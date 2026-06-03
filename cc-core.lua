@@ -110,4 +110,18 @@ end
 
 function M.frontSession(list) return (list or {})[1] end
 
+-- Next session after the one with key==afterKey (wraps to the front). Used by
+-- the cycle-jump hotkey. afterKey nil/unknown -> first session.
+function M.cycleNext(list, afterKey)
+  list = list or {}
+  if #list == 0 then return nil end
+  if not afterKey then return list[1] end
+  local idx
+  for i, it in ipairs(list) do
+    if it.key == afterKey then idx = i; break end
+  end
+  if not idx then return list[1] end
+  return list[(idx % #list) + 1]
+end
+
 return M

@@ -43,12 +43,19 @@ local SD_LONG_PRESS       = 0.7    -- seconds held to count as a "long press"
 local SD_LONG_PRESS_STOPS = false  -- if true, long-press a normal tile = Stop
 local SD_FALLBACK_KEYS    = 15     -- assume a standard deck if detection fails
 local SD_BRIGHTNESS       = 70
+
+-- Global hotkeys (set HOTKEYS_ENABLED = false to disable). {mods, key}.
+local HOTKEYS_ENABLED      = true
+local HOTKEY_APPROVE_FRONT = { { "cmd", "alt" }, "a" } -- approve the front approval
+local HOTKEY_JUMP_NEEDY    = { { "cmd", "alt" }, "j" } -- jump to the session needing you
+local HOTKEY_CYCLE         = { { "cmd", "alt" }, "n" } -- jump to the next session
 -- -------------------------------------------------------------------------
 
 core.STALE_SECONDS = STALE_SECONDS
 
 -- session key (status filename base) -> latest item, for resolving actions.
 local byKey = {}
+local lastJumpKey = nil  -- for the cycle-jump hotkey
 
 -- Find the editor application object across possible bundle ids.
 local function findEditorApp()
@@ -538,6 +545,41 @@ local function refresh()
   wv:evaluateJavaScript("window.ccUpdate(" .. payload .. ")")
 end
 
+-- Bind global hotkeys to act on whichever session needs you, no panel needed.
+-- The target SELECTION is cc-core logic (tested); here we just wire the keys.
+local function bindHotkeys()
+  if not HOTKEYS_ENABLED then return end
+  M.hotkeys = {
+    hs.hotkey.bind(HOTKEY_APPROVE_FRONT[1], HOTKEY_APPROVE_FRONT[2], function()
+      local it = core.nextApproval(refreshList())
+      if it then
+        print("[cc-hotkey] approve-front -> " .. tostring(it.name))
+        core.handleAction(FX, it, "approve")
+      else
+        hs.alert.show("Babysitter: nothing waiting")
+      end
+    end),
+    hs.hotkey.bind(HOTKEY_JUMP_NEEDY[1], HOTKEY_JUMP_NEEDY[2], function()
+      local list = refreshList()
+      local it = core.nextApproval(list) or core.frontSession(list)
+      if it then
+        lastJumpKey = it.key
+        print("[cc-hotkey] jump-needy -> " .. tostring(it.name))
+        core.handleAction(FX, it, "focus")
+      end
+    end),
+    hs.hotkey.bind(HOTKEY_CYCLE[1], HOTKEY_CYCLE[2], function()
+      local it = core.cycleNext(refreshList(), lastJumpKey)
+      if it then
+        lastJumpKey = it.key
+        print("[cc-hotkey] cycle -> " .. tostring(it.name))
+        core.handleAction(FX, it, "focus")
+      end
+    end),
+  }
+  print("[cc-dashboard] hotkeys bound")
+end
+
 -- Ensure the status dir exists so the watcher has something to watch.
 hs.fs.mkdir(STATUS_DIR)
 
@@ -545,6 +587,7 @@ hs.fs.mkdir(STATUS_DIR)
 M.timer = hs.timer.doEvery(POLL_SECONDS, refresh)
 M.watcher = hs.pathwatcher.new(STATUS_DIR, function() refresh() end):start()
 sdStart()  -- begin Stream Deck discovery (no-op if none plugged in)
+bindHotkeys()
 refresh()
 
 -- Keep references alive so Lua does not garbage-collect them.

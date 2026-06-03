@@ -133,5 +133,29 @@ do
   eq("nextApproval: none -> nil", core.nextApproval({ { status = "idle" } }), nil)
 end
 
+-- ---- cycleNext: wrapping jump target ---------------------------------------
+do
+  local list = { { key = "a" }, { key = "b" }, { key = "c" } }
+  eq("cycle: nil start -> first", core.cycleNext(list, nil).key, "a")
+  eq("cycle: after a -> b", core.cycleNext(list, "a").key, "b")
+  eq("cycle: after c wraps -> a", core.cycleNext(list, "c").key, "a")
+  eq("cycle: unknown key -> first", core.cycleNext(list, "zzz").key, "a")
+  eq("cycle: empty list -> nil", core.cycleNext({}, "a"), nil)
+end
+
+-- ---- hotkey wiring: front approval -> approve via recorder -----------------
+do
+  local list = {
+    { key = "w", name = "proj-w", status = "approval", gate = "waiting" },
+    { key = "n", name = "proj-n", status = "working" },
+  }
+  local r = newRecorder()
+  local target = core.nextApproval(list)
+  core.handleAction(r.fx, target, "approve")
+  eq("hotkey approve-front: targets the approval", target.key, "w")
+  eq("hotkey approve-front: hands-free writeDecision", r.last().op, "writeDecision")
+  eq("hotkey approve-front: allow", r.last().b, "allow")
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)
