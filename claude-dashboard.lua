@@ -1,21 +1,14 @@
--- claude-dashboard.lua
+-- claude-dashboard.lua  (bootstrap)
 --
 -- Babysitter: a floating, always-on-top fleet console for Claude Code sessions.
 -- One tile per running session with a live status (idle / working / approval /
--- done). Select a tile to open a detail panel where you can Jump to its window,
--- Approve / Deny a pending action, send a Nudge, or Stop the turn.
+-- done). Select a tile to Jump, Approve / Deny, Nudge, or Stop. Mirrors onto a
+-- physical Stream Deck when one is connected.
 --
--- Sessions are keyed by session_id, so two sessions in the same folder never
--- collide. Tiles disappear when a session ends (SessionEnd) and dim if a session
--- goes stale (no hook updates for a while).
---
--- Control mechanisms (see README):
---   * Keystroke injection - focuses the target window and types into the
---     integrated terminal (the universal primitive; the only option for nudge
---     and stop, and the default for approve/deny).
---   * Hook approval gate  - when a session is gate:"waiting", Approve/Deny
---     instead write a decision file the PreToolUse gate is polling, so you
---     answer hands-free with no window switch.
+-- This file is the Hammerspoon BOOTSTRAP. All pure logic (status parsing,
+-- sorting, action selection, deck layout) lives in cc-core.lua so it can be
+-- unit-tested without Hammerspoon. Here we wire the real effects (window focus,
+-- keystrokes, file I/O, webview, Stream Deck) into cc-core's `fx` interface.
 --
 -- Load it from ~/.hammerspoon/init.lua with:
 --   dofile(os.getenv("HOME") .. "/.hammerspoon/claude-dashboard.lua")
@@ -23,10 +16,15 @@
 
 local M = {}
 
+-- Load the pure-logic core sitting next to this file.
+local HERE = debug.getinfo(1, "S").source:sub(2):match("(.*/)") or "./"
+local core = dofile(HERE .. "cc-core.lua")
+core.json = hs.json   -- production JSON impl (tests inject a vendored one)
+
 -- ---- config -------------------------------------------------------------
-local STATUS_DIR = os.getenv("HOME") .. "/.claude/cc-status"
+-- Honor CC_STATUS_DIR like the shell scripts so tests/dev can redirect state.
+local STATUS_DIR = os.getenv("CC_STATUS_DIR") or (os.getenv("HOME") .. "/.claude/cc-status")
 local HEARTBEAT  = STATUS_DIR .. "/.panel-alive"
--- Bundle ids to search, in order. Cursor and Insiders included as fallbacks.
 local EDITOR_BUNDLES = {
   "com.microsoft.VSCode",
   "com.microsoft.VSCodeInsiders",
@@ -39,22 +37,15 @@ local STALE_SECONDS = 90       -- dim a tile after this long with no updates
 local FOCUS_DELAY   = 0.12     -- wait after focusing before sending keystrokes
 local RESTORE_FOCUS = true     -- return focus to where you were after acting
 
--- Keystrokes the Claude Code permission TUI expects. Verify once on your build
--- (Step 0/3 in the plan) and adjust here if your version differs.
-local KEY_APPROVE = { mods = {},       key = "return" } -- accept highlighted "Yes"
-local KEY_DENY    = { mods = {},       key = "escape" } -- cancel the prompt
-local KEY_STOP    = { mods = {},       key = "escape" } -- interrupt the turn
-
--- Stream Deck (optional). If an Elgato Stream Deck is plugged in AND the
--- official Elgato app is NOT running, babysitter paints one session per key and
--- reuses the same actions as the panel. Adapts to any size (Mini/Standard/XL)
--- by asking the device for its key count; falls back to 15 if that fails.
+-- Stream Deck (optional). Owns the device only if the Elgato app isn't running.
 local STREAMDECK_ENABLED  = true
 local SD_LONG_PRESS       = 0.7    -- seconds held to count as a "long press"
 local SD_LONG_PRESS_STOPS = false  -- if true, long-press a normal tile = Stop
 local SD_FALLBACK_KEYS    = 15     -- assume a standard deck if detection fails
 local SD_BRIGHTNESS       = 70
 -- -------------------------------------------------------------------------
+
+core.STALE_SECONDS = STALE_SECONDS
 
 -- session key (status filename base) -> latest item, for resolving actions.
 local byKey = {}
@@ -70,9 +61,8 @@ local function findEditorApp()
       or hs.application.find("Cursor")
 end
 
--- Focus the editor window whose title contains the project name. Returns true
--- if a specific window was focused. Focusing a window on another Space switches
--- to that Space automatically.
+-- Focus the editor window whose title contains the project name. Returns true if
+-- a specific window was focused (switches Spaces automatically).
 local function focusProject(name)
   print("[cc-dashboard] focus request: " .. tostring(name))
   local app = findEditorApp()
@@ -95,12 +85,39 @@ local function focusProject(name)
   return false
 end
 
--- Focus a session's window, then run sendFn after a short delay so the focus
--- change has settled, optionally restoring the previously focused window.
-local function actOnProject(item, sendFn)
-  if not item then return end
+-- ---- the real effects layer (cc-core calls these; tests swap a recorder) ----
+local FX = {}
+function FX.now() return os.time() end
+function FX.log(m) print(m) end
+
+function FX.readDir(path)
+  local names = {}
+  local ok, iterFn, dirObj = pcall(hs.fs.dir, path)
+  if not ok or type(iterFn) ~= "function" then return names end
+  for file in iterFn, dirObj do names[#names + 1] = file end
+  return names
+end
+
+function FX.readFile(path)
+  local f = io.open(path, "r"); if not f then return nil end
+  local c = f:read("*a"); f:close(); return c
+end
+
+function FX.writeFile(path, content)
+  local f = io.open(path, "w"); if f then f:write(content); f:close() end
+end
+
+function FX.writeDecision(key, value)
+  FX.writeFile(STATUS_DIR .. "/" .. key .. ".decision", value)
+  print("[cc-dashboard] decision " .. tostring(value) .. " -> " .. tostring(key))
+end
+
+function FX.focusWindow(name) return focusProject(name) end
+
+-- Focus a window, then send after a short delay, then restore prior focus.
+local function sendToWindow(name, sendFn)
   local prev = RESTORE_FOCUS and hs.window.focusedWindow() or nil
-  focusProject(item.name)
+  focusProject(name)
   hs.timer.doAfter(FOCUS_DELAY, function()
     pcall(sendFn)
     if prev then
@@ -109,53 +126,15 @@ local function actOnProject(item, sendFn)
   end)
 end
 
--- Write the panel's answer for the hook approval gate to pick up.
-local function writeDecision(key, value)
-  local path = STATUS_DIR .. "/" .. key .. ".decision"
-  local f = io.open(path, "w")
-  if f then
-    f:write(value)
-    f:close()
-    print("[cc-dashboard] decision " .. value .. " -> " .. path)
-  else
-    print("[cc-dashboard] could not write decision file: " .. path)
-  end
+function FX.actOnWindow(name, keySpec)
+  sendToWindow(name, function() hs.eventtap.keyStroke(keySpec.mods, keySpec.key) end)
 end
 
--- Dispatch a panel action against a session.
-local function handleAction(action, key, text)
-  local item = byKey[key]
-  if action == "focus" then
-    if item then focusProject(item.name) end
-    return
-  end
-  if not item then
-    print("[cc-dashboard] action '" .. tostring(action) .. "' for unknown key " .. tostring(key))
-    return
-  end
-
-  if action == "approve" then
-    if item.gate == "waiting" then
-      writeDecision(key, "allow")            -- hands-free, no window switch
-    else
-      actOnProject(item, function() hs.eventtap.keyStroke(KEY_APPROVE.mods, KEY_APPROVE.key) end)
-    end
-  elseif action == "deny" then
-    if item.gate == "waiting" then
-      writeDecision(key, "deny")
-    else
-      actOnProject(item, function() hs.eventtap.keyStroke(KEY_DENY.mods, KEY_DENY.key) end)
-    end
-  elseif action == "stop" then
-    actOnProject(item, function() hs.eventtap.keyStroke(KEY_STOP.mods, KEY_STOP.key) end)
-  elseif action == "nudge" then
-    if text and #text > 0 then
-      actOnProject(item, function()
-        hs.eventtap.keyStrokes(text)
-        hs.timer.doAfter(0.05, function() hs.eventtap.keyStroke({}, "return") end)
-      end)
-    end
-  end
+function FX.typeIntoWindow(name, text)
+  sendToWindow(name, function()
+    hs.eventtap.keyStrokes(text)
+    hs.timer.doAfter(0.05, function() hs.eventtap.keyStroke({}, "return") end)
+  end)
 end
 
 -- Single message bridge. JS posts JSON: {a=action, v=key, text=optional}.
@@ -170,62 +149,19 @@ controller:setCallback(function(msg)
   if a == "theme" then
     hs.settings.set("ccDashboardTheme", tostring(payload.v))
     print("[cc-dashboard] theme saved: " .. tostring(payload.v))
-  else
-    handleAction(a, tostring(payload.v or ""), payload.text and tostring(payload.text) or nil)
+    return
   end
+  local item = byKey[tostring(payload.v or "")]
+  if not item then
+    print("[cc-dashboard] action '" .. a .. "' for unknown key " .. tostring(payload.v))
+    return
+  end
+  core.handleAction(FX, item, a, payload.text and tostring(payload.text) or nil)
 end)
 
--- Read every status file into a list, tagging each with its key (filename base)
--- and a stale flag. Decision / heartbeat files are skipped (not .json).
-local function readStatuses()
-  local list = {}
-  local now = os.time()
-  local ok, iterFn, dirObj = pcall(hs.fs.dir, STATUS_DIR)
-  if not ok or type(iterFn) ~= "function" then return list end
-  for file in iterFn, dirObj do
-    local key = file:match("^(.+)%.json$")
-    if key then
-      local path = STATUS_DIR .. "/" .. file
-      local f = io.open(path, "r")
-      if f then
-        local content = f:read("*a")
-        f:close()
-        if content and #content > 0 then
-          local okj, data = pcall(hs.json.decode, content)
-          if okj and data and data.name then
-            data.key = key
-            data.stale = (data.updated ~= nil) and ((now - data.updated) > STALE_SECONDS) or false
-            table.insert(list, data)
-          end
-        end
-      end
-    end
-  end
-  -- Approvals first (they need you), then by name for stability.
-  local rank = { approval = 0, done = 1, working = 2, idle = 3 }
-  table.sort(list, function(a, b)
-    local ra, rb = rank[a.status] or 9, rank[b.status] or 9
-    if ra ~= rb then return ra < rb end
-    return (a.name or "") < (b.name or "")
-  end)
-  return list
-end
-
--- ---- Stream Deck support (optional, plug-and-play) ----------------------
--- Mirrors the on-screen panel onto a physical Elgato Stream Deck and reuses the
--- exact same actions (handleAction/focusProject). One session per key, colored
--- by status; short-press jumps (or approves a gate-waiting session), long-press
--- denies a waiting gate (or stops, if SD_LONG_PRESS_STOPS). Adapts to any deck.
+-- ---- Stream Deck (optional, plug-and-play) ------------------------------
 local sd = { deck = nil, count = SD_FALLBACK_KEYS, size = { w = 72, h = 72 },
              buttons = {}, downAt = {}, blink = false }
-
-local SD_COLORS = {
-  idle     = { red = 0.42, green = 0.45, blue = 0.50 },
-  working  = { red = 0.96, green = 0.71, blue = 0.04 },
-  done     = { red = 0.13, green = 0.77, blue = 0.37 },
-  approval = { red = 0.94, green = 0.27, blue = 0.27 },
-}
-local SD_LABELS = { idle = "idle", working = "working", done = "ready", approval = "NEEDS YOU" }
 
 -- Render a key image for a session (or a blank dark key when item is nil).
 local function sdButtonImage(item)
@@ -236,8 +172,8 @@ local function sdButtonImage(item)
     local img = c:imageFromCanvas(); c:delete(); return img
   end
   local st = item.status or "idle"
-  local col = SD_COLORS[st] or SD_COLORS.idle
-  if st == "approval" and sd.blink then  -- blink the urgent ones
+  local col = core.SD_COLORS[st] or core.SD_COLORS.idle
+  if st == "approval" and sd.blink then
     col = { red = col.red * 0.35, green = col.green * 0.35, blue = col.blue * 0.35 }
   end
   c[1] = { type = "rectangle", action = "fill", fillColor = col,
@@ -246,7 +182,7 @@ local function sdButtonImage(item)
   if #name > 12 then name = name:sub(1, 11) .. "\226\128\166" end
   c[2] = { type = "text", text = name, textColor = { white = 1.0 }, textSize = h * 0.18,
            frame = { x = 3, y = h * 0.12, w = w - 6, h = h * 0.42 }, textAlignment = "center" }
-  c[3] = { type = "text", text = SD_LABELS[st] or st, textColor = { white = 0.0, alpha = 0.75 },
+  c[3] = { type = "text", text = core.SD_LABELS[st] or st, textColor = { white = 0.0, alpha = 0.75 },
            textSize = h * 0.13, frame = { x = 3, y = h * 0.60, w = w - 6, h = h * 0.3 },
            textAlignment = "center" }
   local img = c:imageFromCanvas(); c:delete(); return img
@@ -255,39 +191,31 @@ end
 -- Paint every key from the current (already sorted) session list.
 local function sdRender(list)
   if not sd.deck then return end
+  local lay = core.deckLayout(sd.count, list)
   for i = 1, sd.count do
-    local item = list[i]
+    local item = lay.items[i]
     sd.buttons[i] = item and item.key or nil
     local ok, img = pcall(sdButtonImage, item)
     if ok and img then pcall(function() sd.deck:setButtonImage(i, img) end) end
   end
-  if #list > sd.count then
-    print("[cc-streamdeck] " .. (#list - sd.count) .. " session(s) beyond the "
+  if lay.overflow > 0 then
+    print("[cc-streamdeck] " .. lay.overflow .. " session(s) beyond the "
           .. sd.count .. " keys aren't on the deck (still on the panel)")
   end
 end
 
--- Short press = Jump (or Approve if a gate is waiting).
--- Long press  = Deny (gate waiting) or Stop (only if SD_LONG_PRESS_STOPS).
+-- Short press = primary, long press = secondary; cc-core decides the action.
 local function sdOnButton(deck, button, isDown)
   if isDown then sd.downAt[button] = hs.timer.secondsSinceEpoch(); return end
   local t0 = sd.downAt[button]; sd.downAt[button] = nil
   local held = t0 and (hs.timer.secondsSinceEpoch() - t0) or 0
   local key = sd.buttons[button]
-  if not key or not byKey[key] then return end
-  local item = byKey[key]
-  local long = held >= SD_LONG_PRESS
-  local action
-  if item.gate == "waiting" then
-    action = long and "deny" or "approve"
-  elseif long and SD_LONG_PRESS_STOPS then
-    action = "stop"
-  else
-    action = "focus"
-  end
-  print("[cc-streamdeck] key " .. button .. " " .. (long and "long" or "short")
-        .. " -> " .. action .. " " .. tostring(key))
-  handleAction(action, key)
+  local item = key and byKey[key] or nil
+  if not item then return end
+  local kind = (held >= SD_LONG_PRESS) and "secondary" or "primary"
+  local action = core.resolveGesture(item, kind, { longPressStops = SD_LONG_PRESS_STOPS })
+  print("[cc-streamdeck] key " .. button .. " " .. kind .. " -> " .. tostring(action) .. " " .. tostring(key))
+  core.handleAction(FX, item, action)
 end
 
 -- Begin discovery. Fires for already-connected and hot-plugged devices.
@@ -307,7 +235,7 @@ local function sdStart()
         pcall(function() deck:buttonCallback(sdOnButton) end)
         print("[cc-streamdeck] connected: " .. sd.count .. " keys @ "
               .. sd.size.w .. "x" .. sd.size.h)
-        sdRender(readStatuses())
+        sdRender(refreshList())
       else
         print("[cc-streamdeck] disconnected")
         if sd.deck == deck then sd.deck = nil; sd.buttons = {} end
@@ -584,23 +512,30 @@ wv:html(HTML)
 wv:show()
 print("[cc-dashboard] panel shown")
 
--- Heartbeat so the approval gate knows the panel is alive (and won't block a
--- session waiting on a panel that isn't running).
-local function writeHeartbeat()
-  local f = io.open(HEARTBEAT, "w")
-  if f then f:write(tostring(os.time())); f:close() end
-end
-
--- Push current statuses into the webview and refresh the action lookup table.
-local function refresh()
-  local list = readStatuses()
+-- Read the status dir, parse via cc-core, refresh byKey, return the sorted list.
+function refreshList()
+  local entries = {}
+  for _, fname in ipairs(FX.readDir(STATUS_DIR)) do
+    local key = fname:match("^(.+)%.json$")
+    if key then
+      local content = FX.readFile(STATUS_DIR .. "/" .. fname)
+      if content and #content > 0 then entries[#entries + 1] = { key = key, content = content } end
+    end
+  end
+  local list = core.parseStatusList(entries, FX.now(), STALE_SECONDS)
   byKey = {}
   for _, it in ipairs(list) do byKey[it.key] = it end
-  writeHeartbeat()
+  return list
+end
+
+-- Push current statuses into the webview + deck, and keep the heartbeat fresh.
+local function refresh()
+  local list = refreshList()
+  FX.writeFile(HEARTBEAT, tostring(FX.now()))
   sd.blink = not sd.blink
   sdRender(list)
-  local json = (#list == 0) and "[]" or hs.json.encode(list)
-  wv:evaluateJavaScript("window.ccUpdate(" .. json .. ")")
+  local payload = (#list == 0) and "[]" or hs.json.encode(list)
+  wv:evaluateJavaScript("window.ccUpdate(" .. payload .. ")")
 end
 
 -- Ensure the status dir exists so the watcher has something to watch.
@@ -613,7 +548,7 @@ sdStart()  -- begin Stream Deck discovery (no-op if none plugged in)
 refresh()
 
 -- Keep references alive so Lua does not garbage-collect them.
-_G.__ccDashboard = { webview = wv, controller = controller, module = M }
+_G.__ccDashboard = { webview = wv, controller = controller, module = M, core = core }
 print("[cc-dashboard] loaded; watching " .. STATUS_DIR)
 
 return M
