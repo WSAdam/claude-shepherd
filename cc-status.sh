@@ -169,6 +169,12 @@ if [ -n "$SET_PROMPT" ]; then
   PATCH="$(printf '%s' "$PATCH" | jq -c --arg lp "$TRIMMED" '. + {last_prompt:$lp}')"
 fi
 
+# Record the transcript path (for the dashboard's live activity peek).
+TRANSCRIPT="$(cc_get "$INPUT" '.transcript_path')"
+if [ -n "$TRANSCRIPT" ]; then
+  PATCH="$(printf '%s' "$PATCH" | jq -c --arg tp "$TRANSCRIPT" '. + {transcript_path:$tp}')"
+fi
+
 # Don't let a generic Notification clobber a precise pending that
 # PermissionRequest already recorded this turn.
 if [ -n "$SET_PENDING" ] && [ -n "$PENDING_IF_ABSENT" ]; then

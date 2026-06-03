@@ -110,6 +110,39 @@ end
 
 function M.frontSession(list) return (list or {})[1] end
 
+-- Extract the latest assistant text from a transcript.jsonl tail, for the "live
+-- activity peek". Scans lines backwards (the last assistant line is often a
+-- tool_use with no text), returns the last text block found, whitespace-collapsed
+-- and truncated. Returns nil if there's no assistant text.
+function M.transcriptSnippet(text, maxLen)
+  maxLen = maxLen or 140
+  if not text or #text == 0 then return nil end
+  local lines = {}
+  for line in (text .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
+  for i = #lines, 1, -1 do
+    local line = lines[i]
+    if line ~= "" then
+      local okj, obj = pcall(function() return M.json.decode(line) end)
+      if okj and type(obj) == "table" and obj.type == "assistant"
+         and obj.message and type(obj.message.content) == "table" then
+        local txt
+        for _, c in ipairs(obj.message.content) do
+          if type(c) == "table" and c.type == "text" and c.text and #c.text > 0 then
+            txt = c.text
+          end
+        end
+        if txt then
+          txt = txt:gsub("%s+", " "):gsub("^ +", ""):gsub(" +$", "")
+          -- reserve 3 bytes for the … ellipsis so the result stays within maxLen
+          if #txt > maxLen then txt = txt:sub(1, maxLen - 3) .. "\226\128\166" end
+          return txt
+        end
+      end
+    end
+  end
+  return nil
+end
+
 -- Next session after the one with key==afterKey (wraps to the front). Used by
 -- the cycle-jump hotkey. afterKey nil/unknown -> first session.
 function M.cycleNext(list, afterKey)

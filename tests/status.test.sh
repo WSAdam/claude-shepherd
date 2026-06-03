@@ -84,4 +84,9 @@ ev sessionstart "{\"session_id\":\"$G\",\"cwd\":\"$GCWD\"}"
 ev notification "{\"session_id\":\"$G\",\"cwd\":\"$GCWD\",\"notification_type\":\"permission_prompt\",\"message\":\"Allow something\"}"
 assert_json "generic notification sets pending when absent" "$GF" '.pending.summary' "Allow something"
 
+# --- Phase 3: transcript_path captured (for live activity peek) ---
+T="t3"; TCWD="/srv/app"; TF="$TMP/$T.json"
+ev userpromptsubmit "{\"session_id\":\"$T\",\"cwd\":\"$TCWD\",\"transcript_path\":\"/U/x/.claude/projects/app/s.jsonl\",\"prompt_text\":\"hi\"}"
+assert_json "transcript_path captured" "$TF" '.transcript_path' "/U/x/.claude/projects/app/s.jsonl"
+
 finish

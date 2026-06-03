@@ -157,5 +157,38 @@ do
   eq("hotkey approve-front: allow", r.last().b, "allow")
 end
 
+-- ---- transcriptSnippet: latest assistant text from a jsonl tail -----------
+do
+  local function aline(text) -- an assistant line carrying one text block
+    return core.json.encode({ type = "assistant", message = { role = "assistant",
+      content = { { type = "text", text = text } } } })
+  end
+  local function toolline() -- an assistant line that is only a tool_use
+    return core.json.encode({ type = "assistant", message = { role = "assistant",
+      content = { { type = "tool_use", name = "Bash" } } } })
+  end
+  local userline = core.json.encode({ type = "user", message = { role = "user" } })
+
+  -- last assistant text is "Refactoring the parser", even though a tool_use
+  -- line and a user line come after it.
+  local jsonl = table.concat({
+    userline,
+    aline("Refactoring the parser   now"),
+    toolline(),
+  }, "\n")
+  eq("snippet: finds last assistant text (whitespace collapsed)",
+     core.transcriptSnippet(jsonl), "Refactoring the parser now")
+
+  eq("snippet: empty input -> nil", core.transcriptSnippet(""), nil)
+  eq("snippet: no assistant text -> nil",
+     core.transcriptSnippet(userline .. "\n" .. toolline()), nil)
+  eq("snippet: garbled lines are skipped",
+     core.transcriptSnippet("{ not json\n" .. aline("hello")), "hello")
+
+  local long = string.rep("x", 300)
+  local snip = core.transcriptSnippet(aline(long), 140)
+  check("snippet: truncated to maxLen", #snip <= 140)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

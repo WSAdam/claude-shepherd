@@ -49,6 +49,10 @@ local HOTKEYS_ENABLED      = true
 local HOTKEY_APPROVE_FRONT = { { "cmd", "alt" }, "a" } -- approve the front approval
 local HOTKEY_JUMP_NEEDY    = { { "cmd", "alt" }, "j" } -- jump to the session needing you
 local HOTKEY_CYCLE         = { { "cmd", "alt" }, "n" } -- jump to the next session
+
+-- Live activity peek: show each active session's latest assistant line.
+local ACTIVITY_PEEK  = true
+local ACTIVITY_BYTES = 65536  -- transcript tail to scan (big tool outputs need room)
 -- -------------------------------------------------------------------------
 
 core.STALE_SECONDS = STALE_SECONDS
@@ -107,6 +111,14 @@ end
 
 function FX.readFile(path)
   local f = io.open(path, "r"); if not f then return nil end
+  local c = f:read("*a"); f:close(); return c
+end
+
+-- Read only the last maxBytes of a (possibly large) file, e.g. a transcript.
+function FX.readTail(path, maxBytes)
+  local f = io.open(path, "r"); if not f then return nil end
+  local size = f:seek("end")
+  f:seek("set", math.max(0, size - (maxBytes or 16384)))
   local c = f:read("*a"); f:close(); return c
 end
 
@@ -340,6 +352,7 @@ local HTML = [[
   #d-name { font-size:14px; font-weight:700; color:#fff; }
   #d-status { font-size:11px; color:#8a8d99; margin-left:auto; }
   #d-prompt { font-size:12px; color:#aeb1bd; margin:8px 0 0; max-height:48px; overflow:hidden; }
+  #d-activity { font-size:12px; color:#9fb6d6; margin:6px 0 0; max-height:48px; overflow:hidden; }
   #d-pending { font-size:12px; color:#f3b1b1; margin:6px 0 0; }
   #d-actions { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
   #d-actions button { background:#21232c; color:#e8e9ee; border:1px solid #2c2f3a;
@@ -373,6 +386,7 @@ local HTML = [[
       <span id="d-status"></span>
     </div>
     <div id="d-pending"></div>
+    <div id="d-activity"></div>
     <div id="d-prompt"></div>
     <div id="d-actions">
       <button id="b-jump"    onclick="act('focus')">Jump</button>
@@ -444,6 +458,9 @@ local HTML = [[
         pend.textContent = "Wants: " + it.pending.summary + (it.gate === "waiting" ? "  (hands-free approve)" : "");
         pend.style.display = "block";
       } else { pend.style.display = "none"; }
+      var ac = document.getElementById("d-activity");
+      if(it.activity){ ac.textContent = "Doing: " + it.activity; ac.style.display="block"; }
+      else { ac.style.display="none"; }
       var pr = document.getElementById("d-prompt");
       if(it.last_prompt){ pr.textContent = "Last: " + it.last_prompt; pr.style.display="block"; }
       else { pr.style.display="none"; }
@@ -538,6 +555,16 @@ end
 -- Push current statuses into the webview + deck, and keep the heartbeat fresh.
 local function refresh()
   local list = refreshList()
+  -- Live activity peek: only read transcripts for active, non-stale sessions.
+  if ACTIVITY_PEEK then
+    for _, it in ipairs(list) do
+      if it.transcript_path and not it.stale
+         and (it.status == "working" or it.status == "approval") then
+        local tail = FX.readTail(it.transcript_path, ACTIVITY_BYTES)
+        if tail then it.activity = core.transcriptSnippet(tail) end
+      end
+    end
+  end
   FX.writeFile(HEARTBEAT, tostring(FX.now()))
   sd.blink = not sd.blink
   sdRender(list)
