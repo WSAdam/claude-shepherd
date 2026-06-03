@@ -6,7 +6,7 @@
 # Usage: cc-status.sh <event>
 #   event is the hook that fired, one of:
 #     sessionstart | userpromptsubmit | pretooluse | posttooluse |
-#     notification | stop | sessionend
+#     permissionrequest | notification | stop | sessionend
 #
 # The hook event JSON arrives on stdin. We key each session by its session_id
 # (so two sessions in the same folder never collide), and merge only the fields
@@ -17,6 +17,7 @@
 #   userpromptsubmit-> working  (+ last_prompt, clears pending)
 #   pretooluse      -> working  (clears pending)
 #   posttooluse     -> working  (clears pending)
+#   permissionrequest -> approval (+ precise pending from tool_input)
 #   notification    -> approval | done | (unchanged)  depending on type
 #   stop            -> done      (clears pending)
 #   sessionend      -> file removed
@@ -34,6 +35,21 @@ EVENT="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
 
 INPUT="$(cat 2>/dev/null || true)"
 cc_debug "event=$EVENT raw=$INPUT"
+
+# Build a short, human summary of what a tool wants to do, from its tool_input.
+# (PermissionRequest carries the exact tool_input; Notification only a message.)
+summarize_tool() { # $1 = json, $2 = tool_name
+  local j="$1" tool="$2" s=""
+  case "$tool" in
+    Bash) s="$(cc_get "$j" '.tool_input.command')" ;;
+    Write|Edit|MultiEdit) s="$(cc_get "$j" '.tool_input.file_path')" ;;
+    NotebookEdit) s="$(cc_get "$j" '.tool_input.notebook_path')" ;;
+  esac
+  [ -n "$s" ] || s="$(cc_get "$j" '.tool_input.command')"
+  [ -n "$s" ] || s="$(cc_get "$j" '.tool_input.file_path')"
+  [ -n "$s" ] || s="$tool"
+  printf '%s' "$s" | cut -c1-200
+}
 
 SESSION_ID="$(cc_get "$INPUT" '.session_id')"
 CWD="$(cc_get "$INPUT" '.cwd')"
@@ -67,6 +83,7 @@ STATUS="working"
 SET_PROMPT=""
 SET_PENDING=""
 CLEAR_PENDING="1"
+PENDING_IF_ABSENT=""
 PENDING_TOOL=""
 PENDING_MSG=""
 
@@ -82,13 +99,22 @@ case "$EVENT" in
   pretooluse|posttooluse)
     STATUS="working"
     ;;
+  permissionrequest)
+    # The precise event: carries tool_name + tool_input, so we can show the
+    # exact command/file being requested rather than a generic message.
+    STATUS="approval"; SET_PENDING="1"; CLEAR_PENDING=""
+    PENDING_TOOL="$(cc_get "$INPUT" '.tool_name')"
+    PENDING_MSG="$(summarize_tool "$INPUT" "$PENDING_TOOL")"
+    ;;
   notification)
     NTYPE="$(cc_get "$INPUT" '.notification_type')"
     [ -n "$NTYPE" ] || NTYPE="$(cc_get "$INPUT" '.type')"
     PENDING_MSG="$(cc_get "$INPUT" '.message')"
     case "$NTYPE" in
       *permission*|*elicitation_dialog*)
-        STATUS="approval"; SET_PENDING="1"; CLEAR_PENDING=""
+        # Generic fallback: only sets pending if PermissionRequest hasn't
+        # already recorded the precise command (PENDING_IF_ABSENT).
+        STATUS="approval"; SET_PENDING="1"; CLEAR_PENDING=""; PENDING_IF_ABSENT="1"
         PENDING_TOOL="$(cc_get "$INPUT" '.tool_name')"
         ;;
       *idle*)
@@ -97,7 +123,7 @@ case "$EVENT" in
       "")
         # Type unknown (older builds): a bare Notification usually means
         # Claude wants you. Treat as approval and surface the message.
-        STATUS="approval"; SET_PENDING="1"; CLEAR_PENDING=""
+        STATUS="approval"; SET_PENDING="1"; CLEAR_PENDING=""; PENDING_IF_ABSENT="1"
         ;;
       *)
         # auth_success / elicitation_complete / etc. - don't change status,
@@ -141,6 +167,12 @@ PATCH="$(jq -nc \
 if [ -n "$SET_PROMPT" ]; then
   TRIMMED="$(printf '%s' "$SET_PROMPT" | cut -c1-200)"
   PATCH="$(printf '%s' "$PATCH" | jq -c --arg lp "$TRIMMED" '. + {last_prompt:$lp}')"
+fi
+
+# Don't let a generic Notification clobber a precise pending that
+# PermissionRequest already recorded this turn.
+if [ -n "$SET_PENDING" ] && [ -n "$PENDING_IF_ABSENT" ]; then
+  [ -n "$(cc_read_field "$KEY" '.pending.summary')" ] && SET_PENDING=""
 fi
 
 if [ -n "$SET_PENDING" ]; then

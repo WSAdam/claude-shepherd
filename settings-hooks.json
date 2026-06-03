@@ -15,6 +15,9 @@
     "PostToolUse": [
       { "matcher": "", "hooks": [ { "type": "command", "command": "bash \"$HOME/.claude/cc-status.sh\" posttooluse" } ] }
     ],
+    "PermissionRequest": [
+      { "matcher": "", "hooks": [ { "type": "command", "command": "bash \"$HOME/.claude/cc-status.sh\" permissionrequest" } ] }
+    ],
     "Notification": [
       { "matcher": "", "hooks": [ { "type": "command", "command": "bash \"$HOME/.claude/cc-status.sh\" notification" } ] }
     ],

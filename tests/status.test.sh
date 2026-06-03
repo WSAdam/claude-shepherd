@@ -62,4 +62,26 @@ assert_eq "distinct session_ids -> distinct files" "2" "$count"
 ev sessionend "{\"session_id\":\"$SID\",\"cwd\":\"$CWD\"}"
 assert_absent "sessionend removes the tile" "$F"
 
+# --- Phase 1: PermissionRequest gives a precise pending summary ---
+P="p1"; PCWD="/srv/api-server"; PF="$TMP/$P.json"
+ev pretooluse "{\"session_id\":\"$P\",\"cwd\":\"$PCWD\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"npm test -- --watch\"}}"
+ev permissionrequest "{\"session_id\":\"$P\",\"cwd\":\"$PCWD\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"npm test -- --watch\"}}"
+assert_json "permissionrequest -> approval" "$PF" '.status' "approval"
+assert_json "permissionrequest Bash -> exact command" "$PF" '.pending.summary' "npm test -- --watch"
+
+# a later generic Notification must NOT clobber the precise pending
+ev notification "{\"session_id\":\"$P\",\"cwd\":\"$PCWD\",\"notification_type\":\"permission_prompt\",\"message\":\"Claude needs permission\"}"
+assert_json "notification keeps precise pending" "$PF" '.pending.summary' "npm test -- --watch"
+
+# Write tool -> file_path summary
+W="p2"; WCWD="/srv/web"; WF="$TMP/$W.json"
+ev permissionrequest "{\"session_id\":\"$W\",\"cwd\":\"$WCWD\",\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"/srv/web/index.html\"}}"
+assert_json "permissionrequest Write -> file_path" "$WF" '.pending.summary' "/srv/web/index.html"
+
+# generic notification still sets pending when none exists yet
+G="p3"; GCWD="/srv/x"; GF="$TMP/$G.json"
+ev sessionstart "{\"session_id\":\"$G\",\"cwd\":\"$GCWD\"}"
+ev notification "{\"session_id\":\"$G\",\"cwd\":\"$GCWD\",\"notification_type\":\"permission_prompt\",\"message\":\"Allow something\"}"
+assert_json "generic notification sets pending when absent" "$GF" '.pending.summary' "Allow something"
+
 finish
