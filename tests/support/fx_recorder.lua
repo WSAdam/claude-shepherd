@@ -22,6 +22,7 @@ local function newRecorder()
     actOnWindow    = function(name, keySpec) rec("actOnWindow", name, keySpec) end,
     typeIntoWindow = function(name, text) rec("typeIntoWindow", name, text) end,
     writeDecision  = function(key, value) rec("writeDecision", key, value) end,
+    spawnSession   = function(project, prompt) rec("spawnSession", project, prompt) end,
     readDir        = function() return {} end,
     readFile       = function() return nil end,
     writeFile      = function() end,

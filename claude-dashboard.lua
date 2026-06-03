@@ -53,6 +53,14 @@ local HOTKEY_CYCLE         = { { "cmd", "alt" }, "n" } -- jump to the next sessi
 -- Live activity peek: show each active session's latest assistant line.
 local ACTIVITY_PEEK  = true
 local ACTIVITY_BYTES = 65536  -- transcript tail to scan (big tool outputs need room)
+
+-- Orchestrator (Phase 4). DRY-RUN by default: shows what it WOULD spawn without
+-- launching anything. Set ORCH_DRY_RUN = false to actually open sessions.
+local ORCH_ENABLED     = true
+local ORCH_DRY_RUN     = true
+local ORCH_TERMINAL    = "Terminal"
+local ORCH_DEFAULT_DIR = os.getenv("HOME") .. "/Programming"
+local HOTKEY_SPAWN     = { { "cmd", "alt" }, "s" } -- spawn a new Claude session
 -- -------------------------------------------------------------------------
 
 core.STALE_SECONDS = STALE_SECONDS
@@ -60,6 +68,7 @@ core.STALE_SECONDS = STALE_SECONDS
 -- session key (status filename base) -> latest item, for resolving actions.
 local byKey = {}
 local lastJumpKey = nil  -- for the cycle-jump hotkey
+local spawnPrompt        -- forward declaration (defined after FX)
 
 -- Find the editor application object across possible bundle ids.
 local function findEditorApp()
@@ -156,6 +165,32 @@ function FX.typeIntoWindow(name, text)
   end)
 end
 
+-- Spawn a new Claude session (Phase 4). Dry-run logs what it WOULD do.
+function FX.spawnSession(project, prompt)
+  local script = core.spawnAppleScript(project, prompt, { terminal = ORCH_TERMINAL })
+  if ORCH_DRY_RUN then
+    print("[cc-orch] DRY-RUN would run: " .. script)
+    hs.alert.show("Babysitter (dry-run): would spawn in " .. tostring(project))
+  else
+    print("[cc-orch] spawning in " .. tostring(project))
+    hs.osascript.applescript(script)  -- Terminal opens a login shell -> claude on PATH
+    hs.alert.show("Babysitter: spawning a session in " .. tostring(project))
+  end
+end
+
+-- Ask for a project + initial task, then spawn. (Interactive; not unit-tested -
+-- the command building it relies on lives in cc-core and is tested.)
+function spawnPrompt()
+  if not ORCH_ENABLED then return end
+  local b1, project = hs.dialog.textPrompt("New Claude session", "Project folder:",
+    ORCH_DEFAULT_DIR, "Next", "Cancel")
+  if b1 ~= "Next" or not project or project == "" then return end
+  local b2, task = hs.dialog.textPrompt("New Claude session", "Initial task (optional):",
+    "", "Spawn", "Cancel")
+  if b2 ~= "Spawn" then return end
+  FX.spawnSession(project, task)
+end
+
 -- Single message bridge. JS posts JSON: {a=action, v=key, text=optional}.
 local controller = hs.webview.usercontent.new("cc")
 controller:setCallback(function(msg)
@@ -168,6 +203,10 @@ controller:setCallback(function(msg)
   if a == "theme" then
     hs.settings.set("ccDashboardTheme", tostring(payload.v))
     print("[cc-dashboard] theme saved: " .. tostring(payload.v))
+    return
+  end
+  if a == "spawn" then
+    spawnPrompt()
     return
   end
   local item = byKey[tostring(payload.v or "")]
@@ -276,8 +315,12 @@ local HTML = [[
   #bar { display:flex; align-items:center; justify-content:space-between;
          padding:6px 10px; gap:8px; border-bottom:1px solid #2c2f3a; }
   #bar .t { color:#8a8d99; font-size:11px; letter-spacing:.04em; text-transform:uppercase; }
+  #bar .right { display:flex; align-items:center; gap:6px; }
   #theme { background:#21232c; color:#e8e9ee; border:1px solid #2c2f3a;
            border-radius:8px; font-size:12px; padding:3px 6px; }
+  #spawn { background:#21232c; color:#8fd4a3; border:1px solid #2c5; border-radius:8px;
+           font-size:12px; padding:3px 8px; cursor:pointer; }
+  #spawn:hover { background:#27332b; }
 
   /* shared bits */
   #grid { display:grid; gap:8px; padding:10px; }
@@ -369,12 +412,15 @@ local HTML = [[
 <body class="theme-__INIT_THEME__" data-theme="__INIT_THEME__">
   <div id="bar">
     <span class="t">Claude sessions</span>
-    <select id="theme" onchange="onThemeChange()">
-      <option value="cards">Cards</option>
-      <option value="bar">Bar</option>
-      <option value="contrast">Contrast</option>
-      <option value="dots">Dots</option>
-    </select>
+    <span class="right">
+      <button id="spawn" onclick="send('spawn','')" title="Spawn a new Claude session">+ New</button>
+      <select id="theme" onchange="onThemeChange()">
+        <option value="cards">Cards</option>
+        <option value="bar">Bar</option>
+        <option value="contrast">Contrast</option>
+        <option value="dots">Dots</option>
+      </select>
+    </span>
   </div>
   <div id="grid"></div>
   <div id="empty">Waiting for Claude Code sessions...<br>Start a session in any project.</div>
@@ -603,6 +649,7 @@ local function bindHotkeys()
         core.handleAction(FX, it, "focus")
       end
     end),
+    hs.hotkey.bind(HOTKEY_SPAWN[1], HOTKEY_SPAWN[2], function() spawnPrompt() end),
   }
   print("[cc-dashboard] hotkeys bound")
 end
@@ -618,7 +665,7 @@ bindHotkeys()
 refresh()
 
 -- Keep references alive so Lua does not garbage-collect them.
-_G.__ccDashboard = { webview = wv, controller = controller, module = M, core = core }
+_G.__ccDashboard = { webview = wv, controller = controller, module = M, core = core, fx = FX }
 print("[cc-dashboard] loaded; watching " .. STATUS_DIR)
 
 return M

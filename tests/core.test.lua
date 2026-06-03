@@ -190,5 +190,25 @@ do
   check("snippet: truncated to maxLen", #snip <= 140)
 end
 
+-- ---- Orchestrator: spawn command building + shell escaping ----------------
+do
+  eq("spawn: inner basic", core.spawnInner("/p", "hi"), "cd '/p' && claude 'hi'")
+  eq("spawn: inner without a prompt", core.spawnInner("/p", ""), "cd '/p' && claude")
+  -- a path with a space and a prompt with a single quote must stay safe
+  eq("spawn: inner escapes single quotes",
+     core.spawnInner("/my proj", "it's broken"),
+     "cd '/my proj' && claude 'it'\\''s broken'")
+
+  local as = core.spawnAppleScript("/p", "hi", { terminal = "Terminal" })
+  eq("spawn: applescript exact",
+     as, 'tell application "Terminal" to do script "cd \'/p\' && claude \'hi\'"')
+  -- AppleScript double-quotes in the prompt must be backslash-escaped
+  local as2 = core.spawnAppleScript("/p", 'say "hi"')
+  check("spawn: escapes double quotes for AppleScript", as2:find('\\"hi\\"', 1, true) ~= nil)
+  -- a single quote in the prompt survives both layers
+  local as3 = core.spawnAppleScript("/p", "it's")
+  check("spawn: handles single quotes", as3:find("'it'\\\\''s'", 1, true) ~= nil)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

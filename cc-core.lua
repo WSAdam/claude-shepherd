@@ -157,4 +157,33 @@ function M.cycleNext(list, afterKey)
   return list[(idx % #list) + 1]
 end
 
+-- ---- Orchestrator (Phase 4): build the command to spawn a session ----------
+-- POSIX single-quote a string so it's safe to embed in a shell command.
+local function shquote(s)
+  return "'" .. tostring(s):gsub("'", "'\\''") .. "'"
+end
+-- AppleScript double-quote a string.
+local function asquote(s)
+  return '"' .. tostring(s):gsub("\\", "\\\\"):gsub('"', '\\"') .. '"'
+end
+
+-- The shell command run INSIDE the spawned terminal:
+--   cd <project> && claude [prompt]
+function M.spawnInner(project, prompt)
+  local inner = "cd " .. shquote(project or ".") .. " && claude"
+  if prompt and #prompt > 0 then inner = inner .. " " .. shquote(prompt) end
+  return inner
+end
+
+-- The AppleScript to run (via hs.osascript, NOT a shell) that opens `terminal`
+-- and runs the inner command in it. Running AppleScript directly avoids an extra
+-- shell-quoting layer, so this only needs to escape for AppleScript + the inner
+-- shell -- two well-defined levels instead of three nested ones.
+function M.spawnAppleScript(project, prompt, opts)
+  opts = opts or {}
+  local term = opts.terminal or "Terminal"
+  return "tell application " .. asquote(term)
+    .. " to do script " .. asquote(M.spawnInner(project, prompt))
+end
+
 return M
