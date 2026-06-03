@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "bash \"$HOME/.claude/cc-status.sh\" sessionstart" } ] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "bash \"$HOME/.claude/cc-status.sh\" userpromptsubmit" } ] }
+    ],
+    "PreToolUse": [
+      { "matcher": "", "hooks": [
+        { "type": "command", "command": "bash \"$HOME/.claude/cc-status.sh\" pretooluse" },
+        { "type": "command", "command": "bash \"$HOME/.claude/cc-approve.sh\"" }
+      ] }
+    ],
+    "PostToolUse": [
+      { "matcher": "", "hooks": [ { "type": "command", "command": "bash \"$HOME/.claude/cc-status.sh\" posttooluse" } ] }
+    ],
+    "Notification": [
+      { "matcher": "", "hooks": [ { "type": "command", "command": "bash \"$HOME/.claude/cc-status.sh\" notification" } ] }
+    ],
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "bash \"$HOME/.claude/cc-status.sh\" stop" } ] }
+    ],
+    "SessionEnd": [
+      { "hooks": [ { "type": "command", "command": "bash \"$HOME/.claude/cc-status.sh\" sessionend" } ] }
+    ]
+  }
+}
