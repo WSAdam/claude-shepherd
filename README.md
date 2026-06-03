@@ -24,8 +24,10 @@ from one pane.
 Sessions are keyed by their **session_id**, so two sessions in the same folder
 never collide into one tile. Tiles disappear when a session ends (SessionEnd) and
 **dim** if a session goes stale (no updates for ~90s, e.g. after a crash). Each
-tile shows time-in-state, the latest prompt, and — on an approval — what's being
-requested (e.g. `wants: npm test`).
+tile shows time-in-state, the latest prompt, and — on an approval — the **exact
+command** being requested (e.g. `wants: npm test -- --watch`, via the
+`PermissionRequest` hook). Selecting a tile also shows a **live activity peek**:
+the latest assistant line from that session's transcript ("Doing: …").
 
 ## How it works
 
@@ -37,9 +39,11 @@ Claude Code hooks ──► cc-status.sh ──► ~/.claude/cc-status/<session_
 - [cc-status.sh](cc-status.sh) merges each hook event into the session's JSON file.
 - [cc-approve.sh](cc-approve.sh) is the optional PreToolUse approval gate (below).
 - [cc-lib.sh](cc-lib.sh) holds shared helpers for both.
-- [claude-dashboard.lua](claude-dashboard.lua) is the Hammerspoon panel: it reads
-  the JSON files, renders tiles, writes a heartbeat so the gate knows it's alive,
-  and drives the control actions.
+- [cc-core.lua](cc-core.lua) is the pure logic (parsing, sorting, action
+  selection, deck layout, spawn-command building) — no `hs.*` calls, fully
+  unit-tested. [claude-dashboard.lua](claude-dashboard.lua) is the Hammerspoon
+  bootstrap: it reads the JSON files, renders tiles, writes a heartbeat, and wires
+  the real effects (focus, keystrokes, Stream Deck) into cc-core.
 
 ## Control actions
 
@@ -69,6 +73,28 @@ There are two mechanisms behind Approve/Deny, and Babysitter uses whichever fits
 > `KEY_APPROVE` / `KEY_DENY` / `KEY_STOP` near the top of
 > [claude-dashboard.lua](claude-dashboard.lua).
 
+## Global hotkeys
+
+Act on the session that needs you without touching the panel (configurable near
+the top of [claude-dashboard.lua](claude-dashboard.lua)):
+
+- **⌘⌥A** — approve the front approval (hands-free via the gate when it's waiting).
+- **⌘⌥J** — jump to the session that needs you.
+- **⌘⌥N** — cycle-jump to the next session.
+- **⌘⌥S** — spawn a new session (see below).
+
+## Spawn new sessions (orchestrator)
+
+Launch a fresh Claude session from the panel — the **+ New** button in the header
+or **⌘⌥S**. It asks for a project folder and an initial task, then opens a terminal
+running `claude` there; the new session shows up as a tile automatically.
+
+This is **dry-run by default** (`ORCH_DRY_RUN = true`): it logs the exact command
+it *would* run to the Hammerspoon Console and launches nothing, so you can confirm
+it before enabling. Set `ORCH_DRY_RUN = false` (and `ORCH_TERMINAL` /
+`ORCH_DEFAULT_DIR` to taste) to spawn for real. Queue/auto-routing is a planned
+next step, not built yet.
+
 ## Install (about 5 minutes)
 
 1. **Install Hammerspoon** (free) and `jq` (required for the rich tiles):
@@ -91,9 +117,9 @@ There are two mechanisms behind Approve/Deny, and Babysitter uses whichever fits
    yet, copy `settings-hooks.json` to it. If it already exists, merge the
    `"hooks"` block from `settings-hooks.json` into your existing JSON.
 
-4. **Install the dashboard:**
+4. **Install the dashboard** (the panel and its logic module — keep them together):
    ```
-   cp claude-dashboard.lua ~/.hammerspoon/claude-dashboard.lua
+   cp claude-dashboard.lua cc-core.lua ~/.hammerspoon/
    ```
    Then add this line to `~/.hammerspoon/init.lua` (create the file if needed):
    ```lua
@@ -207,6 +233,32 @@ A dropdown in the top-right switches themes instantly; your choice is saved.
 To change the default for a fresh install, edit `DEFAULT_THEME` near the top of
 [claude-dashboard.lua](claude-dashboard.lua). To restyle a theme, edit its
 `.theme-NAME` CSS block (or open the webview developer tools to tweak it live).
+
+## Testing & development
+
+Babysitter has a **side-effect-free** test suite. Run it with:
+
+```
+make test          # or: bash tests/run.sh
+```
+
+It never touches your real `~/.claude/cc-status`, never fires a keystroke, never
+focuses a window, and never spawns a session. How that's possible:
+
+- **Pure logic in [cc-core.lua](cc-core.lua)** — status parsing, sorting,
+  staleness, action selection, deck layout, transcript snippet, spawn-command
+  building — has no `hs.*` calls and is unit-tested directly in plain `lua`.
+- **All effects go through one `fx` table** (focus, keystrokes, decision/file
+  writes, Stream Deck, session spawn). Production wires it to Hammerspoon; tests
+  pass a **recorder** that captures intent — so a test asserts *"would press
+  Return on window X"* or *"would spawn in /path"* without doing it.
+- **The shell scripts** are driven against a throwaway `CC_STATUS_DIR`.
+
+Spawning is additionally guarded by `ORCH_DRY_RUN` (default on), so even the live
+app logs-but-doesn't-launch until you opt in.
+
+Layout: [cc-core.lua](cc-core.lua) (logic) + [claude-dashboard.lua](claude-dashboard.lua)
+(Hammerspoon bootstrap) + `tests/` (`run.sh`, bash + lua suites, `support/`).
 
 ## Notes and tweaks
 
