@@ -61,6 +61,9 @@ out="$(printf '%s' "$GATED" | CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 CC_GAT
 assert_eq "timeout: no decision emitted" "" "$out"
 
 # ---- Phase 4c policies (decide WITHOUT a panel; no heartbeat needed) ----
+# Remove the heartbeat left by earlier tests so the "no decision" cases fall
+# through immediately instead of polling for a panel that isn't answering.
+rm -f "$HB"
 POL="$TMP/policy.json"
 cat > "$POL" <<'JSON'
 { "policies": {

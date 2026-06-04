@@ -47,31 +47,40 @@ Claude Code hooks ──► cc-status.sh ──► ~/.claude/cc-status/<session_
 
 ## Control actions
 
-Selecting a tile opens the detail panel with these buttons:
+**Single-click** a tile to select it (opens the detail panel). **Double-click** a
+tile to **jump** straight to its window. The detail panel has:
 
 - **Jump** — focus that session's VS Code/Cursor window (switches Spaces if needed).
 - **Approve / Deny** — answer a pending permission prompt.
-- **Stop** — interrupt the current turn (sends `Esc` to the terminal).
-- **Nudge** — type a message into the session and press Enter for you.
+- **Stop** — interrupt the current turn.
+- **Autopilot** — time-box a session to auto-approve all its prompts (needs the gate + config).
+- **Clear / Compact** — pop a yes/no confirm, then run `/clear` or `/compact` in the session.
+- **Nudge box** — **Send** types a message into the session now; **Queue** saves it
+  for later (the tile shows `+N queued`, **Feed next** sends the front one).
 
-There are two mechanisms behind Approve/Deny, and Babysitter uses whichever fits:
+The **Wants** (the exact command) and **Why** (the assistant's reasoning before a
+request) clamp to two lines — **click to expand**.
 
-1. **Keystroke injection (always available).** The panel focuses the target
-   window and types into the integrated terminal (`Return` to approve, `Esc` to
-   deny / stop, typed text + `Return` to nudge), then returns focus to where you
-   were. This is the only option for **nudge** and **stop**, and the default for
-   approve/deny. It needs Hammerspoon's Accessibility permission (same one used
-   to focus windows).
+### How control reaches the session — and its limits
 
-2. **Hook approval gate (opt-in, hands-free).** When enabled, the
-   [cc-approve.sh](cc-approve.sh) PreToolUse hook routes a permission request to
-   the panel and waits; clicking Approve/Deny writes a decision the hook honors —
-   **no window switch, no keystrokes.** See "The approval gate" below.
+Two paths, and it matters which one your sessions use:
 
-> The approve/deny/stop keystrokes (`Return` / `Esc`) depend on your Claude Code
-> version's permission TUI. If your build uses different keys, change
-> `KEY_APPROVE` / `KEY_DENY` / `KEY_STOP` near the top of
-> [claude-dashboard.lua](claude-dashboard.lua).
+1. **Hook approval gate (hands-free, reliable everywhere).** When armed,
+   [cc-approve.sh](cc-approve.sh) routes a permission decision to the panel and
+   Approve/Deny write a decision file the hook honors — **no window focus, no
+   keystrokes.** Works for terminal *and* VS Code-extension sessions. This is the
+   recommended approve/deny path. See "The approval gate" below.
+
+2. **Keystroke injection (best-effort).** Jump, Stop, Nudge/Feed, and Clear/Compact
+   focus the target window and type into it. This lands reliably when Claude runs
+   in a **terminal** (cursor at the prompt), but is **unreliable for the Claude Code
+   VS Code extension** (the chat input isn't reliably the focused element) — and
+   there's no supported API to inject a prompt into a running session. Needs
+   Hammerspoon **Accessibility** permission.
+
+> Keystroke keys (`Return`/`Esc`) and behavior depend on your setup. For reliable
+> approve/deny regardless of UI, use the gate. For delivering work, **Queue** stores
+> it reliably; feeding/nudge is the fragile part for the extension UI.
 
 ## Global hotkeys
 
@@ -82,6 +91,8 @@ the top of [claude-dashboard.lua](claude-dashboard.lua)):
 - **⌘⌥J** — jump to the session that needs you.
 - **⌘⌥N** — cycle-jump to the next session.
 - **⌘⌥S** — spawn a new session (see below).
+- **⌘⌥B** — show/hide the panel (it also minimizes to the Dock, and there's a 🍼
+  menu-bar icon to reopen it when closed).
 
 ## Spawn new sessions (orchestrator)
 
@@ -104,9 +115,16 @@ backlog unattended.
 ## Automation & policies (`~/.claude/cc-config.json`)
 
 All automatic behavior is governed by one settings file, and **everything is off
-until you turn it on**. Copy [cc-config.example.json](cc-config.example.json) to
+until you turn it on**.
+
+**Easiest: the ⚙ Settings panel.** Click the **gear button next to + New** for a
+form with every toggle (arm the gate, queue autofeed/dry-run, escalation, and the
+policies). **Save** writes `~/.claude/cc-config.json` (creating it if missing) and
+arms/disarms the gate flag — no hand-editing.
+
+To edit by hand instead, copy [cc-config.example.json](cc-config.example.json) to
 `~/.claude/cc-config.json` and flip what you want. Both the panel and the gate
-read it.
+read it (the panel live within ~1s; the gate on the next hook fire).
 
 ```json
 {
@@ -304,13 +322,15 @@ Layout: [cc-core.lua](cc-core.lua) (logic) + [claude-dashboard.lua](claude-dashb
 
 - **Different editor:** Cursor and VS Code Insiders are already in the
   `EDITOR_BUNDLES` list in the `.lua` file; add or reorder as needed.
-- **Jump now opens detail:** selecting a tile shows its controls instead of
-  jumping immediately — use the **Jump** button to focus the window. This keeps
-  the grid clean and lets you act (especially hands-free gate approvals) without
-  switching windows.
-- **Window not focusing:** open the Hammerspoon Console and click Jump. The log
-  shows whether a title match was found. Focus matches the folder name in the VS
-  Code window title (the default title format).
+- **Select vs jump:** single-click selects a tile (opens its controls);
+  **double-click** jumps to the window. This keeps the grid clean and lets you act
+  (especially hands-free gate approvals) without switching windows.
+- **Orphan tiles self-clean:** a status file with no `session_id` that goes stale
+  (from a hook fire that lacked one), or any tile older than 24h, is auto-pruned —
+  so dead/duplicate tiles don't pile up. (`PRUNE_NO_SID` / `PRUNE_SECONDS`.)
+- **Window not focusing:** open the Hammerspoon Console and double-click a tile.
+  The log shows whether a title match was found. Focus matches the folder name in
+  the VS Code window title (the default title format).
 - **Logs:** the hook scripts log to stderr (`[cc-status]` / `[cc-approve]`) and
   the Lua side logs to the Hammerspoon Console.
 - **Known limit:** click-to-focus matches by window title, so two sessions in the

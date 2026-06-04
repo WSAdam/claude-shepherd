@@ -222,6 +222,26 @@ do
   eq("feed: not done -> false", core.shouldFeed("working", "working", q1, true), false)
 end
 
+-- ---- shouldPrune: orphan + ghost cleanup ----------------------------------
+do
+  local opts = { pruneNoSid = true, pruneSeconds = 86400 }
+  -- orphan: stale tile with no session_id
+  local orphan = { stale = true, session_id = "", updated = 100 }
+  eq("prune: stale + no session_id -> true", core.shouldPrune(orphan, 1000, opts), true)
+  -- real session, stale but has a session_id, within the ghost window -> keep
+  local realStale = { stale = true, session_id = "abc", updated = 1000 }
+  eq("prune: stale but has session_id (recent) -> false", core.shouldPrune(realStale, 2000, opts), false)
+  -- ghost backstop: very old even with a session_id
+  local ghost = { stale = true, session_id = "abc", updated = 0 }
+  eq("prune: older than backstop -> true", core.shouldPrune(ghost, 90000, opts), true)
+  -- fresh, valid -> keep
+  local fresh = { stale = false, session_id = "abc", updated = 1000 }
+  eq("prune: fresh valid -> false", core.shouldPrune(fresh, 1010, opts), false)
+  -- pruneNoSid off -> no orphan prune
+  eq("prune: orphan kept when pruneNoSid off",
+     core.shouldPrune(orphan, 1000, { pruneNoSid = false, pruneSeconds = 0 }), false)
+end
+
 -- ---- Policy A: approvalStale ----------------------------------------------
 do
   eq("escalate: fresh approval -> false", core.approvalStale({ status = "approval", since = 100 }, 150, 60), false)

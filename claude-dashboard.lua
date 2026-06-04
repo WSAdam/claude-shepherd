@@ -895,11 +895,9 @@ function refreshList()
   -- 24h backstop. (SessionEnd can't clean these; staleness only dims them.)
   local now = FX.now()
   local list = {}
+  local pruneOpts = { pruneNoSid = PRUNE_NO_SID, pruneSeconds = PRUNE_SECONDS }
   for _, it in ipairs(raw) do
-    local age = it.updated and (now - it.updated) or 0
-    local orphan = PRUNE_NO_SID and it.stale and (not it.session_id or it.session_id == "")
-    local ghost  = PRUNE_SECONDS > 0 and it.updated and age > PRUNE_SECONDS
-    if orphan or ghost then
+    if core.shouldPrune(it, now, pruneOpts) then
       FX.removeStatus(it.key)
       print("[cc-dashboard] pruned orphan tile: " .. tostring(it.name) .. " (" .. it.key .. ")")
     else

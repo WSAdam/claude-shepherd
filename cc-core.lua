@@ -203,6 +203,20 @@ function M.shouldFeed(prev, cur, q, autoOn)
   return cur == "done" and prev ~= "done"
 end
 
+-- Should this tile be pruned? Orphans = stale tiles with no session_id (a hook
+-- fire that lacked one, keyed by folder name, that SessionEnd can't clean), plus
+-- a ghost backstop for anything older than opts.pruneSeconds.
+function M.shouldPrune(item, now, opts)
+  opts = opts or {}
+  if not item then return false end
+  local age = item.updated and (now - item.updated) or 0
+  local orphan = opts.pruneNoSid and item.stale
+    and (not item.session_id or item.session_id == "")
+  local ghost = opts.pruneSeconds and opts.pruneSeconds > 0
+    and item.updated and age > opts.pruneSeconds
+  return (orphan or ghost) and true or false
+end
+
 -- ---- Policy A: stale-approval escalation -----------------------------------
 -- True when a session has been waiting for you (status "approval") longer than
 -- thresholdSec. (`since` is when it entered the approval state.)
