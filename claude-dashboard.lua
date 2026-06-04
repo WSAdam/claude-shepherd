@@ -37,6 +37,8 @@ local POLL_SECONDS  = 1.0
 local PANEL_W       = 580
 local DEFAULT_THEME = "cards"  -- cards | bar | contrast | dots
 local STALE_SECONDS = 90       -- dim a tile after this long with no updates
+local PRUNE_NO_SID  = true     -- delete stale tiles that have no session_id (orphans)
+local PRUNE_SECONDS = 86400    -- also delete any tile older than this (24h ghost backstop; 0=off)
 local FOCUS_DELAY   = 0.12     -- wait after focusing before sending keystrokes
 local RESTORE_FOCUS = true     -- return focus to where you were after acting
 
@@ -56,6 +58,7 @@ local HOTKEY_CYCLE         = { { "cmd", "alt" }, "n" } -- jump to the next sessi
 -- Live activity peek: show each active session's latest assistant line.
 local ACTIVITY_PEEK  = true
 local ACTIVITY_BYTES = 65536  -- transcript tail to scan (big tool outputs need room)
+local ACTIVITY_LEN   = 600    -- how much reasoning to keep (the panel clamps it)
 
 -- Orchestrator (Phase 4). DRY-RUN by default: shows what it WOULD spawn without
 -- launching anything. Set ORCH_DRY_RUN = false to actually open sessions.
@@ -180,6 +183,8 @@ function FX.writeFile(path, content)
   local f = io.open(path, "w"); if f then f:write(content); f:close() end
 end
 
+function FX.removeStatus(key) os.remove(STATUS_DIR .. "/" .. key .. ".json") end
+
 function FX.writeDecision(key, value)
   FX.writeFile(STATUS_DIR .. "/" .. key .. ".decision", value)
   print("[cc-dashboard] decision " .. tostring(value) .. " -> " .. tostring(key))
@@ -269,6 +274,24 @@ controller:setCallback(function(msg)
     if item then
       local task, q2 = core.queuePop(FX.readQueue(key))
       if task then FX.feedTask(item.name, task); FX.writeQueue(key, q2) end
+    end
+    return
+  end
+  if a == "clear" or a == "compact" then
+    local item = byKey[tostring(payload.v or "")]
+    if item then
+      local cmd   = (a == "clear") and "/clear" or "/compact"
+      local title = (a == "clear") and "Clear conversation" or "Auto-compact"
+      local msg   = (a == "clear")
+        and ("Clear ALL conversation context for " .. item.name ..
+             "?\nThis types /clear into its terminal.")
+        or  ("Compact (summarize) the conversation for " .. item.name ..
+             "?\nThis types /compact into its terminal.")
+      pcall(function()
+        if hs.dialog.blockAlert(title, msg, "Yes", "Cancel") == "Yes" then
+          FX.typeIntoWindow(item.name, cmd)
+        end
+      end)
     end
     return
   end
@@ -473,14 +496,20 @@ local HTML = [[
   #d-name { font-size:14px; font-weight:700; color:#fff; }
   #d-status { font-size:11px; color:#8a8d99; margin-left:auto; }
   #d-prompt { font-size:12px; color:#aeb1bd; margin:8px 0 0; max-height:48px; overflow:hidden; }
-  #d-activity { font-size:12px; color:#9fb6d6; margin:6px 0 0; max-height:48px; overflow:hidden; }
-  #d-pending { font-size:12px; color:#f3b1b1; margin:6px 0 0; }
+  #d-activity, #d-pending { font-size:12px; margin:6px 0 0; cursor:pointer;
+    display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; }
+  #d-activity { color:#9fb6d6; }
+  #d-pending  { color:#f3b1b1; }
+  #d-activity.expanded, #d-pending.expanded { -webkit-line-clamp:unset; }
+  .exp-hint { color:#6b7280; font-size:11px; }
   #d-actions { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
   #d-actions button { background:#21232c; color:#e8e9ee; border:1px solid #2c2f3a;
                       border-radius:8px; font-size:12px; padding:5px 10px; cursor:pointer; }
   #d-actions button:hover { background:#2b2e39; }
   #b-approve { border-color:#22c55e; color:#7ee2a0; }
   #b-deny, #b-stop { border-color:#ef4444; color:#f3a1a1; }
+  #b-clear { border-color:#b9772a; color:#e6b277; }
+  .sep { flex-basis:100%; height:0; }
   #nudge-row { display:flex; gap:6px; margin-top:8px; }
   #nudge { flex:1; background:#1b1d24; color:#e8e9ee; border:1px solid #2c2f3a;
            border-radius:8px; font-size:12px; padding:5px 8px; }
@@ -514,8 +543,8 @@ local HTML = [[
       <span id="d-name"></span>
       <span id="d-status"></span>
     </div>
-    <div id="d-pending"></div>
-    <div id="d-activity"></div>
+    <div id="d-pending" onclick="toggleExpand('pending')"></div>
+    <div id="d-activity" onclick="toggleExpand('activity')"></div>
     <div id="d-prompt"></div>
     <div id="d-actions">
       <button id="b-jump"    onclick="act('focus')">Jump</button>
@@ -523,6 +552,9 @@ local HTML = [[
       <button id="b-deny"    onclick="act('deny')">Deny</button>
       <button id="b-stop"    onclick="act('stop')">Stop</button>
       <button id="b-auto"    onclick="act('autopilot')">Autopilot</button>
+      <span class="sep"></span>
+      <button id="b-clear"   onclick="act('clear')">Clear</button>
+      <button id="b-compact" onclick="act('compact')">Compact</button>
     </div>
     <div id="nudge-row">
       <input id="nudge" placeholder="Nudge now, or Queue for later..." onkeydown="onNudgeKey(event)">
@@ -541,6 +573,7 @@ local HTML = [[
     var COLORS = { idle:"#6b7280", working:"#f5b50a", done:"#22c55e", approval:"#ef4444" };
     var lastItems = [];
     var selectedKey = null;
+    var detailExpanded = { pending:false, activity:false };
 
     function send(a, v, text){
       try { window.webkit.messageHandlers.cc.postMessage(JSON.stringify({a:a, v:v||"", text:text||""})); }
@@ -576,7 +609,15 @@ local HTML = [[
       for(var i=0;i<lastItems.length;i++){ if(lastItems[i].key === key) return lastItems[i]; }
       return null;
     }
-    function selectTile(key){ selectedKey = key; renderDetail(); paintSelection(); }
+    function selectTile(key){
+      if(key !== selectedKey){ detailExpanded = { pending:false, activity:false }; }
+      selectedKey = key; renderDetail(); paintSelection();
+    }
+    function toggleExpand(which){ detailExpanded[which] = !detailExpanded[which]; applyExpand(); }
+    function applyExpand(){
+      document.getElementById("d-pending").classList.toggle("expanded", detailExpanded.pending);
+      document.getElementById("d-activity").classList.toggle("expanded", detailExpanded.activity);
+    }
     function paintSelection(){
       var tiles = document.querySelectorAll(".tile");
       tiles.forEach(function(t){ t.classList.toggle("sel", t.dataset.key === selectedKey); });
@@ -599,7 +640,7 @@ local HTML = [[
         pend.style.display = "block";
       } else { pend.style.display = "none"; }
       var ac = document.getElementById("d-activity");
-      if(it.activity){ ac.textContent = "Doing: " + it.activity; ac.style.display="block"; }
+      if(it.activity){ ac.textContent = (st==="approval" ? "Why: " : "Doing: ") + it.activity; ac.style.display="block"; }
       else { ac.style.display="none"; }
       var pr = document.getElementById("d-prompt");
       if(it.last_prompt){ pr.textContent = "Last: " + it.last_prompt; pr.style.display="block"; }
@@ -610,6 +651,7 @@ local HTML = [[
       var ba = document.getElementById("b-auto");
       ba.textContent = it.autopilot ? "Autopilot: ON" : "Autopilot";
       ba.style.color = it.autopilot ? "#8fd4a3" : "#e8e9ee";
+      applyExpand();
     }
 
     window.ccUpdate = function(items){
@@ -634,7 +676,7 @@ local HTML = [[
         if(it.queue > 0){ meta = (meta ? meta + " · " : "") + "+" + it.queue + " queued"; }
         if(it.autopilot){ meta = (meta ? meta + " · " : "") + "🛫 autopilot"; }
         var cls = "tile s-" + st + (it.stale ? " stale" : "") + (it.escalate ? " escalate" : "") + (it.key === selectedKey ? " sel" : "");
-        return '<div class="'+cls+'" data-key="'+esc(it.key)+'" onclick="selectTile(\''+esc(it.key)+'\')">'
+        return '<div class="'+cls+'" data-key="'+esc(it.key)+'" onclick="selectTile(\''+esc(it.key)+'\')" ondblclick="send(\'focus\',\''+esc(it.key)+'\')" title="Double-click to jump">'
              + '<span class="dot"></span>'
              + '<span class="name">'+esc(it.name)+'</span>'
              + '<span class="label">'+label+'</span>'
@@ -719,7 +761,22 @@ function refreshList()
       if content and #content > 0 then entries[#entries + 1] = { key = key, content = content } end
     end
   end
-  local list = core.parseStatusList(entries, FX.now(), STALE_SECONDS)
+  local raw = core.parseStatusList(entries, FX.now(), STALE_SECONDS)
+  -- Prune orphans: stale tiles with no session_id, or any tile older than the
+  -- 24h backstop. (SessionEnd can't clean these; staleness only dims them.)
+  local now = FX.now()
+  local list = {}
+  for _, it in ipairs(raw) do
+    local age = it.updated and (now - it.updated) or 0
+    local orphan = PRUNE_NO_SID and it.stale and (not it.session_id or it.session_id == "")
+    local ghost  = PRUNE_SECONDS > 0 and it.updated and age > PRUNE_SECONDS
+    if orphan or ghost then
+      FX.removeStatus(it.key)
+      print("[cc-dashboard] pruned orphan tile: " .. tostring(it.name) .. " (" .. it.key .. ")")
+    else
+      list[#list + 1] = it
+    end
+  end
   byKey = {}
   for _, it in ipairs(list) do byKey[it.key] = it end
   return list
@@ -754,7 +811,7 @@ local function refresh()
     if ACTIVITY_PEEK and it.transcript_path and not it.stale
        and (it.status == "working" or it.status == "approval") then
       local tail = FX.readTail(it.transcript_path, ACTIVITY_BYTES)
-      if tail then it.activity = core.transcriptSnippet(tail) end
+      if tail then it.activity = core.transcriptSnippet(tail, ACTIVITY_LEN) end
     end
 
     -- Autopilot badge (active only while the feature is enabled in config).
