@@ -42,6 +42,11 @@ local PRUNE_NO_SID  = true     -- delete stale tiles that have no session_id (or
 local PRUNE_SECONDS = 86400    -- also delete any tile older than this (24h ghost backstop; 0=off)
 local FOCUS_DELAY   = 0.12     -- wait after focusing before sending keystrokes
 local RESTORE_FOCUS = true     -- return focus to where you were after acting
+-- Before typing (nudge/feed/clear/compact), focus the chat input. The Claude Code
+-- VS Code extension binds ⌘Esc to focus/unfocus its input ("⌘ Esc to focus or
+-- unfocus Claude"). Set to nil for terminal sessions (where typing goes straight
+-- to the prompt and this would be wrong).
+local FOCUS_CHAT_KEY = { { "cmd" }, "escape" }
 
 -- Stream Deck (optional). Owns the device only if the Elgato app isn't running.
 local STREAMDECK_ENABLED  = true
@@ -213,9 +218,14 @@ function FX.actOnWindow(name, keySpec)
 end
 
 function FX.typeIntoWindow(name, text)
+  print("[cc-dashboard] type -> " .. tostring(name) .. ": " .. tostring(text))
   sendToWindow(name, function()
-    hs.eventtap.keyStrokes(text)
-    hs.timer.doAfter(0.05, function() hs.eventtap.keyStroke({}, "return") end)
+    -- Focus the extension's chat input first (⌘Esc), then type.
+    if FOCUS_CHAT_KEY then hs.eventtap.keyStroke(FOCUS_CHAT_KEY[1], FOCUS_CHAT_KEY[2]) end
+    hs.timer.doAfter(0.10, function()
+      hs.eventtap.keyStrokes(text)
+      hs.timer.doAfter(0.05, function() hs.eventtap.keyStroke({}, "return") end)
+    end)
   end)
 end
 
