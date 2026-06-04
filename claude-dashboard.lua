@@ -28,6 +28,7 @@ local HEARTBEAT  = STATUS_DIR .. "/.panel-alive"
 local CONFIG_FILE   = os.getenv("CC_CONFIG_FILE") or (os.getenv("HOME") .. "/.claude/cc-config.json")
 local QUEUE_DIR     = os.getenv("CC_QUEUE_DIR") or (os.getenv("HOME") .. "/.claude/cc-queue")
 local AUTOPILOT_DIR = os.getenv("CC_AUTOPILOT_DIR") or (os.getenv("HOME") .. "/.claude/cc-autopilot")
+local GATE_FLAG     = os.getenv("CC_GATE_FLAG") or (os.getenv("HOME") .. "/.claude/cc-gate.enabled")
 local EDITOR_BUNDLES = {
   "com.microsoft.VSCode",
   "com.microsoft.VSCodeInsiders",
@@ -255,6 +256,28 @@ controller:setCallback(function(msg)
     print("[cc-dashboard] theme saved: " .. tostring(payload.v))
     return
   end
+  if a == "open-settings" then
+    -- Push the current config (or {} = all defaults) + gate state into the form.
+    local raw = FX.readFile(CONFIG_FILE)
+    local json = (raw and #raw > 0) and raw or "{}"
+    local gateOn = (FX.readFile(GATE_FLAG) ~= nil) and "true" or "false"
+    pcall(function()
+      wv:evaluateJavaScript("showSettings(" .. json .. ", " .. gateOn .. ")")
+    end)
+    return
+  end
+  if a == "save-config" then
+    local ok, parsed = pcall(function() return hs.json.decode(payload.text or "{}") end)
+    if ok and type(parsed) == "table" then
+      hs.fs.mkdir(os.getenv("HOME") .. "/.claude")
+      FX.writeFile(CONFIG_FILE, hs.json.encode(parsed.config or {}, true))  -- creates if missing
+      if parsed.gate == true then FX.writeFile(GATE_FLAG, "")
+      else os.remove(GATE_FLAG) end
+      print("[cc-dashboard] saved cc-config.json (gate=" .. tostring(parsed.gate) .. ")")
+      pcall(function() hs.alert.show("Babysitter: settings saved") end)
+    end
+    return
+  end
   if a == "spawn" then
     spawnPrompt()
     return
@@ -421,6 +444,29 @@ local HTML = [[
   #spawn { background:#21232c; color:#8fd4a3; border:1px solid #2c5; border-radius:8px;
            font-size:12px; padding:3px 8px; cursor:pointer; }
   #spawn:hover { background:#27332b; }
+  #settings-btn { background:#21232c; color:#cfd2db; border:1px solid #2c2f3a;
+           border-radius:8px; font-size:13px; padding:3px 8px; cursor:pointer; }
+
+  /* settings overlay */
+  #settings { display:none; position:fixed; inset:0; background:#15161b; z-index:10;
+              flex-direction:column; }
+  #settings.show { display:flex; }
+  #s-head { display:flex; align-items:center; justify-content:space-between;
+            padding:10px 12px; border-bottom:1px solid #2c2f3a; font-weight:700; color:#fff; }
+  .s-x { background:none; border:none; color:#8a8d99; font-size:14px; cursor:pointer; }
+  #s-body { flex:1; overflow-y:auto; padding:10px 12px; }
+  .s-sec { color:#8a8d99; font-size:11px; text-transform:uppercase; letter-spacing:.04em;
+           margin:12px 0 4px; border-bottom:1px solid #2c2f3a; padding-bottom:3px; }
+  .s-row { display:flex; align-items:center; gap:6px; font-size:13px; color:#d7d9e0;
+           padding:4px 0; flex-wrap:wrap; }
+  .s-lbl { color:#8a8d99; font-size:11px; margin:8px 0 3px; }
+  .s-num { width:54px; background:#1b1d24; color:#e8e9ee; border:1px solid #2c2f3a; border-radius:6px; padding:2px 5px; }
+  .s-txt { flex:1; min-width:120px; background:#1b1d24; color:#e8e9ee; border:1px solid #2c2f3a; border-radius:6px; padding:2px 6px; }
+  .s-area { width:100%; height:54px; background:#1b1d24; color:#e8e9ee; border:1px solid #2c2f3a;
+            border-radius:6px; padding:5px 7px; font-family:ui-monospace,monospace; font-size:12px; box-sizing:border-box; }
+  #s-foot { display:flex; gap:8px; padding:10px 12px; border-top:1px solid #2c2f3a; }
+  #s-save { background:#21232c; color:#8fd4a3; border:1px solid #2c5; border-radius:8px; font-size:13px; padding:6px 14px; cursor:pointer; }
+  #s-foot button:not(#s-save) { background:#21232c; color:#cfd2db; border:1px solid #2c2f3a; border-radius:8px; font-size:13px; padding:6px 14px; cursor:pointer; }
 
   /* shared bits */
   #grid { display:grid; gap:8px; padding:10px; }
@@ -526,6 +572,7 @@ local HTML = [[
     <span class="t">Claude sessions</span>
     <span class="right">
       <button id="spawn" onclick="send('spawn','')" title="Spawn a new Claude session">+ New</button>
+      <button id="settings-btn" onclick="openSettings()" title="Settings">⚙</button>
       <select id="theme" onchange="onThemeChange()">
         <option value="cards">Cards</option>
         <option value="bar">Bar</option>
@@ -567,6 +614,33 @@ local HTML = [[
     </div>
   </div>
 
+  <div id="settings">
+    <div id="s-head"><span>Babysitter settings</span><button class="s-x" onclick="closeSettings()">✕</button></div>
+    <div id="s-body">
+      <label class="s-row"><input type="checkbox" id="s-gate"> Arm the approval gate (route permission prompts to this panel)</label>
+      <div class="s-sec">Queue</div>
+      <label class="s-row"><input type="checkbox" id="s-q-auto"> Auto-feed the next queued task when a session finishes</label>
+      <label class="s-row"><input type="checkbox" id="s-q-dry"> Dry-run (log what it would feed, don't send)</label>
+      <div class="s-sec">Escalation (a waiting approval nags harder)</div>
+      <label class="s-row"><input type="checkbox" id="s-e-en"> Enable escalation</label>
+      <label class="s-row">After <input type="number" id="s-e-min" class="s-num" min="1"> minutes</label>
+      <label class="s-row"><input type="checkbox" id="s-e-snd"> Play a sound</label>
+      <label class="s-row"><input type="checkbox" id="s-e-push"> Push to ntfy topic <input type="text" id="s-e-topic" class="s-txt" placeholder="my-topic"></label>
+      <div class="s-sec">Policies (gate must be armed)</div>
+      <label class="s-row"><input type="checkbox" id="s-p-rep"> Auto-approve a command already approved this session</label>
+      <label class="s-row"><input type="checkbox" id="s-ap-en"> Enable per-session Autopilot, window of <input type="number" id="s-ap-min" class="s-num" min="1"> min</label>
+      <label class="s-row"><input type="checkbox" id="s-pat-en"> Enable pattern rules</label>
+      <div class="s-lbl">Auto-allow (one per line, e.g. Read or Bash(npm test*))</div>
+      <textarea id="s-pat-allow" class="s-area"></textarea>
+      <div class="s-lbl">Auto-deny (wins over allow)</div>
+      <textarea id="s-pat-deny" class="s-area"></textarea>
+    </div>
+    <div id="s-foot">
+      <button id="s-save" onclick="saveSettings()">Save</button>
+      <button onclick="closeSettings()">Cancel</button>
+    </div>
+  </div>
+
   <script>
     var LABELS = { idle:"Idle", working:"Working",
                    approval:"Needs you", done:"Ready for you" };
@@ -596,6 +670,59 @@ local HTML = [[
       var t = document.getElementById("theme").value;
       document.body.className = "theme-" + t;
       send("theme", t);
+    }
+
+    function cv(o, path, def){
+      var p = path.split("."), n = o;
+      for(var i=0;i<p.length;i++){
+        if(n==null || typeof n!=="object") return def;
+        var k = p[i]; n = n[k];
+        if(n===undefined) return def;
+      }
+      return n===undefined ? def : n;
+    }
+    function openSettings(){ send("open-settings"); }
+    function closeSettings(){ document.getElementById("settings").classList.remove("show"); }
+    function showSettings(cfg, gateOn){
+      cfg = cfg || {};
+      function ck(id,v){ document.getElementById(id).checked = !!v; }
+      function val(id,v){ document.getElementById(id).value = v; }
+      ck("s-gate", gateOn);
+      ck("s-q-auto", cv(cfg,"queue.autofeed",false));
+      ck("s-q-dry",  cv(cfg,"queue.dryRun",false));
+      ck("s-e-en",   cv(cfg,"escalation.enabled",false));
+      val("s-e-min", cv(cfg,"escalation.minutes",5));
+      ck("s-e-snd",  cv(cfg,"escalation.sound",false));
+      ck("s-e-push", cv(cfg,"escalation.push",false));
+      val("s-e-topic", cv(cfg,"escalation.pushTopic",""));
+      ck("s-p-rep",  cv(cfg,"policies.approveRepeats",false));
+      ck("s-ap-en",  cv(cfg,"policies.autopilot.enabled",false));
+      val("s-ap-min", cv(cfg,"policies.autopilot.minutes",15));
+      ck("s-pat-en", cv(cfg,"policies.patterns.enabled",false));
+      val("s-pat-allow", (cv(cfg,"policies.patterns.autoAllow",[])||[]).join("\n"));
+      val("s-pat-deny",  (cv(cfg,"policies.patterns.autoDeny",[])||[]).join("\n"));
+      document.getElementById("settings").classList.add("show");
+    }
+    function lines(id){
+      return (document.getElementById(id).value||"").split("\n")
+        .map(function(s){return s.trim();}).filter(function(s){return s.length>0;});
+    }
+    function saveSettings(){
+      function ck(id){ return document.getElementById(id).checked; }
+      function num(id,d){ var n=parseInt(document.getElementById(id).value,10); return isNaN(n)?d:n; }
+      function txt(id){ return document.getElementById(id).value||""; }
+      var config = {
+        queue: { autofeed: ck("s-q-auto"), dryRun: ck("s-q-dry") },
+        escalation: { enabled: ck("s-e-en"), minutes: num("s-e-min",5), sound: ck("s-e-snd"),
+                      push: ck("s-e-push"), pushTopic: txt("s-e-topic") },
+        policies: {
+          approveRepeats: ck("s-p-rep"),
+          autopilot: { enabled: ck("s-ap-en"), minutes: num("s-ap-min",15) },
+          patterns: { enabled: ck("s-pat-en"), autoAllow: lines("s-pat-allow"), autoDeny: lines("s-pat-deny") }
+        }
+      };
+      send("save-config", "", JSON.stringify({ config: config, gate: ck("s-gate") }));
+      closeSettings();
     }
 
     function fmtAge(since){
