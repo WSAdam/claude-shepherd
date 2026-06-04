@@ -1,23 +1,19 @@
 #!/usr/bin/env bash
 #
-# cc-approve.sh - opt-in PreToolUse approval gate for babysitter.
+# cc-approve.sh - opt-in PreToolUse approval gate for babysitter, with policies.
 #
-# When armed, this routes a tool's permission decision to the dashboard so you
-# can Approve/Deny it from the panel with no window switch. It is designed to be
-# SAFE TO WIRE UNCONDITIONALLY: if the gate is disabled, the tool isn't in the
-# gated set, or the panel isn't running, it returns immediately and the session
-# falls back to Claude Code's normal permission flow. Sessions never freeze
-# waiting on a panel that isn't there.
+# When armed (~/.claude/cc-gate.enabled), a permission request for a gated tool is
+# first run through automatic policies (all OFF by default, configured in
+# ~/.claude/cc-config.json); if none decides, it's routed to the panel for a human
+# Approve/Deny. SAFE TO WIRE UNCONDITIONALLY: disabled gate, non-gated tool, or no
+# decision + dead panel all fall straight back to Claude Code's native flow.
 #
-# Flow when it engages:
-#   1. mark the session approval / gate:"waiting" with the pending tool
-#   2. poll for ~/.claude/cc-status/<key>.decision written by the panel
-#   3. emit a PreToolUse permissionDecision (allow|deny) and clear gate state
-#   4. on timeout: emit nothing -> the native permission prompt appears
-#
-# Arming:   create the flag file  ~/.claude/cc-gate.enabled
-# Scope:    CC_GATE_TOOLS (space separated) - default mutating tools only
-# Timeout:  CC_GATE_TIMEOUT seconds (default 120; stays under the hook's 600s)
+# Policy order (auto-decisions fire even if the panel isn't running):
+#   1. policies.patterns.autoDeny   -> deny   (safety first)
+#   2. policies.autopilot           -> allow  (this session, time-boxed)
+#   3. policies.patterns.autoAllow  -> allow
+#   4. policies.approveRepeats      -> allow  (same request approved before)
+#   else -> panel; on a human "allow", remember it for approveRepeats.
 #
 # Only the decision JSON is ever written to stdout; logs go to stderr.
 
@@ -30,6 +26,32 @@ GATE_FLAG="${CC_GATE_FLAG:-${HOME}/.claude/cc-gate.enabled}"
 GATE_TOOLS="${CC_GATE_TOOLS:-Bash Write Edit MultiEdit NotebookEdit}"
 GATE_TIMEOUT="${CC_GATE_TIMEOUT:-120}"
 HEARTBEAT_MAX_AGE="${CC_PANEL_MAX_AGE:-5}"
+APPROVED_DIR="${CC_APPROVED_DIR:-${HOME}/.claude/cc-approved}"
+AUTOPILOT_DIR="${CC_AUTOPILOT_DIR:-${HOME}/.claude/cc-autopilot}"
+
+emit_allow() {
+  printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}'
+}
+emit_deny() { # $1 = reason (plain ASCII)
+  printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"'"$1"'"}}'
+}
+
+# Match a request against a policy pattern. "Tool" matches by tool name;
+# "Tool(glob)" also requires the command/summary to match the shell glob.
+pattern_match() { # $1 tool, $2 summary, $3 pattern  -> 0 if match
+  local tool="$1" cmd="$2" pat="$3" ptool inner
+  case "$pat" in
+    *"("*")")
+      ptool="${pat%%(*}"
+      inner="${pat#*(}"; inner="${inner%)}"
+      [ "$tool" = "$ptool" ] || return 1
+      case "$cmd" in $inner) return 0 ;; *) return 1 ;; esac
+      ;;
+    *)
+      [ "$tool" = "$pat" ] && return 0 || return 1
+      ;;
+  esac
+}
 
 INPUT="$(cat 2>/dev/null || true)"
 
@@ -45,6 +67,72 @@ case " $GATE_TOOLS " in
   *) exit 0 ;;
 esac
 
+SESSION_ID="$(cc_get "$INPUT" '.session_id')"
+CWD="$(cc_get "$INPUT" '.cwd')"
+[ -n "$CWD" ] || CWD="$PWD"
+NAME="$(basename "$CWD")"
+KEY="$(cc_key "$SESSION_ID" "$CWD")"
+
+# A short summary of what's being approved (Bash command, file path, ...).
+SUMMARY="$(cc_get "$INPUT" '.tool_input.command')"
+[ -n "$SUMMARY" ] || SUMMARY="$(cc_get "$INPUT" '.tool_input.file_path')"
+[ -n "$SUMMARY" ] || SUMMARY="$TOOL"
+SIG="$(printf '%s|%s' "$TOOL" "$SUMMARY" | tr '\n' ' ')"
+
+# ---- Policy evaluation (Phase 4c) -----------------------------------------
+PAT_ENABLED="$(cc_config '.policies.patterns.enabled' 'false')"
+
+# 1. autoDeny (safety first)
+if [ "$PAT_ENABLED" = "true" ]; then
+  DENY_PATS="$(cc_config_array '.policies.patterns.autoDeny')"
+  if [ -n "$DENY_PATS" ]; then
+    while IFS= read -r pat; do
+      [ -n "$pat" ] || continue
+      if pattern_match "$TOOL" "$SUMMARY" "$pat"; then
+        echo "[cc-approve] ⛔ policy auto-deny ($pat): $TOOL ($KEY)" >&2
+        emit_deny "Auto-denied by babysitter policy."
+        exit 0
+      fi
+    done <<< "$DENY_PATS"
+  fi
+fi
+
+# 2. autopilot: this session is trusted for a time-boxed window
+if [ "$(cc_config '.policies.autopilot.enabled' 'false')" = "true" ] && [ -f "$AUTOPILOT_DIR/$KEY" ]; then
+  EXP="$(cat "$AUTOPILOT_DIR/$KEY" 2>/dev/null || echo 0)"
+  case "$EXP" in *[!0-9]*) EXP=0 ;; esac
+  if [ "$(cc_now)" -lt "$EXP" ]; then
+    echo "[cc-approve] 🛫 autopilot auto-allow: $TOOL ($KEY)" >&2
+    emit_allow
+    exit 0
+  fi
+fi
+
+# 3. autoAllow patterns
+if [ "$PAT_ENABLED" = "true" ]; then
+  ALLOW_PATS="$(cc_config_array '.policies.patterns.autoAllow')"
+  if [ -n "$ALLOW_PATS" ]; then
+    while IFS= read -r pat; do
+      [ -n "$pat" ] || continue
+      if pattern_match "$TOOL" "$SUMMARY" "$pat"; then
+        echo "[cc-approve] ✅ policy auto-allow ($pat): $TOOL ($KEY)" >&2
+        emit_allow
+        exit 0
+      fi
+    done <<< "$ALLOW_PATS"
+  fi
+fi
+
+# 4. approveRepeats: identical request already approved this session
+if [ "$(cc_config '.policies.approveRepeats' 'false')" = "true" ]; then
+  if [ -f "$APPROVED_DIR/$KEY" ] && grep -Fxq "$SIG" "$APPROVED_DIR/$KEY" 2>/dev/null; then
+    echo "[cc-approve] 🔁 auto-allow (approved before): $TOOL ($KEY)" >&2
+    emit_allow
+    exit 0
+  fi
+fi
+
+# ---- No policy decided: route to the panel --------------------------------
 # Panel must be alive (fresh heartbeat) or we'd block on nothing -> normal flow.
 HB_FILE="$(cc_heartbeat_file)"
 [ -f "$HB_FILE" ] || exit 0
@@ -52,17 +140,6 @@ HB="$(cat "$HB_FILE" 2>/dev/null || echo 0)"
 case "$HB" in *[!0-9]*) HB=0 ;; esac
 AGE=$(( $(cc_now) - HB ))
 [ "$AGE" -le "$HEARTBEAT_MAX_AGE" ] || exit 0
-
-SESSION_ID="$(cc_get "$INPUT" '.session_id')"
-CWD="$(cc_get "$INPUT" '.cwd')"
-[ -n "$CWD" ] || CWD="$PWD"
-NAME="$(basename "$CWD")"
-KEY="$(cc_key "$SESSION_ID" "$CWD")"
-
-# A short human summary of what's being approved (Bash command, file path, ...).
-SUMMARY="$(cc_get "$INPUT" '.tool_input.command')"
-[ -n "$SUMMARY" ] || SUMMARY="$(cc_get "$INPUT" '.tool_input.file_path')"
-[ -n "$SUMMARY" ] || SUMMARY="$TOOL"
 
 DECISION_FILE="$(cc_decision_file "$KEY")"
 rm -f "$DECISION_FILE" 2>/dev/null || true   # ignore any stale answer
@@ -94,13 +171,18 @@ if [ "$DECISION" = "deny" ]; then
   cc_del_field "$KEY" "pending"
   cc_merge "$KEY" "$(jq -nc --argjson now "$(cc_now)" '{status:"working", updated:$now, since:$now}')"
   echo "[cc-approve] ❌ denied $TOOL ($KEY)" >&2
-  printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Denied from the babysitter panel."}}'
+  emit_deny "Denied from the babysitter panel."
   exit 0
 elif [ "$DECISION" = "allow" ]; then
   cc_del_field "$KEY" "pending"
   cc_merge "$KEY" "$(jq -nc --argjson now "$(cc_now)" '{status:"working", updated:$now, since:$now}')"
+  # Remember this approval so approveRepeats can auto-allow it next time.
+  if [ "$(cc_config '.policies.approveRepeats' 'false')" = "true" ]; then
+    mkdir -p "$APPROVED_DIR"
+    grep -Fxq "$SIG" "$APPROVED_DIR/$KEY" 2>/dev/null || printf '%s\n' "$SIG" >> "$APPROVED_DIR/$KEY"
+  fi
   echo "[cc-approve] ✅ allowed $TOOL ($KEY)" >&2
-  printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}'
+  emit_allow
   exit 0
 fi
 

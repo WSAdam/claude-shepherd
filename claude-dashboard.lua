@@ -25,6 +25,9 @@ core.json = hs.json   -- production JSON impl (tests inject a vendored one)
 -- Honor CC_STATUS_DIR like the shell scripts so tests/dev can redirect state.
 local STATUS_DIR = os.getenv("CC_STATUS_DIR") or (os.getenv("HOME") .. "/.claude/cc-status")
 local HEARTBEAT  = STATUS_DIR .. "/.panel-alive"
+local CONFIG_FILE   = os.getenv("CC_CONFIG_FILE") or (os.getenv("HOME") .. "/.claude/cc-config.json")
+local QUEUE_DIR     = os.getenv("CC_QUEUE_DIR") or (os.getenv("HOME") .. "/.claude/cc-queue")
+local AUTOPILOT_DIR = os.getenv("CC_AUTOPILOT_DIR") or (os.getenv("HOME") .. "/.claude/cc-autopilot")
 local EDITOR_BUNDLES = {
   "com.microsoft.VSCode",
   "com.microsoft.VSCodeInsiders",
@@ -69,6 +72,9 @@ core.STALE_SECONDS = STALE_SECONDS
 local byKey = {}
 local lastJumpKey = nil  -- for the cycle-jump hotkey
 local spawnPrompt        -- forward declaration (defined after FX)
+local prevStatus = {}    -- key -> last refresh's status (for auto-feed transitions)
+local escalated  = {}    -- key -> true once we've escalated this approval episode
+local loadConfig         -- forward declaration (defined near refresh)
 
 -- Find the editor application object across possible bundle ids.
 local function findEditorApp()
@@ -129,6 +135,44 @@ function FX.readTail(path, maxBytes)
   local size = f:seek("end")
   f:seek("set", math.max(0, size - (maxBytes or 16384)))
   local c = f:read("*a"); f:close(); return c
+end
+
+-- Task queue I/O (Phase 4b).
+function FX.readQueue(key)
+  local c = FX.readFile(QUEUE_DIR .. "/" .. key .. ".json")
+  if not c or #c == 0 then return { tasks = {} } end
+  local ok, q = pcall(function() return core.json.decode(c) end)
+  if ok and type(q) == "table" then return q end
+  return { tasks = {} }
+end
+function FX.writeQueue(key, q)
+  hs.fs.mkdir(QUEUE_DIR)
+  FX.writeFile(QUEUE_DIR .. "/" .. key .. ".json", core.json.encode(q))
+end
+function FX.feedTask(name, task) FX.typeIntoWindow(name, task) end
+
+-- Per-session autopilot (Phase 4c-C): a file holding an expiry epoch.
+function FX.autopilotExpiry(key)
+  return tonumber(FX.readFile(AUTOPILOT_DIR .. "/" .. key) or "") or 0
+end
+function FX.autopilotActive(key) return FX.autopilotExpiry(key) > FX.now() end
+function FX.setAutopilot(key, expiry)
+  hs.fs.mkdir(AUTOPILOT_DIR)
+  FX.writeFile(AUTOPILOT_DIR .. "/" .. key, tostring(math.floor(expiry)))
+end
+function FX.clearAutopilot(key) os.remove(AUTOPILOT_DIR .. "/" .. key) end
+
+-- Escalation channels (Phase 4c-A), both off unless enabled in cc-config.json.
+function FX.playSound()
+  local s = hs.sound.getByName("Submarine") or hs.sound.getByName("Ping")
+  if s then s:play() end
+end
+function FX.push(topic, title, msg)
+  if not topic or topic == "" then return end
+  pcall(function()
+    hs.http.asyncPost("https://ntfy.sh/" .. topic, msg or "",
+      { Title = title or "Babysitter", Priority = "high" }, function() end)
+  end)
 end
 
 function FX.writeFile(path, content)
@@ -207,6 +251,38 @@ controller:setCallback(function(msg)
   end
   if a == "spawn" then
     spawnPrompt()
+    return
+  end
+  if a == "queue-add" then
+    local key = tostring(payload.v or "")
+    local task = payload.text and tostring(payload.text) or ""
+    if key ~= "" and task ~= "" then
+      FX.writeQueue(key, core.queuePush(FX.readQueue(key), task))
+      print("[cc-queue] queued for " .. key .. ": " .. task)
+    end
+    return
+  end
+  if a == "queue-feed" then
+    local key = tostring(payload.v or "")
+    local item = byKey[key]
+    if item then
+      local task, q2 = core.queuePop(FX.readQueue(key))
+      if task then FX.feedTask(item.name, task); FX.writeQueue(key, q2) end
+    end
+    return
+  end
+  if a == "autopilot" then
+    local key = tostring(payload.v or "")
+    if key ~= "" then
+      if FX.autopilotActive(key) then
+        FX.clearAutopilot(key)
+        print("[cc-autopilot] off for " .. key)
+      else
+        local mins = tonumber(core.config(loadConfig(), "policies.autopilot.minutes", 15)) or 15
+        FX.setAutopilot(key, FX.now() + mins * 60)
+        print("[cc-autopilot] on for " .. key .. " (" .. mins .. "m)")
+      end
+    end
     return
   end
   local item = byKey[tostring(payload.v or "")]
@@ -327,6 +403,7 @@ local HTML = [[
   .tile { cursor:pointer; position:relative; }
   .tile.sel { outline:2px solid #6ea8fe; outline-offset:1px; }
   .tile.stale { opacity:.45; }
+  .tile.escalate { box-shadow:0 0 0 2px #ef4444, 0 0 12px #ef4444; }
   .name { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .dot  { border-radius:50%; flex:0 0 auto; }
   .meta { font-size:11px; color:#8a8d99; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -406,8 +483,13 @@ local HTML = [[
   #nudge-row { display:flex; gap:6px; margin-top:8px; }
   #nudge { flex:1; background:#1b1d24; color:#e8e9ee; border:1px solid #2c2f3a;
            border-radius:8px; font-size:12px; padding:5px 8px; }
-  #b-nudge { background:#21232c; color:#cfd2db; border:1px solid #2c2f3a;
+  #b-nudge, #b-queue { background:#21232c; color:#cfd2db; border:1px solid #2c2f3a;
              border-radius:8px; font-size:12px; padding:5px 10px; cursor:pointer; }
+  #queue-row { display:flex; align-items:center; gap:8px; margin-top:8px; }
+  #q-count { font-size:12px; color:#9fb6d6; flex:1; }
+  #b-feed { background:#21232c; color:#8fd4a3; border:1px solid #2c5; border-radius:8px;
+            font-size:12px; padding:5px 10px; cursor:pointer; }
+  .qbadge { color:#9fb6d6; }
 </style></head>
 <body class="theme-__INIT_THEME__" data-theme="__INIT_THEME__">
   <div id="bar">
@@ -439,10 +521,16 @@ local HTML = [[
       <button id="b-approve" onclick="act('approve')">Approve</button>
       <button id="b-deny"    onclick="act('deny')">Deny</button>
       <button id="b-stop"    onclick="act('stop')">Stop</button>
+      <button id="b-auto"    onclick="act('autopilot')">Autopilot</button>
     </div>
     <div id="nudge-row">
-      <input id="nudge" placeholder="Type a nudge and press Enter..." onkeydown="onNudgeKey(event)">
+      <input id="nudge" placeholder="Nudge now, or Queue for later..." onkeydown="onNudgeKey(event)">
       <button id="b-nudge" onclick="sendNudge()">Send</button>
+      <button id="b-queue" onclick="queueAdd()">Queue</button>
+    </div>
+    <div id="queue-row">
+      <span id="q-count"></span>
+      <button id="b-feed" onclick="act('queue-feed')">Feed next</button>
     </div>
   </div>
 
@@ -464,6 +552,11 @@ local HTML = [[
       if(selectedKey && t){ send("nudge", selectedKey, t); el.value=""; }
     }
     function onNudgeKey(e){ if(e.key === "Enter"){ e.preventDefault(); sendNudge(); } }
+    function queueAdd(){
+      var el = document.getElementById("nudge");
+      var t = (el.value || "").trim();
+      if(selectedKey && t){ send("queue-add", selectedKey, t); el.value=""; }
+    }
 
     function onThemeChange(){
       var t = document.getElementById("theme").value;
@@ -510,6 +603,12 @@ local HTML = [[
       var pr = document.getElementById("d-prompt");
       if(it.last_prompt){ pr.textContent = "Last: " + it.last_prompt; pr.style.display="block"; }
       else { pr.style.display="none"; }
+      var n = it.queue || 0;
+      document.getElementById("q-count").textContent = n>0 ? ("Queue: " + n) : "Queue: empty";
+      document.getElementById("b-feed").style.display = n>0 ? "inline-block" : "none";
+      var ba = document.getElementById("b-auto");
+      ba.textContent = it.autopilot ? "Autopilot: ON" : "Autopilot";
+      ba.style.color = it.autopilot ? "#8fd4a3" : "#e8e9ee";
     }
 
     window.ccUpdate = function(items){
@@ -531,7 +630,9 @@ local HTML = [[
         } else if(it.since){
           meta = fmtAge(it.since);
         }
-        var cls = "tile s-" + st + (it.stale ? " stale" : "") + (it.key === selectedKey ? " sel" : "");
+        if(it.queue > 0){ meta = (meta ? meta + " · " : "") + "+" + it.queue + " queued"; }
+        if(it.autopilot){ meta = (meta ? meta + " · " : "") + "🛫 autopilot"; }
+        var cls = "tile s-" + st + (it.stale ? " stale" : "") + (it.escalate ? " escalate" : "") + (it.key === selectedKey ? " sel" : "");
         return '<div class="'+cls+'" data-key="'+esc(it.key)+'" onclick="selectTile(\''+esc(it.key)+'\')">'
              + '<span class="dot"></span>'
              + '<span class="name">'+esc(it.name)+'</span>'
@@ -598,20 +699,76 @@ function refreshList()
   return list
 end
 
--- Push current statuses into the webview + deck, and keep the heartbeat fresh.
+-- Read cc-config.json (missing/garbled -> empty table = all defaults).
+function loadConfig()
+  local c = FX.readFile(CONFIG_FILE)
+  if not c or #c == 0 then return {} end
+  local ok, t = pcall(function() return core.json.decode(c) end)
+  return (ok and type(t) == "table") and t or {}
+end
+
+-- Push current statuses into the webview + deck; run queue auto-feed and
+-- stale-approval escalation; keep the heartbeat fresh.
 local function refresh()
   local list = refreshList()
-  -- Live activity peek: only read transcripts for active, non-stale sessions.
-  if ACTIVITY_PEEK then
-    for _, it in ipairs(list) do
-      if it.transcript_path and not it.stale
-         and (it.status == "working" or it.status == "approval") then
-        local tail = FX.readTail(it.transcript_path, ACTIVITY_BYTES)
-        if tail then it.activity = core.transcriptSnippet(tail) end
+  local cfg = loadConfig()
+  local autofeed   = core.config(cfg, "queue.autofeed", false) == true
+  local queueDry   = core.config(cfg, "queue.dryRun", false) == true
+  local escEnabled = core.config(cfg, "escalation.enabled", false) == true
+  local escMin     = tonumber(core.config(cfg, "escalation.minutes", 5)) or 5
+  local escSound   = core.config(cfg, "escalation.sound", false) == true
+  local escPush    = core.config(cfg, "escalation.push", false) == true
+  local escTopic   = tostring(core.config(cfg, "escalation.pushTopic", ""))
+  local apEnabled  = core.config(cfg, "policies.autopilot.enabled", false) == true
+  local now = FX.now()
+  local newPrev = {}
+
+  for _, it in ipairs(list) do
+    -- Live activity peek (active, non-stale sessions only).
+    if ACTIVITY_PEEK and it.transcript_path and not it.stale
+       and (it.status == "working" or it.status == "approval") then
+      local tail = FX.readTail(it.transcript_path, ACTIVITY_BYTES)
+      if tail then it.activity = core.transcriptSnippet(tail) end
+    end
+
+    -- Autopilot badge (active only while the feature is enabled in config).
+    it.autopilot = apEnabled and FX.autopilotActive(it.key) or false
+
+    -- Task queue: depth badge + auto-feed on a fresh done transition.
+    local q = FX.readQueue(it.key)
+    it.queue = core.queueDepth(q)
+    if core.shouldFeed(prevStatus[it.key], it.status, q, autofeed) then
+      local task, q2 = core.queuePop(q)
+      if queueDry then
+        print("[cc-queue] DRY-RUN would feed '" .. tostring(task) .. "' to " .. it.name)
+      else
+        print("[cc-queue] feeding '" .. tostring(task) .. "' to " .. it.name)
+        FX.feedTask(it.name, task)
+        FX.writeQueue(it.key, q2)
+        it.queue = core.queueDepth(q2)
       end
     end
+
+    -- Escalation: nag harder when an approval sits too long (once per episode).
+    if escEnabled and core.approvalStale(it, now, escMin * 60) then
+      it.escalate = true
+      if not escalated[it.key] then
+        escalated[it.key] = true
+        print("[cc-escalate] " .. it.name .. " waiting > " .. escMin .. "m")
+        if escSound then FX.playSound() end
+        if escPush then
+          FX.push(escTopic, "Babysitter: " .. it.name .. " needs you",
+            (it.pending and it.pending.summary) or "Waiting for approval")
+        end
+      end
+    end
+    if it.status ~= "approval" then escalated[it.key] = nil end
+
+    newPrev[it.key] = it.status
   end
-  FX.writeFile(HEARTBEAT, tostring(FX.now()))
+  prevStatus = newPrev
+
+  FX.writeFile(HEARTBEAT, tostring(now))
   sd.blink = not sd.blink
   sdRender(list)
   local payload = (#list == 0) and "[]" or hs.json.encode(list)

@@ -6,6 +6,9 @@
 DIR="$(cd "$(dirname "$0")" && pwd)"
 fail=0
 
+echo "== bash: config =="
+bash "$DIR/config.test.sh" || fail=1
+echo ""
 echo "== bash: status writer =="
 bash "$DIR/status.test.sh" || fail=1
 echo ""

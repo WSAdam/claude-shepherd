@@ -32,6 +32,19 @@ M.SD_COLORS = {
 }
 M.SD_LABELS = { idle = "idle", working = "working", done = "ready", approval = "NEEDS YOU" }
 
+-- Read a config value from a decoded settings table by dotted path, returning
+-- `default` if any segment is missing. A stored `false` is preserved (returns
+-- false, not the default), so boolean toggles work correctly.
+function M.config(tbl, path, default)
+  local node = tbl
+  for key in tostring(path):gmatch("[^.]+") do
+    if type(node) ~= "table" then return default end
+    node = node[key]
+    if node == nil then return default end
+  end
+  return node
+end
+
 -- Sort priority: approvals first (they need you), then by name for stability.
 local RANK = { approval = 0, done = 1, working = 2, idle = 3 }
 
@@ -155,6 +168,47 @@ function M.cycleNext(list, afterKey)
   end
   if not idx then return list[1] end
   return list[(idx % #list) + 1]
+end
+
+-- ---- Task queue (Phase 4b) -------------------------------------------------
+-- A queue is { tasks = { "task1", "task2", ... } }; nil/missing is empty.
+local function qtasks(q)
+  if type(q) == "table" and type(q.tasks) == "table" then return q.tasks end
+  return {}
+end
+
+function M.queueDepth(q) return #qtasks(q) end
+
+function M.queuePush(q, task)
+  local t = {}
+  for _, x in ipairs(qtasks(q)) do t[#t + 1] = x end
+  if task and #task > 0 then t[#t + 1] = task end
+  return { tasks = t }
+end
+
+-- Returns the front task and the queue without it.
+function M.queuePop(q)
+  local src = qtasks(q)
+  if #src == 0 then return nil, { tasks = {} } end
+  local rest = {}
+  for i = 2, #src do rest[#rest + 1] = src[i] end
+  return src[1], { tasks = rest }
+end
+
+-- Feed the next task only on a FRESH transition into `done`, when the queue is
+-- non-empty and auto-feed is on. (prev==done means we already handled it.)
+function M.shouldFeed(prev, cur, q, autoOn)
+  if not autoOn then return false end
+  if M.queueDepth(q) == 0 then return false end
+  return cur == "done" and prev ~= "done"
+end
+
+-- ---- Policy A: stale-approval escalation -----------------------------------
+-- True when a session has been waiting for you (status "approval") longer than
+-- thresholdSec. (`since` is when it entered the approval state.)
+function M.approvalStale(item, now, thresholdSec)
+  if not item or item.status ~= "approval" or not item.since then return false end
+  return (now - item.since) > thresholdSec
 end
 
 -- ---- Orchestrator (Phase 4): build the command to spawn a session ----------

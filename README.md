@@ -92,8 +92,48 @@ running `claude` there; the new session shows up as a tile automatically.
 This is **dry-run by default** (`ORCH_DRY_RUN = true`): it logs the exact command
 it *would* run to the Hammerspoon Console and launches nothing, so you can confirm
 it before enabling. Set `ORCH_DRY_RUN = false` (and `ORCH_TERMINAL` /
-`ORCH_DEFAULT_DIR` to taste) to spawn for real. Queue/auto-routing is a planned
-next step, not built yet.
+`ORCH_DEFAULT_DIR` to taste) to spawn for real.
+
+### Task queue
+Each session has a queue (`Queue` button in the detail panel adds the input;
+`Feed next` sends the front task; the tile shows `+N queued`). Turn on
+`queue.autofeed` in the settings file (below) and babysitter feeds the next task
+automatically each time the session finishes — so a session works through a
+backlog unattended.
+
+## Automation & policies (`~/.claude/cc-config.json`)
+
+All automatic behavior is governed by one settings file, and **everything is off
+until you turn it on**. Copy [cc-config.example.json](cc-config.example.json) to
+`~/.claude/cc-config.json` and flip what you want. Both the panel and the gate
+read it.
+
+```json
+{
+  "queue":      { "autofeed": false, "dryRun": false },
+  "escalation": { "enabled": false, "minutes": 5, "sound": false, "push": false, "pushTopic": "" },
+  "policies": {
+    "approveRepeats": false,
+    "autopilot": { "enabled": false, "minutes": 15 },
+    "patterns":  { "enabled": false, "autoAllow": [], "autoDeny": [] }
+  }
+}
+```
+
+- **queue.autofeed / dryRun** — auto-feed queued tasks on done (dryRun logs instead).
+- **escalation** — when an approval waits longer than `minutes`, nag harder: a
+  stronger tile pulse always, plus an optional `sound` and an optional high-priority
+  `push` to your ntfy `pushTopic`. Both channels off by default.
+- **policies.approveRepeats** — if you already approved the *exact* command in a
+  session, auto-approve it next time.
+- **policies.autopilot** — the **Autopilot** button time-boxes a session to
+  auto-approve *all* its prompts (badge `🛫 autopilot`), expiring after `minutes`.
+- **policies.patterns** — gate honors `autoDeny` (wins) and `autoAllow` globs,
+  written like `"Bash(npm test*)"` or `"Read"`.
+
+The gate's auto-decisions apply only to the gated tools (`CC_GATE_TOOLS`) and are
+logged to the Hammerspoon Console / hook stderr whenever they fire. Auto-deny
+always beats auto-allow.
 
 ## Install (about 5 minutes)
 

@@ -25,6 +25,17 @@ end
 
 local function entry(key, tbl) return { key = key, content = core.json.encode(tbl) } end
 
+-- ---- config: dotted lookup with safe defaults ------------------------------
+do
+  local cfg = core.json.decode(
+    '{"queue":{"autofeed":true},"policies":{"approveRepeats":false,"autopilot":{"minutes":15}}}')
+  eq("config: nested true", core.config(cfg, "queue.autofeed", false), true)
+  eq("config: false preserved (not default)", core.config(cfg, "policies.approveRepeats", true), false)
+  eq("config: missing key -> default", core.config(cfg, "policies.patterns.enabled", false), false)
+  eq("config: deep value", core.config(cfg, "policies.autopilot.minutes", 0), 15)
+  eq("config: nil table -> default", core.config(nil, "a.b", "d"), "d")
+end
+
 -- ---- parseStatusList: decode + stale + approvals-first sort ----------------
 do
   local now = 10000
@@ -188,6 +199,34 @@ do
   local long = string.rep("x", 300)
   local snip = core.transcriptSnippet(aline(long), 140)
   check("snippet: truncated to maxLen", #snip <= 140)
+end
+
+-- ---- Task queue: push / pop / depth / shouldFeed --------------------------
+do
+  eq("queue: push onto empty", core.queueDepth(core.queuePush(nil, "a")), 1)
+  local q = core.queuePush(core.queuePush(nil, "a"), "b")
+  eq("queue: depth after two pushes", core.queueDepth(q), 2)
+  local first, rest = core.queuePop(q)
+  eq("queue: pop returns front", first, "a")
+  eq("queue: pop leaves the rest", core.queueDepth(rest), 1)
+  eq("queue: pop next is b", (core.queuePop(rest)), "b")
+  local none = core.queuePop({ tasks = {} })
+  eq("queue: pop empty -> nil", none, nil)
+  eq("queue: push ignores empty task", core.queueDepth(core.queuePush(nil, "")), 0)
+
+  local q1 = { tasks = { "next" } }
+  eq("feed: done transition with queue+auto -> true", core.shouldFeed("working", "done", q1, true), true)
+  eq("feed: still done (no fresh transition) -> false", core.shouldFeed("done", "done", q1, true), false)
+  eq("feed: empty queue -> false", core.shouldFeed("working", "done", { tasks = {} }, true), false)
+  eq("feed: autofeed off -> false", core.shouldFeed("working", "done", q1, false), false)
+  eq("feed: not done -> false", core.shouldFeed("working", "working", q1, true), false)
+end
+
+-- ---- Policy A: approvalStale ----------------------------------------------
+do
+  eq("escalate: fresh approval -> false", core.approvalStale({ status = "approval", since = 100 }, 150, 60), false)
+  eq("escalate: old approval -> true", core.approvalStale({ status = "approval", since = 100 }, 200, 60), true)
+  eq("escalate: non-approval -> false", core.approvalStale({ status = "working", since = 0 }, 999, 60), false)
 end
 
 -- ---- Orchestrator: spawn command building + shell escaping ----------------

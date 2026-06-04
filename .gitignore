@@ -13,6 +13,10 @@
 
 # Babysitter runtime + local state (created at use, not part of the repo)
 cc-status/
+cc-queue/
+cc-approved/
+cc-autopilot/
+cc-config.json
 *.decision
 .panel-alive
 .debug.log

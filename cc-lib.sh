@@ -20,6 +20,29 @@ mkdir -p "$CC_DIR" 2>/dev/null || true
 # Do we have jq? The enriched/merge features require it; callers degrade if not.
 cc_have_jq() { command -v jq >/dev/null 2>&1; }
 
+# Babysitter's settings file. All orchestrator/policy behavior reads from here and
+# defaults to OFF when the file or a key is missing.
+CC_CONFIG_FILE="${CC_CONFIG_FILE:-${HOME}/.claude/cc-config.json}"
+
+# Read a config value by jq path, falling back to a default. A literal `false`
+# is returned as "false" (NOT treated as missing), so booleans work correctly.
+# Usage: cc_config '.policies.approveRepeats' 'false'
+cc_config() {
+  local v=""
+  if [ -f "$CC_CONFIG_FILE" ] && cc_have_jq; then
+    v="$(jq -r "$1" "$CC_CONFIG_FILE" 2>/dev/null)"
+  fi
+  if [ -z "$v" ] || [ "$v" = "null" ]; then v="$2"; fi
+  printf '%s' "$v"
+}
+
+# Print a config array's items, one per line (empty if missing).
+# Usage: cc_config_array '.policies.patterns.autoDeny'
+cc_config_array() {
+  { [ -f "$CC_CONFIG_FILE" ] && cc_have_jq; } || return 0
+  jq -r "${1}[]? // empty" "$CC_CONFIG_FILE" 2>/dev/null
+}
+
 cc_now() { date +%s; }
 
 # Append a line to the debug log when CC_STATUS_DEBUG is set. Used to capture

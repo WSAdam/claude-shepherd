@@ -1,0 +1,29 @@
+{
+  "_comment": "Babysitter settings. Copy to ~/.claude/cc-config.json and flip what you want ON. Everything here is OFF by default; nothing auto-acts until you enable it.",
+
+  "queue": {
+    "autofeed": false,
+    "dryRun": false
+  },
+
+  "escalation": {
+    "enabled": false,
+    "minutes": 5,
+    "sound": false,
+    "push": false,
+    "pushTopic": ""
+  },
+
+  "policies": {
+    "approveRepeats": false,
+    "autopilot": {
+      "enabled": false,
+      "minutes": 15
+    },
+    "patterns": {
+      "enabled": false,
+      "autoAllow": [],
+      "autoDeny": []
+    }
+  }
+}

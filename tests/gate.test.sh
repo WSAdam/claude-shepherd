@@ -7,6 +7,10 @@
 TMP="$(mktemp_dir)"
 trap 'rm -rf "$TMP"' EXIT
 export CC_STATUS_DIR="$TMP"
+# Keep the base tests hermetic: no policy config, isolated policy dirs.
+export CC_CONFIG_FILE="$TMP/none.json"
+export CC_APPROVED_DIR="$TMP/appr"
+export CC_AUTOPILOT_DIR="$TMP/auto"
 
 APP="$ROOT/cc-approve.sh"
 FLAG="$TMP/gate.enabled"
@@ -55,5 +59,43 @@ date +%s > "$HB"
 out="$(printf '%s' "$GATED" | CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=1 \
     bash "$APP" 2>/dev/null)"
 assert_eq "timeout: no decision emitted" "" "$out"
+
+# ---- Phase 4c policies (decide WITHOUT a panel; no heartbeat needed) ----
+POL="$TMP/policy.json"
+cat > "$POL" <<'JSON'
+{ "policies": {
+    "patterns": { "enabled": true, "autoDeny": ["Bash(rm -rf*)"], "autoAllow": ["Read", "Bash(ls*)"] },
+    "autopilot": { "enabled": true, "minutes": 15 },
+    "approveRepeats": true } }
+JSON
+decision() { printf '%s' "$1" | jq -r '.hookSpecificOutput.permissionDecision' 2>/dev/null; }
+runpol() { printf '%s' "$2" | CC_GATE_FLAG="$FLAG" CC_CONFIG_FILE="$POL" bash "$APP" 2>/dev/null; }
+
+# D: pattern auto-deny (safety) wins, even though the panel isn't running
+out="$(runpol x '{"session_id":"d1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"rm -rf build"}}')"
+assert_eq "policy autoDeny -> deny" "deny" "$(decision "$out")"
+
+# D: pattern auto-allow
+out="$(runpol x '{"session_id":"a1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"ls -la"}}')"
+assert_eq "policy autoAllow -> allow" "allow" "$(decision "$out")"
+
+# C: per-session autopilot (future expiry) -> allow anything gated
+mkdir -p "$CC_AUTOPILOT_DIR"; echo 9999999999 > "$CC_AUTOPILOT_DIR/ap1"
+out="$(runpol x '{"session_id":"ap1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"make deploy"}}')"
+assert_eq "autopilot -> allow" "allow" "$(decision "$out")"
+
+# C: expired autopilot does NOT auto-allow (no panel -> no output)
+echo 1 > "$CC_AUTOPILOT_DIR/ap2"
+out="$(runpol x '{"session_id":"ap2","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"make deploy"}}')"
+assert_eq "expired autopilot -> no decision" "" "$out"
+
+# B: approve-repeats (pre-seeded approved-set) -> allow
+mkdir -p "$CC_APPROVED_DIR"; printf 'Bash|git push\n' > "$CC_APPROVED_DIR/r1"
+out="$(runpol x '{"session_id":"r1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"git push"}}')"
+assert_eq "approveRepeats -> allow" "allow" "$(decision "$out")"
+
+# B: an unseen command is NOT auto-allowed (no panel -> no output)
+out="$(runpol x '{"session_id":"r1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"git reset --hard"}}')"
+assert_eq "unseen command -> no decision" "" "$out"
 
 finish
