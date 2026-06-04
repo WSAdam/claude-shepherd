@@ -64,6 +64,7 @@ local ORCH_DRY_RUN     = true
 local ORCH_TERMINAL    = "Terminal"
 local ORCH_DEFAULT_DIR = os.getenv("HOME") .. "/Programming"
 local HOTKEY_SPAWN     = { { "cmd", "alt" }, "s" } -- spawn a new Claude session
+local HOTKEY_TOGGLE    = { { "cmd", "alt" }, "b" } -- show/hide the panel
 -- -------------------------------------------------------------------------
 
 core.STALE_SECONDS = STALE_SECONDS
@@ -683,6 +684,32 @@ wv:html(HTML)
 wv:show()
 print("[cc-dashboard] panel shown")
 
+-- Show/hide so the panel can be dismissed (minimize-to-menubar) and reopened.
+local panelVisible = true
+local function showPanel() pcall(function() wv:show() end); panelVisible = true end
+local function hidePanel() pcall(function() wv:hide() end); panelVisible = false end
+local function togglePanel() if panelVisible then hidePanel() else showPanel() end end
+-- The red close button just hides it; reopen from the menubar or with the hotkey.
+pcall(function()
+  wv:windowCallback(function(action)
+    if action == "closing" then panelVisible = false end
+  end)
+end)
+
+-- Menubar icon to reopen/hide the panel even when it's closed.
+M.menubar = hs.menubar.new()
+if M.menubar then
+  M.menubar:setTitle("🍼")
+  M.menubar:setTooltip("Babysitter — Claude sessions")
+  M.menubar:setMenu(function()
+    return {
+      { title = panelVisible and "Hide panel" or "Show panel", fn = togglePanel },
+      { title = "-" },
+      { title = "Reload config", fn = function() hs.reload() end },
+    }
+  end)
+end
+
 -- Read the status dir, parse via cc-core, refresh byKey, return the sorted list.
 function refreshList()
   local entries = {}
@@ -807,6 +834,7 @@ local function bindHotkeys()
       end
     end),
     hs.hotkey.bind(HOTKEY_SPAWN[1], HOTKEY_SPAWN[2], function() spawnPrompt() end),
+    hs.hotkey.bind(HOTKEY_TOGGLE[1], HOTKEY_TOGGLE[2], function() togglePanel() end),
   }
   print("[cc-dashboard] hotkeys bound")
 end
