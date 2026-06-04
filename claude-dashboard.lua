@@ -673,9 +673,8 @@ local wv = hs.webview.new(rect, { developerExtrasEnabled = true }, controller)
 wv:windowStyle(
   hs.webview.windowMasks.titled |
   hs.webview.windowMasks.closable |
-  hs.webview.windowMasks.resizable |
-  hs.webview.windowMasks.utility |
-  hs.webview.windowMasks.nonactivating
+  hs.webview.windowMasks.miniaturizable |  -- yellow minimize-to-Dock button
+  hs.webview.windowMasks.resizable
 )
 wv:windowTitle("Claude Sessions")
 wv:level(hs.drawing.windowLevels.floating)
