@@ -139,7 +139,9 @@ end
 function FX.readTail(path, maxBytes)
   local f = io.open(path, "r"); if not f then return nil end
   local size = f:seek("end")
-  f:seek("set", math.max(0, size - (maxBytes or 16384)))
+  local start = math.max(0, size - (maxBytes or 16384))
+  f:seek("set", start)
+  if start > 0 then f:read("*l") end  -- drop the partial first line (start at a boundary)
   local c = f:read("*a"); f:close(); return c
 end
 

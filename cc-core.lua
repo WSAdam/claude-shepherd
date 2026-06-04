@@ -134,7 +134,10 @@ function M.transcriptSnippet(text, maxLen)
   for line in (text .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
   for i = #lines, 1, -1 do
     local line = lines[i]
-    if line ~= "" then
+    -- Only attempt to decode lines that look like a JSON object; this skips
+    -- blank lines and any partial line from a mid-file tail read (which would
+    -- otherwise make the JSON decoder log an error every refresh).
+    if line:find("^%s*{") then
       local okj, obj = pcall(function() return M.json.decode(line) end)
       if okj and type(obj) == "table" and obj.type == "assistant"
          and obj.message and type(obj.message.content) == "table" then
