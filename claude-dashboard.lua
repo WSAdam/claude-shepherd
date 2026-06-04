@@ -722,6 +722,7 @@ wv:windowTitle("Claude Sessions")
 wv:level(hs.drawing.windowLevels.floating)
 wv:behavior(hs.drawing.windowBehaviors.canJoinAllSpaces | hs.drawing.windowBehaviors.stationary)
 wv:html(HTML)
+wv:allowTextEntry(true)  -- let the Nudge/Queue input accept keyboard input
 wv:show()
 print("[cc-dashboard] panel shown")
 
