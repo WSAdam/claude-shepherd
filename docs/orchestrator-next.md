@@ -4,8 +4,8 @@ Status: **draft for review** (not built). Builds on 4a (dry-run spawn).
 
 ## Goal
 
-Turn babysitter from a *supervisor* into a *dispatcher*: keep a fleet working by
-auto-feeding queued work (4b), and cut babysitting with **safe, opt-in** policies
+Turn Claude Shepherd from a *supervisor* into a *dispatcher*: keep a fleet working by
+auto-feeding queued work (4b), and cut hands-on oversight with **safe, opt-in** policies
 (4c). Same idiom as everything else: pure logic in [cc-core.lua](../cc-core.lua)
 (unit-tested), effects through the `fx` table (recorder in tests, dry-run flags in
 prod), permission policy evaluated at the gate ([cc-approve.sh](../cc-approve.sh)).
@@ -49,7 +49,7 @@ absent or a key is missing):
 
 ## Phase 4b — Per-session task queue + auto-feed
 
-You line up follow-up tasks for a session; when it finishes, babysitter feeds the
+You line up follow-up tasks for a session; when it finishes, Claude Shepherd feeds the
 next one automatically (via the same focus+type nudge), so a session chews through
 a backlog unattended.
 
@@ -103,7 +103,7 @@ Config: `QUEUE_AUTOFEED` (default on), `QUEUE_DRY_RUN` (logs instead of feeding)
 
 Ordered by safety. Note: Claude Code already auto-allows its native
 `permissions.allow` list *before* the gate, so these only act on prompts that
-actually **reach** babysitter.
+actually **reach** Claude Shepherd.
 
 ### A. Stale-approval escalation  — *safe, high value*
 A session sitting in `approval` > `escalation.minutes` unanswered gets escalated.
@@ -126,7 +126,7 @@ the tile. Per-session, visible, expiring. Riskier than A/B but bounded.
 ### D. Pattern auto-approve/deny  — *riskiest*
 `~/.claude/cc-policy.json` globs the gate honors (autoDeny→deny, autoAllow→allow).
 Overlaps Claude Code's native allow/deny — prefer native for global rules; reserve
-this for babysitter-only nuance. Off by default, empty.
+this for Claude Shepherd-only nuance. Off by default, empty.
 
 ### E. Project routing  — *separate, bigger*
 A project task pool: tasks tagged by project get fed to whichever session in that

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lib.sh - tiny assert helpers for babysitter's bash tests. Side-effect-free:
+# lib.sh - tiny assert helpers for Claude Shepherd's bash tests. Side-effect-free:
 # every suite runs against its own temp CC_STATUS_DIR and cleans up on exit.
 
 TESTS_RUN=0
@@ -8,7 +8,7 @@ TESTS_FAIL=0
 # project root (tests/ is one level down)
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-mktemp_dir() { mktemp -d 2>/dev/null || mktemp -d -t ccbabysit; }
+mktemp_dir() { mktemp -d 2>/dev/null || mktemp -d -t ccshepherd; }
 
 assert_eq() { # <name> <expected> <actual>
   TESTS_RUN=$((TESTS_RUN + 1))

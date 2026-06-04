@@ -1,4 +1,4 @@
-# Babysitter — Claude Code fleet console (Mac)
+# Claude Shepherd — Claude Code fleet console (Mac)
 
 A floating, always-on-top panel with one tile per Claude Code session. Each tile
 shows the project name and a live status, and selecting it opens a control panel
@@ -9,7 +9,7 @@ Deck for a fleet of Claude agents.
 
 When you run several Claude sessions at once, the bottleneck is you: a session
 that finishes or hits a permission prompt sits idle until you notice it.
-Babysitter tells you which agent needs a human *right now* and lets you handle it
+Claude Shepherd tells you which agent needs a human *right now* and lets you handle it
 from one pane.
 
 ## Statuses
@@ -48,18 +48,48 @@ Claude Code hooks ──► cc-status.sh ──► ~/.claude/cc-status/<session_
 ## Control actions
 
 **Single-click** a tile to select it (opens the detail panel). **Double-click** a
-tile to **jump** straight to its window. The detail panel has:
+tile to **jump** straight to its window. **Right-click** a tile for a context menu:
+
+- **Relabel…** — give the tile a custom display name (e.g. "auth refactor" instead
+  of the folder name). Display-only — jumps still target the real window — and
+  **ephemeral**: relabels are in-memory and clear on a Hammerspoon reload.
+- **Close instance** — confirm, then best-effort close the editor window (⌘⇧W) and
+  remove the tile.
+
+The detail panel has:
 
 - **Jump** — focus that session's VS Code/Cursor window (switches Spaces if needed).
 - **Approve / Deny** — answer a pending permission prompt.
 - **Stop** — interrupt the current turn.
 - **Autopilot** — time-box a session to auto-approve all its prompts (needs the gate + config).
 - **Clear / Compact** — pop a yes/no confirm, then run `/clear` or `/compact` in the session.
-- **Nudge box** — **Send** types a message into the session now; **Queue** saves it
-  for later (the tile shows `+N queued`, **Feed next** sends the front one).
+- **Effort** dropdown — set the session's reasoning effort (Low/Medium/High/XHigh) live; sends
+  the `/effort <level>` slash command. The detail also shows badges for the detected **editor**,
+  current **permission mode**, and **effort**.
+- **Nudge box** — a multi-line input: **Enter** sends, **Shift+Enter** adds a newline
+  (mirrors the Claude chat), so a pasted multi-item list arrives intact. **Paste an
+  image** and it's attached as a chip; **Send** delivers text and/or image via the
+  clipboard (one ⌘V, newline-safe). **Queue** saves text for later (the tile shows
+  `+N queued`, **Feed next** sends the front one).
 
 The **Wants** (the exact command) and **Why** (the assistant's reasoning before a
 request) clamp to two lines — **click to expand**.
+
+### AskUserQuestion in the panel
+When a session calls **AskUserQuestion**, the hook captures the question + options and the panel
+renders them as clickable buttons under the detail. Clicking an option: on a **terminal (Kitty)**
+session it drives the picker directly (auto-select); in the **VS Code extension** the picker is
+mouse-only, so clicking **jumps you to it** to pick by hand. Either way you see *what's being asked*
+without leaving Shepherd.
+
+### Editor auto-detection
+Each session self-reports its host editor. [cc-status.sh](cc-status.sh) reads the env it inherits
+from `claude` (`CLAUDE_CODE_ENTRYPOINT`, `__CFBundleIdentifier`, `TERM`/`KITTY_WINDOW_ID`) plus the
+hook's `permission_mode`, and records `editor` (`vscode`/`cursor`/`kitty`/`terminal`),
+`permission_mode`, and `effort` into the session's status JSON. The panel routes actions per session
+on that — **anything not detected as `kitty` uses the VS Code/Cursor path**, so a machine running
+both just works. (Kitty *effect routing* — `kitty @` remote control — is on the roadmap; see
+[todos.md](todos.md).)
 
 ### How control reaches the session — and its limits
 
@@ -91,7 +121,7 @@ the top of [claude-dashboard.lua](claude-dashboard.lua)):
 - **⌘⌥J** — jump to the session that needs you.
 - **⌘⌥N** — cycle-jump to the next session.
 - **⌘⌥S** — spawn a new session (see below).
-- **⌘⌥B** — show/hide the panel (it also minimizes to the Dock, and there's a 🍼
+- **⌘⌥B** — show/hide the panel (it also minimizes to the Dock, and there's a 🐑
   menu-bar icon to reopen it when closed).
 
 ## Spawn new sessions (orchestrator)
@@ -108,7 +138,7 @@ it before enabling. Set `ORCH_DRY_RUN = false` (and `ORCH_TERMINAL` /
 ### Task queue
 Each session has a queue (`Queue` button in the detail panel adds the input;
 `Feed next` sends the front task; the tile shows `+N queued`). Turn on
-`queue.autofeed` in the settings file (below) and babysitter feeds the next task
+`queue.autofeed` in the settings file (below) and Claude Shepherd feeds the next task
 automatically each time the session finishes — so a session works through a
 backlog unattended.
 
@@ -130,6 +160,7 @@ read it (the panel live within ~1s; the gate on the next hook fire).
 {
   "queue":      { "autofeed": false, "dryRun": false },
   "escalation": { "enabled": false, "minutes": 5, "sound": false, "push": false, "pushTopic": "" },
+  "focus":      { "popEditor": false },
   "policies": {
     "approveRepeats": false,
     "autopilot": { "enabled": false, "minutes": 15 },
@@ -142,6 +173,10 @@ read it (the panel live within ~1s; the gate on the next hook fire).
 - **escalation** — when an approval waits longer than `minutes`, nag harder: a
   stronger tile pulse always, plus an optional `sound` and an optional high-priority
   `push` to your ntfy `pushTopic`. Both channels off by default.
+- **focus.popEditor** — pop/focus the editor window when a session finishes or needs
+  you. Off by default; toggle it from the ⚙ panel ("Pop the editor window…"). The
+  Stop/Notification/PermissionRequest hooks call [cc-popup.sh](cc-popup.sh), which only
+  opens the window when this is on (the macOS notification + sound stay independent).
 - **policies.approveRepeats** — if you already approved the *exact* command in a
   session, auto-approve it next time.
 - **policies.autopilot** — the **Autopilot** button time-boxes a session to
@@ -190,7 +225,7 @@ above other windows and shows on every Space.
 
 ## The approval gate (optional, hands-free approve/deny)
 
-By default Babysitter leaves Claude Code's normal permission prompts untouched
+By default Claude Shepherd leaves Claude Code's normal permission prompts untouched
 and you answer them with keystroke injection. If you'd rather approve/deny from
 the panel with **no window switch**, arm the gate:
 
@@ -249,7 +284,7 @@ and an approval, then check that log and adjust the field paths in
 
 ## Stream Deck (physical, optional)
 
-Babysitter can mirror the panel onto a physical Elgato Stream Deck and let you
+Claude Shepherd can mirror the panel onto a physical Elgato Stream Deck and let you
 act on sessions from its keys — no extra software, because Hammerspoon drives the
 deck directly and reuses the same actions as the on-screen panel. It adapts to
 any size (Mini 6 / Standard 15 / XL 32) by asking the device for its key count at
@@ -258,7 +293,7 @@ connect time.
 **Plug-and-play:**
 
 1. **Quit the official Elgato Stream Deck app.** Only one program can own the
-   device at a time, and babysitter takes it over.
+   device at a time, and Claude Shepherd takes it over.
 2. Plug in the Stream Deck (or it's already plugged in).
 
 That's it — Hammerspoon detects it and paints one session per key, colored by
@@ -276,7 +311,7 @@ with sessions that need you sorted to the front.
 Tunables near the top of [claude-dashboard.lua](claude-dashboard.lua):
 `STREAMDECK_ENABLED`, `SD_LONG_PRESS`, `SD_LONG_PRESS_STOPS`, `SD_BRIGHTNESS`,
 `SD_FALLBACK_KEYS`. If you'd rather keep your normal Elgato profiles running,
-babysitter would instead need a separate Stream Deck *plugin* (coexists with the
+Claude Shepherd would instead need a separate Stream Deck *plugin* (coexists with the
 Elgato app) — that path isn't built yet.
 
 ## Themes
@@ -294,23 +329,43 @@ To change the default for a fresh install, edit `DEFAULT_THEME` near the top of
 
 ## Testing & development
 
-Babysitter has a **side-effect-free** test suite. Run it with:
+Claude Shepherd has a **side-effect-free** test suite. Run it with:
 
 ```
 make test          # or: bash tests/run.sh
 ```
+
+**Deploying changes.** Hammerspoon runs the **copies** in `~/.hammerspoon/`
+(`init.lua` does `dofile(... claude-dashboard.lua)`), so edits in this repo are
+**not live until copied**. After a change:
+
+```
+make install       # copy claude-dashboard.lua + cc-core.lua -> ~/.hammerspoon/
+make reload        # hs.reload() via the `hs` CLI (needs require('hs.ipc'))
+make deploy        # test + install + reload, in one shot
+```
+
+A plain `hs.reload()` without `make install` first just re-runs the *old* copy.
 
 It never touches your real `~/.claude/cc-status`, never fires a keystroke, never
 focuses a window, and never spawns a session. How that's possible:
 
 - **Pure logic in [cc-core.lua](cc-core.lua)** — status parsing, sorting,
   staleness, action selection, deck layout, transcript snippet, spawn-command
-  building — has no `hs.*` calls and is unit-tested directly in plain `lua`.
-- **All effects go through one `fx` table** (focus, keystrokes, decision/file
-  writes, Stream Deck, session spawn). Production wires it to Hammerspoon; tests
-  pass a **recorder** that captures intent — so a test asserts *"would press
-  Return on window X"* or *"would spawn in /path"* without doing it.
-- **The shell scripts** are driven against a throwaway `CC_STATUS_DIR`.
+  building, panel-geometry resolution, ephemeral relabels, image data-URL parsing,
+  stale-duplicate pruning, `/effort` command building, and AskUserQuestion answer
+  keys — has no `hs.*` calls and is unit-tested directly in plain `lua`
+  ([tests/core.test.lua](tests/core.test.lua) + [tests/ui.test.lua](tests/ui.test.lua)).
+- **All effects go through one `fx` table** (focus, keystrokes, paste, send-keys,
+  decision/file writes, Stream Deck, session spawn). Production wires it to
+  Hammerspoon; tests pass a **recorder** that captures intent — so a test asserts
+  *"would press Return on window X"* or *"would spawn in /path"* without doing it.
+- **The shell scripts** are driven against a throwaway `CC_STATUS_DIR`:
+  [tests/status.test.sh](tests/status.test.sh) (status writer),
+  [tests/editor.test.sh](tests/editor.test.sh) (editor/mode/effort detection),
+  [tests/ask.test.sh](tests/ask.test.sh) (AskUserQuestion capture),
+  [tests/config.test.sh](tests/config.test.sh), [tests/gate.test.sh](tests/gate.test.sh).
+- **~188 checks, all side-effect-free.** Every new feature lands with its tests.
 
 Spawning is additionally guarded by `ORCH_DRY_RUN` (default on), so even the live
 app logs-but-doesn't-launch until you opt in.
@@ -323,15 +378,26 @@ Layout: [cc-core.lua](cc-core.lua) (logic) + [claude-dashboard.lua](claude-dashb
 - **Different editor:** Cursor and VS Code Insiders are already in the
   `EDITOR_BUNDLES` list in the `.lua` file; add or reorder as needed.
 - **Select vs jump:** single-click selects a tile (opens its controls);
-  **double-click** jumps to the window. This keeps the grid clean and lets you act
-  (especially hands-free gate approvals) without switching windows.
+  **double-click** jumps to the window; **right-click** opens the relabel/close menu.
+  This keeps the grid clean and lets you act (especially hands-free gate approvals)
+  without switching windows.
+- **Window size is remembered:** resize/move the panel and it's saved (in
+  `hs.settings`); a reload restores it instead of snapping back to the default. If a
+  saved frame ends up off-screen or too small, it falls back to the top-right default.
 - **Orphan tiles self-clean:** a status file with no `session_id` that goes stale
   (from a hook fire that lacked one), or any tile older than 24h, is auto-pruned —
   so dead/duplicate tiles don't pile up. (`PRUNE_NO_SID` / `PRUNE_SECONDS`.)
 - **Window not focusing:** open the Hammerspoon Console and double-click a tile.
   The log shows whether a title match was found. Focus matches the folder name in
   the VS Code window title (the default title format).
-- **Logs:** the hook scripts log to stderr (`[cc-status]` / `[cc-approve]`) and
-  the Lua side logs to the Hammerspoon Console.
+- **Logs:** the hook scripts log to stderr (`[cc-status]` / `[cc-approve]`). The
+  Lua side logs to the Hammerspoon Console **and** mirrors every line to
+  `~/.claude/cc-shepherd.log` — `tail -f ~/.claude/cc-shepherd.log`. Keep the HS
+  Console **closed**: an open console pops over your work whenever Hammerspoon
+  activates, so read the file instead.
+- **Relabel / Close** use in-panel UI (an inline rename bar / confirm bar), not
+  native dialogs, specifically so they don't activate Hammerspoon and yank its
+  console forward. (The `+ New` spawn prompt still uses a native dialog; it's rare
+  and off by default.)
 - **Known limit:** click-to-focus matches by window title, so two sessions in the
   *same* window remain ambiguous to jump to (their tiles are still distinct).

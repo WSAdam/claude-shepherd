@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# cc-lib.sh - shared helpers for the babysitter status scripts.
+# cc-lib.sh - shared helpers for the Claude Shepherd status scripts.
 #
 # Sourced by cc-status.sh (the per-event status writer) and cc-approve.sh
 # (the opt-in PreToolUse approval gate). Holds the bits both need: where state
@@ -20,7 +20,7 @@ mkdir -p "$CC_DIR" 2>/dev/null || true
 # Do we have jq? The enriched/merge features require it; callers degrade if not.
 cc_have_jq() { command -v jq >/dev/null 2>&1; }
 
-# Babysitter's settings file. All orchestrator/policy behavior reads from here and
+# Claude Shepherd's settings file. All orchestrator/policy behavior reads from here and
 # defaults to OFF when the file or a key is missing.
 CC_CONFIG_FILE="${CC_CONFIG_FILE:-${HOME}/.claude/cc-config.json}"
 

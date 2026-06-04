@@ -77,7 +77,7 @@ end
 -- ---- handleAction: routes to the right effect, gate-aware ------------------
 do
   local waiting = { key = "w1", name = "proj-w", gate = "waiting" }
-  local normal  = { key = "n1", name = "proj-n" }
+  local normal  = { key = "n1", name = "proj-n", cwd = "/Users/x/proj-n" }
 
   local r = newRecorder()
   core.handleAction(r.fx, waiting, "approve")
@@ -105,8 +105,8 @@ do
 
   r = newRecorder()
   core.handleAction(r.fx, normal, "nudge", "run the tests")
-  eq("nudge: typeIntoWindow op", r.last().op, "typeIntoWindow")
-  eq("nudge: passes text", r.last().b, "run the tests")
+  eq("nudge: pasteIntoWindow op", r.last().op, "pasteIntoWindow")
+  eq("nudge: passes text in payload", r.last().b.text, "run the tests")
 
   r = newRecorder()
   core.handleAction(r.fx, normal, "nudge", "")
@@ -116,6 +116,7 @@ do
   core.handleAction(r.fx, normal, "focus")
   eq("focus: focusWindow op", r.last().op, "focusWindow")
   eq("focus: targets name", r.last().a, "proj-n")
+  eq("focus: passes cwd for ancestor matching", r.last().b, "/Users/x/proj-n")
 end
 
 -- ---- deckLayout: row-major fill + overflow ---------------------------------

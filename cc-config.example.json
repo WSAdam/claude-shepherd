@@ -1,5 +1,5 @@
 {
-  "_comment": "Babysitter settings. Copy to ~/.claude/cc-config.json and flip what you want ON. Everything here is OFF by default; nothing auto-acts until you enable it.",
+  "_comment": "Claude Shepherd settings. Copy to ~/.claude/cc-config.json and flip what you want ON. Everything here is OFF by default; nothing auto-acts until you enable it.",
 
   "queue": {
     "autofeed": false,
@@ -12,6 +12,10 @@
     "sound": false,
     "push": false,
     "pushTopic": ""
+  },
+
+  "focus": {
+    "popEditor": false
   },
 
   "policies": {

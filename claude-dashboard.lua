@@ -1,6 +1,6 @@
 -- claude-dashboard.lua  (bootstrap)
 --
--- Babysitter: a floating, always-on-top fleet console for Claude Code sessions.
+-- Claude Shepherd: a floating, always-on-top fleet console for Claude Code sessions.
 -- One tile per running session with a live status (idle / working / approval /
 -- done). Select a tile to Jump, Approve / Deny, Nudge, or Stop. Mirrors onto a
 -- physical Stream Deck when one is connected.
@@ -20,6 +20,34 @@ local M = {}
 local HERE = debug.getinfo(1, "S").source:sub(2):match("(.*/)") or "./"
 local core = dofile(HERE .. "cc-core.lua")
 core.json = hs.json   -- production JSON impl (tests inject a vendored one)
+
+-- Encode a scalar as a JS string literal for evaluateJavaScript. NOTE:
+-- hs.json.encode only accepts TABLES (it errors on a bare string), so wrap the
+-- value in a 1-element array and strip the [ ] — that reuses hs.json's correct
+-- escaping (quotes, newlines, unicode) and yields "...". Using hs.json.encode on
+-- a bare string was the silent ⌘V/relabel/close failure.
+local function jsString(s) return hs.json.encode({ tostring(s) }):sub(2, -2) end
+
+-- Mirror every print() to a logfile so the Hammerspoon console can stay CLOSED
+-- (an open console pops over your work whenever HS activates). Tail it with:
+--   tail -f ~/.claude/cc-shepherd.log
+local LOG_FILE = os.getenv("CC_LOG_FILE") or (os.getenv("HOME") .. "/.claude/cc-shepherd.log")
+do
+  local _print = print
+  print = function(...)  -- luacheck: ignore (intentional global override)
+    _print(...)
+    local n = select("#", ...)
+    local parts = {}
+    for i = 1, n do parts[i] = tostring((select(i, ...))) end
+    pcall(function()
+      local f = io.open(LOG_FILE, "a")
+      if f then
+        f:write(os.date("%Y-%m-%d %H:%M:%S ") .. table.concat(parts, "\t") .. "\n")
+        f:close()
+      end
+    end)
+  end
+end
 
 -- ---- config -------------------------------------------------------------
 -- Honor CC_STATUS_DIR like the shell scripts so tests/dev can redirect state.
@@ -80,12 +108,17 @@ core.STALE_SECONDS = STALE_SECONDS
 
 -- session key (status filename base) -> latest item, for resolving actions.
 local byKey = {}
+-- Ephemeral display relabels: key -> override name. In-memory only, so a reload
+-- clears them (the user asked for relabels NOT to persist across restart).
+local labels = {}
+local ctxMenu            -- holds the live right-click popup menu (so it isn't GC'd)
 local wv                 -- the webview; forward-declared so the controller can push to it
 local lastJumpKey = nil  -- for the cycle-jump hotkey
 local spawnPrompt        -- forward declaration (defined after FX)
 local prevStatus = {}    -- key -> last refresh's status (for auto-feed transitions)
 local escalated  = {}    -- key -> true once we've escalated this approval episode
 local loadConfig         -- forward declaration (defined near refresh)
+local refresh            -- forward declaration (so the controller can repaint now)
 
 -- Find the editor application object across possible bundle ids.
 local function findEditorApp()
@@ -98,23 +131,71 @@ local function findEditorApp()
       or hs.application.find("Cursor")
 end
 
--- Focus the editor window whose title contains the project name. Returns true if
--- a specific window was focused (switches Spaces automatically).
-local function focusProject(name)
+-- Generic path components that should never be used as a focus candidate.
+local FOCUS_SKIP = { users = true, programming = true, desktop = true,
+  documents = true, projects = true, project = true, src = true, code = true,
+  repos = true, repo = true, dev = true, home = true, [""] = true }
+FOCUS_SKIP[string.lower(os.getenv("USER") or "")] = true
+
+-- Does a window title's folder segment (after the last em-dash) contain needle?
+-- VS Code titles are "<file> — <folder>"; matching the folder avoids grabbing a
+-- window whose task title merely mentions the word (e.g. sms-bot's "Canary alerts").
+local function titleFolderMatch(title, needle)
+  local seg = title:match(".*—%s*(.+)$") or title
+  return seg:find(needle, 1, true) ~= nil
+end
+
+-- Focus the editor window for a session. Tries the session name first, then walks
+-- UP the cwd path (parent folders), so a session running in a subfolder (name
+-- "frontend") still finds its workspace window (titled "… — autobottom"). Returns
+-- true if a specific window was focused (switches Spaces automatically).
+local function focusProject(name, cwd)
   print("[cc-dashboard] focus request: " .. tostring(name))
   local app = findEditorApp()
   if not app then
     print("[cc-dashboard] editor app not found")
-    hs.alert.show("No VS Code window found")
+    hs.alert.show("No editor window found")
     return false
   end
+  local windows = app:allWindows()
+
+  -- Build candidates most-specific first: the name, then cwd ancestors (deepest
+  -- first), skipping generic roots. De-duped.
+  local candidates, seen = {}, {}
+  local function add(n)
+    n = string.lower(n or "")
+    if n ~= "" and not FOCUS_SKIP[n] and not seen[n] then
+      seen[n] = true; candidates[#candidates + 1] = n
+    end
+  end
+  add(name)
+  if cwd then
+    local parts = {}
+    for p in tostring(cwd):gmatch("[^/]+") do parts[#parts + 1] = p end
+    for i = #parts - 1, 1, -1 do add(parts[i]) end  -- ancestors, deepest first
+  end
+
+  -- Pass 1: folder-match each candidate in order; first hit wins.
+  for _, needle in ipairs(candidates) do
+    for _, w in ipairs(windows) do
+      local title = string.lower(w:title() or "")
+      if title ~= "" and titleFolderMatch(title, needle) then
+        w:focus()
+        print("[cc-dashboard] focused (folder: " .. needle .. "): " .. (w:title() or "?"))
+        return true
+      end
+    end
+  end
+  -- Pass 2: loose substring match on the name only (original fallback behavior).
   local needle = string.lower(name or "")
-  for _, w in ipairs(app:allWindows()) do
-    local title = string.lower(w:title() or "")
-    if title ~= "" and needle ~= "" and string.find(title, needle, 1, true) then
-      w:focus()
-      print("[cc-dashboard] focused: " .. (w:title() or "?"))
-      return true
+  if needle ~= "" then
+    for _, w in ipairs(windows) do
+      local title = string.lower(w:title() or "")
+      if title ~= "" and title:find(needle, 1, true) then
+        w:focus()
+        print("[cc-dashboard] focused (loose): " .. (w:title() or "?"))
+        return true
+      end
     end
   end
   app:activate()
@@ -126,6 +207,17 @@ end
 local FX = {}
 function FX.now() return os.time() end
 function FX.log(m) print(m) end
+
+-- Panel geometry persistence (Step 1): remember the size/position the user last
+-- left the window so a Hammerspoon reload doesn't snap it back to the default.
+-- Stored in hs.settings, exactly like the theme.
+function FX.loadGeometry() return hs.settings.get("ccDashboardGeometry") end
+function FX.saveGeometry(frame)
+  if type(frame) == "table" then
+    hs.settings.set("ccDashboardGeometry",
+      { x = frame.x, y = frame.y, w = frame.w, h = frame.h })
+  end
+end
 
 function FX.readDir(path)
   local names = {}
@@ -184,7 +276,7 @@ function FX.push(topic, title, msg)
   if not topic or topic == "" then return end
   pcall(function()
     hs.http.asyncPost("https://ntfy.sh/" .. topic, msg or "",
-      { Title = title or "Babysitter", Priority = "high" }, function() end)
+      { Title = title or "Claude Shepherd", Priority = "high" }, function() end)
   end)
 end
 
@@ -199,7 +291,7 @@ function FX.writeDecision(key, value)
   print("[cc-dashboard] decision " .. tostring(value) .. " -> " .. tostring(key))
 end
 
-function FX.focusWindow(name) return focusProject(name) end
+function FX.focusWindow(name, cwd) return focusProject(name, cwd) end
 
 -- Focus a window, then send after a short delay, then restore prior focus.
 local function sendToWindow(name, sendFn)
@@ -217,16 +309,113 @@ function FX.actOnWindow(name, keySpec)
   sendToWindow(name, function() hs.eventtap.keyStroke(keySpec.mods, keySpec.key) end)
 end
 
+-- Focus a window, run the (timer-driven) injection sequence, and ONLY restore the
+-- prior focus AFTER the final Return. (sendToWindow restores too early for these
+-- multi-step sequences — it re-focuses while ⌘V/Return are still pending, so the
+-- keystrokes hit the wrong window. That race was the chronic nudge flakiness.)
 function FX.typeIntoWindow(name, text)
   print("[cc-dashboard] type -> " .. tostring(name) .. ": " .. tostring(text))
-  sendToWindow(name, function()
-    -- Focus the extension's chat input first (⌘Esc), then type.
+  local prevWin = RESTORE_FOCUS and hs.window.focusedWindow() or nil
+  focusProject(name)
+  hs.timer.doAfter(FOCUS_DELAY, function()
     if FOCUS_CHAT_KEY then hs.eventtap.keyStroke(FOCUS_CHAT_KEY[1], FOCUS_CHAT_KEY[2]) end
-    hs.timer.doAfter(0.10, function()
+    hs.timer.doAfter(0.12, function()
       hs.eventtap.keyStrokes(text)
-      hs.timer.doAfter(0.05, function() hs.eventtap.keyStroke({}, "return") end)
+      hs.timer.doAfter(0.08, function()
+        hs.eventtap.keyStroke({}, "return")
+        if prevWin then hs.timer.doAfter(0.15, function() pcall(function() prevWin:focus() end) end) end
+      end)
     end)
   end)
+end
+
+-- Inject text and/or an image into a session via the clipboard + ⌘V instead of
+-- char-by-char typing. This is newline-safe (a multi-line list pastes as one
+-- block rather than each line submitting early) and a single keystroke, which is
+-- more reliable in the VS Code extension. payload = { text=…, imagePath=… }.
+-- Best-effort: depends on the chat input being focusable. The prior text
+-- clipboard is restored afterwards.
+function FX.pasteIntoWindow(name, payload)
+  payload = payload or {}
+  print("[cc-dashboard] paste -> " .. tostring(name)
+    .. (payload.imagePath and " [image]" or "")
+    .. (payload.text and (": " .. payload.text) or ""))
+  local prevClip = hs.pasteboard.readString()  -- best-effort restore (text only)
+  local prevWin = RESTORE_FOCUS and hs.window.focusedWindow() or nil
+  focusProject(name)
+  hs.timer.doAfter(FOCUS_DELAY, function()
+    if FOCUS_CHAT_KEY then hs.eventtap.keyStroke(FOCUS_CHAT_KEY[1], FOCUS_CHAT_KEY[2]) end
+    hs.timer.doAfter(0.12, function()
+      -- Build the paste steps: image first (becomes an attachment), then text.
+      local steps = {}
+      if payload.imagePath then
+        steps[#steps + 1] = function()
+          local img = hs.image.imageFromPath(payload.imagePath)
+          if img then hs.pasteboard.writeObjects(img) end
+        end
+      end
+      if payload.text and #payload.text > 0 then
+        steps[#steps + 1] = function() hs.pasteboard.setContents(payload.text) end
+      end
+      -- Run each step (set clipboard -> ⌘V) sequentially, submit, THEN restore the
+      -- clipboard + prior focus (only after Return, so nothing races the paste).
+      local function runFrom(i)
+        if i > #steps then
+          hs.eventtap.keyStroke({}, "return")
+          hs.timer.doAfter(0.15, function()
+            if prevClip then pcall(function() hs.pasteboard.setContents(prevClip) end) end
+            if prevWin then pcall(function() prevWin:focus() end) end
+          end)
+          return
+        end
+        steps[i]()
+        hs.eventtap.keyStroke({ "cmd" }, "v")
+        hs.timer.doAfter(0.12, function() runFrom(i + 1) end)
+      end
+      runFrom(1)
+    end)
+  end)
+end
+
+-- Best-effort close the editor window for a session: focus it, then send the
+-- VS Code/Cursor "Close Window" chord (⌘⇧W). Unreliable if the title can't be
+-- matched (focusProject falls back to just activating the app), so the caller
+-- also drops the dashboard tile regardless.
+function FX.closeWindow(name)
+  print("[cc-dashboard] close window -> " .. tostring(name))
+  sendToWindow(name, function() hs.eventtap.keyStroke({ "cmd", "shift" }, "w") end)
+end
+
+-- Drive a sequence of keystrokes into a session (e.g. arrow-down ×N + Return to
+-- pick an AskUserQuestion option). Focus first, send each key with a small gap,
+-- restore prior focus only AFTER the last key (same race-safe pattern as paste).
+function FX.sendKeys(name, keys)
+  keys = keys or {}
+  print("[cc-dashboard] send keys -> " .. tostring(name) .. " (" .. #keys .. " keys)")
+  local prevWin = RESTORE_FOCUS and hs.window.focusedWindow() or nil
+  focusProject(name)
+  hs.timer.doAfter(FOCUS_DELAY, function()
+    local function step(i)
+      if i > #keys then
+        if prevWin then hs.timer.doAfter(0.12, function() pcall(function() prevWin:focus() end) end) end
+        return
+      end
+      local k = keys[i]
+      hs.eventtap.keyStroke(k.mods or {}, k.key)
+      hs.timer.doAfter(0.08, function() step(i + 1) end)
+    end
+    step(1)
+  end)
+end
+
+-- Decode a base64 image payload to a temp file and return its path (Step 5).
+function FX.writeImageTemp(b64, ext)
+  local data = hs.base64.decode(b64)
+  if not data then return nil end
+  local path = core.tempImagePath(os.getenv("TMPDIR") or "/tmp", tostring(FX.now()), ext or "png")
+  local f = io.open(path, "wb"); if not f then return nil end
+  f:write(data); f:close()
+  return path
 end
 
 -- Spawn a new Claude session (Phase 4). Dry-run logs what it WOULD do.
@@ -234,11 +423,11 @@ function FX.spawnSession(project, prompt)
   local script = core.spawnAppleScript(project, prompt, { terminal = ORCH_TERMINAL })
   if ORCH_DRY_RUN then
     print("[cc-orch] DRY-RUN would run: " .. script)
-    hs.alert.show("Babysitter (dry-run): would spawn in " .. tostring(project))
+    hs.alert.show("Claude Shepherd (dry-run): would spawn in " .. tostring(project))
   else
     print("[cc-orch] spawning in " .. tostring(project))
     hs.osascript.applescript(script)  -- Terminal opens a login shell -> claude on PATH
-    hs.alert.show("Babysitter: spawning a session in " .. tostring(project))
+    hs.alert.show("Claude Shepherd: spawning a session in " .. tostring(project))
   end
 end
 
@@ -255,9 +444,14 @@ function spawnPrompt()
   FX.spawnSession(project, task)
 end
 
+-- Relabel + close are driven by IN-WEBVIEW UI (inline rename input / inline
+-- confirm), not native hs.dialog — native dialogs activate the Hammerspoon app,
+-- which yanks its console window over your work. The right-click popup just asks
+-- the webview to start the interaction; the webview posts back "relabel"/"close".
+
 -- Single message bridge. JS posts JSON: {a=action, v=key, text=optional}.
 local controller = hs.webview.usercontent.new("cc")
-controller:setCallback(function(msg)
+local function handleBridgeMsg(msg)
   local okj, payload = pcall(hs.json.decode, msg.body)
   if not okj or not payload then
     print("[cc-dashboard] bad message: " .. tostring(msg.body))
@@ -287,7 +481,7 @@ controller:setCallback(function(msg)
       if parsed.gate == true then FX.writeFile(GATE_FLAG, "")
       else os.remove(GATE_FLAG) end
       print("[cc-dashboard] saved cc-config.json (gate=" .. tostring(parsed.gate) .. ")")
-      pcall(function() hs.alert.show("Babysitter: settings saved") end)
+      pcall(function() hs.alert.show("Claude Shepherd: settings saved") end)
     end
     return
   end
@@ -350,7 +544,73 @@ controller:setCallback(function(msg)
     print("[cc-dashboard] action '" .. a .. "' for unknown key " .. tostring(payload.v))
     return
   end
+  if a == "ctx-menu" then
+    -- Right-click: show a real macOS popup menu at the cursor. Its items kick off
+    -- IN-WEBVIEW interactions (no native dialog -> no console pop).
+    print("[cc-dashboard] context menu for " .. item.key)
+    if ctxMenu then pcall(function() ctxMenu:delete() end); ctxMenu = nil end
+    ctxMenu = hs.menubar.new(false)  -- false = not in the system menu bar
+    if ctxMenu then
+      local keyJson  = jsString(item.key)
+      local nameJson = jsString(item.label or item.name)
+      local shown = item.label or item.name
+      ctxMenu:setMenu({
+        { title = "Relabel…", fn = function()
+            pcall(function() wv:evaluateJavaScript("startRename(" .. keyJson .. ")") end)
+          end },
+        { title = "-" },
+        -- Close uses a native submenu confirm. Native menu clicks are reliable on
+        -- this non-activating panel; an in-webview confirm button was not (the
+        -- first click just activated the window, so commitClose never fired).
+        { title = "Close instance", menu = {
+            { title = "Confirm: close " .. shown, fn = function()
+                labels[item.key] = nil
+                core.handleAction(FX, item, "close")
+                refresh()
+              end },
+            { title = "Cancel", fn = function() end },
+        } },
+      })
+      pcall(function() ctxMenu:popupMenu(hs.mouse.absolutePosition(), true) end)
+    end
+    return
+  end
+  if a == "relabel" then
+    -- New display name from the inline editor; blank or == real name clears it.
+    local txt = (payload.text and tostring(payload.text) or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    labels[item.key] = (txt ~= "" and txt ~= item.name) and txt or nil
+    print("[cc-dashboard] relabel " .. item.key .. " -> " .. tostring(labels[item.key]))
+    refresh()
+    return
+  end
+  if a == "close" then
+    labels[item.key] = nil
+    core.handleAction(FX, item, "close")
+    refresh()
+    return
+  end
+  if a == "nudge" and payload.img and payload.img ~= "" then
+    -- Image paste: decode the data URL to a temp file, then paste it (+ any text).
+    local parsed = core.parseDataUrl(tostring(payload.img))
+    if parsed then
+      local path = FX.writeImageTemp(parsed.b64, parsed.ext)
+      if path then
+        FX.pasteIntoWindow(item.name, { text = payload.text and tostring(payload.text) or nil, imagePath = path })
+      else
+        print("[cc-dashboard] image paste: failed to write temp file")
+      end
+    else
+      print("[cc-dashboard] image paste: unrecognized data URL")
+    end
+    return
+  end
   core.handleAction(FX, item, a, payload.text and tostring(payload.text) or nil)
+end
+-- Wrap the bridge so a stray error in a handler is logged, NOT raised — an
+-- uncaught callback error makes Hammerspoon yank its console over your work.
+controller:setCallback(function(msg)
+  local ok, err = pcall(handleBridgeMsg, msg)
+  if not ok then print("[cc-dashboard] controller error: " .. tostring(err)) end
 end)
 
 -- ---- Stream Deck (optional, plug-and-play) ------------------------------
@@ -492,6 +752,17 @@ local HTML = [[
   .meta { font-size:11px; color:#8a8d99; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
   #empty { color:#6b7280; font-size:13px; padding:18px; text-align:center; }
+  #renamebar, #confirmbar { display:none; align-items:center; gap:6px; padding:8px 12px;
+    background:#161821; border-bottom:1px solid #2c2f3a; }
+  #renamebar.show, #confirmbar.show { display:flex; }
+  #renamebar-label { font-size:12px; color:#9fb6d6; }
+  #confirmbar-label { font-size:12px; color:#e8e9ee; flex:1; }
+  #renamebar-input { flex:1; background:#1b1d24; color:#e8e9ee; border:1px solid #2c2f3a;
+    border-radius:6px; font-size:12px; padding:4px 6px; font-family:inherit; }
+  #renamebar button, #confirmbar button { background:#21232c; color:#cfd2db;
+    border:1px solid #2c2f3a; border-radius:6px; font-size:12px; padding:4px 10px; cursor:pointer; }
+  #renamebar button:hover, #confirmbar button:hover { background:#2b2e39; }
+  #confirmbar button.danger { border-color:#ef4444; color:#f3a1a1; }
 
   /* status colors, shared by all themes via the --c variable */
   .s-idle     { --c:#6b7280; }
@@ -555,6 +826,18 @@ local HTML = [[
   #d-name { font-size:14px; font-weight:700; color:#fff; }
   #d-status { font-size:11px; color:#8a8d99; margin-left:auto; }
   #d-prompt { font-size:12px; color:#aeb1bd; margin:8px 0 0; max-height:48px; overflow:hidden; }
+  #d-ask { display:none; margin:8px 0 0; }
+  #d-ask .ask-q { font-size:12px; color:#cfd2db; margin-top:6px; }
+  #d-ask .ask-opts { display:flex; flex-wrap:wrap; gap:6px; margin-top:4px; }
+  #d-ask .ask-opt { font-size:11px; color:#cfe0f5; background:#21232c; border:1px solid #3a4a66;
+    border-radius:8px; padding:3px 10px; cursor:pointer; font-family:inherit; }
+  #d-ask .ask-opt:hover { background:#2b3346; border-color:#5a7bb0; }
+  #d-ask .ask-hint { font-size:11px; color:#6b7280; margin-top:6px; }
+  #d-meta { display:none; font-size:11px; color:#8a8d99; margin:8px 0 0; }
+  #d-controls { display:flex; flex-wrap:wrap; gap:10px; margin:8px 0 0; }
+  #d-controls .ctl { font-size:11px; color:#9fb6d6; display:flex; align-items:center; gap:4px; }
+  #d-controls select { background:#1b1d24; color:#e8e9ee; border:1px solid #2c2f3a;
+    border-radius:6px; font-size:11px; padding:2px 4px; }
   #d-activity, #d-pending { font-size:12px; margin:6px 0 0; cursor:pointer;
     display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; }
   #d-activity { color:#9fb6d6; }
@@ -569,9 +852,14 @@ local HTML = [[
   #b-deny, #b-stop { border-color:#ef4444; color:#f3a1a1; }
   #b-clear { border-color:#b9772a; color:#e6b277; }
   .sep { flex-basis:100%; height:0; }
-  #nudge-row { display:flex; gap:6px; margin-top:8px; }
+  #nudge-row { display:flex; gap:6px; margin-top:8px; align-items:flex-start; }
   #nudge { flex:1; background:#1b1d24; color:#e8e9ee; border:1px solid #2c2f3a;
-           border-radius:8px; font-size:12px; padding:5px 8px; }
+           border-radius:8px; font-size:12px; padding:5px 8px; font-family:inherit;
+           line-height:1.4; resize:vertical; min-height:24px; max-height:400px; overflow-y:auto; }
+  #nudge-chip { display:none; font-size:11px; color:#9fb6d6; margin-top:6px; }
+  #nudge-chip.show { display:flex; align-items:center; gap:6px; }
+  #nudge-chip button { background:none; border:none; color:#8a8d99; cursor:pointer;
+             font-size:12px; padding:0 2px; }
   #b-nudge, #b-queue { background:#21232c; color:#cfd2db; border:1px solid #2c2f3a;
              border-radius:8px; font-size:12px; padding:5px 10px; cursor:pointer; }
   #queue-row { display:flex; align-items:center; gap:8px; margin-top:8px; }
@@ -594,6 +882,17 @@ local HTML = [[
       </select>
     </span>
   </div>
+  <div id="renamebar">
+    <span id="renamebar-label">Rename:</span>
+    <input id="renamebar-input" onkeydown="renameKeydown(event)">
+    <button onclick="commitRename()">Set</button>
+    <button onclick="hideBars()">Cancel</button>
+  </div>
+  <div id="confirmbar">
+    <span id="confirmbar-label"></span>
+    <button class="danger" onclick="commitClose()">Close</button>
+    <button onclick="hideBars()">Cancel</button>
+  </div>
   <div id="grid"></div>
   <div id="empty">Waiting for Claude Code sessions...<br>Start a session in any project.</div>
 
@@ -604,8 +903,10 @@ local HTML = [[
       <span id="d-status"></span>
     </div>
     <div id="d-pending" onclick="toggleExpand('pending')"></div>
+    <div id="d-ask"></div>
     <div id="d-activity" onclick="toggleExpand('activity')"></div>
     <div id="d-prompt"></div>
+    <div id="d-meta"></div>
     <div id="d-actions">
       <button id="b-jump"    onclick="act('focus')">Jump</button>
       <button id="b-approve" onclick="act('approve')">Approve</button>
@@ -616,11 +917,22 @@ local HTML = [[
       <button id="b-clear"   onclick="act('clear')">Clear</button>
       <button id="b-compact" onclick="act('compact')">Compact</button>
     </div>
+    <div id="d-controls">
+      <label class="ctl">Effort
+        <select id="effort" onchange="onEffortChange()">
+          <option value="low">Low</option>
+          <option value="medium">Medium</option>
+          <option value="high">High</option>
+          <option value="xhigh">XHigh</option>
+        </select>
+      </label>
+    </div>
     <div id="nudge-row">
-      <input id="nudge" placeholder="Nudge now, or Queue for later..." onkeydown="onNudgeKey(event)">
+      <textarea id="nudge" rows="1" placeholder="Nudge now, or Queue for later... (Enter sends, Shift+Enter newline, paste an image)" onkeydown="onNudgeKey(event)" oninput="autoGrow(this)"></textarea>
       <button id="b-nudge" onclick="sendNudge()">Send</button>
       <button id="b-queue" onclick="queueAdd()">Queue</button>
     </div>
+    <div id="nudge-chip"><span id="nudge-chip-label"></span><button onclick="clearImage()" title="Remove image">✕</button></div>
     <div id="queue-row">
       <span id="q-count"></span>
       <button id="b-feed" onclick="act('queue-feed')">Feed next</button>
@@ -628,7 +940,7 @@ local HTML = [[
   </div>
 
   <div id="settings">
-    <div id="s-head"><span>Babysitter settings</span><button class="s-x" onclick="closeSettings()">✕</button></div>
+    <div id="s-head"><span>Claude Shepherd settings</span><button class="s-x" onclick="closeSettings()">✕</button></div>
     <div id="s-body">
       <label class="s-row"><input type="checkbox" id="s-gate"> Arm the approval gate (route permission prompts to this panel)</label>
       <div class="s-sec">Queue</div>
@@ -639,6 +951,8 @@ local HTML = [[
       <label class="s-row">After <input type="number" id="s-e-min" class="s-num" min="1"> minutes</label>
       <label class="s-row"><input type="checkbox" id="s-e-snd"> Play a sound</label>
       <label class="s-row"><input type="checkbox" id="s-e-push"> Push to ntfy topic <input type="text" id="s-e-topic" class="s-txt" placeholder="my-topic"></label>
+      <div class="s-sec">Editor</div>
+      <label class="s-row"><input type="checkbox" id="s-focus-pop"> Pop the editor window when a session finishes or needs you</label>
       <div class="s-sec">Policies (gate must be armed)</div>
       <label class="s-row"><input type="checkbox" id="s-p-rep"> Auto-approve a command already approved this session</label>
       <label class="s-row"><input type="checkbox" id="s-ap-en"> Enable per-session Autopilot, window of <input type="number" id="s-ap-min" class="s-num" min="1"> min</label>
@@ -661,22 +975,101 @@ local HTML = [[
     var lastItems = [];
     var selectedKey = null;
     var detailExpanded = { pending:false, activity:false };
+    var pendingImage = null;  // data URL of an image pasted into the input
 
-    function send(a, v, text){
-      try { window.webkit.messageHandlers.cc.postMessage(JSON.stringify({a:a, v:v||"", text:text||""})); }
+    function send(a, v, text, img){
+      try { window.webkit.messageHandlers.cc.postMessage(JSON.stringify({a:a, v:v||"", text:text||"", img:img||""})); }
       catch(e){ console.log("send error", e); }
     }
     function act(a){ if(selectedKey) send(a, selectedKey); }
+    // Grow the textarea with its content, up to the CSS max-height.
+    function autoGrow(el){ el.style.height = "auto"; el.style.height = Math.min(el.scrollHeight, 220) + "px"; }
+    function resetInput(el){ el.value=""; el.style.height="auto"; clearImage(); }
+    function clearImage(){ pendingImage = null; document.getElementById("nudge-chip").classList.remove("show"); }
+    function setImage(dataUrl){
+      pendingImage = dataUrl;
+      document.getElementById("nudge-chip-label").textContent = "📎 image attached";
+      document.getElementById("nudge-chip").classList.add("show");
+    }
     function sendNudge(){
       var el = document.getElementById("nudge");
       var t = (el.value || "").trim();
-      if(selectedKey && t){ send("nudge", selectedKey, t); el.value=""; }
+      if(selectedKey && (t || pendingImage)){ send("nudge", selectedKey, t, pendingImage); resetInput(el); }
     }
-    function onNudgeKey(e){ if(e.key === "Enter"){ e.preventDefault(); sendNudge(); } }
+    // Enter sends; Shift+Enter inserts a newline (mirrors the Claude chat input).
+    function onNudgeKey(e){ if(e.key === "Enter" && !e.shiftKey){ e.preventDefault(); sendNudge(); } }
     function queueAdd(){
       var el = document.getElementById("nudge");
       var t = (el.value || "").trim();
-      if(selectedKey && t){ send("queue-add", selectedKey, t); el.value=""; }
+      if(selectedKey && t){ send("queue-add", selectedKey, t); resetInput(el); }
+    }
+    // Capture a pasted image as a data URL; plain text keeps default paste.
+    (function(){
+      var el = document.getElementById("nudge");
+      if(!el) return;
+      el.addEventListener("paste", function(e){
+        var items = (e.clipboardData && e.clipboardData.items) || [];
+        for(var i=0;i<items.length;i++){
+          if(items[i].type && items[i].type.indexOf("image") === 0){
+            e.preventDefault();
+            var file = items[i].getAsFile();
+            var r = new FileReader();
+            r.onload = function(){ setImage(r.result); };
+            r.readAsDataURL(file);
+            return;
+          }
+        }
+      });
+    })();
+
+    // Right-click a tile -> ask Lua to show a REAL macOS popup menu at the cursor.
+    // (hs.webview renders its own native menu over any in-page one, so we don't
+    // try to draw the menu in HTML.)
+    function showCtx(e, key){ e.preventDefault(); send("ctx-menu", key); }
+
+    // Relabel / Close happen via in-panel bars (no native dialog -> no console pop).
+    // Lua's popup-menu items call startRename/startClose; these post the result back.
+    var renameKey = null, closeKey = null;
+    function hideBars(){
+      renameKey = null; closeKey = null;
+      document.getElementById("renamebar").classList.remove("show");
+      document.getElementById("confirmbar").classList.remove("show");
+    }
+    function startRename(key){
+      var it = findItem(key); if(!it) return;
+      closeKey = null; document.getElementById("confirmbar").classList.remove("show");
+      renameKey = key;
+      var inp = document.getElementById("renamebar-input");
+      inp.value = it.label || it.name || "";
+      document.getElementById("renamebar").classList.add("show");
+      inp.focus(); inp.select();
+    }
+    function commitRename(){
+      if(renameKey){ send("relabel", renameKey, (document.getElementById("renamebar-input").value||"").trim()); }
+      hideBars();
+    }
+    function renameKeydown(e){
+      if(e.key === "Enter"){ e.preventDefault(); commitRename(); }
+      else if(e.key === "Escape"){ e.preventDefault(); hideBars(); }
+    }
+    function startClose(key, name){
+      renameKey = null; document.getElementById("renamebar").classList.remove("show");
+      closeKey = key;
+      document.getElementById("confirmbar-label").textContent = "Close " + (name || "this session") + "?";
+      document.getElementById("confirmbar").classList.add("show");
+    }
+    function commitClose(){ if(closeKey){ send("close", closeKey); } hideBars(); }
+    // Lua's ⌘V handler calls these, because hs.webview inputs don't receive the
+    // standard paste shortcut on their own (Hammerspoon provides no Edit menu).
+    function insertIntoNudge(t){
+      var el = document.getElementById("nudge");
+      if(!el) return;
+      el.focus();
+      var s  = (el.selectionStart != null) ? el.selectionStart : el.value.length;
+      var en = (el.selectionEnd   != null) ? el.selectionEnd   : el.value.length;
+      el.value = el.value.slice(0, s) + t + el.value.slice(en);
+      el.selectionStart = el.selectionEnd = s + t.length;
+      autoGrow(el);
     }
 
     function onThemeChange(){
@@ -708,6 +1101,7 @@ local HTML = [[
       ck("s-e-snd",  cv(cfg,"escalation.sound",false));
       ck("s-e-push", cv(cfg,"escalation.push",false));
       val("s-e-topic", cv(cfg,"escalation.pushTopic",""));
+      ck("s-focus-pop", cv(cfg,"focus.popEditor",false));
       ck("s-p-rep",  cv(cfg,"policies.approveRepeats",false));
       ck("s-ap-en",  cv(cfg,"policies.autopilot.enabled",false));
       val("s-ap-min", cv(cfg,"policies.autopilot.minutes",15));
@@ -728,6 +1122,7 @@ local HTML = [[
         queue: { autofeed: ck("s-q-auto"), dryRun: ck("s-q-dry") },
         escalation: { enabled: ck("s-e-en"), minutes: num("s-e-min",5), sound: ck("s-e-snd"),
                       push: ck("s-e-push"), pushTopic: txt("s-e-topic") },
+        focus: { popEditor: ck("s-focus-pop") },
         policies: {
           approveRepeats: ck("s-p-rep"),
           autopilot: { enabled: ck("s-ap-en"), minutes: num("s-ap-min",15) },
@@ -763,6 +1158,40 @@ local HTML = [[
       tiles.forEach(function(t){ t.classList.toggle("sel", t.dataset.key === selectedKey); });
     }
 
+    function onEffortChange(){
+      var lvl = document.getElementById("effort").value;
+      if(selectedKey) send("effort", selectedKey, lvl);
+    }
+    // Render the options of a pending AskUserQuestion so they're visible in the
+    // panel (today: read-only + Jump to answer; clickable answering comes later).
+    function renderAsk(it){
+      var el = document.getElementById("d-ask");
+      var ask = it.pending && it.pending.ask;
+      if(!ask || !ask.length){ el.style.display="none"; el.innerHTML=""; return; }
+      // Clickable options: clicking drives the picker (arrow-down to it + Enter).
+      // qi=question index, oi=option index. (Best-effort for multi-question asks.)
+      el.innerHTML = ask.map(function(q, qi){
+        var opts = (q.options||[]).map(function(o, oi){
+          return '<button class="ask-opt" title="'+esc(o.description||"")
+               + '" onclick="answerAsk('+qi+','+oi+')">'+esc(o.label)+'</button>';
+        }).join("");
+        return '<div class="ask-q">'+(q.header?('<b>'+esc(q.header)+'</b> · '):'')+esc(q.question)+'</div>'
+             + '<div class="ask-opts">'+opts+'</div>';
+      }).join("") + '<div class="ask-hint">Click an option — auto-selects on Kitty; jumps to the picker in VS Code (mouse-only there)</div>';
+      el.style.display="block";
+    }
+    function answerAsk(qi, oi){ if(selectedKey) send("answer", selectedKey, String(oi)); }
+    // Small badges: detected editor + live permission mode + effort.
+    function renderMeta(it){
+      var el = document.getElementById("d-meta"), bits = [];
+      if(it.editor) bits.push(it.editor);
+      if(it.permission_mode) bits.push("mode: " + it.permission_mode);
+      if(it.effort) bits.push("effort: " + it.effort);
+      if(!bits.length){ el.style.display="none"; el.textContent=""; return; }
+      el.textContent = bits.join("  ·  "); el.style.display="block";
+      var ef = document.getElementById("effort"); if(ef && it.effort) ef.value = it.effort;
+    }
+
     function renderDetail(){
       var d = document.getElementById("detail");
       var it = selectedKey ? findItem(selectedKey) : null;
@@ -771,7 +1200,7 @@ local HTML = [[
       var st = it.status || "idle";
       document.getElementById("d-dot").style.setProperty("--dc", COLORS[st] || "#6b7280");
       document.getElementById("d-dot").style.background = COLORS[st] || "#6b7280";
-      document.getElementById("d-name").textContent = it.name || "?";
+      document.getElementById("d-name").textContent = it.label || it.name || "?";
       document.getElementById("d-status").textContent =
         (LABELS[st] || st) + (it.since ? " - " + fmtAge(it.since) : "") + (it.stale ? " - stale" : "");
       var pend = document.getElementById("d-pending");
@@ -785,6 +1214,8 @@ local HTML = [[
       var pr = document.getElementById("d-prompt");
       if(it.last_prompt){ pr.textContent = "Last: " + it.last_prompt; pr.style.display="block"; }
       else { pr.style.display="none"; }
+      renderAsk(it);
+      renderMeta(it);
       var n = it.queue || 0;
       document.getElementById("q-count").textContent = n>0 ? ("Queue: " + n) : "Queue: empty";
       document.getElementById("b-feed").style.display = n>0 ? "inline-block" : "none";
@@ -816,9 +1247,9 @@ local HTML = [[
         if(it.queue > 0){ meta = (meta ? meta + " · " : "") + "+" + it.queue + " queued"; }
         if(it.autopilot){ meta = (meta ? meta + " · " : "") + "🛫 autopilot"; }
         var cls = "tile s-" + st + (it.stale ? " stale" : "") + (it.escalate ? " escalate" : "") + (it.key === selectedKey ? " sel" : "");
-        return '<div class="'+cls+'" data-key="'+esc(it.key)+'" onclick="selectTile(\''+esc(it.key)+'\')" ondblclick="send(\'focus\',\''+esc(it.key)+'\')" title="Double-click to jump">'
+        return '<div class="'+cls+'" data-key="'+esc(it.key)+'" onclick="selectTile(\''+esc(it.key)+'\')" ondblclick="send(\'focus\',\''+esc(it.key)+'\')" oncontextmenu="showCtx(event,\''+esc(it.key)+'\')" title="Double-click to jump · right-click for more">'
              + '<span class="dot"></span>'
-             + '<span class="name">'+esc(it.name)+'</span>'
+             + '<span class="name">'+esc(it.label || it.name)+'</span>'
              + '<span class="label">'+label+'</span>'
              + '<span class="meta">'+esc(meta)+'</span>'
              + '</div>';
@@ -847,18 +1278,23 @@ local savedTheme = hs.settings.get("ccDashboardTheme") or DEFAULT_THEME
 HTML = HTML:gsub("__INIT_THEME__", savedTheme)
 print("[cc-dashboard] starting with theme: " .. savedTheme)
 
--- Build and show the panel in the top-right of the main screen.
+-- Build and show the panel. Restore the user's last size/position if we saved
+-- one (and it's still sane and on-screen); otherwise default to the top-right.
+local PANEL_DEFAULTS = { w = PANEL_W, h = 320 }
 local screen = hs.screen.mainScreen():frame()
-local rect = { x = screen.x + screen.w - PANEL_W - 20, y = screen.y + 40, w = PANEL_W, h = 320 }
+local rect = core.resolvePanelRect(FX.loadGeometry(), screen, PANEL_DEFAULTS)
 
-wv = hs.webview.new(rect, { developerExtrasEnabled = true }, controller)
+-- developerExtrasEnabled stays OFF in normal use: with it on, right-click pops
+-- WebKit's "Reload / Inspect Element" menu, which competes with our popup menu.
+-- Flip to true temporarily if you need the web inspector.
+wv = hs.webview.new(rect, { developerExtrasEnabled = false }, controller)
 wv:windowStyle(
   hs.webview.windowMasks.titled |
   hs.webview.windowMasks.closable |
   hs.webview.windowMasks.miniaturizable |  -- yellow minimize-to-Dock button
   hs.webview.windowMasks.resizable
 )
-wv:windowTitle("Claude Sessions")
+wv:windowTitle("Claude Shepherd")
 wv:level(hs.drawing.windowLevels.floating)
 wv:behavior(hs.drawing.windowBehaviors.canJoinAllSpaces | hs.drawing.windowBehaviors.stationary)
 wv:html(HTML)
@@ -868,21 +1304,47 @@ print("[cc-dashboard] panel shown")
 
 -- Show/hide so the panel can be dismissed (minimize-to-menubar) and reopened.
 local panelVisible = true
-local function showPanel() pcall(function() wv:show() end); panelVisible = true end
+-- Tracks whether the panel webview is the KEY window. The panel is a floating,
+-- non-activating webview, so it can be key (receiving keys) without Hammerspoon
+-- being the frontmost app — hs.window/frontmostApplication can't tell. The
+-- webview's own focusChange callback is the only reliable signal (used by ⌘V).
+local panelHasFocus = false
+-- Re-apply the saved frame on show, in case something (a Space switch, a restore
+-- from the Dock) nudged the window back to a smaller size.
+local function showPanel()
+  pcall(function()
+    wv:frame(core.resolvePanelRect(FX.loadGeometry(), hs.screen.mainScreen():frame(), PANEL_DEFAULTS))
+    wv:show()
+  end)
+  panelVisible = true
+end
 local function hidePanel() pcall(function() wv:hide() end); panelVisible = false end
 local function togglePanel() if panelVisible then hidePanel() else showPanel() end end
 -- The red close button just hides it; reopen from the menubar or with the hotkey.
+-- On a resize/move, persist the new frame (debounced — frameChange fires rapidly
+-- while dragging) so the size survives the next reload.
+local saveGeomTimer
 pcall(function()
-  wv:windowCallback(function(action)
-    if action == "closing" then panelVisible = false end
+  wv:windowCallback(function(action, _webview, extra)
+    if action == "closing" then
+      panelVisible = false
+    elseif action == "focusChange" then
+      -- `extra` is a boolean: true = gained key focus, false = lost it.
+      panelHasFocus = extra and true or false
+    elseif action == "frameChange" then
+      if saveGeomTimer then saveGeomTimer:stop() end
+      saveGeomTimer = hs.timer.doAfter(0.4, function()
+        pcall(function() FX.saveGeometry(wv:frame()) end)
+      end)
+    end
   end)
 end)
 
 -- Menubar icon to reopen/hide the panel even when it's closed.
 M.menubar = hs.menubar.new()
 if M.menubar then
-  M.menubar:setTitle("🍼")
-  M.menubar:setTooltip("Babysitter — Claude sessions")
+  M.menubar:setTitle("🐑")
+  M.menubar:setTooltip("Claude Shepherd — Claude sessions")
   M.menubar:setMenu(function()
     return {
       { title = panelVisible and "Hide panel" or "Show panel", fn = togglePanel },
@@ -891,6 +1353,57 @@ if M.menubar then
     }
   end)
 end
+
+-- ⌘V into the panel: hs.webview text inputs don't get the standard paste shortcut
+-- (Hammerspoon has no Edit menu), so we handle it ourselves while the panel is the
+-- focused window — inject text into the input, or stage a pasted image as a chip.
+local function panelIsFocused()
+  -- Primary: the webview's own focusChange signal (works for a non-activating
+  -- panel). Fallback: the focused-window id match (accurate when hs.window can
+  -- see the webview, harmless when it can't).
+  if panelHasFocus then return true end
+  local mw = wv and wv:hswindow()
+  local fw = hs.window.focusedWindow()
+  return (mw and fw and fw:id() == mw:id()) or false
+end
+local function handlePanelPaste()
+  -- Read BOTH reps and PREFER text. Copied text often carries a tag-along image
+  -- representation; checking image-first hijacked plain-text pastes (and the
+  -- image encode then threw, swallowed by the caller's pcall). Only treat it as
+  -- an image when there's an image and no text.
+  local txt = hs.pasteboard.readString()
+  local img = hs.pasteboard.readImage()
+  print(string.format("[cc-dashboard] ⌘V: textlen=%d img=%s",
+    txt and #txt or 0, tostring(img ~= nil)))
+  if txt and #txt > 0 then
+    wv:evaluateJavaScript("insertIntoNudge(" .. jsString(txt) .. ")")
+    print("[cc-dashboard] ⌘V: inserted text len=" .. #txt)
+  elseif img then
+    local ok, durl = pcall(function() return img:encodeAsURLString() end)
+    if ok and durl and #durl > 0 then
+      if not durl:find("^data:") then durl = "data:image/png;base64," .. durl end
+      wv:evaluateJavaScript("setImage(" .. jsString(durl) .. ")")
+      print("[cc-dashboard] ⌘V: staged a pasted image")
+    else
+      print("[cc-dashboard] ⌘V: image encode failed: " .. tostring(durl))
+    end
+  end
+end
+M.pasteTap = hs.eventtap.new({ hs.eventtap.event.types.keyDown }, function(e)
+  local f = e:getFlags()
+  if f.cmd and not f.shift and not f.alt and not f.ctrl
+     and e:getKeyCode() == hs.keycodes.map["v"] then
+    local focused = panelIsFocused()
+    print("[cc-dashboard] ⌘V seen (focus=" .. tostring(focused) .. ")")
+    if focused then
+      local ok, err = pcall(handlePanelPaste)
+      if not ok then print("[cc-dashboard] ⌘V handler error: " .. tostring(err)) end
+      return true  -- swallow ⌘V so it isn't also handled elsewhere
+    end
+  end
+  return false
+end)
+M.pasteTap:start()
 
 -- Read the status dir, parse via cc-core, refresh byKey, return the sorted list.
 function refreshList()
@@ -905,13 +1418,19 @@ function refreshList()
   local raw = core.parseStatusList(entries, FX.now(), STALE_SECONDS)
   -- Prune orphans: stale tiles with no session_id, or any tile older than the
   -- 24h backstop. (SessionEnd can't clean these; staleness only dims them.)
+  -- Also prune /clear "ghosts": a stale tile whose project has a fresher live tile.
   local now = FX.now()
   local list = {}
   local pruneOpts = { pruneNoSid = PRUNE_NO_SID, pruneSeconds = PRUNE_SECONDS }
+  local ghost = {}
+  for _, k in ipairs(core.staleDuplicateKeys(raw)) do ghost[k] = true end
   for _, it in ipairs(raw) do
     if core.shouldPrune(it, now, pruneOpts) then
       FX.removeStatus(it.key)
       print("[cc-dashboard] pruned orphan tile: " .. tostring(it.name) .. " (" .. it.key .. ")")
+    elseif ghost[it.key] then
+      FX.removeStatus(it.key)
+      print("[cc-dashboard] pruned ghost duplicate: " .. tostring(it.name) .. " (" .. it.key .. ")")
     else
       list[#list + 1] = it
     end
@@ -931,7 +1450,7 @@ end
 
 -- Push current statuses into the webview + deck; run queue auto-feed and
 -- stale-approval escalation; keep the heartbeat fresh.
-local function refresh()
+function refresh()
   local list = refreshList()
   local cfg = loadConfig()
   local autofeed   = core.config(cfg, "queue.autofeed", false) == true
@@ -946,9 +1465,11 @@ local function refresh()
   local newPrev = {}
 
   for _, it in ipairs(list) do
-    -- Live activity peek (active, non-stale sessions only).
+    -- Live activity peek (non-stale sessions). Include `done` so the peek refreshes
+    -- to the FINAL assistant line when a session finishes (a done transcript doesn't
+    -- change, so the re-read is stable) instead of freezing mid-turn.
     if ACTIVITY_PEEK and it.transcript_path and not it.stale
-       and (it.status == "working" or it.status == "approval") then
+       and (it.status == "working" or it.status == "approval" or it.status == "done") then
       local tail = FX.readTail(it.transcript_path, ACTIVITY_BYTES)
       if tail then it.activity = core.transcriptSnippet(tail, ACTIVITY_LEN) end
     end
@@ -979,7 +1500,7 @@ local function refresh()
         print("[cc-escalate] " .. it.name .. " waiting > " .. escMin .. "m")
         if escSound then FX.playSound() end
         if escPush then
-          FX.push(escTopic, "Babysitter: " .. it.name .. " needs you",
+          FX.push(escTopic, "Claude Shepherd: " .. it.name .. " needs you",
             (it.pending and it.pending.summary) or "Waiting for approval")
         end
       end
@@ -993,6 +1514,8 @@ local function refresh()
   FX.writeFile(HEARTBEAT, tostring(now))
   sd.blink = not sd.blink
   sdRender(list)
+  -- Overlay any ephemeral relabels (display-only; .name stays the real target).
+  core.applyLabels(list, labels)
   local payload = (#list == 0) and "[]" or hs.json.encode(list)
   wv:evaluateJavaScript("window.ccUpdate(" .. payload .. ")")
 end
@@ -1008,7 +1531,7 @@ local function bindHotkeys()
         print("[cc-hotkey] approve-front -> " .. tostring(it.name))
         core.handleAction(FX, it, "approve")
       else
-        hs.alert.show("Babysitter: nothing waiting")
+        hs.alert.show("Claude Shepherd: nothing waiting")
       end
     end),
     hs.hotkey.bind(HOTKEY_JUMP_NEEDY[1], HOTKEY_JUMP_NEEDY[2], function()

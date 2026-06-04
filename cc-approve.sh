@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# cc-approve.sh - opt-in PreToolUse approval gate for babysitter, with policies.
+# cc-approve.sh - opt-in PreToolUse approval gate for Claude Shepherd, with policies.
 #
 # When armed (~/.claude/cc-gate.enabled), a permission request for a gated tool is
 # first run through automatic policies (all OFF by default, configured in
@@ -90,7 +90,7 @@ if [ "$PAT_ENABLED" = "true" ]; then
       [ -n "$pat" ] || continue
       if pattern_match "$TOOL" "$SUMMARY" "$pat"; then
         echo "[cc-approve] ⛔ policy auto-deny ($pat): $TOOL ($KEY)" >&2
-        emit_deny "Auto-denied by babysitter policy."
+        emit_deny "Auto-denied by Claude Shepherd policy."
         exit 0
       fi
     done <<< "$DENY_PATS"
@@ -171,7 +171,7 @@ if [ "$DECISION" = "deny" ]; then
   cc_del_field "$KEY" "pending"
   cc_merge "$KEY" "$(jq -nc --argjson now "$(cc_now)" '{status:"working", updated:$now, since:$now}')"
   echo "[cc-approve] ❌ denied $TOOL ($KEY)" >&2
-  emit_deny "Denied from the babysitter panel."
+  emit_deny "Denied from the Claude Shepherd panel."
   exit 0
 elif [ "$DECISION" = "allow" ]; then
   cc_del_field "$KEY" "pending"

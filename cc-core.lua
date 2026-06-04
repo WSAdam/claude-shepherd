@@ -1,6 +1,6 @@
 -- cc-core.lua
 --
--- Pure logic for babysitter's panel/deck, with ZERO direct hs.* calls so it can
+-- Pure logic for Claude Shepherd's panel/deck, with ZERO direct hs.* calls so it can
 -- be unit-tested in plain `lua`. Two injection points keep it pure:
 --   * M.json  - a JSON impl with .decode/.encode (prod: hs.json; tests: json.lua)
 --   * fx       - an "effects" table passed to handleAction; the ONLY side effects
@@ -86,7 +86,7 @@ end
 function M.handleAction(fx, item, action, text)
   if not item then return nil end
   if action == "focus" then
-    fx.focusWindow(item.name)
+    fx.focusWindow(item.name, item.cwd)
   elseif action == "approve" then
     if item.gate == "waiting" then fx.writeDecision(item.key, "allow")
     else fx.actOnWindow(item.name, M.KEY_APPROVE) end
@@ -96,11 +96,101 @@ function M.handleAction(fx, item, action, text)
   elseif action == "stop" then
     fx.actOnWindow(item.name, M.KEY_STOP)
   elseif action == "nudge" then
-    if text and #text > 0 then fx.typeIntoWindow(item.name, text) else return nil end
+    -- Inject via the clipboard (one ⌘V), not char-by-char keystrokes: that's
+    -- newline-safe (a multi-line list pastes as one block instead of each line
+    -- submitting early) and more reliable in the VS Code extension.
+    if text and #text > 0 then fx.pasteIntoWindow(item.name, { text = text }) else return nil end
+  elseif action == "close" then
+    -- Best-effort close the editor window, then drop its dashboard tile.
+    fx.closeWindow(item.name)
+    fx.removeStatus(item.key)
+  elseif action == "effort" then
+    -- Change effort live via the `/effort <level>` slash command.
+    local cmd = M.effortCommand(text)
+    if cmd then fx.typeIntoWindow(item.name, cmd) else return nil end
+  elseif action == "answer" then
+    -- Select option #text (0-based) in a pending AskUserQuestion picker. Only a
+    -- terminal TUI (kitty) responds to synthesized arrow/Enter; the VS Code
+    -- extension's picker is mouse-only, so there we just JUMP so the user can
+    -- click it themselves.
+    if item.editor == "kitty" then
+      fx.sendKeys(item.name, M.answerKeys(text))
+    else
+      fx.focusWindow(item.name, item.cwd)
+    end
   else
     return nil
   end
   return action
+end
+
+-- Keys to select option `optIndex` (0-based) in a single-question picker: press
+-- Down `optIndex` times (option 0 starts highlighted), then Enter to confirm.
+-- The nav scheme is centralized here so it's easy to retune once verified live.
+function M.answerKeys(optIndex)
+  local n = math.floor(tonumber(optIndex) or 0)
+  if n < 0 then n = 0 end
+  local keys = {}
+  for _ = 1, n do keys[#keys + 1] = { mods = {}, key = "down" } end
+  keys[#keys + 1] = { mods = {}, key = "return" }
+  return keys
+end
+
+-- Valid effort levels that can be set live via `/effort` (matches settings).
+M.EFFORT_LEVELS = { low = true, medium = true, high = true, xhigh = true }
+
+-- Build the `/effort <level>` slash command, or nil for an unknown level.
+function M.effortCommand(level)
+  level = tostring(level or ""):lower()
+  if not M.EFFORT_LEVELS[level] then return nil end
+  return "/effort " .. level
+end
+
+-- ---- Panel geometry (Step 1) ----------------------------------------------
+-- Minimum sane panel size; anything smaller is treated as garbage and ignored.
+M.PANEL_MIN_W = 200
+M.PANEL_MIN_H = 120
+
+local function isNum(v) return type(v) == "number" end
+
+-- The default top-right rect, derived from the screen frame + desired size.
+local function defaultPanelRect(screenFrame, defaults)
+  return {
+    x = screenFrame.x + screenFrame.w - defaults.w - 20,
+    y = screenFrame.y + 40,
+    w = defaults.w,
+    h = defaults.h,
+  }
+end
+
+-- Decide where to open the panel: a previously-saved frame if it's well-formed,
+-- big enough, and still visible on this screen; otherwise the default top-right
+-- rect. This is what lets a user-resized window survive a Hammerspoon reload.
+function M.resolvePanelRect(saved, screenFrame, defaults)
+  if type(saved) == "table"
+     and isNum(saved.x) and isNum(saved.y) and isNum(saved.w) and isNum(saved.h)
+     and saved.w >= M.PANEL_MIN_W and saved.h >= M.PANEL_MIN_H then
+    local onScreen = saved.x < screenFrame.x + screenFrame.w
+      and saved.x + saved.w > screenFrame.x
+      and saved.y < screenFrame.y + screenFrame.h
+      and saved.y + saved.h > screenFrame.y
+    if onScreen then
+      return { x = saved.x, y = saved.y, w = saved.w, h = saved.h }
+    end
+  end
+  return defaultPanelRect(screenFrame, defaults)
+end
+
+-- ---- Ephemeral relabels (Step 3) -------------------------------------------
+-- Apply in-memory display labels onto a session list, in place. `labels` maps a
+-- session key -> override name. Only the DISPLAY field (.label) is set; .name
+-- (used to focus/target the real window) is never touched, so jumps still work.
+function M.applyLabels(list, labels)
+  labels = labels or {}
+  for _, it in ipairs(list or {}) do
+    it.label = labels[it.key]
+  end
+  return list
 end
 
 -- Map the sorted session list onto a deck of `count` keys (row-major). Returns
@@ -220,12 +310,51 @@ function M.shouldPrune(item, now, opts)
   return (orphan or ghost) and true or false
 end
 
+-- Find ghost duplicates left by `/clear` or a session restart: a `/clear` gives
+-- the project a NEW session_id (a new tile) while the old session_id's status
+-- file lingers with no SessionEnd. Returns the keys of tiles that are stale AND
+-- share a `name` with a non-stale tile (the live session for that project). A
+-- genuinely-active second session in the same folder isn't stale, so it's safe.
+function M.staleDuplicateKeys(list)
+  local liveNames = {}
+  for _, it in ipairs(list or {}) do
+    if not it.stale and it.name then liveNames[it.name] = true end
+  end
+  local keys = {}
+  for _, it in ipairs(list or {}) do
+    if it.stale and it.name and liveNames[it.name] then keys[#keys + 1] = it.key end
+  end
+  return keys
+end
+
 -- ---- Policy A: stale-approval escalation -----------------------------------
 -- True when a session has been waiting for you (status "approval") longer than
 -- thresholdSec. (`since` is when it entered the approval state.)
 function M.approvalStale(item, now, thresholdSec)
   if not item or item.status ~= "approval" or not item.since then return false end
   return (now - item.since) > thresholdSec
+end
+
+-- ---- Image paste (Step 5) --------------------------------------------------
+-- Parse a clipboard image data URL ("data:image/png;base64,...."), returning
+-- its mime, a normalized lowercase file extension, and the base64 payload.
+-- Returns nil for anything that isn't a base64-encoded image.
+function M.parseDataUrl(s)
+  if type(s) ~= "string" then return nil end
+  local mime, b64 = s:match("^data:([^;]+);base64,(.+)$")
+  if not mime or not b64 then return nil end
+  if not mime:find("^image/") then return nil end
+  local ext = (mime:match("^image/(.+)$") or ""):lower()
+  if ext == "jpeg" then ext = "jpg" end
+  if ext == "svg+xml" then ext = "svg" end
+  return { mime = mime, ext = ext, b64 = b64 }
+end
+
+-- Build a deterministic temp path for a pasted image. The key is sanitized so a
+-- session key containing path separators can't escape `dir`.
+function M.tempImagePath(dir, key, ext)
+  local safe = tostring(key):gsub("[^%w%-_]", "_")
+  return dir .. "/cc-paste-" .. safe .. "." .. ext
 end
 
 -- ---- Orchestrator (Phase 4): build the command to spawn a session ----------

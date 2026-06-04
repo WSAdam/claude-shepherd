@@ -16,13 +16,22 @@
       { "matcher": "", "hooks": [ { "type": "command", "command": "bash \"$HOME/.claude/cc-status.sh\" posttooluse" } ] }
     ],
     "PermissionRequest": [
-      { "matcher": "", "hooks": [ { "type": "command", "command": "bash \"$HOME/.claude/cc-status.sh\" permissionrequest" } ] }
+      { "matcher": "", "hooks": [
+        { "type": "command", "command": "bash \"$HOME/.claude/cc-status.sh\" permissionrequest" },
+        { "type": "command", "command": "bash \"$HOME/.claude/cc-popup.sh\" \"${CLAUDE_PROJECT_DIR:-$PWD}\"" }
+      ] }
     ],
     "Notification": [
-      { "matcher": "", "hooks": [ { "type": "command", "command": "bash \"$HOME/.claude/cc-status.sh\" notification" } ] }
+      { "matcher": "", "hooks": [
+        { "type": "command", "command": "bash \"$HOME/.claude/cc-status.sh\" notification" },
+        { "type": "command", "command": "bash \"$HOME/.claude/cc-popup.sh\" \"${CLAUDE_PROJECT_DIR:-$PWD}\"" }
+      ] }
     ],
     "Stop": [
-      { "hooks": [ { "type": "command", "command": "bash \"$HOME/.claude/cc-status.sh\" stop" } ] }
+      { "hooks": [
+        { "type": "command", "command": "bash \"$HOME/.claude/cc-status.sh\" stop" },
+        { "type": "command", "command": "bash \"$HOME/.claude/cc-popup.sh\" \"${CLAUDE_PROJECT_DIR:-$PWD}\"" }
+      ] }
     ],
     "SessionEnd": [
       { "hooks": [ { "type": "command", "command": "bash \"$HOME/.claude/cc-status.sh\" sessionend" } ] }

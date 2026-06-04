@@ -11,7 +11,7 @@
 *.pem
 *-service-account*.json
 
-# Babysitter runtime + local state (created at use, not part of the repo)
+# Claude Shepherd runtime + local state (created at use, not part of the repo)
 cc-status/
 cc-queue/
 cc-approved/

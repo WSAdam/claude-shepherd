@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # cc-status.sh - record the live state of a Claude Code session so the
-# babysitter dashboard can display and act on it. Called by Claude Code hooks.
+# Claude Shepherd dashboard can display and act on it. Called by Claude Code hooks.
 #
 # Usage: cc-status.sh <event>
 #   event is the hook that fired, one of:
@@ -78,6 +78,27 @@ if ! cc_have_jq; then
   exit 0
 fi
 
+# Detect the host editor from the inherited env (this hook runs as a child of
+# `claude`), so the panel can route actions per session: Kitty remote control vs
+# the VS Code/Cursor GUI. Anything not clearly Kitty defaults to vscode behavior.
+detect_editor() {
+  if [ -n "${KITTY_WINDOW_ID:-}" ] || [ "${TERM:-}" = "xterm-kitty" ]; then echo kitty; return; fi
+  case "${__CFBundleIdentifier:-}" in
+    *todesktop*|*[Cc]ursor*) echo cursor; return ;;
+    *VSCode*|*VSCodium*)     echo vscode; return ;;
+  esac
+  case "${CLAUDE_CODE_ENTRYPOINT:-}" in
+    claude-vscode) echo vscode; return ;;
+    cli)           echo terminal; return ;;
+  esac
+  echo vscode  # safe default -> unchanged VS Code behavior
+}
+EDITOR_KIND="$(detect_editor)"
+PERMISSION_MODE="$(cc_get "$INPUT" '.permission_mode')"
+EFFORT="${CLAUDE_EFFORT:-}"
+KITTY_WID="${KITTY_WINDOW_ID:-}"
+KITTY_SOCK="${KITTY_LISTEN_ON:-}"
+
 # Decide the new status (and any extras) from the event.
 STATUS="working"
 SET_PROMPT=""
@@ -86,6 +107,7 @@ CLEAR_PENDING="1"
 PENDING_IF_ABSENT=""
 PENDING_TOOL=""
 PENDING_MSG=""
+ASK_JSON=""
 
 case "$EVENT" in
   sessionstart)
@@ -98,6 +120,16 @@ case "$EVENT" in
     ;;
   pretooluse|posttooluse)
     STATUS="working"
+    # AskUserQuestion carries the multiple-choice questions in tool_input; capture
+    # them so the panel can render the options (the session is now waiting on you).
+    if [ "$EVENT" = "pretooluse" ] && [ "$(cc_get "$INPUT" '.tool_name')" = "AskUserQuestion" ]; then
+      ASK_JSON="$(printf '%s' "$INPUT" | jq -c '.tool_input.questions // empty' 2>/dev/null)"
+      if [ -n "$ASK_JSON" ]; then
+        STATUS="approval"; SET_PENDING="1"; CLEAR_PENDING=""
+        PENDING_TOOL="AskUserQuestion"
+        PENDING_MSG="$(cc_get "$INPUT" '.tool_input.questions[0].question')"
+      fi
+    fi
     ;;
   permissionrequest)
     # The precise event: carries tool_name + tool_input, so we can show the
@@ -175,6 +207,14 @@ if [ -n "$TRANSCRIPT" ]; then
   PATCH="$(printf '%s' "$PATCH" | jq -c --arg tp "$TRANSCRIPT" '. + {transcript_path:$tp}')"
 fi
 
+# Host editor (always) + live mode/effort/kitty handles (when present), so the
+# panel can route per session and display current mode/effort.
+PATCH="$(printf '%s' "$PATCH" | jq -c --arg ed "$EDITOR_KIND" '. + {editor:$ed}')"
+[ -n "$PERMISSION_MODE" ] && PATCH="$(printf '%s' "$PATCH" | jq -c --arg v "$PERMISSION_MODE" '. + {permission_mode:$v}')"
+[ -n "$EFFORT" ]     && PATCH="$(printf '%s' "$PATCH" | jq -c --arg v "$EFFORT"     '. + {effort:$v}')"
+[ -n "$KITTY_WID" ]  && PATCH="$(printf '%s' "$PATCH" | jq -c --arg v "$KITTY_WID"  '. + {kitty_window_id:$v}')"
+[ -n "$KITTY_SOCK" ] && PATCH="$(printf '%s' "$PATCH" | jq -c --arg v "$KITTY_SOCK" '. + {kitty_listen_on:$v}')"
+
 # Don't let a generic Notification clobber a precise pending that
 # PermissionRequest already recorded this turn.
 if [ -n "$SET_PENDING" ] && [ -n "$PENDING_IF_ABSENT" ]; then
@@ -187,6 +227,10 @@ if [ -n "$SET_PENDING" ]; then
   PATCH="$(printf '%s' "$PATCH" | jq -c \
     --arg tool "$PENDING_TOOL" --arg msg "$PENDING_MSG" --arg sum "$SUMMARY" \
     '. + {pending:{tool:$tool, summary:$sum, message:$msg}}')"
+  # Attach the AskUserQuestion questions/options so the panel can render them.
+  if [ -n "$ASK_JSON" ]; then
+    PATCH="$(printf '%s' "$PATCH" | jq -c --argjson ask "$ASK_JSON" '.pending.ask = $ask')"
+  fi
 fi
 
 cc_merge "$KEY" "$PATCH"
