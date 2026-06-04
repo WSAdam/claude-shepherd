@@ -75,6 +75,7 @@ core.STALE_SECONDS = STALE_SECONDS
 
 -- session key (status filename base) -> latest item, for resolving actions.
 local byKey = {}
+local wv                 -- the webview; forward-declared so the controller can push to it
 local lastJumpKey = nil  -- for the cycle-jump hotkey
 local spawnPrompt        -- forward declaration (defined after FX)
 local prevStatus = {}    -- key -> last refresh's status (for auto-feed transitions)
@@ -838,7 +839,7 @@ print("[cc-dashboard] starting with theme: " .. savedTheme)
 local screen = hs.screen.mainScreen():frame()
 local rect = { x = screen.x + screen.w - PANEL_W - 20, y = screen.y + 40, w = PANEL_W, h = 320 }
 
-local wv = hs.webview.new(rect, { developerExtrasEnabled = true }, controller)
+wv = hs.webview.new(rect, { developerExtrasEnabled = true }, controller)
 wv:windowStyle(
   hs.webview.windowMasks.titled |
   hs.webview.windowMasks.closable |
