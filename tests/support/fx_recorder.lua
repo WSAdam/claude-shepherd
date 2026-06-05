@@ -15,22 +15,29 @@ local function newRecorder()
   local function rec(op, a, b)
     r.calls[#r.calls + 1] = { op = op, a = a, b = b }
   end
+  -- Window effects now receive a target TABLE {name,cwd,editor,kittyWindowId,
+  -- kittyListenOn} (Part A). Surface target.name as `.a` so existing name
+  -- assertions keep working, and stash the full target on `.tgt` for kitty-routing
+  -- tests. (focus also records target.cwd as `.b`, matching the old signature.)
+  local function recWin(op, target, b)
+    r.calls[#r.calls + 1] = { op = op, a = (target or {}).name, b = b, tgt = target }
+  end
 
   r.fx = {
     now             = function() return r._now end,
     log             = function() end,
-    focusWindow     = function(name, cwd) rec("focusWindow", name, cwd); return true end,
-    actOnWindow     = function(name, keySpec) rec("actOnWindow", name, keySpec) end,
-    typeIntoWindow  = function(name, text) rec("typeIntoWindow", name, text) end,
-    pasteIntoWindow = function(name, payload) rec("pasteIntoWindow", name, payload) end,
-    closeWindow     = function(name) rec("closeWindow", name) end,
-    sendKeys        = function(name, keys) rec("sendKeys", name, keys) end,
+    focusWindow     = function(t) recWin("focusWindow", t, t and t.cwd); return true end,
+    actOnWindow     = function(t, keySpec) recWin("actOnWindow", t, keySpec) end,
+    typeIntoWindow  = function(t, text) recWin("typeIntoWindow", t, text) end,
+    pasteIntoWindow = function(t, payload) recWin("pasteIntoWindow", t, payload) end,
+    closeWindow     = function(t) recWin("closeWindow", t) end,
+    sendKeys        = function(t, keys) recWin("sendKeys", t, keys) end,
     removeStatus    = function(key) rec("removeStatus", key) end,
     saveGeometry    = function(frame) rec("saveGeometry", frame) end,
     loadGeometry    = function() rec("loadGeometry"); return r._geometry end,
     writeImageTemp  = function(b64) rec("writeImageTemp", b64); return r._imagePath end,
     writeDecision   = function(key, value) rec("writeDecision", key, value) end,
-    spawnSession    = function(project, prompt) rec("spawnSession", project, prompt) end,
+    spawnSession    = function(editor, project, task) rec("spawnSession", editor, { project = project, task = task }) end,
     readDir         = function() return {} end,
     readFile        = function() return nil end,
     writeFile       = function() end,

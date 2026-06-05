@@ -15,7 +15,24 @@
   },
 
   "focus": {
-    "popEditor": false
+    "_comment": "Pop/focus the DETECTED editor (VS Code/Cursor; Kitty/terminal left alone) on each event. Legacy popEditor is still honored as a fallback for both.",
+    "popOnComplete": false,
+    "popOnApproval": false
+  },
+
+  "gate": {
+    "_comment": "Headless approvals: arm the gate (Settings toggle) and keep the policies below OFF, then Approve/Deny from the panel with no window pop. tools = space/comma list of tools that wait for you; reads stay instant.",
+    "tools": "Bash Write Edit MultiEdit NotebookEdit"
+  },
+
+  "spawn": {
+    "_comment": "The + New / New project launcher. editor: terminal | kitty | vscode | cursor. live=false is a dry-run (logs what it would launch, spawns nothing). Kitty/Terminal spawn reliably; VS Code/Cursor open the window then best-effort type `claude` in a new integrated terminal. kittyAutoRemote enables remote control in your kitty.conf when Kitty is in use (so kitty @ effects work).",
+    "editor": "terminal",
+    "live": false,
+    "kittyRemote": true,
+    "kittyAutoRemote": true,
+    "kittyBin": "",
+    "kittySocket": ""
   },
 
   "policies": {

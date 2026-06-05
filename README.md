@@ -47,14 +47,20 @@ Claude Code hooks ──► cc-status.sh ──► ~/.claude/cc-status/<session_
 
 ## Control actions
 
+The **header** has **+ New** (opens the new-session modal — see "Spawn"), a **☕
+keep-awake toggle** (see "Keep this Mac awake"), the **⚙ Settings** panel, and a
+theme switcher.
+
 **Single-click** a tile to select it (opens the detail panel). **Double-click** a
 tile to **jump** straight to its window. **Right-click** a tile for a context menu:
 
 - **Relabel…** — give the tile a custom display name (e.g. "auth refactor" instead
   of the folder name). Display-only — jumps still target the real window — and
-  **ephemeral**: relabels are in-memory and clear on a Hammerspoon reload.
+  **persistent**: keyed by project path in `~/.claude/cc-labels.json`, so it survives
+  a Hammerspoon reload, a new instance, and close/reopen in the same folder. Relabel
+  back to the folder name (or blank) to clear it.
 - **Close instance** — confirm, then best-effort close the editor window (⌘⇧W) and
-  remove the tile.
+  remove the tile (the project's saved label is kept for next time).
 
 The detail panel has:
 
@@ -64,8 +70,10 @@ The detail panel has:
 - **Autopilot** — time-box a session to auto-approve all its prompts (needs the gate + config).
 - **Clear / Compact** — pop a yes/no confirm, then run `/clear` or `/compact` in the session.
 - **Effort** dropdown — set the session's reasoning effort (Low/Medium/High/XHigh) live; sends
-  the `/effort <level>` slash command. The detail also shows badges for the detected **editor**,
-  current **permission mode**, and **effort**.
+  the `/effort <level>` slash command.
+- **Mode** dropdown — switch the permission mode (Default / Accept edits / Plan) live via
+  Shift+Tab; reliable on Kitty, best-effort in the VS Code extension (its switcher is mouse-only).
+  The detail also shows badges for the detected **editor**, current **permission mode**, and **effort**.
 - **Nudge box** — a multi-line input: **Enter** sends, **Shift+Enter** adds a newline
   (mirrors the Claude chat), so a pasted multi-item list arrives intact. **Paste an
   image** and it's attached as a chip; **Send** delivers text and/or image via the
@@ -79,38 +87,42 @@ request) clamp to two lines — **click to expand**.
 When a session calls **AskUserQuestion**, the hook captures the question + options and the panel
 renders them as clickable buttons under the detail. Clicking an option: on a **terminal (Kitty)**
 session it drives the picker directly (auto-select); in the **VS Code extension** the picker is
-mouse-only, so clicking **jumps you to it** to pick by hand. Either way you see *what's being asked*
-without leaving Shepherd.
+mouse-only, so clicking **jumps you to it** to pick by hand. **Multi-select** questions can't be
+driven by synthesized keys, so Shepherd jumps you to those regardless of editor. Either way you see
+*what's being asked* without leaving Shepherd.
 
 ### Editor auto-detection
 Each session self-reports its host editor. [cc-status.sh](cc-status.sh) reads the env it inherits
 from `claude` (`CLAUDE_CODE_ENTRYPOINT`, `__CFBundleIdentifier`, `TERM`/`KITTY_WINDOW_ID`) plus the
 hook's `permission_mode`, and records `editor` (`vscode`/`cursor`/`kitty`/`terminal`),
 `permission_mode`, and `effort` into the session's status JSON. The panel routes actions per session
-on that — **anything not detected as `kitty` uses the VS Code/Cursor path**, so a machine running
-both just works. (Kitty *effect routing* — `kitty @` remote control — is on the roadmap; see
-[todos.md](todos.md).)
+on that: **Kitty sessions run effects headlessly via `kitty @` remote control** (focus/approve/deny/
+nudge/close/answer with no window focus), and **anything else uses the VS Code/Cursor path**, so a
+machine running both just works. Kitty remote control is auto-enabled in your `kitty.conf` when Kitty
+is in use (Shepherd backs the file up first; needs a kitty restart to take effect), and sessions
+Shepherd spawns get it via launch flags.
 
 ### How control reaches the session — and its limits
 
 Two paths, and it matters which one your sessions use:
 
-1. **Hook approval gate (hands-free, reliable everywhere).** When armed,
-   [cc-approve.sh](cc-approve.sh) routes a permission decision to the panel and
+1. **Headless approvals (hands-free, reliable everywhere).** Flip **Headless
+   approvals** in ⚙ Settings (one click: arms the gate + turns off every auto-policy).
+   [cc-approve.sh](cc-approve.sh) then routes each gated permission to the panel and
    Approve/Deny write a decision file the hook honors — **no window focus, no
-   keystrokes.** Works for terminal *and* VS Code-extension sessions. This is the
-   recommended approve/deny path. See "The approval gate" below.
+   keystrokes** — while Claude still can't run a gated tool until you decide. Works
+   for terminal *and* VS Code-extension sessions. See "Headless approvals" below.
 
-2. **Keystroke injection (best-effort).** Jump, Stop, Nudge/Feed, and Clear/Compact
-   focus the target window and type into it. This lands reliably when Claude runs
-   in a **terminal** (cursor at the prompt), but is **unreliable for the Claude Code
-   VS Code extension** (the chat input isn't reliably the focused element) — and
-   there's no supported API to inject a prompt into a running session. Needs
+2. **Per-session effects.** Jump, Stop, Nudge/Feed, Clear/Compact, answer, mode-switch.
+   On **Kitty** these run headlessly via `kitty @` (no window focus). On **VS Code /
+   terminal** they focus the target window and type into it — reliable in a terminal,
+   **best-effort in the VS Code extension** (the chat input/picker isn't reliably the
+   focused element; there's no supported API to inject into a running session). Needs
    Hammerspoon **Accessibility** permission.
 
-> Keystroke keys (`Return`/`Esc`) and behavior depend on your setup. For reliable
-> approve/deny regardless of UI, use the gate. For delivering work, **Queue** stores
-> it reliably; feeding/nudge is the fragile part for the extension UI.
+> For reliable approve/deny regardless of UI, use Headless approvals (or Kitty).
+> For delivering work, **Queue** stores it reliably; feeding/nudge into the VS Code
+> extension's chat input is the fragile part.
 
 ## Global hotkeys
 
@@ -124,16 +136,33 @@ the top of [claude-dashboard.lua](claude-dashboard.lua)):
 - **⌘⌥B** — show/hide the panel (it also minimizes to the Dock, and there's a 🐑
   menu-bar icon to reopen it when closed).
 
-## Spawn new sessions (orchestrator)
+## Keep this Mac awake (caffeinate)
 
-Launch a fresh Claude session from the panel — the **+ New** button in the header
-or **⌘⌥S**. It asks for a project folder and an initial task, then opens a terminal
-running `claude` there; the new session shows up as a tile automatically.
+The **☕ toggle** in the header keeps your Mac awake while long agent runs work
+unattended — it runs `pmset -a disablesleep 1/0` (so it holds even with the lid
+closed). Because that needs root, macOS asks for your password each time you flip it
+(your choice over a passwordless sudoers entry). The button reads the real state via
+`pmset -g` (no password needed) and shows **☕ Awake** (amber) when on.
 
-This is **dry-run by default** (`ORCH_DRY_RUN = true`): it logs the exact command
-it *would* run to the Hammerspoon Console and launches nothing, so you can confirm
-it before enabling. Set `ORCH_DRY_RUN = false` (and `ORCH_TERMINAL` /
-`ORCH_DEFAULT_DIR` to taste) to spawn for real.
+## Spawn new sessions
+
+Click **+ New** (or **⌘⌥S**) to open the **New session** modal:
+
+- **Open existing / Start new project** — open a folder, or create a new folder and start in it.
+- **Folder browser** — drill into subfolders, breadcrumb back up, "Use this folder" fills the
+  path; the free-text path field stays editable too.
+- **Recent** — one-click chips for folders you've launched in (plus currently-active session
+  folders), persisted to `~/.claude/cc-recent-dirs.json`.
+- **Open in** — Terminal / Kitty / VS Code / Cursor (defaults to your `spawn.editor`). Kitty and
+  Terminal launch reliably; VS Code/Cursor open the window, then best-effort type `claude` into a
+  fresh integrated terminal (no supported API for that — Kitty/Terminal are the reliable spawns).
+- **Permission mode** — Default / Plan / Accept edits / Automate (`claude --permission-mode <m>`).
+- **Initial task** (optional).
+
+Spawning is **dry-run until you opt in**: leave it off to log the exact command to
+`~/.claude/cc-shepherd.log` without launching, or flip **"Actually launch"** in ⚙ Settings → Spawn
+(`spawn.live`; the `ORCH_DRY_RUN` code default stays as a safety net). The new session shows up as a
+tile automatically. (The ⌘⌥S hotkey falls back to two native prompts if the modal can't open.)
 
 ### Task queue
 Each session has a queue (`Queue` button in the detail panel adds the input;
@@ -147,10 +176,12 @@ backlog unattended.
 All automatic behavior is governed by one settings file, and **everything is off
 until you turn it on**.
 
-**Easiest: the ⚙ Settings panel.** Click the **gear button next to + New** for a
-form with every toggle (arm the gate, queue autofeed/dry-run, escalation, and the
-policies). **Save** writes `~/.claude/cc-config.json` (creating it if missing) and
-arms/disarms the gate flag — no hand-editing.
+**Easiest: the ⚙ Settings panel.** Click the **gear button in the header** for a
+form with every toggle — **Headless approvals** (one click: arm the gate + all
+policies off) and its editable gated-tools list, the editor-window pop toggles, the
+Spawn defaults, queue autofeed/dry-run, escalation, and the advanced gate/policies —
+each with a one-line explanation. **Save** writes `~/.claude/cc-config.json`
+(creating it if missing) and arms/disarms the gate flag — no hand-editing.
 
 To edit by hand instead, copy [cc-config.example.json](cc-config.example.json) to
 `~/.claude/cc-config.json` and flip what you want. Both the panel and the gate
@@ -160,7 +191,9 @@ read it (the panel live within ~1s; the gate on the next hook fire).
 {
   "queue":      { "autofeed": false, "dryRun": false },
   "escalation": { "enabled": false, "minutes": 5, "sound": false, "push": false, "pushTopic": "" },
-  "focus":      { "popEditor": false },
+  "focus":      { "popOnComplete": false, "popOnApproval": false },
+  "spawn":      { "editor": "terminal", "live": false, "kittyRemote": true, "kittyAutoRemote": true },
+  "gate":       { "tools": "Bash Write Edit MultiEdit NotebookEdit" },
   "policies": {
     "approveRepeats": false,
     "autopilot": { "enabled": false, "minutes": 15 },
@@ -173,10 +206,19 @@ read it (the panel live within ~1s; the gate on the next hook fire).
 - **escalation** — when an approval waits longer than `minutes`, nag harder: a
   stronger tile pulse always, plus an optional `sound` and an optional high-priority
   `push` to your ntfy `pushTopic`. Both channels off by default.
-- **focus.popEditor** — pop/focus the editor window when a session finishes or needs
-  you. Off by default; toggle it from the ⚙ panel ("Pop the editor window…"). The
-  Stop/Notification/PermissionRequest hooks call [cc-popup.sh](cc-popup.sh), which only
-  opens the window when this is on (the macOS notification + sound stay independent).
+- **focus.popOnComplete / popOnApproval** — pop/focus the **detected** editor (VS Code /
+  Cursor; Kitty/terminal are left alone) when a session finishes / needs approval. Both off
+  by default; toggle from the ⚙ panel. The Stop/Notification/PermissionRequest hooks call
+  [cc-popup.sh](cc-popup.sh) with the event, which opens the window only when the matching
+  flag is on (legacy `focus.popEditor` still seeds both). Note: the Claude Code VS Code
+  extension may raise its own window on completion independently of this.
+- **spawn** — the + New / New project launcher: `editor` (terminal/kitty/vscode/cursor),
+  `live` (false = dry-run, log only), `kittyRemote` (give spawned Kitty windows remote control),
+  `kittyAutoRemote` (auto-enable remote control in `kitty.conf` when Kitty is in use).
+- **gate.tools** — space/comma list of tools the approval gate holds for you (default
+  `Bash Write Edit MultiEdit NotebookEdit`); editable from ⚙ Settings. With the gate armed
+  and all policies off ("Headless approvals"), these wait for your panel Approve/Deny —
+  headless, no window pop — and fall back to Claude's native prompt if you don't answer.
 - **policies.approveRepeats** — if you already approved the *exact* command in a
   session, auto-approve it next time.
 - **policies.autopilot** — the **Autopilot** button time-boxes a session to
@@ -184,9 +226,9 @@ read it (the panel live within ~1s; the gate on the next hook fire).
 - **policies.patterns** — gate honors `autoDeny` (wins) and `autoAllow` globs,
   written like `"Bash(npm test*)"` or `"Read"`.
 
-The gate's auto-decisions apply only to the gated tools (`CC_GATE_TOOLS`) and are
-logged to the Hammerspoon Console / hook stderr whenever they fire. Auto-deny
-always beats auto-allow.
+The gate's auto-decisions apply only to the gated tools (`gate.tools`, editable in
+Settings) and are logged to the Hammerspoon Console / hook stderr whenever they
+fire. Auto-deny always beats auto-allow.
 
 ## Install (about 5 minutes)
 
@@ -199,44 +241,42 @@ always beats auto-allow.
    (System Settings > Privacy & Security > Accessibility). It needs that to focus
    windows and send keystrokes.
 
-2. **Install the status scripts:**
+2. **Run the installer** (idempotent — safe to re-run):
    ```
-   mkdir -p ~/.claude
-   cp cc-lib.sh cc-status.sh cc-approve.sh ~/.claude/
-   chmod +x ~/.claude/cc-status.sh ~/.claude/cc-approve.sh
+   make setup
    ```
+   This copies the hook scripts + logic into `~/.claude` and `~/.hammerspoon`,
+   **merges** the hooks into `~/.claude/settings.json` (backing it up first and
+   preserving any hooks you already have), ensures the `dofile(...)` line in
+   `~/.hammerspoon/init.lua`, and builds **Shepherd.app** (a Dock launcher — see below).
 
-3. **Add the hooks** to `~/.claude/settings.json`. If that file doesn't exist
-   yet, copy `settings-hooks.json` to it. If it already exists, merge the
-   `"hooks"` block from `settings-hooks.json` into your existing JSON.
-
-4. **Install the dashboard** (the panel and its logic module — keep them together):
-   ```
-   cp claude-dashboard.lua cc-core.lua ~/.hammerspoon/
-   ```
-   Then add this line to `~/.hammerspoon/init.lua` (create the file if needed):
-   ```lua
-   dofile(os.getenv("HOME") .. "/.hammerspoon/claude-dashboard.lua")
-   ```
-   Click the Hammerspoon menu-bar icon and choose **Reload Config**.
+3. Click the Hammerspoon menu-bar icon and choose **Reload Config**.
 
 The panel appears top-right. Drag it by its title bar, resize it, and it floats
 above other windows and shows on every Space.
 
-## The approval gate (optional, hands-free approve/deny)
+### Shepherd.app — a Dock launcher
+`make setup` (or `make app`) builds **`~/Applications/Shepherd.app`** with a sheep
+icon; drag it to your Dock and click it to show/hide the panel like any app. It
+toggles the panel via Hammerspoon's built-in `hammerspoon://` URL scheme (no extra
+deps). First open is unsigned, so right-click → **Open** once to clear Gatekeeper.
 
-By default Claude Shepherd leaves Claude Code's normal permission prompts untouched
-and you answer them with keystroke injection. If you'd rather approve/deny from
-the panel with **no window switch**, arm the gate:
+### Kitty users
+For reliable click-to-answer / headless approve on Kitty, Shepherd auto-enables
+remote control in your `kitty.conf` (`allow_remote_control` + `listen_on`) when a
+Kitty session is detected — backing the file up first. **Restart Kitty** for it to
+take effect (sessions Shepherd spawns get it via launch flags, no restart needed).
 
-```
-touch ~/.claude/cc-gate.enabled      # arm
-rm   ~/.claude/cc-gate.enabled        # disarm
-```
+## Headless approvals (the gate)
 
-When armed, a permission request for a *mutating* tool (Bash, Write, Edit,
-MultiEdit, NotebookEdit by default) turns the tile red with `gate (hands-free)`,
-and the Approve/Deny buttons answer it directly.
+Want to approve/deny from the panel with **no window switch** and still keep Claude
+fully gated? Flip **Headless approvals** in ⚙ Settings — one click that arms the gate
+([cc-approve.sh](cc-approve.sh)) and turns off every auto-approve policy. A permission
+request for a *gated* tool (`gate.tools` — Bash/Write/Edit/MultiEdit/NotebookEdit by
+default, editable in Settings) then turns the tile red, and Approve/Deny answer it via
+a decision file — **headless, no focus, no keystrokes**. Claude can't run a gated tool
+until you decide. (Manual equivalent: `touch ~/.claude/cc-gate.enabled` to arm, `rm` to
+disarm.)
 
 It is built to be safe:
 
@@ -245,13 +285,12 @@ It is built to be safe:
   through to Claude Code's native prompt.
 - **Times out gracefully.** If you don't answer within `CC_GATE_TIMEOUT` seconds
   (default 120), it falls back to the native prompt rather than denying.
-- **Reads stay fast.** Only the tools in `CC_GATE_TOOLS` are gated.
+- **Reads stay fast.** Only the tools in `gate.tools` are gated; everything else runs normally.
 
-Tunables (set in your shell environment / the hook's env):
-
-- `CC_GATE_TOOLS` — space-separated tool names to gate (default the mutating set).
-- `CC_GATE_TIMEOUT` — seconds to wait for your decision (default 120).
-- `CC_PANEL_MAX_AGE` — max heartbeat age in seconds to consider the panel alive (default 5).
+The advanced **policies** below (autopilot, approve-repeats, pattern auto-allow/deny)
+let some requests auto-decide; Headless approvals keeps them all off so *you* decide
+every gated tool. Hook-env tunables: `CC_GATE_TOOLS` (overrides `gate.tools`),
+`CC_GATE_TIMEOUT` (default 120), `CC_PANEL_MAX_AGE` (default 5).
 
 ## Test it without Claude
 
@@ -350,11 +389,14 @@ A plain `hs.reload()` without `make install` first just re-runs the *old* copy.
 It never touches your real `~/.claude/cc-status`, never fires a keystroke, never
 focuses a window, and never spawns a session. How that's possible:
 
-- **Pure logic in [cc-core.lua](cc-core.lua)** — status parsing, sorting,
-  staleness, action selection, deck layout, transcript snippet, spawn-command
-  building, panel-geometry resolution, ephemeral relabels, image data-URL parsing,
-  stale-duplicate pruning, `/effort` command building, and AskUserQuestion answer
-  keys — has no `hs.*` calls and is unit-tested directly in plain `lua`
+- **Pure logic in [cc-core.lua](cc-core.lua)** — status parsing, sorting, staleness,
+  action selection (+ the editor-aware target), deck layout, transcript snippet,
+  editor-aware spawn spec, `kitty @` argv + key tokens, permission-mode cycle steps,
+  window focus-candidate/title matching, folder-browser path helpers, recent-dirs,
+  new-project validation, persistent-relabel set/apply-by-cwd, pmset command/parse,
+  gated-tool list parsing, hook-merge, panel geometry, image data-URL parsing,
+  `/effort` + AskUserQuestion answer keys (multi-select guarded) — has no `hs.*` calls
+  and is unit-tested directly in plain `lua`
   ([tests/core.test.lua](tests/core.test.lua) + [tests/ui.test.lua](tests/ui.test.lua)).
 - **All effects go through one `fx` table** (focus, keystrokes, paste, send-keys,
   decision/file writes, Stream Deck, session spawn). Production wires it to
@@ -363,12 +405,15 @@ focuses a window, and never spawns a session. How that's possible:
 - **The shell scripts** are driven against a throwaway `CC_STATUS_DIR`:
   [tests/status.test.sh](tests/status.test.sh) (status writer),
   [tests/editor.test.sh](tests/editor.test.sh) (editor/mode/effort detection),
-  [tests/ask.test.sh](tests/ask.test.sh) (AskUserQuestion capture),
-  [tests/config.test.sh](tests/config.test.sh), [tests/gate.test.sh](tests/gate.test.sh).
-- **~188 checks, all side-effect-free.** Every new feature lands with its tests.
+  [tests/ask.test.sh](tests/ask.test.sh) (AskUserQuestion + multi-select capture),
+  [tests/config.test.sh](tests/config.test.sh), [tests/gate.test.sh](tests/gate.test.sh)
+  (incl. the config-driven gated-tool list), and [tests/install.test.sh](tests/install.test.sh)
+  (the installer against a temp `$HOME`).
+- **~320 checks, all side-effect-free.** Every new feature lands with its tests.
 
-Spawning is additionally guarded by `ORCH_DRY_RUN` (default on), so even the live
-app logs-but-doesn't-launch until you opt in.
+Spawning is additionally gated by `spawn.live` (default off → log-but-don't-launch),
+with the `ORCH_DRY_RUN` code constant as a fixed safety net, so the live app never
+launches until you opt in from Settings.
 
 Layout: [cc-core.lua](cc-core.lua) (logic) + [claude-dashboard.lua](claude-dashboard.lua)
 (Hammerspoon bootstrap) + `tests/` (`run.sh`, bash + lua suites, `support/`).
@@ -395,9 +440,9 @@ Layout: [cc-core.lua](cc-core.lua) (logic) + [claude-dashboard.lua](claude-dashb
   `~/.claude/cc-shepherd.log` — `tail -f ~/.claude/cc-shepherd.log`. Keep the HS
   Console **closed**: an open console pops over your work whenever Hammerspoon
   activates, so read the file instead.
-- **Relabel / Close** use in-panel UI (an inline rename bar / confirm bar), not
-  native dialogs, specifically so they don't activate Hammerspoon and yank its
-  console forward. (The `+ New` spawn prompt still uses a native dialog; it's rare
-  and off by default.)
+- **Relabel / Close / New session** use in-panel UI (inline bars / a modal), not
+  native dialogs, so they don't activate Hammerspoon and yank its console forward.
+  (⌘⌥S falls back to a native prompt only if the modal can't open.) Relabels persist
+  per project path in `~/.claude/cc-labels.json`.
 - **Known limit:** click-to-focus matches by window title, so two sessions in the
   *same* window remain ambiguous to jump to (their tiles are still distinct).

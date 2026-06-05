@@ -101,4 +101,23 @@ assert_eq "approveRepeats -> allow" "allow" "$(decision "$out")"
 out="$(runpol x '{"session_id":"r1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"git reset --hard"}}')"
 assert_eq "unseen command -> no decision" "" "$out"
 
+# ---- gate.tools: the gated-tool list is panel-editable via config ----
+date +%s > "$HB"
+TOOLSCFG="$TMP/tools.json"
+echo '{"gate":{"tools":"WebFetch"}}' > "$TOOLSCFG"
+# a tool in the custom list is now gated (waits -> ALLOW decision -> allow)
+( printf '%s' '{"session_id":"t1","cwd":"/x/p","tool_name":"WebFetch","tool_input":{"url":"https://x"}}' \
+    | CC_GATE_FLAG="$FLAG" CC_CONFIG_FILE="$TOOLSCFG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=5 \
+    bash "$APP" > "$TMP/out_tools" 2>/dev/null ) &
+bg=$!
+sleep 0.5
+printf 'allow' > "$TMP/t1.decision"
+wait $bg
+got="$(jq -r '.hookSpecificOutput.permissionDecision' "$TMP/out_tools" 2>/dev/null)"
+assert_eq "config gate.tools: custom tool is gated -> allow" "allow" "$got"
+# a tool OUTSIDE the custom list falls straight through (Bash isn't gated here)
+out="$(printf '%s' '{"session_id":"t2","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"ls"}}' \
+    | CC_GATE_FLAG="$FLAG" CC_CONFIG_FILE="$TOOLSCFG" CC_PANEL_MAX_AGE=99999 bash "$APP" 2>/dev/null)"
+assert_eq "config gate.tools: tool outside list falls through" "" "$out"
+
 finish

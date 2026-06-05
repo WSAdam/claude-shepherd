@@ -18,19 +18,19 @@
     "PermissionRequest": [
       { "matcher": "", "hooks": [
         { "type": "command", "command": "bash \"$HOME/.claude/cc-status.sh\" permissionrequest" },
-        { "type": "command", "command": "bash \"$HOME/.claude/cc-popup.sh\" \"${CLAUDE_PROJECT_DIR:-$PWD}\"" }
+        { "type": "command", "command": "bash \"$HOME/.claude/cc-popup.sh\" \"${CLAUDE_PROJECT_DIR:-$PWD}\" approval" }
       ] }
     ],
     "Notification": [
       { "matcher": "", "hooks": [
         { "type": "command", "command": "bash \"$HOME/.claude/cc-status.sh\" notification" },
-        { "type": "command", "command": "bash \"$HOME/.claude/cc-popup.sh\" \"${CLAUDE_PROJECT_DIR:-$PWD}\"" }
+        { "type": "command", "command": "bash \"$HOME/.claude/cc-popup.sh\" \"${CLAUDE_PROJECT_DIR:-$PWD}\" approval" }
       ] }
     ],
     "Stop": [
       { "hooks": [
         { "type": "command", "command": "bash \"$HOME/.claude/cc-status.sh\" stop" },
-        { "type": "command", "command": "bash \"$HOME/.claude/cc-popup.sh\" \"${CLAUDE_PROJECT_DIR:-$PWD}\"" }
+        { "type": "command", "command": "bash \"$HOME/.claude/cc-popup.sh\" \"${CLAUDE_PROJECT_DIR:-$PWD}\" complete" }
       ] }
     ],
     "SessionEnd": [

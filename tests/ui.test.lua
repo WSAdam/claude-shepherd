@@ -69,6 +69,43 @@ do
   eq("labels: nil table is a no-op", list[1].label, nil)
 end
 
+-- ---- applyLabelsByCwd: persistent display override keyed by project path ----
+do
+  local list = {
+    { key = "s1", name = "frontend", cwd = "/Users/a/proj" },
+    { key = "s2", name = "rune",     cwd = "/Users/a/rune" },
+  }
+  core.applyLabelsByCwd(list, { ["/Users/a/proj"] = "Web UI" })
+  eq("labels-cwd: sets display label by cwd", list[1].label, "Web UI")
+  eq("labels-cwd: real name untouched", list[1].name, "frontend")
+  eq("labels-cwd: unmatched cwd has no label", list[2].label, nil)
+
+  -- a brand-new session (different key) in the SAME folder inherits the label
+  local fresh = { { key = "s3", name = "frontend", cwd = "/Users/a/proj" } }
+  core.applyLabelsByCwd(fresh, { ["/Users/a/proj"] = "Web UI" })
+  eq("labels-cwd: new session same cwd inherits", fresh[1].label, "Web UI")
+
+  -- nil map and a missing cwd are both no-ops (no crash)
+  core.applyLabelsByCwd({ { key = "x", name = "n" } }, nil)
+  check("labels-cwd: nil map / missing cwd safe", true)
+end
+
+-- ---- setLabel: immutable set / clear-on-blank / clear-on-equals-name --------
+do
+  local m = core.setLabel({}, "/p", "Nice Name", "p")
+  eq("setLabel: sets value", m["/p"], "Nice Name")
+
+  -- input table is never mutated
+  local src = {}
+  core.setLabel(src, "/p", "x", "p")
+  eq("setLabel: input untouched", next(src), nil)
+
+  eq("setLabel: trims whitespace", core.setLabel({}, "/p", "  Spaced  ", "p")["/p"], "Spaced")
+  eq("setLabel: blank clears", core.setLabel({ ["/p"] = "x" }, "/p", "  ", "p")["/p"], nil)
+  eq("setLabel: equals folder name clears", core.setLabel({ ["/p"] = "x" }, "/p", "p", "p")["/p"], nil)
+  eq("setLabel: nil cwd is a no-op (returns copy)", core.setLabel({ ["/p"] = "x" }, nil, "y", "z")["/p"], "x")
+end
+
 -- ---- handleAction: nudge pastes (newline-safe), close stops + removes -------
 do
   local normal = { key = "n1", name = "proj-n" }
@@ -105,6 +142,12 @@ do
   eq("dataurl: non-image rejected", core.parseDataUrl("data:text/plain;base64,aGk="), nil)
   eq("dataurl: garbage rejected", core.parseDataUrl("not a data url"), nil)
   eq("dataurl: nil rejected", core.parseDataUrl(nil), nil)
+
+  -- tolerate intermediate params (charset) between mime and ;base64,
+  local svg = core.parseDataUrl("data:image/svg+xml;charset=utf-8;base64,PHN2Zz4=")
+  eq("dataurl: svg+params mime", svg and svg.mime, "image/svg+xml")
+  eq("dataurl: svg ext normalized to svg", svg and svg.ext, "svg")
+  eq("dataurl: svg payload", svg and svg.b64, "PHN2Zz4=")
 end
 
 -- ---- tempImagePath: deterministic, key/ext-derived path --------------------
@@ -181,6 +224,50 @@ do
   r = newRecorder()
   core.handleAction(r.fx, { key = "k", name = "proj", cwd = "/p", editor = "vscode" }, "answer", "1")
   eq("answer(vscode): jumps instead of sending keys", r.last().op, "focusWindow")
+
+  -- kitty + MULTI-select picker: down*N+Enter can't drive it, so jump instead
+  local multiItem = { key = "k", name = "proj", cwd = "/p", editor = "kitty",
+    pending = { ask = { { question = "Pick", multiSelect = true, options = {} } } } }
+  r = newRecorder()
+  core.handleAction(r.fx, multiItem, "answer", "1")
+  eq("answer(kitty multi): jumps, not sendKeys", r.last().op, "focusWindow")
+  check("askIsMulti: true for multiSelect", core.askIsMulti(multiItem) == true)
+  check("askIsMulti: false for single-select", core.askIsMulti({ pending = { ask = { { multiSelect = false } } } }) == false)
+  check("askIsMulti: false when no pending ask", core.askIsMulti({ name = "x" }) == false)
+end
+
+-- ---- Part A: kitty effect routing carries the target (headless) ------------
+do
+  local kitty = { key = "k1", name = "proj", cwd = "/p", editor = "kitty",
+    kitty_window_id = "7", kitty_listen_on = "unix:/tmp/k" }
+
+  -- ungated approve on kitty -> actOnWindow with the kitty target (becomes a
+  -- headless send-key "enter" in the FX layer; no focus).
+  local r = newRecorder()
+  core.handleAction(r.fx, kitty, "approve")
+  eq("kitty approve: actOnWindow", r.last().op, "actOnWindow")
+  eq("kitty approve: target editor kitty", r.last().tgt.editor, "kitty")
+  eq("kitty approve: target window id", r.last().tgt.kittyWindowId, "7")
+  eq("kitty approve: key is return", r.last().b.key, "return")
+
+  -- close routes with the kitty target (socket carried through)
+  r = newRecorder()
+  core.handleAction(r.fx, kitty, "close")
+  eq("kitty close: closeWindow first", r.calls[1].op, "closeWindow")
+  eq("kitty close: target carries socket", r.calls[1].tgt.kittyListenOn, "unix:/tmp/k")
+
+  -- set-mode default->plan = 2 Shift+Tab via sendKeys (Part C)
+  r = newRecorder()
+  core.handleAction(r.fx, { key = "k", name = "p", editor = "kitty", permission_mode = "default" }, "set-mode", "plan")
+  eq("set-mode: routes to sendKeys", r.last().op, "sendKeys")
+  eq("set-mode: 2 shift-tabs", #r.last().b, 2)
+  eq("set-mode: key is tab", r.last().b[1].key, "tab")
+  eq("set-mode: shift modifier", r.last().b[1].mods[1], "shift")
+
+  -- set-mode no-op when already in the target mode
+  r = newRecorder()
+  core.handleAction(r.fx, { key = "k", name = "p", permission_mode = "plan" }, "set-mode", "plan")
+  eq("set-mode: same mode -> no effect", r.count(), 0)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

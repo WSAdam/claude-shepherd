@@ -26,7 +26,7 @@ core.json = hs.json   -- production JSON impl (tests inject a vendored one)
 -- value in a 1-element array and strip the [ ] — that reuses hs.json's correct
 -- escaping (quotes, newlines, unicode) and yields "...". Using hs.json.encode on
 -- a bare string was the silent ⌘V/relabel/close failure.
-local function jsString(s) return hs.json.encode({ tostring(s) }):sub(2, -2) end
+local function jsString(s) return core.jsString(s) end  -- pure impl in cc-core (tested)
 
 -- Mirror every print() to a logfile so the Hammerspoon console can stay CLOSED
 -- (an open console pops over your work whenever HS activates). Tail it with:
@@ -57,6 +57,8 @@ local CONFIG_FILE   = os.getenv("CC_CONFIG_FILE") or (os.getenv("HOME") .. "/.cl
 local QUEUE_DIR     = os.getenv("CC_QUEUE_DIR") or (os.getenv("HOME") .. "/.claude/cc-queue")
 local AUTOPILOT_DIR = os.getenv("CC_AUTOPILOT_DIR") or (os.getenv("HOME") .. "/.claude/cc-autopilot")
 local GATE_FLAG     = os.getenv("CC_GATE_FLAG") or (os.getenv("HOME") .. "/.claude/cc-gate.enabled")
+local LABELS_FILE   = os.getenv("CC_LABELS_FILE") or (os.getenv("HOME") .. "/.claude/cc-labels.json")
+local RECENT_FILE   = os.getenv("CC_RECENT_FILE") or (os.getenv("HOME") .. "/.claude/cc-recent-dirs.json")
 local EDITOR_BUNDLES = {
   "com.microsoft.VSCode",
   "com.microsoft.VSCodeInsiders",
@@ -108,8 +110,10 @@ core.STALE_SECONDS = STALE_SECONDS
 
 -- session key (status filename base) -> latest item, for resolving actions.
 local byKey = {}
--- Ephemeral display relabels: key -> override name. In-memory only, so a reload
--- clears them (the user asked for relabels NOT to persist across restart).
+-- Persistent display relabels, keyed by project path (cwd) so a brand-new session
+-- in the same folder inherits the name. Persisted to cc-labels.json; survives a
+-- new instance, close/reopen, and a Hammerspoon reload. (This intentionally
+-- reverses the earlier in-memory-only rule.) Loaded from disk once FX exists.
 local labels = {}
 local ctxMenu            -- holds the live right-click popup menu (so it isn't GC'd)
 local wv                 -- the webview; forward-declared so the controller can push to it
@@ -117,6 +121,7 @@ local lastJumpKey = nil  -- for the cycle-jump hotkey
 local spawnPrompt        -- forward declaration (defined after FX)
 local prevStatus = {}    -- key -> last refresh's status (for auto-feed transitions)
 local escalated  = {}    -- key -> true once we've escalated this approval episode
+local caffeineTick = 0   -- throttles the keep-awake state re-read (F2)
 local loadConfig         -- forward declaration (defined near refresh)
 local refresh            -- forward declaration (so the controller can repaint now)
 
@@ -132,23 +137,11 @@ local function findEditorApp()
 end
 
 -- Generic path components that should never be used as a focus candidate.
-local FOCUS_SKIP = { users = true, programming = true, desktop = true,
-  documents = true, projects = true, project = true, src = true, code = true,
-  repos = true, repo = true, dev = true, home = true, [""] = true }
-FOCUS_SKIP[string.lower(os.getenv("USER") or "")] = true
-
--- Does a window title's folder segment (after the last em-dash) contain needle?
--- VS Code titles are "<file> — <folder>"; matching the folder avoids grabbing a
--- window whose task title merely mentions the word (e.g. sms-bot's "Canary alerts").
-local function titleFolderMatch(title, needle)
-  local seg = title:match(".*—%s*(.+)$") or title
-  return seg:find(needle, 1, true) ~= nil
-end
-
 -- Focus the editor window for a session. Tries the session name first, then walks
 -- UP the cwd path (parent folders), so a session running in a subfolder (name
 -- "frontend") still finds its workspace window (titled "… — autobottom"). Returns
--- true if a specific window was focused (switches Spaces automatically).
+-- true if a specific window was focused (switches Spaces automatically). The
+-- candidate-building + title matching are pure (cc-core, tested -- review #4).
 local function focusProject(name, cwd)
   print("[cc-dashboard] focus request: " .. tostring(name))
   local app = findEditorApp()
@@ -158,28 +151,13 @@ local function focusProject(name, cwd)
     return false
   end
   local windows = app:allWindows()
-
-  -- Build candidates most-specific first: the name, then cwd ancestors (deepest
-  -- first), skipping generic roots. De-duped.
-  local candidates, seen = {}, {}
-  local function add(n)
-    n = string.lower(n or "")
-    if n ~= "" and not FOCUS_SKIP[n] and not seen[n] then
-      seen[n] = true; candidates[#candidates + 1] = n
-    end
-  end
-  add(name)
-  if cwd then
-    local parts = {}
-    for p in tostring(cwd):gmatch("[^/]+") do parts[#parts + 1] = p end
-    for i = #parts - 1, 1, -1 do add(parts[i]) end  -- ancestors, deepest first
-  end
+  local candidates = core.focusCandidates(name, cwd, os.getenv("USER"))
 
   -- Pass 1: folder-match each candidate in order; first hit wins.
   for _, needle in ipairs(candidates) do
     for _, w in ipairs(windows) do
       local title = string.lower(w:title() or "")
-      if title ~= "" and titleFolderMatch(title, needle) then
+      if title ~= "" and core.titleFolderMatch(title, needle) then
         w:focus()
         print("[cc-dashboard] focused (folder: " .. needle .. "): " .. (w:title() or "?"))
         return true
@@ -254,7 +232,105 @@ function FX.writeQueue(key, q)
   hs.fs.mkdir(QUEUE_DIR)
   FX.writeFile(QUEUE_DIR .. "/" .. key .. ".json", core.json.encode(q))
 end
-function FX.feedTask(name, task) FX.typeIntoWindow(name, task) end
+function FX.feedTask(target, task) FX.typeIntoWindow(target, task) end
+
+-- Persistent relabels (F1): a JSON map of project path (cwd) -> override name.
+-- Missing/garbled file -> empty map (no labels). Mirrors the queue I/O above.
+function FX.loadLabels()
+  local c = FX.readFile(LABELS_FILE)
+  if not c or #c == 0 then return {} end
+  local ok, t = pcall(function() return core.json.decode(c) end)
+  return (ok and type(t) == "table") and t or {}
+end
+function FX.saveLabels(labelsByCwd)
+  hs.fs.mkdir(os.getenv("HOME") .. "/.claude")
+  FX.writeFile(LABELS_FILE, core.json.encode(labelsByCwd or {}))
+end
+
+-- ---- New-session effects (F3-F5): folder browser, recents, mkdir -----------
+-- List the visible SUBFOLDERS of a path for the in-panel browser. Expands a
+-- leading ~, resolves to an absolute path, keeps only directories, sorts, caps.
+-- Falls back to the raw path + empty list on a bad/denied dir (never errors).
+function FX.listDirs(path)
+  local raw = tostring(path or "")
+  if raw:sub(1, 1) == "~" then raw = (os.getenv("HOME") or "") .. raw:sub(2) end
+  local abs = hs.fs.pathToAbsolute(raw) or raw
+  if abs == "" then abs = ORCH_DEFAULT_DIR end
+  local dirs = {}
+  for _, name in ipairs(FX.readDir(abs)) do
+    if core.isVisibleDir(name)
+       and hs.fs.attributes(core.pathJoin(abs, name), "mode") == "directory" then
+      dirs[#dirs + 1] = name
+    end
+  end
+  dirs = core.sortDirs(dirs)
+  if #dirs > 500 then local t = {}; for i = 1, 500 do t[i] = dirs[i] end; dirs = t end
+  return { path = abs, parent = core.parentPath(abs), dirs = dirs }
+end
+
+-- Recent project dirs (F5). Missing/garbled -> empty. Mirrors the queue/label I/O.
+function FX.readRecent()
+  local c = FX.readFile(RECENT_FILE)
+  if not c or #c == 0 then return { dirs = {} } end
+  local ok, t = pcall(function() return core.json.decode(c) end)
+  return (ok and type(t) == "table" and type(t.dirs) == "table") and t or { dirs = {} }
+end
+function FX.writeRecent(state)
+  hs.fs.mkdir(os.getenv("HOME") .. "/.claude")
+  FX.writeFile(RECENT_FILE, core.json.encode(state or { dirs = {} }))
+end
+
+-- Create a project folder (F3). One level under an existing parent (the browsed
+-- dir). An existing path is treated as success ("use existing").
+function FX.mkdirP(path)
+  if not path or path == "" then return false end
+  if hs.fs.attributes(path) then return true end
+  return hs.fs.mkdir(path) and true or false
+end
+
+-- Resolve a binary to an absolute path (hs.task does NOT search PATH). Prefers a
+-- configured path, then the user's login-shell PATH, then common Homebrew spots.
+local function resolveBin(name, configured)
+  if configured and configured ~= "" and configured ~= name
+     and hs.fs.attributes(configured) then return configured end
+  local out = hs.execute("command -v " .. name, true)  -- true = user's shell/PATH
+  if out then out = out:gsub("%s+$", "") end
+  if out and #out > 0 and hs.fs.attributes(out) then return out end
+  for _, p in ipairs({ "/opt/homebrew/bin/" .. name, "/usr/local/bin/" .. name }) do
+    if hs.fs.attributes(p) then return p end
+  end
+  return configured or name
+end
+
+-- ---- Kitty remote control (F: detect + auto-enable) ------------------------
+function FX.kittyConfPath()
+  local dir = os.getenv("KITTY_CONFIG_DIRECTORY")
+  if not dir or dir == "" then dir = (os.getenv("HOME") or "") .. "/.config/kitty" end
+  return dir .. "/kitty.conf"
+end
+
+function FX.kittyRunning()
+  local apps = hs.application.applicationsForBundleID("net.kovidgoyal.kitty")
+  return (apps and #apps > 0) or (hs.application.find("kitty") ~= nil)
+end
+
+-- Ensure the user's global kitty.conf enables remote control on a socket, so the
+-- kitty windows they open themselves (not just the ones we spawn) are reachable
+-- by `kitty @` (Part A). Backs up first, idempotent. Returns "ok" (changed),
+-- "already" (nothing to do), or "error". A change needs a kitty restart to apply.
+function FX.ensureKittyRemote()
+  local path = FX.kittyConfPath()
+  local cur = FX.readFile(path) or ""
+  if core.kittyRemoteStatus(cur).usable then return "already" end
+  local newText, changed = core.kittyConfWithRemote(cur, nil)
+  if not changed then return "already" end
+  hs.fs.mkdir((os.getenv("HOME") or "") .. "/.config")
+  hs.fs.mkdir(path:match("(.*)/[^/]+$") or ".")
+  if #cur > 0 then FX.writeFile(path .. ".cc-backup", cur) end
+  FX.writeFile(path, newText)
+  print("[cc-kitty] enabled remote control in " .. path)
+  return "ok"
+end
 
 -- Per-session autopilot (Phase 4c-C): a file holding an expiry epoch.
 function FX.autopilotExpiry(key)
@@ -284,6 +360,27 @@ function FX.writeFile(path, content)
   local f = io.open(path, "w"); if f then f:write(content); f:close() end
 end
 
+-- Caffeinate / keep-awake (F2). Reading state needs no privileges; toggling does.
+-- Read the live keep-awake flag without sudo (pmset -g is unprivileged). Returns
+-- true/false, or nil if the flag couldn't be read (caller keeps the UI as-is).
+function FX.caffeineState()
+  local out = hs.execute("/usr/bin/pmset -g")
+  return core.parseSleepDisabled(out or "")
+end
+
+-- Toggle keep-awake via a GUI admin-password prompt (one prompt per toggle, by
+-- the user's explicit choice over a NOPASSWD sudoers entry). The command is a
+-- fixed string (only the literal 1/0 from the pure builder), so no injection.
+-- Returns true on success; a cancelled/failed dialog returns false (the caller
+-- re-reads caffeineState() to resync the UI to the real, unchanged state).
+function FX.setCaffeinate(on)
+  local script = 'do shell script "' .. core.pmsetDisableSleepCmd(on)
+    .. '" with administrator privileges'
+  local ok, _, raw = hs.osascript.applescript(script)
+  if not ok then print("[cc-caffeine] toggle cancelled or failed: " .. tostring(raw)) end
+  return ok and true or false
+end
+
 function FX.removeStatus(key) os.remove(STATUS_DIR .. "/" .. key .. ".json") end
 
 function FX.writeDecision(key, value)
@@ -291,7 +388,34 @@ function FX.writeDecision(key, value)
   print("[cc-dashboard] decision " .. tostring(value) .. " -> " .. tostring(key))
 end
 
-function FX.focusWindow(name, cwd) return focusProject(name, cwd) end
+-- ---- Kitty effect routing (Part A): run effects headlessly via `kitty @` ----
+-- Fire one kitty @ remote-control command (no window focus) via hs.task. Returns
+-- true if launched. nil argv (un-targetable / unsupported) or no bin -> false.
+local function runKitty(argv)
+  if not argv then return false end
+  local bin = resolveBin("kitty", core.config(loadConfig(), "spawn.kittyBin", nil))
+  print("[cc-kitty] " .. bin .. " " .. table.concat(argv, " "))
+  local t = hs.task.new(bin, nil, argv)
+  if t then t:start(); return true end
+  return false
+end
+local function isKitty(target) return type(target) == "table" and target.editor == "kitty" end
+-- Adapt the handleAction target to the field names core.kittyCmd reads.
+local function kittyItem(target)
+  return { kitty_window_id = target.kittyWindowId,
+           kitty_listen_on = target.kittyListenOn, cwd = target.cwd }
+end
+-- Build a window-effect target from a status item (for the direct, non-handleAction
+-- call sites: feedTask / clear / compact / image-paste).
+local function winTarget(it)
+  return { name = it.name, cwd = it.cwd, editor = it.editor,
+           kittyWindowId = it.kitty_window_id, kittyListenOn = it.kitty_listen_on }
+end
+
+function FX.focusWindow(target)
+  if isKitty(target) then return runKitty(core.kittyCmd("focus", kittyItem(target))) end
+  return focusProject(target.name, target.cwd)
+end
 
 -- Focus a window, then send after a short delay, then restore prior focus.
 local function sendToWindow(name, sendFn)
@@ -305,15 +429,24 @@ local function sendToWindow(name, sendFn)
   end)
 end
 
-function FX.actOnWindow(name, keySpec)
-  sendToWindow(name, function() hs.eventtap.keyStroke(keySpec.mods, keySpec.key) end)
+function FX.actOnWindow(target, keySpec)
+  -- kitty: headless send-key (no focus) -- approve="enter", deny/stop="esc".
+  if isKitty(target) then
+    return runKitty(core.kittyCmd("key", kittyItem(target), { token = core.kittyKeyToken(keySpec) }))
+  end
+  sendToWindow(target.name, function() hs.eventtap.keyStroke(keySpec.mods, keySpec.key) end)
 end
 
 -- Focus a window, run the (timer-driven) injection sequence, and ONLY restore the
 -- prior focus AFTER the final Return. (sendToWindow restores too early for these
 -- multi-step sequences — it re-focuses while ⌘V/Return are still pending, so the
 -- keystrokes hit the wrong window. That race was the chronic nudge flakiness.)
-function FX.typeIntoWindow(name, text)
+function FX.typeIntoWindow(target, text)
+  -- kitty: one headless send-text (trailing \r submits); no focus / chat-key dance.
+  if isKitty(target) then
+    return runKitty(core.kittyCmd("text", kittyItem(target), { text = text .. "\r" }))
+  end
+  local name = target.name
   print("[cc-dashboard] type -> " .. tostring(name) .. ": " .. tostring(text))
   local prevWin = RESTORE_FOCUS and hs.window.focusedWindow() or nil
   focusProject(name)
@@ -335,8 +468,16 @@ end
 -- more reliable in the VS Code extension. payload = { text=…, imagePath=… }.
 -- Best-effort: depends on the chat input being focusable. The prior text
 -- clipboard is restored afterwards.
-function FX.pasteIntoWindow(name, payload)
+function FX.pasteIntoWindow(target, payload)
   payload = payload or {}
+  -- kitty: no clipboard-image attach via @; send the text (if any) headlessly.
+  if isKitty(target) then
+    if payload.text and #payload.text > 0 then
+      return runKitty(core.kittyCmd("text", kittyItem(target), { text = payload.text .. "\r" }))
+    end
+    return false
+  end
+  local name = target.name
   print("[cc-dashboard] paste -> " .. tostring(name)
     .. (payload.imagePath and " [image]" or "")
     .. (payload.text and (": " .. payload.text) or ""))
@@ -381,16 +522,25 @@ end
 -- VS Code/Cursor "Close Window" chord (⌘⇧W). Unreliable if the title can't be
 -- matched (focusProject falls back to just activating the app), so the caller
 -- also drops the dashboard tile regardless.
-function FX.closeWindow(name)
-  print("[cc-dashboard] close window -> " .. tostring(name))
-  sendToWindow(name, function() hs.eventtap.keyStroke({ "cmd", "shift" }, "w") end)
+function FX.closeWindow(target)
+  if isKitty(target) then return runKitty(core.kittyCmd("close", kittyItem(target))) end
+  print("[cc-dashboard] close window -> " .. tostring(target.name))
+  sendToWindow(target.name, function() hs.eventtap.keyStroke({ "cmd", "shift" }, "w") end)
 end
 
 -- Drive a sequence of keystrokes into a session (e.g. arrow-down ×N + Return to
 -- pick an AskUserQuestion option). Focus first, send each key with a small gap,
 -- restore prior focus only AFTER the last key (same race-safe pattern as paste).
-function FX.sendKeys(name, keys)
+function FX.sendKeys(target, keys)
   keys = keys or {}
+  -- kitty: one headless send-key per key (no focus); used by answer + set-mode.
+  if isKitty(target) then
+    for _, k in ipairs(keys) do
+      runKitty(core.kittyCmd("key", kittyItem(target), { token = core.kittyKeyToken(k) }))
+    end
+    return
+  end
+  local name = target.name
   print("[cc-dashboard] send keys -> " .. tostring(name) .. " (" .. #keys .. " keys)")
   local prevWin = RESTORE_FOCUS and hs.window.focusedWindow() or nil
   focusProject(name)
@@ -418,15 +568,79 @@ function FX.writeImageTemp(b64, ext)
   return path
 end
 
--- Spawn a new Claude session (Phase 4). Dry-run logs what it WOULD do.
-function FX.spawnSession(project, prompt)
-  local script = core.spawnAppleScript(project, prompt, { terminal = ORCH_TERMINAL })
-  if ORCH_DRY_RUN then
-    print("[cc-orch] DRY-RUN would run: " .. script)
-    hs.alert.show("Claude Shepherd (dry-run): would spawn in " .. tostring(project))
+-- Best-effort: open a VS Code/Cursor window at the project, then drive a new
+-- integrated terminal and type `claude …`. There's no supported API to start a
+-- session in the editor's terminal, so this is keystroke automation (Kitty and
+-- Terminal are the reliable paths). Reuses focusProject + the eventtap ladder.
+local function spawnEditorWindow(spec)
+  print("[cc-orch] " .. spec.editor .. " spawn: open " .. spec.app .. " at " .. tostring(spec.project))
+  local t = hs.task.new("/usr/bin/open", nil, { "-na", spec.app, "--args", spec.project })
+  if t then t:start() end
+  hs.alert.show("Claude Shepherd: opening " .. spec.app .. " — starting claude (best-effort)")
+  local proj = spec.project
+  local name = proj and proj:match("([^/]+)/?$") or nil
+  hs.timer.doAfter(2.0, function() pcall(function()
+    focusProject(name, proj)
+    hs.timer.doAfter(0.5, function()
+      -- New integrated terminal via the Command Palette (more reliable than ⌃`,
+      -- which would hide an already-open terminal).
+      hs.eventtap.keyStroke({ "cmd", "shift" }, "p")
+      hs.timer.doAfter(0.35, function()
+        hs.eventtap.keyStrokes("Terminal: Create New Terminal")
+        hs.timer.doAfter(0.2, function()
+          hs.eventtap.keyStroke({}, "return")
+          hs.timer.doAfter(0.6, function()
+            hs.eventtap.keyStrokes(spec.postType)
+            hs.eventtap.keyStroke({}, "return")
+          end)
+        end)
+      end)
+    end)
+  end) end)
+end
+
+-- Short human-readable description of a spawn spec, for dry-run logging.
+local function describeSpec(spec)
+  if spec.kind == "kitty" then return table.concat(spec.argv, " ")
+  elseif spec.kind == "vscode" then
+    return "open " .. spec.app .. " @ " .. tostring(spec.project) .. " + type: " .. spec.postType
+  end
+  return spec.applescript
+end
+
+-- Spawn a new Claude session, editor-aware (F3-F5). The editor comes from the
+-- caller (the modal's picker) or falls back to `spawn.editor` in config. Effective
+-- dry-run = the code default ORCH_DRY_RUN unless the user flips `spawn.live` on.
+function FX.spawnSession(editor, project, task, permissionMode)
+  local cfg = loadConfig()
+  editor = (editor and editor ~= "") and editor or core.config(cfg, "spawn.editor", "terminal")
+  local opts = {
+    terminal       = ORCH_TERMINAL,
+    kittyBin       = resolveBin("kitty", core.config(cfg, "spawn.kittyBin", nil)),
+    kittyRemote    = core.config(cfg, "spawn.kittyRemote", true) ~= false,
+    kittySocket    = core.config(cfg, "spawn.kittySocket", nil),
+    permissionMode = (permissionMode and permissionMode ~= "") and permissionMode or nil,
+  }
+  local spec = core.spawnSpec(editor, project, task, opts)
+  local live = core.config(cfg, "spawn.live", false) == true
+  if ORCH_DRY_RUN and not live then
+    print("[cc-orch] DRY-RUN (" .. spec.kind .. ") would spawn in "
+      .. tostring(project) .. ": " .. describeSpec(spec))
+    hs.alert.show("Claude Shepherd (dry-run): would spawn " .. spec.kind .. " in " .. tostring(project))
+    return
+  end
+  if spec.kind == "kitty" then
+    print("[cc-orch] kitty spawn: " .. table.concat(spec.argv, " "))
+    local args = {}
+    for i = 2, #spec.argv do args[#args + 1] = spec.argv[i] end
+    local t = hs.task.new(spec.argv[1], nil, args)
+    if t then t:start() else print("[cc-orch] kitty task failed to build") end
+    hs.alert.show("Claude Shepherd: spawning kitty in " .. tostring(project))
+  elseif spec.kind == "vscode" then
+    spawnEditorWindow(spec)
   else
-    print("[cc-orch] spawning in " .. tostring(project))
-    hs.osascript.applescript(script)  -- Terminal opens a login shell -> claude on PATH
+    print("[cc-orch] terminal spawn in " .. tostring(project))
+    hs.osascript.applescript(spec.applescript)  -- Terminal login shell -> claude on PATH
     hs.alert.show("Claude Shepherd: spawning a session in " .. tostring(project))
   end
 end
@@ -441,7 +655,9 @@ function spawnPrompt()
   local b2, task = hs.dialog.textPrompt("New Claude session", "Initial task (optional):",
     "", "Spawn", "Cancel")
   if b2 ~= "Spawn" then return end
-  FX.spawnSession(project, task)
+  local editor = core.config(loadConfig(), "spawn.editor", "terminal")
+  FX.writeRecent(core.recentPush(FX.readRecent(), project))
+  FX.spawnSession(editor, project, task)
 end
 
 -- Relabel + close are driven by IN-WEBVIEW UI (inline rename input / inline
@@ -463,6 +679,28 @@ local function handleBridgeMsg(msg)
     print("[cc-dashboard] theme saved: " .. tostring(payload.v))
     return
   end
+  if a == "caffeinate" then
+    -- Global toggle (not per-session). Flip via the admin prompt, then re-read the
+    -- TRUE state (a cancelled dialog leaves it unchanged) and push it back, so the
+    -- button reflects reality rather than an optimistic guess.
+    local want = (payload.v == true) or (payload.v == "true") or (payload.v == 1)
+    FX.setCaffeinate(want)
+    local state = FX.caffeineState()
+    if state ~= nil then
+      pcall(function() wv:evaluateJavaScript("setCaffeine(" .. tostring(state) .. ")") end)
+    end
+    return
+  end
+  if a == "kitty-remote" then
+    -- Manually enable kitty remote control in the user's kitty.conf (so `kitty @`
+    -- effects work). Idempotent; a change needs a kitty restart to take effect.
+    local res = FX.ensureKittyRemote()
+    local msg = (res == "ok") and "enabled kitty remote control — restart kitty to apply"
+      or (res == "already") and "kitty remote control already enabled"
+      or "couldn't update kitty.conf"
+    pcall(function() hs.alert.show("Claude Shepherd: " .. msg) end)
+    return
+  end
   if a == "open-settings" then
     -- Push the current config (or {} = all defaults) + gate state into the form.
     local raw = FX.readFile(CONFIG_FILE)
@@ -477,7 +715,10 @@ local function handleBridgeMsg(msg)
     local ok, parsed = pcall(function() return hs.json.decode(payload.text or "{}") end)
     if ok and type(parsed) == "table" then
       hs.fs.mkdir(os.getenv("HOME") .. "/.claude")
-      FX.writeFile(CONFIG_FILE, hs.json.encode(parsed.config or {}, true))  -- creates if missing
+      local cfg = parsed.config or {}
+      -- Normalize the editable gated-tools list (space/comma -> clean, deduped).
+      if type(cfg.gate) == "table" then cfg.gate.tools = core.parseToolList(cfg.gate.tools) end
+      FX.writeFile(CONFIG_FILE, hs.json.encode(cfg, true))  -- creates if missing
       if parsed.gate == true then FX.writeFile(GATE_FLAG, "")
       else os.remove(GATE_FLAG) end
       print("[cc-dashboard] saved cc-config.json (gate=" .. tostring(parsed.gate) .. ")")
@@ -485,8 +726,53 @@ local function handleBridgeMsg(msg)
     end
     return
   end
+  if a == "open-new" then
+    -- Feed the modal: current config + recent dirs (seeded with active session
+    -- cwds) + the initial folder listing.
+    local raw = FX.readFile(CONFIG_FILE)
+    local json = (raw and #raw > 0) and raw or "{}"
+    local active = {}
+    for _, it in pairs(byKey) do if it.cwd then active[#active + 1] = it.cwd end end
+    local recent = core.recentSeed(FX.readRecent(), active)
+    local browse = FX.listDirs(ORCH_DEFAULT_DIR)
+    pcall(function()
+      wv:evaluateJavaScript("showNew(" .. json .. ", "
+        .. hs.json.encode(recent.dirs) .. ", " .. hs.json.encode(browse) .. ")")
+    end)
+    return
+  end
+  if a == "list-dir" then
+    local path = (payload.v and tostring(payload.v) ~= "") and tostring(payload.v) or ORCH_DEFAULT_DIR
+    local browse = FX.listDirs(path)
+    pcall(function() wv:evaluateJavaScript("ccBrowse(" .. hs.json.encode(browse) .. ")") end)
+    return
+  end
   if a == "spawn" then
-    spawnPrompt()
+    -- From the in-panel modal (carries mode + dir/parent+name + editor); with no
+    -- usable dir we fall back to the native two-prompt flow (also the ⌘⌥S path).
+    local mode   = tostring(payload.mode or "")
+    local editor = payload.editor and tostring(payload.editor) or nil
+    local task   = payload.text and tostring(payload.text) or nil
+    local dir
+    if mode == "new" then
+      dir = core.newProjectPath(tostring(payload.parent or ""), tostring(payload.name or ""))
+      if not dir then
+        pcall(function() hs.alert.show("Claude Shepherd: invalid project name") end)
+        return
+      end
+      if not FX.mkdirP(dir) then
+        pcall(function() hs.alert.show("Claude Shepherd: couldn't create " .. dir) end)
+        return
+      end
+    elseif mode == "existing" then
+      dir = payload.dir and tostring(payload.dir) or ""
+    end
+    if not dir or dir == "" then
+      spawnPrompt()  -- no dir from the modal -> native fallback
+      return
+    end
+    FX.writeRecent(core.recentPush(FX.readRecent(), dir))
+    FX.spawnSession(editor, dir, task, payload.permMode and tostring(payload.permMode) or nil)
     return
   end
   if a == "queue-add" then
@@ -503,7 +789,7 @@ local function handleBridgeMsg(msg)
     local item = byKey[key]
     if item then
       local task, q2 = core.queuePop(FX.readQueue(key))
-      if task then FX.feedTask(item.name, task); FX.writeQueue(key, q2) end
+      if task then FX.feedTask(winTarget(item), task); FX.writeQueue(key, q2) end
     end
     return
   end
@@ -519,7 +805,7 @@ local function handleBridgeMsg(msg)
              "?\nThis types /compact into its terminal.")
       pcall(function()
         if hs.dialog.blockAlert(title, msg, "Yes", "Cancel") == "Yes" then
-          FX.typeIntoWindow(item.name, cmd)
+          FX.typeIntoWindow(winTarget(item), cmd)
         end
       end)
     end
@@ -564,7 +850,8 @@ local function handleBridgeMsg(msg)
         -- first click just activated the window, so commitClose never fired).
         { title = "Close instance", menu = {
             { title = "Confirm: close " .. shown, fn = function()
-                labels[item.key] = nil
+                -- Keep the project's persistent label (F1): closing this session
+                -- shouldn't forget the name for the next session in that folder.
                 core.handleAction(FX, item, "close")
                 refresh()
               end },
@@ -576,15 +863,17 @@ local function handleBridgeMsg(msg)
     return
   end
   if a == "relabel" then
-    -- New display name from the inline editor; blank or == real name clears it.
-    local txt = (payload.text and tostring(payload.text) or ""):gsub("^%s+", ""):gsub("%s+$", "")
-    labels[item.key] = (txt ~= "" and txt ~= item.name) and txt or nil
-    print("[cc-dashboard] relabel " .. item.key .. " -> " .. tostring(labels[item.key]))
+    -- Persistent display name keyed by project path (cwd); blank or == the real
+    -- folder name clears it. Survives close/reopen/new-instance/reload (F1).
+    labels = core.setLabel(labels, item.cwd, payload.text, item.name)
+    FX.saveLabels(labels)
+    print("[cc-dashboard] relabel " .. tostring(item.cwd) .. " -> " .. tostring(labels[item.cwd]))
     refresh()
     return
   end
   if a == "close" then
-    labels[item.key] = nil
+    -- Keep the project's persistent label (F1): only an explicit relabel-to-blank
+    -- clears it, not closing a session.
     core.handleAction(FX, item, "close")
     refresh()
     return
@@ -595,7 +884,7 @@ local function handleBridgeMsg(msg)
     if parsed then
       local path = FX.writeImageTemp(parsed.b64, parsed.ext)
       if path then
-        FX.pasteIntoWindow(item.name, { text = payload.text and tostring(payload.text) or nil, imagePath = path })
+        FX.pasteIntoWindow(winTarget(item), { text = payload.text and tostring(payload.text) or nil, imagePath = path })
       else
         print("[cc-dashboard] image paste: failed to write temp file")
       end
@@ -717,6 +1006,10 @@ local HTML = [[
   #spawn { background:#21232c; color:#8fd4a3; border:1px solid #2c5; border-radius:8px;
            font-size:12px; padding:3px 8px; cursor:pointer; }
   #spawn:hover { background:#27332b; }
+  #caffeine { background:#21232c; color:#cfd2db; border:1px solid #2c2f3a; border-radius:8px;
+           font-size:12px; padding:3px 8px; cursor:pointer; white-space:nowrap; }
+  #caffeine:hover { background:#272a35; }
+  #caffeine.active { background:#3a2f17; color:#f5b50a; border-color:#b9772a; }
   #settings-btn { background:#21232c; color:#cfd2db; border:1px solid #2c2f3a;
            border-radius:8px; font-size:13px; padding:3px 8px; cursor:pointer; }
 
@@ -733,6 +1026,8 @@ local HTML = [[
   .s-row { display:flex; align-items:center; gap:6px; font-size:13px; color:#d7d9e0;
            padding:4px 0; flex-wrap:wrap; }
   .s-lbl { color:#8a8d99; font-size:11px; margin:8px 0 3px; }
+  .s-help { color:#6b7280; font-size:11px; margin:1px 0 6px 22px; line-height:1.35; }
+  .s-row b { color:#cfd2db; font-weight:600; }
   .s-num { width:54px; background:#1b1d24; color:#e8e9ee; border:1px solid #2c2f3a; border-radius:6px; padding:2px 5px; }
   .s-txt { flex:1; min-width:120px; background:#1b1d24; color:#e8e9ee; border:1px solid #2c2f3a; border-radius:6px; padding:2px 6px; }
   .s-area { width:100%; height:54px; background:#1b1d24; color:#e8e9ee; border:1px solid #2c2f3a;
@@ -867,12 +1162,50 @@ local HTML = [[
   #b-feed { background:#21232c; color:#8fd4a3; border:1px solid #2c5; border-radius:8px;
             font-size:12px; padding:5px 10px; cursor:pointer; }
   .qbadge { color:#9fb6d6; }
+
+  /* new-session overlay (F3-F5): own ids so it never collides with #settings */
+  #newsession { display:none; position:fixed; inset:0; background:#15161b; z-index:11;
+                flex-direction:column; }
+  #newsession.show { display:flex; }
+  #n-head { display:flex; align-items:center; justify-content:space-between;
+            padding:10px 12px; border-bottom:1px solid #2c2f3a; font-weight:700; color:#fff; }
+  #n-body { flex:1; overflow-y:auto; padding:10px 12px; }
+  #n-foot { display:flex; gap:8px; padding:10px 12px; border-top:1px solid #2c2f3a; }
+  #n-spawn { background:#21232c; color:#8fd4a3; border:1px solid #2c5; border-radius:8px;
+             font-size:13px; padding:6px 14px; cursor:pointer; }
+  #n-foot button:not(#n-spawn) { background:#21232c; color:#cfd2db; border:1px solid #2c2f3a;
+             border-radius:8px; font-size:13px; padding:6px 14px; cursor:pointer; }
+  #n-path, #n-name { width:100%; box-sizing:border-box; margin-top:2px; }
+  .n-modes { display:flex; gap:6px; margin-bottom:8px; }
+  .n-mode { flex:1; background:#1b1d24; color:#cfd2db; border:1px solid #2c2f3a;
+            border-radius:8px; font-size:12px; padding:6px 10px; cursor:pointer; }
+  .n-mode.active { border-color:#6ea8fe; color:#cfe0f5; background:#1c2536; }
+  .n-recent { display:flex; flex-wrap:wrap; gap:6px; }
+  .n-chip { background:#21232c; color:#cfd2db; border:1px solid #2c2f3a; border-radius:999px;
+            font-size:11px; padding:3px 10px; cursor:pointer; max-width:100%;
+            overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .n-chip:hover { background:#272a35; border-color:#3a4a66; }
+  .n-crumbs { display:flex; flex-wrap:wrap; align-items:center; gap:2px; font-size:11px;
+              color:#8a8d99; margin-bottom:4px; }
+  .n-crumb { color:#9fb6d6; cursor:pointer; }
+  .n-crumb:hover { text-decoration:underline; }
+  .n-dirs { max-height:160px; overflow-y:auto; border:1px solid #2c2f3a; border-radius:8px;
+            background:#1b1d24; }
+  .n-dir { padding:5px 10px; font-size:12px; color:#cfd2db; cursor:pointer;
+           border-bottom:1px solid #21232c; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .n-dir:hover { background:#21232c; }
+  .n-dir.up { color:#8a8d99; }
+  .n-browse-foot { display:flex; align-items:center; gap:8px; margin-top:6px; }
+  .n-browse-foot button { background:#21232c; color:#8fd4a3; border:1px solid #2c5;
+            border-radius:8px; font-size:12px; padding:4px 10px; cursor:pointer; }
+  .n-dim { font-size:11px; color:#6b7280; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 </style></head>
 <body class="theme-__INIT_THEME__" data-theme="__INIT_THEME__">
   <div id="bar">
     <span class="t">Claude sessions</span>
     <span class="right">
-      <button id="spawn" onclick="send('spawn','')" title="Spawn a new Claude session">+ New</button>
+      <button id="spawn" onclick="openNew()" title="Spawn a new Claude session">+ New</button>
+      <button id="caffeine" onclick="toggleCaffeine()" title="Keep this Mac awake — pmset disablesleep (asks for your password)">☕ Sleep ok</button>
       <button id="settings-btn" onclick="openSettings()" title="Settings">⚙</button>
       <select id="theme" onchange="onThemeChange()">
         <option value="cards">Cards</option>
@@ -926,6 +1259,13 @@ local HTML = [[
           <option value="xhigh">XHigh</option>
         </select>
       </label>
+      <label class="ctl">Mode
+        <select id="mode" onchange="onModeChange()" title="Cycle permission mode (Shift+Tab). Kitty reliable; VS Code best-effort. Automate is launch-only.">
+          <option value="default">Default</option>
+          <option value="acceptEdits">Accept edits</option>
+          <option value="plan">Plan</option>
+        </select>
+      </label>
     </div>
     <div id="nudge-row">
       <textarea id="nudge" rows="1" placeholder="Nudge now, or Queue for later... (Enter sends, Shift+Enter newline, paste an image)" onkeydown="onNudgeKey(event)" oninput="autoGrow(this)"></textarea>
@@ -942,7 +1282,15 @@ local HTML = [[
   <div id="settings">
     <div id="s-head"><span>Claude Shepherd settings</span><button class="s-x" onclick="closeSettings()">✕</button></div>
     <div id="s-body">
+      <div class="s-sec">Headless approvals</div>
+      <label class="s-row"><input type="checkbox" id="s-headless" onchange="onHeadlessToggle()"> <b>Headless approvals (recommended)</b></label>
+      <div class="s-help">One switch: arms the gate AND turns off every auto-approve policy. Approve/Deny then go through this panel with no editor window popping, and Claude still can't run a gated tool until you say so. If you don't answer in ~2&nbsp;min (or the panel is closed) it safely falls back to Claude's own prompt — it never auto-approves.</div>
+      <div class="s-lbl">Gated tools (space or comma separated — only these wait for you; reads stay instant)</div>
+      <label class="s-row"><input type="text" id="s-gate-tools" class="s-txt" placeholder="Bash Write Edit MultiEdit NotebookEdit"></label>
+
+      <div class="s-sec">Approval gate (advanced)</div>
       <label class="s-row"><input type="checkbox" id="s-gate"> Arm the approval gate (route permission prompts to this panel)</label>
+      <div class="s-help">The mechanism behind Headless approvals. Leave the policies below OFF for "approve everything by hand, headlessly." Turn a policy on only to let some requests auto-decide without you.</div>
       <div class="s-sec">Queue</div>
       <label class="s-row"><input type="checkbox" id="s-q-auto"> Auto-feed the next queued task when a session finishes</label>
       <label class="s-row"><input type="checkbox" id="s-q-dry"> Dry-run (log what it would feed, don't send)</label>
@@ -951,11 +1299,28 @@ local HTML = [[
       <label class="s-row">After <input type="number" id="s-e-min" class="s-num" min="1"> minutes</label>
       <label class="s-row"><input type="checkbox" id="s-e-snd"> Play a sound</label>
       <label class="s-row"><input type="checkbox" id="s-e-push"> Push to ntfy topic <input type="text" id="s-e-topic" class="s-txt" placeholder="my-topic"></label>
-      <div class="s-sec">Editor</div>
-      <label class="s-row"><input type="checkbox" id="s-focus-pop"> Pop the editor window when a session finishes or needs you</label>
-      <div class="s-sec">Policies (gate must be armed)</div>
+      <div class="s-sec">Editor window pop</div>
+      <label class="s-row"><input type="checkbox" id="s-pop-complete"> Pop the editor when a session finishes</label>
+      <label class="s-row"><input type="checkbox" id="s-pop-approval"> Pop the editor when a session needs approval</label>
+      <div class="s-help">Routes to your detected editor (VS Code / Cursor); Kitty/terminal sessions are left alone. Note: the Claude Code VS Code extension may raise its own window on completion — that's the extension, not Shepherd. Arming Headless approvals stops the approval-time pop entirely.</div>
+      <div class="s-sec">Spawn (the + New / New project launcher)</div>
+      <label class="s-row">Open new sessions in
+        <select id="s-spawn-editor">
+          <option value="terminal">Terminal</option>
+          <option value="kitty">Kitty</option>
+          <option value="vscode">VS Code</option>
+          <option value="cursor">Cursor</option>
+        </select>
+      </label>
+      <label class="s-row"><input type="checkbox" id="s-spawn-live"> Actually launch (off = dry-run: log only, don't spawn)</label>
+      <label class="s-row"><input type="checkbox" id="s-kitty-remote"> Give spawned Kitty windows remote control (recommended)</label>
+      <label class="s-row"><input type="checkbox" id="s-kitty-auto"> Auto-enable Kitty remote control in kitty.conf when Kitty is in use</label>
+      <label class="s-row"><button class="s-x" style="border:1px solid #2c2f3a;border-radius:6px;padding:3px 8px;color:#cfd2db;" onclick="send('kitty-remote')">Enable Kitty remote control now</button></label>
+      <div class="s-sec">Policies (auto-decide — gate must be armed)</div>
+      <div class="s-help">Each one ON lets some requests be decided WITHOUT you. Headless approvals keeps all three OFF.</div>
       <label class="s-row"><input type="checkbox" id="s-p-rep"> Auto-approve a command already approved this session</label>
       <label class="s-row"><input type="checkbox" id="s-ap-en"> Enable per-session Autopilot, window of <input type="number" id="s-ap-min" class="s-num" min="1"> min</label>
+      <div class="s-help">Autopilot auto-approves <i>everything</i> for that one session for N minutes — use sparingly.</div>
       <label class="s-row"><input type="checkbox" id="s-pat-en"> Enable pattern rules</label>
       <div class="s-lbl">Auto-allow (one per line, e.g. Read or Bash(npm test*))</div>
       <textarea id="s-pat-allow" class="s-area"></textarea>
@@ -965,6 +1330,53 @@ local HTML = [[
     <div id="s-foot">
       <button id="s-save" onclick="saveSettings()">Save</button>
       <button onclick="closeSettings()">Cancel</button>
+    </div>
+  </div>
+
+  <div id="newsession">
+    <div id="n-head"><span>New session</span><button class="s-x" onclick="closeNew()">✕</button></div>
+    <div id="n-body">
+      <div class="n-modes">
+        <button id="n-mode-existing" class="n-mode active" onclick="setMode('existing')">Open existing</button>
+        <button id="n-mode-new" class="n-mode" onclick="setMode('new')">Start new project</button>
+      </div>
+      <div class="s-lbl">Project folder</div>
+      <input id="n-path" class="s-txt" placeholder="/Users/you/Programming/project">
+      <div id="n-newrow" style="display:none;">
+        <div class="s-lbl">New folder name (created inside the folder above)</div>
+        <input id="n-name" class="s-txt" placeholder="my-new-project">
+      </div>
+      <div class="s-lbl">Recent</div>
+      <div id="n-recent" class="n-recent"></div>
+      <div class="s-lbl">Browse</div>
+      <div id="n-crumbs" class="n-crumbs"></div>
+      <div id="n-dirs" class="n-dirs"></div>
+      <div class="n-browse-foot">
+        <button onclick="useThisFolder()">Use this folder</button>
+        <span id="n-browse-path" class="n-dim"></span>
+      </div>
+      <div class="s-lbl">Initial task (optional)</div>
+      <textarea id="n-task" class="s-area"></textarea>
+      <label class="s-row" style="margin-top:8px;">Open in
+        <select id="n-editor">
+          <option value="terminal">Terminal</option>
+          <option value="kitty">Kitty</option>
+          <option value="vscode">VS Code</option>
+          <option value="cursor">Cursor</option>
+        </select>
+      </label>
+      <label class="s-row">Permission mode
+        <select id="n-permmode">
+          <option value="">Default</option>
+          <option value="plan">Plan</option>
+          <option value="acceptEdits">Accept edits</option>
+          <option value="bypassPermissions">Automate (bypass)</option>
+        </select>
+      </label>
+    </div>
+    <div id="n-foot">
+      <button id="n-spawn" onclick="submitNew()">Spawn</button>
+      <button onclick="closeNew()">Cancel</button>
     </div>
   </div>
 
@@ -1078,6 +1490,19 @@ local HTML = [[
       send("theme", t);
     }
 
+    // Caffeinate toggle (F2). Lua is the single source of truth: clicking asks Lua
+    // to flip the OS flag, Lua re-reads pmset and calls setCaffeine(realState). The
+    // button never optimistically flips, so a cancelled password dialog snaps back.
+    var caffeineOn = false;
+    function setCaffeine(on){
+      caffeineOn = !!on;
+      var b = document.getElementById("caffeine");
+      if(!b) return;
+      b.classList.toggle("active", caffeineOn);
+      b.textContent = caffeineOn ? "☕ Awake" : "☕ Sleep ok";
+    }
+    function toggleCaffeine(){ send("caffeinate", (!caffeineOn).toString()); }
+
     function cv(o, path, def){
       var p = path.split("."), n = o;
       for(var i=0;i<p.length;i++){
@@ -1101,20 +1526,30 @@ local HTML = [[
       ck("s-e-snd",  cv(cfg,"escalation.sound",false));
       ck("s-e-push", cv(cfg,"escalation.push",false));
       val("s-e-topic", cv(cfg,"escalation.pushTopic",""));
-      ck("s-focus-pop", cv(cfg,"focus.popEditor",false));
+      var legacyPop = cv(cfg,"focus.popEditor",false);  // back-compat seeds both
+      ck("s-pop-complete", cv(cfg,"focus.popOnComplete",legacyPop));
+      ck("s-pop-approval", cv(cfg,"focus.popOnApproval",legacyPop));
+      val("s-spawn-editor", cv(cfg,"spawn.editor","terminal"));
+      ck("s-spawn-live",  cv(cfg,"spawn.live",false));
+      ck("s-kitty-remote", cv(cfg,"spawn.kittyRemote",true));
+      ck("s-kitty-auto",  cv(cfg,"spawn.kittyAutoRemote",true));
       ck("s-p-rep",  cv(cfg,"policies.approveRepeats",false));
       ck("s-ap-en",  cv(cfg,"policies.autopilot.enabled",false));
       val("s-ap-min", cv(cfg,"policies.autopilot.minutes",15));
       ck("s-pat-en", cv(cfg,"policies.patterns.enabled",false));
       val("s-pat-allow", (cv(cfg,"policies.patterns.autoAllow",[])||[]).join("\n"));
       val("s-pat-deny",  (cv(cfg,"policies.patterns.autoDeny",[])||[]).join("\n"));
+      val("s-gate-tools", cv(cfg,"gate.tools","Bash Write Edit MultiEdit NotebookEdit"));
+      // Headless = gate armed AND every auto-policy off.
+      ck("s-headless", gateOn && !cv(cfg,"policies.approveRepeats",false)
+        && !cv(cfg,"policies.autopilot.enabled",false) && !cv(cfg,"policies.patterns.enabled",false));
       document.getElementById("settings").classList.add("show");
     }
     function lines(id){
       return (document.getElementById(id).value||"").split("\n")
         .map(function(s){return s.trim();}).filter(function(s){return s.length>0;});
     }
-    function saveSettings(){
+    function persistSettings(){
       function ck(id){ return document.getElementById(id).checked; }
       function num(id,d){ var n=parseInt(document.getElementById(id).value,10); return isNaN(n)?d:n; }
       function txt(id){ return document.getElementById(id).value||""; }
@@ -1122,7 +1557,10 @@ local HTML = [[
         queue: { autofeed: ck("s-q-auto"), dryRun: ck("s-q-dry") },
         escalation: { enabled: ck("s-e-en"), minutes: num("s-e-min",5), sound: ck("s-e-snd"),
                       push: ck("s-e-push"), pushTopic: txt("s-e-topic") },
-        focus: { popEditor: ck("s-focus-pop") },
+        focus: { popOnComplete: ck("s-pop-complete"), popOnApproval: ck("s-pop-approval") },
+        spawn: { editor: txt("s-spawn-editor"), live: ck("s-spawn-live"),
+                 kittyRemote: ck("s-kitty-remote"), kittyAutoRemote: ck("s-kitty-auto") },
+        gate: { tools: txt("s-gate-tools") },
         policies: {
           approveRepeats: ck("s-p-rep"),
           autopilot: { enabled: ck("s-ap-en"), minutes: num("s-ap-min",15) },
@@ -1130,7 +1568,115 @@ local HTML = [[
         }
       };
       send("save-config", "", JSON.stringify({ config: config, gate: ck("s-gate") }));
-      closeSettings();
+    }
+    function saveSettings(){ persistSettings(); closeSettings(); }
+    // One-click: arm the gate + force all auto-policies OFF (or disarm when off),
+    // then persist immediately WITHOUT closing so you can still tweak the tool list.
+    function onHeadlessToggle(){
+      var on = document.getElementById("s-headless").checked;
+      document.getElementById("s-gate").checked = on;
+      if(on){
+        document.getElementById("s-p-rep").checked = false;
+        document.getElementById("s-ap-en").checked = false;
+        document.getElementById("s-pat-en").checked = false;
+        var t = document.getElementById("s-gate-tools");
+        if(!(t.value||"").trim()) t.value = "Bash Write Edit MultiEdit NotebookEdit";
+      }
+      persistSettings();
+    }
+
+    // ---- New-session modal (F3-F5): browse + recents + new project ----------
+    var browsePath = "";        // folder currently shown in the browser
+    var newMode = "existing";
+    function openNew(){ send("open-new"); }
+    function closeNew(){ document.getElementById("newsession").classList.remove("show"); }
+    function setMode(m){
+      newMode = m;
+      document.getElementById("n-mode-existing").classList.toggle("active", m === "existing");
+      document.getElementById("n-mode-new").classList.toggle("active", m === "new");
+      document.getElementById("n-newrow").style.display = (m === "new") ? "block" : "none";
+    }
+    // Lua pushes config + recent dirs + the initial folder listing.
+    function showNew(cfg, recent, browse){
+      cfg = cfg || {};
+      setMode("existing");
+      document.getElementById("n-path").value = "";
+      document.getElementById("n-name").value = "";
+      document.getElementById("n-task").value = "";
+      document.getElementById("n-editor").value = cv(cfg, "spawn.editor", "terminal");
+      renderRecent(recent || []);
+      ccBrowse(browse || { path:"", parent:"", dirs:[] });
+      document.getElementById("newsession").classList.add("show");
+      document.getElementById("n-path").focus();
+    }
+    function shortPath(p){
+      var parts = (p||"").split("/").filter(Boolean);
+      return parts.length <= 2 ? p : ".../" + parts.slice(-2).join("/");
+    }
+    function renderRecent(dirs){
+      var box = document.getElementById("n-recent"); box.innerHTML = "";
+      if(!dirs.length){ box.innerHTML = '<span class="n-dim">No recent folders yet</span>'; return; }
+      dirs.forEach(function(d){
+        var b = document.createElement("button");
+        b.className = "n-chip"; b.textContent = shortPath(d); b.title = d;
+        b.onclick = function(){ pickRecent(d); };
+        box.appendChild(b);
+      });
+    }
+    function browseTo(path){ send("list-dir", path); }
+    // Lua replies to "list-dir" / "open-new" with { path, parent, dirs }.
+    function ccBrowse(res){
+      res = res || {};
+      browsePath = res.path || "";
+      document.getElementById("n-browse-path").textContent = browsePath;
+      var cr = document.getElementById("n-crumbs"); cr.innerHTML = "";
+      var crumbs = crumbsFor(browsePath);
+      crumbs.forEach(function(c, i){
+        var s = document.createElement("span");
+        s.className = "n-crumb"; s.textContent = c.name;
+        s.onclick = function(){ browseTo(c.path); };
+        cr.appendChild(s);
+        if(i < crumbs.length - 1){ var sep = document.createElement("span"); sep.textContent = " / "; cr.appendChild(sep); }
+      });
+      var box = document.getElementById("n-dirs"); box.innerHTML = "";
+      if(res.parent && res.parent !== browsePath){
+        var up = document.createElement("div");
+        up.className = "n-dir up"; up.textContent = "⬆ ..";
+        up.onclick = function(){ browseTo(res.parent); };
+        box.appendChild(up);
+      }
+      (res.dirs || []).forEach(function(name){
+        var d = document.createElement("div");
+        d.className = "n-dir"; d.textContent = "📁 " + name;
+        d.onclick = function(){ browseTo(joinPath(browsePath, name)); };
+        box.appendChild(d);
+      });
+      if(!(res.dirs || []).length){
+        var e = document.createElement("div"); e.className = "n-dir n-dim"; e.textContent = "(no subfolders)";
+        box.appendChild(e);
+      }
+    }
+    function crumbsFor(path){
+      var out = [{ name:"/", path:"/" }], acc = "";
+      (path||"").split("/").filter(Boolean).forEach(function(seg){ acc += "/" + seg; out.push({ name: seg, path: acc }); });
+      return out;
+    }
+    function joinPath(base, name){
+      if(!base || base === "/") return "/" + name;
+      return base.replace(/\/+$/, "") + "/" + name;
+    }
+    function useThisFolder(){ document.getElementById("n-path").value = browsePath; }
+    function pickRecent(dir){ document.getElementById("n-path").value = dir; browseTo(dir); }
+    function submitNew(){
+      var path = (document.getElementById("n-path").value || "").trim();
+      var name = (document.getElementById("n-name").value || "").trim();
+      var task = (document.getElementById("n-task").value || "").trim();
+      var editor = document.getElementById("n-editor").value;
+      var payload = { a:"spawn", v:"", text:task, img:"", mode:newMode, editor:editor,
+                      permMode: document.getElementById("n-permmode").value };
+      if(newMode === "new"){ payload.parent = path; payload.name = name; } else { payload.dir = path; }
+      try { window.webkit.messageHandlers.cc.postMessage(JSON.stringify(payload)); } catch(e){ console.log("spawn send error", e); }
+      closeNew();
     }
 
     function fmtAge(since){
@@ -1162,6 +1708,12 @@ local HTML = [[
       var lvl = document.getElementById("effort").value;
       if(selectedKey) send("effort", selectedKey, lvl);
     }
+    // Cycle the permission mode via Shift+Tab x N (Part C). Lua computes N from the
+    // current mode; kitty drives it reliably, VS Code is best-effort.
+    function onModeChange(){
+      var m = document.getElementById("mode").value;
+      if(selectedKey) send("set-mode", selectedKey, m);
+    }
     // Render the options of a pending AskUserQuestion so they're visible in the
     // panel (today: read-only + Jump to answer; clickable answering comes later).
     function renderAsk(it){
@@ -1190,6 +1742,7 @@ local HTML = [[
       if(!bits.length){ el.style.display="none"; el.textContent=""; return; }
       el.textContent = bits.join("  ·  "); el.style.display="block";
       var ef = document.getElementById("effort"); if(ef && it.effort) ef.value = it.effort;
+      var md = document.getElementById("mode"); if(md && it.permission_mode) md.value = it.permission_mode;
     }
 
     function renderDetail(){
@@ -1315,11 +1868,22 @@ local function showPanel()
   pcall(function()
     wv:frame(core.resolvePanelRect(FX.loadGeometry(), hs.screen.mainScreen():frame(), PANEL_DEFAULTS))
     wv:show()
+    -- Snap the keep-awake toggle to the real state on show (F2), in case the OS
+    -- flag changed while the panel was hidden.
+    local caf = FX.caffeineState()
+    if caf ~= nil then wv:evaluateJavaScript("setCaffeine(" .. tostring(caf) .. ")") end
   end)
   panelVisible = true
 end
 local function hidePanel() pcall(function() wv:hide() end); panelVisible = false end
 local function togglePanel() if panelVisible then hidePanel() else showPanel() end end
+
+-- Stable toggle entry point for the standalone Shepherd.app Dock launcher (F6).
+-- The app runs `open "hammerspoon://ccShepherdToggle"`; Hammerspoon owns the
+-- built-in hammerspoon:// scheme, so no custom-scheme registration and no `hs`
+-- CLI dependency. Clicking the Dock icon shows/hides the panel like Chrome/VS Code.
+_G.__ccShepherdToggle = togglePanel
+pcall(function() hs.urlevent.bind("ccShepherdToggle", function() togglePanel() end) end)
 -- The red close button just hides it; reopen from the menubar or with the hotkey.
 -- On a resize/move, persist the new frame (debounced — frameChange fires rapidly
 -- while dragging) so the size survives the next reload.
@@ -1486,7 +2050,7 @@ function refresh()
         print("[cc-queue] DRY-RUN would feed '" .. tostring(task) .. "' to " .. it.name)
       else
         print("[cc-queue] feeding '" .. tostring(task) .. "' to " .. it.name)
-        FX.feedTask(it.name, task)
+        FX.feedTask(winTarget(it), task)
         FX.writeQueue(it.key, q2)
         it.queue = core.queueDepth(q2)
       end
@@ -1514,10 +2078,22 @@ function refresh()
   FX.writeFile(HEARTBEAT, tostring(now))
   sd.blink = not sd.blink
   sdRender(list)
-  -- Overlay any ephemeral relabels (display-only; .name stays the real target).
-  core.applyLabels(list, labels)
+  -- Overlay persistent relabels by project path (display-only; .name stays the
+  -- real target). A new session in a labeled folder inherits the name (F1).
+  core.applyLabelsByCwd(list, labels)
   local payload = (#list == 0) and "[]" or hs.json.encode(list)
   wv:evaluateJavaScript("window.ccUpdate(" .. payload .. ")")
+
+  -- Reflect the live keep-awake state in the toggle on a light cadence (every 10
+  -- polls, not every 1s) so a `pmset -g` subprocess doesn't run each second. The
+  -- first refresh (tick 1) syncs immediately so the button is right on load (F2).
+  caffeineTick = (caffeineTick + 1) % 10
+  if caffeineTick == 1 then
+    local caf = FX.caffeineState()
+    if caf ~= nil then
+      pcall(function() wv:evaluateJavaScript("setCaffeine(" .. tostring(caf) .. ")") end)
+    end
+  end
 end
 
 -- Bind global hotkeys to act on whichever session needs you, no panel needed.
@@ -1560,6 +2136,9 @@ end
 -- Ensure the status dir exists so the watcher has something to watch.
 hs.fs.mkdir(STATUS_DIR)
 
+-- Load persistent relabels from disk (F1) now that FX is wired up.
+labels = FX.loadLabels()
+
 -- Poll on a timer, and also react instantly to file changes.
 M.timer = hs.timer.doEvery(POLL_SECONDS, refresh)
 M.watcher = hs.pathwatcher.new(STATUS_DIR, function() refresh() end):start()
@@ -1567,8 +2146,24 @@ sdStart()  -- begin Stream Deck discovery (no-op if none plugged in)
 bindHotkeys()
 refresh()
 
+-- Auto-enable kitty remote control when kitty is actually in use (user request):
+-- only touch kitty.conf if a kitty session exists or kitty is the spawn editor,
+-- always back up, and alert that a restart is needed. Off via spawn.kittyAutoRemote.
+do
+  local cfg = loadConfig()
+  if core.config(cfg, "spawn.kittyAutoRemote", true) ~= false then
+    local usingKitty = core.config(cfg, "spawn.editor", "terminal") == "kitty"
+    if not usingKitty then
+      for _, it in pairs(byKey) do if it.editor == "kitty" then usingKitty = true; break end end
+    end
+    if usingKitty and FX.ensureKittyRemote() == "ok" then
+      hs.alert.show("Claude Shepherd: enabled kitty remote control — restart kitty to apply")
+    end
+  end
+end
+
 -- Keep references alive so Lua does not garbage-collect them.
-_G.__ccDashboard = { webview = wv, controller = controller, module = M, core = core, fx = FX }
+_G.__ccDashboard = { webview = wv, controller = controller, module = M, core = core, fx = FX, toggle = togglePanel }
 print("[cc-dashboard] loaded; watching " .. STATUS_DIR)
 
 return M

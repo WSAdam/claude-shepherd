@@ -81,19 +81,7 @@ fi
 # Detect the host editor from the inherited env (this hook runs as a child of
 # `claude`), so the panel can route actions per session: Kitty remote control vs
 # the VS Code/Cursor GUI. Anything not clearly Kitty defaults to vscode behavior.
-detect_editor() {
-  if [ -n "${KITTY_WINDOW_ID:-}" ] || [ "${TERM:-}" = "xterm-kitty" ]; then echo kitty; return; fi
-  case "${__CFBundleIdentifier:-}" in
-    *todesktop*|*[Cc]ursor*) echo cursor; return ;;
-    *VSCode*|*VSCodium*)     echo vscode; return ;;
-  esac
-  case "${CLAUDE_CODE_ENTRYPOINT:-}" in
-    claude-vscode) echo vscode; return ;;
-    cli)           echo terminal; return ;;
-  esac
-  echo vscode  # safe default -> unchanged VS Code behavior
-}
-EDITOR_KIND="$(detect_editor)"
+EDITOR_KIND="$(cc_detect_editor)"  # shared detector in cc-lib.sh (used by cc-popup.sh too)
 PERMISSION_MODE="$(cc_get "$INPUT" '.permission_mode')"
 EFFORT="${CLAUDE_EFFORT:-}"
 KITTY_WID="${KITTY_WINDOW_ID:-}"

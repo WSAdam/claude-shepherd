@@ -23,7 +23,10 @@ set -u
 . "$(dirname "$0")/cc-lib.sh" 2>/dev/null || . "$HOME/.claude/cc-lib.sh"
 
 GATE_FLAG="${CC_GATE_FLAG:-${HOME}/.claude/cc-gate.enabled}"
-GATE_TOOLS="${CC_GATE_TOOLS:-Bash Write Edit MultiEdit NotebookEdit}"
+# Gated tools: env override (tests) wins, else the panel-editable `gate.tools`
+# config string, else the default 5. Commas tolerated (normalized to spaces).
+GATE_TOOLS="${CC_GATE_TOOLS:-$(cc_config '.gate.tools' 'Bash Write Edit MultiEdit NotebookEdit')}"
+GATE_TOOLS="$(printf '%s' "$GATE_TOOLS" | tr ',' ' ')"
 GATE_TIMEOUT="${CC_GATE_TIMEOUT:-120}"
 HEARTBEAT_MAX_AGE="${CC_PANEL_MAX_AGE:-5}"
 APPROVED_DIR="${CC_APPROVED_DIR:-${HOME}/.claude/cc-approved}"

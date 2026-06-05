@@ -45,6 +45,32 @@ cc_config_array() {
 
 cc_now() { date +%s; }
 
+# Detect the host editor from the hook's environment. Shared by cc-status.sh
+# (records it per session) and cc-popup.sh (routes the focus-on-finish pop to the
+# right app). Returns: kitty | cursor | vscode | terminal.
+cc_detect_editor() {
+  if [ -n "${KITTY_WINDOW_ID:-}" ] || [ "${TERM:-}" = "xterm-kitty" ]; then echo kitty; return; fi
+  case "${__CFBundleIdentifier:-}" in
+    *todesktop*|*[Cc]ursor*) echo cursor; return ;;
+    *VSCode*|*VSCodium*)     echo vscode; return ;;
+  esac
+  case "${CLAUDE_CODE_ENTRYPOINT:-}" in
+    claude-vscode) echo vscode; return ;;
+    cli)           echo terminal; return ;;
+  esac
+  echo vscode  # safe default -> unchanged VS Code behavior
+}
+
+# macOS app name to `open -a` for an editor kind. Empty for kitty/terminal -- a
+# terminal session has no separate editor window worth popping.
+cc_editor_app() {
+  case "$1" in
+    cursor) printf 'Cursor' ;;
+    vscode) printf 'Visual Studio Code' ;;
+    *)      printf '' ;;
+  esac
+}
+
 # Append a line to the debug log when CC_STATUS_DEBUG is set. Used to capture
 # raw hook stdin once during install so real payload field names can be locked.
 cc_debug() {
