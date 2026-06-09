@@ -48,6 +48,17 @@ end
 -- Sort priority: approvals first (they need you), then by name for stability.
 local RANK = { approval = 0, done = 1, working = 2, idle = 3 }
 
+-- A STABLE per-launch-folder identity for a session, used to key persistent
+-- labels. `cwd` drifts as the agent cd's around, so it's unusable as a label key;
+-- transcript_path encodes the session's LAUNCH directory (…/projects/<ENCODED>/…)
+-- and never changes, so the <ENCODED> segment is stable and shared by every
+-- session launched from that folder. Falls back to cwd when there's no transcript.
+function M.projectKey(data)
+  local tp = data and data.transcript_path
+  local enc = type(tp) == "string" and tp:match("/projects/([^/]+)/[^/]+%.jsonl$")
+  return (enc and enc ~= "") and enc or (data and data.cwd) or nil
+end
+
 -- Decode each {key=, content=} status entry, tag it with key + stale flag, drop
 -- malformed/nameless ones, and return the list sorted approvals-first.
 function M.parseStatusList(entries, now, staleSeconds)
@@ -57,6 +68,7 @@ function M.parseStatusList(entries, now, staleSeconds)
     local okj, data = pcall(function() return M.json.decode(e.content) end)
     if okj and type(data) == "table" and data.name then
       data.key = e.key
+      data.projectKey = M.projectKey(data)
       data.stale = (data.updated ~= nil) and ((now - data.updated) > staleSeconds) or false
       list[#list + 1] = data
     end
@@ -234,15 +246,17 @@ function M.applyLabels(list, labels)
   return list
 end
 
--- Apply PERSISTENT display labels keyed by project path (cwd) onto a session
--- list, in place. labelsByCwd maps cwd -> override name. Like applyLabels, only
--- .label (display) is set, never .name. Keying by cwd (not the session_id-based
--- key) means a brand-new session in the same folder inherits the label, so a
--- relabel survives close/reopen and a new instance.
-function M.applyLabelsByCwd(list, labelsByCwd)
-  labelsByCwd = labelsByCwd or {}
+-- Apply PERSISTENT display labels onto a session list, in place. Keyed by the
+-- session's stable projectKey (the launch folder, immune to cd drift) so the
+-- label sticks for the life of the session and a brand-new session in the same
+-- folder inherits it (survives close/reopen). Legacy entries keyed by the live
+-- cwd still resolve via the fallback. Like applyLabels, only .label is set.
+function M.applyLabelsByCwd(list, labelsByKey)
+  labelsByKey = labelsByKey or {}
   for _, it in ipairs(list or {}) do
-    it.label = it.cwd and labelsByCwd[it.cwd] or nil
+    it.label = (it.projectKey and labelsByKey[it.projectKey])
+            or (it.cwd and labelsByKey[it.cwd])   -- legacy cwd-keyed entries
+            or nil
   end
   return list
 end
@@ -258,6 +272,33 @@ function M.setLabel(labelsByCwd, cwd, value, fallbackName)
   local txt = tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", "")
   if txt == "" or txt == fallbackName then out[cwd] = nil else out[cwd] = txt end
   return out
+end
+
+-- ---- Improve button (leaderboard improvement cards) ------------------------
+
+-- Parse `git remote get-url origin` output down to "owner/repo" -- mirrors the sed
+-- in the /improve command: strip a git@host: or https://host/ prefix and .git suffix.
+function M.repoFromRemote(url)
+  url = tostring(url or ""):gsub("%s+", "")
+  return (url:gsub("^git@[^:]+:", ""):gsub("^https?://[^/]+/", ""):gsub("%.git$", ""))
+end
+
+-- Build the review-first prompt for the Improve button from claimed leaderboard
+-- cards (each a table with .text, or a plain string). Deliberately asks for
+-- SUGGESTIONS and a plan, never wholesale application -- the user approves first.
+function M.improvePrompt(cards)
+  cards = cards or {}
+  local lines = {}
+  for i, c in ipairs(cards) do
+    lines[#lines + 1] = i .. ". " .. tostring((type(c) == "table" and c.text) or c)
+  end
+  return "We pulled " .. #cards .. " reflected improvement insight(s) from our most "
+    .. "recent push (now claimed on the leaderboard). Review the reflected improvements "
+    .. "from our recent commit and give suggestions where applicable for applying these "
+    .. "improvements to our code. Do NOT apply them wholesale -- for each, assess it "
+    .. "against our actual code, say whether it's worth doing and why, and propose the "
+    .. "specific minimal change. Present it as a plan for me to approve before any edits."
+    .. "\n\nInsights:\n" .. table.concat(lines, "\n")
 end
 
 -- Map the sorted session list onto a deck of `count` keys (row-major). Returns

@@ -30,12 +30,41 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
   token never logged; falls back to a labeled local approximation if unavailable.
 - **Clear / Compact in the tile right-click menu.** Both added next to Relabel / Close, each with
   a native confirm-submenu, reusing the detail-panel effect (`/clear` / `/compact`).
+- **Improve button (review-first).** A detail-panel **Improve** button pulls this repo's
+  un-applied improvement cards from the AI Monsters leaderboard (`POST /api/grade/claim-cards`)
+  and, instead of applying them wholesale like `/improve`, injects a **review** prompt into the
+  session (assess and suggest where applicable, propose a plan — no blind edits). Toasts "No
+  improvements found" when the latest push's cards are already claimed. Reads `LB_URL`/
+  `GRADE_PREVIEW_TOKEN` from the shell via an interactive zsh (Hammerspoon doesn't inherit the
+  env; the token is never persisted). Pure `core.repoFromRemote` / `core.improvePrompt` helpers.
+- **Jump in the tile right-click menu.** Focus a session's window from the context menu
+  (double-click isn't always reliable).
+
+### Fixed
+- **Relabels now stick.** Labels were keyed by the session's live `cwd`, which drifts as the
+  agent `cd`s around, so the override silently fell off (it would "relabel itself" back). Now
+  keyed by a **stable project identity** derived from `transcript_path` (the launch folder),
+  with a legacy-`cwd` fallback — a relabel survives directory changes, reloads, and new sessions
+  in the same folder. (`core.projectKey`; `applyLabelsByCwd` resolves projectKey then cwd.)
+- **Reliable keystroke injection** (nudge / clear / compact / feed / effort / model / answer /
+  spawn). Nested `hs.timer.doAfter` chains used anonymous timers that could be garbage-collected
+  before firing, silently aborting the sequence mid-way — the chronic "flaky nudge" and the dead
+  right-click `/clear` `/compact`. A new `after()` wrapper holds a strong reference to every
+  pending timer until it fires. Chat-input focus is also made deterministic (focus the editor
+  group, then ⌘Esc, so the toggle always lands on *focused*) and slash commands get a second
+  Return past the autocomplete popup.
+
+### Changed
+- **Reset countdown shows days/hours/min.** The usage footer renders reset times as `6d 16h 0m`
+  instead of `160h 0m` (days only appear past 24h; short windows still read `1h 0m` / `45m`).
 
 ### Tests
 - ~320 → **~517** side-effect-free checks. New pure-logic coverage for provider env-injection
   (`providerEnv`/`envPrefix`/`spawnSpec` with no real keys), `sshWrap`, and the usage helpers
   (`parseUsageLine`/`sumUsage`/`usageInWindow`/`contextFractionFor`/`isoToEpoch`) — no real keys,
   spawns, or network. The no-provider spawn output is asserted byte-identical to before.
+- Added `repoFromRemote` (ssh/https → `owner/repo`), `improvePrompt` (review framing + each card,
+  never wholesale), and `projectKey`-keyed relabel tests (projectKey beats a drifted `cwd`).
 
 ## 2026-06-04
 

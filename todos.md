@@ -6,10 +6,14 @@ remaining items. Full per-round detail is in CHANGELOG.md and git history.
 ## Shipped ✅
 - **Per-session editor detection** + **AskUserQuestion surfacing** + **effort dropdown** +
   **click-to-answer** + nudge focus-race fix.
-- **Persistent relabels** (keyed by project path, `cc-labels.json`), **caffeinate toggle**
-  (top-bar `pmset disablesleep`), **in-panel New-session modal** (folder browser + recent
-  dirs + new-project), **editor-aware spawn** (Terminal/Kitty/VS Code/Cursor), **Shepherd.app
-  Dock launcher**.
+- **Persistent relabels** (keyed by **stable project identity** from `transcript_path` —
+  survives `cwd` drift — `cc-labels.json`), **caffeinate toggle** (top-bar `pmset disablesleep`),
+  **in-panel New-session modal** (folder browser + recent dirs + new-project), **editor-aware
+  spawn** (Terminal/Kitty/VS Code/Cursor), **Shepherd.app Dock launcher**.
+- **Improve button** (review-first): claims this repo's leaderboard improvement cards and injects
+  a *suggest, don't apply* prompt; "No improvements found" when none. **Jump** added to the tile
+  right-click menu. **Keystroke-injection reliability fix**: `after()` retains pending timers so
+  nested `doAfter` chains (nudge/clear/compact/…) can't be GC'd mid-sequence.
 - **Headless approvals** — one-click Settings toggle (arm gate + all policies off); editable
   `gate.tools`; per-control explanations. **Editor-window pop split** (`popOnComplete` /
   `popOnApproval`) with an editor-aware `cc-popup.sh`.

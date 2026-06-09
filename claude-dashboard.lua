@@ -77,6 +77,11 @@ local RESTORE_FOCUS = true     -- return focus to where you were after acting
 -- unfocus Claude"). Set to nil for terminal sessions (where typing goes straight
 -- to the prompt and this would be wrong).
 local FOCUS_CHAT_KEY = { { "cmd" }, "escape" }
+-- ⌘Esc is a TOGGLE, so if the chat input already had focus it would UNFOCUS it and
+-- our keystrokes would land in the editor (the chronic nudge flakiness). Sending
+-- "Focus First Editor Group" (⌘1) first guarantees the input is unfocused, so the
+-- ⌘Esc toggle is deterministic (always unfocused -> focused). nil to disable.
+local FOCUS_EDITOR_KEY = { { "cmd" }, "1" }
 
 -- Stream Deck (optional). Owns the device only if the Elgato app isn't running.
 local STREAMDECK_ENABLED  = true
@@ -518,6 +523,75 @@ function FX.push(topic, title, msg)
   end)
 end
 
+-- Improve button: pull this repo's un-applied leaderboard improvement cards and,
+-- instead of applying them wholesale (what /improve does), inject a REVIEW-first
+-- prompt into the session so the user approves suggestions before any edits.
+-- NOTE: claim-cards is the only (mutating) endpoint, so this CLAIMS the cards --
+-- a second click then correctly reports "no improvements found".
+local improveCreds = nil  -- { url=, token= } cached after the first successful read
+-- LB_URL/GRADE_PREVIEW_TOKEN live in ~/.zshrc; Hammerspoon doesn't inherit the
+-- shell env and a login shell won't source ~/.zshrc, so read them via an
+-- INTERACTIVE zsh (-i sources ~/.zshrc). Cached so the rc cost is paid once.
+local function improveCredsRead()
+  if improveCreds then return improveCreds end
+  local out = hs.execute([[/bin/zsh -ic 'echo "$LB_URL"; echo "$GRADE_PREVIEW_TOKEN"']], false) or ""
+  local url, token = out:match("^(.-)\n(.-)\n")
+  url   = (url   or ""):gsub("%s+$", "")
+  token = (token or ""):gsub("%s+$", "")
+  if url ~= "" and token ~= "" then improveCreds = { url = url, token = token } end
+  return improveCreds
+end
+function FX.runImprove(item)
+  local cwd = item and item.cwd
+  if not cwd or cwd == "" then hs.alert.show("Improve: no working dir for this session"); return end
+  local function dq(s) return '"' .. tostring(s):gsub('[\\"`$]', "\\%0") .. '"' end
+  local creds = improveCredsRead()
+  local lbUrl = creds and creds.url or ""
+  local token = creds and creds.token or ""
+  -- git is on PATH (/usr/bin/git); plain exec keeps each click fast (no rc reload).
+  local remote = hs.execute("git -C " .. dq(cwd) .. " remote get-url origin 2>/dev/null", false) or ""
+  local repo = core.repoFromRemote(remote)
+  if lbUrl == "" or token == "" then
+    hs.alert.show("Improve: leaderboard not configured — source ~/.zshrc and reload Hammerspoon")
+    print("[cc-improve] missing LB_URL/token (Hammerspoon can't see shell env)")
+    return
+  end
+  if repo == "" then
+    hs.alert.show("Improve: no git origin remote for " .. tostring(item.name))
+    print("[cc-improve] no origin remote under " .. tostring(cwd))
+    return
+  end
+  print("[cc-improve] claiming cards for repo: " .. repo)
+  hs.http.asyncPost(lbUrl .. "/api/grade/claim-cards", hs.json.encode({ repo = repo }),
+    { ["x-grade-token"] = token, ["content-type"] = "application/json" },
+    function(status, body)
+      if status ~= 200 or not body then
+        hs.alert.show("Improve: leaderboard error (HTTP " .. tostring(status) .. ")")
+        print("[cc-improve] HTTP " .. tostring(status) .. " body=" .. tostring(body))
+        return
+      end
+      local ok, data = pcall(function() return hs.json.decode(body) end)
+      if not ok or type(data) ~= "table" then
+        hs.alert.show("Improve: bad response from leaderboard")
+        print("[cc-improve] bad JSON: " .. tostring(body))
+        return
+      end
+      local cards = (type(data.cards) == "table") and data.cards or {}
+      local claimed = tonumber(data.claimed) or #cards
+      print("[cc-improve] repo=" .. repo .. " claimed=" .. tostring(claimed))
+      if claimed <= 0 or #cards == 0 then
+        hs.alert.show("No improvements found for " .. repo)
+        return
+      end
+      -- inline target (winTarget is a local defined later in the file, so not in
+      -- scope here; this mirrors its shape for the kitty/VS Code injection routing).
+      local target = { name = item.name, cwd = item.cwd, editor = item.editor,
+                       kittyWindowId = item.kitty_window_id, kittyListenOn = item.kitty_listen_on }
+      FX.pasteIntoWindow(target, { text = core.improvePrompt(cards) })
+      hs.alert.show("Improve: pulled " .. #cards .. " insight(s) → review prompt sent to " .. tostring(item.name))
+    end)
+end
+
 function FX.writeFile(path, content)
   local f = io.open(path, "w"); if f then f:write(content); f:close() end
 end
@@ -579,14 +653,29 @@ function FX.focusWindow(target)
   return focusProject(target.name, target.cwd)
 end
 
+-- hs.timer.doAfter returns a timer that, if nothing references it, can be GC'd
+-- BEFORE it fires -- silently aborting nested injection chains mid-way (the chronic
+-- nudge/clear/compact flakiness: the deeper the nesting, the likelier a pending
+-- timer is collected). Hold a strong ref to every pending timer until it fires.
+local pendingTimers, ptSeq = {}, 0
+local function after(delay, fn)
+  ptSeq = ptSeq + 1
+  local id = ptSeq
+  pendingTimers[id] = hs.timer.doAfter(delay, function()
+    pendingTimers[id] = nil
+    fn()
+  end)
+  return pendingTimers[id]
+end
+
 -- Focus a window, then send after a short delay, then restore prior focus.
 local function sendToWindow(name, sendFn)
   local prev = RESTORE_FOCUS and hs.window.focusedWindow() or nil
   focusProject(name)
-  hs.timer.doAfter(FOCUS_DELAY, function()
+  after(FOCUS_DELAY, function()
     pcall(sendFn)
     if prev then
-      hs.timer.doAfter(FOCUS_DELAY, function() pcall(function() prev:focus() end) end)
+      after(FOCUS_DELAY, function() pcall(function() prev:focus() end) end)
     end
   end)
 end
@@ -608,20 +697,11 @@ function FX.typeIntoWindow(target, text)
   if isKitty(target) then
     return runKitty(core.kittyCmd("text", kittyItem(target), { text = text .. "\r" }))
   end
-  local name = target.name
-  print("[cc-dashboard] type -> " .. tostring(name) .. ": " .. tostring(text))
-  local prevWin = RESTORE_FOCUS and hs.window.focusedWindow() or nil
-  focusProject(name)
-  hs.timer.doAfter(FOCUS_DELAY, function()
-    if FOCUS_CHAT_KEY then hs.eventtap.keyStroke(FOCUS_CHAT_KEY[1], FOCUS_CHAT_KEY[2]) end
-    hs.timer.doAfter(0.12, function()
-      hs.eventtap.keyStrokes(text)
-      hs.timer.doAfter(0.08, function()
-        hs.eventtap.keyStroke({}, "return")
-        if prevWin then hs.timer.doAfter(0.15, function() pcall(function() prevWin:focus() end) end) end
-      end)
-    end)
-  end)
+  -- VS Code: char-by-char keystrokes were flaky and slash commands never submitted.
+  -- Route through the same reliable clipboard-paste path as nudges (it handles the
+  -- deterministic chat-input focus and the slash-command autocomplete on submit).
+  print("[cc-dashboard] type -> " .. tostring(target.name) .. ": " .. tostring(text))
+  return FX.pasteIntoWindow(target, { text = text })
 end
 
 -- Inject text and/or an image into a session via the clipboard + ⌘V instead of
@@ -643,39 +723,52 @@ function FX.pasteIntoWindow(target, payload)
   print("[cc-dashboard] paste -> " .. tostring(name)
     .. (payload.imagePath and " [image]" or "")
     .. (payload.text and (": " .. payload.text) or ""))
+  -- Slash commands (/clear, /compact, /effort…) open the extension's autocomplete
+  -- popup; the first Return only ACCEPTS the suggestion, so submitting needs a 2nd.
+  local isSlash = payload.text ~= nil and payload.text:match("^/") ~= nil
   local prevClip = hs.pasteboard.readString()  -- best-effort restore (text only)
   local prevWin = RESTORE_FOCUS and hs.window.focusedWindow() or nil
   focusProject(name)
-  hs.timer.doAfter(FOCUS_DELAY, function()
-    if FOCUS_CHAT_KEY then hs.eventtap.keyStroke(FOCUS_CHAT_KEY[1], FOCUS_CHAT_KEY[2]) end
-    hs.timer.doAfter(0.12, function()
-      -- Build the paste steps: image first (becomes an attachment), then text.
-      local steps = {}
-      if payload.imagePath then
-        steps[#steps + 1] = function()
-          local img = hs.image.imageFromPath(payload.imagePath)
-          if img then hs.pasteboard.writeObjects(img) end
+  after(FOCUS_DELAY, function()
+    -- Focus the editor group first so the ⌘Esc chat-input toggle is deterministic
+    -- (always unfocused -> focused, never the reverse). Then focus the chat input.
+    if FOCUS_EDITOR_KEY then hs.eventtap.keyStroke(FOCUS_EDITOR_KEY[1], FOCUS_EDITOR_KEY[2]) end
+    after(FOCUS_EDITOR_KEY and 0.06 or 0, function()
+      if FOCUS_CHAT_KEY then hs.eventtap.keyStroke(FOCUS_CHAT_KEY[1], FOCUS_CHAT_KEY[2]) end
+      after(0.12, function()
+        -- Build the paste steps: image first (becomes an attachment), then text.
+        local steps = {}
+        if payload.imagePath then
+          steps[#steps + 1] = function()
+            local img = hs.image.imageFromPath(payload.imagePath)
+            if img then hs.pasteboard.writeObjects(img) end
+          end
         end
-      end
-      if payload.text and #payload.text > 0 then
-        steps[#steps + 1] = function() hs.pasteboard.setContents(payload.text) end
-      end
-      -- Run each step (set clipboard -> ⌘V) sequentially, submit, THEN restore the
-      -- clipboard + prior focus (only after Return, so nothing races the paste).
-      local function runFrom(i)
-        if i > #steps then
-          hs.eventtap.keyStroke({}, "return")
-          hs.timer.doAfter(0.15, function()
-            if prevClip then pcall(function() hs.pasteboard.setContents(prevClip) end) end
-            if prevWin then pcall(function() prevWin:focus() end) end
-          end)
-          return
+        if payload.text and #payload.text > 0 then
+          steps[#steps + 1] = function() hs.pasteboard.setContents(payload.text) end
         end
-        steps[i]()
-        hs.eventtap.keyStroke({ "cmd" }, "v")
-        hs.timer.doAfter(0.12, function() runFrom(i + 1) end)
-      end
-      runFrom(1)
+        -- Run each step (set clipboard -> ⌘V) sequentially, submit, THEN restore the
+        -- clipboard + prior focus (only after Return, so nothing races the paste).
+        local function runFrom(i)
+          if i > #steps then
+            hs.eventtap.keyStroke({}, "return")
+            local restoreDelay = 0.15
+            if isSlash then  -- 2nd Return past the autocomplete; restore after it
+              after(0.12, function() hs.eventtap.keyStroke({}, "return") end)
+              restoreDelay = 0.30
+            end
+            after(restoreDelay, function()
+              if prevClip then pcall(function() hs.pasteboard.setContents(prevClip) end) end
+              if prevWin then pcall(function() prevWin:focus() end) end
+            end)
+            return
+          end
+          steps[i]()
+          hs.eventtap.keyStroke({ "cmd" }, "v")
+          after(0.12, function() runFrom(i + 1) end)
+        end
+        runFrom(1)
+      end)
     end)
   end)
 end
@@ -706,15 +799,15 @@ function FX.sendKeys(target, keys)
   print("[cc-dashboard] send keys -> " .. tostring(name) .. " (" .. #keys .. " keys)")
   local prevWin = RESTORE_FOCUS and hs.window.focusedWindow() or nil
   focusProject(name)
-  hs.timer.doAfter(FOCUS_DELAY, function()
+  after(FOCUS_DELAY, function()
     local function step(i)
       if i > #keys then
-        if prevWin then hs.timer.doAfter(0.12, function() pcall(function() prevWin:focus() end) end) end
+        if prevWin then after(0.12, function() pcall(function() prevWin:focus() end) end) end
         return
       end
       local k = keys[i]
       hs.eventtap.keyStroke(k.mods or {}, k.key)
-      hs.timer.doAfter(0.08, function() step(i + 1) end)
+      after(0.08, function() step(i + 1) end)
     end
     step(1)
   end)
@@ -741,17 +834,17 @@ local function spawnEditorWindow(spec)
   hs.alert.show("Claude Shepherd: opening " .. spec.app .. " — starting claude (best-effort)")
   local proj = spec.project
   local name = proj and proj:match("([^/]+)/?$") or nil
-  hs.timer.doAfter(2.0, function() pcall(function()
+  after(2.0, function() pcall(function()
     focusProject(name, proj)
-    hs.timer.doAfter(0.5, function()
+    after(0.5, function()
       -- New integrated terminal via the Command Palette (more reliable than ⌃`,
       -- which would hide an already-open terminal).
       hs.eventtap.keyStroke({ "cmd", "shift" }, "p")
-      hs.timer.doAfter(0.35, function()
+      after(0.35, function()
         hs.eventtap.keyStrokes("Terminal: Create New Terminal")
-        hs.timer.doAfter(0.2, function()
+        after(0.2, function()
           hs.eventtap.keyStroke({}, "return")
-          hs.timer.doAfter(0.6, function()
+          after(0.6, function()
             hs.eventtap.keyStrokes(spec.postType)
             hs.eventtap.keyStroke({}, "return")
           end)
@@ -988,6 +1081,11 @@ local function handleBridgeMsg(msg)
     end
     return
   end
+  if a == "improve" then
+    local item = byKey[tostring(payload.v or "")]
+    if item then FX.runImprove(item) end
+    return
+  end
   if a == "autopilot" then
     local key = tostring(payload.v or "")
     if key ~= "" then
@@ -1018,6 +1116,12 @@ local function handleBridgeMsg(msg)
       local nameJson = jsString(item.label or item.name)
       local shown = item.label or item.name
       ctxMenu:setMenu({
+        -- Jump focuses the editor window (double-click on a tile isn't always
+        -- reliable, so offer it here too). Same effect as the detail-panel Jump.
+        { title = "Jump to window", fn = function()
+            core.handleAction(FX, item, "focus")
+          end },
+        { title = "-" },
         { title = "Relabel…", fn = function()
             pcall(function() wv:evaluateJavaScript("startRename(" .. keyJson .. ")") end)
           end },
@@ -1059,11 +1163,14 @@ local function handleBridgeMsg(msg)
     return
   end
   if a == "relabel" then
-    -- Persistent display name keyed by project path (cwd); blank or == the real
-    -- folder name clears it. Survives close/reopen/new-instance/reload (F1).
-    labels = core.setLabel(labels, item.cwd, payload.text, item.name)
+    -- Persistent display name keyed by the session's STABLE projectKey (launch
+    -- folder), not the live cwd which drifts as the agent cd's around (that drift
+    -- was why relabels didn't stick). Blank or == the real folder name clears it.
+    -- Survives close/reopen/new-instance/reload (F1).
+    local lkey = item.projectKey or item.cwd
+    labels = core.setLabel(labels, lkey, payload.text, item.name)
     FX.saveLabels(labels)
-    print("[cc-dashboard] relabel " .. tostring(item.cwd) .. " -> " .. tostring(labels[item.cwd]))
+    print("[cc-dashboard] relabel " .. tostring(lkey) .. " -> " .. tostring(labels[lkey]))
     refresh()
     return
   end
@@ -1366,6 +1473,7 @@ local HTML = [[
   #b-approve { border-color:#22c55e; color:#7ee2a0; }
   #b-deny, #b-stop { border-color:#ef4444; color:#f3a1a1; }
   #b-clear { border-color:#b9772a; color:#e6b277; }
+  #b-improve { border-color:#6ea8fe; color:#9fc1ff; }
   .sep { flex-basis:100%; height:0; }
   #nudge-row { display:flex; gap:6px; margin-top:8px; align-items:flex-start; }
   #nudge { flex:1; background:#1b1d24; color:#e8e9ee; border:1px solid #2c2f3a;
@@ -1478,6 +1586,7 @@ local HTML = [[
       <span class="sep"></span>
       <button id="b-clear"   onclick="act('clear')">Clear</button>
       <button id="b-compact" onclick="act('compact')">Compact</button>
+      <button id="b-improve" onclick="act('improve')" title="Pull this repo's un-applied leaderboard improvement insights and send them to this session as a review-first prompt (suggestions, not wholesale edits).">Improve</button>
     </div>
     <div id="d-controls">
       <label class="ctl">Effort
@@ -2173,8 +2282,13 @@ local HTML = [[
     function resetsIn(iso){
       if(!iso) return "";
       var ms = Date.parse(iso) - Date.now(); if(isNaN(ms) || ms<=0) return "";
-      var m = Math.round(ms/60000); if(m<60) return "resets in "+m+"m";
-      return "resets in "+Math.floor(m/60)+"h "+(m%60)+"m";
+      var m = Math.round(ms/60000);
+      var d = Math.floor(m/1440), h = Math.floor((m%1440)/60), mm = m%60;
+      var parts = [];
+      if(d>0) parts.push(d+"d");
+      if(d>0 || h>0) parts.push(h+"h");
+      parts.push(mm+"m");
+      return "resets in "+parts.join(" ");
     }
     function renderUsageFoot(){
       var totEl = document.getElementById("uf-total"), winEl = document.getElementById("uf-windows");
@@ -2604,8 +2718,8 @@ M.officialUsageTimer = hs.timer.doEvery(OFFICIAL_TTL, function() pcall(FX.fetchO
 sdStart()  -- begin Stream Deck discovery (no-op if none plugged in)
 bindHotkeys()
 refresh()
-hs.timer.doAfter(1.0, function() pcall(FX.computeUsage) end)          -- first local pass
-hs.timer.doAfter(1.5, function() pcall(function() FX.fetchOfficialUsage(true) end) end)  -- first official pass
+after(1.0, function() pcall(FX.computeUsage) end)          -- first local pass
+after(1.5, function() pcall(function() FX.fetchOfficialUsage(true) end) end)  -- first official pass
 
 -- Auto-enable kitty remote control when kitty is actually in use (user request):
 -- only touch kitty.conf if a kitty session exists or kitty is the spawn editor,

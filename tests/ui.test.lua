@@ -90,6 +90,52 @@ do
   check("labels-cwd: nil map / missing cwd safe", true)
 end
 
+-- ---- projectKey: stable label key from transcript_path (immune to cwd drift) -
+do
+  local tp = "/Users/a/.claude/projects/-Users-a-proj/sess-1.jsonl"
+  eq("projectKey: from transcript_path",
+     core.projectKey({ transcript_path = tp, cwd = "/Users/a/proj/sub" }), "-Users-a-proj")
+  eq("projectKey: falls back to cwd when no transcript",
+     core.projectKey({ cwd = "/Users/a/proj" }), "/Users/a/proj")
+
+  -- the label must stick to projectKey even after cwd drifts to a subfolder, AND
+  -- win over a stale cwd-keyed entry for that drifted cwd.
+  local list = { { key = "s1", name = "sub", cwd = "/Users/a/proj/sub", projectKey = "-Users-a-proj" } }
+  core.applyLabelsByCwd(list, { ["-Users-a-proj"] = "Web UI", ["/Users/a/proj/sub"] = "Stale" })
+  eq("labels-key: projectKey beats drifted cwd", list[1].label, "Web UI")
+
+  -- legacy cwd-keyed entry still resolves when no projectKey entry exists
+  local legacy = { { key = "s2", name = "proj", cwd = "/Users/a/proj", projectKey = "-Users-a-proj" } }
+  core.applyLabelsByCwd(legacy, { ["/Users/a/proj"] = "Legacy" })
+  eq("labels-key: legacy cwd fallback resolves", legacy[1].label, "Legacy")
+end
+
+-- ---- repoFromRemote: git remote URL -> owner/repo (mirrors /improve sed) -----
+do
+  eq("repo: ssh form", core.repoFromRemote("git@github.com:adam/claude-instance-manager.git"),
+     "adam/claude-instance-manager")
+  eq("repo: https form", core.repoFromRemote("https://github.com/adam/claude-instance-manager.git"),
+     "adam/claude-instance-manager")
+  eq("repo: no .git suffix", core.repoFromRemote("git@gitlab.com:org/sub/proj"), "org/sub/proj")
+  eq("repo: trailing newline trimmed", core.repoFromRemote("git@github.com:a/b.git\n"), "a/b")
+  eq("repo: empty -> empty", core.repoFromRemote(nil), "")
+end
+
+-- ---- improvePrompt: review-first prompt embeds each card, never wholesale ----
+do
+  local p = core.improvePrompt({ { text = "[Simplicity] extract helper X" },
+                                 { text = "[Perf] memoize Y" } })
+  check("improve: counts cards", p:find("2 reflected improvement", 1, true) ~= nil)
+  check("improve: review framing", p:find("give suggestions where applicable", 1, true) ~= nil)
+  check("improve: not wholesale", p:find("Do NOT apply them wholesale", 1, true) ~= nil)
+  check("improve: includes card 1", p:find("extract helper X", 1, true) ~= nil)
+  check("improve: includes card 2", p:find("memoize Y", 1, true) ~= nil)
+  check("improve: numbered list", p:find("1. [Simplicity]", 1, true) ~= nil)
+  -- accepts plain-string cards too, and an empty list is safe
+  check("improve: plain string card", core.improvePrompt({ "raw tip" }):find("raw tip", 1, true) ~= nil)
+  check("improve: empty list safe", core.improvePrompt({}):find("0 reflected", 1, true) ~= nil)
+end
+
 -- ---- setLabel: immutable set / clear-on-blank / clear-on-equals-name --------
 do
   local m = core.setLabel({}, "/p", "Nice Name", "p")

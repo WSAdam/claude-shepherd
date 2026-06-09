@@ -54,11 +54,16 @@ theme switcher.
 **Single-click** a tile to select it (opens the detail panel). **Double-click** a
 tile to **jump** straight to its window. **Right-click** a tile for a context menu:
 
+- **Jump to window** — focus that session's editor window (double-click does the
+  same, but isn't always reliable, so it's offered here too).
 - **Relabel…** — give the tile a custom display name (e.g. "auth refactor" instead
   of the folder name). Display-only — jumps still target the real window — and
-  **persistent**: keyed by project path in `~/.claude/cc-labels.json`, so it survives
-  a Hammerspoon reload, a new instance, and close/reopen in the same folder. Relabel
-  back to the folder name (or blank) to clear it.
+  **persistent**: keyed by the session's **stable project identity** (its launch
+  folder, recorded in `~/.claude/cc-labels.json`), so the name sticks even as the
+  agent changes directories, and survives a Hammerspoon reload, a new instance, and
+  close/reopen in the same folder. Relabel back to the folder name (or blank) to clear it.
+- **Clear conversation / Compact** — native confirm, then run `/clear` or `/compact`
+  in the session (same effect as the detail-panel buttons).
 - **Close instance** — confirm, then best-effort close the editor window (⌘⇧W) and
   remove the tile (the project's saved label is kept for next time).
 
@@ -69,6 +74,11 @@ The detail panel has:
 - **Stop** — interrupt the current turn.
 - **Autopilot** — time-box a session to auto-approve all its prompts (needs the gate + config).
 - **Clear / Compact** — pop a yes/no confirm, then run `/clear` or `/compact` in the session.
+- **Improve** — pull this repo's un-applied improvement insights from the AI Monsters
+  leaderboard and send them to the session as a **review-first** prompt (assess and
+  suggest where applicable — *not* wholesale edits), so you approve a plan before any
+  changes. Shows "No improvements found" when the latest push's insights are already
+  claimed. Needs `LB_URL` / `GRADE_PREVIEW_TOKEN` in your shell (`~/.zshrc`).
 - **Effort** dropdown — set the session's reasoning effort (Low/Medium/High/XHigh) live; sends
   the `/effort <level>` slash command.
 - **Mode** dropdown — switch the permission mode (Default / Accept edits / Plan) live via
