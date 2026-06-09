@@ -82,6 +82,26 @@ SUMMARY="$(cc_get "$INPUT" '.tool_input.command')"
 [ -n "$SUMMARY" ] || SUMMARY="$TOOL"
 SIG="$(printf '%s|%s' "$TOOL" "$SUMMARY" | tr '\n' ' ')"
 
+# transcript_path -> stable projectKey (mirrors cc-core), for ledger lines.
+TRANSCRIPT="$(cc_get "$INPUT" '.transcript_path')"
+PROJECT_KEY=""
+case "$TRANSCRIPT" in
+  */projects/*/*.jsonl) PROJECT_KEY="${TRANSCRIPT##*/projects/}"; PROJECT_KEY="${PROJECT_KEY%%/*}" ;;
+esac
+
+# Append a `decision` event to the audit ledger. The gate branch IS the provenance.
+# $1=outcome (allow|deny|fallback)  $2=by  $3=pattern (optional)
+ledger_decision() {
+  cc_ledger_enabled || return 0
+  cc_ledger_append "$(jq -nc \
+    --arg sid "$SESSION_ID" --arg key "$KEY" --arg name "$NAME" \
+    --arg pk "$PROJECT_KEY" --arg cwd "$CWD" --arg tool "$TOOL" --arg sum "$SUMMARY" \
+    --arg out "$1" --arg by "$2" --arg pat "${3:-}" \
+    '{type:"decision", session_id:$sid, key:$key, name:$name, projectKey:$pk, cwd:$cwd,
+      tool:$tool, summary:$sum, outcome:$out, by:$by}
+     + (if $pat == "" then {} else {pattern:$pat} end)')"
+}
+
 # ---- Policy evaluation (Phase 4c) -----------------------------------------
 PAT_ENABLED="$(cc_config '.policies.patterns.enabled' 'false')"
 
@@ -93,6 +113,7 @@ if [ "$PAT_ENABLED" = "true" ]; then
       [ -n "$pat" ] || continue
       if pattern_match "$TOOL" "$SUMMARY" "$pat"; then
         echo "[cc-approve] ⛔ policy auto-deny ($pat): $TOOL ($KEY)" >&2
+        ledger_decision deny autoDeny "$pat"
         emit_deny "Auto-denied by Claude Shepherd policy."
         exit 0
       fi
@@ -106,6 +127,7 @@ if [ "$(cc_config '.policies.autopilot.enabled' 'false')" = "true" ] && [ -f "$A
   case "$EXP" in *[!0-9]*) EXP=0 ;; esac
   if [ "$(cc_now)" -lt "$EXP" ]; then
     echo "[cc-approve] 🛫 autopilot auto-allow: $TOOL ($KEY)" >&2
+    ledger_decision allow autopilot
     emit_allow
     exit 0
   fi
@@ -119,6 +141,7 @@ if [ "$PAT_ENABLED" = "true" ]; then
       [ -n "$pat" ] || continue
       if pattern_match "$TOOL" "$SUMMARY" "$pat"; then
         echo "[cc-approve] ✅ policy auto-allow ($pat): $TOOL ($KEY)" >&2
+        ledger_decision allow autoAllow "$pat"
         emit_allow
         exit 0
       fi
@@ -130,6 +153,7 @@ fi
 if [ "$(cc_config '.policies.approveRepeats' 'false')" = "true" ]; then
   if [ -f "$APPROVED_DIR/$KEY" ] && grep -Fxq "$SIG" "$APPROVED_DIR/$KEY" 2>/dev/null; then
     echo "[cc-approve] 🔁 auto-allow (approved before): $TOOL ($KEY)" >&2
+    ledger_decision allow approveRepeats
     emit_allow
     exit 0
   fi
@@ -174,6 +198,7 @@ if [ "$DECISION" = "deny" ]; then
   cc_del_field "$KEY" "pending"
   cc_merge "$KEY" "$(jq -nc --argjson now "$(cc_now)" '{status:"working", updated:$now, since:$now}')"
   echo "[cc-approve] ❌ denied $TOOL ($KEY)" >&2
+  ledger_decision deny human
   emit_deny "Denied from the Claude Shepherd panel."
   exit 0
 elif [ "$DECISION" = "allow" ]; then
@@ -185,10 +210,12 @@ elif [ "$DECISION" = "allow" ]; then
     grep -Fxq "$SIG" "$APPROVED_DIR/$KEY" 2>/dev/null || printf '%s\n' "$SIG" >> "$APPROVED_DIR/$KEY"
   fi
   echo "[cc-approve] ✅ allowed $TOOL ($KEY)" >&2
+  ledger_decision allow human
   emit_allow
   exit 0
 fi
 
 # Timed out with no answer: leave it to Claude Code's native prompt.
 echo "[cc-approve] ⚠️  timeout after ${GATE_TIMEOUT}s, falling back to native prompt ($KEY)" >&2
+ledger_decision fallback timeout-fallback
 exit 0

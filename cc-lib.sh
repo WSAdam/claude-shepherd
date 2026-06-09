@@ -150,3 +150,38 @@ cc_del_field() {
 cc_remove() {
   rm -f "$(cc_file "$1")" "$(cc_decision_file "$1")" 2>/dev/null || true
 }
+
+# ---- Audit/event ledger ----------------------------------------------------
+# Append-only JSONL record of fleet activity, one event per line, in a per-day
+# (UTC) file under CC_LEDGER_DIR. OFF by default: nothing is written unless
+# `ledger.enabled` is true in cc-config.json. Lines are well under PIPE_BUF, so
+# concurrent O_APPEND writes from many sessions' hooks stay atomic.
+CC_LEDGER_DIR="${CC_LEDGER_DIR:-${HOME}/.claude/cc-ledger}"
+
+cc_ledger_enabled() { [ "$(cc_config '.ledger.enabled' 'false')" = "true" ]; }
+
+# Append one event. $1 = a jq-built JSON object of the event's fields (must carry
+# at least `type`; callers add session_id/name/cwd/key + type-specific fields).
+# v/ts/id are stamped here so callers stay simple. No-op unless enabled + jq, and
+# unless the event's type is in `ledger.captureTypes` (empty = capture everything).
+cc_ledger_append() {
+  cc_ledger_enabled || return 0
+  cc_have_jq || return 0
+  # Optional type allow-list: only filter when captureTypes is non-empty.
+  local types t
+  types="$(cc_config_array '.ledger.captureTypes')"
+  if [ -n "$types" ]; then
+    t="$(printf '%s' "$1" | jq -r '.type // empty' 2>/dev/null)"
+    [ -n "$t" ] && ! printf '%s\n' "$types" | grep -Fxq "$t" && return 0
+  fi
+  mkdir -p "$CC_LEDGER_DIR" 2>/dev/null || true
+  local now id day file line
+  now="$(cc_now)"
+  id="${now}-$$-${RANDOM}"
+  day="$(date -u +%Y-%m-%d)"
+  file="$CC_LEDGER_DIR/${day}.jsonl"
+  # {v,ts,id} first; caller fields merged on top (and win if they set any).
+  line="$(printf '%s' "$1" | jq -c --argjson v 1 --argjson ts "$now" --arg id "$id" \
+    '{v:$v, ts:$ts, id:$id} + .' 2>/dev/null)" || return 0
+  [ -n "$line" ] && printf '%s\n' "$line" >> "$file" 2>/dev/null || true
+}

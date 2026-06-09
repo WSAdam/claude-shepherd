@@ -59,6 +59,9 @@ KEY="$(cc_key "$SESSION_ID" "$CWD")"
 
 # SessionEnd: drop the tile and any leftover decision file, then we're done.
 if [ "$EVENT" = "sessionend" ]; then
+  cc_ledger_enabled && cc_ledger_append "$(jq -nc \
+    --arg sid "$SESSION_ID" --arg key "$KEY" --arg name "$NAME" --arg cwd "$CWD" \
+    '{type:"session_end", session_id:$sid, key:$key, name:$name, cwd:$cwd}')"
   cc_remove "$KEY"
   echo "[cc-status] ✅ removed session '$NAME' ($KEY)" >&2
   exit 0
@@ -229,6 +232,37 @@ fi
 
 cc_merge "$KEY" "$PATCH"
 [ -n "$CLEAR_PENDING" ] && cc_del_field "$KEY" "pending"
+
+# ---- Audit ledger: record the governance-relevant lifecycle event ----------
+# Tool usage is logged only when it needed a decision (PermissionRequest) or is an
+# AskUserQuestion (the session is waiting on you) — not every Read/Grep/etc. When
+# the gate is armed the resolved allow/deny is logged separately by cc-approve.sh.
+if cc_ledger_enabled; then
+  # Stable per-launch-folder id from transcript_path (…/projects/<ENC>/…), to
+  # mirror cc-core's projectKey; empty until the first transcript path arrives.
+  PROJECT_KEY=""
+  case "$TRANSCRIPT" in
+    */projects/*/*.jsonl)
+      PROJECT_KEY="${TRANSCRIPT##*/projects/}"; PROJECT_KEY="${PROJECT_KEY%%/*}" ;;
+  esac
+  LBASE="$(jq -nc \
+    --arg sid "$SESSION_ID" --arg key "$KEY" --arg name "$NAME" \
+    --arg pk "$PROJECT_KEY" --arg cwd "$CWD" \
+    '{session_id:$sid, key:$key, name:$name, projectKey:$pk, cwd:$cwd}')"
+  case "$EVENT" in
+    sessionstart)
+      cc_ledger_append "$(printf '%s' "$LBASE" | jq -c '. + {type:"session_start"}')" ;;
+    userpromptsubmit)
+      LP="$(printf '%s' "$SET_PROMPT" | cut -c1-200)"
+      cc_ledger_append "$(printf '%s' "$LBASE" | jq -c --arg p "$LP" '. + {type:"prompt", prompt:$p}')" ;;
+    permissionrequest)
+      cc_ledger_append "$(printf '%s' "$LBASE" | jq -c \
+        --arg t "$PENDING_TOOL" --arg s "$PENDING_MSG" '. + {type:"tool_request", tool:$t, summary:$s}')" ;;
+    pretooluse)
+      [ "$PENDING_TOOL" = "AskUserQuestion" ] && cc_ledger_append "$(printf '%s' "$LBASE" | jq -c \
+        --arg t "$PENDING_TOOL" --arg s "$PENDING_MSG" '. + {type:"tool_request", tool:$t, summary:$s}')" ;;
+  esac
+fi
 
 echo "[cc-status] ✅ $EVENT -> $STATUS for '$NAME' ($KEY)" >&2
 exit 0

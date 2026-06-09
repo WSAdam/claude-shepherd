@@ -812,5 +812,54 @@ do
   eq("mergeHooks: appends ours after (2 groups)", #m4.hooks.Stop, 2)
 end
 
+-- ---- Audit ledger: parse / filter / retention / narrative -----------------
+do
+  local text = table.concat({
+    core.json.encode({ v = 1, ts = 100, id = "a", type = "prompt",
+                       session_id = "s1", name = "proj", prompt = "fix bug" }),
+    "",                                  -- blank line tolerated
+    "{ partial tail line",               -- malformed tolerated
+    core.json.encode({ v = 1, ts = 200, id = "b", type = "decision",
+                       session_id = "s1", name = "proj", tool = "Bash", summary = "rm -rf x",
+                       outcome = "deny", by = "autoDeny", pattern = "Bash(rm*)" }),
+    core.json.encode({ v = 1, ts = 150, id = "c", type = "prompt",
+                       session_id = "s2", name = "other", prompt = "hi" }),
+    core.json.encode({ ts = 50 }),       -- no type -> dropped
+  }, "\n")
+  local evs = core.parseLedger(text)
+  eq("parseLedger: keeps only well-formed events", #evs, 3)
+
+  local f1 = core.filterLedger(evs, { session = "s1" })
+  eq("filterLedger: session match count", #f1, 2)
+  eq("filterLedger: newest first", f1[1].ts, 200)
+  eq("filterLedger: by type (list)", #core.filterLedger(evs, { types = { "decision" } }), 1)
+  eq("filterLedger: by type (set)", #core.filterLedger(evs, { types = { decision = true } }), 1)
+  eq("filterLedger: time window", #core.filterLedger(evs, { sinceTs = 120, untilTs = 180 }), 1)
+  eq("filterLedger: empty types = all", #core.filterLedger(evs, { types = {} }), 3)
+
+  eq("ledgerFileEpoch: parses daily name", core.ledgerFileEpoch("2026-01-01.jsonl"),
+     core.isoToEpoch("2026-01-01T00:00:00Z"))
+  eq("ledgerFileEpoch: rejects non-ledger", core.ledgerFileEpoch("notes.txt"), nil)
+
+  local files = { "2026-01-01.jsonl", "2026-06-01.jsonl", "2026-06-09.jsonl", "exports" }
+  local now = core.isoToEpoch("2026-06-09T00:00:00Z")
+  local exp = core.expiredLedgerFiles(files, now, 30)
+  eq("expiredLedgerFiles: 30d cutoff count", #exp, 1)
+  eq("expiredLedgerFiles: drops the oldest", exp[1], "2026-01-01.jsonl")
+  eq("expiredLedgerFiles: retention 0 = keep all", #core.expiredLedgerFiles(files, now, 0), 0)
+
+  check("narrateEvent: decision shows provenance",
+    core.narrateEvent({ type = "decision", outcome = "deny", tool = "Bash", summary = "x",
+                        by = "autoDeny", pattern = "Bash(rm*)" }):find("autoDeny", 1, true) ~= nil)
+  check("renderNarrative: contains a prompt line",
+    core.renderNarrative(evs):find("fix bug", 1, true) ~= nil)
+  check("renderNarrative: empty -> placeholder",
+    core.renderNarrative({}):find("no activity", 1, true) ~= nil)
+  check("auditReviewPrompt: read-only instruction",
+    core.auditReviewPrompt("LOG", { scope = "session proj" }):find("READ%-ONLY") ~= nil)
+  check("auditReviewPrompt: embeds the narrative",
+    core.auditReviewPrompt("LOGTEXT"):find("LOGTEXT", 1, true) ~= nil)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

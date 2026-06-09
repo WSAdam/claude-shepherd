@@ -301,6 +301,156 @@ function M.improvePrompt(cards)
     .. "\n\nInsights:\n" .. table.concat(lines, "\n")
 end
 
+-- ---- Audit/event ledger (pure parse/filter/retention + narrative) ----------
+-- The ledger is append-only JSONL (one event object per line) written by the shell
+-- hooks (cc-status.sh / cc-approve.sh) and the dashboard. These helpers parse and
+-- shape it for the audit view + the on-demand LLM review. All pure: I/O (read /
+-- append / atomic rewrite / expire) lives in the dashboard's FX layer.
+
+-- Parse ledger JSONL text into a list of event tables. Tolerant of blank/partial
+-- lines (same `^%s*{` guard as transcriptSnippet); keeps only objects carrying both
+-- `ts` and `type`, so junk and partial tails never reach the view.
+function M.parseLedger(text)
+  local out = {}
+  if type(text) ~= "string" then return out end
+  for line in (text .. "\n"):gmatch("(.-)\n") do
+    if line:find("^%s*{") then
+      local okj, ev = pcall(function() return M.json.decode(line) end)
+      if okj and type(ev) == "table" and ev.ts and ev.type then out[#out + 1] = ev end
+    end
+  end
+  return out
+end
+
+-- Filter + sort (newest first) a list of events. opts = { session, sinceTs, untilTs,
+-- types }. `types` may be a set ({decision=true}) or a list ({"decision",...}); empty
+-- or nil means all. `session` matches session_id (the reliable cross-writer key).
+function M.filterLedger(events, opts)
+  opts = opts or {}
+  local typeset
+  if type(opts.types) == "table" then
+    typeset = {}
+    if #opts.types > 0 then
+      for _, t in ipairs(opts.types) do typeset[t] = true end
+    else
+      for k, v in pairs(opts.types) do if v then typeset[k] = true end end
+    end
+    if next(typeset) == nil then typeset = nil end
+  end
+  local out = {}
+  for _, e in ipairs(events or {}) do
+    local ok = true
+    if opts.session and e.session_id ~= opts.session then ok = false end
+    if ok and opts.sinceTs and (tonumber(e.ts) or 0) < opts.sinceTs then ok = false end
+    if ok and opts.untilTs and (tonumber(e.ts) or 0) > opts.untilTs then ok = false end
+    if ok and typeset and not typeset[e.type] then ok = false end
+    if ok then out[#out + 1] = e end
+  end
+  table.sort(out, function(a, b) return (tonumber(a.ts) or 0) > (tonumber(b.ts) or 0) end)
+  return out
+end
+
+-- A daily ledger filename ("YYYY-MM-DD.jsonl") -> epoch seconds at 00:00:00Z that
+-- day, reusing isoToEpoch so there's ONE civil-date implementation (matches the UTC
+-- file naming in FX.appendLedger). nil if the name isn't a daily ledger file.
+function M.ledgerFileEpoch(filename)
+  local y, mo, d = tostring(filename or ""):match("^(%d%d%d%d)%-(%d%d)%-(%d%d)%.jsonl$")
+  if not y then return nil end
+  return M.isoToEpoch(y .. "-" .. mo .. "-" .. d .. "T00:00:00Z")
+end
+
+-- Which daily files are past the retention window (older than retentionDays before
+-- `now`). retentionDays <= 0 means "keep forever" -> {}. `now` is injected (pure).
+function M.expiredLedgerFiles(filenames, now, retentionDays)
+  local out = {}
+  local days = tonumber(retentionDays) or 0
+  if days <= 0 then return out end
+  local cutoff = (tonumber(now) or 0) - days * 86400
+  for _, fn in ipairs(filenames or {}) do
+    local ep = M.ledgerFileEpoch(fn)
+    if ep and ep < cutoff then out[#out + 1] = fn end
+  end
+  return out
+end
+
+-- Event-type -> (emoji, verb) for the human narrative. `decision` picks its emoji
+-- from the outcome below, so its entry here is unused.
+local NARRATE = {
+  session_start = { "🟢", "session started" },
+  session_end   = { "⚪", "session ended" },
+  prompt        = { "📝", "prompt" },
+  tool_request  = { "🔧", "requested" },
+  task_feed     = { "📥", "fed task" },
+  mode_change   = { "🎚", "mode" },
+  model_change  = { "🤖", "model" },
+  effort_change = { "🎚", "effort" },
+  clear         = { "🧹", "cleared conversation" },
+  compact       = { "🗜", "compacted conversation" },
+  nudge         = { "👉", "nudge" },
+  autopilot_arm = { "🛫", "autopilot armed" },
+  spawn         = { "✨", "spawned session" },
+  relabel       = { "🏷", "relabeled" },
+  redact        = { "🚫", "redacted an entry" },
+  purge         = { "🗑", "purged entries" },
+}
+
+-- One human-readable line for an event (no timestamp/name; the caller adds those).
+function M.narrateEvent(e)
+  if type(e) ~= "table" then return "" end
+  local t = e.type
+  if t == "decision" then
+    local emoji = (e.outcome == "deny") and "⛔" or "✅"
+    local by = e.by and (" (" .. tostring(e.by)
+      .. (e.pattern and (": " .. tostring(e.pattern)) or "") .. ")") or ""
+    return emoji .. " " .. tostring(e.outcome or "?") .. " " .. tostring(e.tool or "")
+      .. (e.summary and (' "' .. tostring(e.summary) .. '"') or "") .. by
+  end
+  local spec = NARRATE[t]
+  local emoji = (spec and spec[1]) or "•"
+  local verb = (spec and spec[2]) or tostring(t)
+  local detail
+  if t == "mode_change" or t == "model_change" or t == "effort_change" then
+    detail = (e.from and (tostring(e.from) .. " → ") or "→ ") .. tostring(e.to or "?")
+  elseif t == "tool_request" then
+    detail = tostring(e.tool or "") .. (e.summary and (' "' .. tostring(e.summary) .. '"') or "")
+  else
+    detail = e.prompt or e.summary or e.task or e.message
+  end
+  return emoji .. " " .. verb .. (detail and (": " .. tostring(detail)) or "")
+end
+
+-- Render events as a chronological (oldest-first) narrative string, one line per
+-- event: "YYYY-MM-DD HH:MM  <name>  <event>". Pure (os.date is plain-lua safe).
+-- Used by BOTH the timeline view and the on-demand LLM review prompt.
+function M.renderNarrative(events, opts)
+  opts = opts or {}
+  local list = {}
+  for _, e in ipairs(events or {}) do list[#list + 1] = e end
+  table.sort(list, function(a, b) return (tonumber(a.ts) or 0) < (tonumber(b.ts) or 0) end)
+  local lines = {}
+  for _, e in ipairs(list) do
+    local when = e.ts and os.date("%Y-%m-%d %H:%M", tonumber(e.ts)) or "????-??-?? ??:??"
+    local who = e.name or e.session_id or "?"
+    lines[#lines + 1] = when .. "  " .. who .. "  " .. M.narrateEvent(e)
+  end
+  if #lines == 0 then return "(no activity in range)" end
+  return table.concat(lines, "\n")
+end
+
+-- Wrap a rendered narrative in a review-first instruction for the on-demand LLM
+-- review (pasted into a session, like the Improve button). opts.scope labels the
+-- slice ("session proj", "all sessions"). Read-only by construction: never edits.
+function M.auditReviewPrompt(narrative, opts)
+  opts = opts or {}
+  local scope = opts.scope or "the fleet"
+  return "Below is an audit log of recent agent activity for " .. scope .. ", pulled "
+    .. "from Claude Shepherd's ledger. Review it as a governance check: flag any risky "
+    .. "or destructive actions, repeated or suspicious denials, and anything that looks "
+    .. "off or unexplained, then summarize what actually happened. This is a READ-ONLY "
+    .. "review — do not make any changes to code or files.\n\nActivity log:\n"
+    .. tostring(narrative or "")
+end
+
 -- Map the sorted session list onto a deck of `count` keys (row-major). Returns
 -- items[1..count] (nil for empty keys) and how many sessions didn't fit.
 function M.deckLayout(count, list)

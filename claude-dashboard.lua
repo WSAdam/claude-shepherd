@@ -59,6 +59,7 @@ local AUTOPILOT_DIR = os.getenv("CC_AUTOPILOT_DIR") or (os.getenv("HOME") .. "/.
 local GATE_FLAG     = os.getenv("CC_GATE_FLAG") or (os.getenv("HOME") .. "/.claude/cc-gate.enabled")
 local LABELS_FILE   = os.getenv("CC_LABELS_FILE") or (os.getenv("HOME") .. "/.claude/cc-labels.json")
 local RECENT_FILE   = os.getenv("CC_RECENT_FILE") or (os.getenv("HOME") .. "/.claude/cc-recent-dirs.json")
+local LEDGER_DIR    = os.getenv("CC_LEDGER_DIR") or (os.getenv("HOME") .. "/.claude/cc-ledger")
 local EDITOR_BUNDLES = {
   "com.microsoft.VSCode",
   "com.microsoft.VSCodeInsiders",
@@ -127,6 +128,7 @@ local spawnPrompt        -- forward declaration (defined after FX)
 local prevStatus = {}    -- key -> last refresh's status (for auto-feed transitions)
 local escalated  = {}    -- key -> true once we've escalated this approval episode
 local caffeineTick = 0   -- throttles the keep-awake state re-read (F2)
+local ledgerGcTick = 0   -- throttles the ledger retention GC (off the 180s timer)
 local loadConfig         -- forward declaration (defined near refresh)
 local refresh            -- forward declaration (so the controller can repaint now)
 
@@ -412,6 +414,172 @@ end
 function FX.saveLabels(labelsByCwd)
   hs.fs.mkdir(os.getenv("HOME") .. "/.claude")
   FX.writeFile(LABELS_FILE, core.json.encode(labelsByCwd or {}))
+end
+
+-- ---- Audit/event ledger I/O ------------------------------------------------
+-- Append-only JSONL under LEDGER_DIR, one event per line, in per-day (UTC) files.
+-- This is the dashboard's writer for OPERATOR ACTIONS; the shell hooks write
+-- lifecycle + decisions into the same store. Pure parse/filter/retention/narrative
+-- live in cc-core; here is just the I/O. OFF unless ledger.enabled.
+local ledgerSeq = 0
+local function ledgerEnabled() return core.config(loadConfig(), "ledger.enabled", false) == true end
+
+-- Append one event. `event` carries at least `type`; v/ts/id are stamped here.
+-- No-op unless enabled and the type passes ledger.captureTypes (empty = all).
+function FX.appendLedger(event)
+  if type(event) ~= "table" or not ledgerEnabled() then return end
+  local cap = core.config(loadConfig(), "ledger.captureTypes", nil)
+  if type(cap) == "table" and #cap > 0 then
+    local ok = false
+    for _, t in ipairs(cap) do if t == event.type then ok = true; break end end
+    if not ok then return end
+  end
+  ledgerSeq = ledgerSeq + 1
+  event.v  = event.v or 1
+  event.ts = event.ts or FX.now()
+  event.id = event.id or (tostring(event.ts) .. "-d-" .. tostring(ledgerSeq))
+  hs.fs.mkdir(LEDGER_DIR)
+  local day = os.date("!%Y-%m-%d")  -- UTC, to match cc-core.ledgerFileEpoch + the shell writer
+  local f = io.open(LEDGER_DIR .. "/" .. day .. ".jsonl", "a")
+  if f then f:write(core.json.encode(event) .. "\n"); f:close() end
+end
+
+-- Build + append an operator-action event from a live status item. `extra` holds
+-- the type-specific fields (must include `type`); identity fields come from the
+-- item (projectKey from the live value the dashboard already computes).
+local function ledgerFor(item, extra)
+  if type(item) ~= "table" or type(extra) ~= "table" then return end
+  local ev = { session_id = item.session_id, key = item.key, name = item.name,
+               projectKey = item.projectKey, cwd = item.cwd }
+  for k, v in pairs(extra) do ev[k] = v end
+  FX.appendLedger(ev)
+end
+
+-- Read + parse + filter the ledger. opts = { session, sinceTs, untilTs, types,
+-- limit }. Caps the slice (newest-first) so a huge ledger can't bloat the webview
+-- payload. Returns { events, files, truncated, ts }.
+function FX.readLedger(opts)
+  opts = opts or {}
+  local files = {}
+  for _, fn in ipairs(FX.readDir(LEDGER_DIR)) do
+    if fn:match("%.jsonl$") then files[#files + 1] = fn end
+  end
+  table.sort(files)  -- chronological by name
+  local events = {}
+  for _, fn in ipairs(files) do
+    local text = FX.readFile(LEDGER_DIR .. "/" .. fn)
+    if text then
+      for _, e in ipairs(core.parseLedger(text)) do events[#events + 1] = e end
+    end
+  end
+  local filtered = core.filterLedger(events, opts)
+  local cap, truncated = opts.limit or 2000, false
+  if #filtered > cap then
+    local t = {}; for i = 1, cap do t[i] = filtered[i] end
+    filtered, truncated = t, true
+  end
+  return { events = filtered, files = files, truncated = truncated, ts = FX.now() }
+end
+
+-- Atomically rewrite the daily file `day` (UTC "YYYY-MM-DD"), nulling `fields` on
+-- the line whose id == `id` and marking it redacted, then log a `redact` tombstone.
+-- temp+mv is atomic; redact PAST days (today's file is hot with appends). true on hit.
+function FX.redactLedger(day, id, fields)
+  local path = LEDGER_DIR .. "/" .. day .. ".jsonl"
+  local text = FX.readFile(path)
+  if not text then return false end
+  local out, hit = {}, false
+  for _, e in ipairs(core.parseLedger(text)) do
+    if e.id == id then
+      hit = true
+      for _, fld in ipairs(fields or {}) do e[fld] = nil end
+      e.redacted = true
+    end
+    out[#out + 1] = core.json.encode(e)
+  end
+  if not hit then return false end
+  local tmp = path .. ".tmp." .. tostring(FX.now())
+  local f = io.open(tmp, "w"); if not f then return false end
+  f:write(table.concat(out, "\n") .. "\n"); f:close()
+  if not os.rename(tmp, path) then os.remove(tmp); return false end
+  FX.appendLedger({ type = "redact", targetId = id, fields = fields })
+  return true
+end
+
+-- Purge events. filter.all removes every daily file; otherwise { session, sinceTs,
+-- untilTs } rewrites each file dropping matches. Logs a `purge` tombstone with the
+-- count removed (appended AFTER the rewrite so it survives). Returns the count.
+function FX.purgeLedger(filter)
+  filter = filter or {}
+  local removed = 0
+  local files = {}
+  for _, fn in ipairs(FX.readDir(LEDGER_DIR)) do
+    if fn:match("%.jsonl$") then files[#files + 1] = fn end
+  end
+  for _, fn in ipairs(files) do
+    local path = LEDGER_DIR .. "/" .. fn
+    local events = core.parseLedger(FX.readFile(path) or "")
+    if filter.all then
+      removed = removed + #events
+      os.remove(path)
+    else
+      local kept = {}
+      for _, e in ipairs(events) do
+        local match = true
+        if filter.session and e.session_id ~= filter.session then match = false end
+        if match and filter.sinceTs and (tonumber(e.ts) or 0) < filter.sinceTs then match = false end
+        if match and filter.untilTs and (tonumber(e.ts) or 0) > filter.untilTs then match = false end
+        if match then removed = removed + 1 else kept[#kept + 1] = core.json.encode(e) end
+      end
+      local tmp = path .. ".tmp." .. tostring(FX.now())
+      local f = io.open(tmp, "w")
+      if f then
+        f:write(#kept > 0 and (table.concat(kept, "\n") .. "\n") or "")
+        f:close(); os.rename(tmp, path)
+      end
+    end
+  end
+  FX.appendLedger({ type = "purge", filter = filter, count = removed })
+  return removed
+end
+
+-- Retention GC: delete daily files past ledger.retentionDays, then (if maxTotalMB
+-- is set) delete oldest files until total size is under the cap. Logs a `purge`
+-- tombstone listing what was removed. Cheap dir scan; safe to call on a timer.
+function FX.expireLedger()
+  if not ledgerEnabled() then return end
+  local cfg = loadConfig()
+  local files = {}
+  for _, fn in ipairs(FX.readDir(LEDGER_DIR)) do
+    if fn:match("%.jsonl$") then files[#files + 1] = fn end
+  end
+  local removed = {}
+  -- 1) age-based expiry (pure decision in cc-core)
+  local days = tonumber(core.config(cfg, "ledger.retentionDays", 0)) or 0
+  local expired = core.expiredLedgerFiles(files, FX.now(), days)
+  local expiredSet = {}
+  for _, fn in ipairs(expired) do
+    os.remove(LEDGER_DIR .. "/" .. fn); removed[#removed + 1] = fn; expiredSet[fn] = true
+  end
+  -- 2) total-size cap, oldest first
+  local capMB = tonumber(core.config(cfg, "ledger.maxTotalMB", 0)) or 0
+  if capMB > 0 then
+    local live = {}
+    for _, fn in ipairs(files) do if not expiredSet[fn] then live[#live + 1] = fn end end
+    table.sort(live)  -- oldest first by name
+    local function fsize(fn)
+      local a = hs.fs.attributes(LEDGER_DIR .. "/" .. fn); return (a and a.size) or 0
+    end
+    local total = 0; for _, fn in ipairs(live) do total = total + fsize(fn) end
+    local capBytes, i = capMB * 1024 * 1024, 1
+    while total > capBytes and i <= #live do
+      total = total - fsize(live[i])
+      os.remove(LEDGER_DIR .. "/" .. live[i]); removed[#removed + 1] = live[i]; i = i + 1
+    end
+  end
+  if #removed == 0 then return end
+  print("[cc-ledger] retention: removed " .. #removed .. " file(s)")
+  FX.appendLedger({ type = "purge", filter = { retention = true }, expired = removed, count = #removed })
 end
 
 -- ---- New-session effects (F3-F5): folder browser, recents, mkdir -----------
@@ -887,6 +1055,10 @@ function FX.spawnSession(editor, project, task, permissionMode, providerId)
   if profile then print("[cc-orch] provider: " .. tostring(profile.id)
     .. " (" .. tostring(profile.kind or "anthropic") .. " / " .. tostring(profile.model) .. ")") end
   local live = core.config(cfg, "spawn.live", false) == true
+  FX.appendLedger({ type = "spawn",
+    name = (project and project:match("([^/]+)/?$")) or project, cwd = project,
+    editor = editor, kind = spec.kind, provider = profile and profile.id or nil,
+    task = task and tostring(task):sub(1, 200) or nil, dryRun = (ORCH_DRY_RUN and not live) })
   if ORCH_DRY_RUN and not live then
     print("[cc-orch] DRY-RUN (" .. spec.kind .. ") would spawn in "
       .. tostring(project) .. ": " .. describeSpec(spec))
@@ -1059,7 +1231,10 @@ local function handleBridgeMsg(msg)
     local item = byKey[key]
     if item then
       local task, q2 = core.queuePop(FX.readQueue(key))
-      if task then FX.feedTask(winTarget(item), task); FX.writeQueue(key, q2) end
+      if task then
+        FX.feedTask(winTarget(item), task); FX.writeQueue(key, q2)
+        ledgerFor(item, { type = "task_feed", task = tostring(task):sub(1, 200), by = "manual" })
+      end
     end
     return
   end
@@ -1076,6 +1251,7 @@ local function handleBridgeMsg(msg)
       pcall(function()
         if hs.dialog.blockAlert(title, msg, "Yes", "Cancel") == "Yes" then
           FX.typeIntoWindow(winTarget(item), cmd)
+          ledgerFor(item, { type = a })
         end
       end)
     end
@@ -1095,9 +1271,72 @@ local function handleBridgeMsg(msg)
       else
         local mins = tonumber(core.config(loadConfig(), "policies.autopilot.minutes", 15)) or 15
         FX.setAutopilot(key, FX.now() + mins * 60)
+        ledgerFor(byKey[key], { type = "autopilot_arm", minutes = mins })
         print("[cc-autopilot] on for " .. key .. " (" .. mins .. "m)")
       end
     end
+    return
+  end
+  if a == "open-audit-view" then
+    pcall(function() wv:evaluateJavaScript("window.ccAudit(" .. hs.json.encode(FX.readLedger({})) .. ")") end)
+    return
+  end
+  if a == "audit-export" then
+    local okf, f = pcall(function() return hs.json.decode(payload.text or "{}") end)
+    local res = FX.readLedger((okf and type(f) == "table") and f or {})
+    hs.fs.mkdir(LEDGER_DIR .. "/exports")
+    local fname = LEDGER_DIR .. "/exports/audit-" .. os.date("!%Y%m%dT%H%M%SZ") .. ".jsonl"
+    local lines = {}
+    for _, e in ipairs(res.events) do lines[#lines + 1] = core.json.encode(e) end
+    FX.writeFile(fname, (#lines > 0) and (table.concat(lines, "\n") .. "\n") or "")
+    pcall(function() hs.alert.show("Claude Shepherd: exported " .. #res.events .. " event(s) → " .. fname) end)
+    return
+  end
+  if a == "audit-purge" then
+    local okf, f = pcall(function() return hs.json.decode(payload.text or "{}") end)
+    f = (okf and type(f) == "table") and f or {}
+    local scope
+    if f.session or f.sinceTs or f.untilTs then scope = "events matching the current filter"
+    else f.all = true; scope = "ALL recorded events" end
+    pcall(function()
+      if hs.dialog.blockAlert("Purge audit ledger",
+           "Permanently delete " .. scope .. "?\nThis cannot be undone.", "Purge", "Cancel") == "Purge" then
+        local n = FX.purgeLedger(f)
+        wv:evaluateJavaScript("window.ccAudit(" .. hs.json.encode(FX.readLedger({})) .. ")")
+        hs.alert.show("Claude Shepherd: purged " .. n .. " event(s)")
+      end
+    end)
+    return
+  end
+  if a == "audit-redact" then
+    local okr, r = pcall(function() return hs.json.decode(payload.text or "{}") end)
+    if okr and type(r) == "table" and r.id and r.ts then
+      local day = os.date("!%Y-%m-%d", tonumber(r.ts))
+      local done = FX.redactLedger(day, tostring(r.id), type(r.fields) == "table" and r.fields or {})
+      pcall(function()
+        if done then
+          wv:evaluateJavaScript("window.ccAudit(" .. hs.json.encode(FX.readLedger({})) .. ")")
+          hs.alert.show("Claude Shepherd: redacted entry")
+        else
+          hs.alert.show("Claude Shepherd: couldn't redact (entry not found)")
+        end
+      end)
+    end
+    return
+  end
+  if a == "audit-review" then
+    local okf, f = pcall(function() return hs.json.decode(payload.text or "{}") end)
+    f = (okf and type(f) == "table") and f or {}
+    local target = byKey[tostring(payload.v or "")]
+    if not target then
+      pcall(function() hs.alert.show("Claude Shepherd: select a session first, then Review activity") end)
+      return
+    end
+    local res = FX.readLedger(f)
+    local scope = f.session and ("session " .. tostring(target.name or f.session)) or "all sessions"
+    local prompt = core.auditReviewPrompt(core.renderNarrative(res.events), { scope = scope })
+    FX.pasteIntoWindow(winTarget(target), { text = prompt })
+    pcall(function() hs.alert.show("Claude Shepherd: sent a " .. #res.events .. "-event review to " .. tostring(target.name)) end)
     return
   end
   local item = byKey[tostring(payload.v or "")]
@@ -1133,6 +1372,7 @@ local function handleBridgeMsg(msg)
         { title = "Clear conversation", menu = {
             { title = "Confirm: clear ALL context for " .. shown, fn = function()
                 FX.typeIntoWindow(winTarget(item), "/clear")
+                ledgerFor(item, { type = "clear" })
                 refresh()
               end },
             { title = "Cancel", fn = function() end },
@@ -1140,6 +1380,7 @@ local function handleBridgeMsg(msg)
         { title = "Compact", menu = {
             { title = "Confirm: compact (summarize) " .. shown, fn = function()
                 FX.typeIntoWindow(winTarget(item), "/compact")
+                ledgerFor(item, { type = "compact" })
                 refresh()
               end },
             { title = "Cancel", fn = function() end },
@@ -1170,6 +1411,7 @@ local function handleBridgeMsg(msg)
     local lkey = item.projectKey or item.cwd
     labels = core.setLabel(labels, lkey, payload.text, item.name)
     FX.saveLabels(labels)
+    ledgerFor(item, { type = "relabel", to = labels[lkey] or "" })
     print("[cc-dashboard] relabel " .. tostring(lkey) .. " -> " .. tostring(labels[lkey]))
     refresh()
     return
@@ -1188,6 +1430,7 @@ local function handleBridgeMsg(msg)
       local path = FX.writeImageTemp(parsed.b64, parsed.ext)
       if path then
         FX.pasteIntoWindow(winTarget(item), { text = payload.text and tostring(payload.text) or nil, imagePath = path })
+        ledgerFor(item, { type = "nudge", text = tostring(payload.text or ""):sub(1, 200), image = true })
       else
         print("[cc-dashboard] image paste: failed to write temp file")
       end
@@ -1195,6 +1438,18 @@ local function handleBridgeMsg(msg)
       print("[cc-dashboard] image paste: unrecognized data URL")
     end
     return
+  end
+  -- Log operator actions that fall through to the generic handler (the rest log at
+  -- their own branch above). Navigation (focus/approve/deny/stop/answer) is NOT
+  -- logged: approve/deny are shell-owned, the others aren't state changes.
+  if a == "set-mode" then
+    ledgerFor(item, { type = "mode_change", from = item.permission_mode, to = tostring(payload.text or "") })
+  elseif a == "model" then
+    ledgerFor(item, { type = "model_change", from = item.model, to = tostring(payload.text or "") })
+  elseif a == "effort" then
+    ledgerFor(item, { type = "effort_change", from = item.effort, to = tostring(payload.text or "") })
+  elseif a == "nudge" then
+    ledgerFor(item, { type = "nudge", text = tostring(payload.text or ""):sub(1, 200) })
   end
   core.handleAction(FX, item, a, payload.text and tostring(payload.text) or nil)
 end
@@ -1527,6 +1782,25 @@ local HTML = [[
   .n-browse-foot button { background:#21232c; color:#8fd4a3; border:1px solid #2c5;
             border-radius:8px; font-size:12px; padding:4px 10px; cursor:pointer; }
   .n-dim { font-size:11px; color:#6b7280; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+/* Audit ledger overlay (modeled on #settings). */
+#audit{ position:fixed; inset:0; background:#14161b; z-index:11; display:none; flex-direction:column; font-size:12px; }
+#audit.show{ display:flex; }
+#a-head{ display:flex; align-items:center; gap:8px; padding:8px 10px; border-bottom:1px solid #2c2f3a; font-weight:600; }
+.a-tab{ background:none; border:1px solid #2c2f3a; color:#9aa0ad; border-radius:6px; padding:2px 8px; cursor:pointer; }
+.a-tab.active{ color:#fff; border-color:#4b5563; background:#23262f; }
+#a-head .s-x{ margin-left:auto; }
+#a-filters{ display:flex; flex-wrap:wrap; gap:6px; padding:8px 10px; border-bottom:1px solid #23262f; }
+#a-filters select, #a-filters input{ background:#1a1c22; border:1px solid #2c2f3a; color:#cfd2db; border-radius:6px; padding:3px 6px; font-size:12px; }
+#a-body{ flex:1; overflow:auto; padding:6px 10px; }
+.a-row{ display:flex; gap:8px; align-items:baseline; padding:3px 0; border-bottom:1px solid #1e2027; }
+.a-ts{ color:#6b7280; white-space:nowrap; font-variant-numeric:tabular-nums; }
+.a-name{ color:#9aa0ad; white-space:nowrap; max-width:120px; overflow:hidden; text-overflow:ellipsis; }
+.a-desc{ color:#cfd2db; flex:1; word-break:break-word; }
+.a-redacted{ color:#6b7280; }
+.a-redact{ background:none; border:1px solid #3a2c2c; color:#d08; border-radius:5px; padding:1px 6px; cursor:pointer; font-size:11px; }
+.a-narr{ white-space:pre-wrap; color:#cfd2db; font-family:ui-monospace,Menlo,monospace; font-size:11px; line-height:1.5; margin:0; }
+#a-foot{ display:flex; gap:8px; align-items:center; padding:8px 10px; border-top:1px solid #2c2f3a; }
+#a-info{ margin-left:auto; }
 </style></head>
 <body class="theme-__INIT_THEME__" data-theme="__INIT_THEME__">
   <div id="bar">
@@ -1534,6 +1808,7 @@ local HTML = [[
     <span class="right">
       <button id="spawn" onclick="openNew()" title="Spawn a new Claude session">+ New</button>
       <button id="caffeine" onclick="toggleCaffeine()" title="Keep this Mac awake — pmset disablesleep (asks for your password)">☕ Sleep ok</button>
+      <button id="audit-btn" onclick="openAudit()" title="Audit ledger — recorded fleet activity">📜</button>
       <button id="settings-btn" onclick="openSettings()" title="Settings">⚙</button>
       <select id="theme" onchange="onThemeChange()">
         <option value="cards">Cards</option>
@@ -1641,6 +1916,14 @@ local HTML = [[
       <label class="s-row">After <input type="number" id="s-e-min" class="s-num" min="1"> minutes</label>
       <label class="s-row"><input type="checkbox" id="s-e-snd"> Play a sound</label>
       <label class="s-row"><input type="checkbox" id="s-e-push"> Push to ntfy topic <input type="text" id="s-e-topic" class="s-txt" placeholder="my-topic"></label>
+      <div class="s-sec">Audit log (records fleet activity to a local ledger)</div>
+      <label class="s-row"><input type="checkbox" id="s-ledger-en"> Enable the audit/event ledger</label>
+      <div class="s-help">Append-only JSONL under ~/.claude/cc-ledger. Records decisions (with who/what decided), prompts, tool requests, spawns, and operator actions — OFF until you enable it. Open the 📜 Audit view to read, filter, export, redact, or purge it.</div>
+      <label class="s-row">Keep for <input type="number" id="s-ledger-days" class="s-num" min="0"> days (0 = forever)</label>
+      <label class="s-row">Cap total size at <input type="number" id="s-ledger-mb" class="s-num" min="0"> MB (0 = no cap)</label>
+      <div class="s-lbl">Only record these event types (space/comma separated; blank = everything)</div>
+      <label class="s-row"><input type="text" id="s-ledger-types" class="s-txt" placeholder="decision prompt spawn"></label>
+
       <div class="s-sec">Editor window pop</div>
       <label class="s-row"><input type="checkbox" id="s-pop-complete"> Pop the editor when a session finishes</label>
       <label class="s-row"><input type="checkbox" id="s-pop-approval"> Pop the editor when a session needs approval</label>
@@ -1727,6 +2010,47 @@ local HTML = [[
     <div id="n-foot">
       <button id="n-spawn" onclick="submitNew()">Spawn</button>
       <button onclick="closeNew()">Cancel</button>
+    </div>
+  </div>
+
+  <div id="audit">
+    <div id="a-head">
+      <span>Audit ledger</span>
+      <button id="a-tab-rows" class="a-tab active" onclick="auditTab('rows')">Rows</button>
+      <button id="a-tab-time" class="a-tab" onclick="auditTab('timeline')">Timeline</button>
+      <button class="s-x" onclick="closeAudit()">✕</button>
+    </div>
+    <div id="a-filters">
+      <select id="a-f-session" onchange="auditApply()"></select>
+      <select id="a-f-type" onchange="auditApply()">
+        <option value="">All types</option>
+        <option value="decision">Decisions</option>
+        <option value="prompt">Prompts</option>
+        <option value="tool_request">Tool requests</option>
+        <option value="session_start">Session start</option>
+        <option value="session_end">Session end</option>
+        <option value="task_feed">Task feeds</option>
+        <option value="mode_change">Mode change</option>
+        <option value="model_change">Model change</option>
+        <option value="effort_change">Effort change</option>
+        <option value="clear">Clear</option>
+        <option value="compact">Compact</option>
+        <option value="nudge">Nudge</option>
+        <option value="autopilot_arm">Autopilot</option>
+        <option value="spawn">Spawn</option>
+        <option value="relabel">Relabel</option>
+        <option value="redact">Redact</option>
+        <option value="purge">Purge</option>
+      </select>
+      <input type="text" id="a-f-since" class="s-txt" style="max-width:120px;" placeholder="since YYYY-MM-DD" onchange="auditApply()">
+      <input type="text" id="a-f-until" class="s-txt" style="max-width:120px;" placeholder="until YYYY-MM-DD" onchange="auditApply()">
+    </div>
+    <div id="a-body"></div>
+    <div id="a-foot">
+      <button onclick="auditReview()" title="Send this slice to the SELECTED session for a read-only governance review">Review activity</button>
+      <button onclick="auditExport()">Export</button>
+      <button class="danger" onclick="auditPurge()">Purge…</button>
+      <span id="a-info" class="n-dim"></span>
     </div>
   </div>
 
@@ -1890,6 +2214,10 @@ local HTML = [[
       val("s-pat-allow", (cv(cfg,"policies.patterns.autoAllow",[])||[]).join("\n"));
       val("s-pat-deny",  (cv(cfg,"policies.patterns.autoDeny",[])||[]).join("\n"));
       val("s-gate-tools", cv(cfg,"gate.tools","Bash Write Edit MultiEdit NotebookEdit"));
+      ck("s-ledger-en",   cv(cfg,"ledger.enabled",false));
+      val("s-ledger-days", cv(cfg,"ledger.retentionDays",30));
+      val("s-ledger-mb",   cv(cfg,"ledger.maxTotalMB",0));
+      val("s-ledger-types", (cv(cfg,"ledger.captureTypes",[])||[]).join(" "));
       // Headless = gate armed AND every auto-policy off.
       ck("s-headless", gateOn && !cv(cfg,"policies.approveRepeats",false)
         && !cv(cfg,"policies.autopilot.enabled",false) && !cv(cfg,"policies.patterns.enabled",false));
@@ -1995,6 +2323,9 @@ local HTML = [[
       return (document.getElementById(id).value||"").split("\n")
         .map(function(s){return s.trim();}).filter(function(s){return s.length>0;});
     }
+    function toks(id){
+      return (document.getElementById(id).value||"").split(/[\s,]+/).filter(function(s){return s.length>0;});
+    }
     function persistSettings(){
       function ck(id){ return document.getElementById(id).checked; }
       function num(id,d){ var n=parseInt(document.getElementById(id).value,10); return isNaN(n)?d:n; }
@@ -2009,6 +2340,8 @@ local HTML = [[
                  provider: txt("s-spawn-provider") },
         providers: nonBlankProviders(),
         gate: { tools: txt("s-gate-tools") },
+        ledger: { enabled: ck("s-ledger-en"), retentionDays: num("s-ledger-days",30),
+                  maxTotalMB: num("s-ledger-mb",0), captureTypes: toks("s-ledger-types") },
         policies: {
           approveRepeats: ck("s-p-rep"),
           autopilot: { enabled: ck("s-ap-en"), minutes: num("s-ap-min",15) },
@@ -2272,6 +2605,123 @@ local HTML = [[
       return '<div class="ctx-bar '+barLevel(frac)+'" title="Context: '+tok+' ('+pct+'% of window)"><i style="width:'+pct+'%"></i></div>';
     }
     var LAST_OFFICIAL = null;
+    // ---- Audit ledger view --------------------------------------------------
+    var AUDIT = { events: [], files: [], truncated: false };
+    var auditView = "rows";
+    function openAudit(){ send("open-audit-view"); }
+    function closeAudit(){ document.getElementById("audit").classList.remove("show"); }
+    function auditTab(v){
+      auditView = v;
+      document.getElementById("a-tab-rows").classList.toggle("active", v === "rows");
+      document.getElementById("a-tab-time").classList.toggle("active", v === "timeline");
+      renderAudit();
+    }
+    // YYYY-MM-DD -> epoch seconds (UTC midnight, or end-of-day for `until`).
+    function dateToTs(s, endOfDay){
+      s = (s || "").trim(); if(!s) return null;
+      var m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/); if(!m) return null;
+      var t = Date.UTC(+m[1], +m[2]-1, +m[3]) / 1000;
+      return endOfDay ? t + 86399 : t;
+    }
+    function currentFilter(){
+      return { session: document.getElementById("a-f-session").value || "",
+               type:    document.getElementById("a-f-type").value || "",
+               sinceTs: dateToTs(document.getElementById("a-f-since").value, false),
+               untilTs: dateToTs(document.getElementById("a-f-until").value, true) };
+    }
+    // Server-side filter shape (for export/purge/review — full data, not the capped slice).
+    function serverFilter(){
+      var f = currentFilter(), o = {};
+      if(f.session) o.session = f.session;
+      if(f.type) o.types = [f.type];
+      if(f.sinceTs != null) o.sinceTs = f.sinceTs;
+      if(f.untilTs != null) o.untilTs = f.untilTs;
+      return o;
+    }
+    function auditPasses(e, f){
+      if(f.session && e.session_id !== f.session) return false;
+      if(f.type && e.type !== f.type) return false;
+      if(f.sinceTs != null && (e.ts || 0) < f.sinceTs) return false;
+      if(f.untilTs != null && (e.ts || 0) > f.untilTs) return false;
+      return true;
+    }
+    function auditApply(){ renderAudit(); }  // filtering is client-side over the loaded slice
+    function fmtTs(ts){
+      if(!ts) return "????-??-?? ??:??";
+      var d = new Date(ts * 1000), p = function(n){ return (n<10?"0":"") + n; };
+      return d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate())+" "+p(d.getHours())+":"+p(d.getMinutes());
+    }
+    var EV_EMOJI = { session_start:"🟢", session_end:"⚪", prompt:"📝", tool_request:"🔧",
+      task_feed:"📥", mode_change:"🎚", model_change:"🤖", effort_change:"🎚", clear:"🧹",
+      compact:"🗜", nudge:"👉", autopilot_arm:"🛫", spawn:"✨", relabel:"🏷", redact:"🚫", purge:"🗑" };
+    function evDesc(e){
+      if(e.type === "decision"){
+        return (e.outcome === "deny" ? "⛔" : "✅") + " " + (e.outcome || "?") + " " + (e.tool || "")
+          + (e.summary ? (' "' + e.summary + '"') : "")
+          + (e.by ? (" (" + e.by + (e.pattern ? (": " + e.pattern) : "") + ")") : "");
+      }
+      var em = EV_EMOJI[e.type] || "•";
+      var detail = e.prompt || e.summary || e.task || e.text || e.message || "";
+      if(e.type === "mode_change" || e.type === "model_change" || e.type === "effort_change")
+        detail = (e.from || "") + " → " + (e.to || "?");
+      else if(e.type === "tool_request") detail = (e.tool || "") + (e.summary ? (' "' + e.summary + '"') : "");
+      else if(e.type === "spawn") detail = (e.editor || "") + " " + (e.kind || "") + (e.dryRun ? " (dry-run)" : "");
+      else if(e.type === "purge") detail = (e.count != null ? (e.count + " event(s)") : "");
+      return em + " " + e.type + (detail ? (": " + detail) : "");
+    }
+    function narr(e){ return fmtTs(e.ts) + "  " + (e.name || e.session_id || "?") + "  " + evDesc(e) + (e.redacted ? " [redacted]" : ""); }
+    function auditRow(e){
+      var hasContent = (e.prompt || e.summary || e.task || e.text || e.message);
+      var canRedact = hasContent && !e.redacted;
+      return '<div class="a-row">'
+        + '<span class="a-ts">' + esc(fmtTs(e.ts)) + '</span>'
+        + '<span class="a-name">' + esc(e.name || e.session_id || "?") + '</span>'
+        + '<span class="a-desc">' + esc(evDesc(e)) + (e.redacted ? ' <i class="a-redacted">[redacted]</i>' : '') + '</span>'
+        + (canRedact ? '<button class="a-redact" onclick="auditRedact(\'' + e.id + '\',' + (e.ts || 0) + ')">redact</button>' : '')
+        + '</div>';
+    }
+    function populateAuditSessions(){
+      var sel = document.getElementById("a-f-session"), cur = sel.value, seen = {};
+      var opts = '<option value="">All sessions</option>';
+      (AUDIT.events || []).forEach(function(e){
+        if(e.session_id && !seen[e.session_id]){ seen[e.session_id] = 1;
+          opts += '<option value="' + esc(e.session_id) + '">' + esc(e.name || e.session_id) + '</option>'; }
+      });
+      sel.innerHTML = opts; if(cur) sel.value = cur;
+    }
+    function renderAudit(){
+      var f = currentFilter();
+      var evs = (AUDIT.events || []).filter(function(e){ return auditPasses(e, f); });
+      document.getElementById("a-info").textContent = evs.length + " shown"
+        + (AUDIT.truncated ? " · newest " + (AUDIT.events || []).length + " loaded (older not shown)" : "");
+      var body = document.getElementById("a-body");
+      if(auditView === "timeline"){
+        var asc = evs.slice().sort(function(a, b){ return (a.ts || 0) - (b.ts || 0); });
+        body.innerHTML = asc.length
+          ? '<pre class="a-narr">' + esc(asc.map(narr).join("\n")) + '</pre>'
+          : '<div class="s-help" style="margin-left:0;">No events in range.</div>';
+        return;
+      }
+      body.innerHTML = evs.length
+        ? evs.map(auditRow).join("")
+        : '<div class="s-help" style="margin-left:0;">No events in range.</div>';
+    }
+    function auditRedact(id, ts){
+      send("audit-redact", "", JSON.stringify({ id: id, ts: ts,
+        fields: ["prompt","summary","task","text","message","command"] }));
+    }
+    function auditReview(){ send("audit-review", selectedKey || "", JSON.stringify(serverFilter())); }
+    function auditExport(){ send("audit-export", "", JSON.stringify(serverFilter())); }
+    function auditPurge(){ send("audit-purge", "", JSON.stringify(serverFilter())); }  // Lua confirms
+    window.ccAudit = function(payload){
+      AUDIT = payload || { events: [], files: [], truncated: false };
+      if(!Array.isArray(AUDIT.events)) AUDIT.events = [];
+      if(!Array.isArray(AUDIT.files)) AUDIT.files = [];
+      populateAuditSessions();
+      renderAudit();
+      document.getElementById("audit").classList.add("show");
+    };
+
     window.ccUsage = function(u){ LAST_USAGE = u || null; if(u && u.official) LAST_OFFICIAL = u.official; renderUsageFoot(); renderDetail(); };
     window.ccOfficial = function(o){ LAST_OFFICIAL = o || null; renderUsageFoot(); };
     function pctBarRow(lbl, pct, valText){
@@ -2620,6 +3070,7 @@ function refresh()
         FX.feedTask(winTarget(it), task)
         FX.writeQueue(it.key, q2)
         it.queue = core.queueDepth(q2)
+        ledgerFor(it, { type = "task_feed", task = tostring(task):sub(1, 200), by = "autofeed" })
       end
     end
 
@@ -2714,12 +3165,19 @@ M.watcher = hs.pathwatcher.new(STATUS_DIR, function() refresh() end):start()
 -- Token usage (local, zero API cost): recompute fleet/per-session/window every 60s.
 M.usageTimer = hs.timer.doEvery(60, function() pcall(FX.computeUsage) end)
 -- Official plan-usage window (metadata call, no model tokens): refresh every 180s.
-M.officialUsageTimer = hs.timer.doEvery(OFFICIAL_TTL, function() pcall(FX.fetchOfficialUsage) end)
+M.officialUsageTimer = hs.timer.doEvery(OFFICIAL_TTL, function()
+  pcall(FX.fetchOfficialUsage)
+  -- Ledger retention GC: cheap dir scan, throttled to ~hourly (20 * 180s). Reuses
+  -- this already-retained timer rather than a bare doAfter (which can be GC'd).
+  ledgerGcTick = (ledgerGcTick + 1) % 20
+  if ledgerGcTick == 0 then pcall(FX.expireLedger) end
+end)
 sdStart()  -- begin Stream Deck discovery (no-op if none plugged in)
 bindHotkeys()
 refresh()
 after(1.0, function() pcall(FX.computeUsage) end)          -- first local pass
 after(1.5, function() pcall(function() FX.fetchOfficialUsage(true) end) end)  -- first official pass
+after(2.0, function() pcall(FX.expireLedger) end)          -- first retention pass
 
 -- Auto-enable kitty remote control when kitty is actually in use (user request):
 -- only touch kitty.conf if a kitty session exists or kitty is the spawn editor,

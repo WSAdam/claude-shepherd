@@ -14,6 +14,14 @@
     "pushTopic": ""
   },
 
+  "ledger": {
+    "_comment": "Append-only audit/event ledger of fleet activity, written to ~/.claude/cc-ledger/YYYY-MM-DD.jsonl (one JSON event per line). OFF by default — nothing is recorded until enabled. retentionDays: daily files older than this are auto-purged (0 = keep forever). maxTotalMB: cap total ledger size, deleting oldest days first (0 = no cap). captureTypes: empty = record everything; otherwise a list of event types to record (e.g. [\"decision\",\"prompt\",\"spawn\"]).",
+    "enabled": false,
+    "retentionDays": 30,
+    "maxTotalMB": 0,
+    "captureTypes": []
+  },
+
   "focus": {
     "_comment": "Pop/focus the DETECTED editor (VS Code/Cursor; Kitty/terminal left alone) on each event. Legacy popEditor is still honored as a fallback for both.",
     "popOnComplete": false,
