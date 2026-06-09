@@ -60,6 +60,7 @@ local GATE_FLAG     = os.getenv("CC_GATE_FLAG") or (os.getenv("HOME") .. "/.clau
 local LABELS_FILE   = os.getenv("CC_LABELS_FILE") or (os.getenv("HOME") .. "/.claude/cc-labels.json")
 local RECENT_FILE   = os.getenv("CC_RECENT_FILE") or (os.getenv("HOME") .. "/.claude/cc-recent-dirs.json")
 local LEDGER_DIR    = os.getenv("CC_LEDGER_DIR") or (os.getenv("HOME") .. "/.claude/cc-ledger")
+local CLAUDE_DIR    = (os.getenv("HOME") or "") .. "/.claude"
 local EDITOR_BUNDLES = {
   "com.microsoft.VSCode",
   "com.microsoft.VSCodeInsiders",
@@ -107,7 +108,7 @@ local ACTIVITY_LEN   = 600    -- how much reasoning to keep (the panel clamps it
 local ORCH_ENABLED     = true
 local ORCH_DRY_RUN     = true
 local ORCH_TERMINAL    = "Terminal"
-local ORCH_DEFAULT_DIR = os.getenv("HOME") .. "/Programming"
+local ORCH_DEFAULT_DIR = (os.getenv("HOME") or "") .. "/Programming"
 local HOTKEY_SPAWN     = { { "cmd", "alt" }, "s" } -- spawn a new Claude session
 local HOTKEY_TOGGLE    = { { "cmd", "alt" }, "b" } -- show/hide the panel
 -- -------------------------------------------------------------------------
@@ -412,7 +413,7 @@ function FX.loadLabels()
   return (ok and type(t) == "table") and t or {}
 end
 function FX.saveLabels(labelsByCwd)
-  hs.fs.mkdir(os.getenv("HOME") .. "/.claude")
+  hs.fs.mkdir(CLAUDE_DIR)
   FX.writeFile(LABELS_FILE, core.json.encode(labelsByCwd or {}))
 end
 
@@ -611,7 +612,7 @@ function FX.readRecent()
   return (ok and type(t) == "table" and type(t.dirs) == "table") and t or { dirs = {} }
 end
 function FX.writeRecent(state)
-  hs.fs.mkdir(os.getenv("HOME") .. "/.claude")
+  hs.fs.mkdir(CLAUDE_DIR)
   FX.writeFile(RECENT_FILE, core.json.encode(state or { dirs = {} }))
 end
 
@@ -1144,18 +1145,26 @@ local function handleBridgeMsg(msg)
   end
   if a == "open-settings" then
     -- Push the current config (or {} = all defaults) + gate state into the form.
+    -- Decode + RE-ENCODE via hs.json rather than splicing raw file bytes into the
+    -- JS call: a malformed cc-config.json would otherwise produce broken JS that
+    -- silently fails the pcall. On a parse error we fall back to defaults + alert.
     local raw = FX.readFile(CONFIG_FILE)
-    local json = (raw and #raw > 0) and raw or "{}"
+    local cfg = {}
+    if raw and #raw > 0 then
+      local ok, parsed = pcall(function() return hs.json.decode(raw) end)
+      if ok and type(parsed) == "table" then cfg = parsed
+      else pcall(function() hs.alert.show("Claude Shepherd: cc-config.json is malformed — showing defaults") end) end
+    end
     local gateOn = (FX.readFile(GATE_FLAG) ~= nil) and "true" or "false"
     pcall(function()
-      wv:evaluateJavaScript("showSettings(" .. json .. ", " .. gateOn .. ")")
+      wv:evaluateJavaScript("showSettings(" .. hs.json.encode(cfg) .. ", " .. gateOn .. ")")
     end)
     return
   end
   if a == "save-config" then
     local ok, parsed = pcall(function() return hs.json.decode(payload.text or "{}") end)
     if ok and type(parsed) == "table" then
-      hs.fs.mkdir(os.getenv("HOME") .. "/.claude")
+      hs.fs.mkdir(CLAUDE_DIR)
       local cfg = parsed.config or {}
       -- Normalize the editable gated-tools list (space/comma -> clean, deduped).
       if type(cfg.gate) == "table" then cfg.gate.tools = core.parseToolList(cfg.gate.tools) end
@@ -1169,15 +1178,15 @@ local function handleBridgeMsg(msg)
   end
   if a == "open-new" then
     -- Feed the modal: current config + recent dirs (seeded with active session
-    -- cwds) + the initial folder listing.
-    local raw = FX.readFile(CONFIG_FILE)
-    local json = (raw and #raw > 0) and raw or "{}"
+    -- cwds) + the initial folder listing. loadConfig() decodes-or-{}, and we
+    -- re-encode via hs.json so a malformed file can't break the spliced JS.
+    local cfg = loadConfig()
     local active = {}
     for _, it in pairs(byKey) do if it.cwd then active[#active + 1] = it.cwd end end
     local recent = core.recentSeed(FX.readRecent(), active)
     local browse = FX.listDirs(ORCH_DEFAULT_DIR)
     pcall(function()
-      wv:evaluateJavaScript("showNew(" .. json .. ", "
+      wv:evaluateJavaScript("showNew(" .. hs.json.encode(cfg) .. ", "
         .. hs.json.encode(recent.dirs) .. ", " .. hs.json.encode(browse) .. ")")
     end)
     return
@@ -1241,16 +1250,17 @@ local function handleBridgeMsg(msg)
   if a == "clear" or a == "compact" then
     local item = byKey[tostring(payload.v or "")]
     if item then
-      local cmd   = (a == "clear") and "/clear" or "/compact"
-      local title = (a == "clear") and "Clear conversation" or "Auto-compact"
-      local msg   = (a == "clear")
-        and ("Clear ALL conversation context for " .. item.name ..
-             "?\nThis types /clear into its terminal.")
-        or  ("Compact (summarize) the conversation for " .. item.name ..
-             "?\nThis types /compact into its terminal.")
+      -- One spec per action keeps cmd/title/msg in lockstep (no parallel ternaries).
+      local SPEC = {
+        clear = { cmd = "/clear", title = "Clear conversation",
+          msg = "Clear ALL conversation context for " .. item.name .. "?\nThis types /clear into its terminal." },
+        compact = { cmd = "/compact", title = "Auto-compact",
+          msg = "Compact (summarize) the conversation for " .. item.name .. "?\nThis types /compact into its terminal." },
+      }
+      local s = SPEC[a]
       pcall(function()
-        if hs.dialog.blockAlert(title, msg, "Yes", "Cancel") == "Yes" then
-          FX.typeIntoWindow(winTarget(item), cmd)
+        if hs.dialog.blockAlert(s.title, s.msg, "Yes", "Cancel") == "Yes" then
+          FX.typeIntoWindow(winTarget(item), s.cmd)
           ledgerFor(item, { type = a })
         end
       end)
@@ -2479,8 +2489,9 @@ local HTML = [[
     }
     function toggleExpand(which){ detailExpanded[which] = !detailExpanded[which]; applyExpand(); }
     function applyExpand(){
-      document.getElementById("d-pending").classList.toggle("expanded", detailExpanded.pending);
-      document.getElementById("d-activity").classList.toggle("expanded", detailExpanded.activity);
+      ["pending","activity"].forEach(function(which){
+        document.getElementById("d-" + which).classList.toggle("expanded", detailExpanded[which]);
+      });
     }
     function paintSelection(){
       var tiles = document.querySelectorAll(".tile");
@@ -3120,32 +3131,30 @@ end
 -- The target SELECTION is cc-core logic (tested); here we just wire the keys.
 local function bindHotkeys()
   if not HOTKEYS_ENABLED then return end
+  -- Shared shape for the session hotkeys: pick a target from the live list via
+  -- `selector(list)`, then log + act. opts.remember updates lastJumpKey; opts.alertNone
+  -- shows the "nothing waiting" toast when no target matches. (A 4th key is one line.)
+  local function hotkeyAct(label, selector, action, opts)
+    opts = opts or {}
+    local it = selector(refreshList())
+    if it then
+      if opts.remember then lastJumpKey = it.key end
+      print("[cc-hotkey] " .. label .. " -> " .. tostring(it.name))
+      core.handleAction(FX, it, action)
+    elseif opts.alertNone then
+      hs.alert.show("Claude Shepherd: nothing waiting")
+    end
+  end
   M.hotkeys = {
     hs.hotkey.bind(HOTKEY_APPROVE_FRONT[1], HOTKEY_APPROVE_FRONT[2], function()
-      local it = core.nextApproval(refreshList())
-      if it then
-        print("[cc-hotkey] approve-front -> " .. tostring(it.name))
-        core.handleAction(FX, it, "approve")
-      else
-        hs.alert.show("Claude Shepherd: nothing waiting")
-      end
+      hotkeyAct("approve-front", core.nextApproval, "approve", { alertNone = true })
     end),
     hs.hotkey.bind(HOTKEY_JUMP_NEEDY[1], HOTKEY_JUMP_NEEDY[2], function()
-      local list = refreshList()
-      local it = core.nextApproval(list) or core.frontSession(list)
-      if it then
-        lastJumpKey = it.key
-        print("[cc-hotkey] jump-needy -> " .. tostring(it.name))
-        core.handleAction(FX, it, "focus")
-      end
+      hotkeyAct("jump-needy", function(l) return core.nextApproval(l) or core.frontSession(l) end,
+        "focus", { remember = true })
     end),
     hs.hotkey.bind(HOTKEY_CYCLE[1], HOTKEY_CYCLE[2], function()
-      local it = core.cycleNext(refreshList(), lastJumpKey)
-      if it then
-        lastJumpKey = it.key
-        print("[cc-hotkey] cycle -> " .. tostring(it.name))
-        core.handleAction(FX, it, "focus")
-      end
+      hotkeyAct("cycle", function(l) return core.cycleNext(l, lastJumpKey) end, "focus", { remember = true })
     end),
     hs.hotkey.bind(HOTKEY_SPAWN[1], HOTKEY_SPAWN[2], function() spawnPrompt() end),
     hs.hotkey.bind(HOTKEY_TOGGLE[1], HOTKEY_TOGGLE[2], function() togglePanel() end),

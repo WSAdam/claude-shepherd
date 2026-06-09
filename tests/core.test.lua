@@ -861,5 +861,80 @@ do
     core.auditReviewPrompt("LOGTEXT"):find("LOGTEXT", 1, true) ~= nil)
 end
 
+-- ---- Improve cards: bug fixes + previously-untested branches --------------
+do
+  local function aline(text)
+    return core.json.encode({ type = "assistant", message = { role = "assistant",
+      content = { { type = "text", text = text } } } })
+  end
+
+  -- repoFromRemote: scp, https, and the new ssh:// (with user+port) form
+  eq("repo: scp-style git@host:owner/repo.git",
+     core.repoFromRemote("git@github.com:WSAdam/claude-shepherd.git"), "WSAdam/claude-shepherd")
+  eq("repo: https with .git",
+     core.repoFromRemote("https://github.com/WSAdam/claude-shepherd.git"), "WSAdam/claude-shepherd")
+  eq("repo: ssh://user@host:port/owner/repo.git",
+     core.repoFromRemote("ssh://git@github.com:22/WSAdam/claude-shepherd.git"), "WSAdam/claude-shepherd")
+  eq("repo: ssh:// without user", core.repoFromRemote("ssh://github.com/o/r"), "o/r")
+
+  -- transcriptSnippet: whitespace-only block is skipped to the older real text
+  eq("snippet: whitespace-only block skipped",
+     core.transcriptSnippet(aline("real answer") .. "\n" .. aline("   ")), "real answer")
+  eq("snippet: only-whitespace -> nil", core.transcriptSnippet(aline("   \n  ")), nil)
+  -- multiple text blocks on one assistant line: the last non-empty wins
+  local multi = core.json.encode({ type = "assistant", message = { role = "assistant",
+    content = { { type = "text", text = "first" }, { type = "text", text = "second" } } } })
+  eq("snippet: last text block wins", core.transcriptSnippet(multi), "second")
+  -- truncation appends the … ellipsis and preserves a prefix of the original
+  local snip = core.transcriptSnippet(aline(string.rep("a", 300)), 20)
+  check("snippet: truncation appends ellipsis", snip:sub(-3) == "\226\128\166")
+  check("snippet: truncation keeps a prefix", snip:sub(1, 3) == "aaa")
+  -- UTF-8 boundary: a run of 3-byte glyphs is never split mid-character
+  local usnip = core.transcriptSnippet(aline(string.rep("\226\128\166", 30)), 20)
+  check("snippet: utf8-safe within bound", #usnip <= 20)
+  check("snippet: utf8-safe keeps whole glyphs only", (#usnip:sub(1, #usnip - 3) % 3) == 0)
+
+  -- shouldPrune: session_id == nil (not just "") is an orphan; pruneSeconds=0 off
+  local opts = { pruneNoSid = true, pruneSeconds = 86400 }
+  eq("prune: nil session_id orphan -> true",
+     core.shouldPrune({ stale = true, session_id = nil, updated = 100 }, 1000, opts), true)
+  local noBackstop = { pruneNoSid = true, pruneSeconds = 0 }
+  eq("prune: pruneSeconds=0 disables ghost backstop",
+     core.shouldPrune({ stale = true, session_id = "abc", updated = 0 }, 9e9, noBackstop), false)
+  eq("prune: pruneSeconds=0 still prunes a true orphan",
+     core.shouldPrune({ stale = true, session_id = "", updated = 0 }, 9e9, noBackstop), true)
+
+  -- cycleNext advances on repeated calls, threading the prior key (the hotkey loop)
+  local list = { { key = "a" }, { key = "b" }, { key = "c" } }
+  local k = core.cycleNext(list, nil).key;  eq("cycle: 1st -> a", k, "a")
+  k = core.cycleNext(list, k).key;          eq("cycle: 2nd -> b", k, "b")
+  k = core.cycleNext(list, k).key;          eq("cycle: 3rd -> c", k, "c")
+  k = core.cycleNext(list, k).key;          eq("cycle: 4th wraps -> a", k, "a")
+
+  -- jump-needy fallback: no approval -> frontSession is the target
+  local idleList = { { key = "x", name = "x", status = "idle" }, { key = "y", name = "y", status = "working" } }
+  eq("jump-needy: falls back to front session",
+     (core.nextApproval(idleList) or core.frontSession(idleList)).key, "x")
+
+  -- parseStatusList: same-status entries break ties by name (apple before zebra)
+  local sorted = core.parseStatusList({
+    { key = "k2", content = core.json.encode({ name = "zebra", status = "working", updated = 100 }) },
+    { key = "k1", content = core.json.encode({ name = "apple", status = "working", updated = 100 }) },
+  }, 100, 9999)
+  eq("parseStatusList: name tiebreak within status", sorted[1].name, "apple")
+
+  -- usageInWindow: only events whose ts is inside [now-window, now] count
+  local now = 10000
+  eq("usageInWindow: only in-window events count", core.usageInWindow({
+    { ts = now - 10, input = 1, output = 1, cacheCreate = 0 },  -- in window -> 2
+    { ts = now - 99999, input = 5, output = 5 },                -- outside -> 0
+    { input = 9, output = 9 },                                  -- no ts -> skipped
+  }, now, 3600), 2)
+
+  -- isoToEpoch: a 2024 leap day (Feb 29 exists) -> Feb 28 to Mar 1 spans two days
+  eq("iso: 2024 leap day spans Feb 29",
+     core.isoToEpoch("2024-03-01T00:00:00Z") - core.isoToEpoch("2024-02-28T00:00:00Z"), 2 * 86400)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

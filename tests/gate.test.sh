@@ -120,4 +120,30 @@ out="$(printf '%s' '{"session_id":"t2","cwd":"/x/p","tool_name":"Bash","tool_inp
     | CC_GATE_FLAG="$FLAG" CC_CONFIG_FILE="$TOOLSCFG" CC_PANEL_MAX_AGE=99999 bash "$APP" 2>/dev/null)"
 assert_eq "config gate.tools: tool outside list falls through" "" "$out"
 
+# ---- precedence + approveRepeats write path (improve cards) ----
+# A command matching BOTH autoDeny and autoAllow must be DENIED (safety first).
+BOTH="$TMP/both.json"
+cat > "$BOTH" <<'JSON'
+{ "policies": { "patterns": { "enabled": true,
+    "autoDeny": ["Bash(rm*)"], "autoAllow": ["Bash(rm*)"] } } }
+JSON
+out="$(printf '%s' '{"session_id":"p1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"rm x"}}' \
+  | CC_GATE_FLAG="$FLAG" CC_CONFIG_FILE="$BOTH" bash "$APP" 2>/dev/null)"
+assert_eq "precedence: autoDeny beats autoAllow" "deny" "$(decision "$out")"
+
+# approveRepeats: a panel ALLOW must append the SIG so the next identical request
+# auto-allows (previously only the pre-seeded read path was covered).
+rm -f "$CC_APPROVED_DIR"/* 2>/dev/null
+REPCFG="$TMP/rep.json"; echo '{"policies":{"approveRepeats":true}}' > "$REPCFG"
+date +%s > "$HB"
+REQ='{"session_id":"rep1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"npm run build"}}'
+( printf '%s' "$REQ" | CC_GATE_FLAG="$FLAG" CC_CONFIG_FILE="$REPCFG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=5 \
+    bash "$APP" >/dev/null 2>&1 ) &
+bg=$!; sleep 0.5; printf 'allow' > "$TMP/rep1.decision"; wait $bg
+assert_eq "approveRepeats: panel allow records the SIG" "Bash|npm run build" "$(cat "$CC_APPROVED_DIR/rep1" 2>/dev/null)"
+# the 2nd identical request now auto-allows with NO panel (approveRepeats fires first)
+rm -f "$HB"
+out="$(printf '%s' "$REQ" | CC_GATE_FLAG="$FLAG" CC_CONFIG_FILE="$REPCFG" bash "$APP" 2>/dev/null)"
+assert_eq "approveRepeats: 2nd identical request auto-allows" "allow" "$(decision "$out")"
+
 finish

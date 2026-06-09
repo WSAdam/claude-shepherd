@@ -45,10 +45,13 @@ summarize_tool() { # $1 = json, $2 = tool_name
     Write|Edit|MultiEdit) s="$(cc_get "$j" '.tool_input.file_path')" ;;
     NotebookEdit) s="$(cc_get "$j" '.tool_input.notebook_path')" ;;
   esac
+  # Fallbacks for tools with no case arm above (the case arms are the source of
+  # truth for known tools): try a generic command/file, else the tool name.
   [ -n "$s" ] || s="$(cc_get "$j" '.tool_input.command')"
   [ -n "$s" ] || s="$(cc_get "$j" '.tool_input.file_path')"
   [ -n "$s" ] || s="$tool"
-  printf '%s' "$s" | cut -c1-200
+  # Collapse newlines so a multi-line command stays one line in the tile, then cap.
+  printf '%s' "$s" | tr '\n' ' ' | cut -c1-200
 }
 
 SESSION_ID="$(cc_get "$INPUT" '.session_id')"

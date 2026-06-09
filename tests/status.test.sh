@@ -89,4 +89,18 @@ T="t3"; TCWD="/srv/app"; TF="$TMP/$T.json"
 ev userpromptsubmit "{\"session_id\":\"$T\",\"cwd\":\"$TCWD\",\"transcript_path\":\"/U/x/.claude/projects/app/s.jsonl\",\"prompt_text\":\"hi\"}"
 assert_json "transcript_path captured" "$TF" '.transcript_path' "/U/x/.claude/projects/app/s.jsonl"
 
+# --- summarize_tool: fallback, truncation, multi-line collapse (improve cards) ---
+S="sm"; SF="$TMP/$S.json"
+# an unlisted tool with no command/file_path -> falls back to the tool name
+ev permissionrequest "{\"session_id\":\"$S\",\"cwd\":\"/x/p\",\"tool_name\":\"WebFetch\",\"tool_input\":{\"url\":\"https://x\"}}"
+assert_json "summarize: unlisted tool -> tool name" "$SF" '.pending.summary' "WebFetch"
+# a long command is capped at 200 chars
+LONG="echo $(printf 'X%.0s' $(seq 1 400))"
+ev permissionrequest "{\"session_id\":\"$S\",\"cwd\":\"/x/p\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":$(printf '%s' "$LONG" | jq -Rs .)}}"
+assert_eq "summarize: long command capped at 200" "200" "$(jq -r '.pending.summary|length' "$SF")"
+# a multi-line command collapses to a single line (no embedded newline breaks the tile)
+ML="$(printf 'line1\nline2')"
+ev permissionrequest "{\"session_id\":\"$S\",\"cwd\":\"/x/p\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":$(printf '%s' "$ML" | jq -Rs .)}}"
+assert_eq "summarize: multi-line command collapsed to one line" "line1 line2" "$(jq -r '.pending.summary' "$SF")"
+
 finish

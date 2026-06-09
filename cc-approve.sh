@@ -35,8 +35,10 @@ AUTOPILOT_DIR="${CC_AUTOPILOT_DIR:-${HOME}/.claude/cc-autopilot}"
 emit_allow() {
   printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}'
 }
-emit_deny() { # $1 = reason (plain ASCII)
-  printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"'"$1"'"}}'
+emit_deny() { # $1 = reason. Built via jq so a reason with quotes/backslashes can't
+  # produce invalid JSON (jq is guaranteed here: the script exits early without it).
+  jq -nc --arg r "$1" \
+    '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$r}}'
 }
 
 # Match a request against a policy pattern. "Tool" matches by tool name;
@@ -105,21 +107,33 @@ ledger_decision() {
 # ---- Policy evaluation (Phase 4c) -----------------------------------------
 PAT_ENABLED="$(cc_config '.policies.patterns.enabled' 'false')"
 
-# 1. autoDeny (safety first)
-if [ "$PAT_ENABLED" = "true" ]; then
-  DENY_PATS="$(cc_config_array '.policies.patterns.autoDeny')"
-  if [ -n "$DENY_PATS" ]; then
-    while IFS= read -r pat; do
-      [ -n "$pat" ] || continue
-      if pattern_match "$TOOL" "$SUMMARY" "$pat"; then
+# Run the request against a config pattern list; on the FIRST match, log + record
+# the ledger decision + emit it + exit. Shared by autoDeny and autoAllow (the two
+# loops were byte-identical apart from the verb). $1 = jq path to the list,
+# $2 = outcome (deny|allow), $3 = "by" label. No-op when patterns are disabled.
+match_patterns() {
+  [ "$PAT_ENABLED" = "true" ] || return 0
+  local pats pat; pats="$(cc_config_array "$1")"
+  [ -n "$pats" ] || return 0
+  while IFS= read -r pat; do
+    [ -n "$pat" ] || continue
+    if pattern_match "$TOOL" "$SUMMARY" "$pat"; then
+      if [ "$2" = "deny" ]; then
         echo "[cc-approve] ⛔ policy auto-deny ($pat): $TOOL ($KEY)" >&2
-        ledger_decision deny autoDeny "$pat"
+        ledger_decision deny "$3" "$pat"
         emit_deny "Auto-denied by Claude Shepherd policy."
-        exit 0
+      else
+        echo "[cc-approve] ✅ policy auto-allow ($pat): $TOOL ($KEY)" >&2
+        ledger_decision allow "$3" "$pat"
+        emit_allow
       fi
-    done <<< "$DENY_PATS"
-  fi
-fi
+      exit 0
+    fi
+  done <<< "$pats"
+}
+
+# 1. autoDeny (safety first)
+match_patterns '.policies.patterns.autoDeny' deny autoDeny
 
 # 2. autopilot: this session is trusted for a time-boxed window
 if [ "$(cc_config '.policies.autopilot.enabled' 'false')" = "true" ] && [ -f "$AUTOPILOT_DIR/$KEY" ]; then
@@ -134,20 +148,11 @@ if [ "$(cc_config '.policies.autopilot.enabled' 'false')" = "true" ] && [ -f "$A
 fi
 
 # 3. autoAllow patterns
-if [ "$PAT_ENABLED" = "true" ]; then
-  ALLOW_PATS="$(cc_config_array '.policies.patterns.autoAllow')"
-  if [ -n "$ALLOW_PATS" ]; then
-    while IFS= read -r pat; do
-      [ -n "$pat" ] || continue
-      if pattern_match "$TOOL" "$SUMMARY" "$pat"; then
-        echo "[cc-approve] ✅ policy auto-allow ($pat): $TOOL ($KEY)" >&2
-        ledger_decision allow autoAllow "$pat"
-        emit_allow
-        exit 0
-      fi
-    done <<< "$ALLOW_PATS"
-  fi
-fi
+# SECURITY: an autoAllow glob is a PREFIX/shell-glob match on the command, so
+# `Bash(ls*)` also auto-allows `ls; rm -rf /` or `ls && curl … | sh`. Keep
+# autoAllow patterns tight (prefer exact tools like `Read`, or anchored commands)
+# — autoDeny runs first and always wins, so deny dangerous shapes there.
+match_patterns '.policies.patterns.autoAllow' allow autoAllow
 
 # 4. approveRepeats: identical request already approved this session
 if [ "$(cc_config '.policies.approveRepeats' 'false')" = "true" ]; then

@@ -280,6 +280,9 @@ end
 -- in the /improve command: strip a git@host: or https://host/ prefix and .git suffix.
 function M.repoFromRemote(url)
   url = tostring(url or ""):gsub("%s+", "")
+  -- ssh://[user@]host[:port]/owner/repo(.git): strip the scheme+authority first, so
+  -- what's left (owner/repo) flows through the same scp/https handling below.
+  url = url:gsub("^ssh://[^/]+/", "")
   return (url:gsub("^git@[^:]+:", ""):gsub("^https?://[^/]+/", ""):gsub("%.git$", ""))
 end
 
@@ -475,6 +478,19 @@ function M.frontSession(list) return (list or {})[1] end
 -- activity peek". Scans lines backwards (the last assistant line is often a
 -- tool_use with no text), returns the last text block found, whitespace-collapsed
 -- and truncated. Returns nil if there's no assistant text.
+-- Truncate to at most maxBytes without splitting a multibyte UTF-8 char: back off
+-- over trailing continuation bytes (0x80-0xBF) so the cut lands on a codepoint
+-- boundary (otherwise the appended … can render after half a glyph).
+local function utf8trunc(s, maxBytes)
+  if #s <= maxBytes then return s end
+  local cut = maxBytes
+  while cut > 0 do
+    local c = s:byte(cut + 1)
+    if c and c >= 0x80 and c < 0xC0 then cut = cut - 1 else break end
+  end
+  return s:sub(1, cut)
+end
+
 function M.transcriptSnippet(text, maxLen)
   maxLen = maxLen or 140
   if not text or #text == 0 then return nil end
@@ -497,9 +513,14 @@ function M.transcriptSnippet(text, maxLen)
         end
         if txt then
           txt = txt:gsub("%s+", " "):gsub("^ +", ""):gsub(" +$", "")
-          -- reserve 3 bytes for the … ellipsis so the result stays within maxLen
-          if #txt > maxLen then txt = txt:sub(1, maxLen - 3) .. "\226\128\166" end
-          return txt
+          -- A whitespace-only block collapses to ""; skip it and keep scanning older
+          -- lines instead of returning an empty snippet.
+          if #txt > 0 then
+            -- reserve 3 bytes for the … ellipsis so the result stays within maxLen,
+            -- truncating on a UTF-8 boundary so we never split a multibyte glyph.
+            if #txt > maxLen then txt = utf8trunc(txt, maxLen - 3) .. "\226\128\166" end
+            return txt
+          end
         end
       end
     end
@@ -516,7 +537,7 @@ M.WINDOW_5H = 5 * 3600                -- rolling 5-hour window (approx plan limi
 M.WINDOW_7D = 7 * 86400              -- rolling 7-day window
 
 -- Convert an ISO-8601 UTC timestamp ("2026-03-16T12:29:10.850Z") to epoch seconds
--- in UTC, timezone-independent (days-from-civil formula, so it matches os.time()
+-- in UTC, timezone-independent (days-from-civil formula, Howard Hinnant, so it matches os.time()
 -- comparisons without DST/locale drift). nil if unparseable.
 function M.isoToEpoch(s)
   if type(s) ~= "string" then return nil end
