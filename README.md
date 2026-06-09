@@ -157,12 +157,89 @@ Click **+ New** (or **⌘⌥S**) to open the **New session** modal:
   Terminal launch reliably; VS Code/Cursor open the window, then best-effort type `claude` into a
   fresh integrated terminal (no supported API for that — Kitty/Terminal are the reliable spawns).
 - **Permission mode** — Default / Plan / Accept edits / Automate (`claude --permission-mode <m>`).
+- **Provider** — which model/backend to launch this session against (see "Providers & models" below).
 - **Initial task** (optional).
 
 Spawning is **dry-run until you opt in**: leave it off to log the exact command to
 `~/.claude/cc-shepherd.log` without launching, or flip **"Actually launch"** in ⚙ Settings → Spawn
 (`spawn.live`; the `ORCH_DRY_RUN` code default stays as a safety net). The new session shows up as a
 tile automatically. (The ⌘⌥S hotkey falls back to two native prompts if the modal can't open.)
+
+## Providers & models (multi-model / other companies / local)
+
+Claude Shepherd supervises **Claude Code** sessions, and Claude Code is provider-flexible,
+so a "provider profile" is just a **named bundle of env vars + a model id** injected into
+the `claude` launch. Define profiles in **⚙ Settings → Providers**, pick one per session in
+the **New session** modal (or set a **Default provider**), and switch a running session's
+model live from the detail panel's **Model** dropdown (`/model`). The tile/detail shows a
+**model** badge for what's actually running (captured from the session's env by the hook).
+
+Two kinds:
+
+- **Claude** (`kind: "anthropic"`) — just sets `ANTHROPIC_MODEL` (e.g. `claude-opus-4-8`,
+  `claude-sonnet-4-6`, `claude-haiku-4-5`) against the normal endpoint.
+- **Gateway** (`kind: "gateway"`) — also sets `ANTHROPIC_BASE_URL` so Claude Code talks to an
+  **Anthropic-Messages-compatible endpoint**: a [LiteLLM](https://docs.litellm.ai/) proxy
+  (which translates to **Gemini, OpenAI**, and others), or a **local/remote REST server**
+  (Ollama/vLLM/LM Studio, optionally behind LiteLLM). Set `baseUrl`, the `model` id your
+  gateway expects, and optionally `smallFastModel` / `headers`.
+
+**No API keys are stored.** A profile names an **environment variable** in `authTokenEnv`
+(e.g. `MY_LITELLM_KEY`); the spawned **login shell** expands `$MY_LITELLM_KEY` at launch, so
+the key lives in your shell (`~/.zshrc` / a secrets manager), never in `cc-config.json` and
+never in Shepherd's process. Example `~/.claude/cc-config.json`:
+
+```json
+{
+  "spawn": { "provider": "anthropic-opus" },
+  "providers": [
+    { "id": "anthropic-opus", "label": "Claude Opus 4.8", "kind": "anthropic", "model": "claude-opus-4-8" },
+    { "id": "gemini", "label": "Gemini (LiteLLM)", "kind": "gateway",
+      "baseUrl": "http://localhost:4000", "model": "gemini-2.5-pro", "authTokenEnv": "MY_LITELLM_KEY" }
+  ]
+}
+```
+
+**Limits (be honest):** every Shepherd control keeps working because the **harness is still
+Claude Code** — only the backend model swaps. A non-Claude backend may ignore Claude-specific
+behaviors (effort/thinking), but slash commands, hooks, and approvals are Claude Code client
+features and still function. A session's **base URL is fixed at launch**, so switching the
+*model* within a provider goes live via `/model`, but switching the *provider* (a different
+base URL) means starting a **new session**. Running a *different agent CLI* (aider, gemini-cli)
+is out of scope — those have no hook system, so the tiles/approvals couldn't work.
+
+## Token usage
+
+Shepherd reads token usage straight from Claude Code's **local transcript files**
+(`~/.claude/projects/<proj>/<session>.jsonl`), which log every turn's `usage`. Three views:
+
+- **Context-fullness bar (per tile)** — the last turn's prompt size (input + cache) ÷ the model's
+  context window, colored blue → amber → red as it fills. Tells you which session to `/compact`.
+  The window is **model-aware** (Opus 4.x / Sonnet 4.6 = 1M on Claude Code; others 200k), with a
+  per-provider `contextLimit` override and a self-healing guard so a session never reads a false
+  100%. Computed on the 60s usage pass (and live on the 1s loop for active sessions), so it shows
+  on **every** tile — including idle/finished ones. **Local only, zero tokens, zero network.**
+- **Fleet total (footer under the grid)** — cumulative tokens across active sessions (headline
+  **excludes cache reads** — input + output + cache-creation — since cache reads dominate the gross
+  count but aren't how the plan is metered; gross is on hover). Per-model breakdown in the detail
+  panel. Recomputed on a **60s timer** (incremental reads — only new bytes) + an **Update now** button.
+  **Local only, zero tokens.**
+- **Plan window bars (footer)** — your real **session (5h)** and **weekly** utilization %, matching
+  `claude.ai/settings/usage` and Claude Code's `/usage`, with reset times and a Sonnet-only line.
+
+The window bars come from Anthropic's OAuth usage endpoint (`/api/oauth/usage`) using your existing
+Claude Code login token (macOS Keychain or `CLAUDE_CODE_OAUTH_TOKEN`). **This is a metadata call —
+it spends no model tokens**; it's polled at most every **180s**, sends the token only to
+`api.anthropic.com` over HTTPS, and never logs it. If the token is missing/expired or the endpoint
+is unreachable, the bars **fall back** to a labeled local approximation (rolling 5h/7d token sums
+from your Anthropic-session transcripts).
+
+**Honest limits:** usage is shown in **tokens, not dollars** (subscription cost is flat; gateway/
+local model pricing is unknown). For **gateway** sessions (Gemini/OpenAI) cumulative usage still
+appears (whatever the gateway reports; cache tokens ~0) — set a per-provider `contextLimit` (e.g.
+Gemini → 1000000) so the fullness bar uses the right window. The plan window % reflects your
+**Anthropic** account only (gateway/local tokens don't count against it). Local servers that omit
+`usage` simply show no bar.
 
 ### Task queue
 Each session has a queue (`Queue` button in the detail panel adds the input;

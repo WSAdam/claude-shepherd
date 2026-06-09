@@ -4,6 +4,39 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-09
+
+### Added
+- **Providers / multi-model spawn.** A new **Providers** tab in ⚙ Settings defines named
+  profiles that launch `claude` against a chosen model: **Claude** tiers (sets
+  `ANTHROPIC_MODEL`) or a **Gateway** (sets `ANTHROPIC_BASE_URL` for a LiteLLM-style proxy →
+  Gemini/OpenAI, or a local/remote REST server). Pick a provider in the **New session** modal
+  or set a **Default provider** (`spawn.provider`); switch a running session's model live from a
+  detail-panel **Model** dropdown (`/model`). **No API keys are stored** — a profile names an env
+  var (`authTokenEnv`) the spawned login shell expands as `$VAR`. `cc-status.sh` captures
+  `ANTHROPIC_MODEL`/`ANTHROPIC_BASE_URL` so tiles show the live backend.
+- **SSH remote harness (spawn).** A profile with `ssh:{host,user}` launches
+  `ssh -t <dest> '<inner>'` in a local terminal (`core.sshWrap`), so keystroke effects still
+  target the local window and `$VAR` secrets expand on the remote. (The status bridge to surface
+  remote sessions as tiles is tracked in `todos.md`.)
+- **Token-usage bars (local, zero model tokens).** Read from Claude Code's local transcript JSONL.
+  Per-tile **context-fullness bar** (model-aware window: Opus 4.x / Sonnet 4.6 = 1M, else 200k,
+  with a per-provider `contextLimit` override and a self-healing tier guard). A **fleet-total
+  footer** (excludes cache reads) with per-model breakdown in the detail panel, recomputed every
+  60s (incremental reads) + an **Update now** button.
+- **Official plan-usage window.** The footer's **Session (5h)** / **Weekly** / **Sonnet** %
+  comes from Anthropic's `GET /api/oauth/usage` (matches `claude.ai/settings/usage`), using the
+  local Claude Code OAuth token. A metadata call — **no model tokens** — polled ≤ every 180s,
+  token never logged; falls back to a labeled local approximation if unavailable.
+- **Clear / Compact in the tile right-click menu.** Both added next to Relabel / Close, each with
+  a native confirm-submenu, reusing the detail-panel effect (`/clear` / `/compact`).
+
+### Tests
+- ~320 → **~517** side-effect-free checks. New pure-logic coverage for provider env-injection
+  (`providerEnv`/`envPrefix`/`spawnSpec` with no real keys), `sshWrap`, and the usage helpers
+  (`parseUsageLine`/`sumUsage`/`usageInWindow`/`contextFractionFor`/`isoToEpoch`) — no real keys,
+  spawns, or network. The no-provider spawn output is asserted byte-identical to before.
+
 ## 2026-06-04
 
 ### Added

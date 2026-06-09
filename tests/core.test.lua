@@ -117,6 +117,16 @@ do
   eq("focus: focusWindow op", r.last().op, "focusWindow")
   eq("focus: targets name", r.last().a, "proj-n")
   eq("focus: passes cwd for ancestor matching", r.last().b, "/Users/x/proj-n")
+
+  -- model: live /model switch types the slash command into the window
+  r = newRecorder()
+  core.handleAction(r.fx, normal, "model", "claude-sonnet-4-6")
+  eq("model: typeIntoWindow op", r.last().op, "typeIntoWindow")
+  eq("model: types the /model command", r.last().b, "/model claude-sonnet-4-6")
+
+  r = newRecorder()
+  core.handleAction(r.fx, normal, "model", "")
+  eq("model: empty id is a no-op", r.count(), 0)
 end
 
 -- ---- deckLayout: row-major fill + overflow ---------------------------------
@@ -391,6 +401,254 @@ do
   eq("spawnflags: mode -> --permission-mode", f[1], "--permission-mode")
   eq("spawnflags: mode value", f[2], "plan")
   eq("spawnflags: effort not emitted (no launch flag)", #f, 2)
+end
+
+-- ---- provider profiles: lookup, env injection, /model command --------------
+do
+  local an = { id = "opus", kind = "anthropic", model = "claude-opus-4-8" }
+  local gw = { id = "gemini", kind = "gateway", baseUrl = "http://localhost:4000",
+               model = "gemini-2.5-pro", authTokenEnv = "MY_LITELLM_KEY",
+               smallFastModel = "gemini-flash", headers = "X-Foo: bar" }
+  local cfg = { providers = { an, gw } }
+
+  -- providerById
+  eq("provider: by id found", core.providerById(cfg, "gemini").model, "gemini-2.5-pro")
+  eq("provider: anthropic by id", core.providerById(cfg, "opus").kind, "anthropic")
+  eq("provider: missing id -> nil", core.providerById(cfg, "nope"), nil)
+  eq("provider: empty id -> nil", core.providerById(cfg, ""), nil)
+  eq("provider: no providers key -> nil", core.providerById({}, "opus"), nil)
+
+  -- providerEnv: anthropic sets just ANTHROPIC_MODEL (so the hook can see it)
+  local ea = core.providerEnv(an)
+  eq("providerenv: anthropic count", #ea, 1)
+  eq("providerenv: anthropic model name", ea[1].name, "ANTHROPIC_MODEL")
+  eq("providerenv: anthropic model value", ea[1].value, "claude-opus-4-8")
+  eq("providerenv: nil -> empty", #core.providerEnv(nil), 0)
+  eq("providerenv: model-less anthropic -> empty", #core.providerEnv({ kind = "anthropic" }), 0)
+
+  -- providerEnv: gateway sets base/model/small-fast/headers + auth as a $VAR secret
+  local e = core.providerEnv(gw)
+  eq("providerenv: gateway count", #e, 5)
+  eq("providerenv: base url first", e[1].name, "ANTHROPIC_BASE_URL")
+  eq("providerenv: base url value", e[1].value, "http://localhost:4000")
+  eq("providerenv: base url not secret", e[1].secret, false)
+  eq("providerenv: model second", e[2].name, "ANTHROPIC_MODEL")
+  eq("providerenv: model value", e[2].value, "gemini-2.5-pro")
+  eq("providerenv: small-fast model", e[3].name, "ANTHROPIC_SMALL_FAST_MODEL")
+  eq("providerenv: custom headers", e[4].name, "ANTHROPIC_CUSTOM_HEADERS")
+  eq("providerenv: auth token name", e[5].name, "ANTHROPIC_AUTH_TOKEN")
+  eq("providerenv: auth is a $VAR ref", e[5].value, "$MY_LITELLM_KEY")
+  eq("providerenv: auth marked secret", e[5].secret, true)
+  -- gateway without a model still injects base url; no auth when no env name
+  local gw2 = { kind = "gateway", baseUrl = "http://x" }
+  eq("providerenv: gateway no-model/no-auth count", #core.providerEnv(gw2), 1)
+
+  -- envPrefix: literals single-quoted, secrets double-quoted (shell-expanded)
+  eq("envprefix: empty list -> empty", core.envPrefix({}), "")
+  eq("envprefix: nil -> empty", core.envPrefix(nil), "")
+  local pre = core.envPrefix(e)
+  eq("envprefix: exact",
+     pre,
+     "ANTHROPIC_BASE_URL='http://localhost:4000' ANTHROPIC_MODEL='gemini-2.5-pro' "
+     .. "ANTHROPIC_SMALL_FAST_MODEL='gemini-flash' ANTHROPIC_CUSTOM_HEADERS='X-Foo: bar' "
+     .. "ANTHROPIC_AUTH_TOKEN=\"$MY_LITELLM_KEY\" ")
+
+  -- modelCommand: live /model switch
+  eq("modelcmd: builds /model", core.modelCommand("claude-sonnet-4-6"), "/model claude-sonnet-4-6")
+  eq("modelcmd: empty -> nil", core.modelCommand(""), nil)
+  eq("modelcmd: nil -> nil", core.modelCommand(nil), nil)
+end
+
+-- ---- spawn with a provider: env injection through every editor path --------
+do
+  local gw = { id = "gemini", kind = "gateway", baseUrl = "http://localhost:4000",
+               model = "gemini-2.5-pro", authTokenEnv = "MY_LITELLM_KEY" }
+  local env = core.providerEnv(gw)
+
+  -- spawnInner: env prefix (incl. ANTHROPIC_MODEL) + prompt, in order
+  eq("spawn-inner(env): exact",
+     core.spawnInner("/p", "hi", { env = env }),
+     "cd '/p' && ANTHROPIC_BASE_URL='http://localhost:4000' ANTHROPIC_MODEL='gemini-2.5-pro' "
+     .. "ANTHROPIC_AUTH_TOKEN=\"$MY_LITELLM_KEY\" claude 'hi'")
+  -- no opts -> byte-identical to the original two-arg form
+  eq("spawn-inner: no-opts unchanged", core.spawnInner("/p", "hi"), "cd '/p' && claude 'hi'")
+
+  -- terminal path threads the env into the AppleScript
+  local t = core.spawnSpec("terminal", "/p", "hi", { terminal = "Terminal", env = env })
+  check("spawnspec(terminal,env): has base url", t.applescript:find("ANTHROPIC_BASE_URL=", 1, true) ~= nil)
+  check("spawnspec(terminal,env): has model env", t.applescript:find("ANTHROPIC_MODEL=", 1, true) ~= nil)
+  check("spawnspec(terminal,env): auth stays a $VAR", t.applescript:find("$MY_LITELLM_KEY", 1, true) ~= nil)
+
+  -- vscode path prefixes the typed command with the env
+  local v = core.spawnSpec("vscode", "/p", "hi", { env = env })
+  check("spawnspec(vscode,env): post has base url", v.postType:find("ANTHROPIC_BASE_URL=", 1, true) ~= nil)
+  check("spawnspec(vscode,env): post has model env", v.postType:find("ANTHROPIC_MODEL=", 1, true) ~= nil)
+
+  -- kitty path wraps the inner in a login shell so $VAR expands
+  local k = core.spawnSpec("kitty", "/p", "hi", { env = env })
+  eq("spawnspec(kitty,env): runs via login shell", k.argv[#k.argv - 1], "-lc")
+  check("spawnspec(kitty,env): inner has env + model",
+        k.argv[#k.argv]:find("ANTHROPIC_BASE_URL=", 1, true) ~= nil
+        and k.argv[#k.argv]:find("ANTHROPIC_MODEL=", 1, true) ~= nil)
+  check("spawnspec(kitty,env): still has --directory", table.concat(k.argv, " "):find("--directory /p", 1, true) ~= nil)
+  -- no-provider kitty path is unchanged (bare `claude`, task as final element)
+  local kp = core.spawnSpec("kitty", "/p", "hi", {})
+  eq("spawnspec(kitty): no-provider ends with task", kp.argv[#kp.argv], "hi")
+  eq("spawnspec(kitty): no-provider has bare claude", kp.argv[#kp.argv - 1], "claude")
+end
+
+-- ---- SSH remote harness (Phase 2): run claude on another box ---------------
+do
+  -- sshWrap: single-quotes the whole inner so its $VAR expands on the REMOTE host
+  eq("sshwrap: user@host + -t",
+     core.sshWrap("claude", { host = "gpubox", user = "adam" }),
+     "ssh -t adam@gpubox 'claude'")
+  eq("sshwrap: host only (no user)",
+     core.sshWrap("x", { host = "gpubox" }), "ssh -t gpubox 'x'")
+  eq("sshwrap: tty=false drops -t",
+     core.sshWrap("x", { host = "h", tty = false }), "ssh h 'x'")
+  eq("sshwrap: no ssh -> inner unchanged", core.sshWrap("claude", nil), "claude")
+  eq("sshwrap: empty host -> unchanged", core.sshWrap("claude", { host = "" }), "claude")
+
+  local gw = { kind = "gateway", baseUrl = "http://localhost:4000",
+               model = "ollama/llama3", authTokenEnv = "LOCAL_GW_KEY" }
+  local env = core.providerEnv(gw)
+  local ssh = { host = "gpubox", user = "adam" }
+
+  -- spawnInner wraps the env-injected command in ssh; the auth $VAR stays for the
+  -- REMOTE shell (single-quoted, not expanded locally)
+  local inner = core.spawnInner("/remote/proj", "go", { env = env, ssh = ssh })
+  check("spawn-inner(ssh): starts with ssh -t adam@gpubox", inner:find("^ssh %-t adam@gpubox ") ~= nil)
+  check("spawn-inner(ssh): carries the remote cd", inner:find("cd ", 1, true) ~= nil)
+  check("spawn-inner(ssh): auth $VAR preserved for remote", inner:find("$LOCAL_GW_KEY", 1, true) ~= nil)
+
+  -- terminal path: AppleScript runs the ssh command
+  local t = core.spawnSpec("terminal", "/remote/proj", "go", { terminal = "Terminal", env = env, ssh = ssh })
+  check("spawnspec(terminal,ssh): applescript runs ssh", t.applescript:find("ssh -t adam@gpubox", 1, true) ~= nil)
+
+  -- kitty path: runs ssh directly (no local login shell), inner as one argv element
+  local k = core.spawnSpec("kitty", "/remote/proj", "go", { env = env, ssh = ssh })
+  local ai
+  for i, a in ipairs(k.argv) do if a == "ssh" then ai = i end end
+  check("spawnspec(kitty,ssh): has ssh in argv", ai ~= nil)
+  eq("spawnspec(kitty,ssh): -t after ssh", k.argv[ai + 1], "-t")
+  eq("spawnspec(kitty,ssh): dest after -t", k.argv[ai + 2], "adam@gpubox")
+  check("spawnspec(kitty,ssh): inner is one argv element with env",
+        (k.argv[ai + 3] or ""):find("ANTHROPIC_BASE_URL=", 1, true) ~= nil)
+end
+
+-- ---- token usage: parse + aggregate transcript usage (zero-cost, local) -----
+do
+  -- isoToEpoch: UTC, tz-independent (compare deltas, not absolute local time)
+  eq("iso: unix epoch start", core.isoToEpoch("1970-01-01T00:00:00.000Z"), 0)
+  eq("iso: one day later", core.isoToEpoch("1970-01-02T00:00:00Z"), 86400)
+  eq("iso: one hour", core.isoToEpoch("1970-01-01T01:00:00Z"), 3600)
+  eq("iso: garbage -> nil", core.isoToEpoch("not-a-date"), nil)
+  -- a known recent instant: 2026-01-01T00:00:00Z
+  local jan1 = core.isoToEpoch("2026-01-01T00:00:00Z")
+  eq("iso: a day after jan1 2026", core.isoToEpoch("2026-01-02T00:00:00Z") - jan1, 86400)
+
+  -- parseUsageLine: real transcript line shape
+  local line = '{"type":"assistant","timestamp":"2026-06-09T12:00:00.000Z","message":'
+    .. '{"model":"claude-opus-4-8","usage":{"input_tokens":10,"output_tokens":20,'
+    .. '"cache_read_input_tokens":1000,"cache_creation_input_tokens":300}}}'
+  local e = core.parseUsageLine(line)
+  eq("parse: model", e.model, "claude-opus-4-8")
+  eq("parse: input", e.input, 10)
+  eq("parse: output", e.output, 20)
+  eq("parse: cacheRead", e.cacheRead, 1000)
+  eq("parse: cacheCreate", e.cacheCreate, 300)
+  eq("parse: ts is epoch", e.ts, core.isoToEpoch("2026-06-09T12:00:00.000Z"))
+  -- non-usage / non-assistant lines are skipped
+  eq("parse: user line -> nil", core.parseUsageLine('{"type":"user","message":{}}'), nil)
+  eq("parse: assistant w/o usage -> nil", core.parseUsageLine('{"type":"assistant","message":{"model":"x"}}'), nil)
+  eq("parse: blank -> nil", core.parseUsageLine(""), nil)
+  eq("parse: partial tail (no leading brace) -> nil", core.parseUsageLine('tokens":5}'), nil)
+
+  -- contextTokens / contextFraction
+  eq("ctx: tokens = input+cacheRead+cacheCreate", core.contextTokens(e), 10 + 1000 + 300)
+  eq("ctx: fraction vs default 200k", core.contextFraction(100000), 0.5)
+  eq("ctx: fraction clamps >1", core.contextFraction(500000), 1)
+  eq("ctx: fraction custom limit (gemini 1M)", core.contextFraction(500000, 1000000), 0.5)
+  eq("ctx: zero limit -> 0", core.contextFraction(100, 0), 0)
+
+  -- sumUsage: cumulative + per-model
+  local events = {
+    { model = "claude-opus-4-8", input = 10, output = 20, cacheRead = 100, cacheCreate = 5, ts = 1000 },
+    { model = "claude-opus-4-8", input = 1,  output = 2,  cacheRead = 10,  cacheCreate = 0, ts = 2000 },
+    { model = "gemini-2.5-pro",  input = 7,  output = 3,  cacheRead = 0,   cacheCreate = 0, ts = 3000 },
+  }
+  local s = core.sumUsage(events)
+  eq("sum: input", s.input, 18)
+  eq("sum: output", s.output, 25)
+  eq("sum: total (gross, incl cache reads)", s.total, 18 + 25 + 110 + 5)
+  eq("sum: real (excl cache reads)", s.real, 18 + 25 + 5)
+  eq("sum: opus per-model output", s.byModel["claude-opus-4-8"].output, 22)
+  eq("sum: gemini per-model total", s.byModel["gemini-2.5-pro"].total, 10)
+  eq("sum: opus per-model real (excl cacheRead 110)", s.byModel["claude-opus-4-8"].real, 11 + 22 + 5)
+  eq("sum: empty -> zero total", core.sumUsage({}).total, 0)
+  eq("sum: empty -> zero real", core.sumUsage({}).real, 0)
+
+  -- usageInWindow: rolling sum of REAL tokens (excl cacheRead). now=3500, 1500s -> ts>=2000
+  eq("window: last 1500s (real)", core.usageInWindow(events, 3500, 1500), (1+2+0) + (7+3+0))
+  eq("window: huge window catches all (real)", core.usageInWindow(events, 3500, 999999), s.real)
+  eq("window: zero window -> 0", core.usageInWindow(events, 3500, 0), 0)
+
+  -- formatTokens
+  eq("fmt: small int", core.formatTokens(42), "42")
+  eq("fmt: thousands", core.formatTokens(254337), "254.3k")
+  eq("fmt: millions", core.formatTokens(1300000), "1.30M")
+
+  -- usageBarLevel thresholds
+  eq("level: ok", core.usageBarLevel(0.5), "ok")
+  eq("level: warn at .75", core.usageBarLevel(0.8), "warn")
+  eq("level: full at .9", core.usageBarLevel(0.95), "full")
+
+  -- isAnthropicSession: scopes the plan-window bar
+  eq("anthropic: claude model, no base url", core.isAnthropicSession("claude-opus-4-8", nil), true)
+  eq("anthropic: empty model defaults true", core.isAnthropicSession("", ""), true)
+  eq("anthropic: gateway base url -> false", core.isAnthropicSession("claude-opus-4-8", "http://localhost:4000"), false)
+  eq("anthropic: gemini model -> false", core.isAnthropicSession("gemini-2.5-pro", nil), false)
+
+  -- lastUsage: scan a tail bottom-up for the most recent usage line
+  local tail = table.concat({
+    '{"type":"user","message":{"role":"user"}}',
+    line,  -- the opus usage line built above
+    '{"type":"assistant","timestamp":"2026-06-09T13:00:00Z","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":5,"output_tokens":6,"cache_read_input_tokens":2000,"cache_creation_input_tokens":0}}}',
+    'partial-half-written-line-no-brace',
+  }, "\n")
+  local lu = core.lastUsage(tail)
+  eq("lastusage: picks the most recent complete usage", lu.model, "claude-sonnet-4-6")
+  eq("lastusage: its context tokens", core.contextTokens(lu), 5 + 2000 + 0)
+  eq("lastusage: empty -> nil", core.lastUsage(""), nil)
+
+  -- contextLimitFor: provider override > built-in model map > default
+  local cfg = { providers = {
+    { id = "gemini", model = "gemini-2.5-pro", contextLimit = 1500000 },
+    { id = "opus", model = "claude-opus-4-8" } } }
+  eq("ctxlimit: gemini override wins", core.contextLimitFor(cfg, "gemini-2.5-pro"), 1500000)
+  eq("ctxlimit: opus-4 model map -> 1M", core.contextLimitFor(cfg, "claude-opus-4-8"), 1000000)
+  eq("ctxlimit: sonnet-4 model map -> 1M", core.contextLimitFor({}, "claude-sonnet-4-6"), 1000000)
+  eq("ctxlimit: haiku -> 200k default", core.contextLimitFor({}, "claude-haiku-4-5"), 200000)
+  eq("ctxlimit: unknown model -> default", core.contextLimitFor({}, "mystery"), 200000)
+  eq("ctxlimit: no config -> default", core.contextLimitFor({}, "x"), 200000)
+
+  -- nextContextTier: round observed up to a standard window
+  eq("tier: 150k -> 200k", core.nextContextTier(150000), 200000)
+  eq("tier: 437k -> 1M", core.nextContextTier(437000), 1000000)
+  eq("tier: 1.4M -> 2M", core.nextContextTier(1400000), 2000000)
+
+  -- contextFractionFor: the real bug case — 437k on opus-4-8 is ~44% of 1M, NOT 100%
+  local frac, lim = core.contextFractionFor({}, "claude-opus-4-8", 437000)
+  eq("ctxfrac: opus 437k limit is 1M", lim, 1000000)
+  check("ctxfrac: opus 437k ~= 0.44 (not full)", frac > 0.43 and frac < 0.45)
+  -- self-heal: unknown model at 437k uses the 1M tier, not a false 100%
+  local f2, l2 = core.contextFractionFor({}, "mystery-model", 437000)
+  eq("ctxfrac: unknown 437k bumped to 1M tier", l2, 1000000)
+  check("ctxfrac: unknown 437k not full", f2 < 0.5)
+  -- a genuinely full 200k model still reads ~100%
+  local f3 = core.contextFractionFor({}, "claude-haiku-4-5", 198000)
+  check("ctxfrac: haiku 198k/200k ~ full", f3 >= 0.98)
 end
 
 -- ---- path helpers (folder browser) -----------------------------------------

@@ -115,6 +115,12 @@ function M.handleAction(fx, item, action, text)
     -- Change effort live via the `/effort <level>` slash command.
     local cmd = M.effortCommand(text)
     if cmd then fx.typeIntoWindow(tgt, cmd) else return nil end
+  elseif action == "model" then
+    -- Switch model live via the `/model <id>` slash command. Works within the
+    -- session's current backend (Claude tiers, or models the gateway serves); a
+    -- different base URL still needs a fresh session (relaunch), not /model.
+    local cmd = M.modelCommand(text)
+    if cmd then fx.typeIntoWindow(tgt, cmd) else return nil end
   elseif action == "set-mode" then
     -- Cycle to permission mode `text` via Shift+Tab x N (Part C). Kitty reliable;
     -- VS Code best-effort (its mode switcher is mouse-only). N is 0 (no-op) when
@@ -171,6 +177,14 @@ function M.effortCommand(level)
   level = tostring(level or ""):lower()
   if not M.EFFORT_LEVELS[level] then return nil end
   return "/effort " .. level
+end
+
+-- Build the `/model <id>` slash command to switch model live within a session
+-- (same provider only -- a base-URL change needs a relaunch). nil for an empty id.
+function M.modelCommand(id)
+  id = tostring(id or "")
+  if id == "" then return nil end
+  return "/model " .. id
 end
 
 -- ---- Panel geometry (Step 1) ----------------------------------------------
@@ -300,6 +314,187 @@ function M.transcriptSnippet(text, maxLen)
     end
   end
   return nil
+end
+
+-- ---- Token usage (local, ZERO-COST: parsed from transcript JSONL) ----------
+-- Claude Code logs every turn's token counts to the local transcript; reading it
+-- costs no tokens and makes no network call. These pure helpers parse + aggregate
+-- those counts; the impure side (file reads) lives in the dashboard's FX layer.
+M.CONTEXT_LIMIT_DEFAULT = 200000      -- Claude Opus/Sonnet context window
+M.WINDOW_5H = 5 * 3600                -- rolling 5-hour window (approx plan limit)
+M.WINDOW_7D = 7 * 86400              -- rolling 7-day window
+
+-- Convert an ISO-8601 UTC timestamp ("2026-03-16T12:29:10.850Z") to epoch seconds
+-- in UTC, timezone-independent (days-from-civil formula, so it matches os.time()
+-- comparisons without DST/locale drift). nil if unparseable.
+function M.isoToEpoch(s)
+  if type(s) ~= "string" then return nil end
+  local y, mo, d, h, mi, se = s:match("^(%d+)%-(%d+)%-(%d+)T(%d+):(%d+):(%d+)")
+  if not y then return nil end
+  y, mo, d = tonumber(y), tonumber(mo), tonumber(d)
+  h, mi, se = tonumber(h), tonumber(mi), tonumber(se)
+  local yy = y - (mo <= 2 and 1 or 0)
+  local era = math.floor((yy >= 0 and yy or (yy - 399)) / 400)
+  local yoe = yy - era * 400
+  local mp = (mo + 9) % 12
+  local doy = math.floor((153 * mp + 2) / 5) + d - 1
+  local doe = yoe * 365 + math.floor(yoe / 4) - math.floor(yoe / 100) + doy
+  local days = era * 146097 + doe - 719468
+  return days * 86400 + h * 3600 + mi * 60 + se
+end
+
+-- Parse ONE transcript JSONL line into a usage event, or nil if it isn't an
+-- assistant message with a usage block (skips user lines, blanks, partial tails --
+-- same `^%s*{` guard as transcriptSnippet so it never logs a decode error).
+function M.parseUsageLine(line)
+  if type(line) ~= "string" or not line:find("^%s*{") then return nil end
+  local okj, obj = pcall(function() return M.json.decode(line) end)
+  if not okj or type(obj) ~= "table" or obj.type ~= "assistant" then return nil end
+  local m = obj.message
+  if type(m) ~= "table" or type(m.usage) ~= "table" then return nil end
+  local u = m.usage
+  return {
+    model       = m.model,
+    ts          = M.isoToEpoch(obj.timestamp),
+    input       = tonumber(u.input_tokens) or 0,
+    output      = tonumber(u.output_tokens) or 0,
+    cacheRead   = tonumber(u.cache_read_input_tokens) or 0,
+    cacheCreate = tonumber(u.cache_creation_input_tokens) or 0,
+  }
+end
+
+-- Current context size from a usage event: the prompt side (input + both cache
+-- buckets). The LAST assistant turn's value ~= how full the context window is.
+function M.contextTokens(u)
+  if type(u) ~= "table" then return 0 end
+  return (u.input or 0) + (u.cacheRead or 0) + (u.cacheCreate or 0)
+end
+
+-- Fraction 0..1 of the context window used (clamped). limit defaults to 200k.
+function M.contextFraction(tokens, limit)
+  limit = tonumber(limit) or M.CONTEXT_LIMIT_DEFAULT
+  if limit <= 0 then return 0 end
+  local f = (tonumber(tokens) or 0) / limit
+  if f < 0 then return 0 elseif f > 1 then return 1 end
+  return f
+end
+
+-- Sum a list of usage events into cumulative totals + a per-model breakdown.
+-- `total` is gross (incl. cache reads); `real` excludes cache_read (input + output +
+-- cache_creation) -- the meaningful "tokens used" headline, since cache reads dominate
+-- the gross count but are cheap and not how the plan is metered.
+function M.sumUsage(events)
+  local s = { input = 0, output = 0, cacheRead = 0, cacheCreate = 0, total = 0, real = 0, byModel = {} }
+  for _, e in ipairs(events or {}) do
+    s.input = s.input + (e.input or 0)
+    s.output = s.output + (e.output or 0)
+    s.cacheRead = s.cacheRead + (e.cacheRead or 0)
+    s.cacheCreate = s.cacheCreate + (e.cacheCreate or 0)
+    local key = e.model or "unknown"
+    local bm = s.byModel[key] or { input = 0, output = 0, cacheRead = 0, cacheCreate = 0, total = 0, real = 0 }
+    bm.input = bm.input + (e.input or 0)
+    bm.output = bm.output + (e.output or 0)
+    bm.cacheRead = bm.cacheRead + (e.cacheRead or 0)
+    bm.cacheCreate = bm.cacheCreate + (e.cacheCreate or 0)
+    bm.total = bm.input + bm.output + bm.cacheRead + bm.cacheCreate
+    bm.real = bm.input + bm.output + bm.cacheCreate
+    s.byModel[key] = bm
+  end
+  s.total = s.input + s.output + s.cacheRead + s.cacheCreate
+  s.real = s.input + s.output + s.cacheCreate
+  return s
+end
+
+-- "Real" tokens (excl. cache reads) across events whose ts falls within the last
+-- `windowSec` (rolling window ending at `now`). Events without a ts are skipped. Used
+-- for the 5h/7d local-approximation bars (the official % comes from the OAuth endpoint).
+function M.usageInWindow(events, now, windowSec)
+  local cutoff = (tonumber(now) or 0) - (tonumber(windowSec) or 0)
+  local total = 0
+  for _, e in ipairs(events or {}) do
+    if e.ts and e.ts >= cutoff then
+      total = total + (e.input or 0) + (e.output or 0) + (e.cacheCreate or 0)
+    end
+  end
+  return total
+end
+
+-- Human-readable token count: 1.30M / 254.3k / 42.
+function M.formatTokens(n)
+  n = tonumber(n) or 0
+  if n >= 1e9 then return string.format("%.2fB", n / 1e9) end
+  if n >= 1e6 then return string.format("%.2fM", n / 1e6) end
+  if n >= 1e3 then return string.format("%.1fk", n / 1e3) end
+  return tostring(math.floor(n))
+end
+
+-- Bar color band from a 0..1 fraction: ok < .75 <= warn < .9 <= full.
+function M.usageBarLevel(frac)
+  frac = tonumber(frac) or 0
+  if frac >= 0.9 then return "full" end
+  if frac >= 0.75 then return "warn" end
+  return "ok"
+end
+
+-- Does a session count against your Anthropic plan? (Native endpoint + a claude/
+-- anthropic model.) Gateway sessions (a base_url is set) hit a different provider,
+-- so they're excluded from the 5h/7d plan-window approximation.
+function M.isAnthropicSession(model, baseUrl)
+  if baseUrl and tostring(baseUrl) ~= "" then return false end
+  local m = tostring(model or ""):lower()
+  return m == "" or m:find("^claude") ~= nil or m:find("^anthropic") ~= nil
+end
+
+-- The last usage event in a transcript tail (scans bottom-up for the most recent
+-- assistant line with a usage block). Drives the per-tile context-fullness bar off
+-- the bytes the activity peek already read -- so it costs no extra I/O. nil if none.
+function M.lastUsage(text)
+  if not text or #text == 0 then return nil end
+  local lines = {}
+  for line in (text .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
+  for i = #lines, 1, -1 do
+    local e = M.parseUsageLine(lines[i])
+    if e then return e end
+  end
+  return nil
+end
+
+-- Context-window limit for a session's model. Precedence: a provider profile's
+-- explicit `contextLimit` (gateway/local models) -> a built-in map for native Claude
+-- (Opus 4.x and Sonnet 4.6 are 1M in Claude Code; older/Haiku 200k) -> the 200k default.
+-- Getting this right matters: a wrong (too-small) denominator makes a session look
+-- "full" when it isn't (the original bug: 437k context shown as 100% of a 200k default).
+function M.contextLimitFor(cfg, model)
+  local list = M.config(cfg, "providers", nil)
+  if type(list) == "table" and model then
+    for _, p in ipairs(list) do
+      if type(p) == "table" and p.model == model and tonumber(p.contextLimit) then
+        return tonumber(p.contextLimit)
+      end
+    end
+  end
+  local m = tostring(model or ""):lower()
+  -- Opus 4.6/4.7/4.8 + Sonnet 4.6 have a 1M window on Claude Code paid plans.
+  if m:find("opus%-4") or m:find("sonnet%-4") then return 1000000 end
+  return M.CONTEXT_LIMIT_DEFAULT
+end
+
+-- Standard context-window tiers, used to self-heal an unknown/underestimated model:
+-- round an observed context size up to the smallest tier that contains it, so we never
+-- render a false 100% for a model the map doesn't know.
+M.CONTEXT_TIERS = { 200000, 1000000, 2000000 }
+function M.nextContextTier(n)
+  n = tonumber(n) or 0
+  for _, t in ipairs(M.CONTEXT_TIERS) do if n <= t then return t end end
+  return n
+end
+
+-- The context-fullness fraction (0..1) + the effective limit used. Combines the
+-- model/provider limit with the observed-size tier guard, so the denominator is right
+-- for known models AND can't be smaller than what the session actually holds.
+function M.contextFractionFor(cfg, model, tokens)
+  local limit = math.max(M.contextLimitFor(cfg, model), M.nextContextTier(tokens))
+  return M.contextFraction(tokens, limit), limit
 end
 
 -- Next session after the one with key==afterKey (wraps to the front). Used by
@@ -510,12 +705,92 @@ local function asquote(s)
   return '"' .. tostring(s):gsub("\\", "\\\\"):gsub('"', '\\"') .. '"'
 end
 
+-- ---- Provider profiles (multi-model / multi-provider) ----------------------
+-- A "provider" is a named bundle of NON-SECRET env vars + a model id (+ optional
+-- ssh host) injected into the `claude` spawn. Secrets are NEVER stored: a profile
+-- names an env var (authTokenEnv) that the spawned LOGIN SHELL expands at launch,
+-- so cc-config.json holds no key and Shepherd's own process never sees one.
+--   kind="anthropic" (default) -> set ANTHROPIC_MODEL on the normal endpoint.
+--   kind="gateway"             -> also set ANTHROPIC_BASE_URL + auth/headers, so
+--                                 Claude Code talks to a LiteLLM-style gateway
+--                                 (Gemini / OpenAI / local models) or a local/
+--                                 remote REST server.
+-- The model rides ANTHROPIC_MODEL (not `--model`) so it's inherited by the status
+-- hook's env -- that's how the panel shows which model a session is running.
+
+-- Look up a provider profile by id in a decoded config table; nil if absent.
+function M.providerById(cfg, id)
+  if not id or tostring(id) == "" then return nil end
+  local list = M.config(cfg, "providers", nil)
+  if type(list) ~= "table" then return nil end
+  for _, p in ipairs(list) do
+    if type(p) == "table" and tostring(p.id) == tostring(id) then return p end
+  end
+  return nil
+end
+
+-- Ordered env injection for a profile: a list of { name, value, secret }. A
+-- secret carries a shell ref ("$VAR") that the spawned shell expands (emitted
+-- double-quoted); a non-secret is a literal (single-quoted). An empty/model-less
+-- anthropic profile injects nothing (-> bare `claude`, unchanged).
+function M.providerEnv(profile)
+  local env = {}
+  if type(profile) ~= "table" then return env end
+  local gateway = tostring(profile.kind or "anthropic") == "gateway"
+  local function put(name, value, secret)
+    if value and tostring(value) ~= "" then
+      env[#env + 1] = { name = name, value = tostring(value), secret = secret == true }
+    end
+  end
+  if gateway then put("ANTHROPIC_BASE_URL", profile.baseUrl, false) end
+  put("ANTHROPIC_MODEL", profile.model, false)
+  if gateway then
+    put("ANTHROPIC_SMALL_FAST_MODEL", profile.smallFastModel, false)
+    put("ANTHROPIC_CUSTOM_HEADERS", profile.headers, false)
+    if profile.authTokenEnv and tostring(profile.authTokenEnv) ~= "" then
+      put("ANTHROPIC_AUTH_TOKEN", "$" .. tostring(profile.authTokenEnv), true)
+    end
+  end
+  return env
+end
+
+-- Render an env list (from providerEnv) into a shell command prefix ending in a
+-- space ("NAME='v' NAME2=\"$VAR\" "). Empty/absent list -> "" so the no-provider
+-- spawn is byte-identical to before.
+function M.envPrefix(envList)
+  if type(envList) ~= "table" or #envList == 0 then return "" end
+  local parts = {}
+  for _, e in ipairs(envList) do
+    local val = e.secret and ('"' .. tostring(e.value) .. '"') or shquote(tostring(e.value))
+    parts[#parts + 1] = tostring(e.name) .. "=" .. val
+  end
+  return table.concat(parts, " ") .. " "
+end
+
+-- Wrap a remote command for SSH (Phase 2 -- run `claude` ON another machine while
+-- the terminal window stays local, so keystroke effects still target it). The whole
+-- command is single-quoted so its inner `$VAR` secrets expand on the REMOTE host
+-- (from the remote login shell), never locally. `-t` forces a TTY so claude's TUI
+-- works. ssh = { host, user(optional), tty(default true) }.
+function M.sshWrap(inner, ssh)
+  if type(ssh) ~= "table" or not ssh.host or tostring(ssh.host) == "" then return inner end
+  local dest = (ssh.user and tostring(ssh.user) ~= "")
+    and (tostring(ssh.user) .. "@" .. tostring(ssh.host)) or tostring(ssh.host)
+  local cmd = (ssh.tty == false) and "ssh" or "ssh -t"
+  return cmd .. " " .. dest .. " " .. shquote(inner)
+end
+
 -- The shell command run INSIDE the spawned terminal:
---   cd <project> && claude [prompt]
-function M.spawnInner(project, prompt)
-  local inner = "cd " .. shquote(project or ".") .. " && claude"
+--   cd <project> && [ENV=... ] claude [flags] [prompt]
+-- opts: { env = providerEnv list, flags = spawnFlags list, ssh = {host,user} }. All
+-- optional; with none, the output is exactly the original `cd <p> && claude [prompt]`.
+-- With ssh, the whole thing is wrapped in `ssh -t <dest> '<inner>'` (remote harness).
+function M.spawnInner(project, prompt, opts)
+  opts = opts or {}
+  local inner = "cd " .. shquote(project or ".") .. " && " .. M.envPrefix(opts.env) .. "claude"
+  for _, f in ipairs(opts.flags or {}) do inner = inner .. " " .. f end
   if prompt and #prompt > 0 then inner = inner .. " " .. shquote(prompt) end
-  return inner
+  return M.sshWrap(inner, opts.ssh)
 end
 
 -- The AppleScript to run (via hs.osascript, NOT a shell) that opens `terminal`
@@ -526,13 +801,15 @@ function M.spawnAppleScript(project, prompt, opts)
   opts = opts or {}
   local term = opts.terminal or "Terminal"
   return "tell application " .. asquote(term)
-    .. " to do script " .. asquote(M.spawnInner(project, prompt))
+    .. " to do script "
+    .. asquote(M.spawnInner(project, prompt, { env = opts.env, flags = opts.flags, ssh = opts.ssh }))
 end
 
 -- Build claude CLI launch flags from a permission mode (+ effort, reserved). Both
 -- optional. `--permission-mode <m>` is a real launch flag (Part C); effort has no
 -- documented launch flag (it's set live via /effort), so it's accepted but not
--- emitted. Returns a flat argv-style list (possibly empty).
+-- emitted. The model is NOT a flag here -- it rides ANTHROPIC_MODEL (providerEnv)
+-- so the status hook can see it. Returns a flat argv-style list (possibly empty).
 function M.spawnFlags(mode, effort)  -- luacheck: ignore effort (reserved)
   local flags = {}
   if mode and tostring(mode) ~= "" then
@@ -571,11 +848,20 @@ end
 --   vscode   -> { kind="vscode",   app, project, openTerminalKey, postType }
 --   cursor   -> same as vscode with app="Cursor"
 --   else     -> { kind="terminal", applescript=... }        the reliable fallback
--- opts: { terminal, kittyBin, kittyRemote(bool), kittySocket, permissionMode, effort }
+-- opts: { terminal, kittyBin, kittyRemote(bool), kittySocket, permissionMode,
+--         effort, env, shell, ssh }. env (a providerEnv list) injects provider env
+--         vars (incl. ANTHROPIC_MODEL); shell (default "zsh") is the login shell used
+--         to expand `$VAR` secrets in the kitty path; ssh = {host,user} runs `claude`
+--         on a remote box while the terminal window stays local (Phase 2).
 function M.spawnSpec(editor, project, task, opts)
   opts = opts or {}
   editor = tostring(editor or ""):lower()
   task = (task and #task > 0) and task or nil
+  local flags = M.spawnFlags(opts.permissionMode, opts.effort)
+  local env = opts.env
+  local ssh = opts.ssh
+  local hasEnv = type(env) == "table" and #env > 0
+  local isSsh = type(ssh) == "table" and ssh.host and tostring(ssh.host) ~= ""
   if editor == "kitty" then
     -- A fresh kitty window with remote control on a known socket (default ON), so
     -- click-to-answer / mode-switch (Part A) work without touching global config.
@@ -584,23 +870,46 @@ function M.spawnSpec(editor, project, task, opts)
       for _, f in ipairs(M.kittyLaunchRemoteFlags(opts.kittySocket)) do argv[#argv + 1] = f end
     end
     argv[#argv + 1] = "--directory"; argv[#argv + 1] = project or "."
-    argv[#argv + 1] = "claude"
-    for _, f in ipairs(M.spawnFlags(opts.permissionMode, opts.effort)) do argv[#argv + 1] = f end
-    if task then argv[#argv + 1] = task end  -- one argv element: no shell, no quoting
+    if isSsh then
+      -- Run ssh directly (no local shell): the remote login shell runs the inner
+      -- and expands its `$VAR` secrets. The inner is one argv element.
+      argv[#argv + 1] = "ssh"
+      if ssh.tty ~= false then argv[#argv + 1] = "-t" end
+      argv[#argv + 1] = (ssh.user and tostring(ssh.user) ~= "")
+        and (tostring(ssh.user) .. "@" .. tostring(ssh.host)) or tostring(ssh.host)
+      argv[#argv + 1] = M.spawnInner(project, task, { env = env, flags = flags })
+    elseif hasEnv then
+      -- Kitty argv has no shell to expand `$VAR`, so run the inner via a login
+      -- shell (uniform env injection + secret expansion with the terminal path).
+      argv[#argv + 1] = opts.shell or "zsh"
+      argv[#argv + 1] = "-lc"
+      argv[#argv + 1] = M.spawnInner(project, task, { env = env, flags = flags })
+    else
+      argv[#argv + 1] = "claude"
+      for _, f in ipairs(flags) do argv[#argv + 1] = f end
+      if task then argv[#argv + 1] = task end  -- one argv element: no shell, no quoting
+    end
     return { kind = "kitty", argv = argv }
   elseif editor == "vscode" or editor == "cursor" then
     -- Open the window; "run claude" is best-effort keystrokes into a new integrated
-    -- terminal (no supported API), consistent with the project's VS Code stance.
-    local post = "claude"
-    for _, f in ipairs(M.spawnFlags(opts.permissionMode, opts.effort)) do post = post .. " " .. f end
-    if task then post = post .. " " .. shquote(task) end
+    -- terminal (no supported API), consistent with the project's VS Code stance. For
+    -- ssh, type the full `ssh -t <dest> '<inner>'` (the remote cd handles cwd).
+    local post
+    if isSsh then
+      post = M.spawnInner(project, task, { env = env, flags = flags, ssh = ssh })
+    else
+      post = M.envPrefix(env) .. "claude"
+      for _, f in ipairs(flags) do post = post .. " " .. f end
+      if task then post = post .. " " .. shquote(task) end
+    end
     return { kind = "vscode", editor = editor,
              app = (editor == "cursor") and "Cursor" or "Visual Studio Code",
              project = project, openTerminalKey = { mods = { "ctrl" }, key = "`" },
              postType = post }
   end
   return { kind = "terminal",
-           applescript = M.spawnAppleScript(project, task, { terminal = opts.terminal }) }
+           applescript = M.spawnAppleScript(project, task,
+             { terminal = opts.terminal, env = env, flags = flags, ssh = ssh }) }
 end
 
 -- ---- Kitty remote control (detect + enable) --------------------------------

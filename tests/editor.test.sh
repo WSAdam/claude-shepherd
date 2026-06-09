@@ -29,16 +29,24 @@ run sessionstart '{"session_id":"cur","cwd":"/U/x/proj-c"}' \
   __CFBundleIdentifier=com.todesktop.230313mzl4w4u92
 assert_json "cursor bundle -> editor=cursor" "$F" '.editor' "cursor"
 
-# Kitty terminal + permission_mode (stdin) + effort + kitty handles (env)
+# Kitty terminal + permission_mode (stdin) + effort + kitty handles + provider env
 F="$TMP/kit.json"
 run userpromptsubmit '{"session_id":"kit","cwd":"/U/x/proj-k","permission_mode":"plan","prompt_text":"hi"}' \
   CLAUDE_CODE_ENTRYPOINT=cli TERM=xterm-kitty KITTY_WINDOW_ID=7 \
-  KITTY_LISTEN_ON=unix:/tmp/mykitty CLAUDE_EFFORT=high
+  KITTY_LISTEN_ON=unix:/tmp/mykitty CLAUDE_EFFORT=high \
+  ANTHROPIC_MODEL=gemini-2.5-pro ANTHROPIC_BASE_URL=http://localhost:4000
 assert_json "kitty env -> editor=kitty"        "$F" '.editor' "kitty"
 assert_json "kitty window id captured"          "$F" '.kitty_window_id' "7"
 assert_json "kitty listen socket captured"      "$F" '.kitty_listen_on' "unix:/tmp/mykitty"
 assert_json "permission_mode captured (stdin)"  "$F" '.permission_mode' "plan"
 assert_json "effort captured (env)"             "$F" '.effort' "high"
+assert_json "model captured (env)"              "$F" '.model' "gemini-2.5-pro"
+assert_json "base_url captured (env)"           "$F" '.base_url' "http://localhost:4000"
+
+# no provider env -> no model/base_url keys (default Anthropic, bare claude)
+F="$TMP/nomodel.json"
+run sessionstart '{"session_id":"nomodel","cwd":"/U/x/proj-n"}' CLAUDE_CODE_ENTRYPOINT=cli
+assert_json "no provider env -> model absent"   "$F" '.model // "none"' "none"
 
 # plain (non-kitty) CLI terminal
 F="$TMP/term.json"

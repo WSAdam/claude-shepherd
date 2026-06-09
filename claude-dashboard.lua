@@ -220,6 +220,168 @@ function FX.readTail(path, maxBytes)
   local c = f:read("*a"); f:close(); return c
 end
 
+-- Incremental reader: return (newText, newSize) reading from byte `offset` to EOF.
+-- Used by the token-usage aggregator so each tick parses only appended bytes, never
+-- re-chewing multi-MB transcripts. A shrunk file (offset>size) is reread from 0.
+function FX.readFrom(path, offset)
+  local f = io.open(path, "rb"); if not f then return nil, offset or 0 end
+  local size = f:seek("end")
+  offset = offset or 0
+  if offset > size then offset = 0 end
+  if offset == size then f:close(); return "", size end
+  f:seek("set", offset)
+  local data = f:read("*a"); f:close()
+  return data, size
+end
+
+-- Token-usage aggregation across active sessions' transcripts. ZERO API cost: pure
+-- local file reads, incremental per tick. Builds per-session + fleet cumulative
+-- totals + a 5h/7d Anthropic-only window approximation, pushes them to the webview.
+-- Called on a 60s timer and the "Update now" button. (Pure parse/sum/window logic
+-- lives in cc-core; this is just the IO + aggregation shell.)
+local usageState = {}      -- [path] = { offset, cum = {...}, recent = { {ts, buckets, anthropic} } }
+local lastUsagePayload = nil
+local lastOfficialUsage = nil   -- parsed { five_hour, seven_day, seven_day_sonnet, ... } or nil
+local lastOfficialFetch = 0     -- epoch of the last successful/attempted fetch (180s TTL)
+local ccVersion = nil           -- "x.y.z" for the User-Agent (detected once)
+local function blankCum() return { input = 0, output = 0, cacheRead = 0, cacheCreate = 0, total = 0, real = 0, byModel = {} } end
+local function addBuckets(dst, e)
+  dst.input = dst.input + e.input; dst.output = dst.output + e.output
+  dst.cacheRead = dst.cacheRead + e.cacheRead; dst.cacheCreate = dst.cacheCreate + e.cacheCreate
+  dst.total = dst.input + dst.output + dst.cacheRead + dst.cacheCreate
+  dst.real = dst.input + dst.output + dst.cacheCreate  -- excl. cache reads (meaningful headline)
+end
+function FX.computeUsage()
+  local cfg = loadConfig()                 -- for per-provider contextLimit
+  local now = os.time()
+  local cutoff7d = now - core.WINDOW_7D
+  local seen, perSession = {}, {}
+  local fleet = blankCum()
+  local w5h, w7d = 0, 0
+  for key, it in pairs(byKey) do
+    local path = it.transcript_path
+    if path and path ~= "" then
+      seen[path] = true
+      local st = usageState[path] or { offset = 0, cum = blankCum(), recent = {} }
+      local text, newSize = FX.readFrom(path, st.offset)
+      if newSize and newSize < st.offset then st.cum = blankCum(); st.recent = {} end  -- file replaced
+      if text and #text > 0 then
+        for line in (text .. "\n"):gmatch("(.-)\n") do
+          local e = core.parseUsageLine(line)
+          if e then
+            addBuckets(st.cum, e)
+            local mk = e.model or "unknown"
+            st.cum.byModel[mk] = st.cum.byModel[mk] or blankCum()
+            addBuckets(st.cum.byModel[mk], e)
+            st.lastContext = core.contextTokens(e)  -- most recent turn = current context fill
+            st.lastModel = e.model
+            st.recent[#st.recent + 1] = { ts = e.ts, input = e.input, output = e.output,
+              cacheRead = e.cacheRead, cacheCreate = e.cacheCreate,
+              anthropic = core.isAnthropicSession(e.model, it.base_url) }
+          end
+        end
+      end
+      st.offset = newSize or st.offset
+      local pruned = {}  -- keep only events inside the 7d window
+      for _, ev in ipairs(st.recent) do if ev.ts and ev.ts >= cutoff7d then pruned[#pruned + 1] = ev end end
+      st.recent = pruned
+      usageState[path] = st
+
+      -- Context fullness for EVERY session (works for stale/done tiles, unlike the 1s peek).
+      local cfrac, ctoks
+      if st.lastContext then
+        ctoks = st.lastContext
+        cfrac = core.contextFractionFor(cfg, st.lastModel or it.model, ctoks)
+      end
+      perSession[key] = { total = st.cum.total, real = st.cum.real, input = st.cum.input,
+        output = st.cum.output, cacheRead = st.cum.cacheRead, cacheCreate = st.cum.cacheCreate,
+        byModel = st.cum.byModel, context_tokens = ctoks, context_frac = cfrac }
+      addBuckets(fleet, st.cum)
+      for m, v in pairs(st.cum.byModel) do
+        fleet.byModel[m] = fleet.byModel[m] or blankCum(); addBuckets(fleet.byModel[m], v)
+      end
+      local anthro = {}  -- plan-window approximation counts Anthropic sessions only
+      for _, ev in ipairs(st.recent) do if ev.anthropic then anthro[#anthro + 1] = ev end end
+      w5h = w5h + core.usageInWindow(anthro, now, core.WINDOW_5H)
+      w7d = w7d + core.usageInWindow(anthro, now, core.WINDOW_7D)
+    end
+  end
+  for p in pairs(usageState) do if not seen[p] then usageState[p] = nil end end  -- drop ended sessions
+  lastUsagePayload = { fleet = fleet, perSession = perSession, window = { w5h = w5h, w7d = w7d },
+    official = lastOfficialUsage, ts = now }
+  if wv then
+    pcall(function() wv:evaluateJavaScript("window.ccUsage(" .. hs.json.encode(lastUsagePayload) .. ")") end)
+  end
+  return lastUsagePayload
+end
+
+-- ---- Official plan-usage window (undocumented Anthropic OAuth endpoint) -------
+-- GET https://api.anthropic.com/api/oauth/usage returns the SAME numbers as
+-- claude.ai/settings/usage and Claude Code's /usage: five_hour/seven_day utilization %
+-- + reset times. NO model tokens are spent (it's a metadata call). We read the user's
+-- existing Claude Code OAuth token (macOS Keychain or $CLAUDE_CODE_OAUTH_TOKEN) and send
+-- it only to api.anthropic.com over HTTPS; the token is never logged. Polled at most
+-- every 180s (the endpoint 429s if hammered) and on any failure we silently fall back to
+-- the local approximation. The token is the user's own, used read-only for their account.
+local OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+local OFFICIAL_TTL = 180
+
+-- Read the OAuth access token without ever logging it. Prefer the env var, else the
+-- macOS Keychain entry Claude Code keeps (and auto-refreshes while it runs).
+local function oauthToken()
+  local env = os.getenv("CLAUDE_CODE_OAUTH_TOKEN")
+  if env and #env > 0 then return env end
+  local h = io.popen([[security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null]])
+  if not h then return nil end
+  local raw = h:read("*a"); h:close()
+  if not raw or #raw == 0 then return nil end
+  local ok, j = pcall(function() return core.json.decode(raw) end)
+  if ok and type(j) == "table" and j.claudeAiOauth and j.claudeAiOauth.accessToken then
+    return j.claudeAiOauth.accessToken
+  end
+  return nil
+end
+
+-- Detect the Claude Code version once for the required User-Agent (claude-code/<ver>).
+local function ccUserAgent()
+  if not ccVersion then
+    local h = io.popen("claude --version 2>/dev/null")
+    if h then local v = h:read("*a"); h:close()
+      ccVersion = (v or ""):match("(%d+%.%d+%.%d+)") or "2.0.0"
+    else ccVersion = "2.0.0" end
+  end
+  return "claude-code/" .. ccVersion
+end
+
+-- Fetch the official usage window (async, non-blocking). force=true bypasses the TTL
+-- (the Update-now button); otherwise it no-ops if fetched within OFFICIAL_TTL seconds.
+function FX.fetchOfficialUsage(force)
+  local now = os.time()
+  if not force and (now - lastOfficialFetch) < OFFICIAL_TTL then return end
+  lastOfficialFetch = now
+  local token = oauthToken()
+  if not token then return end  -- no token -> stay on the local approximation
+  local headers = {
+    ["Authorization"] = "Bearer " .. token,
+    ["anthropic-beta"] = "oauth-2025-04-20",
+    ["User-Agent"] = ccUserAgent(),
+    ["Content-Type"] = "application/json",
+  }
+  hs.http.asyncGet(OAUTH_USAGE_URL, headers, function(status, body)
+    if status ~= 200 or not body then
+      print("[cc-usage] official usage fetch: HTTP " .. tostring(status) .. " (using local approx)")
+      return
+    end
+    local ok, j = pcall(function() return hs.json.decode(body) end)
+    if not ok or type(j) ~= "table" then return end
+    lastOfficialUsage = j
+    -- push immediately so the bars update without waiting for the next 60s pass
+    if wv then pcall(function()
+      wv:evaluateJavaScript("window.ccOfficial(" .. hs.json.encode(j) .. ")")
+    end) end
+  end)
+end
+
 -- Task queue I/O (Phase 4b).
 function FX.readQueue(key)
   local c = FX.readFile(QUEUE_DIR .. "/" .. key .. ".json")
@@ -611,17 +773,26 @@ end
 -- Spawn a new Claude session, editor-aware (F3-F5). The editor comes from the
 -- caller (the modal's picker) or falls back to `spawn.editor` in config. Effective
 -- dry-run = the code default ORCH_DRY_RUN unless the user flips `spawn.live` on.
-function FX.spawnSession(editor, project, task, permissionMode)
+function FX.spawnSession(editor, project, task, permissionMode, providerId)
   local cfg = loadConfig()
   editor = (editor and editor ~= "") and editor or core.config(cfg, "spawn.editor", "terminal")
+  -- Resolve the provider profile (explicit pick, else the spawn.provider default).
+  -- A missing/unknown profile leaves env/model nil -> bare `claude`, unchanged.
+  local providerKey = (providerId and providerId ~= "") and providerId
+    or core.config(cfg, "spawn.provider", nil)
+  local profile = core.providerById(cfg, providerKey)
   local opts = {
     terminal       = ORCH_TERMINAL,
     kittyBin       = resolveBin("kitty", core.config(cfg, "spawn.kittyBin", nil)),
     kittyRemote    = core.config(cfg, "spawn.kittyRemote", true) ~= false,
     kittySocket    = core.config(cfg, "spawn.kittySocket", nil),
     permissionMode = (permissionMode and permissionMode ~= "") and permissionMode or nil,
+    env            = profile and core.providerEnv(profile) or nil,  -- carries ANTHROPIC_MODEL
+    ssh            = profile and type(profile.ssh) == "table" and profile.ssh or nil,
   }
   local spec = core.spawnSpec(editor, project, task, opts)
+  if profile then print("[cc-orch] provider: " .. tostring(profile.id)
+    .. " (" .. tostring(profile.kind or "anthropic") .. " / " .. tostring(profile.model) .. ")") end
   local live = core.config(cfg, "spawn.live", false) == true
   if ORCH_DRY_RUN and not live then
     print("[cc-orch] DRY-RUN (" .. spec.kind .. ") would spawn in "
@@ -677,6 +848,11 @@ local function handleBridgeMsg(msg)
   if a == "theme" then
     hs.settings.set("ccDashboardTheme", tostring(payload.v))
     print("[cc-dashboard] theme saved: " .. tostring(payload.v))
+    return
+  end
+  if a == "usage-refresh" then
+    pcall(function() FX.fetchOfficialUsage(true) end)  -- force the official window (bypass TTL)
+    pcall(FX.computeUsage)  -- recompute local totals immediately (no model tokens either way)
     return
   end
   if a == "caffeinate" then
@@ -772,7 +948,8 @@ local function handleBridgeMsg(msg)
       return
     end
     FX.writeRecent(core.recentPush(FX.readRecent(), dir))
-    FX.spawnSession(editor, dir, task, payload.permMode and tostring(payload.permMode) or nil)
+    FX.spawnSession(editor, dir, task, payload.permMode and tostring(payload.permMode) or nil,
+      payload.provider and tostring(payload.provider) or nil)
     return
   end
   if a == "queue-add" then
@@ -844,6 +1021,25 @@ local function handleBridgeMsg(msg)
         { title = "Relabel…", fn = function()
             pcall(function() wv:evaluateJavaScript("startRename(" .. keyJson .. ")") end)
           end },
+        { title = "-" },
+        -- Clear / Compact: same effect as the detail-panel buttons (type the slash
+        -- command into the session; headless on Kitty, best-effort in VS Code). A
+        -- native confirm-submenu keeps the destructive /clear behind one more click,
+        -- using the same reliable pattern as Close (no separate dialog -> no console pop).
+        { title = "Clear conversation", menu = {
+            { title = "Confirm: clear ALL context for " .. shown, fn = function()
+                FX.typeIntoWindow(winTarget(item), "/clear")
+                refresh()
+              end },
+            { title = "Cancel", fn = function() end },
+        } },
+        { title = "Compact", menu = {
+            { title = "Confirm: compact (summarize) " .. shown, fn = function()
+                FX.typeIntoWindow(winTarget(item), "/compact")
+                refresh()
+              end },
+            { title = "Cancel", fn = function() end },
+        } },
         { title = "-" },
         -- Close uses a native submenu confirm. Native menu clicks are reliable on
         -- this non-activating panel; an in-webview confirm button was not (the
@@ -1032,6 +1228,11 @@ local HTML = [[
   .s-txt { flex:1; min-width:120px; background:#1b1d24; color:#e8e9ee; border:1px solid #2c2f3a; border-radius:6px; padding:2px 6px; }
   .s-area { width:100%; height:54px; background:#1b1d24; color:#e8e9ee; border:1px solid #2c2f3a;
             border-radius:6px; padding:5px 7px; font-family:ui-monospace,monospace; font-size:12px; box-sizing:border-box; }
+  .prov { border:1px solid #2c2f3a; border-radius:8px; padding:6px 8px; margin:6px 0; background:#191b22; }
+  .prov-head { display:flex; align-items:center; gap:6px; }
+  .prov-head .s-txt { flex:1; }
+  .prov-del { background:#21232c; color:#e88; border:1px solid #3a2c2f; border-radius:6px; padding:2px 7px; cursor:pointer; }
+  .prov-gw { margin-top:4px; }
   #s-foot { display:flex; gap:8px; padding:10px 12px; border-top:1px solid #2c2f3a; }
   #s-save { background:#21232c; color:#8fd4a3; border:1px solid #2c5; border-radius:8px; font-size:13px; padding:6px 14px; cursor:pointer; }
   #s-foot button:not(#s-save) { background:#21232c; color:#cfd2db; border:1px solid #2c2f3a; border-radius:8px; font-size:13px; padding:6px 14px; cursor:pointer; }
@@ -1046,6 +1247,25 @@ local HTML = [[
   .dot  { border-radius:50%; flex:0 0 auto; }
   .meta { font-size:11px; color:#8a8d99; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+  /* context-fullness mini-bar (per tile + detail) */
+  .ctx-bar { height:3px; border-radius:2px; background:#2c2f3a; overflow:hidden; margin-top:3px; grid-column:1 / -1; }
+  .ctx-bar > i { display:block; height:100%; width:0; background:#3b82f6; }
+  .ctx-bar.ok > i { background:#3b82f6; } .ctx-bar.warn > i { background:#f5b50a; } .ctx-bar.full > i { background:#ef4444; }
+  .theme-bar .ctx-bar, .theme-dots .ctx-bar { display:none; }  /* compact themes: badge in detail only */
+  /* usage footer under the grid */
+  #usage-foot { border-top:1px solid #2c2f3a; padding:6px 10px; font-size:11px; color:#9aa0ad; }
+  .uf-row { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+  .uf-total { color:#cfd2db; }
+  #uf-update { background:#21232c; color:#cfd2db; border:1px solid #2c2f3a; border-radius:6px; padding:2px 8px; cursor:pointer; font-size:11px; }
+  .uf-windows { margin-top:4px; display:flex; flex-direction:column; gap:3px; }
+  .uf-win { display:flex; align-items:center; gap:6px; }
+  .uf-win .lbl { width:78px; color:#8a8d99; } .uf-win .bar { flex:1; height:4px; border-radius:2px; background:#2c2f3a; overflow:hidden; }
+  .uf-win .bar > i { display:block; height:100%; background:#8b5cf6; }
+  .uf-win .bar.ok > i { background:#8b5cf6; } .uf-win .bar.warn > i { background:#f5b50a; } .uf-win .bar.full > i { background:#ef4444; }
+  .uf-win .val { color:#9aa0ad; min-width:64px; text-align:right; }
+  .uf-approx { color:#6b7280; font-style:italic; }
+  #d-usage { font-size:11px; color:#9aa0ad; margin-top:6px; }
+  #d-usage .um-row { display:flex; justify-content:space-between; gap:8px; }
   #empty { color:#6b7280; font-size:13px; padding:18px; text-align:center; }
   #renamebar, #confirmbar { display:none; align-items:center; gap:6px; padding:8px 12px;
     background:#161821; border-bottom:1px solid #2c2f3a; }
@@ -1229,6 +1449,14 @@ local HTML = [[
   <div id="grid"></div>
   <div id="empty">Waiting for Claude Code sessions...<br>Start a session in any project.</div>
 
+  <div id="usage-foot">
+    <div class="uf-row">
+      <span class="uf-total" id="uf-total">Fleet: —</span>
+      <button id="uf-update" onclick="send('usage-refresh')" title="Recompute from local transcripts (no tokens used)">Update now</button>
+    </div>
+    <div class="uf-windows" id="uf-windows"></div>
+  </div>
+
   <div id="detail">
     <div id="d-head">
       <span id="d-dot"></span>
@@ -1240,6 +1468,7 @@ local HTML = [[
     <div id="d-activity" onclick="toggleExpand('activity')"></div>
     <div id="d-prompt"></div>
     <div id="d-meta"></div>
+    <div id="d-usage"></div>
     <div id="d-actions">
       <button id="b-jump"    onclick="act('focus')">Jump</button>
       <button id="b-approve" onclick="act('approve')">Approve</button>
@@ -1264,6 +1493,10 @@ local HTML = [[
           <option value="default">Default</option>
           <option value="acceptEdits">Accept edits</option>
           <option value="plan">Plan</option>
+        </select>
+      </label>
+      <label class="ctl">Model
+        <select id="d-model" onchange="onModelChange()" title="Switch model live via /model. Works within the session's current backend; changing the provider/base URL needs a new session.">
         </select>
       </label>
     </div>
@@ -1316,6 +1549,13 @@ local HTML = [[
       <label class="s-row"><input type="checkbox" id="s-kitty-remote"> Give spawned Kitty windows remote control (recommended)</label>
       <label class="s-row"><input type="checkbox" id="s-kitty-auto"> Auto-enable Kitty remote control in kitty.conf when Kitty is in use</label>
       <label class="s-row"><button class="s-x" style="border:1px solid #2c2f3a;border-radius:6px;padding:3px 8px;color:#cfd2db;" onclick="send('kitty-remote')">Enable Kitty remote control now</button></label>
+      <label class="s-row">Default provider <select id="s-spawn-provider"></select></label>
+
+      <div class="s-sec">Providers (model / company per session)</div>
+      <div class="s-help">Each profile launches <code>claude</code> against a model. <b>Claude</b> just sets the model; a <b>Gateway</b> points Claude Code at an Anthropic-compatible endpoint (a LiteLLM proxy for Gemini/OpenAI, or a local/remote REST server) via its base URL. <b>No API keys are stored here</b> — put the key in an environment variable and name that variable below; the spawned shell expands <code>$NAME</code> at launch.</div>
+      <div id="s-providers"></div>
+      <label class="s-row"><button class="s-x" style="border:1px solid #2c2f3a;border-radius:6px;padding:3px 8px;color:#cfd2db;" onclick="addProvider()">+ Add provider</button></label>
+
       <div class="s-sec">Policies (auto-decide — gate must be armed)</div>
       <div class="s-help">Each one ON lets some requests be decided WITHOUT you. Headless approvals keeps all three OFF.</div>
       <label class="s-row"><input type="checkbox" id="s-p-rep"> Auto-approve a command already approved this session</label>
@@ -1373,6 +1613,7 @@ local HTML = [[
           <option value="bypassPermissions">Automate (bypass)</option>
         </select>
       </label>
+      <label class="s-row">Provider <select id="n-provider"></select></label>
     </div>
     <div id="n-foot">
       <button id="n-spawn" onclick="submitNew()">Spawn</button>
@@ -1543,7 +1784,103 @@ local HTML = [[
       // Headless = gate armed AND every auto-policy off.
       ck("s-headless", gateOn && !cv(cfg,"policies.approveRepeats",false)
         && !cv(cfg,"policies.autopilot.enabled",false) && !cv(cfg,"policies.patterns.enabled",false));
+      // Providers: editable list + default picker.
+      PROVIDERS = (cv(cfg,"providers",[])||[]).map(function(p){ return p||{}; });
+      renderProviders();
+      refreshProviderDefault(cv(cfg,"spawn.provider",""));
       document.getElementById("settings").classList.add("show");
+    }
+    // ---- Providers tab (multi-model) ----------------------------------------
+    var PROVIDERS = [];
+    function slugify(s){ return (s||"").toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,""); }
+    function renderProviders(){
+      var box = document.getElementById("s-providers"); box.innerHTML = "";
+      PROVIDERS.forEach(function(p, i){
+        var kind = (p.kind === "gateway") ? "gateway" : "anthropic";
+        var d = document.createElement("div"); d.className = "prov"; d.setAttribute("data-i", i);
+        d.innerHTML =
+          '<div class="prov-head">'
+          + '<input class="s-txt p-label" placeholder="Label (e.g. Claude Opus 4.8)" value="'+esc(p.label)+'">'
+          + '<select class="p-kind" onchange="onKindChange('+i+')">'
+          + '<option value="anthropic"'+(kind==="anthropic"?" selected":"")+'>Claude</option>'
+          + '<option value="gateway"'+(kind==="gateway"?" selected":"")+'>Gateway</option>'
+          + '</select>'
+          + '<button class="prov-del" onclick="removeProvider('+i+')">Remove</button>'
+          + '</div>'
+          + '<div class="s-lbl">Model id</div>'
+          + '<input class="s-txt p-model" placeholder="claude-opus-4-8 / gemini-2.5-pro / ollama/llama3" value="'+esc(p.model)+'">'
+          + '<div class="prov-gw" style="display:'+(kind==="gateway"?"block":"none")+'">'
+          + '<div class="s-lbl">Base URL (Anthropic-compatible endpoint, e.g. http://localhost:4000)</div>'
+          + '<input class="s-txt p-baseurl" placeholder="http://localhost:4000" value="'+esc(p.baseUrl)+'">'
+          + '<div class="s-lbl">Auth-token env var NAME (not the key) — e.g. MY_LITELLM_KEY</div>'
+          + '<input class="s-txt p-authenv" placeholder="MY_LITELLM_KEY" value="'+esc(p.authTokenEnv)+'">'
+          + '<div class="s-lbl">Small/fast model (optional)</div>'
+          + '<input class="s-txt p-smallfast" placeholder="gemini-2.5-flash" value="'+esc(p.smallFastModel)+'">'
+          + '<div class="s-lbl">Custom headers (optional, sent as ANTHROPIC_CUSTOM_HEADERS)</div>'
+          + '<input class="s-txt p-headers" placeholder="X-Header: value" value="'+esc(p.headers)+'">'
+          + '</div>';
+        box.appendChild(d);
+      });
+      if(!PROVIDERS.length){ box.innerHTML = '<div class="s-help" style="margin-left:0;">No providers yet — add one to launch sessions against a model.</div>'; }
+    }
+    function onKindChange(i){
+      var card = document.querySelector('.prov[data-i="'+i+'"]'); if(!card) return;
+      var gw = card.querySelector(".prov-gw");
+      gw.style.display = (card.querySelector(".p-kind").value === "gateway") ? "block" : "none";
+    }
+    function addProvider(){
+      collectProviders(); // keep current edits
+      PROVIDERS.push({ kind:"anthropic", label:"", model:"" });
+      renderProviders(); refreshProviderDefault(document.getElementById("s-spawn-provider").value);
+    }
+    function removeProvider(i){
+      collectProviders(); PROVIDERS.splice(i,1);
+      renderProviders(); refreshProviderDefault(document.getElementById("s-spawn-provider").value);
+    }
+    // Read the DOM rows back into PROVIDERS, 1:1 with the cards (blank rows kept so
+    // data-i indices stay valid during editing; blanks are dropped only at persist).
+    function collectProviders(){
+      var out = [];
+      document.querySelectorAll("#s-providers .prov").forEach(function(card){
+        function v(sel){ var el=card.querySelector(sel); return el? (el.value||"").trim() : ""; }
+        var label = v(".p-label"), model = v(".p-model");
+        var kind = card.querySelector(".p-kind").value;
+        var p = { id: slugify(label) || slugify(model), label: label, kind: kind, model: model };
+        if(kind === "gateway"){
+          p.baseUrl = v(".p-baseurl"); p.authTokenEnv = v(".p-authenv");
+          p.smallFastModel = v(".p-smallfast"); p.headers = v(".p-headers");
+        }
+        out.push(p);
+      });
+      PROVIDERS = out;
+      return out;
+    }
+    function nonBlankProviders(){ return collectProviders().filter(function(p){ return p.label || p.model; }); }
+    // Populate the default-provider select from the (non-blank) providers, keeping the choice.
+    function refreshProviderDefault(want){
+      var list = nonBlankProviders();
+      var sel = document.getElementById("s-spawn-provider");
+      want = want || sel.value || "";
+      sel.innerHTML = '<option value="">(none — bare claude)</option>';
+      list.forEach(function(p){
+        if(!p.id) return;
+        var o = document.createElement("option");
+        o.value = p.id; o.textContent = (p.label||p.id) + " — " + (p.model||"?");
+        if(p.id === want) o.selected = true;
+        sel.appendChild(o);
+      });
+    }
+    // Fill an arbitrary <select> from a providers array (modal + per-tile switch).
+    function fillProviderSelect(selId, list, want){
+      var sel = document.getElementById(selId); if(!sel) return;
+      sel.innerHTML = '<option value="">(none — bare claude)</option>';
+      (list||[]).forEach(function(p){
+        if(!p || !p.id) return;
+        var o = document.createElement("option");
+        o.value = p.id; o.textContent = (p.label||p.id) + " — " + (p.model||"?");
+        if(p.id === (want||"")) o.selected = true;
+        sel.appendChild(o);
+      });
     }
     function lines(id){
       return (document.getElementById(id).value||"").split("\n")
@@ -1559,7 +1896,9 @@ local HTML = [[
                       push: ck("s-e-push"), pushTopic: txt("s-e-topic") },
         focus: { popOnComplete: ck("s-pop-complete"), popOnApproval: ck("s-pop-approval") },
         spawn: { editor: txt("s-spawn-editor"), live: ck("s-spawn-live"),
-                 kittyRemote: ck("s-kitty-remote"), kittyAutoRemote: ck("s-kitty-auto") },
+                 kittyRemote: ck("s-kitty-remote"), kittyAutoRemote: ck("s-kitty-auto"),
+                 provider: txt("s-spawn-provider") },
+        providers: nonBlankProviders(),
         gate: { tools: txt("s-gate-tools") },
         policies: {
           approveRepeats: ck("s-p-rep"),
@@ -1604,6 +1943,7 @@ local HTML = [[
       document.getElementById("n-name").value = "";
       document.getElementById("n-task").value = "";
       document.getElementById("n-editor").value = cv(cfg, "spawn.editor", "terminal");
+      fillProviderSelect("n-provider", cv(cfg,"providers",[])||[], cv(cfg,"spawn.provider",""));
       renderRecent(recent || []);
       ccBrowse(browse || { path:"", parent:"", dirs:[] });
       document.getElementById("newsession").classList.add("show");
@@ -1673,7 +2013,8 @@ local HTML = [[
       var task = (document.getElementById("n-task").value || "").trim();
       var editor = document.getElementById("n-editor").value;
       var payload = { a:"spawn", v:"", text:task, img:"", mode:newMode, editor:editor,
-                      permMode: document.getElementById("n-permmode").value };
+                      permMode: document.getElementById("n-permmode").value,
+                      provider: document.getElementById("n-provider").value };
       if(newMode === "new"){ payload.parent = path; payload.name = name; } else { payload.dir = path; }
       try { window.webkit.messageHandlers.cc.postMessage(JSON.stringify(payload)); } catch(e){ console.log("spawn send error", e); }
       closeNew();
@@ -1714,6 +2055,12 @@ local HTML = [[
       var m = document.getElementById("mode").value;
       if(selectedKey) send("set-mode", selectedKey, m);
     }
+    // Switch model live via /model. Sends the chosen model id (works within the
+    // session's current backend; a provider/base-URL change needs a new session).
+    function onModelChange(){
+      var m = document.getElementById("d-model").value;
+      if(selectedKey && m) send("model", selectedKey, m);
+    }
     // Render the options of a pending AskUserQuestion so they're visible in the
     // panel (today: read-only + Jump to answer; clickable answering comes later).
     function renderAsk(it){
@@ -1733,16 +2080,30 @@ local HTML = [[
       el.style.display="block";
     }
     function answerAsk(qi, oi){ if(selectedKey) send("answer", selectedKey, String(oi)); }
-    // Small badges: detected editor + live permission mode + effort.
+    // Small badges: detected editor + live permission mode + effort + model.
     function renderMeta(it){
       var el = document.getElementById("d-meta"), bits = [];
       if(it.editor) bits.push(it.editor);
       if(it.permission_mode) bits.push("mode: " + it.permission_mode);
       if(it.effort) bits.push("effort: " + it.effort);
-      if(!bits.length){ el.style.display="none"; el.textContent=""; return; }
-      el.textContent = bits.join("  ·  "); el.style.display="block";
+      if(it.model) bits.push("model: " + it.model);
+      var cf = ctxFracFor(it);
+      if(cf != null) bits.push("ctx: " + Math.round(cf*100) + "%");
+      if(bits.length){ el.textContent = bits.join("  ·  "); el.style.display="block"; }
+      else { el.style.display="none"; el.textContent=""; }
       var ef = document.getElementById("effort"); if(ef && it.effort) ef.value = it.effort;
       var md = document.getElementById("mode"); if(md && it.permission_mode) md.value = it.permission_mode;
+      // Model dropdown: list the configured providers' models, plus the session's
+      // live model (so it shows even if no profile matches), selected to it.model.
+      var dm = document.getElementById("d-model");
+      if(dm){
+        var seen = {}, models = [];
+        (PANEL_PROVIDERS||[]).forEach(function(p){ if(p && p.model && !seen[p.model]){ seen[p.model]=1; models.push(p.model); } });
+        if(it.model && !seen[it.model]){ models.unshift(it.model); }
+        dm.innerHTML = '<option value="">(model…)</option>'
+          + models.map(function(m){ return '<option value="'+esc(m)+'">'+esc(m)+'</option>'; }).join("");
+        if(it.model) dm.value = it.model;
+      }
     }
 
     function renderDetail(){
@@ -1769,6 +2130,7 @@ local HTML = [[
       else { pr.style.display="none"; }
       renderAsk(it);
       renderMeta(it);
+      renderDetailUsage(it);
       var n = it.queue || 0;
       document.getElementById("q-count").textContent = n>0 ? ("Queue: " + n) : "Queue: empty";
       document.getElementById("b-feed").style.display = n>0 ? "inline-block" : "none";
@@ -1778,8 +2140,90 @@ local HTML = [[
       applyExpand();
     }
 
-    window.ccUpdate = function(items){
+    // ---- Token usage (local, zero-cost) -------------------------------------
+    var LAST_USAGE = null;
+    function fmtTok(n){
+      n = n || 0;
+      if(n >= 1e9) return (n/1e9).toFixed(2)+"B";
+      if(n >= 1e6) return (n/1e6).toFixed(2)+"M";
+      if(n >= 1e3) return (n/1e3).toFixed(1)+"k";
+      return String(Math.floor(n));
+    }
+    function barLevel(f){ return f>=0.9 ? "full" : (f>=0.75 ? "warn" : "ok"); }
+    // Context for a tile: prefer the live 1s value (active sessions), else the 60s
+    // usage pass (covers stale/done tiles — which is most of them between turns).
+    function psFor(it){ return (LAST_USAGE && LAST_USAGE.perSession) ? LAST_USAGE.perSession[it.key] : null; }
+    function ctxFracFor(it){ if(it.context_frac != null) return it.context_frac; var p = psFor(it); return p ? p.context_frac : null; }
+    function ctxTokFor(it){ if(it.context_tokens != null) return it.context_tokens; var p = psFor(it); return p ? p.context_tokens : null; }
+    function ctxBarHtml(it){
+      var frac = ctxFracFor(it);
+      if(frac == null) return "";   // no usage yet / unknown -> no bar
+      var pct = Math.round(frac*100);
+      var tok = ctxTokFor(it); tok = (tok != null) ? fmtTok(tok) : "";
+      return '<div class="ctx-bar '+barLevel(frac)+'" title="Context: '+tok+' ('+pct+'% of window)"><i style="width:'+pct+'%"></i></div>';
+    }
+    var LAST_OFFICIAL = null;
+    window.ccUsage = function(u){ LAST_USAGE = u || null; if(u && u.official) LAST_OFFICIAL = u.official; renderUsageFoot(); renderDetail(); };
+    window.ccOfficial = function(o){ LAST_OFFICIAL = o || null; renderUsageFoot(); };
+    function pctBarRow(lbl, pct, valText){
+      pct = Math.max(0, Math.min(100, Math.round(pct||0)));
+      var lvl = pct>=90 ? "full" : (pct>=75 ? "warn" : "ok");
+      return '<div class="uf-win"><span class="lbl">'+lbl+'</span><span class="bar '+lvl+'"><i style="width:'+pct+'%"></i></span><span class="val">'+valText+'</span></div>';
+    }
+    function resetsIn(iso){
+      if(!iso) return "";
+      var ms = Date.parse(iso) - Date.now(); if(isNaN(ms) || ms<=0) return "";
+      var m = Math.round(ms/60000); if(m<60) return "resets in "+m+"m";
+      return "resets in "+Math.floor(m/60)+"h "+(m%60)+"m";
+    }
+    function renderUsageFoot(){
+      var totEl = document.getElementById("uf-total"), winEl = document.getElementById("uf-windows");
+      if(!LAST_USAGE){ totEl.textContent = "Fleet: —"; winEl.innerHTML = ""; return; }
+      var f = LAST_USAGE.fleet || {};
+      // Headline excludes cache reads (the meaningful number); gross shown on hover.
+      totEl.textContent = "Fleet: " + fmtTok(f.real||0) + " tokens · " + fmtTok(f.output||0) + " out";
+      totEl.title = "excl. cache reads · gross " + fmtTok(f.total||0) + " (incl. cache)";
+      var o = LAST_OFFICIAL;
+      if(o && o.five_hour){
+        // OFFICIAL plan window — matches claude.ai/settings/usage exactly.
+        var rows = pctBarRow("Session (5h)", o.five_hour.utilization, Math.round(o.five_hour.utilization||0)+"%")
+          + pctBarRow("Weekly", (o.seven_day&&o.seven_day.utilization)||0, Math.round((o.seven_day&&o.seven_day.utilization)||0)+"%");
+        if(o.seven_day_sonnet && o.seven_day_sonnet.utilization != null){
+          rows += pctBarRow("Weekly · Sonnet", o.seven_day_sonnet.utilization, Math.round(o.seven_day_sonnet.utilization)+"%");
+        }
+        var reset5 = resetsIn(o.five_hour.resets_at), reset7 = resetsIn(o.seven_day && o.seven_day.resets_at);
+        winEl.innerHTML = rows + '<span class="uf-approx" style="font-style:normal;">official · '
+          + (reset5 ? "5h "+reset5 : "") + (reset5&&reset7 ? " · " : "") + (reset7 ? "weekly "+reset7 : "") + '</span>';
+      } else {
+        // Local approximation fallback (no official token / endpoint unavailable).
+        var w = LAST_USAGE.window || {};
+        var max = Math.max(w.w7d||0, 1);
+        function winRow(lbl, tokens){
+          var pct = Math.round(Math.min(1, (tokens||0)/max)*100);
+          return '<div class="uf-win"><span class="lbl">'+lbl+'</span><span class="bar"><i style="width:'+pct+'%"></i></span><span class="val">'+fmtTok(tokens||0)+'</span></div>';
+        }
+        winEl.innerHTML = winRow("5h (approx)", w.w5h) + winRow("7d (approx)", w.w7d)
+          + '<span class="uf-approx">approx from local transcripts — official % unavailable (no Claude login token found)</span>';
+      }
+    }
+
+    // Per-session cumulative breakdown in the detail panel (from the 60s usage pass).
+    function renderDetailUsage(it){
+      var du = document.getElementById("d-usage"); if(!du) return;
+      var ps = (LAST_USAGE && LAST_USAGE.perSession) ? LAST_USAGE.perSession[it.key] : null;
+      if(!ps){ du.style.display="none"; du.innerHTML=""; return; }
+      var rows = '<div class="um-row"><span>Session total</span><span title="excl. cache reads; gross '+fmtTok(ps.total)+'">'+fmtTok(ps.real != null ? ps.real : ps.total)+'</span></div>'
+        + '<div class="um-row"><span>output / input</span><span>'+fmtTok(ps.output)+' / '+fmtTok(ps.input)+'</span></div>';
+      if(ps.byModel){ Object.keys(ps.byModel).forEach(function(m){
+        rows += '<div class="um-row"><span>'+esc(m)+'</span><span>'+fmtTok(ps.byModel[m].total)+'</span></div>';
+      }); }
+      du.innerHTML = rows; du.style.display="block";
+    }
+
+    var PANEL_PROVIDERS = [];
+    window.ccUpdate = function(items, providers){
       lastItems = items || [];
+      if(providers !== undefined) PANEL_PROVIDERS = providers || [];
       var grid  = document.getElementById("grid");
       var empty = document.getElementById("empty");
       if(lastItems.length === 0){
@@ -1805,6 +2249,7 @@ local HTML = [[
              + '<span class="name">'+esc(it.label || it.name)+'</span>'
              + '<span class="label">'+label+'</span>'
              + '<span class="meta">'+esc(meta)+'</span>'
+             + ctxBarHtml(it)
              + '</div>';
       }).join("");
       renderDetail();
@@ -2035,7 +2480,15 @@ function refresh()
     if ACTIVITY_PEEK and it.transcript_path and not it.stale
        and (it.status == "working" or it.status == "approval" or it.status == "done") then
       local tail = FX.readTail(it.transcript_path, ACTIVITY_BYTES)
-      if tail then it.activity = core.transcriptSnippet(tail, ACTIVITY_LEN) end
+      if tail then
+        it.activity = core.transcriptSnippet(tail, ACTIVITY_LEN)
+        -- Free context-fullness bar: the last usage line is already in this tail.
+        local u = core.lastUsage(tail)
+        if u then
+          it.context_tokens = core.contextTokens(u)
+          it.context_frac = core.contextFractionFor(cfg, u.model or it.model, it.context_tokens)
+        end
+      end
     end
 
     -- Autopilot badge (active only while the feature is enabled in config).
@@ -2082,7 +2535,9 @@ function refresh()
   -- real target). A new session in a labeled folder inherits the name (F1).
   core.applyLabelsByCwd(list, labels)
   local payload = (#list == 0) and "[]" or hs.json.encode(list)
-  wv:evaluateJavaScript("window.ccUpdate(" .. payload .. ")")
+  local provs = core.config(cfg, "providers", nil)  -- reuse the cfg loaded above
+  local provJson = (type(provs) == "table") and hs.json.encode(provs) or "[]"
+  wv:evaluateJavaScript("window.ccUpdate(" .. payload .. ", " .. provJson .. ")")
 
   -- Reflect the live keep-awake state in the toggle on a light cadence (every 10
   -- polls, not every 1s) so a `pmset -g` subprocess doesn't run each second. The
@@ -2142,9 +2597,15 @@ labels = FX.loadLabels()
 -- Poll on a timer, and also react instantly to file changes.
 M.timer = hs.timer.doEvery(POLL_SECONDS, refresh)
 M.watcher = hs.pathwatcher.new(STATUS_DIR, function() refresh() end):start()
+-- Token usage (local, zero API cost): recompute fleet/per-session/window every 60s.
+M.usageTimer = hs.timer.doEvery(60, function() pcall(FX.computeUsage) end)
+-- Official plan-usage window (metadata call, no model tokens): refresh every 180s.
+M.officialUsageTimer = hs.timer.doEvery(OFFICIAL_TTL, function() pcall(FX.fetchOfficialUsage) end)
 sdStart()  -- begin Stream Deck discovery (no-op if none plugged in)
 bindHotkeys()
 refresh()
+hs.timer.doAfter(1.0, function() pcall(FX.computeUsage) end)          -- first local pass
+hs.timer.doAfter(1.5, function() pcall(function() FX.fetchOfficialUsage(true) end) end)  -- first official pass
 
 -- Auto-enable kitty remote control when kitty is actually in use (user request):
 -- only touch kitty.conf if a kitty session exists or kitty is the spawn editor,

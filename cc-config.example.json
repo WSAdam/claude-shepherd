@@ -26,14 +26,36 @@
   },
 
   "spawn": {
-    "_comment": "The + New / New project launcher. editor: terminal | kitty | vscode | cursor. live=false is a dry-run (logs what it would launch, spawns nothing). Kitty/Terminal spawn reliably; VS Code/Cursor open the window then best-effort type `claude` in a new integrated terminal. kittyAutoRemote enables remote control in your kitty.conf when Kitty is in use (so kitty @ effects work).",
+    "_comment": "The + New / New project launcher. editor: terminal | kitty | vscode | cursor. live=false is a dry-run (logs what it would launch, spawns nothing). Kitty/Terminal spawn reliably; VS Code/Cursor open the window then best-effort type `claude` in a new integrated terminal. kittyAutoRemote enables remote control in your kitty.conf when Kitty is in use (so kitty @ effects work). provider = id of a profile in `providers` to launch new sessions against (empty = bare `claude`, default Anthropic).",
     "editor": "terminal",
     "live": false,
     "kittyRemote": true,
     "kittyAutoRemote": true,
     "kittyBin": "",
-    "kittySocket": ""
+    "kittySocket": "",
+    "provider": ""
   },
+
+  "providers": [
+    {
+      "_comment": "Each profile launches `claude` against a model. kind=anthropic sets ANTHROPIC_MODEL on the normal endpoint; kind=gateway also sets ANTHROPIC_BASE_URL so Claude Code talks to a LiteLLM-style gateway (Gemini/OpenAI/local) or a local/remote REST server. NO API KEYS HERE: authTokenEnv names an ENV VAR the spawned login shell expands ($NAME) — the key lives in your shell, never in this file.",
+      "id": "anthropic-opus",
+      "label": "Claude Opus 4.8",
+      "kind": "anthropic",
+      "model": "claude-opus-4-8"
+    },
+    {
+      "id": "gemini",
+      "label": "Gemini (via LiteLLM)",
+      "kind": "gateway",
+      "baseUrl": "http://localhost:4000",
+      "model": "gemini-2.5-pro",
+      "authTokenEnv": "MY_LITELLM_KEY",
+      "smallFastModel": "",
+      "headers": "",
+      "contextLimit": 1000000
+    }
+  ],
 
   "policies": {
     "approveRepeats": false,

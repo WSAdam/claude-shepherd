@@ -84,6 +84,10 @@ fi
 EDITOR_KIND="$(cc_detect_editor)"  # shared detector in cc-lib.sh (used by cc-popup.sh too)
 PERMISSION_MODE="$(cc_get "$INPUT" '.permission_mode')"
 EFFORT="${CLAUDE_EFFORT:-}"
+# The backend the session is running against (set by the provider profile at spawn
+# via ANTHROPIC_MODEL / ANTHROPIC_BASE_URL), so the panel can show + verify it.
+MODEL="${ANTHROPIC_MODEL:-}"
+BASE_URL="${ANTHROPIC_BASE_URL:-}"
 KITTY_WID="${KITTY_WINDOW_ID:-}"
 KITTY_SOCK="${KITTY_LISTEN_ON:-}"
 
@@ -200,6 +204,8 @@ fi
 PATCH="$(printf '%s' "$PATCH" | jq -c --arg ed "$EDITOR_KIND" '. + {editor:$ed}')"
 [ -n "$PERMISSION_MODE" ] && PATCH="$(printf '%s' "$PATCH" | jq -c --arg v "$PERMISSION_MODE" '. + {permission_mode:$v}')"
 [ -n "$EFFORT" ]     && PATCH="$(printf '%s' "$PATCH" | jq -c --arg v "$EFFORT"     '. + {effort:$v}')"
+[ -n "$MODEL" ]      && PATCH="$(printf '%s' "$PATCH" | jq -c --arg v "$MODEL"      '. + {model:$v}')"
+[ -n "$BASE_URL" ]   && PATCH="$(printf '%s' "$PATCH" | jq -c --arg v "$BASE_URL"   '. + {base_url:$v}')"
 [ -n "$KITTY_WID" ]  && PATCH="$(printf '%s' "$PATCH" | jq -c --arg v "$KITTY_WID"  '. + {kitty_window_id:$v}')"
 [ -n "$KITTY_SOCK" ] && PATCH="$(printf '%s' "$PATCH" | jq -c --arg v "$KITTY_SOCK" '. + {kitty_listen_on:$v}')"
 
