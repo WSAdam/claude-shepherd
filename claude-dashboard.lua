@@ -133,6 +133,9 @@ local prevStatus = {}    -- key -> last refresh's status (for auto-feed transiti
 local prevStale  = {}    -- key -> last refresh's stale flag (for the auto-respawn edge)
 local respawnAttempts = {}  -- projectKey -> auto-respawn count (resets when healthy)
 local escalated  = {}    -- key -> true once we've escalated this approval episode
+local lastProgressTs = {} -- key -> when the transcript last grew (watchdog)
+local transcriptSize = {} -- key -> last seen transcript byte size (watchdog)
+local hungAlerted = {}   -- key -> true once we've flagged this stall episode
 local draining    = {}   -- key -> true: close on the next fresh `done` (Feature F)
 local gitRootByCwd = {}  -- cwd -> resolved git root ("" = not a repo) cache (Feature B)
 local caffeineTick = 0   -- throttles the keep-awake state re-read (F2)
@@ -247,6 +250,14 @@ function FX.readFrom(path, offset)
   f:seek("set", offset)
   local data = f:read("*a"); f:close()
   return data, size
+end
+
+-- Byte size of a file (the watchdog's transcript-growth signal), or nil if
+-- unreadable. Cheap: one seek-to-end, no read.
+function FX.fileSize(path)
+  local f = io.open(path, "rb"); if not f then return nil end
+  local size = f:seek("end"); f:close()
+  return size
 end
 
 -- Token-usage aggregation across active sessions' transcripts. ZERO API cost: pure
@@ -1812,6 +1823,9 @@ local HTML = [[
   /* collision (Feature B): amber ring. Defined BEFORE .escalate so the red
      escalate ring wins when a tile is somehow both. */
   .tile.collide { box-shadow:0 0 0 2px #f5b50a, 0 0 10px #f5b50a; }
+  /* stuck-session watchdog (Feature 8): purple ring. Before .escalate so a
+     red escalate ring still wins when a tile is somehow both. */
+  .tile.hung { box-shadow:0 0 0 2px #a855f7, 0 0 10px #a855f7; }
   .tile.escalate { box-shadow:0 0 0 2px #ef4444, 0 0 12px #ef4444; }
   /* per-session risk badge (Feature E): only shown for med/high */
   .risk { font-size:10px; margin-left:5px; }
@@ -3381,7 +3395,8 @@ local HTML = [[
       if(it.autopilot){ meta = (meta ? meta + " · " : "") + "🛫 autopilot"; }
       if(it.draining){ meta = (meta ? meta + " · " : "") + "⛔ draining"; }
       if(it.collide){ meta = (meta ? meta + " · " : "") + "⚠ shared dir"; }
-      var cls = "tile s-" + st + (it.stale ? " stale" : "") + (it.collide ? " collide" : "") + (it.escalate ? " escalate" : "") + (it.key === selectedKey ? " sel" : "");
+      if(it.hung){ meta = (meta ? meta + " · " : "") + "⏳ stalled"; }
+      var cls = "tile s-" + st + (it.stale ? " stale" : "") + (it.collide ? " collide" : "") + (it.hung ? " hung" : "") + (it.escalate ? " escalate" : "") + (it.key === selectedKey ? " sel" : "");
       return '<div class="'+cls+'" data-key="'+esc(it.key)+'" onclick="selectTile(\''+esc(it.key)+'\')" ondblclick="send(\'focus\',\''+esc(it.key)+'\')" oncontextmenu="showCtx(event,\''+esc(it.key)+'\')" title="Double-click to jump · right-click for more">'
            + '<span class="dot"></span>'
            + '<span class="name">'+esc(it.label || it.name)+(it.group ? ' <span class="gtag">🏷 '+esc(it.group)+'</span>' : '')+'</span>'
@@ -3641,6 +3656,8 @@ function refresh()
   local escSound   = core.config(cfg, "escalation.sound", false) == true
   local escPush    = core.config(cfg, "escalation.push", false) == true
   local escTopic   = tostring(core.config(cfg, "escalation.pushTopic", ""))
+  local hungOn     = core.config(cfg, "escalation.hung.enabled", false) == true
+  local hungMin    = tonumber(core.config(cfg, "escalation.hung.minutes", 5)) or 5
   local apEnabled  = core.config(cfg, "policies.autopilot.enabled", false) == true
   local drainOn    = core.config(cfg, "drain.enabled", false) == true
   local autoRespawnOn  = core.config(cfg, "respawn.auto.enabled", false) == true
@@ -3689,6 +3706,16 @@ function refresh()
           it.context_tokens = core.contextTokens(u)
           it.context_frac = core.contextFractionFor(cfg, u.model or it.model, it.context_tokens)
         end
+      end
+    end
+
+    -- Watchdog (Feature 8): track transcript growth so a stalled `working` session
+    -- (no new output) can be flagged. First sighting seeds lastProgressTs = now.
+    if hungOn and it.transcript_path and not it.stale and it.status == "working" then
+      local sz = FX.fileSize(it.transcript_path)
+      if sz and (transcriptSize[it.key] == nil or sz > transcriptSize[it.key]) then
+        transcriptSize[it.key] = sz
+        lastProgressTs[it.key] = now
       end
     end
 
@@ -3751,6 +3778,27 @@ function refresh()
       end
     end
     if it.status ~= "approval" then escalated[it.key] = nil end
+
+    -- Stuck-session watchdog (Feature 8): flag a `working` session with no transcript
+    -- progress past the threshold; nag once per stall, reusing the escalation
+    -- sound/push prefs. Distinct from approvalStale (which covers waiting on you).
+    if hungOn and core.isHung(it, lastProgressTs[it.key], now, hungMin * 60) then
+      it.hung = true
+      if not hungAlerted[it.key] then
+        hungAlerted[it.key] = true
+        print("[cc-watchdog] " .. it.name .. " stalled (no progress > " .. hungMin .. "m)")
+        if escSound then FX.playSound() end
+        if escPush then FX.push(escTopic, "Claude Shepherd: " .. it.name .. " stalled",
+          "No transcript progress for over " .. hungMin .. " min while working") end
+      end
+    end
+    -- Reset watchdog state whenever a session isn't actively working, so each
+    -- working stint times its own stall from scratch.
+    if it.status ~= "working" then
+      hungAlerted[it.key] = nil
+      lastProgressTs[it.key] = nil
+      transcriptSize[it.key] = nil
+    end
 
     -- Auto-respawn (opt-in): relaunch a session that died unexpectedly. The
     -- per-folder attempt budget resets whenever a session there is seen healthy.

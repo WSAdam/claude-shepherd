@@ -1290,6 +1290,20 @@ function M.approvalStale(item, now, thresholdSec)
   return (now - item.since) > thresholdSec
 end
 
+-- ---- Stuck-session watchdog (working-stall escalation) ---------------------
+-- Is a session stuck mid-turn? True when it's `working`, not stale, and its
+-- transcript hasn't grown for longer than thresholdSec. lastProgressTs is when the
+-- caller last saw the transcript grow (tracked in the dashboard from the bytes the
+-- activity peek already reads). A session with no recorded progress yet
+-- (lastProgressTs nil) isn't flagged -- we only flag a stall we can actually time.
+-- Complements approvalStale: that covers a session waiting on YOU; this covers one
+-- wedged on its own (an infinite tool loop, a hung command) that never escalates.
+function M.isHung(item, lastProgressTs, now, thresholdSec)
+  if not item or item.status ~= "working" or item.stale then return false end
+  if not lastProgressTs then return false end
+  return ((tonumber(now) or 0) - (tonumber(lastProgressTs) or 0)) > (tonumber(thresholdSec) or 0)
+end
+
 -- ---- Image paste (Step 5) --------------------------------------------------
 -- Parse a clipboard image data URL ("data:image/png;base64,...."), returning
 -- its mime, a normalized lowercase file extension, and the base64 payload.

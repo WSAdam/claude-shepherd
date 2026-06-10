@@ -1361,5 +1361,19 @@ do
   }, 3600, "blocked", { maxBlock = 1800 })[1].value, 0)
 end
 
+-- ---- isHung: stalled `working` session watchdog ----------------------------
+do
+  local now = 10000
+  local working = { status = "working" }
+  eq("hung: working + stalled past threshold", core.isHung(working, now - 400, now, 300), true)
+  eq("hung: working + recent progress", core.isHung(working, now - 100, now, 300), false)
+  eq("hung: exactly at threshold not yet hung", core.isHung(working, now - 300, now, 300), false)
+  eq("hung: not working (idle) -> false", core.isHung({ status = "idle" }, now - 400, now, 300), false)
+  eq("hung: not working (approval) -> false", core.isHung({ status = "approval" }, now - 400, now, 300), false)
+  eq("hung: stale tile -> false", core.isHung({ status = "working", stale = true }, now - 400, now, 300), false)
+  eq("hung: no progress timestamp yet -> false", core.isHung(working, nil, now, 300), false)
+  eq("hung: nil item -> false", core.isHung(nil, now - 400, now, 300), false)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

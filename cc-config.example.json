@@ -11,7 +11,12 @@
     "minutes": 5,
     "sound": false,
     "push": false,
-    "pushTopic": ""
+    "pushTopic": "",
+    "hung": {
+      "_comment": "Stuck-session watchdog (Feature 8). When a session stays 'working' with no transcript growth for `minutes`, flag the tile (⏳ purple ring) and nag once per stall using the same sound/push prefs above. Complements the approval-wait escalation: that fires when a session waits on YOU; this fires when one wedges on its own (an infinite tool loop, a hung command). OFF by default.",
+      "enabled": false,
+      "minutes": 5
+    }
   },
 
   "ledger": {
