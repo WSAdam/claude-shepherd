@@ -4,6 +4,79 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-10 — Fleet-scale console + adversarial bug sweep
+
+### Added
+- **Tile search (🔍).** A magnifying-glass header button reveals a filter bar that
+  scopes the live grid by free-text, token-AND over each session's display label, name,
+  cwd, projectKey, status, and group. Empty query shows all. Pure `core.filterTiles`,
+  mirrored in the panel JS so typing stays instant (the same untested-mirror idiom as
+  `fmtDur`/`barLevel`).
+- **Session groups.** Right-click → **Set group…** tags a session into a named cohort
+  (e.g. "backend", "refactor"), keyed by the stable projectKey like relabels so it
+  survives close/reopen and a new session in the same folder inherits it. Persisted to
+  `~/.claude/cc-groups.json`. A filter-chip row appears only when groups exist; clicking
+  a chip scopes the grid (composing with search). Pure `core.applyGroups`/`groupNames`/
+  `setGroup`.
+- **Bulk fleet actions.** A "Fleet" bar acts on the **visible** (post search/group) set
+  at once — approve every waiting session, stop every working one (confirm), or broadcast
+  a nudge (prompt). Counts shown live; buttons appear only when relevant. Targets are
+  re-derived server-side from the keys the panel shows (WYSIWYG). Pure `core.selectActionable`
+  driven by a single-source `core.BULK_RULES` injected into the panel so the count can't
+  drift from what Lua acts on. nudge excludes `approval` (it submits — would corrupt a y/n).
+- **Per-session timeline (📜).** A detail-panel button opens the audit overlay scoped to
+  the selected session's chronological history (timeline view), reusing the overlay +
+  `filterLedger`/`renderNarrative`. Pure `core.sessionTimeline`. Needs the ledger enabled.
+- **Auto-respawn (opt-in, bounded).** When `respawn.auto.enabled` is on, a session that
+  wasn't intentionally closed/drained and goes stale (crash, kill, lost terminal) is
+  relaunched from its cwd once per stale edge, capped by `maxRetries` **per launch
+  folder**; the budget resets when a session there runs healthy again (the ~90s stale
+  latency is the backoff). Pure `core.shouldAutoRespawn` + `core.stepAutoRespawn` (the
+  per-folder bookkeeping, charged only on a real relaunch). Off by default.
+- **Insights sparklines.** The 📊 overlay gains a "Trends — last 24h (hourly)" section
+  with four inline-SVG trend lines: time blocked on you, fleet activity (prompts +
+  tool-requests), active sessions, and denial rate. Pure `core.bucketEvents` (a per-metric
+  handler table); the blocked metric pairs request→decision **per session** and uses a
+  maxBlock window lookback. Ledger-gated.
+- **Stuck-session watchdog.** When `escalation.hung.enabled` is on, a session that stays
+  `working` with no transcript growth past `minutes` is flagged (⏳ + a purple ring) and
+  nags once per stall via the existing escalation sound/push prefs — complementing the
+  approval-wait escalation. Pure `core.isHung`/`trackProgress`/`applyProgress`/
+  `watchdogShouldReset` (re-armed on progress so it nags once **per stall**, not per
+  stint); growth tracked via a cheap `FX.fileSize` seek. Off by default.
+
+### Fixed
+Most of these came from an adversarial multi-agent bug sweep (per-flow finders →
+adversarial verifiers that re-ran each repro), the rest from leaderboard review of the
+feature commits:
+- **sessionRisk crash on string thresholds (major).** A quoted-number `risk.thresholds`
+  from config hit a Lua number↔string compare and threw inside the 1s refresh loop,
+  freezing the whole panel. Thresholds are now coerced via `tonumber` like the weights;
+  the risk band is also derived from the **rounded** score so the number and its color
+  always agree.
+- **Stale `pending.ask` leak.** A new pending without an `ask` (a Write PermissionRequest
+  after an AskUserQuestion) inherited the old `pending.ask` via jq's recursive merge,
+  leaking dead option buttons onto an unrelated approval tile. cc-status.sh now clears the
+  old pending before the merge (a replacement is authoritative).
+- **`staleDuplicateKeys` cross-prune.** /clear-ghost detection grouped by the basename
+  `name`, so two sessions in different folders sharing a basename cross-pruned — silently
+  swallowing the dead one's auto-respawn. Now keyed by the stable projectKey (cwd fallback).
+- **`mergeHooks` over-broad match.** A bare `cc-` substring made any user hook containing
+  "cc-" (e.g. their own `cc-notify.sh`) suppress wiring Shepherd's hooks for that event.
+  Now matches the exact `core.OUR_HOOK_SCRIPTS` basenames; `install.sh`'s jq mirrors it.
+- **Watchdog re-alert lost after a resume.** "Nag once per stall" had degraded to "once
+  per working stint" — `applyProgress` now clears the alert flag on progress (re-arm) and
+  preserves it on a held tick.
+- **Blocked sparkline session-blindness.** It tracked one pending request across the
+  fleet-wide stream, so concurrent sessions mis-paired and under-reported blocked time
+  (disagreeing with the per-session headline). Now keyed per session_id.
+
+### Tests
+- Suite grew from ~475 to **641 core + 103 ui + bash** checks, all green. Every new pure
+  function and every bug fix landed with regression tests (including a two-session
+  blocked-pairing case, an install.sh jq-mirror case, and a watchdog stall→resume→stall
+  re-alert replay).
+
 ## 2026-06-10
 
 ### Added

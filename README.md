@@ -141,6 +141,22 @@ Two paths, and it matters which one your sessions use:
 > For delivering work, **Queue** stores it reliably; feeding/nudge into the VS Code
 > extension's chat input is the fragile part.
 
+## Fleet navigation & bulk actions
+
+For supervising many sessions at once (always on; nothing automatic):
+
+- **🔍 Search** — the magnifying-glass header button reveals a filter bar that scopes the
+  grid as you type (token-AND over each session's name, project, status, and group).
+- **Groups** — right-click → **Set group…** tags a session into a named cohort (kept by
+  the stable project identity, so it survives close/reopen, in `~/.claude/cc-groups.json`).
+  When groups exist, a chip row lets you scope the grid to one group (composes with search).
+- **Bulk actions** — a **Fleet** bar acts on whatever's currently visible (post
+  search/group) at once: **Approve all** waiting sessions, **Stop all** working ones
+  (confirm), or **Nudge all** (broadcast text). Buttons show live counts and appear only
+  when there's something to act on; bulk nudge skips sessions sitting at an approval prompt.
+- **📜 Timeline** — the detail-panel **Timeline** button opens the audit overlay scoped to
+  that one session's chronological history (needs the ledger enabled).
+
 ## Global hotkeys
 
 Act on the session that needs you without touching the panel (configurable near
@@ -350,15 +366,24 @@ These extend the panel without changing any existing behavior when left off:
 - **drain** — a right-click **Drain (finish turn, then close)** action: waits for the
   current turn to finish, then closes (closes immediately if already idle/done).
 - **respawn** — a right-click **Respawn from cwd** action that relaunches a dead/stale
-  session from its last working dir + matched provider + editor.
+  session from its last working dir + matched provider + editor. `respawn.auto.enabled`
+  adds **automatic** respawn: a session that wasn't intentionally closed/drained and goes
+  stale (crash, kill, lost terminal) is relaunched once per stale edge, capped by
+  `respawn.auto.maxRetries` **per launch folder** (the budget resets when a session there
+  runs healthy again; the ~90s stale-detection latency is the backoff).
+- **escalation.hung** — a **stuck-session watchdog**: a session that stays `working` with
+  no transcript growth for `escalation.hung.minutes` gets a ⏳ + purple ring and nags once
+  per stall (reusing the escalation sound/push prefs). Complements the approval-wait
+  escalation — that covers a session waiting on *you*; this covers one wedged on its own.
 - **insights** — the 📊 toolbar button opens a read-only **Fleet insights** view that
   aggregates the ledger (turns per session, approval/denial rates, decision provenance,
-  and the total time the fleet spent blocked on you). Always available like the audit
-  view; shows zeros until the ledger is enabled.
+  the total time the fleet spent blocked on you, and **24h hourly trend sparklines**).
+  Always available like the audit view; shows zeros until the ledger is enabled.
 
 Per-session gating, drain, and respawn use these state dirs / config keys:
-`~/.claude/cc-gate-tools/<key>`, and `risk` / `collision` / `drain` / `respawn` /
-`insights` blocks in `cc-config.json` (see [cc-config.example.json](cc-config.example.json)).
+`~/.claude/cc-gate-tools/<key>`, and `risk` / `collision` / `drain` / `respawn`
+(incl. `respawn.auto`) / `escalation.hung` / `insights` blocks in `cc-config.json`
+(see [cc-config.example.json](cc-config.example.json)).
 
 ## Audit log & insights
 
@@ -377,8 +402,9 @@ Two header overlays read fleet activity. Both are **local and cost no model toke
 - **📊 Fleet insights** — a read-only aggregate of the ledger: turns per session,
   approval/denial rates, decision provenance, most-active sessions, and the total time
   the fleet spent **blocked on you** (the gap from each request to its human/timeout
-  answer, capped by `insights.maxBlockSeconds` so an overnight idle isn't counted).
-  Always available; shows zeros until the ledger is enabled.
+  answer, capped by `insights.maxBlockSeconds` so an overnight idle isn't counted). A
+  **Trends — last 24h (hourly)** section adds four sparklines: time blocked on you, fleet
+  activity, active sessions, and denial rate. Always available; zeros until the ledger is on.
 
 ## Install (about 5 minutes)
 

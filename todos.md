@@ -48,6 +48,19 @@ remaining items. Full per-round detail is in CHANGELOG.md and git history.
   right-click "finish turn then close" and "relaunch a dead session from cwd". Off by default.
 - **Launch on startup** (`hs.autoLaunch`, on by default first run) + **`make dock`**
   (`app/add-to-dock.sh`) to pin Shepherd.app to the Dock.
+- **Fleet-scale console**: **tile search** (🔍, `core.filterTiles`), **session groups**
+  (`core.applyGroups`/`groupNames`/`setGroup`, `cc-groups.json`), **bulk actions**
+  (approve-all/stop-all/nudge-all over the visible set; `core.selectActionable` +
+  single-source `core.BULK_RULES`), **per-session timeline** (`core.sessionTimeline`,
+  reuses the audit overlay), **auto-respawn** (`core.shouldAutoRespawn`/`stepAutoRespawn`,
+  per-folder budget; `respawn.auto.enabled`), **insights sparklines** (`core.bucketEvents`,
+  4 metrics), **stuck-session watchdog** (`core.isHung`/`trackProgress`/`applyProgress`;
+  `escalation.hung`). All off-by-default where they automate.
+- **Adversarial bug sweep** (multi-agent: per-flow finders → verifiers that re-ran each
+  repro): fixed a sessionRisk string-threshold crash (froze refresh), a `pending.ask`
+  merge leak, a `staleDuplicateKeys` cross-project prune, a `mergeHooks` over-broad
+  `cc-` match, a watchdog re-alert miss, and a session-blind blocked sparkline. Suite
+  now **641 core + 103 ui + bash**, all green.
 
 ## TODO
 - **Verify on a real Kitty box** (the one thing that needs the hardware): the `core.KITTY_KEY`
