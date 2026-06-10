@@ -233,6 +233,13 @@ if [ -n "$SET_PENDING" ]; then
   fi
 fi
 
+# A new pending fully REPLACES the old one. cc_merge applies the patch with jq's
+# recursive `*`, which preserves an object key the patch doesn't carry -- so a new
+# pending WITHOUT an `ask` (e.g. a Write PermissionRequest following an
+# AskUserQuestion) would otherwise leave the stale `pending.ask` behind, leaking dead
+# option buttons onto an unrelated approval tile. Clear the old pending first so the
+# fresh one is authoritative.
+[ -n "$SET_PENDING" ] && cc_del_field "$KEY" "pending"
 cc_merge "$KEY" "$PATCH"
 [ -n "$CLEAR_PENDING" ] && cc_del_field "$KEY" "pending"
 

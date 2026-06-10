@@ -36,4 +36,13 @@ ev pretooluse '{"session_id":"ask1","cwd":"/U/x/proj","tool_name":"Bash","tool_i
 assert_json "plain pretooluse -> working"        "$F" '.status' "working"
 assert_json "plain pretooluse clears ask"        "$F" '.pending' "null"
 
+# F-001 (bug sweep): a new pending that has NO ask (a Write PermissionRequest) must
+# fully REPLACE a prior AskUserQuestion pending, not inherit its stale .pending.ask
+# via jq's recursive merge (which would leak dead option buttons onto the Write tile).
+ev pretooluse "$ASK"                              # re-arm an Ask pending
+assert_json "re-armed ask is present"            "$F" '.pending|has("ask")' "true"
+ev permissionrequest '{"session_id":"ask1","cwd":"/U/x/proj","tool_name":"Write","tool_input":{"file_path":"/U/x/y.txt"}}'
+assert_json "F-001: pending summary replaced by the Write" "$F" '.pending.summary' "/U/x/y.txt"
+assert_json "F-001: stale ask dropped on pending replace"  "$F" '.pending|has("ask")' "false"
+
 finish
