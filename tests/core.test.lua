@@ -1391,6 +1391,13 @@ do
   local rok2 = core.stepAutoRespawn(a7, dead("ok2", "s2"), { enabled = true, maxRetries = 2, wasStale = false, canRespawn = true })
   eq("step: second respawnable edge still spawns (under cap)", rok2.spawn, true)
   eq("step: second respawnable edge accumulates the budget", a7["pf"], 2)
+  -- the cap firing: a third edge at maxRetries=2 is suppressed. The cap lives inside
+  -- shouldAutoRespawn (attempts < cap), so a capped edge reports wouldFire=false and
+  -- never over-charges. This brackets the accumulate->cap boundary.
+  local rok3 = core.stepAutoRespawn(a7, dead("ok3", "s3"), { enabled = true, maxRetries = 2, wasStale = false, canRespawn = true })
+  eq("step: respawnable edge suppressed once cap is reached", rok3.spawn, false)
+  eq("step: capped edge reports wouldFire=false (cap is part of the gate)", rok3.wouldFire, false)
+  eq("step: capped edge does NOT over-charge the budget", a7["pf"], 2)
 end
 
 -- ---- bucketEvents: time-series sparkline buckets ---------------------------
@@ -1493,6 +1500,23 @@ do
   eq("watchdog-reset: done -> reset", core.watchdogShouldReset("done", false), true)
   eq("watchdog-reset: working + stale -> reset (no resume false-trip)", core.watchdogShouldReset("working", true), true)
   eq("watchdog-reset: working + healthy -> keep timing", core.watchdogShouldReset("working", false), false)
+
+  -- applyProgress: merges trackProgress onto a watchdog entry, PRESERVING `alerted`
+  -- (the behavior the dashboard's in-place mutation provides, untestable via trackProgress).
+  local wp = { size = 10, ts = 1000, alerted = true }
+  local rp = core.applyProgress(wp, 50, 2000)
+  eq("applyProgress: growth updates size", rp.size, 50)
+  eq("applyProgress: growth rebases ts", rp.ts, 2000)
+  eq("applyProgress: preserves alerted across a growth tick", rp.alerted, true)
+  check("applyProgress: mutates-and-returns the same entry", rp == wp)
+  local wp2 = { size = 50, ts = 2000, alerted = true }
+  local rp2 = core.applyProgress(wp2, 50, 3000)
+  eq("applyProgress: unchanged holds ts", rp2.ts, 2000)
+  eq("applyProgress: unchanged keeps alerted", rp2.alerted, true)
+  local rp3 = core.applyProgress(nil, 100, 4000)
+  eq("applyProgress: nil entry seeds size", rp3.size, 100)
+  eq("applyProgress: nil entry seeds ts", rp3.ts, 4000)
+  check("applyProgress: nil entry has no alerted", rp3.alerted == nil)
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))

@@ -1365,6 +1365,17 @@ function M.trackProgress(prevSize, prevTs, sz, now)
   return { size = prevSize, ts = prevTs }                          -- unchanged: keep timing
 end
 
+-- Merge a trackProgress update onto a watchdog entry, PRESERVING its stall-alert
+-- flag. The dashboard stores the result back at watchdog[key]. Mutates-and-returns
+-- `w` when it exists (so `alerted` survives a progress tick instead of being dropped
+-- and re-threaded); allocates a fresh { size, ts } when w is nil. NOTE: unlike
+-- trackProgress, this MUTATES its first arg.
+function M.applyProgress(w, sz, now)
+  local p = M.trackProgress(w and w.size, w and w.ts, sz, now)
+  if w then w.size, w.ts = p.size, p.ts; return w end
+  return { size = p.size, ts = p.ts }
+end
+
 -- Should the watchdog state for a session be cleared this tick? Reset when it isn't
 -- actively `working`, and also while it's stale: the growth path is skipped during
 -- stale, so a frozen lastProgressTs must not survive to flag hung the instant it

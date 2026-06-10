@@ -3718,12 +3718,7 @@ function refresh()
     -- holds the timer when the size is unchanged.
     if hungOn and it.transcript_path and not it.stale and it.status == "working" then
       local sz = FX.fileSize(it.transcript_path)
-      if sz then
-        local w = watchdog[it.key]
-        local p = core.trackProgress(w and w.size, w and w.ts, sz, now)
-        if w then w.size, w.ts = p.size, p.ts   -- mutate in place; `alerted` survives
-        else watchdog[it.key] = { size = p.size, ts = p.ts } end
-      end
+      if sz then watchdog[it.key] = core.applyProgress(watchdog[it.key], sz, now) end
     end
 
     -- Autopilot badge (active only while the feature is enabled in config).
