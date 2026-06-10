@@ -734,9 +734,10 @@ end
 --                 deliberately the SAME event set as activity (a session whose only
 --                 event in an hour is a trailing decision wasn't "running" that hour)
 --   denialRate -> deny / total-decisions per bucket (0..1; 0 when no decisions)
---   blocked    -> "time blocked on you" per bucket: each tool_request->resolving
---                 human/timeout decision gap (<= ctx.opts.maxBlock) credited to the
---                 bucket where the wait STARTED (same pairing as blockedSeconds).
+--   blocked    -> "time blocked on you" per bucket: each session's tool_request -> its
+--                 resolving human/timeout decision gap (<= ctx.opts.maxBlock) credited
+--                 to the bucket where the wait STARTED. Paired PER SESSION (the feed is
+--                 fleet-wide), mirroring fleetStats running blockedSeconds per session.
 local BUCKET_METRICS = {
   activity = function(evs, series, idx)
     for _, e in ipairs(evs) do
@@ -771,18 +772,25 @@ local BUCKET_METRICS = {
   end,
   blocked = function(evs, series, idx, ctx)
     local maxBlock = tonumber(ctx.opts.maxBlock) or 1800
-    local lastReqTs = nil
+    -- Pair PER SESSION. The insights feed is fleet-wide (filterLedger with no session
+    -- filter), so a single pending-request slot would let one session's request
+    -- overwrite another's and mis-credit the gap -- under-reporting blocked time and
+    -- disagreeing with the per-session approvalBlockedSeconds headline. Keying by
+    -- session_id mirrors fleetStats, which runs blockedSeconds once per isolated session.
+    local lastReq = {}
     for _, e in ipairs(evs) do
+      local sid = e.session_id or "?"
       if e.type == "tool_request" then
-        lastReqTs = tonumber(e.ts)
+        lastReq[sid] = tonumber(e.ts)
       elseif e.type == "decision" then
-        if lastReqTs and (e.by == "human" or e.by == "timeout-fallback") then
-          local gap = (tonumber(e.ts) or 0) - lastReqTs
+        local req = lastReq[sid]
+        if req and (e.by == "human" or e.by == "timeout-fallback") then
+          local gap = (tonumber(e.ts) or 0) - req
           if gap > 0 and gap <= maxBlock then
-            series[idx(lastReqTs)].value = series[idx(lastReqTs)].value + gap
+            series[idx(req)].value = series[idx(req)].value + gap
           end
         end
-        lastReqTs = nil  -- ANY decision resolves the pending request (mirrors blockedSeconds)
+        lastReq[sid] = nil  -- ANY decision resolves THIS session's pending request
       end
     end
   end,

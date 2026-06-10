@@ -1519,6 +1519,21 @@ do
      { ts = 200,  type = "decision", by = "auto",  outcome = "allow" },
      { ts = 1000, type = "decision", by = "human", outcome = "allow" },
   }, 3600, "blocked")[1].value, 0)
+
+  -- R2-001 (round-2 sweep): blocked pairs PER SESSION. The insights feed is fleet-wide,
+  -- so two sessions waiting in the same hour must each pair its OWN request -> decision
+  -- (a single pending slot would let B's request overwrite A's and lose both true gaps).
+  local concurrent = {
+    { ts = 100, type = "tool_request", session_id = "A" },
+    { ts = 120, type = "tool_request", session_id = "B" },
+    { ts = 160, type = "decision", by = "human", outcome = "allow", session_id = "A" },  -- A waited 60
+    { ts = 200, type = "decision", by = "human", outcome = "allow", session_id = "B" },  -- B waited 80
+  }
+  local cb = core.bucketEvents(concurrent, 3600, "blocked", { maxBlock = 1800 })
+  eq("bucket: blocked pairs per session (A 60 + B 80)", cb[1].value, 140)
+  -- and the sparkline now AGREES with the per-session approvalBlockedSeconds headline
+  eq("bucket: blocked sparkline agrees with the fleetStats headline",
+     cb[1].value, core.fleetStats(concurrent, { maxBlock = 1800 }).approvalBlockedSeconds)
 end
 
 -- ---- isHung: stalled `working` session watchdog ----------------------------
