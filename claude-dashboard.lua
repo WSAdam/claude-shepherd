@@ -1438,6 +1438,34 @@ local function handleBridgeMsg(msg)
     pcall(function() hs.alert.show("Claude Shepherd: sent a " .. #res.events .. "-event review to " .. tostring(target.name)) end)
     return
   end
+  if a == "bulk" then
+    -- Fleet-wide action over the keys the panel currently shows (post search/group
+    -- filter -> WYSIWYG). cc-core picks which of those the action targets (by status),
+    -- then each routes through the same handleAction the per-tile buttons use.
+    local action = tostring(payload.v or "")
+    local keys = (type(payload.keys) == "table") and payload.keys or {}
+    local visible = {}
+    for _, k in ipairs(keys) do
+      local it = byKey[tostring(k)]
+      if it then visible[#visible + 1] = it end
+    end
+    local text = (payload.text and tostring(payload.text) ~= "") and tostring(payload.text) or nil
+    local n = 0
+    for _, k in ipairs(core.selectActionable(visible, action)) do
+      local it = byKey[k]
+      if it then
+        core.handleAction(FX, it, action, text)
+        ledgerFor(it, { type = "bulk_action", action = action })
+        n = n + 1
+      end
+    end
+    print("[cc-bulk] " .. action .. " -> " .. n .. " session(s)")
+    if n > 0 then
+      pcall(function() hs.alert.show("Claude Shepherd: " .. action .. " → " .. n .. " session(s)") end)
+    end
+    refresh()
+    return
+  end
   local item = byKey[tostring(payload.v or "")]
   if not item then
     print("[cc-dashboard] action '" .. a .. "' for unknown key " .. tostring(payload.v))
@@ -1806,6 +1834,15 @@ local HTML = [[
   .gchip:hover { background:#272a35; }
   .gchip.active { border-color:#6ea8fe; color:#cfe0f5; background:#1c2536; }
   .gtag { font-size:10px; color:#8a8d99; margin-left:5px; }
+  /* bulk fleet actions (shown only when actionable sessions exist) */
+  #bulkbar { display:none; align-items:center; flex-wrap:wrap; gap:6px; padding:6px 10px; border-bottom:1px solid #2c2f3a; }
+  #bulkbar.show { display:flex; }
+  .bulk-lbl { font-size:11px; color:#8a8d99; text-transform:uppercase; letter-spacing:.04em; }
+  #bulkbar button { background:#21232c; color:#cfd2db; border:1px solid #2c2f3a; border-radius:8px;
+                    font-size:12px; padding:3px 10px; cursor:pointer; }
+  #bulkbar button:hover { background:#272a35; }
+  #bulkbar button.bulk-ap { border-color:#22c55e; color:#7ee2a0; }
+  #bulkbar button.bulk-st { border-color:#ef4444; color:#f3a1a1; }
 
   /* status colors, shared by all themes via the --c variable */
   .s-idle     { --c:#6b7280; }
@@ -2028,6 +2065,7 @@ local HTML = [[
     <button onclick="hideBars()">Cancel</button>
   </div>
   <div id="groupchips"></div>
+  <div id="bulkbar"></div>
   <div id="grid"></div>
   <div id="empty">Waiting for Claude Code sessions...<br>Start a session in any project.</div>
 
@@ -2467,6 +2505,49 @@ local HTML = [[
         chips += '<span class="gchip'+(activeGroup===g?" active":"")+'" onclick="setActiveGroup('+i+')">'+esc(g)+'</span>';
       });
       bar.innerHTML = chips; bar.classList.add("show");
+    }
+
+    // ---- Bulk fleet actions (act on the visible set at once) ----------------
+    // JS twin of core.selectActionable (target by status) so the bar can show live
+    // counts; the Lua side re-derives the targets from the keys we send (WYSIWYG).
+    function actionableKeys(action, items){
+      return (items || []).filter(function(it){
+        if(it.stale || !it.key) return false;
+        if(action === "approve") return it.status === "approval";
+        if(action === "stop") return it.status === "working";
+        if(action === "nudge") return true;
+        return false;
+      }).map(function(it){ return it.key; });
+    }
+    function sendBulk(action, keys, text){
+      try { window.webkit.messageHandlers.cc.postMessage(JSON.stringify({a:"bulk", v:action, text:text||"", keys:keys})); }
+      catch(e){ console.log("bulk send error", e); }
+    }
+    function bulkAction(action){
+      var keys = actionableKeys(action, visibleItems());
+      if(!keys.length) return;
+      var text = "";
+      if(action === "stop"){
+        if(!confirm("Stop " + keys.length + " working session(s)? Sends Escape to interrupt each.")) return;
+      } else if(action === "nudge"){
+        text = prompt("Broadcast a nudge to " + keys.length + " session(s):", "");
+        if(text === null || !text.trim()) return;
+      }
+      sendBulk(action, keys, text);
+    }
+    function renderBulkBar(vis){
+      var bar = document.getElementById("bulkbar");
+      var nAp = actionableKeys("approve", vis).length;
+      var nSt = actionableKeys("stop", vis).length;
+      var nLv = actionableKeys("nudge", vis).length;
+      // approve-all earns its place at 1 (clearing an approval backlog is the point);
+      // stop/nudge need 2+, since acting on one session is the per-tile button's job.
+      if(!(nAp >= 1 || nSt >= 2 || nLv >= 2)){ bar.classList.remove("show"); bar.innerHTML = ""; return; }
+      var html = '<span class="bulk-lbl">Fleet</span>';
+      if(nAp >= 1) html += '<button class="bulk-ap" onclick="bulkAction(\'approve\')">✅ Approve all (' + nAp + ')</button>';
+      if(nSt >= 2) html += '<button class="bulk-st" onclick="bulkAction(\'stop\')">■ Stop all (' + nSt + ')</button>';
+      if(nLv >= 2) html += '<button onclick="bulkAction(\'nudge\')">👉 Nudge all (' + nLv + ')</button>';
+      bar.innerHTML = html; bar.classList.add("show");
     }
     function toggleSearch(){
       var b = document.getElementById("searchbar");
@@ -3233,9 +3314,10 @@ local HTML = [[
       renderGroupChips();  // refresh the group filter row from the latest data
       if(lastItems.length === 0){
         grid.innerHTML = ""; empty.innerHTML = EMPTY_WAITING; empty.style.display = "block";
-        updateSearchCount(0, 0); return;
+        renderBulkBar([]); updateSearchCount(0, 0); return;
       }
       var vis = visibleItems();
+      renderBulkBar(vis);  // fleet-action buttons reflect the visible (filtered) set
       if(vis.length === 0){
         grid.innerHTML = ""; empty.innerHTML = "No sessions match your filter.";
         empty.style.display = "block"; updateSearchCount(0, lastItems.length); return;

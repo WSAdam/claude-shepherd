@@ -1234,5 +1234,30 @@ do
   eq("groups: nil map -> all ungrouped", list[1].group, nil)
 end
 
+-- ---- selectActionable: which keys a bulk action targets --------------------
+do
+  local list = {
+    { key = "w1", status = "approval", gate = "waiting" },        -- needs decision (headless)
+    { key = "n1", status = "approval" },                          -- needs decision (native)
+    { key = "wk", status = "working" },
+    { key = "wk2", status = "working" },
+    { key = "id", status = "idle" },
+    { key = "dn", status = "done" },
+    { key = "st", status = "approval", stale = true },            -- stale -> never targeted
+  }
+  local ap = core.selectActionable(list, "approve")
+  eq("bulk approve: count (excludes stale)", #ap, 2)
+  check("bulk approve: includes headless waiter", ap[1] == "w1")
+  check("bulk approve: includes native waiter", ap[2] == "n1")
+  local stp = core.selectActionable(list, "stop")
+  eq("bulk stop: only working", #stp, 2)
+  check("bulk stop: working keys", stp[1] == "wk" and stp[2] == "wk2")
+  local ng = core.selectActionable(list, "nudge")
+  eq("bulk nudge: all live (non-stale)", #ng, 6)
+  eq("bulk: unknown action -> none", #core.selectActionable(list, "bogus"), 0)
+  eq("bulk: nil list -> none", #core.selectActionable(nil, "approve"), 0)
+  eq("bulk: item without key skipped", #core.selectActionable({ { status = "approval" } }, "approve"), 0)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

@@ -346,6 +346,31 @@ function M.setGroup(groupsByKey, key, value)
   return out
 end
 
+-- ---- Bulk fleet actions ----------------------------------------------------
+-- Which session keys a fleet-wide bulk action targets, drawn from an
+-- ALREADY-VISIBLE list (the panel passes the keys currently shown, post
+-- search/group filter, so a bulk action is WYSIWYG). Each routes through
+-- handleAction on the dashboard side. Targets by status so a bulk "approve" can't
+-- mis-fire an Enter into a session that isn't actually waiting:
+--   approve -> sessions awaiting a decision   (status "approval")
+--   stop    -> sessions mid-turn              (status "working")
+--   nudge   -> all live (non-stale) sessions  (broadcast text)
+-- Stale tiles are never targeted (a dead window can't act). Unknown action -> {}.
+function M.selectActionable(list, action)
+  local out = {}
+  for _, it in ipairs(list or {}) do
+    if it.key and not it.stale then
+      local ok = false
+      if action == "approve" then ok = (it.status == "approval")
+      elseif action == "stop" then ok = (it.status == "working")
+      elseif action == "nudge" then ok = true
+      end
+      if ok then out[#out + 1] = it.key end
+    end
+  end
+  return out
+end
+
 -- ---- Improve button (leaderboard improvement cards) ------------------------
 
 -- Parse `git remote get-url origin` output down to "owner/repo" -- mirrors the sed
