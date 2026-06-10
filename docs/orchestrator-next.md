@@ -6,7 +6,9 @@ auto-allow/deny) are built and live; **4c-E (project routing)** is the only defe
 piece. This file is retained as the original design rationale — the authoritative,
 **current** config schema is [cc-config.example.json](../cc-config.example.json), and
 CHANGELOG.md records what has shipped since (incl. the audit ledger, fleet insights,
-collision warning, per-session gating, risk score, and drain/respawn).
+collision warning, per-session gating, risk score, drain/respawn, and the fleet-scale
+console — tile search, session groups, bulk actions, per-session timeline, auto-respawn,
+insights sparklines, and the stuck-session watchdog).
 
 ## Goal
 
