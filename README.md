@@ -48,8 +48,8 @@ Claude Code hooks ──► cc-status.sh ──► ~/.claude/cc-status/<session_
 ## Control actions
 
 The **header** has **+ New** (opens the new-session modal — see "Spawn"), a **☕
-keep-awake toggle** (see "Keep this Mac awake"), the **⚙ Settings** panel, and a
-theme switcher.
+keep-awake toggle** (see "Keep this Mac awake"), **📊 Fleet insights** and **📜 Audit
+ledger** overlays (see "Audit log & insights"), the **⚙ Settings** panel, and a theme switcher.
 
 **Single-click** a tile to select it (opens the detail panel). **Double-click** a
 tile to **jump** straight to its window. **Right-click** a tile for a context menu:
@@ -66,6 +66,10 @@ tile to **jump** straight to its window. **Right-click** a tile for a context me
   in the session (same effect as the detail-panel buttons).
 - **Close instance** — confirm, then best-effort close the editor window (⌘⇧W) and
   remove the tile (the project's saved label is kept for next time).
+- **Drain (finish turn, then close)** — *shown when `drain.enabled`*: wait for the
+  session to finish its in-flight turn, then close it (closes now if already idle/done).
+- **Respawn from cwd** — *shown when `respawn.enabled`*: relaunch a dead/stale session
+  from its last working dir + matched provider + editor.
 
 The detail panel has:
 
@@ -84,6 +88,9 @@ The detail panel has:
 - **Mode** dropdown — switch the permission mode (Default / Accept edits / Plan) live via
   Shift+Tab; reliable on Kitty, best-effort in the VS Code extension (its switcher is mouse-only).
   The detail also shows badges for the detected **editor**, current **permission mode**, and **effort**.
+- **Model** dropdown — switch the model live within the session's backend (`/model`).
+- **Gate** dropdown — per-session tool gating (Default / All / None / Custom): override the
+  fleet `gate.tools` for just this session. Only enforced while headless approvals are armed.
 - **Nudge box** — a multi-line input: **Enter** sends, **Shift+Enter** adds a newline
   (mirrors the Claude chat), so a pasted multi-item list arrives intact. **Paste an
   image** and it's attached as a chip; **Send** delivers text and/or image via the
@@ -281,6 +288,12 @@ read it (the panel live within ~1s; the gate on the next hook fire).
   "focus":      { "popOnComplete": false, "popOnApproval": false },
   "spawn":      { "editor": "terminal", "live": false, "kittyRemote": true, "kittyAutoRemote": true },
   "gate":       { "tools": "Bash Write Edit MultiEdit NotebookEdit" },
+  "ledger":     { "enabled": false, "retentionDays": 30, "maxTotalMB": 0 },
+  "risk":       { "enabled": false, "thresholds": { "med": 34, "high": 67, "staleSeconds": 300 } },
+  "collision":  { "enabled": false, "useGitRoot": false },
+  "drain":      { "enabled": false },
+  "respawn":    { "enabled": false },
+  "insights":   { "maxBlockSeconds": 1800 },
   "policies": {
     "approveRepeats": false,
     "autopilot": { "enabled": false, "minutes": 15 },
@@ -346,6 +359,26 @@ These extend the panel without changing any existing behavior when left off:
 Per-session gating, drain, and respawn use these state dirs / config keys:
 `~/.claude/cc-gate-tools/<key>`, and `risk` / `collision` / `drain` / `respawn` /
 `insights` blocks in `cc-config.json` (see [cc-config.example.json](cc-config.example.json)).
+
+## Audit log & insights
+
+Two header overlays read fleet activity. Both are **local and cost no model tokens**.
+
+- **📜 Audit ledger** — an opt-in, append-only JSONL record at
+  `~/.claude/cc-ledger/YYYY-MM-DD.jsonl` (one event per line): session start/end,
+  prompts, tool requests, gate **decisions** (with provenance — autoDeny / autoAllow /
+  autopilot / approveRepeats / human / timeout), mode/model/effort changes, nudges,
+  clears, compacts, spawns, relabels. **Off by default** — enable `ledger.enabled` (it's
+  the source of data for everything below). The overlay has **Rows** + **Timeline** tabs,
+  filters by session/type/date, and per-row **redact**, **export**, and **purge**.
+  Retention is GC'd ~hourly by `ledger.retentionDays` / `ledger.maxTotalMB`. A **Review
+  activity** button sends the current slice to the selected session as a read-only
+  governance prompt (assess risky/odd actions — never edits).
+- **📊 Fleet insights** — a read-only aggregate of the ledger: turns per session,
+  approval/denial rates, decision provenance, most-active sessions, and the total time
+  the fleet spent **blocked on you** (the gap from each request to its human/timeout
+  answer, capped by `insights.maxBlockSeconds` so an overnight idle isn't counted).
+  Always available; shows zeros until the ledger is enabled.
 
 ## Install (about 5 minutes)
 
@@ -521,9 +554,12 @@ focuses a window, and never spawns a session. How that's possible:
   editor-aware spawn spec, `kitty @` argv + key tokens, permission-mode cycle steps,
   window focus-candidate/title matching, folder-browser path helpers, recent-dirs,
   new-project validation, persistent-relabel set/apply-by-cwd, pmset command/parse,
-  gated-tool list parsing, hook-merge, panel geometry, image data-URL parsing,
-  `/effort` + AskUserQuestion answer keys (multi-select guarded) — has no `hs.*` calls
-  and is unit-tested directly in plain `lua`
+  gated-tool list parsing (+ per-session `resolveGateTools` precedence), hook-merge,
+  panel geometry, image data-URL parsing, `/effort` + AskUserQuestion answer keys
+  (multi-select guarded), provider env-injection / `respawnSpec` / `providerByModel`,
+  ledger parse/filter/narrative, fleet-insights aggregation (`fleetStats` /
+  `blockedSeconds`), per-session `sessionRisk`, `collisions`, and `shouldDrainClose` —
+  has no `hs.*` calls and is unit-tested directly in plain `lua`
   ([tests/core.test.lua](tests/core.test.lua) + [tests/ui.test.lua](tests/ui.test.lua)).
 - **All effects go through one `fx` table** (focus, keystrokes, paste, send-keys,
   decision/file writes, Stream Deck, session spawn). Production wires it to
@@ -534,9 +570,10 @@ focuses a window, and never spawns a session. How that's possible:
   [tests/editor.test.sh](tests/editor.test.sh) (editor/mode/effort detection),
   [tests/ask.test.sh](tests/ask.test.sh) (AskUserQuestion + multi-select capture),
   [tests/config.test.sh](tests/config.test.sh), [tests/gate.test.sh](tests/gate.test.sh)
-  (incl. the config-driven gated-tool list), and [tests/install.test.sh](tests/install.test.sh)
-  (the installer against a temp `$HOME`).
-- **~320 checks, all side-effect-free.** Every new feature lands with its tests.
+  (the config-driven gated-tool list + per-session overrides),
+  [tests/ledger.test.sh](tests/ledger.test.sh) (audit ledger append/retention), and
+  [tests/install.test.sh](tests/install.test.sh) (the installer against a temp `$HOME`).
+- **~683 checks, all side-effect-free.** Every new feature lands with its tests.
 
 Spawning is additionally gated by `spawn.live` (default off → log-but-don't-launch),
 with the `ORCH_DRY_RUN` code constant as a fixed safety net, so the live app never

@@ -4,7 +4,76 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-10
+
+### Added
+- **Fleet insights view.** A new **📊** toolbar button opens a read-only overlay that
+  aggregates the audit ledger into fleet stats — turns per session, approval/denial
+  rates, decision provenance (autoDeny/autoAllow/autopilot/approveRepeats/human/
+  timeout), most-active sessions, and the total time the fleet spent **blocked on you**.
+  Pure `core.fleetStats` / `core.fmtDuration` / `core.blockedSeconds`; zero model cost.
+  Always available like the audit view (shows zeros until the ledger is enabled).
+- **Same-directory collision warning.** When 2+ **active** sessions (working/approval)
+  share a working dir, their tiles get an amber ring + "⚠ shared dir" so two agents
+  don't silently clobber each other's edits. `collision.useGitRoot` groups by repo root
+  (one cached `git rev-parse` per dir). Detection only — it can't lock another process's
+  writes. Pure `core.collisions`; cached `FX.gitRoot`. Off by default (`collision.enabled`).
+- **Per-session tool gating (least-privilege).** The detail panel's **Gate** dropdown
+  (Default / All / None / Custom) overrides the fleet `gate.tools` for one session,
+  stored in `~/.claude/cc-gate-tools/<key>`; `cc-approve.sh` consults it on the hot path.
+  Lets a risky experiment lock everything down while a trusted session runs free. Pure
+  `core.resolveGateTools`. No override → identical to before.
+- **Empirical per-session risk score.** An indicator (not a gate) computed from a
+  session's ledger history — deny rate, auto-deny hits, timeout-fallbacks, slow
+  approvals, tool volume — surfaced as a med/high ⚠/▲ tile badge (low shows nothing).
+  No quarantine, no enforcement. Pure `core.sessionRisk`. Off by default (`risk.enabled`);
+  `risk.thresholds`/`risk.weights` tunable in config.
+- **Graceful drain + one-click respawn.** Right-click **Drain (finish turn, then close)**
+  waits for the in-flight turn to finish before closing (closes now if already idle/done;
+  wins over auto-feed). **Respawn from cwd** relaunches a dead/stale session from its last
+  cwd + matched provider + editor. Pure `core.shouldDrainClose` / `core.respawnSpec` /
+  `core.providerByModel`; reuses `FX.spawnSession`. Both off by default
+  (`drain.enabled` / `respawn.enabled`).
+- **Launch on startup.** ⚙ Settings → **General → "Launch Shepherd on startup"** toggles
+  Hammerspoon's real *Open at Login* item (`hs.autoLaunch`). **On by default** the first
+  run (one-time, gated by an `hs.settings` flag) so Shepherd returns after a restart.
+- **`make dock`.** Pins the existing `Shepherd.app` launcher to the Dock idempotently
+  (`app/add-to-dock.sh`; the Dock briefly restarts, reversible by dragging the icon off).
+
+### Changed
+- **Settings Save now merges** the managed keys onto the existing `cc-config.json`
+  instead of overwriting the whole file, so hand-edited top-level blocks (the new
+  risk/collision/drain/respawn/insights blocks, `spawn.kittyBin`, …) survive a Save.
+
+### Fixed
+- **Gate-override fails safe.** An empty/half-written `cc-gate-tools/<key>` file was
+  lumped with the `-`/`none` sentinels and gated **nothing**; now an empty file falls
+  back to the fleet default (only `-`/`none` mean "gate nothing"), matching
+  `core.resolveGateTools`. A blank or partial write can no longer silently disable the gate.
+- **Accurate "time blocked on you" / risk.** `lastReqTs` was only cleared on a human
+  decision, so an auto-allow/deny between a request and a later human decision
+  mis-attributed the gap (inflating `approvalBlockedSeconds` / `staleApprovals`). Any
+  decision now resolves the pending request; only human/timeout decisions credit the wait.
+
+### Tests
+- **~683** side-effect-free checks. New pure coverage for `fleetStats` / `blockedSeconds`
+  (incl. the maxBlock-cap drop and auto-decision-clears-pending cases), `sessionRisk`,
+  `collisions`, `resolveGateTools` (sentinel + empty-file precedence), `shouldDrainClose`,
+  `respawnSpec` / `providerByModel`; new gate cases for per-session overrides (the
+  empty-file-still-gates case, polling instead of fixed sleeps).
+
 ## 2026-06-09
+
+### Added
+- **Audit / event ledger.** Opt-in append-only JSONL record of fleet activity at
+  `~/.claude/cc-ledger/YYYY-MM-DD.jsonl` (one event per line), written by the hooks +
+  panel: session start/end, prompts, tool requests, gate decisions (with provenance),
+  mode/model/effort changes, nudges, clears, compacts, spawns, relabels. **Off by
+  default** (`ledger.enabled`), with retention (`retentionDays`, `maxTotalMB`) GC'd ~hourly.
+  A **📜 Audit** overlay (Rows + Timeline tabs) filters by session/type/date and supports
+  per-row redact, export, and purge. A **Review activity** button sends a slice to the
+  selected session as a read-only governance prompt. Pure `core.parseLedger` /
+  `filterLedger` / `renderNarrative` / `narrateEvent` / `auditReviewPrompt`.
 
 ### Added
 - **Providers / multi-model spawn.** A new **Providers** tab in ⚙ Settings defines named

@@ -1,6 +1,12 @@
 # Orchestrator — Phase 4b/4c design spec
 
-Status: **draft for review** (not built). Builds on 4a (dry-run spawn).
+Status: **mostly shipped.** Phase 4b (queue + auto-feed) and Phase 4c **A–D**
+(stale-approval escalation, approve-repeats, per-session autopilot, pattern
+auto-allow/deny) are built and live; **4c-E (project routing)** is the only deferred
+piece. This file is retained as the original design rationale — the authoritative,
+**current** config schema is [cc-config.example.json](../cc-config.example.json), and
+CHANGELOG.md records what has shipped since (incl. the audit ledger, fleet insights,
+collision warning, per-session gating, risk score, and drain/respawn).
 
 ## Goal
 
@@ -22,8 +28,11 @@ All new auto/policy behavior is governed by a single JSON settings file read by
 it, and every field is conservative — **nothing auto-acts unless you explicitly
 turn it on.**
 
-`~/.claude/cc-config.json` (full schema; these ARE the defaults if the file is
-absent or a key is missing):
+`~/.claude/cc-config.json` — the **4b/4c subset** below was the original design; the
+file has since grown more blocks (`gate`, `spawn`, `providers`, `focus`, `ledger`,
+`risk`, `collision`, `drain`, `respawn`, `insights`). See
+[cc-config.example.json](../cc-config.example.json) for the full current schema. These
+ARE the defaults if the file is absent or a key is missing:
 ```json
 {
   "queue":      { "autofeed": false, "dryRun": false },

@@ -33,6 +33,21 @@ remaining items. Full per-round detail is in CHANGELOG.md and git history.
   incremental recompute + Update now. **Official plan window** via `/api/oauth/usage`
   (5h/weekly/Sonnet %, ≤180s poll, token never logged, local-approx fallback).
 - **Right-click Clear / Compact** on each tile (native confirm-submenu).
+- **Audit / event ledger** (opt-in, off by default): append-only JSONL at
+  `cc-ledger/`, the 📜 Audit overlay (Rows/Timeline, filter, redact/export/purge), and a
+  read-only **Review activity** prompt. Pure `parseLedger`/`filterLedger`/`renderNarrative`.
+- **Fleet insights** (📊 overlay): `core.fleetStats`/`blockedSeconds`/`fmtDuration` —
+  turns, approval/denial rates, provenance, most-active, time blocked on you. Read-only.
+- **Same-directory collision warning** (`core.collisions`, cached `FX.gitRoot`): amber
+  tiles when 2+ active sessions share a dir/repo. Off by default.
+- **Per-session tool gating** (`core.resolveGateTools`, `cc-gate-tools/<key>`): detail-panel
+  Gate dropdown (Default/All/None/Custom) overrides the fleet `gate.tools` per session.
+- **Per-session risk score** (`core.sessionRisk`): med/high tile badge from ledger history.
+  Indicator only — no quarantine. Off by default.
+- **Graceful drain + respawn** (`core.shouldDrainClose`/`respawnSpec`/`providerByModel`):
+  right-click "finish turn then close" and "relaunch a dead session from cwd". Off by default.
+- **Launch on startup** (`hs.autoLaunch`, on by default first run) + **`make dock`**
+  (`app/add-to-dock.sh`) to pin Shepherd.app to the Dock.
 
 ## TODO
 - **Verify on a real Kitty box** (the one thing that needs the hardware): the `core.KITTY_KEY`
@@ -66,4 +81,4 @@ remaining items. Full per-round detail is in CHANGELOG.md and git history.
 Pure decisions → `cc-core.lua` + unit tests; effects → `fx` recorder; shell hooks → bash suites
 with temp dirs. No live `kitty @` / keystrokes / network in tests (provider env-injection, usage
 parse/sum/window, and ssh-wrap are all asserted as pure strings — no real keys, no real spawns).
-`make test` green before every `make deploy`. ~517 side-effect-free checks.
+`make test` green before every `make deploy`. ~683 side-effect-free checks.
