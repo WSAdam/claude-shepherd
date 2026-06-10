@@ -84,5 +84,12 @@ assert_json "F-005 fp: my-cc-status.sh suppresses ours (Stop stays 1 group)" "$C
   '.hooks.Stop | length' "1"
 assert_json "F-005 fp: the user's my-cc-status.sh hook is intact" "$CDIR4/settings.json" \
   '.hooks.Stop[0].hooks[0].command | contains("my-cc-status.sh")' "true"
+# Directly pin "ours was NOT wired" (catches ours sneaking in as a 2nd hook inside the
+# existing group, which the group-count assert above would miss). Use the leading-slash
+# form: our command is `bash "$HOME/.claude/cc-status.sh" ...` (contains "/cc-status.sh"),
+# while the user's ".../my-cc-status.sh" does NOT -- so a bare contains("cc-status.sh")
+# would be a tautology here.
+assert_json "F-005 fp: ours (/cc-status.sh) was NOT wired" "$CDIR4/settings.json" \
+  '[.hooks.Stop[].hooks[].command | select(contains("/cc-status.sh"))] | length' "0"
 
 finish
