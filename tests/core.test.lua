@@ -1259,5 +1259,32 @@ do
   eq("bulk: item without key skipped", #core.selectActionable({ { status = "approval" } }, "approve"), 0)
 end
 
+-- ---- sessionTimeline: chronological per-session slice ----------------------
+do
+  local evs = {
+    { ts = 30, type = "prompt",       session_id = "s1", prompt = "third" },
+    { ts = 10, type = "session_start", session_id = "s1" },
+    { ts = 20, type = "tool_request", session_id = "s1", tool = "Bash" },
+    { ts = 15, type = "prompt",       session_id = "s2", prompt = "other session" },
+    { ts = 25, type = "decision",     session_id = "s2", outcome = "allow" },
+  }
+  local t1 = core.sessionTimeline(evs, "s1")
+  eq("timeline: scopes to one session", #t1, 3)
+  eq("timeline: ascending first", t1[1].ts, 10)
+  eq("timeline: ascending middle", t1[2].ts, 20)
+  eq("timeline: ascending last", t1[3].ts, 30)
+  eq("timeline: other session excluded", #core.sessionTimeline(evs, "s2"), 2)
+  eq("timeline: nil session -> empty", #core.sessionTimeline(evs, nil), 0)
+  eq("timeline: empty session -> empty", #core.sessionTimeline(evs, ""), 0)
+  eq("timeline: unknown session -> empty", #core.sessionTimeline(evs, "nope"), 0)
+  -- cap keeps the NEWEST `limit`, then sorts ascending
+  local many = {}
+  for i = 1, 10 do many[i] = { ts = i, type = "prompt", session_id = "s1" } end
+  local capped = core.sessionTimeline(many, "s1", { limit = 3 })
+  eq("timeline: cap count", #capped, 3)
+  eq("timeline: cap keeps newest, ascending", capped[1].ts, 8)
+  eq("timeline: cap last is newest", capped[3].ts, 10)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

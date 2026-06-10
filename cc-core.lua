@@ -551,6 +551,23 @@ function M.auditReviewPrompt(narrative, opts)
     .. tostring(narrative or "")
 end
 
+-- Chronological (oldest-first) slice of ONE session's ledger events, for the
+-- per-session timeline drill-down (the detail-panel "Timeline" button). Scopes via
+-- filterLedger by session_id, keeps the newest `opts.limit` (default 500) so a very
+-- long-lived session can't flood the view, then flips ascending for reading. A
+-- nil/empty sessionId returns {} (never "all"). Pure; the audit overlay's
+-- session-filtered timeline view is the JS twin.
+function M.sessionTimeline(events, sessionId, opts)
+  opts = opts or {}
+  if not sessionId or tostring(sessionId) == "" then return {} end
+  local limit = tonumber(opts.limit) or 500
+  local scoped = M.filterLedger(events, { session = sessionId })  -- newest-first
+  local kept = {}
+  for i = 1, math.min(#scoped, limit) do kept[#kept + 1] = scoped[i] end
+  table.sort(kept, function(a, b) return (tonumber(a.ts) or 0) < (tonumber(b.ts) or 0) end)
+  return kept
+end
+
 -- ---- Fleet insights (pure aggregation over the ledger) ---------------------
 -- Both fleetStats and sessionRisk read ALREADY-PARSED ledger events (the caller
 -- passes FX.readLedger(...).events) -- zero file I/O, zero model cost. The whole

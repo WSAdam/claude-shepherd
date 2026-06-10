@@ -1380,6 +1380,23 @@ local function handleBridgeMsg(msg)
     pcall(function() wv:evaluateJavaScript("window.ccAudit(" .. hs.json.encode(FX.readLedger({})) .. ")") end)
     return
   end
+  if a == "open-session-timeline" then
+    -- Per-session drill-down: open the audit overlay scoped to this session's
+    -- chronological history (timeline view). Reuses core.sessionTimeline + the
+    -- existing audit overlay render. session_id is the cross-writer key.
+    local it = byKey[tostring(payload.v or "")]
+    local sid = it and it.session_id
+    if not sid or tostring(sid) == "" then
+      pcall(function() hs.alert.show("Claude Shepherd: no recorded activity for this session yet (ledger off or no session id)") end)
+      return
+    end
+    local res = FX.readLedger({})
+    local events = core.sessionTimeline(res.events, sid, { limit = 1000 })
+    pcall(function() wv:evaluateJavaScript("window.ccAudit("
+      .. hs.json.encode({ events = events, files = res.files, truncated = res.truncated })
+      .. ", " .. jsString(sid) .. ", " .. jsString("timeline") .. ")") end)
+    return
+  end
   if a == "audit-export" then
     local okf, f = pcall(function() return hs.json.decode(payload.text or "{}") end)
     local res = FX.readLedger((okf and type(f) == "table") and f or {})
@@ -2099,6 +2116,7 @@ local HTML = [[
       <button id="b-clear"   onclick="act('clear')">Clear</button>
       <button id="b-compact" onclick="act('compact')">Compact</button>
       <button id="b-improve" onclick="act('improve')" title="Pull this repo's un-applied leaderboard improvement insights and send them to this session as a review-first prompt (suggestions, not wholesale edits).">Improve</button>
+      <button id="b-timeline" onclick="openSessionTimeline()" title="Show this session's recorded activity timeline (needs the ledger enabled).">📜 Timeline</button>
     </div>
     <div id="d-controls">
       <label class="ctl">Effort
@@ -3037,6 +3055,17 @@ local HTML = [[
     var auditView = "rows";
     function openAudit(){ send("open-audit-view"); }
     function closeAudit(){ document.getElementById("audit").classList.remove("show"); }
+    // Per-session drill-down: open the audit overlay scoped to the selected
+    // session's chronological timeline. Needs the ledger on + a session id.
+    function openSessionTimeline(){
+      if(!selectedKey) return;
+      var it = findItem(selectedKey);
+      if(!it || !it.session_id){
+        alert("No recorded activity for this session yet (the ledger is off, or this session has no id).");
+        return;
+      }
+      send("open-session-timeline", selectedKey);
+    }
 
     // ---- Fleet insights view (Feature A) ------------------------------------
     function openInsights(){ send("open-insights-view"); }
@@ -3200,13 +3229,16 @@ local HTML = [[
     function auditReview(){ send("audit-review", selectedKey || "", JSON.stringify(serverFilter())); }
     function auditExport(){ send("audit-export", "", JSON.stringify(serverFilter())); }
     function auditPurge(){ send("audit-purge", "", JSON.stringify(serverFilter())); }  // Lua confirms
-    window.ccAudit = function(payload){
+    window.ccAudit = function(payload, focusSession, focusView){
       AUDIT = payload || { events: [], files: [], truncated: false };
       if(!Array.isArray(AUDIT.events)) AUDIT.events = [];
       if(!Array.isArray(AUDIT.files)) AUDIT.files = [];
       populateAuditSessions();
-      renderAudit();
+      // Per-session drill-down (Timeline button): pre-select the session + view.
+      if(focusSession){ var sel = document.getElementById("a-f-session"); if(sel) sel.value = focusSession; }
       document.getElementById("audit").classList.add("show");
+      if(focusView){ auditTab(focusView); }  // auditTab also re-renders
+      else { renderAudit(); }
     };
 
     window.ccUsage = function(u){ LAST_USAGE = u || null; if(u && u.official) LAST_OFFICIAL = u.official; renderUsageFoot(); renderDetail(); };
