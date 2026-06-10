@@ -1373,8 +1373,16 @@ local function handleBridgeMsg(msg)
   end
   if a == "open-insights-view" then
     local res = FX.readLedger({})
-    local stats = core.fleetStats(res.events, { now = FX.now(), topN = 8,
-      maxBlock = tonumber(core.config(loadConfig(), "insights.maxBlockSeconds", 1800)) or 1800 })
+    local maxBlock = tonumber(core.config(loadConfig(), "insights.maxBlockSeconds", 1800)) or 1800
+    local stats = core.fleetStats(res.events, { now = FX.now(), topN = 8, maxBlock = maxBlock })
+    -- Sparkline trends: last 24h in hourly buckets (windowed first so the series is small).
+    local recent = core.filterLedger(res.events, { sinceTs = FX.now() - 24 * 3600 })
+    stats.spark = {
+      blocked    = core.bucketEvents(recent, 3600, "blocked", { maxBlock = maxBlock }),
+      activity   = core.bucketEvents(recent, 3600, "activity"),
+      active     = core.bucketEvents(recent, 3600, "active"),
+      denialRate = core.bucketEvents(recent, 3600, "denialRate"),
+    }
     pcall(function() wv:evaluateJavaScript("window.ccInsights(" .. hs.json.encode(stats) .. ")") end)
     return
   end
@@ -2043,6 +2051,12 @@ local HTML = [[
 .i-tbl td.n{ text-align:right; font-variant-numeric:tabular-nums; }
 #i-foot{ display:flex; gap:8px; align-items:center; padding:8px 10px; border-top:1px solid #2c2f3a; }
 #i-info{ margin-left:auto; }
+/* insights sparklines (Feature 6): trend lines over the ledger */
+.spark-row{ display:flex; align-items:center; gap:8px; padding:4px 0; }
+.spark-lbl{ width:110px; flex:0 0 auto; color:#9aa0ad; font-size:11px; }
+.spark{ flex:1; min-width:0; background:#191b22; border:1px solid #23262f; border-radius:4px; }
+.spark-val{ width:160px; flex:0 0 auto; text-align:right; color:#8a8d99; font-size:11px; font-variant-numeric:tabular-nums; }
+.spark-empty{ flex:1; color:#6b7280; font-size:11px; font-style:italic; }
 </style></head>
 <body class="theme-__INIT_THEME__" data-theme="__INIT_THEME__">
   <div id="bar">
@@ -3083,6 +3097,33 @@ local HTML = [[
       if(m < 60) return (s%60) ? (m+"m "+(s%60)+"s") : (m+"m");
       var h = Math.floor(m/60); return (m%60) ? (h+"h "+(m%60)+"m") : (h+"h");
     }
+    // Inline SVG sparkline from a [{ts,value}] series (Feature 6). opts:{w,h,color,max}.
+    function sparkline(series, opts){
+      opts = opts || {};
+      var w = opts.w || 260, h = opts.h || 30, pad = 3;
+      if(!series || !series.length) return '<span class="spark-empty">no data in range</span>';
+      var max = opts.max || 0;
+      if(!max){ series.forEach(function(p){ if(p.value > max) max = p.value; }); }
+      if(max <= 0) max = 1;
+      var n = series.length, innerW = w - 2*pad, innerH = h - 2*pad;
+      var xAt = function(i){ return pad + (n === 1 ? innerW/2 : (i/(n-1))*innerW); };
+      var yAt = function(v){ return pad + innerH - (Math.max(0, Math.min(v, max))/max)*innerH; };
+      var pts = series.map(function(p, i){ return xAt(i).toFixed(1)+","+yAt(p.value).toFixed(1); }).join(" ");
+      var color = opts.color || "#6ea8fe", lastI = n-1;
+      return '<svg class="spark" width="'+w+'" height="'+h+'" viewBox="0 0 '+w+' '+h+'" preserveAspectRatio="none">'
+        + '<polyline points="'+pts+'" fill="none" stroke="'+color+'" stroke-width="1.5" stroke-linejoin="round" />'
+        + '<circle cx="'+xAt(lastI).toFixed(1)+'" cy="'+yAt(series[lastI].value).toFixed(1)+'" r="1.8" fill="'+color+'" />'
+        + '</svg>';
+    }
+    function sparkRow(label, series, opts){
+      opts = opts || {}; series = series || [];
+      var peak = 0, last = series.length ? series[series.length-1].value : 0;
+      series.forEach(function(p){ if(p.value > peak) peak = p.value; });
+      var f = function(v){ return opts.fmt === "dur" ? fmtDur(v) : (opts.fmt === "pct" ? Math.round(v*100)+"%" : Math.round(v)); };
+      return '<div class="spark-row"><div class="spark-lbl">'+esc(label)+'</div>'
+        + sparkline(series, opts)
+        + '<div class="spark-val">now '+esc(f(last))+' · peak '+esc(f(peak))+'</div></div>';
+    }
     window.ccInsights = function(st){
       st = st || {};
       var body = document.getElementById("i-body");
@@ -3123,6 +3164,14 @@ local HTML = [[
                 + '</td><td class="n">'+fmtDur(s.blockedSeconds)+'</td></tr>';
         });
         html += '</table>';
+      }
+      // Trend sparklines (last 24h, hourly) — Feature 6.
+      if(st.spark){
+        html += '<div class="i-sec">Trends — last 24h (hourly)</div>';
+        html += sparkRow("Blocked on you", st.spark.blocked, { color:"#ef4444", fmt:"dur" });
+        html += sparkRow("Fleet activity", st.spark.activity, { color:"#6ea8fe" });
+        html += sparkRow("Active sessions", st.spark.active, { color:"#22c55e" });
+        html += sparkRow("Denial rate", st.spark.denialRate, { color:"#f5b50a", fmt:"pct", max:1 });
       }
       if((tot.events||0) === 0){
         html += '<div class="n-dim" style="margin-top:12px;">No ledger activity yet. Enable the ledger ('

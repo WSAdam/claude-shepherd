@@ -725,6 +725,86 @@ function M.fleetStats(events, opts)
   }
 end
 
+-- ---- Time-series buckets (sparkline trends over the ledger) -----------------
+-- Bucket events into a fixed-width time series for one metric, for the insights
+-- sparklines. Returns a dense array (no gaps) of { ts = bucket start, value }, one
+-- bucket per `bucketSec` from the first to the last event's bucket. The caller
+-- windows the events first (e.g. last 24h) and picks bucketSec, so the series stays
+-- small. Pure + deterministic. Metrics:
+--   activity   -> prompts + tool_requests per bucket
+--   active     -> distinct sessions seen per bucket
+--   denialRate -> deny / total-decisions per bucket (0..1; 0 when no decisions)
+--   blocked    -> "time blocked on you" per bucket: each tool_request->resolving
+--                 human/timeout decision gap (<= opts.maxBlock) credited to the
+--                 bucket where the wait STARTED (same pairing as blockedSeconds).
+-- Unknown metric -> {}. opts.maxBlock caps a single blocked gap (default 1800s).
+function M.bucketEvents(events, bucketSec, metric, opts)
+  opts = opts or {}
+  bucketSec = tonumber(bucketSec) or 3600
+  if bucketSec <= 0 then bucketSec = 3600 end
+  local evs = {}
+  for _, e in ipairs(events or {}) do
+    if type(e) == "table" and tonumber(e.ts) then evs[#evs + 1] = e end
+  end
+  if #evs == 0 then return {} end
+  table.sort(evs, function(a, b) return tonumber(a.ts) < tonumber(b.ts) end)
+  local startB = math.floor(tonumber(evs[1].ts) / bucketSec) * bucketSec
+  local endB   = math.floor(tonumber(evs[#evs].ts) / bucketSec) * bucketSec
+  local nB = math.floor((endB - startB) / bucketSec) + 1
+  local series = {}
+  for i = 1, nB do series[i] = { ts = startB + (i - 1) * bucketSec, value = 0 } end
+  local function idx(ts) return math.floor((tonumber(ts) - startB) / bucketSec) + 1 end
+
+  if metric == "activity" then
+    for _, e in ipairs(evs) do
+      if e.type == "prompt" or e.type == "tool_request" then
+        local i = idx(e.ts); series[i].value = series[i].value + 1
+      end
+    end
+  elseif metric == "active" then
+    local seen = {}
+    for _, e in ipairs(evs) do
+      if e.session_id then
+        local i = idx(e.ts)
+        seen[i] = seen[i] or {}
+        if not seen[i][e.session_id] then seen[i][e.session_id] = true; series[i].value = series[i].value + 1 end
+      end
+    end
+  elseif metric == "denialRate" then
+    local denom = {}
+    for _, e in ipairs(evs) do
+      if e.type == "decision" then
+        local i = idx(e.ts)
+        denom[i] = (denom[i] or 0) + 1
+        if e.outcome == "deny" then series[i].value = series[i].value + 1 end
+      end
+    end
+    for i = 1, nB do
+      local d = denom[i] or 0
+      series[i].value = (d > 0) and (series[i].value / d) or 0
+    end
+  elseif metric == "blocked" then
+    local maxBlock = tonumber(opts.maxBlock) or 1800
+    local lastReqTs = nil
+    for _, e in ipairs(evs) do
+      if e.type == "tool_request" then
+        lastReqTs = tonumber(e.ts)
+      elseif e.type == "decision" then
+        if lastReqTs and (e.by == "human" or e.by == "timeout-fallback") then
+          local gap = (tonumber(e.ts) or 0) - lastReqTs
+          if gap > 0 and gap <= maxBlock then
+            series[idx(lastReqTs)].value = series[idx(lastReqTs)].value + gap
+          end
+        end
+        lastReqTs = nil  -- ANY decision resolves the pending request (mirrors blockedSeconds)
+      end
+    end
+  else
+    return {}
+  end
+  return series
+end
+
 -- ---- Empirical per-session risk score (indicator only; no enforcement) -----
 -- Default weights/thresholds (overridable via opts). Score is a weighted sum of
 -- ledger-observed signals, normalized to 0..100; each signal capped so one noisy

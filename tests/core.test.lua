@@ -1317,5 +1317,49 @@ do
   eq("respawn-auto: nil args -> false", core.shouldAutoRespawn(nil), false)
 end
 
+-- ---- bucketEvents: time-series sparkline buckets ---------------------------
+do
+  local evs = {
+    { ts = 100,  type = "prompt",       session_id = "a" },                              -- bucket 1
+    { ts = 200,  type = "tool_request", session_id = "a" },                              -- bucket 1
+    { ts = 3700, type = "prompt",       session_id = "b" },                              -- bucket 2
+    { ts = 3800, type = "tool_request", session_id = "a" },                              -- bucket 2
+    { ts = 3900, type = "decision", outcome = "deny",  by = "human", session_id = "a" }, -- bucket 2
+    { ts = 7300, type = "decision", outcome = "allow", by = "human", session_id = "b" }, -- bucket 3
+  }
+  local act = core.bucketEvents(evs, 3600, "activity")
+  eq("bucket: dense bucket count", #act, 3)
+  eq("bucket: first ts aligned to bucket", act[1].ts, 0)
+  eq("bucket: second ts aligned", act[2].ts, 3600)
+  eq("bucket: activity b1 (prompt+tool)", act[1].value, 2)
+  eq("bucket: activity b2 (prompt+tool)", act[2].value, 2)
+  eq("bucket: activity b3 (none)", act[3].value, 0)
+
+  local actv = core.bucketEvents(evs, 3600, "active")
+  eq("bucket: active b1 distinct sessions", actv[1].value, 1)
+  eq("bucket: active b2 distinct sessions", actv[2].value, 2)
+  eq("bucket: active b3 distinct sessions", actv[3].value, 1)
+
+  local dr = core.bucketEvents(evs, 3600, "denialRate")
+  eq("bucket: denialRate b1 (no decisions = 0)", dr[1].value, 0)
+  eq("bucket: denialRate b2 (1 deny / 1)", dr[2].value, 1)
+  eq("bucket: denialRate b3 (0 deny / 1)", dr[3].value, 0)
+
+  local bl = core.bucketEvents(evs, 3600, "blocked")
+  eq("bucket: blocked b1 (no wait)", bl[1].value, 0)
+  eq("bucket: blocked b2 (req->human gap credited to wait start)", bl[2].value, 100)
+  eq("bucket: blocked b3 (cleared, no credit)", bl[3].value, 0)
+
+  eq("bucket: empty events -> {}", #core.bucketEvents({}, 3600, "activity"), 0)
+  eq("bucket: unknown metric -> {}", #core.bucketEvents(evs, 3600, "bogus"), 0)
+  eq("bucket: zero bucketSec defaults to 3600", #core.bucketEvents(evs, 0, "activity"), 3)
+  eq("bucket: single event -> one bucket",
+     #core.bucketEvents({ { ts = 500, type = "prompt", session_id = "x" } }, 3600, "activity"), 1)
+  eq("bucket: blocked over-cap dropped", core.bucketEvents({
+     { ts = 100, type = "tool_request" },
+     { ts = 100 + 4000, type = "decision", by = "human", outcome = "allow" },
+  }, 3600, "blocked", { maxBlock = 1800 })[1].value, 0)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)
