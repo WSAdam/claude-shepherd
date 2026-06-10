@@ -3816,7 +3816,9 @@ function refresh()
       enabled = autoRespawnOn, maxRetries = autoRespawnMax,
       intentional = (draining[it.key] ~= nil) or drained,
       wasStale = prevStale[it.key] or false,
-      canRespawn = rs and rs.canRespawn })
+      -- strict boolean (fail-closed): a nil/absent canRespawn must NOT read as
+      -- "respawnable" via stepAutoRespawn's permissive `~= false` default.
+      canRespawn = rs ~= nil and rs.canRespawn == true })
     newPrevStale[it.key] = step.isStale
     if step.spawn then  -- rs.canRespawn was true (the increment is gated on it)
       print("[cc-respawn] auto-relaunch " .. tostring(it.name)

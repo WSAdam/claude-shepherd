@@ -1380,6 +1380,17 @@ do
   eq("step: un-respawnable edge does not spawn", rc.spawn, false)
   eq("step: un-respawnable edge still reports wouldFire", rc.wouldFire, true)
   eq("step: un-respawnable edge does NOT charge the budget", a6["pf"], nil)
+
+  -- the POSITIVE bracket of the canRespawn gate: a fresh respawnable edge fires,
+  -- spawns, and charges exactly one retry; a second one accumulates to two.
+  local a7 = {}
+  local rok = core.stepAutoRespawn(a7, dead("ok", "s"), { enabled = true, maxRetries = 2, wasStale = false, canRespawn = true })
+  eq("step: fresh respawnable edge spawns", rok.spawn, true)
+  eq("step: fresh respawnable edge wouldFire", rok.wouldFire, true)
+  eq("step: fresh respawnable edge charges the budget", a7["pf"], 1)
+  local rok2 = core.stepAutoRespawn(a7, dead("ok2", "s2"), { enabled = true, maxRetries = 2, wasStale = false, canRespawn = true })
+  eq("step: second respawnable edge still spawns (under cap)", rok2.spawn, true)
+  eq("step: second respawnable edge accumulates the budget", a7["pf"], 2)
 end
 
 -- ---- bucketEvents: time-series sparkline buckets ---------------------------
