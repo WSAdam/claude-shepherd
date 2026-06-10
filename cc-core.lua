@@ -1377,14 +1377,21 @@ function M.trackProgress(prevSize, prevTs, sz, now)
   return { size = prevSize, ts = prevTs }                          -- unchanged: keep timing
 end
 
--- Merge a trackProgress update onto a watchdog entry, PRESERVING its stall-alert
--- flag. The dashboard stores the result back at watchdog[key]. Mutates-and-returns
--- `w` when it exists (so `alerted` survives a progress tick instead of being dropped
--- and re-threaded); allocates a fresh { size, ts } when w is nil. NOTE: unlike
--- trackProgress, this MUTATES its first arg.
+-- Merge a trackProgress update onto a watchdog entry. The dashboard stores the
+-- result back at watchdog[key]. Mutates-and-returns `w` when it exists (allocating a
+-- fresh { size, ts } when nil). The stall-alert flag is RE-ARMED on progress: when
+-- trackProgress rebases the timer (a size change == the stall ended), `alerted` is
+-- cleared so a LATER stall in the same working stint nags again ("once per stall",
+-- not "once per working stint"); on a held tick (no change) `alerted` survives so a
+-- continuous stall isn't re-nagged every second. NOTE: unlike trackProgress, this
+-- MUTATES its first arg.
 function M.applyProgress(w, sz, now)
   local p = M.trackProgress(w and w.size, w and w.ts, sz, now)
-  if w then w.size, w.ts = p.size, p.ts; return w end
+  if w then
+    if p.ts ~= w.ts then w.alerted = nil end  -- progress -> stall ended: re-arm
+    w.size, w.ts = p.size, p.ts
+    return w
+  end
   return { size = p.size, ts = p.ts }
 end
 

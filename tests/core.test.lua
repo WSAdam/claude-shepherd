@@ -1542,22 +1542,51 @@ do
   eq("watchdog-reset: working + stale -> reset (no resume false-trip)", core.watchdogShouldReset("working", true), true)
   eq("watchdog-reset: working + healthy -> keep timing", core.watchdogShouldReset("working", false), false)
 
-  -- applyProgress: merges trackProgress onto a watchdog entry, PRESERVING `alerted`
-  -- (the behavior the dashboard's in-place mutation provides, untestable via trackProgress).
+  -- applyProgress: merges trackProgress onto a watchdog entry. F-006: progress (a
+  -- size change that rebases the timer) RE-ARMS the alert ("once per stall"); a held
+  -- tick KEEPS alerted so a continuous stall isn't re-nagged every second.
   local wp = { size = 10, ts = 1000, alerted = true }
   local rp = core.applyProgress(wp, 50, 2000)
   eq("applyProgress: growth updates size", rp.size, 50)
   eq("applyProgress: growth rebases ts", rp.ts, 2000)
-  eq("applyProgress: preserves alerted across a growth tick", rp.alerted, true)
+  eq("applyProgress: growth CLEARS alerted (re-arm for the next stall)", rp.alerted, nil)
   check("applyProgress: mutates-and-returns the same entry", rp == wp)
   local wp2 = { size = 50, ts = 2000, alerted = true }
   local rp2 = core.applyProgress(wp2, 50, 3000)
   eq("applyProgress: unchanged holds ts", rp2.ts, 2000)
-  eq("applyProgress: unchanged keeps alerted", rp2.alerted, true)
+  eq("applyProgress: unchanged KEEPS alerted (no re-nag mid-stall)", rp2.alerted, true)
+  local wp3 = { size = 50, ts = 2000, alerted = true }
+  eq("applyProgress: shrink (rotation) also clears alerted", core.applyProgress(wp3, 10, 5000).alerted, nil)
   local rp3 = core.applyProgress(nil, 100, 4000)
   eq("applyProgress: nil entry seeds size", rp3.size, 100)
   eq("applyProgress: nil entry seeds ts", rp3.ts, 4000)
   check("applyProgress: nil entry has no alerted", rp3.alerted == nil)
+end
+
+-- ---- watchdog re-alert across a resume (F-006 integration) -----------------
+-- Replay the dashboard's watchdog state machine: a session that stays `working`,
+-- stalls -> alerts, resumes (progress), then stalls again must RE-ALERT.
+do
+  local watchdog, it, T = {}, { status = "working", stale = false }, 60
+  local fires = {}
+  local function tick(now, size)
+    watchdog.k = core.applyProgress(watchdog.k, size, now)
+    local w = watchdog.k
+    local fired = false
+    if core.isHung(it, w and w.ts, now, T) and w and not w.alerted then
+      w.alerted = true; fired = true
+    end
+    if core.watchdogShouldReset(it.status, it.stale) then watchdog.k = nil end
+    fires[#fires + 1] = fired
+  end
+  tick(0, 100)    -- seed
+  tick(70, 100)   -- stall #1 -> alert
+  tick(80, 200)   -- resume (progress) -> re-arm
+  tick(160, 200)  -- stall #2 -> must re-alert
+  eq("watchdog: seed tick does not fire", fires[1], false)
+  eq("watchdog: first stall fires", fires[2], true)
+  eq("watchdog: resume tick does not fire", fires[3], false)
+  eq("watchdog: SECOND stall re-fires after a resume", fires[4], true)
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
