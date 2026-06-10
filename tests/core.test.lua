@@ -976,6 +976,52 @@ do
   -- s1 request@40 -> human decision@70 = 30s; s2's fallback has no preceding request
   eq("fleet: approval blocked seconds", st.approvalBlockedSeconds, 30)
   check("fleet: fleet denial rate ~1/3", math.abs(st.denialRate - (1 / 3)) < 1e-9)
+
+  -- maxBlock cap: an over-cap gap is DROPPED (not clamped). One session, a single
+  -- request@0 -> human@4000 pair with maxBlock=1800 contributes ZERO, not 1800.
+  local capped = core.fleetStats({
+    { ts = 0,    type = "tool_request", session_id = "z", tool = "Bash" },
+    { ts = 4000, type = "decision", session_id = "z", outcome = "allow", by = "human" },
+  }, { maxBlock = 1800 })
+  eq("fleet: over-cap gap dropped (not clamped)", capped.approvalBlockedSeconds, 0)
+end
+
+-- ---- blockedSeconds: request->resolving-decision pairing -------------------
+do
+  -- simple in-window gap credited to a human decision
+  eq("blocked: request->human gap", core.blockedSeconds({
+    { ts = 100, type = "tool_request" },
+    { ts = 130, type = "decision", by = "human" },
+  }, 1800), 30)
+  -- over-cap gap dropped entirely
+  eq("blocked: over-cap dropped", core.blockedSeconds({
+    { ts = 0, type = "tool_request" },
+    { ts = 4000, type = "decision", by = "human" },
+  }, 1800), 0)
+  -- mixed: one in-window (30) + one over-cap (dropped) -> only the in-window counts
+  eq("blocked: mixed sums only in-window", core.blockedSeconds({
+    { ts = 100,  type = "tool_request" },
+    { ts = 130,  type = "decision", by = "human" },     -- +30
+    { ts = 200,  type = "tool_request" },
+    { ts = 9000, type = "decision", by = "human" },     -- over cap -> 0
+  }, 1800), 30)
+  -- B2: an auto-decision RESOLVES the request, so a later human decision with no
+  -- intervening request is NOT credited (was the stale-lastReqTs over-attribution bug).
+  eq("blocked: auto-decision clears pending (no mis-attribution)", core.blockedSeconds({
+    { ts = 100, type = "tool_request" },
+    { ts = 110, type = "decision", by = "autoAllow" },  -- resolves; not credited
+    { ts = 300, type = "decision", by = "human" },      -- no pending request -> 0
+  }, 1800), 0)
+  -- an auto-decision is never credited even when it directly resolves a request
+  eq("blocked: auto-decision never credited", core.blockedSeconds({
+    { ts = 100, type = "tool_request" },
+    { ts = 130, type = "decision", by = "autoDeny" },
+  }, 1800), 0)
+  -- unsorted input is handled (sorts a copy internally)
+  eq("blocked: unsorted input sorted", core.blockedSeconds({
+    { ts = 130, type = "decision", by = "human" },
+    { ts = 100, type = "tool_request" },
+  }, 1800), 30)
 end
 
 -- ---- sessionRisk: empirical per-session score ------------------------------

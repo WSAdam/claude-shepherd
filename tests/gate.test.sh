@@ -149,13 +149,25 @@ assert_eq "approveRepeats: 2nd identical request auto-allows" "allow" "$(decisio
 
 # ---- Feature D: per-session gated-tools override (least-privilege) ----
 mkdir -p "$CC_GATE_TOOLS_DIR"
+# Poll for the per-key status file the gate writes right before it begins waiting for
+# a decision, so we write the decision only once the hook is actually blocked — robust
+# on slow boxes (no fixed sleep that could race the hook's startup). ~5s timeout.
+wait_block() { # $1 = status json path
+  local i=0
+  while [ "$i" -lt 100 ]; do
+    [ -f "$1" ] && return 0
+    sleep 0.05; i=$((i+1))
+  done
+  return 1
+}
+
 # A) override that gates a tool NOT in the fleet default -> that tool is now gated
 date +%s > "$HB"
 printf 'WebFetch\n' > "$CC_GATE_TOOLS_DIR/ov1"
 ( printf '%s' '{"session_id":"ov1","cwd":"/x/p","tool_name":"WebFetch","tool_input":{"url":"https://x"}}' \
     | CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=5 \
     bash "$APP" > "$TMP/out_ov1" 2>/dev/null ) &
-bg=$!; sleep 0.5; printf 'allow' > "$TMP/ov1.decision"; wait $bg
+bg=$!; wait_block "$TMP/ov1.json"; printf 'allow' > "$TMP/ov1.decision"; wait $bg
 got="$(jq -r '.hookSpecificOutput.permissionDecision' "$TMP/out_ov1" 2>/dev/null)"
 assert_eq "per-session override: added tool is gated -> allow" "allow" "$got"
 
@@ -170,7 +182,7 @@ date +%s > "$HB"
 ( printf '%s' '{"session_id":"ov3","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"rm -rf build"}}' \
     | CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=5 \
     bash "$APP" > "$TMP/out_ov3" 2>/dev/null ) &
-bg=$!; sleep 0.5; printf 'deny' > "$TMP/ov3.decision"; wait $bg
+bg=$!; wait_block "$TMP/ov3.json"; printf 'deny' > "$TMP/ov3.decision"; wait $bg
 got="$(jq -r '.hookSpecificOutput.permissionDecision' "$TMP/out_ov3" 2>/dev/null)"
 assert_eq "no override: Bash still gated (no regression)" "deny" "$got"
 
@@ -179,8 +191,19 @@ date +%s > "$HB"
 ( printf '%s' '{"session_id":"ov4","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"ls"}}' \
     | CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=5 \
     bash "$APP" > "$TMP/out_ov4" 2>/dev/null ) &
-bg=$!; sleep 0.5; printf 'allow' > "$TMP/ov4.decision"; wait $bg
+bg=$!; wait_block "$TMP/ov4.json"; printf 'allow' > "$TMP/ov4.decision"; wait $bg
 got="$(jq -r '.hookSpecificOutput.permissionDecision' "$TMP/out_ov4" 2>/dev/null)"
 assert_eq "key isolation: another session still gates Bash" "allow" "$got"
+
+# E) EMPTY override file is NOT a sentinel: it falls back to the fleet default, so Bash
+# is STILL gated (B1: a blank/half-written file must not silently disable the gate).
+date +%s > "$HB"
+: > "$CC_GATE_TOOLS_DIR/ov5"
+( printf '%s' '{"session_id":"ov5","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"rm -rf build"}}' \
+    | CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=5 \
+    bash "$APP" > "$TMP/out_ov5" 2>/dev/null ) &
+bg=$!; wait_block "$TMP/ov5.json"; printf 'deny' > "$TMP/ov5.decision"; wait $bg
+got="$(jq -r '.hookSpecificOutput.permissionDecision' "$TMP/out_ov5" 2>/dev/null)"
+assert_eq "empty override file: Bash still gated (empty = fleet default)" "deny" "$got"
 
 finish

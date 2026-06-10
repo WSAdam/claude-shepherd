@@ -80,12 +80,16 @@ KEY="$(cc_key "$SESSION_ID" "$CWD")"
 # Per-session gated-tools override (Feature D, least-privilege). A dedicated file
 # mirrors cc-autopilot/<key>: absent -> use the fleet GATE_TOOLS computed above;
 # "-"/"NONE" (any case) -> gate NOTHING for this session; else gate exactly the
-# listed tools. One cat, no jq, on the hot path. Mirrors core.resolveGateTools.
+# listed tools. One cat, no jq, on the hot path.
+# KEEP IN SYNC with core.resolveGateTools in cc-core.lua: an EMPTY/whitespace file is
+# NOT a "gate nothing" sentinel -- it leaves the fleet GATE_TOOLS untouched (so a
+# blank or half-written override never silently disables the gate). Only "-"/"none".
 if [ -f "$GATE_TOOLS_DIR/$KEY" ]; then
   OVR="$(cat "$GATE_TOOLS_DIR/$KEY" 2>/dev/null | tr ',' ' ')"
   case "$(printf '%s' "$OVR" | tr -d '[:space:]' | tr 'A-Z' 'a-z')" in
-    ''|-|none) GATE_TOOLS="" ;;          # explicit / empty -> gate nothing
-    *)         GATE_TOOLS="$OVR" ;;       # session-specific list wins
+    '')      : ;;                         # empty/whitespace -> no override (fleet default)
+    -|none)  GATE_TOOLS="" ;;             # sentinel -> gate nothing this session
+    *)       GATE_TOOLS="$OVR" ;;         # session-specific list wins
   esac
 fi
 

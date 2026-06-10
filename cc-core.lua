@@ -474,6 +474,33 @@ function M.fmtDuration(seconds)
   return (rm == 0) and (h .. "h") or (h .. "h " .. rm .. "m")
 end
 
+-- Time a human was the bottleneck for one session: the gap from each tool_request to
+-- its resolving decision, summed. ANY decision resolves the pending request (an
+-- auto-allow/deny still clears it) -- but only a human/timeout-fallback decision
+-- CREDITS the gap as your wait, so an auto-decision between a request and a later
+-- human decision can't mis-attribute time. Gaps over maxBlock are dropped (an idle
+-- overnight gap between a request and its answer isn't "blocked time"). Pure; sorts a
+-- COPY by ts so callers needn't pre-sort. Shared by fleetStats (the per-session loop).
+function M.blockedSeconds(events, maxBlock)
+  maxBlock = tonumber(maxBlock) or 1800
+  local evs = {}
+  for _, e in ipairs(events or {}) do evs[#evs + 1] = e end
+  table.sort(evs, function(a, b) return (tonumber(a.ts) or 0) < (tonumber(b.ts) or 0) end)
+  local blocked, lastReqTs = 0, nil
+  for _, e in ipairs(evs) do
+    if e.type == "tool_request" then
+      lastReqTs = tonumber(e.ts) or 0
+    elseif e.type == "decision" then
+      if lastReqTs and (e.by == "human" or e.by == "timeout-fallback") then
+        local gap = (tonumber(e.ts) or 0) - lastReqTs
+        if gap > 0 and gap <= maxBlock then blocked = blocked + gap end
+      end
+      lastReqTs = nil  -- ANY decision resolves the pending request
+    end
+  end
+  return blocked
+end
+
 -- Aggregate a list of ledger events into fleet-wide stats for the insights view.
 -- opts = { topN (mostActive cap, default 5), maxBlock (cap a single blocked gap,
 -- default 1800s, so an overnight idle between a request and its answer isn't
@@ -537,21 +564,12 @@ function M.fleetStats(events, opts)
   local perSession = {}
   for _, sid in ipairs(order) do
     local agg = bySession[sid]
-    table.sort(agg.events, function(a, b) return (tonumber(a.ts) or 0) < (tonumber(b.ts) or 0) end)
-    local blocked, lastReqTs, lastTs = 0, nil, 0
+    local lastTs = 0
     for _, e in ipairs(agg.events) do
       local ts = tonumber(e.ts) or 0
       if ts > lastTs then lastTs = ts end
-      if e.type == "tool_request" then
-        lastReqTs = ts
-      elseif e.type == "decision" and (e.by == "human" or e.by == "timeout-fallback") then
-        if lastReqTs then
-          local gap = ts - lastReqTs
-          if gap > 0 and gap <= maxBlock then blocked = blocked + gap end
-          lastReqTs = nil
-        end
-      end
     end
+    local blocked = M.blockedSeconds(agg.events, maxBlock)
     approvalBlockedSeconds = approvalBlockedSeconds + blocked
     local d = agg.decisions
     local dTotal = d.allow + d.deny + d.fallback
@@ -626,12 +644,14 @@ function M.sessionRisk(events, opts)
       if e.outcome == "deny" then denyCount = denyCount + 1 end
       if e.by == "autoDeny" then autoDenyHits = autoDenyHits + 1 end
       if e.by == "timeout-fallback" then timeoutFallbacks = timeoutFallbacks + 1 end
-      if (e.by == "human" or e.by == "timeout-fallback") and lastReqTs then
-        if ((tonumber(e.ts) or 0) - lastReqTs) > th.staleSeconds then
-          staleApprovals = staleApprovals + 1
-        end
-        lastReqTs = nil
+      -- Only a human/timeout decision counts as a slow approval, but ANY decision
+      -- resolves the pending request -- so an auto-decision can't leave a stale
+      -- lastReqTs that a later human decision would mis-pair (mirrors blockedSeconds).
+      if lastReqTs and (e.by == "human" or e.by == "timeout-fallback")
+         and ((tonumber(e.ts) or 0) - lastReqTs) > th.staleSeconds then
+        staleApprovals = staleApprovals + 1
       end
+      lastReqTs = nil
     end
   end
 
@@ -1115,10 +1135,11 @@ M.DEFAULT_GATE_TOOLS = "Bash Write Edit MultiEdit NotebookEdit"
 -- `gate.tools` > the built-in default. The override may be the sentinel "-"/"NONE"
 -- meaning "gate NOTHING for this session" (returns ""), distinct from no override
 -- (absent file -> falls through to the fleet default). A blank string is NOT an
--- override. cc-approve.sh computes the same precedence inline on its hot path; this
--- mirror exists so the logic is unit-tested and the panel can show the operator the
--- effective list. providerDefault is reserved for a future per-provider layer (pass
--- nil for v1). Output is normalized via parseToolList.
+-- override (it falls back to the fleet default too). providerDefault is reserved for a
+-- future per-provider layer (pass nil for v1). Output is normalized via parseToolList.
+-- KEEP IN SYNC with the per-session override `case` block in cc-approve.sh (the shell
+-- hot path): both must agree that `-`/`none` gates nothing AND that an empty/whitespace
+-- value is NOT an override (falls back to the fleet default, not "gate nothing").
 function M.resolveGateTools(override, providerDefault, fleetDefault)
   local function present(s) return type(s) == "string" and s:match("%S") ~= nil end
   if present(override) then
