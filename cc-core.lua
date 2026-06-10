@@ -726,65 +726,51 @@ function M.fleetStats(events, opts)
 end
 
 -- ---- Time-series buckets (sparkline trends over the ledger) -----------------
--- Bucket events into a fixed-width time series for one metric, for the insights
--- sparklines. Returns a dense array (no gaps) of { ts = bucket start, value }, one
--- bucket per `bucketSec` from the first to the last event's bucket. The caller
--- windows the events first (e.g. last 24h) and picks bucketSec, so the series stays
--- small. Pure + deterministic. Metrics:
+-- Per-metric accumulators for bucketEvents. Each writes into the shared `series`
+-- (indexed via `idx`); a dispatch table (not an if/elseif chain) keeps each metric's
+-- state isolated and makes a 5th metric a one-key addition. ctx = { nB, opts }.
 --   activity   -> prompts + tool_requests per bucket
---   active     -> distinct sessions seen per bucket
+--   active     -> distinct sessions DRIVING work (prompt/tool_request) per bucket --
+--                 deliberately the SAME event set as activity (a session whose only
+--                 event in an hour is a trailing decision wasn't "running" that hour)
 --   denialRate -> deny / total-decisions per bucket (0..1; 0 when no decisions)
 --   blocked    -> "time blocked on you" per bucket: each tool_request->resolving
---                 human/timeout decision gap (<= opts.maxBlock) credited to the
+--                 human/timeout decision gap (<= ctx.opts.maxBlock) credited to the
 --                 bucket where the wait STARTED (same pairing as blockedSeconds).
--- Unknown metric -> {}. opts.maxBlock caps a single blocked gap (default 1800s).
-function M.bucketEvents(events, bucketSec, metric, opts)
-  opts = opts or {}
-  bucketSec = tonumber(bucketSec) or 3600
-  if bucketSec <= 0 then bucketSec = 3600 end
-  local evs = {}
-  for _, e in ipairs(events or {}) do
-    if type(e) == "table" and tonumber(e.ts) then evs[#evs + 1] = e end
-  end
-  if #evs == 0 then return {} end
-  table.sort(evs, function(a, b) return tonumber(a.ts) < tonumber(b.ts) end)
-  local startB = math.floor(tonumber(evs[1].ts) / bucketSec) * bucketSec
-  local endB   = math.floor(tonumber(evs[#evs].ts) / bucketSec) * bucketSec
-  local nB = math.floor((endB - startB) / bucketSec) + 1
-  local series = {}
-  for i = 1, nB do series[i] = { ts = startB + (i - 1) * bucketSec, value = 0 } end
-  local function idx(ts) return math.floor((tonumber(ts) - startB) / bucketSec) + 1 end
-
-  if metric == "activity" then
+local BUCKET_METRICS = {
+  activity = function(evs, series, idx)
     for _, e in ipairs(evs) do
       if e.type == "prompt" or e.type == "tool_request" then
         local i = idx(e.ts); series[i].value = series[i].value + 1
       end
     end
-  elseif metric == "active" then
+  end,
+  active = function(evs, series, idx)
     local seen = {}
     for _, e in ipairs(evs) do
-      if e.session_id then
+      if (e.type == "prompt" or e.type == "tool_request") and e.session_id then
         local i = idx(e.ts)
         seen[i] = seen[i] or {}
         if not seen[i][e.session_id] then seen[i][e.session_id] = true; series[i].value = series[i].value + 1 end
       end
     end
-  elseif metric == "denialRate" then
+  end,
+  denialRate = function(evs, series, idx, ctx)
     local denom = {}
     for _, e in ipairs(evs) do
       if e.type == "decision" then
         local i = idx(e.ts)
-        denom[i] = (denom[i] or 0) + 1
+        denom[i] = (denom[i] or 0) + 1                              -- all decisions
         if e.outcome == "deny" then series[i].value = series[i].value + 1 end
       end
     end
-    for i = 1, nB do
+    for i = 1, ctx.nB do
       local d = denom[i] or 0
       series[i].value = (d > 0) and (series[i].value / d) or 0
     end
-  elseif metric == "blocked" then
-    local maxBlock = tonumber(opts.maxBlock) or 1800
+  end,
+  blocked = function(evs, series, idx, ctx)
+    local maxBlock = tonumber(ctx.opts.maxBlock) or 1800
     local lastReqTs = nil
     for _, e in ipairs(evs) do
       if e.type == "tool_request" then
@@ -799,9 +785,35 @@ function M.bucketEvents(events, bucketSec, metric, opts)
         lastReqTs = nil  -- ANY decision resolves the pending request (mirrors blockedSeconds)
       end
     end
-  else
-    return {}
+  end,
+}
+
+-- Bucket events into a fixed-width time series for one metric (the insights
+-- sparklines). Returns a dense array (no gaps) of { ts = bucket start, value }, one
+-- bucket per `bucketSec` from the first to the last event's bucket. The caller
+-- windows the events first (e.g. last 24h) and picks bucketSec, so the series stays
+-- small -- for the `blocked` metric the caller should add a maxBlock lookback to the
+-- window so a wait that started just before it but resolved inside is still paired.
+-- Pure + deterministic. Unknown metric -> {}.
+function M.bucketEvents(events, bucketSec, metric, opts)
+  opts = opts or {}
+  bucketSec = tonumber(bucketSec) or 3600
+  if bucketSec <= 0 then bucketSec = 3600 end
+  local handler = BUCKET_METRICS[metric]
+  if not handler then return {} end
+  local evs = {}
+  for _, e in ipairs(events or {}) do
+    if type(e) == "table" and tonumber(e.ts) then evs[#evs + 1] = e end
   end
+  if #evs == 0 then return {} end
+  table.sort(evs, function(a, b) return tonumber(a.ts) < tonumber(b.ts) end)
+  local startB = math.floor(tonumber(evs[1].ts) / bucketSec) * bucketSec
+  local endB   = math.floor(tonumber(evs[#evs].ts) / bucketSec) * bucketSec
+  local nB = math.floor((endB - startB) / bucketSec) + 1
+  local series = {}
+  for i = 1, nB do series[i] = { ts = startB + (i - 1) * bucketSec, value = 0 } end
+  local function idx(ts) return math.floor((tonumber(ts) - startB) / bucketSec) + 1 end
+  handler(evs, series, idx, { nB = nB, opts = opts })
   return series
 end
 

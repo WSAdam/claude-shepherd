@@ -1380,9 +1380,11 @@ do
   eq("bucket: activity b3 (none)", act[3].value, 0)
 
   local actv = core.bucketEvents(evs, 3600, "active")
-  eq("bucket: active b1 distinct sessions", actv[1].value, 1)
-  eq("bucket: active b2 distinct sessions", actv[2].value, 2)
-  eq("bucket: active b3 distinct sessions", actv[3].value, 1)
+  eq("bucket: active b1 distinct (driving) sessions", actv[1].value, 1)
+  eq("bucket: active b2 distinct (driving) sessions", actv[2].value, 2)
+  -- b3 has only a trailing decision for session b (no prompt/tool that hour) -> 0,
+  -- matching `activity`'s event set (a decision-only session wasn't "running").
+  eq("bucket: active b3 (decision-only -> not active)", actv[3].value, 0)
 
   local dr = core.bucketEvents(evs, 3600, "denialRate")
   eq("bucket: denialRate b1 (no decisions = 0)", dr[1].value, 0)
@@ -1403,6 +1405,20 @@ do
      { ts = 100, type = "tool_request" },
      { ts = 100 + 4000, type = "decision", by = "human", outcome = "allow" },
   }, 3600, "blocked", { maxBlock = 1800 })[1].value, 0)
+
+  -- denialRate with a denominator > 1 (locks in deny / TOTAL-decisions, not deny/deny)
+  eq("bucket: denialRate fractional (1 deny / 2 decisions)", core.bucketEvents({
+     { ts = 100, type = "decision", outcome = "deny",  by = "human" },
+     { ts = 200, type = "decision", outcome = "allow", by = "human" },
+  }, 3600, "denialRate")[1].value, 0.5)
+
+  -- a non-human/timeout decision RESOLVES the pending request without crediting it,
+  -- so a later human decision can't be mis-paired with that already-cleared request.
+  eq("bucket: blocked — non-human decision clears, no later mis-credit", core.bucketEvents({
+     { ts = 100,  type = "tool_request" },
+     { ts = 200,  type = "decision", by = "auto",  outcome = "allow" },
+     { ts = 1000, type = "decision", by = "human", outcome = "allow" },
+  }, 3600, "blocked")[1].value, 0)
 end
 
 -- ---- isHung: stalled `working` session watchdog ----------------------------

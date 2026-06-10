@@ -1386,10 +1386,15 @@ local function handleBridgeMsg(msg)
     local res = FX.readLedger({})
     local maxBlock = tonumber(core.config(loadConfig(), "insights.maxBlockSeconds", 1800)) or 1800
     local stats = core.fleetStats(res.events, { now = FX.now(), topN = 8, maxBlock = maxBlock })
-    -- Sparkline trends: last 24h in hourly buckets (windowed first so the series is small).
-    local recent = core.filterLedger(res.events, { sinceTs = FX.now() - 24 * 3600 })
+    -- Sparkline trends: last 24h in hourly buckets (windowed first so the series is
+    -- small). `blocked` pairs a tool_request with its later decision, so its window
+    -- gets a maxBlock lookback: a wait that started just before the 24h edge but
+    -- resolved inside it is still paired (its request isn't filtered out).
+    local since = FX.now() - 24 * 3600
+    local recent = core.filterLedger(res.events, { sinceTs = since })
+    local recentBlocked = core.filterLedger(res.events, { sinceTs = since - maxBlock })
     stats.spark = {
-      blocked    = core.bucketEvents(recent, 3600, "blocked", { maxBlock = maxBlock }),
+      blocked    = core.bucketEvents(recentBlocked, 3600, "blocked", { maxBlock = maxBlock }),
       activity   = core.bucketEvents(recent, 3600, "activity"),
       active     = core.bucketEvents(recent, 3600, "active"),
       denialRate = core.bucketEvents(recent, 3600, "denialRate"),
