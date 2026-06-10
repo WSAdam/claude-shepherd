@@ -1831,17 +1831,20 @@ local HTML = [[
   #d-usage { font-size:11px; color:#9aa0ad; margin-top:6px; }
   #d-usage .um-row { display:flex; justify-content:space-between; gap:8px; }
   #empty { color:#6b7280; font-size:13px; padding:18px; text-align:center; }
-  #renamebar, #confirmbar, #searchbar, #setgroupbar { display:none; align-items:center; gap:6px; padding:8px 12px;
+  /* shared bar rows (search / set-group / rename / confirm). The wrapper carries
+     class="barrow" for styling so adding a new bar needs zero CSS; the per-bar id
+     stays for JS show/hide targeting. Per-bar exceptions keep their id selectors. */
+  .barrow { display:none; align-items:center; gap:6px; padding:8px 12px;
     background:#161821; border-bottom:1px solid #2c2f3a; }
-  #renamebar.show, #confirmbar.show, #searchbar.show, #setgroupbar.show { display:flex; }
-  #renamebar-label, #searchbar-label, #setgroupbar-label { font-size:12px; color:#9fb6d6; }
+  .barrow.show { display:flex; }
+  .barrow-label { font-size:12px; color:#9fb6d6; }
   #searchbar-count { font-size:11px; color:#8a8d99; white-space:nowrap; }
   #confirmbar-label { font-size:12px; color:#e8e9ee; flex:1; }
-  #renamebar-input, #searchbar-input, #setgroupbar-input { flex:1; background:#1b1d24; color:#e8e9ee; border:1px solid #2c2f3a;
+  .barrow input { flex:1; background:#1b1d24; color:#e8e9ee; border:1px solid #2c2f3a;
     border-radius:6px; font-size:12px; padding:4px 6px; font-family:inherit; }
-  #renamebar button, #confirmbar button, #searchbar button, #setgroupbar button { background:#21232c; color:#cfd2db;
+  .barrow button { background:#21232c; color:#cfd2db;
     border:1px solid #2c2f3a; border-radius:6px; font-size:12px; padding:4px 10px; cursor:pointer; }
-  #renamebar button:hover, #confirmbar button:hover, #searchbar button:hover, #setgroupbar button:hover { background:#2b2e39; }
+  .barrow button:hover { background:#2b2e39; }
   #confirmbar button.danger { border-color:#ef4444; color:#f3a1a1; }
   /* group filter chips (shown only when groups exist) */
   #groupchips { display:none; flex-wrap:wrap; gap:6px; padding:6px 10px; border-bottom:1px solid #2c2f3a; }
@@ -2057,26 +2060,26 @@ local HTML = [[
       </select>
     </span>
   </div>
-  <div id="searchbar">
-    <span id="searchbar-label">🔍</span>
+  <div id="searchbar" class="barrow">
+    <span id="searchbar-label" class="barrow-label">🔍</span>
     <input id="searchbar-input" placeholder="Filter sessions… (name, project, status, group)"
            oninput="onSearchInput()" onkeydown="searchKeydown(event)">
     <span id="searchbar-count"></span>
     <button onclick="toggleSearch()">✕</button>
   </div>
-  <div id="setgroupbar">
-    <span id="setgroupbar-label">Group:</span>
+  <div id="setgroupbar" class="barrow">
+    <span id="setgroupbar-label" class="barrow-label">Group:</span>
     <input id="setgroupbar-input" placeholder="group name (blank to clear)" onkeydown="groupKeydown(event)">
     <button onclick="commitGroup()">Set</button>
     <button onclick="hideBars()">Cancel</button>
   </div>
-  <div id="renamebar">
-    <span id="renamebar-label">Rename:</span>
+  <div id="renamebar" class="barrow">
+    <span id="renamebar-label" class="barrow-label">Rename:</span>
     <input id="renamebar-input" onkeydown="renameKeydown(event)">
     <button onclick="commitRename()">Set</button>
     <button onclick="hideBars()">Cancel</button>
   </div>
-  <div id="confirmbar">
+  <div id="confirmbar" class="barrow">
     <span id="confirmbar-label"></span>
     <button class="danger" onclick="commitClose()">Close</button>
     <button onclick="hideBars()">Cancel</button>
@@ -2528,12 +2531,14 @@ local HTML = [[
     // ---- Bulk fleet actions (act on the visible set at once) ----------------
     // JS twin of core.selectActionable (target by status) so the bar can show live
     // counts; the Lua side re-derives the targets from the keys we send (WYSIWYG).
+    // MUST stay byte-for-byte equivalent to core.selectActionable's predicate -- if
+    // one changes, change both, or the count drifts from what Lua acts on.
     function actionableKeys(action, items){
       return (items || []).filter(function(it){
         if(it.stale || !it.key) return false;
         if(action === "approve") return it.status === "approval";
         if(action === "stop") return it.status === "working";
-        if(action === "nudge") return true;
+        if(action === "nudge") return it.status !== "approval";  // excl. approval: nudge submits
         return false;
       }).map(function(it){ return it.key; });
     }

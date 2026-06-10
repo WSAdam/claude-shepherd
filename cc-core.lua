@@ -342,7 +342,8 @@ function M.setGroup(groupsByKey, key, value)
   for k, v in pairs(groupsByKey or {}) do out[k] = v end
   if not key or key == "" then return out end
   local txt = tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", "")
-  if txt == "" then out[key] = nil else out[key] = txt end  -- (and/or can't yield nil)
+  -- explicit if/else: the (cond and nil or x) idiom can't return nil when txt=="".
+  if txt == "" then out[key] = nil else out[key] = txt end
   return out
 end
 
@@ -354,8 +355,11 @@ end
 -- mis-fire an Enter into a session that isn't actually waiting:
 --   approve -> sessions awaiting a decision   (status "approval")
 --   stop    -> sessions mid-turn              (status "working")
---   nudge   -> all live (non-stale) sessions  (broadcast text)
--- Stale tiles are never targeted (a dead window can't act). Unknown action -> {}.
+--   nudge   -> live sessions NOT mid-approval (broadcast a follow-up prompt)
+-- Stale tiles are never targeted (a dead window can't act). nudge also excludes
+-- `approval`: handleAction's nudge pastes text AND submits, so broadcasting into a
+-- session sitting at its y/n approval prompt would corrupt that decision -- a
+-- session needs a decision, not a prompt. Unknown action -> {}.
 function M.selectActionable(list, action)
   local out = {}
   for _, it in ipairs(list or {}) do
@@ -363,7 +367,7 @@ function M.selectActionable(list, action)
       local ok = false
       if action == "approve" then ok = (it.status == "approval")
       elseif action == "stop" then ok = (it.status == "working")
-      elseif action == "nudge" then ok = true
+      elseif action == "nudge" then ok = (it.status ~= "approval")
       end
       if ok then out[#out + 1] = it.key end
     end
