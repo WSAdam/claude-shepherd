@@ -31,6 +31,8 @@ GATE_TIMEOUT="${CC_GATE_TIMEOUT:-120}"
 HEARTBEAT_MAX_AGE="${CC_PANEL_MAX_AGE:-5}"
 APPROVED_DIR="${CC_APPROVED_DIR:-${HOME}/.claude/cc-approved}"
 AUTOPILOT_DIR="${CC_AUTOPILOT_DIR:-${HOME}/.claude/cc-autopilot}"
+# Per-session gated-tools overrides (Feature D): one file per key, like cc-autopilot.
+GATE_TOOLS_DIR="${CC_GATE_TOOLS_DIR:-${HOME}/.claude/cc-gate-tools}"
 
 emit_allow() {
   printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}'
@@ -66,17 +68,32 @@ cc_have_jq || exit 0
 
 TOOL="$(cc_get "$INPUT" '.tool_name')"
 
-# Not a gated tool -> normal flow (reads etc. stay fast).
-case " $GATE_TOOLS " in
-  *" $TOOL "*) ;;
-  *) exit 0 ;;
-esac
-
+# Key derivation moves ABOVE the gated-tool check so the per-session override can be
+# consulted (the override is keyed by session). The extra cost for a non-gated tool
+# is one cc_key (a tr), negligible.
 SESSION_ID="$(cc_get "$INPUT" '.session_id')"
 CWD="$(cc_get "$INPUT" '.cwd')"
 [ -n "$CWD" ] || CWD="$PWD"
 NAME="$(basename "$CWD")"
 KEY="$(cc_key "$SESSION_ID" "$CWD")"
+
+# Per-session gated-tools override (Feature D, least-privilege). A dedicated file
+# mirrors cc-autopilot/<key>: absent -> use the fleet GATE_TOOLS computed above;
+# "-"/"NONE" (any case) -> gate NOTHING for this session; else gate exactly the
+# listed tools. One cat, no jq, on the hot path. Mirrors core.resolveGateTools.
+if [ -f "$GATE_TOOLS_DIR/$KEY" ]; then
+  OVR="$(cat "$GATE_TOOLS_DIR/$KEY" 2>/dev/null | tr ',' ' ')"
+  case "$(printf '%s' "$OVR" | tr -d '[:space:]' | tr 'A-Z' 'a-z')" in
+    ''|-|none) GATE_TOOLS="" ;;          # explicit / empty -> gate nothing
+    *)         GATE_TOOLS="$OVR" ;;       # session-specific list wins
+  esac
+fi
+
+# Not a gated tool (for this session) -> normal flow (reads etc. stay fast).
+case " $GATE_TOOLS " in
+  *" $TOOL "*) ;;
+  *) exit 0 ;;
+esac
 
 # A short summary of what's being approved (Bash command, file path, ...).
 SUMMARY="$(cc_get "$INPUT" '.tool_input.command')"

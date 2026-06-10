@@ -65,6 +65,33 @@
     }
   ],
 
+  "risk": {
+    "_comment": "Per-session risk indicator (Feature E). OFF by default. A small empirical score (0-100) computed from each session's ledger history — deny rate, auto-deny pattern hits, timeout-fallbacks, slow approvals, tool volume — surfaced as a med/high badge on the tile (low shows nothing). Indicator ONLY: it never blocks or quarantines anything. Requires the ledger to be enabled to have data. thresholds.med/high set the band cutoffs; thresholds.staleSeconds is the approval gap that counts as a slow-approval signal.",
+    "enabled": false,
+    "thresholds": { "med": 34, "high": 67, "staleSeconds": 300 }
+  },
+
+  "collision": {
+    "_comment": "Same-directory collision warning (Feature B). OFF by default. Flags tiles when 2+ ACTIVE sessions (working/approval) share a working directory, so two agents editing the same repo don't silently clobber each other. Detection only — it cannot lock another process's writes. useGitRoot groups by git repo root (one cached `git rev-parse` per directory) instead of the exact folder, so sibling subfolders of one repo also count.",
+    "enabled": false,
+    "useGitRoot": false
+  },
+
+  "drain": {
+    "_comment": "Graceful drain (Feature F). OFF by default. Adds a right-click 'Drain (finish turn, then close)' action: instead of closing immediately, it waits for the session to finish the in-flight turn (next done) and then closes. If the session is already idle/done it closes now. Drain wins over queue auto-feed for the same session.",
+    "enabled": false
+  },
+
+  "respawn": {
+    "_comment": "One-click respawn (Feature F). OFF by default. Adds a right-click 'Respawn from cwd' action that relaunches a dead/stale session from its last working dir + matched provider profile + editor. A gateway session whose provider profile is no longer in `providers` can't be respawned (its auth env can't be reconstructed).",
+    "enabled": false
+  },
+
+  "insights": {
+    "_comment": "Fleet insights view (Feature A) — the 📊 toolbar button. A read-only aggregate of the ledger (turns/session, approval & denial rates, decision provenance, time the fleet spent blocked on you). Always available like the audit view; shows zeros until the ledger is enabled. maxBlockSeconds caps a single request→approval gap when summing 'time blocked on you', so an overnight idle isn't counted.",
+    "maxBlockSeconds": 1800
+  },
+
   "policies": {
     "approveRepeats": false,
     "autopilot": {

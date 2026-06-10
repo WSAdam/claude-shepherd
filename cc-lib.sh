@@ -146,9 +146,15 @@ cc_del_field() {
   fi
 }
 
-# Remove a session entirely (used by SessionEnd) plus any stray decision file.
+# Per-session gated-tools override dir (Feature D), mirroring cc-autopilot. Defined
+# here so SessionEnd can clean it up; cc-approve.sh reads the same path on its hot path.
+CC_GATE_TOOLS_DIR="${CC_GATE_TOOLS_DIR:-${HOME}/.claude/cc-gate-tools}"
+
+# Remove a session entirely (used by SessionEnd) plus any stray decision file and
+# per-session gated-tools override (a new session gets a new key, so this just
+# stops orphans accumulating).
 cc_remove() {
-  rm -f "$(cc_file "$1")" "$(cc_decision_file "$1")" 2>/dev/null || true
+  rm -f "$(cc_file "$1")" "$(cc_decision_file "$1")" "$CC_GATE_TOOLS_DIR/$1" 2>/dev/null || true
 }
 
 # ---- Audit/event ledger ----------------------------------------------------

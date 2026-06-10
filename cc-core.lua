@@ -454,6 +454,210 @@ function M.auditReviewPrompt(narrative, opts)
     .. tostring(narrative or "")
 end
 
+-- ---- Fleet insights (pure aggregation over the ledger) ---------------------
+-- Both fleetStats and sessionRisk read ALREADY-PARSED ledger events (the caller
+-- passes FX.readLedger(...).events) -- zero file I/O, zero model cost. The whole
+-- feature is descriptive analytics over events the hooks already write.
+
+-- Human-readable duration: 45s / 1m 30s / 2h 5m. Pure (no os.* needed).
+function M.fmtDuration(seconds)
+  local s = math.floor(tonumber(seconds) or 0)
+  if s < 0 then s = 0 end
+  if s < 60 then return s .. "s" end
+  local m = math.floor(s / 60)
+  if m < 60 then
+    local rs = s % 60
+    return (rs == 0) and (m .. "m") or (m .. "m " .. rs .. "s")
+  end
+  local h = math.floor(m / 60)
+  local rm = m % 60
+  return (rm == 0) and (h .. "h") or (h .. "h " .. rm .. "m")
+end
+
+-- Aggregate a list of ledger events into fleet-wide stats for the insights view.
+-- opts = { topN (mostActive cap, default 5), maxBlock (cap a single blocked gap,
+-- default 1800s, so an overnight idle between a request and its answer isn't
+-- counted) }. Pure + deterministic.
+--   * decision buckets: allow / deny / fallback -- `fallback` (timeout) is its OWN
+--     bucket and NEVER counts as a denial.
+--   * provenance: counts keyed by the decision `by` (autoDeny/autoAllow/autopilot/
+--     approveRepeats/human/timeout-fallback/other).
+--   * perSession: turn counts (prompts), tool requests, decision split, denialRate.
+--   * approvalBlockedSeconds: fleet time a human was the bottleneck -- the gap from
+--     each tool_request to its resolving human/timeout-fallback decision.
+function M.fleetStats(events, opts)
+  opts = opts or {}
+  local topN = tonumber(opts.topN) or 5
+  local maxBlock = tonumber(opts.maxBlock) or 1800
+  local totals = { events = 0, sessions = 0, prompts = 0, toolRequests = 0,
+                   spawns = 0, decisions = 0 }
+  local decisions = { allow = 0, deny = 0, fallback = 0, total = 0 }
+  local provenance = {}
+  local bySession, order = {}, {}
+  for _, e in ipairs(events or {}) do
+    if type(e) == "table" then
+      totals.events = totals.events + 1
+      local sid = e.session_id or e.key or "?"
+      local agg = bySession[sid]
+      if not agg then
+        agg = { session_id = sid, name = e.name, projectKey = e.projectKey,
+                prompts = 0, toolRequests = 0,
+                decisions = { allow = 0, deny = 0, fallback = 0 }, events = {} }
+        bySession[sid] = agg
+        order[#order + 1] = sid
+      end
+      if e.name and not agg.name then agg.name = e.name end
+      agg.events[#agg.events + 1] = e
+      local t = e.type
+      if t == "prompt" then
+        totals.prompts = totals.prompts + 1; agg.prompts = agg.prompts + 1
+      elseif t == "tool_request" then
+        totals.toolRequests = totals.toolRequests + 1
+        agg.toolRequests = agg.toolRequests + 1
+      elseif t == "spawn" then
+        totals.spawns = totals.spawns + 1
+      elseif t == "decision" then
+        totals.decisions = totals.decisions + 1
+        local out = e.outcome
+        if out == "allow" then
+          decisions.allow = decisions.allow + 1; agg.decisions.allow = agg.decisions.allow + 1
+        elseif out == "deny" then
+          decisions.deny = decisions.deny + 1; agg.decisions.deny = agg.decisions.deny + 1
+        elseif out == "fallback" then
+          decisions.fallback = decisions.fallback + 1
+          agg.decisions.fallback = agg.decisions.fallback + 1
+        end
+        provenance[e.by or "other"] = (provenance[e.by or "other"] or 0) + 1
+      end
+    end
+  end
+  decisions.total = decisions.allow + decisions.deny + decisions.fallback
+
+  local approvalBlockedSeconds = 0
+  local perSession = {}
+  for _, sid in ipairs(order) do
+    local agg = bySession[sid]
+    table.sort(agg.events, function(a, b) return (tonumber(a.ts) or 0) < (tonumber(b.ts) or 0) end)
+    local blocked, lastReqTs, lastTs = 0, nil, 0
+    for _, e in ipairs(agg.events) do
+      local ts = tonumber(e.ts) or 0
+      if ts > lastTs then lastTs = ts end
+      if e.type == "tool_request" then
+        lastReqTs = ts
+      elseif e.type == "decision" and (e.by == "human" or e.by == "timeout-fallback") then
+        if lastReqTs then
+          local gap = ts - lastReqTs
+          if gap > 0 and gap <= maxBlock then blocked = blocked + gap end
+          lastReqTs = nil
+        end
+      end
+    end
+    approvalBlockedSeconds = approvalBlockedSeconds + blocked
+    local d = agg.decisions
+    local dTotal = d.allow + d.deny + d.fallback
+    perSession[#perSession + 1] = {
+      session_id = sid, name = agg.name or sid, projectKey = agg.projectKey,
+      prompts = agg.prompts, toolRequests = agg.toolRequests,
+      decisions = { allow = d.allow, deny = d.deny, fallback = d.fallback },
+      denialRate = dTotal > 0 and (d.deny / dTotal) or 0,
+      blockedSeconds = blocked, lastTs = lastTs,
+    }
+  end
+  totals.sessions = #perSession
+  table.sort(perSession, function(a, b)
+    if a.prompts ~= b.prompts then return a.prompts > b.prompts end
+    return (a.name or "") < (b.name or "")
+  end)
+  local mostActive = {}
+  for i = 1, math.min(topN, #perSession) do mostActive[i] = perSession[i] end
+
+  return {
+    totals = totals, decisions = decisions, provenance = provenance,
+    approvalRate = decisions.total > 0 and (decisions.allow / decisions.total) or 0,
+    denialRate = decisions.total > 0 and (decisions.deny / decisions.total) or 0,
+    perSession = perSession, mostActive = mostActive,
+    approvalBlockedSeconds = approvalBlockedSeconds,
+  }
+end
+
+-- ---- Empirical per-session risk score (indicator only; no enforcement) -----
+-- Default weights/thresholds (overridable via opts). Score is a weighted sum of
+-- ledger-observed signals, normalized to 0..100; each signal capped so one noisy
+-- dimension can't peg the score on its own.
+M.RISK_WEIGHTS = {
+  denyRate = 40,                              -- full deny rate -> +40
+  autoDenyHit = 8, autoDenyCap = 24,         -- safety net firing = elevated risk
+  timeoutFallback = 6, timeoutCap = 18,      -- requests left unsupervised
+  staleApproval = 4, staleCap = 12,          -- you were a slow bottleneck
+  volume = 3, volumeCap = 6,                  -- log-scaled tool exposure
+}
+M.RISK_THRESHOLDS = { med = 34, high = 67, staleSeconds = 300 }
+
+-- Score one session's risk from its ledger events (caller filters to the session
+-- via core.filterLedger(all, {session=sid})). Returns { score, band, signals }.
+-- Pure + deterministic; no quarantine, no side effects -- purely an indicator.
+function M.sessionRisk(events, opts)
+  opts = opts or {}
+  local function wv(k)
+    local v = opts.weights and opts.weights[k]
+    if v == nil then v = M.RISK_WEIGHTS[k] end
+    return tonumber(v) or 0
+  end
+  local th = {}
+  for k, v in pairs(M.RISK_THRESHOLDS) do th[k] = v end
+  if type(opts.thresholds) == "table" then
+    for k, v in pairs(opts.thresholds) do if v ~= nil then th[k] = v end end
+  end
+
+  local evs = {}
+  for _, e in ipairs(events or {}) do if type(e) == "table" then evs[#evs + 1] = e end end
+  table.sort(evs, function(a, b) return (tonumber(a.ts) or 0) < (tonumber(b.ts) or 0) end)
+
+  local decisionCount, denyCount = 0, 0
+  local autoDenyHits, timeoutFallbacks, toolRequests, staleApprovals = 0, 0, 0, 0
+  local lastReqTs = nil
+  for _, e in ipairs(evs) do
+    local t = e.type
+    if t == "tool_request" then
+      toolRequests = toolRequests + 1
+      lastReqTs = tonumber(e.ts)
+    elseif t == "decision" then
+      decisionCount = decisionCount + 1
+      if e.outcome == "deny" then denyCount = denyCount + 1 end
+      if e.by == "autoDeny" then autoDenyHits = autoDenyHits + 1 end
+      if e.by == "timeout-fallback" then timeoutFallbacks = timeoutFallbacks + 1 end
+      if (e.by == "human" or e.by == "timeout-fallback") and lastReqTs then
+        if ((tonumber(e.ts) or 0) - lastReqTs) > th.staleSeconds then
+          staleApprovals = staleApprovals + 1
+        end
+        lastReqTs = nil
+      end
+    end
+  end
+
+  local denyRate = decisionCount > 0 and (denyCount / decisionCount) or 0
+  local function capped(n, per, cap) local v = n * per; return (v > cap) and cap or v end
+  local score = denyRate * wv("denyRate")
+    + capped(autoDenyHits, wv("autoDenyHit"), wv("autoDenyCap"))
+    + capped(timeoutFallbacks, wv("timeoutFallback"), wv("timeoutCap"))
+    + capped(staleApprovals, wv("staleApproval"), wv("staleCap"))
+  local volScore = (math.log(toolRequests + 1) / math.log(10)) * wv("volume")
+  if volScore > wv("volumeCap") then volScore = wv("volumeCap") end
+  score = score + volScore
+  if score < 0 then score = 0 elseif score > 100 then score = 100 end
+  local band = "low"
+  if score >= th.high then band = "high" elseif score >= th.med then band = "med" end
+  return {
+    score = math.floor(score + 0.5),
+    band = band,
+    signals = {
+      decisionCount = decisionCount, denyCount = denyCount, denyRate = denyRate,
+      autoDenyHits = autoDenyHits, timeoutFallbacks = timeoutFallbacks,
+      staleApprovals = staleApprovals, toolRequests = toolRequests,
+    },
+  }
+end
+
 -- Map the sorted session list onto a deck of `count` keys (row-major). Returns
 -- items[1..count] (nil for empty keys) and how many sessions didn't fit.
 function M.deckLayout(count, list)
@@ -756,6 +960,17 @@ function M.shouldFeed(prev, cur, q, autoOn)
   return cur == "done" and prev ~= "done"
 end
 
+-- ---- Graceful drain (Feature F) --------------------------------------------
+-- Close a session only AFTER it finishes the in-flight turn: fire on the same
+-- fresh transition into `done` that shouldFeed uses (prev==done means we already
+-- handled it), but only when the operator armed drain for this tile. The draining
+-- flag is an in-memory panel intent (not a file) -- a Hammerspoon reload clears it
+-- so a stale "close on next done" can't fire on a session you've since resumed.
+function M.shouldDrainClose(draining, prev, cur)
+  if not draining then return false end
+  return cur == "done" and prev ~= "done"
+end
+
 -- Should this tile be pruned? Orphans = stale tiles with no session_id (a hook
 -- fire that lacked one, keyed by folder name, that SessionEnd can't clean), plus
 -- a ghost backstop for anything older than opts.pruneSeconds.
@@ -785,6 +1000,39 @@ function M.staleDuplicateKeys(list)
     if it.stale and it.name and liveNames[it.name] then keys[#keys + 1] = it.key end
   end
   return keys
+end
+
+-- ---- Same-directory collision warning (Feature B) --------------------------
+-- Flag tiles where 2+ ACTIVE sessions (working/approval, not stale -- i.e. the
+-- ones that could be writing right now) share a working dir, so two agents editing
+-- the same repo don't silently clobber each other. Detection only (we can't lock
+-- another process's writes). Grouping key is opts.rootByCwd[cwd] (a precomputed
+-- git-root, injected so this stays pure -- never shells out), falling back to the
+-- raw cwd when there's no resolved root. Returns { flags = {[key]=true}, groups =
+-- {[groupKey]={key,...}} } for groups of size >= 2.
+function M.collisions(items, opts)
+  opts = opts or {}
+  local rootByCwd = opts.rootByCwd
+  local groups = {}
+  for _, it in ipairs(items or {}) do
+    local active = (it.status == "working" or it.status == "approval") and not it.stale
+    if active and it.cwd and it.cwd ~= "" then
+      local root = rootByCwd and rootByCwd[it.cwd]
+      local gk = (type(root) == "string" and root ~= "") and root or it.cwd
+      local g = groups[gk]
+      if not g then g = {}; groups[gk] = g end
+      g[#g + 1] = it.key
+    end
+  end
+  local flags, outGroups = {}, {}
+  for gk, keys in pairs(groups) do
+    if #keys >= 2 then
+      table.sort(keys)
+      outGroups[gk] = keys
+      for _, k in ipairs(keys) do flags[k] = true end
+    end
+  end
+  return { flags = flags, groups = outGroups }
 end
 
 -- ---- Policy A: stale-approval escalation -----------------------------------
@@ -861,6 +1109,27 @@ end
 
 -- The default gated tools (everything that runs commands or changes files).
 M.DEFAULT_GATE_TOOLS = "Bash Write Edit MultiEdit NotebookEdit"
+
+-- Resolve a session's EFFECTIVE gated-tools list (Feature D: per-session least
+-- privilege). Precedence: per-session override > provider/mode default > fleet
+-- `gate.tools` > the built-in default. The override may be the sentinel "-"/"NONE"
+-- meaning "gate NOTHING for this session" (returns ""), distinct from no override
+-- (absent file -> falls through to the fleet default). A blank string is NOT an
+-- override. cc-approve.sh computes the same precedence inline on its hot path; this
+-- mirror exists so the logic is unit-tested and the panel can show the operator the
+-- effective list. providerDefault is reserved for a future per-provider layer (pass
+-- nil for v1). Output is normalized via parseToolList.
+function M.resolveGateTools(override, providerDefault, fleetDefault)
+  local function present(s) return type(s) == "string" and s:match("%S") ~= nil end
+  if present(override) then
+    local t = override:gsub("%s+", "")
+    if t == "-" or t:upper() == "NONE" then return "" end
+    return M.parseToolList(override)
+  end
+  if present(providerDefault) then return M.parseToolList(providerDefault) end
+  if present(fleetDefault) then return M.parseToolList(fleetDefault) end
+  return M.DEFAULT_GATE_TOOLS
+end
 
 -- ---- Installer: merge our hooks into the user's settings (Part E) ----------
 -- Merge `template.hooks` into `existing` settings, idempotently. Per event: if no
@@ -939,6 +1208,57 @@ function M.providerById(cfg, id)
     if type(p) == "table" and tostring(p.id) == tostring(id) then return p end
   end
   return nil
+end
+
+-- Find a provider profile by its running model (+ base URL), for Feature F's
+-- respawn -- a tile records `model`/`base_url` but not the provider id it launched
+-- from. Anthropic sessions (no base_url) match a profile by model alone; gateway
+-- sessions (base_url set) require BOTH model and baseUrl to match, so a respawn
+-- reconstructs the right endpoint + auth env. nil if nothing matches.
+function M.providerByModel(cfg, model, baseUrl)
+  local list = M.config(cfg, "providers", nil)
+  if type(list) ~= "table" or not model then return nil end
+  local hasBase = baseUrl ~= nil and tostring(baseUrl) ~= ""
+  for _, p in ipairs(list) do
+    if type(p) == "table" and tostring(p.model) == tostring(model) then
+      local pBase = (p.baseUrl ~= nil and tostring(p.baseUrl) ~= "") and tostring(p.baseUrl) or nil
+      if hasBase then
+        if pBase == tostring(baseUrl) then return p end
+      elseif not pBase then
+        return p
+      end
+    end
+  end
+  return nil
+end
+
+-- Reconstruct the spawn arguments to relaunch a dead/stale session (Feature F).
+-- Pure: returns the structured args FX.spawnSession needs, NOT a side effect.
+-- editor/permission_mode/cwd come straight off the tile; the provider is matched
+-- from model(+base_url) via providerByModel. A bare-Anthropic session yields
+-- providerId=nil (faithful bare `claude`). A gateway session whose profile is no
+-- longer in `providers` can't be rebuilt (its auth env is unknown) -> canRespawn
+-- false with a reason the UI can surface. No initial task: it's a relaunch.
+function M.respawnSpec(item, cfg)
+  if type(item) ~= "table" then return { canRespawn = false, reason = "no session" } end
+  local project = item.cwd
+  if not project or tostring(project) == "" then
+    return { canRespawn = false, reason = "unknown working dir" }
+  end
+  local editor = item.editor
+  if not editor or tostring(editor) == "" then editor = M.config(cfg, "spawn.editor", "terminal") end
+  local hasBase = item.base_url ~= nil and tostring(item.base_url) ~= ""
+  local profile = M.providerByModel(cfg, item.model, item.base_url)
+  if hasBase and not profile then
+    return { canRespawn = false, reason = "unknown gateway provider" }
+  end
+  return {
+    canRespawn = true,
+    editor = tostring(editor),
+    project = project,
+    permissionMode = item.permission_mode,
+    providerId = profile and profile.id or nil,
+  }
 end
 
 -- Ordered env injection for a profile: a list of { name, value, secret }. A

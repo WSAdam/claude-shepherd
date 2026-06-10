@@ -56,6 +56,7 @@ local HEARTBEAT  = STATUS_DIR .. "/.panel-alive"
 local CONFIG_FILE   = os.getenv("CC_CONFIG_FILE") or (os.getenv("HOME") .. "/.claude/cc-config.json")
 local QUEUE_DIR     = os.getenv("CC_QUEUE_DIR") or (os.getenv("HOME") .. "/.claude/cc-queue")
 local AUTOPILOT_DIR = os.getenv("CC_AUTOPILOT_DIR") or (os.getenv("HOME") .. "/.claude/cc-autopilot")
+local GATE_TOOLS_DIR = os.getenv("CC_GATE_TOOLS_DIR") or (os.getenv("HOME") .. "/.claude/cc-gate-tools")
 local GATE_FLAG     = os.getenv("CC_GATE_FLAG") or (os.getenv("HOME") .. "/.claude/cc-gate.enabled")
 local LABELS_FILE   = os.getenv("CC_LABELS_FILE") or (os.getenv("HOME") .. "/.claude/cc-labels.json")
 local RECENT_FILE   = os.getenv("CC_RECENT_FILE") or (os.getenv("HOME") .. "/.claude/cc-recent-dirs.json")
@@ -128,6 +129,8 @@ local lastJumpKey = nil  -- for the cycle-jump hotkey
 local spawnPrompt        -- forward declaration (defined after FX)
 local prevStatus = {}    -- key -> last refresh's status (for auto-feed transitions)
 local escalated  = {}    -- key -> true once we've escalated this approval episode
+local draining    = {}   -- key -> true: close on the next fresh `done` (Feature F)
+local gitRootByCwd = {}  -- cwd -> resolved git root ("" = not a repo) cache (Feature B)
 local caffeineTick = 0   -- throttles the keep-awake state re-read (F2)
 local ledgerGcTick = 0   -- throttles the ledger retention GC (off the 180s timer)
 local loadConfig         -- forward declaration (defined near refresh)
@@ -679,6 +682,33 @@ function FX.setAutopilot(key, expiry)
 end
 function FX.clearAutopilot(key) os.remove(AUTOPILOT_DIR .. "/" .. key) end
 
+-- Per-session gated-tools override (Feature D): a dedicated file per session that
+-- cc-approve.sh reads on its hot path. "" / nil = no override; "-" = gate nothing.
+function FX.gateToolsOverride(key) return FX.readFile(GATE_TOOLS_DIR .. "/" .. key) end
+function FX.setGateToolsOverride(key, str)
+  hs.fs.mkdir(GATE_TOOLS_DIR)
+  FX.writeFile(GATE_TOOLS_DIR .. "/" .. key, str)
+end
+function FX.clearGateToolsOverride(key) os.remove(GATE_TOOLS_DIR .. "/" .. key) end
+
+-- Cached git-root resolver (Feature B). Shells out at most once per distinct cwd
+-- for the panel's life (a session's cwd rarely changes), so the 1s refresh never
+-- runs git in steady state. Caches the miss too: a non-repo dir resolves to "" and
+-- is not re-shelled. Returns the repo root, or nil if cwd isn't in a git repo.
+function FX.gitRoot(cwd)
+  if not cwd or cwd == "" then return nil end
+  local cached = gitRootByCwd[cwd]
+  if cached ~= nil then return (cached ~= "") and cached or nil end
+  local root = ""
+  pcall(function()
+    local q = "'" .. tostring(cwd):gsub("'", "'\\''") .. "'"
+    local out = hs.execute("git -C " .. q .. " rev-parse --show-toplevel 2>/dev/null")
+    if out then root = out:gsub("%s+$", "") end
+  end)
+  gitRootByCwd[cwd] = root
+  return (root ~= "") and root or nil
+end
+
 -- Escalation channels (Phase 4c-A), both off unless enabled in cc-config.json.
 function FX.playSound()
   local s = hs.sound.getByName("Submarine") or hs.sound.getByName("Ping")
@@ -1156,8 +1186,10 @@ local function handleBridgeMsg(msg)
       else pcall(function() hs.alert.show("Claude Shepherd: cc-config.json is malformed — showing defaults") end) end
     end
     local gateOn = (FX.readFile(GATE_FLAG) ~= nil) and "true" or "false"
+    local autoOn = "false"
+    pcall(function() if hs.autoLaunch() then autoOn = "true" end end)
     pcall(function()
-      wv:evaluateJavaScript("showSettings(" .. hs.json.encode(cfg) .. ", " .. gateOn .. ")")
+      wv:evaluateJavaScript("showSettings(" .. hs.json.encode(cfg) .. ", " .. gateOn .. ", " .. autoOn .. ")")
     end)
     return
   end
@@ -1165,13 +1197,25 @@ local function handleBridgeMsg(msg)
     local ok, parsed = pcall(function() return hs.json.decode(payload.text or "{}") end)
     if ok and type(parsed) == "table" then
       hs.fs.mkdir(CLAUDE_DIR)
-      local cfg = parsed.config or {}
+      local incoming = parsed.config or {}
       -- Normalize the editable gated-tools list (space/comma -> clean, deduped).
-      if type(cfg.gate) == "table" then cfg.gate.tools = core.parseToolList(cfg.gate.tools) end
+      if type(incoming.gate) == "table" then incoming.gate.tools = core.parseToolList(incoming.gate.tools) end
+      -- Overlay the Settings-managed keys onto the EXISTING config rather than
+      -- replacing the whole file, so hand-edited top-level blocks the UI doesn't
+      -- expose (risk / collision / drain / respawn / insights, spawn.kittyBin…)
+      -- survive a Save.
+      local cfg = loadConfig()
+      for k, v in pairs(incoming) do cfg[k] = v end
       FX.writeFile(CONFIG_FILE, hs.json.encode(cfg, true))  -- creates if missing
       if parsed.gate == true then FX.writeFile(GATE_FLAG, "")
       else os.remove(GATE_FLAG) end
-      print("[cc-dashboard] saved cc-config.json (gate=" .. tostring(parsed.gate) .. ")")
+      -- Launch-on-startup: the source of truth is Hammerspoon's real login item.
+      if parsed.autoLaunch ~= nil then
+        pcall(function() hs.autoLaunch(parsed.autoLaunch == true) end)
+        hs.settings.set("ccAutoLaunchDefaulted", true)
+      end
+      print("[cc-dashboard] saved cc-config.json (gate=" .. tostring(parsed.gate)
+        .. ", autoLaunch=" .. tostring(parsed.autoLaunch) .. ")")
       pcall(function() hs.alert.show("Claude Shepherd: settings saved") end)
     end
     return
@@ -1287,6 +1331,36 @@ local function handleBridgeMsg(msg)
     end
     return
   end
+  if a == "set-gate-tools" then
+    -- Feature D: per-session gated-tools override. "" -> clear (use fleet default);
+    -- "all" -> gate the full fleet list; "none" -> sentinel "-" (gate nothing);
+    -- anything else -> a normalized custom list. cc-approve.sh reads the file.
+    local key = tostring(payload.v or "")
+    local v   = tostring(payload.text or "")
+    if key ~= "" then
+      if v == "" then
+        FX.clearGateToolsOverride(key)
+      elseif v == "all" then
+        FX.setGateToolsOverride(key, core.parseToolList(
+          core.config(loadConfig(), "gate.tools", core.DEFAULT_GATE_TOOLS)))
+      elseif v == "none" then
+        FX.setGateToolsOverride(key, "-")
+      else
+        FX.setGateToolsOverride(key, core.parseToolList(v))
+      end
+      ledgerFor(byKey[key], { type = "gate_tools", scope = v })
+      print("[cc-gate] per-session tools for " .. key .. " -> " .. (v == "" and "(default)" or v))
+    end
+    refresh()
+    return
+  end
+  if a == "open-insights-view" then
+    local res = FX.readLedger({})
+    local stats = core.fleetStats(res.events, { now = FX.now(), topN = 8,
+      maxBlock = tonumber(core.config(loadConfig(), "insights.maxBlockSeconds", 1800)) or 1800 })
+    pcall(function() wv:evaluateJavaScript("window.ccInsights(" .. hs.json.encode(stats) .. ")") end)
+    return
+  end
   if a == "open-audit-view" then
     pcall(function() wv:evaluateJavaScript("window.ccAudit(" .. hs.json.encode(FX.readLedger({})) .. ")") end)
     return
@@ -1364,7 +1438,8 @@ local function handleBridgeMsg(msg)
       local keyJson  = jsString(item.key)
       local nameJson = jsString(item.label or item.name)
       local shown = item.label or item.name
-      ctxMenu:setMenu({
+      local cfg0 = loadConfig()
+      local menu = {
         -- Jump focuses the editor window (double-click on a tile isn't always
         -- reliable, so offer it here too). Same effect as the detail-panel Jump.
         { title = "Jump to window", fn = function()
@@ -1408,7 +1483,43 @@ local function handleBridgeMsg(msg)
               end },
             { title = "Cancel", fn = function() end },
         } },
-      })
+      }
+      -- Drain (Feature F): finish the in-flight turn, then close. While working/
+      -- waiting, arm the in-memory flag; if already idle/done there's no turn to
+      -- finish, so close now. Only shown when drain.enabled.
+      if core.config(cfg0, "drain.enabled", false) == true then
+        menu[#menu + 1] = { title = "-" }
+        menu[#menu + 1] = { title = "Drain (finish turn, then close)", fn = function()
+            if item.status == "working" or item.status == "approval" then
+              draining[item.key] = true
+              ledgerFor(item, { type = "drain_request" })
+              pcall(function() hs.alert.show("Claude Shepherd: will close " .. shown .. " after this turn") end)
+            else
+              core.handleAction(FX, item, "close")
+              refresh()
+            end
+          end }
+        if draining[item.key] then
+          menu[#menu + 1] = { title = "Cancel drain", fn = function() draining[item.key] = nil end }
+        end
+      end
+      -- Respawn (Feature F): relaunch a dead/stale session from its last cwd +
+      -- matched provider + editor. Behind a confirm submenu (it spawns a process).
+      if core.config(cfg0, "respawn.enabled", false) == true then
+        menu[#menu + 1] = { title = "Respawn from cwd", menu = {
+            { title = "Confirm: respawn " .. shown, fn = function()
+                local rs = core.respawnSpec(item, loadConfig())
+                if not rs.canRespawn then
+                  pcall(function() hs.alert.show("Claude Shepherd: can't respawn — " .. tostring(rs.reason)) end)
+                  return
+                end
+                FX.spawnSession(rs.editor, rs.project, nil, rs.permissionMode, rs.providerId)
+                ledgerFor(item, { type = "respawn", cwd = rs.project, editor = rs.editor, provider = rs.providerId })
+              end },
+            { title = "Cancel", fn = function() end },
+        } }
+      end
+      ctxMenu:setMenu(menu)
       pcall(function() ctxMenu:popupMenu(hs.mouse.absolutePosition(), true) end)
     end
     return
@@ -1614,7 +1725,14 @@ local HTML = [[
   .tile { cursor:pointer; position:relative; }
   .tile.sel { outline:2px solid #6ea8fe; outline-offset:1px; }
   .tile.stale { opacity:.45; }
+  /* collision (Feature B): amber ring. Defined BEFORE .escalate so the red
+     escalate ring wins when a tile is somehow both. */
+  .tile.collide { box-shadow:0 0 0 2px #f5b50a, 0 0 10px #f5b50a; }
   .tile.escalate { box-shadow:0 0 0 2px #ef4444, 0 0 12px #ef4444; }
+  /* per-session risk badge (Feature E): only shown for med/high */
+  .risk { font-size:10px; margin-left:5px; }
+  .risk.r-med  { color:#f5b50a; }
+  .risk.r-high { color:#ef4444; }
   .name { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .dot  { border-radius:50%; flex:0 0 auto; }
   .meta { font-size:11px; color:#8a8d99; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -1811,6 +1929,23 @@ local HTML = [[
 .a-narr{ white-space:pre-wrap; color:#cfd2db; font-family:ui-monospace,Menlo,monospace; font-size:11px; line-height:1.5; margin:0; }
 #a-foot{ display:flex; gap:8px; align-items:center; padding:8px 10px; border-top:1px solid #2c2f3a; }
 #a-info{ margin-left:auto; }
+/* Fleet insights overlay (Feature A; modeled on #audit). Pure read of the ledger. */
+#insights{ position:fixed; inset:0; background:#14161b; z-index:11; display:none; flex-direction:column; font-size:12px; }
+#insights.show{ display:flex; }
+#i-head{ display:flex; align-items:center; gap:8px; padding:8px 10px; border-bottom:1px solid #2c2f3a; font-weight:600; }
+#i-head .s-x{ margin-left:auto; }
+#i-body{ flex:1; overflow:auto; padding:10px 12px; }
+.i-cards{ display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px; }
+.i-card{ background:#191b22; border:1px solid #2c2f3a; border-radius:8px; padding:8px 12px; min-width:96px; }
+.i-card .v{ font-size:18px; color:#e8e9ee; font-variant-numeric:tabular-nums; }
+.i-card .k{ font-size:11px; color:#8a8d99; margin-top:2px; }
+.i-sec{ font-weight:600; color:#cfd2db; margin:10px 0 6px; }
+.i-tbl{ width:100%; border-collapse:collapse; }
+.i-tbl th, .i-tbl td{ text-align:left; padding:3px 8px; border-bottom:1px solid #1e2027; color:#cfd2db; }
+.i-tbl th{ color:#8a8d99; font-weight:500; }
+.i-tbl td.n{ text-align:right; font-variant-numeric:tabular-nums; }
+#i-foot{ display:flex; gap:8px; align-items:center; padding:8px 10px; border-top:1px solid #2c2f3a; }
+#i-info{ margin-left:auto; }
 </style></head>
 <body class="theme-__INIT_THEME__" data-theme="__INIT_THEME__">
   <div id="bar">
@@ -1818,6 +1953,7 @@ local HTML = [[
     <span class="right">
       <button id="spawn" onclick="openNew()" title="Spawn a new Claude session">+ New</button>
       <button id="caffeine" onclick="toggleCaffeine()" title="Keep this Mac awake — pmset disablesleep (asks for your password)">☕ Sleep ok</button>
+      <button id="insights-btn" onclick="openInsights()" title="Fleet insights — aggregate stats from the ledger">📊</button>
       <button id="audit-btn" onclick="openAudit()" title="Audit ledger — recorded fleet activity">📜</button>
       <button id="settings-btn" onclick="openSettings()" title="Settings">⚙</button>
       <select id="theme" onchange="onThemeChange()">
@@ -1893,6 +2029,14 @@ local HTML = [[
         <select id="d-model" onchange="onModelChange()" title="Switch model live via /model. Works within the session's current backend; changing the provider/base URL needs a new session.">
         </select>
       </label>
+      <label class="ctl">Gate
+        <select id="d-gate" onchange="onGateChange()" title="Per-session tool gating (least-privilege). Default = use the fleet Gated-tools list. All = gate everything the fleet considers risky. None = gate nothing (trusted session). Custom = a specific list. Only takes effect while headless approvals are armed.">
+          <option value="">Default</option>
+          <option value="all">All</option>
+          <option value="none">None</option>
+          <option value="custom">Custom…</option>
+        </select>
+      </label>
     </div>
     <div id="nudge-row">
       <textarea id="nudge" rows="1" placeholder="Nudge now, or Queue for later... (Enter sends, Shift+Enter newline, paste an image)" onkeydown="onNudgeKey(event)" oninput="autoGrow(this)"></textarea>
@@ -1909,6 +2053,10 @@ local HTML = [[
   <div id="settings">
     <div id="s-head"><span>Claude Shepherd settings</span><button class="s-x" onclick="closeSettings()">✕</button></div>
     <div id="s-body">
+      <div class="s-sec">General</div>
+      <label class="s-row"><input type="checkbox" id="s-autolaunch"> Launch Shepherd on startup (open at login)</label>
+      <div class="s-help">Starts Hammerspoon (which hosts this panel) automatically when you log in, so Shepherd is up after a restart. On by default. This sets Hammerspoon's real "Open at Login" item.</div>
+
       <div class="s-sec">Headless approvals</div>
       <label class="s-row"><input type="checkbox" id="s-headless" onchange="onHeadlessToggle()"> <b>Headless approvals (recommended)</b></label>
       <div class="s-help">One switch: arms the gate AND turns off every auto-approve policy. Approve/Deny then go through this panel with no editor window popping, and Claude still can't run a gated tool until you say so. If you don't answer in ~2&nbsp;min (or the panel is closed) it safely falls back to Claude's own prompt — it never auto-approves.</div>
@@ -2020,6 +2168,18 @@ local HTML = [[
     <div id="n-foot">
       <button id="n-spawn" onclick="submitNew()">Spawn</button>
       <button onclick="closeNew()">Cancel</button>
+    </div>
+  </div>
+
+  <div id="insights">
+    <div id="i-head">
+      <span>Fleet insights</span>
+      <button class="s-x" onclick="closeInsights()">✕</button>
+    </div>
+    <div id="i-body"></div>
+    <div id="i-foot">
+      <button onclick="openInsights()">Refresh</button>
+      <span id="i-info" class="n-dim"></span>
     </div>
   </div>
 
@@ -2198,10 +2358,11 @@ local HTML = [[
     }
     function openSettings(){ send("open-settings"); }
     function closeSettings(){ document.getElementById("settings").classList.remove("show"); }
-    function showSettings(cfg, gateOn){
+    function showSettings(cfg, gateOn, autoOn){
       cfg = cfg || {};
       function ck(id,v){ document.getElementById(id).checked = !!v; }
       function val(id,v){ document.getElementById(id).value = v; }
+      ck("s-autolaunch", autoOn);
       ck("s-gate", gateOn);
       ck("s-q-auto", cv(cfg,"queue.autofeed",false));
       ck("s-q-dry",  cv(cfg,"queue.dryRun",false));
@@ -2358,7 +2519,7 @@ local HTML = [[
           patterns: { enabled: ck("s-pat-en"), autoAllow: lines("s-pat-allow"), autoDeny: lines("s-pat-deny") }
         }
       };
-      send("save-config", "", JSON.stringify({ config: config, gate: ck("s-gate") }));
+      send("save-config", "", JSON.stringify({ config: config, gate: ck("s-gate"), autoLaunch: ck("s-autolaunch") }));
     }
     function saveSettings(){ persistSettings(); closeSettings(); }
     // One-click: arm the gate + force all auto-policies OFF (or disarm when off),
@@ -2514,6 +2675,39 @@ local HTML = [[
       var m = document.getElementById("d-model").value;
       if(selectedKey && m) send("model", selectedKey, m);
     }
+    // Per-session gated-tools override (Feature D). "custom" prompts for an explicit
+    // list; the rest send a scope keyword the native side resolves to a file value.
+    var lastGateCustom = "";
+    function onGateChange(){
+      if(!selectedKey) return;
+      var sel = document.getElementById("d-gate");
+      var v = sel.value;
+      if(v === "custom"){
+        var s = prompt("Gate which tools for this session? (space/comma separated)", lastGateCustom);
+        if(s === null){ syncGateSelect(findItem(selectedKey)); return; }  // cancelled
+        lastGateCustom = s;
+        send("set-gate-tools", selectedKey, s);
+      } else {
+        send("set-gate-tools", selectedKey, v);  // "" = default, "all", "none"
+      }
+    }
+    // Reflect a session's current override in the Gate dropdown: absent -> Default,
+    // "-"/NONE -> None, a list equal to the fleet default -> Default, else Custom.
+    function syncGateSelect(it){
+      var sel = document.getElementById("d-gate"); if(!sel || !it) return;
+      var ovr = it.gate_tools_override;
+      var val;
+      if(ovr == null || String(ovr).trim() === "") val = "";
+      else {
+        var norm = String(ovr).replace(/\s+/g,"").toUpperCase();
+        if(norm === "-" || norm === "NONE") val = "none";
+        else { val = "custom"; lastGateCustom = String(ovr).replace(/,/g," ").replace(/\s+/g," ").trim(); }
+      }
+      sel.value = val;
+      sel.title = "Effective gated tools for this session: "
+        + ((it.gate_tools_effective && it.gate_tools_effective !== "") ? it.gate_tools_effective : "(none)")
+        + " — only enforced while headless approvals are armed.";
+    }
     // Render the options of a pending AskUserQuestion so they're visible in the
     // panel (today: read-only + Jump to answer; clickable answering comes later).
     function renderAsk(it){
@@ -2583,6 +2777,7 @@ local HTML = [[
       else { pr.style.display="none"; }
       renderAsk(it);
       renderMeta(it);
+      syncGateSelect(it);
       renderDetailUsage(it);
       var n = it.queue || 0;
       document.getElementById("q-count").textContent = n>0 ? ("Queue: " + n) : "Queue: empty";
@@ -2621,6 +2816,66 @@ local HTML = [[
     var auditView = "rows";
     function openAudit(){ send("open-audit-view"); }
     function closeAudit(){ document.getElementById("audit").classList.remove("show"); }
+
+    // ---- Fleet insights view (Feature A) ------------------------------------
+    function openInsights(){ send("open-insights-view"); }
+    function closeInsights(){ document.getElementById("insights").classList.remove("show"); }
+    function fmtDur(s){
+      s = Math.max(0, Math.round(s||0));
+      if(s < 60) return s+"s";
+      var m = Math.floor(s/60);
+      if(m < 60) return (s%60) ? (m+"m "+(s%60)+"s") : (m+"m");
+      var h = Math.floor(m/60); return (m%60) ? (h+"h "+(m%60)+"m") : (h+"h");
+    }
+    window.ccInsights = function(st){
+      st = st || {};
+      var body = document.getElementById("i-body");
+      var tot = st.totals || {}, dec = st.decisions || {}, prov = st.provenance || {};
+      var card = function(v, k){ return '<div class="i-card"><div class="v">'+esc(v)+'</div><div class="k">'+esc(k)+'</div></div>'; };
+      var pct = function(x){ return Math.round((x||0)*100)+"%"; };
+      var html = '<div class="i-cards">'
+        + card(tot.sessions||0, "sessions")
+        + card(tot.prompts||0, "prompts (turns)")
+        + card(tot.toolRequests||0, "tool requests")
+        + card(tot.spawns||0, "spawns")
+        + card(dec.total||0, "decisions")
+        + card(pct(st.approvalRate), "approval rate")
+        + card(pct(st.denialRate), "denial rate")
+        + card(fmtDur(st.approvalBlockedSeconds), "fleet time blocked on you")
+        + '</div>';
+      // Decision split + provenance
+      html += '<div class="i-sec">Decisions</div><table class="i-tbl"><tr><th>outcome</th><th class="n">count</th></tr>'
+        + '<tr><td>✅ allow</td><td class="n">'+(dec.allow||0)+'</td></tr>'
+        + '<tr><td>⛔ deny</td><td class="n">'+(dec.deny||0)+'</td></tr>'
+        + '<tr><td>⚠ fallback (timeout)</td><td class="n">'+(dec.fallback||0)+'</td></tr></table>';
+      var provKeys = Object.keys(prov);
+      if(provKeys.length){
+        html += '<div class="i-sec">Decision provenance</div><table class="i-tbl"><tr><th>by</th><th class="n">count</th></tr>';
+        provKeys.sort(function(a,b){ return prov[b]-prov[a]; }).forEach(function(k){
+          html += '<tr><td>'+esc(k)+'</td><td class="n">'+prov[k]+'</td></tr>';
+        });
+        html += '</table>';
+      }
+      // Most active sessions
+      var ma = st.mostActive || [];
+      if(ma.length){
+        html += '<div class="i-sec">Most active sessions</div><table class="i-tbl">'
+          + '<tr><th>session</th><th class="n">turns</th><th class="n">tools</th><th class="n">denials</th><th class="n">blocked</th></tr>';
+        ma.forEach(function(s){
+          html += '<tr><td>'+esc(s.name||s.session_id||"?")+'</td><td class="n">'+(s.prompts||0)
+                + '</td><td class="n">'+(s.toolRequests||0)+'</td><td class="n">'+pct(s.denialRate)
+                + '</td><td class="n">'+fmtDur(s.blockedSeconds)+'</td></tr>';
+        });
+        html += '</table>';
+      }
+      if((tot.events||0) === 0){
+        html += '<div class="n-dim" style="margin-top:12px;">No ledger activity yet. Enable the ledger ('
+          + 'ledger.enabled in cc-config.json) to record fleet activity for these stats.</div>';
+      }
+      body.innerHTML = html;
+      document.getElementById("i-info").textContent = (tot.events||0) + " event(s)";
+      document.getElementById("insights").classList.add("show");
+    };
     function auditTab(v){
       auditView = v;
       document.getElementById("a-tab-rows").classList.toggle("active", v === "rows");
@@ -2818,11 +3073,14 @@ local HTML = [[
         }
         if(it.queue > 0){ meta = (meta ? meta + " · " : "") + "+" + it.queue + " queued"; }
         if(it.autopilot){ meta = (meta ? meta + " · " : "") + "🛫 autopilot"; }
-        var cls = "tile s-" + st + (it.stale ? " stale" : "") + (it.escalate ? " escalate" : "") + (it.key === selectedKey ? " sel" : "");
+        if(it.draining){ meta = (meta ? meta + " · " : "") + "⛔ draining"; }
+        if(it.collide){ meta = (meta ? meta + " · " : "") + "⚠ shared dir"; }
+        var cls = "tile s-" + st + (it.stale ? " stale" : "") + (it.collide ? " collide" : "") + (it.escalate ? " escalate" : "") + (it.key === selectedKey ? " sel" : "");
         return '<div class="'+cls+'" data-key="'+esc(it.key)+'" onclick="selectTile(\''+esc(it.key)+'\')" ondblclick="send(\'focus\',\''+esc(it.key)+'\')" oncontextmenu="showCtx(event,\''+esc(it.key)+'\')" title="Double-click to jump · right-click for more">'
              + '<span class="dot"></span>'
              + '<span class="name">'+esc(it.label || it.name)+'</span>'
              + '<span class="label">'+label+'</span>'
+             + riskBadge(it)
              + '<span class="meta">'+esc(meta)+'</span>'
              + ctxBarHtml(it)
              + '</div>';
@@ -2834,6 +3092,15 @@ local HTML = [[
       return String(s == null ? "" : s)
         .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
         .replace(/"/g,"&quot;").replace(/'/g,"&#39;");
+    }
+
+    // Per-session risk badge (Feature E): only med/high show — low stays silent to
+    // keep the panel calm. Title carries the empirical score (from ledger history).
+    function riskBadge(it){
+      if(it.risk !== "med" && it.risk !== "high") return "";
+      var glyph = it.risk === "high" ? "⚠" : "▲";
+      return '<span class="risk r-'+esc(it.risk)+'" title="Empirical risk '+(it.riskScore||0)
+           + '/100 — from this session’s ledger history (deny rate, auto-deny hits, timeouts)">'+glyph+'</span>';
     }
 
     // sync the dropdown to the saved theme on first paint
@@ -3045,8 +3312,34 @@ function refresh()
   local escPush    = core.config(cfg, "escalation.push", false) == true
   local escTopic   = tostring(core.config(cfg, "escalation.pushTopic", ""))
   local apEnabled  = core.config(cfg, "policies.autopilot.enabled", false) == true
+  local drainOn    = core.config(cfg, "drain.enabled", false) == true
+  local collEnabled = core.config(cfg, "collision.enabled", false) == true
+  local collGitRoot = core.config(cfg, "collision.useGitRoot", false) == true
+  local riskEnabled = core.config(cfg, "risk.enabled", false) == true
+  local riskOpts = riskEnabled and {
+    weights    = core.config(cfg, "risk.weights", nil),
+    thresholds = core.config(cfg, "risk.thresholds", nil),
+  } or nil
+  -- Read the ledger ONCE per refresh for risk scoring (not per tile).
+  local ledgerEvents = riskEnabled and FX.readLedger({}).events or nil
   local now = FX.now()
   local newPrev = {}
+
+  -- Collision detection (Feature B): flag tiles where 2+ active sessions share a
+  -- working dir / git-root. Computed once over the whole list before the tile loop.
+  local collFlags = {}
+  if collEnabled then
+    local rootByCwd = nil
+    if collGitRoot then
+      rootByCwd = {}
+      for _, it in ipairs(list) do
+        if it.cwd and it.cwd ~= "" and rootByCwd[it.cwd] == nil then
+          rootByCwd[it.cwd] = FX.gitRoot(it.cwd) or ""
+        end
+      end
+    end
+    collFlags = core.collisions(list, { rootByCwd = rootByCwd }).flags
+  end
 
   for _, it in ipairs(list) do
     -- Live activity peek (non-stale sessions). Include `done` so the peek refreshes
@@ -3069,10 +3362,36 @@ function refresh()
     -- Autopilot badge (active only while the feature is enabled in config).
     it.autopilot = apEnabled and FX.autopilotActive(it.key) or false
 
+    -- Per-session gated-tools override (Feature D): surface the current scope +
+    -- resolved effective list so the detail panel can reflect/edit it.
+    local ovr = FX.gateToolsOverride(it.key)
+    it.gate_tools_override = ovr
+    it.gate_tools_effective = core.resolveGateTools(ovr, nil, core.config(cfg, "gate.tools", nil))
+
+    -- Collision + risk indicators (Features B/E), both off by default.
+    it.collide = collEnabled and (collFlags[it.key] or false) or nil
+    if riskEnabled and it.session_id and it.session_id ~= "" then
+      local r = core.sessionRisk(core.filterLedger(ledgerEvents, { session = it.session_id }), riskOpts)
+      it.risk = r.band
+      it.riskScore = r.score
+      it.riskSignals = r.signals
+    end
+
+    -- Graceful drain (Feature F): if armed, close on the SAME fresh `done` transition
+    -- the queue uses. Drain WINS over auto-feed (an explicit stop beats a queued task).
+    local drained = false
+    if drainOn and core.shouldDrainClose(draining[it.key], prevStatus[it.key], it.status) then
+      draining[it.key] = nil
+      print("[cc-drain] " .. it.name .. " finished its turn -> closing")
+      ledgerFor(it, { type = "drain_close" })
+      core.handleAction(FX, it, "close")
+      drained = true
+    end
+
     -- Task queue: depth badge + auto-feed on a fresh done transition.
     local q = FX.readQueue(it.key)
     it.queue = core.queueDepth(q)
-    if core.shouldFeed(prevStatus[it.key], it.status, q, autofeed) then
+    if not drained and core.shouldFeed(prevStatus[it.key], it.status, q, autofeed) then
       local task, q2 = core.queuePop(q)
       if queueDry then
         print("[cc-queue] DRY-RUN would feed '" .. tostring(task) .. "' to " .. it.name)
@@ -3187,6 +3506,15 @@ refresh()
 after(1.0, function() pcall(FX.computeUsage) end)          -- first local pass
 after(1.5, function() pcall(function() FX.fetchOfficialUsage(true) end) end)  -- first official pass
 after(2.0, function() pcall(FX.expireLedger) end)          -- first retention pass
+
+-- Launch-on-startup defaults ON the first time Shepherd runs (so it comes back after
+-- a restart); the user's later choice in Settings is then respected (the real
+-- "Open at Login" item is the source of truth). One-time, gated by an hs.settings flag.
+if hs.settings.get("ccAutoLaunchDefaulted") == nil then
+  pcall(function() hs.autoLaunch(true) end)
+  hs.settings.set("ccAutoLaunchDefaulted", true)
+  print("[cc-dashboard] launch-on-startup enabled by default (toggle in ⚙ Settings)")
+end
 
 -- Auto-enable kitty remote control when kitty is actually in use (user request):
 -- only touch kitty.conf if a kitty session exists or kitty is the spawn editor,

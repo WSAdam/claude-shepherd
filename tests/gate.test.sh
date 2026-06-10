@@ -11,6 +11,7 @@ export CC_STATUS_DIR="$TMP"
 export CC_CONFIG_FILE="$TMP/none.json"
 export CC_APPROVED_DIR="$TMP/appr"
 export CC_AUTOPILOT_DIR="$TMP/auto"
+export CC_GATE_TOOLS_DIR="$TMP/gtools"
 
 APP="$ROOT/cc-approve.sh"
 FLAG="$TMP/gate.enabled"
@@ -145,5 +146,41 @@ assert_eq "approveRepeats: panel allow records the SIG" "Bash|npm run build" "$(
 rm -f "$HB"
 out="$(printf '%s' "$REQ" | CC_GATE_FLAG="$FLAG" CC_CONFIG_FILE="$REPCFG" bash "$APP" 2>/dev/null)"
 assert_eq "approveRepeats: 2nd identical request auto-allows" "allow" "$(decision "$out")"
+
+# ---- Feature D: per-session gated-tools override (least-privilege) ----
+mkdir -p "$CC_GATE_TOOLS_DIR"
+# A) override that gates a tool NOT in the fleet default -> that tool is now gated
+date +%s > "$HB"
+printf 'WebFetch\n' > "$CC_GATE_TOOLS_DIR/ov1"
+( printf '%s' '{"session_id":"ov1","cwd":"/x/p","tool_name":"WebFetch","tool_input":{"url":"https://x"}}' \
+    | CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=5 \
+    bash "$APP" > "$TMP/out_ov1" 2>/dev/null ) &
+bg=$!; sleep 0.5; printf 'allow' > "$TMP/ov1.decision"; wait $bg
+got="$(jq -r '.hookSpecificOutput.permissionDecision' "$TMP/out_ov1" 2>/dev/null)"
+assert_eq "per-session override: added tool is gated -> allow" "allow" "$got"
+
+# B) "-" override gates NOTHING: a normally-gated Bash falls straight through
+printf -- '-\n' > "$CC_GATE_TOOLS_DIR/ov2"
+out="$(printf '%s' '{"session_id":"ov2","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"rm -rf build"}}' \
+    | CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 bash "$APP" 2>/dev/null)"
+assert_eq "per-session override: '-' gates nothing (Bash falls through)" "" "$out"
+
+# C) NO override -> Bash is still gated exactly as before (no regression)
+date +%s > "$HB"
+( printf '%s' '{"session_id":"ov3","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"rm -rf build"}}' \
+    | CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=5 \
+    bash "$APP" > "$TMP/out_ov3" 2>/dev/null ) &
+bg=$!; sleep 0.5; printf 'deny' > "$TMP/ov3.decision"; wait $bg
+got="$(jq -r '.hookSpecificOutput.permissionDecision' "$TMP/out_ov3" 2>/dev/null)"
+assert_eq "no override: Bash still gated (no regression)" "deny" "$got"
+
+# D) key isolation: ov2's "-" override does NOT disable gating for a different key
+date +%s > "$HB"
+( printf '%s' '{"session_id":"ov4","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"ls"}}' \
+    | CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=5 \
+    bash "$APP" > "$TMP/out_ov4" 2>/dev/null ) &
+bg=$!; sleep 0.5; printf 'allow' > "$TMP/ov4.decision"; wait $bg
+got="$(jq -r '.hookSpecificOutput.permissionDecision' "$TMP/out_ov4" 2>/dev/null)"
+assert_eq "key isolation: another session still gates Bash" "allow" "$got"
 
 finish

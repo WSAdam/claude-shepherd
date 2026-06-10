@@ -317,6 +317,36 @@ The gate's auto-decisions apply only to the gated tools (`gate.tools`, editable 
 Settings) and are logged to the Hammerspoon Console / hook stderr whenever they
 fire. Auto-deny always beats auto-allow.
 
+### More fleet controls (all off by default)
+
+These extend the panel without changing any existing behavior when left off:
+
+- **Per-session tool gating** — the detail panel's **Gate** dropdown overrides
+  `gate.tools` for one session: *Default* (use the fleet list), *All* (gate
+  everything the fleet considers risky), *None* (trusted session — gate nothing), or
+  *Custom*. Stored per session in `~/.claude/cc-gate-tools/<key>`; the gate reads it
+  on every request. Lets a risky experiment lock down while a trusted session runs free.
+- **risk** — a per-session risk **indicator** computed from that session's ledger
+  history (deny rate, auto-deny hits, timeout-fallbacks, slow approvals, tool volume).
+  Med/high shows a small ⚠/▲ badge on the tile; low shows nothing. Indicator only —
+  it never blocks or quarantines. Needs the ledger on for data.
+- **collision** — flags tiles when 2+ **active** sessions share a working directory
+  (amber ring + "⚠ shared dir"), so two agents don't silently clobber each other's
+  edits. `useGitRoot` groups by repo root (cached `git rev-parse`) instead of the exact
+  folder. Detection only — it can't lock another process's writes.
+- **drain** — a right-click **Drain (finish turn, then close)** action: waits for the
+  current turn to finish, then closes (closes immediately if already idle/done).
+- **respawn** — a right-click **Respawn from cwd** action that relaunches a dead/stale
+  session from its last working dir + matched provider + editor.
+- **insights** — the 📊 toolbar button opens a read-only **Fleet insights** view that
+  aggregates the ledger (turns per session, approval/denial rates, decision provenance,
+  and the total time the fleet spent blocked on you). Always available like the audit
+  view; shows zeros until the ledger is enabled.
+
+Per-session gating, drain, and respawn use these state dirs / config keys:
+`~/.claude/cc-gate-tools/<key>`, and `risk` / `collision` / `drain` / `respawn` /
+`insights` blocks in `cc-config.json` (see [cc-config.example.json](cc-config.example.json)).
+
 ## Install (about 5 minutes)
 
 1. **Install Hammerspoon** (free) and `jq` (required for the rich tiles):
@@ -347,6 +377,16 @@ above other windows and shows on every Space.
 icon; drag it to your Dock and click it to show/hide the panel like any app. It
 toggles the panel via Hammerspoon's built-in `hammerspoon://` URL scheme (no extra
 deps). First open is unsigned, so right-click → **Open** once to clear Gatekeeper.
+
+To pin it to the Dock automatically, run **`make dock`** (builds the app if needed,
+then adds it to the Dock — idempotent; the Dock briefly restarts). Remove it any time
+by dragging the icon off the Dock.
+
+### Launch on startup
+Shepherd runs inside Hammerspoon, so "launch on startup" means **Hammerspoon opens at
+login** and the panel comes up with it. This is **on by default** the first time
+Shepherd runs. Toggle it any time from **⚙ Settings → General → "Launch Shepherd on
+startup"** — it sets Hammerspoon's real *Open at Login* item (`hs.autoLaunch`).
 
 ### Kitty users
 For reliable click-to-answer / headless approve on Kitty, Shepherd auto-enables

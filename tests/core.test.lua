@@ -936,5 +936,185 @@ do
      core.isoToEpoch("2024-03-01T00:00:00Z") - core.isoToEpoch("2024-02-28T00:00:00Z"), 2 * 86400)
 end
 
+-- ---- fmtDuration -----------------------------------------------------------
+do
+  eq("fmt: seconds", core.fmtDuration(45), "45s")
+  eq("fmt: minutes+seconds", core.fmtDuration(90), "1m 30s")
+  eq("fmt: whole minutes", core.fmtDuration(120), "2m")
+  eq("fmt: hours+minutes", core.fmtDuration(3600 + 5 * 60), "1h 5m")
+  eq("fmt: whole hours", core.fmtDuration(7200), "2h")
+  eq("fmt: negative clamps to 0s", core.fmtDuration(-5), "0s")
+end
+
+-- ---- fleetStats: aggregate the ledger --------------------------------------
+do
+  local evs = {
+    { ts = 10, type = "session_start", session_id = "s1", name = "alpha" },
+    { ts = 20, type = "prompt",        session_id = "s1", name = "alpha" },
+    { ts = 30, type = "prompt",        session_id = "s1", name = "alpha" },
+    { ts = 40, type = "tool_request",  session_id = "s1", name = "alpha", tool = "Bash" },
+    { ts = 70, type = "decision",      session_id = "s1", name = "alpha", outcome = "allow", by = "human" },
+    { ts = 80, type = "decision",      session_id = "s1", name = "alpha", outcome = "deny", by = "autoDeny", pattern = "Bash(rm*)" },
+    { ts = 25, type = "prompt",        session_id = "s2", name = "bravo" },
+    { ts = 35, type = "decision",      session_id = "s2", name = "bravo", outcome = "fallback", by = "timeout-fallback" },
+    { ts = 50, type = "spawn",         session_id = "s2", name = "bravo" },
+  }
+  local st = core.fleetStats(evs, { now = 200, topN = 8 })
+  eq("fleet: total prompts", st.totals.prompts, 3)
+  eq("fleet: total sessions", st.totals.sessions, 2)
+  eq("fleet: total spawns", st.totals.spawns, 1)
+  eq("fleet: total toolRequests", st.totals.toolRequests, 1)
+  eq("fleet: decisions allow", st.decisions.allow, 1)
+  eq("fleet: decisions deny", st.decisions.deny, 1)
+  eq("fleet: decisions fallback (own bucket, not a denial)", st.decisions.fallback, 1)
+  eq("fleet: decisions total", st.decisions.total, 3)
+  eq("fleet: provenance autoDeny", st.provenance.autoDeny, 1)
+  eq("fleet: provenance timeout-fallback", st.provenance["timeout-fallback"], 1)
+  eq("fleet: provenance human", st.provenance.human, 1)
+  eq("fleet: most active session is s1", st.mostActive[1].session_id, "s1")
+  eq("fleet: most active prompt count", st.mostActive[1].prompts, 2)
+  -- s1 request@40 -> human decision@70 = 30s; s2's fallback has no preceding request
+  eq("fleet: approval blocked seconds", st.approvalBlockedSeconds, 30)
+  check("fleet: fleet denial rate ~1/3", math.abs(st.denialRate - (1 / 3)) < 1e-9)
+end
+
+-- ---- sessionRisk: empirical per-session score ------------------------------
+do
+  local clean = {
+    { ts = 10, type = "tool_request", session_id = "c", tool = "Bash" },
+    { ts = 15, type = "decision", session_id = "c", outcome = "allow", by = "human" },
+    { ts = 20, type = "tool_request", session_id = "c", tool = "Edit" },
+    { ts = 25, type = "decision", session_id = "c", outcome = "allow", by = "human" },
+  }
+  local rc = core.sessionRisk(clean, {})
+  eq("risk: clean band low", rc.band, "low")
+  check("risk: clean score small (<=5)", rc.score <= 5)
+  eq("risk: empty -> score 0", core.sessionRisk({}, {}).score, 0)
+  eq("risk: empty -> band low", core.sessionRisk({}, {}).band, "low")
+  eq("risk: deterministic", core.sessionRisk(clean, {}).score, core.sessionRisk(clean, {}).score)
+
+  local mid = {
+    { ts = 10, type = "tool_request", session_id = "m", tool = "Bash" },
+    { ts = 12, type = "decision", session_id = "m", outcome = "deny", by = "autoDeny", pattern = "Bash(rm*)" },
+    { ts = 20, type = "tool_request", session_id = "m", tool = "Bash" },
+    { ts = 22, type = "decision", session_id = "m", outcome = "deny", by = "autoDeny", pattern = "Bash(curl*)" },
+    { ts = 30, type = "tool_request", session_id = "m", tool = "Edit" },
+    { ts = 32, type = "decision", session_id = "m", outcome = "allow", by = "human" },
+    { ts = 40, type = "tool_request", session_id = "m", tool = "Edit" },
+    { ts = 42, type = "decision", session_id = "m", outcome = "allow", by = "human" },
+  }
+  eq("risk: mid band med", core.sessionRisk(mid, {}).band, "med")
+
+  local risky = {
+    { ts = 10,  type = "tool_request", session_id = "h", tool = "Bash" },
+    { ts = 400, type = "decision", session_id = "h", outcome = "deny", by = "human" },   -- stale (390s) deny
+    { ts = 410, type = "tool_request", session_id = "h", tool = "Bash" },
+    { ts = 412, type = "decision", session_id = "h", outcome = "deny", by = "autoDeny", pattern = "Bash(rm*)" },
+    { ts = 420, type = "tool_request", session_id = "h", tool = "Bash" },
+    { ts = 422, type = "decision", session_id = "h", outcome = "deny", by = "autoDeny", pattern = "Bash(curl*)" },
+    { ts = 430, type = "tool_request", session_id = "h", tool = "Bash" },
+    { ts = 432, type = "decision", session_id = "h", outcome = "deny", by = "autoDeny", pattern = "Bash(rm*)" },
+    { ts = 440, type = "tool_request", session_id = "h", tool = "Write" },
+    { ts = 442, type = "decision", session_id = "h", outcome = "deny", by = "autoDeny", pattern = "Write" },
+    { ts = 450, type = "tool_request", session_id = "h", tool = "Bash" },
+    { ts = 452, type = "decision", session_id = "h", outcome = "fallback", by = "timeout-fallback" },
+  }
+  local rh = core.sessionRisk(risky, {})
+  eq("risk: risky band high", rh.band, "high")
+  check("risk: score clamped <= 100", rh.score <= 100)
+  eq("risk: signals autoDenyHits", rh.signals.autoDenyHits, 4)
+  eq("risk: signals timeoutFallbacks", rh.signals.timeoutFallbacks, 1)
+  eq("risk: signals staleApprovals", rh.signals.staleApprovals, 1)
+end
+
+-- ---- resolveGateTools: per-session precedence + sentinel -------------------
+do
+  eq("gate: no inputs -> built-in default", core.resolveGateTools(nil, nil, nil), core.DEFAULT_GATE_TOOLS)
+  eq("gate: fleet default used", core.resolveGateTools(nil, nil, "Bash Edit"), "Bash Edit")
+  eq("gate: session override wins", core.resolveGateTools("WebFetch Bash", nil, "Bash Edit"), "WebFetch Bash")
+  eq("gate: sentinel '-' gates nothing", core.resolveGateTools("-", nil, "Bash Edit"), "")
+  eq("gate: sentinel NONE gates nothing", core.resolveGateTools("NONE", nil, "Bash"), "")
+  eq("gate: sentinel none (lower) gates nothing", core.resolveGateTools("none", nil, "Bash"), "")
+  eq("gate: blank override is NOT an override", core.resolveGateTools("   ", nil, "Bash Edit"), "Bash Edit")
+  eq("gate: empty override is NOT an override", core.resolveGateTools("", nil, "Bash Edit"), "Bash Edit")
+  eq("gate: override normalized + deduped", core.resolveGateTools("Bash, Edit ,Bash", nil, nil), "Bash Edit")
+  eq("gate: provider-default layer", core.resolveGateTools(nil, "Write", "Bash"), "Write")
+  eq("gate: override beats provider default", core.resolveGateTools("Edit", "Write", "Bash"), "Edit")
+end
+
+-- ---- shouldDrainClose: fire only on a fresh transition into done -----------
+do
+  eq("drain: working->done fires", core.shouldDrainClose(true, "working", "done"), true)
+  eq("drain: approval->done fires", core.shouldDrainClose(true, "approval", "done"), true)
+  eq("drain: done->done no fire (already handled)", core.shouldDrainClose(true, "done", "done"), false)
+  eq("drain: not draining no fire", core.shouldDrainClose(false, "working", "done"), false)
+  eq("drain: nil draining no fire", core.shouldDrainClose(nil, "working", "done"), false)
+  eq("drain: working->working no fire", core.shouldDrainClose(true, "working", "working"), false)
+end
+
+-- ---- collisions: 2+ active sessions sharing a working dir ------------------
+do
+  local r = core.collisions({
+    { key = "a", cwd = "/x/p", status = "working" },
+    { key = "b", cwd = "/x/p", status = "working" },
+    { key = "c", cwd = "/x/q", status = "working" },
+  }, {})
+  eq("collide: a flagged", r.flags.a, true)
+  eq("collide: b flagged", r.flags.b, true)
+  eq("collide: c alone not flagged", r.flags.c, nil)
+  eq("collide: idle peer not counted", core.collisions({
+    { key = "a", cwd = "/x/p", status = "working" },
+    { key = "b", cwd = "/x/p", status = "idle" },
+  }, {}).flags.a, nil)
+  eq("collide: stale peer excluded", core.collisions({
+    { key = "a", cwd = "/x/p", status = "working" },
+    { key = "b", cwd = "/x/p", status = "working", stale = true },
+  }, {}).flags.a, nil)
+  local items4 = {
+    { key = "a", cwd = "/repo/sub1", status = "working" },
+    { key = "b", cwd = "/repo/sub2", status = "approval" },
+  }
+  local root = { ["/repo/sub1"] = "/repo", ["/repo/sub2"] = "/repo" }
+  eq("collide: git-root groups subfolders", core.collisions(items4, { rootByCwd = root }).flags.a, true)
+  eq("collide: cwd mode does NOT group subfolders", core.collisions(items4, {}).flags.a, nil)
+  local root5 = { ["/x/p"] = "", ["/x/q"] = "" }
+  eq("collide: empty root sentinel falls back to cwd", core.collisions({
+    { key = "a", cwd = "/x/p", status = "working" },
+    { key = "b", cwd = "/x/q", status = "working" },
+  }, { rootByCwd = root5 }).flags.a, nil)
+end
+
+-- ---- providerByModel + respawnSpec: relaunch a dead session ----------------
+do
+  local cfg = core.json.decode([[
+    { "spawn": { "editor": "terminal" },
+      "providers": [
+        { "id": "anthropic-opus", "kind": "anthropic", "model": "claude-opus-4-8" },
+        { "id": "gemini", "kind": "gateway", "model": "gemini-2.5-pro",
+          "baseUrl": "http://localhost:4000", "authTokenEnv": "MY_KEY" } ] }]])
+  eq("provByModel: anthropic by model alone", core.providerByModel(cfg, "claude-opus-4-8", nil).id, "anthropic-opus")
+  eq("provByModel: gateway needs base url too",
+     core.providerByModel(cfg, "gemini-2.5-pro", "http://localhost:4000").id, "gemini")
+  check("provByModel: gateway model w/o base url -> nil", core.providerByModel(cfg, "gemini-2.5-pro", nil) == nil)
+  check("provByModel: unknown model -> nil", core.providerByModel(cfg, "gpt-4", nil) == nil)
+
+  local a = core.respawnSpec({ editor = "kitty", cwd = "/x/p", permission_mode = "plan", model = "claude-opus-4-8" }, cfg)
+  eq("respawn: anthropic canRespawn", a.canRespawn, true)
+  eq("respawn: anthropic providerId", a.providerId, "anthropic-opus")
+  eq("respawn: project = cwd", a.project, "/x/p")
+  eq("respawn: editor carried", a.editor, "kitty")
+  eq("respawn: permission mode carried", a.permissionMode, "plan")
+  eq("respawn: gateway providerId matched", core.respawnSpec(
+    { editor = "terminal", cwd = "/x/q", model = "gemini-2.5-pro", base_url = "http://localhost:4000" }, cfg).providerId, "gemini")
+  local gb = core.respawnSpec({ editor = "terminal", cwd = "/x/q", model = "mystery", base_url = "http://elsewhere" }, cfg)
+  eq("respawn: unknown gateway not respawnable", gb.canRespawn, false)
+  check("respawn: unknown gateway reason set", type(gb.reason) == "string")
+  local b = core.respawnSpec({ editor = "terminal", cwd = "/x/r", model = "claude-future-9" }, cfg)
+  eq("respawn: unknown anthropic still respawnable (bare claude)", b.canRespawn, true)
+  check("respawn: unknown anthropic has nil providerId", b.providerId == nil)
+  eq("respawn: editor falls back to spawn.editor", core.respawnSpec({ cwd = "/x/s", model = "claude-opus-4-8" }, cfg).editor, "terminal")
+  eq("respawn: no cwd -> not respawnable", core.respawnSpec({ model = "x" }, cfg).canRespawn, false)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

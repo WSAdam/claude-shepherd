@@ -40,3 +40,10 @@ app:
 	@osacompile -o "$(APP_DIR)/Shepherd.app" app/Shepherd.applescript
 	@bash app/make-icon.sh "$(APP_DIR)/Shepherd.app" || true
 	@echo "✅ built $(APP_DIR)/Shepherd.app — drag it to your Dock (first open: right-click → Open)"
+
+# Pin Shepherd.app to the Dock (idempotent; builds the app first if missing). The
+# Dock briefly restarts. Reversible: drag the icon off the Dock. Run `make app dock`.
+.PHONY: dock
+dock:
+	@[ -d "$(APP_DIR)/Shepherd.app" ] || $(MAKE) app
+	@bash app/add-to-dock.sh "$(APP_DIR)/Shepherd.app"
