@@ -831,11 +831,15 @@ do
   -- OUR_HOOK_SCRIPTS is single-sourced for the Lua side and mirrored by install.sh's
   -- jq alternation; pin its contents so a Lua-side drift is caught (the jq mirror is
   -- exercised end-to-end by install.test.sh's cc-notify.sh case).
-  eq("mergeHooks: OUR_HOOK_SCRIPTS has 3 entries", #core.OUR_HOOK_SCRIPTS, 3)
-  local wantScript = { ["cc-status.sh"] = true, ["cc-approve.sh"] = true, ["cc-popup.sh"] = true }
-  local scriptsOk = true
-  for _, n in ipairs(core.OUR_HOOK_SCRIPTS) do if not wantScript[n] then scriptsOk = false end end
-  check("mergeHooks: OUR_HOOK_SCRIPTS = {cc-status, cc-approve, cc-popup}.sh", scriptsOk)
+  -- Pin EXACT set-equality via a sorted compare: this rejects a drop, an extra, AND a
+  -- duplicate (a membership-only loop would pass {cc-status.sh x3} while losing two).
+  local got = {}
+  for _, n in ipairs(core.OUR_HOOK_SCRIPTS) do got[#got + 1] = n end
+  table.sort(got)
+  local wantScripts = { "cc-approve.sh", "cc-popup.sh", "cc-status.sh" }  -- sorted
+  local scriptsOk = (#got == #wantScripts)
+  for i = 1, #wantScripts do if got[i] ~= wantScripts[i] then scriptsOk = false end end
+  check("mergeHooks: OUR_HOOK_SCRIPTS == {cc-approve, cc-popup, cc-status}.sh exactly", scriptsOk)
 end
 
 -- ---- Audit ledger: parse / filter / retention / narrative -----------------

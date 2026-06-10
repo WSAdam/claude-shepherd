@@ -42,6 +42,9 @@ assert_json "plain pretooluse clears ask"        "$F" '.pending' "null"
 ev pretooluse "$ASK"                              # re-arm an Ask pending
 assert_json "re-armed ask is present"            "$F" '.pending|has("ask")' "true"
 ev permissionrequest '{"session_id":"ask1","cwd":"/U/x/proj","tool_name":"Write","tool_input":{"file_path":"/U/x/y.txt"}}'
+# Pin the POSITIVE shape of the replacement (a full replace, not a partial merge):
+# the tile now carries the Write tool + summary, and NO leftover ask.
+assert_json "F-001: pending tool is now the Write"        "$F" '.pending.tool' "Write"
 assert_json "F-001: pending summary replaced by the Write" "$F" '.pending.summary' "/U/x/y.txt"
 assert_json "F-001: stale ask dropped on pending replace"  "$F" '.pending|has("ask")' "false"
 

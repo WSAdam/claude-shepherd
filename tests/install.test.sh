@@ -70,4 +70,19 @@ CC_INSTALL_CLAUDE_DIR="$CDIR3" CC_INSTALL_HS_DIR="$HSDIR3" CC_INSTALL_NO_APP=1 \
   bash "$ROOT/install.sh" >/dev/null 2>&1
 assert_eq "F-005: re-run with ours present is a no-op" "$before3" "$(cat "$CDIR3/settings.json")"
 
+# F-005 false positive (DOCUMENTED + accepted): the match is an UNANCHORED substring, so
+# a user hook whose basename ENDS in cc-status.sh (my-cc-status.sh) is mistaken for ours
+# and SUPPRESSES wiring for that event. Pin today's behavior -- if the regex is ever
+# anchored, this assertion flips, forcing a doc update (see OUR_HOOK_SCRIPTS in cc-core.lua).
+CDIR4="$TMP/claude4"; HSDIR4="$TMP/hs4"; mkdir -p "$CDIR4"
+cat > "$CDIR4/settings.json" <<'JSON'
+{ "hooks": { "Stop": [ { "hooks": [ { "type": "command", "command": "bash $HOME/.claude/my-cc-status.sh" } ] } ] } }
+JSON
+CC_INSTALL_CLAUDE_DIR="$CDIR4" CC_INSTALL_HS_DIR="$HSDIR4" CC_INSTALL_NO_APP=1 \
+  bash "$ROOT/install.sh" >/dev/null 2>&1
+assert_json "F-005 fp: my-cc-status.sh suppresses ours (Stop stays 1 group)" "$CDIR4/settings.json" \
+  '.hooks.Stop | length' "1"
+assert_json "F-005 fp: the user's my-cc-status.sh hook is intact" "$CDIR4/settings.json" \
+  '.hooks.Stop[0].hooks[0].command | contains("my-cc-status.sh")' "true"
+
 finish
