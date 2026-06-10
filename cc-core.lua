@@ -1351,6 +1351,28 @@ function M.isHung(item, lastProgressTs, now, thresholdSec)
   return ((tonumber(now) or 0) - (tonumber(lastProgressTs) or 0)) > (tonumber(thresholdSec) or 0)
 end
 
+-- Transcript-progress tracker for the watchdog (pure; the dashboard holds the state
+-- and feeds the current file size). Returns the new { size, ts }. Any size CHANGE
+-- counts as progress and rebases the stall timer to `now`: growth is obvious
+-- progress, and a SHRINK means the transcript was rotated/truncated (still progress
+-- -- don't let the stale larger size freeze the timer and falsely trip the watchdog).
+-- First sighting (prevSize nil) seeds ts=now; an unchanged size keeps the prior ts so
+-- the stall keeps timing; a nil current size holds the prior values.
+function M.trackProgress(prevSize, prevTs, sz, now)
+  if sz == nil then return { size = prevSize, ts = prevTs } end
+  if prevSize == nil then return { size = sz, ts = now } end       -- first sight: seed
+  if sz ~= prevSize then return { size = sz, ts = now } end        -- grew or rotated: progress
+  return { size = prevSize, ts = prevTs }                          -- unchanged: keep timing
+end
+
+-- Should the watchdog state for a session be cleared this tick? Reset whenever it
+-- isn't actively `working` (a new working stint should time its own stall from
+-- scratch) OR while it's stale -- the growth path is skipped during stale, so a
+-- frozen lastProgressTs must not survive to flag hung the instant it un-stales.
+function M.watchdogShouldReset(status, stale)
+  return status ~= "working" or stale == true
+end
+
 -- ---- Image paste (Step 5) --------------------------------------------------
 -- Parse a clipboard image data URL ("data:image/png;base64,...."), returning
 -- its mime, a normalized lowercase file extension, and the base64 payload.

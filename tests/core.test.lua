@@ -1435,5 +1435,29 @@ do
   eq("hung: nil item -> false", core.isHung(nil, now - 400, now, 300), false)
 end
 
+-- ---- trackProgress + watchdogShouldReset: the watchdog state machine --------
+do
+  local r1 = core.trackProgress(nil, nil, 100, 1000)
+  eq("track: first sight seeds size", r1.size, 100)
+  eq("track: first sight seeds ts=now", r1.ts, 1000)
+  local r2 = core.trackProgress(100, 1000, 250, 2000)
+  eq("track: growth updates size", r2.size, 250)
+  eq("track: growth rebases ts", r2.ts, 2000)
+  local r3 = core.trackProgress(250, 2000, 250, 3000)
+  eq("track: unchanged holds size", r3.size, 250)
+  eq("track: unchanged keeps timing (ts held)", r3.ts, 2000)
+  local r4 = core.trackProgress(250, 2000, 40, 4000)
+  eq("track: shrink (rotation) resets size", r4.size, 40)
+  eq("track: shrink rebases ts (no false stall)", r4.ts, 4000)
+  local r5 = core.trackProgress(40, 4000, nil, 5000)
+  eq("track: nil size holds size", r5.size, 40)
+  eq("track: nil size holds ts", r5.ts, 4000)
+
+  eq("watchdog-reset: idle -> reset", core.watchdogShouldReset("idle", false), true)
+  eq("watchdog-reset: done -> reset", core.watchdogShouldReset("done", false), true)
+  eq("watchdog-reset: working + stale -> reset (no resume false-trip)", core.watchdogShouldReset("working", true), true)
+  eq("watchdog-reset: working + healthy -> keep timing", core.watchdogShouldReset("working", false), false)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

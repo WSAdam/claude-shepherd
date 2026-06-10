@@ -133,9 +133,7 @@ local prevStatus = {}    -- key -> last refresh's status (for auto-feed transiti
 local prevStale  = {}    -- key -> last refresh's stale flag (for the auto-respawn edge)
 local respawnAttempts = {}  -- projectKey -> auto-respawn count (resets when healthy)
 local escalated  = {}    -- key -> true once we've escalated this approval episode
-local lastProgressTs = {} -- key -> when the transcript last grew (watchdog)
-local transcriptSize = {} -- key -> last seen transcript byte size (watchdog)
-local hungAlerted = {}   -- key -> true once we've flagged this stall episode
+local watchdog = {}      -- key -> { size, ts, alerted }: transcript progress + stall episode
 local draining    = {}   -- key -> true: close on the next fresh `done` (Feature F)
 local gitRootByCwd = {}  -- cwd -> resolved git root ("" = not a repo) cache (Feature B)
 local caffeineTick = 0   -- throttles the keep-awake state re-read (F2)
@@ -3714,13 +3712,16 @@ function refresh()
       end
     end
 
-    -- Watchdog (Feature 8): track transcript growth so a stalled `working` session
-    -- (no new output) can be flagged. First sighting seeds lastProgressTs = now.
+    -- Watchdog (Feature 8): track transcript progress so a stalled `working` session
+    -- (no new output) can be flagged. trackProgress seeds on first sight, rebases the
+    -- stall timer on any size change (growth OR a rotation/truncation shrink), and
+    -- holds the timer when the size is unchanged.
     if hungOn and it.transcript_path and not it.stale and it.status == "working" then
       local sz = FX.fileSize(it.transcript_path)
-      if sz and (transcriptSize[it.key] == nil or sz > transcriptSize[it.key]) then
-        transcriptSize[it.key] = sz
-        lastProgressTs[it.key] = now
+      if sz then
+        local w = watchdog[it.key]
+        local p = core.trackProgress(w and w.size, w and w.ts, sz, now)
+        watchdog[it.key] = { size = p.size, ts = p.ts, alerted = w and w.alerted }
       end
     end
 
@@ -3787,23 +3788,21 @@ function refresh()
     -- Stuck-session watchdog (Feature 8): flag a `working` session with no transcript
     -- progress past the threshold; nag once per stall, reusing the escalation
     -- sound/push prefs. Distinct from approvalStale (which covers waiting on you).
-    if hungOn and core.isHung(it, lastProgressTs[it.key], now, hungMin * 60) then
+    local w = watchdog[it.key]
+    if hungOn and core.isHung(it, w and w.ts, now, hungMin * 60) then
       it.hung = true
-      if not hungAlerted[it.key] then
-        hungAlerted[it.key] = true
+      if w and not w.alerted then
+        w.alerted = true
         print("[cc-watchdog] " .. it.name .. " stalled (no progress > " .. hungMin .. "m)")
         if escSound then FX.playSound() end
         if escPush then FX.push(escTopic, "Claude Shepherd: " .. it.name .. " stalled",
           "No transcript progress for over " .. hungMin .. " min while working") end
       end
     end
-    -- Reset watchdog state whenever a session isn't actively working, so each
-    -- working stint times its own stall from scratch.
-    if it.status ~= "working" then
-      hungAlerted[it.key] = nil
-      lastProgressTs[it.key] = nil
-      transcriptSize[it.key] = nil
-    end
+    -- Reset watchdog state when a session isn't actively working, OR while it's
+    -- stale (the growth path is skipped during stale, so a frozen timer must not
+    -- survive to flag hung the instant it un-stales). Each new stint times afresh.
+    if core.watchdogShouldReset(it.status, it.stale) then watchdog[it.key] = nil end
 
     -- Auto-respawn (opt-in): relaunch a session that died unexpectedly. cc-core owns
     -- the bookkeeping (per-folder budget: reset when healthy, increment when firing;
