@@ -3807,23 +3807,25 @@ function refresh()
     -- Auto-respawn (opt-in): relaunch a session that died unexpectedly. cc-core owns
     -- the bookkeeping (per-folder budget: reset when healthy, increment when firing;
     -- the projectKey is folded into the gate so a keyless tile can't nil-key write).
+    -- Compute respawnSpec first so cc-core can charge the budget ONLY on a real
+    -- relaunch (an un-respawnable death shouldn't burn a retry). respawnSpec is pure
+    -- and cheap, and only computed while the feature is on.
+    local rs = autoRespawnOn and core.respawnSpec(it, cfg) or nil
     local step = core.stepAutoRespawn(respawnAttempts, it, {
       enabled = autoRespawnOn, maxRetries = autoRespawnMax,
       intentional = (draining[it.key] ~= nil) or drained,
-      wasStale = prevStale[it.key] or false })
+      wasStale = prevStale[it.key] or false,
+      canRespawn = rs and rs.canRespawn })
     newPrevStale[it.key] = step.isStale
-    if step.spawn then
-      local rs = core.respawnSpec(it, cfg)
-      if rs.canRespawn then
-        print("[cc-respawn] auto-relaunch " .. tostring(it.name)
-          .. " (attempt " .. tostring(step.attempts) .. "/" .. autoRespawnMax .. ")")
-        ledgerFor(it, { type = "auto_respawn", cwd = rs.project, editor = rs.editor,
-          provider = rs.providerId, attempt = step.attempts })
-        FX.spawnSession(rs.editor, rs.project, nil, rs.permissionMode, rs.providerId)
-        FX.removeStatus(it.key)  -- drop the dead tile; the relaunch makes a fresh one
-      else
-        print("[cc-respawn] " .. tostring(it.name) .. " died but isn't respawnable: " .. tostring(rs.reason))
-      end
+    if step.spawn then  -- rs.canRespawn was true (the increment is gated on it)
+      print("[cc-respawn] auto-relaunch " .. tostring(it.name)
+        .. " (attempt " .. tostring(step.attempts) .. "/" .. autoRespawnMax .. ")")
+      ledgerFor(it, { type = "auto_respawn", cwd = rs.project, editor = rs.editor,
+        provider = rs.providerId, attempt = step.attempts })
+      FX.spawnSession(rs.editor, rs.project, nil, rs.permissionMode, rs.providerId)
+      FX.removeStatus(it.key)  -- drop the dead tile; the relaunch makes a fresh one
+    elseif step.wouldFire and rs and not rs.canRespawn then
+      print("[cc-respawn] " .. tostring(it.name) .. " died but isn't respawnable: " .. tostring(rs.reason))
     end
 
     newPrev[it.key] = it.status

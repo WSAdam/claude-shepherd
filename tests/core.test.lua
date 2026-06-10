@@ -1359,6 +1359,27 @@ do
     { enabled = true, maxRetries = 2, wasStale = false })
   eq("step: no projectKey -> no fire (guards the nil-key write)", rn.spawn, false)
   eq("step: still reports isStale without a key", rn.isStale, true)
+
+  -- already stale before the edge (wasStale=true, isStale=true): a level, not an
+  -- edge -> no fire and no write, even with a fresh budget.
+  local a4 = {}
+  eq("step: already-stale (level, not edge) -> no fire",
+     core.stepAutoRespawn(a4, dead("z", "s"), { enabled = true, maxRetries = 2, wasStale = true }).spawn, false)
+  eq("step: already-stale -> no write", a4["pf"], nil)
+
+  -- a deliberate drain/close suppresses the fire even on a fresh death edge.
+  local a5 = {}
+  eq("step: intentional drain suppresses a fresh edge",
+     core.stepAutoRespawn(a5, dead("d", "s"), { enabled = true, maxRetries = 2, intentional = true, wasStale = false }).spawn, false)
+  eq("step: intentional -> no write", a5["pf"], nil)
+
+  -- a fresh death edge that isn't respawnable: wouldFire, but no spawn and NO charge
+  -- (an un-respawnable death must not burn the per-folder budget).
+  local a6 = {}
+  local rc = core.stepAutoRespawn(a6, dead("c", "s"), { enabled = true, maxRetries = 2, wasStale = false, canRespawn = false })
+  eq("step: un-respawnable edge does not spawn", rc.spawn, false)
+  eq("step: un-respawnable edge still reports wouldFire", rc.wouldFire, true)
+  eq("step: un-respawnable edge does NOT charge the budget", a6["pf"], nil)
 end
 
 -- ---- bucketEvents: time-series sparkline buckets ---------------------------
