@@ -1289,18 +1289,23 @@ function M.shouldPrune(item, now, opts)
 end
 
 -- Find ghost duplicates left by `/clear` or a session restart: a `/clear` gives
--- the project a NEW session_id (a new tile) while the old session_id's status
--- file lingers with no SessionEnd. Returns the keys of tiles that are stale AND
--- share a `name` with a non-stale tile (the live session for that project). A
--- genuinely-active second session in the same folder isn't stale, so it's safe.
+-- the project a NEW session_id (a new tile) while the old session_id's status file
+-- lingers with no SessionEnd. Returns the keys of tiles that are stale AND share a
+-- live twin IN THE SAME PROJECT. The live twin is matched by the STABLE projectKey
+-- (launch folder, falling back to cwd), NOT the basename `name`: two sessions in
+-- DIFFERENT folders that merely share a basename have the same name but different
+-- projectKeys, so name-keying would cross-prune an unrelated stale tile -- which also
+-- silently swallows that session's auto-respawn (it's removed before the respawn loop).
+-- A genuinely-active second session in the same folder isn't stale, so it's safe.
 function M.staleDuplicateKeys(list)
-  local liveNames = {}
+  local function pid(it) return it.projectKey or it.cwd end
+  local liveProjects = {}
   for _, it in ipairs(list or {}) do
-    if not it.stale and it.name then liveNames[it.name] = true end
+    if not it.stale and pid(it) then liveProjects[pid(it)] = true end
   end
   local keys = {}
   for _, it in ipairs(list or {}) do
-    if it.stale and it.name and liveNames[it.name] then keys[#keys + 1] = it.key end
+    if it.stale and pid(it) and liveProjects[pid(it)] then keys[#keys + 1] = it.key end
   end
   return keys
 end

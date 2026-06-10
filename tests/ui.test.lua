@@ -207,12 +207,13 @@ end
 
 -- ---- staleDuplicateKeys: prune /clear ghosts, keep live + lone tiles -------
 do
-  -- old sms-bot went stale after /clear; a fresh sms-bot is live -> prune the old
+  -- old sms-bot went stale after /clear; a fresh sms-bot (same folder = same
+  -- projectKey) is live -> prune the old. Real tiles always carry a projectKey.
   local list = {
-    { key = "old", name = "sms-bot", stale = true },
-    { key = "new", name = "sms-bot", stale = false },
-    { key = "solo", name = "rune",   stale = true },   -- stale but no live twin -> keep
-    { key = "live", name = "canary", stale = false },
+    { key = "old", name = "sms-bot", projectKey = "p-sms",    stale = true },
+    { key = "new", name = "sms-bot", projectKey = "p-sms",    stale = false },
+    { key = "solo", name = "rune",   projectKey = "p-rune",   stale = true },   -- no live twin -> keep
+    { key = "live", name = "canary", projectKey = "p-canary", stale = false },
   }
   local ghosts = core.staleDuplicateKeys(list)
   eq("ghost: exactly one pruned", #ghosts, 1)
@@ -220,14 +221,30 @@ do
 
   -- two live tiles for the same project (legit parallel sessions) -> prune none
   local twoLive = {
-    { key = "a", name = "sms-bot", stale = false },
-    { key = "b", name = "sms-bot", stale = false },
+    { key = "a", name = "sms-bot", projectKey = "p-sms", stale = false },
+    { key = "b", name = "sms-bot", projectKey = "p-sms", stale = false },
   }
-  eq("ghost: two live same-name -> none pruned", #core.staleDuplicateKeys(twoLive), 0)
+  eq("ghost: two live same project -> none pruned", #core.staleDuplicateKeys(twoLive), 0)
 
   -- a lone stale tile (no fresher twin) -> keep (handled by the 24h backstop instead)
   eq("ghost: lone stale -> none pruned",
-     #core.staleDuplicateKeys({ { key = "x", name = "rune", stale = true } }), 0)
+     #core.staleDuplicateKeys({ { key = "x", name = "rune", projectKey = "p-rune", stale = true } }), 0)
+
+  -- F-004 (bug sweep): two sessions in DIFFERENT folders that merely share a basename
+  -- `name` must NOT cross-prune (different projectKeys) -- else the stale one's
+  -- auto-respawn is silently swallowed.
+  local crossProject = {
+    { key = "dead",  name = "shepherd", projectKey = "-Users-me-work-shepherd",    stale = true },
+    { key = "alive", name = "shepherd", projectKey = "-Users-me-scratch-shepherd", stale = false },
+  }
+  eq("ghost: same basename, different project -> NOT pruned", #core.staleDuplicateKeys(crossProject), 0)
+
+  -- legacy cwd-fallback (tiles without a projectKey) still prunes a same-folder ghost
+  local legacy = {
+    { key = "o", name = "api", cwd = "/x/api", stale = true },
+    { key = "n", name = "api", cwd = "/x/api", stale = false },
+  }
+  eq("ghost: legacy cwd-keyed same-folder ghost pruned", core.staleDuplicateKeys(legacy)[1], "o")
 end
 
 -- ---- effort: /effort slash command building + routing --------------------
