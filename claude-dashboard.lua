@@ -3721,7 +3721,8 @@ function refresh()
       if sz then
         local w = watchdog[it.key]
         local p = core.trackProgress(w and w.size, w and w.ts, sz, now)
-        watchdog[it.key] = { size = p.size, ts = p.ts, alerted = w and w.alerted }
+        if w then w.size, w.ts = p.size, p.ts   -- mutate in place; `alerted` survives
+        else watchdog[it.key] = { size = p.size, ts = p.ts } end
       end
     end
 

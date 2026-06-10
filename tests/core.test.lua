@@ -1453,6 +1453,10 @@ do
   eq("hung: not working (approval) -> false", core.isHung({ status = "approval" }, now - 400, now, 300), false)
   eq("hung: stale tile -> false", core.isHung({ status = "working", stale = true }, now - 400, now, 300), false)
   eq("hung: no progress timestamp yet -> false", core.isHung(working, nil, now, 300), false)
+  -- post-reset / never-seeded: watchdog[key] is nil so the dashboard passes ts=nil;
+  -- the status/stale + nil-ts guards must keep this harmless (no spurious hung).
+  eq("hung: nil ts post-reset (working, not stale) -> false",
+     core.isHung({ status = "working", stale = false }, nil, now, 300), false)
   eq("hung: nil item -> false", core.isHung(nil, now - 400, now, 300), false)
 end
 
