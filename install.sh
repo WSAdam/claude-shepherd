@@ -10,7 +10,9 @@
 # The hook merge mirrors core.mergeHooks (cc-core.lua, unit-tested): for each
 # event, append our group only if none of OUR scripts (cc-status/approve/popup.sh)
 # is wired yet; otherwise skip. Matching our exact names (not a bare "cc-" substring)
-# avoids colliding with a user's own cc-prefixed hook.
+# avoids colliding with a user's own cc-prefixed hook. The test() is an UNANCHORED
+# substring (KEEP IN SYNC with core.OUR_HOOK_SCRIPTS), so a contrived my-cc-status.sh
+# would be a false positive -- acceptable next to the old bare-"cc-" net.
 #
 # Env overrides (used by tests/install.test.sh to stay hermetic):
 #   CC_INSTALL_CLAUDE_DIR, CC_INSTALL_HS_DIR, CC_INSTALL_NO_APP

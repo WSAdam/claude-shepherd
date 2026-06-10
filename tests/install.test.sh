@@ -50,4 +50,24 @@ assert_json "merge appends our Stop hook"   "$CDIR2/settings.json" \
   '[.hooks.Stop[].hooks[].command] | any(contains("cc-status.sh"))' "true"
 exists "merge made a backup" "$(ls "$CDIR2"/settings.json.bak.* 2>/dev/null | head -1)"
 
+# --- F-005: a user's OWN cc-prefixed hook (cc-notify.sh) on a wired event must NOT
+# suppress wiring ours. Regression-tests install.sh's jq mirror of OUR_HOOK_SCRIPTS,
+# which the core.test.lua mergeHooks cases can't reach. ---
+CDIR3="$TMP/claude3"; HSDIR3="$TMP/hs3"; mkdir -p "$CDIR3"
+cat > "$CDIR3/settings.json" <<'JSON'
+{ "hooks": { "Stop": [ { "hooks": [ { "type": "command", "command": "bash $HOME/.claude/cc-notify.sh" } ] } ] } }
+JSON
+CC_INSTALL_CLAUDE_DIR="$CDIR3" CC_INSTALL_HS_DIR="$HSDIR3" CC_INSTALL_NO_APP=1 \
+  bash "$ROOT/install.sh" >/dev/null 2>&1
+assert_json "F-005: user's cc-notify.sh keeps its Stop hook" "$CDIR3/settings.json" \
+  '[.hooks.Stop[].hooks[].command] | any(contains("cc-notify.sh"))' "true"
+assert_json "F-005: ours still appended past the user's cc-* hook" "$CDIR3/settings.json" \
+  '[.hooks.Stop[].hooks[].command] | any(contains("cc-status.sh"))' "true"
+assert_json "F-005: Stop now has 2 groups (user + ours)" "$CDIR3/settings.json" \
+  '.hooks.Stop | length' "2"
+before3="$(cat "$CDIR3/settings.json")"
+CC_INSTALL_CLAUDE_DIR="$CDIR3" CC_INSTALL_HS_DIR="$HSDIR3" CC_INSTALL_NO_APP=1 \
+  bash "$ROOT/install.sh" >/dev/null 2>&1
+assert_eq "F-005: re-run with ours present is a no-op" "$before3" "$(cat "$CDIR3/settings.json")"
+
 finish

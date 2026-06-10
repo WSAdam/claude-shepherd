@@ -827,6 +827,15 @@ do
   -- a genuine prior install (our cc-status.sh present) is still a no-op re-run
   local _, c6 = core.mergeHooks(m1, template)
   eq("mergeHooks: genuine prior install stays a no-op", c6, false)
+
+  -- OUR_HOOK_SCRIPTS is single-sourced for the Lua side and mirrored by install.sh's
+  -- jq alternation; pin its contents so a Lua-side drift is caught (the jq mirror is
+  -- exercised end-to-end by install.test.sh's cc-notify.sh case).
+  eq("mergeHooks: OUR_HOOK_SCRIPTS has 3 entries", #core.OUR_HOOK_SCRIPTS, 3)
+  local wantScript = { ["cc-status.sh"] = true, ["cc-approve.sh"] = true, ["cc-popup.sh"] = true }
+  local scriptsOk = true
+  for _, n in ipairs(core.OUR_HOOK_SCRIPTS) do if not wantScript[n] then scriptsOk = false end end
+  check("mergeHooks: OUR_HOOK_SCRIPTS = {cc-status, cc-approve, cc-popup}.sh", scriptsOk)
 end
 
 -- ---- Audit ledger: parse / filter / retention / narrative -----------------
@@ -1119,7 +1128,9 @@ do
   check("risk: string staleSeconds doesn't throw", okS)
 
   -- F-002 (bug sweep): the band must agree with the DISPLAYED (rounded) score at a
-  -- boundary. This event mix scores raw ~33.53 -> shown 34 -> must be "med", not "low".
+  -- boundary. This event mix is hand-tuned so the RAW score lands in (33.5, 34) -- just
+  -- under default th.med=34 but rounding up to it -- to prove the band derives from the
+  -- rounded `shown`, not raw. Re-tune if M.RISK_WEIGHTS or the default thresholds change.
   local evs, ts = {}, 0
   for _ = 1, 13 do ts = ts + 1; evs[#evs + 1] = { ts = ts, type = "tool_request", session_id = "x", tool = "Bash" } end
   ts = ts + 5; evs[#evs + 1] = { ts = ts, type = "decision", session_id = "x", outcome = "deny", by = "human" }
@@ -1128,6 +1139,11 @@ do
   local rB = core.sessionRisk(evs, {})
   eq("risk: boundary score rounds to 34", rB.score, 34)
   eq("risk: band agrees with rounded score (med, not low)", rB.band, "med")
+  -- F-003 follow-up: a string `high` must actually FEED the band compare, not merely
+  -- avoid throwing. shown=34 >= 30 reads "high" ONLY if "30" was coerced to a number
+  -- (a string would throw -> earlier pcall; a silent fallback to default 67 stays "med").
+  eq("risk: string high threshold coerced INTO the band compare",
+     core.sessionRisk(evs, { thresholds = { high = "30" } }).band, "high")
 end
 
 -- ---- resolveGateTools: per-session precedence + sentinel -------------------

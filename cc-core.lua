@@ -1298,14 +1298,14 @@ end
 -- silently swallows that session's auto-respawn (it's removed before the respawn loop).
 -- A genuinely-active second session in the same folder isn't stale, so it's safe.
 function M.staleDuplicateKeys(list)
-  local function pid(it) return it.projectKey or it.cwd end
+  local function projKey(it) return it.projectKey or it.cwd end
   local liveProjects = {}
   for _, it in ipairs(list or {}) do
-    if not it.stale and pid(it) then liveProjects[pid(it)] = true end
+    if not it.stale and projKey(it) then liveProjects[projKey(it)] = true end
   end
   local keys = {}
   for _, it in ipairs(list or {}) do
-    if it.stale and pid(it) and liveProjects[pid(it)] then keys[#keys + 1] = it.key end
+    if it.stale and projKey(it) and liveProjects[projKey(it)] then keys[#keys + 1] = it.key end
   end
   return keys
 end
@@ -1499,8 +1499,12 @@ end
 -- leave it untouched. All other settings keys are preserved. Returns newSettings,
 -- changed(bool) -- so the installer can skip a no-op write.
 -- Shepherd's own hook scripts. hasOurs matches these EXACT basenames (not a bare
--- "cc-" substring) so a user's own cc-prefixed hook doesn't suppress wiring. KEEP IN
--- SYNC with install.sh's jq `any(test("cc-(status|approve|popup)\\.sh"))`.
+-- "cc-" substring) so a user's own cc-prefixed hook doesn't suppress wiring. The
+-- match is an UNANCHORED substring -- commands appear both bare (`bash cc-status.sh`)
+-- and pathed (`/x/cc-status.sh`), so we can't anchor on a leading `/`; a contrived
+-- user hook whose basename ENDS in one of these (e.g. my-cc-status.sh) is a false
+-- positive, acceptable next to the old bare-"cc-" net. KEEP IN SYNC with install.sh's
+-- jq `any(test("cc-(status|approve|popup)\\.sh"))`.
 M.OUR_HOOK_SCRIPTS = { "cc-status.sh", "cc-approve.sh", "cc-popup.sh" }
 function M.mergeHooks(existing, template)
   existing = type(existing) == "table" and existing or {}
