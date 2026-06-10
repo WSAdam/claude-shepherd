@@ -810,6 +810,23 @@ do
   eq("mergeHooks: user-hook event -> changed", c4, true)
   eq("mergeHooks: keeps user's group first", m4.hooks.Stop[1].hooks[1].command, "bash my-own.sh")
   eq("mergeHooks: appends ours after (2 groups)", #m4.hooks.Stop, 2)
+
+  -- F-005 (bug sweep): a user's OWN cc-prefixed hook (cc-notify.sh) on a wired event
+  -- must NOT count as "already ours" -- Shepherd's group must still be appended.
+  local ccUser = { hooks = { Stop = { { hooks = { { type = "command", command = "bash $HOME/.claude/cc-notify.sh" } } } } } }
+  local m5, c5 = core.mergeHooks(ccUser, template)
+  eq("mergeHooks: user's cc-* hook still triggers a merge", c5, true)
+  eq("mergeHooks: appends ours after the user's cc-* hook", #m5.hooks.Stop, 2)
+  local wiredOurs = false
+  for _, g in ipairs(m5.hooks.Stop) do
+    for _, h in ipairs(g.hooks or {}) do
+      if type(h.command) == "string" and h.command:find("cc-status.sh", 1, true) then wiredOurs = true end
+    end
+  end
+  check("mergeHooks: our cc-status.sh actually gets wired", wiredOurs)
+  -- a genuine prior install (our cc-status.sh present) is still a no-op re-run
+  local _, c6 = core.mergeHooks(m1, template)
+  eq("mergeHooks: genuine prior install stays a no-op", c6, false)
 end
 
 -- ---- Audit ledger: parse / filter / retention / narrative -----------------

@@ -8,7 +8,9 @@
 # Shepherd.app Dock launcher. SAFE TO RE-RUN: a second run is a no-op.
 #
 # The hook merge mirrors core.mergeHooks (cc-core.lua, unit-tested): for each
-# event, append our group only if no cc-*.sh hook is wired yet; otherwise skip.
+# event, append our group only if none of OUR scripts (cc-status/approve/popup.sh)
+# is wired yet; otherwise skip. Matching our exact names (not a bare "cc-" substring)
+# avoids colliding with a user's own cc-prefixed hook.
 #
 # Env overrides (used by tests/install.test.sh to stay hermetic):
 #   CC_INSTALL_CLAUDE_DIR, CC_INSTALL_HS_DIR, CC_INSTALL_NO_APP
@@ -42,7 +44,7 @@ if have_jq; then
     merged="$(jq --argjson tmpl "$(cat "$TEMPLATE")" '
       .hooks //= {}
       | reduce ($tmpl.hooks | to_entries[]) as $e (.;
-          ([ (.hooks[$e.key] // [])[].hooks[]?.command? // empty ] | any(contains("cc-"))) as $has
+          ([ (.hooks[$e.key] // [])[].hooks[]?.command? // empty ] | any(test("cc-(status|approve|popup)\\.sh"))) as $has
           | if $has then . else .hooks[$e.key] = ((.hooks[$e.key] // []) + $e.value) end)
     ' "$SETTINGS" 2>/dev/null)"
     if [ -z "$merged" ]; then

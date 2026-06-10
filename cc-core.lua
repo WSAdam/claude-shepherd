@@ -1491,6 +1491,10 @@ end
 -- of the user's own hooks for that event); if ours are already present (re-run),
 -- leave it untouched. All other settings keys are preserved. Returns newSettings,
 -- changed(bool) -- so the installer can skip a no-op write.
+-- Shepherd's own hook scripts. hasOurs matches these EXACT basenames (not a bare
+-- "cc-" substring) so a user's own cc-prefixed hook doesn't suppress wiring. KEEP IN
+-- SYNC with install.sh's jq `any(test("cc-(status|approve|popup)\\.sh"))`.
+M.OUR_HOOK_SCRIPTS = { "cc-status.sh", "cc-approve.sh", "cc-popup.sh" }
 function M.mergeHooks(existing, template)
   existing = type(existing) == "table" and existing or {}
   local out = {}
@@ -1504,8 +1508,14 @@ function M.mergeHooks(existing, template)
     for _, g in ipairs(groups) do
       if type(g) == "table" and type(g.hooks) == "table" then
         for _, h in ipairs(g.hooks) do
-          if type(h) == "table" and type(h.command) == "string"
-             and h.command:find("cc-", 1, true) then return true end
+          if type(h) == "table" and type(h.command) == "string" then
+            -- Match Shepherd's OWN script basenames, not a bare "cc-" substring: a
+            -- user's own cc-prefixed hook (cc-notify.sh, the natural Claude Code "cc-"
+            -- convention) must NOT count as "already wired" and make us skip this event.
+            for _, name in ipairs(M.OUR_HOOK_SCRIPTS) do
+              if h.command:find(name, 1, true) then return true end
+            end
+          end
         end
       end
     end
