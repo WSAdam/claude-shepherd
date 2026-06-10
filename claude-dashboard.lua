@@ -130,6 +130,8 @@ local wv                 -- the webview; forward-declared so the controller can 
 local lastJumpKey = nil  -- for the cycle-jump hotkey
 local spawnPrompt        -- forward declaration (defined after FX)
 local prevStatus = {}    -- key -> last refresh's status (for auto-feed transitions)
+local prevStale  = {}    -- key -> last refresh's stale flag (for the auto-respawn edge)
+local respawnAttempts = {}  -- projectKey -> auto-respawn count (resets when healthy)
 local escalated  = {}    -- key -> true once we've escalated this approval episode
 local draining    = {}   -- key -> true: close on the next fresh `done` (Feature F)
 local gitRootByCwd = {}  -- cwd -> resolved git root ("" = not a repo) cache (Feature B)
@@ -3590,6 +3592,8 @@ function refresh()
   local escTopic   = tostring(core.config(cfg, "escalation.pushTopic", ""))
   local apEnabled  = core.config(cfg, "policies.autopilot.enabled", false) == true
   local drainOn    = core.config(cfg, "drain.enabled", false) == true
+  local autoRespawnOn  = core.config(cfg, "respawn.auto.enabled", false) == true
+  local autoRespawnMax = tonumber(core.config(cfg, "respawn.auto.maxRetries", 3)) or 3
   local collEnabled = core.config(cfg, "collision.enabled", false) == true
   local collGitRoot = core.config(cfg, "collision.useGitRoot", false) == true
   local riskEnabled = core.config(cfg, "risk.enabled", false) == true
@@ -3601,6 +3605,7 @@ function refresh()
   local ledgerEvents = riskEnabled and FX.readLedger({}).events or nil
   local now = FX.now()
   local newPrev = {}
+  local newPrevStale = {}  -- parallels newPrev, for the auto-respawn stale edge
 
   -- Collision detection (Feature B): flag tiles where 2+ active sessions share a
   -- working dir / git-root. Computed once over the whole list before the tile loop.
@@ -3696,9 +3701,34 @@ function refresh()
     end
     if it.status ~= "approval" then escalated[it.key] = nil end
 
+    -- Auto-respawn (opt-in): relaunch a session that died unexpectedly. The
+    -- per-folder attempt budget resets whenever a session there is seen healthy.
+    local pk = it.projectKey or it.cwd
+    if not it.stale and pk then respawnAttempts[pk] = nil end
+    if autoRespawnOn and core.shouldAutoRespawn({
+         wasStale = prevStale[it.key] or false, isStale = it.stale or false,
+         hasSession = (it.session_id ~= nil and it.session_id ~= ""),
+         intentional = (draining[it.key] ~= nil) or drained,
+         attempts = (pk and respawnAttempts[pk]) or 0, maxRetries = autoRespawnMax }) then
+      local rs = core.respawnSpec(it, cfg)
+      if rs.canRespawn then
+        respawnAttempts[pk] = ((pk and respawnAttempts[pk]) or 0) + 1
+        print("[cc-respawn] auto-relaunch " .. tostring(it.name)
+          .. " (attempt " .. respawnAttempts[pk] .. "/" .. autoRespawnMax .. ")")
+        ledgerFor(it, { type = "auto_respawn", cwd = rs.project, editor = rs.editor,
+          provider = rs.providerId, attempt = respawnAttempts[pk] })
+        FX.spawnSession(rs.editor, rs.project, nil, rs.permissionMode, rs.providerId)
+        FX.removeStatus(it.key)  -- drop the dead tile; the relaunch makes a fresh one
+      else
+        print("[cc-respawn] " .. tostring(it.name) .. " died but isn't respawnable: " .. tostring(rs.reason))
+      end
+    end
+
     newPrev[it.key] = it.status
+    newPrevStale[it.key] = it.stale or false
   end
   prevStatus = newPrev
+  prevStale = newPrevStale
 
   FX.writeFile(HEARTBEAT, tostring(now))
   sd.blink = not sd.blink

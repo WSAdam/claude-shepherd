@@ -1291,5 +1291,25 @@ do
   eq("timeline: cap last is newest", capped[3].ts, 10)
 end
 
+-- ---- shouldAutoRespawn: fire once on the unexpected-death edge --------------
+do
+  local base = { wasStale = false, isStale = true, hasSession = true, intentional = false,
+                 attempts = 0, maxRetries = 3 }
+  local function with(over)
+    local a = {}; for k, v in pairs(base) do a[k] = v end
+    for k, v in pairs(over or {}) do a[k] = v end
+    return a
+  end
+  eq("respawn-auto: fires on fresh stale edge", core.shouldAutoRespawn(with{}), true)
+  eq("respawn-auto: not on a still-stale tile", core.shouldAutoRespawn(with{ wasStale = true }), false)
+  eq("respawn-auto: not when still healthy", core.shouldAutoRespawn(with{ isStale = false }), false)
+  eq("respawn-auto: skips intentional close/drain", core.shouldAutoRespawn(with{ intentional = true }), false)
+  eq("respawn-auto: skips orphan (no session_id)", core.shouldAutoRespawn(with{ hasSession = false }), false)
+  eq("respawn-auto: disabled when maxRetries 0", core.shouldAutoRespawn(with{ maxRetries = 0 }), false)
+  eq("respawn-auto: at cap -> stop", core.shouldAutoRespawn(with{ attempts = 3, maxRetries = 3 }), false)
+  eq("respawn-auto: under cap -> go", core.shouldAutoRespawn(with{ attempts = 2, maxRetries = 3 }), true)
+  eq("respawn-auto: nil args -> false", core.shouldAutoRespawn(nil), false)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

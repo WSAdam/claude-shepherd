@@ -1109,6 +1109,26 @@ function M.shouldDrainClose(draining, prev, cur)
   return cur == "done" and prev ~= "done"
 end
 
+-- ---- Auto-respawn on unexpected death (opt-in, bounded) --------------------
+-- Should we relaunch a session that appears to have died unexpectedly? Fires ONCE
+-- on the fresh transition into stale (wasStale=false -> isStale=true) for a real
+-- session (one that has a session_id, so respawnSpec can faithfully rebuild it),
+-- as long as the operator didn't intentionally close/drain it and we're under the
+-- per-folder retry cap. The ~90s stale-detection latency is the natural backoff
+-- between attempts (a relaunch that also dies is a fresh edge -> the next attempt,
+-- until the cap), so no separate timer is needed. Pure gate; the dashboard owns
+-- the attempt bookkeeping + the actual spawn. args =
+--   { wasStale, isStale, hasSession, intentional, attempts, maxRetries }
+function M.shouldAutoRespawn(args)
+  args = args or {}
+  if args.intentional then return false end                     -- user closed/drained it
+  if not args.hasSession then return false end                  -- orphan: nothing to relaunch faithfully
+  if args.wasStale or not args.isStale then return false end    -- only the fresh false->true edge
+  local cap = tonumber(args.maxRetries) or 0
+  if cap <= 0 then return false end                             -- 0/absent = disabled
+  return (tonumber(args.attempts) or 0) < cap                   -- under the per-folder budget
+end
+
 -- Should this tile be pruned? Orphans = stale tiles with no session_id (a hook
 -- fire that lacked one, keyed by folder name, that SessionEnd can't clean), plus
 -- a ghost backstop for anything older than opts.pruneSeconds.

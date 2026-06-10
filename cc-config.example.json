@@ -84,7 +84,12 @@
 
   "respawn": {
     "_comment": "One-click respawn (Feature F). OFF by default. Adds a right-click 'Respawn from cwd' action that relaunches a dead/stale session from its last working dir + matched provider profile + editor. A gateway session whose provider profile is no longer in `providers` can't be respawned (its auth env can't be reconstructed).",
-    "enabled": false
+    "enabled": false,
+    "auto": {
+      "_comment": "Auto-respawn (opt-in, bounded). When a session that wasn't intentionally closed/drained goes stale (an unexpected death -- crash, kill, lost terminal), relaunch it from cwd, once per stale edge. Capped by maxRetries PER LAUNCH FOLDER; the counter resets when a session in that folder runs healthy again, so a folder that recovers regains its budget. The ~90s stale-detection latency is the backoff. Needs a session_id + a respawnable spec (cwd exists, provider known). enabled=false keeps today's manual-only behavior.",
+      "enabled": false,
+      "maxRetries": 3
+    }
   },
 
   "insights": {
