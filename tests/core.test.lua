@@ -1071,6 +1071,22 @@ do
   eq("risk: signals autoDenyHits", rh.signals.autoDenyHits, 4)
   eq("risk: signals timeoutFallbacks", rh.signals.timeoutFallbacks, 1)
   eq("risk: signals staleApprovals", rh.signals.staleApprovals, 1)
+
+  -- B2 (staleApprovals path): an auto-decision RESOLVES the request, so a later human
+  -- decision with no intervening request must NOT be mis-paired as a slow approval.
+  -- (Mirrors the blockedSeconds auto-clears-pending case but on the discrete counter;
+  -- catches a regression that re-nests `lastReqTs = nil` into the human-only branch.)
+  eq("risk: auto-decision clears pending -> no stale approval", core.sessionRisk({
+    { ts = 0,    type = "tool_request", session_id = "k", tool = "Bash" },
+    { ts = 10,   type = "decision", session_id = "k", outcome = "allow", by = "autoAllow" },
+    { ts = 1000, type = "decision", session_id = "k", outcome = "allow", by = "human" },
+  }, {}).signals.staleApprovals, 0)
+  -- Companion: a genuine slow request->human gap (no auto-decision between, > 300s) DOES
+  -- count, so the test pins both directions and can't pass by always reading zero.
+  eq("risk: genuine slow request->human gap counts", core.sessionRisk({
+    { ts = 0,    type = "tool_request", session_id = "k2", tool = "Bash" },
+    { ts = 1000, type = "decision", session_id = "k2", outcome = "allow", by = "human" },
+  }, {}).signals.staleApprovals, 1)
 end
 
 -- ---- resolveGateTools: per-session precedence + sentinel -------------------
