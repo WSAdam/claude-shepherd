@@ -2342,6 +2342,7 @@ local HTML = [[
     var LABELS = { idle:"Idle", working:"Working",
                    approval:"Needs you", done:"Ready for you" };
     var COLORS = { idle:"#6b7280", working:"#f5b50a", done:"#22c55e", approval:"#ef4444" };
+    var BULK_RULES = __BULK_RULES__;  // injected from core.BULK_RULES (single source)
     var lastItems = [];
     var selectedKey = null;
     var searchQuery = "";   // free-text tile filter (🔍); empty = show all
@@ -2531,17 +2532,15 @@ local HTML = [[
     }
 
     // ---- Bulk fleet actions (act on the visible set at once) ----------------
-    // JS twin of core.selectActionable (target by status) so the bar can show live
-    // counts; the Lua side re-derives the targets from the keys we send (WYSIWYG).
-    // MUST stay byte-for-byte equivalent to core.selectActionable's predicate -- if
-    // one changes, change both, or the count drifts from what Lua acts on.
+    // JS twin of core.selectActionable for the live bar counts. Both sides read the
+    // SAME rule table (BULK_RULES, injected from cc-core), so the count can't drift
+    // from what Lua re-derives and acts on (WYSIWYG). Only the tiny interpreter is
+    // mirrored here; the per-action data lives in one place.
     function actionableKeys(action, items){
+      var rule = BULK_RULES[action]; if(!rule) return [];
       return (items || []).filter(function(it){
         if(it.stale || !it.key) return false;
-        if(action === "approve") return it.status === "approval";
-        if(action === "stop") return it.status === "working";
-        if(action === "nudge") return it.status !== "approval";  // excl. approval: nudge submits
-        return false;
+        return (rule.match !== undefined) ? (it.status === rule.match) : (it.status !== rule.exclude);
       }).map(function(it){ return it.key; });
     }
     function sendBulk(action, keys, text){
@@ -3395,6 +3394,9 @@ local HTML = [[
 -- Apply the saved theme (or default) to the markup before showing.
 local savedTheme = hs.settings.get("ccDashboardTheme") or DEFAULT_THEME
 HTML = HTML:gsub("__INIT_THEME__", savedTheme)
+-- Inject the bulk-action targeting rules so the panel JS shares cc-core's single
+-- source of truth (the bulk-bar count can't drift from what selectActionable acts on).
+HTML = HTML:gsub("__BULK_RULES__", hs.json.encode(core.BULK_RULES))
 print("[cc-dashboard] starting with theme: " .. savedTheme)
 
 -- Build and show the panel. Restore the user's last size/position if we saved

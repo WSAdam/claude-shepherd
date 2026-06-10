@@ -1262,6 +1262,12 @@ do
   eq("bulk: unknown action -> none", #core.selectActionable(list, "bogus"), 0)
   eq("bulk: nil list -> none", #core.selectActionable(nil, "approve"), 0)
   eq("bulk: item without key skipped", #core.selectActionable({ { status = "approval" } }, "approve"), 0)
+  -- BULK_RULES is the single source the panel JS also reads (injected as __BULK_RULES__);
+  -- pin its shape so selectActionable and the JS twin can't silently disagree.
+  check("bulk: rules table exists", type(core.BULK_RULES) == "table")
+  eq("bulk: approve rule matches approval", core.BULK_RULES.approve.match, "approval")
+  eq("bulk: stop rule matches working", core.BULK_RULES.stop.match, "working")
+  eq("bulk: nudge rule excludes approval", core.BULK_RULES.nudge.exclude, "approval")
 end
 
 -- ---- sessionTimeline: chronological per-session slice ----------------------

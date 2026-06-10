@@ -348,27 +348,36 @@ function M.setGroup(groupsByKey, key, value)
 end
 
 -- ---- Bulk fleet actions ----------------------------------------------------
--- Which session keys a fleet-wide bulk action targets, drawn from an
--- ALREADY-VISIBLE list (the panel passes the keys currently shown, post
--- search/group filter, so a bulk action is WYSIWYG). Each routes through
--- handleAction on the dashboard side. Targets by status so a bulk "approve" can't
--- mis-fire an Enter into a session that isn't actually waiting:
---   approve -> sessions awaiting a decision   (status "approval")
---   stop    -> sessions mid-turn              (status "working")
+-- Per-action targeting rule -- the SINGLE source of truth shared with the panel JS,
+-- which reads the same table injected into the HTML as __BULK_RULES__. Keeping one
+-- table means the bulk-bar count (JS-derived) can't drift from what Lua re-derives
+-- and acts on. `match` = only sessions with that status; `exclude` = any status but
+-- that one.
+--   approve -> sessions awaiting a decision   (only "approval")
+--   stop    -> sessions mid-turn              (only "working")
 --   nudge   -> live sessions NOT mid-approval (broadcast a follow-up prompt)
--- Stale tiles are never targeted (a dead window can't act). nudge also excludes
--- `approval`: handleAction's nudge pastes text AND submits, so broadcasting into a
--- session sitting at its y/n approval prompt would corrupt that decision -- a
--- session needs a decision, not a prompt. Unknown action -> {}.
+-- nudge excludes `approval` because handleAction's nudge pastes text AND submits, so
+-- broadcasting into a session sitting at its y/n approval prompt would corrupt that
+-- decision -- a waiter needs a decision, not a prompt.
+M.BULK_RULES = {
+  approve = { match = "approval" },
+  stop    = { match = "working" },
+  nudge   = { exclude = "approval" },
+}
+
+-- Which session keys a fleet-wide bulk action targets, drawn from an ALREADY-VISIBLE
+-- list (the panel passes the keys currently shown, post search/group filter, so a
+-- bulk action is WYSIWYG). Stale tiles are never targeted (a dead window can't act).
+-- Unknown action -> {}. Routes through handleAction on the dashboard side.
 function M.selectActionable(list, action)
+  local rule = M.BULK_RULES[action]
   local out = {}
+  if not rule then return out end
   for _, it in ipairs(list or {}) do
     if it.key and not it.stale then
-      local ok = false
-      if action == "approve" then ok = (it.status == "approval")
-      elseif action == "stop" then ok = (it.status == "working")
-      elseif action == "nudge" then ok = (it.status ~= "approval")
-      end
+      local ok
+      if rule.match ~= nil then ok = (it.status == rule.match)
+      else ok = (it.status ~= rule.exclude) end
       if ok then out[#out + 1] = it.key end
     end
   end
