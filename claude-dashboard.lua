@@ -59,6 +59,7 @@ local AUTOPILOT_DIR = os.getenv("CC_AUTOPILOT_DIR") or (os.getenv("HOME") .. "/.
 local GATE_TOOLS_DIR = os.getenv("CC_GATE_TOOLS_DIR") or (os.getenv("HOME") .. "/.claude/cc-gate-tools")
 local GATE_FLAG     = os.getenv("CC_GATE_FLAG") or (os.getenv("HOME") .. "/.claude/cc-gate.enabled")
 local LABELS_FILE   = os.getenv("CC_LABELS_FILE") or (os.getenv("HOME") .. "/.claude/cc-labels.json")
+local GROUPS_FILE   = os.getenv("CC_GROUPS_FILE") or (os.getenv("HOME") .. "/.claude/cc-groups.json")
 local RECENT_FILE   = os.getenv("CC_RECENT_FILE") or (os.getenv("HOME") .. "/.claude/cc-recent-dirs.json")
 local LEDGER_DIR    = os.getenv("CC_LEDGER_DIR") or (os.getenv("HOME") .. "/.claude/cc-ledger")
 local CLAUDE_DIR    = (os.getenv("HOME") or "") .. "/.claude"
@@ -123,6 +124,7 @@ local byKey = {}
 -- new instance, close/reopen, and a Hammerspoon reload. (This intentionally
 -- reverses the earlier in-memory-only rule.) Loaded from disk once FX exists.
 local labels = {}
+local groups = {}        -- projectKey -> group name (cohort tag); loaded from disk
 local ctxMenu            -- holds the live right-click popup menu (so it isn't GC'd)
 local wv                 -- the webview; forward-declared so the controller can push to it
 local lastJumpKey = nil  -- for the cycle-jump hotkey
@@ -418,6 +420,19 @@ end
 function FX.saveLabels(labelsByCwd)
   hs.fs.mkdir(CLAUDE_DIR)
   FX.writeFile(LABELS_FILE, core.json.encode(labelsByCwd or {}))
+end
+
+-- Session groups (cohort tags): a JSON map of projectKey -> group name. Same
+-- shape + failure mode as labels (missing/garbled -> empty map). Survives reload.
+function FX.loadGroups()
+  local c = FX.readFile(GROUPS_FILE)
+  if not c or #c == 0 then return {} end
+  local ok, t = pcall(function() return core.json.decode(c) end)
+  return (ok and type(t) == "table") and t or {}
+end
+function FX.saveGroups(groupsByKey)
+  hs.fs.mkdir(CLAUDE_DIR)
+  FX.writeFile(GROUPS_FILE, core.json.encode(groupsByKey or {}))
 end
 
 -- ---- Audit/event ledger I/O ------------------------------------------------
@@ -1449,6 +1464,9 @@ local function handleBridgeMsg(msg)
         { title = "Relabel…", fn = function()
             pcall(function() wv:evaluateJavaScript("startRename(" .. keyJson .. ")") end)
           end },
+        { title = "Set group…", fn = function()
+            pcall(function() wv:evaluateJavaScript("startGroup(" .. keyJson .. ")") end)
+          end },
         { title = "-" },
         -- Clear / Compact: same effect as the detail-panel buttons (type the slash
         -- command into the session; headless on Kitty, best-effort in VS Code). A
@@ -1534,6 +1552,17 @@ local function handleBridgeMsg(msg)
     FX.saveLabels(labels)
     ledgerFor(item, { type = "relabel", to = labels[lkey] or "" })
     print("[cc-dashboard] relabel " .. tostring(lkey) .. " -> " .. tostring(labels[lkey]))
+    refresh()
+    return
+  end
+  if a == "set-group" then
+    -- Cohort tag keyed by the stable projectKey (like relabel), so it survives
+    -- close/reopen and a new session in the same folder inherits it. Blank clears.
+    local gkey = item.projectKey or item.cwd
+    groups = core.setGroup(groups, gkey, payload.text)
+    FX.saveGroups(groups)
+    ledgerFor(item, { type = "group", to = groups[gkey] or "" })
+    print("[cc-dashboard] group " .. tostring(gkey) .. " -> " .. tostring(groups[gkey] or "(cleared)"))
     refresh()
     return
   end
@@ -1757,18 +1786,26 @@ local HTML = [[
   #d-usage { font-size:11px; color:#9aa0ad; margin-top:6px; }
   #d-usage .um-row { display:flex; justify-content:space-between; gap:8px; }
   #empty { color:#6b7280; font-size:13px; padding:18px; text-align:center; }
-  #renamebar, #confirmbar, #searchbar { display:none; align-items:center; gap:6px; padding:8px 12px;
+  #renamebar, #confirmbar, #searchbar, #setgroupbar { display:none; align-items:center; gap:6px; padding:8px 12px;
     background:#161821; border-bottom:1px solid #2c2f3a; }
-  #renamebar.show, #confirmbar.show, #searchbar.show { display:flex; }
-  #renamebar-label, #searchbar-label { font-size:12px; color:#9fb6d6; }
+  #renamebar.show, #confirmbar.show, #searchbar.show, #setgroupbar.show { display:flex; }
+  #renamebar-label, #searchbar-label, #setgroupbar-label { font-size:12px; color:#9fb6d6; }
   #searchbar-count { font-size:11px; color:#8a8d99; white-space:nowrap; }
   #confirmbar-label { font-size:12px; color:#e8e9ee; flex:1; }
-  #renamebar-input, #searchbar-input { flex:1; background:#1b1d24; color:#e8e9ee; border:1px solid #2c2f3a;
+  #renamebar-input, #searchbar-input, #setgroupbar-input { flex:1; background:#1b1d24; color:#e8e9ee; border:1px solid #2c2f3a;
     border-radius:6px; font-size:12px; padding:4px 6px; font-family:inherit; }
-  #renamebar button, #confirmbar button, #searchbar button { background:#21232c; color:#cfd2db;
+  #renamebar button, #confirmbar button, #searchbar button, #setgroupbar button { background:#21232c; color:#cfd2db;
     border:1px solid #2c2f3a; border-radius:6px; font-size:12px; padding:4px 10px; cursor:pointer; }
-  #renamebar button:hover, #confirmbar button:hover, #searchbar button:hover { background:#2b2e39; }
+  #renamebar button:hover, #confirmbar button:hover, #searchbar button:hover, #setgroupbar button:hover { background:#2b2e39; }
   #confirmbar button.danger { border-color:#ef4444; color:#f3a1a1; }
+  /* group filter chips (shown only when groups exist) */
+  #groupchips { display:none; flex-wrap:wrap; gap:6px; padding:6px 10px; border-bottom:1px solid #2c2f3a; }
+  #groupchips.show { display:flex; }
+  .gchip { background:#21232c; color:#cfd2db; border:1px solid #2c2f3a; border-radius:999px;
+           font-size:11px; padding:2px 10px; cursor:pointer; }
+  .gchip:hover { background:#272a35; }
+  .gchip.active { border-color:#6ea8fe; color:#cfe0f5; background:#1c2536; }
+  .gtag { font-size:10px; color:#8a8d99; margin-left:5px; }
 
   /* status colors, shared by all themes via the --c variable */
   .s-idle     { --c:#6b7280; }
@@ -1973,6 +2010,12 @@ local HTML = [[
     <span id="searchbar-count"></span>
     <button onclick="toggleSearch()">✕</button>
   </div>
+  <div id="setgroupbar">
+    <span id="setgroupbar-label">Group:</span>
+    <input id="setgroupbar-input" placeholder="group name (blank to clear)" onkeydown="groupKeydown(event)">
+    <button onclick="commitGroup()">Set</button>
+    <button onclick="hideBars()">Cancel</button>
+  </div>
   <div id="renamebar">
     <span id="renamebar-label">Rename:</span>
     <input id="renamebar-input" onkeydown="renameKeydown(event)">
@@ -1984,6 +2027,7 @@ local HTML = [[
     <button class="danger" onclick="commitClose()">Close</button>
     <button onclick="hideBars()">Cancel</button>
   </div>
+  <div id="groupchips"></div>
   <div id="grid"></div>
   <div id="empty">Waiting for Claude Code sessions...<br>Start a session in any project.</div>
 
@@ -2240,6 +2284,7 @@ local HTML = [[
     var lastItems = [];
     var selectedKey = null;
     var searchQuery = "";   // free-text tile filter (🔍); empty = show all
+    var activeGroup = "";   // group-chip filter; empty = all groups
     var detailExpanded = { pending:false, activity:false };
     var pendingImage = null;  // data URL of an image pasted into the input
 
@@ -2295,20 +2340,40 @@ local HTML = [[
 
     // Relabel / Close happen via in-panel bars (no native dialog -> no console pop).
     // Lua's popup-menu items call startRename/startClose; these post the result back.
-    var renameKey = null, closeKey = null;
+    var renameKey = null, closeKey = null, groupKey = null;
     function hideBars(){
-      renameKey = null; closeKey = null;
+      renameKey = null; closeKey = null; groupKey = null;
       document.getElementById("renamebar").classList.remove("show");
       document.getElementById("confirmbar").classList.remove("show");
+      document.getElementById("setgroupbar").classList.remove("show");
     }
     function startRename(key){
       var it = findItem(key); if(!it) return;
-      closeKey = null; document.getElementById("confirmbar").classList.remove("show");
+      hideBars();
       renameKey = key;
       var inp = document.getElementById("renamebar-input");
       inp.value = it.label || it.name || "";
       document.getElementById("renamebar").classList.add("show");
       inp.focus(); inp.select();
+    }
+    // Assign/clear a session's group (cohort tag). Blank input clears it. Keyed
+    // server-side by the stable projectKey, like relabel.
+    function startGroup(key){
+      var it = findItem(key); if(!it) return;
+      hideBars();
+      groupKey = key;
+      var inp = document.getElementById("setgroupbar-input");
+      inp.value = it.group || "";
+      document.getElementById("setgroupbar").classList.add("show");
+      inp.focus(); inp.select();
+    }
+    function commitGroup(){
+      if(groupKey){ send("set-group", groupKey, (document.getElementById("setgroupbar-input").value||"").trim()); }
+      hideBars();
+    }
+    function groupKeydown(e){
+      if(e.key === "Enter"){ e.preventDefault(); commitGroup(); }
+      else if(e.key === "Escape"){ e.preventDefault(); hideBars(); }
     }
     function commitRename(){
       if(renameKey){ send("relabel", renameKey, (document.getElementById("renamebar-input").value||"").trim()); }
@@ -2374,7 +2439,34 @@ local HTML = [[
     }
     function visibleItems(){
       var toks = searchTokens();
-      return lastItems.filter(function(it){ return tileMatches(it, toks); });
+      return lastItems.filter(function(it){
+        if(activeGroup && (it.group || "") !== activeGroup) return false;  // group chip filter
+        return tileMatches(it, toks);
+      });
+    }
+    // ---- Group filter chips (shown only when groups exist) ------------------
+    var GROUP_NAMES = [];  // JS twin of core.groupNames over lastItems (index = chip)
+    function groupNamesJS(){
+      var seen = {}, out = [];
+      lastItems.forEach(function(it){ var g = it.group; if(g && !seen[g]){ seen[g] = 1; out.push(g); } });
+      out.sort();
+      return out;
+    }
+    function setActiveGroup(i){
+      var g = (i < 0) ? "" : (GROUP_NAMES[i] || "");
+      activeGroup = (activeGroup === g) ? "" : g;  // re-click clears
+      renderGrid();
+    }
+    function renderGroupChips(){
+      var bar = document.getElementById("groupchips");
+      GROUP_NAMES = groupNamesJS();
+      if(!GROUP_NAMES.length){ activeGroup = ""; bar.classList.remove("show"); bar.innerHTML = ""; return; }
+      if(activeGroup && GROUP_NAMES.indexOf(activeGroup) < 0) activeGroup = "";  // group vanished
+      var chips = '<span class="gchip'+(activeGroup===""?" active":"")+'" onclick="setActiveGroup(-1)">All</span>';
+      GROUP_NAMES.forEach(function(g, i){
+        chips += '<span class="gchip'+(activeGroup===g?" active":"")+'" onclick="setActiveGroup('+i+')">'+esc(g)+'</span>';
+      });
+      bar.innerHTML = chips; bar.classList.add("show");
     }
     function toggleSearch(){
       var b = document.getElementById("searchbar");
@@ -3124,7 +3216,7 @@ local HTML = [[
       var cls = "tile s-" + st + (it.stale ? " stale" : "") + (it.collide ? " collide" : "") + (it.escalate ? " escalate" : "") + (it.key === selectedKey ? " sel" : "");
       return '<div class="'+cls+'" data-key="'+esc(it.key)+'" onclick="selectTile(\''+esc(it.key)+'\')" ondblclick="send(\'focus\',\''+esc(it.key)+'\')" oncontextmenu="showCtx(event,\''+esc(it.key)+'\')" title="Double-click to jump · right-click for more">'
            + '<span class="dot"></span>'
-           + '<span class="name">'+esc(it.label || it.name)+'</span>'
+           + '<span class="name">'+esc(it.label || it.name)+(it.group ? ' <span class="gtag">🏷 '+esc(it.group)+'</span>' : '')+'</span>'
            + '<span class="label">'+label+'</span>'
            + riskBadge(it)
            + '<span class="meta">'+esc(meta)+'</span>'
@@ -3138,6 +3230,7 @@ local HTML = [[
     function renderGrid(){
       var grid  = document.getElementById("grid");
       var empty = document.getElementById("empty");
+      renderGroupChips();  // refresh the group filter row from the latest data
       if(lastItems.length === 0){
         grid.innerHTML = ""; empty.innerHTML = EMPTY_WAITING; empty.style.display = "block";
         updateSearchCount(0, 0); return;
@@ -3494,6 +3587,7 @@ function refresh()
   -- Overlay persistent relabels by project path (display-only; .name stays the
   -- real target). A new session in a labeled folder inherits the name (F1).
   core.applyLabelsByCwd(list, labels)
+  core.applyGroups(list, groups)  -- cohort tag (.group); drives filter chips + group-scoped bulk
   local payload = (#list == 0) and "[]" or hs.json.encode(list)
   local provs = core.config(cfg, "providers", nil)  -- reuse the cfg loaded above
   local provJson = (type(provs) == "table") and hs.json.encode(provs) or "[]"
@@ -3549,8 +3643,9 @@ end
 -- Ensure the status dir exists so the watcher has something to watch.
 hs.fs.mkdir(STATUS_DIR)
 
--- Load persistent relabels from disk (F1) now that FX is wired up.
+-- Load persistent relabels + group tags from disk now that FX is wired up.
 labels = FX.loadLabels()
+groups = FX.loadGroups()
 
 -- Poll on a timer, and also react instantly to file changes.
 M.timer = hs.timer.doEvery(POLL_SECONDS, refresh)

@@ -1201,5 +1201,38 @@ do
   eq("filter: nil list -> empty", #core.filterTiles(nil, "x"), 0)
 end
 
+-- ---- session groups: applyGroups / groupNames / setGroup -------------------
+do
+  local list = {
+    { key = "a", name = "auth", projectKey = "proj-auth" },
+    { key = "b", name = "web",  projectKey = "proj-web" },
+    { key = "c", name = "docs", cwd = "/legacy/docs" },           -- legacy cwd key
+    { key = "d", name = "misc", projectKey = "proj-misc" },        -- ungrouped
+  }
+  local groups = { ["proj-auth"] = "backend", ["proj-web"] = "frontend", ["/legacy/docs"] = "backend" }
+  core.applyGroups(list, groups)
+  eq("groups: projectKey-tagged", list[1].group, "backend")
+  eq("groups: frontend tagged", list[2].group, "frontend")
+  eq("groups: legacy cwd fallback", list[3].group, "backend")
+  eq("groups: ungrouped stays nil", list[4].group, nil)
+  eq("groups: name untouched", list[1].name, "auth")
+
+  local names = core.groupNames(list)
+  eq("groups: distinct count", #names, 2)
+  eq("groups: sorted first", names[1], "backend")
+  eq("groups: sorted second", names[2], "frontend")
+  eq("groups: empty list -> no names", #core.groupNames({}), 0)
+
+  local g2 = core.setGroup(groups, "proj-misc", "infra")
+  eq("setGroup: adds new", g2["proj-misc"], "infra")
+  eq("setGroup: immutable (input untouched)", groups["proj-misc"], nil)
+  eq("setGroup: blank clears", core.setGroup(groups, "proj-auth", "  ")["proj-auth"], nil)
+  eq("setGroup: trims value", core.setGroup(groups, "proj-misc", "  ops ")["proj-misc"], "ops")
+  eq("setGroup: empty key is no-op", core.setGroup(groups, "", "x")["proj-auth"], "backend")
+  -- applyGroups with no map clears tags (all nil)
+  core.applyGroups(list, nil)
+  eq("groups: nil map -> all ungrouped", list[1].group, nil)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

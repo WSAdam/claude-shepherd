@@ -301,6 +301,51 @@ function M.filterTiles(list, query)
   return out
 end
 
+-- ---- Session groups / tags -------------------------------------------------
+-- Groups let the operator cohort sessions (e.g. "backend", "refactor") and filter
+-- or act on a whole group at once. Like relabels, a group is keyed by the session's
+-- STABLE projectKey (launch folder, immune to cd drift) so it sticks across
+-- close/reopen and a brand-new session in the same folder inherits it. Persistence
+-- (cc-groups.json) + group-scoped bulk actions live in the dashboard; pure bits here.
+
+-- Tag each session with its group (in place), keyed by projectKey with a legacy cwd
+-- fallback (mirrors applyLabelsByCwd). Only .group is set; .name/.key are untouched.
+function M.applyGroups(list, groupsByKey)
+  groupsByKey = groupsByKey or {}
+  for _, it in ipairs(list or {}) do
+    it.group = (it.projectKey and groupsByKey[it.projectKey])
+            or (it.cwd and groupsByKey[it.cwd])   -- legacy cwd-keyed entries
+            or nil
+  end
+  return list
+end
+
+-- Distinct, sorted group names present in a (tagged) list. Ungrouped sessions are
+-- ignored. Drives the header filter chips.
+function M.groupNames(list)
+  local seen, out = {}, {}
+  for _, it in ipairs(list or {}) do
+    local g = it.group
+    if type(g) == "string" and g ~= "" and not seen[g] then
+      seen[g] = true; out[#out + 1] = g
+    end
+  end
+  table.sort(out)
+  return out
+end
+
+-- Set or clear a session's group assignment, immutably (returns a NEW table; the
+-- input is never mutated, like setLabel). A blank/whitespace value CLEARS the entry;
+-- a nil/empty key is a no-op.
+function M.setGroup(groupsByKey, key, value)
+  local out = {}
+  for k, v in pairs(groupsByKey or {}) do out[k] = v end
+  if not key or key == "" then return out end
+  local txt = tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", "")
+  if txt == "" then out[key] = nil else out[key] = txt end  -- (and/or can't yield nil)
+  return out
+end
+
 -- ---- Improve button (leaderboard improvement cards) ------------------------
 
 -- Parse `git remote get-url origin` output down to "owner/repo" -- mirrors the sed
