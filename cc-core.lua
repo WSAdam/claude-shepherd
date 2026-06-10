@@ -843,7 +843,11 @@ function M.sessionRisk(events, opts)
   local th = {}
   for k, v in pairs(M.RISK_THRESHOLDS) do th[k] = v end
   if type(opts.thresholds) == "table" then
-    for k, v in pairs(opts.thresholds) do if v ~= nil then th[k] = v end end
+    -- Coerce like the weights (wv does `tonumber(v) or 0`): a stringified threshold
+    -- from cc-config.json (a quoted JSON number) must not reach the numeric compares
+    -- below and throw "compare string with number", which would freeze the 1s refresh
+    -- loop. Keep the default when a value isn't a number.
+    for k, v in pairs(opts.thresholds) do th[k] = tonumber(v) or th[k] end
   end
 
   local evs = {}
@@ -884,10 +888,13 @@ function M.sessionRisk(events, opts)
   if volScore > wv("volumeCap") then volScore = wv("volumeCap") end
   score = score + volScore
   if score < 0 then score = 0 elseif score > 100 then score = 100 end
+  -- Band from the DISPLAYED (rounded) score, not the raw one, so the number and its
+  -- colored band can't disagree at a boundary (a raw 33.6 shows "34" -> must be med).
+  local shown = math.floor(score + 0.5)
   local band = "low"
-  if score >= th.high then band = "high" elseif score >= th.med then band = "med" end
+  if shown >= th.high then band = "high" elseif shown >= th.med then band = "med" end
   return {
-    score = math.floor(score + 0.5),
+    score = shown,
     band = band,
     signals = {
       decisionCount = decisionCount, denyCount = denyCount, denyRate = denyRate,

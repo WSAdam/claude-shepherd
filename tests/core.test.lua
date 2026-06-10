@@ -1087,6 +1087,30 @@ do
     { ts = 0,    type = "tool_request", session_id = "k2", tool = "Bash" },
     { ts = 1000, type = "decision", session_id = "k2", outcome = "allow", by = "human" },
   }, {}).signals.staleApprovals, 1)
+
+  -- F-003 (bug sweep): a stringified threshold from config (a quoted JSON number)
+  -- must be coerced, not crash the numeric compares (which would freeze refresh).
+  local okT, rT = pcall(core.sessionRisk,
+    { { ts = 0, type = "decision", session_id = "k", outcome = "allow", by = "human" } },
+    { thresholds = { high = "67", med = "34" } })
+  check("risk: string thresholds don't throw", okT)
+  check("risk: string thresholds still yield a band", type(rT) == "table" and rT.band ~= nil)
+  local okS = pcall(core.sessionRisk, {
+    { ts = 0,   type = "tool_request", session_id = "k" },
+    { ts = 500, type = "decision", session_id = "k", outcome = "allow", by = "human" },
+  }, { thresholds = { staleSeconds = "300" } })
+  check("risk: string staleSeconds doesn't throw", okS)
+
+  -- F-002 (bug sweep): the band must agree with the DISPLAYED (rounded) score at a
+  -- boundary. This event mix scores raw ~33.53 -> shown 34 -> must be "med", not "low".
+  local evs, ts = {}, 0
+  for _ = 1, 13 do ts = ts + 1; evs[#evs + 1] = { ts = ts, type = "tool_request", session_id = "x", tool = "Bash" } end
+  ts = ts + 5; evs[#evs + 1] = { ts = ts, type = "decision", session_id = "x", outcome = "deny", by = "human" }
+  ts = ts + 5; evs[#evs + 1] = { ts = ts, type = "tool_request", session_id = "x", tool = "Bash" }
+  ts = ts + 400; evs[#evs + 1] = { ts = ts, type = "decision", session_id = "x", outcome = "fallback", by = "timeout-fallback" }
+  local rB = core.sessionRisk(evs, {})
+  eq("risk: boundary score rounds to 34", rB.score, 34)
+  eq("risk: band agrees with rounded score (med, not low)", rB.band, "med")
 end
 
 -- ---- resolveGateTools: per-session precedence + sentinel -------------------
