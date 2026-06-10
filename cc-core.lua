@@ -1218,6 +1218,41 @@ function M.shouldAutoRespawn(args)
   return (tonumber(args.attempts) or 0) < cap                   -- under the per-folder budget
 end
 
+-- Advance the auto-respawn bookkeeping for ONE tile in one refresh tick and say
+-- whether to relaunch it now. Mutates `attempts` (projectKey -> count) in place:
+-- clears a folder's budget when a session there is healthy (so a folder that
+-- recovers regains its retries), and increments it when a respawn fires. The
+-- projectKey is folded into the gate, so a tile with no projectKey/cwd never
+-- reaches a (nil-key) table write. The caller passes the prior stale flag
+-- (opts.wasStale) and stores the returned `isStale` for the next tick; the actual
+-- spawn / removeStatus stays in the dashboard. Pure apart from the injected-table
+-- mutation -- so the "recovers regains retries" contract is unit-testable.
+--   attempts : table (mutated)
+--   item     : { projectKey, cwd, status, stale, session_id }
+--   opts     : { enabled, maxRetries, intentional, wasStale }
+-- returns { spawn = bool, isStale = bool, attempts = <this folder's count or nil> }
+function M.stepAutoRespawn(attempts, item, opts)
+  attempts = attempts or {}
+  opts = opts or {}
+  item = item or {}
+  local pk = item.projectKey or item.cwd
+  local isStale = item.stale or false
+  if not isStale and pk then attempts[pk] = nil end            -- healthy -> reset folder budget
+  local spawn = false
+  if opts.enabled and pk then
+    local n = attempts[pk] or 0
+    if M.shouldAutoRespawn({
+         wasStale = opts.wasStale or false, isStale = isStale,
+         hasSession = (item.session_id ~= nil and item.session_id ~= ""),
+         intentional = opts.intentional and true or false,
+         attempts = n, maxRetries = opts.maxRetries }) then
+      spawn = true
+      attempts[pk] = n + 1
+    end
+  end
+  return { spawn = spawn, isStale = isStale, attempts = pk and attempts[pk] or nil }
+end
+
 -- Should this tile be pruned? Orphans = stale tiles with no session_id (a hook
 -- fire that lacked one, keyed by folder name, that SessionEnd can't clean), plus
 -- a ghost backstop for anything older than opts.pruneSeconds.

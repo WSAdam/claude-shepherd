@@ -3800,22 +3800,21 @@ function refresh()
       transcriptSize[it.key] = nil
     end
 
-    -- Auto-respawn (opt-in): relaunch a session that died unexpectedly. The
-    -- per-folder attempt budget resets whenever a session there is seen healthy.
-    local pk = it.projectKey or it.cwd
-    if not it.stale and pk then respawnAttempts[pk] = nil end
-    if autoRespawnOn and core.shouldAutoRespawn({
-         wasStale = prevStale[it.key] or false, isStale = it.stale or false,
-         hasSession = (it.session_id ~= nil and it.session_id ~= ""),
-         intentional = (draining[it.key] ~= nil) or drained,
-         attempts = (pk and respawnAttempts[pk]) or 0, maxRetries = autoRespawnMax }) then
+    -- Auto-respawn (opt-in): relaunch a session that died unexpectedly. cc-core owns
+    -- the bookkeeping (per-folder budget: reset when healthy, increment when firing;
+    -- the projectKey is folded into the gate so a keyless tile can't nil-key write).
+    local step = core.stepAutoRespawn(respawnAttempts, it, {
+      enabled = autoRespawnOn, maxRetries = autoRespawnMax,
+      intentional = (draining[it.key] ~= nil) or drained,
+      wasStale = prevStale[it.key] or false })
+    newPrevStale[it.key] = step.isStale
+    if step.spawn then
       local rs = core.respawnSpec(it, cfg)
       if rs.canRespawn then
-        respawnAttempts[pk] = ((pk and respawnAttempts[pk]) or 0) + 1
         print("[cc-respawn] auto-relaunch " .. tostring(it.name)
-          .. " (attempt " .. respawnAttempts[pk] .. "/" .. autoRespawnMax .. ")")
+          .. " (attempt " .. tostring(step.attempts) .. "/" .. autoRespawnMax .. ")")
         ledgerFor(it, { type = "auto_respawn", cwd = rs.project, editor = rs.editor,
-          provider = rs.providerId, attempt = respawnAttempts[pk] })
+          provider = rs.providerId, attempt = step.attempts })
         FX.spawnSession(rs.editor, rs.project, nil, rs.permissionMode, rs.providerId)
         FX.removeStatus(it.key)  -- drop the dead tile; the relaunch makes a fresh one
       else
@@ -3824,7 +3823,6 @@ function refresh()
     end
 
     newPrev[it.key] = it.status
-    newPrevStale[it.key] = it.stale or false
   end
   prevStatus = newPrev
   prevStale = newPrevStale

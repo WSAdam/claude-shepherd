@@ -1317,6 +1317,50 @@ do
   eq("respawn-auto: nil args -> false", core.shouldAutoRespawn(nil), false)
 end
 
+-- ---- stepAutoRespawn: per-folder budget bookkeeping ------------------------
+do
+  local attempts = {}
+  local function step(item, wasStale)
+    return core.stepAutoRespawn(attempts, item,
+      { enabled = true, maxRetries = 2, intentional = false, wasStale = wasStale })
+  end
+  local function dead(key, sid) return { key = key, projectKey = "pf", status = "working", stale = true, session_id = sid } end
+
+  local r1 = step(dead("k1", "s1"), false)
+  eq("step: fires on the death edge", r1.spawn, true)
+  eq("step: attempt counted", attempts["pf"], 1)
+  eq("step: returns isStale", r1.isStale, true)
+
+  eq("step: no re-fire while still stale", step(dead("k1", "s1"), true).spawn, false)
+  eq("step: attempt unchanged when not firing", attempts["pf"], 1)
+
+  eq("step: second death edge fires", step(dead("k2", "s2"), false).spawn, true)
+  eq("step: attempt climbs to 2", attempts["pf"], 2)
+
+  eq("step: at cap -> no fire", step(dead("k3", "s3"), false).spawn, false)
+  eq("step: attempt holds at cap", attempts["pf"], 2)
+
+  -- a healthy session in that folder resets the budget (recovers regains retries)
+  step({ key = "k4", projectKey = "pf", status = "working", stale = false, session_id = "s4" }, false)
+  eq("step: healthy resets the folder budget", attempts["pf"], nil)
+  local r6 = step(dead("k5", "s5"), false)
+  eq("step: fires again after recovery", r6.spawn, true)
+  eq("step: budget climbs from zero again", attempts["pf"], 1)
+
+  -- disabled never fires and never writes
+  local a2 = {}
+  eq("step: disabled -> no fire",
+     core.stepAutoRespawn(a2, dead("x", "s"), { enabled = false, maxRetries = 2, wasStale = false }).spawn, false)
+  eq("step: disabled -> no write", a2["pf"], nil)
+
+  -- a tile with no projectKey/cwd: no fire, NO nil-key write (the review's bug)
+  local a3 = {}
+  local rn = core.stepAutoRespawn(a3, { key = "y", status = "working", stale = true, session_id = "s" },
+    { enabled = true, maxRetries = 2, wasStale = false })
+  eq("step: no projectKey -> no fire (guards the nil-key write)", rn.spawn, false)
+  eq("step: still reports isStale without a key", rn.isStale, true)
+end
+
 -- ---- bucketEvents: time-series sparkline buckets ---------------------------
 do
   local evs = {
