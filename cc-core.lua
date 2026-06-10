@@ -274,6 +274,33 @@ function M.setLabel(labelsByCwd, cwd, value, fallbackName)
   return out
 end
 
+-- ---- Tile filter / search (free-text) --------------------------------------
+-- Filter a session list by a free-text query, case-insensitive, with token-AND
+-- semantics: a session matches when EVERY whitespace-separated token in the query
+-- is a substring of its searchable text (display label, real name, cwd, projectKey,
+-- status, and group). A blank/whitespace query returns the input list unchanged.
+-- Pure; mirrored in the panel JS for the live grid (like fmtDuration / usageBarLevel).
+-- Used by the search bar (via the JS twin) and the bulk-action path (Lua side, to
+-- scope actions to what the operator currently sees).
+function M.filterTiles(list, query)
+  local toks = {}
+  for tok in tostring(query or ""):lower():gmatch("%S+") do toks[#toks + 1] = tok end
+  if #toks == 0 then return list or {} end
+  local out = {}
+  for _, it in ipairs(list or {}) do
+    local hay = string.lower(table.concat({
+      it.label or "", it.name or "", it.cwd or "", it.projectKey or "",
+      it.status or "", it.group or "",
+    }, " "))
+    local all = true
+    for _, t in ipairs(toks) do
+      if not hay:find(t, 1, true) then all = false; break end
+    end
+    if all then out[#out + 1] = it end
+  end
+  return out
+end
+
 -- ---- Improve button (leaderboard improvement cards) ------------------------
 
 -- Parse `git remote get-url origin` output down to "owner/repo" -- mirrors the sed

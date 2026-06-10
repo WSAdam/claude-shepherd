@@ -1178,5 +1178,28 @@ do
   eq("respawn: no cwd -> not respawnable", core.respawnSpec({ model = "x" }, cfg).canRespawn, false)
 end
 
+-- ---- filterTiles: free-text token-AND search over a session list ----------
+do
+  local list = {
+    { key = "a", name = "auth-api",  label = "Auth service", cwd = "/Users/x/auth",  status = "working",  group = "backend" },
+    { key = "b", name = "web-ui",    cwd = "/Users/x/web",   status = "approval", group = "frontend" },
+    { key = "c", name = "auth-docs", cwd = "/Users/x/docs",  status = "idle" },
+  }
+  eq("filter: blank query keeps all", #core.filterTiles(list, ""), 3)
+  eq("filter: nil query keeps all", #core.filterTiles(list, nil), 3)
+  eq("filter: whitespace query keeps all", #core.filterTiles(list, "   "), 3)
+  eq("filter: name substring", #core.filterTiles(list, "auth"), 2)
+  eq("filter: case-insensitive", #core.filterTiles(list, "AUTH"), 2)
+  eq("filter: matches display label", #core.filterTiles(list, "service"), 1)
+  eq("filter: matches cwd path", #core.filterTiles(list, "/web"), 1)
+  eq("filter: matches status", #core.filterTiles(list, "approval"), 1)
+  eq("filter: matches group", #core.filterTiles(list, "backend"), 1)
+  eq("filter: token-AND narrows", #core.filterTiles(list, "auth working"), 1)
+  eq("filter: token-AND no match -> empty", #core.filterTiles(list, "auth frontend"), 0)
+  eq("filter: no match -> empty", #core.filterTiles(list, "zzz"), 0)
+  check("filter: returns the matching item", core.filterTiles(list, "web-ui")[1].key == "b")
+  eq("filter: nil list -> empty", #core.filterTiles(nil, "x"), 0)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

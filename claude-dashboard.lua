@@ -1757,16 +1757,17 @@ local HTML = [[
   #d-usage { font-size:11px; color:#9aa0ad; margin-top:6px; }
   #d-usage .um-row { display:flex; justify-content:space-between; gap:8px; }
   #empty { color:#6b7280; font-size:13px; padding:18px; text-align:center; }
-  #renamebar, #confirmbar { display:none; align-items:center; gap:6px; padding:8px 12px;
+  #renamebar, #confirmbar, #searchbar { display:none; align-items:center; gap:6px; padding:8px 12px;
     background:#161821; border-bottom:1px solid #2c2f3a; }
-  #renamebar.show, #confirmbar.show { display:flex; }
-  #renamebar-label { font-size:12px; color:#9fb6d6; }
+  #renamebar.show, #confirmbar.show, #searchbar.show { display:flex; }
+  #renamebar-label, #searchbar-label { font-size:12px; color:#9fb6d6; }
+  #searchbar-count { font-size:11px; color:#8a8d99; white-space:nowrap; }
   #confirmbar-label { font-size:12px; color:#e8e9ee; flex:1; }
-  #renamebar-input { flex:1; background:#1b1d24; color:#e8e9ee; border:1px solid #2c2f3a;
+  #renamebar-input, #searchbar-input { flex:1; background:#1b1d24; color:#e8e9ee; border:1px solid #2c2f3a;
     border-radius:6px; font-size:12px; padding:4px 6px; font-family:inherit; }
-  #renamebar button, #confirmbar button { background:#21232c; color:#cfd2db;
+  #renamebar button, #confirmbar button, #searchbar button { background:#21232c; color:#cfd2db;
     border:1px solid #2c2f3a; border-radius:6px; font-size:12px; padding:4px 10px; cursor:pointer; }
-  #renamebar button:hover, #confirmbar button:hover { background:#2b2e39; }
+  #renamebar button:hover, #confirmbar button:hover, #searchbar button:hover { background:#2b2e39; }
   #confirmbar button.danger { border-color:#ef4444; color:#f3a1a1; }
 
   /* status colors, shared by all themes via the --c variable */
@@ -1953,6 +1954,7 @@ local HTML = [[
     <span class="right">
       <button id="spawn" onclick="openNew()" title="Spawn a new Claude session">+ New</button>
       <button id="caffeine" onclick="toggleCaffeine()" title="Keep this Mac awake — pmset disablesleep (asks for your password)">☕ Sleep ok</button>
+      <button id="search-btn" onclick="toggleSearch()" title="Filter sessions (name, project, status, group)">🔍</button>
       <button id="insights-btn" onclick="openInsights()" title="Fleet insights — aggregate stats from the ledger">📊</button>
       <button id="audit-btn" onclick="openAudit()" title="Audit ledger — recorded fleet activity">📜</button>
       <button id="settings-btn" onclick="openSettings()" title="Settings">⚙</button>
@@ -1963,6 +1965,13 @@ local HTML = [[
         <option value="dots">Dots</option>
       </select>
     </span>
+  </div>
+  <div id="searchbar">
+    <span id="searchbar-label">🔍</span>
+    <input id="searchbar-input" placeholder="Filter sessions… (name, project, status, group)"
+           oninput="onSearchInput()" onkeydown="searchKeydown(event)">
+    <span id="searchbar-count"></span>
+    <button onclick="toggleSearch()">✕</button>
   </div>
   <div id="renamebar">
     <span id="renamebar-label">Rename:</span>
@@ -2230,6 +2239,7 @@ local HTML = [[
     var COLORS = { idle:"#6b7280", working:"#f5b50a", done:"#22c55e", approval:"#ef4444" };
     var lastItems = [];
     var selectedKey = null;
+    var searchQuery = "";   // free-text tile filter (🔍); empty = show all
     var detailExpanded = { pending:false, activity:false };
     var pendingImage = null;  // data URL of an image pasted into the input
 
@@ -2346,6 +2356,44 @@ local HTML = [[
       b.textContent = caffeineOn ? "☕ Awake" : "☕ Sleep ok";
     }
     function toggleCaffeine(){ send("caffeinate", (!caffeineOn).toString()); }
+
+    // ---- Tile search (🔍): client-side filter over the live grid ------------
+    // The filter is a JS twin of core.filterTiles (token-AND over the same fields),
+    // mirrored here so typing stays instant (no Lua round-trip), like fmtDur/barLevel.
+    function searchTokens(){
+      var toks = [];
+      (searchQuery || "").toLowerCase().split(/\s+/).forEach(function(t){ if(t) toks.push(t); });
+      return toks;
+    }
+    function tileMatches(it, toks){
+      if(!toks.length) return true;
+      var hay = [it.label||"", it.name||"", it.cwd||"", it.projectKey||"",
+                 it.status||"", it.group||""].join(" ").toLowerCase();
+      for(var i=0;i<toks.length;i++){ if(hay.indexOf(toks[i]) < 0) return false; }
+      return true;
+    }
+    function visibleItems(){
+      var toks = searchTokens();
+      return lastItems.filter(function(it){ return tileMatches(it, toks); });
+    }
+    function toggleSearch(){
+      var b = document.getElementById("searchbar");
+      var show = !b.classList.contains("show");
+      b.classList.toggle("show", show);
+      if(show){
+        document.getElementById("renamebar").classList.remove("show");
+        document.getElementById("confirmbar").classList.remove("show");
+        var inp = document.getElementById("searchbar-input"); inp.focus(); inp.select();
+      } else {
+        searchQuery = ""; document.getElementById("searchbar-input").value = ""; renderGrid();
+      }
+    }
+    function onSearchInput(){ searchQuery = document.getElementById("searchbar-input").value || ""; renderGrid(); }
+    function searchKeydown(e){ if(e.key === "Escape"){ e.preventDefault(); toggleSearch(); } }
+    function updateSearchCount(shown, total){
+      var el = document.getElementById("searchbar-count"); if(!el) return;
+      el.textContent = ((searchQuery || "").trim() && total) ? (shown + " / " + total + " shown") : "";
+    }
 
     function cv(o, path, def){
       var p = path.split("."), n = o;
@@ -3054,39 +3102,56 @@ local HTML = [[
     window.ccUpdate = function(items, providers){
       lastItems = items || [];
       if(providers !== undefined) PANEL_PROVIDERS = providers || [];
+      renderGrid();
+      renderDetail();
+    };
+
+    // One tile's HTML. Extracted from ccUpdate so renderGrid can map the (filtered)
+    // visible set without duplicating the markup.
+    function tileHtml(it){
+      var st = it.status || "idle";
+      var label = LABELS[st] || st;
+      var meta = "";
+      if(st === "approval" && it.pending && it.pending.summary){
+        meta = "wants: " + it.pending.summary;
+      } else if(it.since){
+        meta = fmtAge(it.since);
+      }
+      if(it.queue > 0){ meta = (meta ? meta + " · " : "") + "+" + it.queue + " queued"; }
+      if(it.autopilot){ meta = (meta ? meta + " · " : "") + "🛫 autopilot"; }
+      if(it.draining){ meta = (meta ? meta + " · " : "") + "⛔ draining"; }
+      if(it.collide){ meta = (meta ? meta + " · " : "") + "⚠ shared dir"; }
+      var cls = "tile s-" + st + (it.stale ? " stale" : "") + (it.collide ? " collide" : "") + (it.escalate ? " escalate" : "") + (it.key === selectedKey ? " sel" : "");
+      return '<div class="'+cls+'" data-key="'+esc(it.key)+'" onclick="selectTile(\''+esc(it.key)+'\')" ondblclick="send(\'focus\',\''+esc(it.key)+'\')" oncontextmenu="showCtx(event,\''+esc(it.key)+'\')" title="Double-click to jump · right-click for more">'
+           + '<span class="dot"></span>'
+           + '<span class="name">'+esc(it.label || it.name)+'</span>'
+           + '<span class="label">'+label+'</span>'
+           + riskBadge(it)
+           + '<span class="meta">'+esc(meta)+'</span>'
+           + ctxBarHtml(it)
+           + '</div>';
+    }
+
+    var EMPTY_WAITING = 'Waiting for Claude Code sessions...<br>Start a session in any project.';
+    // Render the grid from lastItems through the active search filter. Re-run both on
+    // a fresh ccUpdate and on every keystroke in the search bar (no re-fetch needed).
+    function renderGrid(){
       var grid  = document.getElementById("grid");
       var empty = document.getElementById("empty");
       if(lastItems.length === 0){
-        grid.innerHTML=""; empty.style.display="block";
-        selectedKey=null; renderDetail();
-        return;
+        grid.innerHTML = ""; empty.innerHTML = EMPTY_WAITING; empty.style.display = "block";
+        updateSearchCount(0, 0); return;
       }
-      empty.style.display="none";
-      grid.innerHTML = lastItems.map(function(it){
-        var st = it.status || "idle";
-        var label = LABELS[st] || st;
-        var meta = "";
-        if(st === "approval" && it.pending && it.pending.summary){
-          meta = "wants: " + it.pending.summary;
-        } else if(it.since){
-          meta = fmtAge(it.since);
-        }
-        if(it.queue > 0){ meta = (meta ? meta + " · " : "") + "+" + it.queue + " queued"; }
-        if(it.autopilot){ meta = (meta ? meta + " · " : "") + "🛫 autopilot"; }
-        if(it.draining){ meta = (meta ? meta + " · " : "") + "⛔ draining"; }
-        if(it.collide){ meta = (meta ? meta + " · " : "") + "⚠ shared dir"; }
-        var cls = "tile s-" + st + (it.stale ? " stale" : "") + (it.collide ? " collide" : "") + (it.escalate ? " escalate" : "") + (it.key === selectedKey ? " sel" : "");
-        return '<div class="'+cls+'" data-key="'+esc(it.key)+'" onclick="selectTile(\''+esc(it.key)+'\')" ondblclick="send(\'focus\',\''+esc(it.key)+'\')" oncontextmenu="showCtx(event,\''+esc(it.key)+'\')" title="Double-click to jump · right-click for more">'
-             + '<span class="dot"></span>'
-             + '<span class="name">'+esc(it.label || it.name)+'</span>'
-             + '<span class="label">'+label+'</span>'
-             + riskBadge(it)
-             + '<span class="meta">'+esc(meta)+'</span>'
-             + ctxBarHtml(it)
-             + '</div>';
-      }).join("");
-      renderDetail();
-    };
+      var vis = visibleItems();
+      if(vis.length === 0){
+        grid.innerHTML = ""; empty.innerHTML = "No sessions match your filter.";
+        empty.style.display = "block"; updateSearchCount(0, lastItems.length); return;
+      }
+      empty.style.display = "none";
+      grid.innerHTML = vis.map(tileHtml).join("");
+      paintSelection();
+      updateSearchCount(vis.length, lastItems.length);
+    }
 
     function esc(s){
       return String(s == null ? "" : s)
