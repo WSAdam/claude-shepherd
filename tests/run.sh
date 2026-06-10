@@ -27,6 +27,9 @@ echo ""
 echo "== bash: installer =="
 bash "$DIR/install.test.sh" || fail=1
 echo ""
+echo "== bash: xss escaping tripwire =="
+bash "$DIR/escaping.test.sh" || fail=1
+echo ""
 echo "== lua: cc-core =="
 lua "$DIR/core.test.lua" || fail=1
 echo ""

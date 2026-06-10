@@ -129,10 +129,11 @@ local ctxMenu            -- holds the live right-click popup menu (so it isn't G
 local wv                 -- the webview; forward-declared so the controller can push to it
 local lastJumpKey = nil  -- for the cycle-jump hotkey
 local spawnPrompt        -- forward declaration (defined after FX)
-local prevStatus = {}    -- key -> last refresh's status (for auto-feed transitions)
-local prevStale  = {}    -- key -> last refresh's stale flag (for the auto-respawn edge)
-local respawnAttempts = {}  -- projectKey -> auto-respawn count (resets when healthy)
-local escalated  = {}    -- key -> true once we've escalated this approval episode
+-- One per-tile snapshot of the LAST refresh, keyed by tile key: status (auto-feed
+-- transitions), stale (auto-respawn edge), escalated (one nag per approval episode).
+-- Rebuilt-and-swapped each refresh so a vanished tile drops out; see refresh().
+local prev = {}
+local respawnAttempts = {}  -- projectKey (NOT tile key) -> auto-respawn count; resets when healthy
 local watchdog = {}      -- key -> { size, ts, alerted }: transcript progress + stall episode
 local draining    = {}   -- key -> true: close on the next fresh `done` (Feature F)
 local gitRootByCwd = {}  -- cwd -> resolved git root ("" = not a repo) cache (Feature B)
@@ -3675,8 +3676,7 @@ function refresh()
   -- Read the ledger ONCE per refresh for risk scoring (not per tile).
   local ledgerEvents = riskEnabled and FX.readLedger({}).events or nil
   local now = FX.now()
-  local newPrev = {}
-  local newPrevStale = {}  -- parallels newPrev, for the auto-respawn stale edge
+  local newPrev = {}  -- key -> { status, stale, escalated }: rebuilt this refresh, swapped in below
 
   -- Collision detection (Feature B): flag tiles where 2+ active sessions share a
   -- working dir / git-root. Computed once over the whole list before the tile loop.
@@ -3695,6 +3695,7 @@ function refresh()
   end
 
   for _, it in ipairs(list) do
+    local pv = prev[it.key]  -- last refresh's snapshot for this tile (status/stale/escalated), or nil
     -- Live activity peek (non-stale sessions). Include `done` so the peek refreshes
     -- to the FINAL assistant line when a session finishes (a done transcript doesn't
     -- change, so the re-read is stable) instead of freezing mid-turn.
@@ -3742,7 +3743,7 @@ function refresh()
     -- Graceful drain (Feature F): if armed, close on the SAME fresh `done` transition
     -- the queue uses. Drain WINS over auto-feed (an explicit stop beats a queued task).
     local drained = false
-    if drainOn and core.shouldDrainClose(draining[it.key], prevStatus[it.key], it.status) then
+    if drainOn and core.shouldDrainClose(draining[it.key], pv and pv.status, it.status) then
       draining[it.key] = nil
       print("[cc-drain] " .. it.name .. " finished its turn -> closing")
       ledgerFor(it, { type = "drain_close" })
@@ -3753,7 +3754,7 @@ function refresh()
     -- Task queue: depth badge + auto-feed on a fresh done transition.
     local q = FX.readQueue(it.key)
     it.queue = core.queueDepth(q)
-    if not drained and core.shouldFeed(prevStatus[it.key], it.status, q, autofeed) then
+    if not drained and core.shouldFeed(pv and pv.status, it.status, q, autofeed) then
       local task, q2 = core.queuePop(q)
       if queueDry then
         print("[cc-queue] DRY-RUN would feed '" .. tostring(task) .. "' to " .. it.name)
@@ -3766,11 +3767,13 @@ function refresh()
       end
     end
 
-    -- Escalation: nag harder when an approval sits too long (once per episode).
+    -- Escalation: nag harder when an approval sits too long (once per episode). The
+    -- escalated flag carries forward from the last snapshot (pv) so we nag exactly once.
+    local nowEsc = (pv and pv.escalated) or false
     if escEnabled and core.approvalStale(it, now, escMin * 60) then
       it.escalate = true
-      if not escalated[it.key] then
-        escalated[it.key] = true
+      if not nowEsc then
+        nowEsc = true
         print("[cc-escalate] " .. it.name .. " waiting > " .. escMin .. "m")
         if escSound then FX.playSound() end
         if escPush then
@@ -3779,7 +3782,7 @@ function refresh()
         end
       end
     end
-    if it.status ~= "approval" then escalated[it.key] = nil end
+    if it.status ~= "approval" then nowEsc = false end
 
     -- Stuck-session watchdog (Feature 8): flag a `working` session with no transcript
     -- progress past the threshold; nag once per stall, reusing the escalation
@@ -3810,11 +3813,10 @@ function refresh()
     local step = core.stepAutoRespawn(respawnAttempts, it, {
       enabled = autoRespawnOn, maxRetries = autoRespawnMax,
       intentional = (draining[it.key] ~= nil) or drained,
-      wasStale = prevStale[it.key] or false,
+      wasStale = (pv and pv.stale) or false,
       -- strict boolean (fail-closed): a nil/absent canRespawn must NOT read as
       -- "respawnable" via stepAutoRespawn's permissive `~= false` default.
       canRespawn = rs ~= nil and rs.canRespawn == true })
-    newPrevStale[it.key] = step.isStale
     if step.spawn then  -- rs.canRespawn was true (the increment is gated on it)
       print("[cc-respawn] auto-relaunch " .. tostring(it.name)
         .. " (attempt " .. tostring(step.attempts) .. "/" .. autoRespawnMax .. ")")
@@ -3826,10 +3828,9 @@ function refresh()
       print("[cc-respawn] " .. tostring(it.name) .. " died but isn't respawnable: " .. tostring(rs.reason))
     end
 
-    newPrev[it.key] = it.status
+    newPrev[it.key] = { status = it.status, stale = step.isStale, escalated = nowEsc }
   end
-  prevStatus = newPrev
-  prevStale = newPrevStale
+  prev = newPrev
 
   FX.writeFile(HEARTBEAT, tostring(now))
   sd.blink = not sd.blink

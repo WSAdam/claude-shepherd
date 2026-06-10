@@ -1134,7 +1134,8 @@ do
   -- F-002 (bug sweep): the band must agree with the DISPLAYED (rounded) score at a
   -- boundary. This event mix is hand-tuned so the RAW score lands in (33.5, 34) -- just
   -- under default th.med=34 but rounding up to it -- to prove the band derives from the
-  -- rounded `shown`, not raw. Re-tune if M.RISK_WEIGHTS or the default thresholds change.
+  -- rounded `shown`, not raw. The rawScore window is asserted directly below, so a weight
+  -- retune that slides raw out of (33.5, 34) fails loudly here instead of staying green.
   local evs, ts = {}, 0
   for _ = 1, 13 do ts = ts + 1; evs[#evs + 1] = { ts = ts, type = "tool_request", session_id = "x", tool = "Bash" } end
   ts = ts + 5; evs[#evs + 1] = { ts = ts, type = "decision", session_id = "x", outcome = "deny", by = "human" }
@@ -1143,6 +1144,7 @@ do
   local rB = core.sessionRisk(evs, {})
   eq("risk: boundary score rounds to 34", rB.score, 34)
   eq("risk: band agrees with rounded score (med, not low)", rB.band, "med")
+  check("risk: raw score sits in the (33.5, 34) boundary window", rB.rawScore > 33.5 and rB.rawScore < 34)
   -- F-003 follow-up: a string `high` must actually FEED the band compare, not merely
   -- avoid throwing. shown=34 >= 30 reads "high" ONLY if "30" was coerced to a number
   -- (a string would throw -> earlier pcall; a silent fallback to default 67 stays "med").
@@ -1269,13 +1271,18 @@ do
     { key = "b", name = "web",  projectKey = "proj-web" },
     { key = "c", name = "docs", cwd = "/legacy/docs" },           -- legacy cwd key
     { key = "d", name = "misc", projectKey = "proj-misc" },        -- ungrouped
+    -- R2-B: projectKey present but ungrouped, with a cwd that collides with a legacy
+    -- cwd-keyed entry. The cwd fallback must NOT fire (it's gated on no projectKey) --
+    -- else a real migrated session silently inherits a stale legacy group.
+    { key = "e", name = "migrated", projectKey = "proj-migrated", cwd = "/legacy/docs" },
   }
   local groups = { ["proj-auth"] = "backend", ["proj-web"] = "frontend", ["/legacy/docs"] = "backend" }
   core.applyGroups(list, groups)
   eq("groups: projectKey-tagged", list[1].group, "backend")
   eq("groups: frontend tagged", list[2].group, "frontend")
-  eq("groups: legacy cwd fallback", list[3].group, "backend")
+  eq("groups: legacy cwd fallback (no projectKey)", list[3].group, "backend")
   eq("groups: ungrouped stays nil", list[4].group, nil)
+  eq("groups: projectKey'd session ignores stale legacy cwd group (R2-B)", list[5].group, nil)
   eq("groups: name untouched", list[1].name, "auth")
 
   local names = core.groupNames(list)
@@ -1534,6 +1541,38 @@ do
   -- and the sparkline now AGREES with the per-session approvalBlockedSeconds headline
   eq("bucket: blocked sparkline agrees with the fleetStats headline",
      cb[1].value, core.fleetStats(concurrent, { maxBlock = 1800 }).approvalBlockedSeconds)
+
+  -- R2-001 follow-up A: a pending request that NEVER resolves must not steal another
+  -- session's decision. A's request (150) is the most recent before B's decision, so a
+  -- single shared slot would pair B's decision with A's request (gap 50); per-session
+  -- pairing credits B's OWN request (gap 100). The concurrent fixture above can't catch
+  -- this -- both sessions resolve cleanly there, so the wrong pairing still sums to 140.
+  local dangling = {
+    { ts = 100, type = "tool_request", session_id = "B" },
+    { ts = 150, type = "tool_request", session_id = "A" },  -- A pending, never resolves
+    { ts = 200, type = "decision", by = "human", outcome = "allow", session_id = "B" },  -- B waited 100
+  }
+  local db = core.bucketEvents(dangling, 3600, "blocked", { maxBlock = 1800 })
+  eq("bucket: B's decision pairs B's request, not A's dangling one", db[1].value, 100)
+  eq("bucket: dangling case agrees with the fleetStats headline",
+     db[1].value, core.fleetStats(dangling, { maxBlock = 1800 }).approvalBlockedSeconds)
+
+  -- R2-001 follow-up B: each gap is credited to the bucket where ITS OWN wait STARTED
+  -- (idx(req)), not the decision's bucket and not another session's. A's wait crosses the
+  -- bucket boundary (req in b1, decision in b2) so this also pins start-bucket crediting.
+  -- The concurrent fixture collapses everything into bucket 1, so it can't test placement.
+  -- (Old single-slot code would yield b1=0, b2=50 here.)
+  local split = {
+    { ts = 1700, type = "tool_request", session_id = "A" },                              -- b1
+    { ts = 1850, type = "tool_request", session_id = "B" },                              -- b2
+    { ts = 1900, type = "decision", by = "human", outcome = "allow", session_id = "A" }, -- A waited 200, started b1
+    { ts = 2000, type = "decision", by = "human", outcome = "allow", session_id = "B" }, -- B waited 150, started b2
+  }
+  local sb = core.bucketEvents(split, 1800, "blocked", { maxBlock = 1800 })
+  eq("bucket: A's gap credited to its OWN start bucket b1", sb[1].value, 200)
+  eq("bucket: B's gap credited to its OWN start bucket b2", sb[2].value, 150)
+  eq("bucket: split blocked buckets sum to the fleetStats headline",
+     sb[1].value + sb[2].value, core.fleetStats(split, { maxBlock = 1800 }).approvalBlockedSeconds)
 end
 
 -- ---- isHung: stalled `working` session watchdog ----------------------------

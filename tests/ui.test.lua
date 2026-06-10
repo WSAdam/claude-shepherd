@@ -104,10 +104,16 @@ do
   core.applyLabelsByCwd(list, { ["-Users-a-proj"] = "Web UI", ["/Users/a/proj/sub"] = "Stale" })
   eq("labels-key: projectKey beats drifted cwd", list[1].label, "Web UI")
 
-  -- legacy cwd-keyed entry still resolves when no projectKey entry exists
-  local legacy = { { key = "s2", name = "proj", cwd = "/Users/a/proj", projectKey = "-Users-a-proj" } }
-  core.applyLabelsByCwd(legacy, { ["/Users/a/proj"] = "Legacy" })
-  eq("labels-key: legacy cwd fallback resolves", legacy[1].label, "Legacy")
+  -- R2-B: a session WITH a projectKey never falls back to a cwd-keyed entry, even when
+  -- its projectKey is unlabeled -- otherwise a drifted cwd could grab a stale entry (the
+  -- cd-drift immunity this keying exists for, cf. the "beats drifted cwd" case above).
+  local pk = { { key = "s2", name = "proj", cwd = "/Users/a/proj", projectKey = "-Users-a-proj" } }
+  core.applyLabelsByCwd(pk, { ["/Users/a/proj"] = "Legacy" })
+  eq("labels-key: projectKey'd-but-unlabeled session ignores cwd entry", pk[1].label, nil)
+  -- the legacy cwd fallback still resolves for a session that has NO projectKey at all
+  local keyless = { { key = "s3", name = "proj", cwd = "/Users/a/proj" } }
+  core.applyLabelsByCwd(keyless, { ["/Users/a/proj"] = "Legacy" })
+  eq("labels-key: legacy cwd fallback resolves when there's no projectKey", keyless[1].label, "Legacy")
 end
 
 -- ---- repoFromRemote: git remote URL -> owner/repo (mirrors /improve sed) -----

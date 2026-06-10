@@ -60,7 +60,7 @@ remaining items. Full per-round detail is in CHANGELOG.md and git history.
   repro): fixed a sessionRisk string-threshold crash (froze refresh), a `pending.ask`
   merge leak, a `staleDuplicateKeys` cross-project prune, a `mergeHooks` over-broad
   `cc-` match, a watchdog re-alert miss, and a session-blind blocked sparkline. Suite
-  now **641 core + 103 ui + bash**, all green.
+  now **648 core + 104 ui + bash**, all green.
 
 ## TODO
 - **Verify on a real Kitty box** (the one thing that needs the hardware): the `core.KITTY_KEY`
@@ -94,4 +94,4 @@ remaining items. Full per-round detail is in CHANGELOG.md and git history.
 Pure decisions → `cc-core.lua` + unit tests; effects → `fx` recorder; shell hooks → bash suites
 with temp dirs. No live `kitty @` / keystrokes / network in tests (provider env-injection, usage
 parse/sum/window, and ssh-wrap are all asserted as pure strings — no real keys, no real spawns).
-`make test` green before every `make deploy`. 641 core + 103 ui + 121 bash side-effect-free checks.
+`make test` green before every `make deploy`. 648 core + 104 ui + 128 bash side-effect-free checks.

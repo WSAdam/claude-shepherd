@@ -249,13 +249,14 @@ end
 -- Apply PERSISTENT display labels onto a session list, in place. Keyed by the
 -- session's stable projectKey (the launch folder, immune to cd drift) so the
 -- label sticks for the life of the session and a brand-new session in the same
--- folder inherits it (survives close/reopen). Legacy entries keyed by the live
--- cwd still resolve via the fallback. Like applyLabels, only .label is set.
+-- folder inherits it (survives close/reopen). A legacy cwd-keyed entry resolves
+-- ONLY for a session with no projectKey, so a projectKey'd-but-unlabeled session
+-- can't inherit a stale cwd label. Like applyLabels, only .label is set.
 function M.applyLabelsByCwd(list, labelsByKey)
   labelsByKey = labelsByKey or {}
   for _, it in ipairs(list or {}) do
     it.label = (it.projectKey and labelsByKey[it.projectKey])
-            or (it.cwd and labelsByKey[it.cwd])   -- legacy cwd-keyed entries
+            or (not it.projectKey and it.cwd and labelsByKey[it.cwd])  -- legacy cwd-keyed (ONLY when no projectKey)
             or nil
   end
   return list
@@ -275,11 +276,9 @@ function M.setLabel(labelsByCwd, cwd, value, fallbackName)
 end
 
 -- ---- Tile filter / search (free-text) --------------------------------------
--- Filter a session list by a free-text query, case-insensitive, with token-AND
--- semantics: a session matches when EVERY whitespace-separated token in the query
--- is a substring of its searchable text (display label, real name, cwd, projectKey,
--- status, and group). A blank/whitespace query returns the input list unchanged.
--- Pure; mirrored in the panel JS for the live grid (like fmtDuration / usageBarLevel).
+-- Filter a session list by a free-text query (case-insensitive, token-AND). The
+-- searchable text is label + name + cwd + projectKey + status + group, in that order
+-- -- MIRRORED in the panel JS, which must stay in sync. A blank query is a pass-through.
 -- Used by the search bar (via the JS twin) and the bulk-action path (Lua side, to
 -- scope actions to what the operator currently sees).
 function M.filterTiles(list, query)
@@ -308,13 +307,13 @@ end
 -- close/reopen and a brand-new session in the same folder inherits it. Persistence
 -- (cc-groups.json) + group-scoped bulk actions live in the dashboard; pure bits here.
 
--- Tag each session with its group (in place), keyed by projectKey with a legacy cwd
--- fallback (mirrors applyLabelsByCwd). Only .group is set; .name/.key are untouched.
+-- Tag each session with its group (in place), keyed by projectKey; a legacy cwd-keyed
+-- entry resolves ONLY when the session has no projectKey (mirrors applyLabelsByCwd).
 function M.applyGroups(list, groupsByKey)
   groupsByKey = groupsByKey or {}
   for _, it in ipairs(list or {}) do
     it.group = (it.projectKey and groupsByKey[it.projectKey])
-            or (it.cwd and groupsByKey[it.cwd])   -- legacy cwd-keyed entries
+            or (not it.projectKey and it.cwd and groupsByKey[it.cwd])  -- legacy cwd-keyed (ONLY when no projectKey)
             or nil
   end
   return list
@@ -352,13 +351,9 @@ end
 -- which reads the same table injected into the HTML as __BULK_RULES__. Keeping one
 -- table means the bulk-bar count (JS-derived) can't drift from what Lua re-derives
 -- and acts on. `match` = only sessions with that status; `exclude` = any status but
--- that one.
---   approve -> sessions awaiting a decision   (only "approval")
---   stop    -> sessions mid-turn              (only "working")
---   nudge   -> live sessions NOT mid-approval (broadcast a follow-up prompt)
--- nudge excludes `approval` because handleAction's nudge pastes text AND submits, so
--- broadcasting into a session sitting at its y/n approval prompt would corrupt that
--- decision -- a waiter needs a decision, not a prompt.
+-- that one. nudge excludes `approval` because handleAction's nudge pastes text AND
+-- submits, so broadcasting into a session sitting at its y/n approval prompt would
+-- corrupt that decision -- a waiter needs a decision, not a prompt.
 M.BULK_RULES = {
   approve = { match = "approval" },
   stop    = { match = "working" },
@@ -729,15 +724,11 @@ end
 -- Per-metric accumulators for bucketEvents. Each writes into the shared `series`
 -- (indexed via `idx`); a dispatch table (not an if/elseif chain) keeps each metric's
 -- state isolated and makes a 5th metric a one-key addition. ctx = { nB, opts }.
---   activity   -> prompts + tool_requests per bucket
---   active     -> distinct sessions DRIVING work (prompt/tool_request) per bucket --
---                 deliberately the SAME event set as activity (a session whose only
---                 event in an hour is a trailing decision wasn't "running" that hour)
---   denialRate -> deny / total-decisions per bucket (0..1; 0 when no decisions)
---   blocked    -> "time blocked on you" per bucket: each session's tool_request -> its
---                 resolving human/timeout decision gap (<= ctx.opts.maxBlock) credited
---                 to the bucket where the wait STARTED. Paired PER SESSION (the feed is
---                 fleet-wide), mirroring fleetStats running blockedSeconds per session.
+-- The non-obvious ones: `active` counts work-DRIVING sessions using the SAME event set
+-- as `activity` (a trailing decision alone isn't "running" that hour); `blocked` pairs
+-- each tool_request -> its resolving human/timeout decision PER SESSION (the feed is
+-- fleet-wide, like fleetStats) and credits the gap (<= maxBlock) to the bucket where
+-- the wait STARTED.
 local BUCKET_METRICS = {
   activity = function(evs, series, idx)
     for _, e in ipairs(evs) do
@@ -903,6 +894,7 @@ function M.sessionRisk(events, opts)
   if shown >= th.high then band = "high" elseif shown >= th.med then band = "med" end
   return {
     score = shown,
+    rawScore = score,  -- unrounded (clamped) score; lets tests pin a boundary the rounding hides
     band = band,
     signals = {
       decisionCount = decisionCount, denyCount = denyCount, denyRate = denyRate,

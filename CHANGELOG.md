@@ -4,6 +4,45 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-10 — Round-2 review hardening
+
+A second pass over the bug-sweep commits, driven by leaderboard review. Each suggestion was
+verified against the code before applying — one flagged "XSS vulnerability" was already
+mitigated, and one proposed test was too weak to catch its own regression; both were
+corrected rather than taken at face value.
+
+### Fixed
+- **`applyGroups` / `applyLabelsByCwd` cwd-fallback (latent).** The `projectKey`-then-`cwd`
+  lookup short-circuited a missing projectKey entry and fell through to the live `cwd`, so a
+  session *with* a projectKey but no group/label could inherit a stale legacy cwd-keyed entry
+  — re-introducing the cd-drift sensitivity projectKey exists to prevent. The cwd fallback is
+  now gated on the absence of a projectKey (genuinely keyless legacy sessions still resolve).
+  Both mirror functions fixed, each with a regression test.
+
+### Changed
+- **Per-tile refresh snapshot consolidated.** Three parallel module tables —
+  `prevStatus` / `prevStale` / `escalated`, all keyed by tile key and touched on the same
+  refresh transition — collapsed into one `prev[key] = { status, stale, escalated }` row
+  (mirroring the earlier watchdog consolidation), so one delete clears the whole per-tile
+  snapshot and the fields can't desync. `respawnAttempts` stays standalone (projectKey-keyed
+  per-folder budget). `escalated` now GCs with the row, so a vanished-then-returning stuck
+  approval re-nags once.
+- **Trimmed four restated header comments** (`filterTiles` / `applyGroups` / `BULK_RULES` /
+  `bucketEvents`) to the non-obvious "why", keeping the cross-file "stays in sync with the
+  panel JS" warnings.
+
+### Tests
+- **648 core + 104 ui + 128 bash** checks, all green. New regression coverage: blocked-
+  sparkline per-bucket placement (a wait that crosses an hour boundary) and cross-session
+  mis-pairing (a never-resolving dangling request); an `applyGroups` case for the cwd-fallback
+  bug; a new `sessionRisk.rawScore` field so the F-002 boundary asserts the raw `(33.5, 34)`
+  window directly instead of only the rounded score; and a new **XSS escaping tripwire**
+  ([tests/escaping.test.sh](tests/escaping.test.sh)) that fails if a user-text sink drops its
+  `esc()` wrapper or `esc()` stops entity-encoding. Each new regression test was confirmed to
+  fail against the reverted fix. Adds [context.md](context.md) (architecture/workflow
+  orientation for new sessions).
+
+
 ## 2026-06-10 — Fleet-scale console + adversarial bug sweep
 
 ### Added
