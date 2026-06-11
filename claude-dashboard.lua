@@ -1670,6 +1670,8 @@ local function handleBridgeMsg(msg)
     ledgerFor(item, { type = "effort_change", from = item.effort, to = tostring(payload.text or "") })
   elseif a == "nudge" then
     ledgerFor(item, { type = "nudge", text = tostring(payload.text or ""):sub(1, 200) })
+  elseif a == "continue" then
+    ledgerFor(item, { type = "continue" })  -- resumed a session frozen on an API error
   end
   core.handleAction(FX, item, a, payload.text and tostring(payload.text) or nil)
 end
@@ -1897,6 +1899,7 @@ local HTML = [[
   .s-working  { --c:#f5b50a; }
   .s-done     { --c:#22c55e; }
   .s-approval { --c:#ef4444; }
+  .s-error    { --c:#ec4899; }  /* magenta: API error -- session frozen, needs Continue */
 
   /* THEME: cards (default) ------------------------------------------------ */
   .theme-cards #grid { grid-template-columns:repeat(auto-fill,minmax(170px,1fr)); }
@@ -1911,7 +1914,7 @@ local HTML = [[
   .theme-cards .label { grid-area:label; font-size:12px; color:#aeb1bd; }
   .theme-cards .meta  { grid-area:meta; }
   .theme-cards .s-approval { border-color:var(--c); }
-  .theme-cards .s-approval .dot { animation:pulse 1s infinite; }
+  .theme-cards .s-approval .dot, .theme-cards .s-error .dot { animation:pulse 1s infinite; }
 
   /* THEME: bar (compact single row of pills) ------------------------------ */
   .theme-bar #grid { display:flex; flex-wrap:wrap; }
@@ -1922,7 +1925,7 @@ local HTML = [[
   .theme-bar .dot   { width:9px; height:9px; background:var(--c); }
   .theme-bar .name  { color:#e8e9ee; font-size:13px; font-weight:600; }
   .theme-bar .label, .theme-bar .meta { display:none; }
-  .theme-bar .s-approval .dot { animation:pulse 1s infinite; }
+  .theme-bar .s-approval .dot, .theme-bar .s-error .dot { animation:pulse 1s infinite; }
 
   /* THEME: contrast (large, bold, thick colored border) ------------------- */
   .theme-contrast #grid { grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); }
@@ -1934,7 +1937,7 @@ local HTML = [[
   .theme-contrast .name  { grid-area:name; color:#ffffff; font-size:16px; font-weight:700; }
   .theme-contrast .label { grid-area:label; color:#d7d9e0; font-size:13px; }
   .theme-contrast .meta  { grid-area:meta; }
-  .theme-contrast .s-approval { animation:pulse 1.2s infinite; }
+  .theme-contrast .s-approval, .theme-contrast .s-error { animation:pulse 1.2s infinite; }
 
   /* THEME: dots (minimal vertical list) ----------------------------------- */
   .theme-dots #grid { grid-template-columns:1fr; gap:2px; padding:6px; }
@@ -1944,7 +1947,7 @@ local HTML = [[
   .theme-dots .dot   { width:8px; height:8px; background:var(--c); }
   .theme-dots .name  { color:#cfd2db; font-size:12px; }
   .theme-dots .label, .theme-dots .meta { display:none; }
-  .theme-dots .s-approval .dot { animation:pulse 1s infinite; }
+  .theme-dots .s-approval .dot, .theme-dots .s-error .dot { animation:pulse 1s infinite; }
 
   /* detail / control panel (shared across themes) ------------------------- */
   #detail { border-top:1px solid #2c2f3a; padding:10px 12px; display:none; }
@@ -2372,8 +2375,8 @@ local HTML = [[
 
   <script>
     var LABELS = { idle:"Idle", working:"Working",
-                   approval:"Needs you", done:"Ready for you" };
-    var COLORS = { idle:"#6b7280", working:"#f5b50a", done:"#22c55e", approval:"#ef4444" };
+                   approval:"Needs you", done:"Ready for you", error:"Error" };
+    var COLORS = { idle:"#6b7280", working:"#f5b50a", done:"#22c55e", approval:"#ef4444", error:"#ec4899" };
     var BULK_RULES = __BULK_RULES__;  // injected from core.BULK_RULES (single source)
     var lastItems = [];
     var selectedKey = null;
@@ -3053,7 +3056,8 @@ local HTML = [[
         pend.style.display = "block";
       } else { pend.style.display = "none"; }
       var ac = document.getElementById("d-activity");
-      if(it.activity){ ac.textContent = (st==="approval" ? "Why: " : "Doing: ") + it.activity; ac.style.display="block"; }
+      if(st === "error"){ ac.textContent = "Error: " + (it.error_message || "API error — stopped"); ac.style.display="block"; }
+      else if(it.activity){ ac.textContent = (st==="approval" ? "Why: " : "Doing: ") + it.activity; ac.style.display="block"; }
       else { ac.style.display="none"; }
       var pr = document.getElementById("d-prompt");
       if(it.last_prompt){ pr.textContent = "Last: " + it.last_prompt; pr.style.display="block"; }
@@ -3068,6 +3072,18 @@ local HTML = [[
       var ba = document.getElementById("b-auto");
       ba.textContent = it.autopilot ? "Autopilot: ON" : "Autopilot";
       ba.style.color = it.autopilot ? "#8fd4a3" : "#e8e9ee";
+      // Errored session: the Approve button becomes Continue (types "continue" + Enter to
+      // resume the aborted turn). Restored to Approve for every other status.
+      var bap = document.getElementById("b-approve");
+      if(st === "error"){
+        bap.textContent = "Continue";
+        bap.setAttribute("onclick", "act('continue')");
+        bap.style.borderColor = "#ec4899"; bap.style.color = "#f3a9d0";
+      } else {
+        bap.textContent = "Approve";
+        bap.setAttribute("onclick", "act('approve')");
+        bap.style.borderColor = ""; bap.style.color = "";
+      }
       applyExpand();
     }
 
@@ -3398,6 +3414,8 @@ local HTML = [[
       var meta = "";
       if(st === "approval" && it.pending && it.pending.summary){
         meta = "wants: " + it.pending.summary;
+      } else if(st === "error"){
+        meta = it.error_message || "API error — stopped";
       } else if(it.since){
         meta = fmtAge(it.since);
       }
@@ -3705,18 +3723,30 @@ function refresh()
     -- Live activity peek (non-stale sessions). Include `done` so the peek refreshes
     -- to the FINAL assistant line when a session finishes (a done transcript doesn't
     -- change, so the re-read is stable) instead of freezing mid-turn.
-    if ACTIVITY_PEEK and it.transcript_path and not it.stale
-       and (it.status == "working" or it.status == "approval" or it.status == "done") then
-      local tail = FX.readTail(it.transcript_path, ACTIVITY_BYTES)
-      if tail then
-        it.activity = core.transcriptSnippet(tail, ACTIVITY_LEN)
-        -- Free context-fullness bar: the last usage line is already in this tail.
-        local u = core.lastUsage(tail)
-        if u then
-          it.context_tokens = core.contextTokens(u)
-          it.context_frac = core.contextFractionFor(cfg, u.model or it.model, it.context_tokens)
-        end
+    -- The same tail feeds error detection below, so read it once for any `working`
+    -- session (even stale -- a frozen-on-error session goes stale but must still flag)
+    -- plus the non-stale peek statuses.
+    local peekable = ACTIVITY_PEEK and not it.stale
+       and (it.status == "working" or it.status == "approval" or it.status == "done")
+    local wantTail = it.transcript_path and (peekable or it.status == "working")
+    local tail = wantTail and FX.readTail(it.transcript_path, ACTIVITY_BYTES) or nil
+    if peekable and tail then
+      it.activity = core.transcriptSnippet(tail, ACTIVITY_LEN)
+      -- Free context-fullness bar: the last usage line is already in this tail.
+      local u = core.lastUsage(tail)
+      if u then
+        it.context_tokens = core.contextTokens(u)
+        it.context_frac = core.contextFractionFor(cfg, u.model or it.model, it.context_tokens)
       end
+    end
+    -- Frozen-on-API-error detection: a `working` session whose latest transcript event
+    -- is an api_error aborted WITHOUT a Stop hook -- it's stuck "working" but actually
+    -- stopped. Override the status to "error" so it renders distinctly + offers Continue.
+    -- Done before the watchdog/auto-respawn below (which key off "working", so they skip
+    -- it), and the list is re-sorted after the loop so errors surface near approvals.
+    if tail and it.status == "working" then
+      local err = core.transcriptError(tail)
+      if err then it.status = "error"; it.error_message = err.message end
     end
 
     -- Watchdog (Feature 8): track transcript progress so a stalled `working` session
@@ -3820,7 +3850,9 @@ function refresh()
     -- and cheap, and only computed while the feature is on.
     local rs = autoRespawnOn and core.respawnSpec(it, cfg) or nil
     local step = core.stepAutoRespawn(respawnAttempts, it, {
-      enabled = autoRespawnOn, maxRetries = autoRespawnMax,
+      -- never auto-relaunch a session frozen on an API error: the user resumes it with
+      -- Continue (same session/context), not a fresh respawn.
+      enabled = autoRespawnOn and it.status ~= "error", maxRetries = autoRespawnMax,
       intentional = (draining[it.key] ~= nil) or drained,
       wasStale = (pv and pv.stale) or false,
       -- strict boolean (fail-closed): a nil/absent canRespawn must NOT read as
@@ -3840,6 +3872,10 @@ function refresh()
     newPrev[it.key] = { status = it.status, stale = step.isStale, escalated = nowEsc }
   end
   prev = newPrev
+
+  -- Errored tiles were detected mid-loop (status overridden to "error"); re-sort so they
+  -- surface near approvals -- parseStatusList sorted before we'd read any transcript.
+  core.sortByStatus(list)
 
   FX.writeFile(HEARTBEAT, tostring(now))
   sd.blink = not sd.blink

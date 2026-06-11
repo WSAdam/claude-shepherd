@@ -44,12 +44,14 @@ do
     entry("b", { name = "bravo",   status = "approval", updated = now }),
     entry("c", { name = "charlie", status = "working",  updated = now - 1000 }), -- stale
     entry("d", { name = "delta",   status = "done",     updated = now }),
+    entry("f", { name = "echo",    status = "error",    updated = now }),  -- frozen on API error
     { key = "junk", content = "{ not json" },             -- dropped (malformed)
     entry("e", { status = "idle", updated = now }),        -- dropped (no name)
   }
   local list = core.parseStatusList(entries, now, 90)
-  eq("parse: keeps 4 valid entries", #list, 4)
+  eq("parse: keeps 5 valid entries", #list, 5)
   eq("parse: approval sorts first", list[1].status, "approval")
+  eq("parse: error sorts right after approval", list[2].status, "error")
   eq("parse: approval is bravo", list[1].name, "bravo")
   eq("parse: key tagged", list[1].key, "b")
   -- find charlie and assert stale; alpha not stale
@@ -127,6 +129,12 @@ do
   r = newRecorder()
   core.handleAction(r.fx, normal, "model", "")
   eq("model: empty id is a no-op", r.count(), 0)
+
+  -- continue: resume a session frozen on an API error by typing "continue" + Enter
+  r = newRecorder()
+  core.handleAction(r.fx, normal, "continue")
+  eq("continue: typeIntoWindow op", r.last().op, "typeIntoWindow")
+  eq("continue: types the word continue", r.last().b, "continue")
 end
 
 -- ---- deckLayout: row-major fill + overflow ---------------------------------
@@ -210,6 +218,41 @@ do
   local long = string.rep("x", 300)
   local snip = core.transcriptSnippet(aline(long), 140)
   check("snippet: truncated to maxLen", #snip <= 140)
+end
+
+-- ---- transcriptError: frozen-on-API-error detection from a jsonl tail -------
+do
+  local function errline(msg) -- a { type=system, subtype=api_error } transcript line
+    return core.json.encode({ type = "system", subtype = "api_error", level = "error",
+      error = { formatted = msg, message = "Connection error." } })
+  end
+  local function aline(text)
+    return core.json.encode({ type = "assistant", message = { role = "assistant",
+      content = { { type = "text", text = text } } } })
+  end
+  local userline = core.json.encode({ type = "user", message = { role = "user" } })
+
+  -- latest significant line is an api_error -> stuck; return its formatted message
+  local stuck = aline("working on it") .. "\n" .. errline("Unable to connect to API (ECONNRESET)")
+  local e = core.transcriptError(stuck)
+  check("error: detects api_error as the latest event", e ~= nil)
+  eq("error: returns the formatted message", e and e.message, "Unable to connect to API (ECONNRESET)")
+
+  -- an assistant line AFTER the error -> recovered, not stuck
+  eq("error: assistant after error -> nil",
+     core.transcriptError(errline("boom") .. "\n" .. aline("recovered")), nil)
+  -- a user line after the error (e.g. the user typed continue) -> nil
+  eq("error: user activity after error -> nil",
+     core.transcriptError(errline("boom") .. "\n" .. userline), nil)
+  -- no api_error at all -> nil
+  eq("error: clean transcript -> nil", core.transcriptError(aline("all good")), nil)
+  -- empty / garbled input is safe
+  eq("error: empty input -> nil", core.transcriptError(""), nil)
+  eq("error: garbled line skipped, still finds the error",
+     (core.transcriptError("{ not json\n" .. errline("late boom")) or {}).message, "late boom")
+  -- falls back to error.message when there is no formatted field
+  local nofmt = core.json.encode({ type = "system", subtype = "api_error", error = { message = "Overloaded" } })
+  eq("error: falls back to error.message", (core.transcriptError(nofmt) or {}).message, "Overloaded")
 end
 
 -- ---- Task queue: push / pop / depth / shouldFeed --------------------------

@@ -24,6 +24,10 @@ let size: CGFloat = 1024
 let pad: CGFloat = 96
 // Left-facing German-shepherd head silhouette (erect ear, snout, neck) in an arbitrary
 // design space; normalized below to center + fit the canvas with a transparent margin.
+// These points are a MACHINE-DERIVED ordered outline traversed once (move -> line-loop ->
+// close), NOT hand-tuned art: reordering or inserting a pair distorts the polygon. To change
+// the shape, regenerate the outline from source art rather than nudging integers here. (This
+// is only the no-committed-PNG fallback; docs/assets/shepherd.png is the real icon.)
 let pts: [(CGFloat, CGFloat)] = [
   (158,505),(250,545),(360,568),(442,582),(470,640),(495,705),(516,724),
   (548,966),(664,720),(706,648),(758,575),(806,430),(812,250),

@@ -45,8 +45,9 @@ function M.config(tbl, path, default)
   return node
 end
 
--- Sort priority: approvals first (they need you), then by name for stability.
-local RANK = { approval = 0, done = 1, working = 2, idle = 3 }
+-- Sort priority: approvals first (they need you), then errored sessions (frozen on an
+-- API error -- you must resume them), then the rest; ties broken by name for stability.
+local RANK = { approval = 0, error = 1, done = 2, working = 3, idle = 4 }
 
 -- A STABLE per-launch-folder identity for a session, used to key persistent
 -- labels. `cwd` drifts as the agent cd's around, so it's unusable as a label key;
@@ -73,7 +74,14 @@ function M.parseStatusList(entries, now, staleSeconds)
       list[#list + 1] = data
     end
   end
-  table.sort(list, function(a, b)
+  return M.sortByStatus(list)
+end
+
+-- Sort a parsed session list in place by status priority (approvals/errors first), ties
+-- by name. Exposed so the dashboard can RE-sort after it derives the "error" status from
+-- the transcript -- parseStatusList runs before any transcript is read, so it can't see it.
+function M.sortByStatus(list)
+  table.sort(list or {}, function(a, b)
     local ra, rb = RANK[a.status] or 9, RANK[b.status] or 9
     if ra ~= rb then return ra < rb end
     return (a.name or "") < (b.name or "")
@@ -119,6 +127,10 @@ function M.handleAction(fx, item, action, text)
     -- newline-safe (a multi-line list pastes as one block instead of each line
     -- submitting early) and more reliable in the VS Code extension.
     if text and #text > 0 then fx.pasteIntoWindow(tgt, { text = text }) else return nil end
+  elseif action == "continue" then
+    -- Resume a session frozen on an API error (e.g. ECONNRESET): type the literal word
+    -- "continue" + Enter, exactly as the user would, to restart the aborted turn.
+    fx.typeIntoWindow(tgt, "continue")
   elseif action == "close" then
     -- Best-effort close the editor window, then drop its dashboard tile.
     fx.closeWindow(tgt)
@@ -971,6 +983,36 @@ function M.transcriptSnippet(text, maxLen)
             if #txt > maxLen then txt = utf8trunc(txt, maxLen - 3) .. "\226\128\166" end
             return txt
           end
+        end
+      end
+    end
+  end
+  return nil
+end
+
+-- Detect a session frozen on an API error. When a turn aborts on an API error (e.g.
+-- ECONNRESET) WITHOUT firing a Stop hook, the session sits in "working" forever; Claude
+-- Code records the failure as a { type = "system", subtype = "api_error" } transcript
+-- line. Scanning the tail backwards, return the error's display text IF that error is the
+-- LATEST significant event -- a later `assistant`/`user` line means it recovered (or the
+-- user already typed continue), so return nil. Meta lines (snapshots, stop_hook_summary)
+-- are skipped. Pure; the caller (refresh) reads the tail and overrides the status.
+function M.transcriptError(text)
+  if not text or #text == 0 then return nil end
+  local lines = {}
+  for line in (text .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
+  for i = #lines, 1, -1 do
+    local line = lines[i]
+    if line:find("^%s*{") then
+      local okj, obj = pcall(function() return M.json.decode(line) end)
+      if okj and type(obj) == "table" then
+        local t = obj.type
+        if t == "assistant" or t == "user" then
+          return nil  -- activity after any error -> recovered / no longer stuck
+        elseif t == "system" and obj.subtype == "api_error" then
+          local e = obj.error
+          local msg = (type(e) == "table" and (e.formatted or e.message)) or "API error"
+          return { message = tostring(msg) }
         end
       end
     end

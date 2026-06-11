@@ -4,6 +4,31 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-11 — Frozen-on-API-error state + Continue button
+
+### Added
+- **"Error" session state.** When a turn aborts on an API error (e.g. `Unable to connect to
+  API (ECONNRESET)`) WITHOUT firing a Stop hook, the session sits frozen in "working" — the
+  dashboard now detects this (the latest transcript line is a `system`/`api_error` entry with
+  no recovery after it) and shows a distinct **magenta "Error"** tile: pulsing, sorted up near
+  approvals, with the error message in the meta. The detail **Approve button becomes Continue**
+  — one click types `continue` + Enter to resume the aborted turn. Pure `core.transcriptError`
+  + a `continue` action (`handleAction`); auto-respawn is suppressed for errored tiles so you
+  resume the SAME session rather than relaunching it. Detection is client-side, no Claude Code
+  or hook changes: the error IS recorded in the local transcript, so the tail read each refresh
+  already does is enough.
+
+### Tests
+- **659 core + 104 ui + 130 bash**, all green. `transcriptError` coverage (stuck vs recovered
+  vs clean vs garbled, plus a check against a real ECONNRESET line), the `continue` action, and
+  error sort priority. Round-4 leaderboard review of the prior commit folded in: a **positive
+  control** in escaping.test.sh (plants a known raw `'+it.group+'` sink and asserts the grep
+  FIRES, so the absence-assertion can't silently rot into a no-op), a `\bg\b` anchor fix, a
+  `TODO(headless-js)`, and a `pts`-provenance note in make-icon.sh. The review's "derive the
+  field list" idea was deliberately NOT applied -- it false-positives on numeric fields like
+  `it.queue` that are concatenated raw-but-safe into the meta string.
+
+
 ## 2026-06-10 — Dock UX fixes + round-3 review
 
 ### Fixed

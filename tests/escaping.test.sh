@@ -23,14 +23,23 @@ assert_eq "esc() encodes <"  "yes" "$(has '.replace(/</g,"&lt;")')"
 assert_eq "esc() encodes >"  "yes" "$(has '.replace(/>/g,"&gt;")')"
 assert_eq 'esc() encodes "'  "yes" "$(has '.replace(/"/g,"&quot;")')"
 
-# 3. Deny-list (the allow-list above can only name KNOWN sinks): no user-controlled field may
-# be concatenated RAW into a panel-JS HTML string. The idiom is '...'+EXPR+'...', so a safe
-# sink reads '+esc(it.group)+' and an unsafe one '+it.group+' -- flag any '+ <field> that
-# isn't wrapped in esc(). This catches a NEW unescaped sink the allow-list can't. Brittle by
-# nature: the JS lives embedded in the Lua file, so this single-line grep needs each sink and
-# its esc() on one line; extend the field list when adding a user-controlled field. (A real
-# behavioral test would need the headless-JS twin harness we don't run here.)
-raw_sinks="$(grep -nE "'[[:space:]]*\+[[:space:]]*(it\.(group|label|name|cwd|projectKey)|g)\b" "$DASH" || true)"
+# 3. Deny-list (the allow-list above can only name KNOWN sinks): no user-controlled STRING
+# field may be concatenated RAW into a panel-JS HTML string. The idiom is '...'+EXPR+'...',
+# so a safe sink reads '+esc(it.group)+' and an unsafe one '+it.group+' -- flag any '+ <field>
+# not wrapped in esc(). The list is the user-controlled STRING fields ONLY; it is deliberately
+# NOT auto-derived from every it.* because numeric fields (it.queue / it.since /
+# it.context_tokens) are concatenated raw-but-safe into the meta string and would false-
+# positive. Add a NEW user-controlled string field here when you render one.
+# TODO(headless-js): replace this single-line source grep with the headless-JS twin harness
+# -- it cannot see a sink whose field and its esc() are split across lines.
+SINK_RE="'[[:space:]]*\+[[:space:]]*(it\.(group|label|name|cwd|projectKey)\b|\bg\b)"
+raw_sinks="$(grep -nE "$SINK_RE" "$DASH" || true)"
 assert_eq "no user field concatenated RAW into panel HTML (must be esc()'d)" "" "$raw_sinks"
+
+# Positive control: prove the grep actually FIRES on a known-bad sink, so a broken regex
+# can't make the absence-assert above pass vacuously (a no-op tripwire is worse than none).
+tmp="$(mktemp)"; cp "$DASH" "$tmp"; printf '%s\n' "x.innerHTML='<b>'+it.group+'</b>';" >> "$tmp"
+planted="$(grep -cE "$SINK_RE" "$tmp")"; rm -f "$tmp"
+assert_eq "deny-list grep fires on a planted raw sink (no vacuous pass)" "1" "$planted"
 
 finish
