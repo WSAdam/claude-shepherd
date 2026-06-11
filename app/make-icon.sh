@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Best-effort: produce a sheep icon and install it into a built .app's Resources.
-# Prefers a committed PNG (docs/assets/shepherd.png); else renders the 🐑 glyph via
-# Swift (Xcode Command Line Tools). Silently no-ops (keeps the default applet icon)
-# if neither is available, so `make app` still succeeds on a bare machine.
+# Best-effort: produce the Shepherd Dock icon and install it into a built .app's
+# Resources. Prefers a committed PNG (docs/assets/shepherd.png -- drop your own black
+# German-shepherd-face image there to override, 1024x1024 square); else draws a black
+# GSD-head silhouette via Swift (Xcode Command Line Tools). Silently no-ops (keeps the
+# default applet icon) if neither is available, so `make app` still succeeds on a bare
+# machine. The menubar icon stays 🐑 (the flock) -- this is only the Dock/app icon.
 set -euo pipefail
 
 APP="${1:?usage: make-icon.sh /path/to/Shepherd.app}"
@@ -18,15 +20,29 @@ elif command -v swift >/dev/null 2>&1; then
   swift - "$png" <<'SWIFT'
 import Cocoa
 let out = CommandLine.arguments[1]
-let glyph = "🐑" as NSString
-let size = NSSize(width: 1024, height: 1024)
-let img = NSImage(size: size)
+let size: CGFloat = 1024
+let pad: CGFloat = 96
+// Left-facing German-shepherd head silhouette (erect ear, snout, neck) in an arbitrary
+// design space; normalized below to center + fit the canvas with a transparent margin.
+let pts: [(CGFloat, CGFloat)] = [
+  (158,505),(250,545),(360,568),(442,582),(470,640),(495,705),(516,724),
+  (548,966),(664,720),(706,648),(758,575),(806,430),(812,250),
+  (640,232),(548,250),(472,330),(372,388),(262,442),(200,478)
+]
+let xs = pts.map { $0.0 }, ys = pts.map { $0.1 }
+let minX = xs.min()!, maxX = xs.max()!, minY = ys.min()!, maxY = ys.max()!
+let scale = min((size - 2*pad)/(maxX - minX), (size - 2*pad)/(maxY - minY))
+let offX = (size - (maxX - minX)*scale)/2 - minX*scale
+let offY = (size - (maxY - minY)*scale)/2 - minY*scale
+func tp(_ p: (CGFloat, CGFloat)) -> NSPoint { NSPoint(x: p.0*scale + offX, y: p.1*scale + offY) }
+let bp = NSBezierPath()
+bp.move(to: tp(pts[0]))
+for q in pts.dropFirst() { bp.line(to: tp(q)) }
+bp.close()
+let img = NSImage(size: NSSize(width: size, height: size))
 img.lockFocus()
-let font = NSFont.systemFont(ofSize: 820)
-let attrs: [NSAttributedString.Key: Any] = [.font: font]
-let sz = glyph.size(withAttributes: attrs)
-glyph.draw(at: NSPoint(x: (size.width - sz.width) / 2, y: (size.height - sz.height) / 2),
-           withAttributes: attrs)
+NSColor.black.set()
+bp.fill()
 img.unlockFocus()
 guard let tiff = img.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
       let data = rep.representation(using: .png, properties: [:]) else { exit(1) }
@@ -47,4 +63,4 @@ done
 iconutil -c icns "$set" -o "$TMP/applet.icns"
 cp "$TMP/applet.icns" "$APP/Contents/Resources/applet.icns"
 touch "$APP"
-echo "✅ installed sheep icon into $APP"
+echo "✅ installed shepherd icon into $APP"

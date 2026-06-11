@@ -23,4 +23,14 @@ assert_eq "esc() encodes <"  "yes" "$(has '.replace(/</g,"&lt;")')"
 assert_eq "esc() encodes >"  "yes" "$(has '.replace(/>/g,"&gt;")')"
 assert_eq 'esc() encodes "'  "yes" "$(has '.replace(/"/g,"&quot;")')"
 
+# 3. Deny-list (the allow-list above can only name KNOWN sinks): no user-controlled field may
+# be concatenated RAW into a panel-JS HTML string. The idiom is '...'+EXPR+'...', so a safe
+# sink reads '+esc(it.group)+' and an unsafe one '+it.group+' -- flag any '+ <field> that
+# isn't wrapped in esc(). This catches a NEW unescaped sink the allow-list can't. Brittle by
+# nature: the JS lives embedded in the Lua file, so this single-line grep needs each sink and
+# its esc() on one line; extend the field list when adding a user-controlled field. (A real
+# behavioral test would need the headless-JS twin harness we don't run here.)
+raw_sinks="$(grep -nE "'[[:space:]]*\+[[:space:]]*(it\.(group|label|name|cwd|projectKey)|g)\b" "$DASH" || true)"
+assert_eq "no user field concatenated RAW into panel HTML (must be esc()'d)" "" "$raw_sinks"
+
 finish

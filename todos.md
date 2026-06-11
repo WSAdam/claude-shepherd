@@ -94,4 +94,4 @@ remaining items. Full per-round detail is in CHANGELOG.md and git history.
 Pure decisions → `cc-core.lua` + unit tests; effects → `fx` recorder; shell hooks → bash suites
 with temp dirs. No live `kitty @` / keystrokes / network in tests (provider env-injection, usage
 parse/sum/window, and ssh-wrap are all asserted as pure strings — no real keys, no real spawns).
-`make test` green before every `make deploy`. 648 core + 104 ui + 128 bash side-effect-free checks.
+`make test` green before every `make deploy`. 648 core + 104 ui + 129 bash side-effect-free checks.

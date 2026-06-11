@@ -4,6 +4,32 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-10 — Dock UX fixes + round-3 review
+
+### Fixed
+- **Right-click "Reload" blanked the panel.** On macOS 26, WebKit's native context menu (a
+  dark "↻ Reload" pill) popped wherever no tile handler caught the right-click — e.g. the
+  header. Reloading the webview loads an empty URL (the HTML is injected once via `wv:html`),
+  so the panel went white and the app was dead. A global `contextmenu` suppressor in the
+  panel JS kills the native menu everywhere; tiles keep their own menu and ⌘V still pastes.
+- **Dock icon never lit its running indicator.** The Shepherd.app launcher quit the instant
+  it toggled the panel, so macOS never showed the running dot. An `on idle` handler makes
+  `osacompile` produce a stay-open applet that keeps running (dot lit) until you quit it.
+
+### Changed
+- **App/Dock icon is now a black German shepherd** (`docs/assets/shepherd.png`).
+  `make-icon.sh` prefers that committed image and otherwise draws a black GSD-head silhouette
+  (was the 🐑 glyph). The menubar icon stays 🐑 (the flock the shepherd watches).
+
+### Tests
+- Round-3 leaderboard review of the prior commit folded in: a one-line rationale for the
+  `nowEsc` carry-forward accumulator (why a local, not a mutation of the read-only `pv`
+  snapshot), and a **deny-list** assertion in `escaping.test.sh` that fails if ANY user field
+  is concatenated into panel HTML without `esc()` — the prior allow-list only caught the three
+  KNOWN sinks. Confirmed no deleted-table (`prevStatus`/`prevStale`/`escalated`) references
+  linger. **648 core + 104 ui + 129 bash**, all green.
+
+
 ## 2026-06-10 — Round-2 review hardening
 
 A second pass over the bug-sweep commits, driven by leaderboard review. Each suggestion was

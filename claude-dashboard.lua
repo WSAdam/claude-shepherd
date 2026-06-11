@@ -2431,6 +2431,12 @@ local HTML = [[
     // (hs.webview renders its own native menu over any in-page one, so we don't
     // try to draw the menu in HTML.)
     function showCtx(e, key){ e.preventDefault(); send("ctx-menu", key); }
+    // Kill WebKit's native right-click menu everywhere else. On macOS 26 it offers a
+    // "Reload" item that BLANKS the panel: our HTML is injected once via wv:html, so a
+    // webview reload loads an empty URL -> white screen, app dead. Tiles keep their own
+    // menu (showCtx above); ⌘V already handles paste into the inputs, so nothing here
+    // needs the native menu. preventDefault on a bubble-phase listener cancels it.
+    document.addEventListener("contextmenu", function(e){ e.preventDefault(); }, false);
 
     // Relabel / Close happen via in-panel bars (no native dialog -> no console pop).
     // Lua's popup-menu items call startRename/startClose; these post the result back.
@@ -3767,8 +3773,11 @@ function refresh()
       end
     end
 
-    -- Escalation: nag harder when an approval sits too long (once per episode). The
-    -- escalated flag carries forward from the last snapshot (pv) so we nag exactly once.
+    -- Escalation: nag harder when an approval sits too long (once per episode). nowEsc is an
+    -- accumulator, NOT a mutation of pv: pv is last refresh's read-only snapshot (and may be
+    -- nil), and the loop swaps a fresh newPrev in at the end -- so writing pv.escalated would
+    -- just be discarded. The carried/updated value is stored into newPrev below and becomes
+    -- this tile's new escalated flag (carry-forward -> set-once-on-escalation -> reset-on-non-approval).
     local nowEsc = (pv and pv.escalated) or false
     if escEnabled and core.approvalStale(it, now, escMin * 60) then
       it.escalate = true
