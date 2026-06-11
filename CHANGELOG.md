@@ -18,8 +18,19 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
   or hook changes: the error IS recorded in the local transcript, so the tail read each refresh
   already does is enough.
 
+### Fixed
+- **`make deploy` reloads cleanly.** `hs -c "hs.reload()"` tore down the IPC message port
+  mid-command, so the CLI exited non-zero and deploy printed a false "'hs' CLI not available"
+  even though the reload worked. The reload is now scheduled 0.4s out (`hs.timer.doAfter`) so
+  the command disconnects first — deploys auto-reload and report success accurately.
+- **Approval hooks run the status update FIRST.** A session sitting at a live permission prompt
+  could show "Working" instead of "Needs you" when `cc-status.sh` (the status write) ran *after*
+  a slower popup / desktop-notification / network-push command in the PermissionRequest /
+  Notification hooks. The shipped template already orders `cc-status.sh` first; added install
+  assertions that lock it in so the order can't regress.
+
 ### Tests
-- **659 core + 104 ui + 130 bash**, all green. `transcriptError` coverage (stuck vs recovered
+- **659 core + 104 ui + 132 bash**, all green. `transcriptError` coverage (stuck vs recovered
   vs clean vs garbled, plus a check against a real ECONNRESET line), the `continue` action, and
   error sort priority. Round-4 leaderboard review of the prior commit folded in: a **positive
   control** in escaping.test.sh (plants a known raw `'+it.group+'` sink and asserts the grep

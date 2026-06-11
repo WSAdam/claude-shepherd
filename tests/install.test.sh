@@ -27,6 +27,13 @@ exists "copies dashboard -> hs dir"         "$HSDIR/claude-dashboard.lua"
 exists "writes settings.json"               "$CDIR/settings.json"
 assert_json "settings has our Stop hook" "$CDIR/settings.json" \
   '.hooks.Stop[0].hooks[0].command | contains("cc-status.sh")' "true"
+# The status update MUST be the FIRST command in the approval hooks, so the tile flips
+# to "Needs you" immediately -- not blocked behind a slower popup / desktop notification /
+# network push (which is exactly what left a session showing "Working" at a live prompt).
+assert_json "PermissionRequest runs cc-status FIRST" "$CDIR/settings.json" \
+  '.hooks.PermissionRequest[0].hooks[0].command | contains("cc-status.sh")' "true"
+assert_json "Notification runs cc-status FIRST" "$CDIR/settings.json" \
+  '.hooks.Notification[0].hooks[0].command | contains("cc-status.sh")' "true"
 exists "creates init.lua" "$HSDIR/init.lua"
 assert_eq "init.lua has the dofile" "1" "$(grep -c 'claude-dashboard.lua' "$HSDIR/init.lua")"
 

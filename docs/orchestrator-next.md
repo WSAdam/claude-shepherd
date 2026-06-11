@@ -8,7 +8,8 @@ piece. This file is retained as the original design rationale — the authoritat
 CHANGELOG.md records what has shipped since (incl. the audit ledger, fleet insights,
 collision warning, per-session gating, risk score, drain/respawn, and the fleet-scale
 console — tile search, session groups, bulk actions, per-session timeline, auto-respawn,
-insights sparklines, and the stuck-session watchdog).
+insights sparklines, the stuck-session watchdog, and the API-error "Error" state with
+one-click Continue recovery).
 
 ## Goal
 

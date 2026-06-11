@@ -56,6 +56,12 @@ remaining items. Full per-round detail is in CHANGELOG.md and git history.
   per-folder budget; `respawn.auto.enabled`), **insights sparklines** (`core.bucketEvents`,
   4 metrics), **stuck-session watchdog** (`core.isHung`/`trackProgress`/`applyProgress`;
   `escalation.hung`). All off-by-default where they automate.
+- **API-error "Error" state + Continue recovery**: a session frozen on an API error (e.g.
+  ECONNRESET, no Stop hook) shows a distinct **magenta "Error"** tile and the Approve button
+  becomes **Continue** (types `continue` + Enter to resume). Pure `core.transcriptError` from
+  the transcript tail; auto-respawn suppressed for errored tiles. Also fixed: the approval
+  status hook now runs FIRST so a live permission prompt flips to "Needs you" promptly (was
+  occasionally stuck showing "Working" behind a slower notification command).
 - **Adversarial bug sweep** (multi-agent: per-flow finders → verifiers that re-ran each
   repro): fixed a sessionRisk string-threshold crash (froze refresh), a `pending.ask`
   merge leak, a `staleDuplicateKeys` cross-project prune, a `mergeHooks` over-broad
@@ -94,4 +100,4 @@ remaining items. Full per-round detail is in CHANGELOG.md and git history.
 Pure decisions → `cc-core.lua` + unit tests; effects → `fx` recorder; shell hooks → bash suites
 with temp dirs. No live `kitty @` / keystrokes / network in tests (provider env-injection, usage
 parse/sum/window, and ssh-wrap are all asserted as pure strings — no real keys, no real spawns).
-`make test` green before every `make deploy`. 659 core + 104 ui + 130 bash side-effect-free checks.
+`make test` green before every `make deploy`. 659 core + 104 ui + 132 bash side-effect-free checks.

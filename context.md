@@ -58,10 +58,13 @@ network, no multi-user, no secrets — it reads session status off the local fil
 - Typical change: add a pure cc-core function + its regression test → wire it into the
   dashboard → mirror in the panel JS if it affects rendering (and note the twin).
 
-## State (2026-06-10)
+## State (2026-06-11)
 
 Cross-machine / controls roadmap done. Fleet-scale console shipped (tile search, session
 groups, bulk fleet actions, per-session timeline, auto-respawn, insights sparklines,
-stuck-session watchdog). Two rounds of adversarial + leaderboard-review bug-sweeps applied.
-Suite: **648 core + 104 ui + 128 bash** checks, all green. Remaining work is in
-[todos.md](todos.md) (4c-E project routing is the main deferred piece).
+stuck-session watchdog). A distinct **"Error" state** (magenta) flags sessions frozen on an
+API error and offers a one-click **Continue** to resume them — derived client-side from the
+transcript tail (`core.transcriptError`), no hooks. Several rounds of adversarial +
+leaderboard-review bug-sweeps applied. Suite: **659 core + 104 ui + 132 bash** checks, all
+green. Remaining work is in [todos.md](todos.md) (4c-E project routing is the main deferred
+piece).
