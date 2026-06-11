@@ -22,10 +22,13 @@ install:
 setup:
 	@bash install.sh
 
-# Reload the live Hammerspoon config (needs the `hs` CLI: require('hs.ipc')).
+# Reload the live Hammerspoon config (needs the `hs` CLI: require('hs.ipc')). The reload
+# is SCHEDULED 0.4s out so the `hs` command disconnects cleanly first -- an immediate
+# hs.reload() tears down the IPC port mid-command, which exits non-zero and falsely looks
+# like the CLI is missing (the reload actually worked).
 .PHONY: reload
 reload:
-	@hs -c "hs.reload()" && echo "✅ Hammerspoon reloaded" || echo "⚠️  'hs' CLI not available — reload from the Hammerspoon menu"
+	@hs -c "hs.timer.doAfter(0.4, function() hs.reload() end)" >/dev/null 2>&1 && echo "✅ Hammerspoon reloading (config re-read)" || echo "⚠️  'hs' CLI not available — reload from the Hammerspoon menu"
 
 # Test, deploy, then reload — one shot.
 .PHONY: deploy
