@@ -47,7 +47,7 @@ Claude Code hooks ──► cc-status.sh ──► ~/.claude/cc-status/<session_
 
 ## Control actions
 
-The **header** has **+ New** (opens the new-session modal — see "Spawn"), a **☕
+The **header** has **New** (opens the new-session modal — see "Spawn"), a **☕
 keep-awake toggle** (see "Keep this Mac awake"), **📊 Fleet insights** and **📜 Audit
 ledger** overlays (see "Audit log & insights"), the **⚙ Settings** panel, and a theme switcher.
 
@@ -184,7 +184,7 @@ closed). Because that needs root, macOS asks for your password each time you fli
 
 ## Spawn new sessions
 
-Click **+ New** (or **⌘⌥S**) to open the **New session** modal:
+Click **New** (or **⌘⌥S**) to open the **New session** modal:
 
 - **Open existing / Start new project** — open a folder, or create a new folder and start in it.
 - **Presets** — ▶ chips that spawn a saved folder+editor+mode+provider bundle in one click;
@@ -376,7 +376,7 @@ read it (the panel live within ~1s; the gate on the next hook fire).
   [cc-popup.sh](cc-popup.sh) with the event, which opens the window only when the matching
   flag is on (legacy `focus.popEditor` still seeds both). Note: the Claude Code VS Code
   extension may raise its own window on completion independently of this.
-- **spawn** — the + New / New project launcher: `editor` (terminal/kitty/vscode/cursor),
+- **spawn** — the New / New project launcher: `editor` (terminal/kitty/vscode/cursor),
   `live` (false = dry-run, log only), `kittyRemote` (give spawned Kitty windows remote control),
   `kittyAutoRemote` (auto-enable remote control in `kitty.conf` when Kitty is in use).
 - **gate.tools** — space/comma list of tools the approval gate holds for you (default

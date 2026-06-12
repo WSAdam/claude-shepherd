@@ -1373,21 +1373,32 @@ local function spawnEditorWindow(spec)
   hs.alert.show("Claude Shepherd: opening " .. spec.app .. " — starting claude (best-effort)")
   local proj = spec.project
   local name = proj and proj:match("([^/]+)/?$") or nil
-  after(2.0, function() pcall(function()
+  -- Cold-start timing: a NEW window (the new-project case) takes seconds to be
+  -- palette-ready, and the integrated terminal's shell takes more to accept
+  -- input. The old 2.0/0.35/0.6 ladder typed into the void on cold starts --
+  -- field-verified failure. Each step logs so a miss is diagnosable in the
+  -- console instead of silent.
+  after(3.0, function() pcall(function()
     -- The just-opened window may not be titled yet: activating the app on a
     -- title miss IS the desired behavior here (the keystrokes must land in it).
     focusProject(name, proj, nil, true)
-    after(0.5, function()
+    after(0.8, function()
       -- New integrated terminal via the Command Palette (more reliable than ⌃`,
       -- which would hide an already-open terminal).
+      print("[cc-orch] vscode: opening command palette")
       hs.eventtap.keyStroke({ "cmd", "shift" }, "p")
-      after(0.35, function()
+      after(0.6, function()
         hs.eventtap.keyStrokes("Terminal: Create New Terminal")
-        after(0.2, function()
+        after(0.4, function()
+          print("[cc-orch] vscode: creating integrated terminal")
           hs.eventtap.keyStroke({}, "return")
-          after(0.6, function()
+          after(2.0, function()
+            print("[cc-orch] vscode: typing claude launch line: " .. tostring(spec.postType))
             hs.eventtap.keyStrokes(spec.postType)
-            hs.eventtap.keyStroke({}, "return")
+            after(0.3, function()
+              hs.eventtap.keyStroke({}, "return")
+              print("[cc-orch] vscode: launch line submitted")
+            end)
           end)
         end)
       end)
@@ -1656,17 +1667,32 @@ local function handleBridgeMsg(msg)
     local task   = payload.text and tostring(payload.text) or nil
     local dir
     if mode == "new" then
-      dir = core.newProjectPath(expandHome(payload.parent), tostring(payload.name or ""))
+      local parent = expandHome(payload.parent)
+      local name2 = tostring(payload.name or "")
+      dir = core.newProjectPath(parent, name2)
       if not dir then
         -- nil = unsafe name OR a blank/relative parent (newProjectPath rejects both;
-        -- a relative dir would mkdir against Hammerspoon's cwd but cd against $HOME)
-        pcall(function() hs.alert.show("Claude Shepherd: invalid project name or parent folder") end)
+        -- a relative dir would mkdir against Hammerspoon's cwd but cd against $HOME).
+        -- Say WHICH, with the values, in the console AND the alert -- a bare
+        -- "invalid" popup was field-proven undiagnosable.
+        local why
+        if not core.safeFolderName(name2) then
+          why = "project name " .. string.format("%q", name2)
+            .. " is empty or has unsupported characters (letters/digits/-_. and spaces only)"
+        else
+          why = "parent folder " .. string.format("%q", tostring(parent))
+            .. " must be an absolute path — pick a suggestion, a Recent chip, or Browse to it"
+        end
+        print("[cc-orch] new-project rejected: " .. why)
+        pcall(function() hs.alert.show("Claude Shepherd: " .. why) end)
         return
       end
       if not FX.mkdirP(dir) then
+        print("[cc-orch] new-project mkdir failed: " .. dir)
         pcall(function() hs.alert.show("Claude Shepherd: couldn't create " .. dir) end)
         return
       end
+      print("[cc-orch] new project folder ready: " .. dir)
     elseif mode == "existing" then
       dir = payload.dir and expandHome(payload.dir) or ""
     end
@@ -2801,7 +2827,7 @@ local HTML = [[
   <div id="bar">
     <span class="t">Claude sessions</span>
     <span class="right">
-      <button id="spawn" onclick="openNew()" title="Spawn a new Claude session">+ New</button>
+      <button id="spawn" onclick="openNew()" title="Spawn a new Claude session">New</button>
       <button id="caffeine" onclick="toggleCaffeine()" title="Keep this Mac awake — pmset disablesleep (asks for your password)">☕ Sleep ok</button>
       <button id="search-btn" onclick="toggleSearch()" title="Filter sessions (name, project, status, group)">🔍</button>
       <button id="fsearch-btn" onclick="openFleetSearch()" title="Find in fleet — search every session's transcript + the ledger (which session touched that file?)">🔎</button>
@@ -2983,7 +3009,7 @@ local HTML = [[
       <label class="s-row"><input type="checkbox" id="s-pop-complete"> Pop the editor when a session finishes</label>
       <label class="s-row"><input type="checkbox" id="s-pop-approval"> Pop the editor when a session needs approval</label>
       <div class="s-help">Routes to your detected editor (VS Code / Cursor); Kitty/terminal sessions are left alone. Note: the Claude Code VS Code extension may raise its own window on completion — that's the extension, not Shepherd. Arming Headless approvals stops the approval-time pop entirely.</div>
-      <div class="s-sec">Spawn (the + New / New project launcher)</div>
+      <div class="s-sec">Spawn (the New / New project launcher)</div>
       <label class="s-row">Open new sessions in
         <select id="s-spawn-editor">
           <option value="terminal">Terminal</option>
