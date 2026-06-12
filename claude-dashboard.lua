@@ -4770,8 +4770,15 @@ local function togglePanel() if panelVisible then hidePanel() else showPanel() e
 -- The app runs `open "hammerspoon://ccShepherdToggle"`; Hammerspoon owns the
 -- built-in hammerspoon:// scheme, so no custom-scheme registration and no `hs`
 -- CLI dependency. Clicking the Dock icon shows/hides the panel like Chrome/VS Code.
+-- LaunchServices LOWERCASES the URL host on delivery (field-proven: the event
+-- arrives as "ccshepherdtoggle") and hs.urlevent matches case-sensitively, so
+-- the lowercase bind is the one that actually fires; the camelCase bind stays
+-- for any path that preserves case.
 _G.__ccShepherdToggle = togglePanel
-pcall(function() hs.urlevent.bind("ccShepherdToggle", function() togglePanel() end) end)
+pcall(function()
+  hs.urlevent.bind("ccshepherdtoggle", function() togglePanel() end)
+  hs.urlevent.bind("ccShepherdToggle", function() togglePanel() end)
+end)
 -- The red close button just hides it; reopen from the menubar or with the hotkey.
 -- On a resize/move, persist the new frame (debounced — frameChange fires rapidly
 -- while dragging) so the size survives the next reload.

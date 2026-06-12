@@ -66,5 +66,13 @@ for s in 16 32 128 256 512; do
 done
 iconutil -c icns "$set" -o "$TMP/applet.icns"
 cp "$TMP/applet.icns" "$APP/Contents/Resources/applet.icns"
+# macOS 11+: osacompile applets ship an Assets.car asset catalog and point
+# CFBundleIconName at it, which OVERRIDES Resources/applet.icns -- the swapped
+# icon never showed (field-proven: generic applet icon in the Dock). Drop the
+# catalog + the IconName key so CFBundleIconFile -> applet.icns wins, then
+# ad-hoc re-sign (editing the bundle broke the applet's signature seal).
+rm -f "$APP/Contents/Resources/Assets.car"
+/usr/libexec/PlistBuddy -c "Delete :CFBundleIconName" "$APP/Contents/Info.plist" 2>/dev/null || true
+codesign --force --deep -s - "$APP" >/dev/null 2>&1 || true
 touch "$APP"
 echo "✅ installed shepherd icon into $APP"
