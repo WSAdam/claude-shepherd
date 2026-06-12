@@ -48,6 +48,21 @@ if have_jq; then
       | reduce ($tmpl.hooks | to_entries[]) as $e (.;
           ([ (.hooks[$e.key] // [])[].hooks[]?.command? // empty ] | any(test("cc-(status|approve|popup)\\.sh"))) as $has
           | if $has then . else .hooks[$e.key] = ((.hooks[$e.key] // []) + $e.value) end)
+      # Migrate older installs: the cc-approve.sh entry must carry a timeout above
+      # the gate'\''s 120s poll or Claude Code kills the hook at its 60s default
+      # mid-wait. The append-if-missing pass above skips events already wired, so
+      # patch the timeout in place where it'\''s missing (idempotent). SHAPE-
+      # PRESERVING: this pass visits every event (including ones we don'\''t own),
+      # so it must never reshape them — the outer type=="array" guard leaves
+      # object-valued event groups alone, and `.hooks? // null` turns the
+      # suppressed lookup on a non-object element into null (else `map` would
+      # silently DROP the element when the if yields empty).
+      | .hooks |= with_entries(.value |= (if type == "array" then map(
+          if ((.hooks? // null) | type) == "array" then
+            .hooks |= map(if ((.command? // "") | test("cc-approve\\.sh")) and (has("timeout") | not)
+                          then . + {timeout: 130} else . end)
+          else . end)
+        else . end))
     ' "$SETTINGS" 2>/dev/null)"
     if [ -z "$merged" ]; then
       echo "⚠️  couldn't parse $SETTINGS — leaving it; merge $TEMPLATE by hand"
@@ -65,6 +80,11 @@ fi
 
 # 3. Ensure init.lua dofiles the dashboard.
 if [ ! -f "$INIT" ] || ! grep -Fq "claude-dashboard.lua" "$INIT"; then
+  # A pre-existing init.lua may lack a trailing newline; appending straight onto
+  # its last line would glue the dofile into invalid Lua (breaking the user's
+  # whole config). Separate first. ($() strips a trailing \n, so non-empty
+  # output from tail -c1 means the last byte is NOT a newline.)
+  if [ -s "$INIT" ] && [ -n "$(tail -c1 "$INIT")" ]; then printf '\n' >> "$INIT"; fi
   printf '%s\n' "$DOFILE_LINE" >> "$INIT"
   echo "✅ added dofile to $INIT"
 else

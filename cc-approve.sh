@@ -29,8 +29,8 @@ GATE_TOOLS="${CC_GATE_TOOLS:-$(cc_config '.gate.tools' 'Bash Write Edit MultiEdi
 GATE_TOOLS="$(printf '%s' "$GATE_TOOLS" | tr ',' ' ')"
 GATE_TIMEOUT="${CC_GATE_TIMEOUT:-120}"
 HEARTBEAT_MAX_AGE="${CC_PANEL_MAX_AGE:-5}"
-APPROVED_DIR="${CC_APPROVED_DIR:-${HOME}/.claude/cc-approved}"
-AUTOPILOT_DIR="${CC_AUTOPILOT_DIR:-${HOME}/.claude/cc-autopilot}"
+APPROVED_DIR="$CC_APPROVED_DIR"    # defined in cc-lib.sh so SessionEnd can clean it
+AUTOPILOT_DIR="$CC_AUTOPILOT_DIR"  # (same env-var overrides as before)
 # Per-session gated-tools overrides (Feature D): one file per key, like cc-autopilot.
 GATE_TOOLS_DIR="${CC_GATE_TOOLS_DIR:-${HOME}/.claude/cc-gate-tools}"
 
@@ -99,11 +99,21 @@ case " $GATE_TOOLS " in
   *) exit 0 ;;
 esac
 
-# A short summary of what's being approved (Bash command, file path, ...).
+# A short summary of what's being approved (Bash command, file path, notebook,
+# URL...). KEEP IN SYNC with summarize_tool in cc-status.sh.
 SUMMARY="$(cc_get "$INPUT" '.tool_input.command')"
 [ -n "$SUMMARY" ] || SUMMARY="$(cc_get "$INPUT" '.tool_input.file_path')"
-[ -n "$SUMMARY" ] || SUMMARY="$TOOL"
-SIG="$(printf '%s|%s' "$TOOL" "$SUMMARY" | tr '\n' ' ')"
+[ -n "$SUMMARY" ] || SUMMARY="$(cc_get "$INPUT" '.tool_input.notebook_path')"
+[ -n "$SUMMARY" ] || SUMMARY="$(cc_get "$INPUT" '.tool_input.url')"
+if [ -n "$SUMMARY" ]; then
+  SIG="$(printf '%s|%s' "$TOOL" "$SUMMARY" | tr '\n' ' ')"
+else
+  # No recognized field: keep the SIG per-request with a digest of the whole
+  # tool_input (canonicalized by jq -S). A bare "Tool|Tool" SIG would let ONE
+  # approveRepeats approval blanket-approve every future call of the tool.
+  SIG="$(printf '%s|%s' "$TOOL" "$(printf '%s' "$INPUT" | jq -cS '.tool_input // {}' | cksum | tr ' ' '-')")"
+  SUMMARY="$TOOL"
+fi
 
 # transcript_path -> stable projectKey (mirrors cc-core), for ledger lines.
 TRANSCRIPT="$(cc_get "$INPUT" '.transcript_path')"
@@ -195,30 +205,77 @@ AGE=$(( $(cc_now) - HB ))
 [ "$AGE" -le "$HEARTBEAT_MAX_AGE" ] || exit 0
 
 DECISION_FILE="$(cc_decision_file "$KEY")"
-rm -f "$DECISION_FILE" 2>/dev/null || true   # ignore any stale answer
+# Bind the answer to THIS request instead of clearing the file up front: a
+# startup rm could eat a decision the panel just wrote for a CONCURRENT gated
+# call on the same session key (parallel subagents share the parent session_id).
+# Staleness is judged by mtime in the poll loop below; CLAIM is a name owned by
+# this PID so two waiters can never both consume the same answer (mv is atomic).
+CLAIM="${DECISION_FILE}.claim.$$"
 
-NOW="$(cc_now)"
+NOW="$(cc_now)"   # the request start (whole seconds)
+# Per-request nonce: published in the pending block, echoed back by the panel in
+# the decision content ("allow <nonce>"), and required to match before this
+# waiter consumes an answer. mtime alone can't bind answers to requests: it has
+# 1-second granularity, so a leftover written sub-second BEFORE this request
+# (e.g. a double-clicked Approve whose first write was already consumed) would
+# look "fresh" and silently answer a request that was never displayed.
+NONCE="$$.$NOW"
 cc_merge "$KEY" "$(jq -nc \
   --arg sid "$SESSION_ID" --arg name "$NAME" --arg cwd "$CWD" \
-  --argjson now "$NOW" --arg tool "$TOOL" --arg sum "$SUMMARY" \
-  '{session_id:$sid, name:$name, cwd:$cwd, status:"approval", updated:$now, since:$now, gate:"waiting", pending:{tool:$tool, summary:$sum, message:$sum}}')"
+  --argjson now "$NOW" --arg tool "$TOOL" --arg sum "$SUMMARY" --arg nonce "$NONCE" \
+  '{session_id:$sid, name:$name, cwd:$cwd, status:"approval", updated:$now, since:$now, gate:"waiting", pending:{tool:$tool, summary:$sum, message:$sum, nonce:$nonce}}')"
 echo "[cc-approve] ⏳ waiting on panel for $TOOL ($KEY): $SUMMARY" >&2
 
-# Poll for the panel's decision. 0.25s cadence keeps it responsive.
+# Poll for the panel's decision. 0.25s cadence keeps it responsive. Consume
+# atomically: mv to the PID-owned CLAIM before reading (two waiters can never
+# both consume one answer), then accept it only if it is OURS:
+#   * nonce-bound ("allow <nonce>", current panels): the echoed nonce must equal
+#     this request's NONCE — exact request binding, immune to mtime granularity.
+#   * legacy bare ("allow", an older panel): mtime must be STRICTLY newer than
+#     this request's start second. Whole-second mtimes can't distinguish a
+#     leftover written just BEFORE the request from a real same-second answer,
+#     so the bare format degrades safely (an equal-second answer is missed and
+#     falls back to the native prompt) rather than consuming a stale leftover.
+# An answer that is not ours may be a CONCURRENT sibling's (parallel subagents
+# share the session key), so it is PUT BACK, never rm'd — only consumption
+# removes the file. The restore is a hardlink: link(2) fails atomically with
+# EEXIST, so a FRESH decision the panel wrote while we held the claim is never
+# clobbered (mv -n is a check-then-rename race that could overwrite it), and the
+# link shares the inode, preserving the original mtime the sibling's freshness
+# check needs. Truly stale leftovers never match any waiter and are cleaned up
+# by cc_remove on SessionEnd.
 ITERS=$(( GATE_TIMEOUT * 4 ))
 DECISION=""
 i=0
 while [ "$i" -lt "$ITERS" ]; do
-  if [ -f "$DECISION_FILE" ]; then
-    DECISION="$(cat "$DECISION_FILE" 2>/dev/null | tr -d '[:space:]')"
-    break
+  if [ -f "$DECISION_FILE" ] && mv "$DECISION_FILE" "$CLAIM" 2>/dev/null; then
+    VERB=""; RNONCE=""
+    read -r VERB RNONCE _ < "$CLAIM" 2>/dev/null || true
+    OURS=0
+    if [ -n "$RNONCE" ]; then
+      [ "$RNONCE" = "$NONCE" ] && OURS=1
+    else
+      MTIME="$(stat -f %m "$CLAIM" 2>/dev/null || stat -c %Y "$CLAIM" 2>/dev/null)"
+      case "$MTIME" in ''|*[!0-9]*) MTIME=0 ;; esac
+      [ "$MTIME" -gt "$NOW" ] && OURS=1
+    fi
+    if [ "$OURS" = 1 ]; then
+      DECISION="$VERB"
+      rm -f "$CLAIM" 2>/dev/null || true
+      break
+    fi
+    ln "$CLAIM" "$DECISION_FILE" 2>/dev/null || true   # atomic no-clobber restore
+    rm -f "$CLAIM" 2>/dev/null || true
   fi
   sleep 0.25
   i=$(( i + 1 ))
 done
 
 cc_del_field "$KEY" "gate"
-rm -f "$DECISION_FILE" 2>/dev/null || true
+# NOTE: no rm of $DECISION_FILE here -- on a timeout it could be a sibling's
+# fresh answer. Stale leftovers are ignored (claimed + restored) by every
+# waiter's mtime check above, and cc_remove cleans up on SessionEnd.
+rm -f "$CLAIM" 2>/dev/null || true
 
 if [ "$DECISION" = "deny" ]; then
   cc_del_field "$KEY" "pending"

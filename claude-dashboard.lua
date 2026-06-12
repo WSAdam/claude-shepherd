@@ -75,6 +75,8 @@ local STALE_SECONDS = 90       -- dim a tile after this long with no updates
 local PRUNE_NO_SID  = true     -- delete stale tiles that have no session_id (orphans)
 local PRUNE_SECONDS = 86400    -- also delete any tile older than this (24h ghost backstop; 0=off)
 local FOCUS_DELAY   = 0.12     -- wait after focusing before sending keystrokes
+local BULK_STAGGER  = 1.5      -- gap between bulk window-keystroke targets (> the
+                               -- worst-case paste ladder, so chains never interleave)
 local RESTORE_FOCUS = true     -- return focus to where you were after acting
 -- Before typing (nudge/feed/clear/compact), focus the chat input. The Claude Code
 -- VS Code extension binds ⌘Esc to focus/unfocus its input ("⌘ Esc to focus or
@@ -142,15 +144,29 @@ local ledgerGcTick = 0   -- throttles the ledger retention GC (off the 180s time
 local loadConfig         -- forward declaration (defined near refresh)
 local refresh            -- forward declaration (so the controller can repaint now)
 
--- Find the editor application object across possible bundle ids.
-local function findEditorApp()
-  for _, bid in ipairs(EDITOR_BUNDLES) do
+-- Find the editor application object for a session's editor kind. The kind
+-- scopes the lookup (core.editorBundleIds): a 'cursor' session must never
+-- search VS Code's windows (and vice versa) -- with both running, the fixed
+-- EDITOR_BUNDLES order would match the wrong app and either inject keystrokes
+-- into an unrelated window or skip a perfectly matchable one. Only a nil/
+-- unknown editor falls back to the legacy full walk.
+local EDITOR_APP_NAMES = {
+  terminal = { "Terminal" },
+  cursor   = { "Cursor" },
+  vscode   = { "Code", "Visual Studio Code" },
+}
+local function findEditorApp(editor)
+  for _, bid in ipairs(core.editorBundleIds(editor, EDITOR_BUNDLES)) do
     local apps = hs.application.applicationsForBundleID(bid)
     if apps and #apps > 0 then return apps[1] end
   end
-  return hs.application.find("Code")
-      or hs.application.find("Visual Studio Code")
-      or hs.application.find("Cursor")
+  local names = EDITOR_APP_NAMES[tostring(editor or "")]
+      or { "Code", "Visual Studio Code", "Cursor" }
+  for _, n in ipairs(names) do
+    local app = hs.application.find(n)
+    if app then return app end
+  end
+  return nil
 end
 
 -- Generic path components that should never be used as a focus candidate.
@@ -159,9 +175,14 @@ end
 -- "frontend") still finds its workspace window (titled "… — autobottom"). Returns
 -- true if a specific window was focused (switches Spaces automatically). The
 -- candidate-building + title matching are pure (cc-core, tested -- review #4).
-local function focusProject(name, cwd)
+-- activateOnMiss: only an explicit JUMP (FX.focusWindow / spawn follow-up) may
+-- raise the app when no title matches. The keystroke guards (sendToWindow /
+-- pasteIntoWindow / sendKeys) skip injection on a miss -- activating the app
+-- there would yank the user's focus to the editor and abandon it (their typing
+-- lands in the wrong app, and the early return never restores prev focus).
+local function focusProject(name, cwd, editor, activateOnMiss)
   print("[cc-dashboard] focus request: " .. tostring(name))
-  local app = findEditorApp()
+  local app = findEditorApp(editor)
   if not app then
     print("[cc-dashboard] editor app not found")
     hs.alert.show("No editor window found")
@@ -193,8 +214,12 @@ local function focusProject(name, cwd)
       end
     end
   end
-  app:activate()
-  print("[cc-dashboard] no title match for '" .. tostring(name) .. "', activated app")
+  if activateOnMiss then
+    app:activate()
+    print("[cc-dashboard] no title match for '" .. tostring(name) .. "', activated app")
+  else
+    print("[cc-dashboard] no title match for '" .. tostring(name) .. "' (focus left untouched)")
+  end
   return false
 end
 
@@ -419,7 +444,27 @@ function FX.writeQueue(key, q)
   hs.fs.mkdir(QUEUE_DIR)
   FX.writeFile(QUEUE_DIR .. "/" .. key .. ".json", core.json.encode(q))
 end
-function FX.feedTask(target, task) FX.typeIntoWindow(target, task) end
+function FX.removeQueue(key) os.remove(QUEUE_DIR .. "/" .. key .. ".json") end
+-- Resolve a session's queue file key (project-stable via core.queueKey, so a
+-- respawned or /clear'd session inherits its project's pending tasks), adopting
+-- any legacy session-keyed queue file left from before queues were project-keyed:
+-- its tasks are merged under the project key once and the legacy file removed.
+function FX.queueKeyFor(item)
+  local qk = core.queueKey(item)
+  local legacy = item and item.key
+  if qk and legacy and legacy ~= qk then
+    local old = FX.readQueue(legacy)
+    if core.queueDepth(old) > 0 then
+      FX.writeQueue(qk, core.queueMerge(FX.readQueue(qk), old))
+      FX.removeQueue(legacy)
+      print("[cc-queue] adopted legacy session queue " .. legacy .. " -> " .. qk)
+    end
+  end
+  return qk or legacy
+end
+-- Returns whether the task was actually delivered (false = the no-window-match
+-- guard skipped the paste); callers must NOT pop the queue on a skip.
+function FX.feedTask(target, task) return FX.typeIntoWindow(target, task) end
 
 -- Persistent relabels (F1): a JSON map of project path (cwd) -> override name.
 -- Missing/garbled file -> empty map (no labels). Mirrors the queue I/O above.
@@ -488,7 +533,8 @@ end
 
 -- Read + parse + filter the ledger. opts = { session, sinceTs, untilTs, types,
 -- limit }. Caps the slice (newest-first) so a huge ledger can't bloat the webview
--- payload. Returns { events, files, truncated, ts }.
+-- payload; limit <= 0 disables the cap (the export/review full-data paths).
+-- Returns { events, files, truncated, ts }.
 function FX.readLedger(opts)
   opts = opts or {}
   local files = {}
@@ -503,12 +549,7 @@ function FX.readLedger(opts)
       for _, e in ipairs(core.parseLedger(text)) do events[#events + 1] = e end
     end
   end
-  local filtered = core.filterLedger(events, opts)
-  local cap, truncated = opts.limit or 2000, false
-  if #filtered > cap then
-    local t = {}; for i = 1, cap do t[i] = filtered[i] end
-    filtered, truncated = t, true
-  end
+  local filtered, truncated = core.capLedgerSlice(core.filterLedger(events, opts), opts.limit)
   return { events = filtered, files = files, truncated = truncated, ts = FX.now() }
 end
 
@@ -538,8 +579,11 @@ function FX.redactLedger(day, id, fields)
 end
 
 -- Purge events. filter.all removes every daily file; otherwise { session, sinceTs,
--- untilTs } rewrites each file dropping matches. Logs a `purge` tombstone with the
--- count removed (appended AFTER the rewrite so it survives). Returns the count.
+-- untilTs, types } rewrites each file dropping matches. The match is delegated to
+-- core.splitLedgerEvents (which reuses filterLedger), so purge honors the EXACT
+-- filter the audit UI confirmed -- including `types` -- never a superset. Logs a
+-- `purge` tombstone with the count removed (appended AFTER the rewrite so it
+-- survives). Returns the count.
 function FX.purgeLedger(filter)
   filter = filter or {}
   local removed = 0
@@ -549,24 +593,30 @@ function FX.purgeLedger(filter)
   end
   for _, fn in ipairs(files) do
     local path = LEDGER_DIR .. "/" .. fn
-    local events = core.parseLedger(FX.readFile(path) or "")
+    local before = FX.readFile(path) or ""
+    local events = core.parseLedger(before)
     if filter.all then
       removed = removed + #events
       os.remove(path)
     else
+      local keptEvents, purged = core.splitLedgerEvents(events, filter)
+      local hits = #purged
       local kept = {}
-      for _, e in ipairs(events) do
-        local match = true
-        if filter.session and e.session_id ~= filter.session then match = false end
-        if match and filter.sinceTs and (tonumber(e.ts) or 0) < filter.sinceTs then match = false end
-        if match and filter.untilTs and (tonumber(e.ts) or 0) > filter.untilTs then match = false end
-        if match then removed = removed + 1 else kept[#kept + 1] = core.json.encode(e) end
-      end
-      local tmp = path .. ".tmp." .. tostring(FX.now())
-      local f = io.open(tmp, "w")
-      if f then
-        f:write(#kept > 0 and (table.concat(kept, "\n") .. "\n") or "")
-        f:close(); os.rename(tmp, path)
+      for _, e in ipairs(keptEvents) do kept[#kept + 1] = core.json.encode(e) end
+      -- Nothing matched -> leave the file alone: a pointless rewrite of today's
+      -- hot file would race a concurrent hook append (O_APPEND) and destroy it.
+      if hits > 0 then
+        removed = removed + hits
+        local tmp = path .. ".tmp." .. tostring(FX.now())
+        local f = io.open(tmp, "w")
+        if f then
+          f:write(#kept > 0 and (table.concat(kept, "\n") .. "\n") or "")
+          -- Carry over any bytes a hook appended since our read (today's file is
+          -- hot), so the rename can't silently drop a fresh audit event.
+          local tail = (FX.readFile(path) or ""):sub(#before + 1)
+          if tail ~= "" then f:write(tail) end
+          f:close(); os.rename(tmp, path)
+        end
       end
     end
   end
@@ -592,20 +642,19 @@ function FX.expireLedger()
   for _, fn in ipairs(expired) do
     os.remove(LEDGER_DIR .. "/" .. fn); removed[#removed + 1] = fn; expiredSet[fn] = true
   end
-  -- 2) total-size cap, oldest first
+  -- 2) total-size cap, oldest first (pure decision in cc-core; never selects the
+  -- newest file, so the hot current day's audit trail can't be cap-deleted)
   local capMB = tonumber(core.config(cfg, "ledger.maxTotalMB", 0)) or 0
   if capMB > 0 then
     local live = {}
     for _, fn in ipairs(files) do if not expiredSet[fn] then live[#live + 1] = fn end end
     table.sort(live)  -- oldest first by name
-    local function fsize(fn)
-      local a = hs.fs.attributes(LEDGER_DIR .. "/" .. fn); return (a and a.size) or 0
+    local sizes = {}
+    for _, fn in ipairs(live) do
+      local a = hs.fs.attributes(LEDGER_DIR .. "/" .. fn); sizes[fn] = (a and a.size) or 0
     end
-    local total = 0; for _, fn in ipairs(live) do total = total + fsize(fn) end
-    local capBytes, i = capMB * 1024 * 1024, 1
-    while total > capBytes and i <= #live do
-      total = total - fsize(live[i])
-      os.remove(LEDGER_DIR .. "/" .. live[i]); removed[#removed + 1] = live[i]; i = i + 1
+    for _, fn in ipairs(core.ledgerCapVictims(live, sizes, capMB * 1024 * 1024)) do
+      os.remove(LEDGER_DIR .. "/" .. fn); removed[#removed + 1] = fn
     end
   end
   if #removed == 0 then return end
@@ -749,6 +798,11 @@ function FX.push(topic, title, msg)
   end)
 end
 
+-- Forward-declared; defined next to the injection tail below. FX.runImprove's
+-- async HTTP callback dispatches a paste chain, and every window-keystroke
+-- dispatch must reserve a slot on the SHARED injection tail (R3 #2/#5).
+local dispatchSerialized
+
 -- Improve button: pull this repo's un-applied leaderboard improvement cards and,
 -- instead of applying them wholesale (what /improve does), inject a REVIEW-first
 -- prompt into the session so the user approves suggestions before any edits.
@@ -813,8 +867,17 @@ function FX.runImprove(item)
       -- scope here; this mirrors its shape for the kitty/VS Code injection routing).
       local target = { name = item.name, cwd = item.cwd, editor = item.editor,
                        kittyWindowId = item.kitty_window_id, kittyListenOn = item.kitty_listen_on }
-      FX.pasteIntoWindow(target, { text = core.improvePrompt(cards) })
-      hs.alert.show("Improve: pulled " .. #cards .. " insight(s) → review prompt sent to " .. tostring(item.name))
+      -- pasteIntoWindow reports delivery (false = no positive window match); the
+      -- cards are already claimed server-side, so a skipped paste must not be
+      -- announced as "sent" -- surface it so the user can re-run from the window.
+      -- Serialized: the paste is a multi-second keystroke ladder (R3 #2/#5).
+      dispatchSerialized(item, "improve", function()
+        if FX.pasteIntoWindow(target, { text = core.improvePrompt(cards) }) then
+          hs.alert.show("Improve: pulled " .. #cards .. " insight(s) → review prompt sent to " .. tostring(item.name))
+        else
+          hs.alert.show("Improve: no window match for " .. tostring(item.name) .. " — prompt NOT sent (cards claimed)")
+        end
+      end)
     end)
 end
 
@@ -845,9 +908,44 @@ end
 
 function FX.removeStatus(key) os.remove(STATUS_DIR .. "/" .. key .. ".json") end
 
+-- Merge fields into a session's status file (optimistic local patch -- e.g. the
+-- new permission_mode after set-mode, which fires no hook). temp+mv is atomic so
+-- the shell side never reads a half-written file; the next hook write wins.
+function FX.patchStatus(key, fields)
+  local path = STATUS_DIR .. "/" .. key .. ".json"
+  local text = core.patchedStatus(FX.readFile(path) or "", fields)
+  if not text then return false end
+  local tmp = path .. ".tmp." .. tostring(FX.now())
+  local f = io.open(tmp, "w"); if not f then return false end
+  f:write(text); f:close()
+  if not os.rename(tmp, path) then os.remove(tmp); return false end
+  return true
+end
+
+-- temp+mv is atomic, so cc-approve's exists-then-read poll can never observe the
+-- decision file created but still empty (io.open("w") creates it BEFORE the
+-- content lands at close) -- an empty read would fall through to the native
+-- prompt and discard the user's click. Same idiom as FX.patchStatus / cc_merge.
+-- The pending request's nonce (cc-approve.sh publishes it in the status JSON's
+-- pending block) is echoed into the content ("allow <nonce>") so the gate
+-- consumes this answer ONLY for the request it was clicked for: a leftover from
+-- a double-click can no longer answer the NEXT gated call (mtime alone has
+-- 1-second granularity and can't bind answers to requests). Read from disk, not
+-- the panel snapshot -- the file is fresher than the last refresh. No nonce
+-- (older hook still deployed) -> legacy bare verb, which the gate accepts only
+-- on a strictly-newer mtime.
 function FX.writeDecision(key, value)
-  FX.writeFile(STATUS_DIR .. "/" .. key .. ".decision", value)
-  print("[cc-dashboard] decision " .. tostring(value) .. " -> " .. tostring(key))
+  local path = STATUS_DIR .. "/" .. key .. ".decision"
+  local okj, st = pcall(function()
+    return core.json.decode(FX.readFile(STATUS_DIR .. "/" .. key .. ".json") or "")
+  end)
+  local nonce = okj and type(st) == "table" and type(st.pending) == "table"
+    and type(st.pending.nonce) == "string" and st.pending.nonce ~= "" and st.pending.nonce
+  local content = nonce and (value .. " " .. nonce) or value
+  local tmp = path .. ".tmp." .. tostring(FX.now())
+  local f = io.open(tmp, "w")
+  if f then f:write(content); f:close(); os.rename(tmp, path) end
+  print("[cc-dashboard] decision " .. tostring(content) .. " -> " .. tostring(key))
 end
 
 -- ---- Kitty effect routing (Part A): run effects headlessly via `kitty @` ----
@@ -876,7 +974,9 @@ end
 
 function FX.focusWindow(target)
   if isKitty(target) then return runKitty(core.kittyCmd("focus", kittyItem(target))) end
-  return focusProject(target.name, target.cwd)
+  -- Jump is an explicit "take me there": raising the app on a title miss is
+  -- still useful. The keystroke paths pass false (a miss must disturb nothing).
+  return focusProject(target.name, target.cwd, target.editor, true)
 end
 
 -- hs.timer.doAfter returns a timer that, if nothing references it, can be GC'd
@@ -894,10 +994,42 @@ local function after(delay, fn)
   return pendingTimers[id]
 end
 
+-- Absolute deadline (epoch s) of the LAST scheduled window-keystroke injection
+-- chain. Module-level so the BULK_STAGGER serialization holds across bridge
+-- messages, not just within one: a second bulk click -- or a single window
+-- action arriving during the stagger window -- reserves the next slot via
+-- core.staggerSlot and queues AFTER the in-flight chains instead of
+-- interleaving with them (which lands keys in the wrong session).
+local injectionTailAt = 0
+
+-- THE chokepoint for dispatching session actions (R3 #2/#5: every window-
+-- keystroke launcher must serialize, not just the bulk loop + per-tile tail).
+-- Headless dispatches (kitty @ remote / armed-gate decision-file writes) fire
+-- NOW; everything else focuses a window and injects keystrokes on after()
+-- timers, so it reserves the next slot on the shared injection tail -- chains
+-- launched from ANY site (bulk, per-tile, ctx-menu, refresh()'s drain close /
+-- queue auto-feed, Stream Deck, hotkeys, Improve, audit review) queue behind
+-- the in-flight ones instead of interleaving (keys land in the wrong session).
+-- (Assigned to the local forward-declared above FX.runImprove, whose async
+-- callback needs it before this line runs.)
+function dispatchSerialized(item, action, fn)
+  if core.actionIsHeadless(item, action) then fn() return end
+  local delay
+  delay, injectionTailAt = core.staggerSlot(injectionTailAt, hs.timer.secondsSinceEpoch(), BULK_STAGGER)
+  if delay > 0 then after(delay, fn) else fn() end
+end
+
 -- Focus a window, then send after a short delay, then restore prior focus.
-local function sendToWindow(name, sendFn)
+-- Takes the full target so focusProject gets the cwd (its subfolder-session
+-- ancestor matching) and the editor kind. If the window can't be POSITIVELY
+-- identified, the keys are SKIPPED: typing into whatever happens to be
+-- frontmost answers/closes a different session.
+local function sendToWindow(target, sendFn)
   local prev = RESTORE_FOCUS and hs.window.focusedWindow() or nil
-  focusProject(name)
+  if not focusProject(target.name, target.cwd, target.editor) then
+    print("[cc-dashboard] no window match for '" .. tostring(target.name) .. "' -- keys NOT sent")
+    return
+  end
   after(FOCUS_DELAY, function()
     pcall(sendFn)
     if prev then
@@ -911,7 +1043,7 @@ function FX.actOnWindow(target, keySpec)
   if isKitty(target) then
     return runKitty(core.kittyCmd("key", kittyItem(target), { token = core.kittyKeyToken(keySpec) }))
   end
-  sendToWindow(target.name, function() hs.eventtap.keyStroke(keySpec.mods, keySpec.key) end)
+  sendToWindow(target, function() hs.eventtap.keyStroke(keySpec.mods, keySpec.key) end)
 end
 
 -- Focus a window, run the (timer-driven) injection sequence, and ONLY restore the
@@ -954,13 +1086,19 @@ function FX.pasteIntoWindow(target, payload)
   local isSlash = payload.text ~= nil and payload.text:match("^/") ~= nil
   local prevClip = hs.pasteboard.readString()  -- best-effort restore (text only)
   local prevWin = RESTORE_FOCUS and hs.window.focusedWindow() or nil
-  focusProject(name)
+  if not focusProject(name, target.cwd, target.editor) then
+    print("[cc-dashboard] no window match for '" .. tostring(name) .. "' -- paste NOT sent")
+    return false  -- callers must be able to tell a skip from a delivery (queue pop gates on it)
+  end
+  -- The ⌘1/⌘Esc chat-focus dance is VS Code-only; in a terminal typing goes
+  -- straight to the prompt and those chords would be wrong (see FOCUS_CHAT_KEY).
+  local chatKeys = target.editor ~= "terminal"
   after(FOCUS_DELAY, function()
     -- Focus the editor group first so the ⌘Esc chat-input toggle is deterministic
     -- (always unfocused -> focused, never the reverse). Then focus the chat input.
-    if FOCUS_EDITOR_KEY then hs.eventtap.keyStroke(FOCUS_EDITOR_KEY[1], FOCUS_EDITOR_KEY[2]) end
-    after(FOCUS_EDITOR_KEY and 0.06 or 0, function()
-      if FOCUS_CHAT_KEY then hs.eventtap.keyStroke(FOCUS_CHAT_KEY[1], FOCUS_CHAT_KEY[2]) end
+    if chatKeys and FOCUS_EDITOR_KEY then hs.eventtap.keyStroke(FOCUS_EDITOR_KEY[1], FOCUS_EDITOR_KEY[2]) end
+    after((chatKeys and FOCUS_EDITOR_KEY) and 0.06 or 0, function()
+      if chatKeys and FOCUS_CHAT_KEY then hs.eventtap.keyStroke(FOCUS_CHAT_KEY[1], FOCUS_CHAT_KEY[2]) end
       after(0.12, function()
         -- Build the paste steps: image first (becomes an attachment), then text.
         local steps = {}
@@ -997,6 +1135,7 @@ function FX.pasteIntoWindow(target, payload)
       end)
     end)
   end)
+  return true  -- window positively matched; the injection sequence is scheduled
 end
 
 -- Best-effort close the editor window for a session: focus it, then send the
@@ -1006,25 +1145,32 @@ end
 function FX.closeWindow(target)
   if isKitty(target) then return runKitty(core.kittyCmd("close", kittyItem(target))) end
   print("[cc-dashboard] close window -> " .. tostring(target.name))
-  sendToWindow(target.name, function() hs.eventtap.keyStroke({ "cmd", "shift" }, "w") end)
+  sendToWindow(target, function() hs.eventtap.keyStroke({ "cmd", "shift" }, "w") end)
 end
 
 -- Drive a sequence of keystrokes into a session (e.g. arrow-down ×N + Return to
 -- pick an AskUserQuestion option). Focus first, send each key with a small gap,
 -- restore prior focus only AFTER the last key (same race-safe pattern as paste).
+-- Returns false when nothing was dispatched (no window match / dead kitty
+-- target), true when the chain was scheduled: set-mode only re-bases the stored
+-- permission_mode on a REAL dispatch, so a skip can't make the panel lie.
 function FX.sendKeys(target, keys)
   keys = keys or {}
-  -- kitty: one headless send-key per key (no focus); used by answer + set-mode.
+  -- kitty: ONE headless send-key carrying every token (answer + set-mode). One
+  -- process per key would race to the control socket -- the OS can deliver them
+  -- out of order, so down/.../return could confirm the WRONG picker option.
   if isKitty(target) then
-    for _, k in ipairs(keys) do
-      runKitty(core.kittyCmd("key", kittyItem(target), { token = core.kittyKeyToken(k) }))
-    end
-    return
+    local tokens = {}
+    for _, k in ipairs(keys) do tokens[#tokens + 1] = core.kittyKeyToken(k) end
+    return runKitty(core.kittyCmd("key", kittyItem(target), { tokens = tokens }))
   end
   local name = target.name
   print("[cc-dashboard] send keys -> " .. tostring(name) .. " (" .. #keys .. " keys)")
   local prevWin = RESTORE_FOCUS and hs.window.focusedWindow() or nil
-  focusProject(name)
+  if not focusProject(name, target.cwd, target.editor) then
+    print("[cc-dashboard] no window match for '" .. tostring(name) .. "' -- keys NOT sent")
+    return false
+  end
   after(FOCUS_DELAY, function()
     local function step(i)
       if i > #keys then
@@ -1037,6 +1183,7 @@ function FX.sendKeys(target, keys)
     end
     step(1)
   end)
+  return true  -- window positively matched; the key chain is scheduled
 end
 
 -- Decode a base64 image payload to a temp file and return its path (Step 5).
@@ -1061,7 +1208,9 @@ local function spawnEditorWindow(spec)
   local proj = spec.project
   local name = proj and proj:match("([^/]+)/?$") or nil
   after(2.0, function() pcall(function()
-    focusProject(name, proj)
+    -- The just-opened window may not be titled yet: activating the app on a
+    -- title miss IS the desired behavior here (the keystrokes must land in it).
+    focusProject(name, proj, nil, true)
     after(0.5, function()
       -- New integrated terminal via the Command Palette (more reliable than ⌃`,
       -- which would hide an already-open terminal).
@@ -1095,11 +1244,11 @@ end
 function FX.spawnSession(editor, project, task, permissionMode, providerId)
   local cfg = loadConfig()
   editor = (editor and editor ~= "") and editor or core.config(cfg, "spawn.editor", "terminal")
-  -- Resolve the provider profile (explicit pick, else the spawn.provider default).
-  -- A missing/unknown profile leaves env/model nil -> bare `claude`, unchanged.
-  local providerKey = (providerId and providerId ~= "") and providerId
-    or core.config(cfg, "spawn.provider", nil)
-  local profile = core.providerById(cfg, providerKey)
+  -- Resolve the provider profile. "" is an EXPLICIT "(none — bare claude)" pick;
+  -- only nil (no pick at all) falls back to the spawn.provider default (pure
+  -- resolution in cc-core). A missing/unknown profile leaves env/model nil ->
+  -- bare `claude`, unchanged.
+  local profile = core.providerById(cfg, core.spawnProviderKey(cfg, providerId))
   local opts = {
     terminal       = ORCH_TERMINAL,
     kittyBin       = resolveBin("kitty", core.config(cfg, "spawn.kittyBin", nil)),
@@ -1229,10 +1378,10 @@ local function handleBridgeMsg(msg)
       if type(incoming.gate) == "table" then incoming.gate.tools = core.parseToolList(incoming.gate.tools) end
       -- Overlay the Settings-managed keys onto the EXISTING config rather than
       -- replacing the whole file, so hand-edited top-level blocks the UI doesn't
-      -- expose (risk / collision / drain / respawn / insights, spawn.kittyBin…)
-      -- survive a Save.
-      local cfg = loadConfig()
-      for k, v in pairs(incoming) do cfg[k] = v end
+      -- expose (risk / collision / drain / respawn / insights) survive a Save --
+      -- including the UI-unmanaged subkeys inside rebuilt blocks (spawn.kittyBin/
+      -- kittySocket, escalation.hung), carried forward by core.overlayConfig.
+      local cfg = core.overlayConfig(loadConfig(), incoming)
       FX.writeFile(CONFIG_FILE, hs.json.encode(cfg, true))  -- creates if missing
       if parsed.gate == true then FX.writeFile(GATE_FLAG, "")
       else os.remove(GATE_FLAG) end
@@ -1278,7 +1427,9 @@ local function handleBridgeMsg(msg)
     if mode == "new" then
       dir = core.newProjectPath(tostring(payload.parent or ""), tostring(payload.name or ""))
       if not dir then
-        pcall(function() hs.alert.show("Claude Shepherd: invalid project name") end)
+        -- nil = unsafe name OR a blank/relative parent (newProjectPath rejects both;
+        -- a relative dir would mkdir against Hammerspoon's cwd but cd against $HOME)
+        pcall(function() hs.alert.show("Claude Shepherd: invalid project name or parent folder") end)
         return
       end
       if not FX.mkdirP(dir) then
@@ -1301,8 +1452,10 @@ local function handleBridgeMsg(msg)
     local key = tostring(payload.v or "")
     local task = payload.text and tostring(payload.text) or ""
     if key ~= "" and task ~= "" then
-      FX.writeQueue(key, core.queuePush(FX.readQueue(key), task))
-      print("[cc-queue] queued for " .. key .. ": " .. task)
+      -- queues are PROJECT-keyed (survive respawn//clear); unknown tile -> raw key
+      local qk = byKey[key] and FX.queueKeyFor(byKey[key]) or key
+      FX.writeQueue(qk, core.queuePush(FX.readQueue(qk), task))
+      print("[cc-queue] queued for " .. qk .. ": " .. task)
     end
     return
   end
@@ -1310,11 +1463,22 @@ local function handleBridgeMsg(msg)
     local key = tostring(payload.v or "")
     local item = byKey[key]
     if item then
-      local task, q2 = core.queuePop(FX.readQueue(key))
-      if task then
-        FX.feedTask(winTarget(item), task); FX.writeQueue(key, q2)
-        ledgerFor(item, { type = "task_feed", task = tostring(task):sub(1, 200), by = "manual" })
-      end
+      -- Serialized on the shared injection tail (R3 #2/#5): the paste ladder
+      -- must queue behind in-flight chains. The pop runs INSIDE the slot -- the
+      -- queue is re-read at dispatch time (an earlier slot may have consumed
+      -- the head) and the pop decision still gates on feedTask's synchronous
+      -- delivery result: only a DELIVERED paste pops the queue (persisting q2
+      -- after a skipped paste would silently destroy the task).
+      dispatchSerialized(item, a, function()
+        local qk = FX.queueKeyFor(item)
+        local task, q2 = core.queuePop(FX.readQueue(qk))
+        if task then
+          local commit = core.queueFeedCommit(FX.feedTask(winTarget(item), task))
+          if commit.persist then FX.writeQueue(qk, q2)
+          else print("[cc-queue] feed skipped (no window match) -- task kept queued") end
+          ledgerFor(item, { type = commit.event, task = tostring(task):sub(1, 200), by = "manual" })
+        end
+      end)
     end
     return
   end
@@ -1331,7 +1495,9 @@ local function handleBridgeMsg(msg)
       local s = SPEC[a]
       pcall(function()
         if hs.dialog.blockAlert(s.title, s.msg, "Yes", "Cancel") == "Yes" then
-          FX.typeIntoWindow(winTarget(item), s.cmd)
+          -- Serialized: /clear into the wrong session (an in-flight chain's
+          -- focus) wipes a context that wasn't confirmed (R3 #2/#5).
+          dispatchSerialized(item, a, function() FX.typeIntoWindow(winTarget(item), s.cmd) end)
           ledgerFor(item, { type = a })
         end
       end)
@@ -1424,7 +1590,9 @@ local function handleBridgeMsg(msg)
   end
   if a == "audit-export" then
     local okf, f = pcall(function() return hs.json.decode(payload.text or "{}") end)
-    local res = FX.readLedger((okf and type(f) == "table") and f or {})
+    f = (okf and type(f) == "table") and f or {}
+    f.limit = 0  -- export is the full-data path: NEVER the capped webview slice
+    local res = FX.readLedger(f)
     hs.fs.mkdir(LEDGER_DIR .. "/exports")
     local fname = LEDGER_DIR .. "/exports/audit-" .. os.date("!%Y%m%dT%H%M%SZ") .. ".jsonl"
     local lines = {}
@@ -1436,8 +1604,10 @@ local function handleBridgeMsg(msg)
   if a == "audit-purge" then
     local okf, f = pcall(function() return hs.json.decode(payload.text or "{}") end)
     f = (okf and type(f) == "table") and f or {}
+    -- `types` counts as scope (core.purgeFilterIsScoped): a type-only purge must
+    -- delete just that type, not escalate to f.all = every ledger file.
     local scope
-    if f.session or f.sinceTs or f.untilTs then scope = "events matching the current filter"
+    if core.purgeFilterIsScoped(f) then scope = "events matching the current filter"
     else f.all = true; scope = "ALL recorded events" end
     pcall(function()
       if hs.dialog.blockAlert("Purge audit ledger",
@@ -1453,6 +1623,12 @@ local function handleBridgeMsg(msg)
     local okr, r = pcall(function() return hs.json.decode(payload.text or "{}") end)
     if okr and type(r) == "table" and r.id and r.ts then
       local day = os.date("!%Y-%m-%d", tonumber(r.ts))
+      -- PAST days only (enforcing redactLedger's contract): today's file is hot
+      -- with hook appends, and the rewrite+rename would silently destroy one.
+      if not core.ledgerDayIsPast(day, FX.now()) then
+        pcall(function() hs.alert.show("Claude Shepherd: can't redact today's events yet — try after UTC midnight") end)
+        return
+      end
       local done = FX.redactLedger(day, tostring(r.id), type(r.fields) == "table" and r.fields or {})
       pcall(function()
         if done then
@@ -1473,11 +1649,20 @@ local function handleBridgeMsg(msg)
       pcall(function() hs.alert.show("Claude Shepherd: select a session first, then Review activity") end)
       return
     end
+    f.limit = 0  -- review narrates the FULL filtered history, not the webview slice
     local res = FX.readLedger(f)
     local scope = f.session and ("session " .. tostring(target.name or f.session)) or "all sessions"
     local prompt = core.auditReviewPrompt(core.renderNarrative(res.events), { scope = scope })
-    FX.pasteIntoWindow(winTarget(target), { text = prompt })
-    pcall(function() hs.alert.show("Claude Shepherd: sent a " .. #res.events .. "-event review to " .. tostring(target.name)) end)
+    -- Serialized like every keystroke chain (R3 #2/#5); pasteIntoWindow reports
+    -- delivery (false = no positive window match), so a skipped paste must not
+    -- be announced as sent (R3 #0 -- same contract as the Improve caller).
+    dispatchSerialized(target, a, function()
+      if FX.pasteIntoWindow(winTarget(target), { text = prompt }) then
+        pcall(function() hs.alert.show("Claude Shepherd: sent a " .. #res.events .. "-event review to " .. tostring(target.name)) end)
+      else
+        pcall(function() hs.alert.show("Claude Shepherd: no window match for " .. tostring(target.name) .. " — review NOT sent") end)
+      end
+    end)
     return
   end
   if a == "bulk" then
@@ -1496,7 +1681,13 @@ local function handleBridgeMsg(msg)
     for _, k in ipairs(core.selectActionable(visible, action)) do
       local it = byKey[k]
       if it then
-        core.handleAction(FX, it, action, text)
+        -- Headless targets (kitty / armed-gate decisions) can all fire now. The
+        -- window-keystroke ones focus NOW but inject on after() timers, so a
+        -- synchronous loop would land every session's keys in the LAST-focused
+        -- window -- the chokepoint reserves a slot on the SHARED injection tail
+        -- so each chain finishes before the next, including chains still pending
+        -- from an earlier dispatch (a second bulk click must queue, not interleave).
+        dispatchSerialized(it, action, function() core.handleAction(FX, it, action, text) end)
         ledgerFor(it, { type = "bulk_action", action = action })
         n = n + 1
       end
@@ -1544,7 +1735,7 @@ local function handleBridgeMsg(msg)
         -- using the same reliable pattern as Close (no separate dialog -> no console pop).
         { title = "Clear conversation", menu = {
             { title = "Confirm: clear ALL context for " .. shown, fn = function()
-                FX.typeIntoWindow(winTarget(item), "/clear")
+                dispatchSerialized(item, "clear", function() FX.typeIntoWindow(winTarget(item), "/clear") end)
                 ledgerFor(item, { type = "clear" })
                 refresh()
               end },
@@ -1552,7 +1743,7 @@ local function handleBridgeMsg(msg)
         } },
         { title = "Compact", menu = {
             { title = "Confirm: compact (summarize) " .. shown, fn = function()
-                FX.typeIntoWindow(winTarget(item), "/compact")
+                dispatchSerialized(item, "compact", function() FX.typeIntoWindow(winTarget(item), "/compact") end)
                 ledgerFor(item, { type = "compact" })
                 refresh()
               end },
@@ -1566,7 +1757,8 @@ local function handleBridgeMsg(msg)
             { title = "Confirm: close " .. shown, fn = function()
                 -- Keep the project's persistent label (F1): closing this session
                 -- shouldn't forget the name for the next session in that folder.
-                core.handleAction(FX, item, "close")
+                -- ⌘⇧W is a window keystroke -> serialized (R3 #2/#5).
+                dispatchSerialized(item, "close", function() core.handleAction(FX, item, "close") end)
                 refresh()
               end },
             { title = "Cancel", fn = function() end },
@@ -1583,7 +1775,7 @@ local function handleBridgeMsg(msg)
               ledgerFor(item, { type = "drain_request" })
               pcall(function() hs.alert.show("Claude Shepherd: will close " .. shown .. " after this turn") end)
             else
-              core.handleAction(FX, item, "close")
+              dispatchSerialized(item, "close", function() core.handleAction(FX, item, "close") end)
               refresh()
             end
           end }
@@ -1601,7 +1793,9 @@ local function handleBridgeMsg(msg)
                   pcall(function() hs.alert.show("Claude Shepherd: can't respawn — " .. tostring(rs.reason)) end)
                   return
                 end
-                FX.spawnSession(rs.editor, rs.project, nil, rs.permissionMode, rs.providerId)
+                -- rs.providerId=nil means a FAITHFUL bare-claude relaunch: pass the
+                -- explicit-none sentinel "" so it can't inherit the spawn.provider default.
+                FX.spawnSession(rs.editor, rs.project, nil, rs.permissionMode, rs.providerId or "")
                 ledgerFor(item, { type = "respawn", cwd = rs.project, editor = rs.editor, provider = rs.providerId })
               end },
             { title = "Cancel", fn = function() end },
@@ -1638,8 +1832,10 @@ local function handleBridgeMsg(msg)
   end
   if a == "close" then
     -- Keep the project's persistent label (F1): only an explicit relabel-to-blank
-    -- clears it, not closing a session.
-    core.handleAction(FX, item, "close")
+    -- clears it, not closing a session. ⌘⇧W is a window keystroke, so it must
+    -- reserve a slot like every other chain (R3 #2/#5: this branch used to
+    -- early-return BEFORE the staggered tail below).
+    dispatchSerialized(item, a, function() core.handleAction(FX, item, "close") end)
     refresh()
     return
   end
@@ -1649,8 +1845,19 @@ local function handleBridgeMsg(msg)
     if parsed then
       local path = FX.writeImageTemp(parsed.b64, parsed.ext)
       if path then
-        FX.pasteIntoWindow(winTarget(item), { text = payload.text and tostring(payload.text) or nil, imagePath = path })
-        ledgerFor(item, { type = "nudge", text = tostring(payload.text or ""):sub(1, 200), image = true })
+        -- Serialized (R3 #2/#5), and gated on pasteIntoWindow's delivery status
+        -- (R3 #1): a skipped paste (no window match, or a kitty target -- no
+        -- image attach over `kitty @`) must ledger nudge_skipped, never a
+        -- delivery that didn't happen (same contract as task_feed_skipped),
+        -- and tell the operator instead of dropping the nudge silently.
+        dispatchSerialized(item, a, function()
+          if FX.pasteIntoWindow(winTarget(item), { text = payload.text and tostring(payload.text) or nil, imagePath = path }) then
+            ledgerFor(item, { type = "nudge", text = tostring(payload.text or ""):sub(1, 200), image = true })
+          else
+            ledgerFor(item, { type = "nudge_skipped", text = tostring(payload.text or ""):sub(1, 200), image = true })
+            pcall(function() hs.alert.show("Claude Shepherd: no window match for " .. tostring(item.label or item.name) .. " — nudge NOT sent") end)
+          end
+        end)
       else
         print("[cc-dashboard] image paste: failed to write temp file")
       end
@@ -1668,12 +1875,37 @@ local function handleBridgeMsg(msg)
     ledgerFor(item, { type = "model_change", from = item.model, to = tostring(payload.text or "") })
   elseif a == "effort" then
     ledgerFor(item, { type = "effort_change", from = item.effort, to = tostring(payload.text or "") })
-  elseif a == "nudge" then
-    ledgerFor(item, { type = "nudge", text = tostring(payload.text or ""):sub(1, 200) })
   elseif a == "continue" then
     ledgerFor(item, { type = "continue" })  -- resumed a session frozen on an API error
   end
-  core.handleAction(FX, item, a, payload.text and tostring(payload.text) or nil)
+  local text = payload.text and tostring(payload.text) or nil
+  local function dispatch()
+    local acted = core.handleAction(FX, item, a, text)
+    -- A text nudge is ledgered AFTER dispatch, gated on what was DELIVERED:
+    -- handleAction returns nil when pasteIntoWindow reported a skip (no window
+    -- match), so the audit ledger records nudge_skipped instead of a delivery
+    -- that never happened (R3 #1 -- same contract as task_feed_skipped).
+    if a == "nudge" and text and #text > 0 then
+      ledgerFor(item, { type = (acted == "nudge") and "nudge" or "nudge_skipped",
+                        text = tostring(text):sub(1, 200) })
+    end
+    -- set-mode fires Shift+Tab blind: no hook reports the new mode, so the stored
+    -- permission_mode goes stale, the dropdown snaps back ~1s later, and a re-pick
+    -- would compute the cycle count from the WRONG base (landing past the target).
+    -- Optimistically persist the target mode -- but ONLY on a real dispatch:
+    -- handleAction returns nil when FX.sendKeys reported a skip (window miss /
+    -- dead kitty target), so the panel never claims a mode the session isn't in.
+    -- The next real hook overwrites the optimistic value.
+    if acted == "set-mode" then
+      item.permission_mode = tostring(payload.text or "")
+      FX.patchStatus(item.key, { permission_mode = item.permission_mode })
+    end
+  end
+  -- Window-keystroke actions reserve a slot on the shared injection tail so
+  -- they queue behind any chains still pending (bulk stagger window, or a
+  -- rapid previous per-tile action) instead of interleaving with them;
+  -- headless ones (kitty / armed-gate decisions) fire now.
+  dispatchSerialized(item, a, dispatch)
 end
 -- Wrap the bridge so a stray error in a handler is logged, NOT raised — an
 -- uncaught callback error makes Hammerspoon yank its console over your work.
@@ -1738,7 +1970,8 @@ local function sdOnButton(deck, button, isDown)
   local kind = (held >= SD_LONG_PRESS) and "secondary" or "primary"
   local action = core.resolveGesture(item, kind, { longPressStops = SD_LONG_PRESS_STOPS })
   print("[cc-streamdeck] key " .. button .. " " .. kind .. " -> " .. tostring(action) .. " " .. tostring(key))
-  core.handleAction(FX, item, action)
+  -- An ungated approve/stop is a window keystroke -> serialized (R3 #2/#5).
+  dispatchSerialized(item, action, function() core.handleAction(FX, item, action) end)
 end
 
 -- Begin discovery. Fires for already-connected and hot-plugged devices.
@@ -2733,16 +2966,31 @@ local HTML = [[
     }
     // Read the DOM rows back into PROVIDERS, 1:1 with the cards (blank rows kept so
     // data-i indices stay valid during editing; blanks are dropped only at persist).
+    // Each row MERGES onto its stored entry (via data-i): fields the card doesn't
+    // render (id, ssh, contextLimit, anything future) must survive a Save, and a
+    // stored id is kept as-is — regenerating it from the label would silently break
+    // the spawn.provider default and any hand-edited id. Slugs are only minted for
+    // entries that don't have an id yet (freshly added rows).
     function collectProviders(){
       var out = [];
       document.querySelectorAll("#s-providers .prov").forEach(function(card){
         function v(sel){ var el=card.querySelector(sel); return el? (el.value||"").trim() : ""; }
+        var i = parseInt(card.getAttribute("data-i"), 10);
+        var prev = (!isNaN(i) && PROVIDERS[i]) ? PROVIDERS[i] : {};
+        var p = {}; for(var k in prev){ p[k] = prev[k]; }
         var label = v(".p-label"), model = v(".p-model");
-        var kind = card.querySelector(".p-kind").value;
-        var p = { id: slugify(label) || slugify(model), label: label, kind: kind, model: model };
-        if(kind === "gateway"){
+        p.label = label; p.kind = card.querySelector(".p-kind").value; p.model = model;
+        if(!p.id) p.id = slugify(label) || slugify(model);
+        if(p.kind === "gateway"){
           p.baseUrl = v(".p-baseurl"); p.authTokenEnv = v(".p-authenv");
           p.smallFastModel = v(".p-smallfast"); p.headers = v(".p-headers");
+        } else {
+          // Kind switched (gateway -> claude): drop the gateway-only fields the
+          // merge inherited from the stored entry. A stale baseUrl poisons
+          // respawn matching (providerByModel reads it as a gateway signature),
+          // silently relaunching the session as bare `claude` on the wrong model.
+          delete p.baseUrl; delete p.authTokenEnv;
+          delete p.smallFastModel; delete p.headers;
         }
         out.push(p);
       });
@@ -2750,11 +2998,16 @@ local HTML = [[
       return out;
     }
     function nonBlankProviders(){ return collectProviders().filter(function(p){ return p.label || p.model; }); }
-    // Populate the default-provider select from the (non-blank) providers, keeping the choice.
+    // Populate the default-provider select from the (non-blank) providers. `want`
+    // is the value to select: showSettings passes the SAVED spawn.provider ("" =
+    // bare claude) and the add/remove callers pass the live DOM value explicitly.
+    // No sel.value fallback: the saved "" sentinel is falsy, so falling back to
+    // the stale DOM would resurrect a CANCELLED pick on the next open -- and any
+    // Save (incl. the auto-persisting Headless toggle) would silently persist it.
     function refreshProviderDefault(want){
       var list = nonBlankProviders();
       var sel = document.getElementById("s-spawn-provider");
-      want = want || sel.value || "";
+      want = want || "";
       sel.innerHTML = '<option value="">(none — bare claude)</option>';
       list.forEach(function(p){
         if(!p.id) return;
@@ -3672,6 +3925,30 @@ function loadConfig()
   return (ok and type(t) == "table") and t or {}
 end
 
+-- Risk-scoring ledger snapshot, cached across refreshes: refresh() runs at 1 Hz
+-- (timer + pathwatcher), and re-reading + re-JSON-parsing the whole ledger
+-- directory every tick burns the Hammerspoon main thread. Re-read only when a
+-- daily file's size/mtime changes (cheap hs.fs.attributes scan; hooks append
+-- out-of-process) or the 30s TTL backstop expires (core.ledgerCacheStale).
+local riskLedgerCache = {}
+local function riskLedgerEvents()
+  local parts = {}
+  for _, fn in ipairs(FX.readDir(LEDGER_DIR)) do
+    if fn:match("%.jsonl$") then
+      local a = hs.fs.attributes(LEDGER_DIR .. "/" .. fn)
+      parts[#parts + 1] = fn .. ":" .. tostring(a and a.size or "?")
+        .. ":" .. tostring(a and a.modification or "?")
+    end
+  end
+  table.sort(parts)  -- readDir order isn't guaranteed; the signature must be stable
+  local sig = table.concat(parts, ";")
+  local now = FX.now()
+  if core.ledgerCacheStale(riskLedgerCache, sig, now, 30) then
+    riskLedgerCache = { events = FX.readLedger({}).events, sig = sig, ts = now }
+  end
+  return riskLedgerCache.events
+end
+
 -- Push current statuses into the webview + deck; run queue auto-feed and
 -- stale-approval escalation; keep the heartbeat fresh.
 function refresh()
@@ -3690,6 +3967,11 @@ function refresh()
   local drainOn    = core.config(cfg, "drain.enabled", false) == true
   local autoRespawnOn  = core.config(cfg, "respawn.auto.enabled", false) == true
   local autoRespawnMax = tonumber(core.config(cfg, "respawn.auto.maxRetries", 3)) or 3
+  -- The respawn death threshold is deliberately MUCH larger than the 90s display
+  -- staleness: no hook fires mid-tool-call, so a healthy session running one long
+  -- build/test (Bash tool timeout: default 120s, max 600s) freezes its status file
+  -- at `working` for minutes. Default 600s sits above that ceiling.
+  local autoRespawnStale = tonumber(core.config(cfg, "respawn.auto.staleSeconds", 600)) or 600
   local collEnabled = core.config(cfg, "collision.enabled", false) == true
   local collGitRoot = core.config(cfg, "collision.useGitRoot", false) == true
   local riskEnabled = core.config(cfg, "risk.enabled", false) == true
@@ -3697,10 +3979,12 @@ function refresh()
     weights    = core.config(cfg, "risk.weights", nil),
     thresholds = core.config(cfg, "risk.thresholds", nil),
   } or nil
-  -- Read the ledger ONCE per refresh for risk scoring (not per tile).
-  local ledgerEvents = riskEnabled and FX.readLedger({}).events or nil
+  -- Risk scoring reads the CACHED ledger snapshot (not per tile, and not a full
+  -- re-parse per tick -- see riskLedgerEvents above).
+  local ledgerEvents = riskEnabled and riskLedgerEvents() or nil
   local now = FX.now()
   local newPrev = {}  -- key -> { status, stale, escalated }: rebuilt this refresh, swapped in below
+                      -- (.stale = frozen past the RESPAWN threshold, not display staleness)
 
   -- Collision detection (Feature B): flag tiles where 2+ active sessions share a
   -- working dir / git-root. Computed once over the whole list before the tile loop.
@@ -3783,23 +4067,49 @@ function refresh()
       draining[it.key] = nil
       print("[cc-drain] " .. it.name .. " finished its turn -> closing")
       ledgerFor(it, { type = "drain_close" })
-      core.handleAction(FX, it, "close")
+      -- Serialized (R3 #2): two drains firing in the same refresh tick would
+      -- otherwise both schedule ⌘⇧W chords against the LAST-focused window.
+      dispatchSerialized(it, "close", function() core.handleAction(FX, it, "close") end)
       drained = true
     end
+    -- Drain badge: surface the armed in-memory intent on the tile. Set AFTER the
+    -- shouldDrainClose block (which clears the flag when it fires) so a tile whose
+    -- drain just fired doesn't render a stale badge on its final frame.
+    it.draining = core.drainingBadge(drainOn, draining[it.key] ~= nil)
 
-    -- Task queue: depth badge + auto-feed on a fresh done transition.
-    local q = FX.readQueue(it.key)
+    -- Task queue: depth badge + auto-feed on a fresh done transition. Stale tiles
+    -- are never fed (same invariant as selectActionable: a dead window can't act --
+    -- the paste would land in whatever window the editor happens to focus).
+    -- Queues are PROJECT-keyed (FX.queueKeyFor) so a respawned or /clear'd session
+    -- inherits its project's pending tasks instead of stranding them on disk.
+    local qk = FX.queueKeyFor(it)
+    local q = FX.readQueue(qk)
     it.queue = core.queueDepth(q)
-    if not drained and core.shouldFeed(pv and pv.status, it.status, q, autofeed) then
-      local task, q2 = core.queuePop(q)
+    if not drained and not it.stale and core.shouldFeed(pv and pv.status, it.status, q, autofeed) then
       if queueDry then
+        local task = core.queuePop(q)
         print("[cc-queue] DRY-RUN would feed '" .. tostring(task) .. "' to " .. it.name)
       else
-        print("[cc-queue] feeding '" .. tostring(task) .. "' to " .. it.name)
-        FX.feedTask(winTarget(it), task)
-        FX.writeQueue(it.key, q2)
-        it.queue = core.queueDepth(q2)
-        ledgerFor(it, { type = "task_feed", task = tostring(task):sub(1, 200), by = "autofeed" })
+        -- Serialized on the shared injection tail (R3 #2): the paste is a
+        -- multi-second keystroke ladder, and refresh() firing it mid-chain
+        -- would land the task text in whichever session holds focus. The pop
+        -- runs INSIDE the slot -- the queue is re-read at dispatch time (a
+        -- manual feed may have consumed the head while this slot waited) --
+        -- and only a DELIVERED paste pops the queue (FX.feedTask returns false
+        -- when the no-window-match guard skipped it).
+        dispatchSerialized(it, "queue-feed", function()
+          local task, q2 = core.queuePop(FX.readQueue(qk))
+          if not task then return end
+          print("[cc-queue] feeding '" .. tostring(task) .. "' to " .. it.name)
+          local commit = core.queueFeedCommit(FX.feedTask(winTarget(it), task))
+          if commit.persist then
+            FX.writeQueue(qk, q2)
+            it.queue = core.queueDepth(q2)
+          else
+            print("[cc-queue] feed skipped (no window match) -- task kept queued")
+          end
+          ledgerFor(it, { type = commit.event, task = tostring(task):sub(1, 200), by = "autofeed" })
+        end)
       end
     end
 
@@ -3843,9 +4153,9 @@ function refresh()
     if core.watchdogShouldReset(it.status, it.stale) then watchdog[it.key] = nil end
 
     -- Auto-respawn (opt-in): relaunch a session that died unexpectedly. cc-core owns
-    -- the bookkeeping (per-folder budget: reset when healthy, increment when firing;
-    -- the projectKey is folded into the gate so a keyless tile can't nil-key write).
-    -- Compute respawnSpec first so cc-core can charge the budget ONLY on a real
+    -- the bookkeeping (per-folder budget: reset after SUSTAINED health, increment when
+    -- firing; the projectKey is folded into the gate so a keyless tile can't nil-key
+    -- write). Compute respawnSpec first so cc-core can charge the budget ONLY on a real
     -- relaunch (an un-respawnable death shouldn't burn a retry). respawnSpec is pure
     -- and cheap, and only computed while the feature is on.
     local rs = autoRespawnOn and core.respawnSpec(it, cfg) or nil
@@ -3854,7 +4164,12 @@ function refresh()
       -- Continue (same session/context), not a fresh respawn.
       enabled = autoRespawnOn and it.status ~= "error", maxRetries = autoRespawnMax,
       intentional = (draining[it.key] ~= nil) or drained,
-      wasStale = (pv and pv.stale) or false,
+      -- nil pv = NO prior observation (first refresh after a reload, prev is in-memory):
+      -- treat it as already-frozen so a reload can't mass-fire a "fresh" edge for every
+      -- currently-frozen tile -- edges require a real prior observation.
+      wasStale = (pv == nil) or (pv.stale == true),
+      now = now, staleSeconds = STALE_SECONDS,  -- for the sustained-health budget reset
+      respawnStaleSeconds = autoRespawnStale,   -- the (much larger) death threshold
       -- strict boolean (fail-closed): a nil/absent canRespawn must NOT read as
       -- "respawnable" via stepAutoRespawn's permissive `~= false` default.
       canRespawn = rs ~= nil and rs.canRespawn == true })
@@ -3863,7 +4178,9 @@ function refresh()
         .. " (attempt " .. tostring(step.attempts) .. "/" .. autoRespawnMax .. ")")
       ledgerFor(it, { type = "auto_respawn", cwd = rs.project, editor = rs.editor,
         provider = rs.providerId, attempt = step.attempts })
-      FX.spawnSession(rs.editor, rs.project, nil, rs.permissionMode, rs.providerId)
+      -- rs.providerId=nil = faithful bare claude: "" (explicit none) so the relaunch
+      -- can't silently pick up the spawn.provider default gateway.
+      FX.spawnSession(rs.editor, rs.project, nil, rs.permissionMode, rs.providerId or "")
       FX.removeStatus(it.key)  -- drop the dead tile; the relaunch makes a fresh one
     elseif step.wouldFire and rs and not rs.canRespawn then
       print("[cc-respawn] " .. tostring(it.name) .. " died but isn't respawnable: " .. tostring(rs.reason))
@@ -3914,7 +4231,8 @@ local function bindHotkeys()
     if it then
       if opts.remember then lastJumpKey = it.key end
       print("[cc-hotkey] " .. label .. " -> " .. tostring(it.name))
-      core.handleAction(FX, it, action)
+      -- approve-front sends a window keystroke -> serialized (R3 #2/#5).
+      dispatchSerialized(it, action, function() core.handleAction(FX, it, action) end)
     elseif opts.alertNone then
       hs.alert.show("Claude Shepherd: nothing waiting")
     end
@@ -3943,9 +4261,15 @@ hs.fs.mkdir(STATUS_DIR)
 labels = FX.loadLabels()
 groups = FX.loadGroups()
 
--- Poll on a timer, and also react instantly to file changes.
+-- Poll on a timer, and also react instantly to file changes. The watcher must
+-- ignore the panel's OWN heartbeat (refresh writes .panel-alive into this dir
+-- every tick) or each refresh would trigger the next one forever (pure check
+-- in cc-core; the heartbeat can't move out of STATUS_DIR -- cc-approve reads it
+-- there).
 M.timer = hs.timer.doEvery(POLL_SECONDS, refresh)
-M.watcher = hs.pathwatcher.new(STATUS_DIR, function() refresh() end):start()
+M.watcher = hs.pathwatcher.new(STATUS_DIR, function(paths)
+  if core.watcherShouldRefresh(paths) then refresh() end
+end):start()
 -- Token usage (local, zero API cost): recompute fleet/per-session/window every 60s.
 M.usageTimer = hs.timer.doEvery(60, function() pcall(FX.computeUsage) end)
 -- Official plan-usage window (metadata call, no model tokens): refresh every 180s.

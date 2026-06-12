@@ -58,9 +58,18 @@ ev sessionstart "{\"session_id\":\"t2\",\"cwd\":\"/other/my-project\"}"
 count="$(ls -1 "$TMP"/*.json | wc -l | tr -d ' ')"
 assert_eq "distinct session_ids -> distinct files" "2" "$count"
 
-# sessionend removes the file
+# sessionend removes the file, plus the session's per-key policy orphans
+# (approveRepeats memo, autopilot expiry, gated-tools override — see cc_remove)
+export CC_APPROVED_DIR="$TMP/appr" CC_AUTOPILOT_DIR="$TMP/auto" CC_GATE_TOOLS_DIR="$TMP/gtools"
+mkdir -p "$CC_APPROVED_DIR" "$CC_AUTOPILOT_DIR" "$CC_GATE_TOOLS_DIR"
+printf 'Bash|ls\n' > "$CC_APPROVED_DIR/$SID"
+echo 9999999999 > "$CC_AUTOPILOT_DIR/$SID"
+printf 'Bash\n' > "$CC_GATE_TOOLS_DIR/$SID"
 ev sessionend "{\"session_id\":\"$SID\",\"cwd\":\"$CWD\"}"
 assert_absent "sessionend removes the tile" "$F"
+assert_absent "sessionend removes the approveRepeats memo" "$CC_APPROVED_DIR/$SID"
+assert_absent "sessionend removes the autopilot expiry" "$CC_AUTOPILOT_DIR/$SID"
+assert_absent "sessionend removes the gated-tools override" "$CC_GATE_TOOLS_DIR/$SID"
 
 # --- Phase 1: PermissionRequest gives a precise pending summary ---
 P="p1"; PCWD="/srv/api-server"; PF="$TMP/$P.json"

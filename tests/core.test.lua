@@ -36,6 +36,34 @@ do
   eq("config: nil table -> default", core.config(nil, "a.b", "d"), "d")
 end
 
+-- ---- overlayConfig: Settings Save must not delete hand-edited fields --------
+do
+  local cfg = {
+    spawn = { editor = "kitty", kittyBin = "/opt/kitty/kitty", kittySocket = "unix:/tmp/k" },
+    escalation = { enabled = true, minutes = 5, hung = { enabled = true, minutes = 10 } },
+    risk = { enabled = true },  -- top-level block the UI doesn't expose
+  }
+  local incoming = {
+    spawn = { editor = "terminal", live = true, provider = "" },  -- the form's spawn shape
+    escalation = { enabled = false, minutes = 3 },                -- no `hung` subkey
+    providers = { { id = "a" } },
+  }
+  local out = core.overlayConfig(cfg, incoming)
+  eq("overlay: form field updated", out.spawn.editor, "terminal")
+  eq("overlay: kittyBin carried forward", out.spawn.kittyBin, "/opt/kitty/kitty")
+  eq("overlay: kittySocket carried forward", out.spawn.kittySocket, "unix:/tmp/k")
+  eq("overlay: escalation.hung carried forward", out.escalation.hung.minutes, 10)
+  eq("overlay: escalation form field wins", out.escalation.enabled, false)
+  eq("overlay: unexposed top-level block survives", out.risk.enabled, true)
+  eq("overlay: array-valued key replaced wholesale", #out.providers, 1)
+  -- a Save that DOES carry the subkey (e.g. a future UI field) wins over disk
+  local out2 = core.overlayConfig({ spawn = { kittyBin = "/old" } }, { spawn = { kittyBin = "/new" } })
+  eq("overlay: incoming subkey beats the on-disk one", out2.spawn.kittyBin, "/new")
+  -- degenerate inputs are safe
+  eq("overlay: nil incoming -> cfg unchanged", core.overlayConfig({ a = 1 }, nil).a, 1)
+  eq("overlay: nil cfg -> incoming kept", core.overlayConfig(nil, { a = 2 }).a, 2)
+end
+
 -- ---- parseStatusList: decode + stale + approvals-first sort ----------------
 do
   local now = 10000
@@ -271,9 +299,49 @@ do
   local q1 = { tasks = { "next" } }
   eq("feed: done transition with queue+auto -> true", core.shouldFeed("working", "done", q1, true), true)
   eq("feed: still done (no fresh transition) -> false", core.shouldFeed("done", "done", q1, true), false)
+  -- nil prev = no prior observation (first refresh after a reload, queue persisted
+  -- on disk): NOT a fresh transition, else every reload would re-feed a done tile.
+  eq("feed: nil prev (first refresh after reload) -> false", core.shouldFeed(nil, "done", q1, true), false)
   eq("feed: empty queue -> false", core.shouldFeed("working", "done", { tasks = {} }, true), false)
   eq("feed: autofeed off -> false", core.shouldFeed("working", "done", q1, false), false)
   eq("feed: not done -> false", core.shouldFeed("working", "working", q1, true), false)
+end
+
+-- ---- queueKey: queues are PROJECT-keyed so respawn//clear can't strand them --
+do
+  -- a respawned session gets a NEW session_id (= a new tile key); the queue must
+  -- key off the stable projectKey so the successor inherits the pending tasks.
+  eq("queueKey: projectKey wins", core.queueKey({ key = "sess-1", projectKey = "-Users-a-proj", cwd = "/u/a/proj" }),
+     "-Users-a-proj")
+  eq("queueKey: same project, new session -> same key",
+     core.queueKey({ key = "sess-2", projectKey = "-Users-a-proj" }), "-Users-a-proj")
+  -- cwd fallback is sanitized like cc_sanitize (outside [A-Za-z0-9._-] -> "_")
+  eq("queueKey: cwd fallback sanitized", core.queueKey({ key = "s", cwd = "/u/a proj" }), "_u_a_proj")
+  eq("queueKey: no project identity -> tile key", core.queueKey({ key = "sess-3" }), "sess-3")
+  eq("queueKey: nil item -> nil", core.queueKey(nil), nil)
+end
+
+-- ---- queueMerge: legacy session-keyed queue adopted into the project queue ---
+do
+  local m = core.queueMerge({ tasks = { "a" } }, { tasks = { "b", "c" } })
+  eq("queueMerge: depth", core.queueDepth(m), 3)
+  eq("queueMerge: keeps order, a first", m.tasks[1], "a")
+  eq("queueMerge: appends legacy", m.tasks[3], "c")
+  eq("queueMerge: nil sides safe", core.queueDepth(core.queueMerge(nil, nil)), 0)
+end
+
+-- ---- queueFeedCommit: only a DELIVERED feed pops the queue -------------------
+do
+  -- FX.feedTask returns false when the no-window-match guard skipped the paste;
+  -- persisting the popped queue then would silently destroy the task and write a
+  -- false task_feed audit event.
+  local ok = core.queueFeedCommit(true)
+  eq("feed-commit: delivered -> persist", ok.persist, true)
+  eq("feed-commit: delivered -> task_feed event", ok.event, "task_feed")
+  local skip = core.queueFeedCommit(false)
+  eq("feed-commit: skipped -> queue kept", skip.persist, false)
+  eq("feed-commit: skipped -> task_feed_skipped event", skip.event, "task_feed_skipped")
+  eq("feed-commit: nil (legacy no-report) -> queue kept", core.queueFeedCommit(nil).persist, false)
 end
 
 -- ---- shouldPrune: orphan + ghost cleanup ----------------------------------
@@ -461,6 +529,18 @@ do
   eq("provider: empty id -> nil", core.providerById(cfg, ""), nil)
   eq("provider: no providers key -> nil", core.providerById({}, "opus"), nil)
 
+  -- spawnProviderKey: "" is the EXPLICIT "(none — bare claude)" pick and must NOT
+  -- fall back to the spawn.provider default; only nil (no pick at all) does.
+  local dcfg = { spawn = { provider = "gemini" }, providers = { an, gw } }
+  eq("spawnkey: nil -> spawn.provider default", core.spawnProviderKey(dcfg, nil), "gemini")
+  eq("spawnkey: explicit '' -> no provider", core.spawnProviderKey(dcfg, ""), nil)
+  eq("spawnkey: explicit pick wins", core.spawnProviderKey(dcfg, "opus"), "opus")
+  eq("spawnkey: nil with no default -> nil", core.spawnProviderKey({}, nil), nil)
+  -- end-to-end: the explicit none resolves to NO profile (no gateway env injected)
+  eq("spawnkey: '' resolves to no profile", core.providerById(dcfg, core.spawnProviderKey(dcfg, "")), nil)
+  eq("spawnkey: nil resolves to the default profile",
+     core.providerById(dcfg, core.spawnProviderKey(dcfg, nil)).id, "gemini")
+
   -- providerEnv: anthropic sets just ANTHROPIC_MODEL (so the hook can see it)
   local ea = core.providerEnv(an)
   eq("providerenv: anthropic count", #ea, 1)
@@ -527,12 +607,18 @@ do
   check("spawnspec(vscode,env): post has base url", v.postType:find("ANTHROPIC_BASE_URL=", 1, true) ~= nil)
   check("spawnspec(vscode,env): post has model env", v.postType:find("ANTHROPIC_MODEL=", 1, true) ~= nil)
 
-  -- kitty path wraps the inner in a login shell so $VAR expands
+  -- kitty path wraps the inner in an INTERACTIVE login shell so $VAR expands:
+  -- the README keeps authTokenEnv secrets in ~/.zshrc, which plain `zsh -lc`
+  -- (login, NON-interactive) never sources -- the secret would expand to ""
+  -- and every gateway call 401s (R3 #6). `-lic` sources ~/.zshrc.
   local k = core.spawnSpec("kitty", "/p", "hi", { env = env })
-  eq("spawnspec(kitty,env): runs via login shell", k.argv[#k.argv - 1], "-lc")
-  check("spawnspec(kitty,env): inner has env + model",
-        k.argv[#k.argv]:find("ANTHROPIC_BASE_URL=", 1, true) ~= nil
-        and k.argv[#k.argv]:find("ANTHROPIC_MODEL=", 1, true) ~= nil)
+  eq("spawnspec(kitty,env): shell is zsh", k.argv[#k.argv - 2], "zsh")
+  eq("spawnspec(kitty,env): runs via INTERACTIVE login shell (-lic sources ~/.zshrc)",
+     k.argv[#k.argv - 1], "-lic")
+  -- pin the exact generated inner so the spawned command can't drift silently
+  eq("spawnspec(kitty,env): exact inner command", k.argv[#k.argv],
+     "cd '/p' && ANTHROPIC_BASE_URL='http://localhost:4000' ANTHROPIC_MODEL='gemini-2.5-pro' "
+     .. "ANTHROPIC_AUTH_TOKEN=\"$MY_LITELLM_KEY\" claude 'hi'")
   check("spawnspec(kitty,env): still has --directory", table.concat(k.argv, " "):find("--directory /p", 1, true) ~= nil)
   -- no-provider kitty path is unchanged (bare `claude`, task as final element)
   local kp = core.spawnSpec("kitty", "/p", "hi", {})
@@ -558,12 +644,28 @@ do
   local env = core.providerEnv(gw)
   local ssh = { host = "gpubox", user = "adam" }
 
+  -- loginShellWrap (R3 #6): provider env rides $VAR secrets that live in
+  -- ~/.zshrc (README), which only an INTERACTIVE login zsh sources -- command
+  -- shells (sshd's `shell -c`, kitty argv) skip it and expand the secret to "".
+  eq("login-wrap: env -> interactive login zsh",
+     core.loginShellWrap("claude", env), "zsh -lic 'claude'")
+  eq("login-wrap: no env -> inner unchanged", core.loginShellWrap("claude", nil), "claude")
+  eq("login-wrap: empty env -> inner unchanged", core.loginShellWrap("claude", {}), "claude")
+  eq("login-wrap: custom shell", core.loginShellWrap("claude", env, "bash"), "bash -lic 'claude'")
+
   -- spawnInner wraps the env-injected command in ssh; the auth $VAR stays for the
-  -- REMOTE shell (single-quoted, not expanded locally)
+  -- REMOTE shell (single-quoted, not expanded locally). sshd runs the remote
+  -- command NON-login/NON-interactive, so the inner must ride an interactive
+  -- login zsh there or the remote ~/.zshrc secret never resolves (R3 #6).
   local inner = core.spawnInner("/remote/proj", "go", { env = env, ssh = ssh })
   check("spawn-inner(ssh): starts with ssh -t adam@gpubox", inner:find("^ssh %-t adam@gpubox ") ~= nil)
+  check("spawn-inner(ssh): remote command runs an interactive login zsh",
+        inner:find("zsh -lic ", 1, true) ~= nil)
   check("spawn-inner(ssh): carries the remote cd", inner:find("cd ", 1, true) ~= nil)
   check("spawn-inner(ssh): auth $VAR preserved for remote", inner:find("$LOCAL_GW_KEY", 1, true) ~= nil)
+  -- no env -> no shell wrap (the no-provider ssh spawn keeps its exact shape)
+  eq("spawn-inner(ssh,no-env): unchanged shape",
+     core.spawnInner("/p", "hi", { ssh = { host = "h" } }), "ssh -t h 'cd '\\''/p'\\'' && claude '\\''hi'\\'''")
 
   -- terminal path: AppleScript runs the ssh command
   local t = core.spawnSpec("terminal", "/remote/proj", "go", { terminal = "Terminal", env = env, ssh = ssh })
@@ -578,6 +680,15 @@ do
   eq("spawnspec(kitty,ssh): dest after -t", k.argv[ai + 2], "adam@gpubox")
   check("spawnspec(kitty,ssh): inner is one argv element with env",
         (k.argv[ai + 3] or ""):find("ANTHROPIC_BASE_URL=", 1, true) ~= nil)
+  -- the remote command must run under an interactive login zsh: sshd's
+  -- `shell -c` is non-login, so the remote ~/.zshrc secret would otherwise
+  -- expand to "" (R3 #6 -- same wrap as sshWrap above)
+  check("spawnspec(kitty,ssh,env): remote inner wrapped in zsh -lic",
+        (k.argv[ai + 3] or ""):find("^zsh %-lic ") ~= nil)
+  -- no provider env -> no shell wrap on the remote command
+  local kne = core.spawnSpec("kitty", "/p", "go", { ssh = { host = "h" } })
+  eq("spawnspec(kitty,ssh,no-env): bare inner unchanged",
+     kne.argv[#kne.argv], "cd '/p' && claude 'go'")
 end
 
 -- ---- token usage: parse + aggregate transcript usage (zero-cost, local) -----
@@ -771,6 +882,11 @@ do
 
   eq("newProjectPath: builds under parent", core.newProjectPath("/Users/a/Programming", "new"), "/Users/a/Programming/new")
   eq("newProjectPath: bad name -> nil", core.newProjectPath("/p", "bad/name"), nil)
+  -- a non-absolute parent must be rejected: the relative result would mkdir
+  -- against Hammerspoon's cwd while the spawned shell cd's relative to $HOME
+  eq("newProjectPath: empty parent -> nil", core.newProjectPath("", "x"), nil)
+  eq("newProjectPath: relative parent -> nil", core.newProjectPath("rel/path", "x"), nil)
+  eq("newProjectPath: root parent ok", core.newProjectPath("/", "x"), "/x")
 end
 
 -- ---- Part A: kittyCmd argv builder + kittyKeyToken -------------------------
@@ -790,6 +906,17 @@ do
   eq("kittyCmd: key subcommand", k[4], "send-key")
   eq("kittyCmd: key token last", k[#k], "enter")
   eq("kittyCmd: key without token -> nil", core.kittyCmd("key", it, {}), nil)
+
+  -- payload.tokens batches several keys into ONE send-key argv. One process per
+  -- key raced to the control socket, so down/.../return could arrive out of order
+  -- and an early Return confirmed the WRONG AskUserQuestion option.
+  local kb = core.kittyCmd("key", it, { tokens = { "down", "down", "enter" } })
+  eq("kittyCmd: batched key subcommand", kb[4], "send-key")
+  eq("kittyCmd: batched token 1 in order", kb[7], "down")
+  eq("kittyCmd: batched token 2 in order", kb[8], "down")
+  eq("kittyCmd: batched return last", kb[#kb], "enter")
+  eq("kittyCmd: empty tokens -> nil", core.kittyCmd("key", it, { tokens = {} }), nil)
+  eq("kittyCmd: blank tokens dropped", #core.kittyCmd("key", it, { tokens = { "", "enter" } }), 7)
 
   local t = core.kittyCmd("text", it, { text = "hello" })
   eq("kittyCmd: text subcommand", t[4], "send-text")
@@ -920,6 +1047,28 @@ do
   eq("expiredLedgerFiles: 30d cutoff count", #exp, 1)
   eq("expiredLedgerFiles: drops the oldest", exp[1], "2026-01-01.jsonl")
   eq("expiredLedgerFiles: retention 0 = keep all", #core.expiredLedgerFiles(files, now, 0), 0)
+
+  -- ledgerDayIsPast: redact may only touch PAST days (today's file is hot)
+  check("ledgerDayIsPast: yesterday ok", core.ledgerDayIsPast("2026-06-08", now) == true)
+  check("ledgerDayIsPast: today refused", core.ledgerDayIsPast("2026-06-09", now) == false)
+  check("ledgerDayIsPast: future refused", core.ledgerDayIsPast("2026-06-10", now) == false)
+  check("ledgerDayIsPast: nil day refused", core.ledgerDayIsPast(nil, now) == false)
+
+  -- ledgerCapVictims: size cap deletes oldest first but NEVER the newest (hot) file
+  local live = { "2026-06-01.jsonl", "2026-06-02.jsonl", "2026-06-03.jsonl" }
+  local sizes = { ["2026-06-01.jsonl"] = 600, ["2026-06-02.jsonl"] = 600, ["2026-06-03.jsonl"] = 600 }
+  local vict = core.ledgerCapVictims(live, sizes, 700)
+  eq("capVictims: count to get under cap", #vict, 2)
+  eq("capVictims: oldest first", vict[1], "2026-06-01.jsonl")
+  eq("capVictims: second oldest next", vict[2], "2026-06-02.jsonl")
+  -- a single file over the cap is the newest -> untouchable (today's audit trail)
+  eq("capVictims: lone over-cap file kept (never the newest)",
+     #core.ledgerCapVictims({ "2026-06-09.jsonl" }, { ["2026-06-09.jsonl"] = 5 * 1024 * 1024 }, 1024), 0)
+  -- even when older deletions can't free enough, the loop stops before the newest
+  local vict2 = core.ledgerCapVictims(live, sizes, 100)
+  eq("capVictims: stops before newest even while over cap", #vict2, 2)
+  eq("capVictims: cap 0 = disabled", #core.ledgerCapVictims(live, sizes, 0), 0)
+  eq("capVictims: under cap -> none", #core.ledgerCapVictims(live, sizes, 9999), 0)
 
   check("narrateEvent: decision shows provenance",
     core.narrateEvent({ type = "decision", outcome = "deny", tool = "Bash", summary = "x",
@@ -1218,6 +1367,12 @@ do
   eq("drain: not draining no fire", core.shouldDrainClose(false, "working", "done"), false)
   eq("drain: nil draining no fire", core.shouldDrainClose(nil, "working", "done"), false)
   eq("drain: working->working no fire", core.shouldDrainClose(true, "working", "working"), false)
+
+  -- the "draining" tile badge: armed + feature on -> true; otherwise nil (omitted
+  -- from the JSON payload entirely, like the other optional tile flags)
+  eq("drain-badge: armed + enabled -> shown", core.drainingBadge(true, true), true)
+  eq("drain-badge: not armed -> hidden (nil)", core.drainingBadge(true, false), nil)
+  eq("drain-badge: feature off -> hidden (nil)", core.drainingBadge(false, true), nil)
 end
 
 -- ---- collisions: 2+ active sessions sharing a working dir ------------------
@@ -1266,6 +1421,21 @@ do
   check("provByModel: gateway model w/o base url -> nil", core.providerByModel(cfg, "gemini-2.5-pro", nil) == nil)
   check("provByModel: unknown model -> nil", core.providerByModel(cfg, "gpt-4", nil) == nil)
 
+  -- R2 #11: a claude/anthropic-kind profile carrying a STALE baseUrl (left over
+  -- from a gateway->claude kind switch before the Save-merge cleared the gateway
+  -- fields) must still match a base-less tile by model alone: only a GATEWAY
+  -- profile has a base-URL signature. Otherwise respawn runs bare `claude` on
+  -- the account-default model with no warning.
+  local cfgStale = core.json.decode([[
+    { "providers": [ { "id": "ant", "kind": "anthropic", "model": "m-1",
+                       "baseUrl": "http://localhost:4000" } ] }]])
+  eq("provByModel: anthropic-kind ignores stale baseUrl",
+     core.providerByModel(cfgStale, "m-1", nil).id, "ant")
+  check("provByModel: anthropic-kind never matches BY base url",
+        core.providerByModel(cfgStale, "m-1", "http://localhost:4000") == nil)
+  eq("respawn: stale-baseUrl anthropic profile still matched (faithful model)",
+     core.respawnSpec({ editor = "terminal", cwd = "/x", model = "m-1" }, cfgStale).providerId, "ant")
+
   local a = core.respawnSpec({ editor = "kitty", cwd = "/x/p", permission_mode = "plan", model = "claude-opus-4-8" }, cfg)
   eq("respawn: anthropic canRespawn", a.canRespawn, true)
   eq("respawn: anthropic providerId", a.providerId, "anthropic-opus")
@@ -1280,6 +1450,12 @@ do
   local b = core.respawnSpec({ editor = "terminal", cwd = "/x/r", model = "claude-future-9" }, cfg)
   eq("respawn: unknown anthropic still respawnable (bare claude)", b.canRespawn, true)
   check("respawn: unknown anthropic has nil providerId", b.providerId == nil)
+  -- faithful bare respawn: the FX call sites pass `rs.providerId or ""` (the
+  -- explicit-none sentinel), so it must resolve to NO provider, never the
+  -- spawn.provider default the config may carry.
+  local rcfg = { spawn = { provider = "gemini" }, providers = cfg.providers }
+  eq("respawn: bare session resolves to no provider key",
+     core.spawnProviderKey(rcfg, b.providerId or ""), nil)
   eq("respawn: editor falls back to spawn.editor", core.respawnSpec({ cwd = "/x/s", model = "claude-opus-4-8" }, cfg).editor, "terminal")
   eq("respawn: no cwd -> not respawnable", core.respawnSpec({ model = "x" }, cfg).canRespawn, false)
 end
@@ -1410,14 +1586,24 @@ end
 
 -- ---- shouldAutoRespawn: fire once on the unexpected-death edge --------------
 do
-  local base = { wasStale = false, isStale = true, hasSession = true, intentional = false,
-                 attempts = 0, maxRetries = 3 }
+  local base = { wasStale = false, isStale = true, status = "working", hasSession = true,
+                 intentional = false, attempts = 0, maxRetries = 3 }
   local function with(over)
     local a = {}; for k, v in pairs(base) do a[k] = v end
     for k, v in pairs(over or {}) do a[k] = v end
     return a
   end
-  eq("respawn-auto: fires on fresh stale edge", core.shouldAutoRespawn(with{}), true)
+  eq("respawn-auto: fires on fresh frozen-working edge", core.shouldAutoRespawn(with{}), true)
+  -- Only a long-frozen `working` reads as dead: done/idle quiet is the NORMAL alive
+  -- state between turns (no hooks fire after Stop, so every finished session goes
+  -- stale ~90s later) -- respawning it would duplicate a live agent.
+  eq("respawn-auto: stale done is alive-but-quiet -> no fire", core.shouldAutoRespawn(with{ status = "done" }), false)
+  eq("respawn-auto: stale idle is alive-but-quiet -> no fire", core.shouldAutoRespawn(with{ status = "idle" }), false)
+  -- A stale approval is waiting on a HUMAN (escalation expects multi-minute waits);
+  -- respawning would destroy the tile the user was about to Approve on, and make
+  -- the 5-minute stale-approval escalation unreachable. Escalation owns this case.
+  eq("respawn-auto: stale approval waits on a human -> no fire", core.shouldAutoRespawn(with{ status = "approval" }), false)
+  eq("respawn-auto: error is resumed via Continue, not respawned", core.shouldAutoRespawn(with{ status = "error" }), false)
   eq("respawn-auto: not on a still-stale tile", core.shouldAutoRespawn(with{ wasStale = true }), false)
   eq("respawn-auto: not when still healthy", core.shouldAutoRespawn(with{ isStale = false }), false)
   eq("respawn-auto: skips intentional close/drain", core.shouldAutoRespawn(with{ intentional = true }), false)
@@ -1431,11 +1617,16 @@ end
 -- ---- stepAutoRespawn: per-folder budget bookkeeping ------------------------
 do
   local attempts = {}
-  local function step(item, wasStale)
+  local function step(item, wasStale, now)
     return core.stepAutoRespawn(attempts, item,
-      { enabled = true, maxRetries = 2, intentional = false, wasStale = wasStale })
+      { enabled = true, maxRetries = 2, intentional = false, wasStale = wasStale,
+        now = now or 1000, staleSeconds = 90, respawnStaleSeconds = 600 })
   end
-  local function dead(key, sid) return { key = key, projectKey = "pf", status = "working", stale = true, session_id = sid } end
+  -- frozen at `working` for 700s (updated=300, now=1000) -- past the 600s respawn
+  -- threshold, which is deliberately ABOVE the 90s display staleness (no hook fires
+  -- mid-tool-call, so a healthy long build freezes the file for minutes).
+  local function dead(key, sid) return { key = key, projectKey = "pf", status = "working",
+    stale = true, updated = 300, session_id = sid } end
 
   local r1 = step(dead("k1", "s1"), false)
   eq("step: fires on the death edge", r1.spawn, true)
@@ -1451,43 +1642,103 @@ do
   eq("step: at cap -> no fire", step(dead("k3", "s3"), false).spawn, false)
   eq("step: attempt holds at cap", attempts["pf"], 2)
 
-  -- a healthy session in that folder resets the budget (recovers regains retries)
-  step({ key = "k4", projectKey = "pf", status = "working", stale = false, session_id = "s4" }, false)
-  eq("step: healthy resets the folder budget", attempts["pf"], nil)
+  -- a healthy session resets the budget ONLY after SUSTAINED health: a freshly
+  -- relaunched tile is non-stale by construction (SessionStart just wrote it), so
+  -- a first-sight reset would wipe the budget ~90s before the relaunch could ever
+  -- re-edge -- maxRetries would never bind and a crash loop respawns forever.
+  local function healthy(since)
+    return { key = "k4", projectKey = "pf", status = "working", stale = false, session_id = "s4", since = since }
+  end
+  step(healthy(1000), false, 1000)  -- just (re)spawned: 0s healthy
+  eq("step: fresh healthy tile does NOT reset the budget", attempts["pf"], 2)
+  step(healthy(1000), false, 1050)  -- 50s healthy: still inside the stale window
+  eq("step: sub-window health does NOT reset", attempts["pf"], 2)
+  step(healthy(1000), false, 1091)  -- survived a full stale window (> 90s)
+  eq("step: sustained health resets the folder budget", attempts["pf"], nil)
   local r6 = step(dead("k5", "s5"), false)
   eq("step: fires again after recovery", r6.spawn, true)
   eq("step: budget climbs from zero again", attempts["pf"], 1)
 
+  -- no clock/since provided -> fail closed: never reset the budget blindly
+  local a8 = { pf = 2 }
+  core.stepAutoRespawn(a8, healthy(nil), { enabled = true, maxRetries = 2, wasStale = false })
+  eq("step: no clock/since -> fail-closed, budget kept", a8["pf"], 2)
+
+  -- a stale done tile is alive-but-quiet (the normal between-turns state), not a
+  -- death: no fire, no charge -- only a long-frozen `working` reads as dead.
+  local a9 = {}
+  local rq = core.stepAutoRespawn(a9,
+    { key = "q", projectKey = "pf", status = "done", stale = true, updated = 300, session_id = "sq" },
+    { enabled = true, maxRetries = 2, wasStale = false, now = 1000, staleSeconds = 90, respawnStaleSeconds = 600 })
+  eq("step: stale done (alive between turns) -> no fire", rq.spawn, false)
+  eq("step: stale done -> no charge", a9["pf"], nil)
+
+  -- THE healthy-long-tool-call case (the bug this threshold exists for): a session
+  -- 2 minutes into one Bash call is display-stale (90s) at status=working, but far
+  -- under the 600s respawn threshold -- it is ALIVE and must NOT be duplicated.
+  local a10 = {}
+  local rl = core.stepAutoRespawn(a10,
+    { key = "l", projectKey = "pf", status = "working", stale = true, updated = 880, session_id = "sl" },
+    { enabled = true, maxRetries = 2, wasStale = false, now = 1000, staleSeconds = 90, respawnStaleSeconds = 600 })
+  eq("step: healthy 2-min tool call (display-stale, under threshold) -> no fire", rl.spawn, false)
+  eq("step: under-threshold working is not frozen", rl.isStale, false)
+  eq("step: under-threshold -> no charge", a10["pf"], nil)
+
+  -- ... and a pending approval frozen past even the RESPAWN threshold still never
+  -- fires (waiting on a human; stale-approval escalation owns it).
+  local a11 = {}
+  eq("step: frozen approval -> escalation's case, no fire",
+     core.stepAutoRespawn(a11,
+       { key = "ap", projectKey = "pf", status = "approval", stale = true, updated = 300, session_id = "sa" },
+       { enabled = true, maxRetries = 2, wasStale = false, now = 1000, staleSeconds = 90, respawnStaleSeconds = 600 }).spawn,
+     false)
+  eq("step: frozen approval -> no charge", a11["pf"], nil)
+
+  -- no respawn threshold / clock / updated stamp -> fail closed (no death evidence)
+  local a12 = {}
+  eq("step: missing respawnStaleSeconds -> fail closed",
+     core.stepAutoRespawn(a12, dead("m1", "s"), { enabled = true, maxRetries = 2, wasStale = false, now = 1000 }).spawn, false)
+  eq("step: missing now -> fail closed",
+     core.stepAutoRespawn(a12, dead("m2", "s"), { enabled = true, maxRetries = 2, wasStale = false, respawnStaleSeconds = 600 }).spawn, false)
+  eq("step: missing updated -> fail closed",
+     core.stepAutoRespawn(a12, { key = "m3", projectKey = "pf", status = "working", stale = true, session_id = "s" },
+       { enabled = true, maxRetries = 2, wasStale = false, now = 1000, respawnStaleSeconds = 600 }).spawn, false)
+  eq("step: fail-closed paths never charge", a12["pf"], nil)
+
   -- disabled never fires and never writes
   local a2 = {}
   eq("step: disabled -> no fire",
-     core.stepAutoRespawn(a2, dead("x", "s"), { enabled = false, maxRetries = 2, wasStale = false }).spawn, false)
+     core.stepAutoRespawn(a2, dead("x", "s"), { enabled = false, maxRetries = 2, wasStale = false,
+       now = 1000, respawnStaleSeconds = 600 }).spawn, false)
   eq("step: disabled -> no write", a2["pf"], nil)
 
   -- a tile with no projectKey/cwd: no fire, NO nil-key write (the review's bug)
   local a3 = {}
-  local rn = core.stepAutoRespawn(a3, { key = "y", status = "working", stale = true, session_id = "s" },
-    { enabled = true, maxRetries = 2, wasStale = false })
+  local rn = core.stepAutoRespawn(a3, { key = "y", status = "working", stale = true, updated = 300, session_id = "s" },
+    { enabled = true, maxRetries = 2, wasStale = false, now = 1000, respawnStaleSeconds = 600 })
   eq("step: no projectKey -> no fire (guards the nil-key write)", rn.spawn, false)
   eq("step: still reports isStale without a key", rn.isStale, true)
 
-  -- already stale before the edge (wasStale=true, isStale=true): a level, not an
+  -- already frozen before the edge (wasStale=true, isStale=true): a level, not an
   -- edge -> no fire and no write, even with a fresh budget.
   local a4 = {}
-  eq("step: already-stale (level, not edge) -> no fire",
-     core.stepAutoRespawn(a4, dead("z", "s"), { enabled = true, maxRetries = 2, wasStale = true }).spawn, false)
-  eq("step: already-stale -> no write", a4["pf"], nil)
+  eq("step: already-frozen (level, not edge) -> no fire",
+     core.stepAutoRespawn(a4, dead("z", "s"), { enabled = true, maxRetries = 2, wasStale = true,
+       now = 1000, respawnStaleSeconds = 600 }).spawn, false)
+  eq("step: already-frozen -> no write", a4["pf"], nil)
 
   -- a deliberate drain/close suppresses the fire even on a fresh death edge.
   local a5 = {}
   eq("step: intentional drain suppresses a fresh edge",
-     core.stepAutoRespawn(a5, dead("d", "s"), { enabled = true, maxRetries = 2, intentional = true, wasStale = false }).spawn, false)
+     core.stepAutoRespawn(a5, dead("d", "s"), { enabled = true, maxRetries = 2, intentional = true,
+       wasStale = false, now = 1000, respawnStaleSeconds = 600 }).spawn, false)
   eq("step: intentional -> no write", a5["pf"], nil)
 
   -- a fresh death edge that isn't respawnable: wouldFire, but no spawn and NO charge
   -- (an un-respawnable death must not burn the per-folder budget).
   local a6 = {}
-  local rc = core.stepAutoRespawn(a6, dead("c", "s"), { enabled = true, maxRetries = 2, wasStale = false, canRespawn = false })
+  local rc = core.stepAutoRespawn(a6, dead("c", "s"), { enabled = true, maxRetries = 2, wasStale = false,
+    now = 1000, respawnStaleSeconds = 600, canRespawn = false })
   eq("step: un-respawnable edge does not spawn", rc.spawn, false)
   eq("step: un-respawnable edge still reports wouldFire", rc.wouldFire, true)
   eq("step: un-respawnable edge does NOT charge the budget", a6["pf"], nil)
@@ -1495,17 +1746,20 @@ do
   -- the POSITIVE bracket of the canRespawn gate: a fresh respawnable edge fires,
   -- spawns, and charges exactly one retry; a second one accumulates to two.
   local a7 = {}
-  local rok = core.stepAutoRespawn(a7, dead("ok", "s"), { enabled = true, maxRetries = 2, wasStale = false, canRespawn = true })
+  local rok = core.stepAutoRespawn(a7, dead("ok", "s"), { enabled = true, maxRetries = 2, wasStale = false,
+    now = 1000, respawnStaleSeconds = 600, canRespawn = true })
   eq("step: fresh respawnable edge spawns", rok.spawn, true)
   eq("step: fresh respawnable edge wouldFire", rok.wouldFire, true)
   eq("step: fresh respawnable edge charges the budget", a7["pf"], 1)
-  local rok2 = core.stepAutoRespawn(a7, dead("ok2", "s2"), { enabled = true, maxRetries = 2, wasStale = false, canRespawn = true })
+  local rok2 = core.stepAutoRespawn(a7, dead("ok2", "s2"), { enabled = true, maxRetries = 2, wasStale = false,
+    now = 1000, respawnStaleSeconds = 600, canRespawn = true })
   eq("step: second respawnable edge still spawns (under cap)", rok2.spawn, true)
   eq("step: second respawnable edge accumulates the budget", a7["pf"], 2)
   -- the cap firing: a third edge at maxRetries=2 is suppressed. The cap lives inside
   -- shouldAutoRespawn (attempts < cap), so a capped edge reports wouldFire=false and
   -- never over-charges. This brackets the accumulate->cap boundary.
-  local rok3 = core.stepAutoRespawn(a7, dead("ok3", "s3"), { enabled = true, maxRetries = 2, wasStale = false, canRespawn = true })
+  local rok3 = core.stepAutoRespawn(a7, dead("ok3", "s3"), { enabled = true, maxRetries = 2, wasStale = false,
+    now = 1000, respawnStaleSeconds = 600, canRespawn = true })
   eq("step: respawnable edge suppressed once cap is reached", rok3.spawn, false)
   eq("step: capped edge reports wouldFire=false (cap is part of the gate)", rok3.wouldFire, false)
   eq("step: capped edge does NOT over-charge the budget", a7["pf"], 2)
@@ -1704,6 +1958,130 @@ do
   eq("watchdog: first stall fires", fires[2], true)
   eq("watchdog: resume tick does not fire", fires[3], false)
   eq("watchdog: SECOND stall re-fires after a resume", fires[4], true)
+end
+
+-- ---- editorBundleIds: the editor kind scopes the app lookup (R2 #5) --------
+do
+  local fallback = { "com.microsoft.VSCode", "com.microsoft.VSCodeInsiders",
+                     "com.todesktop.230313mzl4w4u92" }
+  -- a cursor session must NEVER search VS Code's windows (and vice versa):
+  -- with both editors running, the fixed-order walk matched VS Code first and
+  -- either injected keys into the wrong app or skipped a matchable window.
+  local cur = core.editorBundleIds("cursor", fallback)
+  eq("editor-app: cursor -> exactly one bundle", #cur, 1)
+  eq("editor-app: cursor -> Cursor's bundle id", cur[1], "com.todesktop.230313mzl4w4u92")
+  local vs = core.editorBundleIds("vscode", fallback)
+  eq("editor-app: vscode -> VS Code first", vs[1], "com.microsoft.VSCode")
+  eq("editor-app: vscode -> Insiders second", vs[2], "com.microsoft.VSCodeInsiders")
+  local vsHasCursor = false
+  for _, bid in ipairs(vs) do if bid == "com.todesktop.230313mzl4w4u92" then vsHasCursor = true end end
+  check("editor-app: vscode never includes Cursor", vsHasCursor == false)
+  eq("editor-app: terminal -> Terminal.app", core.editorBundleIds("terminal", fallback)[1], "com.apple.Terminal")
+  -- only a nil/unknown editor keeps the legacy full walk
+  eq("editor-app: nil editor -> legacy fallback walk", core.editorBundleIds(nil, fallback), fallback)
+  eq("editor-app: unknown editor -> legacy fallback walk", core.editorBundleIds("emacs", fallback), fallback)
+  eq("editor-app: no fallback -> empty list", #core.editorBundleIds("emacs"), 0)
+end
+
+-- ---- staggerSlot: shared injection tail serializes across dispatches (R2 #7) --
+do
+  -- one bulk dispatch: 3 window targets at now=1000, gap 1.5 -> t=0, 1.5, 3.0
+  local tail, d1, d2, d3 = 0
+  d1, tail = core.staggerSlot(tail, 1000, 1.5)
+  d2, tail = core.staggerSlot(tail, 1000, 1.5)
+  d3, tail = core.staggerSlot(tail, 1000, 1.5)
+  eq("stagger: 1st chain immediate", d1, 0)
+  eq("stagger: 2nd chain +1.5", d2, 1.5)
+  eq("stagger: 3rd chain +3.0", d3, 3.0)
+  eq("stagger: tail after 3 chains", tail, 1004.5)
+  -- a SECOND dispatch 1s later (the second bulk click / a per-tile action in
+  -- the stagger window) queues AFTER the in-flight chains, never at t=0
+  local d4
+  d4, tail = core.staggerSlot(tail, 1001, 1.5)
+  eq("stagger: 2nd dispatch queues after the in-flight tail", d4, 3.5)
+  eq("stagger: tail advances past the 2nd dispatch", tail, 1006)
+  -- idle (tail in the past) -> immediate again, tail rebased on now
+  local d5, t5 = core.staggerSlot(1004.5, 2000, 1.5)
+  eq("stagger: idle tail -> immediate", d5, 0)
+  eq("stagger: idle tail rebases on now", t5, 2001.5)
+  -- garbage state is safe
+  local d6, t6 = core.staggerSlot(nil, 100, 1.5)
+  eq("stagger: nil tail -> immediate", d6, 0)
+  eq("stagger: nil tail still reserves a slot", t6, 101.5)
+end
+
+-- ---- purge: exact-filter split + scoped-confirmation decision (R2 #8) -------
+do
+  local evs = {
+    { id = "1", ts = 100, session_id = "sX", type = "decision" },
+    { id = "2", ts = 110, session_id = "sX", type = "prompt" },
+    { id = "3", ts = 120, session_id = "sY", type = "decision" },
+    { id = "4", ts = 130, session_id = "sX", type = "decision" },
+  }
+  -- session AND types: only sX's decisions purge; sX's prompt and sY's decision
+  -- survive (the old purge matched on session alone -- an irreversible superset).
+  local kept, purged = core.splitLedgerEvents(evs, { session = "sX", types = { "decision" } })
+  eq("purge-split: purges ONLY sX decisions", #purged, 2)
+  eq("purge-split: keeps sX prompt + sY decision", #kept, 2)
+  check("purge-split: purged the right ids", purged[1].id == "1" and purged[2].id == "4")
+  check("purge-split: kept the sX prompt", kept[1].id == "2")
+  check("purge-split: kept the other session's decision", kept[2].id == "3")
+  -- type-only filter purges just that type across sessions
+  local k2, p2 = core.splitLedgerEvents(evs, { types = { "prompt" } })
+  eq("purge-split: type-only purges just that type", #p2, 1)
+  eq("purge-split: type-only keeps the rest", #k2, 3)
+  -- the day window composes with session + type
+  local _, p3 = core.splitLedgerEvents(evs, { session = "sX", types = { "decision" }, sinceTs = 105 })
+  eq("purge-split: window AND session AND type", #p3, 1)
+  eq("purge-split: windowed purge hits the right event", p3[1].id, "4")
+  -- empty filter matches everything (the f.all path removes whole files upstream)
+  local _, pAll = core.splitLedgerEvents(evs, {})
+  eq("purge-split: empty filter matches all", #pAll, 4)
+
+  -- the confirmation-scope decision: `types` counts as a filter, so a type-only
+  -- purge must NOT escalate to f.all (= delete every ledger file).
+  check("purge-scope: types alone is scoped", core.purgeFilterIsScoped({ types = { "prompt" } }) == true)
+  check("purge-scope: session is scoped", core.purgeFilterIsScoped({ session = "sX" }) == true)
+  check("purge-scope: sinceTs is scoped", core.purgeFilterIsScoped({ sinceTs = 1 }) == true)
+  check("purge-scope: untilTs is scoped", core.purgeFilterIsScoped({ untilTs = 1 }) == true)
+  check("purge-scope: empty filter -> ALL", core.purgeFilterIsScoped({}) == false)
+  check("purge-scope: empty types list -> ALL", core.purgeFilterIsScoped({ types = {} }) == false)
+  check("purge-scope: non-table safe", core.purgeFilterIsScoped(nil) == false)
+end
+
+-- ---- capLedgerSlice: webview cap, bypassable for export (R2 #9) -------------
+do
+  local evs = {}
+  for i = 1, 2101 do evs[i] = { id = i } end
+  local sliced, trunc = core.capLedgerSlice(evs, nil)
+  eq("ledger-cap: default caps at 2000", #sliced, 2000)
+  eq("ledger-cap: default cap flags truncation", trunc, true)
+  -- limit 0 = NO cap: the export/audit-review full-data paths
+  local all, t2 = core.capLedgerSlice(evs, 0)
+  eq("ledger-cap: limit 0 bypasses the cap (export)", #all, 2101)
+  eq("ledger-cap: bypass is not truncated", t2, false)
+  local five, t3 = core.capLedgerSlice(evs, 5)
+  eq("ledger-cap: explicit limit honored", #five, 5)
+  eq("ledger-cap: explicit limit flags truncation", t3, true)
+  local small, t4 = core.capLedgerSlice({ { id = 1 } }, 5)
+  eq("ledger-cap: under the cap untouched", #small, 1)
+  eq("ledger-cap: under the cap not truncated", t4, false)
+end
+
+-- ---- ledgerCacheStale: risk read cached off the 1 Hz refresh (R2 #10) -------
+do
+  check("risk-cache: empty cache is stale", core.ledgerCacheStale({}, "sig", 100, 30) == true)
+  check("risk-cache: nil cache is stale", core.ledgerCacheStale(nil, "sig", 100, 30) == true)
+  local cache = { events = {}, sig = "a.jsonl:10:99", ts = 100 }
+  check("risk-cache: same sig, fresh -> serve cached",
+        core.ledgerCacheStale(cache, "a.jsonl:10:99", 101, 30) == false)
+  check("risk-cache: 1 Hz ticks stay cached until the TTL",
+        core.ledgerCacheStale(cache, "a.jsonl:10:99", 129, 30) == false)
+  check("risk-cache: sig change (hook append / new day) -> re-read",
+        core.ledgerCacheStale(cache, "a.jsonl:11:99", 101, 30) == true)
+  check("risk-cache: TTL backstop expired -> re-read",
+        core.ledgerCacheStale(cache, "a.jsonl:10:99", 130, 30) == true)
+  check("risk-cache: default TTL is 30s", core.ledgerCacheStale(cache, "a.jsonl:10:99", 130) == true)
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))

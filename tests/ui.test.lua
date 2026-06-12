@@ -213,12 +213,18 @@ end
 
 -- ---- staleDuplicateKeys: prune /clear ghosts, keep live + lone tiles -------
 do
-  -- old sms-bot went stale after /clear; a fresh sms-bot (same folder = same
-  -- projectKey) is live -> prune the old. Real tiles always carry a projectKey.
+  -- old sms-bot went stale after /clear; a fresh sms-bot in the SAME kitty window
+  -- (same projectKey AND same terminal identity -- /clear reuses the window) is
+  -- live -> prune the old. The shared terminal is the death evidence; staleness
+  -- alone isn't (every alive session dims ~90s after its turn).
+  local sock = "unix:/tmp/cc-kitty-100"
   local list = {
-    { key = "old", name = "sms-bot", projectKey = "p-sms",    stale = true },
-    { key = "new", name = "sms-bot", projectKey = "p-sms",    stale = false },
-    { key = "solo", name = "rune",   projectKey = "p-rune",   stale = true },   -- no live twin -> keep
+    { key = "old", name = "sms-bot", projectKey = "p-sms",    stale = true,
+      kitty_listen_on = sock, kitty_window_id = "7" },
+    { key = "new", name = "sms-bot", projectKey = "p-sms",    stale = false,
+      kitty_listen_on = sock, kitty_window_id = "7" },
+    { key = "solo", name = "rune",   projectKey = "p-rune",   stale = true,
+      kitty_listen_on = sock, kitty_window_id = "3" },   -- no live twin -> keep
     { key = "live", name = "canary", projectKey = "p-canary", stale = false },
   }
   local ghosts = core.staleDuplicateKeys(list)
@@ -227,28 +233,77 @@ do
 
   -- two live tiles for the same project (legit parallel sessions) -> prune none
   local twoLive = {
-    { key = "a", name = "sms-bot", projectKey = "p-sms", stale = false },
-    { key = "b", name = "sms-bot", projectKey = "p-sms", stale = false },
+    { key = "a", name = "sms-bot", projectKey = "p-sms", stale = false,
+      kitty_listen_on = sock, kitty_window_id = "1" },
+    { key = "b", name = "sms-bot", projectKey = "p-sms", stale = false,
+      kitty_listen_on = sock, kitty_window_id = "2" },
   }
   eq("ghost: two live same project -> none pruned", #core.staleDuplicateKeys(twoLive), 0)
 
+  -- parallel sessions in one folder occupy DISTINCT windows: the resting twin
+  -- (stale `done`, but ALIVE and holding its result) must survive while the
+  -- other is driven -- pruning it would delete a live session's tile.
+  local parallel = {
+    { key = "resting", name = "sms-bot", projectKey = "p-sms", status = "done",
+      stale = true,  kitty_listen_on = sock, kitty_window_id = "1" },
+    { key = "driving", name = "sms-bot", projectKey = "p-sms", status = "working",
+      stale = false, kitty_listen_on = sock, kitty_window_id = "2" },
+  }
+  eq("ghost: alive-but-quiet twin in another window -> NOT pruned",
+     #core.staleDuplicateKeys(parallel), 0)
+
+  -- no terminal identity (non-kitty editors) -> no death evidence, never prune
+  -- here; the 24h shouldPrune backstop owns that cleanup.
+  local noId = {
+    { key = "p", name = "api", projectKey = "p-api", stale = true },
+    { key = "q", name = "api", projectKey = "p-api", stale = false },
+  }
+  eq("ghost: no terminal identity -> NOT pruned", #core.staleDuplicateKeys(noId), 0)
+
+  -- a window id WITHOUT the socket is a HALF identity, i.e. NO identity: kitty
+  -- exports KITTY_WINDOW_ID always but KITTY_LISTEN_ON only with remote control
+  -- configured, and window ids are a per-INSTANCE counter from 1 -- so two
+  -- default-config kitty instances both carry window "1". The resting parallel
+  -- session must NOT read as the live one's twin.
+  local sockless = {
+    { key = "resting2", name = "sms-bot", projectKey = "p-sms", stale = true,
+      kitty_window_id = "1" },
+    { key = "driving2", name = "sms-bot", projectKey = "p-sms", stale = false,
+      kitty_window_id = "1" },
+  }
+  eq("ghost: sock-less same wid (two kitty instances) -> NOT pruned",
+     #core.staleDuplicateKeys(sockless), 0)
+  -- socket without a window id is equally half an identity
+  local widless = {
+    { key = "a2", name = "api", projectKey = "p-api", stale = true, kitty_listen_on = sock },
+    { key = "b2", name = "api", projectKey = "p-api", stale = false, kitty_listen_on = sock },
+  }
+  eq("ghost: socket-only identity -> NOT pruned", #core.staleDuplicateKeys(widless), 0)
+
   -- a lone stale tile (no fresher twin) -> keep (handled by the 24h backstop instead)
   eq("ghost: lone stale -> none pruned",
-     #core.staleDuplicateKeys({ { key = "x", name = "rune", projectKey = "p-rune", stale = true } }), 0)
+     #core.staleDuplicateKeys({ { key = "x", name = "rune", projectKey = "p-rune", stale = true,
+                                  kitty_listen_on = sock, kitty_window_id = "9" } }), 0)
 
   -- F-004 (bug sweep): two sessions in DIFFERENT folders that merely share a basename
   -- `name` must NOT cross-prune (different projectKeys) -- else the stale one's
-  -- auto-respawn is silently swallowed.
+  -- auto-respawn is silently swallowed. (Same terminal identity on both makes this a
+  -- strict projectKey check.)
   local crossProject = {
-    { key = "dead",  name = "shepherd", projectKey = "-Users-me-work-shepherd",    stale = true },
-    { key = "alive", name = "shepherd", projectKey = "-Users-me-scratch-shepherd", stale = false },
+    { key = "dead",  name = "shepherd", projectKey = "-Users-me-work-shepherd",    stale = true,
+      kitty_listen_on = sock, kitty_window_id = "5" },
+    { key = "alive", name = "shepherd", projectKey = "-Users-me-scratch-shepherd", stale = false,
+      kitty_listen_on = sock, kitty_window_id = "5" },
   }
   eq("ghost: same basename, different project -> NOT pruned", #core.staleDuplicateKeys(crossProject), 0)
 
-  -- legacy cwd-fallback (tiles without a projectKey) still prunes a same-folder ghost
+  -- legacy cwd-fallback (tiles without a projectKey) still prunes a same-folder
+  -- same-window ghost
   local legacy = {
-    { key = "o", name = "api", cwd = "/x/api", stale = true },
-    { key = "n", name = "api", cwd = "/x/api", stale = false },
+    { key = "o", name = "api", cwd = "/x/api", stale = true,
+      kitty_listen_on = sock, kitty_window_id = "4" },
+    { key = "n", name = "api", cwd = "/x/api", stale = false,
+      kitty_listen_on = sock, kitty_window_id = "4" },
   }
   eq("ghost: legacy cwd-keyed same-folder ghost pruned", core.staleDuplicateKeys(legacy)[1], "o")
 end
@@ -337,6 +392,240 @@ do
   r = newRecorder()
   core.handleAction(r.fx, { key = "k", name = "p", permission_mode = "plan" }, "set-mode", "plan")
   eq("set-mode: same mode -> no effect", r.count(), 0)
+end
+
+-- ---- window-effect targets carry cwd + editor (focusProject matching) -------
+do
+  -- The FX layer threads target.cwd/editor into focusProject on EVERY keystroke
+  -- path (not just Jump): a subfolder session (name "frontend", window titled
+  -- "… — autobottom") is only matchable via the cwd ancestors, and a terminal
+  -- session is only findable in Terminal.app. Pin that every window effect
+  -- receives the full target, so the FX layer always has them to use.
+  local item = { key = "s1", name = "frontend", cwd = "/u/a/autobottom/frontend",
+                 editor = "vscode" }
+  local r = newRecorder()
+  core.handleAction(r.fx, item, "approve")
+  eq("target: ungated approve carries cwd", r.last().tgt.cwd, "/u/a/autobottom/frontend")
+  eq("target: ungated approve carries editor", r.last().tgt.editor, "vscode")
+  r = newRecorder()
+  core.handleAction(r.fx, item, "stop")
+  eq("target: stop carries cwd", r.last().tgt.cwd, "/u/a/autobottom/frontend")
+  r = newRecorder()
+  core.handleAction(r.fx, item, "nudge", "hi")
+  eq("target: nudge carries cwd", r.last().tgt.cwd, "/u/a/autobottom/frontend")
+  r = newRecorder()
+  core.handleAction(r.fx, item, "set-mode", "plan")  -- routes to sendKeys
+  eq("target: set-mode carries cwd", r.last().tgt.cwd, "/u/a/autobottom/frontend")
+  r = newRecorder()
+  core.handleAction(r.fx, item, "close")
+  eq("target: close carries cwd", r.calls[1].tgt.cwd, "/u/a/autobottom/frontend")
+  -- terminal sessions route with their editor kind so the FX layer searches
+  -- Terminal.app for the window instead of VS Code (which can't have it)
+  r = newRecorder()
+  core.handleAction(r.fx, { key = "t1", name = "api", cwd = "/u/a/api", editor = "terminal" }, "stop")
+  eq("target: terminal editor kind carried", r.last().tgt.editor, "terminal")
+end
+
+-- ---- actionIsHeadless: which bulk dispatches must be staggered --------------
+do
+  -- The bulk loop fires headless dispatches together but staggers the window-
+  -- keystroke ones (each focuses NOW and injects on after() timers, so a
+  -- synchronous loop would land every key in the LAST-focused window).
+  local kitty = { key = "k", editor = "kitty" }
+  local vs    = { key = "v", editor = "vscode" }
+  check("headless: kitty always", core.actionIsHeadless(kitty, "stop") == true)
+  check("headless: armed-gate approve", core.actionIsHeadless({ key = "g", gate = "waiting" }, "approve") == true)
+  check("headless: armed-gate deny", core.actionIsHeadless({ key = "g", gate = "waiting" }, "deny") == true)
+  check("headless: ungated vscode approve is NOT", core.actionIsHeadless(vs, "approve") == false)
+  check("headless: vscode stop is NOT", core.actionIsHeadless(vs, "stop") == false)
+  check("headless: armed gate doesn't cover nudge", core.actionIsHeadless({ key = "g", gate = "waiting" }, "nudge") == false)
+  check("headless: nil item safe", core.actionIsHeadless(nil, "stop") == false)
+end
+
+-- ---- set-mode optimistic re-base: return contract + patchedStatus -----------
+do
+  -- handleAction reports WHAT it did so the dashboard can optimistically persist
+  -- the new mode: Shift+Tab fires no hook, so the stored base would go stale and
+  -- a re-pick would cycle PAST the target (default->plan twice = acceptEdits).
+  local item = { key = "k", name = "p", editor = "kitty", permission_mode = "default" }
+  local r = newRecorder()
+  eq("set-mode: success returns the action",
+     core.handleAction(r.fx, item, "set-mode", "plan"), "set-mode")
+  eq("set-mode: no-op returns nil",
+     core.handleAction(r.fx, { key = "k", name = "p", permission_mode = "plan" }, "set-mode", "plan"), nil)
+
+  -- patchedStatus merges fields into the status JSON (the pure half of FX.patchStatus)
+  local txt = core.patchedStatus('{"status":"done","permission_mode":"default"}',
+                                 { permission_mode = "plan" })
+  local back = core.json.decode(txt)
+  eq("patchedStatus: sets the new mode", back.permission_mode, "plan")
+  eq("patchedStatus: keeps other fields", back.status, "done")
+  eq("patchedStatus: garbage input -> nil", core.patchedStatus("not json", { x = 1 }), nil)
+  eq("patchedStatus: empty input -> nil", core.patchedStatus("", { x = 1 }), nil)
+
+  -- once the dashboard re-bases the item, re-picking the SAME mode is a no-op
+  -- (this is the double-apply that used to land in acceptEdits)
+  item.permission_mode = "plan"
+  r = newRecorder()
+  eq("set-mode: re-pick after re-base is a no-op",
+     core.handleAction(r.fx, item, "set-mode", "plan"), nil)
+  eq("set-mode: re-pick sends no keys", r.count(), 0)
+end
+
+-- ---- watcherShouldRefresh: the panel's own heartbeat must not re-trigger ----
+do
+  -- refresh() writes .panel-alive INTO the watched status dir every tick; if the
+  -- pathwatcher refreshed on it, every refresh would schedule the next forever.
+  check("watch: heartbeat only -> no refresh",
+        core.watcherShouldRefresh({ "/s/.panel-alive" }) == false)
+  check("watch: status change -> refresh",
+        core.watcherShouldRefresh({ "/s/abc123.json" }) == true)
+  check("watch: heartbeat + status change -> refresh",
+        core.watcherShouldRefresh({ "/s/.panel-alive", "/s/abc123.json" }) == true)
+  check("watch: decision file -> refresh",
+        core.watcherShouldRefresh({ "/s/abc123.decision" }) == true)
+  check("watch: empty batch -> no refresh (timer covers it)",
+        core.watcherShouldRefresh({}) == false)
+  check("watch: nil batch safe", core.watcherShouldRefresh(nil) == false)
+end
+
+-- ---- set-mode delivery contract: no dispatch -> no optimistic re-base (R2 #4)
+do
+  local item = { key = "k", name = "p", editor = "vscode", permission_mode = "default" }
+  -- FX.sendKeys returns an EXPLICIT false when it skipped (no window match /
+  -- dead kitty target). handleAction must then report nil so the bridge never
+  -- persists the target mode into the status file -- a lying panel, plus every
+  -- re-pick computing a 0-step no-op from the fake base.
+  local r = newRecorder()
+  r.fx.sendKeys = function(t, keys)
+    r.calls[#r.calls + 1] = { op = "sendKeys", a = (t or {}).name, b = keys, tgt = t }
+    return false
+  end
+  eq("set-mode: skipped dispatch returns nil",
+     core.handleAction(r.fx, item, "set-mode", "plan"), nil)
+  eq("set-mode: the skip still ATTEMPTED the keys", r.last().op, "sendKeys")
+
+  -- a delivered dispatch (true) returns the action -> the bridge re-bases
+  r = newRecorder()
+  r.fx.sendKeys = function() return true end
+  eq("set-mode: delivered dispatch returns the action",
+     core.handleAction(r.fx, item, "set-mode", "plan"), "set-mode")
+
+  -- a fake returning NOTHING (the recorder default, and the answer path's
+  -- contract) still counts as success: only an explicit false means "not sent"
+  r = newRecorder()
+  eq("set-mode: nil-returning fx keeps the success contract",
+     core.handleAction(r.fx, item, "set-mode", "plan"), "set-mode")
+end
+
+-- ---- nudge delivery contract: skipped paste -> nil, never ledgered (R3 #1) --
+do
+  local item = { key = "k", name = "p", editor = "vscode" }
+  -- FX.pasteIntoWindow returns an EXPLICIT false when the no-window-match guard
+  -- skipped the paste. handleAction must then report nil so the bridge ledgers
+  -- nudge_skipped instead of a delivery the session never received.
+  local r = newRecorder()
+  r.fx.pasteIntoWindow = function(t, payload)
+    r.calls[#r.calls + 1] = { op = "pasteIntoWindow", a = (t or {}).name, b = payload, tgt = t }
+    return false
+  end
+  eq("nudge: skipped paste returns nil", core.handleAction(r.fx, item, "nudge", "hi"), nil)
+  eq("nudge: the skip still ATTEMPTED the paste", r.last().op, "pasteIntoWindow")
+
+  -- a delivered paste (true) returns the action -> the bridge ledgers "nudge"
+  r = newRecorder()
+  r.fx.pasteIntoWindow = function() return true end
+  eq("nudge: delivered paste returns the action",
+     core.handleAction(r.fx, item, "nudge", "hi"), "nudge")
+
+  -- a fake returning NOTHING (the recorder default) keeps the success contract:
+  -- only an explicit false means "not sent" (same as set-mode/sendKeys)
+  r = newRecorder()
+  eq("nudge: nil-returning fx keeps the success contract",
+     core.handleAction(r.fx, item, "nudge", "hi"), "nudge")
+  -- empty text stays a no-op (returns nil WITHOUT attempting a paste)
+  r = newRecorder()
+  eq("nudge: empty text still a no-op", core.handleAction(r.fx, item, "nudge", ""), nil)
+  eq("nudge: empty text attempts nothing", r.count(), 0)
+end
+
+-- ---- Panel-JS source tripwires (R2 #11 / #15) -------------------------------
+-- The settings JS has no headless runtime in this Lua+bash suite (same rationale
+-- as tests/escaping.test.sh), so pin the load-bearing expressions at the source
+-- level. Reformatting these lines can false-alarm; re-verify the behavior then.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("js-pin: dashboard source readable", #src > 0)
+  -- #15: a cancelled default-provider pick must not resurrect from the stale DOM.
+  -- showSettings passes the SAVED spawn.provider ("" = bare claude); falling back
+  -- to sel.value would re-select -- and any Save silently persist -- the cancel.
+  check("js-pin: refreshProviderDefault has NO stale-DOM fallback",
+        src:find("want = want || sel.value", 1, true) == nil)
+  check("js-pin: refreshProviderDefault keeps the saved-empty sentinel",
+        src:find('want = want || "";', 1, true) ~= nil)
+  -- #11: switching a provider card's kind back to claude must clear the
+  -- gateway-only fields the Save-merge inherited -- a stale baseUrl poisons
+  -- providerByModel's respawn matching (see core.test.lua's pure-side pin).
+  check("js-pin: non-gateway kind clears baseUrl/authTokenEnv on Save",
+        src:find("delete p.baseUrl; delete p.authTokenEnv;", 1, true) ~= nil)
+  check("js-pin: non-gateway kind clears smallFastModel/headers on Save",
+        src:find("delete p.smallFastModel; delete p.headers;", 1, true) ~= nil)
+end
+
+-- ---- Injection-tail chokepoint + delivery-gated alerts (R3 #0/#1/#2/#5) -----
+-- The dashboard's dispatch wiring has no headless runtime here (same rationale
+-- as the Panel-JS tripwires above), so pin the load-bearing call shapes at the
+-- source level. Reformatting these lines can false-alarm; re-verify then.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("inject-pin: dashboard source readable", #src > 0)
+
+  -- #2/#5: EVERY window-keystroke dispatch must reserve its slot through the
+  -- ONE chokepoint (dispatchSerialized). Raw core.staggerSlot arithmetic at a
+  -- call site is how drain/auto-feed/ctx-menu/Stream-Deck/hotkey paths drifted
+  -- out of serialization in round 2.
+  local slotCalls = select(2, src:gsub("core%.staggerSlot%(", ""))
+  eq("inject-pin: staggerSlot called ONLY by the chokepoint", slotCalls, 1)
+  local sites = select(2, src:gsub("dispatchSerialized%(", ""))
+  check("inject-pin: chokepoint wired at all dispatch sites (16 calls + def, got=" .. sites .. ")",
+        sites >= 17)
+  -- the specific launchers round 3 caught bypassing the tail:
+  check("inject-pin: refresh() drain close serialized",
+        src:find('dispatchSerialized(it, "close", function() core.handleAction(FX, it, "close") end)', 1, true) ~= nil)
+  check("inject-pin: refresh() auto-feed serialized (pop inside the slot)",
+        src:find('dispatchSerialized(it, "queue-feed", function()', 1, true) ~= nil)
+  check("inject-pin: per-tile close no longer skips the tail",
+        src:find('dispatchSerialized(item, a, function() core.handleAction(FX, item, "close") end)', 1, true) ~= nil)
+  check("inject-pin: ctx-menu clear serialized",
+        src:find('dispatchSerialized(item, "clear", function() FX.typeIntoWindow(winTarget(item), "/clear") end)', 1, true) ~= nil)
+  check("inject-pin: ctx-menu compact serialized",
+        src:find('dispatchSerialized(item, "compact", function() FX.typeIntoWindow(winTarget(item), "/compact") end)', 1, true) ~= nil)
+  check("inject-pin: Stream Deck / hotkey presses serialized",
+        select(2, src:gsub('dispatchSerialized%(it[em]*, action, function%(%) core%.handleAction%(FX, it[em]*, action%) end%)', "")) >= 2)
+  check("inject-pin: generic per-tile tail uses the chokepoint",
+        src:find("dispatchSerialized(item, a, dispatch)", 1, true) ~= nil)
+
+  -- #0: the audit-review alert is gated on pasteIntoWindow's delivery status
+  -- (a skipped paste must never announce "sent a N-event review").
+  check("audit-pin: review paste return gates the alert",
+        src:find("if FX.pasteIntoWindow(winTarget(target), { text = prompt }) then", 1, true) ~= nil)
+  check("audit-pin: skip announces review NOT sent",
+        src:find("review NOT sent", 1, true) ~= nil)
+
+  -- #1: an image nudge ledgers nudge_skipped (and alerts) on a skipped paste;
+  -- a text nudge ledgers AFTER dispatch, gated on handleAction's result.
+  check("nudge-pin: image paste return gates the ledger",
+        src:find('if FX.pasteIntoWindow(winTarget(item), { text = payload.text and tostring(payload.text) or nil, imagePath = path }) then', 1, true) ~= nil)
+  check("nudge-pin: skipped image nudge ledgers nudge_skipped",
+        src:find('ledgerFor(item, { type = "nudge_skipped", text = tostring(payload.text or ""):sub(1, 200), image = true })', 1, true) ~= nil)
+  check("nudge-pin: skipped image nudge alerts the operator",
+        src:find("nudge NOT sent", 1, true) ~= nil)
+  check("nudge-pin: text nudge ledger gated on delivery",
+        src:find('type = (acted == "nudge") and "nudge" or "nudge_skipped"', 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

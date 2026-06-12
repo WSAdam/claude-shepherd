@@ -24,6 +24,14 @@ cc_have_jq() { command -v jq >/dev/null 2>&1; }
 # defaults to OFF when the file or a key is missing.
 CC_CONFIG_FILE="${CC_CONFIG_FILE:-${HOME}/.claude/cc-config.json}"
 
+# Fail-safe diagnostics: if the file EXISTS but doesn't parse (a hand-edit typo),
+# every cc_config read below silently falls back to its default — which turns
+# user-ENABLED features (audit ledger, autoDeny patterns) off. The defaults still
+# win (fail-safe), but say so loudly, once per process, on stderr.
+if [ -f "$CC_CONFIG_FILE" ] && cc_have_jq && ! jq -e . "$CC_CONFIG_FILE" >/dev/null 2>&1; then
+  echo "[cc-lib] ⚠️  $CC_CONFIG_FILE is malformed — config reads fall back to defaults" >&2
+fi
+
 # Read a config value by jq path, falling back to a default. A literal `false`
 # is returned as "false" (NOT treated as missing), so booleans work correctly.
 # Usage: cc_config '.policies.approveRepeats' 'false'
@@ -149,12 +157,18 @@ cc_del_field() {
 # Per-session gated-tools override dir (Feature D), mirroring cc-autopilot. Defined
 # here so SessionEnd can clean it up; cc-approve.sh reads the same path on its hot path.
 CC_GATE_TOOLS_DIR="${CC_GATE_TOOLS_DIR:-${HOME}/.claude/cc-gate-tools}"
+# Same deal for the per-key approveRepeats memo + autopilot expiry files written by
+# cc-approve.sh/the panel: hoisted here so cc_remove can stop those orphans too.
+CC_APPROVED_DIR="${CC_APPROVED_DIR:-${HOME}/.claude/cc-approved}"
+CC_AUTOPILOT_DIR="${CC_AUTOPILOT_DIR:-${HOME}/.claude/cc-autopilot}"
 
-# Remove a session entirely (used by SessionEnd) plus any stray decision file and
-# per-session gated-tools override (a new session gets a new key, so this just
-# stops orphans accumulating).
+# Remove a session entirely (used by SessionEnd) plus any stray decision/claim
+# file and the per-session gated-tools override, approveRepeats memo, and
+# autopilot expiry (a new session gets a new key, so this just stops orphans
+# accumulating).
 cc_remove() {
-  rm -f "$(cc_file "$1")" "$(cc_decision_file "$1")" "$CC_GATE_TOOLS_DIR/$1" 2>/dev/null || true
+  rm -f "$(cc_file "$1")" "$(cc_decision_file "$1")" "$(cc_decision_file "$1")".claim.* \
+    "$CC_GATE_TOOLS_DIR/$1" "$CC_APPROVED_DIR/$1" "$CC_AUTOPILOT_DIR/$1" 2>/dev/null || true
 }
 
 # ---- Audit/event ledger ----------------------------------------------------

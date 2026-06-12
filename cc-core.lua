@@ -126,7 +126,15 @@ function M.handleAction(fx, item, action, text)
     -- Inject via the clipboard (one ⌘V), not char-by-char keystrokes: that's
     -- newline-safe (a multi-line list pastes as one block instead of each line
     -- submitting early) and more reliable in the VS Code extension.
-    if text and #text > 0 then fx.pasteIntoWindow(tgt, { text = text }) else return nil end
+    if not (text and #text > 0) then return nil end
+    -- pasteIntoWindow reports delivery: an explicit false means the no-window-
+    -- match guard skipped the paste, so report nil and the caller never ledgers
+    -- a nudge the session didn't receive (same contract as set-mode below;
+    -- strict == false keeps fx fakes that return nothing on the success path).
+    if fx.pasteIntoWindow(tgt, { text = text }) == false then
+      fx.log("[cc-core] nudge paste not delivered for " .. tostring(item.name) .. " -- not recorded")
+      return nil
+    end
   elseif action == "continue" then
     -- Resume a session frozen on an API error (e.g. ECONNRESET): type the literal word
     -- "continue" + Enter, exactly as the user would, to restart the aborted turn.
@@ -153,7 +161,15 @@ function M.handleAction(fx, item, action, text)
     if n <= 0 then return nil end
     local keys = {}
     for _ = 1, n do keys[#keys + 1] = { mods = { "shift" }, key = "tab" } end
-    fx.sendKeys(tgt, keys)
+    -- The dashboard optimistically re-bases permission_mode when this returns
+    -- "set-mode" -- but sendKeys can SKIP (no window match / dead kitty target).
+    -- An explicit false means "nothing was sent": report nil so the caller never
+    -- persists a mode the session isn't in. Strict == false keeps fx fakes (and
+    -- the answer path) that return nothing on the success contract.
+    if fx.sendKeys(tgt, keys) == false then
+      fx.log("[cc-core] set-mode keys not delivered for " .. tostring(item.name) .. " -- mode NOT re-based")
+      return nil
+    end
   elseif action == "answer" then
     -- Select option #text (0-based) in a pending single-select AskUserQuestion:
     -- only a terminal TUI (kitty) responds to synthesized arrow/Enter; the VS Code
@@ -391,6 +407,30 @@ function M.selectActionable(list, action)
   return out
 end
 
+-- Does dispatching `action` on this session skip window focus entirely? kitty
+-- routes through `kitty @` (headless) and an armed-gate approve/deny is a
+-- decision-file write. Everything ELSE focuses a window and injects keystrokes
+-- on timers, so the bulk dispatcher must stagger those: N synchronous dispatches
+-- would all fire after the LAST focus and land every key in one window.
+function M.actionIsHeadless(item, action)
+  if not item then return false end
+  if item.editor == "kitty" then return true end
+  return (action == "approve" or action == "deny") and item.gate == "waiting"
+end
+
+-- Reserve the next slot in the SHARED injection-chain schedule. The stagger
+-- must hold across dispatches, not just within one bulk message: a second bulk
+-- click (or a single window action during the stagger window) would otherwise
+-- start its chain at t=0 and interleave with the in-flight ones, landing keys
+-- in the wrong session. `tailAt` is the absolute deadline of the last reserved
+-- chain (module state on the dashboard side); returns the delay (s) to schedule
+-- the next chain and the advanced tail.
+function M.staggerSlot(tailAt, now, gap)
+  now = tonumber(now) or 0
+  local startAt = math.max(tonumber(tailAt) or 0, now)
+  return startAt - now, startAt + (tonumber(gap) or 0)
+end
+
 -- ---- Improve button (leaderboard improvement cards) ------------------------
 
 -- Parse `git remote get-url origin` output down to "owner/repo" -- mirrors the sed
@@ -470,6 +510,43 @@ function M.filterLedger(events, opts)
   return out
 end
 
+-- Cap a filtered slice (newest-first) so a huge ledger can't bloat the webview
+-- payload. limit <= 0 means NO cap -- export/review are documented as "full
+-- data, not the capped slice", so they must be able to bypass the webview
+-- default. Returns the (possibly sliced) list + a truncated flag.
+function M.capLedgerSlice(events, limit)
+  events = events or {}
+  local cap = tonumber(limit) or 2000
+  if cap <= 0 or #events <= cap then return events, false end
+  local t = {}
+  for i = 1, cap do t[i] = events[i] end
+  return t, true
+end
+
+-- Split events into kept/purged under a purge filter (session AND types AND
+-- time window -- the EXACT filter the audit UI confirmed; matching a superset
+-- would irreversibly delete events the operator never approved). Reuses
+-- filterLedger so purge can never disagree with export/review about what a
+-- filter selects. Order of both lists follows the input (file order).
+function M.splitLedgerEvents(events, filter)
+  local matched = {}
+  for _, e in ipairs(M.filterLedger(events, filter)) do matched[e] = true end
+  local kept, purged = {}, {}
+  for _, e in ipairs(events or {}) do
+    if matched[e] then purged[#purged + 1] = e else kept[#kept + 1] = e end
+  end
+  return kept, purged
+end
+
+-- Is a purge filter SCOPED (vs "delete everything")? Drives both the
+-- confirmation dialog wording and whether the purge escalates to filter.all.
+-- `types` counts: a type-only purge must not silently widen to every file.
+function M.purgeFilterIsScoped(f)
+  if type(f) ~= "table" then return false end
+  if f.session or f.sinceTs or f.untilTs then return true end
+  return type(f.types) == "table" and #f.types > 0
+end
+
 -- A daily ledger filename ("YYYY-MM-DD.jsonl") -> epoch seconds at 00:00:00Z that
 -- day, reusing isoToEpoch so there's ONE civil-date implementation (matches the UTC
 -- file naming in FX.appendLedger). nil if the name isn't a daily ledger file.
@@ -489,6 +566,37 @@ function M.expiredLedgerFiles(filenames, now, retentionDays)
   for _, fn in ipairs(filenames or {}) do
     local ep = M.ledgerFileEpoch(fn)
     if ep and ep < cutoff then out[#out + 1] = fn end
+  end
+  return out
+end
+
+-- Is `day` (UTC "YYYY-MM-DD") strictly before the current UTC day at epoch `now`?
+-- Redact may only rewrite PAST days: today's file is hot with O_APPEND hook writes,
+-- and a read->rewrite->rename would silently destroy a concurrent append. ISO
+-- dates compare lexicographically, so plain string `<` is the civil-date compare;
+-- a malformed/missing day fails closed (false -> not redactable).
+function M.ledgerDayIsPast(day, now)
+  day = tostring(day or "")
+  if not day:match("^%d%d%d%d%-%d%d%-%d%d$") then return false end
+  return day < os.date("!%Y-%m-%d", tonumber(now) or 0)
+end
+
+-- Size-cap GC decision (pure): given the live daily files sorted OLDEST-FIRST and
+-- a filename->bytes map, return the files to delete to get under capBytes. NEVER
+-- selects the newest file -- that's the hot current day the hooks are appending to
+-- (age-based expiry above can't pick today either); the cap shaves history, not
+-- the in-progress day. capBytes <= 0 -> {}.
+function M.ledgerCapVictims(live, sizes, capBytes)
+  local out = {}
+  local cap = tonumber(capBytes) or 0
+  if cap <= 0 or type(live) ~= "table" then return out end
+  local function size(fn) return (type(sizes) == "table" and tonumber(sizes[fn])) or 0 end
+  local total = 0
+  for _, fn in ipairs(live) do total = total + size(fn) end
+  local i = 1
+  while total > cap and i < #live do  -- i < #live: stop BEFORE the newest file
+    total = total - size(live[i])
+    out[#out + 1] = live[i]; i = i + 1
   end
   return out
 end
@@ -840,6 +948,18 @@ M.RISK_WEIGHTS = {
   volume = 3, volumeCap = 6,                  -- log-scaled tool exposure
 }
 M.RISK_THRESHOLDS = { med = 34, high = 67, staleSeconds = 300 }
+
+-- Should the risk-scoring ledger snapshot be re-read? refresh() runs at 1 Hz
+-- (timer + pathwatcher), and a full ledger re-read + per-line JSON parse every
+-- tick burns the Hammerspoon main thread forever. Re-read only when the files'
+-- identity signature changed (a hook appended / a day rolled over / a purge) or
+-- the TTL backstop expired (size+mtime can miss a same-second same-size
+-- rewrite). cache = { events, sig, ts }; nil/empty cache is always stale.
+function M.ledgerCacheStale(cache, sig, now, ttl)
+  if type(cache) ~= "table" or cache.events == nil then return true end
+  if sig ~= cache.sig then return true end
+  return (tonumber(now) or 0) - (tonumber(cache.ts) or 0) >= (tonumber(ttl) or 30)
+end
 
 -- Score one session's risk from its ledger events (caller filters to the session
 -- via core.filterLedger(all, {session=sid})). Returns { score, band, signals }.
@@ -1240,12 +1360,51 @@ function M.queuePop(q)
   return src[1], { tasks = rest }
 end
 
+-- Concatenate two queues (a's tasks first). Used when adopting a legacy
+-- session-keyed queue file into the project-keyed one.
+function M.queueMerge(a, b)
+  local t = {}
+  for _, x in ipairs(qtasks(a)) do t[#t + 1] = x end
+  for _, x in ipairs(qtasks(b)) do t[#t + 1] = x end
+  return { tasks = t }
+end
+
+-- The on-disk key for a session's task queue. Queues are keyed by the STABLE
+-- projectKey (launch folder, falling back to cwd) rather than the per-session
+-- tile key: a respawn or /clear gives the project a NEW session_id, so a
+-- session-keyed queue file would be stranded forever (invisible to the successor
+-- tile) the moment auto-respawn or ghost-prune replaces the session. Project
+-- keying means the successor inherits the pending tasks automatically (and
+-- parallel sessions in one folder deliberately share the queue). Sanitized the
+-- same way cc_sanitize does (anything outside [A-Za-z0-9._-] -> "_") so it's a
+-- safe filename. Falls back to the tile key when there's no project identity.
+function M.queueKey(item)
+  local pk = item and (item.projectKey or item.cwd)
+  if type(pk) == "string" and pk ~= "" then
+    return (pk:gsub("[^%w._%-]", "_"))
+  end
+  return item and item.key or nil
+end
+
+-- After ATTEMPTING to feed a queued task, decide what to persist/record. The FX
+-- paste path reports delivery (false = the no-window-match guard skipped the
+-- paste); only a DELIVERED feed may pop the queue -- persisting the shortened
+-- queue after a skipped paste silently destroys the operator's queued task and
+-- writes a false task_feed audit event.
+function M.queueFeedCommit(delivered)
+  if delivered then return { persist = true, event = "task_feed" } end
+  return { persist = false, event = "task_feed_skipped" }
+end
+
 -- Feed the next task only on a FRESH transition into `done`, when the queue is
--- non-empty and auto-feed is on. (prev==done means we already handled it.)
+-- non-empty and auto-feed is on. (prev==done means we already handled it. prev==nil
+-- means NO prior observation -- the first refresh after a Hammerspoon reload, since
+-- the prev snapshot is in-memory while queue files persist on disk -- so it can't
+-- be a fresh transition either: counting it would re-feed on every reload.)
 function M.shouldFeed(prev, cur, q, autoOn)
   if not autoOn then return false end
   if M.queueDepth(q) == 0 then return false end
-  return cur == "done" and prev ~= "done"
+  return cur == "done" and prev ~= nil and prev ~= "done"
 end
 
 -- ---- Graceful drain (Feature F) --------------------------------------------
@@ -1259,20 +1418,37 @@ function M.shouldDrainClose(draining, prev, cur)
   return cur == "done" and prev ~= "done"
 end
 
+-- The tile's "draining" badge: visible only while the feature is on AND the
+-- operator armed drain for this tile (the in-memory panel intent). Returns nil
+-- (not false) when hidden so the encoded tile payload omits the field entirely.
+function M.drainingBadge(drainOn, armed)
+  return (drainOn and armed) and true or nil
+end
+
 -- ---- Auto-respawn on unexpected death (opt-in, bounded) --------------------
 -- Should we relaunch a session that appears to have died unexpectedly? Fires ONCE
--- on the fresh transition into stale (wasStale=false -> isStale=true) for a real
--- session (one that has a session_id, so respawnSpec can faithfully rebuild it),
--- as long as the operator didn't intentionally close/drain it and we're under the
--- per-folder retry cap. The ~90s stale-detection latency is the natural backoff
--- between attempts (a relaunch that also dies is a fresh edge -> the next attempt,
--- until the cap), so no separate timer is needed. Pure gate; the dashboard owns
--- the attempt bookkeeping + the actual spawn. args =
---   { wasStale, isStale, hasSession, intentional, attempts, maxRetries }
+-- on the fresh transition into frozen (wasStale=false -> isStale=true, where the
+-- caller computes the flag against the RESPAWN threshold -- see stepAutoRespawn --
+-- not the 90s display staleness) for a real session (one that has a session_id,
+-- so respawnSpec can faithfully rebuild it), as long as the operator didn't
+-- intentionally close/drain it and we're under the per-folder retry cap. The
+-- threshold latency is the natural backoff between attempts (a relaunch that also
+-- dies is a fresh edge -> the next attempt, until the cap), so no separate timer
+-- is needed. Pure gate; the dashboard owns the attempt bookkeeping + the actual
+-- spawn. args =
+--   { wasStale, isStale, status, hasSession, intentional, attempts, maxRetries }
 function M.shouldAutoRespawn(args)
   args = args or {}
   if args.intentional then return false end                     -- user closed/drained it
   if not args.hasSession then return false end                  -- orphan: nothing to relaunch faithfully
+  -- Only a session frozen at `working` reads as dead. Status files are written
+  -- only by hook events (no heartbeat), so stale done/idle is the NORMAL
+  -- between-turns state, never a death; a clean exit fires SessionEnd (which
+  -- deletes the tile); an API-error freeze is resumed via Continue instead. And
+  -- a stale `approval` is by definition waiting on a HUMAN (escalation expects
+  -- multi-minute waits) -- stale-approval escalation owns that case, never a
+  -- respawn that would destroy the tile the user was about to Approve on.
+  if args.status ~= "working" then return false end
   if args.wasStale or not args.isStale then return false end    -- only the fresh false->true edge
   local cap = tonumber(args.maxRetries) or 0
   if cap <= 0 then return false end                             -- 0/absent = disabled
@@ -1287,8 +1463,9 @@ end
 -- `isStale` for next tick's wasStale (the edge contract); the spawn / removeStatus /
 -- "not respawnable" logging stay in the dashboard, which holds the respawnSpec.
 --   attempts : table (mutated)
---   item     : { projectKey, cwd, status, stale, session_id }
---   opts     : { enabled, maxRetries, intentional, wasStale, canRespawn }
+--   item     : { projectKey, cwd, status, stale, updated, session_id, since }
+--   opts     : { enabled, maxRetries, intentional, wasStale, canRespawn, now,
+--                staleSeconds, respawnStaleSeconds }
 -- returns:
 --   spawn     = edge fired AND canRespawn ~= false (a real relaunch; budget charged)
 --   wouldFire = edge fired (under cap, not intentional), regardless of canRespawn
@@ -1298,13 +1475,33 @@ function M.stepAutoRespawn(attempts, item, opts)
   opts = opts or {}
   item = item or {}
   local pk = item.projectKey or item.cwd
-  local isStale = item.stale or false
-  if not isStale and pk then attempts[pk] = nil end            -- healthy -> reset folder budget
+  -- Healthy -> reset the folder budget, but ONLY after sustained health. A freshly
+  -- relaunched tile is non-stale by construction (SessionStart just wrote it), so
+  -- resetting on first sight would wipe the budget ~90s before the relaunch could
+  -- possibly re-edge -- maxRetries would never bind and a crash loop respawns
+  -- forever. `since` is when the tile entered its current status (cc-status.sh
+  -- keeps it across same-status updates); require it to have survived a full stale
+  -- window. No now/since/staleSeconds -> fail closed (keep the budget).
+  if not (item.stale or false) and pk and opts.now and opts.staleSeconds and item.since
+    and (opts.now - item.since) > opts.staleSeconds then
+    attempts[pk] = nil
+  end
+  -- Death evidence needs MUCH more silence than the 90s display staleness: no
+  -- hook fires between PreToolUse and PostToolUse (nor during a long no-tool
+  -- reasoning segment), so a perfectly healthy session running one long build/
+  -- test command (Bash defaults to 120s, max 600s) freezes `updated` at
+  -- status=working for minutes. The respawn arm therefore uses its own, much
+  -- larger threshold (respawn.auto.staleSeconds, default 600s -- above the
+  -- tool-timeout ceiling) computed from the status file's `updated` stamp.
+  -- Missing clock/updated/threshold -> fail closed (no death evidence, no fire).
+  local rss = tonumber(opts.respawnStaleSeconds)
+  local frozen = (opts.now ~= nil and item.updated ~= nil and rss ~= nil
+    and (opts.now - item.updated) > rss) or false
   local wouldFire, spawn = false, false
   if opts.enabled and pk then
     local n = attempts[pk] or 0
     wouldFire = M.shouldAutoRespawn({
-      wasStale = opts.wasStale or false, isStale = isStale,
+      wasStale = opts.wasStale or false, isStale = frozen, status = item.status,
       hasSession = (item.session_id ~= nil and item.session_id ~= ""),
       intentional = opts.intentional and true or false,
       attempts = n, maxRetries = opts.maxRetries })
@@ -1313,7 +1510,7 @@ function M.stepAutoRespawn(attempts, item, opts)
       attempts[pk] = n + 1
     end
   end
-  return { spawn = spawn, wouldFire = wouldFire, isStale = isStale, attempts = pk and attempts[pk] or nil }
+  return { spawn = spawn, wouldFire = wouldFire, isStale = frozen, attempts = pk and attempts[pk] or nil }
 end
 
 -- Should this tile be pruned? Orphans = stale tiles with no session_id (a hook
@@ -1333,21 +1530,46 @@ end
 -- Find ghost duplicates left by `/clear` or a session restart: a `/clear` gives
 -- the project a NEW session_id (a new tile) while the old session_id's status file
 -- lingers with no SessionEnd. Returns the keys of tiles that are stale AND share a
--- live twin IN THE SAME PROJECT. The live twin is matched by the STABLE projectKey
--- (launch folder, falling back to cwd), NOT the basename `name`: two sessions in
--- DIFFERENT folders that merely share a basename have the same name but different
--- projectKeys, so name-keying would cross-prune an unrelated stale tile -- which also
--- silently swallows that session's auto-respawn (it's removed before the respawn loop).
--- A genuinely-active second session in the same folder isn't stale, so it's safe.
+-- live twin IN THE SAME PROJECT *and the same terminal window*. The live twin is
+-- matched by the STABLE projectKey (launch folder, falling back to cwd), NOT the
+-- basename `name`: two sessions in DIFFERENT folders that merely share a basename
+-- have the same name but different projectKeys, so name-keying would cross-prune an
+-- unrelated stale tile -- which also silently swallows that session's auto-respawn
+-- (it's removed before the respawn loop).
+-- Staleness alone is NOT death evidence: status files only change on hook events,
+-- so every alive session goes stale ~90s after finishing its turn -- with two
+-- parallel sessions in one folder, the resting one would otherwise be pruned while
+-- it sits alive holding its result. The shared terminal IS the evidence: a /clear
+-- reuses the same window (matching kitty identity), while genuine parallel sessions
+-- occupy distinct windows. Tiles with no terminal identity (non-kitty editors) are
+-- never pruned here; the 24h shouldPrune backstop owns that cleanup.
 function M.staleDuplicateKeys(list)
   local function projKey(it) return it.projectKey or it.cwd end
-  local liveProjects = {}
+  local function termId(it)  -- kitty socket+window pair; nil when unknown
+    local sock, wid = it.kitty_listen_on, it.kitty_window_id
+    -- A HALF identity is NO identity: kitty exports KITTY_WINDOW_ID always but
+    -- KITTY_LISTEN_ON only when remote control is configured, and window ids are
+    -- a per-INSTANCE counter from 1 -- so two default-config kitty instances both
+    -- yield window "1". Without the instance-disambiguating socket, matching on
+    -- the bare wid would prune a live parallel session as a false twin; fall to
+    -- the never-prune-here safe side instead (24h shouldPrune backstop cleans up).
+    if sock == nil or sock == "" or wid == nil or wid == "" then return nil end
+    return tostring(sock) .. "#" .. tostring(wid)
+  end
+  local liveTerms = {}  -- projectKey -> { [termId] = true } for non-stale tiles
   for _, it in ipairs(list or {}) do
-    if not it.stale and projKey(it) then liveProjects[projKey(it)] = true end
+    local pk, tid = projKey(it), termId(it)
+    if not it.stale and pk and tid then
+      liveTerms[pk] = liveTerms[pk] or {}
+      liveTerms[pk][tid] = true
+    end
   end
   local keys = {}
   for _, it in ipairs(list or {}) do
-    if it.stale and projKey(it) and liveProjects[projKey(it)] then keys[#keys + 1] = it.key end
+    local pk, tid = projKey(it), termId(it)
+    if it.stale and pk and tid and liveTerms[pk] and liveTerms[pk][tid] then
+      keys[#keys + 1] = it.key
+    end
   end
   return keys
 end
@@ -1445,6 +1667,17 @@ function M.watchdogShouldReset(status, stale)
   return status ~= "working" or stale == true
 end
 
+-- Should a pathwatcher event batch trigger a refresh? false when every changed
+-- path is the panel's own heartbeat: refresh() writes .panel-alive INTO the
+-- watched status dir each tick, so reacting to it would make every refresh
+-- schedule the next one (a self-sustaining loop at FSEvents latency).
+function M.watcherShouldRefresh(paths)
+  for _, p in ipairs(paths or {}) do
+    if not tostring(p):find("/.panel-alive", 1, true) then return true end
+  end
+  return false
+end
+
 -- ---- Image paste (Step 5) --------------------------------------------------
 -- Parse a clipboard image data URL ("data:image/png;base64,...."), returning
 -- its mime, a normalized lowercase file extension, and the base64 payload.
@@ -1495,6 +1728,29 @@ function M.parseSleepDisabled(pmsetOutput)
   local v = pmsetOutput:match("SleepDisabled%s+(%d)")
   if not v then return nil end
   return v == "1"
+end
+
+-- Overlay the Settings-managed keys onto an existing config, per TOP-LEVEL key,
+-- so hand-edited blocks the UI doesn't expose (risk / collision / drain /
+-- respawn / insights) survive a Save. Also carries forward the UI-unmanaged
+-- SUBKEYS inside blocks the form rebuilds wholesale -- spawn.kittyBin /
+-- spawn.kittySocket and escalation.hung would otherwise be silently deleted by
+-- every Save (including the auto-persisting Headless toggle). A generic deep
+-- merge is deliberately avoided: array-valued keys (providers,
+-- policies.patterns.*) must be REPLACED, not index-merged. Mutates + returns cfg.
+M.SETTINGS_KEEP_SUBKEYS = { spawn = { "kittyBin", "kittySocket" }, escalation = { "hung" } }
+function M.overlayConfig(cfg, incoming)
+  cfg = type(cfg) == "table" and cfg or {}
+  if type(incoming) ~= "table" then return cfg end
+  for block, subs in pairs(M.SETTINGS_KEEP_SUBKEYS) do
+    if type(cfg[block]) == "table" and type(incoming[block]) == "table" then
+      for _, k in ipairs(subs) do
+        if incoming[block][k] == nil then incoming[block][k] = cfg[block][k] end
+      end
+    end
+  end
+  for k, v in pairs(incoming) do cfg[k] = v end
+  return cfg
 end
 
 -- ---- Gate: gated-tools list (headless approvals) ---------------------------
@@ -1627,6 +1883,18 @@ function M.providerById(cfg, id)
   return nil
 end
 
+-- Which provider key should a spawn resolve? nil providerId = NO pick at all
+-- (hotkey/dialog path) -> the spawn.provider default; "" = the EXPLICIT
+-- "(none -- bare claude)" pick (the modal's first option, and the sentinel the
+-- respawn paths pass for a faithful bare relaunch) -> no provider at all. The
+-- two must not collapse, or an explicit bare pick silently runs on the default
+-- gateway (wrong endpoint/auth/model).
+function M.spawnProviderKey(cfg, providerId)
+  if providerId == nil then return M.config(cfg, "spawn.provider", nil) end
+  if tostring(providerId) == "" then return nil end
+  return providerId
+end
+
 -- Find a provider profile by its running model (+ base URL), for Feature F's
 -- respawn -- a tile records `model`/`base_url` but not the provider id it launched
 -- from. Anthropic sessions (no base_url) match a profile by model alone; gateway
@@ -1638,7 +1906,12 @@ function M.providerByModel(cfg, model, baseUrl)
   local hasBase = baseUrl ~= nil and tostring(baseUrl) ~= ""
   for _, p in ipairs(list) do
     if type(p) == "table" and tostring(p.model) == tostring(model) then
-      local pBase = (p.baseUrl ~= nil and tostring(p.baseUrl) ~= "") and tostring(p.baseUrl) or nil
+      -- Only a GATEWAY profile has a base-URL signature: a claude/anthropic
+      -- profile never exports ANTHROPIC_BASE_URL, so a stale baseUrl left over
+      -- from a kind switch must not defeat the base-less match (it would turn
+      -- a faithful respawn into a bare `claude` on the wrong model).
+      local isGateway = tostring(p.kind or "anthropic") == "gateway"
+      local pBase = (isGateway and p.baseUrl ~= nil and tostring(p.baseUrl) ~= "") and tostring(p.baseUrl) or nil
       if hasBase then
         if pBase == tostring(baseUrl) then return p end
       elseif not pBase then
@@ -1716,17 +1989,32 @@ function M.envPrefix(envList)
   return table.concat(parts, " ") .. " "
 end
 
+-- Run `inner` under an INTERACTIVE login zsh when it carries provider env.
+-- Command shells (kitty argv, sshd's `shell -c`) are non-interactive and never
+-- source ~/.zshrc -- where the README tells users to export the authTokenEnv
+-- secret -- so plain execution expands `$MY_KEY` to "" and every gateway call
+-- 401s. `-lic` sources .zshenv/.zprofile/.zshrc before exec'ing the command.
+-- No env to expand -> inner unchanged (the no-provider spawn keeps its shape).
+function M.loginShellWrap(inner, env, shell)
+  if type(env) ~= "table" or #env == 0 then return inner end
+  return tostring(shell or "zsh") .. " -lic " .. shquote(inner)
+end
+
 -- Wrap a remote command for SSH (Phase 2 -- run `claude` ON another machine while
 -- the terminal window stays local, so keystroke effects still target it). The whole
--- command is single-quoted so its inner `$VAR` secrets expand on the REMOTE host
--- (from the remote login shell), never locally. `-t` forces a TTY so claude's TUI
--- works. ssh = { host, user(optional), tty(default true) }.
-function M.sshWrap(inner, ssh)
+-- command is single-quoted so its inner `$VAR` secrets expand on the REMOTE host,
+-- never locally. sshd runs a supplied command via `shell -c` -- NON-login,
+-- NON-interactive, so neither remote .zshrc nor .zprofile is sourced -- so when
+-- the inner carries provider env, run it under an interactive login zsh there
+-- (loginShellWrap; the remote ~/.zshrc is the README-documented home for the
+-- secret). `-t` forces a TTY so claude's TUI works.
+-- ssh = { host, user(optional), tty(default true) }.
+function M.sshWrap(inner, ssh, env)
   if type(ssh) ~= "table" or not ssh.host or tostring(ssh.host) == "" then return inner end
   local dest = (ssh.user and tostring(ssh.user) ~= "")
     and (tostring(ssh.user) .. "@" .. tostring(ssh.host)) or tostring(ssh.host)
   local cmd = (ssh.tty == false) and "ssh" or "ssh -t"
-  return cmd .. " " .. dest .. " " .. shquote(inner)
+  return cmd .. " " .. dest .. " " .. shquote(M.loginShellWrap(inner, env))
 end
 
 -- The shell command run INSIDE the spawned terminal:
@@ -1739,7 +2027,7 @@ function M.spawnInner(project, prompt, opts)
   local inner = "cd " .. shquote(project or ".") .. " && " .. M.envPrefix(opts.env) .. "claude"
   for _, f in ipairs(opts.flags or {}) do inner = inner .. " " .. f end
   if prompt and #prompt > 0 then inner = inner .. " " .. shquote(prompt) end
-  return M.sshWrap(inner, opts.ssh)
+  return M.sshWrap(inner, opts.ssh, opts.env)
 end
 
 -- The AppleScript to run (via hs.osascript, NOT a shell) that opens `terminal`
@@ -1791,6 +2079,19 @@ function M.modeCycleSteps(cur, target, enabledModes)
   return (ti - ci) % #cycle
 end
 
+-- Merge fields into a session's status JSON text (pure; the FX layer does the
+-- read + atomic write). Needed after a successful set-mode: Shift+Tab fires no
+-- hook, so the stored permission_mode stays stale -- the dropdown snaps back and
+-- a re-pick would compute the cycle count from the WRONG base, landing past the
+-- target mode. Returns the patched JSON text, or nil when the input doesn't
+-- decode to an object. The session's next real hook write restores ground truth.
+function M.patchedStatus(text, fields)
+  local ok, data = pcall(function() return M.json.decode(text) end)
+  if not ok or type(data) ~= "table" then return nil end
+  for k, v in pairs(fields or {}) do data[k] = v end
+  return M.json.encode(data)
+end
+
 -- Editor-aware spawn spec (F3-F5). Returns a STRUCTURED intent, not a string, that
 -- the impure FX layer dispatches on -- so the editor->command mapping is testable.
 --   kitty    -> { kind="kitty",    argv={...} }            run via hs.task
@@ -1799,8 +2100,9 @@ end
 --   else     -> { kind="terminal", applescript=... }        the reliable fallback
 -- opts: { terminal, kittyBin, kittyRemote(bool), kittySocket, permissionMode,
 --         effort, env, shell, ssh }. env (a providerEnv list) injects provider env
---         vars (incl. ANTHROPIC_MODEL); shell (default "zsh") is the login shell used
---         to expand `$VAR` secrets in the kitty path; ssh = {host,user} runs `claude`
+--         vars (incl. ANTHROPIC_MODEL); shell (default "zsh") is the interactive
+--         login shell (-lic, sources ~/.zshrc) that expands `$VAR` secrets in the
+--         kitty path; ssh = {host,user} runs `claude`
 --         on a remote box while the terminal window stays local (Phase 2).
 function M.spawnSpec(editor, project, task, opts)
   opts = opts or {}
@@ -1820,18 +2122,23 @@ function M.spawnSpec(editor, project, task, opts)
     end
     argv[#argv + 1] = "--directory"; argv[#argv + 1] = project or "."
     if isSsh then
-      -- Run ssh directly (no local shell): the remote login shell runs the inner
-      -- and expands its `$VAR` secrets. The inner is one argv element.
+      -- Run ssh directly (no local shell). sshd executes the remote command via
+      -- `shell -c` (non-login, non-interactive), so the inner's `$VAR` secrets
+      -- need an interactive login zsh on the remote (loginShellWrap sources the
+      -- remote ~/.zshrc). The whole remote command is one argv element.
       argv[#argv + 1] = "ssh"
       if ssh.tty ~= false then argv[#argv + 1] = "-t" end
       argv[#argv + 1] = (ssh.user and tostring(ssh.user) ~= "")
         and (tostring(ssh.user) .. "@" .. tostring(ssh.host)) or tostring(ssh.host)
-      argv[#argv + 1] = M.spawnInner(project, task, { env = env, flags = flags })
+      argv[#argv + 1] = M.loginShellWrap(
+        M.spawnInner(project, task, { env = env, flags = flags }), env)
     elseif hasEnv then
-      -- Kitty argv has no shell to expand `$VAR`, so run the inner via a login
-      -- shell (uniform env injection + secret expansion with the terminal path).
+      -- Kitty argv has no shell to expand `$VAR`, so run the inner via an
+      -- INTERACTIVE login shell: `-lic` sources ~/.zshrc, the README-documented
+      -- home for the authTokenEnv secret. Plain `-lc` (login, non-interactive)
+      -- skips .zshrc, expanding the secret to "" -- every gateway call 401s.
       argv[#argv + 1] = opts.shell or "zsh"
-      argv[#argv + 1] = "-lc"
+      argv[#argv + 1] = "-lic"
       argv[#argv + 1] = M.spawnInner(project, task, { env = env, flags = flags })
     else
       argv[#argv + 1] = "claude"
@@ -1950,7 +2257,7 @@ end
 -- `payload` = { key=<panel key name>, text=<string> }.
 --   focus -> @ [--to S] focus-window --match SEL
 --   close -> @ [--to S] close-window --match SEL
---   key   -> @ [--to S] send-key   --match SEL <token>
+--   key   -> @ [--to S] send-key   --match SEL <token...>
 --   text  -> @ [--to S] send-text  --match SEL -- <text>
 function M.kittyCmd(action, item, payload)
   item = item or {}
@@ -1971,10 +2278,17 @@ function M.kittyCmd(action, item, payload)
   elseif action == "close" then
     argv[#argv + 1] = "close-window"; argv[#argv + 1] = "--match"; argv[#argv + 1] = sel
   elseif action == "key" then
-    local tok = payload.token  -- a ready kitty token (built via M.kittyKeyToken)
-    if not tok or tok == "" then return nil end
+    -- payload.tokens batches several keys into ONE send-key process: ordering is
+    -- guaranteed inside a single invocation, unlike N concurrent processes racing
+    -- to the control socket (an early Return would pick the wrong answer option).
+    local toks = payload.tokens or { payload.token }  -- ready kitty tokens (M.kittyKeyToken)
+    local clean = {}
+    for _, tok in ipairs(toks) do
+      if tok and tok ~= "" then clean[#clean + 1] = tok end
+    end
+    if #clean == 0 then return nil end
     argv[#argv + 1] = "send-key"; argv[#argv + 1] = "--match"; argv[#argv + 1] = sel
-    argv[#argv + 1] = tok
+    for _, tok in ipairs(clean) do argv[#argv + 1] = tok end
   elseif action == "text" then
     if not payload.text or #payload.text == 0 then return nil end
     argv[#argv + 1] = "send-text"; argv[#argv + 1] = "--match"; argv[#argv + 1] = sel
@@ -2021,6 +2335,22 @@ function M.focusCandidates(name, cwd, skipUser, skip)
     for i = #parts - 1, 1, -1 do add(parts[i]) end  -- ancestors, deepest first
   end
   return out
+end
+
+-- Ordered bundle-id candidates for a session's editor kind. A 'cursor' session
+-- must NEVER search VS Code's windows (and vice versa): with both editors
+-- running, a fixed-order walk either injects keystrokes into the wrong app's
+-- matching window or skips a perfectly matchable one. The status file carries
+-- the editor kind (cc_detect_editor), so the right app is always knowable.
+-- nil/unknown editor -> `fallback` (the legacy full walk).
+M.EDITOR_BUNDLE_IDS = {
+  vscode   = { "com.microsoft.VSCode", "com.microsoft.VSCodeInsiders" },
+  cursor   = { "com.todesktop.230313mzl4w4u92" },
+  terminal = { "com.apple.Terminal" },
+}
+
+function M.editorBundleIds(editor, fallback)
+  return M.EDITOR_BUNDLE_IDS[tostring(editor or "")] or fallback or {}
 end
 
 -- ---- New-session UI helpers (F3-F5): folder browser + recents + new project --
@@ -2140,10 +2470,14 @@ function M.safeFolderName(name)
   return name
 end
 
--- Full path for a new project under `parent`, or nil if the name is unsafe.
+-- Full path for a new project under `parent`, or nil if the name is unsafe or
+-- the parent isn't an ABSOLUTE path. A relative result is never right: mkdir
+-- would resolve it against Hammerspoon's process cwd while the spawned shell's
+-- `cd` resolves it against $HOME -- folder created one place, session elsewhere.
 function M.newProjectPath(parent, name)
   local safe = M.safeFolderName(name)
   if not safe then return nil end
+  if M.normDir(parent):sub(1, 1) ~= "/" then return nil end
   return M.pathJoin(parent, safe)
 end
 

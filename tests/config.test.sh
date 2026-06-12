@@ -28,4 +28,16 @@ assert_eq "provider kind by index" "gateway" "$(cfg '.providers[0].kind' '')"
 assert_eq "auth-token is a VAR NAME, not a key" "MY_LITELLM_KEY" "$(cfg '.providers[0].authTokenEnv' '')"
 assert_eq "no literal key field present" "none" "$(cfg '.providers[0].authToken' 'none')"
 
+# Malformed file (a hand-edit typo, e.g. trailing comma): defaults still win
+# (fail-safe), but cc-lib must warn on stderr instead of silently flipping
+# user-ENABLED features (ledger, autoDeny) off.
+printf '{"ledger":{"enabled":true},}' > "$CFG"
+assert_eq "malformed file -> default (fail-safe)" "false" "$(cfg '.ledger.enabled' 'false' 2>/dev/null)"
+warn="$(CC_STATUS_DIR="$TMP" CC_CONFIG_FILE="$CFG" bash -c '. "'"$ROOT"'/cc-lib.sh"' 2>&1 >/dev/null)"
+assert_eq "malformed file warns on stderr" "1" "$(printf '%s' "$warn" | grep -c 'malformed')"
+# ...and a valid file stays silent
+printf '{"ledger":{"enabled":true}}' > "$CFG"
+warn="$(CC_STATUS_DIR="$TMP" CC_CONFIG_FILE="$CFG" bash -c '. "'"$ROOT"'/cc-lib.sh"' 2>&1 >/dev/null)"
+assert_eq "valid file: no warning" "" "$warn"
+
 finish

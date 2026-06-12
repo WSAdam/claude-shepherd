@@ -9,7 +9,7 @@
     "PreToolUse": [
       { "matcher": "", "hooks": [
         { "type": "command", "command": "bash \"$HOME/.claude/cc-status.sh\" pretooluse" },
-        { "type": "command", "command": "bash \"$HOME/.claude/cc-approve.sh\"" }
+        { "type": "command", "command": "bash \"$HOME/.claude/cc-approve.sh\"", "timeout": 130 }
       ] }
     ],
     "PostToolUse": [
