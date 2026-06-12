@@ -1419,6 +1419,16 @@ local function claudeBinPath()
   for _, p in ipairs({ home .. "/.claude/local/claude", home .. "/.local/bin/claude" }) do
     if hs.fs.attributes(p) then return p end
   end
+  -- No CLI installed at all: fall back to the binary the VS Code / Cursor
+  -- extension bundles (it IS the full CLI). The dir is version-pinned, so pick
+  -- the newest numerically (pure + tested).
+  for _, extRoot in ipairs({ home .. "/.vscode/extensions", home .. "/.cursor/extensions" }) do
+    local newest = core.newestClaudeExtension(FX.readDir(extRoot))
+    if newest then
+      local p = extRoot .. "/" .. newest .. "/resources/native-binary/claude"
+      if hs.fs.attributes(p) then return p end
+    end
+  end
   return nil
 end
 

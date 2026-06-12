@@ -740,6 +740,17 @@ do
   local SP = "/Users/a b/claude"
   check("claudebin: spaced path is single-quoted",
      core.spawnInner("/p", nil, { claudeBin = SP }):find("'" .. SP .. "'", 1, true) ~= nil)
+  -- newestClaudeExtension: numeric version compare (lexicographic would pick 2.1.9)
+  eq("claudebin: newest extension picked numerically",
+     core.newestClaudeExtension({ "anthropic.claude-code-2.1.9-darwin-arm64",
+                                  "anthropic.claude-code-2.1.173-darwin-arm64",
+                                  "ms-python.python-2024.1.0", "junk" }),
+     "anthropic.claude-code-2.1.173-darwin-arm64")
+  eq("claudebin: major beats minor", core.newestClaudeExtension(
+     { "anthropic.claude-code-2.9.9", "anthropic.claude-code-3.0.0-darwin-arm64" }),
+     "anthropic.claude-code-3.0.0-darwin-arm64")
+  eq("claudebin: no extension dirs -> nil", core.newestClaudeExtension({ "foo", "bar" }), nil)
+  eq("claudebin: nil listing -> nil", core.newestClaudeExtension(nil), nil)
 end
 
 -- ---- spawnFlags ------------------------------------------------------------

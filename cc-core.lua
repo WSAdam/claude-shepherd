@@ -2527,6 +2527,23 @@ local function claudeRef(claudeBin)
   return "claude"
 end
 
+-- Pick the newest Claude Code EXTENSION dir from a VS Code/Cursor extensions
+-- listing -- the fallback claude binary when no CLI is installed at all (the
+-- extension bundles the full CLI at <dir>/resources/native-binary/claude).
+-- Folder names are version-pinned ("anthropic.claude-code-2.1.173-darwin-arm64")
+-- and lexicographic order lies (2.1.9 > 2.1.173), so compare numerically.
+function M.newestClaudeExtension(dirNames)
+  local best, bestV
+  for _, n in ipairs(dirNames or {}) do
+    local a, b, c = tostring(n):match("^anthropic%.claude%-code%-(%d+)%.(%d+)%.(%d+)")
+    if a then
+      local v = tonumber(a) * 1e8 + tonumber(b) * 1e4 + tonumber(c)
+      if not bestV or v > bestV then best, bestV = n, v end
+    end
+  end
+  return best
+end
+
 -- The shell command run INSIDE the spawned terminal:
 --   cd <project> && [ENV=... ] claude [flags] [prompt]
 -- opts: { env = providerEnv list, flags = spawnFlags list, ssh = {host,user},
