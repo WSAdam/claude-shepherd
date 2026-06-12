@@ -65,8 +65,15 @@ remaining items. Full per-round detail is in CHANGELOG.md and git history.
 - **Adversarial bug sweep** (multi-agent: per-flow finders → verifiers that re-ran each
   repro): fixed a sessionRisk string-threshold crash (froze refresh), a `pending.ask`
   merge leak, a `staleDuplicateKeys` cross-project prune, a `mergeHooks` over-broad
-  `cc-` match, a watchdog re-alert miss, and a session-blind blocked sparkline. Suite
-  now **659 core + 104 ui + bash**, all green.
+  `cc-` match, a watchdog re-alert miss, and a session-blind blocked sparkline.
+- **Three-round full-project scan (June 2026, commit `d46c215`)**: 46 verified bugs fixed
+  (majors 13 → 3 → 1 → 0 across rounds). Gate decisions now **nonce-bound** (atomic
+  claim/restore, 130s hook timeout + installer migration); auto-respawn fires only on a
+  ≥600s **frozen** `working` file (never approvals, sustained-health budget reset); queue
+  feeds are delivery-gated and projectKey-keyed; every window keystroke goes through the
+  `dispatchSerialized` chokepoint and **skips when no window matches**; ledger purge/export
+  honor exact filters; provider cards survive Settings Save; kitty spawns resolve
+  `~/.zshrc` secrets (`zsh -lic`). Suite **795 core + 167 ui + 167 bash**, all green.
 
 ## TODO
 - **Verify on a real Kitty box** (the one thing that needs the hardware): the `core.KITTY_KEY`
@@ -87,6 +94,48 @@ remaining items. Full per-round detail is in CHANGELOG.md and git history.
 - **4c-E — project routing / orchestrator** (deferred): per-project task routing + richer
   autopilot. Design notes in [docs/orchestrator-next.md](docs/orchestrator-next.md).
 
+## Feature roadmap (from the June 2026 full scan)
+
+Prioritized by value-for-effort. Items 1–7 came out of the scan's gap analysis; the two
+tool-backed items fold in `rg`/`fd`. **Principle for any external tool: detect → use →
+degrade gracefully** — a missing binary means slower, never broken (the install story
+stays "clone, `make install`, done"; `jq` remains the only hard dependency).
+
+1. **Settings UI for the dark config.** `risk.*`, `collision.*`, `drain.enabled`,
+   `respawn.*` (incl. the new `auto.staleSeconds`), `insights.maxBlockSeconds`, and
+   `ledger.captureTypes` all work today but require hand-editing `cc-config.json`. The
+   ⚙ form pattern already exists — cheapest win on the list. Add inline syntax examples
+   next to the `patterns.autoAllow`/`autoDeny` textareas while in there.
+2. **Per-session gate decision log in the detail panel.** Decisions land in the ledger
+   with full provenance but aren't visible where you act on the session — surface the
+   last N (e.g. "policy denied Bash ×4", with the matching pattern). Pure read of
+   existing ledger data.
+3. **Fleet-wide transcript/ledger search** *(ripgrep-backed)*. A search box answering
+   "which session touched `auth.ts`?" / "who ran that migration?" across every session's
+   transcript JSONL + the ledger. `rg` (detected at runtime) makes it instant across
+   hundreds of MB; fall back to `grep -r` when absent. Same theme as #2: data we already
+   have, invisible today.
+4. **Spawn presets + fuzzy folder search** *(fd-backed)*. "Save this setup" (folder +
+   editor + mode + provider) as one-click presets, per-project last-used recall, and
+   type-ahead fuzzy folder matching over the project roots in the New Session modal —
+   `fd` is fast and respects `.gitignore`/skips `node_modules`; fall back to
+   `find -maxdepth`. Builds on the existing recent-dirs plumbing.
+5. **Queue upgrades.** Reorder/priority in the detail panel, bulk-paste a multi-line
+   list auto-split into tasks, saved task templates. The queue rework from the scan
+   (projectKey keying, delivery-gated pops) is the clean base for this.
+6. **Notification history.** Escalation/watchdog alerts fire once; a "what fired while
+   you were away" view (read from the ledger's escalation events) closes the
+   missed-alert hole.
+7. **SSH status bridge** (Phase 2 above — promoted from "needs hardware" to roadmap
+   item): rsync-pull remote `cc-status/` with host-namespaced keys so remote sessions
+   become real tiles. Biggest unlock of the deferred items; then 4c-E project routing
+   extends the queue model across them.
+
+Evaluated and **declined** from the same tool review: `gron`/`yq`/`htmlq`/`hexyl` (no
+YAML/HTML/binary surfaces; `jq` already covers the JSON), `jc` (a parser framework for
+~5 lines of working `pmset` shell is altitude inversion), `eza`/`bat`/`tv` (terminal-human
+niceties; the panel's webview wants embedded JS, not shelled-out TUIs).
+
 ## Known platform limits (not bugs)
 - **VS Code extension** UI widgets (AskUserQuestion picker, permission-mode switcher) are
   **mouse-only** — no keyboard path. So click-to-answer, live mode-switch, and non-gate approve
@@ -100,4 +149,4 @@ remaining items. Full per-round detail is in CHANGELOG.md and git history.
 Pure decisions → `cc-core.lua` + unit tests; effects → `fx` recorder; shell hooks → bash suites
 with temp dirs. No live `kitty @` / keystrokes / network in tests (provider env-injection, usage
 parse/sum/window, and ssh-wrap are all asserted as pure strings — no real keys, no real spawns).
-`make test` green before every `make deploy`. 659 core + 104 ui + 132 bash side-effect-free checks.
+`make test` green before every `make deploy`. 795 core + 167 ui + 167 bash side-effect-free checks.

@@ -46,7 +46,19 @@ network, no multi-user, no secrets — it reads session status off the local fil
   [tests/escaping.test.sh](tests/escaping.test.sh) is a source-level tripwire for it.
 - **Per-tile refresh state is one row**: `prev[key] = { status, stale, escalated }`, rebuilt
   and swapped each refresh so a vanished tile drops out. `respawnAttempts` is separate
-  (keyed by projectKey — a per-folder budget, different lifecycle).
+  (keyed by projectKey — a per-folder budget, different lifecycle). **Autonomous actions
+  (feed / prune / respawn) never fire from a missing prev** — the first refresh after a
+  reload is an observation, not a transition edge — and never target a stale tile.
+- **Keystroke delivery is a contract.** `FX.pasteIntoWindow` / `FX.sendKeys` / `feedTask`
+  return delivery status; when no window positively matches, they **skip** (never type into
+  whatever is frontmost) and the caller must gate its side effects (queue pop, mode patch,
+  ledger event, success alert) on that return. Every window-keystroke dispatch goes through
+  the single `dispatchSerialized` chokepoint (shared `core.staggerSlot` tail) so chains
+  can't interleave; headless paths (kitty `@`, armed-gate decision files) stay immediate.
+- **Gate decisions are nonce-bound.** `cc-approve.sh` publishes `pending.nonce` per request;
+  `FX.writeDecision` echoes it (`allow <nonce>`, written tmp+rename); the gate consumes only
+  a matching nonce (legacy bare verbs need a strictly-newer mtime) via an atomic PID-owned
+  claim, restoring non-matching answers for their owner.
 
 ## Workflow
 
@@ -64,7 +76,10 @@ Cross-machine / controls roadmap done. Fleet-scale console shipped (tile search,
 groups, bulk fleet actions, per-session timeline, auto-respawn, insights sparklines,
 stuck-session watchdog). A distinct **"Error" state** (magenta) flags sessions frozen on an
 API error and offers a one-click **Continue** to resume them — derived client-side from the
-transcript tail (`core.transcriptError`), no hooks. Several rounds of adversarial +
-leaderboard-review bug-sweeps applied. Suite: **659 core + 104 ui + 132 bash** checks, all
-green. Remaining work is in [todos.md](todos.md) (4c-E project routing is the main deferred
-piece).
+transcript tail (`core.transcriptError`), no hooks. A **three-round multi-agent scan**
+(per-flow finders → adversarial verifiers → engineer fixes, June 2026) fixed 46 verified
+bugs and hardened the gate IPC (nonce-bound decisions), autonomy loops (600s frozen
+threshold), and keystroke delivery (skip-on-no-match + serialized dispatch). Suite:
+**795 core + 167 ui + 167 bash** checks, all green. Remaining work is in
+[todos.md](todos.md) (4c-E project routing is the main deferred piece; the feature
+roadmap from the scan lives there too).

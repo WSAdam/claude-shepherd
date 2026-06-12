@@ -4,6 +4,61 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-11 — Three-round full-project scan: 46 verified bugs fixed
+
+Three rounds of flow-by-flow multi-agent auditing (8 finders per round, every finding
+adversarially verified against the code before being fixed, a regression test per fix,
+`make test` gating each round). Majors went 13 → 3 → 1 → 0. Commit `d46c215` has the
+full per-bug detail; highlights:
+
+### Fixed — approval gate & decision IPC
+- **Decisions are now request-bound.** The gate publishes a per-request `pending.nonce`;
+  the panel echoes it in the decision file (written atomically, tmp+rename); the gate
+  consumes only a matching nonce via an atomic PID-owned claim and restores non-matching
+  answers (no-clobber hardlink). Closes a concurrent-request decision steal AND a
+  same-second leftover that could silently allow the wrong tool call.
+- **The gate actually gets its 2 minutes.** Claude Code's 60s default hook timeout was
+  killing `cc-approve.sh` mid-poll; the shipped registration now carries `timeout: 130`
+  and `install.sh` migrates existing installs (idempotently, shape-preserving jq).
+- NotebookEdit-style tools (no command/file_path) got digest signatures — one
+  approveRepeats approval no longer blanket-approves the whole tool. SessionEnd now also
+  cleans approveRepeats memos, autopilot expiries, and stray claim files.
+
+### Fixed — autonomy loops
+- **Auto-respawn can no longer duplicate live sessions.** It fires only on a `working`
+  status file frozen past `respawn.auto.staleSeconds` (default 600s — above the longest
+  tool call; display staleness is 90s and was the old, wrong trigger), never on pending
+  approvals (escalation owns those), and its per-folder budget resets only after
+  sustained health. Ghost-prune now needs positive terminal-identity evidence.
+- **Queue feeds are delivery-safe.** No feed on the first refresh after a reload (nil
+  prev is not a transition), never to a stale tile, the pop persists only when the paste
+  actually delivered (`task_feed_skipped` otherwise), and queues are keyed by projectKey
+  so respawn//clear can't strand them.
+
+### Fixed — keystroke delivery
+- **No more typing into the wrong window.** Window targeting threads cwd+editor through
+  every injection path; an unmatched window means skip+log, not fire-at-frontmost.
+  Cursor no longer falls through to VS Code; Terminal.app sessions are targetable.
+- **One dispatch chokepoint.** All window-keystroke sends serialize through
+  `dispatchSerialized` (shared stagger tail): bulk actions, drain-close, auto-feed,
+  hotkeys, Stream Deck — chains can't interleave. Kitty answer/mode keys go in a single
+  ordered `kitty @ send-key`. Callers gate their side effects (mode patch, ledger,
+  alerts) on the delivery status.
+
+### Fixed — ledger, spawn & settings
+- Audit purge honors the exact confirmed filter (was deleting a superset); redact
+  refuses the hot day-file; size-cap GC spares today; export bypasses the 2000-event
+  cap; risk scoring caches ledger reads. Settings Save merges provider cards (was
+  regenerating ids and stripping `ssh`/`contextLimit`); kind-switch clears gateway
+  fields; explicit "(none — bare claude)" is honored. Kitty spawns use `zsh -lic` so
+  `~/.zshrc`-exported gateway secrets resolve. Heartbeat writes no longer self-trigger
+  the pathwatcher refresh loop; malformed `cc-config.json` warns loudly instead of
+  silently disabling features.
+
+### Tests
+- **795 core + 167 ui + 167 bash = 1,129 checks** (from ~895), all green. Every fix
+  carries a regression test; gate tests now exercise the nonce protocol end-to-end.
+
 ## 2026-06-11 — Frozen-on-API-error state + Continue button
 
 ### Added

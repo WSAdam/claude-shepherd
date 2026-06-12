@@ -284,7 +284,10 @@ Each session has a queue (`Queue` button in the detail panel adds the input;
 `Feed next` sends the front task; the tile shows `+N queued`). Turn on
 `queue.autofeed` in the settings file (below) and Claude Shepherd feeds the next task
 automatically each time the session finishes — so a session works through a
-backlog unattended.
+backlog unattended. Feeds are delivery-safe: a task is only popped off the queue when
+the paste actually reached the session's window (no window match → it stays queued, and
+the ledger records `task_feed_skipped`), and queues follow the **project**, so a
+respawned or `/clear`-ed session inherits its folder's pending tasks.
 
 ## Automation & policies (`~/.claude/cc-config.json`)
 
@@ -313,7 +316,7 @@ read it (the panel live within ~1s; the gate on the next hook fire).
   "risk":       { "enabled": false, "thresholds": { "med": 34, "high": 67, "staleSeconds": 300 } },
   "collision":  { "enabled": false, "useGitRoot": false },
   "drain":      { "enabled": false },
-  "respawn":    { "enabled": false },
+  "respawn":    { "enabled": false, "auto": { "enabled": false, "maxRetries": 3, "staleSeconds": 600 } },
   "insights":   { "maxBlockSeconds": 1800 },
   "policies": {
     "approveRepeats": false,
@@ -372,10 +375,12 @@ These extend the panel without changing any existing behavior when left off:
   current turn to finish, then closes (closes immediately if already idle/done).
 - **respawn** — a right-click **Respawn from cwd** action that relaunches a dead/stale
   session from its last working dir + matched provider + editor. `respawn.auto.enabled`
-  adds **automatic** respawn: a session that wasn't intentionally closed/drained and goes
-  stale (crash, kill, lost terminal) is relaunched once per stale edge, capped by
-  `respawn.auto.maxRetries` **per launch folder** (the budget resets when a session there
-  runs healthy again; the ~90s stale-detection latency is the backoff).
+  adds **automatic** respawn: a session whose status file freezes **mid-turn** (status
+  `working` with no hook write for `respawn.auto.staleSeconds`, default 600 — well above
+  the longest tool call, so a 2-minute `npm test` never reads as a death) is relaunched,
+  capped by `respawn.auto.maxRetries` **per launch folder** (the budget resets only after
+  sustained healthy running, so a crash-looping folder can't thrash). Sessions waiting on
+  an **approval are never auto-respawned** — that's the escalation nag's job.
 - **escalation.hung** — a **stuck-session watchdog**: a session that stays `working` with
   no transcript growth for `escalation.hung.minutes` gets a ⏳ + purple ring and nags once
   per stall (reusing the escalation sound/push prefs). Complements the approval-wait
@@ -475,7 +480,13 @@ It is built to be safe:
   (it checks the panel's heartbeat). Panel closed → the request falls straight
   through to Claude Code's native prompt.
 - **Times out gracefully.** If you don't answer within `CC_GATE_TIMEOUT` seconds
-  (default 120), it falls back to the native prompt rather than denying.
+  (default 120), it falls back to the native prompt rather than denying. (The shipped
+  hook registration carries a 130s hook timeout so Claude Code doesn't kill the gate
+  mid-wait; the installer migrates existing installs.)
+- **Decisions are request-bound.** Each gated request publishes a one-time nonce and the
+  panel's Approve/Deny echoes it back, so a leftover or concurrent decision file can never
+  answer a *different* request — no stale silent-allows, even with several gated calls in
+  flight on one session.
 - **Reads stay fast.** Only the tools in `gate.tools` are gated; everything else runs normally.
 
 The advanced **policies** below (autopilot, approve-repeats, pattern auto-allow/deny)
