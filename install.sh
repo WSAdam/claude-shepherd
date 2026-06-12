@@ -44,25 +44,29 @@ if have_jq; then
     echo "✅ wrote hooks to new $SETTINGS"
   else
     merged="$(jq --argjson tmpl "$(cat "$TEMPLATE")" '
+      # Give an existing cc-approve.sh hook entry the 130s timeout it needs
+      # (the gate polls up to 120s; Claude Code'\''s 60s default would kill it
+      # mid-wait). Idempotent: entries that already carry a timeout pass through.
+      def patch_approve:
+        if ((.command? // "") | test("cc-approve\\.sh")) and (has("timeout") | not)
+        then . + {timeout: 130} else . end;
+      # SHAPE-PRESERVING migration over every event group (including ones we
+      # do not own). Invariants — pinned by install.test.sh'\''s "shape:" checks:
+      #   * object-valued event groups pass through the type=="array" guard;
+      #   * stray non-object array elements survive: `.hooks?` on a string
+      #     suppresses to EMPTY, and an `if` yielding empty makes `map` DROP
+      #     the element — `(.hooks? // null)` turns that into null instead.
+      def migrate_timeout:
+        with_entries(.value |= (if type == "array" then map(
+          if ((.hooks? // null) | type) == "array"
+          then .hooks |= map(patch_approve)
+          else . end)
+        else . end));
       .hooks //= {}
       | reduce ($tmpl.hooks | to_entries[]) as $e (.;
           ([ (.hooks[$e.key] // [])[].hooks[]?.command? // empty ] | any(test("cc-(status|approve|popup)\\.sh"))) as $has
           | if $has then . else .hooks[$e.key] = ((.hooks[$e.key] // []) + $e.value) end)
-      # Migrate older installs: the cc-approve.sh entry must carry a timeout above
-      # the gate'\''s 120s poll or Claude Code kills the hook at its 60s default
-      # mid-wait. The append-if-missing pass above skips events already wired, so
-      # patch the timeout in place where it'\''s missing (idempotent). SHAPE-
-      # PRESERVING: this pass visits every event (including ones we don'\''t own),
-      # so it must never reshape them — the outer type=="array" guard leaves
-      # object-valued event groups alone, and `.hooks? // null` turns the
-      # suppressed lookup on a non-object element into null (else `map` would
-      # silently DROP the element when the if yields empty).
-      | .hooks |= with_entries(.value |= (if type == "array" then map(
-          if ((.hooks? // null) | type) == "array" then
-            .hooks |= map(if ((.command? // "") | test("cc-approve\\.sh")) and (has("timeout") | not)
-                          then . + {timeout: 130} else . end)
-          else . end)
-        else . end))
+      | .hooks |= migrate_timeout
     ' "$SETTINGS" 2>/dev/null)"
     if [ -z "$merged" ]; then
       echo "⚠️  couldn't parse $SETTINGS — leaving it; merge $TEMPLATE by hand"

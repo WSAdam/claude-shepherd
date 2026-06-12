@@ -101,6 +101,19 @@ function M.resolveGesture(item, kind, opts)
   return "focus"
 end
 
+-- Delivery contract for window effects that report it: an EXPLICIT false means
+-- "positively not delivered" (the no-window-match guard skipped the injection);
+-- nil/anything-else is success -- fx fakes and effect paths that return nothing
+-- must stay on the success path. Defining the strict == false check ONCE keeps
+-- the two call sites (nudge paste, set-mode keys) from drifting apart.
+local function delivered(fx, sent, msg)
+  if sent == false then
+    fx.log("[cc-core] " .. msg)
+    return false
+  end
+  return true
+end
+
 -- Perform an action on a session via the injected fx (the only side effects).
 -- Returns the action actually taken (handy for tests/logging).
 function M.handleAction(fx, item, action, text)
@@ -127,12 +140,10 @@ function M.handleAction(fx, item, action, text)
     -- newline-safe (a multi-line list pastes as one block instead of each line
     -- submitting early) and more reliable in the VS Code extension.
     if not (text and #text > 0) then return nil end
-    -- pasteIntoWindow reports delivery: an explicit false means the no-window-
-    -- match guard skipped the paste, so report nil and the caller never ledgers
-    -- a nudge the session didn't receive (same contract as set-mode below;
-    -- strict == false keeps fx fakes that return nothing on the success path).
-    if fx.pasteIntoWindow(tgt, { text = text }) == false then
-      fx.log("[cc-core] nudge paste not delivered for " .. tostring(item.name) .. " -- not recorded")
+    -- pasteIntoWindow reports delivery (see `delivered` above): a skipped paste
+    -- returns nil so the caller never ledgers a nudge the session didn't receive.
+    if not delivered(fx, fx.pasteIntoWindow(tgt, { text = text }),
+        "nudge paste not delivered for " .. tostring(item.name) .. " -- not recorded") then
       return nil
     end
   elseif action == "continue" then
@@ -163,11 +174,10 @@ function M.handleAction(fx, item, action, text)
     for _ = 1, n do keys[#keys + 1] = { mods = { "shift" }, key = "tab" } end
     -- The dashboard optimistically re-bases permission_mode when this returns
     -- "set-mode" -- but sendKeys can SKIP (no window match / dead kitty target).
-    -- An explicit false means "nothing was sent": report nil so the caller never
-    -- persists a mode the session isn't in. Strict == false keeps fx fakes (and
-    -- the answer path) that return nothing on the success contract.
-    if fx.sendKeys(tgt, keys) == false then
-      fx.log("[cc-core] set-mode keys not delivered for " .. tostring(item.name) .. " -- mode NOT re-based")
+    -- A skipped send returns nil (see `delivered`) so the caller never persists
+    -- a mode the session isn't in.
+    if not delivered(fx, fx.sendKeys(tgt, keys),
+        "set-mode keys not delivered for " .. tostring(item.name) .. " -- mode NOT re-based") then
       return nil
     end
   elseif action == "answer" then
@@ -418,6 +428,26 @@ function M.actionIsHeadless(item, action)
   if item.remote then return true end  -- bridge tiles never focus a local window
   if item.editor == "kitty" then return true end
   return (action == "approve" or action == "deny") and item.gate == "waiting"
+end
+
+-- Schedule a flat list of { delay, fn } beats through an injected scheduler
+-- (`schedule(delaySeconds, fn) -> handle`; the dashboard passes its GC-safe
+-- `after`). Delays are RELATIVE to the previous beat, so a keystroke ladder's
+-- timings read as one tunable column instead of a nested-callback pyramid.
+-- Every beat runs in its own pcall: one failed beat logs and the remaining
+-- beats still fire (deliberately NOT one chain-wide pcall, which would abort
+-- the rest of the ladder on a mid-beat throw). Returns the scheduler handles
+-- (one per beat) so a caller can cancel a superseded ladder (hs.timer:stop()).
+function M.runSequence(steps, schedule)
+  local t, handles = 0, {}
+  for i, s in ipairs(steps or {}) do
+    t = t + (tonumber(s.delay) or 0)
+    handles[#handles + 1] = schedule(t, function()
+      local ok, err = pcall(s.fn)
+      if not ok then print("[cc-seq] beat " .. i .. " failed: " .. tostring(err)) end
+    end)
+  end
+  return handles
 end
 
 -- Reserve the next slot in the SHARED injection-chain schedule. The stagger

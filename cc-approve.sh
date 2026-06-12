@@ -226,24 +226,17 @@ cc_merge "$KEY" "$(jq -nc \
   '{session_id:$sid, name:$name, cwd:$cwd, status:"approval", updated:$now, since:$now, gate:"waiting", pending:{tool:$tool, summary:$sum, message:$sum, nonce:$nonce}}')"
 echo "[cc-approve] ⏳ waiting on panel for $TOOL ($KEY): $SUMMARY" >&2
 
-# Poll for the panel's decision. 0.25s cadence keeps it responsive. Consume
-# atomically: mv to the PID-owned CLAIM before reading (two waiters can never
-# both consume one answer), then accept it only if it is OURS:
-#   * nonce-bound ("allow <nonce>", current panels): the echoed nonce must equal
-#     this request's NONCE — exact request binding, immune to mtime granularity.
-#   * legacy bare ("allow", an older panel): mtime must be STRICTLY newer than
-#     this request's start second. Whole-second mtimes can't distinguish a
-#     leftover written just BEFORE the request from a real same-second answer,
-#     so the bare format degrades safely (an equal-second answer is missed and
-#     falls back to the native prompt) rather than consuming a stale leftover.
-# An answer that is not ours may be a CONCURRENT sibling's (parallel subagents
-# share the session key), so it is PUT BACK, never rm'd — only consumption
-# removes the file. The restore is a hardlink: link(2) fails atomically with
-# EEXIST, so a FRESH decision the panel wrote while we held the claim is never
-# clobbered (mv -n is a check-then-rename race that could overwrite it), and the
-# link shares the inode, preserving the original mtime the sibling's freshness
-# check needs. Truly stale leftovers never match any waiter and are cleaned up
-# by cc_remove on SessionEnd.
+# Poll for the panel's decision (0.25s cadence). Load-bearing invariants
+# (full rationale lives at the top of tests/gate.test.sh, next to the cases
+# that pin each one):
+#   1. never rm up front -- a startup rm could eat a concurrent sibling's answer;
+#   2. consume via the PID-owned CLAIM mv -- two waiters can't both take one answer;
+#   3. accept only if OURS -- nonce match, or for legacy bare answers an mtime
+#      STRICTLY newer (-gt) than this request's start second;
+#   4. a not-ours answer is RESTORED via atomic hardlink (mtime-preserving;
+#      EEXIST protects a fresh write) or PARKED on collision -- never rm'd,
+#      and there is no rm on timeout.
+# invariants pinned in tests/gate.test.sh (same-second accept + reject, concurrency).
 ITERS=$(( GATE_TIMEOUT * 4 ))
 DECISION=""
 i=0
@@ -264,8 +257,17 @@ while [ "$i" -lt "$ITERS" ]; do
       rm -f "$CLAIM" 2>/dev/null || true
       break
     fi
-    ln "$CLAIM" "$DECISION_FILE" 2>/dev/null || true   # atomic no-clobber restore
-    rm -f "$CLAIM" 2>/dev/null || true
+    if ln "$CLAIM" "$DECISION_FILE" 2>/dev/null; then   # atomic no-clobber restore
+      rm -f "$CLAIM" 2>/dev/null || true
+    else
+      # EEXIST: the panel wrote a FRESH decision while we held this one. The
+      # held answer is a sibling's -- rm'ing it here silently destroyed a human
+      # decision (that waiter then timed out to the native prompt with no
+      # trace). Park it under a unique name instead: diagnosable on disk, never
+      # consumed by mistake, swept by cc_remove's .claim.* glob on SessionEnd.
+      mv "$CLAIM" "${CLAIM}.parked" 2>/dev/null || true
+      echo "[cc-approve] ⚠️ unconsumed sibling decision collided with a fresh write — parked as ${CLAIM##*/}.parked (that waiter falls back to the native prompt)" >&2
+    fi
   fi
   sleep 0.25
   i=$(( i + 1 ))

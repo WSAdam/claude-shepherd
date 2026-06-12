@@ -1160,22 +1160,9 @@ local function after(delay, fn)
   return pendingTimers[id]
 end
 
--- Schedule a flat list of { delay, fn } beats, each delay RELATIVE to the
--- previous beat. Replaces nested after() pyramids for keystroke ladders whose
--- steps have no data dependency -- the timings become one tunable column.
--- Every beat runs in its own pcall: one failed beat logs and the remaining
--- beats still fire (deliberately NOT one chain-wide pcall, which would abort
--- the rest of the ladder on a mid-beat throw).
-local function runSequence(steps)
-  local t = 0
-  for i, s in ipairs(steps or {}) do
-    t = t + (tonumber(s.delay) or 0)
-    after(t, function()
-      local ok, err = pcall(s.fn)
-      if not ok then print("[cc-seq] beat " .. i .. " failed: " .. tostring(err)) end
-    end)
-  end
-end
+-- Beat-list scheduling lives in core.runSequence (pure, scheduler-injected,
+-- unit-tested); production passes the GC-safe `after` above. It returns the
+-- timer handles so a superseded ladder can be cancelled (spawnEditorWindow).
 
 -- Absolute deadline (epoch s) of the LAST scheduled window-keystroke injection
 -- chain. Module-level so the BULK_STAGGER serialization holds across bridge
@@ -1383,8 +1370,20 @@ end
 -- integrated terminal and type `claude …`. There's no supported API to start a
 -- session in the editor's terminal, so this is keystroke automation (Kitty and
 -- Terminal are the reliable paths). Reuses focusProject + the eventtap ladder.
+local spawnSeqHandles = nil  -- the in-flight spawn ladder's timers (module-level: GC-safe)
 local function spawnEditorWindow(spec)
   print("[cc-orch] " .. spec.editor .. " spawn: open " .. spec.app .. " at " .. tostring(spec.project))
+  -- Supersede any previous spawn's still-pending beats: two overlapping ladders
+  -- would interleave their keystrokes into whichever window is focused when
+  -- each beat's wall-clock arrives.
+  if spawnSeqHandles then
+    local stopped = 0
+    for _, h in ipairs(spawnSeqHandles) do
+      if h and h.stop then pcall(function() h:stop() end); stopped = stopped + 1 end
+    end
+    if stopped > 0 then print("[cc-orch] superseding previous spawn ladder (" .. stopped .. " pending beat(s) cancelled)") end
+    spawnSeqHandles = nil
+  end
   local t = hs.task.new("/usr/bin/open", nil, { "-na", spec.app, "--args", spec.project })
   if t then t:start() end
   hs.alert.show("Claude Shepherd: opening " .. spec.app .. " — starting claude (best-effort)")
@@ -1397,7 +1396,7 @@ local function spawnEditorWindow(spec)
   -- beat) so the timings read as one tunable column instead of a callback
   -- pyramid. Each beat gets its own pcall: one failed beat logs and the rest
   -- still fire. Each logs so a miss is diagnosable in the console.
-  runSequence({
+  spawnSeqHandles = core.runSequence({
     { delay = 3.0, fn = function()
         -- The just-opened window may not be titled yet: activating the app on a
         -- title miss IS the desired behavior (the keystrokes must land in it).
@@ -1422,7 +1421,7 @@ local function spawnEditorWindow(spec)
         hs.eventtap.keyStroke({}, "return")
         print("[cc-orch] vscode: launch line submitted")
       end },
-  })
+  }, after)
 end
 
 -- Short human-readable description of a spawn spec, for dry-run logging.

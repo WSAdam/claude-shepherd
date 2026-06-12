@@ -69,15 +69,11 @@ done
 # every osacompile applet on the system shares, which macOS's icon cache
 # lumps together (field-proven: the generic applet icon survived rebuilds,
 # a fresh bundle id, lsregister, re-pins, and Dock restarts).
-ICON_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$APP/Contents/Info.plist" 2>/dev/null || echo applet)"
+# This script is a pure "PNG -> Resources/<name>.icns" step: the CALLER
+# (app/build-app.sh) owns the closing codesign + touch -- writing the icns
+# invalidates an existing signature, so re-sign after running this standalone.
+ICON_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$APP/Contents/Info.plist" 2>/dev/null || echo icon)"
 ICON_NAME="${ICON_NAME%.icns}"
 iconutil -c icns "$set" -o "$TMP/icon.icns"
 cp "$TMP/icon.icns" "$APP/Contents/Resources/${ICON_NAME}.icns"
-# Legacy applet-bundle cleanup (no-ops on the hand-rolled bundle): Assets.car +
-# CFBundleIconName override the .icns; applets also ship no bundle identifier.
-rm -f "$APP/Contents/Resources/Assets.car"
-/usr/libexec/PlistBuddy -c "Delete :CFBundleIconName" "$APP/Contents/Info.plist" 2>/dev/null || true
-/usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string com.claude-shepherd.launcher" \
-  "$APP/Contents/Info.plist" 2>/dev/null || true
-touch "$APP"
 echo "✅ installed shepherd icon into $APP (Resources/${ICON_NAME}.icns)"

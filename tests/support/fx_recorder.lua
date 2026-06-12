@@ -10,7 +10,11 @@
 
 local function newRecorder()
   -- _geometry / _imagePath let a test control what the read-style effects return.
-  local r = { calls = {}, _now = 1000, _geometry = nil, _imagePath = "/tmp/cc-img-test.png" }
+  -- _pasteResult / _sendKeysResult control the DELIVERY report of the window
+  -- injections (nil = success, the default; false = "positively not delivered",
+  -- the no-window-match skip) so tests can pin handleAction's == false contract.
+  local r = { calls = {}, _now = 1000, _geometry = nil, _imagePath = "/tmp/cc-img-test.png",
+              _pasteResult = nil, _sendKeysResult = nil }
 
   local function rec(op, a, b)
     r.calls[#r.calls + 1] = { op = op, a = a, b = b }
@@ -25,13 +29,13 @@ local function newRecorder()
 
   r.fx = {
     now             = function() return r._now end,
-    log             = function() end,
+    log             = function(msg) rec("log", msg) end,
     focusWindow     = function(t) recWin("focusWindow", t, t and t.cwd); return true end,
     actOnWindow     = function(t, keySpec) recWin("actOnWindow", t, keySpec) end,
     typeIntoWindow  = function(t, text) recWin("typeIntoWindow", t, text) end,
-    pasteIntoWindow = function(t, payload) recWin("pasteIntoWindow", t, payload) end,
+    pasteIntoWindow = function(t, payload) recWin("pasteIntoWindow", t, payload); return r._pasteResult end,
     closeWindow     = function(t) recWin("closeWindow", t) end,
-    sendKeys        = function(t, keys) recWin("sendKeys", t, keys) end,
+    sendKeys        = function(t, keys) recWin("sendKeys", t, keys); return r._sendKeysResult end,
     removeStatus    = function(key) rec("removeStatus", key) end,
     saveGeometry    = function(frame) rec("saveGeometry", frame) end,
     loadGeometry    = function() rec("loadGeometry"); return r._geometry end,

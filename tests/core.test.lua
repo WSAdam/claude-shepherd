@@ -166,6 +166,28 @@ do
   core.handleAction(r.fx, normal, "nudge", "")
   eq("nudge: empty text is a no-op", r.count(), 0)
 
+  -- Delivery gating: pasteIntoWindow/sendKeys report delivery, and the contract
+  -- is STRICTLY == false ("positively not delivered" -- the no-window-match
+  -- skip). false -> handleAction returns nil + logs, so the dashboard never
+  -- ledgers an undelivered nudge / re-bases an unset mode; nil (fakes and
+  -- effect paths that return nothing) MUST stay on the success path.
+  r = newRecorder()
+  r._pasteResult = false
+  eq("nudge: skipped paste (false) -> nil", core.handleAction(r.fx, normal, "nudge", "hi"), nil)
+  eq("nudge: skipped paste logs 'not delivered'", "yes",
+     (r.last().op == "log" and r.last().a:find("not delivered", 1, true)) and "yes" or "no")
+  r = newRecorder()  -- positive control: nil delivery report = success
+  eq("nudge: nil delivery report -> success", core.handleAction(r.fx, normal, "nudge", "hi"), "nudge")
+  local modal = { key = "m1", name = "proj-m", permission_mode = "default" }
+  r = newRecorder()
+  r._sendKeysResult = false
+  eq("set-mode: skipped keys (false) -> nil (mode NOT re-based)",
+     core.handleAction(r.fx, modal, "set-mode", "plan"), nil)
+  eq("set-mode: skipped keys log 'NOT re-based'", "yes",
+     (r.last().op == "log" and r.last().a:find("NOT re-based", 1, true)) and "yes" or "no")
+  r = newRecorder()
+  eq("set-mode: nil delivery report -> success", core.handleAction(r.fx, modal, "set-mode", "plan"), "set-mode")
+
   r = newRecorder()
   core.handleAction(r.fx, normal, "focus")
   eq("focus: focusWindow op", r.last().op, "focusWindow")
@@ -305,6 +327,70 @@ do
   -- falls back to error.message when there is no formatted field
   local nofmt = core.json.encode({ type = "system", subtype = "api_error", error = { message = "Overloaded" } })
   eq("error: falls back to error.message", (core.transcriptError(nofmt) or {}).message, "Overloaded")
+end
+
+-- ---- runSequence: beat-list scheduling (injected scheduler) ----------------
+do
+  -- Cumulative offsets: delays are RELATIVE to the previous beat, so the
+  -- scheduler must receive the running sum (the spawn ladder's tunable column).
+  local offsets, ran = {}, {}
+  local function fakeSchedule(t, fn)
+    offsets[#offsets + 1] = t
+    fn()                       -- synchronous: run the beat now
+    return "handle-" .. #offsets
+  end
+  local handles = core.runSequence({
+    { delay = 3.0, fn = function() ran[#ran + 1] = "a" end },
+    { delay = 0.8, fn = function() ran[#ran + 1] = "b" end },
+    { delay = 2.0, fn = function() ran[#ran + 1] = "c" end },
+  }, fakeSchedule)
+  eq("runSeq: first offset", offsets[1], 3.0)
+  eq("runSeq: offsets accumulate", offsets[2], 3.8)
+  eq("runSeq: third offset", offsets[3], 5.8)
+  eq("runSeq: all beats ran in order", table.concat(ran, ","), "a,b,c")
+  eq("runSeq: one handle per beat", #handles, 3)
+  eq("runSeq: handles are the scheduler's returns", handles[2], "handle-2")
+  -- pcall isolation: a throwing beat logs and the REST still fire (the
+  -- deliberate per-beat pcall -- one chain-wide pcall would abort the ladder).
+  local ran2 = {}
+  core.runSequence({
+    { delay = 1, fn = function() ran2[#ran2 + 1] = 1 end },
+    { delay = 1, fn = function() error("boom") end },
+    { delay = 1, fn = function() ran2[#ran2 + 1] = 3 end },
+  }, function(_, fn) fn() end)
+  eq("runSeq: beats around a throwing one still fire", table.concat(ran2, ","), "1,3")
+  -- degenerate inputs
+  eq("runSeq: nil steps -> empty handles", #core.runSequence(nil, function() end), 0)
+  eq("runSeq: missing delay treated as 0", (function()
+    local o = {}
+    core.runSequence({ { fn = function() end } }, function(t) o[1] = t end)
+    return o[1]
+  end)(), 0)
+end
+
+-- ---- staggerSlot: the shared injection-chain schedule ----------------------
+do
+  -- cold start: now is past the (empty) tail -> no delay, tail = now + gap
+  local d, t = core.staggerSlot(0, 100, 5)
+  eq("stagger: cold start no delay", d, 0)
+  eq("stagger: cold start tail = now + gap", t, 105)
+  -- back-to-back reservation while the tail is still ahead -> wait for it,
+  -- and the tail advances by gap FROM THE TAIL (not from now)
+  local d2, t2 = core.staggerSlot(105, 101, 5)
+  eq("stagger: queued behind in-flight chain", d2, 4)
+  eq("stagger: tail advances by gap", t2, 110)
+  -- a reservation arriving after the tail passed -> resets off NOW, not the
+  -- stale tail (no phantom delay from long-finished chains)
+  local d3, t3 = core.staggerSlot(110, 200, 5)
+  eq("stagger: stale tail -> no delay", d3, 0)
+  eq("stagger: stale tail -> tail rebased off now", t3, 205)
+  -- degenerate inputs coerce to 0 (nil-safe)
+  local d4, t4 = core.staggerSlot(nil, nil, nil)
+  eq("stagger: nil inputs -> zero delay", d4, 0)
+  eq("stagger: nil inputs -> zero tail", t4, 0)
+  local d5, t5 = core.staggerSlot("junk", "junk", 5)
+  eq("stagger: garbage strings coerce", d5, 0)
+  eq("stagger: garbage tail = gap", t5, 5)
 end
 
 -- ---- Task queue: push / pop / depth / shouldFeed --------------------------

@@ -503,7 +503,10 @@ do
   end
   eq("set-mode: skipped dispatch returns nil",
      core.handleAction(r.fx, item, "set-mode", "plan"), nil)
-  eq("set-mode: the skip still ATTEMPTED the keys", r.last().op, "sendKeys")
+  -- the skip logs AFTER the attempt (the `delivered` helper), so the attempt
+  -- is the second-to-last recorded call
+  eq("set-mode: the skip still ATTEMPTED the keys", r.calls[#r.calls - 1].op, "sendKeys")
+  eq("set-mode: the skip is logged", r.last().op, "log")
 
   -- a delivered dispatch (true) returns the action -> the bridge re-bases
   r = newRecorder()
@@ -530,7 +533,9 @@ do
     return false
   end
   eq("nudge: skipped paste returns nil", core.handleAction(r.fx, item, "nudge", "hi"), nil)
-  eq("nudge: the skip still ATTEMPTED the paste", r.last().op, "pasteIntoWindow")
+  -- the skip logs AFTER the attempt (the `delivered` helper)
+  eq("nudge: the skip still ATTEMPTED the paste", r.calls[#r.calls - 1].op, "pasteIntoWindow")
+  eq("nudge: the skip is logged", r.last().op, "log")
 
   -- a delivered paste (true) returns the action -> the bridge ledgers "nudge"
   r = newRecorder()

@@ -1,6 +1,38 @@
 #!/usr/bin/env bash
 # gate.test.sh - exercise cc-approve.sh (the opt-in approval gate) across its
 # safety paths. Side-effect-free: temp CC_STATUS_DIR, no real sessions.
+#
+# ---- Why the decision IPC looks the way it does (rationale for the invariants
+# the poll-loop comment in cc-approve.sh lists; each is pinned by a case below):
+#
+# * WHY A NONCE: decision-file mtimes have 1-second granularity, so a leftover
+#   written sub-second BEFORE a request (e.g. a double-clicked Approve whose
+#   first write was already consumed) is indistinguishable by time from a real
+#   same-second answer. The per-request nonce ("allow <nonce>") binds an answer
+#   to exactly one request. Legacy bare answers ("allow") survive but are
+#   accepted only on a mtime STRICTLY newer (-gt) than the request second —
+#   an equal-second bare leftover is rejected (case "ss1"), while a same-second
+#   nonce-bound answer is consumed (case "ss3" + every answer() case).
+# * WHY CLAIM-BY-MV: two waiters can share one session key (parallel subagents
+#   inherit the parent session_id). mv to a PID-owned CLAIM is atomic, so two
+#   waiters can never both consume one answer.
+# * WHY HARDLINK RESTORE (not `mv -n`): a claimed answer that isn't ours is a
+#   sibling's — it must go BACK. link(2) fails atomically with EEXIST, so a
+#   FRESH decision the panel wrote while we held the claim is never clobbered
+#   (`mv -n` is a check-then-rename race that could overwrite it), and the link
+#   shares the inode, preserving the mtime the sibling's freshness check needs
+#   (cases "st1" restore + "ss2").
+# * WHY PARK ON COLLISION (never rm): if the restore hits EEXIST, the held
+#   sibling answer is parked under a unique .claim.<pid>.parked name (swept by
+#   cc_remove on SessionEnd) — an rm there silently destroyed a human decision.
+#   The collision window is sub-millisecond inside one poll iteration, so it
+#   isn't orchestrable from a test; the invariant is "claimed-but-not-ours is
+#   restored or parked, NEVER rm'd", and the restore half is pinned by "st1".
+# * KNOWN LIMITATION (pinned by the "concurrent" case): the status JSON holds
+#   ONE pending block per session key, so concurrent same-key requests
+#   overwrite each other's published nonce — the panel can only ever answer
+#   the most-recent request; earlier waiters fall back to the native prompt.
+#   A real fix needs per-request pending entries (out of scope; documented).
 
 . "$(dirname "$0")/lib.sh"
 
@@ -357,5 +389,42 @@ bg=$!; answer ss3 allow; wait $bg
 got="$(jq -r '.hookSpecificOutput.permissionDecision' "$TMP/out_ss3" 2>/dev/null)"
 assert_eq "matching-nonce answer is consumed (request binding)" "allow" "$got"
 assert_eq "consumed decision file is removed" "gone" "$([ ! -f "$TMP/ss3.decision" ] && echo gone)"
+
+# ---- concurrent same-key requests: the nonce-overwrite limitation (documented)
+# Two gated requests on ONE session key wait at once (parallel subagents share
+# the parent session_id). Each publishes its nonce into the key's SINGLE
+# pending block, so the second merge OVERWRITES the first's nonce: the panel
+# can only ever see — and therefore answer — the most-recent request. This
+# case pins the current degradation so a future per-request-pending fix has a
+# target: the answered (last) waiter is satisfied, the earlier one falls back
+# to the native prompt (empty output), and nothing is cross-answered.
+date +%s > "$HB"
+REQA='{"session_id":"cc1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"echo first"}}'
+REQB='{"session_id":"cc1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"echo second"}}'
+( printf '%s' "$REQA" | CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=3 \
+    bash "$APP" > "$TMP/out_cc_a" 2>/dev/null ) &
+bgA=$!
+wait_block "$TMP/cc1.json"
+nonceA=""
+i=0; while [ "$i" -lt 100 ]; do
+  nonceA="$(jq -r '.pending.nonce // empty' "$TMP/cc1.json" 2>/dev/null)"
+  [ -n "$nonceA" ] && break
+  sleep 0.05; i=$((i+1))
+done
+( printf '%s' "$REQB" | CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=5 \
+    bash "$APP" > "$TMP/out_cc_b" 2>/dev/null ) &
+bgB=$!
+# wait until B's merge has overwritten the published nonce
+i=0; while [ "$i" -lt 100 ]; do
+  nB="$(jq -r '.pending.nonce // empty' "$TMP/cc1.json" 2>/dev/null)"
+  [ -n "$nB" ] && [ "$nB" != "$nonceA" ] && break
+  sleep 0.05; i=$((i+1))
+done
+answer cc1 allow   # reads the CURRENT (= B's) nonce, like the real panel
+wait $bgB
+wait $bgA
+gotB="$(jq -r '.hookSpecificOutput.permissionDecision' "$TMP/out_cc_b" 2>/dev/null)"
+assert_eq "concurrent same-key: the LAST request (panel-visible nonce) is answered" "allow" "$gotB"
+assert_eq "concurrent same-key: the earlier waiter degrades to the native prompt" "" "$(cat "$TMP/out_cc_a" 2>/dev/null)"
 
 finish

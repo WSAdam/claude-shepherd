@@ -4,6 +4,50 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-12 (later) — Review hardening: gate lost-decision fix + coverage
+
+Applied the leaderboard reviews against `c023468`/`d4aebc6`/`0f31c42` (every
+claim verified against the code first).
+
+### Fixed
+- **Approval gate could silently destroy a held sibling decision**: when a
+  waiter claimed a not-ours answer and the panel wrote a *fresh* decision
+  before the hardlink restore ran, the restore failed EEXIST (correctly
+  protecting the fresh write) — but the unconditional `rm` then deleted the
+  held answer, and that sibling timed out to the native prompt with no trace.
+  The claim is now restored on success or **parked** under a unique
+  `.claim.<pid>.parked` name on collision (loud stderr note; swept by
+  `cc_remove` on SessionEnd) — a claimed-but-not-ours decision is never rm'd.
+  The poll-loop comment is condensed to the four load-bearing invariants, with
+  the long-form rationale moved to the top of tests/gate.test.sh next to the
+  cases that pin each one.
+
+### Added — tests & refactors
+- gate.test.sh: **concurrent same-key case** documenting the known
+  one-pending-block-per-session-key limitation (the panel can only answer the
+  most-recent request; earlier waiters degrade to the native prompt). The
+  review's "same-second bare-allow reject is unpinned" claim was outdated —
+  case `ss1` already pins it.
+- `core.runSequence(steps, schedule)`: the spawn keystroke ladder's scheduler
+  moved to cc-core with the scheduler injected — unit-tested (cumulative
+  offsets, per-beat pcall isolation, handles) — and it now **returns the timer
+  handles**; spawnEditorWindow cancels a superseded ladder so rapid
+  double-spawns can't interleave keystrokes into one window.
+- handleAction's strict `== false` delivery contract defined once (`delivered`
+  helper) and pinned by tests: paste/sendKeys returning false → nil + no
+  ledger/re-base; returning nil → success (fakes stay on the success path).
+  fx_recorder gained `_pasteResult`/`_sendKeysResult` knobs and a recording
+  `log`.
+- `core.staggerSlot` pinned (cold start, queued-behind-tail, stale-tail
+  rebase, nil/garbage coercion).
+- install.sh's timeout-migration jq hoisted into named defs
+  (`patch_approve` / `migrate_timeout`) with the shape-preservation invariant
+  documented inline, keyed to install.test.sh's "shape:" checks.
+- make-icon.sh is now a pure "PNG → Resources/<CFBundleIconFile>.icns" step:
+  the dead legacy-applet cleanup (Assets.car/IconName/Identifier — no-ops
+  since the hand-rolled bundle) and its redundant `touch` removed;
+  build-app.sh owns the closing codesign + touch.
+
 ## 2026-06-12 — Feature roadmap shipped: all 7 items + 4c-E project routing
 
 The June 2026 scan's whole gap-analysis roadmap, in one pass. External-tool stance
