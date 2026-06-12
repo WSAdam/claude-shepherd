@@ -779,13 +779,34 @@ do
   local k5 = core.spawnSpec("kitty", "/p", nil, { permissionMode = "plan" })
   check("spawnspec(kitty): permission-mode flag", table.concat(k5.argv, " "):find("--permission-mode plan", 1, true) ~= nil)
 
+  -- DEFAULT flavor: the Claude Code EXTENSION (the panel the operator works
+  -- in), not a terminal CLI -- field feedback: "i do not want to run claude
+  -- code in the terminal". The task rides along for the Claude input.
   local v = core.spawnSpec("vscode", "/Users/a/proj", "do it", {})
   eq("spawnspec(vscode): kind", v.kind, "vscode")
   eq("spawnspec(vscode): app", v.app, "Visual Studio Code")
   eq("spawnspec(vscode): project", v.project, "/Users/a/proj")
-  eq("spawnspec(vscode): open-terminal key", v.openTerminalKey.key, "`")
-  check("spawnspec(vscode): post types claude + quoted task", v.postType:find("claude 'do it'", 1, true) ~= nil)
+  eq("spawnspec(vscode): default flavor is the extension", v.flavor, "extension")
+  eq("spawnspec(vscode): extension carries the task", v.task, "do it")
+  eq("spawnspec(vscode): extension has no typed launch line", v.postType, nil)
   eq("spawnspec(cursor): app", core.spawnSpec("cursor", "/p", nil, {}).app, "Cursor")
+  -- terminal flavor (opt-in): the typed integrated-terminal launch line
+  local vt = core.spawnSpec("vscode", "/Users/a/proj", "do it", { vscodeFlavor = "terminal" })
+  eq("spawnspec(vscode/terminal): flavor", vt.flavor, "terminal")
+  eq("spawnspec(vscode/terminal): open-terminal key", vt.openTerminalKey.key, "`")
+  check("spawnspec(vscode/terminal): post types claude + quoted task",
+        vt.postType:find("claude 'do it'", 1, true) ~= nil)
+  -- ssh ALWAYS uses the terminal flavor (the extension can't run a remote claude)
+  local vs = core.spawnSpec("vscode", "/p", nil, { ssh = { host = "h" } })
+  eq("spawnspec(vscode/ssh): forced terminal flavor", vs.flavor, "terminal")
+  check("spawnspec(vscode/ssh): post is the ssh line", vs.postType:find("^ssh ") ~= nil)
+  -- provider env ALSO forces the terminal flavor: the extension launches its
+  -- own claude, so a gateway's ANTHROPIC_* env can only ride the typed line
+  local ve = core.spawnSpec("vscode", "/p", nil,
+    { env = { { name = "ANTHROPIC_MODEL", value = "m" } } })
+  eq("spawnspec(vscode/provider-env): forced terminal flavor", ve.flavor, "terminal")
+  check("spawnspec(vscode/provider-env): env rides the typed line",
+        ve.postType:find("ANTHROPIC_MODEL=", 1, true) ~= nil)
 
   local t = core.spawnSpec("terminal", "/p", "hi", { terminal = "Terminal" })
   eq("spawnspec(terminal): kind", t.kind, "terminal")
@@ -807,8 +828,8 @@ do
   check("claudebin: ssh inner stays bare claude",
      core.spawnInner("/p", nil, { claudeBin = CB, ssh = { host = "h" } })
        :find(CB, 1, true) == nil)
-  local vb = core.spawnSpec("vscode", "/p", "do it", { claudeBin = CB })
-  check("claudebin: vscode post types the absolute path",
+  local vb = core.spawnSpec("vscode", "/p", "do it", { claudeBin = CB, vscodeFlavor = "terminal" })
+  check("claudebin: vscode terminal post types the absolute path",
      vb.postType:find("'" .. CB .. "' 'do it'", 1, true) ~= nil)
   local vbSsh = core.spawnSpec("vscode", "/p", nil, { claudeBin = CB, ssh = { host = "h" } })
   check("claudebin: vscode ssh post stays bare", vbSsh.postType:find(CB, 1, true) == nil)
@@ -936,8 +957,9 @@ do
   check("spawnspec(terminal,env): has model env", t.applescript:find("ANTHROPIC_MODEL=", 1, true) ~= nil)
   check("spawnspec(terminal,env): auth stays a $VAR", t.applescript:find("$MY_LITELLM_KEY", 1, true) ~= nil)
 
-  -- vscode path prefixes the typed command with the env
-  local v = core.spawnSpec("vscode", "/p", "hi", { env = env })
+  -- vscode TERMINAL flavor prefixes the typed command with the env (the
+  -- default extension flavor has no typed line -- the extension owns its env)
+  local v = core.spawnSpec("vscode", "/p", "hi", { env = env, vscodeFlavor = "terminal" })
   check("spawnspec(vscode,env): post has base url", v.postType:find("ANTHROPIC_BASE_URL=", 1, true) ~= nil)
   check("spawnspec(vscode,env): post has model env", v.postType:find("ANTHROPIC_MODEL=", 1, true) ~= nil)
 
@@ -1294,6 +1316,25 @@ do
   eq("titleMatch: ignores file part", core.titleFolderMatch("autobottom.md — other", "autobottom"), false)
   eq("titleMatch: no em-dash uses whole title", core.titleFolderMatch("autobottom", "autobottom"), true)
   eq("titleMatch: empty needle -> false", core.titleFolderMatch("x — y", ""), false)
+
+  -- Rank tiers: prefix-named sibling projects collide under a bare substring
+  -- test (field-proven: "Dialer-info" jumped to "… — Dialer-info-Five9", and
+  -- the cwd-ancestor candidate "dialer" matched "… — Dialer-scraper"). The
+  -- exact tier (2) must outrank contains (1) so the true window wins.
+  eq("titleRank: exact folder segment = 2",
+     core.titleFolderRank("claude code — dialer-info", "dialer-info"), 2)
+  eq("titleRank: prefix-sibling is only contains = 1",
+     core.titleFolderRank("claude code — dialer-info-five9", "dialer-info"), 1)
+  eq("titleRank: ancestor vs sibling project = 1 (never exact)",
+     core.titleFolderRank("x — dialer-scraper", "dialer"), 1)
+  eq("titleRank: ancestor's own window = 2",
+     core.titleFolderRank("x — dialer", "dialer"), 2)
+  eq("titleRank: decorated title still contains-matches",
+     core.titleFolderRank("x — dialer-info (workspace)", "dialer-info"), 1)
+  eq("titleRank: trimmed segment can be exact",
+     core.titleFolderRank("x —   dialer-info  ", "dialer-info"), 2)
+  eq("titleRank: no match -> nil", core.titleFolderRank("x — other", "dialer-info"), nil)
+  eq("titleRank: nil title -> nil", core.titleFolderRank(nil, "x"), nil)
 
   local cands = core.focusCandidates("frontend", "/Users/adam/Programming/autobottom/frontend", "adam")
   eq("focusCands: name first", cands[1], "frontend")

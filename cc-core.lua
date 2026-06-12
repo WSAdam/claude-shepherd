@@ -2714,11 +2714,25 @@ function M.spawnSpec(editor, project, task, opts)
     end
     return { kind = "kitty", argv = argv }
   elseif editor == "vscode" or editor == "cursor" then
-    -- Open the window; "run claude" is best-effort keystrokes into a new integrated
-    -- terminal (no supported API), consistent with the project's VS Code stance. For
-    -- ssh, type the full `ssh -t <dest> '<inner>'` (the remote cd handles cwd).
-    -- The integrated terminal's PATH/aliases often DON'T carry `claude` (proven:
-    -- `zsh: command not found: claude`), so type the resolved absolute path.
+    -- Open the window, then start Claude one of two ways (no supported API for
+    -- either -- both are best-effort keystrokes; Kitty/Terminal stay the
+    -- reliable spawns):
+    --   * flavor "extension" (DEFAULT): drive the Claude Code EXTENSION via its
+    --     quick-launch shortcut (⌘Esc) -- the panel the operator actually works
+    --     in (resume/new session UI), not a terminal CLI. An optional task is
+    --     typed into the focused Claude input.
+    --   * flavor "terminal" (spawn.vscodeFlavor = "terminal", any ssh spawn --
+    --     the extension can't run claude on a remote box -- or any spawn with
+    --     provider env: the extension launches its own claude, so a gateway's
+    --     ANTHROPIC_* env can only ride the typed terminal line): open a new
+    --     integrated terminal and type the launch line. The terminal's PATH/
+    --     aliases often don't carry `claude` (proven: command not found), so
+    --     the line embeds the resolved absolute path.
+    local app = (editor == "cursor") and "Cursor" or "Visual Studio Code"
+    if not isSsh and not hasEnv and opts.vscodeFlavor ~= "terminal" then
+      return { kind = "vscode", editor = editor, app = app, project = project,
+               flavor = "extension", task = task }
+    end
     local post
     if isSsh then
       post = M.spawnInner(project, task, { env = env, flags = flags, ssh = ssh })
@@ -2727,9 +2741,8 @@ function M.spawnSpec(editor, project, task, opts)
       for _, f in ipairs(flags) do post = post .. " " .. f end
       if task then post = post .. " " .. shquote(task) end
     end
-    return { kind = "vscode", editor = editor,
-             app = (editor == "cursor") and "Cursor" or "Visual Studio Code",
-             project = project, openTerminalKey = { mods = { "ctrl" }, key = "`" },
+    return { kind = "vscode", editor = editor, app = app, project = project,
+             flavor = "terminal", openTerminalKey = { mods = { "ctrl" }, key = "`" },
              postType = post }
   end
   return { kind = "terminal",
@@ -2876,13 +2889,30 @@ M.FOCUS_SKIP = { users = true, programming = true, desktop = true, documents = t
   projects = true, project = true, src = true, code = true, repos = true, repo = true,
   dev = true, home = true, [""] = true }
 
--- Does a window title's folder segment (after the last em-dash) contain needle?
--- VS Code titles are "<file> — <folder>"; matching the folder avoids grabbing a
--- window whose task title merely mentions the word (e.g. "Canary alerts").
-function M.titleFolderMatch(title, needle)
-  if not title or not needle or needle == "" then return false end
+-- Rank a window title's folder segment (after the last em-dash) against a
+-- focus candidate. VS Code titles are "<file> — <folder>"; matching the folder
+-- avoids grabbing a window whose task title merely mentions the word.
+--   2 = the segment IS the candidate (exact, trimmed)
+--   1 = the segment merely CONTAINS it
+--   nil = no match
+-- The two tiers exist because prefix-named sibling projects collide under a
+-- bare substring test (field-proven: "Dialer-info"'s Jump matched the
+-- "… — Dialer-info-Five9" window, and the cwd-ancestor candidate "dialer"
+-- matched "… — Dialer-scraper"). Callers must prefer rank 2 across ALL
+-- windows before settling for a rank-1 contains-match (decorated titles like
+-- "proj (Workspace)" still need the fallback).
+function M.titleFolderRank(title, needle)
+  if not title or not needle or needle == "" then return nil end
   local seg = title:match(".*—%s*(.+)$") or title
-  return seg:find(needle, 1, true) ~= nil
+  seg = seg:gsub("^%s+", ""):gsub("%s+$", "")
+  if seg == needle then return 2 end
+  if seg:find(needle, 1, true) then return 1 end
+  return nil
+end
+
+-- Boolean convenience over titleFolderRank (legacy shape).
+function M.titleFolderMatch(title, needle)
+  return M.titleFolderRank(title, needle) ~= nil
 end
 
 -- Build focus candidates most-specific first: the session name, then cwd

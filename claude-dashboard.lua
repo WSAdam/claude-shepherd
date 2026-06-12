@@ -205,15 +205,29 @@ local function focusProject(name, cwd, editor, activateOnMiss)
   local windows = app:allWindows()
   local candidates = core.focusCandidates(name, cwd, os.getenv("USER"))
 
-  -- Pass 1: folder-match each candidate in order; first hit wins.
+  -- Pass 1: folder-match each candidate in order, best RANK first within a
+  -- candidate: an exact folder segment (rank 2) beats a contains-match (rank 1)
+  -- across ALL windows. First-contains-wins grabbed the wrong window for
+  -- prefix-named siblings (field-proven: "Dialer-info" jumped to
+  -- "… — Dialer-info-Five9"); the exact tier makes the true window win
+  -- whenever it exists, while contains still covers decorated titles.
   for _, needle in ipairs(candidates) do
+    local best, bestRank
     for _, w in ipairs(windows) do
       local title = string.lower(w:title() or "")
-      if title ~= "" and core.titleFolderMatch(title, needle) then
-        w:focus()
-        print("[cc-dashboard] focused (folder: " .. needle .. "): " .. (w:title() or "?"))
-        return true
+      if title ~= "" then
+        local rank = core.titleFolderRank(title, needle)
+        if rank and (not bestRank or rank > bestRank) then
+          best, bestRank = w, rank
+          if rank == 2 then break end  -- nothing beats exact
+        end
       end
+    end
+    if best then
+      best:focus()
+      print("[cc-dashboard] focused (folder" .. (bestRank == 2 and ", exact" or "") .. ": "
+        .. needle .. "): " .. (best:title() or "?"))
+      return true
     end
   end
   -- Pass 2: loose substring match on the name only (original fallback behavior).
@@ -1390,21 +1404,47 @@ local function spawnEditorWindow(spec)
   local proj = spec.project
   local name = proj and proj:match("([^/]+)/?$") or nil
   -- Cold-start timing: a NEW window (the new-project case) takes seconds to be
-  -- palette-ready, and the integrated terminal's shell takes more to accept
-  -- input (the old 2.0/0.35/0.6 ladder typed into the void -- field-verified).
-  -- The beats are a flat {delay, fn} list (delays are RELATIVE to the previous
-  -- beat) so the timings read as one tunable column instead of a callback
-  -- pyramid. Each beat gets its own pcall: one failed beat logs and the rest
-  -- still fire. Each logs so a miss is diagnosable in the console.
+  -- input-ready. The beats are a flat {delay, fn} list (delays RELATIVE to the
+  -- previous beat) so the timings read as one tunable column; each beat gets
+  -- its own pcall and logs, so a miss is diagnosable in the console.
+  if spec.flavor == "extension" then
+    -- DEFAULT: open the Claude Code EXTENSION (the panel the operator works
+    -- in -- resume the recent session / new-session UI) via its quick-launch
+    -- shortcut ⌘Esc. An optional initial task is typed into the Claude input
+    -- the shortcut focuses.
+    local beats = {
+      { delay = 3.0, fn = function()
+          -- The just-opened window may not be titled yet: activating the app on
+          -- a title miss IS the desired behavior (the keystrokes must land in it).
+          focusProject(name, proj, nil, true)
+        end },
+      { delay = 1.0, fn = function()
+          print("[cc-orch] vscode: opening the Claude Code extension (⌘Esc)")
+          hs.eventtap.keyStroke({ "cmd" }, "escape")
+        end },
+    }
+    if spec.task and #spec.task > 0 then
+      beats[#beats + 1] = { delay = 2.0, fn = function()
+        print("[cc-orch] vscode: typing initial task into the Claude input")
+        hs.eventtap.keyStrokes(spec.task)
+      end }
+      beats[#beats + 1] = { delay = 0.3, fn = function()
+        hs.eventtap.keyStroke({}, "return")
+        print("[cc-orch] vscode: initial task submitted")
+      end }
+    end
+    spawnSeqHandles = core.runSequence(beats, after)
+    return
+  end
+  -- flavor "terminal" (spawn.vscodeFlavor = "terminal", and every ssh spawn):
+  -- a new integrated terminal + the typed claude launch line. The palette is
+  -- more reliable than ⌃` (which would hide an already-open terminal), and the
+  -- shell needs ~2s before it accepts input (field-verified cold-start miss).
   spawnSeqHandles = core.runSequence({
     { delay = 3.0, fn = function()
-        -- The just-opened window may not be titled yet: activating the app on a
-        -- title miss IS the desired behavior (the keystrokes must land in it).
         focusProject(name, proj, nil, true)
       end },
     { delay = 0.8, fn = function()
-        -- New integrated terminal via the Command Palette (more reliable than
-        -- ⌃`, which would hide an already-open terminal).
         print("[cc-orch] vscode: opening command palette")
         hs.eventtap.keyStroke({ "cmd", "shift" }, "p")
       end },
@@ -1428,6 +1468,10 @@ end
 local function describeSpec(spec)
   if spec.kind == "kitty" then return table.concat(spec.argv, " ")
   elseif spec.kind == "vscode" then
+    if spec.flavor == "extension" then
+      return "open " .. spec.app .. " @ " .. tostring(spec.project) .. " + ⌘Esc (Claude Code extension)"
+        .. (spec.task and (" + task: " .. spec.task) or "")
+    end
     return "open " .. spec.app .. " @ " .. tostring(spec.project) .. " + type: " .. spec.postType
   end
   return spec.applescript
@@ -1481,6 +1525,7 @@ function FX.spawnSession(editor, project, task, permissionMode, providerId)
     env            = profile and core.providerEnv(profile) or nil,  -- carries ANTHROPIC_MODEL
     ssh            = profile and type(profile.ssh) == "table" and profile.ssh or nil,
     claudeBin      = claudeBinPath(),  -- absolute path; nil keeps the bare word
+    vscodeFlavor   = core.config(cfg, "spawn.vscodeFlavor", "extension"),  -- extension | terminal
   }
   local spec = core.spawnSpec(editor, project, task, opts)
   if profile then print("[cc-orch] provider: " .. tostring(profile.id)
@@ -3029,6 +3074,13 @@ local HTML = [[
           <option value="cursor">Cursor</option>
         </select>
       </label>
+      <label class="s-row">VS Code / Cursor spawns open
+        <select id="s-spawn-vsflavor">
+          <option value="extension">the Claude Code extension (⌘Esc panel)</option>
+          <option value="terminal">an integrated terminal running claude</option>
+        </select>
+      </label>
+      <div class="s-help">Extension = the side-panel UI (resume recent / new session). Terminal = the CLI typed into a fresh integrated terminal. Both are best-effort keystrokes; ssh spawns always use the terminal. Kitty/Terminal spawns are unaffected.</div>
       <label class="s-row"><input type="checkbox" id="s-spawn-live"> Actually launch (off = dry-run: log only, don't spawn)</label>
       <label class="s-row"><input type="checkbox" id="s-kitty-remote"> Give spawned Kitty windows remote control (recommended)</label>
       <label class="s-row"><input type="checkbox" id="s-kitty-auto"> Auto-enable Kitty remote control in kitty.conf when Kitty is in use</label>
@@ -3588,6 +3640,7 @@ local HTML = [[
       ck("s-pop-complete", cv(cfg,"focus.popOnComplete",legacyPop));
       ck("s-pop-approval", cv(cfg,"focus.popOnApproval",legacyPop));
       val("s-spawn-editor", cv(cfg,"spawn.editor","terminal"));
+      val("s-spawn-vsflavor", cv(cfg,"spawn.vscodeFlavor","extension"));
       ck("s-spawn-live",  cv(cfg,"spawn.live",false));
       ck("s-kitty-remote", cv(cfg,"spawn.kittyRemote",true));
       ck("s-kitty-auto",  cv(cfg,"spawn.kittyAutoRemote",true));
@@ -3741,6 +3794,7 @@ local HTML = [[
                       push: ck("s-e-push"), pushTopic: txt("s-e-topic") },
         focus: { popOnComplete: ck("s-pop-complete"), popOnApproval: ck("s-pop-approval") },
         spawn: { editor: txt("s-spawn-editor"), live: ck("s-spawn-live"),
+                 vscodeFlavor: txt("s-spawn-vsflavor"),
                  kittyRemote: ck("s-kitty-remote"), kittyAutoRemote: ck("s-kitty-auto"),
                  provider: txt("s-spawn-provider") },
         providers: nonBlankProviders(),

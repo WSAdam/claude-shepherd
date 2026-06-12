@@ -201,8 +201,13 @@ Click **New** (or **⌘⌥S**) to open the **New session** modal:
 - **Recent** — one-click chips for folders you've launched in (plus currently-active session
   folders), persisted to `~/.claude/cc-recent-dirs.json`.
 - **Open in** — Terminal / Kitty / VS Code / Cursor (defaults to your `spawn.editor`). Kitty and
-  Terminal launch reliably; VS Code/Cursor open the window, then best-effort type `claude` into a
-  fresh integrated terminal (no supported API for that — Kitty/Terminal are the reliable spawns).
+  Terminal launch reliably; VS Code/Cursor open the window, then best-effort drive Claude Code
+  (no supported API — Kitty/Terminal are the reliable spawns). By default that means opening the
+  **Claude Code extension panel** (its ⌘Esc quick-launch; the resume/new-session UI), typing the
+  optional initial task into the Claude input; set `spawn.vscodeFlavor` to `terminal` (⚙ Settings →
+  Spawn) for the old behavior of typing a `claude` CLI line into a fresh integrated terminal. ssh
+  spawns and gateway providers always use the terminal flavor (the extension can't run a remote
+  claude or carry `ANTHROPIC_*` env).
 - **Permission mode** — Default / Plan / Accept edits / Automate (`claude --permission-mode <m>`).
 - **Provider** — which model/backend to launch this session against (see "Providers & models" below).
 - **Initial task** (optional).

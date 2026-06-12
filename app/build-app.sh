@@ -49,6 +49,16 @@ PLIST
 # CFBundleIconFile, so it writes Resources/shepherd.icns here).
 bash "$HERE/app/make-icon.sh" "$APP" || true
 
+# Cache-bust on icon changes: macOS's icon service caches by bundle identity,
+# so swapping the icns CONTENT under an unchanged version can keep serving the
+# old art. Stamp CFBundleVersion from the icon source's mtime -- replacing
+# docs/assets/shepherd.png + `make app` is then always enough.
+ICON_SRC="$HERE/docs/assets/shepherd.png"
+if [ -f "$ICON_SRC" ]; then
+  VER="$(stat -f %m "$ICON_SRC" 2>/dev/null || stat -c %Y "$ICON_SRC" 2>/dev/null || echo 2)"
+  /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VER" "$APP/Contents/Info.plist" 2>/dev/null || true
+fi
+
 # Ad-hoc sign so Gatekeeper treats it like the old applet (right-click -> Open once).
 codesign --force --deep -s - "$APP" >/dev/null 2>&1 || true
 touch "$APP"
