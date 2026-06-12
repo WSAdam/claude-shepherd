@@ -187,6 +187,15 @@ closed). Because that needs root, macOS asks for your password each time you fli
 Click **+ New** (or **⌘⌥S**) to open the **New session** modal:
 
 - **Open existing / Start new project** — open a folder, or create a new folder and start in it.
+- **Presets** — ▶ chips that spawn a saved folder+editor+mode+provider bundle in one click;
+  "Save as preset" in the footer captures the current form (`~/.claude/cc-presets.json`,
+  ✕ on a chip deletes). Picking a known folder also recalls the editor/mode/provider you
+  last used for that project.
+- **Fuzzy folder search** — just type a project name fragment into the path field: your
+  project roots (`spawn.searchRoots`, default `~/Programming`) are indexed once per open
+  (with [fd](https://github.com/sharkdp/fd) when installed — gitignore-aware, so
+  `node_modules` never appears; plain `find` otherwise) and ranked suggestions drop down
+  (arrows + Enter to pick).
 - **Folder browser** — drill into subfolders, breadcrumb back up, "Use this folder" fills the
   path; the free-text path field stays editable too.
 - **Recent** — one-click chips for folders you've launched in (plus currently-active session
@@ -289,6 +298,23 @@ the paste actually reached the session's window (no window match → it stays qu
 the ledger records `task_feed_skipped`), and queues follow the **project**, so a
 respawned or `/clear`-ed session inherits its folder's pending tasks.
 
+Queue extras:
+- **Edit the queue in place** — click "Queue: N" to expand the task list and reorder
+  (▲▼) or remove (✕) entries. Edits are race-safe against the 1s autofeed loop: each
+  one carries the task text you clicked, and a mismatch (the queue changed underneath)
+  is refused and the list refreshed instead of moving the wrong task.
+- **Bulk paste** — paste a multi-line list into the input and hit Queue: it splits into
+  one task per line (bullets/numbering stripped, blanks dropped) after a confirm.
+- **Task templates** — "Tpl ▾" next to Queue saves the current input as a named
+  template and inserts saved ones back into the input (never auto-sends). Stored in
+  `~/.claude/cc-templates.json`.
+- **Project routing (4c-E)** — with `queue.routing.enabled` on AND a project armed via
+  the detail panel's **route** toggle, the project's queue feeds **whichever of its
+  sessions is free** (just finished a turn), not only the one that emptied its own
+  backlog — parallel sessions in one folder drain a shared backlog. One feed per project
+  per second, delivery-gated, ledgered as `by:"router"`; `starveMinutes` flags a project
+  whose tasks wait with no free session (⌛). Off by default at both levels.
+
 ## Automation & policies (`~/.claude/cc-config.json`)
 
 All automatic behavior is governed by one settings file, and **everything is off
@@ -297,9 +323,12 @@ until you turn it on**.
 **Easiest: the ⚙ Settings panel.** Click the **gear button in the header** for a
 form with every toggle — **Headless approvals** (one click: arm the gate + all
 policies off) and its editable gated-tools list, the editor-window pop toggles, the
-Spawn defaults, queue autofeed/dry-run, escalation, and the advanced gate/policies —
-each with a one-line explanation. **Save** writes `~/.claude/cc-config.json`
-(creating it if missing) and arms/disarms the gate flag — no hand-editing.
+Spawn defaults, queue autofeed/dry-run/project-routing, escalation, the risk badge,
+collision warning, drain, respawn (manual + auto), insights cap, the SSH status
+bridge, and the advanced gate/policies — each with a one-line explanation. **Save**
+writes `~/.claude/cc-config.json` (creating it if missing) and arms/disarms the gate
+flag — no hand-editing. (A hand-added `risk.weights` tuning map and the
+`spawn.searchRoots`/`bridge.staleSlackSeconds`-style power keys survive Saves.)
 
 To edit by hand instead, copy [cc-config.example.json](cc-config.example.json) to
 `~/.claude/cc-config.json` and flip what you want. Both the panel and the gate
@@ -307,12 +336,18 @@ read it (the panel live within ~1s; the gate on the next hook fire).
 
 ```json
 {
-  "queue":      { "autofeed": false, "dryRun": false },
+  "queue":      { "autofeed": false, "dryRun": false,
+                  "routing": { "enabled": false, "starveMinutes": 0 } },
   "escalation": { "enabled": false, "minutes": 5, "sound": false, "push": false, "pushTopic": "" },
   "focus":      { "popOnComplete": false, "popOnApproval": false },
-  "spawn":      { "editor": "terminal", "live": false, "kittyRemote": true, "kittyAutoRemote": true },
+  "spawn":      { "editor": "terminal", "live": false, "kittyRemote": true, "kittyAutoRemote": true,
+                  "searchRoots": [], "searchDepth": 4 },
   "gate":       { "tools": "Bash Write Edit MultiEdit NotebookEdit" },
   "ledger":     { "enabled": false, "retentionDays": 30, "maxTotalMB": 0 },
+  "decisions":  { "limit": 5, "hours": 48 },
+  "notifications": { "days": 7 },
+  "search":     { "rgBin": "", "maxResults": 200 },
+  "bridge":     { "enabled": false, "intervalSeconds": 2, "staleSlackSeconds": 15 },
   "risk":       { "enabled": false, "thresholds": { "med": 34, "high": 67, "staleSeconds": 300 } },
   "collision":  { "enabled": false, "useGitRoot": false },
   "drain":      { "enabled": false },
@@ -327,6 +362,11 @@ read it (the panel live within ~1s; the gate on the next hook fire).
 ```
 
 - **queue.autofeed / dryRun** — auto-feed queued tasks on done (dryRun logs instead).
+- **queue.routing** — 4c-E project routing (see "Task queue" above): global switch +
+  per-project arm toggle; `starveMinutes` flags queued work with no free session.
+- **decisions / notifications / search / bridge** — the gate decision log window, the 🔔
+  history window, the 🔎 fleet-search caps, and the SSH status bridge (see their sections;
+  all read-only except the bridge, which is off by default).
 - **escalation** — when an approval waits longer than `minutes`, nag harder: a
   stronger tile pulse always, plus an optional `sound` and an optional high-priority
   `push` to your ntfy `pushTopic`. Both channels off by default.
@@ -415,6 +455,36 @@ Two header overlays read fleet activity. Both are **local and cost no model toke
   answer, capped by `insights.maxBlockSeconds` so an overnight idle isn't counted). A
   **Trends — last 24h (hourly)** section adds four sparklines: time blocked on you, fleet
   activity, active sessions, and denial rate. Always available; zeros until the ledger is on.
+
+Three more ledger-backed views (all read-only, local, zero model tokens):
+
+- **🔔 Notification history** — "what fired while you were away": escalations, stall
+  warnings, auto-respawns, and every **non-human** gate decision, in an **Alerts** tab of
+  the audit overlay. The header bell shows an unseen count; opening it marks everything
+  seen and highlights what's new since you last looked. (If you've set
+  `ledger.captureTypes`, include `escalation` and `hung`.)
+- **Per-session gate decision log** — the detail panel shows the selected session's last
+  few gate decisions, grouped with counts and provenance ("⛔ deny Bash ×4 (autoDeny:
+  Bash(rm*)) · 2m ago"), so what the gate has been doing to a session is visible right
+  where you act on it. `decisions.limit` / `decisions.hours` tune it.
+- **🔎 Find in fleet** — search every session's **transcript** (live *and* dead sessions)
+  plus the ledger: "which session touched `auth.ts`?", "who ran that migration?". Click a
+  hit to select the live session (or open a dead one's audit timeline). Instant with
+  [ripgrep](https://github.com/BurntSushi/ripgrep) installed (`brew install ripgrep`);
+  falls back to grep — slower, never broken.
+
+### SSH status bridge (remote sessions as tiles)
+
+A provider can carry `ssh: {"host": "devbox", "user": "adam"}` — its sessions run
+`claude` on the remote box inside a local terminal. With **⚙ Settings → SSH status
+bridge** enabled, Shepherd also rsync-pulls each such host's remote `~/.claude/cc-status/`
+(every `bridge.intervalSeconds`, key-based auth required) so those remote sessions render
+as **⇄ tiles** with live status. Remote tiles are **headless-only**: Approve/Deny route
+back over ssh as nonce-bound decision files; keystroke actions (nudge/stop/clear/…) are
+disabled. Remote staleness gets `bridge.staleSlackSeconds` of slack for sync lag, and a
+stalled sync shows "bridge offline" on the tile. The remote box needs this repo's
+`make install` run on it. Off by default; see todos.md for the hardware-verification
+checklist.
 
 ## Install (about 5 minutes)
 

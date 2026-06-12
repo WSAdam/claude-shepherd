@@ -392,12 +392,13 @@ M.BULK_RULES = {
 -- list (the panel passes the keys currently shown, post search/group filter, so a
 -- bulk action is WYSIWYG). Stale tiles are never targeted (a dead window can't act).
 -- Unknown action -> {}. Routes through handleAction on the dashboard side.
-function M.selectActionable(list, action)
+function M.selectActionable(list, action, opts)
   local rule = M.BULK_RULES[action]
   local out = {}
   if not rule then return out end
   for _, it in ipairs(list or {}) do
-    if it.key and not it.stale then
+    if it.key and not it.stale
+       and M.remoteActionAllowed(it, action, opts) then  -- remote tiles: headless approve/deny only
       local ok
       if rule.match ~= nil then ok = (it.status == rule.match)
       else ok = (it.status ~= rule.exclude) end
@@ -414,6 +415,7 @@ end
 -- would all fire after the LAST focus and land every key in one window.
 function M.actionIsHeadless(item, action)
   if not item then return false end
+  if item.remote then return true end  -- bridge tiles never focus a local window
   if item.editor == "kitty" then return true end
   return (action == "approve" or action == "deny") and item.gate == "waiting"
 end
@@ -620,6 +622,14 @@ local NARRATE = {
   relabel       = { "🏷", "relabeled" },
   redact        = { "🚫", "redacted an entry" },
   purge         = { "🗑", "purged entries" },
+  escalation    = { "🔴", "approval waiting too long" },
+  hung          = { "⏳", "stalled (no transcript progress)" },
+  auto_respawn  = { "♻️", "auto-respawned" },
+  drain_close   = { "⛔", "drained (finished turn, closed)" },
+  queue_edit    = { "🧾", "edited the queue" },
+  route_arm     = { "🔀", "project routing toggled" },
+  queue_starved = { "⌛", "queued work waiting (no free session)" },
+  remote_decision = { "📡", "remote decision sent" },
 }
 
 -- One human-readable line for an event (no timestamp/name; the caller adds those).
@@ -694,6 +704,159 @@ function M.sessionTimeline(events, sessionId, opts)
   for i = 1, math.min(#scoped, limit) do kept[#kept + 1] = scoped[i] end
   table.sort(kept, function(a, b) return (tonumber(a.ts) or 0) < (tonumber(b.ts) or 0) end)
   return kept
+end
+
+-- Last-N gate decisions for ONE session, grouped for the detail panel: a burst of
+-- identical CONSECUTIVE decisions ("policy denied Bash ×4") collapses to one row
+-- with a count, so the widget reads as "what's the gate been doing to this
+-- session" rather than a raw event dump. Group key = (tool, outcome, by, pattern);
+-- only adjacent events merge -- an interleaved different decision splits the run
+-- (A A B A = three groups), preserving the actual order of what happened.
+-- Returns newest-first groups: { tool, outcome, by, pattern, summary, count,
+-- lastTs, firstTs } -- summary is the NEWEST member's. opts = { limit (default 5
+-- groups), sinceTs }. nil/empty sessionId -> {} (never "all sessions").
+function M.gateDecisionSummary(events, sessionId, opts)
+  opts = opts or {}
+  if not sessionId or tostring(sessionId) == "" then return {} end
+  local limit = tonumber(opts.limit) or 5
+  local scoped = M.filterLedger(events,
+    { session = sessionId, types = { "decision" }, sinceTs = opts.sinceTs })  -- newest-first
+  local groups = {}
+  local function keyOf(e)
+    return tostring(e.tool or "") .. "\0" .. tostring(e.outcome or "") .. "\0"
+      .. tostring(e.by or "") .. "\0" .. tostring(e.pattern or "")
+  end
+  local cur, curKey = nil, nil
+  for _, e in ipairs(scoped) do
+    local k = keyOf(e)
+    if cur and k == curKey then
+      cur.count = cur.count + 1
+      cur.firstTs = tonumber(e.ts) or cur.firstTs  -- walking newest->oldest
+    else
+      if #groups >= limit then break end
+      cur = { tool = e.tool, outcome = e.outcome, by = e.by, pattern = e.pattern,
+              summary = e.summary, count = 1,
+              lastTs = tonumber(e.ts), firstTs = tonumber(e.ts) }
+      curKey = k
+      groups[#groups + 1] = cur
+    end
+  end
+  return groups
+end
+
+-- Which ledger events count as "a notification fired" (🔔 history): the alert
+-- types the panel raises on its own (escalation / hung / auto_respawn) plus any
+-- gate decision NOT made by a human (autoAllow/autoDeny/autopilot/approveRepeats/
+-- timeout-*) -- exactly the set of things that happened without you. opts =
+-- { sinceTs, limit (default 200) }. Newest-first (filterLedger order).
+M.NOTIFY_TYPES = { escalation = true, hung = true, auto_respawn = true }
+function M.notificationEvents(events, opts)
+  opts = opts or {}
+  local out = {}
+  for _, e in ipairs(M.filterLedger(events, { sinceTs = opts.sinceTs })) do
+    if M.NOTIFY_TYPES[e.type]
+       or (e.type == "decision" and e.by ~= nil and e.by ~= "human") then
+      out[#out + 1] = e
+    end
+  end
+  return M.capLedgerSlice(out, tonumber(opts.limit) or 200)
+end
+
+-- How many of a newest-first notification list are newer than lastSeenTs.
+-- nil/0 lastSeenTs counts everything (window-bounded by the caller's sinceTs).
+function M.unseenNotificationCount(notifs, lastSeenTs)
+  local seen = tonumber(lastSeenTs) or 0
+  local n = 0
+  for _, e in ipairs(notifs or {}) do
+    if (tonumber(e.ts) or 0) > seen then n = n + 1 else break end  -- newest-first
+  end
+  return n
+end
+
+-- ---- Fleet-wide transcript/ledger search (roadmap #3, ripgrep-backed) -------
+-- "Which session touched auth.ts?" across every transcript JSONL + the ledger.
+-- rg when installed, grep -r fallback; both invocations are built HERE (pure,
+-- tested) and executed via hs.task in the dashboard.
+
+-- Escape a user query so rg and `grep -E` (shared ERE syntax) treat it as a
+-- literal string.
+function M.escapeSearchPattern(q)
+  return (tostring(q or ""):gsub("[\\%.%[%]%(%)%{%}%*%+%?%^%$|]", "\\%0"))
+end
+
+M.SEARCH_MIN_QUERY = 3
+M.SEARCH_CTX = 60  -- chars of context captured around the match
+
+-- Build the ARGUMENT list for one fleet search (binary EXCLUDED -- hs.task.new
+-- takes the resolved path separately). kind = "rg"|"grep".
+-- The match is wrapped as .{0,CTX}<literal>.{0,CTX} and emitted with -o:
+-- transcript lines are multi-KB JSON, so emitting ONLY the wrapped match keeps
+-- the output tiny by construction (no --json parsing, no giant lines).
+-- Returns nil for a too-short query (< SEARCH_MIN_QUERY after trim).
+function M.searchArgv(kind, query, paths, opts)
+  opts = opts or {}
+  local q = tostring(query or ""):gsub("^%s+", ""):gsub("%s+$", "")
+  if #q < M.SEARCH_MIN_QUERY then return nil end
+  local ctx = tostring(tonumber(opts.ctx) or M.SEARCH_CTX)
+  local maxPerFile = tostring(tonumber(opts.maxPerFile) or 3)
+  local wrapped = ".{0," .. ctx .. "}" .. M.escapeSearchPattern(q) .. ".{0," .. ctx .. "}"
+  local argv
+  if kind == "rg" then
+    argv = { "--no-config", "-i", "-n", "-o", "--no-heading", "--with-filename",
+             "--max-count", maxPerFile, "--max-filesize", "50M", "-g", "*.jsonl",
+             "-e", wrapped }
+  else
+    argv = { "-r", "-I", "-i", "-n", "-o", "-H", "-E", "-m", maxPerFile,
+             "--include=*.jsonl", "-e", wrapped }
+  end
+  for _, p in ipairs(paths or {}) do argv[#argv + 1] = tostring(p) end
+  return argv
+end
+
+-- Parse `file:line:matchtext` output lines -> { hits = {{file,line,text}},
+-- truncated }. Splits on the FIRST two colons only (the match text may contain
+-- colons); malformed lines are skipped. opts = { limit (default 200), maxLen
+-- (default 200, display backstop) }.
+function M.parseSearchResults(output, opts)
+  opts = opts or {}
+  local limit = tonumber(opts.limit) or 200
+  local maxLen = tonumber(opts.maxLen) or 200
+  local hits, truncated = {}, false
+  for line in (tostring(output or "") .. "\n"):gmatch("(.-)\n") do
+    local file, ln, text = line:match("^(/[^:]+):(%d+):(.*)$")
+    if file then
+      if #hits >= limit then truncated = true; break end
+      if #text > maxLen then text = text:sub(1, maxLen) .. "…" end
+      hits[#hits + 1] = { file = file, line = tonumber(ln), text = text }
+    end
+  end
+  return { hits = hits, truncated = truncated }
+end
+
+-- Tag each hit with provenance + map it back to a session. items = the parsed
+-- live status list. Adds per hit: kind ("transcript"|"ledger"), sessionId (the
+-- transcript basename sans .jsonl), projectKey (the /projects/<ENC>/ segment --
+-- same match as M.projectKey), and key/name when the file IS a live session's
+-- transcript. Ledger hits only get kind = "ledger".
+function M.annotateSearchHits(hits, items, ledgerDir)
+  local byTranscript = {}
+  for _, it in ipairs(items or {}) do
+    if it.transcript_path then byTranscript[it.transcript_path] = it end
+  end
+  ledgerDir = tostring(ledgerDir or "")
+  for _, h in ipairs(hits or {}) do
+    local f = tostring(h.file or "")
+    if ledgerDir ~= "" and f:sub(1, #ledgerDir) == ledgerDir then
+      h.kind = "ledger"
+    else
+      h.kind = "transcript"
+      h.projectKey = f:match("/projects/([^/]+)/[^/]+%.jsonl$")
+      h.sessionId = f:match("/([^/]+)%.jsonl$")
+      local live = byTranscript[f]
+      if live then h.key = live.key; h.name = live.label or live.name end
+    end
+  end
+  return hits
 end
 
 -- ---- Fleet insights (pure aggregation over the ledger) ---------------------
@@ -1336,10 +1499,17 @@ function M.cycleNext(list, afterKey)
 end
 
 -- ---- Task queue (Phase 4b) -------------------------------------------------
--- A queue is { tasks = { "task1", "task2", ... } }; nil/missing is empty.
+-- A queue is { tasks = { "task1", "task2", ... } }; nil/missing is empty. The
+-- 4c-E arm flag (routing = true) rides in the same file, so EVERY function that
+-- rebuilds a queue must carry it through `qkeep` -- a pop/move/push that
+-- dropped it would silently disarm the project on the next write.
 local function qtasks(q)
   if type(q) == "table" and type(q.tasks) == "table" then return q.tasks end
   return {}
+end
+local function qkeep(q, out)
+  if type(q) == "table" and q.routing == true then out.routing = true end
+  return out
 end
 
 function M.queueDepth(q) return #qtasks(q) end
@@ -1348,25 +1518,85 @@ function M.queuePush(q, task)
   local t = {}
   for _, x in ipairs(qtasks(q)) do t[#t + 1] = x end
   if task and #task > 0 then t[#t + 1] = task end
-  return { tasks = t }
+  return qkeep(q, { tasks = t })
 end
 
 -- Returns the front task and the queue without it.
 function M.queuePop(q)
   local src = qtasks(q)
-  if #src == 0 then return nil, { tasks = {} } end
+  if #src == 0 then return nil, qkeep(q, { tasks = {} }) end
   local rest = {}
   for i = 2, #src do rest[#rest + 1] = src[i] end
-  return src[1], { tasks = rest }
+  return src[1], qkeep(q, { tasks = rest })
 end
 
 -- Concatenate two queues (a's tasks first). Used when adopting a legacy
--- session-keyed queue file into the project-keyed one.
+-- session-keyed queue file into the project-keyed one -- `a` is the DESTINATION
+-- (project) queue, so its arm flag wins.
 function M.queueMerge(a, b)
   local t = {}
   for _, x in ipairs(qtasks(a)) do t[#t + 1] = x end
   for _, x in ipairs(qtasks(b)) do t[#t + 1] = x end
-  return { tasks = t }
+  return qkeep(a, { tasks = t })
+end
+
+-- Move tasks[idx] by dir (-1 = up toward the front, +1 = down). The panel's
+-- rendered list can be STALE (the 1s autofeed loop pops heads asynchronously),
+-- so `expect` -- the task text the operator clicked -- must match tasks[idx] or
+-- the move is refused; the caller replies with the fresh list so the UI
+-- self-heals. Returns newQueue, moved(boolean); refusals return an unchanged
+-- copy in the standard { tasks = ... } shape.
+function M.queueMove(q, idx, dir, expect)
+  local src = qtasks(q)
+  local t = {}
+  for _, x in ipairs(src) do t[#t + 1] = x end
+  idx = tonumber(idx)
+  dir = tonumber(dir)
+  if not idx or not dir or (dir ~= -1 and dir ~= 1) then return qkeep(q, { tasks = t }), false end
+  local j = idx + dir
+  if idx < 1 or idx > #t or j < 1 or j > #t then return qkeep(q, { tasks = t }), false end
+  if expect ~= nil and t[idx] ~= expect then return qkeep(q, { tasks = t }), false end
+  t[idx], t[j] = t[j], t[idx]
+  return qkeep(q, { tasks = t }), true
+end
+
+-- Remove tasks[idx] (same expect guard as queueMove). Returns newQueue,
+-- removedTask|nil -- nil means the remove was refused/out of range.
+function M.queueRemoveAt(q, idx, expect)
+  local src = qtasks(q)
+  local t = {}
+  for _, x in ipairs(src) do t[#t + 1] = x end
+  idx = tonumber(idx)
+  if not idx or idx < 1 or idx > #t then return qkeep(q, { tasks = t }), nil end
+  if expect ~= nil and t[idx] ~= expect then return qkeep(q, { tasks = t }), nil end
+  local removed = table.remove(t, idx)
+  return qkeep(q, { tasks = t }), removed
+end
+
+-- Split a multi-line queue input into tasks: one per line, CRLF-tolerant,
+-- trimmed, blanks dropped, leading list markers stripped ("- x", "* x",
+-- "3. x", "3) x" -> "x"). The splitting authority lives HERE (not in JS) so
+-- the bulk-add bridge action and its tests agree on the rules.
+function M.queueSplitLines(text)
+  local out = {}
+  for line in (tostring(text or "") .. "\n"):gmatch("(.-)\n") do
+    line = line:gsub("\r$", ""):gsub("^%s+", ""):gsub("%s+$", "")
+    line = line:gsub("^[-*]%s+", ""):gsub("^%d+[.%)]%s+", "")
+    -- a line that was ONLY a marker ("- ", "3.") trims to the bare marker --
+    -- drop it (it's list scaffolding, not a task). "-x flag" stays a task.
+    if line:match("^[-*]$") or line:match("^%d+[.%)]$") then line = "" end
+    if #line > 0 then out[#out + 1] = line end
+  end
+  return out
+end
+
+-- One read-modify-write for a bulk add (queuePush semantics over a list:
+-- empties dropped, order preserved). Returns the new queue.
+function M.queuePushAll(q, tasks)
+  local out = q
+  for _, task in ipairs(tasks or {}) do out = M.queuePush(out, task) end
+  -- normalize shape even when nothing was added (queuePush carried the arm flag)
+  return qkeep(out ~= nil and out or q, { tasks = qtasks(out) })
 end
 
 -- The on-disk key for a session's task queue. Queues are keyed by the STABLE
@@ -1405,6 +1635,111 @@ function M.shouldFeed(prev, cur, q, autoOn)
   if not autoOn then return false end
   if M.queueDepth(q) == 0 then return false end
   return cur == "done" and prev ~= nil and prev ~= "done"
+end
+
+-- ---- Project routing (4c-E, roadmap orchestrator) ---------------------------
+-- With routing armed, a project's queue feeds WHICHEVER session of that project
+-- is free -- not just the one that finished (4b's edge trigger can't reach a
+-- session that was already done when the task was queued). Level-triggered: a
+-- single dispatcher per refresh tick picks at most ONE target per project; an
+-- in-memory routePending marker keeps the next tick from double-feeding the
+-- same session while its status file still says `done` (the paste hasn't
+-- flipped it to `working` yet). Double opt-in: queue.routing.enabled (global)
+-- AND routing:true in the project's queue file. All off by default.
+
+-- The per-project arm flag rides INSIDE the queue file so it inherits the
+-- projectKey keying + respawn survival for free. Accessors keep the file-shape
+-- knowledge in one place; queueSetRouted preserves tasks.
+function M.queueRouted(q)
+  return type(q) == "table" and q.routing == true
+end
+function M.queueSetRouted(q, on)
+  local out = { tasks = qtasks(q) }
+  if on then out.routing = true end  -- absent (not false) when off: legacy shape
+  return out
+end
+
+-- Has a pending routed feed resolved? satisfied = the session left done/idle
+-- (the paste landed: working/approval/...); expired = the marker outlived
+-- `timeout` seconds (lost feed -- no-window-match, kill, etc). Caller clears
+-- the map entry when true.
+function M.routePendingDone(ts, status, now, timeout)
+  if ts == nil then return false end
+  if status ~= "done" and status ~= "idle" then return true end
+  return ((tonumber(now) or 0) - (tonumber(ts) or 0)) > (tonumber(timeout) or 45)
+end
+
+M.ROUTE_PENDING_TIMEOUT = 45
+
+-- Is this session eligible to receive routed work? v1 is deliberately
+-- done-only: an `idle` session may be one the operator is actively typing
+-- into, and a routed paste would land in their prompt (idle-inclusion is a
+-- flagged follow-up). Excludes stale/error/remote/draining sessions and ones
+-- with a FRESH pending routed feed (an expired marker no longer blocks).
+function M.sessionFree(item, opts)
+  opts = opts or {}
+  if type(item) ~= "table" then return false end
+  if item.status ~= "done" then return false end
+  if item.stale then return false end
+  if item.remote then return false end
+  if opts.draining then return false end
+  if opts.pending ~= nil then
+    local expired = ((tonumber(opts.now) or 0) - (tonumber(opts.pending) or 0))
+      > (tonumber(opts.pendingTimeout) or M.ROUTE_PENDING_TIMEOUT)
+    if not expired then return false end
+  end
+  return true
+end
+
+-- Pick the target for one project's next task. Deterministic: longest-free
+-- first (smallest `since` -- the status file stamps it on each status change),
+-- key ascending as the tiebreak; a missing `since` reads as "just changed"
+-- (lowest priority). members = parsed items sharing one queueKey. opts =
+-- { draining = map key->bool, pending = map key->ts, now, pendingTimeout }.
+-- Returns the chosen tile key, or nil when no member is free.
+function M.routePick(members, opts)
+  opts = opts or {}
+  local draining = opts.draining or {}
+  local pending = opts.pending or {}
+  local best, bestSince
+  for _, it in ipairs(members or {}) do
+    if M.sessionFree(it, { draining = draining[it.key], pending = pending[it.key],
+                           now = opts.now, pendingTimeout = opts.pendingTimeout }) then
+      local since = tonumber(it.since) or math.huge
+      if best == nil or since < bestSince
+         or (since == bestSince and tostring(it.key) < tostring(best)) then
+        best, bestSince = it.key, since
+      end
+    end
+  end
+  return best
+end
+
+-- The whole per-project decision: should the dispatcher feed this tick?
+-- Requires opts.globalOn AND the queue file armed AND depth > 0 AND a free
+-- pick. Returns { key = <tile key> } or nil.
+function M.routeTask(members, q, opts)
+  opts = opts or {}
+  if not opts.globalOn then return nil end
+  if not M.queueRouted(q) then return nil end
+  if M.queueDepth(q) == 0 then return nil end
+  local key = M.routePick(members, opts)
+  if not key then return nil end
+  return { key = key }
+end
+
+-- Starvation check: an armed project with queued work and NO free session for
+-- longer than `minutes`. sinceTs = when the caller first observed the starved
+-- condition (it keeps the clock; pure here). minutes <= 0 disables.
+function M.queueStarved(members, q, opts)
+  opts = opts or {}
+  local minutes = tonumber(opts.minutes) or 0
+  if minutes <= 0 then return false end
+  if not M.queueRouted(q) or M.queueDepth(q) == 0 then return false end
+  if M.routePick(members, opts) ~= nil then return false end
+  local sinceTs = tonumber(opts.sinceTs)
+  if not sinceTs then return false end
+  return ((tonumber(opts.now) or 0) - sinceTs) > minutes * 60
 end
 
 -- ---- Graceful drain (Feature F) --------------------------------------------
@@ -1731,14 +2066,20 @@ function M.parseSleepDisabled(pmsetOutput)
 end
 
 -- Overlay the Settings-managed keys onto an existing config, per TOP-LEVEL key,
--- so hand-edited blocks the UI doesn't expose (risk / collision / drain /
--- respawn / insights) survive a Save. Also carries forward the UI-unmanaged
--- SUBKEYS inside blocks the form rebuilds wholesale -- spawn.kittyBin /
--- spawn.kittySocket and escalation.hung would otherwise be silently deleted by
--- every Save (including the auto-persisting Headless toggle). A generic deep
--- merge is deliberately avoided: array-valued keys (providers,
--- policies.patterns.*) must be REPLACED, not index-merged. Mutates + returns cfg.
-M.SETTINGS_KEEP_SUBKEYS = { spawn = { "kittyBin", "kittySocket" }, escalation = { "hung" } }
+-- so hand-edited blocks the UI doesn't expose survive a Save. Also carries
+-- forward the UI-unmanaged SUBKEYS inside blocks the form rebuilds wholesale --
+-- spawn.kittyBin / spawn.kittySocket, escalation.hung, and risk.weights (the
+-- 9-key tuning map stays hand-edit-only; the form manages risk.enabled +
+-- risk.thresholds) would otherwise be silently deleted by every Save (including
+-- the auto-persisting Headless toggle). A generic deep merge is deliberately
+-- avoided: array-valued keys (providers, policies.patterns.*) must be REPLACED,
+-- not index-merged. Mutates + returns cfg.
+M.SETTINGS_KEEP_SUBKEYS = {
+  spawn = { "kittyBin", "kittySocket", "searchRoots", "searchDepth", "fdBin" },
+  escalation = { "hung" },
+  risk = { "weights" },
+  bridge = { "staleSlackSeconds", "keystrokes" },
+}
 function M.overlayConfig(cfg, incoming)
   cfg = type(cfg) == "table" and cfg or {}
   if type(incoming) ~= "table" then return cfg end
@@ -2009,12 +2350,168 @@ end
 -- (loginShellWrap; the remote ~/.zshrc is the README-documented home for the
 -- secret). `-t` forces a TTY so claude's TUI works.
 -- ssh = { host, user(optional), tty(default true) }.
-function M.sshWrap(inner, ssh, env)
-  if type(ssh) ~= "table" or not ssh.host or tostring(ssh.host) == "" then return inner end
-  local dest = (ssh.user and tostring(ssh.user) ~= "")
+-- "user@host" (or bare "host") for an ssh spec; nil when there's no usable host.
+-- The ONE place dest formatting lives (sshWrap, spawnSpec, and the status
+-- bridge all build from it).
+function M.sshDest(ssh)
+  if type(ssh) ~= "table" or not ssh.host or tostring(ssh.host) == "" then return nil end
+  return (ssh.user and tostring(ssh.user) ~= "")
     and (tostring(ssh.user) .. "@" .. tostring(ssh.host)) or tostring(ssh.host)
+end
+
+function M.sshWrap(inner, ssh, env)
+  local dest = M.sshDest(ssh)
+  if not dest then return inner end
   local cmd = (ssh.tty == false) and "ssh" or "ssh -t"
   return cmd .. " " .. dest .. " " .. shquote(M.loginShellWrap(inner, env))
+end
+
+-- ---- SSH status bridge (roadmap #7, Phase 2) --------------------------------
+-- Remote sessions (spawned via ssh providers) write status JSON in the REMOTE
+-- ~/.claude/cc-status/ -- invisible locally. The bridge rsync-pulls each ssh
+-- host's dir into a local mirror, merges those entries into refreshList with
+-- HOST-NAMESPACED keys, and routes headless Approve/Deny back over ssh as
+-- nonce-bound decision files. Everything here is pure (argv builders, key
+-- namespacing, merge); the rsync/ssh executions are FX effects. Off unless
+-- bridge.enabled AND a provider declares ssh. Remote tiles are HEADLESS-ONLY
+-- in v1: ssh -t forwards TERM (so the remote hook detects "kitty") but not
+-- KITTY_WINDOW_ID -- keystroke actions would silently no-op, so they're gated
+-- off explicitly via remoteActionAllowed.
+
+-- Namespace separator ":" can never appear in a local key (cc_sanitize strips
+-- to [A-Za-z0-9._-]), so host:key is unambiguous and reversible. Namespaced
+-- keys live IN MEMORY only -- mirror files keep their raw remote names, and
+-- anything key->filename (queueKey) sanitizes ":" to "_" deterministically.
+function M.namespaceKey(ns, key)
+  return tostring(ns or "") .. ":" .. tostring(key or "")
+end
+-- Returns ns, rest for a namespaced key; nil, key for a local one.
+function M.splitNamespacedKey(key)
+  key = tostring(key or "")
+  local ns, rest = key:match("^([^:]+):(.+)$")
+  if ns then return ns, rest end
+  return nil, key
+end
+
+-- Unique bridge targets from config: providers carrying ssh:{host,user}, deduped
+-- by dest. Gated on bridge.enabled (default OFF -- the bridge never runs from
+-- config alone). ns = host label sanitized for use as a dir name + key prefix.
+function M.sshHosts(cfg)
+  if M.config(cfg, "bridge.enabled", false) ~= true then return {} end
+  local out, seen = {}, {}
+  for _, p in ipairs(M.config(cfg, "providers", nil) or {}) do
+    if type(p) == "table" and type(p.ssh) == "table" then
+      local dest = M.sshDest(p.ssh)
+      if dest and not seen[dest] then
+        seen[dest] = true
+        out[#out + 1] = {
+          host = tostring(p.ssh.host),
+          user = p.ssh.user and tostring(p.ssh.user) or nil,
+          dest = dest,
+          ns = (tostring(p.ssh.host):gsub("[^%w.-]", "_")),
+        }
+      end
+    end
+  end
+  return out
+end
+
+-- argv for one mirror pull (binary "rsync" first -- resolveBin'd by FX).
+-- BatchMode=yes is load-bearing: without it a passphrase prompt hangs the task
+-- forever and the skip-if-running guard then starves the host. The remote path
+-- is home-relative (".claude/...") to dodge ~-expansion differences; --delete
+-- makes the mirror track remote truth (a remote SessionEnd removes the tile).
+function M.rsyncArgv(dest, mirrorDir, opts)
+  if not dest or tostring(dest) == "" then return nil end
+  opts = opts or {}
+  return { "rsync", "-az", "--delete",
+           "--timeout=" .. tostring(tonumber(opts.timeout) or 5),
+           "-e", "ssh -oBatchMode=yes -oConnectTimeout=" .. tostring(tonumber(opts.connectTimeout) or 3),
+           tostring(dest) .. ":.claude/cc-status/",
+           tostring(mirrorDir) .. "/" }
+end
+
+-- Parse ONE host's mirror entries into status items: parseStatusList plus, per
+-- item: key namespaced (host:key, raw key kept as remoteKey), remote = the host
+-- spec, projectKey namespaced too (the same repo cloned at the same path on two
+-- boxes yields an IDENTICAL /projects/<ENC>/ segment -- un-namespaced it would
+-- silently share queues/labels/respawn budgets with the local clone), and
+-- staleness widened by opts.slack (rsync lag + clock skew).
+function M.parseMirrorList(hostSpec, entries, now, staleSeconds, opts)
+  opts = opts or {}
+  local slack = tonumber(opts.slack) or 15
+  local list = M.parseStatusList(entries, now, (tonumber(staleSeconds) or M.STALE_SECONDS) + slack)
+  for _, it in ipairs(list) do
+    it.remoteKey = it.key
+    it.key = M.namespaceKey(hostSpec.ns, it.key)
+    it.remote = { host = hostSpec.host, dest = hostSpec.dest, ns = hostSpec.ns }
+    if it.projectKey then it.projectKey = M.namespaceKey(hostSpec.ns, it.projectKey) end
+  end
+  return list
+end
+
+-- Merge local + mirror lists and re-sort. Collisions are impossible by
+-- construction (every remote key carries ":", no local key can).
+function M.mergeStatusLists(a, b)
+  local out = {}
+  for _, it in ipairs(a or {}) do out[#out + 1] = it end
+  for _, it in ipairs(b or {}) do out[#out + 1] = it end
+  return M.sortByStatus(out)
+end
+
+-- The decision-file content for a verb, nonce-bound when the status JSON (text)
+-- carries a pending nonce. Extracted from FX.writeDecision so the LOCAL write
+-- and the REMOTE ssh write share one implementation: garbled/missing JSON
+-- degrades to the bare verb (cc-approve.sh accepts both; a mismatched nonce is
+-- ignored there, so the worst case is a no-op).
+function M.decisionContent(value, statusText)
+  local nonce
+  pcall(function()
+    local st = M.json.decode(tostring(statusText or ""))
+    if type(st) == "table" and type(st.pending) == "table"
+       and type(st.pending.nonce) == "string" and st.pending.nonce ~= "" then
+      nonce = st.pending.nonce
+    end
+  end)
+  return nonce and (tostring(value) .. " " .. nonce) or tostring(value)
+end
+
+-- argv for routing a decision back to the remote box. The remote write keeps
+-- the temp+mv atomicity cc-approve.sh's poller relies on. Validation is the
+-- injection guard -- the key and content are embedded in a remote shell line,
+-- so anything outside the known-good shapes returns nil (never "best effort"):
+--   remoteKey: ^[A-Za-z0-9._-]+$ (cc_sanitize's alphabet)
+--   content:   ^(allow|deny)( <nonce in the same alphabet>)?$
+function M.decisionSshArgv(dest, remoteKey, content)
+  if not dest or tostring(dest) == "" then return nil end
+  remoteKey = tostring(remoteKey or "")
+  content = tostring(content or "")
+  if not remoteKey:match("^[%w._%-]+$") then return nil end
+  if not content:match("^allow$") and not content:match("^deny$")
+     and not content:match("^allow [%w._%-]+$") and not content:match("^deny [%w._%-]+$") then
+    return nil
+  end
+  local f = ".claude/cc-status/" .. remoteKey .. ".decision"
+  return { "ssh", "-oBatchMode=yes", "-oConnectTimeout=3", tostring(dest),
+           "printf %s '" .. content .. "' > '" .. f .. ".tmp' && mv '" .. f .. ".tmp' '" .. f .. "'" }
+end
+
+-- Which actions work on a remote tile. v1: headless approve/deny only (and only
+-- while the remote gate is actually waiting -- there's no decision file to
+-- consume otherwise). Keystroke actions (nudge/stop/clear/compact/focus/...)
+-- need a local window the tile can't name; opts.keystrokes (bridge.keystrokes,
+-- hardware-verify) is the future unlock. Autopilot/gate-tools arming is also
+-- blocked: those are REMOTE-gate files -- arming them locally would lie.
+function M.remoteActionAllowed(item, action, opts)
+  if type(item) ~= "table" or not item.remote then return true end  -- local: no gate here
+  opts = opts or {}
+  if action == "approve" or action == "deny" then
+    return item.gate == "waiting"
+  end
+  if opts.keystrokes then
+    return action == "nudge" or action == "stop" or action == "clear" or action == "compact"
+  end
+  return false
 end
 
 -- The shell command run INSIDE the spawned terminal:
@@ -2128,8 +2625,7 @@ function M.spawnSpec(editor, project, task, opts)
       -- remote ~/.zshrc). The whole remote command is one argv element.
       argv[#argv + 1] = "ssh"
       if ssh.tty ~= false then argv[#argv + 1] = "-t" end
-      argv[#argv + 1] = (ssh.user and tostring(ssh.user) ~= "")
-        and (tostring(ssh.user) .. "@" .. tostring(ssh.host)) or tostring(ssh.host)
+      argv[#argv + 1] = M.sshDest(ssh)
       argv[#argv + 1] = M.loginShellWrap(
         M.spawnInner(project, task, { env = env, flags = flags }), env)
     elseif hasEnv then
@@ -2415,6 +2911,86 @@ function M.sortDirs(names)
   return out
 end
 
+-- ---- Fuzzy folder search (roadmap #4b, fd-backed) ---------------------------
+-- The modal scans the project roots ONCE per open (async hs.task, cached); each
+-- keystroke filters the cached index here -- so the ranking is pure + tested and
+-- no process is ever spawned per keystroke. fd is preferred (fast, honors
+-- .gitignore so node_modules vanishes in repos); plain `find` is the fallback.
+
+-- argv for an fd directory scan (binary first, hs.task shape).
+function M.folderScanArgv(fdPath, roots, depth)
+  local argv = { tostring(fdPath or "fd"), "--type", "d",
+                 "--max-depth", tostring(tonumber(depth) or 4), "--absolute-path", "." }
+  for _, r in ipairs(roots or {}) do argv[#argv + 1] = tostring(r) end
+  return argv
+end
+
+-- argv for the `find` fallback: same shape of output (one absolute dir per
+-- line). Skips dotdirs + node_modules explicitly (fd gets that for free).
+function M.folderScanFallbackArgv(roots, depth)
+  local argv = { "/usr/bin/find" }
+  for _, r in ipairs(roots or {}) do argv[#argv + 1] = tostring(r) end
+  argv[#argv + 1] = "-maxdepth"; argv[#argv + 1] = tostring(tonumber(depth) or 4)
+  argv[#argv + 1] = "-type"; argv[#argv + 1] = "d"
+  argv[#argv + 1] = "-not"; argv[#argv + 1] = "-path"; argv[#argv + 1] = "*/.*"
+  argv[#argv + 1] = "-not"; argv[#argv + 1] = "-path"; argv[#argv + 1] = "*node_modules*"
+  return argv
+end
+
+-- Scanner stdout -> deduped list of normalized absolute dirs, capped (a runaway
+-- depth over a huge tree must not balloon the in-memory index). CRLF-tolerant.
+function M.parseDirList(stdout, cap)
+  cap = tonumber(cap) or 5000
+  local out, seen = {}, {}
+  for line in (tostring(stdout or "") .. "\n"):gmatch("(.-)\n") do
+    line = M.normDir(line:gsub("\r$", ""):gsub("^%s+", ""):gsub("%s+$", ""))
+    if #line > 0 and not seen[line] then
+      seen[line] = true
+      out[#out + 1] = line
+      if #out >= cap then break end
+    end
+  end
+  return out
+end
+
+-- Rank the cached index against a typed query. Tokenized AND-substring match
+-- (every whitespace-separated token must appear somewhere in the lowercased
+-- path; plain find -- `(`/`%` in a query can't inject a Lua pattern). Score:
+-- basename starts with the LAST token (3) > basename contains it (2) > path
+-- match only (1); ties break shorter-path-first then lexicographic, so the
+-- result is total + deterministic. Empty/whitespace query -> {}.
+function M.fuzzyFilter(query, paths, limit)
+  limit = tonumber(limit) or 12
+  local toks = {}
+  for tok in tostring(query or ""):lower():gmatch("%S+") do toks[#toks + 1] = tok end
+  if #toks == 0 then return {} end
+  local lastTok = toks[#toks]
+  local scored = {}
+  for _, p in ipairs(paths or {}) do
+    local lp = tostring(p):lower()
+    local all = true
+    for _, tok in ipairs(toks) do
+      if not lp:find(tok, 1, true) then all = false; break end
+    end
+    if all then
+      local base = lp:match("([^/]+)$") or lp
+      local score
+      if base:sub(1, #lastTok) == lastTok then score = 3
+      elseif base:find(lastTok, 1, true) then score = 2
+      else score = 1 end
+      scored[#scored + 1] = { p = p, s = score }
+    end
+  end
+  table.sort(scored, function(a, b)
+    if a.s ~= b.s then return a.s > b.s end
+    if #a.p ~= #b.p then return #a.p < #b.p end
+    return a.p < b.p
+  end)
+  local out = {}
+  for i = 1, math.min(#scored, limit) do out[i] = scored[i].p end
+  return out
+end
+
 -- Recent directories list (F5): a { dirs = { "/a", "/b", ... } } most-recent-first.
 M.RECENT_CAP = 12
 
@@ -2456,6 +3032,153 @@ function M.recentSeed(state, activeDirs)
     end
   end
   return { dirs = out }
+end
+
+-- ---- Saved task templates (roadmap #5c) -------------------------------------
+-- Operator data, stored OUTSIDE cc-config.json (a separate cc-templates.json,
+-- like labels/recents) so the Settings overlay round-trip can never clobber it.
+-- State shape: { templates = { { name = "...", text = "..." }, ... } }.
+M.TEMPLATE_CAP = 50
+
+local function ttpl(state)
+  if type(state) == "table" and type(state.templates) == "table" then return state.templates end
+  return {}
+end
+
+-- Safe copy of the templates list; tolerates nil/garbage state and drops
+-- malformed entries (missing/blank name or text).
+function M.templateList(state)
+  local out = {}
+  for _, t in ipairs(ttpl(state)) do
+    if type(t) == "table" and type(t.name) == "string" and t.name ~= ""
+       and type(t.text) == "string" and t.text ~= "" then
+      out[#out + 1] = { name = t.name, text = t.text }
+    end
+  end
+  return out
+end
+
+-- Save a template: trim both fields, reject blanks (returns state unchanged +
+-- false), replace an existing same-name entry IN PLACE (rename-free update),
+-- else prepend. Caps at `cap` (default TEMPLATE_CAP), dropping the oldest.
+function M.templatePush(state, name, text, cap)
+  cap = tonumber(cap) or M.TEMPLATE_CAP
+  name = tostring(name or ""):gsub("^%s+", ""):gsub("%s+$", "")
+  text = tostring(text or ""):gsub("^%s+", ""):gsub("%s+$", "")
+  local list = M.templateList(state)
+  if name == "" or text == "" then return { templates = list }, false end
+  local out, replaced = {}, false
+  for _, t in ipairs(list) do
+    if t.name == name then
+      out[#out + 1] = { name = name, text = text }; replaced = true
+    else
+      out[#out + 1] = t
+    end
+  end
+  if not replaced then table.insert(out, 1, { name = name, text = text }) end
+  while #out > cap do table.remove(out) end
+  return { templates = out }, true
+end
+
+-- Delete by name (no-op copy on miss).
+function M.templateRemove(state, name)
+  local out = {}
+  for _, t in ipairs(M.templateList(state)) do
+    if t.name ~= name then out[#out + 1] = t end
+  end
+  return { templates = out }
+end
+
+-- Body text for a named template, or nil.
+function M.templateGet(state, name)
+  for _, t in ipairs(M.templateList(state)) do
+    if t.name == name then return t.text end
+  end
+  return nil
+end
+
+-- ---- Spawn presets (roadmap #4a) --------------------------------------------
+-- "Save this setup" for the New Session modal: a named {folder, editor,
+-- permMode, provider} bundle, plus per-project last-used recall. Stored in a
+-- separate cc-presets.json (operator data, same reasoning as templates).
+-- State: { presets = { {name, folder, editor, permMode, provider}, ... },
+--          lastByProject = { [normDir(folder)] = {editor, permMode, provider} } }.
+M.PRESET_CAP = 20
+
+local function plist(state)
+  if type(state) == "table" and type(state.presets) == "table" then return state.presets end
+  return {}
+end
+local function plast(state)
+  if type(state) == "table" and type(state.lastByProject) == "table" then return state.lastByProject end
+  return {}
+end
+
+-- Safe copy of the presets list; drops entries without a name or an absolute folder.
+function M.presetList(state)
+  local out = {}
+  for _, p in ipairs(plist(state)) do
+    if type(p) == "table" and type(p.name) == "string" and p.name ~= ""
+       and type(p.folder) == "string" and p.folder:sub(1, 1) == "/" then
+      out[#out + 1] = { name = p.name, folder = M.normDir(p.folder),
+                        editor = p.editor, permMode = p.permMode, provider = p.provider }
+    end
+  end
+  return out
+end
+
+-- Save a preset: validates name (nonblank after trim) + folder (absolute),
+-- replaces same-name in place, else prepends; caps (oldest dropped). Returns
+-- newState, saved(boolean). lastByProject rides through untouched.
+function M.presetPush(state, preset, cap)
+  cap = tonumber(cap) or M.PRESET_CAP
+  local list = M.presetList(state)
+  local last = {}
+  for k, v in pairs(plast(state)) do last[k] = v end
+  preset = type(preset) == "table" and preset or {}
+  local name = tostring(preset.name or ""):gsub("^%s+", ""):gsub("%s+$", "")
+  local folder = M.normDir(tostring(preset.folder or ""))
+  if name == "" or folder:sub(1, 1) ~= "/" then
+    return { presets = list, lastByProject = last }, false
+  end
+  local entry = { name = name, folder = folder, editor = preset.editor,
+                  permMode = preset.permMode, provider = preset.provider }
+  local out, replaced = {}, false
+  for _, p in ipairs(list) do
+    if p.name == name then out[#out + 1] = entry; replaced = true
+    else out[#out + 1] = p end
+  end
+  if not replaced then table.insert(out, 1, entry) end
+  while #out > cap do table.remove(out) end
+  return { presets = out, lastByProject = last }, true
+end
+
+-- Delete by name (no-op copy on miss).
+function M.presetRemove(state, name)
+  local out = {}
+  for _, p in ipairs(M.presetList(state)) do
+    if p.name ~= name then out[#out + 1] = p end
+  end
+  local last = {}
+  for k, v in pairs(plast(state)) do last[k] = v end
+  return { presets = out, lastByProject = last }
+end
+
+-- Record the spawn options last used for a project (per-project recall).
+-- nil/relative folder or no options -> unchanged copy.
+function M.presetMarkUsed(state, folder, spec)
+  local out = { presets = M.presetList(state), lastByProject = {} }
+  for k, v in pairs(plast(state)) do out.lastByProject[k] = v end
+  folder = M.normDir(tostring(folder or ""))
+  if folder:sub(1, 1) ~= "/" or type(spec) ~= "table" then return out end
+  out.lastByProject[folder] = { editor = spec.editor, permMode = spec.permMode,
+                                provider = spec.provider }
+  return out
+end
+
+-- The last-used spawn options for a project, or nil.
+function M.presetForProject(state, folder)
+  return plast(state)[M.normDir(tostring(folder or ""))]
 end
 
 -- Validate a new project folder name (F3). Returns the trimmed name, or nil if

@@ -41,7 +41,7 @@ do
   local cfg = {
     spawn = { editor = "kitty", kittyBin = "/opt/kitty/kitty", kittySocket = "unix:/tmp/k" },
     escalation = { enabled = true, minutes = 5, hung = { enabled = true, minutes = 10 } },
-    risk = { enabled = true },  -- top-level block the UI doesn't expose
+    risk = { enabled = true },  -- block absent from THIS incoming -> must survive
   }
   local incoming = {
     spawn = { editor = "terminal", live = true, provider = "" },  -- the form's spawn shape
@@ -62,6 +62,30 @@ do
   -- degenerate inputs are safe
   eq("overlay: nil incoming -> cfg unchanged", core.overlayConfig({ a = 1 }, nil).a, 1)
   eq("overlay: nil cfg -> incoming kept", core.overlayConfig(nil, { a = 2 }).a, 2)
+  -- risk: the Settings form now manages enabled+thresholds but NEVER sends
+  -- weights -- the hand-edited tuning map must ride through a wholesale save.
+  local riskCfg = { risk = { enabled = false, weights = { denyRate = 99 },
+                             thresholds = { med = 10, high = 20, staleSeconds = 30 } } }
+  local riskIn  = { risk = { enabled = true,
+                             thresholds = { med = 40, high = 70, staleSeconds = 300 } } }
+  local rOut = core.overlayConfig(riskCfg, riskIn)
+  eq("overlay: risk form field wins", rOut.risk.enabled, true)
+  eq("overlay: hand-edited risk.weights survives the save", rOut.risk.weights.denyRate, 99)
+  eq("overlay: risk.thresholds replaced wholesale", rOut.risk.thresholds.med, 40)
+  -- an incoming that DOES carry weights (hand-rolled save-config) wins over disk
+  local rOut2 = core.overlayConfig({ risk = { weights = { denyRate = 1 } } },
+                                   { risk = { weights = { denyRate = 2 } } })
+  eq("overlay: explicit incoming risk.weights beats disk", rOut2.risk.weights.denyRate, 2)
+  -- first-ever save on a config with no risk block: form block lands intact
+  local rOut3 = core.overlayConfig({}, { risk = { enabled = true } })
+  eq("overlay: risk block created on first save", rOut3.risk.enabled, true)
+  -- spawn search keys (fd fuzzy search) ride through like kittyBin
+  local sOut = core.overlayConfig(
+    { spawn = { searchRoots = { "/a" }, searchDepth = 6, fdBin = "/opt/fd" } },
+    { spawn = { editor = "kitty" } })
+  eq("overlay: spawn.searchRoots carried forward", sOut.spawn.searchRoots[1], "/a")
+  eq("overlay: spawn.searchDepth carried forward", sOut.spawn.searchDepth, 6)
+  eq("overlay: spawn.fdBin carried forward", sOut.spawn.fdBin, "/opt/fd")
 end
 
 -- ---- parseStatusList: decode + stale + approvals-first sort ----------------
@@ -305,6 +329,186 @@ do
   eq("feed: empty queue -> false", core.shouldFeed("working", "done", { tasks = {} }, true), false)
   eq("feed: autofeed off -> false", core.shouldFeed("working", "done", q1, false), false)
   eq("feed: not done -> false", core.shouldFeed("working", "working", q1, true), false)
+end
+
+-- ---- Queue editing (roadmap #5): move / removeAt / splitLines / pushAll -----
+do
+  local q3 = { tasks = { "a", "b", "c" } }
+  -- queueMove: happy paths + boundary no-ops
+  local m1, ok1 = core.queueMove(q3, 2, -1, "b")
+  eq("qmove: middle up", table.concat(m1.tasks, ","), "b,a,c")
+  eq("qmove: middle up flag", ok1, true)
+  local m2, ok2 = core.queueMove(q3, 2, 1, "b")
+  eq("qmove: middle down", table.concat(m2.tasks, ","), "a,c,b")
+  eq("qmove: middle down flag", ok2, true)
+  local m3, ok3 = core.queueMove(q3, 1, -1, "a")
+  eq("qmove: first up refused", ok3, false)
+  eq("qmove: refused leaves order", table.concat(m3.tasks, ","), "a,b,c")
+  local _, ok4 = core.queueMove(q3, 3, 1, "c")
+  eq("qmove: last down refused", ok4, false)
+  local _, ok5 = core.queueMove(q3, 9, -1, "x")
+  eq("qmove: out of range refused", ok5, false)
+  -- the expect guard: a stale panel (autofeed popped the head) must not move
+  -- the WRONG task -- mismatch refuses and returns an unchanged copy.
+  local m6, ok6 = core.queueMove(q3, 2, -1, "stale-text")
+  eq("qmove: expect mismatch refused", ok6, false)
+  eq("qmove: mismatch leaves order", table.concat(m6.tasks, ","), "a,b,c")
+  local m7, ok7 = core.queueMove(nil, 1, 1, "a")
+  eq("qmove: nil queue tolerated", ok7, false)
+  eq("qmove: nil queue -> canonical shape", #m7.tasks, 0)
+  eq("qmove: original untouched (pure)", table.concat(q3.tasks, ","), "a,b,c")
+  -- queueRemoveAt
+  local r1, rem1 = core.queueRemoveAt(q3, 2, "b")
+  eq("qrm: removes the task", rem1, "b")
+  eq("qrm: remaining order", table.concat(r1.tasks, ","), "a,c")
+  local _, rem2 = core.queueRemoveAt(q3, 9, nil)
+  eq("qrm: out of range -> nil", rem2, nil)
+  local r3, rem3 = core.queueRemoveAt(q3, 1, "not-a")
+  eq("qrm: expect mismatch -> nil", rem3, nil)
+  eq("qrm: mismatch leaves queue", #r3.tasks, 3)
+  local r4, rem4 = core.queueRemoveAt({ tasks = { "only" } }, 1, "only")
+  eq("qrm: last task removed", rem4, "only")
+  eq("qrm: empty canonical shape", #r4.tasks, 0)
+  check("qrm: shape stays {tasks=...}", type(r4.tasks) == "table")
+  -- queueSplitLines
+  local s1 = core.queueSplitLines("a\nb\n\n   \nc")
+  eq("qsplit: blanks dropped", #s1, 3)
+  eq("qsplit: order kept", table.concat(s1, ","), "a,b,c")
+  eq("qsplit: CRLF tolerated", table.concat(core.queueSplitLines("a\r\nb\r\n"), ","), "a,b")
+  eq("qsplit: dash bullet stripped", core.queueSplitLines("- task one")[1], "task one")
+  eq("qsplit: star bullet stripped", core.queueSplitLines("* task two")[1], "task two")
+  eq("qsplit: numbered dot stripped", core.queueSplitLines("3. task three")[1], "task three")
+  eq("qsplit: numbered paren stripped", core.queueSplitLines("12) task twelve")[1], "task twelve")
+  eq("qsplit: bare marker line dropped", #core.queueSplitLines("- \n* "), 0)
+  eq("qsplit: single line -> 1", #core.queueSplitLines("just one"), 1)
+  eq("qsplit: empty -> {}", #core.queueSplitLines(""), 0)
+  eq("qsplit: nil -> {}", #core.queueSplitLines(nil), 0)
+  -- a literal "-x" (no space) is a task, not a bullet
+  eq("qsplit: dash without space kept", core.queueSplitLines("-x flag")[1], "-x flag")
+  -- queuePushAll
+  local pa = core.queuePushAll({ tasks = { "old" } }, { "n1", "n2" })
+  eq("qpushall: appends after existing", table.concat(pa.tasks, ","), "old,n1,n2")
+  eq("qpushall: empty list unchanged", table.concat(core.queuePushAll(q3, {}).tasks, ","), "a,b,c")
+  eq("qpushall: drops empty strings", #core.queuePushAll(nil, { "", "x" }).tasks, 1)
+  check("qpushall: nil queue canonical shape", type(core.queuePushAll(nil, nil).tasks) == "table")
+end
+
+-- ---- Saved task templates (roadmap #5c) -------------------------------------
+do
+  local st, ok1 = core.templatePush(nil, "deploy", "run make deploy")
+  eq("tpl: push onto nil state", ok1, true)
+  eq("tpl: list after push", #core.templateList(st), 1)
+  eq("tpl: get by name", core.templateGet(st, "deploy"), "run make deploy")
+  -- replace-by-name updates in place (no duplicate)
+  local st2 = core.templatePush(st, "deploy", "make deploy && make test")
+  eq("tpl: replace keeps one entry", #core.templateList(st2), 1)
+  eq("tpl: replace updates text", core.templateGet(st2, "deploy"), "make deploy && make test")
+  -- prepend order: newest first
+  local st3 = core.templatePush(st2, "lint", "run the linter")
+  eq("tpl: newest first", core.templateList(st3)[1].name, "lint")
+  -- blank name/text rejected
+  local _, okBlank = core.templatePush(st3, "  ", "x")
+  eq("tpl: blank name rejected", okBlank, false)
+  local _, okNoText = core.templatePush(st3, "x", "")
+  eq("tpl: blank text rejected", okNoText, false)
+  -- trim both fields
+  local st4 = core.templatePush(nil, "  padded  ", "  body  ")
+  eq("tpl: name trimmed", core.templateList(st4)[1].name, "padded")
+  eq("tpl: text trimmed", core.templateGet(st4, "padded"), "body")
+  -- remove: hit + miss
+  eq("tpl: remove", #core.templateList(core.templateRemove(st3, "lint")), 1)
+  eq("tpl: remove miss is no-op", #core.templateList(core.templateRemove(st3, "nope")), 2)
+  eq("tpl: get miss -> nil", core.templateGet(st3, "nope"), nil)
+  -- cap drops the oldest
+  local big = nil
+  for i = 1, 5 do big = core.templatePush(big, "t" .. i, "x" .. i, 3) end
+  eq("tpl: cap size", #core.templateList(big), 3)
+  eq("tpl: cap keeps newest", core.templateList(big)[1].name, "t5")
+  eq("tpl: cap dropped oldest", core.templateGet(big, "t1"), nil)
+  -- garbage state tolerated; malformed entries dropped
+  eq("tpl: garbage state -> empty", #core.templateList("nonsense"), 0)
+  eq("tpl: malformed entries dropped",
+     #core.templateList({ templates = { { name = "ok", text = "t" }, { name = "" }, "junk" } }), 1)
+end
+
+-- ---- Spawn presets (roadmap #4a) --------------------------------------------
+do
+  local st, ok1 = core.presetPush(nil, { name = "api work", folder = "/u/a/api",
+                                         editor = "kitty", permMode = "plan", provider = "opus" })
+  eq("preset: push onto nil state", ok1, true)
+  eq("preset: list after push", #core.presetList(st), 1)
+  eq("preset: fields kept", core.presetList(st)[1].editor, "kitty")
+  -- trailing slash normalized (normDir)
+  local stN = core.presetPush(nil, { name = "n", folder = "/u/a/api/" })
+  eq("preset: folder normalized", core.presetList(stN)[1].folder, "/u/a/api")
+  -- replace-by-name in place
+  local st2 = core.presetPush(st, { name = "api work", folder = "/u/a/api2" })
+  eq("preset: replace keeps one", #core.presetList(st2), 1)
+  eq("preset: replace updates folder", core.presetList(st2)[1].folder, "/u/a/api2")
+  -- validation: blank name / relative folder rejected
+  local _, okBlank = core.presetPush(st, { name = " ", folder = "/x" })
+  eq("preset: blank name rejected", okBlank, false)
+  local _, okRel = core.presetPush(st, { name = "x", folder = "relative/path" })
+  eq("preset: relative folder rejected", okRel, false)
+  -- remove: hit + miss are safe copies
+  eq("preset: remove", #core.presetList(core.presetRemove(st, "api work")), 0)
+  eq("preset: remove miss no-op", #core.presetList(core.presetRemove(st, "nope")), 1)
+  -- cap drops oldest
+  local big = nil
+  for i = 1, 4 do big = core.presetPush(big, { name = "p" .. i, folder = "/p/" .. i }, 2) end
+  eq("preset: cap size", #core.presetList(big), 2)
+  eq("preset: cap keeps newest", core.presetList(big)[1].name, "p4")
+  -- lastByProject recall round-trip + normalization + survival through push/remove
+  local mu = core.presetMarkUsed(st, "/u/a/proj/", { editor = "vscode", permMode = "plan", provider = "" })
+  check("preset: markUsed recorded", core.presetForProject(mu, "/u/a/proj") ~= nil)
+  eq("preset: recall editor", core.presetForProject(mu, "/u/a/proj").editor, "vscode")
+  eq("preset: recall via trailing slash", core.presetForProject(mu, "/u/a/proj/").editor, "vscode")
+  local mu2 = core.presetPush(mu, { name = "z", folder = "/z" })
+  eq("preset: lastByProject survives push", core.presetForProject(mu2, "/u/a/proj").editor, "vscode")
+  local mu3 = core.presetRemove(mu2, "z")
+  eq("preset: lastByProject survives remove", core.presetForProject(mu3, "/u/a/proj").editor, "vscode")
+  -- degenerate inputs
+  eq("preset: markUsed relative folder no-op", core.presetForProject(
+     core.presetMarkUsed(nil, "relative", { editor = "k" }), "relative"), nil)
+  eq("preset: garbage state -> empty", #core.presetList(42), 0)
+  check("preset: forProject on nil state", core.presetForProject(nil, "/x") == nil)
+end
+
+-- ---- Fuzzy folder search (roadmap #4b) --------------------------------------
+do
+  -- argv builders: exact shape (binary first; hs.task takes the rest)
+  local fa = core.folderScanArgv("/opt/homebrew/bin/fd", { "/u/a/Programming", "/u/a/Work" }, 4)
+  eq("fscan: fd argv", table.concat(fa, " "),
+     "/opt/homebrew/bin/fd --type d --max-depth 4 --absolute-path . /u/a/Programming /u/a/Work")
+  local ga = core.folderScanFallbackArgv({ "/u/a/Programming" }, 3)
+  eq("fscan: find argv", table.concat(ga, " "),
+     "/usr/bin/find /u/a/Programming -maxdepth 3 -type d -not -path */.* -not -path *node_modules*")
+  -- parseDirList: trim, CRLF, dedupe, trailing-slash normalize, cap
+  local pd = core.parseDirList("/a/b\r\n/a/b/\n  /a/c  \n\n/a/b\n")
+  eq("fscan: parse count", #pd, 2)
+  eq("fscan: parse first", pd[1], "/a/b")
+  eq("fscan: parse second", pd[2], "/a/c")
+  eq("fscan: parse cap", #core.parseDirList("/a\n/b\n/c\n", 2), 2)
+  eq("fscan: parse nil -> empty", #core.parseDirList(nil), 0)
+  -- fuzzyFilter ranking
+  local idx = { "/u/p/shepherd", "/u/p/shepherd-docs", "/u/p/old/shepherd-archive",
+                "/u/p/sheep", "/u/other/herd" }
+  local r = core.fuzzyFilter("shep", idx)
+  eq("fuzzy: basename prefix first", r[1], "/u/p/shepherd")
+  eq("fuzzy: shorter beats longer on ties", r[2], "/u/p/shepherd-docs")
+  check("fuzzy: non-matching dropped", #r < #idx)
+  -- multi-token AND across the whole path
+  local r2 = core.fuzzyFilter("old shep", idx)
+  eq("fuzzy: multi-token AND", #r2, 1)
+  eq("fuzzy: multi-token hit", r2[1], "/u/p/old/shepherd-archive")
+  -- case-insensitive both sides
+  eq("fuzzy: case-insensitive", core.fuzzyFilter("SHEP", { "/u/Shepherd" })[1], "/u/Shepherd")
+  -- limit, empty query, pattern-injection safety
+  eq("fuzzy: limit", #core.fuzzyFilter("p", { "/p1", "/p2", "/p3" }, 2), 2)
+  eq("fuzzy: empty query -> {}", #core.fuzzyFilter("", idx), 0)
+  eq("fuzzy: whitespace query -> {}", #core.fuzzyFilter("   ", idx), 0)
+  eq("fuzzy: lua-pattern chars are literal", #core.fuzzyFilter("(x%", { "/a/(x%y" }), 1)
+  eq("fuzzy: nil paths -> {}", #core.fuzzyFilter("x", nil), 0)
 end
 
 -- ---- queueKey: queues are PROJECT-keyed so respawn//clear can't strand them --
@@ -1582,6 +1786,389 @@ do
   eq("timeline: cap count", #capped, 3)
   eq("timeline: cap keeps newest, ascending", capped[1].ts, 8)
   eq("timeline: cap last is newest", capped[3].ts, 10)
+end
+
+-- ---- gateDecisionSummary: grouped last-N gate decisions (roadmap #2) --------
+do
+  local function dec(ts, sid, tool, outcome, by, pattern, summary)
+    return { ts = ts, type = "decision", session_id = sid, tool = tool,
+             outcome = outcome, by = by, pattern = pattern, summary = summary }
+  end
+  -- four identical consecutive denies collapse to one ×4 group
+  local burst = {
+    dec(40, "s1", "Bash", "deny", "autoDeny", "Bash(rm*)", "rm -rf build"),
+    dec(30, "s1", "Bash", "deny", "autoDeny", "Bash(rm*)", "rm -rf dist"),
+    dec(20, "s1", "Bash", "deny", "autoDeny", "Bash(rm*)", "rm -rf tmp"),
+    dec(10, "s1", "Bash", "deny", "autoDeny", "Bash(rm*)", "rm -rf old"),
+  }
+  local g = core.gateDecisionSummary(burst, "s1")
+  eq("decisions: burst collapses to one group", #g, 1)
+  eq("decisions: count", g[1].count, 4)
+  eq("decisions: lastTs is newest", g[1].lastTs, 40)
+  eq("decisions: firstTs is oldest", g[1].firstTs, 10)
+  eq("decisions: summary is newest member's", g[1].summary, "rm -rf build")
+  eq("decisions: pattern carried", g[1].pattern, "Bash(rm*)")
+  -- an interleaved different decision splits the run (A A B A = 3 groups)
+  local mixed = {
+    dec(40, "s1", "Bash", "deny", "autoDeny", "Bash(rm*)"),
+    dec(30, "s1", "Bash", "deny", "autoDeny", "Bash(rm*)"),
+    dec(20, "s1", "Write", "allow", "human"),
+    dec(10, "s1", "Bash", "deny", "autoDeny", "Bash(rm*)"),
+  }
+  local gm = core.gateDecisionSummary(mixed, "s1")
+  eq("decisions: interleave splits groups", #gm, 3)
+  eq("decisions: newest group first", gm[1].count, 2)
+  eq("decisions: middle group is the allow", gm[2].outcome, "allow")
+  -- nil vs set pattern are DIFFERENT group keys (no false merge)
+  local pat = {
+    dec(20, "s1", "Bash", "deny", "autoDeny", "Bash(rm*)"),
+    dec(10, "s1", "Bash", "deny", "autoDeny", nil),
+  }
+  eq("decisions: nil-vs-set pattern split", #core.gateDecisionSummary(pat, "s1"), 2)
+  -- limit caps GROUPS (not raw events); newest groups win
+  local alt = {}
+  for i = 10, 1, -1 do  -- alternate tools -> 10 groups, newest ts=10..1
+    alt[#alt + 1] = dec(i, "s1", (i % 2 == 0) and "Bash" or "Write", "allow", "human")
+  end
+  local gl = core.gateDecisionSummary(alt, "s1", { limit = 3 })
+  eq("decisions: limit caps groups", #gl, 3)
+  eq("decisions: capped keeps newest", gl[1].lastTs, 10)
+  -- sinceTs window + other-session + non-decision exclusion
+  local noisy = {
+    dec(50, "s1", "Bash", "allow", "human"),
+    dec(5,  "s1", "Bash", "allow", "human"),          -- below sinceTs
+    dec(45, "s2", "Bash", "deny", "autoDeny"),        -- other session
+    { ts = 48, type = "prompt", session_id = "s1" },  -- not a decision
+  }
+  local gn = core.gateDecisionSummary(noisy, "s1", { sinceTs = 10 })
+  eq("decisions: sinceTs + scope filters", #gn, 1)
+  eq("decisions: scoped result is the fresh allow", gn[1].lastTs, 50)
+  -- degenerate inputs
+  eq("decisions: nil session -> empty", #core.gateDecisionSummary(burst, nil), 0)
+  eq("decisions: empty session -> empty", #core.gateDecisionSummary(burst, ""), 0)
+  eq("decisions: nil events -> empty", #core.gateDecisionSummary(nil, "s1"), 0)
+end
+
+-- ---- notificationEvents / unseenNotificationCount (roadmap #6) --------------
+do
+  local evs = {
+    { ts = 90, type = "escalation",   session_id = "s1", minutes = 5 },
+    { ts = 80, type = "hung",         session_id = "s1", minutes = 5 },
+    { ts = 70, type = "auto_respawn", session_id = "s2" },
+    { ts = 60, type = "decision", session_id = "s1", by = "autoDeny", outcome = "deny" },
+    { ts = 55, type = "decision", session_id = "s1", by = "timeout-fallback", outcome = "allow" },
+    { ts = 50, type = "decision", session_id = "s1", by = "human", outcome = "allow" },  -- excluded
+    { ts = 45, type = "decision", session_id = "s1", outcome = "allow" },                -- no by -> excluded
+    { ts = 40, type = "prompt",   session_id = "s1", prompt = "hi" },                    -- excluded
+    { ts = 5,  type = "escalation", session_id = "s1" },                                 -- below sinceTs
+  }
+  local n = core.notificationEvents(evs, { sinceTs = 10 })
+  eq("notify: count", #n, 5)
+  eq("notify: newest first", n[1].ts, 90)
+  eq("notify: oldest kept", n[5].ts, 55)
+  eq("notify: limit caps", #core.notificationEvents(evs, { sinceTs = 10, limit = 2 }), 2)
+  eq("notify: nil events -> empty", #core.notificationEvents(nil, {}), 0)
+  -- unseen counting (newest-first input)
+  eq("notify: unseen between events", core.unseenNotificationCount(n, 72), 2)
+  eq("notify: unseen nil lastSeen = all", core.unseenNotificationCount(n, nil), 5)
+  eq("notify: unseen 0 lastSeen = all", core.unseenNotificationCount(n, 0), 5)
+  eq("notify: lastSeen newer than all -> 0", core.unseenNotificationCount(n, 999), 0)
+  eq("notify: empty list -> 0", core.unseenNotificationCount({}, 0), 0)
+  eq("notify: nil list -> 0", core.unseenNotificationCount(nil, 0), 0)
+  -- narrateEvent renders the new types without crashing on missing fields
+  check("notify: narrate escalation", core.narrateEvent({ type = "escalation" }):find("waiting too long", 1, true) ~= nil)
+  check("notify: narrate hung", core.narrateEvent({ type = "hung" }):find("stalled", 1, true) ~= nil)
+  check("notify: narrate auto_respawn", core.narrateEvent({ type = "auto_respawn" }):find("respawned", 1, true) ~= nil)
+  check("notify: narrate drain_close", core.narrateEvent({ type = "drain_close" }):find("drained", 1, true) ~= nil)
+end
+
+-- ---- SSH status bridge (roadmap #7): pure layer -----------------------------
+do
+  -- sshDest: the one dest formatter
+  eq("bridge: dest user@host", core.sshDest({ host = "devbox", user = "adam" }), "adam@devbox")
+  eq("bridge: dest host only", core.sshDest({ host = "devbox" }), "devbox")
+  eq("bridge: dest nil host -> nil", core.sshDest({ user = "adam" }), nil)
+  eq("bridge: dest empty host -> nil", core.sshDest({ host = "" }), nil)
+  eq("bridge: dest non-table -> nil", core.sshDest("devbox"), nil)
+  -- sshWrap still works through sshDest (regression)
+  check("bridge: sshWrap unchanged", core.sshWrap("cd /p && claude", { host = "h", user = "u" })
+    :find("^ssh %-t u@h ") ~= nil)
+  -- sshHosts: gated on bridge.enabled, deduped, ns sanitized
+  local cfgOff = { providers = { { id = "r", ssh = { host = "devbox", user = "adam" } } } }
+  eq("bridge: hosts gated off by default", #core.sshHosts(cfgOff), 0)
+  local cfgOn = { bridge = { enabled = true }, providers = {
+    { id = "r1", ssh = { host = "devbox", user = "adam" } },
+    { id = "r2", ssh = { host = "devbox", user = "adam" } },   -- same dest: deduped
+    { id = "r3", ssh = { host = "my box!", user = "a" } },     -- ns sanitized
+    { id = "local1" },                                          -- no ssh: skipped
+    { id = "bad", ssh = { user = "x" } },                       -- no host: skipped
+  } }
+  local hosts = core.sshHosts(cfgOn)
+  eq("bridge: hosts deduped count", #hosts, 2)
+  eq("bridge: host dest", hosts[1].dest, "adam@devbox")
+  eq("bridge: ns sanitized", hosts[2].ns, "my_box_")
+  eq("bridge: nil cfg -> {}", #core.sshHosts(nil), 0)
+  -- rsyncArgv: exact shape (BatchMode is load-bearing; home-relative remote path)
+  eq("bridge: rsync argv", table.concat(core.rsyncArgv("adam@devbox", "/m/devbox"), " "),
+     "rsync -az --delete --timeout=5 -e ssh -oBatchMode=yes -oConnectTimeout=3 "
+     .. "adam@devbox:.claude/cc-status/ /m/devbox/")
+  eq("bridge: rsync nil dest -> nil", core.rsyncArgv(nil, "/m"), nil)
+  -- namespacing round-trip; ":" is impossible in local keys (cc_sanitize)
+  eq("bridge: namespaceKey", core.namespaceKey("devbox", "abc-123"), "devbox:abc-123")
+  local ns, rest = core.splitNamespacedKey("devbox:abc-123")
+  eq("bridge: split ns", ns, "devbox")
+  eq("bridge: split rest", rest, "abc-123")
+  local ns2, rest2 = core.splitNamespacedKey("local-key")
+  eq("bridge: local key has nil ns", ns2, nil)
+  eq("bridge: local key passes through", rest2, "local-key")
+  -- a (theoretical) second colon stays in the rest
+  local _, rest3 = core.splitNamespacedKey("h:a:b")
+  eq("bridge: only first colon splits", rest3, "a:b")
+  -- parseMirrorList: tagging + namespaced projectKey + slack-widened staleness
+  local hostSpec = { ns = "devbox", host = "devbox", dest = "adam@devbox" }
+  local now = 10000
+  local mentries = {
+    entry("r1", { name = "remote-proj", status = "working", updated = now - 95,
+                  transcript_path = "/home/adam/.claude/projects/-home-a-proj/s1.jsonl" }),
+    entry("r2", { name = "fresh", status = "done", updated = now }),
+  }
+  local ml = core.parseMirrorList(hostSpec, mentries, now, 90, { slack = 15 })
+  eq("bridge: mirror count", #ml, 2)
+  local r1
+  for _, it in ipairs(ml) do if it.remoteKey == "r1" then r1 = it end end
+  eq("bridge: key namespaced", r1.key, "devbox:r1")
+  eq("bridge: raw key kept", r1.remoteKey, "r1")
+  eq("bridge: remote tag host", r1.remote.host, "devbox")
+  eq("bridge: projectKey namespaced", r1.projectKey, "devbox:-home-a-proj")
+  -- 95s old: stale at the local 90s threshold, NOT stale with 15s slack
+  eq("bridge: slack widens staleness", r1.stale, false)
+  local mlTight = core.parseMirrorList(hostSpec, mentries, now, 90, { slack = 0 })
+  local r1t
+  for _, it in ipairs(mlTight) do if it.remoteKey == "r1" then r1t = it end end
+  eq("bridge: no slack -> stale", r1t.stale, true)
+  -- queueKey folding: a remote projectKey can never collide with the local clone
+  eq("bridge: queueKey folds the namespace", core.queueKey({ projectKey = "devbox:-home-a-proj" }),
+     "devbox_-home-a-proj")
+  -- mergeStatusLists: sort holds across the merge; no collisions by construction
+  local localList = { { key = "l1", name = "loc", status = "done" } }
+  local merged = core.mergeStatusLists(localList, ml)
+  eq("bridge: merged count", #merged, 3)
+  eq("bridge: merge re-sorts by status rank (done before working)", merged[1].status, "done")
+  eq("bridge: working sorts last", merged[3].status, "working")
+  -- decisionContent: nonce binding shared by local + remote writers
+  eq("bridge: decision with nonce",
+     core.decisionContent("allow", '{"pending":{"nonce":"n-1"}}'), "allow n-1")
+  eq("bridge: decision no nonce", core.decisionContent("deny", '{"status":"approval"}'), "deny")
+  eq("bridge: decision garbled json", core.decisionContent("allow", "{ not json"), "allow")
+  eq("bridge: decision nil text", core.decisionContent("allow", nil), "allow")
+  -- decisionSshArgv: exact shape + injection guards (nil, never best-effort)
+  eq("bridge: decision argv", table.concat(core.decisionSshArgv("adam@devbox", "k-1", "allow n-1"), " "),
+     "ssh -oBatchMode=yes -oConnectTimeout=3 adam@devbox "
+     .. "printf %s 'allow n-1' > '.claude/cc-status/k-1.decision.tmp' && "
+     .. "mv '.claude/cc-status/k-1.decision.tmp' '.claude/cc-status/k-1.decision'")
+  eq("bridge: argv refuses key with semicolon", core.decisionSshArgv("d", "k;rm -rf /", "allow"), nil)
+  eq("bridge: argv refuses key with slash", core.decisionSshArgv("d", "../k", "allow"), nil)
+  eq("bridge: argv refuses key with space", core.decisionSshArgv("d", "k 1", "allow"), nil)
+  eq("bridge: argv refuses non-verb content", core.decisionSshArgv("d", "k", "reboot"), nil)
+  eq("bridge: argv refuses quoted content", core.decisionSshArgv("d", "k", "allow 'x'"), nil)
+  eq("bridge: argv refuses nil dest", core.decisionSshArgv(nil, "k", "allow"), nil)
+  check("bridge: argv accepts bare deny", core.decisionSshArgv("d", "k", "deny") ~= nil)
+  -- remoteActionAllowed: headless-only matrix
+  local rWait = { remote = { host = "h" }, gate = "waiting" }
+  local rIdle = { remote = { host = "h" } }
+  eq("bridge: remote approve while waiting", core.remoteActionAllowed(rWait, "approve"), true)
+  eq("bridge: remote deny while waiting", core.remoteActionAllowed(rWait, "deny"), true)
+  eq("bridge: remote approve not waiting", core.remoteActionAllowed(rIdle, "approve"), false)
+  eq("bridge: remote nudge blocked", core.remoteActionAllowed(rWait, "nudge"), false)
+  eq("bridge: remote stop blocked", core.remoteActionAllowed(rWait, "stop"), false)
+  eq("bridge: remote focus blocked", core.remoteActionAllowed(rWait, "focus"), false)
+  eq("bridge: remote autopilot blocked", core.remoteActionAllowed(rWait, "autopilot"), false)
+  eq("bridge: keystrokes flag unlocks nudge",
+     core.remoteActionAllowed(rWait, "nudge", { keystrokes = true }), true)
+  eq("bridge: keystrokes flag never unlocks focus",
+     core.remoteActionAllowed(rWait, "focus", { keystrokes = true }), false)
+  eq("bridge: local item always allowed", core.remoteActionAllowed({ key = "l" }, "nudge"), true)
+  -- actionIsHeadless: remote tiles never focus a window
+  eq("bridge: remote action is headless", core.actionIsHeadless(rWait, "approve"), true)
+  eq("bridge: remote nudge headless too", core.actionIsHeadless(rIdle, "nudge"), true)
+  -- selectActionable: bulk approve reaches a remote waiter; bulk stop/nudge never
+  local fleet = {
+    { key = "l1", status = "approval", stale = false },
+    { key = "devbox:r1", status = "approval", stale = false, remote = { host = "h" }, gate = "waiting" },
+    { key = "devbox:r2", status = "working", stale = false, remote = { host = "h" } },
+    { key = "l2", status = "working", stale = false },
+  }
+  local app = core.selectActionable(fleet, "approve")
+  eq("bridge: bulk approve includes remote waiter", #app, 2)
+  local stops = core.selectActionable(fleet, "stop")
+  eq("bridge: bulk stop excludes remote", #stops, 1)
+  eq("bridge: bulk stop hits the local one", stops[1], "l2")
+  local nudges = core.selectActionable(fleet, "nudge")
+  eq("bridge: bulk nudge excludes remote", #nudges, 1)
+  -- routing never targets remote (re-pin alongside the bridge)
+  eq("bridge: sessionFree excludes remote",
+     core.sessionFree({ key = "devbox:r", status = "done", stale = false, remote = { host = "h" } }, {}), false)
+  -- recorder contract: approve on a remote waiting tile still routes through
+  -- fx.writeDecision with the NAMESPACED key (FX owns local-vs-ssh routing)
+  local rec = newRecorder()
+  core.handleAction(rec.fx, { key = "devbox:r1", name = "remote-proj", gate = "waiting",
+                              remote = { host = "devbox" } }, "approve")
+  eq("bridge: handleAction routes to writeDecision", rec.last().op, "writeDecision")
+  eq("bridge: writeDecision gets namespaced key", rec.last().a, "devbox:r1")
+  eq("bridge: writeDecision verb", rec.last().b, "allow")
+end
+
+-- ---- 4c-E project routing: free-set, pick, dispatch gating ------------------
+do
+  local function sess(key, status, over)
+    local s = { key = key, status = status, since = 100, stale = false }
+    for k, v in pairs(over or {}) do s[k] = v end
+    return s
+  end
+  -- sessionFree: v1 is done-only (an idle session may be one you're typing into)
+  eq("route-free: done -> true", core.sessionFree(sess("a", "done"), {}), true)
+  eq("route-free: idle -> false (v1)", core.sessionFree(sess("a", "idle"), {}), false)
+  eq("route-free: working -> false", core.sessionFree(sess("a", "working"), {}), false)
+  eq("route-free: approval -> false", core.sessionFree(sess("a", "approval"), {}), false)
+  eq("route-free: error -> false", core.sessionFree(sess("a", "error"), {}), false)
+  eq("route-free: stale -> false", core.sessionFree(sess("a", "done", { stale = true }), {}), false)
+  eq("route-free: remote -> false", core.sessionFree(sess("a", "done", { remote = { host = "h" } }), {}), false)
+  eq("route-free: draining -> false", core.sessionFree(sess("a", "done"), { draining = true }), false)
+  eq("route-free: fresh pending -> false",
+     core.sessionFree(sess("a", "done"), { pending = 100, now = 110 }), false)
+  eq("route-free: expired pending -> true (lost feed re-eligible)",
+     core.sessionFree(sess("a", "done"), { pending = 100, now = 200 }), true)
+  eq("route-free: nil item -> false", core.sessionFree(nil, {}), false)
+  -- routePendingDone: satisfied (left done/idle) / held / timed out
+  eq("route-pending: nil marker -> false", core.routePendingDone(nil, "done", 100, 45), false)
+  eq("route-pending: flipped to working -> done", core.routePendingDone(50, "working", 60, 45), true)
+  eq("route-pending: still done within timeout -> held", core.routePendingDone(50, "done", 60, 45), false)
+  eq("route-pending: still done past timeout -> done", core.routePendingDone(50, "done", 100, 45), true)
+  -- routePick: determinism
+  local members = { sess("b", "done", { since = 50 }), sess("a", "done", { since = 80 }),
+                    sess("c", "working") }
+  eq("route-pick: longest-free wins", core.routePick(members, { now = 100 }), "b")
+  local tied = { sess("z", "done", { since = 50 }), sess("a", "done", { since = 50 }) }
+  eq("route-pick: key tiebreak ascending", core.routePick(tied, { now = 100 }), "a")
+  -- missing since reads as newest (lowest priority)
+  local noSince = { sess("a", "done", { since = nil }), sess("b", "done", { since = 70 }) }
+  eq("route-pick: missing since loses", core.routePick(noSince, { now = 100 }), "b")
+  eq("route-pick: all busy -> nil", core.routePick({ sess("a", "working") }, {}), nil)
+  eq("route-pick: empty members -> nil", core.routePick({}, {}), nil)
+  -- simultaneous finishers: one deterministic pick (the dispatcher feeds ONE per tick)
+  local simul = { sess("s2", "done", { since = 90 }), sess("s1", "done", { since = 90 }) }
+  eq("route-pick: simultaneous finishers -> single deterministic pick",
+     core.routePick(simul, { now = 100 }), "s1")
+  -- pending map blocks the just-fed session on the next tick (two-tick drain)
+  local two = { sess("s1", "done", { since = 90 }), sess("s2", "done", { since = 95 }) }
+  eq("route-pick: tick 1 picks s1", core.routePick(two, { now = 100, pending = {} }), "s1")
+  eq("route-pick: tick 2 skips pending s1",
+     core.routePick(two, { now = 101, pending = { s1 = 100 } }), "s2")
+  -- routeTask: double opt-in gating
+  local armed = { tasks = { "t" }, routing = true }
+  local unarmed = { tasks = { "t" } }
+  local free = { sess("a", "done") }
+  eq("route-task: happy path", core.routeTask(free, armed, { globalOn = true, now = 100 }).key, "a")
+  eq("route-task: global off -> nil", core.routeTask(free, armed, { globalOn = false, now = 100 }), nil)
+  eq("route-task: project unarmed -> nil", core.routeTask(free, unarmed, { globalOn = true, now = 100 }), nil)
+  eq("route-task: empty queue -> nil",
+     core.routeTask(free, { tasks = {}, routing = true }, { globalOn = true, now = 100 }), nil)
+  eq("route-task: nobody free -> nil",
+     core.routeTask({ sess("a", "working") }, armed, { globalOn = true, now = 100 }), nil)
+  -- queueRouted / queueSetRouted round-trip; tasks preserved; legacy shape clean
+  eq("route-flag: legacy file unarmed", core.queueRouted({ tasks = { "x" } }), false)
+  local on = core.queueSetRouted({ tasks = { "x", "y" } }, true)
+  eq("route-flag: armed", core.queueRouted(on), true)
+  eq("route-flag: tasks preserved", table.concat(on.tasks, ","), "x,y")
+  local off = core.queueSetRouted(on, false)
+  eq("route-flag: disarmed", core.queueRouted(off), false)
+  eq("route-flag: off leaves no key (legacy shape)", off.routing, nil)
+  eq("route-flag: nil queue tolerated", core.queueRouted(core.queueSetRouted(nil, false)), false)
+  -- EVERY queue rebuild must carry the arm flag: a routed feed pops + writes
+  -- the queue back, and dropping `routing` there would silently disarm the
+  -- project on its first fed task. Same for add/move/remove/bulk on an armed
+  -- queue. (Regression: queuePop originally rebuilt a bare {tasks} shape.)
+  local _, popped = core.queuePop(on)
+  eq("route-flag: pop preserves arm flag", core.queueRouted(popped), true)
+  eq("route-flag: push preserves arm flag", core.queueRouted(core.queuePush(on, "z")), true)
+  local moved = core.queueMove(on, 1, 1, "x")
+  eq("route-flag: move preserves arm flag", core.queueRouted(moved), true)
+  local removedQ = core.queueRemoveAt(on, 1, "x")
+  eq("route-flag: remove preserves arm flag", core.queueRouted(removedQ), true)
+  eq("route-flag: bulk add preserves arm flag", core.queueRouted(core.queuePushAll(on, { "n" })), true)
+  -- queueMerge: the DESTINATION (project) queue's flag wins on adoption
+  eq("route-flag: merge keeps destination arm", core.queueRouted(core.queueMerge(on, unarmed)), true)
+  eq("route-flag: merge unarmed destination stays off", core.queueRouted(core.queueMerge(unarmed, on)), false)
+  -- unarmed queues still serialize to the legacy plain shape
+  local _, plainPop = core.queuePop(unarmed)
+  eq("route-flag: unarmed pop has no routing key", plainPop.routing, nil)
+  -- queueStarved
+  local busy = { sess("a", "working") }
+  eq("starve: armed+depth+nobody free past threshold",
+     core.queueStarved(busy, armed, { minutes = 5, sinceTs = 100, now = 100 + 301 }), true)
+  eq("starve: within threshold -> false",
+     core.queueStarved(busy, armed, { minutes = 5, sinceTs = 100, now = 100 + 299 }), false)
+  eq("starve: free member -> false",
+     core.queueStarved(free, armed, { minutes = 5, sinceTs = 100, now = 999 }), false)
+  eq("starve: minutes 0 -> never", core.queueStarved(busy, armed, { minutes = 0, sinceTs = 0, now = 999 }), false)
+  eq("starve: unarmed -> false", core.queueStarved(busy, unarmed, { minutes = 5, sinceTs = 100, now = 999 }), false)
+end
+
+-- ---- Fleet-wide search (roadmap #3): argv builders + result parsing ---------
+do
+  -- ERE escaping: literal search, no metachar injection
+  eq("fsearch: escape metas", core.escapeSearchPattern("a.b(c)*+?[x]{2}^$|\\"),
+     "a\\.b\\(c\\)\\*\\+\\?\\[x\\]\\{2\\}\\^\\$\\|\\\\")
+  eq("fsearch: plain word unchanged", core.escapeSearchPattern("auth_ts"), "auth_ts")
+  -- rg argv shape
+  local ra = core.searchArgv("rg", "auth.ts", { "/h/.claude/projects", "/h/.claude/cc-ledger" })
+  eq("fsearch: rg argv", table.concat(ra, " "),
+     "--no-config -i -n -o --no-heading --with-filename --max-count 3 --max-filesize 50M "
+     .. "-g *.jsonl -e .{0,60}auth\\.ts.{0,60} /h/.claude/projects /h/.claude/cc-ledger")
+  -- grep fallback shape (BSD-compatible flags)
+  local ga = core.searchArgv("grep", "auth.ts", { "/h/.claude/projects" })
+  eq("fsearch: grep argv", table.concat(ga, " "),
+     "-r -I -i -n -o -H -E -m 3 --include=*.jsonl -e .{0,60}auth\\.ts.{0,60} /h/.claude/projects")
+  -- too-short / blank queries refuse to build
+  eq("fsearch: 2-char query -> nil", core.searchArgv("rg", "ab", { "/p" }), nil)
+  eq("fsearch: whitespace query -> nil", core.searchArgv("rg", "  a  ", { "/p" }), nil)
+  -- result parsing: first-two-colons split, colons in text survive
+  local out = "/h/projects/ENC/sid-1.jsonl:12:cmd: npm test -- --watch\n"
+    .. "/h/cc-ledger/2026-06-11.jsonl:3:decision allow\n"
+    .. "garbage line without colons\n"
+    .. "relative.jsonl:9:not absolute -> skipped\n"
+  local res = core.parseSearchResults(out)
+  eq("fsearch: parse hit count", #res.hits, 2)
+  eq("fsearch: parse file", res.hits[1].file, "/h/projects/ENC/sid-1.jsonl")
+  eq("fsearch: parse line number", res.hits[1].line, 12)
+  eq("fsearch: colons in text survive", res.hits[1].text, "cmd: npm test -- --watch")
+  eq("fsearch: not truncated", res.truncated, false)
+  -- limit + truncated flag + maxLen backstop
+  local many = ("/a/b.jsonl:1:" .. string.rep("x", 300) .. "\n"):rep(5)
+  local r2 = core.parseSearchResults(many, { limit = 3, maxLen = 10 })
+  eq("fsearch: limit caps hits", #r2.hits, 3)
+  eq("fsearch: truncated flag", r2.truncated, true)
+  eq("fsearch: maxLen truncates", r2.hits[1].text, string.rep("x", 10) .. "…")
+  eq("fsearch: nil output -> empty", #core.parseSearchResults(nil).hits, 0)
+  -- annotation: transcript vs ledger, projectKey/sessionId extraction, live mapping
+  local hits = {
+    { file = "/h/.claude/projects/-Users-a-proj/sid-123.jsonl", line = 1, text = "t" },
+    { file = "/h/.claude/cc-ledger/2026-06-11.jsonl", line = 2, text = "l" },
+    { file = "/h/.claude/projects/-Users-a-other/sid-999.jsonl", line = 3, text = "d" },
+  }
+  local items = { { key = "k1", name = "proj", label = "my proj",
+                    transcript_path = "/h/.claude/projects/-Users-a-proj/sid-123.jsonl" } }
+  core.annotateSearchHits(hits, items, "/h/.claude/cc-ledger")
+  eq("fsearch: live hit kind", hits[1].kind, "transcript")
+  eq("fsearch: live hit projectKey", hits[1].projectKey, "-Users-a-proj")
+  eq("fsearch: live hit sessionId", hits[1].sessionId, "sid-123")
+  eq("fsearch: live hit tile key", hits[1].key, "k1")
+  eq("fsearch: live hit label wins", hits[1].name, "my proj")
+  eq("fsearch: ledger hit kind", hits[2].kind, "ledger")
+  eq("fsearch: ledger hit has no session", hits[2].sessionId, nil)
+  eq("fsearch: dead hit kind", hits[3].kind, "transcript")
+  eq("fsearch: dead hit sessionId", hits[3].sessionId, "sid-999")
+  eq("fsearch: dead hit has no tile key", hits[3].key, nil)
 end
 
 -- ---- shouldAutoRespawn: fire once on the unexpected-death edge --------------

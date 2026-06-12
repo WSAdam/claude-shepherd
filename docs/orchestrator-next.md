@@ -1,9 +1,12 @@
 # Orchestrator — Phase 4b/4c design spec
 
-Status: **mostly shipped.** Phase 4b (queue + auto-feed) and Phase 4c **A–D**
-(stale-approval escalation, approve-repeats, per-session autopilot, pattern
-auto-allow/deny) are built and live; **4c-E (project routing)** is the only deferred
-piece. This file is retained as the original design rationale — the authoritative,
+Status: **fully shipped.** Phase 4b (queue + auto-feed) and Phase 4c **A–E** are built
+and live — **4c-E (project routing)** landed June 2026 as a level-triggered dispatcher:
+double opt-in (`queue.routing.enabled` + a per-project `routing:true` flag in the queue
+file), feeds whichever session of the project is free (done-only in v1), one feed per
+project per tick, delivery-gated pops, `by:"router"` ledger events, and an optional
+starvation flag (`queue.routing.starveMinutes`). This file is retained as the original
+design rationale — the authoritative,
 **current** config schema is [cc-config.example.json](../cc-config.example.json), and
 CHANGELOG.md records what has shipped since (incl. the audit ledger, fleet insights,
 collision warning, per-session gating, risk score, drain/respawn, and the fleet-scale
@@ -140,9 +143,13 @@ the tile. Per-session, visible, expiring. Riskier than A/B but bounded.
 Overlaps Claude Code's native allow/deny — prefer native for global rules; reserve
 this for Claude Shepherd-only nuance. Off by default, empty.
 
-### E. Project routing  — *separate, bigger*
+### E. Project routing  — *separate, bigger* — **SHIPPED June 2026**
 A project task pool: tasks tagged by project get fed to whichever session in that
 project is free. Extends 4b's per-session queue to load-balance parallel work.
+As built: queues were already projectKey-keyed, so "tagging" came free — the
+increment is a level-triggered dispatcher in `refresh()` (one feed per armed
+project per tick, `routePending` in-flight guard, done-only targets in v1) plus
+`core.sessionFree`/`routePick`/`routeTask`/`queueRouted` (all unit-tested).
 
 ### Where policy runs
 A/B/C/D evaluate at the **gate** (cc-approve.sh) before routing to the panel; the

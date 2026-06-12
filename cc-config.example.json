@@ -3,7 +3,37 @@
 
   "queue": {
     "autofeed": false,
-    "dryRun": false
+    "dryRun": false,
+    "routing": {
+      "_comment": "4c-E project routing. With enabled=true AND a project's queue armed (the detail-panel 'route' toggle writes routing:true into its cc-queue file), queued tasks feed WHICHEVER session of that project is free (status done, not stale/error/draining) — not just the one that finished. One feed per project per refresh tick; pops stay delivery-gated; routed feeds are ledgered as by:'router'. starveMinutes>0 flags the project (⌛ + one ledger event) when tasks wait with no free session that long; 0 = off. OFF by default at both levels.",
+      "enabled": false,
+      "starveMinutes": 0
+    }
+  },
+
+  "decisions": {
+    "_comment": "Per-session gate decision log in the detail panel (last N grouped decisions, e.g. 'deny Bash ×4 (autoDeny: Bash(rm*))'). Pure read of the ledger — hidden when the ledger is off or there are no decisions. limit = max grouped rows shown; hours = lookback window.",
+    "limit": 5,
+    "hours": 48
+  },
+
+  "notifications": {
+    "_comment": "🔔 notification history ('what fired while you were away'): escalations, stall warnings, auto-respawns, and non-human gate decisions, read from the ledger into the audit overlay's Alerts tab with an unseen-count badge. days = badge/list lookback. Inert while the ledger is off. NOTE: if you set ledger.captureTypes, include 'escalation' and 'hung' or those alerts won't be recorded.",
+    "days": 7
+  },
+
+  "search": {
+    "_comment": "🔎 fleet-wide transcript/ledger search. Uses ripgrep when installed (brew install ripgrep — instant across hundreds of MB), else falls back to grep. rgBin optionally pins an explicit rg path. maxResults caps the rendered hits.",
+    "rgBin": "",
+    "maxResults": 200
+  },
+
+  "bridge": {
+    "_comment": "SSH status bridge (Phase 2). Mirrors each ssh provider's remote ~/.claude/cc-status/ locally via rsync (every intervalSeconds, BatchMode key auth required) so remote sessions render as ⇄ tiles. Remote tiles are HEADLESS-ONLY: Approve/Deny route back over ssh as nonce-bound decision files; keystroke actions are disabled (keystrokes=true is an experimental future unlock — needs hardware verification). staleSlackSeconds widens the staleness threshold for remote tiles (rsync lag + clock skew). Inert unless enabled AND a provider declares ssh:{host,user}. OFF by default.",
+    "enabled": false,
+    "intervalSeconds": 2,
+    "staleSlackSeconds": 15,
+    "keystrokes": false
   },
 
   "escalation": {
@@ -39,19 +69,22 @@
   },
 
   "spawn": {
-    "_comment": "The + New / New project launcher. editor: terminal | kitty | vscode | cursor. live=false is a dry-run (logs what it would launch, spawns nothing). Kitty/Terminal spawn reliably; VS Code/Cursor open the window then best-effort type `claude` in a new integrated terminal. kittyAutoRemote enables remote control in your kitty.conf when Kitty is in use (so kitty @ effects work). provider = id of a profile in `providers` to launch new sessions against (empty = bare `claude`, default Anthropic).",
+    "_comment": "The + New / New project launcher. editor: terminal | kitty | vscode | cursor. live=false is a dry-run (logs what it would launch, spawns nothing). Kitty/Terminal spawn reliably; VS Code/Cursor open the window then best-effort type `claude` in a new integrated terminal. kittyAutoRemote enables remote control in your kitty.conf when Kitty is in use (so kitty @ effects work). provider = id of a profile in `providers` to launch new sessions against (empty = bare `claude`, default Anthropic). searchRoots/searchDepth/fdBin drive the modal's fuzzy folder search: roots scanned once per modal open (default ~/Programming) to searchDepth, with fd when installed (gitignore-aware) else find. These three survive Settings saves (hand-edit keys).",
     "editor": "terminal",
     "live": false,
     "kittyRemote": true,
     "kittyAutoRemote": true,
     "kittyBin": "",
     "kittySocket": "",
-    "provider": ""
+    "provider": "",
+    "searchRoots": [],
+    "searchDepth": 4,
+    "fdBin": ""
   },
 
   "providers": [
     {
-      "_comment": "Each profile launches `claude` against a model. kind=anthropic sets ANTHROPIC_MODEL on the normal endpoint; kind=gateway also sets ANTHROPIC_BASE_URL so Claude Code talks to a LiteLLM-style gateway (Gemini/OpenAI/local) or a local/remote REST server. NO API KEYS HERE: authTokenEnv names an ENV VAR the spawned login shell expands ($NAME) — the key lives in your shell, never in this file.",
+      "_comment": "Each profile launches `claude` against a model. kind=anthropic sets ANTHROPIC_MODEL on the normal endpoint; kind=gateway also sets ANTHROPIC_BASE_URL so Claude Code talks to a LiteLLM-style gateway (Gemini/OpenAI/local) or a local/remote REST server. NO API KEYS HERE: authTokenEnv names an ENV VAR the spawned login shell expands ($NAME) — the key lives in your shell, never in this file. A profile may also carry \"ssh\": {\"host\": \"devbox\", \"user\": \"adam\"} to run `claude` on a remote box (the terminal window stays local); pair with the `bridge` block above to see its remote sessions as tiles.",
       "id": "anthropic-opus",
       "label": "Claude Opus 4.8",
       "kind": "anthropic",
@@ -71,7 +104,7 @@
   ],
 
   "risk": {
-    "_comment": "Per-session risk indicator (Feature E). OFF by default. A small empirical score (0-100) computed from each session's ledger history — deny rate, auto-deny pattern hits, timeout-fallbacks, slow approvals, tool volume — surfaced as a med/high badge on the tile (low shows nothing). Indicator ONLY: it never blocks or quarantines anything. Requires the ledger to be enabled to have data. thresholds.med/high set the band cutoffs; thresholds.staleSeconds is the approval gap that counts as a slow-approval signal.",
+    "_comment": "Per-session risk indicator (Feature E). OFF by default. A small empirical score (0-100) computed from each session's ledger history — deny rate, auto-deny pattern hits, timeout-fallbacks, slow approvals, tool volume — surfaced as a med/high badge on the tile (low shows nothing). Indicator ONLY: it never blocks or quarantines anything. Requires the ledger to be enabled to have data. thresholds.med/high set the band cutoffs; thresholds.staleSeconds is the approval gap that counts as a slow-approval signal. enabled + thresholds are editable in ⚙ Settings; an optional hand-added `weights` map (see RISK_WEIGHTS in cc-core.lua) stays hand-edit-only and survives Settings saves.",
     "enabled": false,
     "thresholds": { "med": 34, "high": 67, "staleSeconds": 300 }
   },

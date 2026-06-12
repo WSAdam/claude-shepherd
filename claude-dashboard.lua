@@ -61,6 +61,8 @@ local GATE_FLAG     = os.getenv("CC_GATE_FLAG") or (os.getenv("HOME") .. "/.clau
 local LABELS_FILE   = os.getenv("CC_LABELS_FILE") or (os.getenv("HOME") .. "/.claude/cc-labels.json")
 local GROUPS_FILE   = os.getenv("CC_GROUPS_FILE") or (os.getenv("HOME") .. "/.claude/cc-groups.json")
 local RECENT_FILE   = os.getenv("CC_RECENT_FILE") or (os.getenv("HOME") .. "/.claude/cc-recent-dirs.json")
+local TEMPLATE_FILE = os.getenv("CC_TEMPLATE_FILE") or (os.getenv("HOME") .. "/.claude/cc-templates.json")
+local PRESET_FILE   = os.getenv("CC_PRESET_FILE") or (os.getenv("HOME") .. "/.claude/cc-presets.json")
 local LEDGER_DIR    = os.getenv("CC_LEDGER_DIR") or (os.getenv("HOME") .. "/.claude/cc-ledger")
 local CLAUDE_DIR    = (os.getenv("HOME") or "") .. "/.claude"
 local EDITOR_BUNDLES = {
@@ -141,7 +143,19 @@ local draining    = {}   -- key -> true: close on the next fresh `done` (Feature
 local gitRootByCwd = {}  -- cwd -> resolved git root ("" = not a repo) cache (Feature B)
 local caffeineTick = 0   -- throttles the keep-awake state re-read (F2)
 local ledgerGcTick = 0   -- throttles the ledger retention GC (off the 180s timer)
+local lastNotifyCount = -1  -- 🔔 unseen-badge value last pushed to JS (-1 = never)
+local searchTask, searchGen = nil, 0  -- fleet-search hs.task + stale-result guard
+local MIRROR_DIR = os.getenv("CC_MIRROR_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-status-mirror")
+local BRIDGE_SECONDS = 2     -- per-host rsync cadence (SSH status bridge)
+local bridge = {}            -- ns -> { timer, running, lastOkTs, dest, host }: live bridge state
+                             -- (module-level so the timers are GC-safe, per the after() lesson)
+local routePending = {}  -- tile key -> dispatch ts: a routed feed in flight (4c-E);
+                         -- in-memory on purpose -- pops are delivery-gated, so a
+                         -- reload losing the marker can at worst re-pick a target
+local starvedSince  = {} -- queueKey -> first ts the armed project had work but no free session
+local starvedAlerted = {} -- queueKey -> true once the starvation ledger event fired this episode
 local loadConfig         -- forward declaration (defined near refresh)
+local ledgerSnapshot     -- forward declaration (defined near refresh; bridge handlers use it)
 local refresh            -- forward declaration (so the controller can repaint now)
 
 -- Find the editor application object for a session's editor kind. The kind
@@ -695,6 +709,30 @@ function FX.writeRecent(state)
   FX.writeFile(RECENT_FILE, core.json.encode(state or { dirs = {} }))
 end
 
+-- Saved task templates (roadmap #5c). Missing/garbled -> empty. readRecent mirrors.
+function FX.readTemplates()
+  local c = FX.readFile(TEMPLATE_FILE)
+  if not c or #c == 0 then return { templates = {} } end
+  local ok, t = pcall(function() return core.json.decode(c) end)
+  return (ok and type(t) == "table") and t or { templates = {} }
+end
+function FX.writeTemplates(state)
+  hs.fs.mkdir(CLAUDE_DIR)
+  FX.writeFile(TEMPLATE_FILE, core.json.encode(state or { templates = {} }))
+end
+
+-- Spawn presets (roadmap #4a). Missing/garbled -> empty.
+function FX.readPresets()
+  local c = FX.readFile(PRESET_FILE)
+  if not c or #c == 0 then return { presets = {}, lastByProject = {} } end
+  local ok, t = pcall(function() return core.json.decode(c) end)
+  return (ok and type(t) == "table") and t or { presets = {}, lastByProject = {} }
+end
+function FX.writePresets(state)
+  hs.fs.mkdir(CLAUDE_DIR)
+  FX.writeFile(PRESET_FILE, core.json.encode(state or { presets = {}, lastByProject = {} }))
+end
+
 -- Create a project folder (F3). One level under an existing parent (the browsed
 -- dir). An existing path is treated as success ("use existing").
 function FX.mkdirP(path)
@@ -715,6 +753,104 @@ local function resolveBin(name, configured)
     if hs.fs.attributes(p) then return p end
   end
   return configured or name
+end
+
+-- ---- SSH status bridge (roadmap #7): rsync-pull remote cc-status ------------
+-- One repeating timer per configured ssh host pulls its remote ~/.claude/
+-- cc-status/ into MIRROR_DIR/<ns>/ via hs.task (async; skip-if-running so a
+-- slow/dead host can't stack tasks). reconcileBridge diffs config against the
+-- live timer set each refresh tick (cheap) so Settings changes apply without a
+-- reload. NEEDS-HARDWARE: end-to-end verified only with a real remote box --
+-- the pure pieces (argv, namespacing, merge) are unit-tested.
+function FX.bridgeSync(hostSpec)
+  local b = bridge[hostSpec.ns]
+  if not b or b.running then return end
+  b.running = true
+  local dir = MIRROR_DIR .. "/" .. hostSpec.ns
+  hs.fs.mkdir(MIRROR_DIR); hs.fs.mkdir(dir)
+  local argv = core.rsyncArgv(hostSpec.dest, dir)
+  if not argv then b.running = false; return end
+  local bin = resolveBin("rsync")  -- /usr/bin/rsync ships with macOS; resolveBin finds brew's too
+  local args = {}
+  for i = 2, #argv do args[#args + 1] = argv[i] end
+  local ok = pcall(function()
+    local t = hs.task.new(bin, function(code)
+      b.running = false
+      if code == 0 then
+        b.lastOkTs = hs.timer.secondsSinceEpoch()
+        if b.failed then b.failed = false; print("[cc-bridge] " .. hostSpec.ns .. " sync recovered") end
+      elseif not b.failed then
+        b.failed = true  -- log once per outage, not once per 2s tick
+        print("[cc-bridge] " .. hostSpec.ns .. " rsync failed (exit " .. tostring(code) .. ")")
+      end
+    end, args)
+    if t then t:start() else error("task create failed") end
+  end)
+  if not ok then b.running = false end
+end
+
+local function reconcileBridge(cfg)
+  local interval = tonumber(core.config(cfg, "bridge.intervalSeconds", BRIDGE_SECONDS)) or BRIDGE_SECONDS
+  if interval < 1 then interval = 1 end
+  local want = {}
+  for _, h in ipairs(core.sshHosts(cfg)) do want[h.ns] = h end
+  -- stop timers for hosts no longer configured (or bridge disabled), and for
+  -- hosts whose interval changed (recreated below with the new cadence)
+  for ns, b in pairs(bridge) do
+    if not want[ns] or b.interval ~= interval then
+      if b.timer then pcall(function() b.timer:stop() end) end
+      bridge[ns] = nil
+      if not want[ns] then print("[cc-bridge] " .. ns .. " stopped") end
+    end
+  end
+  -- start timers for newly configured hosts
+  for ns, h in pairs(want) do
+    if not bridge[ns] then
+      bridge[ns] = { dest = h.dest, host = h.host, running = false, lastOkTs = 0, interval = interval }
+      bridge[ns].timer = hs.timer.doEvery(interval, function() FX.bridgeSync(h) end)
+      print("[cc-bridge] " .. ns .. " syncing " .. h.dest .. " every " .. interval .. "s")
+      FX.bridgeSync(h)  -- first pull now, not in <interval>s
+    end
+  end
+end
+
+-- ---- Fuzzy folder search index (roadmap #4b) --------------------------------
+-- Scanned ONCE per modal open (async hs.task, 60s TTL cache); per-keystroke
+-- ranking happens in pure core.fuzzyFilter against this cache -- never a
+-- process per keystroke. fd when present (gitignore-aware), find fallback.
+local folderIndex = { paths = {}, ts = 0 }
+local folderScanTask = nil
+function FX.scanFolders()
+  local now = hs.timer.secondsSinceEpoch()
+  if folderScanTask or (now - (folderIndex.ts or 0)) < 60 then return end  -- fresh or in flight
+  local cfg = loadConfig()
+  local roots = core.config(cfg, "spawn.searchRoots", nil)
+  if type(roots) ~= "table" or #roots == 0 then roots = { ORCH_DEFAULT_DIR } end
+  local expanded = {}
+  for _, r in ipairs(roots) do
+    local raw = tostring(r or "")
+    if raw:sub(1, 1) == "~" then raw = (os.getenv("HOME") or "") .. raw:sub(2) end
+    if raw ~= "" and hs.fs.attributes(raw) then expanded[#expanded + 1] = raw end
+  end
+  if #expanded == 0 then return end
+  local depth = tonumber(core.config(cfg, "spawn.searchDepth", 4)) or 4
+  -- detect -> use -> degrade gracefully: resolveBin returns the bare name on a
+  -- total miss and hs.task needs a real path, so verify with hs.fs.attributes.
+  local fd = resolveBin("fd", core.config(cfg, "spawn.fdBin", nil))
+  local argv
+  if hs.fs.attributes(fd) then argv = core.folderScanArgv(fd, expanded, depth)
+  else argv = core.folderScanFallbackArgv(expanded, depth) end
+  local args = {}
+  for i = 2, #argv do args[#args + 1] = argv[i] end
+  local ok = pcall(function()
+    folderScanTask = hs.task.new(argv[1], function(_, stdout)
+      folderScanTask = nil
+      folderIndex = { paths = core.parseDirList(stdout), ts = hs.timer.secondsSinceEpoch() }
+      print("[cc-spawn] folder index: " .. #folderIndex.paths .. " dir(s)")
+    end, args)
+    if folderScanTask then folderScanTask:start() else error("task create failed") end
+  end)
+  if not ok then folderScanTask = nil end
 end
 
 -- ---- Kitty remote control (F: detect + auto-enable) ------------------------
@@ -934,14 +1070,36 @@ end
 -- the panel snapshot -- the file is fresher than the last refresh. No nonce
 -- (older hook still deployed) -> legacy bare verb, which the gate accepts only
 -- on a strictly-newer mtime.
+-- A namespaced key (host:key, SSH bridge) routes the decision to the REMOTE
+-- box instead: nonce read from the mirror copy (≤ a few seconds old; a stale
+-- nonce is ignored by the remote gate, worst case a no-op), write executed as
+-- a temp+mv over ssh (core.decisionSshArgv -- validated argv, BatchMode).
 function FX.writeDecision(key, value)
+  local ns, rawKey = core.splitNamespacedKey(key)
+  if ns then
+    local b = bridge[ns]
+    if not b or not b.dest then
+      print("[cc-bridge] decision dropped: no live bridge for host " .. tostring(ns))
+      return
+    end
+    local statusText = FX.readFile(MIRROR_DIR .. "/" .. ns .. "/" .. rawKey .. ".json")
+    local content = core.decisionContent(value, statusText)
+    local argv = core.decisionSshArgv(b.dest, rawKey, content)
+    if not argv then
+      print("[cc-bridge] decision dropped: unsafe key/content for " .. tostring(key))
+      return
+    end
+    local args = {}
+    for i = 2, #argv do args[#args + 1] = argv[i] end
+    pcall(function()
+      local t = hs.task.new("/usr/bin/ssh", nil, args)
+      if t then t:start() end
+    end)
+    print("[cc-bridge] remote decision " .. tostring(content) .. " -> " .. tostring(key))
+    return
+  end
   local path = STATUS_DIR .. "/" .. key .. ".decision"
-  local okj, st = pcall(function()
-    return core.json.decode(FX.readFile(STATUS_DIR .. "/" .. key .. ".json") or "")
-  end)
-  local nonce = okj and type(st) == "table" and type(st.pending) == "table"
-    and type(st.pending.nonce) == "string" and st.pending.nonce ~= "" and st.pending.nonce
-  local content = nonce and (value .. " " .. nonce) or value
+  local content = core.decisionContent(value, FX.readFile(STATUS_DIR .. "/" .. key .. ".json"))
   local tmp = path .. ".tmp." .. tostring(FX.now())
   local f = io.open(tmp, "w")
   if f then f:write(content); f:close(); os.rename(tmp, path) end
@@ -1398,16 +1556,22 @@ local function handleBridgeMsg(msg)
   end
   if a == "open-new" then
     -- Feed the modal: current config + recent dirs (seeded with active session
-    -- cwds) + the initial folder listing. loadConfig() decodes-or-{}, and we
-    -- re-encode via hs.json so a malformed file can't break the spliced JS.
+    -- cwds) + the initial folder listing + saved presets / per-project last-used
+    -- options. loadConfig() decodes-or-{}, and we re-encode via hs.json so a
+    -- malformed file can't break the spliced JS. Also warm the fuzzy-search
+    -- folder index (async; the dropdown just stays empty until it lands).
     local cfg = loadConfig()
     local active = {}
     for _, it in pairs(byKey) do if it.cwd then active[#active + 1] = it.cwd end end
     local recent = core.recentSeed(FX.readRecent(), active)
     local browse = FX.listDirs(ORCH_DEFAULT_DIR)
+    local pstate = FX.readPresets()
+    FX.scanFolders()
     pcall(function()
       wv:evaluateJavaScript("showNew(" .. hs.json.encode(cfg) .. ", "
-        .. hs.json.encode(recent.dirs) .. ", " .. hs.json.encode(browse) .. ")")
+        .. hs.json.encode(recent.dirs) .. ", " .. hs.json.encode(browse) .. ", "
+        .. hs.json.encode({ presets = core.presetList(pstate),
+                            lastByProject = pstate.lastByProject or {} }) .. ")")
     end)
     return
   end
@@ -1415,6 +1579,29 @@ local function handleBridgeMsg(msg)
     local path = (payload.v and tostring(payload.v) ~= "") and tostring(payload.v) or ORCH_DEFAULT_DIR
     local browse = FX.listDirs(path)
     pcall(function() wv:evaluateJavaScript("ccBrowse(" .. hs.json.encode(browse) .. ")") end)
+    return
+  end
+  -- Spawn presets (roadmap #4a): save / delete; both reply with the fresh list.
+  if a == "preset-save" or a == "preset-delete" then
+    if a == "preset-save" then
+      local okp, p = pcall(hs.json.decode, payload.text or "{}")
+      local st, saved = core.presetPush(FX.readPresets(), (okp and type(p) == "table") and p or {})
+      if saved then FX.writePresets(st)
+      else pcall(function() hs.alert.show("Claude Shepherd: preset needs a name and an absolute folder") end) end
+    else
+      FX.writePresets(core.presetRemove(FX.readPresets(), tostring(payload.v or "")))
+    end
+    local list = core.presetList(FX.readPresets())
+    local listJson = (#list > 0) and hs.json.encode(list) or "[]"
+    pcall(function() wv:evaluateJavaScript("ccPresets(" .. listJson .. ")") end)
+    return
+  end
+  -- Fuzzy folder search (roadmap #4b): rank the CACHED index (no per-keystroke
+  -- process; the scan ran once on modal open).
+  if a == "folder-search" then
+    local hits = core.fuzzyFilter(tostring(payload.v or ""), folderIndex.paths or {}, 12)
+    local hitsJson = (#hits > 0) and hs.json.encode(hits) or "[]"
+    pcall(function() wv:evaluateJavaScript("ccSearchResults(" .. hitsJson .. ")") end)
     return
   end
   if a == "spawn" then
@@ -1444,6 +1631,11 @@ local function handleBridgeMsg(msg)
       return
     end
     FX.writeRecent(core.recentPush(FX.readRecent(), dir))
+    -- Per-project last-used recall (roadmap #4a): every modal spawn records its
+    -- options so re-opening the modal on this folder pre-fills them.
+    FX.writePresets(core.presetMarkUsed(FX.readPresets(), dir, {
+      editor = editor, permMode = payload.permMode and tostring(payload.permMode) or nil,
+      provider = payload.provider and tostring(payload.provider) or nil }))
     FX.spawnSession(editor, dir, task, payload.permMode and tostring(payload.permMode) or nil,
       payload.provider and tostring(payload.provider) or nil)
     return
@@ -1462,6 +1654,10 @@ local function handleBridgeMsg(msg)
   if a == "queue-feed" then
     local key = tostring(payload.v or "")
     local item = byKey[key]
+    if item and item.remote then
+      pcall(function() hs.alert.show("Claude Shepherd: can't feed a remote session (no local window)") end)
+      return
+    end
     if item then
       -- Serialized on the shared injection tail (R3 #2/#5): the paste ladder
       -- must queue behind in-flight chains. The pop runs INSIDE the slot -- the
@@ -1480,6 +1676,76 @@ local function handleBridgeMsg(msg)
         end
       end)
     end
+    return
+  end
+  -- Queue editing (roadmap #5): list / reorder / remove / bulk-add. Every
+  -- mutation re-reads the file INSIDE the handler (the autofeed loop pops heads
+  -- asynchronously, so the JS snapshot may be stale), passes the clicked task
+  -- text as the `expect` guard, and always replies with the fresh list so the
+  -- panel self-heals after a refused edit.
+  if a == "queue-list" or a == "queue-move" or a == "queue-remove" or a == "queue-add-bulk" then
+    local key = tostring(payload.v or "")
+    local item = byKey[key]
+    local qk = item and FX.queueKeyFor(item) or ((key ~= "") and key or nil)
+    if not qk then return end
+    if a == "queue-move" or a == "queue-remove" then
+      local okr, req = pcall(hs.json.decode, payload.text or "{}")
+      req = (okr and type(req) == "table") and req or {}
+      local q = FX.readQueue(qk)
+      if a == "queue-move" then
+        local q2, moved = core.queueMove(q, req.idx, req.dir, req.task)
+        if moved then
+          FX.writeQueue(qk, q2)
+          if item then ledgerFor(item, { type = "queue_edit", op = "move" }) end
+        end
+      else
+        local q2, removed = core.queueRemoveAt(q, req.idx, req.task)
+        if removed then
+          FX.writeQueue(qk, q2)
+          if item then ledgerFor(item, { type = "queue_edit", op = "remove",
+            task = tostring(removed):sub(1, 200) }) end
+        end
+      end
+    elseif a == "queue-add-bulk" then
+      local tasks = core.queueSplitLines(payload.text)
+      if #tasks > 0 then
+        FX.writeQueue(qk, core.queuePushAll(FX.readQueue(qk), tasks))
+        print("[cc-queue] bulk-queued " .. #tasks .. " task(s) for " .. qk)
+        if item then ledgerFor(item, { type = "queue_edit", op = "bulk_add", count = #tasks }) end
+      end
+    end
+    local tasks = FX.readQueue(qk).tasks or {}
+    local listJson = (#tasks > 0) and hs.json.encode(tasks) or "[]"
+    pcall(function() wv:evaluateJavaScript("ccQueueList(" .. jsString(key) .. ", " .. listJson .. ")") end)
+    return
+  end
+  -- 4c-E: arm/disarm project routing for this project's queue. The flag lives
+  -- in the queue file (routing:true) so it inherits projectKey keying; every
+  -- session of the project shows the same toggle (intended -- it's per-project).
+  if a == "queue-route" then
+    local key = tostring(payload.v or "")
+    local item = byKey[key]
+    if not item then return end
+    local qk = FX.queueKeyFor(item)
+    local on = tostring(payload.text or "") == "on"
+    FX.writeQueue(qk, core.queueSetRouted(FX.readQueue(qk), on))
+    print("[cc-route] " .. qk .. " routing " .. (on and "ARMED" or "off"))
+    ledgerFor(item, { type = "route_arm", on = on })
+    return
+  end
+  -- Saved task templates (roadmap #5c): named reusable task strings in
+  -- cc-templates.json (operator data, outside the Settings round-trip).
+  if a == "template-list" or a == "template-save" or a == "template-delete" then
+    if a == "template-save" then
+      local st, saved = core.templatePush(FX.readTemplates(), payload.v, payload.text)
+      if saved then FX.writeTemplates(st)
+      else pcall(function() hs.alert.show("Claude Shepherd: template needs a name and text") end) end
+    elseif a == "template-delete" then
+      FX.writeTemplates(core.templateRemove(FX.readTemplates(), tostring(payload.v or "")))
+    end
+    local list = core.templateList(FX.readTemplates())
+    local listJson = (#list > 0) and hs.json.encode(list) or "[]"
+    pcall(function() wv:evaluateJavaScript("ccTemplates(" .. listJson .. ")") end)
     return
   end
   if a == "clear" or a == "compact" then
@@ -1571,6 +1837,68 @@ local function handleBridgeMsg(msg)
     pcall(function() wv:evaluateJavaScript("window.ccAudit(" .. hs.json.encode(FX.readLedger({})) .. ")") end)
     return
   end
+  -- Fleet-wide transcript/ledger search (roadmap #3): rg when installed, grep
+  -- fallback. Async hs.task with a generation guard + terminate-on-new-query so
+  -- out-of-order results can never paint over a newer search. Output stays tiny
+  -- by construction (core.searchArgv emits -o context-wrapped matches only).
+  if a == "fleet-search" then
+    local okq, req = pcall(hs.json.decode, payload.text or "{}")
+    local q = (okq and type(req) == "table") and tostring(req.q or "") or ""
+    searchGen = searchGen + 1
+    local gen = searchGen
+    if searchTask then pcall(function() searchTask:terminate() end); searchTask = nil end
+    local cfg = loadConfig()
+    local rg = resolveBin("rg", core.config(cfg, "search.rgBin", nil))
+    local kind = hs.fs.attributes(rg) and "rg" or "grep"
+    local bin = (kind == "rg") and rg or "/usr/bin/grep"
+    local paths = { (os.getenv("HOME") or "") .. "/.claude/projects" }
+    if hs.fs.attributes(LEDGER_DIR) then paths[#paths + 1] = LEDGER_DIR end
+    local args = core.searchArgv(kind, q, paths)
+    if not args then return end  -- too-short query: JS already cleared the view
+    local maxResults = tonumber(core.config(cfg, "search.maxResults", 200)) or 200
+    local ok = pcall(function()
+      searchTask = hs.task.new(bin, function(_, out)
+        searchTask = nil
+        if gen ~= searchGen then return end  -- superseded by a newer query
+        local res = core.parseSearchResults(out or "", { limit = maxResults })
+        local items = {}
+        for _, it in pairs(byKey) do items[#items + 1] = it end
+        res.hits = core.annotateSearchHits(res.hits, items, LEDGER_DIR)
+        res.q = q
+        pcall(function() wv:evaluateJavaScript("window.ccSearch(" .. hs.json.encode(res) .. ")") end)
+      end, args)
+      if searchTask then searchTask:start() else error("task create failed") end
+    end)
+    if not ok then searchTask = nil end
+    return
+  end
+  -- Open the audit overlay pre-scoped to a session found via fleet search (the
+  -- hit may be a DEAD session -- no byKey entry -- so this takes a session_id
+  -- directly, unlike open-session-timeline).
+  if a == "open-audit-for-session" then
+    local sid = tostring(payload.v or "")
+    if sid == "" then return end
+    local res = FX.readLedger({})
+    local events = core.sessionTimeline(res.events, sid, { limit = 1000 })
+    pcall(function() wv:evaluateJavaScript("window.ccAudit("
+      .. hs.json.encode({ events = events, files = res.files, truncated = res.truncated })
+      .. ", " .. jsString(sid) .. ", " .. jsString("timeline") .. ")") end)
+    return
+  end
+  if a == "open-notifications" then
+    -- 🔔 history: the audit overlay's Alerts tab, scoped to the notification
+    -- window, with the PREVIOUS last-seen as the unseen divider. Opening marks
+    -- everything seen (hs.settings survives reloads, like ccDashboardTheme).
+    local lastSeen = tonumber(hs.settings.get("ccNotifySeen")) or 0
+    local days = tonumber(core.config(loadConfig(), "notifications.days", 7)) or 7
+    local notifs = core.notificationEvents(ledgerSnapshot(), { sinceTs = FX.now() - days * 86400 })
+    hs.settings.set("ccNotifySeen", FX.now())
+    lastNotifyCount = 0  -- badge cleared; recomputed against the fresh mark next change
+    pcall(function() wv:evaluateJavaScript("window.ccAudit("
+      .. hs.json.encode({ events = notifs, files = {}, truncated = false })
+      .. ", null, " .. jsString("alerts") .. ", " .. tostring(lastSeen) .. ")") end)
+    return
+  end
   if a == "open-session-timeline" then
     -- Per-session drill-down: open the audit overlay scoped to this session's
     -- chronological history (timeline view). Reuses core.sessionTimeline + the
@@ -1586,6 +1914,28 @@ local function handleBridgeMsg(msg)
     pcall(function() wv:evaluateJavaScript("window.ccAudit("
       .. hs.json.encode({ events = events, files = res.files, truncated = res.truncated })
       .. ", " .. jsString(sid) .. ", " .. jsString("timeline") .. ")") end)
+    return
+  end
+  if a == "decision-log" then
+    -- Detail-panel gate decision log: last N grouped decisions for the selected
+    -- session, read from the CACHED ledger snapshot (selection-triggered, never
+    -- on the 1s tick). Replies null when there's nothing to show -- the JS hides
+    -- the section (and an empty Lua table would json-encode as {} not []).
+    local key = tostring(payload.v or "")
+    local it = byKey[key]
+    local sid = it and it.session_id
+    if not ledgerEnabled() or not sid or tostring(sid) == "" then
+      pcall(function() wv:evaluateJavaScript("window.ccDecisions(" .. jsString(key) .. ", null)") end)
+      return
+    end
+    local cfg = loadConfig()
+    local hours = tonumber(core.config(cfg, "decisions.hours", 48)) or 48
+    local rows = core.gateDecisionSummary(ledgerSnapshot(), sid, {
+      limit = tonumber(core.config(cfg, "decisions.limit", 5)) or 5,
+      sinceTs = FX.now() - hours * 3600,
+    })
+    local payloadJson = (#rows > 0) and hs.json.encode(rows) or "null"
+    pcall(function() wv:evaluateJavaScript("window.ccDecisions(" .. jsString(key) .. ", " .. payloadJson .. ")") end)
     return
   end
   if a == "audit-export" then
@@ -1704,6 +2054,19 @@ local function handleBridgeMsg(msg)
     print("[cc-dashboard] action '" .. a .. "' for unknown key " .. tostring(payload.v))
     return
   end
+  -- Remote (bridge) tiles are headless-only in v1: approve/deny route over ssh
+  -- (remoteActionAllowed gates on the remote gate actually waiting); local-data
+  -- actions (relabel/group/menu) stay fine; everything keystroke- or
+  -- local-file-shaped (nudge/stop/clear/compact/focus/autopilot/gate-tools/
+  -- mode/model/effort/improve/continue) is refused loudly, never silently.
+  if item.remote and a ~= "ctx-menu" and a ~= "relabel" and a ~= "set-group" then
+    local ks = core.config(loadConfig(), "bridge.keystrokes", false) == true
+    if not core.remoteActionAllowed(item, a, { keystrokes = ks }) then
+      pcall(function() hs.alert.show("Claude Shepherd: '" .. a .. "' isn't available for remote session "
+        .. tostring(item.label or item.name) .. " (headless approve/deny only)") end)
+      return
+    end
+  end
   if a == "ctx-menu" then
     -- Right-click: show a real macOS popup menu at the cursor. Its items kick off
     -- IN-WEBVIEW interactions (no native dialog -> no console pop).
@@ -1715,6 +2078,22 @@ local function handleBridgeMsg(msg)
       local nameJson = jsString(item.label or item.name)
       local shown = item.label or item.name
       local cfg0 = loadConfig()
+      -- Remote (bridge) tile: every other item is window/keystroke-shaped, so
+      -- the menu is just the local-data actions.
+      if item.remote then
+        ctxMenu:setMenu({
+          { title = "Remote session on " .. tostring(item.remote.host) .. " — headless approve/deny only", disabled = true },
+          { title = "-" },
+          { title = "Relabel…", fn = function()
+              pcall(function() wv:evaluateJavaScript("startRename(" .. keyJson .. ")") end)
+            end },
+          { title = "Set group…", fn = function()
+              pcall(function() wv:evaluateJavaScript("startGroup(" .. keyJson .. ")") end)
+            end },
+        })
+        pcall(function() ctxMenu:popupMenu(hs.mouse.absolutePosition(), true) end)
+        return
+      end
       local menu = {
         -- Jump focuses the editor window (double-click on a tile isn't always
         -- reliable, so offer it here too). Same effect as the detail-panel Jump.
@@ -2198,6 +2577,10 @@ local HTML = [[
   #d-ask .ask-opt:hover { background:#2b3346; border-color:#5a7bb0; }
   #d-ask .ask-hint { font-size:11px; color:#6b7280; margin-top:6px; }
   #d-meta { display:none; font-size:11px; color:#8a8d99; margin:8px 0 0; }
+  /* gate decision log (roadmap #2): last-N grouped gate decisions, dim one-liners */
+  #d-decisions { display:none; font-size:11px; color:#8a8d99; margin:6px 0 0; line-height:1.5; }
+  #d-decisions .dec-deny { color:#e88; }
+  #d-decisions .dec-fallback { color:#f5b50a; }
   #d-controls { display:flex; flex-wrap:wrap; gap:10px; margin:8px 0 0; }
   #d-controls .ctl { font-size:11px; color:#9fb6d6; display:flex; align-items:center; gap:4px; }
   #d-controls select { background:#1b1d24; color:#e8e9ee; border:1px solid #2c2f3a;
@@ -2228,7 +2611,36 @@ local HTML = [[
   #b-nudge, #b-queue { background:#21232c; color:#cfd2db; border:1px solid #2c2f3a;
              border-radius:8px; font-size:12px; padding:5px 10px; cursor:pointer; }
   #queue-row { display:flex; align-items:center; gap:8px; margin-top:8px; }
-  #q-count { font-size:12px; color:#9fb6d6; flex:1; }
+  #q-count { font-size:12px; color:#9fb6d6; flex:1; cursor:pointer; }
+  #q-count:hover { text-decoration:underline; }
+  #route-lbl { font-size:11px; color:#9aa0ad; display:flex; align-items:center; gap:3px; cursor:pointer; }
+  /* queue editor (roadmap #5): expandable task list with reorder/remove */
+  #queue-list { display:none; margin-top:4px; border:1px solid #2c2f3a; border-radius:8px;
+                background:#191b22; max-height:140px; overflow-y:auto; }
+  #queue-list.show { display:block; }
+  .ql-row { display:flex; align-items:center; gap:4px; padding:3px 8px;
+            border-bottom:1px solid #1e2027; font-size:12px; }
+  .ql-row:last-child { border-bottom:none; }
+  .ql-text { flex:1; color:#cfd2db; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .ql-row button { background:none; border:1px solid #2c2f3a; color:#9aa0ad; border-radius:5px;
+                   padding:0 5px; cursor:pointer; font-size:11px; }
+  .ql-row button:disabled { opacity:.3; cursor:default; }
+  .ql-row button.ql-x { color:#e88; border-color:#3a2c2f; }
+  /* saved task templates (roadmap #5c) */
+  #b-tpl { background:#21232c; color:#cfd2db; border:1px solid #2c2f3a; border-radius:8px;
+           font-size:12px; padding:4px 8px; cursor:pointer; }
+  #tpl-menu { display:none; margin-top:4px; border:1px solid #2c2f3a; border-radius:8px;
+              background:#191b22; max-height:160px; overflow-y:auto; }
+  #tpl-menu.show { display:block; }
+  .tpl-row { display:flex; align-items:center; gap:6px; padding:4px 8px;
+             border-bottom:1px solid #1e2027; font-size:12px; cursor:pointer; }
+  .tpl-row:hover { background:#21232c; }
+  .tpl-row:last-child { border-bottom:none; }
+  .tpl-name { color:#cfd2db; white-space:nowrap; font-weight:600; }
+  .tpl-text { flex:1; color:#8a8d99; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .tpl-row button { background:none; border:1px solid #3a2c2f; color:#e88; border-radius:5px;
+                    padding:0 5px; cursor:pointer; font-size:11px; }
+  .tpl-save { color:#8fd4a3; font-style:italic; }
   #b-feed { background:#21232c; color:#8fd4a3; border:1px solid #2c5; border-radius:8px;
             font-size:12px; padding:5px 10px; cursor:pointer; }
   .qbadge { color:#9fb6d6; }
@@ -2265,6 +2677,16 @@ local HTML = [[
            border-bottom:1px solid #21232c; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .n-dir:hover { background:#21232c; }
   .n-dir.up { color:#8a8d99; }
+  /* fuzzy folder search (roadmap #4b): suggestion dropdown under #n-path */
+  #n-suggest { display:none; border:1px solid #2c2f3a; border-radius:8px; background:#1b1d24;
+               max-height:160px; overflow-y:auto; margin-top:2px; }
+  #n-suggest.show { display:block; }
+  .n-sug { padding:5px 10px; font-size:12px; color:#cfd2db; cursor:pointer;
+           border-bottom:1px solid #21232c; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .n-sug:hover, .n-sug.sel { background:#23304a; }
+  /* spawn presets (roadmap #4a): chip row; ✕ inside the chip deletes */
+  .n-chip .chip-x { margin-left:6px; color:#8a8d99; }
+  .n-chip .chip-x:hover { color:#e88; }
   .n-browse-foot { display:flex; align-items:center; gap:8px; margin-top:6px; }
   .n-browse-foot button { background:#21232c; color:#8fd4a3; border:1px solid #2c5;
             border-radius:8px; font-size:12px; padding:4px 10px; cursor:pointer; }
@@ -2286,8 +2708,27 @@ local HTML = [[
 .a-redacted{ color:#6b7280; }
 .a-redact{ background:none; border:1px solid #3a2c2c; color:#d08; border-radius:5px; padding:1px 6px; cursor:pointer; font-size:11px; }
 .a-narr{ white-space:pre-wrap; color:#cfd2db; font-family:ui-monospace,Menlo,monospace; font-size:11px; line-height:1.5; margin:0; }
+/* notification history (roadmap #6): "since you last looked" highlight + 🔔 badge */
+.a-row.unseen{ background:#1d2333; border-left:2px solid #6ea8fe; padding-left:6px; }
+#notify-btn{ background:#21232c; color:#cfd2db; border:1px solid #2c2f3a; border-radius:8px;
+             font-size:13px; padding:3px 8px; cursor:pointer; position:relative; }
+#notify-badge{ display:none; background:#ef4444; color:#fff; border-radius:8px; font-size:9px;
+               padding:0 4px; margin-left:3px; vertical-align:top; font-variant-numeric:tabular-nums; }
 #a-foot{ display:flex; gap:8px; align-items:center; padding:8px 10px; border-top:1px solid #2c2f3a; }
 #a-info{ margin-left:auto; }
+/* Fleet-wide search overlay (roadmap #3; modeled on #audit). Read-only. */
+#fsearch{ position:fixed; inset:0; background:#14161b; z-index:11; display:none; flex-direction:column; font-size:12px; }
+#fsearch.show{ display:flex; }
+#fs-head{ display:flex; align-items:center; gap:8px; padding:8px 10px; border-bottom:1px solid #2c2f3a; font-weight:600; }
+#fs-head input{ flex:1; background:#1a1c22; border:1px solid #2c2f3a; color:#e8e9ee; border-radius:6px; padding:4px 8px; font-size:12px; }
+#fs-body{ flex:1; overflow:auto; padding:6px 10px; }
+.fs-row{ display:flex; gap:8px; align-items:baseline; padding:4px 0; border-bottom:1px solid #1e2027; cursor:pointer; }
+.fs-row:hover{ background:#191c24; }
+.fs-row.dead{ cursor:default; }
+.fs-who{ color:#9fb6d6; white-space:nowrap; max-width:170px; overflow:hidden; text-overflow:ellipsis; }
+.fs-file{ color:#6b7280; white-space:nowrap; font-variant-numeric:tabular-nums; }
+.fs-text{ color:#cfd2db; flex:1; word-break:break-all; font-family:ui-monospace,Menlo,monospace; font-size:11px; }
+.fs-jump{ background:none; border:1px solid #2c2f3a; color:#9aa0ad; border-radius:5px; padding:0 6px; cursor:pointer; font-size:11px; }
 /* Fleet insights overlay (Feature A; modeled on #audit). Pure read of the ledger. */
 #insights{ position:fixed; inset:0; background:#14161b; z-index:11; display:none; flex-direction:column; font-size:12px; }
 #insights.show{ display:flex; }
@@ -2319,8 +2760,10 @@ local HTML = [[
       <button id="spawn" onclick="openNew()" title="Spawn a new Claude session">+ New</button>
       <button id="caffeine" onclick="toggleCaffeine()" title="Keep this Mac awake — pmset disablesleep (asks for your password)">☕ Sleep ok</button>
       <button id="search-btn" onclick="toggleSearch()" title="Filter sessions (name, project, status, group)">🔍</button>
+      <button id="fsearch-btn" onclick="openFleetSearch()" title="Find in fleet — search every session's transcript + the ledger (which session touched that file?)">🔎</button>
       <button id="insights-btn" onclick="openInsights()" title="Fleet insights — aggregate stats from the ledger">📊</button>
       <button id="audit-btn" onclick="openAudit()" title="Audit ledger — recorded fleet activity">📜</button>
+      <button id="notify-btn" onclick="openNotifications()" title="Notification history — what fired while you were away">🔔<span id="notify-badge"></span></button>
       <button id="settings-btn" onclick="openSettings()" title="Settings">⚙</button>
       <select id="theme" onchange="onThemeChange()">
         <option value="cards">Cards</option>
@@ -2378,6 +2821,7 @@ local HTML = [[
     <div id="d-activity" onclick="toggleExpand('activity')"></div>
     <div id="d-prompt"></div>
     <div id="d-meta"></div>
+    <div id="d-decisions"></div>
     <div id="d-usage"></div>
     <div id="d-actions">
       <button id="b-jump"    onclick="act('focus')">Jump</button>
@@ -2424,12 +2868,16 @@ local HTML = [[
       <textarea id="nudge" rows="1" placeholder="Nudge now, or Queue for later... (Enter sends, Shift+Enter newline, paste an image)" onkeydown="onNudgeKey(event)" oninput="autoGrow(this)"></textarea>
       <button id="b-nudge" onclick="sendNudge()">Send</button>
       <button id="b-queue" onclick="queueAdd()">Queue</button>
+      <button id="b-tpl" onclick="toggleTemplates()" title="Saved task templates — insert into the input (never auto-sends)">Tpl ▾</button>
     </div>
+    <div id="tpl-menu"></div>
     <div id="nudge-chip"><span id="nudge-chip-label"></span><button onclick="clearImage()" title="Remove image">✕</button></div>
     <div id="queue-row">
-      <span id="q-count"></span>
+      <span id="q-count" onclick="toggleQueueList()" title="Click to view / reorder / remove queued tasks"></span>
+      <label id="route-lbl" title="4c-E project routing: feed this project's queue to WHICHEVER of its sessions is free (not just the one that finished). Per-project flag; also needs Settings → Queue → project routing enabled. Logged as by:'router'."><input type="checkbox" id="q-route" onchange="onRouteToggle()"> route</label>
       <button id="b-feed" onclick="act('queue-feed')">Feed next</button>
     </div>
+    <div id="queue-list"></div>
   </div>
 
   <div id="settings">
@@ -2451,11 +2899,34 @@ local HTML = [[
       <div class="s-sec">Queue</div>
       <label class="s-row"><input type="checkbox" id="s-q-auto"> Auto-feed the next queued task when a session finishes</label>
       <label class="s-row"><input type="checkbox" id="s-q-dry"> Dry-run (log what it would feed, don't send)</label>
+      <label class="s-row"><input type="checkbox" id="s-q-route"> Project routing (4c-E): feed a project's queue to <i>any</i> free session of that project</label>
+      <div class="s-help">Double opt-in: this global switch AND the per-project "route" toggle in the detail panel. Targets only sessions that just finished a turn (never one you're typing into); one feed per project per second; every routed feed is ledgered as by:"router". Flag a starving project after <input type="number" id="s-q-starve" class="s-num" min="0"> minutes with queued work but no free session (0 = off).</div>
       <div class="s-sec">Escalation (a waiting approval nags harder)</div>
       <label class="s-row"><input type="checkbox" id="s-e-en"> Enable escalation</label>
       <label class="s-row">After <input type="number" id="s-e-min" class="s-num" min="1"> minutes</label>
       <label class="s-row"><input type="checkbox" id="s-e-snd"> Play a sound</label>
       <label class="s-row"><input type="checkbox" id="s-e-push"> Push to ntfy topic <input type="text" id="s-e-topic" class="s-txt" placeholder="my-topic"></label>
+
+      <div class="s-sec">Risk score (per-session indicator on tiles)</div>
+      <label class="s-row"><input type="checkbox" id="s-risk-en"> Show a med/high risk badge from ledger history</label>
+      <div class="s-help">Indicator only — never quarantines. Needs the audit ledger enabled to have data. Band thresholds (score 0–100): med ≥ <input type="number" id="s-risk-med" class="s-num" min="0" max="100"> high ≥ <input type="number" id="s-risk-high" class="s-num" min="0" max="100">, slow-approval signal after <input type="number" id="s-risk-stale" class="s-num" min="1"> s. Signal weights stay hand-edit-only (<code>risk.weights</code> in cc-config.json) and survive Saves.</div>
+
+      <div class="s-sec">Same-folder collision warning</div>
+      <label class="s-row"><input type="checkbox" id="s-coll-en"> Amber-flag tiles when 2+ active sessions share a folder</label>
+      <label class="s-row"><input type="checkbox" id="s-coll-git"> Compare by git repo root (not just the exact folder)</label>
+
+      <div class="s-sec">Graceful drain</div>
+      <label class="s-row"><input type="checkbox" id="s-drain-en"> Show "finish turn, then close" in the tile right-click menu</label>
+
+      <div class="s-sec">Respawn</div>
+      <label class="s-row"><input type="checkbox" id="s-resp-en"> Show "Respawn from cwd" in the tile right-click menu (relaunch a dead session)</label>
+      <label class="s-row"><input type="checkbox" id="s-resp-auto"> Auto-respawn a session that died unexpectedly</label>
+      <div class="s-help">⚠ Launches processes without you. Per-folder retry budget of <input type="number" id="s-resp-max" class="s-num" min="1"> attempts; a session counts as dead only after its status file is frozen mid-<code>working</code> for <input type="number" id="s-resp-stale" class="s-num" min="60"> s (default 600 — above the longest Bash tool timeout, so a long build never triggers it).</div>
+
+      <div class="s-sec">Insights</div>
+      <label class="s-row">Cap "time blocked on you" per approval at <input type="number" id="s-ins-block" class="s-num" min="0"> seconds</label>
+      <div class="s-help">An approval you never answered counts as blocking for at most this long in the 📊 fleet stats (0 = no cap).</div>
+
       <div class="s-sec">Audit log (records fleet activity to a local ledger)</div>
       <label class="s-row"><input type="checkbox" id="s-ledger-en"> Enable the audit/event ledger</label>
       <div class="s-help">Append-only JSONL under ~/.claude/cc-ledger. Records decisions (with who/what decided), prompts, tool requests, spawns, and operator actions — OFF until you enable it. Open the 📜 Audit view to read, filter, export, redact, or purge it.</div>
@@ -2483,6 +2954,10 @@ local HTML = [[
       <label class="s-row"><button class="s-x" style="border:1px solid #2c2f3a;border-radius:6px;padding:3px 8px;color:#cfd2db;" onclick="send('kitty-remote')">Enable Kitty remote control now</button></label>
       <label class="s-row">Default provider <select id="s-spawn-provider"></select></label>
 
+      <div class="s-sec">SSH status bridge (remote sessions as tiles)</div>
+      <label class="s-row"><input type="checkbox" id="s-br-en"> Mirror remote sessions from ssh providers into the panel</label>
+      <div class="s-help">For providers that declare <code>ssh:{host,user}</code> (hand-edit in cc-config.json for now): rsync-pulls each host's remote <code>~/.claude/cc-status/</code> every <input type="number" id="s-br-int" class="s-num" min="1"> s so its sessions render as ⇄ tiles. Remote tiles are <b>headless-only</b>: Approve/Deny route back over ssh (nonce-bound); keystroke actions are disabled. Needs key-based ssh auth (BatchMode) and the remote box set up with <code>make install</code>. Off by default.</div>
+
       <div class="s-sec">Providers (model / company per session)</div>
       <div class="s-help">Each profile launches <code>claude</code> against a model. <b>Claude</b> just sets the model; a <b>Gateway</b> points Claude Code at an Anthropic-compatible endpoint (a LiteLLM proxy for Gemini/OpenAI, or a local/remote REST server) via its base URL. <b>No API keys are stored here</b> — put the key in an environment variable and name that variable below; the spawned shell expands <code>$NAME</code> at launch.</div>
       <div id="s-providers"></div>
@@ -2496,8 +2971,10 @@ local HTML = [[
       <label class="s-row"><input type="checkbox" id="s-pat-en"> Enable pattern rules</label>
       <div class="s-lbl">Auto-allow (one per line, e.g. Read or Bash(npm test*))</div>
       <textarea id="s-pat-allow" class="s-area"></textarea>
+      <div class="s-help">One rule per line. <code>Read</code> matches the tool by name; <code>Bash(npm test*)</code> also shell-glob-matches the command/summary (<code>*</code> and <code>?</code> wildcards).</div>
       <div class="s-lbl">Auto-deny (wins over allow)</div>
       <textarea id="s-pat-deny" class="s-area"></textarea>
+      <div class="s-help">Same syntax, e.g. <code>Bash(rm -rf*)</code> or <code>WebFetch</code>. A request matching both lists is denied — deny always wins.</div>
     </div>
     <div id="s-foot">
       <button id="s-save" onclick="saveSettings()">Save</button>
@@ -2512,8 +2989,12 @@ local HTML = [[
         <button id="n-mode-existing" class="n-mode active" onclick="setMode('existing')">Open existing</button>
         <button id="n-mode-new" class="n-mode" onclick="setMode('new')">Start new project</button>
       </div>
-      <div class="s-lbl">Project folder</div>
-      <input id="n-path" class="s-txt" placeholder="/Users/you/Programming/project">
+      <div class="s-lbl">Presets</div>
+      <div id="n-presets" class="n-recent"></div>
+      <div class="s-lbl">Project folder (type to fuzzy-search your project roots)</div>
+      <input id="n-path" class="s-txt" placeholder="/Users/you/Programming/project" autocomplete="off"
+             oninput="onPathInput()" onkeydown="onPathKey(event)" onchange="applyLastUsed(this.value)">
+      <div id="n-suggest"></div>
       <div id="n-newrow" style="display:none;">
         <div class="s-lbl">New folder name (created inside the folder above)</div>
         <input id="n-name" class="s-txt" placeholder="my-new-project">
@@ -2549,6 +3030,7 @@ local HTML = [[
     </div>
     <div id="n-foot">
       <button id="n-spawn" onclick="submitNew()">Spawn</button>
+      <button onclick="savePreset()" title="Save the current folder + editor + mode + provider as a one-click preset">Save as preset</button>
       <button onclick="closeNew()">Cancel</button>
     </div>
   </div>
@@ -2570,6 +3052,7 @@ local HTML = [[
       <span>Audit ledger</span>
       <button id="a-tab-rows" class="a-tab active" onclick="auditTab('rows')">Rows</button>
       <button id="a-tab-time" class="a-tab" onclick="auditTab('timeline')">Timeline</button>
+      <button id="a-tab-alerts" class="a-tab" onclick="auditTab('alerts')">🔔 Alerts</button>
       <button class="s-x" onclick="closeAudit()">✕</button>
     </div>
     <div id="a-filters">
@@ -2604,6 +3087,17 @@ local HTML = [[
       <button class="danger" onclick="auditPurge()">Purge…</button>
       <span id="a-info" class="n-dim"></span>
     </div>
+  </div>
+
+  <div id="fsearch">
+    <div id="fs-head">
+      <span>🔎 Find in fleet</span>
+      <input type="text" id="fs-input" placeholder="Search transcripts + ledger… (3+ chars; auth.ts, a command, an error…)"
+             oninput="onFleetSearchInput()" autocomplete="off">
+      <span id="fs-info" class="n-dim"></span>
+      <button class="s-x" onclick="closeFleetSearch()">✕</button>
+    </div>
+    <div id="fs-body"><div class="s-help" style="margin-left:0;">Searches every session's transcript JSONL (live and dead) plus the audit ledger. Instant with ripgrep installed (<code>brew install ripgrep</code>); falls back to grep.</div></div>
   </div>
 
   <script>
@@ -2642,7 +3136,109 @@ local HTML = [[
     function queueAdd(){
       var el = document.getElementById("nudge");
       var t = (el.value || "").trim();
-      if(selectedKey && t){ send("queue-add", selectedKey, t); resetInput(el); }
+      if(!selectedKey || !t) return;
+      // Bulk paste (roadmap #5b): a multi-line input splits into one task per
+      // line. The count here is display-only -- the authoritative split rules
+      // (CRLF, bullets, blanks) live in core.queueSplitLines on the Lua side.
+      if(t.indexOf("\n") >= 0){
+        var n = t.split("\n").map(function(s){ return s.trim(); })
+                 .filter(function(s){ return s.length > 0; }).length;
+        if(n > 1){
+          if(confirm("Queue " + n + " tasks (one per line)?")){
+            send("queue-add-bulk", selectedKey, t); resetInput(el);
+          }
+          return;  // cancelled: leave the textarea untouched (Send still works)
+        }
+      }
+      send("queue-add", selectedKey, t); resetInput(el);
+    }
+
+    // ---- Queue editor (roadmap #5a): list / reorder / remove ---------------
+    var QUEUE_LIST = { key: null, tasks: [] };
+    var queueListOpen = false;
+    function toggleQueueList(){
+      queueListOpen = !queueListOpen;
+      if(queueListOpen && selectedKey){ send("queue-list", selectedKey); }
+      renderQueueList();
+    }
+    function ccQueueList(key, tasks){
+      QUEUE_LIST = { key: key, tasks: tasks || [] };
+      renderQueueList();
+    }
+    function renderQueueList(){
+      var box = document.getElementById("queue-list"); if(!box) return;
+      var ok = queueListOpen && selectedKey && QUEUE_LIST.key === selectedKey
+               && QUEUE_LIST.tasks && QUEUE_LIST.tasks.length;
+      box.classList.toggle("show", !!ok);
+      if(!ok){ box.innerHTML = ""; return; }
+      box.innerHTML = QUEUE_LIST.tasks.map(function(t, i){
+        var n = QUEUE_LIST.tasks.length;
+        // idx+task ride along as the expect guard: the Lua side refuses the
+        // edit if the queue changed underneath (autofeed popped the head).
+        return '<div class="ql-row">'
+          + '<span class="ql-text" title="' + esc(t) + '">' + (i+1) + '. ' + esc(t) + '</span>'
+          + '<button onclick="queueMove(' + i + ',-1)"' + (i === 0 ? ' disabled' : '') + ' title="Move up">▲</button>'
+          + '<button onclick="queueMove(' + i + ',1)"' + (i === n-1 ? ' disabled' : '') + ' title="Move down">▼</button>'
+          + '<button class="ql-x" onclick="queueRemove(' + i + ')" title="Remove">✕</button>'
+          + '</div>';
+      }).join("");
+    }
+    function queueMove(i, dir){
+      if(!selectedKey) return;
+      send("queue-move", selectedKey, JSON.stringify({ idx: i+1, dir: dir, task: QUEUE_LIST.tasks[i] }));
+    }
+    function queueRemove(i){
+      if(!selectedKey) return;
+      send("queue-remove", selectedKey, JSON.stringify({ idx: i+1, task: QUEUE_LIST.tasks[i] }));
+    }
+    // 4c-E: arm/disarm project routing (per-project flag in the queue file).
+    function onRouteToggle(){
+      if(!selectedKey) return;
+      send("queue-route", selectedKey, document.getElementById("q-route").checked ? "on" : "off");
+    }
+
+    // ---- Saved task templates (roadmap #5c) --------------------------------
+    var TEMPLATES = [];
+    var tplOpen = false;
+    function toggleTemplates(){
+      tplOpen = !tplOpen;
+      if(tplOpen){ send("template-list"); }
+      renderTemplates();
+    }
+    function ccTemplates(list){ TEMPLATES = list || []; renderTemplates(); }
+    function renderTemplates(){
+      var box = document.getElementById("tpl-menu"); if(!box) return;
+      box.classList.toggle("show", tplOpen);
+      if(!tplOpen){ box.innerHTML = ""; return; }
+      var html = '<div class="tpl-row tpl-save" onclick="templateSaveCurrent()">＋ Save current input as template…</div>';
+      html += TEMPLATES.map(function(t){
+        return '<div class="tpl-row" onclick="templateInsert(' + JSON.stringify(t.name).replace(/"/g,"&quot;").replace(/</g,"&lt;") + ')">'
+          + '<span class="tpl-name">' + esc(t.name) + '</span>'
+          + '<span class="tpl-text">' + esc(t.text) + '</span>'
+          + '<button onclick="event.stopPropagation();templateDelete(' + JSON.stringify(t.name).replace(/"/g,"&quot;").replace(/</g,"&lt;") + ')" title="Delete">✕</button>'
+          + '</div>';
+      }).join("");
+      box.innerHTML = html;
+    }
+    function templateInsert(name){
+      for(var i = 0; i < TEMPLATES.length; i++){
+        if(TEMPLATES[i].name === name){
+          var el = document.getElementById("nudge");
+          el.value = TEMPLATES[i].text; autoGrow(el); el.focus();
+          break;
+        }
+      }
+      tplOpen = false; renderTemplates();
+    }
+    function templateSaveCurrent(){
+      var t = (document.getElementById("nudge").value || "").trim();
+      if(!t){ alert("Type the task text into the input first, then save it as a template."); return; }
+      var name = prompt("Template name?");
+      if(name === null) return;
+      send("template-save", name, t);  // Lua validates + replies with the fresh list
+    }
+    function templateDelete(name){
+      if(confirm('Delete template "' + name + '"?')){ send("template-delete", name); }
     }
     // Capture a pasted image as a data URL; plain text keeps default paste.
     (function(){
@@ -2885,11 +3481,28 @@ local HTML = [[
       ck("s-gate", gateOn);
       ck("s-q-auto", cv(cfg,"queue.autofeed",false));
       ck("s-q-dry",  cv(cfg,"queue.dryRun",false));
+      ck("s-q-route", cv(cfg,"queue.routing.enabled",false));
+      val("s-q-starve", cv(cfg,"queue.routing.starveMinutes",0));
+      ck("s-br-en",  cv(cfg,"bridge.enabled",false));
+      val("s-br-int", cv(cfg,"bridge.intervalSeconds",2));
       ck("s-e-en",   cv(cfg,"escalation.enabled",false));
       val("s-e-min", cv(cfg,"escalation.minutes",5));
       ck("s-e-snd",  cv(cfg,"escalation.sound",false));
       ck("s-e-push", cv(cfg,"escalation.push",false));
       val("s-e-topic", cv(cfg,"escalation.pushTopic",""));
+      // Dark-config blocks (defaults must match the Lua read sites in refresh()).
+      ck("s-risk-en",    cv(cfg,"risk.enabled",false));
+      val("s-risk-med",  cv(cfg,"risk.thresholds.med",34));
+      val("s-risk-high", cv(cfg,"risk.thresholds.high",67));
+      val("s-risk-stale",cv(cfg,"risk.thresholds.staleSeconds",300));
+      ck("s-coll-en",    cv(cfg,"collision.enabled",false));
+      ck("s-coll-git",   cv(cfg,"collision.useGitRoot",false));
+      ck("s-drain-en",   cv(cfg,"drain.enabled",false));
+      ck("s-resp-en",    cv(cfg,"respawn.enabled",false));
+      ck("s-resp-auto",  cv(cfg,"respawn.auto.enabled",false));
+      val("s-resp-max",  cv(cfg,"respawn.auto.maxRetries",3));
+      val("s-resp-stale",cv(cfg,"respawn.auto.staleSeconds",600));
+      val("s-ins-block", cv(cfg,"insights.maxBlockSeconds",1800));
       var legacyPop = cv(cfg,"focus.popEditor",false);  // back-compat seeds both
       ck("s-pop-complete", cv(cfg,"focus.popOnComplete",legacyPop));
       ck("s-pop-approval", cv(cfg,"focus.popOnApproval",legacyPop));
@@ -3041,7 +3654,8 @@ local HTML = [[
       function num(id,d){ var n=parseInt(document.getElementById(id).value,10); return isNaN(n)?d:n; }
       function txt(id){ return document.getElementById(id).value||""; }
       var config = {
-        queue: { autofeed: ck("s-q-auto"), dryRun: ck("s-q-dry") },
+        queue: { autofeed: ck("s-q-auto"), dryRun: ck("s-q-dry"),
+                 routing: { enabled: ck("s-q-route"), starveMinutes: num("s-q-starve",0) } },
         escalation: { enabled: ck("s-e-en"), minutes: num("s-e-min",5), sound: ck("s-e-snd"),
                       push: ck("s-e-push"), pushTopic: txt("s-e-topic") },
         focus: { popOnComplete: ck("s-pop-complete"), popOnApproval: ck("s-pop-approval") },
@@ -3056,7 +3670,22 @@ local HTML = [[
           approveRepeats: ck("s-p-rep"),
           autopilot: { enabled: ck("s-ap-en"), minutes: num("s-ap-min",15) },
           patterns: { enabled: ck("s-pat-en"), autoAllow: lines("s-pat-allow"), autoDeny: lines("s-pat-deny") }
-        }
+        },
+        // Dark-config blocks. risk deliberately carries NO weights key:
+        // overlayConfig's SETTINGS_KEEP_SUBKEYS preserves a hand-edited
+        // risk.weights across this wholesale block replace.
+        risk: { enabled: ck("s-risk-en"),
+                thresholds: { med: num("s-risk-med",34), high: num("s-risk-high",67),
+                              staleSeconds: num("s-risk-stale",300) } },
+        collision: { enabled: ck("s-coll-en"), useGitRoot: ck("s-coll-git") },
+        drain: { enabled: ck("s-drain-en") },
+        respawn: { enabled: ck("s-resp-en"),
+                   auto: { enabled: ck("s-resp-auto"), maxRetries: num("s-resp-max",3),
+                           staleSeconds: num("s-resp-stale",600) } },
+        insights: { maxBlockSeconds: num("s-ins-block",1800) },
+        // bridge carries NO staleSlackSeconds/keystrokes keys: SETTINGS_KEEP_SUBKEYS
+        // preserves the hand-edited ones across this wholesale block replace.
+        bridge: { enabled: ck("s-br-en"), intervalSeconds: num("s-br-int",2) }
       };
       send("save-config", "", JSON.stringify({ config: config, gate: ck("s-gate"), autoLaunch: ck("s-autolaunch") }));
     }
@@ -3088,7 +3717,9 @@ local HTML = [[
       document.getElementById("n-newrow").style.display = (m === "new") ? "block" : "none";
     }
     // Lua pushes config + recent dirs + the initial folder listing.
-    function showNew(cfg, recent, browse){
+    var PRESETS = [];            // saved spawn presets (roadmap #4a)
+    var LAST_BY_PROJECT = {};    // folder -> {editor, permMode, provider} recall
+    function showNew(cfg, recent, browse, presetState){
       cfg = cfg || {};
       setMode("existing");
       document.getElementById("n-path").value = "";
@@ -3096,10 +3727,109 @@ local HTML = [[
       document.getElementById("n-task").value = "";
       document.getElementById("n-editor").value = cv(cfg, "spawn.editor", "terminal");
       fillProviderSelect("n-provider", cv(cfg,"providers",[])||[], cv(cfg,"spawn.provider",""));
+      presetState = presetState || {};
+      PRESETS = presetState.presets || [];
+      LAST_BY_PROJECT = presetState.lastByProject || {};
+      renderPresets();
+      hideSuggest();
       renderRecent(recent || []);
       ccBrowse(browse || { path:"", parent:"", dirs:[] });
       document.getElementById("newsession").classList.add("show");
       document.getElementById("n-path").focus();
+    }
+    function ccPresets(list){ PRESETS = list || []; renderPresets(); }
+    function renderPresets(){
+      var box = document.getElementById("n-presets"); box.innerHTML = "";
+      if(!PRESETS.length){ box.innerHTML = '<span class="n-dim">No presets yet — set up a spawn below, then "Save as preset"</span>'; return; }
+      PRESETS.forEach(function(p){
+        var b = document.createElement("button");
+        b.className = "n-chip";
+        b.title = p.folder + (p.editor ? " · " + p.editor : "") + (p.permMode ? " · " + p.permMode : "")
+                + (p.provider ? " · " + p.provider : "") + "\nClick to spawn · ✕ deletes";
+        b.textContent = "▶ " + p.name;
+        var x = document.createElement("span");
+        x.className = "chip-x"; x.textContent = "✕";
+        x.onclick = function(ev){
+          ev.stopPropagation();
+          if(confirm('Delete preset "' + p.name + '"?')){ send("preset-delete", p.name); }
+        };
+        b.appendChild(x);
+        b.onclick = function(){ presetSpawn(p); };
+        box.appendChild(b);
+      });
+    }
+    // One-click spawn from a preset: same payload submitNew builds, no field
+    // round-trip (the saved bundle IS the form state).
+    function presetSpawn(p){
+      var task = (document.getElementById("n-task").value || "").trim();
+      var payload = { a:"spawn", v:"", text:task, img:"", mode:"existing", dir:p.folder,
+                      editor:p.editor || "", permMode:p.permMode || "", provider:p.provider || "" };
+      try { window.webkit.messageHandlers.cc.postMessage(JSON.stringify(payload)); } catch(e){ console.log("spawn send error", e); }
+      closeNew();
+    }
+    function savePreset(){
+      var path = (document.getElementById("n-path").value || "").trim();
+      if(!path || path.charAt(0) !== "/"){ alert("Pick an absolute project folder first."); return; }
+      var name = prompt("Preset name?");
+      if(name === null || !(name = name.trim())) return;
+      send("preset-save", "", JSON.stringify({ name: name, folder: path,
+        editor: document.getElementById("n-editor").value,
+        permMode: document.getElementById("n-permmode").value,
+        provider: document.getElementById("n-provider").value }));
+    }
+    // Per-project recall: picking a known folder pre-fills its last-used options.
+    function applyLastUsed(dir){
+      dir = (dir || "").replace(/\/+$/, "");
+      var spec = LAST_BY_PROJECT[dir];
+      if(!spec) return;
+      if(spec.editor) document.getElementById("n-editor").value = spec.editor;
+      if(spec.permMode != null) document.getElementById("n-permmode").value = spec.permMode;
+      if(spec.provider != null) document.getElementById("n-provider").value = spec.provider;
+    }
+
+    // ---- Fuzzy folder search (roadmap #4b) ----------------------------------
+    // 150ms debounce -> "folder-search" against the Lua-cached index; ranking is
+    // pure cc-core. Arrow keys + Enter pick; Escape hides.
+    var sugTimer = null, sugItems = [], sugSel = -1;
+    function onPathInput(){
+      if(sugTimer) clearTimeout(sugTimer);
+      var q = document.getElementById("n-path").value || "";
+      if(q.trim().length < 2 || q.charAt(0) === "/"){ hideSuggest(); return; }  // absolute paths browse, not search
+      sugTimer = setTimeout(function(){ send("folder-search", q); }, 150);
+    }
+    function ccSearchResults(paths){
+      sugItems = paths || []; sugSel = -1;
+      var box = document.getElementById("n-suggest");
+      if(!sugItems.length){ hideSuggest(); return; }
+      box.innerHTML = sugItems.map(function(p, i){
+        return '<div class="n-sug" data-i="' + i + '" onclick="pickSuggest(' + i + ')" title="' + esc(p) + '">📁 ' + esc(shortPath(p)) + '</div>';
+      }).join("");
+      box.classList.add("show");
+    }
+    function hideSuggest(){
+      var box = document.getElementById("n-suggest");
+      box.classList.remove("show"); box.innerHTML = ""; sugItems = []; sugSel = -1;
+    }
+    function pickSuggest(i){
+      var p = sugItems[i]; if(!p) return;
+      document.getElementById("n-path").value = p;
+      hideSuggest();
+      applyLastUsed(p);
+      browseTo(p);
+    }
+    function onPathKey(e){
+      if(!sugItems.length) return;
+      if(e.key === "ArrowDown" || e.key === "ArrowUp"){
+        e.preventDefault();
+        sugSel = (e.key === "ArrowDown") ? Math.min(sugSel + 1, sugItems.length - 1) : Math.max(sugSel - 1, 0);
+        document.querySelectorAll("#n-suggest .n-sug").forEach(function(el, i){
+          el.classList.toggle("sel", i === sugSel);
+        });
+      } else if(e.key === "Enter" && sugSel >= 0){
+        e.preventDefault(); pickSuggest(sugSel);
+      } else if(e.key === "Escape"){
+        hideSuggest();
+      }
     }
     function shortPath(p){
       var parts = (p||"").split("/").filter(Boolean);
@@ -3158,7 +3888,7 @@ local HTML = [[
       return base.replace(/\/+$/, "") + "/" + name;
     }
     function useThisFolder(){ document.getElementById("n-path").value = browsePath; }
-    function pickRecent(dir){ document.getElementById("n-path").value = dir; browseTo(dir); }
+    function pickRecent(dir){ document.getElementById("n-path").value = dir; applyLastUsed(dir); browseTo(dir); }
     function submitNew(){
       var path = (document.getElementById("n-path").value || "").trim();
       var name = (document.getElementById("n-name").value || "").trim();
@@ -3184,8 +3914,43 @@ local HTML = [[
       return null;
     }
     function selectTile(key){
-      if(key !== selectedKey){ detailExpanded = { pending:false, activity:false }; }
+      if(key !== selectedKey){
+        detailExpanded = { pending:false, activity:false };
+        requestDecisions(key);  // gate decision log loads per selection, not per tick
+        queueListOpen = false; renderQueueList();   // queue editor is per-session
+        tplOpen = false; renderTemplates();
+      }
       selectedKey = key; renderDetail(); paintSelection();
+    }
+
+    // ---- Gate decision log (roadmap #2): last-N grouped decisions ----------
+    // Loaded on selection + on the selected tile's status transitions (exactly
+    // when a decision likely just landed) -- NEVER on the 1s refresh tick.
+    var DECISIONS = { key: null, rows: null };
+    function requestDecisions(key){ if(key) send("decision-log", key); }
+    window.ccDecisions = function(key, rows){
+      DECISIONS = { key: key, rows: rows };
+      renderDecisions();
+    };
+    function renderDecisions(){
+      var box = document.getElementById("d-decisions"); if(!box) return;
+      var rows = DECISIONS.rows;
+      // Stale paint guard: only show data fetched for the CURRENT selection.
+      if(DECISIONS.key !== selectedKey || !rows || !rows.length || !rows.map){
+        box.style.display = "none"; box.innerHTML = ""; return;
+      }
+      box.innerHTML = rows.map(function(r){
+        var glyph = r.outcome === "deny" ? "⛔" : (r.outcome === "fallback" ? "⚠" : "✅");
+        var cls = r.outcome === "deny" ? "dec-deny" : (r.outcome === "fallback" ? "dec-fallback" : "");
+        var who = r.by ? (r.by + (r.pattern ? ": " + r.pattern : "")) : "";
+        return '<div class="'+cls+'" title="'+esc(r.summary || "")+'">'
+          + glyph + " " + esc(r.outcome || "?") + " " + esc(r.tool || "")
+          + (r.count > 1 ? " ×" + r.count : "")
+          + (who ? " (" + esc(who) + ")" : "")
+          + (r.lastTs ? ' <span style="opacity:.7">· ' + fmtAge(r.lastTs) + ' ago</span>' : "")
+          + '</div>';
+      }).join("");
+      box.style.display = "block";
     }
     function toggleExpand(which){ detailExpanded[which] = !detailExpanded[which]; applyExpand(); }
     function applyExpand(){
@@ -3318,13 +4083,39 @@ local HTML = [[
       renderAsk(it);
       renderMeta(it);
       syncGateSelect(it);
+      renderDecisions();
       renderDetailUsage(it);
       var n = it.queue || 0;
-      document.getElementById("q-count").textContent = n>0 ? ("Queue: " + n) : "Queue: empty";
+      document.getElementById("q-count").textContent = n>0 ? ("Queue: " + n + " ▾") : "Queue: empty";
       document.getElementById("b-feed").style.display = n>0 ? "inline-block" : "none";
+      document.getElementById("q-route").checked = !!it.routed;
+      // Keep the open queue editor honest: re-fetch when the depth moved
+      // (autofeed/manual feed popped a head) and fold it shut when empty.
+      if(queueListOpen){
+        if(n === 0){ queueListOpen = false; renderQueueList(); }
+        else if(QUEUE_LIST.key === selectedKey && QUEUE_LIST.tasks.length !== n){
+          send("queue-list", selectedKey);
+        }
+      }
       var ba = document.getElementById("b-auto");
       ba.textContent = it.autopilot ? "Autopilot: ON" : "Autopilot";
       ba.style.color = it.autopilot ? "#8fd4a3" : "#e8e9ee";
+      // Remote (bridge) tiles are headless-only: grey every keystroke-shaped
+      // control. Approve/Deny stay live only while the remote gate is waiting
+      // (they route over ssh as decision files). Queue add/edit and the route
+      // toggle stay enabled -- queues are LOCAL data (a future remote feed
+      // would use them) -- but Feed next is blocked (no local window).
+      var remote = !!it.remote;
+      var remoteWait = remote && it.gate === "waiting";
+      ["b-jump","b-stop","b-auto","b-clear","b-compact","b-improve","b-nudge","b-feed",
+       "effort","mode","d-model","d-gate","nudge"].forEach(function(id){
+        var el = document.getElementById(id); if(!el) return;
+        el.disabled = remote;
+        if(remote){ el.title = "Remote session — headless approve/deny only"; }
+        else if(el.title === "Remote session — headless approve/deny only"){ el.title = ""; }
+      });
+      var bdeny = document.getElementById("b-deny");
+      bdeny.disabled = remote && !remoteWait;
       // Errored session: the Approve button becomes Continue (types "continue" + Enter to
       // resume the aborted turn). Restored to Approve for every other status.
       var bap = document.getElementById("b-approve");
@@ -3337,6 +4128,9 @@ local HTML = [[
         bap.setAttribute("onclick", "act('approve')");
         bap.style.borderColor = ""; bap.style.color = "";
       }
+      // Remote: Approve works only as a headless gate decision (waiting), and
+      // Continue (keystrokes) never does.
+      bap.disabled = remote && (!remoteWait || st === "error");
       applyExpand();
     }
 
@@ -3478,7 +4272,14 @@ local HTML = [[
       auditView = v;
       document.getElementById("a-tab-rows").classList.toggle("active", v === "rows");
       document.getElementById("a-tab-time").classList.toggle("active", v === "timeline");
+      document.getElementById("a-tab-alerts").classList.toggle("active", v === "alerts");
       renderAudit();
+    }
+    // JS twin of core.notificationEvents' predicate: panel-raised alerts plus
+    // any non-human gate decision (something happened without you).
+    function isNotification(e){
+      if(e.type === "escalation" || e.type === "hung" || e.type === "auto_respawn") return true;
+      return e.type === "decision" && e.by != null && e.by !== "human";
     }
     // YYYY-MM-DD -> epoch seconds (UTC midnight, or end-of-day for `until`).
     function dateToTs(s, endOfDay){
@@ -3517,7 +4318,8 @@ local HTML = [[
     }
     var EV_EMOJI = { session_start:"🟢", session_end:"⚪", prompt:"📝", tool_request:"🔧",
       task_feed:"📥", mode_change:"🎚", model_change:"🤖", effort_change:"🎚", clear:"🧹",
-      compact:"🗜", nudge:"👉", autopilot_arm:"🛫", spawn:"✨", relabel:"🏷", redact:"🚫", purge:"🗑" };
+      compact:"🗜", nudge:"👉", autopilot_arm:"🛫", spawn:"✨", relabel:"🏷", redact:"🚫", purge:"🗑",
+      escalation:"🔴", hung:"⏳", auto_respawn:"♻️", drain_close:"⛔" };
     function evDesc(e){
       if(e.type === "decision"){
         return (e.outcome === "deny" ? "⛔" : "✅") + " " + (e.outcome || "?") + " " + (e.tool || "")
@@ -3531,13 +4333,17 @@ local HTML = [[
       else if(e.type === "tool_request") detail = (e.tool || "") + (e.summary ? (' "' + e.summary + '"') : "");
       else if(e.type === "spawn") detail = (e.editor || "") + " " + (e.kind || "") + (e.dryRun ? " (dry-run)" : "");
       else if(e.type === "purge") detail = (e.count != null ? (e.count + " event(s)") : "");
+      else if(e.type === "escalation") detail = "waiting > " + (e.minutes || "?") + "m" + (e.summary ? (' on "' + e.summary + '"') : "");
+      else if(e.type === "hung") detail = "no progress > " + (e.minutes || "?") + "m";
+      else if(e.type === "auto_respawn") detail = (e.cwd || "") + (e.attempt ? (" (attempt " + e.attempt + ")") : "");
       return em + " " + e.type + (detail ? (": " + detail) : "");
     }
     function narr(e){ return fmtTs(e.ts) + "  " + (e.name || e.session_id || "?") + "  " + evDesc(e) + (e.redacted ? " [redacted]" : ""); }
     function auditRow(e){
       var hasContent = (e.prompt || e.summary || e.task || e.text || e.message);
       var canRedact = hasContent && !e.redacted;
-      return '<div class="a-row">'
+      var unseen = auditView === "alerts" && LAST_SEEN > 0 && (e.ts || 0) > LAST_SEEN;
+      return '<div class="a-row' + (unseen ? ' unseen' : '') + '">'
         + '<span class="a-ts">' + esc(fmtTs(e.ts)) + '</span>'
         + '<span class="a-name">' + esc(e.name || e.session_id || "?") + '</span>'
         + '<span class="a-desc">' + esc(evDesc(e)) + (e.redacted ? ' <i class="a-redacted">[redacted]</i>' : '') + '</span>'
@@ -3556,6 +4362,7 @@ local HTML = [[
     function renderAudit(){
       var f = currentFilter();
       var evs = (AUDIT.events || []).filter(function(e){ return auditPasses(e, f); });
+      if(auditView === "alerts"){ evs = evs.filter(isNotification); }
       document.getElementById("a-info").textContent = evs.length + " shown"
         + (AUDIT.truncated ? " · newest " + (AUDIT.events || []).length + " loaded (older not shown)" : "");
       var body = document.getElementById("a-body");
@@ -3564,6 +4371,12 @@ local HTML = [[
         body.innerHTML = asc.length
           ? '<pre class="a-narr">' + esc(asc.map(narr).join("\n")) + '</pre>'
           : '<div class="s-help" style="margin-left:0;">No events in range.</div>';
+        return;
+      }
+      if(auditView === "alerts" && !evs.length){
+        body.innerHTML = '<div class="s-help" style="margin-left:0;">No alerts recorded. '
+          + 'Escalations, stall warnings, auto-respawns, and non-human gate decisions land here '
+          + '(the audit ledger must be enabled to record them).</div>';
         return;
       }
       body.innerHTML = evs.length
@@ -3577,10 +4390,14 @@ local HTML = [[
     function auditReview(){ send("audit-review", selectedKey || "", JSON.stringify(serverFilter())); }
     function auditExport(){ send("audit-export", "", JSON.stringify(serverFilter())); }
     function auditPurge(){ send("audit-purge", "", JSON.stringify(serverFilter())); }  // Lua confirms
-    window.ccAudit = function(payload, focusSession, focusView){
+    // lastSeen: epoch of the previous 🔔 open -- alerts newer than this render
+    // highlighted ("since you last looked"). 0 = no divider.
+    var LAST_SEEN = 0;
+    window.ccAudit = function(payload, focusSession, focusView, lastSeen){
       AUDIT = payload || { events: [], files: [], truncated: false };
       if(!Array.isArray(AUDIT.events)) AUDIT.events = [];
       if(!Array.isArray(AUDIT.files)) AUDIT.files = [];
+      LAST_SEEN = (typeof lastSeen === "number") ? lastSeen : 0;
       populateAuditSessions();
       // Per-session drill-down (Timeline button): pre-select the session + view.
       if(focusSession){ var sel = document.getElementById("a-f-session"); if(sel) sel.value = focusSession; }
@@ -3588,6 +4405,75 @@ local HTML = [[
       if(focusView){ auditTab(focusView); }  // auditTab also re-renders
       else { renderAudit(); }
     };
+    // ---- Fleet-wide search (roadmap #3) -------------------------------------
+    // 300ms debounce, min 3 chars; Lua runs rg/grep async and replies ccSearch.
+    // The reply echoes the query -- stale (out-of-order) results are dropped
+    // here too, belt-and-braces with the Lua generation guard.
+    var fsTimer = null;
+    function openFleetSearch(){
+      document.getElementById("fsearch").classList.add("show");
+      var inp = document.getElementById("fs-input");
+      inp.focus(); inp.select();
+    }
+    function closeFleetSearch(){ document.getElementById("fsearch").classList.remove("show"); }
+    function onFleetSearchInput(){
+      if(fsTimer) clearTimeout(fsTimer);
+      var q = (document.getElementById("fs-input").value || "").trim();
+      var body = document.getElementById("fs-body");
+      var info = document.getElementById("fs-info");
+      if(q.length < 3){ info.textContent = ""; body.innerHTML = '<div class="s-help" style="margin-left:0;">Type at least 3 characters.</div>'; return; }
+      info.textContent = "searching…";
+      fsTimer = setTimeout(function(){ send("fleet-search", "", JSON.stringify({ q: q })); }, 300);
+    }
+    var FS_HITS = [];
+    window.ccSearch = function(res){
+      res = res || {};
+      var cur = (document.getElementById("fs-input").value || "").trim();
+      if(res.q !== cur) return;  // a newer query superseded this result
+      FS_HITS = res.hits || [];
+      document.getElementById("fs-info").textContent =
+        FS_HITS.length + " hit(s)" + (res.truncated ? " (more not shown — narrow the search)" : "");
+      var body = document.getElementById("fs-body");
+      if(!FS_HITS.length){ body.innerHTML = '<div class="s-help" style="margin-left:0;">No matches.</div>'; return; }
+      body.innerHTML = FS_HITS.map(function(h, i){
+        var who = h.name ? h.name
+                : (h.kind === "ledger" ? "📜 ledger"
+                : (h.projectKey ? decodeProjectKey(h.projectKey) : "?"));
+        var base = (h.file || "").split("/").pop();
+        var click = h.key ? ' onclick="fsOpen(' + i + ')"' : (h.sessionId ? ' onclick="fsTimelineFor(' + i + ')"' : '');
+        var cls = "fs-row" + ((h.key || h.sessionId) ? "" : " dead");
+        return '<div class="' + cls + '"' + click + ' title="' + esc(h.file || "") + '">'
+          + '<span class="fs-who">' + (h.key ? "● " : "") + esc(who) + '</span>'
+          + '<span class="fs-file">' + esc(base) + ':' + (h.line || "?") + '</span>'
+          + '<span class="fs-text">' + esc(h.text || "") + '</span>'
+          + (h.key ? '<button class="fs-jump" onclick="event.stopPropagation();send(\'focus\',\'' + esc(h.key) + '\')" title="Jump to this session\'s window">Jump</button>' : '')
+          + '</div>';
+      }).join("");
+    };
+    // The encoded /projects/<ENC>/ segment reads roughly as the launch path with
+    // separators folded to "-" -- show the last two segments as a readable hint.
+    function decodeProjectKey(pk){
+      var parts = (pk || "").split("-").filter(Boolean);
+      return parts.length ? parts.slice(-2).join("/") : pk;
+    }
+    function fsOpen(i){
+      var h = FS_HITS[i]; if(!h || !h.key) return;
+      closeFleetSearch();
+      selectTile(h.key);
+    }
+    function fsTimelineFor(i){
+      var h = FS_HITS[i]; if(!h || !h.sessionId) return;
+      closeFleetSearch();
+      send("open-audit-for-session", h.sessionId);
+    }
+
+    // ---- Notification history (roadmap #6) ----------------------------------
+    function openNotifications(){ send("open-notifications"); setNotifyBadge(0); }
+    function setNotifyBadge(n){
+      var b = document.getElementById("notify-badge"); if(!b) return;
+      b.textContent = (n > 0) ? String(n > 99 ? "99+" : n) : "";
+      b.style.display = (n > 0) ? "inline-block" : "none";
+    }
 
     window.ccUsage = function(u){ LAST_USAGE = u || null; if(u && u.official) LAST_OFFICIAL = u.official; renderUsageFoot(); renderDetail(); };
     window.ccOfficial = function(o){ LAST_OFFICIAL = o || null; renderUsageFoot(); };
@@ -3652,11 +4538,19 @@ local HTML = [[
     }
 
     var PANEL_PROVIDERS = [];
+    var lastSelectedStatus = null;
     window.ccUpdate = function(items, providers){
       lastItems = items || [];
       if(providers !== undefined) PANEL_PROVIDERS = providers || [];
       renderGrid();
       renderDetail();
+      // Refresh the gate decision log exactly when the selected tile changes
+      // status (a decision likely just landed) -- one cached-snapshot read per
+      // transition, zero per tick.
+      var sel = selectedKey ? findItem(selectedKey) : null;
+      var st = sel ? (sel.status || "idle") : null;
+      if(sel && lastSelectedStatus !== null && st !== lastSelectedStatus){ requestDecisions(selectedKey); }
+      lastSelectedStatus = st;
     };
 
     // One tile's HTML. Extracted from ccUpdate so renderGrid can map the (filtered)
@@ -3672,7 +4566,11 @@ local HTML = [[
       } else if(it.since){
         meta = fmtAge(it.since);
       }
-      if(it.queue > 0){ meta = (meta ? meta + " · " : "") + "+" + it.queue + " queued"; }
+      if(it.remote){ meta = (meta ? meta + " · " : "") + "⇄ " + (it.remote.host || "remote")
+                            + (it.bridgeStale ? " (bridge offline)" : ""); }
+      if(it.queue > 0){ meta = (meta ? meta + " · " : "") + (it.routed ? "⇉" : "+") + it.queue + " queued"; }
+      else if(it.routed){ meta = (meta ? meta + " · " : "") + "⇉ routed"; }
+      if(it.starved){ meta = (meta ? meta + " · " : "") + "⌛ queue starved"; }
       if(it.autopilot){ meta = (meta ? meta + " · " : "") + "🛫 autopilot"; }
       if(it.draining){ meta = (meta ? meta + " · " : "") + "⛔ draining"; }
       if(it.collide){ meta = (meta ? meta + " · " : "") + "⚠ shared dir"; }
@@ -3912,6 +4810,31 @@ function refreshList()
       list[#list + 1] = it
     end
   end
+  -- SSH status bridge (roadmap #7): merge each live host's mirror dir as
+  -- host-namespaced tiles. NEVER pruned locally (rsync --delete is truth: a
+  -- remote SessionEnd removes the mirror file; FX.removeStatus on a namespaced
+  -- key would unlink a wrong local path and rsync would resurrect it anyway).
+  -- bridgeStale marks "the BRIDGE isn't syncing" distinctly from session
+  -- staleness (the mirror's `updated` freezes when rsync stalls).
+  for ns, b in pairs(bridge) do
+    local mdir = MIRROR_DIR .. "/" .. ns
+    local mentries = {}
+    for _, fname in ipairs(FX.readDir(mdir)) do
+      local key = fname:match("^(.+)%.json$")
+      if key then
+        local content = FX.readFile(mdir .. "/" .. fname)
+        if content and #content > 0 then mentries[#mentries + 1] = { key = key, content = content } end
+      end
+    end
+    if #mentries > 0 then
+      local slack = tonumber(core.config(loadConfig(), "bridge.staleSlackSeconds", 15)) or 15
+      local remoteList = core.parseMirrorList({ ns = ns, host = b.host, dest = b.dest },
+        mentries, now, STALE_SECONDS, { slack = slack })
+      local syncStale = (now - (b.lastOkTs or 0)) > 3 * (b.interval or BRIDGE_SECONDS)
+      for _, it in ipairs(remoteList) do it.bridgeStale = syncStale or nil end
+      list = core.mergeStatusLists(list, remoteList)
+    end
+  end
   byKey = {}
   for _, it in ipairs(list) do byKey[it.key] = it end
   return list
@@ -3925,13 +4848,16 @@ function loadConfig()
   return (ok and type(t) == "table") and t or {}
 end
 
--- Risk-scoring ledger snapshot, cached across refreshes: refresh() runs at 1 Hz
+-- Ledger snapshot, cached across refreshes: refresh() runs at 1 Hz
 -- (timer + pathwatcher), and re-reading + re-JSON-parsing the whole ledger
 -- directory every tick burns the Hammerspoon main thread. Re-read only when a
 -- daily file's size/mtime changes (cheap hs.fs.attributes scan; hooks append
 -- out-of-process) or the 30s TTL backstop expires (core.ledgerCacheStale).
-local riskLedgerCache = {}
-local function riskLedgerEvents()
+-- Shared by risk scoring, the gate decision log, and the notification badge.
+-- Returns events, changed -- `changed` is true only when this call re-read the
+-- files, so per-tick consumers (the 🔔 badge) can skip recompute on cache hits.
+local ledgerSnapshotCache = {}
+function ledgerSnapshot()  -- assigns the forward-declared local (same as loadConfig)
   local parts = {}
   for _, fn in ipairs(FX.readDir(LEDGER_DIR)) do
     if fn:match("%.jsonl$") then
@@ -3943,19 +4869,25 @@ local function riskLedgerEvents()
   table.sort(parts)  -- readDir order isn't guaranteed; the signature must be stable
   local sig = table.concat(parts, ";")
   local now = FX.now()
-  if core.ledgerCacheStale(riskLedgerCache, sig, now, 30) then
-    riskLedgerCache = { events = FX.readLedger({}).events, sig = sig, ts = now }
+  local changed = false
+  if core.ledgerCacheStale(ledgerSnapshotCache, sig, now, 30) then
+    ledgerSnapshotCache = { events = FX.readLedger({}).events, sig = sig, ts = now }
+    changed = true
   end
-  return riskLedgerCache.events
+  return ledgerSnapshotCache.events, changed
 end
 
 -- Push current statuses into the webview + deck; run queue auto-feed and
 -- stale-approval escalation; keep the heartbeat fresh.
 function refresh()
-  local list = refreshList()
   local cfg = loadConfig()
+  reconcileBridge(cfg)  -- SSH bridge timers track config (cheap diff per tick)
+  local list = refreshList()
   local autofeed   = core.config(cfg, "queue.autofeed", false) == true
   local queueDry   = core.config(cfg, "queue.dryRun", false) == true
+  local routingOn  = core.config(cfg, "queue.routing.enabled", false) == true  -- 4c-E
+  local starveMin  = tonumber(core.config(cfg, "queue.routing.starveMinutes", 0)) or 0
+  local routeGroups = {}  -- queueKey -> { items }: members per project, for the dispatcher
   local escEnabled = core.config(cfg, "escalation.enabled", false) == true
   local escMin     = tonumber(core.config(cfg, "escalation.minutes", 5)) or 5
   local escSound   = core.config(cfg, "escalation.sound", false) == true
@@ -3979,9 +4911,13 @@ function refresh()
     weights    = core.config(cfg, "risk.weights", nil),
     thresholds = core.config(cfg, "risk.thresholds", nil),
   } or nil
-  -- Risk scoring reads the CACHED ledger snapshot (not per tile, and not a full
-  -- re-parse per tick -- see riskLedgerEvents above).
-  local ledgerEvents = riskEnabled and riskLedgerEvents() or nil
+  -- Risk scoring + the 🔔 badge share ONE cached ledger snapshot per tick (not
+  -- per tile, and not a full re-parse -- see ledgerSnapshot above). A single
+  -- call also keeps the `changed` edge intact: a second call in the same tick
+  -- would always see the freshly-warmed cache and report false.
+  local ledgerOn = ledgerEnabled()
+  local ledgerEvents, ledgerChanged = nil, false
+  if riskEnabled or ledgerOn then ledgerEvents, ledgerChanged = ledgerSnapshot() end
   local now = FX.now()
   local newPrev = {}  -- key -> { status, stale, escalated }: rebuilt this refresh, swapped in below
                       -- (.stale = frozen past the RESPAWN threshold, not display staleness)
@@ -3990,16 +4926,23 @@ function refresh()
   -- working dir / git-root. Computed once over the whole list before the tile loop.
   local collFlags = {}
   if collEnabled then
+    -- Remote (bridge) tiles are excluded: their cwd is a REMOTE path -- a
+    -- same-layout local clone would read as a false collision, and FX.gitRoot
+    -- would run git against whatever happens to exist locally at that path.
+    local localList = {}
+    for _, it in ipairs(list) do
+      if not it.remote then localList[#localList + 1] = it end
+    end
     local rootByCwd = nil
     if collGitRoot then
       rootByCwd = {}
-      for _, it in ipairs(list) do
+      for _, it in ipairs(localList) do
         if it.cwd and it.cwd ~= "" and rootByCwd[it.cwd] == nil then
           rootByCwd[it.cwd] = FX.gitRoot(it.cwd) or ""
         end
       end
     end
-    collFlags = core.collisions(list, { rootByCwd = rootByCwd }).flags
+    collFlags = core.collisions(localList, { rootByCwd = rootByCwd }).flags
   end
 
   for _, it in ipairs(list) do
@@ -4010,9 +4953,13 @@ function refresh()
     -- The same tail feeds error detection below, so read it once for any `working`
     -- session (even stale -- a frozen-on-error session goes stale but must still flag)
     -- plus the non-stale peek statuses.
-    local peekable = ACTIVITY_PEEK and not it.stale
+    -- Remote (bridge) tiles: transcript_path is a REMOTE path -- a same-layout
+    -- local clone could make it exist HERE too, so never read it (peek/error/
+    -- watchdog all skip). Approve/Deny route over ssh; escalation stays on
+    -- (pure timestamp math -- nagging about a remote approval is the point).
+    local peekable = ACTIVITY_PEEK and not it.stale and not it.remote
        and (it.status == "working" or it.status == "approval" or it.status == "done")
-    local wantTail = it.transcript_path and (peekable or it.status == "working")
+    local wantTail = it.transcript_path and not it.remote and (peekable or it.status == "working")
     local tail = wantTail and FX.readTail(it.transcript_path, ACTIVITY_BYTES) or nil
     if peekable and tail then
       it.activity = core.transcriptSnippet(tail, ACTIVITY_LEN)
@@ -4037,7 +4984,7 @@ function refresh()
     -- (no new output) can be flagged. trackProgress seeds on first sight, rebases the
     -- stall timer on any size change (growth OR a rotation/truncation shrink), and
     -- holds the timer when the size is unchanged.
-    if hungOn and it.transcript_path and not it.stale and it.status == "working" then
+    if hungOn and it.transcript_path and not it.stale and not it.remote and it.status == "working" then
       local sz = FX.fileSize(it.transcript_path)
       if sz then watchdog[it.key] = core.applyProgress(watchdog[it.key], sz, now) end
     end
@@ -4085,7 +5032,22 @@ function refresh()
     local qk = FX.queueKeyFor(it)
     local q = FX.readQueue(qk)
     it.queue = core.queueDepth(q)
-    if not drained and not it.stale and core.shouldFeed(pv and pv.status, it.status, q, autofeed) then
+    -- 4c-E routing bookkeeping: retire a satisfied/expired in-flight marker,
+    -- collect project membership for the post-loop dispatcher, and badge armed
+    -- projects. An ARMED project skips the per-tile 4b autofeed below -- the
+    -- single dispatcher owns its feeds (otherwise the finisher's edge-feed and
+    -- the router could both fire in one tick).
+    if core.routePendingDone(routePending[it.key], it.status, now, core.ROUTE_PENDING_TIMEOUT) then
+      routePending[it.key] = nil
+    end
+    it.routed = core.queueRouted(q) or nil  -- armed flag (file truth; toggle state)
+    local routedHere = routingOn and it.routed or false
+    if routingOn then
+      routeGroups[qk] = routeGroups[qk] or {}
+      table.insert(routeGroups[qk], it)
+    end
+    if not drained and not it.stale and not it.remote and not routedHere
+       and core.shouldFeed(pv and pv.status, it.status, q, autofeed) then
       if queueDry then
         local task = core.queuePop(q)
         print("[cc-queue] DRY-RUN would feed '" .. tostring(task) .. "' to " .. it.name)
@@ -4124,6 +5086,10 @@ function refresh()
       if not nowEsc then
         nowEsc = true
         print("[cc-escalate] " .. it.name .. " waiting > " .. escMin .. "m")
+        -- One ledger event per escalation episode -> feeds the 🔔 notification
+        -- history ("what fired while you were away"). No-op when the ledger is off.
+        ledgerFor(it, { type = "escalation", minutes = escMin,
+          summary = (it.pending and it.pending.summary) or nil })
         if escSound then FX.playSound() end
         if escPush then
           FX.push(escTopic, "Claude Shepherd: " .. it.name .. " needs you",
@@ -4142,6 +5108,8 @@ function refresh()
       if w and not w.alerted then
         w.alerted = true
         print("[cc-watchdog] " .. it.name .. " stalled (no progress > " .. hungMin .. "m)")
+        -- One ledger event per stall episode (🔔 notification history).
+        ledgerFor(it, { type = "hung", minutes = hungMin })
         if escSound then FX.playSound() end
         if escPush then FX.push(escTopic, "Claude Shepherd: " .. it.name .. " stalled",
           "No transcript progress for over " .. hungMin .. " min while working") end
@@ -4158,11 +5126,12 @@ function refresh()
     -- write). Compute respawnSpec first so cc-core can charge the budget ONLY on a real
     -- relaunch (an un-respawnable death shouldn't burn a retry). respawnSpec is pure
     -- and cheap, and only computed while the feature is on.
-    local rs = autoRespawnOn and core.respawnSpec(it, cfg) or nil
+    local rs = (autoRespawnOn and not it.remote) and core.respawnSpec(it, cfg) or nil
     local step = core.stepAutoRespawn(respawnAttempts, it, {
       -- never auto-relaunch a session frozen on an API error: the user resumes it with
-      -- Continue (same session/context), not a fresh respawn.
-      enabled = autoRespawnOn and it.status ~= "error", maxRetries = autoRespawnMax,
+      -- Continue (same session/context), not a fresh respawn. Remote tiles are
+      -- never respawned (the relaunch would target a LOCAL editor window).
+      enabled = autoRespawnOn and it.status ~= "error" and not it.remote, maxRetries = autoRespawnMax,
       intentional = (draining[it.key] ~= nil) or drained,
       -- nil pv = NO prior observation (first refresh after a reload, prev is in-memory):
       -- treat it as already-frozen so a reload can't mass-fire a "fresh" edge for every
@@ -4190,9 +5159,86 @@ function refresh()
   end
   prev = newPrev
 
+  -- 4c-E project routing dispatcher: ONE feed per armed project per tick, to
+  -- whichever member is free (done, not stale/error/draining/pending). Runs
+  -- AFTER the tile loop so it sees every member's final status this tick --
+  -- two sessions finishing simultaneously yield exactly one deterministic
+  -- pick. The pop stays inside the dispatchSerialized slot and delivery-gated
+  -- (same contract as 4b); a skipped paste clears the pending marker so the
+  -- session stays eligible.
+  if routingOn then
+    for qk, members in pairs(routeGroups) do
+      local q = FX.readQueue(qk)
+      local pick = core.routeTask(members, q, { globalOn = true, draining = draining,
+        pending = routePending, now = now, pendingTimeout = core.ROUTE_PENDING_TIMEOUT })
+      if pick then
+        starvedSince[qk] = nil; starvedAlerted[qk] = nil
+        local item
+        for _, m in ipairs(members) do if m.key == pick.key then item = m; break end end
+        if item then
+          if queueDry then
+            local task = core.queuePop(q)
+            print("[cc-route] DRY-RUN would feed '" .. tostring(task) .. "' to " .. tostring(item.name))
+          else
+            routePending[item.key] = now
+            dispatchSerialized(item, "queue-feed", function()
+              local task, q2 = core.queuePop(FX.readQueue(qk))
+              if not task then routePending[item.key] = nil; return end
+              print("[cc-route] feeding '" .. tostring(task) .. "' to " .. tostring(item.name))
+              local commit = core.queueFeedCommit(FX.feedTask(winTarget(item), task))
+              if commit.persist then
+                FX.writeQueue(qk, q2)
+              else
+                print("[cc-route] feed skipped (no window match) -- task kept queued")
+                routePending[item.key] = nil  -- session stays eligible
+              end
+              ledgerFor(item, { type = commit.event, task = tostring(task):sub(1, 200), by = "router" })
+            end)
+          end
+        end
+      elseif core.queueRouted(q) and core.queueDepth(q) > 0 then
+        -- Armed + work queued + nobody free: starvation clock. One ledger event
+        -- + tile tint per episode when queue.routing.starveMinutes > 0.
+        starvedSince[qk] = starvedSince[qk] or now
+        if core.queueStarved(members, q, { minutes = starveMin, sinceTs = starvedSince[qk],
+             now = now, draining = draining, pending = routePending }) then
+          for _, m in ipairs(members) do m.starved = true end
+          if not starvedAlerted[qk] then
+            starvedAlerted[qk] = true
+            print("[cc-route] " .. qk .. " starved: " .. core.queueDepth(q)
+              .. " task(s) queued, no free session for " .. starveMin .. "m+")
+            ledgerFor(members[1], { type = "queue_starved", depth = core.queueDepth(q) })
+          end
+        end
+      else
+        starvedSince[qk] = nil; starvedAlerted[qk] = nil
+      end
+    end
+  end
+
   -- Errored tiles were detected mid-loop (status overridden to "error"); re-sort so they
   -- surface near approvals -- parseStatusList sorted before we'd read any transcript.
   core.sortByStatus(list)
+
+  -- 🔔 unseen-notification badge. The snapshot scan is the same cheap attributes
+  -- pass risk scoring pays; the filter only reruns when the snapshot actually
+  -- re-read (changed) or the badge was never pushed, and JS is only poked when
+  -- the count moved.
+  if ledgerOn then
+    if ledgerChanged or lastNotifyCount < 0 then
+      local days = tonumber(core.config(cfg, "notifications.days", 7)) or 7
+      local lastSeen = tonumber(hs.settings.get("ccNotifySeen")) or 0
+      local n = core.unseenNotificationCount(
+        core.notificationEvents(ledgerEvents, { sinceTs = now - days * 86400 }), lastSeen)
+      if n ~= lastNotifyCount then
+        lastNotifyCount = n
+        pcall(function() wv:evaluateJavaScript("setNotifyBadge(" .. tostring(n) .. ")") end)
+      end
+    end
+  elseif lastNotifyCount ~= 0 then
+    lastNotifyCount = 0
+    pcall(function() wv:evaluateJavaScript("setNotifyBadge(0)") end)
+  end
 
   FX.writeFile(HEARTBEAT, tostring(now))
   sd.blink = not sd.blink

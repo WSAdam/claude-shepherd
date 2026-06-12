@@ -70,7 +70,7 @@ network, no multi-user, no secrets — it reads session status off the local fil
 - Typical change: add a pure cc-core function + its regression test → wire it into the
   dashboard → mirror in the panel JS if it affects rendering (and note the twin).
 
-## State (2026-06-11)
+## State (2026-06-12)
 
 Cross-machine / controls roadmap done. Fleet-scale console shipped (tile search, session
 groups, bulk fleet actions, per-session timeline, auto-respawn, insights sparklines,
@@ -79,7 +79,12 @@ API error and offers a one-click **Continue** to resume them — derived client-
 transcript tail (`core.transcriptError`), no hooks. A **three-round multi-agent scan**
 (per-flow finders → adversarial verifiers → engineer fixes, June 2026) fixed 46 verified
 bugs and hardened the gate IPC (nonce-bound decisions), autonomy loops (600s frozen
-threshold), and keystroke delivery (skip-on-no-match + serialized dispatch). Suite:
-**795 core + 167 ui + 167 bash** checks, all green. Remaining work is in
-[todos.md](todos.md) (4c-E project routing is the main deferred piece; the feature
-roadmap from the scan lives there too).
+threshold), and keystroke delivery (skip-on-no-match + serialized dispatch). The scan's
+**feature roadmap then shipped in full** (June 12): Settings UI for the dark config,
+per-session gate decision log, 🔔 notification history, queue editing/bulk-paste/templates,
+spawn presets + fd fuzzy folder search, 🔎 rg-backed fleet-wide transcript/ledger search,
+**4c-E project routing** (level-triggered dispatcher, double opt-in), and the **SSH status
+bridge** (rsync-mirrored ⇄ remote tiles, headless approve/deny over ssh — hardware
+verification checklist pending). Suite: **1062 core + 167 ui + 167 bash** checks, all
+green. Remaining work is in [todos.md](todos.md) (Kitty token verify + the bridge's
+real-box checklist + routing follow-ups).

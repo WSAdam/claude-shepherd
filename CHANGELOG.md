@@ -4,6 +4,77 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-12 — Feature roadmap shipped: all 7 items + 4c-E project routing
+
+The June 2026 scan's whole gap-analysis roadmap, in one pass. External-tool stance
+throughout: detect → use → degrade gracefully (`rg`/`fd` are auto-detected accelerators;
+`jq` stays the only hard dependency). Suite grew 795 → **1062 core** checks (+167 ui,
++167 bash), all green.
+
+### Added — visibility (pure reads of data we already had)
+- **Per-session gate decision log** in the detail panel: the last N gate decisions,
+  grouped ("⛔ deny Bash ×4 (autoDeny: Bash(rm*)) · 2m ago") via `core.gateDecisionSummary`.
+  Loads on tile selection and on the selected tile's status transitions — never on the
+  1s tick. Config: `decisions.limit`/`decisions.hours`.
+- **Notification history** (🔔 top-bar button + unseen badge): escalation and
+  stuck-session alerts now write ledger events at fire time (`escalation`/`hung` — add
+  them to `ledger.captureTypes` if you've customized it); together with `auto_respawn`
+  and non-human `decision` events they feed a new **Alerts** tab in the audit overlay,
+  with a "since you last looked" highlight (`hs.settings` last-seen mark). The badge
+  recomputes only when the cached ledger snapshot actually changed.
+- **Fleet-wide transcript/ledger search** (🔎): "which session touched auth.ts?" across
+  every session's transcript JSONL (live and dead) + the ledger. ripgrep when installed,
+  BSD-grep fallback — both built as `-o` context-wrapped literal matches so multi-KB
+  JSONL lines never reach the panel. Async `hs.task` with terminate-on-new-query + a
+  generation guard; hits select live tiles (with Jump) or open a dead session's audit
+  timeline.
+
+### Added — operator ergonomics
+- **Settings UI for the dark config**: risk (enabled + thresholds; a hand-edited
+  `risk.weights` now survives Settings saves via `SETTINGS_KEEP_SUBKEYS`), collision,
+  drain, respawn (manual + auto incl. `staleSeconds`), and `insights.maxBlockSeconds`
+  are all editable in ⚙. Pattern-syntax hints under the auto-allow/deny textareas.
+- **Queue upgrades**: "Queue: N" opens an inline editor — reorder (▲▼) and remove (✕),
+  every edit guarded by the clicked task text (`expect`) so the 1s autofeed race can
+  never move/delete the wrong task, and every reply pushes the fresh list. Multi-line
+  paste into Queue auto-splits into one task per line (`core.queueSplitLines`: CRLF,
+  bullets, blanks — confirm first). Saved task templates ("Tpl ▾", `cc-templates.json`)
+  insert into the input, never auto-send.
+- **Spawn presets + fuzzy folder search** in the New Session modal: ▶ preset chips
+  (one-click spawn of folder+editor+mode+provider, `cc-presets.json`), "Save as preset",
+  per-project last-used recall, and type-ahead folder suggestions — the project roots
+  (`spawn.searchRoots`, default ~/Programming) are scanned once per modal open (fd when
+  installed: gitignore-aware; else find) and ranked by pure `core.fuzzyFilter`.
+
+### Added — orchestration
+- **4c-E project routing** (the orchestrator doc's last deferred piece): arm a project
+  (detail-panel "route" toggle writes `routing:true` into its queue file) AND enable
+  `queue.routing.enabled`, and queued tasks feed **whichever session of that project is
+  free** — done-only in v1 (an idle session may be one you're typing into). Level-
+  triggered single dispatcher (one feed per project per tick), `routePending` in-flight
+  guard with timeout, delivery-gated pops, `by:"router"` ledger events, dry-run honored,
+  optional starvation flag (`queue.routing.starveMinutes` → ⌛ + one ledger event).
+  Every queue rebuild now carries the arm flag (`qkeep`) — a routed feed popping the
+  queue can't disarm its own project.
+- **SSH status bridge** (Phase 2): with `bridge.enabled` and an ssh provider, a per-host
+  timer rsync-pulls the remote `~/.claude/cc-status/` into `~/.claude/cc-status-mirror/
+  <host>/` and merges those sessions as **⇄ remote tiles** with `host:`-namespaced keys
+  (projectKey namespaced too, so a same-path clone can't share queues/labels/budgets).
+  Remote tiles are **headless-only**: Approve/Deny route back over ssh as nonce-bound,
+  injection-guarded decision files (`core.decisionSshArgv`); keystroke actions are
+  disabled (loud refusal, reduced right-click menu), and autofeed/watchdog/auto-respawn/
+  collision all skip remote tiles while stale-approval escalation stays on. Staleness is
+  widened by `bridge.staleSlackSeconds`; a stalled sync shows "bridge offline" distinctly.
+  End-to-end verification needs a real remote box — checklist in todos.md.
+
+### Changed
+- `riskLedgerEvents()` generalized to `ledgerSnapshot()` (returns `events, changed`) and
+  shared by risk scoring, the decision log, and the 🔔 badge — still one cached parse.
+- `core.selectActionable` now takes remote tiles into account: bulk Approve reaches a
+  waiting remote gate; bulk Stop/Nudge never target remote tiles. `core.actionIsHeadless`
+  returns true for remote tiles (they never focus a local window).
+- `core.sshDest` extracted as the single user@host formatter (sshWrap/spawnSpec/bridge).
+
 ## 2026-06-11 — Three-round full-project scan: 46 verified bugs fixed
 
 Three rounds of flow-by-flow multi-agent auditing (8 finders per round, every finding
