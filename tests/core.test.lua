@@ -1135,6 +1135,23 @@ do
   eq("newProjectPath: empty parent -> nil", core.newProjectPath("", "x"), nil)
   eq("newProjectPath: relative parent -> nil", core.newProjectPath("rel/path", "x"), nil)
   eq("newProjectPath: root parent ok", core.newProjectPath("/", "x"), "/x")
+
+  -- The rejection REASON comes from the validator (single source of truth for
+  -- the panel's alert): assert the right branch fires with the right value, so
+  -- the alert can never blame the parent for a bad name or vice versa.
+  local _, whyName = core.newProjectPath("/ok/parent", "bad/name")
+  check("newProjectPath: bad-name reason names the name",
+    whyName:find('"bad/name"', 1, true) ~= nil and whyName:find("unsupported characters", 1, true) ~= nil)
+  check("newProjectPath: bad-name reason does NOT blame the parent",
+    whyName:find("absolute path", 1, true) == nil)
+  local _, whyParent = core.newProjectPath("rel/path", "good-name")
+  check("newProjectPath: relative-parent reason names the parent",
+    whyParent:find('"rel/path"', 1, true) ~= nil and whyParent:find("absolute path", 1, true) ~= nil)
+  check("newProjectPath: relative-parent reason does NOT blame the name",
+    whyParent:find("unsupported characters", 1, true) == nil)
+  local okPath, noWhy = core.newProjectPath("/ok", "fine")
+  eq("newProjectPath: success has no reason", noWhy, nil)
+  eq("newProjectPath: success path intact", okPath, "/ok/fine")
 end
 
 -- ---- Part A: kittyCmd argv builder + kittyKeyToken -------------------------

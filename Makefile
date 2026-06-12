@@ -34,14 +34,14 @@ reload:
 .PHONY: deploy
 deploy: test install reload
 
-# Build the standalone Shepherd.app Dock launcher (F6). osacompile generates the
-# bundle from app/Shepherd.applescript (no binary committed); make-icon.sh installs
-# a sheep icon (best-effort). Drag the result to your Dock; clicking toggles the panel.
+# Build the standalone Shepherd.app Dock launcher (F6). Hand-rolled bundle (a
+# shell stub that opens the hammerspoon:// toggle URL) — NOT an osacompile
+# applet: applets share the "applet" executable/icon names and ship Assets.car
+# + no bundle id, which left macOS's icon cache permanently stuck on the
+# generic applet icon. make-icon.sh installs the shepherd icon (best-effort).
 .PHONY: app
 app:
-	@rm -rf "$(APP_DIR)/Shepherd.app"
-	@osacompile -o "$(APP_DIR)/Shepherd.app" app/Shepherd.applescript
-	@bash app/make-icon.sh "$(APP_DIR)/Shepherd.app" || true
+	@bash app/build-app.sh "$(APP_DIR)/Shepherd.app"
 	@echo "✅ built $(APP_DIR)/Shepherd.app — drag it to your Dock (first open: right-click → Open)"
 
 # Pin Shepherd.app to the Dock (idempotent; builds the app first if missing). The

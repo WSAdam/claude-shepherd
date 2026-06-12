@@ -3237,14 +3237,24 @@ function M.safeFolderName(name)
   return name
 end
 
--- Full path for a new project under `parent`, or nil if the name is unsafe or
--- the parent isn't an ABSOLUTE path. A relative result is never right: mkdir
--- would resolve it against Hammerspoon's process cwd while the spawned shell's
--- `cd` resolves it against $HOME -- folder created one place, session elsewhere.
+-- Full path for a new project under `parent`, or nil, reason when rejected
+-- (unsafe name / non-absolute parent). The REASON comes from here -- the one
+-- place that runs the checks -- so the UI's rejection alert can never disagree
+-- with the check that actually fired (re-deriving it at the call site
+-- mislabels any future rejection path). A relative parent is never right:
+-- mkdir would resolve it against Hammerspoon's process cwd while the spawned
+-- shell's `cd` resolves it against $HOME -- folder created one place, session
+-- elsewhere.
 function M.newProjectPath(parent, name)
   local safe = M.safeFolderName(name)
-  if not safe then return nil end
-  if M.normDir(parent):sub(1, 1) ~= "/" then return nil end
+  if not safe then
+    return nil, "project name " .. string.format("%q", tostring(name or ""))
+      .. " is empty or has unsupported characters (letters/digits/-_. and spaces only)"
+  end
+  if M.normDir(parent):sub(1, 1) ~= "/" then
+    return nil, "parent folder " .. string.format("%q", tostring(parent or ""))
+      .. " must be an absolute path — pick a suggestion, a Recent chip, or Browse to it"
+  end
   return M.pathJoin(parent, safe)
 end
 

@@ -64,23 +64,20 @@ for s in 16 32 128 256 512; do
   d=$((s * 2))
   sips -z "$d" "$d" "$png" --out "$set/icon_${s}x${s}@2x.png" >/dev/null
 done
-iconutil -c icns "$set" -o "$TMP/applet.icns"
-cp "$TMP/applet.icns" "$APP/Contents/Resources/applet.icns"
-# macOS 11+: osacompile applets ship an Assets.car asset catalog and point
-# CFBundleIconName at it, which OVERRIDES Resources/applet.icns -- the swapped
-# icon never showed (field-proven: generic applet icon in the Dock). Drop the
-# catalog + the IconName key so CFBundleIconFile -> applet.icns wins.
+# Install under the bundle's DECLARED icon name (CFBundleIconFile): the
+# hand-rolled bundle uses "shepherd" -- deliberately NOT "applet", the name
+# every osacompile applet on the system shares, which macOS's icon cache
+# lumps together (field-proven: the generic applet icon survived rebuilds,
+# a fresh bundle id, lsregister, re-pins, and Dock restarts).
+ICON_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$APP/Contents/Info.plist" 2>/dev/null || echo applet)"
+ICON_NAME="${ICON_NAME%.icns}"
+iconutil -c icns "$set" -o "$TMP/icon.icns"
+cp "$TMP/icon.icns" "$APP/Contents/Resources/${ICON_NAME}.icns"
+# Legacy applet-bundle cleanup (no-ops on the hand-rolled bundle): Assets.car +
+# CFBundleIconName override the .icns; applets also ship no bundle identifier.
 rm -f "$APP/Contents/Resources/Assets.car"
 /usr/libexec/PlistBuddy -c "Delete :CFBundleIconName" "$APP/Contents/Info.plist" 2>/dev/null || true
-# osacompile also emits NO CFBundleIdentifier, so iconservices caches the icon
-# under a derived identity that survives rebuilds + Dock restarts (field-proven:
-# the generic icon outlived make app / lsregister / killall Dock). A real,
-# app-specific bundle id gives it a clean cache identity.
 /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string com.claude-shepherd.launcher" \
-  "$APP/Contents/Info.plist" 2>/dev/null \
-  || /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier com.claude-shepherd.launcher" \
-       "$APP/Contents/Info.plist" 2>/dev/null || true
-# Ad-hoc re-sign (the plist/Resources edits broke the applet's signature seal).
-codesign --force --deep -s - "$APP" >/dev/null 2>&1 || true
+  "$APP/Contents/Info.plist" 2>/dev/null || true
 touch "$APP"
-echo "✅ installed shepherd icon into $APP"
+echo "✅ installed shepherd icon into $APP (Resources/${ICON_NAME}.icns)"

@@ -1160,6 +1160,23 @@ local function after(delay, fn)
   return pendingTimers[id]
 end
 
+-- Schedule a flat list of { delay, fn } beats, each delay RELATIVE to the
+-- previous beat. Replaces nested after() pyramids for keystroke ladders whose
+-- steps have no data dependency -- the timings become one tunable column.
+-- Every beat runs in its own pcall: one failed beat logs and the remaining
+-- beats still fire (deliberately NOT one chain-wide pcall, which would abort
+-- the rest of the ladder on a mid-beat throw).
+local function runSequence(steps)
+  local t = 0
+  for i, s in ipairs(steps or {}) do
+    t = t + (tonumber(s.delay) or 0)
+    after(t, function()
+      local ok, err = pcall(s.fn)
+      if not ok then print("[cc-seq] beat " .. i .. " failed: " .. tostring(err)) end
+    end)
+  end
+end
+
 -- Absolute deadline (epoch s) of the LAST scheduled window-keystroke injection
 -- chain. Module-level so the BULK_STAGGER serialization holds across bridge
 -- messages, not just within one: a second bulk click -- or a single window
@@ -1375,35 +1392,37 @@ local function spawnEditorWindow(spec)
   local name = proj and proj:match("([^/]+)/?$") or nil
   -- Cold-start timing: a NEW window (the new-project case) takes seconds to be
   -- palette-ready, and the integrated terminal's shell takes more to accept
-  -- input. The old 2.0/0.35/0.6 ladder typed into the void on cold starts --
-  -- field-verified failure. Each step logs so a miss is diagnosable in the
-  -- console instead of silent.
-  after(3.0, function() pcall(function()
-    -- The just-opened window may not be titled yet: activating the app on a
-    -- title miss IS the desired behavior here (the keystrokes must land in it).
-    focusProject(name, proj, nil, true)
-    after(0.8, function()
-      -- New integrated terminal via the Command Palette (more reliable than ⌃`,
-      -- which would hide an already-open terminal).
-      print("[cc-orch] vscode: opening command palette")
-      hs.eventtap.keyStroke({ "cmd", "shift" }, "p")
-      after(0.6, function()
-        hs.eventtap.keyStrokes("Terminal: Create New Terminal")
-        after(0.4, function()
-          print("[cc-orch] vscode: creating integrated terminal")
-          hs.eventtap.keyStroke({}, "return")
-          after(2.0, function()
-            print("[cc-orch] vscode: typing claude launch line: " .. tostring(spec.postType))
-            hs.eventtap.keyStrokes(spec.postType)
-            after(0.3, function()
-              hs.eventtap.keyStroke({}, "return")
-              print("[cc-orch] vscode: launch line submitted")
-            end)
-          end)
-        end)
-      end)
-    end)
-  end) end)
+  -- input (the old 2.0/0.35/0.6 ladder typed into the void -- field-verified).
+  -- The beats are a flat {delay, fn} list (delays are RELATIVE to the previous
+  -- beat) so the timings read as one tunable column instead of a callback
+  -- pyramid. Each beat gets its own pcall: one failed beat logs and the rest
+  -- still fire. Each logs so a miss is diagnosable in the console.
+  runSequence({
+    { delay = 3.0, fn = function()
+        -- The just-opened window may not be titled yet: activating the app on a
+        -- title miss IS the desired behavior (the keystrokes must land in it).
+        focusProject(name, proj, nil, true)
+      end },
+    { delay = 0.8, fn = function()
+        -- New integrated terminal via the Command Palette (more reliable than
+        -- ⌃`, which would hide an already-open terminal).
+        print("[cc-orch] vscode: opening command palette")
+        hs.eventtap.keyStroke({ "cmd", "shift" }, "p")
+      end },
+    { delay = 0.6, fn = function() hs.eventtap.keyStrokes("Terminal: Create New Terminal") end },
+    { delay = 0.4, fn = function()
+        print("[cc-orch] vscode: creating integrated terminal")
+        hs.eventtap.keyStroke({}, "return")
+      end },
+    { delay = 2.0, fn = function()
+        print("[cc-orch] vscode: typing claude launch line: " .. tostring(spec.postType))
+        hs.eventtap.keyStrokes(spec.postType)
+      end },
+    { delay = 0.3, fn = function()
+        hs.eventtap.keyStroke({}, "return")
+        print("[cc-orch] vscode: launch line submitted")
+      end },
+  })
 end
 
 -- Short human-readable description of a spawn spec, for dry-run logging.
@@ -1667,22 +1686,15 @@ local function handleBridgeMsg(msg)
     local task   = payload.text and tostring(payload.text) or nil
     local dir
     if mode == "new" then
-      local parent = expandHome(payload.parent)
-      local name2 = tostring(payload.name or "")
-      dir = core.newProjectPath(parent, name2)
+      local parentDir = expandHome(payload.parent)
+      local projName = tostring(payload.name or "")
+      local why
+      dir, why = core.newProjectPath(parentDir, projName)
       if not dir then
-        -- nil = unsafe name OR a blank/relative parent (newProjectPath rejects both;
-        -- a relative dir would mkdir against Hammerspoon's cwd but cd against $HOME).
-        -- Say WHICH, with the values, in the console AND the alert -- a bare
-        -- "invalid" popup was field-proven undiagnosable.
-        local why
-        if not core.safeFolderName(name2) then
-          why = "project name " .. string.format("%q", name2)
-            .. " is empty or has unsupported characters (letters/digits/-_. and spaces only)"
-        else
-          why = "parent folder " .. string.format("%q", tostring(parent))
-            .. " must be an absolute path — pick a suggestion, a Recent chip, or Browse to it"
-        end
+        -- The rejection reason comes from the validator itself (single source
+        -- of truth) -- a bare "invalid" popup was field-proven undiagnosable,
+        -- and re-deriving the reason here could mislabel future checks.
+        why = why or "invalid project name or parent folder"
         print("[cc-orch] new-project rejected: " .. why)
         pcall(function() hs.alert.show("Claude Shepherd: " .. why) end)
         return

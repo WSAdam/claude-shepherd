@@ -91,8 +91,9 @@ else
   echo "✅ dofile already in $INIT"
 fi
 
-# 4. Build the Dock launcher (skipped in tests / when osacompile is absent).
-if [ -z "${CC_INSTALL_NO_APP:-}" ] && command -v osacompile >/dev/null 2>&1; then
+# 4. Build the Dock launcher (skipped in tests). Hand-rolled bundle -- no
+# osacompile dependency (see app/build-app.sh for why applets were dropped).
+if [ -z "${CC_INSTALL_NO_APP:-}" ]; then
   make -C "$HERE" app || echo "⚠️  Shepherd.app build skipped"
 fi
 
