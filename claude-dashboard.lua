@@ -733,12 +733,20 @@ function FX.writePresets(state)
   FX.writeFile(PRESET_FILE, core.json.encode(state or { presets = {}, lastByProject = {} }))
 end
 
--- Create a project folder (F3). One level under an existing parent (the browsed
--- dir). An existing path is treated as success ("use existing").
+-- Create a project folder (F3), with real `mkdir -p` semantics: every missing
+-- component on the way down is created (hs.fs.mkdir is single-level, which made
+-- "Start new project" fail whenever the typed parent didn't exist yet -- e.g.
+-- a fresh ~/Programming/Dialer holding the new Dialer-scraper). Walks the
+-- tested core.breadcrumbs prefixes. An existing path is success ("use existing").
 function FX.mkdirP(path)
   if not path or path == "" then return false end
   if hs.fs.attributes(path) then return true end
-  return hs.fs.mkdir(path) and true or false
+  for _, c in ipairs(core.breadcrumbs(path)) do
+    if c.path ~= "/" and not hs.fs.attributes(c.path) then
+      if not hs.fs.mkdir(c.path) then return false end
+    end
+  end
+  return hs.fs.attributes(path) ~= nil
 end
 
 -- Resolve a binary to an absolute path (hs.task does NOT search PATH). Prefers a
@@ -1396,6 +1404,24 @@ local function describeSpec(spec)
   return spec.applescript
 end
 
+-- Resolve `claude` to an absolute path for spawns. Bare `claude` breaks where
+-- the spawned context's PATH/aliases don't carry it -- proven in the VS Code
+-- integrated terminal (`zsh: command not found: claude`; the usual install is
+-- an ~/.zshrc alias to ~/.claude/local/claude, invisible to that typed line).
+-- Order: spawn.claudeBin (hand-edit override, survives Settings saves) ->
+-- resolveBin (login-shell `command -v` resolves the alias value + homebrew
+-- dirs) -> the known install homes. nil = unresolved; spawnSpec then keeps the
+-- legacy bare word (which still works for Terminal's login shell).
+local function claudeBinPath()
+  local bin = resolveBin("claude", core.config(loadConfig(), "spawn.claudeBin", nil))
+  if bin and bin ~= "claude" and hs.fs.attributes(bin) then return bin end
+  local home = os.getenv("HOME") or ""
+  for _, p in ipairs({ home .. "/.claude/local/claude", home .. "/.local/bin/claude" }) do
+    if hs.fs.attributes(p) then return p end
+  end
+  return nil
+end
+
 -- Spawn a new Claude session, editor-aware (F3-F5). The editor comes from the
 -- caller (the modal's picker) or falls back to `spawn.editor` in config. Effective
 -- dry-run = the code default ORCH_DRY_RUN unless the user flips `spawn.live` on.
@@ -1415,6 +1441,7 @@ function FX.spawnSession(editor, project, task, permissionMode, providerId)
     permissionMode = (permissionMode and permissionMode ~= "") and permissionMode or nil,
     env            = profile and core.providerEnv(profile) or nil,  -- carries ANTHROPIC_MODEL
     ssh            = profile and type(profile.ssh) == "table" and profile.ssh or nil,
+    claudeBin      = claudeBinPath(),  -- absolute path; nil keeps the bare word
   }
   local spec = core.spawnSpec(editor, project, task, opts)
   if profile then print("[cc-orch] provider: " .. tostring(profile.id)
@@ -1607,12 +1634,19 @@ local function handleBridgeMsg(msg)
   if a == "spawn" then
     -- From the in-panel modal (carries mode + dir/parent+name + editor); with no
     -- usable dir we fall back to the native two-prompt flow (also the ⌘⌥S path).
+    -- A typed "~/..." path is expanded here (the browser/listDirs already does);
+    -- newProjectPath would otherwise reject it as relative.
+    local function expandHome(p)
+      p = tostring(p or "")
+      if p:sub(1, 1) == "~" then return (os.getenv("HOME") or "") .. p:sub(2) end
+      return p
+    end
     local mode   = tostring(payload.mode or "")
     local editor = payload.editor and tostring(payload.editor) or nil
     local task   = payload.text and tostring(payload.text) or nil
     local dir
     if mode == "new" then
-      dir = core.newProjectPath(tostring(payload.parent or ""), tostring(payload.name or ""))
+      dir = core.newProjectPath(expandHome(payload.parent), tostring(payload.name or ""))
       if not dir then
         -- nil = unsafe name OR a blank/relative parent (newProjectPath rejects both;
         -- a relative dir would mkdir against Hammerspoon's cwd but cd against $HOME)
@@ -1624,7 +1658,7 @@ local function handleBridgeMsg(msg)
         return
       end
     elseif mode == "existing" then
-      dir = payload.dir and tostring(payload.dir) or ""
+      dir = payload.dir and expandHome(payload.dir) or ""
     end
     if not dir or dir == "" then
       spawnPrompt()  -- no dir from the modal -> native fallback
@@ -3891,6 +3925,13 @@ local HTML = [[
     function pickRecent(dir){ document.getElementById("n-path").value = dir; applyLastUsed(dir); browseTo(dir); }
     function submitNew(){
       var path = (document.getElementById("n-path").value || "").trim();
+      // Browsed to a folder but never clicked "Use this folder"? Use it anyway —
+      // an empty path otherwise silently falls back to the native prompts.
+      if(!path && browsePath){ path = browsePath; }
+      if(newMode === "new" && !(document.getElementById("n-name").value || "").trim()){
+        alert("Name the new project folder first (it's created inside " + (path || "the chosen folder") + ").");
+        return;
+      }
       var name = (document.getElementById("n-name").value || "").trim();
       var task = (document.getElementById("n-task").value || "").trim();
       var editor = document.getElementById("n-editor").value;

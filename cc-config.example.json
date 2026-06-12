@@ -69,7 +69,7 @@
   },
 
   "spawn": {
-    "_comment": "The + New / New project launcher. editor: terminal | kitty | vscode | cursor. live=false is a dry-run (logs what it would launch, spawns nothing). Kitty/Terminal spawn reliably; VS Code/Cursor open the window then best-effort type `claude` in a new integrated terminal. kittyAutoRemote enables remote control in your kitty.conf when Kitty is in use (so kitty @ effects work). provider = id of a profile in `providers` to launch new sessions against (empty = bare `claude`, default Anthropic). searchRoots/searchDepth/fdBin drive the modal's fuzzy folder search: roots scanned once per modal open (default ~/Programming) to searchDepth, with fd when installed (gitignore-aware) else find. These three survive Settings saves (hand-edit keys).",
+    "_comment": "The + New / New project launcher. editor: terminal | kitty | vscode | cursor. live=false is a dry-run (logs what it would launch, spawns nothing). Kitty/Terminal spawn reliably; VS Code/Cursor open the window then best-effort type the claude launch line in a new integrated terminal. kittyAutoRemote enables remote control in your kitty.conf when Kitty is in use (so kitty @ effects work). provider = id of a profile in `providers` to launch new sessions against (empty = bare `claude`, default Anthropic). claudeBin optionally pins the absolute claude path; left empty Shepherd auto-resolves it (login-shell command -v, then ~/.claude/local/claude and ~/.local/bin/claude) so spawned terminals whose PATH lacks `claude` (VS Code's integrated terminal) still launch. searchRoots/searchDepth/fdBin drive the modal's fuzzy folder search: roots scanned once per modal open (default ~/Programming) to searchDepth, with fd when installed (gitignore-aware) else find. claudeBin + these three survive Settings saves (hand-edit keys).",
     "editor": "terminal",
     "live": false,
     "kittyRemote": true,
@@ -77,6 +77,7 @@
     "kittyBin": "",
     "kittySocket": "",
     "provider": "",
+    "claudeBin": "",
     "searchRoots": [],
     "searchDepth": 4,
     "fdBin": ""

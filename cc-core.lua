@@ -2075,7 +2075,7 @@ end
 -- avoided: array-valued keys (providers, policies.patterns.*) must be REPLACED,
 -- not index-merged. Mutates + returns cfg.
 M.SETTINGS_KEEP_SUBKEYS = {
-  spawn = { "kittyBin", "kittySocket", "searchRoots", "searchDepth", "fdBin" },
+  spawn = { "kittyBin", "kittySocket", "searchRoots", "searchDepth", "fdBin", "claudeBin" },
   escalation = { "hung" },
   risk = { "weights" },
   bridge = { "staleSlackSeconds", "keystrokes" },
@@ -2514,14 +2514,32 @@ function M.remoteActionAllowed(item, action, opts)
   return false
 end
 
+-- How `claude` is referenced in a SHELL-STRING spawn. A bare `claude` breaks in
+-- terminals whose PATH/aliases don't carry it (the VS Code integrated terminal
+-- is the proven case: `zsh: command not found: claude` -- the alias lives in an
+-- interactive zsh's rc, which that typed command line may not have). When the
+-- caller resolved an absolute path (FX.claudeBin), embed it single-quoted
+-- (paths can contain spaces); nil keeps the legacy bare word.
+local function claudeRef(claudeBin)
+  if claudeBin and tostring(claudeBin) ~= "" and tostring(claudeBin) ~= "claude" then
+    return shquote(claudeBin)
+  end
+  return "claude"
+end
+
 -- The shell command run INSIDE the spawned terminal:
 --   cd <project> && [ENV=... ] claude [flags] [prompt]
--- opts: { env = providerEnv list, flags = spawnFlags list, ssh = {host,user} }. All
--- optional; with none, the output is exactly the original `cd <p> && claude [prompt]`.
--- With ssh, the whole thing is wrapped in `ssh -t <dest> '<inner>'` (remote harness).
+-- opts: { env = providerEnv list, flags = spawnFlags list, ssh = {host,user},
+-- claudeBin = locally-resolved absolute path }. All optional; with none, the
+-- output is exactly the original `cd <p> && claude [prompt]`. With ssh, the
+-- whole thing is wrapped in `ssh -t <dest> '<inner>'` (remote harness) and
+-- claudeBin is IGNORED -- the remote box resolves its own `claude`; a local
+-- absolute path would be wrong there.
 function M.spawnInner(project, prompt, opts)
   opts = opts or {}
-  local inner = "cd " .. shquote(project or ".") .. " && " .. M.envPrefix(opts.env) .. "claude"
+  local isSsh = type(opts.ssh) == "table" and opts.ssh.host and tostring(opts.ssh.host) ~= ""
+  local bin = isSsh and "claude" or claudeRef(opts.claudeBin)
+  local inner = "cd " .. shquote(project or ".") .. " && " .. M.envPrefix(opts.env) .. bin
   for _, f in ipairs(opts.flags or {}) do inner = inner .. " " .. f end
   if prompt and #prompt > 0 then inner = inner .. " " .. shquote(prompt) end
   return M.sshWrap(inner, opts.ssh, opts.env)
@@ -2536,7 +2554,8 @@ function M.spawnAppleScript(project, prompt, opts)
   local term = opts.terminal or "Terminal"
   return "tell application " .. asquote(term)
     .. " to do script "
-    .. asquote(M.spawnInner(project, prompt, { env = opts.env, flags = opts.flags, ssh = opts.ssh }))
+    .. asquote(M.spawnInner(project, prompt, { env = opts.env, flags = opts.flags,
+                                               ssh = opts.ssh, claudeBin = opts.claudeBin }))
 end
 
 -- Build claude CLI launch flags from a permission mode (+ effort, reserved). Both
@@ -2596,11 +2615,13 @@ end
 --   cursor   -> same as vscode with app="Cursor"
 --   else     -> { kind="terminal", applescript=... }        the reliable fallback
 -- opts: { terminal, kittyBin, kittyRemote(bool), kittySocket, permissionMode,
---         effort, env, shell, ssh }. env (a providerEnv list) injects provider env
---         vars (incl. ANTHROPIC_MODEL); shell (default "zsh") is the interactive
---         login shell (-lic, sources ~/.zshrc) that expands `$VAR` secrets in the
---         kitty path; ssh = {host,user} runs `claude`
---         on a remote box while the terminal window stays local (Phase 2).
+--         effort, env, shell, ssh, claudeBin }. env (a providerEnv list) injects
+--         provider env vars (incl. ANTHROPIC_MODEL); shell (default "zsh") is the
+--         interactive login shell (-lic, sources ~/.zshrc) that expands `$VAR`
+--         secrets in the kitty path; ssh = {host,user} runs `claude` on a remote
+--         box while the terminal window stays local (Phase 2); claudeBin is the
+--         locally-resolved absolute claude path (ignored for ssh -- the remote
+--         box resolves its own).
 function M.spawnSpec(editor, project, task, opts)
   opts = opts or {}
   editor = tostring(editor or ""):lower()
@@ -2632,12 +2653,15 @@ function M.spawnSpec(editor, project, task, opts)
       -- Kitty argv has no shell to expand `$VAR`, so run the inner via an
       -- INTERACTIVE login shell: `-lic` sources ~/.zshrc, the README-documented
       -- home for the authTokenEnv secret. Plain `-lc` (login, non-interactive)
-      -- skips .zshrc, expanding the secret to "" -- every gateway call 401s.
+      -- skips ~/.zshrc, expanding the secret to "" -- every gateway call 401s.
       argv[#argv + 1] = opts.shell or "zsh"
       argv[#argv + 1] = "-lic"
-      argv[#argv + 1] = M.spawnInner(project, task, { env = env, flags = flags })
+      argv[#argv + 1] = M.spawnInner(project, task, { env = env, flags = flags,
+                                                      claudeBin = opts.claudeBin })
     else
-      argv[#argv + 1] = "claude"
+      -- No shell at all here, so a PATH lookup is kitty's (launchd env, which
+      -- often lacks user bins) -- prefer the locally-resolved absolute path.
+      argv[#argv + 1] = opts.claudeBin or "claude"
       for _, f in ipairs(flags) do argv[#argv + 1] = f end
       if task then argv[#argv + 1] = task end  -- one argv element: no shell, no quoting
     end
@@ -2646,11 +2670,13 @@ function M.spawnSpec(editor, project, task, opts)
     -- Open the window; "run claude" is best-effort keystrokes into a new integrated
     -- terminal (no supported API), consistent with the project's VS Code stance. For
     -- ssh, type the full `ssh -t <dest> '<inner>'` (the remote cd handles cwd).
+    -- The integrated terminal's PATH/aliases often DON'T carry `claude` (proven:
+    -- `zsh: command not found: claude`), so type the resolved absolute path.
     local post
     if isSsh then
       post = M.spawnInner(project, task, { env = env, flags = flags, ssh = ssh })
     else
-      post = M.envPrefix(env) .. "claude"
+      post = M.envPrefix(env) .. claudeRef(opts.claudeBin)
       for _, f in ipairs(flags) do post = post .. " " .. f end
       if task then post = post .. " " .. shquote(task) end
     end
@@ -2661,7 +2687,8 @@ function M.spawnSpec(editor, project, task, opts)
   end
   return { kind = "terminal",
            applescript = M.spawnAppleScript(project, task,
-             { terminal = opts.terminal, env = env, flags = flags, ssh = ssh }) }
+             { terminal = opts.terminal, env = env, flags = flags, ssh = ssh,
+               claudeBin = opts.claudeBin }) }
 end
 
 -- ---- Kitty remote control (detect + enable) --------------------------------

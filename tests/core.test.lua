@@ -707,6 +707,39 @@ do
   eq("spawnspec(nil): falls back to terminal", core.spawnSpec(nil, "/p", nil, {}).kind, "terminal")
 
   eq("spawnspec(kitty): tricky task stays one element", core.spawnSpec("kitty", "/p", "it's a test", {}).argv[#core.spawnSpec("kitty", "/p", "it's a test", {}).argv], "it's a test")
+
+  -- claudeBin: spawns embed the locally-resolved absolute path so contexts whose
+  -- PATH/aliases don't carry `claude` (the VS Code integrated terminal is the
+  -- proven case) still launch. nil keeps the legacy bare word everywhere above.
+  local CB = "/Users/a/.claude/local/claude"
+  eq("claudebin: spawnInner quotes the path",
+     core.spawnInner("/p", "hi", { claudeBin = CB }),
+     "cd '/p' && '" .. CB .. "' 'hi'")
+  eq("claudebin: spawnInner ignores literal 'claude'",
+     core.spawnInner("/p", nil, { claudeBin = "claude" }), "cd '/p' && claude")
+  -- ssh: the REMOTE box resolves its own claude -- a local path would be wrong
+  check("claudebin: ssh inner stays bare claude",
+     core.spawnInner("/p", nil, { claudeBin = CB, ssh = { host = "h" } })
+       :find(CB, 1, true) == nil)
+  local vb = core.spawnSpec("vscode", "/p", "do it", { claudeBin = CB })
+  check("claudebin: vscode post types the absolute path",
+     vb.postType:find("'" .. CB .. "' 'do it'", 1, true) ~= nil)
+  local vbSsh = core.spawnSpec("vscode", "/p", nil, { claudeBin = CB, ssh = { host = "h" } })
+  check("claudebin: vscode ssh post stays bare", vbSsh.postType:find(CB, 1, true) == nil)
+  local kb = core.spawnSpec("kitty", "/p", nil, { claudeBin = CB })
+  eq("claudebin: kitty bare argv uses the path raw", kb.argv[#kb.argv], CB)
+  local env1 = { { name = "ANTHROPIC_MODEL", value = "m" } }
+  check("claudebin: kitty env inner carries the quoted path",
+     core.spawnSpec("kitty", "/p", nil, { claudeBin = CB, env = env1 })
+       .argv[#core.spawnSpec("kitty", "/p", nil, { claudeBin = CB, env = env1 }).argv]
+       :find("'" .. CB .. "'", 1, true) ~= nil)
+  check("claudebin: terminal applescript carries the quoted path",
+     core.spawnSpec("terminal", "/p", nil, { claudeBin = CB, terminal = "Terminal" })
+       .applescript:find(CB, 1, true) ~= nil)
+  -- a path with a space survives the shell-string contexts
+  local SP = "/Users/a b/claude"
+  check("claudebin: spaced path is single-quoted",
+     core.spawnInner("/p", nil, { claudeBin = SP }):find("'" .. SP .. "'", 1, true) ~= nil)
 end
 
 -- ---- spawnFlags ------------------------------------------------------------
