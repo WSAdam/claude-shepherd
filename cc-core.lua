@@ -2714,20 +2714,15 @@ function M.spawnSpec(editor, project, task, opts)
     end
     return { kind = "kitty", argv = argv }
   elseif editor == "vscode" or editor == "cursor" then
-    -- Open the window, then start Claude one of two ways (no supported API for
-    -- either -- both are best-effort keystrokes; Kitty/Terminal stay the
-    -- reliable spawns):
-    --   * flavor "extension" (DEFAULT): drive the Claude Code EXTENSION via its
-    --     quick-launch shortcut (⌘Esc) -- the panel the operator actually works
-    --     in (resume/new session UI), not a terminal CLI. An optional task is
-    --     typed into the focused Claude input.
-    --   * flavor "terminal" (spawn.vscodeFlavor = "terminal", any ssh spawn --
-    --     the extension can't run claude on a remote box -- or any spawn with
-    --     provider env: the extension launches its own claude, so a gateway's
-    --     ANTHROPIC_* env can only ride the typed terminal line): open a new
-    --     integrated terminal and type the launch line. The terminal's PATH/
-    --     aliases often don't carry `claude` (proven: command not found), so
-    --     the line embeds the resolved absolute path.
+    -- Two best-effort keystroke flavors (no supported API; Kitty/Terminal stay
+    -- the reliable spawns):
+    --   "extension" (DEFAULT): ⌘Esc opens the Claude Code extension panel (the
+    --     resume/new-session UI the operator works in); optional task typed
+    --     into the focused Claude input.
+    --   "terminal": new integrated terminal + typed launch line (embedding the
+    --     resolved claude path -- the terminal's PATH often lacks `claude`).
+    --     FORCED for ssh spawns (the extension can't run a remote claude) and
+    --     provider env (ANTHROPIC_* can only ride the typed line).
     local app = (editor == "cursor") and "Cursor" or "Visual Studio Code"
     if not isSsh and not hasEnv and opts.vscodeFlavor ~= "terminal" then
       return { kind = "vscode", editor = editor, app = app, project = project,
@@ -2749,6 +2744,23 @@ function M.spawnSpec(editor, project, task, opts)
            applescript = M.spawnAppleScript(project, task,
              { terminal = opts.terminal, env = env, flags = flags, ssh = ssh,
                claudeBin = opts.claudeBin }) }
+end
+
+-- One-line human description of a spawn spec, for dry-run logging (what
+-- `spawn.live = false` prints instead of launching).
+function M.describeSpec(spec)
+  if type(spec) ~= "table" then return tostring(spec) end
+  if spec.kind == "kitty" then return table.concat(spec.argv or {}, " ") end
+  if spec.kind == "vscode" then
+    if spec.flavor == "extension" then
+      return "open " .. tostring(spec.app) .. " @ " .. tostring(spec.project)
+        .. " + ⌘Esc (Claude Code extension)"
+        .. (spec.task and (" + task: " .. spec.task) or "")
+    end
+    return "open " .. tostring(spec.app) .. " @ " .. tostring(spec.project)
+      .. " + type: " .. tostring(spec.postType)
+  end
+  return tostring(spec.applescript)
 end
 
 -- ---- Kitty remote control (detect + enable) --------------------------------
@@ -2900,9 +2912,13 @@ M.FOCUS_SKIP = { users = true, programming = true, desktop = true, documents = t
 -- "… — Dialer-info-Five9" window, and the cwd-ancestor candidate "dialer"
 -- matched "… — Dialer-scraper"). Callers must prefer rank 2 across ALL
 -- windows before settling for a rank-1 contains-match (decorated titles like
--- "proj (Workspace)" still need the fallback).
+-- "proj (Workspace)" still need the fallback) -- bestWindowFor below does that.
+-- Case-insensitive on BOTH sides (self-contained: callers historically
+-- pre-lowercased, but the function must not silently depend on it).
 function M.titleFolderRank(title, needle)
   if not title or not needle or needle == "" then return nil end
+  title = string.lower(title)
+  needle = string.lower(needle)
   local seg = title:match(".*—%s*(.+)$") or title
   seg = seg:gsub("^%s+", ""):gsub("%s+$", "")
   if seg == needle then return 2 end
@@ -2913,6 +2929,22 @@ end
 -- Boolean convenience over titleFolderRank (legacy shape).
 function M.titleFolderMatch(title, needle)
   return M.titleFolderRank(title, needle) ~= nil
+end
+
+-- The cross-window preference: best-ranked title for a candidate over a whole
+-- window list -- an exact (rank 2) ANYWHERE beats a contains (rank 1) seen
+-- earlier. Returns index, rank; nil when nothing matches. focusProject feeds
+-- it live window titles; pure here so the preference is pinned by tests.
+function M.bestWindowFor(titles, needle)
+  local best, bestRank
+  for i, t in ipairs(titles or {}) do
+    local r = M.titleFolderRank(t, needle)
+    if r and (not bestRank or r > bestRank) then
+      best, bestRank = i, r
+      if r == 2 then break end  -- nothing beats exact
+    end
+  end
+  return best, bestRank
 end
 
 -- Build focus candidates most-specific first: the session name, then cwd

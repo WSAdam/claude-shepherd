@@ -72,7 +72,14 @@ done
 # This script is a pure "PNG -> Resources/<name>.icns" step: the CALLER
 # (app/build-app.sh) owns the closing codesign + touch -- writing the icns
 # invalidates an existing signature, so re-sign after running this standalone.
-ICON_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$APP/Contents/Info.plist" 2>/dev/null || echo icon)"
+# No guessing on a missing key: an icns written under an invented name is an
+# orphan macOS never looks at. build-app.sh always writes CFBundleIconFile, so
+# absence means a malformed bundle -- fail loudly instead.
+ICON_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$APP/Contents/Info.plist" 2>/dev/null || true)"
+if [ -z "$ICON_NAME" ]; then
+  echo "❌ $APP has no CFBundleIconFile in Info.plist — refusing to write an orphan icns" >&2
+  exit 1
+fi
 ICON_NAME="${ICON_NAME%.icns}"
 iconutil -c icns "$set" -o "$TMP/icon.icns"
 cp "$TMP/icon.icns" "$APP/Contents/Resources/${ICON_NAME}.icns"

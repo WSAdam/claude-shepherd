@@ -27,8 +27,12 @@ setup:
 # hs.reload() tears down the IPC port mid-command, which exits non-zero and falsely looks
 # like the CLI is missing (the reload actually worked).
 .PHONY: reload
+# The scheduled timer MUST be retained in a global: a bare hs.timer.doAfter can
+# be GC'd before it fires (the project's own after() lesson), which silently
+# skipped the reload while this target still echoed success -- field-proven:
+# "deployed" code repeatedly wasn't live until a manual hs.reload().
 reload:
-	@hs -c "hs.timer.doAfter(0.4, function() hs.reload() end)" >/dev/null 2>&1 && echo "✅ Hammerspoon reloading (config re-read)" || echo "⚠️  'hs' CLI not available — reload from the Hammerspoon menu"
+	@hs -c "_G.__ccReloadTimer = hs.timer.doAfter(0.4, function() hs.reload() end)" >/dev/null 2>&1 && echo "✅ Hammerspoon reloading (config re-read)" || echo "⚠️  'hs' CLI not available — reload from the Hammerspoon menu"
 
 # Test, deploy, then reload — one shot.
 .PHONY: deploy

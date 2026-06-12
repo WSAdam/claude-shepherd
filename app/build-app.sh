@@ -55,7 +55,12 @@ bash "$HERE/app/make-icon.sh" "$APP" || true
 # docs/assets/shepherd.png + `make app` is then always enough.
 ICON_SRC="$HERE/docs/assets/shepherd.png"
 if [ -f "$ICON_SRC" ]; then
-  VER="$(stat -f %m "$ICON_SRC" 2>/dev/null || stat -c %Y "$ICON_SRC" 2>/dev/null || echo 2)"
+  # mtime first; if both stat forms somehow fail, fall back to a CONTENT-
+  # derived value (cksum CRC) -- a fixed constant here would freeze the
+  # version and silently disable the cache-bust this block exists for.
+  VER="$(stat -f %m "$ICON_SRC" 2>/dev/null || stat -c %Y "$ICON_SRC" 2>/dev/null \
+    || cksum "$ICON_SRC" 2>/dev/null | awk '{print $1}')"
+  [ -n "$VER" ] || VER=2
   /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VER" "$APP/Contents/Info.plist" 2>/dev/null || true
 fi
 

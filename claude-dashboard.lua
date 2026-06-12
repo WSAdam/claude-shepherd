@@ -205,28 +205,17 @@ local function focusProject(name, cwd, editor, activateOnMiss)
   local windows = app:allWindows()
   local candidates = core.focusCandidates(name, cwd, os.getenv("USER"))
 
-  -- Pass 1: folder-match each candidate in order, best RANK first within a
-  -- candidate: an exact folder segment (rank 2) beats a contains-match (rank 1)
-  -- across ALL windows. First-contains-wins grabbed the wrong window for
-  -- prefix-named siblings (field-proven: "Dialer-info" jumped to
-  -- "… — Dialer-info-Five9"); the exact tier makes the true window win
-  -- whenever it exists, while contains still covers decorated titles.
+  -- Pass 1: per candidate, pick the best-RANKED window (core.bestWindowFor:
+  -- exact folder segment beats contains across ALL windows -- the
+  -- prefix-named-sibling fix; rationale on titleFolderRank).
+  local titles = {}
+  for i, w in ipairs(windows) do titles[i] = w:title() or "" end
   for _, needle in ipairs(candidates) do
-    local best, bestRank
-    for _, w in ipairs(windows) do
-      local title = string.lower(w:title() or "")
-      if title ~= "" then
-        local rank = core.titleFolderRank(title, needle)
-        if rank and (not bestRank or rank > bestRank) then
-          best, bestRank = w, rank
-          if rank == 2 then break end  -- nothing beats exact
-        end
-      end
-    end
-    if best then
-      best:focus()
-      print("[cc-dashboard] focused (folder" .. (bestRank == 2 and ", exact" or "") .. ": "
-        .. needle .. "): " .. (best:title() or "?"))
+    local idx, rank = core.bestWindowFor(titles, needle)
+    if idx then
+      windows[idx]:focus()
+      print("[cc-dashboard] focused (folder" .. (rank == 2 and ", exact" or "") .. ": "
+        .. needle .. "): " .. (titles[idx] or "?"))
       return true
     end
   end
@@ -1404,9 +1393,9 @@ local function spawnEditorWindow(spec)
   local proj = spec.project
   local name = proj and proj:match("([^/]+)/?$") or nil
   -- Cold-start timing: a NEW window (the new-project case) takes seconds to be
-  -- input-ready. The beats are a flat {delay, fn} list (delays RELATIVE to the
-  -- previous beat) so the timings read as one tunable column; each beat gets
-  -- its own pcall and logs, so a miss is diagnosable in the console.
+  -- input-ready. Beats run via core.runSequence (see its header for the
+  -- column/pcall semantics); handles are captured into spawnSeqHandles so the
+  -- next spawn can cancel a superseded ladder (the block above).
   if spec.flavor == "extension" then
     -- DEFAULT: open the Claude Code EXTENSION (the panel the operator works
     -- in -- resume the recent session / new-session UI) via its quick-launch
@@ -1464,18 +1453,8 @@ local function spawnEditorWindow(spec)
   }, after)
 end
 
--- Short human-readable description of a spawn spec, for dry-run logging.
-local function describeSpec(spec)
-  if spec.kind == "kitty" then return table.concat(spec.argv, " ")
-  elseif spec.kind == "vscode" then
-    if spec.flavor == "extension" then
-      return "open " .. spec.app .. " @ " .. tostring(spec.project) .. " + ⌘Esc (Claude Code extension)"
-        .. (spec.task and (" + task: " .. spec.task) or "")
-    end
-    return "open " .. spec.app .. " @ " .. tostring(spec.project) .. " + type: " .. spec.postType
-  end
-  return spec.applescript
-end
+-- Dry-run spec description lives in core.describeSpec (pure, tested).
+local function describeSpec(spec) return core.describeSpec(spec) end
 
 -- Resolve `claude` to an absolute path for spawns. Bare `claude` breaks where
 -- the spawned context's PATH/aliases don't carry it -- proven in the VS Code

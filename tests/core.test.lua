@@ -350,8 +350,7 @@ do
   eq("runSeq: all beats ran in order", table.concat(ran, ","), "a,b,c")
   eq("runSeq: one handle per beat", #handles, 3)
   eq("runSeq: handles are the scheduler's returns", handles[2], "handle-2")
-  -- pcall isolation: a throwing beat logs and the REST still fire (the
-  -- deliberate per-beat pcall -- one chain-wide pcall would abort the ladder).
+  -- per-beat pcall (see runSequence's header): a throwing beat doesn't abort the rest
   local ran2 = {}
   core.runSequence({
     { delay = 1, fn = function() ran2[#ran2 + 1] = 1 end },
@@ -1317,10 +1316,8 @@ do
   eq("titleMatch: no em-dash uses whole title", core.titleFolderMatch("autobottom", "autobottom"), true)
   eq("titleMatch: empty needle -> false", core.titleFolderMatch("x — y", ""), false)
 
-  -- Rank tiers: prefix-named sibling projects collide under a bare substring
-  -- test (field-proven: "Dialer-info" jumped to "… — Dialer-info-Five9", and
-  -- the cwd-ancestor candidate "dialer" matched "… — Dialer-scraper"). The
-  -- exact tier (2) must outrank contains (1) so the true window wins.
+  -- rank tiers (rationale on titleFolderRank): exact must outrank contains
+  -- so prefix-named sibling projects can't steal each other's windows
   eq("titleRank: exact folder segment = 2",
      core.titleFolderRank("claude code — dialer-info", "dialer-info"), 2)
   eq("titleRank: prefix-sibling is only contains = 1",
@@ -1335,6 +1332,40 @@ do
      core.titleFolderRank("x —   dialer-info  ", "dialer-info"), 2)
   eq("titleRank: no match -> nil", core.titleFolderRank("x — other", "dialer-info"), nil)
   eq("titleRank: nil title -> nil", core.titleFolderRank(nil, "x"), nil)
+  -- self-contained case handling: mixed-case on EITHER side must not silently
+  -- demote an exact match (the function can't depend on pre-lowercased input)
+  eq("titleRank: mixed-case title still exact", core.titleFolderRank("X — Dialer-Info", "dialer-info"), 2)
+  eq("titleRank: mixed-case needle still exact", core.titleFolderRank("x — dialer-info", "Dialer-Info"), 2)
+
+  -- bestWindowFor: the cross-window preference focusProject relies on -- an
+  -- exact (rank 2) ANYWHERE beats a contains (rank 1) seen earlier, in BOTH
+  -- enumeration orders (first-contains-wins was the field bug).
+  local sib  = "claude code — dialer-info-five9"
+  local mine = "claude code — dialer-info"
+  local i1, r1 = core.bestWindowFor({ sib, mine }, "dialer-info")
+  eq("bestWindow: rank-1 sibling first, exact still wins", i1, 2)
+  eq("bestWindow: winning rank is exact", r1, 2)
+  local i2 = core.bestWindowFor({ mine, sib }, "dialer-info")
+  eq("bestWindow: exact first also wins", i2, 1)
+  -- contains-only fallback when no exact window exists (decorated title)
+  local i3, r3 = core.bestWindowFor({ "x — other", "x — dialer-info (workspace)" }, "dialer-info")
+  eq("bestWindow: contains fallback picks the only match", i3, 2)
+  eq("bestWindow: fallback rank is contains", r3, 1)
+  eq("bestWindow: no match -> nil", core.bestWindowFor({ "x — other" }, "dialer-info"), nil)
+  eq("bestWindow: empty list -> nil", core.bestWindowFor({}, "x"), nil)
+
+  -- describeSpec: the dry-run line (spawn.live=false) per spec kind
+  local dx = core.describeSpec(core.spawnSpec("vscode", "/Users/a/proj", "do it", {}))
+  check("describe: extension marker", dx:find("⌘Esc (Claude Code extension)", 1, true) ~= nil)
+  check("describe: extension carries the task", dx:find("+ task: do it", 1, true) ~= nil)
+  local dn = core.describeSpec(core.spawnSpec("vscode", "/p", nil, {}))
+  check("describe: no task -> no task suffix", dn:find("+ task:", 1, true) == nil)
+  local dt = core.describeSpec(core.spawnSpec("vscode", "/p", "go", { vscodeFlavor = "terminal" }))
+  check("describe: terminal flavor shows the typed line", dt:find("+ type: ", 1, true) ~= nil)
+  check("describe: kitty is the argv", core.describeSpec(core.spawnSpec("kitty", "/p", nil, {}))
+    :find("claude", 1, true) ~= nil)
+  check("describe: terminal kind is the applescript",
+    core.describeSpec(core.spawnSpec("terminal", "/p", nil, {})):find("tell application", 1, true) ~= nil)
 
   local cands = core.focusCandidates("frontend", "/Users/adam/Programming/autobottom/frontend", "adam")
   eq("focusCands: name first", cands[1], "frontend")

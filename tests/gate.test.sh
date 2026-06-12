@@ -23,8 +23,10 @@
 #   shares the inode, preserving the mtime the sibling's freshness check needs
 #   (cases "st1" restore + "ss2").
 # * WHY PARK ON COLLISION (never rm): if the restore hits EEXIST, the held
-#   sibling answer is parked under a unique .claim.<pid>.parked name (swept by
-#   cc_remove on SessionEnd) — an rm there silently destroyed a human decision.
+#   sibling answer is parked under a unique .claim.<pid>.parked.N name (the N
+#   counter keeps a second collision from overwriting the first; cc_remove's
+#   .claim.* glob sweeps them on SessionEnd) — an rm there silently destroyed
+#   a human decision.
 #   The collision window is sub-millisecond inside one poll iteration, so it
 #   isn't orchestrable from a test; the invariant is "claimed-but-not-ours is
 #   restored or parked, NEVER rm'd", and the restore half is pinned by "st1".
@@ -401,7 +403,11 @@ assert_eq "consumed decision file is removed" "gone" "$([ ! -f "$TMP/ss3.decisio
 date +%s > "$HB"
 REQA='{"session_id":"cc1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"echo first"}}'
 REQB='{"session_id":"cc1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"echo second"}}'
-( printf '%s' "$REQA" | CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=3 \
+# A's timeout is the suite's wall-clock floor here -- it ALWAYS times out (that
+# IS the assertion), so keep it short; its degradation holds whether it expires
+# before or after B's answer lands. B gets margin so a slow box can't time the
+# ANSWERED waiter out mid-orchestration (the failure mode of cutting it to 1-2s).
+( printf '%s' "$REQA" | CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=1 \
     bash "$APP" > "$TMP/out_cc_a" 2>/dev/null ) &
 bgA=$!
 wait_block "$TMP/cc1.json"
@@ -411,7 +417,7 @@ i=0; while [ "$i" -lt 100 ]; do
   [ -n "$nonceA" ] && break
   sleep 0.05; i=$((i+1))
 done
-( printf '%s' "$REQB" | CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=5 \
+( printf '%s' "$REQB" | CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=3 \
     bash "$APP" > "$TMP/out_cc_b" 2>/dev/null ) &
 bgB=$!
 # wait until B's merge has overwritten the published nonce
