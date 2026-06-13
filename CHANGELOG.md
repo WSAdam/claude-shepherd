@@ -4,6 +4,62 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-13 — Context bar (% + match-editor + ramp), Auto-Continue, Auto-Remote-Control
+
+A single batch: make the per-tile context bar legible and accurate, auto-recover sessions
+frozen on an API error, and auto-enable Claude Code's Remote Control across the fleet.
+
+### Added — context-fullness bar
+- **The numeric `% lives ON the bar`** (right-aligned, shadowed for legibility over every
+  color), the bar is taller (3px → 12px) to fit it, and the fill is still `width:N%`.
+- **It tracks the editor, not the raw window.** `core.contextFractionFor` now divides by
+  `window * context.autoCompactFraction` (default **0.92**), modeling the output reserve Claude
+  Code holds back — so the tile matches the editor's "% until auto-compact" instead of reading
+  ~8% low. The auto-compact threshold is **undocumented** (confirmed against the live transcript,
+  which carries no context field, and the official docs, which don't expose the formula); the
+  fraction is therefore an approximation, hand-tunable, and preserved across Settings saves
+  (`SETTINGS_KEEP_SUBKEYS.context`). The observed-size tier self-heal still floors the denominator.
+- **7-color ramp** (`core.contextBand`, mirrored in the panel `barLevel` twin): calm `<50`, a new
+  color every 10% (50/60/70/80/90), and a distinct **critical** band for the last 5% (95–100,
+  gently pulsing). Replaces the old 3-level bar (the fleet-footer usage bars keep their scheme).
+
+### Added — Auto-Continue on a frozen API error (opt-in, off by default)
+- A tile in the magenta `Error` state (e.g. ECONNRESET, no Stop hook) **auto-types `continue`**
+  after `autoContinue.delaySeconds` (default 60) — the SAME serialized keystroke the manual
+  Continue button uses. Capped at `autoContinue.maxAttempts` (default 3) **per launch folder**,
+  with fires spaced ~delaySeconds apart; the budget resets only on a clean `done`/`idle`, never on
+  the `working` the continue itself produces, so a persistently dead connection can't loop. Emits
+  an `auto_continue` ledger event (surfaced in the 🔔 Alerts feed). `core.shouldAutoContinue` /
+  `core.stepAutoContinue` (pure, unit-tested); ⚙ Settings toggle + delay/cap.
+
+### Added — Auto-enable Claude Code Remote Control (on by default)
+- **New spawns launch with `--remote-control`** (`remoteControl.onSpawn`) — the documented,
+  keystroke-free way to register RC — but only for a **LOCAL native-Anthropic** session (RC needs
+  claude.ai auth and rejects gateway/ssh providers; the flag is also dropped for ssh in spawnSpec).
+- **Startup sweep** (`remoteControl.sweepOnStartup`): types `/rc` into already-running idle/done
+  LOCAL sessions on Shepherd boot, so a computer restart re-arms RC across sessions started outside
+  Shepherd. `core.remoteControlSweepTargets` picks safe targets (never mid-turn / mid-approval);
+  the keystroke rides the serialized chokepoint; `/rc` is idempotent.
+- ⚙ Settings section (kept **distinct** from the existing Kitty `kitty @` remote control, which is
+  Shepherd-drives-the-window, not claude.ai-drives-the-session). NOTE: the "Enable Remote Control
+  for all sessions" Claude Code setting has **no documented settings.json key**, so Shepherd can't
+  set it — to auto-register RC for sessions you start yourself in a terminal, run `/config` and
+  toggle it once (documented in the ⚙ help, the README, and cc-config.example.json).
+
+### Deferred
+- The **4c-E routing follow-ups** (task→session tags, auto-spawn on starvation, idle/remote
+  routing targets) were intentionally **not** built — each needs a UX decision first, and shipping
+  speculative automation behind dead flags wasn't worth it. Documented in todos.md for a later
+  green-light. A **hardware-verification runbook** ([docs/hardware-verification.md]) now captures
+  the Kitty-token + SSH-bridge checks for when the real boxes are available.
+
+### Tests
+- Suite **1193 core + 178 ui + 167 bash**, all green (was 1062 + 167 + 167). New core coverage:
+  `contextBand` boundaries, the effective-limit fraction + `autoCompactFraction` clamp,
+  `shouldAutoContinue`/`stepAutoContinue` (grace clock, per-folder cap, loop-guard), `spawnFlags`
+  rc + `spawnSpec` ssh-drop, `remoteControlSweepTargets`. New UI source-pins: the `%`/band classes,
+  and the auto-continue + RC-sweep dispatches routing through the serialized chokepoint.
+
 ## 2026-06-12 (later) — Review hardening: gate lost-decision fix + coverage
 
 Applied the leaderboard reviews against `c023468`/`d4aebc6`/`0f31c42` (every

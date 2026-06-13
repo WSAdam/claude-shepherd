@@ -138,6 +138,7 @@ local spawnPrompt        -- forward declaration (defined after FX)
 -- Rebuilt-and-swapped each refresh so a vanished tile drops out; see refresh().
 local prev = {}
 local respawnAttempts = {}  -- projectKey (NOT tile key) -> auto-respawn count; resets when healthy
+local autoContinueState = { since = {}, attempts = {} }  -- key->first-error ts; projectKey->continue count
 local watchdog = {}      -- key -> { size, ts, alerted }: transcript progress + stall episode
 local draining    = {}   -- key -> true: close on the next fresh `done` (Feature F)
 local gitRootByCwd = {}  -- cwd -> resolved git root ("" = not a repo) cache (Feature B)
@@ -1506,6 +1507,14 @@ function FX.spawnSession(editor, project, task, permissionMode, providerId)
     claudeBin      = claudeBinPath(),  -- absolute path; nil keeps the bare word
     vscodeFlavor   = core.config(cfg, "spawn.vscodeFlavor", "extension"),  -- extension | terminal
   }
+  -- Auto-enable Remote Control via the --remote-control launch flag, but only for a LOCAL,
+  -- native-Anthropic session: RC needs claude.ai auth and rejects third-party/gateway
+  -- providers, and an ssh-remote box would register RC to its own window. Off via
+  -- remoteControl.onSpawn. (spawnSpec also drops the flag for ssh as a belt-and-suspenders.)
+  local isGateway = profile and tostring(profile.kind or "anthropic") == "gateway"
+  local isSshProfile = profile and type(profile.ssh) == "table" and profile.ssh.host
+  opts.remoteControl = core.config(cfg, "remoteControl.onSpawn", true) == true
+    and not isGateway and not isSshProfile
   local spec = core.spawnSpec(editor, project, task, opts)
   if profile then print("[cc-orch] provider: " .. tostring(profile.id)
     .. " (" .. tostring(profile.kind or "anthropic") .. " / " .. tostring(profile.model) .. ")") end
@@ -2557,11 +2566,22 @@ local HTML = [[
   .name { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .dot  { border-radius:50%; flex:0 0 auto; }
   .meta { font-size:11px; color:#8a8d99; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .age  { font-size:11px; color:#8a8d99; font-weight:400; }  /* elapsed-in-status, inline before the status word */
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
-  /* context-fullness mini-bar (per tile + detail) */
-  .ctx-bar { height:3px; border-radius:2px; background:#2c2f3a; overflow:hidden; margin-top:3px; grid-column:1 / -1; }
-  .ctx-bar > i { display:block; height:100%; width:0; background:#3b82f6; }
-  .ctx-bar.ok > i { background:#3b82f6; } .ctx-bar.warn > i { background:#f5b50a; } .ctx-bar.full > i { background:#ef4444; }
+  /* context-fullness mini-bar (per tile + detail): a labeled gauge that tracks Claude Code's
+     "% until auto-compact". Color ramp steps every 10% from 50%, with a critical last-5% band. */
+  .ctx-bar { position:relative; height:12px; border-radius:3px; background:#2c2f3a; overflow:hidden; margin-top:4px; grid-column:1 / -1; }
+  .ctx-bar > i { display:block; height:100%; width:0; background:#3b82f6; transition:width .3s ease; }
+  .ctx-bar.b0 > i { background:#3b82f6; }  /* <50%  calm blue   */
+  .ctx-bar.b1 > i { background:#22c55e; }  /* 50-60 green       */
+  .ctx-bar.b2 > i { background:#84cc16; }  /* 60-70 lime        */
+  .ctx-bar.b3 > i { background:#eab308; }  /* 70-80 yellow      */
+  .ctx-bar.b4 > i { background:#f97316; }  /* 80-90 orange      */
+  .ctx-bar.b5 > i { background:#ef4444; }  /* 90-95 red         */
+  .ctx-bar.b6 > i { background:#dc2626; }  /* 95-100 critical   */
+  .ctx-bar.b6 { animation:pulse 1.6s ease-in-out infinite; }
+  .ctx-bar .pct { position:absolute; top:50%; right:4px; transform:translateY(-50%); font-size:9px; line-height:1;
+                  font-weight:600; color:#fff; text-shadow:0 0 2px rgba(0,0,0,.95), 0 0 3px rgba(0,0,0,.85); pointer-events:none; }
   .theme-bar .ctx-bar, .theme-dots .ctx-bar { display:none; }  /* compact themes: badge in detail only */
   /* usage footer under the grid */
   #usage-foot { border-top:1px solid #2c2f3a; padding:6px 10px; font-size:11px; color:#9aa0ad; }
@@ -3028,6 +3048,10 @@ local HTML = [[
       <label class="s-row"><input type="checkbox" id="s-resp-auto"> Auto-respawn a session that died unexpectedly</label>
       <div class="s-help">⚠ Launches processes without you. Per-folder retry budget of <input type="number" id="s-resp-max" class="s-num" min="1"> attempts; a session counts as dead only after its status file is frozen mid-<code>working</code> for <input type="number" id="s-resp-stale" class="s-num" min="60"> s (default 600 — above the longest Bash tool timeout, so a long build never triggers it).</div>
 
+      <div class="s-sec">Auto-Continue (API-error recovery)</div>
+      <label class="s-row"><input type="checkbox" id="s-cont-auto"> Auto-resume a session frozen on an API error (types "continue")</label>
+      <div class="s-help">⚠ Sends a keystroke without you. When a tile shows the magenta <code>Error</code> state (e.g. ECONNRESET, no Stop hook), wait <input type="number" id="s-cont-delay" class="s-num" min="5"> s then type <code>continue</code> to resume the same session. Capped at <input type="number" id="s-cont-max" class="s-num" min="1"> attempts per folder (a clean turn completion resets the budget) so a persistently dead connection can't loop.</div>
+
       <div class="s-sec">Insights</div>
       <label class="s-row">Cap "time blocked on you" per approval at <input type="number" id="s-ins-block" class="s-num" min="0"> seconds</label>
       <div class="s-help">An approval you never answered counts as blocking for at most this long in the 📊 fleet stats (0 = no cap).</div>
@@ -3065,6 +3089,11 @@ local HTML = [[
       <label class="s-row"><input type="checkbox" id="s-kitty-auto"> Auto-enable Kitty remote control in kitty.conf when Kitty is in use</label>
       <label class="s-row"><button class="s-x" style="border:1px solid #2c2f3a;border-radius:6px;padding:3px 8px;color:#cfd2db;" onclick="send('kitty-remote')">Enable Kitty remote control now</button></label>
       <label class="s-row">Default provider <select id="s-spawn-provider"></select></label>
+
+      <div class="s-sec">Claude Code Remote Control (drive sessions from claude.ai / mobile)</div>
+      <label class="s-row"><input type="checkbox" id="s-rc-spawn"> Launch new sessions with <code>--remote-control</code> (auto-register RC)</label>
+      <label class="s-row"><input type="checkbox" id="s-rc-sweep"> On startup, type <code>/rc</code> into already-running sessions</label>
+      <div class="s-help">Distinct from Kitty remote control above (that lets Shepherd drive the window). This is Claude Code's own Remote Control — continue a local session from claude.ai or the Claude app. New Shepherd spawns get the <code>--remote-control</code> flag (native-Anthropic, local sessions only — RC rejects gateway/ssh providers); the startup sweep covers sessions started outside Shepherd. To auto-enable RC for sessions you start in a terminal yourself, run <code>/config</code> in Claude Code and set <b>Enable Remote Control for all sessions</b> (no settings.json key is documented for it).</div>
 
       <div class="s-sec">SSH status bridge (remote sessions as tiles)</div>
       <label class="s-row"><input type="checkbox" id="s-br-en"> Mirror remote sessions from ssh providers into the panel</label>
@@ -3614,6 +3643,9 @@ local HTML = [[
       ck("s-resp-auto",  cv(cfg,"respawn.auto.enabled",false));
       val("s-resp-max",  cv(cfg,"respawn.auto.maxRetries",3));
       val("s-resp-stale",cv(cfg,"respawn.auto.staleSeconds",600));
+      ck("s-cont-auto",  cv(cfg,"autoContinue.enabled",false));
+      val("s-cont-delay",cv(cfg,"autoContinue.delaySeconds",60));
+      val("s-cont-max",  cv(cfg,"autoContinue.maxAttempts",3));
       val("s-ins-block", cv(cfg,"insights.maxBlockSeconds",1800));
       var legacyPop = cv(cfg,"focus.popEditor",false);  // back-compat seeds both
       ck("s-pop-complete", cv(cfg,"focus.popOnComplete",legacyPop));
@@ -3623,6 +3655,8 @@ local HTML = [[
       ck("s-spawn-live",  cv(cfg,"spawn.live",false));
       ck("s-kitty-remote", cv(cfg,"spawn.kittyRemote",true));
       ck("s-kitty-auto",  cv(cfg,"spawn.kittyAutoRemote",true));
+      ck("s-rc-spawn",    cv(cfg,"remoteControl.onSpawn",true));
+      ck("s-rc-sweep",    cv(cfg,"remoteControl.sweepOnStartup",true));
       ck("s-p-rep",  cv(cfg,"policies.approveRepeats",false));
       ck("s-ap-en",  cv(cfg,"policies.autopilot.enabled",false));
       val("s-ap-min", cv(cfg,"policies.autopilot.minutes",15));
@@ -3776,6 +3810,7 @@ local HTML = [[
                  vscodeFlavor: txt("s-spawn-vsflavor"),
                  kittyRemote: ck("s-kitty-remote"), kittyAutoRemote: ck("s-kitty-auto"),
                  provider: txt("s-spawn-provider") },
+        remoteControl: { onSpawn: ck("s-rc-spawn"), sweepOnStartup: ck("s-rc-sweep") },
         providers: nonBlankProviders(),
         gate: { tools: txt("s-gate-tools") },
         ledger: { enabled: ck("s-ledger-en"), retentionDays: num("s-ledger-days",30),
@@ -3796,6 +3831,8 @@ local HTML = [[
         respawn: { enabled: ck("s-resp-en"),
                    auto: { enabled: ck("s-resp-auto"), maxRetries: num("s-resp-max",3),
                            staleSeconds: num("s-resp-stale",600) } },
+        autoContinue: { enabled: ck("s-cont-auto"), delaySeconds: num("s-cont-delay",60),
+                        maxAttempts: num("s-cont-max",3) },
         insights: { maxBlockSeconds: num("s-ins-block",1800) },
         // bridge carries NO staleSlackSeconds/keystrokes keys: SETTINGS_KEEP_SUBKEYS
         // preserves the hand-edited ones across this wholesale block replace.
@@ -4264,7 +4301,8 @@ local HTML = [[
       if(n >= 1e3) return (n/1e3).toFixed(1)+"k";
       return String(Math.floor(n));
     }
-    function barLevel(f){ return f>=0.9 ? "full" : (f>=0.75 ? "warn" : "ok"); }
+    // Mirror of core.contextBand: calm <50, a band every 10% from 50, critical last-5%.
+    function barLevel(f){ return f>=0.95?"b6":f>=0.90?"b5":f>=0.80?"b4":f>=0.70?"b3":f>=0.60?"b2":f>=0.50?"b1":"b0"; }
     // Context for a tile: prefer the live 1s value (active sessions), else the 60s
     // usage pass (covers stale/done tiles — which is most of them between turns).
     function psFor(it){ return (LAST_USAGE && LAST_USAGE.perSession) ? LAST_USAGE.perSession[it.key] : null; }
@@ -4275,7 +4313,7 @@ local HTML = [[
       if(frac == null) return "";   // no usage yet / unknown -> no bar
       var pct = Math.round(frac*100);
       var tok = ctxTokFor(it); tok = (tok != null) ? fmtTok(tok) : "";
-      return '<div class="ctx-bar '+barLevel(frac)+'" title="Context: '+tok+' ('+pct+'% of window)"><i style="width:'+pct+'%"></i></div>';
+      return '<div class="ctx-bar '+barLevel(frac)+'" title="Context: '+tok+' ('+pct+'% to auto-compact)"><i style="width:'+pct+'%"></i><span class="pct">'+pct+'%</span></div>';
     }
     var LAST_OFFICIAL = null;
     // ---- Audit ledger view --------------------------------------------------
@@ -4399,7 +4437,7 @@ local HTML = [[
     // JS twin of core.notificationEvents' predicate: panel-raised alerts plus
     // any non-human gate decision (something happened without you).
     function isNotification(e){
-      if(e.type === "escalation" || e.type === "hung" || e.type === "auto_respawn") return true;
+      if(e.type === "escalation" || e.type === "hung" || e.type === "auto_respawn" || e.type === "auto_continue") return true;
       return e.type === "decision" && e.by != null && e.by !== "human";
     }
     // YYYY-MM-DD -> epoch seconds (UTC midnight, or end-of-day for `until`).
@@ -4440,7 +4478,7 @@ local HTML = [[
     var EV_EMOJI = { session_start:"🟢", session_end:"⚪", prompt:"📝", tool_request:"🔧",
       task_feed:"📥", mode_change:"🎚", model_change:"🤖", effort_change:"🎚", clear:"🧹",
       compact:"🗜", nudge:"👉", autopilot_arm:"🛫", spawn:"✨", relabel:"🏷", redact:"🚫", purge:"🗑",
-      escalation:"🔴", hung:"⏳", auto_respawn:"♻️", drain_close:"⛔" };
+      escalation:"🔴", hung:"⏳", auto_respawn:"♻️", auto_continue:"▶️", drain_close:"⛔" };
     function evDesc(e){
       if(e.type === "decision"){
         return (e.outcome === "deny" ? "⛔" : "✅") + " " + (e.outcome || "?") + " " + (e.tool || "")
@@ -4457,6 +4495,7 @@ local HTML = [[
       else if(e.type === "escalation") detail = "waiting > " + (e.minutes || "?") + "m" + (e.summary ? (' on "' + e.summary + '"') : "");
       else if(e.type === "hung") detail = "no progress > " + (e.minutes || "?") + "m";
       else if(e.type === "auto_respawn") detail = (e.cwd || "") + (e.attempt ? (" (attempt " + e.attempt + ")") : "");
+      else if(e.type === "auto_continue") detail = "resumed after API error" + (e.attempt ? (" (attempt " + e.attempt + ")") : "");
       return em + " " + e.type + (detail ? (": " + detail) : "");
     }
     function narr(e){ return fmtTs(e.ts) + "  " + (e.name || e.session_id || "?") + "  " + evDesc(e) + (e.redacted ? " [redacted]" : ""); }
@@ -4679,13 +4718,14 @@ local HTML = [[
     function tileHtml(it){
       var st = it.status || "idle";
       var label = LABELS[st] || st;
+      // The elapsed-in-status age (2s/13s/11h) rides the status line -- right of the dot,
+      // before the status words -- instead of taking its own meta row.
+      var age = it.since ? fmtAge(it.since) : "";
       var meta = "";
       if(st === "approval" && it.pending && it.pending.summary){
         meta = "wants: " + it.pending.summary;
       } else if(st === "error"){
         meta = it.error_message || "API error — stopped";
-      } else if(it.since){
-        meta = fmtAge(it.since);
       }
       if(it.remote){ meta = (meta ? meta + " · " : "") + "⇄ " + (it.remote.host || "remote")
                             + (it.bridgeStale ? " (bridge offline)" : ""); }
@@ -4700,9 +4740,9 @@ local HTML = [[
       return '<div class="'+cls+'" data-key="'+esc(it.key)+'" onclick="selectTile(\''+esc(it.key)+'\')" ondblclick="send(\'focus\',\''+esc(it.key)+'\')" oncontextmenu="showCtx(event,\''+esc(it.key)+'\')" title="Double-click to jump · right-click for more">'
            + '<span class="dot"></span>'
            + '<span class="name">'+esc(it.label || it.name)+(it.group ? ' <span class="gtag">🏷 '+esc(it.group)+'</span>' : '')+'</span>'
-           + '<span class="label">'+label+'</span>'
+           + '<span class="label">'+(age ? '<span class="age">'+esc(age)+'</span> ' : '')+label+'</span>'
            + riskBadge(it)
-           + '<span class="meta">'+esc(meta)+'</span>'
+           + (meta ? '<span class="meta">'+esc(meta)+'</span>' : '')
            + ctxBarHtml(it)
            + '</div>';
     }
@@ -5032,6 +5072,11 @@ function refresh()
   -- build/test (Bash tool timeout: default 120s, max 600s) freezes its status file
   -- at `working` for minutes. Default 600s sits above that ceiling.
   local autoRespawnStale = tonumber(core.config(cfg, "respawn.auto.staleSeconds", 600)) or 600
+  -- Auto-Continue (opt-in): resume a tile frozen on an API error by typing "continue" after a
+  -- grace delay, capped per folder so a persistently dead connection can't loop. Off by default.
+  local autoContinueOn    = core.config(cfg, "autoContinue.enabled", false) == true
+  local autoContinueDelay = tonumber(core.config(cfg, "autoContinue.delaySeconds", 60)) or 60
+  local autoContinueMax   = tonumber(core.config(cfg, "autoContinue.maxAttempts", 3)) or 3
   local collEnabled = core.config(cfg, "collision.enabled", false) == true
   local collGitRoot = core.config(cfg, "collision.useGitRoot", false) == true
   local riskEnabled = core.config(cfg, "risk.enabled", false) == true
@@ -5283,6 +5328,20 @@ function refresh()
       print("[cc-respawn] " .. tostring(it.name) .. " died but isn't respawnable: " .. tostring(rs.reason))
     end
 
+    -- Auto-Continue (opt-in): a tile frozen on an API error (status=="error") is resumed by
+    -- typing "continue" after a grace delay, capped per folder. cc-core owns the timing/budget
+    -- (since/attempts maps); the keystroke goes through the SAME serialized chokepoint the manual
+    -- Continue button uses. Remote tiles are excluded (the keystroke targets a LOCAL window).
+    local cstep = core.stepAutoContinue(autoContinueState, it,
+      { enabled = autoContinueOn and not it.remote, now = now,
+        minSeconds = autoContinueDelay, maxAttempts = autoContinueMax })
+    if cstep.fire then
+      print("[cc-continue] auto-continue " .. tostring(it.name)
+        .. " (attempt " .. tostring(cstep.attempts) .. "/" .. autoContinueMax .. ")")
+      ledgerFor(it, { type = "auto_continue", attempt = cstep.attempts })
+      dispatchSerialized(it, "continue", function() core.handleAction(FX, it, "continue") end)
+    end
+
     newPrev[it.key] = { status = it.status, stale = step.isStale, escalated = nowEsc }
   end
   prev = newPrev
@@ -5483,6 +5542,31 @@ do
     if usingKitty and FX.ensureKittyRemote() == "ok" then
       hs.alert.show("Claude Shepherd: enabled kitty remote control — restart kitty to apply")
     end
+  end
+end
+
+-- Auto-enable Claude Code Remote Control on already-running sessions (user request): on
+-- startup, type `/rc` into each quiescent LOCAL session so a computer restart re-arms RC
+-- across the whole fleet with no manual step. New Shepherd spawns get RC via the
+-- --remote-control launch flag instead (see FX.spawnSession); this sweep covers sessions
+-- started outside Shepherd or before it booted. cc-core picks the safe targets (idle/done,
+-- never mid-turn / mid-approval); the keystroke rides the serialized chokepoint, and /rc is
+-- idempotent. Delayed so the first refresh() has populated the tile map. Off via
+-- remoteControl.sweepOnStartup.
+do
+  local cfg = loadConfig()
+  if core.config(cfg, "remoteControl.sweepOnStartup", true) == true then
+    after(2.5, function()
+      local list = {}
+      for _, it in pairs(byKey) do list[#list + 1] = it end
+      local targets = core.remoteControlSweepTargets(list)
+      if #targets > 0 then
+        print("[cc-rc] startup sweep: /rc -> " .. #targets .. " running session(s)")
+        for _, it in ipairs(targets) do
+          dispatchSerialized(it, "rc", function() FX.typeIntoWindow(winTarget(it), "/rc") end)
+        end
+      end
+    end)
   end
 end
 

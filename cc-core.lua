@@ -779,7 +779,7 @@ end
 -- gate decision NOT made by a human (autoAllow/autoDeny/autopilot/approveRepeats/
 -- timeout-*) -- exactly the set of things that happened without you. opts =
 -- { sinceTs, limit (default 200) }. Newest-first (filterLedger order).
-M.NOTIFY_TYPES = { escalation = true, hung = true, auto_respawn = true }
+M.NOTIFY_TYPES = { escalation = true, hung = true, auto_respawn = true, auto_continue = true }
 function M.notificationEvents(events, opts)
   opts = opts or {}
   local out = {}
@@ -1338,6 +1338,12 @@ end
 -- costs no tokens and makes no network call. These pure helpers parse + aggregate
 -- those counts; the impure side (file reads) lives in the dashboard's FX layer.
 M.CONTEXT_LIMIT_DEFAULT = 200000      -- Claude Opus/Sonnet context window
+-- Claude Code measures "% context used / until auto-compact" against the window MINUS an
+-- output reserve, so its number runs higher than tokens/rawWindow. We model that reserve
+-- as a fraction of the window so the per-tile bar tracks the editor's reading. The exact
+-- threshold is undocumented; ~0.92 was calibrated against a live 1M session (Shepherd's
+-- ~90% lined up with the editor's ~98%). Hand-tunable via config `context.autoCompactFraction`.
+M.CONTEXT_AUTOCOMPACT_DEFAULT = 0.92
 M.WINDOW_5H = 5 * 3600                -- rolling 5-hour window (approx plan limit)
 M.WINDOW_7D = 7 * 86400              -- rolling 7-day window
 
@@ -1506,12 +1512,36 @@ function M.nextContextTier(n)
   return n
 end
 
+-- The auto-compact fraction (0<f<=1) from config, clamped to a sane range. Off-range or
+-- non-numeric falls back to the default so a bad Settings value can't divide-by-~0.
+function M.autoCompactFraction(cfg)
+  local f = tonumber(M.config(cfg, "context.autoCompactFraction", M.CONTEXT_AUTOCOMPACT_DEFAULT))
+  if not f or f <= 0 or f > 1 then return M.CONTEXT_AUTOCOMPACT_DEFAULT end
+  return f
+end
+
 -- The context-fullness fraction (0..1) + the effective limit used. Combines the
--- model/provider limit with the observed-size tier guard, so the denominator is right
--- for known models AND can't be smaller than what the session actually holds.
+-- model/provider limit with the observed-size tier guard, then applies the auto-compact
+-- reserve so the bar matches Claude Code's "% until auto-compact" reading. The denominator
+-- is right for known models, can't be smaller than what the session actually holds, and
+-- accounts for the output reserve the editor measures against.
 function M.contextFractionFor(cfg, model, tokens)
-  local limit = math.max(M.contextLimitFor(cfg, model), M.nextContextTier(tokens))
+  local window = math.max(M.contextLimitFor(cfg, model), M.nextContextTier(tokens))
+  local limit = window * M.autoCompactFraction(cfg)
   return M.contextFraction(tokens, limit), limit
+end
+
+-- Per-tile context bar color band. Calm below 50%, then a new band every 10% (50/60/70/80/90),
+-- with a distinct critical band for the last 5% (95-100%). b0..b6, mirrored in the panel JS.
+function M.contextBand(frac)
+  local f = tonumber(frac) or 0
+  if f >= 0.95 then return "b6" end
+  if f >= 0.90 then return "b5" end
+  if f >= 0.80 then return "b4" end
+  if f >= 0.70 then return "b3" end
+  if f >= 0.60 then return "b2" end
+  if f >= 0.50 then return "b1" end
+  return "b0"
 end
 
 -- Next session after the one with key==afterKey (wraps to the front). Used by
@@ -1878,6 +1908,79 @@ function M.stepAutoRespawn(attempts, item, opts)
   return { spawn = spawn, wouldFire = wouldFire, isStale = frozen, attempts = pk and attempts[pk] or nil }
 end
 
+-- ---- Auto-Continue on a frozen API error (opt-in, bounded) -----------------
+-- A session frozen on an API error (e.g. ECONNRESET) renders as status=="error" and is
+-- normally resumed by the operator clicking Continue (types "continue" + Enter). This pure
+-- gate decides whether to do that automatically: only for an errored tile, only once a grace
+-- delay has elapsed since the error appeared, and only under a per-folder attempt cap so a
+-- persistently dead connection can't loop forever. Pure "is it time?" gate; stepAutoContinue
+-- owns the timers/budget and the dashboard fires the keystroke. args =
+--   { status, elapsed (since error first seen), minSeconds, attempts, maxAttempts }
+function M.shouldAutoContinue(args)
+  args = args or {}
+  if args.status ~= "error" then return false end                    -- only a frozen API error
+  if (tonumber(args.elapsed) or 0) < (tonumber(args.minSeconds) or 0) then return false end
+  local cap = tonumber(args.maxAttempts) or 0
+  if cap <= 0 then return false end                                  -- 0/absent = disabled
+  return (tonumber(args.attempts) or 0) < cap                        -- under the per-folder budget
+end
+
+-- Advance auto-continue bookkeeping for one tile per tick; return whether to fire "continue"
+-- now. Mutates `state` = { since = {key->ts}, attempts = {projectKey->count} } in place:
+--   * stamp `since[key]` on the first error sighting (the grace clock starts here);
+--   * a fire restarts that clock (since=now) so retries are spaced ~minSeconds apart rather
+--     than firing maxAttempts times on consecutive ticks while the tile is still "error";
+--   * leaving error clears the tile's clock, and reaching a CLEAN completion (done/idle) --
+--     never the `working` the continue itself produces -- resets the folder budget, so a
+--     still-dead connection that re-errors keeps counting toward the cap instead of looping.
+--   item : { key, projectKey, cwd, status }
+--   opts : { enabled, minSeconds, maxAttempts, now }
+-- returns: { fire, elapsed, attempts }
+function M.stepAutoContinue(state, item, opts)
+  state = state or {}; state.since = state.since or {}; state.attempts = state.attempts or {}
+  opts = opts or {}; item = item or {}
+  local key = item.key
+  local pk = item.projectKey or item.cwd or key
+  if not key then return { fire = false } end
+  if item.status ~= "error" then
+    state.since[key] = nil
+    if item.status == "done" or item.status == "idle" then state.attempts[pk] = nil end
+    return { fire = false }
+  end
+  if state.since[key] == nil then state.since[key] = opts.now end
+  local elapsed = (tonumber(opts.now) or 0) - (tonumber(state.since[key]) or 0)
+  local n = state.attempts[pk] or 0
+  local fire = (opts.enabled == true) and M.shouldAutoContinue({
+    status = item.status, elapsed = elapsed,
+    minSeconds = opts.minSeconds, attempts = n, maxAttempts = opts.maxAttempts }) or false
+  if fire then state.attempts[pk] = n + 1; state.since[key] = opts.now end
+  return { fire = fire, elapsed = elapsed, attempts = pk and state.attempts[pk] or nil }
+end
+
+-- ---- Auto-enable Remote Control on already-running sessions -----------------
+-- Which live tiles should receive an automatic `/rc` (remote-control) keystroke on Shepherd
+-- startup. Shepherd-SPAWNED sessions get RC via the --remote-control launch flag, and after a
+-- computer restart a relaunched session comes up fresh; this sweep covers the gap -- sessions
+-- that were ALREADY running (started outside Shepherd, or before Shepherd booted). Targets are
+-- real, LOCAL, non-stale sessions in a quiescent state (idle/done) where typing a slash command
+-- runs cleanly; working/approval/error tiles are skipped so we never inject mid-turn or over a
+-- pending permission prompt. Pure filter; the dashboard fires the keystrokes through the
+-- serialized chokepoint. (/rc is idempotent -- a second run just opens the status panel.)
+function M.remoteControlSweepTargets(list)
+  local out = {}
+  for _, it in ipairs(list or {}) do
+    if it and not it.remote and not it.stale
+       and (it.status == "idle" or it.status == "done")
+       and it.session_id ~= nil and tostring(it.session_id) ~= ""
+       -- RC needs claude.ai auth and rejects gateway/third-party providers, so /rc would
+       -- just error in a gateway session -- skip those (a base_url marks a gateway tile).
+       and M.isAnthropicSession(it.model, it.base_url) then
+      out[#out + 1] = it
+    end
+  end
+  return out
+end
+
 -- Should this tile be pruned? Orphans = stale tiles with no session_id (a hook
 -- fire that lacked one, keyed by folder name, that SessionEnd can't clean), plus
 -- a ghost backstop for anything older than opts.pruneSeconds.
@@ -2109,6 +2212,7 @@ M.SETTINGS_KEEP_SUBKEYS = {
   escalation = { "hung" },
   risk = { "weights" },
   bridge = { "staleSlackSeconds", "keystrokes" },
+  context = { "autoCompactFraction" },
 }
 function M.overlayConfig(cfg, incoming)
   cfg = type(cfg) == "table" and cfg or {}
@@ -2608,14 +2712,18 @@ end
 -- Build claude CLI launch flags from a permission mode (+ effort, reserved). Both
 -- optional. `--permission-mode <m>` is a real launch flag (Part C); effort has no
 -- documented launch flag (it's set live via /effort), so it's accepted but not
--- emitted. The model is NOT a flag here -- it rides ANTHROPIC_MODEL (providerEnv)
--- so the status hook can see it. Returns a flat argv-style list (possibly empty).
-function M.spawnFlags(mode, effort)  -- luacheck: ignore effort (reserved)
+-- emitted. `--remote-control` (rc=true) starts the interactive session with Remote
+-- Control registered (drive it from claude.ai / the Claude app) -- the documented,
+-- reliable way to auto-enable RC on a Shepherd-spawned session (vs. typing /rc).
+-- The model is NOT a flag here -- it rides ANTHROPIC_MODEL (providerEnv) so the
+-- status hook can see it. Returns a flat argv-style list (possibly empty).
+function M.spawnFlags(mode, effort, rc)  -- luacheck: ignore effort (reserved)
   local flags = {}
   if mode and tostring(mode) ~= "" then
     flags[#flags + 1] = "--permission-mode"
     flags[#flags + 1] = tostring(mode)
   end
+  if rc == true then flags[#flags + 1] = "--remote-control" end
   return flags
 end
 
@@ -2673,11 +2781,14 @@ function M.spawnSpec(editor, project, task, opts)
   opts = opts or {}
   editor = tostring(editor or ""):lower()
   task = (task and #task > 0) and task or nil
-  local flags = M.spawnFlags(opts.permissionMode, opts.effort)
   local env = opts.env
   local ssh = opts.ssh
   local hasEnv = type(env) == "table" and #env > 0
   local isSsh = type(ssh) == "table" and ssh.host and tostring(ssh.host) ~= ""
+  -- Remote Control rides the launch flag only for a LOCAL session (an ssh-remote box
+  -- registers RC to its own claude.ai window, defeating the "window into my local
+  -- session" model); the gateway/native gate is the caller's (FX.spawnSession).
+  local flags = M.spawnFlags(opts.permissionMode, opts.effort, opts.remoteControl == true and not isSsh)
   if editor == "kitty" then
     -- A fresh kitty window with remote control on a known socket (default ON), so
     -- click-to-answer / mode-switch (Part A) work without touching global config.

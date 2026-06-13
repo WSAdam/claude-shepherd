@@ -80,7 +80,9 @@ The detail panel has:
   connect to API (ECONNRESET)`) that aborts the turn without a Stop, its tile turns a distinct
   **magenta "Error"** and the Approve button becomes **Continue**; one click types `continue` +
   Enter to resume the aborted turn. Detected from the transcript (no hooks); auto-respawn is
-  held off so you resume the *same* session rather than relaunching it.
+  held off so you resume the *same* session rather than relaunching it. **Auto-Continue**
+  (⚙ Settings, off by default) does this for you: after a grace delay it types `continue`
+  automatically, capped per folder so a persistently dead connection can't loop.
 - **Autopilot** — time-box a session to auto-approve all its prompts (needs the gate + config).
 - **Clear / Compact** — pop a yes/no confirm, then run `/clear` or `/compact` in the session.
 - **Improve** — pull this repo's un-applied improvement insights from the AI Monsters
@@ -217,6 +219,25 @@ Spawning is **dry-run until you opt in**: leave it off to log the exact command 
 (`spawn.live`; the `ORCH_DRY_RUN` code default stays as a safety net). The new session shows up as a
 tile automatically. (The ⌘⌥S hotkey falls back to two native prompts if the modal can't open.)
 
+### Auto-enable Remote Control (claude.ai / mobile)
+
+Claude Code's own **Remote Control** lets you drive a *local* session from claude.ai or the
+Claude app. Shepherd can turn it on for you (⚙ Settings → *Claude Code Remote Control*; on by
+default — distinct from the Kitty `kitty @` control above, which is how Shepherd drives the
+window):
+
+- **On spawn** (`remoteControl.onSpawn`) — new Shepherd-spawned sessions launch with the
+  documented `--remote-control` flag, so they register Remote Control with no extra step. This
+  applies only to **local, native-Anthropic** sessions: Remote Control needs a claude.ai login
+  and rejects gateway/SSH providers, so the flag is skipped for those.
+- **On startup** (`remoteControl.sweepOnStartup`) — when Shepherd starts, it types `/rc` into
+  already-running idle/finished local sessions, so after a computer restart Remote Control is
+  re-armed across the fleet (it skips sessions mid-turn or waiting on a prompt; `/rc` is harmless
+  to repeat).
+- **Sessions you start yourself in a terminal** aren't Shepherd-spawned, so to auto-register them
+  run `/config` inside Claude Code once and set **Enable Remote Control for all sessions** — there
+  is no settings.json key documented for that toggle, so Shepherd can't set it for you.
+
 ## Providers & models (multi-model / other companies / local)
 
 Claude Shepherd supervises **Claude Code** sessions, and Claude Code is provider-flexible,
@@ -266,11 +287,17 @@ Shepherd reads token usage straight from Claude Code's **local transcript files*
 (`~/.claude/projects/<proj>/<session>.jsonl`), which log every turn's `usage`. Three views:
 
 - **Context-fullness bar (per tile)** — the last turn's prompt size (input + cache) ÷ the model's
-  context window, colored blue → amber → red as it fills. Tells you which session to `/compact`.
+  context window, with the **numeric `% shown on the bar`**. Tells you which session to `/compact`.
   The window is **model-aware** (Opus 4.x / Sonnet 4.6 = 1M on Claude Code; others 200k), with a
   per-provider `contextLimit` override and a self-healing guard so a session never reads a false
-  100%. Computed on the 60s usage pass (and live on the 1s loop for active sessions), so it shows
-  on **every** tile — including idle/finished ones. **Local only, zero tokens, zero network.**
+  100%. To **match Claude Code's own "% until auto-compact"** (which measures against the window
+  minus an output reserve, so it reads higher than raw tokens/window), the bar divides by
+  `window × context.autoCompactFraction` (default `0.92` — hand-tunable in `cc-config.json`; the
+  exact threshold is undocumented, so this is a close approximation). The color steps through **7
+  bands** — calm below 50%, a new color every 10% (50/60/70/80/90), and a distinct **critical**
+  band for the last 5% (95–100%). Computed on the 60s usage pass (and live on the 1s loop for
+  active sessions), so it shows on **every** tile — including idle/finished ones. **Local only,
+  zero tokens, zero network.**
 - **Fleet total (footer under the grid)** — cumulative tokens across active sessions (headline
   **excludes cache reads** — input + output + cache-creation — since cache reads dominate the gross
   count but aren't how the plan is metered; gross is on hover). Per-model breakdown in the detail
@@ -426,6 +453,20 @@ These extend the panel without changing any existing behavior when left off:
   capped by `respawn.auto.maxRetries` **per launch folder** (the budget resets only after
   sustained healthy running, so a crash-looping folder can't thrash). Sessions waiting on
   an **approval are never auto-respawned** — that's the escalation nag's job.
+- **autoContinue** — **automatic** API-error recovery (a sibling to auto-respawn, but it
+  resumes the *same* session instead of relaunching). When a tile shows the magenta `Error`
+  state, after `autoContinue.delaySeconds` (default 60) Shepherd types `continue`, capped by
+  `autoContinue.maxAttempts` **per launch folder** (default 3, fires spaced ~delay apart; the
+  budget resets on a clean turn completion, so a dead connection can't loop). Off by default;
+  emits an `auto_continue` ledger event.
+- **remoteControl** — auto-enable **Claude Code's Remote Control** (drive a local session from
+  claude.ai / mobile). `onSpawn` adds the `--remote-control` launch flag to new spawns (local
+  native-Anthropic only); `sweepOnStartup` types `/rc` into already-running local sessions on
+  startup. Both on by default. See "Auto-enable Remote Control" above. (Distinct from
+  `spawn.kittyRemote`, which is the Kitty `kitty @` control Shepherd uses to drive windows.)
+- **context.autoCompactFraction** — the per-tile context bar's denominator factor (default
+  0.92) so it matches Claude Code's "% until auto-compact"; see *Token usage* above. Hand-edit
+  in `cc-config.json` (preserved across Settings saves).
 - **escalation.hung** — a **stuck-session watchdog**: a session that stays `working` with
   no transcript growth for `escalation.hung.minutes` gets a ⏳ + purple ring and nags once
   per stall (reusing the escalation sound/push prefs). Complements the approval-wait

@@ -133,6 +133,24 @@
     }
   },
 
+  "autoContinue": {
+    "_comment": "Auto-Continue on a frozen API error (opt-in, bounded). When a tile shows the magenta 'Error' state — a session aborted on an API error (e.g. ECONNRESET) with no Stop hook, so it's stuck 'working' but actually stopped — wait delaySeconds, then type 'continue' to resume the SAME session/context (exactly what the manual Continue button does). Capped at maxAttempts PER LAUNCH FOLDER; fires are spaced ~delaySeconds apart, and a CLEAN turn completion (done/idle) resets the budget — the 'working' the continue itself produces does NOT, so a persistently dead connection can't loop forever. enabled=false keeps manual-only Continue.",
+    "enabled": false,
+    "delaySeconds": 60,
+    "maxAttempts": 3
+  },
+
+  "context": {
+    "_comment": "Per-tile context-fullness bar tuning. autoCompactFraction models the output reserve Claude Code holds back, so the bar tracks the editor's '% until auto-compact' instead of raw tokens/window. The threshold is undocumented; 0.92 was calibrated against a live 1M session (a smaller value reads fuller). Hand-edit only — preserved across Settings saves.",
+    "autoCompactFraction": 0.92
+  },
+
+  "remoteControl": {
+    "_comment": "Auto-enable Claude Code's own Remote Control (drive a local session from claude.ai / the Claude app) — distinct from spawn.kittyRemote (which lets Shepherd drive the Kitty window). onSpawn launches new Shepherd-spawned sessions with the documented `--remote-control` flag, but only for LOCAL native-Anthropic sessions (RC rejects gateway/ssh providers and needs claude.ai auth). sweepOnStartup types `/rc` into already-running idle/done LOCAL sessions on Shepherd boot, so a computer restart re-arms RC across sessions started outside Shepherd. Both ON by default. NOTE: to auto-register RC for sessions you start yourself in a terminal, run `/config` in Claude Code and set 'Enable Remote Control for all sessions' — there is no documented settings.json key for that toggle.",
+    "onSpawn": true,
+    "sweepOnStartup": true
+  },
+
   "insights": {
     "_comment": "Fleet insights view (Feature A) — the 📊 toolbar button. A read-only aggregate of the ledger (turns/session, approval & denial rates, decision provenance, time the fleet spent blocked on you). Always available like the audit view; shows zeros until the ledger is enabled. maxBlockSeconds caps a single request→approval gap when summing 'time blocked on you', so an overnight idle isn't counted.",
     "maxBlockSeconds": 1800

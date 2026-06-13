@@ -107,8 +107,33 @@ remaining items. Full per-round detail is in CHANGELOG.md and git history.
      delivery-gated pops, `by:"router"` ledger events, starvation flag. Queue ops now
      carry the arm flag (`qkeep`) so a routed feed can't disarm its own project.
   Suite **1062 core + 167 ui + 167 bash**, all green.
+- **Context bar + Auto-Continue + Auto-Remote-Control batch (June 2026)**:
+  1. **Context bar — % on the bar + match the editor + color ramp**: the per-tile bar now
+     overlays the numeric `NN%`, divides by an **effective** limit (`context.autoCompactFraction`,
+     default 0.92 — the output reserve Claude Code holds back, so the bar tracks the editor's
+     "% until auto-compact" instead of raw tokens/window; calibrated against a live 1M session,
+     hand-tunable, preserved across Settings saves), and colors in **7 bands** — calm `<50`, a new
+     color every 10% (50/60/70/80/90), and a distinct **critical** band for the last 5% (95–100,
+     gently pulsing). `core.contextBand` (mirrored in the panel `barLevel`) + a taller labeled bar.
+  2. **Auto-Continue on a frozen API error** (`autoContinue.{enabled=false,delaySeconds=60,
+     maxAttempts=3}`): a tile in the magenta `Error` state (e.g. ECONNRESET) auto-types `continue`
+     after the grace delay — the SAME serialized keystroke the manual button uses — capped **per
+     folder** with fires spaced ~`delaySeconds` apart; a clean turn completion resets the budget
+     (the `working` the continue produces does not), so a dead connection can't loop. Ledgers an
+     `auto_continue` event (in the 🔔 Alerts feed). `core.shouldAutoContinue`/`stepAutoContinue`;
+     ⚙ Settings toggle.
+  3. **Auto-enable Claude Code Remote Control** (`remoteControl.{onSpawn=true,sweepOnStartup=true}`):
+     new Shepherd spawns launch with the documented `--remote-control` flag (LOCAL native-Anthropic
+     only — RC rejects gateway/ssh providers); on startup Shepherd types `/rc` into already-running
+     idle/done LOCAL sessions so a computer restart re-arms RC across the fleet. `core.spawnFlags`
+     (rc) + `core.remoteControlSweepTargets`; ⚙ Settings toggles. NOTE: to auto-register RC for
+     sessions you start yourself in a terminal, run `/config` → **Enable Remote Control for all
+     sessions** (no documented settings.json key exists for that toggle, so Shepherd can't set it).
+  Suite **1193 core + 178 ui + 167 bash**, all green.
 
 ## TODO
+
+### Needs hardware (runbook ready — see [docs/hardware-verification.md](docs/hardware-verification.md))
 - **Verify on a real Kitty box** (the one thing that needs the hardware): the `core.KITTY_KEY`
   send-key tokens (`enter`/`esc`/`down`/`tab` — `kitty @ send-key` fails *silently*) and the
   AskUserQuestion picker nav (`answerKeys` = arrow-down×N + Enter). Retune `KITTY_KEY` /
@@ -133,10 +158,16 @@ remaining items. Full per-round detail is in CHANGELOG.md and git history.
      nudge/stop/clear/compact can be un-greyed behind the flag.
   7. Remote SessionEnd → mirror file deleted next sync → tile disappears (no local prune).
   8. Spawn-then-appear: spawn via an ssh provider → tile shows within ~2× intervalSeconds.
-- **4c-E follow-ups** (routing v1 is done-only by design): idle sessions as routing
-  targets (flagged off pending UX thought — idle may be a session you're typing into),
-  task→session affinity/tags, auto-spawn on starvation, remote tiles as routing targets
-  (pairs with bridge.keystrokes or a remote feed path).
+### Deferred (needs a UX decision before building)
+- **4c-E follow-ups** (routing v1 is done-only by design) — **intentionally not built in the
+  June 2026 batch**: each needs a design call before it's worth the code, so building them
+  speculatively behind dead flags was declined. Say the word to green-light any:
+  - **task→session affinity/tags** — no existing tag source; needs a decision on where a task's
+    tag comes from (queue-line syntax? session group? provider?).
+  - **auto-spawn on starvation** — clear trigger (the `queueStarved`/`starvedSince` clock exists)
+    but "spawn a new session for me" is an aggressive automation; needs a cap + UX on when/where.
+  - **idle sessions as routing targets** — idle may be a session you're actively typing into.
+  - **remote tiles as routing targets** — pairs with `bridge.keystrokes` (hardware-gated above).
 
 ## Tooling stance (from the June 2026 review)
 

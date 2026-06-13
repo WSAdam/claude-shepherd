@@ -25,8 +25,8 @@ network, no multi-user, no secrets — it reads session status off the local fil
   cc-core, or smoke-test after `make install`.
 - **Panel JS** (embedded in claude-dashboard.lua as an HTML string) renders the grid
   client-side. A few pure cc-core helpers are **hand-mirrored** in this JS for instant
-  interactivity (`filterTiles`, `applyGroups`, `fmtDuration`, `usageBarLevel`); these twins
-  must stay in sync — comments mark them. `BULK_RULES` is single-sourced (injected as
+  interactivity (`filterTiles`, `applyGroups`, `fmtDuration`, and `contextBand` → the JS
+  `barLevel`); these twins must stay in sync — comments mark them. `BULK_RULES` is single-sourced (injected as
   `__BULK_RULES__`) so the bulk-bar count can't drift from what Lua acts on.
 - **Shell hooks** — [cc-status.sh](cc-status.sh) / [cc-approve.sh](cc-approve.sh) /
   [cc-popup.sh](cc-popup.sh) + [cc-lib.sh](cc-lib.sh). Claude Code hooks write session status
@@ -59,6 +59,24 @@ network, no multi-user, no secrets — it reads session status off the local fil
   `FX.writeDecision` echoes it (`allow <nonce>`, written tmp+rename); the gate consumes only
   a matching nonce (legacy bare verbs need a strictly-newer mtime) via an atomic PID-owned
   claim, restoring non-matching answers for their owner.
+- **The context bar tracks the editor, not the raw window.** `core.contextFractionFor` divides
+  context tokens by `window * context.autoCompactFraction` (default 0.92) so the per-tile bar
+  matches Claude Code's "% until auto-compact" (the editor measures against the window minus an
+  output reserve). The threshold is **undocumented** — the fraction is an approximation, hand-
+  tunable, and preserved across Settings saves (`SETTINGS_KEEP_SUBKEYS.context`). Color comes
+  from `core.contextBand` (7 bands, mirrored in the panel `barLevel` twin — keep them in sync).
+- **Two different "remote controls" — don't conflate them.** `spawn.kittyRemote` /
+  `kittyAutoRemote` is **Kitty's** `kitty @` control (so *Shepherd* can drive the window
+  headlessly). `remoteControl.*` is **Claude Code's own** Remote Control (so *you* drive a local
+  session from claude.ai / mobile): `onSpawn` adds the `--remote-control` launch flag (LOCAL
+  native-Anthropic only — it rejects gateway/ssh and needs claude.ai auth), `sweepOnStartup`
+  types `/rc` into already-running idle/done local sessions. The "enable for all sessions"
+  Claude Code setting has **no documented settings.json key**, so Shepherd can't set it — it's a
+  manual `/config` toggle (noted in the ⚙ help + README).
+- **Auto-Continue is a bounded loop-guard.** `core.stepAutoContinue` resumes an `error` tile by
+  typing `continue` after a grace delay, but charges a **per-folder** budget that resets ONLY on
+  a clean `done`/`idle` — never on the `working` the continue itself produces — so a persistently
+  dead connection can't loop. Same edge discipline as auto-respawn (off by default, ledgered).
 
 ## Workflow
 
@@ -70,7 +88,7 @@ network, no multi-user, no secrets — it reads session status off the local fil
 - Typical change: add a pure cc-core function + its regression test → wire it into the
   dashboard → mirror in the panel JS if it affects rendering (and note the twin).
 
-## State (2026-06-12)
+## State (2026-06-13)
 
 Cross-machine / controls roadmap done. Fleet-scale console shipped (tile search, session
 groups, bulk fleet actions, per-session timeline, auto-respawn, insights sparklines,
@@ -85,6 +103,14 @@ per-session gate decision log, 🔔 notification history, queue editing/bulk-pas
 spawn presets + fd fuzzy folder search, 🔎 rg-backed fleet-wide transcript/ledger search,
 **4c-E project routing** (level-triggered dispatcher, double opt-in), and the **SSH status
 bridge** (rsync-mirrored ⇄ remote tiles, headless approve/deny over ssh — hardware
-verification checklist pending). Suite: **1062 core + 167 ui + 167 bash** checks, all
-green. Remaining work is in [todos.md](todos.md) (Kitty token verify + the bridge's
-real-box checklist + routing follow-ups).
+verification checklist pending).
+
+**June 13 batch** (this session): (1) the **context bar** now shows the `NN%` on the bar,
+tracks the editor's "% until auto-compact" via `context.autoCompactFraction`, and colors in 7
+bands (calm <50, every 10% to 90, critical last-5%); (2) **Auto-Continue** auto-resumes an
+API-error tile after a grace delay (bounded per-folder, off by default); (3) **Auto-Remote-
+Control** launches new spawns with `--remote-control` and sweeps `/rc` into running sessions on
+startup. Routing follow-ups were **deliberately deferred** (UX-blocked — see todos.md). Suite:
+**1193 core + 178 ui + 167 bash** checks, all green. Remaining work is in [todos.md](todos.md):
+the **needs-hardware** runbook ([docs/hardware-verification.md](docs/hardware-verification.md))
+for the Kitty tokens + the SSH bridge, and the deferred routing follow-ups.

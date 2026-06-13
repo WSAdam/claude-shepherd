@@ -577,6 +577,16 @@ do
         src:find("delete p.baseUrl; delete p.authTokenEnv;", 1, true) ~= nil)
   check("js-pin: non-gateway kind clears smallFastModel/headers on Save",
         src:find("delete p.smallFastModel; delete p.headers;", 1, true) ~= nil)
+  -- Context bar: the % must live ON the bar (a .pct label), the fill width is still the
+  -- pct, and the band classes/colors must cover b0..b6 (mirror of core.contextBand).
+  check("js-pin: ctx-bar carries a visible % label",
+        src:find('<span class="pct">\'+pct+\'%</span>', 1, true) ~= nil)
+  check("js-pin: ctx-bar fill width is still driven by pct",
+        src:find("<i style=\"width:'+pct+'%\">", 1, true) ~= nil)
+  check("js-pin: barLevel mirrors the 7-band contextBand ramp",
+        src:find('f>=0.95?"b6":f>=0.90?"b5"', 1, true) ~= nil)
+  check("js-pin: ctx-bar CSS defines the calm band b0", src:find(".ctx-bar.b0 > i", 1, true) ~= nil)
+  check("js-pin: ctx-bar CSS defines the critical band b6", src:find(".ctx-bar.b6 > i", 1, true) ~= nil)
 end
 
 -- ---- Injection-tail chokepoint + delivery-gated alerts (R3 #0/#1/#2/#5) -----
@@ -613,6 +623,16 @@ do
         select(2, src:gsub('dispatchSerialized%(it[em]*, action, function%(%) core%.handleAction%(FX, it[em]*, action%) end%)', "")) >= 2)
   check("inject-pin: generic per-tile tail uses the chokepoint",
         src:find("dispatchSerialized(item, a, dispatch)", 1, true) ~= nil)
+  -- Auto-Continue fires the SAME serialized continue keystroke the manual button uses.
+  check("inject-pin: auto-continue serialized through the chokepoint",
+        src:find('dispatchSerialized(it, "continue", function() core.handleAction(FX, it, "continue") end)', 1, true) ~= nil)
+  check("inject-pin: auto-continue ledgers the resume",
+        src:find('type = "auto_continue", attempt = cstep.attempts', 1, true) ~= nil)
+  -- Remote-control startup sweep types /rc through the SAME serialized chokepoint.
+  check("inject-pin: RC startup sweep serialized through the chokepoint",
+        src:find('dispatchSerialized(it, "rc", function() FX.typeIntoWindow(winTarget(it), "/rc") end)', 1, true) ~= nil)
+  check("inject-pin: RC sweep targets come from cc-core",
+        src:find("core.remoteControlSweepTargets(list)", 1, true) ~= nil)
 
   -- #0: the audit-review alert is gated on pasteIntoWindow's delivery status
   -- (a skipped paste must never announce "sent a N-event review").

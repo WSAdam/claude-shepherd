@@ -859,6 +859,47 @@ do
   eq("claudebin: nil listing -> nil", core.newestClaudeExtension(nil), nil)
 end
 
+-- ---- Remote Control launch flag + startup-sweep targeting ------------------
+do
+  -- spawnFlags: --remote-control rides only when rc=true; composes with --permission-mode
+  eq("rcflag: omitted by default", table.concat(core.spawnFlags(nil, nil), " "), "")
+  check("rcflag: present when rc=true",
+        table.concat(core.spawnFlags(nil, nil, true), " "):find("--remote-control", 1, true) ~= nil)
+  eq("rcflag: absent when rc=false", table.concat(core.spawnFlags("plan", nil, false), " "), "--permission-mode plan")
+  check("rcflag: composes with permission-mode",
+        table.concat(core.spawnFlags("plan", nil, true), " "):find("--permission%-mode plan.*--remote%-control") ~= nil)
+
+  -- spawnSpec threads the flag through for a LOCAL session, drops it for ssh (the remote
+  -- box would register RC to its own claude.ai window)
+  local rk = core.spawnSpec("kitty", "/p", nil, { remoteControl = true })
+  check("rcspec(kitty): --remote-control present", table.concat(rk.argv, " "):find("--remote-control", 1, true) ~= nil)
+  local rt = core.spawnSpec("terminal", "/p", nil, { remoteControl = true, terminal = "Terminal" })
+  check("rcspec(terminal): --remote-control in the launch line", rt.applescript:find("--remote-control", 1, true) ~= nil)
+  local rkSsh = core.spawnSpec("kitty", "/p", nil, { remoteControl = true, ssh = { host = "h" } })
+  check("rcspec(kitty/ssh): flag dropped for a remote box", table.concat(rkSsh.argv, " "):find("--remote-control", 1, true) == nil)
+  local rkOff = core.spawnSpec("kitty", "/p", nil, { remoteControl = false })
+  check("rcspec(kitty): no flag when off", table.concat(rkOff.argv, " "):find("--remote-control", 1, true) == nil)
+
+  -- remoteControlSweepTargets: only real, local, non-stale, quiescent (idle/done) sessions
+  local list = {
+    { key = "a", status = "idle",     session_id = "s1" },                 -- target
+    { key = "b", status = "done",     session_id = "s2" },                 -- target
+    { key = "c", status = "working",  session_id = "s3" },                 -- mid-turn: skip
+    { key = "d", status = "approval", session_id = "s4" },                 -- mid-prompt: skip
+    { key = "e", status = "error",    session_id = "s5" },                 -- errored: skip
+    { key = "f", status = "idle",     session_id = "s6", stale = true },   -- stale ghost: skip
+    { key = "g", status = "idle",     session_id = "s7", remote = true },  -- remote tile: skip
+    { key = "h", status = "idle",     session_id = "" },                   -- no real session: skip
+    { key = "i", status = "idle",     session_id = "s9", model = "gemini-2.5-pro",
+      base_url = "http://localhost:4000" },                               -- gateway: /rc would error: skip
+  }
+  local tgts = core.remoteControlSweepTargets(list)
+  eq("rcsweep: count = the two quiescent local sessions", #tgts, 2)
+  eq("rcsweep: first is the idle session", tgts[1].key, "a")
+  eq("rcsweep: second is the done session", tgts[2].key, "b")
+  eq("rcsweep: nil list -> empty", #core.remoteControlSweepTargets(nil), 0)
+end
+
 -- ---- spawnFlags ------------------------------------------------------------
 do
   eq("spawnflags: none -> empty", #core.spawnFlags(nil, nil), 0)
@@ -1147,17 +1188,41 @@ do
   eq("tier: 437k -> 1M", core.nextContextTier(437000), 1000000)
   eq("tier: 1.4M -> 2M", core.nextContextTier(1400000), 2000000)
 
-  -- contextFractionFor: the real bug case — 437k on opus-4-8 is ~44% of 1M, NOT 100%
+  -- contextFractionFor: 437k on opus-4-8 -> effective limit is 1M * 0.92 = 920k (auto-compact
+  -- reserve), so ~47.5% -- still NOT a false 100% (the original bug), and tracks the editor.
   local frac, lim = core.contextFractionFor({}, "claude-opus-4-8", 437000)
-  eq("ctxfrac: opus 437k limit is 1M", lim, 1000000)
-  check("ctxfrac: opus 437k ~= 0.44 (not full)", frac > 0.43 and frac < 0.45)
-  -- self-heal: unknown model at 437k uses the 1M tier, not a false 100%
+  eq("ctxfrac: opus 437k effective limit is 920k", lim, 920000)
+  check("ctxfrac: opus 437k ~= 0.475 (not full)", frac > 0.46 and frac < 0.49)
+  -- self-heal: unknown model at 437k uses the 1M tier (x0.92), not a false 100%
   local f2, l2 = core.contextFractionFor({}, "mystery-model", 437000)
-  eq("ctxfrac: unknown 437k bumped to 1M tier", l2, 1000000)
+  eq("ctxfrac: unknown 437k bumped to 1M tier x0.92", l2, 920000)
   check("ctxfrac: unknown 437k not full", f2 < 0.5)
-  -- a genuinely full 200k model still reads ~100%
+  -- a genuinely full 200k model still reads 100% (198k/184k effective -> clamped)
   local f3 = core.contextFractionFor({}, "claude-haiku-4-5", 198000)
   check("ctxfrac: haiku 198k/200k ~ full", f3 >= 0.98)
+  -- autoCompactFraction: config override + clamp on bad values
+  eq("autocompact: default 0.92", core.autoCompactFraction({}), 0.92)
+  eq("autocompact: config override", core.autoCompactFraction({ context = { autoCompactFraction = 0.85 } }), 0.85)
+  eq("autocompact: zero -> default", core.autoCompactFraction({ context = { autoCompactFraction = 0 } }), 0.92)
+  eq("autocompact: >1 -> default", core.autoCompactFraction({ context = { autoCompactFraction = 1.5 } }), 0.92)
+  -- a smaller fraction makes the same tokens read fuller (reserve tuned tighter):
+  -- 460k/(1M*0.5)=0.92 vs 460k/(1M*0.92)=0.50 at the default
+  local fTight = core.contextFractionFor({ context = { autoCompactFraction = 0.5 } }, "claude-opus-4-8", 460000)
+  local fDefault = core.contextFractionFor({}, "claude-opus-4-8", 460000)
+  check("ctxfrac: tighter fraction reads fuller", fTight > fDefault and fTight > 0.9)
+
+  -- contextBand: calm <50, then a band every 10% from 50, distinct last-5% critical band
+  eq("band: 0 -> b0", core.contextBand(0), "b0")
+  eq("band: 0.49 -> b0", core.contextBand(0.49), "b0")
+  eq("band: 0.50 -> b1", core.contextBand(0.50), "b1")
+  eq("band: 0.59 -> b1", core.contextBand(0.59), "b1")
+  eq("band: 0.60 -> b2", core.contextBand(0.60), "b2")
+  eq("band: 0.70 -> b3", core.contextBand(0.70), "b3")
+  eq("band: 0.80 -> b4", core.contextBand(0.80), "b4")
+  eq("band: 0.90 -> b5", core.contextBand(0.90), "b5")
+  eq("band: 0.94 -> b5", core.contextBand(0.94), "b5")
+  eq("band: 0.95 -> b6 (last 5%)", core.contextBand(0.95), "b6")
+  eq("band: 1.0 -> b6", core.contextBand(1.0), "b6")
 end
 
 -- ---- path helpers (folder browser) -----------------------------------------
@@ -2569,6 +2634,76 @@ do
   eq("step: respawnable edge suppressed once cap is reached", rok3.spawn, false)
   eq("step: capped edge reports wouldFire=false (cap is part of the gate)", rok3.wouldFire, false)
   eq("step: capped edge does NOT over-charge the budget", a7["pf"], 2)
+end
+
+-- ---- shouldAutoContinue: time-gated, capped resume of a frozen API error ----
+do
+  local function with(o)
+    local a = { status = "error", elapsed = 100, minSeconds = 60, attempts = 0, maxAttempts = 3 }
+    for k, v in pairs(o) do a[k] = v end
+    return a
+  end
+  eq("autocont: fires once errored + past delay + under cap", core.shouldAutoContinue(with{}), true)
+  eq("autocont: not before the grace delay", core.shouldAutoContinue(with{ elapsed = 30 }), false)
+  eq("autocont: exactly at the delay -> fires", core.shouldAutoContinue(with{ elapsed = 60 }), true)
+  eq("autocont: only the error state (working never)", core.shouldAutoContinue(with{ status = "working" }), false)
+  eq("autocont: not on done", core.shouldAutoContinue(with{ status = "done" }), false)
+  eq("autocont: disabled when maxAttempts 0", core.shouldAutoContinue(with{ maxAttempts = 0 }), false)
+  eq("autocont: at cap -> stop", core.shouldAutoContinue(with{ attempts = 3, maxAttempts = 3 }), false)
+  eq("autocont: under cap -> go", core.shouldAutoContinue(with{ attempts = 2, maxAttempts = 3 }), true)
+  eq("autocont: nil args -> false", core.shouldAutoContinue(nil), false)
+end
+
+-- ---- stepAutoContinue: per-tile grace clock + per-folder fire budget --------
+do
+  local st = { since = {}, attempts = {} }
+  local function err(now) return core.stepAutoContinue(st,
+    { key = "k1", projectKey = "pf", status = "error" },
+    { enabled = true, minSeconds = 60, maxAttempts = 2, now = now }) end
+
+  -- the grace clock starts on first sighting; nothing fires until it elapses
+  eq("step-cont: first error sighting does NOT fire", err(1000).fire, false)
+  eq("step-cont: clock stamped at first sighting", st.since["k1"], 1000)
+  eq("step-cont: still inside the grace delay -> no fire", err(1030).fire, false)
+  eq("step-cont: no premature charge", st.attempts["pf"], nil)
+
+  -- past the delay: fire once, charge one, and RESTART the clock (so retries are spaced
+  -- ~minSeconds apart rather than firing maxAttempts times on consecutive ticks)
+  local f1 = err(1061)
+  eq("step-cont: fires once past the grace delay", f1.fire, true)
+  eq("step-cont: charges one attempt", st.attempts["pf"], 1)
+  eq("step-cont: fire restarts the grace clock", st.since["k1"], 1061)
+  eq("step-cont: does not immediately re-fire next tick", err(1062).fire, false)
+
+  -- still errored a full delay later: second (final) fire, then the cap binds
+  eq("step-cont: second fire after another full delay", err(1122).fire, true)
+  eq("step-cont: budget climbs to the cap", st.attempts["pf"], 2)
+  eq("step-cont: at cap -> no more fires even past the delay", err(1200).fire, false)
+  eq("step-cont: capped budget holds", st.attempts["pf"], 2)
+
+  -- a CLEAN completion resets the folder budget AND clears the tile clock; a still-dead
+  -- connection that only flips to `working` (what the continue itself produces) must NOT
+  -- reset, or the cap would never bind and it would loop forever.
+  local stB = { since = { kb = 500 }, attempts = { pfb = 2 } }
+  core.stepAutoContinue(stB, { key = "kb", projectKey = "pfb", status = "working" },
+    { enabled = true, minSeconds = 60, maxAttempts = 2, now = 2000 })
+  eq("step-cont: working clears the tile clock", stB.since["kb"], nil)
+  eq("step-cont: working does NOT reset the folder budget (loop guard)", stB.attempts["pfb"], 2)
+  core.stepAutoContinue(stB, { key = "kb", projectKey = "pfb", status = "done" },
+    { enabled = true, minSeconds = 60, maxAttempts = 2, now = 2100 })
+  eq("step-cont: a clean done resets the folder budget", stB.attempts["pfb"], nil)
+
+  -- disabled never fires and never writes; keyless tiles never nil-key write
+  local stC = { since = {}, attempts = {} }
+  eq("step-cont: disabled -> no fire", core.stepAutoContinue(stC,
+    { key = "kc", projectKey = "pfc", status = "error" },
+    { enabled = false, minSeconds = 60, maxAttempts = 2, now = 9000 }).fire, false)
+  eq("step-cont: disabled past-delay -> no fire", core.stepAutoContinue(stC,
+    { key = "kc", projectKey = "pfc", status = "error" },
+    { enabled = false, minSeconds = 60, maxAttempts = 2, now = 9100 }).fire, false)
+  eq("step-cont: disabled -> no charge", stC.attempts["pfc"], nil)
+  eq("step-cont: keyless tile -> no fire", core.stepAutoContinue(stC,
+    { projectKey = "pfc", status = "error" }, { enabled = true, minSeconds = 0, maxAttempts = 2, now = 1 }).fire, false)
 end
 
 -- ---- bucketEvents: time-series sparkline buckets ---------------------------
