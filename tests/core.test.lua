@@ -1200,11 +1200,16 @@ do
   -- a genuinely full 200k model still reads 100% (198k/184k effective -> clamped)
   local f3 = core.contextFractionFor({}, "claude-haiku-4-5", 198000)
   check("ctxfrac: haiku 198k/200k ~ full", f3 >= 0.98)
-  -- autoCompactFraction: config override + clamp on bad values
+  -- autoCompactFraction: config override + clamp to a SANE range [0.5, 1]
   eq("autocompact: default 0.92", core.autoCompactFraction({}), 0.92)
   eq("autocompact: config override", core.autoCompactFraction({ context = { autoCompactFraction = 0.85 } }), 0.85)
   eq("autocompact: zero -> default", core.autoCompactFraction({ context = { autoCompactFraction = 0 } }), 0.92)
   eq("autocompact: >1 -> default", core.autoCompactFraction({ context = { autoCompactFraction = 1.5 } }), 0.92)
+  -- a tiny value would shrink the denominator to ~0 and pin every tile to a false 100% --
+  -- the floor rejects it (the divide-by-~0 the comment warns about)
+  eq("autocompact: tiny -> default", core.autoCompactFraction({ context = { autoCompactFraction = 0.01 } }), 0.92)
+  eq("autocompact: 0.5 floor is accepted", core.autoCompactFraction({ context = { autoCompactFraction = 0.5 } }), 0.5)
+  eq("autocompact: just under floor -> default", core.autoCompactFraction({ context = { autoCompactFraction = 0.49 } }), 0.92)
   -- a smaller fraction makes the same tokens read fuller (reserve tuned tighter):
   -- 460k/(1M*0.5)=0.92 vs 460k/(1M*0.92)=0.50 at the default
   local fTight = core.contextFractionFor({ context = { autoCompactFraction = 0.5 } }, "claude-opus-4-8", 460000)
@@ -2704,6 +2709,35 @@ do
   eq("step-cont: disabled -> no charge", stC.attempts["pfc"], nil)
   eq("step-cont: keyless tile -> no fire", core.stepAutoContinue(stC,
     { projectKey = "pfc", status = "error" }, { enabled = true, minSeconds = 0, maxAttempts = 2, now = 1 }).fire, false)
+
+  -- missing clock (opts.now == nil): the grace clock degrades to elapsed 0 -> never fires,
+  -- never crashes (pins the implicit fail-closed behavior against a future refactor)
+  local stN = { since = {}, attempts = {} }
+  local rN = core.stepAutoContinue(stN, { key = "kn", projectKey = "pfn", status = "error" },
+    { enabled = true, minSeconds = 60, maxAttempts = 3 })  -- no now
+  eq("step-cont: nil now -> no fire", rN.fire, false)
+  eq("step-cont: nil now -> elapsed 0", rN.elapsed, 0)
+
+  -- THE anti-loop invariant, exercised as a natural sequence (not pre-seeded state): the
+  -- `working` the continue itself produces must NOT reset the budget, or a still-dead
+  -- connection that re-errors would loop forever past maxAttempts.
+  local stL = { since = {}, attempts = {} }
+  local function stepL(status, now) return core.stepAutoContinue(stL,
+    { key = "kl", projectKey = "pfl", status = status },
+    { enabled = true, minSeconds = 60, maxAttempts = 2, now = now }) end
+  stepL("error", 1000)                                   -- clock starts
+  eq("step-cont(seq): first fire after the delay", stepL("error", 1061).fire, true)
+  eq("step-cont(seq): budget at 1", stL.attempts["pfl"], 1)
+  -- the continue drives the tile to `working`: clock clears, budget MUST hold
+  eq("step-cont(seq): working does not fire", stepL("working", 1062).fire, false)
+  eq("step-cont(seq): working held the budget at 1 (loop guard)", stL.attempts["pfl"], 1)
+  -- still dead -> re-errors: a fresh clock, then the second fire COUNTS toward the cap
+  stepL("error", 1100)                                   -- clock restarts on re-error
+  eq("step-cont(seq): second fire counts toward the cap", stepL("error", 1161).fire, true)
+  eq("step-cont(seq): budget at the cap", stL.attempts["pfl"], 2)
+  stepL("error", 1300)
+  eq("step-cont(seq): capped -> no further fires", stepL("error", 1400).fire, false)
+  eq("step-cont(seq): cap holds (no runaway loop)", stL.attempts["pfl"], 2)
 end
 
 -- ---- bucketEvents: time-series sparkline buckets ---------------------------

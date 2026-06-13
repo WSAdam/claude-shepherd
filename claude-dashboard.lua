@@ -2835,10 +2835,24 @@ local HTML = [[
 .a-narr{ white-space:pre-wrap; color:#cfd2db; font-family:ui-monospace,Menlo,monospace; font-size:11px; line-height:1.5; margin:0; }
 /* notification history (roadmap #6): "since you last looked" highlight + 🔔 badge */
 .a-row.unseen{ background:#1d2333; border-left:2px solid #6ea8fe; padding-left:6px; }
-#notify-btn{ background:#21232c; color:#cfd2db; border:1px solid #2c2f3a; border-radius:8px;
-             font-size:13px; padding:3px 8px; cursor:pointer; position:relative; }
+/* collapsed toolbar: one list button (☰) opens a drawer of the views */
+#menu-wrap{ position:relative; display:inline-flex; }
+#menu-btn{ background:#21232c; color:#cfd2db; border:1px solid #2c2f3a; border-radius:8px;
+           font-size:14px; line-height:1; padding:4px 9px; cursor:pointer; position:relative; }
+#menu-btn:hover{ background:#272a34; }
+#toolmenu{ display:none; position:absolute; top:calc(100% + 5px); right:0; z-index:30;
+           background:#1b1d24; border:1px solid #2c2f3a; border-radius:10px; padding:5px;
+           box-shadow:0 8px 24px rgba(0,0,0,.5); min-width:188px; }
+#toolmenu.show{ display:block; }
+#toolmenu .tm-item{ display:flex; align-items:center; gap:9px; width:100%; box-sizing:border-box;
+           text-align:left; background:transparent; border:0; color:#e8e9ee; font-size:13px;
+           padding:7px 9px; border-radius:7px; cursor:pointer; white-space:nowrap; }
+#toolmenu .tm-item:hover{ background:#262a36; }
+#toolmenu .tm-ic{ font-size:14px; width:18px; text-align:center; flex:0 0 auto; }
 #notify-badge{ display:none; background:#ef4444; color:#fff; border-radius:8px; font-size:9px;
                padding:0 4px; margin-left:3px; vertical-align:top; font-variant-numeric:tabular-nums; }
+#tm-notify-badge{ display:none; background:#ef4444; color:#fff; border-radius:8px; font-size:9px;
+               padding:0 4px; margin-left:auto; font-variant-numeric:tabular-nums; }
 #a-foot{ display:flex; gap:8px; align-items:center; padding:8px 10px; border-top:1px solid #2c2f3a; }
 #a-info{ margin-left:auto; }
 /* Fleet-wide search overlay (roadmap #3; modeled on #audit). Read-only. */
@@ -2884,11 +2898,16 @@ local HTML = [[
     <span class="right">
       <button id="spawn" onclick="openNew()" title="Spawn a new Claude session">New</button>
       <button id="caffeine" onclick="toggleCaffeine()" title="Keep this Mac awake — pmset disablesleep (asks for your password)">☕ Sleep ok</button>
-      <button id="search-btn" onclick="toggleSearch()" title="Filter sessions (name, project, status, group)">🔍</button>
-      <button id="fsearch-btn" onclick="openFleetSearch()" title="Find in fleet — search every session's transcript + the ledger (which session touched that file?)">🔎</button>
-      <button id="insights-btn" onclick="openInsights()" title="Fleet insights — aggregate stats from the ledger">📊</button>
-      <button id="audit-btn" onclick="openAudit()" title="Audit ledger — recorded fleet activity">📜</button>
-      <button id="notify-btn" onclick="openNotifications()" title="Notification history — what fired while you were away">🔔<span id="notify-badge"></span></button>
+      <span id="menu-wrap">
+        <button id="menu-btn" onclick="toggleMenu(event)" title="Views — search, insights, audit, notifications">☰<span id="notify-badge"></span></button>
+        <div id="toolmenu">
+          <button class="tm-item" onclick="menuPick('search')"><span class="tm-ic">🔍</span> Filter sessions</button>
+          <button class="tm-item" onclick="menuPick('fsearch')"><span class="tm-ic">🔎</span> Find in fleet</button>
+          <button class="tm-item" onclick="menuPick('insights')"><span class="tm-ic">📊</span> Fleet insights</button>
+          <button class="tm-item" onclick="menuPick('audit')"><span class="tm-ic">📜</span> Audit ledger</button>
+          <button class="tm-item" onclick="menuPick('notify')"><span class="tm-ic">🔔</span> Notifications<span id="tm-notify-badge"></span></button>
+        </div>
+      </span>
       <button id="settings-btn" onclick="openSettings()" title="Settings">⚙</button>
       <select id="theme" onchange="onThemeChange()">
         <option value="cards">Cards</option>
@@ -3093,7 +3112,7 @@ local HTML = [[
       <div class="s-sec">Claude Code Remote Control (drive sessions from claude.ai / mobile)</div>
       <label class="s-row"><input type="checkbox" id="s-rc-spawn"> Launch new sessions with <code>--remote-control</code> (auto-register RC)</label>
       <label class="s-row"><input type="checkbox" id="s-rc-sweep"> On startup, type <code>/rc</code> into already-running sessions</label>
-      <div class="s-help">Distinct from Kitty remote control above (that lets Shepherd drive the window). This is Claude Code's own Remote Control — continue a local session from claude.ai or the Claude app. New Shepherd spawns get the <code>--remote-control</code> flag (native-Anthropic, local sessions only — RC rejects gateway/ssh providers); the startup sweep covers sessions started outside Shepherd. To auto-enable RC for sessions you start in a terminal yourself, run <code>/config</code> in Claude Code and set <b>Enable Remote Control for all sessions</b> (no settings.json key is documented for it).</div>
+      <div class="s-help">Distinct from Kitty remote control above (that lets Shepherd drive the window). This is Claude Code's own Remote Control — continue a local session from claude.ai or the Claude app. New Shepherd spawns get the <code>--remote-control</code> flag (native-Anthropic, local sessions only — RC rejects gateway/ssh providers); the startup sweep covers sessions started outside Shepherd. To auto-enable RC for sessions you start in a terminal yourself, run <code>/config</code> in Claude Code and set <b>Enable Remote Control for all sessions</b> (no settings.json key is documented for it).<br><b>⚠ On by default:</b> a session with Remote Control can be driven from your claude.ai account, so anyone with access to that account (or the Claude app) can type into a <i>local</i> shell session — this widens the trust boundary from "whoever is at this machine" to "whoever can reach my claude.ai". Turn it off if that's broader than you want.</div>
 
       <div class="s-sec">SSH status bridge (remote sessions as tiles)</div>
       <label class="s-row"><input type="checkbox" id="s-br-en"> Mirror remote sessions from ssh providers into the panel</label>
@@ -4301,7 +4320,8 @@ local HTML = [[
       if(n >= 1e3) return (n/1e3).toFixed(1)+"k";
       return String(Math.floor(n));
     }
-    // Mirror of core.contextBand: calm <50, a band every 10% from 50, critical last-5%.
+    // Mirror of core.contextBand (cc-core.lua) -- keep these seven thresholds in sync; the
+    // ui.test.lua pin "barLevel mirrors the 7-band contextBand ramp" guards the twin.
     function barLevel(f){ return f>=0.95?"b6":f>=0.90?"b5":f>=0.80?"b4":f>=0.70?"b3":f>=0.60?"b2":f>=0.50?"b1":"b0"; }
     // Context for a tile: prefer the live 1s value (active sessions), else the 60s
     // usage pass (covers stale/done tiles — which is most of them between turns).
@@ -4627,12 +4647,35 @@ local HTML = [[
       send("open-audit-for-session", h.sessionId);
     }
 
+    // ---- Toolbar views drawer (☰): collapses search/insights/audit/notify ---
+    function toggleMenu(e){ if(e) e.stopPropagation();
+      document.getElementById("toolmenu").classList.toggle("show"); }
+    function closeMenu(){ var m = document.getElementById("toolmenu"); if(m) m.classList.remove("show"); }
+    function menuPick(which){
+      closeMenu();
+      if(which === "search") toggleSearch();
+      else if(which === "fsearch") openFleetSearch();
+      else if(which === "insights") openInsights();
+      else if(which === "audit") openAudit();
+      else if(which === "notify") openNotifications();
+    }
+    // Close the drawer on any click outside it (the button's onclick stops propagation,
+    // so opening doesn't immediately re-close).
+    document.addEventListener("click", function(e){
+      var w = document.getElementById("menu-wrap");
+      if(w && !w.contains(e.target)) closeMenu();
+    });
+
     // ---- Notification history (roadmap #6) ----------------------------------
     function openNotifications(){ send("open-notifications"); setNotifyBadge(0); }
     function setNotifyBadge(n){
-      var b = document.getElementById("notify-badge"); if(!b) return;
-      b.textContent = (n > 0) ? String(n > 99 ? "99+" : n) : "";
-      b.style.display = (n > 0) ? "inline-block" : "none";
+      var txt = (n > 0) ? String(n > 99 ? "99+" : n) : "";
+      // badge on the collapsed ☰ button (visible while closed) + the drawer's Notifications row
+      ["notify-badge", "tm-notify-badge"].forEach(function(id){
+        var b = document.getElementById(id); if(!b) return;
+        b.textContent = txt;
+        b.style.display = (n > 0) ? "inline-block" : "none";
+      });
     }
 
     window.ccUsage = function(u){ LAST_USAGE = u || null; if(u && u.official) LAST_OFFICIAL = u.official; renderUsageFoot(); renderDetail(); };

@@ -238,6 +238,12 @@ window):
   run `/config` inside Claude Code once and set **Enable Remote Control for all sessions** — there
   is no settings.json key documented for that toggle, so Shepherd can't set it for you.
 
+> **⚠ Security — this is on by default.** A session with Remote Control can be driven from your
+> claude.ai account, so anyone with access to that account (or the Claude mobile app) can type
+> into a **local** shell session. That widens the trust boundary from "whoever is at this machine"
+> to "whoever can reach my claude.ai." Turn `remoteControl.onSpawn` / `sweepOnStartup` off (⚙
+> Settings) if that's broader than you want.
+
 ## Providers & models (multi-model / other companies / local)
 
 Claude Shepherd supervises **Claude Code** sessions, and Claude Code is provider-flexible,

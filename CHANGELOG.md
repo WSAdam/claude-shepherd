@@ -4,6 +4,35 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-13 (later) — Review fixes + collapse the toolbar into a ☰ views drawer
+
+Applied the leaderboard review of `80dddb8` (each claim verified against the code first;
+the "loosen the js-pins to patterns" note was declined — the whole ui.test.lua uses exact
+source tripwires by design, and the fragility is documented).
+
+### Fixed
+- **`context.autoCompactFraction` had no lower bound** — a tiny hand-tuned value (e.g. `0.01`)
+  passed the `>0` guard, shrank the denominator to ~0, and pinned every tile to a false 100%
+  b6. Clamped to a sane `[0.5, 1]` (output reserve is never half the window), falling back to
+  the default otherwise. The `0.5` floor stays valid (the existing tighter-fraction test).
+
+### Added
+- **Toolbar collapse**: the five view icons (🔍 filter, 🔎 fleet-search, 📊 insights, 📜 audit,
+  🔔 notifications) now live behind a single **☰** button that pops a labeled drawer (icon +
+  name per row). The unseen-notification badge rides the ☰ button (and the drawer's
+  Notifications row); the drawer closes on pick or outside-click. New / ☕ / ⚙ / theme stay put.
+- **Comment cross-refs** between `core.contextBand` and the JS `barLevel` twin (each names the
+  other + the guarding test), so the next edit jumps straight to the mirror.
+- Tests: explicit `stepAutoContinue` cases for the `working`-doesn't-reset-the-budget anti-loop
+  invariant (as a natural fire→working→re-error sequence) and the `nil` clock (elapsed 0, no
+  fire); the `autoCompactFraction` floor cases; and a ui-pin that the ☰ drawer still wires all
+  five views. Suite **1206 core + 187 ui + 167 bash**, all green.
+
+### Security
+- Noted (Settings help + README + example config) that `remoteControl.onSpawn` is **on by
+  default** and that `--remote-control` lets anyone with your claude.ai account drive a local
+  shell — an informed-choice note, no behavior change.
+
 ## 2026-06-13 — Context bar (% + match-editor + ramp), Auto-Continue, Auto-Remote-Control
 
 A single batch: make the per-tile context bar legible and accurate, auto-recover sessions

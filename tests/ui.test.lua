@@ -587,6 +587,15 @@ do
         src:find('f>=0.95?"b6":f>=0.90?"b5"', 1, true) ~= nil)
   check("js-pin: ctx-bar CSS defines the calm band b0", src:find(".ctx-bar.b0 > i", 1, true) ~= nil)
   check("js-pin: ctx-bar CSS defines the critical band b6", src:find(".ctx-bar.b6 > i", 1, true) ~= nil)
+  -- Toolbar collapse: the ☰ drawer must still wire all five views (search / fleet-search /
+  -- insights / audit / notifications) -- a dropped menuPick branch silently buries a view.
+  check("js-pin: toolbar drawer exists", src:find('id="toolmenu"', 1, true) ~= nil)
+  for _, w in ipairs({ "search", "fsearch", "insights", "audit", "notify" }) do
+    check("js-pin: drawer wires menuPick('" .. w .. "')", src:find("menuPick('" .. w .. "')", 1, true) ~= nil)
+  end
+  check("js-pin: menuPick routes search->toggleSearch", src:find('which === "search") toggleSearch()', 1, true) ~= nil)
+  check("js-pin: menuPick routes notify->openNotifications", src:find('which === "notify") openNotifications()', 1, true) ~= nil)
+  check("js-pin: notify badge still updated on the collapsed button", src:find('"notify-badge", "tm-notify-badge"', 1, true) ~= nil)
 end
 
 -- ---- Injection-tail chokepoint + delivery-gated alerts (R3 #0/#1/#2/#5) -----

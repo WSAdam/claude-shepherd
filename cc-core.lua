@@ -1512,11 +1512,14 @@ function M.nextContextTier(n)
   return n
 end
 
--- The auto-compact fraction (0<f<=1) from config, clamped to a sane range. Off-range or
--- non-numeric falls back to the default so a bad Settings value can't divide-by-~0.
+-- The auto-compact fraction from config, clamped to a SANE range [0.5, 1]. The output
+-- reserve is small (a 1M window reserves well under half for output), so anything below
+-- ~0.5 is a typo, not a real reserve -- and a tiny value (e.g. 0.01) would shrink the
+-- denominator to ~0 and pin every tile to a false 100% b6. Off-range / non-numeric falls
+-- back to the default so a bad Settings value can't break the bar.
 function M.autoCompactFraction(cfg)
   local f = tonumber(M.config(cfg, "context.autoCompactFraction", M.CONTEXT_AUTOCOMPACT_DEFAULT))
-  if not f or f <= 0 or f > 1 then return M.CONTEXT_AUTOCOMPACT_DEFAULT end
+  if not f or f < 0.5 or f > 1 then return M.CONTEXT_AUTOCOMPACT_DEFAULT end
   return f
 end
 
@@ -1532,7 +1535,10 @@ function M.contextFractionFor(cfg, model, tokens)
 end
 
 -- Per-tile context bar color band. Calm below 50%, then a new band every 10% (50/60/70/80/90),
--- with a distinct critical band for the last 5% (95-100%). b0..b6, mirrored in the panel JS.
+-- with a distinct critical band for the last 5% (95-100%). b0..b6. TWIN: the same thresholds
+-- live in the embedded-JS `barLevel` function in claude-dashboard.lua (search "Mirror of
+-- core.contextBand"); the ui.test.lua pin "js-pin: barLevel mirrors the 7-band contextBand
+-- ramp" fails the build if they drift -- edit both.
 function M.contextBand(frac)
   local f = tonumber(frac) or 0
   if f >= 0.95 then return "b6" end
