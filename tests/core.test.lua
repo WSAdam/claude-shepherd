@@ -568,6 +568,18 @@ do
   local ga = core.folderScanFallbackArgv({ "/u/a/Programming" }, 3)
   eq("fscan: find argv", table.concat(ga, " "),
      "/usr/bin/find /u/a/Programming -maxdepth 3 -type d -not -path */.* -not -path *node_modules*")
+  -- folderScanShellCommand: argv -> a /bin/sh -c command that redirects to a file (so hs.task's
+  -- own stdout stays empty -> no >64KB pipe-buffer deadlock over a large tree). Single-quoted.
+  eq("fscan: shell cmd quotes argv + redirects",
+     core.folderScanShellCommand({ "/opt/homebrew/bin/fd", "--type", "d", "/u/a/Programming" }, "/tmp/out"),
+     "'/opt/homebrew/bin/fd' '--type' 'd' '/u/a/Programming' > '/tmp/out' 2>/dev/null")
+  local c2 = core.folderScanShellCommand({ "/usr/bin/find", "/Users/a b/Programming" }, "/tmp/o o")
+  check("fscan: spaced root stays one quoted token", c2:find("'/Users/a b/Programming'", 1, true) ~= nil)
+  check("fscan: spaced outfile is quoted", c2:find("> '/tmp/o o'", 1, true) ~= nil)
+  -- a single-quote in a path is POSIX-escaped ('\'') -- not a quote-break (injection guard)
+  local c3 = core.folderScanShellCommand({ "fd", "/Users/a's/p" }, "/tmp/o")
+  check("fscan: single-quote in a path is escaped", c3:find("'/Users/a'\\''s/p'", 1, true) ~= nil)
+  eq("fscan: empty argv -> just the redirect", core.folderScanShellCommand({}, "/tmp/o"), " > '/tmp/o' 2>/dev/null")
   -- parseDirList: trim, CRLF, dedupe, trailing-slash normalize, cap
   local pd = core.parseDirList("/a/b\r\n/a/b/\n  /a/c  \n\n/a/b\n")
   eq("fscan: parse count", #pd, 2)

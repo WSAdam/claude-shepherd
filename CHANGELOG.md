@@ -4,6 +4,39 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-13 (later 2) — CLI accelerators (fd/rg) wired + folder-scan deadlock fix
+
+The "better grep" was set up but looked unused. Audit (verified live): `rg` was already
+installed and powering fleet search; `fd` was simply not installed (folder scan silently used
+`find`); `jq` (the only hard dep) was fine. Three things came out of it:
+
+### Fixed
+- **Folder scan deadlocked over a large tree** (pre-existing; hit `find` too, not fd-specific).
+  `FX.scanFolders` direct-exec'd the scanner via `hs.task`, which **stalls once the child's
+  stdout exceeds the OS pipe buffer (~64KB)** — the task waits for exit while the child blocks
+  on a full pipe nobody drains. Over `~/Programming` (1187 dirs ≈ 71KB) it hung forever, so the
+  New-session **fuzzy folder type-ahead silently produced nothing**. Now the scan runs via
+  `/bin/sh` with stdout **redirected to a temp file** (the task's own pipe stays empty → no
+  deadlock; the login-shell path always worked for the same reason), read back on exit, with a
+  **15s timeout backstop** so a wedged scan can never pin the index. New pure
+  `core.folderScanShellCommand` (POSIX-quoted argv + redirect, unit-tested); verified live
+  (`folder scan: fd … -> 1187 dir(s)`, was 0).
+
+### Added
+- **Runtime engine visibility** — the search/scan paths now log which engine actually ran:
+  `[cc-search] engine=rg …` and `[cc-spawn] folder scan: fd …` (with an "install for speed" hint
+  on the `grep`/`find` fallbacks). Previously neither logged anything, so rg "looked unused."
+- **`make doctor`** (alias `tools`) + an install.sh **tooling-check** step: reports jq (required)
+  + the rg/fd accelerators (optional), offers to `brew install` a missing one when interactive
+  (prints the command otherwise), never hard-fails, and is skipped non-interactively (tests /
+  `make setup` never block). README note on the optional accelerators.
+
+### Tests
+- Suite **1211 core + 192 ui + 167 bash**, all green. New: `folderScanShellCommand` quoting +
+  redirect (incl. spaces and a single-quote injection guard); fscan-pins that the scan runs via
+  `/bin/sh` + temp file + timeout and that the direct-exec path is gone; and 8 hermetic
+  install.test.sh cases for the non-interactive tooling check.
+
 ## 2026-06-13 (later) — Review fixes + collapse the toolbar into a ☰ views drawer
 
 Applied the leaderboard review of `80dddb8` (each claim verified against the code first;

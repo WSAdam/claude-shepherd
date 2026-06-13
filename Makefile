@@ -22,6 +22,13 @@ install:
 setup:
 	@bash install.sh
 
+# Tooling check: report jq (required) + the rg/fd accelerators (optional — fleet search
+# and folder scan degrade to grep/find without them) and offer to brew-install any that are
+# missing. Read-only; re-runnable any time. Same check `make setup` runs at the end.
+.PHONY: doctor tools
+doctor tools:
+	@bash install.sh --tools-only
+
 # Reload the live Hammerspoon config (needs the `hs` CLI: require('hs.ipc')). The reload
 # is SCHEDULED 0.4s out so the `hs` command disconnects cleanly first -- an immediate
 # hs.reload() tears down the IPC port mid-command, which exits non-zero and falsely looks

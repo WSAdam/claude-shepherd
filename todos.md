@@ -130,6 +130,21 @@ remaining items. Full per-round detail is in CHANGELOG.md and git history.
      sessions you start yourself in a terminal, run `/config` → **Enable Remote Control for all
      sessions** (no documented settings.json key exists for that toggle, so Shepherd can't set it).
   Suite **1193 core + 178 ui + 167 bash**, all green.
+- **Toolbar collapse + review fixes (June 2026)**: the five view icons (🔍 filter, 🔎 fleet-
+  search, 📊 insights, 📜 audit, 🔔 notifications) fold into a single **☰** drawer (icon + name
+  per row, badge on the button + Notifications row, closes on pick/outside-click); plus the
+  leaderboard review of the prior commit — `context.autoCompactFraction` clamped to `[0.5,1]`
+  (a tiny value pinned every tile to a false 100%), `contextBand`↔`barLevel` cross-ref comments,
+  explicit `stepAutoContinue` anti-loop + nil-clock tests, and an RC on-by-default security note.
+- **CLI accelerators wired + folder-scan deadlock fix (June 2026)**: `fd` installed and
+  auto-detected (folder scan was silently using `find`); runtime **engine logs** (`[cc-search]
+  engine=rg …`, `[cc-spawn] folder scan: fd …`) so the accelerators are visible; **`make doctor`**
+  + an install.sh tooling check (jq required; rg/fd optional, offers brew-install, non-interactive
+  under tests). **Fixed a pre-existing folder-scan deadlock**: `hs.task` direct-exec stalled once
+  a scan's stdout topped the ~64KB pipe buffer (the New-session fuzzy folder type-ahead had been
+  silently empty over a large tree) — now runs via `/bin/sh` with a temp-file redirect + a 15s
+  timeout (`core.folderScanShellCommand`). Verified live (`folder scan: fd … -> 1187 dir(s)`, was
+  0). Suite **1211 core + 192 ui + 167 bash**, all green.
 
 ## TODO
 
@@ -173,11 +188,17 @@ remaining items. Full per-round detail is in CHANGELOG.md and git history.
 
 **Principle for any external tool: detect → use → degrade gracefully** — a missing binary
 means slower, never broken (`jq` remains the only hard dependency; `rg` and `fd` are
-auto-detected accelerators for fleet search and the spawn modal's fuzzy folder search).
-Evaluated and **declined**: `gron`/`yq`/`htmlq`/`hexyl` (no YAML/HTML/binary surfaces;
-`jq` already covers the JSON), `jc` (a parser framework for ~5 lines of working `pmset`
-shell is altitude inversion), `eza`/`bat`/`tv` (terminal-human niceties; the panel's
-webview wants embedded JS, not shelled-out TUIs).
+auto-detected accelerators for fleet search and the spawn modal's fuzzy folder search,
+resolved by `resolveBin` via PATH + `/opt/homebrew/bin` + `/usr/local/bin`). The chosen
+engine is now **logged at runtime** (`[cc-search] engine=rg …`, `[cc-spawn] folder scan: fd …`)
+and **`make doctor`** reports tool status + offers to install a missing accelerator — so an
+accelerator can't silently sit unused (which is exactly how `fd` went uninstalled for a while).
+Note: any `hs.task` that captures large output must redirect to a file (the ~64KB pipe-buffer
+deadlock — see context.md); the folder scan does. Evaluated and **declined**: `gron`/`yq`/
+`htmlq`/`hexyl` (no YAML/HTML/binary surfaces; `jq` already covers the JSON), `jc` (a parser
+framework for ~5 lines of working `pmset` shell is altitude inversion), `eza`/`bat`/`tv`/`fzf`
+(terminal-human niceties; the panel's webview wants embedded JS / pure-Lua `fuzzyFilter`, not
+shelled-out TUIs).
 
 ## Known platform limits (not bugs)
 - **VS Code extension** UI widgets (AskUserQuestion picker, permission-mode switcher) are

@@ -28,6 +28,46 @@ INIT="$HS_DIR/init.lua"
 DOFILE_LINE='dofile(os.getenv("HOME") .. "/.hammerspoon/claude-dashboard.lua")'
 
 have_jq() { command -v jq >/dev/null 2>&1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# Tooling status: jq (required) + the rg/fd accelerators (optional — they make fleet search
+# and the spawn modal's folder scan faster/gitignore-aware, but degrade to grep/find when
+# absent). Offers to brew-install a missing accelerator ONLY when interactive (a tty on
+# /dev/tty); otherwise just prints the command. Read-only probing; never hard-fails on an
+# optional tool. Reused by `make doctor` via `install.sh --tools-only`.
+tooling_check() {
+  echo "🔧 Tooling check:"
+  if have_jq; then printf '   ✅ %-4s %s\n' jq "$(command -v jq)"
+  else printf '   ❌ %-4s MISSING (required) — install: brew install jq\n' jq; fi
+  # tool:fallback pairs (optional accelerators)
+  for entry in rg:grep fd:find; do
+    tool="${entry%%:*}"; fb="${entry##*:}"
+    if have "$tool"; then
+      printf '   ✅ %-4s %s\n' "$tool" "$(command -v "$tool")"
+    else
+      printf '   ⚠️  %-4s missing — degrades to %s\n' "$tool" "$fb"
+      if have brew; then
+        if [ -t 1 ] && [ -r /dev/tty ]; then
+          printf '      install %s now with Homebrew? [y/N] ' "$tool"
+          read -r ans </dev/tty 2>/dev/null || ans=""
+          case "$ans" in
+            y|Y) brew install "$tool" && printf '      ✅ installed %s\n' "$tool" \
+                   || printf '      ⚠️  brew install %s failed — run it by hand\n' "$tool";;
+            *)   printf '      skipped — enable later with: brew install %s\n' "$tool";;
+          esac
+        else
+          printf '      to enable: brew install %s\n' "$tool"
+        fi
+      else
+        printf '      Homebrew not found — install %s, then it is auto-detected\n' "$tool"
+      fi
+    fi
+  done
+}
+
+# `install.sh --tools-only` (or CC_TOOLS_ONLY=1): just run the tooling check and exit
+# (powers `make doctor`). Defined before any copy/merge so it never touches your config.
+if [ "${1:-}" = "--tools-only" ] || [ -n "${CC_TOOLS_ONLY:-}" ]; then tooling_check; exit 0; fi
 
 mkdir -p "$CLAUDE_DIR" "$HS_DIR"
 
@@ -100,6 +140,10 @@ fi
 if [ -z "${CC_INSTALL_NO_APP:-}" ]; then
   make -C "$HERE" app || echo "⚠️  Shepherd.app build skipped"
 fi
+
+# 5. Tooling check (jq required; rg/fd optional accelerators). Non-interactive when no tty,
+# so tests and `make setup` never block; re-runnable any time via `make doctor`.
+tooling_check
 
 echo "ℹ️  Kitty users: Shepherd can auto-enable remote control in kitty.conf (Settings)."
 echo "✅ install complete — open/reload Hammerspoon to start the panel."

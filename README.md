@@ -549,6 +549,18 @@ checklist.
    (System Settings > Privacy & Security > Accessibility). It needs that to focus
    windows and send keystrokes.
 
+   **Optional accelerators** (`jq` is the only hard dependency — everything else degrades
+   gracefully): [ripgrep](https://github.com/BurntSushi/ripgrep) speeds up fleet-wide search
+   and [fd](https://github.com/sharkdp/fd) makes the New-session folder scan faster and
+   gitignore-aware. Without them, search falls back to `grep` and folder scan to `find`.
+   ```
+   brew install ripgrep fd
+   ```
+   `make setup` checks for these at the end and offers to install any that are missing; run
+   **`make doctor`** any time to see which engine each path is using (and confirm it in the
+   Hammerspoon console — a fleet search logs `[cc-search] engine=rg …`, a folder scan
+   `[cc-spawn] folder scan: fd …`).
+
 2. **Run the installer** (idempotent — safe to re-run):
    ```
    make setup
@@ -556,7 +568,8 @@ checklist.
    This copies the hook scripts + logic into `~/.claude` and `~/.hammerspoon`,
    **merges** the hooks into `~/.claude/settings.json` (backing it up first and
    preserving any hooks you already have), ensures the `dofile(...)` line in
-   `~/.hammerspoon/init.lua`, and builds **Shepherd.app** (a Dock launcher — see below).
+   `~/.hammerspoon/init.lua`, builds **Shepherd.app** (a Dock launcher — see below), and
+   runs the **tooling check** (jq / ripgrep / fd).
 
 3. Click the Hammerspoon menu-bar icon and choose **Reload Config**.
 

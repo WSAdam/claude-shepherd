@@ -832,6 +832,7 @@ end
 -- process per keystroke. fd when present (gitignore-aware), find fallback.
 local folderIndex = { paths = {}, ts = 0 }
 local folderScanTask = nil
+local folderScanTimer = nil  -- retained timeout backstop for a wedged scan (GC-safe)
 function FX.scanFolders()
   local now = hs.timer.secondsSinceEpoch()
   if folderScanTask or (now - (folderIndex.ts or 0)) < 60 then return end  -- fresh or in flight
@@ -849,20 +850,42 @@ function FX.scanFolders()
   -- detect -> use -> degrade gracefully: resolveBin returns the bare name on a
   -- total miss and hs.task needs a real path, so verify with hs.fs.attributes.
   local fd = resolveBin("fd", core.config(cfg, "spawn.fdBin", nil))
-  local argv
-  if hs.fs.attributes(fd) then argv = core.folderScanArgv(fd, expanded, depth)
-  else argv = core.folderScanFallbackArgv(expanded, depth) end
-  local args = {}
-  for i = 2, #argv do args[#args + 1] = argv[i] end
+  local argv, usedFd
+  if hs.fs.attributes(fd) then argv = core.folderScanArgv(fd, expanded, depth); usedFd = true
+  else argv = core.folderScanFallbackArgv(expanded, depth); usedFd = false end
+  -- Make the accelerator visible: which engine actually ran (fd when installed, find else).
+  local engine = usedFd and ("fd " .. fd) or "find  (install fd for faster, gitignore-aware scans)"
+  -- Run the scanner via /bin/sh with stdout REDIRECTED to a temp file, then read the file on
+  -- exit. Direct-exec hs.task DEADLOCKS once a scan's stdout exceeds the OS pipe buffer (~64KB)
+  -- over a large tree (the task waits for exit while the child blocks on a full pipe) -- a file
+  -- keeps the task's pipe empty. core.folderScanShellCommand single-quotes argv + outFile.
+  local outFile = os.tmpname()
+  local cmd = core.folderScanShellCommand(argv, outFile)
   local ok = pcall(function()
-    folderScanTask = hs.task.new(argv[1], function(_, stdout)
+    folderScanTask = hs.task.new("/bin/sh", function()
+      if folderScanTimer then pcall(function() folderScanTimer:stop() end); folderScanTimer = nil end
       folderScanTask = nil
-      folderIndex = { paths = core.parseDirList(stdout), ts = hs.timer.secondsSinceEpoch() }
-      print("[cc-spawn] folder index: " .. #folderIndex.paths .. " dir(s)")
-    end, args)
-    if folderScanTask then folderScanTask:start() else error("task create failed") end
+      local out = FX.readFile(outFile) or ""
+      pcall(os.remove, outFile)
+      folderIndex = { paths = core.parseDirList(out), ts = hs.timer.secondsSinceEpoch() }
+      print("[cc-spawn] folder scan: " .. engine .. " -> " .. #folderIndex.paths .. " dir(s)")
+    end, { "-c", cmd })
+    if not folderScanTask then error("task create failed") end
+    folderScanTask:start()
+    -- Backstop: a wedged scan (a stuck mount, a hung fs) must never pin the slot forever.
+    -- Retain the timer in a module global so GC can't eat it before it fires (the after()
+    -- lesson). 15s << the 60s scan cache, so it can never collide with a later scan.
+    folderScanTimer = hs.timer.doAfter(15, function()
+      folderScanTimer = nil
+      if folderScanTask then
+        pcall(function() folderScanTask:terminate() end)
+        folderScanTask = nil
+        pcall(os.remove, outFile)
+        print("[cc-spawn] folder scan timed out (15s) — index left as-is")
+      end
+    end)
   end)
-  if not ok then folderScanTask = nil end
+  if not ok then folderScanTask = nil; pcall(os.remove, outFile) end
 end
 
 -- ---- Kitty remote control (F: detect + auto-enable) ------------------------
@@ -1965,6 +1988,9 @@ local function handleBridgeMsg(msg)
     local rg = resolveBin("rg", core.config(cfg, "search.rgBin", nil))
     local kind = hs.fs.attributes(rg) and "rg" or "grep"
     local bin = (kind == "rg") and rg or "/usr/bin/grep"
+    -- Make the accelerator visible: which engine actually ran (rg when installed, grep else).
+    print("[cc-search] engine=" .. kind .. " " .. bin
+      .. (kind ~= "rg" and "  (install ripgrep for faster fleet search)" or ""))
     local paths = { (os.getenv("HOME") or "") .. "/.claude/projects" }
     if hs.fs.attributes(LEDGER_DIR) then paths[#paths + 1] = LEDGER_DIR end
     local args = core.searchArgv(kind, q, paths)

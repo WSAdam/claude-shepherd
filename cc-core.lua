@@ -3190,6 +3190,18 @@ function M.folderScanFallbackArgv(roots, depth)
   return argv
 end
 
+-- Join a scanner argv into a `/bin/sh -c` command that REDIRECTS stdout to a file. Direct-exec
+-- hs.task DEADLOCKS once a scan's stdout exceeds the OS pipe buffer (~64KB) over a large tree:
+-- the task waits for the child to exit while the child blocks writing into a full pipe nobody
+-- drains (the login-shell path already worked precisely because it reads to completion).
+-- Redirecting to a file keeps the task's own stdout empty, so there's no pipe to stall. Every
+-- argv element AND the outFile are POSIX single-quoted; stderr is discarded.
+function M.folderScanShellCommand(argv, outFile)
+  local parts = {}
+  for _, a in ipairs(argv or {}) do parts[#parts + 1] = shquote(tostring(a)) end
+  return table.concat(parts, " ") .. " > " .. shquote(tostring(outFile)) .. " 2>/dev/null"
+end
+
 -- Scanner stdout -> deduped list of normalized absolute dirs, capped (a runaway
 -- depth over a huge tree must not balloon the in-memory index). CRLF-tolerant.
 function M.parseDirList(stdout, cap)

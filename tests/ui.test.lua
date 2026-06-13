@@ -587,6 +587,14 @@ do
         src:find('f>=0.95?"b6":f>=0.90?"b5"', 1, true) ~= nil)
   check("js-pin: ctx-bar CSS defines the calm band b0", src:find(".ctx-bar.b0 > i", 1, true) ~= nil)
   check("js-pin: ctx-bar CSS defines the critical band b6", src:find(".ctx-bar.b6 > i", 1, true) ~= nil)
+  -- Folder scan must run deadlock-proof: via /bin/sh with stdout redirected to a file (NOT
+  -- direct-exec hs.task, which stalls >64KB over a large tree), reading the file on exit,
+  -- with a timeout backstop. Reverting to `hs.task.new(argv[1]` would reintroduce the hang.
+  check("fscan-pin: scan runs via /bin/sh (not direct-exec)", src:find('hs.task.new("/bin/sh"', 1, true) ~= nil)
+  check("fscan-pin: scan command built by core (quoted + redirect)", src:find("core.folderScanShellCommand(argv, outFile)", 1, true) ~= nil)
+  check("fscan-pin: scan reads the temp file on exit", src:find("FX.readFile(outFile)", 1, true) ~= nil)
+  check("fscan-pin: scan has a timeout backstop", src:find("folder scan timed out", 1, true) ~= nil)
+  check("fscan-pin: no direct-exec scan remains", src:find("hs.task.new(argv[1], function(_, stdout)", 1, true) == nil)
   -- Toolbar collapse: the ☰ drawer must still wire all five views (search / fleet-search /
   -- insights / audit / notifications) -- a dropped menuPick branch silently buries a view.
   check("js-pin: toolbar drawer exists", src:find('id="toolmenu"', 1, true) ~= nil)

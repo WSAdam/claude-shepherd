@@ -49,6 +49,14 @@ network, no multi-user, no secrets — it reads session status off the local fil
   (keyed by projectKey — a per-folder budget, different lifecycle). **Autonomous actions
   (feed / prune / respawn) never fire from a missing prev** — the first refresh after a
   reload is an observation, not a transition edge — and never target a stale tile.
+- **A large `hs.task` capture deadlocks — redirect to a file.** `hs.task` direct-exec waits for
+  the child to exit while reading its stdout pipe; once the child's output exceeds the OS pipe
+  buffer (~64KB) it blocks on write and neither side advances (this silently wedged the
+  folder-scan index over `~/Programming`). For any scan that can emit a lot, run it via
+  `/bin/sh -c "<cmd> > <tmpfile>"` (keeps the task's own pipe empty) and read the file on exit,
+  with a retained-timer timeout backstop. `core.folderScanShellCommand` builds the quoted command.
+  The accelerators it runs (`rg`/`fd`) are resolved by `resolveBin` (PATH + `/opt/homebrew/bin`
+  + `/usr/local/bin`) and **degrade gracefully** to grep/find; `make doctor` reports what's live.
 - **Keystroke delivery is a contract.** `FX.pasteIntoWindow` / `FX.sendKeys` / `feedTask`
   return delivery status; when no window positively matches, they **skip** (never type into
   whatever is frontmost) and the caller must gate its side effects (queue pop, mode patch,

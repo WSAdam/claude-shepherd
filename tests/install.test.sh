@@ -166,4 +166,24 @@ assert_eq "newline-less init.lua: user's line intact" "local x = 1" "$(head -n 1
 assert_eq "newline-less init.lua: dofile on its OWN line" "1" \
   "$(grep -Fxc 'dofile(os.getenv("HOME") .. "/.hammerspoon/claude-dashboard.lua")' "$HSDIR6/init.lua")"
 
+# --- tooling check (`install.sh --tools-only`, powers `make doctor`): reports status,
+# is NON-INTERACTIVE without a tty (never blocks tests/`make setup`), offers (prints) the
+# brew command for a missing optional accelerator, and NEVER hard-fails. Simulate
+# "brew present, fd missing" with a controlled PATH of symlinks (jq/rg/brew, no fd). ---
+TOOLDIR="$TMP/tools"; mkdir -p "$TOOLDIR"
+for b in jq rg brew; do src="$(command -v "$b" 2>/dev/null)"; [ -n "$src" ] && ln -sf "$src" "$TOOLDIR/$b"; done
+# fd intentionally absent (and not a system tool, so /usr/bin:/bin won't supply it)
+TOUT="$TMP/tools.out"
+PATH="$TOOLDIR:/usr/bin:/bin" bash "$ROOT/install.sh" --tools-only </dev/null >"$TOUT" 2>&1
+assert_eq "tools-only: exits 0 (a missing optional never hard-fails)" "0" "$?"
+assert_eq "tools-only: prints the tooling header" "1" "$(grep -Fc 'Tooling check' "$TOUT")"
+assert_eq "tools-only: jq reported present with its path" "1" "$(grep -Fc "$TOOLDIR/jq" "$TOUT")"
+assert_eq "tools-only: rg reported present with its path" "1" "$(grep -Fc "$TOOLDIR/rg" "$TOUT")"
+assert_eq "tools-only: fd reported missing (degrades to find)" "1" "$(grep -Fc 'degrades to find' "$TOUT")"
+assert_eq "tools-only: non-interactive -> prints 'brew install fd' (no prompt, no hang)" "1" "$(grep -Fc 'brew install fd' "$TOUT")"
+assert_eq "tools-only: did NOT run the prompt text" "0" "$(grep -Fc 'install fd now with Homebrew' "$TOUT")"
+# --tools-only exits before any copy/merge: a temp claude dir must NOT be created
+assert_eq "tools-only: touches no config (early exit before copy)" "0" \
+  "$([ -e "$TMP/tools-claude" ] && echo 1 || echo 0)"
+
 finish
