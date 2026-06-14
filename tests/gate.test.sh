@@ -46,6 +46,7 @@ export CC_CONFIG_FILE="$TMP/none.json"
 export CC_APPROVED_DIR="$TMP/appr"
 export CC_AUTOPILOT_DIR="$TMP/auto"
 export CC_GATE_TOOLS_DIR="$TMP/gtools"
+export CC_POLICY_DIR="$TMP/policy"
 
 APP="$ROOT/cc-approve.sh"
 FLAG="$TMP/gate.enabled"
@@ -260,6 +261,42 @@ date +%s > "$HB"
 bg=$!; wait_block "$TMP/ov5.json"; answer ov5 deny; wait $bg
 got="$(jq -r '.hookSpecificOutput.permissionDecision' "$TMP/out_ov5" 2>/dev/null)"
 assert_eq "empty override file: Bash still gated (empty = fleet default)" "deny" "$got"
+
+# ---- L2: per-session resolved policy bundle file (cc-policy/<key>) ----
+# The panel writes core.resolvePolicy output here; the gate reads it as authoritative
+# and opt-in (applies even with NO fleet policies enabled). CONFIG_FILE stays none.json
+# (no fleet patterns) throughout, so a decision can ONLY come from the policy file.
+mkdir -p "$CC_POLICY_DIR"
+
+# A) policy-file autoDeny denies a gated tool with no fleet policy at all
+date +%s > "$HB"
+printf '{"autoDeny":["Bash(rm*)"],"bundle":"read-only"}' > "$CC_POLICY_DIR/pol1"
+out="$(printf '%s' '{"session_id":"pol1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"rm -rf build"}}' \
+    | CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 bash "$APP" 2>/dev/null)"
+assert_eq "policy file: autoDeny denies (no fleet policy needed)" "deny" "$(decision "$out")"
+
+# B) policy-file autoAllow allows a gated tool
+printf '{"autoAllow":["Bash(ls*)"],"bundle":"loose"}' > "$CC_POLICY_DIR/pol2"
+out="$(printf '%s' '{"session_id":"pol2","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"ls -la"}}' \
+    | CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 bash "$APP" 2>/dev/null)"
+assert_eq "policy file: autoAllow allows" "allow" "$(decision "$out")"
+
+# C) policy file present but no rule matches -> routes to the panel (human decides)
+date +%s > "$HB"
+printf '{"autoDeny":["Bash(rm*)"]}' > "$CC_POLICY_DIR/pol3"
+( printf '%s' '{"session_id":"pol3","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"echo hi"}}' \
+    | CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=5 \
+    bash "$APP" > "$TMP/out_pol3" 2>/dev/null ) &
+bg=$!; wait_block "$TMP/pol3.json"; answer pol3 deny; wait $bg
+assert_eq "policy file: non-matching rule -> routes to panel" "deny" \
+  "$(jq -r '.hookSpecificOutput.permissionDecision' "$TMP/out_pol3" 2>/dev/null)"
+
+# D) key isolation: pol1's deny file must NOT affect a different session (no file ->
+#    no auto-decision; with a dead panel it falls straight through to native).
+echo 0 > "$HB"   # stale heartbeat -> immediate native fallback, no wait
+out="$(printf '%s' '{"session_id":"polX","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"rm -rf build"}}' \
+    | CC_GATE_FLAG="$FLAG" bash "$APP" 2>/dev/null)"
+assert_eq "policy file: key isolation (other session not auto-denied)" "" "$out"
 
 # ---- per-request signatures: no tool-name-only SIG (blanket approval) ----
 # NotebookEdit has no command/file_path; its SIG must key on notebook_path so ONE

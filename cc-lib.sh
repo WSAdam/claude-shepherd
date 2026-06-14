@@ -161,14 +161,21 @@ CC_GATE_TOOLS_DIR="${CC_GATE_TOOLS_DIR:-${HOME}/.claude/cc-gate-tools}"
 # cc-approve.sh/the panel: hoisted here so cc_remove can stop those orphans too.
 CC_APPROVED_DIR="${CC_APPROVED_DIR:-${HOME}/.claude/cc-approved}"
 CC_AUTOPILOT_DIR="${CC_AUTOPILOT_DIR:-${HOME}/.claude/cc-autopilot}"
+# L2 per-session policy files: the resolved bundle the gate reads (cc-approve.sh)
+# and the chosen-bundle override the panel writes. Hoisted here (defaults MUST match
+# cc-approve.sh's CC_POLICY_DIR and the dashboard's POLICY_DIR/POLICY_OVERRIDE_DIR)
+# so cc_remove reaps them on SessionEnd like the siblings above.
+CC_POLICY_DIR="${CC_POLICY_DIR:-${HOME}/.claude/cc-policy}"
+CC_POLICY_OVERRIDE_DIR="${CC_POLICY_OVERRIDE_DIR:-${HOME}/.claude/cc-policy-override}"
 
 # Remove a session entirely (used by SessionEnd) plus any stray decision/claim
-# file and the per-session gated-tools override, approveRepeats memo, and
-# autopilot expiry (a new session gets a new key, so this just stops orphans
-# accumulating).
+# file and the per-session gated-tools override, approveRepeats memo, autopilot
+# expiry, and L2 policy files (a new session gets a new key, so this just stops
+# orphans accumulating).
 cc_remove() {
   rm -f "$(cc_file "$1")" "$(cc_decision_file "$1")" "$(cc_decision_file "$1")".claim.* \
-    "$CC_GATE_TOOLS_DIR/$1" "$CC_APPROVED_DIR/$1" "$CC_AUTOPILOT_DIR/$1" 2>/dev/null || true
+    "$CC_GATE_TOOLS_DIR/$1" "$CC_APPROVED_DIR/$1" "$CC_AUTOPILOT_DIR/$1" \
+    "$CC_POLICY_DIR/$1" "$CC_POLICY_OVERRIDE_DIR/$1" 2>/dev/null || true
 }
 
 # ---- Audit/event ledger ----------------------------------------------------

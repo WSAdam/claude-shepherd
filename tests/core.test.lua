@@ -3349,5 +3349,71 @@ do
   eq("profilesForFolder: empty dir -> none", #core.profilesForFolder(profs, ""), 0)
 end
 
+-- ---- L2: named policy / guardrail bundles + attachments --------------------
+do
+  -- globEq: wildcard, glob, exact
+  check("globEq: empty pattern is wildcard", core.globEq("", "anything") == true)
+  check("globEq: nil pattern is wildcard", core.globEq(nil, "anything") == true)
+  check("globEq: exact match", core.globEq("claude", "claude") == true)
+  check("globEq: star match", core.globEq("my-*", "my-repo") == true)
+  check("globEq: no match", core.globEq("my-*", "other") == false)
+
+  local cfg = core.json.decode([[{
+    "gate": { "tools": "Bash" },
+    "policies": {
+      "patterns": { "autoAllow": ["Read"], "autoDeny": ["Bash(rm*)"] },
+      "bundles": {
+        "read-only": { "autoDeny": ["Write","Edit"], "gateTools": "Bash Write Edit" },
+        "tight": { "autoDeny": ["Bash(curl*)"], "disableGlobal": true, "toolLimits": {"Bash": 3} }
+      },
+      "attachments": [
+        { "match": { "project": "secure-*" }, "bundle": "read-only" },
+        { "match": { "group": "prod" }, "bundle": "tight" }
+      ]
+    }
+  }]])
+
+  -- matchAttachment: project glob, group, no-match
+  eq("matchAttachment: project glob -> read-only",
+     core.matchAttachment(cfg, { project = "secure-api" }), "read-only")
+  eq("matchAttachment: group -> tight",
+     core.matchAttachment(cfg, { group = "prod" }), "tight")
+  eq("matchAttachment: no match -> nil",
+     core.matchAttachment(cfg, { project = "scratch", group = "dev" }), nil)
+
+  -- resolvePolicy: fleet default (no override, no attachment)
+  local fleet = core.resolvePolicy(cfg, { project = "scratch" })
+  eq("resolvePolicy: fleet source", fleet.source, "fleet")
+  eq("resolvePolicy: fleet autoDeny is the patterns list", fleet.autoDeny[1], "Bash(rm*)")
+  eq("resolvePolicy: fleet gateTools", fleet.gateTools, "Bash")
+
+  -- attachment-matched bundle UNIONS the fleet lists
+  local att = core.resolvePolicy(cfg, { project = "secure-api" })
+  eq("resolvePolicy: attachment source", att.source, "attachment")
+  eq("resolvePolicy: attachment bundle name", att.bundle, "read-only")
+  check("resolvePolicy: union keeps fleet deny",
+        (function() for _, d in ipairs(att.autoDeny) do if d == "Bash(rm*)" then return true end end return false end)())
+  check("resolvePolicy: union adds bundle deny",
+        (function() for _, d in ipairs(att.autoDeny) do if d == "Write" then return true end end return false end)())
+  eq("resolvePolicy: bundle gateTools wins over fleet", att.gateTools, "Bash Write Edit")
+
+  -- disableGlobal drops the fleet lists; explicit override beats attachment
+  local ov = core.resolvePolicy(cfg, { project = "secure-api" }, { bundle = "tight" })
+  eq("resolvePolicy: override source", ov.source, "session")
+  eq("resolvePolicy: override bundle", ov.bundle, "tight")
+  check("resolvePolicy: disableGlobal drops fleet deny",
+        (function() for _, d in ipairs(ov.autoDeny) do if d == "Bash(rm*)" then return false end end return true end)())
+  eq("resolvePolicy: only the bundle deny survives", ov.autoDeny[1], "Bash(curl*)")
+  check("resolvePolicy: toolLimits carried", ov.toolLimits ~= nil and ov.toolLimits.Bash == 3)
+
+  -- starter bundles + overToolLimit
+  check("DEFAULT_POLICY_BUNDLES: read-only gates Bash",
+        (function() for _, d in ipairs(core.DEFAULT_POLICY_BUNDLES["read-only"].autoDeny) do
+           if d == "Bash" then return true end end return false end)())
+  local over = core.overToolLimit({ Bash = 3, Write = 5 }, { Bash = 3, Write = 1 })
+  eq("overToolLimit: one tool over", #over, 1)
+  eq("overToolLimit: it is Bash", over[1].tool, "Bash")
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

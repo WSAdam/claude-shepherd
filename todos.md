@@ -380,6 +380,11 @@ skills and MCPs."* Nine LiteLLM features converge into ONE: extend the spawn-pre
 - **Build order:** registry + spawn-from-agent → skills card → MCP registry+attach → plugins → inventory badge.
 
 ### L2 — Named policy / guardrail bundles + attachments — effort **M**
+> ✅ **SHIPPED 2026-06-14** (see CHANGELOG): `policies.bundles` + `policies.attachments`, resolved per session
+> (override > attachment > fleet) into a `cc-policy/<key>` file the gate reads (authoritative + opt-in), with a
+> detail-panel Policy dropdown, an orphan sweep, atomic writes, and SessionEnd cleanup. Built with an adversarial
+> review pass. **Deferred follow-up:** the bundle/attachment EDITOR UI (today: hand-edited config), bundle
+> `gateTools` auto-apply, `toolLimits` shell enforcement, and the free-text deny-reason enrichment.
 *Source: ADAPT items 11, 12, 14, 15 (key-scoped access lists + key_type, per-key policy attachment + enforced
 params + disable-global, guardrail lifecycle CRUD + timing + transparency, named/scoped versioned bundles).*
 Today `policies.patterns` is a single flat anonymous `{autoAllow[], autoDeny[]}` + a per-session `gate.tools`

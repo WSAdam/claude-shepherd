@@ -166,6 +166,10 @@
       "enabled": false,
       "autoAllow": [],
       "autoDeny": []
-    }
+    },
+    "_bundles_comment": "L2 named policy/guardrail bundles. Each is a reusable {autoAllow[], autoDeny[], disableGlobal?} set you attach to a session — via the detail-panel Policy dropdown (per session) or `attachments` below (fleet-wide). When a bundle is attached, the panel resolves it (bundle rules UNION the fleet patterns, unless disableGlobal drops the fleet) and writes a per-session file the gate reads — so a bundle applies EVEN IF patterns.enabled is false (attaching is the opt-in). autoDeny wins over autoAllow. Pattern syntax = the same Tool / Tool(glob) as patterns above. Starter ideas: read-only (autoDeny Bash/Write/Edit/MultiEdit/NotebookEdit), no-bash, no-network.",
+    "bundles": {},
+    "_attachments_comment": "Auto-attach a bundle to sessions matching project/group/providerId/key (each a glob; absent = wildcard; first match wins). e.g. [{\"match\":{\"project\":\"secure-*\"},\"bundle\":\"read-only\"}]. Empty = no auto-attach (use the per-session Policy dropdown instead).",
+    "attachments": []
   }
 }

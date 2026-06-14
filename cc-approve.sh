@@ -33,6 +33,13 @@ APPROVED_DIR="$CC_APPROVED_DIR"    # defined in cc-lib.sh so SessionEnd can clea
 AUTOPILOT_DIR="$CC_AUTOPILOT_DIR"  # (same env-var overrides as before)
 # Per-session gated-tools overrides (Feature D): one file per key, like cc-autopilot.
 GATE_TOOLS_DIR="${CC_GATE_TOOLS_DIR:-${HOME}/.claude/cc-gate-tools}"
+# Per-session resolved policy bundle (L2): one JSON file per key, written by the
+# panel (core.resolvePolicy → {autoAllow,autoDeny,bundle}). When present its lists
+# are AUTHORITATIVE and apply REGARDLESS of policies.patterns.enabled (attaching a
+# bundle is an explicit opt-in). Absent → fall back to the fleet policies.patterns.*
+# gated by .policies.patterns.enabled (unchanged). KEEP IN SYNC with
+# core.resolvePolicy in cc-core.lua (which produces this file's contents).
+POLICY_DIR="${CC_POLICY_DIR:-${HOME}/.claude/cc-policy}"
 
 emit_allow() {
   printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}'
@@ -93,6 +100,12 @@ if [ -f "$GATE_TOOLS_DIR/$KEY" ]; then
   esac
 fi
 
+# L2: the per-session resolved policy file (named bundle), keyed like the override
+# above. Read once here (KEY is known); match_patterns consults it on the hot path.
+POLICY_FILE="$POLICY_DIR/$KEY"
+POLICY_BUNDLE=""
+[ -f "$POLICY_FILE" ] && POLICY_BUNDLE="$(jq -r '.bundle // empty' "$POLICY_FILE" 2>/dev/null || true)"
+
 # Not a gated tool (for this session) -> normal flow (reads etc. stay fast).
 case " $GATE_TOOLS " in
   *" $TOOL "*) ;;
@@ -142,20 +155,30 @@ PAT_ENABLED="$(cc_config '.policies.patterns.enabled' 'false')"
 # the ledger decision + emit it + exit. Shared by autoDeny and autoAllow (the two
 # loops were byte-identical apart from the verb). $1 = jq path to the list,
 # $2 = outcome (deny|allow), $3 = "by" label. No-op when patterns are disabled.
+# L2: when a per-session POLICY_FILE exists its lists win and apply regardless of
+# PAT_ENABLED (bundle = explicit opt-in); the ledger `by` carries the bundle name.
+# Otherwise read the fleet `.policies.patterns.<leaf>` gated by PAT_ENABLED (old
+# behavior). $1 = leaf (autoAllow|autoDeny), $2 = outcome (deny|allow), $3 = by.
 match_patterns() {
-  [ "$PAT_ENABLED" = "true" ] || return 0
-  local pats pat; pats="$(cc_config_array "$1")"
+  local leaf="$1" pats pat by="$3"
+  if [ -f "$POLICY_FILE" ]; then
+    pats="$(jq -r --arg k "$leaf" '.[$k][]? // empty' "$POLICY_FILE" 2>/dev/null)"
+    [ -n "$POLICY_BUNDLE" ] && by="bundle:$POLICY_BUNDLE"
+  else
+    [ "$PAT_ENABLED" = "true" ] || return 0
+    pats="$(cc_config_array ".policies.patterns.$leaf")"
+  fi
   [ -n "$pats" ] || return 0
   while IFS= read -r pat; do
     [ -n "$pat" ] || continue
     if pattern_match "$TOOL" "$SUMMARY" "$pat"; then
       if [ "$2" = "deny" ]; then
         echo "[cc-approve] ⛔ policy auto-deny ($pat): $TOOL ($KEY)" >&2
-        ledger_decision deny "$3" "$pat"
+        ledger_decision deny "$by" "$pat"
         emit_deny "Auto-denied by Claude Shepherd policy."
       else
         echo "[cc-approve] ✅ policy auto-allow ($pat): $TOOL ($KEY)" >&2
-        ledger_decision allow "$3" "$pat"
+        ledger_decision allow "$by" "$pat"
         emit_allow
       fi
       exit 0
@@ -164,7 +187,7 @@ match_patterns() {
 }
 
 # 1. autoDeny (safety first)
-match_patterns '.policies.patterns.autoDeny' deny autoDeny
+match_patterns autoDeny deny autoDeny
 
 # 2. autopilot: this session is trusted for a time-boxed window
 if [ "$(cc_config '.policies.autopilot.enabled' 'false')" = "true" ] && [ -f "$AUTOPILOT_DIR/$KEY" ]; then
@@ -183,7 +206,7 @@ fi
 # `Bash(ls*)` also auto-allows `ls; rm -rf /` or `ls && curl … | sh`. Keep
 # autoAllow patterns tight (prefer exact tools like `Read`, or anchored commands)
 # — autoDeny runs first and always wins, so deny dangerous shapes there.
-match_patterns '.policies.patterns.autoAllow' allow autoAllow
+match_patterns autoAllow allow autoAllow
 
 # 4. approveRepeats: identical request already approved this session
 if [ "$(cc_config '.policies.approveRepeats' 'false')" = "true" ]; then

@@ -67,6 +67,14 @@ local AGENT_FILE    = os.getenv("CC_AGENT_FILE") or (os.getenv("HOME") .. "/.cla
 local MCP_FILE      = os.getenv("CC_MCP_FILE") or (os.getenv("HOME") .. "/.claude/cc-mcp.json")
 local MCP_CONFIG_DIR = os.getenv("CC_MCP_CONFIG_DIR") or (os.getenv("HOME") .. "/.claude/cc-mcp-configs")
 local SKILLS_DIR    = os.getenv("CC_SKILLS_DIR") or (os.getenv("HOME") .. "/.claude/skills")
+-- L2 named policy bundles: POLICY_DIR holds the resolved per-session policy the
+-- gate reads (MUST match cc-approve.sh's CC_POLICY_DIR default); POLICY_OVERRIDE_DIR
+-- holds each session's chosen bundle name (the detail-panel Policy dropdown).
+local POLICY_DIR    = os.getenv("CC_POLICY_DIR") or (os.getenv("HOME") .. "/.claude/cc-policy")
+local POLICY_OVERRIDE_DIR = os.getenv("CC_POLICY_OVERRIDE_DIR") or (os.getenv("HOME") .. "/.claude/cc-policy-override")
+-- Change-gate for the per-session resolved-policy file writes (avoid 1s churn):
+-- key -> last-written JSON. Cleared when a session resolves back to the fleet.
+local policyCache = {}
 local LEDGER_DIR    = os.getenv("CC_LEDGER_DIR") or (os.getenv("HOME") .. "/.claude/cc-ledger")
 local CLAUDE_DIR    = (os.getenv("HOME") or "") .. "/.claude"
 local EDITOR_BUNDLES = {
@@ -1013,6 +1021,27 @@ function FX.setGateToolsOverride(key, str)
   FX.writeFile(GATE_TOOLS_DIR .. "/" .. key, str)
 end
 function FX.clearGateToolsOverride(key) os.remove(GATE_TOOLS_DIR .. "/" .. key) end
+
+-- L2 named policy bundles. The override file = the session's chosen bundle name
+-- (detail-panel Policy dropdown); the resolved file = core.resolvePolicy output
+-- the gate (cc-approve.sh) reads. KEEP IN SYNC: cc-approve.sh reads POLICY_DIR/<key>.
+function FX.policyOverride(key) return FX.readFile(POLICY_OVERRIDE_DIR .. "/" .. key) end
+function FX.setPolicyOverride(key, name)
+  hs.fs.mkdir(POLICY_OVERRIDE_DIR)
+  FX.writeFile(POLICY_OVERRIDE_DIR .. "/" .. key, name)
+end
+function FX.clearPolicyOverride(key) os.remove(POLICY_OVERRIDE_DIR .. "/" .. key) end
+function FX.writeResolvedPolicy(key, str)
+  hs.fs.mkdir(POLICY_DIR)
+  -- Atomic (temp + rename) like FX.patchStatus/writeDecision: cc-approve.sh reads
+  -- this file on the gated hot path, so a torn truncate-then-write could briefly
+  -- drop the bundle's deny rules. os.rename is atomic on the same filesystem.
+  local path = POLICY_DIR .. "/" .. key
+  local tmp = path .. ".tmp." .. tostring(FX.now())
+  local f = io.open(tmp, "w")
+  if f then f:write(str); f:close(); os.rename(tmp, path) end
+end
+function FX.clearResolvedPolicy(key) os.remove(POLICY_DIR .. "/" .. key) end
 
 -- Cached git-root resolver (Feature B). Shells out at most once per distinct cwd
 -- for the panel's life (a session's cwd rarely changes), so the 1s refresh never
@@ -2100,6 +2129,37 @@ local function handleBridgeMsg(msg)
       end
       ledgerFor(byKey[key], { type = "gate_tools", scope = v })
       print("[cc-gate] per-session tools for " .. key .. " -> " .. (v == "" and "(default)" or v))
+    end
+    refresh()
+    return
+  end
+  -- L2: per-session policy bundle. "" clears (back to attachment/fleet); a name
+  -- attaches that bundle. Resolve + write the gate's per-session file immediately
+  -- so it applies without waiting a tick; refresh() re-resolves with full context.
+  if a == "set-policy" then
+    local key  = tostring(payload.v or "")
+    local name = tostring(payload.text or "")
+    if key ~= "" then
+      if name == "" then
+        FX.clearPolicyOverride(key); FX.clearResolvedPolicy(key); policyCache[key] = nil
+      else
+        FX.setPolicyOverride(key, name)
+        local cfg = loadConfig()
+        local it = byKey[key]
+        local prov = it and core.providerByModel(cfg, it.model, it.base_url) or nil
+        local resolved = core.resolvePolicy(cfg,
+          { project = it and it.projectKey, projectKey = it and it.projectKey,
+            group = it and it.group, providerId = prov and prov.id or nil, key = key }, name)
+        if resolved.source ~= "fleet" then
+          local enc = core.json.encode({ autoAllow = resolved.autoAllow,
+            autoDeny = resolved.autoDeny, bundle = resolved.bundle })
+          FX.writeResolvedPolicy(key, enc); policyCache[key] = enc
+        else
+          FX.clearResolvedPolicy(key); policyCache[key] = nil
+        end
+      end
+      ledgerFor(byKey[key], { type = "policy_set", scope = name })
+      print("[cc-policy] per-session bundle for " .. key .. " -> " .. (name == "" and "(default)" or name))
     end
     refresh()
     return
@@ -3242,6 +3302,11 @@ local HTML = [[
           <option value="all">All</option>
           <option value="none">None</option>
           <option value="custom">Custom…</option>
+        </select>
+      </label>
+      <label class="ctl">Policy
+        <select id="d-policy" onchange="onPolicyChange()" title="Attach a named policy/guardrail bundle (policies.bundles in config) to this session. Its autoAllow/autoDeny rules apply on top of the fleet policy (or replace it if the bundle sets disableGlobal). Default = no per-session bundle (attachment/fleet policy applies). Only enforced while headless approvals are armed.">
+          <option value="">Default</option>
         </select>
       </label>
     </div>
@@ -4505,6 +4570,25 @@ local HTML = [[
         + ((it.gate_tools_effective && it.gate_tools_effective !== "") ? it.gate_tools_effective : "(none)")
         + " — only enforced while headless approvals are armed.";
     }
+    // L2: per-session policy bundle. "" = Default (no bundle); a name attaches it.
+    function onPolicyChange(){
+      if(!selectedKey) return;
+      send("set-policy", selectedKey, document.getElementById("d-policy").value);
+    }
+    // Populate the Policy dropdown from the configured bundle names + reflect the
+    // session's current attachment (override file -> the live resolved bundle).
+    function syncPolicySelect(it){
+      var sel = document.getElementById("d-policy"); if(!sel || !it) return;
+      var names = PANEL_BUNDLES || [];
+      var cur = (it.policy_override != null && String(it.policy_override).trim() !== "")
+                ? String(it.policy_override).trim() : "";
+      sel.innerHTML = '<option value="">Default</option>'
+        + names.map(function(n){ return '<option value="'+esc(n)+'">'+esc(n)+'</option>'; }).join("");
+      sel.value = cur;
+      var eff = it.policy_bundle ? ("bundle: " + it.policy_bundle) : "fleet policy";
+      sel.title = "Effective policy for this session: " + eff
+        + " — named bundles live in policies.bundles; only enforced while headless approvals are armed.";
+    }
     // Render the options of a pending AskUserQuestion so they're visible in the
     // panel (today: read-only + Jump to answer; clickable answering comes later).
     function renderAsk(it){
@@ -4580,6 +4664,7 @@ local HTML = [[
       renderAsk(it);
       renderMeta(it);
       syncGateSelect(it);
+      syncPolicySelect(it);
       renderDecisions();
       renderDetailUsage(it);
       var n = it.queue || 0;
@@ -4605,7 +4690,7 @@ local HTML = [[
       var remote = !!it.remote;
       var remoteWait = remote && it.gate === "waiting";
       ["b-jump","b-stop","b-auto","b-clear","b-compact","b-improve","b-nudge","b-feed",
-       "effort","mode","d-model","d-gate","nudge"].forEach(function(id){
+       "effort","mode","d-model","d-gate","d-policy","nudge"].forEach(function(id){
         var el = document.getElementById(id); if(!el) return;
         el.disabled = remote;
         if(remote){ el.title = "Remote session — headless approve/deny only"; }
@@ -5147,10 +5232,12 @@ local HTML = [[
     }
 
     var PANEL_PROVIDERS = [];
+    var PANEL_BUNDLES = [];   // L2 policy-bundle names (detail-panel Policy dropdown)
     var lastSelectedStatus = null;
-    window.ccUpdate = function(items, providers){
+    window.ccUpdate = function(items, providers, bundles){
       lastItems = items || [];
       if(providers !== undefined) PANEL_PROVIDERS = providers || [];
+      if(bundles !== undefined) PANEL_BUNDLES = bundles || [];
       renderGrid();
       renderDetail();
       // Refresh the gate decision log exactly when the selected tile changes
@@ -5941,10 +6028,64 @@ function refresh()
   -- real target). A new session in a labeled folder inherits the name (F1).
   core.applyLabelsByCwd(list, labels)
   core.applyGroups(list, groups)  -- cohort tag (.group); drives filter chips + group-scoped bulk
+
+  -- L2: resolve each session's effective policy bundle (attachments apply
+  -- fleet-wide; a per-session override wins) and CHANGE-GATED-write the per-session
+  -- file the gate reads. Placed AFTER applyGroups so .group is available for
+  -- attachment matching. The RESOLVE+WRITE half is gated to the no-cost case
+  -- (skip when no attachments AND no overrides), but the ORPHAN SWEEP below runs
+  -- UNCONDITIONALLY so removing the last attachment (or a session ending) always
+  -- tears down its resolved file within a tick — the gate enforces that file
+  -- authoritatively, so a stale one would keep auto-allowing/denying silently.
+  do
+    local attList = core.config(cfg, "policies.attachments", nil)
+    local hasAtt = type(attList) == "table" and #attList > 0
+    local hasOvr = false
+    for _, n in ipairs(FX.readDir(POLICY_OVERRIDE_DIR)) do
+      if n ~= "." and n ~= ".." then hasOvr = true; break end
+    end
+    local wrote = {}  -- keys (re)written this tick; everything else on disk is stale
+    if hasAtt or hasOvr then
+      for _, it in ipairs(list) do
+        if it.key and not it.remote then
+          local ovr = FX.policyOverride(it.key)
+          local prov = core.providerByModel(cfg, it.model, it.base_url)
+          local resolved = core.resolvePolicy(cfg,
+            { project = it.projectKey, projectKey = it.projectKey, group = it.group,
+              providerId = prov and prov.id or nil, key = it.key },
+            (ovr and ovr ~= "") and ovr or nil)
+          it.policy_override = ovr
+          it.policy_bundle = resolved.bundle
+          if resolved.source ~= "fleet" then
+            local enc = core.json.encode({ autoAllow = resolved.autoAllow,
+              autoDeny = resolved.autoDeny, bundle = resolved.bundle })
+            if policyCache[it.key] ~= enc then
+              FX.writeResolvedPolicy(it.key, enc); policyCache[it.key] = enc
+            end
+            wrote[it.key] = true
+          end
+        end
+      end
+    end
+    -- Sweep: any resolved-policy file NOT (re)written this tick is stale — its
+    -- attachment was removed, its per-session override was cleared, or the session
+    -- ended. One readDir/tick; in the clean case the dir is empty (no-op). Decoupled
+    -- from hasAtt/hasOvr so a removed attachment can't leave an enforcing orphan.
+    for _, n in ipairs(FX.readDir(POLICY_DIR)) do
+      if n ~= "." and n ~= ".." and not n:find("%.tmp%.", 1, false) and not wrote[n] then
+        FX.clearResolvedPolicy(n); policyCache[n] = nil
+      end
+    end
+  end
+
   local payload = (#list == 0) and "[]" or hs.json.encode(list)
   local provs = core.config(cfg, "providers", nil)  -- reuse the cfg loaded above
   local provJson = (type(provs) == "table") and hs.json.encode(provs) or "[]"
-  wv:evaluateJavaScript("window.ccUpdate(" .. payload .. ", " .. provJson .. ")")
+  local bundleNames = {}
+  for name in pairs(core.policyBundles(cfg)) do bundleNames[#bundleNames + 1] = name end
+  table.sort(bundleNames)
+  local bundleJson = hs.json.encode(bundleNames)
+  wv:evaluateJavaScript("window.ccUpdate(" .. payload .. ", " .. provJson .. ", " .. bundleJson .. ")")
 
   -- Reflect the live keep-awake state in the toggle on a light cadence (every 10
   -- polls, not every 1s) so a `pmset -g` subprocess doesn't run each second. The

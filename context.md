@@ -106,7 +106,13 @@ mined into a backlog L1–L7 (see [todos.md](todos.md); per-project reports in `
 a pure-`cc-core` registry layer (`cc-agents.json` + `cc-mcp.json`, validator, `resolveAgent`, `mcpConfig`,
 `personaPrompt`, `spawnExtraFlags`, skills parser) plus the New-Session modal's Agents chip row, Save-as-agent,
 and a read-only Skills card. The richer registry-management UI (folders/favorites/fork/sort, in-panel
-skills/MCP/knowledge attach editor) is the deferred L1 follow-up. Build order next: L2 → … → L7.
+skills/MCP/knowledge attach editor) is the deferred L1 follow-up.
+
+**L2 — named policy/guardrail bundles** is shipped too: `policies.bundles` + `policies.attachments` resolved
+per session (`core.resolvePolicy`, precedence override > attachment > fleet) into a `cc-policy/<key>` file the
+gate (`cc-approve.sh`) reads authoritatively, with a detail-panel Policy dropdown, an orphan sweep, atomic
+writes, and SessionEnd cleanup — built with an adversarial-review pass that caught + fixed an orphaned-policy
+enforcement bug. Deferred: the bundle/attachment editor UI. Build order next: L3 → … → L7.
 
 ## State (2026-06-13)
 

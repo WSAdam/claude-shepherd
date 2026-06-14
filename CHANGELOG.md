@@ -4,6 +4,34 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-14 (later) — L2 named policy / guardrail bundles + attachments
+
+Second build from the feature-mining backlog. Turns the flat fleet policy
+(`policies.patterns.autoAllow/autoDeny`) into NAMED, reusable bundles you attach per-session
+or fleet-wide.
+
+- **cc-core (pure, tested):** `resolvePolicy` (precedence session-override > attached bundle >
+  fleet; unions bundle+fleet lists, or drops the fleet when `disableGlobal`), `matchAttachment`
+  (project/group/provider/key glob matching), `globEq`, `policyBundles`/`policyBundle`,
+  `overToolLimit`, and `DEFAULT_POLICY_BUNDLES` (read-only / no-bash / no-network starters).
+- **The gate (`cc-approve.sh`):** `match_patterns` reads a per-session `cc-policy/<key>` file when
+  present — **authoritative + opt-in** (applies even if `policies.patterns.enabled` is false; the
+  bundle name lands in the ledger `by`). Absent file → the old fleet behavior, byte-identical.
+- **Dashboard:** resolves each session every tick (attachments fleet-wide, the detail-panel
+  **Policy dropdown** override wins) and change-gated-writes the gate's per-session file; a
+  **decoupled orphan sweep** tears down any resolved file not re-written that tick, so removing an
+  attachment (or a session ending) can never leave a stale, still-enforcing policy.
+- **Config:** `policies.bundles` + `policies.attachments` documented in the example.
+- **Lifecycle:** `cc_remove` (SessionEnd) now reaps `cc-policy`/`cc-policy-override`;
+  `writeResolvedPolicy` is atomic (temp+rename) so the gate never reads a torn file.
+
+Built with an **adversarial review pass** (5 dimensions → skeptic-verify) before deploy, which
+caught the orphaned-file enforcement bug, the SessionEnd leak, and the non-atomic write — all
+fixed + regression-tested here. Suite **1346 core + 260 ui + 183 bash**, all green; deployed
+(`make setup`) + live-verified (the deployed gate denies under a read-only bundle file).
+Deferred follow-up: the bundle/attachment EDITOR UI (today they're hand-edited config), bundle
+`gateTools` auto-apply, and `toolLimits` enforcement in the shell.
+
 ## 2026-06-14 — L1 Agent Profiles ("spawn from a saved agent") + Phase 0 foundation
 
 First build from the cross-project feature-mining backlog (5 sources mined → L1–L7 in todos.md;

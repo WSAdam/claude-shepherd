@@ -774,5 +774,47 @@ do
   check("l1-pin: renderSkills card", src:find("function renderSkills()", 1, true) ~= nil)
 end
 
+-- ---- L2 named policy bundles: dashboard wiring pins ------------------------
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("l2-pin: dashboard source readable", #src > 0)
+  check("l2-pin: POLICY_DIR matches cc-approve default", src:find("/.claude/cc%-policy\"") ~= nil)
+  check("l2-pin: POLICY_OVERRIDE_DIR", src:find("cc%-policy%-override") ~= nil)
+  check("l2-pin: FX.policyOverride", src:find("function FX.policyOverride(", 1, true) ~= nil)
+  check("l2-pin: FX.writeResolvedPolicy", src:find("function FX.writeResolvedPolicy(", 1, true) ~= nil)
+  check("l2-pin: set-policy handler", src:find('a == "set%-policy"') ~= nil)
+  check("l2-pin: refresh resolves policy", src:find("core.resolvePolicy(cfg,", 1, true) ~= nil)
+  check("l2-pin: change-gated write via policyCache", src:find("policyCache[it.key] ~= enc", 1, true) ~= nil)
+  check("l2-pin: bundle names pushed to panel", src:find("core.policyBundles(cfg)", 1, true) ~= nil)
+  check("l2-pin: ccUpdate takes bundles", src:find("window.ccUpdate = function(items, providers, bundles)", 1, true) ~= nil)
+  check("l2-pin: d-policy select in detail", src:find('id="d%-policy"') ~= nil)
+  check("l2-pin: onPolicyChange", src:find("function onPolicyChange()", 1, true) ~= nil)
+  check("l2-pin: syncPolicySelect called", src:find("syncPolicySelect(it)", 1, true) ~= nil)
+  check("l2-pin: d-policy disabled for remote", src:find('"d-model","d-gate","d-policy","nudge"', 1, true) ~= nil)
+
+  -- cc-approve.sh reads the per-session policy file (KEEP-IN-SYNC anchor)
+  local g = io.open(ROOT .. "cc-approve.sh", "r")
+  local gsrc = g and g:read("*a") or ""
+  if g then g:close() end
+  check("l2-pin: cc-approve POLICY_DIR default", gsrc:find("CC_POLICY_DIR", 1, true) ~= nil)
+  check("l2-pin: cc-approve reads POLICY_FILE in match_patterns",
+        gsrc:find('jq -r --arg k "$leaf"', 1, true) ~= nil)
+  check("l2-pin: cc-approve bundle in ledger by", gsrc:find('by="bundle:$POLICY_BUNDLE"', 1, true) ~= nil)
+
+  -- Review fixes: orphan sweep (decoupled from hasAtt/hasOvr), atomic write, cc_remove cleanup.
+  check("l2-fix: orphan sweep reads POLICY_DIR", src:find("for _, n in ipairs(FX.readDir(POLICY_DIR))", 1, true) ~= nil)
+  check("l2-fix: sweep clears keys not (re)written this tick", src:find("not wrote[n] then", 1, true) ~= nil)
+  check("l2-fix: writeResolvedPolicy is atomic (temp+rename)",
+        src:find("torn truncate-then-write", 1, true) ~= nil and src:find("os.rename(tmp, path)", 1, true) ~= nil)
+  local lib = io.open(ROOT .. "cc-lib.sh", "r")
+  local lsrc = lib and lib:read("*a") or ""
+  if lib then lib:close() end
+  check("l2-fix: cc-lib hoists CC_POLICY_DIR", lsrc:find("CC_POLICY_DIR=", 1, true) ~= nil)
+  check("l2-fix: cc_remove reaps the L2 policy files",
+        lsrc:find('"$CC_POLICY_DIR/$1" "$CC_POLICY_OVERRIDE_DIR/$1"', 1, true) ~= nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

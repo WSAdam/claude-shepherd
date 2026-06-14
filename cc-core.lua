@@ -4209,4 +4209,115 @@ function M.skillCommand(name)
   return "/" .. n
 end
 
+-- ===========================================================================
+-- L2 — Named policy / guardrail bundles + attachments
+-- ===========================================================================
+-- Turn the flat fleet policy (policies.patterns.autoAllow/autoDeny + gate.tools)
+-- into NAMED, attachable bundles. A session's EFFECTIVE policy is resolved here
+-- (pure) with precedence: per-session override > attached bundle (matched by
+-- project/group/provider/key) > fleet default. The dashboard resolves each session
+-- and writes a per-session policy file the gate (cc-approve.sh) reads -- KEEP IN
+-- SYNC (the shell wiring mirrors this resolution / consumes its output).
+-- Config: policies.bundles = { [name] = { autoAllow[], autoDeny[], gateTools,
+--   autopilot, lockedPermMode, toolLimits{tool=N}, disableGlobal } };
+--   policies.attachments = [ { match = {project,group,providerId,key}, bundle } ].
+
+-- Glob-equality for one match field: nil/"" pattern = wildcard; supports * and ?.
+function M.globEq(pat, val)
+  if pat == nil or pat == "" then return true end
+  pat = tostring(pat); val = tostring(val or "")
+  local rx = "^" .. pat:gsub("[%^%$%(%)%.%[%]%+%-%%]", "%%%1")
+                       :gsub("%*", ".*"):gsub("%?", ".") .. "$"
+  local ok, m = pcall(string.match, val, rx)
+  return ok and m ~= nil
+end
+
+function M.policyBundles(cfg)
+  local b = M.config(cfg, "policies.bundles", nil)
+  return type(b) == "table" and b or {}
+end
+function M.policyBundle(cfg, name)
+  if not name or tostring(name) == "" then return nil end
+  local b = M.policyBundles(cfg)[tostring(name)]
+  return type(b) == "table" and b or nil
+end
+
+-- First attachment whose match matches the session -> its bundle name, or nil.
+-- session = { project|projectKey, group, providerId, key }. An absent/"" match
+-- field is a wildcard; all present fields must glob-match.
+function M.matchAttachment(cfg, session)
+  session = session or {}
+  local atts = M.config(cfg, "policies.attachments", nil)
+  if type(atts) ~= "table" then return nil end
+  for _, a in ipairs(atts) do
+    if type(a) == "table" and type(a.match) == "table" and a.bundle then
+      local m = a.match
+      if M.globEq(m.project, session.project or session.projectKey)
+         and M.globEq(m.group, session.group)
+         and M.globEq(m.providerId, session.providerId)
+         and M.globEq(m.key, session.key) then
+        return tostring(a.bundle)
+      end
+    end
+  end
+  return nil
+end
+
+-- Resolve a session's EFFECTIVE policy. override (optional) = a bundle name, or
+-- { bundle, disableGlobal }. Precedence: override > attachment > fleet. autoDeny
+-- and autoAllow are the bundle's UNION the fleet's (unless disableGlobal drops the
+-- fleet lists); gateTools reuses resolveGateTools precedence. Pure + deterministic.
+function M.resolvePolicy(cfg, session, override)
+  local ovName, ovDisable
+  if type(override) == "table" then ovName = override.bundle; ovDisable = override.disableGlobal
+  elseif type(override) == "string" and override ~= "" then ovName = override end
+  local bundleName = (ovName and tostring(ovName) ~= "" and ovName) or M.matchAttachment(cfg, session)
+  local bundle = M.policyBundle(cfg, bundleName) or {}
+  local source = (ovName and "session") or (bundleName and "attachment") or "fleet"
+  local disableGlobal = ovDisable
+  if disableGlobal == nil then disableGlobal = bundle.disableGlobal == true end
+  local function arr(v) return type(v) == "table" and v or {} end
+  local function union(a, b)
+    local out, seen = {}, {}
+    for _, x in ipairs(a) do local s = tostring(x); if not seen[s] then seen[s] = true; out[#out + 1] = x end end
+    for _, x in ipairs(b) do local s = tostring(x); if not seen[s] then seen[s] = true; out[#out + 1] = x end end
+    return out
+  end
+  local fleetAllow = disableGlobal and {} or arr(M.config(cfg, "policies.patterns.autoAllow", nil))
+  local fleetDeny  = disableGlobal and {} or arr(M.config(cfg, "policies.patterns.autoDeny", nil))
+  return {
+    bundle = bundleName, source = source, disableGlobal = disableGlobal,
+    autoAllow = union(arr(bundle.autoAllow), fleetAllow),
+    autoDeny  = union(arr(bundle.autoDeny), fleetDeny),
+    gateTools = M.resolveGateTools(bundle.gateTools, nil, M.config(cfg, "gate.tools", nil)),
+    autopilot = bundle.autopilot == true,
+    lockedPermMode = bundle.lockedPermMode,
+    toolLimits = type(bundle.toolLimits) == "table" and bundle.toolLimits or nil,
+  }
+end
+
+-- Starter bundles the UI offers (the operator copies one into policies.bundles).
+-- read-only = gate everything that mutates; mind the escalation semantics (these
+-- are autoDeny rules, NOT an allow-list).
+M.DEFAULT_POLICY_BUNDLES = {
+  ["read-only"]  = { autoDeny = { "Bash", "Write", "Edit", "MultiEdit", "NotebookEdit" } },
+  ["no-bash"]    = { autoDeny = { "Bash" } },
+  ["no-network"] = { autoDeny = { "Bash(curl*)", "Bash(wget*)", "WebFetch" } },
+}
+
+-- Tools at/over their per-bundle usage ceiling, given a counts map {tool=n}.
+-- Returns a list of { tool, used, limit }. (Soft/next-request limit; the ledger
+-- supplies the counts -- Claude Code owns true enforcement.)
+function M.overToolLimit(toolLimits, counts)
+  local out = {}
+  if type(toolLimits) ~= "table" then return out end
+  counts = type(counts) == "table" and counts or {}
+  for tool, lim in pairs(toolLimits) do
+    local n = tonumber(counts[tool]) or 0
+    local L = tonumber(lim)
+    if L and n >= L then out[#out + 1] = { tool = tool, used = n, limit = L } end
+  end
+  return out
+end
+
 return M
