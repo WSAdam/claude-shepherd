@@ -133,7 +133,28 @@ skills/MCP/knowledge attach editor) is the deferred L1 follow-up.
 per session (`core.resolvePolicy`, precedence override > attachment > fleet) into a `cc-policy/<key>` file the
 gate (`cc-approve.sh`) reads authoritatively, with a detail-panel Policy dropdown, an orphan sweep, atomic
 writes, and SessionEnd cleanup — built with an adversarial-review pass that caught + fixed an orphaned-policy
-enforcement bug. Deferred: the bundle/attachment editor UI. Build order next: L3 → … → L7.
+enforcement bug. Deferred: the bundle/attachment editor UI.
+
+**L3 — parameterized + versioned prompt templates** is shipped: saved templates (`cc-templates.json`) grew from
+flat `{name, text}` into structured/versioned records with `{{var}}` interpolation, all back-compat. The
+load-bearing facts a refactor must keep:
+- **cc-core is the authoritative renderer — no JS render twin.** `core.renderTemplate` does the substitution;
+  the panel round-trips through the `template-render` handler (which composes + interpolates and echoes back via
+  `ccTemplateRendered`). The only JS twin is the trivial `{{`-detection. Built-ins: `date`/`today`/`now` come
+  from an **injected `os.time()`** (cc-core stays clock-pure — `opts.now`); `{{prev_output}}` = the relevant
+  tile's `it.activity` (transcript snippet).
+- **Two render modes.** Interactive (Tpl menu, modal picker) REFUSES on a missing required var. Autonomous feed
+  (`renderFeed` at the three queue feed sites) uses `keepMissing=true`: built-ins + `{{prev_output}}` resolve,
+  unfillable user vars are left VERBATIM, it never refuses, and a placeholder-free task is byte-identical — so
+  existing queues are unaffected. The **raw** queued task is still what's popped/persisted/ledgered; only the
+  typed text is rendered. Delivery gating (`queueFeedCommit`) is untouched.
+- **Validator family mirrors L1.** `validateTemplate → templateLoad (keep-valid/drop-bad/return errors) →
+  templateList`. Versioning (`templatePushVersioned`) is duplicate-on-edit; its change detector signs on the
+  **composed body** (so an edit to a `composeTemplate`-shadowed field doesn't spuriously bump). Definition source:
+  `parsePromptFile`/`promptImport` import `*.prompt`/`*.md` from `templates.sourceDir` (default
+  `~/.claude/cc-prompts`), strictly local. Deferred: the structured-template authoring + version/revert editor UI.
+
+Build order next: **L4** (declarative routing — the affinity source is DECIDED = queue-line `@role:` prefix) → L5 → L6 → L7.
 
 ## State (2026-06-13)
 

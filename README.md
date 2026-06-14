@@ -371,9 +371,29 @@ Queue extras:
   is refused and the list refreshed instead of moving the wrong task.
 - **Bulk paste** — paste a multi-line list into the input and hit Queue: it splits into
   one task per line (bullets/numbering stripped, blanks dropped) after a confirm.
-- **Task templates** — "Tpl ▾" next to Queue saves the current input as a named
-  template and inserts saved ones back into the input (never auto-sends). Stored in
-  `~/.claude/cc-templates.json`.
+- **Task templates (parameterized + versioned)** — "Tpl ▾" next to Queue saves the
+  current input as a named template and inserts saved ones back into the input (never
+  auto-sends). Stored in `~/.claude/cc-templates.json`.
+  - **Variables** — a template body can carry `{{name}}` (required) and `{{name?}}`
+    (optional) placeholders. Picking one opens an inline fill-in form (required vars gate
+    Insert), then it's rendered before it lands in the input. Built-in vars fill
+    automatically: `{{date}}`/`{{today}}`, `{{now}}`, and `{{prev_output}}` (the selected
+    session's latest output).
+  - **Render-before-spawn** — the New-Session modal has a **Templates** picker that seeds
+    the Initial-task field; any `{{vars}}` are filled in (required vars gate "Use") and
+    rendered so the spawn task is fully resolved before launch.
+  - **Render-before-feed** — queued tasks are rendered just before they're typed in
+    (manual / autofeed / router): `{{prev_output}}` (the turn that just finished) and the
+    date built-ins resolve; user `{{vars}}` that can't be auto-filled are left as-is, and a
+    task with no `{{ }}` is fed unchanged.
+  - **Versioning** — re-saving a template snapshots the previous body and bumps its
+    version (a `v2` chip marks edited templates); an identical save is a no-op.
+  - **Import a definitions folder** — "⤓ Import from prompts folder…" pulls `*.prompt` /
+    `*.md` files (a leading `--- name: … ---` front-matter block + the body) from a local
+    directory (`templates.sourceDir`, default `~/.claude/cc-prompts`) into the store.
+    Strictly local-disk — no network. Structured fields (`description`/`expected_output`)
+    and the version history are hand-editable in `cc-templates.json` for now (a richer
+    editor is the deferred follow-up).
 - **Project routing (4c-E)** — with `queue.routing.enabled` on AND a project armed via
   the detail panel's **route** toggle, the project's queue feeds **whichever of its
   sessions is free** (just finished a turn), not only the one that emptied its own

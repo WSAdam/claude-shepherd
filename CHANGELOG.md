@@ -4,6 +4,49 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-14 (later still) — L3 parameterized + versioned prompt templates
+
+Third build from the feature-mining backlog. Turns saved task templates from flat `{name, text}`
+strings into **parameterized, structured, versioned** records — the local "agent-definition"
+layer that feeds the input, the New-Session spawn, and the autonomous queue. Back-compat is
+preserved end to end (a legacy `{name, text}` round-trips byte-identically; the old
+`templatePush/templateGet/templateRemove` API and the existing Tpl-menu flow are unchanged).
+
+- **cc-core (pure, deterministic — clock injected via `opts.now`; mirrors the L1 validator family):**
+  `validateTemplate`/`templateLoad`/`templateList` (fail-safe per-entry load: keep valid, drop bad
+  with reasons, dedupe-first-wins; known-fields allowlist), `composeTemplate` (structured body =
+  description + an "Expected output:" block, else legacy text), `templateVars`/`renderTemplate`
+  (`{{name}}` required / `{{name?}}` optional + the built-ins `date`/`today`/`now`/`prev_output`;
+  a missing required var REFUSES the render — or, with `keepMissing`, is left verbatim and never
+  refuses), `effectiveVars`/`fillDefaults`, `templatePushVersioned`/`templateVersions`/
+  `templateRevert` (duplicate-on-edit: snapshot the prior head into a capped history + bump; the
+  change detector signs on the COMPOSED body so a shadowed-field edit doesn't spuriously bump),
+  and `parsePromptFile`/`promptImport` (definition source).
+- **Variables in the Tpl menu:** picking a template with vars opens an inline fill-in form (required
+  vars gate Insert); cc-core renders it — `{{prev_output}}` = the selected tile's latest output —
+  and the result drops into the input, **never auto-sent**. cc-core is the authoritative renderer
+  (no JS render twin to drift). A `{{ }}` badge + version chip mark templated/edited entries.
+- **Render-before-spawn:** a Templates picker in the New-Session modal seeds the Initial-task field;
+  a template with vars is filled in first (required vars gate "Use") and rendered into the task — so
+  the spawn task is fully resolved BEFORE spawn.
+- **Render-before-feed (queue):** every queued task is rendered just before it's typed in (manual,
+  autofeed, router) — `{{prev_output}}` (the just-finished turn's output) + date built-ins resolve;
+  user `{{vars}}` that can't be auto-filled are left verbatim, and a task with no placeholders is
+  byte-unaffected. The raw queued task is still what's popped/persisted/ledgered.
+- **Versioned saves:** re-saving a template snapshots the prior body and bumps the version
+  (`templatePushVersioned`); an identical save is a no-op.
+- **Definition source / import:** `⤓ Import from prompts folder…` imports `*.prompt` / `*.md`
+  files (front-matter `name` + body, no YAML/Jinja) from a local dir (`templates.sourceDir`, default
+  `~/.claude/cc-prompts`) into the store, versioned. Strictly local-disk — no network.
+- **Robustness (from an adversarial-review pass):** the version-change detector signs on the
+  composed body (no spurious bumps from shadowed fields); corrupt/hand-edited records are surfaced
+  to the console on load instead of being silently reaped on the next save/delete. A second review
+  pass over the modal/queue/import surfaces reported 30 candidates, 0 confirmed.
+- **Deferred follow-up** (cc-core already supports it): the full structured-template authoring editor
+  (description/expected_output fields) + the version/revert VIEW UI — today those structured fields
+  are hand-edited in `cc-templates.json` or imported. (Same "defer the editor" posture as L1/L2.)
+- Suite: **1425 core + 293 ui + 183 bash**, all green.
+
 ## 2026-06-14 (later) — L2 named policy / guardrail bundles + attachments
 
 Second build from the feature-mining backlog. Turns the flat fleet policy

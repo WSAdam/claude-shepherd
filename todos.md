@@ -207,15 +207,16 @@ remaining items. Full per-round detail is in CHANGELOG.md and git history.
 ## Candidate features — cross-project mining backlog
 
 > **▶ RESUME HERE (build status, 2026-06-14):** Mining is DONE (5 sources → L1–L7). Build order
-> **Phase 0✅ → L1✅ → L2✅ → L3 → L4 → L5 → L6 → L7**. **L1 (Agent Profiles) and L2 (policy bundles)
-> are SHIPPED + committed + deployed** (see CHANGELOG 2026-06-14 + their `✅` blocks below; each has a
-> *deferred follow-up* — mainly editor UIs). **Next: L3** (parameterized + versioned prompt templates
-> with a definition directory). Method per feature: pure logic in `cc-core.lua` + unit tests → wire
-> the dashboard (FX/handleAction/panel-JS) + ui pins → `make test` green → for risky changes run an
-> **adversarial-review Workflow** (caught 3 real bugs in L2) → fix → `make setup`/`deploy` →
+> **Phase 0✅ → L1✅ → L2✅ → L3✅ → L4 → L5 → L6 → L7**. **L1 (Agent Profiles), L2 (policy bundles),
+> and L3 (prompt templates) are SHIPPED + committed + deployed** (see CHANGELOG 2026-06-14 + their `✅`
+> blocks below; each has a *deferred follow-up* — mainly editor UIs). **Next: L4** (declarative routing &
+> orchestration — the affinity source is DECIDED = queue-line `@role:` prefix; unblocks the deferred 4c-E
+> follow-ups). Method per feature: pure logic in `cc-core.lua` + unit tests → wire the dashboard
+> (FX/handleAction/panel-JS) + ui pins → `make test` green → for risky changes run an **adversarial-review
+> Workflow** (caught 3 real bugs in L2; 3 in L3 round 1, 0 in L3 round 2) → fix → `make setup`/`deploy` →
 > live-verify → commit. **L4 routing source is DECIDED = queue-line `@role:` prefix.** Honor the
 > three load-bearing facts below (the `claude` CLI is present; `gate.tools` is a hold-list not an
-> allow-list; secrets are env-var NAMES only) and the L1/L2 KEEP-IN-SYNC invariants in context.md.
+> allow-list; secrets are env-var NAMES only) and the L1/L2/L3 KEEP-IN-SYNC invariants in context.md.
 
 Built by adversarially mining top AI orchestration/governance apps (12 domains each: finders → dedup →
 FOR/AGAINST judge → skeptic verify) for features worth ADAPTing onto Shepherd's primitives. CANDIDATES for
@@ -447,6 +448,19 @@ override. Turn it into named, attachable bundles.
     object. Drop credentials/impersonation/delegation-token (no-secrets/no-auth scope).
 
 ### L3 — Parameterized + versioned prompt templates with a definition source — effort **M**
+> ✅ **SHIPPED 2026-06-14** (see CHANGELOG): `cc-templates.json` records grew from flat `{name, text}` into
+> structured/versioned, all back-compat. cc-core (clock-pure): `validateTemplate`/`templateLoad`/`templateList`
+> (fail-safe load), `composeTemplate`, `templateVars`/`renderTemplate` (`{{name}}`/`{{name?}}` + built-ins
+> date/today/now/`{{prev_output}}`; required-var refusal, or `keepMissing` for autonomous feed),
+> `effectiveVars`/`fillDefaults`, `templatePushVersioned`/`templateVersions`/`templateRevert` (duplicate-on-edit,
+> change detector signs on the composed body), `parsePromptFile`/`promptImport`. Wired: inline var form in the
+> Tpl menu (render-before-insert, no-auto-send), a New-Session modal **Templates** picker (render-before-spawn),
+> render-before-feed at all three queue sites, versioned saves, and `⤓ Import from prompts folder` (`*.prompt`/
+> `*.md` from `templates.sourceDir`, default `~/.claude/cc-prompts`). cc-core is the authoritative renderer (no JS
+> render twin). Two adversarial-review passes (3 real fixed; then 0). Suite 1425 core + 293 ui + 183 bash.
+> **Deferred follow-up:** the structured-template authoring editor (description/expected_output fields) + the
+> version/revert VIEW UI — today those fields are hand-edited in `cc-templates.json` or imported (same posture as
+> the deferred L1/L2 editors).
 *Source: ADAPT items 42, 43, 44 (dotprompt file definitions + input-schema, prompt-management CRUD +
 versioning + playground, remote/git prompt sources). This is the local "agent-definition directory" that
 feeds L1.* `cc-templates.json` stores verbatim task text today (no vars, no schema; `templatePush`

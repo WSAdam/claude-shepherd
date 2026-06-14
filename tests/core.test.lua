@@ -576,6 +576,15 @@ do
   eq("render: no clock -> blank date", core.renderTemplate("[{{date}}]", {}, {}), "[]")
   eq("render: prev_output", core.renderTemplate("<{{prev_output}}>", {}, { prevOutput = "OUT" }), "<OUT>")
   eq("render: prev_output default blank", core.renderTemplate("<{{prev_output}}>", {}, {}), "<>")
+  -- keepMissing (autonomous feed): builtins/prev_output resolve, user vars stay verbatim, never refuses
+  local rk, mk = core.renderTemplate("do {{thing}} on {{today}}", {}, { now = T, keepMissing = true })
+  eq("render: keepMissing fills builtins, keeps user var", rk, "do {{thing}} on " .. os.date("%Y-%m-%d", T))
+  eq("render: keepMissing never refuses", #mk, 0)
+  eq("render: keepMissing fills prev_output",
+     core.renderTemplate("from {{prev_output}}", {}, { prevOutput = "RESULT", keepMissing = true }), "from RESULT")
+  eq("render: keepMissing blanks optional", core.renderTemplate("a{{x?}}b", {}, { keepMissing = true }), "ab")
+  eq("render: keepMissing plain task unchanged",
+     core.renderTemplate("just do the thing", {}, { keepMissing = true }), "just do the thing")
 
   -- effectiveVars merges declared schema + parsed body
   local ev = core.effectiveVars({ name = "n", description = "use {{repo}} and {{extra}}",
@@ -643,6 +652,35 @@ do
   local sr = core.templatePushVersioned(nil, { name = "R", description = "d", expected_output = "x" }, { now = 1 })
   local sr2 = core.templatePushVersioned(sr, { name = "R", description = "d", expected_output = "y" }, { now = 2 })
   eq("ver: rendered-body edit bumps", core.templateGetRecord(sr2, "R").version, 2)
+end
+
+-- ---- L3: prompt-file import (definition source) ----------------------------
+do
+  -- frontmatter name + body (vars derived from the body at render time)
+  local rec = core.parsePromptFile("---\nname: Reviewer\n---\nReview {{file}} now", "fallback")
+  eq("prompt: frontmatter name", rec.name, "Reviewer")
+  eq("prompt: body is the text", rec.text, "Review {{file}} now")
+  -- no frontmatter -> stem is the name, whole (trimmed) text is the body
+  local rec2 = core.parsePromptFile("  just do {{x}}  ", "do-it")
+  eq("prompt: stem fallback name", rec2.name, "do-it")
+  eq("prompt: whole text body trimmed", rec2.text, "just do {{x}}")
+  -- import folds files into the store (versioned); bad ones skipped with reasons
+  local st, sum = core.promptImport(nil, {
+    { stem = "a", text = "---\nname: Alpha\n---\nbody A" },
+    { stem = "b", text = "do {{thing}}" },
+    { stem = "empty", text = "---\nname: E\n---\n   " } }, { now = 10 })
+  eq("import: imported count", sum.imported, 2)
+  eq("import: skipped the empty", sum.skipped, 1)
+  eq("import: error carries a name", sum.errors[1].name, "E")
+  eq("import: stored Alpha body", core.templateGet(st, "Alpha"), "body A")
+  eq("import: stored stem-named", core.templateGet(st, "b"), "do {{thing}}")
+  eq("import: vars parse from imported body", core.templateVars(core.templateGet(st, "b"))[1].name, "thing")
+  -- re-import of a changed body versions (duplicate-on-edit)
+  local st2 = core.promptImport(st, { { stem = "a", text = "---\nname: Alpha\n---\nbody A v2" } }, { now = 20 })
+  eq("import: re-import bumps version", core.templateGetRecord(st2, "Alpha").version, 2)
+  -- garbage tolerated
+  local _, sum2 = core.promptImport(nil, "nonsense", { now = 1 })
+  eq("import: garbage files -> nothing", sum2.imported, 0)
 end
 
 -- ---- Spawn presets (roadmap #4a) --------------------------------------------

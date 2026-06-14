@@ -3897,12 +3897,16 @@ end
 -- built-ins. Returns (rendered, missing[]): a missing REQUIRED var (no value at a
 -- non-optional occurrence) REFUSES the render -> (nil, {names...}); an optional
 -- placeholder blanks out; built-ins resolve from opts (an absent clock -> blank
--- date). Pure (clock injected via opts.now).
+-- date). With opts.keepMissing=true (the AUTONOMOUS feed path -- no human to
+-- prompt), a missing required var is LEFT VERBATIM instead, and the render never
+-- refuses: only built-ins + {{prev_output}} + supplied vars resolve, so a queued
+-- task with no placeholders is returned unchanged. Pure (clock injected).
 function M.renderTemplate(text, vars, opts)
   text = type(text) == "string" and text or ""
   vars = type(vars) == "table" and vars or {}
   opts = type(opts) == "table" and opts or {}
   local now = tonumber(opts.now)
+  local keep = opts.keepMissing == true
   local prevOut = type(opts.prevOutput) == "string" and opts.prevOutput or ""
   local missing, seenMissing = {}, {}
   local function dateFmt(fmt) return now and os.date(fmt, now) or "" end
@@ -3914,6 +3918,7 @@ function M.renderTemplate(text, vars, opts)
     if val ~= nil then val = tostring(val) end
     if val ~= nil and tplTrim(val) ~= "" then return val end
     if opt == "?" then return "" end
+    if keep then return nil end  -- leave the placeholder verbatim; never refuse
     if not seenMissing[name] then seenMissing[name] = true; missing[#missing + 1] = name end
     return ""
   end)
@@ -3953,6 +3958,60 @@ function M.fillDefaults(schema, vars)
     end
   end
   return out
+end
+
+-- Parse a .prompt / .md prompt definition into a template record. Strips an
+-- optional leading `---`...`---` frontmatter (reads `name`); the body after it is
+-- the prompt text, which may carry {{vars}}. Name falls back to the file stem. No
+-- YAML/Jinja -- just frontmatter + body, like parseSkillFrontmatter. Pure (runs on
+-- text the FX layer reads); validate the result before storing.
+function M.parsePromptFile(text, stem)
+  text = tostring(text or "")
+  local name = tplTrim(stem)
+  local body = text
+  local fm, rest = text:match("^%s*%-%-%-%s*\n(.-)\n%s*%-%-%-%s*\n?(.*)$")
+  if fm then
+    body = rest
+    for line in (fm .. "\n"):gmatch("(.-)\n") do
+      local k, v = line:match("^%s*([%w_]+)%s*:%s*(.-)%s*$")
+      if k and k:lower() == "name" then
+        v = v:gsub('^"(.*)"$', "%1"):gsub("^'(.*)'$", "%1")
+        if tplTrim(v) ~= "" then name = tplTrim(v) end
+      end
+    end
+  end
+  return { name = name, text = tplTrim(body) }
+end
+
+-- Import parsed prompt-definition files into the template store (versioned, so a
+-- re-import snapshots the prior body). `files` = { {stem, text}, ... } the FX layer
+-- read from the definitions dir. Returns newState, summary{imported, skipped,
+-- names[], errors[]}. Pure (clock via opts.now).
+function M.promptImport(state, files, opts)
+  opts = type(opts) == "table" and opts or {}
+  local summary = { imported = 0, skipped = 0, names = {}, errors = {} }
+  local st = state
+  for _, f in ipairs(type(files) == "table" and files or {}) do
+    local rec = M.parsePromptFile(type(f) == "table" and f.text or "",
+                                  type(f) == "table" and f.stem or "")
+    local v = M.validateTemplate(rec)
+    if not v.ok then
+      summary.skipped = summary.skipped + 1
+      summary.errors[#summary.errors + 1] = {
+        name = rec.name ~= "" and rec.name or "(unnamed)",
+        reason = table.concat(v.errors, "; ") }
+    else
+      local nst, saved = M.templatePushVersioned(st, rec, opts)
+      st = nst
+      if saved then
+        summary.imported = summary.imported + 1
+        summary.names[#summary.names + 1] = rec.name
+      else
+        summary.skipped = summary.skipped + 1
+      end
+    end
+  end
+  return st, summary
 end
 
 -- ---- Spawn presets (roadmap #4a) --------------------------------------------

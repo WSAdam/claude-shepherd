@@ -767,7 +767,7 @@ do
   -- modal JS
   check("l1-pin: Agents chip row in modal", src:find('id="n%-agents"') ~= nil)
   check("l1-pin: skills card in modal", src:find('id="n%-skills"') ~= nil)
-  check("l1-pin: showNew takes agentState", src:find("function showNew(cfg, recent, browse, presetState, agentState){", 1, true) ~= nil)
+  check("l1-pin: showNew takes agentState", src:find("function showNew(cfg, recent, browse, presetState, agentState, templates)", 1, true) ~= nil)
   check("l1-pin: agentSpawn carries agent name", src:find("agent:p.name", 1, true) ~= nil)
   check("l1-pin: ccAgents updater", src:find("function ccAgents(list)", 1, true) ~= nil)
   check("l1-pin: saveAgent button", src:find("function saveAgent()", 1, true) ~= nil)
@@ -842,6 +842,34 @@ do
   check("l3-pin: insert stays no-auto-send", src:find("el.value = (o && o.text)", 1, true) ~= nil)
   -- review-fix: dropped/corrupt records are surfaced, not silently reaped on save/delete
   check("l3-pin: load surfaces dropped records", src:find("dropped \" .. #loaded.errors", 1, true) ~= nil)
+  -- Inc 3: render-before-spawn — modal template picker seeds #n-task via the same render
+  check("l3-pin: shared enrichedTemplates helper", src:find("local function enrichedTemplates()", 1, true) ~= nil)
+  check("l3-pin: open-new passes templates to modal", src:find("local tpls = enrichedTemplates()", 1, true) ~= nil)
+  check("l3-pin: showNew takes templates arg",
+        src:find("function showNew(cfg, recent, browse, presetState, agentState, templates)", 1, true) ~= nil)
+  check("l3-pin: modal n-templates row", src:find('id="n-templates"', 1, true) ~= nil)
+  check("l3-pin: modal picker fn", src:find("function modalTplPick(name)", 1, true) ~= nil)
+  check("l3-pin: render target switch", src:find("var tplRenderTarget", 1, true) ~= nil)
+  check("l3-pin: modal render targets n-task", src:find('tplRenderTarget = "n-task"', 1, true) ~= nil)
+  check("l3-pin: modal required-var gates Use", src:find('document.getElementById("m-tpl-go")', 1, true) ~= nil)
+  -- Inc 4: queue render-before-feed — {{prev_output}}/built-ins resolved before the paste,
+  -- raw task still popped/persisted; keepMissing so non-template queues are byte-unaffected.
+  check("l3-pin: renderFeed helper", src:find("local function renderFeed(task, item)", 1, true) ~= nil)
+  check("l3-pin: renderFeed uses keepMissing", src:find("keepMissing = true", 1, true) ~= nil)
+  check("l3-pin: renderFeed prevOutput from item.activity", src:find("item.activity", 1, true) ~= nil)
+  -- every feed site renders before typing; none feeds the raw task verbatim
+  check("l3-pin: all 3 feed sites render",
+        select(2, src:gsub("FX%.feedTask%(winTarget%([a-z]+%), renderFeed%(task,", "")) == 3)
+  check("l3-pin: no feed site bypasses render",
+        src:find("FX.feedTask(winTarget(item), task)", 1, true) == nil
+        and src:find("FX.feedTask(winTarget(it), task)", 1, true) == nil)
+  -- Inc 5: definition source — import *.prompt/*.md from a local dir via cc-core
+  check("l3-pin: PROMPTS_DIR constant", src:find("local PROMPTS_DIR", 1, true) ~= nil)
+  check("l3-pin: FX.listPromptFiles", src:find("function FX.listPromptFiles(dir)", 1, true) ~= nil)
+  check("l3-pin: template-import handler", src:find('a == "template%-import"') ~= nil)
+  check("l3-pin: import via cc-core promptImport", src:find("core.promptImport(FX.readTemplates()", 1, true) ~= nil)
+  check("l3-pin: sourceDir config override", src:find('core.config(loadConfig(), "templates.sourceDir"', 1, true) ~= nil)
+  check("l3-pin: JS import row", src:find("function templateImport()", 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

@@ -67,6 +67,9 @@ local AGENT_FILE    = os.getenv("CC_AGENT_FILE") or (os.getenv("HOME") .. "/.cla
 local MCP_FILE      = os.getenv("CC_MCP_FILE") or (os.getenv("HOME") .. "/.claude/cc-mcp.json")
 local MCP_CONFIG_DIR = os.getenv("CC_MCP_CONFIG_DIR") or (os.getenv("HOME") .. "/.claude/cc-mcp-configs")
 local SKILLS_DIR    = os.getenv("CC_SKILLS_DIR") or (os.getenv("HOME") .. "/.claude/skills")
+-- L3 definition source: a local dir of *.prompt / *.md prompt definitions imported
+-- into cc-templates.json (config `templates.sourceDir` overrides; strictly local).
+local PROMPTS_DIR   = os.getenv("CC_PROMPTS_DIR") or (os.getenv("HOME") .. "/.claude/cc-prompts")
 -- L2 named policy bundles: POLICY_DIR holds the resolved per-session policy the
 -- gate reads (MUST match cc-approve.sh's CC_POLICY_DIR default); POLICY_OVERRIDE_DIR
 -- holds each session's chosen bundle name (the detail-panel Policy dropdown).
@@ -809,6 +812,23 @@ function FX.listSkills()
     end
   end
   table.sort(out, function(a, b) return tostring(a.name):lower() < tostring(b.name):lower() end)
+  return out
+end
+
+-- L3 definition source: enumerate prompt-definition files (*.prompt / *.md, skip
+-- README) in `dir` -> { {stem, text}, ... }. Synchronous readDir+readFile (a flat,
+-- bounded dir, like FX.listSkills -- not the async folder-scan). Missing dir -> {}.
+function FX.listPromptFiles(dir)
+  local out = {}
+  for _, name in ipairs(FX.readDir(dir)) do
+    if name ~= "." and name ~= ".." and (name:match("%.prompt$") or name:match("%.md$"))
+       and name:lower() ~= "readme.md" then
+      local txt = FX.readFile(dir .. "/" .. name)
+      if txt then
+        out[#out + 1] = { stem = (name:gsub("%.prompt$", ""):gsub("%.md$", "")), text = txt }
+      end
+    end
+  end
   return out
 end
 
@@ -1703,6 +1723,40 @@ end
 -- which yanks its console window over your work. The right-click popup just asks
 -- the webview to start the interaction; the webview posts back "relabel"/"close".
 
+-- Enriched template list for the panel: each {name, body, vars[], version,
+-- versionCount}. Surfaces any dropped (corrupt/hand-edited) records to the console
+-- so a save/delete can't silently reap them (mirrors the L1 agent-load posture).
+-- Shared by the nudge "Tpl ▾" menu reply and the New-Session modal picker.
+local function enrichedTemplates()
+  local loaded = core.templateLoad(FX.readTemplates())
+  if #loaded.errors > 0 then
+    local names = {}
+    for _, e in ipairs(loaded.errors) do names[#names + 1] = e.name end
+    print("[cc-tpl] dropped " .. #loaded.errors .. " invalid template(s): " .. table.concat(names, ", "))
+  end
+  local out = {}
+  for _, r in ipairs(loaded.valid) do
+    out[#out + 1] = { name = r.name, body = core.composeTemplate(r) or "",
+      vars = core.effectiveVars(r), version = r.version or 1,
+      versionCount = (r.versions and #r.versions) or 0 }
+  end
+  return out
+end
+
+-- L3: render a queued task just before it's typed in. Fills {{prev_output}} (the
+-- target's latest output, which on the feed's done edge IS the turn that just
+-- finished) + the date built-ins; user {{vars}} that can't be auto-resolved
+-- without a human are left VERBATIM (keepMissing), and a task with NO placeholders
+-- is returned unchanged -- so existing non-template queues are byte-unaffected.
+-- The raw queued task is still what gets popped/persisted/ledgered; only the typed
+-- text is rendered.
+local function renderFeed(task, item)
+  local prevOut = (item and type(item.activity) == "string") and item.activity or ""
+  local r = core.renderTemplate(tostring(task or ""), {},
+    { now = os.time(), prevOutput = prevOut, keepMissing = true })
+  return r or tostring(task or "")
+end
+
 -- Single message bridge. JS posts JSON: {a=action, v=key, text=optional}.
 local controller = hs.webview.usercontent.new("cc")
 local function handleBridgeMsg(msg)
@@ -1805,13 +1859,15 @@ local function handleBridgeMsg(msg)
     local pstate = FX.readPresets()
     local agentState = { agents = core.agentList(FX.readAgents()),
                          mcp = core.mcpList(FX.readMcp()), skills = FX.listSkills() }
+    local tpls = enrichedTemplates()
+    local tplJson = (#tpls > 0) and hs.json.encode(tpls) or "[]"
     FX.scanFolders()
     pcall(function()
       wv:evaluateJavaScript("showNew(" .. hs.json.encode(cfg) .. ", "
         .. hs.json.encode(recent.dirs) .. ", " .. hs.json.encode(browse) .. ", "
         .. hs.json.encode({ presets = core.presetList(pstate),
                             lastByProject = pstate.lastByProject or {} }) .. ", "
-        .. hs.json.encode(agentState) .. ")")
+        .. hs.json.encode(agentState) .. ", " .. tplJson .. ")")
     end)
     return
   end
@@ -1989,7 +2045,7 @@ local function handleBridgeMsg(msg)
         local qk = FX.queueKeyFor(item)
         local task, q2 = core.queuePop(FX.readQueue(qk))
         if task then
-          local commit = core.queueFeedCommit(FX.feedTask(winTarget(item), task))
+          local commit = core.queueFeedCommit(FX.feedTask(winTarget(item), renderFeed(task, item)))
           if commit.persist then FX.writeQueue(qk, q2)
           else print("[cc-queue] feed skipped (no window match) -- task kept queued") end
           ledgerFor(item, { type = commit.event, task = tostring(task):sub(1, 200), by = "manual" })
@@ -2078,6 +2134,22 @@ local function handleBridgeMsg(msg)
     end
     return
   end
+  if a == "template-import" then
+    -- L3 definition source: import *.prompt / *.md files from the local prompts dir
+    -- (config templates.sourceDir, default ~/.claude/cc-prompts) into the template
+    -- store (versioned via cc-core; strictly local-disk, no network).
+    local dir = core.config(loadConfig(), "templates.sourceDir", nil)
+    dir = (type(dir) == "string" and dir ~= "") and dir or PROMPTS_DIR
+    local files = FX.listPromptFiles(dir)
+    local st, summary = core.promptImport(FX.readTemplates(), files, { now = os.time() })
+    if summary.imported > 0 then FX.writeTemplates(st) end
+    pcall(function() hs.alert.show("Claude Shepherd: imported " .. summary.imported ..
+      " template(s) from " .. dir .. (summary.skipped > 0 and (" (" .. summary.skipped .. " skipped)") or "")) end)
+    local out = enrichedTemplates()
+    local listJson = (#out > 0) and hs.json.encode(out) or "[]"
+    pcall(function() wv:evaluateJavaScript("ccTemplates(" .. listJson .. ")") end)
+    return
+  end
   if a == "template-list" or a == "template-save" or a == "template-delete" then
     if a == "template-save" then
       -- versioned save (duplicate-on-edit): re-saving a name snapshots the prior
@@ -2091,21 +2163,8 @@ local function handleBridgeMsg(msg)
       FX.writeTemplates(core.templateRemove(FX.readTemplates(), tostring(payload.v or "")))
     end
     -- enriched reply: each {name, body, vars[], version, versionCount} so the
-    -- panel renders the menu + knows which templates need a var prompt. Load once
-    -- and surface any dropped (corrupt/hand-edited) records to the console so a
-    -- save/delete can't silently reap them (mirrors the L1 agent-load posture).
-    local loaded = core.templateLoad(FX.readTemplates())
-    if #loaded.errors > 0 then
-      local names = {}
-      for _, e in ipairs(loaded.errors) do names[#names + 1] = e.name end
-      print("[cc-tpl] dropped " .. #loaded.errors .. " invalid template(s): " .. table.concat(names, ", "))
-    end
-    local out = {}
-    for _, r in ipairs(loaded.valid) do
-      out[#out + 1] = { name = r.name, body = core.composeTemplate(r) or "",
-        vars = core.effectiveVars(r), version = r.version or 1,
-        versionCount = (r.versions and #r.versions) or 0 }
-    end
+    -- panel renders the menu + knows which templates need a var prompt.
+    local out = enrichedTemplates()
     local listJson = (#out > 0) and hs.json.encode(out) or "[]"
     pcall(function() wv:evaluateJavaScript("ccTemplates(" .. listJson .. ")") end)
     return
@@ -3091,7 +3150,7 @@ local HTML = [[
   .tpl-form-foot { display:flex; justify-content:flex-end; gap:6px; margin-top:4px; }
   .tpl-form-foot button { background:#21232c; color:#cfd2db; border:1px solid #3a3d47;
                           border-radius:6px; padding:3px 10px; cursor:pointer; font-size:12px; }
-  .tpl-form-foot button#tpl-var-go { color:#8fd4a3; border-color:#2c5; }
+  .tpl-form-foot button#tpl-var-go, .tpl-form-foot button#m-tpl-go { color:#8fd4a3; border-color:#2c5; }
   .tpl-form-foot button:disabled { opacity:0.4; cursor:default; }
   #b-feed { background:#21232c; color:#8fd4a3; border:1px solid #2c5; border-radius:8px;
             font-size:12px; padding:5px 10px; cursor:pointer; }
@@ -3528,6 +3587,8 @@ local HTML = [[
         <button onclick="useThisFolder()">Use this folder</button>
         <span id="n-browse-path" class="n-dim"></span>
       </div>
+      <div class="s-lbl">Templates <span class="n-dim">— seed the task; any {{vars}} are filled in before spawn</span></div>
+      <div id="n-templates" class="n-recent"></div>
       <div class="s-lbl">Initial task (optional)</div>
       <textarea id="n-task" class="s-area"></textarea>
       <label class="s-row" style="margin-top:8px;">Open in
@@ -3744,6 +3805,7 @@ local HTML = [[
       if(!tplOpen){ box.innerHTML = ""; return; }
       if(tplVarForm){ box.innerHTML = renderVarForm(); tplVarCheck(); return; }
       var html = '<div class="tpl-row tpl-save" onclick="templateSaveCurrent()">＋ Save current input as template…</div>';
+      html += '<div class="tpl-row tpl-save" onclick="templateImport()">⤓ Import from prompts folder…</div>';
       html += TEMPLATES.map(function(t){
         var nm = tplQuote(t.name);
         var badge = (t.vars && t.vars.length) ? '<span class="tpl-badge" title="has variables">{{ }}</span>' : '';
@@ -3799,9 +3861,16 @@ local HTML = [[
       send("template-render", tplVarForm.name, JSON.stringify({ vars: tplVarForm.values, key: selectedKey || "" }));
       tplVarForm = null; tplOpen = false; renderTemplates();
     }
+    // cc-core hands back the rendered body; it lands in whichever input started the
+    // flow (the nudge box, or the New-Session modal's task field). Never auto-sent.
+    var tplRenderTarget = "nudge";
     function ccTemplateRendered(o){
-      var el = document.getElementById("nudge"); if(!el) return;
-      el.value = (o && o.text) || ""; autoGrow(el); el.focus();
+      var id = (tplRenderTarget === "n-task") ? "n-task" : "nudge";
+      tplRenderTarget = "nudge";   // reset to the default sink
+      var el = document.getElementById(id); if(!el) return;
+      el.value = (o && o.text) || "";
+      if(id === "nudge"){ autoGrow(el); } else { renderModalTpls(); }
+      el.focus();
     }
     function templateSaveCurrent(){
       var t = (document.getElementById("nudge").value || "").trim();
@@ -3813,6 +3882,9 @@ local HTML = [[
     function templateDelete(name){
       if(confirm('Delete template "' + name + '"?')){ send("template-delete", name); }
     }
+    // L3 definition source: import *.prompt / *.md files from the local prompts
+    // folder (config templates.sourceDir, default ~/.claude/cc-prompts).
+    function templateImport(){ send("template-import"); }
     // Capture a pasted image as a data URL; plain text keeps default paste.
     (function(){
       var el = document.getElementById("nudge");
@@ -4305,12 +4377,13 @@ local HTML = [[
     var AGENTS = [];             // saved agent profiles (L1)
     var MCPS = [];               // saved MCP servers (L1)
     var SKILLS = [];             // ~/.claude/skills cards (L1, read-only)
-    function showNew(cfg, recent, browse, presetState, agentState){
+    function showNew(cfg, recent, browse, presetState, agentState, templates){
       cfg = cfg || {};
       setMode("existing");
       document.getElementById("n-path").value = "";
       document.getElementById("n-name").value = "";
       document.getElementById("n-task").value = "";
+      mTplForm = null; ccModalTemplates(templates);
       document.getElementById("n-editor").value = cv(cfg, "spawn.editor", "terminal");
       fillProviderSelect("n-provider", cv(cfg,"providers",[])||[], cv(cfg,"spawn.provider",""));
       presetState = presetState || {};
@@ -4417,6 +4490,66 @@ local HTML = [[
       if(path && path.charAt(0) === "/") rec.folder = path;
       send("agent-save", "", JSON.stringify(rec));
       alert('Saved agent "'+name+'". Attach skills/MCP/knowledge by editing ~/.claude/cc-agents.json (per-profile arrays: skills[], mcpServers[], knowledge[]); a full editor is coming next.');
+    }
+    // ---- L3 template picker in the New-Session modal (render-before-spawn) ---
+    // Picking a template SEEDS the Initial-task field. A template with vars opens
+    // an inline form (required vars gate "Use"); cc-core renders it and the result
+    // lands in #n-task -- so the spawn task is fully resolved BEFORE spawn. Shares
+    // the template-render round-trip with the nudge menu (cc-core owns the render).
+    var MTEMPLATES = [];
+    var mTplForm = null;   // {name, vars:[{name,required,label,default}], values:{}}
+    function ccModalTemplates(list){ MTEMPLATES = Array.isArray(list) ? list : []; renderModalTpls(); }
+    function mTplFind(name){ for(var i=0;i<MTEMPLATES.length;i++){ if(MTEMPLATES[i].name===name) return MTEMPLATES[i]; } return null; }
+    function renderModalTpls(){
+      var box = document.getElementById("n-templates"); if(!box) return;
+      if(mTplForm){ box.innerHTML = renderMTplForm(); mTplCheck(); return; }
+      if(!MTEMPLATES.length){ box.innerHTML = '<span class="n-dim">No templates yet — save one from the input’s “Tpl ▾” menu</span>'; return; }
+      box.innerHTML = MTEMPLATES.map(function(t){
+        var badge = (t.vars && t.vars.length) ? '<span class="tpl-badge" title="has variables">{{ }}</span>' : '';
+        return '<button class="n-chip" title="Seed the task from this template" onclick="modalTplPick(' + tplQuote(t.name) + ')">'
+          + '◆ ' + esc(t.name) + badge + '</button>';
+      }).join("");
+    }
+    function renderMTplForm(){
+      var f = mTplForm;
+      var rows = f.vars.map(function(v){
+        var lab = esc(v.label || v.name) + (v.required ? ' <span class="tpl-req">*</span>' : '');
+        return '<label class="tpl-var"><span>' + lab + '</span>'
+          + '<input type="text" value="' + esc(f.values[v.name] || "") + '" oninput="mTplInput(' + tplQuote(v.name) + ', this.value)"></label>';
+      }).join("");
+      return '<div class="tpl-form"><div class="tpl-form-head">Fill variables for “' + esc(f.name) + '” → seeds the task</div>'
+        + rows
+        + '<div class="tpl-form-foot"><button onclick="mTplCancel()">Cancel</button>'
+        + '<button id="m-tpl-go" onclick="mTplGo()">Use</button></div></div>';
+    }
+    function modalTplPick(name){
+      var t = mTplFind(name); if(!t) return;
+      var vars = (t.vars && t.vars.length) ? t.vars : [];
+      if(vars.length){
+        mTplForm = { name: name, vars: vars, values: {} };
+        vars.forEach(function(v){ if(v.default) mTplForm.values[v.name] = v.default; });
+        renderModalTpls(); return;
+      }
+      if(/\{\{/.test(t.body || "")){   // built-ins only (date/now/prev_output)
+        tplRenderTarget = "n-task";
+        send("template-render", name, JSON.stringify({ vars: {}, key: selectedKey || "" }));
+        return;
+      }
+      var el = document.getElementById("n-task"); el.value = t.body || ""; el.focus();
+    }
+    function mTplInput(name, val){ if(mTplForm){ mTplForm.values[name] = val; mTplCheck(); } }
+    function mTplCheck(){
+      if(!mTplForm) return;
+      var ok = true;
+      mTplForm.vars.forEach(function(v){ if(v.required && !((mTplForm.values[v.name]||"").trim())) ok = false; });
+      var btn = document.getElementById("m-tpl-go"); if(btn) btn.disabled = !ok;
+    }
+    function mTplCancel(){ mTplForm = null; renderModalTpls(); }
+    function mTplGo(){
+      if(!mTplForm) return;
+      tplRenderTarget = "n-task";
+      send("template-render", mTplForm.name, JSON.stringify({ vars: mTplForm.values, key: selectedKey || "" }));
+      mTplForm = null; renderModalTpls();
     }
     // ---- L1 Skills card (read-only) -----------------------------------------
     function ccSkills(list){ SKILLS = list || [];
@@ -5925,7 +6058,7 @@ function refresh()
           local task, q2 = core.queuePop(FX.readQueue(qk))
           if not task then return end
           print("[cc-queue] feeding '" .. tostring(task) .. "' to " .. it.name)
-          local commit = core.queueFeedCommit(FX.feedTask(winTarget(it), task))
+          local commit = core.queueFeedCommit(FX.feedTask(winTarget(it), renderFeed(task, it)))
           if commit.persist then
             FX.writeQueue(qk, q2)
             it.queue = core.queueDepth(q2)
@@ -6061,7 +6194,7 @@ function refresh()
               local task, q2 = core.queuePop(FX.readQueue(qk))
               if not task then routePending[item.key] = nil; return end
               print("[cc-route] feeding '" .. tostring(task) .. "' to " .. tostring(item.name))
-              local commit = core.queueFeedCommit(FX.feedTask(winTarget(item), task))
+              local commit = core.queueFeedCommit(FX.feedTask(winTarget(item), renderFeed(task, item)))
               if commit.persist then
                 FX.writeQueue(qk, q2)
               else
