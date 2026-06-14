@@ -3071,5 +3071,124 @@ do
   check("risk-cache: default TTL is 30s", core.ledgerCacheStale(cache, "a.jsonl:10:99", 130) == true)
 end
 
+-- ---- nextAttention: who most needs the operator (approval>error>hung) -------
+do
+  local function S(name, status, hung) return { name = name, status = status, hung = hung } end
+  local l = { S("a","approval"), S("b","error"), S("c","working",true), S("d","idle") }
+  eq("nextAttention: approval wins", core.nextAttention(l).name, "a")
+  eq("nextAttention: error beats hung when no approval",
+     core.nextAttention({ S("b","error"), S("c","working",true) }).name, "b")
+  eq("nextAttention: hung when only a stalled session",
+     core.nextAttention({ S("d","idle"), S("c","working",true) }).name, "c")
+  check("nextAttention: nil when nothing is wedged",
+        core.nextAttention({ S("d","idle"), S("e","working"), S("f","done") }) == nil)
+  check("nextAttention: nil/empty safe", core.nextAttention(nil) == nil and core.nextAttention({}) == nil)
+  eq("nextAttention: front-most approval (list order, not a later one)",
+     core.nextAttention({ S("a","approval"), S("z","approval") }).name, "a")
+end
+
+-- ---- fmtHotkey / hotkeyLegend: the ⌨ legend built from real bindings --------
+do
+  eq("fmtHotkey: cmd+alt+j -> macOS canonical ⌥⌘J", core.fmtHotkey({ "cmd", "alt" }, "j"), "⌥⌘J")
+  eq("fmtHotkey: order-independent (input alt,cmd same as cmd,alt)",
+     core.fmtHotkey({ "alt", "cmd" }, "j"), "⌥⌘J")
+  eq("fmtHotkey: full canonical ⌃⌥⇧⌘ order",
+     core.fmtHotkey({ "cmd", "shift", "ctrl", "alt" }, "k"), "⌃⌥⇧⌘K")
+  eq("fmtHotkey: named key title-cased", core.fmtHotkey({ "cmd" }, "space"), "⌘Space")
+  local legend = core.hotkeyLegend(
+    { { mods = { "cmd", "alt" }, key = "j", desc = "Jump to who needs you" },
+      { mods = { "cmd", "alt" }, key = "s", desc = "Spawn" } },
+    { { combo = "Enter", desc = "Send" } })
+  eq("hotkeyLegend: two sections (global + panel)", #legend, 2)
+  eq("hotkeyLegend: global rows formatted from bindings", legend[1].rows[1].combo, "⌥⌘J")
+  eq("hotkeyLegend: global desc carried", legend[1].rows[1].desc, "Jump to who needs you")
+  eq("hotkeyLegend: panel rows passed through", legend[2].rows[1].combo, "Enter")
+  eq("hotkeyLegend: empty panel section omitted",
+     #core.hotkeyLegend({ { mods = { "cmd" }, key = "b", desc = "x" } }, nil), 1)
+end
+
+-- ---- filterLedger projectKey + projectLineage + lineageSummary -------------
+do
+  local evs = {
+    { ts = 100, type = "spawn",        projectKey = "P", session_id = "s1", name = "alpha" },
+    { ts = 110, type = "prompt",       projectKey = "P", session_id = "s1", name = "alpha" },
+    { ts = 120, type = "auto_respawn", projectKey = "P", session_id = "s1", name = "alpha" },
+    { ts = 130, type = "prompt",       projectKey = "P", session_id = "s2", name = "alpha" },
+    { ts = 140, type = "clear",        projectKey = "P", session_id = "s2", name = "alpha" },
+    { ts = 150, type = "prompt",       projectKey = "Q", session_id = "s9", name = "other" },
+    { ts =  50, type = "prompt",       projectKey = "P", session_id = "s0", name = "alpha" }, -- before window
+  }
+  local pOnly = core.filterLedger(evs, { projectKey = "P" })
+  eq("filterLedger: projectKey slices one project", #pOnly, 6)
+  check("filterLedger: projectKey excludes other projects",
+        (function() for _, e in ipairs(pOnly) do if e.projectKey ~= "P" then return false end end return true end)())
+
+  local lin = core.projectLineage(evs, "P", { sinceTs = 100 })
+  eq("projectLineage: distinct sessions in window", lin.sessionCount, 2)  -- s1, s2 (s0 is pre-window)
+  eq("projectLineage: auto-respawns counted", lin.autoRespawns, 1)
+  eq("projectLineage: clears counted", lin.clears, 1)
+  eq("projectLineage: ignores other projects (Q)", lin.counts.prompt or 0, 0)
+  check("projectLineage: nil projectKey -> nil", core.projectLineage(evs, nil) == nil)
+
+  eq("lineageSummary: formats sessions + churn",
+     core.lineageSummary({ sessionCount = 3, autoRespawns = 2, clears = 1 }),
+     "3rd session today · 2 auto-respawns · 1 clear")
+  eq("lineageSummary: singular churn unit",
+     core.lineageSummary({ sessionCount = 2, autoRespawns = 1 }),
+     "2nd session today · 1 auto-respawn")
+  check("lineageSummary: nil when nothing notable",
+        core.lineageSummary({ sessionCount = 1 }) == nil)
+  eq("lineageSummary: ordinal 11th not 11st",
+     core.lineageSummary({ sessionCount = 11, clears = 1 }), "11th session today · 1 clear")
+  eq("lineageSummary: ordinal 21st",
+     core.lineageSummary({ sessionCount = 21, clears = 1 }), "21st session today · 1 clear")
+
+  -- lineageByProject: one pass -> map for ALL projects (drives per-tile badges)
+  local m = core.lineageByProject(evs, 100)
+  eq("lineageByProject: P session count", m["P"].sessionCount, 2)
+  eq("lineageByProject: P auto-respawns", m["P"].autoRespawns, 1)
+  eq("lineageByProject: P clears", m["P"].clears, 1)
+  eq("lineageByProject: Q present (one session)", m["Q"].sessionCount, 1)
+  check("lineageByProject: pre-window project absent", true)  -- s0@50 excluded above, still 2 for P
+  -- projectLineage now delegates to lineageByProject -> identical numbers
+  eq("projectLineage: delegates (sessions match map)", core.projectLineage(evs, "P", { sinceTs = 100 }).sessionCount, m["P"].sessionCount)
+  eq("projectLineage: unknown project -> zeroed lineage", core.projectLineage(evs, "ZZ", { sinceTs = 100 }).sessionCount, 0)
+end
+
+-- ---- fleetStandup: ops-only shift report -----------------------------------
+do
+  local evs = {
+    { ts = 200, type = "spawn",        projectKey = "P", session_id = "s1", name = "alpha" },
+    { ts = 210, type = "prompt",       projectKey = "P", session_id = "s1", name = "alpha" },
+    { ts = 220, type = "decision",     projectKey = "P", session_id = "s1", name = "alpha", outcome = "deny",  by = "human" },
+    { ts = 230, type = "decision",     projectKey = "P", session_id = "s1", name = "alpha", outcome = "allow", by = "router" },
+    { ts = 240, type = "auto_respawn", projectKey = "P", session_id = "s2", name = "alpha" },
+    { ts = 250, type = "escalation",   projectKey = "Q", session_id = "s9", name = "beta", minutes = 6 },
+    { ts = 260, type = "prompt",       projectKey = "Q", session_id = "s9", name = "beta" },
+    { ts =  10, type = "prompt",       projectKey = "P", session_id = "s0", name = "alpha" }, -- before window
+  }
+  local r = core.fleetStandup(evs, { sinceTs = 200 })
+  check("fleetStandup: not empty with events in window", r.empty == false)
+  eq("fleetStandup: deny counted", r.decisions.deny, 1)
+  eq("fleetStandup: allow counted", r.decisions.allow, 1)
+  eq("fleetStandup: provenance records who decided (router)", r.provenance.router, 1)
+  eq("fleetStandup: auto-respawn tallied", r.autoActions.auto_respawn, 1)
+  eq("fleetStandup: routed decisions counted", r.autoActions.routed, 1)
+  eq("fleetStandup: escalation problem tallied", r.problems.escalation, 1)
+  eq("fleetStandup: pre-window event excluded (prompts=alpha1+beta1)", r.totals.prompts, 2)
+  check("fleetStandup: byProject rollup present", #r.byProject >= 2)
+  local empty = core.fleetStandup({}, { sinceTs = 0 })
+  check("fleetStandup: empty window flagged", empty.empty == true)
+
+  -- standupMarkdown: the <pre> body + Copy share this render
+  local md = core.standupMarkdown(r, { windowLabel = "since open" })
+  check("standupMarkdown: carries the window label", md:find("since open", 1, true) ~= nil)
+  check("standupMarkdown: reports approvals line", md:find("1 allow / 1 deny", 1, true) ~= nil)
+  check("standupMarkdown: lists provenance (router)", md:find("router", 1, true) ~= nil)
+  check("standupMarkdown: by-project section present", md:find("By project:", 1, true) ~= nil)
+  local mdEmpty = core.standupMarkdown(core.fleetStandup({}, { sinceTs = 0 }), { windowLabel = "8h" })
+  check("standupMarkdown: empty window explains the ledger", mdEmpty:find("ledger must be enabled", 1, true) ~= nil)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

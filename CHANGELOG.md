@@ -4,6 +4,51 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-13 (later 3) — pad-mirror batch: priority jump + ⌨ legend + shift report + lineage
+
+Crawled the `pad` project (a local-first agent-era task manager) for ideas worth mirroring,
+ran an adversarial pass per candidate, and shipped the four that survived — each a *widening
+of an existing Shepherd primitive*, not a new parallel system. (The tempting ones — playbooks,
+durable conventions/notes, a task backlog — were declined as domain creep / duplicates of
+CLAUDE.md + the gate.)
+
+### Added
+- **Jump-to-priority global hotkey (1.1a)**: **⌘⌥J** now targets `core.nextAttention`
+  (a pending **approval** › a frozen **error** › a watchdog-**stalled** session) instead of
+  approvals-only, and reads the fully-annotated render list (so the error/stalled tiers
+  actually fire) — focusing the right window **from any app**, panel open or not. Generalizes
+  the old jump-needy key; no new binding. Pure `core.nextAttention`, falls back to the front
+  session when nothing's wedged.
+- **⌨ Hotkey legend (1.1b)**: a subtle **bottom-right** button whose popup opens **upward**
+  with every shortcut + what it does. Built in Lua from the real `HOTKEY_*` bindings via pure
+  `core.hotkeyLegend` / `core.fmtHotkey` (macOS-canonical ⌃⌥⇧⌘ order) and injected as
+  `__HOTKEY_LEGEND__`, so the displayed combos **can't drift** from what's actually bound.
+- **📋 Fleet shift report (1.3)**: a **📋 Shift** tab in the audit overlay (and ☰ drawer) that
+  summarizes **what the fleet did** over a window — **Since opened** / **Last 8h** / **Last
+  24h** — sessions, prompts, approvals (allow/deny + who decided), auto-actions
+  (respawn/continue/drain/routed), escalations/stalls, time blocked on you, and a per-project
+  rollup, with a **Copy** button. Pure `core.fleetStandup` + `core.standupMarkdown` (one source
+  for the `<pre>` body and the copied text). **Ops only — no "what shipped" changelog** (a
+  prompt is an instruction, not an outcome; Shepherd has no git/CI ground truth).
+- **♻️ Session lineage (1.6)**: the normally-invisible respawn/`/clear`/continue churn for a
+  project (each mints a new session id) is now legible — a detail-panel one-liner ("3rd session
+  today · 2 auto-respawns · 1 clear") since local midnight, plus a tile **♻️N** badge once the
+  churn adds up. One ledger pass per tick via pure `core.lineageByProject` (cached on ledger
+  change / day roll, like the 🔔 badge); `core.lineageSummary` formats it. Pure read — **nothing
+  new is stored**, and it degrades to nothing when the ledger is off.
+
+### Changed
+- `core.filterLedger` gained a `projectKey` filter (a project's whole lineage spans the session
+  ids a respawn/clear mints); `core.projectLineage` now delegates to `core.lineageByProject` so
+  the per-tick map and any per-session read can't disagree.
+
+### Tests
+- **+47 core** (`nextAttention`, `fmtHotkey`/`hotkeyLegend`, `filterLedger` projectKey,
+  `projectLineage`/`lineageByProject`/`lineageSummary`, `fleetStandup`/`standupMarkdown`) and
+  **+13 ui** source-pins for the webview wiring (incl. a guard that the `__HOTKEY_LEGEND__`
+  placeholder is always substituted — an unsubstituted one would take the panel script down).
+  Suite **1260 core + 205 ui + bash**, all green.
+
 ## 2026-06-13 (later 2) — CLI accelerators (fd/rg) wired + folder-scan deadlock fix
 
 The "better grep" was set up but looked unused. Audit (verified live): `rg` was already

@@ -101,7 +101,7 @@ local SD_BRIGHTNESS       = 70
 -- Global hotkeys (set HOTKEYS_ENABLED = false to disable). {mods, key}.
 local HOTKEYS_ENABLED      = true
 local HOTKEY_APPROVE_FRONT = { { "cmd", "alt" }, "a" } -- approve the front approval
-local HOTKEY_JUMP_NEEDY    = { { "cmd", "alt" }, "j" } -- jump to the session needing you
+local HOTKEY_JUMP_NEEDY    = { { "cmd", "alt" }, "j" } -- jump to the session that most needs you (approval > error > hung), from any app
 local HOTKEY_CYCLE         = { { "cmd", "alt" }, "n" } -- jump to the next session
 
 -- Live activity peek: show each active session's latest assistant line.
@@ -145,6 +145,15 @@ local gitRootByCwd = {}  -- cwd -> resolved git root ("" = not a repo) cache (Fe
 local caffeineTick = 0   -- throttles the keep-awake state re-read (F2)
 local ledgerGcTick = 0   -- throttles the ledger retention GC (off the 180s timer)
 local lastNotifyCount = -1  -- 🔔 unseen-badge value last pushed to JS (-1 = never)
+local lastLedgerOn = nil    -- last ledger-on state pushed to JS (gates the 📋 Shift UI)
+local PANEL_START_TS = nil  -- when this panel process started (set at show); the
+                            -- 📋 Shift report's "since opened" window anchors here.
+local lineageMap = {}       -- projectKey -> lineage (respawn/clear churn since local
+local lineageDayStart = nil -- midnight); recomputed only on ledger change / day roll.
+local lastRenderList = nil  -- the last fully-annotated+sorted tick list (error status,
+                            -- .hung, .escalate). The ⌘⌥J jump hotkey reads THIS, not a
+                            -- fresh refreshList(): error/hung are derived in the render
+                            -- loop, so a re-parse would only ever see approvals.
 local searchTask, searchGen = nil, 0  -- fleet-search hs.task + stale-result guard
 local MIRROR_DIR = os.getenv("CC_MIRROR_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-status-mirror")
 local BRIDGE_SECONDS = 2     -- per-host rsync cadence (SSH status bridge)
@@ -1974,6 +1983,36 @@ local function handleBridgeMsg(msg)
     pcall(function() wv:evaluateJavaScript("window.ccAudit(" .. hs.json.encode(FX.readLedger({})) .. ")") end)
     return
   end
+  -- 📋 Shift report: ops-only summary of what the fleet DID over a window. Pure
+  -- aggregation in cc-core (fleetStandup + standupMarkdown) over the ledger; the
+  -- markdown is rendered in a <pre> AND fed to the Copy button (one source).
+  -- "Since opened" uses the panel's start ts (what the fleet did while you were
+  -- away since you launched Shepherd); 8h/24h are rolling windows.
+  if a == "open-shift" then
+    local okj2, req = pcall(hs.json.decode, payload.text or "{}")
+    local win = (okj2 and type(req) == "table") and tostring(req.window or "open") or "open"
+    local now = FX.now()
+    local sinceTs, label
+    if win == "8h" then sinceTs = now - 8 * 3600; label = "the last 8 hours"
+    elseif win == "24h" then sinceTs = now - 24 * 3600; label = "the last 24 hours"
+    else win = "open"; sinceTs = PANEL_START_TS or (now - 24 * 3600); label = "Shepherd opened" end
+    local report = core.fleetStandup(ledgerSnapshot(), { sinceTs = sinceTs, untilTs = now })
+    local md = core.standupMarkdown(report, { windowLabel = label })
+    pcall(function() wv:evaluateJavaScript("window.ccShift("
+      .. jsString(md) .. ", " .. hs.json.encode({ window = win }) .. ")") end)
+    return
+  end
+  -- Copy a block of text (the Shift report) to the system clipboard. The Shift
+  -- report is pure aggregate counts -- no prompt bodies -- so there's nothing to
+  -- redact; this is a plain pasteboard write.
+  if a == "copy-text" then
+    local txt = tostring(payload.text or "")
+    if txt ~= "" then
+      pcall(function() hs.pasteboard.setContents(txt) end)
+      pcall(function() hs.alert.show("Claude Shepherd: copied to clipboard") end)
+    end
+    return
+  end
   -- Fleet-wide transcript/ledger search (roadmap #3): rg when installed, grep
   -- fallback. Async hs.task with a generation guard + terminate-on-new-query so
   -- out-of-order results can never paint over a newer search. Output stays tiny
@@ -2728,6 +2767,7 @@ local HTML = [[
   #d-ask .ask-opt:hover { background:#2b3346; border-color:#5a7bb0; }
   #d-ask .ask-hint { font-size:11px; color:#6b7280; margin-top:6px; }
   #d-meta { display:none; font-size:11px; color:#8a8d99; margin:8px 0 0; }
+  #d-lineage { display:none; font-size:11px; color:#8a8d99; margin:4px 0 0; }
   /* gate decision log (roadmap #2): last-N grouped gate decisions, dim one-liners */
   #d-decisions { display:none; font-size:11px; color:#8a8d99; margin:6px 0 0; line-height:1.5; }
   #d-decisions .dec-deny { color:#e88; }
@@ -2848,6 +2888,12 @@ local HTML = [[
 #a-head{ display:flex; align-items:center; gap:8px; padding:8px 10px; border-bottom:1px solid #2c2f3a; font-weight:600; }
 .a-tab{ background:none; border:1px solid #2c2f3a; color:#9aa0ad; border-radius:6px; padding:2px 8px; cursor:pointer; }
 .a-tab.active{ color:#fff; border-color:#4b5563; background:#23262f; }
+/* 📋 Shift report: window-preset bar + Copy (rendered into #a-body) */
+.sh-wins{ display:flex; gap:6px; align-items:center; margin-bottom:8px; }
+.sh-win{ background:none; border:1px solid #2c2f3a; color:#9aa0ad; border-radius:6px; padding:2px 8px; cursor:pointer; font-size:11px; }
+.sh-win.active{ color:#fff; border-color:#4b5563; background:#23262f; }
+.sh-copy{ margin-left:auto; background:none; border:1px solid #2c2f3a; color:#9aa0ad; border-radius:6px; padding:2px 8px; cursor:pointer; font-size:11px; }
+.sh-copy:hover{ color:#fff; background:#23262f; }
 #a-head .s-x{ margin-left:auto; }
 #a-filters{ display:flex; flex-wrap:wrap; gap:6px; padding:8px 10px; border-bottom:1px solid #23262f; }
 #a-filters select, #a-filters input{ background:#1a1c22; border:1px solid #2c2f3a; color:#cfd2db; border-radius:6px; padding:3px 6px; font-size:12px; }
@@ -2917,6 +2963,24 @@ local HTML = [[
 .spark{ flex:1; min-width:0; background:#191b22; border:1px solid #23262f; border-radius:4px; }
 .spark-val{ width:160px; flex:0 0 auto; text-align:right; color:#8a8d99; font-size:11px; font-variant-numeric:tabular-nums; }
 .spark-empty{ flex:1; color:#6b7280; font-size:11px; font-style:italic; }
+/* ⌨ hotkey legend: a subtle bottom-right button whose popup opens UPWARD */
+#keyhelp-wrap{ position:fixed; right:8px; bottom:8px; z-index:31; }
+#keyhelp-btn{ background:#21232c; color:#9aa0ad; border:1px solid #2c2f3a; border-radius:8px;
+              font-size:13px; line-height:1; padding:4px 8px; cursor:pointer; opacity:.7; }
+#keyhelp-btn:hover{ opacity:1; background:#272a34; }
+#keymenu{ display:none; position:absolute; right:0; bottom:calc(100% + 6px); z-index:32;
+          background:#1b1d24; border:1px solid #2c2f3a; border-radius:10px; padding:8px;
+          box-shadow:0 8px 24px rgba(0,0,0,.5); min-width:250px; max-width:320px;
+          max-height:62vh; overflow:auto; }
+#keymenu.show{ display:block; }
+#keymenu .kh-sec{ font-size:10px; text-transform:uppercase; letter-spacing:.04em;
+                  color:#8a8d99; margin:7px 4px 3px; }
+#keymenu .kh-sec:first-child{ margin-top:0; }
+#keymenu .kh-row{ display:flex; align-items:baseline; gap:10px; padding:3px 4px; }
+#keymenu .kh-combo{ flex:0 0 auto; min-width:52px; text-align:center; font-size:12px;
+                    font-family:ui-monospace,Menlo,monospace; color:#e8e9ee; background:#262a36;
+                    border:1px solid #2c2f3a; border-radius:5px; padding:1px 6px; }
+#keymenu .kh-desc{ flex:1; color:#cfd2db; font-size:12px; }
 </style></head>
 <body class="theme-__INIT_THEME__" data-theme="__INIT_THEME__">
   <div id="bar">
@@ -2931,6 +2995,7 @@ local HTML = [[
           <button class="tm-item" onclick="menuPick('fsearch')"><span class="tm-ic">🔎</span> Find in fleet</button>
           <button class="tm-item" onclick="menuPick('insights')"><span class="tm-ic">📊</span> Fleet insights</button>
           <button class="tm-item" onclick="menuPick('audit')"><span class="tm-ic">📜</span> Audit ledger</button>
+          <button id="tm-shift" class="tm-item" style="display:none" onclick="menuPick('shift')"><span class="tm-ic">📋</span> Shift report</button>
           <button class="tm-item" onclick="menuPick('notify')"><span class="tm-ic">🔔</span> Notifications<span id="tm-notify-badge"></span></button>
         </div>
       </span>
@@ -2991,6 +3056,7 @@ local HTML = [[
     <div id="d-activity" onclick="toggleExpand('activity')"></div>
     <div id="d-prompt"></div>
     <div id="d-meta"></div>
+    <div id="d-lineage" title="Respawn / clear / continue churn for this project since midnight (needs the audit ledger)."></div>
     <div id="d-decisions"></div>
     <div id="d-usage"></div>
     <div id="d-actions">
@@ -3239,6 +3305,7 @@ local HTML = [[
       <button id="a-tab-rows" class="a-tab active" onclick="auditTab('rows')">Rows</button>
       <button id="a-tab-time" class="a-tab" onclick="auditTab('timeline')">Timeline</button>
       <button id="a-tab-alerts" class="a-tab" onclick="auditTab('alerts')">🔔 Alerts</button>
+      <button id="a-tab-shift" class="a-tab" style="display:none" onclick="auditTab('shift')">📋 Shift</button>
       <button class="s-x" onclick="closeAudit()">✕</button>
     </div>
     <div id="a-filters">
@@ -4245,6 +4312,10 @@ local HTML = [[
       if(cf != null) bits.push("ctx: " + Math.round(cf*100) + "%");
       if(bits.length){ el.textContent = bits.join("  ·  "); el.style.display="block"; }
       else { el.style.display="none"; el.textContent=""; }
+      // 📋 Lineage: respawn/clear churn for this project since midnight (one line).
+      var lg = document.getElementById("d-lineage");
+      if(it.lineage){ lg.textContent = "♻️ " + it.lineage; lg.style.display="block"; }
+      else { lg.style.display="none"; lg.textContent=""; }
       var ef = document.getElementById("effort"); if(ef && it.effort) ef.value = it.effort;
       var md = document.getElementById("mode"); if(md && it.permission_mode) md.value = it.permission_mode;
       // Model dropdown: list the configured providers' models, plus the session's
@@ -4367,6 +4438,10 @@ local HTML = [[
     var auditView = "rows";
     function openAudit(){ send("open-audit-view"); }
     function closeAudit(){ document.getElementById("audit").classList.remove("show"); }
+    // Drawer "Shift report": open the audit overlay (loads events so the other
+    // tabs work) and switch straight to the Shift tab once ccAudit replies.
+    var pendingShiftView = false;
+    function openShiftReport(){ pendingShiftView = true; openAudit(); }
     // Per-session drill-down: open the audit overlay scoped to the selected
     // session's chronological timeline. Needs the ledger on + a session id.
     function openSessionTimeline(){
@@ -4478,8 +4553,38 @@ local HTML = [[
       document.getElementById("a-tab-rows").classList.toggle("active", v === "rows");
       document.getElementById("a-tab-time").classList.toggle("active", v === "timeline");
       document.getElementById("a-tab-alerts").classList.toggle("active", v === "alerts");
+      var shiftTab = document.getElementById("a-tab-shift"); if(shiftTab) shiftTab.classList.toggle("active", v === "shift");
+      // The Shift report has its own window selector + no per-row filters/actions,
+      // so hide the filter row + Review/Export/Purge footer while it's showing.
+      var isShift = (v === "shift");
+      document.getElementById("a-filters").style.display = isShift ? "none" : "";
+      document.getElementById("a-foot").style.display = isShift ? "none" : "";
+      if(isShift){ openShift(); return; }
       renderAudit();
     }
+    // ---- 📋 Shift report (ops-only "what the fleet did") --------------------
+    // Lua computes core.fleetStandup + core.standupMarkdown over the chosen window
+    // and replies ccShift; we render the markdown in a <pre> (same as Timeline) so
+    // the on-screen text and the Copy text can't diverge.
+    var shiftWindow = "open", shiftMarkdown = "";
+    function openShift(){
+      document.getElementById("a-body").innerHTML = '<div class="s-help" style="margin-left:0;">Loading shift report…</div>';
+      send("open-shift", "", JSON.stringify({ window: shiftWindow }));
+    }
+    function setShiftWindow(w){ shiftWindow = w; openShift(); }
+    function shiftWinBtn(w, label){
+      return '<button class="sh-win' + (shiftWindow === w ? ' active' : '') + '" onclick="setShiftWindow(\'' + w + '\')">' + esc(label) + '</button>';
+    }
+    function copyShift(){ if(shiftMarkdown) send("copy-text", "", shiftMarkdown); }
+    window.ccShift = function(markdown, meta){
+      if(auditView !== "shift") return;   // user switched tabs before the reply landed
+      shiftMarkdown = markdown || "";
+      if(meta && meta.window) shiftWindow = meta.window;
+      var bar = '<div class="sh-wins">'
+        + shiftWinBtn("open", "Since opened") + shiftWinBtn("8h", "Last 8h") + shiftWinBtn("24h", "Last 24h")
+        + '<button class="sh-copy" onclick="copyShift()">Copy</button></div>';
+      document.getElementById("a-body").innerHTML = bar + '<pre class="a-narr">' + esc(shiftMarkdown) + '</pre>';
+    };
     // JS twin of core.notificationEvents' predicate: panel-raised alerts plus
     // any non-human gate decision (something happened without you).
     function isNotification(e){
@@ -4608,7 +4713,9 @@ local HTML = [[
       // Per-session drill-down (Timeline button): pre-select the session + view.
       if(focusSession){ var sel = document.getElementById("a-f-session"); if(sel) sel.value = focusSession; }
       document.getElementById("audit").classList.add("show");
-      if(focusView){ auditTab(focusView); }  // auditTab also re-renders
+      if(pendingShiftView){ pendingShiftView = false; auditTab("shift"); }
+      else if(focusView){ auditTab(focusView); }  // auditTab also re-renders
+      else if(auditView === "shift"){ auditTab("rows"); }  // a normal open after Shift: restore filters/foot
       else { renderAudit(); }
     };
     // ---- Fleet-wide search (roadmap #3) -------------------------------------
@@ -4683,6 +4790,7 @@ local HTML = [[
       else if(which === "fsearch") openFleetSearch();
       else if(which === "insights") openInsights();
       else if(which === "audit") openAudit();
+      else if(which === "shift"){ if(LEDGER_ON) openShiftReport(); }
       else if(which === "notify") openNotifications();
     }
     // Close the drawer on any click outside it (the button's onclick stops propagation,
@@ -4690,6 +4798,43 @@ local HTML = [[
     document.addEventListener("click", function(e){
       var w = document.getElementById("menu-wrap");
       if(w && !w.contains(e.target)) closeMenu();
+    });
+
+    // ---- ⌨ Hotkey legend (bottom-right) -------------------------------------
+    // HOTKEY_LEGEND is injected from Lua, built from the real HOTKEY_* bindings
+    // (core.hotkeyLegend), so the displayed combos can't drift from what's bound.
+    // Rendered via textContent only -- the content is operator constants, but
+    // textContent keeps the no-untrusted-HTML discipline anyway.
+    window.HOTKEY_LEGEND = __HOTKEY_LEGEND__;
+    var keyhelpRendered = false;
+    function renderKeyhelp(){
+      var menu = document.getElementById("keymenu");
+      menu.innerHTML = "";
+      (window.HOTKEY_LEGEND || []).forEach(function(sec){
+        var h = document.createElement("div"); h.className = "kh-sec";
+        h.textContent = sec.title; menu.appendChild(h);
+        (sec.rows || []).forEach(function(r){
+          var row = document.createElement("div"); row.className = "kh-row";
+          var c = document.createElement("span"); c.className = "kh-combo"; c.textContent = r.combo;
+          var d = document.createElement("span"); d.className = "kh-desc"; d.textContent = r.desc;
+          row.appendChild(c); row.appendChild(d); menu.appendChild(row);
+        });
+      });
+    }
+    function closeKeyhelp(){ var m = document.getElementById("keymenu"); if(m) m.classList.remove("show"); }
+    function toggleKeyhelp(e){
+      if(e) e.stopPropagation();
+      var menu = document.getElementById("keymenu");
+      var show = !menu.classList.contains("show");
+      if(show && !keyhelpRendered){ renderKeyhelp(); keyhelpRendered = true; }
+      menu.classList.toggle("show", show);
+    }
+    document.addEventListener("click", function(e){
+      var w = document.getElementById("keyhelp-wrap");
+      if(w && !w.contains(e.target)) closeKeyhelp();
+    });
+    document.addEventListener("keydown", function(e){
+      if(e.key === "Escape" && document.getElementById("keymenu").classList.contains("show")) closeKeyhelp();
     });
 
     // ---- Notification history (roadmap #6) ----------------------------------
@@ -4702,6 +4847,18 @@ local HTML = [[
         b.textContent = txt;
         b.style.display = (n > 0) ? "inline-block" : "none";
       });
+    }
+    // The 📋 Shift report only exists when the audit ledger is on (it's pure
+    // ledger aggregation -- nothing to show otherwise), so the refresh tick pokes
+    // this on change to show/hide its tab + drawer row entirely. Live with the
+    // Settings toggle; no reload needed. (Lineage self-gates: it just isn't
+    // computed when the ledger is off, so no detail line / tile badge appears.)
+    var LEDGER_ON = true;
+    function setLedgerOn(on){
+      LEDGER_ON = !!on;
+      var tab = document.getElementById("a-tab-shift"); if(tab) tab.style.display = LEDGER_ON ? "" : "none";
+      var row = document.getElementById("tm-shift");    if(row) row.style.display = LEDGER_ON ? "" : "none";
+      if(!LEDGER_ON && auditView === "shift") auditTab("rows");  // ledger turned off mid-view
     }
 
     window.ccUsage = function(u){ LAST_USAGE = u || null; if(u && u.official) LAST_OFFICIAL = u.official; renderUsageFoot(); renderDetail(); };
@@ -4805,6 +4962,7 @@ local HTML = [[
       if(it.draining){ meta = (meta ? meta + " · " : "") + "⛔ draining"; }
       if(it.collide){ meta = (meta ? meta + " · " : "") + "⚠ shared dir"; }
       if(it.hung){ meta = (meta ? meta + " · " : "") + "⏳ stalled"; }
+      if(it.churn){ meta = (meta ? meta + " · " : "") + "♻️" + it.churn; }   // respawn/clear churn today
       var cls = "tile s-" + st + (it.stale ? " stale" : "") + (it.collide ? " collide" : "") + (it.hung ? " hung" : "") + (it.escalate ? " escalate" : "") + (it.key === selectedKey ? " sel" : "");
       return '<div class="'+cls+'" data-key="'+esc(it.key)+'" onclick="selectTile(\''+esc(it.key)+'\')" ondblclick="send(\'focus\',\''+esc(it.key)+'\')" oncontextmenu="showCtx(event,\''+esc(it.key)+'\')" title="Double-click to jump · right-click for more">'
            + '<span class="dot"></span>'
@@ -4861,6 +5019,10 @@ local HTML = [[
       if (sel) sel.value = t;
     })();
   </script>
+  <div id="keyhelp-wrap">
+    <button id="keyhelp-btn" onclick="toggleKeyhelp(event)" title="Keyboard shortcuts">⌨</button>
+    <div id="keymenu"></div>
+  </div>
 </body></html>
 ]]
 
@@ -4870,6 +5032,24 @@ HTML = HTML:gsub("__INIT_THEME__", savedTheme)
 -- Inject the bulk-action targeting rules so the panel JS shares cc-core's single
 -- source of truth (the bulk-bar count can't drift from what selectActionable acts on).
 HTML = HTML:gsub("__BULK_RULES__", hs.json.encode(core.BULK_RULES))
+-- Inject the ⌨ hotkey legend, sourced from the real HOTKEY_* bindings (so the
+-- displayed combos can't drift from what's actually bound) via core.hotkeyLegend.
+local legendGlobals = {
+  { mods = HOTKEY_APPROVE_FRONT[1], key = HOTKEY_APPROVE_FRONT[2], desc = "Approve the front-most pending approval" },
+  { mods = HOTKEY_JUMP_NEEDY[1],    key = HOTKEY_JUMP_NEEDY[2],    desc = "Jump to the session that most needs you (approval › error › stalled)" },
+  { mods = HOTKEY_CYCLE[1],         key = HOTKEY_CYCLE[2],         desc = "Jump to the next session" },
+  { mods = HOTKEY_SPAWN[1],         key = HOTKEY_SPAWN[2],         desc = "Spawn a new Claude session" },
+  { mods = HOTKEY_TOGGLE[1],        key = HOTKEY_TOGGLE[2],        desc = "Show / hide this panel" },
+}
+local legendPanel = {
+  { combo = "Enter",  desc = "Send the nudge to the selected session" },
+  { combo = "⇧Enter", desc = "New line in the nudge box" },
+  { combo = "Esc",    desc = "Close the open overlay or popup" },
+}
+-- gsub treats % in the replacement specially; escape any in the JSON (defensive --
+-- the legend is constant text, but keeps the substitution faithful regardless).
+local legendJson = hs.json.encode(core.hotkeyLegend(legendGlobals, legendPanel)):gsub("%%", "%%%%")
+HTML = HTML:gsub("__HOTKEY_LEGEND__", legendJson)
 print("[cc-dashboard] starting with theme: " .. savedTheme)
 
 -- Build and show the panel. Restore the user's last size/position if we saved
@@ -4894,6 +5074,7 @@ wv:behavior(hs.drawing.windowBehaviors.canJoinAllSpaces | hs.drawing.windowBehav
 wv:html(HTML)
 wv:allowTextEntry(true)  -- let the Nudge/Queue input accept keyboard input
 wv:show()
+PANEL_START_TS = FX.now()  -- anchor the Shift report's "since opened" window
 print("[cc-dashboard] panel shown")
 
 -- Show/hide so the panel can be dismissed (minimize-to-menubar) and reopened.
@@ -5187,8 +5368,32 @@ function refresh()
     collFlags = core.collisions(localList, { rootByCwd = rootByCwd }).flags
   end
 
+  -- 📋 Session lineage: per-project respawn/clear/continue churn since local
+  -- midnight, made legible on the tile + detail. One ledger pass per tick, cached
+  -- like the 🔔 badge -- recompute only when the ledger changed or the day rolled.
+  if ledgerOn then
+    local dt = os.date("*t", now); dt.hour, dt.min, dt.sec = 0, 0, 0
+    local midnight = os.time(dt)
+    if ledgerChanged or lineageDayStart ~= midnight then
+      lineageMap = core.lineageByProject(ledgerEvents, midnight)
+      lineageDayStart = midnight
+    end
+  elseif next(lineageMap) ~= nil then
+    lineageMap = {}; lineageDayStart = nil  -- ledger off: drop any stale annotations
+  end
+
   for _, it in ipairs(list) do
     local pv = prev[it.key]  -- last refresh's snapshot for this tile (status/stale/escalated), or nil
+    -- Lineage annotation: .lineage (one-line detail summary) + .churn (count) for
+    -- the tile badge -- both omitted unless notable, like the other optional flags.
+    local lin = it.projectKey and lineageMap[it.projectKey] or nil
+    if lin then
+      local summary = core.lineageSummary(lin)
+      if summary then it.lineage = summary end
+      local churn = (lin.autoRespawns or 0) + (lin.manualRespawns or 0)
+                  + (lin.clears or 0) + (lin.continues or 0)
+      if churn >= 2 then it.churn = churn end
+    end
     -- Live activity peek (non-stale sessions). Include `done` so the peek refreshes
     -- to the FINAL assistant line when a session finishes (a done transcript doesn't
     -- change, so the re-read is stable) instead of freezing mid-turn.
@@ -5475,6 +5680,8 @@ function refresh()
   -- Errored tiles were detected mid-loop (status overridden to "error"); re-sort so they
   -- surface near approvals -- parseStatusList sorted before we'd read any transcript.
   core.sortByStatus(list)
+  -- Hand the fully-annotated list to the jump hotkey (it.hung / error status / sorted).
+  lastRenderList = list
 
   -- 🔔 unseen-notification badge. The snapshot scan is the same cheap attributes
   -- pass risk scoring pays; the filter only reruns when the snapshot actually
@@ -5494,6 +5701,14 @@ function refresh()
   elseif lastNotifyCount ~= 0 then
     lastNotifyCount = 0
     pcall(function() wv:evaluateJavaScript("setNotifyBadge(0)") end)
+  end
+
+  -- Show/hide the 📋 Shift report UI (tab + drawer row) live with the ledger
+  -- toggle -- it's pure ledger aggregation, so there's nothing to show when off.
+  -- Poked only on change, like the notify badge.
+  if ledgerOn ~= lastLedgerOn then
+    lastLedgerOn = ledgerOn
+    pcall(function() wv:evaluateJavaScript("setLedgerOn(" .. tostring(ledgerOn) .. ")") end)
   end
 
   FX.writeFile(HEARTBEAT, tostring(now))
@@ -5529,7 +5744,7 @@ local function bindHotkeys()
   -- shows the "nothing waiting" toast when no target matches. (A 4th key is one line.)
   local function hotkeyAct(label, selector, action, opts)
     opts = opts or {}
-    local it = selector(refreshList())
+    local it = selector(lastRenderList or refreshList())
     if it then
       if opts.remember then lastJumpKey = it.key end
       print("[cc-hotkey] " .. label .. " -> " .. tostring(it.name))
@@ -5544,7 +5759,7 @@ local function bindHotkeys()
       hotkeyAct("approve-front", core.nextApproval, "approve", { alertNone = true })
     end),
     hs.hotkey.bind(HOTKEY_JUMP_NEEDY[1], HOTKEY_JUMP_NEEDY[2], function()
-      hotkeyAct("jump-needy", function(l) return core.nextApproval(l) or core.frontSession(l) end,
+      hotkeyAct("jump-priority", function(l) return core.nextAttention(l) or core.frontSession(l) end,
         "focus", { remember = true })
     end),
     hs.hotkey.bind(HOTKEY_CYCLE[1], HOTKEY_CYCLE[2], function()

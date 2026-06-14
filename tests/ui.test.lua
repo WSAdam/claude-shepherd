@@ -670,5 +670,62 @@ do
         src:find('type = (acted == "nudge") and "nudge" or "nudge_skipped"', 1, true) ~= nil)
 end
 
+-- ---- source-pins for the pad-mirror batch (no JS runtime here) --------------
+-- These four features are wired in the webview/handlers, which has no headless
+-- runtime; pin the load-bearing wiring at the source level so it can't silently
+-- regress (especially an UNSUBSTITUTED placeholder, which breaks the panel).
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("padmirror-pin: dashboard source readable", #src > 0)
+
+  -- 1.1a: the ⌘⌥J jump hotkey targets nextAttention (approval>error>hung), not
+  -- nextApproval, and reads the fully-annotated render list (it.hung/error).
+  check("padmirror-pin: jump hotkey uses nextAttention",
+        src:find("core.nextAttention(l) or core.frontSession(l)", 1, true) ~= nil)
+  check("padmirror-pin: hotkey reads the annotated lastRenderList",
+        src:find("selector(lastRenderList or refreshList())", 1, true) ~= nil)
+  check("padmirror-pin: render tick captures lastRenderList after the re-sort",
+        src:find("lastRenderList = list", 1, true) ~= nil)
+
+  -- 1.1b: the ⌨ legend placeholder MUST have a matching gsub (an unsubstituted
+  -- __HOTKEY_LEGEND__ is invalid JS and takes the whole panel script down).
+  check("padmirror-pin: legend placeholder referenced once in the template",
+        select(2, src:gsub("window%.HOTKEY_LEGEND = __HOTKEY_LEGEND__;", "")) == 1)
+  check("padmirror-pin: legend placeholder is substituted (gsub present)",
+        src:find('HTML:gsub("__HOTKEY_LEGEND__", legendJson)', 1, true) ~= nil)
+  check("padmirror-pin: legend sourced from core.hotkeyLegend (no drift)",
+        src:find("core.hotkeyLegend(legendGlobals, legendPanel)", 1, true) ~= nil)
+
+  -- 1.3: the Shift report computes fleetStandup + standupMarkdown in Lua (one
+  -- source for the <pre> body and the Copy button); copy-text writes the pasteboard.
+  check("padmirror-pin: open-shift handler present", src:find('a == "open-shift"', 1, true) ~= nil)
+  check("padmirror-pin: shift uses core.fleetStandup", src:find("core.fleetStandup(ledgerSnapshot()", 1, true) ~= nil)
+  check("padmirror-pin: shift renders via core.standupMarkdown", src:find("core.standupMarkdown(report", 1, true) ~= nil)
+  check("padmirror-pin: copy-text writes the pasteboard", src:find("hs.pasteboard.setContents(txt)", 1, true) ~= nil)
+
+  -- 1.6: lineage annotated once per tick via lineageByProject (cached), assigned
+  -- to it.lineage/it.churn, and the day-window anchored at local midnight.
+  check("padmirror-pin: lineage map via core.lineageByProject",
+        src:find("core.lineageByProject(ledgerEvents, midnight)", 1, true) ~= nil)
+  check("padmirror-pin: lineage one-liner via core.lineageSummary",
+        src:find("core.lineageSummary(lin)", 1, true) ~= nil)
+
+  -- ledger-gating: the 📋 Shift tab + drawer row default HIDDEN and are revealed
+  -- only by setLedgerOn, which the refresh tick pushes on change. (Lineage needs
+  -- no such gate -- it simply isn't computed when the ledger is off.)
+  check("padmirror-pin: shift tab defaults hidden",
+        src:find('id="a-tab-shift" class="a-tab" style="display:none"', 1, true) ~= nil)
+  check("padmirror-pin: shift drawer row defaults hidden",
+        src:find('id="tm-shift" class="tm-item" style="display:none"', 1, true) ~= nil)
+  check("padmirror-pin: setLedgerOn toggles the shift tab",
+        src:find('document.getElementById("a-tab-shift"); if(tab) tab.style.display = LEDGER_ON', 1, true) ~= nil)
+  check("padmirror-pin: refresh tick pushes ledger state on change",
+        src:find('"setLedgerOn(" .. tostring(ledgerOn) .. ")"', 1, true) ~= nil)
+  check("padmirror-pin: shift drawer entry guarded by LEDGER_ON",
+        src:find('else if(which === "shift"){ if(LEDGER_ON) openShiftReport(); }', 1, true) ~= nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

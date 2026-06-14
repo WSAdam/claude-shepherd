@@ -170,11 +170,18 @@ Act on the session that needs you without touching the panel (configurable near
 the top of [claude-dashboard.lua](claude-dashboard.lua)):
 
 - **⌘⌥A** — approve the front approval (hands-free via the gate when it's waiting).
-- **⌘⌥J** — jump to the session that needs you.
+- **⌘⌥J** — **jump to the session that most needs you, from any app.** Ranks hard
+  attention signals: a pending **approval** first, then a session frozen on an API
+  **error**, then one the watchdog flagged **stalled** — and focuses its window even
+  when the panel isn't open. (Falls back to the front session when nothing's wedged.)
 - **⌘⌥N** — cycle-jump to the next session.
 - **⌘⌥S** — spawn a new session (see below).
 - **⌘⌥B** — show/hide the panel (it also minimizes to the Dock, and there's a 🐑
   menu-bar icon to reopen it when closed).
+
+Forget the combos? The small **⌨ button** in the **bottom-right** of the panel pops
+up a legend of every shortcut and what it does (sourced from the live bindings, so
+it never drifts).
 
 ## Keep this Mac awake (caffeinate)
 
@@ -508,17 +515,32 @@ Two header overlays read fleet activity. Both are **local and cost no model toke
   **Trends — last 24h (hourly)** section adds four sparklines: time blocked on you, fleet
   activity, active sessions, and denial rate. Always available; zeros until the ledger is on.
 
-Three more ledger-backed views (all read-only, local, zero model tokens):
+More ledger-backed views (all read-only, local, zero model tokens):
 
 - **🔔 Notification history** — "what fired while you were away": escalations, stall
   warnings, auto-respawns, and every **non-human** gate decision, in an **Alerts** tab of
   the audit overlay. The header bell shows an unseen count; opening it marks everything
   seen and highlights what's new since you last looked. (If you've set
   `ledger.captureTypes`, include `escalation` and `hung`.)
+- **📋 Shift report** — a one-click narrative of **what the fleet did over a window** (a
+  **📋 Shift** tab in the audit overlay, also in the ☰ drawer). Pick **Since opened** (what
+  ran while you were away since you launched Shepherd), **Last 8h**, or **Last 24h**: it
+  rolls up sessions active, prompts, approvals (allow/deny and who decided), auto-actions
+  (respawns / continues / drained / routed feeds), escalations and stalls, time you were the
+  bottleneck, and a per-project breakdown — then **Copy** the report to the clipboard. It
+  reports *operations*, not outcomes: there's deliberately no "what shipped" line, because a
+  prompt is an instruction and Shepherd has no git/CI ground truth to claim a result. The
+  **📋 Shift** tab and drawer entry only appear while the ledger is enabled (it's pure ledger
+  aggregation — nothing to report otherwise), and they show/hide live with the setting.
 - **Per-session gate decision log** — the detail panel shows the selected session's last
   few gate decisions, grouped with counts and provenance ("⛔ deny Bash ×4 (autoDeny:
   Bash(rm*)) · 2m ago"), so what the gate has been doing to a session is visible right
   where you act on it. `decisions.limit` / `decisions.hours` tune it.
+- **♻️ Session lineage** — auto-respawns and `/clear`s mint a new session id for the same
+  project, and that churn is normally invisible. The detail panel now shows a one-liner
+  ("3rd session today · 2 auto-respawns · 1 clear") for the project since midnight, and a
+  tile gets a small **♻️N** badge once the churn adds up — so a crash-loop survivor is
+  obvious at a glance. Pure read of the ledger; nothing new is stored.
 - **🔎 Find in fleet** — search every session's **transcript** (live *and* dead sessions)
   plus the ledger: "which session touched `auth.ts`?", "who ran that migration?". Click a
   hit to select the live session (or open a dead one's audit timeline). Instant with

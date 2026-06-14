@@ -514,9 +514,12 @@ function M.parseLedger(text)
   return out
 end
 
--- Filter + sort (newest first) a list of events. opts = { session, sinceTs, untilTs,
--- types }. `types` may be a set ({decision=true}) or a list ({"decision",...}); empty
--- or nil means all. `session` matches session_id (the reliable cross-writer key).
+-- Filter + sort (newest first) a list of events. opts = { session, projectKey,
+-- sinceTs, untilTs, types }. `types` may be a set ({decision=true}) or a list
+-- ({"decision",...}); empty or nil means all. `session` matches session_id (the
+-- reliable cross-writer key); `projectKey` matches the launch-folder identity
+-- (stamped on every event by ledgerFor) so a project's whole lineage -- across
+-- the session_ids a respawn/clear mints -- can be sliced in one call.
 function M.filterLedger(events, opts)
   opts = opts or {}
   local typeset
@@ -533,6 +536,7 @@ function M.filterLedger(events, opts)
   for _, e in ipairs(events or {}) do
     local ok = true
     if opts.session and e.session_id ~= opts.session then ok = false end
+    if ok and opts.projectKey and e.projectKey ~= opts.projectKey then ok = false end
     if ok and opts.sinceTs and (tonumber(e.ts) or 0) < opts.sinceTs then ok = false end
     if ok and opts.untilTs and (tonumber(e.ts) or 0) > opts.untilTs then ok = false end
     if ok and typeset and not typeset[e.type] then ok = false end
@@ -1033,6 +1037,213 @@ function M.fleetStats(events, opts)
   }
 end
 
+-- ---- Session lineage (respawn / clear churn made legible) -------------------
+-- Make the otherwise-invisible respawn/clear/continue CHURN for one project
+-- legible: count the distinct sessions and the lifecycle events recorded for a
+-- projectKey within a window. The caller passes sinceTs (e.g. local midnight) --
+-- a pure fn has no clock. Pure read over ledger events already stamped with
+-- projectKey by ledgerFor; deliberately NO new persisted "lineage chain" and NO
+-- sessionRisk wiring (the synthesis kept this to the narrow read). Returns
+-- nil-safe zeros so the caller can render "Nth session today (K auto-respawns)".
+local LINEAGE_TYPES = { spawn = 0, auto_respawn = 0, respawn = 0, clear = 0,
+                        continue = 0, auto_continue = 0, drain_close = 0 }
+local function lineageRollup(l)
+  local c = l.counts
+  l.autoRespawns, l.manualRespawns = c.auto_respawn, c.respawn
+  l.clears, l.continues = c.clear, c.continue + c.auto_continue
+  l.spawns, l.drains = c.spawn, c.drain_close
+  return l
+end
+
+-- One pass over the ledger building a map projectKey -> lineage table for EVERY
+-- project in the window, so the dashboard can annotate all tiles in a single
+-- ledger pass per tick (not one pass per session). Same shape as projectLineage.
+function M.lineageByProject(events, sinceTs)
+  sinceTs = tonumber(sinceTs) or 0
+  local out, seenByKey = {}, {}
+  for _, e in ipairs(events or {}) do
+    if type(e) == "table" and e.projectKey and (tonumber(e.ts) or 0) >= sinceTs then
+      local pk = e.projectKey
+      local l = out[pk]
+      if not l then
+        local c = {}
+        for k, v in pairs(LINEAGE_TYPES) do c[k] = v end
+        l = { projectKey = pk, sessionCount = 0, counts = c }
+        out[pk] = l; seenByKey[pk] = {}
+      end
+      local sid = e.session_id or e.key
+      if sid and not seenByKey[pk][sid] then seenByKey[pk][sid] = true; l.sessionCount = l.sessionCount + 1 end
+      if l.counts[e.type] ~= nil then l.counts[e.type] = l.counts[e.type] + 1 end
+    end
+  end
+  for _, l in pairs(out) do lineageRollup(l) end
+  return out
+end
+
+-- Lineage for ONE project (delegates to lineageByProject so the per-tick map and
+-- the per-session read can never disagree). nil projectKey -> nil.
+function M.projectLineage(events, projectKey, opts)
+  if not projectKey then return nil end
+  opts = opts or {}
+  local m = M.lineageByProject(events, opts.sinceTs)
+  if m[projectKey] then return m[projectKey] end
+  local c = {}
+  for k, v in pairs(LINEAGE_TYPES) do c[k] = v end
+  return lineageRollup({ projectKey = projectKey, sessionCount = 0, counts = c })
+end
+
+-- One-line lineage summary for the detail panel, e.g.
+-- "3rd session today · 2 auto-respawns · 1 clear". Returns nil when there's
+-- nothing notable (a single session with no churn) so the panel omits the row.
+function M.lineageSummary(lin)
+  if not lin then return nil end
+  local n = lin.sessionCount or 0
+  local churn = (lin.autoRespawns or 0) + (lin.manualRespawns or 0)
+             + (lin.clears or 0) + (lin.continues or 0)
+  if n <= 1 and churn == 0 then return nil end
+  local function ord(k)
+    local m100 = k % 100
+    if m100 >= 11 and m100 <= 13 then return k .. "th" end
+    local suf = ({ "st", "nd", "rd" })[k % 10] or "th"
+    return k .. suf
+  end
+  local parts = {}
+  if n >= 1 then parts[#parts + 1] = ord(n) .. " session today" end
+  local function add(num, one, many)
+    if num and num > 0 then parts[#parts + 1] = num .. " " .. (num == 1 and one or many) end
+  end
+  add(lin.autoRespawns,   "auto-respawn", "auto-respawns")
+  add(lin.manualRespawns, "respawn",      "respawns")
+  add(lin.clears,         "clear",        "clears")
+  add(lin.continues,      "continue",     "continues")
+  return table.concat(parts, " · ")
+end
+
+-- ---- Fleet shift report (the "what did the fleet do while I was away" read) --
+-- Operations shift report for the audit overlay's 📋 Shift tab: what the fleet
+-- DID over a window. Pure aggregation -- reuses fleetStats for decisions /
+-- provenance / blocked-time, then a second pass tallies lifecycle + auto-action
+-- + problem events grouped by project. Reports OPERATIONS ONLY: there is NO
+-- "what shipped" changelog, by design -- a prompt is an instruction, not an
+-- outcome, and Shepherd has no git/CI/diff ground truth, so the honest signal
+-- for error-recovery is the continue/auto_continue count, not a claimed outcome.
+-- opts = { sinceTs, untilTs, topN }. `empty` flags a window with no events so the
+-- UI can show the enable-the-ledger / nothing-happened state.
+local STANDUP_LIFE   = { spawn = true, auto_respawn = true, respawn = true,
+                         clear = true, continue = true, auto_continue = true,
+                         drain_close = true }
+local STANDUP_AUTO   = { auto_respawn = true, auto_continue = true, drain_close = true }
+local STANDUP_PROBLEM = { escalation = true, hung = true, queue_starved = true }
+function M.fleetStandup(events, opts)
+  opts = opts or {}
+  local slice = M.filterLedger(events, { sinceTs = opts.sinceTs, untilTs = opts.untilTs })
+  local stats = M.fleetStats(slice, { topN = opts.topN or 8 })
+  local life = { spawn = 0, auto_respawn = 0, respawn = 0, clear = 0,
+                 continue = 0, auto_continue = 0, drain_close = 0 }
+  local problems = { escalation = 0, hung = 0, queue_starved = 0 }
+  local routed = 0
+  local byKey = {}   -- projectKey -> rollup
+  local function proj(e)
+    local k = e.projectKey or e.cwd or e.name or "?"
+    local p = byKey[k]
+    if not p then
+      p = { projectKey = k, name = e.name or k, prompts = 0, allow = 0, deny = 0,
+            autoRespawns = 0, escalations = 0, hangs = 0 }
+      byKey[k] = p
+    end
+    if e.name and (not p.name or p.name == k) then p.name = e.name end
+    return p
+  end
+  for _, e in ipairs(slice) do
+    local t = e.type
+    if STANDUP_LIFE[t] then life[t] = (life[t] or 0) + 1 end
+    if STANDUP_PROBLEM[t] then problems[t] = (problems[t] or 0) + 1 end
+    if t == "prompt" then local p = proj(e); p.prompts = p.prompts + 1
+    elseif t == "auto_respawn" then local p = proj(e); p.autoRespawns = p.autoRespawns + 1
+    elseif t == "escalation" then local p = proj(e); p.escalations = p.escalations + 1
+    elseif t == "hung" then local p = proj(e); p.hangs = p.hangs + 1
+    elseif t == "decision" then
+      local p = proj(e)
+      if e.outcome == "deny" then p.deny = p.deny + 1
+      elseif e.outcome == "allow" then p.allow = p.allow + 1 end
+      if e.by == "router" then routed = routed + 1 end
+    end
+  end
+  local byProject = {}
+  for _, p in pairs(byKey) do byProject[#byProject + 1] = p end
+  table.sort(byProject, function(a, b)
+    local aw = a.prompts + a.allow + a.deny + a.autoRespawns + a.escalations
+    local bw = b.prompts + b.allow + b.deny + b.autoRespawns + b.escalations
+    if aw ~= bw then return aw > bw end
+    return (a.name or "") < (b.name or "")
+  end)
+  return {
+    sinceTs = opts.sinceTs, untilTs = opts.untilTs,
+    empty = (#slice == 0),
+    totals = stats.totals,            -- events, sessions, prompts, toolRequests, spawns, decisions
+    decisions = stats.decisions,      -- allow / deny / fallback / total
+    provenance = stats.provenance,    -- who decided: by -> count
+    blockedSeconds = stats.approvalBlockedSeconds,
+    lifecycle = life,                 -- spawn / respawn / clear / continue counts
+    autoActions = { auto_respawn = life.auto_respawn, auto_continue = life.auto_continue,
+                    drain_close = life.drain_close, routed = routed },
+    problems = problems,              -- escalation / hung / queue_starved
+    continues = life.continue + life.auto_continue,  -- error-recovery signal (honest stand-in for "errors")
+    byProject = byProject,
+    mostActive = stats.mostActive,
+  }
+end
+
+-- Render a fleetStandup report as a readable plain-text/markdown block -- used
+-- BOTH for the 📋 Shift tab body (shown in a <pre>, mirroring the timeline view)
+-- and the Copy button, so the on-screen text and the copied text can't diverge.
+-- Pure; opts.windowLabel is the human window ("since Shepherd opened" / "8h").
+function M.standupMarkdown(report, opts)
+  opts = opts or {}
+  local label = opts.windowLabel or "the selected window"
+  local L = { "Fleet shift report — " .. label }
+  L[#L + 1] = string.rep("─", math.min(#L[1], 48))
+  if not report or report.empty then
+    L[#L + 1] = "No fleet activity recorded in this window."
+    L[#L + 1] = "(The audit ledger must be enabled to record activity — it's off by default.)"
+    return table.concat(L, "\n")
+  end
+  local t, d, a, p = report.totals, report.decisions, report.autoActions, report.problems
+  L[#L + 1] = string.format("Sessions active: %d   ·   Prompts: %d   ·   Tool requests: %d",
+    t.sessions or 0, t.prompts or 0, t.toolRequests or 0)
+  L[#L + 1] = string.format("Spawns: %d   ·   Auto-respawns: %d   ·   Auto-continues: %d   ·   Drained: %d   ·   Routed feeds: %d",
+    t.spawns or 0, a.auto_respawn or 0, a.auto_continue or 0, a.drain_close or 0, a.routed or 0)
+  L[#L + 1] = string.format("Approvals: %d allow / %d deny (of %d)   ·   You were the bottleneck for %s",
+    d.allow or 0, d.deny or 0, d.total or 0, M.fmtDuration(report.blockedSeconds or 0))
+  L[#L + 1] = string.format("Escalations: %d   ·   Stalls: %d   ·   Error recoveries: %d",
+    p.escalation or 0, p.hung or 0, report.continues or 0)
+  -- who made the gate decisions (human vs automation), most-common first
+  local prov = {}
+  for by, n in pairs(report.provenance or {}) do prov[#prov + 1] = { by = by, n = n } end
+  table.sort(prov, function(x, y) if x.n ~= y.n then return x.n > y.n end return x.by < y.by end)
+  if #prov > 0 then
+    local parts = {}
+    for _, e in ipairs(prov) do parts[#parts + 1] = e.by .. " " .. e.n end
+    L[#L + 1] = "Decided by: " .. table.concat(parts, ", ")
+  end
+  if report.byProject and #report.byProject > 0 then
+    L[#L + 1] = ""
+    L[#L + 1] = "By project:"
+    for _, pr in ipairs(report.byProject) do
+      local bits = {}
+      if (pr.prompts or 0) > 0 then bits[#bits + 1] = pr.prompts .. " prompt" .. ((pr.prompts == 1) and "" or "s") end
+      if (pr.allow or 0) > 0 then bits[#bits + 1] = pr.allow .. " allow" end
+      if (pr.deny or 0) > 0 then bits[#bits + 1] = pr.deny .. " deny" end
+      if (pr.autoRespawns or 0) > 0 then bits[#bits + 1] = pr.autoRespawns .. " auto-respawn" .. ((pr.autoRespawns == 1) and "" or "s") end
+      if (pr.escalations or 0) > 0 then bits[#bits + 1] = pr.escalations .. " escalation" .. ((pr.escalations == 1) and "" or "s") end
+      if (pr.hangs or 0) > 0 then bits[#bits + 1] = pr.hangs .. " stall" .. ((pr.hangs == 1) and "" or "s") end
+      L[#L + 1] = "  • " .. (pr.name or pr.projectKey or "?")
+        .. (#bits > 0 and ("  —  " .. table.concat(bits, " · ")) or "  —  (no recorded activity)")
+    end
+  end
+  return table.concat(L, "\n")
+end
+
 -- ---- Time-series buckets (sparkline trends over the ledger) -----------------
 -- Per-metric accumulators for bucketEvents. Each writes into the shared `series`
 -- (indexed via `idx`); a dispatch table (not an if/elseif chain) keeps each metric's
@@ -1248,6 +1459,70 @@ function M.nextApproval(list)
 end
 
 function M.frontSession(list) return (list or {})[1] end
+
+-- The single session that most needs the operator RIGHT NOW, in hard-attention
+-- order: a pending approval first, then a session frozen on an API error (the
+-- magenta "Error" state -- you must resume it), then one the watchdog flagged
+-- hung. Returns nil when nothing is wedged, so the jump hotkey can fall back to
+-- frontSession. Reads only fields already on the parsed item (status + the
+-- it.hung flag the refresh sets), so it stays pure/testable -- this generalizes
+-- nextApproval, which the ⌘⌥J "jump to who needs you" key used to call. The
+-- tiers are deliberately HARD signals only: context-band and stale-approval are
+-- softer and would make the global key teleport to sessions that don't yet need
+-- a human. The list is already RANK-sorted (approval=0, error=1), so the first
+-- match in each pass is the front-most of its kind.
+function M.nextAttention(list)
+  for _, it in ipairs(list or {}) do
+    if it.status == "approval" then return it end
+  end
+  for _, it in ipairs(list or {}) do
+    if it.status == "error" then return it end
+  end
+  for _, it in ipairs(list or {}) do
+    if it.hung then return it end
+  end
+  return nil
+end
+
+-- Hotkey legend (the ⌨ popup) ------------------------------------------------
+-- Mac modifier glyphs and their canonical render order (⌃⌥⇧⌘), so a combo reads
+-- the way the OS prints it regardless of how the binding listed its mods.
+local MOD_SYM   = { ctrl = "⌃", control = "⌃", alt = "⌥", option = "⌥", shift = "⇧", cmd = "⌘", command = "⌘" }
+local MOD_ORDER = { ctrl = 1, control = 1, alt = 2, option = 2, shift = 3, cmd = 4, command = 4 }
+
+-- Format a {mods, key} binding as a display combo like "⌘⌥J". Pure; used to build
+-- the legend from the dashboard's real HOTKEY_* constants so the displayed combo
+-- can never drift from the actual binding.
+function M.fmtHotkey(mods, key)
+  local ms = {}
+  for _, m in ipairs(mods or {}) do ms[#ms + 1] = m end
+  table.sort(ms, function(a, b) return (MOD_ORDER[a] or 9) < (MOD_ORDER[b] or 9) end)
+  local out = ""
+  for _, m in ipairs(ms) do out = out .. (MOD_SYM[m] or ("?" .. tostring(m))) end
+  local k = tostring(key or "")
+  -- single letters/digits render upper-case; named keys (space, tab) title-cased
+  if #k == 1 then k = k:upper() else k = k:sub(1, 1):upper() .. k:sub(2) end
+  return out .. k
+end
+
+-- Build the legend rows for the ⌨ popup. `globals` is a list of
+-- { mods, key, desc } passed straight from the dashboard's HOTKEY_* consts (so
+-- the legend is sourced from the real bindings, not a hand-kept copy);
+-- `panelKeys` is the static in-panel list of { combo, desc } (Enter to send,
+-- Esc to close, etc.). Returns sections [{ title, rows = {{ combo, desc }} }],
+-- skipping any empty section.
+function M.hotkeyLegend(globals, panelKeys)
+  local g = {}
+  for _, b in ipairs(globals or {}) do
+    g[#g + 1] = { combo = M.fmtHotkey(b.mods, b.key), desc = b.desc or "" }
+  end
+  local out = {}
+  if #g > 0 then out[#out + 1] = { title = "Global — work from any app", rows = g } end
+  if panelKeys and #panelKeys > 0 then
+    out[#out + 1] = { title = "In the panel", rows = panelKeys }
+  end
+  return out
+end
 
 -- Extract the latest assistant text from a transcript.jsonl tail, for the "live
 -- activity peek". Scans lines backwards (the last assistant line is often a
