@@ -516,6 +516,135 @@ do
      #core.templateList({ templates = { { name = "ok", text = "t" }, { name = "" }, "junk" } }), 1)
 end
 
+-- ---- L3: template validate / fail-safe load --------------------------------
+do
+  eq("vtpl: not a table", core.validateTemplate("x").ok, false)
+  eq("vtpl: blank name invalid", core.validateTemplate({ name = "", text = "t" }).ok, false)
+  eq("vtpl: needs text or description",
+     core.validateTemplate({ name = "n" }).ok, false)
+  eq("vtpl: text-only valid", core.validateTemplate({ name = "n", text = "t" }).ok, true)
+  eq("vtpl: description-only valid", core.validateTemplate({ name = "n", description = "d" }).ok, true)
+  eq("vtpl: non-string text invalid", core.validateTemplate({ name = "n", text = 5 }).ok, false)
+  eq("vtpl: non-list vars invalid", core.validateTemplate({ name = "n", text = "t", vars = "x" }).ok, false)
+  eq("vtpl: unknown field flagged", core.validateTemplate({ name = "n", text = "t", bogus = 1 }).ok, false)
+  -- fail-safe load keeps valid, drops bad with reasons; dup keeps first
+  local ld = core.templateLoad({ templates = {
+    { name = "a", text = "t" }, { name = "", text = "x" },
+    { name = "a", text = "dup" }, { name = "c", description = "d" } } })
+  eq("ltpl: keeps the valid", #ld.valid, 2)
+  eq("ltpl: drops the bad + dup", #ld.errors, 2)
+  eq("ltpl: dup keeps first text", core.templateGet({ templates = ld.valid }, "a"), "t")
+  -- legacy round-trips byte-identically (no spurious fields)
+  local leg = core.templateList({ templates = { { name = "L", text = "body" } } })[1]
+  eq("ltpl: legacy keeps text", leg.text, "body")
+  eq("ltpl: legacy has no version", leg.version, nil)
+end
+
+-- ---- L3: compose / vars / render -------------------------------------------
+do
+  eq("compose: legacy text", core.composeTemplate({ name = "n", text = "hi" }), "hi")
+  eq("compose: structured w/ expected",
+     core.composeTemplate({ name = "n", description = "Do X", expected_output = "A diff" }),
+     "Do X\n\nExpected output:\nA diff")
+  eq("compose: description only", core.composeTemplate({ name = "n", description = "Do X" }), "Do X")
+  eq("compose: nil -> nil", core.composeTemplate(nil), nil)
+  eq("compose: contentless -> nil", core.composeTemplate({ name = "n" }), nil)
+
+  local vs = core.templateVars("Fix {{bug}} in {{file}}, note {{ctx?}}, on {{today}}")
+  eq("vars: count excludes builtins", #vs, 3)
+  eq("vars: first name", vs[1].name, "bug")
+  eq("vars: required default", vs[1].required, true)
+  eq("vars: optional marker", vs[3].required, false)
+  -- a name required if ANY occurrence is required
+  local vs2 = core.templateVars("{{x?}} then {{x}}")
+  eq("vars: dedup", #vs2, 1)
+  eq("vars: any-required wins", vs2[1].required, true)
+
+  -- render: required-missing refuses
+  local r1, miss = core.renderTemplate("Hi {{name}}", {})
+  eq("render: refuses on missing required", r1, nil)
+  eq("render: reports the missing name", miss[1], "name")
+  -- render: filled + optional blanks
+  eq("render: substitutes", core.renderTemplate("Hi {{name}}", { name = "Sam" }), "Hi Sam")
+  eq("render: optional blanks out", core.renderTemplate("a{{x?}}b", {}), "ab")
+  -- render: blank value counts as missing for required
+  eq("render: blank required missing", core.renderTemplate("{{a}}", { a = "  " }), nil)
+  -- render: built-ins from injected now (TZ-agnostic: same os.date both sides)
+  local T = 1700000000
+  eq("render: today", core.renderTemplate("{{today}}", {}, { now = T }), os.date("%Y-%m-%d", T))
+  eq("render: now", core.renderTemplate("{{now}}", {}, { now = T }), os.date("%Y-%m-%d %H:%M", T))
+  eq("render: no clock -> blank date", core.renderTemplate("[{{date}}]", {}, {}), "[]")
+  eq("render: prev_output", core.renderTemplate("<{{prev_output}}>", {}, { prevOutput = "OUT" }), "<OUT>")
+  eq("render: prev_output default blank", core.renderTemplate("<{{prev_output}}>", {}, {}), "<>")
+
+  -- effectiveVars merges declared schema + parsed body
+  local ev = core.effectiveVars({ name = "n", description = "use {{repo}} and {{extra}}",
+    vars = { { name = "repo", label = "Repository", required = true },
+             { name = "branch", required = false, default = "main" } } })
+  eq("effvars: declared first", ev[1].name, "repo")
+  eq("effvars: carries label", ev[1].label, "Repository")
+  eq("effvars: declared-only kept", ev[2].name, "branch")
+  eq("effvars: parsed-only appended", ev[3].name, "extra")
+  -- fillDefaults applies a default only when missing/blank
+  local fd = core.fillDefaults({ { name = "branch", default = "main" } }, { repo = "r" })
+  eq("filld: keeps existing", fd.repo, "r")
+  eq("filld: applies default", fd.branch, "main")
+  eq("filld: no override of set",
+     core.fillDefaults({ { name = "branch", default = "main" } }, { branch = "dev" }).branch, "dev")
+end
+
+-- ---- L3: versioning + revert ----------------------------------------------
+do
+  -- new template starts at version 1, empty history
+  local s1 = core.templatePushVersioned(nil, { name = "T", text = "v one" }, { now = 100 })
+  local r1 = core.templateGetRecord(s1, "T")
+  eq("ver: new starts at 1", r1.version, 1)
+  eq("ver: new empty history", #r1.versions, 0)
+  -- editing snapshots the previous head and bumps
+  local s2 = core.templatePushVersioned(s1, { name = "T", text = "v two" }, { now = 200 })
+  local r2 = core.templateGetRecord(s2, "T")
+  eq("ver: edit bumps to 2", r2.version, 2)
+  eq("ver: edit keeps one snapshot", #r2.versions, 1)
+  eq("ver: snapshot holds old body", r2.versions[1].text, "v one")
+  eq("ver: head is new body", core.templateGet(s2, "T"), "v two")
+  -- an unchanged push is a no-op (no churn)
+  local s3 = core.templatePushVersioned(s2, { name = "T", text = "v two" }, { now = 300 })
+  eq("ver: unchanged no churn", core.templateGetRecord(s3, "T").version, 2)
+  -- version history list: current first, newest-first
+  local vh = core.templateVersions(s2, "T")
+  eq("ver: history length", #vh, 2)
+  eq("ver: current first", vh[1].current, true)
+  eq("ver: current version num", vh[1].version, 2)
+  eq("ver: prior version num", vh[2].version, 1)
+  eq("ver: unknown -> empty", #core.templateVersions(s2, "nope"), 0)
+  -- revert is non-destructive: restores old content, bumps forward
+  local s4, ok = core.templateRevert(s2, "T", 1, { now = 400 })
+  eq("ver: revert ok", ok, true)
+  eq("ver: revert restores body", core.templateGet(s4, "T"), "v one")
+  eq("ver: revert bumps to 3", core.templateGetRecord(s4, "T").version, 3)
+  eq("ver: revert unknown version -> false", select(2, core.templateRevert(s2, "T", 99)), false)
+  eq("ver: revert unknown name -> false", select(2, core.templateRevert(s2, "nope", 1)), false)
+  -- version history capped
+  local big = core.templatePushVersioned(nil, { name = "C", text = "x0" }, { now = 0, versionCap = 2 })
+  for i = 1, 5 do
+    big = core.templatePushVersioned(big, { name = "C", text = "x" .. i }, { now = i, versionCap = 2 })
+  end
+  eq("ver: history capped", #core.templateGetRecord(big, "C").versions, 2)
+  -- review-fix: "edit" is measured on the COMPOSED body, not raw shadowed fields.
+  -- description shadows text -> changing text alone is a no-op (no version bump).
+  local sv = core.templatePushVersioned(nil, { name = "S", text = "a", description = "D" }, { now = 1 })
+  local sv2 = core.templatePushVersioned(sv, { name = "S", text = "b", description = "D" }, { now = 2 })
+  eq("ver: shadowed text edit no-op", core.templateGetRecord(sv2, "S").version, 1)
+  -- expected_output without a description isn't rendered -> changing it is a no-op
+  local se = core.templatePushVersioned(nil, { name = "E", text = "body", expected_output = "x" }, { now = 1 })
+  local se2 = core.templatePushVersioned(se, { name = "E", text = "body", expected_output = "y" }, { now = 2 })
+  eq("ver: unrendered expected_output edit no-op", core.templateGetRecord(se2, "E").version, 1)
+  -- but a real change to the rendered body DOES bump (expected_output WITH a description)
+  local sr = core.templatePushVersioned(nil, { name = "R", description = "d", expected_output = "x" }, { now = 1 })
+  local sr2 = core.templatePushVersioned(sr, { name = "R", description = "d", expected_output = "y" }, { now = 2 })
+  eq("ver: rendered-body edit bumps", core.templateGetRecord(sr2, "R").version, 2)
+end
+
 -- ---- Spawn presets (roadmap #4a) --------------------------------------------
 do
   local st, ok1 = core.presetPush(nil, { name = "api work", folder = "/u/a/api",

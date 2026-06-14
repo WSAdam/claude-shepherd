@@ -816,5 +816,33 @@ do
         lsrc:find('"$CC_POLICY_DIR/$1" "$CC_POLICY_OVERRIDE_DIR/$1"', 1, true) ~= nil)
 end
 
+-- ---- L3 pins: template {{var}} render wiring (dashboard) -------------------
+-- cc-core owns the render (no JS render twin); these guard the FX handler +
+-- panel JS round-trip + the no-auto-send insert discipline against unwiring.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("l3-pin: dashboard source readable", #src > 0)
+  -- Lua handler: render action (cc-core authoritative) + versioned save + rich list
+  check("l3-pin: template-render action", src:find('a == "template%-render"') ~= nil)
+  check("l3-pin: render via cc-core",
+        src:find("core.renderTemplate(core.composeTemplate(rec)", 1, true) ~= nil)
+  check("l3-pin: prev_output from selected tile", src:find("sel.activity", 1, true) ~= nil)
+  check("l3-pin: save is versioned",
+        src:find("core.templatePushVersioned(FX.readTemplates()", 1, true) ~= nil)
+  check("l3-pin: list reply carries vars", src:find("vars = core.effectiveVars(r)", 1, true) ~= nil)
+  check("l3-pin: rendered echoed to panel", src:find("ccTemplateRendered(", 1, true) ~= nil)
+  -- panel JS: var form -> render round-trip -> no-auto-send insert
+  check("l3-pin: JS ccTemplateRendered", src:find("function ccTemplateRendered(o)", 1, true) ~= nil)
+  check("l3-pin: JS var form", src:find("function renderVarForm()", 1, true) ~= nil)
+  check("l3-pin: JS sends template-render", src:find('send("template-render"', 1, true) ~= nil)
+  check("l3-pin: required-var gates Insert", src:find("btn.disabled = !ok", 1, true) ~= nil)
+  check("l3-pin: menu renders body", src:find('esc(t.body || "")', 1, true) ~= nil)
+  check("l3-pin: insert stays no-auto-send", src:find("el.value = (o && o.text)", 1, true) ~= nil)
+  -- review-fix: dropped/corrupt records are surfaced, not silently reaped on save/delete
+  check("l3-pin: load surfaces dropped records", src:find("dropped \" .. #loaded.errors", 1, true) ~= nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

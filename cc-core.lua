@@ -3589,50 +3589,191 @@ function M.recentSeed(state, activeDirs)
   return { dirs = out }
 end
 
--- ---- Saved task templates (roadmap #5c) -------------------------------------
+-- ---- Saved task templates (roadmap #5c; L3 enriches) ------------------------
 -- Operator data, stored OUTSIDE cc-config.json (a separate cc-templates.json,
 -- like labels/recents) so the Settings overlay round-trip can never clobber it.
--- State shape: { templates = { { name = "...", text = "..." }, ... } }.
+-- Back-compat record: { name, text }. L3 widens it (all but `name` optional):
+--   { name, text?, description?, expected_output?, vars?, version?, versions?,
+--     createdAt?, updatedAt? }
+-- A STRUCTURED template composes its body from description (+ expected_output);
+-- a LEGACY template keeps using `text` (the back-compat fallback). Body vars are
+-- {{name}} (required) / {{name?}} (optional) placeholders, plus the built-ins
+-- date/today/now/prev_output (auto-filled at render time). The validate ->
+-- fail-safe load -> list family mirrors the L1 agent registry (~3877) so a bad
+-- record is dropped (with a reason) instead of breaking the whole file.
 M.TEMPLATE_CAP = 50
+M.TEMPLATE_VERSION_CAP = 20
+
+-- Built-in interpolation vars: auto-filled at render time, never prompted for.
+M.TEMPLATE_BUILTINS = { date = true, today = true, now = true, prev_output = true }
+function M.isBuiltinVar(name) return M.TEMPLATE_BUILTINS[tostring(name or "")] == true end
+
+-- Known record fields. Unknown keys are FLAGGED by validateTemplate (a typo'd key
+-- is a dead no-op otherwise) and drop the record at load -- same posture as agents.
+M.TEMPLATE_FIELDS = { name = true, text = true, description = true,
+  expected_output = true, vars = true, version = true, versions = true,
+  createdAt = true, updatedAt = true }
+
+local function tplTrim(s) return tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", "") end
+local function tplStr(x) return type(x) == "string" and x or nil end
 
 local function ttpl(state)
   if type(state) == "table" and type(state.templates) == "table" then return state.templates end
   return {}
 end
 
--- Safe copy of the templates list; tolerates nil/garbage state and drops
--- malformed entries (missing/blank name or text).
-function M.templateList(state)
-  local out = {}
-  for _, t in ipairs(ttpl(state)) do
-    if type(t) == "table" and type(t.name) == "string" and t.name ~= ""
-       and type(t.text) == "string" and t.text ~= "" then
-      out[#out + 1] = { name = t.name, text = t.text }
+-- Normalize the optional vars schema into a list of {name, required, label?,
+-- default?}. Accepts bare strings (name only, required) or objects; drops entries
+-- without a usable name, dedupes by name (first wins).
+local function tplVarSchema(v)
+  local out, seen = {}, {}
+  if type(v) ~= "table" then return out end
+  for _, item in ipairs(v) do
+    local name, required, label, default
+    if type(item) == "string" then
+      name, required = tplTrim(item), true
+    elseif type(item) == "table" then
+      name = tplTrim(item.name)
+      required = item.required ~= false
+      label = (type(item.label) == "string" and item.label ~= "") and item.label or nil
+      default = (type(item.default) == "string") and item.default or nil
+    end
+    if name and name ~= "" and not seen[name] then
+      seen[name] = true
+      out[#out + 1] = { name = name, required = required, label = label, default = default }
     end
   end
   return out
 end
 
--- Save a template: trim both fields, reject blanks (returns state unchanged +
--- false), replace an existing same-name entry IN PLACE (rename-free update),
--- else prepend. Caps at `cap` (default TEMPLATE_CAP), dropping the oldest.
-function M.templatePush(state, name, text, cap)
-  cap = tonumber(cap) or M.TEMPLATE_CAP
-  name = tostring(name or ""):gsub("^%s+", ""):gsub("%s+$", "")
-  text = tostring(text or ""):gsub("^%s+", ""):gsub("%s+$", "")
-  local list = M.templateList(state)
-  if name == "" or text == "" then return { templates = list }, false end
-  local out, replaced = {}, false
-  for _, t in ipairs(list) do
-    if t.name == name then
-      out[#out + 1] = { name = name, text = text }; replaced = true
-    else
-      out[#out + 1] = t
+-- Pre-flight validator (L3): returns { ok, errors[] } collecting ALL problems.
+-- A valid record has a non-blank name and at least one of text/description.
+function M.validateTemplate(rec)
+  if type(rec) ~= "table" then return { ok = false, errors = { "not an object" } } end
+  local errs = {}
+  if tplTrim(rec.name) == "" then errs[#errs + 1] = "missing required field: name" end
+  for _, f in ipairs({ "text", "description", "expected_output" }) do
+    if rec[f] ~= nil and type(rec[f]) ~= "string" then errs[#errs + 1] = f .. " must be a string" end
+  end
+  if rec.vars ~= nil and type(rec.vars) ~= "table" then errs[#errs + 1] = "vars must be a list" end
+  if rec.versions ~= nil and type(rec.versions) ~= "table" then errs[#errs + 1] = "versions must be a list" end
+  if rec.version ~= nil and type(rec.version) ~= "number" then errs[#errs + 1] = "version must be a number" end
+  if tplTrim(rec.text) == "" and tplTrim(rec.description) == "" then
+    errs[#errs + 1] = "needs text or description"
+  end
+  for k in pairs(rec) do
+    if not M.TEMPLATE_FIELDS[k] then errs[#errs + 1] = "unknown field: " .. tostring(k) end
+  end
+  return { ok = #errs == 0, errors = errs }
+end
+
+-- Normalize a record to the canonical shape (absent fields stay absent, so a
+-- legacy {name, text} round-trips byte-identically).
+local function tplNorm(rec)
+  local versions
+  if type(rec.versions) == "table" then
+    versions = {}
+    for _, s in ipairs(rec.versions) do
+      if type(s) == "table" then
+        versions[#versions + 1] = {
+          version = tonumber(s.version), ts = tonumber(s.ts),
+          text = tplStr(s.text), description = tplStr(s.description),
+          expected_output = tplStr(s.expected_output),
+          vars = s.vars ~= nil and tplVarSchema(s.vars) or nil,
+        }
+      end
     end
   end
-  if not replaced then table.insert(out, 1, { name = name, text = text }) end
+  return {
+    name = tplTrim(rec.name),
+    text = tplStr(rec.text),
+    description = tplStr(rec.description),
+    expected_output = tplStr(rec.expected_output),
+    vars = rec.vars ~= nil and tplVarSchema(rec.vars) or nil,
+    version = tonumber(rec.version),
+    versions = versions,
+    createdAt = tonumber(rec.createdAt),
+    updatedAt = tonumber(rec.updatedAt),
+  }
+end
+
+-- Fail-safe load (mirrors agentLoad): validate each record, keep the valid
+-- (normalized), DROP only the bad, and RETURN the dropped names+reasons so the FX
+-- glue can surface them once. Duplicates keep the first. Returns {valid, errors}.
+function M.templateLoad(state)
+  local valid, errors, seen = {}, {}, {}
+  for _, rec in ipairs(ttpl(state)) do
+    local v = M.validateTemplate(rec)
+    local nm = (type(rec) == "table") and tplTrim(rec.name) or ""
+    if not v.ok then
+      errors[#errors + 1] = { name = nm ~= "" and nm or "(unnamed)",
+                              reason = table.concat(v.errors, "; ") }
+    elseif seen[nm] then
+      errors[#errors + 1] = { name = nm, reason = "duplicate name (kept first)" }
+    else
+      seen[nm] = true; valid[#valid + 1] = tplNorm(rec)
+    end
+  end
+  return { valid = valid, errors = errors }
+end
+
+-- Clean list (common path): all valid, normalized records.
+function M.templateList(state) return M.templateLoad(state).valid end
+
+-- The renderable body for a record: STRUCTURED (description, then an "Expected
+-- output:" block when set) once a description is present, else the legacy `text`.
+-- Returns nil for a nil/contentless record.
+function M.composeTemplate(rec)
+  if type(rec) ~= "table" then return nil end
+  if tplTrim(rec.description) ~= "" then
+    local body = rec.description
+    if tplTrim(rec.expected_output) ~= "" then
+      body = body .. "\n\nExpected output:\n" .. rec.expected_output
+    end
+    return body
+  end
+  if type(rec.text) == "string" and rec.text ~= "" then return rec.text end
+  return nil
+end
+
+-- The full normalized record for a name, or nil.
+function M.templateGetRecord(state, name)
+  for _, t in ipairs(M.templateList(state)) do
+    if t.name == name then return t end
+  end
+  return nil
+end
+
+-- Renderable body for a named template, or nil. (Back-compat: legacy `text`.)
+function M.templateGet(state, name)
+  return M.composeTemplate(M.templateGetRecord(state, name))
+end
+
+-- Structured upsert: validate, replace same-name IN PLACE / prepend, cap. Returns
+-- newState, saved, errors. Pure (no clock; versioning/timestamps belong to
+-- templatePushVersioned).
+function M.templatePushRecord(state, rec, cap)
+  cap = tonumber(cap) or M.TEMPLATE_CAP
+  local list = M.templateList(state)
+  rec = type(rec) == "table" and rec or {}
+  local v = M.validateTemplate(rec)
+  if not v.ok then return { templates = list }, false, v.errors end
+  local entry = tplNorm(rec)
+  local out, replaced = {}, false
+  for _, t in ipairs(list) do
+    if t.name == entry.name then out[#out + 1] = entry; replaced = true
+    else out[#out + 1] = t end
+  end
+  if not replaced then table.insert(out, 1, entry) end
   while #out > cap do table.remove(out) end
   return { templates = out }, true
+end
+
+-- Back-compat save: trim name+text, reject blanks, replace in place / prepend,
+-- cap. Delegates to templatePushRecord. Returns newState, saved.
+function M.templatePush(state, name, text, cap)
+  local st, saved = M.templatePushRecord(state, { name = tplTrim(name), text = tplTrim(text) }, cap)
+  return st, saved
 end
 
 -- Delete by name (no-op copy on miss).
@@ -3644,12 +3785,174 @@ function M.templateRemove(state, name)
   return { templates = out }
 end
 
--- Body text for a named template, or nil.
-function M.templateGet(state, name)
-  for _, t in ipairs(M.templateList(state)) do
-    if t.name == name then return t.text end
+-- Content signature (what defines an "edit"): the COMPOSED body -- so a change to
+-- a field composeTemplate shadows (e.g. `text` when a description is set, or
+-- expected_output with no description) is correctly a no-op, since the rendered
+-- result is unchanged -- plus the vars schema. Trimmed, so a whitespace-only edit
+-- is a no-op too. Used to skip a redundant version bump.
+local function tplContentSig(rec)
+  local parts = { tplTrim(M.composeTemplate(rec) or "") }
+  for _, vv in ipairs(tplVarSchema(rec.vars)) do
+    parts[#parts + 1] = vv.name .. "\1" .. (vv.required and "1" or "0") ..
+      "\1" .. (vv.default or "") .. "\1" .. (vv.label or "")
   end
-  return nil
+  return table.concat(parts, "\2")
+end
+
+-- Versioned upsert (duplicate-on-edit): on a real content change to an EXISTING
+-- template, snapshot the previous head into versions[] (capped at versionCap) and
+-- bump `version`, instead of overwriting. A new template starts at version 1; an
+-- unchanged push is a no-op (no version churn). Timestamps come from opts.now
+-- (injected -> pure). opts = {cap, versionCap, now}. Returns newState, saved, errors.
+function M.templatePushVersioned(state, rec, opts)
+  opts = type(opts) == "table" and opts or {}
+  local now = tonumber(opts.now)
+  local vcap = tonumber(opts.versionCap) or M.TEMPLATE_VERSION_CAP
+  rec = type(rec) == "table" and rec or {}
+  local v = M.validateTemplate(rec)
+  if not v.ok then return { templates = M.templateList(state) }, false, v.errors end
+  local entry = tplNorm(rec)
+  local prev = M.templateGetRecord(state, entry.name)
+  if prev and tplContentSig(prev) == tplContentSig(entry) then
+    return { templates = M.templateList(state) }, true  -- unchanged: no churn
+  end
+  if prev then
+    local snap = { version = prev.version or 1, ts = prev.updatedAt or now,
+      text = prev.text, description = prev.description,
+      expected_output = prev.expected_output, vars = prev.vars }
+    local hist = { snap }
+    for _, s in ipairs(prev.versions or {}) do hist[#hist + 1] = s end
+    while #hist > vcap do table.remove(hist) end
+    entry.versions = hist
+    entry.version = (prev.version or 1) + 1
+    entry.createdAt = prev.createdAt or now
+    entry.updatedAt = now
+  else
+    entry.versions = {}
+    entry.version = 1
+    entry.createdAt = now
+    entry.updatedAt = now
+  end
+  return M.templatePushRecord(state, entry, tonumber(opts.cap) or M.TEMPLATE_CAP)
+end
+
+-- Version history for the revert view: the current head first (current=true), then
+-- prior snapshots, all newest-first. Empty list for an unknown template.
+function M.templateVersions(state, name)
+  local rec = M.templateGetRecord(state, name)
+  if not rec then return {} end
+  local out = { { version = rec.version or 1, ts = rec.updatedAt,
+    text = rec.text, description = rec.description,
+    expected_output = rec.expected_output, current = true } }
+  for _, s in ipairs(rec.versions or {}) do
+    out[#out + 1] = { version = s.version, ts = s.ts, text = s.text,
+      description = s.description, expected_output = s.expected_output, current = false }
+  end
+  return out
+end
+
+-- Revert a template to a prior version: NON-DESTRUCTIVE -- snapshots the current
+-- head and bumps version forward (via templatePushVersioned) with the chosen
+-- version's content. Returns newState, ok. Unknown name/version -> no-op.
+function M.templateRevert(state, name, version, opts)
+  local rec = M.templateGetRecord(state, name)
+  if not rec then return state, false end
+  version = tonumber(version)
+  local target
+  if version == (rec.version or 1) then
+    target = rec
+  else
+    for _, s in ipairs(rec.versions or {}) do
+      if tonumber(s.version) == version then target = s; break end
+    end
+  end
+  if not target then return state, false end
+  local st, saved = M.templatePushVersioned(state,
+    { name = name, text = target.text, description = target.description,
+      expected_output = target.expected_output, vars = target.vars }, opts)
+  return st, saved == true
+end
+
+-- Ordered, deduped list of USER-facing placeholders in `text`: {{name}} (required)
+-- / {{name?}} (optional). Built-ins (date/today/now/prev_output) are excluded --
+-- they auto-fill at render time. A name is required unless EVERY occurrence is
+-- marked optional. Returns { {name, required}, ... }.
+function M.templateVars(text)
+  text = type(text) == "string" and text or ""
+  local order, req = {}, {}
+  for name, opt in text:gmatch("{{%s*([%w_%.%-]+)%s*(%??)%s*}}") do
+    if not M.isBuiltinVar(name) then
+      local isReq = (opt ~= "?")
+      if req[name] == nil then order[#order + 1] = name; req[name] = isReq
+      else req[name] = req[name] or isReq end
+    end
+  end
+  local out = {}
+  for _, name in ipairs(order) do out[#out + 1] = { name = name, required = req[name] } end
+  return out
+end
+
+-- Interpolate {{name}} / {{name?}} placeholders + the built-ins. `vars` is a
+-- name->value map; `opts` carries {now=<epoch>, prevOutput=<string>} for the
+-- built-ins. Returns (rendered, missing[]): a missing REQUIRED var (no value at a
+-- non-optional occurrence) REFUSES the render -> (nil, {names...}); an optional
+-- placeholder blanks out; built-ins resolve from opts (an absent clock -> blank
+-- date). Pure (clock injected via opts.now).
+function M.renderTemplate(text, vars, opts)
+  text = type(text) == "string" and text or ""
+  vars = type(vars) == "table" and vars or {}
+  opts = type(opts) == "table" and opts or {}
+  local now = tonumber(opts.now)
+  local prevOut = type(opts.prevOutput) == "string" and opts.prevOutput or ""
+  local missing, seenMissing = {}, {}
+  local function dateFmt(fmt) return now and os.date(fmt, now) or "" end
+  local rendered = text:gsub("{{%s*([%w_%.%-]+)%s*(%??)%s*}}", function(name, opt)
+    if name == "date" or name == "today" then return dateFmt("%Y-%m-%d") end
+    if name == "now" then return dateFmt("%Y-%m-%d %H:%M") end
+    if name == "prev_output" then return prevOut end
+    local val = vars[name]
+    if val ~= nil then val = tostring(val) end
+    if val ~= nil and tplTrim(val) ~= "" then return val end
+    if opt == "?" then return "" end
+    if not seenMissing[name] then seenMissing[name] = true; missing[#missing + 1] = name end
+    return ""
+  end)
+  if #missing > 0 then return nil, missing end
+  return rendered, {}
+end
+
+-- The effective var list for a record: the declared schema (in order, with its
+-- required/label/default metadata) first, then any placeholders parsed from the
+-- composed body that the schema didn't declare. Feeds the New-Session var grid.
+function M.effectiveVars(rec)
+  if type(rec) ~= "table" then return {} end
+  local out, seen = {}, {}
+  for _, d in ipairs(tplVarSchema(rec.vars)) do
+    if not seen[d.name] then
+      seen[d.name] = true
+      out[#out + 1] = { name = d.name, required = d.required, label = d.label, default = d.default }
+    end
+  end
+  for _, p in ipairs(M.templateVars(M.composeTemplate(rec) or "")) do
+    if not seen[p.name] then
+      seen[p.name] = true
+      out[#out + 1] = { name = p.name, required = p.required }
+    end
+  end
+  return out
+end
+
+-- Fill missing/blank var values from the schema's defaults. Pure; new map.
+function M.fillDefaults(schema, vars)
+  local out = {}
+  if type(vars) == "table" then for k, vv in pairs(vars) do out[k] = vv end end
+  for _, d in ipairs(type(schema) == "table" and schema or {}) do
+    if type(d) == "table" and type(d.name) == "string" and d.default ~= nil then
+      local cur = out[d.name]
+      if cur == nil or tplTrim(cur) == "" then out[d.name] = d.default end
+    end
+  end
+  return out
 end
 
 -- ---- Spawn presets (roadmap #4a) --------------------------------------------

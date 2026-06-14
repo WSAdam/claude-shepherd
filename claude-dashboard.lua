@@ -2053,18 +2053,60 @@ local function handleBridgeMsg(msg)
     ledgerFor(item, { type = "route_arm", on = on })
     return
   end
-  -- Saved task templates (roadmap #5c): named reusable task strings in
-  -- cc-templates.json (operator data, outside the Settings round-trip).
+  -- Saved task templates (roadmap #5c; L3): named reusable task strings in
+  -- cc-templates.json (operator data, outside the Settings round-trip). L3 adds
+  -- structured/versioned records + {{var}} interpolation -- cc-core stays the
+  -- authoritative renderer (no JS render twin to drift).
+  if a == "template-render" then
+    -- Resolve a template to its rendered body: compose, then interpolate the
+    -- operator-supplied vars + built-ins (date/now, and {{prev_output}} = the
+    -- selected tile's latest output) and hand it back to drop into the input
+    -- (NEVER auto-sent). A missing required var alerts instead of rendering.
+    local rec = core.templateGetRecord(FX.readTemplates(), tostring(payload.v or ""))
+    if rec then
+      local opts = {}
+      pcall(function() opts = hs.json.decode(tostring(payload.text or "")) or {} end)
+      local sel = byKey[tostring(opts.key or "")]
+      local prevOut = (sel and type(sel.activity) == "string") and sel.activity or ""
+      local rendered, missing = core.renderTemplate(core.composeTemplate(rec) or "",
+        type(opts.vars) == "table" and opts.vars or {}, { now = os.time(), prevOutput = prevOut })
+      if rendered then
+        pcall(function() wv:evaluateJavaScript("ccTemplateRendered(" .. hs.json.encode({ text = rendered }) .. ")") end)
+      else
+        pcall(function() hs.alert.show("Claude Shepherd: fill required variables: " .. table.concat(missing or {}, ", ")) end)
+      end
+    end
+    return
+  end
   if a == "template-list" or a == "template-save" or a == "template-delete" then
     if a == "template-save" then
-      local st, saved = core.templatePush(FX.readTemplates(), payload.v, payload.text)
+      -- versioned save (duplicate-on-edit): re-saving a name snapshots the prior
+      -- body into its history and bumps the version; an identical save is a no-op.
+      local nm = tostring(payload.v or ""):gsub("^%s+", ""):gsub("%s+$", "")
+      local tx = tostring(payload.text or ""):gsub("^%s+", ""):gsub("%s+$", "")
+      local st, saved = core.templatePushVersioned(FX.readTemplates(), { name = nm, text = tx }, { now = os.time() })
       if saved then FX.writeTemplates(st)
       else pcall(function() hs.alert.show("Claude Shepherd: template needs a name and text") end) end
     elseif a == "template-delete" then
       FX.writeTemplates(core.templateRemove(FX.readTemplates(), tostring(payload.v or "")))
     end
-    local list = core.templateList(FX.readTemplates())
-    local listJson = (#list > 0) and hs.json.encode(list) or "[]"
+    -- enriched reply: each {name, body, vars[], version, versionCount} so the
+    -- panel renders the menu + knows which templates need a var prompt. Load once
+    -- and surface any dropped (corrupt/hand-edited) records to the console so a
+    -- save/delete can't silently reap them (mirrors the L1 agent-load posture).
+    local loaded = core.templateLoad(FX.readTemplates())
+    if #loaded.errors > 0 then
+      local names = {}
+      for _, e in ipairs(loaded.errors) do names[#names + 1] = e.name end
+      print("[cc-tpl] dropped " .. #loaded.errors .. " invalid template(s): " .. table.concat(names, ", "))
+    end
+    local out = {}
+    for _, r in ipairs(loaded.valid) do
+      out[#out + 1] = { name = r.name, body = core.composeTemplate(r) or "",
+        vars = core.effectiveVars(r), version = r.version or 1,
+        versionCount = (r.versions and #r.versions) or 0 }
+    end
+    local listJson = (#out > 0) and hs.json.encode(out) or "[]"
     pcall(function() wv:evaluateJavaScript("ccTemplates(" .. listJson .. ")") end)
     return
   end
@@ -3037,6 +3079,20 @@ local HTML = [[
   .tpl-row button { background:none; border:1px solid #3a2c2f; color:#e88; border-radius:5px;
                     padding:0 5px; cursor:pointer; font-size:11px; }
   .tpl-save { color:#8fd4a3; font-style:italic; }
+  .tpl-badge { color:#c7a9f0; font-size:10px; margin-left:5px; opacity:0.85; }
+  .tpl-ver { color:#7f93b8; font-size:10px; margin-left:5px; }
+  .tpl-form { padding:8px; font-size:12px; }
+  .tpl-form-head { color:#cfd2db; font-weight:600; margin-bottom:6px; }
+  .tpl-var { display:flex; flex-direction:column; gap:2px; margin-bottom:6px; }
+  .tpl-var > span { color:#8a8d99; font-size:11px; }
+  .tpl-var input { background:#101218; border:1px solid #2a2d36; color:#dfe2ea;
+                   border-radius:5px; padding:4px 6px; font-size:12px; }
+  .tpl-req { color:#e88; }
+  .tpl-form-foot { display:flex; justify-content:flex-end; gap:6px; margin-top:4px; }
+  .tpl-form-foot button { background:#21232c; color:#cfd2db; border:1px solid #3a3d47;
+                          border-radius:6px; padding:3px 10px; cursor:pointer; font-size:12px; }
+  .tpl-form-foot button#tpl-var-go { color:#8fd4a3; border-color:#2c5; }
+  .tpl-form-foot button:disabled { opacity:0.4; cursor:default; }
   #b-feed { background:#21232c; color:#8fd4a3; border:1px solid #2c5; border-radius:8px;
             font-size:12px; padding:5px 10px; cursor:pointer; }
   .qbadge { color:#9fb6d6; }
@@ -3665,38 +3721,87 @@ local HTML = [[
       send("queue-route", selectedKey, document.getElementById("q-route").checked ? "on" : "off");
     }
 
-    // ---- Saved task templates (roadmap #5c) --------------------------------
+    // ---- Saved task templates (roadmap #5c; L3) ----------------------------
+    // Records carry a composed `body`, an effective `vars` list, and a version.
+    // A template with vars (or built-ins like {{today}}) is RENDERED by cc-core
+    // before insert: collect values in an inline form, round-trip to Lua, drop the
+    // rendered text into the input (never auto-sent). cc-core owns the render — no
+    // JS render twin to drift.
     var TEMPLATES = [];
     var tplOpen = false;
+    var tplVarForm = null;   // {name, vars:[{name,required,label,default}], values:{}}
     function toggleTemplates(){
       tplOpen = !tplOpen;
-      if(tplOpen){ send("template-list"); }
+      if(tplOpen){ tplVarForm = null; send("template-list"); }
       renderTemplates();
     }
     function ccTemplates(list){ TEMPLATES = list || []; renderTemplates(); }
+    function tplFind(name){ for(var i=0;i<TEMPLATES.length;i++){ if(TEMPLATES[i].name===name) return TEMPLATES[i]; } return null; }
+    function tplQuote(s){ return JSON.stringify(s).replace(/"/g,"&quot;").replace(/</g,"&lt;"); }
     function renderTemplates(){
       var box = document.getElementById("tpl-menu"); if(!box) return;
       box.classList.toggle("show", tplOpen);
       if(!tplOpen){ box.innerHTML = ""; return; }
+      if(tplVarForm){ box.innerHTML = renderVarForm(); tplVarCheck(); return; }
       var html = '<div class="tpl-row tpl-save" onclick="templateSaveCurrent()">＋ Save current input as template…</div>';
       html += TEMPLATES.map(function(t){
-        return '<div class="tpl-row" onclick="templateInsert(' + JSON.stringify(t.name).replace(/"/g,"&quot;").replace(/</g,"&lt;") + ')">'
-          + '<span class="tpl-name">' + esc(t.name) + '</span>'
-          + '<span class="tpl-text">' + esc(t.text) + '</span>'
-          + '<button onclick="event.stopPropagation();templateDelete(' + JSON.stringify(t.name).replace(/"/g,"&quot;").replace(/</g,"&lt;") + ')" title="Delete">✕</button>'
+        var nm = tplQuote(t.name);
+        var badge = (t.vars && t.vars.length) ? '<span class="tpl-badge" title="has variables">{{ }}</span>' : '';
+        var ver = (t.version && t.version > 1) ? '<span class="tpl-ver">v' + t.version + '</span>' : '';
+        return '<div class="tpl-row" onclick="templateInsert(' + nm + ')">'
+          + '<span class="tpl-name">' + esc(t.name) + badge + ver + '</span>'
+          + '<span class="tpl-text">' + esc(t.body || "") + '</span>'
+          + '<button onclick="event.stopPropagation();templateDelete(' + nm + ')" title="Delete">✕</button>'
           + '</div>';
       }).join("");
       box.innerHTML = html;
     }
+    function renderVarForm(){
+      var f = tplVarForm;
+      var rows = f.vars.map(function(v){
+        var lab = esc(v.label || v.name) + (v.required ? ' <span class="tpl-req">*</span>' : '');
+        return '<label class="tpl-var"><span>' + lab + '</span>'
+          + '<input type="text" value="' + esc(f.values[v.name] || "") + '" oninput="tplVarInput(' + tplQuote(v.name) + ', this.value)"></label>';
+      }).join("");
+      return '<div class="tpl-form"><div class="tpl-form-head">Fill variables for “' + esc(f.name) + '”</div>'
+        + rows
+        + '<div class="tpl-form-foot"><button onclick="tplVarCancel()">Cancel</button>'
+        + '<button id="tpl-var-go" onclick="tplVarGo()">Insert</button></div></div>';
+    }
     function templateInsert(name){
-      for(var i = 0; i < TEMPLATES.length; i++){
-        if(TEMPLATES[i].name === name){
-          var el = document.getElementById("nudge");
-          el.value = TEMPLATES[i].text; autoGrow(el); el.focus();
-          break;
-        }
+      var t = tplFind(name); if(!t) return;
+      var vars = (t.vars && t.vars.length) ? t.vars : [];
+      if(vars.length){   // collect values, then render
+        tplVarForm = { name: name, vars: vars, values: {} };
+        vars.forEach(function(v){ if(v.default) tplVarForm.values[v.name] = v.default; });
+        renderTemplates(); return;
       }
+      if(/\{\{/.test(t.body || "")){   // built-ins only (date/now/prev_output)
+        send("template-render", name, JSON.stringify({ vars: {}, key: selectedKey || "" }));
+        tplOpen = false; renderTemplates(); return;
+      }
+      var el = document.getElementById("nudge");
+      el.value = t.body || ""; autoGrow(el); el.focus();
       tplOpen = false; renderTemplates();
+    }
+    function tplVarInput(name, val){ if(tplVarForm){ tplVarForm.values[name] = val; tplVarCheck(); } }
+    function tplVarCheck(){
+      if(!tplVarForm) return;
+      var ok = true;
+      tplVarForm.vars.forEach(function(v){
+        if(v.required && !((tplVarForm.values[v.name] || "").trim())) ok = false;
+      });
+      var btn = document.getElementById("tpl-var-go"); if(btn) btn.disabled = !ok;
+    }
+    function tplVarCancel(){ tplVarForm = null; renderTemplates(); }
+    function tplVarGo(){
+      if(!tplVarForm) return;
+      send("template-render", tplVarForm.name, JSON.stringify({ vars: tplVarForm.values, key: selectedKey || "" }));
+      tplVarForm = null; tplOpen = false; renderTemplates();
+    }
+    function ccTemplateRendered(o){
+      var el = document.getElementById("nudge"); if(!el) return;
+      el.value = (o && o.text) || ""; autoGrow(el); el.focus();
     }
     function templateSaveCurrent(){
       var t = (document.getElementById("nudge").value || "").trim();
