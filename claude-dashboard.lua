@@ -179,6 +179,8 @@ local routePending = {}  -- tile key -> dispatch ts: a routed feed in flight (4c
                          -- reload losing the marker can at worst re-pick a target
 local starvedSince  = {} -- queueKey -> first ts the armed project had work but no free session
 local starvedAlerted = {} -- queueKey -> true once the starvation ledger event fired this episode
+local taskStart     = {} -- tile key -> { ts, role, projectKey, by }: a fed queue task in
+                         -- flight (L4 per-task timing); consumed on the next done edge
 local loadConfig         -- forward declaration (defined near refresh)
 local ledgerSnapshot     -- forward declaration (defined near refresh; bridge handlers use it)
 local refresh            -- forward declaration (so the controller can repaint now)
@@ -1751,13 +1753,24 @@ end
 -- The raw queued task is still what gets popped/persisted/ledgered; only the typed
 -- text is rendered.
 local function renderFeed(task, item)
-  -- strip a leading @role: routing prefix (L4) so the session never sees the
-  -- scaffolding -- the role already chose the target; only the bare text is typed.
-  local _, bare = core.taskRoute(tostring(task or ""))
+  -- strip the L4 routing scaffolding so the session never sees it: a leading
+  -- @all:/@any: join barrier, then an @role: prefix (the dispatcher already used
+  -- them to gate + choose the target). Only the bare text is typed.
+  local _, afterBarrier = core.taskBarrier(tostring(task or ""))
+  local _, bare = core.taskRoute(afterBarrier)
   local prevOut = (item and type(item.activity) == "string") and item.activity or ""
   local r = core.renderTemplate(bare, {},
     { now = os.time(), prevOutput = prevOut, keepMissing = true })
   return r or bare
+end
+
+-- L4 per-task timing: record when a queue task was fed to a session (its role +
+-- source), so the next done edge can ledger a task_done with the duration.
+local function stampTaskStart(item, task, by)
+  if not (item and item.key) then return end
+  local _, afterB = core.taskBarrier(tostring(task or ""))
+  taskStart[item.key] = { ts = os.time(), role = select(1, core.taskRoute(afterB)),
+                          projectKey = item.projectKey, by = by }
 end
 
 -- Single message bridge. JS posts JSON: {a=action, v=key, text=optional}.
@@ -2049,7 +2062,7 @@ local function handleBridgeMsg(msg)
         local task, q2 = core.queuePop(FX.readQueue(qk))
         if task then
           local commit = core.queueFeedCommit(FX.feedTask(winTarget(item), renderFeed(task, item)))
-          if commit.persist then FX.writeQueue(qk, q2)
+          if commit.persist then FX.writeQueue(qk, q2); stampTaskStart(item, task, "manual")
           else print("[cc-queue] feed skipped (no window match) -- task kept queued") end
           ledgerFor(item, { type = commit.event, task = tostring(task):sub(1, 200), by = "manual" })
         end
@@ -2110,6 +2123,18 @@ local function handleBridgeMsg(msg)
     FX.writeQueue(qk, core.queueSetRouted(FX.readQueue(qk), on))
     print("[cc-route] " .. qk .. " routing " .. (on and "ARMED" or "off"))
     ledgerFor(item, { type = "route_arm", on = on })
+    return
+  end
+  if a == "queue-route-mode" then
+    -- L4 process mode: distribute (default, fan out) vs sequential (one routed
+    -- task in flight at a time). Rides the queue file like the arm flag.
+    local item = byKey[tostring(payload.v or "")]
+    if not item then return end
+    local qk = FX.queueKeyFor(item)
+    local seq = tostring(payload.text or "") == "sequential"
+    FX.writeQueue(qk, core.queueSetMode(FX.readQueue(qk), seq and "sequential" or "distribute"))
+    print("[cc-route] " .. qk .. " mode " .. (seq and "sequential" or "distribute"))
+    ledgerFor(item, { type = "route_mode", mode = seq and "sequential" or "distribute" })
     return
   end
   -- Saved task templates (roadmap #5c; L3): named reusable task strings in
@@ -3439,6 +3464,7 @@ local HTML = [[
     <div id="queue-row">
       <span id="q-count" onclick="toggleQueueList()" title="Click to view / reorder / remove queued tasks"></span>
       <label id="route-lbl" title="4c-E project routing: feed this project's queue to WHICHEVER of its sessions is free (not just the one that finished). Per-project flag; also needs Settings → Queue → project routing enabled. Logged as by:'router'."><input type="checkbox" id="q-route" onchange="onRouteToggle()"> route</label>
+      <label id="route-seq-lbl" title="L4 process mode. Sequential: run this project's queue ONE routed task at a time (the next starts only after the current finishes) — serialize through the fleet. Off = distribute: fan tasks out across whichever sessions are free."><input type="checkbox" id="q-route-seq" onchange="onRouteModeToggle()"> seq</label>
       <button id="b-feed" onclick="act('queue-feed')">Feed next</button>
     </div>
     <div id="queue-list"></div>
@@ -3783,6 +3809,11 @@ local HTML = [[
     function onRouteToggle(){
       if(!selectedKey) return;
       send("queue-route", selectedKey, document.getElementById("q-route").checked ? "on" : "off");
+    }
+    // L4: distribute (default) vs sequential (one routed task in flight at a time).
+    function onRouteModeToggle(){
+      if(!selectedKey) return;
+      send("queue-route-mode", selectedKey, document.getElementById("q-route-seq").checked ? "sequential" : "distribute");
     }
 
     // ---- Saved task templates (roadmap #5c; L3) ----------------------------
@@ -4912,6 +4943,7 @@ local HTML = [[
       document.getElementById("q-count").textContent = n>0 ? ("Queue: " + n + " ▾") : "Queue: empty";
       document.getElementById("b-feed").style.display = n>0 ? "inline-block" : "none";
       document.getElementById("q-route").checked = !!it.routed;
+      var seqEl = document.getElementById("q-route-seq"); if(seqEl) seqEl.checked = !!it.routeSeq;
       // Keep the open queue editor honest: re-fetch when the depth moved
       // (autofeed/manual feed popped a head) and fold it shut when empty.
       if(queueListOpen){
@@ -6010,6 +6042,23 @@ function refresh()
       it.riskSignals = r.signals
     end
 
+    -- L4 per-task timing: a fed queue task finishes on its first done edge -- ledger
+    -- the duration + role, then clear the marker (the autofeed below may re-stamp the
+    -- next task). Fires before drain/feed so a completing task is always recorded.
+    local started = taskStart[it.key]
+    if started then
+      if it.stale then
+        taskStart[it.key] = nil  -- abandon: a frozen session's in-flight task can't be timed
+      else
+        local td = core.stepTaskDone(started, pv and pv.status, it.status, now)
+        if td then
+          ledgerFor(it, { type = "task_done", durationS = td.durationS,
+                          role = started.role, by = started.by or "queue" })
+          taskStart[it.key] = nil
+        end
+      end
+    end
+
     -- Graceful drain (Feature F): if armed, close on the SAME fresh `done` transition
     -- the queue uses. Drain WINS over auto-feed (an explicit stop beats a queued task).
     local drained = false
@@ -6044,6 +6093,7 @@ function refresh()
       routePending[it.key] = nil
     end
     it.routed = core.queueRouted(q) or nil  -- armed flag (file truth; toggle state)
+    it.routeSeq = (core.queueRouteMode(q) == "sequential") or nil  -- L4 process mode
     local routedHere = routingOn and it.routed or false
     if routingOn then
       routeGroups[qk] = routeGroups[qk] or {}
@@ -6070,6 +6120,7 @@ function refresh()
           if commit.persist then
             FX.writeQueue(qk, q2)
             it.queue = core.queueDepth(q2)
+            stampTaskStart(it, task, "autofeed")
           else
             print("[cc-queue] feed skipped (no window match) -- task kept queued")
           end
@@ -6175,6 +6226,10 @@ function refresh()
     newPrev[it.key] = { status = it.status, stale = step.isStale, escalated = nowEsc }
   end
   prev = newPrev
+  -- Reap per-task timers whose session vanished from the fleet (pruned / respawned /
+  -- removeStatus) without a done edge -- the loop above only visits live tiles, so a
+  -- gone key would leak forever (mirrors the usageState seen-set reap).
+  for k in pairs(taskStart) do if not newPrev[k] then taskStart[k] = nil end end
 
   -- 4c-E project routing dispatcher: ONE feed per armed project per tick, to
   -- whichever member is free (done, not stale/error/draining/pending). Runs
@@ -6205,6 +6260,7 @@ function refresh()
               local commit = core.queueFeedCommit(FX.feedTask(winTarget(item), renderFeed(task, item)))
               if commit.persist then
                 FX.writeQueue(qk, q2)
+                stampTaskStart(item, task, "router")
               else
                 print("[cc-route] feed skipped (no window match) -- task kept queued")
                 routePending[item.key] = nil  -- session stays eligible

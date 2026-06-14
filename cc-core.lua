@@ -1142,6 +1142,7 @@ function M.fleetStandup(events, opts)
                  continue = 0, auto_continue = 0, drain_close = 0 }
   local problems = { escalation = 0, hung = 0, queue_starved = 0 }
   local routed = 0
+  local tasksDone, taskSecs = 0, 0   -- L4 per-task timing rollup (task_done events)
   local byKey = {}   -- projectKey -> rollup
   local function proj(e)
     local k = e.projectKey or e.cwd or e.name or "?"
@@ -1162,6 +1163,8 @@ function M.fleetStandup(events, opts)
     elseif t == "auto_respawn" then local p = proj(e); p.autoRespawns = p.autoRespawns + 1
     elseif t == "escalation" then local p = proj(e); p.escalations = p.escalations + 1
     elseif t == "hung" then local p = proj(e); p.hangs = p.hangs + 1
+    elseif t == "task_done" then
+      tasksDone = tasksDone + 1; taskSecs = taskSecs + (tonumber(e.durationS) or 0)
     elseif t == "decision" then
       local p = proj(e)
       if e.outcome == "deny" then p.deny = p.deny + 1
@@ -1189,6 +1192,8 @@ function M.fleetStandup(events, opts)
                     drain_close = life.drain_close, routed = routed },
     problems = problems,              -- escalation / hung / queue_starved
     continues = life.continue + life.auto_continue,  -- error-recovery signal (honest stand-in for "errors")
+    tasks = { done = tasksDone, totalSeconds = taskSecs,   -- L4 per-task timing rollup
+              avgSeconds = tasksDone > 0 and math.floor(taskSecs / tasksDone + 0.5) or 0 },
     byProject = byProject,
     mostActive = stats.mostActive,
   }
@@ -1217,6 +1222,10 @@ function M.standupMarkdown(report, opts)
     d.allow or 0, d.deny or 0, d.total or 0, M.fmtDuration(report.blockedSeconds or 0))
   L[#L + 1] = string.format("Escalations: %d   ·   Stalls: %d   ·   Error recoveries: %d",
     p.escalation or 0, p.hung or 0, report.continues or 0)
+  if report.tasks and (report.tasks.done or 0) > 0 then
+    L[#L + 1] = string.format("Routed tasks completed: %d   ·   avg %s   ·   total %s",
+      report.tasks.done, M.fmtDuration(report.tasks.avgSeconds or 0), M.fmtDuration(report.tasks.totalSeconds or 0))
+  end
   -- who made the gate decisions (human vs automation), most-common first
   local prov = {}
   for by, n in pairs(report.provenance or {}) do prov[#prov + 1] = { by = by, n = n } end
@@ -1849,7 +1858,12 @@ local function qtasks(q)
   return {}
 end
 local function qkeep(q, out)
-  if type(q) == "table" and q.routing == true then out.routing = true end
+  if type(q) == "table" then
+    if q.routing == true then out.routing = true end
+    -- L4 process mode rides the queue file like `routing`; carry it through every
+    -- rebuild so a pop/move/push can't silently revert a sequential queue.
+    if q.mode == "sequential" then out.mode = "sequential" end
+  end
   return out
 end
 
@@ -2001,6 +2015,21 @@ end
 function M.queueSetRouted(q, on)
   local out = { tasks = qtasks(q) }
   if on then out.routing = true end  -- absent (not false) when off: legacy shape
+  if M.queueRouteMode(q) == "sequential" then out.mode = "sequential" end  -- preserve mode
+  return out
+end
+
+-- Process mode (L4): "distribute" (default) fans the queue across whichever member
+-- is free (today's routePick); "sequential" serializes -- at most ONE routed task
+-- in flight per project, the next starting only after the current finishes (other
+-- members are held). Rides the queue file like `routing` (absent = distribute).
+function M.queueRouteMode(q)
+  return (type(q) == "table" and q.mode == "sequential") and "sequential" or "distribute"
+end
+function M.queueSetMode(q, mode)
+  local out = { tasks = qtasks(q) }
+  if type(q) == "table" and q.routing == true then out.routing = true end  -- preserve arm
+  if mode == "sequential" then out.mode = "sequential" end  -- absent = distribute (legacy shape)
   return out
 end
 
@@ -2036,6 +2065,27 @@ function M.sessionFree(item, opts)
   return true
 end
 
+-- Does the project have a routed task IN FLIGHT? (sequential mode holds the queue
+-- until the current one finishes.) True if any member is mid-turn (working/approval)
+-- or carries a FRESH pending routed-feed marker. opts = { pending = map key->ts,
+-- now, pendingTimeout }.
+function M.projectBusy(members, opts)
+  opts = opts or {}
+  local pending = opts.pending or {}
+  for _, it in ipairs(members or {}) do
+    if type(it) == "table" then
+      if it.status == "working" or it.status == "approval" then return true end
+      local ts = pending[it.key]
+      if ts ~= nil then
+        local expired = ((tonumber(opts.now) or 0) - (tonumber(ts) or 0))
+          > (tonumber(opts.pendingTimeout) or M.ROUTE_PENDING_TIMEOUT)
+        if not expired then return true end
+      end
+    end
+  end
+  return false
+end
+
 -- ---- L4 conditional routing: @role: labels ---------------------------------
 -- A queued task may carry a leading "@role:" prefix addressing it to a session
 -- ROLE (the DECIDED affinity source). Returns (role|nil, bareText): the role
@@ -2059,6 +2109,37 @@ function M.memberRole(item)
     if g ~= "" then return g end
   end
   return nil
+end
+
+-- A queued task may be a JOIN BARRIER (L4): a leading "@all:" waits until ALL of
+-- the project's members have finished, "@any:" until AT LEAST ONE has, before it
+-- routes. Returns (mode|nil, rest). "all"/"any" are reserved (a group so named
+-- can't be @-addressed); a barrier composes with a role -- "@all: @review: x" is a
+-- join THEN a role. A prefix with no body after it is literal text (no barrier).
+function M.taskBarrier(task)
+  task = tostring(task or "")
+  local kw, rest = task:match("^@(%a+):%s*(.*)$")
+  if (kw == "all" or kw == "any") and rest and rest:gsub("%s+$", "") ~= "" then
+    return kw, rest
+  end
+  return nil, task
+end
+
+-- Is a join barrier satisfied? "all" = every member settled (done, not stale/
+-- remote); "any" = at least one settled. Flat AND/OR over done-state -- no nested
+-- tree. nil/unknown mode -> true (not a barrier). Empty membership -> false.
+function M.routeBarrierMet(members, mode)
+  if mode ~= "all" and mode ~= "any" then return true end
+  local settled, total = 0, 0
+  for _, it in ipairs(members or {}) do
+    if type(it) == "table" then
+      total = total + 1
+      if it.status == "done" and not it.stale and not it.remote then settled = settled + 1 end
+    end
+  end
+  if total == 0 then return false end
+  if mode == "all" then return settled == total end
+  return settled >= 1
 end
 
 -- Pick the target for one project's next task. Deterministic: longest-free
@@ -2096,11 +2177,19 @@ function M.routeTask(members, q, opts)
   if not opts.globalOn then return nil end
   if not M.queueRouted(q) then return nil end
   if M.queueDepth(q) == 0 then return nil end
-  local role = select(1, M.taskRoute(M.queuePeek(q)))  -- @role: on the FIFO head
+  -- sequential mode: hold while a routed task is still in flight (one at a time)
+  if M.queueRouteMode(q) == "sequential"
+     and M.projectBusy(members, { pending = opts.pending, now = opts.now,
+                                  pendingTimeout = opts.pendingTimeout }) then
+    return nil
+  end
+  local barrier, afterB = M.taskBarrier(M.queuePeek(q))  -- @all:/@any: join on the head
+  if barrier and not M.routeBarrierMet(members, barrier) then return nil end  -- hold until met
+  local role = select(1, M.taskRoute(afterB))  -- @role: (possibly after the barrier)
   local key = M.routePick(members, { draining = opts.draining, pending = opts.pending,
     now = opts.now, pendingTimeout = opts.pendingTimeout, role = role })
   if not key then return nil end
-  return { key = key, role = role }
+  return { key = key, role = role, barrier = barrier }
 end
 
 -- Starvation check: an armed project with queued work and NO free session for
@@ -2111,13 +2200,27 @@ function M.queueStarved(members, q, opts)
   local minutes = tonumber(opts.minutes) or 0
   if minutes <= 0 then return false end
   if not M.queueRouted(q) or M.queueDepth(q) == 0 then return false end
+  -- a head waiting on an unmet join barrier is WAITING, not starved
+  local barrier, afterB = M.taskBarrier(M.queuePeek(q))
+  if barrier and not M.routeBarrierMet(members, barrier) then return false end
   -- starved = the FIFO head can't be routed (its @role: has no free matching member)
-  local role = select(1, M.taskRoute(M.queuePeek(q)))
+  local role = select(1, M.taskRoute(afterB))
   if M.routePick(members, { draining = opts.draining, pending = opts.pending,
        now = opts.now, pendingTimeout = opts.pendingTimeout, role = role }) ~= nil then return false end
   local sinceTs = tonumber(opts.sinceTs)
   if not sinceTs then return false end
   return ((tonumber(opts.now) or 0) - sinceTs) > minutes * 60
+end
+
+-- L4 per-task timing: a fed queue task completes on the FIRST done edge after it
+-- was fed. Given the recorded start ({ts=...}) and the tile's prev/cur status,
+-- returns { durationS } on that edge, else nil. Same edge discipline as shouldFeed
+-- (a nil prev = no prior observation, not a completion; prev==done already handled).
+function M.stepTaskDone(start, prev, cur, now)
+  if type(start) ~= "table" or start.ts == nil then return nil end
+  if cur ~= "done" then return nil end
+  if prev == nil or prev == "done" then return nil end
+  return { durationS = math.max(0, (tonumber(now) or 0) - (tonumber(start.ts) or 0)) }
 end
 
 -- ---- Graceful drain (Feature F) --------------------------------------------

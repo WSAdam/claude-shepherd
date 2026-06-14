@@ -400,6 +400,21 @@ Queue extras:
   backlog — parallel sessions in one folder drain a shared backlog. One feed per project
   per second, delivery-gated, ledgered as `by:"router"`; `starveMinutes` flags a project
   whose tasks wait with no free session (⌛). Off by default at both levels.
+- **Declarative routing (L4)** — built on the router, all driven by queue-line syntax (the
+  prefix is stripped before the task is typed, so the session never sees it):
+  - **`@role:` conditional routing** — a task prefixed `@review: …` routes only to a free
+    session whose **group** is `review` (sessions are grouped via the tile's 🏷 tag).
+    Unlabeled tasks route to anyone free, as before.
+  - **`seq` (process mode)** — the detail panel's **seq** toggle (next to **route**) runs a
+    project's queue **one routed task at a time** (the next starts only after the current
+    finishes); off = distribute across free sessions in parallel.
+  - **`@all:` / `@any:` join barriers** — a task prefixed `@all: …` waits until **every**
+    session in the project has finished before it routes (`@any:` waits for one). Composes
+    with a role: `@all: @review: ship`.
+  - **Per-task timing** — each routed/queued task is timed from feed to completion; the 📋
+    Shift report shows tasks completed with average + total duration (ledger must be on).
+  - Deferred (needs a design call first): a visual routing topology view, role-addressed
+    delegation/handoff, and idle/auto-spawn routing targets.
 
 ## Automation & policies (`~/.claude/cc-config.json`)
 

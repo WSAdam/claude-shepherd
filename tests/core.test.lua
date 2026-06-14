@@ -2566,6 +2566,67 @@ do
   eq("route-starved: labeled head, no matching free -> starved",
      core.queueStarved({ sess("bd", "done", { group = "build" }) },
        { tasks = { "@review: x" }, routing = true }, { minutes = 1, sinceTs = 0, now = 1000 }), true)
+  -- L4 process modes: distribute (default) vs sequential (one routed task at a time)
+  eq("mode: default distribute", core.queueRouteMode({ tasks = { "x" } }), "distribute")
+  local seqQ = core.queueSetMode({ tasks = { "a", "b" }, routing = true }, "sequential")
+  eq("mode: set sequential", core.queueRouteMode(seqQ), "sequential")
+  eq("mode: preserves routing", core.queueRouted(seqQ), true)
+  eq("mode: preserves tasks", table.concat(seqQ.tasks, ","), "a,b")
+  eq("mode: setRouted preserves mode", core.queueRouteMode(core.queueSetRouted(seqQ, true)), "sequential")
+  eq("mode: survives a pop", core.queueRouteMode(select(2, core.queuePop(seqQ))), "sequential")
+  eq("mode: back to distribute", core.queueRouteMode(core.queueSetMode(seqQ, "distribute")), "distribute")
+  eq("busy: working -> true", core.projectBusy({ sess("a", "working") }, {}), true)
+  eq("busy: approval -> true", core.projectBusy({ sess("a", "approval") }, {}), true)
+  eq("busy: all done -> false", core.projectBusy({ sess("a", "done"), sess("b", "done") }, {}), false)
+  eq("busy: fresh pending -> true", core.projectBusy({ sess("a", "done") }, { pending = { a = 100 }, now = 110 }), true)
+  eq("busy: expired pending -> false", core.projectBusy({ sess("a", "done") }, { pending = { a = 100 }, now = 200 }), false)
+  local seqBusy = { sess("a", "done", { since = 50 }), sess("b", "working") }
+  eq("route-seq: holds while a member works",
+     core.routeTask(seqBusy, core.queueSetMode({ tasks = { "t" }, routing = true }, "sequential"),
+       { globalOn = true, now = 100 }), nil)
+  local seqIdle = { sess("a", "done", { since = 50 }), sess("b", "done", { since = 60 }) }
+  eq("route-seq: feeds when the project is idle",
+     core.routeTask(seqIdle, core.queueSetMode({ tasks = { "t" }, routing = true }, "sequential"),
+       { globalOn = true, now = 100 }).key, "a")
+  eq("route-dist: feeds despite a busy sibling (default)",
+     core.routeTask(seqBusy, { tasks = { "t" }, routing = true }, { globalOn = true, now = 100 }).key, "a")
+  -- L4 join barriers: @all:/@any: hold a task until members finish
+  eq("barrier: @all parses", (core.taskBarrier("@all: merge")), "all")
+  eq("barrier: @all strips", select(2, core.taskBarrier("@all: merge")), "merge")
+  eq("barrier: @any parses", (core.taskBarrier("@any: go")), "any")
+  eq("barrier: @role is not a barrier", core.taskBarrier("@review: x"), nil)
+  eq("barrier: bare @all is literal", core.taskBarrier("@all:"), nil)
+  eq("barrier: composes with a role", select(2, core.taskBarrier("@all: @review: x")), "@review: x")
+  local allDone = { sess("a", "done"), sess("b", "done") }
+  local oneWorking = { sess("a", "done"), sess("b", "working") }
+  eq("barrier-met: all done -> all true", core.routeBarrierMet(allDone, "all"), true)
+  eq("barrier-met: one working -> all false", core.routeBarrierMet(oneWorking, "all"), false)
+  eq("barrier-met: one done -> any true", core.routeBarrierMet(oneWorking, "any"), true)
+  eq("barrier-met: none done -> any false", core.routeBarrierMet({ sess("a", "working") }, "any"), false)
+  eq("barrier-met: empty -> false", core.routeBarrierMet({}, "all"), false)
+  eq("barrier-met: stale excluded", core.routeBarrierMet({ sess("a", "done", { stale = true }) }, "all"), false)
+  local bq = { tasks = { "@all: merge" }, routing = true }
+  eq("route-barrier: @all holds while one works",
+     core.routeTask(oneWorking, bq, { globalOn = true, now = 100 }), nil)
+  eq("route-barrier: @all routes when all done",
+     core.routeTask({ sess("a", "done", { since = 50 }), sess("b", "done", { since = 60 }) }, bq,
+       { globalOn = true, now = 100 }).key, "a")
+  eq("route-barrier: returns the barrier mode",
+     core.routeTask(allDone, bq, { globalOn = true, now = 100 }).barrier, "all")
+  eq("route-barrier: nested role honored after the barrier",
+     core.routeTask({ sess("rv", "done", { since = 50, group = "review" }),
+                      sess("bd", "done", { since = 40, group = "build" }) },
+       { tasks = { "@all: @review: ship" }, routing = true }, { globalOn = true, now = 100 }).key, "rv")
+  eq("route-barrier: blocked head is not starved",
+     core.queueStarved(oneWorking, bq, { minutes = 1, sinceTs = 0, now = 1000 }), false)
+  -- L4 per-task timing: fire on the first done edge after a feed, with the duration
+  eq("task-done: fires on working->done edge",
+     core.stepTaskDone({ ts = 100 }, "working", "done", 160).durationS, 60)
+  eq("task-done: no start -> nil", core.stepTaskDone(nil, "working", "done", 160), nil)
+  eq("task-done: not done yet -> nil", core.stepTaskDone({ ts = 100 }, "working", "working", 160), nil)
+  eq("task-done: already done (no edge) -> nil", core.stepTaskDone({ ts = 100 }, "done", "done", 160), nil)
+  eq("task-done: nil prev (post-reload) -> nil", core.stepTaskDone({ ts = 100 }, nil, "done", 160), nil)
+  eq("task-done: clamps negative", core.stepTaskDone({ ts = 200 }, "working", "done", 100).durationS, 0)
   -- queueRouted / queueSetRouted round-trip; tasks preserved; legacy shape clean
   eq("route-flag: legacy file unarmed", core.queueRouted({ tasks = { "x" } }), false)
   local on = core.queueSetRouted({ tasks = { "x", "y" } }, true)
@@ -3355,6 +3416,8 @@ do
     { ts = 240, type = "auto_respawn", projectKey = "P", session_id = "s2", name = "alpha" },
     { ts = 250, type = "escalation",   projectKey = "Q", session_id = "s9", name = "beta", minutes = 6 },
     { ts = 260, type = "prompt",       projectKey = "Q", session_id = "s9", name = "beta" },
+    { ts = 270, type = "task_done",    projectKey = "P", session_id = "s1", name = "alpha", durationS = 30, by = "router" },
+    { ts = 280, type = "task_done",    projectKey = "Q", session_id = "s9", name = "beta",  durationS = 90, by = "autofeed" },
     { ts =  10, type = "prompt",       projectKey = "P", session_id = "s0", name = "alpha" }, -- before window
   }
   local r = core.fleetStandup(evs, { sinceTs = 200 })
@@ -3367,6 +3430,9 @@ do
   eq("fleetStandup: escalation problem tallied", r.problems.escalation, 1)
   eq("fleetStandup: pre-window event excluded (prompts=alpha1+beta1)", r.totals.prompts, 2)
   check("fleetStandup: byProject rollup present", #r.byProject >= 2)
+  eq("fleetStandup: task_done count", r.tasks.done, 2)
+  eq("fleetStandup: task_done total seconds", r.tasks.totalSeconds, 120)
+  eq("fleetStandup: task_done avg seconds", r.tasks.avgSeconds, 60)
   local empty = core.fleetStandup({}, { sinceTs = 0 })
   check("fleetStandup: empty window flagged", empty.empty == true)
 
@@ -3375,6 +3441,7 @@ do
   check("standupMarkdown: carries the window label", md:find("since open", 1, true) ~= nil)
   check("standupMarkdown: reports approvals line", md:find("1 allow / 1 deny", 1, true) ~= nil)
   check("standupMarkdown: lists provenance (router)", md:find("router", 1, true) ~= nil)
+  check("standupMarkdown: reports routed tasks completed", md:find("Routed tasks completed: 2", 1, true) ~= nil)
   check("standupMarkdown: by-project section present", md:find("By project:", 1, true) ~= nil)
   local mdEmpty = core.standupMarkdown(core.fleetStandup({}, { sinceTs = 0 }), { windowLabel = "8h" })
   check("standupMarkdown: empty window explains the ledger", mdEmpty:find("ledger must be enabled", 1, true) ~= nil)

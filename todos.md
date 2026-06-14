@@ -207,16 +207,16 @@ remaining items. Full per-round detail is in CHANGELOG.md and git history.
 ## Candidate features — cross-project mining backlog
 
 > **▶ RESUME HERE (build status, 2026-06-14):** Mining is DONE (5 sources → L1–L7). Build order
-> **Phase 0✅ → L1✅ → L2✅ → L3✅ → L4 → L5 → L6 → L7**. **L1 (Agent Profiles), L2 (policy bundles),
-> and L3 (prompt templates) are SHIPPED + committed + deployed** (see CHANGELOG 2026-06-14 + their `✅`
-> blocks below; each has a *deferred follow-up* — mainly editor UIs). **Next: L4** (declarative routing &
-> orchestration — the affinity source is DECIDED = queue-line `@role:` prefix; unblocks the deferred 4c-E
-> follow-ups). Method per feature: pure logic in `cc-core.lua` + unit tests → wire the dashboard
-> (FX/handleAction/panel-JS) + ui pins → `make test` green → for risky changes run an **adversarial-review
-> Workflow** (caught 3 real bugs in L2; 3 in L3 round 1, 0 in L3 round 2) → fix → `make setup`/`deploy` →
-> live-verify → commit. **L4 routing source is DECIDED = queue-line `@role:` prefix.** Honor the
-> three load-bearing facts below (the `claude` CLI is present; `gate.tools` is a hold-list not an
-> allow-list; secrets are env-var NAMES only) and the L1/L2/L3 KEEP-IN-SYNC invariants in context.md.
+> **Phase 0✅ → L1✅ → L2✅ → L3✅ → L4✅ → L5 → L6 → L7**. **L1–L4 are SHIPPED + committed + deployed**
+> (see CHANGELOG 2026-06-14 + their `✅` blocks below; each has a *deferred follow-up* — mostly editor UIs and,
+> for L4, the UX-gated topology/delegation/idle-target pieces). **Next: L5** (richer session observability &
+> detail — plan/TODO on a tile, auto-title, error taxonomy, detail-panel tabs, export archive, PR status,
+> loop-detection watchdog, session-history browser, OS-native notifications). Method per feature: pure logic in
+> `cc-core.lua` + unit tests → wire the dashboard (FX/handleAction/panel-JS) + ui pins → `make test` green → run
+> an **adversarial-review Workflow** (caught real bugs every phase: 3 in L2; 3 in L3-r1, 0 in L3-r2; the
+> applyGroups ordering bug in L4-r1, the taskStart GC leak in L4-r2) → fix → `make deploy` → commit + push.
+> Honor the three load-bearing facts below (the `claude` CLI is present; `gate.tools` is a hold-list not an
+> allow-list; secrets are env-var NAMES only) and the L1/L2/L3/L4 KEEP-IN-SYNC invariants in context.md.
 
 Built by adversarially mining top AI orchestration/governance apps (12 domains each: finders → dedup →
 FOR/AGAINST judge → skeptic verify) for features worth ADAPTing onto Shepherd's primitives. CANDIDATES for
@@ -515,6 +515,18 @@ overwrites in place at [cc-core.lua:3613](cc-core.lua#L3613)). Enrich it.
     server, signature verification, OAuth, and the branch/commit/push executor — the spawned session owns that.
 
 ### L4 — Declarative routing & orchestration (NEW from crewAI) — effort **M**; unblocks the deferred 4c-E follow-ups
+> ✅ **SHIPPED 2026-06-14** (the non-UX-gated parts; see CHANGELOG): conditional routing by a queue-line `@role:`
+> prefix (matches a member's GROUP — `core.taskRoute`/`memberRole`/`routePick` role filter); process modes
+> (`core.queueRouteMode`/`queueSetMode` + `projectBusy`; *distribute* default / *sequential* one-at-a-time, a
+> detail-panel **seq** toggle); join barriers (`core.taskBarrier` `@all:`/`@any:` + `routeBarrierMet`, composes
+> with a role); per-task timing (`core.stepTaskDone` → `task_done` ledger at the 3 feed sites, rolled into
+> `fleetStandup`/Shift report). `renderFeed` strips the routing scaffolding before typing. Two adversarial-review
+> passes caught + fixed the `applyGroups`-before-dispatcher ordering bug and the `taskStart` GC leak (now
+> abandoned-on-stale + reaped-on-vanish). Suite 1481 core + 308 ui + 183 bash.
+> **Deferred (still UX-gated — need a design call first):** the routing **topology view** (`plot`), role-addressed
+> **delegation/handoff**, **idle-as-routing-target**, and **auto-spawn on starvation**. Also deferred: hierarchical
+> "manager" mode, the OpenHands pending-before-ready queue + parent/delegation lineage + per-session diff view, and
+> the cline dependency-chains / priority+concurrency-cap / broadcast-mailbox enrichments below.
 *Source: crewAI ADAPT items — Flow `@start`/`@listen`/`@router`, `and_`/`or_` join barriers, `plot()`,
 sequential/hierarchical process modes, delegation/handoff, per-task timing. The 3 genuinely-new items + the
 routing-flavored reinforcements.* crewAI's Flow engine maps onto Shepherd's **shipped Project Routing v1**

@@ -154,7 +154,29 @@ load-bearing facts a refactor must keep:
   `parsePromptFile`/`promptImport` import `*.prompt`/`*.md` from `templates.sourceDir` (default
   `~/.claude/cc-prompts`), strictly local. Deferred: the structured-template authoring + version/revert editor UI.
 
-Build order next: **L4** (declarative routing — the affinity source is DECIDED = queue-line `@role:` prefix) → L5 → L6 → L7.
+**L4 — declarative routing & orchestration** is shipped (the non-UX-gated parts): conditional routing,
+process modes, join barriers, per-task timing — all queue-line syntax on top of the shipped Project Routing
+v1 dispatcher, stripped before the task is typed. Load-bearing facts:
+- **`@role:` affinity matches a member's GROUP** (`core.memberRole` = the tile's group; `core.taskRoute` parses
+  the prefix). `routePick` gained a `role` filter; `routeTask`/`queueStarved` derive the FIFO head's role. The
+  member-role axis being GROUP (not agent name) is a deliberate reuse of the shipped groups feature.
+- **ORDERING (review-caught):** `core.applyGroups(list, groups)` MUST run before the routing dispatcher in the
+  refresh tick (it's now right after `refreshList()`), or every tile's `.group` is nil at route time and labeled
+  tasks starve. A ui pin guards this. `routeGroups` holds references to the same tiles, so setting `.group`
+  before the dispatcher propagates.
+- **Process mode + join barrier ride the queue file** like the `routing` arm flag — `qkeep` carries `mode`
+  through every rebuild; `queueSetRouted`/`queueSetMode` preserve each other; a legacy queue round-trips
+  byte-identically. Sequential = `core.projectBusy` holds while a routed task is in flight. Barriers =
+  `core.taskBarrier` (`@all:`/`@any:`, reserved keywords) + `core.routeBarrierMet` (all/any settled).
+- **Per-task timing:** `core.stepTaskDone` (pure, injected clock) fires a `task_done` on the first done edge
+  after a feed; the dashboard `taskStart` map is stamped only on a DELIVERED feed at the 3 feed sites and is
+  **abandoned on stale + reaped when a key vanishes** (review-caught: it has no self-expiry otherwise). The RAW
+  queued task is still what's popped/persisted; only the typed text is stripped/rendered. `fleetStandup` rolls
+  `task_done` into the Shift report.
+- **Deferred (UX-gated):** routing topology view, role-addressed delegation, idle-as-target, auto-spawn on
+  starvation.
+
+Build order next: **L5** (richer session observability) → L6 (event-callback rule engine) → L7 (scheduled spawns).
 
 ## State (2026-06-13)
 

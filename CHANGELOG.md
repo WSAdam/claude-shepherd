@@ -4,6 +4,37 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-14 (even later) — L4 declarative routing & orchestration
+
+Fourth build from the feature-mining backlog. Extends the shipped Project Routing v1 dispatcher
+with conditional routing, process modes, join barriers, and per-task timing. All off unless
+`queue.routing.enabled` + a project is armed; a queue with no routing syntax is byte-unchanged.
+
+- **Conditional routing by `@role:`** (the DECIDED affinity source): a queued task prefixed
+  `@review: …` routes only to a free session whose GROUP is `review`. cc-core `taskRoute`
+  (parse/strip), `memberRole` (group = the match axis), `routePick` role filter; `routeTask`/
+  `queueStarved` derive the FIFO head's role. `renderFeed` strips the prefix so the session never
+  sees the scaffolding. (Review-caught + fixed: `applyGroups` must run before the dispatcher or
+  `.group` is nil at route time and labeled tasks starve.)
+- **Process modes — `seq` toggle** (`queueRouteMode`/`queueSetMode`, rides the queue file like the
+  arm flag): *distribute* (default) fans across whichever member is free; *sequential* runs the
+  queue ONE routed task at a time (`projectBusy` holds the next until the current finishes).
+- **Join barriers `@all:` / `@any:`** (`taskBarrier`/`routeBarrierMet`): a task prefixed `@all:`
+  waits until every project member is settled (done, not stale/remote), `@any:` until one is, before
+  it routes. Composes with a role (`@all: @review: x`). `queueStarved` treats a waiting barrier as
+  waiting, not starved.
+- **Per-task timing** (`stepTaskDone` + a `taskStart` map): a fed queue task is timed from feed to
+  its first done edge; a `task_done` ledger event records `{durationS, role, by}`, and `fleetStandup`
+  rolls it into the Shift report (tasks completed · avg · total). Stamped only on a *delivered* feed;
+  the raw queued task is still what's popped/persisted. (Review-caught + fixed: the timer map is
+  abandoned when a session goes stale and reaped when a session vanishes, so it can't leak or ledger
+  a bogus duration after a long stall.)
+- Reviewed adversarially across two passes (round 1 caught the `applyGroups` ordering bug; round 2
+  over modes/barriers/timing reported 8, confirmed 5 — all the one `taskStart`-GC issue, fixed).
+  Tests: +66 cc-core checks, +13 dashboard pins. Suite green (1481 core + 308 ui + 183 bash).
+- **Deferred (still UX-gated, by design):** the routing topology view, role-addressed delegation/
+  handoff, idle-as-routing-target, and auto-spawn on starvation — each needs a design call first.
+
 ## 2026-06-14 (later still) — L3 parameterized + versioned prompt templates
 
 Third build from the feature-mining backlog. Turns saved task templates from flat `{name, text}`

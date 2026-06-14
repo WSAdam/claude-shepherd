@@ -871,7 +871,7 @@ do
   check("l3-pin: sourceDir config override", src:find('core.config(loadConfig(), "templates.sourceDir"', 1, true) ~= nil)
   check("l3-pin: JS import row", src:find("function templateImport()", 1, true) ~= nil)
   -- L4 Inc 1: renderFeed strips the @role: routing prefix before typing
-  check("l4-pin: renderFeed strips @role:", src:find("local _, bare = core.taskRoute(tostring(task or ", 1, true) ~= nil)
+  check("l4-pin: renderFeed strips @role:", src:find("local _, bare = core.taskRoute(afterBarrier)", 1, true) ~= nil)
   -- L4 Inc 1 (review fix): applyGroups MUST run before the routing dispatcher, or
   -- every tile's .group is nil at route time and labeled tasks starve. Guard the order.
   do
@@ -880,6 +880,25 @@ do
     check("l4-pin: applyGroups runs before the router (so .group is set for @role:)",
           agPos ~= nil and rtPos ~= nil and agPos < rtPos)
   end
+  -- L4 Inc 2: process modes (sequential vs distribute) wired to the detail panel
+  check("l4-pin: queue-route-mode handler", src:find('a == "queue%-route%-mode"') ~= nil)
+  check("l4-pin: mode handler uses queueSetMode", src:find("core.queueSetMode(FX.readQueue(qk)", 1, true) ~= nil)
+  check("l4-pin: tile carries routeSeq", src:find("it.routeSeq = (core.queueRouteMode(q)", 1, true) ~= nil)
+  check("l4-pin: seq checkbox + toggle", src:find('id="q-route-seq"', 1, true) ~= nil
+        and src:find("function onRouteModeToggle()", 1, true) ~= nil)
+  check("l4-pin: seq checkbox synced from routeSeq", src:find("seqEl.checked = !!it.routeSeq", 1, true) ~= nil)
+  -- L4 Inc 3: renderFeed strips the @all:/@any: join barrier before typing
+  check("l4-pin: renderFeed strips barrier", src:find("local _, afterBarrier = core.taskBarrier(tostring(task or ", 1, true) ~= nil)
+  -- L4 Inc 4: per-task timing — stamp at feed, ledger task_done on the done edge
+  check("l4-pin: taskStart map", src:find("local taskStart", 1, true) ~= nil)
+  check("l4-pin: stampTaskStart helper", src:find("local function stampTaskStart(item, task, by)", 1, true) ~= nil)
+  check("l4-pin: stamps at all 3 feed sites",
+        select(2, src:gsub('stampTaskStart%(it[em]*, task, "', "")) == 3)
+  check("l4-pin: task_done via stepTaskDone", src:find("core.stepTaskDone(started, pv and pv.status", 1, true) ~= nil)
+  check("l4-pin: task_done ledger event", src:find('type = "task_done", durationS', 1, true) ~= nil)
+  -- L4 review fix: taskStart has no self-expiry -> must abandon on stale + reap vanished keys
+  check("l4-pin: abandon timer on stale", src:find("taskStart[it.key] = nil  -- abandon", 1, true) ~= nil)
+  check("l4-pin: reap vanished task timers", src:find("if not newPrev[k] then taskStart[k] = nil", 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
