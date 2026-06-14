@@ -4,6 +4,43 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-14 — L1 Agent Profiles ("spawn from a saved agent") + Phase 0 foundation
+
+First build from the cross-project feature-mining backlog (5 sources mined → L1–L7 in todos.md;
+reports in `docs/feature-mining/`). Shipped **L1 — Agent Profiles**, the user's #1 stated interest
+("pre-configured agents we hand work off to, saved into a directory; same with skills and MCPs").
+
+**Phase 0 foundation (pure `cc-core`, fully unit-tested):**
+- **Registries:** `cc-agents.json` (`agentList/agentLoad/agentPush/agentRemove/agentGet/agentFork/agentSort`)
+  and `cc-mcp.json` (`mcpList/mcpLoad/mcpPush/mcpRemove/mcpGet`) — with a **fail-safe load** discipline
+  (validate each record, keep the valid, drop only the bad, return the dropped names+reasons).
+- **Pre-flight validator:** `validateAgent`/`validateMcp` (required fields, absolute-folder shape, array
+  types, unknown-field flagging, and cross-ref checks for provider/policyBundle/skill/MCP).
+- **Spawn-from-agent plumbing:** `resolveAgent` (profile → concrete spawn intent), `personaPrompt`
+  (role/goal/backstory → `--append-system-prompt`), `mcpConfig` (→ `--mcp-config` JSON; secrets as
+  `${VAR}` refs, never stored), `spawnExtraFlags` (threads `--mcp-config`/`--append-system-prompt`/
+  `--agent`/`--add-dir`/`--plugin-dir` into `spawnSpec`), plus `missingEnv` and `profilesForFolder`
+  (folder-scoped auto-attach). New `shArg` helper quotes value-bearing flags in the shell sinks while
+  keeping kitty argv raw and existing no-space flags **byte-identical** (no spawn/editor regression).
+- **Skills card:** `parseSkillFrontmatter` + `skillCommand` (dual-shape `SKILL.md` / flat `*.md`).
+
+**Dashboard wiring (`claude-dashboard.lua`):**
+- FX: `readAgents/writeAgents`, `readMcp/writeMcp`, `listSkills` (enumerates `~/.claude/skills`),
+  `writeMcpConfig`.
+- `handleAction`: agent CRUD (`agent-save`/`-delete`/`-fork`), MCP CRUD (`mcp-save`/`-delete`), and
+  **spawn-from-agent** (resolve profile → write its `--mcp-config` → spawn with the extra flags; selected
+  skills ride the appended system prompt; `seedPrompt` seeds the task; `lastSpawnedAt` stamped; a
+  `spawn_agent` ledger event). The New-Session modal is fed agents/MCP/skills.
+- New-Session modal UI: an **Agents** chip row (one-click "spawn from this agent" + ✕ delete), a
+  **Save as agent** button (name/role/folder/editor/mode/provider/seed), and a read-only **Skills card**
+  (the `/command` + description for every skill in `~/.claude/skills`).
+
+Real spawning stays gated by `spawn.live` (dry-run by default); secrets are never stored (env-var NAMES
+only, expanded by the spawned login shell). **Deferred follow-up** (cc-core already supports it): the
+richer registry-management UI — folders/favorites/hide/archive/fork buttons, a sort dropdown, an in-panel
+skills/MCP/knowledge attach editor, and an MCP-registry management surface (today: edit `cc-agents.json` /
+`cc-mcp.json` arrays by hand). Suite **1322 core + 238 ui + 177 bash**, all green; deployed + live-verified.
+
 ## 2026-06-13 (later 3) — pad-mirror batch: priority jump + ⌨ legend + shift report + lineage
 
 Crawled the `pad` project (a local-first agent-era task manager) for ideas worth mirroring,

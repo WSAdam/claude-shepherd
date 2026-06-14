@@ -63,6 +63,10 @@ local GROUPS_FILE   = os.getenv("CC_GROUPS_FILE") or (os.getenv("HOME") .. "/.cl
 local RECENT_FILE   = os.getenv("CC_RECENT_FILE") or (os.getenv("HOME") .. "/.claude/cc-recent-dirs.json")
 local TEMPLATE_FILE = os.getenv("CC_TEMPLATE_FILE") or (os.getenv("HOME") .. "/.claude/cc-templates.json")
 local PRESET_FILE   = os.getenv("CC_PRESET_FILE") or (os.getenv("HOME") .. "/.claude/cc-presets.json")
+local AGENT_FILE    = os.getenv("CC_AGENT_FILE") or (os.getenv("HOME") .. "/.claude/cc-agents.json")
+local MCP_FILE      = os.getenv("CC_MCP_FILE") or (os.getenv("HOME") .. "/.claude/cc-mcp.json")
+local MCP_CONFIG_DIR = os.getenv("CC_MCP_CONFIG_DIR") or (os.getenv("HOME") .. "/.claude/cc-mcp-configs")
+local SKILLS_DIR    = os.getenv("CC_SKILLS_DIR") or (os.getenv("HOME") .. "/.claude/skills")
 local LEDGER_DIR    = os.getenv("CC_LEDGER_DIR") or (os.getenv("HOME") .. "/.claude/cc-ledger")
 local CLAUDE_DIR    = (os.getenv("HOME") or "") .. "/.claude"
 local EDITOR_BUNDLES = {
@@ -744,6 +748,69 @@ end
 function FX.writePresets(state)
   hs.fs.mkdir(CLAUDE_DIR)
   FX.writeFile(PRESET_FILE, core.json.encode(state or { presets = {}, lastByProject = {} }))
+end
+
+-- L1 Agent Profiles registry (cc-agents.json) + MCP registry (cc-mcp.json).
+-- Operator data, same posture as presets/templates. Missing/garbled -> empty.
+function FX.readAgents()
+  local c = FX.readFile(AGENT_FILE)
+  if not c or #c == 0 then return { agents = {} } end
+  local ok, t = pcall(function() return core.json.decode(c) end)
+  return (ok and type(t) == "table") and t or { agents = {} }
+end
+function FX.writeAgents(state)
+  hs.fs.mkdir(CLAUDE_DIR)
+  FX.writeFile(AGENT_FILE, core.json.encode(state or { agents = {} }))
+end
+function FX.readMcp()
+  local c = FX.readFile(MCP_FILE)
+  if not c or #c == 0 then return { servers = {} } end
+  local ok, t = pcall(function() return core.json.decode(c) end)
+  return (ok and type(t) == "table") and t or { servers = {} }
+end
+function FX.writeMcp(state)
+  hs.fs.mkdir(CLAUDE_DIR)
+  FX.writeFile(MCP_FILE, core.json.encode(state or { servers = {} }))
+end
+
+-- Enumerate ~/.claude/skills (dual-shape: directory SKILL.md AND flat *.md) into
+-- read-only cards { name, display_title, description, command, shape, path }.
+-- Parsing is pure (core.parseSkillFrontmatter); native Claude Code owns auto-load.
+function FX.listSkills()
+  local out, seen = {}, {}
+  local function add(path, stem, shape)
+    local txt = FX.readFile(path)
+    if not txt then return end
+    local card = core.parseSkillFrontmatter(txt, stem)
+    if card.name == "" or seen[card.name] then return end
+    seen[card.name] = true
+    out[#out + 1] = { name = card.name, display_title = card.display_title,
+                      description = card.description, command = core.skillCommand(card.name),
+                      shape = shape, path = path }
+  end
+  for _, name in ipairs(FX.readDir(SKILLS_DIR)) do
+    if name ~= "." and name ~= ".." then
+      local p = SKILLS_DIR .. "/" .. name
+      local mode = hs.fs.attributes(p, "mode")
+      if mode == "directory" then
+        local sk = p .. "/SKILL.md"
+        if hs.fs.attributes(sk) then add(sk, name, "agentskills") end
+      elseif name:match("%.md$") and name:lower() ~= "readme.md" then
+        add(p, (name:gsub("%.md$", "")), "flat")
+      end
+    end
+  end
+  table.sort(out, function(a, b) return tostring(a.name):lower() < tostring(b.name):lower() end)
+  return out
+end
+
+-- Write a resolved agent's --mcp-config JSON to a per-agent file; returns the path.
+function FX.writeMcpConfig(agentName, cfgTable)
+  hs.fs.mkdir(MCP_CONFIG_DIR)
+  local safe = tostring(agentName or "agent"):gsub("[^%w%-_.]", "_")
+  local path = MCP_CONFIG_DIR .. "/" .. safe .. ".json"
+  FX.writeFile(path, core.json.encode(cfgTable or { mcpServers = {} }))
+  return path
 end
 
 -- Create a project folder (F3), with real `mkdir -p` semantics: every missing
@@ -1520,7 +1587,7 @@ end
 -- Spawn a new Claude session, editor-aware (F3-F5). The editor comes from the
 -- caller (the modal's picker) or falls back to `spawn.editor` in config. Effective
 -- dry-run = the code default ORCH_DRY_RUN unless the user flips `spawn.live` on.
-function FX.spawnSession(editor, project, task, permissionMode, providerId)
+function FX.spawnSession(editor, project, task, permissionMode, providerId, agentOpts)
   local cfg = loadConfig()
   editor = (editor and editor ~= "") and editor or core.config(cfg, "spawn.editor", "terminal")
   -- Resolve the provider profile. "" is an EXPLICIT "(none — bare claude)" pick;
@@ -1539,6 +1606,16 @@ function FX.spawnSession(editor, project, task, permissionMode, providerId)
     claudeBin      = claudeBinPath(),  -- absolute path; nil keeps the bare word
     vscodeFlavor   = core.config(cfg, "spawn.vscodeFlavor", "extension"),  -- extension | terminal
   }
+  -- L1 "spawn from a saved agent": profile-derived launch flags (persona, MCP
+  -- config, --agent, --add-dir knowledge, --plugin-dir). Absent -> byte-identical.
+  if type(agentOpts) == "table" then
+    opts.appendSystemPrompt = agentOpts.appendSystemPrompt
+    opts.mcpConfigPath = agentOpts.mcpConfigPath
+    opts.strictMcp = agentOpts.strictMcp == true
+    opts.agentName = agentOpts.agentName
+    opts.addDirs = agentOpts.addDirs
+    opts.pluginDirs = agentOpts.pluginDirs
+  end
   -- Auto-enable Remote Control via the --remote-control launch flag, but only for a LOCAL,
   -- native-Anthropic session: RC needs claude.ai auth and rejects third-party/gateway
   -- providers, and an ssh-remote box would register RC to its own window. Off via
@@ -1697,12 +1774,15 @@ local function handleBridgeMsg(msg)
     local recent = core.recentSeed(FX.readRecent(), active)
     local browse = FX.listDirs(ORCH_DEFAULT_DIR)
     local pstate = FX.readPresets()
+    local agentState = { agents = core.agentList(FX.readAgents()),
+                         mcp = core.mcpList(FX.readMcp()), skills = FX.listSkills() }
     FX.scanFolders()
     pcall(function()
       wv:evaluateJavaScript("showNew(" .. hs.json.encode(cfg) .. ", "
         .. hs.json.encode(recent.dirs) .. ", " .. hs.json.encode(browse) .. ", "
         .. hs.json.encode({ presets = core.presetList(pstate),
-                            lastByProject = pstate.lastByProject or {} }) .. ")")
+                            lastByProject = pstate.lastByProject or {} }) .. ", "
+        .. hs.json.encode(agentState) .. ")")
     end)
     return
   end
@@ -1725,6 +1805,41 @@ local function handleBridgeMsg(msg)
     local list = core.presetList(FX.readPresets())
     local listJson = (#list > 0) and hs.json.encode(list) or "[]"
     pcall(function() wv:evaluateJavaScript("ccPresets(" .. listJson .. ")") end)
+    return
+  end
+  -- L1 Agent Profiles: save / delete / fork; reply with the fresh list.
+  if a == "agent-save" or a == "agent-delete" or a == "agent-fork" then
+    if a == "agent-save" then
+      local okp, p = pcall(hs.json.decode, payload.text or "{}")
+      local st, saved, errs = core.agentPush(FX.readAgents(), (okp and type(p) == "table") and p or {})
+      if saved then FX.writeAgents(st)
+      else pcall(function() hs.alert.show("Claude Shepherd: agent invalid — "
+        .. table.concat(errs or { "?" }, "; ")) end) end
+    elseif a == "agent-fork" then
+      local st, ok = core.agentFork(FX.readAgents(), tostring(payload.v or ""))
+      if ok then FX.writeAgents(st) end
+    else
+      FX.writeAgents(core.agentRemove(FX.readAgents(), tostring(payload.v or "")))
+    end
+    local list = core.agentList(FX.readAgents())
+    pcall(function() wv:evaluateJavaScript("ccAgents("
+      .. ((#list > 0) and hs.json.encode(list) or "[]") .. ")") end)
+    return
+  end
+  -- L1 MCP registry: save / delete; reply with the fresh list.
+  if a == "mcp-save" or a == "mcp-delete" then
+    if a == "mcp-save" then
+      local okp, p = pcall(hs.json.decode, payload.text or "{}")
+      local st, saved, errs = core.mcpPush(FX.readMcp(), (okp and type(p) == "table") and p or {})
+      if saved then FX.writeMcp(st)
+      else pcall(function() hs.alert.show("Claude Shepherd: MCP server invalid — "
+        .. table.concat(errs or { "?" }, "; ")) end) end
+    else
+      FX.writeMcp(core.mcpRemove(FX.readMcp(), tostring(payload.v or "")))
+    end
+    local list = core.mcpList(FX.readMcp())
+    pcall(function() wv:evaluateJavaScript("ccMcp("
+      .. ((#list > 0) and hs.json.encode(list) or "[]") .. ")") end)
     return
   end
   -- Fuzzy folder search (roadmap #4b): rank the CACHED index (no per-keystroke
@@ -1782,8 +1897,38 @@ local function handleBridgeMsg(msg)
     FX.writePresets(core.presetMarkUsed(FX.readPresets(), dir, {
       editor = editor, permMode = payload.permMode and tostring(payload.permMode) or nil,
       provider = payload.provider and tostring(payload.provider) or nil }))
+    -- L1 "spawn from a saved agent": resolve the profile -> persona / MCP-config /
+    -- knowledge / plugin flags, write its --mcp-config file, and pass the extra opts.
+    local agentOpts = nil
+    local agentName = payload.agent and tostring(payload.agent) or nil
+    if agentName and agentName ~= "" then
+      local profile = core.agentGet(FX.readAgents(), agentName)
+      if profile then
+        local res = core.resolveAgent(profile, { mcpState = FX.readMcp() })
+        if #res.errors > 0 then
+          print("[cc-orch] agent '" .. agentName .. "' resolve warnings: " .. table.concat(res.errors, "; "))
+        end
+        local mcpPath = res.mcpConfig and FX.writeMcpConfig(profile.name, res.mcpConfig) or nil
+        -- selected skills ride the appended system prompt (native auto-load also applies)
+        local persona = res.appendSystemPrompt
+        if profile.skills and #profile.skills > 0 then
+          local cmds = {}
+          for _, s in ipairs(profile.skills) do cmds[#cmds + 1] = core.skillCommand(s) or s end
+          persona = (persona and (persona .. "\n") or "") .. "Skills available to you: " .. table.concat(cmds, ", ")
+        end
+        agentOpts = { appendSystemPrompt = persona, mcpConfigPath = mcpPath, strictMcp = false,
+                      agentName = res.agentName, addDirs = res.addDirs, pluginDirs = res.pluginDirs }
+        if (not task or task == "") and res.seedPrompt then task = res.seedPrompt end
+        FX.appendLedger({ type = "spawn_agent", name = profile.name, cwd = dir, by = "agent" })
+        -- record lastSpawnedAt for the registry's "last used" sort
+        local pp = {}; for k, v in pairs(profile) do pp[k] = v end; pp.lastSpawnedAt = os.time()
+        FX.writeAgents((core.agentPush(FX.readAgents(), pp)))
+      else
+        print("[cc-orch] spawn-agent: no saved agent named '" .. agentName .. "'")
+      end
+    end
     FX.spawnSession(editor, dir, task, payload.permMode and tostring(payload.permMode) or nil,
-      payload.provider and tostring(payload.provider) or nil)
+      payload.provider and tostring(payload.provider) or nil, agentOpts)
     return
   end
   if a == "queue-add" then
@@ -3243,6 +3388,8 @@ local HTML = [[
       </div>
       <div class="s-lbl">Presets</div>
       <div id="n-presets" class="n-recent"></div>
+      <div class="s-lbl">Agents <span class="n-dim">— saved profiles you hand work off to (persona · skills · MCP)</span></div>
+      <div id="n-agents" class="n-recent"></div>
       <div class="s-lbl">Project folder (type to fuzzy-search your project roots)</div>
       <input id="n-path" class="s-txt" placeholder="/Users/you/Programming/project" autocomplete="off"
              oninput="onPathInput()" onkeydown="onPathKey(event)" onchange="applyLastUsed(this.value)">
@@ -3279,10 +3426,13 @@ local HTML = [[
         </select>
       </label>
       <label class="s-row">Provider <select id="n-provider"></select></label>
+      <div class="s-lbl">Skills available (<span id="n-skills-count">0</span>) <span class="n-dim" id="n-skills-tog" onclick="toggleSkills()" style="cursor:pointer;text-decoration:underline;">show</span></div>
+      <div id="n-skills" class="n-recent" style="display:none;"></div>
     </div>
     <div id="n-foot">
       <button id="n-spawn" onclick="submitNew()">Spawn</button>
       <button onclick="savePreset()" title="Save the current folder + editor + mode + provider as a one-click preset">Save as preset</button>
+      <button onclick="saveAgent()" title="Save the current setup (folder/editor/mode/provider/task + a persona role) as a reusable agent you can spawn from">Save as agent</button>
       <button onclick="closeNew()">Cancel</button>
     </div>
   </div>
@@ -3982,7 +4132,10 @@ local HTML = [[
     // Lua pushes config + recent dirs + the initial folder listing.
     var PRESETS = [];            // saved spawn presets (roadmap #4a)
     var LAST_BY_PROJECT = {};    // folder -> {editor, permMode, provider} recall
-    function showNew(cfg, recent, browse, presetState){
+    var AGENTS = [];             // saved agent profiles (L1)
+    var MCPS = [];               // saved MCP servers (L1)
+    var SKILLS = [];             // ~/.claude/skills cards (L1, read-only)
+    function showNew(cfg, recent, browse, presetState, agentState){
       cfg = cfg || {};
       setMode("existing");
       document.getElementById("n-path").value = "";
@@ -3994,6 +4147,10 @@ local HTML = [[
       PRESETS = presetState.presets || [];
       LAST_BY_PROJECT = presetState.lastByProject || {};
       renderPresets();
+      agentState = agentState || {};
+      AGENTS = agentState.agents || []; MCPS = agentState.mcp || [];
+      renderAgents();
+      ccSkills(agentState.skills || []);
       hideSuggest();
       renderRecent(recent || []);
       ccBrowse(browse || { path:"", parent:"", dirs:[] });
@@ -4039,6 +4196,72 @@ local HTML = [[
         editor: document.getElementById("n-editor").value,
         permMode: document.getElementById("n-permmode").value,
         provider: document.getElementById("n-provider").value }));
+    }
+    // ---- L1 Agent Profiles --------------------------------------------------
+    function ccAgents(list){ AGENTS = list || []; renderAgents(); }
+    function ccMcp(list){ MCPS = list || []; }
+    function renderAgents(){
+      var box = document.getElementById("n-agents"); if(!box) return; box.innerHTML = "";
+      var shown = (AGENTS||[]).filter(function(p){ return !p.hidden && !p.archived && !p.deleted; });
+      if(!shown.length){ box.innerHTML = '<span class="n-dim">No saved agents — set up a spawn below, then "Save as agent"</span>'; return; }
+      shown.forEach(function(p){
+        var b = document.createElement("button"); b.className = "n-chip";
+        var bits = [p.role||"", p.provider?("· "+p.provider):"",
+                    (p.skills&&p.skills.length)?("· "+p.skills.length+" skills"):"",
+                    (p.mcpServers&&p.mcpServers.length)?("· "+p.mcpServers.length+" mcp"):""].filter(Boolean).join(" ");
+        b.title = (p.folder||"(no saved folder — pick one first)") + (bits?("\n"+bits):"")
+                + "\nClick to spawn from this agent · ✕ deletes";
+        b.textContent = (p.favorite?"★ ":"") + "✦ " + p.name;
+        var x = document.createElement("span"); x.className = "chip-x"; x.textContent = "✕";
+        x.onclick = function(ev){ ev.stopPropagation();
+          if(confirm('Delete agent "'+p.name+'"?')){ send("agent-delete", p.name); } };
+        b.appendChild(x);
+        b.onclick = function(){ agentSpawn(p); };
+        box.appendChild(b);
+      });
+    }
+    // One-click spawn from a saved agent: carries the profile name so Lua resolves
+    // its persona/skills/MCP/knowledge into launch flags. Folder = the profile's
+    // saved folder, else whatever's in the path box.
+    function agentSpawn(p){
+      var folder = p.folder || (document.getElementById("n-path").value||"").trim();
+      if(!folder || folder.charAt(0) !== "/"){
+        alert('Agent "'+p.name+'" has no saved folder — pick a project folder first, then click it again.'); return;
+      }
+      var task = (document.getElementById("n-task").value||"").trim();
+      var payload = { a:"spawn", v:"", text:task, img:"", mode:"existing", dir:folder,
+        editor:p.editor||document.getElementById("n-editor").value||"",
+        permMode:p.permMode||"", provider:p.provider||"", agent:p.name };
+      try { window.webkit.messageHandlers.cc.postMessage(JSON.stringify(payload)); }
+      catch(e){ console.log("spawn-agent send error", e); }
+      closeNew();
+    }
+    function saveAgent(){
+      var name = prompt("Agent name?"); if(name === null || !(name = name.trim())) return;
+      var role = prompt("Role (optional, e.g. \"a senior code reviewer\"):"); role = role ? role.trim() : "";
+      var path = (document.getElementById("n-path").value||"").trim();
+      var rec = { name:name, editor:document.getElementById("n-editor").value,
+        permMode:document.getElementById("n-permmode").value,
+        provider:document.getElementById("n-provider").value,
+        seedPrompt:(document.getElementById("n-task").value||"").trim(), role:role };
+      if(path && path.charAt(0) === "/") rec.folder = path;
+      send("agent-save", "", JSON.stringify(rec));
+      alert('Saved agent "'+name+'". Attach skills/MCP/knowledge by editing ~/.claude/cc-agents.json (per-profile arrays: skills[], mcpServers[], knowledge[]); a full editor is coming next.');
+    }
+    // ---- L1 Skills card (read-only) -----------------------------------------
+    function ccSkills(list){ SKILLS = list || [];
+      var c = document.getElementById("n-skills-count"); if(c) c.textContent = SKILLS.length; renderSkills(); }
+    function toggleSkills(){ var b = document.getElementById("n-skills"), t = document.getElementById("n-skills-tog");
+      if(!b) return; var sh = (b.style.display === "none"); b.style.display = sh ? "flex" : "none"; if(t) t.textContent = sh ? "hide" : "show"; }
+    function renderSkills(){
+      var box = document.getElementById("n-skills"); if(!box) return; box.innerHTML = "";
+      if(!SKILLS.length){ box.innerHTML = '<span class="n-dim">No skills in ~/.claude/skills</span>'; return; }
+      SKILLS.forEach(function(s){
+        var d = document.createElement("span"); d.className = "n-chip"; d.style.cursor = "default";
+        d.title = (s.description||"") + (s.path?("\n"+s.path):"") + (s.shape?("\n["+s.shape+"]"):"");
+        d.textContent = (s.command || ("/"+s.name)) + (s.display_title?(" — "+s.display_title):"");
+        box.appendChild(d);
+      });
     }
     // Per-project recall: picking a known folder pre-fills its last-used options.
     function applyLastUsed(dir){

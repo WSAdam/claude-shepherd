@@ -98,6 +98,16 @@ network, no multi-user, no secrets — it reads session status off the local fil
 - Typical change: add a pure cc-core function + its regression test → wire it into the
   dashboard → mirror in the panel JS if it affects rendering (and note the twin).
 
+## State (2026-06-14)
+
+**Feature-mining → build:** 5 top AI apps (LiteLLM/crewAI/OpenHands/cline/AutoGPT) were adversarially
+mined into a backlog L1–L7 (see [todos.md](todos.md); per-project reports in `docs/feature-mining/`).
+**L1 — Agent Profiles ("spawn from a saved agent")** is the first shipped (see [CHANGELOG.md](CHANGELOG.md)):
+a pure-`cc-core` registry layer (`cc-agents.json` + `cc-mcp.json`, validator, `resolveAgent`, `mcpConfig`,
+`personaPrompt`, `spawnExtraFlags`, skills parser) plus the New-Session modal's Agents chip row, Save-as-agent,
+and a read-only Skills card. The richer registry-management UI (folders/favorites/fork/sort, in-panel
+skills/MCP/knowledge attach editor) is the deferred L1 follow-up. Build order next: L2 → … → L7.
+
 ## State (2026-06-13)
 
 Cross-machine / controls roadmap done. Fleet-scale console shipped (tile search, session

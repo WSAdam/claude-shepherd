@@ -2959,6 +2959,17 @@ function M.newestClaudeExtension(dirNames)
   return best
 end
 
+-- Quote a launch flag/value ONLY when it isn't already shell-safe, so existing
+-- no-space flags (--permission-mode default, /abs/path) emit byte-identical to
+-- before while value-bearing L1 flags (--append-system-prompt "<persona>") are
+-- quoted for the shell sinks. The kitty path keeps flags RAW (argv elements, no
+-- shell), so this is only used where a flag joins a shell command string.
+local function shArg(s)
+  s = tostring(s)
+  if s:match("^[%w@%%+=:,./_-]+$") then return s end
+  return shquote(s)
+end
+
 -- The shell command run INSIDE the spawned terminal:
 --   cd <project> && [ENV=... ] claude [flags] [prompt]
 -- opts: { env = providerEnv list, flags = spawnFlags list, ssh = {host,user},
@@ -2972,7 +2983,7 @@ function M.spawnInner(project, prompt, opts)
   local isSsh = type(opts.ssh) == "table" and opts.ssh.host and tostring(opts.ssh.host) ~= ""
   local bin = isSsh and "claude" or claudeRef(opts.claudeBin)
   local inner = "cd " .. shquote(project or ".") .. " && " .. M.envPrefix(opts.env) .. bin
-  for _, f in ipairs(opts.flags or {}) do inner = inner .. " " .. f end
+  for _, f in ipairs(opts.flags or {}) do inner = inner .. " " .. shArg(f) end
   if prompt and #prompt > 0 then inner = inner .. " " .. shquote(prompt) end
   return M.sshWrap(inner, opts.ssh, opts.env)
 end
@@ -3070,6 +3081,10 @@ function M.spawnSpec(editor, project, task, opts)
   -- registers RC to its own claude.ai window, defeating the "window into my local
   -- session" model); the gateway/native gate is the caller's (FX.spawnSession).
   local flags = M.spawnFlags(opts.permissionMode, opts.effort, opts.remoteControl == true and not isSsh)
+  -- L1 "spawn from a saved agent": append profile-derived flags (persona, MCP
+  -- config, --agent, --add-dir knowledge, --plugin-dir). All optional -> a
+  -- non-agent spawn is byte-identical (spawnExtraFlags returns {}).
+  for _, f in ipairs(M.spawnExtraFlags(opts)) do flags[#flags + 1] = f end
   if editor == "kitty" then
     -- A fresh kitty window with remote control on a known socket (default ON), so
     -- click-to-answer / mode-switch (Part A) work without touching global config.
@@ -3125,7 +3140,7 @@ function M.spawnSpec(editor, project, task, opts)
       post = M.spawnInner(project, task, { env = env, flags = flags, ssh = ssh })
     else
       post = M.envPrefix(env) .. claudeRef(opts.claudeBin)
-      for _, f in ipairs(flags) do post = post .. " " .. f end
+      for _, f in ipairs(flags) do post = post .. " " .. shArg(f) end
       if task then post = post .. " " .. shquote(task) end
     end
     return { kind = "vscode", editor = editor, app = app, project = project,
@@ -3752,6 +3767,446 @@ function M.newProjectPath(parent, name)
       .. " must be an absolute path — pick a suggestion, a Recent chip, or Browse to it"
   end
   return M.pathJoin(parent, safe)
+end
+
+-- ===========================================================================
+-- L1 — Agent Profiles registry + "spawn from a saved agent"
+-- ===========================================================================
+-- A saved agent profile extends a spawn preset with a persona + capability
+-- refs. Stored in cc-agents.json (operator data, same posture as cc-presets).
+-- DECLARATIVE: Shepherd only emits launch flags/files; native Claude Code owns
+-- the actual agent/skill/MCP execution. Profile shape (all but `name` optional):
+--   { name, folder, provider, model, permMode, seedPrompt, role, goal, backstory,
+--     skills[], mcpServers[], knowledge[], plugins[], policyBundle, requiredEnv[],
+--     folderGlobs[], modelByMode, category, favorite, hidden, archived, deleted,
+--     forkedFrom, lastSpawnedAt, versions[] }
+-- MCP registry lives in cc-mcp.json: { servers = { {id, label, transport, command,
+--   args[], url, allowedTools[], authTokenEnv, description}, ... } }.
+M.AGENT_CAP = 50
+M.MCP_CAP = 30
+
+local function agTrim(s) return tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", "") end
+-- Normalize an optional array-of-strings field: drop non-strings/blanks, dedupe.
+local function agStrList(v)
+  local out, seen = {}, {}
+  if type(v) == "table" then
+    for _, x in ipairs(v) do
+      if type(x) == "string" then
+        local s = agTrim(x)
+        if s ~= "" and not seen[s] then seen[s] = true; out[#out + 1] = s end
+      end
+    end
+  end
+  return out
+end
+local function aglist(state)
+  if type(state) == "table" and type(state.agents) == "table" then return state.agents end
+  return {}
+end
+
+-- Known top-level profile fields. Unknown keys are FLAGGED by validateAgent (a
+-- typo'd key is a dead no-op otherwise) but don't block loading on their own.
+M.AGENT_FIELDS = { name = true, folder = true, provider = true, model = true,
+  permMode = true, seedPrompt = true, role = true, goal = true, backstory = true,
+  skills = true, mcpServers = true, knowledge = true, plugins = true,
+  policyBundle = true, requiredEnv = true, folderGlobs = true, modelByMode = true,
+  agentName = true, category = true, favorite = true, hidden = true, archived = true,
+  deleted = true, forkedFrom = true, lastSpawnedAt = true, versions = true }
+
+-- Pre-flight validator (L1): returns { ok, errors[] } collecting ALL problems.
+-- `refs` (optional) enables cross-reference checks: { providers=set, bundles=set,
+-- skills=set, mcp=set } — pass nil/{} at load time (cross-refs are a spawn-time
+-- concern, not a reason to drop a stored record).
+function M.validateAgent(rec, refs)
+  refs = refs or {}
+  if type(rec) ~= "table" then return { ok = false, errors = { "not an object" } } end
+  local errs = {}
+  if agTrim(rec.name) == "" then errs[#errs + 1] = "missing required field: name" end
+  if rec.folder ~= nil and not (type(rec.folder) == "string" and rec.folder:sub(1, 1) == "/") then
+    errs[#errs + 1] = "folder must be an absolute path"
+  end
+  for _, f in ipairs({ "skills", "mcpServers", "knowledge", "plugins", "requiredEnv",
+                       "folderGlobs", "versions" }) do
+    if rec[f] ~= nil and type(rec[f]) ~= "table" then errs[#errs + 1] = f .. " must be a list" end
+  end
+  for k in pairs(rec) do
+    if not M.AGENT_FIELDS[k] then errs[#errs + 1] = "unknown field: " .. tostring(k) end
+  end
+  if refs.providers and agTrim(rec.provider) ~= "" and not refs.providers[tostring(rec.provider)] then
+    errs[#errs + 1] = "provider not found: " .. tostring(rec.provider)
+  end
+  if refs.bundles and agTrim(rec.policyBundle) ~= "" and not refs.bundles[tostring(rec.policyBundle)] then
+    errs[#errs + 1] = "policy bundle not found: " .. tostring(rec.policyBundle)
+  end
+  if refs.mcp then
+    for _, id in ipairs(agStrList(rec.mcpServers)) do
+      if not refs.mcp[id] then errs[#errs + 1] = "MCP server not found: " .. id end
+    end
+  end
+  if refs.skills then
+    for _, s in ipairs(agStrList(rec.skills)) do
+      if not refs.skills[s] then errs[#errs + 1] = "skill not found: " .. s end
+    end
+  end
+  return { ok = #errs == 0, errors = errs }
+end
+
+local function agNorm(rec)
+  return {
+    name = agTrim(rec.name),
+    folder = (type(rec.folder) == "string" and rec.folder:sub(1, 1) == "/") and M.normDir(rec.folder) or nil,
+    provider = rec.provider, model = rec.model, permMode = rec.permMode,
+    seedPrompt = rec.seedPrompt, role = rec.role, goal = rec.goal, backstory = rec.backstory,
+    skills = agStrList(rec.skills), mcpServers = agStrList(rec.mcpServers),
+    knowledge = agStrList(rec.knowledge), plugins = agStrList(rec.plugins),
+    policyBundle = rec.policyBundle,
+    requiredEnv = type(rec.requiredEnv) == "table" and rec.requiredEnv or nil,
+    folderGlobs = agStrList(rec.folderGlobs),
+    modelByMode = type(rec.modelByMode) == "table" and rec.modelByMode or nil,
+    agentName = rec.agentName, category = rec.category, favorite = rec.favorite == true,
+    hidden = rec.hidden == true, archived = rec.archived == true, deleted = rec.deleted == true,
+    forkedFrom = rec.forkedFrom, lastSpawnedAt = rec.lastSpawnedAt,
+    versions = type(rec.versions) == "table" and rec.versions or nil,
+  }
+end
+
+-- Load the registry with the fail-safe discipline (cline/AutoGPT enrichment):
+-- validate EACH record, keep the valid (normalized), DROP only the bad, and
+-- RETURN the dropped names+reasons so the FX glue can surface them once (instead
+-- of presetList's silent drop). Duplicates keep the first. Returns {valid, errors}.
+function M.agentLoad(state)
+  local valid, errors, seen = {}, {}, {}
+  for _, rec in ipairs(aglist(state)) do
+    local v = M.validateAgent(rec, {})
+    local nm = (type(rec) == "table") and agTrim(rec.name) or ""
+    if not v.ok then
+      errors[#errors + 1] = { name = nm ~= "" and nm or "(unnamed)",
+                              reason = table.concat(v.errors, "; ") }
+    elseif seen[nm] then
+      errors[#errors + 1] = { name = nm, reason = "duplicate name (kept first)" }
+    else
+      seen[nm] = true; valid[#valid + 1] = agNorm(rec)
+    end
+  end
+  return { valid = valid, errors = errors }
+end
+
+-- Clean list (common path) — all valid records incl. hidden/archived/deleted
+-- (the UI filters those for the spawn picker; the registry view shows them).
+function M.agentList(state) return M.agentLoad(state).valid end
+
+-- Strict save: reject an invalid profile (returns state-unchanged + false +
+-- errors), else replace same-name in place / prepend, capped. Mirrors presetPush.
+function M.agentPush(state, profile, cap)
+  cap = tonumber(cap) or M.AGENT_CAP
+  local list = M.agentList(state)
+  profile = type(profile) == "table" and profile or {}
+  local v = M.validateAgent(profile, {})
+  if not v.ok then return { agents = list }, false, v.errors end
+  local entry = agNorm(profile)
+  local out, replaced = {}, false
+  for _, p in ipairs(list) do
+    if p.name == entry.name then out[#out + 1] = entry; replaced = true
+    else out[#out + 1] = p end
+  end
+  if not replaced then table.insert(out, 1, entry) end
+  while #out > cap do table.remove(out) end
+  return { agents = out }, true
+end
+
+function M.agentRemove(state, name)
+  local out = {}
+  for _, p in ipairs(M.agentList(state)) do
+    if p.name ~= name then out[#out + 1] = p end
+  end
+  return { agents = out }
+end
+
+function M.agentGet(state, name)
+  for _, p in ipairs(M.agentList(state)) do
+    if p.name == name then return p end
+  end
+  return nil
+end
+
+-- Fork/duplicate with lineage: deep-copies the named profile to a unique
+-- "<name> (copy)[ N]", stamps forkedFrom, clears favorite. No secret-strip needed
+-- (only env-var NAMES are ever stored). Returns newState, ok.
+function M.agentFork(state, name)
+  local src = M.agentGet(state, name)
+  if not src then return state, false end
+  local copy = {}
+  for k, vv in pairs(src) do copy[k] = vv end
+  local base = src.name .. " (copy)"
+  local nm, n = base, 2
+  while M.agentGet(state, nm) do nm = base .. " " .. n; n = n + 1 end
+  copy.name = nm; copy.forkedFrom = src.name; copy.favorite = false
+  local st = M.agentPush(state, copy)
+  return st, true
+end
+
+-- Bounded sort for the registry list. key in {name, favorite, lastUsed, updated}.
+function M.agentSort(list, key)
+  local out = {}
+  for _, p in ipairs(list or {}) do out[#out + 1] = p end
+  local k = tostring(key or "name")
+  local function lc(s) return tostring(s or ""):lower() end
+  table.sort(out, function(a, b)
+    if k == "favorite" then
+      local fa, fb = a.favorite and 1 or 0, b.favorite and 1 or 0
+      if fa ~= fb then return fa > fb end
+      return lc(a.name) < lc(b.name)
+    elseif k == "lastUsed" then
+      local la, lb = tonumber(a.lastSpawnedAt) or 0, tonumber(b.lastSpawnedAt) or 0
+      if la ~= lb then return la > lb end
+      return lc(a.name) < lc(b.name)
+    end
+    return lc(a.name) < lc(b.name)
+  end)
+  return out
+end
+
+-- ---- MCP server registry (cc-mcp.json) -------------------------------------
+M.MCP_TRANSPORTS = { stdio = true, sse = true, http = true }
+local function mcplist(state)
+  if type(state) == "table" and type(state.servers) == "table" then return state.servers end
+  return {}
+end
+
+function M.validateMcp(rec)
+  if type(rec) ~= "table" then return { ok = false, errors = { "not an object" } } end
+  local errs = {}
+  if agTrim(rec.id) == "" then errs[#errs + 1] = "missing required field: id" end
+  local tr = agTrim(rec.transport):lower()
+  if not M.MCP_TRANSPORTS[tr] then
+    errs[#errs + 1] = "transport must be stdio|sse|http"
+  elseif tr == "stdio" then
+    if agTrim(rec.command) == "" then errs[#errs + 1] = "stdio transport needs a command" end
+  else
+    if agTrim(rec.url) == "" then errs[#errs + 1] = tr .. " transport needs a url" end
+  end
+  return { ok = #errs == 0, errors = errs }
+end
+
+local function mcNorm(rec)
+  return { id = agTrim(rec.id), label = rec.label, transport = agTrim(rec.transport):lower(),
+           command = rec.command, args = agStrList(rec.args), url = rec.url,
+           allowedTools = agStrList(rec.allowedTools), authTokenEnv = rec.authTokenEnv,
+           description = rec.description }
+end
+
+function M.mcpLoad(state)
+  local valid, errors, seen = {}, {}, {}
+  for _, rec in ipairs(mcplist(state)) do
+    local v = M.validateMcp(rec)
+    local id = (type(rec) == "table") and agTrim(rec.id) or ""
+    if not v.ok then
+      errors[#errors + 1] = { id = id ~= "" and id or "(no id)",
+                              reason = table.concat(v.errors, "; ") }
+    elseif seen[id] then
+      errors[#errors + 1] = { id = id, reason = "duplicate id (kept first)" }
+    else
+      seen[id] = true; valid[#valid + 1] = mcNorm(rec)
+    end
+  end
+  return { valid = valid, errors = errors }
+end
+
+function M.mcpList(state) return M.mcpLoad(state).valid end
+
+function M.mcpPush(state, rec, cap)
+  cap = tonumber(cap) or M.MCP_CAP
+  local list = M.mcpList(state)
+  rec = type(rec) == "table" and rec or {}
+  local v = M.validateMcp(rec)
+  if not v.ok then return { servers = list }, false, v.errors end
+  local entry = mcNorm(rec)
+  local out, replaced = {}, false
+  for _, s in ipairs(list) do
+    if s.id == entry.id then out[#out + 1] = entry; replaced = true
+    else out[#out + 1] = s end
+  end
+  if not replaced then table.insert(out, 1, entry) end
+  while #out > cap do table.remove(out) end
+  return { servers = out }, true
+end
+
+function M.mcpRemove(state, id)
+  local out = {}
+  for _, s in ipairs(M.mcpList(state)) do
+    if s.id ~= id then out[#out + 1] = s end
+  end
+  return { servers = out }
+end
+
+function M.mcpGet(state, id)
+  for _, s in ipairs(M.mcpList(state)) do
+    if s.id == id then return s end
+  end
+  return nil
+end
+
+-- Build the claude `--mcp-config` object from resolved MCP records. stdio ->
+-- {command,args,env?}; sse/http -> {type,url,headers?}. Secrets ride as ${VAR}
+-- refs (Claude Code expands them at launch) — Shepherd never stores the value.
+function M.mcpConfig(servers)
+  local mcp = {}
+  for _, s in ipairs(servers or {}) do
+    local id = agTrim(s.id)
+    if id ~= "" then
+      local tr = agTrim(s.transport):lower()
+      local hasTok = s.authTokenEnv and agTrim(s.authTokenEnv) ~= ""
+      if tr == "stdio" then
+        local e = { command = s.command, args = agStrList(s.args) }
+        if hasTok then e.env = { [tostring(s.authTokenEnv)] = "${" .. tostring(s.authTokenEnv) .. "}" } end
+        mcp[id] = e
+      elseif tr == "sse" or tr == "http" then
+        local e = { type = tr, url = s.url }
+        if hasTok then e.headers = { Authorization = "Bearer ${" .. tostring(s.authTokenEnv) .. "}" } end
+        mcp[id] = e
+      end
+    end
+  end
+  return { mcpServers = mcp }
+end
+
+-- Compose a profile's persona (role/goal/backstory) for --append-system-prompt.
+-- nil when there are no persona fields (so the spawn stays byte-identical).
+function M.personaPrompt(profile)
+  if type(profile) ~= "table" then return nil end
+  local parts = {}
+  local role, goal, back = agTrim(profile.role), agTrim(profile.goal), agTrim(profile.backstory)
+  if role ~= "" then parts[#parts + 1] = "You are " .. role .. "." end
+  if goal ~= "" then parts[#parts + 1] = "Your goal: " .. goal end
+  if back ~= "" then parts[#parts + 1] = back end
+  if #parts == 0 then return nil end
+  return table.concat(parts, "\n")
+end
+
+-- Which required env-var NAMES are unset/blank in the spawned shell env.
+-- requiredEnv: list of { name, required? } or bare strings (required by default).
+function M.missingEnv(profile, shellEnv)
+  shellEnv = type(shellEnv) == "table" and shellEnv or {}
+  local missing = {}
+  local req = (type(profile) == "table") and profile.requiredEnv or nil
+  for _, e in ipairs(type(req) == "table" and req or {}) do
+    local name = (type(e) == "table") and agTrim(e.name) or agTrim(e)
+    local isReq = (type(e) ~= "table") or (e.required ~= false)
+    if name ~= "" and isReq then
+      local val = shellEnv[name]
+      if val == nil or tostring(val) == "" then missing[#missing + 1] = name end
+    end
+  end
+  return missing
+end
+
+-- Profile-derived launch flags (L1), appended after the base spawnFlags inside
+-- spawnSpec. All optional -> {} (a non-agent spawn is byte-identical). The shell
+-- sinks shArg-quote value-bearing flags; the kitty argv path keeps them raw.
+-- opts: { appendSystemPrompt, mcpConfigPath, strictMcp, agentName, addDirs[], pluginDirs[] }
+function M.spawnExtraFlags(opts)
+  opts = opts or {}
+  local f = {}
+  if opts.appendSystemPrompt and agTrim(opts.appendSystemPrompt) ~= "" then
+    f[#f + 1] = "--append-system-prompt"; f[#f + 1] = tostring(opts.appendSystemPrompt)
+  end
+  if opts.mcpConfigPath and agTrim(opts.mcpConfigPath) ~= "" then
+    f[#f + 1] = "--mcp-config"; f[#f + 1] = tostring(opts.mcpConfigPath)
+    if opts.strictMcp then f[#f + 1] = "--strict-mcp-config" end
+  end
+  if opts.agentName and agTrim(opts.agentName) ~= "" then
+    f[#f + 1] = "--agent"; f[#f + 1] = tostring(opts.agentName)
+  end
+  for _, d in ipairs(opts.addDirs or {}) do
+    if agTrim(d) ~= "" then f[#f + 1] = "--add-dir"; f[#f + 1] = tostring(d) end
+  end
+  for _, p in ipairs(opts.pluginDirs or {}) do
+    if agTrim(p) ~= "" then f[#f + 1] = "--plugin-dir"; f[#f + 1] = tostring(p) end
+  end
+  return f
+end
+
+-- Resolve a saved agent profile into a concrete spawn intent. ctx = { mcpState }
+-- (the MCP registry to dereference mcpServers names against). Returns the pieces
+-- the FX layer turns into spawnSpec opts + an mcp-config file:
+--   { folder, permMode, providerId, seedPrompt, appendSystemPrompt, agentName,
+--     addDirs[], pluginDirs[], mcpServers[](resolved), mcpConfig(table|nil),
+--     policyBundle, errors[] }.
+function M.resolveAgent(profile, ctx)
+  ctx = ctx or {}
+  local res = { errors = {}, addDirs = {}, pluginDirs = {}, mcpServers = {} }
+  if type(profile) ~= "table" then res.errors[#res.errors + 1] = "no profile"; return res end
+  res.folder = profile.folder
+  res.permMode = profile.permMode
+  res.providerId = (agTrim(profile.provider) ~= "") and profile.provider or nil
+  res.seedPrompt = (agTrim(profile.seedPrompt) ~= "") and profile.seedPrompt or nil
+  res.appendSystemPrompt = M.personaPrompt(profile)
+  res.agentName = (agTrim(profile.agentName) ~= "") and profile.agentName or nil
+  res.policyBundle = profile.policyBundle
+  res.addDirs = agStrList(profile.knowledge)
+  res.pluginDirs = agStrList(profile.plugins)
+  local servers = {}
+  for _, id in ipairs(agStrList(profile.mcpServers)) do
+    local rec = M.mcpGet(ctx.mcpState, id)
+    if rec then servers[#servers + 1] = rec
+    else res.errors[#res.errors + 1] = "MCP server not found: " .. id end
+  end
+  res.mcpServers = servers
+  if #servers > 0 then res.mcpConfig = M.mcpConfig(servers) end
+  return res
+end
+
+-- Profiles whose folderGlobs match `dir` (folder-scoped auto-attach). A profile
+-- with no folderGlobs never auto-matches; a malformed glob fails open (skipped,
+-- never errors). Glob syntax: `*` within a path segment, `**` across segments;
+-- a leading `~` expands to $HOME.
+function M.profilesForFolder(profiles, dir)
+  local d = M.normDir(tostring(dir or ""))
+  local out = {}
+  if d == "" then return out end
+  local home = os.getenv("HOME") or "~"
+  for _, p in ipairs(profiles or {}) do
+    for _, g in ipairs(agStrList(p.folderGlobs)) do
+      local glob = g:gsub("^~", home)
+      -- escape Lua-pattern magic (NOT `*`), then map `**`->`.*`, `*`->`[^/]*`.
+      local pat = "^" .. glob:gsub("[%^%$%(%)%.%[%]%+%-%%]", "%%%1")
+                              :gsub("%*%*", "\1"):gsub("%*", "[^/]*"):gsub("\1", ".*") .. "$"
+      local ok, m = pcall(string.match, d, pat)
+      if ok and m then out[#out + 1] = p; break end
+    end
+  end
+  return out
+end
+
+-- ---- Skills enumerator (L1 skills card) ------------------------------------
+-- Parse a SKILL.md / microagent .md leading YAML frontmatter into a card. Strips
+-- a `---`...`---` fence and reads name/display_title/description; falls back to
+-- the file stem for name. Pure (operates on file text the FX layer reads).
+function M.parseSkillFrontmatter(text, stem)
+  local out = { name = agTrim(stem), display_title = nil, description = nil }
+  text = tostring(text or "")
+  local fm = text:match("^%s*%-%-%-%s*\n(.-)\n%s*%-%-%-")
+  if fm then
+    for line in (fm .. "\n"):gmatch("(.-)\n") do
+      local k, v = line:match("^%s*([%w_]+)%s*:%s*(.-)%s*$")
+      if k then
+        v = v:gsub('^"(.*)"$', "%1"):gsub("^'(.*)'$", "%1")
+        local lk = k:lower()
+        if lk == "name" and agTrim(v) ~= "" then out.name = agTrim(v)
+        elseif lk == "display_title" or lk == "title" then out.display_title = agTrim(v)
+        elseif lk == "description" then out.description = agTrim(v) end
+      end
+    end
+  end
+  if out.name == "" then out.name = agTrim(stem) end
+  return out
+end
+
+-- The /<name> slash command a skill exposes (lowercased, spaces -> "-").
+function M.skillCommand(name)
+  local n = agTrim(name):lower():gsub("%s+", "-")
+  if n == "" then return nil end
+  return "/" .. n
 end
 
 return M

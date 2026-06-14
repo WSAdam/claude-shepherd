@@ -3190,5 +3190,164 @@ do
   check("standupMarkdown: empty window explains the ledger", mdEmpty:find("ledger must be enabled", 1, true) ~= nil)
 end
 
+-- ---- L1: Agent Profiles registry -------------------------------------------
+do
+  -- validateAgent: required + shape + unknown-field + cross-refs
+  check("validateAgent: missing name", core.validateAgent({}).ok == false)
+  check("validateAgent: ok minimal", core.validateAgent({ name = "rev" }).ok == true)
+  check("validateAgent: relative folder rejected",
+    core.validateAgent({ name = "a", folder = "rel/path" }).ok == false)
+  check("validateAgent: absolute folder ok",
+    core.validateAgent({ name = "a", folder = "/abs" }).ok == true)
+  check("validateAgent: array field must be a list",
+    core.validateAgent({ name = "a", skills = "nope" }).ok == false)
+  check("validateAgent: unknown field flagged",
+    core.validateAgent({ name = "a", bogus = 1 }).ok == false)
+  local xref = core.validateAgent({ name = "a", provider = "missing", mcpServers = { "x" } },
+    { providers = {}, mcp = {} })
+  check("validateAgent: cross-ref provider not found", xref.ok == false and #xref.errors == 2)
+
+  -- agentPush/List/Get/Remove: strict save, replace-in-place, drop malformed
+  local st = { agents = {} }
+  local saved
+  st, saved = core.agentPush(st, { name = "reviewer", role = "a senior reviewer",
+    provider = "claude", skills = { "code-review" } })
+  check("agentPush: saved valid", saved == true)
+  st = (core.agentPush(st, { name = "builder", folder = "/work" }))
+  eq("agentList: two agents", #core.agentList(st), 2)
+  check("agentGet: by name", core.agentGet(st, "reviewer").role == "a senior reviewer")
+  local _, bad = core.agentPush(st, { name = "" })
+  check("agentPush: rejects invalid (no name)", bad == false)
+  st = (core.agentPush(st, { name = "reviewer", role = "updated" }))
+  eq("agentPush: replace-in-place (still 2)", #core.agentList(st), 2)
+  check("agentPush: in-place updated value", core.agentGet(st, "reviewer").role == "updated")
+  st = core.agentRemove(st, "builder")
+  eq("agentRemove: one left", #core.agentList(st), 1)
+
+  -- agentLoad fail-safe: drop the bad, keep the good, report the drop
+  local rep = core.agentLoad({ agents = { { name = "good" }, { name = "" }, { name = "good" } } })
+  eq("agentLoad: one valid kept", #rep.valid, 1)
+  eq("agentLoad: two errors (blank + dup)", #rep.errors, 2)
+
+  -- agentFork: unique name + lineage stamp
+  local fk = (core.agentFork(st, "reviewer"))
+  check("agentFork: copy exists", core.agentGet(fk, "reviewer (copy)") ~= nil)
+  check("agentFork: lineage stamped", core.agentGet(fk, "reviewer (copy)").forkedFrom == "reviewer")
+
+  -- agentSort: favorite-first then name
+  local list = { { name = "zed" }, { name = "amy", favorite = true }, { name = "bob" } }
+  local sorted = core.agentSort(list, "favorite")
+  eq("agentSort: favorite first", sorted[1].name, "amy")
+  eq("agentSort: name order", core.agentSort(list, "name")[1].name, "amy")
+end
+
+-- ---- L1: MCP registry + mcp-config -----------------------------------------
+do
+  check("validateMcp: stdio needs command",
+    core.validateMcp({ id = "x", transport = "stdio" }).ok == false)
+  check("validateMcp: stdio ok",
+    core.validateMcp({ id = "x", transport = "stdio", command = "npx" }).ok == true)
+  check("validateMcp: http needs url",
+    core.validateMcp({ id = "x", transport = "http" }).ok == false)
+  check("validateMcp: bad transport",
+    core.validateMcp({ id = "x", transport = "carrier-pigeon", command = "x" }).ok == false)
+
+  local m = { servers = {} }
+  m = (core.mcpPush(m, { id = "linear", transport = "sse", url = "https://mcp.linear.app/sse" }))
+  m = (core.mcpPush(m, { id = "local", transport = "stdio", command = "npx",
+    args = { "-y", "srv" }, authTokenEnv = "MY_TOKEN" }))
+  eq("mcpList: two servers", #core.mcpList(m), 2)
+  check("mcpGet: by id", core.mcpGet(m, "linear").transport == "sse")
+
+  local cfg = core.mcpConfig(core.mcpList(m))
+  check("mcpConfig: stdio command", cfg.mcpServers["local"].command == "npx")
+  check("mcpConfig: stdio env ref", cfg.mcpServers["local"].env.MY_TOKEN == "${MY_TOKEN}")
+  check("mcpConfig: sse type+url", cfg.mcpServers["linear"].type == "sse"
+    and cfg.mcpServers["linear"].url == "https://mcp.linear.app/sse")
+end
+
+-- ---- L1: persona / extra flags / resolver / env ----------------------------
+do
+  eq("personaPrompt: nil when empty", core.personaPrompt({ name = "x" }), nil)
+  local pp = core.personaPrompt({ role = "a reviewer", goal = "find bugs", backstory = "Be terse." })
+  check("personaPrompt: role line", pp:find("You are a reviewer.", 1, true) ~= nil)
+  check("personaPrompt: goal line", pp:find("Your goal: find bugs", 1, true) ~= nil)
+
+  eq("spawnExtraFlags: empty when none", #core.spawnExtraFlags({}), 0)
+  local xf = core.spawnExtraFlags({ appendSystemPrompt = "you are bob", mcpConfigPath = "/tmp/m.json",
+    strictMcp = true, agentName = "reviewer", addDirs = { "/k" }, pluginDirs = { "/p" } })
+  local joined = table.concat(xf, " ")
+  check("spawnExtraFlags: append-system-prompt", joined:find("--append-system-prompt you are bob", 1, true) ~= nil)
+  check("spawnExtraFlags: mcp-config + strict", joined:find("--mcp-config /tmp/m.json --strict-mcp-config", 1, true) ~= nil)
+  check("spawnExtraFlags: --agent", joined:find("--agent reviewer", 1, true) ~= nil)
+  check("spawnExtraFlags: --add-dir", joined:find("--add-dir /k", 1, true) ~= nil)
+  check("spawnExtraFlags: --plugin-dir", joined:find("--plugin-dir /p", 1, true) ~= nil)
+
+  -- resolveAgent dereferences MCP names; reports a missing one
+  local mcpState = (core.mcpPush({ servers = {} }, { id = "linear", transport = "sse", url = "u" }))
+  local res = core.resolveAgent({ name = "r", provider = "claude", seedPrompt = "go",
+    role = "a reviewer", knowledge = { "/docs" }, mcpServers = { "linear", "ghost" } },
+    { mcpState = mcpState })
+  eq("resolveAgent: providerId", res.providerId, "claude")
+  eq("resolveAgent: seedPrompt", res.seedPrompt, "go")
+  check("resolveAgent: persona built", res.appendSystemPrompt ~= nil)
+  eq("resolveAgent: addDirs from knowledge", res.addDirs[1], "/docs")
+  eq("resolveAgent: one MCP resolved", #res.mcpServers, 1)
+  check("resolveAgent: mcpConfig built", res.mcpConfig ~= nil)
+  check("resolveAgent: missing MCP reported", #res.errors == 1)
+
+  -- missingEnv
+  local miss = core.missingEnv({ requiredEnv = { "PRESENT", { name = "ABSENT" }, { name = "OPT", required = false } } },
+    { PRESENT = "1" })
+  eq("missingEnv: only the absent required one", #miss, 1)
+  eq("missingEnv: it is ABSENT", miss[1], "ABSENT")
+end
+
+-- ---- L1: spawn integration (flags flow through; non-agent unchanged) --------
+do
+  local si = core.spawnInner("/tmp/x", nil,
+    { flags = { "--permission-mode", "default", "--append-system-prompt", "you are bob" } })
+  check("spawnInner: safe flag raw", si:find("--permission-mode default", 1, true) ~= nil)
+  check("spawnInner: spaced flag quoted", si:find("'you are bob'", 1, true) ~= nil)
+
+  local spec = core.spawnSpec("terminal", "/tmp/x", nil,
+    { permissionMode = "plan", appendSystemPrompt = "be terse", agentName = "rev" })
+  check("spawnSpec: agent flags appear", spec.applescript:find("--agent rev", 1, true) ~= nil)
+  check("spawnSpec: persona quoted in applescript", spec.applescript:find("'be terse'", 1, true) ~= nil)
+  local base = core.spawnSpec("kitty", "/tmp/x", nil, { permissionMode = "plan" })
+  check("spawnSpec: non-agent kitty has no agent flags",
+    table.concat(base.argv, " "):find("--append-system-prompt", 1, true) == nil)
+end
+
+-- ---- L1: skills frontmatter + slash command --------------------------------
+do
+  local sk = core.parseSkillFrontmatter(
+    "---\nname: code-review\ndisplay_title: Code Review\ndescription: \"Review a diff.\"\n---\nBody here", "fallback")
+  eq("parseSkill: name from frontmatter", sk.name, "code-review")
+  eq("parseSkill: display_title", sk.display_title, "Code Review")
+  eq("parseSkill: description (dequoted)", sk.description, "Review a diff.")
+  eq("parseSkill: stem fallback when no frontmatter",
+    core.parseSkillFrontmatter("just a body, no fence", "my-skill").name, "my-skill")
+  eq("skillCommand: slugified", core.skillCommand("Deep Planning"), "/deep-planning")
+  eq("skillCommand: nil on blank", core.skillCommand("  "), nil)
+end
+
+-- ---- L1: folder-scoped profile matching ------------------------------------
+do
+  local profs = {
+    { name = "fe", folderGlobs = { "/work/frontend/**" } },
+    { name = "any", folderGlobs = { "/work/*" } },
+    { name = "none" },
+  }
+  local m1 = core.profilesForFolder(profs, "/work/frontend/app/sub")
+  local names = {}; for _, p in ipairs(m1) do names[p.name] = true end
+  check("profilesForFolder: ** matches deep", names.fe == true)
+  check("profilesForFolder: single * matches one segment", core.profilesForFolder(profs, "/work/api")[1] ~= nil)
+  check("profilesForFolder: no-glob profile never matches",
+    (function() for _, p in ipairs(core.profilesForFolder(profs, "/work/api")) do
+       if p.name == "none" then return false end end; return true end)())
+  eq("profilesForFolder: empty dir -> none", #core.profilesForFolder(profs, ""), 0)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

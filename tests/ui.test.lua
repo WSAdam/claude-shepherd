@@ -727,5 +727,52 @@ do
         src:find('else if(which === "shift"){ if(LEDGER_ON) openShiftReport(); }', 1, true) ~= nil)
 end
 
+-- ---- L1 Agent Profiles: dashboard wiring pins ------------------------------
+-- Source-level guards that the L1 FX layer / handleAction / modal JS stay wired
+-- (claude-dashboard.lua is not directly unit-tested; the pure logic is in
+-- cc-core + core.test). These catch an accidental unwiring on refactor.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("l1-pin: dashboard source readable", #src > 0)
+
+  -- FX layer
+  check("l1-pin: AGENT_FILE constant", src:find("cc%-agents%.json") ~= nil)
+  check("l1-pin: MCP_FILE constant", src:find("cc%-mcp%.json") ~= nil)
+  check("l1-pin: FX.readAgents", src:find("function FX.readAgents()", 1, true) ~= nil)
+  check("l1-pin: FX.writeAgents", src:find("function FX.writeAgents(", 1, true) ~= nil)
+  check("l1-pin: FX.readMcp", src:find("function FX.readMcp()", 1, true) ~= nil)
+  check("l1-pin: FX.listSkills enumerator", src:find("function FX.listSkills()", 1, true) ~= nil)
+  check("l1-pin: listSkills uses core parser", src:find("core.parseSkillFrontmatter", 1, true) ~= nil)
+  check("l1-pin: FX.writeMcpConfig", src:find("function FX.writeMcpConfig(", 1, true) ~= nil)
+
+  -- spawnSession threads agentOpts -> spawnExtraFlags (via opts.*)
+  check("l1-pin: spawnSession takes agentOpts",
+        src:find("function FX.spawnSession(editor, project, task, permissionMode, providerId, agentOpts)", 1, true) ~= nil)
+  check("l1-pin: opts.appendSystemPrompt threaded", src:find("opts.appendSystemPrompt = agentOpts.appendSystemPrompt", 1, true) ~= nil)
+  check("l1-pin: opts.mcpConfigPath threaded", src:find("opts.mcpConfigPath = agentOpts.mcpConfigPath", 1, true) ~= nil)
+
+  -- handleAction CRUD + spawn-from-agent
+  check("l1-pin: agent CRUD action", src:find('a == "agent%-save" or a == "agent%-delete" or a == "agent%-fork"') ~= nil)
+  check("l1-pin: agentPush wired", src:find("core.agentPush(FX.readAgents()", 1, true) ~= nil)
+  check("l1-pin: agentFork wired", src:find("core.agentFork(FX.readAgents()", 1, true) ~= nil)
+  check("l1-pin: mcp CRUD action", src:find('a == "mcp%-save" or a == "mcp%-delete"') ~= nil)
+  check("l1-pin: spawn resolves a saved agent", src:find("core.resolveAgent(profile, { mcpState = FX.readMcp() })", 1, true) ~= nil)
+  check("l1-pin: spawn writes the mcp-config", src:find("FX.writeMcpConfig(profile.name, res.mcpConfig)", 1, true) ~= nil)
+  check("l1-pin: spawn passes agentOpts", src:find("payload.provider and tostring(payload.provider) or nil, agentOpts)", 1, true) ~= nil)
+  check("l1-pin: spawn_agent ledger event", src:find('type = "spawn_agent"', 1, true) ~= nil)
+  check("l1-pin: open-new feeds agentState", src:find("agentState = { agents = core.agentList(FX.readAgents())", 1, true) ~= nil)
+
+  -- modal JS
+  check("l1-pin: Agents chip row in modal", src:find('id="n%-agents"') ~= nil)
+  check("l1-pin: skills card in modal", src:find('id="n%-skills"') ~= nil)
+  check("l1-pin: showNew takes agentState", src:find("function showNew(cfg, recent, browse, presetState, agentState){", 1, true) ~= nil)
+  check("l1-pin: agentSpawn carries agent name", src:find("agent:p.name", 1, true) ~= nil)
+  check("l1-pin: ccAgents updater", src:find("function ccAgents(list)", 1, true) ~= nil)
+  check("l1-pin: saveAgent button", src:find("function saveAgent()", 1, true) ~= nil)
+  check("l1-pin: renderSkills card", src:find("function renderSkills()", 1, true) ~= nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

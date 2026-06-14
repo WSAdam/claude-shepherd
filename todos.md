@@ -204,6 +204,475 @@ remaining items. Full per-round detail is in CHANGELOG.md and git history.
   - **idle sessions as routing targets** — idle may be a session you're actively typing into.
   - **remote tiles as routing targets** — pairs with `bridge.keystrokes` (hardware-gated above).
 
+## Candidate features — cross-project mining backlog
+
+Built by adversarially mining top AI orchestration/governance apps (12 domains each: finders → dedup →
+FOR/AGAINST judge → skeptic verify) for features worth ADAPTing onto Shepherd's primitives. CANDIDATES for
+one consolidated "big push" — more projects get mined first, then we build. Not started; off-by-default like
+everything that automates. Per-project reports (full FOR/AGAINST/ruling/mapping for every candidate) live in
+`docs/feature-mining/`.
+
+- **LiteLLM** (2026-06-14): 236 features → 143 candidates → 46 ADAPT / 97 DON'T-ADD / 0 verbatim-fit (it's a
+  proxy; Shepherd isn't). Seeded **L1/L2/L3** below. Report: [docs/feature-mining/litellm.md](docs/feature-mining/litellm.md).
+- **crewAI** (2026-06-14): 203 → 82 → 36 ADAPT / 46 DON'T-ADD / 0 verbatim-fit (it's an in-process agent
+  *executor*; Shepherd watches/steers/spawns, runs nothing). **33 of 36 ADAPT independently corroborated
+  L1/L2/L3** (an independent framework converging on the same design) and enriched them with the
+  *crewAI-corroborated* sub-bullets below; the 3 genuinely-new items became **L4**. Report:
+  [docs/feature-mining/crewai.md](docs/feature-mining/crewai.md).
+- **OpenHands** (2026-06-14): 163 → 91 → 53 ADAPT / 38 DON'T-ADD / 0 verbatim-fit (an in-process agent
+  *executor* AND a multi-user web server — double mismatch). **Third independent corroboration of L1** (32
+  ADAPT reinforced it). Added **L5** (richer watch-console observability/detail) + **L6** (event-callback rule
+  engine) and the *OpenHands-corroborated* enrichments below. Report:
+  [docs/feature-mining/openhands.md](docs/feature-mining/openhands.md).
+- **cline** (2026-06-14): 177 → 90 → 67 ADAPT / 22 DON'T-ADD / 0 verbatim-fit (VS Code/CLI coding-agent
+  platform; executor + partial hub mismatch). **65/67 ADAPT reinforce L1–L6** (L1×28, L5×15, L4×10). New:
+  scheduling (→ **L7**) + OS-native notifications. Report: [docs/feature-mining/cline.md](docs/feature-mining/cline.md).
+- **AutoGPT** (2026-06-14): 175 → 84 → 59 ADAPT / 25 DON'T-ADD / 0 verbatim-fit (visual agent-builder platform;
+  graph/block executor + multi-user web double mismatch). **58/59 ADAPT reinforce L1–L6** (L1×28, L6×8). New:
+  scheduling (→ **L7**) + loop-detection watchdog. Report: [docs/feature-mining/autogpt.md](docs/feature-mining/autogpt.md).
+
+> **Cross-source signal:** L1 (Agent Profiles) has now been independently reaffirmed by all **5** mined sources;
+> L2–L6 recur across them. The backlog shape is well-validated — the cline+AutoGPT batch added **L7** (scheduling)
+> and folded *cline/AutoGPT-corroborated* enrichments into L1/L4/L5; the rest re-confirmed (detail in the reports).
+
+**Build sequence (decided 2026-06-14):** Phase 0 Foundation (spawn-flag emission + config-by-ref resolver +
+pre-flight validator + `FX.listSkills` + `cc-agents.json`/`cc-mcp.json` loaders) → **Phase 2 L1 Agent Profiles**
+(the headline — building Phase 0 + L1 FIRST per user pick) → Phase 1 L5 quick wins → Phase 3 L2 + L1 polish →
+Phase 4 L4 + L7 → Phase 5 L6 + L5 remainder. Each increment keeps `make test` green and ships via `make deploy`.
+**L4 routing source DECIDED:** the affinity tag comes from a **queue-line `@role:` prefix** (parsed in
+`queueSplitLines`), not session-group or provider — explicit, per-task, no new UI.
+
+**Three load-bearing facts the build must honor** (verified during mining 2026-06-14):
+- **The `claude` CLI is present** at `~/.local/bin/claude` (v2.1.175) — corrects the old "no claude CLI on
+  this Mac" note. It exposes `--mcp-config <files>` / `--strict-mcp-config`, `--agent` / `--agents`,
+  `--plugin-dir`, `--append-system-prompt`, `--add-dir`, and the `claude plugin` / `claude mcp add`
+  subcommands, so launch-flag wiring is feasible. BUT native Claude Code already reads project `.mcp.json`
+  and keeps its own plugin/MCP registry — Shepherd stays a thin fleet-convenience layer (emit flags/files);
+  it does NOT reimplement MCP/skills/plugins. Skills live at `~/.claude/skills/<name>/SKILL.md`
+  (frontmatter `name`/`display_title`/`description`).
+- **`gate.tools` is a HOLD-FOR-APPROVAL / escalation list, NOT a capability allow-list.** Tools *not* in it
+  run freely (`cc-approve.sh` `*) exit 0`). So a "read-only agent" is built by **autoDeny** of the mutating
+  set (`Bash Write Edit MultiEdit NotebookEdit` = `DEFAULT_GATE_TOOLS`), never by adding them to `gate.tools`.
+  Any mapping phrased as "seed the allow-list to grant a tool" is backwards — fix it at design time.
+- **Secrets never stored.** Reuse the `providerEnv` pattern ([cc-core.lua](cc-core.lua) ~2710/2714): records
+  store the env-var *NAME* (`authTokenEnv`), expanded by the spawned login shell via `loginShellWrap`. New
+  registries (`cc-agents.json`, `cc-mcp.json`) are operator-data JSON like `cc-presets.json`, living OUTSIDE
+  the Settings round-trip. Spawn side-effects gate behind `spawn.live` (default dry-run). VS Code/Cursor
+  spawn is keystroke-only → flag injection is best-effort; reliable on Kitty/Terminal (same caveat as
+  provider-env spawns).
+
+### L1 — Agent Profiles registry (saved agents + skills + MCP, "spawn from a saved agent") — effort **L**
+> ✅ **CORE SHIPPED 2026-06-14** (see CHANGELOG): Phase 0 foundation + spawn-from-agent + Save-as-agent + a
+> read-only skills card + agent/MCP CRUD, all in `cc-agents.json`/`cc-mcp.json`. **Deferred follow-up** (cc-core
+> already supports it): the richer registry-management UI — folders/favorites/hide/archive/**fork** buttons, a
+> **sort** dropdown, an in-panel **skills/MCP/knowledge attach** editor, an **MCP-registry management** surface,
+> per-mode model binding + folderGlobs auto-attach UI. Today those arrays are edited in the JSON by hand.
+*Source: ADAPT items 1–9 (Provider-native Agents CRUD, Skills registry, MCP server registry, Named toolsets,
+MCP access groups, Public MCP registry/discovery, per-server MCP health, Access groups, Plugin marketplace).
+The user's #1 stated interest — "pre-configured agents we hand work off to, saved into a directory; same with
+skills and MCPs."* Nine LiteLLM features converge into ONE: extend the spawn-preset primitive into a saved
+**agent profile** + a **"Spawn from agent"** action.
+
+- **Registry (preset++ / `cc-agents.json`):** pure cc-core CRUD `agentList/agentPush/agentRemove` mirroring
+  `presetPush/presetList` ([cc-core.lua](cc-core.lua) ~3640–3722; validate + cap + replace-in-place, zero
+  `hs.*`). Profile = `{name, folder, provider, model, permMode, seedPrompt, policyBundle (see L2), skills[],
+  mcpServers[], plugins[], versions[]?}` — a superset of the existing preset, not a parallel system. Optional
+  local-only `versions[]` (reuse the session-lineage mindset; no remote object).
+- **Spawn from agent:** new action via the New Session modal → `spawnSpec` ([cc-core.lua:3061](cc-core.lua#L3061)),
+  seeds the session queue with `seedPrompt`, threads selections into `spawnFlags`
+  ([cc-core.lua:3001](cc-core.lua#L3001)) as `--mcp-config`/`--strict-mcp-config`, `--append-system-prompt`
+  (skills/system), `--agent`/`--plugin-dir`, and applies the profile's policy bundle.
+- **MCP server registry (`cc-mcp.json`):** named records `{id, label, transport(stdio|sse|http), command,
+  args, url, allowedTools, authTokenEnv}`, modeled on the `providers` registry. Pure validator +
+  mcp-config-file builder. MCP picker in the modal; attachable to a profile.
+- **Skills (read-mostly):** pure enumerator over `~/.claude/skills/*/SKILL.md` parsing frontmatter → card view
+  via a new `FX.listSkills` file read. Authoring stays "drop a folder in ~/.claude/skills" — no DB.
+- **Plugins:** optional per-profile list; apply via `claude plugin install` on spawn (gated by `spawn.live`),
+  degrade gracefully if the CLI/subcommand is absent.
+- **MCP inventory badge (narrowed from "health check"):** `~/.claude.json` holds only config (no runtime
+  status), so true health is NOT locally sourceable. Build a pure derivation reading `~/.claude.json` +
+  project `.mcp.json` → per-session configured servers + enabled/disabled state; best-effort last-error from
+  `~/.claude/debug/*.txt` ONLY when present, else "unknown". Off-by-default tile/detail badge, sibling to
+  `stale`/`hung`.
+- **DROP:** all Prisma tables, multi-tenant access-groups/teams/keys + assignment/propagation, make-public,
+  A2A agent cards, per-agent billing, the `marketplace.json`/`/discover`/`/registry.json` endpoints +
+  submission/approve/reject workflow, the `/v1/skills` proxy + zip/Bytes storage + SkillVersion + ownership,
+  server-side health pings/endpoints, live ClientSessions + namespacing/strip-on-call routing, stored auth
+  values.
+- **crewAI-corroborated enrichments** (independent second source; fold into the profile schema):
+  - **Structured identity:** split `seedPrompt` into `{role, goal, backstory}` subfields rendered into the
+    `--append-system-prompt` persona block; show role/goal on the profile card for scannability. Drop crewAI's
+    md5 identity/cache key (no in-process cache to hash).
+  - **`knowledge[]`** = validated local paths → `--add-dir` at spawn (+ small inline refs via
+    `--append-system-prompt`); fleet-default vs per-profile scope. Claude Code does the retrieval — NO
+    embedder/vector store/chunking.
+  - **`requiredEnv: [{name, description, required, default}]`** on profiles + `cc-mcp.json` records; pure
+    `core.missingEnv(profile, shellEnv)` checks NAME-presence only (never values, via `loginShellWrap`) →
+    New-Session preflight warning + optional tile badge.
+  - **Pre-flight validation/lint:** a pure validator family (sibling to `presetList`/`templateList`
+    [cc-core.lua](cc-core.lua) ~3590–3722) returns aggregated structured errors (unknown-field,
+    missing-required, bad cross-ref: `policyBundle`/`mcpServers[]`/`skills[]` must resolve) and **refuses
+    spawn/attach with the full list before emitting any flag**. Per-registry known-fields allowlist so adding
+    optional fields (e.g. `versions[]`) doesn't trip it. Shared with L2 attach + L3 render-refuse.
+  - **Config-by-reference resolver:** the profile stores NAMES; ONE pure resolver dereferences
+    provider/policyBundle/skills[]/mcpServers[]/plugins[] against the providers list, L2 bundles, `cc-mcp.json`,
+    `~/.claude/skills` at "Spawn from agent", then `spawnFlags` emits concrete flags. This IS L2's resolver,
+    generalized — single-source it (extends `providerById`:2632 / `resolveGateTools`:2537).
+  - **Batch fan-out spawn:** pick profile + parameterized template (L3) + paste N input rows → render per row →
+    fan out one session per row with its queue seeded; gated by `spawn.live` (dry-run default); `by:"batch"`
+    ledger event; aggregate per-session usage into insights. Pure row-split/render in cc-core; effects via `fx`.
+  - **Safe-path hardening:** skill/MCP/plugin name resolvers validate against `[A-Za-z0-9._-]` and reject any
+    name resolving outside its root BEFORE `FX` writes the config/flag (reuse existing sanitization ~1950/2451/2796).
+  - **Per-agent `contextDir`/`memoryFile`** (e.g. `~/.claude/agents/<name>/CONTEXT.md`) → `--add-dir` /
+    `--append-system-prompt` at spawn. Static, human/Claude-edited — NO embeddings, NO recall, NO in-loop mutation.
+- **OpenHands-corroborated enrichments** (third source; its skills/profile layer matched L1 32×):
+  - **Dual-shape skills enumerator:** `FX.listSkills` globs BOTH flat `skills/*.md` (microagent shape) AND
+    directory `SKILL.md` + `references/`, skips `README.md`, falls back to the file stem for name, derives a
+    `/<name>` command; surface `shape` (flat|agentskills) + `/<name>` + description on the card. (Earlier spec
+    assumed only `SKILL.md`.)
+  - **Slash-command autocomplete** in the spawn/nudge input: reuse the existing `#n-suggest` keyboard-nav
+    (`onPathKey` [claude-dashboard.lua:4083](claude-dashboard.lua#L4083)) + `#tpl-menu` render (~3462) over a
+    `/`-typeahead of skill names + Shepherd-known commands (`/model`, `/effort`, clear, compact) — never invent
+    an executor-side command list.
+  - **Per-session "skills loaded" inspector:** detail-panel view of the effective
+    skills[]/mcpServers[]/knowledge[] resolved from the profile the session was spawned from, each row
+    expandable to its `SKILL.md` frontmatter — stated honestly as "what Shepherd attached at spawn" with an
+    "(human-started; not visible to Shepherd)" note for un-spawned sessions. Optional
+    `transcriptSkillActivations` → off-by-default `skill_triggered` ledger event via the existing timeline.
+  - **Per-profile skill toggle rows:** the skills card renders each skill as a toggle that adds/removes it from
+    the editing profile's `skills[]` (positive selection). Any "hide from picker" flag lives in operator JSON,
+    labeled picker-scope only (can't disable native auto-load on a live session).
+  - **Schema-drift / fail-safe loading:** generalize `presetList`'s per-entry skip (~3658) to
+    `agentList`/`mcpList` — validate each record, **keep the valid, drop only the bad**, and RETURN the dropped
+    count+names so the FX glue raises a one-time alert + `by:"config-drift"` ledger event (replaces today's
+    silent drop). Whole-file decode stays pcall-guarded.
+  - **Authoring front-end (agent-builder / add_agent / onboarding / /remember):** L1's missing CREATE side —
+    "Save as agent" pre-seeds defaults (version, structured `{role,goal,backstory}`, empty `skills[]`) + runs
+    the pre-flight validator; a curated set of L3 "author-a-spec"/onboarding prompts (the *session* runs the
+    interview and writes the `cc-agents.json` profile + a plan/CONTEXT.md); a WRITE-mode `/remember`
+    prompt-builder (sibling to `auditReviewPrompt`) that renders the recent ledger/transcript slice and asks
+    the session to list durable items **NUMBERED for human confirmation** before appending to the agent's
+    `memoryFile`. Authoring done by the session, not Shepherd; off-by-default, dry-run behind `spawn.live`.
+- **cline + AutoGPT-corroborated enrichments** (L1 reaffirmed a 4th & 5th time — registry organization + lifecycle):
+  - **Registry organization:** per-profile organizing `category` (Phase 1: mirror the session `group` field +
+    `filterTiles` chips, [cc-core.lua:341](cc-core.lua#L341); Phase 2 only if it grows: a `cc-agent-folders.json`
+    tree + a pure circular-move guard), a `favorite` bool (pure `agentSetFavorite`, favorites-first sort + chip),
+    `hidden`/`archived` flags (picker filters them by default — the "hide from picker" flag L1 reserved), a
+    `deleted` tombstone + "recently deleted/restore", and a bounded `agentSort` (name/created/updated/lastUsed;
+    stamp `lastSpawnedAt` on spawn). **Name the organizing field distinctly from `folder` (launch dir) and from
+    session GROUPS** — avoid the three-way collision.
+  - **Fork/duplicate with lineage:** pure `agentFork(state, name)` (sibling to `presetPush`) deep-copies →
+    unique "<name> (copy)", carries all fields + the L2 policyBundle by value, stamps `forkedFromName/Version`;
+    "Duplicate" action + a "forked from" provenance line. Secret-strip is a no-op (only env-var NAMES stored).
+  - **Ephemeral git worktree per spawn** `[M]` — spawn-time option: `fx.gitWorktree(repo, key)` runs
+    `git worktree add --detach ~/.claude/cc-worktrees/<projectKey>-<n>` (pure `worktreePathFor`/`worktreeAddCmd`,
+    deadlock-safe redirect); spawnSpec uses it as cwd + `--add-dir <mainRepo>`; ⑂ tile badge; right-click "remove
+    worktree" + startup orphan sweep. **Solves the same-dir collision** (true parallel work on one repo) instead
+    of just warning. Off by default; skip the symlinked-node_modules half (executor-only).
+  - **Per-mode model binding** `[S]` — extend the profile `model` into an optional per-mode map
+    (`{plan, default, acceptEdits}`), default to flat `model`; resolve via the config-by-ref resolver; at
+    mode-switch, if the bound model is the SAME backend emit `/model`, else show a "needs a fresh session" hint
+    (don't silently fail). Spawn picks the model bound to the initial `permMode`.
+  - **Conditional folder-scoped auto-attach** `[S]` — optional `folderGlobs[]` on a profile; pure
+    `profilesForFolder(profiles, chosenDir)` pre-selects matching profiles in the New-Session modal so their
+    skills[]/knowledge[]/seedPrompt auto-fill (`[]` = never auto-attach; a bad glob fails open). Expose the
+    matcher as an L6 scope predicate too. Spawn-time pre-fill only — no runtime engine.
+- **Build order:** registry + spawn-from-agent → skills card → MCP registry+attach → plugins → inventory badge.
+
+### L2 — Named policy / guardrail bundles + attachments — effort **M**
+*Source: ADAPT items 11, 12, 14, 15 (key-scoped access lists + key_type, per-key policy attachment + enforced
+params + disable-global, guardrail lifecycle CRUD + timing + transparency, named/scoped versioned bundles).*
+Today `policies.patterns` is a single flat anonymous `{autoAllow[], autoDeny[]}` + a per-session `gate.tools`
+override. Turn it into named, attachable bundles.
+
+- **Named bundles:** `policies.bundles = { name -> {autoAllow[], autoDeny[], gateTools, autopilot,
+  lockedPermMode?} }`, optionally per-rule `{name, action: deny|allow|flag, tier: pre|observe, enabled}`.
+- **Attachments:** `policies.attachments = [{ match: {project|group|providerId|sessionKey (wildcards ok)},
+  bundle }]` — matched against the project/group/provider context the dashboard already tracks per tile.
+- **Resolver:** ONE new pure cc-core fn mirroring `resolveGateTools` precedence — **session override >
+  attached bundle > fleet default**. The ordered pipeline in `cc-approve.sh` (autoDeny→autopilot→autoAllow→
+  approveRepeats, ~166–196) stays put; it just reads the resolved bundle instead of the flat lists. **Honor
+  the [cc-core.lua](cc-core.lua) ↔ [cc-approve.sh](cc-approve.sh) KEEP-IN-SYNC contract** (as the gate-tools
+  override already does).
+- **Per-session opt-out of fleet policy as a unit** (the `disable_global_guardrails` mirror) — a flag the
+  session/profile can carry.
+- **`flag/observe` tier:** no blocking path — rides the existing ledger + risk score as an indicator only.
+- **Transparency:** thread the fired bundle/rule name into the `ledger_decision` `by`/`pattern`
+  ([cc-approve.sh](cc-approve.sh) ~145–164); `gateDecisionSummary` ([cc-core.lua:752](cc-core.lua#L752))
+  already renders "which fired".
+- **`key_type=read_only` flavor + starter bundles:** ship 2–3 named bundles — *read-only* (autoDeny the
+  `DEFAULT_GATE_TOOLS` mutating set — **mind the gate semantics above**), *no-Bash*, *MCP-only*. Ties to L1
+  (a saved agent profile carries a default bundle).
+- **enforced/locked fields** (force permMode / a gate list the session can't loosen / force provider) = the
+  weakest piece; **defer** unless needed — a single-user console rarely needs to defend a preset against itself.
+- **Keep ALL opt-in** — do NOT port LiteLLM's `default_on` (violates the off-by-default scope limit).
+- **DROP:** request-body content filtering / PII / prompt-injection scanning, request-field validation, MASK,
+  during_call/modify_response (Shepherd sees no response bodies), HTTP CRUD endpoints, DB table, the
+  draft→published→prod version state machine (git already versions cc-config.json), the compliance-template
+  catalog, and the teams/keys/models/tags attachment axes.
+- **crewAI-corroborated enrichments:**
+  - **Deny reason (human-in-the-loop):** free-text reason on the panel deny → `handleAction` deny branch
+    ([cc-core.lua](cc-core.lua):133) → `fx.writeDecision(key,"deny",reason)` → `cc-approve.sh` `emit_deny`
+    already wires `permissionDecisionReason`. Ledger it so `gateDecisionSummary` (cc-core.lua:752) renders
+    "⛔ denied — <reason>". Folds into L2's transparency work.
+  - **Per-task tool restriction at spawn:** a saved agent (L1) / template (L3) carries a bundle applied as the
+    new session's scope at spawn — `autoDeny` the mutating set (NOT an allow-list, per the gate-semantics
+    caveat above), optionally a `--disallowed-tools` flag for hard launch scope. The unit carrying tools is the
+    saved agent/template, not a per-queue-item field.
+  - **Per-tool usage limit:** bundle field `toolLimits = {Bash=5,…}`; pure cc-core counts a session's
+    invocations from the ledger (reuse the `tool_request` tally in `riskScore` ~1393); at/over ceiling →
+    `autoDeny` `by='usage-limit'` + reason; "X/N" tile badge; per-session reset. **Soft** (next-request) limit —
+    Claude Code owns true enforcement. Off by default; attach via bundle, never `default_on`.
+  - **Per-tool + per-agent-role scoping & log-only tier** = exactly L2's per-rule `action: deny|allow|flag` +
+    `tier: pre|observe`. DROP after-call output rewrite/redact and before/after-LLM interception (no payloads in
+    Shepherd's hooks — already on L2's DROP list).
+  - **Fingerprint/identity seam:** the per-component policy attach point IS L2's bundles + attachments +
+    resolver; "auditable identity" is already `projectKey` + `session_id` + ledger stamping — NO Fingerprint
+    object. Drop credentials/impersonation/delegation-token (no-secrets/no-auth scope).
+
+### L3 — Parameterized + versioned prompt templates with a definition source — effort **M**
+*Source: ADAPT items 42, 43, 44 (dotprompt file definitions + input-schema, prompt-management CRUD +
+versioning + playground, remote/git prompt sources). This is the local "agent-definition directory" that
+feeds L1.* `cc-templates.json` stores verbatim task text today (no vars, no schema; `templatePush`
+overwrites in place at [cc-core.lua:3613](cc-core.lua#L3613)). Enrich it.
+
+- **Variable interpolation (pure cc-core):** `templateVars(text)` → ordered `{{name}}` / `{{name?}}`
+  placeholders with required/optional flags; `renderTemplate(text, vars)` → `(rendered, missingRequired)`
+  that **refuses to render on a missing required var**. Persist an optional vars-schema alongside `name/text`.
+- **Render-before-spawn:** the New Session modal + queue prompt for required vars before enabling spawn. The
+  "test/playground" = render with sample vars + paste into a session via the existing **no-auto-send**
+  `templateInsert` path ([claude-dashboard.lua:3480](claude-dashboard.lua#L3480)) — human submits.
+- **Versioning-lite:** `templatePushVersioned` (duplicate-on-edit / `v(n+1)`, don't overwrite) + versions/revert view.
+- **Definition SOURCE (the "saved into a directory" the user asked for):** a configurable local dir (e.g.
+  `~/.claude/agents` or user-set) scanned with the existing accelerators (`folderScanShellCommand` +
+  `resolveBin` rg/fd, grep/find fallback) → `{name, prompt, systemPrompt, presetFields}` records feeding the
+  spawn modal + `spawnInner` `[prompt]` arg + `spawnFlags` (`--append-system-prompt`/`--add-dir`). **Strictly
+  local-disk** — no network client, no token storage.
+- **`.prompt` → JSON import:** a new `FX` reader feeding `templatePush` — no YAML parser, no Jinja2 (keep it
+  pure cc-core).
+- **DROP:** environments/promotion (dev/staging/prod), `metadata['prompts']` allow-list, RBAC/admin checks,
+  the SQL PromptRepository, the streamed `/prompts/test` completion call, `merge_messages` + sampling-param
+  overrides, and the credentialed git/SaaS network clients (Bitbucket/GitLab/Langfuse/Phoenix tokens).
+- **crewAI-corroborated enrichments:**
+  - **Built-in interpolation vars** in `renderTemplate`/`templateVars`: `{{date}}`/`{{today}}`/`{{now}}` (from
+    `os.date` at render-time) and **`{{prev_output}}`** single-hop context-chaining — on the done edge
+    ([cc-core.lua](cc-core.lua) ~2092) capture `transcriptSnippet` of the finishing session into an in-memory
+    per-project slot (not persisted, like `routePending`); render into the next routed task before paste.
+    Opt-in "carry output forward" flag (rides the queue file like `queueSetRouted`), human-visible before paste.
+  - **Structured task record:** enrich `cc-templates.json` from `{name, text}` to `{name, description,
+    expected_output}` (`text` = back-compat fallback); a pure composer near `templatePush` (~3604–3638) builds
+    `description + "Expected output:" + expected_output`, interpolated with `{{var}}`. Drop the md5 key and any
+    output-validation (Shepherd never reads results back).
+  - **`attachments[] = [{name, path}]`** on templates/profiles: derive unique parent dirs → `--add-dir`; expand
+    `{{name}}` → resolved path in the prompt; attachment picker reuses the folder browser (`FX.listDirs`).
+    Path reference, not byte injection (Claude Code owns multimodal).
+  - **Input-schema collection ("chat with a crew" pattern):** `templateVars` declares required/optional vars;
+    the New-Session modal renders one field per var, disables Spawn/Feed until required are filled, then
+    interpolates → `spawnSpec` `[prompt]` / `--append-system-prompt`. Human submits (no LLM). L1 profiles supply
+    the schema source. The conversational/continue half is already the live nudge textarea + per-session queue.
+
+- **OpenHands-corroborated enrichments:**
+  - **Suggested-tasks "Work feed" overlay:** opt-in, `gh`-backed (detect→use→degrade) per-repo actionable
+    items — `gh issue list --assignee @me`, `gh pr list --author @me`, `gh pr checks` (failing), mergeable
+    state, unresolved review threads — tagged by a pure `core.classifyWorkItems`; repos = the git roots
+    Shepherd already discovers (`FX.gitRoot`); gh uses the user's own login (NO token store). One-click "Fix
+    this" renders an L3 template (`{{repo}}/{{issue}}/{{pr_number}}`) → inject into a selected session (the
+    Improve/`pasteIntoWindow` path) or spawn-from-L1-agent + enqueue (L4). Slow poll (≥60s)/on-demand, off by
+    default; ledger a `work_feed_dispatch` event.
+  - **Trigger → rendered seed prompt:** model each "resolver" convention as an L3 template
+    `{name, description, expected_output, vars}` with an "ask before pushing" line baked in; bundle the
+    per-repo convention into an L1 agent profile (+ a read-only/ask-before-push L2 bundle). DROP the webhook
+    server, signature verification, OAuth, and the branch/commit/push executor — the spawned session owns that.
+
+### L4 — Declarative routing & orchestration (NEW from crewAI) — effort **M**; unblocks the deferred 4c-E follow-ups
+*Source: crewAI ADAPT items — Flow `@start`/`@listen`/`@router`, `and_`/`or_` join barriers, `plot()`,
+sequential/hierarchical process modes, delegation/handoff, per-task timing. The 3 genuinely-new items + the
+routing-flavored reinforcements.* crewAI's Flow engine maps onto Shepherd's **shipped Project Routing v1**
+dispatcher (`routeTask`/`routePick`/`sessionFree`/`routePendingDone`, [cc-core.lua](cc-core.lua) ~1981–2084).
+This is the concrete shape for the **4c-E follow-ups deferred above** (task→session affinity/tags). **DROP all
+decorators / in-process method execution / return-value event bus / in-memory flow state** — Shepherd has no
+firing engine; the level-triggered dispatcher + the ledger ARE the engine.
+
+- **Conditional routing (route labels / `@router`):** give a queued task an optional **route label** — this
+  answers the deferred "where does the tag come from": a queue-line prefix like `@review: <task>` (parsed in
+  `queueSplitLines` ~1921) or inherited from a session group (`applyGroups`). A pure label→target resolver
+  beside `routePick` filters members by label before the longest-free tiebreak. Keep `shouldFeed` (~1975) as
+  the `@listen` trigger, `routePendingDone` (~2007) as the in-flight guard. Behind the existing
+  `queue.routing.enabled` + `routing:true` double opt-in; ledger `by:"router"`.
+- **Process modes (sequential vs distribute):** `queueRouteMode(q)` → `"distribute"` (today's `routePick`,
+  default) | `"sequential"` (pin to one chosen member, feed in declared order, hold the rest). `routeTask`/
+  `routePick` honor the mode; pure + unit-tested. (Hierarchical "manager" = designate which profile the
+  coordinator session spawns from — NO in-process manager/manager_llm.)
+- **Join barriers (`and_`/`or_`):** pure `core.routeBarrierMet(members, opts)` → true only when all (or any)
+  members of the armed project/group are `done` (same stale/remote/error exclusions as `sessionFree`); gate a
+  designated "join" task on it before `routePick`. Flat AND/OR-over-done only — no nested condition tree.
+- **Delegation / role-addressed handoff:** extend the dispatcher from done-only/by-project toward AGENT/ROLE-
+  addressed targets (the deferred affinity item). Addressable identity from **L1** (`cc-agents.json` role/name);
+  handoff payload from **L3** (rendered `{{var}}` task). "Delegate" = render an L3 task + enqueue onto the named
+  L1 agent's queue, delivered by the router (ledger `by:"router"`/delegation). "Ask coworker" = the existing
+  cross-session nudge (`handleAction "nudge"`) at the target — fire-and-forget. Opt-in, dry-run-able, ledgered.
+- **Routing topology view (`plot`, reshaped):** NOT an HTML export — a read-only in-panel topology of
+  routing/queue state. Pure cc-core aggregation (sibling to `fleetStats` ~943 / `lineageByProject` ~1061) walks
+  routing state + `by:"router"`/`queueStarved`/`starvedSince` ledger events into nodes/edges (project
+  group-nodes, session member-nodes, feed edges, queue-depth/starvation annotations); render in the webview JS
+  twin (insights/sparkline/timeline), gated to appear only while routing/ledger on.
+- **Per-task timing/outcome counters:** stamp task-start ts on dispatch (~2040–2098); on done/idle compute
+  `execution_duration` (`since`/`updated` + `fmtDuration` ~902); emit a `task_done` ledger event `{projectKey,
+  sessionId, role, durationS, toolRequests, approvals, escalations, continues, routerHandoffs}`; roll into
+  `fleetStandup` (~1137) / the Shift tab. Feeds L3 per-template analytics ("this template averages 4m, 2
+  denials"). NO in-process output object.
+- **Still UX-gated:** L4 realizes the 4c-E follow-ups deferred pending a design call (idle-as-target, the
+  affinity tag SOURCE, auto-spawn on starvation). **Decide the route-label/affinity source first** — it's the
+  load-bearing choice the rest hangs off.
+- **OpenHands-corroborated enrichments:**
+  - **Pending-message queue (queue-before-ready):** let an armed project's projectKey-keyed queue hold ordered
+    tasks even with ZERO live members; `routeTask`/`routePick` deliver in created-at order to the first session
+    that reaches `done` for that folder (the no-session-yet case `routePick` can't reach today). Pairs with L1
+    spawn-seeding so "spawn from agent" pre-stages a multi-message queue the new session drains on first ready.
+    projectKey keying removes any placeholder-id/rekey need.
+  - **Sub-conversations = parent/delegation lineage:** when a session spawns/delegates another (the L4 Delegate
+    path), stamp the route/spawn ledger event with `parent_session`/`spawnedBy`; show parent→child edges in the
+    routing topology view; reuse session groups + collapse for "collapse children under parent." Config
+    inheritance on spawn is already `respawnSpec` + L1's config-by-ref resolver — don't reimplement. **DROP
+    cascade-delete** (never auto-kill a child the human is steering). Keep "lineage" for the existing
+    respawn/clear read; call the new edge "parent/delegation."
+  - **Per-session git changes/diff view:** a 'Changes' overlay tab — `FX.gitChanges(cwd)` runs
+    `git -C <q> status --porcelain=v1 -z` + `FX.gitDiff` per file; pure `core.parseGitStatus` (A/D/M/R/??) is
+    unit-tested; render status icons + collapsible unified-diff `<pre>` (not Monaco), lazy on open + manual
+    refresh, never on the 1s loop. Feeds a per-session "files touched" count into the shift report/lineage —
+    the deliberately-omitted "what changed" signal, without claiming outcomes. (Shares the tab framework with L5.)
+
+- **cline-corroborated enrichments:**
+  - **Task dependency chains + auto-start next ready** `[M]` — optional `dependsOn[]` on the queue task record
+    (rides the projectKey-keyed queue file like `queueSetRouted`, not a new store); gate a dependent task in
+    `routeTask` via `routeBarrierMet` over its deps' done-state; the shipped `shouldFeed` + level-triggered
+    done-edge already auto-starts the next ready task. A panel "link these cards" affordance writes `dependsOn[]`
+    (+ optional route label), rendered alongside the routing topology view. Behind the existing double opt-in.
+  - **Queue priority + concurrency cap** `[M]` — optional per-task `priority` consulted by `routePick` when
+    choosing which queued task to feed first (dispatcher loop ~5623); a fleet `queue.routing.maxConcurrent` the
+    post-loop dispatcher honors by counting active sessions before feeding. Reuse `isHung` for stuck-detection.
+    DROP retry/lease/heartbeat fields (respawn + Auto-Continue budgets already cover Shepherd's only retry).
+  - **Broadcast nudge / inter-session mailbox** `[S]` — "send to one agent" = role-addressed handoff (resolve an
+    L1 name → its queue via `queuePush`); "send to a not-yet-live session" = the pending-message queue;
+    "broadcast to a group" = the existing bulk nudge (`selectActionable` + `BULK_RULES.nudge` + staggered
+    dispatcher) scoped to a session group. Optional subject prefix on the queue line. DROP the read/unread
+    mailbox state machine + the agent-side team_* tools.
+
+### L5 — Richer session observability & detail (NEW from OpenHands) — effort **M** (mostly S sub-items)
+*Source: OpenHands ADAPT items with no prior backlog match — the management/UI layer that makes Shepherd a
+better WATCH console. All pure-core derivations off the transcript Shepherd already tails + local reads; no
+executor/sandbox/server.*
+
+- **Surface the agent's plan/TODO on a tile** `[H/S]` — pure `core.planFromTranscript(text)` scans the tail
+  (same `^%s*{` JSON guard as `transcriptError`, [cc-core.lua:1544](cc-core.lua#L1544)) for the latest
+  `ExitPlanMode` input and/or `TodoWrite` todos; show in the detail panel + optional tile 📋 affordance, loaded
+  on selection/status-change (never the 1s tick). Optional `<cwd>/PLAN.md` fallback via an FX file read.
+- **Auto-title tiles from content** `[H/M]` — `core.deriveAutoTitle(tail, maxLen)` from the first prompt
+  (`cc-status.sh` already captures `last_prompt` as the seed); precedence `manual relabel > auto-title >
+  folder basename`; cache by projectKey (`cc-autotitles.json`), recompute only while empty; `esc()` at the
+  render sink; Settings toggle default OFF.
+- **Error-reason taxonomy** `[H/M]` — `core.classifyError(message)` →
+  budget_exceeded|model_error|runtime_error|timeout|user_cancelled|unknown (extends `transcriptError`'s result
+  with `.reason`); cause badge on the error tile + a search/filter facet; ledger the reason so `fleetStats`/
+  shift report gain an "errors by cause" breakdown. Prefer non-message signals (usage-limit autoDeny →
+  budget_exceeded; watchdog hung → timeout).
+- **Detail-panel tabs** `[H/M]` — reshape the flat `#detail` stack into a tab strip over views Shepherd ALREADY
+  produces: Activity (default), Timeline (pull `sessionTimeline` inline), Decisions, Usage, Queue (+ optional
+  Lineage / Changes from the L4 diff view). Pin/unpin via the existing right-click menu; persist
+  `{selectedTab, unpinnedTabs}` to webview localStorage keyed by projectKey; keep the lazy-load discipline.
+  **DROP** Code/Terminal/Browser tabs (no sandbox) — Jump stays the editor affordance. Mostly panel JS.
+- **Export session archive** `[H/S]` — per-tile + fleet "Export selected": copy the session's `.jsonl`
+  transcript + a `meta.json` (label, provider/model, lineage, shift-report counters); reuse the audit-export
+  side-effect path (mkdir `~/.claude/cc-exports`, write, optional zip, alert/Reveal). Pure assembly in cc-core;
+  honor the ledger redaction posture so prompt bodies aren't leaked. Explicit operator action.
+- **Host stats + fleet idle-since** `[M/M]` — `core.hostHealth` + `core.fleetIdleSince(tiles, now)` (pure,
+  injected `now`); feed CPU/mem/disk/uptime from `hs.host.cpuUsage`/`vmStat` + a disk read (NOT `/proc`);
+  compact strip in the 📊 insights overlay/footer; wire the host signal into `starvedSince` so a starvation
+  alert can note "box is CPU/disk-pressured." Read-only, off by default.
+- **PR/MR status per tile** `[H/M]` — STATUS ONLY: `core.parsePrStatus(json)` + `core.prBadge(item)`; opt-in
+  cached poll `gh -C <gitRoot> pr view --json number,state,url,title` (reuse the cached `FX.gitRoot`); tile
+  badge "PR #123 open/merged" + open-url action; ledger PR-opened/merged into lineage + shift report.
+  Self-gates when `gh` absent or no remote. **DROP** create tools, token storage, any VCS API call by Shepherd.
+- **Post-run self-summary callback** `[M/M]` — opt-in, off-by-default: `core.summaryPrompt(item)` (sibling to
+  `auditReviewPrompt`/`improvePrompt`) + a target filter (modeled on `remoteControlSweepTargets`/
+  `shouldAutoContinue`) selecting sessions on a FRESH `done` edge; type via the `dispatchSerialized` chokepoint
+  so the reply lands in that session's own tile; optional `summary` ledger event. Framed strictly as "Shepherd
+  typed a self-review prompt," never an authoritative outcome.
+- **Hooks inspector** `[H/S]` — `core.parseHookInventory(settingsJson [, projectSettingsJson])` walks the same
+  hooks table `mergeHooks` operates on, groups by event, returns `{matcher, command, timeout, isOurs}` (reuse
+  `OUR_HOOK_SCRIPTS`); read-only 'Hooks' section in ⚙ Settings / `make doctor`, warns if `cc-approve.sh` lacks
+  its 130s timeout; per-session twist reads the cwd's `.claude/settings.json` for effective hooks.
+
+- **cline + AutoGPT-corroborated enrichments:**
+  - **Session history browser** `[M]` — one search/history overlay (or extend the audit overlay) over the ledger
+    + transcript corpus Shepherd already reads: a fuzzy query box (reuse `filterTiles`/`searchArgv`), sort chips
+    (newest/oldest/most-tokens/most-relevant via `filterLedger`), facets ("current workspace only" projectKey
+    filter, "pinned only"), and a star/pin persisted by projectKey. Derive records — don't persist a parallel
+    history store; rows show tokens/size from existing tracking. DROP a cost column + a resumable-task object
+    (Claude Code owns `--resume`).
+  - **Bulk history management** `[S]` — a storage readout (`localStorageReport` over ledger/queue/state-file
+    bytes) in ⚙ Settings near `retentionDays`; multi-select delete in the Audit Rows view routed through the
+    existing scoped audit-purge path (with its modal-confirm). DROP deleting Claude Code's own transcripts.
+  - **OS-native desktop notifications** `[S]` — `FX.notify(title, text, opts)` wrapping `hs.notify` (click→jump),
+    beside `FX.playSound`/`FX.push`; config `notifications.banner = {onApproval, onDone, onAutoApproved}` (default
+    off); fire on the rising edge to approval/done (reuse the escalation edge detector + a `notified`
+    carry-forward field); pure `notifyDecision(pv, it, cfg)` in cc-core.
+  - **Loop-detection watchdog** `[M]` — pure `isLooping(item, recentActions, now, thresholdN)` beside `isHung`:
+    fed a ring buffer of the last N tool calls from the transcript tail, true when the same command+args repeats
+    ≥N consecutively; a distinct ⟳ tile decoration (not the ⏳ hung ring); nag once per episode; ledger a `loop`
+    type; optional auto-nudge ("you seem to be repeating <tool> — try another approach"). Config
+    `escalation.loop {enabled=false, repeats=N}`. Detection + human/nudge escalation only — no rewind/model-swap.
+
+### L6 — Event-callback rule engine (NEW from OpenHands) — effort **M**
+*Source: OpenHands event-callback registry + result ledger. Generalizes Shepherd's hard-coded
+auto-respawn/auto-continue/escalation into declarative, opt-in rules — layered on the existing level-triggered
+dispatcher, NOT a new event bus.*
+
+- **Rule registry (`cc-rules.json`):** opt-in rules `{name, status(ACTIVE|DISABLED|COMPLETED|ERROR),
+  trigger:{scope: projectKey|sessionKey, kind: done|error|hung|approval|starved}, processor:{kind:
+  feed|continue|nudge|relabel|log, …}, once?, retryUntil?}`, evaluated each refresh tick by pure cc-core
+  predicates sitting ALONGSIDE the existing `shouldFeed`(~1975)/`shouldAutoContinue`(~2200)/`isHung`(~2375).
+  Status self-mutation persists through `fx` like the `routePending`/`alerted` markers; lifecycle transitions
+  emit a `by:"rule"` ledger event. Processor catalog maps onto present effects: log→`appendLedger`,
+  relabel→`setLabel`, nudge→`handleAction "nudge"`, feed→`routeTask`. Reuses L1/L3's name→resolver + the
+  validator family. Sequential execution = today's single-dispatcher-per-tick.
+- **Automation result ledger:** add an `outcome`/`detail` convention to the existing automation ledger events
+  (`auto_respawn` ~5595, `auto_continue` ~5615, router feed ~5656, `drain_close` ~5463) — incl. the missing
+  write for auto-respawn's wouldFire-but-can't branch (carry `rs.reason`) and an auto-continue delivery outcome
+  via the `dispatchSerialized` delivered callback; pure classifier beside `queueFeedCommit`; a "failed
+  automations" filter chip in the 📜 Audit overlay. Folds into L4's `task_done` so per-task and per-automation
+  outcomes share one event family. No new SQL/pagination — reuse JSONL + the overlay's cap.
+
+### L7 — Scheduled spawns / routines (NEW from cline + AutoGPT) — effort **M**
+*Source: cline (Desktop Routine board) + AutoGPT (cron / one-shot / recurring / visual cron builder / next-run /
+activity digest) — the one genuinely-new, multi-source candidate. Off by default, ledgered, edge-disciplined
+exactly like auto-respawn/auto-continue. NOT a second executor — it fires the normal spawn/nudge effects on a
+schedule. (See also [schedule](#) the cloud-routines skill is unrelated — this is local.)*
+
+- **Schedule store + engine:** `cc-schedules.json` operator data of routines `{name, kind: cron|oneShot, when
+  (cron expr | epoch), folder, editor, provider, model, permMode, prompt|templateRef|agentRef, enabled:false,
+  tags, lastFiredAt}`. Pure cc-core (deterministic on injected `now`): `cronFromSchedule`/`scheduleFromCron`/
+  `nextRunAt(cron, now)`/`dueSchedules(list, lastFired, now)` + `humanizeCron(cron)` → "Every Monday 9:00 AM".
+  Payload = an existing `spawnSpec` / saved preset / L1 profile / L3 template — NOT a new run type.
+- **Firing:** a guarded pass in the ~1s loop (or a dedicated `hs.timer`) calls `dueSchedules` and routes a due
+  routine through the normal spawn `fx` (`onSpawn`/`spawnSpec`), or for a resume target pushes `nudgeText` into a
+  tile's queue; jump `lastFiredAt` via fx (like `routePending`); one-shots self-delete after a *delivered* fire
+  (gate on the fx delivery return). A `sweepOnStartup` re-arms timers + coalesces missed one-shots (copy
+  `remoteControlSweepTargets`). Backpressure: `scheduleBackpressure(liveTiles, cap)` defers when over cap.
+  **Local-tz only** (`os.date`) — drop timezone fields. Optional launchd plist as the asleep-while-due backstop
+  that just opens Shepherd / writes a trigger file (NOT a second executor).
+- **Routine board (UI):** routines as a list reusing the tile/badge idiom — enabled dot, cron + mode badges,
+  prompt/model/folder, **next-run** (`nextRunAt`), inline **run-now**, **pause/resume** (toggle `enabled`),
+  delete; an "Add Routine" modal = the spawn-preset modal + hour/minute/weekday picker → **live cron preview**
+  (the pure builder, hand-mirrored in the JS twin). "Last run" soft-links to the live tile it spawned.
+- **Periodic activity digest:** a daily/weekly cron routine (off by default) that calls the existing
+  `fleetStandup`/`standupMarkdown` over the window and pushes a headline via `FX.push` (full markdown in the
+  📋 Shift tab); persists last-fire in `hs.settings`. The first concrete consumer of the scheduling primitive.
+- **Import/export routines** (JSON/YAML) + **overlap control** ("don't start if this routine's previous run is
+  still busy") round it out.
+- **DROP:** SQLAlchemyJobStore / per-user quota / credentials / max_instances / the cline-hub execution board —
+  all executor/server.
+
 ## Tooling stance (from the June 2026 review)
 
 **Principle for any external tool: detect → use → degrade gracefully** — a missing binary
