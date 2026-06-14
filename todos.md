@@ -207,16 +207,16 @@ remaining items. Full per-round detail is in CHANGELOG.md and git history.
 ## Candidate features — cross-project mining backlog
 
 > **▶ RESUME HERE (build status, 2026-06-14):** Mining is DONE (5 sources → L1–L7). Build order
-> **Phase 0✅ → L1✅ → L2✅ → L3✅ → L4✅ → L5 → L6 → L7**. **L1–L4 are SHIPPED + committed + deployed**
+> **Phase 0✅ → L1✅ → L2✅ → L3✅ → L4✅ → L5✅ → L6 → L7**. **L1–L5 are SHIPPED + committed + deployed**
 > (see CHANGELOG 2026-06-14 + their `✅` blocks below; each has a *deferred follow-up* — mostly editor UIs and,
-> for L4, the UX-gated topology/delegation/idle-target pieces). **Next: L5** (richer session observability &
-> detail — plan/TODO on a tile, auto-title, error taxonomy, detail-panel tabs, export archive, PR status,
-> loop-detection watchdog, session-history browser, OS-native notifications). Method per feature: pure logic in
-> `cc-core.lua` + unit tests → wire the dashboard (FX/handleAction/panel-JS) + ui pins → `make test` green → run
-> an **adversarial-review Workflow** (caught real bugs every phase: 3 in L2; 3 in L3-r1, 0 in L3-r2; the
-> applyGroups ordering bug in L4-r1, the taskStart GC leak in L4-r2) → fix → `make deploy` → commit + push.
-> Honor the three load-bearing facts below (the `claude` CLI is present; `gate.tools` is a hold-list not an
-> allow-list; secrets are env-var NAMES only) and the L1/L2/L3/L4 KEEP-IN-SYNC invariants in context.md.
+> for L4, the UX-gated topology/delegation/idle-target pieces; for L5, the heavier UI sub-items). **Next: L6**
+> (event-callback rule engine — `cc-rules.json` declarative opt-in rules generalizing auto-respawn/continue/
+> escalation onto the existing level-triggered dispatcher; + an automation result ledger). Then **L7** (scheduled
+> spawns / routines — `cc-schedules.json` cron/one-shot firing the normal spawn/nudge effects). Method per feature:
+> pure logic in `cc-core.lua` + unit tests → wire the dashboard (FX/handleAction/panel-JS) + ui pins → `make test`
+> green → run an **adversarial-review Workflow** (caught real bugs in L2/L3/L4; L5 was clean) → fix → `make deploy`
+> → commit + push. Honor the three load-bearing facts below (the `claude` CLI is present; `gate.tools` is a
+> hold-list not an allow-list; secrets are env-var NAMES only) and the L1–L5 KEEP-IN-SYNC invariants in context.md.
 
 Built by adversarially mining top AI orchestration/governance apps (12 domains each: finders → dedup →
 FOR/AGAINST judge → skeptic verify) for features worth ADAPTing onto Shepherd's primitives. CANDIDATES for
@@ -601,6 +601,17 @@ firing engine; the level-triggered dispatcher + the ledger ARE the engine.
     mailbox state machine + the agent-side team_* tools.
 
 ### L5 — Richer session observability & detail (NEW from OpenHands) — effort **M** (mostly S sub-items)
+> ✅ **PARTIALLY SHIPPED 2026-06-14** (the high-value pure-core derivations; see CHANGELOG): error-reason
+> taxonomy (`core.classifyError` → `transcriptError.reason` + tile cause badge + fresh-edge `error` ledger);
+> plan/TODO on the detail panel (`core.planFromTranscript`, loaded on selection); auto-title (`core.deriveAutoTitle`,
+> `autoTitle.enabled` off, cached in `cc-autotitles.json`); loop-detection watchdog (`core.toolCallSig`/
+> `transcriptToolSigs`/`isLooping`, `escalation.loop.enabled` off, ⟳ badge + `loop` ledger); OS-native banners
+> (`core.notifyDecision` + `FX.notify`, `notifications.banner.*` off). Adversarial review clean (2 reported, 0
+> confirmed). Suite 1528 core + 330 ui + 183 bash.
+> **Deferred L5 sub-items** (still want a build): detail-panel **tab strip**, **export session archive**, **host
+> stats + fleet idle-since**, **PR/MR status** per tile (`gh`-backed), **post-run self-summary**, **hooks
+> inspector**, the cline/AutoGPT **session-history browser** + **bulk history management**, and a **Settings UI**
+> for the auto-title / loop / banner toggles (config-only today).
 *Source: OpenHands ADAPT items with no prior backlog match — the management/UI layer that makes Shepherd a
 better WATCH console. All pure-core derivations off the transcript Shepherd already tails + local reads; no
 executor/sandbox/server.*

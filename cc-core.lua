@@ -658,6 +658,8 @@ local NARRATE = {
   purge         = { "🗑", "purged entries" },
   escalation    = { "🔴", "approval waiting too long" },
   hung          = { "⏳", "stalled (no transcript progress)" },
+  error         = { "❌", "errored" },
+  loop          = { "⟳", "repeating the same action" },
   auto_respawn  = { "♻️", "auto-respawned" },
   drain_close   = { "⛔", "drained (finished turn, closed)" },
   queue_edit    = { "🧾", "edited the queue" },
@@ -1609,10 +1611,174 @@ function M.transcriptError(text)
         elseif t == "system" and obj.subtype == "api_error" then
           local e = obj.error
           local msg = (type(e) == "table" and (e.formatted or e.message)) or "API error"
-          return { message = tostring(msg) }
+          return { message = tostring(msg), reason = M.classifyError(msg) }  -- L5 cause taxonomy
         end
       end
     end
+  end
+  return nil
+end
+
+-- Classify an error message into a coarse CAUSE (L5 error-reason taxonomy): pure
+-- keyword match over the lowercased text, most-specific first. The caller may
+-- override from non-message signals (a usage-limit autoDeny -> budget_exceeded, the
+-- watchdog -> timeout). Returns one of M.ERROR_REASONS.
+M.ERROR_REASONS = { "budget_exceeded", "timeout", "runtime_error", "model_error",
+                    "user_cancelled", "unknown" }
+function M.classifyError(message)
+  local s = tostring(message or ""):lower()
+  if s == "" then return "unknown" end
+  local rules = {
+    { "budget_exceeded", { "usage limit", "rate limit", "ratelimit", "quota", "insufficient",
+                           "billing", "credit balance", "exceeded your", "payment", "429", "402" } },
+    { "timeout",         { "timeout", "timed out", "etimedout", "deadline exceeded", "504", "408" } },
+    { "runtime_error",   { "econnreset", "econnrefused", "enotfound", "epipe", "socket hang",
+                           "network", "connection error", "connection reset", "fetch failed",
+                           "503", "502", "500", "bad gateway" } },
+    { "model_error",     { "overloaded", "529", "context length", "context_length", "too many tokens",
+                           "max tokens", "invalid_request", "invalid request", "prompt is too long" } },
+    { "user_cancelled",  { "cancel", "aborted", "abort", "interrupted", "user rejected" } },
+  }
+  for _, rule in ipairs(rules) do
+    for _, kw in ipairs(rule[2]) do
+      if s:find(kw, 1, true) then return rule[1] end
+    end
+  end
+  return "unknown"
+end
+
+-- L5: surface the agent's current plan / TODO from the transcript tail. Scans
+-- backwards for the latest TodoWrite todos and/or ExitPlanMode plan (tool_use blocks
+-- inside assistant messages). Returns { todos = {{content, status}, ...}, plan = "..." }
+-- (either may be absent) or nil when neither is present. Pure (operates on tail text;
+-- the caller reads the tail on SELECTION, not every tick -- it parses the whole tail).
+function M.planFromTranscript(text)
+  if not text or #text == 0 then return nil end
+  local lines = {}
+  for line in (text .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
+  local todos, plan
+  for i = #lines, 1, -1 do
+    local line = lines[i]
+    if line:find("^%s*{") then
+      local okj, obj = pcall(function() return M.json.decode(line) end)
+      if okj and type(obj) == "table" and obj.type == "assistant"
+         and type(obj.message) == "table" and type(obj.message.content) == "table" then
+        for _, c in ipairs(obj.message.content) do
+          if type(c) == "table" and c.type == "tool_use" and type(c.input) == "table" then
+            if not todos and c.name == "TodoWrite" and type(c.input.todos) == "table" then
+              local out = {}
+              for _, td in ipairs(c.input.todos) do
+                if type(td) == "table" and type(td.content) == "string" and td.content ~= "" then
+                  out[#out + 1] = { content = td.content, status = tostring(td.status or "") }
+                end
+              end
+              if #out > 0 then todos = out end
+            elseif not plan and c.name == "ExitPlanMode" and type(c.input.plan) == "string"
+                   and c.input.plan ~= "" then
+              plan = c.input.plan
+            end
+          end
+        end
+      end
+      if todos and plan then break end  -- newest-first; both found -> stop
+    end
+  end
+  if not todos and not plan then return nil end
+  return { todos = todos, plan = plan }
+end
+
+-- L5 auto-title: a short tile title derived from a session's first prompt (the
+-- cc-status last_prompt seed). First non-blank line, with markdown header / list /
+-- quote markers stripped, whitespace collapsed, UTF-8-truncated to maxLen. Returns
+-- nil for a blank seed. Pure; the precedence (manual relabel > auto-title > folder)
+-- and the per-projectKey cache live in the caller; esc() applies at the render sink.
+function M.deriveAutoTitle(seed, maxLen)
+  maxLen = tonumber(maxLen) or 48
+  local first
+  for line in (tostring(seed or "") .. "\n"):gmatch("(.-)\n") do
+    local t = line:gsub("^%s+", ""):gsub("%s+$", "")
+    if t ~= "" then first = t; break end
+  end
+  if not first then return nil end
+  first = first:gsub("^[#>%*%-%s]+", ""):gsub("^%d+[.%)]%s*", "")  -- strip md/list/quote markers
+  first = first:gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+  if first == "" then return nil end
+  if #first > maxLen then first = utf8trunc(first, maxLen - 3) .. "\226\128\166" end
+  return first
+end
+
+-- L5 loop-detection: a stable signature for a tool_use block = name + its primary
+-- argument (the field that identifies WHAT it's doing), so re-running the same Bash
+-- command / re-Reading the same file produces an equal signature. Deterministic
+-- (no json re-encode, whose key order isn't stable). Pure.
+local LOOP_PRIMARY = { "command", "file_path", "path", "pattern", "url", "query", "prompt" }
+function M.toolCallSig(name, input)
+  local arg = ""
+  if type(input) == "table" then
+    for _, f in ipairs(LOOP_PRIMARY) do
+      if type(input[f]) == "string" and input[f] ~= "" then arg = input[f]; break end
+    end
+  end
+  return tostring(name or "") .. "\1" .. arg
+end
+
+-- Ordered (oldest->newest) list of the last `limit` tool-call signatures in the
+-- transcript tail. Pure; the caller reads the tail (already read for working tiles).
+function M.transcriptToolSigs(text, limit)
+  limit = tonumber(limit) or 12
+  local sigs = {}
+  if not text or #text == 0 then return sigs end
+  for line in (text .. "\n"):gmatch("(.-)\n") do
+    if line:find("^%s*{") then
+      local okj, obj = pcall(function() return M.json.decode(line) end)
+      if okj and type(obj) == "table" and obj.type == "assistant"
+         and type(obj.message) == "table" and type(obj.message.content) == "table" then
+        for _, c in ipairs(obj.message.content) do
+          if type(c) == "table" and c.type == "tool_use" then
+            sigs[#sigs + 1] = M.toolCallSig(c.name, c.input)
+          end
+        end
+      end
+    end
+  end
+  -- keep only the last `limit`
+  if #sigs > limit then
+    local trimmed = {}
+    for i = #sigs - limit + 1, #sigs do trimmed[#trimmed + 1] = sigs[i] end
+    return trimmed
+  end
+  return sigs
+end
+
+-- True when the last `n` tool-call signatures are identical (the agent is repeating
+-- the same action) -- the loop-detection watchdog. n>=2; pure.
+function M.isLooping(sigs, n)
+  n = tonumber(n) or 3
+  if n < 2 or type(sigs) ~= "table" or #sigs < n then return false end
+  local last = sigs[#sigs]
+  if type(last) ~= "string" or last == "" or last == "\1" then return false end
+  for i = #sigs - n + 1, #sigs do
+    if sigs[i] ~= last then return false end
+  end
+  return true
+end
+
+-- L5 OS-native banner decision: on a FRESH rising edge into approval/done (gated by
+-- notifications.banner.{onApproval,onDone}), return {kind, title, text} for FX.notify,
+-- else nil. Pure; prevStatus is last tick's status (nil = no prior observation = no
+-- edge, so a reload can't fire a banner for every existing tile).
+function M.notifyDecision(prevStatus, item, cfg)
+  if type(item) ~= "table" or prevStatus == nil then return nil end
+  local cur = item.status
+  if cur == prevStatus then return nil end  -- not a transition
+  local name = item.label or item.name or "session"
+  if cur == "approval" and M.config(cfg, "notifications.banner.onApproval", false) == true then
+    local sum = (type(item.pending) == "table" and item.pending.summary) or ""
+    return { kind = "approval", title = "Needs you — " .. name,
+             text = (sum ~= "" and ("wants: " .. sum)) or "waiting for approval" }
+  elseif cur == "done" and M.config(cfg, "notifications.banner.onDone", false) == true then
+    return { kind = "done", title = "Done — " .. name,
+             text = (type(item.activity) == "string" and item.activity ~= "" and item.activity) or "finished its turn" }
   end
   return nil
 end

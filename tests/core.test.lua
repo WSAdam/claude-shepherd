@@ -327,6 +327,109 @@ do
   -- falls back to error.message when there is no formatted field
   local nofmt = core.json.encode({ type = "system", subtype = "api_error", error = { message = "Overloaded" } })
   eq("error: falls back to error.message", (core.transcriptError(nofmt) or {}).message, "Overloaded")
+  -- L5 error-reason taxonomy: transcriptError carries a .reason; classifyError maps causes
+  eq("error: carries a reason", (core.transcriptError(stuck) or {}).reason, "runtime_error")
+  eq("error: overloaded -> model_error", (core.transcriptError(nofmt) or {}).reason, "model_error")
+  eq("classify: usage limit -> budget", core.classifyError("You have hit your usage limit"), "budget_exceeded")
+  eq("classify: 429 -> budget", core.classifyError("HTTP 429 Too Many Requests"), "budget_exceeded")
+  eq("classify: timed out -> timeout", core.classifyError("request timed out after 60s"), "timeout")
+  eq("classify: ECONNRESET -> runtime", core.classifyError("read ECONNRESET"), "runtime_error")
+  eq("classify: overloaded -> model", core.classifyError("Error: Overloaded (529)"), "model_error")
+  eq("classify: cancelled -> user", core.classifyError("Request was cancelled"), "user_cancelled")
+  eq("classify: unknown fallback", core.classifyError("something weird happened"), "unknown")
+  eq("classify: empty -> unknown", core.classifyError(""), "unknown")
+  eq("classify: nil -> unknown", core.classifyError(nil), "unknown")
+end
+
+-- ---- planFromTranscript: agent plan/TODO from the tail ---------------------
+do
+  local function asst(blocks) return core.json.encode({ type = "assistant", message = { content = blocks } }) end
+  local todoLine = asst({ { type = "tool_use", name = "TodoWrite", input = { todos = {
+    { content = "write tests", status = "completed" }, { content = "wire dashboard", status = "in_progress" } } } } })
+  local planLine = asst({ { type = "tool_use", name = "ExitPlanMode", input = { plan = "Step 1. do X\nStep 2. do Y" } } })
+  local chat = asst({ { type = "text", text = "hello" } })
+  -- todos parsed
+  local p = core.planFromTranscript(chat .. "\n" .. todoLine)
+  check("plan: todos found", p ~= nil and p.todos ~= nil)
+  eq("plan: todo count", p and #p.todos, 2)
+  eq("plan: todo content", p and p.todos[2].content, "wire dashboard")
+  eq("plan: todo status", p and p.todos[2].status, "in_progress")
+  -- plan text parsed
+  local p2 = core.planFromTranscript(planLine)
+  eq("plan: ExitPlanMode plan", p2 and p2.plan, "Step 1. do X\nStep 2. do Y")
+  -- newest TodoWrite wins (scan backwards)
+  local older = asst({ { type = "tool_use", name = "TodoWrite", input = { todos = { { content = "old", status = "pending" } } } } })
+  local pn = core.planFromTranscript(older .. "\n" .. todoLine)
+  eq("plan: newest todos win", pn and #pn.todos, 2)
+  -- both plan + todos
+  local both = core.planFromTranscript(planLine .. "\n" .. todoLine)
+  check("plan: both plan and todos", both and both.plan ~= nil and both.todos ~= nil)
+  -- none / garbage
+  eq("plan: no plan/todos -> nil", core.planFromTranscript(chat), nil)
+  eq("plan: empty -> nil", core.planFromTranscript(""), nil)
+  eq("plan: garbage line skipped", core.planFromTranscript("{ not json\n" .. todoLine) ~= nil, true)
+end
+
+-- ---- deriveAutoTitle: tile title from the first prompt ----------------------
+do
+  eq("autotitle: first line", core.deriveAutoTitle("Fix the login bug\nmore detail", 48), "Fix the login bug")
+  eq("autotitle: strips list marker", core.deriveAutoTitle("- refactor the parser", 48), "refactor the parser")
+  eq("autotitle: strips md header", core.deriveAutoTitle("## Add caching", 48), "Add caching")
+  eq("autotitle: collapses whitespace", core.deriveAutoTitle("do    a   thing", 48), "do a thing")
+  eq("autotitle: skips blank leading lines", core.deriveAutoTitle("\n\n  real task", 48), "real task")
+  eq("autotitle: blank -> nil", core.deriveAutoTitle("   ", 48), nil)
+  eq("autotitle: nil -> nil", core.deriveAutoTitle(nil, 48), nil)
+  local long = core.deriveAutoTitle(string.rep("x", 100), 20)
+  check("autotitle: truncates to maxLen", #long <= 20 + 3)  -- + ellipsis bytes
+  check("autotitle: truncation adds ellipsis", long:sub(-3) == "\226\128\166")
+end
+
+-- ---- isLooping: repeated-tool-call watchdog --------------------------------
+do
+  local function tu(name, input) return core.json.encode({ type = "assistant",
+    message = { content = { { type = "tool_use", name = name, input = input } } } }) end
+  -- toolCallSig: primary arg picked deterministically
+  eq("loopsig: bash command", core.toolCallSig("Bash", { command = "ls -la" }), "Bash\1ls -la")
+  eq("loopsig: read file", core.toolCallSig("Read", { file_path = "/a/b.lua" }), "Read\1/a/b.lua")
+  eq("loopsig: no primary -> name only", core.toolCallSig("Glob", {}), "Glob\1")
+  -- transcriptToolSigs: ordered, capped
+  local tail = tu("Bash", { command = "make test" }) .. "\n" .. tu("Read", { file_path = "/x" })
+  local sigs = core.transcriptToolSigs(tail, 12)
+  eq("loopsigs: count", #sigs, 2)
+  eq("loopsigs: order oldest->newest", sigs[1], "Bash\1make test")
+  -- isLooping: 3 identical consecutive -> looping
+  local loopTail = (tu("Bash", { command = "npm run x" }) .. "\n"):rep(3)
+  check("loop: 3 same in a row -> true", core.isLooping(core.transcriptToolSigs(loopTail, 12), 3))
+  -- mixed tail -> not looping
+  local mixed = tu("Bash", { command = "a" }) .. "\n" .. tu("Bash", { command = "b" }) .. "\n" .. tu("Bash", { command = "a" })
+  eq("loop: alternating -> false", core.isLooping(core.transcriptToolSigs(mixed, 12), 3), false)
+  -- below threshold -> false
+  eq("loop: 2 when n=3 -> false", core.isLooping({ "x", "x" }, 3), false)
+  eq("loop: n<2 disabled", core.isLooping({ "x", "x", "x" }, 1), false)
+  eq("loop: empty sig not a loop", core.isLooping({ "\1", "\1", "\1" }, 3), false)
+end
+
+-- ---- notifyDecision: OS banner on a rising edge -----------------------------
+do
+  local onApp = { notifications = { banner = { onApproval = true } } }
+  local onDone = { notifications = { banner = { onDone = true } } }
+  local off = {}
+  local appItem = { name = "alpha", status = "approval", pending = { summary = "Bash(rm)" } }
+  local doneItem = { name = "beta", status = "done", activity = "wrote the file" }
+  -- rising edge into approval fires when enabled
+  local n = core.notifyDecision("working", appItem, onApp)
+  check("notify: approval edge fires", n ~= nil and n.kind == "approval")
+  check("notify: approval text has summary", n and n.text:find("Bash(rm)", 1, true) ~= nil)
+  -- done edge
+  eq("notify: done edge kind", (core.notifyDecision("working", doneItem, onDone) or {}).kind, "done")
+  -- no edge (same status) -> nil
+  eq("notify: no edge when status unchanged", core.notifyDecision("approval", appItem, onApp), nil)
+  -- nil prev (post-reload) -> nil
+  eq("notify: nil prev -> no banner", core.notifyDecision(nil, appItem, onApp), nil)
+  -- config off -> nil
+  eq("notify: off by default", core.notifyDecision("working", appItem, off), nil)
+  -- approval edge but only onDone enabled -> nil
+  eq("notify: wrong toggle -> nil", core.notifyDecision("working", appItem, onDone), nil)
 end
 
 -- ---- runSequence: beat-list scheduling (injected scheduler) ----------------

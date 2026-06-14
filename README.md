@@ -29,6 +29,24 @@ command** being requested (e.g. `wants: npm test -- --watch`, via the
 `PermissionRequest` hook). Selecting a tile also shows a **live activity peek**:
 the latest assistant line from that session's transcript ("Doing: …").
 
+### Session observability (L5)
+
+All derived locally from the transcript Shepherd already tails — no extra hooks:
+
+- **Error cause** — an errored tile (frozen on an API error) shows a coarse cause
+  badge: `[budget exceeded]`, `[timeout]`, `[runtime error]`, `[model error]`,
+  `[user cancelled]`. The cause is recorded in the audit log (errors-by-cause).
+- **Plan / TODO** — selecting a tile shows the agent's current plan and TODO list
+  (its latest `TodoWrite` / plan-mode plan), if any.
+- **Auto-title** (off by default, `autoTitle.enabled`) — names an unlabeled tile
+  from its first prompt (cached). A manual relabel always wins.
+- **Loop watchdog** (off by default, `escalation.loop.enabled`) — a ⟳ badge when a
+  working session keeps repeating the same tool call (e.g. re-running a failing
+  command); detection only.
+- **Desktop banners** (off by default, `notifications.banner.onApproval` /
+  `onDone`) — a native macOS notification on a rising edge into "needs you" / "done";
+  click it to jump to the session.
+
 ## How it works
 
 ```

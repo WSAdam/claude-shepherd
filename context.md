@@ -176,7 +176,25 @@ v1 dispatcher, stripped before the task is typed. Load-bearing facts:
 - **Deferred (UX-gated):** routing topology view, role-addressed delegation, idle-as-target, auto-spawn on
   starvation.
 
-Build order next: **L5** (richer session observability) → L6 (event-callback rule engine) → L7 (scheduled spawns).
+**L5 — richer session observability** is shipped (the high-value pure-core derivations): all read off
+the transcript Shepherd already tails + local state, all off-by-default where they automate.
+- **Error-reason taxonomy:** `core.classifyError` (keyword match, most-specific first) → `transcriptError`
+  returns `{message, reason}`; the tile shows a cause badge + a fresh-edge `error` ledger event.
+- **Plan/TODO:** `core.planFromTranscript` (latest TodoWrite/ExitPlanMode), loaded ON SELECTION via the
+  `plan` bridge action (never the 1s tick — it parses the whole tail), `esc()` at the `#d-plan` sink.
+- **Auto-title** (`autoTitle.enabled`, off): `core.deriveAutoTitle` from `it.last_prompt`, cached once per
+  projectKey in `cc-autotitles.json`; the refresh pass runs AFTER `applyLabelsByCwd` (so it.label is known)
+  and only for unlabeled tiles; panel precedence `it.label || it.autoTitle || it.name`.
+- **Loop watchdog** (`escalation.loop.enabled`, off): `core.toolCallSig`/`transcriptToolSigs`/`isLooping`
+  reuse the working-tile tail; ⟳ badge + one `loop` event/episode; `loopAlerted` is REAPED on vanish (same
+  L4 lesson as `taskStart`).
+- **OS banners** (`notifications.banner.*`, off): `core.notifyDecision` fires on a rising approval/done edge;
+  `FX.notify` wraps `hs.notify` (click → `focusProject`).
+- **Deferred L5 sub-items:** detail-panel tabs, export archive, host stats, PR status, post-run self-summary,
+  hooks inspector, session-history browser, and a Settings UI for the auto-title/loop/banner toggles
+  (config-only for now).
+
+Build order next: **L6** (event-callback rule engine — `cc-rules.json`) → L7 (scheduled spawns / routines).
 
 ## State (2026-06-13)
 

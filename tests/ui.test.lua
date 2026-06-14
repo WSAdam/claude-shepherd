@@ -899,6 +899,39 @@ do
   -- L4 review fix: taskStart has no self-expiry -> must abandon on stale + reap vanished keys
   check("l4-pin: abandon timer on stale", src:find("taskStart[it.key] = nil  -- abandon", 1, true) ~= nil)
   check("l4-pin: reap vanished task timers", src:find("if not newPrev[k] then taskStart[k] = nil", 1, true) ~= nil)
+  -- L5 Inc 1: error-reason taxonomy — tile carries the cause, badge + fresh-edge ledger
+  check("l5-pin: tile carries error_reason", src:find("it.error_reason = err.reason", 1, true) ~= nil)
+  check("l5-pin: cause badge on the error tile", src:find("it.error_reason.replace(/_/g", 1, true) ~= nil)
+  check("l5-pin: error cause ledgered on the fresh edge",
+        src:find('type = "error", reason = it.error_reason', 1, true) ~= nil)
+  -- L5 Inc 2: plan/TODO on the detail panel, loaded on selection via core.planFromTranscript
+  check("l5-pin: plan handler", src:find('a == "plan"') ~= nil)
+  check("l5-pin: plan via cc-core", src:find("core.planFromTranscript(tail)", 1, true) ~= nil)
+  check("l5-pin: plan requested on selection", src:find('if(key) send("plan", key)', 1, true) ~= nil)
+  check("l5-pin: ccPlan + renderPlan", src:find("window.ccPlan = function(key, data)", 1, true) ~= nil
+        and src:find("function renderPlan()", 1, true) ~= nil)
+  check("l5-pin: d-plan element", src:find('id="d-plan"', 1, true) ~= nil)
+  -- L5 Inc 3: auto-title (off by default) — cached per projectKey, manual relabel wins
+  check("l5-pin: autotitle persistence", src:find("function FX.loadAutoTitles()", 1, true) ~= nil
+        and src:find("function FX.saveAutoTitles(map)", 1, true) ~= nil)
+  check("l5-pin: autotitle loaded at startup", src:find("autoTitles = FX.loadAutoTitles()", 1, true) ~= nil)
+  check("l5-pin: autotitle pass uses cc-core", src:find("core.deriveAutoTitle(it.last_prompt, 48)", 1, true) ~= nil)
+  check("l5-pin: autotitle gated off by default", src:find('core.config(cfg, "autoTitle.enabled", false)', 1, true) ~= nil)
+  check("l5-pin: name precedence label>autoTitle>name",
+        src:find("esc(it.label || it.autoTitle || it.name)", 1, true) ~= nil)
+  -- L5 Inc 4: loop-detection watchdog (off by default) — reuses the tail, ⟳ badge, once/episode
+  check("l5-pin: loop detection via cc-core",
+        src:find("core.isLooping(core.transcriptToolSigs(tail, loopRepeats + 2), loopRepeats)", 1, true) ~= nil)
+  check("l5-pin: loop gated off by default", src:find('core.config(cfg, "escalation.loop.enabled", false)', 1, true) ~= nil)
+  check("l5-pin: loop ledger once per episode", src:find("loopAlerted[it.key] = true", 1, true) ~= nil)
+  check("l5-pin: loop alerted reaped", src:find("if not newPrev[k] then loopAlerted[k] = nil", 1, true) ~= nil)
+  check("l5-pin: loop tile badge", src:find("⟳ looping", 1, true) ~= nil)
+  -- L5 Inc 5: OS-native banners (off by default) via core.notifyDecision + FX.notify (hs.notify)
+  check("l5-pin: FX.notify wraps hs.notify", src:find("function FX.notify(title, text, opts)", 1, true) ~= nil
+        and src:find("hs.notify.new(function()", 1, true) ~= nil)
+  check("l5-pin: notify click jumps to session", src:find("focusProject(it.name, it.cwd, it.editor, true)", 1, true) ~= nil)
+  check("l5-pin: banner decision via cc-core", src:find("core.notifyDecision(pv.status, it, cfg)", 1, true) ~= nil)
+  check("l5-pin: banner gated off by default", src:find('core.config(cfg, "notifications.banner.onApproval", false)', 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

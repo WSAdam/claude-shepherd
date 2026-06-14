@@ -59,6 +59,7 @@ local AUTOPILOT_DIR = os.getenv("CC_AUTOPILOT_DIR") or (os.getenv("HOME") .. "/.
 local GATE_TOOLS_DIR = os.getenv("CC_GATE_TOOLS_DIR") or (os.getenv("HOME") .. "/.claude/cc-gate-tools")
 local GATE_FLAG     = os.getenv("CC_GATE_FLAG") or (os.getenv("HOME") .. "/.claude/cc-gate.enabled")
 local LABELS_FILE   = os.getenv("CC_LABELS_FILE") or (os.getenv("HOME") .. "/.claude/cc-labels.json")
+local AUTOTITLE_FILE = os.getenv("CC_AUTOTITLE_FILE") or (os.getenv("HOME") .. "/.claude/cc-autotitles.json")
 local GROUPS_FILE   = os.getenv("CC_GROUPS_FILE") or (os.getenv("HOME") .. "/.claude/cc-groups.json")
 local RECENT_FILE   = os.getenv("CC_RECENT_FILE") or (os.getenv("HOME") .. "/.claude/cc-recent-dirs.json")
 local TEMPLATE_FILE = os.getenv("CC_TEMPLATE_FILE") or (os.getenv("HOME") .. "/.claude/cc-templates.json")
@@ -144,6 +145,7 @@ local byKey = {}
 -- reverses the earlier in-memory-only rule.) Loaded from disk once FX exists.
 local labels = {}
 local groups = {}        -- projectKey -> group name (cohort tag); loaded from disk
+local autoTitles = {}    -- projectKey -> derived tile title (L5; cached once per project)
 local ctxMenu            -- holds the live right-click popup menu (so it isn't GC'd)
 local wv                 -- the webview; forward-declared so the controller can push to it
 local lastJumpKey = nil  -- for the cycle-jump hotkey
@@ -181,6 +183,7 @@ local starvedSince  = {} -- queueKey -> first ts the armed project had work but 
 local starvedAlerted = {} -- queueKey -> true once the starvation ledger event fired this episode
 local taskStart     = {} -- tile key -> { ts, role, projectKey, by }: a fed queue task in
                          -- flight (L4 per-task timing); consumed on the next done edge
+local loopAlerted   = {} -- tile key -> true once a loop ledger event fired this episode (L5)
 local loadConfig         -- forward declaration (defined near refresh)
 local ledgerSnapshot     -- forward declaration (defined near refresh; bridge handlers use it)
 local refresh            -- forward declaration (so the controller can repaint now)
@@ -521,6 +524,18 @@ end
 function FX.saveLabels(labelsByCwd)
   hs.fs.mkdir(CLAUDE_DIR)
   FX.writeFile(LABELS_FILE, core.json.encode(labelsByCwd or {}))
+end
+-- L5 auto-titles: projectKey -> derived tile title (cc-autotitles.json). Computed
+-- once per project (from its first prompt) and cached so the title is stable.
+function FX.loadAutoTitles()
+  local c = FX.readFile(AUTOTITLE_FILE)
+  if not c or #c == 0 then return {} end
+  local ok, t = pcall(function() return core.json.decode(c) end)
+  return (ok and type(t) == "table") and t or {}
+end
+function FX.saveAutoTitles(map)
+  hs.fs.mkdir(CLAUDE_DIR)
+  FX.writeFile(AUTOTITLE_FILE, core.json.encode(map or {}))
 end
 
 -- Session groups (cohort tags): a JSON map of projectKey -> group name. Same
@@ -1093,6 +1108,19 @@ function FX.push(topic, title, msg)
   pcall(function()
     hs.http.asyncPost("https://ntfy.sh/" .. topic, msg or "",
       { Title = title or "Claude Shepherd", Priority = "high" }, function() end)
+  end)
+end
+-- L5 OS-native banner (hs.notify). Click jumps to the session (best-effort focus via
+-- focusProject). Local-only, no network; off by default (gated by the caller).
+function FX.notify(title, text, opts)
+  opts = opts or {}
+  pcall(function()
+    local n = hs.notify.new(function()
+      local it = opts.key and byKey[opts.key]
+      if it then pcall(function() focusProject(it.name, it.cwd, it.editor, true) end) end
+    end, { title = tostring(title or "Claude Shepherd"), informativeText = tostring(text or ""),
+           withdrawAfter = 0 })
+    n:send()
   end)
 end
 
@@ -2451,6 +2479,22 @@ local function handleBridgeMsg(msg)
     pcall(function() wv:evaluateJavaScript("window.ccDecisions(" .. jsString(key) .. ", " .. payloadJson .. ")") end)
     return
   end
+  if a == "plan" then
+    -- L5 detail-panel agent plan/TODO: parse the selected session's transcript tail
+    -- for the latest TodoWrite/ExitPlanMode (selection-triggered, NEVER the 1s tick --
+    -- it parses the whole tail). Replies null when there's nothing to show.
+    local key = tostring(payload.v or "")
+    local it = byKey[key]
+    local path = it and it.transcript_path
+    local plan = nil
+    if path and path ~= "" and not it.remote then
+      local tail = FX.readTail(path, 262144)
+      if tail then plan = core.planFromTranscript(tail) end
+    end
+    local payloadJson = plan and hs.json.encode(plan) or "null"
+    pcall(function() wv:evaluateJavaScript("window.ccPlan(" .. jsString(key) .. ", " .. payloadJson .. ")") end)
+    return
+  end
   if a == "audit-export" then
     local okf, f = pcall(function() return hs.json.decode(payload.text or "{}") end)
     f = (okf and type(f) == "table") and f or {}
@@ -3180,6 +3224,13 @@ local HTML = [[
                           border-radius:6px; padding:3px 10px; cursor:pointer; font-size:12px; }
   .tpl-form-foot button#tpl-var-go, .tpl-form-foot button#m-tpl-go { color:#8fd4a3; border-color:#2c5; }
   .tpl-form-foot button:disabled { opacity:0.4; cursor:default; }
+  #d-plan { display:none; margin-top:6px; }
+  .d-plan-h { color:#9aa0ad; font-size:11px; text-transform:uppercase; letter-spacing:.04em; margin:4px 0 2px; }
+  .todo-row { font-size:12px; color:#c9ccd6; padding:1px 0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .todo-row.todo-done { color:#6f7787; text-decoration:line-through; }
+  .todo-row.todo-active { color:#8fd4ff; font-weight:600; }
+  .d-plan-pre { white-space:pre-wrap; font-size:11px; color:#aeb3c0; background:#15171d; border:1px solid #23262f;
+                border-radius:5px; padding:5px 7px; margin:2px 0 0; max-height:160px; overflow-y:auto; }
   #b-feed { background:#21232c; color:#8fd4a3; border:1px solid #2c5; border-radius:8px;
             font-size:12px; padding:5px 10px; cursor:pointer; }
   .qbadge { color:#9fb6d6; }
@@ -3406,6 +3457,7 @@ local HTML = [[
     <div id="d-meta"></div>
     <div id="d-lineage" title="Respawn / clear / continue churn for this project since midnight (needs the audit ledger)."></div>
     <div id="d-decisions"></div>
+    <div id="d-plan"></div>
     <div id="d-usage"></div>
     <div id="d-actions">
       <button id="b-jump"    onclick="act('focus')">Jump</button>
@@ -4757,11 +4809,32 @@ local HTML = [[
     // Loaded on selection + on the selected tile's status transitions (exactly
     // when a decision likely just landed) -- NEVER on the 1s refresh tick.
     var DECISIONS = { key: null, rows: null };
-    function requestDecisions(key){ if(key) send("decision-log", key); }
+    function requestDecisions(key){ if(key) send("decision-log", key); if(key) send("plan", key); }
     window.ccDecisions = function(key, rows){
       DECISIONS = { key: key, rows: rows };
       renderDecisions();
     };
+    // L5: agent plan/TODO, loaded on selection (+ on the selected tile's status change).
+    var PLAN = { key: null, data: null };
+    window.ccPlan = function(key, data){ PLAN = { key: key, data: data }; renderPlan(); };
+    function renderPlan(){
+      var box = document.getElementById("d-plan"); if(!box) return;
+      var d = PLAN.data;
+      if(PLAN.key !== selectedKey || !d){ box.style.display = "none"; box.innerHTML = ""; return; }
+      var html = "";
+      if(d.todos && d.todos.length){
+        html += '<div class="d-plan-h">Plan / TODO</div>';
+        html += d.todos.map(function(t){
+          var mark = t.status === "completed" ? "✓" : (t.status === "in_progress" ? "▸" : "○");
+          var cls = t.status === "completed" ? "todo-done" : (t.status === "in_progress" ? "todo-active" : "");
+          return '<div class="todo-row ' + cls + '">' + mark + ' ' + esc(t.content) + '</div>';
+        }).join("");
+      }
+      if(d.plan){
+        html += '<div class="d-plan-h">Plan</div><pre class="d-plan-pre">' + esc(d.plan) + '</pre>';
+      }
+      box.innerHTML = html; box.style.display = html ? "block" : "none";
+    }
     function renderDecisions(){
       var box = document.getElementById("d-decisions"); if(!box) return;
       var rows = DECISIONS.rows;
@@ -5534,7 +5607,8 @@ local HTML = [[
       if(st === "approval" && it.pending && it.pending.summary){
         meta = "wants: " + it.pending.summary;
       } else if(st === "error"){
-        meta = it.error_message || "API error — stopped";
+        meta = (it.error_reason && it.error_reason !== "unknown" ? "[" + it.error_reason.replace(/_/g," ") + "] " : "")
+             + (it.error_message || "API error — stopped");
       }
       if(it.remote){ meta = (meta ? meta + " · " : "") + "⇄ " + (it.remote.host || "remote")
                             + (it.bridgeStale ? " (bridge offline)" : ""); }
@@ -5545,11 +5619,12 @@ local HTML = [[
       if(it.draining){ meta = (meta ? meta + " · " : "") + "⛔ draining"; }
       if(it.collide){ meta = (meta ? meta + " · " : "") + "⚠ shared dir"; }
       if(it.hung){ meta = (meta ? meta + " · " : "") + "⏳ stalled"; }
+      if(it.looping){ meta = (meta ? meta + " · " : "") + "⟳ looping"; }   // L5 loop watchdog
       if(it.churn){ meta = (meta ? meta + " · " : "") + "♻️" + it.churn; }   // respawn/clear churn today
       var cls = "tile s-" + st + (it.stale ? " stale" : "") + (it.collide ? " collide" : "") + (it.hung ? " hung" : "") + (it.escalate ? " escalate" : "") + (it.key === selectedKey ? " sel" : "");
       return '<div class="'+cls+'" data-key="'+esc(it.key)+'" onclick="selectTile(\''+esc(it.key)+'\')" ondblclick="send(\'focus\',\''+esc(it.key)+'\')" oncontextmenu="showCtx(event,\''+esc(it.key)+'\')" title="Double-click to jump · right-click for more">'
            + '<span class="dot"></span>'
-           + '<span class="name">'+esc(it.label || it.name)+(it.group ? ' <span class="gtag">🏷 '+esc(it.group)+'</span>' : '')+'</span>'
+           + '<span class="name">'+esc(it.label || it.autoTitle || it.name)+(it.group ? ' <span class="gtag">🏷 '+esc(it.group)+'</span>' : '')+'</span>'
            + '<span class="label">'+(age ? '<span class="age">'+esc(age)+'</span> ' : '')+label+'</span>'
            + riskBadge(it)
            + (meta ? '<span class="meta">'+esc(meta)+'</span>' : '')
@@ -5892,6 +5967,11 @@ function refresh()
   local autofeed   = core.config(cfg, "queue.autofeed", false) == true
   local queueDry   = core.config(cfg, "queue.dryRun", false) == true
   local routingOn  = core.config(cfg, "queue.routing.enabled", false) == true  -- 4c-E
+  local autoTitleOn = core.config(cfg, "autoTitle.enabled", false) == true  -- L5 derived tile titles
+  local loopOn      = core.config(cfg, "escalation.loop.enabled", false) == true  -- L5 loop watchdog
+  local loopRepeats = tonumber(core.config(cfg, "escalation.loop.repeats", 3)) or 3
+  local bannerOn    = (core.config(cfg, "notifications.banner.onApproval", false) == true)  -- L5 OS banners
+                   or (core.config(cfg, "notifications.banner.onDone", false) == true)
   local starveMin  = tonumber(core.config(cfg, "queue.routing.starveMinutes", 0)) or 0
   local routeGroups = {}  -- queueKey -> { items }: members per project, for the dispatcher
   local escEnabled = core.config(cfg, "escalation.enabled", false) == true
@@ -6012,7 +6092,28 @@ function refresh()
     -- it), and the list is re-sorted after the loop so errors surface near approvals.
     if tail and it.status == "working" then
       local err = core.transcriptError(tail)
-      if err then it.status = "error"; it.error_message = err.message end
+      if err then it.status = "error"; it.error_message = err.message; it.error_reason = err.reason end
+    end
+
+    -- L5 loop watchdog (off by default): flag a working session repeating the SAME
+    -- tool call (e.g. re-running a failing command). Reuses the tail already read; a
+    -- ⟳ tile badge + ONE ledger event per episode (reset when it stops). Detection only.
+    if loopOn and tail and it.status == "working"
+       and core.isLooping(core.transcriptToolSigs(tail, loopRepeats + 2), loopRepeats) then
+      it.looping = true
+      if not loopAlerted[it.key] then
+        loopAlerted[it.key] = true
+        if ledgerOn then ledgerFor(it, { type = "loop", repeats = loopRepeats }) end
+      end
+    else
+      loopAlerted[it.key] = nil
+    end
+
+    -- L5 OS-native banner on a fresh rising edge into approval/done (off by default;
+    -- gated by bannerOn so we don't even build the decision when disabled).
+    if bannerOn and pv ~= nil then
+      local nb = core.notifyDecision(pv.status, it, cfg)
+      if nb then FX.notify(nb.title, nb.text, { key = it.key }) end
     end
 
     -- Watchdog (Feature 8): track transcript progress so a stalled `working` session
@@ -6040,6 +6141,14 @@ function refresh()
       it.risk = r.band
       it.riskScore = r.score
       it.riskSignals = r.signals
+    end
+
+    -- L5 error-reason taxonomy: ledger the CAUSE once, on the fresh transition into
+    -- the error state (errors-by-cause shows up in the audit timeline + search). pv==nil
+    -- (post-reload) is no edge, so a reload can't re-ledger every frozen tile.
+    if ledgerOn and it.status == "error" and pv ~= nil and pv.status ~= "error" then
+      ledgerFor(it, { type = "error", reason = it.error_reason or "unknown",
+                      message = it.error_message })
     end
 
     -- L4 per-task timing: a fed queue task finishes on its first done edge -- ledger
@@ -6230,6 +6339,7 @@ function refresh()
   -- removeStatus) without a done edge -- the loop above only visits live tiles, so a
   -- gone key would leak forever (mirrors the usageState seen-set reap).
   for k in pairs(taskStart) do if not newPrev[k] then taskStart[k] = nil end end
+  for k in pairs(loopAlerted) do if not newPrev[k] then loopAlerted[k] = nil end end
 
   -- 4c-E project routing dispatcher: ONE feed per armed project per tick, to
   -- whichever member is free (done, not stale/error/draining/pending). Runs
@@ -6329,6 +6439,25 @@ function refresh()
   -- Overlay persistent relabels by project path (display-only; .name stays the
   -- real target). A new session in a labeled folder inherits the name (F1).
   core.applyLabelsByCwd(list, labels)
+  -- L5 auto-title (off by default): for an UNLABELED tile, derive a stable title from
+  -- its first prompt and cache it per projectKey (computed once -- titles don't change).
+  -- Runs after applyLabelsByCwd so it.label (the manual relabel) is known; precedence
+  -- is manual relabel > auto-title > folder basename (the panel reads it.autoTitle).
+  if autoTitleOn then
+    local dirty = false
+    for _, it in ipairs(list) do
+      if (not it.label or it.label == "") and it.projectKey and it.projectKey ~= "" then
+        local cached = autoTitles[it.projectKey]
+        if type(cached) == "string" and cached ~= "" then
+          it.autoTitle = cached
+        elseif type(it.last_prompt) == "string" and it.last_prompt ~= "" then
+          local title = core.deriveAutoTitle(it.last_prompt, 48)
+          if title then autoTitles[it.projectKey] = title; it.autoTitle = title; dirty = true end
+        end
+      end
+    end
+    if dirty then FX.saveAutoTitles(autoTitles) end
+  end
   -- (.group is applied earlier in the tick — see the comment after refreshList() —
   -- so the routing dispatcher can match @role: against a member's group.)
 
@@ -6444,6 +6573,7 @@ hs.fs.mkdir(STATUS_DIR)
 -- Load persistent relabels + group tags from disk now that FX is wired up.
 labels = FX.loadLabels()
 groups = FX.loadGroups()
+autoTitles = FX.loadAutoTitles()
 
 -- Poll on a timer, and also react instantly to file changes. The watcher must
 -- ignore the panel's OWN heartbeat (refresh writes .panel-alive into this dir

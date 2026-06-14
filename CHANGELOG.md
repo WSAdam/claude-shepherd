@@ -4,6 +4,37 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-14 (later still ×2) — L5 richer session observability
+
+Fifth build from the feature-mining backlog. Pure-core derivations off the transcript Shepherd
+already tails + local reads — no executor, no sandbox, no server. Each automatic piece is off by
+default.
+
+- **Error-reason taxonomy** — `core.classifyError(msg)` maps an API error to a coarse cause
+  (`budget_exceeded` / `timeout` / `runtime_error` / `model_error` / `user_cancelled` / `unknown`);
+  `transcriptError` now returns `{message, reason}`. Error tiles show a cause badge
+  (`[budget exceeded] …`), and the cause is ledgered once on the fresh transition into error (an
+  errors-by-cause facet in the audit timeline + search).
+- **Plan / TODO on the detail panel** — `core.planFromTranscript(tail)` surfaces the agent's latest
+  `TodoWrite` todos and/or `ExitPlanMode` plan; loaded **on selection** (a `plan` bridge action,
+  never the 1s tick), rendered in a `#d-plan` section with `esc()` at the sink.
+- **Auto-title tiles** (config `autoTitle.enabled`, default **off**) — `core.deriveAutoTitle(seed)`
+  names an unlabeled tile from its first prompt; cached once per `projectKey` in `cc-autotitles.json`.
+  Precedence: manual relabel > auto-title > folder basename.
+- **Loop-detection watchdog** (config `escalation.loop.enabled`, default **off**) —
+  `core.toolCallSig`/`transcriptToolSigs`/`isLooping` flag a working session repeating the same tool
+  call (re-running a failing command, re-reading a file); a ⟳ tile badge + one `loop` ledger event
+  per episode. Reuses the tail already read for working tiles; detection only (no auto-nudge).
+- **OS-native desktop banners** (config `notifications.banner.{onApproval,onDone}`, default **off**) —
+  `core.notifyDecision` fires on a fresh rising edge into approval/done; `FX.notify` wraps `hs.notify`
+  and the click jumps to the session. Local-only, no network.
+- Reviewed adversarially (2 reported, 0 confirmed). State-lifecycle care from the L4 lesson:
+  `loopAlerted` is reaped when a key vanishes; `autoTitles` is written only when a new title is
+  computed. Tests: +56 cc-core checks, +21 dashboard pins. Suite green (1528 core + 330 ui + 183 bash).
+- **Deferred L5 sub-items** (the phase is large): detail-panel tab strip, export session archive, host
+  stats + fleet idle-since, PR/MR status per tile, post-run self-summary, hooks inspector, the
+  session-history browser, and a Settings UI toggle for auto-title/loop/banners (config-only for now).
+
 ## 2026-06-14 (even later) — L4 declarative routing & orchestration
 
 Fourth build from the feature-mining backlog. Extends the shipped Project Routing v1 dispatcher
