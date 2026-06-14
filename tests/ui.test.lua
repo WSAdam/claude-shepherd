@@ -870,6 +870,16 @@ do
   check("l3-pin: import via cc-core promptImport", src:find("core.promptImport(FX.readTemplates()", 1, true) ~= nil)
   check("l3-pin: sourceDir config override", src:find('core.config(loadConfig(), "templates.sourceDir"', 1, true) ~= nil)
   check("l3-pin: JS import row", src:find("function templateImport()", 1, true) ~= nil)
+  -- L4 Inc 1: renderFeed strips the @role: routing prefix before typing
+  check("l4-pin: renderFeed strips @role:", src:find("local _, bare = core.taskRoute(tostring(task or ", 1, true) ~= nil)
+  -- L4 Inc 1 (review fix): applyGroups MUST run before the routing dispatcher, or
+  -- every tile's .group is nil at route time and labeled tasks starve. Guard the order.
+  do
+    local agPos = src:find("core.applyGroups(list, groups)", 1, true)
+    local rtPos = src:find("core.routeTask(members, q", 1, true)
+    check("l4-pin: applyGroups runs before the router (so .group is set for @role:)",
+          agPos ~= nil and rtPos ~= nil and agPos < rtPos)
+  end
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

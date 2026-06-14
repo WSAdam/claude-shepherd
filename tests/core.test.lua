@@ -2543,6 +2543,29 @@ do
      core.routeTask(free, { tasks = {}, routing = true }, { globalOn = true, now = 100 }), nil)
   eq("route-task: nobody free -> nil",
      core.routeTask({ sess("a", "working") }, armed, { globalOn = true, now = 100 }), nil)
+  -- L4 conditional routing: a "@role:" prefix routes to a session whose GROUP matches
+  eq("taskRoute: strips the prefix", select(2, core.taskRoute("@review: do the thing")), "do the thing")
+  eq("taskRoute: role lowercased", (core.taskRoute("@Review: x")), "review")
+  eq("taskRoute: no prefix -> nil role", core.taskRoute("just do it"), nil)
+  eq("taskRoute: bare prefix -> no role", core.taskRoute("@review:"), nil)
+  eq("taskRoute: bare prefix kept literal", select(2, core.taskRoute("@review:")), "@review:")
+  eq("memberRole: group lowercased", core.memberRole({ group = "Review" }), "review")
+  eq("memberRole: blank -> nil", core.memberRole({ group = "  " }), nil)
+  local roled = { sess("rv", "done", { since = 50, group = "review" }),
+                  sess("bd", "done", { since = 40, group = "build" }) }
+  eq("route-pick: role restricts the pool", core.routePick(roled, { now = 100, role = "review" }), "rv")
+  eq("route-pick: unmatched role -> nil", core.routePick(roled, { now = 100, role = "deploy" }), nil)
+  eq("route-pick: no role -> longest-free across all", core.routePick(roled, { now = 100 }), "bd")
+  local rq = { tasks = { "@review: ship it" }, routing = true }
+  eq("route-task: labeled head -> matching group",
+     core.routeTask(roled, rq, { globalOn = true, now = 100 }).key, "rv")
+  eq("route-task: labeled head returns role",
+     core.routeTask(roled, rq, { globalOn = true, now = 100 }).role, "review")
+  eq("route-task: label with no matching member -> nil",
+     core.routeTask(roled, { tasks = { "@deploy: x" }, routing = true }, { globalOn = true, now = 100 }), nil)
+  eq("route-starved: labeled head, no matching free -> starved",
+     core.queueStarved({ sess("bd", "done", { group = "build" }) },
+       { tasks = { "@review: x" }, routing = true }, { minutes = 1, sinceTs = 0, now = 1000 }), true)
   -- queueRouted / queueSetRouted round-trip; tasks preserved; legacy shape clean
   eq("route-flag: legacy file unarmed", core.queueRouted({ tasks = { "x" } }), false)
   local on = core.queueSetRouted({ tasks = { "x", "y" } }, true)

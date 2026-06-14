@@ -1751,10 +1751,13 @@ end
 -- The raw queued task is still what gets popped/persisted/ledgered; only the typed
 -- text is rendered.
 local function renderFeed(task, item)
+  -- strip a leading @role: routing prefix (L4) so the session never sees the
+  -- scaffolding -- the role already chose the target; only the bare text is typed.
+  local _, bare = core.taskRoute(tostring(task or ""))
   local prevOut = (item and type(item.activity) == "string") and item.activity or ""
-  local r = core.renderTemplate(tostring(task or ""), {},
+  local r = core.renderTemplate(bare, {},
     { now = os.time(), prevOutput = prevOut, keepMissing = true })
-  return r or tostring(task or "")
+  return r or bare
 end
 
 -- Single message bridge. JS posts JSON: {a=action, v=key, text=optional}.
@@ -5849,6 +5852,11 @@ function refresh()
   local cfg = loadConfig()
   reconcileBridge(cfg)  -- SSH bridge timers track config (cheap diff per tick)
   local list = refreshList()
+  -- Cohort tag (.group) MUST be applied before the routing dispatcher below: L4
+  -- @role: routing matches a task's role against a member's GROUP, and routeGroups
+  -- holds references to these same tiles. (Also feeds the filter chips, group-scoped
+  -- bulk actions, and L2 attachment matching — all later in the tick.)
+  core.applyGroups(list, groups)
   local autofeed   = core.config(cfg, "queue.autofeed", false) == true
   local queueDry   = core.config(cfg, "queue.dryRun", false) == true
   local routingOn  = core.config(cfg, "queue.routing.enabled", false) == true  -- 4c-E
@@ -6265,7 +6273,8 @@ function refresh()
   -- Overlay persistent relabels by project path (display-only; .name stays the
   -- real target). A new session in a labeled folder inherits the name (F1).
   core.applyLabelsByCwd(list, labels)
-  core.applyGroups(list, groups)  -- cohort tag (.group); drives filter chips + group-scoped bulk
+  -- (.group is applied earlier in the tick — see the comment after refreshList() —
+  -- so the routing dispatcher can match @role: against a member's group.)
 
   -- L2: resolve each session's effective policy bundle (attachments apply
   -- fleet-wide; a per-session override wins) and CHANGE-GATED-write the per-session

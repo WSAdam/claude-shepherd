@@ -1871,6 +1871,10 @@ function M.queuePop(q)
   return src[1], qkeep(q, { tasks = rest })
 end
 
+-- The front task without removing it. The router peeks the head to resolve a
+-- routed task's @role: before choosing a target (the dispatcher then pops it).
+function M.queuePeek(q) return qtasks(q)[1] end
+
 -- Concatenate two queues (a's tasks first). Used when adopting a legacy
 -- session-keyed queue file into the project-keyed one -- `a` is the DESTINATION
 -- (project) queue, so its arm flag wins.
@@ -2032,20 +2036,48 @@ function M.sessionFree(item, opts)
   return true
 end
 
+-- ---- L4 conditional routing: @role: labels ---------------------------------
+-- A queued task may carry a leading "@role:" prefix addressing it to a session
+-- ROLE (the DECIDED affinity source). Returns (role|nil, bareText): the role
+-- lowercased, and the task with the prefix stripped -- the bare text is what gets
+-- TYPED (the session never sees the routing scaffolding). A prefix with nothing
+-- after it is treated as literal text (no role), so a stray "@x:" can't blank a task.
+function M.taskRoute(task)
+  task = tostring(task or "")
+  local role, rest = task:match("^@([%w._%-]+):%s*(.*)$")
+  if role and rest and rest:gsub("%s+$", "") ~= "" then return role:lower(), rest end
+  return nil, task
+end
+
+-- A member's role axis for @role: matching: its session GROUP (the shipped per-tile
+-- cohort tag), lowercased. nil/blank -> nil. An UNLABELED task matches any member;
+-- a LABELED task matches only members whose group equals the role.
+function M.memberRole(item)
+  local g = item and item.group
+  if type(g) == "string" then
+    g = g:gsub("^%s+", ""):gsub("%s+$", ""):lower()
+    if g ~= "" then return g end
+  end
+  return nil
+end
+
 -- Pick the target for one project's next task. Deterministic: longest-free
 -- first (smallest `since` -- the status file stamps it on each status change),
 -- key ascending as the tiebreak; a missing `since` reads as "just changed"
 -- (lowest priority). members = parsed items sharing one queueKey. opts =
--- { draining = map key->bool, pending = map key->ts, now, pendingTimeout }.
--- Returns the chosen tile key, or nil when no member is free.
+-- { draining = map key->bool, pending = map key->ts, now, pendingTimeout,
+-- role = label|nil }. With a role set, only members whose memberRole matches are
+-- eligible (conditional routing). Returns the chosen tile key, or nil when none free.
 function M.routePick(members, opts)
   opts = opts or {}
   local draining = opts.draining or {}
   local pending = opts.pending or {}
+  local role = opts.role
   local best, bestSince
   for _, it in ipairs(members or {}) do
-    if M.sessionFree(it, { draining = draining[it.key], pending = pending[it.key],
-                           now = opts.now, pendingTimeout = opts.pendingTimeout }) then
+    if (role == nil or M.memberRole(it) == role)
+       and M.sessionFree(it, { draining = draining[it.key], pending = pending[it.key],
+                               now = opts.now, pendingTimeout = opts.pendingTimeout }) then
       local since = tonumber(it.since) or math.huge
       if best == nil or since < bestSince
          or (since == bestSince and tostring(it.key) < tostring(best)) then
@@ -2064,9 +2096,11 @@ function M.routeTask(members, q, opts)
   if not opts.globalOn then return nil end
   if not M.queueRouted(q) then return nil end
   if M.queueDepth(q) == 0 then return nil end
-  local key = M.routePick(members, opts)
+  local role = select(1, M.taskRoute(M.queuePeek(q)))  -- @role: on the FIFO head
+  local key = M.routePick(members, { draining = opts.draining, pending = opts.pending,
+    now = opts.now, pendingTimeout = opts.pendingTimeout, role = role })
   if not key then return nil end
-  return { key = key }
+  return { key = key, role = role }
 end
 
 -- Starvation check: an armed project with queued work and NO free session for
@@ -2077,7 +2111,10 @@ function M.queueStarved(members, q, opts)
   local minutes = tonumber(opts.minutes) or 0
   if minutes <= 0 then return false end
   if not M.queueRouted(q) or M.queueDepth(q) == 0 then return false end
-  if M.routePick(members, opts) ~= nil then return false end
+  -- starved = the FIFO head can't be routed (its @role: has no free matching member)
+  local role = select(1, M.taskRoute(M.queuePeek(q)))
+  if M.routePick(members, { draining = opts.draining, pending = opts.pending,
+       now = opts.now, pendingTimeout = opts.pendingTimeout, role = role }) ~= nil then return false end
   local sinceTs = tonumber(opts.sinceTs)
   if not sinceTs then return false end
   return ((tonumber(opts.now) or 0) - sinceTs) > minutes * 60
