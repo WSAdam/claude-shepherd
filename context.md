@@ -18,7 +18,7 @@ network, no multi-user, no secrets — it reads session status off the local fil
   parse/sort/staleness, action selection, spawn specs, ledger + fleet-insights aggregation,
   per-session risk, grouping/filtering, sparkline bucketing) is a pure, deterministic
   function unit-tested directly in plain `lua`. **New logic goes here.**
-- **[claude-dashboard.lua](claude-dashboard.lua) — Hammerspoon glue (~3,900 lines).** The
+- **[claude-dashboard.lua](claude-dashboard.lua) — Hammerspoon glue (~5,900 lines).** The
   webview, the ~1s refresh loop, module-level state, and all side effects. Effects funnel
   through one `fx` table (focus / keys / paste / file writes / spawn) so tests pass a
   **recorder double** instead of acting. This file is NOT unit-tested directly — put logic in
@@ -27,7 +27,9 @@ network, no multi-user, no secrets — it reads session status off the local fil
   client-side. A few pure cc-core helpers are **hand-mirrored** in this JS for instant
   interactivity (`filterTiles`, `applyGroups`, `fmtDuration`, and `contextBand` → the JS
   `barLevel`); these twins must stay in sync — comments mark them. `BULK_RULES` is single-sourced (injected as
-  `__BULK_RULES__`) so the bulk-bar count can't drift from what Lua acts on.
+  `__BULK_RULES__`) so the bulk-bar count can't drift from what Lua acts on; likewise the ⌨ hotkey
+  legend is injected as `__HOTKEY_LEGEND__`, built from the real `HOTKEY_*` bindings so the displayed
+  combos can't drift from what's bound.
 - **Shell hooks** — [cc-status.sh](cc-status.sh) / [cc-approve.sh](cc-approve.sh) /
   [cc-popup.sh](cc-popup.sh) + [cc-lib.sh](cc-lib.sh). Claude Code hooks write session status
   JSON into `~/.claude/cc-status/`; the dashboard reads it.
@@ -119,6 +121,6 @@ bands (calm <50, every 10% to 90, critical last-5%); (2) **Auto-Continue** auto-
 API-error tile after a grace delay (bounded per-folder, off by default); (3) **Auto-Remote-
 Control** launches new spawns with `--remote-control` and sweeps `/rc` into running sessions on
 startup. Routing follow-ups were **deliberately deferred** (UX-blocked — see todos.md). Suite:
-**1193 core + 178 ui + 167 bash** checks, all green. Remaining work is in [todos.md](todos.md):
+**1260 core + 210 ui + 177 bash** checks, all green. Remaining work is in [todos.md](todos.md):
 the **needs-hardware** runbook ([docs/hardware-verification.md](docs/hardware-verification.md))
 for the Kitty tokens + the SSH bridge, and the deferred routing follow-ups.

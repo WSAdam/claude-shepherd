@@ -145,6 +145,26 @@ remaining items. Full per-round detail is in CHANGELOG.md and git history.
   silently empty over a large tree) — now runs via `/bin/sh` with a temp-file redirect + a 15s
   timeout (`core.folderScanShellCommand`). Verified live (`folder scan: fd … -> 1187 dir(s)`, was
   0). Suite **1211 core + 192 ui + 167 bash**, all green.
+- **pad-mirror batch (June 2026)**: crawled the `pad` project (a local-first agent-era task
+  manager), ran an adversarial pass per candidate, and shipped the four that survived — each a
+  *widening of an existing primitive*, not a new system (playbooks / durable conventions+notes /
+  a task backlog were **declined** as domain creep or duplicates of CLAUDE.md + the gate):
+  1. **Jump-to-priority hotkey** — **⌘⌥J** now targets `core.nextAttention` (approval › error ›
+     stalled) over the fully-annotated render list (so the error/stalled tiers fire), not
+     approvals-only; focuses the right window from any app. Generalizes the old jump-needy key.
+  2. **⌨ hotkey legend** — a bottom-right button whose popup opens upward listing every shortcut,
+     built in Lua from the real `HOTKEY_*` bindings (`core.hotkeyLegend`/`fmtHotkey`) and injected
+     as `__HOTKEY_LEGEND__` so the combos can't drift.
+  3. **📋 Fleet shift report** — a Shift tab in the audit overlay (+ ☰ drawer) summarizing what the
+     fleet did over a window (Since opened / 8h / 24h): sessions, prompts, approvals + who decided,
+     auto-actions, escalations/stalls, time blocked on you, per-project rollup, with Copy. Pure
+     `core.fleetStandup` + `core.standupMarkdown`. Ops only — no "what shipped" line. Tab + drawer
+     row only appear while the ledger is on (`setLedgerOn`, live with the toggle).
+  4. **♻️ Session lineage** — respawn/`/clear`/continue churn per project (each mints a new session
+     id) made legible: a detail one-liner since midnight + a tile **♻️N** badge once churn adds up.
+     One cached ledger pass/tick via pure `core.lineageByProject`; self-gates when the ledger's off.
+  `core.filterLedger` gained a `projectKey` filter; `core.projectLineage` delegates to
+  `lineageByProject`. Suite **1260 core + 210 ui + 177 bash**, all green. Shipped + deployed + pushed.
 
 ## TODO
 
