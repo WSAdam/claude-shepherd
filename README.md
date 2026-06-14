@@ -226,6 +226,27 @@ Spawning is **dry-run until you opt in**: leave it off to log the exact command 
 (`spawn.live`; the `ORCH_DRY_RUN` code default stays as a safety net). The new session shows up as a
 tile automatically. (The ⌘⌥S hotkey falls back to two native prompts if the modal can't open.)
 
+### Agent profiles (spawn from a saved agent)
+
+Beyond presets (folder + editor + mode + provider), the modal has an **Agents** row — saved,
+reusable **agent profiles** you hand work off to: a name + persona (role/goal/backstory) +
+provider/model + permission mode + an optional seed task + attached **skills**, **MCP servers**,
+**knowledge** dirs, and **plugins**. Click an **✦ agent chip** to *spawn from that agent* in one
+click; **Save as agent** in the footer captures the current form (plus a role you're prompted for).
+Stored in `~/.claude/cc-agents.json` (operator data — **no secrets**; an MCP server's auth is an
+env-var NAME your shell expands, never a value).
+
+Spawning from an agent emits the right launch flags for native Claude Code: `--append-system-prompt`
+(persona + skills), `--mcp-config` (built from `~/.claude/cc-mcp.json`, secrets as `${VAR}` refs),
+`--add-dir` (knowledge), `--agent`, `--plugin-dir`. A read-only **Skills card** in the modal lists
+every skill in `~/.claude/skills` (its `/command` + description). Real spawning still honors
+`spawn.live` (dry-run by default).
+
+Today you attach skills/MCP/knowledge to a profile by editing the `cc-agents.json` / `cc-mcp.json`
+arrays by hand — a profile is `{name, folder?, provider?, model?, permMode?, seedPrompt?, role?,
+goal?, backstory?, skills[], mcpServers[], knowledge[], plugins[]}`; an in-panel editor with
+folders/favorites/fork is a planned follow-up.
+
 ### Auto-enable Remote Control (claude.ai / mobile)
 
 Claude Code's own **Remote Control** lets you drive a *local* session from claude.ai or the
@@ -438,6 +459,32 @@ read it (the panel live within ~1s; the gate on the next hook fire).
 The gate's auto-decisions apply only to the gated tools (`gate.tools`, editable in
 Settings) and are logged to the Hammerspoon Console / hook stderr whenever they
 fire. Auto-deny always beats auto-allow.
+
+### Named policy bundles (per-session guardrails)
+
+`policies.patterns` is one fleet-wide allow/deny list. **Bundles** make those rules reusable and
+per-session: define named sets under `policies.bundles`, then attach one to a session — via the
+detail-panel **Policy** dropdown, or fleet-wide with `policies.attachments` (matched by
+project / group / provider / session key, each a glob):
+
+```json
+"policies": {
+  "patterns": { "enabled": false, "autoAllow": [], "autoDeny": [] },
+  "bundles": {
+    "read-only":  { "autoDeny": ["Bash", "Write", "Edit", "MultiEdit", "NotebookEdit"] },
+    "no-network": { "autoDeny": ["Bash(curl*)", "Bash(wget*)", "WebFetch"] }
+  },
+  "attachments": [ { "match": { "project": "secure-*" }, "bundle": "read-only" } ]
+}
+```
+
+When a bundle is attached, its rules apply **even if `patterns.enabled` is false** (attaching is the
+opt-in) — the bundle's lists union with the fleet patterns, or *replace* them if the bundle sets
+`"disableGlobal": true`. The panel resolves each session (precedence: per-session **Policy**
+dropdown > attachment > fleet), writes the result to `~/.claude/cc-policy/<key>`, and the gate reads
+it; removing an attachment tears its enforcement down within a tick. Starter bundles to copy:
+**read-only**, **no-bash**, **no-network**. (An in-panel bundle/attachment editor is a planned
+follow-up; today they're config.)
 
 ### More fleet controls (all off by default)
 

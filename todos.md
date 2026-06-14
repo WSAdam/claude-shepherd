@@ -206,6 +206,17 @@ remaining items. Full per-round detail is in CHANGELOG.md and git history.
 
 ## Candidate features — cross-project mining backlog
 
+> **▶ RESUME HERE (build status, 2026-06-14):** Mining is DONE (5 sources → L1–L7). Build order
+> **Phase 0✅ → L1✅ → L2✅ → L3 → L4 → L5 → L6 → L7**. **L1 (Agent Profiles) and L2 (policy bundles)
+> are SHIPPED + committed + deployed** (see CHANGELOG 2026-06-14 + their `✅` blocks below; each has a
+> *deferred follow-up* — mainly editor UIs). **Next: L3** (parameterized + versioned prompt templates
+> with a definition directory). Method per feature: pure logic in `cc-core.lua` + unit tests → wire
+> the dashboard (FX/handleAction/panel-JS) + ui pins → `make test` green → for risky changes run an
+> **adversarial-review Workflow** (caught 3 real bugs in L2) → fix → `make setup`/`deploy` →
+> live-verify → commit. **L4 routing source is DECIDED = queue-line `@role:` prefix.** Honor the
+> three load-bearing facts below (the `claude` CLI is present; `gate.tools` is a hold-list not an
+> allow-list; secrets are env-var NAMES only) and the L1/L2 KEEP-IN-SYNC invariants in context.md.
+
 Built by adversarially mining top AI orchestration/governance apps (12 domains each: finders → dedup →
 FOR/AGAINST judge → skeptic verify) for features worth ADAPTing onto Shepherd's primitives. CANDIDATES for
 one consolidated "big push" — more projects get mined first, then we build. Not started; off-by-default like

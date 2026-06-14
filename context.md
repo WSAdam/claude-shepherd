@@ -87,6 +87,27 @@ network, no multi-user, no secrets — it reads session status off the local fil
   typing `continue` after a grace delay, but charges a **per-folder** budget that resets ONLY on
   a clean `done`/`idle` — never on the `working` the continue itself produces — so a persistently
   dead connection can't loop. Same edge discipline as auto-respawn (off by default, ledgered).
+- **L1 Agent Profiles + L2 policy bundles (shipped 2026-06-14) — the operator-data files + sync
+  contracts a refactor must not break:**
+  - **Operator-data registries** (same posture as `cc-presets.json`, never store secrets — env-var
+    NAMES only): `cc-agents.json` (saved agent profiles; `core.agentList/agentPush/.../agentFork`),
+    `cc-mcp.json` (MCP servers; `core.mcpList/.../mcpConfig`). Skills are read-only from
+    `~/.claude/skills/*/SKILL.md` (`core.parseSkillFrontmatter`, `FX.listSkills`).
+  - **"Spawn from a saved agent"** = `core.resolveAgent` → `core.spawnExtraFlags` appends
+    `--mcp-config`/`--append-system-prompt`/`--agent`/`--add-dir`/`--plugin-dir` inside `spawnSpec`.
+    New `shArg` quotes value-bearing flags in the shell sinks only (kitty argv stays raw; existing
+    no-space flags byte-identical — don't regress that).
+  - **L2 gate KEEP-IN-SYNC (load-bearing):** the panel resolves each session's policy with
+    `core.resolvePolicy` (precedence per-session override > attachment > fleet) and writes
+    `~/.claude/cc-policy/<key>` = `{autoAllow, autoDeny, bundle}`; `cc-approve.sh` `match_patterns`
+    reads that file as **authoritative + opt-in** (applies regardless of `policies.patterns.enabled`),
+    falling back to the flat fleet `policies.patterns.*` only when the file is absent. Three rules a
+    change must preserve: (1) the per-session **orphan sweep** in `refresh()` (readDir `POLICY_DIR`,
+    clear any key not re-written this tick) is **decoupled** from the `hasAtt/hasOvr` fast-path — a
+    removed attachment must never leave an enforcing orphan; (2) `FX.writeResolvedPolicy` is **atomic**
+    (temp+rename) — the gate reads it on the hot path; (3) `cc_remove` (SessionEnd, `cc-lib.sh`) reaps
+    `cc-policy`/`cc-policy-override`. The `POLICY_DIR` default must match across `cc-lib.sh`,
+    `cc-approve.sh`, and the dashboard (`~/.claude/cc-policy`).
 
 ## Workflow
 
