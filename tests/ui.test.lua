@@ -1009,6 +1009,26 @@ do
   check("l3ed-pin: ccTplVersions render fn", src:find("function ccTplVersions(name, versions)", 1, true) ~= nil)
   check("l3ed-pin: drawer templates entry", src:find("menuPick('templates')", 1, true) ~= nil)
   check("l3ed-pin: templates overlay markup", src:find('<div id="tpleditor">', 1, true) ~= nil)
+  -- L1 agents registry editor (deferred polish): full-field authoring + attach + MCP surface
+  check("l1ed-pin: editor bridge handlers",
+        src:find('a == "open-agents-editor" or a == "agent-ed-save"', 1, true) ~= nil)
+  check("l1ed-pin: save via core.agentPush", src:find("core.agentPush(st0, p)", 1, true) ~= nil)
+  check("l1ed-pin: carries forward non-form fields", src:find('"modelByMode", "requiredEnv", "versions", "forkedFrom"', 1, true) ~= nil)
+  check("l1ed-pin: rename removes old record first", src:find("st0 = core.agentRemove(st0, oldName)", 1, true) ~= nil)
+  check("l1ed-pin: flag toggle via core.agentSetFlag", src:find("core.agentSetFlag(FX.readAgents()", 1, true) ~= nil)
+  check("l1ed-pin: fork via core.agentFork", src:find("core.agentFork(FX.readAgents()", 1, true) ~= nil)
+  check("l1ed-pin: MCP registry save via core.mcpPush in editor", src:find('a == "mcp-ed-save"', 1, true) ~= nil)
+  check("l1ed-pin: editor bundle reply", src:find('wv:evaluateJavaScript("ccAgentEd("', 1, true) ~= nil)
+  check("l1ed-pin: bundle carries skills+providers+bundles",
+        src:find("skills = FX.listSkills(), providers = core.config(lc", 1, true) ~= nil)
+  check("l1ed-pin: ccAgentEd render fn", src:find("function ccAgentEd(b)", 1, true) ~= nil)
+  check("l1ed-pin: attach chips union (no silent drop)", src:find("Object.keys(afSkills).forEach", 1, true) ~= nil)
+  check("l1ed-pin: drawer agents entry", src:find("menuPick('agents')", 1, true) ~= nil)
+  check("l1ed-pin: agents overlay markup", src:find('<div id="agented">', 1, true) ~= nil)
+  -- review fix: MCP form pre-validates the transport requirement before the
+  -- optimistic reset (else a server-side reject wipes the typed input).
+  check("l1ed-pin: MCP form pre-validates transport",
+        src:find('alert("stdio transport needs a command.")', 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

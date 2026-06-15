@@ -3797,6 +3797,21 @@ do
   local sorted = core.agentSort(list, "favorite")
   eq("agentSort: favorite first", sorted[1].name, "amy")
   eq("agentSort: name order", core.agentSort(list, "name")[1].name, "amy")
+
+  -- agentSetFlag: toggles favorite/hidden/archived, preserving every other field
+  local fstate = { agents = { { name = "rev", role = "r", skills = { "a", "b" },
+    mcpServers = { "linear" }, knowledge = { "/k" }, provider = "p" } } }
+  local fav = core.agentSetFlag(fstate, "rev", "favorite", true)
+  eq("agentSetFlag: favorite set", core.agentGet(fav, "rev").favorite, true)
+  eq("agentSetFlag: preserves skills", #core.agentGet(fav, "rev").skills, 2)
+  eq("agentSetFlag: preserves mcp", core.agentGet(fav, "rev").mcpServers[1], "linear")
+  eq("agentSetFlag: archive toggles independently",
+     core.agentGet(core.agentSetFlag(fav, "rev", "archived", true), "rev").archived, true)
+  eq("agentSetFlag: unfavorite", core.agentGet(core.agentSetFlag(fav, "rev", "favorite", false), "rev").favorite, false)
+  eq("agentSetFlag: unknown flag no-op", #core.agentList(core.agentSetFlag(fstate, "rev", "bogus", true)), 1)
+  check("agentSetFlag: unknown flag leaves record unchanged",
+     core.agentGet(core.agentSetFlag(fstate, "rev", "bogus", true), "rev").favorite ~= true)
+  eq("agentSetFlag: missing name no-op", #core.agentList(core.agentSetFlag(fstate, "nope", "favorite", true)), 1)
 end
 
 -- ---- L1: MCP registry + mcp-config -----------------------------------------

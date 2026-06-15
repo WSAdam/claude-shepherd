@@ -4670,6 +4670,27 @@ function M.agentSort(list, key)
   return out
 end
 
+-- The management flags the registry UI toggles per agent.
+M.AGENT_FLAGS = { favorite = true, hidden = true, archived = true, deleted = true }
+
+-- Toggle a boolean management flag (favorite/hidden/archived/deleted) on an agent,
+-- preserving EVERY other field (operates on RAW state, like scheduleSetEnabled) so
+-- a flag flip can't drop the profile's skills/mcp/knowledge/etc. Unknown flag or
+-- missing name -> unchanged copy. Pure.
+function M.agentSetFlag(state, name, flag, value)
+  local out, target, fl = {}, agTrim(name), tostring(flag)
+  for _, p in ipairs(aglist(state)) do
+    if type(p) == "table" and agTrim(p.name) == target and M.AGENT_FLAGS[fl] then
+      local c = {}; for k, v in pairs(p) do c[k] = v end
+      c[fl] = value == true
+      out[#out + 1] = c
+    else
+      out[#out + 1] = p
+    end
+  end
+  return { agents = out }
+end
+
 -- ---- MCP server registry (cc-mcp.json) -------------------------------------
 M.MCP_TRANSPORTS = { stdio = true, sse = true, http = true }
 local function mcplist(state)

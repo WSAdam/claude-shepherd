@@ -286,10 +286,16 @@ Phase 4 L4 + L7 → Phase 5 L6 + L5 remainder. Each increment keeps `make test` 
 
 ### L1 — Agent Profiles registry (saved agents + skills + MCP, "spawn from a saved agent") — effort **L**
 > ✅ **CORE SHIPPED 2026-06-14** (see CHANGELOG): Phase 0 foundation + spawn-from-agent + Save-as-agent + a
-> read-only skills card + agent/MCP CRUD, all in `cc-agents.json`/`cc-mcp.json`. **Deferred follow-up** (cc-core
-> already supports it): the richer registry-management UI — folders/favorites/hide/archive/**fork** buttons, a
-> **sort** dropdown, an in-panel **skills/MCP/knowledge attach** editor, an **MCP-registry management** surface,
-> per-mode model binding + folderGlobs auto-attach UI. Today those arrays are edited in the JSON by hand.
+> read-only skills card + agent/MCP CRUD, all in `cc-agents.json`/`cc-mcp.json`.
+> **Editor ✅ SHIPPED 2026-06-14 (deferred-polish ③):** a ✦ Agents editor (☰ drawer + a "Manage agents…" button in
+> the New-session modal) — full-field authoring (name/category/folder/provider/model/permMode/role/goal/backstory/
+> seedPrompt/policyBundle) + **skills/MCP attach as toggle chips** (rendered as the union of available+selected so
+> nothing's silently dropped) + **knowledge/plugin/folderGlobs editable lists** + favorite★/fork/archive/sort/
+> show-archived/delete/Spawn + an **MCP-registry surface** (cc-mcp.json CRUD). New pure `core.agentSetFlag`
+> (preserves all fields). No edit data-loss: all 26 AGENT_FIELDS covered by form∪carry-forward; rename removes the
+> old record first + reads prior by old name. Adversarial review: 1 fixed (MCP form pre-validates transport before
+> the optimistic reset). **Still deferred:** an in-editor `modelByMode`/`requiredEnv` editor (carried forward on
+> edit; hand-edited today), an agent-folders tree, recently-deleted/restore.
 *Source: ADAPT items 1–9 (Provider-native Agents CRUD, Skills registry, MCP server registry, Named toolsets,
 MCP access groups, Public MCP registry/discovery, per-server MCP health, Access groups, Plugin marketplace).
 The user's #1 stated interest — "pre-configured agents we hand work off to, saved into a directory; same with

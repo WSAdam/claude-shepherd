@@ -4,6 +4,39 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-14 (deferred polish ③) — L1 agents registry editor
+
+Third deferred-polish build (the largest): a ✦ **Agents** editor (☰ drawer + a "Manage
+agents…" button in the New-session modal) so agent profiles (`cc-agents.json`) and MCP servers
+(`cc-mcp.json`) no longer have to be hand-edited. The old "Save as agent" only saved the basic
+fields and told you to hand-edit the JSON for skills/MCP/knowledge — that's now a real editor.
+
+- **Full-field agent authoring:** name, category, folder, provider (dropdown), model, perm
+  mode, the persona (role/goal/backstory), seed prompt, **skills** + **MCP servers** as toggle
+  chips, **knowledge** / **plugin** dirs + **folder globs** as editable lists, and the L2
+  **policy bundle** (dropdown). The attach chips render the UNION of available + currently
+  selected, so a selection for a now-missing skill/server is never silently dropped.
+- **Management:** favorite (★ toggle), fork (lineage-stamped), archive/unarchive, a sort
+  dropdown (name/favorite/last-used), a "show archived" toggle, delete, and a one-click Spawn
+  from a profile's saved folder.
+- **MCP registry surface:** list/add/edit/delete `cc-mcp.json` servers (transport stdio/sse/
+  http, command/args or url, allowed tools, auth-token ENV name) attachable to any agent.
+- **cc-core (pure, +8 tests):** `agentSetFlag(state, name, flag, value)` toggles favorite/
+  hidden/archived/deleted on RAW state, preserving every other field. The rest of L1
+  (validate/push/fork/sort/resolve, MCP registry) was already shipped.
+- **No edit data-loss:** an edit rebuilds the record from the form but the handler carries
+  forward every field the form doesn't expose (modelByMode/requiredEnv/versions + the
+  management flags + lineage) — verified all 26 `AGENT_FIELDS` are covered by (form ∪
+  carry-forward). A rename removes the old record first (name-keyed push) and reads the prior
+  from the old name; `oldName` is stripped before validate. XSS-safe (textContent throughout).
+- **Adversarial review** (4-lens workflow + verifiers): one real issue — the MCP form wiped
+  itself after Save without pre-validating the transport requirement, so a server-side reject
+  lost the typed input (the agent form pre-checks its reject conditions; the MCP form now does
+  too). Fixed.
+- Tests: +8 cc-core, +14 dashboard pins. Suite green (1650 core + 398 ui + 183 bash).
+- **Deferred (unchanged):** an in-editor `modelByMode` / `requiredEnv` editor (carried forward
+  on edit; hand-edited in `cc-agents.json` today), agent folders tree, recently-deleted/restore.
+
 ## 2026-06-14 (deferred polish ②) — L3 templates editor (authoring + version/revert)
 
 Second deferred-polish build: a 📝 **Templates** editor (☰ drawer + a "Manage templates…"

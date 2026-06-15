@@ -2007,6 +2007,66 @@ local function handleBridgeMsg(msg)
       .. ((#list > 0) and hs.json.encode(list) or "[]") .. ")") end)
     return
   end
+  -- L1 Agents registry EDITOR (deferred-polish): full-field authoring + skills/MCP/
+  -- knowledge attach + favorite/fork/archive + an MCP-registry surface. Every action
+  -- replies with the full editor bundle (ccAgentEd) so one round-trip refreshes it all.
+  if a == "open-agents-editor" or a == "agent-ed-save" or a == "agent-ed-delete"
+     or a == "agent-ed-fork" or a == "agent-ed-flag"
+     or a == "mcp-ed-save" or a == "mcp-ed-delete" then
+    if a == "agent-ed-save" then
+      local okp, p = pcall(hs.json.decode, payload.text or "{}")
+      p = (okp and type(p) == "table") and p or {}
+      -- a rename carries the old name; look up the prior record under it
+      local oldName = tostring(p.oldName or "")
+      local lookup = (oldName ~= "") and oldName or tostring(p.name or "")
+      local prior = core.agentGet(FX.readAgents(), lookup)
+      -- carry forward the fields the form doesn't expose, so an edit can't drop
+      -- them (modelByMode/requiredEnv/versions + the management flags + lineage).
+      if prior then
+        for _, k in ipairs({ "modelByMode", "requiredEnv", "versions", "forkedFrom",
+                             "lastSpawnedAt", "agentName", "favorite", "hidden", "archived", "deleted" }) do
+          if p[k] == nil and prior[k] ~= nil then p[k] = prior[k] end
+        end
+      end
+      p.oldName = nil  -- not an AGENT_FIELD; strip before validate (would flag unknown)
+      local st0 = FX.readAgents()
+      if oldName ~= "" and oldName ~= tostring(p.name or "") then
+        st0 = core.agentRemove(st0, oldName)  -- name-keyed push won't replace a renamed record
+      end
+      local st, saved, errs = core.agentPush(st0, p)
+      if saved then FX.writeAgents(st)
+      else pcall(function() hs.alert.show("Claude Shepherd: agent invalid — "
+        .. table.concat(errs or { "?" }, "; ")) end) end
+    elseif a == "agent-ed-delete" then
+      FX.writeAgents(core.agentRemove(FX.readAgents(), tostring(payload.v or "")))
+    elseif a == "agent-ed-fork" then
+      local st, ok = core.agentFork(FX.readAgents(), tostring(payload.v or ""))
+      if ok then FX.writeAgents(st) end
+    elseif a == "agent-ed-flag" then
+      local okp, p = pcall(hs.json.decode, payload.text or "{}")
+      p = (okp and type(p) == "table") and p or {}
+      FX.writeAgents(core.agentSetFlag(FX.readAgents(), tostring(payload.v or ""), p.flag, p.value == true))
+    elseif a == "mcp-ed-save" then
+      local okp, p = pcall(hs.json.decode, payload.text or "{}")
+      local st, saved, errs = core.mcpPush(FX.readMcp(), (okp and type(p) == "table") and p or {})
+      if saved then FX.writeMcp(st)
+      else pcall(function() hs.alert.show("Claude Shepherd: MCP server invalid — "
+        .. table.concat(errs or { "?" }, "; ")) end) end
+    elseif a == "mcp-ed-delete" then
+      FX.writeMcp(core.mcpRemove(FX.readMcp(), tostring(payload.v or "")))
+    end
+    local lc = loadConfig()
+    local bundleNames = {}
+    for name in pairs(core.policyBundles(lc)) do bundleNames[#bundleNames + 1] = name end
+    table.sort(bundleNames)
+    local bundle = {
+      agents = core.agentList(FX.readAgents()), mcp = core.mcpList(FX.readMcp()),
+      skills = FX.listSkills(), providers = core.config(lc, "providers", {}) or {},
+      bundles = bundleNames,
+    }
+    pcall(function() wv:evaluateJavaScript("ccAgentEd(" .. hs.json.encode(bundle) .. ")") end)
+    return
+  end
   -- Fuzzy folder search (roadmap #4b): rank the CACHED index (no per-keystroke
   -- process; the scan ran once on modal open).
   if a == "folder-search" then
@@ -3563,6 +3623,40 @@ local HTML = [[
 .te-ver-row.cur{ border-color:#34507a; }
 .te-ver-meta{ flex:0 0 92px; color:#8a8d99; font-size:11px; }
 .te-ver-body{ flex:1; min-width:0; color:#cfd2db; font-family:ui-monospace,Menlo,monospace; font-size:11px; white-space:pre-wrap; word-break:break-word; max-height:120px; overflow:auto; }
+/* L1 Agents registry editor overlay (modeled on #tpleditor). Edits cc-agents.json / cc-mcp.json. */
+#agented{ position:fixed; inset:0; background:#14161b; z-index:11; display:none; flex-direction:column; font-size:12px; }
+#agented.show{ display:flex; }
+#ae-head{ display:flex; align-items:center; gap:8px; padding:8px 10px; border-bottom:1px solid #2c2f3a; font-weight:600; flex-wrap:wrap; }
+#ae-head select, #ae-head label{ font-weight:400; color:#9aa0ad; font-size:11px; }
+#ae-head select{ background:#1a1c22; border:1px solid #2c2f3a; color:#cfd2db; border-radius:6px; padding:2px 6px; }
+#ae-head .s-x{ margin-left:auto; }
+#ae-body{ flex:1; overflow:auto; padding:8px 10px; }
+.ae-row{ display:flex; gap:10px; align-items:center; padding:7px 8px; border:1px solid #23262f; border-radius:8px; margin-bottom:6px; background:#191b22; }
+.ae-row.arch{ opacity:.55; }
+.ae-star{ flex:0 0 auto; cursor:pointer; font-size:14px; color:#6b7280; background:none; border:0; }
+.ae-star.on{ color:#f5b50a; }
+.ae-main{ flex:1; min-width:0; }
+.ae-name{ color:#e8e9ee; font-weight:600; }
+.ae-sub{ color:#8a8d99; font-size:11px; margin-top:1px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.ae-badge{ display:inline-block; background:#23262f; color:#9aa0ad; border:1px solid #2c2f3a; border-radius:5px; padding:0 5px; font-size:10px; margin-right:4px; }
+.ae-badge.cat{ color:#9fb6d6; border-color:#34435a; }
+.ae-badge.sk{ color:#c3a3e8; border-color:#43345a; }
+.ae-acts{ display:flex; gap:5px; flex:0 0 auto; flex-wrap:wrap; }
+.ae-empty{ color:#6b7280; font-style:italic; padding:12px 4px; }
+#ae-form, #ae-mcp{ display:none; flex-direction:column; gap:7px; padding:4px 2px; }
+#ae-form.show, #ae-mcp.show{ display:flex; }
+#ae-form label, #ae-mcp label{ display:flex; flex-direction:column; gap:3px; color:#9aa0ad; font-size:11px; }
+#ae-form input, #ae-form select, #ae-form textarea, #ae-mcp input, #ae-mcp select{ background:#1a1c22; border:1px solid #2c2f3a; color:#e8e9ee; border-radius:6px; padding:4px 7px; font-size:12px; }
+#ae-form textarea{ resize:vertical; min-height:46px; font-family:inherit; }
+.ae-grid{ display:flex; gap:8px; flex-wrap:wrap; }
+.ae-grid > label{ flex:1; min-width:130px; }
+.ae-sec{ font-weight:600; color:#cfd2db; margin:6px 0 2px; font-size:11px; }
+.ae-chips{ display:flex; gap:5px; flex-wrap:wrap; }
+.ae-chip{ background:#1a1c22; border:1px solid #2c2f3a; color:#9aa0ad; border-radius:6px; padding:2px 8px; cursor:pointer; font-size:11px; }
+.ae-chip.on{ background:#23314a; border-color:#3b6; color:#fff; }
+.ae-list{ display:flex; flex-direction:column; gap:4px; }
+.ae-list-row{ display:flex; gap:5px; align-items:center; }
+.ae-list-row input{ flex:1; }
 /* insights sparklines (Feature 6): trend lines over the ledger */
 .spark-row{ display:flex; align-items:center; gap:8px; padding:4px 0; }
 .spark-lbl{ width:110px; flex:0 0 auto; color:#9aa0ad; font-size:11px; }
@@ -3603,6 +3697,7 @@ local HTML = [[
           <button class="tm-item" onclick="menuPick('audit')"><span class="tm-ic">📜</span> Audit ledger</button>
           <button class="tm-item" onclick="menuPick('routines')"><span class="tm-ic">⏰</span> Routines</button>
           <button class="tm-item" onclick="menuPick('templates')"><span class="tm-ic">📝</span> Templates</button>
+          <button class="tm-item" onclick="menuPick('agents')"><span class="tm-ic">✦</span> Agents</button>
           <button id="tm-shift" class="tm-item" style="display:none" onclick="menuPick('shift')"><span class="tm-ic">📋</span> Shift report</button>
           <button class="tm-item" onclick="menuPick('notify')"><span class="tm-ic">🔔</span> Notifications<span id="tm-notify-badge"></span></button>
         </div>
@@ -3905,6 +4000,7 @@ local HTML = [[
       <button id="n-spawn" onclick="submitNew()">Spawn</button>
       <button onclick="savePreset()" title="Save the current folder + editor + mode + provider as a one-click preset">Save as preset</button>
       <button onclick="saveAgent()" title="Save the current setup (folder/editor/mode/provider/task + a persona role) as a reusable agent you can spawn from">Save as agent</button>
+      <button onclick="closeNew();openAgentEd()" title="Open the Agents editor: full-field authoring, skills/MCP/knowledge attach, fork/favorite/archive">Manage agents…</button>
       <button onclick="closeNew()">Cancel</button>
     </div>
   </div>
@@ -4075,6 +4171,83 @@ local HTML = [[
       <div id="te-ver-list"></div>
     </div>
     <div id="r-foot" style="border-top:1px solid #2c2f3a;"><span class="n-dim" id="te-info"></span></div>
+  </div>
+
+  <div id="agented">
+    <div id="ae-head">
+      <span id="ae-title">✦ Agents</span>
+      <button class="r-btn" onclick="agentEdNew()">+ New agent</button>
+      <label>Sort <select id="ae-sort" onchange="renderAgentEd()">
+        <option value="name">name</option><option value="favorite">favorite</option><option value="lastUsed">last used</option>
+      </select></label>
+      <label><input type="checkbox" id="ae-show-arch" onchange="renderAgentEd()"> show archived</label>
+      <button class="r-btn" onclick="mcpEdOpen()">⚙ MCP servers</button>
+      <button class="s-x" onclick="closeAgentEd()">✕</button>
+    </div>
+    <div id="ae-body"></div>
+    <div id="ae-form">
+      <div class="ae-grid">
+        <label>Name<input type="text" id="af-name" placeholder="e.g. code-reviewer"></label>
+        <label>Category<input type="text" id="af-category" placeholder="e.g. review (groups in the list)"></label>
+      </div>
+      <label>Folder (absolute — the launch dir)<input type="text" id="af-folder" placeholder="/Users/you/Programming/project"></label>
+      <div class="ae-grid">
+        <label>Provider<select id="af-provider"></select></label>
+        <label>Model<input type="text" id="af-model" placeholder="(provider default)"></label>
+        <label>Perm mode<select id="af-permmode"><option value="">(default)</option><option value="default">default</option><option value="acceptEdits">acceptEdits</option><option value="plan">plan</option></select></label>
+      </div>
+      <div class="ae-sec">Persona (→ --append-system-prompt)</div>
+      <div class="ae-grid">
+        <label>Role<input type="text" id="af-role" placeholder="a senior code reviewer"></label>
+        <label>Goal<input type="text" id="af-goal" placeholder="find correctness bugs"></label>
+      </div>
+      <label>Backstory<textarea id="af-backstory" placeholder="Background/context for the persona block."></textarea></label>
+      <label>Seed prompt (first task queued on spawn)<textarea id="af-seed" placeholder="Optional initial task."></textarea></label>
+      <div class="ae-sec">Skills (→ --append-system-prompt) <span class="n-dim" id="af-skills-n"></span></div>
+      <div class="ae-chips" id="af-skills"></div>
+      <div class="ae-sec">MCP servers (→ --mcp-config) <span class="n-dim" id="af-mcp-n"></span></div>
+      <div class="ae-chips" id="af-mcp"></div>
+      <div class="ae-sec">Knowledge dirs (→ --add-dir)</div>
+      <div class="ae-list" id="af-knowledge"></div>
+      <button class="r-btn" style="align-self:flex-start;" onclick="aeListAdd('knowledge','')">+ knowledge path</button>
+      <div class="ae-sec">Plugins (→ --plugin-dir; gated by spawn.live)</div>
+      <div class="ae-list" id="af-plugins"></div>
+      <button class="r-btn" style="align-self:flex-start;" onclick="aeListAdd('plugins','')">+ plugin dir</button>
+      <div class="ae-sec">Folder globs (auto-attach this agent in the modal when the chosen dir matches)</div>
+      <div class="ae-list" id="af-globs"></div>
+      <button class="r-btn" style="align-self:flex-start;" onclick="aeListAdd('globs','')">+ glob</button>
+      <div class="ae-grid">
+        <label>Policy bundle (L2)<select id="af-bundle"></select></label>
+      </div>
+      <div class="ae-grid">
+        <button class="r-btn" style="border-color:#3b6;color:#bdf;" onclick="agentEdSave()">Save agent</button>
+        <button class="r-btn" onclick="agentEdCancel()">Cancel</button>
+        <span class="n-dim" id="af-note" style="align-self:center;">Per-mode model binding (modelByMode) + requiredEnv are preserved on edit; hand-edit those in cc-agents.json.</span>
+      </div>
+    </div>
+    <div id="ae-mcp">
+      <div class="ae-sec">MCP server registry (cc-mcp.json) — attachable to any agent above</div>
+      <div id="ae-mcp-list" class="ae-list"></div>
+      <div class="ae-sec">Add / edit a server</div>
+      <div class="ae-grid">
+        <label>ID<input type="text" id="mf-id" placeholder="e.g. linear"></label>
+        <label>Label<input type="text" id="mf-label" placeholder="optional display name"></label>
+        <label>Transport<select id="mf-transport" onchange="mcpFormSync()"><option value="stdio">stdio</option><option value="sse">sse</option><option value="http">http</option></select></label>
+      </div>
+      <label id="mf-cmd-wrap">Command (stdio)<input type="text" id="mf-command" placeholder="npx"></label>
+      <label id="mf-args-wrap">Args (space-separated)<input type="text" id="mf-args" placeholder="-y @scope/server"></label>
+      <label id="mf-url-wrap" style="display:none;">URL (sse/http)<input type="text" id="mf-url" placeholder="https://mcp.example.com/sse"></label>
+      <div class="ae-grid">
+        <label>Allowed tools (space-separated, optional)<input type="text" id="mf-tools" placeholder=""></label>
+        <label>Auth token ENV var (name only — never the value)<input type="text" id="mf-tokenenv" placeholder="MY_MCP_TOKEN"></label>
+      </div>
+      <div class="ae-grid">
+        <button class="r-btn" style="border-color:#3b6;color:#bdf;" onclick="mcpEdSave()">Save server</button>
+        <button class="r-btn" onclick="mcpEdReset()">Clear form</button>
+        <button class="r-btn" onclick="mcpEdBack()">← Back to agents</button>
+      </div>
+    </div>
+    <div id="r-foot" style="border-top:1px solid #2c2f3a;"><span class="n-dim" id="ae-info"></span></div>
   </div>
 
   <script>
@@ -4887,7 +5060,7 @@ local HTML = [[
         seedPrompt:(document.getElementById("n-task").value||"").trim(), role:role };
       if(path && path.charAt(0) === "/") rec.folder = path;
       send("agent-save", "", JSON.stringify(rec));
-      alert('Saved agent "'+name+'". Attach skills/MCP/knowledge by editing ~/.claude/cc-agents.json (per-profile arrays: skills[], mcpServers[], knowledge[]); a full editor is coming next.');
+      alert('Saved agent "'+name+'". Attach skills / MCP / knowledge and edit every field in the ✦ Agents editor (☰ menu → Agents).');
     }
     // ---- L3 template picker in the New-Session modal (render-before-spawn) ---
     // Picking a template SEEDS the Initial-task field. A template with vars opens
@@ -5809,6 +5982,245 @@ local HTML = [[
       send("template-revert", name, String(version));  // reply refreshes the list
       send("template-versions", name);                 // refresh this versions view
     }
+
+    // ---- L1 Agents registry editor (✦): full-field authoring + attach + MCP ----
+    var AGENTS_ED = [], AE_MCP = [], AE_SKILLS = [], AE_PROVIDERS = [], AE_BUNDLES = [];
+    var aeEditing = null;        // agent name being edited, or null for new
+    var afSkills = {}, afMcp = {};  // attach selection sets (name/id -> true)
+
+    function openAgentEd(){ send("open-agents-editor"); agentEdFormHide(); mcpEdBack();
+      document.getElementById("agented").classList.add("show"); }
+    function closeAgentEd(){ document.getElementById("agented").classList.remove("show"); }
+    function ccAgentEd(b){
+      b = b || {};
+      AGENTS_ED = b.agents || []; AE_MCP = b.mcp || []; AE_SKILLS = b.skills || [];
+      AE_PROVIDERS = b.providers || []; AE_BUNDLES = b.bundles || [];
+      renderAgentEd();
+      if(document.getElementById("ae-mcp").classList.contains("show")) renderMcpList();
+    }
+    function aeSorted(){
+      var list = (AGENTS_ED||[]).slice(), key = gv("ae-sort");
+      list.sort(function(a,b){
+        if(key==="favorite"){ var fa=a.favorite?1:0, fb=b.favorite?1:0; if(fa!==fb) return fb-fa; }
+        else if(key==="lastUsed"){ var la=a.lastSpawnedAt||0, lb=b.lastSpawnedAt||0; if(la!==lb) return lb-la; }
+        var an=(a.name||"").toLowerCase(), bn=(b.name||"").toLowerCase();
+        return an < bn ? -1 : (an > bn ? 1 : 0);
+      });
+      return list;
+    }
+    function renderAgentEd(){
+      var body = document.getElementById("ae-body"); body.innerHTML = "";
+      var showArch = document.getElementById("ae-show-arch").checked;
+      var list = aeSorted().filter(function(p){ return !p.deleted && (showArch || (!p.archived && !p.hidden)); });
+      if(!list.length){ var e=document.createElement("div"); e.className="ae-empty";
+        e.textContent = "No agents yet. “+ New agent” authors one (or use “Save as agent” in the New-session modal).";
+        body.appendChild(e); document.getElementById("ae-info").textContent=""; return; }
+      list.forEach(function(p){
+        var row = document.createElement("div"); row.className = "ae-row" + (p.archived?" arch":"");
+        var star = document.createElement("button"); star.className = "ae-star" + (p.favorite?" on":"");
+        star.textContent = p.favorite ? "★" : "☆"; star.title = "favorite";
+        star.onclick = function(){ agentEdFlag(p.name, "favorite", !p.favorite); };
+        row.appendChild(star);
+        var main = document.createElement("div"); main.className = "ae-main";
+        var nm = document.createElement("div"); nm.className = "ae-name"; nm.textContent = p.name; main.appendChild(nm);
+        var sub = document.createElement("div"); sub.className = "ae-sub";
+        if(p.category){ var bc=document.createElement("span"); bc.className="ae-badge cat"; bc.textContent=p.category; sub.appendChild(bc); }
+        var counts = [];
+        if(p.skills&&p.skills.length) counts.push(p.skills.length+" skills");
+        if(p.mcpServers&&p.mcpServers.length) counts.push(p.mcpServers.length+" mcp");
+        if(p.knowledge&&p.knowledge.length) counts.push(p.knowledge.length+" kb");
+        if(counts.length){ var bk=document.createElement("span"); bk.className="ae-badge sk"; bk.textContent=counts.join(" · "); sub.appendChild(bk); }
+        if(p.archived){ var bx=document.createElement("span"); bx.className="ae-badge"; bx.textContent="archived"; sub.appendChild(bx); }
+        var rl=document.createElement("span");
+        rl.textContent=[p.role||"", p.provider?("· "+p.provider):"", p.folder?("· "+p.folder.replace(/^.*\//,"")):""].filter(Boolean).join(" ");
+        sub.appendChild(rl); main.appendChild(sub); row.appendChild(main);
+        var acts = document.createElement("div"); acts.className = "ae-acts";
+        acts.appendChild(mkRBtn("Spawn", function(){ agentEdSpawn(p); }, ""));
+        acts.appendChild(mkRBtn("Edit", function(){ agentEdOpen(p); }, ""));
+        acts.appendChild(mkRBtn("Fork", function(){ send("agent-ed-fork", p.name); }, ""));
+        acts.appendChild(mkRBtn(p.archived?"Unarchive":"Archive", function(){ agentEdFlag(p.name,"archived",!p.archived); }, ""));
+        acts.appendChild(mkRBtn("Delete", function(){ agentEdDelete(p.name); }, "danger"));
+        row.appendChild(acts); body.appendChild(row);
+      });
+      document.getElementById("ae-info").textContent = list.length + " agent" + (list.length===1?"":"s");
+    }
+    function agentEdFlag(name, flag, value){ send("agent-ed-flag", name, JSON.stringify({ flag: flag, value: value })); }
+    function agentEdDelete(name){ if(confirm('Delete agent "'+name+'"? (removes the saved profile)')) send("agent-ed-delete", name); }
+    function agentEdSpawn(p){
+      if(!p.folder || p.folder.charAt(0) !== "/"){ alert('Agent "'+p.name+'" has no saved folder — Edit it and set one first.'); return; }
+      var payload = { a:"spawn", v:"", text:"", img:"", mode:"existing", dir:p.folder,
+        editor:"", permMode:p.permMode||"", provider:p.provider||"", agent:p.name };
+      try { window.webkit.messageHandlers.cc.postMessage(JSON.stringify(payload)); } catch(e){ console.log("spawn-agent err", e); }
+      closeAgentEd();
+    }
+    // --- option lists + selects ---
+    function setSelect(id, val){
+      var el = document.getElementById(id); if(!el) return;
+      var has = false; for(var i=0;i<el.options.length;i++){ if(el.options[i].value===val){ has=true; break; } }
+      if(!has && val){ var o=document.createElement("option"); o.value=val; o.textContent=val+" (missing)"; el.appendChild(o); }
+      el.value = val;
+    }
+    function populateAeSelects(){
+      var ps = document.getElementById("af-provider"); ps.innerHTML = "";
+      var none = document.createElement("option"); none.value=""; none.textContent="(none — bare claude)"; ps.appendChild(none);
+      AE_PROVIDERS.forEach(function(pr){ var id=(pr&&pr.id)?pr.id:pr; if(!id) return;
+        var o=document.createElement("option"); o.value=id; o.textContent=id; ps.appendChild(o); });
+      var bs = document.getElementById("af-bundle"); bs.innerHTML = "";
+      var bn = document.createElement("option"); bn.value=""; bn.textContent="(none)"; bs.appendChild(bn);
+      AE_BUNDLES.forEach(function(b){ var o=document.createElement("option"); o.value=b; o.textContent=b; bs.appendChild(o); });
+    }
+    // --- attach chips (skills + MCP): render the UNION of available + selected so a
+    //     selection for a now-missing skill/server isn't silently dropped on save ---
+    function skillByName(n){ for(var i=0;i<AE_SKILLS.length;i++){ if(AE_SKILLS[i].name===n) return AE_SKILLS[i]; } return null; }
+    function renderSkillChips(){
+      var box = document.getElementById("af-skills"); box.innerHTML = "";
+      var names = AE_SKILLS.map(function(s){ return s.name; });
+      Object.keys(afSkills).forEach(function(n){ if(names.indexOf(n)<0) names.push(n); });
+      if(!names.length){ box.innerHTML = '<span class="n-dim">No skills in ~/.claude/skills</span>'; updateAttachCounts(); return; }
+      names.forEach(function(n){
+        var s = skillByName(n);
+        var c = document.createElement("button"); c.type="button";
+        c.className = "ae-chip" + (afSkills[n]?" on":"");
+        c.textContent = n + (s?"":" (missing)"); c.title = s ? (s.description||"") : "not found in ~/.claude/skills";
+        c.onclick = function(){ if(afSkills[n]) delete afSkills[n]; else afSkills[n]=true;
+          c.className = "ae-chip"+(afSkills[n]?" on":""); updateAttachCounts(); };
+        box.appendChild(c);
+      });
+      updateAttachCounts();
+    }
+    function renderMcpChips(){
+      var box = document.getElementById("af-mcp"); box.innerHTML = "";
+      var ids = AE_MCP.map(function(m){ return m.id; });
+      Object.keys(afMcp).forEach(function(n){ if(ids.indexOf(n)<0) ids.push(n); });
+      if(!ids.length){ box.innerHTML = '<span class="n-dim">No MCP servers — add some via “⚙ MCP servers”</span>'; updateAttachCounts(); return; }
+      ids.forEach(function(n){
+        var known = AE_MCP.some(function(m){ return m.id===n; });
+        var c = document.createElement("button"); c.type="button";
+        c.className = "ae-chip" + (afMcp[n]?" on":"");
+        c.textContent = n + (known?"":" (missing)");
+        c.onclick = function(){ if(afMcp[n]) delete afMcp[n]; else afMcp[n]=true;
+          c.className = "ae-chip"+(afMcp[n]?" on":""); updateAttachCounts(); };
+        box.appendChild(c);
+      });
+      updateAttachCounts();
+    }
+    function updateAttachCounts(){
+      document.getElementById("af-skills-n").textContent = Object.keys(afSkills).length ? (Object.keys(afSkills).length+" selected") : "";
+      document.getElementById("af-mcp-n").textContent = Object.keys(afMcp).length ? (Object.keys(afMcp).length+" selected") : "";
+    }
+    // --- list fields (knowledge / plugins / globs): editable input rows ---
+    function aeListAdd(kind, val){
+      var box = document.getElementById("af-"+kind); if(!box) return;
+      var row = document.createElement("div"); row.className = "ae-list-row";
+      var inp = document.createElement("input"); inp.type="text"; inp.value = val||"";
+      inp.placeholder = (kind==="knowledge") ? "/path/to/dir" : (kind==="plugins") ? "/path/to/plugin-dir" : "src/**/*.ts";
+      var x = document.createElement("button"); x.className="r-btn danger"; x.textContent="✕";
+      x.onclick = function(){ box.removeChild(row); };
+      row.appendChild(inp); row.appendChild(x); box.appendChild(row);
+    }
+    function aeListClear(kind){ var box=document.getElementById("af-"+kind); if(box) box.innerHTML=""; }
+    function aeListRead(kind){
+      var box=document.getElementById("af-"+kind), out=[];
+      if(box) box.querySelectorAll("input").forEach(function(inp){ var v=inp.value.trim(); if(v) out.push(v); });
+      return out;
+    }
+    // --- agent form ---
+    function agentEdShow(){
+      document.getElementById("ae-body").style.display="none";
+      document.getElementById("ae-mcp").classList.remove("show");
+      populateAeSelects();
+      document.getElementById("ae-form").classList.add("show");
+    }
+    function agentEdFormHide(){ document.getElementById("ae-form").classList.remove("show"); document.getElementById("ae-body").style.display=""; }
+    function agentEdReset(){
+      ["af-name","af-category","af-folder","af-model","af-role","af-goal","af-backstory","af-seed"].forEach(function(id){ sv(id,""); });
+      setSelect("af-provider",""); setSelect("af-permmode",""); setSelect("af-bundle","");
+      afSkills={}; afMcp={}; aeListClear("knowledge"); aeListClear("plugins"); aeListClear("globs");
+    }
+    function agentEdNew(){ aeEditing=null; agentEdShow(); agentEdReset(); renderSkillChips(); renderMcpChips(); }
+    function agentEdCancel(){ agentEdFormHide(); }
+    function agentEdOpen(p){
+      aeEditing = p.name; agentEdShow(); agentEdReset();
+      sv("af-name",p.name); sv("af-category",p.category||""); sv("af-folder",p.folder||""); sv("af-model",p.model||"");
+      setSelect("af-provider",p.provider||""); setSelect("af-permmode",p.permMode||""); setSelect("af-bundle",p.policyBundle||"");
+      sv("af-role",p.role||""); sv("af-goal",p.goal||""); sv("af-backstory",p.backstory||""); sv("af-seed",p.seedPrompt||"");
+      (p.skills||[]).forEach(function(s){ afSkills[s]=true; });
+      (p.mcpServers||[]).forEach(function(m){ afMcp[m]=true; });
+      (p.knowledge||[]).forEach(function(k){ aeListAdd("knowledge",k); });
+      (p.plugins||[]).forEach(function(k){ aeListAdd("plugins",k); });
+      (p.folderGlobs||[]).forEach(function(k){ aeListAdd("globs",k); });
+      renderSkillChips(); renderMcpChips();
+    }
+    function agentEdSave(){
+      var name = gv("af-name").trim();
+      if(!name){ alert("Agent needs a name."); return; }
+      var folder = gv("af-folder").trim();
+      if(folder && folder.charAt(0) !== "/"){ alert("Folder must be an absolute path (or blank)."); return; }
+      var rec = { name: name };
+      if(gv("af-category").trim()) rec.category = gv("af-category").trim();
+      if(folder) rec.folder = folder;
+      if(gv("af-provider")) rec.provider = gv("af-provider");
+      if(gv("af-model").trim()) rec.model = gv("af-model").trim();
+      if(gv("af-permmode")) rec.permMode = gv("af-permmode");
+      if(gv("af-role").trim()) rec.role = gv("af-role").trim();
+      if(gv("af-goal").trim()) rec.goal = gv("af-goal").trim();
+      if(gv("af-backstory").trim()) rec.backstory = gv("af-backstory");
+      if(gv("af-seed").trim()) rec.seedPrompt = gv("af-seed");
+      var sk = Object.keys(afSkills); if(sk.length) rec.skills = sk;
+      var mc = Object.keys(afMcp); if(mc.length) rec.mcpServers = mc;
+      var kn = aeListRead("knowledge"); if(kn.length) rec.knowledge = kn;
+      var pl = aeListRead("plugins"); if(pl.length) rec.plugins = pl;
+      var gl = aeListRead("globs"); if(gl.length) rec.folderGlobs = gl;
+      if(gv("af-bundle")) rec.policyBundle = gv("af-bundle");
+      if(AGENTS_ED.some(function(p){ return p.name === name && p.name !== aeEditing; })){
+        if(!confirm('An agent named "'+name+'" already exists — overwrite it?')) return;
+      }
+      if(aeEditing && aeEditing !== name) rec.oldName = aeEditing;  // server renames + carries hidden fields
+      send("agent-ed-save", "", JSON.stringify(rec));
+      aeEditing = null; agentEdFormHide();
+    }
+    // --- MCP registry surface ---
+    function mcpEdOpen(){ document.getElementById("ae-body").style.display="none";
+      document.getElementById("ae-form").classList.remove("show");
+      document.getElementById("ae-mcp").classList.add("show"); mcpEdReset(); renderMcpList(); }
+    function mcpEdBack(){ document.getElementById("ae-mcp").classList.remove("show"); document.getElementById("ae-body").style.display=""; }
+    function renderMcpList(){
+      var box = document.getElementById("ae-mcp-list"); box.innerHTML = "";
+      if(!AE_MCP.length){ box.innerHTML = '<span class="n-dim">No MCP servers yet.</span>'; return; }
+      AE_MCP.forEach(function(m){
+        var row = document.createElement("div"); row.className = "ae-list-row";
+        var info = document.createElement("span"); info.style.flex="1";
+        info.textContent = m.id + " · " + m.transport + " · " + (m.command || m.url || "");
+        row.appendChild(info);
+        row.appendChild(mkRBtn("Edit", function(){ mcpEdEdit(m); }, ""));
+        row.appendChild(mkRBtn("Delete", function(){ if(confirm('Delete MCP server "'+m.id+'"?')) send("mcp-ed-delete", m.id); }, "danger"));
+        box.appendChild(row);
+      });
+    }
+    function mcpFormSync(){ var t = gv("mf-transport");
+      show("mf-cmd-wrap", t==="stdio"); show("mf-args-wrap", t==="stdio"); show("mf-url-wrap", t!=="stdio"); }
+    function mcpEdReset(){ sv("mf-id",""); sv("mf-label",""); sv("mf-transport","stdio"); sv("mf-command","");
+      sv("mf-args",""); sv("mf-url",""); sv("mf-tools",""); sv("mf-tokenenv",""); mcpFormSync(); }
+    function mcpEdEdit(m){ sv("mf-id",m.id); sv("mf-label",m.label||""); sv("mf-transport",m.transport||"stdio");
+      sv("mf-command",m.command||""); sv("mf-args",(m.args||[]).join(" ")); sv("mf-url",m.url||"");
+      sv("mf-tools",(m.allowedTools||[]).join(" ")); sv("mf-tokenenv",m.authTokenEnv||""); mcpFormSync(); }
+    function mcpEdSave(){
+      var id = gv("mf-id").trim(); if(!id){ alert("MCP server needs an id."); return; }
+      var rec = { id:id, transport:gv("mf-transport") };
+      if(gv("mf-label").trim()) rec.label = gv("mf-label").trim();
+      if(gv("mf-command").trim()) rec.command = gv("mf-command").trim();
+      var args = gv("mf-args").trim(); if(args) rec.args = args.split(/\s+/);
+      if(gv("mf-url").trim()) rec.url = gv("mf-url").trim();
+      var tools = gv("mf-tools").trim(); if(tools) rec.allowedTools = tools.split(/\s+/);
+      if(gv("mf-tokenenv").trim()) rec.authTokenEnv = gv("mf-tokenenv").trim();
+      // Pre-validate the transport requirement (mirrors core.validateMcp) BEFORE
+      // the optimistic mcpEdReset() below -- else a server-side reject would wipe
+      // the form and lose the typed id/label/token (the agent form pre-checks too).
+      if(rec.transport === "stdio" && !rec.command){ alert("stdio transport needs a command."); return; }
+      if(rec.transport !== "stdio" && !rec.url){ alert(rec.transport + " transport needs a url."); return; }
+      send("mcp-ed-save", "", JSON.stringify(rec));
+      mcpEdReset();
+    }
     function fmtDur(s){
       s = Math.max(0, Math.round(s||0));
       if(s < 60) return s+"s";
@@ -6144,6 +6556,7 @@ local HTML = [[
       else if(which === "audit") openAudit();
       else if(which === "routines") openRoutines();
       else if(which === "templates") openTplEditor();
+      else if(which === "agents") openAgentEd();
       else if(which === "shift"){ if(LEDGER_ON) openShiftReport(); }
       else if(which === "notify") openNotifications();
     }
@@ -6206,6 +6619,15 @@ local HTML = [[
       if(document.getElementById("te-form").classList.contains("show")){ tplEditFormHide(); }
       else if(document.getElementById("te-versions").classList.contains("show")){ tplVersionsBack(); }
       else { closeTplEditor(); }
+    });
+    // Esc in the agents editor: close the form/MCP surface first, then the overlay.
+    document.addEventListener("keydown", function(e){
+      if(e.key !== "Escape") return;
+      var ov = document.getElementById("agented");
+      if(!ov || !ov.classList.contains("show")) return;
+      if(document.getElementById("ae-form").classList.contains("show")){ agentEdFormHide(); }
+      else if(document.getElementById("ae-mcp").classList.contains("show")){ mcpEdBack(); }
+      else { closeAgentEd(); }
     });
 
     // ---- Notification history (roadmap #6) ----------------------------------
