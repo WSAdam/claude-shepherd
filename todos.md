@@ -206,18 +206,26 @@ remaining items. Full per-round detail is in CHANGELOG.md and git history.
 
 ## Candidate features — cross-project mining backlog
 
-> **▶ RESUME HERE (build status, 2026-06-14): BACKLOG COMPLETE.** Mining DONE (5 sources → L1–L7); build order
-> **Phase 0✅ → L1✅ → L2✅ → L3✅ → L4✅ → L5✅ → L6✅ → L7✅ — ALL SHIPPED + committed + deployed + pushed.**
-> Suite ~1599 core + 355 ui + 183 bash, green. **There is no "next phase" — the mined backlog is done.** What's
-> left is the OPT-IN **deferred polish queue** below (none required; pick any if wanted): editor UIs for
-> L1/L2/L3/L6/L7 (all operator-data JSON is hand-edited today); L4 UX-gated routing (topology view / delegation /
-> idle+auto-spawn targets); L5 heavier sub-items (detail-panel tabs, export archive, host stats, PR status, hooks
-> inspector, session-history browser) + Settings toggles for the L5/L7 flags; L6 hung/loop/starved triggers +
-> feed/continue processors; the L7 routine-board UI; plus the still-pending hardware-verification runbook (Kitty
-> tokens + SSH bridge). **Deploy gotcha:** `make deploy`'s reload can hang on `hs -c` — if it stalls after the
-> copy, do `make test && make install` then push, then `pkill -f 'hs -c'; hs -c "hs.reload()"` separately. Honor
-> the load-bearing facts (the `claude` CLI is present; `gate.tools` is a HOLD-list not an allow-list; secrets are
-> env-var NAMES only) and the L1–L7 KEEP-IN-SYNC invariants in context.md. <!-- superseded build-loop note: -->
+> **▶ RESUME HERE (build status, 2026-06-15): BACKLOG COMPLETE + EDITOR-UI POLISH DONE.** Mining DONE (5 sources →
+> L1–L7); **Phase 0✅ → L1✅ → L2✅ → L3✅ → L4✅ → L5✅ → L6✅ → L7✅ — ALL SHIPPED.** Then the **deferred editor-UI
+> queue** (this session, 6 commits 5801199→6f5d3ac): **L7 routine board✅ · L3 templates editor✅ · L1 agents
+> registry editor✅ · L2 policy bundle/attachment editor✅ · L6 rules editor + hung/loop/starved triggers +
+> feed/continue processors✅ · L5 Settings toggles + hooks inspector✅** — every shipped registry now has an
+> in-panel editor (☰ drawer: ⏰ Routines · 📝 Templates · ✦ Agents · 🛡 Policy bundles · ⚙️ Automation rules; plus
+> ⚙ Settings observability toggles + Hooks inspector). Each built via the loop (pure cc-core + tests → wire +
+> pins → adversarial-review Workflow → fix → deploy → commit → push); reviews caught real bugs (L7 edit/rename
+> data-loss; L1 MCP-form strand; L6 **high-sev** feed-queue-key silent data loss; L5 notifications.days Save-drop).
+> Suite ~1707 core + 430 ui + 183 bash, green. **What's LEFT (all opt-in, none required):** the **heavier L5
+> sub-items** (detail-panel tab strip, export session archive, host stats + idle-since, PR/MR status, post-run
+> self-summary, session-history browser + bulk history mgmt, `banner.onAutoApproved`); **L4 UX-gated routing**
+> (topology view / delegation / idle+auto-spawn targets / dependency chains / priority+concurrency); the small
+> per-editor deferrals (L1 modelByMode/requiredEnv editor + agent-folders tree; L2 gateTools auto-apply +
+> toolLimits shell enforcement; L3 vars-schema editor; L6 per-rule status lifecycle); plus the still-pending
+> **hardware-verification runbook** (Kitty tokens + SSH bridge). **Deploy gotcha:** `make deploy`'s reload can hang
+> on `hs -c` — if it stalls after the copy, do `make test && make install` then push, then `pkill -f 'hs -c'; hs
+> -c "hs.reload()"` separately. Honor the load-bearing facts (the `claude` CLI is present; `gate.tools` is a
+> HOLD-list not an allow-list; secrets are env-var NAMES only) and the L1–L7 KEEP-IN-SYNC invariants in context.md.
+> <!-- superseded build-loop note: -->
 > **L1–L6 are SHIPPED + committed + deployed**
 > (see CHANGELOG 2026-06-14 + their `✅` blocks below; each has a *deferred follow-up* — mostly editor UIs and,
 > for L4, the UX-gated topology/delegation/idle-target pieces; for L5, the heavier UI sub-items; for L6, the
