@@ -1124,6 +1124,43 @@ function FX.gitRoot(cwd)
   return (root ~= "") and root or nil
 end
 
+-- L5 Changes tab: read a repo's working-tree status. Run from the repo ROOT so
+-- the -z porcelain paths (always root-relative) line up with FX.gitDiff's path
+-- interpretation. Synchronous hs.execute like FX.gitRoot -- output is bounded by
+-- the changed-file count, and this is selection/tab-triggered, never on the tick.
+function FX.gitStatus(root)
+  if not root or root == "" then return nil end
+  local out = nil
+  pcall(function()
+    local q = "'" .. tostring(root):gsub("'", "'\\''") .. "'"
+    -- -z already emits paths verbatim (no C-quoting); core.quotepath=false makes
+    -- that explicit/future-proof. head -c caps a pathological repo (tens of
+    -- thousands of changes) so it can't flood the bridge -- a partial trailing
+    -- record is dropped safely by core.parseGitStatus.
+    out = hs.execute("git -C " .. q .. " -c core.quotepath=false status --porcelain=v1 -z 2>/dev/null | head -c 1000000")
+  end)
+  return out
+end
+
+-- One file's unified diff (tracked changes vs HEAD; falls back to a new-file
+-- diff for untracked paths). Capped with `head -c` so a giant diff can't flood
+-- the panel or the JS bridge. `file` is a root-relative path from FX.gitStatus.
+function FX.gitDiff(root, file)
+  if not root or root == "" or not file or file == "" then return nil end
+  local out = nil
+  pcall(function()
+    local q = "'" .. tostring(root):gsub("'", "'\\''") .. "'"
+    local f = "'" .. tostring(file):gsub("'", "'\\''") .. "'"
+    out = hs.execute("git -C " .. q .. " -c core.quotepath=false diff HEAD --no-color --no-ext-diff -- " .. f
+                     .. " 2>/dev/null | head -c 200000")
+    if not out or out == "" then        -- untracked / brand-new file: synth an all-additions diff
+      out = hs.execute("git -C " .. q .. " -c core.quotepath=false diff --no-color --no-ext-diff --no-index -- /dev/null " .. f
+                       .. " 2>/dev/null | head -c 200000")
+    end
+  end)
+  return out
+end
+
 -- Escalation channels (Phase 4c-A), both off unless enabled in cc-config.json.
 function FX.playSound()
   local s = hs.sound.getByName("Submarine") or hs.sound.getByName("Ping")
@@ -2785,6 +2822,41 @@ local function handleBridgeMsg(msg)
       .. jsString(key) .. ", " .. hs.json.encode(events) .. ")") end)
     return
   end
+  if a == "detail-changes" then
+    -- L5 Changes tab: the selected session's working-tree status. Resolves the
+    -- repo root (cached) and reads `git status --porcelain=v1 -z`; pure
+    -- core.parseGitStatus normalizes it. Selection/tab-triggered, never on the
+    -- tick. Local-only -- remote tiles have no local cwd to inspect.
+    local key = tostring(payload.v or "")
+    local it = byKey[key]
+    local function reply(tbl)
+      pcall(function() wv:evaluateJavaScript("window.ccDetailChanges("
+        .. jsString(key) .. ", " .. hs.json.encode(tbl) .. ")") end)
+    end
+    if not it then reply({ noRepo = true }); return end
+    if it.remote then reply({ remote = true }); return end
+    local root = it.cwd and FX.gitRoot(it.cwd) or nil
+    if not root then reply({ noRepo = true }); return end
+    local parsed = core.parseGitStatus(FX.gitStatus(root) or "")
+    reply({ files = parsed.files, summary = parsed.summary, root = root })
+    return
+  end
+  if a == "detail-diff" then
+    -- L5 Changes tab: one file's unified diff, fetched on expand. Capped in
+    -- FX.gitDiff. file (payload.text) is a root-relative path from parseGitStatus.
+    local key = tostring(payload.v or "")
+    local file = tostring(payload.text or "")
+    local it = byKey[key]
+    local function reply(txt)
+      pcall(function() wv:evaluateJavaScript("window.ccDetailDiff("
+        .. jsString(key) .. ", " .. jsString(file) .. ", " .. jsString(txt or "") .. ")") end)
+    end
+    if not it or it.remote or file == "" then reply(""); return end
+    local root = it.cwd and FX.gitRoot(it.cwd) or nil
+    if not root then reply(""); return end
+    reply(FX.gitDiff(root, file) or "")
+    return
+  end
   if a == "decision-log" then
     -- Detail-panel gate decision log: last N grouped decisions for the selected
     -- session, read from the CACHED ledger snapshot (selection-triggered, never
@@ -3485,7 +3557,26 @@ local HTML = [[
   .d-panel.active { display:block; }
   #d-timeline { font-size:11px; }
   #d-timeline .tl-pre { white-space:pre-wrap; color:#cfd2db; font-family:ui-monospace,Menlo,monospace; font-size:11px; line-height:1.5; margin:0; }
-  #d-timeline .tl-empty { color:#6b7280; font-size:11px; }
+  #d-timeline .tl-empty, #d-changes .tl-empty { color:#6b7280; font-size:11px; }
+  /* L5 git Changes tab */
+  #d-changes { font-size:11px; }
+  #d-changes .ch-head { display:flex; align-items:center; gap:8px; margin-bottom:4px; color:#9aa0ad; }
+  #d-changes .ch-sum { font-size:11px; }
+  #d-changes .ch-refresh { margin-left:auto; font-size:11px; color:#8a8d99; background:transparent; border:1px solid #2c2f3a;
+    border-radius:6px; padding:2px 8px; cursor:pointer; font-family:inherit; }
+  #d-changes .ch-refresh:hover { color:#cfd2db; }
+  #d-changes .ch-row { display:flex; align-items:baseline; gap:7px; padding:2px 0; cursor:pointer; }
+  #d-changes .ch-row:hover { background:#1a1c24; }
+  #d-changes .ch-mark { flex:0 0 auto; width:14px; text-align:center; font-weight:700; font-family:ui-monospace,Menlo,monospace; }
+  #d-changes .ch-mark.mod { color:#d6a55a; } #d-changes .ch-mark.add { color:#5ad67f; }
+  #d-changes .ch-mark.del { color:#d65a5a; } #d-changes .ch-mark.ren { color:#5a9fd6; }
+  #d-changes .ch-mark.untracked { color:#8a8d99; } #d-changes .ch-mark.other { color:#9aa0ad; }
+  #d-changes .ch-path { color:#cfd2db; word-break:break-all; }
+  #d-changes .ch-orig { color:#6b7280; }
+  #d-changes .ch-diff { margin:2px 0 6px 21px; }
+  #d-changes .ch-diff pre { white-space:pre-wrap; font-family:ui-monospace,Menlo,monospace; font-size:11px; line-height:1.45; margin:0;
+    background:#16171e; border:1px solid #23252e; border-radius:6px; padding:6px 8px; max-height:340px; overflow:auto; }
+  #d-changes .ch-diff .da { color:#5ad67f; } #d-changes .ch-diff .dd { color:#d65a5a; } #d-changes .ch-diff .dh { color:#5a9fd6; }
   #d-head { display:flex; align-items:center; gap:8px; }
   #d-dot  { width:10px; height:10px; border-radius:50%; background:var(--dc,#6b7280); flex:0 0 auto; }
   #d-name { font-size:14px; font-weight:700; color:#fff; }
@@ -3983,6 +4074,9 @@ local HTML = [[
     </div>
     <div class="d-panel" data-tab="usage">
       <div id="d-usage"></div>
+    </div>
+    <div class="d-panel" data-tab="changes">
+      <div id="d-changes"></div>
     </div>
     <div class="d-panel" data-tab="queue">
       <div id="queue-row">
@@ -5676,6 +5770,7 @@ local HTML = [[
         queueListOpen = false; renderQueueList();   // queue editor is per-session
         tplOpen = false; renderTemplates();
         TIMELINE = { key:null, events:null };       // L5: inline timeline is per-session, lazy
+        CHANGES = { key:null, data:null }; CH_DIFFS = {}; CH_OPEN = {};  // git Changes: per-session
         closeTabMenu();
         loadTabState(key);          // restore this project's {selectedTab, unpinned}
       }
@@ -5782,6 +5877,12 @@ local HTML = [[
           } else { TIMELINE = { key: selectedKey, events: [] }; }
         }
         renderDetailTimeline();   // clears stale (key mismatch) or paints cache/pending
+      } else if(detailTab === "changes"){
+        if(CHANGES.key !== selectedKey){
+          CHANGES = { key: selectedKey, data: null };   // pending (dedupes re-fetch)
+          send("detail-changes", selectedKey);          // ccDetailChanges repaints
+        }
+        renderDetailChanges();
       } else if(detailTab === "queue"){
         if(!queueListOpen){ var it2 = findItem(selectedKey); if(it2 && (it2.queue||0) > 0){ toggleQueueList(); } }
       }
@@ -5798,6 +5899,80 @@ local HTML = [[
       if(evs === null){ box.innerHTML = '<div class="tl-empty">Loading activity…</div>'; return; }  // fetch in flight
       if(!evs.length){ box.innerHTML = '<div class="tl-empty">No recorded activity for this session yet (the ledger is off, or this session has no id).</div>'; return; }
       box.innerHTML = '<pre class="tl-pre">' + esc(evs.map(narr).join("\n")) + '</pre>';
+    }
+
+    // ---- L5 Changes tab: per-session git working-tree status + per-file diff --
+    // Lazy on tab-activation (+ manual ↻ Refresh), per-session, stale-guarded.
+    // data === null while a fetch is in flight; {files,summary,root} | {noRepo} |
+    // {remote} once it lands. Per-file diffs fetch on expand (CH_DIFFS cache).
+    var CHANGES  = { key:null, data:null };
+    var CH_DIFFS = {};   // root-relative path -> diff text (current selection)
+    var CH_OPEN  = {};   // root-relative path -> true (expanded row)
+    window.ccDetailChanges = function(key, data){
+      if(key !== selectedKey) return;     // stale guard (consistent with ccDetailDiff)
+      CHANGES = { key: key, data: data || { files:[], summary:{} } };
+      renderDetailChanges();
+    };
+    window.ccDetailDiff = function(key, file, text){
+      if(key !== selectedKey) return;        // stale guard
+      CH_DIFFS[file] = (text == null ? "" : text);
+      renderDetailChanges();
+    };
+    function refreshChanges(){
+      if(!selectedKey) return;
+      CHANGES = { key: selectedKey, data: null }; CH_DIFFS = {}; CH_OPEN = {};
+      send("detail-changes", selectedKey); renderDetailChanges();
+    }
+    function toggleChangeFile(idx){
+      var d = CHANGES.data; if(!d || !d.files) return;
+      var f = d.files[idx]; if(!f) return;
+      if(CH_OPEN[f.path]){ delete CH_OPEN[f.path]; }
+      else {
+        CH_OPEN[f.path] = true;
+        if(CH_DIFFS[f.path] === undefined){ send("detail-diff", selectedKey, f.path); }  // ccDetailDiff fills it
+      }
+      renderDetailChanges();
+    }
+    function changeSummary(s, n){
+      s = s || {}; var parts = [];
+      if(s.modified)  parts.push(s.modified  + " modified");
+      if(s.added)     parts.push(s.added     + " added");
+      if(s.deleted)   parts.push(s.deleted   + " deleted");
+      if(s.renamed)   parts.push(s.renamed   + " renamed");
+      if(s.untracked) parts.push(s.untracked + " untracked");
+      return n + (n === 1 ? " file" : " files") + (parts.length ? " · " + parts.join(", ") : "");
+    }
+    function colorDiff(text){
+      if(text === undefined) return '<div class="tl-empty">Loading diff…</div>';
+      if(!text) return '<div class="tl-empty">(no diff — binary, or identical to HEAD)</div>';
+      var out = text.split("\n").map(function(ln){
+        var c = ln.charAt(0), cls = "";
+        if(ln.indexOf("+++") === 0 || ln.indexOf("---") === 0 || c === "@" || ln.indexOf("diff ") === 0) cls = "dh";
+        else if(c === "+") cls = "da"; else if(c === "-") cls = "dd";
+        return cls ? '<span class="' + cls + '">' + esc(ln) + '</span>' : esc(ln);
+      }).join("\n");
+      return '<pre>' + out + '</pre>';
+    }
+    function renderDetailChanges(){
+      var box = document.getElementById("d-changes"); if(!box) return;
+      if(CHANGES.key !== selectedKey){ box.innerHTML = ""; return; }   // stale guard
+      var d = CHANGES.data;
+      if(d === null){ box.innerHTML = '<div class="tl-empty">Loading changes…</div>'; return; }
+      if(d.remote){ box.innerHTML = '<div class="tl-empty">Changes aren\'t available for remote sessions.</div>'; return; }
+      if(d.noRepo){ box.innerHTML = '<div class="tl-empty">This session\'s folder isn\'t a git repository.</div>'; return; }
+      var files = d.files || [];
+      var html = '<div class="ch-head"><span class="ch-sum">' + esc(changeSummary(d.summary, files.length))
+        + '</span><button class="ch-refresh" onclick="refreshChanges()" title="Re-read git status">↻ Refresh</button></div>';
+      if(!files.length){ box.innerHTML = html + '<div class="tl-empty">Working tree clean.</div>'; return; }
+      html += files.map(function(f, idx){
+        var orig = f.orig ? ' <span class="ch-orig">← ' + esc(f.orig) + '</span>' : '';
+        // idx is a controlled integer (not user data) -> safe inline handler.
+        var row = '<div class="ch-row" onclick="toggleChangeFile(' + idx + ')" title="Show / hide this file\'s diff">'
+          + '<span class="ch-mark ' + esc(f.cls || "other") + '">' + esc(f.mark || "?") + '</span>'
+          + '<span class="ch-path">' + esc(f.path) + orig + '</span></div>';
+        return row + (CH_OPEN[f.path] ? ('<div class="ch-diff">' + colorDiff(CH_DIFFS[f.path]) + '</div>') : '');
+      }).join("");
+      box.innerHTML = html;
     }
     // ⋯ menu: per-project tab show/hide (pin/unpin). 'activity' is always shown.
     function toggleTabMenu(){

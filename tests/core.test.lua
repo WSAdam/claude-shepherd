@@ -4155,5 +4155,51 @@ do
   check("tabs: injected list unpinned kept", n6.unpinned.y == true)
 end
 
+-- ---- L5: git Changes tab (parseGitStatus / parseGitDiff) ------------------
+do
+  -- 'changes' tab is registered in the canonical list
+  check("git: changes tab present", core.detailTabIds().changes == true)
+
+  -- empty / nil input -> empty result
+  eq("git: nil status -> 0 files", #core.parseGitStatus(nil).files, 0)
+  eq("git: empty status -> 0 total", core.parseGitStatus("").summary.total, 0)
+
+  -- a representative porcelain -z stream (NUL-terminated records). Per the git
+  -- -z spec (verified against real `git status --porcelain=v1 -z`): paths are
+  -- VERBATIM (no C-quoting) and a renamed record is `XY <new>\0<old>` -- the NEW
+  -- path first, then the ORIGINAL in a following NUL token.
+  local z = " M src/app.lua\0" .. "?? new.txt\0" .. "A  added.lua\0"
+         .. " D gone.lua\0" .. "R  renamed.lua\0old.lua\0"
+  local s = core.parseGitStatus(z)
+  eq("git: parsed 5 files", #s.files, 5)
+  eq("git: modified path", s.files[1].path, "src/app.lua")
+  eq("git: modified mark", s.files[1].mark, "M")
+  eq("git: untracked mark", s.files[2].mark, "?")
+  eq("git: untracked cls", s.files[2].cls, "untracked")
+  eq("git: added mark", s.files[3].mark, "A")
+  eq("git: deleted mark", s.files[4].mark, "D")
+  eq("git: renamed mark", s.files[5].mark, "R")
+  eq("git: renamed NEW path is first token", s.files[5].path, "renamed.lua")
+  eq("git: renamed ORIG path is the extra token", s.files[5].orig, "old.lua")
+  eq("git: summary modified", s.summary.modified, 1)
+  eq("git: summary untracked", s.summary.untracked, 1)
+  eq("git: summary added", s.summary.added, 1)
+  eq("git: summary deleted", s.summary.deleted, 1)
+  eq("git: summary renamed", s.summary.renamed, 1)
+  eq("git: summary total", s.summary.total, 5)
+
+  -- rename does NOT swallow the following real entry (consumes exactly one extra token)
+  local z2 = "R  a.lua\0b.lua\0 M c.lua\0"
+  local s2 = core.parseGitStatus(z2)
+  eq("git: rename + next entry = 2 files", #s2.files, 2)
+  eq("git: entry after rename parsed", s2.files[2].path, "c.lua")
+
+  -- -z paths are verbatim: spaces and quote chars survive unmangled (no C-unescape)
+  local z3 = ' M weird name.txt\0' .. ' M qu"ote.txt\0'
+  local s3 = core.parseGitStatus(z3)
+  eq("git: space in path verbatim", s3.files[1].path, "weird name.txt")
+  eq("git: quote in path verbatim", s3.files[2].path, 'qu"ote.txt')
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

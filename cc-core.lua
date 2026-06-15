@@ -5754,6 +5754,7 @@ M.DETAIL_TABS = {
   { id = "timeline",  label = "Timeline" },
   { id = "decisions", label = "Decisions" },
   { id = "usage",     label = "Usage" },
+  { id = "changes",   label = "Changes" },
   { id = "queue",     label = "Queue" },
 }
 M.DETAIL_TAB_DEFAULT = "activity"
@@ -5798,6 +5799,59 @@ function M.normalizeTabState(raw, tabs)
     sel = def
   end
   return { selectedTab = sel, unpinned = unpinned }
+end
+
+-- ---- L5: per-session git Changes tab -------------------------------------
+-- Split a NUL-separated string (git's -z output) with a plain find -- no
+-- pattern-class ambiguity, works on any byte-clean Lua string.
+local function splitNul(s)
+  local out, start = {}, 1
+  while true do
+    local p = s:find("\0", start, true)
+    if not p then if start <= #s then out[#out + 1] = s:sub(start) end break end
+    out[#out + 1] = s:sub(start, p - 1)
+    start = p + 1
+  end
+  return out
+end
+
+-- parseGitStatus(out) : parse `git status --porcelain=v1 -z` into a normalized
+-- file list + a per-class summary. Pure. The -z format is NUL-terminated records
+-- `XY<space>path`; renamed/copied records are followed by an extra NUL token
+-- holding the ORIGINAL path. Returns { files = {{status,mark,cls,path,orig}}, summary }.
+function M.parseGitStatus(out)
+  local sum = { modified = 0, added = 0, deleted = 0, renamed = 0, untracked = 0, total = 0 }
+  local files = {}
+  if type(out) ~= "string" or out == "" then return { files = files, summary = sum } end
+  local toks = splitNul(out)
+  local i = 1
+  while i <= #toks do
+    local entry = toks[i]; i = i + 1
+    if entry ~= nil and #entry >= 3 then
+      local code = entry:sub(1, 2)
+      local path = entry:sub(4)            -- skip the space at position 3
+      local x, y = code:sub(1, 1), code:sub(2, 2)
+      local orig = nil
+      if x == "R" or x == "C" or y == "R" or y == "C" then
+        orig = toks[i]; i = i + 1           -- the next token is the original path
+      end
+      local mark, cls
+      if code == "??" then
+        mark, cls = "?", "untracked"; sum.untracked = sum.untracked + 1
+      else
+        local m = (x ~= " " and x ~= "?") and x or y
+        if m == "M" or m == "U" then mark, cls = "M", "mod"; sum.modified = sum.modified + 1
+        elseif m == "A" then mark, cls = "A", "add"; sum.added = sum.added + 1
+        elseif m == "D" then mark, cls = "D", "del"; sum.deleted = sum.deleted + 1
+        elseif m == "R" then mark, cls = "R", "ren"; sum.renamed = sum.renamed + 1
+        elseif m == "C" then mark, cls = "C", "ren"; sum.renamed = sum.renamed + 1
+        else mark, cls = (m ~= " " and m or "?"), "other" end
+      end
+      files[#files + 1] = { status = code, mark = mark, cls = cls, path = path, orig = orig }
+      sum.total = sum.total + 1
+    end
+  end
+  return { files = files, summary = sum }
 end
 
 return M

@@ -1108,6 +1108,31 @@ do
         and src:find("No token usage recorded for this session yet", 1, true) ~= nil)
   check("l5tab-fix: normalizeTabStateJS mirrors Lua value form",
         src:find('(ru[k]===true) ? k : (typeof ru[k]==="string" ? ru[k] : null)', 1, true) ~= nil)
+  -- #2 git Changes tab: panel markup, lazy fetch via FX.gitStatus/Diff, per-file
+  -- diff expand, run-from-root, capped diff, remote/no-repo guards.
+  check("l5chg-pin: changes panel markup", src:find('class="d-panel" data-tab="changes"', 1, true) ~= nil
+        and src:find('<div id="d-changes">', 1, true) ~= nil)
+  check("l5chg-pin: status + diff bridge handlers",
+        src:find('a == "detail-changes"', 1, true) ~= nil and src:find('a == "detail-diff"', 1, true) ~= nil)
+  check("l5chg-pin: parses status via core.parseGitStatus",
+        src:find("core.parseGitStatus(FX.gitStatus(root)", 1, true) ~= nil)
+  check("l5chg-pin: runs git from the repo ROOT (path parity)",
+        src:find("FX.gitRoot(it.cwd) or nil", 1, true) ~= nil)
+  check("l5chg-pin: diff is capped (head -c)", src:find("head -c 200000", 1, true) ~= nil)
+  check("l5chg-pin: remote + no-repo guarded",
+        src:find("reply({ remote = true })", 1, true) ~= nil
+        and src:find("reply({ noRepo = true })", 1, true) ~= nil)
+  check("l5chg-pin: lazy fetch (not on tick) + stale guard",
+        src:find('send("detail-changes", selectedKey)', 1, true) ~= nil
+        and src:find("if(CHANGES.key !== selectedKey){ box.innerHTML", 1, true) ~= nil)
+  check("l5chg-pin: per-file diff fetch on expand",
+        src:find('send("detail-diff", selectedKey, f.path)', 1, true) ~= nil)
+  -- #2 review fixes: explicit verbatim paths (core.quotepath=false) + status cap,
+  -- ccDetailChanges entry-level stale guard.
+  check("l5chg-fix: quotepath=false + status cap",
+        src:find("core.quotepath=false status --porcelain=v1 -z 2>/dev/null | head -c 1000000", 1, true) ~= nil)
+  check("l5chg-fix: ccDetailChanges entry stale guard",
+        src:find("window.ccDetailChanges = function(key, data){\n      if(key !== selectedKey) return;", 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
