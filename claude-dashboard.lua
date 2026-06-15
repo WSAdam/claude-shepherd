@@ -508,6 +508,64 @@ function FX.fetchOfficialUsage(force)
   end)
 end
 
+-- ---- #6: host stats (read-only, off by default) -----------------------------
+-- Slow-moving host health (CPU/mem/disk/uptime/load) gathered on a throttled poll. All
+-- DERIVATION is pure (core.hostHealth); FX only gathers raw readings, each in its own pcall
+-- so a missing source degrades to nil instead of crashing. Off unless insights.hostStats.
+local lastHostHealth = nil   -- latest core.hostHealth() result, or nil when off/unavailable
+local lastHostPoll   = 0
+local HOST_TTL = 30          -- host stats move slowly + each poll shells out (df/sysctl)
+function FX.pollHostStats(force, cfg)
+  cfg = cfg or loadConfig()   -- reuse the refresh tick's cfg when given (no per-second re-read)
+  if not core.config(cfg, "insights.hostStats", false) then lastHostHealth = nil; return end
+  local now = os.time()
+  if not force and (now - lastHostPoll) < HOST_TTL then return end
+  lastHostPoll = now
+  local raw = {}
+  -- CPU: percent active since the last sample (hs.host.cpuUsage diffs ticks for us).
+  pcall(function()
+    local u = hs.host.cpuUsage()
+    if u and u.overall and u.overall.active then raw.cpuPct = u.overall.active end
+  end)
+  -- Memory: used ≈ (active + wired + compressor) pages -- an Activity-Monitor-style "Memory
+  -- Used" proxy. NOT total-minus-free (which counts reclaimable cache as used and would pin
+  -- the bar near 100% on every Mac). pagesUsedByVMCompressor is the CURRENT compressed
+  -- footprint (pagesCompressed is a lifetime counter -- do not use it).
+  pcall(function()
+    local vm = hs.host.vmStat()
+    if vm and vm.memSize and vm.pageSize then
+      local usedPages = (vm.pagesActive or 0) + (vm.pagesWiredDown or 0) + (vm.pagesUsedByVMCompressor or 0)
+      raw.memTotalBytes = vm.memSize
+      raw.memUsedBytes  = usedPages * vm.pageSize
+    end
+  end)
+  -- Disk: df -k / -- use Used + Available (NOT the APFS container "size"), so the % matches
+  -- df's Capacity column. A portable read; explicitly not /proc.
+  pcall(function()
+    local out = hs.execute("df -k / | tail -1") or ""
+    local used, avail = out:match("^%S+%s+%d+%s+(%d+)%s+(%d+)")
+    if used and avail then
+      raw.diskUsedBytes  = tonumber(used) * 1024
+      raw.diskTotalBytes = (tonumber(used) + tonumber(avail)) * 1024
+    end
+  end)
+  -- Uptime: now - kern.boottime sec.
+  pcall(function()
+    local sec = (hs.execute("sysctl -n kern.boottime 2>/dev/null") or ""):match("sec%s*=%s*(%d+)")
+    if sec then raw.uptimeSeconds = now - tonumber(sec) end
+  end)
+  -- 1-minute load average.
+  pcall(function()
+    local l1 = (hs.execute("sysctl -n vm.loadavg 2>/dev/null") or ""):match("([%d%.]+)")
+    if l1 then raw.loadAvg1 = tonumber(l1) end
+  end)
+  lastHostHealth = core.hostHealth(raw, {
+    cpuThreshold  = tonumber(core.config(cfg, "insights.hostPressure.cpu", 90)),
+    memThreshold  = tonumber(core.config(cfg, "insights.hostPressure.mem", 90)),
+    diskThreshold = tonumber(core.config(cfg, "insights.hostPressure.disk", 90)),
+  })
+end
+
 -- Task queue I/O (Phase 4b).
 function FX.readQueue(key)
   local c = FX.readFile(QUEUE_DIR .. "/" .. key .. ".json")
@@ -1221,7 +1279,11 @@ local prStatusTasks  = {}   -- root -> { task=<live hs.task>, ts=<launch epoch> 
                             -- task isn't GC'd before its callback fires, and TIMESTAMPED so a HUNG
                             -- gh (callback never fires) is detected past the deadline and re-polled.
 local PR_TTL = 180          -- full cache TTL once we have real data
-local PR_RETRY_TTL = 20     -- short retry / hung-task deadline while data is still nil/in-flight
+local PR_RETRY_TTL = 20     -- short re-attempt window while data is still nil
+local PR_HUNG_TTL = 60      -- an in-flight gh older than this is presumed HUNG -> kill + re-poll.
+                            -- Decoupled from the cache TTL so a had-data refresh that hangs is
+                            -- reclaimed in ~60s (not 180s); 60 > a healthy `gh pr view`, so we
+                            -- don't churn a slow-but-alive poll.
 function FX.ghPrStatus(root)
   if not root or root == "" then return end
   local gh = ghBin()
@@ -1229,11 +1291,15 @@ function FX.ghPrStatus(root)
   local now = os.time()
   local cached = prStatusByRoot[root]
   local inflight = prStatusTasks[root]
-  -- core.prPollPlan owns the decision: full TTL once we have data, a short retry window
-  -- while it's still nil/in-flight, and -- crucially -- a stale (past-deadline) in-flight
-  -- task is treated as HUNG so the slot can be reclaimed and re-polled instead of latching
-  -- forever (the bug a bare `if prStatusTasks[root] then return` had).
-  local plan = core.prPollPlan(cached, inflight, now, { ttl = PR_TTL, retryTtl = PR_RETRY_TTL })
+  -- core.prPollPlan owns the decision: full TTL once we have data, a short window while it's
+  -- still nil, and -- crucially -- a stale (past-deadline) in-flight task is treated as HUNG so
+  -- the slot is reclaimed and re-polled instead of latching forever (the bug a bare
+  -- `if prStatusTasks[root] then return` had). The hung deadline is DATA-AWARE: a COLD hang
+  -- (no prior data) is reclaimed fast (PR_RETRY_TTL ~20s) so a first badge isn't stuck; a
+  -- HAD-DATA refresh that hangs waits PR_HUNG_TTL (~60s, still well under the 180s cache TTL)
+  -- so we don't churn a slow-but-alive refresh.
+  local hungTtl = (cached and cached.data ~= nil) and PR_HUNG_TTL or PR_RETRY_TTL
+  local plan = core.prPollPlan(cached, inflight, now, { ttl = PR_TTL, retryTtl = PR_RETRY_TTL, deadline = hungTtl })
   if plan.act ~= "start" then return end
   if plan.killStale and inflight and inflight.task then
     pcall(function() inflight.task:terminate() end)   -- hung gh -> reclaim the slot before re-polling
@@ -1243,14 +1309,13 @@ function FX.ghPrStatus(root)
   prStatusByRoot[root] = { ts = now, data = cached and cached.data or nil }
   local ok = pcall(function()
     local t = hs.task.new(gh, function(code, stdout)
-      -- Paint ONLY if this task still owns the slot. A stale-kill (hung re-poll) or a
-      -- vanished-root reap replaces/clears the latch; a late callback from the superseded
-      -- (terminated) task must DROP its result -- a SIGTERM'd gh exits non-zero, so its
-      -- snapshot is `false`, and writing it would clobber the fresh poll's PR data (stamped
-      -- newer, so it sticks for the full TTL) or re-populate a reaped root. Mirrors the
-      -- searchGen 'superseded by a newer query' guard the fleet-search task uses.
-      local inf = prStatusTasks[root]
-      if not inf or inf.task ~= t then return end
+      -- Paint ONLY if this task still owns the slot (core.prCallbackOwns). A stale-kill (hung
+      -- re-poll) or a vanished-root reap replaces/clears the latch; a late callback from the
+      -- superseded (terminated) task must DROP its result -- a SIGTERM'd gh exits non-zero, so
+      -- its snapshot is `false`, and writing it would clobber the fresh poll's PR data (stamped
+      -- newer, so it sticks for the full TTL) or re-populate a reaped root. Mirrors the searchGen
+      -- 'superseded by a newer query' guard the fleet-search task uses.
+      if not core.prCallbackOwns(prStatusTasks[root], t) then return end
       prStatusTasks[root] = nil   -- our task completed -> release the latch
       local data = false   -- gh exits non-zero when the branch has no PR / no remote
       if code == 0 and stdout and stdout ~= "" then
@@ -2842,6 +2907,14 @@ local function handleBridgeMsg(msg)
       active     = core.bucketEvents(recent, 3600, "active"),
       denialRate = core.bucketEvents(recent, 3600, "denialRate"),
     }
+    -- #6 host stats + fleet idle-since (off by default): force a fresh poll so the strip
+    -- reflects "now" on open, then attach the derived host view + the pure fleet-idle calc
+    -- off the latest rendered tiles. Both pure-cored; absent/disabled -> nil (strip hidden).
+    if core.config(loadConfig(), "insights.hostStats", false) then
+      pcall(function() FX.pollHostStats(true) end)
+      stats.host = lastHostHealth
+      stats.fleetIdle = core.fleetIdleSince(lastRenderList or {}, FX.now())
+    end
     pcall(function() wv:evaluateJavaScript("window.ccInsights(" .. hs.json.encode(stats) .. ")") end)
     return
   end
@@ -4014,6 +4087,8 @@ local HTML = [[
 .i-card .v{ font-size:18px; color:#e8e9ee; font-variant-numeric:tabular-nums; }
 .i-card .k{ font-size:11px; color:#8a8d99; margin-top:2px; }
 .i-sec{ font-weight:600; color:#cfd2db; margin:10px 0 6px; }
+.i-pressure{ color:#ef4444; font-weight:600; font-size:11px; margin-left:6px; }
+.i-fleetidle{ color:#9aa4b2; font-size:12px; margin:-4px 0 10px; }
 .i-tbl{ width:100%; border-collapse:collapse; }
 .i-tbl th, .i-tbl td{ text-align:left; padding:3px 8px; border-bottom:1px solid #1e2027; color:#cfd2db; }
 .i-tbl th{ color:#8a8d99; font-weight:500; }
@@ -4413,6 +4488,8 @@ local HTML = [[
       <div class="s-sec">Insights</div>
       <label class="s-row">Cap "time blocked on you" per approval at <input type="number" id="s-ins-block" class="s-num" min="0"> seconds</label>
       <div class="s-help">An approval you never answered counts as blocking for at most this long in the 📊 fleet stats (0 = no cap).</div>
+      <label class="s-row"><input type="checkbox" id="s-ins-host"> Show host stats (CPU / memory / disk / uptime) + fleet idle-since</label>
+      <div class="s-help">A read-only strip at the top of the 📊 insights overlay. Polled locally every ~30s; a starvation alert notes when the box is CPU/disk-pressured. Pressure thresholds are hand-editable via <code>insights.hostPressure.{cpu,mem,disk}</code> (default 90%).</div>
 
       <div class="s-sec">Observability (L5)</div>
       <label class="s-row"><input type="checkbox" id="s-autotitle"> Auto-title tiles from the session's first prompt</label>
@@ -5388,6 +5465,7 @@ local HTML = [[
       val("s-cont-delay",cv(cfg,"autoContinue.delaySeconds",60));
       val("s-cont-max",  cv(cfg,"autoContinue.maxAttempts",3));
       val("s-ins-block", cv(cfg,"insights.maxBlockSeconds",1800));
+      ck("s-ins-host",   cv(cfg,"insights.hostStats",false));   // #6 host stats strip
       // L5 observability toggles (were config-only).
       ck("s-autotitle",      cv(cfg,"autoTitle.enabled",false));
       ck("s-loop-en",        cv(cfg,"escalation.loop.enabled",false));
@@ -5595,7 +5673,7 @@ local HTML = [[
                            staleSeconds: num("s-resp-stale",600) } },
         autoContinue: { enabled: ck("s-cont-auto"), delaySeconds: num("s-cont-delay",60),
                         maxAttempts: num("s-cont-max",3) },
-        insights: { maxBlockSeconds: num("s-ins-block",1800) },
+        insights: { maxBlockSeconds: num("s-ins-block",1800), hostStats: ck("s-ins-host") },
         // bridge carries NO staleSlackSeconds/keystrokes keys: SETTINGS_KEEP_SUBKEYS
         // preserves the hand-edited ones across this wholesale block replace.
         bridge: { enabled: ck("s-br-en"), intervalSeconds: num("s-br-int",2) }
@@ -7455,7 +7533,32 @@ local HTML = [[
       var tot = st.totals || {}, dec = st.decisions || {}, prov = st.provenance || {};
       var card = function(v, k){ return '<div class="i-card"><div class="v">'+esc(v)+'</div><div class="k">'+esc(k)+'</div></div>'; };
       var pct = function(x){ return Math.round((x||0)*100)+"%"; };
-      var html = '<div class="i-cards">'
+      // #6 host stats strip (only when enabled+gathered) + fleet idle-since. card() esc's its
+      // args; esc() the non-card bits. All values are pre-formatted by core (fmtBytes/fmtUptime).
+      var hostHtml = "";
+      var hh = st.host, fi = st.fleetIdle;
+      if(hh || fi){
+        hostHtml += '<div class="i-sec">Host';
+        if(hh && hh.pressured && hh.pressure) hostHtml += ' <span class="i-pressure">⚠ '+esc(hh.pressure)+'</span>';
+        hostHtml += '</div>';
+        if(hh){
+          var memK = (hh.memUsed && hh.memTotal) ? ("memory ("+hh.memUsed+" / "+hh.memTotal+")") : "memory";
+          var diskK = (hh.diskUsed && hh.diskTotal) ? ("disk ("+hh.diskUsed+" / "+hh.diskTotal+")") : "disk";
+          hostHtml += '<div class="i-cards">'
+            + card(hh.cpu!=null ? hh.cpu+"%" : "—", "CPU")
+            + card(hh.memPct!=null ? hh.memPct+"%" : "—", memK)
+            + card(hh.diskPct!=null ? hh.diskPct+"%" : "—", diskK)
+            + card(hh.uptime!=null ? hh.uptime : "—", "uptime")
+            + (hh.load1!=null ? card(hh.load1, "load (1m)") : "")
+            + '</div>';
+        }
+        if(fi){
+          var fl = fi.idle ? ("Fleet idle for "+fmtDur(fi.seconds||0))
+                 : (fi.active ? "Fleet active — a session is busy" : "");
+          if(fl) hostHtml += '<div class="i-fleetidle">'+esc(fl)+'</div>';
+        }
+      }
+      var html = hostHtml + '<div class="i-cards">'
         + card(tot.sessions||0, "sessions")
         + card(tot.prompts||0, "prompts (turns)")
         + card(tot.toolRequests||0, "tool requests")
@@ -8395,6 +8498,7 @@ end
 function refresh()
   local cfg = loadConfig()
   reconcileBridge(cfg)  -- SSH bridge timers track config (cheap diff per tick)
+  pcall(function() FX.pollHostStats(false, cfg) end)  -- #6 host stats: self-gating (off by default) + throttled (HOST_TTL)
   local list = refreshList()
   -- Cohort tag (.group) MUST be applied before the routing dispatcher below: L4
   -- @role: routing matches a task's role against a member's GROUP, and routeGroups
@@ -8974,9 +9078,13 @@ function refresh()
           for _, m in ipairs(members) do m.starved = true end
           if not starvedAlerted[qk] then
             starvedAlerted[qk] = true
+            -- #6: if host stats are on and the box is resource-pressured, note it -- a
+            -- starvation can be the machine choking, not just a missing free session.
+            local pressure = lastHostHealth and lastHostHealth.pressured and lastHostHealth.pressure or nil
             print("[cc-route] " .. qk .. " starved: " .. core.queueDepth(q)
-              .. " task(s) queued, no free session for " .. starveMin .. "m+")
-            ledgerFor(members[1], { type = "queue_starved", depth = core.queueDepth(q) })
+              .. " task(s) queued, no free session for " .. starveMin .. "m+"
+              .. (pressure and (" (host pressured: " .. pressure .. ")") or ""))
+            ledgerFor(members[1], { type = "queue_starved", depth = core.queueDepth(q), hostPressure = pressure })
             runRules(ruleSet, members[1], "starved")  -- L6 starved trigger (rising edge, once per episode)
           end
         end

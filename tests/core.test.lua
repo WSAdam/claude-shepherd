@@ -93,6 +93,14 @@ do
   eq("overlay: spawn.searchRoots carried forward", sOut.spawn.searchRoots[1], "/a")
   eq("overlay: spawn.searchDepth carried forward", sOut.spawn.searchDepth, 6)
   eq("overlay: spawn.fdBin carried forward", sOut.spawn.fdBin, "/opt/fd")
+  -- #6: hand-edited insights.hostPressure thresholds survive a Save (form sends only
+  -- maxBlockSeconds + hostStats), like escalation.hung / risk.weights.
+  local iOut = core.overlayConfig(
+    { insights = { hostPressure = { cpu = 80, disk = 95 } } },
+    { insights = { maxBlockSeconds = 1800, hostStats = true } })
+  eq("overlay: insights.hostPressure.cpu carried forward", iOut.insights.hostPressure.cpu, 80)
+  eq("overlay: insights.hostPressure.disk carried forward", iOut.insights.hostPressure.disk, 95)
+  eq("overlay: insights.hostStats taken from the form", iOut.insights.hostStats, true)
 end
 
 -- ---- parseStatusList: decode + stale + approvals-first sort ----------------
@@ -2224,6 +2232,62 @@ do
   eq("fmt: hours+minutes", core.fmtDuration(3600 + 5 * 60), "1h 5m")
   eq("fmt: whole hours", core.fmtDuration(7200), "2h")
   eq("fmt: negative clamps to 0s", core.fmtDuration(-5), "0s")
+end
+
+-- ---- #6 host stats + fleet idle-since --------------------------------------
+do
+  -- fmtBytes
+  eq("host: bytes", core.fmtBytes(512), "512 B")
+  eq("host: KB", core.fmtBytes(1536), "1.5 KB")
+  eq("host: GB", core.fmtBytes(2 * 1024^3), "2.0 GB")
+  eq("host: nil bytes -> dash", core.fmtBytes(nil), "—")
+  eq("host: negative bytes -> dash", core.fmtBytes(-5), "—")
+  -- fmtUptime
+  eq("host: uptime days+hours", core.fmtUptime(4 * 86400 + 3600), "4d 1h")
+  eq("host: uptime exact day", core.fmtUptime(2 * 86400), "2d")
+  eq("host: uptime under a day falls back to h/m", core.fmtUptime(3661), "1h 1m")
+  -- hostHealth: full reading, no pressure
+  local h = core.hostHealth({ cpuPct = 42.6, memUsedBytes = 8 * 1024^3, memTotalBytes = 16 * 1024^3,
+    diskUsedBytes = 100 * 1024^3, diskTotalBytes = 500 * 1024^3, uptimeSeconds = 90000, loadAvg1 = 1.5 })
+  eq("host: cpu rounded", h.cpu, 43)
+  eq("host: memPct", h.memPct, 50)
+  eq("host: diskPct", h.diskPct, 20)
+  eq("host: uptime humanized", h.uptime, "1d 1h")
+  eq("host: load passthrough", h.load1, 1.5)
+  eq("host: not pressured", h.pressured, false)
+  eq("host: no pressure string", h.pressure, nil)
+  -- pressure thresholds (default 90): CPU + mem + disk all over
+  local hp = core.hostHealth({ cpuPct = 95, memUsedBytes = 95, memTotalBytes = 100,
+    diskUsedBytes = 92, diskTotalBytes = 100 })
+  eq("host: pressured", hp.pressured, true)
+  check("host: pressure lists each over-threshold metric",
+        hp.pressure:find("CPU 95%", 1, true) and hp.pressure:find("mem 95%", 1, true)
+        and hp.pressure:find("disk 92%", 1, true))
+  -- custom thresholds
+  eq("host: custom cpu threshold not tripped", core.hostHealth({ cpuPct = 80 }, { cpuThreshold = 95 }).pressured, false)
+  -- missing readings degrade to nil, never pressured, no crash
+  local hm = core.hostHealth({})
+  eq("host: missing cpu -> nil", hm.cpu, nil)
+  eq("host: missing mem -> nil pct", hm.memPct, nil)
+  eq("host: missing -> not pressured", hm.pressured, false)
+  eq("host: zero total -> nil pct (no div-by-zero)", core.hostHealth({ memUsedBytes = 5, memTotalBytes = 0 }).memPct, nil)
+  eq("host: cpu clamps over 100", core.hostHealth({ cpuPct = 130 }).cpu, 100)
+
+  -- fleetIdleSince
+  local fi = core.fleetIdleSince({ { status = "idle", since = 100 }, { status = "done", since = 250 } }, 400)
+  eq("idle: all idle/done -> idle", fi.idle, true)
+  eq("idle: sinceTs = the last to go quiet", fi.sinceTs, 250)
+  eq("idle: seconds = now - sinceTs", fi.seconds, 150)
+  local fa = core.fleetIdleSince({ { status = "idle", since = 100 }, { status = "working", since = 250 } }, 400)
+  eq("idle: a working tile -> not idle", fa.idle, false)
+  eq("idle: ...and active", fa.active, true)
+  eq("idle: approval counts as active", core.fleetIdleSince({ { status = "approval", since = 100 } }, 400).active, true)
+  eq("idle: error counts as active", core.fleetIdleSince({ { status = "error", since = 100 } }, 400).active, true)
+  local fe = core.fleetIdleSince({}, 400)
+  eq("idle: empty fleet not idle", fe.idle, false)
+  eq("idle: empty fleet not active", fe.active, false)
+  eq("idle: falls back to updated, clamps future ts to 0",
+     core.fleetIdleSince({ { status = "idle", updated = 500 } }, 400).seconds, 0)
 end
 
 -- ---- fleetStats: aggregate the ledger --------------------------------------
@@ -4461,6 +4525,13 @@ do
   -- the host char must be non-whitespace (so " " / tab can't stand in for a host)
   check("pr: whitespace-only host rejected", core.isOpenableUrl("https:// github.com") == false)
   check("pr: tab host rejected", core.isOpenableUrl("https://\tx") == false)
+  -- scheme is case-insensitive (RFC 3986); only the scheme, not the path
+  check("pr: uppercase HTTPS:// accepted", core.isOpenableUrl("HTTPS://github.com/x") == true)
+  check("pr: mixed-case Http:// accepted", core.isOpenableUrl("Http://x") == true)
+  -- ...but case-insensitivity must NOT open the smuggle door: uppercase non-http rejected
+  check("pr: uppercase FILE:// still rejected", core.isOpenableUrl("FILE:///etc/passwd") == false)
+  check("pr: uppercase JAVASCRIPT: still rejected", core.isOpenableUrl("JAVASCRIPT:alert(1)") == false)
+  check("pr: mixed-case Data: still rejected", core.isOpenableUrl("Data:text/html,x") == false)
 end
 
 -- ---- L5: gh PR-status poll planner (hung-task aware) + reapUnbacked --------
@@ -4478,13 +4549,29 @@ do
   -- kill the orphaned task and re-poll (the bug both reviews flagged: this was unreachable)
   p = plan({ ts = 1000, data = nil }, { ts = 1000 }, 1025)
   check("prpoll: hung gh past retry window kills + re-polls", p.act == "start" and p.killStale == true)
-  -- a refresh poll that had data but hangs past the FULL TTL is hung too
-  p = plan({ ts = 1000, data = { number = 1 } }, { ts = 1000 }, 1181)
-  check("prpoll: hung refresh poll (had data) past TTL kills + re-polls", p.act == "start" and p.killStale == true)
+  -- a refresh poll that HAD data but hangs is reclaimed at the hung deadline (default = the
+  -- 20s retry window here), WITHOUT waiting for the full cache TTL -- the hung check runs
+  -- before the cache-freshness skip, so a frozen badge recovers fast.
+  p = plan({ ts = 1000, data = { number = 1 } }, { ts = 1000 }, 1025)
+  check("prpoll: hung refresh poll (had data) reclaimed at deadline, not full TTL", p.act == "start" and p.killStale == true)
   p = plan(nil, { ts = 1000 }, 1005)
   check("prpoll: in-flight, no cache, within window skips", p.act == "skip")
   -- defaults (no opts): ttl 180 / retry 20
   check("prpoll: default retryTtl re-polls nil data past 20s", core.prPollPlan({ ts = 0, data = nil }, nil, 25).act == "start")
+  -- opts.deadline OVERRIDE is independent of the cache window (effTtl). Had data so
+  -- effTtl=180: with deadline=30 a 50s-old in-flight task is hung -> start+kill, even though
+  -- the cache is "fresh" (50 < 180).
+  p = core.prPollPlan({ ts = 1000, data = { number = 1 } }, { ts = 1000 }, 1050, { ttl = 180, retryTtl = 20, deadline = 30 })
+  check("prpoll: deadline override flips killStale inside the cache window", p.act == "start" and p.killStale == true)
+  -- ...and a generous deadline keeps a not-yet-hung in-flight poll skipped despite a tiny effTtl
+  p = core.prPollPlan({ ts = 1000, data = nil }, { ts = 1000 }, 1050, { ttl = 180, retryTtl = 20, deadline = 200 })
+  check("prpoll: deadline override (200) keeps an alive poll skipped", p.act == "skip")
+
+  -- prCallbackOwns: does this callback still own its root's slot?
+  local tk = {}  -- stand-in for an hs.task (the guard uses reference identity only)
+  check("prowns: same task still owns", core.prCallbackOwns({ task = tk, ts = 1 }, tk) == true)
+  check("prowns: superseded by a newer poll -> not owned (drop, no clobber)", core.prCallbackOwns({ task = {}, ts = 2 }, tk) == false)
+  check("prowns: reaped latch (nil) -> not owned (drop, no re-populate)", core.prCallbackOwns(nil, tk) == false)
 
   -- reapUnbacked: prune cache entries not backed by a live key, in place
   local cache = { ["/a"] = 1, ["/b"] = 2, ["/c"] = 3 }

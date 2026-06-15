@@ -1231,6 +1231,12 @@ do
         src:find("if plan.killStale and inflight and inflight.task then", 1, true) ~= nil
         and src:find("inflight.task:terminate()", 1, true) ~= nil
         and src:find("local PR_RETRY_TTL = 20", 1, true) ~= nil)
+  -- review fix: a dedicated hung deadline (PR_HUNG_TTL) is passed so a had-data refresh that
+  -- hangs is reclaimed in ~60s, not held for the full cache TTL. Behavior in core.test (prpoll).
+  check("l5pr-fix: data-aware hung deadline (cold ~20s, had-data ~60s) passed to the planner",
+        src:find("local PR_HUNG_TTL = 60", 1, true) ~= nil
+        and src:find("local hungTtl = (cached and cached.data ~= nil) and PR_HUNG_TTL or PR_RETRY_TTL", 1, true) ~= nil
+        and src:find("deadline = hungTtl", 1, true) ~= nil)
   check("l5pr-pin: runs gh in the repo root, status-only fields",
         src:find("t:setWorkingDirectory(root)", 1, true) ~= nil
         and src:find('"number,state,url,title,isDraft"', 1, true) ~= nil)
@@ -1264,7 +1270,7 @@ do
   -- (stale-killed/reaped) task's late SIGTERM callback can't clobber a fresh poll's data or
   -- re-populate a reaped root. Pin the specific guard (generic '= nil' matches 3 sites).
   check("l5pr-fix: callback drops its result if superseded (no clobber/re-populate)",
-        src:find("if not inf or inf.task ~= t then return end", 1, true) ~= nil)
+        src:find("if not core.prCallbackOwns(prStatusTasks[root], t) then return end", 1, true) ~= nil)
   -- the prune step is behavior-tested via core.reapUnbacked; keep a thin source pin on the
   -- LIVE-SET construction (which stays in the dashboard) + the reapUnbacked wiring, and on
   -- the vanished-root latch TERMINATE (else a hung task ref leaks for a root never re-examined).
@@ -1276,6 +1282,37 @@ do
         src:find("next(prStatusByRoot) or next(prStatusTasks)", 1, true) ~= nil
         and src:find("for r, inf in pairs(prStatusTasks) do", 1, true) ~= nil
         and src:find("inf.task:terminate()", 1, true) ~= nil)
+
+  -- ===== #6 host stats + fleet idle-since (read-only, off by default) =====
+  -- FX gather self-gates on the toggle + is throttled; ALL derivation is pure core.hostHealth.
+  check("host-pin: FX.pollHostStats self-gates on insights.hostStats + throttles",
+        src:find("function FX.pollHostStats(force, cfg)", 1, true) ~= nil
+        and src:find('core.config(cfg, "insights.hostStats", false)', 1, true) ~= nil
+        and src:find("(now - lastHostPoll) < HOST_TTL", 1, true) ~= nil)
+  check("host-pin: gathers cpu/mem/disk/uptime/load from hs (each pcall-guarded, derived in core)",
+        src:find("hs.host.cpuUsage()", 1, true) ~= nil
+        and src:find("hs.host.vmStat()", 1, true) ~= nil
+        and src:find("pagesUsedByVMCompressor", 1, true) ~= nil
+        and src:find("df -k / | tail -1", 1, true) ~= nil
+        and src:find("kern.boottime", 1, true) ~= nil
+        and src:find("lastHostHealth = core.hostHealth(raw,", 1, true) ~= nil)
+  check("host-pin: polled once per refresh tick (reuses tick cfg, self-gating + throttled)",
+        src:find("FX.pollHostStats(false, cfg)", 1, true) ~= nil)
+  check("host-pin: insights handler attaches host + fleet idle-since (gated)",
+        src:find('core.config(loadConfig(), "insights.hostStats", false)', 1, true) ~= nil
+        and src:find("stats.host = lastHostHealth", 1, true) ~= nil
+        and src:find("stats.fleetIdle = core.fleetIdleSince(lastRenderList or {}, FX.now())", 1, true) ~= nil)
+  check("host-pin: insights panel renders the host strip + fleet idle line",
+        src:find("var hh = st.host, fi = st.fleetIdle;", 1, true) ~= nil
+        and src:find('hostHtml += \'<div class="i-sec">Host', 1, true) ~= nil
+        and src:find("Fleet idle for ", 1, true) ~= nil)
+  check("host-pin: Settings toggle loaded + persisted",
+        src:find('ck("s-ins-host",   cv(cfg,"insights.hostStats",false))', 1, true) ~= nil
+        and src:find('hostStats: ck("s-ins-host")', 1, true) ~= nil
+        and src:find('id="s-ins-host"', 1, true) ~= nil)
+  check("host-pin: starvation alert notes host pressure when present",
+        src:find("lastHostHealth.pressured and lastHostHealth.pressure", 1, true) ~= nil
+        and src:find("hostPressure = pressure", 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

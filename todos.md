@@ -195,8 +195,8 @@ remaining items. Full per-round detail is in CHANGELOG.md and git history.
   behavior tests (`resolveDiffTarget`, `promoteSummary`, `officialLogDecision`). **A refresh-loop `pairs(nil)`
   crash (a reap over an uninitialized state table) shipped + was caught live → `tests/smoke.test.lua`** now loads
   the dashboard under a stubbed `hs` and runs the load-time `refresh()` in `make test`. Suite **~1848 core + 488
-  ui + 183 bash + smoke**, green. **LEFT: #6 host stats + fleet idle-since, #7 session-history browser + bulk
-  history management.**
+  ui + 183 bash + smoke**, green. **#6 host stats + fleet idle-since SHIPPED (read-only, off by default). LEFT:
+  #7 session-history browser + bulk history management.**
 
 ## TODO
 
@@ -246,12 +246,17 @@ remaining items. Full per-round detail is in CHANGELOG.md and git history.
 > projectKey-keyed localStorage; lazy inline Timeline) · **#2 git CHANGES tab** (per-session `git status -z` +
 > per-file colorized diff, rename-aware, path-validated) · **#3 EXPORT session archive** (⤓ button + ctx-menu →
 > transcript + meta.json under `cc-exports`) · **#4 post-run SELF-SUMMARY + onAutoApproved banner** (both opt-in,
-> off by default) · **#5 PR/MR STATUS badge** (gh-backed, status-only, off by default). **LEFT in this batch: #6
-> host stats + fleet idle-since, #7 session-history browser + bulk history mgmt.** Each built via the loop (pure
-> cc-core + tests → wire + pins → adversarial-review Workflow → fix → deploy → commit → push); the reviews +
-> leaderboard feedback caught real bugs every round (e.g. #2 `--no-index` arbitrary-file read + rename-as-add; #4
-> **HIGH** orphaned self-summary guard on a failed paste; #3 phantom-export on write failure; #5 prStatusByRoot
-> leak / gh-hang retry). **Suite ~1848 core + 488 ui + 183 bash + a new dashboard smoke test, green.**
+> off by default) · **#5 PR/MR STATUS badge** (gh-backed, status-only, off by default) · **#6 HOST STATS +
+> FLEET IDLE-SINCE** (read-only, off by default: `core.hostHealth`/`fmtBytes`/`fmtUptime`/`fleetIdleSince`; a host
+> strip — CPU/mem/disk/uptime/load + idle-since — atop the 📊 insights overlay; `FX.pollHostStats` self-gating +
+> 30s-throttled, verified live; starvation alert notes host pressure; ⚙ toggle + hand-editable
+> `insights.hostPressure.{cpu,mem,disk}`). **LEFT in this batch: #7 session-history browser + bulk history mgmt.**
+> Each built via the loop (pure cc-core + tests → wire + pins → adversarial-review Workflow → fix → deploy → commit
+> → push); the reviews + leaderboard feedback caught real bugs every round (e.g. #2 `--no-index` arbitrary-file read
+> + rename-as-add; #4 **HIGH** orphaned self-summary guard on a failed paste; #3 phantom-export on write failure; #5
+> prStatusByRoot leak / gh-hang retry; the `7cd6245` review caught the prPollPlan hung-task latch being dead code +
+> a callback clobber race → `core.prPollPlan`/`prCallbackOwns` + data-aware hung deadline). **Suite ~1928 core + 500
+> ui + 183 bash + smoke, green.**
 >
 > **▶ PHASE A — REVIEW-FIX HARDENING (in progress 2026-06-15):** before #6/#7, a contained pass folding in the
 > two AI-leaderboard reviews of `fbcd609` (isOpenableUrl + hung-gh retry) and `879adc7` (openPr data-key +

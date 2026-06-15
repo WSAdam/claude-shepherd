@@ -922,6 +922,97 @@ function M.fmtDuration(seconds)
   return (rm == 0) and (h .. "h") or (h .. "h " .. rm .. "m")
 end
 
+-- ---- #6: host stats + fleet idle-since (read-only, off by default) ----------
+-- Human-readable bytes (binary units): 1536 -> "1.5 KB", 2*1024^3 -> "2.0 GB".
+-- nil / negative -> "—" (so a missing reading renders cleanly). Pure.
+function M.fmtBytes(n)
+  n = tonumber(n)
+  if not n or n < 0 then return "—" end
+  local units = { "B", "KB", "MB", "GB", "TB", "PB" }
+  local i = 1
+  while n >= 1024 and i < #units do n = n / 1024; i = i + 1 end
+  if i == 1 then return string.format("%d %s", math.floor(n), units[i]) end  -- whole bytes
+  return string.format("%.1f %s", n, units[i])
+end
+
+-- Compact uptime: 350000s -> "4d 1h"; under a day falls back to fmtDuration (h/m/s). Pure.
+function M.fmtUptime(seconds)
+  local s = math.floor(tonumber(seconds) or 0)
+  if s < 0 then s = 0 end
+  local d = math.floor(s / 86400)
+  if d >= 1 then
+    local h = math.floor((s % 86400) / 3600)
+    return (h == 0) and (d .. "d") or (d .. "d " .. h .. "h")
+  end
+  return M.fmtDuration(s)
+end
+
+-- Normalize raw host readings the FX layer gathered (hs.host.cpuUsage / vmStat + a disk
+-- read + uptime) into a render-ready view. EVERY raw field may be nil (the reading was
+-- unavailable) -- degrade gracefully to nil, never crash. opts gives pressure thresholds
+-- (percent, default 90). Returns the view plus a `pressured` flag and a joined `pressure`
+-- reason string the starvation note consumes ("CPU 95%, disk 92%"). Pure.
+function M.hostHealth(raw, opts)
+  raw = raw or {}; opts = opts or {}
+  local cpuTh  = tonumber(opts.cpuThreshold)  or 90
+  local memTh  = tonumber(opts.memThreshold)  or 90
+  local diskTh = tonumber(opts.diskThreshold) or 90
+  local function pct(used, total)
+    used, total = tonumber(used), tonumber(total)
+    if not used or not total or total <= 0 then return nil end
+    local p = math.floor((used / total) * 100 + 0.5)
+    if p < 0 then p = 0 elseif p > 100 then p = 100 end
+    return p
+  end
+  local cpu = tonumber(raw.cpuPct)
+  if cpu then cpu = math.floor(cpu + 0.5); if cpu < 0 then cpu = 0 elseif cpu > 100 then cpu = 100 end end
+  local memPct  = pct(raw.memUsedBytes,  raw.memTotalBytes)
+  local diskPct = pct(raw.diskUsedBytes, raw.diskTotalBytes)
+  local reasons = {}
+  if cpu     and cpu     >= cpuTh  then reasons[#reasons + 1] = "CPU "  .. cpu     .. "%" end
+  if memPct  and memPct  >= memTh  then reasons[#reasons + 1] = "mem "  .. memPct  .. "%" end
+  if diskPct and diskPct >= diskTh then reasons[#reasons + 1] = "disk " .. diskPct .. "%" end
+  return {
+    cpu = cpu,
+    memPct   = memPct,
+    memUsed  = raw.memUsedBytes  and M.fmtBytes(raw.memUsedBytes)  or nil,
+    memTotal = raw.memTotalBytes and M.fmtBytes(raw.memTotalBytes) or nil,
+    diskPct   = diskPct,
+    diskUsed  = raw.diskUsedBytes  and M.fmtBytes(raw.diskUsedBytes)  or nil,
+    diskTotal = raw.diskTotalBytes and M.fmtBytes(raw.diskTotalBytes) or nil,
+    uptime = raw.uptimeSeconds and M.fmtUptime(raw.uptimeSeconds) or nil,
+    load1  = tonumber(raw.loadAvg1),
+    pressured = #reasons > 0,
+    pressure  = (#reasons > 0) and table.concat(reasons, ", ") or nil,
+  }
+end
+
+-- How long the whole fleet has been idle (no working / approval / error tile). Pure
+-- (injected `now`). Returns { active, idle, sinceTs, seconds }: active=true when any tile
+-- is doing or needing something (so NOT idle); idle=true only when every tile is idle/done,
+-- with sinceTs = the most recent `since` among them (when the last busy session went quiet)
+-- and seconds = now - sinceTs (clamped ≥0). An empty fleet is neither active nor idle.
+function M.fleetIdleSince(tiles, now)
+  now = tonumber(now) or 0
+  local ACTIVE = { working = true, approval = true, error = true }
+  local any, active, latest = false, false, nil
+  for _, it in ipairs(tiles or {}) do
+    if type(it) == "table" then
+      any = true
+      if ACTIVE[it.status] then
+        active = true
+      else
+        local ts = tonumber(it.since) or tonumber(it.updated)
+        if ts and (not latest or ts > latest) then latest = ts end
+      end
+    end
+  end
+  if not any then return { active = false, idle = false } end
+  if active then return { active = true, idle = false } end
+  return { active = false, idle = true, sinceTs = latest,
+           seconds = latest and math.max(0, now - latest) or nil }
+end
+
 -- Time a human was the bottleneck for one session: the gap from each tool_request to
 -- its resolving decision, summed. ANY decision resolves the pending request (an
 -- auto-allow/deny still clears it) -- but only a human/timeout-fallback decision
@@ -2819,6 +2910,9 @@ M.SETTINGS_KEEP_SUBKEYS = {
   -- hand-edited `days` (the 🔔 history lookback window, no UI input) must survive
   -- a Save just like escalation.hung does. `banner` is form-managed -> not kept.
   notifications = { "days", "_comment" },
+  -- #6 host stats: maxBlockSeconds + hostStats are form-managed; the hand-edited
+  -- hostPressure.{cpu,mem,disk} thresholds (no UI input) must survive a Save.
+  insights = { "hostPressure" },
 }
 function M.overlayConfig(cfg, incoming)
   cfg = type(cfg) == "table" and cfg or {}
@@ -6017,16 +6111,11 @@ function M.promoteSummary(state, key, landed)
   state.pending[key] = nil
 end
 
--- Pure one-step decision for the official-usage poll's log + recovery lines, given the
--- previous fetch status `prev`, this fetch's HTTP `status`, and whether the response body
--- decoded into a usable payload (`bodyOk`). Returns (shouldLog, recovered, newPrev):
---   shouldLog -- print the "HTTP <status>" line (only on a CHANGE, so a persistent
---                -1/401 doesn't spam the 180s poll);
---   recovered -- print the single "recovered" line (first usable 200 after a non-success);
---   newPrev   -- the status to carry forward.
--- A 200 with an UNUSABLE body (garbage/undecodable/empty) is a NO-OP -- prev is left
--- unchanged so a later good 200 still counts as the recovery. Recovery is therefore gated
--- on a decodable payload, not on status 200 alone.
+-- Pure one-step decision for the official-usage poll, given the previous fetch status
+-- `prev`, this fetch's HTTP `status`, and whether the body decoded (`bodyOk`). Returns
+-- (shouldLog, recovered, newPrev). The non-obvious rule: a 200 with an UNUSABLE body
+-- (garbage/undecodable/empty) is a NO-OP -- prev is left unchanged so a later good 200 still
+-- counts as the recovery (recovery is gated on a decodable payload, not status 200 alone).
 function M.officialUsageStep(prev, status, bodyOk)
   if status == 200 then
     if not bodyOk then return false, false, prev end   -- garbage/empty 200: don't flip prev
@@ -6067,34 +6156,44 @@ end
 
 -- True only for an http(s) url WITH a host -- the open-url scheme guard, so a crafted PR
 -- url can't smuggle a file:// / javascript: / data: scheme into hs.urlevent.openURL. The
--- `[^%s/]` after the scheme requires at least one NON-whitespace host char, so a hostless
--- "https://" / "https:///path" and a whitespace-only "host" ("https:// x") are rejected. Pure.
+-- scheme is matched case-INSENsitively (RFC 3986 schemes are; only the scheme, so path/query
+-- case is untouched), and `[^%s/]` requires a non-whitespace host char (rejecting "https://",
+-- "https:///path", and "https:// x"). Pure.
 function M.isOpenableUrl(url)
-  return type(url) == "string" and url:match("^https?://[^%s/]") ~= nil
+  return type(url) == "string" and url:match("^[Hh][Tt][Tt][Pp][Ss]?://[^%s/]") ~= nil
 end
 
 -- ---- L5: gh PR-status poll planner (hung-task aware) ----------------------
--- Pure decision for whether to (re)launch a gh PR-status poll for a repo root, given:
---   cached   = { ts=<last attempt/result epoch>, data=<pr|false|nil> } or nil
---   inflight = { ts=<task launch epoch> } or nil   (the in-flight task latch)
---   now      = epoch seconds
---   opts.ttl      = full cache TTL once we have real data (default 180)
---   opts.retryTtl = short retry / hung deadline while data is still nil/in-flight (default 20)
---   opts.deadline = an in-flight task older than this is presumed HUNG (default = the
---                   applicable cache window, so a stalled poll gets the same grace)
--- Returns { act = "skip" | "start", killStale = <bool> }. killStale is true only when a
--- stale (past-deadline) in-flight task must be TERMINATED before the fresh poll starts --
--- a hung gh whose callback never fires would otherwise latch the slot forever, leaving the
--- retry window as dead code and freezing the PR badge. Pure (injected `now`).
+-- Pure decision for whether to (re)launch a gh PR-status poll for a repo root. cached =
+-- { ts, data=<pr|false|nil> } or nil; inflight = { ts } or nil (the in-flight task latch);
+-- now = epoch. opts: ttl (full TTL once we have data, default 180), retryTtl (short window
+-- while data is still nil, default 20), deadline (an in-flight task older than this is
+-- presumed HUNG, default retryTtl). The hung check runs BEFORE the cache-freshness skip, so
+-- a refresh poll that hangs while we already have data is reclaimed at `deadline` rather than
+-- held for the full cache TTL (the skip would otherwise dominate). killStale=true means the
+-- stale in-flight task must be TERMINATED before the fresh poll -- else a hung gh whose
+-- callback never fires latches the slot forever and the retry is dead code (the bug both
+-- leaderboard reviews flagged). Pure (injected `now`).
 function M.prPollPlan(cached, inflight, now, opts)
   opts = opts or {}
-  local ttl = opts.ttl or 180
-  local retryTtl = opts.retryTtl or 20
-  local effTtl = (cached and cached.data ~= nil) and ttl or retryTtl
-  local deadline = opts.deadline or effTtl
+  local effTtl = (cached and cached.data ~= nil) and (opts.ttl or 180) or (opts.retryTtl or 20)
+  local hungDeadline = opts.deadline or opts.retryTtl or 20
+  -- a hung in-flight task is reclaimed even within the cache window
+  if inflight and (now - inflight.ts) >= hungDeadline then return { act = "start", killStale = true } end
+  -- cache still fresh -> nothing to do
   if cached and (now - cached.ts) < effTtl then return { act = "skip", killStale = false } end
-  if inflight and (now - inflight.ts) < deadline then return { act = "skip", killStale = false } end
-  return { act = "start", killStale = inflight ~= nil }
+  -- a still-alive in-flight poll (age < deadline) -> don't pile on a second
+  if inflight then return { act = "skip", killStale = false } end
+  return { act = "start", killStale = false }
+end
+
+-- True iff `inflight` (the in-flight poll latch {task=...}) is non-nil and still holds
+-- `task` -- i.e. this callback still owns its root's slot, so its result should be painted.
+-- False once a stale-kill replaced the latch with a newer poll, or a vanished-root reap
+-- cleared it: the late (often SIGTERM'd) callback must then DROP its result rather than
+-- clobber the fresh poll's data or re-populate a reaped root. Pure reference comparison.
+function M.prCallbackOwns(inflight, task)
+  return inflight ~= nil and inflight.task == task
 end
 
 -- Prune every entry of `cache` whose key is NOT present (truthy) in `liveKeys`, in place
