@@ -711,8 +711,14 @@ executor/sandbox/server.*
 > result ledger: `outcome` on `auto_respawn`/`auto_continue` + the new `auto_respawn_blocked` (was silent) +
 > delivery-gated `handleAction("continue")` (both auto + manual paths ledger gated on delivery). Adversarial
 > review (5 reported, 3 confirmed = one manual-continue audit issue, fixed). Suite 1548 core + 344 ui + 183 bash.
-> **Deferred:** `hung`/`loop`/`starved` triggers (their edges fire at other sites), `feed`/`continue` processors,
-> per-rule status lifecycle (COMPLETED/ERROR), and a rules editor UI (hand-edited JSON today).
+> **Editor + triggers/processors ✅ SHIPPED 2026-06-14 (deferred-polish ⑤):** an ⚙️ Automation rules editor (☰
+> drawer) — author trigger/scope/processor + once/enabled, list-toggle, edit/rename, delete. **NEW triggers**
+> `hung`/`loop`/`starved` now fire `runRules` at their own rising-edge detection sites; **NEW processors** `feed`
+> (enqueue a task, auto-feed delivers it) + `continue` (delivery-gated resume). New pure cc-core: triggers/
+> processors added to the constants + `ruleGet`/`rulePush`/`ruleRemove`/`ruleSetEnabled` CRUD; new `FX.writeRules`.
+> Adversarial review caught + fixed a high-sev silent data-loss bug (feed keyed the queue by the RAW projectKey/cwd
+> instead of the SANITIZED `FX.queueKeyFor` key). **Still deferred:** per-rule status lifecycle (COMPLETED/ERROR) +
+> `retryUntil`.
 *Source: OpenHands event-callback registry + result ledger. Generalizes Shepherd's hard-coded
 auto-respawn/auto-continue/escalation into declarative, opt-in rules — layered on the existing level-triggered
 dispatcher, NOT a new event bus.*

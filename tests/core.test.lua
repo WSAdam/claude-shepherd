@@ -479,7 +479,43 @@ do
   local rs = core.ruleList({ rules = { goodLog, goodNudge } })
   eq("rules-for-edge: done -> 1", #core.rulesForEdge(rs, "done", item), 1)
   eq("rules-for-edge: error -> 1 (scoped)", #core.rulesForEdge(rs, "error", item), 1)
-  eq("rules-for-edge: no match -> 0", #core.rulesForEdge(rs, "hung", item), 0)
+  eq("rules-for-edge: matched scope on hung", #core.rulesForEdge(rs, "hung", item), 0)
+
+  -- L6 NEW triggers (hung/loop/starved) + processors (feed/continue) now valid
+  eq("rule: hung trigger valid",
+     core.validateRule({ name = "h", trigger = { kind = "hung" }, processor = { kind = "log" } }).ok, true)
+  eq("rule: loop trigger valid",
+     core.validateRule({ name = "l", trigger = { kind = "loop" }, processor = { kind = "nudge", text = "try again" } }).ok, true)
+  eq("rule: starved trigger valid",
+     core.validateRule({ name = "s", trigger = { kind = "starved" }, processor = { kind = "log" } }).ok, true)
+  eq("rule: feed processor needs text",
+     core.validateRule({ name = "f", trigger = { kind = "done" }, processor = { kind = "feed" } }).ok, false)
+  eq("rule: feed processor valid w/ text",
+     core.validateRule({ name = "f", trigger = { kind = "done" }, processor = { kind = "feed", text = "next task" } }).ok, true)
+  eq("rule: continue processor valid (no text)",
+     core.validateRule({ name = "c", trigger = { kind = "error" }, processor = { kind = "continue" } }).ok, true)
+  local hrule = core.ruleList({ rules = { { name = "h", trigger = { kind = "hung" }, processor = { kind = "log" } } } })[1]
+  eq("rule-fires: hung edge", core.ruleFires(hrule, "hung", item), true)
+
+  -- L6 rule CRUD (editor): push / replace / remove / get / setEnabled
+  local rst = { rules = {} }
+  local rst1, rok = core.rulePush(rst, goodLog)
+  eq("rulePush: saved", rok, true)
+  eq("rulePush: count 1", #core.ruleList(rst1), 1)
+  local _, rbad, rerrs = core.rulePush(rst, { name = "x", trigger = { kind = "boom" }, processor = { kind = "log" } })
+  eq("rulePush: invalid rejected", rbad, false)
+  check("rulePush: errors returned", type(rerrs) == "table" and #rerrs > 0)
+  local rst2 = core.rulePush(rst1, { name = goodLog.name, trigger = { kind = "error" }, processor = { kind = "log" } })
+  eq("rulePush: replace in place", #core.ruleList(rst2), 1)
+  eq("rulePush: replaced trigger", core.ruleGet(rst2, goodLog.name).trigger.kind, "error")
+  check("ruleGet: finds", core.ruleGet(rst1, goodLog.name) ~= nil)
+  eq("ruleGet: miss -> nil", core.ruleGet(rst1, "nope"), nil)
+  eq("ruleRemove: deletes", #core.ruleList(core.ruleRemove(rst1, goodLog.name)), 0)
+  -- setEnabled preserves the rest of the record (RAW state)
+  local rEn = core.ruleSetEnabled({ rules = { { name = "r", enabled = true, trigger = { kind = "done" },
+    processor = { kind = "nudge", text = "hi" } } } }, "r", false)
+  eq("ruleSetEnabled: disabled", core.ruleList(rEn)[1].enabled, false)
+  eq("ruleSetEnabled: preserves processor text", core.ruleList(rEn)[1].processor.text, "hi")
 end
 
 -- ---- L7 cron / schedule layer ----------------------------------------------

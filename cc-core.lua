@@ -5195,11 +5195,13 @@ end
 -- global rules.enabled is set AND the rule is enabled. Validate -> fail-safe load ->
 -- list mirrors the L1 agent registry.
 M.RULE_CAP = 50
--- v1 fires on the three status EDGES (done/error/approval), detected per-tile in the
--- refresh loop. hung/loop/starved are a noted follow-up (their firing sites differ);
--- a rule targeting them fails validation explicitly rather than silently never firing.
-M.RULE_TRIGGERS = { done = true, error = true, approval = true }
-M.RULE_PROCESSORS = { log = true, relabel = true, nudge = true }
+-- Triggers: the three status EDGES (done/error/approval) fire per-tile in the refresh
+-- loop; hung/loop/starved fire at their OWN detection sites (the watchdog / loop
+-- watchdog / routing starvation clock) -- the engine calls runRules there on the
+-- rising edge. Processors map onto present SAFE effects: log->ledger, relabel->setLabel,
+-- nudge/feed/continue->the delivery-gated keystroke/queue paths.
+M.RULE_TRIGGERS = { done = true, error = true, approval = true, hung = true, loop = true, starved = true }
+M.RULE_PROCESSORS = { log = true, relabel = true, nudge = true, feed = true, continue = true }
 M.RULE_FIELDS = { name = true, enabled = true, trigger = true, processor = true, once = true }
 
 local function rlist(state)
@@ -5227,6 +5229,7 @@ function M.validateRule(rec)
     errs[#errs + 1] = "unknown processor kind: " .. tostring(pr.kind)
   else
     if pr.kind == "nudge" and agTrim(pr.text) == "" then errs[#errs + 1] = "nudge processor needs text" end
+    if pr.kind == "feed" and agTrim(pr.text) == "" then errs[#errs + 1] = "feed processor needs text" end
     if pr.kind == "relabel" and agTrim(pr.label) == "" then errs[#errs + 1] = "relabel processor needs label" end
   end
   for k in pairs(rec) do
@@ -5295,6 +5298,51 @@ function M.rulesForEdge(rules, edgeKind, item)
     if M.ruleFires(r, edgeKind, item) then out[#out + 1] = r end
   end
   return out
+end
+
+-- ---- L6 rule CRUD (editor) — mirrors the agent registry --------------------
+function M.ruleGet(state, name)
+  for _, r in ipairs(M.ruleList(state)) do if r.name == agTrim(name) then return r end end
+  return nil
+end
+
+-- Upsert a rule: validate -> replace same-name in place / prepend -> cap. Returns
+-- newState, ok, errors.
+function M.rulePush(state, rec, cap)
+  cap = tonumber(cap) or M.RULE_CAP
+  rec = type(rec) == "table" and rec or {}
+  local v = M.validateRule(rec)
+  if not v.ok then return { rules = M.ruleList(state) }, false, v.errors end
+  local entry = ruleNorm(rec)
+  local out, replaced = {}, false
+  for _, r in ipairs(M.ruleList(state)) do
+    if r.name == entry.name then out[#out + 1] = entry; replaced = true
+    else out[#out + 1] = r end
+  end
+  if not replaced then table.insert(out, 1, entry) end
+  while #out > cap do table.remove(out) end
+  return { rules = out }, true
+end
+
+function M.ruleRemove(state, name)
+  local out, target = {}, agTrim(name)
+  for _, r in ipairs(M.ruleList(state)) do if r.name ~= target then out[#out + 1] = r end end
+  return { rules = out }
+end
+
+-- Toggle a rule's enabled flag on RAW state (preserve every field). Pure.
+function M.ruleSetEnabled(state, name, on)
+  local out, target = {}, agTrim(name)
+  for _, r in ipairs(rlist(state)) do
+    if type(r) == "table" and agTrim(r.name) == target then
+      local c = {}; for k, v in pairs(r) do c[k] = v end
+      c.enabled = on == true
+      out[#out + 1] = c
+    else
+      out[#out + 1] = r
+    end
+  end
+  return { rules = out }
 end
 
 -- ===========================================================================

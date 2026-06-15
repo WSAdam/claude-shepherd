@@ -1045,6 +1045,25 @@ do
   check("l2ed-pin: ccPolicyEd render fn", src:find("function ccPolicyEd(o)", 1, true) ~= nil)
   check("l2ed-pin: drawer policies entry", src:find("menuPick('policies')", 1, true) ~= nil)
   check("l2ed-pin: policy overlay markup", src:find('<div id="policyed">', 1, true) ~= nil)
+  -- L6 rules editor + new triggers/processors (deferred polish)
+  check("l6ed-pin: FX.writeRules", src:find("function FX.writeRules(state)", 1, true) ~= nil)
+  check("l6ed-pin: editor bridge handlers",
+        src:find('a == "open-rules-editor" or a == "rule-ed-save"', 1, true) ~= nil)
+  check("l6ed-pin: save via core.rulePush", src:find("core.rulePush(st0, p)", 1, true) ~= nil)
+  check("l6ed-pin: toggle via core.ruleSetEnabled", src:find("core.ruleSetEnabled(FX.readRules()", 1, true) ~= nil)
+  check("l6ed-pin: ccRuleEd render fn", src:find("function ccRuleEd(list, on)", 1, true) ~= nil)
+  check("l6ed-pin: drawer rules entry", src:find("menuPick('rules')", 1, true) ~= nil)
+  check("l6ed-pin: rules overlay markup", src:find('<div id="ruleed">', 1, true) ~= nil)
+  -- new triggers fired at their detection sites + new processors in the engine
+  check("l6trig-pin: loop trigger fired on rising edge", src:find('runRules(ruleSet, it, "loop")', 1, true) ~= nil)
+  check("l6trig-pin: hung trigger fired on rising edge", src:find('runRules(ruleSet, it, "hung")', 1, true) ~= nil)
+  check("l6trig-pin: starved trigger fired on rising edge", src:find('runRules(ruleSet, members[1], "starved")', 1, true) ~= nil)
+  check("l6proc-pin: feed processor enqueues via queuePush",
+        src:find("core.queuePush(FX.readQueue(qk), tostring(p.text))", 1, true) ~= nil)
+  check("l6proc-pin: feed key sanitized like the reader (review fix)",
+        src:find("review%-caught silent data loss") ~= nil)
+  check("l6proc-pin: continue processor delivery-gated",
+        src:find('core.handleAction(FX, target, "continue")', 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

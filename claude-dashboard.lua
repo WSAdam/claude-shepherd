@@ -775,6 +775,11 @@ function FX.readRules()
   local ok, t = pcall(function() return core.json.decode(c) end)
   return (ok and type(t) == "table") and t or { rules = {} }
 end
+-- L6 rules editor writes cc-rules.json (the engine read it before; now it's editable).
+function FX.writeRules(state)
+  hs.fs.mkdir(CLAUDE_DIR)
+  FX.writeFile(RULES_FILE, core.json.encode(state or { rules = {} }))
+end
 -- L7 scheduled routines (cc-schedules.json). Missing/garbled -> empty.
 function FX.readSchedules()
   local c = FX.readFile(SCHEDULES_FILE)
@@ -2130,6 +2135,32 @@ local function handleBridgeMsg(msg)
       .. ",\"starters\":" .. hs.json.encode(core.DEFAULT_POLICY_BUNDLES)
       .. ",\"armed\":" .. ((FX.readFile(GATE_FLAG) ~= nil) and "true" or "false") .. "}"
     pcall(function() wv:evaluateJavaScript("ccPolicyEd(" .. reply .. ")") end)
+    return
+  end
+  -- L6 rules EDITOR (deferred-polish): author cc-rules.json (the engine read it
+  -- before; now it's editable). Each action replies with the fresh rule list +
+  -- the rules.enabled master-switch state.
+  if a == "open-rules-editor" or a == "rule-ed-save" or a == "rule-ed-delete" or a == "rule-ed-toggle" then
+    if a == "rule-ed-save" then
+      local okp, p = pcall(hs.json.decode, payload.text or "{}")
+      p = (okp and type(p) == "table") and p or {}
+      local oldName = tostring(p.oldName or ""); p.oldName = nil  -- not a RULE_FIELD
+      local st0 = FX.readRules()
+      if oldName ~= "" and oldName ~= tostring(p.name or "") then st0 = core.ruleRemove(st0, oldName) end
+      local st, saved, errs = core.rulePush(st0, p)
+      if saved then FX.writeRules(st)
+      else pcall(function() hs.alert.show("Claude Shepherd: rule invalid — "
+        .. table.concat(errs or { "?" }, "; ")) end) end
+    elseif a == "rule-ed-delete" then
+      FX.writeRules(core.ruleRemove(FX.readRules(), tostring(payload.v or "")))
+    elseif a == "rule-ed-toggle" then
+      local on = (payload.text == "true" or payload.text == true)
+      FX.writeRules(core.ruleSetEnabled(FX.readRules(), tostring(payload.v or ""), on))
+    end
+    local rulesEnabled = core.config(loadConfig(), "rules.enabled", false) == true
+    local list = core.ruleList(FX.readRules())
+    pcall(function() wv:evaluateJavaScript("ccRuleEd("
+      .. ((#list > 0) and hs.json.encode(list) or "[]") .. ", " .. tostring(rulesEnabled) .. ")") end)
     return
   end
   -- Fuzzy folder search (roadmap #4b): rank the CACHED index (no per-keystroke
@@ -3749,6 +3780,33 @@ local HTML = [[
 .pe-grid{ display:flex; gap:8px; flex-wrap:wrap; }
 .pe-grid > label{ flex:1; min-width:120px; }
 .pe-check{ flex-direction:row !important; align-items:center; gap:6px; }
+/* L6 rules editor overlay (modeled on #routines). Edits cc-rules.json. */
+#ruleed{ position:fixed; inset:0; background:#14161b; z-index:11; display:none; flex-direction:column; font-size:12px; }
+#ruleed.show{ display:flex; }
+#re-head{ display:flex; align-items:center; gap:8px; padding:8px 10px; border-bottom:1px solid #2c2f3a; font-weight:600; flex-wrap:wrap; }
+#re-head .s-x{ margin-left:auto; }
+#re-warn{ padding:6px 10px; background:#2a2410; color:#e4c463; border-bottom:1px solid #3a3320; font-size:11px; display:none; }
+#re-warn.show{ display:block; }
+#re-body{ flex:1; overflow:auto; padding:8px 10px; }
+.re-row{ display:flex; gap:10px; align-items:center; padding:7px 8px; border:1px solid #23262f; border-radius:8px; margin-bottom:6px; background:#191b22; }
+.re-dot{ width:9px; height:9px; border-radius:50%; flex:0 0 auto; background:#3a3f4b; }
+.re-dot.on{ background:#22c55e; }
+.re-main{ flex:1; min-width:0; }
+.re-name{ color:#e8e9ee; font-weight:600; }
+.re-sub{ color:#8a8d99; font-size:11px; margin-top:1px; word-break:break-word; }
+.re-badge{ display:inline-block; background:#23262f; color:#9aa0ad; border:1px solid #2c2f3a; border-radius:5px; padding:0 5px; font-size:10px; margin-right:4px; }
+.re-badge.trig{ color:#9fb6d6; border-color:#34435a; }
+.re-badge.proc{ color:#c3a3e8; border-color:#43345a; }
+.re-acts{ display:flex; gap:5px; flex:0 0 auto; }
+.re-empty{ color:#6b7280; font-style:italic; padding:12px 4px; }
+#re-form{ display:none; flex-direction:column; gap:7px; padding:4px 2px; }
+#re-form.show{ display:flex; }
+#re-form label{ display:flex; flex-direction:column; gap:3px; color:#9aa0ad; font-size:11px; }
+#re-form input, #re-form select, #re-form textarea{ background:#1a1c22; border:1px solid #2c2f3a; color:#e8e9ee; border-radius:6px; padding:4px 7px; font-size:12px; }
+.re-grid{ display:flex; gap:8px; flex-wrap:wrap; }
+.re-grid > label{ flex:1; min-width:120px; }
+.re-check{ flex-direction:row !important; align-items:center; gap:6px; }
+.re-sec{ font-weight:600; color:#cfd2db; margin:4px 0 0; font-size:11px; }
 /* insights sparklines (Feature 6): trend lines over the ledger */
 .spark-row{ display:flex; align-items:center; gap:8px; padding:4px 0; }
 .spark-lbl{ width:110px; flex:0 0 auto; color:#9aa0ad; font-size:11px; }
@@ -3791,6 +3849,7 @@ local HTML = [[
           <button class="tm-item" onclick="menuPick('templates')"><span class="tm-ic">📝</span> Templates</button>
           <button class="tm-item" onclick="menuPick('agents')"><span class="tm-ic">✦</span> Agents</button>
           <button class="tm-item" onclick="menuPick('policies')"><span class="tm-ic">🛡</span> Policy bundles</button>
+          <button class="tm-item" onclick="menuPick('rules')"><span class="tm-ic">⚙️</span> Automation rules</button>
           <button id="tm-shift" class="tm-item" style="display:none" onclick="menuPick('shift')"><span class="tm-ic">📋</span> Shift report</button>
           <button class="tm-item" onclick="menuPick('notify')"><span class="tm-ic">🔔</span> Notifications<span id="tm-notify-badge"></span></button>
         </div>
@@ -4396,6 +4455,60 @@ local HTML = [[
       <div id="pe-atts"></div>
     </div>
     <div id="r-foot" style="border-top:1px solid #2c2f3a;"><span class="n-dim" id="pe-info"></span></div>
+  </div>
+
+  <div id="ruleed">
+    <div id="re-head">
+      <span>⚙️ Automation rules</span>
+      <button class="r-btn" onclick="ruleEdNew()">+ New rule</button>
+      <button class="s-x" onclick="closeRuleEd()">✕</button>
+    </div>
+    <div id="re-warn"></div>
+    <div id="re-body"></div>
+    <div id="re-form">
+      <label>Name<input type="text" id="rlf-name" placeholder="e.g. nudge-on-loop"></label>
+      <div class="re-sec">When (trigger)</div>
+      <label>On edge
+        <select id="rlf-trigger">
+          <option value="done">done (turn finished)</option>
+          <option value="error">error (API error / frozen)</option>
+          <option value="approval">approval (needs you)</option>
+          <option value="hung">hung (stalled — no progress)</option>
+          <option value="loop">loop (repeating the same tool)</option>
+          <option value="starved">starved (queue has work, no free session)</option>
+        </select>
+      </label>
+      <div class="re-grid">
+        <label>Match project (glob; blank = any)<input type="text" id="rlf-m-project" placeholder="(any)"></label>
+        <label>Match group<input type="text" id="rlf-m-group" placeholder="(any)"></label>
+      </div>
+      <div class="re-grid">
+        <label>Match session key<input type="text" id="rlf-m-key" placeholder="(any)"></label>
+        <label>Match providerId<input type="text" id="rlf-m-provider" placeholder="(any)"></label>
+      </div>
+      <div class="re-sec">Do (processor)</div>
+      <label>Action
+        <select id="rlf-proc" onchange="ruleEdProcSync()">
+          <option value="log">log (audit-only note)</option>
+          <option value="relabel">relabel the tile</option>
+          <option value="nudge">nudge (type a message)</option>
+          <option value="feed">feed (queue a task)</option>
+          <option value="continue">continue (resume an errored session)</option>
+        </select>
+      </label>
+      <label id="rlf-text-wrap">Text<textarea id="rlf-text" placeholder="The message / task / note."></textarea></label>
+      <label id="rlf-label-wrap" style="display:none;">New label<input type="text" id="rlf-label" placeholder="e.g. ⚠ review me"></label>
+      <div class="re-grid">
+        <label class="re-check"><input type="checkbox" id="rlf-once" checked> once (fire at most once per session)</label>
+        <label class="re-check"><input type="checkbox" id="rlf-enabled" checked> enabled</label>
+      </div>
+      <div class="re-grid">
+        <button class="r-btn" style="border-color:#3b6;color:#bdf;" onclick="ruleEdSave()">Save rule</button>
+        <button class="r-btn" onclick="ruleEdCancel()">Cancel</button>
+        <span class="n-dim" style="align-self:center;">nudge/feed/continue are delivery-gated (skip if no window matches); all safe + opt-in.</span>
+      </div>
+    </div>
+    <div id="r-foot" style="border-top:1px solid #2c2f3a;"><span class="n-dim" id="re-info"></span></div>
   </div>
 
   <script>
@@ -6515,6 +6628,95 @@ local HTML = [[
       peAttEditing=null; peAttHide();
     }
     function peAttMove(i, dir){ send("policy-att-move", "", JSON.stringify({ index: i+1, dir: dir })); }
+
+    // ---- L6 automation rules editor (⚙️) -------------------------------------
+    var RULES_ED = [], RULES_ON = false, rleEditing = null;
+    function openRuleEd(){ send("open-rules-editor"); ruleEdHide();
+      document.getElementById("ruleed").classList.add("show"); }
+    function closeRuleEd(){ document.getElementById("ruleed").classList.remove("show"); }
+    function ccRuleEd(list, on){ RULES_ED = list || []; RULES_ON = !!on; renderRuleEd(); }
+    function renderRuleEd(){
+      var warn = document.getElementById("re-warn");
+      if(!RULES_ON){ warn.textContent = "The rule engine is OFF (rules.enabled in cc-config.json) — rules won't fire until you turn it on. They're listed/editable here regardless."; warn.classList.add("show"); }
+      else warn.classList.remove("show");
+      var body = document.getElementById("re-body"); body.innerHTML = "";
+      if(!RULES_ED.length){ var e=document.createElement("div"); e.className="re-empty";
+        e.textContent = "No rules yet. “+ New rule” reacts to a session edge (done/error/hung/loop/…) with a safe action (log/relabel/nudge/feed/continue).";
+        body.appendChild(e); document.getElementById("re-info").textContent=""; return; }
+      RULES_ED.forEach(function(r){
+        var tr = r.trigger||{}, pr = r.processor||{};
+        var row = document.createElement("div"); row.className = "re-row";
+        var dot = document.createElement("div"); dot.className = "re-dot" + (r.enabled?" on":""); dot.title = r.enabled?"enabled":"disabled";
+        dot.style.cursor="pointer"; dot.onclick = function(){ send("rule-ed-toggle", r.name, r.enabled?"false":"true"); };
+        row.appendChild(dot);
+        var main = document.createElement("div"); main.className = "re-main";
+        var nm = document.createElement("div"); nm.className = "re-name"; nm.textContent = r.name; main.appendChild(nm);
+        var sub = document.createElement("div"); sub.className = "re-sub";
+        var bt=document.createElement("span"); bt.className="re-badge trig"; bt.textContent="on "+(tr.kind||"?"); sub.appendChild(bt);
+        var bp=document.createElement("span"); bp.className="re-badge proc"; bp.textContent="do "+(pr.kind||"?"); sub.appendChild(bp);
+        if(r.once){ var bo=document.createElement("span"); bo.className="re-badge"; bo.textContent="once"; sub.appendChild(bo); }
+        var det = document.createElement("span");
+        var m = tr.match||{}; var parts=[];
+        ["project","group","sessionKey","provider"].forEach(function(k){ if(m[k]) parts.push(k+"="+m[k]); });
+        det.textContent = (pr.text? ('“'+String(pr.text).slice(0,40)+'” ') : (pr.label? ('→ '+pr.label+' ') : "")) + (parts.length? ("· "+parts.join(" ")) : "· any session");
+        sub.appendChild(det); main.appendChild(sub); row.appendChild(main);
+        var acts = document.createElement("div"); acts.className = "re-acts";
+        acts.appendChild(mkRBtn("Edit", function(){ ruleEdOpen(r); }, ""));
+        acts.appendChild(mkRBtn(r.enabled?"Disable":"Enable", function(){ send("rule-ed-toggle", r.name, r.enabled?"false":"true"); }, ""));
+        acts.appendChild(mkRBtn("Delete", function(){ if(confirm('Delete rule "'+r.name+'"?')) send("rule-ed-delete", r.name); }, "danger"));
+        row.appendChild(acts); body.appendChild(row);
+      });
+      document.getElementById("re-info").textContent = RULES_ED.length + " rule" + (RULES_ED.length===1?"":"s");
+    }
+    function ruleEdProcSync(){
+      var k = gv("rlf-proc");
+      show("rlf-text-wrap", k==="log" || k==="nudge" || k==="feed");
+      show("rlf-label-wrap", k==="relabel");
+    }
+    function ruleEdShow(){ document.getElementById("re-body").style.display="none";
+      document.getElementById("re-form").classList.add("show"); ruleEdProcSync(); }
+    function ruleEdHide(){ document.getElementById("re-form").classList.remove("show");
+      document.getElementById("re-body").style.display=""; }
+    function ruleEdReset(){
+      sv("rlf-name",""); sv("rlf-trigger","done"); sv("rlf-proc","log");
+      sv("rlf-m-project",""); sv("rlf-m-group",""); sv("rlf-m-key",""); sv("rlf-m-provider","");
+      sv("rlf-text",""); sv("rlf-label","");
+      document.getElementById("rlf-once").checked = true; document.getElementById("rlf-enabled").checked = true;
+    }
+    function ruleEdNew(){ rleEditing=null; ruleEdReset(); ruleEdShow(); }
+    function ruleEdCancel(){ ruleEdHide(); }
+    function ruleEdOpen(r){
+      rleEditing = r.name; ruleEdReset();
+      var tr=r.trigger||{}, pr=r.processor||{}, m=tr.match||{};
+      sv("rlf-name", r.name); setSelect("rlf-trigger", tr.kind||"done"); setSelect("rlf-proc", pr.kind||"log");
+      sv("rlf-m-project", m.project||""); sv("rlf-m-group", m.group||""); sv("rlf-m-key", m.sessionKey||""); sv("rlf-m-provider", m.provider||"");
+      sv("rlf-text", pr.text||""); sv("rlf-label", pr.label||"");
+      document.getElementById("rlf-once").checked = !!r.once;
+      document.getElementById("rlf-enabled").checked = r.enabled !== false;
+      ruleEdShow();
+    }
+    function ruleEdSave(){
+      var name = gv("rlf-name").trim(); if(!name){ alert("Rule needs a name."); return; }
+      var proc = gv("rlf-proc"), text = gv("rlf-text"), label = gv("rlf-label").trim();
+      // pre-validate (mirror core.validateRule) so a reject doesn't strand the form
+      if((proc==="nudge" || proc==="feed") && !text.trim()){ alert(proc+" needs text."); return; }
+      if(proc==="relabel" && !label){ alert("relabel needs a new label."); return; }
+      var match = {};
+      var mp=gv("rlf-m-project").trim(), mg=gv("rlf-m-group").trim(), mk=gv("rlf-m-key").trim(), mv=gv("rlf-m-provider").trim();
+      if(mp) match.project=mp; if(mg) match.group=mg; if(mk) match.sessionKey=mk; if(mv) match.provider=mv;
+      var trigger = { kind: gv("rlf-trigger") };
+      if(Object.keys(match).length) trigger.match = match;
+      var processor = { kind: proc };
+      if(proc==="relabel") processor.label = label; else if(proc!=="continue") processor.text = text;
+      var rec = { name: name, enabled: document.getElementById("rlf-enabled").checked,
+        once: document.getElementById("rlf-once").checked, trigger: trigger, processor: processor };
+      if(RULES_ED.some(function(x){ return x.name===name && x.name!==rleEditing; })){
+        if(!confirm('A rule named "'+name+'" already exists — overwrite it?')) return;
+      }
+      if(rleEditing && rleEditing !== name) rec.oldName = rleEditing;
+      send("rule-ed-save", "", JSON.stringify(rec));
+      rleEditing=null; ruleEdHide();
+    }
     function fmtDur(s){
       s = Math.max(0, Math.round(s||0));
       if(s < 60) return s+"s";
@@ -6852,6 +7054,7 @@ local HTML = [[
       else if(which === "templates") openTplEditor();
       else if(which === "agents") openAgentEd();
       else if(which === "policies") openPolicyEd();
+      else if(which === "rules") openRuleEd();
       else if(which === "shift"){ if(LEDGER_ON) openShiftReport(); }
       else if(which === "notify") openNotifications();
     }
@@ -6932,6 +7135,14 @@ local HTML = [[
       if(document.getElementById("pe-bform").classList.contains("show")){ peBundleHide(); }
       else if(document.getElementById("pe-aform").classList.contains("show")){ peAttHide(); }
       else { closePolicyEd(); }
+    });
+    // Esc in the rules editor: close the form first, then the overlay.
+    document.addEventListener("keydown", function(e){
+      if(e.key !== "Escape") return;
+      var ov = document.getElementById("ruleed");
+      if(!ov || !ov.classList.contains("show")) return;
+      if(document.getElementById("re-form").classList.contains("show")){ ruleEdHide(); }
+      else { closeRuleEd(); }
     });
 
     // ---- Notification history (roadmap #6) ----------------------------------
@@ -7426,6 +7637,27 @@ local function runRules(ruleSet, it, edgeKind)
                               processor = (acted == "nudge") and "nudge" or "nudge_skipped",
                               text = tostring(p.text):sub(1, 200) })
         end)
+      elseif p.kind == "feed" and p.text and p.text ~= "" then
+        -- Enqueue a task onto the tile's queue; the existing auto-feed delivers it
+        -- when the session next reaches done/idle (no direct keystroke). Resolve the
+        -- key EXACTLY as the reader does -- FX.queueKeyFor -> core.queueKey SANITIZES
+        -- it (a raw projectKey/cwd has slashes, which both break the write path and
+        -- diverge from the key auto-feed/router read; review-caught silent data loss).
+        local qk = FX.queueKeyFor(it)
+        if qk then
+          FX.writeQueue(qk, core.queuePush(FX.readQueue(qk), tostring(p.text)))
+          ledgerFor(it, { type = "rule", rule = r.name, kind = edgeKind, by = "rule",
+                          processor = "feed", text = tostring(p.text):sub(1, 200) })
+        end
+      elseif p.kind == "continue" then
+        -- Resume an errored/stuck session by typing "continue" (delivery-gated,
+        -- same path as the manual Continue button + Auto-Continue).
+        local target = it
+        dispatchSerialized(target, "rule-continue", function()
+          local acted = core.handleAction(FX, target, "continue")
+          ledgerFor(target, { type = "rule", rule = r.name, kind = edgeKind, by = "rule",
+                              processor = (acted == "continue") and "continue" or "continue_skipped" })
+        end)
       end
     end
   end
@@ -7585,6 +7817,7 @@ function refresh()
       if not loopAlerted[it.key] then
         loopAlerted[it.key] = true
         if ledgerOn then ledgerFor(it, { type = "loop", repeats = loopRepeats }) end
+        runRules(ruleSet, it, "loop")  -- L6 loop trigger (rising edge, once per episode)
       end
     else
       loopAlerted[it.key] = nil
@@ -7764,6 +7997,7 @@ function refresh()
         if escSound then FX.playSound() end
         if escPush then FX.push(escTopic, "Claude Shepherd: " .. it.name .. " stalled",
           "No transcript progress for over " .. hungMin .. " min while working") end
+        runRules(ruleSet, it, "hung")  -- L6 hung trigger (rising edge, once per stall)
       end
     end
     -- Reset watchdog state when a session isn't actively working, OR while it's
@@ -7933,6 +8167,7 @@ function refresh()
             print("[cc-route] " .. qk .. " starved: " .. core.queueDepth(q)
               .. " task(s) queued, no free session for " .. starveMin .. "m+")
             ledgerFor(members[1], { type = "queue_starved", depth = core.queueDepth(q) })
+            runRules(ruleSet, members[1], "starved")  -- L6 starved trigger (rising edge, once per episode)
           end
         end
       else

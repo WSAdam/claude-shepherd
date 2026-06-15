@@ -4,6 +4,33 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-14 (deferred polish ⑤) — L6 rules editor + hung/loop/starved triggers + feed/continue
+
+Fifth deferred-polish build: an ⚙️ **Automation rules** editor (☰ drawer) for `cc-rules.json`
+(was hand-edited), plus the deferred engine work — three new triggers and two new processors.
+
+- **Rules editor:** author a rule's trigger (on edge), scope match
+  (project/group/sessionKey/provider globs), processor + its text/label, and the once/enabled
+  flags; enable/disable from the list (a clickable dot), edit/rename, delete. A non-armed
+  warning when `rules.enabled` is off (rules still list/edit, just don't fire).
+- **New triggers (now wired):** `hung` (stalled watchdog), `loop` (repeating-tool watchdog),
+  and `starved` (queue has work, no free session) — each fires `runRules` at its OWN detection
+  site on the RISING edge (once per episode), alongside the existing done/error/approval status
+  edges. (Previously a rule targeting these failed validation since nothing fired them.)
+- **New processors:** `feed` (enqueue a task onto the tile's queue — the existing auto-feed
+  delivers it; no direct keystroke) and `continue` (resume an errored/stuck session by typing
+  `continue`, delivery-gated, same path as the manual Continue button + Auto-Continue).
+- **cc-core (pure, +18 tests):** hung/loop/starved added to `RULE_TRIGGERS`, feed/continue to
+  `RULE_PROCESSORS` (feed validates needing text); rule CRUD `ruleGet`/`rulePush`/`ruleRemove`/
+  `ruleSetEnabled` (mirrors the agent registry). New `FX.writeRules`.
+- **Adversarial review** (3-lens workflow + verifiers): caught a real **high-severity** silent
+  data-loss bug — the `feed` processor keyed the queue by the RAW `it.projectKey or it.cwd`,
+  but every other queue path uses the SANITIZED key (`FX.queueKeyFor`), so a fed task landed in
+  a divergent (or slash-broken, silently-dropped) file the auto-feed never read. Fixed to
+  resolve the key exactly as the reader does.
+- Tests: +18 cc-core, +12 dashboard pins. Suite green (1692 core + 421 ui + 183 bash).
+- **Deferred (unchanged):** per-rule status lifecycle (COMPLETED/ERROR) + `retryUntil`.
+
 ## 2026-06-14 (deferred polish ④) — L2 policy bundle/attachment editor
 
 Fourth deferred-polish build: a 🛡 **Policy bundles** editor (☰ drawer) so named
