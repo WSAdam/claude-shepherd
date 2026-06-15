@@ -2102,6 +2102,12 @@ do
   eq("filterLedger: by type (set)", #core.filterLedger(evs, { types = { decision = true } }), 1)
   eq("filterLedger: time window", #core.filterLedger(evs, { sinceTs = 120, untilTs = 180 }), 1)
   eq("filterLedger: empty types = all", #core.filterLedger(evs, { types = {} }), 3)
+  -- #7 multi-session set (bulk history delete): matches any listed session_id
+  eq("filterLedger: sessions set matches both", #core.filterLedger(evs, { sessions = { "s1", "s2" } }), 3)
+  eq("filterLedger: sessions set matches one", #core.filterLedger(evs, { sessions = { "s2" } }), 1)
+  eq("filterLedger: empty sessions = all (no filter)", #core.filterLedger(evs, { sessions = {} }), 3)
+  check("purge: sessions set is a SCOPED filter", core.purgeFilterIsScoped({ sessions = { "s1" } }) == true)
+  check("purge: empty sessions is NOT scoped", core.purgeFilterIsScoped({ sessions = {} }) == false)
 
   eq("ledgerFileEpoch: parses daily name", core.ledgerFileEpoch("2026-01-01.jsonl"),
      core.isoToEpoch("2026-01-01T00:00:00Z"))
@@ -2704,6 +2710,58 @@ do
   eq("timeline: cap count", #capped, 3)
   eq("timeline: cap keeps newest, ascending", capped[1].ts, 8)
   eq("timeline: cap last is newest", capped[3].ts, 10)
+end
+
+-- ---- #7 sessionHistory: per-session records from the ledger ----------------
+do
+  local evs = {
+    { ts = 10, type = "session_start", session_id = "s1", name = "alpha", projectKey = "pkA" },
+    { ts = 20, type = "prompt",        session_id = "s1", prompt = "x" },
+    { ts = 30, type = "tool_request",  session_id = "s1", tool = "Bash" },
+    { ts = 35, type = "decision",      session_id = "s1", outcome = "allow" },
+    { ts = 40, type = "decision",      session_id = "s1", outcome = "deny" },
+    { ts = 50, type = "prompt",        session_id = "s2", name = "bravo", projectKey = "pkB" },
+    { ts = 60, type = "prompt",        session_id = "s2" },
+    { ts = 70, type = "prompt",        session_id = "s2" },
+    { ts =  5, type = "prompt" },                                  -- no session_id -> ignored
+  }
+  local recent = core.sessionHistory(evs)
+  eq("history: one record per session", #recent, 2)
+  -- default sort = recent (s2 lastTs 70 > s1 lastTs 40)
+  eq("history: recent sort newest first", recent[1].session_id, "s2")
+  local s1 = recent[2]
+  eq("history: name captured", s1.name, "alpha")
+  eq("history: projectKey captured", s1.projectKey, "pkA")
+  eq("history: firstTs", s1.firstTs, 10)
+  eq("history: lastTs", s1.lastTs, 40)
+  eq("history: lastType is the newest event's", s1.lastType, "decision")
+  eq("history: event count", s1.events, 5)
+  eq("history: prompts", s1.prompts, 1)
+  eq("history: toolRequests", s1.toolRequests, 1)
+  eq("history: allow", s1.allow, 1)
+  eq("history: deny", s1.deny, 1)
+  -- sort: oldest
+  eq("history: oldest sort", core.sessionHistory(evs, { sort = "oldest" })[1].session_id, "s1")
+  -- sort: active (s2 has 3 prompts > s1's 1 prompt + 1 tool = 2)
+  eq("history: active sort by prompts+tools", core.sessionHistory(evs, { sort = "active" })[1].session_id, "s2")
+  -- empty / no-session inputs
+  eq("history: empty events -> none", #core.sessionHistory({}), 0)
+  eq("history: events without session_id ignored", #core.sessionHistory({ { ts = 1, type = "prompt" } }), 0)
+
+  -- localStorageReport: format + sort + total
+  local rep = core.localStorageReport({
+    { name = "ledger", bytes = 2 * 1024 * 1024 },
+    { name = "queue", bytes = 512 },
+    { name = "state", bytes = 1024 },
+    { name = "bad" },                 -- no bytes -> skipped
+    "not a table",                    -- skipped
+  })
+  eq("storage: skips entries without bytes", #rep.items, 3)
+  eq("storage: sorted desc by bytes", rep.items[1].name, "ledger")
+  eq("storage: smallest last", rep.items[3].name, "queue")
+  eq("storage: human formatted", rep.items[1].human, "2.0 MB")
+  eq("storage: total bytes", rep.totalBytes, 2 * 1024 * 1024 + 512 + 1024)
+  eq("storage: empty -> zero total", core.localStorageReport({}).totalBytes, 0)
 end
 
 -- ---- gateDecisionSummary: grouped last-N gate decisions (roadmap #2) --------

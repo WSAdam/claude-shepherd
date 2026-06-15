@@ -770,6 +770,36 @@ function FX.purgeLedger(filter)
   return removed
 end
 
+-- #7 storage readout: byte totals for Shepherd's own local state. Each entry is a flat
+-- dir (sum its files) or the cc-*.json state files in ~/.claude. core.localStorageReport
+-- sorts + humanizes. NEVER touches Claude Code's own transcripts (not ours to delete).
+function FX.storageEntries()
+  local home = os.getenv("HOME") or ""
+  local function dirBytes(dir)
+    local total = 0
+    for _, fn in ipairs(FX.readDir(dir)) do
+      if fn ~= "." and fn ~= ".." then   -- hs.fs.dir yields the dir self-entries; their inode
+        local a = hs.fs.attributes(dir .. "/" .. fn)  -- sizes would inflate the readout
+        if a and a.size then total = total + a.size end
+      end
+    end
+    return total
+  end
+  local stateBytes = 0
+  for _, fn in ipairs(FX.readDir(home .. "/.claude")) do
+    if fn:match("^cc%-.*%.json$") then
+      local a = hs.fs.attributes(home .. "/.claude/" .. fn)
+      if a and a.size then stateBytes = stateBytes + a.size end
+    end
+  end
+  return {
+    { name = "Audit ledger",        bytes = dirBytes(LEDGER_DIR) },
+    { name = "Task queues",         bytes = dirBytes(QUEUE_DIR) },
+    { name = "Session status",      bytes = dirBytes(STATUS_DIR) },
+    { name = "State files (cc-*.json)", bytes = stateBytes },
+  }
+end
+
 -- Retention GC: delete daily files past ledger.retentionDays, then (if maxTotalMB
 -- is set) delete oldest files until total size is under the cap. Logs a `purge`
 -- tombstone listing what was removed. Cheap dir scan; safe to call on a timer.
@@ -3205,6 +3235,46 @@ local function handleBridgeMsg(msg)
     end)
     return
   end
+  if a == "open-history-view" then
+    -- #7 session-history browser: aggregate per-session records over the FULL ledger
+    -- (limit=0, uncapped -- aggregation collapses many events into one record per session,
+    -- so the payload stays small even on a huge ledger) and send the compact list.
+    local res = FX.readLedger({ limit = 0 })
+    local records = core.sessionHistory(res.events)
+    pcall(function() wv:evaluateJavaScript("window.ccHistory(" .. hs.json.encode({ records = records }) .. ")") end)
+    return
+  end
+  if a == "history-delete" then
+    -- #7 bulk history delete: purge the ledger events of the SELECTED sessions, routed
+    -- through the same scoped-purge path (with its own confirm) the Purge button uses.
+    local okh, h = pcall(function() return hs.json.decode(payload.text or "{}") end)
+    local sessions = (okh and type(h) == "table" and type(h.sessions) == "table") and h.sessions or {}
+    if #sessions == 0 then return end
+    pcall(function()
+      local label = (#sessions == 1) and "1 session" or (#sessions .. " sessions")
+      if hs.dialog.blockAlert("Delete session history",
+           "Permanently delete all ledger events for " .. label .. "?\nThis cannot be undone.",
+           "Delete", "Cancel") == "Delete" then
+        local n = FX.purgeLedger({ sessions = sessions })
+        -- Refresh BOTH views that share the overlay's data: the History tab (ccHistory) and
+        -- the audit Rows/Timeline cache (ccAudit) -- else switching tabs in the same open
+        -- overlay would still show the just-deleted events (mirrors the audit-purge handler).
+        local recs = core.sessionHistory(FX.readLedger({ limit = 0 }).events)
+        wv:evaluateJavaScript("window.ccHistory(" .. hs.json.encode({ records = recs }) .. ")")
+        wv:evaluateJavaScript("window.ccAudit(" .. hs.json.encode(FX.readLedger({})) .. ")")
+        hs.alert.show("Claude Shepherd: deleted " .. n .. " event(s) from " .. label)
+      end
+    end)
+    return
+  end
+  if a == "storage-report" then
+    -- #7 storage readout for ⚙ Settings: measure Shepherd's own state (ledger / queues /
+    -- status / state files); pure core.localStorageReport formats it.
+    pcall(function()
+      wv:evaluateJavaScript("window.ccStorage(" .. hs.json.encode(core.localStorageReport(FX.storageEntries())) .. ")")
+    end)
+    return
+  end
   if a == "audit-redact" then
     local okr, r = pcall(function() return hs.json.decode(payload.text or "{}") end)
     if okr and type(r) == "table" and r.id and r.ts then
@@ -4033,6 +4103,20 @@ local HTML = [[
 #a-head .s-x{ margin-left:auto; }
 #a-filters{ display:flex; flex-wrap:wrap; gap:6px; padding:8px 10px; border-bottom:1px solid #23262f; }
 #a-filters select, #a-filters input{ background:#1a1c22; border:1px solid #2c2f3a; color:#cfd2db; border-radius:6px; padding:3px 6px; font-size:12px; }
+/* #7 History tab */
+#h-filters{ display:flex; flex-wrap:wrap; gap:6px; align-items:center; padding:8px 10px; border-bottom:1px solid #23262f; }
+#h-filters input[type=text]{ background:#1a1c22; border:1px solid #2c2f3a; color:#cfd2db; border-radius:6px; padding:3px 6px; font-size:12px; min-width:200px; flex:1; }
+.h-sort{ background:none; border:1px solid #2c2f3a; color:#9aa0ad; border-radius:6px; padding:2px 8px; cursor:pointer; font-size:11px; }
+.h-sort.active{ background:#2b2f3a; color:#e8e9ee; }
+.h-facet{ color:#9aa0ad; font-size:12px; display:inline-flex; align-items:center; gap:3px; }
+#h-del{ margin-left:auto; }
+.h-row{ display:flex; gap:8px; align-items:center; padding:4px 0; border-bottom:1px solid #1e2027; }
+.h-pin{ background:none; border:none; color:#6b7280; cursor:pointer; font-size:14px; padding:0 2px; }
+.h-pin.on{ color:#f5b50a; }
+.h-name{ color:#e8e9ee; white-space:nowrap; max-width:200px; overflow:hidden; text-overflow:ellipsis; }
+.h-sub{ color:#6b7280; white-space:nowrap; max-width:200px; overflow:hidden; text-overflow:ellipsis; }
+.h-stat{ color:#9aa0ad; flex:1; font-size:11px; }
+.h-when{ color:#6b7280; white-space:nowrap; font-variant-numeric:tabular-nums; font-size:11px; }
 #a-body{ flex:1; overflow:auto; padding:6px 10px; }
 .a-row{ display:flex; gap:8px; align-items:baseline; padding:3px 0; border-bottom:1px solid #1e2027; }
 .a-ts{ color:#6b7280; white-space:nowrap; font-variant-numeric:tabular-nums; }
@@ -4518,6 +4602,8 @@ local HTML = [[
       <label class="s-row">Cap total size at <input type="number" id="s-ledger-mb" class="s-num" min="0"> MB (0 = no cap)</label>
       <div class="s-lbl">Only record these event types (space/comma separated; blank = everything)</div>
       <label class="s-row"><input type="text" id="s-ledger-types" class="s-txt" placeholder="decision prompt spawn"></label>
+      <label class="s-row"><button class="s-x" style="border:1px solid #2c2f3a;border-radius:6px;padding:3px 8px;color:#cfd2db;" onclick="measureStorage()">Measure storage</button> <span id="s-storage" class="n-dim">Shepherd's local state on disk.</span></label>
+      <div class="s-help">Ledger / queues / status / state files only — never Claude Code's own transcripts. Delete a session's recorded history from the 🗂 History tab; trim old ledger days with the retention setting above.</div>
 
       <div class="s-sec">Editor window pop</div>
       <label class="s-row"><input type="checkbox" id="s-pop-complete"> Pop the editor when a session finishes</label>
@@ -4658,7 +4744,18 @@ local HTML = [[
       <button id="a-tab-time" class="a-tab" onclick="auditTab('timeline')">Timeline</button>
       <button id="a-tab-alerts" class="a-tab" onclick="auditTab('alerts')">🔔 Alerts</button>
       <button id="a-tab-shift" class="a-tab" style="display:none" onclick="auditTab('shift')">📋 Shift</button>
+      <button id="a-tab-history" class="a-tab" onclick="auditTab('history')">🗂 History</button>
       <button class="s-x" onclick="closeAudit()">✕</button>
+    </div>
+    <div id="h-filters" style="display:none">
+      <input type="text" id="h-q" class="s-txt" placeholder="Filter sessions… (name or folder)" oninput="renderHistory()">
+      <button class="h-sort active" id="h-sort-recent" onclick="setHistorySort('recent')">Recent</button>
+      <button class="h-sort" id="h-sort-oldest" onclick="setHistorySort('oldest')">Oldest</button>
+      <button class="h-sort" id="h-sort-active" onclick="setHistorySort('active')">Most active</button>
+      <label class="h-facet" id="h-fac-ws-l" style="display:none"><input type="checkbox" id="h-fac-ws" onchange="renderHistory()"> This workspace</label>
+      <label class="h-facet"><input type="checkbox" id="h-fac-pin" onchange="renderHistory()"> ★ pinned</label>
+      <span id="h-info" class="n-dim"></span>
+      <button class="danger" id="h-del" onclick="historyDelete()" disabled>Delete selected</button>
     </div>
     <div id="a-filters">
       <select id="a-f-session" onchange="auditApply()"></select>
@@ -5432,6 +5529,19 @@ local HTML = [[
     }
     function openSettings(){ send("open-settings"); }
     function closeSettings(){ document.getElementById("settings").classList.remove("show"); }
+    // #7 storage readout: measured on demand (a button, not every Settings open) since it
+    // walks the state dirs. Lua replies ccStorage with core.localStorageReport output.
+    function measureStorage(){
+      var el = document.getElementById("s-storage"); if(el) el.textContent = "measuring…";
+      send("storage-report");
+    }
+    window.ccStorage = function(rep){
+      var el = document.getElementById("s-storage"); if(!el) return;
+      rep = rep || {}; var items = rep.items || [];
+      if(!items.length){ el.textContent = "no local state measured."; return; }
+      var parts = items.map(function(i){ return esc(i.name) + " " + esc(i.human); });
+      el.textContent = "total " + esc(rep.totalHuman || "—") + " — " + parts.join(" · ");
+    };
     function showSettings(cfg, gateOn, autoOn){
       cfg = cfg || {};
       function ck(id,v){ document.getElementById(id).checked = !!v; }
@@ -7615,12 +7725,20 @@ local HTML = [[
       document.getElementById("a-tab-time").classList.toggle("active", v === "timeline");
       document.getElementById("a-tab-alerts").classList.toggle("active", v === "alerts");
       var shiftTab = document.getElementById("a-tab-shift"); if(shiftTab) shiftTab.classList.toggle("active", v === "shift");
-      // The Shift report has its own window selector + no per-row filters/actions,
-      // so hide the filter row + Review/Export/Purge footer while it's showing.
-      var isShift = (v === "shift");
-      document.getElementById("a-filters").style.display = isShift ? "none" : "";
-      document.getElementById("a-foot").style.display = isShift ? "none" : "";
+      var histTab = document.getElementById("a-tab-history"); if(histTab) histTab.classList.toggle("active", v === "history");
+      // Shift + History each have their own controls + no per-event filters/actions,
+      // so hide the event filter row + Review/Export/Purge footer while they show.
+      var isShift = (v === "shift"), isHist = (v === "history");
+      document.getElementById("a-filters").style.display = (isShift || isHist) ? "none" : "";
+      document.getElementById("a-foot").style.display = (isShift || isHist) ? "none" : "";
+      var hf = document.getElementById("h-filters"); if(hf) hf.style.display = isHist ? "" : "none";
       if(isShift){ openShift(); return; }
+      if(isHist){
+        // the "This workspace" facet only makes sense with a tile selected
+        var wsl = document.getElementById("h-fac-ws-l");
+        if(wsl) wsl.style.display = projectKeyOf(findItem(selectedKey)) ? "" : "none";
+        openHistory(); return;
+      }
       renderAudit();
     }
     // ---- 📋 Shift report (ops-only "what the fleet did") --------------------
@@ -7776,9 +7894,108 @@ local HTML = [[
       document.getElementById("audit").classList.add("show");
       if(pendingShiftView){ pendingShiftView = false; auditTab("shift"); }
       else if(focusView){ auditTab(focusView); }  // auditTab also re-renders
-      else if(auditView === "shift"){ auditTab("rows"); }  // a normal open after Shift: restore filters/foot
+      else if(auditView === "shift" || auditView === "history"){ auditTab("rows"); }  // normal open after Shift/History: restore filters/foot
       else { renderAudit(); }
     };
+    // ---- #7 session-history browser (🗂 History tab) ------------------------
+    // Per-session records aggregated server-side by core.sessionHistory over the FULL
+    // ledger (open-history-view). Query/sort/facet/pin are client-side over the small
+    // record list. Pins persist by STABLE projectKey in localStorage (like the detail
+    // tab state). Bulk delete routes selected sessions through the scoped audit-purge.
+    var HISTORY = [];            // records from core.sessionHistory
+    var historySort = "recent";  // client-side re-sort chip
+    function openHistory(){
+      document.getElementById("a-body").innerHTML = '<div class="s-help" style="margin-left:0;">Loading session history…</div>';
+      send("open-history-view");
+    }
+    function setHistorySort(s){
+      historySort = s;
+      ["recent","oldest","active"].forEach(function(k){
+        var b = document.getElementById("h-sort-"+k); if(b) b.classList.toggle("active", k === s);
+      });
+      renderHistory();
+    }
+    function historyPins(){
+      try { return JSON.parse(window.localStorage.getItem("cc-historyPins") || "{}") || {}; } catch(e){ return {}; }
+    }
+    function setHistoryPin(pk, on){
+      if(!pk) return;
+      var p = historyPins();
+      if(on) p[pk] = true; else delete p[pk];
+      try { window.localStorage.setItem("cc-historyPins", JSON.stringify(p)); } catch(e){}
+      renderHistory();
+    }
+    window.ccHistory = function(payload){
+      HISTORY = (payload && payload.records) || [];
+      if(auditView === "history") renderHistory();
+    };
+    function historySortCmp(s){
+      if(s === "oldest") return function(a,b){ return (a.lastTs||0) - (b.lastTs||0); };
+      if(s === "active")  return function(a,b){ return ((b.prompts||0)+(b.toolRequests||0)) - ((a.prompts||0)+(a.toolRequests||0)) || (b.lastTs||0)-(a.lastTs||0); };
+      return function(a,b){ return (b.lastTs||0) - (a.lastTs||0); };  // recent
+    }
+    function renderHistory(){
+      var body = document.getElementById("a-body");
+      var pins = historyPins();
+      var q = (document.getElementById("h-q").value || "").trim().toLowerCase();
+      var pinOnly = document.getElementById("h-fac-pin").checked;
+      var wsPk = document.getElementById("h-fac-ws").checked ? projectKeyOf(findItem(selectedKey)) : null;
+      var rows = (HISTORY || []).filter(function(r){
+        if(pinOnly && !pins[r.projectKey]) return false;
+        if(wsPk && r.projectKey !== wsPk) return false;
+        if(q){
+          var hay = ((r.name||"") + " " + decodeProjectKey(r.projectKey||"")).toLowerCase();
+          if(hay.indexOf(q) === -1) return false;
+        }
+        return true;
+      });
+      rows.sort(historySortCmp(historySort));
+      document.getElementById("h-info").textContent = rows.length + " session(s)";
+      if(!rows.length){
+        body.innerHTML = '<div class="s-help" style="margin-left:0;">'
+          + (HISTORY.length ? 'No sessions match the filter.' : 'No session history yet — the audit ledger must be enabled to record it.')
+          + '</div>';
+        updateHistoryDelBtn(); return;
+      }
+      body.innerHTML = rows.map(historyRow).join("");
+      updateHistoryDelBtn();
+    }
+    // NOTE: projectKey/session_id are written as ESC'd data- attributes and read back raw
+    // via getAttribute (never interpolated into an inline JS handler), so a key with a quote
+    // can't break out -- same anti-XSS pattern as the tile data-key / openPr.
+    function historyRow(r){
+      var pinned = !!historyPins()[r.projectKey];
+      var who = esc(r.name || decodeProjectKey(r.projectKey || "") || r.session_id || "?");
+      var sub = esc(decodeProjectKey(r.projectKey || ""));
+      return '<div class="h-row" data-pk="' + esc(r.projectKey || "") + '" data-sid="' + esc(r.session_id || "") + '">'
+        + '<input type="checkbox" class="h-ck" onchange="updateHistoryDelBtn()">'
+        + '<button class="h-pin' + (pinned ? ' on' : '') + '" title="Pin/unpin this project" onclick="historyPinClick(event)">' + (pinned ? '★' : '☆') + '</button>'
+        + '<span class="h-name">' + who + '</span>'
+        + '<span class="h-sub">' + sub + '</span>'
+        + '<span class="h-stat">' + (r.prompts||0) + ' turns · ' + (r.toolRequests||0) + ' tools · ' + (r.events||0) + ' events</span>'
+        + '<span class="h-when">' + esc(fmtTs(r.lastTs)) + '</span>'
+        + '</div>';
+    }
+    function historyPinClick(ev){
+      var row = ev && ev.target && ev.target.closest ? ev.target.closest(".h-row") : null;
+      var pk = row && row.getAttribute("data-pk");
+      if(pk) setHistoryPin(pk, !historyPins()[pk]);
+    }
+    function updateHistoryDelBtn(){
+      var n = 0;
+      document.querySelectorAll("#a-body .h-row .h-ck").forEach(function(c){ if(c.checked) n++; });
+      var btn = document.getElementById("h-del"); if(!btn) return;
+      btn.disabled = n === 0;
+      btn.textContent = n ? ("Delete selected (" + n + ")") : "Delete selected";
+    }
+    function historyDelete(){
+      var sessions = [];
+      document.querySelectorAll("#a-body .h-row").forEach(function(row){
+        var ck = row.querySelector(".h-ck");
+        if(ck && ck.checked){ var sid = row.getAttribute("data-sid"); if(sid) sessions.push(sid); }
+      });
+      if(sessions.length) send("history-delete", "", JSON.stringify({ sessions: sessions }));  // Lua confirms + refreshes
+    }
     // ---- Fleet-wide search (roadmap #3) -------------------------------------
     // 300ms debounce, min 3 chars; Lua runs rg/grep async and replies ccSearch.
     // The reply echoes the query -- stale (out-of-order) results are dropped
@@ -7967,7 +8184,9 @@ local HTML = [[
       LEDGER_ON = !!on;
       var tab = document.getElementById("a-tab-shift"); if(tab) tab.style.display = LEDGER_ON ? "" : "none";
       var row = document.getElementById("tm-shift");    if(row) row.style.display = LEDGER_ON ? "" : "none";
-      if(!LEDGER_ON && auditView === "shift") auditTab("rows");  // ledger turned off mid-view
+      // #7 History is also ledger-derived -> hide its tab too (parity with Shift).
+      var htab = document.getElementById("a-tab-history"); if(htab) htab.style.display = LEDGER_ON ? "" : "none";
+      if(!LEDGER_ON && (auditView === "shift" || auditView === "history")) auditTab("rows");  // ledger off mid-view
     }
 
     window.ccUsage = function(u){ LAST_USAGE = u || null; if(u && u.official) LAST_OFFICIAL = u.official; renderUsageFoot(); renderDetail(); };

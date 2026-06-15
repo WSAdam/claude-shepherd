@@ -195,8 +195,8 @@ remaining items. Full per-round detail is in CHANGELOG.md and git history.
   behavior tests (`resolveDiffTarget`, `promoteSummary`, `officialLogDecision`). **A refresh-loop `pairs(nil)`
   crash (a reap over an uninitialized state table) shipped + was caught live → `tests/smoke.test.lua`** now loads
   the dashboard under a stubbed `hs` and runs the load-time `refresh()` in `make test`. Suite **~1848 core + 488
-  ui + 183 bash + smoke**, green. **#6 host stats + fleet idle-since SHIPPED (read-only, off by default). LEFT:
-  #7 session-history browser + bulk history management.**
+  ui + 183 bash + smoke**, green. **#6 host stats + fleet idle-since AND #7 session-history browser + bulk
+  history management SHIPPED — the L5 build-ready batch (#1–#7) is COMPLETE.**
 
 ## TODO
 
@@ -250,8 +250,14 @@ remaining items. Full per-round detail is in CHANGELOG.md and git history.
 > FLEET IDLE-SINCE** (read-only, off by default: `core.hostHealth`/`fmtBytes`/`fmtUptime`/`fleetIdleSince`; a host
 > strip — CPU/mem/disk/uptime/load + idle-since — atop the 📊 insights overlay; `FX.pollHostStats` self-gating +
 > 30s-throttled, verified live; starvation alert notes host pressure; ⚙ toggle + hand-editable
-> `insights.hostPressure.{cpu,mem,disk}`). **LEFT in this batch: #7 session-history browser + bulk history mgmt.**
-> Each built via the loop (pure cc-core + tests → wire + pins → adversarial-review Workflow → fix → deploy → commit
+> `insights.hostPressure.{cpu,mem,disk}`) · **#7 SESSION-HISTORY BROWSER + BULK HISTORY MGMT** (a 🗂 History tab in
+> the 📜 audit overlay: `core.sessionHistory` per-session records over the full ledger, fuzzy query + Recent/Oldest/
+> Most-active sort + this-workspace/pinned facets + a ★ pin persisted by projectKey; multi-select **Delete selected**
+> routed through the existing scoped-purge — `filterLedger` gained a `sessions` set, `purgeFilterIsScoped` treats it
+> as scoped so an empty selection can never escalate to delete-all; plus a ⚙ **Measure storage** readout via
+> `core.localStorageReport`/`FX.storageEntries`, ledger/queue/state only, never Claude's transcripts). **THE L5
+> BUILD-READY BATCH (#1–#7) IS COMPLETE.** Each built via the loop (pure cc-core + tests → wire + pins →
+> adversarial-review Workflow → fix → deploy → commit
 > → push); the reviews + leaderboard feedback caught real bugs every round (e.g. #2 `--no-index` arbitrary-file read
 > + rename-as-add; #4 **HIGH** orphaned self-summary guard on a failed paste; #3 phantom-export on write failure; #5
 > prStatusByRoot leak / gh-hang retry; the `7cd6245` review caught the prPollPlan hung-task latch being dead code +

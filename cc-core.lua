@@ -536,10 +536,18 @@ function M.filterLedger(events, opts)
     end
     if next(typeset) == nil then typeset = nil end
   end
+  -- multi-session filter (bulk history delete): opts.sessions = list of session_ids.
+  -- ANDs with opts.session (a lone session_id) if both are somehow given.
+  local sessionset
+  if type(opts.sessions) == "table" and #opts.sessions > 0 then
+    sessionset = {}
+    for _, s in ipairs(opts.sessions) do sessionset[s] = true end
+  end
   local out = {}
   for _, e in ipairs(events or {}) do
     local ok = true
     if opts.session and e.session_id ~= opts.session then ok = false end
+    if ok and sessionset and not sessionset[e.session_id] then ok = false end
     if ok and opts.projectKey and e.projectKey ~= opts.projectKey then ok = false end
     if ok and opts.sinceTs and (tonumber(e.ts) or 0) < opts.sinceTs then ok = false end
     if ok and opts.untilTs and (tonumber(e.ts) or 0) > opts.untilTs then ok = false end
@@ -584,6 +592,7 @@ end
 function M.purgeFilterIsScoped(f)
   if type(f) ~= "table" then return false end
   if f.session or f.sinceTs or f.untilTs then return true end
+  if type(f.sessions) == "table" and #f.sessions > 0 then return true end  -- bulk history delete
   return type(f.types) == "table" and #f.types > 0
 end
 
@@ -594,6 +603,76 @@ function M.ledgerFileEpoch(filename)
   local y, mo, d = tostring(filename or ""):match("^(%d%d%d%d)%-(%d%d)%-(%d%d)%.jsonl$")
   if not y then return nil end
   return M.isoToEpoch(y .. "-" .. mo .. "-" .. d .. "T00:00:00Z")
+end
+
+-- ---- #7: session-history browser + bulk history management -----------------
+-- Derive per-session HISTORY records from the ledger (NOT a parallel store) for the
+-- history browser. Groups events by session_id, summarizes activity, and sorts.
+-- opts.sort ("recent" (default, newest lastTs first) | "oldest" | "active" (most
+-- prompts+toolRequests)). Pure. Each record:
+--   { session_id, name, projectKey, firstTs, lastTs, lastType, events, prompts,
+--     toolRequests, allow, deny }. Events without a session_id are ignored (no key).
+function M.sessionHistory(events, opts)
+  opts = opts or {}
+  local by, order = {}, {}
+  for _, e in ipairs(events or {}) do
+    if type(e) == "table" and e.session_id and e.session_id ~= "" then
+      local sid = e.session_id
+      local r = by[sid]
+      if not r then
+        r = { session_id = sid, name = e.name, projectKey = e.projectKey,
+              firstTs = nil, lastTs = nil, lastType = nil,
+              events = 0, prompts = 0, toolRequests = 0, allow = 0, deny = 0 }
+        by[sid] = r; order[#order + 1] = sid
+      end
+      if e.name and e.name ~= "" then r.name = e.name end       -- prefer the latest non-empty name
+      if e.projectKey and not r.projectKey then r.projectKey = e.projectKey end
+      local ts = tonumber(e.ts)
+      if ts then
+        if not r.firstTs or ts < r.firstTs then r.firstTs = ts end
+        if not r.lastTs or ts >= r.lastTs then r.lastTs = ts; r.lastType = e.type end
+      end
+      r.events = r.events + 1
+      if e.type == "prompt" then r.prompts = r.prompts + 1
+      elseif e.type == "tool_request" then r.toolRequests = r.toolRequests + 1
+      elseif e.type == "decision" then
+        if e.outcome == "allow" then r.allow = r.allow + 1
+        elseif e.outcome == "deny" then r.deny = r.deny + 1 end
+      end
+    end
+  end
+  local list = {}
+  for _, sid in ipairs(order) do list[#list + 1] = by[sid] end
+  local sort = opts.sort or "recent"
+  if sort == "oldest" then
+    table.sort(list, function(a, b) return (a.lastTs or 0) < (b.lastTs or 0) end)
+  elseif sort == "active" then
+    table.sort(list, function(a, b)
+      local aa, bb = a.prompts + a.toolRequests, b.prompts + b.toolRequests
+      if aa ~= bb then return aa > bb end
+      return (a.lastTs or 0) > (b.lastTs or 0)
+    end)
+  else  -- recent (default)
+    table.sort(list, function(a, b) return (a.lastTs or 0) > (b.lastTs or 0) end)
+  end
+  return list
+end
+
+-- Format a storage readout for the ⚙ Settings "Storage" section from raw {name, bytes}
+-- entries the FX layer measured (ledger / queue / state-file dirs). Returns
+-- { items = <entries sorted desc by bytes, each + human=fmtBytes(bytes)>, totalBytes,
+--   totalHuman }. Skips non-table / nil-byte entries. Pure.
+function M.localStorageReport(entries)
+  local items, total = {}, 0
+  for _, e in ipairs(entries or {}) do
+    local b = type(e) == "table" and tonumber(e.bytes) or nil
+    if b and b >= 0 then
+      items[#items + 1] = { name = tostring(e.name or "?"), bytes = b, human = M.fmtBytes(b) }
+      total = total + b
+    end
+  end
+  table.sort(items, function(a, b) return a.bytes > b.bytes end)
+  return { items = items, totalBytes = total, totalHuman = M.fmtBytes(total) }
 end
 
 -- Which daily files are past the retention window (older than retentionDays before

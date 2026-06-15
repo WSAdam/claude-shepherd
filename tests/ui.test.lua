@@ -1313,6 +1313,55 @@ do
   check("host-pin: starvation alert notes host pressure when present",
         src:find("lastHostHealth.pressured and lastHostHealth.pressure", 1, true) ~= nil
         and src:find("hostPressure = pressure", 1, true) ~= nil)
+
+  -- ===== #7 session-history browser + bulk history management =====
+  check("hist-pin: open-history-view aggregates the FULL ledger via core.sessionHistory",
+        src:find('a == "open-history-view"', 1, true) ~= nil
+        and src:find("FX.readLedger({ limit = 0 })", 1, true) ~= nil
+        and src:find("core.sessionHistory(res.events", 1, true) ~= nil
+        and src:find("window.ccHistory(", 1, true) ~= nil)
+  check("hist-pin: bulk delete purges selected sessions through the scoped-purge path (+ confirm)",
+        src:find('a == "history-delete"', 1, true) ~= nil
+        and src:find("FX.purgeLedger({ sessions = sessions })", 1, true) ~= nil
+        and src:find('hs.dialog.blockAlert("Delete session history"', 1, true) ~= nil)
+  check("hist-pin: bulk delete no-ops on an empty selection (never escalates to delete-all)",
+        src:find("if #sessions == 0 then return end", 1, true) ~= nil)
+  check("hist-pin: bulk delete refreshes BOTH the History view and the audit-rows cache",
+        src:find("window.ccHistory(", 1, true) ~= nil
+        and src:find('window.ccAudit(" .. hs.json.encode(FX.readLedger({})) .. ")', 1, true) ~= nil)
+  check("hist-pin: dirBytes skips the dir self-entries (. / ..) so the readout isn't inflated",
+        src:find('if fn ~= "." and fn ~= ".." then', 1, true) ~= nil)
+  check("hist-pin: History tab hidden when the ledger is off (parity with Shift)",
+        src:find('htab = document.getElementById("a-tab-history"); if(htab) htab.style.display = LEDGER_ON', 1, true) ~= nil
+        and src:find('(auditView === "shift" || auditView === "history")) auditTab("rows")', 1, true) ~= nil)
+  check("hist-pin: storage report = core.localStorageReport over FX.storageEntries",
+        src:find('a == "storage-report"', 1, true) ~= nil
+        and src:find("core.localStorageReport(FX.storageEntries())", 1, true) ~= nil
+        and src:find("function FX.storageEntries()", 1, true) ~= nil)
+  check("hist-pin: storageEntries measures Shepherd state, NOT Claude transcripts",
+        src:find('name = "Audit ledger"', 1, true) ~= nil
+        and src:find('name = "Task queues"', 1, true) ~= nil
+        and src:find('fn:match("^cc%-.*%.json$")', 1, true) ~= nil)
+  check("hist-pin: History tab wired (button + filter row + auditTab branch)",
+        src:find('onclick="auditTab(\'history\')"', 1, true) ~= nil
+        and src:find('id="h-filters"', 1, true) ~= nil
+        and src:find("isHist = (v === \"history\")", 1, true) ~= nil
+        and src:find("openHistory(); return;", 1, true) ~= nil)
+  check("hist-pin: a normal audit open resets a stale History/Shift view to Rows",
+        src:find('auditView === "shift" || auditView === "history"', 1, true) ~= nil)
+  check("hist-pin: history rows use ESC'd data-pk/data-sid read back raw (no JS interpolation)",
+        src:find('data-pk="\' + esc(r.projectKey || "")', 1, true) ~= nil
+        and src:find('data-sid="\' + esc(r.session_id || "")', 1, true) ~= nil
+        and src:find('row.getAttribute("data-pk")', 1, true) ~= nil
+        and src:find('row.getAttribute("data-sid")', 1, true) ~= nil)
+  check("hist-pin: pins persist by projectKey in localStorage; pinned/workspace facets + sort chips",
+        src:find('window.localStorage.getItem("cc-historyPins"', 1, true) ~= nil
+        and src:find("function historySortCmp(s)", 1, true) ~= nil
+        and src:find('document.getElementById("h-fac-pin").checked', 1, true) ~= nil)
+  check("hist-pin: Settings storage readout (button + ccStorage render)",
+        src:find('id="s-storage"', 1, true) ~= nil
+        and src:find("function measureStorage()", 1, true) ~= nil
+        and src:find("window.ccStorage = function(rep)", 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
