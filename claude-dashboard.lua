@@ -776,29 +776,41 @@ end
 -- sorts + humanizes. NEVER touches Claude Code's own transcripts (not ours to delete).
 function FX.storageEntries()
   local home = os.getenv("HOME") or ""
-  local function dirBytes(dir)
-    local total = 0
-    for _, fn in ipairs(FX.readDir(dir)) do
-      if fn ~= "." and fn ~= ".." then   -- hs.fs.dir yields the dir self-entries; their inode
-        local a = hs.fs.attributes(dir .. "/" .. fn)  -- sizes would inflate the readout
-        if a and a.size then total = total + a.size end
-      end
+  -- thin adapter: readDir + attributes -> {name, size} list; the pure core helpers own the
+  -- skip-(./..)-and-sum and the cc-*.json filter decisions (so they're unit-tested).
+  local function entriesOf(dir)
+    local list = {}
+    for _, fn in ipairs(FX.readDir(dir) or {}) do
+      local a = hs.fs.attributes(dir .. "/" .. fn)
+      list[#list + 1] = { name = fn, size = a and a.size or nil }
     end
-    return total
+    return list
   end
-  local stateBytes = 0
-  for _, fn in ipairs(FX.readDir(home .. "/.claude")) do
-    if fn:match("^cc%-.*%.json$") then
-      local a = hs.fs.attributes(home .. "/.claude/" .. fn)
-      if a and a.size then stateBytes = stateBytes + a.size end
-    end
+  local function dirBytes(dir) return core.sumDirBytes(entriesOf(dir)) end
+  local claudeDir = home .. "/.claude"
+  local stateEntries = {}
+  for _, fn in ipairs(core.matchStateFiles(FX.readDir(claudeDir) or {})) do
+    local a = hs.fs.attributes(claudeDir .. "/" .. fn)
+    stateEntries[#stateEntries + 1] = { name = fn, size = a and a.size or nil }
   end
   return {
     { name = "Audit ledger",        bytes = dirBytes(LEDGER_DIR) },
     { name = "Task queues",         bytes = dirBytes(QUEUE_DIR) },
     { name = "Session status",      bytes = dirBytes(STATUS_DIR) },
-    { name = "State files (cc-*.json)", bytes = stateBytes },
+    { name = "State files (cc-*.json)", bytes = core.sumDirBytes(stateEntries) },
   }
+end
+
+-- #7: re-read the FULL ledger (uncapped -- aggregation collapses events into ONE record per
+-- session, so the payload stays small) and push the records to the History tab. The
+-- uncapped read + the ccHistory push live in ONE place so the tab and its post-delete
+-- refresh can't diverge (and both get the pcall guard).
+function FX.sendHistory()
+  if not wv then return end
+  local recs = core.sessionHistory(FX.readLedger({ limit = 0 }).events)
+  pcall(function()
+    wv:evaluateJavaScript("window.ccHistory(" .. hs.json.encode({ records = recs }) .. ")")
+  end)
 end
 
 -- Retention GC: delete daily files past ledger.retentionDays, then (if maxTotalMB
@@ -3238,12 +3250,7 @@ local function handleBridgeMsg(msg)
     return
   end
   if a == "open-history-view" then
-    -- #7 session-history browser: aggregate per-session records over the FULL ledger
-    -- (limit=0, uncapped -- aggregation collapses many events into one record per session,
-    -- so the payload stays small even on a huge ledger) and send the compact list.
-    local res = FX.readLedger({ limit = 0 })
-    local records = core.sessionHistory(res.events)
-    pcall(function() wv:evaluateJavaScript("window.ccHistory(" .. hs.json.encode({ records = records }) .. ")") end)
+    FX.sendHistory()   -- #7: aggregate the full ledger -> records -> ccHistory (one source)
     return
   end
   if a == "history-delete" then
@@ -3258,11 +3265,10 @@ local function handleBridgeMsg(msg)
            "Permanently delete all ledger events for " .. label .. "?\nThis cannot be undone.",
            "Delete", "Cancel") == "Delete" then
         local n = FX.purgeLedger({ sessions = sessions })
-        -- Refresh BOTH views that share the overlay's data: the History tab (ccHistory) and
-        -- the audit Rows/Timeline cache (ccAudit) -- else switching tabs in the same open
+        -- Refresh BOTH views that share the overlay's data: the History tab (FX.sendHistory)
+        -- and the audit Rows/Timeline cache (ccAudit) -- else switching tabs in the same open
         -- overlay would still show the just-deleted events (mirrors the audit-purge handler).
-        local recs = core.sessionHistory(FX.readLedger({ limit = 0 }).events)
-        wv:evaluateJavaScript("window.ccHistory(" .. hs.json.encode({ records = recs }) .. ")")
+        FX.sendHistory()
         wv:evaluateJavaScript("window.ccAudit(" .. hs.json.encode(FX.readLedger({})) .. ")")
         hs.alert.show("Claude Shepherd: deleted " .. n .. " event(s) from " .. label)
       end
@@ -4109,6 +4115,7 @@ local HTML = [[
 #h-filters{ display:flex; flex-wrap:wrap; gap:6px; align-items:center; padding:8px 10px; border-bottom:1px solid #23262f; }
 #h-filters input[type=text]{ background:#1a1c22; border:1px solid #2c2f3a; color:#cfd2db; border-radius:6px; padding:3px 6px; font-size:12px; min-width:200px; flex:1; }
 .h-sort{ background:none; border:1px solid #2c2f3a; color:#9aa0ad; border-radius:6px; padding:2px 8px; cursor:pointer; font-size:11px; }
+.s-btn{ background:none; border:1px solid #2c2f3a; color:#cfd2db; border-radius:6px; padding:3px 8px; cursor:pointer; font-size:12px; }
 .h-sort.active{ background:#2b2f3a; color:#e8e9ee; }
 .h-facet{ color:#9aa0ad; font-size:12px; display:inline-flex; align-items:center; gap:3px; }
 #h-del{ margin-left:auto; }
@@ -4604,7 +4611,7 @@ local HTML = [[
       <label class="s-row">Cap total size at <input type="number" id="s-ledger-mb" class="s-num" min="0"> MB (0 = no cap)</label>
       <div class="s-lbl">Only record these event types (space/comma separated; blank = everything)</div>
       <label class="s-row"><input type="text" id="s-ledger-types" class="s-txt" placeholder="decision prompt spawn"></label>
-      <label class="s-row"><button class="s-x" style="border:1px solid #2c2f3a;border-radius:6px;padding:3px 8px;color:#cfd2db;" onclick="measureStorage()">Measure storage</button> <span id="s-storage" class="n-dim">Shepherd's local state on disk.</span></label>
+      <label class="s-row"><button class="s-btn" onclick="measureStorage()">Measure storage</button> <span id="s-storage" class="n-dim">Shepherd's local state on disk.</span></label>
       <div class="s-help">Ledger / queues / status / state files only — never Claude Code's own transcripts. Delete a session's recorded history from the 🗂 History tab; trim old ledger days with the retention setting above.</div>
 
       <div class="s-sec">Editor window pop</div>

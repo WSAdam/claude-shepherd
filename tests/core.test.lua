@@ -2763,6 +2763,23 @@ do
   -- empty / no-session inputs
   eq("history: empty events -> none", #core.sessionHistory({}), 0)
   eq("history: events without session_id ignored", #core.sessionHistory({ { ts = 1, type = "prompt" } }), 0)
+  -- tie-breaks: two events at the SAME ts -> the LATER one (in order) sets lastType (>= rule)
+  local tie = core.sessionHistory({
+    { ts = 200, type = "prompt",   session_id = "z" },
+    { ts = 200, type = "decision", session_id = "z", outcome = "allow" },
+  })
+  eq("history: equal-ts lastType = later event (>= tie-break)", tie[1].lastType, "decision")
+  -- active sort secondary key: equal activity (prompts+tools) -> the more RECENT lastTs wins
+  -- (this branch was never hit when the two sessions differed on activity). p: 1 prompt +
+  -- 1 tool @ lastTs 300; q: 2 prompts @ lastTs 200 -> both activity 2, so p (newer) sorts first.
+  local sec = core.sessionHistory({
+    { ts = 100, type = "prompt",       session_id = "p", name = "p" },
+    { ts = 300, type = "tool_request", session_id = "p", tool = "Bash" },
+    { ts = 150, type = "prompt",       session_id = "q", name = "q" },
+    { ts = 200, type = "prompt",       session_id = "q" },
+  }, { sort = "active" })
+  eq("history: active-sort tie broken by newer lastTs", sec[1].session_id, "p")
+  eq("history: active-sort tie second", sec[2].session_id, "q")
 
   -- localStorageReport: format + sort + total
   local rep = core.localStorageReport({
@@ -2778,6 +2795,22 @@ do
   eq("storage: human formatted", rep.items[1].human, "2.0 MB")
   eq("storage: total bytes", rep.totalBytes, 2 * 1024 * 1024 + 512 + 1024)
   eq("storage: empty -> zero total", core.localStorageReport({}).totalBytes, 0)
+
+  -- sumDirBytes: skip . / .. self-entries + entries with no numeric size; sum the rest
+  eq("sumdir: sums real entries, skips ./.. + sizeless", core.sumDirBytes({
+    { name = ".",  size = 4096 },
+    { name = "..", size = 4096 },
+    { name = "a.jsonl", size = 100 },
+    { name = "b.jsonl", size = 250 },
+    { name = "no-size" },            -- nil size -> skipped
+  }), 350)
+  eq("sumdir: empty/nil -> 0", core.sumDirBytes(nil), 0)
+  -- matchStateFiles: only cc-*.json
+  local sf = core.matchStateFiles({ ".", "cc-config.json", "cc-agents.json", "transcript.json", "cc-notes.txt", "notcc.json" })
+  eq("matchstate: count", #sf, 2)
+  eq("matchstate: keeps cc-config.json", sf[1], "cc-config.json")
+  eq("matchstate: keeps cc-agents.json", sf[2], "cc-agents.json")
+  eq("matchstate: empty/nil -> none", #core.matchStateFiles(nil), 0)
 end
 
 -- ---- gateDecisionSummary: grouped last-N gate decisions (roadmap #2) --------

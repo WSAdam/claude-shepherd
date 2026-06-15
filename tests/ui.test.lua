@@ -1315,10 +1315,13 @@ do
         and src:find("hostPressure = pressure", 1, true) ~= nil)
 
   -- ===== #7 session-history browser + bulk history management =====
-  check("hist-pin: open-history-view aggregates the FULL ledger via core.sessionHistory",
+  -- the uncapped read + aggregate + ccHistory push are single-sourced in FX.sendHistory so the
+  -- tab and its post-delete refresh can't diverge (e.g. one site capping the read).
+  check("hist-pin: open-history-view + FX.sendHistory aggregate the FULL (uncapped) ledger",
         src:find('a == "open-history-view"', 1, true) ~= nil
-        and src:find("FX.readLedger({ limit = 0 })", 1, true) ~= nil
-        and src:find("core.sessionHistory(res.events", 1, true) ~= nil
+        and src:find("FX.sendHistory()", 1, true) ~= nil
+        and src:find("function FX.sendHistory()", 1, true) ~= nil
+        and src:find("core.sessionHistory(FX.readLedger({ limit = 0 }).events)", 1, true) ~= nil
         and src:find("window.ccHistory(", 1, true) ~= nil)
   check("hist-pin: bulk delete purges selected sessions through the scoped-purge path (+ confirm)",
         src:find('a == "history-delete"', 1, true) ~= nil
@@ -1326,11 +1329,9 @@ do
         and src:find('hs.dialog.blockAlert("Delete session history"', 1, true) ~= nil)
   check("hist-pin: bulk delete no-ops on an empty selection (never escalates to delete-all)",
         src:find("if #sessions == 0 then return end", 1, true) ~= nil)
-  check("hist-pin: bulk delete refreshes BOTH the History view and the audit-rows cache",
-        src:find("window.ccHistory(", 1, true) ~= nil
+  check("hist-pin: bulk delete refreshes BOTH the History view (sendHistory) and the audit-rows cache",
+        src:find("FX.sendHistory()", 1, true) ~= nil
         and src:find('window.ccAudit(" .. hs.json.encode(FX.readLedger({})) .. ")', 1, true) ~= nil)
-  check("hist-pin: dirBytes skips the dir self-entries (. / ..) so the readout isn't inflated",
-        src:find('if fn ~= "." and fn ~= ".." then', 1, true) ~= nil)
   check("hist-pin: History tab hidden when the ledger is off (parity with Shift)",
         src:find('htab = document.getElementById("a-tab-history"); if(htab) htab.style.display = LEDGER_ON', 1, true) ~= nil
         and src:find('(auditView === "shift" || auditView === "history")) auditTab("rows")', 1, true) ~= nil)
@@ -1338,10 +1339,13 @@ do
         src:find('a == "storage-report"', 1, true) ~= nil
         and src:find("core.localStorageReport(FX.storageEntries())", 1, true) ~= nil
         and src:find("function FX.storageEntries()", 1, true) ~= nil)
-  check("hist-pin: storageEntries measures Shepherd state, NOT Claude transcripts",
+  -- the count/skip + cc-*.json decisions now live in pure core (behavior-tested: sumdir:* /
+  -- matchstate:*); FX.storageEntries is a thin readDir+attributes adapter (nil-guarded).
+  check("hist-pin: storageEntries measures Shepherd state via pure core helpers, NOT Claude transcripts",
         src:find('name = "Audit ledger"', 1, true) ~= nil
         and src:find('name = "Task queues"', 1, true) ~= nil
-        and src:find('fn:match("^cc%-.*%.json$")', 1, true) ~= nil)
+        and src:find("core.sumDirBytes(", 1, true) ~= nil
+        and src:find("core.matchStateFiles(FX.readDir(claudeDir) or {})", 1, true) ~= nil)
   check("hist-pin: History tab wired (button + filter row + auditTab branch)",
         src:find('onclick="auditTab(\'history\')"', 1, true) ~= nil
         and src:find('id="h-filters"', 1, true) ~= nil

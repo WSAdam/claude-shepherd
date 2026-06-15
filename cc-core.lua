@@ -626,6 +626,8 @@ function M.sessionHistory(events, opts)
         by[sid] = r; order[#order + 1] = sid
       end
       if e.name and e.name ~= "" then r.name = e.name end       -- prefer the latest non-empty name
+      -- ...but FIRST projectKey wins (deliberate asymmetry): it's the pin key, so a session
+      -- that migrates workspace keeps its pin stable rather than splitting across keys.
       if e.projectKey and not r.projectKey then r.projectKey = e.projectKey end
       local ts = tonumber(e.ts)
       if ts then
@@ -673,6 +675,31 @@ function M.localStorageReport(entries)
   end
   table.sort(items, function(a, b) return a.bytes > b.bytes end)
   return { items = items, totalBytes = total, totalHuman = M.fmtBytes(total) }
+end
+
+-- Sum the byte sizes of directory entries for the #7 storage readout, SKIPPING the "." /
+-- ".." self-entries (whose inode sizes would inflate the total) and any entry without a
+-- numeric size. The FX layer turns readDir + hs.fs.attributes into the {name, size} list;
+-- this keeps the count/skip decision pure + unit-tested. Pure.
+function M.sumDirBytes(entries)
+  local total = 0
+  for _, e in ipairs(entries or {}) do
+    if type(e) == "table" and e.name ~= "." and e.name ~= ".." then
+      local s = tonumber(e.size)
+      if s and s >= 0 then total = total + s end
+    end
+  end
+  return total
+end
+
+-- Filter a list of filenames to Shepherd's own `cc-*.json` state files (the storage
+-- readout's "State files" group). Pure.
+function M.matchStateFiles(names)
+  local out = {}
+  for _, fn in ipairs(names or {}) do
+    if type(fn) == "string" and fn:match("^cc%-.*%.json$") then out[#out + 1] = fn end
+  end
+  return out
 end
 
 -- Which daily files are past the retention window (older than retentionDays before
