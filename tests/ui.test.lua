@@ -1142,11 +1142,16 @@ do
   check("l5chg-rev: rename-aware diff via orig",
         src:find("function FX.gitDiff(root, file, orig)", 1, true) ~= nil
         and src:find("diff HEAD -M --no-color", 1, true) ~= nil)
-  check("l5chg-rev: detail-diff validates path against session file set",
-        src:find("local allowed = gitChangeFiles[key]", 1, true) ~= nil
-        and src:find("allowed[file] == nil then reply", 1, true) ~= nil)
+  check("l5chg-rev: detail-diff validates path via pure core.resolveDiffTarget",
+        src:find("core.resolveDiffTarget(gitChangeFiles[key], file)", 1, true) ~= nil
+        and src:find("not okPath then reply", 1, true) ~= nil)
   check("l5chg-rev: detail-changes caches the authoritative file set",
         src:find("gitChangeFiles[key] = allowed", 1, true) ~= nil)
+  -- observed-from-console fix: the official-usage poll logs only on STATUS CHANGE
+  -- (a persistent -1/401 was spamming every 180s); the local-approx fallback stays.
+  check("usagelog-fix: official fetch logs only on status change",
+        src:find("if status ~= lastOfficialStatus then", 1, true) ~= nil
+        and src:find("official usage recovered (HTTP 200)", 1, true) ~= nil)
   -- #3 export session archive: bridge handler, transcript cp (verbatim, large-safe),
   -- meta via core, ledger event, two entry points (detail button + ctx-menu).
   check("l5exp-pin: export-session handler", src:find('a == "export-session"', 1, true) ~= nil)

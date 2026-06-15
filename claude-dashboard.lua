@@ -350,6 +350,7 @@ local usageState = {}      -- [path] = { offset, cum = {...}, recent = { {ts, bu
 local lastUsagePayload = nil
 local lastOfficialUsage = nil   -- parsed { five_hour, seven_day, seven_day_sonnet, ... } or nil
 local lastOfficialFetch = 0     -- epoch of the last successful/attempted fetch (180s TTL)
+local lastOfficialStatus = nil  -- last fetch HTTP status, so we log only on CHANGE (no 3-min spam)
 local ccVersion = nil           -- "x.y.z" for the User-Agent (detected once)
 local function blankCum() return { input = 0, output = 0, cacheRead = 0, cacheCreate = 0, total = 0, real = 0, byModel = {} } end
 local function addBuckets(dst, e)
@@ -476,11 +477,21 @@ function FX.fetchOfficialUsage(force)
   }
   hs.http.asyncGet(OAUTH_USAGE_URL, headers, function(status, body)
     if status ~= 200 or not body then
-      print("[cc-usage] official usage fetch: HTTP " .. tostring(status) .. " (using local approx)")
+      -- Log only when the status CHANGES (the poll runs every 180s; a persistent
+      -- -1/401 -- e.g. an expired Claude oauth token -- otherwise spams the console).
+      -- The local-approx fallback keeps working regardless.
+      if status ~= lastOfficialStatus then
+        print("[cc-usage] official usage fetch: HTTP " .. tostring(status) .. " (using local approx; suppressing repeats)")
+        lastOfficialStatus = status
+      end
       return
     end
     local ok, j = pcall(function() return hs.json.decode(body) end)
     if not ok or type(j) ~= "table" then return end
+    if lastOfficialStatus ~= nil and lastOfficialStatus ~= 200 then
+      print("[cc-usage] official usage recovered (HTTP 200)")
+    end
+    lastOfficialStatus = 200
     lastOfficialUsage = j
     -- push immediately so the bars update without waiting for the next 60s pass
     if wv then pcall(function()
@@ -1168,6 +1179,8 @@ function FX.gitDiff(root, file, orig)
                        .. o .. " " .. f .. " 2>/dev/null | head -c 200000")
     end
     if not out or out == "" then
+      -- tracked file modified in place (its blob lives at the path itself, no -M
+      -- needed) -- also the fallback when the rename attempt came back empty.
       out = hs.execute("git -C " .. q .. " -c core.quotepath=false diff HEAD --no-color --no-ext-diff -- " .. f
                        .. " 2>/dev/null | head -c 200000")
     end
@@ -2922,12 +2935,13 @@ local function handleBridgeMsg(msg)
       pcall(function() wv:evaluateJavaScript("window.ccDetailDiff("
         .. jsString(key) .. ", " .. jsString(file) .. ", " .. jsString(txt or "") .. ")") end)
     end
-    local allowed = gitChangeFiles[key]
-    if not it or it.remote or file == "" or not allowed or allowed[file] == nil then reply(""); return end
+    -- core.resolveDiffTarget is the security boundary (a path not in the cached
+    -- status set is refused) AND returns the rename orig in one clean call.
+    local okPath, orig = core.resolveDiffTarget(gitChangeFiles[key], file)
+    if not it or it.remote or file == "" or not okPath then reply(""); return end
     local root = it.cwd and FX.gitRoot(it.cwd) or nil
     if not root then reply(""); return end
-    local orig = allowed[file]
-    reply(FX.gitDiff(root, file, (orig and orig ~= false) and orig or nil) or "")
+    reply(FX.gitDiff(root, file, orig) or "")
     return
   end
   if a == "export-session" then

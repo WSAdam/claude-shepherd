@@ -4204,6 +4204,17 @@ do
   eq("git: summary renamed", s.summary.renamed, 1)
   eq("git: summary total", s.summary.total, 5)
 
+  -- resolveDiffTarget: the security boundary -- a path NOT in the cached status set
+  -- is refused; an in-set path returns ok=true + its rename orig (or nil).
+  local allowed = { ["a.lua"] = false, ["b.lua"] = "old.lua" }
+  local okA, origA = core.resolveDiffTarget(allowed, "a.lua")
+  check("resolveDiff: in-set no-rename ok", okA == true and origA == nil)
+  local okB, origB = core.resolveDiffTarget(allowed, "b.lua")
+  check("resolveDiff: in-set rename returns orig", okB == true and origB == "old.lua")
+  local okX = core.resolveDiffTarget(allowed, "/etc/passwd")
+  eq("resolveDiff: out-of-set REFUSED", okX, false)
+  eq("resolveDiff: nil allowed -> refused", core.resolveDiffTarget(nil, "a.lua"), false)
+
   -- rename does NOT swallow the following real entry (consumes exactly one extra token)
   local z2 = "R  a.lua\0b.lua\0 M c.lua\0"
   local s2 = core.parseGitStatus(z2)

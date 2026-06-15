@@ -5862,6 +5862,18 @@ function M.parseGitStatus(out)
   return { files = files, summary = sum }
 end
 
+-- Resolve a detail-diff request against the authoritative file set from the last
+-- parseGitStatus (the security boundary: a bridge-supplied path that ISN'T a real
+-- status entry is refused, so the --no-index fallback can't read an arbitrary
+-- file). `allowed` maps path -> orig|false (orig present for a rename). Returns
+-- (ok, orig): ok=false when the path isn't in the set; orig is the rename source
+-- string or nil. Pure -- unit-tested directly (the source-grep can't exercise it).
+function M.resolveDiffTarget(allowed, file)
+  if type(allowed) ~= "table" or allowed[file] == nil then return false, nil end
+  local orig = allowed[file]
+  return true, (orig ~= false and orig ~= "" and orig) or nil
+end
+
 -- ---- L5: export session archive ------------------------------------------
 -- Slug a string into a filesystem-safe fragment for the export folder name, in
 -- two passes (the parens truncate each gsub's (string,count) to the string):
@@ -5869,7 +5881,7 @@ end
 --     (it's in the allowed set), so dot hygiene must run AFTER this.
 --   dotHygiene: no leading/trailing/repeated dots.
 local function squeezeSep(x) return (x:gsub("[^%w%._%-]+", "-"):gsub("%-+", "-"):gsub("^%-", ""):gsub("%-$", "")) end
-local function dotHygiene(x) return (x:gsub("%.+", "."):gsub("^%.", ""):gsub("%.$", "")) end
+local function dotHygiene(x) return (x:gsub("%.+", "."):gsub("^%.", ""):gsub("%.$", "")) end  -- run AFTER squeezeSep (it preserves '.')
 local function exportSlug(s)
   local out = dotHygiene(squeezeSep(tostring(s or "")))
   if out == "" then out = "session" end
