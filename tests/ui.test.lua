@@ -1076,6 +1076,38 @@ do
   check("l5b-pin: hooks via core.parseHookInventory", src:find("core.parseHookInventory(settings)", 1, true) ~= nil)
   check("l5b-pin: gate timeout check", src:find("core.gateHookTimeoutOk(inv, 130)", 1, true) ~= nil)
   check("l5b-pin: ccHooks render fn", src:find("function ccHooks(inv, gate, path)", 1, true) ~= nil)
+  -- L5 detail-panel tab strip (keystone): tabs from core.DETAIL_TABS, localStorage
+  -- bridge keyed by projectKey, lazy Timeline fetch, pin/unpin menu.
+  check("l5tab-pin: DETAIL_TABS injected single-source",
+        src:find("__DETAIL_TABS__", 1, true) ~= nil
+        and src:find('HTML:gsub("__DETAIL_TABS__"', 1, true) ~= nil)
+  check("l5tab-pin: tab bar + panels markup", src:find('<div id="d-tabs">', 1, true) ~= nil
+        and src:find('class="d-panel" data-tab="activity"', 1, true) ~= nil
+        and src:find('class="d-panel" data-tab="queue"', 1, true) ~= nil)
+  check("l5tab-pin: JS mirrors core.normalizeTabState", src:find("function normalizeTabStateJS(raw)", 1, true) ~= nil)
+  check("l5tab-pin: localStorage keyed by projectKey",
+        src:find('return "cc-detailTabs-" + pk', 1, true) ~= nil
+        and src:find("function projectKeyOf(it)", 1, true) ~= nil)
+  check("l5tab-pin: tab state restored on selection", src:find("loadTabState(key)", 1, true) ~= nil)
+  check("l5tab-pin: lazy Timeline fetch (not on tick)", src:find('send("detail-timeline", selectedKey)', 1, true) ~= nil
+        and src:find('a == "detail-timeline"', 1, true) ~= nil)
+  check("l5tab-pin: inline timeline reuses narr + stale guard",
+        src:find("evs.map(narr).join", 1, true) ~= nil
+        and src:find("if(TIMELINE.key !== selectedKey)", 1, true) ~= nil)
+  check("l5tab-pin: default tab can't be unpinned", src:find('if(id === "activity") return;', 1, true) ~= nil)
+  -- adversarial-review fixes (round 1): dedup in-flight timeline fetch, DOM-safe
+  -- tab menu (no inline-handler id interpolation), empty-state notes, JS/Lua parity.
+  check("l5tab-fix: timeline fetch deduped via pending marker",
+        src:find("TIMELINE = { key: selectedKey, events: null }", 1, true) ~= nil
+        and src:find("if(evs === null)", 1, true) ~= nil)
+  check("l5tab-fix: tab menu built DOM-safe (no inline onchange interpolation)",
+        src:find("cb.onchange = function(){ toggleTabPinned(t.id); }", 1, true) ~= nil
+        and src:find('onchange="toggleTabPinned(', 1, true) == nil)
+  check("l5tab-fix: empty-state notes for active-but-empty tabs",
+        src:find("No gate decisions recorded for this session yet", 1, true) ~= nil
+        and src:find("No token usage recorded for this session yet", 1, true) ~= nil)
+  check("l5tab-fix: normalizeTabStateJS mirrors Lua value form",
+        src:find('(ru[k]===true) ? k : (typeof ru[k]==="string" ? ru[k] : null)', 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

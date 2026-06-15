@@ -4103,5 +4103,57 @@ do
   eq("polAtt: remaining is the second", a5.attachments[1].bundle, "read-only")
 end
 
+-- ---- L5: detail-panel tab strip state normalizer --------------------------
+do
+  -- canonical list is non-empty and starts with the default
+  check("tabs: DETAIL_TABS non-empty", #core.DETAIL_TABS > 0)
+  eq("tabs: default is first id", core.DETAIL_TABS[1].id, core.DETAIL_TAB_DEFAULT)
+  local ids = core.detailTabIds()
+  check("tabs: ids set has activity", ids.activity == true)
+  check("tabs: ids set has queue", ids.queue == true)
+
+  -- nil / garbage raw -> default selected, no unpinned
+  local n0 = core.normalizeTabState(nil)
+  eq("tabs: nil raw -> default selected", n0.selectedTab, "activity")
+  eq("tabs: nil raw -> no unpinned (next is nil)", next(n0.unpinned), nil)
+  local ng = core.normalizeTabState("not a table")
+  eq("tabs: garbage raw -> default", ng.selectedTab, "activity")
+
+  -- a valid selection that is pinned is kept
+  local n1 = core.normalizeTabState({ selectedTab = "usage", unpinned = { decisions = true } })
+  eq("tabs: valid selection kept", n1.selectedTab, "usage")
+  check("tabs: valid unpinned kept", n1.unpinned.decisions == true)
+  eq("tabs: unrelated tab not unpinned", n1.unpinned.usage, nil)
+
+  -- unknown selectedTab -> default
+  eq("tabs: unknown selection -> default",
+     core.normalizeTabState({ selectedTab = "bogus" }).selectedTab, "activity")
+
+  -- the default tab can NEVER be unpinned
+  local n2 = core.normalizeTabState({ selectedTab = "activity", unpinned = { activity = true } })
+  eq("tabs: default cannot be unpinned", n2.unpinned.activity, nil)
+
+  -- selecting a tab that is also unpinned -> falls back to default (active must be visible)
+  local n3 = core.normalizeTabState({ selectedTab = "queue", unpinned = { queue = true } })
+  eq("tabs: selected-but-unpinned -> default", n3.selectedTab, "activity")
+  check("tabs: that tab stays unpinned", n3.unpinned.queue == true)
+
+  -- unknown ids in unpinned are dropped
+  local n4 = core.normalizeTabState({ unpinned = { nope = true, timeline = true } })
+  eq("tabs: unknown unpinned id dropped", n4.unpinned.nope, nil)
+  check("tabs: known unpinned id kept", n4.unpinned.timeline == true)
+
+  -- array form of unpinned is accepted
+  local n5 = core.normalizeTabState({ unpinned = { "decisions", "usage" } })
+  check("tabs: array unpinned decisions", n5.unpinned.decisions == true)
+  check("tabs: array unpinned usage", n5.unpinned.usage == true)
+
+  -- injected tabs list (test override) is honored
+  local n6 = core.normalizeTabState({ selectedTab = "x", unpinned = { y = true } },
+                                     { { id = "activity" }, { id = "x" }, { id = "y" } })
+  eq("tabs: injected list selection kept", n6.selectedTab, "x")
+  check("tabs: injected list unpinned kept", n6.unpinned.y == true)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

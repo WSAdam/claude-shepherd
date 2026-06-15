@@ -5740,4 +5740,64 @@ function M.scheduleBoard(list, now)
   return out
 end
 
+-- ---- L5: detail-panel tab strip ------------------------------------------
+-- Canonical ordered tab list for the detail panel. Injected into the panel JS
+-- as __DETAIL_TABS__ (like __BULK_RULES__) so the strip and the pure state
+-- normalizer share ONE source of truth -- no drift. 'activity' is the default
+-- and can NEVER be unpinned (it's the always-available fallback view). New
+-- tabs (e.g. 'changes' from the git-changes view) append here.
+-- KEEP-IN-SYNC: the per-tab render dispatch in the panel JS (setDetailTab /
+-- applyTabVisibility) must handle each id, and normalizeTabStateJS in the panel
+-- JS mirrors M.normalizeTabState below.
+M.DETAIL_TABS = {
+  { id = "activity",  label = "Activity" },
+  { id = "timeline",  label = "Timeline" },
+  { id = "decisions", label = "Decisions" },
+  { id = "usage",     label = "Usage" },
+  { id = "queue",     label = "Queue" },
+}
+M.DETAIL_TAB_DEFAULT = "activity"
+
+-- Set of valid tab ids (derived once from M.DETAIL_TABS, or an injected list for
+-- tests). Returns a { [id]=true } map.
+function M.detailTabIds(tabs)
+  local set = {}
+  for _, t in ipairs(tabs or M.DETAIL_TABS) do
+    if type(t) == "table" and t.id then set[t.id] = true
+    elseif type(t) == "string" then set[t] = true end
+  end
+  return set
+end
+
+-- normalizeTabState(raw [, tabs]) -> { selectedTab, unpinned }
+-- Sanitize a stored/over-the-wire tab-state blob so the panel can trust it:
+--   * unpinned: keep only entries whose id is a KNOWN tab AND not the default
+--     (the default tab can never be hidden); returned as a { [id]=true } map.
+--   * selectedTab: kept only if it's a known tab that is NOT unpinned (so the
+--     active tab is always visible); otherwise falls back to the default.
+-- Pure + deterministic. Mirrored by normalizeTabStateJS in the panel JS.
+function M.normalizeTabState(raw, tabs)
+  local valid = M.detailTabIds(tabs)
+  local def = M.DETAIL_TAB_DEFAULT
+  raw = type(raw) == "table" and raw or {}
+
+  local unpinned = {}
+  local rawUnp = raw.unpinned
+  if type(rawUnp) == "table" then
+    -- accept either a { id=true } map or an array of ids
+    for k, v in pairs(rawUnp) do
+      local id = (type(k) == "string") and k or (type(v) == "string" and v or nil)
+      if id and valid[id] and id ~= def and (v == true or type(k) == "number") then
+        unpinned[id] = true
+      end
+    end
+  end
+
+  local sel = raw.selectedTab
+  if type(sel) ~= "string" or not valid[sel] or unpinned[sel] then
+    sel = def
+  end
+  return { selectedTab = sel, unpinned = unpinned }
+end
+
 return M

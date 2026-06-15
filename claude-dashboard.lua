@@ -2767,6 +2767,24 @@ local function handleBridgeMsg(msg)
       .. ", " .. jsString(sid) .. ", " .. jsString("timeline") .. ")") end)
     return
   end
+  if a == "detail-timeline" then
+    -- L5 inline Timeline tab: the selected session's chronological history,
+    -- rendered compactly in the detail panel (reuses core.sessionTimeline + the
+    -- cached ledger). Selection/tab-triggered, NEVER on the 1s tick. Replies an
+    -- empty array when there's nothing to show (the JS renders an empty note).
+    local key = tostring(payload.v or "")
+    local it = byKey[key]
+    local sid = it and it.session_id
+    if not ledgerEnabled() or not sid or tostring(sid) == "" then
+      pcall(function() wv:evaluateJavaScript("window.ccDetailTimeline(" .. jsString(key) .. ", [])") end)
+      return
+    end
+    local res = FX.readLedger({})
+    local events = core.sessionTimeline(res.events, sid, { limit = 200 })
+    pcall(function() wv:evaluateJavaScript("window.ccDetailTimeline("
+      .. jsString(key) .. ", " .. hs.json.encode(events) .. ")") end)
+    return
+  end
   if a == "decision-log" then
     -- Detail-panel gate decision log: last N grouped decisions for the selected
     -- session, read from the CACHED ledger snapshot (selection-triggered, never
@@ -3449,6 +3467,25 @@ local HTML = [[
   /* detail / control panel (shared across themes) ------------------------- */
   #detail { border-top:1px solid #2c2f3a; padding:10px 12px; display:none; }
   #detail.show { display:block; }
+  /* L5 detail-panel tab strip */
+  #d-tabs { display:flex; align-items:center; gap:2px; margin:8px 0 6px; border-bottom:1px solid #2c2f3a; flex-wrap:wrap; }
+  .d-tab { font-size:11px; color:#8a8d99; background:transparent; border:none; border-bottom:2px solid transparent;
+    padding:4px 9px; cursor:pointer; font-family:inherit; line-height:1.4; }
+  .d-tab:hover { color:#cfd2db; }
+  .d-tab.active { color:#fff; border-bottom-color:#5a7fd6; }
+  .d-tab-cog { margin-left:auto; color:#6b7280; font-size:12px; padding:2px 6px; border:none; background:transparent;
+    cursor:pointer; font-family:inherit; }
+  .d-tab-cog:hover { color:#cfd2db; }
+  #d-tab-menu { display:none; margin:0 0 6px; padding:6px 8px; background:#1a1c24; border:1px solid #2c2f3a; border-radius:8px; }
+  #d-tab-menu.show { display:block; }
+  #d-tab-menu .tm-h { font-size:10px; color:#6b7280; text-transform:uppercase; letter-spacing:.04em; margin-bottom:4px; }
+  #d-tab-menu label { display:flex; align-items:center; gap:6px; font-size:11px; color:#cfd2db; padding:2px 0; cursor:pointer; }
+  #d-tab-menu label.locked { color:#6b7280; cursor:default; }
+  .d-panel { display:none; }
+  .d-panel.active { display:block; }
+  #d-timeline { font-size:11px; }
+  #d-timeline .tl-pre { white-space:pre-wrap; color:#cfd2db; font-family:ui-monospace,Menlo,monospace; font-size:11px; line-height:1.5; margin:0; }
+  #d-timeline .tl-empty { color:#6b7280; font-size:11px; }
   #d-head { display:flex; align-items:center; gap:8px; }
   #d-dot  { width:10px; height:10px; border-radius:50%; background:var(--dc,#6b7280); flex:0 0 auto; }
   #d-name { font-size:14px; font-weight:700; color:#fff; }
@@ -3923,15 +3960,39 @@ local HTML = [[
       <span id="d-name"></span>
       <span id="d-status"></span>
     </div>
-    <div id="d-pending" onclick="toggleExpand('pending')"></div>
-    <div id="d-ask"></div>
-    <div id="d-activity" onclick="toggleExpand('activity')"></div>
-    <div id="d-prompt"></div>
-    <div id="d-meta"></div>
-    <div id="d-lineage" title="Respawn / clear / continue churn for this project since midnight (needs the audit ledger)."></div>
-    <div id="d-decisions"></div>
-    <div id="d-plan"></div>
-    <div id="d-usage"></div>
+    <!-- L5 tab strip: groups the views Shepherd already renders. The bar is
+         built in JS from __DETAIL_TABS__ (single source w/ core.DETAIL_TABS);
+         only the active panel shows. Renderers keep writing into the same div
+         IDs below -- the strip only gates visibility + lazy-loads Timeline. -->
+    <div id="d-tabs"></div>
+    <div id="d-tab-menu"></div>
+    <div class="d-panel" data-tab="activity">
+      <div id="d-pending" onclick="toggleExpand('pending')"></div>
+      <div id="d-ask"></div>
+      <div id="d-activity" onclick="toggleExpand('activity')"></div>
+      <div id="d-prompt"></div>
+      <div id="d-meta"></div>
+      <div id="d-lineage" title="Respawn / clear / continue churn for this project since midnight (needs the audit ledger)."></div>
+      <div id="d-plan"></div>
+    </div>
+    <div class="d-panel" data-tab="timeline">
+      <div id="d-timeline"></div>
+    </div>
+    <div class="d-panel" data-tab="decisions">
+      <div id="d-decisions"></div>
+    </div>
+    <div class="d-panel" data-tab="usage">
+      <div id="d-usage"></div>
+    </div>
+    <div class="d-panel" data-tab="queue">
+      <div id="queue-row">
+        <span id="q-count" onclick="toggleQueueList()" title="Click to view / reorder / remove queued tasks"></span>
+        <label id="route-lbl" title="4c-E project routing: feed this project's queue to WHICHEVER of its sessions is free (not just the one that finished). Per-project flag; also needs Settings &rarr; Queue &rarr; project routing enabled. Logged as by:'router'."><input type="checkbox" id="q-route" onchange="onRouteToggle()"> route</label>
+        <label id="route-seq-lbl" title="L4 process mode. Sequential: run this project's queue ONE routed task at a time (the next starts only after the current finishes) &mdash; serialize through the fleet. Off = distribute: fan tasks out across whichever sessions are free."><input type="checkbox" id="q-route-seq" onchange="onRouteModeToggle()"> seq</label>
+        <button id="b-feed" onclick="act('queue-feed')">Feed next</button>
+      </div>
+      <div id="queue-list"></div>
+    </div>
     <div id="d-actions">
       <button id="b-jump"    onclick="act('focus')">Jump</button>
       <button id="b-approve" onclick="act('approve')">Approve</button>
@@ -3986,13 +4047,6 @@ local HTML = [[
     </div>
     <div id="tpl-menu"></div>
     <div id="nudge-chip"><span id="nudge-chip-label"></span><button onclick="clearImage()" title="Remove image">✕</button></div>
-    <div id="queue-row">
-      <span id="q-count" onclick="toggleQueueList()" title="Click to view / reorder / remove queued tasks"></span>
-      <label id="route-lbl" title="4c-E project routing: feed this project's queue to WHICHEVER of its sessions is free (not just the one that finished). Per-project flag; also needs Settings → Queue → project routing enabled. Logged as by:'router'."><input type="checkbox" id="q-route" onchange="onRouteToggle()"> route</label>
-      <label id="route-seq-lbl" title="L4 process mode. Sequential: run this project's queue ONE routed task at a time (the next starts only after the current finishes) — serialize through the fleet. Off = distribute: fan tasks out across whichever sessions are free."><input type="checkbox" id="q-route-seq" onchange="onRouteModeToggle()"> seq</label>
-      <button id="b-feed" onclick="act('queue-feed')">Feed next</button>
-    </div>
-    <div id="queue-list"></div>
   </div>
 
   <div id="settings">
@@ -5621,8 +5675,164 @@ local HTML = [[
         requestDecisions(key);  // gate decision log loads per selection, not per tick
         queueListOpen = false; renderQueueList();   // queue editor is per-session
         tplOpen = false; renderTemplates();
+        TIMELINE = { key:null, events:null };       // L5: inline timeline is per-session, lazy
+        closeTabMenu();
+        loadTabState(key);          // restore this project's {selectedTab, unpinned}
       }
       selectedKey = key; renderDetail(); paintSelection();
+      renderTabBar(); applyTabVisibility();  // built per-selection, NOT on the 1s tick
+      maybeLoadActiveTab();         // lazy-fetch Timeline/Queue if that's the restored tab
+    }
+
+    // ---- L5 detail-panel tab strip -----------------------------------------
+    // The bar groups the views Shepherd already renders (Activity / Timeline /
+    // Decisions / Usage / Queue). DETAIL_TABS is injected from core.DETAIL_TABS
+    // (single source). Per-project state {selectedTab, unpinned} persists to
+    // localStorage keyed by the STABLE projectKey, so it survives cd-drift and
+    // reopen. Renderers keep populating their div IDs every tick; the strip only
+    // gates which panel shows + lazy-loads the expensive Timeline tab.
+    var DETAIL_TABS = __DETAIL_TABS__;     // [{id,label}], canonical order
+    var detailTab = "activity";            // active tab id for the current selection
+    var detailUnpinned = {};               // { id:true } hidden tabs for the current project
+    var TIMELINE = { key:null, events:null };  // inline timeline cache (lazy, per-session)
+
+    function projectKeyOf(it){ return (it && (it.projectKey || it.cwd || it.key)) || null; }
+    function tabStorageKey(pk){ return "cc-detailTabs-" + pk; }
+
+    // Mirror of core.normalizeTabState (KEEP-IN-SYNC). Clamps selectedTab to a
+    // known+pinned tab (default 'activity', which can never be unpinned) and
+    // drops unknown/default entries from unpinned.
+    function normalizeTabStateJS(raw){
+      var valid = {}; for(var i=0;i<DETAIL_TABS.length;i++) valid[DETAIL_TABS[i].id] = true;
+      var def = "activity";
+      raw = (raw && typeof raw === "object") ? raw : {};
+      var unp = {};
+      var ru = raw.unpinned;
+      if(ru && typeof ru === "object"){
+        if(ru.length !== undefined){          // array of ids
+          for(var j=0;j<ru.length;j++){ var id=ru[j]; if(valid[id] && id!==def) unp[id]=true; }
+        } else {
+          // map form { id:true }, OR (mirroring core.normalizeTabState) a
+          // numeric-keyed { "1":"decisions" } whose VALUE is the id.
+          for(var k in ru){
+            var idk = (ru[k]===true) ? k : (typeof ru[k]==="string" ? ru[k] : null);
+            if(idk && valid[idk] && idk!==def) unp[idk]=true;
+          }
+        }
+      }
+      var sel = raw.selectedTab;
+      if(typeof sel !== "string" || !valid[sel] || unp[sel]) sel = def;
+      return { selectedTab: sel, unpinned: unp };
+    }
+    function loadTabState(key){
+      var it = findItem(key); var pk = projectKeyOf(it);
+      var st = { selectedTab:"activity", unpinned:{} };
+      if(pk){ try { var raw = window.localStorage.getItem(tabStorageKey(pk));
+        if(raw) st = normalizeTabStateJS(JSON.parse(raw)); } catch(e){} }
+      detailTab = st.selectedTab; detailUnpinned = st.unpinned;
+    }
+    function saveTabState(){
+      var it = findItem(selectedKey); var pk = projectKeyOf(it); if(!pk) return;
+      try { window.localStorage.setItem(tabStorageKey(pk),
+        JSON.stringify({ selectedTab: detailTab, unpinned: detailUnpinned })); } catch(e){}
+    }
+    function renderTabBar(){
+      var bar = document.getElementById("d-tabs"); if(!bar) return;
+      bar.innerHTML = "";
+      DETAIL_TABS.forEach(function(t){
+        if(detailUnpinned[t.id]) return;           // hidden for this project
+        var b = document.createElement("button");
+        b.className = "d-tab" + (t.id === detailTab ? " active" : "");
+        b.textContent = t.label; b.title = t.label;
+        b.onclick = function(){ setDetailTab(t.id, true); };
+        bar.appendChild(b);
+      });
+      var cog = document.createElement("button");
+      cog.className = "d-tab-cog"; cog.textContent = "⋯";
+      cog.title = "Show / hide tabs for this project";
+      cog.setAttribute("aria-label", "Show or hide tabs for this project");
+      cog.onclick = toggleTabMenu;
+      bar.appendChild(cog);
+    }
+    function applyTabVisibility(){
+      var panels = document.querySelectorAll("#detail .d-panel");
+      for(var i=0;i<panels.length;i++){
+        panels[i].classList.toggle("active", panels[i].getAttribute("data-tab") === detailTab);
+      }
+    }
+    function setDetailTab(id, persist){
+      detailTab = id; applyTabVisibility(); renderTabBar();
+      if(persist) saveTabState();
+      maybeLoadActiveTab();
+    }
+    // Lazy-load discipline: Activity/Decisions/Usage already render into their
+    // divs every tick (cheap text). Only the expensive views fetch on demand --
+    // Timeline pulls the ledger, Queue pulls the task file -- and only when their
+    // tab is the active one.
+    function maybeLoadActiveTab(){
+      if(!selectedKey) return;
+      if(detailTab === "timeline"){
+        if(TIMELINE.key !== selectedKey){
+          var it = findItem(selectedKey);
+          if(it && it.session_id){
+            // Mark pending (key set, events=null) BEFORE the async send so a
+            // second tab-click before the reply arrives won't re-fetch.
+            TIMELINE = { key: selectedKey, events: null };
+            send("detail-timeline", selectedKey);   // ccDetailTimeline repaints
+          } else { TIMELINE = { key: selectedKey, events: [] }; }
+        }
+        renderDetailTimeline();   // clears stale (key mismatch) or paints cache/pending
+      } else if(detailTab === "queue"){
+        if(!queueListOpen){ var it2 = findItem(selectedKey); if(it2 && (it2.queue||0) > 0){ toggleQueueList(); } }
+      }
+    }
+    window.ccDetailTimeline = function(key, events){
+      TIMELINE = { key: key, events: events || [] };
+      renderDetailTimeline();
+    };
+    function renderDetailTimeline(){
+      var box = document.getElementById("d-timeline"); if(!box) return;
+      // Stale paint guard: only show data fetched for the CURRENT selection.
+      if(TIMELINE.key !== selectedKey){ box.innerHTML = ""; return; }
+      var evs = TIMELINE.events;
+      if(evs === null){ box.innerHTML = '<div class="tl-empty">Loading activity…</div>'; return; }  // fetch in flight
+      if(!evs.length){ box.innerHTML = '<div class="tl-empty">No recorded activity for this session yet (the ledger is off, or this session has no id).</div>'; return; }
+      box.innerHTML = '<pre class="tl-pre">' + esc(evs.map(narr).join("\n")) + '</pre>';
+    }
+    // ⋯ menu: per-project tab show/hide (pin/unpin). 'activity' is always shown.
+    function toggleTabMenu(){
+      var m = document.getElementById("d-tab-menu");
+      if(m.classList.contains("show")){ closeTabMenu(); return; }
+      renderTabMenu(); m.classList.add("show");
+    }
+    function closeTabMenu(){ var m = document.getElementById("d-tab-menu"); if(m) m.classList.remove("show"); }
+    function renderTabMenu(){
+      var m = document.getElementById("d-tab-menu"); if(!m) return;
+      // Built with createElement (not innerHTML concatenation) so the tab id is
+      // never interpolated into an inline handler string -- the id rides a
+      // closure and the label rides a text node, both injection-safe even if
+      // DETAIL_TABS later grows dynamic entries.
+      m.innerHTML = "";
+      var h = document.createElement("div"); h.className = "tm-h";
+      h.textContent = "Tabs for this project"; m.appendChild(h);
+      DETAIL_TABS.forEach(function(t){
+        var locked = (t.id === "activity");
+        var lab = document.createElement("label"); if(locked) lab.className = "locked";
+        var cb = document.createElement("input"); cb.type = "checkbox";
+        cb.checked = !detailUnpinned[t.id]; cb.disabled = locked;
+        if(!locked) cb.onchange = function(){ toggleTabPinned(t.id); };
+        lab.appendChild(cb); lab.appendChild(document.createTextNode(" " + t.label));
+        m.appendChild(lab);
+      });
+    }
+    function toggleTabPinned(id){
+      if(id === "activity") return;             // the default tab can't be hidden
+      if(detailUnpinned[id]){ delete detailUnpinned[id]; }
+      else {
+        detailUnpinned[id] = true;
+        if(detailTab === id) detailTab = "activity";   // can't sit on a hidden tab
+      }
+      saveTabState(); renderTabBar(); applyTabVisibility(); renderTabMenu(); maybeLoadActiveTab();
     }
 
     // ---- Gate decision log (roadmap #2): last-N grouped decisions ----------
@@ -5657,10 +5867,15 @@ local HTML = [[
     }
     function renderDecisions(){
       var box = document.getElementById("d-decisions"); if(!box) return;
+      // Visibility is gated by the parent .d-panel (Decisions tab); this div just
+      // holds content. display:block overrides the #d-decisions{display:none} CSS
+      // default so an ACTIVE Decisions tab isn't blank when empty.
+      box.style.display = "block";
       var rows = DECISIONS.rows;
-      // Stale paint guard: only show data fetched for the CURRENT selection.
-      if(DECISIONS.key !== selectedKey || !rows || !rows.length || !rows.map){
-        box.style.display = "none"; box.innerHTML = ""; return;
+      // Stale paint guard: nothing until the decision-log reply for THIS selection.
+      if(DECISIONS.key !== selectedKey){ box.innerHTML = ""; return; }
+      if(!rows || !rows.length || !rows.map){
+        box.innerHTML = '<div class="tl-empty">No gate decisions recorded for this session yet.</div>'; return;
       }
       box.innerHTML = rows.map(function(r){
         var glyph = r.outcome === "deny" ? "⛔" : (r.outcome === "fallback" ? "⚠" : "✅");
@@ -5880,6 +6095,10 @@ local HTML = [[
       // Continue (keystrokes) never does.
       bap.disabled = remote && (!remoteWait || st === "error");
       applyExpand();
+      // NB: the tab bar + inline timeline are (re)built on selection / tab-click /
+      // pin-toggle -- NOT here. renderDetail runs every 1s tick for the selected
+      // tile; rebuilding the bar or re-painting the timeline <pre> each tick would
+      // waste work and reset the timeline's scroll position.
     }
 
     // ---- Token usage (local, zero-cost) -------------------------------------
@@ -7295,8 +7514,9 @@ local HTML = [[
     // Per-session cumulative breakdown in the detail panel (from the 60s usage pass).
     function renderDetailUsage(it){
       var du = document.getElementById("d-usage"); if(!du) return;
+      du.style.display = "block";   // visibility gated by the parent .d-panel (Usage tab)
       var ps = (LAST_USAGE && LAST_USAGE.perSession) ? LAST_USAGE.perSession[it.key] : null;
-      if(!ps){ du.style.display="none"; du.innerHTML=""; return; }
+      if(!ps){ du.innerHTML = '<div class="tl-empty">No token usage recorded for this session yet.</div>'; return; }
       var rows = '<div class="um-row"><span>Session total</span><span title="excl. cache reads; gross '+fmtTok(ps.total)+'">'+fmtTok(ps.real != null ? ps.real : ps.total)+'</span></div>'
         + '<div class="um-row"><span>output / input</span><span>'+fmtTok(ps.output)+' / '+fmtTok(ps.input)+'</span></div>';
       if(ps.byModel){ Object.keys(ps.byModel).forEach(function(m){
@@ -7319,7 +7539,13 @@ local HTML = [[
       // transition, zero per tick.
       var sel = selectedKey ? findItem(selectedKey) : null;
       var st = sel ? (sel.status || "idle") : null;
-      if(sel && lastSelectedStatus !== null && st !== lastSelectedStatus){ requestDecisions(selectedKey); }
+      if(sel && lastSelectedStatus !== null && st !== lastSelectedStatus){
+        requestDecisions(selectedKey);
+        // A status edge likely just appended an event -- refresh the inline
+        // Timeline too, but ONLY while that tab is the active view (still lazy:
+        // a status change is an edge, not the 1s tick).
+        if(detailTab === "timeline"){ TIMELINE = { key:null, events:null }; maybeLoadActiveTab(); }
+      }
       lastSelectedStatus = st;
     };
 
@@ -7418,6 +7644,9 @@ HTML = HTML:gsub("__INIT_THEME__", savedTheme)
 -- Inject the bulk-action targeting rules so the panel JS shares cc-core's single
 -- source of truth (the bulk-bar count can't drift from what selectActionable acts on).
 HTML = HTML:gsub("__BULK_RULES__", hs.json.encode(core.BULK_RULES))
+-- Inject the L5 detail-panel tab list so the strip shares core.DETAIL_TABS (the
+-- normalizeTabState mirror + per-tab dispatch can't drift from the canonical ids).
+HTML = HTML:gsub("__DETAIL_TABS__", (hs.json.encode(core.DETAIL_TABS):gsub("%%", "%%%%")))
 -- Inject the ⌨ hotkey legend, sourced from the real HOTKEY_* bindings (so the
 -- displayed combos can't drift from what's actually bound) via core.hotkeyLegend.
 local legendGlobals = {
