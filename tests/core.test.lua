@@ -4291,5 +4291,53 @@ do
   check("export: meta nil-safe", type(core.sessionExportMeta(nil, nil, nil)) == "table")
 end
 
+-- ---- L5: post-run self-summary + onAutoApproved detector -------------------
+do
+  -- summaryPrompt: review-first framing, forbids further work, no transcript interp
+  local p = core.summaryPrompt({ activity = "edited x" })
+  check("summary: mentions self-summary", p:find("self%-summary") ~= nil)
+  check("summary: forbids further changes", p:lower():find("do not make further") ~= nil)
+  check("summary: deterministic (no item interp)", core.summaryPrompt({ activity = "other" }) == p)
+
+  -- shouldSummarize: done + real local session + not stale/remote
+  check("summary: done local eligible", core.shouldSummarize({ status="done", session_id="s" }) == true)
+  check("summary: working not eligible", core.shouldSummarize({ status="working", session_id="s" }) == false)
+  check("summary: stale not eligible", core.shouldSummarize({ status="done", session_id="s", stale=true }) == false)
+  check("summary: remote not eligible", core.shouldSummarize({ status="done", session_id="s", remote={} }) == false)
+  check("summary: no sid not eligible", core.shouldSummarize({ status="done" }) == false)
+
+  -- stepSelfSummary: fires once on a fresh done edge; the summary's own done is skipped
+  local st = {}
+  local item = { key="k", status="done", session_id="s" }
+  eq("summary: disabled -> no fire", core.stepSelfSummary(st, item, { enabled=false, prevStatus="working" }).fire, false)
+  eq("summary: fresh done edge fires", core.stepSelfSummary(st, item, { enabled=true, prevStatus="working" }).fire, true)
+  -- the typed prompt drives working -> done again; that done must NOT re-fire (loop guard)
+  eq("summary: summary's own done skipped",
+     core.stepSelfSummary(st, item, { enabled=true, prevStatus="working" }).fire, false)
+  -- guard cleared -> a later real completion fires again
+  core.stepSelfSummary(st, { key="k", status="idle", session_id="s" }, { enabled=true, prevStatus="done" })
+  eq("summary: fires again after a clean completion",
+     core.stepSelfSummary(st, item, { enabled=true, prevStatus="idle" }).fire, true)
+  -- no edge when already done (prev==done)
+  eq("summary: no edge when prev already done",
+     core.stepSelfSummary({}, item, { enabled=true, prevStatus="done" }).fire, false)
+  -- ineligible (stale) never fires even on a fresh edge
+  eq("summary: stale never fires",
+     core.stepSelfSummary({}, { key="k", status="done", session_id="s", stale=true }, { enabled=true, prevStatus="working" }).fire, false)
+
+  -- newestAutoApprove: newest automated allow ts; ignores human + denies + other sids
+  local evs = {
+    { type="decision", session_id="s", outcome="allow", by="autoAllow", ts=100 },
+    { type="decision", session_id="s", outcome="allow", by="autopilot", ts=300 },
+    { type="decision", session_id="s", outcome="allow", by="human",     ts=400 },  -- manual: ignored
+    { type="decision", session_id="s", outcome="deny",  by="autoDeny",  ts=500 },  -- deny: ignored
+    { type="decision", session_id="other", outcome="allow", by="autopilot", ts=999 },  -- other sid
+  }
+  eq("autoApprove: newest automated allow", core.newestAutoApprove(evs, "s"), 300)
+  eq("autoApprove: none for unknown sid", core.newestAutoApprove(evs, "nope"), nil)
+  eq("autoApprove: nil sid -> nil", core.newestAutoApprove(evs, nil), nil)
+  eq("autoApprove: empty -> nil", core.newestAutoApprove({}, "s"), nil)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

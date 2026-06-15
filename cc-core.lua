@@ -5926,4 +5926,71 @@ function M.sessionExportMeta(item, events, opts)
   return meta
 end
 
+-- ---- L5: post-run self-summary callback ----------------------------------
+-- A review-first prompt Shepherd OPTIONALLY types into a session on a fresh done
+-- edge (off by default). Framed strictly as a status note for the human watching,
+-- NOT a new task -- and it explicitly forbids further edits so it can't run away.
+-- Sibling to improvePrompt / auditReviewPrompt. Pure (no transcript interpolation).
+function M.summaryPrompt(item)
+  return "Before we move on, jot a brief self-summary of the turn you just finished, "
+    .. "for the log the human is watching: (1) what you changed or accomplished, "
+    .. "(2) anything still open, blocked, or uncertain, and (3) the single most useful "
+    .. "next step. A few lines is plenty. Do NOT make further changes or start new "
+    .. "work -- just summarize what already happened."
+end
+
+-- Is this tile a valid self-summary target? done, real local session, not stale.
+function M.shouldSummarize(item)
+  if type(item) ~= "table" then return false end
+  if item.status ~= "done" then return false end
+  if item.remote or item.stale then return false end
+  if not item.session_id or tostring(item.session_id) == "" then return false end
+  return true
+end
+
+-- Advance self-summary bookkeeping for one tile per tick; returns whether to type
+-- the summary prompt now. Mutates state.fired (key->true) in place. Fires once on a
+-- fresh done edge for an eligible tile; the NEXT done edge after a fire is treated
+-- as the summary's OWN completion and skipped (clearing the guard), so the typed
+-- prompt -> working -> done cycle can't loop. Leaving done to a non-working status
+-- also clears the guard so a later real completion summarizes again.
+--   item : { key, status, session_id, remote, stale }
+--   opts : { enabled, prevStatus }
+function M.stepSelfSummary(state, item, opts)
+  state = state or {}; state.fired = state.fired or {}
+  opts = opts or {}; item = item or {}
+  local key = item.key
+  if not key then return { fire = false } end
+  local prev = opts.prevStatus
+  local freshDone = (prev ~= nil and prev ~= "done" and item.status == "done")
+  if not freshDone then
+    if item.status ~= "done" and item.status ~= "working" then state.fired[key] = nil end
+    return { fire = false }
+  end
+  if state.fired[key] then              -- the summary's own done -> skip + reset the guard
+    state.fired[key] = nil
+    return { fire = false }
+  end
+  local fire = (opts.enabled == true) and M.shouldSummarize(item)
+  if fire then state.fired[key] = true end
+  return { fire = fire }
+end
+
+-- Newest auto-approve decision ts for a session (an "automated allow" = an `allow`
+-- decision whose `by` is anything other than the manual "human"; mirrors the
+-- automated-decision test at the narrative builder). nil when there is none. Used
+-- by the optional onAutoApproved banner edge. Pure.
+function M.newestAutoApprove(events, sid)
+  if not sid or tostring(sid) == "" then return nil end
+  local newest = nil
+  for _, e in ipairs(type(events) == "table" and events or {}) do
+    if type(e) == "table" and e.type == "decision" and e.session_id == sid
+       and e.outcome == "allow" and e.by ~= nil and e.by ~= "human" then
+      local ts = tonumber(e.ts) or 0
+      if not newest or ts > newest then newest = ts end
+    end
+  end
+  return newest
+end
+
 return M
