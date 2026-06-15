@@ -6009,6 +6009,31 @@ function M.stepSelfSummary(state, item, opts)
   return { fire = fire }
 end
 
+-- ---- L5: PR/MR status per tile (gh-backed, status-only) -------------------
+-- Parse `gh pr view --json number,state,url,title,isDraft` output (a single JSON
+-- object for the current branch's PR) into a normalized { number, state, url,
+-- title }. state is lowercased (open|merged|closed|draft). nil on empty / no PR /
+-- garbage. Pure (decode via the injected M.json).
+function M.parsePrStatus(jsonStr)
+  if type(jsonStr) ~= "string" or not jsonStr:find("{", 1, true) then return nil end
+  local ok, j = pcall(function() return M.json.decode(jsonStr) end)
+  if not ok or type(j) ~= "table" or j.number == nil then return nil end
+  local state = tostring(j.state or ""):lower()
+  if j.isDraft == true and state == "open" then state = "draft" end
+  return {
+    number = tonumber(j.number) or j.number,
+    state = state,
+    url = (type(j.url) == "string") and j.url or nil,
+    title = (type(j.title) == "string") and j.title or nil,
+  }
+end
+
+-- Compact tile badge for a parsed PR status, e.g. "PR #123 merged". nil if no PR.
+function M.prBadge(pr)
+  if type(pr) ~= "table" or pr.number == nil then return nil end
+  return "PR #" .. tostring(pr.number) .. " " .. tostring(pr.state or "")
+end
+
 -- Newest auto-approve decision ts for a session (an "automated allow" = an `allow`
 -- decision whose `by` is anything other than the manual "human"; mirrors the
 -- automated-decision test at the narrative builder). nil when there is none. Used

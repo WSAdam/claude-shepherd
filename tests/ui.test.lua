@@ -1210,6 +1210,28 @@ do
         and src:find("for k in pairs(summaryState.fired) do if not newPrev[k]", 1, true) ~= nil
         and src:find("for k in pairs(summaryState.pending) do if not newPrev[k]", 1, true) ~= nil
         and src:find("for k in pairs(gitChangeFiles) do if not newPrev[k]", 1, true) ~= nil)
+  -- #5 PR/MR status per tile (gh-backed, status-only)
+  check("l5pr-pin: gh self-gates (resolveBin, absent -> false)",
+        src:find("ghBinPath = (p and hs.fs.attributes(p)) and p or false", 1, true) ~= nil)
+  check("l5pr-pin: async gh poll (hs.task) parses via core, TTL-throttled",
+        src:find("function FX.ghPrStatus(root)", 1, true) ~= nil
+        and src:find("core.parsePrStatus(stdout)", 1, true) ~= nil
+        and src:find("now - cached.ts) < PR_TTL", 1, true) ~= nil)
+  check("l5pr-pin: runs gh in the repo root, status-only fields",
+        src:find("t:setWorkingDirectory(root)", 1, true) ~= nil
+        and src:find('"number,state,url,title,isDraft"', 1, true) ~= nil)
+  check("l5pr-pin: annotated only for local tiles when enabled",
+        src:find("if prOn and not it.remote and it.cwd", 1, true) ~= nil
+        and src:find("it.pr = FX.prDataForRoot(proot)", 1, true) ~= nil)
+  check("l5pr-pin: badge click sends KEY not url (no interpolation) + esc",
+        src:find('onclick="openPr(event,\\\'\'+esc(it.key)+\'\\\')"', 1, true) ~= nil
+        and src:find('send("open-url", key)', 1, true) ~= nil)
+  check("l5pr-pin: open-url validates http(s) scheme",
+        src:find('url:match("^https?://")', 1, true) ~= nil
+        and src:find("hs.urlevent.openURL(url)", 1, true) ~= nil)
+  check("l5pr-pin: Settings toggle populated + persisted",
+        src:find('cv(cfg,"prStatus.enabled",false)', 1, true) ~= nil
+        and src:find('prStatus: { enabled: ck("s-pr-en") }', 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

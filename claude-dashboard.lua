@@ -159,7 +159,7 @@ local spawnPrompt        -- forward declaration (defined after FX)
 local prev = {}
 local respawnAttempts = {}  -- projectKey (NOT tile key) -> auto-respawn count; resets when healthy
 local autoContinueState = { since = {}, attempts = {} }  -- key->first-error ts; projectKey->continue count
-local summaryState  = { fired = {} } -- tile key -> true once a self-summary fired this done-episode (L5)
+local summaryState  = { fired = {}, pending = {} } -- tile key -> guard once a self-summary fired/queued this done-episode (L5). BOTH subtables MUST exist up front: the reap loop iterates summaryState.pending even when self-summary is off (stepSelfSummary, which lazily creates it, never runs), and pairs(nil) would crash refresh.
 local autoApproveFired = {} -- tile key -> last auto-approve ts a banner fired for (L5 onAutoApproved edge)
 local watchdog = {}      -- key -> { size, ts, alerted }: transcript progress + stall episode
 local draining    = {}   -- key -> true: close on the next fresh `done` (Feature F)
@@ -1190,6 +1190,50 @@ function FX.gitDiff(root, file, orig)
     end
   end)
   return out
+end
+
+-- L5 PR/MR status: resolve the `gh` binary once (cached). false = not installed,
+-- so the whole feature self-gates (no badge, no error).
+local ghBinPath = nil   -- nil = unresolved, false = absent, string = path
+local function ghBin()
+  if ghBinPath == nil then
+    local p = resolveBin("gh")
+    ghBinPath = (p and hs.fs.attributes(p)) and p or false
+  end
+  return ghBinPath or nil
+end
+
+-- Per-repo-root PR status cache (status-only; reads gh, never writes). Async via
+-- hs.task so the ~1s loop never blocks on gh; TTL-throttled like the usage poll.
+-- data: a parsed { number, state, url, title, badge } | false (no PR / error).
+local prStatusByRoot = {}   -- root -> { ts, data }
+local PR_TTL = 180
+function FX.ghPrStatus(root)
+  if not root or root == "" then return end
+  local gh = ghBin()
+  if not gh then return end
+  local now = os.time()
+  local cached = prStatusByRoot[root]
+  if cached and (now - cached.ts) < PR_TTL then return end
+  -- mark attempted NOW (debounce) but keep any prior data until the call returns
+  prStatusByRoot[root] = { ts = now, data = cached and cached.data or nil }
+  local ok = pcall(function()
+    local t = hs.task.new(gh, function(code, stdout)
+      local data = false   -- gh exits non-zero when the branch has no PR / no remote
+      if code == 0 and stdout and stdout ~= "" then
+        local pr = core.parsePrStatus(stdout)
+        if pr then pr.badge = core.prBadge(pr); data = pr end
+      end
+      prStatusByRoot[root] = { ts = os.time(), data = data }
+    end, { "pr", "view", "--json", "number,state,url,title,isDraft" })
+    if t then t:setWorkingDirectory(root); t:start() else error("gh task create failed") end
+  end)
+  if not ok then prStatusByRoot[root] = { ts = now, data = false } end
+end
+-- Read the cached PR data for a root (nil if absent/none). Pure read, no fetch.
+function FX.prDataForRoot(root)
+  local c = root and prStatusByRoot[root]
+  return (c and c.data) or nil
 end
 
 -- L5 Export session archive: write a folder under cc-exports holding the session's
@@ -2944,6 +2988,17 @@ local function handleBridgeMsg(msg)
     reply(FX.gitDiff(root, file, orig) or "")
     return
   end
+  if a == "open-url" then
+    -- L5 PR badge click: open the selected tile's PR url. The JS sends the tile
+    -- KEY (not the url), and we open byKey[key].pr.url only if it's http(s) -- so a
+    -- crafted PR title/url can't smuggle a file:// or javascript: scheme through.
+    local it = byKey[tostring(payload.v or "")]
+    local url = it and it.pr and it.pr.url
+    if type(url) == "string" and url:match("^https?://") then
+      pcall(function() hs.urlevent.openURL(url) end)
+    end
+    return
+  end
   if a == "export-session" then
     -- L5 Export session archive: transcript .jsonl + meta.json under cc-exports.
     -- Explicit operator action; honors the ledger redaction posture by exporting
@@ -3532,6 +3587,14 @@ local HTML = [[
   .risk { font-size:10px; margin-left:5px; }
   .risk.r-med  { color:#f5b50a; }
   .risk.r-high { color:#ef4444; }
+  /* L5 PR/MR status badge */
+  .pr { font-size:10px; margin-left:6px; padding:1px 6px; border-radius:8px; cursor:pointer;
+    border:1px solid #2c2f3a; color:#9aa0ad; }
+  .pr:hover { color:#fff; }
+  .pr.pr-open   { color:#5ad67f; border-color:#2f6b43; }
+  .pr.pr-draft  { color:#9aa0ad; border-color:#3a3d49; }
+  .pr.pr-merged { color:#a98bff; border-color:#4a3f7a; }
+  .pr.pr-closed { color:#d65a5a; border-color:#6b2f2f; }
   .name { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .dot  { border-radius:50%; flex:0 0 auto; }
   .meta { font-size:11px; color:#8a8d99; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -4326,6 +4389,9 @@ local HTML = [[
 
       <label class="s-row"><input type="checkbox" id="s-summary-en"> Post-run self-summary — type a review prompt when a session finishes</label>
       <div class="s-help">When a session reaches “ready”, Shepherd types a brief “summarize what you just did” prompt into it (for the log you’re watching — it forbids further edits). Off by default; fires once per turn (the summary’s own completion is skipped so it can’t loop). Local sessions only.</div>
+
+      <label class="s-row"><input type="checkbox" id="s-pr-en"> Show PR/MR status on each tile (needs the GitHub CLI <code>gh</code>)</label>
+      <div class="s-help">A clickable “PR #N open/merged” badge per repo, polled with <code>gh pr view</code> (status only — Shepherd never opens or edits PRs). Off by default; self-gates when <code>gh</code> isn’t installed or the repo has no PR/remote. Local sessions only; refreshes every ~3 min.</div>
 
       <div class="s-sec">Hooks <button class="s-x" style="border:1px solid #2c2f3a;border-radius:6px;padding:2px 7px;color:#cfd2db;margin-left:6px;" onclick="inspectHooks()">Inspect ~/.claude/settings.json</button></div>
       <div class="s-help">Read-only inventory of the Claude Code hooks wired in your settings (Shepherd's own are highlighted). Warns if the gate hook (cc-approve.sh) is missing its required timeout.</div>
@@ -5293,6 +5359,7 @@ local HTML = [[
       ck("s-banner-done",    cv(cfg,"notifications.banner.onDone",false));
       ck("s-banner-auto",    cv(cfg,"notifications.banner.onAutoApproved",false));
       ck("s-summary-en",     cv(cfg,"summary.enabled",false));
+      ck("s-pr-en",          cv(cfg,"prStatus.enabled",false));
       document.getElementById("s-hooks").innerHTML = "";  // lazy: load on Inspect
       var legacyPop = cv(cfg,"focus.popEditor",false);  // back-compat seeds both
       ck("s-pop-complete", cv(cfg,"focus.popOnComplete",legacyPop));
@@ -5457,6 +5524,7 @@ local HTML = [[
         // summary is fully form-managed (only `enabled`), written wholesale on Save.
         // If a hand-edited summary.* subkey is added later, add it to SETTINGS_KEEP_SUBKEYS.
         summary: { enabled: ck("s-summary-en") },   // L5 post-run self-summary
+        prStatus: { enabled: ck("s-pr-en") },        // L5 PR/MR tile badge
         // banner is written wholesale on Save, so onAutoApproved is included here
         // (form-managed) and won't be dropped. It's driven off a fresh auto-approve
         // ledger edge (see the banner block in refresh), not a status transition.
@@ -7881,10 +7949,22 @@ local HTML = [[
            + '<span class="name">'+esc(it.label || it.autoTitle || it.name)+(it.group ? ' <span class="gtag">🏷 '+esc(it.group)+'</span>' : '')+'</span>'
            + '<span class="label">'+(age ? '<span class="age">'+esc(age)+'</span> ' : '')+label+'</span>'
            + riskBadge(it)
+           + prBadgeHtml(it)
            + (meta ? '<span class="meta">'+esc(meta)+'</span>' : '')
            + ctxBarHtml(it)
            + '</div>';
     }
+    // L5 PR/MR badge: server-computed text (it.pr.badge) + a click that opens the
+    // PR url. The url is NOT interpolated into the handler -- openPr sends the tile
+    // KEY and Lua opens byKey[key].pr.url (validated http(s)), so a crafted title/
+    // url can't inject. esc() everywhere it reaches innerHTML.
+    function prBadgeHtml(it){
+      if(!it.pr || !it.pr.badge) return "";
+      var s = (it.pr.state || "").toLowerCase();
+      return '<span class="pr pr-'+esc(s)+'" title="'+esc(it.pr.title || "")+' — click to open"'
+           + ' onclick="openPr(event,\''+esc(it.key)+'\')">'+esc(it.pr.badge)+'</span>';
+    }
+    function openPr(ev, key){ if(ev){ ev.stopPropagation(); } if(key) send("open-url", key); }
 
     var EMPTY_WAITING = 'Waiting for Claude Code sessions...<br>Start a session in any project.';
     // Render the grid from lastItems through the active search filter. Re-run both on
@@ -8288,6 +8368,7 @@ function refresh()
                    or (core.config(cfg, "notifications.banner.onDone", false) == true)
                    or autoApprovedBannerOn
   local summaryOn   = core.config(cfg, "summary.enabled", false) == true  -- L5 post-run self-summary
+  local prOn        = core.config(cfg, "prStatus.enabled", false) == true  -- L5 PR/MR tile badge
   local rulesOn     = core.config(cfg, "rules.enabled", false) == true  -- L6 event-callback rules
   local ruleSet     = rulesOn and core.ruleList(FX.readRules()) or nil  -- loaded once per refresh
   local schedulesOn = core.config(cfg, "schedules.enabled", false) == true  -- L7 scheduled routines
@@ -8486,6 +8567,18 @@ function refresh()
       it.risk = r.band
       it.riskScore = r.score
       it.riskSignals = r.signals
+    end
+
+    -- L5 PR/MR status badge (off by default; gh-backed, status-only, local tiles
+    -- only). Kicks off a throttled async gh poll per repo root + annotates from the
+    -- cache (nil on the first pass, populated once gh returns; self-gates if gh
+    -- isn't installed or the repo has no PR/remote).
+    if prOn and not it.remote and it.cwd and it.cwd ~= "" then
+      local proot = FX.gitRoot(it.cwd)
+      if proot then
+        FX.ghPrStatus(proot)
+        it.pr = FX.prDataForRoot(proot) or nil
+      end
     end
 
     -- L5 error-reason taxonomy: ledger the CAUSE once, on the fresh transition into

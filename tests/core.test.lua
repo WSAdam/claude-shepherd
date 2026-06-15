@@ -4384,5 +4384,25 @@ do
   eq("autoApprove: empty -> nil", core.newestAutoApprove({}, "s"), nil)
 end
 
+-- ---- L5: PR/MR status per tile (parsePrStatus / prBadge) -------------------
+do
+  local op = core.parsePrStatus('{"number":7,"state":"OPEN","url":"https://x/7","title":"Add thing"}')
+  eq("pr: number", op.number, 7)
+  eq("pr: state lowercased", op.state, "open")
+  eq("pr: url", op.url, "https://x/7")
+  eq("pr: title", op.title, "Add thing")
+  eq("pr: badge open", core.prBadge(op), "PR #7 open")
+  eq("pr: merged state", core.parsePrStatus('{"number":9,"state":"MERGED","url":"u"}').state, "merged")
+  eq("pr: closed state", core.parsePrStatus('{"number":9,"state":"CLOSED"}').state, "closed")
+  -- draft = OPEN + isDraft
+  eq("pr: draft state", core.parsePrStatus('{"number":3,"state":"OPEN","isDraft":true}').state, "draft")
+  -- no PR / garbage / missing number -> nil
+  eq("pr: empty -> nil", core.parsePrStatus(""), nil)
+  eq("pr: gh 'no pr' text -> nil", core.parsePrStatus("no pull requests found"), nil)
+  eq("pr: object without number -> nil", core.parsePrStatus('{"state":"OPEN"}'), nil)
+  eq("pr: badge nil for non-table", core.prBadge(nil), nil)
+  eq("pr: badge nil without number", core.prBadge({ state = "open" }), nil)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)
