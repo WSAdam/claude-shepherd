@@ -188,6 +188,10 @@ local taskStart     = {} -- tile key -> { ts, role, projectKey, by }: a fed queu
                          -- flight (L4 per-task timing); consumed on the next done edge
 local loopAlerted   = {} -- tile key -> true once a loop ledger event fired this episode (L5)
 local ruleFired     = {} -- "ruleName\1tileKey" -> true: a `once` L6 rule already fired for this tile
+local gitChangeFiles = {} -- tile key -> { [path] = orig|false }: the authoritative file
+                          -- set from the last detail-changes reply. detail-diff only diffs a
+                          -- path in this set (keeps the --no-index fallback from reaching an
+                          -- arbitrary file), and uses the orig for a rename-aware diff (L5 #2).
 local loadConfig         -- forward declaration (defined near refresh)
 local ledgerSnapshot     -- forward declaration (defined near refresh; bridge handlers use it)
 local refresh            -- forward declaration (so the controller can repaint now)
@@ -1145,15 +1149,26 @@ end
 
 -- One file's unified diff (tracked changes vs HEAD; falls back to a new-file
 -- diff for untracked paths). Capped with `head -c` so a giant diff can't flood
--- the panel or the JS bridge. `file` is a root-relative path from FX.gitStatus.
-function FX.gitDiff(root, file)
+-- the panel or the JS bridge. `file` is a root-relative path from FX.gitStatus;
+-- `orig` (a root-relative original path) makes a RENAMED file diff against its
+-- old blob with rename detection instead of rendering as an all-additions file
+-- (HEAD has no blob at the new path, so a plain `diff HEAD -- <new>` is empty).
+function FX.gitDiff(root, file, orig)
   if not root or root == "" or not file or file == "" then return nil end
   local out = nil
   pcall(function()
     local q = "'" .. tostring(root):gsub("'", "'\\''") .. "'"
     local f = "'" .. tostring(file):gsub("'", "'\\''") .. "'"
-    out = hs.execute("git -C " .. q .. " -c core.quotepath=false diff HEAD --no-color --no-ext-diff -- " .. f
-                     .. " 2>/dev/null | head -c 200000")
+    if orig and orig ~= "" then
+      -- rename-aware: diff both pathspecs vs HEAD with -M so git pairs old->new.
+      local o = "'" .. tostring(orig):gsub("'", "'\\''") .. "'"
+      out = hs.execute("git -C " .. q .. " -c core.quotepath=false diff HEAD -M --no-color --no-ext-diff -- "
+                       .. o .. " " .. f .. " 2>/dev/null | head -c 200000")
+    end
+    if not out or out == "" then
+      out = hs.execute("git -C " .. q .. " -c core.quotepath=false diff HEAD --no-color --no-ext-diff -- " .. f
+                       .. " 2>/dev/null | head -c 200000")
+    end
     if not out or out == "" then        -- untracked / brand-new file: synth an all-additions diff
       out = hs.execute("git -C " .. q .. " -c core.quotepath=false diff --no-color --no-ext-diff --no-index -- /dev/null " .. f
                        .. " 2>/dev/null | head -c 200000")
@@ -2881,12 +2896,20 @@ local function handleBridgeMsg(msg)
     local root = it.cwd and FX.gitRoot(it.cwd) or nil
     if not root then reply({ noRepo = true }); return end
     local parsed = core.parseGitStatus(FX.gitStatus(root) or "")
+    -- Cache the authoritative file set so detail-diff only ever diffs a path that
+    -- actually appears in this session's status (path -> orig|false).
+    local allowed = {}
+    for _, f in ipairs(parsed.files) do allowed[f.path] = f.orig or false end
+    gitChangeFiles[key] = allowed
     reply({ files = parsed.files, summary = parsed.summary, root = root })
     return
   end
   if a == "detail-diff" then
     -- L5 Changes tab: one file's unified diff, fetched on expand. Capped in
-    -- FX.gitDiff. file (payload.text) is a root-relative path from parseGitStatus.
+    -- FX.gitDiff. file (payload.text) is bridge-supplied, so it MUST be a member
+    -- of the last detail-changes file set for this session -- otherwise the
+    -- --no-index fallback would happily render an arbitrary file (e.g. an
+    -- absolute path) as a diff. A rename also carries its orig for a real diff.
     local key = tostring(payload.v or "")
     local file = tostring(payload.text or "")
     local it = byKey[key]
@@ -2894,10 +2917,12 @@ local function handleBridgeMsg(msg)
       pcall(function() wv:evaluateJavaScript("window.ccDetailDiff("
         .. jsString(key) .. ", " .. jsString(file) .. ", " .. jsString(txt or "") .. ")") end)
     end
-    if not it or it.remote or file == "" then reply(""); return end
+    local allowed = gitChangeFiles[key]
+    if not it or it.remote or file == "" or not allowed or allowed[file] == nil then reply(""); return end
     local root = it.cwd and FX.gitRoot(it.cwd) or nil
     if not root then reply(""); return end
-    reply(FX.gitDiff(root, file) or "")
+    local orig = allowed[file]
+    reply(FX.gitDiff(root, file, (orig and orig ~= false) and orig or nil) or "")
     return
   end
   if a == "export-session" then
@@ -5878,16 +5903,9 @@ local HTML = [[
       var unp = {};
       var ru = raw.unpinned;
       if(ru && typeof ru === "object"){
-        if(ru.length !== undefined){          // array of ids
-          for(var j=0;j<ru.length;j++){ var id=ru[j]; if(valid[id] && id!==def) unp[id]=true; }
-        } else {
-          // map form { id:true }, OR (mirroring core.normalizeTabState) a
-          // numeric-keyed { "1":"decisions" } whose VALUE is the id.
-          for(var k in ru){
-            var idk = (ru[k]===true) ? k : (typeof ru[k]==="string" ? ru[k] : null);
-            if(idk && valid[idk] && idk!==def) unp[idk]=true;
-          }
-        }
+        // canonical { id:true } map (the only shape saveTabState writes); mirrors
+        // core.normalizeTabState.
+        for(var k in ru){ if(ru[k]===true && valid[k] && k!==def) unp[k]=true; }
       }
       var sel = raw.selectedTab;
       if(typeof sel !== "string" || !valid[sel] || unp[sel]) sel = def;

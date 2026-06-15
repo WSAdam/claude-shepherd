@@ -2044,12 +2044,28 @@ do
   eq("hookInv: a user hook is not ours", inv[2].isOurs, false)
   eq("hookInv: default matcher is *", inv[3].matcher, "*")  -- the Stop group has no matcher
   eq("hookInv: empty settings -> empty", #core.parseHookInventory({}), 0)
+  -- malformed settings.json must degrade to empty/partial, never error (locks the
+  -- type-guards the commit claims). hooks-not-a-table, group/hooks/entry not tables.
+  eq("hookInv: hooks not a table -> 0", #core.parseHookInventory({ hooks = "bad" }), 0)
+  eq("hookInv: group.hooks not a table -> 0",
+     #core.parseHookInventory({ hooks = { Stop = { { hooks = "nope" } } } }), 0)
+  local mixed = core.parseHookInventory({ hooks = { Stop = { { hooks = {
+    "string-not-table", { type = "command", command = "bash $HOME/.claude/cc-status.sh" } } } } } })
+  eq("hookInv: non-table hook entry skipped, good one kept", #mixed, 1)
+  local junkGroup = core.parseHookInventory({ hooks = { PreToolUse = { "junk", { matcher = "Bash", hooks = {
+    { type = "command", command = "bash my.sh" } } } } } })
+  eq("hookInv: non-table group element skipped", #junkGroup, 1)
   -- gateHookTimeoutOk
   local gt = core.gateHookTimeoutOk(inv)
   eq("gateTimeout: present", gt.present, true)
   eq("gateTimeout: ok at 130", gt.ok, true)
   local low = core.gateHookTimeoutOk({ { script = "cc-approve.sh", timeout = 60 } })
   eq("gateTimeout: 60 < 130 not ok", low.ok, false)
+  -- present but timeout UNSET (hand-wired hook with no timeout field) -> not ok,
+  -- still present (the most likely real-world misconfig; pins the t~=nil half).
+  local none = core.gateHookTimeoutOk({ { script = "cc-approve.sh" } })
+  eq("gateTimeout: present but timeout unset -> not ok", none.ok, false)
+  eq("gateTimeout: present even when timeout nil", none.present, true)
   eq("gateTimeout: missing not present",
      core.gateHookTimeoutOk({ { script = "cc-status.sh", timeout = 5 } }).present, false)
 end
@@ -4143,10 +4159,10 @@ do
   eq("tabs: unknown unpinned id dropped", n4.unpinned.nope, nil)
   check("tabs: known unpinned id kept", n4.unpinned.timeline == true)
 
-  -- array form of unpinned is accepted
-  local n5 = core.normalizeTabState({ unpinned = { "decisions", "usage" } })
-  check("tabs: array unpinned decisions", n5.unpinned.decisions == true)
-  check("tabs: array unpinned usage", n5.unpinned.usage == true)
+  -- canonical map form only: a stray non-true value is ignored (no array form)
+  local n5 = core.normalizeTabState({ unpinned = { decisions = true, usage = "x" } })
+  check("tabs: map-form unpinned kept", n5.unpinned.decisions == true)
+  eq("tabs: non-true unpinned value ignored", n5.unpinned.usage, nil)
 
   -- injected tabs list (test override) is honored
   local n6 = core.normalizeTabState({ selectedTab = "x", unpinned = { y = true } },
@@ -4199,6 +4215,23 @@ do
   local s3 = core.parseGitStatus(z3)
   eq("git: space in path verbatim", s3.files[1].path, "weird name.txt")
   eq("git: quote in path verbatim", s3.files[2].path, 'qu"ote.txt')
+
+  -- two-sided XY codes: the index column (X) wins when it's non-blank/non-?,
+  -- else the worktree column (Y). Locks the documented precedence.
+  local z4 = "MM both.lua\0" .. "AM staged-add-wt-mod.lua\0" .. "MD del-in-wt.lua\0" .. " M wt-only.lua\0"
+  local s4 = core.parseGitStatus(z4)
+  eq("git: MM -> M", s4.files[1].mark, "M")
+  eq("git: AM -> A (index wins)", s4.files[2].mark, "A")
+  eq("git: MD -> M (index wins over worktree delete)", s4.files[3].mark, "M")
+  eq("git: ' M' -> M (worktree when index blank)", s4.files[4].mark, "M")
+
+  -- a head -c-truncated stream can cut a rename's ORIG token: safe-drop (orig=nil),
+  -- still one file, still marked R, no crash and no swallowed next entry.
+  local zt = "R  renamed.lua\0"
+  local st = core.parseGitStatus(zt)
+  eq("git: truncated rename = 1 file", #st.files, 1)
+  eq("git: truncated rename still marks R", st.files[1].mark, "R")
+  eq("git: truncated rename orig is nil", st.files[1].orig, nil)
 end
 
 -- ---- L5: export session archive ------------------------------------------

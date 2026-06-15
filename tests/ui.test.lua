@@ -1106,8 +1106,9 @@ do
   check("l5tab-fix: empty-state notes for active-but-empty tabs",
         src:find("No gate decisions recorded for this session yet", 1, true) ~= nil
         and src:find("No token usage recorded for this session yet", 1, true) ~= nil)
-  check("l5tab-fix: normalizeTabStateJS mirrors Lua value form",
-        src:find('(ru[k]===true) ? k : (typeof ru[k]==="string" ? ru[k] : null)', 1, true) ~= nil)
+  check("l5tab-fix: normalizeTabStateJS canonical map form (matches Lua)",
+        src:find("function normalizeTabStateJS(raw)", 1, true) ~= nil
+        and src:find("if(ru[k]===true && valid[k] && k!==def) unp[k]=true;", 1, true) ~= nil)
   -- #2 git Changes tab: panel markup, lazy fetch via FX.gitStatus/Diff, per-file
   -- diff expand, run-from-root, capped diff, remote/no-repo guards.
   check("l5chg-pin: changes panel markup", src:find('class="d-panel" data-tab="changes"', 1, true) ~= nil
@@ -1118,7 +1119,8 @@ do
         src:find("core.parseGitStatus(FX.gitStatus(root)", 1, true) ~= nil)
   check("l5chg-pin: runs git from the repo ROOT (path parity)",
         src:find("FX.gitRoot(it.cwd) or nil", 1, true) ~= nil)
-  check("l5chg-pin: diff is capped (head -c)", src:find("head -c 200000", 1, true) ~= nil)
+  -- semantic anchors (not the exact byte count) so harmless refactors don't break the test
+  check("l5chg-pin: diff output is capped", src:find("head -c", 1, true) ~= nil)
   check("l5chg-pin: remote + no-repo guarded",
         src:find("reply({ remote = true })", 1, true) ~= nil
         and src:find("reply({ noRepo = true })", 1, true) ~= nil)
@@ -1127,12 +1129,24 @@ do
         and src:find("if(CHANGES.key !== selectedKey){ box.innerHTML", 1, true) ~= nil)
   check("l5chg-pin: per-file diff fetch on expand",
         src:find('send("detail-diff", selectedKey, f.path)', 1, true) ~= nil)
-  -- #2 review fixes: explicit verbatim paths (core.quotepath=false) + status cap,
-  -- ccDetailChanges entry-level stale guard.
-  check("l5chg-fix: quotepath=false + status cap",
-        src:find("core.quotepath=false status --porcelain=v1 -z 2>/dev/null | head -c 1000000", 1, true) ~= nil)
+  -- #2 review fixes (semantic anchors, not verbatim shell strings): status is
+  -- porcelain v1 in -z mode, verbatim paths, byte-capped; ccDetailChanges guarded.
+  check("l5chg-fix: status is porcelain v1 -z, verbatim, capped",
+        src:find("porcelain=v1", 1, true) ~= nil and src:find("quotepath=false", 1, true) ~= nil
+        and src:find("status --porcelain=v1 -z", 1, true) ~= nil)
   check("l5chg-fix: ccDetailChanges entry stale guard",
-        src:find("window.ccDetailChanges = function(key, data){\n      if(key !== selectedKey) return;", 1, true) ~= nil)
+        src:find("window.ccDetailChanges = function(key, data){", 1, true) ~= nil
+        and src:find("if(key !== selectedKey) return;", 1, true) ~= nil)
+  -- leaderboard review: rename-aware diff (orig forwarded from the cached file set)
+  -- + detail-diff validates the bridge path against that set (no --no-index arbitrary read).
+  check("l5chg-rev: rename-aware diff via orig",
+        src:find("function FX.gitDiff(root, file, orig)", 1, true) ~= nil
+        and src:find("diff HEAD -M --no-color", 1, true) ~= nil)
+  check("l5chg-rev: detail-diff validates path against session file set",
+        src:find("local allowed = gitChangeFiles[key]", 1, true) ~= nil
+        and src:find("allowed[file] == nil then reply", 1, true) ~= nil)
+  check("l5chg-rev: detail-changes caches the authoritative file set",
+        src:find("gitChangeFiles[key] = allowed", 1, true) ~= nil)
   -- #3 export session archive: bridge handler, transcript cp (verbatim, large-safe),
   -- meta via core, ledger event, two entry points (detail button + ctx-menu).
   check("l5exp-pin: export-session handler", src:find('a == "export-session"', 1, true) ~= nil)

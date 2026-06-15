@@ -5744,11 +5744,19 @@ end
 -- Canonical ordered tab list for the detail panel. Injected into the panel JS
 -- as __DETAIL_TABS__ (like __BULK_RULES__) so the strip and the pure state
 -- normalizer share ONE source of truth -- no drift. 'activity' is the default
--- and can NEVER be unpinned (it's the always-available fallback view). New
--- tabs (e.g. 'changes' from the git-changes view) append here.
--- KEEP-IN-SYNC: the per-tab render dispatch in the panel JS (setDetailTab /
--- applyTabVisibility) must handle each id, and normalizeTabStateJS in the panel
--- JS mirrors M.normalizeTabState below.
+-- and can NEVER be unpinned (it's the always-available fallback view).
+--
+-- ADDING A TAB -- checklist (most sites are data-driven and need NO edit):
+--   auto-flows from this list (no change): renderTabBar (built from
+--     __DETAIL_TABS__), M.detailTabIds, M.normalizeTabState + normalizeTabStateJS.
+--   MANUAL edits required:
+--     (a) a matching <div class="d-panel" data-tab="ID"> in the HTML block --
+--         the strip only toggles .active on panels that already exist;
+--     (b) for a LAZY/expensive tab, a `detail-ID` action in the bridge handler
+--         + a maybeLoadActiveTab case (see how 'timeline'/'changes' wire a
+--         detail-* action -> ccDetail* callback, stale-guarded);
+--     (c) a per-id branch in maybeLoadActiveTab only if it needs special load
+--         behavior (cheap always-rendered tabs need nothing).
 M.DETAIL_TABS = {
   { id = "activity",  label = "Activity" },
   { id = "timeline",  label = "Timeline" },
@@ -5785,10 +5793,10 @@ function M.normalizeTabState(raw, tabs)
   local unpinned = {}
   local rawUnp = raw.unpinned
   if type(rawUnp) == "table" then
-    -- accept either a { id=true } map or an array of ids
-    for k, v in pairs(rawUnp) do
-      local id = (type(k) == "string") and k or (type(v) == "string" and v or nil)
-      if id and valid[id] and id ~= def and (v == true or type(k) == "number") then
+    -- canonical form is a { id=true } map (the only shape the panel JS ever
+    -- writes); keep only known, non-default ids.
+    for id, v in pairs(rawUnp) do
+      if v == true and type(id) == "string" and valid[id] and id ~= def then
         unpinned[id] = true
       end
     end
