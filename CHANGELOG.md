@@ -4,6 +4,33 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-14 (later still ×3) — L6 event-callback rule engine
+
+Sixth backlog build. Declarative, OPT-IN rules that react to a session edge with a safe effect —
+generalizing the hard-coded auto-respawn/continue/escalation onto the existing level-triggered
+dispatcher (not a new event bus). Off unless `rules.enabled`.
+
+- **Rule engine** (`cc-rules.json`) — a rule is `{name, enabled, trigger:{kind, match?}, processor:
+  {kind, text?, label?}, once?}`. cc-core: `validateRule` / `ruleLoad` (fail-safe, dedupe, mirrors
+  the L1 registry) / `ruleList`; `ruleScopeMatch` (wildcard glob on project/group/sessionKey/provider);
+  `ruleFires` / `rulesForEdge`. The dashboard loads the rule set once per refresh and runs matching
+  rules on a **fresh status edge** (v1 triggers: `done` / `error` / `approval`). Processors map onto
+  existing SAFE effects: `log` → a `by:"rule"` ledger event, `relabel` → `setLabel`, `nudge` → the
+  delivery-gated nudge path. `once` rules fire at most once per (rule, tile) via a marker that's reaped
+  when the tile vanishes. Edge-triggered (a reload's `pv==nil` never fires).
+- **Automation result ledger** — automation events now carry an `outcome`: `auto_respawn` →
+  `outcome="ok"`; the previously **silent** would-respawn-but-can't branch now ledgers
+  `auto_respawn_blocked {outcome="skipped", reason}`; `auto_continue` ledgers **inside** the serialized
+  closure with the outcome from actual delivery. `handleAction("continue")` is now delivery-gated
+  (returns nil on a no-window-match skip), and the **manual** Continue path was moved to a
+  post-dispatch, delivery-gated ledger to match (review-caught: the eager pre-dispatch log would have
+  recorded a skipped resume as a success).
+- Reviewed adversarially (5 reported, 3 confirmed — all the one manual-continue audit-fidelity issue,
+  fixed). Tests: +33 cc-core checks, +15 dashboard pins. Suite green (1548 core + 344 ui + 183 bash).
+- **Deferred:** the `hung` / `loop` / `starved` rule triggers (v1 fires on the three status edges;
+  those edges fire at different sites), the `feed` / `continue` processors, per-rule status lifecycle
+  (COMPLETED/ERROR), and a rules editor UI (`cc-rules.json` is hand-edited).
+
 ## 2026-06-14 (later still ×2) — L5 richer session observability
 
 Fifth build from the feature-mining backlog. Pure-core derivations off the transcript Shepherd

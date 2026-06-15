@@ -207,12 +207,12 @@ remaining items. Full per-round detail is in CHANGELOG.md and git history.
 ## Candidate features — cross-project mining backlog
 
 > **▶ RESUME HERE (build status, 2026-06-14):** Mining is DONE (5 sources → L1–L7). Build order
-> **Phase 0✅ → L1✅ → L2✅ → L3✅ → L4✅ → L5✅ → L6 → L7**. **L1–L5 are SHIPPED + committed + deployed**
+> **Phase 0✅ → L1✅ → L2✅ → L3✅ → L4✅ → L5✅ → L6✅ → L7**. **L1–L6 are SHIPPED + committed + deployed**
 > (see CHANGELOG 2026-06-14 + their `✅` blocks below; each has a *deferred follow-up* — mostly editor UIs and,
-> for L4, the UX-gated topology/delegation/idle-target pieces; for L5, the heavier UI sub-items). **Next: L6**
-> (event-callback rule engine — `cc-rules.json` declarative opt-in rules generalizing auto-respawn/continue/
-> escalation onto the existing level-triggered dispatcher; + an automation result ledger). Then **L7** (scheduled
-> spawns / routines — `cc-schedules.json` cron/one-shot firing the normal spawn/nudge effects). Method per feature:
+> for L4, the UX-gated topology/delegation/idle-target pieces; for L5, the heavier UI sub-items; for L6, the
+> hung/loop/starved triggers + feed/continue processors + a rules editor). **Next: L7** (scheduled spawns /
+> routines — `cc-schedules.json` cron/one-shot firing the normal spawn/nudge effects; routine board; periodic
+> digest — the LAST mined-backlog phase). Method per feature:
 > pure logic in `cc-core.lua` + unit tests → wire the dashboard (FX/handleAction/panel-JS) + ui pins → `make test`
 > green → run an **adversarial-review Workflow** (caught real bugs in L2/L3/L4; L5 was clean) → fix → `make deploy`
 > → commit + push. Honor the three load-bearing facts below (the `claude` CLI is present; `gate.tools` is a
@@ -677,6 +677,15 @@ executor/sandbox/server.*
     `escalation.loop {enabled=false, repeats=N}`. Detection + human/nudge escalation only — no rewind/model-swap.
 
 ### L6 — Event-callback rule engine (NEW from OpenHands) — effort **M**
+> ✅ **SHIPPED 2026-06-14** (see CHANGELOG): opt-in `cc-rules.json` rules (`rules.enabled`, default off) react
+> to a fresh status edge with a safe effect. cc-core: `validateRule`/`ruleLoad`/`ruleList` (fail-safe),
+> `ruleScopeMatch`/`ruleFires`/`rulesForEdge`; v1 triggers `{done, error, approval}`, processors `{log, relabel,
+> nudge}`. Engine: `runRules` on the edge, `once` via a reaped `ruleFired` map, ledgered `by:"rule"`. Automation
+> result ledger: `outcome` on `auto_respawn`/`auto_continue` + the new `auto_respawn_blocked` (was silent) +
+> delivery-gated `handleAction("continue")` (both auto + manual paths ledger gated on delivery). Adversarial
+> review (5 reported, 3 confirmed = one manual-continue audit issue, fixed). Suite 1548 core + 344 ui + 183 bash.
+> **Deferred:** `hung`/`loop`/`starved` triggers (their edges fire at other sites), `feed`/`continue` processors,
+> per-rule status lifecycle (COMPLETED/ERROR), and a rules editor UI (hand-edited JSON today).
 *Source: OpenHands event-callback registry + result ledger. Generalizes Shepherd's hard-coded
 auto-respawn/auto-continue/escalation into declarative, opt-in rules — layered on the existing level-triggered
 dispatcher, NOT a new event bus.*

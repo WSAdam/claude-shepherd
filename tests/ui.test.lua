@@ -642,7 +642,8 @@ do
         src:find("dispatchSerialized(item, a, dispatch)", 1, true) ~= nil)
   -- Auto-Continue fires the SAME serialized continue keystroke the manual button uses.
   check("inject-pin: auto-continue serialized through the chokepoint",
-        src:find('dispatchSerialized(it, "continue", function() core.handleAction(FX, it, "continue") end)', 1, true) ~= nil)
+        src:find('dispatchSerialized(ct, "continue", function()', 1, true) ~= nil
+        and src:find('core.handleAction(FX, ct, "continue")', 1, true) ~= nil)
   check("inject-pin: auto-continue ledgers the resume",
         src:find('type = "auto_continue", attempt = cstep.attempts', 1, true) ~= nil)
   -- Remote-control startup sweep types /rc through the SAME serialized chokepoint.
@@ -932,6 +933,27 @@ do
   check("l5-pin: notify click jumps to session", src:find("focusProject(it.name, it.cwd, it.editor, true)", 1, true) ~= nil)
   check("l5-pin: banner decision via cc-core", src:find("core.notifyDecision(pv.status, it, cfg)", 1, true) ~= nil)
   check("l5-pin: banner gated off by default", src:find('core.config(cfg, "notifications.banner.onApproval", false)', 1, true) ~= nil)
+  -- L6: event-callback rule engine (cc-rules.json, off by default), safe processors
+  check("l6-pin: RULES_FILE + FX.readRules", src:find("local RULES_FILE", 1, true) ~= nil
+        and src:find("function FX.readRules()", 1, true) ~= nil)
+  check("l6-pin: rules gated off by default", src:find('core.config(cfg, "rules.enabled", false)', 1, true) ~= nil)
+  check("l6-pin: ruleSet loaded once per refresh", src:find("core.ruleList(FX.readRules())", 1, true) ~= nil)
+  check("l6-pin: runRules helper", src:find("local function runRules(ruleSet, it, edgeKind)", 1, true) ~= nil)
+  check("l6-pin: fires via core.rulesForEdge", src:find("core.rulesForEdge(ruleSet, edgeKind, it)", 1, true) ~= nil)
+  check("l6-pin: fired on a fresh status edge", src:find("runRules(ruleSet, it, it.status)", 1, true) ~= nil)
+  check("l6-pin: log processor ledgers by:rule", src:find('type = "rule", rule = r.name', 1, true) ~= nil)
+  check("l6-pin: nudge processor uses delivery-gated path",
+        src:find('core.handleAction(FX, target, "nudge", p.text)', 1, true) ~= nil)
+  check("l6-pin: once-state reaped on vanish", src:find("if tk and not newPrev[tk] then ruleFired[k] = nil", 1, true) ~= nil)
+  -- L6 Inc 3: automation result ledger — outcome field + the previously-silent blocked branch
+  check("l6-pin: auto_respawn carries outcome", src:find('type = "auto_respawn", outcome = "ok"', 1, true) ~= nil)
+  check("l6-pin: blocked respawn now ledgered", src:find('type = "auto_respawn_blocked", outcome = "skipped"', 1, true) ~= nil)
+  check("l6-pin: auto_continue outcome from delivery",
+        src:find('outcome = (acted == "continue") and "ok" or "skipped"', 1, true) ~= nil)
+  -- L6 review fix: manual continue is ledgered POST-dispatch, gated on delivery (not eager)
+  check("l6-pin: manual continue gated ledger",
+        src:find('type = "continue", outcome = (acted == "continue") and "ok" or "skipped"', 1, true) ~= nil)
+  check("l6-pin: no eager continue ledger", src:find('ledgerFor(item, { type = "continue" })', 1, true) == nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

@@ -47,6 +47,24 @@ All derived locally from the transcript Shepherd already tails — no extra hook
   `onDone`) — a native macOS notification on a rising edge into "needs you" / "done";
   click it to jump to the session.
 
+### Event-callback rules (L6, off by default)
+
+Opt-in declarative rules (`~/.claude/cc-rules.json`, enable with `rules.enabled`) that react to a
+session edge with a safe effect — a lighter, per-session complement to the fleet automations.
+A rule is `{name, trigger:{kind, match?}, processor:{kind, …}, once?}`:
+
+- **trigger.kind** — `done`, `error`, or `approval` (the fresh status edge).
+- **trigger.match** (optional) — wildcard-glob scope on `project` / `group` / `sessionKey` /
+  `provider` (absent = fleet-wide).
+- **processor.kind** — `log` (write an audit note), `relabel` (rename the tile), or `nudge`
+  (type text into the session, via the same delivery-gated path as a manual nudge).
+- **once** — fire at most once per session.
+
+Example: `{ "name":"flag-prod-errors", "trigger":{"kind":"error","match":{"group":"prod"}},
+"processor":{"kind":"relabel","label":"⚠ prod error"}, "once":true }`. Every rule firing is
+ledgered as `by:"rule"`. Automation events (`auto_respawn`, `auto_continue`) now also record an
+`outcome` (and a death that can't be auto-respawned is logged instead of failing silently).
+
 ## How it works
 
 ```

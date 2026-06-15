@@ -206,9 +206,12 @@ do
 
   -- continue: resume a session frozen on an API error by typing "continue" + Enter
   r = newRecorder()
-  core.handleAction(r.fx, normal, "continue")
+  eq("continue: returns continue when delivered", core.handleAction(r.fx, normal, "continue"), "continue")
   eq("continue: typeIntoWindow op", r.last().op, "typeIntoWindow")
   eq("continue: types the word continue", r.last().b, "continue")
+  -- L6: continue is delivery-gated — a no-window-match skip returns nil (accurate outcome)
+  local rskip = newRecorder(); rskip._typeResult = false
+  eq("continue: skip on no-window-match -> nil", core.handleAction(rskip.fx, normal, "continue"), nil)
 end
 
 -- ---- deckLayout: row-major fill + overflow ---------------------------------
@@ -430,6 +433,41 @@ do
   eq("notify: off by default", core.notifyDecision("working", appItem, off), nil)
   -- approval edge but only onDone enabled -> nil
   eq("notify: wrong toggle -> nil", core.notifyDecision("working", appItem, onDone), nil)
+end
+
+-- ---- L6 rule engine: validate / fail-safe load / matcher -------------------
+do
+  local goodLog = { name = "log-done", trigger = { kind = "done" }, processor = { kind = "log", text = "finished" } }
+  local goodNudge = { name = "nudge-err", trigger = { kind = "error", match = { group = "build*" } },
+                      processor = { kind = "nudge", text = "continue" }, once = true }
+  eq("rule: valid log", core.validateRule(goodLog).ok, true)
+  eq("rule: valid nudge w/ scope", core.validateRule(goodNudge).ok, true)
+  eq("rule: missing name", core.validateRule({ trigger = { kind = "done" }, processor = { kind = "log" } }).ok, false)
+  eq("rule: bad trigger kind", core.validateRule({ name = "x", trigger = { kind = "boom" }, processor = { kind = "log" } }).ok, false)
+  eq("rule: bad processor kind", core.validateRule({ name = "x", trigger = { kind = "done" }, processor = { kind = "explode" } }).ok, false)
+  eq("rule: nudge needs text", core.validateRule({ name = "x", trigger = { kind = "done" }, processor = { kind = "nudge" } }).ok, false)
+  eq("rule: relabel needs label", core.validateRule({ name = "x", trigger = { kind = "done" }, processor = { kind = "relabel" } }).ok, false)
+  eq("rule: unknown field", core.validateRule({ name = "x", trigger = { kind = "done" }, processor = { kind = "log" }, bogus = 1 }).ok, false)
+  -- fail-safe load: keep valid, drop bad, dedupe by name
+  local ld = core.ruleLoad({ rules = { goodLog, { name = "" }, goodLog, goodNudge } })
+  eq("rule-load: keeps valid", #ld.valid, 2)
+  eq("rule-load: drops bad + dup", #ld.errors, 2)
+  -- ruleFires: kind + scope
+  local item = { projectKey = "/p", group = "build", key = "k1", providerId = "anthropic" }
+  local lrule = core.ruleList({ rules = { goodLog } })[1]
+  eq("rule-fires: kind match", core.ruleFires(lrule, "done", item), true)
+  eq("rule-fires: wrong edge", core.ruleFires(lrule, "error", item), false)
+  local nrule = core.ruleList({ rules = { goodNudge } })[1]
+  eq("rule-fires: scope group glob", core.ruleFires(nrule, "error", item), true)
+  eq("rule-fires: scope mismatch",
+     core.ruleFires(nrule, "error", { group = "review", key = "k", projectKey = "/p" }), false)
+  eq("rule-fires: disabled -> false",
+     core.ruleFires({ enabled = false, trigger = { kind = "done" } }, "done", item), false)
+  -- rulesForEdge ordered
+  local rs = core.ruleList({ rules = { goodLog, goodNudge } })
+  eq("rules-for-edge: done -> 1", #core.rulesForEdge(rs, "done", item), 1)
+  eq("rules-for-edge: error -> 1 (scoped)", #core.rulesForEdge(rs, "error", item), 1)
+  eq("rules-for-edge: no match -> 0", #core.rulesForEdge(rs, "hung", item), 0)
 end
 
 -- ---- runSequence: beat-list scheduling (injected scheduler) ----------------

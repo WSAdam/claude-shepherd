@@ -194,7 +194,23 @@ the transcript Shepherd already tails + local state, all off-by-default where th
   hooks inspector, session-history browser, and a Settings UI for the auto-title/loop/banner toggles
   (config-only for now).
 
-Build order next: **L6** (event-callback rule engine — `cc-rules.json`) → L7 (scheduled spawns / routines).
+**L6 — event-callback rule engine** is shipped: opt-in `cc-rules.json` rules react to a session edge with a
+safe effect, layered on the existing level-triggered dispatcher (NOT a new bus). Off unless `rules.enabled`.
+- **Pure layer:** `validateRule`/`ruleLoad`(fail-safe)/`ruleList`; `ruleScopeMatch` (globEq on
+  project/group/sessionKey/provider); `ruleFires`/`rulesForEdge`. v1 `RULE_TRIGGERS = {done, error, approval}`
+  (status edges); `RULE_PROCESSORS = {log, relabel, nudge}`.
+- **Engine:** `ruleSet` loaded ONCE per refresh; `runRules(ruleSet, it, edgeKind)` fires on the FRESH status
+  edge (pv~=nil and it.status~=pv.status). Processors → existing SAFE effects (log→ledger by:"rule",
+  relabel→setLabel, nudge→delivery-gated `handleAction`). `once` via a module `ruleFired["name\1key"]` map,
+  REAPED on vanish (same L4/L5 lesson).
+- **Automation result ledger:** `auto_respawn` carries `outcome="ok"`; the once-silent can't-respawn branch now
+  ledgers `auto_respawn_blocked`; `auto_continue` ledgers inside the serialized closure with the delivery
+  outcome. **`handleAction("continue")` is now delivery-gated** (returns nil on no-window-match) — and BOTH the
+  auto and the **manual** Continue paths ledger post-dispatch gated on that (review-caught the manual eager log).
+- **Deferred:** hung/loop/starved triggers, feed/continue processors, per-rule status lifecycle, a rules editor UI.
+
+Build order next: **L7** (scheduled spawns / routines — `cc-schedules.json` cron/one-shot firing the normal
+spawn/nudge effects) — the LAST mined-backlog phase.
 
 ## State (2026-06-13)
 

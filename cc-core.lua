@@ -148,8 +148,12 @@ function M.handleAction(fx, item, action, text)
     end
   elseif action == "continue" then
     -- Resume a session frozen on an API error (e.g. ECONNRESET): type the literal word
-    -- "continue" + Enter, exactly as the user would, to restart the aborted turn.
-    fx.typeIntoWindow(tgt, "continue")
+    -- "continue" + Enter, exactly as the user would, to restart the aborted turn. Gated
+    -- on delivery (skip-on-no-match) so the caller can record an accurate outcome.
+    if not delivered(fx, fx.typeIntoWindow(tgt, "continue"),
+        "continue keystroke not delivered for " .. tostring(item.name)) then
+      return nil
+    end
   elseif action == "close" then
     -- Best-effort close the editor window, then drop its dashboard tile.
     fx.closeWindow(tgt)
@@ -661,6 +665,8 @@ local NARRATE = {
   error         = { "❌", "errored" },
   loop          = { "⟳", "repeating the same action" },
   auto_respawn  = { "♻️", "auto-respawned" },
+  auto_respawn_blocked = { "🚫", "death not respawnable" },
+  rule          = { "📐", "rule fired" },
   drain_close   = { "⛔", "drained (finished turn, closed)" },
   queue_edit    = { "🧾", "edited the queue" },
   route_arm     = { "🔀", "project routing toggled" },
@@ -4984,6 +4990,120 @@ function M.overToolLimit(toolLimits, counts)
     local n = tonumber(counts[tool]) or 0
     local L = tonumber(lim)
     if L and n >= L then out[#out + 1] = { tool = tool, used = n, limit = L } end
+  end
+  return out
+end
+
+-- ===========================================================================
+-- L6 — Event-callback rule engine (cc-rules.json)
+-- ===========================================================================
+-- Declarative, OPT-IN rules that react to a session edge with a safe effect --
+-- generalizing the hard-coded auto-respawn/continue/escalation onto the existing
+-- level-triggered dispatcher (NOT a new event bus). A rule = { name, enabled,
+-- trigger = { kind, match? }, processor = { kind, text?, label? }, once? }. The
+-- dashboard detects the edge each tick and runs the FIRST matching rule's processor;
+-- `once` self-mutates a fired-marker through fx (like routePending). Off unless the
+-- global rules.enabled is set AND the rule is enabled. Validate -> fail-safe load ->
+-- list mirrors the L1 agent registry.
+M.RULE_CAP = 50
+-- v1 fires on the three status EDGES (done/error/approval), detected per-tile in the
+-- refresh loop. hung/loop/starved are a noted follow-up (their firing sites differ);
+-- a rule targeting them fails validation explicitly rather than silently never firing.
+M.RULE_TRIGGERS = { done = true, error = true, approval = true }
+M.RULE_PROCESSORS = { log = true, relabel = true, nudge = true }
+M.RULE_FIELDS = { name = true, enabled = true, trigger = true, processor = true, once = true }
+
+local function rlist(state)
+  if type(state) == "table" and type(state.rules) == "table" then return state.rules end
+  return {}
+end
+
+-- Validate a rule: returns { ok, errors[] }. name non-blank; trigger.kind in
+-- RULE_TRIGGERS; processor.kind in RULE_PROCESSORS; processor-specific required
+-- fields (nudge needs text; relabel needs label). Unknown fields flagged.
+function M.validateRule(rec)
+  if type(rec) ~= "table" then return { ok = false, errors = { "not an object" } } end
+  local errs = {}
+  if agTrim(rec.name) == "" then errs[#errs + 1] = "missing required field: name" end
+  local tr = rec.trigger
+  if type(tr) ~= "table" then errs[#errs + 1] = "trigger must be an object"
+  elseif not M.RULE_TRIGGERS[tostring(tr.kind)] then
+    errs[#errs + 1] = "unknown trigger kind: " .. tostring(tr.kind)
+  elseif tr.match ~= nil and type(tr.match) ~= "table" then
+    errs[#errs + 1] = "trigger.match must be an object"
+  end
+  local pr = rec.processor
+  if type(pr) ~= "table" then errs[#errs + 1] = "processor must be an object"
+  elseif not M.RULE_PROCESSORS[tostring(pr.kind)] then
+    errs[#errs + 1] = "unknown processor kind: " .. tostring(pr.kind)
+  else
+    if pr.kind == "nudge" and agTrim(pr.text) == "" then errs[#errs + 1] = "nudge processor needs text" end
+    if pr.kind == "relabel" and agTrim(pr.label) == "" then errs[#errs + 1] = "relabel processor needs label" end
+  end
+  for k in pairs(rec) do
+    if not M.RULE_FIELDS[k] then errs[#errs + 1] = "unknown field: " .. tostring(k) end
+  end
+  return { ok = #errs == 0, errors = errs }
+end
+
+local function ruleNorm(rec)
+  local tr = type(rec.trigger) == "table" and rec.trigger or {}
+  local pr = type(rec.processor) == "table" and rec.processor or {}
+  return {
+    name = agTrim(rec.name),
+    enabled = rec.enabled ~= false,  -- default ON (the global rules.enabled gates the engine)
+    trigger = { kind = tostring(tr.kind),
+                match = type(tr.match) == "table" and tr.match or nil },
+    processor = { kind = tostring(pr.kind), text = tplStr(pr.text), label = tplStr(pr.label) },
+    once = rec.once == true,
+  }
+end
+
+-- Fail-safe load (mirrors agentLoad/templateLoad): validate each, keep valid
+-- (normalized), drop bad with reasons, dedupe by name. Returns {valid, errors}.
+function M.ruleLoad(state)
+  local valid, errors, seen = {}, {}, {}
+  for _, rec in ipairs(rlist(state)) do
+    local v = M.validateRule(rec)
+    local nm = (type(rec) == "table") and agTrim(rec.name) or ""
+    if not v.ok then
+      errors[#errors + 1] = { name = nm ~= "" and nm or "(unnamed)", reason = table.concat(v.errors, "; ") }
+    elseif seen[nm] then
+      errors[#errors + 1] = { name = nm, reason = "duplicate name (kept first)" }
+    else
+      seen[nm] = true; valid[#valid + 1] = ruleNorm(rec)
+    end
+  end
+  return { valid = valid, errors = errors }
+end
+
+function M.ruleList(state) return M.ruleLoad(state).valid end
+
+-- Does a rule's scope match this tile? match fields (project/group/sessionKey/
+-- provider) are wildcard-globbed; an absent/"" field matches anything; nil match =
+-- fleet-wide. Reuses the L2 globEq.
+local function ruleScopeMatch(match, item)
+  if type(match) ~= "table" then return true end
+  item = type(item) == "table" and item or {}
+  return M.globEq(match.project, item.projectKey) and M.globEq(match.group, item.group)
+     and M.globEq(match.sessionKey, item.key) and M.globEq(match.provider, item.providerId)
+end
+
+-- Does this rule fire for an `edgeKind` event on `item`? enabled + trigger kind +
+-- scope. Pure; the caller detects the edge (done/error/hung/approval/starved/loop)
+-- and the `once`/fired bookkeeping.
+function M.ruleFires(rule, edgeKind, item)
+  if type(rule) ~= "table" or rule.enabled == false then return false end
+  if type(rule.trigger) ~= "table" or rule.trigger.kind ~= edgeKind then return false end
+  return ruleScopeMatch(rule.trigger.match, item)
+end
+
+-- All rules (in order) that fire for an edge on a tile -- sequential execution is
+-- the caller running them in order (one dispatcher per tick).
+function M.rulesForEdge(rules, edgeKind, item)
+  local out = {}
+  for _, r in ipairs(type(rules) == "table" and rules or {}) do
+    if M.ruleFires(r, edgeKind, item) then out[#out + 1] = r end
   end
   return out
 end

@@ -60,6 +60,7 @@ local GATE_TOOLS_DIR = os.getenv("CC_GATE_TOOLS_DIR") or (os.getenv("HOME") .. "
 local GATE_FLAG     = os.getenv("CC_GATE_FLAG") or (os.getenv("HOME") .. "/.claude/cc-gate.enabled")
 local LABELS_FILE   = os.getenv("CC_LABELS_FILE") or (os.getenv("HOME") .. "/.claude/cc-labels.json")
 local AUTOTITLE_FILE = os.getenv("CC_AUTOTITLE_FILE") or (os.getenv("HOME") .. "/.claude/cc-autotitles.json")
+local RULES_FILE    = os.getenv("CC_RULES_FILE") or (os.getenv("HOME") .. "/.claude/cc-rules.json")
 local GROUPS_FILE   = os.getenv("CC_GROUPS_FILE") or (os.getenv("HOME") .. "/.claude/cc-groups.json")
 local RECENT_FILE   = os.getenv("CC_RECENT_FILE") or (os.getenv("HOME") .. "/.claude/cc-recent-dirs.json")
 local TEMPLATE_FILE = os.getenv("CC_TEMPLATE_FILE") or (os.getenv("HOME") .. "/.claude/cc-templates.json")
@@ -184,6 +185,7 @@ local starvedAlerted = {} -- queueKey -> true once the starvation ledger event f
 local taskStart     = {} -- tile key -> { ts, role, projectKey, by }: a fed queue task in
                          -- flight (L4 per-task timing); consumed on the next done edge
 local loopAlerted   = {} -- tile key -> true once a loop ledger event fired this episode (L5)
+local ruleFired     = {} -- "ruleName\1tileKey" -> true: a `once` L6 rule already fired for this tile
 local loadConfig         -- forward declaration (defined near refresh)
 local ledgerSnapshot     -- forward declaration (defined near refresh; bridge handlers use it)
 local refresh            -- forward declaration (so the controller can repaint now)
@@ -764,6 +766,13 @@ end
 function FX.writeTemplates(state)
   hs.fs.mkdir(CLAUDE_DIR)
   FX.writeFile(TEMPLATE_FILE, core.json.encode(state or { templates = {} }))
+end
+-- L6 event-callback rules (cc-rules.json). Missing/garbled -> empty.
+function FX.readRules()
+  local c = FX.readFile(RULES_FILE)
+  if not c or #c == 0 then return { rules = {} } end
+  local ok, t = pcall(function() return core.json.decode(c) end)
+  return (ok and type(t) == "table") and t or { rules = {} }
 end
 
 -- Spawn presets (roadmap #4a). Missing/garbled -> empty.
@@ -2811,9 +2820,10 @@ local function handleBridgeMsg(msg)
     ledgerFor(item, { type = "model_change", from = item.model, to = tostring(payload.text or "") })
   elseif a == "effort" then
     ledgerFor(item, { type = "effort_change", from = item.effort, to = tostring(payload.text or "") })
-  elseif a == "continue" then
-    ledgerFor(item, { type = "continue" })  -- resumed a session frozen on an API error
   end
+  -- NOTE: `continue` is ledgered POST-dispatch (gated on delivery) inside dispatch()
+  -- below -- L6 made handleAction("continue") delivery-gated, so an eager pre-dispatch
+  -- log would falsely record a skipped (no-window-match) resume as a success.
   local text = payload.text and tostring(payload.text) or nil
   local function dispatch()
     local acted = core.handleAction(FX, item, a, text)
@@ -2824,6 +2834,12 @@ local function handleBridgeMsg(msg)
     if a == "nudge" and text and #text > 0 then
       ledgerFor(item, { type = (acted == "nudge") and "nudge" or "nudge_skipped",
                         text = tostring(text):sub(1, 200) })
+    end
+    -- continue: resumed a session frozen on an API error. Ledger gated on DELIVERY
+    -- (handleAction returns nil on a no-window-match skip) so the audit trail can't
+    -- record a resume that never landed. type stays "continue" (lineage counts it).
+    if a == "continue" then
+      ledgerFor(item, { type = "continue", outcome = (acted == "continue") and "ok" or "skipped" })
     end
     -- set-mode fires Shift+Tab blind: no hook reports the new mode, so the stored
     -- permission_mode goes stale, the dropdown snaps back ~1s later, and a re-pick
@@ -5953,6 +5969,41 @@ function ledgerSnapshot()  -- assigns the forward-declared local (same as loadCo
   return ledgerSnapshotCache.events, changed
 end
 
+-- L6: run the OPT-IN event-callback rules for an edge on a tile. Sequential -- every
+-- matching rule (cc-core orders them) runs; a `once` rule fires at most once per
+-- (rule, tile) via ruleFired. Processors map onto existing SAFE effects: log -> a
+-- ledger note, relabel -> setLabel, nudge -> the delivery-gated nudge path. Each fire
+-- ledgers a by:"rule" event. ruleSet is loaded once per refresh (off unless rules.enabled).
+local function runRules(ruleSet, it, edgeKind)
+  if not ruleSet or #ruleSet == 0 then return end
+  for _, r in ipairs(core.rulesForEdge(ruleSet, edgeKind, it)) do
+    local mark = r.name .. "\1" .. tostring(it.key)
+    if not (r.once and ruleFired[mark]) then
+      if r.once then ruleFired[mark] = true end
+      local p = r.processor or {}
+      if p.kind == "log" then
+        ledgerFor(it, { type = "rule", rule = r.name, kind = edgeKind, by = "rule",
+                        processor = "log", note = p.text })
+      elseif p.kind == "relabel" and p.label and p.label ~= "" then
+        local lkey = it.projectKey or it.cwd
+        if lkey then
+          labels = core.setLabel(labels, lkey, p.label, it.name); FX.saveLabels(labels); it.label = p.label
+        end
+        ledgerFor(it, { type = "rule", rule = r.name, kind = edgeKind, by = "rule",
+                        processor = "relabel", to = p.label })
+      elseif p.kind == "nudge" and p.text and p.text ~= "" then
+        local target = it
+        dispatchSerialized(target, "rule-nudge", function()
+          local acted = core.handleAction(FX, target, "nudge", p.text)
+          ledgerFor(target, { type = "rule", rule = r.name, kind = edgeKind, by = "rule",
+                              processor = (acted == "nudge") and "nudge" or "nudge_skipped",
+                              text = tostring(p.text):sub(1, 200) })
+        end)
+      end
+    end
+  end
+end
+
 -- Push current statuses into the webview + deck; run queue auto-feed and
 -- stale-approval escalation; keep the heartbeat fresh.
 function refresh()
@@ -5972,6 +6023,8 @@ function refresh()
   local loopRepeats = tonumber(core.config(cfg, "escalation.loop.repeats", 3)) or 3
   local bannerOn    = (core.config(cfg, "notifications.banner.onApproval", false) == true)  -- L5 OS banners
                    or (core.config(cfg, "notifications.banner.onDone", false) == true)
+  local rulesOn     = core.config(cfg, "rules.enabled", false) == true  -- L6 event-callback rules
+  local ruleSet     = rulesOn and core.ruleList(FX.readRules()) or nil  -- loaded once per refresh
   local starveMin  = tonumber(core.config(cfg, "queue.routing.starveMinutes", 0)) or 0
   local routeGroups = {}  -- queueKey -> { items }: members per project, for the dispatcher
   local escEnabled = core.config(cfg, "escalation.enabled", false) == true
@@ -6114,6 +6167,13 @@ function refresh()
     if bannerOn and pv ~= nil then
       local nb = core.notifyDecision(pv.status, it, cfg)
       if nb then FX.notify(nb.title, nb.text, { key = it.key }) end
+    end
+
+    -- L6 event-callback rules on a FRESH status edge (done/error/approval). pv==nil
+    -- (post-reload) is no edge. Off unless rules.enabled (ruleSet is nil otherwise).
+    if ruleSet and pv ~= nil and it.status ~= pv.status
+       and (it.status == "done" or it.status == "error" or it.status == "approval") then
+      runRules(ruleSet, it, it.status)
     end
 
     -- Watchdog (Feature 8): track transcript progress so a stalled `working` session
@@ -6308,14 +6368,19 @@ function refresh()
     if step.spawn then  -- rs.canRespawn was true (the increment is gated on it)
       print("[cc-respawn] auto-relaunch " .. tostring(it.name)
         .. " (attempt " .. tostring(step.attempts) .. "/" .. autoRespawnMax .. ")")
-      ledgerFor(it, { type = "auto_respawn", cwd = rs.project, editor = rs.editor,
+      ledgerFor(it, { type = "auto_respawn", outcome = "ok", cwd = rs.project, editor = rs.editor,
         provider = rs.providerId, attempt = step.attempts })
       -- rs.providerId=nil = faithful bare claude: "" (explicit none) so the relaunch
       -- can't silently pick up the spawn.provider default gateway.
       FX.spawnSession(rs.editor, rs.project, nil, rs.permissionMode, rs.providerId or "")
       FX.removeStatus(it.key)  -- drop the dead tile; the relaunch makes a fresh one
     elseif step.wouldFire and rs and not rs.canRespawn then
+      -- L6: a death that WOULD auto-respawn but can't -- previously a silent print.
+      -- Ledger it once (the edge is debounced by stepAutoRespawn) so "failed
+      -- automations" are auditable, carrying why (rs.reason).
       print("[cc-respawn] " .. tostring(it.name) .. " died but isn't respawnable: " .. tostring(rs.reason))
+      if ledgerOn then ledgerFor(it, { type = "auto_respawn_blocked", outcome = "skipped",
+        reason = tostring(rs.reason or "not respawnable") }) end
     end
 
     -- Auto-Continue (opt-in): a tile frozen on an API error (status=="error") is resumed by
@@ -6328,8 +6393,14 @@ function refresh()
     if cstep.fire then
       print("[cc-continue] auto-continue " .. tostring(it.name)
         .. " (attempt " .. tostring(cstep.attempts) .. "/" .. autoContinueMax .. ")")
-      ledgerFor(it, { type = "auto_continue", attempt = cstep.attempts })
-      dispatchSerialized(it, "continue", function() core.handleAction(FX, it, "continue") end)
+      -- L6: ledger INSIDE the serialized closure so the outcome reflects DELIVERY
+      -- (handleAction returns "continue" only when the keystroke actually landed).
+      local ct = it
+      dispatchSerialized(ct, "continue", function()
+        local acted = core.handleAction(FX, ct, "continue")
+        ledgerFor(ct, { type = "auto_continue", attempt = cstep.attempts,
+                        outcome = (acted == "continue") and "ok" or "skipped" })
+      end)
     end
 
     newPrev[it.key] = { status = it.status, stale = step.isStale, escalated = nowEsc }
@@ -6340,6 +6411,8 @@ function refresh()
   -- gone key would leak forever (mirrors the usageState seen-set reap).
   for k in pairs(taskStart) do if not newPrev[k] then taskStart[k] = nil end end
   for k in pairs(loopAlerted) do if not newPrev[k] then loopAlerted[k] = nil end end
+  -- ruleFired keys are "ruleName\1tileKey"; reap when the tile vanishes (L6 once-state)
+  for k in pairs(ruleFired) do local tk = k:match("\1(.*)$"); if tk and not newPrev[tk] then ruleFired[k] = nil end end
 
   -- 4c-E project routing dispatcher: ONE feed per armed project per tick, to
   -- whichever member is free (done, not stale/error/draining/pending). Runs
