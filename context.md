@@ -165,13 +165,20 @@ in the AI-leaderboard reviews of the #4/#5 commits. New KEEP-IN-SYNC + invariant
   when toggled off. **#6 host stats** is read-only: `FX.pollHostStats(force, cfg)` self-gates on `insights.hostStats`
   + is 30s-throttled, gathers raw readings (each pcall-guarded) and derives via pure `core.hostHealth(raw, opts)`
   (CPU/mem/disk %, uptime, a `pressured` flag + reason string; hand-editable `insights.hostPressure.{cpu,mem,disk}`
-  thresholds preserved across Save via `SETTINGS_KEEP_SUBKEYS.insights`). `core.fleetIdleSince(tiles, now)` is pure.
+  thresholds preserved across Save via `SETTINGS_KEEP_SUBKEYS.insights`). `core.fleetIdleSince(tiles, now)` is pure;
+  the off-by-default OMISSION of the strip is routed through pure `core.insightsHostAttach` (returns `{}` when off)
+  so it's behavior-tested, not just source-pinned. **The disk read uses `df -kP /` (POSIX one-line-per-fs)** — plain
+  `df -k` wraps a long device name onto a 2nd line and the anchored parse silently returns nil (don't regress it).
 - **#7 history browser is ledger-DERIVED, not a parallel store:** `core.sessionHistory(events, opts)` aggregates
   per-session records over the FULL ledger (`readLedger({limit=0})`). **Bulk delete is over-delete-safe:**
   `filterLedger` gained a `sessions` SET and `core.purgeFilterIsScoped` treats a non-empty `sessions` list as
   scoped — but an **empty list is NOT scoped**, and `history-delete` early-returns on an empty selection, so a
   no-selection bulk delete can never escalate to delete-all. It routes through the same `splitLedgerEvents` purge
-  path the Purge button uses and refreshes BOTH the History view and the shared audit-rows cache.
+  path the Purge button uses and refreshes BOTH the History view and the shared audit-rows cache. **`FX.sendHistory`
+  single-sources the uncapped read + aggregate + `ccHistory` push** (so the tab and its post-delete refresh can't
+  diverge on the load-bearing `limit=0`). The ⚙ storage readout's count/skip + `cc-*.json` filter are pure
+  (`core.sumDirBytes` skips `.`/`..`, `core.matchStateFiles`); `FX.storageEntries` is a thin readDir+attributes
+  adapter (nil-guarded) — never touches Claude Code's own transcripts.
 - **Panel anti-XSS for keyed rows:** PR badge clicks (`data-key`) and #7 history rows (`data-pk`/`data-sid`) write
   the key as an **`esc()`'d data- attribute and read it back RAW via `getAttribute`** — never interpolate a
   project/session key into an inline JS handler (`esc()` is HTML-entity escaping, wrong for a JS-string context).

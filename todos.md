@@ -275,8 +275,10 @@ remaining items. Full per-round detail is in CHANGELOG.md and git history.
 > → push); the reviews + leaderboard feedback caught real bugs every round (e.g. #2 `--no-index` arbitrary-file read
 > + rename-as-add; #4 **HIGH** orphaned self-summary guard on a failed paste; #3 phantom-export on write failure; #5
 > prStatusByRoot leak / gh-hang retry; the `7cd6245` review caught the prPollPlan hung-task latch being dead code +
-> a callback clobber race → `core.prPollPlan`/`prCallbackOwns` + data-aware hung deadline). **Suite ~1928 core + 500
-> ui + 183 bash + smoke, green.**
+> a callback clobber race → `core.prPollPlan`/`prCallbackOwns` + data-aware hung deadline; the `312c588` review
+> caught the `df -k` long-device-name 2-line-wrap silently nulling disk → `df -kP`; the `ca66146` review →
+> `FX.sendHistory` dedup + pure `sumDirBytes`/`matchStateFiles`). **Post-batch review rounds for #6/#7 all triaged +
+> folded (commits `c568b2c`, `150129f`). Suite ~1973 core + 512 ui + 183 bash + smoke, green.**
 >
 > **▶ PHASE A — REVIEW-FIX HARDENING (in progress 2026-06-15):** before #6/#7, a contained pass folding in the
 > two AI-leaderboard reviews of `fbcd609` (isOpenableUrl + hung-gh retry) and `879adc7` (openPr data-key +

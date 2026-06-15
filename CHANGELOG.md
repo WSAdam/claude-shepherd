@@ -4,6 +4,30 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-15 (review rounds) — leaderboard review fixes for #6 + #7
+
+The AI-leaderboard reviews of the #6 (`312c588`) and #7 (`54123fe`/docs `ca66146`) commits came
+back; every finding was real and folded in (none discarded). Both rounds: triage → verify against
+the code → fix → `make test` → live-verify the hs-integration bits → deploy → commit.
+
+- **#6 review (`312c588`) — one real latent bug + quality/testing:** the disk read parsed
+  `df -k / | tail -1`, which silently returns nil when a long filesystem device name wraps onto a
+  second physical line (the data row then has no leading filesystem token and the anchored match
+  fails) → disk showed "—" and pressure detection never fired. Switched to **`df -kP /`** (POSIX
+  `-P` = one physical line per fs). Plus: a `clampPct` helper single-sourcing the 0–100 round+clamp;
+  pure `core.insightsHostAttach` so the off-by-default omission of the host strip is behavior-tested,
+  not just source-pinned; a `fleetIdleSince` timestampless-tile test; a loosened (reword-proof)
+  `hungTtl` pin; trimmed comments.
+- **#7 review (`ca66146`) — dedup + pure extraction + tie-break tests:** `FX.sendHistory()`
+  single-sources the uncapped read + aggregate + `ccHistory` push (was duplicated across
+  open-history-view and the post-delete refresh, risking divergence on the load-bearing `limit=0`);
+  pure `core.sumDirBytes` (skip `.`/`..` + sizeless) and `core.matchStateFiles` (the `cc-*.json`
+  filter), leaving `FX.storageEntries` a thin nil-guarded adapter, so the count/skip decisions are
+  unit-tested in core; documented the deliberate `projectKey` first-write-wins (keeps the pin key
+  stable across a workspace move); a `.s-btn` class for the Measure-storage button; and
+  `sessionHistory` tie-break tests (the `>=` lastType rule + the active-sort secondary `lastTs` key).
+- Suite **1973 core + 512 ui + 183 bash + smoke**, green.
+
 ## 2026-06-15 — L5 build-ready batch COMPLETE (#1–#7) + review-fix hardening
 
 The seven heavier L5 detail/observability sub-items, all shipped + deployed (read-only, or
