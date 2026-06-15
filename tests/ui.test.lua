@@ -996,6 +996,19 @@ do
   check("l7board-pin: pushTopic editable in-panel", src:find('gv("rf-pushtopic")', 1, true) ~= nil)
   check("l7board-pin: name-collision confirm",
         src:find("already exists — overwrite it?", 1, true) ~= nil)
+  -- L3 templates editor (deferred polish): structured authoring + version/revert
+  check("l3ed-pin: editorTemplates structured reply", src:find("local function editorTemplates()", 1, true) ~= nil)
+  check("l3ed-pin: editor bridge handlers",
+        src:find('a == "template-editor-list" or a == "template-editor-save"', 1, true) ~= nil)
+  check("l3ed-pin: versioned save via templatePushVersioned", src:find("core.templatePushVersioned(stt, rec", 1, true) ~= nil)
+  check("l3ed-pin: rename preserves history via core.templateRename", src:find("core.templateRename(stt, oldName, rec.name)", 1, true) ~= nil)
+  check("l3ed-pin: carries forward vars schema", src:find("if prior and prior.vars then rec.vars = prior.vars end", 1, true) ~= nil)
+  check("l3ed-pin: versions reply", src:find("core.templateVersions(FX.readTemplates(), name)", 1, true) ~= nil)
+  check("l3ed-pin: revert via core.templateRevert", src:find("core.templateRevert(FX.readTemplates()", 1, true) ~= nil)
+  check("l3ed-pin: ccTplEditor render fn", src:find("function ccTplEditor(list)", 1, true) ~= nil)
+  check("l3ed-pin: ccTplVersions render fn", src:find("function ccTplVersions(name, versions)", 1, true) ~= nil)
+  check("l3ed-pin: drawer templates entry", src:find("menuPick('templates')", 1, true) ~= nil)
+  check("l3ed-pin: templates overlay markup", src:find('<div id="tpleditor">', 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

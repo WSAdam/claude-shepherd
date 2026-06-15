@@ -924,6 +924,22 @@ do
     big = core.templatePushVersioned(big, { name = "C", text = "x" .. i }, { now = i, versionCap = 2 })
   end
   eq("ver: history capped", #core.templateGetRecord(big, "C").versions, 2)
+  -- templateRename (editor rename) preserves the full record incl. version history
+  local rnOk, ok2 = core.templateRename(s2, "T", "T2")
+  eq("rename: ok", ok2, true)
+  eq("rename: old gone", core.templateGetRecord(rnOk, "T"), nil)
+  eq("rename: new present", core.templateGetRecord(rnOk, "T2").name, "T2")
+  eq("rename: keeps version", core.templateGetRecord(rnOk, "T2").version, 2)
+  eq("rename: keeps history", #core.templateGetRecord(rnOk, "T2").versions, 1)
+  eq("rename: unknown old -> false", select(2, core.templateRename(s2, "nope", "X")), false)
+  eq("rename: blank new -> false", select(2, core.templateRename(s2, "T", "  ")), false)
+  eq("rename: same name -> false", select(2, core.templateRename(s2, "T", "T")), false)
+  -- rename ONTO an existing different template overwrites it (caller confirms)
+  local two = core.templatePushVersioned(core.templatePushVersioned(nil,
+    { name = "A", text = "aa" }, { now = 1 }), { name = "B", text = "bb" }, { now = 2 })
+  local merged = core.templateRename(two, "A", "B")
+  eq("rename: collision overwrites", #core.templateList(merged), 1)
+  eq("rename: collision keeps renamed body", core.templateGet(merged, "B"), "aa")
   -- review-fix: "edit" is measured on the COMPOSED body, not raw shadowed fields.
   -- description shadows text -> changing text alone is a no-op (no version bump).
   local sv = core.templatePushVersioned(nil, { name = "S", text = "a", description = "D" }, { now = 1 })

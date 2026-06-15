@@ -469,9 +469,12 @@ override. Turn it into named, attachable bundles.
 > render-before-feed at all three queue sites, versioned saves, and `⤓ Import from prompts folder` (`*.prompt`/
 > `*.md` from `templates.sourceDir`, default `~/.claude/cc-prompts`). cc-core is the authoritative renderer (no JS
 > render twin). Two adversarial-review passes (3 real fixed; then 0). Suite 1425 core + 293 ui + 183 bash.
-> **Deferred follow-up:** the structured-template authoring editor (description/expected_output fields) + the
-> version/revert VIEW UI — today those fields are hand-edited in `cc-templates.json` or imported (same posture as
-> the deferred L1/L2 editors).
+> **Editor ✅ SHIPPED 2026-06-14 (deferred-polish ②):** a 📝 Templates editor (☰ drawer + Tpl-menu "Manage…")
+> with structured authoring (description + expected_output toggle vs raw text, live var readout), a
+> version-history view with non-destructive **revert**, in-panel rename (new pure `core.templateRename` preserves
+> history; vars-schema carried forward on edit), name-collision confirm, XSS-safe textContent rendering.
+> Adversarial review: 0 findings. **Still deferred:** an in-editor vars-schema editor (labels/defaults — derived
+> from `{{var}}` or hand-edited today).
 *Source: ADAPT items 42, 43, 44 (dotprompt file definitions + input-schema, prompt-management CRUD +
 versioning + playground, remote/git prompt sources). This is the local "agent-definition directory" that
 feeds L1.* `cc-templates.json` stores verbatim task text today (no vars, no schema; `templatePush`

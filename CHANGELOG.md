@@ -4,6 +4,33 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-14 (deferred polish ②) — L3 templates editor (authoring + version/revert)
+
+Second deferred-polish build: a 📝 **Templates** editor (☰ drawer + a "Manage templates…"
+row in the Tpl menu) so templates no longer have to be hand-edited in `cc-templates.json`.
+You can author with the **structured** fields the inline Tpl menu hides — a description +
+optional "Expected output:" block — or raw text, with a live **Variables detected** readout;
+view a template's **version history** and **revert** to any prior version (non-destructive);
+and rename, all in-panel.
+
+- **cc-core (pure, +10 tests):** `templateRename(state, old, new)` moves a template under a
+  new name while PRESERVING its full record incl. version history (an editor rename via
+  delete+re-add would have dropped it) and overwrites a same-new-name record (the UI confirms
+  first). The rest of L3 (validate/compose/versioned-save/`templateVersions`/`templateRevert`)
+  was already shipped — this is mostly UI.
+- **dashboard:** `editorTemplates()` sends the structured fields (description/expected_output/
+  text + composed body + detected vars + version count); bridge handlers `template-editor-list/
+  -save/-delete`, `template-versions`, `template-revert`. A rename is atomic server-side
+  (`templateRename` → `templatePushVersioned`), and an edit carries forward a hand-authored
+  vars schema so the structured save can't drop it. The `#tpleditor` overlay has a list view, an
+  author form (mode toggle, name-collision confirm), and a versions view with per-snapshot
+  Revert. XSS-safe (every template field rendered via `textContent`).
+- **Adversarial review** (3-lens workflow + verifiers): **0 findings** — the history-preserving
+  rename + vars carry-forward preempted the edit/rename data-loss class.
+- Tests: +10 cc-core, +11 dashboard pins. Suite green (1642 core + 384 ui + 183 bash).
+- **Deferred (unchanged):** an in-editor vars-schema editor (labels/defaults are still
+  hand-edited or derived from `{{var}}`).
+
 ## 2026-06-14 (deferred polish ①) — L7 routine board UI
 
 First of the deferred-polish-queue builds: routines no longer have to be hand-edited in

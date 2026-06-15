@@ -1794,6 +1794,21 @@ local function enrichedTemplates()
   return out
 end
 
+-- Richer reply for the Templates EDITOR (L3 deferred-polish): the structured
+-- fields (description / expected_output / legacy text) the inline Tpl menu hides,
+-- plus the composed body + detected vars + version count. A superset of
+-- enrichedTemplates (which sends only the composed body for the insert menu).
+local function editorTemplates()
+  local out = {}
+  for _, r in ipairs(core.templateList(FX.readTemplates())) do
+    out[#out + 1] = { name = r.name, description = r.description or "",
+      expected_output = r.expected_output or "", text = r.text or "",
+      body = core.composeTemplate(r) or "", vars = core.effectiveVars(r),
+      version = r.version or 1, versionCount = (r.versions and #r.versions) or 0 }
+  end
+  return out
+end
+
 -- L3: render a queued task just before it's typed in. Fills {{prev_output}} (the
 -- target's latest output, which on the feed's done edge IS the turn that just
 -- finished) + the date built-ins; user {{vars}} that can't be auto-resolved
@@ -2244,6 +2259,52 @@ local function handleBridgeMsg(msg)
     local out = enrichedTemplates()
     local listJson = (#out > 0) and hs.json.encode(out) or "[]"
     pcall(function() wv:evaluateJavaScript("ccTemplates(" .. listJson .. ")") end)
+    return
+  end
+  -- L3 Templates EDITOR (deferred-polish): authoring (description/expected_output
+  -- structured fields, not just the legacy text the Tpl menu saves) + a versioned
+  -- save + revert. Replies with editorTemplates() (the structured list).
+  if a == "template-editor-list" or a == "template-editor-save"
+     or a == "template-editor-delete" or a == "template-revert" then
+    if a == "template-editor-save" then
+      local okp, p = pcall(hs.json.decode, payload.text or "{}")
+      p = (okp and type(p) == "table") and p or {}
+      local rec = { name = tostring(p.name or ""), description = tostring(p.description or ""),
+        expected_output = tostring(p.expected_output or ""), text = tostring(p.text or "") }
+      local stt = FX.readTemplates()
+      -- a rename: move the record under the new name FIRST (preserves version
+      -- history), then the versioned save below snapshots the prior body + bumps.
+      local oldName = tostring(p.oldName or "")
+      if oldName ~= "" and oldName ~= rec.name then
+        local rn, ok = core.templateRename(stt, oldName, rec.name)
+        if ok then stt = rn end
+      end
+      -- carry forward a hand-authored vars schema (labels/defaults) the editor
+      -- doesn't expose, so editing the body can't silently drop it (L7's lesson).
+      local prior = core.templateGetRecord(stt, rec.name)
+      if prior and prior.vars then rec.vars = prior.vars end
+      local st, saved, errs = core.templatePushVersioned(stt, rec, { now = os.time() })
+      if saved then FX.writeTemplates(st)
+      else pcall(function() hs.alert.show("Claude Shepherd: template invalid — "
+        .. table.concat(errs or { "?" }, "; ")) end) end
+    elseif a == "template-editor-delete" then
+      FX.writeTemplates(core.templateRemove(FX.readTemplates(), tostring(payload.v or "")))
+    elseif a == "template-revert" then
+      local st, ok = core.templateRevert(FX.readTemplates(), tostring(payload.v or ""),
+        tonumber(payload.text), { now = os.time() })
+      if ok then FX.writeTemplates(st) end
+    end
+    local out = editorTemplates()
+    pcall(function() wv:evaluateJavaScript("ccTplEditor("
+      .. ((#out > 0) and hs.json.encode(out) or "[]") .. ")") end)
+    return
+  end
+  -- Version history for the revert view (current head first, then prior snapshots).
+  if a == "template-versions" then
+    local name = tostring(payload.v or "")
+    local vers = core.templateVersions(FX.readTemplates(), name)
+    pcall(function() wv:evaluateJavaScript("ccTplVersions(" .. jsString(name) .. ", "
+      .. ((#vers > 0) and hs.json.encode(vers) or "[]") .. ")") end)
     return
   end
   -- L7 routine board (deferred-polish): open / save / delete / pause-resume. The
@@ -3476,6 +3537,32 @@ local HTML = [[
 .r-wd button{ background:#1a1c22; border:1px solid #2c2f3a; color:#9aa0ad; border-radius:5px; padding:2px 7px; cursor:pointer; font-size:11px; }
 .r-wd button.on{ background:#23314a; border-color:#3b6; color:#fff; }
 #r-preview{ color:#9fb6d6; font-size:11px; margin-top:6px; font-family:ui-monospace,Menlo,monospace; }
+/* L3 Templates editor overlay (modeled on #routines). Edits cc-templates.json. */
+#tpleditor{ position:fixed; inset:0; background:#14161b; z-index:11; display:none; flex-direction:column; font-size:12px; }
+#tpleditor.show{ display:flex; }
+#te-head{ display:flex; align-items:center; gap:8px; padding:8px 10px; border-bottom:1px solid #2c2f3a; font-weight:600; }
+#te-head .s-x{ margin-left:auto; }
+#te-body{ flex:1; overflow:auto; padding:8px 10px; }
+.te-row{ display:flex; gap:10px; align-items:center; padding:7px 8px; border:1px solid #23262f; border-radius:8px; margin-bottom:6px; background:#191b22; }
+.te-main{ flex:1; min-width:0; }
+.te-name{ color:#e8e9ee; font-weight:600; }
+.te-sub{ color:#8a8d99; font-size:11px; margin-top:1px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.te-badge{ display:inline-block; background:#23262f; color:#9aa0ad; border:1px solid #2c2f3a; border-radius:5px; padding:0 5px; font-size:10px; margin-right:4px; }
+.te-badge.var{ color:#c3a3e8; border-color:#43345a; }
+.te-acts{ display:flex; gap:5px; flex:0 0 auto; }
+.te-empty{ color:#6b7280; font-style:italic; padding:12px 4px; }
+#te-form{ display:none; flex-direction:column; gap:7px; padding:4px 2px; }
+#te-form.show{ display:flex; }
+#te-form label{ display:flex; flex-direction:column; gap:3px; color:#9aa0ad; font-size:11px; }
+#te-form input, #te-form select, #te-form textarea{ background:#1a1c22; border:1px solid #2c2f3a; color:#e8e9ee; border-radius:6px; padding:4px 7px; font-size:12px; }
+#te-form textarea{ resize:vertical; min-height:60px; font-family:inherit; }
+#te-vars{ color:#c3a3e8; font-size:11px; font-family:ui-monospace,Menlo,monospace; }
+#te-versions{ display:none; flex-direction:column; gap:6px; padding:4px 2px; }
+#te-versions.show{ display:flex; }
+.te-ver-row{ display:flex; gap:10px; align-items:flex-start; padding:7px 8px; border:1px solid #23262f; border-radius:8px; background:#191b22; }
+.te-ver-row.cur{ border-color:#34507a; }
+.te-ver-meta{ flex:0 0 92px; color:#8a8d99; font-size:11px; }
+.te-ver-body{ flex:1; min-width:0; color:#cfd2db; font-family:ui-monospace,Menlo,monospace; font-size:11px; white-space:pre-wrap; word-break:break-word; max-height:120px; overflow:auto; }
 /* insights sparklines (Feature 6): trend lines over the ledger */
 .spark-row{ display:flex; align-items:center; gap:8px; padding:4px 0; }
 .spark-lbl{ width:110px; flex:0 0 auto; color:#9aa0ad; font-size:11px; }
@@ -3515,6 +3602,7 @@ local HTML = [[
           <button class="tm-item" onclick="menuPick('insights')"><span class="tm-ic">📊</span> Fleet insights</button>
           <button class="tm-item" onclick="menuPick('audit')"><span class="tm-ic">📜</span> Audit ledger</button>
           <button class="tm-item" onclick="menuPick('routines')"><span class="tm-ic">⏰</span> Routines</button>
+          <button class="tm-item" onclick="menuPick('templates')"><span class="tm-ic">📝</span> Templates</button>
           <button id="tm-shift" class="tm-item" style="display:none" onclick="menuPick('shift')"><span class="tm-ic">📋</span> Shift report</button>
           <button class="tm-item" onclick="menuPick('notify')"><span class="tm-ic">🔔</span> Notifications<span id="tm-notify-badge"></span></button>
         </div>
@@ -3956,6 +4044,39 @@ local HTML = [[
     <div id="r-foot"><span class="n-dim" id="r-info"></span></div>
   </div>
 
+  <div id="tpleditor">
+    <div id="te-head">
+      <span id="te-title">📝 Templates</span>
+      <button class="r-btn" onclick="tplEditNew()">+ New template</button>
+      <button class="s-x" onclick="closeTplEditor()">✕</button>
+    </div>
+    <div id="te-body"></div>
+    <div id="te-form">
+      <label>Name<input type="text" id="te-name" placeholder="e.g. Bug triage"></label>
+      <div class="r-grid">
+        <label style="flex-direction:row;align-items:center;gap:6px;">Body
+          <select id="te-mode" onchange="tplEditModeSync()">
+            <option value="structured">Structured (description + expected output)</option>
+            <option value="text">Raw text</option>
+          </select>
+        </label>
+      </div>
+      <label id="te-desc-wrap">Description / task<textarea id="te-desc" placeholder="What the session should do. Use {{var}} for required vars, {{var?}} optional." oninput="tplEditVarsSync()"></textarea></label>
+      <label id="te-exp-wrap">Expected output (optional)<textarea id="te-exp" placeholder="What a good result looks like (appended under “Expected output:”)." oninput="tplEditVarsSync()"></textarea></label>
+      <label id="te-text-wrap" style="display:none;">Text<textarea id="te-text" placeholder="The raw template body. Use {{var}} / {{var?}} for variables." oninput="tplEditVarsSync()"></textarea></label>
+      <div>Variables: <span id="te-vars">none</span></div>
+      <div class="r-grid">
+        <button class="r-btn" style="border-color:#3b6;color:#bdf;" onclick="tplEditSave()">Save template</button>
+        <button class="r-btn" onclick="tplEditCancel()">Cancel</button>
+      </div>
+    </div>
+    <div id="te-versions">
+      <div class="r-grid"><button class="r-btn" onclick="tplVersionsBack()">← Back</button><span class="n-dim" id="te-ver-info"></span></div>
+      <div id="te-ver-list"></div>
+    </div>
+    <div id="r-foot" style="border-top:1px solid #2c2f3a;"><span class="n-dim" id="te-info"></span></div>
+  </div>
+
   <script>
     var LABELS = { idle:"Idle", working:"Working",
                    approval:"Needs you", done:"Ready for you", error:"Error" };
@@ -4082,6 +4203,7 @@ local HTML = [[
       if(tplVarForm){ box.innerHTML = renderVarForm(); tplVarCheck(); return; }
       var html = '<div class="tpl-row tpl-save" onclick="templateSaveCurrent()">＋ Save current input as template…</div>';
       html += '<div class="tpl-row tpl-save" onclick="templateImport()">⤓ Import from prompts folder…</div>';
+      html += '<div class="tpl-row tpl-save" onclick="tplOpen=false;renderTemplates();openTplEditor()">📝 Manage templates… (author / versions)</div>';
       html += TEMPLATES.map(function(t){
         var nm = tplQuote(t.name);
         var badge = (t.vars && t.vars.length) ? '<span class="tpl-badge" title="has variables">{{ }}</span>' : '';
@@ -5557,6 +5679,136 @@ local HTML = [[
       if(!confirm(msg)) return;
       send("schedule-run-now", name);
     }
+
+    // ---- L3 Templates editor (📝): structured authoring + version/revert -------
+    var TPL_EDIT = [];        // editor records from ccTplEditor()
+    var teEditing = null;     // name being edited, or null for a new template
+    var teVersionsFor = null; // template whose version history is showing, or null
+    var BUILTIN_VARS = { date:1, today:1, now:1, prev_output:1 };
+
+    function openTplEditor(){ send("template-editor-list"); tplEditFormHide(); tplVersionsHide();
+      document.getElementById("tpleditor").classList.add("show"); }
+    function closeTplEditor(){ document.getElementById("tpleditor").classList.remove("show"); }
+    function ccTplEditor(list){ TPL_EDIT = list || []; renderTplEditor(); }
+    function renderTplEditor(){
+      var body = document.getElementById("te-body"); body.innerHTML = "";
+      if(!TPL_EDIT.length){
+        var e = document.createElement("div"); e.className = "te-empty";
+        e.textContent = "No templates yet. “+ New template” authors one (or import from the prompts folder via the Tpl menu).";
+        body.appendChild(e); document.getElementById("te-info").textContent = ""; return;
+      }
+      TPL_EDIT.forEach(function(t){
+        var row = document.createElement("div"); row.className = "te-row";
+        var main = document.createElement("div"); main.className = "te-main";
+        var nm = document.createElement("div"); nm.className = "te-name"; nm.textContent = t.name;
+        main.appendChild(nm);
+        var sub = document.createElement("div"); sub.className = "te-sub";
+        if(t.version > 1){ var bv = document.createElement("span"); bv.className = "te-badge"; bv.textContent = "v"+t.version; sub.appendChild(bv); }
+        if(t.vars && t.vars.length){ var bx = document.createElement("span"); bx.className = "te-badge var";
+          bx.textContent = t.vars.length + " var" + (t.vars.length===1?"":"s"); sub.appendChild(bx); }
+        var prev = document.createElement("span"); prev.textContent = (t.body || "").replace(/\s+/g," ").slice(0,90);
+        sub.appendChild(prev); main.appendChild(sub); row.appendChild(main);
+        var acts = document.createElement("div"); acts.className = "te-acts";
+        acts.appendChild(mkRBtn("Edit", function(){ tplEditOpen(t); }, ""));
+        var vlabel = (t.versionCount > 0) ? ("Versions ("+(t.versionCount+1)+")") : "Versions";
+        acts.appendChild(mkRBtn(vlabel, function(){ tplVersionsOpen(t.name); }, ""));
+        acts.appendChild(mkRBtn("Delete", function(){ tplEditDelete(t.name); }, "danger"));
+        row.appendChild(acts); body.appendChild(row);
+      });
+      document.getElementById("te-info").textContent = TPL_EDIT.length + " template" + (TPL_EDIT.length===1?"":"s");
+    }
+    // --- author form ---
+    function tplEditShow(){ document.getElementById("te-body").style.display="none";
+      tplVersionsHide(); document.getElementById("te-form").classList.add("show");
+      tplEditModeSync(); }
+    function tplEditFormHide(){ document.getElementById("te-form").classList.remove("show");
+      document.getElementById("te-body").style.display=""; }
+    function tplEditReset(){ sv("te-name",""); sv("te-mode","structured"); sv("te-desc",""); sv("te-exp",""); sv("te-text",""); }
+    function tplEditNew(){ teEditing = null; tplEditReset(); tplEditShow(); }
+    function tplEditCancel(){ tplEditFormHide(); }
+    function tplEditOpen(t){
+      teEditing = t.name; tplEditReset(); sv("te-name", t.name);
+      if((t.description || "").trim()){ sv("te-mode","structured"); sv("te-desc", t.description||""); sv("te-exp", t.expected_output||""); }
+      else { sv("te-mode","text"); sv("te-text", t.text || t.body || ""); }
+      tplEditShow();
+    }
+    function tplEditModeSync(){
+      var structured = (gv("te-mode") === "structured");
+      show("te-desc-wrap", structured); show("te-exp-wrap", structured); show("te-text-wrap", !structured);
+      tplEditVarsSync();
+    }
+    // Display-only var detection — a convenience readout. cc-core (templateVars/
+    // effectiveVars) is the authoritative parser on save; this just mirrors its
+    // {{name}} / {{name?}} grammar (built-ins excluded) for the editor.
+    function detectVars(text){
+      var seen = {}, out = [], re = /\{\{\s*([\w.\-]+)\s*(\??)\s*\}\}/g, m;
+      while((m = re.exec(text)) !== null){
+        var name = m[1]; if(BUILTIN_VARS[name]) continue;
+        if(seen[name] === undefined){ seen[name] = (m[2] === "?"); out.push(name); }
+        else if(m[2] !== "?"){ seen[name] = false; }
+      }
+      return out.map(function(n){ return seen[n] ? (n + "?") : n; });
+    }
+    function tplEditVarsSync(){
+      var body = (gv("te-mode") === "structured") ? (gv("te-desc") + "\n" + gv("te-exp")) : gv("te-text");
+      var found = detectVars(body);
+      document.getElementById("te-vars").textContent = found.length ? found.join(", ") : "none";
+    }
+    function tplEditSave(){
+      var name = gv("te-name").trim();
+      if(!name){ alert("Template needs a name."); return; }
+      var rec = { name: name };
+      if(gv("te-mode") === "structured"){
+        rec.description = gv("te-desc"); rec.expected_output = gv("te-exp"); rec.text = "";
+        if(!rec.description.trim()){ alert("Add a description (or switch to Raw text)."); return; }
+      } else {
+        rec.text = gv("te-text"); rec.description = ""; rec.expected_output = "";
+        if(!rec.text.trim()){ alert("Add the template text."); return; }
+      }
+      if(TPL_EDIT.some(function(t){ return t.name === name && t.name !== teEditing; })){
+        if(!confirm('A template named "' + name + '" already exists — overwrite it?')) return;
+      }
+      // pass oldName so the server renames (preserving version history) before the
+      // versioned save -- no client-side delete+re-add (which would drop history).
+      if(teEditing && teEditing !== name) rec.oldName = teEditing;
+      send("template-editor-save", name, JSON.stringify(rec));
+      teEditing = null; tplEditFormHide();
+    }
+    function tplEditDelete(name){
+      if(confirm('Delete template "' + name + '"? (its version history is also removed)')) send("template-editor-delete", name);
+    }
+    // --- version history / revert ---
+    function tplVersionsOpen(name){ teVersionsFor = name; send("template-versions", name);
+      document.getElementById("te-body").style.display="none";
+      document.getElementById("te-form").classList.remove("show");
+      document.getElementById("te-versions").classList.add("show"); }
+    function tplVersionsHide(){ document.getElementById("te-versions").classList.remove("show"); teVersionsFor = null; }
+    function tplVersionsBack(){ tplVersionsHide(); document.getElementById("te-body").style.display=""; }
+    function ccTplVersions(name, versions){
+      if(teVersionsFor !== name) return;  // a stale reply (user moved on)
+      document.getElementById("te-ver-info").textContent = 'Version history — “' + name + '”';
+      var box = document.getElementById("te-ver-list"); box.innerHTML = "";
+      versions = versions || [];
+      if(!versions.length){ box.innerHTML = '<div class="te-empty">No version history.</div>'; return; }
+      versions.forEach(function(v){
+        var row = document.createElement("div"); row.className = "te-ver-row" + (v.current ? " cur" : "");
+        var meta = document.createElement("div"); meta.className = "te-ver-meta";
+        meta.textContent = "v" + v.version + (v.current ? " · current" : "") + (v.ts ? (" · " + fmtNextRun(v.ts)) : "");
+        row.appendChild(meta);
+        var bodyd = document.createElement("div"); bodyd.className = "te-ver-body";
+        var hasDesc = v.description && v.description.trim();
+        bodyd.textContent = hasDesc ? (v.description + (v.expected_output ? ("\n\nExpected output:\n"+v.expected_output) : "")) : (v.text || "");
+        row.appendChild(bodyd);
+        if(!v.current){ row.appendChild(mkRBtn("Revert to this",
+          (function(ver){ return function(){ tplRevert(name, ver); }; })(v.version), "")); }
+        box.appendChild(row);
+      });
+    }
+    function tplRevert(name, version){
+      if(!confirm("Revert “" + name + "” to v" + version + "?\n(non-destructive — the current body is snapshotted first)")) return;
+      send("template-revert", name, String(version));  // reply refreshes the list
+      send("template-versions", name);                 // refresh this versions view
+    }
     function fmtDur(s){
       s = Math.max(0, Math.round(s||0));
       if(s < 60) return s+"s";
@@ -5891,6 +6143,7 @@ local HTML = [[
       else if(which === "insights") openInsights();
       else if(which === "audit") openAudit();
       else if(which === "routines") openRoutines();
+      else if(which === "templates") openTplEditor();
       else if(which === "shift"){ if(LEDGER_ON) openShiftReport(); }
       else if(which === "notify") openNotifications();
     }
@@ -5944,6 +6197,15 @@ local HTML = [[
       if(!ov || !ov.classList.contains("show")) return;
       if(document.getElementById("r-form").classList.contains("show")){ routineFormHide(); }
       else { closeRoutines(); }
+    });
+    // Esc in the templates editor: close the form/versions view first, then the overlay.
+    document.addEventListener("keydown", function(e){
+      if(e.key !== "Escape") return;
+      var ov = document.getElementById("tpleditor");
+      if(!ov || !ov.classList.contains("show")) return;
+      if(document.getElementById("te-form").classList.contains("show")){ tplEditFormHide(); }
+      else if(document.getElementById("te-versions").classList.contains("show")){ tplVersionsBack(); }
+      else { closeTplEditor(); }
     });
 
     // ---- Notification history (roadmap #6) ----------------------------------

@@ -4106,6 +4106,27 @@ function M.templateRemove(state, name)
   return { templates = out }
 end
 
+-- Rename a template, PRESERVING its full record incl. version history (so the
+-- editor's rename can't drop it the way delete+re-add would). A same-newName
+-- record is dropped (overwrite -- the caller confirms first). No-op if oldName
+-- is missing or newName is blank. Returns newState, ok.
+function M.templateRename(state, oldName, newName)
+  local rec = M.templateGetRecord(state, oldName)
+  newName = tplTrim(newName)
+  if not rec or newName == "" or newName == oldName then return state, false end
+  local out = {}
+  for _, t in ipairs(M.templateList(state)) do
+    if t.name == oldName then
+      local c = {}; for k, v in pairs(t) do c[k] = v end
+      c.name = newName
+      out[#out + 1] = c
+    elseif t.name ~= newName then  -- overwrite any same-newName record
+      out[#out + 1] = t
+    end
+  end
+  return { templates = out }, true
+end
+
 -- Content signature (what defines an "edit"): the COMPOSED body -- so a change to
 -- a field composeTemplate shadows (e.g. `text` when a description is set, or
 -- expected_output with no description) is correctly a no-op, since the rendered
