@@ -1026,25 +1026,23 @@ function M.fmtUptime(seconds)
   return M.fmtDuration(s)
 end
 
--- Normalize raw host readings the FX layer gathered (hs.host.cpuUsage / vmStat + a disk
--- read + uptime) into a render-ready view. EVERY raw field may be nil (the reading was
--- unavailable) -- degrade gracefully to nil, never crash. opts gives pressure thresholds
--- (percent, default 90). Returns the view plus a `pressured` flag and a joined `pressure`
--- reason string the starvation note consumes ("CPU 95%, disk 92%"). Pure.
+-- Normalize the raw host readings the FX layer gathered into a render-ready view. EVERY raw
+-- field may be nil (the reading was unavailable) -> degrade to nil, never crash. `pressure`
+-- is the joined reason string the starvation note consumes. opts: pressure thresholds
+-- (percent, default 90). Pure.
 function M.hostHealth(raw, opts)
   raw = raw or {}; opts = opts or {}
   local cpuTh  = tonumber(opts.cpuThreshold)  or 90
   local memTh  = tonumber(opts.memThreshold)  or 90
   local diskTh = tonumber(opts.diskThreshold) or 90
+  -- single definition of the 0-100 round+clamp (shared by the cpu passthrough + pct)
+  local function clampPct(p) p = math.floor(p + 0.5); if p < 0 then return 0 elseif p > 100 then return 100 end; return p end
   local function pct(used, total)
     used, total = tonumber(used), tonumber(total)
     if not used or not total or total <= 0 then return nil end
-    local p = math.floor((used / total) * 100 + 0.5)
-    if p < 0 then p = 0 elseif p > 100 then p = 100 end
-    return p
+    return clampPct((used / total) * 100)
   end
-  local cpu = tonumber(raw.cpuPct)
-  if cpu then cpu = math.floor(cpu + 0.5); if cpu < 0 then cpu = 0 elseif cpu > 100 then cpu = 100 end end
+  local cpu = tonumber(raw.cpuPct); if cpu then cpu = clampPct(cpu) end
   local memPct  = pct(raw.memUsedBytes,  raw.memTotalBytes)
   local diskPct = pct(raw.diskUsedBytes, raw.diskTotalBytes)
   local reasons = {}
@@ -1066,11 +1064,10 @@ function M.hostHealth(raw, opts)
   }
 end
 
--- How long the whole fleet has been idle (no working / approval / error tile). Pure
--- (injected `now`). Returns { active, idle, sinceTs, seconds }: active=true when any tile
--- is doing or needing something (so NOT idle); idle=true only when every tile is idle/done,
--- with sinceTs = the most recent `since` among them (when the last busy session went quiet)
--- and seconds = now - sinceTs (clamped ≥0). An empty fleet is neither active nor idle.
+-- How long the whole fleet has been idle. Two non-obvious rules: working/approval/error
+-- count as ACTIVE (so the fleet is not idle), and when fully idle `sinceTs` is the MOST
+-- RECENT `since`/`updated` among the quiet tiles (when the last busy session went quiet).
+-- An empty fleet is neither active nor idle. Pure (injected `now`).
 function M.fleetIdleSince(tiles, now)
   now = tonumber(now) or 0
   local ACTIVE = { working = true, approval = true, error = true }
@@ -1090,6 +1087,15 @@ function M.fleetIdleSince(tiles, now)
   if active then return { active = true, idle = false } end
   return { active = false, idle = true, sinceTs = latest,
            seconds = latest and math.max(0, now - latest) or nil }
+end
+
+-- The off-by-default gate for the #6 insights host strip, expressed as a PURE decision so
+-- the "off -> omit the strip" guarantee is behavior-testable (not just source-pinned).
+-- Returns the keys to merge into the insights payload: {} when insights.hostStats is off,
+-- else { host = host, fleetIdle = fleetIdle }. Pure.
+function M.insightsHostAttach(cfg, host, fleetIdle)
+  if not M.config(cfg, "insights.hostStats", false) then return {} end
+  return { host = host, fleetIdle = fleetIdle }
 end
 
 -- Time a human was the bottleneck for one session: the gap from each tool_request to

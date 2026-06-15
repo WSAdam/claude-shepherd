@@ -539,10 +539,11 @@ function FX.pollHostStats(force, cfg)
       raw.memUsedBytes  = usedPages * vm.pageSize
     end
   end)
-  -- Disk: df -k / -- use Used + Available (NOT the APFS container "size"), so the % matches
-  -- df's Capacity column. A portable read; explicitly not /proc.
+  -- Disk: df -kP / -- use Used + Available (NOT the APFS container "size"), so the % matches
+  -- df's Capacity column. POSIX -P guarantees ONE physical line per fs (a long device name
+  -- otherwise wraps onto a 2nd line and the anchored match silently fails). Not /proc.
   pcall(function()
-    local out = hs.execute("df -k / | tail -1") or ""
+    local out = hs.execute("df -kP / | tail -1") or ""
     local used, avail = out:match("^%S+%s+%d+%s+(%d+)%s+(%d+)")
     if used and avail then
       raw.diskUsedBytes  = tonumber(used) * 1024
@@ -2938,12 +2939,13 @@ local function handleBridgeMsg(msg)
       denialRate = core.bucketEvents(recent, 3600, "denialRate"),
     }
     -- #6 host stats + fleet idle-since (off by default): force a fresh poll so the strip
-    -- reflects "now" on open, then attach the derived host view + the pure fleet-idle calc
-    -- off the latest rendered tiles. Both pure-cored; absent/disabled -> nil (strip hidden).
-    if core.config(loadConfig(), "insights.hostStats", false) then
-      pcall(function() FX.pollHostStats(true) end)
-      stats.host = lastHostHealth
-      stats.fleetIdle = core.fleetIdleSince(lastRenderList or {}, FX.now())
+    -- reflects "now" on open, then let the PURE core.insightsHostAttach gate the merge --
+    -- it returns {} when insights.hostStats is off, so the omission is behavior-tested, not
+    -- just source-pinned.
+    local insCfg = loadConfig()
+    if core.config(insCfg, "insights.hostStats", false) then pcall(function() FX.pollHostStats(true, insCfg) end) end
+    for k, v in pairs(core.insightsHostAttach(insCfg, lastHostHealth, core.fleetIdleSince(lastRenderList or {}, FX.now()))) do
+      stats[k] = v
     end
     pcall(function() wv:evaluateJavaScript("window.ccInsights(" .. hs.json.encode(stats) .. ")") end)
     return

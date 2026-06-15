@@ -2294,6 +2294,22 @@ do
   eq("idle: empty fleet not active", fe.active, false)
   eq("idle: falls back to updated, clamps future ts to 0",
      core.fleetIdleSince({ { status = "idle", updated = 500 } }, 400).seconds, 0)
+  -- a timestampless quiet tile: idle, but sinceTs/seconds stay nil (no clock to anchor)
+  local fn = core.fleetIdleSince({ { status = "idle" } }, 400)
+  eq("idle: timestampless quiet tile -> idle", fn.idle, true)
+  eq("idle: ...sinceTs nil", fn.sinceTs, nil)
+  eq("idle: ...seconds nil", fn.seconds, nil)
+
+  -- insightsHostAttach: the off-by-default gate as a PURE decision (so the off-omission is
+  -- behavior-tested, not just source-pinned)
+  local hAttachOff = core.insightsHostAttach({ insights = { hostStats = false } }, { cpu = 5 }, { idle = true })
+  eq("attach: off -> no host key", hAttachOff.host, nil)
+  eq("attach: off -> no fleetIdle key", hAttachOff.fleetIdle, nil)
+  eq("attach: off -> empty table", next(hAttachOff), nil)
+  eq("attach: default (no cfg) -> off", next(core.insightsHostAttach({}, {}, {})), nil)
+  local hAttachOn = core.insightsHostAttach({ insights = { hostStats = true } }, { cpu = 5 }, { idle = true })
+  eq("attach: on -> host present", hAttachOn.host.cpu, 5)
+  eq("attach: on -> fleetIdle present", hAttachOn.fleetIdle.idle, true)
 end
 
 -- ---- fleetStats: aggregate the ledger --------------------------------------

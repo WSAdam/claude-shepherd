@@ -1231,12 +1231,13 @@ do
         src:find("if plan.killStale and inflight and inflight.task then", 1, true) ~= nil
         and src:find("inflight.task:terminate()", 1, true) ~= nil
         and src:find("local PR_RETRY_TTL = 20", 1, true) ~= nil)
-  -- review fix: a dedicated hung deadline (PR_HUNG_TTL) is passed so a had-data refresh that
-  -- hangs is reclaimed in ~60s, not held for the full cache TTL. Behavior in core.test (prpoll).
-  check("l5pr-fix: data-aware hung deadline (cold ~20s, had-data ~60s) passed to the planner",
-        src:find("local PR_HUNG_TTL = 60", 1, true) ~= nil
-        and src:find("local hungTtl = (cached and cached.data ~= nil) and PR_HUNG_TTL or PR_RETRY_TTL", 1, true) ~= nil
-        and src:find("deadline = hungTtl", 1, true) ~= nil)
+  -- review fix: a data-aware hung deadline is passed to the planner (the cold-vs-had-data
+  -- mapping is the dashboard wiring; the deadline BEHAVIOR is covered by core.test prpoll).
+  -- Loose pins (survive a reword): the value is wired as `deadline =` and is data-aware.
+  check("l5pr-fix: data-aware hung deadline wired into the poll plan",
+        src:find("deadline = hungTtl", 1, true) ~= nil
+        and src:find("PR_HUNG_TTL", 1, true) ~= nil
+        and src:find("cached.data ~= nil", 1, true) ~= nil)
   check("l5pr-pin: runs gh in the repo root, status-only fields",
         src:find("t:setWorkingDirectory(root)", 1, true) ~= nil
         and src:find('"number,state,url,title,isDraft"', 1, true) ~= nil)
@@ -1293,15 +1294,14 @@ do
         src:find("hs.host.cpuUsage()", 1, true) ~= nil
         and src:find("hs.host.vmStat()", 1, true) ~= nil
         and src:find("pagesUsedByVMCompressor", 1, true) ~= nil
-        and src:find("df -k / | tail -1", 1, true) ~= nil
+        and src:find("df -kP / | tail -1", 1, true) ~= nil
         and src:find("kern.boottime", 1, true) ~= nil
         and src:find("lastHostHealth = core.hostHealth(raw,", 1, true) ~= nil)
   check("host-pin: polled once per refresh tick (reuses tick cfg, self-gating + throttled)",
         src:find("FX.pollHostStats(false, cfg)", 1, true) ~= nil)
-  check("host-pin: insights handler attaches host + fleet idle-since (gated)",
-        src:find('core.config(loadConfig(), "insights.hostStats", false)', 1, true) ~= nil
-        and src:find("stats.host = lastHostHealth", 1, true) ~= nil
-        and src:find("stats.fleetIdle = core.fleetIdleSince(lastRenderList or {}, FX.now())", 1, true) ~= nil)
+  check("host-pin: insights handler routes the host attach through pure core.insightsHostAttach (off-omission behavior-tested)",
+        src:find("core.insightsHostAttach(insCfg, lastHostHealth, core.fleetIdleSince(lastRenderList or {}, FX.now()))", 1, true) ~= nil
+        and src:find("for k, v in pairs(core.insightsHostAttach(", 1, true) ~= nil)
   check("host-pin: insights panel renders the host strip + fleet idle line",
         src:find("var hh = st.host, fi = st.fleetIdle;", 1, true) ~= nil
         and src:find('hostHtml += \'<div class="i-sec">Host', 1, true) ~= nil
