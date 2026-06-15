@@ -2815,6 +2815,10 @@ M.SETTINGS_KEEP_SUBKEYS = {
   risk = { "weights" },
   bridge = { "staleSlackSeconds", "keystrokes" },
   context = { "autoCompactFraction" },
+  -- The L5 banner toggles made `notifications` a form-managed block; its
+  -- hand-edited `days` (the 🔔 history lookback window, no UI input) must survive
+  -- a Save just like escalation.hung does. `banner` is form-managed -> not kept.
+  notifications = { "days", "_comment" },
 }
 function M.overlayConfig(cfg, incoming)
   cfg = type(cfg) == "table" and cfg or {}
@@ -2924,6 +2928,53 @@ function M.mergeHooks(existing, template)
     end
   end
   return out, changed
+end
+
+-- L5 hooks inspector: flatten a settings.json `hooks` table into per-hook rows
+-- {event, matcher, command, timeout, isOurs, script} for a read-only inventory.
+-- Pure. `script` = the matching OUR_HOOK_SCRIPTS basename (or nil). Events sorted.
+function M.parseHookInventory(settings)
+  local out = {}
+  local hooks = (type(settings) == "table" and type(settings.hooks) == "table") and settings.hooks or {}
+  local events = {}
+  for ev in pairs(hooks) do events[#events + 1] = tostring(ev) end
+  table.sort(events)
+  for _, ev in ipairs(events) do
+    local groups = hooks[ev]
+    if type(groups) == "table" then
+      for _, g in ipairs(groups) do
+        if type(g) == "table" and type(g.hooks) == "table" then
+          local matcher = (type(g.matcher) == "string" and g.matcher ~= "") and g.matcher or "*"
+          for _, h in ipairs(g.hooks) do
+            if type(h) == "table" then
+              local cmd = type(h.command) == "string" and h.command or ""
+              local script
+              for _, name in ipairs(M.OUR_HOOK_SCRIPTS) do
+                if cmd:find(name, 1, true) then script = name; break end
+              end
+              out[#out + 1] = { event = ev, matcher = matcher, command = cmd,
+                                timeout = tonumber(h.timeout), isOurs = script ~= nil, script = script }
+            end
+          end
+        end
+      end
+    end
+  end
+  return out
+end
+
+-- The gate hook (cc-approve.sh) needs its long timeout: the nonce-bound atomic
+-- claim runs well past Claude Code's default. Returns { present, timeout, ok }.
+-- minTimeout defaults to 130 (what install.sh sets).
+function M.gateHookTimeoutOk(inventory, minTimeout)
+  minTimeout = tonumber(minTimeout) or 130
+  for _, h in ipairs(type(inventory) == "table" and inventory or {}) do
+    if h.script == "cc-approve.sh" then
+      local t = tonumber(h.timeout)
+      return { present = true, timeout = t, ok = (t ~= nil and t >= minTimeout) }
+    end
+  end
+  return { present = false, ok = false }
 end
 
 -- ---- Orchestrator (Phase 4): build the command to spawn a session ----------

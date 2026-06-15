@@ -1064,6 +1064,18 @@ do
         src:find("review%-caught silent data loss") ~= nil)
   check("l6proc-pin: continue processor delivery-gated",
         src:find('core.handleAction(FX, target, "continue")', 1, true) ~= nil)
+  -- L5 observability batch: Settings toggles (autoTitle/loop/banner) + hooks inspector
+  check("l5b-pin: autoTitle toggle populated", src:find('cv(cfg,"autoTitle.enabled",false)', 1, true) ~= nil)
+  check("l5b-pin: loop toggle populated", src:find('cv(cfg,"escalation.loop.enabled",false)', 1, true) ~= nil)
+  check("l5b-pin: banner toggles populated", src:find('cv(cfg,"notifications.banner.onApproval",false)', 1, true) ~= nil)
+  check("l5b-pin: toggles persisted (escalation.loop)", src:find('loop: { enabled: ck("s-loop-en")', 1, true) ~= nil)
+  check("l5b-pin: toggles persisted (autoTitle/notifications)",
+        src:find('autoTitle: { enabled: ck("s-autotitle") }', 1, true) ~= nil
+        and src:find('notifications: { banner:', 1, true) ~= nil)
+  check("l5b-pin: hooks inspector bridge", src:find('a == "inspect-hooks"', 1, true) ~= nil)
+  check("l5b-pin: hooks via core.parseHookInventory", src:find("core.parseHookInventory(settings)", 1, true) ~= nil)
+  check("l5b-pin: gate timeout check", src:find("core.gateHookTimeoutOk(inv, 130)", 1, true) ~= nil)
+  check("l5b-pin: ccHooks render fn", src:find("function ccHooks(inv, gate, path)", 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

@@ -55,6 +55,13 @@ do
   eq("overlay: escalation.hung carried forward", out.escalation.hung.minutes, 10)
   eq("overlay: escalation form field wins", out.escalation.enabled, false)
   eq("overlay: unexposed top-level block survives", out.risk.enabled, true)
+  -- L5: the banner toggles made `notifications` form-managed; its hand-edited
+  -- `days` (no UI input) must survive a Save (review-caught regression).
+  local nOut = core.overlayConfig(
+    { notifications = { days = 30, banner = { onApproval = false } } },
+    { notifications = { banner = { onApproval = true, onDone = false } } })
+  eq("overlay: notifications.days carried forward", nOut.notifications.days, 30)
+  eq("overlay: notifications.banner form field wins", nOut.notifications.banner.onApproval, true)
   eq("overlay: array-valued key replaced wholesale", #out.providers, 1)
   -- a Save that DOES carry the subkey (e.g. a future UI field) wins over disk
   local out2 = core.overlayConfig({ spawn = { kittyBin = "/old" } }, { spawn = { kittyBin = "/new" } })
@@ -2019,6 +2026,32 @@ do
   local scriptsOk = (#got == #wantScripts)
   for i = 1, #wantScripts do if got[i] ~= wantScripts[i] then scriptsOk = false end end
   check("mergeHooks: OUR_HOOK_SCRIPTS == {cc-approve, cc-popup, cc-status}.sh exactly", scriptsOk)
+
+  -- L5 hooks inspector: flatten settings.json hooks into per-hook rows
+  local settings = { hooks = {
+    Stop = { { hooks = { { type = "command", command = "bash $HOME/.claude/cc-status.sh" } } } },
+    PreToolUse = { { matcher = "Bash", hooks = {
+      { type = "command", command = "bash $HOME/.claude/cc-approve.sh", timeout = 130 },
+      { type = "command", command = "bash my-own.sh" } } } },
+  } }
+  local inv = core.parseHookInventory(settings)
+  eq("hookInv: row count", #inv, 3)
+  eq("hookInv: events sorted (PreToolUse first)", inv[1].event, "PreToolUse")
+  eq("hookInv: matcher captured", inv[1].matcher, "Bash")
+  eq("hookInv: timeout captured", inv[1].timeout, 130)
+  eq("hookInv: ours flagged", inv[1].isOurs, true)
+  eq("hookInv: ours script basename", inv[1].script, "cc-approve.sh")
+  eq("hookInv: a user hook is not ours", inv[2].isOurs, false)
+  eq("hookInv: default matcher is *", inv[3].matcher, "*")  -- the Stop group has no matcher
+  eq("hookInv: empty settings -> empty", #core.parseHookInventory({}), 0)
+  -- gateHookTimeoutOk
+  local gt = core.gateHookTimeoutOk(inv)
+  eq("gateTimeout: present", gt.present, true)
+  eq("gateTimeout: ok at 130", gt.ok, true)
+  local low = core.gateHookTimeoutOk({ { script = "cc-approve.sh", timeout = 60 } })
+  eq("gateTimeout: 60 < 130 not ok", low.ok, false)
+  eq("gateTimeout: missing not present",
+     core.gateHookTimeoutOk({ { script = "cc-status.sh", timeout = 5 } }).present, false)
 end
 
 -- ---- Audit ledger: parse / filter / retention / narrative -----------------

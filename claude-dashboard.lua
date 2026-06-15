@@ -1903,6 +1903,23 @@ local function handleBridgeMsg(msg)
     end)
     return
   end
+  -- L5 hooks inspector: read ~/.claude/settings.json, flatten its hooks into a
+  -- read-only inventory + a gate-timeout check, and render into the ⚙ Hooks section.
+  if a == "inspect-hooks" then
+    local path = (os.getenv("HOME") or "") .. "/.claude/settings.json"
+    local sraw = FX.readFile(path)
+    local settings = {}
+    if sraw and #sraw > 0 then
+      local ok, parsed = pcall(function() return hs.json.decode(sraw) end)
+      if ok and type(parsed) == "table" then settings = parsed end
+    end
+    local inv = core.parseHookInventory(settings)
+    local gate = core.gateHookTimeoutOk(inv, 130)
+    pcall(function() wv:evaluateJavaScript("ccHooks("
+      .. ((#inv > 0) and hs.json.encode(inv) or "[]") .. ", "
+      .. hs.json.encode(gate) .. ", " .. jsString(path) .. ")") end)
+    return
+  end
   if a == "save-config" then
     local ok, parsed = pcall(function() return hs.json.decode(payload.text or "{}") end)
     if ok and type(parsed) == "table" then
@@ -4029,6 +4046,19 @@ local HTML = [[
       <label class="s-row">Cap "time blocked on you" per approval at <input type="number" id="s-ins-block" class="s-num" min="0"> seconds</label>
       <div class="s-help">An approval you never answered counts as blocking for at most this long in the 📊 fleet stats (0 = no cap).</div>
 
+      <div class="s-sec">Observability (L5)</div>
+      <label class="s-row"><input type="checkbox" id="s-autotitle"> Auto-title tiles from the session's first prompt</label>
+      <div class="s-help">When a session has no manual relabel, derive a short title from its opening prompt (cached per project). Precedence: your relabel &gt; auto-title &gt; folder name.</div>
+      <label class="s-row"><input type="checkbox" id="s-loop-en"> Loop watchdog — flag a session repeating the same tool call</label>
+      <div class="s-help">A ⟳ badge + one ledger event per episode when the same command repeats <input type="number" id="s-loop-rep" class="s-num" min="2"> times in a row (default 3). Detection only — pair it with an Automation rule (loop trigger) to nudge.</div>
+      <label class="s-row"><input type="checkbox" id="s-banner-approval"> macOS banner when a session needs you</label>
+      <label class="s-row"><input type="checkbox" id="s-banner-done"> macOS banner when a session finishes a turn</label>
+      <div class="s-help">Native notification banners (click to jump to the session). Off by default; fire on the rising edge so you're not spammed.</div>
+
+      <div class="s-sec">Hooks <button class="s-x" style="border:1px solid #2c2f3a;border-radius:6px;padding:2px 7px;color:#cfd2db;margin-left:6px;" onclick="inspectHooks()">Inspect ~/.claude/settings.json</button></div>
+      <div class="s-help">Read-only inventory of the Claude Code hooks wired in your settings (Shepherd's own are highlighted). Warns if the gate hook (cc-approve.sh) is missing its required timeout.</div>
+      <div id="s-hooks"></div>
+
       <div class="s-sec">Audit log (records fleet activity to a local ledger)</div>
       <label class="s-row"><input type="checkbox" id="s-ledger-en"> Enable the audit/event ledger</label>
       <div class="s-help">Append-only JSONL under ~/.claude/cc-ledger. Records decisions (with who/what decided), prompts, tool requests, spawns, and operator actions — OFF until you enable it. Open the 📜 Audit view to read, filter, export, redact, or purge it.</div>
@@ -4983,6 +5013,13 @@ local HTML = [[
       val("s-cont-delay",cv(cfg,"autoContinue.delaySeconds",60));
       val("s-cont-max",  cv(cfg,"autoContinue.maxAttempts",3));
       val("s-ins-block", cv(cfg,"insights.maxBlockSeconds",1800));
+      // L5 observability toggles (were config-only).
+      ck("s-autotitle",      cv(cfg,"autoTitle.enabled",false));
+      ck("s-loop-en",        cv(cfg,"escalation.loop.enabled",false));
+      val("s-loop-rep",      cv(cfg,"escalation.loop.repeats",3));
+      ck("s-banner-approval",cv(cfg,"notifications.banner.onApproval",false));
+      ck("s-banner-done",    cv(cfg,"notifications.banner.onDone",false));
+      document.getElementById("s-hooks").innerHTML = "";  // lazy: load on Inspect
       var legacyPop = cv(cfg,"focus.popEditor",false);  // back-compat seeds both
       ck("s-pop-complete", cv(cfg,"focus.popOnComplete",legacyPop));
       ck("s-pop-approval", cv(cfg,"focus.popOnApproval",legacyPop));
@@ -5140,7 +5177,13 @@ local HTML = [[
         queue: { autofeed: ck("s-q-auto"), dryRun: ck("s-q-dry"),
                  routing: { enabled: ck("s-q-route"), starveMinutes: num("s-q-starve",0) } },
         escalation: { enabled: ck("s-e-en"), minutes: num("s-e-min",5), sound: ck("s-e-snd"),
-                      push: ck("s-e-push"), pushTopic: txt("s-e-topic") },
+                      push: ck("s-e-push"), pushTopic: txt("s-e-topic"),
+                      loop: { enabled: ck("s-loop-en"), repeats: num("s-loop-rep",3) } },
+        autoTitle: { enabled: ck("s-autotitle") },
+        // onAutoApproved is intentionally NOT exposed: notifyDecision only consumes
+        // onApproval/onDone (auto-approve banners would need a gate-decision firing
+        // site — deferred). Don't surface a toggle that does nothing.
+        notifications: { banner: { onApproval: ck("s-banner-approval"), onDone: ck("s-banner-done") } },
         focus: { popOnComplete: ck("s-pop-complete"), popOnApproval: ck("s-pop-approval") },
         spawn: { editor: txt("s-spawn-editor"), live: ck("s-spawn-live"),
                  vscodeFlavor: txt("s-spawn-vsflavor"),
@@ -5190,6 +5233,37 @@ local HTML = [[
         if(!(t.value||"").trim()) t.value = "Bash Write Edit MultiEdit NotebookEdit";
       }
       persistSettings();
+    }
+    // ---- L5 hooks inspector (read-only) --------------------------------------
+    function inspectHooks(){ send("inspect-hooks"); }
+    function ccHooks(inv, gate, path){
+      var box = document.getElementById("s-hooks"); if(!box) return; box.innerHTML = "";
+      var g = document.createElement("div"); g.className = "s-help"; g.style.marginLeft = "0";
+      if(gate && gate.present){
+        g.textContent = gate.ok
+          ? ("✓ Gate hook cc-approve.sh timeout = " + gate.timeout + "s (≥130 — OK).")
+          : ("⚠ Gate hook cc-approve.sh timeout = " + (gate.timeout||"unset") + "s — needs ≥130s. Run make install to fix.");
+        g.style.color = gate.ok ? "#8fd4a3" : "#e4c463";
+      } else {
+        g.textContent = "⚠ Gate hook cc-approve.sh is NOT wired in settings.json — headless approvals won't work (run make setup).";
+        g.style.color = "#e4c463";
+      }
+      box.appendChild(g);
+      if(!inv || !inv.length){ var e=document.createElement("div"); e.className="s-help"; e.style.marginLeft="0";
+        e.textContent = "No hooks found in " + (path||"settings.json") + "."; box.appendChild(e); return; }
+      var byEvent = {};
+      inv.forEach(function(h){ (byEvent[h.event] = byEvent[h.event] || []).push(h); });
+      Object.keys(byEvent).forEach(function(ev){
+        var sec = document.createElement("div"); sec.className = "s-lbl"; sec.textContent = ev; box.appendChild(sec);
+        byEvent[ev].forEach(function(h){
+          var row = document.createElement("div"); row.className = "s-help"; row.style.marginLeft = "12px";
+          var to = (h.timeout != null) ? (" [" + h.timeout + "s]") : "";
+          var mt = (h.matcher && h.matcher !== "*") ? (h.matcher + ": ") : "";
+          row.textContent = (h.isOurs ? "● " : "○ ") + mt + h.command + to + (h.isOurs ? "  (Shepherd)" : "");
+          row.style.color = h.isOurs ? "#9fb6d6" : "#8a8d99";
+          box.appendChild(row);
+        });
+      });
     }
 
     // ---- New-session modal (F3-F5): browse + recents + new project ----------

@@ -4,6 +4,34 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-15 (deferred polish ⑥) — L5 observability batch (Settings toggles + hooks inspector)
+
+Sixth deferred-polish build: the L5 sub-items that were config-only get UI, and the gate's
+hooks become inspectable — both landing in ⚙ Settings.
+
+- **Observability toggles:** `autoTitle.enabled` (auto-title tiles from the first prompt),
+  `escalation.loop.{enabled,repeats}` (the ⟳ loop watchdog), and `notifications.banner.
+  {onApproval,onDone}` (macOS banners) are now real ⚙ checkboxes (were hand-edited config). The
+  written keys were verified to match the engine's read sites exactly (a mismatch = a silent
+  no-op). `onAutoApproved` was deliberately NOT exposed — `notifyDecision` doesn't consume it
+  (auto-approve banners would need a gate-decision firing site), so a toggle for it would do
+  nothing.
+- **Hooks inspector:** a read-only ⚙ Hooks section (Inspect button) flattens
+  `~/.claude/settings.json` hooks into a per-event inventory (Shepherd's own highlighted) and
+  WARNS if the gate hook `cc-approve.sh` is missing its required ≥130s timeout. Pure
+  `core.parseHookInventory` + `core.gateHookTimeoutOk` (+13 tests); robust to a missing/malformed
+  settings.json.
+- **Adversarial review** (2-lens workflow + verifiers): caught a real regression — the new
+  `notifications` block made Save wholesale-replace it, silently dropping the hand-edited
+  `notifications.days` (the 🔔 history lookback, no UI input). Fixed by adding `notifications`
+  to `SETTINGS_KEEP_SUBKEYS` (same protection as `escalation.hung`). A self-review also dropped
+  the unconsumed `onAutoApproved` toggle before the review.
+- Tests: +13 cc-core (+1 keep-subkey regression test), +9 dashboard pins. Suite green
+  (1707 core + 430 ui + 183 bash).
+- **L5 still deferred (each warrants its own build):** detail-panel tab strip, export session
+  archive, host stats + fleet idle-since, PR/MR status per tile, post-run self-summary, the
+  session-history browser + bulk history management, and `notifications.banner.onAutoApproved`.
+
 ## 2026-06-14 (deferred polish ⑤) — L6 rules editor + hung/loop/starved triggers + feed/continue
 
 Fifth deferred-polish build: an ⚙️ **Automation rules** editor (☰ drawer) for `cc-rules.json`

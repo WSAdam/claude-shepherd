@@ -635,10 +635,14 @@ firing engine; the level-triggered dispatcher + the ledger ARE the engine.
 > `transcriptToolSigs`/`isLooping`, `escalation.loop.enabled` off, ⟳ badge + `loop` ledger); OS-native banners
 > (`core.notifyDecision` + `FX.notify`, `notifications.banner.*` off). Adversarial review clean (2 reported, 0
 > confirmed). Suite 1528 core + 330 ui + 183 bash.
-> **Deferred L5 sub-items** (still want a build): detail-panel **tab strip**, **export session archive**, **host
-> stats + fleet idle-since**, **PR/MR status** per tile (`gh`-backed), **post-run self-summary**, **hooks
-> inspector**, the cline/AutoGPT **session-history browser** + **bulk history management**, and a **Settings UI**
-> for the auto-title / loop / banner toggles (config-only today).
+> **Partial batch ✅ SHIPPED 2026-06-15 (deferred-polish ⑥):** the **Settings UI** for the auto-title / loop /
+> banner toggles (now real ⚙ checkboxes, keys verified against the engine read sites) + the **hooks inspector**
+> (read-only ⚙ section via pure `core.parseHookInventory`/`gateHookTimeoutOk`; warns if `cc-approve.sh` lacks its
+> ≥130s timeout). Adversarial-review-caught + fixed: the new `notifications` block dropped hand-edited
+> `notifications.days` on Save → added to `SETTINGS_KEEP_SUBKEYS`. `onAutoApproved` not exposed (unconsumed).
+> **Still deferred L5 sub-items** (each warrants its own build): detail-panel **tab strip**, **export session
+> archive**, **host stats + fleet idle-since**, **PR/MR status** per tile (`gh`-backed), **post-run self-summary**,
+> the cline/AutoGPT **session-history browser** + **bulk history management**, and `notifications.banner.onAutoApproved`.
 *Source: OpenHands ADAPT items with no prior backlog match — the management/UI layer that makes Shepherd a
 better WATCH console. All pure-core derivations off the transcript Shepherd already tails + local reads; no
 executor/sandbox/server.*
