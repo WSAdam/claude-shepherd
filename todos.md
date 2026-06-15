@@ -165,7 +165,7 @@ remaining items. Full per-round detail is in CHANGELOG.md and git history.
      One cached ledger pass/tick via pure `core.lineageByProject`; self-gates when the ledger's off.
   `core.filterLedger` gained a `projectKey` filter; `core.projectLineage` delegates to
   `lineageByProject`. Suite **1260 core + 210 ui + 177 bash**, all green. Shipped + deployed + pushed.
-- **L5 build-ready batch (June 2026) — 5 of 7 shipped.** The heavier L5 detail/observability sub-items, each
+- **L5 build-ready batch (June 2026) — ALL 7 shipped (COMPLETE).** The heavier L5 detail/observability sub-items, each
   via the loop (pure cc-core + tests → wire + ui pins → adversarial-review Workflow → fix → deploy → commit →
   push):
   1. **Detail-panel tab strip** — the flat `#detail` stack reshaped into Activity/Timeline/Decisions/Usage/
@@ -187,16 +187,30 @@ remaining items. Full per-round detail is in CHANGELOG.md and git history.
      `FX.ghPrStatus` (`hs.task` in the repo root, 180s TTL, GC-retained, per-root cache reaped); a clickable
      "PR #N open/merged" tile badge (click reads the tile's `data-key`; Lua opens the url only if `http(s)`).
      Self-gates when `gh` is absent or the repo has no PR/remote.
+  6. **Host stats + fleet idle-since** — off by default (`insights.hostStats`), read-only. Pure
+     `core.hostHealth(raw,opts)`/`fleetIdleSince`/`fmtBytes`/`fmtUptime`; `FX.pollHostStats` self-gates + 30s-throttled,
+     gathers cpu/mem/disk/uptime/load (each pcall-guarded, derivation pure). A host strip (CPU/mem/disk/uptime/load)
+     + fleet idle-since atop the 📊 insights overlay; starvation alert notes host pressure; hand-editable
+     `insights.hostPressure.{cpu,mem,disk}` thresholds preserved across Save.
+  7. **Session-history browser + bulk history management** — a 🗂 History tab in the 📜 audit overlay:
+     `core.sessionHistory` per-session records over the full ledger (derived, no parallel store), fuzzy query +
+     Recent/Oldest/Most-active sort + this-workspace/pinned facets + a ★ pin by projectKey (localStorage). Multi-select
+     **Delete selected** through the existing scoped purge (`filterLedger` `sessions` set; `purgeFilterIsScoped` treats
+     a non-empty list as scoped, an EMPTY one never escalates to delete-all). ⚙ **Measure storage** = `core.localStorageReport`
+     over `FX.storageEntries` (ledger/queue/status/state bytes — never Claude Code transcripts).
   **Hardening from per-item adversarial review + the AI-leaderboard feedback** (every round found real issues):
   #2 `--no-index` arbitrary-file read + rename-rendered-as-all-additions; #3 phantom export on a write failure
   (mkdir/io fail by return value, not by throwing) + lying `meta.transcript`; #4 **HIGH** orphaned self-summary
   guard when the paste didn't land (split into pending/fired, promote on delivery); #5 unbounded `prStatusByRoot`
-  + `ghBin`-cached-false-forever + gh-task GC + the `esc()`-in-JS-onclick break. Pure helpers extracted for
-  behavior tests (`resolveDiffTarget`, `promoteSummary`, `officialLogDecision`). **A refresh-loop `pairs(nil)`
-  crash (a reap over an uninitialized state table) shipped + was caught live → `tests/smoke.test.lua`** now loads
-  the dashboard under a stubbed `hs` and runs the load-time `refresh()` in `make test`. Suite **~1848 core + 488
-  ui + 183 bash + smoke**, green. **#6 host stats + fleet idle-since AND #7 session-history browser + bulk
-  history management SHIPPED — the L5 build-ready batch (#1–#7) is COMPLETE.**
+  + `ghBin`-cached-false-forever + gh-task GC + the `esc()`-in-JS-onclick break. **Phase A + the #4/#5 leaderboard
+  reviews:** the hung-`gh` PR poll never retried (latch checked after the TTL) → pure `core.prPollPlan` (terminate a
+  hung task + data-aware deadline) + `core.prCallbackOwns` (drop a superseded/reaped task's late result, no clobber);
+  `core.reapUnbacked` single-sources the reaps; `isOpenableUrl` requires a host (case-insensitive scheme);
+  `core.officialUsageStep` replaced `officialLogDecision` (decodable-body gating). Pure helpers extracted for behavior
+  tests (`resolveDiffTarget`, `promoteSummary`, `officialUsageStep`, `prPollPlan`, `prCallbackOwns`, `sessionHistory`,
+  `reapUnbacked`). **A refresh-loop `pairs(nil)` crash (a reap over an uninitialized state table) shipped + was caught
+  live → `tests/smoke.test.lua`** now loads the dashboard under a stubbed `hs` and runs the load-time `refresh()` in
+  `make test`. Suite **~1955 core + 513 ui + 183 bash + smoke**, green. **The L5 build-ready batch (#1–#7) is COMPLETE.**
 
 ## TODO
 

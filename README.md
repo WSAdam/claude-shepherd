@@ -55,6 +55,14 @@ All derived locally from the transcript Shepherd already tails — no extra hook
   clickable **"PR #N open / merged"** badge per repo, polled with `gh pr view`
   (status only — Shepherd never opens or edits PRs). Self-gates when `gh` is absent or
   the repo has no PR/remote.
+- **Host stats + fleet idle-since** (off by default, `insights.hostStats`) — a read-only
+  strip at the top of the 📊 Fleet insights overlay: CPU / memory / disk / uptime / load,
+  plus how long the whole fleet has been idle. A queue-starvation alert notes when the box
+  is CPU/disk-pressured. Pressure thresholds are hand-editable
+  (`insights.hostPressure.{cpu,mem,disk}`, default 90%).
+- **Session history browser** — a 🗂 **History** tab in the 📜 Audit overlay (see
+  "Audit log & insights") lists every recorded session with its activity, a fuzzy filter,
+  sort + pin, and a multi-select delete.
 
 ### Event-callback rules (L6, off by default)
 
@@ -676,7 +684,9 @@ Two header overlays read fleet activity. Both are **local and cost no model toke
   the fleet spent **blocked on you** (the gap from each request to its human/timeout
   answer, capped by `insights.maxBlockSeconds` so an overnight idle isn't counted). A
   **Trends — last 24h (hourly)** section adds four sparklines: time blocked on you, fleet
-  activity, active sessions, and denial rate. Always available; zeros until the ledger is on.
+  activity, active sessions, and denial rate. With `insights.hostStats` on, a **Host** strip
+  (CPU / memory / disk / uptime / load) and a **fleet idle-since** line sit at the top.
+  Always available; zeros until the ledger is on.
 
 More ledger-backed views (all read-only, local, zero model tokens):
 
@@ -695,6 +705,17 @@ More ledger-backed views (all read-only, local, zero model tokens):
   prompt is an instruction and Shepherd has no git/CI ground truth to claim a result. The
   **📋 Shift** tab and drawer entry only appear while the ledger is enabled (it's pure ledger
   aggregation — nothing to report otherwise), and they show/hide live with the setting.
+- **🗂 Session history browser** — a **History** tab in the audit overlay lists every session the
+  ledger has seen (derived on the fly — no parallel store), each with its turns / tool calls /
+  events and last activity. Filter by name or folder, sort **Recent / Oldest / Most active**, and
+  narrow to **this workspace** or **pinned only**; ★-pin the projects you care about (saved by
+  stable project id). Multi-select rows and **Delete selected** purges those sessions' recorded
+  history through the same confirmed, scoped purge the Purge button uses (it never deletes Claude
+  Code's own transcripts). Appears only while the ledger is enabled, like the Shift tab.
+- **Storage readout** — ⚙ Settings → **Measure storage** shows how much disk Shepherd's own state
+  uses (audit ledger / task queues / session status / `cc-*.json` state files — never Claude Code's
+  transcripts). Trim old ledger days with the retention setting; delete a session's recorded history
+  from the 🗂 History tab.
 - **Per-session gate decision log** — the detail panel shows the selected session's last
   few gate decisions, grouped with counts and provenance ("⛔ deny Bash ×4 (autoDeny:
   Bash(rm*)) · 2m ago"), so what the gate has been doing to a session is visible right

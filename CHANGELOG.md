@@ -4,6 +4,59 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-15 — L5 build-ready batch COMPLETE (#1–#7) + review-fix hardening
+
+The seven heavier L5 detail/observability sub-items, all shipped + deployed (read-only, or
+off-by-default where they automate). Each built via the loop: pure `cc-core` + unit tests → wire the
+dashboard + source pins → `make test` (incl. the load-time smoke test) → an adversarial multi-agent
+review → fix confirmed findings → live-verify → deploy. The AI-leaderboard reviews of the earlier #4/#5
+commits were folded in as a hardening pass.
+
+- **#1 Detail-panel tab strip** — the flat `#detail` stack became a tab strip (Activity / Timeline /
+  Decisions / Usage / Changes / Queue), pin/unpin per tab, `{selectedTab, unpinned}` persisted to
+  webview `localStorage` by stable projectKey; lazy inline Timeline. `core.DETAIL_TABS` single source.
+- **#2 git Changes tab** — per-session `git status -z` + per-file colorized diff from the repo root,
+  rename-aware; bridge-supplied diff paths validated against the session's status set.
+- **#3 Export session archive** — ⤓ button + context-menu copies the transcript + a `meta.json`
+  (label / provider / model / lineage / activity, no prompt bodies) under `~/.claude/cc-exports`;
+  ledgers a `session_export`.
+- **#4 Post-run self-summary + onAutoApproved banner** — both opt-in: a self-review prompt typed on a
+  fresh `done` edge (delivery-gated; its own done can't re-fire), and a macOS banner when the newest
+  automated `allow` advances.
+- **#5 PR/MR status badge** — opt-in, gh-backed, status-only: a clickable "PR #N open/merged" tile
+  badge; async poll in the repo root; self-gates when `gh` is absent or there's no PR/remote.
+- **#6 Host stats + fleet idle-since** (off by default, `insights.hostStats`) — a read-only strip atop
+  the 📊 insights overlay (CPU / memory / disk / uptime / load) + how long the fleet has been idle;
+  a starvation alert notes host pressure. Pure `core.hostHealth` / `fleetIdleSince` / `fmtBytes` /
+  `fmtUptime`; `FX.pollHostStats` self-gates + is 30s-throttled (each raw read pcall-guarded, verified
+  live); hand-editable `insights.hostPressure.{cpu,mem,disk}` thresholds preserved across Save.
+- **#7 Session-history browser + bulk history management** — a 🗂 History tab in the 📜 audit overlay:
+  `core.sessionHistory` per-session records derived over the full ledger (no parallel store), fuzzy
+  query, Recent/Oldest/Most-active sort, this-workspace/pinned facets, ★-pin by projectKey
+  (`localStorage`). Multi-select **Delete selected** purges those sessions' events through the existing
+  confirmed, scoped purge — `filterLedger` gained a `sessions` set and `purgeFilterIsScoped` treats it
+  as scoped, but an **empty selection is never scoped** so a bulk delete can't escalate to delete-all.
+  A ⚙ **Measure storage** readout (`core.localStorageReport`) shows ledger/queue/status/state bytes —
+  never Claude Code's own transcripts.
+
+- **Review-fix hardening (Phase A + the leaderboard reviews of #4/#5):**
+  - **Hung gh PR-status poll could never retry** (caught by two independent reviews) — the in-flight
+    latch was checked after the TTL, so a hung `gh` (callback never fires) latched the slot forever and
+    the short retry was dead code. Extracted pure `core.prPollPlan` (skip/start + terminate-stale-task)
+    with a timestamped, **data-aware** hung deadline (cold ~20s, had-data refresh ~60s, checked before
+    the cache skip). `core.prCallbackOwns` drops a superseded/reaped task's late (SIGTERM'd) result so it
+    can't clobber fresh data or re-populate a reaped root (the searchGen supersede pattern).
+  - `core.reapUnbacked` single-sources the per-key refresh reaps; `parsePrStatus` rejects a non-numeric
+    `number`; `core.isOpenableUrl` requires an http(s) scheme (case-insensitive) **plus a host**;
+    `core.officialUsageStep` (replaced `officialLogDecision`) gates recovery on a decodable body.
+  - **Anti-XSS:** PR badge clicks (`data-key`) and #7 history rows (`data-pk`/`data-sid`) write the key
+    as an `esc()`'d data- attribute read back raw via `getAttribute` — never interpolated into an inline
+    JS handler.
+  - A refresh-loop `pairs(nil)` over an uninitialized state table once crashed the whole panel at load →
+    **`tests/smoke.test.lua`** now loads the dashboard under a stubbed `hs` and runs the load-time
+    `refresh()` in `make test`.
+- Suite **~1955 core + 513 ui + 183 bash + smoke**, green.
+
 ## 2026-06-15 (deferred polish ⑥) — L5 observability batch (Settings toggles + hooks inspector)
 
 Sixth deferred-polish build: the L5 sub-items that were config-only get UI, and the gate's
@@ -28,9 +81,12 @@ hooks become inspectable — both landing in ⚙ Settings.
   the unconsumed `onAutoApproved` toggle before the review.
 - Tests: +13 cc-core (+1 keep-subkey regression test), +9 dashboard pins. Suite green
   (1707 core + 430 ui + 183 bash).
-- **L5 still deferred (each warrants its own build):** detail-panel tab strip, export session
-  archive, host stats + fleet idle-since, PR/MR status per tile, post-run self-summary, the
+- **L5 still deferred at this point (each warrants its own build):** detail-panel tab strip, export
+  session archive, host stats + fleet idle-since, PR/MR status per tile, post-run self-summary, the
   session-history browser + bulk history management, and `notifications.banner.onAutoApproved`.
+  *(All of these were then built — including the `onAutoApproved` banner + its Settings toggle, once #4
+  wired `core.newestAutoApprove` to consume it. See the **L5 build-ready batch COMPLETE** entry above,
+  later the same day.)*
 
 ## 2026-06-14 (deferred polish ⑤) — L6 rules editor + hung/loop/starved triggers + feed/continue
 

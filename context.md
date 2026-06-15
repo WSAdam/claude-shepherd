@@ -133,23 +133,52 @@ network, no multi-user, no secrets — it reads session status off the local fil
 
 ## State (2026-06-15)
 
-**L5 build-ready batch — 5 of 7 shipped** (the heavier L5 detail/observability sub-items; see
-[todos.md](todos.md) RESUME banner): #1 detail-panel **tab strip**, #2 git **Changes** tab, #3 **Export**
-session archive, #4 post-run **self-summary** + **onAutoApproved** banner, #5 **PR/MR status** badge. #6 host
-stats + fleet idle-since and #7 session-history browser remain. New KEEP-IN-SYNC + invariants from this batch:
+**L5 build-ready batch — ALL 7 shipped + deployed (batch COMPLETE).** The heavier L5 detail/observability
+sub-items: #1 detail-panel **tab strip**, #2 git **Changes** tab, #3 **Export** session archive, #4 post-run
+**self-summary** + **onAutoApproved** banner, #5 **PR/MR status** badge, #6 **host stats + fleet idle-since**,
+#7 **session-history browser + bulk history management**. Plus a **review-fix hardening** pass (Phase A) folding
+in the AI-leaderboard reviews of the #4/#5 commits. New KEEP-IN-SYNC + invariants from this batch:
 
 - **Detail tab strip:** `core.DETAIL_TABS` is the single source (injected as `__DETAIL_TABS__`). Adding a tab
   needs a manual `<div class="d-panel" data-tab="ID">` in the HTML, and for a lazy tab a `detail-ID` bridge
   action + a `maybeLoadActiveTab` case (see the checklist comment on `M.DETAIL_TABS`). `normalizeTabStateJS`
   in the panel mirrors `core.normalizeTabState` (canonical `{id:true}` unpinned map only).
-- **localStorage** is now used in the panel (tab state), keyed by the **stable projectKey** — Hammerspoon's
-  default WebKit data store is persistent, so it survives reloads.
-- **gh / git reads** run async (`hs.task`, retained until callback so they aren't GC'd) or capped/sync from the
-  **repo root**; bridge-supplied diff paths are validated against the session's status set; url opens are
-  `http(s)`-only. Per-root caches (`prStatusByRoot`) are reaped like the per-tile ones.
-- **Off-by-default automations** (self-summary, onAutoApproved, PR status) follow the established edge rules:
-  never fire from a missing `prev`, exclude remote/stale, delivery-gate any keystroke, and clear their guard
-  when the feature is toggled off.
+- **localStorage** is used in the panel — detail **tab state** keyed by the **stable projectKey**, and #7
+  **history pins** under `cc-historyPins` (a `{projectKey:true}` set). Hammerspoon's default WebKit data store
+  is persistent, so both survive reloads.
+- **gh / git reads** run async (`hs.task`) or capped/sync from the **repo root**; bridge-supplied diff paths are
+  validated against the session's status set; url opens are `http(s)`-with-a-host only (`core.isOpenableUrl`,
+  case-insensitive scheme).
+- **PR-status poll is hung-task aware (review-hardened):** `core.prPollPlan(cached, inflight, now, opts)` decides
+  skip/start + whether to **terminate a stale (hung) in-flight task** before re-polling — a hung `gh` whose
+  callback never fires no longer latches the slot forever (the bug two reviews caught). The latch is timestamped
+  `{task, ts}`; the hung deadline is **data-aware** (cold poll ~`PR_RETRY_TTL` 20s, had-data refresh `PR_HUNG_TTL`
+  60s, checked BEFORE the cache-freshness skip). The task callback paints ONLY if `core.prCallbackOwns(latch, t)`
+  (it still owns the slot) — a superseded/reaped task's late SIGTERM'd result is **dropped**, never clobbers fresh
+  data or re-populates a reaped root (the searchGen supersede pattern). Vanished-root latches are reaped + terminated.
+- **`core.reapUnbacked(cache, liveKeys)` single-sources the per-key refresh reaps** (taskStart / loopAlerted /
+  autoApproveFired / summaryState.* / gitChangeFiles / prStatusByRoot). `ruleFired` stays bespoke (its `\1` key
+  transform). **Every module-level per-key state table is still initialized `{}` up front** (the reaps iterate
+  them even when their feature is off — the smoke-test invariant).
+- **Off-by-default automations** (self-summary, onAutoApproved, PR status, host stats) follow the established edge
+  rules: never fire from a missing `prev`, exclude remote/stale, delivery-gate any keystroke, clear their guard
+  when toggled off. **#6 host stats** is read-only: `FX.pollHostStats(force, cfg)` self-gates on `insights.hostStats`
+  + is 30s-throttled, gathers raw readings (each pcall-guarded) and derives via pure `core.hostHealth(raw, opts)`
+  (CPU/mem/disk %, uptime, a `pressured` flag + reason string; hand-editable `insights.hostPressure.{cpu,mem,disk}`
+  thresholds preserved across Save via `SETTINGS_KEEP_SUBKEYS.insights`). `core.fleetIdleSince(tiles, now)` is pure.
+- **#7 history browser is ledger-DERIVED, not a parallel store:** `core.sessionHistory(events, opts)` aggregates
+  per-session records over the FULL ledger (`readLedger({limit=0})`). **Bulk delete is over-delete-safe:**
+  `filterLedger` gained a `sessions` SET and `core.purgeFilterIsScoped` treats a non-empty `sessions` list as
+  scoped — but an **empty list is NOT scoped**, and `history-delete` early-returns on an empty selection, so a
+  no-selection bulk delete can never escalate to delete-all. It routes through the same `splitLedgerEvents` purge
+  path the Purge button uses and refreshes BOTH the History view and the shared audit-rows cache.
+- **Panel anti-XSS for keyed rows:** PR badge clicks (`data-key`) and #7 history rows (`data-pk`/`data-sid`) write
+  the key as an **`esc()`'d data- attribute and read it back RAW via `getAttribute`** — never interpolate a
+  project/session key into an inline JS handler (`esc()` is HTML-entity escaping, wrong for a JS-string context).
+- **`core.officialUsageStep(prev, status, bodyOk)`** (replaced `officialLogDecision`) owns the official-usage poll's
+  log-once + recovery decision; a 200 with an undecodable/empty body is a no-op so a later good 200 still logs
+  "recovered". `core.localStorageReport` formats the ⚙ storage readout (ledger/queue/status/state bytes — never
+  Claude Code's own transcripts).
 
 ## State (2026-06-14)
 
