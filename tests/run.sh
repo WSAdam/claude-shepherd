@@ -37,6 +37,11 @@ echo "== lua: panel UX =="
 lua "$DIR/ui.test.lua" || fail=1
 echo ""
 
+echo "== lua: dashboard smoke (load + first refresh under a stubbed hs) =="
+# Redirect HOME so a stray read/write can't touch the real ~/.claude.
+HOME="$(mktemp -d)" lua "$DIR/smoke.test.lua" || fail=1
+echo ""
+
 if [ "$fail" -eq 0 ]; then
   echo "✅ ALL GREEN"
 else
