@@ -1148,9 +1148,10 @@ do
   check("l5chg-rev: detail-changes caches the authoritative file set",
         src:find("gitChangeFiles[key] = allowed", 1, true) ~= nil)
   -- observed-from-console fix: the official-usage poll logs only on STATUS CHANGE
-  -- (a persistent -1/401 was spamming every 180s); the local-approx fallback stays.
-  check("usagelog-fix: official fetch logs only on status change",
-        src:find("if status ~= lastOfficialStatus then", 1, true) ~= nil
+  -- (a persistent -1/401 was spamming every 180s); the pure decision lives in
+  -- core.officialLogDecision (behavior-tested), the callback just wires it.
+  check("usagelog-fix: official fetch uses pure core.officialLogDecision",
+        src:find("core.officialLogDecision(lastOfficialStatus, status)", 1, true) ~= nil
         and src:find("official usage recovered (HTTP 200)", 1, true) ~= nil)
   -- #3 export session archive: bridge handler, transcript cp (verbatim, large-safe),
   -- meta via core, ledger event, two entry points (detail button + ctx-menu).
@@ -1191,14 +1192,16 @@ do
   check("l5sum-pin: summary typed via serialized chokepoint",
         src:find('dispatchSerialized(su, "summary"', 1, true) ~= nil
         and src:find("FX.pasteIntoWindow(winTarget(su), { text = core.summaryPrompt(su) })", 1, true) ~= nil)
-  -- review fix: the loop guard is armed (pending->fired) only when the paste LANDS;
-  -- a no-window-match clears pending so the next real done retries (no orphan).
-  check("l5sum-fix: guard promoted pending->fired ONLY on delivery + ledger gated",
-        src:find("summaryState.fired[su.key] = true; summaryState.pending[su.key] = nil", 1, true) ~= nil
-        and src:find('ledgerFor(su, { type = "summary" })', 1, true) ~= nil)
-  check("l5sum-fix: failed paste clears pending (retry, no orphaned edge)",
-        src:find("else\n            -- no window match: don't orphan", 1, true) ~= nil
-        and src:find("summaryState.pending[su.key] = nil", 1, true) ~= nil)
+  -- review fix: the summary ledger is delivery-gated (only when the paste landed).
+  check("l5sum-fix: summary ledger gated on delivery",
+        src:find("if landed and ledgerOn then ledgerFor(su", 1, true) ~= nil)
+  -- review fix: delivery promotion goes through pure core.promoteSummary (land->fired,
+  -- miss->clear-pending-retry); the summary-OFF branch clears the guard (no orphan).
+  -- Loosened anchors (no embedded whitespace/comment) so a reflow doesn't break them.
+  check("l5sum-fix: promotion via pure core.promoteSummary",
+        src:find("core.promoteSummary(summaryState, su.key, landed and true or false)", 1, true) ~= nil)
+  check("l5sum-fix: feature-off clears the guard (no orphaned pending)",
+        src:find("summaryState.fired[it.key] = nil; summaryState.pending[it.key] = nil", 1, true) ~= nil)
   check("l5sum-pin: onAutoApproved edge observes first sighting (no false alarm)",
         src:find("core.newestAutoApprove(ledgerSnapshot(), it.session_id)", 1, true) ~= nil
         and src:find("autoApproveFired[it.key] = newest", 1, true) ~= nil)
@@ -1223,15 +1226,26 @@ do
   check("l5pr-pin: annotated only for local tiles when enabled",
         src:find("if prOn and not it.remote and it.cwd", 1, true) ~= nil
         and src:find("it.pr = FX.prDataForRoot(proot)", 1, true) ~= nil)
-  check("l5pr-pin: badge click sends KEY not url (no interpolation) + esc",
-        src:find('onclick="openPr(event,\\\'\'+esc(it.key)+\'\\\')"', 1, true) ~= nil
-        and src:find('send("open-url", key)', 1, true) ~= nil)
+  -- review fix: badge click reads the tile's data-key (NOT an interpolated key) so a
+  -- cwd/key with a quote can't break out of the inline handler.
+  check("l5pr-fix: badge click reads data-key (no key interpolation)",
+        src:find('onclick="openPr(event)"', 1, true) ~= nil
+        and src:find('tile.getAttribute("data-key")', 1, true) ~= nil)
   check("l5pr-pin: open-url validates http(s) scheme",
         src:find('url:match("^https?://")', 1, true) ~= nil
         and src:find("hs.urlevent.openURL(url)", 1, true) ~= nil)
   check("l5pr-pin: Settings toggle populated + persisted",
         src:find('cv(cfg,"prStatus.enabled",false)', 1, true) ~= nil
         and src:find('prStatus: { enabled: ck("s-pr-en") }', 1, true) ~= nil)
+  -- review fixes: gh re-detected if installed later; task retained (GC-safe); the
+  -- per-root cache is reaped so it can't grow unbounded across many repos.
+  check("l5pr-fix: ghBin re-checks the ABSENT case (TTL)",
+        src:find("ghBinPath == false and (os.time() - ghBinAt) > 300", 1, true) ~= nil)
+  check("l5pr-fix: gh task retained until callback (GC-safe)",
+        src:find("prStatusTasks[root] = t", 1, true) ~= nil
+        and src:find("prStatusTasks[root] = nil", 1, true) ~= nil)
+  check("l5pr-fix: prStatusByRoot reaped for abandoned roots",
+        src:find("for r in pairs(prStatusByRoot) do if not liveRoots[r]", 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

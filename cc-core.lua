@@ -5976,12 +5976,9 @@ function M.shouldSummarize(item)
 end
 
 -- Advance self-summary bookkeeping for one tile per tick; returns whether to type
--- the summary prompt now. Two guards (both key->true): `pending` is armed HERE on a
--- fire (the prompt has been queued but not yet typed); the dashboard promotes it to
--- `fired` only when the paste actually LANDS (else it clears pending, so a failed
--- paste retries on the next real done instead of orphaning the edge). The skip path
--- checks BOTH, so the typed prompt -> working -> done cycle is treated as the
--- summary's own completion and can't loop.
+-- the summary prompt now. Two key->true guards: `pending` is armed here on a fire;
+-- the dashboard promotes it to `fired` only when the paste lands (else clears it to
+-- retry) via M.promoteSummary. The skip path checks both. Truth table:
 --   item : { key, status, session_id, remote, stale };  opts : { enabled, prevStatus }
 --   prev      status         pending/fired   -> action
 --   not done  done           neither         -> FIRE (if enabled & eligible), arm pending
@@ -6007,6 +6004,28 @@ function M.stepSelfSummary(state, item, opts)
   local fire = (opts.enabled == true) and M.shouldSummarize(item)
   if fire then state.pending[key] = true end      -- the dashboard promotes pending->fired ON DELIVERY
   return { fire = fire }
+end
+
+-- Promote a self-summary guard after a delivery ATTEMPT (the dashboard calls this
+-- from the dispatchSerialized callback): pending->fired when the paste LANDED (so
+-- the summary's own done is skipped), else just clear pending so the next real done
+-- retries instead of being orphaned. Pure -- behavior-tested directly.
+function M.promoteSummary(state, key, landed)
+  state = state or {}; state.fired = state.fired or {}; state.pending = state.pending or {}
+  if not key then return end
+  if landed then state.fired[key] = true end
+  state.pending[key] = nil
+end
+
+-- Decide whether the official-usage poll should log this fetch result -- so the
+-- 180s poll doesn't spam identical failure lines. Pure: given the previous HTTP
+-- status and the new one, returns (shouldLog, recovered, newPrev). shouldLog=true
+-- only when the status CHANGED to a failure; recovered=true on the first usable
+-- success after a failure. The caller gates the 200 case on a DECODABLE body.
+function M.officialLogDecision(prev, status)
+  if status == 200 then return false, (prev ~= nil and prev ~= 200), 200 end
+  if status ~= prev then return true, false, status end
+  return false, false, prev
 end
 
 -- ---- L5: PR/MR status per tile (gh-backed, status-only) -------------------

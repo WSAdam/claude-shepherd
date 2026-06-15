@@ -479,18 +479,22 @@ function FX.fetchOfficialUsage(force)
     if status ~= 200 or not body then
       -- Log only when the status CHANGES (the poll runs every 180s; a persistent
       -- -1/401 -- e.g. an expired Claude oauth token -- otherwise spams the console).
-      -- The local-approx fallback keeps working regardless.
-      if status ~= lastOfficialStatus then
+      -- The local-approx fallback keeps working regardless. core.officialLogDecision
+      -- owns the pure log-once-per-status-run decision.
+      local shouldLog, _, newPrev = core.officialLogDecision(lastOfficialStatus, status)
+      if shouldLog then
         print("[cc-usage] official usage fetch: HTTP " .. tostring(status) .. " (using local approx; suppressing repeats)")
-        lastOfficialStatus = status
       end
+      lastOfficialStatus = newPrev
       return
     end
     local ok, j = pcall(function() return hs.json.decode(body) end)
+    -- Recovery is intentionally gated on a DECODABLE payload, not status 200 alone:
+    -- a 200 with garbage JSON returns here without flipping lastOfficialStatus, so a
+    -- later 200 with a usable body still logs the one "recovered" line.
     if not ok or type(j) ~= "table" then return end
-    if lastOfficialStatus ~= nil and lastOfficialStatus ~= 200 then
-      print("[cc-usage] official usage recovered (HTTP 200)")
-    end
+    local _, recovered = core.officialLogDecision(lastOfficialStatus, 200)
+    if recovered then print("[cc-usage] official usage recovered (HTTP 200)") end
     lastOfficialStatus = 200
     lastOfficialUsage = j
     -- push immediately so the bars update without waiting for the next 60s pass
@@ -1195,10 +1199,12 @@ end
 -- L5 PR/MR status: resolve the `gh` binary once (cached). false = not installed,
 -- so the whole feature self-gates (no badge, no error).
 local ghBinPath = nil   -- nil = unresolved, false = absent, string = path
+local ghBinAt = 0       -- when last resolved (re-check the ABSENT case so installing gh later works)
 local function ghBin()
-  if ghBinPath == nil then
+  if ghBinPath == nil or (ghBinPath == false and (os.time() - ghBinAt) > 300) then
     local p = resolveBin("gh")
     ghBinPath = (p and hs.fs.attributes(p)) and p or false
+    ghBinAt = os.time()
   end
   return ghBinPath or nil
 end
@@ -1207,6 +1213,7 @@ end
 -- hs.task so the ~1s loop never blocks on gh; TTL-throttled like the usage poll.
 -- data: a parsed { number, state, url, title, badge } | false (no PR / error).
 local prStatusByRoot = {}   -- root -> { ts, data }
+local prStatusTasks  = {}   -- root -> live hs.task, so it isn't GC'd before its callback fires
 local PR_TTL = 180
 function FX.ghPrStatus(root)
   if not root or root == "" then return end
@@ -1215,10 +1222,12 @@ function FX.ghPrStatus(root)
   local now = os.time()
   local cached = prStatusByRoot[root]
   if cached and (now - cached.ts) < PR_TTL then return end
+  if prStatusTasks[root] then return end   -- a poll for this root is already in flight
   -- mark attempted NOW (debounce) but keep any prior data until the call returns
   prStatusByRoot[root] = { ts = now, data = cached and cached.data or nil }
   local ok = pcall(function()
     local t = hs.task.new(gh, function(code, stdout)
+      prStatusTasks[root] = nil   -- callback ran -> release the retention
       local data = false   -- gh exits non-zero when the branch has no PR / no remote
       if code == 0 and stdout and stdout ~= "" then
         local pr = core.parsePrStatus(stdout)
@@ -1226,9 +1235,13 @@ function FX.ghPrStatus(root)
       end
       prStatusByRoot[root] = { ts = os.time(), data = data }
     end, { "pr", "view", "--json", "number,state,url,title,isDraft" })
-    if t then t:setWorkingDirectory(root); t:start() else error("gh task create failed") end
+    if t then
+      t:setWorkingDirectory(root)
+      prStatusTasks[root] = t   -- retain (module-level) until the callback clears it -- GC-safe
+      t:start()
+    else error("gh task create failed") end
   end)
-  if not ok then prStatusByRoot[root] = { ts = now, data = false } end
+  if not ok then prStatusTasks[root] = nil; prStatusByRoot[root] = { ts = now, data = false } end
 end
 -- Read the cached PR data for a root (nil if absent/none). Pure read, no fetch.
 function FX.prDataForRoot(root)
@@ -7955,16 +7968,23 @@ local HTML = [[
            + '</div>';
     }
     // L5 PR/MR badge: server-computed text (it.pr.badge) + a click that opens the
-    // PR url. The url is NOT interpolated into the handler -- openPr sends the tile
-    // KEY and Lua opens byKey[key].pr.url (validated http(s)), so a crafted title/
-    // url can't inject. esc() everywhere it reaches innerHTML.
+    // PR url. NEITHER the url NOR the tile key is interpolated into the handler --
+    // openPr reads the key from the enclosing tile's data-key (already esc'd in the
+    // attribute, read back raw via getAttribute, so a key/cwd containing a quote
+    // can't break out), and Lua opens byKey[key].pr.url only if it's http(s). esc()
+    // on every value that reaches innerHTML.
     function prBadgeHtml(it){
       if(!it.pr || !it.pr.badge) return "";
       var s = (it.pr.state || "").toLowerCase();
       return '<span class="pr pr-'+esc(s)+'" title="'+esc(it.pr.title || "")+' — click to open"'
-           + ' onclick="openPr(event,\''+esc(it.key)+'\')">'+esc(it.pr.badge)+'</span>';
+           + ' onclick="openPr(event)">'+esc(it.pr.badge)+'</span>';
     }
-    function openPr(ev, key){ if(ev){ ev.stopPropagation(); } if(key) send("open-url", key); }
+    function openPr(ev){
+      if(ev){ ev.stopPropagation(); }
+      var tile = ev && ev.target && ev.target.closest ? ev.target.closest(".tile") : null;
+      var key = tile && tile.getAttribute("data-key");
+      if(key) send("open-url", key);
+    }
 
     var EMPTY_WAITING = 'Waiting for Claude Code sessions...<br>Start a session in any project.';
     // Render the grid from lastItems through the active search filter. Re-run both on
@@ -8793,16 +8813,17 @@ function refresh()
       if sstep.fire then
         local su = it
         dispatchSerialized(su, "summary", function()
-          if FX.pasteIntoWindow(winTarget(su), { text = core.summaryPrompt(su) }) then
-            -- delivered: arm the loop guard so the summary's own done is skipped
-            summaryState.fired[su.key] = true; summaryState.pending[su.key] = nil
-            if ledgerOn then ledgerFor(su, { type = "summary" }) end
-          else
-            -- no window match: don't orphan the edge -- let the next real done retry
-            summaryState.pending[su.key] = nil
-          end
+          -- promote pending->fired on a landed paste (so the summary's own done is
+          -- skipped), else clear pending so the next real done retries.
+          local landed = FX.pasteIntoWindow(winTarget(su), { text = core.summaryPrompt(su) })
+          core.promoteSummary(summaryState, su.key, landed and true or false)
+          if landed and ledgerOn then ledgerFor(su, { type = "summary" }) end
         end)
       end
+    else
+      -- Feature toggled OFF: clear any guard left armed mid-episode so re-enabling
+      -- later doesn't swallow the next real done as "the summary's own".
+      summaryState.fired[it.key] = nil; summaryState.pending[it.key] = nil
     end
 
     newPrev[it.key] = { status = it.status, stale = step.isStale, escalated = nowEsc }
@@ -8817,6 +8838,18 @@ function refresh()
   for k in pairs(summaryState.fired) do if not newPrev[k] then summaryState.fired[k] = nil end end  -- L5
   for k in pairs(summaryState.pending) do if not newPrev[k] then summaryState.pending[k] = nil end end  -- L5
   for k in pairs(gitChangeFiles) do if not newPrev[k] then gitChangeFiles[k] = nil end end  -- L5 Changes cache
+  -- L5 PR status cache is keyed by repo ROOT (not tile key): reap roots no longer
+  -- backing any live local tile, so it can't grow unbounded across many repos.
+  if next(prStatusByRoot) then
+    local liveRoots = {}
+    for _, it in ipairs(list) do
+      if not it.remote and it.cwd and it.cwd ~= "" then
+        local r = FX.gitRoot(it.cwd)
+        if r then liveRoots[r] = true end
+      end
+    end
+    for r in pairs(prStatusByRoot) do if not liveRoots[r] then prStatusByRoot[r] = nil end end
+  end
   -- ruleFired keys are "ruleName\1tileKey"; reap when the tile vanishes (L6 once-state)
   for k in pairs(ruleFired) do local tk = k:match("\1(.*)$"); if tk and not newPrev[tk] then ruleFired[k] = nil end end
 

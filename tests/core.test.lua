@@ -4206,11 +4206,14 @@ do
 
   -- resolveDiffTarget: the security boundary -- a path NOT in the cached status set
   -- is refused; an in-set path returns ok=true + its rename orig (or nil).
-  local allowed = { ["a.lua"] = false, ["b.lua"] = "old.lua" }
+  local allowed = { ["a.lua"] = false, ["b.lua"] = "old.lua", ["c.lua"] = "" }
   local okA, origA = core.resolveDiffTarget(allowed, "a.lua")
   check("resolveDiff: in-set no-rename ok", okA == true and origA == nil)
   local okB, origB = core.resolveDiffTarget(allowed, "b.lua")
   check("resolveDiff: in-set rename returns orig", okB == true and origB == "old.lua")
+  -- empty-string orig still resolves ok=true but collapses to nil (never pass orig="" to gitDiff)
+  local okC, origC = core.resolveDiffTarget(allowed, "c.lua")
+  check("resolveDiff: empty orig -> nil (still served)", okC == true and origC == nil)
   local okX = core.resolveDiffTarget(allowed, "/etc/passwd")
   eq("resolveDiff: out-of-set REFUSED", okX, false)
   eq("resolveDiff: nil allowed -> refused", core.resolveDiffTarget(nil, "a.lua"), false)
@@ -4355,20 +4358,40 @@ do
   eq("summary: missing key -> no fire",
      core.stepSelfSummary({}, { status="done", session_id="s" }, { enabled=true, prevStatus="working" }).fire, false)
 
-  -- DELIVERED path: dashboard promotes pending->fired; the summary's own done is skipped via `fired`
+  -- DELIVERED path: core.promoteSummary lands the paste (pending->fired); the summary's
+  -- own done is then skipped via `fired` (exercises the REAL promotion, not a manual poke)
   local sd = {}
   core.stepSelfSummary(sd, item, { enabled=true, prevStatus="working" })   -- fire, pending=true
-  sd.fired.k = true; sd.pending.k = nil                                     -- simulate a landed paste
+  core.promoteSummary(sd, "k", true)                                        -- landed paste
+  check("summary: promote landed -> fired set, pending cleared", sd.fired.k == true and sd.pending.k == nil)
   eq("summary: delivered -> own done skipped", core.stepSelfSummary(sd, item, { enabled=true, prevStatus="working" }).fire, false)
   check("summary: guard fully cleared after own done", sd.fired.k == nil and sd.pending.k == nil)
 
-  -- FAILED-delivery path: dashboard clears pending -> the next real done RETRIES (no orphaned guard)
+  -- FAILED-delivery path: core.promoteSummary(landed=false) clears pending -> the next
+  -- real done RETRIES (no orphaned guard)
   local sf = {}
   core.stepSelfSummary(sf, item, { enabled=true, prevStatus="working" })   -- fire, pending=true
-  sf.pending.k = nil                                                        -- simulate a paste that didn't land
+  core.promoteSummary(sf, "k", false)                                       -- paste did NOT land
+  check("summary: promote miss -> nothing armed", sf.fired.k == nil and sf.pending.k == nil)
   core.stepSelfSummary(sf, { key="k", status="idle", session_id="s" }, { enabled=true, prevStatus="done" })
   eq("summary: failed paste retries on the next real done",
      core.stepSelfSummary(sf, item, { enabled=true, prevStatus="idle" }).fire, true)
+  -- promoteSummary nil-safe
+  check("summary: promote nil key no-op", (function() local s={}; core.promoteSummary(s, nil, true); return next(s.fired)==nil end)())
+
+  -- officialLogDecision: log once per status run; recovery on first usable success
+  local sl, rc, np = core.officialLogDecision(nil, -1)
+  check("usage: first failure logs", sl == true and rc == false and np == -1)
+  sl, rc, np = core.officialLogDecision(-1, -1)
+  check("usage: repeat failure no log", sl == false and np == -1)
+  sl, rc, np = core.officialLogDecision(-1, 401)
+  check("usage: status change logs", sl == true and np == 401)
+  sl, rc, np = core.officialLogDecision(-1, 200)
+  check("usage: recovery on first success", sl == false and rc == true and np == 200)
+  sl, rc, np = core.officialLogDecision(200, 200)
+  check("usage: steady success no log/recover", sl == false and rc == false and np == 200)
+  sl, rc, np = core.officialLogDecision(nil, 200)
+  check("usage: first-call success isn't a recovery", sl == false and rc == false and np == 200)
 
   -- newestAutoApprove: newest automated allow ts; ignores human + denies + other sids
   local evs = {
