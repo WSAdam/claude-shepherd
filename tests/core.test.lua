@@ -3927,6 +3927,42 @@ do
      #core.hotkeyLegend({ { mods = { "cmd" }, key = "b", desc = "x" } }, nil), 1)
 end
 
+-- ---- resolveHotkeys: configurable global hotkeys (defaults + validation) ----
+do
+  local function combo(hk) return core.fmtHotkey(hk[1], hk[2]) end  -- {mods,key} -> display combo
+  -- absent / nil / non-table hotkeys block -> the five ⌘⌥ defaults (no crash)
+  local d = core.resolveHotkeys({})
+  eq("resolveHotkeys: default approveFront", combo(d.approveFront), "⌥⌘A")
+  eq("resolveHotkeys: default jumpNeedy",    combo(d.jumpNeedy),    "⌥⌘J")
+  eq("resolveHotkeys: default cycle",        combo(d.cycle),        "⌥⌘N")
+  eq("resolveHotkeys: default spawn",        combo(d.spawn),        "⌥⌘S")
+  eq("resolveHotkeys: default toggle",       combo(d.toggle),       "⌥⌘B")
+  eq("resolveHotkeys: nil cfg -> default",          combo(core.resolveHotkeys(nil).spawn), "⌥⌘S")
+  eq("resolveHotkeys: non-table block -> default",  combo(core.resolveHotkeys({ hotkeys = "nope" }).toggle), "⌥⌘B")
+  -- a valid override is applied; siblings keep their defaults
+  local o = core.resolveHotkeys({ hotkeys = { approveFront = { mods = { "ctrl", "alt" }, key = "a" } } })
+  eq("resolveHotkeys: override applied",       combo(o.approveFront), "⌃⌥A")
+  eq("resolveHotkeys: siblings keep default",  combo(o.toggle),       "⌥⌘B")
+  -- F-key with empty mods is the ONLY legal no-modifier binding
+  eq("resolveHotkeys: F-key no-mods allowed",
+     combo(core.resolveHotkeys({ hotkeys = { cycle = { mods = {}, key = "f13" } } }).cycle), "F13")
+  -- malformed entries each fall back to the default:
+  eq("resolveHotkeys: unknown mod -> default",
+     combo(core.resolveHotkeys({ hotkeys = { spawn = { mods = { "hyper" }, key = "s" } } }).spawn), "⌥⌘S")
+  eq("resolveHotkeys: empty key -> default",
+     combo(core.resolveHotkeys({ hotkeys = { jumpNeedy = { mods = { "cmd" }, key = "" } } }).jumpNeedy), "⌥⌘J")
+  eq("resolveHotkeys: no-mod letter (can't bind globally) -> default",
+     combo(core.resolveHotkeys({ hotkeys = { cycle = { mods = {}, key = "n" } } }).cycle), "⌥⌘N")
+  eq("resolveHotkeys: non-table entry -> default",
+     combo(core.resolveHotkeys({ hotkeys = { toggle = "b" } }).toggle), "⌥⌘B")
+  -- mods are case-insensitive + de-duped (Command/Alt/alt -> ⌥⌘)
+  eq("resolveHotkeys: mods case-insensitive + de-duped",
+     combo(core.resolveHotkeys({ hotkeys = { spawn = { mods = { "Command", "Alt", "alt" }, key = "s" } } }).spawn), "⌥⌘S")
+  -- the returned default is a FRESH copy: mutating one result can't poison the next call
+  d.approveFront[1][#d.approveFront[1] + 1] = "shift"
+  eq("resolveHotkeys: defaults not shared (fresh copy)", combo(core.resolveHotkeys({}).approveFront), "⌥⌘A")
+end
+
 -- ---- filterLedger projectKey + projectLineage + lineageSummary -------------
 do
   local evs = {

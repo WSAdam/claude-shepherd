@@ -29,7 +29,9 @@ network, no multi-user, no secrets — it reads session status off the local fil
   `barLevel`); these twins must stay in sync — comments mark them. `BULK_RULES` is single-sourced (injected as
   `__BULK_RULES__`) so the bulk-bar count can't drift from what Lua acts on; likewise the ⌨ hotkey
   legend is injected as `__HOTKEY_LEGEND__`, built from the real `HOTKEY_*` bindings so the displayed
-  combos can't drift from what's bound.
+  combos can't drift from what's bound — and those `HOTKEY_*` are themselves resolved from
+  `cc-config.json`'s `hotkeys` block via pure `core.resolveHotkeys` (read early via `readConfigEarly`,
+  before `loadConfig`/FX exist), so config → binds → legend are one source.
 - **Shell hooks** — [cc-status.sh](cc-status.sh) / [cc-approve.sh](cc-approve.sh) /
   [cc-popup.sh](cc-popup.sh) + [cc-lib.sh](cc-lib.sh). Claude Code hooks write session status
   JSON into `~/.claude/cc-status/`; the dashboard reads it.
@@ -130,6 +132,34 @@ network, no multi-user, no secrets — it reads session status off the local fil
 - Typical change: add a pure cc-core function + its regression test → wire it into the
   dashboard → mirror in the panel JS if it affects rendering (and note the twin) → `make test`
   (smoke included) → deploy.
+
+## State (2026-06-15) — QoL batch
+
+Seven QoL items from real panel use → four code fixes (the other three — Gate/Autopilot/Policy —
+work, they're just inert until the gate/ledger are armed). New invariants:
+
+- **Panel visibility is state-robust, not flag-based.** The native yellow **minimize** parks the
+  webview in the Dock WITHOUT a `windowCallback` action we can hook (`hs.webview` emits only
+  closing/focusChange/frameChange), so the old `panelVisible` boolean desynced and `togglePanel`
+  fired the wrong way. `panelIsOnScreen()` (visible AND not `hswindow():isMinimized()`) is the
+  source of truth for `togglePanel` + the 🐑 menu-bar label; `showPanel` **un-minimizes** before
+  showing. The menu-bar "Show panel" is the guaranteed restore; the Dock launcher is best-effort.
+- **Dock launcher** (`app/build-app.sh`): the stub drops `exec` + uses `open -g` (clean lifecycle,
+  no activation handshake), and build/pin strip the quarantine bit + `lsregister -f` (app
+  translocation is the "Shepherd is not responding" trigger). Hand-rolled fake-`.app`-in-Dock is
+  inherently finicky — the menu-bar + ⌘⌥B paths are the reliable ones.
+- **Live model on the tile:** `FX.computeUsage` already parses each turn's `message.model` from the
+  transcript tail (`st.lastModel`) for token accounting; it now syncs that onto `it.model` (only
+  when non-empty) so the detail **Model** dropdown shows + follows the live model. The status-file
+  `model` from `$ANTHROPIC_MODEL` is a spawn-time snapshot and goes stale after a `/model` switch.
+- **Configurable hotkeys:** `core.resolveHotkeys(cfg)` (pure, tested) maps `cfg.hotkeys.*` →
+  `{mods,key}` with the ⌘⌥ defaults + validation (known mods only; empty mods allowed ONLY for
+  F-keys since macOS can't bind a bare key globally; any malformed entry reverts to default). The
+  `hotkeys` block is **wholly form-unmanaged**, so `overlayConfig`'s pairs-merge preserves it across
+  a Settings Save with **no `SETTINGS_KEEP_SUBKEYS` entry needed** (that table is only for blocks
+  the form partially writes).
+- **Decisions empty-state** branches on the JS `LEDGER_ON` global: ledger off → "turn on the audit
+  ledger + arm the gate"; ledger on → the plain "none yet".
 
 ## State (2026-06-15)
 

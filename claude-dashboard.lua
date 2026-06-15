@@ -117,11 +117,25 @@ local SD_LONG_PRESS_STOPS = false  -- if true, long-press a normal tile = Stop
 local SD_FALLBACK_KEYS    = 15     -- assume a standard deck if detection fails
 local SD_BRIGHTNESS       = 70
 
--- Global hotkeys (set HOTKEYS_ENABLED = false to disable). {mods, key}.
+-- Global hotkeys (set HOTKEYS_ENABLED = false to disable). All five are configurable via
+-- cc-config.json's `hotkeys` block (each entry { "mods": ["cmd","alt"], "key": "a" }); a missing
+-- or malformed entry keeps its ⌘⌥ default. These bind far earlier than loadConfig()/FX, so read
+-- the file directly here -- core.resolveHotkeys validates + fills defaults. The ⌨ legend (built
+-- below) and bindHotkeys() read the SAME resolved table, so the shown combos can't drift from the
+-- real binds. {mods, key} shape: HOTKEY_X[1] = mods list, HOTKEY_X[2] = key.
 local HOTKEYS_ENABLED      = true
-local HOTKEY_APPROVE_FRONT = { { "cmd", "alt" }, "a" } -- approve the front approval
-local HOTKEY_JUMP_NEEDY    = { { "cmd", "alt" }, "j" } -- jump to the session that most needs you (approval > error > hung), from any app
-local HOTKEY_CYCLE         = { { "cmd", "alt" }, "n" } -- jump to the next session
+local function readConfigEarly()
+  local f = io.open(CONFIG_FILE, "r")
+  if not f then return {} end
+  local c = f:read("*a"); f:close()
+  if not c or #c == 0 then return {} end
+  local ok, t = pcall(function() return core.json.decode(c) end)
+  return (ok and type(t) == "table") and t or {}
+end
+local _hk = core.resolveHotkeys(readConfigEarly())
+local HOTKEY_APPROVE_FRONT = _hk.approveFront -- approve the front approval
+local HOTKEY_JUMP_NEEDY    = _hk.jumpNeedy     -- jump to the session that most needs you (approval > error > hung)
+local HOTKEY_CYCLE         = _hk.cycle         -- jump to the next session
 
 -- Live activity peek: show each active session's latest assistant line.
 local ACTIVITY_PEEK  = true
@@ -134,8 +148,8 @@ local ORCH_ENABLED     = true
 local ORCH_DRY_RUN     = true
 local ORCH_TERMINAL    = "Terminal"
 local ORCH_DEFAULT_DIR = (os.getenv("HOME") or "") .. "/Programming"
-local HOTKEY_SPAWN     = { { "cmd", "alt" }, "s" } -- spawn a new Claude session
-local HOTKEY_TOGGLE    = { { "cmd", "alt" }, "b" } -- show/hide the panel
+local HOTKEY_SPAWN     = _hk.spawn   -- spawn a new Claude session
+local HOTKEY_TOGGLE    = _hk.toggle  -- show/hide the panel
 -- -------------------------------------------------------------------------
 
 core.STALE_SECONDS = STALE_SECONDS
@@ -399,6 +413,11 @@ function FX.computeUsage()
       for _, ev in ipairs(st.recent) do if ev.ts and ev.ts >= cutoff7d then pruned[#pruned + 1] = ev end end
       st.recent = pruned
       usageState[path] = st
+      -- Surface the LIVE model (the transcript tail's most recent assistant turn) onto the tile so
+      -- the detail panel's Model dropdown shows + preselects it. The status-file `model` is a
+      -- spawn-time snapshot of $ANTHROPIC_MODEL that goes stale after an in-session /model switch;
+      -- the transcript is always current. Only sync when known -- never clobber with nil/empty.
+      if st.lastModel and st.lastModel ~= "" then it.model = st.lastModel end
 
       -- Context fullness for EVERY session (works for stale/done tiles, unlike the 1s peek).
       local cfrac, ctoks
@@ -6475,7 +6494,12 @@ local HTML = [[
       // Stale paint guard: nothing until the decision-log reply for THIS selection.
       if(DECISIONS.key !== selectedKey){ box.innerHTML = ""; return; }
       if(!rows || !rows.length || !rows.map){
-        box.innerHTML = '<div class="tl-empty">No gate decisions recorded for this session yet.</div>'; return;
+        // Empty has two causes: the ledger is OFF (nothing is recorded at all), or it's on but
+        // this session hasn't hit a gated decision yet. Point at the fix only in the first case.
+        box.innerHTML = LEDGER_ON
+          ? '<div class="tl-empty">No gate decisions recorded for this session yet.</div>'
+          : '<div class="tl-empty">Turn on the audit ledger (⚙ Settings) and arm the gate to record allow/deny decisions here.</div>';
+        return;
       }
       box.innerHTML = rows.map(function(r){
         var glyph = r.outcome === "deny" ? "⛔" : (r.outcome === "fallback" ? "⚠" : "✅");
@@ -8456,10 +8480,22 @@ local panelVisible = true
 local panelHasFocus = false
 -- Re-apply the saved frame on show, in case something (a Space switch, a restore
 -- from the Dock) nudged the window back to a smaller size.
+-- Real on-screen visibility. The `panelVisible` flag tracks our own show/hide, but the native
+-- yellow MINIMIZE button parks the window in the Dock WITHOUT firing a windowCallback we can hook
+-- (hs.webview only emits closing/focusChange/frameChange), so the flag desyncs and the toggle
+-- acts the wrong way. Check the actual window state so toggle + menubar decide on truth.
+local function panelIsOnScreen()
+  if not panelVisible then return false end
+  local ok, mini = pcall(function() local w = wv and wv:hswindow(); return w and w:isMinimized() end)
+  if ok and mini then return false end
+  return true
+end
 local function showPanel()
   pcall(function()
     wv:frame(core.resolvePanelRect(FX.loadGeometry(), hs.screen.mainScreen():frame(), PANEL_DEFAULTS))
     wv:show()
+    -- If the native minimize button parked it in the Dock, show() alone won't restore it.
+    local w = wv:hswindow(); if w and w:isMinimized() then w:unminimize() end
     -- Snap the keep-awake toggle to the real state on show (F2), in case the OS
     -- flag changed while the panel was hidden.
     local caf = FX.caffeineState()
@@ -8468,7 +8504,8 @@ local function showPanel()
   panelVisible = true
 end
 local function hidePanel() pcall(function() wv:hide() end); panelVisible = false end
-local function togglePanel() if panelVisible then hidePanel() else showPanel() end end
+-- Toggle on REAL visibility, not the bare flag, so a native-minimized panel restores (not re-hides).
+local function togglePanel() if panelIsOnScreen() then hidePanel() else showPanel() end end
 
 -- Stable toggle entry point for the standalone Shepherd.app Dock launcher (F6).
 -- The app runs `open "hammerspoon://ccShepherdToggle"`; Hammerspoon owns the
@@ -8510,7 +8547,7 @@ if M.menubar then
   M.menubar:setTooltip("Claude Shepherd — Claude sessions")
   M.menubar:setMenu(function()
     return {
-      { title = panelVisible and "Hide panel" or "Show panel", fn = togglePanel },
+      { title = panelIsOnScreen() and "Hide panel" or "Show panel", fn = togglePanel },
       { title = "-" },
       { title = "Reload config", fn = function() hs.reload() end },
     }

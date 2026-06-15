@@ -1386,6 +1386,22 @@ do
         src:find('id="s-storage"', 1, true) ~= nil
         and src:find("function measureStorage()", 1, true) ~= nil
         and src:find("window.ccStorage = function(rep)", 1, true) ~= nil)
+
+  -- ===== QoL batch: panel restore, live model, configurable hotkeys, decisions hint =====
+  check("qol-pin: panel toggle decides on REAL visibility (native-minimize-safe) + showPanel un-minimizes",
+        src:find("local function panelIsOnScreen()", 1, true) ~= nil
+        and src:find("if panelIsOnScreen() then hidePanel() else showPanel() end", 1, true) ~= nil
+        and src:find("if w and w:isMinimized() then w:unminimize() end", 1, true) ~= nil
+        and src:find('panelIsOnScreen() and "Hide panel" or "Show panel"', 1, true) ~= nil)
+  check("qol-pin: live model from the transcript tail synced onto the tile for the Model dropdown",
+        src:find("then it.model = st.lastModel end", 1, true) ~= nil)
+  check("qol-pin: global hotkeys resolved from cc-config via pure core.resolveHotkeys (legend + binds share it)",
+        src:find("core.resolveHotkeys(readConfigEarly())", 1, true) ~= nil
+        and src:find("_hk.approveFront", 1, true) ~= nil
+        and src:find("_hk.toggle", 1, true) ~= nil)
+  check("qol-pin: Decisions empty-state points at ledger+gate only when the ledger is OFF",
+        src:find("box.innerHTML = LEDGER_ON", 1, true) ~= nil
+        and src:find("and arm the gate to record allow/deny decisions", 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

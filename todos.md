@@ -280,6 +280,17 @@ remaining items. Full per-round detail is in CHANGELOG.md and git history.
 > `FX.sendHistory` dedup + pure `sumDirBytes`/`matchStateFiles`). **Post-batch review rounds for #6/#7 all triaged +
 > folded (commits `c568b2c`, `150129f`). Suite ~1973 core + 512 ui + 183 bash + smoke, green.**
 >
+> **▶ QoL BATCH (2026-06-15):** four panel QoL fixes from real use (plan-mode → approved) — (1) panel
+> restore is **state-robust** (`panelIsOnScreen` reads real window visibility, not the `panelVisible`
+> flag the native yellow-minimize desynced; `showPanel` un-minimizes) + best-effort Dock-launcher
+> hardening (`open -g`, no `exec`, quarantine-strip + `lsregister`); (2) **Model** dropdown shows the
+> live model (sync `st.lastModel` from the transcript tail onto `it.model`); (7) **configurable
+> hotkeys** via pure `core.resolveHotkeys` (cc-config `hotkeys` → binds + legend, one source; NO
+> `SETTINGS_KEEP_SUBKEYS` needed — the block is form-unmanaged, so `overlayConfig` preserves it); (4)
+> Decisions empty-state hints at "turn on ledger + arm gate" when off. Gate/Autopilot/Policy were
+> already correct (inert until armed) → documented, not changed. Suite **1993 core + 519 ui + 183 bash
+> + smoke**, green.
+>
 > **▶ PHASE A — REVIEW-FIX HARDENING (in progress 2026-06-15):** before #6/#7, a contained pass folding in the
 > two AI-leaderboard reviews of `fbcd609` (isOpenableUrl + hung-gh retry) and `879adc7` (openPr data-key +
 > officialLogDecision). Triaged every finding; incorporating all but one cosmetic note (the smoke comment trim —

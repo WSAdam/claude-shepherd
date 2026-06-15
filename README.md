@@ -168,7 +168,10 @@ The detail panel has:
 - **Mode** dropdown — switch the permission mode (Default / Accept edits / Plan) live via
   Shift+Tab; reliable on Kitty, best-effort in the VS Code extension (its switcher is mouse-only).
   The detail also shows badges for the detected **editor**, current **permission mode**, and **effort**.
-- **Model** dropdown — switch the model live within the session's backend (`/model`).
+- **Model** dropdown — shows the session's **current** model (read live from the transcript, so it
+  follows an in-session `/model`) and switches it within the backend (`/model <id>`). The switchable
+  list comes from the `providers[]` you define in `cc-config.json`; with none configured it shows
+  just the current model. Changing the *provider / base URL* needs a fresh session (by design).
 - **Gate** dropdown — per-session tool gating (Default / All / None / Custom): override the
   fleet `gate.tools` for just this session. Only enforced while headless approvals are armed.
 - **Nudge box** — a multi-line input: **Enter** sends, **Shift+Enter** adds a newline
@@ -255,8 +258,8 @@ For supervising many sessions at once (always on; nothing automatic):
 
 ## Global hotkeys
 
-Act on the session that needs you without touching the panel (configurable near
-the top of [claude-dashboard.lua](claude-dashboard.lua)):
+Act on the session that needs you without touching the panel. Defaults are ⌘⌥-based;
+**remap any of them in `cc-config.json` under `hotkeys`** (each `{ "mods": [...], "key": "x" }`):
 
 - **⌘⌥A** — approve the front approval (hands-free via the gate when it's waiting).
 - **⌘⌥J** — **jump to the session that most needs you, from any app.** Ranks hard
@@ -265,12 +268,19 @@ the top of [claude-dashboard.lua](claude-dashboard.lua)):
   when the panel isn't open. (Falls back to the front session when nothing's wedged.)
 - **⌘⌥N** — cycle-jump to the next session.
 - **⌘⌥S** — spawn a new session (see below).
-- **⌘⌥B** — show/hide the panel (it also minimizes to the Dock, and there's a 🐑
-  menu-bar icon to reopen it when closed).
+- **⌘⌥B** — show/hide the panel — state-aware, so it **restores even after a native Dock-minimize**
+  (no more "wrong-way" toggle). The 🐑 **menu-bar icon → "Show panel"** is the always-reliable way
+  to bring it back; the Dock launcher app is an optional extra.
+
+Remapping notes: valid modifiers are `cmd`/`command`, `ctrl`/`control`, `alt`/`option`, `shift`.
+macOS can't bind a bare un-modified key globally **except function keys** (`f1`–`f20`, which take
+`"mods": []`). Single-modifier combos collide — `ctrl` alone breaks terminal readline (⌃A/⌃N/⌃S),
+`alt` alone hits app shortcuts — so ⌘⌥ (or ⌃⌥) stay the low-conflict picks. A malformed entry keeps
+its default; reload Hammerspoon (menu-bar 🐑 → **Reload config**) after editing.
 
 Forget the combos? The small **⌨ button** in the **bottom-right** of the panel pops
 up a legend of every shortcut and what it does (sourced from the live bindings, so
-it never drifts).
+it never drifts — including your remaps).
 
 ## Keep this Mac awake (caffeinate)
 

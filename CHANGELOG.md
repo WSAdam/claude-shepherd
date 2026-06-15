@@ -4,6 +4,35 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-15 (QoL batch) — panel restore, live model, configurable hotkeys, decisions hint
+
+Seven QoL items from real panel use, triaged into four code fixes + three "working as designed,
+just document it" (Gate / Autopilot / Policy are inert only until the gate/ledger are armed). All
+behavior-additive; no existing flow changes.
+
+- **Panel restore is state-robust.** The native yellow **minimize** button parks the window in the
+  Dock without firing a `windowCallback` we can hook, so the `panelVisible` flag desynced and the
+  toggle (⌘⌥B, the 🐑 menu-bar item, the Dock launcher) acted the wrong way. `togglePanel` now
+  decides on the **real** window state (`panelIsOnScreen`: visible AND not minimized) and `showPanel`
+  **un-minimizes** before showing — so it restores from either hidden or Dock-minimized. The 🐑
+  menu-bar "Show panel" is the guaranteed path.
+- **Dock launcher hardening (best-effort).** The "Shepherd is not responding" dialog came from the
+  stub `.app` (`exec open …` while pinned to the Dock). The stub now drops `exec` + uses `open -g`
+  (clean process lifecycle, no activation handshake), and `make app`/`make dock` strip the quarantine
+  bit + re-register with LaunchServices (app-translocation is a known "not responding" trigger).
+- **Model dropdown shows the live model.** It read a spawn-time `$ANTHROPIC_MODEL` snapshot (often
+  empty → `(model…)`). It now syncs the model parsed from the transcript tail (already read for token
+  accounting) onto the tile each tick, so the current model shows and follows an in-session `/model`.
+- **Configurable global hotkeys.** The five ⌘⌥ shortcuts are now overridable in `cc-config.json`
+  under `hotkeys` (`{ "mods": [...], "key": "x" }` each) via pure `core.resolveHotkeys` — which both
+  the binder and the ⌨ legend read, so the shown combos can't drift. Malformed entries fall back to
+  the default; empty mods are allowed only for F-keys (macOS can't bind a bare key globally). The
+  block is wholly form-unmanaged, so `overlayConfig` preserves it across a Settings Save without a
+  `SETTINGS_KEEP_SUBKEYS` entry.
+- **Decisions empty-state** now tells you *why* it's empty: when the ledger is off it points at
+  "turn on the audit ledger (⚙ Settings) + arm the gate" instead of a bare "none yet".
+- Suite **1993 core + 519 ui + 183 bash + smoke**, green.
+
 ## 2026-06-15 (review rounds) — leaderboard review fixes for #6 + #7
 
 The AI-leaderboard reviews of the #6 (`312c588`) and #7 (`54123fe`/docs `ca66146`) commits came

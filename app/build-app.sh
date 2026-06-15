@@ -22,7 +22,12 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 cat > "$APP/Contents/MacOS/shepherd" <<'STUB'
 #!/bin/sh
-exec /usr/bin/open "hammerspoon://ccshepherdtoggle"
+# Toggle the Shepherd panel via Hammerspoon's built-in hammerspoon:// scheme.
+# `-g` dispatches the URL WITHOUT a foreground-activation handshake (the panel is a
+# floating webview, not a focusable app), and there is NO `exec`: the stub waits for
+# `open` and exits cleanly so LaunchServices deregisters this one-shot launcher
+# instead of leaving a half-alive process it later reports as "not responding".
+/usr/bin/open -g "hammerspoon://ccshepherdtoggle"
 STUB
 chmod +x "$APP/Contents/MacOS/shepherd"
 
@@ -66,5 +71,12 @@ fi
 
 # Ad-hoc sign so Gatekeeper treats it like the old applet (right-click -> Open once).
 codesign --force --deep -s - "$APP" >/dev/null 2>&1 || true
+# Clear any quarantine bit + (re)register with LaunchServices. A quarantined,
+# ad-hoc-signed app pinned to the Dock can get app-translocated or left in a stale
+# LS registration -- which surfaces as the "Shepherd is not responding" dialog on a
+# Dock click. Stripping quarantine + a fresh lsregister keeps the launch path clean.
+xattr -cr "$APP" 2>/dev/null || true
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister"
+[ -x "$LSREGISTER" ] && "$LSREGISTER" -f "$APP" >/dev/null 2>&1 || true
 touch "$APP"
 echo "✅ built $APP (hand-rolled launcher bundle)"

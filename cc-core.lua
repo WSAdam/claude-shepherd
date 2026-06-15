@@ -1744,6 +1744,73 @@ function M.hotkeyLegend(globals, panelKeys)
   return out
 end
 
+-- The five configurable global hotkeys, in the dashboard's HOTKEY_* shape ([1]=mods, [2]=key).
+-- These are the ⌘⌥ defaults; cc-config.json's `hotkeys` block overrides any of them.
+local HOTKEY_DEFAULTS = {
+  approveFront = { { "cmd", "alt" }, "a" },
+  jumpNeedy    = { { "cmd", "alt" }, "j" },
+  cycle        = { { "cmd", "alt" }, "n" },
+  spawn        = { { "cmd", "alt" }, "s" },
+  toggle       = { { "cmd", "alt" }, "b" },
+}
+local HOTKEY_ACTIONS  = { "approveFront", "jumpNeedy", "cycle", "spawn", "toggle" }
+-- Modifier names hs.hotkey.bind accepts (both spellings). Anything else is rejected so a
+-- typo can't half-bind a key or throw at bind time -- the action reverts to its default.
+local HOTKEY_MODS_OK  = { cmd = true, command = true, ctrl = true, control = true,
+                          alt = true, option = true, shift = true, fn = true }
+
+local function normalizeMods(mods)
+  if type(mods) ~= "table" then return nil end
+  local out, seen = {}, {}
+  for _, m in ipairs(mods) do
+    if type(m) ~= "string" then return nil end
+    local lm = m:lower()
+    if not HOTKEY_MODS_OK[lm] then return nil end
+    if not seen[lm] then seen[lm] = true; out[#out + 1] = lm end
+  end
+  return out  -- may be empty (only valid for F-keys; see resolveOneHotkey)
+end
+
+-- Resolve one hotkey entry (a cc-config `{ mods = {...}, key = "x" }` object) against its
+-- default {mods, key}. ANY rejection returns a fresh COPY of the default (never the shared
+-- table) so a malformed config can't crash hs.hotkey.bind or leave a key half-bound:
+--   * key must be a non-empty string
+--   * mods, if present, must all be known modifier names (else revert)
+--   * empty mods are allowed ONLY for an F-key (f1..f20) -- Hammerspoon can't bind a bare
+--     letter globally, so a no-modifier letter reverts to the default rather than no-op'ing.
+function M.resolveOneHotkey(entry, default)
+  local function dflt()
+    local m = {}
+    for _, x in ipairs(default[1]) do m[#m + 1] = x end
+    return { m, default[2] }
+  end
+  if type(entry) ~= "table" then return dflt() end
+  local key = entry.key
+  if type(key) ~= "string" or key == "" then return dflt() end
+  local mods
+  if entry.mods == nil then
+    mods = {}
+  else
+    mods = normalizeMods(entry.mods)
+    if not mods then return dflt() end
+  end
+  if #mods == 0 and not key:lower():match("^f%d+$") then return dflt() end
+  return { mods, key }
+end
+
+-- Resolve all five global hotkeys from cc-config.json's `hotkeys` block, each falling back
+-- to its ⌘⌥ default. Pure; the dashboard feeds the result to BOTH hs.hotkey.bind and the
+-- ⌨ legend, so the displayed combos can't drift from what's actually bound.
+function M.resolveHotkeys(cfg)
+  local hk = M.config(cfg, "hotkeys", nil)
+  if type(hk) ~= "table" then hk = {} end
+  local out = {}
+  for _, name in ipairs(HOTKEY_ACTIONS) do
+    out[name] = M.resolveOneHotkey(hk[name], HOTKEY_DEFAULTS[name])
+  end
+  return out
+end
+
 -- Extract the latest assistant text from a transcript.jsonl tail, for the "live
 -- activity peek". Scans lines backwards (the last assistant line is often a
 -- tool_use with no text), returns the last text block found, whitespace-collapsed

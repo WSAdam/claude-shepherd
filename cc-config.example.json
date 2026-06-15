@@ -171,5 +171,14 @@
     "bundles": {},
     "_attachments_comment": "Auto-attach a bundle to sessions matching project/group/providerId/key (each a glob; absent = wildcard; first match wins). e.g. [{\"match\":{\"project\":\"secure-*\"},\"bundle\":\"read-only\"}]. Empty = no auto-attach (use the per-session Policy dropdown instead).",
     "attachments": []
+  },
+
+  "hotkeys": {
+    "_comment": "Global shortcuts (work from any app). Each entry is { \"mods\": [...], \"key\": \"x\" }; valid mods are cmd/command, ctrl/control, alt/option, shift. A missing or malformed entry keeps its ⌘⌥ default, so you can override just the ones you want. macOS can't bind a bare un-modified key globally EXCEPT function keys — f1–f20 take \"mods\": []. Heads-up on conflicts: ctrl-alone breaks terminal readline (⌃A/⌃N/⌃S), alt-alone hits app shortcuts; ⌘⌥ and ⌃⌥ are the low-conflict combos. Reload Hammerspoon (menubar 🐑 → Reload config) after editing.",
+    "approveFront": { "mods": ["cmd", "alt"], "key": "a" },
+    "jumpNeedy":    { "mods": ["cmd", "alt"], "key": "j" },
+    "cycle":        { "mods": ["cmd", "alt"], "key": "n" },
+    "spawn":        { "mods": ["cmd", "alt"], "key": "s" },
+    "toggle":       { "mods": ["cmd", "alt"], "key": "b" }
   }
 }

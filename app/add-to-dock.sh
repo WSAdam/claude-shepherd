@@ -16,6 +16,11 @@ if [ ! -d "$APP" ]; then
   exit 1
 fi
 
+# Strip any quarantine bit before pinning — a quarantined launcher can get
+# app-translocated and then click as "not responding". (make app already does this
+# on build; repeated here for apps built before the hardening landed.) Idempotent.
+xattr -cr "$APP" 2>/dev/null || true
+
 # Already pinned? (match the bundle path in the Dock's persistent-apps plist.)
 if defaults read com.apple.dock persistent-apps 2>/dev/null | grep -q "Shepherd.app"; then
   echo "✅ Shepherd.app is already in the Dock — nothing to do."
