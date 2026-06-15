@@ -1029,6 +1029,22 @@ do
   -- optimistic reset (else a server-side reject wipes the typed input).
   check("l1ed-pin: MCP form pre-validates transport",
         src:find('alert("stdio transport needs a command.")', 1, true) ~= nil)
+  -- L2 policy bundle/attachment editor (deferred polish): edits cc-config.json policies
+  check("l2ed-pin: policy editor bridge handlers",
+        src:find('a == "open-policy-editor" or a == "policy-bundle-save"', 1, true) ~= nil)
+  check("l2ed-pin: reads RAW config file", src:find("local raw = FX.readFile(CONFIG_FILE)", 1, true) ~= nil)
+  check("l2ed-pin: bundle save via core.policySetBundle", src:find("core.policySetBundle(policies, name, p)", 1, true) ~= nil)
+  check("l2ed-pin: bundle rename removes old key", src:find("policies = core.policyRemoveBundle(policies, oldName)", 1, true) ~= nil)
+  check("l2ed-pin: attachment add/move/remove",
+        src:find("core.policyAddAttachment(policies", 1, true) ~= nil
+        and src:find("core.policyMoveAttachment(policies, p.index, p.dir)", 1, true) ~= nil)
+  check("l2ed-pin: writes cfg.policies back", src:find("cfg.policies = policies", 1, true) ~= nil)
+  check("l2ed-pin: reply carries starters + armed",
+        src:find("hs.json.encode(core.DEFAULT_POLICY_BUNDLES)", 1, true) ~= nil
+        and src:find("FX.readFile(GATE_FLAG) ~= nil) and \"true\" or \"false\"", 1, true) ~= nil)
+  check("l2ed-pin: ccPolicyEd render fn", src:find("function ccPolicyEd(o)", 1, true) ~= nil)
+  check("l2ed-pin: drawer policies entry", src:find("menuPick('policies')", 1, true) ~= nil)
+  check("l2ed-pin: policy overlay markup", src:find('<div id="policyed">', 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

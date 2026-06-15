@@ -4,6 +4,36 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-14 (deferred polish ④) — L2 policy bundle/attachment editor
+
+Fourth deferred-polish build: a 🛡 **Policy bundles** editor (☰ drawer) so named
+`policies.bundles` and `policies.attachments` no longer have to be hand-edited in
+`cc-config.json`. Unlike the other editors, these live INSIDE the config file, so the
+handler reads the raw config, applies a pure op to the `policies` subtree, and writes the
+whole file back — carefully, so unrelated config survives.
+
+- **Bundle authoring:** name, **autoDeny** / **autoAllow** patterns (one per line), per-bundle
+  **gateTools** (hold-for-approval list), **lockedPermMode**, soft **toolLimits** (`Tool=N`),
+  and **autopilot** / **disableGlobal** toggles. One-click copy of a starter
+  (read-only / no-bash / no-network from `DEFAULT_POLICY_BUNDLES`). A non-armed-gate warning
+  banner (bundles only ENFORCE while headless approvals are armed).
+- **Attachments** (first-match-wins): an ordered list with ▲▼ reorder, edit, delete, and an
+  add form (match project/group/providerId/key globs — blank = any — → bundle dropdown).
+- **cc-core (pure, +24 tests):** `validatePolicyBundle`/`policyBundleNorm` (keeps only set
+  fields; `gateTools` normalized to a string like `gate.tools`; empty lists dropped; toolLimits
+  coerced to numbers), `policySetBundle`/`policyRemoveBundle` (bundles is a name→bundle map),
+  `validateAttachment`/`attachmentNorm`, and `policyAddAttachment`/`policySetAttachment`/
+  `policyRemoveAttachment`/`policyMoveAttachment` (ordered array). Each returns a NEW policies
+  subtree; `policies.patterns` + every other config key ride through untouched.
+- **Config safety:** the write is gated on an actual change (opening the editor never rewrites
+  the file), a malformed config is never clobbered (mutations bail with an alert), and the
+  shallow-copy ops don't alias/mutate the original config tables.
+- **Adversarial review** (3-lens workflow + verifiers): **0 findings** — the malformed-config
+  guard, change-gated write, and 1-based index conversion preempted the config-corruption class.
+- Tests: +24 cc-core, +10 dashboard pins. Suite green (1674 core + 408 ui + 183 bash).
+- **Deferred (unchanged):** bundle `gateTools` auto-apply at spawn, `toolLimits` shell
+  enforcement (it's a soft/ledger indicator), and free-text deny-reason enrichment.
+
 ## 2026-06-14 (deferred polish ③) — L1 agents registry editor
 
 Third deferred-polish build (the largest): a ✦ **Agents** editor (☰ drawer + a "Manage

@@ -3986,6 +3986,52 @@ do
   local over = core.overToolLimit({ Bash = 3, Write = 5 }, { Bash = 3, Write = 1 })
   eq("overToolLimit: one tool over", #over, 1)
   eq("overToolLimit: it is Bash", over[1].tool, "Bash")
+
+  -- L2 editor CRUD: bundles (map) + attachments (ordered array) on the policies subtree
+  local pol = { patterns = { autoAllow = { "Read" } } }
+  local p1, ok1, errs1 = core.policySetBundle(pol, "tight", { autoDeny = { "Bash", "Write" }, gateTools = "Bash Edit" })
+  eq("polBundle: saved", ok1, true)
+  eq("polBundle: stored under name", #p1.bundles.tight.autoDeny, 2)
+  eq("polBundle: gateTools normalized string", p1.bundles.tight.gateTools, "Bash Edit")
+  eq("polBundle: patterns ride through", p1.patterns.autoAllow[1], "Read")
+  local _, okBad, errsBad = core.policySetBundle(pol, "", { autoDeny = {} })
+  eq("polBundle: blank name rejected", okBad, false)
+  check("polBundle: returns errors", type(errsBad) == "table" and #errsBad > 0)
+  eq("polBundle: bad lockedPermMode rejected",
+     select(2, core.policySetBundle(pol, "x", { lockedPermMode = "nope" })), false)
+  -- empty fields are dropped on normalize
+  local p2 = core.policySetBundle(pol, "empty", { autoAllow = {}, autopilot = false })
+  eq("polBundle: empty autoAllow dropped", p2.bundles.empty.autoAllow, nil)
+  eq("polBundle: autopilot false dropped", p2.bundles.empty.autopilot, nil)
+  -- toolLimits normalized to numbers
+  local p3 = core.policySetBundle(pol, "lim", { toolLimits = { Bash = "5", Junk = "x" } })
+  eq("polBundle: toolLimit number kept", p3.bundles.lim.toolLimits.Bash, 5)
+  eq("polBundle: toolLimit non-number dropped", p3.bundles.lim.toolLimits.Junk, nil)
+  -- remove
+  local p4 = core.policyRemoveBundle(p1, "tight")
+  eq("polBundle: removed", p4.bundles.tight, nil)
+  -- attachments: add / order / move / remove
+  local a1 = core.policyAddAttachment(pol, { match = { project = "shep*" }, bundle = "tight" })
+  eq("polAtt: added", #a1.attachments, 1)
+  eq("polAtt: match normalized", a1.attachments[1].match.project, "shep*")
+  local a2 = core.policyAddAttachment(a1, { match = {}, bundle = "read-only" })
+  eq("polAtt: second appended", #a2.attachments, 2)
+  eq("polAtt: blank match = wildcard (empty match table)", next(a2.attachments[2].match), nil)
+  local _, okA, errsA = core.policyAddAttachment(pol, { match = {} })
+  eq("polAtt: missing bundle rejected", okA, false)
+  -- move down then back up
+  local a3 = core.policyMoveAttachment(a2, 1, 1)
+  eq("polAtt: moved to second", a3.attachments[2].bundle, "tight")
+  eq("polAtt: other moved to first", a3.attachments[1].bundle, "read-only")
+  eq("polAtt: move out of range no-op", core.policyMoveAttachment(a2, 2, 1).attachments[2].bundle, "read-only")
+  -- set (replace at index)
+  local a4 = core.policySetAttachment(a2, 1, { match = { group = "g" }, bundle = "no-bash" })
+  eq("polAtt: replaced bundle", a4.attachments[1].bundle, "no-bash")
+  eq("polAtt: set bad index rejected", select(2, core.policySetAttachment(a2, 9, { bundle = "x" })), false)
+  -- remove by index
+  local a5 = core.policyRemoveAttachment(a2, 1)
+  eq("polAtt: removed one", #a5.attachments, 1)
+  eq("polAtt: remaining is the second", a5.attachments[1].bundle, "read-only")
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))

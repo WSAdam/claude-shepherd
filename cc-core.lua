@@ -5045,6 +5045,143 @@ function M.overToolLimit(toolLimits, counts)
   return out
 end
 
+-- ---- L2 bundle/attachment EDITOR — pure CRUD on the policies subtree --------
+-- The L2 editor authors policies.bundles (a name->bundle MAP) + policies.attachments
+-- (an ORDERED array; first match wins) inside cc-config.json. These pure ops take
+-- the `policies` subtree and return a NEW one (policies.patterns rides through
+-- untouched); the dashboard reads cfg, applies, writes cfg back. No clock, no hs.*.
+
+function M.validatePolicyBundle(rec)
+  if type(rec) ~= "table" then return { ok = false, errors = { "not an object" } } end
+  local errs = {}
+  for _, f in ipairs({ "autoAllow", "autoDeny" }) do
+    if rec[f] ~= nil and type(rec[f]) ~= "table" then errs[#errs + 1] = f .. " must be a list" end
+  end
+  if rec.lockedPermMode ~= nil and tostring(rec.lockedPermMode) ~= "" then
+    local pm = tostring(rec.lockedPermMode)
+    if pm ~= "default" and pm ~= "acceptEdits" and pm ~= "plan" then
+      errs[#errs + 1] = "lockedPermMode must be default|acceptEdits|plan"
+    end
+  end
+  if rec.toolLimits ~= nil and type(rec.toolLimits) ~= "table" then errs[#errs + 1] = "toolLimits must be a map" end
+  return { ok = #errs == 0, errors = errs }
+end
+
+-- Normalize a bundle to only its SET fields (so an empty field doesn't persist).
+function M.policyBundleNorm(rec)
+  rec = type(rec) == "table" and rec or {}
+  local out = {}
+  if type(rec.autoAllow) == "table" then local l = agStrList(rec.autoAllow); if #l > 0 then out.autoAllow = l end end
+  if type(rec.autoDeny) == "table" then local l = agStrList(rec.autoDeny); if #l > 0 then out.autoDeny = l end end
+  -- gateTools is a normalized STRING (space-separated, like gate.tools) -- parseToolList
+  -- dedupes + joins; drop it if it ends up empty.
+  if rec.gateTools ~= nil and tostring(rec.gateTools) ~= "" then
+    local g = M.parseToolList(rec.gateTools); if g ~= "" then out.gateTools = g end
+  end
+  if rec.autopilot == true then out.autopilot = true end
+  if rec.disableGlobal == true then out.disableGlobal = true end
+  if type(rec.lockedPermMode) == "string" and rec.lockedPermMode ~= "" then out.lockedPermMode = rec.lockedPermMode end
+  if type(rec.toolLimits) == "table" then
+    local tl = {}
+    for k, v in pairs(rec.toolLimits) do local n = tonumber(v); if n and agTrim(k) ~= "" then tl[agTrim(k)] = n end end
+    if next(tl) then out.toolLimits = tl end
+  end
+  return out
+end
+
+local function polCopy(policies)
+  local out = {}
+  if type(policies) == "table" then for k, v in pairs(policies) do out[k] = v end end
+  return out
+end
+
+-- Upsert a named bundle. Returns newPolicies, ok, errors. Validated + normalized.
+function M.policySetBundle(policies, name, rec)
+  name = agTrim(name)
+  local v = M.validatePolicyBundle(rec)
+  if name == "" then v.ok = false; v.errors = v.errors or {}; v.errors[#v.errors + 1] = "bundle needs a name" end
+  if not v.ok then return policies, false, v.errors end
+  local out = polCopy(policies)
+  local bundles = {}
+  if type(out.bundles) == "table" then for k, vv in pairs(out.bundles) do bundles[k] = vv end end
+  bundles[name] = M.policyBundleNorm(rec)
+  out.bundles = bundles
+  return out, true
+end
+
+function M.policyRemoveBundle(policies, name)
+  name = agTrim(name)
+  local out = polCopy(policies)
+  local bundles = {}
+  if type(out.bundles) == "table" then for k, vv in pairs(out.bundles) do if k ~= name then bundles[k] = vv end end end
+  out.bundles = bundles
+  return out
+end
+
+function M.validateAttachment(att)
+  if type(att) ~= "table" then return { ok = false, errors = { "not an object" } } end
+  local errs = {}
+  if att.bundle == nil or agTrim(att.bundle) == "" then errs[#errs + 1] = "attachment needs a bundle" end
+  if att.match ~= nil and type(att.match) ~= "table" then errs[#errs + 1] = "match must be an object" end
+  return { ok = #errs == 0, errors = errs }
+end
+
+-- Keep only the present match fields (blank = wildcard, so drop it).
+function M.attachmentNorm(att)
+  local m = type(att.match) == "table" and att.match or {}
+  local match = {}
+  for _, k in ipairs({ "project", "group", "providerId", "key" }) do
+    if type(m[k]) == "string" and agTrim(m[k]) ~= "" then match[k] = agTrim(m[k]) end
+  end
+  return { match = match, bundle = agTrim(att.bundle) }
+end
+
+local function attArr(policies)
+  local a = (type(policies) == "table" and type(policies.attachments) == "table") and policies.attachments or {}
+  local out = {}; for _, x in ipairs(a) do out[#out + 1] = x end; return out
+end
+
+function M.policyAddAttachment(policies, att)
+  local v = M.validateAttachment(att)
+  if not v.ok then return policies, false, v.errors end
+  local out = polCopy(policies)
+  local arr = attArr(policies); arr[#arr + 1] = M.attachmentNorm(att)
+  out.attachments = arr
+  return out, true
+end
+
+function M.policySetAttachment(policies, index, att)
+  local v = M.validateAttachment(att)
+  if not v.ok then return policies, false, v.errors end
+  local arr = attArr(policies); index = tonumber(index)
+  if not index or index < 1 or index > #arr then return policies, false, { "bad attachment index" } end
+  local out = polCopy(policies)
+  arr[index] = M.attachmentNorm(att); out.attachments = arr
+  return out, true
+end
+
+function M.policyRemoveAttachment(policies, index)
+  local out = polCopy(policies)
+  local arr, res = attArr(policies), {}
+  index = tonumber(index)
+  for i, x in ipairs(arr) do if i ~= index then res[#res + 1] = x end end
+  out.attachments = res
+  return out
+end
+
+-- Reorder an attachment (dir -1 up / +1 down). First-match-wins, so order matters.
+function M.policyMoveAttachment(policies, index, dir)
+  local out = polCopy(policies)
+  local arr = attArr(policies)
+  index = tonumber(index); dir = tonumber(dir)
+  local j = (index and dir) and (index + dir) or nil
+  if index and j and index >= 1 and index <= #arr and j >= 1 and j <= #arr then
+    arr[index], arr[j] = arr[j], arr[index]
+  end
+  out.attachments = arr
+  return out
+end
+
 -- ===========================================================================
 -- L6 — Event-callback rule engine (cc-rules.json)
 -- ===========================================================================

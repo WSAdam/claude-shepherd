@@ -412,8 +412,15 @@ skills and MCPs."* Nine LiteLLM features converge into ONE: extend the spawn-pre
 > ✅ **SHIPPED 2026-06-14** (see CHANGELOG): `policies.bundles` + `policies.attachments`, resolved per session
 > (override > attachment > fleet) into a `cc-policy/<key>` file the gate reads (authoritative + opt-in), with a
 > detail-panel Policy dropdown, an orphan sweep, atomic writes, and SessionEnd cleanup. Built with an adversarial
-> review pass. **Deferred follow-up:** the bundle/attachment EDITOR UI (today: hand-edited config), bundle
-> `gateTools` auto-apply, `toolLimits` shell enforcement, and the free-text deny-reason enrichment.
+> review pass.
+> **Editor ✅ SHIPPED 2026-06-14 (deferred-polish ④):** a 🛡 Policy bundles editor (☰ drawer) — bundle authoring
+> (autoDeny/autoAllow/gateTools/lockedPermMode/toolLimits/autopilot/disableGlobal + starter copy) + ordered
+> attachment CRUD (▲▼ reorder, match globs → bundle). New pure cc-core: `validate/normPolicyBundle`,
+> `policySet/RemoveBundle`, `validate/normAttachment`, `policyAdd/Set/Remove/MoveAttachment` — each returns a new
+> `policies` subtree (patterns + other config keys ride through). Writes into cc-config.json: change-gated,
+> malformed-config-safe (never clobbers an unparseable file), non-aliasing. Adversarial review: 0 findings.
+> **Still deferred:** bundle `gateTools` auto-apply at spawn, `toolLimits` shell enforcement (soft/ledger
+> indicator today), free-text deny-reason enrichment.
 *Source: ADAPT items 11, 12, 14, 15 (key-scoped access lists + key_type, per-key policy attachment + enforced
 params + disable-global, guardrail lifecycle CRUD + timing + transparency, named/scoped versioned bundles).*
 Today `policies.patterns` is a single flat anonymous `{autoAllow[], autoDeny[]}` + a per-session `gate.tools`

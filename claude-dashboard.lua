@@ -2067,6 +2067,71 @@ local function handleBridgeMsg(msg)
     pcall(function() wv:evaluateJavaScript("ccAgentEd(" .. hs.json.encode(bundle) .. ")") end)
     return
   end
+  -- L2 policy bundle/attachment EDITOR (deferred-polish): author policies.bundles
+  -- (a name->bundle MAP) + policies.attachments (an ORDERED array, first match wins)
+  -- INSIDE cc-config.json. Reads the RAW config file, applies a pure cc-core op to
+  -- the policies subtree (the rest of the file rides through), writes it back.
+  if a == "open-policy-editor" or a == "policy-bundle-save" or a == "policy-bundle-delete"
+     or a == "policy-att-add" or a == "policy-att-save" or a == "policy-att-delete"
+     or a == "policy-att-move" then
+    local raw = FX.readFile(CONFIG_FILE)
+    local cfg, malformed = {}, false
+    if raw and #raw > 0 then
+      local ok, parsed = pcall(function() return hs.json.decode(raw) end)
+      if ok and type(parsed) == "table" then cfg = parsed
+      else malformed = true end
+    end
+    -- A non-empty file that won't parse: NEVER write (we'd clobber the user's
+    -- file, losing whatever else is in it). A read (open) still replies with the
+    -- defaults view so the overlay opens, but every mutation bails here.
+    if malformed then
+      pcall(function() hs.alert.show("Claude Shepherd: cc-config.json is malformed — fix it before editing policies") end)
+      if a ~= "open-policy-editor" then return end
+    end
+    local policies = type(cfg.policies) == "table" and cfg.policies or {}
+    local changed = false
+    local function badAlert(errs) pcall(function() hs.alert.show("Claude Shepherd: invalid — "
+      .. table.concat(errs or { "?" }, "; ")) end) end
+    if a == "policy-bundle-save" then
+      local okp, p = pcall(hs.json.decode, payload.text or "{}")
+      p = (okp and type(p) == "table") and p or {}
+      local name, oldName = tostring(p.name or ""), tostring(p.oldName or "")
+      p.name = nil; p.oldName = nil  -- not bundle fields
+      if oldName ~= "" and oldName ~= name then policies = core.policyRemoveBundle(policies, oldName) end
+      local np, ok, errs = core.policySetBundle(policies, name, p)
+      if ok then policies = np; changed = true else badAlert(errs) end
+    elseif a == "policy-bundle-delete" then
+      policies = core.policyRemoveBundle(policies, tostring(payload.v or "")); changed = true
+    elseif a == "policy-att-add" then
+      local okp, p = pcall(hs.json.decode, payload.text or "{}")
+      local np, ok, errs = core.policyAddAttachment(policies, (okp and type(p) == "table") and p or {})
+      if ok then policies = np; changed = true else badAlert(errs) end
+    elseif a == "policy-att-save" then
+      local okp, p = pcall(hs.json.decode, payload.text or "{}")
+      p = (okp and type(p) == "table") and p or {}
+      local np, ok, errs = core.policySetAttachment(policies, p.index, p)
+      if ok then policies = np; changed = true else badAlert(errs) end
+    elseif a == "policy-att-delete" then
+      policies = core.policyRemoveAttachment(policies, tonumber(payload.v)); changed = true
+    elseif a == "policy-att-move" then
+      local okp, p = pcall(hs.json.decode, payload.text or "{}")
+      p = (okp and type(p) == "table") and p or {}
+      policies = core.policyMoveAttachment(policies, p.index, p.dir); changed = true
+    end
+    if changed then
+      cfg.policies = policies
+      FX.writeFile(CONFIG_FILE, hs.json.encode(cfg, true))
+    end
+    -- reply with the editor bundle (read fresh so it reflects the write)
+    local nc = loadConfig()
+    local atts = core.config(nc, "policies.attachments", {}) or {}
+    local reply = "{\"bundles\":" .. hs.json.encode(core.policyBundles(nc))
+      .. ",\"attachments\":" .. ((#atts > 0) and hs.json.encode(atts) or "[]")
+      .. ",\"starters\":" .. hs.json.encode(core.DEFAULT_POLICY_BUNDLES)
+      .. ",\"armed\":" .. ((FX.readFile(GATE_FLAG) ~= nil) and "true" or "false") .. "}"
+    pcall(function() wv:evaluateJavaScript("ccPolicyEd(" .. reply .. ")") end)
+    return
+  end
   -- Fuzzy folder search (roadmap #4b): rank the CACHED index (no per-keystroke
   -- process; the scan ran once on modal open).
   if a == "folder-search" then
@@ -3657,6 +3722,33 @@ local HTML = [[
 .ae-list{ display:flex; flex-direction:column; gap:4px; }
 .ae-list-row{ display:flex; gap:5px; align-items:center; }
 .ae-list-row input{ flex:1; }
+/* L2 policy bundle/attachment editor overlay (modeled on #agented). Edits cc-config.json policies. */
+#policyed{ position:fixed; inset:0; background:#14161b; z-index:11; display:none; flex-direction:column; font-size:12px; }
+#policyed.show{ display:flex; }
+#pe-head{ display:flex; align-items:center; gap:8px; padding:8px 10px; border-bottom:1px solid #2c2f3a; font-weight:600; flex-wrap:wrap; }
+#pe-head .s-x{ margin-left:auto; }
+#pe-warn{ padding:6px 10px; background:#2a2410; color:#e4c463; border-bottom:1px solid #3a3320; font-size:11px; display:none; }
+#pe-warn.show{ display:block; }
+#pe-body{ flex:1; overflow:auto; padding:8px 10px; }
+.pe-sec{ font-weight:600; color:#cfd2db; margin:8px 0 5px; display:flex; align-items:center; gap:8px; }
+.pe-row{ display:flex; gap:10px; align-items:center; padding:7px 8px; border:1px solid #23262f; border-radius:8px; margin-bottom:6px; background:#191b22; }
+.pe-main{ flex:1; min-width:0; }
+.pe-name{ color:#e8e9ee; font-weight:600; }
+.pe-sub{ color:#8a8d99; font-size:11px; margin-top:1px; word-break:break-word; }
+.pe-badge{ display:inline-block; background:#23262f; color:#9aa0ad; border:1px solid #2c2f3a; border-radius:5px; padding:0 5px; font-size:10px; margin-right:4px; }
+.pe-badge.deny{ color:#e08; border-color:#5a3340; }
+.pe-badge.allow{ color:#8fd4a3; border-color:#2c5a3a; }
+.pe-acts{ display:flex; gap:5px; flex:0 0 auto; }
+.pe-empty{ color:#6b7280; font-style:italic; padding:6px 4px; }
+.pe-starter{ background:#1a1c22; border:1px dashed #3a4a5a; color:#9fb6d6; border-radius:6px; padding:2px 8px; cursor:pointer; font-size:11px; }
+#pe-bform, #pe-aform{ display:none; flex-direction:column; gap:7px; padding:4px 2px; border:1px solid #23262f; border-radius:8px; margin:6px 0; background:#15171d; padding:10px; }
+#pe-bform.show, #pe-aform.show{ display:flex; }
+#pe-bform label, #pe-aform label{ display:flex; flex-direction:column; gap:3px; color:#9aa0ad; font-size:11px; }
+#pe-bform input, #pe-bform select, #pe-bform textarea, #pe-aform input, #pe-aform select{ background:#1a1c22; border:1px solid #2c2f3a; color:#e8e9ee; border-radius:6px; padding:4px 7px; font-size:12px; }
+#pe-bform textarea{ resize:vertical; min-height:42px; font-family:ui-monospace,Menlo,monospace; }
+.pe-grid{ display:flex; gap:8px; flex-wrap:wrap; }
+.pe-grid > label{ flex:1; min-width:120px; }
+.pe-check{ flex-direction:row !important; align-items:center; gap:6px; }
 /* insights sparklines (Feature 6): trend lines over the ledger */
 .spark-row{ display:flex; align-items:center; gap:8px; padding:4px 0; }
 .spark-lbl{ width:110px; flex:0 0 auto; color:#9aa0ad; font-size:11px; }
@@ -3698,6 +3790,7 @@ local HTML = [[
           <button class="tm-item" onclick="menuPick('routines')"><span class="tm-ic">⏰</span> Routines</button>
           <button class="tm-item" onclick="menuPick('templates')"><span class="tm-ic">📝</span> Templates</button>
           <button class="tm-item" onclick="menuPick('agents')"><span class="tm-ic">✦</span> Agents</button>
+          <button class="tm-item" onclick="menuPick('policies')"><span class="tm-ic">🛡</span> Policy bundles</button>
           <button id="tm-shift" class="tm-item" style="display:none" onclick="menuPick('shift')"><span class="tm-ic">📋</span> Shift report</button>
           <button class="tm-item" onclick="menuPick('notify')"><span class="tm-ic">🔔</span> Notifications<span id="tm-notify-badge"></span></button>
         </div>
@@ -4248,6 +4341,61 @@ local HTML = [[
       </div>
     </div>
     <div id="r-foot" style="border-top:1px solid #2c2f3a;"><span class="n-dim" id="ae-info"></span></div>
+  </div>
+
+  <div id="policyed">
+    <div id="pe-head">
+      <span>🛡 Policy bundles &amp; attachments</span>
+      <button class="s-x" onclick="closePolicyEd()">✕</button>
+    </div>
+    <div id="pe-warn"></div>
+    <div id="pe-body">
+      <div class="pe-sec">Bundles <button class="r-btn" onclick="peBundleNew()">+ New bundle</button>
+        <span class="n-dim">starters:</span>
+        <button class="pe-starter" onclick="peStarter('read-only')">read-only</button>
+        <button class="pe-starter" onclick="peStarter('no-bash')">no-bash</button>
+        <button class="pe-starter" onclick="peStarter('no-network')">no-network</button>
+      </div>
+      <div id="pe-bform">
+        <label>Name<input type="text" id="bf-name" placeholder="e.g. tight"></label>
+        <label>autoDeny — patterns to HOLD/escalate, one per line (e.g. Bash, Bash(rm*), Write)<textarea id="bf-deny" placeholder="Bash&#10;Write&#10;Edit"></textarea></label>
+        <label>autoAllow — patterns to auto-approve, one per line<textarea id="bf-allow" placeholder="Read&#10;Bash(ls*)"></textarea></label>
+        <label>gateTools — per-bundle hold-for-approval list (space-separated; overrides fleet gate.tools)<input type="text" id="bf-gate" placeholder="(blank = inherit fleet gate.tools)"></label>
+        <div class="pe-grid">
+          <label>Locked perm mode<select id="bf-lockmode"><option value="">(none)</option><option value="default">default</option><option value="acceptEdits">acceptEdits</option><option value="plan">plan</option></select></label>
+          <label>toolLimits — soft per-tool ceilings, "Tool=N" space-separated<input type="text" id="bf-limits" placeholder="Bash=5 Write=10"></label>
+        </div>
+        <div class="pe-grid">
+          <label class="pe-check"><input type="checkbox" id="bf-autopilot"> autopilot (auto-approve everything not denied)</label>
+          <label class="pe-check"><input type="checkbox" id="bf-disable"> disableGlobal (ignore the fleet policy for this session)</label>
+        </div>
+        <div class="pe-grid">
+          <button class="r-btn" style="border-color:#3b6;color:#bdf;" onclick="peBundleSave()">Save bundle</button>
+          <button class="r-btn" onclick="peBundleCancel()">Cancel</button>
+        </div>
+      </div>
+      <div id="pe-bundles"></div>
+      <div class="pe-sec" style="margin-top:14px;">Attachments <button class="r-btn" onclick="peAttNew()">+ New attachment</button>
+        <span class="n-dim">first match wins → its bundle applies</span>
+      </div>
+      <div id="pe-aform">
+        <div class="pe-grid">
+          <label>Match project (glob; blank = any)<input type="text" id="af2-project" placeholder="shepherd* or *"></label>
+          <label>Match group<input type="text" id="af2-group" placeholder="(any)"></label>
+        </div>
+        <div class="pe-grid">
+          <label>Match providerId<input type="text" id="af2-provider" placeholder="(any)"></label>
+          <label>Match session key<input type="text" id="af2-key" placeholder="(any)"></label>
+        </div>
+        <label>Bundle to apply<select id="af2-bundle"></select></label>
+        <div class="pe-grid">
+          <button class="r-btn" style="border-color:#3b6;color:#bdf;" onclick="peAttSave()">Save attachment</button>
+          <button class="r-btn" onclick="peAttCancel()">Cancel</button>
+        </div>
+      </div>
+      <div id="pe-atts"></div>
+    </div>
+    <div id="r-foot" style="border-top:1px solid #2c2f3a;"><span class="n-dim" id="pe-info"></span></div>
   </div>
 
   <script>
@@ -6221,6 +6369,152 @@ local HTML = [[
       send("mcp-ed-save", "", JSON.stringify(rec));
       mcpEdReset();
     }
+
+    // ---- L2 policy bundle / attachment editor (🛡) ----------------------------
+    var PE_BUNDLES = {}, PE_ATTS = [], PE_STARTERS = {}, PE_ARMED = false;
+    var peBundleEditing = null;   // bundle name being edited, or null for new
+    var peAttEditing = null;      // 0-based attachment index being edited, or null
+
+    function openPolicyEd(){ send("open-policy-editor"); peBundleHide(); peAttHide();
+      document.getElementById("policyed").classList.add("show"); }
+    function closePolicyEd(){ document.getElementById("policyed").classList.remove("show"); }
+    function ccPolicyEd(o){
+      o = o || {};
+      PE_BUNDLES = o.bundles && !Array.isArray(o.bundles) ? o.bundles : {};
+      PE_ATTS = Array.isArray(o.attachments) ? o.attachments : [];
+      PE_STARTERS = o.starters && !Array.isArray(o.starters) ? o.starters : {};
+      PE_ARMED = !!o.armed;
+      renderPolicyEd();
+    }
+    function bundleNames(){ return Object.keys(PE_BUNDLES).sort(); }
+    function renderPolicyEd(){
+      var warn = document.getElementById("pe-warn");
+      if(!PE_ARMED){ warn.textContent = "Headless approvals are NOT armed — bundles are only ENFORCED while the gate is armed (⚙ Settings). They still resolve + show here."; warn.classList.add("show"); }
+      else warn.classList.remove("show");
+      // bundles
+      var bb = document.getElementById("pe-bundles"); bb.innerHTML = "";
+      var names = bundleNames();
+      if(!names.length){ var e=document.createElement("div"); e.className="pe-empty"; e.textContent="No bundles yet. “+ New bundle”, or copy a starter above."; bb.appendChild(e); }
+      names.forEach(function(name){
+        var b = PE_BUNDLES[name] || {};
+        var row = document.createElement("div"); row.className = "pe-row";
+        var main = document.createElement("div"); main.className = "pe-main";
+        var nm = document.createElement("div"); nm.className = "pe-name"; nm.textContent = name; main.appendChild(nm);
+        var sub = document.createElement("div"); sub.className = "pe-sub";
+        if(b.autoDeny && b.autoDeny.length){ var bd=document.createElement("span"); bd.className="pe-badge deny"; bd.textContent="deny "+b.autoDeny.length; sub.appendChild(bd); }
+        if(b.autoAllow && b.autoAllow.length){ var ba=document.createElement("span"); ba.className="pe-badge allow"; ba.textContent="allow "+b.autoAllow.length; sub.appendChild(ba); }
+        if(b.gateTools){ var bg=document.createElement("span"); bg.className="pe-badge"; bg.textContent="gate: "+b.gateTools; sub.appendChild(bg); }
+        if(b.autopilot){ var bp=document.createElement("span"); bp.className="pe-badge"; bp.textContent="autopilot"; sub.appendChild(bp); }
+        if(b.disableGlobal){ var bx=document.createElement("span"); bx.className="pe-badge"; bx.textContent="disableGlobal"; sub.appendChild(bx); }
+        if(b.lockedPermMode){ var bl=document.createElement("span"); bl.className="pe-badge"; bl.textContent="lock:"+b.lockedPermMode; sub.appendChild(bl); }
+        if(b.toolLimits){ var lk=Object.keys(b.toolLimits); if(lk.length){ var bt=document.createElement("span"); bt.className="pe-badge"; bt.textContent="limits "+lk.length; sub.appendChild(bt); } }
+        var det=document.createElement("span"); det.textContent = " " + ((b.autoDeny||[]).concat(b.autoAllow||[]).slice(0,4).join(", "));
+        sub.appendChild(det);
+        main.appendChild(sub); row.appendChild(main);
+        var acts = document.createElement("div"); acts.className = "pe-acts";
+        acts.appendChild(mkRBtn("Edit", function(){ peBundleOpen(name); }, ""));
+        acts.appendChild(mkRBtn("Delete", function(){ peBundleDelete(name); }, "danger"));
+        row.appendChild(acts); bb.appendChild(row);
+      });
+      // attachments (ordered)
+      var ab = document.getElementById("pe-atts"); ab.innerHTML = "";
+      if(!PE_ATTS.length){ var e2=document.createElement("div"); e2.className="pe-empty"; e2.textContent="No attachments. Without one, a session uses the fleet policy unless you attach a bundle from its detail panel."; ab.appendChild(e2); }
+      PE_ATTS.forEach(function(at, i){
+        var row = document.createElement("div"); row.className = "pe-row";
+        var main = document.createElement("div"); main.className = "pe-main";
+        var nm = document.createElement("div"); nm.className = "pe-name"; nm.textContent = (i+1) + ". → " + (at.bundle||"(none)"); main.appendChild(nm);
+        var sub = document.createElement("div"); sub.className = "pe-sub";
+        var m = at.match || {}; var parts = [];
+        ["project","group","providerId","key"].forEach(function(k){ if(m[k]) parts.push(k+"="+m[k]); });
+        sub.textContent = parts.length ? parts.join("  ") : "matches ANY session";
+        main.appendChild(sub); row.appendChild(main);
+        var acts = document.createElement("div"); acts.className = "pe-acts";
+        acts.appendChild(mkRBtn("▲", function(){ peAttMove(i,-1); }, ""));
+        acts.appendChild(mkRBtn("▼", function(){ peAttMove(i, 1); }, ""));
+        acts.appendChild(mkRBtn("Edit", function(){ peAttOpen(i); }, ""));
+        acts.appendChild(mkRBtn("Delete", function(){ if(confirm("Delete attachment #"+(i+1)+"?")) send("policy-att-delete", String(i+1)); }, "danger"));
+        row.appendChild(acts); ab.appendChild(row);
+      });
+      document.getElementById("pe-info").textContent = names.length + " bundle" + (names.length===1?"":"s") + " · " + PE_ATTS.length + " attachment" + (PE_ATTS.length===1?"":"s");
+    }
+    // --- bundle form ---
+    function peBundleShow(){ document.getElementById("pe-bform").classList.add("show"); }
+    function peBundleHide(){ document.getElementById("pe-bform").classList.remove("show"); }
+    function peBundleReset(){ sv("bf-name",""); sv("bf-deny",""); sv("bf-allow",""); sv("bf-gate","");
+      sv("bf-lockmode",""); sv("bf-limits",""); document.getElementById("bf-autopilot").checked=false; document.getElementById("bf-disable").checked=false; }
+    function peBundleNew(){ peBundleEditing=null; peBundleReset(); peAttHide(); peBundleShow(); }
+    function peBundleCancel(){ peBundleHide(); }
+    function peBundleOpen(name){
+      peBundleEditing=name; peBundleReset(); peAttHide();
+      var b = PE_BUNDLES[name] || {};
+      sv("bf-name",name); sv("bf-deny",(b.autoDeny||[]).join("\n")); sv("bf-allow",(b.autoAllow||[]).join("\n"));
+      sv("bf-gate", b.gateTools||""); setSelect("bf-lockmode", b.lockedPermMode||"");
+      sv("bf-limits", b.toolLimits ? Object.keys(b.toolLimits).map(function(k){ return k+"="+b.toolLimits[k]; }).join(" ") : "");
+      document.getElementById("bf-autopilot").checked = !!b.autopilot;
+      document.getElementById("bf-disable").checked = !!b.disableGlobal;
+      peBundleShow();
+    }
+    function peStarter(name){
+      var s = PE_STARTERS[name]; if(!s){ alert("starter not available"); return; }
+      peBundleEditing=null; peBundleReset();
+      sv("bf-name", name); sv("bf-deny",(s.autoDeny||[]).join("\n")); sv("bf-allow",(s.autoAllow||[]).join("\n"));
+      peAttHide(); peBundleShow();
+    }
+    function parseLimits(str){
+      var m = {}; (str||"").trim().split(/\s+/).forEach(function(t){ if(!t) return;
+        var kv = t.split("="); if(kv.length===2 && kv[0].trim() && kv[1].trim() && !isNaN(Number(kv[1]))) m[kv[0].trim()] = Number(kv[1]); });
+      return m;
+    }
+    function splitLines(str){ return (str||"").split("\n").map(function(s){ return s.trim(); }).filter(Boolean); }
+    function peBundleSave(){
+      var name = gv("bf-name").trim(); if(!name){ alert("Bundle needs a name."); return; }
+      if(Object.keys(PE_BUNDLES).some(function(n){ return n===name && n!==peBundleEditing; })){
+        if(!confirm('A bundle named "'+name+'" already exists — overwrite it?')) return;
+      }
+      var rec = { name: name,
+        autoDeny: splitLines(gv("bf-deny")), autoAllow: splitLines(gv("bf-allow")),
+        gateTools: gv("bf-gate").trim(), lockedPermMode: gv("bf-lockmode"),
+        toolLimits: parseLimits(gv("bf-limits")),
+        autopilot: document.getElementById("bf-autopilot").checked,
+        disableGlobal: document.getElementById("bf-disable").checked };
+      if(peBundleEditing && peBundleEditing !== name) rec.oldName = peBundleEditing;
+      send("policy-bundle-save", "", JSON.stringify(rec));
+      peBundleEditing=null; peBundleHide();
+    }
+    function peBundleDelete(name){
+      var used = PE_ATTS.filter(function(a){ return a.bundle===name; }).length;
+      var msg = 'Delete bundle "'+name+'"?' + (used ? ("\n"+used+" attachment(s) reference it and will then point at a missing bundle.") : "");
+      if(confirm(msg)) send("policy-bundle-delete", name);
+    }
+    // --- attachment form ---
+    function peAttShow(){ populateAttBundleSelect(); document.getElementById("pe-aform").classList.add("show"); }
+    function peAttHide(){ document.getElementById("pe-aform").classList.remove("show"); }
+    function populateAttBundleSelect(){
+      var sel = document.getElementById("af2-bundle"); sel.innerHTML = "";
+      var names = bundleNames();
+      if(!names.length){ var o=document.createElement("option"); o.value=""; o.textContent="(no bundles — create one first)"; sel.appendChild(o); return; }
+      names.forEach(function(n){ var o=document.createElement("option"); o.value=n; o.textContent=n; sel.appendChild(o); });
+    }
+    function peAttReset(){ sv("af2-project",""); sv("af2-group",""); sv("af2-provider",""); sv("af2-key",""); }
+    function peAttNew(){ peAttEditing=null; peAttReset(); peBundleHide(); peAttShow(); }
+    function peAttCancel(){ peAttHide(); }
+    function peAttOpen(i){
+      peAttEditing=i; peAttReset(); peBundleHide();
+      var at = PE_ATTS[i] || {}; var m = at.match || {};
+      sv("af2-project", m.project||""); sv("af2-group", m.group||""); sv("af2-provider", m.providerId||""); sv("af2-key", m.key||"");
+      peAttShow(); setSelect("af2-bundle", at.bundle||"");
+    }
+    function peAttSave(){
+      var bundle = gv("af2-bundle").trim();
+      if(!bundle){ alert("Pick a bundle (create one first if the list is empty)."); return; }
+      var rec = { bundle: bundle, match: {
+        project: gv("af2-project").trim(), group: gv("af2-group").trim(),
+        providerId: gv("af2-provider").trim(), key: gv("af2-key").trim() } };
+      if(peAttEditing != null){ rec.index = peAttEditing + 1; send("policy-att-save", "", JSON.stringify(rec)); }
+      else send("policy-att-add", "", JSON.stringify(rec));
+      peAttEditing=null; peAttHide();
+    }
+    function peAttMove(i, dir){ send("policy-att-move", "", JSON.stringify({ index: i+1, dir: dir })); }
     function fmtDur(s){
       s = Math.max(0, Math.round(s||0));
       if(s < 60) return s+"s";
@@ -6557,6 +6851,7 @@ local HTML = [[
       else if(which === "routines") openRoutines();
       else if(which === "templates") openTplEditor();
       else if(which === "agents") openAgentEd();
+      else if(which === "policies") openPolicyEd();
       else if(which === "shift"){ if(LEDGER_ON) openShiftReport(); }
       else if(which === "notify") openNotifications();
     }
@@ -6628,6 +6923,15 @@ local HTML = [[
       if(document.getElementById("ae-form").classList.contains("show")){ agentEdFormHide(); }
       else if(document.getElementById("ae-mcp").classList.contains("show")){ mcpEdBack(); }
       else { closeAgentEd(); }
+    });
+    // Esc in the policy editor: close an open form first, then the overlay.
+    document.addEventListener("keydown", function(e){
+      if(e.key !== "Escape") return;
+      var ov = document.getElementById("policyed");
+      if(!ov || !ov.classList.contains("show")) return;
+      if(document.getElementById("pe-bform").classList.contains("show")){ peBundleHide(); }
+      else if(document.getElementById("pe-aform").classList.contains("show")){ peAttHide(); }
+      else { closePolicyEd(); }
     });
 
     // ---- Notification history (roadmap #6) ----------------------------------
