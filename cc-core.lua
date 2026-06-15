@@ -5863,12 +5863,27 @@ function M.parseGitStatus(out)
 end
 
 -- ---- L5: export session archive ------------------------------------------
--- Slug a string into a filesystem-safe fragment for the export folder name.
+-- Slug a string into a filesystem-safe fragment for the export folder name, in
+-- two passes (the parens truncate each gsub's (string,count) to the string):
+--   squeezeSep: map unsafe-char runs -> '-', collapse + trim hyphens. Keeps '.'
+--     (it's in the allowed set), so dot hygiene must run AFTER this.
+--   dotHygiene: no leading/trailing/repeated dots.
+local function squeezeSep(x) return (x:gsub("[^%w%._%-]+", "-"):gsub("%-+", "-"):gsub("^%-", ""):gsub("%-$", "")) end
+local function dotHygiene(x) return (x:gsub("%.+", "."):gsub("^%.", ""):gsub("%.$", "")) end
 local function exportSlug(s)
-  s = tostring(s or ""):gsub("[^%w%._%-]+", "-"):gsub("%-+", "-"):gsub("^%-", ""):gsub("%-$", "")
-  s = s:gsub("%.+", "."):gsub("^%.", ""):gsub("%.$", "")   -- no leading/trailing/repeated dots
-  if s == "" then s = "session" end
-  return s:sub(1, 60)
+  local out = dotHygiene(squeezeSep(tostring(s or "")))
+  if out == "" then out = "session" end
+  return out:sub(1, 60)
+end
+
+-- Resolve a collision-free name by appending -2, -3, ... while `exists(name)` is
+-- true. Pure (existence injected) so the export uniquify math is unit-testable
+-- without touching the filesystem.
+function M.uniquifyName(base, exists)
+  if type(exists) ~= "function" then return base end
+  local n, cand = 1, base
+  while exists(cand) do n = n + 1; cand = base .. "-" .. n end
+  return cand
 end
 
 -- sessionExportBasename(item, now) : a unique, filesystem-safe export folder name

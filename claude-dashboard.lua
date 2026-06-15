@@ -1182,17 +1182,13 @@ end
 -- read-into-memory cap and no redaction) + a meta.json (label/provider/model/
 -- lineage/activity, no prompt bodies). Explicit operator action; reveals in
 -- Finder best-effort. Returns { ok, dir, transcript } (transcript=false if absent).
-function FX.exportSession(item, basename, metaJson)
+function FX.exportSession(item, basename, meta)
   if type(item) ~= "table" or not basename or basename == "" then return { ok = false } end
   -- Uniquify: re-exports (incl. two within the same second, which share a basename)
-  -- get a -N suffix so a prior export is never silently overwritten.
-  local dir = EXPORT_DIR .. "/" .. basename
-  do
-    local n, candidate = 1, dir
-    while hs.fs.attributes(candidate) do n = n + 1; candidate = dir .. "-" .. n end
-    dir = candidate
-  end
-  local copied = false
+  -- get a -N suffix so a prior export is never silently overwritten. The resolved
+  -- `name` is what we ledger, so the log matches the folder actually written.
+  local name = core.uniquifyName(basename, function(c) return hs.fs.attributes(EXPORT_DIR .. "/" .. c) ~= nil end)
+  local dir = EXPORT_DIR .. "/" .. name
   pcall(function()
     hs.fs.mkdir(EXPORT_DIR)   -- returns false if it already exists -- expected, not an error
     hs.fs.mkdir(dir)
@@ -1201,14 +1197,21 @@ function FX.exportSession(item, basename, metaJson)
       local s = "'" .. tostring(tp):gsub("'", "'\\''") .. "'"
       local d = "'" .. (dir .. "/transcript.jsonl"):gsub("'", "'\\''") .. "'"
       hs.execute("cp -- " .. s .. " " .. d .. " 2>/dev/null")   -- cp: safe for large files
-      copied = hs.fs.attributes(dir .. "/transcript.jsonl") ~= nil
     end
-    FX.writeFile(dir .. "/meta.json", metaJson or "{}")
+    -- meta.transcript must reflect what was ACTUALLY copied, not just a non-empty
+    -- transcript_path -- otherwise a missing/unreadable source yields a meta.json
+    -- that claims a transcript.jsonl which was never written. We own the field
+    -- here (after the copy) and encode + write inside the function.
+    if type(meta) == "table" then
+      meta.transcript = (hs.fs.attributes(dir .. "/transcript.jsonl") ~= nil) and "transcript.jsonl" or nil
+    end
+    FX.writeFile(dir .. "/meta.json", core.json.encode(meta or {}))
   end)
-  -- Source of truth = did meta.json actually land? hs.fs.mkdir / io.open fail by
+  -- Source of truth = did the files actually land? hs.fs.mkdir / io.open fail by
   -- RETURN value, not by throwing, so a bare pcall-true would falsely report
   -- success (and ledger a phantom export) on a permission/space failure.
   local ok = hs.fs.attributes(dir .. "/meta.json") ~= nil
+  local copied = hs.fs.attributes(dir .. "/transcript.jsonl") ~= nil
   if ok then
     pcall(function() hs.alert.show("Claude Shepherd: exported session → " .. dir
       .. (copied and "" or "  (no transcript found)")) end)
@@ -1216,7 +1219,7 @@ function FX.exportSession(item, basename, metaJson)
   else
     pcall(function() hs.alert.show("Claude Shepherd: export FAILED — couldn't write to " .. EXPORT_DIR) end)
   end
-  return { ok = ok, dir = dir, transcript = copied }
+  return { ok = ok, dir = dir, name = name, transcript = copied }
 end
 
 -- Escalation channels (Phase 4c-A), both off unless enabled in cc-config.json.
@@ -2939,14 +2942,16 @@ local function handleBridgeMsg(msg)
     local now = os.time()
     local basename = core.sessionExportBasename(it, now)
     local res = FX.readLedger({})
+    -- Pass the meta TABLE (not pre-encoded): FX.exportSession sets meta.transcript
+    -- from the ACTUAL copy result, then encodes + writes it.
     local meta = core.sessionExportMeta(it, res.events, {
       exportedAt = os.date("!%Y-%m-%dT%H:%M:%SZ", now),
-      transcriptName = (it.transcript_path and it.transcript_path ~= "") and "transcript.jsonl" or nil,
       sinceTs = 0,
     })
-    local out = FX.exportSession(it, basename, core.json.encode(meta))
+    local out = FX.exportSession(it, basename, meta)
     if out.ok and ledgerEnabled() then
-      ledgerFor(it, { type = "session_export", dir = basename, transcript = out.transcript })
+      -- ledger the UNIQUIFIED folder name so the log matches what was written.
+      ledgerFor(it, { type = "session_export", dir = out.name, transcript = out.transcript })
     end
     return
   end

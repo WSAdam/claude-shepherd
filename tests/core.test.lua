@@ -4270,6 +4270,20 @@ do
   eq("export: counters errors", c.errors, 1)
   eq("export: counters escalations", c.escalations, 1)
   eq("export: counters empty", core.sessionExportCounters({}).total, 0)
+  -- unknown / missing event types bump ONLY total, never a real bucket (else-less dispatch)
+  local cg = core.sessionExportCounters({ { type = "prompt" }, { type = "frobnicate" }, { type = nil } })
+  eq("export: garbage type bumps only total", cg.total, 3)
+  eq("export: garbage type -> prompts unchanged", cg.prompts, 1)
+  eq("export: garbage type -> toolRequests 0", cg.toolRequests, 0)
+  eq("export: garbage type -> errors 0", cg.errors, 0)
+
+  -- uniquifyName: skip taken names with -N; injected existence predicate (pure)
+  eq("uniquify: no collision keeps base", core.uniquifyName("s", function(_) return false end), "s")
+  local taken = { ["s"] = true }
+  eq("uniquify: one collision -> -2", core.uniquifyName("s", function(c) return taken[c] end), "s-2")
+  local taken2 = { ["s"] = true, ["s-2"] = true }
+  eq("uniquify: two collisions -> -3", core.uniquifyName("s", function(c) return taken2[c] end), "s-3")
+  eq("uniquify: no predicate -> base", core.uniquifyName("s", nil), "s")
 
   -- meta DTO: shape + lineage/activity wiring + no prompt bodies
   local item = { label = "Repo", projectKey = "pk", session_id = "s", cwd = "/r",

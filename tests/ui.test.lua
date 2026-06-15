@@ -1165,8 +1165,16 @@ do
   check("l5exp-fix: success verified via meta.json existence",
         src:find('local ok = hs.fs.attributes(dir .. "/meta.json") ~= nil', 1, true) ~= nil)
   check("l5exp-fix: export failure surfaced", src:find("export FAILED", 1, true) ~= nil)
-  check("l5exp-fix: re-export dir uniquified",
-        src:find("while hs.fs.attributes(candidate) do", 1, true) ~= nil)
+  -- #3 review round 2: uniquify via pure core.uniquifyName; ledger the resolved
+  -- name (not the bare basename); meta.transcript reflects the ACTUAL copy.
+  check("l5exp-rev: uniquify via pure core.uniquifyName",
+        src:find("core.uniquifyName(basename, function(c)", 1, true) ~= nil)
+  check("l5exp-rev: ledgers the uniquified name (matches folder)",
+        src:find('dir = out.name', 1, true) ~= nil)
+  check("l5exp-rev: meta.transcript reflects actual copy",
+        src:find('meta.transcript = (hs.fs.attributes(dir .. "/transcript.jsonl") ~= nil)', 1, true) ~= nil)
+  check("l5exp-rev: exportSession takes the meta table (sets transcript itself)",
+        src:find("FX.exportSession(it, basename, meta)", 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
