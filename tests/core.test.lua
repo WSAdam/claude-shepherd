@@ -4379,19 +4379,26 @@ do
   -- promoteSummary nil-safe
   check("summary: promote nil key no-op", (function() local s={}; core.promoteSummary(s, nil, true); return next(s.fired)==nil end)())
 
-  -- officialLogDecision: log once per status run; recovery on first usable success
-  local sl, rc, np = core.officialLogDecision(nil, -1)
+  -- officialUsageStep(prev, status, bodyOk): log once per status run; recovery on the
+  -- first DECODABLE 200; a garbage 200 is a no-op so a later good 200 still recovers.
+  local sl, rc, np = core.officialUsageStep(nil, -1, false)
   check("usage: first failure logs", sl == true and rc == false and np == -1)
-  sl, rc, np = core.officialLogDecision(-1, -1)
+  sl, rc, np = core.officialUsageStep(-1, -1, false)
   check("usage: repeat failure no log", sl == false and np == -1)
-  sl, rc, np = core.officialLogDecision(-1, 401)
+  sl, rc, np = core.officialUsageStep(-1, 401, false)
   check("usage: status change logs", sl == true and np == 401)
-  sl, rc, np = core.officialLogDecision(-1, 200)
-  check("usage: recovery on first success", sl == false and rc == true and np == 200)
-  sl, rc, np = core.officialLogDecision(200, 200)
+  sl, rc, np = core.officialUsageStep(-1, 200, true)
+  check("usage: recovery on first usable success", sl == false and rc == true and np == 200)
+  sl, rc, np = core.officialUsageStep(200, 200, true)
   check("usage: steady success no log/recover", sl == false and rc == false and np == 200)
-  sl, rc, np = core.officialLogDecision(nil, 200)
+  sl, rc, np = core.officialUsageStep(nil, 200, true)
   check("usage: first-call success isn't a recovery", sl == false and rc == false and np == 200)
+  -- DECODABLE-body gating (the dashboard edge that's easy to regress):
+  sl, rc, np = core.officialUsageStep(-1, 200, false)
+  check("usage: garbage 200 is a no-op (prev unchanged, no recover)", sl == false and rc == false and np == -1)
+  -- ...and the full chain: garbage 200 keeps prev at the failure value, then a good 200 recovers
+  sl, rc, np = core.officialUsageStep(np, 200, true)
+  check("usage: good 200 after a garbage 200 still recovers", rc == true and np == 200)
 
   -- newestAutoApprove: newest automated allow ts; ignores human + denies + other sids
   local evs = {
@@ -4430,10 +4437,16 @@ do
   eq("pr: brace but malformed json -> nil", core.parsePrStatus("{not json"), nil)
   eq("pr: truncated object -> nil", core.parsePrStatus('{"number":'), nil)
   eq("pr: object without number -> nil", core.parsePrStatus('{"state":"OPEN"}'), nil)
+  -- present-but-non-numeric number: guard passes (not nil) but tonumber fails -> treat as no
+  -- PR (else number=nil silently nulls the badge). gh's --json number is always an int.
+  eq("pr: non-numeric string number -> nil", core.parsePrStatus('{"number":"x","state":"OPEN"}'), nil)
+  eq("pr: boolean number -> nil", core.parsePrStatus('{"number":true,"state":"OPEN"}'), nil)
+  -- a numeric STRING still parses (tonumber coerces) -- gh won't emit this, but it's the boundary
+  eq("pr: numeric-string number coerces", core.parsePrStatus('{"number":"7","state":"OPEN"}').number, 7)
   eq("pr: badge nil for non-table", core.prBadge(nil), nil)
   eq("pr: badge nil without number", core.prBadge({ state = "open" }), nil)
 
-  -- isOpenableUrl: the open-url scheme guard (http(s) only; reject smuggled schemes)
+  -- isOpenableUrl: the open-url scheme guard (http(s) + a host; reject smuggled schemes)
   check("pr: https openable", core.isOpenableUrl("https://github.com/x/y/pull/7") == true)
   check("pr: http openable", core.isOpenableUrl("http://x") == true)
   check("pr: file:// rejected", core.isOpenableUrl("file:///etc/passwd") == false)
@@ -4441,6 +4454,46 @@ do
   check("pr: data: rejected", core.isOpenableUrl("data:text/html,x") == false)
   check("pr: non-anchored https rejected", core.isOpenableUrl("x https://y") == false)
   check("pr: nil url rejected", core.isOpenableUrl(nil) == false)
+  -- boundary cases: empty string (type ok, match fails) and a hostless scheme are rejected
+  check("pr: empty url rejected", core.isOpenableUrl("") == false)
+  check("pr: bare https:// (no host) rejected", core.isOpenableUrl("https://") == false)
+  check("pr: triple-slash (empty host) rejected", core.isOpenableUrl("https:///path") == false)
+  -- the host char must be non-whitespace (so " " / tab can't stand in for a host)
+  check("pr: whitespace-only host rejected", core.isOpenableUrl("https:// github.com") == false)
+  check("pr: tab host rejected", core.isOpenableUrl("https://\tx") == false)
+end
+
+-- ---- L5: gh PR-status poll planner (hung-task aware) + reapUnbacked --------
+do
+  local function plan(cached, inflight, now) return core.prPollPlan(cached, inflight, now, { ttl = 180, retryTtl = 20 }) end
+  local p = plan(nil, nil, 1000)
+  check("prpoll: cold start", p.act == "start" and p.killStale == false)
+  p = plan({ ts = 1000, data = { number = 1 } }, nil, 1100)
+  check("prpoll: fresh data within TTL skips", p.act == "skip")
+  p = plan({ ts = 1000, data = { number = 1 } }, nil, 1181)
+  check("prpoll: stale data re-polls", p.act == "start" and p.killStale == false)
+  p = plan({ ts = 1000, data = nil }, { ts = 1000 }, 1005)
+  check("prpoll: in-flight poll within retry window skips", p.act == "skip")
+  -- the headline: nil data past the retry window with a still-in-flight task = HUNG gh ->
+  -- kill the orphaned task and re-poll (the bug both reviews flagged: this was unreachable)
+  p = plan({ ts = 1000, data = nil }, { ts = 1000 }, 1025)
+  check("prpoll: hung gh past retry window kills + re-polls", p.act == "start" and p.killStale == true)
+  -- a refresh poll that had data but hangs past the FULL TTL is hung too
+  p = plan({ ts = 1000, data = { number = 1 } }, { ts = 1000 }, 1181)
+  check("prpoll: hung refresh poll (had data) past TTL kills + re-polls", p.act == "start" and p.killStale == true)
+  p = plan(nil, { ts = 1000 }, 1005)
+  check("prpoll: in-flight, no cache, within window skips", p.act == "skip")
+  -- defaults (no opts): ttl 180 / retry 20
+  check("prpoll: default retryTtl re-polls nil data past 20s", core.prPollPlan({ ts = 0, data = nil }, nil, 25).act == "start")
+
+  -- reapUnbacked: prune cache entries not backed by a live key, in place
+  local cache = { ["/a"] = 1, ["/b"] = 2, ["/c"] = 3 }
+  local ret = core.reapUnbacked(cache, { ["/a"] = true, ["/c"] = true })
+  check("reap: drops unbacked key", cache["/b"] == nil)
+  check("reap: keeps backed keys", cache["/a"] == 1 and cache["/c"] == 3)
+  check("reap: returns the same table (in place)", ret == cache)
+  check("reap: nil liveKeys clears all", (function() local c = { a = 1, b = 2 }; core.reapUnbacked(c, nil); return next(c) == nil end)())
+  check("reap: non-table cache is a no-op", core.reapUnbacked(nil, {}) == nil)
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))

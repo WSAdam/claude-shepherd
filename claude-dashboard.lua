@@ -481,26 +481,25 @@ function FX.fetchOfficialUsage(force)
     ["Content-Type"] = "application/json",
   }
   hs.http.asyncGet(OAUTH_USAGE_URL, headers, function(status, body)
-    if status ~= 200 or not body then
-      -- Log only when the status CHANGES (the poll runs every 180s; a persistent
-      -- -1/401 -- e.g. an expired Claude oauth token -- otherwise spams the console).
-      -- The local-approx fallback keeps working regardless. core.officialLogDecision
-      -- owns the pure log-once-per-status-run decision.
-      local shouldLog, _, newPrev = core.officialLogDecision(lastOfficialStatus, status)
-      if shouldLog then
-        print("[cc-usage] official usage fetch: HTTP " .. tostring(status) .. " (using local approx; suppressing repeats)")
-      end
-      lastOfficialStatus = newPrev
-      return
+    -- Decode only on a 200 with a body; anything else -> bodyOk=false (no usable payload).
+    local j, bodyOk = nil, false
+    if status == 200 and body then
+      local ok, decoded = pcall(function() return hs.json.decode(body) end)
+      if ok and type(decoded) == "table" then j, bodyOk = decoded, true end
     end
-    local ok, j = pcall(function() return hs.json.decode(body) end)
-    -- Recovery is intentionally gated on a DECODABLE payload, not status 200 alone:
-    -- a 200 with garbage JSON returns here without flipping lastOfficialStatus, so a
-    -- later 200 with a usable body still logs the one "recovered" line.
-    if not ok or type(j) ~= "table" then return end
-    local _, recovered = core.officialLogDecision(lastOfficialStatus, 200)
+    -- core.officialUsageStep owns the pure log-once-per-status-run + recovery decision.
+    -- It logs the "HTTP <status>" line only on a CHANGE (so a persistent -1/401 -- e.g.
+    -- an expired Claude oauth token -- doesn't spam the 180s poll), and gates recovery on a
+    -- DECODABLE payload: a 200 with garbage/empty JSON is a no-op (lastOfficialStatus left
+    -- unchanged) so a later good 200 still logs the one "recovered" line. The local-approx
+    -- fallback keeps working regardless.
+    local shouldLog, recovered, newPrev = core.officialUsageStep(lastOfficialStatus, status, bodyOk)
+    if shouldLog then
+      print("[cc-usage] official usage fetch: HTTP " .. tostring(status) .. " (using local approx; suppressing repeats)")
+    end
     if recovered then print("[cc-usage] official usage recovered (HTTP 200)") end
-    lastOfficialStatus = 200
+    lastOfficialStatus = newPrev
+    if not bodyOk then return end   -- no usable payload to render
     lastOfficialUsage = j
     -- push immediately so the bars update without waiting for the next 60s pass
     if wv then pcall(function()
@@ -1218,24 +1217,41 @@ end
 -- hs.task so the ~1s loop never blocks on gh; TTL-throttled like the usage poll.
 -- data: a parsed { number, state, url, title, badge } | false (no PR / error).
 local prStatusByRoot = {}   -- root -> { ts, data }
-local prStatusTasks  = {}   -- root -> live hs.task, so it isn't GC'd before its callback fires
-local PR_TTL = 180
+local prStatusTasks  = {}   -- root -> { task=<live hs.task>, ts=<launch epoch> }: retained so the
+                            -- task isn't GC'd before its callback fires, and TIMESTAMPED so a HUNG
+                            -- gh (callback never fires) is detected past the deadline and re-polled.
+local PR_TTL = 180          -- full cache TTL once we have real data
+local PR_RETRY_TTL = 20     -- short retry / hung-task deadline while data is still nil/in-flight
 function FX.ghPrStatus(root)
   if not root or root == "" then return end
   local gh = ghBin()
   if not gh then return end
   local now = os.time()
   local cached = prStatusByRoot[root]
-  -- Full TTL once we have real data; a short window while it's still nil/in-flight, so a
-  -- HUNG gh (callback never fires, ts frozen at launch) retries in ~20s, not 180s.
-  local ttl = (cached and cached.data ~= nil) and PR_TTL or 20
-  if cached and (now - cached.ts) < ttl then return end
-  if prStatusTasks[root] then return end   -- a poll for this root is already in flight
+  local inflight = prStatusTasks[root]
+  -- core.prPollPlan owns the decision: full TTL once we have data, a short retry window
+  -- while it's still nil/in-flight, and -- crucially -- a stale (past-deadline) in-flight
+  -- task is treated as HUNG so the slot can be reclaimed and re-polled instead of latching
+  -- forever (the bug a bare `if prStatusTasks[root] then return` had).
+  local plan = core.prPollPlan(cached, inflight, now, { ttl = PR_TTL, retryTtl = PR_RETRY_TTL })
+  if plan.act ~= "start" then return end
+  if plan.killStale and inflight and inflight.task then
+    pcall(function() inflight.task:terminate() end)   -- hung gh -> reclaim the slot before re-polling
+  end
+  prStatusTasks[root] = nil
   -- mark attempted NOW (debounce) but keep any prior data until the call returns
   prStatusByRoot[root] = { ts = now, data = cached and cached.data or nil }
   local ok = pcall(function()
     local t = hs.task.new(gh, function(code, stdout)
-      prStatusTasks[root] = nil   -- callback ran -> release the retention
+      -- Paint ONLY if this task still owns the slot. A stale-kill (hung re-poll) or a
+      -- vanished-root reap replaces/clears the latch; a late callback from the superseded
+      -- (terminated) task must DROP its result -- a SIGTERM'd gh exits non-zero, so its
+      -- snapshot is `false`, and writing it would clobber the fresh poll's PR data (stamped
+      -- newer, so it sticks for the full TTL) or re-populate a reaped root. Mirrors the
+      -- searchGen 'superseded by a newer query' guard the fleet-search task uses.
+      local inf = prStatusTasks[root]
+      if not inf or inf.task ~= t then return end
+      prStatusTasks[root] = nil   -- our task completed -> release the latch
       local data = false   -- gh exits non-zero when the branch has no PR / no remote
       if code == 0 and stdout and stdout ~= "" then
         local pr = core.parsePrStatus(stdout)
@@ -1245,7 +1261,7 @@ function FX.ghPrStatus(root)
     end, { "pr", "view", "--json", "number,state,url,title,isDraft" })
     if t then
       t:setWorkingDirectory(root)
-      prStatusTasks[root] = t   -- retain (module-level) until the callback clears it -- GC-safe
+      prStatusTasks[root] = { task = t, ts = now }   -- retain + timestamp (GC-safe, hung-detectable)
       t:start()
     else error("gh task create failed") end
   end)
@@ -8837,18 +8853,21 @@ function refresh()
     newPrev[it.key] = { status = it.status, stale = step.isStale, escalated = nowEsc }
   end
   prev = newPrev
-  -- Reap per-task timers whose session vanished from the fleet (pruned / respawned /
-  -- removeStatus) without a done edge -- the loop above only visits live tiles, so a
-  -- gone key would leak forever (mirrors the usageState seen-set reap).
-  for k in pairs(taskStart) do if not newPrev[k] then taskStart[k] = nil end end
-  for k in pairs(loopAlerted) do if not newPrev[k] then loopAlerted[k] = nil end end
-  for k in pairs(autoApproveFired) do if not newPrev[k] then autoApproveFired[k] = nil end end  -- L5
-  for k in pairs(summaryState.fired) do if not newPrev[k] then summaryState.fired[k] = nil end end  -- L5
-  for k in pairs(summaryState.pending) do if not newPrev[k] then summaryState.pending[k] = nil end end  -- L5
-  for k in pairs(gitChangeFiles) do if not newPrev[k] then gitChangeFiles[k] = nil end end  -- L5 Changes cache
-  -- L5 PR status cache is keyed by repo ROOT (not tile key): reap roots no longer
-  -- backing any live local tile, so it can't grow unbounded across many repos.
-  if next(prStatusByRoot) then
+  -- Reap per-key caches whose session vanished from the fleet (pruned / respawned /
+  -- removeStatus) without a done edge -- the loop above only visits live tiles, so a gone
+  -- key would leak forever (mirrors the usageState seen-set reap). Single-sourced through
+  -- core.reapUnbacked so the unbounded-growth guard can't drift per table.
+  core.reapUnbacked(taskStart, newPrev)
+  core.reapUnbacked(loopAlerted, newPrev)
+  core.reapUnbacked(autoApproveFired, newPrev)       -- L5
+  core.reapUnbacked(summaryState.fired, newPrev)     -- L5
+  core.reapUnbacked(summaryState.pending, newPrev)   -- L5
+  core.reapUnbacked(gitChangeFiles, newPrev)         -- L5 Changes cache
+  -- L5 PR status cache is keyed by repo ROOT (not tile key): reap roots no longer backing
+  -- any live local tile, so it can't grow unbounded across many repos -- and drop + TERMINATE
+  -- any in-flight poll latch for a vanished root (else a hung task ref leaks for a root we'll
+  -- never re-examine).
+  if next(prStatusByRoot) or next(prStatusTasks) then
     local liveRoots = {}
     for _, it in ipairs(list) do
       if not it.remote and it.cwd and it.cwd ~= "" then
@@ -8856,7 +8875,13 @@ function refresh()
         if r then liveRoots[r] = true end
       end
     end
-    for r in pairs(prStatusByRoot) do if not liveRoots[r] then prStatusByRoot[r] = nil end end
+    core.reapUnbacked(prStatusByRoot, liveRoots)
+    for r, inf in pairs(prStatusTasks) do
+      if not liveRoots[r] then
+        pcall(function() if inf and inf.task then inf.task:terminate() end end)
+        prStatusTasks[r] = nil
+      end
+    end
   end
   -- ruleFired keys are "ruleName\1tileKey"; reap when the tile vanishes (L6 once-state)
   for k in pairs(ruleFired) do local tk = k:match("\1(.*)$"); if tk and not newPrev[tk] then ruleFired[k] = nil end end

@@ -253,6 +253,23 @@ remaining items. Full per-round detail is in CHANGELOG.md and git history.
 > **HIGH** orphaned self-summary guard on a failed paste; #3 phantom-export on write failure; #5 prStatusByRoot
 > leak / gh-hang retry). **Suite ~1848 core + 488 ui + 183 bash + a new dashboard smoke test, green.**
 >
+> **▶ PHASE A — REVIEW-FIX HARDENING (in progress 2026-06-15):** before #6/#7, a contained pass folding in the
+> two AI-leaderboard reviews of `fbcd609` (isOpenableUrl + hung-gh retry) and `879adc7` (openPr data-key +
+> officialLogDecision). Triaged every finding; incorporating all but one cosmetic note (the smoke comment trim —
+> the comments earn their keep). Both reviews independently caught the SAME real latent bug: the
+> `prStatusTasks[root]` in-flight latch is checked AFTER the TTL, and a HUNG gh never clears it (its callback never
+> fires) — so the 20s retry the prior commit added is DEAD CODE for the exact failure it targeted; the PR badge
+> freezes forever. Work items: **(A1)** pure `core.prPollPlan` — full TTL once data exists, short retry while
+> nil/in-flight, and a stale latch past a deadline is dead → kill the task + re-poll; timestamped latch
+> `{task, ts}`; named `PR_RETRY_TTL`; behavior-tested (replaces the brittle grep pin). **(A2)** `parsePrStatus`
+> rejects a present-but-non-numeric `number`. **(A3)** `isOpenableUrl` tightened to require a host (`^https?://[^/]`)
+> + empty/bare-scheme boundary tests. **(A4)** `core.officialUsageStep(prev,status,bodyOk)` replaces
+> officialLogDecision (single call site, 200-with-bad-body is a no-op, uses the returned newPrev) + the
+> garbage-200→good-200 recovery test. **(A5)** pure `core.reapUnbacked(cache, liveKeys)` routes the 4 in-line
+> refresh reaps (`prStatusByRoot`/`gitChangeFiles`/`summaryState.fired`/`.pending`) + behavior test. **(A6)** ui
+> pin on the tile `data-key` write site. THEN #6 host stats + fleet idle-since, THEN #7 session-history + bulk
+> history. Each phase via the loop + an adversarial-review Workflow (ultracode on).
+>
 > **⚠ DEPLOY DISCIPLINE (learned the hard way 2026-06-15):** a refresh-loop `pairs(nil)` (a reap over an
 > uninitialized state table) crashed the WHOLE dashboard at load — luac + the unit suite missed it because
 > `refresh()` was never exercised. FIX SHIPPED: **`tests/smoke.test.lua`** loads claude-dashboard.lua under a

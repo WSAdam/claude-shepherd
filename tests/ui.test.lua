@@ -899,7 +899,7 @@ do
   check("l4-pin: task_done ledger event", src:find('type = "task_done", durationS', 1, true) ~= nil)
   -- L4 review fix: taskStart has no self-expiry -> must abandon on stale + reap vanished keys
   check("l4-pin: abandon timer on stale", src:find("taskStart[it.key] = nil  -- abandon", 1, true) ~= nil)
-  check("l4-pin: reap vanished task timers", src:find("if not newPrev[k] then taskStart[k] = nil", 1, true) ~= nil)
+  check("l4-pin: reap vanished task timers", src:find("core.reapUnbacked(taskStart, newPrev)", 1, true) ~= nil)
   -- L5 Inc 1: error-reason taxonomy — tile carries the cause, badge + fresh-edge ledger
   check("l5-pin: tile carries error_reason", src:find("it.error_reason = err.reason", 1, true) ~= nil)
   check("l5-pin: cause badge on the error tile", src:find("it.error_reason.replace(/_/g", 1, true) ~= nil)
@@ -926,7 +926,7 @@ do
         src:find("core.isLooping(core.transcriptToolSigs(tail, loopRepeats + 2), loopRepeats)", 1, true) ~= nil)
   check("l5-pin: loop gated off by default", src:find('core.config(cfg, "escalation.loop.enabled", false)', 1, true) ~= nil)
   check("l5-pin: loop ledger once per episode", src:find("loopAlerted[it.key] = true", 1, true) ~= nil)
-  check("l5-pin: loop alerted reaped", src:find("if not newPrev[k] then loopAlerted[k] = nil", 1, true) ~= nil)
+  check("l5-pin: loop alerted reaped", src:find("core.reapUnbacked(loopAlerted, newPrev)", 1, true) ~= nil)
   check("l5-pin: loop tile badge", src:find("⟳ looping", 1, true) ~= nil)
   -- L5 Inc 5: OS-native banners (off by default) via core.notifyDecision + FX.notify (hs.notify)
   check("l5-pin: FX.notify wraps hs.notify", src:find("function FX.notify(title, text, opts)", 1, true) ~= nil
@@ -1149,9 +1149,10 @@ do
         src:find("gitChangeFiles[key] = allowed", 1, true) ~= nil)
   -- observed-from-console fix: the official-usage poll logs only on STATUS CHANGE
   -- (a persistent -1/401 was spamming every 180s); the pure decision lives in
-  -- core.officialLogDecision (behavior-tested), the callback just wires it.
-  check("usagelog-fix: official fetch uses pure core.officialLogDecision",
-        src:find("core.officialLogDecision(lastOfficialStatus, status)", 1, true) ~= nil
+  -- core.officialUsageStep (behavior-tested, incl. the decodable-body gating), the
+  -- callback just decodes the body and wires it in one call.
+  check("usagelog-fix: official fetch uses pure core.officialUsageStep(prev,status,bodyOk)",
+        src:find("core.officialUsageStep(lastOfficialStatus, status, bodyOk)", 1, true) ~= nil
         and src:find("official usage recovered (HTTP 200)", 1, true) ~= nil)
   -- #3 export session archive: bridge handler, transcript cp (verbatim, large-safe),
   -- meta via core, ledger event, two entry points (detail button + ctx-menu).
@@ -1208,21 +1209,28 @@ do
   -- review fix: onAutoApproved excludes remote/stale (parity with shouldSummarize)
   check("l5sum-fix: onAutoApproved excludes remote/stale + needs ledger + prev",
         src:find("if autoApprovedBannerOn and ledgerOn and pv ~= nil and not it.remote and not it.stale", 1, true) ~= nil)
-  check("l5sum-pin: new per-key state is reaped (no leak)",
-        src:find("for k in pairs(autoApproveFired) do if not newPrev[k]", 1, true) ~= nil
-        and src:find("for k in pairs(summaryState.fired) do if not newPrev[k]", 1, true) ~= nil
-        and src:find("for k in pairs(summaryState.pending) do if not newPrev[k]", 1, true) ~= nil
-        and src:find("for k in pairs(gitChangeFiles) do if not newPrev[k]", 1, true) ~= nil)
+  -- review fix: the per-key reaps are single-sourced through pure core.reapUnbacked
+  -- (behavior-tested), so the unbounded-growth guard can't drift per table.
+  check("l5sum-pin: new per-key state is reaped via core.reapUnbacked (no leak)",
+        src:find("core.reapUnbacked(autoApproveFired, newPrev)", 1, true) ~= nil
+        and src:find("core.reapUnbacked(summaryState.fired, newPrev)", 1, true) ~= nil
+        and src:find("core.reapUnbacked(summaryState.pending, newPrev)", 1, true) ~= nil
+        and src:find("core.reapUnbacked(gitChangeFiles, newPrev)", 1, true) ~= nil)
   -- #5 PR/MR status per tile (gh-backed, status-only)
   check("l5pr-pin: gh self-gates (resolveBin, absent -> false)",
         src:find("ghBinPath = (p and hs.fs.attributes(p)) and p or false", 1, true) ~= nil)
-  check("l5pr-pin: async gh poll (hs.task) parses via core, TTL-throttled",
+  check("l5pr-pin: async gh poll (hs.task) parses via core, planned by core.prPollPlan",
         src:find("function FX.ghPrStatus(root)", 1, true) ~= nil
         and src:find("core.parsePrStatus(stdout)", 1, true) ~= nil
-        and src:find("now - cached.ts) < ttl", 1, true) ~= nil)
-  -- review fix: a hung gh (callback never fires) retries in ~20s, not the full TTL
-  check("l5pr-fix: hung gh retries on a short window while data is nil",
-        src:find("data ~= nil) and PR_TTL or 20", 1, true) ~= nil)
+        and src:find("core.prPollPlan(cached, inflight, now", 1, true) ~= nil)
+  -- review fix (both leaderboard reviews): a HUNG gh (callback never fires) used to latch
+  -- prStatusTasks[root] forever, making the short-retry window dead code. core.prPollPlan
+  -- now flags a stale in-flight task and FX terminates it before re-polling. The retry
+  -- behavior itself is behavior-tested in core.test (prpoll: hung gh ... kills + re-polls).
+  check("l5pr-fix: hung gh task is terminated before re-poll (slot reclaimed)",
+        src:find("if plan.killStale and inflight and inflight.task then", 1, true) ~= nil
+        and src:find("inflight.task:terminate()", 1, true) ~= nil
+        and src:find("local PR_RETRY_TTL = 20", 1, true) ~= nil)
   check("l5pr-pin: runs gh in the repo root, status-only fields",
         src:find("t:setWorkingDirectory(root)", 1, true) ~= nil
         and src:find('"number,state,url,title,isDraft"', 1, true) ~= nil)
@@ -1234,6 +1242,11 @@ do
   check("l5pr-fix: badge click reads data-key (no key interpolation)",
         src:find('onclick="openPr(event)"', 1, true) ~= nil
         and src:find('tile.getAttribute("data-key")', 1, true) ~= nil)
+  -- review fix: openPr depends on the .tile carrying an esc'd data-key -- pin the WRITE
+  -- site (the tile render) so a markup refactor that drops/renames it fails here instead
+  -- of silently breaking every badge click.
+  check("l5pr-fix: tile render emits an esc'd data-key for badge clicks",
+        src:find("data-key=\"'+esc(it.key)", 1, true) ~= nil)
   check("l5pr-pin: open-url validates scheme via pure core.isOpenableUrl",
         src:find("core.isOpenableUrl(url)", 1, true) ~= nil
         and src:find("hs.urlevent.openURL(url)", 1, true) ~= nil)
@@ -1244,11 +1257,25 @@ do
   -- per-root cache is reaped so it can't grow unbounded across many repos.
   check("l5pr-fix: ghBin re-checks the ABSENT case (TTL)",
         src:find("ghBinPath == false and (os.time() - ghBinAt) > 300", 1, true) ~= nil)
-  check("l5pr-fix: gh task retained until callback (GC-safe)",
-        src:find("prStatusTasks[root] = t", 1, true) ~= nil
+  check("l5pr-fix: gh task retained + timestamped until callback (GC-safe, hung-detectable)",
+        src:find("prStatusTasks[root] = { task = t, ts = now }", 1, true) ~= nil
         and src:find("prStatusTasks[root] = nil", 1, true) ~= nil)
-  check("l5pr-fix: prStatusByRoot reaped for abandoned roots",
-        src:find("for r in pairs(prStatusByRoot) do if not liveRoots[r]", 1, true) ~= nil)
+  -- review fix: the callback PAINTS only if this task still owns the slot, so a terminated
+  -- (stale-killed/reaped) task's late SIGTERM callback can't clobber a fresh poll's data or
+  -- re-populate a reaped root. Pin the specific guard (generic '= nil' matches 3 sites).
+  check("l5pr-fix: callback drops its result if superseded (no clobber/re-populate)",
+        src:find("if not inf or inf.task ~= t then return end", 1, true) ~= nil)
+  -- the prune step is behavior-tested via core.reapUnbacked; keep a thin source pin on the
+  -- LIVE-SET construction (which stays in the dashboard) + the reapUnbacked wiring, and on
+  -- the vanished-root latch TERMINATE (else a hung task ref leaks for a root never re-examined).
+  check("l5pr-fix: prStatusByRoot reaped (live-set built from local tiles' git roots)",
+        src:find("core.reapUnbacked(prStatusByRoot, liveRoots)", 1, true) ~= nil
+        and src:find("local r = FX.gitRoot(it.cwd)", 1, true) ~= nil
+        and src:find("if r then liveRoots[r] = true end", 1, true) ~= nil)
+  check("l5pr-fix: vanished-root in-flight poll latch is dropped + terminated",
+        src:find("next(prStatusByRoot) or next(prStatusTasks)", 1, true) ~= nil
+        and src:find("for r, inf in pairs(prStatusTasks) do", 1, true) ~= nil
+        and src:find("inf.task:terminate()", 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

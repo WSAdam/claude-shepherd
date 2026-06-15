@@ -6017,13 +6017,21 @@ function M.promoteSummary(state, key, landed)
   state.pending[key] = nil
 end
 
--- Decide whether the official-usage poll should log this fetch result -- so the
--- 180s poll doesn't spam identical failure lines. Pure: given the previous HTTP
--- status and the new one, returns (shouldLog, recovered, newPrev). shouldLog=true
--- only when the status CHANGED to a failure; recovered=true on the first usable
--- success after a failure. The caller gates the 200 case on a DECODABLE body.
-function M.officialLogDecision(prev, status)
-  if status == 200 then return false, (prev ~= nil and prev ~= 200), 200 end
+-- Pure one-step decision for the official-usage poll's log + recovery lines, given the
+-- previous fetch status `prev`, this fetch's HTTP `status`, and whether the response body
+-- decoded into a usable payload (`bodyOk`). Returns (shouldLog, recovered, newPrev):
+--   shouldLog -- print the "HTTP <status>" line (only on a CHANGE, so a persistent
+--                -1/401 doesn't spam the 180s poll);
+--   recovered -- print the single "recovered" line (first usable 200 after a non-success);
+--   newPrev   -- the status to carry forward.
+-- A 200 with an UNUSABLE body (garbage/undecodable/empty) is a NO-OP -- prev is left
+-- unchanged so a later good 200 still counts as the recovery. Recovery is therefore gated
+-- on a decodable payload, not on status 200 alone.
+function M.officialUsageStep(prev, status, bodyOk)
+  if status == 200 then
+    if not bodyOk then return false, false, prev end   -- garbage/empty 200: don't flip prev
+    return false, (prev ~= nil and prev ~= 200), 200
+  end
   if status ~= prev then return true, false, status end
   return false, false, prev
 end
@@ -6037,11 +6045,14 @@ function M.parsePrStatus(jsonStr)
   if type(jsonStr) ~= "string" or not jsonStr:find("{", 1, true) then return nil end
   local ok, j = pcall(function() return M.json.decode(jsonStr) end)
   if not ok or type(j) ~= "table" or j.number == nil then return nil end
+  local number = tonumber(j.number)   -- gh's --json number is an int, but a present-but-
+  if number == nil then return nil end -- non-numeric value (decoded "x"/true) would null the
+                                       -- badge (prBadge guards number==nil) -> treat as no PR
   local state = tostring(j.state or ""):lower()
   if j.isDraft == true and state == "open" then state = "draft" end
   if state == "" then state = "unknown" end   -- never a trailing-space badge / empty pr- class
   return {
-    number = tonumber(j.number),   -- gh's --json number is always numeric; j.number existed (checked above)
+    number = number,
     state = state,
     url = (type(j.url) == "string") and j.url or nil,
     title = (type(j.title) == "string") and j.title or nil,
@@ -6054,10 +6065,51 @@ function M.prBadge(pr)
   return "PR #" .. tostring(pr.number) .. " " .. tostring(pr.state or "")
 end
 
--- True only for an http(s) url -- the open-url scheme guard, so a crafted PR url
--- can't smuggle a file:// / javascript: / data: scheme into hs.urlevent.openURL. Pure.
+-- True only for an http(s) url WITH a host -- the open-url scheme guard, so a crafted PR
+-- url can't smuggle a file:// / javascript: / data: scheme into hs.urlevent.openURL. The
+-- `[^%s/]` after the scheme requires at least one NON-whitespace host char, so a hostless
+-- "https://" / "https:///path" and a whitespace-only "host" ("https:// x") are rejected. Pure.
 function M.isOpenableUrl(url)
-  return type(url) == "string" and url:match("^https?://") ~= nil
+  return type(url) == "string" and url:match("^https?://[^%s/]") ~= nil
+end
+
+-- ---- L5: gh PR-status poll planner (hung-task aware) ----------------------
+-- Pure decision for whether to (re)launch a gh PR-status poll for a repo root, given:
+--   cached   = { ts=<last attempt/result epoch>, data=<pr|false|nil> } or nil
+--   inflight = { ts=<task launch epoch> } or nil   (the in-flight task latch)
+--   now      = epoch seconds
+--   opts.ttl      = full cache TTL once we have real data (default 180)
+--   opts.retryTtl = short retry / hung deadline while data is still nil/in-flight (default 20)
+--   opts.deadline = an in-flight task older than this is presumed HUNG (default = the
+--                   applicable cache window, so a stalled poll gets the same grace)
+-- Returns { act = "skip" | "start", killStale = <bool> }. killStale is true only when a
+-- stale (past-deadline) in-flight task must be TERMINATED before the fresh poll starts --
+-- a hung gh whose callback never fires would otherwise latch the slot forever, leaving the
+-- retry window as dead code and freezing the PR badge. Pure (injected `now`).
+function M.prPollPlan(cached, inflight, now, opts)
+  opts = opts or {}
+  local ttl = opts.ttl or 180
+  local retryTtl = opts.retryTtl or 20
+  local effTtl = (cached and cached.data ~= nil) and ttl or retryTtl
+  local deadline = opts.deadline or effTtl
+  if cached and (now - cached.ts) < effTtl then return { act = "skip", killStale = false } end
+  if inflight and (now - inflight.ts) < deadline then return { act = "skip", killStale = false } end
+  return { act = "start", killStale = inflight ~= nil }
+end
+
+-- Prune every entry of `cache` whose key is NOT present (truthy) in `liveKeys`, in place
+-- (so existing references stay valid), returning `cache`. The shared shape behind the
+-- per-key refresh caches (taskStart / loopAlerted / autoApproveFired / summaryState.* /
+-- gitChangeFiles / prStatusByRoot): a vanished tile or root must never leave an orphan, so
+-- the unbounded-growth guard is single-sourced here instead of re-written per table. A
+-- non-table `cache` is returned untouched (never crashes a reap over an uninitialized one).
+function M.reapUnbacked(cache, liveKeys)
+  if type(cache) ~= "table" then return cache end
+  liveKeys = liveKeys or {}
+  for k in pairs(cache) do
+    if not liveKeys[k] then cache[k] = nil end
+  end
+  return cache
 end
 
 -- Newest auto-approve decision ts for a session (an "automated allow" = an `allow`
