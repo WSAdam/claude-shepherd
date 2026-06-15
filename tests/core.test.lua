@@ -4325,8 +4325,10 @@ do
   local item = { key="k", status="done", session_id="s" }
   eq("summary: disabled -> no fire", core.stepSelfSummary(st, item, { enabled=false, prevStatus="working" }).fire, false)
   eq("summary: fresh done edge fires", core.stepSelfSummary(st, item, { enabled=true, prevStatus="working" }).fire, true)
+  -- a fire ARMS pending (not fired) -- the dashboard promotes pending->fired only on delivery
+  check("summary: fire arms pending, not fired", st.pending.k == true and st.fired.k == nil)
   -- the typed prompt drives working -> done again; that done must NOT re-fire (loop guard)
-  eq("summary: summary's own done skipped",
+  eq("summary: summary's own done skipped (pending set)",
      core.stepSelfSummary(st, item, { enabled=true, prevStatus="working" }).fire, false)
   -- guard cleared -> a later real completion fires again
   core.stepSelfSummary(st, { key="k", status="idle", session_id="s" }, { enabled=true, prevStatus="done" })
@@ -4338,6 +4340,24 @@ do
   -- ineligible (stale) never fires even on a fresh edge
   eq("summary: stale never fires",
      core.stepSelfSummary({}, { key="k", status="done", session_id="s", stale=true }, { enabled=true, prevStatus="working" }).fire, false)
+  -- missing key -> no fire (early guard; never index state with a nil key)
+  eq("summary: missing key -> no fire",
+     core.stepSelfSummary({}, { status="done", session_id="s" }, { enabled=true, prevStatus="working" }).fire, false)
+
+  -- DELIVERED path: dashboard promotes pending->fired; the summary's own done is skipped via `fired`
+  local sd = {}
+  core.stepSelfSummary(sd, item, { enabled=true, prevStatus="working" })   -- fire, pending=true
+  sd.fired.k = true; sd.pending.k = nil                                     -- simulate a landed paste
+  eq("summary: delivered -> own done skipped", core.stepSelfSummary(sd, item, { enabled=true, prevStatus="working" }).fire, false)
+  check("summary: guard fully cleared after own done", sd.fired.k == nil and sd.pending.k == nil)
+
+  -- FAILED-delivery path: dashboard clears pending -> the next real done RETRIES (no orphaned guard)
+  local sf = {}
+  core.stepSelfSummary(sf, item, { enabled=true, prevStatus="working" })   -- fire, pending=true
+  sf.pending.k = nil                                                        -- simulate a paste that didn't land
+  core.stepSelfSummary(sf, { key="k", status="idle", session_id="s" }, { enabled=true, prevStatus="done" })
+  eq("summary: failed paste retries on the next real done",
+     core.stepSelfSummary(sf, item, { enabled=true, prevStatus="idle" }).fire, true)
 
   -- newestAutoApprove: newest automated allow ts; ignores human + denies + other sids
   local evs = {

@@ -1175,6 +1175,36 @@ do
         src:find('meta.transcript = (hs.fs.attributes(dir .. "/transcript.jsonl") ~= nil)', 1, true) ~= nil)
   check("l5exp-rev: exportSession takes the meta table (sets transcript itself)",
         src:find("FX.exportSession(it, basename, meta)", 1, true) ~= nil)
+  -- #4 post-run self-summary + onAutoApproved banner
+  check("l5sum-pin: Settings toggles populated + persisted",
+        src:find('cv(cfg,"summary.enabled",false)', 1, true) ~= nil
+        and src:find('summary: { enabled: ck("s-summary-en") }', 1, true) ~= nil
+        and src:find('onAutoApproved: ck("s-banner-auto")', 1, true) ~= nil)
+  check("l5sum-pin: self-summary fires on fresh done edge via core",
+        src:find("core.stepSelfSummary(summaryState, it", 1, true) ~= nil
+        and src:find('prevStatus = pv and pv.status or nil', 1, true) ~= nil)
+  check("l5sum-pin: summary typed via serialized chokepoint",
+        src:find('dispatchSerialized(su, "summary"', 1, true) ~= nil
+        and src:find("FX.pasteIntoWindow(winTarget(su), { text = core.summaryPrompt(su) })", 1, true) ~= nil)
+  -- review fix: the loop guard is armed (pending->fired) only when the paste LANDS;
+  -- a no-window-match clears pending so the next real done retries (no orphan).
+  check("l5sum-fix: guard promoted pending->fired ONLY on delivery + ledger gated",
+        src:find("summaryState.fired[su.key] = true; summaryState.pending[su.key] = nil", 1, true) ~= nil
+        and src:find('ledgerFor(su, { type = "summary" })', 1, true) ~= nil)
+  check("l5sum-fix: failed paste clears pending (retry, no orphaned edge)",
+        src:find("else\n            -- no window match: don't orphan", 1, true) ~= nil
+        and src:find("summaryState.pending[su.key] = nil", 1, true) ~= nil)
+  check("l5sum-pin: onAutoApproved edge observes first sighting (no false alarm)",
+        src:find("core.newestAutoApprove(ledgerSnapshot(), it.session_id)", 1, true) ~= nil
+        and src:find("autoApproveFired[it.key] = newest", 1, true) ~= nil)
+  -- review fix: onAutoApproved excludes remote/stale (parity with shouldSummarize)
+  check("l5sum-fix: onAutoApproved excludes remote/stale + needs ledger + prev",
+        src:find("if autoApprovedBannerOn and ledgerOn and pv ~= nil and not it.remote and not it.stale", 1, true) ~= nil)
+  check("l5sum-pin: new per-key state is reaped (no leak)",
+        src:find("for k in pairs(autoApproveFired) do if not newPrev[k]", 1, true) ~= nil
+        and src:find("for k in pairs(summaryState.fired) do if not newPrev[k]", 1, true) ~= nil
+        and src:find("for k in pairs(summaryState.pending) do if not newPrev[k]", 1, true) ~= nil
+        and src:find("for k in pairs(gitChangeFiles) do if not newPrev[k]", 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

@@ -5964,30 +5964,36 @@ function M.shouldSummarize(item)
 end
 
 -- Advance self-summary bookkeeping for one tile per tick; returns whether to type
--- the summary prompt now. Mutates state.fired (key->true) in place. Fires once on a
--- fresh done edge for an eligible tile; the NEXT done edge after a fire is treated
--- as the summary's OWN completion and skipped (clearing the guard), so the typed
--- prompt -> working -> done cycle can't loop. Leaving done to a non-working status
--- also clears the guard so a later real completion summarizes again.
---   item : { key, status, session_id, remote, stale }
---   opts : { enabled, prevStatus }
+-- the summary prompt now. Two guards (both key->true): `pending` is armed HERE on a
+-- fire (the prompt has been queued but not yet typed); the dashboard promotes it to
+-- `fired` only when the paste actually LANDS (else it clears pending, so a failed
+-- paste retries on the next real done instead of orphaning the edge). The skip path
+-- checks BOTH, so the typed prompt -> working -> done cycle is treated as the
+-- summary's own completion and can't loop.
+--   item : { key, status, session_id, remote, stale };  opts : { enabled, prevStatus }
+--   prev      status         pending/fired   -> action
+--   not done  done           neither         -> FIRE (if enabled & eligible), arm pending
+--   not done  done           either set      -> skip (summary's own done), clear both
+--   *         not done/work   *               -> clear both (a later real done can summarize)
+--   done      done           *               -> no fresh edge, no-op
 function M.stepSelfSummary(state, item, opts)
-  state = state or {}; state.fired = state.fired or {}
+  state = state or {}; state.fired = state.fired or {}; state.pending = state.pending or {}
   opts = opts or {}; item = item or {}
   local key = item.key
   if not key then return { fire = false } end
+  local function clear() state.fired[key] = nil; state.pending[key] = nil end
   local prev = opts.prevStatus
   local freshDone = (prev ~= nil and prev ~= "done" and item.status == "done")
   if not freshDone then
-    if item.status ~= "done" and item.status ~= "working" then state.fired[key] = nil end
+    if item.status ~= "done" and item.status ~= "working" then clear() end
     return { fire = false }
   end
-  if state.fired[key] then              -- the summary's own done -> skip + reset the guard
-    state.fired[key] = nil
+  if state.fired[key] or state.pending[key] then  -- summary's own done (landed or in-flight) -> skip
+    clear()
     return { fire = false }
   end
   local fire = (opts.enabled == true) and M.shouldSummarize(item)
-  if fire then state.fired[key] = true end
+  if fire then state.pending[key] = true end      -- the dashboard promotes pending->fired ON DELIVERY
   return { fire = fire }
 end
 

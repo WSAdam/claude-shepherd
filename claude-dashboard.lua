@@ -159,6 +159,8 @@ local spawnPrompt        -- forward declaration (defined after FX)
 local prev = {}
 local respawnAttempts = {}  -- projectKey (NOT tile key) -> auto-respawn count; resets when healthy
 local autoContinueState = { since = {}, attempts = {} }  -- key->first-error ts; projectKey->continue count
+local summaryState  = { fired = {} } -- tile key -> true once a self-summary fired this done-episode (L5)
+local autoApproveFired = {} -- tile key -> last auto-approve ts a banner fired for (L5 onAutoApproved edge)
 local watchdog = {}      -- key -> { size, ts, alerted }: transcript progress + stall episode
 local draining    = {}   -- key -> true: close on the next fresh `done` (Feature F)
 local gitRootByCwd = {}  -- cwd -> resolved git root ("" = not a repo) cache (Feature B)
@@ -4305,7 +4307,11 @@ local HTML = [[
       <div class="s-help">A ⟳ badge + one ledger event per episode when the same command repeats <input type="number" id="s-loop-rep" class="s-num" min="2"> times in a row (default 3). Detection only — pair it with an Automation rule (loop trigger) to nudge.</div>
       <label class="s-row"><input type="checkbox" id="s-banner-approval"> macOS banner when a session needs you</label>
       <label class="s-row"><input type="checkbox" id="s-banner-done"> macOS banner when a session finishes a turn</label>
-      <div class="s-help">Native notification banners (click to jump to the session). Off by default; fire on the rising edge so you're not spammed.</div>
+      <label class="s-row"><input type="checkbox" id="s-banner-auto"> macOS banner when a session auto-approves a tool</label>
+      <div class="s-help">Native notification banners (click to jump to the session). Off by default; fire on the rising edge so you're not spammed. Auto-approve banners need the audit ledger on (the decision is read from it) and can lag up to ~30s.</div>
+
+      <label class="s-row"><input type="checkbox" id="s-summary-en"> Post-run self-summary — type a review prompt when a session finishes</label>
+      <div class="s-help">When a session reaches “ready”, Shepherd types a brief “summarize what you just did” prompt into it (for the log you’re watching — it forbids further edits). Off by default; fires once per turn (the summary’s own completion is skipped so it can’t loop). Local sessions only.</div>
 
       <div class="s-sec">Hooks <button class="s-x" style="border:1px solid #2c2f3a;border-radius:6px;padding:2px 7px;color:#cfd2db;margin-left:6px;" onclick="inspectHooks()">Inspect ~/.claude/settings.json</button></div>
       <div class="s-help">Read-only inventory of the Claude Code hooks wired in your settings (Shepherd's own are highlighted). Warns if the gate hook (cc-approve.sh) is missing its required timeout.</div>
@@ -5271,6 +5277,8 @@ local HTML = [[
       val("s-loop-rep",      cv(cfg,"escalation.loop.repeats",3));
       ck("s-banner-approval",cv(cfg,"notifications.banner.onApproval",false));
       ck("s-banner-done",    cv(cfg,"notifications.banner.onDone",false));
+      ck("s-banner-auto",    cv(cfg,"notifications.banner.onAutoApproved",false));
+      ck("s-summary-en",     cv(cfg,"summary.enabled",false));
       document.getElementById("s-hooks").innerHTML = "";  // lazy: load on Inspect
       var legacyPop = cv(cfg,"focus.popEditor",false);  // back-compat seeds both
       ck("s-pop-complete", cv(cfg,"focus.popOnComplete",legacyPop));
@@ -5432,10 +5440,14 @@ local HTML = [[
                       push: ck("s-e-push"), pushTopic: txt("s-e-topic"),
                       loop: { enabled: ck("s-loop-en"), repeats: num("s-loop-rep",3) } },
         autoTitle: { enabled: ck("s-autotitle") },
-        // onAutoApproved is intentionally NOT exposed: notifyDecision only consumes
-        // onApproval/onDone (auto-approve banners would need a gate-decision firing
-        // site — deferred). Don't surface a toggle that does nothing.
-        notifications: { banner: { onApproval: ck("s-banner-approval"), onDone: ck("s-banner-done") } },
+        // summary is fully form-managed (only `enabled`), written wholesale on Save.
+        // If a hand-edited summary.* subkey is added later, add it to SETTINGS_KEEP_SUBKEYS.
+        summary: { enabled: ck("s-summary-en") },   // L5 post-run self-summary
+        // banner is written wholesale on Save, so onAutoApproved is included here
+        // (form-managed) and won't be dropped. It's driven off a fresh auto-approve
+        // ledger edge (see the banner block in refresh), not a status transition.
+        notifications: { banner: { onApproval: ck("s-banner-approval"), onDone: ck("s-banner-done"),
+                                   onAutoApproved: ck("s-banner-auto") } },
         focus: { popOnComplete: ck("s-pop-complete"), popOnApproval: ck("s-pop-approval") },
         spawn: { editor: txt("s-spawn-editor"), live: ck("s-spawn-live"),
                  vscodeFlavor: txt("s-spawn-vsflavor"),
@@ -8257,8 +8269,11 @@ function refresh()
   local autoTitleOn = core.config(cfg, "autoTitle.enabled", false) == true  -- L5 derived tile titles
   local loopOn      = core.config(cfg, "escalation.loop.enabled", false) == true  -- L5 loop watchdog
   local loopRepeats = tonumber(core.config(cfg, "escalation.loop.repeats", 3)) or 3
+  local autoApprovedBannerOn = core.config(cfg, "notifications.banner.onAutoApproved", false) == true  -- L5
   local bannerOn    = (core.config(cfg, "notifications.banner.onApproval", false) == true)  -- L5 OS banners
                    or (core.config(cfg, "notifications.banner.onDone", false) == true)
+                   or autoApprovedBannerOn
+  local summaryOn   = core.config(cfg, "summary.enabled", false) == true  -- L5 post-run self-summary
   local rulesOn     = core.config(cfg, "rules.enabled", false) == true  -- L6 event-callback rules
   local ruleSet     = rulesOn and core.ruleList(FX.readRules()) or nil  -- loaded once per refresh
   local schedulesOn = core.config(cfg, "schedules.enabled", false) == true  -- L7 scheduled routines
@@ -8405,6 +8420,24 @@ function refresh()
     if bannerOn and pv ~= nil then
       local nb = core.notifyDecision(pv.status, it, cfg)
       if nb then FX.notify(nb.title, nb.text, { key = it.key }) end
+    end
+    -- L5 onAutoApproved banner: fire when the newest AUTOMATED allow decision for
+    -- this session advances (read from the cached ledger snapshot, so up to ~30s
+    -- lag; needs the ledger on). The FIRST sighting per tile is observed, not
+    -- alarmed -- consistent with "autonomous actions never fire from a missing prev".
+    if autoApprovedBannerOn and ledgerOn and pv ~= nil and not it.remote and not it.stale
+       and it.session_id and tostring(it.session_id) ~= "" then
+      local newest = core.newestAutoApprove(ledgerSnapshot(), it.session_id)
+      if newest then
+        local seen = autoApproveFired[it.key]
+        if seen == nil then
+          autoApproveFired[it.key] = newest                  -- first sighting: observe only
+        elseif newest > seen then
+          autoApproveFired[it.key] = newest
+          FX.notify("Auto-approved — " .. (it.label or it.name or "session"),
+                    "a tool ran without asking", { key = it.key })
+        end
+      end
     end
 
     -- L6 event-callback rules on a FRESH status edge (done/error/approval). pv==nil
@@ -8642,6 +8675,29 @@ function refresh()
       end)
     end
 
+    -- L5 post-run self-summary (opt-in): on a fresh done edge, type a brief
+    -- "summarize what you just did" prompt into the session's OWN window via the
+    -- serialized chokepoint. cc-core owns the edge + loop guard (the summary's own
+    -- done is skipped). Local sessions only (shouldSummarize excludes remote/stale);
+    -- delivery-gated -- ledger only when the paste actually lands.
+    if summaryOn then
+      local sstep = core.stepSelfSummary(summaryState, it,
+        { enabled = true, prevStatus = pv and pv.status or nil })
+      if sstep.fire then
+        local su = it
+        dispatchSerialized(su, "summary", function()
+          if FX.pasteIntoWindow(winTarget(su), { text = core.summaryPrompt(su) }) then
+            -- delivered: arm the loop guard so the summary's own done is skipped
+            summaryState.fired[su.key] = true; summaryState.pending[su.key] = nil
+            if ledgerOn then ledgerFor(su, { type = "summary" }) end
+          else
+            -- no window match: don't orphan the edge -- let the next real done retry
+            summaryState.pending[su.key] = nil
+          end
+        end)
+      end
+    end
+
     newPrev[it.key] = { status = it.status, stale = step.isStale, escalated = nowEsc }
   end
   prev = newPrev
@@ -8650,6 +8706,10 @@ function refresh()
   -- gone key would leak forever (mirrors the usageState seen-set reap).
   for k in pairs(taskStart) do if not newPrev[k] then taskStart[k] = nil end end
   for k in pairs(loopAlerted) do if not newPrev[k] then loopAlerted[k] = nil end end
+  for k in pairs(autoApproveFired) do if not newPrev[k] then autoApproveFired[k] = nil end end  -- L5
+  for k in pairs(summaryState.fired) do if not newPrev[k] then summaryState.fired[k] = nil end end  -- L5
+  for k in pairs(summaryState.pending) do if not newPrev[k] then summaryState.pending[k] = nil end end  -- L5
+  for k in pairs(gitChangeFiles) do if not newPrev[k] then gitChangeFiles[k] = nil end end  -- L5 Changes cache
   -- ruleFired keys are "ruleName\1tileKey"; reap when the tile vanishes (L6 once-state)
   for k in pairs(ruleFired) do local tk = k:match("\1(.*)$"); if tk and not newPrev[tk] then ruleFired[k] = nil end end
 
