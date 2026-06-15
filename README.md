@@ -65,6 +65,26 @@ Example: `{ "name":"flag-prod-errors", "trigger":{"kind":"error","match":{"group
 ledgered as `by:"rule"`. Automation events (`auto_respawn`, `auto_continue`) now also record an
 `outcome` (and a death that can't be auto-respawned is logged instead of failing silently).
 
+### Scheduled routines (L7, off by default)
+
+Routines (`~/.claude/cc-schedules.json`, enable with `schedules.enabled`) fire the normal
+spawn/nudge effects on a schedule — they are NOT a second executor, and a scheduled spawn still
+respects `spawn.live` (dry-run by default). A routine is `{name, kind:"cron"|"oneShot",
+cron|at, folder, editor?, provider?, model?, permMode?, prompt?, action:"spawn"|"digest",
+enabled:false}`:
+
+- **cron** uses a standard 5-field expression (`min hour dom month dow`, with `*`, ranges,
+  lists, and `*/step`); **oneShot** uses an `at` epoch and self-deletes after it fires.
+- **action "spawn"** (default) launches a session in `folder` with the given options + `prompt`.
+- **action "digest"** pushes a fleet shift report (`fleetStandup`) over a window via `ntfy`
+  (`pushTopic` or the escalation push topic) — a daily/weekly summary; needs no folder.
+- `schedules.maxConcurrent` backpressure defers spawns when the fleet is at capacity.
+
+Example: `{ "name":"nightly-tests", "kind":"cron", "cron":"0 2 * * *", "folder":"/repo",
+"prompt":"run the full test suite and summarize failures", "enabled":true }`. Each firing is
+ledgered as `schedule_fire`. (Routines are hand-edited for now; the routine-board UI is a
+deferred follow-up.)
+
 ## How it works
 
 ```

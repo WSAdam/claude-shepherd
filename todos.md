@@ -206,8 +206,19 @@ remaining items. Full per-round detail is in CHANGELOG.md and git history.
 
 ## Candidate features — cross-project mining backlog
 
-> **▶ RESUME HERE (build status, 2026-06-14):** Mining is DONE (5 sources → L1–L7). Build order
-> **Phase 0✅ → L1✅ → L2✅ → L3✅ → L4✅ → L5✅ → L6✅ → L7**. **L1–L6 are SHIPPED + committed + deployed**
+> **▶ RESUME HERE (build status, 2026-06-14): BACKLOG COMPLETE.** Mining DONE (5 sources → L1–L7); build order
+> **Phase 0✅ → L1✅ → L2✅ → L3✅ → L4✅ → L5✅ → L6✅ → L7✅ — ALL SHIPPED + committed + deployed + pushed.**
+> Suite ~1599 core + 355 ui + 183 bash, green. **There is no "next phase" — the mined backlog is done.** What's
+> left is the OPT-IN **deferred polish queue** below (none required; pick any if wanted): editor UIs for
+> L1/L2/L3/L6/L7 (all operator-data JSON is hand-edited today); L4 UX-gated routing (topology view / delegation /
+> idle+auto-spawn targets); L5 heavier sub-items (detail-panel tabs, export archive, host stats, PR status, hooks
+> inspector, session-history browser) + Settings toggles for the L5/L7 flags; L6 hung/loop/starved triggers +
+> feed/continue processors; the L7 routine-board UI; plus the still-pending hardware-verification runbook (Kitty
+> tokens + SSH bridge). **Deploy gotcha:** `make deploy`'s reload can hang on `hs -c` — if it stalls after the
+> copy, do `make test && make install` then push, then `pkill -f 'hs -c'; hs -c "hs.reload()"` separately. Honor
+> the load-bearing facts (the `claude` CLI is present; `gate.tools` is a HOLD-list not an allow-list; secrets are
+> env-var NAMES only) and the L1–L7 KEEP-IN-SYNC invariants in context.md. <!-- superseded build-loop note: -->
+> **L1–L6 are SHIPPED + committed + deployed**
 > (see CHANGELOG 2026-06-14 + their `✅` blocks below; each has a *deferred follow-up* — mostly editor UIs and,
 > for L4, the UX-gated topology/delegation/idle-target pieces; for L5, the heavier UI sub-items; for L6, the
 > hung/loop/starved triggers + feed/continue processors + a rules editor). **Next: L7** (scheduled spawns /
@@ -706,6 +717,14 @@ dispatcher, NOT a new event bus.*
   outcomes share one event family. No new SQL/pagination — reuse JSONL + the overlay's cap.
 
 ### L7 — Scheduled spawns / routines (NEW from cline + AutoGPT) — effort **M**
+> ✅ **SHIPPED 2026-06-14** (see CHANGELOG): cron/schedule engine (`cc-schedules.json`, `schedules.enabled` off)
+> fires the normal spawn/nudge effects on a schedule. cc-core (pure on injected now): `cronMatches`/`nextRunAt`/
+> `dueSchedules`/`humanizeCron`/`validateSchedule`/`scheduleLoad`/`scheduleMarkFired`/`scheduleBackpressure`.
+> Engine: a guarded refresh pass fires due routines via `FX.spawnSession` (respects `spawn.live` dry-run), stamps
+> `lastFiredAt`, self-deletes one-shots, honors `schedules.maxConcurrent`. `action:"digest"` pushes a
+> `fleetStandup` report via `FX.push`. Suite 1599 core + 355 ui + 183 bash. **Deferred:** the routine **board UI**
+> (Add/run-now/pause/resume/live-cron-preview — hand-edited JSON today), import/export, overlap control, launchd
+> backstop.
 *Source: cline (Desktop Routine board) + AutoGPT (cron / one-shot / recurring / visual cron builder / next-run /
 activity digest) — the one genuinely-new, multi-source candidate. Off by default, ledgered, edge-disciplined
 exactly like auto-respawn/auto-continue. NOT a second executor — it fires the normal spawn/nudge effects on a

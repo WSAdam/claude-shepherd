@@ -61,6 +61,7 @@ local GATE_FLAG     = os.getenv("CC_GATE_FLAG") or (os.getenv("HOME") .. "/.clau
 local LABELS_FILE   = os.getenv("CC_LABELS_FILE") or (os.getenv("HOME") .. "/.claude/cc-labels.json")
 local AUTOTITLE_FILE = os.getenv("CC_AUTOTITLE_FILE") or (os.getenv("HOME") .. "/.claude/cc-autotitles.json")
 local RULES_FILE    = os.getenv("CC_RULES_FILE") or (os.getenv("HOME") .. "/.claude/cc-rules.json")
+local SCHEDULES_FILE = os.getenv("CC_SCHEDULES_FILE") or (os.getenv("HOME") .. "/.claude/cc-schedules.json")
 local GROUPS_FILE   = os.getenv("CC_GROUPS_FILE") or (os.getenv("HOME") .. "/.claude/cc-groups.json")
 local RECENT_FILE   = os.getenv("CC_RECENT_FILE") or (os.getenv("HOME") .. "/.claude/cc-recent-dirs.json")
 local TEMPLATE_FILE = os.getenv("CC_TEMPLATE_FILE") or (os.getenv("HOME") .. "/.claude/cc-templates.json")
@@ -773,6 +774,17 @@ function FX.readRules()
   if not c or #c == 0 then return { rules = {} } end
   local ok, t = pcall(function() return core.json.decode(c) end)
   return (ok and type(t) == "table") and t or { rules = {} }
+end
+-- L7 scheduled routines (cc-schedules.json). Missing/garbled -> empty.
+function FX.readSchedules()
+  local c = FX.readFile(SCHEDULES_FILE)
+  if not c or #c == 0 then return { schedules = {} } end
+  local ok, t = pcall(function() return core.json.decode(c) end)
+  return (ok and type(t) == "table") and t or { schedules = {} }
+end
+function FX.writeSchedules(state)
+  hs.fs.mkdir(CLAUDE_DIR)
+  FX.writeFile(SCHEDULES_FILE, core.json.encode(state or { schedules = {} }))
 end
 
 -- Spawn presets (roadmap #4a). Missing/garbled -> empty.
@@ -6025,6 +6037,7 @@ function refresh()
                    or (core.config(cfg, "notifications.banner.onDone", false) == true)
   local rulesOn     = core.config(cfg, "rules.enabled", false) == true  -- L6 event-callback rules
   local ruleSet     = rulesOn and core.ruleList(FX.readRules()) or nil  -- loaded once per refresh
+  local schedulesOn = core.config(cfg, "schedules.enabled", false) == true  -- L7 scheduled routines
   local starveMin  = tonumber(core.config(cfg, "queue.routing.starveMinutes", 0)) or 0
   local routeGroups = {}  -- queueKey -> { items }: members per project, for the dispatcher
   local escEnabled = core.config(cfg, "escalation.enabled", false) == true
@@ -6413,6 +6426,47 @@ function refresh()
   for k in pairs(loopAlerted) do if not newPrev[k] then loopAlerted[k] = nil end end
   -- ruleFired keys are "ruleName\1tileKey"; reap when the tile vanishes (L6 once-state)
   for k in pairs(ruleFired) do local tk = k:match("\1(.*)$"); if tk and not newPrev[tk] then ruleFired[k] = nil end end
+
+  -- L7 scheduled routines (off unless schedules.enabled): fire each due routine
+  -- through the NORMAL spawn fx (which itself respects spawn.live's dry-run). cc-core
+  -- gates by minute + lastFiredAt so a routine fires at most once per matching minute;
+  -- one-shots self-delete after firing; backpressure defers when the fleet is at cap.
+  if schedulesOn then
+    local sstate = FX.readSchedules()
+    local due = core.dueSchedules(core.scheduleList(sstate), os.time())
+    if #due > 0 then
+      local cap = tonumber(core.config(cfg, "schedules.maxConcurrent", 0)) or 0
+      local liveCount = #list
+      for _, r in ipairs(due) do
+        if r.action == "digest" then
+          -- L7 periodic digest: push a fleet shift report over a window (the first
+          -- concrete consumer of the scheduling primitive). No spawn -> no backpressure.
+          print("[cc-sched] firing digest routine '" .. tostring(r.name) .. "'")
+          local hours = tonumber(r.digestHours) or 24
+          local report = core.fleetStandup(ledgerSnapshot(), { sinceTs = os.time() - hours * 3600 })
+          local topic = (r.pushTopic and r.pushTopic ~= "") and r.pushTopic or escTopic
+          if topic and topic ~= "" then
+            FX.push(topic, "Claude Shepherd: shift report (" .. hours .. "h)",
+              core.standupMarkdown(report, { windowLabel = hours .. "h" }):sub(1, 800))
+          end
+          if ledgerOn then ledgerFor({ name = r.name },
+            { type = "schedule_fire", routine = r.name, kind = r.kind, action = "digest" }) end
+          sstate = core.scheduleMarkFired(sstate, r.name, os.time())
+        elseif core.scheduleBackpressure(liveCount, cap) then
+          print("[cc-sched] backpressure (" .. liveCount .. "/" .. cap .. "): deferring '" .. tostring(r.name) .. "'")
+        else
+          print("[cc-sched] firing routine '" .. tostring(r.name) .. "' (" .. tostring(r.kind) .. ")")
+          FX.spawnSession(r.editor or core.config(cfg, "spawn.editor", "terminal"),
+            r.folder, r.prompt, r.permMode, r.provider or "")
+          if ledgerOn then ledgerFor({ name = r.name, projectKey = r.folder, cwd = r.folder },
+            { type = "schedule_fire", routine = r.name, kind = r.kind }) end
+          liveCount = liveCount + 1
+          sstate = core.scheduleMarkFired(sstate, r.name, os.time())
+        end
+      end
+      FX.writeSchedules(sstate)
+    end
+  end
 
   -- 4c-E project routing dispatcher: ONE feed per armed project per tick, to
   -- whichever member is free (done, not stale/error/draining/pending). Runs

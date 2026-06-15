@@ -667,6 +667,7 @@ local NARRATE = {
   auto_respawn  = { "♻️", "auto-respawned" },
   auto_respawn_blocked = { "🚫", "death not respawnable" },
   rule          = { "📐", "rule fired" },
+  schedule_fire = { "⏰", "scheduled routine fired" },
   drain_close   = { "⛔", "drained (finished turn, closed)" },
   queue_edit    = { "🧾", "edited the queue" },
   route_arm     = { "🔀", "project routing toggled" },
@@ -1635,12 +1636,18 @@ function M.classifyError(message)
   local s = tostring(message or ""):lower()
   if s == "" then return "unknown" end
   local rules = {
-    { "budget_exceeded", { "usage limit", "rate limit", "ratelimit", "quota", "insufficient",
-                           "billing", "credit balance", "exceeded your", "payment", "429", "402" } },
+    -- HTTP codes are bucketed by FAILURE FAMILY, not numeric range: 429 rate-limit +
+    -- 402 payment are quota/billing walls; 504/408 are timeouts; 500/502/503 are
+    -- transient infra; 529 (below) is Anthropic "Overloaded", NOT a generic 5xx.
+    -- "insufficient" is billing-scoped (not bare, which mis-hit "insufficient permissions").
+    { "budget_exceeded", { "usage limit", "rate limit", "ratelimit", "quota", "insufficient quota",
+                           "insufficient credit", "insufficient funds", "billing", "credit balance",
+                           "exceeded your", "payment", "429", "402" } },
     { "timeout",         { "timeout", "timed out", "etimedout", "deadline exceeded", "504", "408" } },
+    -- "connection aborted"/econnaborted are network faults -> must win before user_cancelled's "abort".
     { "runtime_error",   { "econnreset", "econnrefused", "enotfound", "epipe", "socket hang",
-                           "network", "connection error", "connection reset", "fetch failed",
-                           "503", "502", "500", "bad gateway" } },
+                           "network", "connection error", "connection reset", "connection aborted",
+                           "econnaborted", "fetch failed", "503", "502", "500", "bad gateway" } },
     { "model_error",     { "overloaded", "529", "context length", "context_length", "too many tokens",
                            "max tokens", "invalid_request", "invalid request", "prompt is too long" } },
     { "user_cancelled",  { "cancel", "aborted", "abort", "interrupted", "user rejected" } },
@@ -1762,7 +1769,9 @@ function M.isLooping(sigs, n)
   n = tonumber(n) or 3
   if n < 2 or type(sigs) ~= "table" or #sigs < n then return false end
   local last = sigs[#sigs]
-  if type(last) ~= "string" or last == "" or last == "\1" then return false end
+  -- ignore an arg-less signature ("Name\1" -- no primary arg, e.g. TodoWrite/ExitPlanMode):
+  -- normal repeated todo updates shouldn't read as a loop. Only a name+arg repeat counts.
+  if type(last) ~= "string" or last == "" or last:sub(-1) == "\1" then return false end
   for i = #sigs - n + 1, #sigs do
     if sigs[i] ~= last then return false end
   end
@@ -5001,7 +5010,8 @@ end
 -- generalizing the hard-coded auto-respawn/continue/escalation onto the existing
 -- level-triggered dispatcher (NOT a new event bus). A rule = { name, enabled,
 -- trigger = { kind, match? }, processor = { kind, text?, label? }, once? }. The
--- dashboard detects the edge each tick and runs the FIRST matching rule's processor;
+-- dashboard detects the edge each tick and runs ALL matching rules' processors in
+-- declared order (rulesForEdge returns every match, not first-wins);
 -- `once` self-mutates a fired-marker through fx (like routePending). Off unless the
 -- global rules.enabled is set AND the rule is enabled. Validate -> fail-safe load ->
 -- list mirrors the L1 agent registry.
@@ -5106,6 +5116,230 @@ function M.rulesForEdge(rules, edgeKind, item)
     if M.ruleFires(r, edgeKind, item) then out[#out + 1] = r end
   end
   return out
+end
+
+-- ===========================================================================
+-- L7 — Scheduled spawns / routines (cc-schedules.json)
+-- ===========================================================================
+-- A routine fires the NORMAL spawn/nudge effects on a schedule (NOT a second
+-- executor). A record = { name, kind = cron|oneShot, cron? (5-field), at? (epoch),
+-- folder, editor?, provider?, model?, permMode?, prompt?|templateRef?|agentRef?,
+-- enabled = false, tags?, lastFiredAt? }. All scheduling is PURE on an injected
+-- `now` (local-tz via os.date, which is plain-lua safe). Off by default (enabled).
+M.SCHEDULE_CAP = 50
+M.SCHEDULE_FIELDS = { name = true, kind = true, cron = true, at = true, folder = true,
+  editor = true, provider = true, model = true, permMode = true, prompt = true,
+  templateRef = true, agentRef = true, enabled = true, tags = true, lastFiredAt = true,
+  action = true, digestHours = true, pushTopic = true }
+M.SCHEDULE_ACTIONS = { spawn = true, digest = true }
+
+local function slist(state)
+  if type(state) == "table" and type(state.schedules) == "table" then return state.schedules end
+  return {}
+end
+
+-- Match one cron field spec against an integer value within [lo,hi]. Supports
+-- "*", "N", "A-B", "A,B,C", "*/S", "A-B/S" (and lists of those). Pure.
+local function cronFieldMatch(spec, value, lo, hi)
+  for part in (tostring(spec or "*") .. ","):gmatch("([^,]*),") do
+    part = part:gsub("%s", "")
+    if part ~= "" then
+      local base, step = part, 1
+      local b, s = part:match("^(.-)/(%d+)$")
+      if b then base = b; step = tonumber(s) or 1 end
+      local rlo, rhi
+      if base == "*" then rlo, rhi = lo, hi
+      else
+        local a, z = base:match("^(%d+)%-(%d+)$")
+        if a then rlo, rhi = tonumber(a), tonumber(z)
+        else local n = tonumber(base); if n then rlo, rhi = n, n end end
+      end
+      if rlo and rhi and step >= 1 and value >= rlo and value <= rhi
+         and ((value - rlo) % step == 0) then return true end
+    end
+  end
+  return false
+end
+
+-- Does a 5-field cron ("min hour dom month dow") match a time table t =
+-- {min, hour, day, month, wday}? wday is os.date's 1=Sun..7=Sat. Cron dow is
+-- 0-6 (0=Sun, also 7=Sun). Standard rule: when BOTH dom and dow are restricted,
+-- match if EITHER matches; otherwise AND. Pure.
+function M.cronMatches(cron, t)
+  local f = {}
+  for w in tostring(cron or ""):gmatch("%S+") do f[#f + 1] = w end
+  if #f ~= 5 then return false end
+  if type(t) ~= "table" then return false end
+  local minOk = cronFieldMatch(f[1], t.min, 0, 59)
+  local hourOk = cronFieldMatch(f[2], t.hour, 0, 23)
+  local monOk = cronFieldMatch(f[4], t.month, 1, 12)
+  local domStar = (f[3]:gsub("%s", "") == "*")
+  local dowStar = (f[5]:gsub("%s", "") == "*")
+  local cronDow = (tonumber(t.wday) or 1) - 1  -- 0=Sun..6=Sat
+  local domOk = cronFieldMatch(f[3], t.day, 1, 31)
+  local dowOk = cronFieldMatch(f[5], cronDow, 0, 6)
+             or (cronDow == 0 and cronFieldMatch(f[5], 7, 0, 7))  -- 7 = Sunday alias
+  local dayOk
+  if domStar and dowStar then dayOk = true
+  elseif domStar then dayOk = dowOk
+  elseif dowStar then dayOk = domOk
+  else dayOk = domOk or dowOk end
+  return minOk and hourOk and monOk and dayOk
+end
+
+-- The next epoch (>= the next whole minute after `now`) a cron matches, or nil if
+-- none within ~366 days. Display-only (the board's "next run") -- the firing path
+-- uses dueSchedules, which only checks the CURRENT minute. Pure (now injected).
+function M.nextRunAt(cron, now)
+  now = tonumber(now)
+  if not now then return nil end
+  local t = now - (now % 60) + 60  -- next whole minute
+  local horizon = t + 366 * 86400
+  while t <= horizon do
+    local dt = os.date("*t", t)
+    if M.cronMatches(cron, { min = dt.min, hour = dt.hour, day = dt.day, month = dt.month, wday = dt.wday }) then
+      return t
+    end
+    t = t + 60
+  end
+  return nil
+end
+
+-- Schedules due to fire at `now`: enabled, and either a cron matching the CURRENT
+-- minute (and not already fired this minute) or a oneShot whose `at` has passed and
+-- never fired. Pure (now injected); the caller stamps lastFiredAt + deletes one-shots.
+function M.dueSchedules(list, now)
+  now = tonumber(now)
+  local out = {}
+  if not now or type(list) ~= "table" then return out end
+  local dt = os.date("*t", now)
+  local curMin = now - (now % 60)
+  for _, s in ipairs(list) do
+    if type(s) == "table" and s.enabled then
+      local last = tonumber(s.lastFiredAt) or 0
+      local due = false
+      if s.kind == "oneShot" then
+        local at = tonumber(s.at)
+        due = at ~= nil and at <= now and last == 0
+      elseif s.kind == "cron" then
+        due = (last < curMin) and M.cronMatches(s.cron,
+          { min = dt.min, hour = dt.hour, day = dt.day, month = dt.month, wday = dt.wday })
+      end
+      if due then out[#out + 1] = s end
+    end
+  end
+  return out
+end
+
+-- Best-effort human rendering of a 5-field cron for the routine board. Pure.
+function M.humanizeCron(cron)
+  local f = {}
+  for w in tostring(cron or ""):gmatch("%S+") do f[#f + 1] = w end
+  if #f ~= 5 then return tostring(cron or "") end
+  local mi, h, dom, mon, dow = f[1], f[2], f[3], f[4], f[5]
+  local DOW = { ["0"] = "Sun", ["1"] = "Mon", ["2"] = "Tue", ["3"] = "Wed",
+                ["4"] = "Thu", ["5"] = "Fri", ["6"] = "Sat", ["7"] = "Sun" }
+  local function hhmm()
+    local hn, mn = tonumber(h), tonumber(mi)
+    return (hn and mn) and string.format("%02d:%02d", hn, mn) or nil
+  end
+  if mi == "*" and h == "*" and dom == "*" and mon == "*" and dow == "*" then return "every minute" end
+  local everyN = mi:match("^%*/(%d+)$")
+  if everyN and h == "*" and dom == "*" and mon == "*" and dow == "*" then return "every " .. everyN .. " min" end
+  if mi == "0" and h == "*" and dom == "*" and mon == "*" and dow == "*" then return "hourly" end
+  local t = hhmm()
+  if t and dom == "*" and mon == "*" and dow == "*" then return "daily at " .. t end
+  if t and dom == "*" and mon == "*" and DOW[dow] then return DOW[dow] .. " at " .. t end
+  if t and tonumber(dom) and mon == "*" and dow == "*" then return "monthly on day " .. dom .. " at " .. t end
+  return tostring(cron)
+end
+
+-- Pre-flight validator (L7): returns { ok, errors[] }. name + folder required; cron
+-- needs 5 fields; oneShot needs a numeric `at`; unknown fields flagged.
+function M.validateSchedule(rec)
+  if type(rec) ~= "table" then return { ok = false, errors = { "not an object" } } end
+  local errs = {}
+  if agTrim(rec.name) == "" then errs[#errs + 1] = "missing required field: name" end
+  local kind = tostring(rec.kind)
+  if kind ~= "cron" and kind ~= "oneShot" then errs[#errs + 1] = "kind must be cron or oneShot"
+  elseif kind == "cron" then
+    local n = 0; for _ in tostring(rec.cron or ""):gmatch("%S+") do n = n + 1 end
+    if n ~= 5 then errs[#errs + 1] = "cron must have 5 fields" end
+  elseif kind == "oneShot" and tonumber(rec.at) == nil then
+    errs[#errs + 1] = "oneShot needs an `at` epoch"
+  end
+  local action = rec.action == nil and "spawn" or tostring(rec.action)
+  if not M.SCHEDULE_ACTIONS[action] then errs[#errs + 1] = "action must be spawn or digest" end
+  -- a `spawn` routine needs a folder; a `digest` routine doesn't (it pushes a report)
+  if action ~= "digest" and agTrim(rec.folder) == "" then
+    errs[#errs + 1] = "missing required field: folder"
+  end
+  for k in pairs(rec) do
+    if not M.SCHEDULE_FIELDS[k] then errs[#errs + 1] = "unknown field: " .. tostring(k) end
+  end
+  return { ok = #errs == 0, errors = errs }
+end
+
+local function scheduleNorm(rec)
+  return {
+    name = agTrim(rec.name), kind = tostring(rec.kind),
+    cron = tplStr(rec.cron), at = tonumber(rec.at),
+    folder = tplStr(rec.folder), editor = tplStr(rec.editor), provider = tplStr(rec.provider),
+    model = tplStr(rec.model), permMode = tplStr(rec.permMode),
+    prompt = tplStr(rec.prompt), templateRef = tplStr(rec.templateRef), agentRef = tplStr(rec.agentRef),
+    enabled = rec.enabled == true,  -- default OFF (a routine must be explicitly enabled)
+    tags = type(rec.tags) == "table" and rec.tags or nil,
+    lastFiredAt = tonumber(rec.lastFiredAt),
+    action = (rec.action == "digest") and "digest" or "spawn",  -- default: spawn a session
+    digestHours = tonumber(rec.digestHours), pushTopic = tplStr(rec.pushTopic),
+  }
+end
+
+-- Fail-safe load (mirrors agentLoad/ruleLoad): keep valid (normalized), drop bad
+-- with reasons, dedupe by name. Returns {valid, errors}.
+function M.scheduleLoad(state)
+  local valid, errors, seen = {}, {}, {}
+  for _, rec in ipairs(slist(state)) do
+    local v = M.validateSchedule(rec)
+    local nm = (type(rec) == "table") and agTrim(rec.name) or ""
+    if not v.ok then
+      errors[#errors + 1] = { name = nm ~= "" and nm or "(unnamed)", reason = table.concat(v.errors, "; ") }
+    elseif seen[nm] then
+      errors[#errors + 1] = { name = nm, reason = "duplicate name (kept first)" }
+    else
+      seen[nm] = true; valid[#valid + 1] = scheduleNorm(rec)
+    end
+  end
+  return { valid = valid, errors = errors }
+end
+
+function M.scheduleList(state) return M.scheduleLoad(state).valid end
+
+-- After a routine fires: stamp its lastFiredAt (cron) or REMOVE it (a oneShot
+-- self-deletes after a delivered fire). Operates on the RAW state (preserves any
+-- extra fields) so the persisted file isn't lossily normalized. Returns newState. Pure.
+function M.scheduleMarkFired(state, name, now)
+  local out, target = {}, agTrim(name)
+  for _, s in ipairs(slist(state)) do
+    if type(s) == "table" and agTrim(s.name) == target then
+      if s.kind ~= "oneShot" then
+        local c = {}; for k, v in pairs(s) do c[k] = v end
+        c.lastFiredAt = tonumber(now)
+        out[#out + 1] = c
+      end  -- oneShot: dropped (self-delete)
+    else
+      out[#out + 1] = s
+    end
+  end
+  return { schedules = out }
+end
+
+-- Backpressure: skip firing new routines when the live fleet is at/over `cap`
+-- (cap <= 0 disables the limit). Pure.
+function M.scheduleBackpressure(liveTiles, cap)
+  cap = tonumber(cap) or 0
+  if cap <= 0 then return false end
+  return (tonumber(liveTiles) or 0) >= cap
 end
 
 return M

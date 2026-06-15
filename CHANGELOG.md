@@ -4,6 +4,38 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-14 (later still ×4) — L7 scheduled spawns / routines (backlog complete)
+
+Seventh and final backlog build. Routines fire the NORMAL spawn/nudge effects on a schedule
+(NOT a second executor). Off unless `schedules.enabled`; each routine is `enabled:false` until
+explicitly turned on; scheduled spawns still respect `spawn.live` (dry-run by default) — triple opt-in.
+
+- **Cron/schedule layer** (cc-core, pure on an injected `now`): `cronMatches` (5-field
+  min/hour/dom/month/dow with `*`, `N`, `A-B`, `A,B,C`, `*/S`, `A-B/S`; dom-OR-dow when both set;
+  0/7 = Sunday), `nextRunAt` (next match for the board's "next run"), `dueSchedules` (fires once per
+  matching minute via `lastFiredAt`; oneShots when `at` passes), `humanizeCron`, `validateSchedule` /
+  `scheduleLoad` (fail-safe, mirrors the L1 registry), `scheduleMarkFired` (stamp / self-delete a
+  oneShot), `scheduleBackpressure`.
+- **Firing engine** — `cc-schedules.json` routines `{name, kind: cron|oneShot, cron|at, folder,
+  editor?, provider?, model?, permMode?, prompt?, action: spawn|digest, enabled}`. A guarded pass in
+  the refresh loop fires due routines through `FX.spawnSession` (respecting `spawn.live`), stamps
+  `lastFiredAt`, self-deletes one-shots, and defers under `schedules.maxConcurrent` backpressure.
+  Missed crons don't flood (only the current minute matches); a missed oneShot fires on next startup.
+- **Periodic digest** (`action: "digest"`) — a cron routine that pushes a `fleetStandup` shift report
+  over a window via `FX.push` (the first concrete consumer of the scheduling primitive). Needs no folder.
+- Review-fix pass over today's commits (kept only what mattered): `classifyError` no longer mis-buckets
+  "insufficient permissions" / "connection aborted"; `isLooping` ignores arg-less signatures (no false
+  ⟳ on repeated TodoWrite); L6 header comment corrected (runs ALL matching rules, not the first); +
+  locking pins (classifyError precedence, newest-ExitPlanMode, plan-text esc()).
+- Tests: +42 cc-core checks, +11 dashboard pins. Suite green (1599 core + 355 ui + 183 bash).
+- **Deferred:** the routine **board UI** (Add-Routine modal, run-now, pause/resume, live cron preview —
+  routines are hand-edited in `cc-schedules.json` for now), import/export, overlap control, and a launchd
+  asleep-while-due backstop.
+
+**Backlog complete:** L1–L7 of the cross-project feature-mining backlog are all shipped. Remaining work
+is the deferred polish queue (editor UIs, L4 UX-gated routing pieces, heavier L5 sub-items, L6 extra
+triggers, the L7 board UI) — see todos.md.
+
 ## 2026-06-14 (later still ×3) — L6 event-callback rule engine
 
 Sixth backlog build. Declarative, OPT-IN rules that react to a session edge with a safe effect —

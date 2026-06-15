@@ -209,8 +209,39 @@ safe effect, layered on the existing level-triggered dispatcher (NOT a new bus).
   auto and the **manual** Continue paths ledger post-dispatch gated on that (review-caught the manual eager log).
 - **Deferred:** hung/loop/starved triggers, feed/continue processors, per-rule status lifecycle, a rules editor UI.
 
-Build order next: **L7** (scheduled spawns / routines — `cc-schedules.json` cron/one-shot firing the normal
-spawn/nudge effects) — the LAST mined-backlog phase.
+**L7 — scheduled spawns / routines** is shipped (the LAST mined-backlog phase): routines fire the NORMAL
+spawn/nudge effects on a schedule (NOT a second executor). Triple opt-in: `schedules.enabled` + per-routine
+`enabled` + `spawn.live` (scheduled spawns still dry-run by default).
+- **Pure layer:** `cronMatches` (5-field; `*`/`N`/`A-B`/`A,B,C`/`*/S`; dom-OR-dow when both set; 0/7=Sun),
+  `nextRunAt`, `dueSchedules` (once/minute via `lastFiredAt`; oneShot when `at` passes), `humanizeCron`,
+  `validateSchedule`/`scheduleLoad`/`scheduleMarkFired` (stamp cron / self-delete oneShot),
+  `scheduleBackpressure`. All deterministic on injected `now` (os.date is plain-lua safe).
+- **Engine:** `cc-schedules.json`; a guarded refresh pass fires due routines via `FX.spawnSession` (respects
+  `spawn.live`), stamps `lastFiredAt`, self-deletes one-shots, defers under `schedules.maxConcurrent`. Missed
+  crons don't flood (current-minute match only); a missed oneShot fires next startup. `action: "digest"` pushes
+  a `fleetStandup` report via `FX.push` (needs no folder) — the first consumer of the primitive.
+- **Deferred:** the routine **board UI** (Add/run-now/pause/resume/cron-preview — hand-edited JSON today),
+  import/export, overlap control, a launchd asleep-while-due backstop.
+
+## ▶ BACKLOG COMPLETE (2026-06-14)
+
+**All 7 mined-backlog phases (L1–L7) are shipped + committed + deployed + pushed.** Suite ~1599 core + 355 ui
++ 183 bash, green. Each phase was built via the loop: pure cc-core + unit tests → wire dashboard + ui pins →
+`make test` → adversarial-review Workflow → fix → `make deploy` → commit + push. Reviews caught real bugs every
+phase (L2 ×3; L3 r1 ×3 / r2 ×0; L4 the applyGroups-before-dispatcher ordering bug + the taskStart GC leak; L5 ×0;
+L6 the manual-continue audit-fidelity gap; plus a leaderboard-review pass: classifyError mis-bucketing +
+isLooping arg-less false-positive).
+
+**Deferred polish queue** (all noted in todos.md; none required for backlog completion): editor UIs for
+L1/L2/L3/L6/L7 (all operator-data JSON is hand-edited today); L4 UX-gated routing (topology view, delegation,
+idle/auto-spawn targets); L5 heavier sub-items (detail-panel tabs, export archive, host stats, PR status, hooks
+inspector, session-history browser) + Settings toggles for L5/L7 flags; L6 hung/loop/starved triggers +
+feed/continue processors. Also still pending: the hardware-verification runbook (Kitty tokens + SSH bridge).
+
+**Deploy note (learned the hard way):** `make deploy`'s `reload` step can HANG on the `hs -c` IPC. If a deploy
+stalls after "copied … -> ~/.hammerspoon", run `make test && make install` (copies, no reload), then push, then
+reload separately in the background: `pkill -f 'hs -c'; hs -c "hs.reload()"`. The copy = files live; the reload
+just re-reads them.
 
 ## State (2026-06-13)
 

@@ -912,6 +912,7 @@ do
   check("l5-pin: ccPlan + renderPlan", src:find("window.ccPlan = function(key, data)", 1, true) ~= nil
         and src:find("function renderPlan()", 1, true) ~= nil)
   check("l5-pin: d-plan element", src:find('id="d-plan"', 1, true) ~= nil)
+  check("l5-pin: plan text esc()'d (XSS sink)", src:find("esc(d.plan)", 1, true) ~= nil)
   -- L5 Inc 3: auto-title (off by default) — cached per projectKey, manual relabel wins
   check("l5-pin: autotitle persistence", src:find("function FX.loadAutoTitles()", 1, true) ~= nil
         and src:find("function FX.saveAutoTitles(map)", 1, true) ~= nil)
@@ -954,6 +955,19 @@ do
   check("l6-pin: manual continue gated ledger",
         src:find('type = "continue", outcome = (acted == "continue") and "ok" or "skipped"', 1, true) ~= nil)
   check("l6-pin: no eager continue ledger", src:find('ledgerFor(item, { type = "continue" })', 1, true) == nil)
+  -- L7: scheduled routines (cc-schedules.json, off by default) firing engine
+  check("l7-pin: SCHEDULES_FILE + FX.readSchedules", src:find("local SCHEDULES_FILE", 1, true) ~= nil
+        and src:find("function FX.readSchedules()", 1, true) ~= nil)
+  check("l7-pin: schedules gated off by default", src:find('core.config(cfg, "schedules.enabled", false)', 1, true) ~= nil)
+  check("l7-pin: fires via core.dueSchedules", src:find("core.dueSchedules(core.scheduleList(sstate), os.time())", 1, true) ~= nil)
+  check("l7-pin: fires through the normal spawn fx", src:find("FX.spawnSession(r.editor or core.config(cfg", 1, true) ~= nil)
+  check("l7-pin: backpressure honored", src:find("core.scheduleBackpressure(liveCount, cap)", 1, true) ~= nil)
+  check("l7-pin: mark fired (stamp/self-delete)", src:find("core.scheduleMarkFired(sstate, r.name, os.time())", 1, true) ~= nil)
+  check("l7-pin: schedule_fire ledger", src:find('type = "schedule_fire", routine = r.name', 1, true) ~= nil)
+  -- L7 Inc 4: periodic digest action pushes a fleetStandup over a window
+  check("l7-pin: digest action branch", src:find('if r.action == "digest" then', 1, true) ~= nil)
+  check("l7-pin: digest builds fleetStandup", src:find("core.fleetStandup(ledgerSnapshot()", 1, true) ~= nil)
+  check("l7-pin: digest pushes via FX.push", src:find('FX.push(topic, "Claude Shepherd: shift report', 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

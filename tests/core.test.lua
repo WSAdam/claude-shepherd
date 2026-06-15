@@ -342,6 +342,13 @@ do
   eq("classify: unknown fallback", core.classifyError("something weird happened"), "unknown")
   eq("classify: empty -> unknown", core.classifyError(""), "unknown")
   eq("classify: nil -> unknown", core.classifyError(nil), "unknown")
+  -- review fix: bare "insufficient"/"abort" mis-bucketed -> scope them
+  eq("classify: insufficient permissions not budget", core.classifyError("insufficient permissions"), "unknown")
+  eq("classify: insufficient quota -> budget", core.classifyError("insufficient quota remaining"), "budget_exceeded")
+  eq("classify: connection aborted -> runtime", core.classifyError("Error: connection aborted"), "runtime_error")
+  eq("classify: user abort -> user_cancelled", core.classifyError("user aborted the request"), "user_cancelled")
+  -- precedence lock: budget (rule #1) beats timeout when a message has both
+  eq("classify: budget beats timeout on multi-keyword", core.classifyError("request timed out: HTTP 429"), "budget_exceeded")
 end
 
 -- ---- planFromTranscript: agent plan/TODO from the tail ---------------------
@@ -367,6 +374,9 @@ do
   -- both plan + todos
   local both = core.planFromTranscript(planLine .. "\n" .. todoLine)
   check("plan: both plan and todos", both and both.plan ~= nil and both.todos ~= nil)
+  -- newest ExitPlanMode plan wins (mirror of newest-todos-wins; locks the backward scan)
+  local oldPlan = asst({ { type = "tool_use", name = "ExitPlanMode", input = { plan = "OLD" } } })
+  eq("plan: newest ExitPlanMode wins", core.planFromTranscript(oldPlan .. "\n" .. planLine).plan, "Step 1. do X\nStep 2. do Y")
   -- none / garbage
   eq("plan: no plan/todos -> nil", core.planFromTranscript(chat), nil)
   eq("plan: empty -> nil", core.planFromTranscript(""), nil)
@@ -410,6 +420,8 @@ do
   eq("loop: 2 when n=3 -> false", core.isLooping({ "x", "x" }, 3), false)
   eq("loop: n<2 disabled", core.isLooping({ "x", "x", "x" }, 1), false)
   eq("loop: empty sig not a loop", core.isLooping({ "\1", "\1", "\1" }, 3), false)
+  -- review fix: an arg-less sig (name only, e.g. repeated TodoWrite) is not a loop
+  eq("loop: arg-less repeats not a loop", core.isLooping({ "TodoWrite\1", "TodoWrite\1", "TodoWrite\1" }, 3), false)
 end
 
 -- ---- notifyDecision: OS banner on a rising edge -----------------------------
@@ -468,6 +480,78 @@ do
   eq("rules-for-edge: done -> 1", #core.rulesForEdge(rs, "done", item), 1)
   eq("rules-for-edge: error -> 1 (scoped)", #core.rulesForEdge(rs, "error", item), 1)
   eq("rules-for-edge: no match -> 0", #core.rulesForEdge(rs, "hung", item), 0)
+end
+
+-- ---- L7 cron / schedule layer ----------------------------------------------
+do
+  local t = { min = 30, hour = 9, day = 15, month = 6, wday = 2 }  -- Mon (os.date wday 2)
+  eq("cron: exact match", core.cronMatches("30 9 15 6 *", t), true)
+  eq("cron: wildcard all", core.cronMatches("* * * * *", t), true)
+  eq("cron: minute mismatch", core.cronMatches("31 9 15 6 *", t), false)
+  eq("cron: step */15 at :30", core.cronMatches("*/15 * * * *", t), true)
+  eq("cron: step */15 at :31", core.cronMatches("*/15 * * * *", { min = 31, hour = 9, day = 1, month = 1, wday = 1 }), false)
+  eq("cron: hour range 8-17", core.cronMatches("0 8-17 * * *", { min = 0, hour = 9, day = 1, month = 1, wday = 1 }), true)
+  eq("cron: day list 1,15", core.cronMatches("0 0 1,15 * *", { min = 0, hour = 0, day = 15, month = 3, wday = 1 }), true)
+  eq("cron: dow Monday", core.cronMatches("30 9 * * 1", t), true)
+  eq("cron: dow Sunday via 0", core.cronMatches("0 9 * * 0", { min = 0, hour = 9, day = 1, month = 1, wday = 1 }), true)
+  eq("cron: dow Sunday via 7", core.cronMatches("0 9 * * 7", { min = 0, hour = 9, day = 1, month = 1, wday = 1 }), true)
+  eq("cron: dom-OR-dow when both set", core.cronMatches("30 9 15 * 5", t), true)  -- dom 15 matches even though dow != Fri
+  eq("cron: bad field count", core.cronMatches("* * *", t), false)
+  -- nextRunAt: future + satisfies the cron
+  local n0 = 1700000000
+  local nr = core.nextRunAt("*/15 * * * *", n0)
+  check("nextrun: in the future", nr ~= nil and nr > n0)
+  check("nextrun: minute is a /15", nr ~= nil and (tonumber(os.date("%M", nr)) % 15) == 0)
+  eq("nextrun: nil now -> nil", core.nextRunAt("* * * * *", nil), nil)
+  -- dueSchedules: a cron matching now's minute fires once; lastFiredAt gates it
+  local now = 1700000000
+  local d = os.date("*t", now)
+  local matching = string.format("%d %d * * *", d.min, d.hour)
+  local sCron = { name = "c", kind = "cron", cron = matching, folder = "/p", enabled = true }
+  eq("due: cron matches this minute", #core.dueSchedules({ sCron }, now), 1)
+  eq("due: not refired same minute",
+     #core.dueSchedules({ { name = "c", kind = "cron", cron = matching, folder = "/p", enabled = true, lastFiredAt = now } }, now), 0)
+  eq("due: disabled never fires",
+     #core.dueSchedules({ { name = "c", kind = "cron", cron = matching, folder = "/p", enabled = false } }, now), 0)
+  eq("due: oneShot past fires",
+     #core.dueSchedules({ { name = "o", kind = "oneShot", at = now - 10, folder = "/p", enabled = true } }, now), 1)
+  eq("due: oneShot future skipped",
+     #core.dueSchedules({ { name = "o", kind = "oneShot", at = now + 1000, folder = "/p", enabled = true } }, now), 0)
+  eq("due: oneShot already fired",
+     #core.dueSchedules({ { name = "o", kind = "oneShot", at = now - 10, folder = "/p", enabled = true, lastFiredAt = now - 5 } }, now), 0)
+  -- humanizeCron
+  eq("human: daily", core.humanizeCron("30 9 * * *"), "daily at 09:30")
+  eq("human: every 15", core.humanizeCron("*/15 * * * *"), "every 15 min")
+  eq("human: weekly Mon", core.humanizeCron("0 9 * * 1"), "Mon at 09:00")
+  eq("human: hourly", core.humanizeCron("0 * * * *"), "hourly")
+  -- validate / load / backpressure
+  eq("vsched: valid", core.validateSchedule(sCron).ok, true)
+  eq("vsched: missing folder", core.validateSchedule({ name = "x", kind = "cron", cron = "* * * * *" }).ok, false)
+  eq("vsched: bad cron fields", core.validateSchedule({ name = "x", kind = "cron", cron = "* *", folder = "/p" }).ok, false)
+  eq("vsched: oneShot needs at", core.validateSchedule({ name = "x", kind = "oneShot", folder = "/p" }).ok, false)
+  eq("vsched: unknown field", core.validateSchedule({ name = "x", kind = "cron", cron = "* * * * *", folder = "/p", bogus = 1 }).ok, false)
+  local sl = core.scheduleLoad({ schedules = { sCron, { name = "" }, sCron } })
+  eq("sload: keeps valid", #sl.valid, 1)
+  eq("sload: drops bad + dup", #sl.errors, 2)
+  eq("sload: enabled normalized", core.scheduleList({ schedules = { sCron } })[1].enabled, true)
+  eq("backpressure: over cap", core.scheduleBackpressure(10, 8), true)
+  eq("backpressure: under cap", core.scheduleBackpressure(5, 8), false)
+  eq("backpressure: disabled (cap 0)", core.scheduleBackpressure(100, 0), false)
+  -- scheduleMarkFired: cron stamps lastFiredAt; oneShot self-deletes
+  local st = { schedules = { sCron, { name = "o", kind = "oneShot", at = 1, folder = "/p", enabled = true } } }
+  local after = core.scheduleMarkFired(st, "c", 555)
+  eq("markfired: cron count unchanged", #after.schedules, 2)
+  eq("markfired: cron stamped", core.scheduleList(after)[1].lastFiredAt, 555)
+  local after2 = core.scheduleMarkFired(st, "o", 555)
+  eq("markfired: oneShot removed", #after2.schedules, 1)
+  eq("markfired: unknown name no-op", #core.scheduleMarkFired(st, "nope", 555).schedules, 2)
+  -- L7 digest action: a digest routine needs no folder; action validated + normalized
+  eq("vsched: digest needs no folder",
+     core.validateSchedule({ name = "d", kind = "cron", cron = "0 9 * * *", action = "digest" }).ok, true)
+  eq("vsched: bad action", core.validateSchedule({ name = "d", kind = "cron", cron = "0 9 * * *", folder = "/p", action = "boom" }).ok, false)
+  eq("sched: action defaults to spawn", core.scheduleList({ schedules = { sCron } })[1].action, "spawn")
+  eq("sched: digest action normalized",
+     core.scheduleList({ schedules = { { name = "d", kind = "cron", cron = "0 9 * * *", action = "digest", digestHours = 8 } } })[1].action, "digest")
 end
 
 -- ---- runSequence: beat-list scheduling (injected scheduler) ----------------
