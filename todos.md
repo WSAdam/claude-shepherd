@@ -165,6 +165,38 @@ remaining items. Full per-round detail is in CHANGELOG.md and git history.
      One cached ledger pass/tick via pure `core.lineageByProject`; self-gates when the ledger's off.
   `core.filterLedger` gained a `projectKey` filter; `core.projectLineage` delegates to
   `lineageByProject`. Suite **1260 core + 210 ui + 177 bash**, all green. Shipped + deployed + pushed.
+- **L5 build-ready batch (June 2026) — 5 of 7 shipped.** The heavier L5 detail/observability sub-items, each
+  via the loop (pure cc-core + tests → wire + ui pins → adversarial-review Workflow → fix → deploy → commit →
+  push):
+  1. **Detail-panel tab strip** — the flat `#detail` stack reshaped into Activity/Timeline/Decisions/Usage/
+     Changes/Queue tabs from `core.DETAIL_TABS` (injected `__DETAIL_TABS__`); `{selectedTab, unpinned}` persists
+     to **webview localStorage keyed by projectKey** (the panel's first localStorage use); inline **Timeline** is
+     lazy (a `detail-timeline` action → `core.sessionTimeline`), stale-guarded; a ⋯ menu hides/shows tabs.
+  2. **git Changes tab** — per-session `git status --porcelain=v1 -z` (`core.parseGitStatus`, run from the repo
+     ROOT) + click-to-expand colorized per-file diff (`FX.gitDiff`, rename-aware via `-M`, capped). Bridge path
+     validated against the session's status set (`core.resolveDiffTarget`) so the `--no-index` fallback can't read
+     an arbitrary file. Local tiles only.
+  3. **Export session archive** — ⤓ Export button + tile right-click → copies the transcript `.jsonl` (verbatim,
+     via `cp`) + a `meta.json` (`core.sessionExportMeta`: label/provider/model/lineage/activity, no prompt bodies)
+     into `~/.claude/cc-exports/<unique>/`, reveals in Finder; ledgers a `session_export`.
+  4. **Post-run self-summary + onAutoApproved banner** — both opt-in, off by default. Self-summary types a brief
+     review prompt on a fresh `done` edge (delivery-gated; `core.stepSelfSummary`/`promoteSummary` own the loop
+     guard so the summary's own done can't re-fire). onAutoApproved fires a macOS banner when the newest automated
+     `allow` decision advances (`core.newestAutoApprove`, ≤30s lag, ledger-gated, remote/stale-excluded).
+  5. **PR/MR status badge** — off by default, gh-backed, **status-only**. `core.parsePrStatus`/`prBadge`; async
+     `FX.ghPrStatus` (`hs.task` in the repo root, 180s TTL, GC-retained, per-root cache reaped); a clickable
+     "PR #N open/merged" tile badge (click reads the tile's `data-key`; Lua opens the url only if `http(s)`).
+     Self-gates when `gh` is absent or the repo has no PR/remote.
+  **Hardening from per-item adversarial review + the AI-leaderboard feedback** (every round found real issues):
+  #2 `--no-index` arbitrary-file read + rename-rendered-as-all-additions; #3 phantom export on a write failure
+  (mkdir/io fail by return value, not by throwing) + lying `meta.transcript`; #4 **HIGH** orphaned self-summary
+  guard when the paste didn't land (split into pending/fired, promote on delivery); #5 unbounded `prStatusByRoot`
+  + `ghBin`-cached-false-forever + gh-task GC + the `esc()`-in-JS-onclick break. Pure helpers extracted for
+  behavior tests (`resolveDiffTarget`, `promoteSummary`, `officialLogDecision`). **A refresh-loop `pairs(nil)`
+  crash (a reap over an uninitialized state table) shipped + was caught live → `tests/smoke.test.lua`** now loads
+  the dashboard under a stubbed `hs` and runs the load-time `refresh()` in `make test`. Suite **~1848 core + 488
+  ui + 183 bash + smoke**, green. **LEFT: #6 host stats + fleet idle-since, #7 session-history browser + bulk
+  history management.**
 
 ## TODO
 
@@ -206,25 +238,32 @@ remaining items. Full per-round detail is in CHANGELOG.md and git history.
 
 ## Candidate features — cross-project mining backlog
 
-> **▶ RESUME HERE (build status, 2026-06-15): BACKLOG COMPLETE + EDITOR-UI POLISH DONE.** Mining DONE (5 sources →
-> L1–L7); **Phase 0✅ → L1✅ → L2✅ → L3✅ → L4✅ → L5✅ → L6✅ → L7✅ — ALL SHIPPED.** Then the **deferred editor-UI
-> queue** (this session, 6 commits 5801199→6f5d3ac): **L7 routine board✅ · L3 templates editor✅ · L1 agents
-> registry editor✅ · L2 policy bundle/attachment editor✅ · L6 rules editor + hung/loop/starved triggers +
-> feed/continue processors✅ · L5 Settings toggles + hooks inspector✅** — every shipped registry now has an
-> in-panel editor (☰ drawer: ⏰ Routines · 📝 Templates · ✦ Agents · 🛡 Policy bundles · ⚙️ Automation rules; plus
-> ⚙ Settings observability toggles + Hooks inspector). Each built via the loop (pure cc-core + tests → wire +
-> pins → adversarial-review Workflow → fix → deploy → commit → push); reviews caught real bugs (L7 edit/rename
-> data-loss; L1 MCP-form strand; L6 **high-sev** feed-queue-key silent data loss; L5 notifications.days Save-drop).
-> Suite ~1707 core + 430 ui + 183 bash, green. **What's LEFT (all opt-in, none required):** the **heavier L5
-> sub-items** (detail-panel tab strip, export session archive, host stats + idle-since, PR/MR status, post-run
-> self-summary, session-history browser + bulk history mgmt, `banner.onAutoApproved`); **L4 UX-gated routing**
-> (topology view / delegation / idle+auto-spawn targets / dependency chains / priority+concurrency); the small
-> per-editor deferrals (L1 modelByMode/requiredEnv editor + agent-folders tree; L2 gateTools auto-apply +
-> toolLimits shell enforcement; L3 vars-schema editor; L6 per-rule status lifecycle); plus the still-pending
-> **hardware-verification runbook** (Kitty tokens + SSH bridge). **Deploy gotcha:** `make deploy`'s reload can hang
-> on `hs -c` — if it stalls after the copy, do `make test && make install` then push, then `pkill -f 'hs -c'; hs
-> -c "hs.reload()"` separately. Honor the load-bearing facts (the `claude` CLI is present; `gate.tools` is a
-> HOLD-list not an allow-list; secrets are env-var NAMES only) and the L1–L7 KEEP-IN-SYNC invariants in context.md.
+> **▶ RESUME HERE (build status, 2026-06-15): BACKLOG + EDITOR-UI POLISH DONE; L5 BUILD-READY BATCH 5/7 SHIPPED.**
+> Mining DONE (5 sources → L1–L7); **Phase 0✅ → L1✅…L7✅ — ALL SHIPPED**, then the deferred editor-UI queue (☰
+> drawer: ⏰ Routines · 📝 Templates · ✦ Agents · 🛡 Policy bundles · ⚙️ Automation rules + ⚙ observability toggles).
+> **NOW: the "L5 build-ready batch" (the heavier L5 detail/observability sub-items).** Sequenced #1→#7; **#1–#5
+> SHIPPED + deployed + pushed:** **#1 detail-panel TAB STRIP** (Activity/Timeline/Decisions/Usage/Changes/Queue;
+> projectKey-keyed localStorage; lazy inline Timeline) · **#2 git CHANGES tab** (per-session `git status -z` +
+> per-file colorized diff, rename-aware, path-validated) · **#3 EXPORT session archive** (⤓ button + ctx-menu →
+> transcript + meta.json under `cc-exports`) · **#4 post-run SELF-SUMMARY + onAutoApproved banner** (both opt-in,
+> off by default) · **#5 PR/MR STATUS badge** (gh-backed, status-only, off by default). **LEFT in this batch: #6
+> host stats + fleet idle-since, #7 session-history browser + bulk history mgmt.** Each built via the loop (pure
+> cc-core + tests → wire + pins → adversarial-review Workflow → fix → deploy → commit → push); the reviews +
+> leaderboard feedback caught real bugs every round (e.g. #2 `--no-index` arbitrary-file read + rename-as-add; #4
+> **HIGH** orphaned self-summary guard on a failed paste; #3 phantom-export on write failure; #5 prStatusByRoot
+> leak / gh-hang retry). **Suite ~1848 core + 488 ui + 183 bash + a new dashboard smoke test, green.**
+>
+> **⚠ DEPLOY DISCIPLINE (learned the hard way 2026-06-15):** a refresh-loop `pairs(nil)` (a reap over an
+> uninitialized state table) crashed the WHOLE dashboard at load — luac + the unit suite missed it because
+> `refresh()` was never exercised. FIX SHIPPED: **`tests/smoke.test.lua`** loads claude-dashboard.lua under a
+> stubbed `hs` and runs the load-time `refresh()`; it's in `make test`. **Always `make test` (smoke included)
+> before `make install`.** Deploy gotcha unchanged: `make deploy`'s `hs -c` reload can hang — do `make install`
+> then reload separately with a timeout backstop. Honor the load-bearing facts (the `claude` CLI is present;
+> `gate.tools` is a HOLD-list not an allow-list; secrets are env-var NAMES only), and: **every new module-level
+> per-key state table MUST be initialized `{}` up front** (the reaps iterate them even when their feature is off).
+> Still also LEFT: **L4 UX-gated routing**; small per-editor deferrals (L1 modelByMode/requiredEnv editor; L2
+> gateTools auto-apply; L3 vars-schema editor; L6 per-rule status lifecycle); the **hardware-verification runbook**
+> (Kitty tokens + SSH bridge).
 > <!-- superseded build-loop note: -->
 > **L1–L6 are SHIPPED + committed + deployed**
 > (see CHANGELOG 2026-06-14 + their `✅` blocks below; each has a *deferred follow-up* — mostly editor UIs and,

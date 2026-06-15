@@ -1219,7 +1219,10 @@ do
   check("l5pr-pin: async gh poll (hs.task) parses via core, TTL-throttled",
         src:find("function FX.ghPrStatus(root)", 1, true) ~= nil
         and src:find("core.parsePrStatus(stdout)", 1, true) ~= nil
-        and src:find("now - cached.ts) < PR_TTL", 1, true) ~= nil)
+        and src:find("now - cached.ts) < ttl", 1, true) ~= nil)
+  -- review fix: a hung gh (callback never fires) retries in ~20s, not the full TTL
+  check("l5pr-fix: hung gh retries on a short window while data is nil",
+        src:find("data ~= nil) and PR_TTL or 20", 1, true) ~= nil)
   check("l5pr-pin: runs gh in the repo root, status-only fields",
         src:find("t:setWorkingDirectory(root)", 1, true) ~= nil
         and src:find('"number,state,url,title,isDraft"', 1, true) ~= nil)
@@ -1231,8 +1234,8 @@ do
   check("l5pr-fix: badge click reads data-key (no key interpolation)",
         src:find('onclick="openPr(event)"', 1, true) ~= nil
         and src:find('tile.getAttribute("data-key")', 1, true) ~= nil)
-  check("l5pr-pin: open-url validates http(s) scheme",
-        src:find('url:match("^https?://")', 1, true) ~= nil
+  check("l5pr-pin: open-url validates scheme via pure core.isOpenableUrl",
+        src:find("core.isOpenableUrl(url)", 1, true) ~= nil
         and src:find("hs.urlevent.openURL(url)", 1, true) ~= nil)
   check("l5pr-pin: Settings toggle populated + persisted",
         src:find('cv(cfg,"prStatus.enabled",false)', 1, true) ~= nil

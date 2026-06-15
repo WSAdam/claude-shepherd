@@ -114,10 +114,42 @@ network, no multi-user, no secrets — it reads session status off the local fil
 - **`make test`** runs the whole suite ([tests/run.sh](tests/run.sh)): bash + standalone lua,
   all side-effect-free (temp dirs + recorder doubles, never touches real `~/.claude`). Keep it
   green before every deploy.
+- **Dashboard smoke test** ([tests/smoke.test.lua](tests/smoke.test.lua), in `make test`): loads
+  claude-dashboard.lua under a **stubbed `hs`** and runs the load-time `refresh()` once. This is
+  the only thing that exercises the Hammerspoon glue — `luac` + the pure unit tests can't catch a
+  runtime error there. It exists because a refresh-loop **`pairs(nil)`** (a reap over an
+  uninitialized state table) once crashed the whole panel at load and shipped. **Invariant: every
+  module-level per-key state table must be initialized `{}` up front** — the end-of-refresh reaps
+  iterate them even when their feature is off. When you add an `hs.<ns>` the dashboard touches in a
+  new way, the smoke may need a matching stub (numeric value-tables for anything bit-OR-ed, e.g.
+  `windowMasks`/`windowLevels`).
 - **`make install`** copies files into `~/.claude` + `~/.hammerspoon`; **`make deploy`** =
-  test + install + reload. **Edits are not live until installed/deployed.**
+  test + install + reload. **Edits are not live until installed/deployed.** `make deploy`'s `hs -c`
+  reload can hang — if it stalls after the copy, `make install` then reload separately with a
+  timeout backstop.
 - Typical change: add a pure cc-core function + its regression test → wire it into the
-  dashboard → mirror in the panel JS if it affects rendering (and note the twin).
+  dashboard → mirror in the panel JS if it affects rendering (and note the twin) → `make test`
+  (smoke included) → deploy.
+
+## State (2026-06-15)
+
+**L5 build-ready batch — 5 of 7 shipped** (the heavier L5 detail/observability sub-items; see
+[todos.md](todos.md) RESUME banner): #1 detail-panel **tab strip**, #2 git **Changes** tab, #3 **Export**
+session archive, #4 post-run **self-summary** + **onAutoApproved** banner, #5 **PR/MR status** badge. #6 host
+stats + fleet idle-since and #7 session-history browser remain. New KEEP-IN-SYNC + invariants from this batch:
+
+- **Detail tab strip:** `core.DETAIL_TABS` is the single source (injected as `__DETAIL_TABS__`). Adding a tab
+  needs a manual `<div class="d-panel" data-tab="ID">` in the HTML, and for a lazy tab a `detail-ID` bridge
+  action + a `maybeLoadActiveTab` case (see the checklist comment on `M.DETAIL_TABS`). `normalizeTabStateJS`
+  in the panel mirrors `core.normalizeTabState` (canonical `{id:true}` unpinned map only).
+- **localStorage** is now used in the panel (tab state), keyed by the **stable projectKey** — Hammerspoon's
+  default WebKit data store is persistent, so it survives reloads.
+- **gh / git reads** run async (`hs.task`, retained until callback so they aren't GC'd) or capped/sync from the
+  **repo root**; bridge-supplied diff paths are validated against the session's status set; url opens are
+  `http(s)`-only. Per-root caches (`prStatusByRoot`) are reaped like the per-tile ones.
+- **Off-by-default automations** (self-summary, onAutoApproved, PR status) follow the established edge rules:
+  never fire from a missing `prev`, exclude remote/stale, delivery-gate any keystroke, and clear their guard
+  when the feature is toggled off.
 
 ## State (2026-06-14)
 

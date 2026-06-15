@@ -44,8 +44,17 @@ All derived locally from the transcript Shepherd already tails — no extra hook
   working session keeps repeating the same tool call (e.g. re-running a failing
   command); detection only.
 - **Desktop banners** (off by default, `notifications.banner.onApproval` /
-  `onDone`) — a native macOS notification on a rising edge into "needs you" / "done";
-  click it to jump to the session.
+  `onDone` / `onAutoApproved`) — a native macOS notification on a rising edge into
+  "needs you" / "done", or when a session **auto-approves** a tool (the last needs the
+  audit ledger on and can lag ~30s); click it to jump to the session.
+- **Post-run self-summary** (off by default, `summary.enabled`) — when a session
+  finishes a turn, Shepherd types a brief "summarize what you just did" prompt into it
+  (for the log you're watching — it forbids further edits). Fires once per turn (the
+  summary's own completion is skipped so it can't loop); local sessions only.
+- **PR/MR status** (off by default, `prStatus.enabled`, needs the GitHub CLI `gh`) — a
+  clickable **"PR #N open / merged"** badge per repo, polled with `gh pr view`
+  (status only — Shepherd never opens or edits PRs). Self-gates when `gh` is absent or
+  the repo has no PR/remote.
 
 ### Event-callback rules (L6, off by default)
 
@@ -162,6 +171,22 @@ The detail panel has:
 
 The **Wants** (the exact command) and **Why** (the assistant's reasoning before a
 request) clamp to two lines — **click to expand**.
+
+The detail panel groups its views into a **tab strip** — **Activity** (the default: status,
+wants/why, plan/TODO, lineage), **Timeline** (this session's recorded activity, inline),
+**Decisions** (the gate decision log), **Usage** (per-session token breakdown), **Changes**
+(see below), and **Queue**. The expensive tabs load only when opened. The **⋯** button hides
+tabs you don't want; your choice (and the last-open tab) is remembered per project. A **⤓
+Export** button (also on the tile right-click menu) archives the session — its transcript
+`.jsonl` plus a `meta.json` (label, provider/model, lineage, activity counts) — into
+`~/.claude/cc-exports/` and reveals it in Finder.
+
+#### Changes tab (per-session git status + diff)
+
+The **Changes** tab shows the session folder's working tree: a list of changed files with
+A/M/D/R/?? marks, and **click any file to expand its colorized diff** (rename-aware). Read-only,
+local sessions only, with a **↻ Refresh**. Nothing runs against the repo except `git status` /
+`git diff` from the repo root.
 
 ### AskUserQuestion in the panel
 When a session calls **AskUserQuestion**, the hook captures the question + options and the panel

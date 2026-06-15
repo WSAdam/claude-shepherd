@@ -4419,12 +4419,28 @@ do
   eq("pr: closed state", core.parsePrStatus('{"number":9,"state":"CLOSED"}').state, "closed")
   -- draft = OPEN + isDraft
   eq("pr: draft state", core.parsePrStatus('{"number":3,"state":"OPEN","isDraft":true}').state, "draft")
+  -- number-without-state -> "unknown" (never a trailing-space badge / empty pr- class)
+  local ns = core.parsePrStatus('{"number":7}')
+  eq("pr: missing state -> unknown", ns.state, "unknown")
+  eq("pr: badge has no trailing space", core.prBadge(ns), "PR #7 unknown")
   -- no PR / garbage / missing number -> nil
   eq("pr: empty -> nil", core.parsePrStatus(""), nil)
-  eq("pr: gh 'no pr' text -> nil", core.parsePrStatus("no pull requests found"), nil)
+  eq("pr: gh 'no pr' text (no brace) -> nil", core.parsePrStatus("no pull requests found"), nil)
+  -- brace present but UNdecodable -> the pcall/decode path returns nil (not the brace guard)
+  eq("pr: brace but malformed json -> nil", core.parsePrStatus("{not json"), nil)
+  eq("pr: truncated object -> nil", core.parsePrStatus('{"number":'), nil)
   eq("pr: object without number -> nil", core.parsePrStatus('{"state":"OPEN"}'), nil)
   eq("pr: badge nil for non-table", core.prBadge(nil), nil)
   eq("pr: badge nil without number", core.prBadge({ state = "open" }), nil)
+
+  -- isOpenableUrl: the open-url scheme guard (http(s) only; reject smuggled schemes)
+  check("pr: https openable", core.isOpenableUrl("https://github.com/x/y/pull/7") == true)
+  check("pr: http openable", core.isOpenableUrl("http://x") == true)
+  check("pr: file:// rejected", core.isOpenableUrl("file:///etc/passwd") == false)
+  check("pr: javascript: rejected", core.isOpenableUrl("javascript:alert(1)") == false)
+  check("pr: data: rejected", core.isOpenableUrl("data:text/html,x") == false)
+  check("pr: non-anchored https rejected", core.isOpenableUrl("x https://y") == false)
+  check("pr: nil url rejected", core.isOpenableUrl(nil) == false)
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))

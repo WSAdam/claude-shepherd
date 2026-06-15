@@ -6039,8 +6039,9 @@ function M.parsePrStatus(jsonStr)
   if not ok or type(j) ~= "table" or j.number == nil then return nil end
   local state = tostring(j.state or ""):lower()
   if j.isDraft == true and state == "open" then state = "draft" end
+  if state == "" then state = "unknown" end   -- never a trailing-space badge / empty pr- class
   return {
-    number = tonumber(j.number) or j.number,
+    number = tonumber(j.number),   -- gh's --json number is always numeric; j.number existed (checked above)
     state = state,
     url = (type(j.url) == "string") and j.url or nil,
     title = (type(j.title) == "string") and j.title or nil,
@@ -6051,6 +6052,12 @@ end
 function M.prBadge(pr)
   if type(pr) ~= "table" or pr.number == nil then return nil end
   return "PR #" .. tostring(pr.number) .. " " .. tostring(pr.state or "")
+end
+
+-- True only for an http(s) url -- the open-url scheme guard, so a crafted PR url
+-- can't smuggle a file:// / javascript: / data: scheme into hs.urlevent.openURL. Pure.
+function M.isOpenableUrl(url)
+  return type(url) == "string" and url:match("^https?://") ~= nil
 end
 
 -- Newest auto-approve decision ts for a session (an "automated allow" = an `allow`

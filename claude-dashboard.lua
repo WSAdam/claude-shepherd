@@ -159,7 +159,12 @@ local spawnPrompt        -- forward declaration (defined after FX)
 local prev = {}
 local respawnAttempts = {}  -- projectKey (NOT tile key) -> auto-respawn count; resets when healthy
 local autoContinueState = { since = {}, attempts = {} }  -- key->first-error ts; projectKey->continue count
-local summaryState  = { fired = {}, pending = {} } -- tile key -> guard once a self-summary fired/queued this done-episode (L5). BOTH subtables MUST exist up front: the reap loop iterates summaryState.pending even when self-summary is off (stepSelfSummary, which lazily creates it, never runs), and pairs(nil) would crash refresh.
+-- L5 self-summary guards (tile key -> true). BOTH `fired` and `pending` MUST be
+-- declared up front: the end-of-refresh reap does `for k in pairs(summaryState.pending)`,
+-- but stepSelfSummary (which lazily creates pending) never runs when self-summary is
+-- off, so an absent pending makes pairs(nil) crash the whole refresh. (Backstory in
+-- git log; the rule for every new per-key state table: initialize it `{}` here.)
+local summaryState  = { fired = {}, pending = {} }
 local autoApproveFired = {} -- tile key -> last auto-approve ts a banner fired for (L5 onAutoApproved edge)
 local watchdog = {}      -- key -> { size, ts, alerted }: transcript progress + stall episode
 local draining    = {}   -- key -> true: close on the next fresh `done` (Feature F)
@@ -1221,7 +1226,10 @@ function FX.ghPrStatus(root)
   if not gh then return end
   local now = os.time()
   local cached = prStatusByRoot[root]
-  if cached and (now - cached.ts) < PR_TTL then return end
+  -- Full TTL once we have real data; a short window while it's still nil/in-flight, so a
+  -- HUNG gh (callback never fires, ts frozen at launch) retries in ~20s, not 180s.
+  local ttl = (cached and cached.data ~= nil) and PR_TTL or 20
+  if cached and (now - cached.ts) < ttl then return end
   if prStatusTasks[root] then return end   -- a poll for this root is already in flight
   -- mark attempted NOW (debounce) but keep any prior data until the call returns
   prStatusByRoot[root] = { ts = now, data = cached and cached.data or nil }
@@ -3007,7 +3015,7 @@ local function handleBridgeMsg(msg)
     -- crafted PR title/url can't smuggle a file:// or javascript: scheme through.
     local it = byKey[tostring(payload.v or "")]
     local url = it and it.pr and it.pr.url
-    if type(url) == "string" and url:match("^https?://") then
+    if core.isOpenableUrl(url) then
       pcall(function() hs.urlevent.openURL(url) end)
     end
     return
