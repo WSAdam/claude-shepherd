@@ -2266,9 +2266,16 @@ do
   local hp = core.hostHealth({ cpuPct = 95, memUsedBytes = 95, memTotalBytes = 100,
     diskUsedBytes = 92, diskTotalBytes = 100 })
   eq("host: pressured", hp.pressured, true)
-  check("host: pressure lists each over-threshold metric",
+  check("host: pressure lists each at-or-over-threshold metric",
         hp.pressure:find("CPU 95%", 1, true) and hp.pressure:find("mem 95%", 1, true)
         and hp.pressure:find("disk 92%", 1, true))
+  -- boundary: the pressure compare is at-or-over (>=), so a metric EXACTLY at the threshold
+  -- trips (and the integer-percent rounding means the raw trip point is ~89.5%). Pins the
+  -- `>=` intent so a later switch to strict `>` would fail loudly.
+  eq("host: disk exactly at threshold (90) is pressured",
+     core.hostHealth({ diskUsedBytes = 90, diskTotalBytes = 100 }).pressured, true)
+  eq("host: disk just under threshold (89) not pressured",
+     core.hostHealth({ diskUsedBytes = 89, diskTotalBytes = 100 }).pressured, false)
   -- custom thresholds
   eq("host: custom cpu threshold not tripped", core.hostHealth({ cpuPct = 80 }, { cpuThreshold = 95 }).pressured, false)
   -- missing readings degrade to nil, never pressured, no crash
@@ -2797,19 +2804,24 @@ do
   eq("storage: empty -> zero total", core.localStorageReport({}).totalBytes, 0)
 
   -- sumDirBytes: skip . / .. self-entries + entries with no numeric size; sum the rest
-  eq("sumdir: sums real entries, skips ./.. + sizeless", core.sumDirBytes({
+  eq("sumdir: sums real entries, skips ./.. + sizeless + negative", core.sumDirBytes({
     { name = ".",  size = 4096 },
     { name = "..", size = 4096 },
     { name = "a.jsonl", size = 100 },
     { name = "b.jsonl", size = 250 },
     { name = "no-size" },            -- nil size -> skipped
+    { name = "bad", size = -1 },     -- negative size -> skipped (locks the `s >= 0` guard)
   }), 350)
   eq("sumdir: empty/nil -> 0", core.sumDirBytes(nil), 0)
-  -- matchStateFiles: only cc-*.json
-  local sf = core.matchStateFiles({ ".", "cc-config.json", "cc-agents.json", "transcript.json", "cc-notes.txt", "notcc.json" })
-  eq("matchstate: count", #sf, 2)
-  eq("matchstate: keeps cc-config.json", sf[1], "cc-config.json")
-  eq("matchstate: keeps cc-agents.json", sf[2], "cc-agents.json")
+  -- matchStateFiles: only cc-*.json. `cc-.json` pins the `.*` (empty-middle) edge -- tightening
+  -- to `.+` would silently drop it; the trailing 123 pins the `type(fn)=='string'` guard, which
+  -- is load-bearing (without it `(123):match` throws, it doesn't just skip).
+  local sf = core.matchStateFiles({ ".", "cc-.json", "cc-config.json", "cc-agents.json", "transcript.json", "cc-notes.txt", "notcc.json", 123 })
+  eq("matchstate: count", #sf, 3)
+  eq("matchstate: keeps cc-.json (.* empty middle)", sf[1], "cc-.json")
+  eq("matchstate: keeps cc-config.json", sf[2], "cc-config.json")
+  eq("matchstate: keeps cc-agents.json", sf[3], "cc-agents.json")
+  eq("matchstate: skips non-string (type guard)", sf[4], nil)
   eq("matchstate: empty/nil -> none", #core.matchStateFiles(nil), 0)
 end
 

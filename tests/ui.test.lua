@@ -1332,6 +1332,26 @@ do
   check("hist-pin: bulk delete refreshes BOTH the History view (sendHistory) and the audit-rows cache",
         src:find("FX.sendHistory()", 1, true) ~= nil
         and src:find('window.ccAudit(" .. hs.json.encode(FX.readLedger({})) .. ")', 1, true) ~= nil)
+  -- STRUCTURAL dedup pin (not just present-in-file): slice each handler body and assert it
+  -- DELEGATES to FX.sendHistory() and never re-inlines the uncapped read / ccHistory push --
+  -- the exact regression (one site capping `limit`) that a file-wide substring pin would miss.
+  local function handlerSlice(marker, nextMarker)
+    local s = src:find(marker, 1, true)
+    local e = s and src:find(nextMarker, s, true)
+    return (s and e) and src:sub(s, e - 1) or ""
+  end
+  local openHist = handlerSlice('a == "open-history-view"', 'a == "history-delete"')
+  local delHist  = handlerSlice('a == "history-delete"', 'a == "storage-report"')
+  check("hist-pin: open-history-view delegates to FX.sendHistory (no inlined read/push)",
+        openHist ~= "" and openHist:find("FX.sendHistory()", 1, true) ~= nil
+        and openHist:find("core.sessionHistory(", 1, true) == nil
+        and openHist:find("window.ccHistory(", 1, true) == nil)
+  check("hist-pin: history-delete refresh delegates to FX.sendHistory (no inlined read/push)",
+        delHist ~= "" and delHist:find("FX.sendHistory()", 1, true) ~= nil
+        and delHist:find("core.sessionHistory(", 1, true) == nil
+        and delHist:find("window.ccHistory(", 1, true) == nil)
+  check("hist-pin: the uncapped read lives ONLY in FX.sendHistory (single source, no divergence)",
+        select(2, src:gsub("core%.sessionHistory%(FX%.readLedger", "")) == 1)
   check("hist-pin: History tab hidden when the ledger is off (parity with Shift)",
         src:find('htab = document.getElementById("a-tab-history"); if(htab) htab.style.display = LEDGER_ON', 1, true) ~= nil
         and src:find('(auditView === "shift" || auditView === "history")) auditTab("rows")', 1, true) ~= nil)

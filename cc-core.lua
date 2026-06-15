@@ -679,8 +679,7 @@ end
 
 -- Sum the byte sizes of directory entries for the #7 storage readout, SKIPPING the "." /
 -- ".." self-entries (whose inode sizes would inflate the total) and any entry without a
--- numeric size. The FX layer turns readDir + hs.fs.attributes into the {name, size} list;
--- this keeps the count/skip decision pure + unit-tested. Pure.
+-- numeric size. Pure.
 function M.sumDirBytes(entries)
   local total = 0
   for _, e in ipairs(entries or {}) do
