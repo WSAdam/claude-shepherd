@@ -1133,6 +1133,26 @@ do
         src:find("core.quotepath=false status --porcelain=v1 -z 2>/dev/null | head -c 1000000", 1, true) ~= nil)
   check("l5chg-fix: ccDetailChanges entry stale guard",
         src:find("window.ccDetailChanges = function(key, data){\n      if(key !== selectedKey) return;", 1, true) ~= nil)
+  -- #3 export session archive: bridge handler, transcript cp (verbatim, large-safe),
+  -- meta via core, ledger event, two entry points (detail button + ctx-menu).
+  check("l5exp-pin: export-session handler", src:find('a == "export-session"', 1, true) ~= nil)
+  check("l5exp-pin: meta assembled via core", src:find("core.sessionExportMeta(it, res.events", 1, true) ~= nil
+        and src:find("core.sessionExportBasename(it, now)", 1, true) ~= nil)
+  check("l5exp-pin: transcript copied verbatim via cp (large-safe)",
+        src:find('hs.execute("cp -- " .. s', 1, true) ~= nil)
+  check("l5exp-pin: ledgers a session_export action",
+        src:find('type = "session_export"', 1, true) ~= nil)
+  check("l5exp-pin: detail-panel Export button + fn",
+        src:find('id="b-export"', 1, true) ~= nil and src:find('send("export-session", selectedKey)', 1, true) ~= nil)
+  check("l5exp-pin: ctx-menu Export entry", src:find('title = "Export session…"', 1, true) ~= nil)
+  check("l5exp-pin: export dir constant", src:find("/.claude/cc-exports", 1, true) ~= nil)
+  -- #3 review fixes: success verified by real meta.json existence (no phantom
+  -- ledger on write failure) + re-exports uniquified (no silent overwrite).
+  check("l5exp-fix: success verified via meta.json existence",
+        src:find('local ok = hs.fs.attributes(dir .. "/meta.json") ~= nil', 1, true) ~= nil)
+  check("l5exp-fix: export failure surfaced", src:find("export FAILED", 1, true) ~= nil)
+  check("l5exp-fix: re-export dir uniquified",
+        src:find("while hs.fs.attributes(candidate) do", 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

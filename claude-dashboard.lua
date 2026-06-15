@@ -82,6 +82,7 @@ local POLICY_OVERRIDE_DIR = os.getenv("CC_POLICY_OVERRIDE_DIR") or (os.getenv("H
 -- key -> last-written JSON. Cleared when a session resolves back to the fleet.
 local policyCache = {}
 local LEDGER_DIR    = os.getenv("CC_LEDGER_DIR") or (os.getenv("HOME") .. "/.claude/cc-ledger")
+local EXPORT_DIR    = os.getenv("CC_EXPORT_DIR") or (os.getenv("HOME") .. "/.claude/cc-exports")
 local CLAUDE_DIR    = (os.getenv("HOME") or "") .. "/.claude"
 local EDITOR_BUNDLES = {
   "com.microsoft.VSCode",
@@ -1159,6 +1160,48 @@ function FX.gitDiff(root, file)
     end
   end)
   return out
+end
+
+-- L5 Export session archive: write a folder under cc-exports holding the session's
+-- transcript (.jsonl, copied VERBATIM via cp -- the operator's own data, so no
+-- read-into-memory cap and no redaction) + a meta.json (label/provider/model/
+-- lineage/activity, no prompt bodies). Explicit operator action; reveals in
+-- Finder best-effort. Returns { ok, dir, transcript } (transcript=false if absent).
+function FX.exportSession(item, basename, metaJson)
+  if type(item) ~= "table" or not basename or basename == "" then return { ok = false } end
+  -- Uniquify: re-exports (incl. two within the same second, which share a basename)
+  -- get a -N suffix so a prior export is never silently overwritten.
+  local dir = EXPORT_DIR .. "/" .. basename
+  do
+    local n, candidate = 1, dir
+    while hs.fs.attributes(candidate) do n = n + 1; candidate = dir .. "-" .. n end
+    dir = candidate
+  end
+  local copied = false
+  pcall(function()
+    hs.fs.mkdir(EXPORT_DIR)   -- returns false if it already exists -- expected, not an error
+    hs.fs.mkdir(dir)
+    local tp = item.transcript_path
+    if tp and tp ~= "" and hs.fs.attributes(tp) then
+      local s = "'" .. tostring(tp):gsub("'", "'\\''") .. "'"
+      local d = "'" .. (dir .. "/transcript.jsonl"):gsub("'", "'\\''") .. "'"
+      hs.execute("cp -- " .. s .. " " .. d .. " 2>/dev/null")   -- cp: safe for large files
+      copied = hs.fs.attributes(dir .. "/transcript.jsonl") ~= nil
+    end
+    FX.writeFile(dir .. "/meta.json", metaJson or "{}")
+  end)
+  -- Source of truth = did meta.json actually land? hs.fs.mkdir / io.open fail by
+  -- RETURN value, not by throwing, so a bare pcall-true would falsely report
+  -- success (and ledger a phantom export) on a permission/space failure.
+  local ok = hs.fs.attributes(dir .. "/meta.json") ~= nil
+  if ok then
+    pcall(function() hs.alert.show("Claude Shepherd: exported session → " .. dir
+      .. (copied and "" or "  (no transcript found)")) end)
+    pcall(function() hs.execute("open " .. "'" .. dir:gsub("'", "'\\''") .. "'") end)
+  else
+    pcall(function() hs.alert.show("Claude Shepherd: export FAILED — couldn't write to " .. EXPORT_DIR) end)
+  end
+  return { ok = ok, dir = dir, transcript = copied }
 end
 
 -- Escalation channels (Phase 4c-A), both off unless enabled in cc-config.json.
@@ -2857,6 +2900,31 @@ local function handleBridgeMsg(msg)
     reply(FX.gitDiff(root, file) or "")
     return
   end
+  if a == "export-session" then
+    -- L5 Export session archive: transcript .jsonl + meta.json under cc-exports.
+    -- Explicit operator action; honors the ledger redaction posture by exporting
+    -- only derived metadata (no prompt bodies) alongside the operator's own
+    -- transcript. Ledgers a session_export event.
+    local key = tostring(payload.v or "")
+    local it = byKey[key]
+    if not it then
+      pcall(function() hs.alert.show("Claude Shepherd: no such session to export") end)
+      return
+    end
+    local now = os.time()
+    local basename = core.sessionExportBasename(it, now)
+    local res = FX.readLedger({})
+    local meta = core.sessionExportMeta(it, res.events, {
+      exportedAt = os.date("!%Y-%m-%dT%H:%M:%SZ", now),
+      transcriptName = (it.transcript_path and it.transcript_path ~= "") and "transcript.jsonl" or nil,
+      sinceTs = 0,
+    })
+    local out = FX.exportSession(it, basename, core.json.encode(meta))
+    if out.ok and ledgerEnabled() then
+      ledgerFor(it, { type = "session_export", dir = basename, transcript = out.transcript })
+    end
+    return
+  end
   if a == "decision-log" then
     -- Detail-panel gate decision log: last N grouped decisions for the selected
     -- session, read from the CACHED ledger snapshot (selection-triggered, never
@@ -3063,6 +3131,11 @@ local function handleBridgeMsg(msg)
           end },
         { title = "Set group…", fn = function()
             pcall(function() wv:evaluateJavaScript("startGroup(" .. keyJson .. ")") end)
+          end },
+        -- L5: archive this session (transcript + meta.json) under cc-exports.
+        -- Round-trips through the same 'export-session' handler the detail button uses.
+        { title = "Export session…", fn = function()
+            pcall(function() wv:evaluateJavaScript("send('export-session', " .. keyJson .. ")") end)
           end },
         { title = "-" },
         -- Clear / Compact: same effect as the detail-panel buttons (type the slash
@@ -4098,6 +4171,7 @@ local HTML = [[
       <button id="b-compact" onclick="act('compact')">Compact</button>
       <button id="b-improve" onclick="act('improve')" title="Pull this repo's un-applied leaderboard improvement insights and send them to this session as a review-first prompt (suggestions, not wholesale edits).">Improve</button>
       <button id="b-timeline" onclick="openSessionTimeline()" title="Show this session's recorded activity timeline (needs the ledger enabled).">📜 Timeline</button>
+      <button id="b-export" onclick="exportSession()" title="Export this session: copy its transcript (.jsonl) + a meta.json (label, provider/model, lineage, activity counters) into ~/.claude/cc-exports and reveal it in Finder.">⤓ Export</button>
     </div>
     <div id="d-controls">
       <label class="ctl">Effort
@@ -6321,6 +6395,8 @@ local HTML = [[
       }
       send("open-session-timeline", selectedKey);
     }
+    // L5 Export session archive: transcript + meta.json into ~/.claude/cc-exports.
+    function exportSession(){ if(selectedKey) send("export-session", selectedKey); }
 
     // ---- Fleet insights view (Feature A) ------------------------------------
     function openInsights(){ send("open-insights-view"); }

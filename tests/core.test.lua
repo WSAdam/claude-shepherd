@@ -4201,5 +4201,62 @@ do
   eq("git: quote in path verbatim", s3.files[2].path, 'qu"ote.txt')
 end
 
+-- ---- L5: export session archive ------------------------------------------
+do
+  -- basename: slug + UTC stamp, deterministic on injected now
+  local t = 1781000000   -- a fixed epoch
+  local bn = core.sessionExportBasename({ label = "My Cool Repo!" }, t)
+  check("export: basename prefix", bn:find("^session%-My%-Cool%-Repo%-") ~= nil)
+  check("export: basename has UTC stamp", bn:find("%-%d%d%d%d%d%d%d%dT%d%d%d%d%d%dZ$") ~= nil)
+  eq("export: basename deterministic", core.sessionExportBasename({ label = "My Cool Repo!" }, t), bn)
+  -- slug collapses unsafe chars; falls back when empty
+  check("export: unsafe chars slugged", core.sessionExportBasename({ label = "a/b c:d" }, t):find("a%-b%-c%-d", 1) ~= nil)
+  check("export: empty label -> session", core.sessionExportBasename({}, t):find("^session%-session%-") ~= nil)
+  -- prefers label > name > projectKey > key
+  check("export: falls back to projectKey", core.sessionExportBasename({ projectKey = "proj" }, t):find("session%-proj%-") ~= nil)
+  -- review fix: dot hygiene -- no leading/trailing/repeated dots in the folder name
+  check("export: repeated dots collapse", core.sessionExportBasename({ label = "a...b" }, t):find("session%-a%.b%-", 1) ~= nil)
+  check("export: dot-only label -> session", core.sessionExportBasename({ label = ".." }, t):find("^session%-session%-") ~= nil)
+  check("export: leading/trailing dots stripped", core.sessionExportBasename({ label = ".secret." }, t):find("session%-secret%-", 1) ~= nil)
+
+  -- counters: per-type tally
+  local evs = {
+    { type = "prompt", session_id = "s" },
+    { type = "tool_request", session_id = "s", tool = "Bash" },
+    { type = "decision", session_id = "s", outcome = "deny" },
+    { type = "decision", session_id = "s", outcome = "allow" },
+    { type = "error", session_id = "s" },
+    { type = "escalation", session_id = "s" },
+    { type = "prompt", session_id = "other" },
+  }
+  local c = core.sessionExportCounters(evs)
+  eq("export: counters prompts", c.prompts, 2)   -- counts ALL given (filter happens upstream)
+  eq("export: counters toolRequests", c.toolRequests, 1)
+  eq("export: counters denials", c.denials, 1)
+  eq("export: counters approvals", c.approvals, 1)
+  eq("export: counters errors", c.errors, 1)
+  eq("export: counters escalations", c.escalations, 1)
+  eq("export: counters empty", core.sessionExportCounters({}).total, 0)
+
+  -- meta DTO: shape + lineage/activity wiring + no prompt bodies
+  local item = { label = "Repo", projectKey = "pk", session_id = "s", cwd = "/r",
+                 provider = "anthropic", model = "claude-opus-4-8", status = "done" }
+  local meta = core.sessionExportMeta(item, evs, { exportedAt = "2026-06-15T00:00:00Z", transcriptName = "transcript.jsonl" })
+  eq("export: meta schema", meta.schema, "cc-session-export/1")
+  eq("export: meta label", meta.label, "Repo")
+  eq("export: meta provider", meta.provider, "anthropic")
+  eq("export: meta model", meta.model, "claude-opus-4-8")
+  eq("export: meta exportedAt", meta.exportedAt, "2026-06-15T00:00:00Z")
+  eq("export: meta transcript name", meta.transcript, "transcript.jsonl")
+  check("export: meta has lineage", type(meta.lineage) == "table")
+  check("export: meta has activity", type(meta.activity) == "table")
+  -- activity is filtered to THIS session (the 'other' prompt excluded)
+  eq("export: meta activity session-scoped", meta.activity.prompts, 1)
+  -- no prompt-body field leaks into the meta DTO
+  eq("export: meta carries no prompt body", meta.prompt, nil)
+  -- nil-safe
+  check("export: meta nil-safe", type(core.sessionExportMeta(nil, nil, nil)) == "table")
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

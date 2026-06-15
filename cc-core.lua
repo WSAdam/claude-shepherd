@@ -5854,4 +5854,68 @@ function M.parseGitStatus(out)
   return { files = files, summary = sum }
 end
 
+-- ---- L5: export session archive ------------------------------------------
+-- Slug a string into a filesystem-safe fragment for the export folder name.
+local function exportSlug(s)
+  s = tostring(s or ""):gsub("[^%w%._%-]+", "-"):gsub("%-+", "-"):gsub("^%-", ""):gsub("%-$", "")
+  s = s:gsub("%.+", "."):gsub("^%.", ""):gsub("%.$", "")   -- no leading/trailing/repeated dots
+  if s == "" then s = "session" end
+  return s:sub(1, 60)
+end
+
+-- sessionExportBasename(item, now) : a unique, filesystem-safe export folder name
+-- like "session-my-label-20260615T143000Z". Pure (now injected; UTC stamp).
+function M.sessionExportBasename(item, now)
+  item = type(item) == "table" and item or {}
+  local label = item.label or item.name or item.projectKey or item.key or "session"
+  local stamp = now and os.date("!%Y%m%dT%H%M%SZ", tonumber(now)) or "export"
+  return "session-" .. exportSlug(label) .. "-" .. stamp
+end
+
+-- Per-session activity tally from this session's ledger events (pure).
+function M.sessionExportCounters(events)
+  local c = { prompts = 0, toolRequests = 0, approvals = 0, denials = 0,
+              errors = 0, escalations = 0, total = 0 }
+  for _, e in ipairs(type(events) == "table" and events or {}) do
+    c.total = c.total + 1
+    local t = e.type
+    if t == "prompt" then c.prompts = c.prompts + 1
+    elseif t == "tool_request" then c.toolRequests = c.toolRequests + 1
+    elseif t == "decision" then
+      if e.outcome == "deny" then c.denials = c.denials + 1 else c.approvals = c.approvals + 1 end
+    elseif t == "error" then c.errors = c.errors + 1
+    elseif t == "escalation" then c.escalations = c.escalations + 1 end
+  end
+  return c
+end
+
+-- sessionExportMeta(item, events, opts) : assemble the meta.json DTO. Pure -- the
+-- timestamp + transcript filename arrive via opts. Carries label/provider/model +
+-- lineage (respawn/clear churn) + a per-session activity tally. Deliberately NOT
+-- prompt bodies: those live in the copied transcript (the operator's own data).
+function M.sessionExportMeta(item, events, opts)
+  item = type(item) == "table" and item or {}
+  opts = type(opts) == "table" and opts or {}
+  local meta = {
+    schema = "cc-session-export/1",
+    label = item.label or item.name,
+    projectKey = item.projectKey,
+    sessionId = item.session_id,
+    cwd = item.cwd,
+    provider = item.provider or item.providerId,
+    model = item.model,
+    status = item.status,
+    exportedAt = opts.exportedAt,
+    transcript = opts.transcriptName,
+  }
+  if item.projectKey and type(events) == "table" then
+    meta.lineage = M.projectLineage(events, item.projectKey, { sinceTs = opts.sinceTs or 0 })
+  end
+  local sid = item.session_id
+  if sid and type(events) == "table" then
+    meta.activity = M.sessionExportCounters(M.filterLedger(events, { session = sid }))
+  end
+  return meta
+end
+
 return M
