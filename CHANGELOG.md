@@ -4,6 +4,37 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-14 (deferred polish ①) — L7 routine board UI
+
+First of the deferred-polish-queue builds: routines no longer have to be hand-edited in
+`cc-schedules.json` — a ⏰ **Routines** board (☰ drawer) lists every routine with an
+enabled dot, schedule/action badges, next-run time, and inline **Run · Pause/Resume · Edit ·
+Delete**; an Add/Edit form has a **live cron preview** built from hour/minute/weekday pickers.
+The firing ENGINE is untouched — this is purely the editor + a manual trigger.
+
+- **cc-core (pure, +33 tests):** `cronBuild(spec)` assembles a 5-field cron from the picker
+  state (minute/hour/day/week/month; clamps + sorts/dedupes weekdays; always emits a cron
+  `validateSchedule` accepts) — **hand-mirrored** in the panel JS twin `cronBuildJS`.
+  `schedulePush`/`scheduleRemove`/`scheduleGet`/`scheduleSetEnabled` are the board CRUD
+  (mirroring the agent registry: validate → replace-in-place → cap; `setEnabled` toggles on
+  RAW state to preserve every field). `scheduleBoard(list, now)` annotates each row with a
+  human-readable schedule + the next-run epoch (display-only; the firing path still uses
+  `dueSchedules`).
+- **Run now** fires the spawn/digest effect immediately, bypassing cron/enabled, WITHOUT
+  mutating schedule state — and spawns still respect `spawn.live`'s dry-run, so it's safe by
+  default. A board warning banner calls out when `schedules.enabled` or `spawn.live` is off.
+- **Adversarial review** (4-lens workflow + per-finding verifiers) caught real **edit
+  data-loss**: rebuilding the record from form fields dropped a digest's `pushTopic` (and
+  `model`/`templateRef`/`agentRef`/`tags`), and a rename dropped `lastFiredAt` (a renamed cron
+  could double-fire the same minute). Fixed: an edit now carries those non-form fields forward
+  from the prior board row, `pushTopic` got an in-panel input, and a name collision now
+  confirms before clobbering. (A self-review also caught + fixed a cron-clobber on Edit:
+  opening the form recomputed the raw cron from pickers, destroying a hand-written cron —
+  split visibility from picker-driven rebuild so the raw field stays the source of truth.)
+- Tests: +33 cc-core, +18 dashboard pins. Suite green (1632 core + 373 ui + 183 bash).
+- **Deferred (unchanged):** import/export routines, overlap control, a launchd
+  asleep-while-due backstop.
+
 ## 2026-06-14 (later still ×4) — L7 scheduled spawns / routines (backlog complete)
 
 Seventh and final backlog build. Routines fire the NORMAL spawn/nudge effects on a schedule

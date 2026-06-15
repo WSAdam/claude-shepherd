@@ -968,6 +968,34 @@ do
   check("l7-pin: digest action branch", src:find('if r.action == "digest" then', 1, true) ~= nil)
   check("l7-pin: digest builds fleetStandup", src:find("core.fleetStandup(ledgerSnapshot()", 1, true) ~= nil)
   check("l7-pin: digest pushes via FX.push", src:find('FX.push(topic, "Claude Shepherd: shift report', 1, true) ~= nil)
+  -- L7 board UI (deferred polish): the routine board overlay + CRUD bridge handlers
+  check("l7board-pin: open/save/delete/toggle bridge",
+        src:find('a == "open-routines" or a == "schedule-save" or a == "schedule-delete"', 1, true) ~= nil)
+  check("l7board-pin: save via core.schedulePush", src:find("core.schedulePush(FX.readSchedules()", 1, true) ~= nil)
+  check("l7board-pin: delete via core.scheduleRemove", src:find("core.scheduleRemove(FX.readSchedules()", 1, true) ~= nil)
+  check("l7board-pin: toggle via core.scheduleSetEnabled", src:find("core.scheduleSetEnabled(FX.readSchedules()", 1, true) ~= nil)
+  check("l7board-pin: board annotated via core.scheduleBoard", src:find("core.scheduleBoard(core.scheduleList(FX.readSchedules())", 1, true) ~= nil)
+  check("l7board-pin: ccSchedules reply carries enabled+live", src:find('wv:evaluateJavaScript("ccSchedules("', 1, true) ~= nil)
+  -- run-now: a separate handler that fires immediately, bypassing cron/enabled
+  check("l7board-pin: run-now handler", src:find('a == "schedule-run-now"', 1, true) ~= nil)
+  check("l7board-pin: run-now resolves via scheduleGet", src:find("core.scheduleGet(FX.readSchedules()", 1, true) ~= nil)
+  check("l7board-pin: run-now ledgers by manual", src:find('by = "manual"', 1, true) ~= nil)
+  -- panel JS: the board render + the cron-builder twin
+  check("l7board-pin: ccSchedules render fn", src:find("function ccSchedules(list, schedOn, live)", 1, true) ~= nil)
+  check("l7board-pin: cronBuildJS twin present", src:find("function cronBuildJS(spec)", 1, true) ~= nil)
+  check("l7board-pin: cronBuildJS noted as a twin of core.cronBuild",
+        src:find("HAND%-MIRRORED twin of core.cronBuild") ~= nil)
+  check("l7board-pin: drawer routines entry", src:find("menuPick('routines')", 1, true) ~= nil)
+  check("l7board-pin: routines overlay markup", src:find('<div id="routines">', 1, true) ~= nil)
+  -- review fixes (adversarial pass): edit must not drop non-form fields, rename
+  -- must keep lastFiredAt, and a name collision must confirm before clobbering.
+  check("l7board-pin: edit carries forward lastFiredAt",
+        src:find("if(prev.lastFiredAt != null) rec.lastFiredAt = prev.lastFiredAt", 1, true) ~= nil)
+  check("l7board-pin: edit carries forward model/refs/tags",
+        src:find('["model","templateRef","agentRef","tags"].forEach', 1, true) ~= nil)
+  check("l7board-pin: pushTopic editable in-panel", src:find('gv("rf-pushtopic")', 1, true) ~= nil)
+  check("l7board-pin: name-collision confirm",
+        src:find("already exists — overwrite it?", 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

@@ -554,6 +554,66 @@ do
      core.scheduleList({ schedules = { { name = "d", kind = "cron", cron = "0 9 * * *", action = "digest", digestHours = 8 } } })[1].action, "digest")
 end
 
+-- ---- L7 routine-board CRUD + cron builder ----------------------------------
+do
+  -- cronBuild: each freq -> a valid 5-field cron the matcher accepts
+  eq("cronBuild: minute", core.cronBuild({ freq = "minute", every = 10 }), "*/10 * * * *")
+  eq("cronBuild: minute clamps", core.cronBuild({ freq = "minute", every = 0 }), "*/1 * * * *")
+  eq("cronBuild: minute default", core.cronBuild({ freq = "minute" }), "*/5 * * * *")
+  eq("cronBuild: hourly at :15", core.cronBuild({ freq = "hour", minute = 15 }), "15 * * * *")
+  eq("cronBuild: daily", core.cronBuild({ freq = "day", minute = 30, hour = 9 }), "30 9 * * *")
+  eq("cronBuild: day default 09:00", core.cronBuild({ freq = "day" }), "0 9 * * *")
+  eq("cronBuild: weekly sorted+dedup", core.cronBuild({ freq = "week", minute = 0, hour = 8, weekdays = { 5, 1, 1, 3 } }), "0 8 * * 1,3,5")
+  eq("cronBuild: weekly none -> *", core.cronBuild({ freq = "week", minute = 0, hour = 8, weekdays = {} }), "0 8 * * *")
+  eq("cronBuild: weekly drops out-of-range", core.cronBuild({ freq = "week", weekdays = { 9, 2 } }), "0 9 * * 2")
+  eq("cronBuild: monthly", core.cronBuild({ freq = "month", minute = 0, hour = 6, dom = 15 }), "0 6 15 * *")
+  eq("cronBuild: hour clamps", core.cronBuild({ freq = "day", hour = 99 }), "0 23 * * *")
+  eq("cronBuild: empty -> daily default", core.cronBuild(nil), "0 9 * * *")
+  check("cronBuild output is a valid 5-field cron", core.validateSchedule({
+    name = "x", kind = "cron", cron = core.cronBuild({ freq = "week", weekdays = { 2 } }), folder = "/p" }).ok)
+  -- schedulePush: validate, replace-in-place, prepend, cap
+  local s0 = { schedules = {} }
+  local s1, ok1 = core.schedulePush(s0, { name = "a", kind = "cron", cron = "0 9 * * *", folder = "/p" })
+  eq("schedPush: saved", ok1, true)
+  eq("schedPush: count 1", #s1.schedules, 1)
+  local _, ok2, errs2 = core.schedulePush(s0, { name = "", kind = "cron", cron = "0 9 * * *", folder = "/p" })
+  eq("schedPush: invalid rejected", ok2, false)
+  check("schedPush: returns errors", type(errs2) == "table" and #errs2 > 0)
+  -- replace-in-place carries forward lastFiredAt
+  local sFired = { schedules = { { name = "a", kind = "cron", cron = "0 9 * * *", folder = "/p", enabled = true, lastFiredAt = 999 } } }
+  local sRepl = core.schedulePush(sFired, { name = "a", kind = "cron", cron = "0 10 * * *", folder = "/p", enabled = true })
+  eq("schedPush: replace same name (no dup)", #sRepl.schedules, 1)
+  eq("schedPush: replace updates cron", core.scheduleList(sRepl)[1].cron, "0 10 * * *")
+  eq("schedPush: replace keeps lastFiredAt", core.scheduleList(sRepl)[1].lastFiredAt, 999)
+  -- prepend (new name goes to front)
+  local sPre = core.schedulePush(s1, { name = "b", kind = "cron", cron = "0 8 * * *", folder = "/p" })
+  eq("schedPush: prepend to front", core.scheduleList(sPre)[1].name, "b")
+  -- cap drops the oldest
+  local capState = { schedules = {} }
+  for i = 1, 5 do capState = core.schedulePush(capState, { name = "r" .. i, kind = "cron", cron = "0 9 * * *", folder = "/p" }, 3) end
+  eq("schedPush: cap honored", #capState.schedules, 3)
+  -- scheduleRemove / scheduleGet
+  eq("schedRemove: deletes by name", #core.scheduleRemove(sRepl, "a").schedules, 0)
+  eq("schedRemove: miss is no-op", #core.scheduleRemove(sRepl, "nope").schedules, 1)
+  check("schedGet: finds", core.scheduleGet(sRepl, "a") ~= nil)
+  eq("schedGet: miss -> nil", core.scheduleGet(sRepl, "nope"), nil)
+  -- scheduleSetEnabled toggles + preserves extra fields (raw state)
+  local sToggle = core.scheduleSetEnabled(sFired, "a", false)
+  eq("schedSetEnabled: paused", core.scheduleList(sToggle)[1].enabled, false)
+  eq("schedSetEnabled: preserves lastFiredAt", core.scheduleList(sToggle)[1].lastFiredAt, 999)
+  eq("schedSetEnabled: resume", core.scheduleList(core.scheduleSetEnabled(sToggle, "a", true))[1].enabled, true)
+  -- scheduleBoard: human + nextRunAt annotations
+  local now = 1700000000
+  local board = core.scheduleBoard(core.scheduleList({ schedules = {
+    { name = "c", kind = "cron", cron = "0 9 * * *", folder = "/p", enabled = true },
+    { name = "o", kind = "oneShot", at = now + 1000, folder = "/p", enabled = true },
+  } }), now)
+  eq("schedBoard: cron human", board[1].human, "daily at 09:00")
+  check("schedBoard: cron nextRunAt set", type(board[1].nextRunAt) == "number" and board[1].nextRunAt > now)
+  eq("schedBoard: oneShot human", board[2].human, "once")
+  eq("schedBoard: oneShot nextRunAt = at", board[2].nextRunAt, now + 1000)
+end
+
 -- ---- runSequence: beat-list scheduling (injected scheduler) ----------------
 do
   -- Cumulative offsets: delays are RELATIVE to the previous beat, so the

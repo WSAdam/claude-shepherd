@@ -722,9 +722,16 @@ dispatcher, NOT a new event bus.*
 > `dueSchedules`/`humanizeCron`/`validateSchedule`/`scheduleLoad`/`scheduleMarkFired`/`scheduleBackpressure`.
 > Engine: a guarded refresh pass fires due routines via `FX.spawnSession` (respects `spawn.live` dry-run), stamps
 > `lastFiredAt`, self-deletes one-shots, honors `schedules.maxConcurrent`. `action:"digest"` pushes a
-> `fleetStandup` report via `FX.push`. Suite 1599 core + 355 ui + 183 bash. **Deferred:** the routine **board UI**
-> (Add/run-now/pause/resume/live-cron-preview — hand-edited JSON today), import/export, overlap control, launchd
-> backstop.
+> `fleetStandup` report via `FX.push`. Suite 1599 core + 355 ui + 183 bash.
+> **Board UI ✅ SHIPPED 2026-06-14 (deferred-polish ①):** a ⏰ Routines board (☰ drawer) lists routines with an
+> enabled dot / schedule+action badges / next-run, inline **Run · Pause/Resume · Edit · Delete**, and an Add/Edit
+> form with a **live cron preview** (hour/minute/weekday pickers → `core.cronBuild`, hand-mirrored in the JS
+> `cronBuildJS` twin). Pure cc-core: `cronBuild`/`schedulePush`/`scheduleRemove`/`scheduleGet`/`scheduleSetEnabled`/
+> `scheduleBoard`. Run-now fires immediately (bypasses cron/enabled, no state mutation, honors `spawn.live` dry-run).
+> Adversarial-review-caught + fixed: edit dropped non-form fields (`pushTopic`/`model`/`templateRef`/`agentRef`/
+> `tags`) and rename dropped `lastFiredAt` (double-fire) → now carried forward + a name-collision confirm + an
+> in-panel pushTopic input. **Still deferred:** import/export routines, overlap control, a launchd
+> asleep-while-due backstop.
 *Source: cline (Desktop Routine board) + AutoGPT (cron / one-shot / recurring / visual cron builder / next-run /
 activity digest) — the one genuinely-new, multi-source candidate. Off by default, ledgered, edge-disciplined
 exactly like auto-respawn/auto-continue. NOT a second executor — it fires the normal spawn/nudge effects on a

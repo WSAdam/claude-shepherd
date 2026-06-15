@@ -2246,6 +2246,61 @@ local function handleBridgeMsg(msg)
     pcall(function() wv:evaluateJavaScript("ccTemplates(" .. listJson .. ")") end)
     return
   end
+  -- L7 routine board (deferred-polish): open / save / delete / pause-resume. The
+  -- routines live in cc-schedules.json (operator data); the FIRING engine in
+  -- refresh() is untouched -- this is just the editor that replaces hand-editing JSON.
+  if a == "open-routines" or a == "schedule-save" or a == "schedule-delete"
+     or a == "schedule-toggle" then
+    if a == "schedule-save" then
+      local okp, p = pcall(hs.json.decode, payload.text or "{}")
+      local st, saved, errs = core.schedulePush(FX.readSchedules(), (okp and type(p) == "table") and p or {})
+      if saved then FX.writeSchedules(st)
+      else pcall(function() hs.alert.show("Claude Shepherd: routine invalid — "
+        .. table.concat(errs or { "?" }, "; ")) end) end
+    elseif a == "schedule-delete" then
+      FX.writeSchedules(core.scheduleRemove(FX.readSchedules(), tostring(payload.v or "")))
+    elseif a == "schedule-toggle" then
+      local on = (payload.text == "true" or payload.text == true)
+      FX.writeSchedules(core.scheduleSetEnabled(FX.readSchedules(), tostring(payload.v or ""), on))
+    end
+    local board = core.scheduleBoard(core.scheduleList(FX.readSchedules()), os.time())
+    local lc = loadConfig()
+    local sOn = core.config(lc, "schedules.enabled", false) == true
+    local live = core.config(lc, "spawn.live", false) == true
+    pcall(function() wv:evaluateJavaScript("ccSchedules("
+      .. ((#board > 0) and hs.json.encode(board) or "[]") .. ", "
+      .. tostring(sOn) .. ", " .. tostring(live) .. ")") end)
+    return
+  end
+  -- Run a routine NOW (manual trigger from the board): fire the spawn/digest
+  -- effect immediately, bypassing cron/enabled. Does NOT mutate schedule state --
+  -- the natural firing stays intact (the user explicitly clicked it). Spawns still
+  -- respect spawn.live's dry-run (FX.spawnSession), so this is safe by default.
+  if a == "schedule-run-now" then
+    local r = core.scheduleGet(FX.readSchedules(), tostring(payload.v or ""))
+    if not r then pcall(function() hs.alert.show("Claude Shepherd: routine not found") end); return end
+    local cfg = loadConfig()
+    if r.action == "digest" then
+      local hours = tonumber(r.digestHours) or 24
+      local report = core.fleetStandup(ledgerSnapshot(), { sinceTs = os.time() - hours * 3600 })
+      local topic = (r.pushTopic and r.pushTopic ~= "") and r.pushTopic
+        or tostring(core.config(cfg, "escalation.pushTopic", ""))
+      if topic and topic ~= "" then
+        FX.push(topic, "Claude Shepherd: shift report (" .. hours .. "h)",
+          core.standupMarkdown(report, { windowLabel = hours .. "h" }):sub(1, 800))
+        pcall(function() hs.alert.show("Claude Shepherd: pushed '" .. tostring(r.name) .. "' digest") end)
+      else
+        pcall(function() hs.alert.show("Claude Shepherd: no push topic (set escalation.pushTopic)") end)
+      end
+    else
+      FX.spawnSession(r.editor or core.config(cfg, "spawn.editor", "terminal"),
+        r.folder, r.prompt, r.permMode, r.provider or "")
+    end
+    if ledgerEnabled() then ledgerFor({ name = r.name, projectKey = r.folder, cwd = r.folder },
+      { type = "schedule_fire", routine = r.name, kind = r.kind, by = "manual",
+        action = r.action or "spawn" }) end
+    return
+  end
   if a == "clear" or a == "compact" then
     local item = byKey[tostring(payload.v or "")]
     if item then
@@ -3384,6 +3439,43 @@ local HTML = [[
 .i-tbl td.n{ text-align:right; font-variant-numeric:tabular-nums; }
 #i-foot{ display:flex; gap:8px; align-items:center; padding:8px 10px; border-top:1px solid #2c2f3a; }
 #i-info{ margin-left:auto; }
+/* L7 routine board overlay (modeled on #audit). Edits cc-schedules.json. */
+#routines{ position:fixed; inset:0; background:#14161b; z-index:11; display:none; flex-direction:column; font-size:12px; }
+#routines.show{ display:flex; }
+#r-head{ display:flex; align-items:center; gap:8px; padding:8px 10px; border-bottom:1px solid #2c2f3a; font-weight:600; }
+#r-head .s-x{ margin-left:auto; }
+#r-warn{ padding:6px 10px; background:#2a2410; color:#e4c463; border-bottom:1px solid #3a3320; font-size:11px; display:none; }
+#r-warn.show{ display:block; }
+#r-body{ flex:1; overflow:auto; padding:8px 10px; }
+.r-row{ display:flex; gap:10px; align-items:center; padding:7px 8px; border:1px solid #23262f; border-radius:8px; margin-bottom:6px; background:#191b22; }
+.r-dot{ width:9px; height:9px; border-radius:50%; flex:0 0 auto; background:#3a3f4b; }
+.r-dot.on{ background:#22c55e; }
+.r-main{ flex:1; min-width:0; }
+.r-name{ color:#e8e9ee; font-weight:600; }
+.r-sub{ color:#8a8d99; font-size:11px; margin-top:1px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.r-badge{ display:inline-block; background:#23262f; color:#9aa0ad; border:1px solid #2c2f3a; border-radius:5px; padding:0 5px; font-size:10px; margin-right:4px; }
+.r-badge.digest{ color:#9fb6d6; border-color:#34435a; }
+.r-next{ color:#6b7280; font-size:11px; white-space:nowrap; font-variant-numeric:tabular-nums; }
+.r-acts{ display:flex; gap:5px; flex:0 0 auto; }
+.r-btn{ background:none; border:1px solid #2c2f3a; color:#9aa0ad; border-radius:5px; padding:2px 7px; cursor:pointer; font-size:11px; }
+.r-btn:hover{ color:#fff; background:#23262f; }
+.r-btn.danger{ border-color:#3a2c2c; color:#d08; }
+.r-empty{ color:#6b7280; font-style:italic; padding:12px 4px; }
+#r-foot{ display:flex; gap:8px; align-items:center; padding:8px 10px; border-top:1px solid #2c2f3a; }
+/* Add/Edit Routine form (slides over #r-body) */
+#r-form{ display:none; flex-direction:column; gap:7px; padding:4px 2px; }
+#r-form.show{ display:flex; }
+#r-form label{ display:flex; flex-direction:column; gap:3px; color:#9aa0ad; font-size:11px; }
+#r-form input, #r-form select, #r-form textarea{ background:#1a1c22; border:1px solid #2c2f3a; color:#e8e9ee; border-radius:6px; padding:4px 7px; font-size:12px; }
+#r-form textarea{ resize:vertical; min-height:48px; font-family:inherit; }
+.r-grid{ display:flex; gap:8px; flex-wrap:wrap; }
+.r-grid > label{ flex:1; min-width:120px; }
+.r-cron{ background:#15171d; border:1px solid #23262f; border-radius:8px; padding:8px; }
+.r-cron-row{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+.r-wd{ display:flex; gap:4px; flex-wrap:wrap; }
+.r-wd button{ background:#1a1c22; border:1px solid #2c2f3a; color:#9aa0ad; border-radius:5px; padding:2px 7px; cursor:pointer; font-size:11px; }
+.r-wd button.on{ background:#23314a; border-color:#3b6; color:#fff; }
+#r-preview{ color:#9fb6d6; font-size:11px; margin-top:6px; font-family:ui-monospace,Menlo,monospace; }
 /* insights sparklines (Feature 6): trend lines over the ledger */
 .spark-row{ display:flex; align-items:center; gap:8px; padding:4px 0; }
 .spark-lbl{ width:110px; flex:0 0 auto; color:#9aa0ad; font-size:11px; }
@@ -3422,6 +3514,7 @@ local HTML = [[
           <button class="tm-item" onclick="menuPick('fsearch')"><span class="tm-ic">🔎</span> Find in fleet</button>
           <button class="tm-item" onclick="menuPick('insights')"><span class="tm-ic">📊</span> Fleet insights</button>
           <button class="tm-item" onclick="menuPick('audit')"><span class="tm-ic">📜</span> Audit ledger</button>
+          <button class="tm-item" onclick="menuPick('routines')"><span class="tm-ic">⏰</span> Routines</button>
           <button id="tm-shift" class="tm-item" style="display:none" onclick="menuPick('shift')"><span class="tm-ic">📋</span> Shift report</button>
           <button class="tm-item" onclick="menuPick('notify')"><span class="tm-ic">🔔</span> Notifications<span id="tm-notify-badge"></span></button>
         </div>
@@ -3792,6 +3885,75 @@ local HTML = [[
       <button class="s-x" onclick="closeFleetSearch()">✕</button>
     </div>
     <div id="fs-body"><div class="s-help" style="margin-left:0;">Searches every session's transcript JSONL (live and dead) plus the audit ledger. Instant with ripgrep installed (<code>brew install ripgrep</code>); falls back to grep.</div></div>
+  </div>
+
+  <div id="routines">
+    <div id="r-head">
+      <span>⏰ Routines</span>
+      <button class="r-btn" onclick="routineNew()">+ Add routine</button>
+      <button class="s-x" onclick="closeRoutines()">✕</button>
+    </div>
+    <div id="r-warn"></div>
+    <div id="r-body"></div>
+    <div id="r-form">
+      <label>Name<input type="text" id="rf-name" placeholder="e.g. Morning standup digest"></label>
+      <div class="r-grid">
+        <label>Action
+          <select id="rf-action" onchange="routineFormVis()">
+            <option value="spawn">Spawn a session</option>
+            <option value="digest">Push a shift-report digest</option>
+          </select>
+        </label>
+        <label>Kind
+          <select id="rf-kind" onchange="routineFormVis()">
+            <option value="cron">Recurring (cron)</option>
+            <option value="oneShot">Once (one-shot)</option>
+          </select>
+        </label>
+      </div>
+      <div class="r-cron" id="rf-cron-wrap">
+        <div class="r-cron-row" id="rf-cron-build">
+          <label style="flex-direction:row;align-items:center;gap:6px;">Every
+            <select id="rf-freq" onchange="routineFormSync()">
+              <option value="minute">N minutes</option>
+              <option value="hour">hour</option>
+              <option value="day" selected>day</option>
+              <option value="week">week</option>
+              <option value="month">month</option>
+            </select>
+          </label>
+          <label id="rf-every-wrap" style="flex-direction:row;align-items:center;gap:4px;display:none;">N=<input type="number" id="rf-every" min="1" max="59" value="5" style="width:54px;" oninput="routineFormSync()"></label>
+          <label id="rf-hm-wrap" style="flex-direction:row;align-items:center;gap:4px;">at <input type="number" id="rf-hour" min="0" max="23" value="9" style="width:48px;" oninput="routineFormSync()">:<input type="number" id="rf-min" min="0" max="59" value="0" style="width:48px;" oninput="routineFormSync()"></label>
+          <label id="rf-dom-wrap" style="flex-direction:row;align-items:center;gap:4px;display:none;">day <input type="number" id="rf-dom" min="1" max="31" value="1" style="width:54px;" oninput="routineFormSync()"></label>
+        </div>
+        <div class="r-wd" id="rf-wd-wrap" style="margin-top:6px;display:none;"></div>
+        <label style="flex-direction:row;align-items:center;gap:6px;margin-top:6px;">cron <input type="text" id="rf-cron-raw" value="0 9 * * *" style="flex:1;font-family:ui-monospace,Menlo,monospace;" oninput="routinePreview()"></label>
+        <div id="r-preview"></div>
+      </div>
+      <label id="rf-at-wrap" style="display:none;">Run at (local, YYYY-MM-DD HH:MM)<input type="text" id="rf-at" placeholder="2026-06-15 14:30" oninput="routineFormSync()"></label>
+      <div class="r-grid" id="rf-spawn-fields">
+        <label>Folder<input type="text" id="rf-folder" placeholder="/Users/you/Programming/project"></label>
+        <label>Editor
+          <select id="rf-editor"><option value="">(default)</option><option value="terminal">Terminal</option><option value="kitty">Kitty</option><option value="vscode">VS Code</option><option value="cursor">Cursor</option></select>
+        </label>
+      </div>
+      <div class="r-grid" id="rf-spawn-fields2">
+        <label>Provider<input type="text" id="rf-provider" placeholder="(default — blank for bare claude)"></label>
+        <label>Perm mode
+          <select id="rf-permmode"><option value="">(default)</option><option value="default">default</option><option value="acceptEdits">acceptEdits</option><option value="plan">plan</option></select>
+        </label>
+      </div>
+      <label id="rf-prompt-wrap">Initial prompt (optional)<textarea id="rf-prompt" placeholder="Seed task typed into the new session…"></textarea></label>
+      <div class="r-grid" id="rf-digest-wrap" style="display:none;">
+        <label>Digest window (hours)<input type="number" id="rf-digesthours" min="1" max="168" value="24" style="width:80px;"></label>
+        <label>Push topic (blank = default escalation.pushTopic)<input type="text" id="rf-pushtopic" placeholder="ntfy topic"></label>
+      </div>
+      <div class="r-grid">
+        <button class="r-btn" style="border-color:#3b6;color:#bdf;" onclick="routineSave()">Save routine</button>
+        <button class="r-btn" onclick="routineCancel()">Cancel</button>
+      </div>
+    </div>
+    <div id="r-foot"><span class="n-dim" id="r-info"></span></div>
   </div>
 
   <script>
@@ -5139,6 +5301,262 @@ local HTML = [[
     // ---- Fleet insights view (Feature A) ------------------------------------
     function openInsights(){ send("open-insights-view"); }
     function closeInsights(){ document.getElementById("insights").classList.remove("show"); }
+
+    // ---- L7 routine board (⏰): edit cc-schedules.json without hand-editing ----
+    var ROUTINES = [];          // last board rows from ccSchedules()
+    var SCHED_ON = false;       // schedules.enabled (engine master switch)
+    var SPAWN_LIVE = false;     // spawn.live (else spawn routines dry-run)
+    var rfWeekdays = [];        // selected weekday indices (0=Sun..6=Sat) in the form
+    var rfEditing = null;       // name being edited, or null for a brand-new routine
+    var WD_LABELS = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+
+    function openRoutines(){ send("open-routines"); routineFormHide();
+      document.getElementById("routines").classList.add("show"); }
+    function closeRoutines(){ document.getElementById("routines").classList.remove("show"); }
+    // Server reply: ([rows], schedules.enabled, spawn.live)
+    function ccSchedules(list, schedOn, live){
+      ROUTINES = list || []; SCHED_ON = !!schedOn; SPAWN_LIVE = !!live; renderRoutines();
+    }
+    function pad2(n){ return (n < 10 ? "0" : "") + n; }
+    function fmtNextRun(ts){
+      if(!ts) return "—";
+      var d = new Date(ts * 1000), now = new Date();
+      var hm = pad2(d.getHours()) + ":" + pad2(d.getMinutes());
+      if(d.toDateString() === now.toDateString()) return "today " + hm;
+      return (d.getMonth()+1) + "/" + d.getDate() + " " + hm;
+    }
+    function mkRBtn(label, fn, cls){
+      var b = document.createElement("button"); b.className = "r-btn" + (cls ? " "+cls : "");
+      b.textContent = label; b.onclick = fn; return b;
+    }
+    function renderRoutines(){
+      var warn = document.getElementById("r-warn"); var notes = [];
+      if(!SCHED_ON) notes.push("Scheduling is OFF (schedules.enabled in ⚙ Settings) — routines won't auto-fire. “Run” still works.");
+      if(!SPAWN_LIVE) notes.push("spawn.live is OFF — spawn routines are DRY-RUN (no real session).");
+      warn.textContent = notes.join("   "); warn.classList.toggle("show", notes.length > 0);
+      var body = document.getElementById("r-body"); body.innerHTML = "";
+      if(!ROUTINES.length){
+        var e = document.createElement("div"); e.className = "r-empty";
+        e.textContent = "No routines yet. “+ Add routine” schedules a session spawn or a shift-report digest.";
+        body.appendChild(e); document.getElementById("r-info").textContent = ""; return;
+      }
+      ROUTINES.forEach(function(r){
+        var row = document.createElement("div"); row.className = "r-row";
+        var dot = document.createElement("div"); dot.className = "r-dot" + (r.enabled ? " on" : "");
+        dot.title = r.enabled ? "enabled" : "paused"; row.appendChild(dot);
+        var main = document.createElement("div"); main.className = "r-main";
+        var nm = document.createElement("div"); nm.className = "r-name"; nm.textContent = r.name || "(unnamed)";
+        main.appendChild(nm);
+        var sub = document.createElement("div"); sub.className = "r-sub";
+        var bAct = document.createElement("span"); bAct.className = "r-badge" + (r.action==="digest" ? " digest" : "");
+        bAct.textContent = (r.action === "digest") ? "digest" : "spawn"; sub.appendChild(bAct);
+        var bSch = document.createElement("span"); bSch.className = "r-badge";
+        bSch.textContent = (r.kind === "oneShot") ? "once" : (r.human || r.cron || ""); sub.appendChild(bSch);
+        var tail = document.createElement("span"); var bits = [];
+        if(r.action !== "digest" && r.folder) bits.push(r.folder.replace(/^.*\//, ""));
+        if(r.provider) bits.push(r.provider);
+        tail.textContent = bits.join(" · "); sub.appendChild(tail);
+        main.appendChild(sub); row.appendChild(main);
+        var next = document.createElement("div"); next.className = "r-next";
+        next.textContent = r.enabled ? ("next " + fmtNextRun(r.nextRunAt)) : "paused";
+        row.appendChild(next);
+        var acts = document.createElement("div"); acts.className = "r-acts";
+        acts.appendChild(mkRBtn("Run", function(){ routineRunNow(r.name); }, ""));
+        acts.appendChild(mkRBtn(r.enabled ? "Pause" : "Resume", function(){ routineToggle(r.name, !r.enabled); }, ""));
+        acts.appendChild(mkRBtn("Edit", function(){ routineEdit(r); }, ""));
+        acts.appendChild(mkRBtn("Delete", function(){ routineDelete(r.name); }, "danger"));
+        row.appendChild(acts); body.appendChild(row);
+      });
+      document.getElementById("r-info").textContent = ROUTINES.length + " routine" + (ROUTINES.length===1?"":"s");
+    }
+    // --- Add/Edit form ---
+    function gv(id){ var el = document.getElementById(id); return el ? el.value : ""; }
+    function sv(id, val){ var el = document.getElementById(id); if(el) el.value = (val==null?"":val); }
+    function show(id, on){ var el = document.getElementById(id); if(el) el.style.display = on ? "" : "none"; }
+    function buildWeekdayBtns(){
+      var wrap = document.getElementById("rf-wd-wrap"); wrap.innerHTML = "";
+      WD_LABELS.forEach(function(lbl, i){
+        var b = document.createElement("button"); b.type = "button"; b.textContent = lbl;
+        b.onclick = function(){ toggleWeekday(i, b); };
+        b.className = (rfWeekdays.indexOf(i) >= 0) ? "on" : "";
+        wrap.appendChild(b);
+      });
+    }
+    function toggleWeekday(i, btn){
+      var at = rfWeekdays.indexOf(i);
+      if(at >= 0) rfWeekdays.splice(at, 1); else rfWeekdays.push(i);
+      btn.className = (rfWeekdays.indexOf(i) >= 0) ? "on" : "";
+      routineFormSync();
+    }
+    // HAND-MIRRORED twin of core.cronBuild (cc-core.lua) — keep in sync.
+    function cronBuildJS(spec){
+      spec = spec || {};
+      function clamp(v, lo, hi, dflt){ v = parseInt(v,10); if(isNaN(v)) return dflt;
+        return v < lo ? lo : (v > hi ? hi : v); }
+      var freq = spec.freq || "day";
+      var mi = clamp(spec.minute, 0, 59, 0), hr = clamp(spec.hour, 0, 23, 9);
+      if(freq === "minute"){ return "*/" + clamp(spec.every, 1, 59, 5) + " * * * *"; }
+      if(freq === "hour"){ return mi + " * * * *"; }
+      if(freq === "week"){
+        var seen = {}, days = [];
+        (spec.weekdays || []).forEach(function(d){ d = parseInt(d,10);
+          if(!isNaN(d) && d>=0 && d<=6 && !seen[d]){ seen[d] = 1; days.push(d); } });
+        days.sort(function(a,b){ return a-b; });
+        return mi + " " + hr + " * * " + (days.length ? days.join(",") : "*");
+      }
+      if(freq === "month"){ return mi + " " + hr + " " + clamp(spec.dom, 1, 31, 1) + " * *"; }
+      return mi + " " + hr + " * * *";
+    }
+    // Visibility + preview ONLY — never rebuilds the raw cron (so opening the
+    // form to edit, or flipping action/kind, can't clobber a hand-written cron
+    // that decomposeCron couldn't fully reverse). Called on form open + by the
+    // action/kind selects.
+    function routineFormVis(){
+      var action = gv("rf-action"), kind = gv("rf-kind"), freq = gv("rf-freq");
+      var isDigest = (action === "digest"), isOnce = (kind === "oneShot");
+      show("rf-spawn-fields", !isDigest); show("rf-spawn-fields2", !isDigest);
+      show("rf-prompt-wrap", !isDigest); show("rf-digest-wrap", isDigest);
+      show("rf-cron-wrap", !isOnce); show("rf-at-wrap", isOnce);
+      // cron sub-fields by freq
+      show("rf-every-wrap", freq === "minute");
+      show("rf-hm-wrap", freq !== "minute");
+      show("rf-dom-wrap", freq === "month");
+      show("rf-wd-wrap", freq === "week");
+      routinePreview();
+    }
+    // A cron PICKER changed -> rebuild the raw cron from the pickers (the raw
+    // field is the source of truth on save; pickers write into it). Called only
+    // by the cron freq/every/hour/min/dom selects + weekday buttons.
+    function routineFormSync(){
+      routineFormVis();
+      if(gv("rf-kind") !== "oneShot"){
+        sv("rf-cron-raw", cronBuildJS({ freq: gv("rf-freq"), every: gv("rf-every"), minute: gv("rf-min"),
+                                        hour: gv("rf-hour"), dom: gv("rf-dom"), weekdays: rfWeekdays }));
+        routinePreview();
+      }
+    }
+    function routinePreview(){
+      var kind = gv("rf-kind"), p = document.getElementById("r-preview");
+      if(kind === "oneShot"){
+        var ep = localToEpoch(gv("rf-at"));
+        p.textContent = ep ? ("Fires once at " + new Date(ep*1000).toLocaleString()) : "Enter a date/time (YYYY-MM-DD HH:MM)";
+      } else {
+        p.textContent = "Cron: " + (gv("rf-cron-raw") || "(empty)");
+      }
+    }
+    function localToEpoch(s){
+      s = (s || "").trim(); if(!s) return null;
+      var d = new Date(s.replace(" ", "T"));
+      var t = d.getTime(); return isNaN(t) ? null : Math.floor(t / 1000);
+    }
+    function epochToLocal(ep){
+      var d = new Date(ep * 1000);
+      return d.getFullYear() + "-" + pad2(d.getMonth()+1) + "-" + pad2(d.getDate()) +
+             " " + pad2(d.getHours()) + ":" + pad2(d.getMinutes());
+    }
+    function routineFormShow(){
+      document.getElementById("r-body").style.display = "none";
+      document.getElementById("r-form").classList.add("show");
+      buildWeekdayBtns(); routineFormVis();  // visibility only — preserves rf-cron-raw
+    }
+    function routineFormHide(){
+      document.getElementById("r-form").classList.remove("show");
+      document.getElementById("r-body").style.display = "";
+    }
+    function routineFormReset(){
+      rfWeekdays = []; sv("rf-name",""); sv("rf-action","spawn"); sv("rf-kind","cron");
+      sv("rf-freq","day"); sv("rf-every","5"); sv("rf-hour","9"); sv("rf-min","0"); sv("rf-dom","1");
+      sv("rf-cron-raw","0 9 * * *"); sv("rf-at","");
+      sv("rf-folder",""); sv("rf-editor",""); sv("rf-provider",""); sv("rf-permmode","");
+      sv("rf-prompt",""); sv("rf-digesthours","24"); sv("rf-pushtopic","");
+    }
+    function routineNew(){ rfEditing = null; routineFormReset(); routineFormShow(); }
+    function routineCancel(){ routineFormHide(); }
+    function routineEdit(r){
+      rfEditing = r.name; routineFormReset();
+      sv("rf-name", r.name); sv("rf-action", r.action || "spawn"); sv("rf-kind", r.kind || "cron");
+      sv("rf-folder", r.folder || ""); sv("rf-editor", r.editor || "");
+      sv("rf-provider", r.provider || ""); sv("rf-permmode", r.permMode || "");
+      sv("rf-prompt", r.prompt || ""); if(r.digestHours) sv("rf-digesthours", r.digestHours);
+      sv("rf-pushtopic", r.pushTopic || "");
+      // raw cron is the source of truth on save; pickers are best-effort decompose
+      if(r.kind === "cron" && r.cron){ sv("rf-cron-raw", r.cron); decomposeCron(r.cron); }
+      if(r.kind === "oneShot" && r.at) sv("rf-at", epochToLocal(r.at));
+      routineFormShow();
+    }
+    // Best-effort: set the pickers from a cron so editing common shapes feels right.
+    // Unknown shapes leave the pickers at defaults; the raw field still has the truth.
+    function decomposeCron(cron){
+      var f = (cron || "").trim().split(/\s+/); if(f.length !== 5) return;
+      var mi = f[0], hr = f[1], dom = f[2], dow = f[4];
+      var ev = mi.match(/^\*\/(\d+)$/);
+      if(ev && hr==="*" && dom==="*" && dow==="*"){ sv("rf-freq","minute"); sv("rf-every", ev[1]); return; }
+      if(hr==="*" && dom==="*" && dow==="*" && /^\d+$/.test(mi)){ sv("rf-freq","hour"); sv("rf-min", mi); return; }
+      if(/^\d+$/.test(mi) && /^\d+$/.test(hr)){
+        sv("rf-min", mi); sv("rf-hour", hr);
+        if(dom==="*" && dow!=="*"){ sv("rf-freq","week");
+          rfWeekdays = dow.split(",").map(function(x){ return parseInt(x,10); }).filter(function(x){ return !isNaN(x) && x>=0 && x<=6; }); return; }
+        if(dom!=="*" && /^\d+$/.test(dom) && dow==="*"){ sv("rf-freq","month"); sv("rf-dom", dom); return; }
+        if(dom==="*" && dow==="*"){ sv("rf-freq","day"); return; }
+      }
+    }
+    function routineSave(){
+      var name = gv("rf-name").trim();
+      if(!name){ alert("Routine needs a name."); return; }
+      var action = gv("rf-action"), kind = gv("rf-kind");
+      var rec = { name: name, kind: kind, action: action, enabled: false };
+      // Carry forward the prior record's fields the form has NO input for, so an
+      // edit (esp. a rename, which prepends a fresh record) can't silently drop
+      // them: enabled (don't re-pause), lastFiredAt (else a renamed cron re-fires
+      // the same minute), and model/templateRef/agentRef/tags. pushTopic has its
+      // own input below. We copy ONLY these known keys -- never the whole board
+      // row, which also carries human/nextRunAt annotations validateSchedule rejects.
+      var prev = rfEditing ? ROUTINES.filter(function(r){ return r.name === rfEditing; })[0] : null;
+      if(prev){
+        rec.enabled = !!prev.enabled;
+        if(prev.lastFiredAt != null) rec.lastFiredAt = prev.lastFiredAt;
+        ["model","templateRef","agentRef","tags"].forEach(function(k){ if(prev[k] != null) rec[k] = prev[k]; });
+      }
+      if(kind === "oneShot"){
+        var ep = localToEpoch(gv("rf-at"));
+        if(!ep){ alert("Enter a valid date/time (YYYY-MM-DD HH:MM)."); return; }
+        rec.at = ep;
+      } else { rec.cron = gv("rf-cron-raw").trim(); }
+      if(action === "digest"){
+        rec.digestHours = parseInt(gv("rf-digesthours"),10) || 24;
+        var pt = gv("rf-pushtopic").trim();
+        if(pt) rec.pushTopic = pt; else delete rec.pushTopic;  // a cleared field clears it
+      } else {
+        delete rec.pushTopic;  // spawn routines don't push
+        var folder = gv("rf-folder").trim();
+        if(!folder){ alert("A spawn routine needs a folder."); return; }
+        rec.folder = folder;
+        if(gv("rf-editor")) rec.editor = gv("rf-editor");
+        if(gv("rf-provider").trim()) rec.provider = gv("rf-provider").trim();
+        if(gv("rf-permmode")) rec.permMode = gv("rf-permmode");
+        if(gv("rf-prompt").trim()) rec.prompt = gv("rf-prompt");
+      }
+      // Name collision (new routine OR rename) silently overwrites a same-name
+      // record (schedulePush is name-keyed) -- confirm before clobbering another.
+      if(ROUTINES.some(function(r){ return r.name === name && r.name !== rfEditing; })){
+        if(!confirm("A routine named “" + name + "” already exists — overwrite it?")) return;
+      }
+      // a rename: drop the old record first (push is keyed by name)
+      if(rfEditing && rfEditing !== name) send("schedule-delete", rfEditing);
+      send("schedule-save", name, JSON.stringify(rec));
+      rfEditing = null; routineFormHide();
+    }
+    function routineDelete(name){
+      if(!confirm("Delete routine “" + name + "”?")) return;
+      send("schedule-delete", name);
+    }
+    function routineToggle(name, on){ send("schedule-toggle", name, on ? "true" : "false"); }
+    function routineRunNow(name){
+      var msg = SPAWN_LIVE ? ("Run “" + name + "” now?")
+                           : ("Run “" + name + "” now?\n(spawn.live is OFF — a spawn routine will DRY-RUN.)");
+      if(!confirm(msg)) return;
+      send("schedule-run-now", name);
+    }
     function fmtDur(s){
       s = Math.max(0, Math.round(s||0));
       if(s < 60) return s+"s";
@@ -5472,6 +5890,7 @@ local HTML = [[
       else if(which === "fsearch") openFleetSearch();
       else if(which === "insights") openInsights();
       else if(which === "audit") openAudit();
+      else if(which === "routines") openRoutines();
       else if(which === "shift"){ if(LEDGER_ON) openShiftReport(); }
       else if(which === "notify") openNotifications();
     }
@@ -5517,6 +5936,14 @@ local HTML = [[
     });
     document.addEventListener("keydown", function(e){
       if(e.key === "Escape" && document.getElementById("keymenu").classList.contains("show")) closeKeyhelp();
+    });
+    // Esc in the routine board: close the form first, then the overlay.
+    document.addEventListener("keydown", function(e){
+      if(e.key !== "Escape") return;
+      var ov = document.getElementById("routines");
+      if(!ov || !ov.classList.contains("show")) return;
+      if(document.getElementById("r-form").classList.contains("show")){ routineFormHide(); }
+      else { closeRoutines(); }
     });
 
     // ---- Notification history (roadmap #6) ----------------------------------

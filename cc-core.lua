@@ -5342,4 +5342,124 @@ function M.scheduleBackpressure(liveTiles, cap)
   return (tonumber(liveTiles) or 0) >= cap
 end
 
+-- ---- L7 routine-board CRUD + cron builder (UI layer) -----------------------
+-- These power the routine board (Add/run-now/pause/resume) so routines no longer
+-- have to be hand-edited in cc-schedules.json. All pure; the firing engine above
+-- is untouched.
+
+-- Assemble a 5-field cron from the Add-Routine picker state. Pure; HAND-MIRRORED
+-- in the panel JS (`cronBuildJS`) for the live preview -- keep them in sync.
+-- spec = { freq = minute|hour|day|week|month, every?, minute?, hour?, weekdays?[], dom? }.
+-- Always returns a valid 5-field cron (validateSchedule/cronMatches accept it).
+function M.cronBuild(spec)
+  spec = type(spec) == "table" and spec or {}
+  local function clamp(v, lo, hi, dflt)
+    v = tonumber(v); if not v then return dflt end
+    v = math.floor(v)
+    if v < lo then return lo elseif v > hi then return hi else return v end
+  end
+  local freq = tostring(spec.freq or "day")
+  local mi = clamp(spec.minute, 0, 59, 0)
+  local hr = clamp(spec.hour, 0, 23, 9)
+  if freq == "minute" then
+    local n = clamp(spec.every, 1, 59, 5)
+    return "*/" .. n .. " * * * *"
+  elseif freq == "hour" then
+    return mi .. " * * * *"
+  elseif freq == "week" then
+    local seen, days = {}, {}
+    for _, d in ipairs(type(spec.weekdays) == "table" and spec.weekdays or {}) do
+      local n = tonumber(d)
+      if n and n >= 0 and n <= 6 and not seen[n] then seen[n] = true; days[#days + 1] = n end
+    end
+    table.sort(days)
+    local dow = (#days > 0) and table.concat(days, ",") or "*"
+    return mi .. " " .. hr .. " * * " .. dow
+  elseif freq == "month" then
+    local dom = clamp(spec.dom, 1, 31, 1)
+    return mi .. " " .. hr .. " " .. dom .. " * *"
+  else  -- day (default)
+    return mi .. " " .. hr .. " * * *"
+  end
+end
+
+-- Save a routine: validates (validateSchedule), replaces same-name in place,
+-- else prepends; caps (oldest dropped). On a replace, carries forward the old
+-- lastFiredAt unless the new record sets one -- so editing a routine via the
+-- board can't resurface an already-fired oneShot or re-fire a cron this minute.
+-- Returns newState, ok, errors. Mirrors agentPush.
+function M.schedulePush(state, rec, cap)
+  cap = tonumber(cap) or M.SCHEDULE_CAP
+  rec = type(rec) == "table" and rec or {}
+  local v = M.validateSchedule(rec)
+  if not v.ok then return { schedules = M.scheduleList(state) }, false, v.errors end
+  local entry = scheduleNorm(rec)
+  local out, replaced = {}, false
+  for _, s in ipairs(M.scheduleList(state)) do
+    if s.name == entry.name then
+      if entry.lastFiredAt == nil then entry.lastFiredAt = s.lastFiredAt end
+      out[#out + 1] = entry; replaced = true
+    else out[#out + 1] = s end
+  end
+  if not replaced then table.insert(out, 1, entry) end
+  while #out > cap do table.remove(out) end
+  return { schedules = out }, true
+end
+
+-- Delete a routine by name (no-op copy on miss).
+function M.scheduleRemove(state, name)
+  local out, target = {}, agTrim(name)
+  for _, s in ipairs(M.scheduleList(state)) do
+    if s.name ~= target then out[#out + 1] = s end
+  end
+  return { schedules = out }
+end
+
+-- Get one normalized routine by name, or nil.
+function M.scheduleGet(state, name)
+  local target = agTrim(name)
+  for _, s in ipairs(M.scheduleList(state)) do
+    if s.name == target then return s end
+  end
+  return nil
+end
+
+-- Toggle a routine's enabled flag (board pause/resume). Operates on the RAW
+-- state (like scheduleMarkFired) so every field -- incl. lastFiredAt + any
+-- hand-added extras -- rides through untouched. Pure.
+function M.scheduleSetEnabled(state, name, on)
+  local out, target = {}, agTrim(name)
+  for _, s in ipairs(slist(state)) do
+    if type(s) == "table" and agTrim(s.name) == target then
+      local c = {}; for k, val in pairs(s) do c[k] = val end
+      c.enabled = on == true
+      out[#out + 1] = c
+    else
+      out[#out + 1] = s
+    end
+  end
+  return { schedules = out }
+end
+
+-- Annotate the routine list for the board: each row gets a human-readable
+-- schedule string (`human`) + the next epoch it'll fire (`nextRunAt`,
+-- display-only -- the firing path uses dueSchedules). Pure (now injected).
+function M.scheduleBoard(list, now)
+  local out = {}
+  for _, s in ipairs(type(list) == "table" and list or {}) do
+    local row = {}
+    for k, v in pairs(s) do row[k] = v end
+    if s.kind == "oneShot" then
+      row.human = "once"
+      -- not yet fired -> its scheduled epoch; fired oneShots are gone from disk
+      row.nextRunAt = (s.lastFiredAt == nil) and tonumber(s.at) or nil
+    else
+      row.human = M.humanizeCron(s.cron)
+      row.nextRunAt = M.nextRunAt(s.cron, now)
+    end
+    out[#out + 1] = row
+  end
+  return out
+end
+
 return M
