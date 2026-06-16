@@ -116,6 +116,8 @@ local SD_LONG_PRESS       = 0.7    -- seconds held to count as a "long press"
 local SD_LONG_PRESS_STOPS = false  -- if true, long-press a normal tile = Stop
 local SD_FALLBACK_KEYS    = 15     -- assume a standard deck if detection fails
 local SD_BRIGHTNESS       = 70
+local STREAMDECK_ACTIONS  = true   -- reserve the bottom-left row for global action keys
+local SD_JUMP_RESET       = 8      -- s: a fresh Jump press after this idle gap restarts at the neediest
 
 -- Global hotkeys (set HOTKEYS_ENABLED = false to disable). All five are configurable via
 -- cc-config.json's `hotkeys` block (each entry { "mods": ["cmd","alt"], "key": "a" }); a missing
@@ -3640,7 +3642,51 @@ end)
 
 -- ---- Stream Deck (optional, plug-and-play) ------------------------------
 local sd = { deck = nil, count = SD_FALLBACK_KEYS, size = { w = 72, h = 72 },
-             buttons = {}, downAt = {}, blink = false }
+             buttons = {}, downAt = {}, blink = false,
+             cols = 0, rows = 0, reserved = {}, actionByKey = {},
+             recording = false, jumpKey = nil, jumpTs = 0, voiceTask = nil }
+
+-- Global action keys on the bottom-left row, left -> right. Each maps to a handler in
+-- sdRunAction (assigned far below, where showPanel/spawnPrompt/refreshList exist).
+local SD_ACTION_ORDER = { "jump", "approve", "spawn", "voice" }
+local SD_ACTION_SPECS = {
+  jump    = { glyph = "🎯", label = "JUMP",    bg = { red = 0.12, green = 0.34, blue = 0.55 } },
+  approve = { glyph = "✓",  label = "APPROVE", bg = { red = 0.11, green = 0.46, blue = 0.24 }, glyphSize = 0.54 },
+  spawn   = { glyph = "＋", label = "SPAWN",   bg = { red = 0.33, green = 0.22, blue = 0.55 }, glyphSize = 0.54 },
+  voice   = { glyph = "🎙", label = "VOICE",   bg = { red = 0.40, green = 0.17, blue = 0.17 },
+              glyphActive = "●", labelActive = "REC", bgActive = { red = 0.86, green = 0.16, blue = 0.16 } },
+}
+local sdRunAction  -- forward decl; the handlers need late-defined upvalues (assigned below)
+
+-- Render a "cool" action-key image: an accent rounded-rect + a top sheen + a big glyph +
+-- a label. `active` swaps the Voice key to its recording look (red, ● REC).
+local function sdActionImage(spec, active)
+  local w, h = sd.size.w, sd.size.h
+  local c = hs.canvas.new({ x = 0, y = 0, w = w, h = h })
+  c[1] = { type = "rectangle", action = "fill", fillColor = (active and spec.bgActive) or spec.bg,
+           roundedRectRadii = { xRadius = 12, yRadius = 12 } }
+  c[2] = { type = "rectangle", action = "fill", fillColor = { white = 1.0, alpha = 0.06 },
+           frame = { x = 0, y = 0, w = w, h = h * 0.5 }, roundedRectRadii = { xRadius = 12, yRadius = 12 } }
+  c[3] = { type = "text", text = (active and spec.glyphActive) or spec.glyph, textColor = { white = 1.0 },
+           textSize = h * (spec.glyphSize or 0.46), textAlignment = "center",
+           frame = { x = 0, y = h * 0.06, w = w, h = h * 0.56 } }
+  c[4] = { type = "text", text = (active and spec.labelActive) or spec.label,
+           textColor = { white = 1.0, alpha = 0.92 }, textSize = h * 0.16,
+           frame = { x = 0, y = h * 0.68, w = w, h = h * 0.26 }, textAlignment = "center" }
+  local img = c:imageFromCanvas(); c:delete(); return img
+end
+
+-- Repaint a single action key (used by the Voice handler to flip REC on/off instantly).
+local function sdPaintAction(name)
+  if not sd.deck then return end
+  for idx, n in pairs(sd.actionByKey) do
+    if n == name then
+      local active = (name == "voice") and sd.recording or false
+      local ok, img = pcall(sdActionImage, SD_ACTION_SPECS[name], active)
+      if ok and img then pcall(function() sd.deck:setButtonImage(idx, img) end) end
+    end
+  end
+end
 
 -- Render a key image for a session (or a blank dark key when item is nil).
 local function sdButtonImage(item)
@@ -3657,7 +3703,9 @@ local function sdButtonImage(item)
   end
   c[1] = { type = "rectangle", action = "fill", fillColor = col,
            roundedRectRadii = { xRadius = 10, yRadius = 10 } }
-  local name = item.name or "?"
+  -- Match the panel tile's name precedence: manual relabel > auto-title > folder basename
+  -- (the deck used to show only item.name, ignoring relabels -- the reported bug).
+  local name = item.label or item.autoTitle or item.name or "?"
   if #name > 12 then name = name:sub(1, 11) .. "\226\128\166" end
   c[2] = { type = "text", text = name, textColor = { white = 1.0 }, textSize = h * 0.18,
            frame = { x = 3, y = h * 0.12, w = w - 6, h = h * 0.42 }, textAlignment = "center" }
@@ -3667,24 +3715,42 @@ local function sdButtonImage(item)
   local img = c:imageFromCanvas(); c:delete(); return img
 end
 
--- Paint every key from the current (already sorted) session list.
+-- Paint every key: the reserved bottom-left keys get their action image, the rest get the
+-- (already sorted) session list, laid out around the reserved slots.
 local function sdRender(list)
   if not sd.deck then return end
-  local lay = core.deckLayout(sd.count, list)
+  local reserved = sd.reserved or {}
+  local lay = core.deckLayout(sd.count, list, reserved)
   for i = 1, sd.count do
-    local item = lay.items[i]
-    sd.buttons[i] = item and item.key or nil
-    local ok, img = pcall(sdButtonImage, item)
-    if ok and img then pcall(function() sd.deck:setButtonImage(i, img) end) end
+    if reserved[i] then
+      sd.buttons[i] = nil
+      local name = sd.actionByKey[i]
+      local active = (name == "voice") and sd.recording or false
+      local ok, img = pcall(sdActionImage, SD_ACTION_SPECS[name], active)
+      if ok and img then pcall(function() sd.deck:setButtonImage(i, img) end) end
+    else
+      local item = lay.items[i]
+      sd.buttons[i] = item and item.key or nil
+      local ok, img = pcall(sdButtonImage, item)
+      if ok and img then pcall(function() sd.deck:setButtonImage(i, img) end) end
+    end
   end
   if lay.overflow > 0 then
     print("[cc-streamdeck] " .. lay.overflow .. " session(s) beyond the "
-          .. sd.count .. " keys aren't on the deck (still on the panel)")
+          .. (sd.count - (sd.actionCount or 0)) .. " session keys aren't on the deck (still on the panel)")
   end
 end
 
--- Short press = primary, long press = secondary; cc-core decides the action.
+-- Action keys (bottom-left) fire their handler on release; session keys do the
+-- short=primary / long=secondary gesture cc-core decides.
 local function sdOnButton(deck, button, isDown)
+  local act = sd.actionByKey and sd.actionByKey[button]
+  if act then
+    if isDown then return end  -- fire on release (tap)
+    print("[cc-streamdeck] action key " .. button .. " -> " .. act)
+    if sdRunAction then sdRunAction(act) end
+    return
+  end
   if isDown then sd.downAt[button] = hs.timer.secondsSinceEpoch(); return end
   local t0 = sd.downAt[button]; sd.downAt[button] = nil
   local held = t0 and (hs.timer.secondsSinceEpoch() - t0) or 0
@@ -3705,16 +3771,28 @@ local function sdStart()
     hs.streamdeck.init(function(connected, deck)
       if connected then
         sd.deck = deck
-        local a, b = deck:buttonLayout()
-        if a and b then sd.count = a * b elseif a then sd.count = a end
+        local a, b = deck:buttonLayout()  -- columns, rows
+        if a and b then sd.count = a * b; sd.cols = a; sd.rows = b
+        elseif a then sd.count = a; sd.cols = a; sd.rows = 1 end
         if not sd.count or sd.count < 1 then sd.count = SD_FALLBACK_KEYS end
+        -- Reserve the bottom-left N keys for the global action row, but only on a deck big
+        -- enough to spare them (>= 4 cols, >= 2 rows). Sessions fill every other key.
+        sd.reserved, sd.actionByKey, sd.actionCount = {}, {}, 0
+        if STREAMDECK_ACTIONS and sd.cols >= 4 and sd.rows >= 2 then
+          for i, kidx in ipairs(core.deckActionKeys(sd.cols, sd.rows, #SD_ACTION_ORDER)) do
+            sd.reserved[kidx] = true
+            sd.actionByKey[kidx] = SD_ACTION_ORDER[i]
+            sd.actionCount = sd.actionCount + 1
+          end
+        end
         local oks, sz = pcall(function() return deck:imageSize() end)
         if oks and sz and sz.w and sz.h then sd.size = { w = sz.w, h = sz.h } end
         pcall(function() deck:reset() end)
         pcall(function() deck:setBrightness(SD_BRIGHTNESS) end)
         pcall(function() deck:buttonCallback(sdOnButton) end)
-        print("[cc-streamdeck] connected: " .. sd.count .. " keys @ "
-              .. sd.size.w .. "x" .. sd.size.h)
+        print("[cc-streamdeck] connected: " .. sd.count .. " keys (" .. sd.cols .. "x" .. sd.rows
+              .. ") @ " .. sd.size.w .. "x" .. sd.size.h
+              .. (sd.actionCount > 0 and (" | " .. sd.actionCount .. " action keys") or ""))
         sdRender(refreshList())
       else
         print("[cc-streamdeck] disconnected")
@@ -9394,8 +9472,6 @@ function refresh()
   end
 
   FX.writeFile(HEARTBEAT, tostring(now))
-  sd.blink = not sd.blink
-  sdRender(list)
   -- Overlay persistent relabels by project path (display-only; .name stays the
   -- real target). A new session in a labeled folder inherits the name (F1).
   core.applyLabelsByCwd(list, labels)
@@ -9479,6 +9555,12 @@ function refresh()
   local bundleJson = hs.json.encode(bundleNames)
   wv:evaluateJavaScript("window.ccUpdate(" .. payload .. ", " .. provJson .. ", " .. bundleJson .. ")")
 
+  -- Paint the Stream Deck from the SAME fully-decorated `list` the panel just got. MUST run
+  -- after applyLabelsByCwd + the auto-title pass above, else the keys show the raw folder name
+  -- instead of your relabel/auto-title. blink toggles each tick so an approval key pulses.
+  sd.blink = not sd.blink
+  sdRender(list)
+
   -- Reflect the live keep-awake state in the toggle on a light cadence (every 10
   -- polls, not every 1s) so a `pmset -g` subprocess doesn't run each second. The
   -- first refresh (tick 1) syncs immediately so the button is right on load (F2).
@@ -9554,6 +9636,130 @@ M.officialUsageTimer = hs.timer.doEvery(OFFICIAL_TTL, function()
   ledgerGcTick = (ledgerGcTick + 1) % 20
   if ledgerGcTick == 0 then pcall(FX.expireLedger) end
 end)
+-- ---- Stream Deck global action handlers (Jump / Approve / Spawn / Voice) -------
+-- Defined here (not with sdStart) so they can reach the late-defined showPanel /
+-- spawnPrompt / refreshList / lastRenderList. sdRunAction is forward-declared in the deck
+-- block above; sdOnButton dispatches action-key taps to it. Wrapped in a `do` block so these
+-- handler locals don't count against Lua's 200-per-function main-chunk local limit (the
+-- sdRunAction closure, assigned to the main-chunk forward local, keeps them alive).
+do
+-- JUMP: first tap -> the neediest session (approval > error > stalled, else the front one);
+-- each further tap cycles to the next in sorted order, through all of them. After SD_JUMP_RESET
+-- seconds idle (or if the remembered session vanished) a fresh tap restarts at the neediest.
+local function sdJump()
+  local list = lastRenderList or refreshList()
+  if not list or #list == 0 then return end
+  local nowt = hs.timer.secondsSinceEpoch()
+  local stillThere = false
+  if sd.jumpKey then
+    for _, it in ipairs(list) do if it.key == sd.jumpKey then stillThere = true; break end end
+  end
+  if (nowt - (sd.jumpTs or 0)) > SD_JUMP_RESET or not stillThere then sd.jumpKey = nil end
+  sd.jumpTs = nowt
+  local target = (sd.jumpKey and core.cycleNext(list, sd.jumpKey))
+                 or core.nextAttention(list) or core.frontSession(list)
+  if target then
+    sd.jumpKey = target.key
+    dispatchSerialized(target, "focus", function() core.handleAction(FX, target, "focus") end)
+  end
+end
+
+-- APPROVE: clear the front-most pending approval (the ⌥⌘A action), hands-free via the gate.
+local function sdApprove()
+  local it = core.nextApproval(lastRenderList or refreshList())
+  if it then
+    dispatchSerialized(it, "approve", function() core.handleAction(FX, it, "approve") end)
+  else
+    hs.alert.show("Claude Shepherd: nothing waiting")
+  end
+end
+
+-- SPAWN: reveal the panel and open its New-session flow (the folder browser).
+local function sdSpawn()
+  showPanel()
+  spawnPrompt()
+end
+
+-- VOICE: which session owns the window you have focused (so dictation goes to that project).
+local function sdVoiceTarget()
+  local list = lastRenderList or refreshList()
+  if not list or #list == 0 then return nil end
+  local fw = hs.window.focusedWindow()
+  return core.sessionForTitle(list, fw and fw:title() or "", os.getenv("USER"))
+end
+
+-- Transcribe the recorded wav with whisper-cli (local), then send the text to the focused
+-- session (auto-submit) or, if voice.autoSend=false, stage it in the panel's nudge box.
+local function sdTranscribeAndSend(wav, cfg)
+  local target = sdVoiceTarget()
+  if not target then
+    hs.alert.show("🎙 Voice: focus a project window first (couldn't tell which session)")
+    return
+  end
+  local whisper = resolveBin("whisper-cli", core.config(cfg, "voice.whisperBin", nil))
+  local model = core.config(cfg, "voice.model", (os.getenv("HOME") or "") .. "/.cache/whisper/ggml-base.en.bin")
+  if model:sub(1, 2) == "~/" then model = (os.getenv("HOME") or "") .. model:sub(2) end  -- whisper won't expand ~
+  if not hs.fs.attributes(model) then
+    hs.alert.show("🎙 Voice: model missing — " .. model)
+    return
+  end
+  hs.alert.show("🎙 Transcribing…")
+  local autoSend = core.config(cfg, "voice.autoSend", true)
+  local wt = hs.task.new(whisper, function(code, stdout, stderr)
+    local text = tostring(stdout or "")
+    text = text:gsub("%[[%d:%.%s%->]+%]", "")                 -- strip any stray [timestamps]
+    text = text:gsub("^%s+", ""):gsub("%s+$", ""):gsub("%s+", " ")
+    -- whisper emits non-speech as a single bracketed token ([BLANK_AUDIO], (beeping)…);
+    -- treat a wholly-bracketed result as "nothing said" so silence isn't sent.
+    if text == "" or text:match("^[%[%(].-[%]%)]$") then hs.alert.show("🎙 Voice: nothing heard"); return end
+    print("[cc-streamdeck] voice -> " .. tostring(target.name) .. ": " .. text)
+    if autoSend then
+      dispatchSerialized(target, "voice", function() FX.typeIntoWindow(target, text) end)
+    else
+      showPanel()
+      pcall(function() wv:evaluateJavaScript("insertIntoNudge(" .. jsString(text) .. ")") end)
+    end
+    hs.alert.show("🎙 → " .. tostring(target.label or target.name) .. ": " .. text:sub(1, 48))
+  end, { "-m", model, "-f", wav, "-nt", "-np", "-l", "en" })
+  if wt then wt:start() else hs.alert.show("🎙 Voice: couldn't run whisper-cli") end
+end
+
+-- Tap to start recording the mic (ffmpeg -> 16k mono wav), tap again to stop + transcribe.
+local function sdVoiceToggle()
+  local cfg = loadConfig()
+  if sd.recording then
+    sd.recording = false; sdPaintAction("voice")
+    local task, wav = sd.voiceTask, sd.voiceWav
+    sd.voiceTask = nil
+    if task then pcall(function() task:terminate() end) end  -- SIGTERM -> ffmpeg finalizes the wav
+    after(0.5, function() sdTranscribeAndSend(wav, cfg) end)
+    return
+  end
+  local ff = resolveBin("ffmpeg", core.config(cfg, "voice.ffmpegBin", nil))
+  local mic = core.config(cfg, "voice.micDevice", ":0")  -- avfoundation audio-only input
+  sd.voiceWav = (os.getenv("TMPDIR") or "/tmp/") .. "cc-voice.wav"
+  local t = hs.task.new(ff, function(code, so, se)
+    if code and code ~= 0 and code ~= 143 and code ~= 255 then
+      print("[cc-streamdeck] ffmpeg exited " .. tostring(code) .. ": " .. tostring(se))
+    end
+  end, { "-hide_banner", "-loglevel", "error", "-f", "avfoundation", "-i", mic,
+         "-ar", "16000", "-ac", "1", "-y", sd.voiceWav })
+  if t and t:start() then
+    sd.voiceTask = t; sd.recording = true; sdPaintAction("voice")
+    hs.alert.show("🎙 Recording — tap VOICE again to send")
+  else
+    hs.alert.show("🎙 Voice: couldn't start ffmpeg (mic permission for Hammerspoon?)")
+  end
+end
+
+sdRunAction = function(name)
+  if name == "jump" then sdJump()
+  elseif name == "approve" then sdApprove()
+  elseif name == "spawn" then sdSpawn()
+  elseif name == "voice" then sdVoiceToggle() end
+end
+end  -- close the action-handlers do-block
+
 sdStart()  -- begin Stream Deck discovery (no-op if none plugged in)
 bindHotkeys()
 refresh()

@@ -241,6 +241,38 @@ do
   local lay2 = core.deckLayout(15, list)
   eq("deck: no overflow when room", lay2.overflow, 0)
   eq("deck: empty keys are nil", lay2.items[4], nil)
+
+  -- reserved action keys: sessions skip those indices, overflow counts non-reserved slots
+  local reserved = { [1] = true, [2] = true }  -- first two keys are actions
+  local lay3 = core.deckLayout(4, list, reserved)
+  eq("deck: reserved key 1 holds no session", lay3.items[1], nil)
+  eq("deck: reserved key 2 holds no session", lay3.items[2], nil)
+  eq("deck: first session lands on the first FREE key", lay3.items[3].key, "a")
+  eq("deck: second session on the next free key", lay3.items[4].key, "b")
+  eq("deck: overflow counts only non-reserved slots", lay3.overflow, 1)  -- 3 sessions, 2 free slots
+end
+
+-- ---- deckActionKeys: the bottom-left action row from deck geometry ----------
+do
+  eq("deckActionKeys: XL 8x4 bottom-left 4 -> {25,26,27,28}",
+     table.concat(core.deckActionKeys(8, 4, 4), ","), "25,26,27,28")
+  eq("deckActionKeys: standard 5x3 -> {11,12,13,14}",
+     table.concat(core.deckActionKeys(5, 3, 4), ","), "11,12,13,14")
+  eq("deckActionKeys: clamps n to the column count",
+     table.concat(core.deckActionKeys(3, 2, 4), ","), "4,5,6")  -- only 3 cols
+  eq("deckActionKeys: degenerate geometry -> none", #core.deckActionKeys(0, 0, 4), 0)
+end
+
+-- ---- sessionForTitle: reverse window->session match (deck Voice routing) ----
+do
+  local list = {
+    { key = "a", name = "autobottom",  cwd = "/Users/adam/Programming/autobottom" },
+    { key = "b", name = "qb-interface", cwd = "/Users/adam/Programming/qb-interface" },
+  }
+  local hit = core.sessionForTitle(list, "main.ts — autobottom", "adam")  -- editor title: file — folder
+  eq("sessionForTitle: matches the project in the window title", hit and hit.key, "a")
+  eq("sessionForTitle: empty title -> nil", core.sessionForTitle(list, "", "adam"), nil)
+  eq("sessionForTitle: no match -> nil", core.sessionForTitle(list, "Slack | general", "adam"), nil)
 end
 
 -- ---- hotkey helpers --------------------------------------------------------

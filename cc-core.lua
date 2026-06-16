@@ -1660,14 +1660,38 @@ function M.sessionRisk(events, opts)
   }
 end
 
--- Map the sorted session list onto a deck of `count` keys (row-major). Returns
--- items[1..count] (nil for empty keys) and how many sessions didn't fit.
-function M.deckLayout(count, list)
+-- Map the sorted session list onto a deck of `count` keys (row-major), SKIPPING any key
+-- index in `reserved` (a {[idx]=true} set used for the global action keys). Returns
+-- items[1..count] (nil for empty/reserved keys) and how many sessions didn't fit the
+-- non-reserved slots. `reserved` is optional -- omitted = the original plain fill.
+function M.deckLayout(count, list, reserved)
+  reserved = reserved or {}
+  list = list or {}
   local items = {}
-  for i = 1, count do items[i] = list[i] end
-  local overflow = #list - count
+  local li, slots = 1, 0
+  for i = 1, count do
+    if reserved[i] then
+      items[i] = nil
+    else
+      items[i] = list[li]; li = li + 1; slots = slots + 1
+    end
+  end
+  local overflow = #list - slots
   if overflow < 0 then overflow = 0 end
   return { items = items, overflow = overflow }
+end
+
+-- The key indices for the global action row: the bottom row's leftmost `n` keys on a
+-- cols x rows deck (1-based, row-major). e.g. an 8x4 Stream Deck XL -> {25,26,27,28}.
+-- Returns {} if the geometry can't host them (a tiny deck just shows sessions).
+function M.deckActionKeys(cols, rows, n)
+  cols = tonumber(cols) or 0; rows = tonumber(rows) or 0; n = tonumber(n) or 0
+  if cols < 1 or rows < 1 or n < 1 then return {} end
+  local base = (rows - 1) * cols  -- 0-based index of the last row's first key
+  local take = math.min(n, cols)
+  local out = {}
+  for i = 1, take do out[i] = base + i end
+  return out
 end
 
 -- Hotkey helpers (used in Phase 2).
@@ -4018,6 +4042,26 @@ function M.focusCandidates(name, cwd, skipUser, skip)
     for i = #parts - 1, 1, -1 do add(parts[i]) end  -- ancestors, deepest first
   end
   return out
+end
+
+-- Reverse window match: which session owns the window titled `title`? Used by the deck's
+-- Voice key to route dictation to the project you're looking at. Scores every session's
+-- focusCandidates against the title via bestWindowFor (exact folder segment beats contains)
+-- and returns the best-ranked session, or nil if nothing matches. Pure; `user` is skipped
+-- as a candidate (same as focusProject). Callers can pre-filter `list` by editor app.
+function M.sessionForTitle(list, title, user)
+  if type(title) ~= "string" or title == "" then return nil end
+  local titles = { title }
+  local best, bestRank = nil, 0
+  for _, it in ipairs(list or {}) do
+    if type(it) == "table" then
+      for _, needle in ipairs(M.focusCandidates(it.name, it.cwd, user)) do
+        local idx, rank = M.bestWindowFor(titles, needle)
+        if idx and (rank or 0) > bestRank then best, bestRank = it, rank or 0 end
+      end
+    end
+  end
+  return best
 end
 
 -- Ordered bundle-id candidates for a session's editor kind. A 'cursor' session

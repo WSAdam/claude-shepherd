@@ -133,6 +133,26 @@ network, no multi-user, no secrets — it reads session status off the local fil
   dashboard → mirror in the panel JS if it affects rendering (and note the twin) → `make test`
   (smoke included) → deploy.
 
+## State (2026-06-16) — Stream Deck action row + local voice
+
+- **Deck label fix:** keys now use `item.label or item.autoTitle or item.name` (panel parity), and
+  `sdRender` moved to AFTER the per-tick label/auto-title decoration (was before → raw names).
+- **Global action row** (bottom-left N keys, reserved only when `STREAMDECK_ACTIONS` and the deck is
+  >= 4 cols x 2 rows): pure `core.deckActionKeys(cols, rows, n)` picks the indices (XL → 25–28),
+  `core.deckLayout(count, list, reserved)` lays sessions around them. Order = `SD_ACTION_ORDER`
+  (jump, approve, spawn, voice); each renders via `sdActionImage`. Handlers live in a **`do` block**
+  near the `sdStart()` call (so they can reach showPanel/spawnPrompt/refreshList AND to dodge Lua's
+  200-local main-chunk cap); `sdRunAction` is the forward-declared bridge from `sdOnButton`.
+- **Voice = local, no cloud:** ffmpeg (avfoundation `:0`, 16k mono) records to a temp wav on the
+  first tap; the second tap SIGTERMs it and `whisper-cli` transcribes on-device. Target = the session
+  owning the **focused window** via pure `core.sessionForTitle` (reverse of focusProject's title
+  match); auto-submit via `FX.typeIntoWindow`. Config: `voice.{model,micDevice,autoSend,whisperBin,
+  ffmpegBin}`. Hammerspoon needs Microphone TCC permission; whisper non-speech `[BLANK_AUDIO]`/`(...)`
+  results are filtered out.
+- **Gotcha documented:** the tile "Close instance" matches the editor window by TITLE, so closing a
+  stale tile whose live twin shares the name closes the REAL window — clear an orphan by deleting its
+  `cc-status/<id>.json` instead (no window match). A no-window "Forget tile" action is the follow-up.
+
 ## State (2026-06-15) — QoL batch
 
 Seven QoL items from real panel use → four code fixes (the other three — Gate/Autopilot/Policy —

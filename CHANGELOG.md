@@ -4,6 +4,35 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-16 — Stream Deck: label fix, safe "Forget tile", + a global action row (incl. local voice)
+
+Stream Deck work, in three parts.
+
+- **Label fix (bug):** deck keys showed the raw folder name, ignoring relabels/auto-titles. Two
+  causes: `sdButtonImage` read only `item.name` (now `item.label or item.autoTitle or item.name`,
+  matching the panel tile), and `sdRender` ran in the refresh tick *before* the label/auto-title
+  decoration — moved it to right after the `ccUpdate` push so the deck and panel paint the SAME
+  fully-decorated list.
+- **Global action row (bottom-left 4 keys, on a deck with room):** reserved via pure
+  `core.deckActionKeys(cols, rows, n)` (XL 8x4 → keys 25–28); sessions fill the rest via
+  `core.deckLayout(count, list, reserved)`. Each key gets a custom "cool" canvas image. Left→right:
+  - **🎯 JUMP** — first tap → neediest (`nextAttention`); each further tap `cycleNext`s through all;
+    idle-resets to the neediest after `SD_JUMP_RESET`s.
+  - **✓ APPROVE** — front-most pending approval (the ⌥⌘A action).
+  - **＋ SPAWN** — `showPanel()` + the New-session folder browser.
+  - **🎙 VOICE** — local push-to-talk: tap records the mic (ffmpeg avfoundation, 16k mono), tap
+    again → `whisper-cli` transcribes on-device → text is routed to the session whose window is
+    focused (pure `core.sessionForTitle` reverse-match) and auto-submitted (`voice.autoSend`).
+    New `voice` config block (model / micDevice / autoSend / bins). Needs whisper-cpp + ffmpeg +
+    a model + Hammerspoon mic permission. (The six handlers live in a `do` block to stay under
+    Lua's 200-local main-chunk limit.)
+- **Safe orphan cleanup:** a stale "Autobottom" tile (a session whose SessionEnd never fired)
+  surfaced that "Close instance" matches the editor window by *title*, so closing a stale tile whose
+  live twin shares the name closes the REAL window. Documented; the surgical clear is removing the
+  orphan `cc-status/<id>.json` (no window match). (A no-window-match "Forget tile" menu action is
+  the proposed follow-up.)
+- Suite **2005 core + 526 ui + 183 bash + smoke**, green.
+
 ## 2026-06-15 (QoL batch) — panel restore, live model, configurable hotkeys, decisions hint
 
 Seven QoL items from real panel use, triaged into four code fixes + three "working as designed,

@@ -1402,6 +1402,37 @@ do
   check("qol-pin: Decisions empty-state points at ledger+gate only when the ledger is OFF",
         src:find("box.innerHTML = LEDGER_ON", 1, true) ~= nil
         and src:find("and arm the gate to record allow/deny decisions", 1, true) ~= nil)
+
+  -- Stream Deck: keys show the panel's name (relabel > auto-title > folder), and the deck is
+  -- painted AFTER the per-tick label/auto-title decoration (not before, the original bug).
+  check("sd-pin: deck key name precedence matches the tile (label || autoTitle || name)",
+        src:find("local name = item.label or item.autoTitle or item.name", 1, true) ~= nil)
+  check("sd-pin: deck rendered AFTER label/auto-title decoration (same list as the panel)",
+        (function()
+           local u = src:find("window.ccUpdate(", 1, true)
+           local s = src:find("Paint the Stream Deck from the SAME fully-decorated", 1, true)
+           return (u ~= nil) and (s ~= nil) and (s > u)
+         end)())
+
+  -- Stream Deck global action row (bottom-left): Jump / Approve / Spawn / Voice
+  check("sd-pin: action row order jump,approve,spawn,voice + reserved via core.deckActionKeys",
+        src:find('SD_ACTION_ORDER = { "jump", "approve", "spawn", "voice" }', 1, true) ~= nil
+        and src:find("core.deckActionKeys(sd.cols, sd.rows", 1, true) ~= nil
+        and src:find("sd.actionByKey[kidx] = SD_ACTION_ORDER[i]", 1, true) ~= nil)
+  check("sd-pin: action keys get a custom button image; deckLayout skips the reserved slots",
+        src:find("local function sdActionImage(spec, active)", 1, true) ~= nil
+        and src:find("core.deckLayout(sd.count, list, reserved)", 1, true) ~= nil)
+  check("sd-pin: Jump taps cycle (neediest seed -> cycleNext through all)",
+        src:find("core.cycleNext(list, sd.jumpKey)", 1, true) ~= nil
+        and src:find("core.nextAttention(list) or core.frontSession(list)", 1, true) ~= nil)
+  check("sd-pin: Spawn reveals the panel + opens the New-session flow",
+        src:find("local function sdSpawn()", 1, true) ~= nil
+        and src:find("spawnPrompt()", 1, true) ~= nil)
+  check("sd-pin: Voice records via ffmpeg avfoundation, whisper-cli transcribes, routes by focused window",
+        src:find('"avfoundation"', 1, true) ~= nil
+        and src:find('resolveBin("whisper-cli"', 1, true) ~= nil
+        and src:find("core.sessionForTitle(list, fw", 1, true) ~= nil
+        and src:find("FX.typeIntoWindow(target, text)", 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

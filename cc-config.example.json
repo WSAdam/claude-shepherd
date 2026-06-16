@@ -180,5 +180,14 @@
     "cycle":        { "mods": ["cmd", "alt"], "key": "n" },
     "spawn":        { "mods": ["cmd", "alt"], "key": "s" },
     "toggle":       { "mods": ["cmd", "alt"], "key": "b" }
+  },
+
+  "voice": {
+    "_comment": "Stream Deck VOICE key (bottom-left action row): tap to record the mic, tap again to transcribe LOCALLY with whisper-cli and send the text to the project window you have focused. Needs whisper-cpp + ffmpeg (brew install whisper-cpp ffmpeg) and a model — download one to `model` below (e.g. ggml-base.en.bin from huggingface.co/ggerganov/whisper.cpp). Hammerspoon needs Microphone permission (System Settings → Privacy → Microphone). micDevice is the ffmpeg avfoundation audio input (':0' = default mic; run `ffmpeg -f avfoundation -list_devices true -i \"\"` to list). autoSend=true types + submits; false stages the text in the panel's nudge box for review.",
+    "model": "~/.cache/whisper/ggml-base.en.bin",
+    "micDevice": ":0",
+    "autoSend": true,
+    "whisperBin": "",
+    "ffmpegBin": ""
   }
 }

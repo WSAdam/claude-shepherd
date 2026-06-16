@@ -900,9 +900,24 @@ with sessions that need you sorted to the front.
   long-press does nothing unless you set `SD_LONG_PRESS_STOPS = true` (then it
   **Stops** the turn) — off by default to avoid accidental interrupts.
 
+**Global action row** (the four **bottom-left** keys, on a deck with room to spare — e.g.
+the XL). These are reserved for fleet actions instead of sessions; sessions fill the rest:
+
+- **🎯 JUMP** — first tap jumps to the session that most needs you (approval › error ›
+  stalled); each further tap cycles to the next in order, through all of them. After a few
+  seconds idle a fresh tap restarts at the neediest (`SD_JUMP_RESET`).
+- **✓ APPROVE** — approve the front-most pending approval, hands-free via the gate.
+- **＋ SPAWN** — reveal the panel and open the New-session folder browser.
+- **🎙 VOICE** — local push-to-talk dictation. Tap to start recording (the key turns red
+  **REC**), talk, tap again → **whisper-cli transcribes on-device** and sends the text to the
+  **project window you have focused** (auto-submits by default). Needs `brew install
+  whisper-cpp ffmpeg`, a model at `voice.model` (e.g. `ggml-base.en.bin`), and Microphone
+  permission for Hammerspoon. Tune under `voice` in cc-config.json (`model` / `micDevice` /
+  `autoSend`). Set `STREAMDECK_ACTIONS = false` to give those four keys back to sessions.
+
 Tunables near the top of [claude-dashboard.lua](claude-dashboard.lua):
-`STREAMDECK_ENABLED`, `SD_LONG_PRESS`, `SD_LONG_PRESS_STOPS`, `SD_BRIGHTNESS`,
-`SD_FALLBACK_KEYS`. If you'd rather keep your normal Elgato profiles running,
+`STREAMDECK_ENABLED`, `STREAMDECK_ACTIONS`, `SD_LONG_PRESS`, `SD_LONG_PRESS_STOPS`,
+`SD_JUMP_RESET`, `SD_BRIGHTNESS`, `SD_FALLBACK_KEYS`. If you'd rather keep your normal Elgato profiles running,
 Claude Shepherd would instead need a separate Stream Deck *plugin* (coexists with the
 Elgato app) — that path isn't built yet.
 
