@@ -1818,7 +1818,12 @@ function M.resolveOneHotkey(entry, default)
     mods = normalizeMods(entry.mods)
     if not mods then return dflt() end
   end
-  if #mods == 0 and not key:lower():match("^f%d+$") then return dflt() end
+  -- A bare (no-modifier) key is legal ONLY for a real function key F1..F20. Match the digits and
+  -- range-check them: `^f%d+$` alone would accept f0 / f21..f99 (keys macOS has no scancode for),
+  -- which then bind to nothing and silently leave the action dead instead of reverting to default.
+  local fn = key:lower():match("^f(%d+)$")
+  local isFkey = fn ~= nil and tonumber(fn) >= 1 and tonumber(fn) <= 20
+  if #mods == 0 and not isFkey then return dflt() end
   return { mods, key }
 end
 
@@ -2306,6 +2311,28 @@ function M.contextBand(frac)
   if f >= 0.60 then return "b2" end
   if f >= 0.50 then return "b1" end
   return "b0"
+end
+
+-- Stream Deck context-fill bucket: quantize a context fraction into ~2.5% steps (0..40) so the
+-- per-key repaint signature changes as the bar grows but not on every sub-pixel tick. Clamps to
+-- [0,1] first (a frac >1 from a stale aggregate would otherwise overflow the bucket). Returns nil
+-- for nil / non-numeric input -- the deck uses that as the "no bar drawn" sentinel (distinct from a
+-- real 0 bucket, which draws an empty bar). TWIN: sdButtonImage/sdRender in claude-dashboard.lua
+-- call this; the ui.test pin fails the build if a site stops using it.
+function M.contextBucket(frac)
+  local f = tonumber(frac)
+  if not f then return nil end
+  if f < 0 then f = 0 elseif f > 1 then f = 1 end
+  return math.floor(f * 40)
+end
+
+-- Voice dictation hard cap (seconds), read from cc-config `voice.maxSeconds`. Anti-runaway: a
+-- non-positive or non-numeric override falls back to the 120s default so ffmpeg never gets `-t 0`
+-- (which would record unbounded). Pure so the clamp is pinned by a test rather than a source grep.
+function M.voiceMaxSeconds(cfg)
+  local n = tonumber(M.config(cfg, "voice.maxSeconds", 120))
+  if not n or n <= 0 then return 120 end
+  return n
 end
 
 -- Next session after the one with key==afterKey (wraps to the front). Used by

@@ -3651,6 +3651,11 @@ controller:setCallback(function(msg)
 end)
 
 -- ---- Stream Deck (optional, plug-and-play) ------------------------------
+-- Deck runtime state. New deck state goes HERE (a field on `sd`), NOT as a new main-chunk local --
+-- this file is at Lua's 200-local ceiling. Holds: geometry (cols/rows/reserved/actionByKey), live
+-- toggles (recording/caffeine), the Jump cycle cursor (jumpKey/jumpTs), the voiceTask handle, the
+-- per-key repaint signature cache (sd.sig, lazily created), and the actionActive() predicate (both
+-- assigned below).
 local sd = { deck = nil, count = SD_FALLBACK_KEYS, size = { w = 72, h = 72 },
              buttons = {}, downAt = {}, blink = false,
              cols = 0, rows = 0, reserved = {}, actionByKey = {},
@@ -3778,7 +3783,7 @@ local function sdRender(list)
         if cf == nil and lastUsagePayload and lastUsagePayload.perSession then
           local ps = lastUsagePayload.perSession[item.key]; cf = ps and ps.context_frac or nil
         end
-        local cb = cf and math.floor((tonumber(cf) or 0) * 40) or -1  -- ~2.5% buckets
+        local cb = core.contextBucket(cf) or -1  -- ~2.5% buckets; -1 = no bar (see core.contextBucket)
         sig = "s:" .. tostring(item.status) .. ":" .. nm .. ":c" .. cb
              .. ((item.status == "approval") and (":" .. tostring(sd.blink)) or "")
       else
@@ -9811,7 +9816,7 @@ local function sdVoiceToggle()
   end
   local ff = resolveBin("ffmpeg", core.config(cfg, "voice.ffmpegBin", nil))
   local mic = core.config(cfg, "voice.micDevice", ":0")  -- avfoundation audio-only input
-  local maxSec = tonumber(core.config(cfg, "voice.maxSeconds", 120)) or 120  -- hard cap (anti-runaway)
+  local maxSec = core.voiceMaxSeconds(cfg)  -- hard cap, clamped >0 (anti-runaway; see core.voiceMaxSeconds)
   sd.voiceWav = (os.getenv("TMPDIR") or "/tmp/") .. "cc-voice.wav"
   local t = hs.task.new(ff, function(code, so, se)
     -- ffmpeg exited. If we're STILL "recording" here, it stopped ON ITS OWN (hit the -t cap,

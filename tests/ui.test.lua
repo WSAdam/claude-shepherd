@@ -1435,9 +1435,11 @@ do
         and src:find("FX.typeIntoWindow(target, text)", 1, true) ~= nil)
 
   -- Efficiency + safety pass
+  -- The cap VALUE/clamp is pinned in core.test (voiceMaxSeconds); here we only pin the wiring:
+  -- the cap is sourced from the helper and reaches ffmpeg's -t arg.
   check("sd-pin: Voice recorder has a hard -t cap + auto-resets REC when ffmpeg self-exits (anti-runaway)",
         src:find('"-t", tostring(maxSec)', 1, true) ~= nil
-        and src:find('core.config(cfg, "voice.maxSeconds"', 1, true) ~= nil)
+        and src:find("core.voiceMaxSeconds(cfg)", 1, true) ~= nil)
   check("sd-pin: deck repaints only keys whose content signature changed (per-tick diff)",
         src:find("if sd.sig[i] ~= sig then", 1, true) ~= nil)
   check("sd-pin: panel ccUpdate push skipped when the panel is hidden (panelVisible gate)",
@@ -1445,9 +1447,12 @@ do
   check("sd-pin: 'Forget tile' drops the tile via removeStatus with NO window close (orphan-safe)",
         src:find('title = "Forget tile (no close)"', 1, true) ~= nil
         and src:find("FX.removeStatus(item.key)", 1, true) ~= nil)
+  -- Bar presence + perSession fallback is glue (grep); the bucket math/clamp is pinned by VALUE
+  -- in core.test (contextBucket) and wired here via core.contextBucket in the repaint signature.
   check("sd-pin: session keys draw a context-fill bar (it.context_frac, perSession fallback)",
         src:find("local cf = item.context_frac", 1, true) ~= nil
-        and src:find("ps and ps.context_frac", 1, true) ~= nil)
+        and src:find("ps and ps.context_frac", 1, true) ~= nil
+        and src:find("core.contextBucket(cf)", 1, true) ~= nil)
   check("sd-pin: caffeine keep-awake key reserved bottom-right (sd.count) + cached state on sd.caffeine",
         src:find('sd.actionByKey[sd.count] = "caffeine"', 1, true) ~= nil
         and src:find("local function sdCaffeine()", 1, true) ~= nil

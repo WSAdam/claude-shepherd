@@ -273,6 +273,25 @@ do
   eq("sessionForTitle: matches the project in the window title", hit and hit.key, "a")
   eq("sessionForTitle: empty title -> nil", core.sessionForTitle(list, "", "adam"), nil)
   eq("sessionForTitle: no match -> nil", core.sessionForTitle(list, "Slack | general", "adam"), nil)
+  -- tie-break: when two sessions both appear in the title, the exact folder segment (rank 2)
+  -- must win over a bare substring (rank 1) -- NOT first-found. "qb" contains-matches the
+  -- "qb-interface" segment, but "qb-interface" IS the segment, so it wins.
+  local amb = {
+    { key = "x", name = "qb" },
+    { key = "y", name = "qb-interface" },
+  }
+  eq("sessionForTitle: exact segment beats substring",
+     (core.sessionForTitle(amb, "index.ts — qb-interface", "adam") or {}).key, "y")
+  -- order-independent: same result with the higher-rank session listed first
+  local ambRev = {
+    { key = "y", name = "qb-interface" },
+    { key = "x", name = "qb" },
+  }
+  eq("sessionForTitle: exact segment wins regardless of list order",
+     (core.sessionForTitle(ambRev, "index.ts — qb-interface", "adam") or {}).key, "y")
+  -- when only the plain 'qb' is a real segment ('qb-interface' doesn't appear), it's chosen
+  eq("sessionForTitle: substring session chosen when it's the only match",
+     (core.sessionForTitle(amb, "notes — qb", "adam") or {}).key, "x")
 end
 
 -- ---- hotkey helpers --------------------------------------------------------
@@ -1791,6 +1810,23 @@ do
   eq("band: 0.94 -> b5", core.contextBand(0.94), "b5")
   eq("band: 0.95 -> b6 (last 5%)", core.contextBand(0.95), "b6")
   eq("band: 1.0 -> b6", core.contextBand(1.0), "b6")
+  -- contextBucket: deck repaint signature -- ~2.5% steps (0..40), clamped, nil for no-bar
+  eq("bucket: 0 -> 0", core.contextBucket(0), 0)
+  eq("bucket: 0.5 -> 20", core.contextBucket(0.5), 20)
+  eq("bucket: 1.0 -> 40", core.contextBucket(1.0), 40)
+  eq("bucket: >1 clamps to 40", core.contextBucket(1.7), 40)
+  eq("bucket: <0 clamps to 0", core.contextBucket(-0.3), 0)
+  eq("bucket: nil -> nil (no bar)", core.contextBucket(nil), nil)
+  eq("bucket: non-numeric -> nil", core.contextBucket("x"), nil)
+  -- the threshold that drives a repaint: 0.59 vs 0.61 land in DIFFERENT buckets
+  eq("bucket: 0.59 and 0.61 differ (repaint trigger)",
+     core.contextBucket(0.59) ~= core.contextBucket(0.61), true)
+  -- voiceMaxSeconds: hard cap, default 120, clamps non-positive to default (no `-t 0`)
+  eq("voiceMax: default 120", core.voiceMaxSeconds({}), 120)
+  eq("voiceMax: override applied", core.voiceMaxSeconds({ voice = { maxSeconds = 45 } }), 45)
+  eq("voiceMax: zero -> default", core.voiceMaxSeconds({ voice = { maxSeconds = 0 } }), 120)
+  eq("voiceMax: negative -> default", core.voiceMaxSeconds({ voice = { maxSeconds = -10 } }), 120)
+  eq("voiceMax: non-numeric -> default", core.voiceMaxSeconds({ voice = { maxSeconds = "nope" } }), 120)
 end
 
 -- ---- path helpers (folder browser) -----------------------------------------
@@ -3978,6 +4014,13 @@ do
   -- F-key with empty mods is the ONLY legal no-modifier binding
   eq("resolveHotkeys: F-key no-mods allowed",
      combo(core.resolveHotkeys({ hotkeys = { cycle = { mods = {}, key = "f13" } } }).cycle), "F13")
+  eq("resolveHotkeys: F20 (top of range) no-mods allowed",
+     combo(core.resolveHotkeys({ hotkeys = { cycle = { mods = {}, key = "f20" } } }).cycle), "F20")
+  -- ...but a bare key outside F1..F20 is a dead key, not a binding -> revert to default:
+  eq("resolveHotkeys: bare f0 (no such key) -> default",
+     combo(core.resolveHotkeys({ hotkeys = { cycle = { mods = {}, key = "f0" } } }).cycle), "⌥⌘N")
+  eq("resolveHotkeys: bare f25 (above F20) -> default",
+     combo(core.resolveHotkeys({ hotkeys = { cycle = { mods = {}, key = "f25" } } }).cycle), "⌥⌘N")
   -- malformed entries each fall back to the default:
   eq("resolveHotkeys: unknown mod -> default",
      combo(core.resolveHotkeys({ hotkeys = { spawn = { mods = { "hyper" }, key = "s" } } }).spawn), "⌥⌘S")
