@@ -1433,6 +1433,18 @@ do
         and src:find('resolveBin("whisper-cli"', 1, true) ~= nil
         and src:find("core.sessionForTitle(list, fw", 1, true) ~= nil
         and src:find("FX.typeIntoWindow(target, text)", 1, true) ~= nil)
+
+  -- Efficiency + safety pass
+  check("sd-pin: Voice recorder has a hard -t cap + auto-resets REC when ffmpeg self-exits (anti-runaway)",
+        src:find('"-t", tostring(maxSec)', 1, true) ~= nil
+        and src:find('core.config(cfg, "voice.maxSeconds"', 1, true) ~= nil)
+  check("sd-pin: deck repaints only keys whose content signature changed (per-tick diff)",
+        src:find("if sd.sig[i] ~= sig then", 1, true) ~= nil)
+  check("sd-pin: panel ccUpdate push skipped when the panel is hidden (panelVisible gate)",
+        src:find("running JS into a hidden webview is wasted work", 1, true) ~= nil)
+  check("sd-pin: 'Forget tile' drops the tile via removeStatus with NO window close (orphan-safe)",
+        src:find('title = "Forget tile (no close)"', 1, true) ~= nil
+        and src:find("FX.removeStatus(item.key)", 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

@@ -4,6 +4,30 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-16 (efficiency + safety) — voice cap, deck repaint diff, hidden-panel skip, Forget tile
+
+A footprint pass after measuring Shepherd at ~250 MB / ~6% of one core (vs ~9.5 GB for the user's
+Electron apps — Shepherd is not the cause of their typing lag, but these are real efficiency wins),
+plus the promised orphan-safe tile dismiss.
+
+- **Voice recorder safety cap (bug):** a tested recording left `ffmpeg` running **21 minutes** into a
+  34 MB wav — it records with no time limit, so a missed second-tap = infinite capture. Added a hard
+  `-t voice.maxSeconds` cap (default 120s) AND a reset in the task's exit callback: if ffmpeg exits
+  while `sd.recording` is still true (cap hit / mic-permission denied / device error), the REC state
+  is cleared and the key repainted, so it can't get stuck or run unbounded.
+- **Deck repaint diffing:** `sdRender` was repainting all 32 keys every second (canvas encode + USB
+  write) regardless of change. Now it computes a cheap per-key content signature (status + display
+  name, plus `sd.blink` for the pulsing approval keys) and only re-renders the keys that actually
+  changed — 32 repaints/sec down to ~0 at steady state. Signature cache cleared on (re)connect.
+- **Hidden-panel skip:** the per-tick full-list JSON encode + `window.ccUpdate` push now only runs
+  when `panelVisible`; encoding into a hidden webview was wasted work. The deck + the rest of the tick
+  still run, and re-showing repopulates within a tick.
+- **Forget tile (orphan-safe dismiss):** new right-click **"Forget tile (no close)"** that just
+  `removeStatus`es the tile — NO window keystroke, so (unlike "Close instance", which title-matches
+  the window) it can't close a live twin that shares the name. The fix for the stale-Autobottom
+  hazard documented yesterday.
+- Suite **2005 core + 530 ui + 183 bash + smoke**, green.
+
 ## 2026-06-16 — Stream Deck: label fix, safe "Forget tile", + a global action row (incl. local voice)
 
 Stream Deck work, in three parts.

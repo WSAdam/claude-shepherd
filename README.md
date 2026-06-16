@@ -138,7 +138,13 @@ tile to **jump** straight to its window. **Right-click** a tile for a context me
 - **Clear conversation / Compact** — native confirm, then run `/clear` or `/compact`
   in the session (same effect as the detail-panel buttons).
 - **Close instance** — confirm, then best-effort close the editor window (⌘⇧W) and
-  remove the tile (the project's saved label is kept for next time).
+  remove the tile (the project's saved label is kept for next time). *Note:* it finds
+  the window by **title**, so for two sessions sharing a name, prefer **Forget tile** to
+  clear a stale one (Close could match the live twin's window).
+- **Forget tile (no close)** — just drops the dashboard tile (removes its status file)
+  with **no window keystroke**, so it can't close a live session that shares the name.
+  Use it for stale/orphan tiles (a session that ended without a clean `SessionEnd`). A
+  still-running session simply reappears on its next hook event — so it's always safe.
 - **Drain (finish turn, then close)** — *shown when `drain.enabled`*: wait for the
   session to finish its in-flight turn, then close it (closes now if already idle/done).
 - **Respawn from cwd** — *shown when `respawn.enabled`*: relaunch a dead/stale session
@@ -913,7 +919,8 @@ the XL). These are reserved for fleet actions instead of sessions; sessions fill
   **project window you have focused** (auto-submits by default). Needs `brew install
   whisper-cpp ffmpeg`, a model at `voice.model` (e.g. `ggml-base.en.bin`), and Microphone
   permission for Hammerspoon. Tune under `voice` in cc-config.json (`model` / `micDevice` /
-  `autoSend`). Set `STREAMDECK_ACTIONS = false` to give those four keys back to sessions.
+  `autoSend` / `maxSeconds` — a hard recording cap, default 120s, so a missed second-tap can't
+  record forever). Set `STREAMDECK_ACTIONS = false` to give those four keys back to sessions.
 
 Tunables near the top of [claude-dashboard.lua](claude-dashboard.lua):
 `STREAMDECK_ENABLED`, `STREAMDECK_ACTIONS`, `SD_LONG_PRESS`, `SD_LONG_PRESS_STOPS`,

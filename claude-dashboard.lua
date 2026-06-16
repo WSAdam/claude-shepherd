@@ -3482,6 +3482,15 @@ local function handleBridgeMsg(msg)
               end },
             { title = "Cancel", fn = function() end },
         } },
+        -- Forget JUST drops the dashboard tile (removeStatus) with NO window keystroke, so --
+        -- unlike "Close instance" -- it can't match + close a live twin that shares this name
+        -- (the title-match hazard). Safe for stale orphans; a still-live session simply
+        -- reappears on its next hook event, so no confirm is needed.
+        { title = "Forget tile (no close)", fn = function()
+            FX.removeStatus(item.key)
+            print("[cc-dashboard] forgot tile " .. tostring(item.key) .. " (" .. tostring(shown) .. ")")
+            refresh()
+          end },
       }
       -- Drain (Feature F): finish the in-flight turn, then close. While working/
       -- waiting, arm the in-memory flag; if already idle/done there's no turn to
@@ -3721,18 +3730,36 @@ local function sdRender(list)
   if not sd.deck then return end
   local reserved = sd.reserved or {}
   local lay = core.deckLayout(sd.count, list, reserved)
+  sd.sig = sd.sig or {}
   for i = 1, sd.count do
+    -- Cheap content signature per key; the canvas render + USB write only fire when it changes.
+    local sig
     if reserved[i] then
       sd.buttons[i] = nil
       local name = sd.actionByKey[i]
-      local active = (name == "voice") and sd.recording or false
-      local ok, img = pcall(sdActionImage, SD_ACTION_SPECS[name], active)
-      if ok and img then pcall(function() sd.deck:setButtonImage(i, img) end) end
+      sig = "a:" .. tostring(name) .. ":" .. tostring((name == "voice") and sd.recording or false)
     else
       local item = lay.items[i]
       sd.buttons[i] = item and item.key or nil
-      local ok, img = pcall(sdButtonImage, item)
-      if ok and img then pcall(function() sd.deck:setButtonImage(i, img) end) end
+      if item then
+        local nm = item.label or item.autoTitle or item.name or "?"
+        -- approval keys blink, so fold in sd.blink (they repaint each tick); every other key
+        -- only repaints when its status/name actually changes.
+        sig = "s:" .. tostring(item.status) .. ":" .. nm
+             .. ((item.status == "approval") and (":" .. tostring(sd.blink)) or "")
+      else
+        sig = "blank"
+      end
+    end
+    if sd.sig[i] ~= sig then  -- only re-render the keys that changed (32/sec -> ~0 at steady state)
+      local ok, img
+      if reserved[i] then
+        local name = sd.actionByKey[i]
+        ok, img = pcall(sdActionImage, SD_ACTION_SPECS[name], (name == "voice") and sd.recording or false)
+      else
+        ok, img = pcall(sdButtonImage, lay.items[i])
+      end
+      if ok and img then pcall(function() sd.deck:setButtonImage(i, img) end); sd.sig[i] = sig end
     end
   end
   if lay.overflow > 0 then
@@ -3775,6 +3802,7 @@ local function sdStart()
         if a and b then sd.count = a * b; sd.cols = a; sd.rows = b
         elseif a then sd.count = a; sd.cols = a; sd.rows = 1 end
         if not sd.count or sd.count < 1 then sd.count = SD_FALLBACK_KEYS end
+        sd.sig = {}  -- drop the repaint cache so a (re)connect repaints every key
         -- Reserve the bottom-left N keys for the global action row, but only on a deck big
         -- enough to spare them (>= 4 cols, >= 2 rows). Sessions fill every other key.
         sd.reserved, sd.actionByKey, sd.actionCount = {}, {}, 0
@@ -3796,7 +3824,7 @@ local function sdStart()
         sdRender(refreshList())
       else
         print("[cc-streamdeck] disconnected")
-        if sd.deck == deck then sd.deck = nil; sd.buttons = {} end
+        if sd.deck == deck then sd.deck = nil; sd.buttons = {}; sd.sig = {} end
       end
     end)
   end)
@@ -9546,14 +9574,20 @@ function refresh()
     end
   end
 
-  local payload = (#list == 0) and "[]" or hs.json.encode(list)
-  local provs = core.config(cfg, "providers", nil)  -- reuse the cfg loaded above
-  local provJson = (type(provs) == "table") and hs.json.encode(provs) or "[]"
-  local bundleNames = {}
-  for name in pairs(core.policyBundles(cfg)) do bundleNames[#bundleNames + 1] = name end
-  table.sort(bundleNames)
-  local bundleJson = hs.json.encode(bundleNames)
-  wv:evaluateJavaScript("window.ccUpdate(" .. payload .. ", " .. provJson .. ", " .. bundleJson .. ")")
+  -- Push the full session payload to the panel -- but ONLY when it's shown. Encoding the list +
+  -- running JS into a hidden webview is wasted work every tick; re-showing repopulates it on the
+  -- next tick (<=1s). Gate on our own `panelVisible` flag (reliable, set by hide/show) rather than
+  -- a window query. The Stream Deck + the rest of the tick still run, so nothing else goes stale.
+  if panelVisible then
+    local payload = (#list == 0) and "[]" or hs.json.encode(list)
+    local provs = core.config(cfg, "providers", nil)  -- reuse the cfg loaded above
+    local provJson = (type(provs) == "table") and hs.json.encode(provs) or "[]"
+    local bundleNames = {}
+    for name in pairs(core.policyBundles(cfg)) do bundleNames[#bundleNames + 1] = name end
+    table.sort(bundleNames)
+    local bundleJson = hs.json.encode(bundleNames)
+    wv:evaluateJavaScript("window.ccUpdate(" .. payload .. ", " .. provJson .. ", " .. bundleJson .. ")")
+  end
 
   -- Paint the Stream Deck from the SAME fully-decorated `list` the panel just got. MUST run
   -- after applyLabelsByCwd + the auto-title pass above, else the keys show the raw folder name
@@ -9737,13 +9771,23 @@ local function sdVoiceToggle()
   end
   local ff = resolveBin("ffmpeg", core.config(cfg, "voice.ffmpegBin", nil))
   local mic = core.config(cfg, "voice.micDevice", ":0")  -- avfoundation audio-only input
+  local maxSec = tonumber(core.config(cfg, "voice.maxSeconds", 120)) or 120  -- hard cap (anti-runaway)
   sd.voiceWav = (os.getenv("TMPDIR") or "/tmp/") .. "cc-voice.wav"
   local t = hs.task.new(ff, function(code, so, se)
+    -- ffmpeg exited. If we're STILL "recording" here, it stopped ON ITS OWN (hit the -t cap,
+    -- mic permission denied, or a device error) rather than via our stop tap -- reset the UI so
+    -- the VOICE key can't get stuck on REC and ffmpeg can't keep recording unbounded (the 21-min
+    -- runaway). No transcribe: the user didn't tap stop.
+    if sd.recording then
+      sd.recording = false; sd.voiceTask = nil
+      pcall(function() sdPaintAction("voice") end)
+      hs.alert.show("🎙 Voice: recording ended (" .. maxSec .. "s cap or mic error) — tap to record")
+    end
     if code and code ~= 0 and code ~= 143 and code ~= 255 then
       print("[cc-streamdeck] ffmpeg exited " .. tostring(code) .. ": " .. tostring(se))
     end
   end, { "-hide_banner", "-loglevel", "error", "-f", "avfoundation", "-i", mic,
-         "-ar", "16000", "-ac", "1", "-y", sd.voiceWav })
+         "-ar", "16000", "-ac", "1", "-t", tostring(maxSec), "-y", sd.voiceWav })
   if t and t:start() then
     sd.voiceTask = t; sd.recording = true; sdPaintAction("voice")
     hs.alert.show("🎙 Recording — tap VOICE again to send")

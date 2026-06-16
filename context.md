@@ -133,6 +133,25 @@ network, no multi-user, no secrets — it reads session status off the local fil
   dashboard → mirror in the panel JS if it affects rendering (and note the twin) → `make test`
   (smoke included) → deploy.
 
+## State (2026-06-16) — Stream Deck efficiency + safety pass
+
+Measured Shepherd at ~250 MB / ~6% of one core (Hammerspoon 151 MB + the WebKit panel webview
+~71 MB); it is NOT the cause of the user's typing lag (that's ~9.5 GB of Electron on a 16 GB Mac →
+9 GB swap). Footprint wins + one bug:
+
+- **Deck repaint is now diffed:** `sdRender` keeps `sd.sig[i]` (a content signature: status + display
+  name, + `sd.blink` only for approval keys) and re-renders/USB-writes a key ONLY when its signature
+  changes — was repainting all 32 keys every tick. Cache cleared on (re)connect/disconnect.
+- **Panel push gated on `panelVisible`:** the per-tick `hs.json.encode(list)` + `window.ccUpdate` only
+  runs when shown (NOT `panelIsOnScreen()` — that consults the window and broke the headless smoke
+  path; `panelVisible` is our own reliable flag). Deck + rest of the tick still run.
+- **Voice anti-runaway:** ffmpeg records with `-t voice.maxSeconds` (default 120) AND the task exit
+  callback resets `sd.recording`/repaints if it exits while still "recording" (cap/mic-deny/device
+  error) — fixes a 21-min orphaned recording found in the wild.
+- **Forget tile:** right-click "Forget tile (no close)" = `FX.removeStatus(item.key)` only, NO
+  `closeWindow` — the orphan-safe counterpart to "Close instance" (which title-matches the window and
+  can close a live same-named twin).
+
 ## State (2026-06-16) — Stream Deck action row + local voice
 
 - **Deck label fix:** keys now use `item.label or item.autoTitle or item.name` (panel parity), and

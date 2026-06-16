@@ -187,6 +187,7 @@
     "model": "~/.cache/whisper/ggml-base.en.bin",
     "micDevice": ":0",
     "autoSend": true,
+    "maxSeconds": 120,
     "whisperBin": "",
     "ffmpegBin": ""
   }
