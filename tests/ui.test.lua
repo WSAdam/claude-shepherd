@@ -1457,6 +1457,10 @@ do
         src:find('sd.actionByKey[sd.count] = "caffeine"', 1, true) ~= nil
         and src:find("local function sdCaffeine()", 1, true) ~= nil
         and src:find("FX.setCaffeinate(not (sd.caffeine == true))", 1, true) ~= nil)
+  check("sd-pin: App Tab (real ⌘-Tab keystroke) reserved just left of caffeine (sd.count - 1)",
+        src:find('sd.actionByKey[sd.count - 1] = "apptab"', 1, true) ~= nil
+        and src:find('hs.eventtap.keyStroke({ "cmd" }, "tab")', 1, true) ~= nil
+        and src:find('elseif name == "apptab" then sdAppTab()', 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

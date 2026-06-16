@@ -3673,6 +3673,8 @@ local SD_ACTION_SPECS = {
   -- caffeine lives on the bottom-RIGHT key; base = sleep-ok (dim), active = keep-awake (amber).
   caffeine = { glyph = "☕", label = "SLEEP OK", bg = { red = 0.20, green = 0.18, blue = 0.16 },
                glyphActive = "☕", labelActive = "AWAKE", bgActive = { red = 0.62, green = 0.44, blue = 0.10 } },
+  -- apptab fires a real macOS ⌘-Tab (system app switcher), bottom-RIGHT just left of caffeine.
+  apptab = { glyph = "⌘⇥", label = "APP TAB", bg = { red = 0.16, green = 0.22, blue = 0.30 }, glyphSize = 0.40 },
 }
 local sdRunAction  -- forward decl; the handlers need late-defined upvalues (assigned below)
 
@@ -3854,6 +3856,12 @@ local function sdStart()
           if not sd.reserved[sd.count] then
             sd.reserved[sd.count] = true
             sd.actionByKey[sd.count] = "caffeine"
+            sd.actionCount = sd.actionCount + 1
+          end
+          -- App-switch (⌘-Tab) just LEFT of caffeine (sd.count - 1), if that key is free.
+          if sd.count - 1 >= 1 and not sd.reserved[sd.count - 1] then
+            sd.reserved[sd.count - 1] = true
+            sd.actionByKey[sd.count - 1] = "apptab"
             sd.actionCount = sd.actionCount + 1
           end
         end
@@ -9852,11 +9860,20 @@ local function sdCaffeine()
   sdPaintAction("caffeine")
 end
 
+-- APP TAB: fire a real macOS ⌘-Tab so the OS's OWN app switcher handles it -- same MRU ordering
+-- and same two-app bounce as pressing ⌘-Tab on the keyboard (a tap flips to the previous app, the
+-- next tap flips back). We mirror cmd-tab exactly rather than reimplement it: hs.window.switcher
+-- only marched one way through a fixed list, which doesn't feel like cmd-tab. No on/off state.
+local function sdAppTab()
+  hs.eventtap.keyStroke({ "cmd" }, "tab")
+end
+
 sdRunAction = function(name)
   if name == "jump" then sdJump()
   elseif name == "approve" then sdApprove()
   elseif name == "spawn" then sdSpawn()
   elseif name == "voice" then sdVoiceToggle()
+  elseif name == "apptab" then sdAppTab()
   elseif name == "caffeine" then sdCaffeine() end
 end
 end  -- close the action-handlers do-block
