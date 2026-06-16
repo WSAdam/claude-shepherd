@@ -4,6 +4,23 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-16 (deck glance) — context-fill bar on session keys + ☕ caffeine key
+
+Two Stream Deck additions from real use:
+
+- **Context-fill bar:** every session key now draws a thin bar along its bottom edge showing how
+  full that session's context window is (green < 60% < amber < 85% < red). Sourced exactly like the
+  panel — the per-tick `it.context_frac`, falling back to the 60s usage aggregate
+  `lastUsagePayload.perSession[key].context_frac`. The fill bucket is folded into the key's repaint
+  signature, so it updates as context grows but doesn't churn the diff.
+- **☕ Caffeine key (bottom-right corner):** toggles keep-awake (same `pmset` path as the panel ☕,
+  so it asks for the admin password). Reserved on `sd.count` (key 32 on the XL) alongside the
+  bottom-left action row. State is cached in `sd.caffeine` (read on the existing 10-tick `pmset`
+  cadence) so the key never shells out per render; the key shows amber AWAKE vs dim SLEEP OK.
+- Internals: a generic `sd.actionActive(name)` drives the on/off look (Voice=recording,
+  Caffeine=keep-awake); kept on the `sd` table (not main-chunk locals) to stay under Lua's 200-local
+  cap. Suite **2005 core + 532 ui + 183 bash + smoke**, green.
+
 ## 2026-06-16 (efficiency + safety) — voice cap, deck repaint diff, hidden-panel skip, Forget tile
 
 A footprint pass after measuring Shepherd at ~250 MB / ~6% of one core (vs ~9.5 GB for the user's

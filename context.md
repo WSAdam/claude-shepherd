@@ -133,6 +133,19 @@ network, no multi-user, no secrets — it reads session status off the local fil
   dashboard → mirror in the panel JS if it affects rendering (and note the twin) → `make test`
   (smoke included) → deploy.
 
+## State (2026-06-16) — Stream Deck glance: context bar + caffeine key
+
+- **Context-fill bar** on each session key: `sdButtonImage` reads `item.context_frac` (per tick),
+  else `lastUsagePayload.perSession[key].context_frac` (60s aggregate) — same precedence as the
+  panel. The fill bucket (`floor(cf*40)`) is in the repaint signature so it updates without churn.
+- **Caffeine key** on the bottom-right corner (`sd.count`), reserved next to the bottom-left action
+  row. Toggling calls `FX.setCaffeinate` (admin-password prompt, like the panel ☕). State is cached
+  in **`sd.caffeine`** (updated on the existing 10-tick pmset cadence) — the deck NEVER shells
+  `pmset` per render. `sd.actionActive(name)` is the generic on/off check (voice/caffeine).
+- Both `sd.actionActive` and the caffeine state live on the `sd` table, NOT as main-chunk locals —
+  the file is at Lua's 200-local ceiling, so new deck state goes on `sd` (or in the handler `do`
+  block) from here on.
+
 ## State (2026-06-16) — Stream Deck efficiency + safety pass
 
 Measured Shepherd at ~250 MB / ~6% of one core (Hammerspoon 151 MB + the WebKit panel webview

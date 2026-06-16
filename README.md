@@ -922,6 +922,14 @@ the XL). These are reserved for fleet actions instead of sessions; sessions fill
   `autoSend` / `maxSeconds` — a hard recording cap, default 120s, so a missed second-tap can't
   record forever). Set `STREAMDECK_ACTIONS = false` to give those four keys back to sessions.
 
+The **bottom-right** corner key is **☕ CAFFEINE** — toggles keep-awake (the same `pmset`
+keep-awake as the panel's ☕ button, so it asks for your admin password); the key shows amber
+**AWAKE** vs dim **SLEEP OK**.
+
+Each **session key** also draws a thin **context-fill bar** along its bottom edge — how full
+that session's context window is (green < 60% < amber < 85% < red), so you can see at a glance
+which sessions are getting close to a compact.
+
 Tunables near the top of [claude-dashboard.lua](claude-dashboard.lua):
 `STREAMDECK_ENABLED`, `STREAMDECK_ACTIONS`, `SD_LONG_PRESS`, `SD_LONG_PRESS_STOPS`,
 `SD_JUMP_RESET`, `SD_BRIGHTNESS`, `SD_FALLBACK_KEYS`. If you'd rather keep your normal Elgato profiles running,

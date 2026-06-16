@@ -186,6 +186,7 @@ local watchdog = {}      -- key -> { size, ts, alerted }: transcript progress + 
 local draining    = {}   -- key -> true: close on the next fresh `done` (Feature F)
 local gitRootByCwd = {}  -- cwd -> resolved git root ("" = not a repo) cache (Feature B)
 local caffeineTick = 0   -- throttles the keep-awake state re-read (F2)
+-- (cached keep-awake state lives on the `sd` table as sd.caffeine -- read by the deck key)
 local ledgerGcTick = 0   -- throttles the ledger retention GC (off the 180s timer)
 local lastNotifyCount = -1  -- 🔔 unseen-badge value last pushed to JS (-1 = never)
 local lastLedgerOn = nil    -- last ledger-on state pushed to JS (gates the 📋 Shift UI)
@@ -3653,7 +3654,7 @@ end)
 local sd = { deck = nil, count = SD_FALLBACK_KEYS, size = { w = 72, h = 72 },
              buttons = {}, downAt = {}, blink = false,
              cols = 0, rows = 0, reserved = {}, actionByKey = {},
-             recording = false, jumpKey = nil, jumpTs = 0, voiceTask = nil }
+             recording = false, caffeine = false, jumpKey = nil, jumpTs = 0, voiceTask = nil }
 
 -- Global action keys on the bottom-left row, left -> right. Each maps to a handler in
 -- sdRunAction (assigned far below, where showPanel/spawnPrompt/refreshList exist).
@@ -3664,8 +3665,19 @@ local SD_ACTION_SPECS = {
   spawn   = { glyph = "＋", label = "SPAWN",   bg = { red = 0.33, green = 0.22, blue = 0.55 }, glyphSize = 0.54 },
   voice   = { glyph = "🎙", label = "VOICE",   bg = { red = 0.40, green = 0.17, blue = 0.17 },
               glyphActive = "●", labelActive = "REC", bgActive = { red = 0.86, green = 0.16, blue = 0.16 } },
+  -- caffeine lives on the bottom-RIGHT key; base = sleep-ok (dim), active = keep-awake (amber).
+  caffeine = { glyph = "☕", label = "SLEEP OK", bg = { red = 0.20, green = 0.18, blue = 0.16 },
+               glyphActive = "☕", labelActive = "AWAKE", bgActive = { red = 0.62, green = 0.44, blue = 0.10 } },
 }
 local sdRunAction  -- forward decl; the handlers need late-defined upvalues (assigned below)
+
+-- Is an action key in its "active/on" state? (Voice = recording, Caffeine = keep-awake on.)
+-- Stored on the `sd` table (not a main-chunk local) to stay under Lua's 200-local cap.
+sd.actionActive = function(name)
+  if name == "voice" then return sd.recording == true end
+  if name == "caffeine" then return sd.caffeine == true end
+  return false
+end
 
 -- Render a "cool" action-key image: an accent rounded-rect + a top sheen + a big glyph +
 -- a label. `active` swaps the Voice key to its recording look (red, ● REC).
@@ -3690,8 +3702,7 @@ local function sdPaintAction(name)
   if not sd.deck then return end
   for idx, n in pairs(sd.actionByKey) do
     if n == name then
-      local active = (name == "voice") and sd.recording or false
-      local ok, img = pcall(sdActionImage, SD_ACTION_SPECS[name], active)
+      local ok, img = pcall(sdActionImage, SD_ACTION_SPECS[name], sd.actionActive(name))
       if ok and img then pcall(function() sd.deck:setButtonImage(idx, img) end) end
     end
   end
@@ -3719,8 +3730,27 @@ local function sdButtonImage(item)
   c[2] = { type = "text", text = name, textColor = { white = 1.0 }, textSize = h * 0.18,
            frame = { x = 3, y = h * 0.12, w = w - 6, h = h * 0.42 }, textAlignment = "center" }
   c[3] = { type = "text", text = core.SD_LABELS[st] or st, textColor = { white = 0.0, alpha = 0.75 },
-           textSize = h * 0.13, frame = { x = 3, y = h * 0.60, w = w - 6, h = h * 0.3 },
+           textSize = h * 0.13, frame = { x = 3, y = h * 0.56, w = w - 6, h = h * 0.3 },
            textAlignment = "center" }
+  -- Context-fullness bar along the bottom edge (same precedence as the panel: the per-tick
+  -- it.context_frac, else the 60s usage aggregate). green < 60% < amber < 85% < red.
+  local cf = item.context_frac
+  if cf == nil and lastUsagePayload and lastUsagePayload.perSession then
+    local ps = lastUsagePayload.perSession[item.key]
+    cf = ps and ps.context_frac or nil
+  end
+  cf = tonumber(cf)
+  if cf then
+    if cf < 0 then cf = 0 elseif cf > 1 then cf = 1 end
+    local bh, by, bx = h * 0.06, h * 0.90, 5
+    c[4] = { type = "rectangle", action = "fill", fillColor = { white = 0.0, alpha = 0.55 },
+             frame = { x = bx, y = by, w = w - bx * 2, h = bh }, roundedRectRadii = { xRadius = 3, yRadius = 3 } }
+    local fillCol = (cf >= 0.85) and { red = 0.94, green = 0.27, blue = 0.27 }
+                 or (cf >= 0.60) and { red = 0.96, green = 0.71, blue = 0.04 }
+                 or { red = 0.16, green = 0.80, blue = 0.42 }
+    c[5] = { type = "rectangle", action = "fill", fillColor = fillCol,
+             frame = { x = bx, y = by, w = (w - bx * 2) * cf, h = bh }, roundedRectRadii = { xRadius = 3, yRadius = 3 } }
+  end
   local img = c:imageFromCanvas(); c:delete(); return img
 end
 
@@ -3736,16 +3766,20 @@ local function sdRender(list)
     local sig
     if reserved[i] then
       sd.buttons[i] = nil
-      local name = sd.actionByKey[i]
-      sig = "a:" .. tostring(name) .. ":" .. tostring((name == "voice") and sd.recording or false)
+      sig = "a:" .. tostring(sd.actionByKey[i]) .. ":" .. tostring(sd.actionActive(sd.actionByKey[i]))
     else
       local item = lay.items[i]
       sd.buttons[i] = item and item.key or nil
       if item then
         local nm = item.label or item.autoTitle or item.name or "?"
-        -- approval keys blink, so fold in sd.blink (they repaint each tick); every other key
-        -- only repaints when its status/name actually changes.
-        sig = "s:" .. tostring(item.status) .. ":" .. nm
+        -- context-fill bucket (so the bar repaints as it grows); approval keys also fold in
+        -- sd.blink (they pulse); everything else only repaints when its content changes.
+        local cf = item.context_frac
+        if cf == nil and lastUsagePayload and lastUsagePayload.perSession then
+          local ps = lastUsagePayload.perSession[item.key]; cf = ps and ps.context_frac or nil
+        end
+        local cb = cf and math.floor((tonumber(cf) or 0) * 40) or -1  -- ~2.5% buckets
+        sig = "s:" .. tostring(item.status) .. ":" .. nm .. ":c" .. cb
              .. ((item.status == "approval") and (":" .. tostring(sd.blink)) or "")
       else
         sig = "blank"
@@ -3754,8 +3788,7 @@ local function sdRender(list)
     if sd.sig[i] ~= sig then  -- only re-render the keys that changed (32/sec -> ~0 at steady state)
       local ok, img
       if reserved[i] then
-        local name = sd.actionByKey[i]
-        ok, img = pcall(sdActionImage, SD_ACTION_SPECS[name], (name == "voice") and sd.recording or false)
+        ok, img = pcall(sdActionImage, SD_ACTION_SPECS[sd.actionByKey[i]], sd.actionActive(sd.actionByKey[i]))
       else
         ok, img = pcall(sdButtonImage, lay.items[i])
       end
@@ -3810,6 +3843,12 @@ local function sdStart()
           for i, kidx in ipairs(core.deckActionKeys(sd.cols, sd.rows, #SD_ACTION_ORDER)) do
             sd.reserved[kidx] = true
             sd.actionByKey[kidx] = SD_ACTION_ORDER[i]
+            sd.actionCount = sd.actionCount + 1
+          end
+          -- Caffeine (keep-awake) on the bottom-RIGHT corner key (sd.count), if free.
+          if not sd.reserved[sd.count] then
+            sd.reserved[sd.count] = true
+            sd.actionByKey[sd.count] = "caffeine"
             sd.actionCount = sd.actionCount + 1
           end
         end
@@ -9602,6 +9641,7 @@ function refresh()
   if caffeineTick == 1 then
     local caf = FX.caffeineState()
     if caf ~= nil then
+      sd.caffeine = caf  -- the Stream Deck caffeine key reads this cached value (no pmset/render)
       pcall(function() wv:evaluateJavaScript("setCaffeine(" .. tostring(caf) .. ")") end)
     end
   end
@@ -9796,11 +9836,23 @@ local function sdVoiceToggle()
   end
 end
 
+-- CAFFEINE: toggle keep-awake (☕). Like the panel button, FX.setCaffeinate asks for the admin
+-- password; then re-read the TRUE state (a cancelled prompt leaves it unchanged) and reflect it
+-- on both the panel and the deck key.
+local function sdCaffeine()
+  FX.setCaffeinate(not (sd.caffeine == true))
+  local state = FX.caffeineState()
+  if state ~= nil then sd.caffeine = state end
+  pcall(function() wv:evaluateJavaScript("setCaffeine(" .. tostring(sd.caffeine) .. ")") end)
+  sdPaintAction("caffeine")
+end
+
 sdRunAction = function(name)
   if name == "jump" then sdJump()
   elseif name == "approve" then sdApprove()
   elseif name == "spawn" then sdSpawn()
-  elseif name == "voice" then sdVoiceToggle() end
+  elseif name == "voice" then sdVoiceToggle()
+  elseif name == "caffeine" then sdCaffeine() end
 end
 end  -- close the action-handlers do-block
 

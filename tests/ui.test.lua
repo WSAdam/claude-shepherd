@@ -1445,6 +1445,13 @@ do
   check("sd-pin: 'Forget tile' drops the tile via removeStatus with NO window close (orphan-safe)",
         src:find('title = "Forget tile (no close)"', 1, true) ~= nil
         and src:find("FX.removeStatus(item.key)", 1, true) ~= nil)
+  check("sd-pin: session keys draw a context-fill bar (it.context_frac, perSession fallback)",
+        src:find("local cf = item.context_frac", 1, true) ~= nil
+        and src:find("ps and ps.context_frac", 1, true) ~= nil)
+  check("sd-pin: caffeine keep-awake key reserved bottom-right (sd.count) + cached state on sd.caffeine",
+        src:find('sd.actionByKey[sd.count] = "caffeine"', 1, true) ~= nil
+        and src:find("local function sdCaffeine()", 1, true) ~= nil
+        and src:find("FX.setCaffeinate(not (sd.caffeine == true))", 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
