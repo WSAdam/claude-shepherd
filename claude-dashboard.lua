@@ -3843,27 +3843,15 @@ local function sdStart()
         elseif a then sd.count = a; sd.cols = a; sd.rows = 1 end
         if not sd.count or sd.count < 1 then sd.count = SD_FALLBACK_KEYS end
         sd.sig = {}  -- drop the repaint cache so a (re)connect repaints every key
-        -- Reserve the bottom-left N keys for the global action row, but only on a deck big
-        -- enough to spare them (>= 4 cols, >= 2 rows). Sessions fill every other key.
+        -- Reserve the action keys: the left action row (jump/approve/spawn/voice) plus the
+        -- bottom-RIGHT tail (caffeine on the corner, app-switch just left of it). All the geometry
+        -- + free-slot logic lives in the pure core.deckReservations so it's value-tested; here we
+        -- just gate on the feature flag and copy the result onto `sd`. Sessions fill every other key.
         sd.reserved, sd.actionByKey, sd.actionCount = {}, {}, 0
-        if STREAMDECK_ACTIONS and sd.cols >= 4 and sd.rows >= 2 then
-          for i, kidx in ipairs(core.deckActionKeys(sd.cols, sd.rows, #SD_ACTION_ORDER)) do
-            sd.reserved[kidx] = true
-            sd.actionByKey[kidx] = SD_ACTION_ORDER[i]
-            sd.actionCount = sd.actionCount + 1
-          end
-          -- Caffeine (keep-awake) on the bottom-RIGHT corner key (sd.count), if free.
-          if not sd.reserved[sd.count] then
-            sd.reserved[sd.count] = true
-            sd.actionByKey[sd.count] = "caffeine"
-            sd.actionCount = sd.actionCount + 1
-          end
-          -- App-switch (⌘-Tab) just LEFT of caffeine (sd.count - 1), if that key is free.
-          if sd.count - 1 >= 1 and not sd.reserved[sd.count - 1] then
-            sd.reserved[sd.count - 1] = true
-            sd.actionByKey[sd.count - 1] = "apptab"
-            sd.actionCount = sd.actionCount + 1
-          end
+        if STREAMDECK_ACTIONS then
+          local r = core.deckReservations(sd.cols, sd.rows, sd.count, SD_ACTION_ORDER,
+                                          { "caffeine", "apptab" })
+          sd.reserved, sd.actionByKey, sd.actionCount = r.reserved, r.actionByKey, r.actionCount
         end
         local oks, sz = pcall(function() return deck:imageSize() end)
         if oks and sz and sz.w and sz.h then sd.size = { w = sz.w, h = sz.h } end

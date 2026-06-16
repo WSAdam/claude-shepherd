@@ -263,6 +263,38 @@ do
   eq("deckActionKeys: degenerate geometry -> none", #core.deckActionKeys(0, 0, 4), 0)
 end
 
+-- ---- deckReservations: action-row + bottom-right tail, with free-slot guard ----
+do
+  local ORDER = { "jump", "approve", "spawn", "voice" }
+  local TAIL  = { "caffeine", "apptab" }
+  -- XL 8x4: left row 25-28, caffeine on the corner (32), apptab just left of it (31). 6 actions.
+  local r = core.deckReservations(8, 4, 32, ORDER, TAIL)
+  eq("deckReservations: XL left row jump@25", r.actionByKey[25], "jump")
+  eq("deckReservations: XL left row voice@28", r.actionByKey[28], "voice")
+  eq("deckReservations: XL caffeine on corner (count)", r.actionByKey[32], "caffeine")
+  eq("deckReservations: XL apptab just left of caffeine (count-1)", r.actionByKey[31], "apptab")
+  eq("deckReservations: XL apptab slot reserved", r.reserved[31], true)
+  eq("deckReservations: XL session key 29 left free", r.reserved[29], nil)
+  eq("deckReservations: XL total action count", r.actionCount, 6)
+  -- Small deck where the left row reaches the right edge: caffeine + apptab slots are already
+  -- taken, so BOTH skip rather than clobbering a row action. This is the new guard's skip branch.
+  -- 4x2: count=8, deckActionKeys(4,2,4)={5,6,7,8}. caffeine wants 8 (taken), apptab wants 7 (taken).
+  local s = core.deckReservations(4, 2, 8, ORDER, TAIL)
+  eq("deckReservations: tight deck keeps voice@8 (caffeine skipped)", s.actionByKey[8], "voice")
+  eq("deckReservations: tight deck keeps spawn@7 (apptab skipped)", s.actionByKey[7], "spawn")
+  eq("deckReservations: tight deck only the 4 row actions", s.actionCount, 4)
+  -- apptab-specific branch: same geometry, but pretend only the apptab slot (count-1) is free.
+  -- 5x3: count=15, left row {11,12,13,14}. caffeine@15 free -> assigned; apptab@14 TAKEN -> skip.
+  local m = core.deckReservations(5, 3, 15, ORDER, TAIL)
+  eq("deckReservations: 5x3 caffeine assigned@15", m.actionByKey[15], "caffeine")
+  eq("deckReservations: 5x3 apptab skipped (14 is voice)", m.actionByKey[14], "voice")
+  eq("deckReservations: 5x3 count = 4 row + caffeine", m.actionCount, 5)
+  -- Decks below 4x2 host no action keys at all.
+  local tiny = core.deckReservations(3, 2, 6, ORDER, TAIL)
+  eq("deckReservations: sub-4-col deck -> no actions", tiny.actionCount, 0)
+  eq("deckReservations: sub-4-col deck -> nothing reserved", next(tiny.reserved), nil)
+end
+
 -- ---- sessionForTitle: reverse window->session match (deck Voice routing) ----
 do
   local list = {

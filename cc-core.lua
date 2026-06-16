@@ -1694,6 +1694,35 @@ function M.deckActionKeys(cols, rows, n)
   return out
 end
 
+-- Compute every global action-key reservation for a cols x rows deck (count = cols*rows). The
+-- `actionOrder` names fill the bottom row's leftmost keys (via deckActionKeys); the `tail` names
+-- are placed on the bottom-RIGHT, walking leftward from the last key (count, count-1, ...), each
+-- ONLY if its slot is still free -- so on a deck too narrow to spare them (the left row already
+-- reaches the right edge) they're silently skipped rather than overwriting a row action. Decks
+-- smaller than 4x2 host no action keys at all (sessions get every key). Returns { reserved = a
+-- {[idx]=true} set, actionByKey = {[idx]=name}, actionCount = N }. Pure: the dashboard feeds deck
+-- geometry in and copies the result onto `sd`, so both the happy path and the skip branch are
+-- pinned by value tests instead of a source grep.
+function M.deckReservations(cols, rows, count, actionOrder, tail)
+  local reserved, actionByKey, n = {}, {}, 0
+  actionOrder = actionOrder or {}
+  tail = tail or {}
+  count = tonumber(count) or 0
+  if (tonumber(cols) or 0) < 4 or (tonumber(rows) or 0) < 2 then
+    return { reserved = reserved, actionByKey = actionByKey, actionCount = 0 }
+  end
+  for i, kidx in ipairs(M.deckActionKeys(cols, rows, #actionOrder)) do
+    reserved[kidx] = true; actionByKey[kidx] = actionOrder[i]; n = n + 1
+  end
+  for i, name in ipairs(tail) do
+    local kidx = count - (i - 1)  -- count, count-1, ... walking left from the bottom-right corner
+    if kidx >= 1 and not reserved[kidx] then
+      reserved[kidx] = true; actionByKey[kidx] = name; n = n + 1
+    end
+  end
+  return { reserved = reserved, actionByKey = actionByKey, actionCount = n }
+end
+
 -- Hotkey helpers (used in Phase 2).
 function M.nextApproval(list)
   for _, it in ipairs(list or {}) do

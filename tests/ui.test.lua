@@ -1415,10 +1415,11 @@ do
          end)())
 
   -- Stream Deck global action row (bottom-left): Jump / Approve / Spawn / Voice
-  check("sd-pin: action row order jump,approve,spawn,voice + reserved via core.deckActionKeys",
+  -- The left-row order is fed to core.deckReservations (which calls deckActionKeys internally;
+  -- both are value-tested in core.test). Pin the order literal + that it's the order argument.
+  check("sd-pin: action row order jump,approve,spawn,voice fed to core.deckReservations",
         src:find('SD_ACTION_ORDER = { "jump", "approve", "spawn", "voice" }', 1, true) ~= nil
-        and src:find("core.deckActionKeys(sd.cols, sd.rows", 1, true) ~= nil
-        and src:find("sd.actionByKey[kidx] = SD_ACTION_ORDER[i]", 1, true) ~= nil)
+        and src:find("sd.count, SD_ACTION_ORDER", 1, true) ~= nil)
   check("sd-pin: action keys get a custom button image; deckLayout skips the reserved slots",
         src:find("local function sdActionImage(spec, active)", 1, true) ~= nil
         and src:find("core.deckLayout(sd.count, list, reserved)", 1, true) ~= nil)
@@ -1453,13 +1454,17 @@ do
         src:find("local cf = item.context_frac", 1, true) ~= nil
         and src:find("ps and ps.context_frac", 1, true) ~= nil
         and src:find("core.contextBucket(cf)", 1, true) ~= nil)
-  check("sd-pin: caffeine keep-awake key reserved bottom-right (sd.count) + cached state on sd.caffeine",
-        src:find('sd.actionByKey[sd.count] = "caffeine"', 1, true) ~= nil
+  -- The reservation geometry/free-slot logic (left row + caffeine + apptab tail) is value-tested
+  -- in core.test (deckReservations); here we pin the wiring: the dashboard feeds the tail
+  -- {caffeine, apptab} through it, and each action's handler does the right thing.
+  check("sd-pin: caffeine keep-awake key reserved via deckReservations tail + cached state on sd.caffeine",
+        src:find('{ "caffeine", "apptab" }', 1, true) ~= nil
         and src:find("local function sdCaffeine()", 1, true) ~= nil
         and src:find("FX.setCaffeinate(not (sd.caffeine == true))", 1, true) ~= nil)
-  check("sd-pin: App Tab (real ⌘-Tab keystroke) reserved just left of caffeine (sd.count - 1)",
-        src:find('sd.actionByKey[sd.count - 1] = "apptab"', 1, true) ~= nil
-        and src:find('hs.eventtap.keyStroke({ "cmd" }, "tab")', 1, true) ~= nil
+  check("sd-pin: deck action reservations come from pure core.deckReservations (left row + tail)",
+        src:find("core.deckReservations(sd.cols, sd.rows, sd.count, SD_ACTION_ORDER", 1, true) ~= nil)
+  check("sd-pin: App Tab fires a real ⌘-Tab keystroke via its sdRunAction arm",
+        src:find('hs.eventtap.keyStroke({ "cmd" }, "tab")', 1, true) ~= nil
         and src:find('elseif name == "apptab" then sdAppTab()', 1, true) ~= nil)
 end
 
