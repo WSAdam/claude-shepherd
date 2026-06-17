@@ -5399,12 +5399,18 @@ function M.parseSkillFrontmatter(text, stem)
         if v == ">" or v == ">-" or v == ">+" or v == "|" or v == "|-" or v == "|+" then
           local base, parts, j = #indent, {}, i + 1
           while j <= #lines do
-            if lines[j]:match("^%s*$") then parts[#parts + 1] = ""; j = j + 1
-            elseif #(lines[j]:match("^(%s*)")) > base then parts[#parts + 1] = agTrim(lines[j]); j = j + 1
-            else break end
+            local cur = lines[j]
+            if cur:match("^%s*$") then
+              parts[#parts + 1] = ""                      -- blank line inside the block
+            elseif #(cur:match("^(%s*)")) > base then
+              parts[#parts + 1] = agTrim(cur)             -- a more-indented body line
+            else
+              break                                        -- de-dent: end of the block (not consumed)
+            end
+            j = j + 1                                       -- both gather arms advance; only break stops
           end
           v = agTrim((table.concat(parts, " "):gsub("%s+", " ")))
-          i = j - 1
+          i = j - 1   -- rewind: the de-dent line wasn't consumed, the loop's i+1 re-reads it as a key
         else
           v = v:gsub('^"(.*)"$', "%1"):gsub("^'(.*)'$", "%1")
         end
@@ -5619,6 +5625,20 @@ function M.worklistToggle(state, scope, id)
   for _, it in ipairs(M.worklistScopeList(state, scope)) do
     if it.id == id then it.done = not it.done; break end
   end
+  return state
+end
+
+-- Remove one item by id from a scope (the per-item ✕ delete). Rebuilds the scope
+-- list without the matching id; an unknown id is a no-op. Mirrors clearDone's
+-- write-through (assign the kept list back to the right container). Pure.
+function M.worklistRemove(state, scope, id)
+  if type(state) ~= "table" then return state or {} end
+  local kept = {}
+  for _, it in ipairs(M.worklistScopeList(state, scope)) do
+    if it.id ~= id then kept[#kept + 1] = it end
+  end
+  if scope == nil or scope == "generic" then state.generic = kept
+  else state.byProject = state.byProject or {}; state.byProject[scope] = kept end
   return state
 end
 

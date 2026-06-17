@@ -4546,6 +4546,39 @@ do
   eq("clearDone(project): drops done in that project", #core.worklistScopeList(cd, "proj:/p"), 1)
   eq("clearDone(project): keeps the active one", core.worklistScopeList(cd, "proj:/p")[1].id, "b")
   eq("clearDone(project): leaves generic untouched", #core.worklistScopeList(cd, "generic"), 1)
+
+  -- worklistRemove: per-item ✕ delete (works on active OR done items, by id)
+  local rm = { generic = { { id = "a", text = "1st", done = false },
+                           { id = "b", text = "2nd", done = true  },
+                           { id = "c", text = "3rd", done = false } },
+               byProject = { ["proj:/r"] = { { id = "x", text = "px", done = false },
+                                             { id = "y", text = "py", done = false } } } }
+  core.worklistRemove(rm, "generic", "b")  -- delete a DONE item by id
+  eq("remove: drops the targeted item", #core.worklistScopeList(rm, "generic"), 2)
+  eq("remove: survivors keep order (1st)", core.worklistScopeList(rm, "generic")[1].id, "a")
+  eq("remove: survivors keep order (3rd)", core.worklistScopeList(rm, "generic")[2].id, "c")
+  core.worklistRemove(rm, "generic", "a")  -- delete an ACTIVE item by id
+  eq("remove: active item deletes too", #core.worklistScopeList(rm, "generic"), 1)
+  eq("remove: last survivor is c", core.worklistScopeList(rm, "generic")[1].id, "c")
+  -- unknown id is a no-op (no crash, nothing dropped)
+  core.worklistRemove(rm, "generic", "nope")
+  eq("remove: unknown id is a no-op", #core.worklistScopeList(rm, "generic"), 1)
+  -- scope isolation: removing from generic left the project list untouched
+  eq("remove: other scope untouched", #core.worklistScopeList(rm, "proj:/r"), 2)
+  -- project-scope branch deletes by id there too
+  core.worklistRemove(rm, "proj:/r", "x")
+  eq("remove(project): drops in that project", #core.worklistScopeList(rm, "proj:/r"), 1)
+  eq("remove(project): keeps the other one", core.worklistScopeList(rm, "proj:/r")[1].id, "y")
+  eq("remove(project): leaves generic untouched", #core.worklistScopeList(rm, "generic"), 1)
+  -- removing every item empties the scope (not a crash, just an empty list)
+  core.worklistRemove(rm, "generic", "c")
+  eq("remove: emptying a scope is fine", #core.worklistScopeList(rm, "generic"), 0)
+  -- tolerant of nil/garbled state and unknown scope (mirrors clearDone: the guard
+  -- only prevents a crash on non-table state; real callers always pass a table)
+  eq("remove: nil state -> empty distinct", #core.worklistScopeList(core.worklistRemove(nil, "generic", "z"), "generic"), 0)
+  check("remove: non-table state does not crash", (pcall(core.worklistRemove, "nope", "generic", "z")))
+  core.worklistRemove(rm, "proj:/unknown", "z")  -- unknown project scope: no crash
+  eq("remove: unknown project scope is a no-op", #core.worklistScopeList(rm, "proj:/unknown"), 0)
 end
 
 -- ---- L1: persona / extra flags / resolver / env ----------------------------

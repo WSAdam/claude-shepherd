@@ -16,6 +16,7 @@ has() { grep -qF "$1" "$DASH" && echo yes || echo no; }
 assert_eq "group filter chip label is esc()'d"  "yes" "$(has 'esc(g)')"
 assert_eq "per-tile group tag is esc()'d"        "yes" "$(has 'esc(it.group)')"
 assert_eq "tile display label/name is esc()'d"   "yes" "$(has 'esc(it.label')"
+assert_eq "worklist item text is esc()'d"        "yes" "$(has 'esc(it.text')"
 
 # 2. esc() itself still entity-encodes the HTML metacharacters (not gutted to a no-op)
 assert_eq "esc() encodes &"  "yes" "$(has '.replace(/&/g,"&amp;")')"

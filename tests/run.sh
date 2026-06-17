@@ -30,6 +30,9 @@ echo ""
 echo "== bash: xss escaping tripwire =="
 bash "$DIR/escaping.test.sh" || fail=1
 echo ""
+echo "== bash: worklist UI wiring tripwire =="
+bash "$DIR/worklist-ui.test.sh" || fail=1
+echo ""
 echo "== lua: cc-core =="
 lua "$DIR/core.test.lua" || fail=1
 echo ""

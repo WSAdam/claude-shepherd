@@ -1076,7 +1076,10 @@ function FX.readWorklist()
 end
 function FX.writeWorklist(state)
   local WORKLIST_FILE = os.getenv("CC_WORKLIST_FILE") or (os.getenv("HOME") .. "/.claude/cc-worklist.json")
-  hs.fs.mkdir(CLAUDE_DIR)
+  -- Create the dir of the file we actually write (CC_WORKLIST_FILE may point
+  -- outside ~/.claude, e.g. in tests); mkdir(CLAUDE_DIR) would miss that parent.
+  local dir = WORKLIST_FILE:match("^(.*)/[^/]+$")
+  if dir then hs.fs.mkdir(dir) end
   FX.writeFile(WORKLIST_FILE, core.json.encode(state or { generic = {}, byProject = {} }))
 end
 -- Mint a unique worklist item id (time + small random; collisions are irrelevant
@@ -1514,7 +1517,10 @@ function FX.liveMcpList(cb)
       if #list > 0 or code == 0 then
         if cb then cb(list) end
       elseif cb then
-        local notFound = text:find("command not found") or text:find("not found")
+        -- ONLY the shell's "command not found" means the CLI is absent. A bare
+        -- "not found" can appear in a server's failure status/URL (e.g. "404 not
+        -- found"), which would mislead a healthy-CLI/failing-servers run.
+        local notFound = text:find("command not found")
         cb(nil, notFound and "claude CLI not found on your shell PATH"
                          or ((stderr ~= "" and stderr) or "`claude mcp list` failed"))
       end
@@ -3175,11 +3181,12 @@ local function handleBridgeMsg(msg)
     pcall(function() wv:evaluateJavaScript("window.ccWorklist(" .. hs.json.encode(FX.worklistPayload()) .. ")") end)
     return
   end
-  if a == "worklist-add" or a == "worklist-toggle" or a == "worklist-clear-done" then
+  if a == "worklist-add" or a == "worklist-toggle" or a == "worklist-remove" or a == "worklist-clear-done" then
     local scope = tostring(payload.v or "generic")
     local st = FX.readWorklist()
     if a == "worklist-add" then core.worklistAdd(st, scope, tostring(payload.text or ""), FX.worklistNewId(), FX.now())
     elseif a == "worklist-toggle" then core.worklistToggle(st, scope, tostring(payload.text or ""))
+    elseif a == "worklist-remove" then core.worklistRemove(st, scope, tostring(payload.text or ""))
     else core.worklistClearDone(st, scope) end
     FX.writeWorklist(st)
     pcall(function() wv:evaluateJavaScript("window.ccWorklist(" .. hs.json.encode(FX.worklistPayload()) .. ")") end)
@@ -4229,16 +4236,22 @@ local HTML = [[
   .wl-scope { background:#21232c; color:#cfd2db; border:1px solid #2c2f3a; border-radius:14px;
               padding:3px 12px; font-size:12px; cursor:pointer; }
   .wl-scope.on { background:#2a3550; border-color:#6ea8fe; color:#cfe0ff; font-weight:600; }
-  #wl-addrow { display:flex; gap:6px; margin-bottom:10px; }
+  #wl-addrow { display:flex; gap:6px; margin-bottom:10px; align-items:flex-start; }
   #wl-input { flex:1; background:#15171d; color:#e8e9ee; border:1px solid #2c2f3a; border-radius:8px;
-              padding:6px 10px; font-size:13px; }
+              padding:6px 10px; font-size:13px; font-family:inherit; line-height:1.4;
+              resize:none; min-height:20px; max-height:220px; overflow-y:auto; }
   #wl-input:focus { outline:none; border-color:#6ea8fe; }
   #wl-addrow button { background:#21232c; color:#cfd2db; border:1px solid #2c2f3a; border-radius:8px;
                       padding:6px 14px; cursor:pointer; }
   #wl-addrow button:hover { background:#272a35; }
   .wl-item { display:flex; align-items:flex-start; gap:9px; padding:6px 4px; border-bottom:1px solid #23262f; }
   .wl-cb { cursor:pointer; margin-top:2px; flex:0 0 auto; width:16px; height:16px; accent-color:#6ea8fe; }
-  .wl-txt { color:#e8e9ee; font-size:13px; line-height:1.4; word-break:break-word; }
+  .wl-txt { color:#e8e9ee; font-size:13px; line-height:1.4; word-break:break-word; white-space:pre-wrap; flex:1; }
+  /* Per-item ✕ delete: muted (same tone as the panel's other dim controls, ≥3:1
+     contrast so it stays discoverable) and reddens on hover. */
+  .wl-del { flex:0 0 auto; background:none; border:none; color:#6b7280; cursor:pointer; font-size:13px;
+            line-height:1; padding:2px 5px; border-radius:6px; }
+  .wl-del:hover { color:#f3a1a1; background:#2a1f24; }
   .wl-empty { color:#6b7280; padding:8px 4px; font-size:12px; }
   #wl-donewrap { margin-top:12px; }
   #wl-donehd { display:flex; align-items:center; gap:6px; color:#9aa0ad; font-weight:600; font-size:12px;
@@ -4856,8 +4869,8 @@ local HTML = [[
   <div id="worklist">
     <div id="wl-scopes"></div>
     <div id="wl-addrow">
-      <input id="wl-input" type="text" maxlength="500" placeholder="Add an item…  (Enter)"
-        onkeydown="if(event.key==='Enter'){ event.preventDefault(); worklistAddCurrent(); }">
+      <textarea id="wl-input" rows="1" maxlength="2000" placeholder="Add an item…  (Enter adds, Shift+Enter newline)"
+        onkeydown="onWorklistKey(event)" oninput="autoGrow(this)"></textarea>
       <button onclick="worklistAddCurrent()">Add</button>
     </div>
     <div id="wl-active"></div>
@@ -5994,9 +6007,11 @@ local HTML = [[
       // data-id (NOT an inline onchange with JSON.stringify): the stringified id is
       // double-quoted, which would terminate the double-quoted attribute. A delegated
       // change listener reads data-id instead. esc() escapes quotes for the attribute.
-      return '<div class="wl-item"><input type="checkbox" class="wl-cb" data-id="' + esc(String(it.id || "")) + '"'
+      var id = esc(String(it.id || ""));
+      return '<div class="wl-item"><input type="checkbox" class="wl-cb" data-id="' + id + '"'
         + (isDone ? " checked" : "") + '>'
-        + '<span class="wl-txt">' + esc(it.text || "") + '</span></div>';
+        + '<span class="wl-txt">' + esc(it.text || "") + '</span>'
+        + '<button class="wl-del" data-del="' + id + '" title="Delete">✕</button></div>';
     }
     function renderWorklist(){
       if(!worklistData) return;
@@ -6025,14 +6040,17 @@ local HTML = [[
       document.getElementById("wl-donecaret").textContent = worklistDoneOpen ? "▾" : "▸";
     }
     function worklistPick(scope){ worklistScope = scope; renderWorklist(); }
+    // Enter adds; Shift+Enter falls through to insert a newline (multi-line items).
+    function onWorklistKey(e){ if(e.key === "Enter" && !e.shiftKey){ e.preventDefault(); worklistAddCurrent(); } }
     function worklistAddCurrent(){
       var inp = document.getElementById("wl-input");
       var t = (inp.value || "").trim();
       if(!t) return;
       send("worklist-add", worklistScope, t);
-      inp.value = ""; inp.focus();
+      inp.value = ""; inp.style.height = "auto"; inp.focus();  // reset the auto-grown height
     }
     function worklistToggle(id){ send("worklist-toggle", worklistScope, id); }
+    function worklistRemove(id){ send("worklist-remove", worklistScope, id); }
     function worklistClearDone(){ send("worklist-clear-done", worklistScope); }
     function worklistToggleDone(){ worklistDoneOpen = !worklistDoneOpen; renderWorklist(); }
     // Delegated handlers for the dynamically-rendered scope buttons + checkboxes
@@ -6041,6 +6059,8 @@ local HTML = [[
       var t = e.target; if(!t) return;
       var sb = (t.classList && t.classList.contains("wl-scope")) ? t : (t.closest ? t.closest(".wl-scope") : null);
       if(sb && sb.getAttribute){ var s = sb.getAttribute("data-scope"); if(s !== null) worklistPick(s); }
+      var db = (t.classList && t.classList.contains("wl-del")) ? t : (t.closest ? t.closest(".wl-del") : null);
+      if(db && db.getAttribute){ var did = db.getAttribute("data-del"); if(did) worklistRemove(did); }
     });
     document.addEventListener("change", function(e){
       var cb = e.target;

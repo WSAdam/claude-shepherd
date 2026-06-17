@@ -4,6 +4,63 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-17 (panel) — typing-stall fix, MCPs & Skills viewer, in-app worklist
+
+A correctness pass that traced an intermittent system-wide typing drop to Shepherd's own event
+loop, plus two new panel surfaces. All new logic is pure `cc-core` under unit test.
+
+### Fixed — intermittent "typing randomly stops"
+
+Root cause was a coupling: the 1 Hz refresh re-parsed the **entire** audit ledger every tick
+(`ledgerSnapshot` → a full `FX.readLedger` over ~10k lines), and that ~310 ms block ran on the
+single Hammerspoon main thread shared by an **always-on global keyDown eventtap** — which holds each
+keystroke until its callback returns, so the stall dropped keys in *every* app.
+
+- **Incremental ledger parse:** a per-file cache keyed on size:mtime; only changed files are
+  re-read+decoded (today's hot file on append), the rest reused from memory. Measured **~310 ms →
+  ~2.7 ms** per tick against the live corpus. The decision is the pure `core.ledgerCachePlan`; the
+  stitch (`core.assembleLedger` — concat in chronological file order, drop vanished files, global
+  newest-2000 cap) is pure too. Drops the old 30 s TTL backstop — the per-file sig + atomic temp+mv
+  on every redact/purge is the sole invalidation.
+- **Focus-scoped ⌘V tap:** the keyDown tap now starts on panel focus and stops on blur, so it's out
+  of the global keystroke path ~99% of the time, and re-arms on `tapDisabledByTimeout` so a stall
+  can't leave ⌘V permanently dead.
+- **No stacking/leak across reload:** idempotent teardown of the tap + repeating
+  timers/pathwatcher before re-create, plus an `hs.shutdownCallback`.
+- Re-enabled the ledger size cap (`ledger.maxTotalMB`) to bound cold-start cost.
+
+### Added — 🔌 MCPs & Skills viewer (☰ drawer)
+
+Read-only catalog of the **installed** MCP servers (parsed from `~/.claude.json` user + per-project
+`mcpServers`, env values never surfaced) and skills (`~/.claude/skills` + `~/.claude/commands` +
+pinned built-ins). A footer **Re-check** runs `claude mcp list` via the login shell **on demand**
+(never polled) for the claude.ai connectors + live connected/failed/needs-auth health, merged onto
+the config list and cached. Also fixed `parseSkillFrontmatter` to fold YAML block scalars
+(`description: >-` now resolves to its text, not the `>-` indicator) — improves the Agents editor too.
+
+### Added — 📋 In-app worklist ("My List" on the FLEET row)
+
+Generic + per-project checklists in `cc-worklist.json`, project lists keyed by the stable
+launch-folder identity so they survive close / reopen / respawn. **My List** swaps the tiles for the
+worklist (the fleet bulk buttons still show only when needed); add / check / **delete** / Clear, with
+checked items moving to a collapsed Done area. Add is a multi-line auto-growing textarea (**Enter**
+adds, **Shift+Enter** newlines); every row carries a **✕** that deletes it via the pure
+`core.worklistRemove` (delegated click, same `data-`-attribute idiom as the checkbox). Two bugs fixed
+during build: the checkbox handler (an inline `JSON.stringify` double-quoted the id *inside* a
+double-quoted attribute and broke it → switched to `data-` attributes + event delegation), and
+`generic`/`byProject` aliasing (`hs.json.decode` interns empty `{}` into one shared table, so adding
+to one list polluted the other → `core.worklistNormalize` rebuilds distinct containers on read and
+self-heals already-corrupted files).
+
+### Internals / tests
+
+~80 new unit tests: `ledgerCachePlan` + `assembleLedger` (global-cap equivalence, vanished-file
+drop, empty corpus), the MCP/skill parsers (`extractInstalledMcp` fallbacks, `parseMcpListOutput`
+every status + the statusless-line contract, `mergeMcpStatus` live-only/absent branches,
+folded/literal frontmatter), and worklist CRUD + `worklistNormalize` de-alias/self-heal. New viewer
+state lives on the `FX` table (not main-chunk locals) to stay under Lua's 200-local cap. Suite
+**2140 core + 534 ui + 183 bash + smoke**, green.
+
 ## 2026-06-16 (deck glance) — context-fill bar on session keys + ☕ caffeine key
 
 Two Stream Deck additions from real use:

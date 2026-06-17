@@ -4,6 +4,16 @@ The cross-machine / controls roadmap (Parts A/C/E) is **done**. This tracks the 
 remaining items. Full per-round detail is in CHANGELOG.md and git history.
 
 ## Shipped ✅
+- **Typing-stall fix** — incremental per-file ledger parse (`core.ledgerCachePlan` +
+  `assembleLedger`, ~310 ms → ~2.7 ms/tick) + focus-scoped ⌘V eventtap + `tapDisabledByTimeout`
+  re-arm + idempotent teardown/`shutdownCallback`. The 1 Hz full-ledger re-parse on the shared
+  main thread was starving an always-on global keyDown tap → system-wide dropped keystrokes.
+- **🔌 MCPs & Skills viewer** (☰ drawer) — read-only catalog of installed MCP servers
+  (`~/.claude.json`, env never surfaced) + skills (`~/.claude/skills` + `~/.claude/commands` +
+  pinned built-ins); **Re-check** runs `claude mcp list` via the login shell on demand for live
+  connector/health status. Plus a `parseSkillFrontmatter` YAML block-scalar fix.
+- **📋 In-app worklist** ("My List" on the FLEET row) — generic + per-project checklists
+  (`cc-worklist.json`, keyed by stable folder identity); add / check / Clear with a Done area.
 - **Per-session editor detection** + **AskUserQuestion surfacing** + **effort dropdown** +
   **click-to-answer** + nudge focus-race fix.
 - **Persistent relabels** (keyed by **stable project identity** from `transcript_path` —

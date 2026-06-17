@@ -760,6 +760,39 @@ stalled sync shows "bridge offline" on the tile. The remote box needs this repo'
 `make install` run on it. Off by default; see todos.md for the hardware-verification
 checklist.
 
+## MCPs & Skills viewer
+
+The **🔌 MCPs & Skills** item in the ☰ drawer opens a read-only catalog of what's actually
+installed for Claude Code — distinct from the agent-profile registry (`cc-mcp.json`), which is
+just the servers you attach to spawns.
+
+- **MCP servers** — read instantly from `~/.claude.json` (user-scope `mcpServers` + every
+  project's `mcpServers`, deduped; a server defined in both shows `user+project`). Each row shows
+  scope, transport, and the command/url — **env values are never surfaced** (only the var names
+  Claude itself prints). A **Re-check** button (footer) runs `claude mcp list` via your login shell
+  — only on demand, never on a timer — to add the claude.ai **connectors** (Drive/Calendar/Gmail)
+  and live **connected / failed / needs-auth** health, merged onto the config list and cached for
+  the next open.
+- **Skills** — your `~/.claude/skills` (SKILL.md) and `~/.claude/commands` (`/slash` files), plus
+  a pinned list of the CLI's **built-in** skills (which have no file to enumerate), each with its
+  `/command` and description.
+
+Read-only — Shepherd never edits your MCP config or skills; it just shows the inventory.
+
+## Worklist (My List)
+
+A dead-simple checklist built into the panel — no code hooks, just add → check → clear. The
+**📋 My List** button on the right of the FLEET row swaps the session tiles for the worklist (click
+again to go back; the fleet bulk buttons still appear only when there's something to act on).
+
+- **Scopes** — a **Generic** (global) list plus one button per **currently-open project**, labeled
+  with that project's relabel name. Lists are stored in `~/.claude/cc-worklist.json` keyed by the
+  **stable launch-folder identity** (same as relabels/groups), so a project's list persists across
+  close / reopen / respawn — a closed project just has no button until a session reopens there.
+- **Add / check / delete / clear** — type and **Enter** to add (**Shift+Enter** for a newline; the
+  box grows as you type, so items can be multi-line); checking an item moves it to a collapsed
+  **Done** area; the **✕** on any row deletes it outright; **Clear** empties Done for that scope.
+
 ## Install (about 5 minutes)
 
 1. **Install Hammerspoon** (free) and `jq` (required for the rich tiles):
