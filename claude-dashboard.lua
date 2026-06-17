@@ -16,6 +16,25 @@
 
 local M = {}
 
+-- Re-dofile guard: if a PRIOR instance is still live in this Lua VM (a console
+-- re-dofile or any hot-reload that didn't go through hs.reload's full VM
+-- teardown), stop its long-lived handles before we build new ones. Otherwise
+-- each reload STACKS another always-on eventtap + a duplicate 1 Hz refresh
+-- timer/pathwatcher on the single main thread — escalating per-keystroke latency
+-- plus a leaked CGEventTap Mach port. A clean hs.reload() tears down the whole
+-- VM, so this is a no-op there; it only bites the in-VM re-dofile path. pcall
+-- everything: the prior table's shape may differ across versions.
+do
+  local prev = _G.__ccDashboard
+  local pm = prev and prev.module
+  if pm then
+    for _, k in ipairs({ "pasteTap", "timer", "watcher", "usageTimer", "officialUsageTimer" }) do
+      if pm[k] then pcall(function() pm[k]:stop() end) end
+    end
+    if pm.menubar then pcall(function() pm.menubar:delete() end) end
+  end
+end
+
 -- Load the pure-logic core sitting next to this file.
 local HERE = debug.getinfo(1, "S").source:sub(2):match("(.*/)") or "./"
 local core = dofile(HERE .. "cc-core.lua")
@@ -1007,6 +1026,65 @@ function FX.listSkills()
   return out
 end
 
+-- Enumerate ~/.claude/commands (flat *.md slash commands, e.g. /improve) into the
+-- same read-only card shape as FX.listSkills, tagged source="command". Frontmatter
+-- is optional (a bare prompt file has none) -> name falls back to the file stem.
+function FX.listCommands()
+  local COMMANDS_DIR = os.getenv("CC_COMMANDS_DIR") or (os.getenv("HOME") .. "/.claude/commands")
+  local out, seen = {}, {}
+  for _, name in ipairs(FX.readDir(COMMANDS_DIR)) do
+    if name:match("%.md$") and name:lower() ~= "readme.md" then
+      local txt = FX.readFile(COMMANDS_DIR .. "/" .. name)
+      if txt then
+        local card = core.parseSkillFrontmatter(txt, (name:gsub("%.md$", "")))
+        if card.name ~= "" and not seen[card.name] then
+          seen[card.name] = true
+          out[#out + 1] = { name = card.name, display_title = card.display_title,
+            description = card.description, command = core.skillCommand(card.name),
+            shape = "command", path = COMMANDS_DIR .. "/" .. name }
+        end
+      end
+    end
+  end
+  table.sort(out, function(a, b) return tostring(a.name):lower() < tostring(b.name):lower() end)
+  return out
+end
+
+-- Read the ACTUALLY-installed MCP servers from ~/.claude.json (user + per-project
+-- mcpServers), normalized + env-redacted by core.extractInstalledMcp. Distinct
+-- from FX.readMcp (the cc-mcp.json agent registry). Sync: ~/.claude.json is small
+-- (~50KB) and this only runs on the user opening the 🔌 viewer, never per-tick.
+function FX.readInstalledMcp()
+  local CLAUDE_JSON = os.getenv("CC_CLAUDE_JSON") or (os.getenv("HOME") .. "/.claude.json")
+  local c = FX.readFile(CLAUDE_JSON)
+  if not c or #c == 0 then return {} end
+  local ok, t = pcall(function() return core.json.decode(c) end)
+  if not ok or type(t) ~= "table" then return {} end
+  return core.extractInstalledMcp(t)
+end
+
+-- In-app worklist store (cc-worklist.json): { generic = [...], byProject = { key = [...] } }.
+-- Operator data, same posture as presets/labels. Missing/garbled -> empty lists.
+function FX.readWorklist()
+  local WORKLIST_FILE = os.getenv("CC_WORKLIST_FILE") or (os.getenv("HOME") .. "/.claude/cc-worklist.json")
+  local c = FX.readFile(WORKLIST_FILE)
+  if not c or #c == 0 then return { generic = {}, byProject = {} } end
+  local ok, t = pcall(function() return core.json.decode(c) end)
+  -- core.worklistNormalize rebuilds distinct containers -- REQUIRED because
+  -- hs.json.decode interns empty {} into one shared table (aliasing generic<->byProject).
+  return core.worklistNormalize((ok and t) or {})
+end
+function FX.writeWorklist(state)
+  local WORKLIST_FILE = os.getenv("CC_WORKLIST_FILE") or (os.getenv("HOME") .. "/.claude/cc-worklist.json")
+  hs.fs.mkdir(CLAUDE_DIR)
+  FX.writeFile(WORKLIST_FILE, core.json.encode(state or { generic = {}, byProject = {} }))
+end
+-- Mint a unique worklist item id (time + small random; collisions are irrelevant
+-- for a hand-curated list). Pure-core ops take the id so they stay deterministic.
+function FX.worklistNewId()
+  return string.format("%d-%04d", FX.now(), math.random(0, 9999))
+end
+
 -- L3 definition source: enumerate prompt-definition files (*.prompt / *.md, skip
 -- README) in `dir` -> { {stem, text}, ... }. Synchronous readDir+readFile (a flat,
 -- bounded dir, like FX.listSkills -- not the async folder-scan). Missing dir -> {}.
@@ -1335,6 +1413,11 @@ local function ghBin()
   end
   return ghBinPath or nil
 end
+-- 🔌 MCPs & Skills viewer state on the FX table (Lua caps a function at 200 locals
+-- and this main chunk is at the limit, so new top-level locals are out): live =
+-- last `claude mcp list` parse (nil until Re-check), task/gen = the in-flight
+-- Re-check task + supersede guard.
+FX.mcpView = { live = nil, task = nil, gen = 0 }
 
 -- Per-repo-root PR status cache (status-only; reads gh, never writes). Async via
 -- hs.task so the ~1s loop never blocks on gh; TTL-throttled like the usage poll.
@@ -1401,6 +1484,48 @@ end
 function FX.prDataForRoot(root)
   local c = root and prStatusByRoot[root]
   return (c and c.data) or nil
+end
+
+-- Live MCP health via `claude mcp list` (async; ~1-2s). Triggered ONLY by the 🔌
+-- viewer's Re-check button, never on a timer, so its latency never touches the
+-- refresh loop. Output parsed by core.parseMcpListOutput. Calls cb(list) on
+-- success or cb(nil, errString) on failure. A newer Re-check supersedes an older
+-- in-flight call (generation guard); the task handle is retained so GC can't kill
+-- it mid-flight. Run from $HOME so user + per-project servers all resolve.
+function FX.liveMcpList(cb)
+  local mv = FX.mcpView
+  -- Run via the user's LOGIN shell ($SHELL -l -c), NOT a bare hs.task: `claude mcp
+  -- list` health-checks each stdio server by spawning its command (npx/docker/
+  -- uvx/node), which a bare task's empty PATH can't find -- every stdio server
+  -- would show "failed" even when healthy. The login shell reproduces the exact
+  -- statuses the user sees in their terminal (verified). Mirrors resolveBin's
+  -- login-shell approach; HOME cwd so user + per-project servers resolve.
+  local shell = os.getenv("SHELL")
+  if not shell or shell == "" then shell = "/bin/zsh" end
+  mv.gen = mv.gen + 1
+  local gen = mv.gen
+  if mv.task then pcall(function() mv.task:terminate() end) end
+  local ok = pcall(function()
+    local t = hs.task.new(shell, function(code, stdout, stderr)
+      if gen ~= mv.gen then return end   -- superseded by a newer Re-check
+      mv.task = nil
+      local text = (stdout or "") .. "\n" .. (stderr or "")
+      local list = core.parseMcpListOutput(text)
+      if #list > 0 or code == 0 then
+        if cb then cb(list) end
+      elseif cb then
+        local notFound = text:find("command not found") or text:find("not found")
+        cb(nil, notFound and "claude CLI not found on your shell PATH"
+                         or ((stderr ~= "" and stderr) or "`claude mcp list` failed"))
+      end
+    end, { "-l", "-c", "claude mcp list" })
+    if t then
+      t:setWorkingDirectory(os.getenv("HOME") or ".")
+      mv.task = t
+      t:start()
+    else error("task create failed") end
+  end)
+  if not ok and cb then cb(nil, "could not launch `claude mcp list`") end
 end
 
 -- L5 Export session archive: write a folder under cc-exports holding the session's
@@ -2164,6 +2289,45 @@ local function stampTaskStart(item, task, by)
   local _, afterB = core.taskBarrier(tostring(task or ""))
   taskStart[item.key] = { ts = os.time(), role = select(1, core.taskRoute(afterB)),
                           projectKey = item.projectKey, by = by }
+end
+
+-- 🔌 MCPs & Skills viewer payload. Config MCPs (env-redacted) merged with the
+-- last live `claude mcp list` status (nil until the user clicks Re-check), plus
+-- skills = user files (~/.claude/skills) + slash commands (~/.claude/commands) +
+-- the pinned built-ins. All sync reads of small files, only on open/Re-check.
+function FX.mcpSkillsPayload()
+  local user = {}
+  for _, s in ipairs(FX.listSkills()) do user[#user + 1] = s end
+  for _, s in ipairs(FX.listCommands()) do user[#user + 1] = s end
+  table.sort(user, function(a, b) return tostring(a.name):lower() < tostring(b.name):lower() end)
+  return {
+    mcp = core.mergeMcpStatus(FX.readInstalledMcp(), FX.mcpView.live),
+    skills = { user = user, builtin = core.builtinSkillCards() },
+    builtinVersion = core.BUILTIN_SKILLS_VERSION,
+    live = (FX.mcpView.live ~= nil),
+  }
+end
+
+-- 📋 Worklist payload: the generic list + one entry per CURRENTLY-OPEN project
+-- (distinct projectKey from the last render), each labeled with its relabel name
+-- (falls back to the folder name) and carrying that folder's saved items. Lists
+-- persist for every folder in cc-worklist.json; a closed project just has no
+-- button until a session reopens there.
+function FX.worklistPayload()
+  local st = FX.readWorklist()
+  local seen, projects = {}, {}
+  for _, it in ipairs(lastRenderList or {}) do
+    local k = it.projectKey
+    if k and k ~= "" and not seen[k] then
+      seen[k] = true
+      projects[#projects + 1] = {
+        key = k,
+        label = (it.label and it.label ~= "" and it.label) or it.name or k,
+        items = core.worklistScopeList(st, k),
+      }
+    end
+  end
+  return { generic = core.worklistScopeList(st, "generic"), projects = projects }
 end
 
 -- Single message bridge. JS posts JSON: {a=action, v=key, text=optional}.
@@ -2982,6 +3146,43 @@ local function handleBridgeMsg(msg)
       stats[k] = v
     end
     pcall(function() wv:evaluateJavaScript("window.ccInsights(" .. hs.json.encode(stats) .. ")") end)
+    return
+  end
+  -- 🔌 MCPs & Skills viewer. Open = instant render from files (+ last live status
+  -- if any). Re-check = async `claude mcp list` for connectors + connected/failed
+  -- health, merged and re-pushed; never runs on a timer.
+  if a == "open-mcpskills-view" then
+    pcall(function()
+      wv:evaluateJavaScript("window.ccMcpSkills(" .. hs.json.encode(FX.mcpSkillsPayload()) .. ")")
+    end)
+    return
+  end
+  if a == "recheck-mcpskills" then
+    FX.liveMcpList(function(list, err)
+      if list then FX.mcpView.live = list end   -- keep prior status on error
+      local p = FX.mcpSkillsPayload()
+      p.rechecked = true
+      p.recheckError = err or nil
+      pcall(function()
+        wv:evaluateJavaScript("window.ccMcpSkills(" .. hs.json.encode(p) .. ")")
+      end)
+    end)
+    return
+  end
+  -- 📋 In-app worklist (generic + per-project checklists; no code hooks). load
+  -- just renders; add/toggle/clear-done mutate cc-worklist.json then re-push.
+  if a == "worklist-load" then
+    pcall(function() wv:evaluateJavaScript("window.ccWorklist(" .. hs.json.encode(FX.worklistPayload()) .. ")") end)
+    return
+  end
+  if a == "worklist-add" or a == "worklist-toggle" or a == "worklist-clear-done" then
+    local scope = tostring(payload.v or "generic")
+    local st = FX.readWorklist()
+    if a == "worklist-add" then core.worklistAdd(st, scope, tostring(payload.text or ""), FX.worklistNewId(), FX.now())
+    elseif a == "worklist-toggle" then core.worklistToggle(st, scope, tostring(payload.text or ""))
+    else core.worklistClearDone(st, scope) end
+    FX.writeWorklist(st)
+    pcall(function() wv:evaluateJavaScript("window.ccWorklist(" .. hs.json.encode(FX.worklistPayload()) .. ")") end)
     return
   end
   if a == "open-audit-view" then
@@ -4015,6 +4216,40 @@ local HTML = [[
   #bulkbar button:hover { background:#272a35; }
   #bulkbar button.bulk-ap { border-color:#22c55e; color:#7ee2a0; }
   #bulkbar button.bulk-st { border-color:#ef4444; color:#f3a1a1; }
+  /* 📋 Worklist: the My List toggle lives in the FLEET row (right-aligned). The
+     fleet label/buttons render into #bulkbar-fleet only when needed; My List is
+     always present. Clicking it swaps the #grid tiles area for the worklist. */
+  #bulkbar-fleet { display:flex; align-items:center; flex-wrap:wrap; gap:6px; }
+  #mylist-btn { margin-left:auto; }
+  #mylist-btn.on { background:#2a3550; border-color:#6ea8fe; color:#cfe0ff; }
+  #worklist { display:none; padding:8px 10px 14px; }
+  body.worklist-mode #grid, body.worklist-mode #empty { display:none !important; }
+  body.worklist-mode #worklist { display:block; }
+  #wl-scopes { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:10px; }
+  .wl-scope { background:#21232c; color:#cfd2db; border:1px solid #2c2f3a; border-radius:14px;
+              padding:3px 12px; font-size:12px; cursor:pointer; }
+  .wl-scope.on { background:#2a3550; border-color:#6ea8fe; color:#cfe0ff; font-weight:600; }
+  #wl-addrow { display:flex; gap:6px; margin-bottom:10px; }
+  #wl-input { flex:1; background:#15171d; color:#e8e9ee; border:1px solid #2c2f3a; border-radius:8px;
+              padding:6px 10px; font-size:13px; }
+  #wl-input:focus { outline:none; border-color:#6ea8fe; }
+  #wl-addrow button { background:#21232c; color:#cfd2db; border:1px solid #2c2f3a; border-radius:8px;
+                      padding:6px 14px; cursor:pointer; }
+  #wl-addrow button:hover { background:#272a35; }
+  .wl-item { display:flex; align-items:flex-start; gap:9px; padding:6px 4px; border-bottom:1px solid #23262f; }
+  .wl-cb { cursor:pointer; margin-top:2px; flex:0 0 auto; width:16px; height:16px; accent-color:#6ea8fe; }
+  .wl-txt { color:#e8e9ee; font-size:13px; line-height:1.4; word-break:break-word; }
+  .wl-empty { color:#6b7280; padding:8px 4px; font-size:12px; }
+  #wl-donewrap { margin-top:12px; }
+  #wl-donehd { display:flex; align-items:center; gap:6px; color:#9aa0ad; font-weight:600; font-size:12px;
+               cursor:pointer; padding:5px 4px; border-top:1px solid #2c2f3a; }
+  #wl-donehd .wl-count { color:#6b7280; font-weight:500; }
+  #wl-clearbtn { margin-left:auto; background:#21232c; color:#9aa0ad; border:1px solid #2c2f3a;
+                 border-radius:7px; padding:2px 10px; font-size:11px; cursor:pointer; }
+  #wl-clearbtn:hover { color:#f3a1a1; border-color:#ef4444; }
+  #wl-done { display:none; }
+  #wl-donewrap.open #wl-done { display:block; }
+  #wl-done .wl-txt { color:#7f8694; text-decoration:line-through; }
 
   /* status colors, shared by all themes via the --c variable */
   .s-idle     { --c:#6b7280; }
@@ -4353,6 +4588,32 @@ local HTML = [[
 .i-tbl td.n{ text-align:right; font-variant-numeric:tabular-nums; }
 #i-foot{ display:flex; gap:8px; align-items:center; padding:8px 10px; border-top:1px solid #2c2f3a; }
 #i-info{ margin-left:auto; }
+/* 🔌 MCPs & Skills viewer (read-only; cloned from #insights). Open renders from
+   files instantly; Re-check runs `claude mcp list` for live health. */
+#mcpskills{ position:fixed; inset:0; background:#14161b; z-index:11; display:none; flex-direction:column; font-size:12px; }
+#mcpskills.show{ display:flex; }
+#mk-head{ display:flex; align-items:center; gap:8px; padding:8px 10px; border-bottom:1px solid #2c2f3a; font-weight:600; }
+#mk-head .s-x{ margin-left:auto; }
+#mk-body{ flex:1; overflow:auto; padding:10px 12px; }
+#mk-foot{ display:flex; gap:8px; align-items:center; padding:8px 10px; border-top:1px solid #2c2f3a; }
+#mk-info{ margin-left:auto; color:#8a8d99; }
+.mk-sec{ font-weight:600; color:#cfd2db; margin:12px 0 6px; }
+.mk-sec:first-child{ margin-top:0; }
+.mk-sec .mk-count{ color:#6b7280; font-weight:500; margin-left:4px; }
+.mk-row{ display:flex; align-items:flex-start; gap:8px; padding:6px 8px; border-bottom:1px solid #23262f; }
+.mk-main{ min-width:0; flex:1; }
+.mk-name{ color:#e8e9ee; font-weight:600; }
+.mk-name .mk-cmd{ color:#9fb6d6; font-weight:500; margin-left:6px; font-family:ui-monospace,Menlo,monospace; font-size:11px; }
+.mk-detail{ color:#8a8d99; font-size:11px; margin-top:2px; word-break:break-all; font-family:ui-monospace,Menlo,monospace; }
+.mk-desc{ color:#9aa0ad; font-size:11px; margin-top:2px; }
+.mk-tags{ display:flex; gap:5px; flex-shrink:0; align-items:center; flex-wrap:wrap; justify-content:flex-end; max-width:42%; }
+.mk-chip{ font-size:10px; padding:1px 6px; border-radius:10px; background:#23262f; color:#9aa0ad; white-space:nowrap; }
+.mk-st{ font-size:10px; padding:1px 7px; border-radius:10px; white-space:nowrap; font-weight:600; }
+.mk-st.connected{ background:#14331f; color:#22c55e; }
+.mk-st.failed{ background:#3a1a1a; color:#ef4444; }
+.mk-st.needs-auth, .mk-st.pending{ background:#3a2f12; color:#f5b50a; }
+.mk-st.unknown{ background:#23262f; color:#8a8d99; }
+.mk-empty{ color:#6b7280; padding:6px 8px; }
 /* L7 routine board overlay (modeled on #audit). Edits cc-schedules.json. */
 #routines{ position:fixed; inset:0; background:#14161b; z-index:11; display:none; flex-direction:column; font-size:12px; }
 #routines.show{ display:flex; }
@@ -4545,6 +4806,7 @@ local HTML = [[
           <button class="tm-item" onclick="menuPick('routines')"><span class="tm-ic">⏰</span> Routines</button>
           <button class="tm-item" onclick="menuPick('templates')"><span class="tm-ic">📝</span> Templates</button>
           <button class="tm-item" onclick="menuPick('agents')"><span class="tm-ic">✦</span> Agents</button>
+          <button class="tm-item" onclick="menuPick('mcpskills')"><span class="tm-ic">🔌</span> MCPs &amp; Skills</button>
           <button class="tm-item" onclick="menuPick('policies')"><span class="tm-ic">🛡</span> Policy bundles</button>
           <button class="tm-item" onclick="menuPick('rules')"><span class="tm-ic">⚙️</span> Automation rules</button>
           <button id="tm-shift" class="tm-item" style="display:none" onclick="menuPick('shift')"><span class="tm-ic">📋</span> Shift report</button>
@@ -4585,9 +4847,28 @@ local HTML = [[
     <button onclick="hideBars()">Cancel</button>
   </div>
   <div id="groupchips"></div>
-  <div id="bulkbar"></div>
+  <div id="bulkbar" class="show">
+    <span id="bulkbar-fleet"></span>
+    <button id="mylist-btn" onclick="toggleWorklist()">📋 My List</button>
+  </div>
   <div id="grid"></div>
   <div id="empty">Waiting for Claude Code sessions...<br>Start a session in any project.</div>
+  <div id="worklist">
+    <div id="wl-scopes"></div>
+    <div id="wl-addrow">
+      <input id="wl-input" type="text" maxlength="500" placeholder="Add an item…  (Enter)"
+        onkeydown="if(event.key==='Enter'){ event.preventDefault(); worklistAddCurrent(); }">
+      <button onclick="worklistAddCurrent()">Add</button>
+    </div>
+    <div id="wl-active"></div>
+    <div id="wl-donewrap">
+      <div id="wl-donehd" onclick="worklistToggleDone()">
+        <span id="wl-donecaret">▸</span> Done <span id="wl-donecount" class="wl-count"></span>
+        <button id="wl-clearbtn" onclick="event.stopPropagation(); worklistClearDone();">Clear</button>
+      </div>
+      <div id="wl-done"></div>
+    </div>
+  </div>
 
   <div id="usage-foot">
     <div class="uf-row">
@@ -4908,6 +5189,18 @@ local HTML = [[
     <div id="i-foot">
       <button onclick="openInsights()">Refresh</button>
       <span id="i-info" class="n-dim"></span>
+    </div>
+  </div>
+
+  <div id="mcpskills">
+    <div id="mk-head">
+      <span>🔌 MCPs &amp; Skills</span>
+      <button class="s-x" onclick="closeMcpSkills()">✕</button>
+    </div>
+    <div id="mk-body"></div>
+    <div id="mk-foot">
+      <button onclick="recheckMcps()">Re-check</button>
+      <span id="mk-info" class="n-dim"></span>
     </div>
   </div>
 
@@ -5660,19 +5953,99 @@ local HTML = [[
       sendBulk(action, keys, text);
     }
     function renderBulkBar(vis){
-      var bar = document.getElementById("bulkbar");
+      // The FLEET row stays present for the persistent My List toggle; only the
+      // fleet label/buttons are conditional, rendered into #bulkbar-fleet so they
+      // don't show unless needed.
+      var fleet = document.getElementById("bulkbar-fleet");
+      if(!fleet) return;
       var nAp = actionableKeys("approve", vis).length;
       var nSt = actionableKeys("stop", vis).length;
       var nLv = actionableKeys("nudge", vis).length;
       // approve-all earns its place at 1 (clearing an approval backlog is the point);
       // stop/nudge need 2+, since acting on one session is the per-tile button's job.
-      if(!(nAp >= 1 || nSt >= 2 || nLv >= 2)){ bar.classList.remove("show"); bar.innerHTML = ""; return; }
+      if(!(nAp >= 1 || nSt >= 2 || nLv >= 2)){ fleet.innerHTML = ""; return; }
       var html = '<span class="bulk-lbl">Fleet</span>';
       if(nAp >= 1) html += '<button class="bulk-ap" onclick="bulkAction(\'approve\')">✅ Approve all (' + nAp + ')</button>';
       if(nSt >= 2) html += '<button class="bulk-st" onclick="bulkAction(\'stop\')">■ Stop all (' + nSt + ')</button>';
       if(nLv >= 2) html += '<button onclick="bulkAction(\'nudge\')">👉 Nudge all (' + nLv + ')</button>';
-      bar.innerHTML = html; bar.classList.add("show");
+      fleet.innerHTML = html;
     }
+    // ---- 📋 In-app worklist (toggled into the #grid area) -------------------
+    var worklistMode = false, worklistScope = "generic", worklistData = null, worklistDoneOpen = false;
+    function toggleWorklist(){
+      worklistMode = !worklistMode;
+      document.body.classList.toggle("worklist-mode", worklistMode);
+      var btn = document.getElementById("mylist-btn");
+      if(btn) btn.classList.toggle("on", worklistMode);
+      if(worklistMode){ send("worklist-load"); }
+    }
+    window.ccWorklist = function(d){
+      worklistData = d || { generic: [], projects: [] };
+      renderWorklist();
+    };
+    function wlScopeItems(scope){
+      if(!worklistData) return [];
+      if(scope === "generic") return Array.isArray(worklistData.generic) ? worklistData.generic : [];
+      var projs = Array.isArray(worklistData.projects) ? worklistData.projects : [];
+      for(var i = 0; i < projs.length; i++){ if(projs[i].key === scope) return Array.isArray(projs[i].items) ? projs[i].items : []; }
+      return [];
+    }
+    function wlItemRow(it, isDone){
+      // data-id (NOT an inline onchange with JSON.stringify): the stringified id is
+      // double-quoted, which would terminate the double-quoted attribute. A delegated
+      // change listener reads data-id instead. esc() escapes quotes for the attribute.
+      return '<div class="wl-item"><input type="checkbox" class="wl-cb" data-id="' + esc(String(it.id || "")) + '"'
+        + (isDone ? " checked" : "") + '>'
+        + '<span class="wl-txt">' + esc(it.text || "") + '</span></div>';
+    }
+    function renderWorklist(){
+      if(!worklistData) return;
+      var projs = Array.isArray(worklistData.projects) ? worklistData.projects : [];
+      // current scope's project may have closed -> fall back to Generic
+      if(worklistScope !== "generic"){
+        var ok = false;
+        for(var i = 0; i < projs.length; i++){ if(projs[i].key === worklistScope){ ok = true; break; } }
+        if(!ok) worklistScope = "generic";
+      }
+      var sc = '<button class="wl-scope' + (worklistScope === "generic" ? " on" : "") + '" data-scope="generic">Generic</button>';
+      projs.forEach(function(p){
+        sc += '<button class="wl-scope' + (worklistScope === p.key ? " on" : "") + '" data-scope="' + esc(String(p.key)) + '">' + esc(p.label || p.key) + '</button>';
+      });
+      document.getElementById("wl-scopes").innerHTML = sc;
+      var active = [], done = [];
+      wlScopeItems(worklistScope).forEach(function(it){ (it.done ? done : active).push(it); });
+      document.getElementById("wl-active").innerHTML = active.length
+        ? active.map(function(it){ return wlItemRow(it, false); }).join("")
+        : '<div class="wl-empty">No items — add one above.</div>';
+      document.getElementById("wl-done").innerHTML = done.map(function(it){ return wlItemRow(it, true); }).join("");
+      document.getElementById("wl-donecount").textContent = done.length ? "(" + done.length + ")" : "";
+      var dw = document.getElementById("wl-donewrap");
+      dw.style.display = done.length ? "block" : "none";
+      dw.classList.toggle("open", worklistDoneOpen);
+      document.getElementById("wl-donecaret").textContent = worklistDoneOpen ? "▾" : "▸";
+    }
+    function worklistPick(scope){ worklistScope = scope; renderWorklist(); }
+    function worklistAddCurrent(){
+      var inp = document.getElementById("wl-input");
+      var t = (inp.value || "").trim();
+      if(!t) return;
+      send("worklist-add", worklistScope, t);
+      inp.value = ""; inp.focus();
+    }
+    function worklistToggle(id){ send("worklist-toggle", worklistScope, id); }
+    function worklistClearDone(){ send("worklist-clear-done", worklistScope); }
+    function worklistToggleDone(){ worklistDoneOpen = !worklistDoneOpen; renderWorklist(); }
+    // Delegated handlers for the dynamically-rendered scope buttons + checkboxes
+    // (data-attrs avoid the inline-attribute quoting bug with dynamic ids/keys).
+    document.addEventListener("click", function(e){
+      var t = e.target; if(!t) return;
+      var sb = (t.classList && t.classList.contains("wl-scope")) ? t : (t.closest ? t.closest(".wl-scope") : null);
+      if(sb && sb.getAttribute){ var s = sb.getAttribute("data-scope"); if(s !== null) worklistPick(s); }
+    });
+    document.addEventListener("change", function(e){
+      var cb = e.target;
+      if(cb && cb.classList && cb.classList.contains("wl-cb")){ var id = cb.getAttribute("data-id"); if(id) worklistToggle(id); }
+    });
     function toggleSearch(){
       var b = document.getElementById("searchbar");
       var show = !b.classList.contains("show");
@@ -6922,6 +7295,63 @@ local HTML = [[
     // ---- Fleet insights view (Feature A) ------------------------------------
     function openInsights(){ send("open-insights-view"); }
     function closeInsights(){ document.getElementById("insights").classList.remove("show"); }
+
+    // 🔌 MCPs & Skills viewer. Open renders instantly from config files (+ last
+    // live status); Re-check runs `claude mcp list` for connectors + health.
+    function openMcpSkills(){ send("open-mcpskills-view"); }
+    function closeMcpSkills(){ document.getElementById("mcpskills").classList.remove("show"); }
+    function recheckMcps(){
+      var info = document.getElementById("mk-info");
+      if(info) info.textContent = "Checking servers… (claude mcp list)";
+      send("recheck-mcpskills");
+    }
+    function mkSkillRow(s){
+      var cmd = s.command ? '<span class="mk-cmd">'+esc(s.command)+'</span>' : "";
+      var nm = esc(s.display_title || s.name || "?");
+      var desc = s.description ? '<div class="mk-desc">'+esc(s.description)+'</div>' : "";
+      return '<div class="mk-row"><div class="mk-main"><div class="mk-name">'+nm+cmd+'</div>'+desc+'</div></div>';
+    }
+    window.ccMcpSkills = function(d){
+      d = d || {};
+      var mcp = Array.isArray(d.mcp) ? d.mcp : [];
+      var sk = d.skills || {};
+      var userSk = Array.isArray(sk.user) ? sk.user : [];
+      var builtinSk = Array.isArray(sk.builtin) ? sk.builtin : [];
+      var stLabel = { connected:"connected", failed:"failed", "needs-auth":"needs auth", pending:"pending", unknown:"—" };
+      var html = '<div class="mk-sec">MCP servers <span class="mk-count">'+mcp.length+'</span></div>';
+      if(!mcp.length){
+        html += '<div class="mk-empty">No MCP servers configured in ~/.claude.json.</div>';
+      } else {
+        mcp.forEach(function(m){
+          var st = m.status || "unknown";
+          html += '<div class="mk-row"><div class="mk-main">'
+            + '<div class="mk-name">'+esc(m.name||"?")+'</div>'
+            + '<div class="mk-detail">'+esc(m.detail||"")+'</div></div>'
+            + '<div class="mk-tags">'
+            + (m.scope ? '<span class="mk-chip">'+esc(m.scope)+'</span>' : "")
+            + (m.transport ? '<span class="mk-chip">'+esc(m.transport)+'</span>' : "")
+            + '<span class="mk-st '+st+'">'+(stLabel[st]||"—")+'</span>'
+            + '</div></div>';
+        });
+      }
+      html += '<div class="mk-sec">Skills · user &amp; project <span class="mk-count">'+userSk.length+'</span></div>';
+      if(!userSk.length){ html += '<div class="mk-empty">No skills in ~/.claude/skills or ~/.claude/commands.</div>'; }
+      else { userSk.forEach(function(s){ html += mkSkillRow(s); }); }
+      html += '<div class="mk-sec">Skills · built-in <span class="mk-count">'+builtinSk.length+'</span></div>';
+      builtinSk.forEach(function(s){ html += mkSkillRow(s); });
+      document.getElementById("mk-body").innerHTML = html;
+
+      var info = document.getElementById("mk-info");
+      if(info){
+        var msg;
+        if(d.recheckError){ msg = "Re-check failed: " + d.recheckError; }
+        else if(d.live){ msg = "live health checked"; }
+        else { msg = "from config — click Re-check for live status + connectors"; }
+        if(d.builtinVersion) msg += " · built-ins @ " + d.builtinVersion;
+        info.textContent = msg;
+      }
+      document.getElementById("mcpskills").classList.add("show");
+    };
 
     // ---- L7 routine board (⏰): edit cc-schedules.json without hand-editing ----
     var ROUTINES = [];          // last board rows from ccSchedules()
@@ -8250,6 +8680,7 @@ local HTML = [[
       else if(which === "routines") openRoutines();
       else if(which === "templates") openTplEditor();
       else if(which === "agents") openAgentEd();
+      else if(which === "mcpskills") openMcpSkills();
       else if(which === "policies") openPolicyEd();
       else if(which === "rules") openRuleEd();
       else if(which === "shift"){ if(LEDGER_ON) openShiftReport(); }
@@ -8297,6 +8728,12 @@ local HTML = [[
     });
     document.addEventListener("keydown", function(e){
       if(e.key === "Escape" && document.getElementById("keymenu").classList.contains("show")) closeKeyhelp();
+    });
+    // Esc closes the 🔌 MCPs & Skills viewer (read-only; no sub-form).
+    document.addEventListener("keydown", function(e){
+      if(e.key !== "Escape") return;
+      var ov = document.getElementById("mcpskills");
+      if(ov && ov.classList.contains("show")) closeMcpSkills();
     });
     // Esc in the routine board: close the form first, then the overlay.
     document.addEventListener("keydown", function(e){
@@ -8677,6 +9114,15 @@ pcall(function()
     elseif action == "focusChange" then
       -- `extra` is a boolean: true = gained key focus, false = lost it.
       panelHasFocus = extra and true or false
+      -- Scope the ⌘V keyDown tap to ONLY while the panel holds key focus. An
+      -- always-on global keyDown tap sits in the system-wide keystroke path on
+      -- the single HS main thread, so a busy refresh tick could stall typing in
+      -- EVERY app; gated to focus, it's out of that path ~99% of the time.
+      -- pcall: the tap is created later in the bootstrap, so guard early calls.
+      pcall(function()
+        if not M.pasteTap then return end
+        if panelHasFocus then M.pasteTap:start() else M.pasteTap:stop() end
+      end)
     elseif action == "frameChange" then
       if saveGeomTimer then saveGeomTimer:stop() end
       saveGeomTimer = hs.timer.doAfter(0.4, function()
@@ -8735,7 +9181,21 @@ local function handlePanelPaste()
     end
   end
 end
-M.pasteTap = hs.eventtap.new({ hs.eventtap.event.types.keyDown }, function(e)
+if M.pasteTap then pcall(function() M.pasteTap:stop() end) end  -- no stacking on re-dofile
+M.pasteTap = hs.eventtap.new({
+  hs.eventtap.event.types.keyDown,
+  hs.eventtap.event.types.tapDisabledByTimeout,
+  hs.eventtap.event.types.tapDisabledByUserInput,
+}, function(e)
+  local et = e:getType()
+  if et == hs.eventtap.event.types.tapDisabledByTimeout
+     or et == hs.eventtap.event.types.tapDisabledByUserInput then
+    -- The OS watchdog disabled the tap (a main-thread block exceeded the
+    -- CGEventTap time budget). Re-arm so ⌘V into the panel can't silently die
+    -- until a reload — without this, typing recovers but paste stops working.
+    pcall(function() if M.pasteTap then M.pasteTap:start() end end)
+    return false
+  end
   local f = e:getFlags()
   if f.cmd and not f.shift and not f.alt and not f.ctrl
      and e:getKeyCode() == hs.keycodes.map["v"] then
@@ -8749,7 +9209,11 @@ M.pasteTap = hs.eventtap.new({ hs.eventtap.event.types.keyDown }, function(e)
   end
   return false
 end)
-M.pasteTap:start()
+-- NOT started at load: the webview focusChange handler starts it when the panel
+-- gains key focus and stops it on blur, keeping it out of the global keystroke
+-- path. Start now only if the panel already holds focus (e.g. reloaded while
+-- focused) so ⌘V works immediately without a focus toggle.
+if panelHasFocus then pcall(function() M.pasteTap:start() end) end
 
 -- Read the status dir, parse via cc-core, refresh byKey, return the sorted list.
 function refreshList()
@@ -8827,25 +9291,48 @@ end
 -- Shared by risk scoring, the gate decision log, and the notification badge.
 -- Returns events, changed -- `changed` is true only when this call re-read the
 -- files, so per-tick consumers (the 🔔 badge) can skip recompute on cache hits.
-local ledgerSnapshotCache = {}
+-- Per-file parsed-event cache { [name] = { sig, events } }. Only files whose
+-- size:mtime fingerprint moved are re-read + re-decoded each tick (today's hot
+-- file on an append); the historical daily files are reused from memory instead
+-- of re-JSON-parsing the whole ~4.6MB corpus on every refresh -- THE main-thread
+-- stall that intermittently froze typing (the always-on keyDown tap shares this
+-- thread). ledgerSnapshotCache holds the assembled, filtered + capped slice so an
+-- unchanged tick returns it without even re-sorting. core.ledgerCachePlan is the
+-- pure (unit-tested) decision; the I/O stays here.
+local ledgerCache = { byFile = {}, events = nil }   -- byFile: per-file parsed cache; events: assembled+capped slice
 function ledgerSnapshot()  -- assigns the forward-declared local (same as loadConfig)
-  local parts = {}
+  local files = {}
   for _, fn in ipairs(FX.readDir(LEDGER_DIR)) do
     if fn:match("%.jsonl$") then
       local a = hs.fs.attributes(LEDGER_DIR .. "/" .. fn)
-      parts[#parts + 1] = fn .. ":" .. tostring(a and a.size or "?")
-        .. ":" .. tostring(a and a.modification or "?")
+      files[#files + 1] = { name = fn,
+        sig = tostring(a and a.size or "?") .. ":" .. tostring(a and a.modification or "?") }
     end
   end
-  table.sort(parts)  -- readDir order isn't guaranteed; the signature must be stable
-  local sig = table.concat(parts, ";")
-  local now = FX.now()
-  local changed = false
-  if core.ledgerCacheStale(ledgerSnapshotCache, sig, now, 30) then
-    ledgerSnapshotCache = { events = FX.readLedger({}).events, sig = sig, ts = now }
-    changed = true
+  table.sort(files, function(x, y) return x.name < y.name end)  -- chronological by name
+  local plan = core.ledgerCachePlan(ledgerCache.byFile, files)
+  if not plan.changed and ledgerCache.events then
+    return ledgerCache.events, false
   end
-  return ledgerSnapshotCache.events, changed
+  -- Re-read ONLY the changed files; reuse the rest from the per-file cache. (No
+  -- 30s TTL backstop here, unlike the old single-sig ledgerCacheStale path: the
+  -- per-file size:mtime sig + atomic temp+mv on every redact/purge is the sole
+  -- invalidation -- a same-second, same-byte-count rewrite is the only miss, and
+  -- that's vanishingly narrow.)
+  local newByFile = {}
+  for _, f in ipairs(files) do
+    local cached = (not plan.reparse[f.name]) and ledgerCache.byFile[f.name] or nil
+    if not cached then
+      local text = FX.readFile(LEDGER_DIR .. "/" .. f.name)
+      cached = { sig = f.sig, events = core.parseLedger(text or "") }
+    end
+    newByFile[f.name] = cached
+  end
+  ledgerCache.byFile = newByFile  -- drops entries for files that vanished (expiry/purge)
+  -- Pure assembly (concat in chronological file order + global newest-2000 cap),
+  -- matching the old FX.readLedger({}) slice. Unit-tested as core.assembleLedger.
+  ledgerCache.events = core.assembleLedger(files, newByFile)
+  return ledgerCache.events, true
 end
 
 -- L6: run the OPT-IN event-callback rules for an edge on a tile. Sequential -- every
@@ -9925,6 +10412,19 @@ end
 
 -- Keep references alive so Lua does not garbage-collect them.
 _G.__ccDashboard = { webview = wv, controller = controller, module = M, core = core, fx = FX, toggle = togglePanel }
+
+-- Stop our long-lived handles on Hammerspoon quit/reload so the CGEventTap +
+-- repeating timers/pathwatcher are released cleanly (no leaked Mach port / run
+-- loop source). Chain any pre-existing shutdown callback rather than clobber it.
+do
+  local priorShutdown = hs.shutdownCallback
+  hs.shutdownCallback = function()
+    for _, k in ipairs({ "pasteTap", "timer", "watcher", "usageTimer", "officialUsageTimer" }) do
+      if M[k] then pcall(function() M[k]:stop() end) end
+    end
+    if priorShutdown then pcall(priorShutdown) end
+  end
+end
 print("[cc-dashboard] loaded; watching " .. STATUS_DIR)
 
 return M

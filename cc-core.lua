@@ -1585,6 +1585,57 @@ function M.ledgerCacheStale(cache, sig, now, ttl)
   return (tonumber(now) or 0) - (tonumber(cache.ts) or 0) >= (tonumber(ttl) or 30)
 end
 
+-- Plan an INCREMENTAL ledger re-parse so refresh() never re-decodes the whole
+-- 30-day corpus every tick (the main-thread stall that froze typing). Pure: the
+-- caller does the I/O. `oldByFile` is the prior per-file cache { [name] = { sig,
+-- events } }; `files` is the sorted list of files now on disk, each { name, sig }
+-- where sig is a "size:mtime" fingerprint. Returns { changed, reparse, present }:
+--   reparse[name] = true   -> file is new or its sig moved (append / redact / purge
+--                             / shrink / rotation), so the caller must re-read it
+--   present[name] = true   -> file still exists (drop cache entries not present)
+--   changed                -> any file was added/modified OR a cached file vanished,
+--                             i.e. the assembled snapshot (and its consumers) must
+--                             recompute; false means reuse the prior slice verbatim.
+-- A real append always grows size, and an atomic redact/purge rewrite bumps mtime,
+-- so the size:mtime sig catches every mutation without byte-offset bookkeeping.
+function M.ledgerCachePlan(oldByFile, files)
+  oldByFile = oldByFile or {}
+  local reparse, present = {}, {}
+  local changed = false
+  for _, f in ipairs(files or {}) do
+    present[f.name] = true
+    local old = oldByFile[f.name]
+    if not old or old.sig ~= f.sig then
+      reparse[f.name] = true
+      changed = true
+    end
+  end
+  for name in pairs(oldByFile) do
+    if not present[name] then changed = true end  -- a daily file was expired/purged
+  end
+  return { changed = changed, reparse = reparse, present = present }
+end
+
+-- Assemble the ledger snapshot from the per-file cache: concat each file's parsed
+-- events in chronological FILE order (filesInOrder is name-sorted), then globally
+-- filter (newest-first) + cap. Pure counterpart to ledgerCachePlan's decision --
+-- the impure ledgerSnapshot reads/parses the changed files, this stitches them.
+-- Only files in filesInOrder contribute, so a vanished (expired/purged) file is
+-- dropped automatically. opts.limit defaults to the capLedgerSlice newest-2000,
+-- matching the old FX.readLedger({}) slice every ledger consumer expects.
+function M.assembleLedger(filesInOrder, byFile, opts)
+  opts = opts or {}
+  byFile = byFile or {}
+  local all = {}
+  for _, f in ipairs(filesInOrder or {}) do
+    local entry = f and f.name and byFile[f.name]
+    if entry and type(entry.events) == "table" then
+      for _, e in ipairs(entry.events) do all[#all + 1] = e end
+    end
+  end
+  return (M.capLedgerSlice(M.filterLedger(all, {}), opts.limit))
+end
+
 -- Score one session's risk from its ledger events (caller filters to the session
 -- via core.filterLedger(all, {session=sid})). Returns { score, band, signals }.
 -- Pure + deterministic; no quarantine, no side effects -- purely an indicator.
@@ -5335,15 +5386,34 @@ function M.parseSkillFrontmatter(text, stem)
   text = tostring(text or "")
   local fm = text:match("^%s*%-%-%-%s*\n(.-)\n%s*%-%-%-")
   if fm then
-    for line in (fm .. "\n"):gmatch("(.-)\n") do
-      local k, v = line:match("^%s*([%w_]+)%s*:%s*(.-)%s*$")
+    local lines = {}
+    for line in (fm .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
+    local i = 1
+    while i <= #lines do
+      local indent, k, v = lines[i]:match("^(%s*)([%w_]+)%s*:%s*(.-)%s*$")
       if k then
-        v = v:gsub('^"(.*)"$', "%1"):gsub("^'(.*)'$", "%1")
+        -- YAML block/folded scalar ("key: >" / ">-" / "|" / "|-" + chomp variants):
+        -- the value is the following MORE-indented lines, not the indicator itself.
+        -- Gather them and fold to a single line (what the cards display). Without
+        -- this the value was literally ">-" (e.g. rune / deno-fresh2 SKILL.md).
+        if v == ">" or v == ">-" or v == ">+" or v == "|" or v == "|-" or v == "|+" then
+          local base, parts, j = #indent, {}, i + 1
+          while j <= #lines do
+            if lines[j]:match("^%s*$") then parts[#parts + 1] = ""; j = j + 1
+            elseif #(lines[j]:match("^(%s*)")) > base then parts[#parts + 1] = agTrim(lines[j]); j = j + 1
+            else break end
+          end
+          v = agTrim((table.concat(parts, " "):gsub("%s+", " ")))
+          i = j - 1
+        else
+          v = v:gsub('^"(.*)"$', "%1"):gsub("^'(.*)'$", "%1")
+        end
         local lk = k:lower()
         if lk == "name" and agTrim(v) ~= "" then out.name = agTrim(v)
         elseif lk == "display_title" or lk == "title" then out.display_title = agTrim(v)
         elseif lk == "description" then out.description = agTrim(v) end
       end
+      i = i + 1
     end
   end
   if out.name == "" then out.name = agTrim(stem) end
@@ -5355,6 +5425,249 @@ function M.skillCommand(name)
   local n = agTrim(name):lower():gsub("%s+", "-")
   if n == "" then return nil end
   return "/" .. n
+end
+
+-- ---- Installed MCP + skills INVENTORY (read-only 🔌 viewer) -----------------
+-- Distinct from the cc-mcp.json agent registry above: this surfaces what is
+-- ACTUALLY installed for Claude Code -- the user + per-project mcpServers in
+-- ~/.claude.json, the live `claude mcp list` health/connectors, and the slash
+-- commands + built-in skills. All pure; the FX layer does the reads/subprocess.
+
+-- A server's display detail, NEVER exposing env values (those are secrets):
+-- "command arg arg…" for stdio, or the url for http/sse.
+local function mcpDetail(rec)
+  if type(rec) ~= "table" then return "?" end
+  if type(rec.command) == "string" then
+    local parts = { rec.command }
+    if type(rec.args) == "table" then
+      for _, a in ipairs(rec.args) do parts[#parts + 1] = tostring(a) end
+    end
+    return table.concat(parts, " ")
+  elseif type(rec.url) == "string" then
+    return rec.url
+  end
+  return "?"
+end
+local function mcpTransport(rec)
+  if type(rec) ~= "table" then return "stdio" end
+  if rec.type and rec.type ~= "" then return tostring(rec.type) end
+  if rec.url then return "http" end
+  return "stdio"
+end
+
+-- Extract installed MCP servers from a decoded ~/.claude.json. Walks user-scope
+-- `mcpServers` + every project's `mcpServers`, dedups by name (defined in both ->
+-- scope "user+project"), and NEVER includes env. Returns a name-sorted list of
+-- { name, scope, transport, detail }.
+function M.extractInstalledMcp(claudeJson)
+  claudeJson = type(claudeJson) == "table" and claudeJson or {}
+  local byName, order = {}, {}
+  local function add(name, rec, scope)
+    if type(name) ~= "string" or name == "" then return end
+    local e = byName[name]
+    if not e then
+      e = { name = name, scope = scope, transport = mcpTransport(rec), detail = mcpDetail(rec) }
+      byName[name] = e; order[#order + 1] = name
+    elseif not (e.scope == scope or e.scope:find(scope, 1, true)) then
+      e.scope = e.scope .. "+" .. scope  -- same server defined in multiple scopes
+    end
+  end
+  if type(claudeJson.mcpServers) == "table" then
+    for name, rec in pairs(claudeJson.mcpServers) do add(name, rec, "user") end
+  end
+  if type(claudeJson.projects) == "table" then
+    for _, proj in pairs(claudeJson.projects) do
+      if type(proj) == "table" and type(proj.mcpServers) == "table" then
+        for name, rec in pairs(proj.mcpServers) do add(name, rec, "project") end
+      end
+    end
+  end
+  local out = {}
+  for _, name in ipairs(order) do out[#out + 1] = byName[name] end
+  table.sort(out, function(a, b) return a.name:lower() < b.name:lower() end)
+  return out
+end
+
+-- Parse `claude mcp list` stdout. Each server line is
+--   "<name>: <detail> - <glyph> <status text>"
+-- (✔ Connected / ✘ Failed to connect / ! Needs authentication / ⏸ Pending
+-- approval). Connectors are prefixed "claude.ai ". Skips the health-check header,
+-- blanks, and everything from "MCP Config Diagnostics" on. Returns a list of
+-- { name, detail, status, connector } with status in
+-- connected|failed|needs-auth|pending|unknown.
+function M.parseMcpListOutput(text)
+  local out = {}
+  if type(text) ~= "string" then return out end
+  for line in (text .. "\n"):gmatch("(.-)\n") do
+    if line:match("^MCP Config Diagnostics") then break end
+    local name, rest = line:match("^(.-): (.+)$")
+    if name and rest then
+      local detail, status = rest:match("^(.*) %- (.+)$")  -- greedy: split last " - "
+      if detail and status then
+        local st = "unknown"
+        if status:find("Connected") then st = "connected"
+        elseif status:find("Failed") then st = "failed"
+        elseif status:find("[Aa]uthenticat") then st = "needs-auth"
+        elseif status:find("Pending") then st = "pending" end
+        local connector = line:match("^claude%.ai ") ~= nil
+        out[#out + 1] = {
+          name = connector and (name:gsub("^claude%.ai ", "")) or name,
+          detail = detail, status = st, connector = connector,
+        }
+      end
+    end
+  end
+  return out
+end
+
+-- Merge config-derived servers (scope/transport/detail, no status) with live
+-- `claude mcp list` results (status + connectors). Config entries gain status by
+-- name; live-only servers (connectors, approved .mcp.json not in ~/.claude.json)
+-- are appended (scope "connector"/"other"). liveList nil -> status "unknown".
+-- Returns a list sorted by scope then name: { name, scope, transport, detail, status }.
+function M.mergeMcpStatus(configList, liveList)
+  local liveByName = {}
+  for _, l in ipairs(liveList or {}) do liveByName[l.name] = l end
+  local out, seen = {}, {}
+  for _, c in ipairs(configList or {}) do
+    local l = liveByName[c.name]
+    out[#out + 1] = { name = c.name, scope = c.scope, transport = c.transport,
+                      detail = c.detail, status = (l and l.status) or "unknown" }
+    seen[c.name] = true
+  end
+  for _, l in ipairs(liveList or {}) do
+    if not seen[l.name] then
+      out[#out + 1] = { name = l.name, scope = l.connector and "connector" or "other",
+                        transport = (l.detail or ""):match("^https?://") and "http" or "stdio",
+                        detail = l.detail, status = l.status }
+    end
+  end
+  table.sort(out, function(a, b)
+    if (a.scope or "") ~= (b.scope or "") then return (a.scope or "") < (b.scope or "") end
+    return a.name:lower() < b.name:lower()
+  end)
+  return out
+end
+
+-- Built-in slash-command skills that ship INSIDE the `claude` binary -- they have
+-- no file on disk and there is no `claude skill list` to enumerate them, so this
+-- is maintained by hand and pinned to the CLI version. Update on a CLI bump.
+M.BUILTIN_SKILLS_VERSION = "2.1.175"
+M.BUILTIN_SKILLS = {
+  { name = "code-review", description = "Review the current diff for bugs and reuse/efficiency cleanups at a chosen effort level." },
+  { name = "security-review", description = "Security review of the pending changes on the current branch." },
+  { name = "review", description = "Review a pull request." },
+  { name = "simplify", description = "Apply reuse / simplification / efficiency / altitude cleanups to the changed code." },
+  { name = "verify", description = "Run the app and observe behavior to confirm a change actually works." },
+  { name = "run", description = "Launch and drive this project's app to see a change working." },
+  { name = "deep-research", description = "Fan-out web research, adversarially verify claims, synthesize a cited report." },
+  { name = "loop", description = "Run a prompt or slash command on a recurring interval." },
+  { name = "schedule", description = "Create / manage scheduled cloud agents (cron routines)." },
+  { name = "update-config", description = "Configure the Claude Code harness via settings.json (hooks, permissions, env)." },
+  { name = "keybindings-help", description = "Customize keyboard shortcuts / keybindings.json." },
+  { name = "fewer-permission-prompts", description = "Add a read-only allowlist to settings to cut permission prompts." },
+  { name = "claude-api", description = "Reference for the Claude API / Anthropic SDK (models, pricing, tools)." },
+  { name = "init", description = "Initialize a new CLAUDE.md with codebase documentation." },
+}
+
+-- The built-in skills as viewer cards { name, description, command, builtin }.
+function M.builtinSkillCards()
+  local out = {}
+  for _, s in ipairs(M.BUILTIN_SKILLS) do
+    out[#out + 1] = { name = s.name, description = s.description,
+                      command = M.skillCommand(s.name), builtin = true }
+  end
+  return out
+end
+
+-- ---- In-app worklist (project + generic checklists; NO code hooks) ----------
+-- A dead-simple checklist surfaced in the panel. state.generic is the global
+-- list; state.byProject[projectKey] is a per-folder list keyed by the SAME stable
+-- launch-folder identity as labels/groups, so a list sticks across cd-drift /
+-- respawn / close-and-reopen. Items: { id, text, done, ts }. All pure -- the FX
+-- layer does I/O and mints ids. scope == "generic" (or nil) -> the global list;
+-- any other string -> that projectKey's list.
+
+-- The live array for a scope (the actual reference, so mutations write through).
+function M.worklistScopeList(state, scope)
+  if type(state) ~= "table" then return {} end
+  if scope == nil or scope == "generic" then return state.generic or {} end
+  return (state.byProject or {})[scope] or {}
+end
+
+-- Append a trimmed item to a scope (empty/whitespace text is ignored). The caller
+-- supplies a unique id (FX mints it) + now; pure here for deterministic tests.
+function M.worklistAdd(state, scope, text, id, now)
+  state = type(state) == "table" and state or {}
+  text = type(text) == "string" and (text:gsub("^%s+", ""):gsub("%s+$", "")) or ""
+  if text == "" then return state end
+  local item = { id = tostring(id or ""), text = text, done = false, ts = tonumber(now) or 0 }
+  if scope == nil or scope == "generic" then
+    if type(state.generic) ~= "table" then state.generic = {} end
+    state.generic[#state.generic + 1] = item
+  else
+    if type(state.byProject) ~= "table" then state.byProject = {} end
+    if type(state.byProject[scope]) ~= "table" then state.byProject[scope] = {} end
+    local l = state.byProject[scope]; l[#l + 1] = item
+  end
+  return state
+end
+
+-- Flip an item's done flag by id within a scope (checking moves it to the Done
+-- area in the UI; unchecking brings it back).
+function M.worklistToggle(state, scope, id)
+  for _, it in ipairs(M.worklistScopeList(state, scope)) do
+    if it.id == id then it.done = not it.done; break end
+  end
+  return state
+end
+
+-- Drop the done items from a scope (the "Clear" on the Done area).
+function M.worklistClearDone(state, scope)
+  if type(state) ~= "table" then return state or {} end
+  local kept = {}
+  for _, it in ipairs(M.worklistScopeList(state, scope)) do
+    if not it.done then kept[#kept + 1] = it end
+  end
+  if scope == nil or scope == "generic" then state.generic = kept
+  else state.byProject = state.byProject or {}; state.byProject[scope] = kept end
+  return state
+end
+
+-- Split a scope's items into active + done lists (UI helper; pure).
+function M.worklistSplit(items)
+  local active, done = {}, {}
+  for _, it in ipairs(items or {}) do
+    if it.done then done[#done + 1] = it else active[#active + 1] = it end
+  end
+  return active, done
+end
+
+-- Normalize a decoded worklist into DISTINCT, correctly-shaped containers:
+-- generic = a fresh LIST, byProject = a fresh MAP of string-key -> list. This is
+-- load-bearing: hs.json.decode INTERNS empty {} into a single shared table, so a
+-- fresh file's generic and byProject decode to the SAME table -- adding to one
+-- then pollutes the other. Rebuilding into separate tables breaks that alias.
+-- Also drops stray non-string keys / non-table items, which self-heals a file
+-- already corrupted by the old aliasing bug (its byProject is a numeric-keyed
+-- array). Pure.
+function M.worklistNormalize(t)
+  t = type(t) == "table" and t or {}
+  local generic = {}
+  if type(t.generic) == "table" then
+    for _, it in ipairs(t.generic) do if type(it) == "table" then generic[#generic + 1] = it end end
+  end
+  local byProject = {}
+  if type(t.byProject) == "table" then
+    for k, v in pairs(t.byProject) do
+      if type(k) == "string" and type(v) == "table" then
+        local list = {}
+        for _, it in ipairs(v) do if type(it) == "table" then list[#list + 1] = it end end
+        byProject[k] = list
+      end
+    end
+  end
+  return { generic = generic, byProject = byProject }
 end
 
 -- ===========================================================================

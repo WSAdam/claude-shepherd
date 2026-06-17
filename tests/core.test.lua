@@ -2242,6 +2242,90 @@ do
   eq("capVictims: cap 0 = disabled", #core.ledgerCapVictims(live, sizes, 0), 0)
   eq("capVictims: under cap -> none", #core.ledgerCapVictims(live, sizes, 9999), 0)
 
+  -- ledgerCachePlan: incremental re-parse decision (only touch changed files)
+  local files = {
+    { name = "2026-06-15.jsonl", sig = "100:111" },
+    { name = "2026-06-16.jsonl", sig = "200:222" },
+    { name = "2026-06-17.jsonl", sig = "300:333" },  -- today (hot)
+  }
+  -- cold cache: everything reparses, changed
+  local cold = core.ledgerCachePlan({}, files)
+  check("cachePlan: cold cache is changed", cold.changed == true)
+  eq("cachePlan: cold reparses today", cold.reparse["2026-06-17.jsonl"], true)
+  eq("cachePlan: cold reparses history", cold.reparse["2026-06-15.jsonl"], true)
+  -- warm cache, only today grew (append): reparse ONLY today, others reused
+  local warm = {
+    ["2026-06-15.jsonl"] = { sig = "100:111", events = {} },
+    ["2026-06-16.jsonl"] = { sig = "200:222", events = {} },
+    ["2026-06-17.jsonl"] = { sig = "250:300", events = {} },  -- prior, smaller
+  }
+  local plan = core.ledgerCachePlan(warm, files)
+  check("cachePlan: append is changed", plan.changed == true)
+  eq("cachePlan: reparses only the grown file", plan.reparse["2026-06-17.jsonl"], true)
+  check("cachePlan: reuses unchanged history (15)", plan.reparse["2026-06-15.jsonl"] == nil)
+  check("cachePlan: reuses unchanged history (16)", plan.reparse["2026-06-16.jsonl"] == nil)
+  -- fully warm, nothing moved: not changed, no reparse (the hot-path win)
+  local same = {
+    ["2026-06-15.jsonl"] = { sig = "100:111", events = {} },
+    ["2026-06-16.jsonl"] = { sig = "200:222", events = {} },
+    ["2026-06-17.jsonl"] = { sig = "300:333", events = {} },
+  }
+  local noop = core.ledgerCachePlan(same, files)
+  check("cachePlan: unchanged tick is NOT changed", noop.changed == false)
+  check("cachePlan: unchanged tick reparses nothing", next(noop.reparse) == nil)
+  -- a redact/purge that shrinks a PAST file (sig moves) reparses just that file
+  local shrunk = {
+    ["2026-06-15.jsonl"] = { sig = "100:111", events = {} },
+    ["2026-06-16.jsonl"] = { sig = "999:999", events = {} },  -- rewritten
+    ["2026-06-17.jsonl"] = { sig = "300:333", events = {} },
+  }
+  local rplan = core.ledgerCachePlan(shrunk, files)
+  check("cachePlan: rewritten past file is changed", rplan.changed == true)
+  eq("cachePlan: reparses the rewritten file", rplan.reparse["2026-06-16.jsonl"], true)
+  -- a vanished cached file (expiry/purge of a whole day) invalidates the snapshot
+  local expired = {
+    ["2026-06-14.jsonl"] = { sig = "50:50", events = {} },  -- no longer on disk
+    ["2026-06-15.jsonl"] = { sig = "100:111", events = {} },
+    ["2026-06-16.jsonl"] = { sig = "200:222", events = {} },
+    ["2026-06-17.jsonl"] = { sig = "300:333", events = {} },
+  }
+  local eplan = core.ledgerCachePlan(expired, files)
+  check("cachePlan: a vanished daily file is changed", eplan.changed == true)
+  check("cachePlan: vanished file not marked present", eplan.present["2026-06-14.jsonl"] == nil)
+  -- both-empty (empty ledger dir / feature just enabled): must NOT report changed,
+  -- else refresh would needlessly reparse+reassemble every tick (the very stall fixed)
+  local empt = core.ledgerCachePlan({}, {})
+  check("cachePlan: empty corpus is NOT changed", empt.changed == false and next(empt.reparse) == nil and next(empt.present) == nil)
+
+  -- assembleLedger: the pure ASSEMBLY counterpart to the (tested) decision. Concat
+  -- per-file events in file order, sort newest-first, global cap. (This is what the
+  -- impure ledgerSnapshot inlined with zero coverage before the extract.)
+  local aByFile = {
+    ["2026-06-15.jsonl"] = { events = { { ts = 100, type = "x" }, { ts = 300, type = "x" } } },
+    ["2026-06-16.jsonl"] = { events = { { ts = 200, type = "x" } } },
+  }
+  local aOrder = { { name = "2026-06-15.jsonl" }, { name = "2026-06-16.jsonl" } }
+  local aev = core.assembleLedger(aOrder, aByFile)
+  eq("assembleLedger: total count", #aev, 3)
+  eq("assembleLedger: newest first (global sort)", aev[1].ts, 300)
+  eq("assembleLedger: middle", aev[2].ts, 200)
+  eq("assembleLedger: oldest last", aev[3].ts, 100)
+  -- a vanished file (not in the order list) contributes nothing, even if still cached
+  local av2 = core.assembleLedger({ { name = "2026-06-16.jsonl" } }, aByFile)
+  eq("assembleLedger: vanished file dropped (count)", #av2, 1)
+  eq("assembleLedger: vanished file dropped (survivor)", av2[1].ts, 200)
+  -- cap is GLOBAL newest-N across files, not per-file (matches old FX.readLedger 2000)
+  local big = { f1 = { events = {} }, f2 = { events = {} } }
+  for i = 1, 1300 do big.f1.events[i] = { ts = i, type = "x" } end           -- ts 1..1300
+  for i = 1, 1300 do big.f2.events[i] = { ts = 2000 + i, type = "x" } end     -- ts 2001..3300
+  local capped = core.assembleLedger({ { name = "f1" }, { name = "f2" } }, big)  -- default cap 2000
+  eq("assembleLedger: default cap = 2000", #capped, 2000)
+  eq("assembleLedger: cap keeps global newest", capped[1].ts, 3300)
+  eq("assembleLedger: 2000th is global, not file-local", capped[2000].ts, 601)
+  eq("assembleLedger: nil inputs -> empty", #core.assembleLedger(nil, nil), 0)
+  -- a file in the order with no cache entry contributes nothing (no crash)
+  eq("assembleLedger: missing cache entry skipped", #core.assembleLedger({ { name = "ghost" } }, aByFile), 0)
+
   check("narrateEvent: decision shows provenance",
     core.narrateEvent({ type = "decision", outcome = "deny", tool = "Bash", summary = "x",
                         by = "autoDeny", pattern = "Bash(rm*)" }):find("autoDeny", 1, true) ~= nil)
@@ -4248,6 +4332,220 @@ do
   check("mcpConfig: stdio env ref", cfg.mcpServers["local"].env.MY_TOKEN == "${MY_TOKEN}")
   check("mcpConfig: sse type+url", cfg.mcpServers["linear"].type == "sse"
     and cfg.mcpServers["linear"].url == "https://mcp.linear.app/sse")
+end
+
+-- ---- Installed MCP + skills INVENTORY (read-only 🔌 viewer) -----------------
+do
+  -- extractInstalledMcp: user + per-project mcpServers, deduped, NO env exposed
+  local cj = {
+    mcpServers = {
+      context7 = { type = "stdio", command = "npx", args = { "-y", "@upstash/context7-mcp" } },
+      playwright = { command = "npx", args = { "-y", "@playwright/mcp@latest" } },
+    },
+    projects = {
+      ["/Users/adam"] = { mcpServers = {
+        playwright = { command = "npx", args = { "@playwright/mcp@latest", "--isolated" } },  -- also user
+        github = { command = "docker", args = { "run", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN" },
+                   env = { GITHUB_PERSONAL_ACCESS_TOKEN = "ghp_SECRET_VALUE" } },
+        unity = { url = "http://localhost:8080/mcp", type = "http" },
+      } },
+    },
+  }
+  local mcp = core.extractInstalledMcp(cj)
+  local byName = {}; for _, e in ipairs(mcp) do byName[e.name] = e end
+  eq("extractInstalledMcp: deduped count", #mcp, 4)  -- context7, playwright, github, unity
+  eq("extractInstalledMcp: user scope", byName.context7.scope, "user")
+  eq("extractInstalledMcp: dual scope merged", byName.playwright.scope, "user+project")
+  eq("extractInstalledMcp: project scope", byName.github.scope, "project")
+  eq("extractInstalledMcp: stdio detail = command+args", byName.context7.detail, "npx -y @upstash/context7-mcp")
+  eq("extractInstalledMcp: http transport from url", byName.unity.transport, "http")
+  eq("extractInstalledMcp: url detail", byName.unity.detail, "http://localhost:8080/mcp")
+  check("extractInstalledMcp: NEVER leaks env values",
+    not byName.github.detail:find("SECRET") and not byName.github.detail:find("ghp_"))
+  eq("extractInstalledMcp: nil input -> empty", #core.extractInstalledMcp(nil), 0)
+  check("extractInstalledMcp: sorted by name", mcp[1].name == "context7")
+
+  -- parseMcpListOutput: the real `claude mcp list` format
+  local raw = table.concat({
+    "Checking MCP server health…",
+    "",
+    "claude.ai Google Drive: https://drivemcp.googleapis.com/mcp/v1 - ✔ Connected",
+    "claude.ai Gmail: https://gmailmcp.googleapis.com/mcp/v1 - ! Needs authentication",
+    "playwright: npx @playwright/mcp@latest --isolated - ✔ Connected",
+    "github: docker run -i --rm -e GITHUB_PERSONAL_ACCESS_TOKEN ghcr.io/github/github-mcp-server - ✘ Failed to connect",
+    "UnityMCP: http://localhost:8080/mcp (HTTP) - ✘ Failed to connect",
+    "",
+    "MCP Config Diagnostics",
+    "",
+    " └ [Warning] Server \"playwright\" defined in multiple scopes",
+  }, "\n")
+  local live = core.parseMcpListOutput(raw)
+  local lByName = {}; for _, e in ipairs(live) do lByName[e.name] = e end
+  eq("parseMcpListOutput: server count (diagnostics excluded)", #live, 5)
+  eq("parseMcpListOutput: connector name stripped", lByName["Google Drive"].connector, true)
+  eq("parseMcpListOutput: connected status", lByName.playwright.status, "connected")
+  eq("parseMcpListOutput: failed status", lByName.github.status, "failed")
+  eq("parseMcpListOutput: needs-auth status", lByName.Gmail.status, "needs-auth")
+  eq("parseMcpListOutput: detail keeps full command", lByName.playwright.detail, "npx @playwright/mcp@latest --isolated")
+  eq("parseMcpListOutput: detail splits on LAST ' - '",
+     lByName.github.detail, "docker run -i --rm -e GITHUB_PERSONAL_ACCESS_TOKEN ghcr.io/github/github-mcp-server")
+  eq("parseMcpListOutput: header line ignored", lByName["Checking MCP server health…"], nil)
+
+  -- mergeMcpStatus: config gains live status; connectors appended
+  local merged = core.mergeMcpStatus(
+    { { name = "playwright", scope = "user+project", transport = "stdio", detail = "npx …" },
+      { name = "github", scope = "project", transport = "stdio", detail = "docker …" } },
+    live)
+  local mByName = {}; for _, e in ipairs(merged) do mByName[e.name] = e end
+  eq("mergeMcpStatus: config gets live status", mByName.playwright.status, "connected")
+  eq("mergeMcpStatus: config keeps its scope", mByName.github.scope, "project")
+  eq("mergeMcpStatus: connector added as connector scope", mByName["Google Drive"].scope, "connector")
+  check("mergeMcpStatus: nil live -> unknown status",
+    core.mergeMcpStatus({ { name = "x", scope = "user", transport = "stdio", detail = "y" } }, nil)[1].status == "unknown")
+
+  -- builtin skills catalog
+  check("builtinSkillCards: non-empty", #core.builtinSkillCards() > 0)
+  check("builtinSkillCards: command is /name", core.builtinSkillCards()[1].command:match("^/") ~= nil)
+  check("builtinSkillCards: flagged builtin", core.builtinSkillCards()[1].builtin == true)
+
+  -- extractInstalledMcp fallbacks: a server with neither command nor url, and an
+  -- explicit type that overrides url-based transport inference
+  local cj2 = { mcpServers = {
+    broken = { type = "stdio" },                                   -- no command, no url
+    linear = { url = "https://mcp.linear.app/sse", type = "sse" }, -- explicit type wins
+  } }
+  local m2 = {}; for _, e in ipairs(core.extractInstalledMcp(cj2)) do m2[e.name] = e end
+  eq("extractInstalledMcp: no command/url -> detail '?'", m2.broken.detail, "?")
+  eq("extractInstalledMcp: no command/url -> transport from type", m2.broken.transport, "stdio")
+  eq("extractInstalledMcp: explicit type beats url inference", m2.linear.transport, "sse")
+
+  -- parseMcpListOutput remaining status branches + the statusless-line contract
+  eq("parseMcpListOutput: pending status", core.parseMcpListOutput("x: cmd - ⏸ Pending approval")[1].status, "pending")
+  eq("parseMcpListOutput: unrecognized status -> unknown", core.parseMcpListOutput("x: cmd - ✦ weird state")[1].status, "unknown")
+  -- a line with no ' - <status>' is NOT a server line -> dropped (locks the contract:
+  -- claude mcp list health-checks every server, so a real server line always has one)
+  eq("parseMcpListOutput: statusless line dropped", #core.parseMcpListOutput("noStatusServer: just a detail here"), 0)
+
+  -- mergeMcpStatus live-only inference + config-absent-from-NONEMPTY-live (distinct
+  -- code path from the nil-live 'unknown' already covered above)
+  local loHttp = core.mergeMcpStatus({}, { { name = "remote", status = "connected", connector = false, detail = "https://x/mcp" } })
+  eq("mergeMcpStatus: live-only scope 'other'", loHttp[1].scope, "other")
+  eq("mergeMcpStatus: live-only http transport from url", loHttp[1].transport, "http")
+  local loStdio = core.mergeMcpStatus({}, { { name = "loc", status = "failed", connector = false, detail = "npx foo" } })
+  eq("mergeMcpStatus: live-only non-url -> stdio", loStdio[1].transport, "stdio")
+  local absent = core.mergeMcpStatus(
+    { { name = "absent", scope = "user", transport = "stdio", detail = "x" } },
+    { { name = "elsewhere", status = "connected" } })
+  local aById = {}; for _, e in ipairs(absent) do aById[e.name] = e end
+  eq("mergeMcpStatus: config absent from non-empty live stays unknown", aById.absent.status, "unknown")
+end
+
+-- ---- parseSkillFrontmatter: YAML folded/block scalars + inline values --------
+do
+  -- folded scalar ">-" (the rune / deno-fresh2 SKILL.md shape): value is the
+  -- following indented lines folded to one line, NOT the literal ">-".
+  local folded = "---\nname: rune\ndescription: >-\n  Author .rune specs and generate\n  code with the toolchain.\n---\nbody"
+  local f = core.parseSkillFrontmatter(folded, "rune")
+  eq("frontmatter: folded name", f.name, "rune")
+  eq("frontmatter: folded description joined", f.description, "Author .rune specs and generate code with the toolchain.")
+  check("frontmatter: folded never leaves the >- indicator", f.description ~= ">-" and not f.description:find(">%-"))
+  -- literal block scalar "|"
+  local lit = core.parseSkillFrontmatter("---\nname: x\ndescription: |\n  line one\n  line two\n---", "x")
+  eq("frontmatter: literal block joined", lit.description, "line one line two")
+  -- plain inline value still works (regression)
+  local inline = core.parseSkillFrontmatter("---\nname: improve\ndescription: Apply cards. Usage: /improve\n---", "improve")
+  eq("frontmatter: inline description", inline.description, "Apply cards. Usage: /improve")
+  -- quoted inline value still unwrapped (regression)
+  local q = core.parseSkillFrontmatter('---\nname: y\ndescription: "quoted desc"\n---', "y")
+  eq("frontmatter: quoted inline unwrapped", q.description, "quoted desc")
+  -- no frontmatter -> name falls back to stem, no description
+  local none = core.parseSkillFrontmatter("just a prompt body, no fence", "triage-email")
+  eq("frontmatter: stem fallback name", none.name, "triage-email")
+  check("frontmatter: no description when absent", none.description == nil)
+end
+
+-- ---- In-app worklist (generic + per-project checklists) ---------------------
+do
+  local st = { generic = {}, byProject = {} }
+  -- add to generic + a project scope
+  core.worklistAdd(st, "generic", "call the bank", "g1", 100)
+  core.worklistAdd(st, "generic", "  send invoice  ", "g2", 101)  -- trimmed
+  core.worklistAdd(st, "proj:/Users/adam/qb", "fix date filter", "p1", 102)
+  eq("worklist: generic count", #core.worklistScopeList(st, "generic"), 2)
+  eq("worklist: text trimmed", core.worklistScopeList(st, "generic")[2].text, "send invoice")
+  eq("worklist: project scope count", #core.worklistScopeList(st, "proj:/Users/adam/qb"), 1)
+  eq("worklist: nil scope == generic", #core.worklistScopeList(st, nil), 2)
+  -- empty/whitespace text ignored
+  core.worklistAdd(st, "generic", "   ", "g3", 103)
+  core.worklistAdd(st, "generic", "", "g4", 104)
+  eq("worklist: blank text ignored", #core.worklistScopeList(st, "generic"), 2)
+  -- new items start active (not done)
+  check("worklist: new item active", core.worklistScopeList(st, "generic")[1].done == false)
+  -- toggle moves to done; toggle again brings back
+  core.worklistToggle(st, "generic", "g1")
+  check("worklist: toggle sets done", core.worklistScopeList(st, "generic")[1].done == true)
+  local active, done = core.worklistSplit(core.worklistScopeList(st, "generic"))
+  eq("worklist: split active", #active, 1)
+  eq("worklist: split done", #done, 1)
+  eq("worklist: split done is the toggled one", done[1].id, "g1")
+  core.worklistToggle(st, "generic", "g1")
+  check("worklist: toggle back to active", core.worklistScopeList(st, "generic")[1].done == false)
+  -- clearDone removes only done items, only in that scope
+  core.worklistToggle(st, "generic", "g2")          -- mark "send invoice" done
+  core.worklistToggle(st, "proj:/Users/adam/qb", "p1")  -- mark project item done
+  core.worklistClearDone(st, "generic")
+  eq("worklist: clearDone drops done in scope", #core.worklistScopeList(st, "generic"), 1)
+  eq("worklist: clearDone keeps active", core.worklistScopeList(st, "generic")[1].id, "g1")
+  eq("worklist: clearDone leaves other scope untouched", #core.worklistScopeList(st, "proj:/Users/adam/qb"), 1)
+  -- toggle of an unknown id is a no-op (no crash)
+  core.worklistToggle(st, "generic", "nope")
+  eq("worklist: unknown-id toggle is a no-op", #core.worklistScopeList(st, "generic"), 1)
+  -- scope list for an unknown project is empty (no crash)
+  eq("worklist: unknown scope -> empty", #core.worklistScopeList(st, "proj:/nope"), 0)
+  -- tolerant of a nil/garbled state
+  eq("worklist: nil state scope -> empty", #core.worklistScopeList(nil, "generic"), 0)
+  check("worklist: add to nil state builds it", #core.worklistScopeList(core.worklistAdd(nil, "generic", "x", "z1", 1), "generic") == 1)
+
+  -- worklistNormalize: de-alias + self-heal a decoded blob
+  -- (1) the JSON-intern alias bug: generic and byProject are the SAME table
+  local shared = { { id = "a", text = "t", done = false, ts = 1 } }
+  local aliased = { generic = shared, byProject = shared }
+  local n1 = core.worklistNormalize(aliased)
+  check("normalize: generic and byProject are DISTINCT tables", not rawequal(n1.generic, n1.byProject))
+  eq("normalize: generic keeps its item", #n1.generic, 1)
+  check("normalize: byProject drops numeric-keyed (aliased) entries", next(n1.byProject) == nil)
+  -- adding to the normalized generic must NOT touch byProject
+  core.worklistAdd(n1, "generic", "b", "b1", 2)
+  eq("normalize: post-add generic", #n1.generic, 2)
+  check("normalize: post-add byProject still empty", next(n1.byProject) == nil)
+  -- (2) a corrupted byProject-as-array is healed to an empty map
+  local n2 = core.worklistNormalize({ generic = {}, byProject = { { id = "x", text = "y" } } })
+  check("normalize: array byProject healed to empty map", next(n2.byProject) == nil)
+  -- (3) a valid byProject map is preserved, keyed by project
+  local n3 = core.worklistNormalize({ generic = {}, byProject = { ["proj:/a"] = { { id = "p", text = "q", done = true } } } })
+  eq("normalize: valid project list preserved", #core.worklistScopeList(n3, "proj:/a"), 1)
+  check("normalize: preserved item flag", core.worklistScopeList(n3, "proj:/a")[1].done == true)
+  -- (4) nil / garbage -> empty distinct containers
+  local n4 = core.worklistNormalize(nil)
+  check("normalize: nil -> distinct empties", not rawequal(n4.generic, n4.byProject) and #n4.generic == 0 and next(n4.byProject) == nil)
+  -- (5) junk drop INSIDE valid containers: non-table generic items + a non-table
+  -- byProject value are dropped (self-heal beyond the alias case)
+  local n5 = core.worklistNormalize({
+    generic = { "astring", { id = "1", text = "x" }, 42 },
+    byProject = { good = { { id = "2", text = "y" }, "junkitem" }, junk = "alsoastring" },
+  })
+  eq("normalize: non-table generic items dropped", #n5.generic, 1)
+  eq("normalize: non-table project value dropped", core.worklistScopeList(n5, "junk") and #core.worklistScopeList(n5, "junk"), 0)
+  eq("normalize: valid project kept, junk item dropped", #core.worklistScopeList(n5, "good"), 1)
+
+  -- worklistClearDone PROJECT-scope branch (only the generic branch was covered)
+  local cd = { generic = { { id = "g", text = "keep", done = false } },
+               byProject = { ["proj:/p"] = { { id = "a", text = "done1", done = true },
+                                              { id = "b", text = "active", done = false } } } }
+  core.worklistClearDone(cd, "proj:/p")
+  eq("clearDone(project): drops done in that project", #core.worklistScopeList(cd, "proj:/p"), 1)
+  eq("clearDone(project): keeps the active one", core.worklistScopeList(cd, "proj:/p")[1].id, "b")
+  eq("clearDone(project): leaves generic untouched", #core.worklistScopeList(cd, "generic"), 1)
 end
 
 -- ---- L1: persona / extra flags / resolver / env ----------------------------
