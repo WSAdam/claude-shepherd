@@ -776,8 +776,14 @@ just the servers you attach to spawns.
 - **Skills** — your `~/.claude/skills` (SKILL.md) and `~/.claude/commands` (`/slash` files), plus
   a pinned list of the CLI's **built-in** skills (which have no file to enumerate), each with its
   `/command` and description.
+- **CLI tools** — the external binaries Shepherd shells out to, each with an **installed / missing**
+  chip and its resolved path. Detected via the same PATH/Homebrew lookup the app uses to actually
+  run them, so the status reflects the real binary it would pick: `jq` (the one **required** dep),
+  `ripgrep` and `fd` (the search/folder-scan accelerators — when missing, they show the POSIX tool
+  they fall back to: `grep` / `find`), `rsync` (the SSH status bridge), and `ffmpeg` + `whisper-cli`
+  (the optional Stream Deck voice key).
 
-Read-only — Shepherd never edits your MCP config or skills; it just shows the inventory.
+Read-only — Shepherd never edits your MCP config, skills, or tools; it just shows the inventory.
 
 ## Worklist (My List)
 

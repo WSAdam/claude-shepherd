@@ -4,6 +4,11 @@ The cross-machine / controls roadmap (Parts A/C/E) is **done**. This tracks the 
 remaining items. Full per-round detail is in CHANGELOG.md and git history.
 
 ## Shipped ✅
+- **📋 Worklist: per-item delete + multi-line add** — each row has a **✕** (pure `core.worklistRemove`,
+  delegated click); add field is an auto-growing `<textarea>` (Enter adds, Shift+Enter newlines).
+- **🔌 CLI-tools inventory** (MCPs & Skills viewer) — read-only installed/missing + resolved-path
+  rows for `jq`/`rg`/`fd`/`rsync`/`ffmpeg`/`whisper-cli` (`core.CLI_TOOLS` + `cliToolCards`,
+  resolved via `resolveBin` on open). `rg`/`fd` show their `grep`/`find` fallback when missing.
 - **Typing-stall fix** — incremental per-file ledger parse (`core.ledgerCachePlan` +
   `assembleLedger`, ~310 ms → ~2.7 ms/tick) + focus-scoped ⌘V eventtap + `tapDisabledByTimeout`
   re-arm + idempotent teardown/`shutdownCallback`. The 1 Hz full-ledger re-parse on the shared

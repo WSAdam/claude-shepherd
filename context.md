@@ -17,7 +17,7 @@ network, no multi-user, no secrets — it reads session status off the local fil
 - **[cc-core.lua](cc-core.lua) — pure logic, zero `hs.*`.** Every decision (status
   parse/sort/staleness, action selection, spawn specs, ledger parse/cache/assembly +
   fleet-insights aggregation, per-session risk, grouping/filtering, sparkline bucketing,
-  installed-MCP/skills inventory, worklist CRUD) is a pure, deterministic
+  installed-MCP/skills/CLI-tools inventory, worklist CRUD) is a pure, deterministic
   function unit-tested directly in plain `lua`. **New logic goes here.**
 - **[claude-dashboard.lua](claude-dashboard.lua) — Hammerspoon glue (~5,900 lines).** The
   webview, the ~1s refresh loop, module-level state, and all side effects. Effects funnel

@@ -4,6 +4,35 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-18 (panel) — worklist delete + multi-line add, CLI-tools inventory
+
+Two follow-ups on the day-old panel surfaces. All new logic is pure `cc-core` under unit test;
+the front-end legs get source-level wiring tripwires (the panel JS has no headless runtime here).
+
+### Added — 📋 Worklist: per-item delete + multi-line add
+
+Each worklist row now carries a **✕** that deletes it outright (active or done, any scope) via the
+pure `core.worklistRemove` — delegated click + `data-`-attribute idiom, same as the checkbox; the
+bridge dispatches a new `worklist-remove` action. The add field became a multi-line auto-growing
+`<textarea>`: **Enter** adds, **Shift+Enter** inserts a newline, the box grows with content and
+resets after add; items render their line breaks (`white-space: pre-wrap`). The ✕ resting color
+clears the 3:1 contrast floor so delete stays discoverable.
+
+### Added — 🔌 MCPs & Skills viewer: "CLI tools" section
+
+A read-only inventory of the external binaries Shepherd shells out to — `jq` (required), `ripgrep`
++ `fd` (search/folder-scan accelerators, with the `grep`/`find` fallback shown when missing),
+`rsync` (SSH bridge), and `ffmpeg` + `whisper-cli` (voice). Each row shows an **installed / missing**
+chip and the resolved path, detected through the same `resolveBin` PATH/Homebrew lookup the app uses
+to actually run them — so the status reflects the real binary it would pick. Pure catalog +
+`core.cliToolCards` shaping; `FX.cliToolStatus` resolves on viewer open only (never on the tick).
+
+### Internals / tests
+
+`core.worklistRemove` + `core.cliToolCards`/`CLI_TOOLS` are unit-tested directly; new bash tripwires
+(`worklist-ui.test.sh`, `mcpskills-tools.test.sh`) pin the JS↔bridge↔core wiring, and the XSS
+tripwire gained the worklist item-text sink. Suite green.
+
 ## 2026-06-17 (panel) — typing-stall fix, MCPs & Skills viewer, in-app worklist
 
 A correctness pass that traced an intermittent system-wide typing drop to Shepherd's own event

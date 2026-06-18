@@ -5586,6 +5586,43 @@ function M.builtinSkillCards()
   return out
 end
 
+-- External CLI tools Shepherd shells out to, surfaced read-only in the 🔌 viewer
+-- so a glance shows what's installed vs. degraded. Each: name + `bin` (what we
+-- resolve on PATH), `role` (what it powers), and either `fallback` (the POSIX
+-- tool it degrades to), `required` (jq -- the one hard dep), or `optional` (a
+-- subsystem you may not use). Hand-maintained; pure data. The FX layer resolves
+-- real paths (resolveBin) and M.cliToolCards turns that into cards.
+M.CLI_TOOLS = {
+  { name = "jq",          bin = "jq",          role = "rich session tiles (parses each session's status JSON)", required = true },
+  { name = "ripgrep",     bin = "rg",          role = "fleet-wide search across sessions",          fallback = "grep" },
+  { name = "fd",          bin = "fd",          role = "New-session folder scan (gitignore-aware)",  fallback = "find" },
+  { name = "rsync",       bin = "rsync",       role = "SSH status bridge (pulls remote fleets)" },
+  { name = "ffmpeg",      bin = "ffmpeg",      role = "Stream Deck voice capture",        optional = true },
+  { name = "whisper-cli", bin = "whisper-cli", role = "Stream Deck voice transcription",  optional = true },
+}
+
+-- Shape the CLI-tool catalog into viewer cards given a { bin = resolvedPath } map
+-- (FX resolves the paths). A tool counts as INSTALLED only when its resolved value
+-- is an ABSOLUTE path -- resolveBin returns the bare name when nothing is found, so
+-- a non-"/"-prefixed value means missing. Missing tools surface their fallback
+-- instead of a path. Pure.
+function M.cliToolCards(resolved)
+  resolved = type(resolved) == "table" and resolved or {}
+  local out = {}
+  for _, t in ipairs(M.CLI_TOOLS) do
+    local path = resolved[t.bin]
+    local installed = type(path) == "string" and path:sub(1, 1) == "/"
+    out[#out + 1] = {
+      name = t.name, bin = t.bin, role = t.role,
+      required = t.required == true, optional = t.optional == true,
+      fallback = t.fallback,
+      installed = installed,
+      path = installed and path or nil,
+    }
+  end
+  return out
+end
+
 -- ---- In-app worklist (project + generic checklists; NO code hooks) ----------
 -- A dead-simple checklist surfaced in the panel. state.generic is the global
 -- list; state.byProject[projectKey] is a per-folder list keyed by the SAME stable

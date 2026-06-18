@@ -4408,6 +4408,37 @@ do
   check("builtinSkillCards: command is /name", core.builtinSkillCards()[1].command:match("^/") ~= nil)
   check("builtinSkillCards: flagged builtin", core.builtinSkillCards()[1].builtin == true)
 
+  -- CLI tools inventory (🔌 viewer "CLI tools" section)
+  local toolByBin = {}
+  for _, t in ipairs(core.CLI_TOOLS) do toolByBin[t.bin] = t end
+  check("cliTools: includes the rg + fd search accelerators", toolByBin.rg ~= nil and toolByBin.fd ~= nil)
+  check("cliTools: jq flagged required (the one hard dep)", toolByBin.jq and toolByBin.jq.required == true)
+  eq("cliTools: rg degrades to grep", toolByBin.rg.fallback, "grep")
+  eq("cliTools: fd degrades to find", toolByBin.fd.fallback, "find")
+  -- cliToolCards: an ABSOLUTE resolved path => installed (+ path surfaced)
+  local cards = core.cliToolCards({ jq = "/opt/homebrew/bin/jq", rg = "/usr/local/bin/rg" })
+  eq("cliToolCards: one card per catalog tool", #cards, #core.CLI_TOOLS)
+  local cc = {}; for _, c in ipairs(cards) do cc[c.bin] = c end
+  check("cliToolCards: resolved abs path => installed", cc.jq.installed == true)
+  eq("cliToolCards: installed surfaces the path", cc.jq.path, "/opt/homebrew/bin/jq")
+  check("cliToolCards: rg installed too", cc.rg.installed == true)
+  -- a tool absent from the resolved map => missing, no path, fallback preserved
+  check("cliToolCards: absent tool => missing", cc.fd.installed == false)
+  eq("cliToolCards: missing tool has no path", cc.fd.path, nil)
+  eq("cliToolCards: missing tool keeps its fallback", cc.fd.fallback, "find")
+  -- required / optional flags ride through to the card
+  check("cliToolCards: jq required flag", cc.jq.required == true)
+  check("cliToolCards: ffmpeg optional flag", cc.ffmpeg.optional == true)
+  -- a BARE-NAME resolve (resolveBin's not-found fallback) is NOT "installed"
+  local cards2 = core.cliToolCards({ rg = "rg" })
+  local cc2 = {}; for _, c in ipairs(cards2) do cc2[c.bin] = c end
+  check("cliToolCards: bare-name resolve is not installed", cc2.rg.installed == false)
+  -- nil / garbage resolved map => every tool missing (no crash)
+  local cards3 = core.cliToolCards(nil)
+  local anyInstalled = false
+  for _, c in ipairs(cards3) do if c.installed then anyInstalled = true end end
+  check("cliToolCards: nil resolved => all missing", (not anyInstalled) and #cards3 == #core.CLI_TOOLS)
+
   -- extractInstalledMcp fallbacks: a server with neither command nor url, and an
   -- explicit type that overrides url-based transport inference
   local cj2 = { mcpServers = {

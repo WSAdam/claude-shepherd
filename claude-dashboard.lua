@@ -2301,6 +2301,22 @@ end
 -- last live `claude mcp list` status (nil until the user clicks Re-check), plus
 -- skills = user files (~/.claude/skills) + slash commands (~/.claude/commands) +
 -- the pinned built-ins. All sync reads of small files, only on open/Re-check.
+-- Resolve each external CLI tool Shepherd uses to its real path (shell PATH +
+-- brew/usr-local, via resolveBin) so the 🔌 viewer can show installed vs. missing.
+-- resolveBin returns the bare name when nothing is found, so only an absolute path
+-- that exists counts as installed. Sync (a handful of `command -v` calls), run only
+-- on viewer open / Re-check -- never on the refresh tick.
+function FX.cliToolStatus()
+  local resolved = {}
+  for _, t in ipairs(core.CLI_TOOLS) do
+    local p = resolveBin(t.bin)
+    if type(p) == "string" and p:sub(1, 1) == "/" and hs.fs.attributes(p) then
+      resolved[t.bin] = p
+    end
+  end
+  return core.cliToolCards(resolved)
+end
+
 function FX.mcpSkillsPayload()
   local user = {}
   for _, s in ipairs(FX.listSkills()) do user[#user + 1] = s end
@@ -2309,6 +2325,7 @@ function FX.mcpSkillsPayload()
   return {
     mcp = core.mergeMcpStatus(FX.readInstalledMcp(), FX.mcpView.live),
     skills = { user = user, builtin = core.builtinSkillCards() },
+    tools = FX.cliToolStatus(),
     builtinVersion = core.BUILTIN_SKILLS_VERSION,
     live = (FX.mcpView.live ~= nil),
   }
@@ -7331,6 +7348,26 @@ local HTML = [[
       var desc = s.description ? '<div class="mk-desc">'+esc(s.description)+'</div>' : "";
       return '<div class="mk-row"><div class="mk-main"><div class="mk-name">'+nm+cmd+'</div>'+desc+'</div></div>';
     }
+    // A CLI-tool row: installed -> green chip + resolved path; missing -> grey chip
+    // (red for the one required tool) + the POSIX fallback it degrades to. esc() on
+    // every interpolated field (paths/names are system-derived, but still escaped).
+    function mkToolRow(t){
+      var st = t.installed ? "connected" : (t.required ? "failed" : "unknown");
+      var stLabel = t.installed ? "installed" : "missing";
+      var detail = t.installed ? esc(t.path || "")
+        : (t.fallback ? ("falls back to <span class=\"mk-cmd\">"+esc(t.fallback)+"</span>")
+          : (t.required ? "required — not found" : "not installed"));
+      var roleChip = t.required ? '<span class="mk-chip">required</span>'
+        : (t.optional ? '<span class="mk-chip">optional</span>' : "");
+      return '<div class="mk-row"><div class="mk-main">'
+        + '<div class="mk-name">'+esc(t.name||"?")+'</div>'
+        + '<div class="mk-detail">'+detail+'</div>'
+        + (t.role ? '<div class="mk-desc">'+esc(t.role)+'</div>' : "")
+        + '</div><div class="mk-tags">'
+        + roleChip
+        + '<span class="mk-st '+st+'">'+stLabel+'</span>'
+        + '</div></div>';
+    }
     window.ccMcpSkills = function(d){
       d = d || {};
       var mcp = Array.isArray(d.mcp) ? d.mcp : [];
@@ -7359,6 +7396,11 @@ local HTML = [[
       else { userSk.forEach(function(s){ html += mkSkillRow(s); }); }
       html += '<div class="mk-sec">Skills · built-in <span class="mk-count">'+builtinSk.length+'</span></div>';
       builtinSk.forEach(function(s){ html += mkSkillRow(s); });
+      var tools = Array.isArray(d.tools) ? d.tools : [];
+      if(tools.length){
+        html += '<div class="mk-sec">CLI tools <span class="mk-count">'+tools.length+'</span></div>';
+        tools.forEach(function(t){ html += mkToolRow(t); });
+      }
       document.getElementById("mk-body").innerHTML = html;
 
       var info = document.getElementById("mk-info");
