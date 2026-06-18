@@ -5451,5 +5451,77 @@ do
   check("promptSnippet: truncates to maxLen", #core.userPromptSnippet(longLine, 40) <= 40)
 end
 
+-- ---- DR7: A/B fork-to-compare (plan / worktree cmds / compare / judge) -----
+do
+  eq("abSlug: sanitizes + caps", core.abSlug("My Cohort #1!!"), "my-cohort-1")
+  eq("abSlug: trims dashes", core.abSlug("--a/b--"), "a-b")
+  eq("abBranchName", core.abBranchName("Run 1", "Opus"), "ab/run-1/opus")
+  eq("abWorktreePath: sibling .cc-ab dir",
+     core.abWorktreePath("/Users/x/Programming/repo", "c1", "a"), "/Users/x/Programming/.cc-ab/repo-c1-a")
+
+  local plan = core.abCohortPlan({
+    cohort = "c1", repoRoot = "/p/repo", task = "build the feature",
+    variants = { { label = "Sonnet", model = "sonnet" }, { label = "Opus", model = "opus", prompt = "build it carefully" } },
+  })
+  check("abCohortPlan: ok", plan.ok == true)
+  eq("abCohortPlan: 2 variants", #plan.variants, 2)
+  eq("abCohortPlan: branch", plan.variants[1].branch, "ab/c1/sonnet")
+  eq("abCohortPlan: worktree", plan.variants[2].worktreePath, "/p/.cc-ab/repo-c1-opus")
+  eq("abCohortPlan: base task inherited", plan.variants[1].task, "build the feature")
+  eq("abCohortPlan: per-variant prompt overrides task", plan.variants[2].task, "build it carefully")
+  eq("abCohortPlan: model carried", plan.variants[2].model, "opus")
+  eq("abCohortPlan: base defaults to HEAD", plan.base, "HEAD")
+  check("abCohortPlan: rejects <2 variants",
+        core.abCohortPlan({ cohort = "c", repoRoot = "/p", task = "t", variants = { { label = "a" } } }).ok == false)
+  check("abCohortPlan: rejects no repo",
+        core.abCohortPlan({ cohort = "c", task = "t", variants = { { label = "a" }, { label = "b" } } }).ok == false)
+  check("abCohortPlan: rejects dup labels",
+        core.abCohortPlan({ cohort = "c", repoRoot = "/p", task = "t", variants = { { label = "A" }, { label = "a" } } }).ok == false)
+  check("abCohortPlan: rejects a variant with no task at all",
+        core.abCohortPlan({ cohort = "c", repoRoot = "/p", variants = { { label = "a" }, { label = "b" } } }).ok == false)
+
+  -- git command builders (quoted; run via /bin/sh by the dashboard)
+  check("gitWorktreeAddCmd: shape",
+        core.gitWorktreeAddCmd("/p/repo", "/p/.cc-ab/repo-c1-a", "ab/c1/a", "HEAD")
+        == "git -C /p/repo worktree add -b ab/c1/a /p/.cc-ab/repo-c1-a HEAD")
+  check("gitWorktreeRemoveCmd: shape",
+        core.gitWorktreeRemoveCmd("/p/repo", "/p/.cc-ab/repo-c1-a")
+        == "git -C /p/repo worktree remove --force /p/.cc-ab/repo-c1-a")
+  check("gitBranchDeleteCmd: shape",
+        core.gitBranchDeleteCmd("/p/repo", "ab/c1/a") == "git -C /p/repo branch -D ab/c1/a")
+  check("gitWorktreeAddCmd: quotes a spacey path",
+        core.gitWorktreeAddCmd("/p/my repo", "/p/wt a", "ab/c/a", "HEAD"):find("'/p/my repo'", 1, true) ~= nil)
+
+  -- compare: rank by score (scored first, highest wins, stable ties)
+  local cmp = core.abCompare(plan.variants, { Sonnet = { score = 70, hadData = true }, Opus = { score = 92, hadData = true } })
+  eq("abCompare: winner is highest score", cmp.winner, "Opus")
+  eq("abCompare: rank 1 = winner", cmp.rows[1].label, "Opus")
+  eq("abCompare: rank 2", cmp.rows[2].label, "Sonnet")
+  local cmp2 = core.abCompare(plan.variants, { Sonnet = { score = 80, hadData = true } })  -- Opus unscored
+  eq("abCompare: scored before unscored", cmp2.rows[1].label, "Sonnet")
+  check("abCompare: winner is the scored one", cmp2.winner == "Sonnet")
+  local cmp3 = core.abCompare(plan.variants, {})   -- none scored
+  check("abCompare: no scores -> no winner", cmp3.winner == nil)
+  check("abCompare: stable order when no data", cmp3.rows[1].label == "Sonnet" and cmp3.rows[2].label == "Opus")
+
+  -- A/B model variant on a fresh worktree: env forces the terminal flavor, which must
+  -- ALSO carry coldStart so vscodeOpenArgs adds --disable-workspace-trust (else the trust
+  -- modal blocks the integrated-terminal launch line).
+  local abSpec = core.spawnSpec("vscode", "/p/.cc-ab/repo-c1-a", "build it",
+    { isNew = true, env = { { name = "ANTHROPIC_MODEL", value = "opus", secret = false } } })
+  eq("ab spawn: env -> terminal flavor", abSpec.flavor, "terminal")
+  check("ab spawn: terminal flavor carries coldStart when isNew", abSpec.coldStart == true)
+  local function hasArg2(args, v) for _, a in ipairs(args) do if a == v then return true end end return false end
+  check("ab spawn: cold terminal flavor gets --disable-workspace-trust",
+        hasArg2(core.vscodeOpenArgs(abSpec), "--disable-workspace-trust"))
+  check("ab spawn: ANTHROPIC_MODEL rides the typed line", (abSpec.postType or ""):find("ANTHROPIC_MODEL", 1, true) ~= nil)
+
+  -- judge prompt
+  local jp = core.abJudgePrompt("do X", { { label = "A", model = "opus", output = "did X via foo" }, { label = "B", output = "did X via bar" } })
+  check("abJudgePrompt: includes task", jp:find("do X", 1, true) ~= nil)
+  check("abJudgePrompt: includes both variants + a winner ask",
+        jp:find("Variant A", 1, true) ~= nil and jp:find("Variant B", 1, true) ~= nil and jp:find("WINNING variant", 1, true) ~= nil)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

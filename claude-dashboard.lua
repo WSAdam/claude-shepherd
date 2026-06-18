@@ -2299,7 +2299,7 @@ end
 -- Spawn a new Claude session, editor-aware (F3-F5). The editor comes from the
 -- caller (the modal's picker) or falls back to `spawn.editor` in config. Effective
 -- dry-run = the code default ORCH_DRY_RUN unless the user flips `spawn.live` on.
-function FX.spawnSession(editor, project, task, permissionMode, providerId, agentOpts, isNew)
+function FX.spawnSession(editor, project, task, permissionMode, providerId, agentOpts, isNew, modelOverride)
   local cfg = loadConfig()
   editor = (editor and editor ~= "") and editor or core.config(cfg, "spawn.editor", "terminal")
   -- Resolve the provider profile. "" is an EXPLICIT "(none — bare claude)" pick;
@@ -2307,13 +2307,20 @@ function FX.spawnSession(editor, project, task, permissionMode, providerId, agen
   -- resolution in cc-core). A missing/unknown profile leaves env/model nil ->
   -- bare `claude`, unchanged.
   local profile = core.providerById(cfg, core.spawnProviderKey(cfg, providerId))
+  local env = profile and core.providerEnv(profile) or nil
+  -- DR7: a raw per-variant ANTHROPIC_MODEL (A/B model-axis on native Anthropic, no
+  -- provider profile needed). Only when there's no provider env already (a profile's
+  -- model wins) and the model is non-empty.
+  if (not env) and type(modelOverride) == "string" and modelOverride ~= "" then
+    env = { { name = "ANTHROPIC_MODEL", value = modelOverride, secret = false } }
+  end
   local opts = {
     terminal       = ORCH_TERMINAL,
     kittyBin       = resolveBin("kitty", core.config(cfg, "spawn.kittyBin", nil)),
     kittyRemote    = core.config(cfg, "spawn.kittyRemote", true) ~= false,
     kittySocket    = core.config(cfg, "spawn.kittySocket", nil),
     permissionMode = (permissionMode and permissionMode ~= "") and permissionMode or nil,
-    env            = profile and core.providerEnv(profile) or nil,  -- carries ANTHROPIC_MODEL
+    env            = env,  -- carries ANTHROPIC_MODEL (provider profile or the raw override)
     ssh            = profile and type(profile.ssh) == "table" and profile.ssh or nil,
     claudeBin      = claudeBinPath(),  -- absolute path; nil keeps the bare word
     vscodeFlavor   = core.config(cfg, "spawn.vscodeFlavor", "extension"),  -- extension | terminal
@@ -2380,6 +2387,165 @@ function spawnPrompt()
   local editor = core.config(loadConfig(), "spawn.editor", "terminal")
   FX.writeRecent(core.recentPush(FX.readRecent(), project))
   FX.spawnSession(editor, project, task)
+end
+
+-- ---- DR7: A/B fork-to-compare (explicitly-invoked, operator-aware) ------------
+-- Registry of active cohorts (cc-ab.json). AB_FILE lives in this do-block so it is an
+-- FX upvalue, not a main-chunk local (the file is at Lua's 200-local cap).
+do
+  local AB_FILE = os.getenv("CC_AB_FILE") or (os.getenv("HOME") .. "/.claude/cc-ab.json")
+  function FX.readAbCohorts()
+    local c = FX.readFile(AB_FILE)
+    if c then
+      local ok, t = pcall(function() return hs.json.decode(c) end)
+      if ok and type(t) == "table" and type(t.cohorts) == "table" then return t end
+    end
+    return { cohorts = {} }
+  end
+  function FX.writeAbCohorts(t) FX.writeFile(AB_FILE, hs.json.encode(t or { cohorts = {} })) end
+end
+
+-- Match a cohort variant to its live tile by cwd == worktreePath (the spawn opens VS
+-- Code on the worktree folder, so the session's cwd is that path). An FX member (no
+-- main-chunk local) to stay under Lua's 200-local cap.
+function FX.abTileForPath(path)
+  for _, it in pairs(byKey) do if it.cwd == path then return it end end
+  return nil
+end
+
+-- Launch a cohort: a git worktree per variant (rolling back created ones on any add
+-- failure), then spawn each variant into its worktree (VS Code, cold-start so the
+-- untrusted worktree folder can't swallow the task), then record the registry. Variants
+-- differ by model (raw ANTHROPIC_MODEL) and/or provider and/or prompt.
+function FX.abLaunch(spec)
+  spec = type(spec) == "table" and spec or {}
+  -- millisecond cohort id so two launches in the same wall-clock second can't collide
+  -- on branch/worktree names (the modal never supplies a cohort).
+  if not spec.cohort or spec.cohort == "" then
+    spec.cohort = "c" .. tostring(math.floor(hs.timer.secondsSinceEpoch() * 1000))
+  end
+  local plan = core.abCohortPlan(spec)
+  if not plan.ok then
+    pcall(function() hs.alert.show("Claude Shepherd: A/B — " .. tostring(plan.error)) end)
+    return { ok = false, error = plan.error }
+  end
+  -- Require a real git repo (worktree add would fail anyway -- fail early + clearly).
+  if not FX.gitRoot(plan.repoRoot) then
+    pcall(function() hs.alert.show("Claude Shepherd: A/B needs a git repo (no repo at that folder)") end)
+    return { ok = false, error = "not a git repo" }
+  end
+  local created = {}
+  for _, v in ipairs(plan.variants) do
+    local out, ok = hs.execute(core.gitWorktreeAddCmd(plan.repoRoot, v.worktreePath, v.branch, plan.base) .. " 2>&1", true)
+    if not ok then
+      -- roll back the worktrees AND branches already created -> a failed launch leaves no trace
+      for _, c in ipairs(created) do
+        hs.execute(core.gitWorktreeRemoveCmd(plan.repoRoot, c.path) .. " 2>&1", true)
+        hs.execute(core.gitBranchDeleteCmd(plan.repoRoot, c.branch) .. " 2>&1", true)
+      end
+      pcall(function() hs.alert.show("Claude Shepherd: A/B worktree failed — " .. tostring(out):sub(1, 140)) end)
+      return { ok = false, error = out }
+    end
+    created[#created + 1] = { path = v.worktreePath, branch = v.branch }
+  end
+  for _, v in ipairs(plan.variants) do
+    FX.spawnSession("vscode", v.worktreePath, v.task, spec.mode, v.provider, nil, true, v.model)
+  end
+  local reg = FX.readAbCohorts()
+  reg.cohorts[plan.cohort] = { repoRoot = plan.repoRoot, base = plan.base, task = spec.task or "",
+    created = os.time(), variants = plan.variants }
+  FX.writeAbCohorts(reg)
+  ledgerFor({ name = "A/B " .. plan.cohort, cwd = plan.repoRoot },
+    { type = "ab_launch", cohort = plan.cohort, count = #plan.variants })
+  pcall(function() hs.alert.show("Claude Shepherd: launched A/B — " .. #plan.variants .. " variants in worktrees") end)
+  return { ok = true, cohort = plan.cohort }
+end
+
+-- Compare payload for the A/B panel: each cohort's variants matched to their live tile +
+-- DR4 run score (when the ledger is on), with abCompare's suggested winner.
+function FX.abData()
+  local reg = FX.readAbCohorts()
+  local led = ledgerEnabled() and FX.readLedger({}) or nil
+  local out = {}
+  for cohort, c in pairs(reg.cohorts or {}) do
+    local variants, scores = {}, {}
+    for _, v in ipairs(c.variants or {}) do
+      local tile = FX.abTileForPath(v.worktreePath)
+      local sid = tile and tile.session_id
+      local score, hadData
+      if led and sid and tostring(sid) ~= "" then
+        local r = core.runScore(led.events, sid); score, hadData = r.score, r.hadData
+        scores[v.label] = { score = score, hadData = hadData }
+      end
+      variants[#variants + 1] = { label = v.label, model = v.model, provider = v.provider,
+        branch = v.branch, worktreePath = v.worktreePath, live = tile ~= nil,
+        status = tile and tile.status or nil, activity = (tile and tile.activity) or "",
+        score = score, hadData = hadData }
+    end
+    local cmp = core.abCompare(c.variants, scores)
+    out[#out + 1] = { cohort = cohort, repoRoot = c.repoRoot, task = c.task or "",
+      created = c.created, variants = variants, winner = cmp.winner }
+  end
+  return { cohorts = out, ledgerOn = ledgerEnabled() }
+end
+
+-- Keep the winner: close the LOSER tiles + remove their worktrees (winner's worktree +
+-- branch stay for you to merge), then drop the cohort. Gated by a confirm in the handler.
+function FX.abKeep(cohort, winnerLabel)
+  local reg = FX.readAbCohorts()
+  local c = reg.cohorts[cohort]
+  if not c then return { ok = false } end
+  local removed = 0
+  for _, v in ipairs(c.variants or {}) do
+    if v.label ~= winnerLabel then
+      local tile = FX.abTileForPath(v.worktreePath)
+      if tile then
+        FX.closeWindow({ name = tile.name, cwd = tile.cwd, editor = tile.editor,
+          kittyWindowId = tile.kitty_window_id, kittyListenOn = tile.kitty_listen_on })
+        FX.removeStatus(tile.key)
+      end
+      hs.execute(core.gitWorktreeRemoveCmd(c.repoRoot, v.worktreePath) .. " 2>&1", true)
+      hs.execute(core.gitBranchDeleteCmd(c.repoRoot, v.branch) .. " 2>&1", true)  -- discard the loser fully
+      removed = removed + 1
+    end
+  end
+  reg.cohorts[cohort] = nil
+  FX.writeAbCohorts(reg)
+  ledgerFor({ name = "A/B " .. cohort, cwd = c.repoRoot },
+    { type = "ab_keep", cohort = cohort, winner = winnerLabel or "?", removed = removed })
+  return { ok = true, removed = removed }
+end
+
+-- Optional LLM-judge pass: build the rubric from each variant's recent output and paste
+-- it into the FIRST live variant's session (serialized + delivery-gated). The verdict
+-- appears there for the operator to read (explicit, never silent).
+function FX.abJudge(cohort)
+  local reg = FX.readAbCohorts()
+  local c = reg.cohorts[cohort]
+  if not c then return false end
+  local entries, firstTile = {}, nil
+  for _, v in ipairs(c.variants or {}) do
+    local tile = FX.abTileForPath(v.worktreePath)
+    local out = ""
+    if tile and tile.transcript_path and not tile.remote then
+      out = table.concat(core.transcriptRecent(FX.readTail(tile.transcript_path, 32768), 6, 400), "\n")
+    end
+    entries[#entries + 1] = { label = v.label, model = v.model, output = out }
+    if not firstTile and tile and not tile.remote then firstTile = tile end
+  end
+  if not firstTile then
+    pcall(function() hs.alert.show("Claude Shepherd: A/B judge needs at least one live local variant") end)
+    return false
+  end
+  local prompt = core.abJudgePrompt(c.task, entries)
+  dispatchSerialized(firstTile, "ab-judge", function()
+    if FX.pasteIntoWindow(winTarget(firstTile), { text = prompt }) then
+      pcall(function() hs.alert.show("Claude Shepherd: sent the A/B judge prompt to " .. tostring(firstTile.name)) end)
+    else
+      pcall(function() hs.alert.show("Claude Shepherd: couldn't deliver the judge prompt (no window match)") end)
+    end
+  end)
+  return true
 end
 
 -- Relabel + close are driven by IN-WEBVIEW UI (inline rename input / inline
@@ -2787,6 +2953,49 @@ local function handleBridgeMsg(msg)
     local path = (payload.v and tostring(payload.v) ~= "") and tostring(payload.v) or ORCH_DEFAULT_DIR
     local browse = FX.listDirs(path)
     pcall(function() wv:evaluateJavaScript("ccBrowse(" .. hs.json.encode(browse) .. ")") end)
+    return
+  end
+  -- DR7 A/B fork-to-compare. open-ab: feed the panel the active cohorts + provider list +
+  -- recent repos. ab-launch / ab-keep / ab-judge drive the worktree spawn / keep-winner /
+  -- judge effects (all FX, all operator-invoked). Each re-pushes ccAb so the panel refreshes.
+  if a == "open-ab" then
+    local cfg = loadConfig()
+    local recent = {}
+    for _, it in pairs(byKey) do if it.cwd then recent[#recent + 1] = it.cwd end end
+    recent = core.recentSeed(FX.readRecent(), recent).dirs
+    pcall(function() wv:evaluateJavaScript("window.ccAb(" .. hs.json.encode(FX.abData())
+      .. ", " .. hs.json.encode({ providers = core.config(cfg, "providers", {}) or {},
+                                  recent = recent }) .. ")") end)
+    return
+  end
+  if a == "ab-launch" then
+    local oks, spec = pcall(function() return hs.json.decode(payload.text or "{}") end)
+    if oks and type(spec) == "table" then
+      FX.abLaunch(spec)
+      refresh()
+      pcall(function() wv:evaluateJavaScript("window.ccAb(" .. hs.json.encode(FX.abData()) .. ")") end)
+    end
+    return
+  end
+  if a == "ab-keep" then
+    local okk, req = pcall(function() return hs.json.decode(payload.text or "{}") end)
+    if okk and type(req) == "table" and req.cohort and req.winner then
+      pcall(function()
+        if hs.dialog.blockAlert("Keep \"" .. tostring(req.winner) .. "\"?",
+             "Close the OTHER variants and remove their git worktrees? The winner's worktree "
+             .. "and branch stay (merge it when ready). This can't be undone.",
+             "Keep winner", "Cancel") == "Keep winner" then
+          FX.abKeep(tostring(req.cohort), tostring(req.winner))
+          refresh()
+          wv:evaluateJavaScript("window.ccAb(" .. hs.json.encode(FX.abData()) .. ")")
+        end
+      end)
+    end
+    return
+  end
+  if a == "ab-judge" then
+    local okj, req = pcall(function() return hs.json.decode(payload.text or "{}") end)
+    if okj and type(req) == "table" and req.cohort then FX.abJudge(tostring(req.cohort)) end
     return
   end
   -- Spawn presets (roadmap #4a): save / delete; both reply with the fresh list.
@@ -4970,6 +5179,34 @@ local HTML = [[
   #newsession { display:none; position:fixed; inset:0; background:#15161b; z-index:11;
                 flex-direction:column; }
   #newsession.show { display:flex; }
+  /* DR7 A/B fork-to-compare modal (same full-screen overlay pattern as #newsession) */
+  #abmodal { display:none; position:fixed; inset:0; background:#15161b; z-index:12; flex-direction:column; }
+  #abmodal.show { display:flex; }
+  #ab-head { display:flex; align-items:center; justify-content:space-between; padding:10px 12px;
+             border-bottom:1px solid #2c2f3a; font-weight:700; color:#fff; }
+  #ab-body { flex:1; overflow-y:auto; padding:10px 12px; }
+  #ab-foot { display:flex; gap:8px; margin-top:10px; }
+  #ab-launch-btn { background:#21232c; color:#e0b050; border:1px solid #5a4a22; border-radius:8px; font-size:13px; padding:6px 14px; cursor:pointer; }
+  #ab-foot button:not(#ab-launch-btn) { background:#21232c; color:#cfd2db; border:1px solid #2c2f3a; border-radius:8px; font-size:13px; padding:6px 14px; cursor:pointer; }
+  #ab-repo, #ab-task { width:100%; box-sizing:border-box; }
+  .ab-sep { margin:14px 0 6px; font-size:10px; text-transform:uppercase; letter-spacing:.5px; color:#7c8190; border-top:1px solid #20232c; padding-top:9px; }
+  .ab-vrow { display:flex; gap:6px; align-items:center; margin:4px 0; flex-wrap:wrap; }
+  .ab-vrow input, .ab-vrow select { background:#1b1d24; color:#e8e9ee; border:1px solid #2c2f3a; border-radius:6px; padding:3px 6px; font-size:12px; }
+  .ab-vrow .ab-vlabel { width:84px; } .ab-vrow .ab-vmodel { width:110px; } .ab-vrow .ab-vprompt { flex:1; min-width:140px; }
+  .ab-vrow .ab-vx { background:none; border:none; color:#8a8d99; cursor:pointer; font-size:13px; }
+  .ab-cohort { border:1px solid #2c2f3a; border-radius:8px; padding:8px 10px; margin-bottom:8px; background:#181a21; }
+  .ab-cohort .ab-ctitle { display:flex; align-items:center; gap:8px; color:#cfd2db; font-size:12px; margin-bottom:6px; }
+  .ab-cohort .ab-ctitle .ab-task { color:#8a8d99; font-weight:400; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; min-width:0; }
+  .ab-vr { display:flex; align-items:center; gap:8px; padding:3px 0; border-top:1px solid #20232c; font-size:12px; }
+  .ab-vr.win { background:#1c2418; border-radius:5px; }
+  .ab-vr .ab-vn { flex:0 0 auto; color:#e8e9ee; min-width:84px; }
+  .ab-vr .ab-vm { flex:0 0 auto; color:#9fb6c8; font-size:11px; min-width:64px; }
+  .ab-vr .ab-vs { flex:0 0 auto; font-family:ui-monospace,Menlo,monospace; font-size:11px; min-width:64px; }
+  .ab-vr .ab-va { flex:1 1 auto; color:#8a8d99; font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .ab-vr .ab-keep { background:transparent; color:#8fd4a3; border:1px solid #2c5a3a; border-radius:6px; padding:1px 8px; font-size:11px; cursor:pointer; }
+  .ab-cohort .ab-cacts { display:flex; gap:6px; margin-top:6px; }
+  .ab-cohort .ab-cacts button { background:transparent; color:#9fb6d6; border:1px solid #34435a; border-radius:6px; padding:2px 9px; font-size:11px; cursor:pointer; }
+  .ab-win-tag { color:#8fd4a3; font-size:10px; }
   #n-head { display:flex; align-items:center; justify-content:space-between;
             padding:10px 12px; border-bottom:1px solid #2c2f3a; font-weight:700; color:#fff; }
   #n-body { flex:1; overflow-y:auto; padding:10px 12px; }
@@ -5311,6 +5548,7 @@ local HTML = [[
     <span class="t">Claude sessions</span>
     <span class="right">
       <button id="spawn" onclick="openNew()" title="Spawn a new Claude session">New</button>
+      <button id="b-ab" onclick="openAb()" title="A/B fork-to-compare — run the same task as 2+ variants (model and/or prompt) in isolated git worktrees, then score them side-by-side and keep the winner">⚖ A/B</button>
       <button id="caffeine" onclick="toggleCaffeine()" title="Keep this Mac awake — pmset disablesleep (asks for your password)">☕ Sleep ok</button>
       <button id="lock" onclick="lockMac()" title="Lock — block input until your password, while Claude sessions + remote control keep running (pair with Awake to close the lid locked)">🔒</button>
       <span id="menu-wrap">
@@ -5732,6 +5970,36 @@ local HTML = [[
       <button onclick="saveAgent()" title="Save the current setup (folder/editor/mode/provider/task + a persona role) as a reusable agent you can spawn from">Save as agent</button>
       <button onclick="closeNew();openAgentEd()" title="Open the Agents editor: full-field authoring, skills/MCP/knowledge attach, fork/favorite/archive">Manage agents…</button>
       <button onclick="closeNew()">Cancel</button>
+    </div>
+  </div>
+
+  <!-- DR7: A/B fork-to-compare. Top = active cohorts (compare scores + Judge + Keep);
+       bottom = launch a new run (repo + base task + variant rows). -->
+  <div id="abmodal">
+    <div id="ab-head"><span>⚖ A/B fork-to-compare</span><button class="s-x" onclick="closeAb()">✕</button></div>
+    <div id="ab-body">
+      <div id="ab-active"></div>
+      <div class="ab-sep">New A/B run</div>
+      <div class="s-lbl">Repo folder (must be a git repo — each variant builds in its own worktree)</div>
+      <input id="ab-repo" class="s-txt" placeholder="/Users/you/Programming/project" list="ab-recent" autocomplete="off">
+      <datalist id="ab-recent"></datalist>
+      <div class="s-lbl">Base task (shared by all variants unless a variant sets its own prompt)</div>
+      <textarea id="ab-task" class="s-area"></textarea>
+      <label class="s-row" style="margin-top:6px;">Permission mode
+        <select id="ab-mode">
+          <option value="">Default</option>
+          <option value="plan">Plan</option>
+          <option value="acceptEdits">Accept edits</option>
+          <option value="bypassPermissions">Automate (bypass)</option>
+        </select>
+      </label>
+      <div class="s-lbl">Variants <span class="n-dim">— label · model (opus/sonnet/haiku or blank) · provider · optional prompt override</span></div>
+      <div id="ab-variants"></div>
+      <button onclick="addAbVariant('','','','')" style="background:#21232c;color:#cfd2db;border:1px solid #2c2f3a;border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer;margin-top:4px;">+ variant</button>
+      <div id="ab-foot">
+        <button id="ab-launch-btn" onclick="launchAb()">Launch A/B</button>
+        <button onclick="closeAb()">Cancel</button>
+      </div>
     </div>
   </div>
 
@@ -6968,6 +7236,95 @@ local HTML = [[
     var newMode = "existing";
     function openNew(){ send("open-new"); }
     function closeNew(){ document.getElementById("newsession").classList.remove("show"); }
+
+    // ---- DR7: A/B fork-to-compare ----------------------------------------------
+    var AB_PROVIDERS = [], AB_DATA = { cohorts:[] };
+    function openAb(){ send("open-ab"); }
+    function closeAb(){ document.getElementById("abmodal").classList.remove("show"); }
+    // ccAb(data[, meta]): data = active cohorts (+ledger flag); meta (only on open) =
+    // providers + recent repos. On open we seed the form + show the modal; later pushes
+    // (after launch/keep) just refresh the active list.
+    window.ccAb = function(data, meta){
+      AB_DATA = data || { cohorts:[] };
+      if(meta){
+        AB_PROVIDERS = meta.providers || [];
+        var dl = document.getElementById("ab-recent");
+        if(dl){ dl.innerHTML = (meta.recent||[]).map(function(r){ return '<option value="'+esc(r)+'">'; }).join(""); }
+        if(!document.getElementById("ab-variants").children.length){
+          addAbVariant("A","opus","",""); addAbVariant("B","sonnet","","");
+        }
+        document.getElementById("abmodal").classList.add("show");
+      }
+      renderAbActive();
+    };
+    function abProviderOptions(sel){
+      var o = '<option value="">native (no provider)</option>';
+      AB_PROVIDERS.forEach(function(p){ var id=(p&&p.id)||""; if(id) o += '<option value="'+esc(id)+'"'+(id===sel?' selected':'')+'>'+esc(id)+'</option>'; });
+      return o;
+    }
+    function addAbVariant(label, model, provider, prompt){
+      var box = document.getElementById("ab-variants");
+      if(box.children.length >= 4) return;   // cap at 4 variants
+      var row = document.createElement("div");
+      row.className = "ab-vrow";
+      row.innerHTML = '<input class="ab-vlabel" placeholder="label" value="'+esc(label||"")+'">'
+        + '<input class="ab-vmodel" placeholder="model (opt)" value="'+esc(model||"")+'">'
+        + '<select class="ab-vprov">'+abProviderOptions(provider||"")+'</select>'
+        + '<input class="ab-vprompt" placeholder="prompt override (optional)" value="'+esc(prompt||"")+'">'
+        + '<button class="ab-vx" title="remove" onclick="this.parentNode.remove()">✕</button>';
+      box.appendChild(row);
+    }
+    function launchAb(){
+      var repo = document.getElementById("ab-repo").value.trim();
+      var task = document.getElementById("ab-task").value;
+      var mode = document.getElementById("ab-mode").value;
+      var variants = [];
+      var rows = document.querySelectorAll("#ab-variants .ab-vrow");
+      for(var i=0;i<rows.length;i++){
+        var r = rows[i];
+        var label = r.querySelector(".ab-vlabel").value.trim();
+        if(!label) continue;
+        variants.push({ label: label,
+          model: r.querySelector(".ab-vmodel").value.trim(),
+          provider: r.querySelector(".ab-vprov").value,
+          prompt: r.querySelector(".ab-vprompt").value.trim() });
+      }
+      if(!repo){ alert("Pick a git repo folder for the A/B run."); return; }
+      if(variants.length < 2){ alert("A/B needs at least 2 labelled variants."); return; }
+      send("ab-launch", null, JSON.stringify({ repoRoot: repo, task: task, mode: mode, variants: variants }));
+    }
+    function keepAb(cohort, winner){ send("ab-keep", null, JSON.stringify({ cohort: cohort, winner: winner })); }
+    function judgeAb(cohort){ send("ab-judge", null, JSON.stringify({ cohort: cohort })); }
+    // Read keys back RAW from esc()'d data- attributes (esc is HTML-entity escaping —
+    // wrong for a JS-string context, so never interpolate a label into an inline handler).
+    function keepAbBtn(el){ keepAb(el.getAttribute("data-cohort"), el.getAttribute("data-label")); }
+    function judgeAbBtn(el){ judgeAb(el.getAttribute("data-cohort")); }
+    function renderAbActive(){
+      var box = document.getElementById("ab-active"); if(!box) return;
+      var cs = (AB_DATA && AB_DATA.cohorts) || [];
+      if(!cs.length){ box.innerHTML = '<div class="ab-sep" style="border-top:none;margin-top:0;">No active A/B runs</div>'; return; }
+      var html = '<div class="ab-sep" style="border-top:none;margin-top:0;">Active A/B runs</div>';
+      cs.forEach(function(c){
+        html += '<div class="ab-cohort">';
+        html += '<div class="ab-ctitle"><b>'+esc(c.cohort)+'</b><span class="ab-task" title="'+esc(c.task||"")+'">'+esc(c.task||"")+'</span></div>';
+        (c.variants||[]).forEach(function(v){
+          var isWin = c.winner && v.label === c.winner;
+          var score = v.hadData ? (v.score+"/100") : (AB_DATA.ledgerOn ? "—" : "(ledger off)");
+          html += '<div class="ab-vr'+(isWin?' win':'')+'">'
+            + '<span class="ab-vn">'+esc(v.label)+(isWin?' <span class="ab-win-tag">★ lead</span>':'')+'</span>'
+            + '<span class="ab-vm">'+esc(v.model||v.provider||"native")+'</span>'
+            + '<span class="ab-vs">'+esc(score)+'</span>'
+            + '<span class="ab-va">'+(v.live?esc(v.status||"")+(v.activity?(" · "+esc(v.activity)):""):'<i>not live</i>')+'</span>'
+            + '<button class="ab-keep" data-cohort="'+esc(c.cohort)+'" data-label="'+esc(v.label)+'" onclick="keepAbBtn(this)">Keep this</button>'
+            + '</div>';
+        });
+        html += '<div class="ab-cacts">'
+          + '<button data-cohort="'+esc(c.cohort)+'" onclick="judgeAbBtn(this)" title="Paste a side-by-side judge prompt into the first variant for a qualitative verdict">⚖ Judge</button>'
+          + '</div>';
+        html += '</div>';
+      });
+      box.innerHTML = html;
+    }
     function setMode(m){
       newMode = m;
       document.getElementById("n-mode-existing").classList.toggle("active", m === "existing");

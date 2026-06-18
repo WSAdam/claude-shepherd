@@ -768,7 +768,7 @@ do
 
   -- spawnSession threads agentOpts -> spawnExtraFlags (via opts.*)
   check("l1-pin: spawnSession takes agentOpts",
-        src:find("function FX.spawnSession(editor, project, task, permissionMode, providerId, agentOpts, isNew)", 1, true) ~= nil)
+        src:find("function FX.spawnSession(editor, project, task, permissionMode, providerId, agentOpts, isNew, modelOverride)", 1, true) ~= nil)
   check("l1-pin: opts.appendSystemPrompt threaded", src:find("opts.appendSystemPrompt = agentOpts.appendSystemPrompt", 1, true) ~= nil)
   check("l1-pin: opts.mcpConfigPath threaded", src:find("opts.mcpConfigPath = agentOpts.mcpConfigPath", 1, true) ~= nil)
 
@@ -1566,6 +1566,38 @@ do
     local m = 0; for _ in src:gmatch("it%.auto_model and 0%.8 or 0") do m = m + 1 end
     check("dr6-fix: all 3 feed sites reserve extra stagger for the preface ladder", (n + m) == 3)
   end
+
+  -- ---- DR7: A/B fork-to-compare (panel flow, worktree isolation) --------------
+  check("dr7-pin: A/B modal + header entry wired",
+        src:find('id="abmodal"', 1, true) ~= nil
+        and src:find('onclick="openAb()"', 1, true) ~= nil
+        and src:find('a == "open-ab"', 1, true) ~= nil)
+  check("dr7-pin: launch creates a worktree per variant then spawns into it (cold-start)",
+        src:find("function FX.abLaunch(spec)", 1, true) ~= nil
+        and src:find("core.abCohortPlan(spec)", 1, true) ~= nil
+        and src:find("core.gitWorktreeAddCmd(plan.repoRoot", 1, true) ~= nil
+        and src:find('FX.spawnSession("vscode", v.worktreePath, v.task, spec.mode, v.provider, nil, true, v.model)', 1, true) ~= nil)
+  check("dr7-pin: launch rolls back created worktrees + branches on a failed add",
+        src:find("core.gitWorktreeRemoveCmd(plan.repoRoot, c.path)", 1, true) ~= nil
+        and src:find("core.gitBranchDeleteCmd(plan.repoRoot, c.branch)", 1, true) ~= nil
+        and src:find("FX.gitRoot(plan.repoRoot)", 1, true) ~= nil)
+  check("dr7-pin: a raw per-variant model rides ANTHROPIC_MODEL (no provider needed)",
+        src:find('{ name = "ANTHROPIC_MODEL", value = modelOverride, secret = false }', 1, true) ~= nil)
+  check("dr7-pin: keep-winner closes losers + removes their worktrees, behind a confirm",
+        src:find("function FX.abKeep(cohort, winnerLabel)", 1, true) ~= nil
+        and src:find("core.gitWorktreeRemoveCmd(c.repoRoot, v.worktreePath)", 1, true) ~= nil
+        and src:find('hs.dialog.blockAlert("Keep \\"" .. tostring(req.winner)', 1, true) ~= nil)
+  check("dr7-pin: compare uses DR4 runScore + core.abCompare for the winner",
+        src:find("core.runScore(led.events, sid)", 1, true) ~= nil
+        and src:find("core.abCompare(c.variants, scores)", 1, true) ~= nil)
+  check("dr7-pin: optional LLM-judge pastes core.abJudgePrompt, delivery-gated",
+        src:find("function FX.abJudge(cohort)", 1, true) ~= nil
+        and src:find("core.abJudgePrompt(c.task, entries)", 1, true) ~= nil
+        and src:find('FX.pasteIntoWindow(winTarget(firstTile)', 1, true) ~= nil)
+  check("dr7-pin: cohort keys read RAW from esc'd data- attrs (no JS-string interpolation)",
+        src:find("function keepAbBtn(el)", 1, true) ~= nil
+        and src:find('data-cohort="\'+esc(c.cohort)+\'"', 1, true) ~= nil
+        and src:find("el.getAttribute(\"data-cohort\")", 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

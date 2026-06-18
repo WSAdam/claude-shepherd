@@ -4181,7 +4181,7 @@ function M.spawnSpec(editor, project, task, opts)
     end
     return { kind = "vscode", editor = editor, app = app, project = project,
              flavor = "terminal", openTerminalKey = { mods = { "ctrl" }, key = "`" },
-             postType = post }
+             postType = post, coldStart = opts.isNew == true }
   end
   return { kind = "terminal",
            applescript = M.spawnAppleScript(project, task,
@@ -7414,6 +7414,127 @@ function M.backgroundActivity(files, now, opts)
     end
   end
   return { active = count > 0, count = count, newest = newest }
+end
+
+-- ---- DR7: A/B fork-to-compare (explicitly-invoked, operator-aware) ----------
+-- "Build both pathways, keep the best." An operator launches the SAME task into 2+
+-- isolated variants (differing by model and/or prompt), each running in its OWN git
+-- worktree (branch ab/<cohort>/<label>) so parallel builds never clobber each other;
+-- they run as normal tiles; at the end a side-by-side compare (DR4 scores + optional
+-- LLM-judge) helps keep the winner (losers' worktrees removed). This module is the PURE
+-- planning + comparison; the worktree/spawn/close effects live in the dashboard.
+
+-- Sanitize one path/branch component: lowercase, non-alnum -> "-", collapse, trim, cap.
+function M.abSlug(s)
+  s = tostring(s or ""):lower():gsub("[^%w]+", "-"):gsub("^%-+", ""):gsub("%-+$", "")
+  if #s > 24 then s = s:sub(1, 24):gsub("%-+$", "") end
+  return s
+end
+
+-- Branch + worktree path for a variant (deterministic). Worktrees live under a
+-- `.cc-ab/` dir BESIDE the repo (a sibling, never inside the tracked tree).
+function M.abBranchName(cohort, label) return "ab/" .. M.abSlug(cohort) .. "/" .. M.abSlug(label) end
+function M.abWorktreePath(repoRoot, cohort, label)
+  repoRoot = tostring(repoRoot or ""):gsub("/+$", "")
+  local parent = repoRoot:match("^(.*)/[^/]+$") or "."
+  local name = repoRoot:match("([^/]+)$") or "repo"
+  return parent .. "/.cc-ab/" .. name .. "-" .. M.abSlug(cohort) .. "-" .. M.abSlug(label)
+end
+
+-- Validate + build a cohort plan from a spec:
+--   { cohort, repoRoot, base="HEAD", task, variants = { {label, model?, provider?, prompt?} ... } }
+-- Each variant's task = its own `prompt` (if set) else the base task; model/provider are
+-- the per-variant overrides. Returns { ok=false, error } or
+--   { ok=true, cohort, repoRoot, base, variants = [{ id,label,branch,worktreePath,task,model,provider }] }.
+-- Requires >= 2 variants with non-empty, DISTINCT (post-slug) labels and a task to run.
+function M.abCohortPlan(spec)
+  if type(spec) ~= "table" then return { ok = false, error = "no spec" } end
+  local repoRoot = tostring(spec.repoRoot or "")
+  if repoRoot == "" then return { ok = false, error = "no repo root (A/B needs a git repo)" } end
+  local baseTask = tostring(spec.task or ""):gsub("^%s+", ""):gsub("%s+$", "")
+  local vs = spec.variants
+  if type(vs) ~= "table" or #vs < 2 then return { ok = false, error = "need at least 2 variants" } end
+  local cohort = M.abSlug(spec.cohort ~= nil and spec.cohort or "")
+  if cohort == "" then return { ok = false, error = "no cohort id" } end
+  local base = (spec.base ~= nil and tostring(spec.base) ~= "") and tostring(spec.base) or "HEAD"
+  local out, seen = {}, {}
+  for _, v in ipairs(vs) do
+    if type(v) ~= "table" then return { ok = false, error = "bad variant" } end
+    local label = tostring(v.label or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    local id = M.abSlug(label)
+    if label == "" or id == "" then return { ok = false, error = "every variant needs a label" } end
+    if seen[id] then return { ok = false, error = "duplicate variant label: " .. label } end
+    seen[id] = true
+    local task = tostring(v.prompt or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    if task == "" then task = baseTask end
+    if task == "" then return { ok = false, error = "variant " .. label .. " has no task (set a base task or a per-variant prompt)" } end
+    out[#out + 1] = {
+      id = id, label = label,
+      branch = M.abBranchName(cohort, label),
+      worktreePath = M.abWorktreePath(repoRoot, cohort, label),
+      task = task,
+      model = (v.model ~= nil and tostring(v.model) ~= "") and tostring(v.model) or nil,
+      provider = (v.provider ~= nil and tostring(v.provider) ~= "") and tostring(v.provider) or nil,
+    }
+  end
+  return { ok = true, cohort = cohort, repoRoot = repoRoot, base = base, variants = out }
+end
+
+-- Quoted git commands the dashboard runs via /bin/sh (same posture as
+-- folderScanShellCommand). `add` creates the variant's worktree+branch off `base`;
+-- `remove --force` drops a loser's worktree (its branch is left for you to delete/merge).
+function M.gitWorktreeAddCmd(repoRoot, worktreePath, branch, base)
+  return "git -C " .. shArg(repoRoot) .. " worktree add -b " .. shArg(branch)
+    .. " " .. shArg(worktreePath) .. " " .. shArg(base or "HEAD")
+end
+function M.gitWorktreeRemoveCmd(repoRoot, worktreePath)
+  return "git -C " .. shArg(repoRoot) .. " worktree remove --force " .. shArg(worktreePath)
+end
+-- Delete a variant's branch (after its worktree is removed, which frees the branch).
+-- Used to leave NO trace on a rolled-back launch + to fully discard a loser on keep.
+function M.gitBranchDeleteCmd(repoRoot, branch)
+  return "git -C " .. shArg(repoRoot) .. " branch -D " .. shArg(branch)
+end
+
+-- Side-by-side comparison: rank the variants by DR4 run score (scored variants first,
+-- highest score wins; ties broken by original order). scoresByLabel[label] = {score, hadData}.
+-- Returns { rows = [{label, model, score, hadData, rank}], winner = label|nil }.
+function M.abCompare(variants, scoresByLabel)
+  scoresByLabel = type(scoresByLabel) == "table" and scoresByLabel or {}
+  local rows = {}
+  for i, v in ipairs(variants or {}) do
+    local s = scoresByLabel[v.label] or {}
+    rows[#rows + 1] = { label = v.label, model = v.model, idx = i,
+                        score = tonumber(s.score), hadData = s.hadData == true }
+  end
+  table.sort(rows, function(a, b)
+    if a.hadData ~= b.hadData then return a.hadData end        -- scored before unscored
+    if a.hadData and a.score ~= b.score then return (a.score or 0) > (b.score or 0) end
+    return a.idx < b.idx                                       -- stable tie-break
+  end)
+  local winner
+  for i, r in ipairs(rows) do r.rank = i; r.idx = nil; if i == 1 and r.hadData then winner = r.label end end
+  return { rows = rows, winner = winner }
+end
+
+-- LLM-judge rubric prompt (pasted into a session via the Improve/audit-review path) to
+-- get a qualitative pick across the variants' outputs. Pure string assembly.
+function M.abJudgePrompt(taskText, entries)
+  local parts = {
+    "Compare these approaches to the SAME task and pick the single best one. Be decisive.",
+    "", "TASK:", tostring(taskText or "(no task recorded)"), "",
+  }
+  for _, e in ipairs(entries or {}) do
+    if type(e) == "table" then
+      parts[#parts + 1] = "## Variant " .. tostring(e.label or "?")
+        .. (e.model and (" (model: " .. tostring(e.model) .. ")") or "")
+      parts[#parts + 1] = tostring(e.output or "(no output captured)")
+      parts[#parts + 1] = ""
+    end
+  end
+  parts[#parts + 1] = "Judge on correctness, completeness, and code quality. Name the WINNING variant"
+    .. " by its label and justify the pick in 3-4 sentences; then list each loser's single biggest weakness."
+  return table.concat(parts, "\n")
 end
 
 return M
