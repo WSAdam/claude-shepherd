@@ -134,6 +134,35 @@ network, no multi-user, no secrets — it reads session status off the local fil
   dashboard → mirror in the panel JS if it affects rendering (and note the twin) → `make test`
   (smoke included) → deploy.
 
+## State (2026-06-18) — DR7 A/B fork-to-compare (deep-research backlog COMPLETE)
+
+DR7 shipped — **the deep-research backlog DR1–DR7 is now fully done + deployed + committed.** An
+operator-invoked **⚖ A/B** panel flow (header button): run the SAME task as 2+ variants (model and/or
+prompt), each isolated in its own **git worktree** (branch `ab/<cohort>/<label>`), then compare
+side-by-side (DR4 scores + optional LLM-judge) and **keep the winner** (closes losers + removes their
+worktrees/branches, behind a confirm).
+
+- **Pure core:** `core.abCohortPlan` (validate + plan), `abSlug`/`abBranchName`/`abWorktreePath`
+  (deterministic names; worktrees in a sibling `.cc-ab/` dir), `abCompare` (rank by DR4 run score, stable
+  ties, winner), `abJudgePrompt`, and quoted `gitWorktreeAddCmd`/`gitWorktreeRemoveCmd`/`gitBranchDeleteCmd`.
+- **Spawn integration:** `FX.spawnSession` gained a **`modelOverride`** (8th param) → a raw
+  `ANTHROPIC_MODEL` for a native model-axis variant (no provider profile needed). A non-empty env forces
+  the VS Code **terminal flavor**, so `spawnSpec`'s terminal-flavor spec now ALSO carries `coldStart` →
+  `vscodeOpenArgs` adds `--disable-workspace-trust` (else a fresh worktree's trust modal blocks the launch).
+  KEEP-IN-SYNC: that terminal-flavor `coldStart` line is load-bearing for A/B worktree spawns.
+- **FX (all members / do-block — no main-chunk locals, the file is at the 200-cap):** `abLaunch` (worktree
+  per variant, rolls back worktrees+branches on any add failure, then spawns; ms cohort id so same-second
+  launches can't collide), `abData` (variants↔live tiles + DR4 scores + winner), `abKeep` (close losers +
+  remove their worktrees+branches, winner stays; modal-confirm in the handler), `abJudge` (paste the rubric
+  into the first live variant, serialized + delivery-gated). Registry: `cc-ab.json`.
+- **Panel:** `#abmodal` (active cohorts compare/Judge/Keep over a new-run form). Cohort/label keys ride
+  esc()'d `data-` attrs read back RAW via getAttribute (esc is HTML-entity, wrong for JS-string context).
+- Adversarial review: worktree lifecycle / destructive-keep targeting / spawn env+trust / XSS / delivery
+  gating / registry / cap — all clean (0 majors); fixed the orphaned-branch + same-second-cohort minors.
+- **Known follow-ons:** a variant with BOTH provider+model uses the provider's model (documented
+  precedence); model-axis variants run in the VS Code integrated terminal (CLI), prompt-only in the
+  extension panel; an abandoned (never-kept) cohort's worktrees are cleaned via keep or `git worktree prune`.
+
 ## State (2026-06-18) — DR6 per-session model auto-routing (opt-in, off by default)
 
 DR6 shipped (deep-research backlog now DR1–DR6 done; only DR7 left). Per-session, opt-in, OFF by default,

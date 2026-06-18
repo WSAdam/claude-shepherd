@@ -310,7 +310,7 @@ commit + push. Honor the three load-bearing facts (claude CLI present; `gate.too
 secrets are env-var NAMES only).
 
 **Recommended build order:** DR1+DR2 (shared data source, highest value, self-contained) → DR3 →
-DR4 → DR5 → DR6 → DR7. **Status: DR1–DR6 shipped + deployed. Next (LAST): DR7.**
+DR4 → DR5 → DR6 → DR7. **Status: ▶ DR1–DR7 ALL shipped + deployed + committed. Deep-research backlog COMPLETE.**
 
 ### DR1 — Subagent fan-out trace (clickable) — effort **M**  ✅ SHIPPED + DEPLOYED 2026-06-18
 > Detail-panel **Agents** tab (`core.DETAIL_TABS` + `data-tab="subagents"`): lists each spawned subagent
@@ -459,7 +459,27 @@ a quick classify); on a routed/queued feed it sets the model via the existing pr
 - Pure core: `core.suggestModel(task, policy)` (heuristic, pure + tested); per-session `autoModel` flag
   in session state, never a global default.
 
-### DR7 — A/B fork-to-compare as an INVOKED SKILL — effort **L** (handle carefully)
+### DR7 — A/B fork-to-compare — effort **L**  ✅ SHIPPED + DEPLOYED 2026-06-18
+> Built as an operator-invoked **Shepherd panel flow** (the ⚖ A/B header button), per Adam's design
+> calls: variants differ by **model and/or prompt**, isolated via a **git worktree per variant** (branch
+> `ab/<cohort>/<label>`), compare = **DR4 scores side-by-side + an optional one-click LLM-judge**, and
+> **keep-winner closes the losers + removes their worktrees/branches** (winner's branch stays to merge)
+> behind a modal confirm. Pure `core.abCohortPlan` (validate + plan: branch/worktree names, per-variant
+> task/model/provider; needs a repo + ≥2 distinct-labelled variants) + `abCompare` (rank by run score,
+> stable ties, suggested winner) + `abJudgePrompt` + `gitWorktreeAdd/Remove/BranchDeleteCmd` (quoted).
+> `FX.abLaunch` creates a worktree per variant (rolling back worktrees+branches on any add failure) then
+> spawns each into it; `FX.spawnSession` gained a `modelOverride` (raw ANTHROPIC_MODEL → terminal flavor,
+> so spawnSpec's terminal flavor now carries coldStart → `--disable-workspace-trust` for the fresh
+> worktree). `FX.abData` matches variants to live tiles + DR4 scores; `FX.abKeep`/`abJudge` are the
+> destructive-confirm / delivery-gated effects. Registry: `cc-ab.json`. Modal keys ride esc()'d data-
+> attrs read raw (no JS-string interpolation). Adversarially reviewed (0 majors; fixed orphaned-branch +
+> same-second-cohort-id minors). +37 core tests, +9 ui pins; suite 2322 core / 569 ui / 1 smoke green.
+> Deployed + live-verified. Follow-ons: a variant that sets BOTH provider+model uses the provider's model
+> (documented precedence); model-axis variants run in the VS Code integrated terminal (CLI), prompt-only
+> variants in the extension panel; worktrees of an abandoned (never-kept) cohort are cleaned via keep or a
+> manual `git worktree prune`.
+> <!-- original DR7 spec below -->
+### DR7 — (spec) A/B fork-to-compare as an INVOKED SKILL — effort **L** (handle carefully)
 "Build both pathways, keep the best." Adam's constraints: **never silent / always operator-aware**,
 implemented as an **explicitly-invoked skill** (not an automation), with the **performative comparison
 at the END**. The skill spawns the same task into 2+ sessions (variant prompt and/or model — builds on
