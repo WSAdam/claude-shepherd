@@ -1484,6 +1484,40 @@ do
   check("sd-pin: App Tab fires a real ⌘-Tab keystroke via its sdRunAction arm",
         src:find('hs.eventtap.keyStroke({ "cmd" }, "tab")', 1, true) ~= nil
         and src:find('elseif name == "apptab" then sdAppTab()', 1, true) ~= nil)
+
+  -- ---- DR3: Rewind tab (Timeline folded in) + guarded /rewind ----------------
+  -- The timeline detail tab was renamed to "rewind" (core.DETAIL_TABS); the panel
+  -- folds the checkpoint list + the activity timeline under it.
+  check("dr3-pin: DETAIL_TABS renamed timeline -> rewind (single source)",
+        src:find('data%-tab="rewind"') ~= nil
+        and src:find('data%-tab="timeline"') == nil)
+  check("dr3-pin: Rewind tab folds in the activity timeline (#d-timeline retained)",
+        src:find('id="d%-checkpoints"') ~= nil and src:find('id="d%-timeline"') ~= nil)
+  check("dr3-pin: rewind lazy-load fetches BOTH checkpoints and the folded timeline",
+        src:find('detailTab === "rewind"', 1, true) ~= nil
+        and src:find('send("detail-rewind", selectedKey)', 1, true) ~= nil
+        and src:find('send("detail-timeline", selectedKey)', 1, true) ~= nil)
+  check("dr3-pin: checkpoints round-trip (handler -> core.checkpointTimeline -> ccCheckpoints)",
+        src:find('a == "detail-rewind"', 1, true) ~= nil
+        and src:find("core.checkpointTimeline(snap", 1, true) ~= nil
+        and src:find("FX.attachCheckpointPrompts(path, points)", 1, true) ~= nil
+        and src:find("window.ccCheckpoints(", 1, true) ~= nil)
+  check("dr3-pin: snapshot/prompt scan is thin FX + on-demand (core.userPromptSnippet)",
+        src:find("function FX.snapshotLines(path)", 1, true) ~= nil
+        and src:find("function FX.attachCheckpointPrompts(path, points)", 1, true) ~= nil
+        and src:find("core.userPromptSnippet(line, 160)", 1, true) ~= nil)
+  -- the rewind ACTION is HARD-gated by a modal confirm (bash-changes caveat) and
+  -- delivery-gated like every keystroke chain (a skip is never announced as sent).
+  check("dr3-pin: /rewind behind a modal confirm with the bash-changes caveat",
+        src:find('a == "rewind-open"', 1, true) ~= nil
+        and src:find("Open the rewind picker?", 1, true) ~= nil
+        and src:find("by bash are NOT undone", 1, true) ~= nil)
+  check("dr3-pin: /rewind serialized + delivery-gated + ledgered only on a real send",
+        src:find('FX.typeIntoWindow(winTarget(target), "/rewind")', 1, true) ~= nil
+        and src:find('ledgerFor(target, { type = "rewind_open" })', 1, true) ~= nil)
+  check("dr3-pin: checkpoint rows stale-guarded + ESC'd (no key interpolation)",
+        src:find("CHECKPOINTS.key !== selectedKey", 1, true) ~= nil
+        and src:find("esc(p.prompt", 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

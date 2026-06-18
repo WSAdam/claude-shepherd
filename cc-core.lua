@@ -778,6 +778,7 @@ local NARRATE = {
   route_arm     = { "🔀", "project routing toggled" },
   queue_starved = { "⌛", "queued work waiting (no free session)" },
   remote_decision = { "📡", "remote decision sent" },
+  rewind_open   = { "↶", "opened the rewind picker" },
 }
 
 -- One human-readable line for an event (no timestamp/name; the caller adds those).
@@ -2141,6 +2142,123 @@ function M.planFromTranscript(text)
   end
   if not todos and not plan then return nil end
   return { todos = todos, plan = plan }
+end
+
+-- ---- DR3: checkpoint / rewind timeline -------------------------------------
+-- Claude Code records restore points as `file-history-snapshot` transcript lines.
+-- Per user-prompt turn it writes an ESTABLISHING snapshot (isSnapshotUpdate falsy;
+-- its snapshot.messageId == that user line's `uuid`, verified against real local
+-- transcripts 2026-06-18) carrying the CUMULATIVE
+-- snapshot.trackedFileBackups = { <absPath> = {backupFileName, version, backupTime} }
+-- as captured when the turn began, plus zero+ UPDATE lines (isSnapshotUpdate true,
+-- SAME snapshot.messageId) appended as files change during the turn. Shepherd READS
+-- this to show "where we are / where we can rewind to"; the rewind ACTION just types
+-- /rewind into the session (Claude Code's own picker confirms the destructive part).
+--
+-- core.checkpointTimeline(snapText, opts) -> NEWEST-first list of restore points:
+--   { messageId, ts (epoch|nil), iso, fileCount, filesChanged, changed = {{path,name,version}, ...} }
+-- `snapText` is the transcript reduced to ONLY its file-history-snapshot lines (the
+-- caller streams the multi-MB transcript and keeps just those ~hundreds of KB). Prompt
+-- LABELS are attached by the caller (core.userPromptSnippet over the few user lines
+-- that ARE restore points) -- kept out of here so this stays a pure function of the
+-- snapshot lines. "Files changed this turn" = a diff of THIS turn's establishing
+-- baseline against the NEXT turn's establishing baseline (its committed end state),
+-- falling back to this turn's own last cumulative map for the most-recent turn (whose
+-- committed changes aren't captured until the next prompt). opts.limit caps the result
+-- (default 80, most-recent kept). Pure + deterministic.
+function M.checkpointTimeline(snapText, opts)
+  opts = opts or {}
+  local limit = tonumber(opts.limit) or 80
+  if type(snapText) ~= "string" or #snapText == 0 then return {} end
+  local order, seen = {}, {}     -- messageIds in establishing-first order
+  local establishing = {}        -- messageId -> { iso, ts, map = {path -> {version, backupTime}} }
+  local final = {}               -- messageId -> last-seen cumulative map for that mid
+  for line in (snapText .. "\n"):gmatch("(.-)\n") do
+    if line:find("^%s*{") and line:find("file%-history%-snapshot", 1, false) then
+      local okj, obj = pcall(function() return M.json.decode(line) end)
+      if okj and type(obj) == "table" and obj.type == "file-history-snapshot"
+         and type(obj.snapshot) == "table" then
+        local s = obj.snapshot
+        local mid = s.messageId
+        if type(mid) == "string" and mid ~= "" then
+          local map = {}
+          if type(s.trackedFileBackups) == "table" then
+            for path, info in pairs(s.trackedFileBackups) do
+              if type(path) == "string" and type(info) == "table" then
+                map[path] = { version = tonumber(info.version) or 0,
+                              backupTime = type(info.backupTime) == "string" and info.backupTime or "" }
+              end
+            end
+          end
+          if not seen[mid] then
+            seen[mid] = true
+            order[#order + 1] = mid
+            establishing[mid] = { iso = s.timestamp, ts = M.isoToEpoch(s.timestamp), map = map }
+          end
+          final[mid] = map        -- last line wins (updates come after the establishing line)
+        end
+      end
+    end
+  end
+  local points = {}
+  for i = 1, #order do
+    local mid = order[i]
+    local est = establishing[mid]
+    local base = est.map
+    local endMap = (i < #order and establishing[order[i + 1]].map) or final[mid] or base
+    local changed = {}
+    for path, info in pairs(endMap) do
+      local b = base[path]
+      if (not b) or b.version ~= info.version or b.backupTime ~= info.backupTime then
+        changed[#changed + 1] = { path = path, name = path:match("([^/]+)$") or path, version = info.version }
+      end
+    end
+    table.sort(changed, function(a, b) return a.path < b.path end)
+    local total = 0; for _ in pairs(endMap) do total = total + 1 end
+    points[#points + 1] = { messageId = mid, iso = est.iso, ts = est.ts,
+                            fileCount = total, filesChanged = #changed, changed = changed }
+  end
+  local out = {}                  -- newest-first, capped
+  for i = #points, 1, -1 do
+    if #out >= limit then break end
+    out[#out + 1] = points[i]
+  end
+  return out
+end
+
+-- DR3 label helper: extract a short prompt snippet from ONE raw `user` transcript
+-- JSONL line. message.content is either a string or an array of blocks (text +
+-- tool_result + …); we take the first text. The caller passes only the handful of
+-- user lines that ARE restore points (matched by uuid), so decoding a large
+-- pasted-prompt line here is bounded. Returns "" for a tool_result-only turn / no
+-- user text. Pure (reuses the json decoder + utf8trunc).
+function M.userPromptSnippet(line, maxLen)
+  maxLen = tonumber(maxLen) or 140
+  if type(line) ~= "string" or not line:find("^%s*{") then return "" end
+  local okj, obj = pcall(function() return M.json.decode(line) end)
+  if not okj or type(obj) ~= "table" or obj.type ~= "user" or type(obj.message) ~= "table" then return "" end
+  local content, txt = obj.message.content, nil
+  if type(content) == "string" then
+    txt = content
+  elseif type(content) == "table" then
+    for _, c in ipairs(content) do
+      if type(c) == "table" and c.type == "text" and type(c.text) == "string" and #c.text > 0 then
+        txt = c.text; break
+      elseif type(c) == "string" and #c > 0 then
+        txt = c; break
+      end
+    end
+  end
+  if type(txt) ~= "string" then return "" end
+  local first
+  for ln in (txt .. "\n"):gmatch("(.-)\n") do
+    local t = ln:gsub("^%s+", ""):gsub("%s+$", "")
+    if t ~= "" then first = t; break end
+  end
+  if not first then return "" end
+  first = first:gsub("%s+", " ")
+  if #first > maxLen then first = utf8trunc(first, maxLen - 3) .. "\226\128\166" end
+  return first
 end
 
 -- L5 auto-title: a short tile title derived from a session's first prompt (the
@@ -6588,7 +6706,7 @@ end
 --         behavior (cheap always-rendered tabs need nothing).
 M.DETAIL_TABS = {
   { id = "activity",  label = "Activity" },
-  { id = "timeline",  label = "Timeline" },
+  { id = "rewind",    label = "Rewind" },
   { id = "decisions", label = "Decisions" },
   { id = "usage",     label = "Usage" },
   { id = "changes",   label = "Changes" },
