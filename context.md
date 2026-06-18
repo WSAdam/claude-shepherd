@@ -134,6 +134,36 @@ network, no multi-user, no secrets — it reads session status off the local fil
   dashboard → mirror in the panel JS if it affects rendering (and note the twin) → `make test`
   (smoke included) → deploy.
 
+## State (2026-06-18) — DR3 Rewind tab (checkpoint/rewind timeline)
+
+DR3 shipped (deep-research backlog now DR1–DR5 done; next DR6 → DR7). The detail-panel **Timeline tab was
+folded into a richer "Rewind" tab** (`core.DETAIL_TABS` `timeline`→`rewind`; Decisions kept). It lists
+newest-first **restore points** (prompt label · age · ±N files changed + the changed basenames) above the
+folded-in activity timeline, and a **↶ Rewind…** action.
+
+- **Data source = the transcript's `file-history-snapshot` lines** (NOT the ledger). An ESTABLISHING
+  snapshot per user-prompt turn (`isSnapshotUpdate` falsy; `snapshot.messageId` == that user line's
+  `uuid`, verified live) carries the CUMULATIVE `snapshot.trackedFileBackups = {<absPath>={backupFileName,
+  version,backupTime}}`, plus 0+ UPDATE lines (same messageId) as files change. Pure
+  `core.checkpointTimeline(snapText, opts)` → `{messageId, ts, iso, fileCount, filesChanged, changed[]}`,
+  newest-first, `opts.limit`. **Per-turn "changed" = this turn's establishing baseline diffed against the
+  NEXT turn's establishing baseline** (its committed end state), falling back to the turn's own last
+  cumulative map for the uncommitted latest turn. `core.userPromptSnippet(line, maxLen)` labels each point.
+- **Thin FX, two streaming passes, on-demand only (never the tick), local-only:** `FX.snapshotLines` pulls
+  only the small snapshot lines (~hundreds of KB of a multi-MB transcript); `FX.attachCheckpointPrompts`
+  decodes ONLY the few user lines whose uuid is a restore point (cheap uuid substring pre-filter), calling
+  the pure snippet extractor per line — never holds the whole transcript.
+- **The ↶ Rewind… action types `/rewind`** (opens Claude Code's OWN restore-point picker — there's no arg
+  form, so Shepherd can't target a specific checkpoint) behind a **mandatory `hs.dialog.blockAlert`
+  confirm** that surfaces the caveat (**rewind reverts Write/Edit/NotebookEdit only — bash-made changes are
+  NOT undone**). Serialized + delivery-gated (a skipped send is never announced) + ledgered (`rewind_open`)
+  only on a real send. Same keystroke contract as `/clear`/`/compact`/`/rc`.
+- **Panel state machine:** the Rewind tab lazy-loads BOTH checkpoints (`detail-rewind`→`ccCheckpoints`) and
+  the folded timeline (`detail-timeline`→`ccDetailTimeline`); `renderCheckpoints` has pending/loaded/remote/
+  empty branches, stale-guarded on `selectedKey`, `esc()` at every sink. The handler ALWAYS replies a
+  non-null object so the tab can't spin "Loading…" forever. Old localStorage `selectedTab:"timeline"` is
+  clamped to `activity` by `normalizeTabState`. (Independent adversarial review: 0 majors.)
+
 ## State (2026-06-18) — deep-research adds (DR1/DR2/DR4/DR5) + lock + two bug fixes
 
 A forward-looking deep-research pass (Claude Code's newest native features + AgentOps/Langfuse

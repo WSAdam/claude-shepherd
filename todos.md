@@ -310,7 +310,7 @@ commit + push. Honor the three load-bearing facts (claude CLI present; `gate.too
 secrets are env-var NAMES only).
 
 **Recommended build order:** DR1+DR2 (shared data source, highest value, self-contained) → DR3 →
-DR4 → DR5 → DR6 → DR7.
+DR4 → DR5 → DR6 → DR7. **Status: DR1/DR2/DR3/DR4/DR5 shipped + deployed. Next: DR6 → DR7.**
 
 ### DR1 — Subagent fan-out trace (clickable) — effort **M**  ✅ SHIPPED + DEPLOYED 2026-06-18
 > Detail-panel **Agents** tab (`core.DETAIL_TABS` + `data-tab="subagents"`): lists each spawned subagent
@@ -364,7 +364,26 @@ presence.
 - UI: a small green ⚙/⟳ badge on the tile when active; tooltip = N running. Read on the existing refresh
   tick.
 
-### DR3 — Checkpoint / rewind timeline (with mandatory 2nd confirm) — effort **M/L**
+### DR3 — Checkpoint / rewind timeline (with mandatory 2nd confirm) — effort **M/L**  ✅ SHIPPED + DEPLOYED 2026-06-18
+> UI decision RESOLVED (as Adam directed): **folded Timeline → a richer "Rewind" tab** (DETAIL_TABS
+> `timeline`→`rewind`; Decisions kept). The tab shows newest-first restore points (prompt label · time ·
+> ±N files changed, with the changed basenames) above the folded-in activity timeline. Pure
+> `core.checkpointTimeline(snapText, opts)` parses the transcript's `file-history-snapshot` lines into
+> `{messageId, ts, iso, fileCount, filesChanged, changed[]}` — per-turn "changed" = this turn's
+> establishing baseline diffed against the NEXT turn's baseline (committed end state), falling back to
+> the turn's own last cumulative map for the uncommitted latest turn; `core.userPromptSnippet` labels each
+> point from its user line (matched by uuid == establishing snapshot.messageId, verified live).
+> `FX.snapshotLines` + `FX.attachCheckpointPrompts` are thin streaming readers (pull only the small
+> snapshot lines, decode only the few needed user lines — never chew the multi-MB transcript); on-demand,
+> never the tick; local-only. The **↶ Rewind…** action types `/rewind` (opens Claude Code's own picker)
+> behind a **mandatory `hs.dialog.blockAlert` confirm** that surfaces the bash-changes caveat; serialized +
+> delivery-gated (a skipped send is never announced) + ledgered (`rewind_open`) only on a real send.
+> +22 core tests, +8 ui pins; suite 2276 core / 548 ui / 1 smoke green. Live-verified on a real transcript
+> (32 restore points, correct prompts + per-turn file lists; `DETAIL_TABS[2].id == "rewind"`). Follow-ons:
+> per-checkpoint targeted rewind isn't possible (Claude Code's `/rewind` is an interactive picker with no
+> arg); deletions aren't counted as "changed" (trackedFileBackups is cumulative — edge case only).
+> <!-- original DR3 spec below -->
+### DR3 — (spec) Checkpoint / rewind timeline (with mandatory 2nd confirm) — effort **M/L**
 A breakdown of "where we are and where we can rewind to," living in the detail tab strip and
 **replacing Timeline and/or Decisions** (Adam: "either or both ... the features for that living in
 there work best" — **OPEN UI DECISION, resolve when building**: leaning fold Timeline → a richer
