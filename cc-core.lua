@@ -241,6 +241,72 @@ function M.modelCommand(id)
   return "/model " .. id
 end
 
+-- ---- DR6: per-session model auto-routing (heuristic, OFF by default) --------
+-- Pick a model TIER for a task by difficulty, then map the tier to a model id, so a
+-- cheap task can run on Haiku and a hard one on Opus. PURE + deterministic (no clock,
+-- no network) -- the per-session opt-in, the /model switch, and the delivery gating
+-- all live in the dashboard. Heuristic, most-specific first:
+--   1) any "hard" keyword  -> hard
+--   2) else any "cheap" keyword -> cheap
+--   3) else by word count: <= cheapMax -> cheap; >= hardMin -> hard; else standard
+-- Keywords beat length (a short "refactor the auth" is still hard). Returns
+-- { tier, model, reason } or nil for an empty task. Everything is config-overridable
+-- (automodel.models / .cheapMax / .hardMin / .cheapWords / .hardWords) -- but the
+-- ENABLE is per-session only, never a fleet default.
+M.AUTOMODEL_DEFAULTS = {
+  models   = { cheap = "haiku", standard = "sonnet", hard = "opus" },
+  cheapMax = 6,    -- <= this many words (and no keyword) -> cheap
+  hardMin  = 40,   -- >= this many words (and no keyword) -> hard
+  cheapWords = { "typo", "rename", "format", "lint", "bump", "comment", "docstring",
+                 "readme", "changelog", "whitespace", "spelling", "gitignore", "tweak" },
+  hardWords  = { "refactor", "architect", "design", "debug", "investigate", "root cause",
+                 "security", "audit", "migrate", "rewrite", "optimize", "concurren",
+                 "race condition", "deadlock", "algorithm", "regression", "complex" },
+}
+local function countWords(s)
+  local n = 0
+  for _ in tostring(s):gmatch("%S+") do n = n + 1 end
+  return n
+end
+local function anyKeyword(haystack, words)
+  if type(words) ~= "table" then return nil end
+  for _, w in ipairs(words) do
+    w = tostring(w):lower()
+    if w ~= "" and haystack:find(w, 1, true) then return w end
+  end
+  return nil
+end
+function M.suggestModel(task, cfg)
+  task = tostring(task or "")
+  local trimmed = task:gsub("^%s+", ""):gsub("%s+$", "")
+  if trimmed == "" then return nil end
+  local D = M.AUTOMODEL_DEFAULTS
+  local models   = M.config(cfg, "automodel.models", D.models) or D.models
+  local cheapMax = tonumber(M.config(cfg, "automodel.cheapMax", D.cheapMax)) or D.cheapMax
+  local hardMin  = tonumber(M.config(cfg, "automodel.hardMin",  D.hardMin))  or D.hardMin
+  local cheapW   = M.config(cfg, "automodel.cheapWords", D.cheapWords) or D.cheapWords
+  local hardW    = M.config(cfg, "automodel.hardWords",  D.hardWords)  or D.hardWords
+  local lc = trimmed:lower()
+  local tier, reason
+  local hk = anyKeyword(lc, hardW)
+  if hk then
+    tier, reason = "hard", "keyword: " .. hk
+  else
+    local ck = anyKeyword(lc, cheapW)
+    if ck then
+      tier, reason = "cheap", "keyword: " .. ck
+    else
+      local n = countWords(trimmed)
+      if n <= cheapMax then tier, reason = "cheap", "short task (" .. n .. " words)"
+      elseif n >= hardMin then tier, reason = "hard", "long task (" .. n .. " words)"
+      else tier, reason = "standard", "default (" .. n .. " words)" end
+    end
+  end
+  local model = models[tier]
+  if type(model) ~= "string" or model == "" then return nil end
+  return { tier = tier, model = model, reason = reason }
+end
+
 -- ---- Panel geometry (Step 1) ----------------------------------------------
 -- Minimum sane panel size; anything smaller is treated as garbage and ignored.
 M.PANEL_MIN_W = 200

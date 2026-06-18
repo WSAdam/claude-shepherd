@@ -1518,6 +1518,54 @@ do
   check("dr3-pin: checkpoint rows stale-guarded + ESC'd (no key interpolation)",
         src:find("CHECKPOINTS.key !== selectedKey", 1, true) ~= nil
         and src:find("esc(p.prompt", 1, true) ~= nil)
+
+  -- ---- DR6: per-session model auto-routing (opt-in, off by default) -----------
+  -- The model switch + the task feed are ONE atomic delivery via pasteIntoWindow's
+  -- preface (so the pop/commit can't race a 2nd tick); the switch is local-native only
+  -- and ledgered ONLY on a delivered feed.
+  check("dr6-pin: feedTask carries an optional slash preface into one paste",
+        src:find("function FX.feedTask(target, task, preface)", 1, true) ~= nil
+        and src:find("text = task, preface = preface", 1, true) ~= nil)
+  check("dr6-pin: pasteIntoWindow submits the preface then settles before the main text",
+        src:find("local preface =", 1, true) ~= nil
+        and src:find("after(0.5, function() runFrom(1) end)", 1, true) ~= nil)
+  check("dr6-pin: autoModelPreface is local-native-only + classifies the bare task",
+        src:find("function FX.autoModelPreface(item, task)", 1, true) ~= nil
+        and src:find("core.isAnthropicSession(item.model, item.base_url)", 1, true) ~= nil
+        and src:find("core.suggestModel(bare, loadConfig())", 1, true) ~= nil)
+  -- all THREE feed sites (manual / autofeed / router) consult it + ledger on delivery
+  do
+    local n = 0; for _ in src:gmatch("= FX%.autoModelPreface%(") do n = n + 1 end  -- call sites, not the def
+    check("dr6-pin: all 3 feed sites consult autoModelPreface", n == 3)
+    local m = 0; for _ in src:gmatch('type = "model_change", from = pre%.from') do m = m + 1 end
+    check("dr6-pin: model_change ledgered (by=auto) at all 3 sites, gated on commit.persist", m == 3)
+  end
+  check("dr6-pin: per-session opt-in file (presence=on), off by default, NEVER fleet-wide",
+        src:find("function FX.autoModelOn(key)", 1, true) ~= nil
+        and src:find("function FX.setAutoModel(key, on)", 1, true) ~= nil
+        and src:find('a == "set-automodel"', 1, true) ~= nil)
+  check("dr6-pin: set-automodel rejects remote/gateway sessions",
+        src:find("it.remote or not core.isAnthropicSession(it.model, it.base_url)", 1, true) ~= nil)
+  check("dr6-pin: detail toggle wired + gated to local-native (checkbox disabled otherwise)",
+        src:find('id="d-automodel"', 1, true) ~= nil
+        and src:find("function onAutoModelChange()", 1, true) ~= nil
+        and src:find("var ok = !it.remote && !!it.anthropic;", 1, true) ~= nil)
+  check("dr6-pin: per-tile auto_model/anthropic decoration is local-native short-circuited",
+        src:find("it.anthropic = core.isAnthropicSession(it.model, it.base_url)", 1, true) ~= nil
+        and src:find("it.auto_model = (not it.remote) and it.anthropic and FX.autoModelOn(it.key)", 1, true) ~= nil)
+  -- review fixes (round 1):
+  check("dr6-fix: auto-routing restricted to chat-input editors (kitty/terminal skipped)",
+        src:find('item.editor == "kitty" or item.editor == "terminal" then return nil', 1, true) ~= nil)
+  check("dr6-fix: same-tier skip is nil-family-safe (no nil==nil wrong-skip)",
+        src:find("if (sf and cf == sf) or item.model == s.model then return nil end", 1, true) ~= nil)
+  check("dr6-fix: kitty preface concatenated into ONE send-text (ordered, no socket race)",
+        src:find("function dispatchSerialized(item, action, fn, extraStagger)", 1, true) ~= nil
+        and src:find("BULK_STAGGER + (tonumber(extraStagger) or 0)", 1, true) ~= nil)
+  do
+    local n = 0; for _ in src:gmatch("item%.auto_model and 0%.8 or 0") do n = n + 1 end
+    local m = 0; for _ in src:gmatch("it%.auto_model and 0%.8 or 0") do m = m + 1 end
+    check("dr6-fix: all 3 feed sites reserve extra stagger for the preface ladder", (n + m) == 3)
+  end
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

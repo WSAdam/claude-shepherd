@@ -167,15 +167,19 @@ CC_AUTOPILOT_DIR="${CC_AUTOPILOT_DIR:-${HOME}/.claude/cc-autopilot}"
 # so cc_remove reaps them on SessionEnd like the siblings above.
 CC_POLICY_DIR="${CC_POLICY_DIR:-${HOME}/.claude/cc-policy}"
 CC_POLICY_OVERRIDE_DIR="${CC_POLICY_OVERRIDE_DIR:-${HOME}/.claude/cc-policy-override}"
+# DR6 per-session model auto-routing opt-in (presence = on). Hoisted here so cc_remove
+# reaps it on SessionEnd like the siblings above (default MUST match the dashboard's
+# AUTOMODEL_DIR). A new session gets a new key, so a stale opt-in can't silently carry over.
+CC_AUTOMODEL_DIR="${CC_AUTOMODEL_DIR:-${HOME}/.claude/cc-automodel}"
 
 # Remove a session entirely (used by SessionEnd) plus any stray decision/claim
 # file and the per-session gated-tools override, approveRepeats memo, autopilot
-# expiry, and L2 policy files (a new session gets a new key, so this just stops
-# orphans accumulating).
+# expiry, L2 policy files, and the model auto-routing opt-in (a new session gets a
+# new key, so this just stops orphans accumulating).
 cc_remove() {
   rm -f "$(cc_file "$1")" "$(cc_decision_file "$1")" "$(cc_decision_file "$1")".claim.* \
     "$CC_GATE_TOOLS_DIR/$1" "$CC_APPROVED_DIR/$1" "$CC_AUTOPILOT_DIR/$1" \
-    "$CC_POLICY_DIR/$1" "$CC_POLICY_OVERRIDE_DIR/$1" 2>/dev/null || true
+    "$CC_POLICY_DIR/$1" "$CC_POLICY_OVERRIDE_DIR/$1" "$CC_AUTOMODEL_DIR/$1" 2>/dev/null || true
 }
 
 # ---- Audit/event ledger ----------------------------------------------------

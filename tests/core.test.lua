@@ -5311,6 +5311,25 @@ do
   eq("estimateCost: gateway listed as unpriced", mixed.unpriced[1], "gemini-2.5-pro")
   check("estimateCost: empty -> not priced", core.estimateCost({}).priced == false)
 
+  -- DR6: per-session model auto-routing heuristic (pure; enable is per-session elsewhere)
+  eq("suggestModel: empty -> nil", core.suggestModel("", {}), nil)
+  eq("suggestModel: whitespace -> nil", core.suggestModel("   \n ", {}), nil)
+  local sh = core.suggestModel("refactor the auth module", {})
+  eq("suggestModel: hard keyword -> hard/opus", sh.tier, "hard"); eq("suggestModel: hard model", sh.model, "opus")
+  check("suggestModel: keyword beats short length", core.suggestModel("debug it", {}).tier == "hard")
+  local sc = core.suggestModel("fix a typo in the readme", {})
+  eq("suggestModel: cheap keyword -> cheap/haiku", sc.tier, "cheap"); eq("suggestModel: cheap model", sc.model, "haiku")
+  eq("suggestModel: short no-keyword -> cheap", core.suggestModel("update the header", {}).tier, "cheap")
+  eq("suggestModel: mid-length no-keyword -> standard",
+     core.suggestModel("please add a new endpoint that returns the list of active users for the dashboard view today", {}).tier, "standard")
+  local longTask = string.rep("word ", 45)
+  eq("suggestModel: long no-keyword -> hard", core.suggestModel(longTask, {}).tier, "hard")
+  check("suggestModel: reason carries the keyword", core.suggestModel("optimize the query", {}).reason == "keyword: optimize")
+  -- config overrides: remap the tier->model + thresholds
+  local cfgOv = core.json.decode('{"automodel":{"models":{"cheap":"haiku-lite","standard":"sonnet","hard":"opus-max"},"cheapMax":2}}')
+  eq("suggestModel: model map override", core.suggestModel("rename foo", cfgOv).model, "haiku-lite")
+  eq("suggestModel: cheapMax override pushes 3-word to standard", core.suggestModel("add new feature", cfgOv).tier, "standard")
+
   -- spawn: a brand-new project (opts.isNew) marks the extension spec coldStart, and the
   -- open args gain --disable-workspace-trust so the trust modal can't swallow the prompt.
   local newSpec = core.spawnSpec("vscode", "/p/Farter", "build me a thing", { isNew = true, vscodeFlavor = "extension" })

@@ -721,8 +721,13 @@ function FX.queueKeyFor(item)
   return qk or legacy
 end
 -- Returns whether the task was actually delivered (false = the no-window-match
--- guard skipped the paste); callers must NOT pop the queue on a skip.
-function FX.feedTask(target, task) return FX.typeIntoWindow(target, task) end
+-- guard skipped the paste); callers must NOT pop the queue on a skip. `preface` (DR6,
+-- optional) is a slash command (e.g. "/model opus") submitted first in the SAME focus
+-- so the model switch + the task are one atomic delivery (one window match, one return).
+function FX.feedTask(target, task, preface)
+  if preface and #preface > 0 then return FX.pasteIntoWindow(target, { text = task, preface = preface }) end
+  return FX.typeIntoWindow(target, task)
+end
 
 -- Persistent relabels (F1): a JSON map of project path (cwd) -> override name.
 -- Missing/garbled file -> empty map (no labels). Mirrors the queue I/O above.
@@ -1397,6 +1402,19 @@ function FX.setGateToolsOverride(key, str)
 end
 function FX.clearGateToolsOverride(key) os.remove(GATE_TOOLS_DIR .. "/" .. key) end
 
+-- DR6 per-session model auto-routing opt-in (off by default, NEVER fleet-wide). The
+-- file's mere presence under cc-automodel/<key> = on for that session; same per-session
+-- file posture as gate-tools, reaped on SessionEnd (cc-lib.sh). Wrapped in a do-block so
+-- AUTOMODEL_DIR is an FX upvalue, NOT a main-chunk local (the file is at Lua's 200-cap).
+do
+  local AUTOMODEL_DIR = os.getenv("CC_AUTOMODEL_DIR") or (os.getenv("HOME") .. "/.claude/cc-automodel")
+  function FX.autoModelOn(key) return key ~= nil and FX.readFile(AUTOMODEL_DIR .. "/" .. key) ~= nil end
+  function FX.setAutoModel(key, on)
+    if on then hs.fs.mkdir(AUTOMODEL_DIR); FX.writeFile(AUTOMODEL_DIR .. "/" .. key, "1")
+    else os.remove(AUTOMODEL_DIR .. "/" .. key) end
+  end
+end
+
 -- L2 named policy bundles. The override file = the session's chosen bundle name
 -- (detail-panel Policy dropdown); the resolved file = core.resolvePolicy output
 -- the gate (cc-approve.sh) reads. KEEP IN SYNC: cc-approve.sh reads POLICY_DIR/<key>.
@@ -1927,10 +1945,15 @@ local injectionTailAt = 0
 -- the in-flight ones instead of interleaving (keys land in the wrong session).
 -- (Assigned to the local forward-declared above FX.runImprove, whose async
 -- callback needs it before this line runs.)
-function dispatchSerialized(item, action, fn)
+-- extraStagger (DR6, optional): seconds ADDED to this slot's reservation so the next
+-- serialized dispatch waits longer. A model-auto-routing feed prepends a `/model` switch
+-- (~0.74s of extra keystroke ladder inside the one paste); reserving the extra keeps the
+-- chain from running past BULK_STAGGER and interleaving with the next target's keys.
+function dispatchSerialized(item, action, fn, extraStagger)
   if core.actionIsHeadless(item, action) then fn() return end
   local delay
-  delay, injectionTailAt = core.staggerSlot(injectionTailAt, hs.timer.secondsSinceEpoch(), BULK_STAGGER)
+  delay, injectionTailAt = core.staggerSlot(injectionTailAt, hs.timer.secondsSinceEpoch(),
+    BULK_STAGGER + (tonumber(extraStagger) or 0))
   if delay > 0 then after(delay, fn) else fn() end
 end
 
@@ -1983,14 +2006,23 @@ end
 -- more reliable in the VS Code extension. payload = { text=…, imagePath=… }.
 -- Best-effort: depends on the chat input being focusable. The prior text
 -- clipboard is restored afterwards.
+-- payload.preface (DR6): a slash command (e.g. "/model opus") typed + submitted ONCE
+-- before the main text, WITHIN the same focus session, so the model switch and the task
+-- feed are a single atomic delivery (one window match, one synchronous return -- the
+-- caller's pop/commit can't race a 2nd tick). The preface is always a slash command, so
+-- it gets the autocomplete double-Return.
 function FX.pasteIntoWindow(target, payload)
   payload = payload or {}
-  -- kitty: no clipboard-image attach via @; send the text (if any) headlessly.
+  local preface = (type(payload.preface) == "string" and #payload.preface > 0) and payload.preface or nil
+  -- kitty: no clipboard-image attach via @; send the text (if any) headlessly. A preface
+  -- is concatenated into the SAME send-text so the two submits keep their order (two
+  -- separate `@ send-text` processes would race the control socket). The no-preface path
+  -- is byte-identical to before. (DR6 auto-routing never prefaces a kitty/terminal feed.)
   if isKitty(target) then
-    if payload.text and #payload.text > 0 then
-      return runKitty(core.kittyCmd("text", kittyItem(target), { text = payload.text .. "\r" }))
-    end
-    return false
+    local txt = (preface and (preface .. "\r") or "")
+      .. ((payload.text and #payload.text > 0) and (payload.text .. "\r") or "")
+    if txt == "" then return false end
+    return runKitty(core.kittyCmd("text", kittyItem(target), { text = txt }))
   end
   local name = target.name
   print("[cc-dashboard] paste -> " .. tostring(name)
@@ -2046,7 +2078,22 @@ function FX.pasteIntoWindow(target, payload)
           hs.eventtap.keyStroke({ "cmd" }, "v")
           after(0.12, function() runFrom(i + 1) end)
         end
-        runFrom(1)
+        -- DR6: an optional slash-command preface (e.g. "/model opus") is submitted
+        -- first (autocomplete double-Return), then we settle before the main steps so
+        -- the switch applies before the task lands -- all in this one focus session.
+        if preface then
+          hs.pasteboard.setContents(preface)
+          hs.eventtap.keyStroke({ "cmd" }, "v")
+          after(0.12, function()
+            hs.eventtap.keyStroke({}, "return")           -- accept the autocomplete
+            after(0.12, function()
+              hs.eventtap.keyStroke({}, "return")         -- submit the slash command
+              after(0.5, function() runFrom(1) end)       -- let /model apply, then feed
+            end)
+          end)
+        else
+          runFrom(1)
+        end
       end)
     end)
   end)
@@ -2401,6 +2448,36 @@ local function stampTaskStart(item, task, by)
   local _, afterB = core.taskBarrier(tostring(task or ""))
   taskStart[item.key] = { ts = os.time(), role = select(1, core.taskRoute(afterB)),
                           projectKey = item.projectKey, by = by }
+end
+
+-- DR6: per-session model auto-routing. If this session opted in (cc-automodel/<key>)
+-- AND is a LOCAL native-Anthropic session (/model tiers don't apply to a gateway/ssh)
+-- AND the heuristic picks a DIFFERENT model family than the current one, return
+-- { cmd, model, from, reason } so FX.feedTask can prepend a `/model` switch in the same
+-- atomic delivery. NO side effects (the caller ledgers + re-bases item.model only on a
+-- DELIVERED feed, so a skipped paste never logs a phantom switch). Off by default; the
+-- raw task is classified after stripping the L4 routing scaffolding (same as renderFeed).
+-- An FX member (not a main-chunk local) to stay under Lua's 200-local cap.
+function FX.autoModelPreface(item, task)
+  if not (item and item.key) or item.remote then return nil end
+  -- Chat-input editors only (VS Code / Cursor): the `/model <id>` preface is the
+  -- extension's type-id+autocomplete path. A terminal/kitty `/model` is an interactive
+  -- picker (and kitty's two `@ send-text` would race the socket), so auto-routing skips them.
+  if item.editor == "kitty" or item.editor == "terminal" then return nil end
+  if not FX.autoModelOn(item.key) then return nil end
+  if not core.isAnthropicSession(item.model, item.base_url) then return nil end
+  local _, afterB = core.taskBarrier(tostring(task or ""))
+  local _, bare = core.taskRoute(afterB)
+  local s = core.suggestModel(bare, loadConfig())
+  if not s or not s.model then return nil end
+  -- Skip a no-op switch: already on that family (priced ids) OR the exact same id.
+  -- Guard nil families (empty current model / a custom unfamilied override) so a
+  -- nil==nil can never wrongly skip a real switch.
+  local cf, sf = core.priceFamily(item.model), core.priceFamily(s.model)
+  if (sf and cf == sf) or item.model == s.model then return nil end
+  local cmd = core.modelCommand(s.model)
+  if not cmd then return nil end
+  return { cmd = cmd, model = s.model, from = item.model, reason = s.reason }
 end
 
 -- 🔌 MCPs & Skills viewer payload. Config MCPs (env-redacted) merged with the
@@ -3031,12 +3108,15 @@ local function handleBridgeMsg(msg)
         local qk = FX.queueKeyFor(item)
         local task, q2 = core.queuePop(FX.readQueue(qk))
         if task then
-          local commit = core.queueFeedCommit(FX.feedTask(winTarget(item), renderFeed(task, item)))
-          if commit.persist then FX.writeQueue(qk, q2); stampTaskStart(item, task, "manual")
+          local pre = FX.autoModelPreface(item, task)   -- DR6 (nil unless opted-in + a different tier)
+          local commit = core.queueFeedCommit(FX.feedTask(winTarget(item), renderFeed(task, item), pre and pre.cmd))
+          if commit.persist then
+            FX.writeQueue(qk, q2); stampTaskStart(item, task, "manual")
+            if pre then ledgerFor(item, { type = "model_change", from = pre.from, to = pre.model, by = "auto", reason = pre.reason }); item.model = pre.model end
           else print("[cc-queue] feed skipped (no window match) -- task kept queued") end
           ledgerFor(item, { type = commit.event, task = tostring(task):sub(1, 200), by = "manual" })
         end
-      end)
+      end, item.auto_model and 0.8 or 0)   -- DR6: reserve extra stagger for the /model preface ladder
     end
     return
   end
@@ -3330,6 +3410,24 @@ local function handleBridgeMsg(msg)
       ledgerFor(byKey[key], { type = "gate_tools", scope = v })
       print("[cc-gate] per-session tools for " .. key .. " -> " .. (v == "" and "(default)" or v))
     end
+    refresh()
+    return
+  end
+  -- DR6: per-session model auto-routing opt-in (off by default, NEVER fleet-wide).
+  -- "1" enables for this session, "" clears. Local native-Anthropic only -- a remote
+  -- or gateway tile is rejected (the /model tier switch doesn't apply there).
+  if a == "set-automodel" then
+    local key = tostring(payload.v or "")
+    local on  = tostring(payload.text or "") == "1"
+    local it  = byKey[key]
+    if key == "" or not it then return end
+    if on and (it.remote or not core.isAnthropicSession(it.model, it.base_url)) then
+      pcall(function() hs.alert.show("Claude Shepherd: model auto-routing is for local native-Anthropic sessions only") end)
+      refresh(); return
+    end
+    FX.setAutoModel(key, on)
+    ledgerFor(it, { type = "automodel_toggle", on = on })
+    print("[cc-automodel] per-session auto-routing for " .. key .. " -> " .. (on and "ON" or "off"))
     refresh()
     return
   end
@@ -5399,6 +5497,12 @@ local HTML = [[
         <select id="d-policy" onchange="onPolicyChange()" title="Attach a named policy/guardrail bundle (policies.bundles in config) to this session. Its autoAllow/autoDeny rules apply on top of the fleet policy (or replace it if the bundle sets disableGlobal). Default = no per-session bundle (attachment/fleet policy applies). Only enforced while headless approvals are armed.">
           <option value="">Default</option>
         </select>
+      </label>
+      <!-- DR6: per-session model auto-routing. OFF by default, NEVER fleet-wide. When on,
+           each queued/routed feed picks a model by task difficulty (cheap→Haiku, hard→Opus)
+           and switches via /model just before the task. Local native-Anthropic sessions only. -->
+      <label class="ctl" id="d-automodel-lbl" title="Auto-pick the model per task by difficulty (cheap→Haiku, standard→Sonnet, hard→Opus) and switch via /model just before each queued/routed feed. Per-session only — never fleet-wide. Local native-Anthropic sessions only (a gateway serves fixed models).">
+        <input type="checkbox" id="d-automodel" onchange="onAutoModelChange()"> Auto-model
       </label>
     </div>
     <div id="nudge-row">
@@ -7719,6 +7823,21 @@ local HTML = [[
       sel.title = "Effective policy for this session: " + eff
         + " — named bundles live in policies.bundles; only enforced while headless approvals are armed.";
     }
+    // DR6: per-session model auto-routing toggle. Off by default, never fleet-wide.
+    // Disabled for remote tiles + non-Anthropic (gateway) sessions, where /model tier
+    // switching doesn't apply.
+    function onAutoModelChange(){
+      if(!selectedKey) return;
+      send("set-automodel", selectedKey, document.getElementById("d-automodel").checked ? "1" : "");
+    }
+    function syncAutoModel(it){
+      var cb = document.getElementById("d-automodel"); if(!cb || !it) return;
+      var ok = !it.remote && !!it.anthropic;   // local native-Anthropic only
+      cb.checked = ok && !!it.auto_model;
+      cb.disabled = !ok;
+      var lbl = document.getElementById("d-automodel-lbl");
+      if(lbl) lbl.style.opacity = ok ? "1" : "0.45";
+    }
     // Render the options of a pending AskUserQuestion so they're visible in the
     // panel (today: read-only + Jump to answer; clickable answering comes later).
     function renderAsk(it){
@@ -7795,6 +7914,7 @@ local HTML = [[
       renderMeta(it);
       syncGateSelect(it);
       syncPolicySelect(it);
+      syncAutoModel(it);
       renderDecisions();
       renderDetailUsage(it);
       var n = it.queue || 0;
@@ -10283,6 +10403,11 @@ function refresh()
     it.gate_tools_override = ovr
     it.gate_tools_effective = core.resolveGateTools(ovr, nil, core.config(cfg, "gate.tools", nil))
 
+    -- DR6: per-session model auto-routing state for the detail toggle. it.anthropic
+    -- gates the checkbox (the /model tier switch is local native-Anthropic only).
+    it.anthropic = core.isAnthropicSession(it.model, it.base_url)
+    it.auto_model = (not it.remote) and it.anthropic and FX.autoModelOn(it.key) or false
+
     -- Collision + risk indicators (Features B/E), both off by default.
     it.collide = collEnabled and (collFlags[it.key] or false) or nil
     if riskEnabled and it.session_id and it.session_id ~= "" then
@@ -10386,16 +10511,18 @@ function refresh()
           local task, q2 = core.queuePop(FX.readQueue(qk))
           if not task then return end
           print("[cc-queue] feeding '" .. tostring(task) .. "' to " .. it.name)
-          local commit = core.queueFeedCommit(FX.feedTask(winTarget(it), renderFeed(task, it)))
+          local pre = FX.autoModelPreface(it, task)   -- DR6 (nil unless opted-in + a different tier)
+          local commit = core.queueFeedCommit(FX.feedTask(winTarget(it), renderFeed(task, it), pre and pre.cmd))
           if commit.persist then
             FX.writeQueue(qk, q2)
             it.queue = core.queueDepth(q2)
             stampTaskStart(it, task, "autofeed")
+            if pre then ledgerFor(it, { type = "model_change", from = pre.from, to = pre.model, by = "auto", reason = pre.reason }); it.model = pre.model end
           else
             print("[cc-queue] feed skipped (no window match) -- task kept queued")
           end
           ledgerFor(it, { type = commit.event, task = tostring(task):sub(1, 200), by = "autofeed" })
-        end)
+        end, it.auto_model and 0.8 or 0)   -- DR6: reserve extra stagger for the /model preface ladder
       end
     end
 
@@ -10632,16 +10759,18 @@ function refresh()
               local task, q2 = core.queuePop(FX.readQueue(qk))
               if not task then routePending[item.key] = nil; return end
               print("[cc-route] feeding '" .. tostring(task) .. "' to " .. tostring(item.name))
-              local commit = core.queueFeedCommit(FX.feedTask(winTarget(item), renderFeed(task, item)))
+              local pre = FX.autoModelPreface(item, task)   -- DR6 (nil unless opted-in + a different tier)
+              local commit = core.queueFeedCommit(FX.feedTask(winTarget(item), renderFeed(task, item), pre and pre.cmd))
               if commit.persist then
                 FX.writeQueue(qk, q2)
                 stampTaskStart(item, task, "router")
+                if pre then ledgerFor(item, { type = "model_change", from = pre.from, to = pre.model, by = "auto", reason = pre.reason }); item.model = pre.model end
               else
                 print("[cc-route] feed skipped (no window match) -- task kept queued")
                 routePending[item.key] = nil  -- session stays eligible
               end
               ledgerFor(item, { type = commit.event, task = tostring(task):sub(1, 200), by = "router" })
-            end)
+            end, item.auto_model and 0.8 or 0)   -- DR6: reserve extra stagger for the /model preface ladder
           end
         end
       elseif core.queueRouted(q) and core.queueDepth(q) > 0 then
