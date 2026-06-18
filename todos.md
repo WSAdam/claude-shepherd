@@ -310,7 +310,7 @@ commit + push. Honor the three load-bearing facts (claude CLI present; `gate.too
 secrets are env-var NAMES only).
 
 **Recommended build order:** DR1+DR2 (shared data source, highest value, self-contained) → DR3 →
-DR4 → DR5 → DR6 → DR7. **Status: DR1/DR2/DR3/DR4/DR5 shipped + deployed. Next: DR6 → DR7.**
+DR4 → DR5 → DR6 → DR7. **Status: DR1–DR6 shipped + deployed. Next (LAST): DR7.**
 
 ### DR1 — Subagent fan-out trace (clickable) — effort **M**  ✅ SHIPPED + DEPLOYED 2026-06-18
 > Detail-panel **Agents** tab (`core.DETAIL_TABS` + `data-tab="subagents"`): lists each spawned subagent
@@ -433,7 +433,24 @@ $" ; for gateway/local it's the real metered cost. Optional follow-on (not requi
 budget-alert rules via the existing rule engine; per-project/per-task cost attribution.
 - Pure core: `core.priceTable` (config `pricing.<model>` overrides) + `core.estimateCost(usage, model)`.
 
-### DR6 — Per-session cost/quality model auto-routing — effort **M**
+### DR6 — Per-session cost/quality model auto-routing — effort **M**  ✅ SHIPPED + DEPLOYED 2026-06-18
+> Per-session, opt-in, OFF by default everywhere (never fleet-wide). When a session opts in (detail-panel
+> **Auto-model** checkbox → `cc-automodel/<key>`, presence = on), each queued/routed task feed picks a model
+> by task difficulty and switches via `/model` just before the task — cheap→Haiku, standard→Sonnet, hard→Opus.
+> Pure `core.suggestModel(task, cfg)` (hard keyword > cheap keyword > word-count buckets; all thresholds/
+> keywords/model-map config-overridable via `automodel.*`, but the ENABLE is never a config default).
+> `FX.autoModelPreface` returns a `/model <id>` preface ONLY when opted-in + a chat-input editor (VS Code/
+> Cursor — terminal/kitty `/model` is an interactive picker) + `core.isAnthropicSession` (gateway/remote
+> excluded) + a DIFFERENT tier (nil-family-safe skip). The switch + the task are ONE atomic delivery via a
+> new `pasteIntoWindow` `preface` (one window match, one synchronous return — the pop/commit can't race the
+> tick); `dispatchSerialized` reserves extra stagger for the longer preface ladder so it can't interleave.
+> model_change (by="auto") is ledgered + `item.model` re-based ONLY on a delivered feed. Reaped on SessionEnd
+> (cc-lib.sh). +13 core tests, +13 ui pins; suite 2289 core / 561 ui / 1 smoke green. Adversarially reviewed
+> (fixed: kitty socket-race → chat-editors-only + single send-text; stagger interleave → extra reservation;
+> nil-family false-skip). Live-verified (cheap/haiku, hard/opus, standard/sonnet). Follow-on (spec's
+> "quick classify"): an LLM classify pass instead of the keyword/length heuristic; a fleet-wide opt-in once trusted.
+> <!-- original DR6 spec below -->
+### DR6 — (spec) Per-session cost/quality model auto-routing — effort **M**
 Optionally auto-pick the model by task difficulty/cost (cheap → Haiku, hard → Opus). **Per-session,
 opt-in, OFF by default everywhere** — Adam: "configurable on a by-session basis ... only run that on
 one session at a time until I trust it." A session-level toggle + a heuristic (task length/keywords, or

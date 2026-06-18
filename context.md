@@ -134,6 +134,35 @@ network, no multi-user, no secrets — it reads session status off the local fil
   dashboard → mirror in the panel JS if it affects rendering (and note the twin) → `make test`
   (smoke included) → deploy.
 
+## State (2026-06-18) — DR6 per-session model auto-routing (opt-in, off by default)
+
+DR6 shipped (deep-research backlog now DR1–DR6 done; only DR7 left). Per-session, opt-in, OFF by default,
+NEVER fleet-wide. When a session opts in (detail-panel **Auto-model** checkbox), each queued/routed feed
+picks a model by task difficulty and switches via `/model` just before the task: cheap→Haiku, standard→
+Sonnet, hard→Opus.
+
+- **Pure `core.suggestModel(task, cfg)`** — tier pick: hard keyword > cheap keyword > word-count buckets;
+  maps tier→model id. Everything config-overridable (`automodel.models/.cheapMax/.hardMin/.cheapWords/
+  .hardWords`) EXCEPT the enable, which is per-session only.
+- **Per-session opt-in file** `cc-automodel/<key>` (presence = on), same posture as gate-tools:
+  `FX.autoModelOn`/`setAutoModel`; reaped on SessionEnd (`cc_remove` in cc-lib.sh; `CC_AUTOMODEL_DIR` default
+  MUST match the dashboard's). `set-automodel` + the detail checkbox both REJECT remote/gateway sessions.
+- **`FX.autoModelPreface(item, task)`** is the single switch chokepoint: returns a `/model <id>` preface ONLY
+  when opted-in + a **chat-input editor** (VS Code/Cursor — a terminal/kitty `/model` is an interactive
+  picker, and kitty's two `@ send-text` would race) + `core.isAnthropicSession` (gateway/remote excluded) +
+  a **different tier** (nil-family-safe skip). NO side effects — the 3 feed sites ledger `model_change`
+  (by="auto") + re-base `item.model` ONLY inside `if commit.persist` (delivered), so a skipped paste never
+  logs a phantom switch.
+- **Atomic delivery:** `pasteIntoWindow` gained an optional `preface` slash command submitted first in the
+  SAME focus session (one window match, one SYNCHRONOUS return), so the switch + the task land together and
+  the pop/commit can't race the 1s tick. kitty preface is concatenated into ONE `send-text` (ordered). The
+  no-preface path is byte-identical. `dispatchSerialized` gained an `extraStagger` arg; a preface feed
+  reserves +0.8s so the longer ladder can't run past `BULK_STAGGER` and interleave with the next target.
+- **Cap discipline:** both new helpers avoid main-chunk locals (AUTOMODEL_DIR lives in the FX do-block;
+  `autoModelPreface` is an FX member) — the file is at Lua's 200-local ceiling (smoke enforces it).
+- Adversarial review: queue-pop/ledger gating clean; fixed kitty socket-race, stagger interleave, nil-family
+  false-skip. +13 core / +13 ui pins.
+
 ## State (2026-06-18) — DR3 Rewind tab (checkpoint/rewind timeline)
 
 DR3 shipped (deep-research backlog now DR1–DR5 done; next DR6 → DR7). The detail-panel **Timeline tab was
