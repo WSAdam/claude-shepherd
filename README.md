@@ -29,6 +29,11 @@ command** being requested (e.g. `wants: npm test -- --watch`, via the
 `PermissionRequest` hook). Selecting a tile also shows a **live activity peek**:
 the latest assistant line from that session's transcript ("Doing: …").
 
+Status is hook-driven, but a `done` tile **self-heals back to `working`** if the
+transcript shows the model resumed — so in Auto mode (where a text-only reply or an
+auto-continued turn can skip the `working` hooks) a tile no longer gets stuck on
+"Ready for you" while it's actually working. (`status.resumeSlack`, default 2s.)
+
 ### Session observability (L5)
 
 All derived locally from the transcript Shepherd already tails — no extra hooks:
@@ -63,6 +68,18 @@ All derived locally from the transcript Shepherd already tails — no extra hook
 - **Session history browser** — a 🗂 **History** tab in the 📜 Audit overlay (see
   "Audit log & insights") lists every recorded session with its activity, a fuzzy filter,
   sort + pin, and a multi-select delete.
+- **Subagent fan-out (Agents tab)** — when a session spawns subagents or runs a Workflow,
+  the detail panel's **Agents** tab lists each one (grouped by Workflow run) with a green
+  running dot and its latest "Doing:" line; click a row to drill into that agent's recent
+  output. Read from the `subagents/` tree Claude Code writes beside the transcript — no extra
+  hooks. Self-gates when a session has no subagents.
+- **Background-work badge** — a green **⚙ N** pill on a tile while background work is running
+  (delegated subagents or a Workflow fleet), so you can see at a glance which session is busy
+  behind the scenes. Tunable window: `subagents.activeWindow` (default 45s).
+- **Run score** — a **Score** button in the detail panel rates the selected session 0–100 from
+  the audit ledger (penalizes API errors, denied tools, loop episodes, and forced respawns),
+  shows a ⚠ when recent sessions trend down, and a mini sparkline of the trend. Needs the Audit
+  log on; weights are hand-tunable (`score.weights`).
 
 ### Event-callback rules (L6, off by default)
 
@@ -296,11 +313,28 @@ closed). Because that needs root, macOS asks for your password each time you fli
 (your choice over a passwordless sudoers entry). The button reads the real state via
 `pmset -g` (no password needed) and shows **☕ Awake** (amber) when on.
 
+## Lock the screen (keep agents running)
+
+The **🔒 button** (next to ☕ Awake) locks the Mac behind a full-screen overlay that
+blocks all keyboard/mouse input until you type your password — while **everything keeps
+running**: Claude sessions, the approval gate, and remote control. It is deliberately
+**not** the macOS login window (that would block Shepherd's keystroke control of your
+GUI sessions). First click sets a password (stored as a salted SHA-256 hash in
+`~/.claude/cc-lock.json` — never plaintext, and it's your own password, not a hash you
+type). Pair it with **Awake** to close the lid locked and leave the fleet working. It's a
+**soft lock** (deters casual access, not a security boundary): a `⌘⌥⌃⇧U` chord force-unlocks
+so a typo can't lock you out, and `killall Hammerspoon` / a reboot always releases it. For a
+true security boundary use the real macOS lock — but it stops keystroke-driven control.
+
 ## Spawn new sessions
 
 Click **New** (or **⌘⌥S**) to open the **New session** modal:
 
 - **Open existing / Start new project** — open a folder, or create a new folder and start in it.
+  A brand-new project is the fragile spawn (cold-start window on the Welcome tab, Workspace Trust
+  prompt), so new-project spawns get extra settle time, open VS Code with `--disable-workspace-trust`,
+  re-assert the chat-input focus, and **paste** the initial task — so the prompt reliably lands and the
+  session actually starts.
 - **Presets** — ▶ chips that spawn a saved folder+editor+mode+provider bundle in one click;
   "Save as preset" in the footer captures the current form (`~/.claude/cc-presets.json`,
   ✕ on a chip deletes). Picking a known folder also recalls the editor/mode/provider you
@@ -441,7 +475,10 @@ Shepherd reads token usage straight from Claude Code's **local transcript files*
   **excludes cache reads** — input + output + cache-creation — since cache reads dominate the gross
   count but aren't how the plan is metered; gross is on hover). Per-model breakdown in the detail
   panel. Recomputed on a **60s timer** (incremental reads — only new bytes) + an **Update now** button.
-  **Local only, zero tokens.**
+  **Local only, zero tokens.** The footer also shows an **`~$X est.`** API-equivalent dollar figure
+  from a per-model price table (`core.PRICING`; Opus 4.x $5/$25, Sonnet 4.6 $3/$15, Haiku 4.5 $1/$5 per
+  Mtok, cache-aware) — an estimate (your subscription is flat-rate), hand-tunable via `pricing.<family>`;
+  gateway/local models have unknown pricing and are excluded.
 - **Plan window bars (footer)** — your real **session (5h)** and **weekly** utilization %, matching
   `claude.ai/settings/usage` and Claude Code's `/usage`, with reset times and a Sonnet-only line.
 

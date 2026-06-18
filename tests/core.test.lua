@@ -4415,6 +4415,15 @@ do
   check("cliTools: jq flagged required (the one hard dep)", toolByBin.jq and toolByBin.jq.required == true)
   eq("cliTools: rg degrades to grep", toolByBin.rg.fallback, "grep")
   eq("cliTools: fd degrades to find", toolByBin.fd.fallback, "find")
+  -- isInstalledPath: the single-source install rule (absolute path => installed). Pure.
+  check("isInstalledPath: absolute path => true", core.isInstalledPath("/opt/bin/jq") == true)
+  check("isInstalledPath: bare name => false", core.isInstalledPath("rg") == false)
+  check("isInstalledPath: relative path => false", core.isInstalledPath("./jq") == false)
+  check("isInstalledPath: nil => false", core.isInstalledPath(nil) == false)
+  check("isInstalledPath: empty string => false", core.isInstalledPath("") == false)
+  -- cliToolCards: a bare-name resolved value (PATH-relative, never absolute) => missing
+  check("cliToolCards: bare-name resolve => missing", core.cliToolCards({ rg = "rg" })[1] ~= nil
+        and (function() for _, c in ipairs(core.cliToolCards({ rg = "rg" })) do if c.bin == "rg" then return c.installed == false end end end)())
   -- cliToolCards: an ABSOLUTE resolved path => installed (+ path surfaced)
   local cards = core.cliToolCards({ jq = "/opt/homebrew/bin/jq", rg = "/usr/local/bin/rg" })
   eq("cliToolCards: one card per catalog tool", #cards, #core.CLI_TOOLS)
@@ -5205,6 +5214,166 @@ do
   check("reap: returns the same table (in place)", ret == cache)
   check("reap: nil liveKeys clears all", (function() local c = { a = 1, b = 2 }; core.reapUnbacked(c, nil); return next(c) == nil end)())
   check("reap: non-table cache is a no-op", core.reapUnbacked(nil, {}) == nil)
+end
+
+-- ---- DR1/DR2: subagent fan-out trace + background-activity indicator -------
+do
+  eq("subagentsDir: from transcript_path",
+     core.subagentsDir("/p/projects/ENC/sess-uuid.jsonl"), "/p/projects/ENC/sess-uuid/subagents")
+  eq("subagentsDir: nil without .jsonl", core.subagentsDir("/p/sess"), nil)
+  eq("subagentsDir: nil for non-string", core.subagentsDir(nil), nil)
+
+  local meta = core.subagentMeta(core.json.encode(
+    { type = "user", agentId = "a382c84e9550c1460", slug = "do-a-full-scan-sunny-panda", isSidechain = true }))
+  eq("subagentMeta: agentId", meta and meta.agentId, "a382c84e9550c1460")
+  eq("subagentMeta: slug", meta and meta.slug, "do-a-full-scan-sunny-panda")
+  eq("subagentMeta: nil for non-json", core.subagentMeta("not json"), nil)
+  eq("subagentMeta: nil when no agentId", core.subagentMeta(core.json.encode({ type = "user" })), nil)
+
+  eq("subagentLabel: humanizes slug",
+     core.subagentLabel("can-you-review-if-swirling-otter", "x"), "can you review if swirling otter")
+  eq("subagentLabel: falls back to short id", core.subagentLabel(nil, "a382c84e9550c1460"), "agent a382c84e")
+
+  local now = 100000
+  local tailA = core.json.encode(
+    { type = "assistant", message = { content = { { type = "text", text = "Scanning the payments module" } } } })
+  local files = {
+    { name = "agent-a1.jsonl", mtime = now - 5,
+      firstLine = core.json.encode({ agentId = "a1", slug = "full-scan-sunny-panda" }), tail = tailA },
+    { name = "workflows/wf_abc123/agent-b2.jsonl", mtime = now - 500,
+      firstLine = core.json.encode({ agentId = "b2", slug = "deep-research-otter" }) },
+    { name = "notes.txt", mtime = now },            -- ignored (not an agent file)
+  }
+  local tree = core.subagentTree(files, now, { activeWindow = 45 })
+  eq("subagentTree: counts agents only", tree.count, 2)
+  eq("subagentTree: running within window", tree.runningCount, 1)
+  check("subagentTree: active flag", tree.active == true)
+  eq("subagentTree: newest first", tree.agents[1].agentId, "a1")
+  eq("subagentTree: keeps relative name (for drill-in)", tree.agents[1].name, "agent-a1.jsonl")
+  eq("subagentTree: lastLine snippet", tree.agents[1].lastLine, "Scanning the payments module")
+  eq("subagentTree: workflow grouping", tree.agents[2].wfId, "wf_abc123")
+  eq("subagentTree: kind=workflow", tree.agents[2].kind, "workflow")
+  check("subagentTree: workflows map counts",
+        tree.workflows["wf_abc123"] ~= nil and tree.workflows["wf_abc123"].count == 1)
+
+  local function al(t) return core.json.encode({ type = "assistant", message = { content = { { type = "text", text = t } } } }) end
+  local recentTail = al("first step") .. "\n" .. core.json.encode({ type = "user", message = { content = "x" } }) .. "\n" .. al("second step")
+  local recent = core.transcriptRecent(recentTail, 12, 200)
+  eq("transcriptRecent: count (assistant only)", #recent, 2)
+  eq("transcriptRecent: chronological order", recent[1], "first step")
+  eq("transcriptRecent: newest last", recent[2], "second step")
+  eq("transcriptRecent: empty tail -> {}", #core.transcriptRecent("", 12), 0)
+  eq("transcriptRecent: caps to n", #core.transcriptRecent(al("a").."\n"..al("b").."\n"..al("c"), 2), 2)
+
+  check("subagentNameOk: direct agent file", core.subagentNameOk("agent-a1.jsonl") == true)
+  check("subagentNameOk: workflow agent file", core.subagentNameOk("workflows/wf_abc123/agent-b2.jsonl") == true)
+  check("subagentNameOk: rejects traversal", core.subagentNameOk("../../etc/passwd") == false)
+  check("subagentNameOk: rejects absolute", core.subagentNameOk("/etc/passwd") == false)
+  check("subagentNameOk: rejects non-agent file", core.subagentNameOk("notes.txt") == false)
+  check("subagentNameOk: rejects empty", core.subagentNameOk("") == false)
+
+  -- DR4: run score + regression trend (from ledger signals)
+  local function ev(sid, t, extra) local e = { session_id = sid, type = t }; for k, v in pairs(extra or {}) do e[k] = v end; return e end
+  eq("runScore: clean session = 100",
+     core.runScore({ ev("s1", "decision", { outcome = "allow" }), ev("s1", "prompt") }, "s1").score, 100)
+  eq("runScore: 1 error + 2 denies = 100-18-12 = 70",
+     core.runScore({ ev("s1", "error"), ev("s1", "decision", { outcome = "deny" }), ev("s1", "decision", { outcome = "deny" }) }, "s1").score, 70)
+  eq("runScore: clamps at 0", core.runScore({ ev("s1","error"),ev("s1","error"),ev("s1","error"),ev("s1","error"),ev("s1","error"),ev("s1","error") }, "s1").score, 0)
+  eq("runScore: scopes to sid", core.runScore({ ev("s1","error"), ev("s2","error") }, "s2").score, 82)
+  check("runScore: no data -> hadData false", core.runScore({}, "s1").hadData == false)
+  -- trend: three sessions declining 100 -> 70 -> 40 (by ts) => regression
+  local declining = {
+    ev("a","decision",{outcome="allow",ts=10}),
+    ev("b","error",{ts=20}), ev("b","decision",{outcome="deny",ts=21}), ev("b","decision",{outcome="deny",ts=22}),  -- 100-18-12=70
+    ev("c","error",{ts=30}), ev("c","error",{ts=31}), ev("c","error",{ts=32}),  -- 100-54=46
+  }
+  local tr = core.scoreTrend(declining, { window = 3, drop = 12 })
+  eq("scoreTrend: ordered oldest->newest", tr.series[1].sid, "a")
+  eq("scoreTrend: newest is the worst", tr.series[3].score, 46)
+  check("scoreTrend: flags the decline", tr.regression == true)
+  local steady = core.scoreTrend({ ev("a","decision",{outcome="allow",ts=1}), ev("b","decision",{outcome="allow",ts=2}), ev("c","decision",{outcome="allow",ts=3}) }, {})
+  check("scoreTrend: flat 100s -> no regression", steady.regression == false)
+  check("scoreTrend: fewer than window -> no regression", core.scoreTrend({ ev("a","error",{ts=1}) }, {}).regression == false)
+
+  -- DR5: cost estimate (Anthropic list prices; gateway/local skipped)
+  eq("priceFamily: opus", core.priceFamily("claude-opus-4-8"), "opus")
+  eq("priceFamily: sonnet", core.priceFamily("claude-sonnet-4-6"), "sonnet")
+  eq("priceFamily: haiku", core.priceFamily("claude-haiku-4-5"), "haiku")
+  eq("priceFamily: gateway model -> nil", core.priceFamily("gemini-2.5-pro"), nil)
+  eq("priceFor: opus input rate", core.priceFor("claude-opus-4-8").input, 5.0)
+  eq("priceFor: override merges", core.priceFor("claude-opus-4-8", { opus = { input = 4 } }).input, 4)
+  eq("priceFor: override keeps un-set fields", core.priceFor("claude-opus-4-8", { opus = { input = 4 } }).output, 25.0)
+  local cost = core.estimateCost({ ["claude-opus-4-8"] = { input = 1000000, output = 1000000, cacheCreate = 1000000, cacheRead = 1000000 } })
+  eq("estimateCost: opus 1M each bucket", string.format("%.2f", cost.usd), "36.75")  -- 5 + 25 + 6.25 + 0.50
+  check("estimateCost: priced flag set", cost.priced == true)
+  local mixed = core.estimateCost({ ["claude-haiku-4-5"] = { input = 2000000 }, ["gemini-2.5-pro"] = { input = 5000000 } })
+  eq("estimateCost: haiku 2M input = $2, gateway skipped", string.format("%.2f", mixed.usd), "2.00")
+  eq("estimateCost: gateway listed as unpriced", mixed.unpriced[1], "gemini-2.5-pro")
+  check("estimateCost: empty -> not priced", core.estimateCost({}).priced == false)
+
+  -- spawn: a brand-new project (opts.isNew) marks the extension spec coldStart, and the
+  -- open args gain --disable-workspace-trust so the trust modal can't swallow the prompt.
+  local newSpec = core.spawnSpec("vscode", "/p/Farter", "build me a thing", { isNew = true, vscodeFlavor = "extension" })
+  check("spawn: new project => extension flavor", newSpec.flavor == "extension")
+  check("spawn: new project => coldStart", newSpec.coldStart == true)
+  check("spawn: new project carries the task", newSpec.task == "build me a thing")
+  local oldSpec = core.spawnSpec("vscode", "/p/Existing", "do x", { vscodeFlavor = "extension" })
+  check("spawn: existing project => not coldStart", oldSpec.coldStart ~= true)
+  local function hasArg(args, v) for _, a in ipairs(args) do if a == v then return true end end return false end
+  check("vscodeOpenArgs: coldStart adds --disable-workspace-trust", hasArg(core.vscodeOpenArgs(newSpec), "--disable-workspace-trust"))
+  check("vscodeOpenArgs: non-cold has NO trust flag", not hasArg(core.vscodeOpenArgs(oldSpec), "--disable-workspace-trust"))
+  check("vscodeOpenArgs: project is the last arg", core.vscodeOpenArgs(newSpec)[#core.vscodeOpenArgs(newSpec)] == "/p/Farter")
+
+  local bg = core.backgroundActivity(files, now, { activeWindow = 45 })
+  check("backgroundActivity: active", bg.active == true)
+  eq("backgroundActivity: count of recent", bg.count, 1)
+  check("backgroundActivity: idle when all stale",
+        core.backgroundActivity(files, now + 100000, { activeWindow = 45 }).active == false)
+  check("backgroundActivity: empty list -> inactive", core.backgroundActivity({}, now, {}).active == false)
+end
+
+-- ---- stale-"done" self-heal: transcript-resumed override ------------------
+do
+  local function aline(ts)
+    return core.json.encode({ type = "assistant", timestamp = ts,
+                              message = { content = { { type = "text", text = "x" } } } })
+  end
+  local function uline(ts)  -- e.g. an IDE file-open injection (a user line)
+    return core.json.encode({ type = "user", timestamp = ts,
+                              message = { content = "<ide_opened_file>foo</ide_opened_file>" } })
+  end
+  local t0 = core.isoToEpoch("2026-06-18T14:00:00Z")
+  check("resumed: isoToEpoch sanity", type(t0) == "number")
+  -- genuinely done: the turn's final assistant line, then Stop bumped updated to t0+1
+  check("resumed: genuine done not flagged",
+        core.transcriptResumed(aline("2026-06-18T14:00:00Z"), t0 + 1, 2) == false)
+  -- resumed: previous done recorded updated=t0; a NEW assistant line 30s later
+  check("resumed: new assistant after stale done -> working",
+        core.transcriptResumed(aline("2026-06-18T14:00:00Z") .. "\n" .. aline("2026-06-18T14:00:30Z"), t0, 2) == true)
+  -- an IDE-open (user line) newer than done must NOT flip to working
+  check("resumed: IDE-open user line ignored",
+        core.transcriptResumed(aline("2026-06-18T14:00:00Z") .. "\n" .. uline("2026-06-18T14:05:00Z"), t0 + 1, 2) == false)
+  check("resumed: no assistant line -> false",
+        core.transcriptResumed(uline("2026-06-18T14:05:00Z"), t0, 2) == false)
+  check("resumed: within slack not flagged", core.transcriptResumed(aline("2026-06-18T14:00:01Z"), t0, 2) == false)
+  check("resumed: nil updated -> false", core.transcriptResumed(aline("2026-06-18T14:00:30Z"), nil, 2) == false)
+  check("resumed: empty tail -> false", core.transcriptResumed("", t0, 2) == false)
+end
+
+-- ---- custom screen lock: salted-hash password ----------------------------
+do
+  local function fakeHash(s) return "H<" .. s .. ">" end
+  local rec = core.lockRecord("salt1", "hunter2", fakeHash)
+  eq("lock: record salt", rec and rec.salt, "salt1")
+  eq("lock: record hash", rec and rec.hash, "H<salt1:hunter2>")
+  check("lock: verify correct password", core.lockVerify(rec, "hunter2", fakeHash) == true)
+  check("lock: verify wrong password", core.lockVerify(rec, "wrong", fakeHash) == false)
+  check("lock: verify nil record", core.lockVerify(nil, "hunter2", fakeHash) == false)
+  check("lock: verify empty input", core.lockVerify(rec, "", fakeHash) == false)
+  check("lock: record needs a hasher", core.lockRecord("s", "p", nil) == nil)
+  check("lock: salt changes the hash (defeats precompute)",
+        core.lockRecord("saltA", "pw", fakeHash).hash ~= core.lockRecord("saltB", "pw", fakeHash).hash)
+  eq("lock: saltedInput format", core.lockSaltedInput("s", "p"), "s:p")
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))

@@ -4,6 +4,38 @@ The cross-machine / controls roadmap (Parts A/C/E) is **done**. This tracks the 
 remaining items. Full per-round detail is in CHANGELOG.md and git history.
 
 ## Shipped ✅
+- **🐞 New-project spawn delivers the initial prompt (shipped + deployed 2026-06-18)** — "Start new
+  project" created the folder + opened VS Code but the initial prompt never landed (field+log proven: the
+  Farter spawn typed the task at +6s into a brand-new window still on the Welcome tab, behind the
+  Workspace Trust modal → no session started). Fix, gated to NEW projects only (existing-folder spawns
+  unchanged): the spawn threads `isNew` (modal `mode=="new"` → `FX.spawnSession` → `opts.isNew` →
+  `spec.coldStart`); `core.vscodeOpenArgs` adds `--disable-workspace-trust` so the trust modal can't steal
+  focus; and the extension ladder, on a cold start, waits longer (5s/1.5s/2.5s), re-asserts window focus +
+  the deterministic ⌘1→⌘Esc chat dance (same as a nudge) right before delivery, and **pastes** the task
+  (reliable vs char-typing on a busy cold window). +9 core tests (coldStart spec + open-args) + 4 ui pins;
+  live-verified. NOTE: needs a real new-project spawn to confirm end-to-end (logs now tag the cold path).
+- **🔒 Custom in-app lock (shipped + deployed 2026-06-18)** — a `🔒` icon button in the header (right of
+  `☕ Awake`). Deliberately NOT the macOS loginwindow (that would block Shepherd's keystroke control of GUI
+  sessions): a full-screen `hs.canvas` overlay (all screens, screenSaver level) + an `hs.eventtap` that
+  swallows ALL keyboard/mouse input and captures the typed password; ⏎ verifies against a salted SHA-256
+  hash in `cc-lock.json` (pure `core.lockSaltedInput`/`lockRecord`/`lockVerify` + 9 tests; FX uses
+  `hs.hash.SHA256`, never plaintext). Everything keeps running (Claude sessions, gate, remote control).
+  First 🔒 with no password set opens a set-password modal (`#lockset`, confirm field). **Soft lock** —
+  bail-outs: `⌘⌥⌃⇧U` force-unlock chord, `hs.reload()`/`killall Hammerspoon`, and SSH `hs -c
+  "_G.__ccLockRelease()"`; an mtime watchdog re-arms the eventtap if macOS disables it. Live-verified
+  (bail-out global is a function; SHA-256 roundtrip correct→true/wrong→false; clean load). Follow-ups:
+  multi-monitor tested 1 screen only in code; no Touch ID (eventtap can't use LocalAuthentication).
+- **🐞 Stale-"done" self-heal (shipped + deployed 2026-06-18, live-verified)** — a tile showed "Ready for
+  you" while the session was actively working. Root cause: status is hook-driven; "done" is set by a
+  Stop hook (or idle Notification) and nothing flips it back until the next *working* hook. In **Auto
+  mode** (confirmed live: `permission_mode:"auto"`, `effort:"xhigh"`) a text-only reply fires no tool
+  hooks and the auto-continued/remote prompt skipped UserPromptSubmit, so the tile kept the stale done.
+  Fix: `core.transcriptResumed(tail, updatedEpoch, slack)` — newest `assistant` transcript line newer
+  than `it.updated` ⇒ override done→working (symmetric to the existing working→error self-heal; keyed on
+  assistant lines so IDE file-open user lines + snapshots never false-trigger). Wired in refresh before
+  the error override; `status.resumeSlack` (default 2s) tunable. +8 unit tests; full suite green. Deployed
+  + live-verified (`transcriptResumed LIVE`). Inherent limit: an extended-thinking window with zero
+  transcript writes still can't be detected (no signal exists) — flips as soon as the model emits output.
 - **📋 Worklist: per-item delete + multi-line add** — each row has a **✕** (pure `core.worklistRemove`,
   delegated click); add field is an auto-growing `<textarea>` (Enter adds, Shift+Enter newlines).
 - **🔌 CLI-tools inventory** (MCPs & Skills viewer) — read-only installed/missing + resolved-path
@@ -264,6 +296,140 @@ remaining items. Full per-round detail is in CHANGELOG.md and git history.
     but "spawn a new session for me" is an aggressive automation; needs a cap + UX on when/where.
   - **idle sessions as routing targets** — idle may be a session you're actively typing into.
   - **remote tiles as routing targets** — pairs with `bridge.keystrokes` (hardware-gated above).
+
+## Deep-research adds (2026-06-18) — ACCEPTED BUILD QUEUE
+
+From a forward-looking deep-research pass (Claude Code's newest native features + AgentOps/Langfuse
+observability patterns; the mining sources were already exhausted). Adam triaged the suggestions and
+**accepted these seven** (rejected: cloud/teleport tiles, the "Agent Inbox" + ambient-mode UX, session
+replay, shared blackboard, critic-pass). Data shapes below were **verified against real local
+transcripts on 2026-06-18** — these are not speculative. Off-by-default like everything that automates.
+Build via the usual loop: pure `cc-core.lua` + unit tests → wire dashboard (FX/handleAction/panel-JS) +
+ui pins → `make test` (smoke included) green → adversarial-review Workflow → fix → `make deploy` →
+commit + push. Honor the three load-bearing facts (claude CLI present; `gate.tools` is a hold-list;
+secrets are env-var NAMES only).
+
+**Recommended build order:** DR1+DR2 (shared data source, highest value, self-contained) → DR3 →
+DR4 → DR5 → DR6 → DR7.
+
+### DR1 — Subagent fan-out trace (clickable) — effort **M**  ✅ SHIPPED + DEPLOYED 2026-06-18
+> Detail-panel **Agents** tab (`core.DETAIL_TABS` + `data-tab="subagents"`): lists each spawned subagent
+> grouped by Workflow run, with a green running dot + its latest "Doing:" line; click a row to drill in
+> (`detail-subagent` → `core.transcriptRecent` shows recent assistant output). `detail-subagents` →
+> `FX.subagentScan(dir,true)` → `core.subagentTree` → `window.ccSubagents`; drill-in is path-validated by
+> `core.subagentNameOk` (no traversal). +6 tests; live-verified on a real subagents dir (3 agents, labels
+> render). Follow-on: surface in-transcript Task-tool sidechains too (Adam's sessions use the subagents/
+> tree, not `isSidechain` lines, so that path is untested live).
+> <!-- superseded: -->
+### DR1 — (old) Subagent fan-out trace — pure-core/FX notes
+> **Pure-core + FX landed + DEPLOYED (2026-06-18):** `core.subagentsDir` / `subagentMeta` /
+> `subagentLabel` / `subagentTree` (+ DR2's `backgroundActivity`) in cc-core.lua + 21 unit tests, and
+> `FX.subagentScan(dir, withContent)` in the dashboard (reads agent-*.jsonl mtimes; withContent also
+> reads first line + tail; recurses `workflows/wf_*/` one level). Full suite green (core 2198 / ui 534 /
+> smoke 1). **REMAINING — the clickable UI:** a detail-panel **Agents** tab mirroring the Timeline
+> round-trip — a `data-tab="subagents"` panel + tab button + a `detail-subagents` handleAction
+> (`FX.subagentScan(dir, true)` → `core.subagentTree` → `window.ccSubagents(key, tree)`) + lazy-load in
+> `maybeLoadActiveTab` + click a row to drill into that agent's tail. (Open UI decision settled: new tab,
+> not a reuse.)
+A live view of the subagents a session has spawned, with click-to-drill-in. **Verified data source:**
+beside each session transcript Claude Code writes `~/.claude/projects/<proj>/<sessionUuid>/subagents/
+agent-<id>.jsonl` (one per spawned subagent; first line carries `agentId` + a human-ish **`slug`**
+derived from the subagent's first prompt, e.g. `do-a-full-scan-sunny-panda`, plus `isSidechain`/
+`parentUuid`) and, for Workflow runs, a `subagents/workflows/wf_<id>/` subtree. NOTE: Adam's normal
+sessions use these `subagents/` files, **not** in-transcript `Task` tool_use / `isSidechain:true` lines
+(0 of those exist locally) — so the trace reads the **subagents/ tree**, not `parent_tool_use_id` from
+the main transcript (the research's first guess; corrected against real data).
+- Pure core: `core.subagentTree(sessionDir)` → list of `{agentId, slug, kind:"agent"|"workflow",
+  wfId?, lastActivity, running, lastLine}`; reuse the existing transcript-tail/“Doing: …” extractor
+  for each agent's latest line. Workflow agents group under their `wf_<id>`.
+- UI: a new detail-panel tab (or section) listing each subagent by slug + latest line + a running dot;
+  click a row → drill into that agent's tail (its own “Doing: …” stream). Self-gates (no `subagents/`
+  dir → nothing shown), like the PR badge.
+
+### DR2 — Background / workflow-active indicator — effort **S**  ✅ SHIPPED + DEPLOYED 2026-06-18
+> Green **⚙ N** pill on a tile while background work runs (delegated subagents or a Workflow fleet).
+> `core.backgroundActivity` + `FX.subagentScan(dir,false)` (cheap mtime-only scan) wired into refresh
+> (`it.bg_active`/`it.bg_count`, `subagents.activeWindow` default 45s, self-gating) → `bgBadge(it)` in
+> `tileHtml` + a green `.bg-run` pill (spinning ⚙). Suite green; deployed + live-verified (clean load).
+> Lights up on the next workflow/subagent run. Follow-on (later): also reflect Claude Code background
+> bash (`run_in_background`/`BashOutput`) once it appears in transcripts.
+A per-tile badge that **turns green when background work is running** — Adam's framing: "turns green
+whenever workflows are running, like the deep research just did." Same data source as DR1: a session
+has active background work when files under its `subagents/` tree (esp. `subagents/workflows/wf_*/`)
+were modified within the last ~N seconds. Also fold in Claude Code background bash tasks if they surface
+in the transcript (`run_in_background` / `BashOutput`) — none locally yet, so design for it but gate on
+presence.
+- Pure core: `core.backgroundActivity(sessionDir, now)` → `{active:bool, count, kind}` from newest
+  mtime in the subagents tree (a small FX `dirNewestMtime`/`countActive`).
+- UI: a small green ⚙/⟳ badge on the tile when active; tooltip = N running. Read on the existing refresh
+  tick.
+
+### DR3 — Checkpoint / rewind timeline (with mandatory 2nd confirm) — effort **M/L**
+A breakdown of "where we are and where we can rewind to," living in the detail tab strip and
+**replacing Timeline and/or Decisions** (Adam: "either or both ... the features for that living in
+there work best" — **OPEN UI DECISION, resolve when building**: leaning fold Timeline → a richer
+**Rewind** tab since a checkpoint timeline *is* a timeline; keep Decisions). **Verified data source:**
+`file-history-snapshot` lines in the session transcript — messageId-keyed restore points carrying
+`snapshot.trackedFileBackups: {<path>: {backupFileName, version, backupTime}}` (confirmed live, e.g.
+sms-bot `main.ts` → `2ea853440de356f5@v1`). Shepherd READS this timeline (which user-messages have
+restore points + which files each touched); the rewind ACTION types `/rewind` into the session (Adam
+runs the VS Code ext, where `/rewind` is a slash command).
+- Pure core: `core.checkpointTimeline(events)` → ordered `{messageId, ts, files:[…], filesChanged}`
+  restore points; map each to its user message/prompt snippet for labels.
+- **HARD REQUIREMENT — every rewind takes a SECOND CONFIRMATION** before any `/rewind` is sent ("so we
+  don't accidentally click it and it eats dirt"). A click arms; an explicit confirm fires. Caveat to
+  surface in UI: checkpoints track Write/Edit/NotebookEdit only — **bash-made changes aren't reverted**.
+
+### DR4 — Run scoring + regression trend — effort **M**  ✅ SHIPPED + DEPLOYED 2026-06-18
+> Detail-panel **Score** button → `run score: N/100` + a ⚠ regression flag + a mini sparkline, from the
+> audit ledger. Pure `core.runScore` (100 minus weighted penalties: error 18 / deny 6 / loop 12 / respawn
+> 14; cc-config `score.weights`) + `core.scoreTrend` (per-session scores over time; regression = last
+> `window` non-increasing AND drop ≥ `drop`). `a=="score"` handler logs a `run_score` ledger event +
+> pushes `window.ccScore`; cleared on selection change. +15 tests; live-verified (76 for 1 err+1 deny).
+> Follow-on (the spec's LLM-as-judge): a "deep score" that pastes a rubric prompt via the Improve/paste
+> path for a qualitative read; a fleet-wide score trend in the 📊 insights overlay.
+> <!-- original DR4 spec below -->
+### DR4 — (spec) Run scoring + regression trend — effort **M**
+Score an agent run's quality and trend it over time (Langfuse Experiments / LLM-as-a-Judge, adapted).
+Reuse the existing **Improve/paste LLM path** (no API keys, no network) for an on-demand "score this
+run" against a rubric; persist the score in the **audit ledger**; chart the trend per project / per
+agent-profile so you can see if an agent is getting better or worse, and flag regressions.
+- Pure core: rubric prompt builder + `core.scoreTrend(ledger, {scope})` (per project/profile, with a
+  simple regression flag on a downward run of N). Ledger gains a `run_score` event type.
+- UI: a "Score" action on a finished session/detail; a small trend sparkline in insights/history.
+
+### DR5 — Dollars after the fleet token line — effort **S**  ✅ SHIPPED + DEPLOYED 2026-06-18
+> `~$X est.` after "Fleet: N tokens · N out" — `core.PRICING` (Opus 4.x 5/25, Sonnet 4.6 3/15, Haiku 4.5
+> 1/5, Fable 5 10/50 $/Mtok; cache-write = 5m rate 1.25× input, cache-read 0.1×) + `core.priceFamily` /
+> `priceFor` (cc-config `pricing.<family>` override) / `estimateCost` (Anthropic families only;
+> gateway/local skipped) → `fleet.costUsd`/`costPriced` in the usage payload → footer pill, tooltip notes
+> it's an est. (flat subscription). +11 tests; live-verified ($32.75 sample). Follow-on: per-tile /
+> per-project $ in the detail panel; budget-alert rules.
+> <!-- original DR5 spec below -->
+### DR5 — (spec) Dollars after the fleet token line — effort **S**
+Add a **$ estimate after the "Fleet: N tokens · N out" footer**. A hand-editable per-model price table
+(input/output/cache $/Mtok) → dollar estimate for the fleet headline (and optionally per-tile / per
+project in the detail panel). Honest: Anthropic subscription cost is flat, so label it "est. API-equiv
+$" ; for gateway/local it's the real metered cost. Optional follow-on (not required by Adam now):
+budget-alert rules via the existing rule engine; per-project/per-task cost attribution.
+- Pure core: `core.priceTable` (config `pricing.<model>` overrides) + `core.estimateCost(usage, model)`.
+
+### DR6 — Per-session cost/quality model auto-routing — effort **M**
+Optionally auto-pick the model by task difficulty/cost (cheap → Haiku, hard → Opus). **Per-session,
+opt-in, OFF by default everywhere** — Adam: "configurable on a by-session basis ... only run that on
+one session at a time until I trust it." A session-level toggle + a heuristic (task length/keywords, or
+a quick classify); on a routed/queued feed it sets the model via the existing provider/model profiles +
+`/model`. Never fleet-wide unless explicitly turned on per session.
+- Pure core: `core.suggestModel(task, policy)` (heuristic, pure + tested); per-session `autoModel` flag
+  in session state, never a global default.
+
+### DR7 — A/B fork-to-compare as an INVOKED SKILL — effort **L** (handle carefully)
+"Build both pathways, keep the best." Adam's constraints: **never silent / always operator-aware**,
+implemented as an **explicitly-invoked skill** (not an automation), with the **performative comparison
+at the END**. The skill spawns the same task into 2+ sessions (variant prompt and/or model — builds on
+DR4 scoring + the SDK fork concept), lets them run visibly as normal tiles, then runs a deliberate
+side-by-side comparison/scoring step and helps you keep the winner. Lowest priority; design the
+compare/keep step before building. Reuses templates ({{vars}}), provider profiles, and DR4 scoring.
 
 ## Candidate features — cross-project mining backlog
 

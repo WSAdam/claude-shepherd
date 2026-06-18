@@ -1974,6 +1974,39 @@ function M.transcriptSnippet(text, maxLen)
   return nil
 end
 
+-- DR1 drill-in: up to `n` most-recent assistant text snippets from a transcript tail,
+-- chronological (oldest->newest), each whitespace-collapsed + truncated. Used when you
+-- click a subagent row to "see what it's working on". Pure (reuses the json decoder).
+function M.transcriptRecent(text, n, maxLen)
+  n = tonumber(n) or 12; maxLen = tonumber(maxLen) or 200
+  if not text or #text == 0 then return {} end
+  local lines = {}
+  for line in (text .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
+  local newest = {}
+  for i = #lines, 1, -1 do
+    if #newest >= n then break end
+    local line = lines[i]
+    if line:find("^%s*{") then
+      local okj, obj = pcall(function() return M.json.decode(line) end)
+      if okj and type(obj) == "table" and obj.type == "assistant"
+         and obj.message and type(obj.message.content) == "table" then
+        for _, c in ipairs(obj.message.content) do
+          if #newest < n and type(c) == "table" and c.type == "text" and c.text and #c.text > 0 then
+            local t = c.text:gsub("%s+", " "):gsub("^ +", ""):gsub(" +$", "")
+            if #t > 0 then
+              if #t > maxLen then t = t:sub(1, maxLen - 1) .. "\226\128\166" end
+              newest[#newest + 1] = t
+            end
+          end
+        end
+      end
+    end
+  end
+  local out = {}                       -- reverse newest-first -> chronological
+  for i = #newest, 1, -1 do out[#out + 1] = newest[i] end
+  return out
+end
+
 -- Detect a session frozen on an API error. When a turn aborts on an API error (e.g.
 -- ECONNRESET) WITHOUT firing a Stop hook, the session sits in "working" forever; Claude
 -- Code records the failure as a { type = "system", subtype = "api_error" } transcript
@@ -2002,6 +2035,38 @@ function M.transcriptError(text)
     end
   end
   return nil
+end
+
+-- Stale-"done" self-heal (symmetric to transcriptError's working->error override).
+-- A tile's status is hook-driven: "done" is set by a Stop hook (or an idle
+-- Notification) and nothing flips it back until the next *working* hook fires. In
+-- Auto mode -- or whenever UserPromptSubmit / Pre/PostToolUse is missed (a text-only
+-- reply fires no tool hooks; remote-control / auto-continued prompts can skip
+-- UserPromptSubmit) -- the session resumes work but the tile keeps showing "Ready
+-- for you". Detect resumption from the transcript tail: the model only writes
+-- `assistant` lines while working, so a NEWEST assistant line timestamped AFTER the
+-- status was last written (`updatedEpoch`, when Stop recorded "done") means the turn
+-- restarted -> override done -> working. Keyed on assistant lines so IDE file-open
+-- injections (user lines) and file-history snapshots never false-trigger; a
+-- genuinely-done turn's own final assistant line is <= updatedEpoch (Stop fires after
+-- it). `slack` (default 2s) absorbs same-second jitter. Pure (reuses isoToEpoch).
+function M.transcriptResumed(text, updatedEpoch, slack)
+  updatedEpoch = tonumber(updatedEpoch)
+  if not text or #text == 0 or not updatedEpoch then return false end
+  slack = tonumber(slack) or 2
+  local lines = {}
+  for line in (text .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
+  for i = #lines, 1, -1 do
+    local line = lines[i]
+    if line:find("^%s*{") then
+      local okj, obj = pcall(function() return M.json.decode(line) end)
+      if okj and type(obj) == "table" and obj.type == "assistant" and obj.timestamp then
+        local ts = M.isoToEpoch(obj.timestamp)
+        return (ts ~= nil) and (ts > updatedEpoch + slack) or false
+      end
+    end
+  end
+  return false
 end
 
 -- Classify an error message into a coarse CAUSE (L5 error-reason taxonomy): pure
@@ -3844,6 +3909,18 @@ end
 --         box while the terminal window stays local (Phase 2); claudeBin is the
 --         locally-resolved absolute claude path (ignored for ssh -- the remote
 --         box resolves its own).
+-- The `open(1)` argv tail for a VS Code / Cursor spawn. A brand-new project folder
+-- (spec.coldStart) pops VS Code's Workspace Trust modal, which steals focus and
+-- swallows the extension keystrokes that should start the session -- so for a cold
+-- start we add `--disable-workspace-trust` to skip it for this launch. Pure.
+function M.vscodeOpenArgs(spec)
+  spec = spec or {}
+  local args = { "-na", spec.app, "--args" }
+  if spec.coldStart then args[#args + 1] = "--disable-workspace-trust" end
+  args[#args + 1] = spec.project
+  return args
+end
+
 function M.spawnSpec(editor, project, task, opts)
   opts = opts or {}
   editor = tostring(editor or ""):lower()
@@ -3908,7 +3985,7 @@ function M.spawnSpec(editor, project, task, opts)
     local app = (editor == "cursor") and "Cursor" or "Visual Studio Code"
     if not isSsh and not hasEnv and opts.vscodeFlavor ~= "terminal" then
       return { kind = "vscode", editor = editor, app = app, project = project,
-               flavor = "extension", task = task }
+               flavor = "extension", task = task, coldStart = opts.isNew == true }
     end
     local post
     if isSsh then
@@ -5606,12 +5683,22 @@ M.CLI_TOOLS = {
 -- is an ABSOLUTE path -- resolveBin returns the bare name when nothing is found, so
 -- a non-"/"-prefixed value means missing. Missing tools surface their fallback
 -- instead of a path. Pure.
+-- The install rule, owned HERE as the single source of truth: a tool counts as
+-- installed iff its resolved value is an ABSOLUTE path. Pure, so it can't touch the
+-- filesystem -- a caller that resolves via PATH (FX.cliToolStatus) pre-filters to
+-- absolute paths that ALSO exist (hs.fs.attributes) before passing the map in. That
+-- existence layer sits ON TOP of this rule; it doesn't replace it, so this predicate
+-- stays authoritative for any caller (incl. ones that pass a raw resolveBin map).
+function M.isInstalledPath(p)
+  return type(p) == "string" and p:sub(1, 1) == "/"
+end
+
 function M.cliToolCards(resolved)
   resolved = type(resolved) == "table" and resolved or {}
   local out = {}
   for _, t in ipairs(M.CLI_TOOLS) do
     local path = resolved[t.bin]
-    local installed = type(path) == "string" and path:sub(1, 1) == "/"
+    local installed = M.isInstalledPath(path)
     out[#out + 1] = {
       name = t.name, bin = t.bin, role = t.role,
       required = t.required == true, optional = t.optional == true,
@@ -6505,6 +6592,7 @@ M.DETAIL_TABS = {
   { id = "decisions", label = "Decisions" },
   { id = "usage",     label = "Usage" },
   { id = "changes",   label = "Changes" },
+  { id = "subagents", label = "Agents" },
   { id = "queue",     label = "Queue" },
 }
 M.DETAIL_TAB_DEFAULT = "activity"
@@ -6874,6 +6962,274 @@ function M.newestAutoApprove(events, sid)
     end
   end
   return newest
+end
+
+-- ============================================================================
+-- ============================================================================
+-- DR4: run quality scoring + regression trend, computed from the audit ledger
+-- (the empirical-scoring direction). `runScore` is a 0-100 heuristic for one
+-- session: starts at 100 and subtracts for the rough edges (api errors, denied
+-- tools, loop episodes, forced respawns). `scoreTrend` scores each session over
+-- time and flags a downward run. Weights hand-tunable via cc-config `score.weights`.
+-- Pure (no clock, no IO). A deeper LLM-as-a-judge pass can reuse the paste path.
+-- ============================================================================
+function M.runScore(events, sid, opts)
+  opts = opts or {}
+  local w = type(opts.weights) == "table" and opts.weights or {}
+  local W = { error = tonumber(w.error) or 18, deny = tonumber(w.deny) or 6,
+              loop = tonumber(w.loop) or 12, respawn = tonumber(w.respawn) or 14 }
+  local n = { error = 0, deny = 0, loop = 0, respawn = 0, allow = 0, events = 0 }
+  for _, e in ipairs(type(events) == "table" and events or {}) do
+    if type(e) == "table" and (sid == nil or e.session_id == sid) then
+      n.events = n.events + 1
+      local t = e.type
+      if t == "error" then n.error = n.error + 1
+      elseif t == "loop" then n.loop = n.loop + 1
+      elseif t == "auto_respawn" then n.respawn = n.respawn + 1
+      elseif t == "decision" then
+        if e.outcome == "deny" then n.deny = n.deny + 1
+        elseif e.outcome == "allow" then n.allow = n.allow + 1 end
+      end
+    end
+  end
+  local score = 100 - n.error * W.error - n.deny * W.deny - n.loop * W.loop - n.respawn * W.respawn
+  if score < 0 then score = 0 elseif score > 100 then score = 100 end
+  return { score = score, factors = n, hadData = n.events > 0 }
+end
+
+-- Per-session run scores oldest->newest (by each session's latest event ts) + a
+-- regression flag: the last `window` (default 3) scores are non-increasing AND the
+-- drop across that window is >= `drop` (default 12). Pure.
+function M.scoreTrend(events, opts)
+  opts = opts or {}
+  local window = tonumber(opts.window) or 3
+  local drop = tonumber(opts.drop) or 12
+  local bySid, lastTs = {}, {}
+  for _, e in ipairs(type(events) == "table" and events or {}) do
+    if type(e) == "table" and e.session_id and e.session_id ~= "" then
+      local sid = e.session_id
+      bySid[sid] = bySid[sid] or {}
+      bySid[sid][#bySid[sid] + 1] = e
+      local ts = tonumber(e.ts) or 0
+      if not lastTs[sid] or ts > lastTs[sid] then lastTs[sid] = ts end
+    end
+  end
+  local series = {}
+  for sid, evs in pairs(bySid) do
+    local r = M.runScore(evs, sid, opts)
+    series[#series + 1] = { sid = sid, score = r.score, ts = lastTs[sid] or 0 }
+  end
+  table.sort(series, function(a, b) return (a.ts or 0) < (b.ts or 0) end)
+  local regression = false
+  if #series >= window then
+    regression = true
+    local startIdx = #series - window + 1
+    for i = startIdx + 1, #series do
+      if series[i].score > series[i - 1].score then regression = false; break end
+    end
+    if regression and (series[startIdx].score - series[#series].score) < drop then regression = false end
+  end
+  return { series = series, regression = regression }
+end
+
+-- ============================================================================
+-- DR5: dollar estimate for the fleet token footer. Default Anthropic API LIST
+-- prices in $ per MILLION tokens (cache-write = the 5-minute-TTL rate, 1.25x input;
+-- cache-read ≈ 0.1x input). Subscription cost is flat, so this is an "est. API-
+-- equivalent" figure; gateway/local models have unknown pricing and are skipped.
+-- Hand-tunable via cc-config `pricing.<family>`. Source: Anthropic pricing
+-- (Opus 4.x 5/25, Sonnet 4.6 3/15, Haiku 4.5 1/5, Fable 5 10/50), 2026-06-18.
+-- ============================================================================
+M.PRICING = {
+  opus   = { input = 5.0,  output = 25.0, cacheWrite = 6.25, cacheRead = 0.50 },
+  sonnet = { input = 3.0,  output = 15.0, cacheWrite = 3.75, cacheRead = 0.30 },
+  haiku  = { input = 1.0,  output = 5.0,  cacheWrite = 1.25, cacheRead = 0.10 },
+  fable  = { input = 10.0, output = 50.0, cacheWrite = 12.5, cacheRead = 1.00 },
+}
+
+-- Map a model id to its price FAMILY (opus/sonnet/haiku/fable), or nil for a
+-- non-Anthropic / unknown model (gateway/local pricing is unknown). Pure.
+function M.priceFamily(model)
+  local m = tostring(model or ""):lower()
+  if m:find("opus", 1, true) then return "opus" end
+  if m:find("sonnet", 1, true) then return "sonnet" end
+  if m:find("haiku", 1, true) then return "haiku" end
+  if m:find("fable", 1, true) or m:find("mythos", 1, true) then return "fable" end
+  return nil
+end
+
+-- The price entry for a model: cc-config `pricing.<family>` overrides merged over
+-- the default, or nil for an unpriced model. Pure.
+function M.priceFor(model, pricing)
+  local fam = M.priceFamily(model)
+  if not fam then return nil end
+  local base = M.PRICING[fam]
+  local over = type(pricing) == "table" and pricing[fam] or nil
+  if type(over) ~= "table" then return base end
+  return {
+    input      = tonumber(over.input) or base.input,
+    output     = tonumber(over.output) or base.output,
+    cacheWrite = tonumber(over.cacheWrite) or base.cacheWrite,
+    cacheRead  = tonumber(over.cacheRead) or base.cacheRead,
+  }
+end
+
+-- Estimate $ for a per-model usage map { <model> = {input, output, cacheRead,
+-- cacheCreate} }. Prices Anthropic families only -> { usd, priced (any matched),
+-- unpriced = {model,…} }. Pure.
+function M.estimateCost(byModel, pricing)
+  local usd, priced, unpriced = 0, false, {}
+  for model, u in pairs(type(byModel) == "table" and byModel or {}) do
+    local p = type(u) == "table" and M.priceFor(model, pricing) or nil
+    if p then
+      priced = true
+      usd = usd
+        + (tonumber(u.input) or 0)       / 1e6 * p.input
+        + (tonumber(u.output) or 0)      / 1e6 * p.output
+        + (tonumber(u.cacheCreate) or 0) / 1e6 * p.cacheWrite
+        + (tonumber(u.cacheRead) or 0)   / 1e6 * p.cacheRead
+    elseif type(u) == "table" then
+      unpriced[#unpriced + 1] = tostring(model)
+    end
+  end
+  return { usd = usd, priced = priced, unpriced = unpriced }
+end
+
+-- ============================================================================
+-- Custom in-app screen lock: salted-hash password. NEVER stores plaintext. The
+-- hasher (hs.hash.SHA256 in prod, a fake in tests) is injected so the salt+compare
+-- logic is pure and testable; the FX layer owns the real hash + cc-lock.json IO.
+-- ============================================================================
+
+-- The exact string that gets hashed: salt + ":" + password. Pure.
+function M.lockSaltedInput(salt, pw)
+  return tostring(salt or "") .. ":" .. tostring(pw or "")
+end
+
+-- Build a stored record { salt, hash } for a new password. nil if no hasher. Pure.
+function M.lockRecord(salt, pw, hasher)
+  if type(hasher) ~= "function" then return nil end
+  return { salt = tostring(salt or ""), hash = hasher(M.lockSaltedInput(salt, pw)) }
+end
+
+-- Verify a typed `input` against a stored { salt, hash } record. Pure.
+function M.lockVerify(record, input, hasher)
+  if type(record) ~= "table" or not record.hash or type(hasher) ~= "function" then return false end
+  return hasher(M.lockSaltedInput(record.salt, input)) == record.hash
+end
+
+-- DR1/DR2: Subagent fan-out trace + background-activity indicator.
+-- Claude Code writes one transcript per spawned subagent BESIDE the session
+-- transcript: …/projects/<ENC>/<sessionUuid>/subagents/agent-<id>.jsonl (the
+-- first line carries `agentId` + a human-ish `slug` derived from the agent's
+-- first prompt, e.g. "do-a-full-scan-sunny-panda"), plus per-Workflow fleets
+-- under …/subagents/workflows/wf_<id>/agent-*.jsonl. These pure helpers
+-- structure FX-provided file descriptors; the FX layer owns the directory read.
+-- ============================================================================
+
+-- The subagents directory for a session, derived from its transcript_path
+-- (…/<sessionUuid>.jsonl -> …/<sessionUuid>/subagents). nil without a path.
+function M.subagentsDir(transcriptPath)
+  if type(transcriptPath) ~= "string" then return nil end
+  local base = transcriptPath:match("^(.*)%.jsonl$")
+  if not base or base == "" then return nil end
+  return base .. "/subagents"
+end
+
+-- Parse a subagent transcript's FIRST line -> { agentId, slug }. nil for
+-- non-JSON / no agentId. The slug is a readable label Claude Code derives from
+-- the agent's first prompt.
+function M.subagentMeta(firstLine)
+  if type(firstLine) ~= "string" or not firstLine:find("^%s*{") then return nil end
+  local okj, obj = pcall(function() return M.json.decode(firstLine) end)
+  if not okj or type(obj) ~= "table" then return nil end
+  local id = obj.agentId or obj.agent_id
+  if not id or tostring(id) == "" then return nil end
+  local slug = obj.slug
+  return { agentId = tostring(id), slug = (type(slug) == "string" and slug ~= "") and slug or nil }
+end
+
+-- A display label from a slug ("can-you-review-if-swirling-otter" -> "can you
+-- review if swirling otter"); falls back to a short agentId. Pure.
+function M.subagentLabel(slug, agentId)
+  if type(slug) == "string" and slug ~= "" then
+    return (slug:gsub("%-+", " "))
+  end
+  local id = tostring(agentId or "")
+  return id ~= "" and ("agent " .. id:sub(1, 8)) or "subagent"
+end
+
+-- Validate a subagent file name supplied by the client before it's joined onto the
+-- session's subagents dir (the drill-in security boundary): agent-<id>.jsonl, or one
+-- workflows/wf_<id>/agent-<id>.jsonl level. Rejects traversal / absolute paths. Pure.
+function M.subagentNameOk(name)
+  if type(name) ~= "string" or name == "" then return false end
+  if name:find("%.%.") or name:find("^/") then return false end
+  if name:match("^agent%-%w+%.jsonl$") then return true end
+  if name:match("^workflows/wf[_%-][%w_%-]+/agent%-%w+%.jsonl$") then return true end
+  return false
+end
+
+-- Structure FX-provided subagent file descriptors into a fan-out tree.
+-- `files` = list of { name, mtime, firstLine?, tail? } where `name` is the path
+-- RELATIVE to the subagents dir (workflow agents look like
+-- "workflows/wf_<id>/agent-<x>.jsonl"). opts.activeWindow (default 45s): an
+-- mtime within now-window => "running". Returns { agents = { {agentId, slug,
+-- label, kind, wfId?, mtime, running, lastLine} (newest first) }, count,
+-- runningCount, active, workflows = { wfId -> {running, count} } }.
+function M.subagentTree(files, now, opts)
+  opts = opts or {}
+  now = tonumber(now) or 0
+  local win = tonumber(opts.activeWindow) or 45
+  local out = { agents = {}, count = 0, runningCount = 0, active = false, workflows = {} }
+  for _, f in ipairs(type(files) == "table" and files or {}) do
+    local name = type(f) == "table" and f.name
+    if type(name) == "string" and name:match("agent%-[^/]+%.jsonl$") then
+      local wfId = name:match("workflows/(wf[_%-][%w_%-]+)/")
+      local meta = f.firstLine and M.subagentMeta(f.firstLine) or nil
+      local agentId = (meta and meta.agentId) or name:match("(agent%-%w+)%.jsonl$") or name
+      local slug = meta and meta.slug
+      local mtime = tonumber(f.mtime) or 0
+      local running = (now > 0) and (now - mtime <= win) or false
+      local lastLine = f.tail and M.transcriptSnippet(f.tail, opts.snippetLen or 120) or nil
+      out.agents[#out.agents + 1] = {
+        agentId = agentId, slug = slug, label = M.subagentLabel(slug, agentId),
+        kind = wfId and "workflow" or "agent", wfId = wfId, name = name,
+        mtime = mtime, running = running, lastLine = lastLine,
+      }
+      out.count = out.count + 1
+      if running then out.runningCount = out.runningCount + 1; out.active = true end
+      if wfId then
+        local w = out.workflows[wfId] or { running = false, count = 0 }
+        w.count = w.count + 1
+        if running then w.running = true end
+        out.workflows[wfId] = w
+      end
+    end
+  end
+  table.sort(out.agents, function(a, b) return (a.mtime or 0) > (b.mtime or 0) end)
+  return out
+end
+
+-- DR2: cheap background-activity check for the hot tile loop. Any subagent file
+-- touched within the window => background work is running (a Workflow fleet or a
+-- delegated subagent). Independent of full-tree parsing so it can run every tick.
+function M.backgroundActivity(files, now, opts)
+  opts = opts or {}
+  now = tonumber(now) or 0
+  local win = tonumber(opts.activeWindow) or 45
+  local count, newest = 0, 0
+  for _, f in ipairs(type(files) == "table" and files or {}) do
+    local name = type(f) == "table" and f.name
+    if type(name) == "string" and name:match("agent%-[^/]+%.jsonl$") then
+      local mtime = tonumber(f.mtime) or 0
+      if now > 0 and now - mtime <= win then
+        count = count + 1
+        if mtime > newest then newest = mtime end
+      end
+    end
+  end
+  return { active = count > 0, count = count, newest = newest }
 end
 
 return M

@@ -382,6 +382,48 @@ function FX.fileSize(path)
   return size
 end
 
+-- DR1/DR2: scan a session's subagents/ dir into descriptors for core.subagentTree /
+-- core.backgroundActivity. Claude Code writes one transcript per delegated subagent
+-- (agent-<id>.jsonl, first line carries agentId + slug) and per-Workflow fleets under
+-- workflows/wf_<id>/. withContent=false (the hot per-tile badge path) returns just
+-- {name, mtime}; withContent=true (on-demand, detail panel) also reads each file's
+-- first line + tail. Recurses ONE level into workflows/wf_*/. Self-gates: a missing
+-- dir (FX.readDir pcall-fails) yields {}.
+local SUBAGENT_TAIL_BYTES = 8192
+function FX.subagentScan(dir, withContent)
+  local out = {}
+  if not dir then return out end
+  local function addFile(relName, abs)
+    local a = hs.fs.attributes(abs)
+    if not a or a.mode ~= "file" then return end
+    local rec = { name = relName, mtime = a.modification or 0 }
+    if withContent then
+      local f = io.open(abs, "r")
+      if f then rec.firstLine = f:read("*l"); f:close() end
+      rec.tail = FX.readTail(abs, SUBAGENT_TAIL_BYTES)
+    end
+    out[#out + 1] = rec
+  end
+  for _, name in ipairs(FX.readDir(dir)) do
+    if name:match("^agent%-.*%.jsonl$") then
+      addFile(name, dir .. "/" .. name)
+    elseif name == "workflows" then
+      local wdir = dir .. "/workflows"
+      for _, wf in ipairs(FX.readDir(wdir)) do
+        if wf:match("^wf[_%-]") then
+          local wfdir = wdir .. "/" .. wf
+          for _, fn in ipairs(FX.readDir(wfdir)) do
+            if fn:match("^agent%-.*%.jsonl$") then
+              addFile("workflows/" .. wf .. "/" .. fn, wfdir .. "/" .. fn)
+            end
+          end
+        end
+      end
+    end
+  end
+  return out
+end
+
 -- Token-usage aggregation across active sessions' transcripts. ZERO API cost: pure
 -- local file reads, incremental per tick. Builds per-session + fleet cumulative
 -- totals + a 5h/7d Anthropic-only window approximation, pushes them to the webview.
@@ -461,6 +503,11 @@ function FX.computeUsage()
     end
   end
   for p in pairs(usageState) do if not seen[p] then usageState[p] = nil end end  -- drop ended sessions
+  -- DR5: est. API-equivalent $ from the fleet's per-model usage (Anthropic families
+  -- only; gateway/local models are unpriced -> not added). Hand-tunable: pricing.<family>.
+  local cost = core.estimateCost(fleet.byModel, core.config(cfg, "pricing", nil))
+  fleet.costUsd = cost.usd
+  fleet.costPriced = cost.priced
   lastUsagePayload = { fleet = fleet, perSession = perSession, window = { w5h = w5h, w7d = w7d },
     official = lastOfficialUsage, ts = now }
   if wv then
@@ -2047,7 +2094,7 @@ local function spawnEditorWindow(spec)
     if stopped > 0 then print("[cc-orch] superseding previous spawn ladder (" .. stopped .. " pending beat(s) cancelled)") end
     spawnSeqHandles = nil
   end
-  local t = hs.task.new("/usr/bin/open", nil, { "-na", spec.app, "--args", spec.project })
+  local t = hs.task.new("/usr/bin/open", nil, core.vscodeOpenArgs(spec))
   if t then t:start() end
   hs.alert.show("Claude Shepherd: opening " .. spec.app .. " — starting claude (best-effort)")
   local proj = spec.project
@@ -2057,27 +2104,50 @@ local function spawnEditorWindow(spec)
   -- column/pcall semantics); handles are captured into spawnSeqHandles so the
   -- next spawn can cancel a superseded ladder (the block above).
   if spec.flavor == "extension" then
-    -- DEFAULT: open the Claude Code EXTENSION (the panel the operator works
-    -- in -- resume the recent session / new-session UI) via its quick-launch
-    -- shortcut ⌘Esc. An optional initial task is typed into the Claude input
-    -- the shortcut focuses.
-    local beats = {
-      { delay = 3.0, fn = function()
-          -- The just-opened window may not be titled yet: activating the app on
-          -- a title miss IS the desired behavior (the keystrokes must land in it).
-          focusProject(name, proj, nil, true)
-        end },
-      { delay = 1.0, fn = function()
-          print("[cc-orch] vscode: opening the Claude Code extension (⌘Esc)")
-          hs.eventtap.keyStroke({ "cmd" }, "escape")
-        end },
-    }
-    if spec.task and #spec.task > 0 then
-      beats[#beats + 1] = { delay = 2.0, fn = function()
-        print("[cc-orch] vscode: typing initial task into the Claude input")
-        hs.eventtap.keyStrokes(spec.task)
+    -- DEFAULT: open the Claude Code EXTENSION via its ⌘Esc quick-launch; an optional
+    -- initial task is typed into the focused Claude input. A brand-NEW project folder
+    -- (spec.coldStart) is the fragile case (field-reported): the window cold-starts on
+    -- the Welcome tab and the Workspace Trust handoff steals focus, so a bare ⌘Esc +
+    -- char-typing misses and NO session starts. For cold starts we wait longer, re-assert
+    -- the window focus + the deterministic ⌘1->⌘Esc chat dance (same as a nudge) right
+    -- before delivery, and PASTE the task (reliable on a busy window vs char-by-char).
+    local cold = spec.coldStart == true
+    local beats = { { delay = cold and 5.0 or 3.0, fn = function()
+      -- A just-opened window may not be titled yet: activating on a title miss IS desired.
+      focusProject(name, proj, nil, true)
+    end } }
+    if cold then
+      beats[#beats + 1] = { delay = 1.5, fn = function()
+        focusProject(name, proj, nil, true)
+        hs.eventtap.keyStroke(FOCUS_EDITOR_KEY[1], FOCUS_EDITOR_KEY[2])  -- ⌘1 first => deterministic ⌘Esc
       end }
-      beats[#beats + 1] = { delay = 0.3, fn = function()
+      beats[#beats + 1] = { delay = 0.4, fn = function()
+        print("[cc-orch] vscode: opening the Claude Code extension (⌘Esc, cold-start)")
+        hs.eventtap.keyStroke(FOCUS_CHAT_KEY[1], FOCUS_CHAT_KEY[2])
+      end }
+    else
+      beats[#beats + 1] = { delay = 1.0, fn = function()
+        print("[cc-orch] vscode: opening the Claude Code extension (⌘Esc)")
+        hs.eventtap.keyStroke({ "cmd" }, "escape")
+      end }
+    end
+    if spec.task and #spec.task > 0 then
+      beats[#beats + 1] = { delay = cold and 2.5 or 2.0, fn = function()
+        if cold then
+          -- the Welcome tab / trust handoff may have stolen focus -- re-assert it + the chat input
+          focusProject(name, proj, nil, true)
+          hs.eventtap.keyStroke(FOCUS_EDITOR_KEY[1], FOCUS_EDITOR_KEY[2])
+          hs.eventtap.keyStroke(FOCUS_CHAT_KEY[1], FOCUS_CHAT_KEY[2])
+        end
+        print("[cc-orch] vscode: typing initial task into the Claude input")
+        if cold then
+          hs.pasteboard.setContents(spec.task)
+          hs.eventtap.keyStroke({ "cmd" }, "v")
+        else
+          hs.eventtap.keyStrokes(spec.task)
+        end
+      end }
+      beats[#beats + 1] = { delay = cold and 0.6 or 0.3, fn = function()
         hs.eventtap.keyStroke({}, "return")
         print("[cc-orch] vscode: initial task submitted")
       end }
@@ -2147,7 +2217,7 @@ end
 -- Spawn a new Claude session, editor-aware (F3-F5). The editor comes from the
 -- caller (the modal's picker) or falls back to `spawn.editor` in config. Effective
 -- dry-run = the code default ORCH_DRY_RUN unless the user flips `spawn.live` on.
-function FX.spawnSession(editor, project, task, permissionMode, providerId, agentOpts)
+function FX.spawnSession(editor, project, task, permissionMode, providerId, agentOpts, isNew)
   local cfg = loadConfig()
   editor = (editor and editor ~= "") and editor or core.config(cfg, "spawn.editor", "terminal")
   -- Resolve the provider profile. "" is an EXPLICIT "(none — bare claude)" pick;
@@ -2165,6 +2235,7 @@ function FX.spawnSession(editor, project, task, permissionMode, providerId, agen
     ssh            = profile and type(profile.ssh) == "table" and profile.ssh or nil,
     claudeBin      = claudeBinPath(),  -- absolute path; nil keeps the bare word
     vscodeFlavor   = core.config(cfg, "spawn.vscodeFlavor", "extension"),  -- extension | terminal
+    isNew          = isNew == true,  -- brand-new project folder -> cold-start-robust spawn ladder
   }
   -- L1 "spawn from a saved agent": profile-derived launch flags (persona, MCP
   -- config, --agent, --add-dir knowledge, --plugin-dir). Absent -> byte-identical.
@@ -2310,7 +2381,10 @@ function FX.cliToolStatus()
   local resolved = {}
   for _, t in ipairs(core.CLI_TOOLS) do
     local p = resolveBin(t.bin)
-    if type(p) == "string" and p:sub(1, 1) == "/" and hs.fs.attributes(p) then
+    -- core.isInstalledPath owns the absolute-path rule; FX adds the on-disk existence
+    -- check that pure core can't do. The prefix gate must stay FIRST so hs.fs.attributes
+    -- never runs on a bare name (which would resolve relative to cwd and falsely succeed).
+    if core.isInstalledPath(p) and hs.fs.attributes(p) then
       resolved[t.bin] = p
     end
   end
@@ -2355,6 +2429,105 @@ end
 
 -- Single message bridge. JS posts JSON: {a=action, v=key, text=optional}.
 local controller = hs.webview.usercontent.new("cc")
+-- ============================================================================
+-- Custom in-app screen lock. Blocks ALL keyboard/mouse input behind a full-screen
+-- overlay until the user's password is typed -- while EVERY process keeps running
+-- (Claude sessions, the gate, remote control). This is deliberately NOT the macOS
+-- loginwindow: that would block Shepherd's own keystroke control of GUI sessions.
+-- It is therefore a SOFT lock -- a Hammerspoon reload or `killall Hammerspoon`
+-- releases it (the ultimate bail-out), and a ⌘⌥⌃⇧U chord force-unlocks so a typo can
+-- never lock you out. Password is a salted SHA-256 hash in cc-lock.json (never
+-- plaintext); the salt/compare logic is pure in cc-core.
+-- ============================================================================
+do  -- block-scope these locals so they don't count against the main chunk's 200-local cap
+local LOCK_FILE = os.getenv("CC_LOCK_FILE") or (os.getenv("HOME") .. "/.claude/cc-lock.json")
+local function lockHasher(s) return hs.hash.SHA256(s) end
+function FX.lockLoad()
+  local c = FX.readFile(LOCK_FILE); if not c then return nil end
+  local ok, rec = pcall(function() return core.json.decode(c) end)
+  if ok and type(rec) == "table" and rec.hash then return rec end
+  return nil
+end
+function FX.lockHas() return FX.lockLoad() ~= nil end
+function FX.lockSet(pw)
+  if type(pw) ~= "string" or pw == "" then return false end
+  local salt = (hs.host and hs.host.uuid and hs.host.uuid()) or tostring(os.time())
+  local rec = core.lockRecord(salt, pw, lockHasher)
+  if not rec then return false end
+  local f = io.open(LOCK_FILE, "w"); if not f then return false end
+  f:write(core.json.encode(rec)); f:close()
+  return true
+end
+function FX.lockCheck(input) return core.lockVerify(FX.lockLoad(), input, lockHasher) end
+
+local lockState = nil
+local function lockRelease()
+  if not lockState then return end
+  pcall(function() if lockState.tap then lockState.tap:stop() end end)
+  pcall(function() if lockState.rearm then lockState.rearm:stop() end end)
+  for _, c in ipairs(lockState.canvases or {}) do pcall(function() c:delete() end) end
+  lockState = nil
+  print("[cc-lock] 🔓 unlocked")
+end
+_G.__ccLockRelease = lockRelease  -- SSH/console bail-out: hs -c "_G.__ccLockRelease()"
+
+function FX.lockEngage()
+  if lockState or not FX.lockHas() then return end
+  local IDLE = "Locked — type your password, then press ⏎"
+  local canvases = {}
+  for _, scr in ipairs(hs.screen.allScreens()) do
+    local f = scr:fullFrame()
+    local c = hs.canvas.new({ x = f.x, y = f.y, w = f.w, h = f.h })
+    c:level(hs.canvas.windowLevels.screenSaver)
+    c:appendElements(
+      { type = "rectangle", action = "fill", fillColor = { red = 0.04, green = 0.04, blue = 0.06, alpha = 0.985 },
+        frame = { x = 0, y = 0, w = f.w, h = f.h } },
+      { type = "text", text = "🔒", textSize = 70, textAlignment = "center", textColor = { white = 0.92 },
+        frame = { x = 0, y = f.h / 2 - 110, w = f.w, h = 100 } },
+      { id = "msg", type = "text", text = IDLE, textSize = 18, textAlignment = "center", textColor = { white = 0.72 },
+        frame = { x = 0, y = f.h / 2 + 10, w = f.w, h = 40 } },
+      { type = "text", text = "force unlock: ⌘⌥⌃⇧U", textSize = 12, textAlignment = "center", textColor = { white = 0.32 },
+        frame = { x = 0, y = f.h - 56, w = f.w, h = 24 } }
+    )
+    c:show()
+    canvases[#canvases + 1] = c
+  end
+  local buf, map = "", hs.keycodes.map
+  local function setMsg(m) for _, c in ipairs(canvases) do pcall(function() c["msg"].text = m end) end end
+  local function showDots() setMsg(#buf > 0 and (string.rep("•", math.min(#buf, 28)) .. "   (⏎ to unlock)") or IDLE) end
+  local tap = hs.eventtap.new({
+    hs.eventtap.event.types.keyDown, hs.eventtap.event.types.keyUp, hs.eventtap.event.types.flagsChanged,
+    hs.eventtap.event.types.leftMouseDown, hs.eventtap.event.types.rightMouseDown,
+    hs.eventtap.event.types.otherMouseDown, hs.eventtap.event.types.leftMouseDragged,
+    hs.eventtap.event.types.rightMouseDragged, hs.eventtap.event.types.scrollWheel,
+  }, function(e)
+    if e:getType() ~= hs.eventtap.event.types.keyDown then return true end  -- swallow everything else
+    local key, flags = e:getKeyCode(), e:getFlags()
+    if flags.cmd and flags.alt and flags.ctrl and flags.shift and key == map.u then
+      lockRelease(); return true  -- guaranteed escape hatch (anti-lockout)
+    end
+    if key == map["return"] or key == map.padenter then
+      if FX.lockCheck(buf) then lockRelease() else buf = ""; setMsg("Wrong password — try again") end
+      return true
+    elseif key == map.delete then
+      buf = buf:sub(1, -2); showDots(); return true
+    end
+    local ch = e:getCharacters(true)
+    if type(ch) == "string" and #ch >= 1 and ch:byte(1) and ch:byte(1) >= 32 then
+      buf = buf .. ch; showDots()
+    end
+    return true
+  end)
+  tap:start()
+  -- Re-arm if macOS disables the tap (input must NEVER leak through while locked).
+  local rearm = hs.timer.doEvery(0.5, function()
+    if lockState and lockState.tap and not lockState.tap:isEnabled() then pcall(function() lockState.tap:start() end) end
+  end)
+  lockState = { canvases = canvases, tap = tap, rearm = rearm }
+  print("[cc-lock] 🔒 locked (" .. #canvases .. " screen(s))")
+end
+end  -- lock do-block
+
 local function handleBridgeMsg(msg)
   local okj, payload = pcall(hs.json.decode, msg.body)
   if not okj or not payload then
@@ -2382,6 +2555,20 @@ local function handleBridgeMsg(msg)
     if state ~= nil then
       pcall(function() wv:evaluateJavaScript("setCaffeine(" .. tostring(state) .. ")") end)
     end
+    return
+  end
+  if a == "lock" then
+    -- Custom in-app lock (NOT the macOS loginwindow -- see the lock block above). If a
+    -- password is set, engage the blocking overlay; otherwise ask the panel to open the
+    -- set-password modal so there's a password to unlock with.
+    if FX.lockHas() then FX.lockEngage()
+    else pcall(function() wv:evaluateJavaScript("openLockSet()") end) end
+    return
+  end
+  if a == "lock-set" then
+    local ok = FX.lockSet(tostring(payload.v or ""))
+    pcall(function() hs.alert.show("Claude Shepherd: "
+      .. (ok and "🔒 lock password set — click 🔒 to lock" or "couldn't set lock password")) end)
     return
   end
   if a == "kitty-remote" then
@@ -2777,7 +2964,7 @@ local function handleBridgeMsg(msg)
       end
     end
     FX.spawnSession(editor, dir, task, payload.permMode and tostring(payload.permMode) or nil,
-      payload.provider and tostring(payload.provider) or nil, agentOpts)
+      payload.provider and tostring(payload.provider) or nil, agentOpts, mode == "new")
     return
   end
   if a == "queue-add" then
@@ -3343,6 +3530,40 @@ local function handleBridgeMsg(msg)
       .. jsString(key) .. ", " .. hs.json.encode(events) .. ")") end)
     return
   end
+  if a == "detail-subagents" then
+    -- DR1 Agents tab: the selected session's spawned subagents (delegated agents +
+    -- Workflow fleets), read from its subagents/ tree. Selection/tab-triggered, never
+    -- on the 1s tick. Replies null when there's no tree to show (the JS notes it).
+    local key = tostring(payload.v or "")
+    local it = byKey[key]
+    local dir = it and it.transcript_path and not it.remote and core.subagentsDir(it.transcript_path)
+    if not dir then
+      pcall(function() wv:evaluateJavaScript("window.ccSubagents(" .. jsString(key) .. ", null)") end)
+      return
+    end
+    local tree = core.subagentTree(FX.subagentScan(dir, true), FX.now(),
+      { activeWindow = tonumber(core.config(loadConfig(), "subagents.activeWindow", 45)) or 45 })
+    pcall(function() wv:evaluateJavaScript("window.ccSubagents("
+      .. jsString(key) .. ", " .. hs.json.encode(tree) .. ")") end)
+    return
+  end
+  if a == "detail-subagent" then
+    -- DR1 drill-in: one subagent's recent activity ("what it's working on"). `name`
+    -- (payload.text) MUST pass core.subagentNameOk (agent-<id>.jsonl, optionally one
+    -- workflows/wf_<id>/ level) before it's joined onto the session's subagents dir --
+    -- so a traversal/arbitrary path can never be read.
+    local key = tostring(payload.v or "")
+    local name = tostring(payload.text or "")
+    local it = byKey[key]
+    local dir = it and it.transcript_path and not it.remote and core.subagentsDir(it.transcript_path)
+    local function reply(lines)
+      pcall(function() wv:evaluateJavaScript("window.ccSubagentDetail("
+        .. jsString(key) .. ", " .. jsString(name) .. ", " .. hs.json.encode(lines or {}) .. ")") end)
+    end
+    if not (dir and core.subagentNameOk(name)) then reply({}); return end
+    reply(core.transcriptRecent(FX.readTail(dir .. "/" .. name, 16384), 14, 220))
+    return
+  end
   if a == "detail-changes" then
     -- L5 Changes tab: the selected session's working-tree status. Resolves the
     -- repo root (cached) and reads `git status --porcelain=v1 -z`; pure
@@ -3550,6 +3771,25 @@ local function handleBridgeMsg(msg)
         end
       end)
     end
+    return
+  end
+  if a == "score" then
+    -- DR4: heuristic run-quality score + regression trend for the selected session,
+    -- from the audit ledger (needs it on). Logs a run_score event + pushes a readout.
+    -- (A deeper LLM-as-judge pass would reuse the paste path; not auto-run here.)
+    local target = byKey[tostring(payload.v or "")]
+    if not target then return end
+    local res = FX.readLedger({})
+    local r = core.runScore(res.events, target.session_id)
+    local trend = core.scoreTrend(res.events, {})
+    if r.hadData then
+      ledgerFor(target, { type = "run_score", score = r.score, regression = trend.regression and true or false })
+    end
+    local scores = {}; for _, s in ipairs(trend.series) do scores[#scores + 1] = s.score end
+    local data = { score = r.score, hadData = r.hadData, factors = r.factors,
+                   regression = trend.regression and true or false, scores = scores }
+    pcall(function() wv:evaluateJavaScript("window.ccScore("
+      .. jsString(tostring(payload.v or "")) .. ", " .. hs.json.encode(data) .. ")") end)
     return
   end
   if a == "audit-review" then
@@ -4118,6 +4358,44 @@ local HTML = [[
            font-size:12px; padding:3px 8px; cursor:pointer; white-space:nowrap; }
   #caffeine:hover { background:#272a35; }
   #caffeine.active { background:#3a2f17; color:#f5b50a; border-color:#b9772a; }
+  /* Lock-screen button (sibling of Awake): close the lid locked, keep sessions running */
+  #lock { background:#21232c; color:#cfd2db; border:1px solid #2c2f3a; border-radius:8px;
+          font-size:12px; padding:3px 8px; cursor:pointer; white-space:nowrap; }
+  #lock:hover { background:#2a2330; color:#d9b3ff; border-color:#4a3f7a; }
+  /* Set-lock-password modal */
+  #lockset { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:30; align-items:center; justify-content:center; }
+  #lockset.show { display:flex; }
+  #lockset .lockset-box { background:#1b1d24; border:1px solid #2c2f3a; border-radius:12px; padding:18px 20px; width:340px; color:#e8e9ee; }
+  #lockset h3 { margin:0 0 8px; font-size:15px; }
+  #lockset p { font-size:11px; color:#8a8d99; margin:0 0 12px; line-height:1.45; }
+  #lockset code { background:#15161b; border:1px solid #2c2f3a; border-radius:4px; padding:0 4px; color:#cfd2db; }
+  #lockset input { width:100%; box-sizing:border-box; margin:5px 0; background:#15161b; color:#e8e9ee; border:1px solid #2c2f3a; border-radius:7px; padding:7px 9px; font-size:13px; }
+  #lockset-err { color:#ef6a6a; font-size:11px; min-height:14px; margin:4px 0; }
+  .lockset-foot { display:flex; gap:8px; justify-content:flex-end; margin-top:8px; }
+  .lockset-foot button { background:#21232c; color:#cfd2db; border:1px solid #2c2f3a; border-radius:8px; padding:6px 14px; font-size:13px; cursor:pointer; }
+  #lockset-save { color:#d9b3ff; border-color:#4a3f7a; }
+  /* DR4 run-score readout */
+  #d-score { display:none; gap:8px; align-items:center; flex-wrap:wrap; font-size:11px; margin:4px 0; }
+  .ds-score { font-weight:600; }
+  .ds-score.good { color:#5ad67f; } .ds-score.mid { color:#f5b50a; } .ds-score.bad { color:#ef6a6a; }
+  .ds-reg { color:#ef6a6a; font-size:10px; }
+  .ds-spark { display:inline-flex; align-items:flex-end; gap:1px; height:12px; }
+  .ds-spark > i { width:3px; background:#5b6cff; border-radius:1px; display:inline-block; }
+  .ds-bits { color:#8a8d99; }
+  .ds-dim { color:#5b5e6b; font-style:italic; }
+  /* DR1 Agents tab: subagent fan-out rows */
+  .sa-head { font-size:11px; color:#8a8d99; margin:2px 0 6px; }
+  .sa-row { display:flex; align-items:center; gap:6px; padding:5px 6px; border-radius:6px; cursor:pointer; }
+  .sa-row:hover, .sa-row.open { background:#1b1d24; }
+  .sa-dot { width:8px; height:8px; border-radius:50%; background:#3a3d49; flex:0 0 auto; }
+  .sa-dot.run { background:#5ad67f; animation:pulse 1.2s infinite; }
+  .sa-name { font-size:12px; color:#e8e9ee; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .sa-wf { font-size:9px; color:#9fb6d6; border:1px solid #34435a; border-radius:5px; padding:0 4px; white-space:nowrap; }
+  .sa-badge { font-size:9px; color:#5ad67f; margin-left:auto; flex:0 0 auto; }
+  .sa-doing { font-size:11px; color:#8a8d99; margin:0 0 4px 20px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .sa-doing.sa-idle { color:#5b5e6b; font-style:italic; }
+  .sa-detail { margin:0 0 9px 20px; }
+  .sa-detail .tl-pre { white-space:pre-wrap; word-break:break-word; }
   #settings-btn { background:#21232c; color:#cfd2db; border:1px solid #2c2f3a;
            border-radius:8px; font-size:13px; padding:3px 8px; cursor:pointer; }
 
@@ -4173,6 +4451,11 @@ local HTML = [[
   .pr.pr-draft  { color:#9aa0ad; border-color:#3a3d49; }
   .pr.pr-merged { color:#a98bff; border-color:#4a3f7a; }
   .pr.pr-closed { color:#d65a5a; border-color:#6b2f2f; }
+  /* DR2: background/workflow-active pill — green while subagents/workflows are running */
+  .bg-run { font-size:10px; margin-left:6px; padding:1px 6px; border-radius:8px;
+    color:#5ad67f; border:1px solid #2f6b43; background:#1c2a20; }
+  .bg-run .spin { display:inline-block; animation:spin 1.4s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
   .name { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .dot  { border-radius:50%; flex:0 0 auto; }
   .meta { font-size:11px; color:#8a8d99; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -4826,6 +5109,7 @@ local HTML = [[
     <span class="right">
       <button id="spawn" onclick="openNew()" title="Spawn a new Claude session">New</button>
       <button id="caffeine" onclick="toggleCaffeine()" title="Keep this Mac awake — pmset disablesleep (asks for your password)">☕ Sleep ok</button>
+      <button id="lock" onclick="lockMac()" title="Lock — block input until your password, while Claude sessions + remote control keep running (pair with Awake to close the lid locked)">🔒</button>
       <span id="menu-wrap">
         <button id="menu-btn" onclick="toggleMenu(event)" title="Views — search, insights, audit, notifications">☰<span id="notify-badge"></span></button>
         <div id="toolmenu">
@@ -4926,6 +5210,7 @@ local HTML = [[
       <div id="d-activity" onclick="toggleExpand('activity')"></div>
       <div id="d-prompt"></div>
       <div id="d-meta"></div>
+      <div id="d-score"></div>
       <div id="d-lineage" title="Respawn / clear / continue churn for this project since midnight (needs the audit ledger)."></div>
       <div id="d-plan"></div>
     </div>
@@ -4940,6 +5225,9 @@ local HTML = [[
     </div>
     <div class="d-panel" data-tab="changes">
       <div id="d-changes"></div>
+    </div>
+    <div class="d-panel" data-tab="subagents">
+      <div id="d-subagents"></div>
     </div>
     <div class="d-panel" data-tab="queue">
       <div id="queue-row">
@@ -4960,6 +5248,7 @@ local HTML = [[
       <button id="b-clear"   onclick="act('clear')">Clear</button>
       <button id="b-compact" onclick="act('compact')">Compact</button>
       <button id="b-improve" onclick="act('improve')" title="Pull this repo's un-applied leaderboard improvement insights and send them to this session as a review-first prompt (suggestions, not wholesale edits).">Improve</button>
+      <button id="b-score" onclick="act('score')" title="Run-quality score (0-100) for this session from the audit ledger — penalizes errors, denied tools, loops, and forced respawns — plus a ⚠ when recent sessions trend down. Needs the Audit log on.">Score</button>
       <button id="b-timeline" onclick="openSessionTimeline()" title="Show this session's recorded activity timeline (needs the ledger enabled).">📜 Timeline</button>
       <button id="b-export" onclick="exportSession()" title="Export this session: copy its transcript (.jsonl) + a meta.json (label, provider/model, lineage, activity counters) into ~/.claude/cc-exports and reveal it in Finder.">⤓ Export</button>
     </div>
@@ -5146,6 +5435,23 @@ local HTML = [[
     <div id="s-foot">
       <button id="s-save" onclick="saveSettings()">Save</button>
       <button onclick="closeSettings()">Cancel</button>
+    </div>
+  </div>
+
+  <div id="lockset">
+    <div class="lockset-box">
+      <h3>🔒 Set a lock password</h3>
+      <p>Locks input behind a full-screen overlay until this password is typed — while Claude
+         sessions + remote control keep running. Soft lock: a Hammerspoon reload or
+         <code>⌘⌥⌃⇧U</code> releases it (so a typo can't lock you out).</p>
+      <input id="lockpw1" type="password" placeholder="password" autocomplete="new-password">
+      <input id="lockpw2" type="password" placeholder="confirm password" autocomplete="new-password"
+             onkeydown="if(event.key==='Enter')saveLockSet()">
+      <div id="lockset-err"></div>
+      <div class="lockset-foot">
+        <button onclick="closeLockSet()">Cancel</button>
+        <button id="lockset-save" onclick="saveLockSet()">Set password</button>
+      </div>
     </div>
   </div>
 
@@ -5906,6 +6212,23 @@ local HTML = [[
       b.textContent = caffeineOn ? "☕ Awake" : "☕ Sleep ok";
     }
     function toggleCaffeine(){ send("caffeinate", (!caffeineOn).toString()); }
+    function lockMac(){ send("lock"); }   // Lua locks if a password is set, else calls openLockSet()
+    function openLockSet(){
+      document.getElementById("lockpw1").value = "";
+      document.getElementById("lockpw2").value = "";
+      document.getElementById("lockset-err").textContent = "";
+      document.getElementById("lockset").classList.add("show");
+      setTimeout(function(){ document.getElementById("lockpw1").focus(); }, 60);
+    }
+    function closeLockSet(){ document.getElementById("lockset").classList.remove("show"); }
+    function saveLockSet(){
+      var a = document.getElementById("lockpw1").value, b = document.getElementById("lockpw2").value;
+      var err = document.getElementById("lockset-err");
+      if(!a){ err.textContent = "Enter a password."; return; }
+      if(a !== b){ err.textContent = "Passwords don't match."; return; }
+      send("lock-set", a);
+      closeLockSet();
+    }
 
     // ---- Tile search (🔍): client-side filter over the live grid ------------
     // The filter is a JS twin of core.filterTiles (token-AND over the same fields),
@@ -6778,6 +7101,7 @@ local HTML = [[
         tplOpen = false; renderTemplates();
         TIMELINE = { key:null, events:null };       // L5: inline timeline is per-session, lazy
         CHANGES = { key:null, data:null }; CH_DIFFS = {}; CH_OPEN = {};  // git Changes: per-session
+        resetScoreReadout();   // DR4: clear the run-score readout on selection change
         closeTabMenu();
         loadTabState(key);          // restore this project's {selectedTab, unpinned}
       }
@@ -6883,6 +7207,12 @@ local HTML = [[
           send("detail-changes", selectedKey);          // ccDetailChanges repaints
         }
         renderDetailChanges();
+      } else if(detailTab === "subagents"){
+        if(SUBAGENTS.key !== selectedKey){
+          SUBAGENTS = { key: selectedKey, tree: null };  // pending (dedupes re-fetch)
+          send("detail-subagents", selectedKey);         // ccSubagents repaints
+        }
+        renderDetailSubagents();
       } else if(detailTab === "queue"){
         if(!queueListOpen){ var it2 = findItem(selectedKey); if(it2 && (it2.queue||0) > 0){ toggleQueueList(); } }
       }
@@ -6899,6 +7229,56 @@ local HTML = [[
       if(evs === null){ box.innerHTML = '<div class="tl-empty">Loading activity…</div>'; return; }  // fetch in flight
       if(!evs.length){ box.innerHTML = '<div class="tl-empty">No recorded activity for this session yet (the ledger is off, or this session has no id).</div>'; return; }
       box.innerHTML = '<pre class="tl-pre">' + esc(evs.map(narr).join("\n")) + '</pre>';
+    }
+
+    // ---- DR1 Agents tab: this session's subagent fan-out, clickable to drill in ----
+    var SUBAGENTS  = { key:null, tree:null };   // tree===null while a fetch is in flight
+    var SUB_OPEN   = {};   // agent name -> expanded
+    var SUB_DETAIL = {};   // agent name -> recent activity lines (fetched on expand)
+    window.ccSubagents = function(key, tree){
+      if(key !== selectedKey) return;                 // stale guard
+      SUBAGENTS = { key:key, tree:tree }; SUB_OPEN = {}; SUB_DETAIL = {};
+      renderDetailSubagents();
+    };
+    window.ccSubagentDetail = function(key, name, lines){
+      if(key !== selectedKey) return;
+      SUB_DETAIL[name] = lines || [];
+      renderDetailSubagents();
+    };
+    function toggleSubagent(el){
+      var name = el.getAttribute("data-name"); if(!name) return;
+      if(SUB_OPEN[name]){ delete SUB_OPEN[name]; }
+      else { SUB_OPEN[name] = true; if(SUB_DETAIL[name] === undefined){ send("detail-subagent", selectedKey, name); } }
+      renderDetailSubagents();
+    }
+    function renderDetailSubagents(){
+      var box = document.getElementById("d-subagents"); if(!box) return;
+      if(SUBAGENTS.key !== selectedKey){ box.innerHTML = ""; return; }   // stale guard
+      var tree = SUBAGENTS.tree;
+      if(tree === null){ box.innerHTML = '<div class="tl-empty">Loading subagents…</div>'; return; }
+      var agents = (tree && tree.agents) || [];
+      if(!agents.length){ box.innerHTML = '<div class="tl-empty">No subagents — this session hasn\'t delegated to a subagent or run a workflow.</div>'; return; }
+      var html = '<div class="sa-head">' + (tree.runningCount ? ('⚙ ' + tree.runningCount + ' running · ') : '')
+               + agents.length + ' subagent' + (agents.length === 1 ? '' : 's') + '</div>';
+      agents.forEach(function(ag){
+        var open = !!SUB_OPEN[ag.name];
+        html += '<div class="sa-row' + (open ? ' open' : '') + '" data-name="' + esc(ag.name || '') + '" onclick="toggleSubagent(this)">'
+              + '<span class="sa-dot' + (ag.running ? ' run' : '') + '"></span>'
+              + '<span class="sa-name">' + esc(ag.label || ag.agentId || 'subagent') + '</span>'
+              + (ag.wfId ? '<span class="sa-wf">' + esc(ag.wfId) + '</span>' : '')
+              + (ag.running ? '<span class="sa-badge">running</span>' : '')
+              + '</div>';
+        if(!open){
+          html += ag.lastLine ? '<div class="sa-doing">' + esc(ag.lastLine) + '</div>'
+                              : '<div class="sa-doing sa-idle">(no output captured yet)</div>';
+        } else {
+          var det = SUB_DETAIL[ag.name];
+          if(det === undefined){ html += '<div class="sa-detail"><div class="tl-empty">Loading activity…</div></div>'; }
+          else if(!det.length){ html += '<div class="sa-detail"><div class="tl-empty">No assistant output captured yet.</div></div>'; }
+          else { html += '<div class="sa-detail"><pre class="tl-pre">' + esc(det.join("\n")) + '</pre></div>'; }
+        }
+      });
+      box.innerHTML = html;
     }
 
     // ---- L5 Changes tab: per-session git working-tree status + per-file diff --
@@ -7015,6 +7395,35 @@ local HTML = [[
     // when a decision likely just landed) -- NEVER on the 1s refresh tick.
     var DECISIONS = { key: null, rows: null };
     function requestDecisions(key){ if(key) send("decision-log", key); if(key) send("plan", key); }
+    // DR4: run-quality score readout (filled on demand by the Score button).
+    window.ccScore = function(key, d){
+      if(key !== selectedKey) return;
+      var box = document.getElementById("d-score"); if(!box) return;
+      d = d || {};
+      if(!d.hadData){
+        box.innerHTML = '<span class="ds-dim">No ledger data to score — enable the Audit log (and arm the gate) first.</span>';
+        box.style.display = "flex"; return;
+      }
+      var f = d.factors || {}, bits = [];
+      if(f.error)   bits.push(f.error   + " error"   + (f.error>1?"s":""));
+      if(f.deny)    bits.push(f.deny    + " denied");
+      if(f.loop)    bits.push(f.loop    + " loop"    + (f.loop>1?"s":""));
+      if(f.respawn) bits.push(f.respawn + " respawn" + (f.respawn>1?"s":""));
+      var spark = "";
+      if(d.scores && d.scores.length > 1){
+        spark = '<span class="ds-spark">' + d.scores.map(function(s){
+          return '<i style="height:' + Math.max(2, Math.round(s/100*12)) + 'px" title="' + s + '"></i>';
+        }).join("") + '</span>';
+      }
+      var cls = d.score>=80 ? "good" : (d.score>=50 ? "mid" : "bad");
+      box.innerHTML = '<span class="ds-score ' + cls + '">run score: ' + d.score + '/100</span>'
+        + (d.regression ? '<span class="ds-reg">⚠ trending down</span>' : '')
+        + spark
+        + (bits.length ? '<span class="ds-bits">' + esc(bits.join(" · ")) + '</span>'
+                       : '<span class="ds-bits ds-dim">clean run</span>');
+      box.style.display = "flex";
+    };
+    function resetScoreReadout(){ var b = document.getElementById("d-score"); if(b){ b.style.display="none"; b.innerHTML=""; } }
     window.ccDecisions = function(key, rows){
       DECISIONS = { key: key, rows: rows };
       renderDecisions();
@@ -7354,6 +7763,10 @@ local HTML = [[
     function mkToolRow(t){
       var st = t.installed ? "connected" : (t.required ? "failed" : "unknown");
       var stLabel = t.installed ? "installed" : "missing";
+      // detail precedence: installed-path > fallback > required-not-found > not-installed.
+      // NB: fallback is checked BEFORE required, so a required tool that ALSO carried a
+      // fallback would read "falls back to …" rather than "required — not found". Latent
+      // today (jq is the only required tool and has no fallback); revisit if that changes.
       var detail = t.installed ? esc(t.path || "")
         : (t.fallback ? ("falls back to <span class=\"mk-cmd\">"+esc(t.fallback)+"</span>")
           : (t.required ? "required — not found" : "not installed"));
@@ -8890,8 +9303,16 @@ local HTML = [[
       if(!LAST_USAGE){ totEl.textContent = "Fleet: —"; winEl.innerHTML = ""; return; }
       var f = LAST_USAGE.fleet || {};
       // Headline excludes cache reads (the meaningful number); gross shown on hover.
-      totEl.textContent = "Fleet: " + fmtTok(f.real||0) + " tokens · " + fmtTok(f.output||0) + " out";
-      totEl.title = "excl. cache reads · gross " + fmtTok(f.total||0) + " (incl. cache)";
+      // DR5: est. API-equivalent $ (Anthropic models only; gateway/local are unpriced).
+      // Subscription cost is flat, so it's an estimate — labeled "est." with a tooltip.
+      var dollars = "";
+      if(f.costPriced && (f.costUsd||0) > 0){
+        var c = f.costUsd;
+        dollars = " · ~$" + (c >= 100 ? c.toFixed(0) : c.toFixed(2)) + " est.";
+      }
+      totEl.textContent = "Fleet: " + fmtTok(f.real||0) + " tokens · " + fmtTok(f.output||0) + " out" + dollars;
+      totEl.title = "excl. cache reads · gross " + fmtTok(f.total||0) + " (incl. cache)"
+                  + (dollars ? "\nest. API-equivalent cost at Anthropic list prices (your plan is flat-rate); gateway/local models excluded" : "");
       var o = LAST_OFFICIAL;
       if(o && o.five_hour){
         // OFFICIAL plan window — matches claude.ai/settings/usage exactly.
@@ -8987,9 +9408,18 @@ local HTML = [[
            + '<span class="label">'+(age ? '<span class="age">'+esc(age)+'</span> ' : '')+label+'</span>'
            + riskBadge(it)
            + prBadgeHtml(it)
+           + bgBadge(it)
            + (meta ? '<span class="meta">'+esc(meta)+'</span>' : '')
            + ctxBarHtml(it)
            + '</div>';
+    }
+    // DR2: green pill while background work runs (delegated subagents or a Workflow
+    // fleet). Count from the server-side subagents/ mtime scan (it.bg_count).
+    function bgBadge(it){
+      if(!it.bg_active) return "";
+      var n = it.bg_count || 0;
+      return '<span class="bg-run" title="'+n+' background agent'+(n===1?'':'s')
+           + ' running (subagent / workflow)"><span class="spin">⚙</span> '+n+'</span>';
     }
     // L5 PR/MR badge: server-computed text (it.pr.badge) + a click that opens the
     // PR url. NEITHER the url NOR the tile key is interpolated into the handler --
@@ -9593,6 +10023,16 @@ function refresh()
         it.context_frac = core.contextFractionFor(cfg, u.model or it.model, it.context_tokens)
       end
     end
+    -- Stale-"done" self-heal: a hook-driven "done" can be stale (Auto mode, or a missed
+    -- UserPromptSubmit/PreToolUse -- e.g. a text-only reply fires no tool hooks) while the
+    -- session is actually mid-turn. If the transcript shows assistant output newer than
+    -- when "done" was recorded (it.updated), the turn resumed -> flip to working so the
+    -- tile stops lying. Done FIRST so a resumed session flows through the working-keyed
+    -- logic below (error/loop/hung) this same tick. Skips stale/remote (tail is nil there).
+    if tail and it.status == "done" and not it.stale
+       and core.transcriptResumed(tail, it.updated, core.config(cfg, "status.resumeSlack", 2)) then
+      it.status = "working"
+    end
     -- Frozen-on-API-error detection: a `working` session whose latest transcript event
     -- is an api_error aborted WITHOUT a Stop hook -- it's stuck "working" but actually
     -- stopped. Override the status to "error" so it renders distinctly + offers Continue.
@@ -9616,6 +10056,17 @@ function refresh()
       end
     else
       loopAlerted[it.key] = nil
+    end
+
+    -- DR2: background / workflow-active badge. A session is running background work
+    -- when files in its subagents/ tree (delegated subagents or a Workflow fleet) were
+    -- touched within the window. Cheap mtime-only scan; self-gates (no dir -> inactive).
+    if it.transcript_path and not it.remote and not it.stale then
+      local bg = core.backgroundActivity(
+        FX.subagentScan(core.subagentsDir(it.transcript_path), false),
+        now, { activeWindow = tonumber(core.config(cfg, "subagents.activeWindow", 45)) or 45 })
+      it.bg_active = bg.active
+      it.bg_count = bg.count
     end
 
     -- L5 OS-native banner on a fresh rising edge into approval/done (off by default;

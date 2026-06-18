@@ -134,6 +134,54 @@ network, no multi-user, no secrets — it reads session status off the local fil
   dashboard → mirror in the panel JS if it affects rendering (and note the twin) → `make test`
   (smoke included) → deploy.
 
+## State (2026-06-18) — deep-research adds (DR1/DR2/DR4/DR5) + lock + two bug fixes
+
+A forward-looking deep-research pass (Claude Code's newest native features + AgentOps/Langfuse
+patterns) produced a 7-item backlog DR1–DR7 in todos.md; this batch shipped four of them plus a
+custom lock and two field bug fixes. All pure logic + tests in cc-core; all deployed + live-verified.
+
+- **🐞 Stale-"done" self-heal** — status is hook-driven, so in Auto mode a tile could sit on "done"
+  while actually working (a text-only reply fires no tool hooks; an auto-continued prompt skipped
+  UserPromptSubmit — confirmed live: `since` never advanced through a whole turn). `core.transcriptResumed
+  (tail, updatedEpoch, slack)` flips done→working when the NEWEST `assistant` transcript line is newer
+  than `it.updated` (keyed on assistant lines so IDE file-open *user* lines + snapshots never false-trip;
+  a done turn's own final line is ≤ updated since Stop fires after it). Wired in refresh BEFORE the
+  working→error override (symmetric self-heal). `status.resumeSlack` (default 2s).
+- **🐞 New-project spawn delivers the initial prompt** — a brand-new folder cold-starts on the Welcome
+  tab behind the Workspace-Trust modal, so the old ladder typed the task into the void (no session).
+  Threaded `isNew` (modal `mode=="new"` → `FX.spawnSession` → `opts.isNew` → `spec.coldStart`);
+  `core.vscodeOpenArgs(spec)` adds `--disable-workspace-trust`; the extension ladder, on cold start,
+  waits longer (5/1.5/2.5s), re-asserts focus + the deterministic ⌘1→⌘Esc chat dance, and **pastes** the
+  task (reliable vs char-typing). Existing-folder spawns unchanged.
+- **🔒 Custom in-app lock** (header 🔒, right of ☕) — full-screen `hs.canvas` overlay (all screens,
+  screenSaver level) + an `hs.eventtap` that swallows ALL keyboard/mouse and captures the typed password;
+  ⏎ verifies a salted SHA-256 hash in cc-lock.json (pure `core.lockSaltedInput`/`lockRecord`/`lockVerify`;
+  FX uses `hs.hash.SHA256`). NOT the macOS loginwindow (that blocks Shepherd's keystroke control). Soft
+  lock: `⌘⌥⌃⇧U` chord + `_G.__ccLockRelease()` (SSH) + reload all release it. **The whole lock block is
+  wrapped in a `do … end`** — its locals (LOCK_FILE/lockHasher/lockState/lockRelease) would otherwise
+  blow the main chunk's 200-local cap; only `FX.lockEngage` (table member) is reachable from the handler.
+- **DR1 — Subagent fan-out (Agents tab)** — Adam's sessions write `…/<sessionUuid>/subagents/agent-*.jsonl`
+  (first line carries `agentId`+`slug`) + `subagents/workflows/wf_*/`, NOT in-transcript `Task`/`isSidechain`
+  lines (0 of those exist locally — verified). `core.subagentsDir`/`subagentTree`/`subagentMeta`/
+  `subagentLabel` + `FX.subagentScan(dir, withContent)`; detail `Agents` tab (in `core.DETAIL_TABS`) lists
+  agents grouped by run, click to drill (`detail-subagent` → `core.transcriptRecent`, path-validated by
+  `core.subagentNameOk`).
+- **DR2 — Background-work badge** — green `⚙ N` tile pill via `core.backgroundActivity` over the same
+  `subagents/` mtimes (`subagents.activeWindow` default 45s); cheap mtime-only scan on the refresh tick.
+- **DR4 — Run score** — detail **Score** button → `core.runScore` (100 minus error 18 / deny 6 / loop 12 /
+  respawn 14; `score.weights`) + `core.scoreTrend` (regression = last `window` non-increasing AND drop ≥
+  `drop`); logs a `run_score` ledger event; `#d-score` readout cleared on selection change.
+- **DR5 — Dollars** — `~$X est.` in the fleet footer via `core.PRICING` + `priceFamily`/`priceFor`/
+  `estimateCost` (Anthropic families only; gateway/local unpriced). `fleet.costUsd`/`costPriced` in the
+  usage payload; `pricing.<family>` override.
+- **Review-triage of a4bef0c** (CLI-tools inventory): extracted `core.isInstalledPath` as the single
+  absolute-path install rule; `FX.cliToolStatus` calls it + keeps `hs.fs.attributes` (the existence check
+  core can't do). Skipped the injectable-stat + node-headless-test asks (against the codebase's
+  thin-FX/grep-pin idiom) — documented the `mkToolRow` fallback-before-required edge instead.
+
+Invariant reaffirmed: **every new module-level group of locals in claude-dashboard.lua risks the 200-local
+main-chunk cap** — wrap helper clusters in a `do … end` and expose only table members (see the lock block).
+
 ## State (2026-06-16) — Stream Deck glance: context bar + caffeine key
 
 - **Context-fill bar** on each session key: `sdButtonImage` reads `item.context_frac` (per tick),

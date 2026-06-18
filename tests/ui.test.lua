@@ -594,6 +594,24 @@ do
   check("fscan-pin: scan command built by core (quoted + redirect)", src:find("core.folderScanShellCommand(argv, outFile)", 1, true) ~= nil)
   check("fscan-pin: scan reads the temp file on exit", src:find("FX.readFile(outFile)", 1, true) ~= nil)
   check("fscan-pin: scan has a timeout backstop", src:find("folder scan timed out", 1, true) ~= nil)
+  -- New-project spawn cold-start fix: the VS Code open goes through core.vscodeOpenArgs (so a
+  -- cold start gets --disable-workspace-trust), and the extension ladder, on a cold start,
+  -- pastes the task + re-asserts the deterministic ⌘1->⌘Esc chat dance before submitting.
+  check("spawn-pin: VS Code open uses core.vscodeOpenArgs(spec)",
+        src:find("core.vscodeOpenArgs(spec)", 1, true) ~= nil)
+  check("spawn-pin: cold-start ladder branches on spec.coldStart",
+        src:find("local cold = spec.coldStart == true", 1, true) ~= nil)
+  check("spawn-pin: cold-start pastes the task (not char-typing)",
+        src:find("hs.pasteboard.setContents(spec.task)", 1, true) ~= nil)
+  check("spawn-pin: new-project flag threaded from the modal (mode == new)",
+        src:find("agentOpts, mode == \"new\")", 1, true) ~= nil)
+  -- CLI-tools inventory (review of a4bef0c): the absolute-path install rule lives ONCE in
+  -- core.isInstalledPath; FX.cliToolStatus calls it and keeps hs.fs.attributes on top (the
+  -- on-disk existence check pure core can't do). The prefix gate must precede the stat.
+  check("clitool-pin: FX.cliToolStatus uses the shared core.isInstalledPath rule",
+        src:find("core.isInstalledPath(p) and hs.fs.attributes(p)", 1, true) ~= nil)
+  check("clitool-pin: no duplicate inline '/'-prefix check remains in FX.cliToolStatus",
+        src:find('p:sub(1, 1) == "/" and hs.fs.attributes(p)', 1, true) == nil)
   check("fscan-pin: no direct-exec scan remains", src:find("hs.task.new(argv[1], function(_, stdout)", 1, true) == nil)
   -- Toolbar collapse: the ☰ drawer must still wire all five views (search / fleet-search /
   -- insights / audit / notifications) -- a dropped menuPick branch silently buries a view.
@@ -750,7 +768,7 @@ do
 
   -- spawnSession threads agentOpts -> spawnExtraFlags (via opts.*)
   check("l1-pin: spawnSession takes agentOpts",
-        src:find("function FX.spawnSession(editor, project, task, permissionMode, providerId, agentOpts)", 1, true) ~= nil)
+        src:find("function FX.spawnSession(editor, project, task, permissionMode, providerId, agentOpts, isNew)", 1, true) ~= nil)
   check("l1-pin: opts.appendSystemPrompt threaded", src:find("opts.appendSystemPrompt = agentOpts.appendSystemPrompt", 1, true) ~= nil)
   check("l1-pin: opts.mcpConfigPath threaded", src:find("opts.mcpConfigPath = agentOpts.mcpConfigPath", 1, true) ~= nil)
 
@@ -761,7 +779,7 @@ do
   check("l1-pin: mcp CRUD action", src:find('a == "mcp%-save" or a == "mcp%-delete"') ~= nil)
   check("l1-pin: spawn resolves a saved agent", src:find("core.resolveAgent(profile, { mcpState = FX.readMcp() })", 1, true) ~= nil)
   check("l1-pin: spawn writes the mcp-config", src:find("FX.writeMcpConfig(profile.name, res.mcpConfig)", 1, true) ~= nil)
-  check("l1-pin: spawn passes agentOpts", src:find("payload.provider and tostring(payload.provider) or nil, agentOpts)", 1, true) ~= nil)
+  check("l1-pin: spawn passes agentOpts", src:find("payload.provider and tostring(payload.provider) or nil, agentOpts, mode == \"new\")", 1, true) ~= nil)
   check("l1-pin: spawn_agent ledger event", src:find('type = "spawn_agent"', 1, true) ~= nil)
   check("l1-pin: open-new feeds agentState", src:find("agentState = { agents = core.agentList(FX.readAgents())", 1, true) ~= nil)
 
