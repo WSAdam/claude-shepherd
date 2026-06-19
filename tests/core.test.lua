@@ -5612,5 +5612,34 @@ do
   check("appearance: reduceMotion true", core.resolveAppearance({ reduceMotion = true }).reduceMotion == true)
 end
 
+-- ---- Review-fix: cold-start poll bound + appearanceCss completeness + junk coercion ----
+do
+  -- coldStartStep: the bounded open/wait/giveup decision (pure; the ladder executes it)
+  eq("coldStartStep: window seen -> open", core.coldStartStep(true, 0, 25), "open")
+  eq("coldStartStep: seen overrides elapsed", core.coldStartStep(true, 999, 25), "open")
+  eq("coldStartStep: not seen, under cap -> wait", core.coldStartStep(false, 5, 25), "wait")
+  eq("coldStartStep: not seen, at cap -> giveup (no infinite poll)", core.coldStartStep(false, 25, 25), "giveup")
+  eq("coldStartStep: not seen, over cap -> giveup", core.coldStartStep(false, 99, 25), "giveup")
+  eq("coldStartStep: nil elapsed safe -> wait", core.coldStartStep(false, nil, 25), "wait")
+  eq("coldStartStep: nil waitMax -> default-25 cap", core.coldStartStep(false, 25, nil), "giveup")
+
+  -- appearanceCss COMPLETENESS: every APPEARANCE_VARS token is emitted (catches a token
+  -- added to the list but missed in the render loop). The SSR side single-sources the JS
+  -- twin's setProperty loop (both iterate APPEARANCE_VARS), so this guards both.
+  local css0 = core.appearanceCss(core.resolveAppearance({}))
+  local missingVar = nil
+  for _, pair in ipairs(core.APPEARANCE_VARS) do
+    if not css0:find(pair[2] .. ":", 1, true) then missingVar = pair[2]; break end
+  end
+  check("appearanceCss: emits EVERY APPEARANCE_VARS token (" .. #core.APPEARANCE_VARS .. " of them)", missingVar == nil)
+
+  -- junk coercion: a hand-edited cc-config.json non-numeric scale/tileMin must fall back,
+  -- never crash the appearance render (appearanceClamp = tonumber-or-default before compare).
+  eq("appearance: junk scale string -> 1.0", core.resolveAppearance({ scale = "abc" }).scale, 1.0)
+  eq("appearance: table scale -> 1.0", core.resolveAppearance({ scale = {} }).scale, 1.0)
+  eq("appearance: boolean scale -> 1.0", core.resolveAppearance({ scale = true }).scale, 1.0)
+  eq("appearance: junk tileMin string -> 170", core.resolveAppearance({ tileMin = "big" }).tileMin, 170)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

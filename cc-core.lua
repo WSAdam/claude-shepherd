@@ -7545,9 +7545,12 @@ end
 -- (accent / palette / status colors) plus SIZING (ui scale, density, tile width).
 -- Pure here: resolveAppearance merges defaults<-theme<-overrides and validates;
 -- appearanceCss renders the resolved :root block injected as __APPEARANCE_CSS__.
--- A small JS twin (applyAppearance) mirrors this for instant live-preview -- it
--- consumes the SAME injected APPEARANCE_THEMES/DEFAULTS so the two can't drift (the
--- contextBand<->barLevel pattern). KEEP this token list == the JS twin's list.
+-- A small JS twin (applyAppearance) mirrors this for instant live-preview. The DATA
+-- can't drift -- the twin iterates the SAME injected APPEARANCE (vars/defaults/themes/
+-- fonts), so APPEARANCE_VARS below is the single source for both the SSR appearanceCss
+-- AND the JS setProperty loop (there is NO second token list). Only the small merge
+-- logic (defaults<-theme<-overrides) is duplicated in the twin -- keep THAT in sync
+-- (the contextBand<->barLevel pattern), and the live-preview iteration is pinned in ui.test.
 
 -- Ordered {stateKey, cssVar} -- also the emit order in appearanceCss.
 M.APPEARANCE_VARS = {
@@ -7768,6 +7771,20 @@ function M.appearanceCss(resolved)
   parts[#parts + 1] = "--font:" .. (M.APPEARANCE_FONTS[resolved.font] or M.APPEARANCE_FONTS.system) .. ";"
   parts[#parts + 1] = "}"
   return table.concat(parts)
+end
+
+-- ---- Cold-start spawn ladder: the bounded poll decision (pure) --------------
+-- The new-project extension ladder polls until the project window appears, then
+-- opens the Claude panel. This is the regression-prone branch (an unbounded poll
+-- would hang the spawn on a window that never title-matches). Pure so the bound +
+-- give-up are unit-tested; the dashboard ladder executes the returned action.
+--   windowSeen -> "open"  (the window matched -> open the panel after the buffer)
+--   not seen, elapsed < waitMax -> "wait"   (poll another tick)
+--   not seen, elapsed >= waitMax -> "giveup" (open best-effort + deliver, don't hang)
+function M.coldStartStep(windowSeen, elapsed, waitMax)
+  if windowSeen then return "open" end
+  if (tonumber(elapsed) or 0) < (tonumber(waitMax) or 25) then return "wait" end
+  return "giveup"
 end
 
 return M

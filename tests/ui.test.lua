@@ -606,6 +606,10 @@ do
   check("spawn-pin: cold-start polls for the window (focusProject false) before opening the panel",
         src:find("focusProject(name, proj, nil, false)", 1, true) ~= nil
         and src:find("cold-start: window seen after", 1, true) ~= nil)
+  check("spawn-pin: cold-start poll is BOUNDED via pure core.coldStartStep (giveup, can't hang)",
+        src:find("core.coldStartStep(focusProject", 1, true) ~= nil
+        and src:find('step == "wait"', 1, true) ~= nil      -- ladder reads the helper's decision
+        and src:find("never matched after", 1, true) ~= nil)  -- + the give-up log on the bounded path
   check("spawn-pin: cold-start activation buffer is tunable (spec.coldWindowWait / coldActivate, Save-safe)",
         src:find("spec.coldWindowWait", 1, true) ~= nil and src:find("spec.coldActivate", 1, true) ~= nil)
   check("spawn-pin: cold-start pastes the task (not char-typing)",
@@ -1659,6 +1663,11 @@ do
   check("appearance b2: accent quick-swatches (dedicated, not gated by the custom palette)",
         src:find("function renderAccentSwatches(active)", 1, true) ~= nil
         and src:find("function pickAccent(hex)", 1, true) ~= nil and src:find('id="a-accent-sw"', 1, true) ~= nil)
+  -- Review: the live-preview twin must iterate the INJECTED APPEARANCE.vars (== core.APPEARANCE_VARS),
+  -- NOT a hand-written copy -- so the token list can't drift between the SSR appearanceCss and JS.
+  check("appearance b2: live-preview iterates the injected APPEARANCE.vars (single-sourced, no twin list)",
+        src:find("(APPEARANCE.vars||[]).forEach", 1, true) ~= nil
+        and src:find("vars = core.APPEARANCE_VARS", 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

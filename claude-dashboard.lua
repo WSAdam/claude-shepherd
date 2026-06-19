@@ -2223,13 +2223,16 @@ local function spawnEditorWindow(spec)
       end
       local elapsed = 0
       local function poll()
-        if focusProject(name, proj, nil, false) then  -- window appeared + got focused
+        -- focusProject(...,false) both reports a real title match AND focuses on hit;
+        -- core.coldStartStep (pure, tested) owns the bounded open/wait/giveup decision.
+        local step = core.coldStartStep(focusProject(name, proj, nil, false), elapsed, waitMax)
+        if step == "open" then  -- window appeared + got focused
           print(string.format("[cc-orch] vscode cold-start: window seen after ~%.0fs; waiting %ss for the extension to activate", elapsed, activate))
           sched(activate, deliver)
-        elseif elapsed < waitMax then
+        elseif step == "wait" then
           elapsed = elapsed + 1.0
           sched(1.0, poll)
-        else
+        else  -- giveup: never title-matched within waitMax -> open best-effort, don't hang
           print("[cc-orch] vscode cold-start: window '" .. tostring(name) .. "' never matched after " .. waitMax .. "s; opening the extension best-effort")
           sched(0, deliver)
         end

@@ -245,7 +245,9 @@ colors / size / font, live. Plus a field-reported new-project spawn bug fixed.
   extension to activate, then opens the panel **once** (`⌘Esc` toggles, so never double-fire) and delivers
   the task. Tunable + Save-safe: `spawn.coldWindowWaitSeconds` (25) / `spawn.coldActivateSeconds` (6). Linear
   chain (one pending timer) tracked in `spawnSeqHandles` for supersession; `after` keeps timers GC-safe.
-  **Still best-effort by nature** — extension-activation time is unobservable — so it needs a live
+  The bounded open/wait/giveup decision is the **pure, tested `core.coldStartStep(windowSeen, elapsed,
+  waitMax)`** — a window that never title-matches gives up after `coldWindowWaitSeconds` (best-effort open),
+  it can't infinite-poll. **Still best-effort by nature** — extension-activation time is unobservable — so it needs a live
   new-project spawn to confirm per-machine; bump `coldActivateSeconds` if a heavy setup needs longer. A
   no-task new project opens the panel ready (a tile appears once a first prompt is sent).
 

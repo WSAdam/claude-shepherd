@@ -41,6 +41,19 @@ project window actually appears (`focusProject` matches a real title), waits a t
 then opens the panel **once** (`⌘Esc` toggles — never double-fired) and delivers the task. Tunable +
 Save-safe via `spawn.coldWindowWaitSeconds` (25) / `spawn.coldActivateSeconds` (6).
 
+### Hardened (leaderboard-review triage of `afbd797`)
+
+- Extracted the cold-start poll's bounded open/wait/giveup decision into pure `core.coldStartStep`
+  (unit-tested with synthetic state) — the give-up path (a window that never title-matches) is now
+  behaviorally tested + pinned, not just the success path.
+- Added an `appearanceCss` **completeness** test: asserts every one of the 27 `APPEARANCE_VARS`
+  tokens is emitted, so a token added to the list but missed in the render loop fails loudly.
+- Pinned that the JS live-preview iterates the **injected** `APPEARANCE.vars` (`== core.APPEARANCE_VARS`),
+  not a hand-written copy — there is no second token list to drift (clarified the cc-core comment that
+  implied otherwise). Added junk-coercion cases (non-numeric `scale`/`tileMin` fall back, never crash).
+- Declined: trimming the 16 themes — they're the requested feature, and each is just a token delta the
+  resolver handles uniformly. Security review: clean (all injected appearance values validated/clamped).
+
 ## 2026-06-18 (panel) — worklist delete + multi-line add, CLI-tools inventory
 
 Two follow-ups on the day-old panel surfaces. All new logic is pure `cc-core` under unit test;
