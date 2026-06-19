@@ -4,6 +4,43 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-19 — Appearance system (themeable UI) + new-project cold-start fix
+
+A full visual refresh built on a new design-token layer, plus a fix for a field-reported
+new-project spawn bug. Pure logic in `cc-core` under unit test; the panel JS gets source-level
+wiring tripwires and a headless-browser render check.
+
+### Added — Appearance tab (themeable UI)
+
+The ~800-line panel stylesheet was converted to a **`:root` design-token layer** (`--bg`/`--surface`/
+`--border`/`--text…`, status `--st-*`, `--accent*`, sizing `--ui-scale`/`--tile-min`/`--gap`/`--pad`/
+`--font`); the Refined-Midnight defaults are byte-identical to the old hand-tuned palette. A new
+**Appearance tab** in a **tabbed** Settings overlay lets you customize it live:
+
+- **16 built-in themes** — Refined Midnight, Modern Slate, Minimal Flat, Nord, High Contrast, Light,
+  Dracula, Tokyo Night, Gruvbox, Solarized Dark, Solarized Light, Rosé Pine, Catppuccin, Gruvbox Light,
+  Monokai, OLED Black. Each is a token delta over the defaults; Slate/Flat also change tile *shape*.
+- **Accent quick-swatches** (10 presets + custom), **custom palette** (bg/surface/border/text/muted),
+  **custom status colors** (the tile dots), **font** (System/Rounded/Mono/Serif), **sizing** (UI scale,
+  tile width, compact density), and a **reduce-motion** toggle.
+- **Live preview** (changes apply instantly via the JS `applyAppearance` twin of `core.resolveAppearance`/
+  `appearanceCss`), **Save** persists to `cc-config.json` (`appearance` block), **Cancel** reverts, **Reset**.
+
+Pure: `core.APPEARANCE_DEFAULTS`/`APPEARANCE_THEMES`/`APPEARANCE_VARS`/`APPEARANCE_FONTS`,
+`core.resolveAppearance` (merge + validate + clamp), `core.appearanceCss` (the injected `:root` block).
+Injected like `__INIT_THEME__` (a 2nd `<style id="appearance-root">`); the body carries `data-look`
+(shape rules) + a density/`calm` class. Layout (cards/bar/contrast/dots) stays a separate `hs.settings`
+axis. The JS `COLORS` detail-dot map is now single-sourced to the `--st-*` tokens.
+
+### Fixed — 🐞 "Start new project" didn't open Claude (cold-start spawn)
+
+A brand-new VS Code window takes a variable, often long time on a heavy setup to paint AND activate the
+Claude extension; the old ladder fired `⌘Esc` at a fixed ~7s into the still-loading Welcome tab and
+missed (logs confirmed it). The extension cold-start ladder is now **adaptive**: it polls until the
+project window actually appears (`focusProject` matches a real title), waits a tunable activation buffer,
+then opens the panel **once** (`⌘Esc` toggles — never double-fired) and delivers the task. Tunable +
+Save-safe via `spawn.coldWindowWaitSeconds` (25) / `spawn.coldActivateSeconds` (6).
+
 ## 2026-06-18 (panel) — worklist delete + multi-line add, CLI-tools inventory
 
 Two follow-ups on the day-old panel surfaces. All new logic is pure `cc-core` under unit test;

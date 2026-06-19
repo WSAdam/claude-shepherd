@@ -5523,5 +5523,94 @@ do
         jp:find("Variant A", 1, true) ~= nil and jp:find("Variant B", 1, true) ~= nil and jp:find("WINNING variant", 1, true) ~= nil)
 end
 
+-- ---- Appearance: token themes + overrides + CSS render ---------------------
+do
+  -- defaults / empty -> Refined Midnight
+  local d = core.resolveAppearance({})
+  eq("appearance: empty -> midnight theme", d.theme, "midnight")
+  eq("appearance: midnight bg default", d.tokens.bg, "#15161b")
+  eq("appearance: midnight scheme dark", d.scheme, "dark")
+  eq("appearance: midnight look card", d.look, "card")
+  eq("appearance: default scale 1.0", d.scale, 1.0)
+  eq("appearance: default tileMin 170", d.tileMin, 170)
+  eq("appearance: default density comfortable", d.density, "comfortable")
+  eq("appearance: nil arg safe", core.resolveAppearance(nil).theme, "midnight")
+
+  -- unknown theme falls back; known theme applies its palette + scheme + look
+  eq("appearance: unknown theme -> midnight", core.resolveAppearance({ theme = "bogus" }).theme, "midnight")
+  local lt = core.resolveAppearance({ theme = "light" })
+  eq("appearance: light scheme", lt.scheme, "light")
+  eq("appearance: light bg", lt.tokens.bg, "#f4f6f9")
+  eq("appearance: slate look", core.resolveAppearance({ theme = "slate" }).look, "slate")
+  eq("appearance: flat look", core.resolveAppearance({ theme = "flat" }).look, "flat")
+
+  -- palette override: valid hex wins, unknown key + bad hex ignored
+  local ov = core.resolveAppearance({ theme = "midnight", colors = { bg = "#222222", nope = "#fff", surface = "zzz" } })
+  eq("appearance: valid color override applied", ov.tokens.bg, "#222222")
+  eq("appearance: bad-hex override ignored (keeps theme value)", ov.tokens.surface, "#21232c")
+  check("appearance: unknown override key dropped", ov.tokens.nope == nil)
+
+  -- accent shortcut + status overrides
+  eq("appearance: accent shortcut", core.resolveAppearance({ accent = "#abc" }).tokens.accent, "#abc")
+  local st = core.resolveAppearance({ status = { working = "#101010", bogus = "#fff" } })
+  eq("appearance: status.working override", st.tokens.stWorking, "#101010")
+  eq("appearance: untouched status keeps default", st.tokens.stDone, "#22c55e")
+
+  -- sizing clamps
+  eq("appearance: scale clamp high", core.resolveAppearance({ scale = 5 }).scale, 1.4)
+  eq("appearance: scale clamp low", core.resolveAppearance({ scale = 0.1 }).scale, 0.8)
+  eq("appearance: scale numeric string", core.resolveAppearance({ scale = "1.2" }).scale, 1.2)
+  eq("appearance: tileMin clamp high", core.resolveAppearance({ tileMin = 9999 }).tileMin, 320)
+  eq("appearance: tileMin clamp low", core.resolveAppearance({ tileMin = 10 }).tileMin, 120)
+  eq("appearance: density dense passes", core.resolveAppearance({ density = "dense" }).density, "dense")
+  eq("appearance: density junk -> comfortable", core.resolveAppearance({ density = "huge" }).density, "comfortable")
+
+  -- isHex guard
+  check("appearance: isHex #rgb", core.appearanceIsHex("#abc"))
+  check("appearance: isHex #rrggbb", core.appearanceIsHex("#a1b2c3"))
+  check("appearance: isHex rejects no-#", not core.appearanceIsHex("abc123"))
+  check("appearance: isHex rejects len", not core.appearanceIsHex("#abcd"))
+
+  -- appearanceCss: :root block, color-scheme, a couple tokens, sizing vars
+  local css = core.appearanceCss(core.resolveAppearance({}))
+  check("appearanceCss: opens :root", css:sub(1, 6) == ":root{")
+  check("appearanceCss: color-scheme dark", css:find("color-scheme:dark", 1, true) ~= nil)
+  check("appearanceCss: emits --st-working", css:find("--st-working:#f5b50a", 1, true) ~= nil)
+  check("appearanceCss: emits --bg", css:find("--bg:#15161b", 1, true) ~= nil)
+  check("appearanceCss: emits --ui-scale", css:find("--ui-scale:", 1, true) ~= nil)
+  check("appearanceCss: emits --tile-min px", css:find("--tile-min:170px", 1, true) ~= nil)
+  local lcss = core.appearanceCss(core.resolveAppearance({ theme = "light" }))
+  check("appearanceCss: light -> color-scheme light", lcss:find("color-scheme:light", 1, true) ~= nil)
+  check("appearanceCss: light -> light bg token", lcss:find("--bg:#f4f6f9", 1, true) ~= nil)
+end
+
+-- ---- Appearance batch 2: more themes + font + reduce-motion -----------------
+do
+  -- new themes resolve with their palettes + correct scheme
+  eq("appearance: dracula accent", core.resolveAppearance({ theme = "dracula" }).tokens.accent, "#bd93f9")
+  eq("appearance: tokyonight done", core.resolveAppearance({ theme = "tokyonight" }).tokens.stDone, "#9ece6a")
+  eq("appearance: gruvbox bg", core.resolveAppearance({ theme = "gruvbox" }).tokens.bg, "#282828")
+  eq("appearance: solarized dark scheme", core.resolveAppearance({ theme = "solarized" }).scheme, "dark")
+  eq("appearance: solarizedlight scheme light", core.resolveAppearance({ theme = "solarizedlight" }).scheme, "light")
+  eq("appearance: rosepine accent", core.resolveAppearance({ theme = "rosepine" }).tokens.accent, "#c4a7e7")
+  eq("appearance: catppuccin bg", core.resolveAppearance({ theme = "catppuccin" }).tokens.bg, "#1e1e2e")
+  eq("appearance: gruvboxlight scheme light", core.resolveAppearance({ theme = "gruvboxlight" }).scheme, "light")
+  eq("appearance: monokai accent", core.resolveAppearance({ theme = "monokai" }).tokens.accent, "#66d9ef")
+  eq("appearance: oled true-black bg", core.resolveAppearance({ theme = "oled" }).tokens.bg, "#000000")
+  do local n = 0; for _ in pairs(core.APPEARANCE_THEMES) do n = n + 1 end
+     check("appearance: 16 built-in themes", n == 16) end
+
+  -- font: default system, valid passes, junk -> system; appearanceCss emits --font stack
+  eq("appearance: default font system", core.resolveAppearance({}).font, "system")
+  eq("appearance: valid font passes", core.resolveAppearance({ font = "mono" }).font, "mono")
+  eq("appearance: junk font -> system", core.resolveAppearance({ font = "comic" }).font, "system")
+  check("appearanceCss: emits a --font stack", core.appearanceCss(core.resolveAppearance({ font = "mono" })):find("--font:ui%-monospace") ~= nil)
+  check("appearanceCss: default --font is the system stack", core.appearanceCss(core.resolveAppearance({})):find("--font:-apple-system", 1, true) ~= nil)
+
+  -- reduce motion: bool passthrough, default false
+  check("appearance: reduceMotion default false", core.resolveAppearance({}).reduceMotion == false)
+  check("appearance: reduceMotion true", core.resolveAppearance({ reduceMotion = true }).reduceMotion == true)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

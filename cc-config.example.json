@@ -69,7 +69,7 @@
   },
 
   "spawn": {
-    "_comment": "The + New / New project launcher. editor: terminal | kitty | vscode | cursor. live=false is a dry-run (logs what it would launch, spawns nothing). Kitty/Terminal spawn reliably; VS Code/Cursor open the window then best-effort drive Claude Code: vscodeFlavor=extension (default) opens the Claude Code EXTENSION panel via its ⌘Esc quick-launch (resume/new-session UI); vscodeFlavor=terminal types the claude launch line into a new integrated terminal (ssh spawns and gateway providers always use the terminal — the extension can't run a remote claude or carry ANTHROPIC_* env). kittyAutoRemote enables remote control in your kitty.conf when Kitty is in use (so kitty @ effects work). provider = id of a profile in `providers` to launch new sessions against (empty = bare `claude`, default Anthropic). claudeBin optionally pins the absolute claude path; left empty Shepherd auto-resolves it (login-shell command -v, then ~/.claude/local/claude and ~/.local/bin/claude) so spawned terminals whose PATH lacks `claude` (VS Code's integrated terminal) still launch. searchRoots/searchDepth/fdBin drive the modal's fuzzy folder search: roots scanned once per modal open (default ~/Programming) to searchDepth, with fd when installed (gitignore-aware) else find. claudeBin + these three survive Settings saves (hand-edit keys).",
+    "_comment": "The + New / New project launcher. editor: terminal | kitty | vscode | cursor. live=false is a dry-run (logs what it would launch, spawns nothing). Kitty/Terminal spawn reliably; VS Code/Cursor open the window then best-effort drive Claude Code: vscodeFlavor=extension (default) opens the Claude Code EXTENSION panel via its ⌘Esc quick-launch (resume/new-session UI); vscodeFlavor=terminal types the claude launch line into a new integrated terminal (ssh spawns and gateway providers always use the terminal — the extension can't run a remote claude or carry ANTHROPIC_* env). kittyAutoRemote enables remote control in your kitty.conf when Kitty is in use (so kitty @ effects work). provider = id of a profile in `providers` to launch new sessions against (empty = bare `claude`, default Anthropic). claudeBin optionally pins the absolute claude path; left empty Shepherd auto-resolves it (login-shell command -v, then ~/.claude/local/claude and ~/.local/bin/claude) so spawned terminals whose PATH lacks `claude` (VS Code's integrated terminal) still launch. searchRoots/searchDepth/fdBin drive the modal's fuzzy folder search: roots scanned once per modal open (default ~/Programming) to searchDepth, with fd when installed (gitignore-aware) else find. claudeBin + these three survive Settings saves (hand-edit keys). coldWindowWaitSeconds/coldActivateSeconds tune the new-project (extension) cold-start: how long to poll for the brand-new VS Code window to appear, then the buffer before opening the Claude panel (⌘Esc) — raise coldActivateSeconds if a heavy/slow VS Code needs longer to activate the extension. Both survive Settings saves.",
     "editor": "terminal",
     "vscodeFlavor": "extension",
     "live": false,
@@ -81,7 +81,22 @@
     "claudeBin": "",
     "searchRoots": [],
     "searchDepth": 4,
-    "fdBin": ""
+    "fdBin": "",
+    "coldWindowWaitSeconds": 25,
+    "coldActivateSeconds": 6
+  },
+
+  "appearance": {
+    "_comment": "The Appearance tab (Settings) — edited live and written here on Save. theme: midnight|slate|flat|nord|contrast|light|dracula|tokyonight|gruvbox|solarized|solarizedlight|rosepine|catppuccin|gruvboxlight|monokai|oled. accent is an optional hex (#rgb or #rrggbb) accent override (empty = the theme's own); colors overrides any of bg/surface/surface2/surface3/surfaceHover/border/borderWeak/text/text2/text3/muted/dim/textStrong/accent2/accentText/accentBg; status overrides working/done/approval/error/idle (the tile dots). font: system|rounded|mono|serif. scale 0.8–1.4 (UI zoom), tileMin 120–320 (cards grid min width px), density comfortable|dense, reduceMotion disables pulse/spin. Invalid values fall back to the theme/default. Layout (cards/bar/contrast/dots — tile ARRANGEMENT) is a separate axis kept in hs.settings, not here.",
+    "theme": "midnight",
+    "accent": "",
+    "colors": {},
+    "status": {},
+    "font": "system",
+    "scale": 1.0,
+    "tileMin": 170,
+    "density": "comfortable",
+    "reduceMotion": false
   },
 
   "providers": [

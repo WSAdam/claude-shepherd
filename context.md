@@ -26,8 +26,9 @@ network, no multi-user, no secrets — it reads session status off the local fil
   cc-core, or smoke-test after `make install`.
 - **Panel JS** (embedded in claude-dashboard.lua as an HTML string) renders the grid
   client-side. A few pure cc-core helpers are **hand-mirrored** in this JS for instant
-  interactivity (`filterTiles`, `applyGroups`, `fmtDuration`, and `contextBand` → the JS
-  `barLevel`); these twins must stay in sync — comments mark them. `BULK_RULES` is single-sourced (injected as
+  interactivity (`filterTiles`, `applyGroups`, `fmtDuration`, `contextBand` → the JS
+  `barLevel`, and `resolveAppearance`/`appearanceCss` → the JS `applyAppearance` live-preview twin —
+  see the 2026-06-19 Appearance state); these twins must stay in sync — comments mark them. `BULK_RULES` is single-sourced (injected as
   `__BULK_RULES__`) so the bulk-bar count can't drift from what Lua acts on; likewise the ⌨ hotkey
   legend is injected as `__HOTKEY_LEGEND__`, built from the real `HOTKEY_*` bindings so the displayed
   combos can't drift from what's bound — and those `HOTKEY_*` are themselves resolved from
@@ -111,6 +112,23 @@ network, no multi-user, no secrets — it reads session status off the local fil
     (temp+rename) — the gate reads it on the hot path; (3) `cc_remove` (SessionEnd, `cc-lib.sh`) reaps
     `cc-policy`/`cc-policy-override`. The `POLICY_DIR` default must match across `cc-lib.sh`,
     `cc-approve.sh`, and the dashboard (`~/.claude/cc-policy`).
+- **Three load-bearing facts any new feature MUST honor** (verified during the 2026-06-14 mining; the
+  whole spawn / agent-profile / policy layer rests on them):
+  1. **The `claude` CLI is present** at `~/.local/bin/claude` (v2.1.175) and exposes `--mcp-config`/
+     `--strict-mcp-config`, `--agent`/`--agents`, `--plugin-dir`, `--append-system-prompt`, `--add-dir`,
+     and `claude plugin` / `claude mcp add`. But native Claude Code already reads project `.mcp.json` and
+     keeps its own plugin/MCP registry — **Shepherd stays a thin fleet-convenience layer (emit flags/files);
+     it does NOT reimplement MCP/skills/plugins.** Skills live at `~/.claude/skills/<name>/SKILL.md`
+     (frontmatter `name`/`display_title`/`description`).
+  2. **`gate.tools` is a HOLD-FOR-APPROVAL / escalation list, NOT a capability allow-list.** Tools *not* in
+     it run freely (`cc-approve.sh` `*) exit 0`). A "read-only agent" is built by **`autoDeny`** of the
+     mutating set (`Bash Write Edit MultiEdit NotebookEdit` = `DEFAULT_GATE_TOOLS`), **never** by adding
+     them to `gate.tools`. Any design phrased as "seed the allow-list to grant a tool" is backwards.
+  3. **Secrets are never stored — env-var NAMES only.** Records store the env-var *name* (`authTokenEnv`),
+     expanded by the spawned login shell via `loginShellWrap` (the `providerEnv` pattern). Operator-data
+     registries (`cc-presets.json`/`cc-agents.json`/`cc-mcp.json`) live OUTSIDE the Settings round-trip.
+     Spawn side-effects gate behind `spawn.live` (default dry-run); VS Code/Cursor flag injection is
+     keystroke-only (best-effort), reliable on Kitty/Terminal.
 
 ## Workflow
 
@@ -133,6 +151,103 @@ network, no multi-user, no secrets — it reads session status off the local fil
 - Typical change: add a pure cc-core function + its regression test → wire it into the
   dashboard → mirror in the panel JS if it affects rendering (and note the twin) → `make test`
   (smoke included) → deploy.
+- **Test purity:** pure decisions live in cc-core + unit tests; effects go through the `fx` recorder; shell
+  hooks get bash temp-dir suites. **No live `kitty @` / keystrokes / network in tests** — provider
+  env-injection, usage parse/sum/window, and ssh-wrap are all asserted as pure strings (no real keys/spawns).
+
+## Tooling stance — detect → use → degrade gracefully
+
+A missing binary means slower, never broken. `jq` is the only hard dependency; `rg`/`fd` are auto-detected
+accelerators (fleet search + the spawn modal's fuzzy folder scan), resolved by `resolveBin` (PATH +
+`/opt/homebrew/bin` + `/usr/local/bin`) and degrading to grep/find. The chosen engine is **logged at runtime**
+(`[cc-search] engine=rg …`, `[cc-spawn] folder scan: fd …`) and **`make doctor`** reports tool status + offers
+to install a missing accelerator — so an accelerator can't silently sit unused (which is how `fd` went
+uninstalled for a while). Any `hs.task` capturing large output must redirect to a file (the ~64KB pipe-buffer
+deadlock — see Invariants). **Declined** (no surface / altitude inversion / terminal-human niceties the
+webview doesn't want): `gron`/`yq`/`htmlq`/`hexyl`, `jc`, `eza`/`bat`/`tv`/`fzf`.
+
+## Known platform limits (not bugs)
+
+- **VS Code / Cursor extension UI widgets are mouse-only** (AskUserQuestion picker, permission-mode switcher —
+  no keyboard path). So click-to-answer, live mode-switch, and non-gate approve are **best-effort / jump-only**
+  in the extension, and **reliable only on Kitty** (`kitty @`) or via the **headless gate** (decision file).
+  VS Code spawn ("run claude in a new terminal") is likewise best-effort keystrokes; Kitty/Terminal spawn
+  reliably.
+- **A pop on *completion*** with both `popOn*` flags off is the **VS Code extension** raising its own window,
+  not Shepherd (arming the gate stops the *approval* pop).
+
+## Deferred / not-yet-built (as of the 2026-06-19 todos reset)
+
+Consciously-left-unbuilt work, kept here so the todos wipe loses nothing — full per-item detail (FOR/AGAINST
+rulings, data shapes) is in git history of `todos.md` and in `docs/feature-mining/*`.
+
+- **Needs hardware (runbook ready):** [docs/hardware-verification.md](docs/hardware-verification.md) — verify
+  the `core.KITTY_KEY` send-key tokens + AskUserQuestion `answerKeys` nav on a real Kitty box, and the SSH
+  status-bridge 8-step checklist (remote install / headless-only assumption, rsync+openrsync round-trip,
+  decision round-trip, `BatchMode` auth, clock-skew → `bridge.staleSlackSeconds`, the `bridge.keystrokes`
+  title-escape experiment, SessionEnd prune, spawn-then-appear).
+- **UX-gated routing (4c-E / L4 follow-ups)** — each needs a design call first: task→session affinity/tag
+  **source**, auto-spawn on starvation (needs a cap + UX), idle sessions as routing targets, remote tiles as
+  routing targets (pairs with `bridge.keystrokes`), plus L4's topology view (`plot`), role-addressed
+  delegation, hierarchical "manager" mode, pending-before-ready queue, parent/delegation lineage, task
+  dependency chains, queue priority + concurrency cap, broadcast mailbox.
+- **Per-feature editor / enforcement polish:** L1 in-editor `modelByMode`/`requiredEnv`, agent-folders tree,
+  recently-deleted/restore; L2 bundle `gateTools` auto-apply at spawn + `toolLimits` shell enforcement (soft
+  ledger indicator today) + deny-reason enrichment; L3 in-editor vars-schema editor; L6 per-rule status
+  lifecycle (COMPLETED/ERROR) + `retryUntil`; L7 import/export routines, overlap control, a launchd
+  asleep-while-due backstop.
+- **DR follow-ons:** DR1 in-transcript `Task`/`isSidechain` sidechains (none exist locally yet); DR3
+  per-checkpoint targeted rewind is impossible (`/rewind` is an interactive picker with no arg) + deletions
+  aren't counted as "changed"; DR4 an LLM-as-judge "deep score" + a fleet-wide score trend; DR5 per-tile /
+  per-project $ + budget-alert rules; DR6 an LLM classify pass + fleet-wide opt-in once trusted; DR7 worktree
+  cleanup of an abandoned (never-kept) cohort (`git worktree prune`).
+
+## State (2026-06-19) — Appearance system (themeable UI) + new-project cold-start fix
+
+A full visual refresh: the panel stylesheet was converted to a **`:root` design-token layer**, and an
+**Appearance tab** (in a newly **tabbed** Settings overlay) lets the operator pick a theme + customize
+colors / size / font, live. Plus a field-reported new-project spawn bug fixed.
+
+- **Token layer.** The ~800-line `<style>` block now references CSS custom properties (`--bg`/`--surface`/
+  `--border`/`--text…`, status `--st-*`, `--accent*`, sizing `--ui-scale`/`--tile-min`/`--gap`/`--pad`/
+  `--font`) declared in a `:root` block (the Refined-Midnight defaults == the old hand-tuned palette).
+  **Edit the palette/themes in `cc-core` `APPEARANCE_*`, NOT the literals** — almost no raw hex remains in
+  the stylesheet. The few always-light spots (ctx-bar `%`, notify badges) keep a literal `#fff` on purpose.
+- **Pure core (tested):** `core.APPEARANCE_DEFAULTS` (Midnight baseline) + `APPEARANCE_THEMES` (**16**
+  presets, each a token delta over defaults) + `APPEARANCE_VARS` (the ordered `{key→cssVar}` list, also the
+  emit order) + `APPEARANCE_FONTS`. `core.resolveAppearance(ap)` merges defaults←theme←overrides
+  (accent / palette / status), validates hex, clamps scale/tileMin, carries font + reduceMotion;
+  `core.appearanceCss(resolved)` renders the `:root` override block (valid-hex tokens only, so a malformed
+  override silently falls back to the default).
+- **Injection (mirrors `__INIT_THEME__`):** a 2nd `<style id="appearance-root">__APPEARANCE_CSS__</style>`
+  after the main stylesheet receives `core.appearanceCss(resolveAppearance(readConfigEarly().appearance))`;
+  the body carries `data-look` (`__INIT_LOOK__` → static `body[data-look=slate|flat]` SHAPE rules) and a
+  density / `calm` (reduce-motion) class via `__INIT_DENSITY__`. `__APPEARANCE_THEMES__` injects
+  `{vars,defaults,themes,fonts}` for the JS. **The whole gsub block is wrapped in `do…end`** — the file is
+  at Lua's 200-local main-chunk cap, so it adds NO new main-chunk local (same lesson as the lock/automodel blocks).
+- **KEEP-IN-SYNC twin:** JS `applyAppearance(ap)` mirrors `resolveAppearance`+`appearanceCss` for instant
+  **live preview** (sets the `:root` vars on `documentElement`, toggles `data-look`/`dense`/`calm`); and JS
+  `COLORS` (the detail dot) is single-sourced to the `--st-*` tokens (no hex twin). The injected `APPEARANCE`
+  single-sources themes/defaults/vars/fonts, so only the small merge logic is duplicated.
+- **Two persistence axes — don't conflate.** **Appearance** (theme + accent/palette/status + font + sizing +
+  reduce-motion) persists in **`cc-config.json`** (`appearance` block, form-managed, written wholesale →
+  `resolveAppearance` tolerates any missing piece). **Layout** (cards/bar/contrast/dots — tile *arrangement*)
+  stays in **`hs.settings`** via the existing `onThemeChange`, so the Appearance "Layout" chips apply
+  **instantly** (not on Save). Cold-start spawn timing lives under `spawn.*` and is kept across a Settings
+  Save (added to `SETTINGS_KEEP_SUBKEYS.spawn`).
+- **Tabbed Settings:** the flat `#s-body` sections are bucketed into tabs (General/Appearance/Approvals/
+  Automation/Observability/Spawn) by their header text on open (`tagSettingsTabs`/`settingsTabFor`) — no
+  per-section markup wrapping needed. Cancel reverts the live preview (`applyAppearance(apSaved)`); Save commits.
+- **🐞 New-project cold-start spawn fix (field-reported).** "Start new project" opened VS Code but the lone
+  `⌘Esc` fired at ~7s into a still-loading Welcome tab and missed (logs confirmed: `⌘Esc` then nothing). The
+  extension cold ladder is now **adaptive** — it polls until the project window actually appears
+  (`focusProject` returns true ONLY on a real title match → also focuses it), waits a buffer for the
+  extension to activate, then opens the panel **once** (`⌘Esc` toggles, so never double-fire) and delivers
+  the task. Tunable + Save-safe: `spawn.coldWindowWaitSeconds` (25) / `spawn.coldActivateSeconds` (6). Linear
+  chain (one pending timer) tracked in `spawnSeqHandles` for supersession; `after` keeps timers GC-safe.
+  **Still best-effort by nature** — extension-activation time is unobservable — so it needs a live
+  new-project spawn to confirm per-machine; bump `coldActivateSeconds` if a heavy setup needs longer. A
+  no-task new project opens the panel ready (a tile appears once a first prompt is sent).
 
 ## State (2026-06-18) — DR7 A/B fork-to-compare (deep-research backlog COMPLETE)
 

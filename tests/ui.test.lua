@@ -595,12 +595,19 @@ do
   check("fscan-pin: scan reads the temp file on exit", src:find("FX.readFile(outFile)", 1, true) ~= nil)
   check("fscan-pin: scan has a timeout backstop", src:find("folder scan timed out", 1, true) ~= nil)
   -- New-project spawn cold-start fix: the VS Code open goes through core.vscodeOpenArgs (so a
-  -- cold start gets --disable-workspace-trust), and the extension ladder, on a cold start,
-  -- pastes the task + re-asserts the deterministic ⌘1->⌘Esc chat dance before submitting.
+  -- cold start gets --disable-workspace-trust), and the extension ladder, on a cold start, is
+  -- ADAPTIVE -- it polls until the project window actually appears (focusProject true only on a
+  -- real title match), waits a tunable activation buffer, then opens the panel once and pastes
+  -- the task. Fixed-delay ⌘Esc was firing into the still-loading Welcome tab and missing.
   check("spawn-pin: VS Code open uses core.vscodeOpenArgs(spec)",
         src:find("core.vscodeOpenArgs(spec)", 1, true) ~= nil)
   check("spawn-pin: cold-start ladder branches on spec.coldStart",
-        src:find("local cold = spec.coldStart == true", 1, true) ~= nil)
+        src:find("if spec.coldStart == true then", 1, true) ~= nil)
+  check("spawn-pin: cold-start polls for the window (focusProject false) before opening the panel",
+        src:find("focusProject(name, proj, nil, false)", 1, true) ~= nil
+        and src:find("cold-start: window seen after", 1, true) ~= nil)
+  check("spawn-pin: cold-start activation buffer is tunable (spec.coldWindowWait / coldActivate, Save-safe)",
+        src:find("spec.coldWindowWait", 1, true) ~= nil and src:find("spec.coldActivate", 1, true) ~= nil)
   check("spawn-pin: cold-start pastes the task (not char-typing)",
         src:find("hs.pasteboard.setContents(spec.task)", 1, true) ~= nil)
   check("spawn-pin: new-project flag threaded from the modal (mode == new)",
@@ -1598,6 +1605,60 @@ do
         src:find("function keepAbBtn(el)", 1, true) ~= nil
         and src:find('data-cohort="\'+esc(c.cohort)+\'"', 1, true) ~= nil
         and src:find("el.getAttribute(\"data-cohort\")", 1, true) ~= nil)
+end
+
+-- ---- Appearance: token layer + injection + tabbed settings -----------------
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+
+  check("appearance: :root declares the token defaults (tokenized stylesheet)",
+        src:find("--bg:#15161b", 1, true) ~= nil and src:find("--surface:#21232c", 1, true) ~= nil
+        and src:find("--accent:#6ea8fe", 1, true) ~= nil and src:find("--st-working:#f5b50a", 1, true) ~= nil)
+  check("appearance: stylesheet references tokens, not raw palette literals (var(--border) used widely)",
+        select(2, src:gsub("var%(%-%-border%)", "")) > 50)
+  check("appearance: second <style> consumes the injected __APPEARANCE_CSS__",
+        src:find('id="appearance-root">__APPEARANCE_CSS__', 1, true) ~= nil)
+  check("appearance: Lua injects core.appearanceCss into __APPEARANCE_CSS__ (wrapped in do/end for the 200-local cap)",
+        src:find("core.appearanceCss(ap)", 1, true) ~= nil
+        and src:find('HTML = HTML:gsub("__APPEARANCE_CSS__"', 1, true) ~= nil)
+  check("appearance: body carries look + density init from the resolved appearance",
+        src:find('data%-look="__INIT_LOOK__"') ~= nil and src:find("__INIT_DENSITY__", 1, true) ~= nil
+        and src:find('HTML = HTML:gsub("__INIT_LOOK__"', 1, true) ~= nil)
+  check("appearance: status colors single-sourced (JS COLORS == --st-* tokens, no hex twin)",
+        src:find('working:"var(--st-working)"', 1, true) ~= nil
+        and src:find(".s%-working%s*{%s*%-%-c:var%(%-%-st%-working%)") ~= nil)
+  check("appearance: themes/defaults/vars injected for the live-preview twin",
+        src:find("var APPEARANCE = __APPEARANCE_THEMES__", 1, true) ~= nil
+        and src:find('HTML = HTML:gsub("__APPEARANCE_THEMES__"', 1, true) ~= nil)
+  check("appearance: applyAppearance twin merges defaults<-theme<-overrides like resolveAppearance",
+        src:find("function applyAppearance(ap)", 1, true) ~= nil
+        and src:find("function resolveAp(ap)", 1, true) ~= nil
+        and src:find("root.style.setProperty(cssv, v)", 1, true) ~= nil)
+  check("appearance: form round-trips through persistSettings (appearance: readApForm())",
+        src:find("appearance: readApForm()", 1, true) ~= nil)
+  check("appearance: Cancel reverts live preview to the saved appearance",
+        src:find("function closeSettings(){ applyAppearance(apSaved)", 1, true) ~= nil
+        and src:find("apSaved = readApForm()", 1, true) ~= nil)
+  check("appearance: settings tabs built + section-tagged; openSettings lands on a tab",
+        src:find("function tagSettingsTabs()", 1, true) ~= nil
+        and src:find("function settingsTabFor(t)", 1, true) ~= nil
+        and src:find('settingsTab("general")', 1, true) ~= nil)
+  check("appearance: layout chip uses the existing onThemeChange (hs.settings) path",
+        src:find("function pickLayout(l)", 1, true) ~= nil and src:find("onThemeChange();", 1, true) ~= nil)
+  check("appearance: look shape rules keyed off body[data-look]",
+        src:find('body%[data%-look="flat"%] %.theme%-cards %.tile') ~= nil
+        and src:find('body%[data%-look="slate"%] %.theme%-cards %.tile') ~= nil)
+  check("appearance b2: font token applied + selector wired to APPEARANCE.fonts",
+        src:find("font-family:var(--font)", 1, true) ~= nil
+        and src:find('id="a-font"', 1, true) ~= nil and src:find("APPEARANCE.fonts", 1, true) ~= nil)
+  check("appearance b2: reduce-motion body.calm rule + toggle",
+        src:find("body.calm *", 1, true) ~= nil and src:find('id="a-motion"', 1, true) ~= nil
+        and src:find('classList.toggle("calm"', 1, true) ~= nil)
+  check("appearance b2: accent quick-swatches (dedicated, not gated by the custom palette)",
+        src:find("function renderAccentSwatches(active)", 1, true) ~= nil
+        and src:find("function pickAccent(hex)", 1, true) ~= nil and src:find('id="a-accent-sw"', 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

@@ -3459,7 +3459,8 @@ end
 -- avoided: array-valued keys (providers, policies.patterns.*) must be REPLACED,
 -- not index-merged. Mutates + returns cfg.
 M.SETTINGS_KEEP_SUBKEYS = {
-  spawn = { "kittyBin", "kittySocket", "searchRoots", "searchDepth", "fdBin", "claudeBin" },
+  spawn = { "kittyBin", "kittySocket", "searchRoots", "searchDepth", "fdBin", "claudeBin",
+            "coldWindowWaitSeconds", "coldActivateSeconds" },
   escalation = { "hung" },
   risk = { "weights" },
   bridge = { "staleSlackSeconds", "keystrokes" },
@@ -7535,6 +7536,238 @@ function M.abJudgePrompt(taskText, entries)
   parts[#parts + 1] = "Judge on correctness, completeness, and code quality. Name the WINNING variant"
     .. " by its label and justify the pick in 3-4 sentences; then list each loser's single biggest weakness."
   return table.concat(parts, "\n")
+end
+
+-- ---- Appearance: design-token themes + per-token overrides -----------------
+-- The panel's whole stylesheet references CSS custom properties (--bg, --surface,
+-- --accent, --st-working, ...) declared in :root. Appearance lets the operator pick
+-- a built-in THEME (a full token bundle) and layer per-token OVERRIDES on top
+-- (accent / palette / status colors) plus SIZING (ui scale, density, tile width).
+-- Pure here: resolveAppearance merges defaults<-theme<-overrides and validates;
+-- appearanceCss renders the resolved :root block injected as __APPEARANCE_CSS__.
+-- A small JS twin (applyAppearance) mirrors this for instant live-preview -- it
+-- consumes the SAME injected APPEARANCE_THEMES/DEFAULTS so the two can't drift (the
+-- contextBand<->barLevel pattern). KEEP this token list == the JS twin's list.
+
+-- Ordered {stateKey, cssVar} -- also the emit order in appearanceCss.
+M.APPEARANCE_VARS = {
+  { "bg", "--bg" }, { "bgOverlay", "--bg-overlay" }, { "surface", "--surface" },
+  { "surface2", "--surface-2" }, { "surface3", "--surface-3" }, { "surfaceHover", "--surface-hover" },
+  { "border", "--border" }, { "borderWeak", "--border-weak" },
+  { "text", "--text" }, { "text2", "--text-2" }, { "text3", "--text-3" },
+  { "muted", "--muted" }, { "dim", "--dim" }, { "textStrong", "--text-strong" },
+  { "accent", "--accent" }, { "accent2", "--accent-2" }, { "accentText", "--accent-text" }, { "accentBg", "--accent-bg" },
+  { "stIdle", "--st-idle" }, { "stWorking", "--st-working" }, { "stDone", "--st-done" },
+  { "stApproval", "--st-approval" }, { "stError", "--st-error" },
+  { "ok", "--ok" }, { "danger", "--danger" }, { "warn", "--warn" }, { "purple", "--purple" },
+}
+
+-- Refined Midnight = the baseline palette (== today's hand-tuned dark look, lightly
+-- polished). Every theme below is a DELTA over these defaults.
+M.APPEARANCE_DEFAULTS = {
+  bg = "#15161b", bgOverlay = "#14161b", surface = "#21232c", surface2 = "#1b1d24",
+  surface3 = "#191b22", surfaceHover = "#272a35", border = "#2c2f3a", borderWeak = "#23262f",
+  text = "#e8e9ee", text2 = "#cfd2db", text3 = "#aeb1bd", muted = "#8a8d99", dim = "#6b7280", textStrong = "#ffffff",
+  accent = "#6ea8fe", accent2 = "#5b6cff", accentText = "#9fc1ff", accentBg = "#1c2536",
+  stIdle = "#6b7280", stWorking = "#f5b50a", stDone = "#22c55e", stApproval = "#ef4444", stError = "#ec4899",
+  ok = "#5ad67f", danger = "#ef4444", warn = "#f5b50a", purple = "#a98bff",
+}
+
+M.APPEARANCE_DEFAULT_THEME = "midnight"
+
+-- theme = { label, scheme:"dark"|"light", look:"card"|"slate"|"flat", tokens={delta} }.
+-- `look` drives static shape rules in the stylesheet (body[data-look=...]).
+M.APPEARANCE_THEMES = {
+  midnight = { label = "Refined Midnight", scheme = "dark", look = "card", tokens = {} },
+  slate = { label = "Modern Slate", scheme = "dark", look = "slate", tokens = {
+    bg = "#0f1420", bgOverlay = "#0d111b", surface = "#1b2333", surface2 = "#161d2b",
+    surface3 = "#19212f", surfaceHover = "#24304a", border = "#2b3650", borderWeak = "#222c40",
+    text = "#eef1f7", text2 = "#cdd6e6", text3 = "#9fabc2", muted = "#8893a8", dim = "#67718a",
+    accent = "#7c9cff", accent2 = "#6d7bff", accentText = "#aebfff", accentBg = "#1e2a44",
+  } },
+  flat = { label = "Minimal Flat", scheme = "dark", look = "flat", tokens = {
+    bg = "#16171a", bgOverlay = "#141518", surface = "#16171a", surface2 = "#1c1e22",
+    surface3 = "#1a1c20", surfaceHover = "#212329", border = "#26282e", borderWeak = "#202227",
+    text = "#e6e7ea", text2 = "#bcbfc7", text3 = "#9499a3", muted = "#7f838d", dim = "#5e626b",
+    accent = "#8ab4ff", accentText = "#bcd0ff",
+  } },
+  nord = { label = "Nord", scheme = "dark", look = "card", tokens = {
+    bg = "#2e3440", bgOverlay = "#272c38", surface = "#3b4252", surface2 = "#353c4a",
+    surface3 = "#39414f", surfaceHover = "#434c5e", border = "#4c566a", borderWeak = "#3b4252",
+    text = "#eceff4", text2 = "#d8dee9", text3 = "#abb2bf", muted = "#9aa3b5", dim = "#6f7a8d",
+    accent = "#88c0d0", accent2 = "#81a1c1", accentText = "#8fbcbb", accentBg = "#3b4a52",
+    stIdle = "#6f7a8d", stWorking = "#ebcb8b", stDone = "#a3be8c", stApproval = "#bf616a", stError = "#b48ead",
+    ok = "#a3be8c", danger = "#bf616a", warn = "#ebcb8b", purple = "#b48ead",
+  } },
+  contrast = { label = "High Contrast", scheme = "dark", look = "card", tokens = {
+    bg = "#000000", bgOverlay = "#000000", surface = "#0d0d10", surface2 = "#141418",
+    surface3 = "#111114", surfaceHover = "#1d1d22", border = "#5a5f6b", borderWeak = "#3a3d47",
+    text = "#ffffff", text2 = "#eef0f5", text3 = "#cfd3dc", muted = "#aab0bd", dim = "#7e8694",
+    accent = "#5ea0ff", accent2 = "#7c9cff", accentText = "#bcd4ff", accentBg = "#10243f",
+    stIdle = "#9aa1ae", stWorking = "#ffc21a", stDone = "#2ee06a", stApproval = "#ff4d4d", stError = "#ff5cc8",
+    ok = "#2ee06a", danger = "#ff4d4d", warn = "#ffc21a", purple = "#c79bff",
+  } },
+  light = { label = "Light", scheme = "light", look = "card", tokens = {
+    bg = "#f4f6f9", bgOverlay = "#eef1f5", surface = "#ffffff", surface2 = "#f1f3f7",
+    surface3 = "#f7f8fb", surfaceHover = "#e9edf3", border = "#d6dbe3", borderWeak = "#e4e8ee",
+    text = "#1b1f27", text2 = "#39414f", text3 = "#5b6373", muted = "#6b7280", dim = "#98a0ad", textStrong = "#0b0e14",
+    accent = "#2563eb", accent2 = "#4f46e5", accentText = "#1d4ed8", accentBg = "#dfe8fd",
+    stIdle = "#9ca3af", stWorking = "#d97706", stDone = "#16a34a", stApproval = "#dc2626", stError = "#db2777",
+    ok = "#16a34a", danger = "#dc2626", warn = "#d97706", purple = "#7c3aed",
+  } },
+  dracula = { label = "Dracula", scheme = "dark", look = "card", tokens = {
+    bg = "#282a36", bgOverlay = "#21222c", surface = "#343746", surface2 = "#21222c",
+    surface3 = "#2b2e3b", surfaceHover = "#424458", border = "#44475a", borderWeak = "#343746",
+    text = "#f8f8f2", text2 = "#e2e2dc", text3 = "#b9b9c4", muted = "#8a8ca3", dim = "#6272a4",
+    accent = "#bd93f9", accent2 = "#ff79c6", accentText = "#8be9fd", accentBg = "#343a52",
+    stWorking = "#f1fa8c", stDone = "#50fa7b", stApproval = "#ff5555", stError = "#ff79c6",
+    ok = "#50fa7b", danger = "#ff5555", warn = "#f1fa8c", purple = "#bd93f9",
+  } },
+  tokyonight = { label = "Tokyo Night", scheme = "dark", look = "card", tokens = {
+    bg = "#1a1b26", bgOverlay = "#16161e", surface = "#24283b", surface2 = "#1f2335",
+    surface3 = "#222538", surfaceHover = "#2f344d", border = "#2f3549", borderWeak = "#292e42",
+    text = "#c0caf5", text2 = "#a9b1d6", text3 = "#828bb8", muted = "#6b7394", dim = "#565f89",
+    accent = "#7aa2f7", accent2 = "#bb9af7", accentText = "#7dcfff", accentBg = "#283457",
+    stWorking = "#e0af68", stDone = "#9ece6a", stApproval = "#f7768e", stError = "#bb9af7",
+    ok = "#9ece6a", danger = "#f7768e", warn = "#e0af68", purple = "#bb9af7",
+  } },
+  gruvbox = { label = "Gruvbox", scheme = "dark", look = "card", tokens = {
+    bg = "#282828", bgOverlay = "#1d2021", surface = "#3c3836", surface2 = "#32302f",
+    surface3 = "#3a3735", surfaceHover = "#504945", border = "#504945", borderWeak = "#3c3836",
+    text = "#ebdbb2", text2 = "#d5c4a1", text3 = "#bdae93", muted = "#a89984", dim = "#928374",
+    accent = "#83a598", accent2 = "#d3869b", accentText = "#8ec07c", accentBg = "#3b4a45",
+    stWorking = "#fabd2f", stDone = "#b8bb26", stApproval = "#fb4934", stError = "#d3869b",
+    ok = "#b8bb26", danger = "#fb4934", warn = "#fabd2f", purple = "#d3869b",
+  } },
+  solarized = { label = "Solarized Dark", scheme = "dark", look = "card", tokens = {
+    bg = "#002b36", bgOverlay = "#00252e", surface = "#073642", surface2 = "#053742",
+    surface3 = "#06303a", surfaceHover = "#0a4a59", border = "#134552", borderWeak = "#073642",
+    text = "#93a1a1", text2 = "#839496", text3 = "#768e96", muted = "#657b83", dim = "#586e75", textStrong = "#fdf6e3",
+    accent = "#268bd2", accent2 = "#6c71c4", accentText = "#2aa198", accentBg = "#093f4d",
+    stWorking = "#b58900", stDone = "#859900", stApproval = "#dc322f", stError = "#d33682",
+    ok = "#859900", danger = "#dc322f", warn = "#b58900", purple = "#6c71c4",
+  } },
+  solarizedlight = { label = "Solarized Light", scheme = "light", look = "card", tokens = {
+    bg = "#fdf6e3", bgOverlay = "#eee8d5", surface = "#ffffff", surface2 = "#f7f1de",
+    surface3 = "#faf3e0", surfaceHover = "#eee8d5", border = "#d9d2bf", borderWeak = "#e7e0cd",
+    text = "#586e75", text2 = "#657b83", text3 = "#839496", muted = "#93a1a1", dim = "#9aa79f", textStrong = "#073642",
+    accent = "#268bd2", accent2 = "#6c71c4", accentText = "#1c6a9c", accentBg = "#d7e6f0",
+    stWorking = "#b58900", stDone = "#859900", stApproval = "#dc322f", stError = "#d33682",
+    ok = "#859900", danger = "#dc322f", warn = "#b58900", purple = "#6c71c4",
+  } },
+  rosepine = { label = "Rosé Pine", scheme = "dark", look = "card", tokens = {
+    bg = "#191724", bgOverlay = "#16141f", surface = "#1f1d2e", surface2 = "#26233a",
+    surface3 = "#21202e", surfaceHover = "#2a283e", border = "#403d52", borderWeak = "#2a273f",
+    text = "#e0def4", text2 = "#cdcbe0", text3 = "#908caa", muted = "#6e6a86", dim = "#6e6a86",
+    accent = "#c4a7e7", accent2 = "#ebbcba", accentText = "#9ccfd8", accentBg = "#2a283e",
+    stWorking = "#f6c177", stDone = "#9ccfd8", stApproval = "#eb6f92", stError = "#ebbcba",
+    ok = "#9ccfd8", danger = "#eb6f92", warn = "#f6c177", purple = "#c4a7e7",
+  } },
+  catppuccin = { label = "Catppuccin", scheme = "dark", look = "card", tokens = {
+    bg = "#1e1e2e", bgOverlay = "#181825", surface = "#313244", surface2 = "#181825",
+    surface3 = "#292c3c", surfaceHover = "#45475a", border = "#45475a", borderWeak = "#313244",
+    text = "#cdd6f4", text2 = "#bac2de", text3 = "#a6adc8", muted = "#9399b2", dim = "#6c7086",
+    accent = "#89b4fa", accent2 = "#cba6f7", accentText = "#94e2d5", accentBg = "#2a2b40",
+    stWorking = "#f9e2af", stDone = "#a6e3a1", stApproval = "#f38ba8", stError = "#f5c2e7",
+    ok = "#a6e3a1", danger = "#f38ba8", warn = "#f9e2af", purple = "#cba6f7",
+  } },
+  gruvboxlight = { label = "Gruvbox Light", scheme = "light", look = "card", tokens = {
+    bg = "#fbf1c7", bgOverlay = "#f2e5bc", surface = "#ffffff", surface2 = "#f4e8be",
+    surface3 = "#f9f0d0", surfaceHover = "#ebdbb2", border = "#d5c4a1", borderWeak = "#ece0bf",
+    text = "#3c3836", text2 = "#504945", text3 = "#665c54", muted = "#7c6f64", dim = "#928374", textStrong = "#282828",
+    accent = "#458588", accent2 = "#b16286", accentText = "#076678", accentBg = "#d6e5e5",
+    stWorking = "#d79921", stDone = "#98971a", stApproval = "#cc241d", stError = "#b16286",
+    ok = "#98971a", danger = "#cc241d", warn = "#d79921", purple = "#b16286",
+  } },
+  monokai = { label = "Monokai", scheme = "dark", look = "card", tokens = {
+    bg = "#272822", bgOverlay = "#1e1f1c", surface = "#3e3d32", surface2 = "#2d2e27",
+    surface3 = "#383830", surfaceHover = "#49483e", border = "#49483e", borderWeak = "#3e3d32",
+    text = "#f8f8f2", text2 = "#e6e6dc", text3 = "#cfcfc2", muted = "#a6a28c", dim = "#75715e",
+    accent = "#66d9ef", accent2 = "#ae81ff", accentText = "#a6e22e", accentBg = "#2b3a3f",
+    stWorking = "#e6db74", stDone = "#a6e22e", stApproval = "#f92672", stError = "#ae81ff",
+    ok = "#a6e22e", danger = "#f92672", warn = "#fd971f", purple = "#ae81ff",
+  } },
+  oled = { label = "OLED Black", scheme = "dark", look = "card", tokens = {
+    bg = "#000000", bgOverlay = "#000000", surface = "#0a0a0a", surface2 = "#121212",
+    surface3 = "#0e0e0e", surfaceHover = "#1a1a1a", border = "#262626", borderWeak = "#1c1c1c",
+    text = "#f2f2f2", text2 = "#d4d4d4", text3 = "#a3a3a3", muted = "#8a8a8a", dim = "#5c5c5c", textStrong = "#ffffff",
+    accent = "#4ea3ff", accent2 = "#7c9cff", accentText = "#8fc0ff", accentBg = "#06243f",
+    stWorking = "#f5b50a", stDone = "#22c55e", stApproval = "#ef4444", stError = "#ec4899",
+    ok = "#22c55e", danger = "#ef4444", warn = "#f5b50a", purple = "#a98bff",
+  } },
+}
+
+-- Font-family stacks the Appearance > Font picker maps to (--font token). Keys are
+-- the stored enum; values are the CSS stack. system = the original panel font.
+M.APPEARANCE_FONTS = {
+  system  = "-apple-system,system-ui,sans-serif",
+  rounded = "ui-rounded,'SF Pro Rounded','Nunito',system-ui,sans-serif",
+  mono    = "ui-monospace,'SF Mono',Menlo,monospace",
+  serif   = "ui-serif,Georgia,'Iowan Old Style',serif",
+}
+M.APPEARANCE_DEFAULT_FONT = "system"
+
+-- An accepts #rgb or #rrggbb (the only forms the color inputs + presets emit).
+local function appearanceIsHex(s)
+  return type(s) == "string" and (s:match("^#%x%x%x$") ~= nil or s:match("^#%x%x%x%x%x%x$") ~= nil)
+end
+M.appearanceIsHex = appearanceIsHex
+
+local function appearanceClamp(v, lo, hi, dflt)
+  v = tonumber(v); if not v then return dflt end
+  if v < lo then return lo elseif v > hi then return hi end
+  return v
+end
+
+-- Merge DEFAULTS <- theme delta <- user overrides (palette/accent/status); validate
+-- + clamp sizing. `ap` is cfg.appearance (any shape -> safe). Returns the resolved
+-- view the dashboard body + appearanceCss + the JS twin consume.
+function M.resolveAppearance(ap)
+  ap = type(ap) == "table" and ap or {}
+  local themeKey = (type(ap.theme) == "string" and M.APPEARANCE_THEMES[ap.theme]) and ap.theme
+    or M.APPEARANCE_DEFAULT_THEME
+  local theme = M.APPEARANCE_THEMES[themeKey]
+  local tokens = {}
+  for k, v in pairs(M.APPEARANCE_DEFAULTS) do tokens[k] = v end
+  for k, v in pairs(theme.tokens or {}) do tokens[k] = v end
+  if type(ap.colors) == "table" then            -- palette overrides: known keys, valid hex only
+    for k, v in pairs(ap.colors) do
+      if tokens[k] ~= nil and appearanceIsHex(v) then tokens[k] = v end
+    end
+  end
+  if appearanceIsHex(ap.accent) then tokens.accent = ap.accent end
+  if type(ap.status) == "table" then
+    local map = { working = "stWorking", done = "stDone", approval = "stApproval", error = "stError", idle = "stIdle" }
+    for k, tk in pairs(map) do if appearanceIsHex(ap.status[k]) then tokens[tk] = ap.status[k] end end
+  end
+  return {
+    theme = themeKey,
+    scheme = theme.scheme or "dark",
+    look = theme.look or "card",
+    tokens = tokens,
+    scale = appearanceClamp(ap.scale, 0.8, 1.4, 1.0),
+    tileMin = math.floor(appearanceClamp(ap.tileMin, 120, 320, 170) + 0.5),
+    density = (ap.density == "dense") and "dense" or "comfortable",
+    font = (type(ap.font) == "string" and M.APPEARANCE_FONTS[ap.font]) and ap.font or M.APPEARANCE_DEFAULT_FONT,
+    reduceMotion = ap.reduceMotion == true,
+  }
+end
+
+-- Render the resolved appearance as the :root override block injected after the
+-- main stylesheet (cascades over the static Midnight defaults). Pure string; emits
+-- only valid-hex tokens so a malformed override silently falls back to the default.
+function M.appearanceCss(resolved)
+  resolved = type(resolved) == "table" and resolved or M.resolveAppearance({})
+  local t = resolved.tokens or {}
+  local parts = { ":root{", "color-scheme:" .. (resolved.scheme == "light" and "light" or "dark") .. ";" }
+  for _, pair in ipairs(M.APPEARANCE_VARS) do
+    if appearanceIsHex(t[pair[1]]) then parts[#parts + 1] = pair[2] .. ":" .. t[pair[1]] .. ";" end
+  end
+  parts[#parts + 1] = "--ui-scale:" .. tostring(resolved.scale or 1) .. ";"
+  parts[#parts + 1] = "--tile-min:" .. tostring(resolved.tileMin or 170) .. "px;"
+  parts[#parts + 1] = "--font:" .. (M.APPEARANCE_FONTS[resolved.font] or M.APPEARANCE_FONTS.system) .. ";"
+  parts[#parts + 1] = "}"
+  return table.concat(parts)
 end
 
 return M
