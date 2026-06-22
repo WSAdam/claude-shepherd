@@ -138,6 +138,24 @@ local function delivered(fx, sent, msg)
   return true
 end
 
+-- R1-26: shared approve/deny decision path so the two can't drift (someone fixing
+-- the remote rule for one and forgetting the other). Order is GATE-FIRST: a remote
+-- (bridge) tile may still answer headlessly via the decision file while its gate is
+-- waiting, but a non-waiting remote tile must fail closed -- never fall through to
+-- actOnWindow, which would focus a LOCAL window matching the remote name and press a
+-- key. Returns true when it acted (caller keeps the action) or nil to bail (no ledger).
+local function gatedDecision(fx, item, tgt, verb, keyConst)
+  if item.gate == "waiting" then
+    fx.writeDecision(item.key, verb)  -- headless: write "allow"/"deny <nonce>"
+    return true
+  elseif item.remote then
+    return nil                        -- remote + not waiting: never touch a local window
+  else
+    fx.actOnWindow(tgt, keyConst)     -- local (kitty): headless send-key
+    return true
+  end
+end
+
 -- Perform an action on a session via the injected fx (the only side effects).
 -- Returns the action actually taken (handy for tests/logging).
 function M.handleAction(fx, item, action, text)
@@ -161,21 +179,14 @@ function M.handleAction(fx, item, action, text)
   if action == "focus" then
     fx.focusWindow(tgt)
   elseif action == "approve" then
-    -- R1-26: a remote (bridge) tile must NEVER fall through to actOnWindow (which
-    -- focuses a LOCAL window matching the remote name + presses Enter). Fail closed:
-    -- approve only via the decision file, and only while the remote gate is waiting.
-    -- This protects ALL callers (the single-approve hotkey + Stream Deck paths don't
-    -- pre-gate via remoteActionAllowed the way the webview/bulk paths do) and aligns
-    -- handleAction with actionIsHeadless (remote tiles never focus a local window).
-    if item.remote then
-      if item.gate == "waiting" then fx.writeDecision(item.key, "allow") else return nil end
-    elseif item.gate == "waiting" then fx.writeDecision(item.key, "allow")
-    else fx.actOnWindow(tgt, M.KEY_APPROVE) end  -- kitty: headless send-key "enter"
+    -- R1-26: approve only via the decision file for a remote tile, and only while
+    -- the gate is waiting -- never fall through to actOnWindow on a local window
+    -- matching the remote name. gatedDecision enforces this for approve+deny alike
+    -- (protects ALL callers: the single-approve hotkey + Stream Deck don't pre-gate
+    -- via remoteActionAllowed the way the webview/bulk paths do).
+    if not gatedDecision(fx, item, tgt, "allow", M.KEY_APPROVE) then return nil end
   elseif action == "deny" then
-    if item.remote then
-      if item.gate == "waiting" then fx.writeDecision(item.key, "deny") else return nil end
-    elseif item.gate == "waiting" then fx.writeDecision(item.key, "deny")
-    else fx.actOnWindow(tgt, M.KEY_DENY) end
+    if not gatedDecision(fx, item, tgt, "deny", M.KEY_DENY) then return nil end
   elseif action == "stop" then
     fx.actOnWindow(tgt, M.KEY_STOP)
   elseif action == "nudge" then

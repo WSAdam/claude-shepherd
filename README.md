@@ -1114,3 +1114,13 @@ Layout: [cc-core.lua](cc-core.lua) (logic) + [claude-dashboard.lua](claude-dashb
   per project path in `~/.claude/cc-labels.json`.
 - **Known limit:** click-to-focus matches by window title, so two sessions in the
   *same* window remain ambiguous to jump to (their tiles are still distinct).
+
+## Review tags (`R1-`/`R2-`/`R3-` in comments & tests)
+
+Many code comments and test names carry tags like `R1-26`, `R2-17`, or `R3-18`.
+These reference findings from the multi-agent bug-hunt review sweeps: `R<round>-<id>`
+is the `<id>`-th confirmed finding of review **round** `<round>` (round 1, 2, 3, …).
+The authoritative "why" for each tag is the code comment next to it — it records the
+non-obvious invariant (usually a concurrency or fail-closed rule) the fix protects, so
+a later edit doesn't "simplify" the guard back into the bug. To trace one across the
+tree: `git log --grep='R2-17'` or `grep -rn 'R2-17' .`.

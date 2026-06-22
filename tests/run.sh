@@ -12,6 +12,9 @@ echo ""
 echo "== bash: status writer =="
 bash "$DIR/status.test.sh" || fail=1
 echo ""
+echo "== bash: cc-lib helpers =="
+bash "$DIR/lib.test.sh" || fail=1
+echo ""
 echo "== bash: editor detection =="
 bash "$DIR/editor.test.sh" || fail=1
 echo ""
