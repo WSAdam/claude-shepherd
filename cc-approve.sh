@@ -25,7 +25,8 @@ set -u
 GATE_FLAG="${CC_GATE_FLAG:-${HOME}/.claude/cc-gate.enabled}"
 # Gated tools: env override (tests) wins, else the panel-editable `gate.tools`
 # config string, else the default 5. Commas tolerated (normalized to spaces).
-GATE_TOOLS="${CC_GATE_TOOLS:-$(cc_config '.gate.tools' 'Bash Write Edit MultiEdit NotebookEdit')}"
+GATE_TOOLS="${CC_GATE_TOOLS:-$(cc_config_toollist)}"
+GATE_TOOLS="${GATE_TOOLS:-Bash Write Edit MultiEdit NotebookEdit}"
 GATE_TOOLS="$(printf '%s' "$GATE_TOOLS" | tr ',' ' ')"
 GATE_TIMEOUT="${CC_GATE_TIMEOUT:-120}"
 HEARTBEAT_MAX_AGE="${CC_PANEL_MAX_AGE:-5}"
@@ -189,10 +190,21 @@ match_patterns() {
 # 1. autoDeny (safety first)
 match_patterns autoDeny deny autoDeny
 
-# 2. autopilot: this session is trusted for a time-boxed window
+# 2a. bundle autopilot: an attached/per-session bundle set autopilot:true. This is
+# POLICY_FILE-authoritative (the resolved-policy file the panel writes), mirroring
+# how autoAllow/autoDeny already honor POLICY_FILE. Placed AFTER autoDeny so deny
+# still wins ("auto-approve everything not denied").
+if [ -f "$POLICY_FILE" ] && [ "$(jq -r '.autopilot // empty' "$POLICY_FILE" 2>/dev/null)" = "true" ]; then
+  echo "[cc-approve] 🛫 bundle autopilot auto-allow: $TOOL ($KEY)" >&2
+  ledger_decision allow "bundle:${POLICY_BUNDLE:-?}"
+  emit_allow
+  exit 0
+fi
+
+# 2b. autopilot: this session is trusted for a time-boxed window
 if [ "$(cc_config '.policies.autopilot.enabled' 'false')" = "true" ] && [ -f "$AUTOPILOT_DIR/$KEY" ]; then
   EXP="$(cat "$AUTOPILOT_DIR/$KEY" 2>/dev/null || echo 0)"
-  case "$EXP" in *[!0-9]*) EXP=0 ;; esac
+  case "$EXP" in ''|*[!0-9]*) EXP=0 ;; esac  # empty file: cat succeeds, so `|| echo 0` never runs
   if [ "$(cc_now)" -lt "$EXP" ]; then
     echo "[cc-approve] 🛫 autopilot auto-allow: $TOOL ($KEY)" >&2
     ledger_decision allow autopilot
@@ -243,10 +255,15 @@ NOW="$(cc_now)"   # the request start (whole seconds)
 # (e.g. a double-clicked Approve whose first write was already consumed) would
 # look "fresh" and silently answer a request that was never displayed.
 NONCE="$$.$NOW"
+# R1-36: write the per-request nonce ALSO at top level (gate_nonce) -- the parallel
+# cc-status.sh PreToolUse hook can clear the pending block (and with it pending.nonce)
+# in the SAME event via its own read-modify-write race. A top-level field cc-status.sh
+# never touches survives that clear, so decisionContent can still bind a same-second
+# answer. cc-approve clears gate_nonce when it tears the gate down (below).
 cc_merge "$KEY" "$(jq -nc \
   --arg sid "$SESSION_ID" --arg name "$NAME" --arg cwd "$CWD" \
   --argjson now "$NOW" --arg tool "$TOOL" --arg sum "$SUMMARY" --arg nonce "$NONCE" \
-  '{session_id:$sid, name:$name, cwd:$cwd, status:"approval", updated:$now, since:$now, gate:"waiting", pending:{tool:$tool, summary:$sum, message:$sum, nonce:$nonce}}')"
+  '{session_id:$sid, name:$name, cwd:$cwd, status:"approval", updated:$now, since:$now, gate:"waiting", gate_nonce:$nonce, pending:{tool:$tool, summary:$sum, message:$sum, nonce:$nonce}}')"
 echo "[cc-approve] ⏳ waiting on panel for $TOOL ($KEY): $SUMMARY" >&2
 
 # Poll for the panel's decision (0.25s cadence). Load-bearing invariants --
@@ -299,7 +316,18 @@ while [ "$i" -lt "$ITERS" ]; do
   i=$(( i + 1 ))
 done
 
-cc_del_field "$KEY" "gate"
+# R3-18: ownership-aware gate teardown. Two concurrent gated requests on one session
+# key (parallel subagents share session_id) both write gate:"waiting"+gate_nonce. If the
+# FIRST waiter to resolve/time-out deletes the SHARED gate fields unconditionally, a
+# status event during the second waiter's remaining poll can revert its approval tile and
+# drop its pending block (cc-status.sh's R1-36 protection keys off .gate=="waiting"). Only
+# delete when we're still the survivor: the empty check preserves teardown for the single-
+# waiter case (and after a sibling already cleaned up), the NONCE match for the genuine owner.
+CUR_GN="$(cc_read_field "$KEY" '.gate_nonce')"
+if [ -z "$CUR_GN" ] || [ "$CUR_GN" = "$NONCE" ]; then
+  cc_del_field "$KEY" "gate"
+  cc_del_field "$KEY" "gate_nonce"   # R1-36: the gate is resolved; drop the survivor nonce
+fi
 # NOTE: no rm of $DECISION_FILE here -- on a timeout it could be a sibling's
 # fresh answer. Stale leftovers are ignored (claimed + restored) by every
 # waiter's mtime check above, and cc_remove cleans up on SessionEnd.
@@ -327,6 +355,12 @@ elif [ "$DECISION" = "allow" ]; then
 fi
 
 # Timed out with no answer: leave it to Claude Code's native prompt.
+# R1-37: clear our OWN published request state so the tile doesn't keep showing a
+# waiting-for-approval block with a now-dead nonce until the next hook event. This is
+# the session's own pending block (not the shared decision file), so it doesn't touch
+# the "never rm the decision file on timeout" invariant above.
+cc_del_field "$KEY" "pending"
+cc_merge "$KEY" "$(jq -nc --argjson now "$(cc_now)" '{status:"working", updated:$now, since:$now}')"
 echo "[cc-approve] ⚠️  timeout after ${GATE_TIMEOUT}s, falling back to native prompt ($KEY)" >&2
 ledger_decision fallback timeout-fallback
 exit 0

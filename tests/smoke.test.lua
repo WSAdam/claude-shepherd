@@ -82,6 +82,7 @@ local hs = {
 }
 hs.timer = setmetatable({
   secondsSinceEpoch = function() return os.time() end,
+  absoluteTime = function() return os.time() * 1e9 end,  -- monotonic ns (R1-08 dispatchSerialized)
   doEvery = function() return mkstub() end,
   doAfter = function() return mkstub() end,
   new = function() return mkstub() end,

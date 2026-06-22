@@ -78,8 +78,25 @@ if ! cc_have_jq; then
     sessionstart) STATUS="idle" ;;
     *) STATUS="working" ;;
   esac
-  printf '{"session_id":"%s","name":"%s","cwd":"%s","status":"%s","updated":%s,"since":%s}\n' \
-    "$SESSION_ID" "$NAME" "$CWD" "$STATUS" "$(cc_now)" "$(cc_now)" > "$(cc_file "$KEY")"
+  # JSON-escape the interpolated string values (cwd/name can legally contain a
+  # double-quote, backslash, or control char on Unix/macOS); STATUS is one of our
+  # own literals so it needs no escaping. Without this the file would be malformed
+  # and parseStatusList would silently drop the tile.
+  # Emit `editor` even here (cc_detect_editor is pure shell, no jq): the R1-31
+  # kitty/terminal auto-model guard and focusProject routing depend on it; omitting
+  # it makes the auto-model gate fail OPEN, pasting VS Code chat keystrokes into a
+  # real terminal/Kitty window.
+  FB_EDITOR="$(cc_detect_editor)"
+  # R3-25: write atomically (temp + mv, the cc_merge/cc_del_field idiom) so a concurrent
+  # 1Hz dashboard poll never observes an empty/partial file (which the JSON decode drops,
+  # flickering the tile for a tick). Capture cc_now ONCE so updated==since on a fresh write
+  # (two separate $(cc_now) calls could skew by 1s).
+  NOW="$(cc_now)"
+  FB="$(cc_file "$KEY")"
+  FBTMP="${FB}.tmp.$$"
+  printf '{"session_id":"%s","name":"%s","cwd":"%s","status":"%s","editor":"%s","updated":%s,"since":%s}\n' \
+    "$(cc_json_str "$SESSION_ID")" "$(cc_json_str "$NAME")" "$(cc_json_str "$CWD")" \
+    "$STATUS" "$(cc_json_str "$FB_EDITOR")" "$NOW" "$NOW" > "$FBTMP" && mv "$FBTMP" "$FB"
   echo "[cc-status] ⚠️  jq not found; wrote minimal $STATUS for '$NAME'" >&2
   exit 0
 fi
@@ -181,7 +198,11 @@ if [ "$STATUS" != "$PREV" ]; then
   SINCE="$NOW"
 else
   SINCE="$(cc_read_field "$KEY" '.since')"
-  [ -n "$SINCE" ] || SINCE="$NOW"
+  # Coerce a non-numeric/empty .since (hand-edit, rsync-mirror, partial write) to
+  # NOW: --argjson below requires valid JSON, so a non-numeric value would wedge
+  # every further update for this tile. Mirrors core.parseStatusList's tonumber
+  # hardening on the reader side (cc-core.lua).
+  case "$SINCE" in ''|*[!0-9]*) SINCE="$NOW" ;; esac
 fi
 
 # Build the merge patch.
@@ -232,6 +253,26 @@ if [ -n "$SET_PENDING" ]; then
     PATCH="$(printf '%s' "$PATCH" | jq -c --argjson ask "$ASK_JSON" '.pending.ask = $ask')"
   fi
 fi
+
+# R1-36: cc-approve.sh (the gate) and THIS hook run in parallel under the same
+# PreToolUse matcher group, both read-modify-writing <key>.json. When the gate has
+# armed (gate=="waiting"), a pretooluse/posttooluse {status:working}+pending-clear
+# landing AFTER the gate's write would revert the approval status and delete the
+# pending block (incl. the nonce) out from under the panel. The gate owns the tile's
+# lifecycle while it's waiting, so leave status/pending untouched for these events.
+case "$EVENT" in
+  pretooluse|posttooluse)
+    if [ "$(cc_read_field "$KEY" '.gate')" = "waiting" ]; then
+      # don't override the armed gate's status, and don't clear its pending block.
+      # R3-15: ALSO strip `since` -- the gate recorded since:T1 (when the approval
+      # started) and the dashboard's stale-approval escalation measures (now - since).
+      # A concurrent sibling tool event on the same key would otherwise merge since:$NOW,
+      # restarting the "waiting since" clock every tick so the threshold never trips.
+      # `updated` still flows (tile stays fresh), only the escalation clock is preserved.
+      PATCH="$(printf '%s' "$PATCH" | jq -c 'del(.status, .since)')"
+      CLEAR_PENDING=""
+    fi ;;
+esac
 
 # A new pending fully REPLACES the old one. cc_merge applies the patch with jq's
 # recursive `*`, which preserves an object key the patch doesn't carry -- so a new

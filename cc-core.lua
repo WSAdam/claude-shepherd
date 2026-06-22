@@ -49,6 +49,11 @@ end
 -- API error -- you must resume them), then the rest; ties broken by name for stability.
 local RANK = { approval = 0, error = 1, done = 2, working = 3, idle = 4 }
 
+-- The known, trusted status set. parseStatusList clamps any value not in here to
+-- "idle" so a hand-edited/rsync-mirrored/hostile status string can never reach the
+-- panel's innerHTML sink raw (R2-17). Mirror of RANK's keys; exposed for tests.
+M.STATUSES = { approval = true, error = true, done = true, working = true, idle = true }
+
 -- A STABLE per-launch-folder identity for a session, used to key persistent
 -- labels. `cwd` drifts as the agent cd's around, so it's unusable as a label key;
 -- transcript_path encodes the session's LAUNCH directory (…/projects/<ENCODED>/…)
@@ -69,7 +74,26 @@ function M.parseStatusList(entries, now, staleSeconds)
     local okj, data = pcall(function() return M.json.decode(e.content) end)
     if okj and type(data) == "table" and data.name then
       data.key = e.key
+      -- R3-01: coerce name to a string at the parse chokepoint, mirroring the
+      -- updated/since/status hardening below. A non-string name (JSON number/bool,
+      -- legal to hand-write or rsync-mirror) would otherwise tie on status with a
+      -- string-named tile and throw `attempt to compare number with string` inside
+      -- sortByStatus's `<` comparator, aborting the (un-pcall'd) refresh tick.
+      data.name = tostring(data.name)
       data.projectKey = M.projectKey(data)
+      -- Coerce time fields to numbers at the parse chokepoint. A status file with a
+      -- non-numeric `updated`/`since` (boolean, "soon", a date string -- all legal to
+      -- hand-write or rsync-mirror) would otherwise reach the raw arithmetic in stale/
+      -- approvalStale/stepAutoRespawn/shouldPrune OUTSIDE the decode pcall and throw,
+      -- permanently aborting the 1Hz refresh tick. tonumber yields nil for garbage,
+      -- which every downstream `~= nil`/`and ...` guard already handles as "no timestamp".
+      data.updated = tonumber(data.updated)
+      data.since = tonumber(data.since)
+      -- R2-17: clamp status to the known set at the parse chokepoint. status is later
+      -- interpolated UNESCAPED into the tile innerHTML (class + label) on the LOCAL
+      -- panel, so a hostile/compromised bridged host (parseMirrorList delegates here)
+      -- could ship status='<img src=x onerror=...>' as stored XSS. Unknown -> "idle".
+      if not M.STATUSES[data.status] then data.status = "idle" end
       data.stale = (data.updated ~= nil) and ((now - data.updated) > staleSeconds) or false
       list[#list + 1] = data
     end
@@ -84,7 +108,7 @@ function M.sortByStatus(list)
   table.sort(list or {}, function(a, b)
     local ra, rb = RANK[a.status] or 9, RANK[b.status] or 9
     if ra ~= rb then return ra < rb end
-    return (a.name or "") < (b.name or "")
+    return tostring(a.name or "") < tostring(b.name or "")
   end)
   return list
 end
@@ -118,6 +142,15 @@ end
 -- Returns the action actually taken (handy for tests/logging).
 function M.handleAction(fx, item, action, text)
   if not item then return nil end
+  -- R2-07: fail closed for remote (bridge) tiles on EVERY window-effect action.
+  -- R1-26 only hardened approve/deny, but the rule engine, Stream Deck button, and
+  -- the jump/cycle hotkey all reach focus/stop/nudge/continue/etc WITHOUT pre-gating
+  -- via core.remoteActionAllowed -- and those branches build a local `tgt` (dropping
+  -- item.remote) that focuses/keystrokes a LOCAL window matching the remote name.
+  -- Only the decision-file approve/deny (headless, self-gated on gate=="waiting"
+  -- below) may proceed for a remote tile. This single chokepoint covers all callers,
+  -- matching the R1-26 comment's claim and actionIsHeadless / remoteActionAllowed.
+  if item.remote and action ~= "approve" and action ~= "deny" then return nil end
   -- The window effects route per editor (Part A), so they need more than the
   -- name: a compact target carries the kitty targeting data too. Key-based
   -- effects (writeDecision/removeStatus) stay headless regardless of editor.
@@ -128,10 +161,20 @@ function M.handleAction(fx, item, action, text)
   if action == "focus" then
     fx.focusWindow(tgt)
   elseif action == "approve" then
-    if item.gate == "waiting" then fx.writeDecision(item.key, "allow")
+    -- R1-26: a remote (bridge) tile must NEVER fall through to actOnWindow (which
+    -- focuses a LOCAL window matching the remote name + presses Enter). Fail closed:
+    -- approve only via the decision file, and only while the remote gate is waiting.
+    -- This protects ALL callers (the single-approve hotkey + Stream Deck paths don't
+    -- pre-gate via remoteActionAllowed the way the webview/bulk paths do) and aligns
+    -- handleAction with actionIsHeadless (remote tiles never focus a local window).
+    if item.remote then
+      if item.gate == "waiting" then fx.writeDecision(item.key, "allow") else return nil end
+    elseif item.gate == "waiting" then fx.writeDecision(item.key, "allow")
     else fx.actOnWindow(tgt, M.KEY_APPROVE) end  -- kitty: headless send-key "enter"
   elseif action == "deny" then
-    if item.gate == "waiting" then fx.writeDecision(item.key, "deny")
+    if item.remote then
+      if item.gate == "waiting" then fx.writeDecision(item.key, "deny") else return nil end
+    elseif item.gate == "waiting" then fx.writeDecision(item.key, "deny")
     else fx.actOnWindow(tgt, M.KEY_DENY) end
   elseif action == "stop" then
     fx.actOnWindow(tgt, M.KEY_STOP)
@@ -159,15 +202,26 @@ function M.handleAction(fx, item, action, text)
     fx.closeWindow(tgt)
     fx.removeStatus(item.key)
   elseif action == "effort" then
-    -- Change effort live via the `/effort <level>` slash command.
+    -- Change effort live via the `/effort <level>` slash command. Gated on delivery
+    -- (skip-on-no-window-match) so the caller never ledgers a change the session
+    -- never received -- matching nudge/continue/set-mode.
     local cmd = M.effortCommand(text)
-    if cmd then fx.typeIntoWindow(tgt, cmd) else return nil end
+    if not cmd then return nil end
+    if not delivered(fx, fx.typeIntoWindow(tgt, cmd),
+        "effort keystroke not delivered for " .. tostring(item.name)) then
+      return nil
+    end
   elseif action == "model" then
     -- Switch model live via the `/model <id>` slash command. Works within the
     -- session's current backend (Claude tiers, or models the gateway serves); a
     -- different base URL still needs a fresh session (relaunch), not /model.
+    -- Gated on delivery like effort/nudge/continue.
     local cmd = M.modelCommand(text)
-    if cmd then fx.typeIntoWindow(tgt, cmd) else return nil end
+    if not cmd then return nil end
+    if not delivered(fx, fx.typeIntoWindow(tgt, cmd),
+        "model keystroke not delivered for " .. tostring(item.name)) then
+      return nil
+    end
   elseif action == "set-mode" then
     -- Cycle to permission mode `text` via Shift+Tab x N (Part C). Kitty reliable;
     -- VS Code best-effort (its mode switcher is mouse-only). N is 0 (no-op) when
@@ -190,7 +244,12 @@ function M.handleAction(fx, item, action, text)
     -- extension's picker is mouse-only. A MULTI-select picker can't be driven by
     -- down*N+Enter (it needs toggle-then-confirm), so for it -- and for non-kitty --
     -- we JUMP so the user finishes it by hand.
-    if item.editor == "kitty" and not M.askIsMulti(item) then
+    -- R2-16: only fire key-synthesis for a SINGLE single-select question, where
+    -- the option index unambiguously drives the one picker. For a multi-QUESTION
+    -- ask, answerAsk passes only the option index (not the question index), so
+    -- down*N would drive question 1's picker by an option meant for question 2 --
+    -- a confidently-wrong selection. Jump instead so the operator finishes by hand.
+    if item.editor == "kitty" and not M.askIsMulti(item) and not M.askIsMultiQuestion(item) then
       fx.sendKeys(tgt, M.answerKeys(text))
     else
       fx.focusWindow(tgt)
@@ -221,6 +280,14 @@ function M.askIsMulti(item)
   if type(ask) ~= "table" then return false end
   local q = ask[1]
   return type(q) == "table" and q.multiSelect == true
+end
+
+-- Does the pending AskUserQuestion contain MORE THAN ONE question? answerAsk only
+-- sends the option index (not the question index), so down*N+Enter can't target a
+-- specific question -- the key-synth path is restricted to single-question asks.
+function M.askIsMultiQuestion(item)
+  local ask = item and item.pending and item.pending.ask
+  return type(ask) == "table" and #ask > 1
 end
 
 -- Valid effort levels that can be set live via `/effort` (matches settings).
@@ -281,9 +348,23 @@ function M.suggestModel(task, cfg)
   local trimmed = task:gsub("^%s+", ""):gsub("%s+$", "")
   if trimmed == "" then return nil end
   local D = M.AUTOMODEL_DEFAULTS
-  local models   = M.config(cfg, "automodel.models", D.models) or D.models
+  -- R1-33: merge the models override PER-TIER over the defaults, not wholesale. M.config
+  -- returns the user's node as-is, so overriding only one tier (e.g. { cheap = "x" })
+  -- would leave standard/hard nil and silently disable routing for them. Per-tier merge
+  -- keeps the un-overridden tiers working.
+  local mv = M.config(cfg, "automodel.models", nil)
+  local models = {
+    cheap    = (type(mv) == "table" and mv.cheap)    or D.models.cheap,
+    standard = (type(mv) == "table" and mv.standard) or D.models.standard,
+    hard     = (type(mv) == "table" and mv.hard)     or D.models.hard,
+  }
   local cheapMax = tonumber(M.config(cfg, "automodel.cheapMax", D.cheapMax)) or D.cheapMax
   local hardMin  = tonumber(M.config(cfg, "automodel.hardMin",  D.hardMin))  or D.hardMin
+  -- R2-28: enforce the low<high invariant. The tier test below checks `n <= cheapMax`
+  -- FIRST, so an inverted/overlapping config (cheapMax >= hardMin, via typo/swap)
+  -- would silently classify long tasks in [hardMin, cheapMax] as cheap and route them
+  -- to Haiku. Reject the bad pair back to the safe defaults rather than honor it.
+  if cheapMax >= hardMin then cheapMax, hardMin = D.cheapMax, D.hardMin end
   local cheapW   = M.config(cfg, "automodel.cheapWords", D.cheapWords) or D.cheapWords
   local hardW    = M.config(cfg, "automodel.hardWords",  D.hardWords)  or D.hardWords
   local lc = trimmed:lower()
@@ -686,15 +767,28 @@ function M.sessionHistory(events, opts)
       local sid = e.session_id
       local r = by[sid]
       if not r then
-        r = { session_id = sid, name = e.name, projectKey = e.projectKey,
+        r = { session_id = sid, name = nil, projectKey = nil,
               firstTs = nil, lastTs = nil, lastType = nil,
-              events = 0, prompts = 0, toolRequests = 0, allow = 0, deny = 0 }
+              events = 0, prompts = 0, toolRequests = 0, allow = 0, deny = 0,
+              _nameTs = nil, _pkTs = nil }
         by[sid] = r; order[#order + 1] = sid
       end
-      if e.name and e.name ~= "" then r.name = e.name end       -- prefer the latest non-empty name
-      -- ...but FIRST projectKey wins (deliberate asymmetry): it's the pin key, so a session
-      -- that migrates workspace keeps its pin stable rather than splitting across keys.
-      if e.projectKey and not r.projectKey then r.projectKey = e.projectKey end
+      -- R1-12: name/projectKey selection must be ORDER-INDEPENDENT. The only caller
+      -- feeds events NEWEST-first (filterLedger sorts ts desc), so the old
+      -- unconditional-overwrite picked the OLDEST name and a not-set guard kept the
+      -- NEWEST projectKey -- both inverted from the documented intent. Track each
+      -- field's source ts instead so the LATEST non-empty name and the EARLIEST
+      -- projectKey (the stable pin) win regardless of iteration order.
+      do
+        local nts = tonumber(e.ts) or -math.huge
+        if e.name and e.name ~= "" and (not r._nameTs or nts >= r._nameTs) then
+          r.name = e.name; r._nameTs = nts
+        end
+        local pts = tonumber(e.ts) or math.huge
+        if e.projectKey and (not r._pkTs or pts < r._pkTs) then
+          r.projectKey = e.projectKey; r._pkTs = pts
+        end
+      end
       local ts = tonumber(e.ts)
       if ts then
         if not r.firstTs or ts < r.firstTs then r.firstTs = ts end
@@ -710,7 +804,11 @@ function M.sessionHistory(events, opts)
     end
   end
   local list = {}
-  for _, sid in ipairs(order) do list[#list + 1] = by[sid] end
+  for _, sid in ipairs(order) do
+    local r = by[sid]
+    r._nameTs = nil; r._pkTs = nil  -- internal ts trackers; don't leak into the record
+    list[#list + 1] = r
+  end
   local sort = opts.sort or "recent"
   if sort == "oldest" then
     table.sort(list, function(a, b) return (a.lastTs or 0) < (b.lastTs or 0) end)
@@ -822,7 +920,9 @@ local NARRATE = {
   task_feed     = { "📥", "fed task" },
   mode_change   = { "🎚", "mode" },
   model_change  = { "🤖", "model" },
+  model_skipped = { "🤖", "model NOT switched (no window)" },
   effort_change = { "🎚", "effort" },
+  effort_skipped = { "🎚", "effort NOT changed (no window)" },
   clear         = { "🧹", "cleared conversation" },
   compact       = { "🗜", "compacted conversation" },
   nudge         = { "👉", "nudge" },
@@ -837,6 +937,7 @@ local NARRATE = {
   loop          = { "⟳", "repeating the same action" },
   auto_respawn  = { "♻️", "auto-respawned" },
   auto_respawn_blocked = { "🚫", "death not respawnable" },
+  auto_continue = { "▶️", "auto-continued" },
   rule          = { "📐", "rule fired" },
   schedule_fire = { "⏰", "scheduled routine fired" },
   drain_close   = { "⛔", "drained (finished turn, closed)" },
@@ -845,7 +946,13 @@ local NARRATE = {
   queue_starved = { "⌛", "queued work waiting (no free session)" },
   remote_decision = { "📡", "remote decision sent" },
   rewind_open   = { "↶", "opened the rewind picker" },
+  mode_skipped  = { "🎚", "mode NOT changed (no window)" },
 }
+-- R3-10: expose NARRATE so the dashboard can inject it as data (__NARRATE__) and the JS
+-- evDesc twin derives BOTH its emoji and verb label from this single source -- otherwise
+-- the hand-maintained EV_VERB/EV_EMOJI partial maps drift and ~21 types render the raw
+-- e.type in Rows/Timeline while Review/Shift shows the rich verb.
+M.NARRATE = NARRATE
 
 -- One human-readable line for an event (no timestamp/name; the caller adds those).
 function M.narrateEvent(e)
@@ -862,12 +969,33 @@ function M.narrateEvent(e)
   local emoji = (spec and spec[1]) or "•"
   local verb = (spec and spec[2]) or tostring(t)
   local detail
-  if t == "mode_change" or t == "model_change" or t == "effort_change" then
+  if t == "mode_change" or t == "model_change" or t == "effort_change"
+     or t == "model_skipped" or t == "effort_skipped" or t == "mode_skipped" then
     detail = (e.from and (tostring(e.from) .. " → ") or "→ ") .. tostring(e.to or "?")
   elseif t == "tool_request" then
     detail = tostring(e.tool or "") .. (e.summary and (' "' .. tostring(e.summary) .. '"') or "")
+  elseif t == "auto_continue" then
+    -- mirror the JS evDesc twin (resumed after API error, attempt-aware)
+    detail = "resumed after API error"
+      .. (e.attempt and (" (attempt " .. tostring(e.attempt) .. ")") or "")
+  -- R3-10: these types carry their detail in NON-default fields, so the generic
+  -- e.prompt/.summary/.task/.text/.message fallback below rendered a bare verb. Match
+  -- the JS evDesc twin's per-type detail so Review/Shift == Rows/Timeline.
+  elseif t == "rule" then
+    detail = e.rule or e.kind
+  elseif t == "loop" then
+    detail = (e.repeats ~= nil) and (tostring(e.repeats) .. "x") or nil
+  elseif t == "queue_starved" then
+    detail = (e.depth ~= nil) and (tostring(e.depth) .. " queued") or nil
+  elseif t == "error" then
+    detail = e.reason or e.message
+  elseif t == "auto_respawn_blocked" then
+    detail = e.reason or e.outcome
   else
-    detail = e.prompt or e.summary or e.task or e.message
+    -- R2-14: include e.text (matches the JS evDesc twin) -- nudge/nudge_skipped
+    -- ledger events carry their operator/broadcast content ONLY in .text, so
+    -- omitting it rendered a bare "👉 nudge" and hid the content from the LLM review.
+    detail = e.prompt or e.summary or e.task or e.text or e.message
   end
   return emoji .. " " .. verb .. (detail and (": " .. tostring(detail)) or "")
 end
@@ -1437,6 +1565,10 @@ function M.fleetStandup(events, opts)
     local t = e.type
     if STANDUP_LIFE[t] then life[t] = (life[t] or 0) + 1 end
     if STANDUP_PROBLEM[t] then problems[t] = (problems[t] or 0) + 1 end
+    -- R2-13: routed feeds are DELIVERED 'task_feed' events with by='router' (written
+    -- by the dispatcher), NOT 'decision' events -- the gate never sets by='router'.
+    -- Count only delivered feeds (task_feed), not task_feed_skipped (no delivery).
+    if t == "task_feed" and e.by == "router" then routed = routed + 1 end
     if t == "prompt" then local p = proj(e); p.prompts = p.prompts + 1
     elseif t == "auto_respawn" then local p = proj(e); p.autoRespawns = p.autoRespawns + 1
     elseif t == "escalation" then local p = proj(e); p.escalations = p.escalations + 1
@@ -1447,7 +1579,6 @@ function M.fleetStandup(events, opts)
       local p = proj(e)
       if e.outcome == "deny" then p.deny = p.deny + 1
       elseif e.outcome == "allow" then p.allow = p.allow + 1 end
-      if e.by == "router" then routed = routed + 1 end
     end
   end
   local byProject = {}
@@ -1738,7 +1869,14 @@ function M.sessionRisk(events, opts)
     elseif t == "decision" then
       decisionCount = decisionCount + 1
       if e.outcome == "deny" then denyCount = denyCount + 1 end
-      if e.by == "autoDeny" then autoDenyHits = autoDenyHits + 1 end
+      -- R3-11: a policy-bundle auto-deny carries by='bundle:<name>' (cc-approve.sh),
+      -- not the literal 'autoDeny', so the "safety net fired" signal was permanently 0
+      -- for bundle sessions. Count it too (gated on outcome=='deny' so a bundle auto-
+      -- ALLOW isn't miscounted as a safety-net trip).
+      if e.by == "autoDeny"
+         or (type(e.by) == "string" and e.by:sub(1, 7) == "bundle:" and e.outcome == "deny") then
+        autoDenyHits = autoDenyHits + 1
+      end
       if e.by == "timeout-fallback" then timeoutFallbacks = timeoutFallbacks + 1 end
       -- Only a human/timeout decision counts as a slow approval, but ANY decision
       -- resolves the pending request -- so an auto-decision can't leave a stale
@@ -2081,6 +2219,32 @@ end
 -- LATEST significant event -- a later `assistant`/`user` line means it recovered (or the
 -- user already typed continue), so return nil. Meta lines (snapshots, stop_hook_summary)
 -- are skipped. Pure; the caller (refresh) reads the tail and overrides the status.
+-- R3-04: is this transcript `user` line a genuine human-typed prompt (vs an IDE
+-- file-open injection, a meta line, or a tool-result-only user line)? A real prompt
+-- carries non-empty text/string content and is not flagged isMeta. Pure helper.
+function M.userHasHumanText(obj)
+  if type(obj) ~= "table" then return false end
+  if obj.isMeta then return false end
+  local m = obj.message
+  if type(m) ~= "table" then return false end
+  local c = m.content
+  if type(c) == "string" then
+    return c:gsub("%s+", "") ~= ""
+  end
+  if type(c) == "table" then
+    for _, part in ipairs(c) do
+      if type(part) == "table" then
+        -- a tool_result block is not a human prompt; only text blocks count
+        if part.type == "text" and type(part.text) == "string"
+           and part.text:gsub("%s+", "") ~= "" then
+          return true
+        end
+      end
+    end
+  end
+  return false
+end
+
 function M.transcriptError(text)
   if not text or #text == 0 then return nil end
   local lines = {}
@@ -2091,8 +2255,18 @@ function M.transcriptError(text)
       local okj, obj = pcall(function() return M.json.decode(line) end)
       if okj and type(obj) == "table" then
         local t = obj.type
-        if t == "assistant" or t == "user" then
-          return nil  -- activity after any error -> recovered / no longer stuck
+        if t == "assistant" then
+          return nil  -- a model turn after the error -> recovered / no longer stuck
+        elseif t == "user" then
+          -- R3-04: symmetric with transcriptResumed -- the IDE injects spurious `user`
+          -- lines (file-open context, tool-results, meta) that are NOT real activity,
+          -- so a lone such line during a freeze must NOT read as recovery. Treat a user
+          -- line as recovery ONLY when it is a genuine human-typed prompt: non-meta,
+          -- carrying actual text content. Otherwise keep scanning past it.
+          if M.userHasHumanText(obj) then
+            return nil
+          end
+          -- else: IDE/meta/tool-result injection -> not recovery, keep scanning back
         elseif t == "system" and obj.subtype == "api_error" then
           local e = obj.error
           local msg = (type(e) == "table" and (e.formatted or e.message)) or "API error"
@@ -2899,12 +3073,17 @@ end
 -- until the current one finishes.) True if any member is mid-turn (working/approval)
 -- or carries a FRESH pending routed-feed marker. opts = { pending = map key->ts,
 -- now, pendingTimeout }.
+-- R2-19: a STALE (dead/frozen) member must NOT count as in-flight -- a session that
+-- died/froze mid-turn keeps status=='working' and would otherwise hold a sequential
+-- queue forever behind a corpse, with no starvation alert (queueStarved suppresses
+-- on the sequential-busy branch). Mirrors the `not it.stale` discipline in
+-- sessionFree/routeBarrierMet (the PICK side already excludes stale).
 function M.projectBusy(members, opts)
   opts = opts or {}
   local pending = opts.pending or {}
   for _, it in ipairs(members or {}) do
     if type(it) == "table" then
-      if it.status == "working" or it.status == "approval" then return true end
+      if not it.stale and (it.status == "working" or it.status == "approval") then return true end
       local ts = pending[it.key]
       if ts ~= nil then
         local expired = ((tonumber(opts.now) or 0) - (tonumber(ts) or 0))
@@ -2923,7 +3102,10 @@ end
 -- TYPED (the session never sees the routing scaffolding). A prefix with nothing
 -- after it is treated as literal text (no role), so a stray "@x:" can't blank a task.
 function M.taskRoute(task)
-  task = tostring(task or "")
+  -- R3-06: strip leading whitespace at the parse chokepoint so a task like
+  -- " @review: x" (queue-add bridge / L6 feed don't pre-trim) is still recognized
+  -- as routed and the scaffolding is stripped (renderFeed types the trimmed bare text).
+  task = tostring(task or ""):gsub("^%s+", "")
   local role, rest = task:match("^@([%w._%-]+):%s*(.*)$")
   if role and rest and rest:gsub("%s+$", "") ~= "" then return role:lower(), rest end
   return nil, task
@@ -2947,24 +3129,35 @@ end
 -- can't be @-addressed); a barrier composes with a role -- "@all: @review: x" is a
 -- join THEN a role. A prefix with no body after it is literal text (no barrier).
 function M.taskBarrier(task)
-  task = tostring(task or "")
+  -- R3-06: strip leading whitespace (untrimmed callers: queue-add bridge, L6 feed).
+  task = tostring(task or ""):gsub("^%s+", "")
+  -- R3-05: lowercase the matched keyword before the reserved-word test, mirroring
+  -- taskRoute's role:lower(), so @ALL:/@Any:/etc. are recognized as barriers (and thus
+  -- excluded from role routing) -- otherwise an uppercase barrier silently degrades to
+  -- a role filter (group=='all') and the task stalls forever.
   local kw, rest = task:match("^@(%a+):%s*(.*)$")
+  kw = kw and kw:lower() or kw
   if (kw == "all" or kw == "any") and rest and rest:gsub("%s+$", "") ~= "" then
     return kw, rest
   end
   return nil, task
 end
 
--- Is a join barrier satisfied? "all" = every member settled (done, not stale/
--- remote); "any" = at least one settled. Flat AND/OR over done-state -- no nested
--- tree. nil/unknown mode -> true (not a barrier). Empty membership -> false.
+-- Is a join barrier satisfied? "all" = every DRIVABLE member settled (done);
+-- "any" = at least one settled. Flat AND/OR over done-state -- no nested tree.
+-- nil/unknown mode -> true (not a barrier). Empty (or all-non-drivable) -> false.
+-- R2-18: stale/remote members are EXCLUDED from the requirement, not permanent
+-- blockers. They can never become `settled` (the PICK side, sessionFree, excludes
+-- them), so counting them in `total` made "all" forever-unsatisfiable whenever any
+-- sibling was dead/frozen/remote -- a silent permanent stall (routeTask returns nil
+-- and queueStarved is suppressed). Matches sessionFree's drivable notion.
 function M.routeBarrierMet(members, mode)
   if mode ~= "all" and mode ~= "any" then return true end
   local settled, total = 0, 0
   for _, it in ipairs(members or {}) do
-    if type(it) == "table" then
+    if type(it) == "table" and not it.stale and not it.remote then
       total = total + 1
-      if it.status == "done" and not it.stale and not it.remote then settled = settled + 1 end
+      if it.status == "done" then settled = settled + 1 end
     end
   end
   if total == 0 then return false end
@@ -3022,6 +3215,23 @@ function M.routeTask(members, q, opts)
   return { key = key, role = role, barrier = barrier }
 end
 
+-- R1-18: re-validate a routed feed AFTER the pop, before committing. routeTask peeks
+-- the head and picks a member for that head's @role:/barrier; the actual pop happens
+-- later inside the dispatchSerialized slot and re-reads the file FIFO. If the operator
+-- reorders the queue (queue-move) during the sub-second stagger, the popped task may
+-- carry a DIFFERENT @role: than the chosen member -> a role-addressed task lands in a
+-- non-matching member. This recomputes barrier + role from the freshly-popped task and
+-- the chosen item, returning true only when both still hold (so the caller can refuse
+-- the feed and leave the task queued for the next tick to re-pick). Pure.
+function M.routeFeedMatches(item, task, members)
+  if type(item) ~= "table" then return false end
+  local barrier, afterB = M.taskBarrier(task)
+  if barrier and not M.routeBarrierMet(members, barrier) then return false end
+  local role = select(1, M.taskRoute(afterB))
+  if role ~= nil and M.memberRole(item) ~= role then return false end
+  return true
+end
+
 -- Starvation check: an armed project with queued work and NO free session for
 -- longer than `minutes`. sinceTs = when the caller first observed the starved
 -- condition (it keeps the clock; pure here). minutes <= 0 disables.
@@ -3030,6 +3240,15 @@ function M.queueStarved(members, q, opts)
   local minutes = tonumber(opts.minutes) or 0
   if minutes <= 0 then return false end
   if not M.queueRouted(q) or M.queueDepth(q) == 0 then return false end
+  -- R1-16: a sequential queue with a task in flight is PROGRESSING one-at-a-time, not
+  -- starved. routeTask already holds (returns nil) for sequential-busy; mirror that
+  -- here so the dispatcher's starvation branch doesn't fire queue_starved on a queue
+  -- working exactly as designed. projectBusy defaults pendingTimeout when nil.
+  if M.queueRouteMode(q) == "sequential"
+     and M.projectBusy(members, { pending = opts.pending, now = opts.now,
+                                  pendingTimeout = opts.pendingTimeout }) then
+    return false
+  end
   -- a head waiting on an unmet join barrier is WAITING, not starved
   local barrier, afterB = M.taskBarrier(M.queuePeek(q))
   if barrier and not M.routeBarrierMet(members, barrier) then return false end
@@ -3116,11 +3335,30 @@ end
 --   spawn     = edge fired AND canRespawn ~= false (a real relaunch; budget charged)
 --   wouldFire = edge fired (under cap, not intentional), regardless of canRespawn
 --   isStale, attempts (this folder's count or nil)
+-- R2-21: the retry-budget key. projectKey alone is the LAUNCH FOLDER, so two
+-- parallel sessions in one folder share ONE budget -- a healthy/recovered sibling
+-- then zeroes a crash-looper's budget each reset tick and the cap never binds.
+-- Key per terminal WINDOW (kitty socket#window, stable across a respawn that reuses
+-- the window but distinct per genuine sibling) when available; fall back to
+-- projectKey/cwd for non-kitty editors with no terminal identity (accepting
+-- per-folder sharing only there -- the same safe side staleDuplicateKeys takes).
+-- MUST NOT key by session_id: a respawn deliberately gives a NEW session_id but the
+-- SAME window, and the count must carry across respawns toward the cap.
+function M.budgetKey(item)
+  item = item or {}
+  local pk = item.projectKey or item.cwd
+  local sock, wid = item.kitty_listen_on, item.kitty_window_id
+  if pk and sock ~= nil and sock ~= "" and wid ~= nil and wid ~= "" then
+    return pk .. "@" .. tostring(sock) .. "#" .. tostring(wid)
+  end
+  return pk
+end
+
 function M.stepAutoRespawn(attempts, item, opts)
   attempts = attempts or {}
   opts = opts or {}
   item = item or {}
-  local pk = item.projectKey or item.cwd
+  local pk = M.budgetKey(item)
   -- Healthy -> reset the folder budget, but ONLY after sustained health. A freshly
   -- relaunched tile is non-stale by construction (SessionStart just wrote it), so
   -- resetting on first sight would wipe the budget ~90s before the relaunch could
@@ -3128,8 +3366,9 @@ function M.stepAutoRespawn(attempts, item, opts)
   -- forever. `since` is when the tile entered its current status (cc-status.sh
   -- keeps it across same-status updates); require it to have survived a full stale
   -- window. No now/since/staleSeconds -> fail closed (keep the budget).
-  if not (item.stale or false) and pk and opts.now and opts.staleSeconds and item.since
-    and (opts.now - item.since) > opts.staleSeconds then
+  local since = tonumber(item.since)
+  if not (item.stale or false) and pk and opts.now and opts.staleSeconds and since
+    and (opts.now - since) > opts.staleSeconds then
     attempts[pk] = nil
   end
   -- Death evidence needs MUCH more silence than the 90s display staleness: no
@@ -3141,8 +3380,9 @@ function M.stepAutoRespawn(attempts, item, opts)
   -- tool-timeout ceiling) computed from the status file's `updated` stamp.
   -- Missing clock/updated/threshold -> fail closed (no death evidence, no fire).
   local rss = tonumber(opts.respawnStaleSeconds)
-  local frozen = (opts.now ~= nil and item.updated ~= nil and rss ~= nil
-    and (opts.now - item.updated) > rss) or false
+  local updated = tonumber(item.updated)
+  local frozen = (opts.now ~= nil and updated ~= nil and rss ~= nil
+    and (opts.now - updated) > rss) or false
   local wouldFire, spawn = false, false
   if opts.enabled and pk then
     local n = attempts[pk] or 0
@@ -3191,9 +3431,20 @@ function M.stepAutoContinue(state, item, opts)
   state = state or {}; state.since = state.since or {}; state.attempts = state.attempts or {}
   opts = opts or {}; item = item or {}
   local key = item.key
-  local pk = item.projectKey or item.cwd or key
+  local pk = M.budgetKey(item) or key  -- R2-21: per-window budget (see budgetKey)
   if not key then return { fire = false } end
   if item.status ~= "error" then
+    -- R3-23: distinguish "left the error state" from "couldn't determine status this
+    -- tick". The dashboard derives status=='error' from a fresh transcript-tail read;
+    -- a momentary read failure (io.open flap) makes status fall back to 'working', and
+    -- naively wiping the grace clock here would restart the full delaySeconds countdown
+    -- on every flicker, indefinitely delaying resume of a genuinely-frozen session.
+    -- statusKnown defaults true (callers passing real statuses are unaffected); only a
+    -- FAILED-read tick (statusKnown==false) preserves an already-running grace clock and
+    -- does not fire (we can't confirm the session is still errored).
+    if opts.statusKnown == false and state.since[key] ~= nil then
+      return { fire = false }
+    end
     state.since[key] = nil
     if item.status == "done" or item.status == "idle" then state.attempts[pk] = nil end
     return { fire = false }
@@ -3204,8 +3455,23 @@ function M.stepAutoContinue(state, item, opts)
   local fire = (opts.enabled == true) and M.shouldAutoContinue({
     status = item.status, elapsed = elapsed,
     minSeconds = opts.minSeconds, attempts = n, maxAttempts = opts.maxAttempts }) or false
-  if fire then state.attempts[pk] = n + 1; state.since[key] = opts.now end
-  return { fire = fire, elapsed = elapsed, attempts = pk and state.attempts[pk] or nil }
+  -- R2-22: restart the grace clock on a fired attempt (so a fired-but-undelivered
+  -- tile re-spaces instead of re-firing every tick), but DO NOT charge the budget
+  -- here -- the charge happens on CONFIRMED delivery via chargeAutoContinue. A
+  -- session whose window can't be matched would otherwise burn maxAttempts without
+  -- ever typing "continue" (handleAction returns nil / ledgers skipped on a miss).
+  if fire then state.since[key] = opts.now end
+  return { fire = fire, elapsed = elapsed, attempts = pk and state.attempts[pk] or nil,
+           budgetKey = pk }
+end
+
+-- R2-22: charge one auto-continue attempt against the per-window budget. Called by
+-- the dashboard ONLY after a "continue" keystroke actually landed (handleAction
+-- returned "continue"), so an undelivered attempt never advances the cap.
+function M.chargeAutoContinue(state, pk)
+  if not (state and pk) then return end
+  state.attempts = state.attempts or {}
+  state.attempts[pk] = (state.attempts[pk] or 0) + 1
 end
 
 -- ---- Auto-enable Remote Control on already-running sessions -----------------
@@ -3238,11 +3504,12 @@ end
 function M.shouldPrune(item, now, opts)
   opts = opts or {}
   if not item then return false end
-  local age = item.updated and (now - item.updated) or 0
+  local updated = tonumber(item.updated)
+  local age = updated and (now - updated) or 0
   local orphan = opts.pruneNoSid and item.stale
     and (not item.session_id or item.session_id == "")
   local ghost = opts.pruneSeconds and opts.pruneSeconds > 0
-    and item.updated and age > opts.pruneSeconds
+    and updated and age > opts.pruneSeconds
   return (orphan or ghost) and true or false
 end
 
@@ -3330,8 +3597,10 @@ end
 -- True when a session has been waiting for you (status "approval") longer than
 -- thresholdSec. (`since` is when it entered the approval state.)
 function M.approvalStale(item, now, thresholdSec)
-  if not item or item.status ~= "approval" or not item.since then return false end
-  return (now - item.since) > thresholdSec
+  if not item or item.status ~= "approval" then return false end
+  local since = tonumber(item.since)
+  if not since then return false end
+  return (now - since) > thresholdSec
 end
 
 -- ---- Stuck-session watchdog (working-stall escalation) ---------------------
@@ -3729,6 +3998,14 @@ function M.respawnSpec(item, cfg)
     project = project,
     permissionMode = item.permission_mode,
     providerId = profile and profile.id or nil,
+    -- R1-24: a raw per-variant ANTHROPIC_MODEL (DR7 native A/B, no provider profile)
+    -- is recorded on the tile but matches no providers entry, so providerByModel
+    -- returns nil and the relaunch would otherwise run the account DEFAULT model.
+    -- Carry the raw model so the relaunch faithfully reuses it. Only for a base-less
+    -- (native Anthropic) session with NO matched profile -- a profile match (its
+    -- model wins via env) or a gateway session (base_url set) leaves this nil.
+    model = (not profile and not hasBase and item.model and tostring(item.model) ~= "")
+            and tostring(item.model) or nil,
   }
 end
 
@@ -3750,8 +4027,15 @@ function M.providerEnv(profile)
   if gateway then
     put("ANTHROPIC_SMALL_FAST_MODEL", profile.smallFastModel, false)
     put("ANTHROPIC_CUSTOM_HEADERS", profile.headers, false)
-    if profile.authTokenEnv and tostring(profile.authTokenEnv) ~= "" then
-      put("ANTHROPIC_AUTH_TOKEN", "$" .. tostring(profile.authTokenEnv), true)
+    -- R1-11: authTokenEnv is an env-var NAME, emitted RAW between double quotes as
+    -- ANTHROPIC_AUTH_TOKEN="$<name>" so the spawned shell expands it. A shell var
+    -- name can ONLY be [A-Za-z_][A-Za-z0-9_]* anyway, so constrain to that and fail
+    -- closed on anything else: a name with $(...)/backtick/"/; would otherwise run
+    -- arbitrary substitution in the spawn shell. A dropped token just 401s (the same
+    -- as today's empty-name case) -- correct fail-closed, never code execution.
+    local atok = profile.authTokenEnv and tostring(profile.authTokenEnv) or ""
+    if atok:match("^[A-Za-z_][A-Za-z0-9_]*$") then
+      put("ANTHROPIC_AUTH_TOKEN", "$" .. atok, true)
     end
   end
   return env
@@ -3795,14 +4079,35 @@ end
 -- bridge all build from it).
 function M.sshDest(ssh)
   if type(ssh) ~= "table" or not ssh.host or tostring(ssh.host) == "" then return nil end
-  return (ssh.user and tostring(ssh.user) ~= "")
-    and (tostring(ssh.user) .. "@" .. tostring(ssh.host)) or tostring(ssh.host)
+  -- R1-34: dest is interpolated UNQUOTED into the spawn shell string in sshWrap
+  -- (between `ssh -t` and the single-quoted inner). Validate host/user to a
+  -- hostname/user charset and fail SAFE (nil) on anything else, so a host/user with
+  -- shell metacharacters ($(...), backtick, ;, ") can't inject. This is the ONE
+  -- place dest is built, so every consumer (sshWrap, spawnSpec, the kitty argv path,
+  -- the bridge) is protected. nil aborts the spawn rather than running a bad command.
+  local host = tostring(ssh.host)
+  if not host:match("^[%w._%-]+$") then return nil end
+  -- R2-24: the charset above ALLOWS dots, so "." / ".." / "a..b" pass -- but the
+  -- bridge derives a mirror-dir name from the dest (sshHosts.ns), and
+  -- `rsync -az --delete REMOTE:.claude/cc-status/ MIRROR_DIR/<ns>/` would then run
+  -- --delete against a traversed path (e.g. ns=".." -> ~/.claude). Reject any
+  -- dot-traversal component at this single chokepoint so no consumer can build one.
+  if host == "." or host == ".." or host:find("%.%.") then return nil end
+  if ssh.user and tostring(ssh.user) ~= "" then
+    local user = tostring(ssh.user)
+    if not user:match("^[%w._%-]+$") then return nil end
+    if user == "." or user == ".." or user:find("%.%.") then return nil end
+    return user .. "@" .. host
+  end
+  return host
 end
 
 function M.sshWrap(inner, ssh, env)
   local dest = M.sshDest(ssh)
   if not dest then return inner end
   local cmd = (ssh.tty == false) and "ssh" or "ssh -t"
+  -- dest is now validated to a hostname/user charset in sshDest (returns nil on any
+  -- shell metacharacter -> spawn aborts), so the unquoted interpolation here is safe.
   return cmd .. " " .. dest .. " " .. shquote(M.loginShellWrap(inner, env))
 end
 
@@ -3842,13 +4147,24 @@ function M.sshHosts(cfg)
   for _, p in ipairs(M.config(cfg, "providers", nil) or {}) do
     if type(p) == "table" and type(p.ssh) == "table" then
       local dest = M.sshDest(p.ssh)
-      if dest and not seen[dest] then
+      -- R2-24 defense-in-depth: even though sshDest now blocks dot-traversal at the
+      -- source, skip any host whose derived ns is unsafe as a dir component, so a
+      -- future ns-derivation change can't reintroduce a traversal into the rsync dir.
+      local ns = dest and (dest:gsub("[^%w.-]", "_")) or nil
+      if dest and not seen[dest]
+         and ns ~= "" and ns ~= "." and ns ~= ".." and not ns:find("%.%.") then
         seen[dest] = true
         out[#out + 1] = {
           host = tostring(p.ssh.host),
           user = p.ssh.user and tostring(p.ssh.user) or nil,
           dest = dest,
-          ns = (tostring(p.ssh.host):gsub("[^%w.-]", "_")),
+          -- R1-25: namespace from DEST (user@host), not host alone. Two providers on
+          -- one host with different users pass the dest-dedup (distinct dests) but
+          -- would collide to one ns if derived from host only -- reconcileBridge keys
+          -- want[ns]=h, so the second host would silently overwrite the first and
+          -- never be bridged. dest is already validated to a safe charset by sshDest;
+          -- "@" -> "_" keeps it a clean dir name + key prefix.
+          ns = ns,
         }
       end
     end
@@ -3908,9 +4224,15 @@ function M.decisionContent(value, statusText)
   local nonce
   pcall(function()
     local st = M.json.decode(tostring(statusText or ""))
-    if type(st) == "table" and type(st.pending) == "table"
-       and type(st.pending.nonce) == "string" and st.pending.nonce ~= "" then
+    if type(st) ~= "table" then return end
+    if type(st.pending) == "table" and type(st.pending.nonce) == "string"
+       and st.pending.nonce ~= "" then
       nonce = st.pending.nonce
+    -- R1-36: fall back to the top-level gate_nonce when the parallel cc-status.sh hook
+    -- cleared the pending block (and its nonce) in the same event. cc-approve writes
+    -- both; gate_nonce survives a pending-clear so a same-second answer still binds.
+    elseif type(st.gate_nonce) == "string" and st.gate_nonce ~= "" then
+      nonce = st.gate_nonce
     end
   end)
   return nonce and (tostring(value) .. " " .. nonce) or tostring(value)
@@ -3948,9 +4270,11 @@ function M.remoteActionAllowed(item, action, opts)
   if action == "approve" or action == "deny" then
     return item.gate == "waiting"
   end
-  if opts.keystrokes then
-    return action == "nudge" or action == "stop" or action == "clear" or action == "compact"
-  end
+  -- R3-09: remote tiles permit ONLY headless approve/deny. There is no remote-keystroke
+  -- transport (only the writeDecision allow/deny ssh path exists), and handleAction's
+  -- R2-07 guard hard-refuses every non-approve/deny action for a remote tile -- so a
+  -- keystrokes branch here advertised nudge/stop/clear/compact that the dispatcher would
+  -- count + ledger as delivered while the remote session received nothing.
   return false
 end
 
@@ -4135,9 +4459,20 @@ function M.spawnSpec(editor, project, task, opts)
       -- `shell -c` (non-login, non-interactive), so the inner's `$VAR` secrets
       -- need an interactive login zsh on the remote (loginShellWrap sources the
       -- remote ~/.zshrc). The whole remote command is one argv element.
+      -- R3-02: compute the dest once and abort cleanly on nil. sshDest is a
+      -- fail-CLOSED control (nil for a host/user with shell metacharacters or
+      -- dot-traversal), but isSsh is gated only on a non-empty ssh.host. Assigning
+      -- nil to argv[#argv+1] is a no-op in Lua, so without this guard the next
+      -- assignment would write the inner remote command into the dest's slot and
+      -- ssh would interpret it as the hostname -- silently dropping the dest and
+      -- defeating the "nil aborts the spawn" contract.
+      local dest = M.sshDest(ssh)
+      if not dest then
+        return { kind = "kitty", argv = nil, error = "invalid ssh dest" }
+      end
       argv[#argv + 1] = "ssh"
       if ssh.tty ~= false then argv[#argv + 1] = "-t" end
-      argv[#argv + 1] = M.sshDest(ssh)
+      argv[#argv + 1] = dest
       argv[#argv + 1] = M.loginShellWrap(
         M.spawnInner(project, task, { env = env, flags = flags }), env)
     elseif hasEnv then
@@ -4332,10 +4667,48 @@ function M.kittyCmd(action, item, payload)
     if not payload.text or #payload.text == 0 then return nil end
     argv[#argv + 1] = "send-text"; argv[#argv + 1] = "--match"; argv[#argv + 1] = sel
     argv[#argv + 1] = "--"; argv[#argv + 1] = payload.text
+  elseif action == "ls" then
+    -- R1-15: liveness probe. `@ ls --match <sel>` lists matching windows as JSON;
+    -- an empty/no-window result means the target window is gone, so a feed must NOT
+    -- report delivered (the queued task would be popped + lost).
+    argv[#argv + 1] = "ls"; argv[#argv + 1] = "--match"; argv[#argv + 1] = sel
   else
     return nil
   end
   return argv
+end
+
+-- R1-15: parse `kitty @ ls` JSON output and report whether ANY window is present
+-- (the --match filter already narrows it to the target). Pure: the dashboard runs
+-- the probe (FX) and passes the captured stdout here. A window has a numeric "id"
+-- field; we only need to know the matched set is non-empty. Empty/garbage -> false
+-- (fail-closed: treat an unparseable/empty probe as "window gone", keep the task).
+function M.kittyWindowAlive(lsOutput)
+  local s = tostring(lsOutput or "")
+  if s:match("^%s*$") then return false end
+  local ok, data = pcall(function() return M.json.decode(s) end)
+  if not ok or type(data) ~= "table" then return false end
+  -- kitty @ ls returns a JSON ARRAY of OS-windows, each with a "tabs" array of
+  -- tabs, each with a "windows" array. With --match it still returns the nested
+  -- shape but only including matching windows; the simplest robust signal is "is
+  -- there at least one window object with an id anywhere in the tree".
+  local function hasWindow(node)
+    if type(node) ~= "table" then return false end
+    -- a window object: has a numeric id and is inside a "windows" list
+    for _, osw in ipairs(node) do
+      if type(osw) == "table" then
+        local tabs = osw.tabs
+        if type(tabs) == "table" then
+          for _, tab in ipairs(tabs) do
+            local wins = type(tab) == "table" and tab.windows or nil
+            if type(wins) == "table" and #wins > 0 then return true end
+          end
+        end
+      end
+    end
+    return false
+  end
+  return hasWindow(data)
 end
 
 -- ---- Window focus matching (extracted from focusProject; review #4) --------
@@ -5516,14 +5889,18 @@ function M.mcpConfig(servers)
     local id = agTrim(s.id)
     if id ~= "" then
       local tr = agTrim(s.transport):lower()
-      local hasTok = s.authTokenEnv and agTrim(s.authTokenEnv) ~= ""
+      -- R1-11: authTokenEnv names an env var expanded as ${...} into an MCP env key /
+      -- Bearer header. Constrain to a POSIX shell identifier (the only valid var-name
+      -- charset) so a crafted name can't inject; a non-matching name drops the token.
+      local atok = s.authTokenEnv and agTrim(s.authTokenEnv) or ""
+      local hasTok = atok:match("^[A-Za-z_][A-Za-z0-9_]*$") ~= nil
       if tr == "stdio" then
         local e = { command = s.command, args = agStrList(s.args) }
-        if hasTok then e.env = { [tostring(s.authTokenEnv)] = "${" .. tostring(s.authTokenEnv) .. "}" } end
+        if hasTok then e.env = { [atok] = "${" .. atok .. "}" } end
         mcp[id] = e
       elseif tr == "sse" or tr == "http" then
         local e = { type = tr, url = s.url }
-        if hasTok then e.headers = { Authorization = "Bearer ${" .. tostring(s.authTokenEnv) .. "}" } end
+        if hasTok then e.headers = { Authorization = "Bearer ${" .. atok .. "}" } end
         mcp[id] = e
       end
     end
@@ -7717,6 +8094,15 @@ end
 M.appearanceIsHex = appearanceIsHex
 
 local function appearanceClamp(v, lo, hi, dflt)
+  -- R2-26: reject hex / non-decimal string literals so this Lua side matches the JS
+  -- apClamp twin (which gates strings through a base-10 regex). tonumber("0x96")==150
+  -- and tonumber("0x1.2")==1.125, so a hex string would give SSR CSS a value the
+  -- live preview computes differently. Numbers pass straight through.
+  if type(v) == "string" then
+    if not v:match("^%s*[-+]?%d*%.?%d+%s*$") and not v:match("^%s*[-+]?%d+%.?%d*%s*$") then
+      return dflt
+    end
+  end
   v = tonumber(v); if not v then return dflt end
   if v < lo then return lo elseif v > hi then return hi end
   return v
@@ -7785,6 +8171,51 @@ function M.coldStartStep(windowSeen, elapsed, waitMax)
   if windowSeen then return "open" end
   if (tonumber(elapsed) or 0) < (tonumber(waitMax) or 25) then return "wait" end
   return "giveup"
+end
+
+-- ---- Per-spawn cold-start ladder key (R1-09) -------------------------------
+-- Each concurrent spawn (notably an A/B cohort, which spawns N variants in a
+-- synchronous loop) needs its OWN cold-start ladder storage slot. A single shared
+-- module-level slot lets variant 2 cancel variant 1's just-scheduled ladder, so
+-- R3-07: worst-case wall-clock duration (seconds) of a spawn's keystroke ladder,
+-- so spawnEditorWindow can reserve that long a slot on the shared injectionTailAt
+-- (the same tail dispatchSerialized uses) and a concurrent dispatched paste queues
+-- BEHIND the spawn ladder instead of cross-clobbering its clipboard/focus. Pure so
+-- it's unit-testable; the dashboard passes the resolved spec. The numbers mirror
+-- the beat delays in spawnEditorWindow's three branches:
+--   warm extension : 3.0 + 1.0 + 2.0 + 0.3                   = 6.3s
+--   terminal       : 3.0 + 0.8 + 0.6 + 0.4 + 2.0 + 0.3       = 7.1s
+--   cold-start     : 2.0 head start + coldWindowWait + coldActivate + drive(7.1)
+-- A generous over-reservation is safe: it only delays a *concurrent* dispatch, and
+-- staggerSlot collapses to ~0 once the tail is in the past.
+function M.spawnLadderWorst(spec)
+  spec = spec or {}
+  if spec.flavor == "extension" and spec.coldStart ~= true then
+    return 6.3  -- warm extension ladder
+  end
+  local terminalDrive = 7.1  -- terminal/warm drive ladder
+  if spec.coldStart == true then
+    local waitMax  = tonumber(spec.coldWindowWait) or 25
+    local activate = tonumber(spec.coldActivate) or 6
+    -- 2.0s head start before polling + the bounded window wait + activation buffer
+    -- + the drive ladder that runs once the window is seen.
+    return 2.0 + waitMax + activate + terminalDrive
+  end
+  return terminalDrive  -- warm terminal ladder
+end
+
+-- only the LAST variant ever gets its task. This returns a stable, normalized key
+-- for the spawn's target window (the worktree project path, falling back to the
+-- resolved window `name`) so the dashboard can key its handle map per-window:
+-- distinct variants -> distinct keys (all ladders survive); a repeat manual spawn
+-- of the SAME project -> same key (it correctly supersedes its own prior ladder).
+function M.spawnLadderKey(spec)
+  spec = spec or {}
+  local p = spec.project
+  if p ~= nil and tostring(p) ~= "" then return tostring(p) end
+  local n = spec.name
+  if n ~= nil and tostring(n) ~= "" then return tostring(n) end
+  return "__default__"
 end
 
 return M

@@ -238,6 +238,10 @@ local gitChangeFiles = {} -- tile key -> { [path] = orig|false }: the authoritat
 local loadConfig         -- forward declaration (defined near refresh)
 local ledgerSnapshot     -- forward declaration (defined near refresh; bridge handlers use it)
 local refresh            -- forward declaration (so the controller can repaint now)
+-- R3-24: re-entrancy state for refresh() (a kitty feed's waitUntilExit pumps the run
+-- loop, which could fire a nested 1Hz refresh mid-feed). Stashed on FX (an existing
+-- module table) rather than a new top-level local to stay under Lua's 200-local cap:
+-- FX._refreshBody is the actual work, FX._refreshBusy is the guard flag.
 
 -- Find the editor application object for a session's editor kind. The kind
 -- scopes the lookup (core.editorBundleIds): a 'cursor' session must never
@@ -348,6 +352,20 @@ end
 function FX.readFile(path)
   local f = io.open(path, "r"); if not f then return nil end
   local c = f:read("*a"); f:close(); return c
+end
+
+-- R2-20: re-read ONE tile's live status file and return the freshly-parsed item
+-- (nil if missing/unparseable). Used inside the router slot to re-check the chosen
+-- member's freedom at dispatch time -- the slot's snapshot `item.status` is frozen
+-- at tick time, so a manual feed/nudge that landed during the stagger window can't
+-- be seen via the snapshot; only a live re-stat catches it. Mirrors refreshList's
+-- decode path (core.parseStatusList over a single {key,content} entry).
+function FX.liveStatusFor(key)
+  if not key then return nil end
+  local content = FX.readFile(STATUS_DIR .. "/" .. tostring(key) .. ".json")
+  if not content then return nil end
+  local list = core.parseStatusList({ { key = key, content = content } }, os.time())
+  return list and list[1] or nil
 end
 
 -- Read only the last maxBytes of a (possibly large) file, e.g. a transcript.
@@ -516,7 +534,7 @@ function FX.computeUsage()
       -- the detail panel's Model dropdown shows + preselects it. The status-file `model` is a
       -- spawn-time snapshot of $ANTHROPIC_MODEL that goes stale after an in-session /model switch;
       -- the transcript is always current. Only sync when known -- never clobber with nil/empty.
-      if st.lastModel and st.lastModel ~= "" then it.model = st.lastModel end
+      if st.lastModel and st.lastModel ~= "" then it.model = st.lastModel; it.live_model = st.lastModel end
 
       -- Context fullness for EVERY session (works for stale/done tiles, unlike the 1s peek).
       local cfrac, ctoks
@@ -692,15 +710,32 @@ end
 
 -- Task queue I/O (Phase 4b).
 function FX.readQueue(key)
-  local c = FX.readFile(QUEUE_DIR .. "/" .. key .. ".json")
+  local path = QUEUE_DIR .. "/" .. key .. ".json"
+  local c = FX.readFile(path)
   if not c or #c == 0 then return { tasks = {} } end
   local ok, q = pcall(function() return core.json.decode(c) end)
   if ok and type(q) == "table" then return q end
+  -- R1-17: present-but-UNDECODABLE (a truncated/garbled write) must not silently
+  -- strip routing:true / mode:'sequential' -- returning a bare { tasks={} } and
+  -- writing it back would permanently disarm the queue. Back the bad file up ONCE so
+  -- an operator can recover its flags/tasks before any mutation overwrites it. The
+  -- durable temp+rename writer below makes this corruption window very unlikely.
+  local bak = path .. ".bad." .. tostring(FX.now())
+  pcall(function() os.rename(path, bak) end)
+  print("[cc-queue] ⚠️ undecodable queue " .. key .. " -- backed up to " .. bak .. " (flags/tasks preserved there)")
   return { tasks = {} }
 end
 function FX.writeQueue(key, q)
   hs.fs.mkdir(QUEUE_DIR)
-  FX.writeFile(QUEUE_DIR .. "/" .. key .. ".json", core.json.encode(q))
+  -- R1-17: durable write (temp+rename, same idiom as patchStatus) so a crash / disk-full
+  -- mid-write can never leave a truncated queue that loses routing/mode flags on the
+  -- next read. os.rename is atomic on the same filesystem.
+  local path = QUEUE_DIR .. "/" .. key .. ".json"
+  local tmp = path .. ".tmp." .. tostring(FX.now())
+  local f = io.open(tmp, "w")
+  if not f then return end
+  f:write(core.json.encode(q)); f:close()
+  if not os.rename(tmp, path) then os.remove(tmp) end
 end
 function FX.removeQueue(key) os.remove(QUEUE_DIR .. "/" .. key .. ".json") end
 -- Resolve a session's queue file key (project-stable via core.queueKey, so a
@@ -831,6 +866,11 @@ end
 -- Atomically rewrite the daily file `day` (UTC "YYYY-MM-DD"), nulling `fields` on
 -- the line whose id == `id` and marking it redacted, then log a `redact` tombstone.
 -- temp+mv is atomic; redact PAST days (today's file is hot with appends). true on hit.
+-- R1-14: the rewrite reconstructs the file from core.parseLedger, so it CANONICALIZES
+-- the day as a side effect -- any non-conforming line parseLedger rejects (blank, a
+-- torn/partial append, or a future-schema object lacking ts/type) is dropped, even
+-- though it was never the redact target. All in-tree writers emit conforming lines, so
+-- this is benign in normal operation; accepted as the documented behavior.
 function FX.redactLedger(day, id, fields)
   local path = LEDGER_DIR .. "/" .. day .. ".jsonl"
   local text = FX.readFile(path)
@@ -859,6 +899,10 @@ end
 -- filter the audit UI confirmed -- including `types` -- never a superset. Logs a
 -- `purge` tombstone with the count removed (appended AFTER the rewrite so it
 -- survives). Returns the count.
+-- R1-14: like redactLedger, each rewritten day is reconstructed from core.parseLedger
+-- and is therefore CANONICALIZED -- non-conforming lines (blank/torn/typeless) that
+-- parseLedger drops are removed as a side effect, even when they weren't purge targets.
+-- All in-tree writers emit conforming lines, so this is benign; documented behavior.
 function FX.purgeLedger(filter)
   filter = filter or {}
   local removed = 0
@@ -1241,6 +1285,13 @@ end
 function FX.bridgeSync(hostSpec)
   local b = bridge[hostSpec.ns]
   if not b or b.running then return end
+  -- R2-24 belt-and-suspenders: never build a mirror dir from a traversal-bearing ns
+  -- (sshDest/sshHosts already block it, but a bad ns here would run rsync --delete
+  -- against a traversed path). Bail safely, mirroring the `not argv` early return.
+  local ns = hostSpec.ns
+  if type(ns) ~= "string" or ns == "" or ns == "." or ns == ".." or ns:find("%.%.") or ns:find("/") then
+    b.running = false; return
+  end
   b.running = true
   local dir = MIRROR_DIR .. "/" .. hostSpec.ns
   hs.fs.mkdir(MIRROR_DIR); hs.fs.mkdir(dir)
@@ -1251,7 +1302,10 @@ function FX.bridgeSync(hostSpec)
   for i = 2, #argv do args[#args + 1] = argv[i] end
   local ok = pcall(function()
     local t = hs.task.new(bin, function(code)
+      -- R1-27: cancel the timeout backstop on a real exit (cancel-on-normal-exit).
+      if b.timeoutTimer then pcall(function() b.timeoutTimer:stop() end); b.timeoutTimer = nil end
       b.running = false
+      b.task = nil   -- R2-25: free the retained handle so reconcile can't terminate a dead task
       if code == 0 then
         b.lastOkTs = hs.timer.secondsSinceEpoch()
         if b.failed then b.failed = false; print("[cc-bridge] " .. hostSpec.ns .. " sync recovered") end
@@ -1260,9 +1314,33 @@ function FX.bridgeSync(hostSpec)
         print("[cc-bridge] " .. hostSpec.ns .. " rsync failed (exit " .. tostring(code) .. ")")
       end
     end, args)
-    if t then t:start() else error("task create failed") end
+    if t then
+      t:start()
+      b.task = t   -- R2-25: retain so reconcileBridge can terminate an in-flight rsync on teardown
+      -- R1-27: a never-returning task (externally reaped child, dropped exit callback)
+      -- would pin b.running=true forever, so the skip-if-running guard starves THIS host
+      -- permanently with no recovery. Independent backstop: if the exit callback hasn't
+      -- fired by 3*interval (>=15s floor, matching bridgeStale + scanFolders' idiom),
+      -- terminate the task and free the slot. NOT the after() wrapper -- this needs an
+      -- explicitly retained, individually-cancellable handle (same reason scanFolders
+      -- uses a dedicated timer). rsync's own --timeout=5 governs real transfer stalls.
+      local backstop = math.max(15, (tonumber(b.interval) or BRIDGE_SECONDS) * 3)
+      b.timeoutTimer = hs.timer.doAfter(backstop, function()
+        b.timeoutTimer = nil
+        if b.running then
+          pcall(function() t:terminate() end)
+          b.running = false
+          b.task = nil   -- R2-25: handle freed after the wedged-task terminate
+          if not b.failed then b.failed = true
+            print("[cc-bridge] " .. hostSpec.ns .. " sync timed out -- task wedged, slot freed") end
+        end
+      end)
+    else error("task create failed") end
   end)
-  if not ok then b.running = false end
+  if not ok then
+    if b.timeoutTimer then pcall(function() b.timeoutTimer:stop() end); b.timeoutTimer = nil end
+    b.running = false
+  end
 end
 
 local function reconcileBridge(cfg)
@@ -1275,6 +1353,13 @@ local function reconcileBridge(cfg)
   for ns, b in pairs(bridge) do
     if not want[ns] or b.interval ~= interval then
       if b.timer then pcall(function() b.timer:stop() end) end
+      -- R1-27: a host torn down mid-flight must not leave its timeout backstop dangling.
+      if b.timeoutTimer then pcall(function() b.timeoutTimer:stop() end) end
+      -- R2-25: terminate any in-flight rsync before nil'ing the entry. On an interval
+      -- change the entry is recreated immediately with running=false, so without this
+      -- a SECOND `rsync -az --delete` would start into the same mirror dir while the
+      -- old one is still writing/deleting (concurrent --delete -> mirror flicker).
+      if b.task then pcall(function() b.task:terminate() end); b.task = nil end
       bridge[ns] = nil
       if not want[ns] then print("[cc-bridge] " .. ns .. " stopped") end
     end
@@ -1282,7 +1367,7 @@ local function reconcileBridge(cfg)
   -- start timers for newly configured hosts
   for ns, h in pairs(want) do
     if not bridge[ns] then
-      bridge[ns] = { dest = h.dest, host = h.host, running = false, lastOkTs = 0, interval = interval }
+      bridge[ns] = { dest = h.dest, host = h.host, running = false, lastOkTs = 0, interval = interval, timeoutTimer = nil, task = nil }
       bridge[ns].timer = hs.timer.doEvery(interval, function() FX.bridgeSync(h) end)
       print("[cc-bridge] " .. ns .. " syncing " .. h.dest .. " every " .. interval .. "s")
       FX.bridgeSync(h)  -- first pull now, not in <interval>s
@@ -1326,14 +1411,22 @@ function FX.scanFolders()
   local outFile = os.tmpname()
   local cmd = core.folderScanShellCommand(argv, outFile)
   local ok = pcall(function()
-    folderScanTask = hs.task.new("/bin/sh", function()
+    local myTask  -- captured below; the exit callback uses it for an ownership check
+    myTask = hs.task.new("/bin/sh", function()
       if folderScanTimer then pcall(function() folderScanTimer:stop() end); folderScanTimer = nil end
+      -- R1-38: the exit callback fires on terminate() too. If the 15s backstop already
+      -- terminated this scan (and removed outFile), it nil'd folderScanTask -- so an
+      -- ownership check (this task still owns the slot) prevents a late callback from
+      -- overwriting a previously-good folderIndex with an EMPTY one (parseDirList("")
+      -- -> {}) AND resetting the 60s-cache ts (which would block a rescan for ~60s).
+      if folderScanTask ~= myTask then pcall(os.remove, outFile); return end
       folderScanTask = nil
       local out = FX.readFile(outFile) or ""
       pcall(os.remove, outFile)
       folderIndex = { paths = core.parseDirList(out), ts = hs.timer.secondsSinceEpoch() }
       print("[cc-spawn] folder scan: " .. engine .. " -> " .. #folderIndex.paths .. " dir(s)")
     end, { "-c", cmd })
+    folderScanTask = myTask
     if not folderScanTask then error("task create failed") end
     folderScanTask:start()
     -- Backstop: a wedged scan (a stuck mount, a hung fs) must never pin the slot forever.
@@ -1888,6 +1981,30 @@ local function runKitty(argv)
   if t then t:start(); return true end
   return false
 end
+-- R1-15: a feed/text send that must REPORT real delivery (so a queued task isn't
+-- popped + lost when the window is gone). runKitty returns true the instant the
+-- `@ send-text` process launches -- it never checks the window exists. This probes
+-- liveness FIRST via a synchronous `@ ls --match <sel>`: only when a matching window
+-- is present do we send (returning true); otherwise return false so the caller keeps
+-- the task queued. Synchronous (hs.task:waitUntilExit) because the call sites need a
+-- synchronous delivery result for their pop/commit decision.
+function FX.runKittyChecked(item, sendArgv)
+  if not sendArgv then return false end  -- un-targetable -> not delivered
+  local lsArgv = core.kittyCmd("ls", item)
+  if lsArgv then
+    local bin = resolveBin("kitty", core.config(loadConfig(), "spawn.kittyBin", nil))
+    local out = ""
+    local ok = pcall(function()
+      local t = hs.task.new(bin, function(_, so) out = so or "" end, lsArgv)
+      if t then t:start(); t:waitUntilExit() end
+    end)
+    if not ok or not core.kittyWindowAlive(out) then
+      print("[cc-kitty] window gone (ls probe empty) -- not delivering")
+      return false
+    end
+  end
+  return runKitty(sendArgv)
+end
 local function isKitty(target) return type(target) == "table" and target.editor == "kitty" end
 -- Adapt the handleAction target to the field names core.kittyCmd reads.
 local function kittyItem(target)
@@ -1916,11 +2033,19 @@ local pendingTimers, ptSeq = {}, 0
 local function after(delay, fn)
   ptSeq = ptSeq + 1
   local id = ptSeq
-  pendingTimers[id] = hs.timer.doAfter(delay, function()
+  -- R1-21: run fn in pcall so a throw in one beat can't abort the rest of a ladder
+  -- (matches core.runSequence's per-beat isolation) and can't strand the clipboard/
+  -- focus restore step. R1-20: the fired callback reaps its own pendingTimers entry,
+  -- but a timer that is :stop()'d externally (spawn supersession) never fires, so its
+  -- entry would leak forever. Return a small wrapper whose :stop() ALSO reaps the
+  -- entry (and still answers :stop() for callers that hold the handle).
+  local t = hs.timer.doAfter(delay, function()
     pendingTimers[id] = nil
-    fn()
+    local ok, err = pcall(fn)
+    if not ok then print("[cc-after] timer callback failed: " .. tostring(err)) end
   end)
-  return pendingTimers[id]
+  pendingTimers[id] = t
+  return { stop = function() pendingTimers[id] = nil; if t then pcall(function() t:stop() end) end end }
 end
 
 -- Beat-list scheduling lives in core.runSequence (pure, scheduler-injected,
@@ -1952,7 +2077,12 @@ local injectionTailAt = 0
 function dispatchSerialized(item, action, fn, extraStagger)
   if core.actionIsHeadless(item, action) then fn() return end
   local delay
-  delay, injectionTailAt = core.staggerSlot(injectionTailAt, hs.timer.secondsSinceEpoch(),
+  -- R1-08: feed staggerSlot a MONOTONIC `now` (absoluteTime, ns since boot). The wall
+  -- clock (secondsSinceEpoch) can step backward on an NTP correction, which would make
+  -- now < the carried tail deadline and schedule the next keystroke chain minutes out
+  -- with nothing in flight. staggerSlot is base-agnostic (relative diffs only), so the
+  -- monotonic base is self-consistent (initial tail 0 is in the past either way).
+  delay, injectionTailAt = core.staggerSlot(injectionTailAt, hs.timer.absoluteTime() / 1e9,
     BULK_STAGGER + (tonumber(extraStagger) or 0))
   if delay > 0 then after(delay, fn) else fn() end
 end
@@ -1990,8 +2120,10 @@ end
 -- keystrokes hit the wrong window. That race was the chronic nudge flakiness.)
 function FX.typeIntoWindow(target, text)
   -- kitty: one headless send-text (trailing \r submits); no focus / chat-key dance.
+  -- R1-15: probe the window is alive FIRST so a feed into a closed window reports
+  -- false (caller keeps the task queued) instead of a false delivery.
   if isKitty(target) then
-    return runKitty(core.kittyCmd("text", kittyItem(target), { text = text .. "\r" }))
+    return FX.runKittyChecked(kittyItem(target), core.kittyCmd("text", kittyItem(target), { text = text .. "\r" }))
   end
   -- VS Code: char-by-char keystrokes were flaky and slash commands never submitted.
   -- Route through the same reliable clipboard-paste path as nudges (it handles the
@@ -2022,7 +2154,8 @@ function FX.pasteIntoWindow(target, payload)
     local txt = (preface and (preface .. "\r") or "")
       .. ((payload.text and #payload.text > 0) and (payload.text .. "\r") or "")
     if txt == "" then return false end
-    return runKitty(core.kittyCmd("text", kittyItem(target), { text = txt }))
+    -- R1-15: liveness-probe so a paste into a dead window reports false (task stays queued).
+    return FX.runKittyChecked(kittyItem(target), core.kittyCmd("text", kittyItem(target), { text = txt }))
   end
   local name = target.name
   print("[cc-dashboard] paste -> " .. tostring(name)
@@ -2074,8 +2207,12 @@ function FX.pasteIntoWindow(target, payload)
             end)
             return
           end
-          steps[i]()
-          hs.eventtap.keyStroke({ "cmd" }, "v")
+          -- R1-21: pcall each step's work so a throw can't abort the recursion before
+          -- the next beat (and the trailing clipboard/focus restore) is scheduled.
+          -- The after() wrapper pcall-protects the already-scheduled callbacks; this
+          -- guards the SYNCHRONOUS part that runs before the next after() is reached.
+          pcall(steps[i])
+          pcall(function() hs.eventtap.keyStroke({ "cmd" }, "v") end)
           after(0.12, function() runFrom(i + 1) end)
         end
         -- DR6: an optional slash-command preface (e.g. "/model opus") is submitted
@@ -2140,7 +2277,9 @@ function FX.sendKeys(target, keys)
         return
       end
       local k = keys[i]
-      hs.eventtap.keyStroke(k.mods or {}, k.key)
+      -- R1-21: pcall the keystroke so a throw can't abort the chain before the next
+      -- step (and the focus restore) is scheduled.
+      pcall(function() hs.eventtap.keyStroke(k.mods or {}, k.key) end)
       after(0.08, function() step(i + 1) end)
     end
     step(1)
@@ -2162,20 +2301,38 @@ end
 -- integrated terminal and type `claude …`. There's no supported API to start a
 -- session in the editor's terminal, so this is keystroke automation (Kitty and
 -- Terminal are the reliable paths). Reuses focusProject + the eventtap ladder.
-local spawnSeqHandles = nil  -- the in-flight spawn ladder's timers (module-level: GC-safe)
+-- R1-09: per-TARGET-WINDOW cold-start ladder storage (was a single shared slot,
+-- which let each A/B variant cancel the previous variant's ladder so only the last
+-- got its task). Keyed by core.spawnLadderKey(spec) -> { timer-handle(s) }. A repeat
+-- manual spawn of the same project supersedes ITS OWN prior ladder; distinct windows
+-- (cohort variants) keep independent ladders. Module-level: GC-safe.
+local spawnSeqHandlesByKey = {}
 local function spawnEditorWindow(spec)
   print("[cc-orch] " .. spec.editor .. " spawn: open " .. spec.app .. " at " .. tostring(spec.project))
-  -- Supersede any previous spawn's still-pending beats: two overlapping ladders
-  -- would interleave their keystrokes into whichever window is focused when
-  -- each beat's wall-clock arrives.
-  if spawnSeqHandles then
+  local ladderKey = core.spawnLadderKey(spec)
+  -- Supersede only a PREVIOUS spawn ladder TARGETING THE SAME WINDOW: two ladders
+  -- aimed at one window would interleave their keystrokes; ladders for different
+  -- windows (A/B variants) must coexist.
+  if spawnSeqHandlesByKey[ladderKey] then
     local stopped = 0
-    for _, h in ipairs(spawnSeqHandles) do
+    for _, h in ipairs(spawnSeqHandlesByKey[ladderKey]) do
       if h and h.stop then pcall(function() h:stop() end); stopped = stopped + 1 end
     end
-    if stopped > 0 then print("[cc-orch] superseding previous spawn ladder (" .. stopped .. " pending beat(s) cancelled)") end
-    spawnSeqHandles = nil
+    if stopped > 0 then print("[cc-orch] superseding previous spawn ladder for " .. ladderKey .. " (" .. stopped .. " pending beat(s) cancelled)") end
+    spawnSeqHandlesByKey[ladderKey] = nil
   end
+  -- R3-07: bring the spawn ladder under the SHARED injection-tail chokepoint that
+  -- dispatchSerialized uses. The spawn's clipboard-paste / keystroke beats run on
+  -- after() timers exactly like a dispatched paste; without reserving a slot, a
+  -- task dispatched DURING the ladder starts its own chain at t=0 and the two
+  -- cross-clobber clipboard + focus (keys land in the wrong window). Reserve the
+  -- ladder's worst-case duration on injectionTailAt so subsequent dispatches queue
+  -- BEHIND it, and start the ladder itself at the returned delay (it queues behind
+  -- any chain already in flight). Mirrors the DR6 extraStagger pattern. The monotonic
+  -- absoluteTime base matches dispatchSerialized (R1-08).
+  local spawnDelay
+  spawnDelay, injectionTailAt = core.staggerSlot(
+    injectionTailAt, hs.timer.absoluteTime() / 1e9, core.spawnLadderWorst(spec))
   local t = hs.task.new("/usr/bin/open", nil, core.vscodeOpenArgs(spec))
   if t then t:start() end
   hs.alert.show("Claude Shepherd: opening " .. spec.app .. " — starting claude (best-effort)")
@@ -2198,23 +2355,45 @@ local function spawnEditorWindow(spec)
       -- spawnSeqHandles so a later spawn supersedes it; `after` keeps timers GC-safe.
       local waitMax  = tonumber(spec.coldWindowWait) or 25
       local activate = tonumber(spec.coldActivate) or 6
-      local function sched(d, fn) spawnSeqHandles = { after(d, fn) }; return spawnSeqHandles end
+      local function sched(d, fn) spawnSeqHandlesByKey[ladderKey] = { after(d, fn) }; return spawnSeqHandlesByKey[ladderKey] end
       local function deliver()
-        focusProject(name, proj, nil, true)
-        hs.eventtap.keyStroke(FOCUS_EDITOR_KEY[1], FOCUS_EDITOR_KEY[2])  -- ⌘1 => deterministic ⌘Esc
+        -- R1-19: gate the task body on a POSITIVE window match. focusProject with
+        -- activateOnMiss=true only app:activates and returns false on a miss; pasting
+        -- the task then would submit the operator's prompt into whatever window came
+        -- to front (a different project). Best-effort ⌘1/⌘Esc panel-open is harmless
+        -- on the activated app, but the task is only delivered on a real match.
+        local matched = focusProject(name, proj, spec.editor, true)
+        -- R3-22: guard the FOCUS constants exactly as pasteIntoWindow does -- the
+        -- comments at FOCUS_EDITOR_KEY/FOCUS_CHAT_KEY invite setting them to nil for
+        -- terminal sessions, and an index-on-nil here would throw inside the after()
+        -- pcall, silently aborting the whole cold-start ladder.
+        if FOCUS_EDITOR_KEY then hs.eventtap.keyStroke(FOCUS_EDITOR_KEY[1], FOCUS_EDITOR_KEY[2]) end  -- ⌘1 => deterministic ⌘Esc
         sched(0.4, function()
           print("[cc-orch] vscode: opening the Claude Code extension (⌘Esc, cold-start)")
-          hs.eventtap.keyStroke(FOCUS_CHAT_KEY[1], FOCUS_CHAT_KEY[2])
+          if FOCUS_CHAT_KEY then hs.eventtap.keyStroke(FOCUS_CHAT_KEY[1], FOCUS_CHAT_KEY[2]) end
           if spec.task and #spec.task > 0 then
+            if matched == false then
+              print("[cc-orch] vscode cold-start: no window match -- task NOT delivered")
+              return
+            end
+            -- R1-10: save + restore the user's clipboard around the task paste (the
+            -- established pasteIntoWindow convention) so a cold-start spawn doesn't
+            -- silently clobber it (once per A/B variant otherwise).
+            local prevClip = hs.pasteboard.readString()
             sched(2.0, function()
-              focusProject(name, proj, nil, true)  -- re-assert (Welcome/trust may have stolen focus)
-              hs.eventtap.keyStroke(FOCUS_EDITOR_KEY[1], FOCUS_EDITOR_KEY[2])
-              hs.eventtap.keyStroke(FOCUS_CHAT_KEY[1], FOCUS_CHAT_KEY[2])
+              local matched2 = focusProject(name, proj, spec.editor, true)  -- re-assert (Welcome/trust may have stolen focus)
+              if matched2 == false then
+                print("[cc-orch] vscode cold-start: no window match on re-assert -- task NOT delivered")
+                return
+              end
+              if FOCUS_EDITOR_KEY then hs.eventtap.keyStroke(FOCUS_EDITOR_KEY[1], FOCUS_EDITOR_KEY[2]) end
+              if FOCUS_CHAT_KEY then hs.eventtap.keyStroke(FOCUS_CHAT_KEY[1], FOCUS_CHAT_KEY[2]) end
               print("[cc-orch] vscode: typing initial task into the Claude input")
               hs.pasteboard.setContents(spec.task)
               hs.eventtap.keyStroke({ "cmd" }, "v")  -- paste (reliable on a busy window)
               sched(0.6, function()
                 hs.eventtap.keyStroke({}, "return")
+                if prevClip then pcall(function() hs.pasteboard.setContents(prevClip) end) end
                 print("[cc-orch] vscode: initial task submitted")
               end)
             end)
@@ -2225,7 +2404,7 @@ local function spawnEditorWindow(spec)
       local function poll()
         -- focusProject(...,false) both reports a real title match AND focuses on hit;
         -- core.coldStartStep (pure, tested) owns the bounded open/wait/giveup decision.
-        local step = core.coldStartStep(focusProject(name, proj, nil, false), elapsed, waitMax)
+        local step = core.coldStartStep(focusProject(name, proj, spec.editor, false), elapsed, waitMax)
         if step == "open" then  -- window appeared + got focused
           print(string.format("[cc-orch] vscode cold-start: window seen after ~%.0fs; waiting %ss for the extension to activate", elapsed, activate))
           sched(activate, deliver)
@@ -2237,54 +2416,134 @@ local function spawnEditorWindow(spec)
           sched(0, deliver)
         end
       end
-      sched(2.0, poll)  -- a head start for `open` to launch the window
+      sched(2.0 + spawnDelay, poll)  -- a head start for `open` to launch the window (R3-07: + shared-tail slot)
       return
     end
     -- WARM extension (existing window, already activated): one ⌘Esc, then the task.
-    local beats = { { delay = 3.0, fn = function() focusProject(name, proj, nil, true) end },
+    -- R2-09: pass spec.editor so the app lookup is scoped to the target editor (a
+    -- Cursor spawn must not land in a VS Code window). R2-10: capture the match and
+    -- gate the task beats on a POSITIVE window match (mirrors the R1-19 cold-start
+    -- gate) so a title miss never types into the frontmost/wrong window. R2-11:
+    -- PASTE the task via the clipboard (newline-safe) instead of keyStrokes, which
+    -- would submit a multi-line task at each embedded newline.
+    local warmMatched
+    local warmPrevClip
+    -- R3-07: offset the first beat by spawnDelay so the whole ladder runs in its
+    -- reserved injection-tail slot (queued behind any in-flight dispatch chain).
+    local beats = { { delay = 3.0 + spawnDelay, fn = function() warmMatched = focusProject(name, proj, spec.editor, true) end },
       { delay = 1.0, fn = function()
         print("[cc-orch] vscode: opening the Claude Code extension (⌘Esc)")
         hs.eventtap.keyStroke({ "cmd" }, "escape")
       end } }
     if spec.task and #spec.task > 0 then
       beats[#beats + 1] = { delay = 2.0, fn = function()
-        print("[cc-orch] vscode: typing initial task into the Claude input")
-        hs.eventtap.keyStrokes(spec.task)
+        -- R3-07: re-assert focus immediately before the paste. Even with the
+        -- shared-tail reservation, a dispatch already mid-flight when this spawn
+        -- began could have stolen focus; re-confirming the target window here (and
+        -- gating the paste on the result) means a miss skips rather than ⌘V-ing the
+        -- task into the wrong window. Mirrors the cold-start re-assert.
+        warmMatched = focusProject(name, proj, spec.editor, true)
+        if warmMatched == false then
+          print("[cc-orch] vscode warm: no window match -- task NOT delivered")
+          return
+        end
+        print("[cc-orch] vscode: pasting initial task into the Claude input")
+        warmPrevClip = hs.pasteboard.readString()
+        hs.pasteboard.setContents(spec.task)
+        hs.eventtap.keyStroke({ "cmd" }, "v")  -- paste (newline-safe, unlike keyStrokes)
       end }
       beats[#beats + 1] = { delay = 0.3, fn = function()
+        if warmMatched == false then return end
         hs.eventtap.keyStroke({}, "return")
+        if warmPrevClip then pcall(function() hs.pasteboard.setContents(warmPrevClip) end) end
         print("[cc-orch] vscode: initial task submitted")
       end }
     end
-    spawnSeqHandles = core.runSequence(beats, after)
+    spawnSeqHandlesByKey[ladderKey] = core.runSequence(beats, after)
     return
   end
   -- flavor "terminal" (spawn.vscodeFlavor = "terminal", and every ssh spawn):
   -- a new integrated terminal + the typed claude launch line. The palette is
   -- more reliable than ⌃` (which would hide an already-open terminal), and the
   -- shell needs ~2s before it accepts input (field-verified cold-start miss).
-  spawnSeqHandles = core.runSequence({
-    { delay = 3.0, fn = function()
-        focusProject(name, proj, nil, true)
-      end },
-    { delay = 0.8, fn = function()
-        print("[cc-orch] vscode: opening command palette")
-        hs.eventtap.keyStroke({ "cmd", "shift" }, "p")
-      end },
-    { delay = 0.6, fn = function() hs.eventtap.keyStrokes("Terminal: Create New Terminal") end },
-    { delay = 0.4, fn = function()
-        print("[cc-orch] vscode: creating integrated terminal")
-        hs.eventtap.keyStroke({}, "return")
-      end },
-    { delay = 2.0, fn = function()
-        print("[cc-orch] vscode: typing claude launch line: " .. tostring(spec.postType))
-        hs.eventtap.keyStrokes(spec.postType)
-      end },
-    { delay = 0.3, fn = function()
-        hs.eventtap.keyStroke({}, "return")
-        print("[cc-orch] vscode: launch line submitted")
-      end },
-  }, after)
+  -- R2-09: pass spec.editor so the app lookup is scoped to the target editor.
+  -- R2-10: capture the match and gate the palette/type beats on a POSITIVE window
+  -- match (mirrors the R1-19 cold-start gate) so a title miss never drives the
+  -- claude launch line (incl. ANTHROPIC_* env) into the frontmost/wrong window;
+  -- and branch on spec.coldStart so a heavy new window is polled for (adaptive)
+  -- rather than blindly driven on the fixed 3s ladder.
+  local termMatched
+  local function termDriveBeats(initialDelay)
+    return {
+      { delay = initialDelay, fn = function()
+          termMatched = focusProject(name, proj, spec.editor, true)
+        end },
+      { delay = 0.8, fn = function()
+          if termMatched == false then
+            print("[cc-orch] vscode terminal: no window match -- launch line NOT delivered")
+            return
+          end
+          print("[cc-orch] vscode: opening command palette")
+          hs.eventtap.keyStroke({ "cmd", "shift" }, "p")
+        end },
+      { delay = 0.6, fn = function()
+          if termMatched == false then return end
+          hs.eventtap.keyStrokes("Terminal: Create New Terminal")
+        end },
+      { delay = 0.4, fn = function()
+          if termMatched == false then return end
+          print("[cc-orch] vscode: creating integrated terminal")
+          hs.eventtap.keyStroke({}, "return")
+        end },
+      { delay = 2.0, fn = function()
+          -- R3-07: re-assert focus before driving the claude launch line (incl.
+          -- ANTHROPIC_* env). A dispatch in flight when the spawn began could have
+          -- stolen focus; re-confirm the target window and skip on a miss rather
+          -- than typing the launch line into the wrong window.
+          termMatched = focusProject(name, proj, spec.editor, true)
+          if termMatched == false then
+            print("[cc-orch] vscode terminal: no window match on re-assert -- launch line NOT delivered")
+            return
+          end
+          print("[cc-orch] vscode: typing claude launch line: " .. tostring(spec.postType))
+          hs.eventtap.keyStrokes(spec.postType)
+        end },
+      { delay = 0.3, fn = function()
+          if termMatched == false then return end
+          hs.eventtap.keyStroke({}, "return")
+          print("[cc-orch] vscode: launch line submitted")
+        end },
+    }
+  end
+  if spec.coldStart == true then
+    -- Heavy new window: poll for the project window (adaptive) before driving the
+    -- terminal ladder, reusing the same bounded coldStartStep decision as the
+    -- extension cold path. termDriveBeats(0) runs immediately once the window is seen.
+    local waitMax  = tonumber(spec.coldWindowWait) or 25
+    local activate = tonumber(spec.coldActivate) or 6
+    local function sched(d, fn) spawnSeqHandlesByKey[ladderKey] = { after(d, fn) }; return spawnSeqHandlesByKey[ladderKey] end
+    local elapsed = 0
+    local function poll()
+      local step = core.coldStartStep(focusProject(name, proj, spec.editor, false), elapsed, waitMax)
+      if step == "open" then
+        print(string.format("[cc-orch] vscode terminal cold-start: window seen after ~%.0fs; waiting %ss to activate", elapsed, activate))
+        sched(activate, function()
+          spawnSeqHandlesByKey[ladderKey] = core.runSequence(termDriveBeats(0), after)
+        end)
+      elseif step == "wait" then
+        elapsed = elapsed + 1.0
+        sched(1.0, poll)
+      else
+        print("[cc-orch] vscode terminal cold-start: window '" .. tostring(name) .. "' never matched after " .. waitMax .. "s; driving best-effort")
+        sched(0, function()
+          spawnSeqHandlesByKey[ladderKey] = core.runSequence(termDriveBeats(0), after)
+        end)
+      end
+    end
+    sched(2.0 + spawnDelay, poll)  -- R3-07: + shared-tail slot
+    return
+  end
+  spawnSeqHandlesByKey[ladderKey] = core.runSequence(termDriveBeats(3.0 + spawnDelay), after)  -- R3-07: + shared-tail slot
 end
 
 -- Dry-run spec description lives in core.describeSpec (pure, tested).
@@ -2383,9 +2642,16 @@ function FX.spawnSession(editor, project, task, permissionMode, providerId, agen
     print("[cc-orch] DRY-RUN (" .. spec.kind .. ") would spawn in "
       .. tostring(project) .. ": " .. describeSpec(spec))
     hs.alert.show("Claude Shepherd (dry-run): would spawn " .. spec.kind .. " in " .. tostring(project))
-    return
+    return false  -- R1-22: a dry-run launched NOTHING; callers must not act as if it did
   end
   if spec.kind == "kitty" then
+    -- R3-02: a nil argv means spawnSpec fail-closed (e.g. invalid ssh dest). Abort
+    -- and log instead of crashing on table.concat / indexing a nil argv.
+    if not spec.argv then
+      print("[cc-orch] kitty spawn aborted: " .. tostring(spec.error))
+      pcall(function() hs.alert.show("Claude Shepherd: kitty spawn aborted (" .. tostring(spec.error) .. ")") end)
+      return false
+    end
     print("[cc-orch] kitty spawn: " .. table.concat(spec.argv, " "))
     local args = {}
     for i = 2, #spec.argv do args[#args + 1] = spec.argv[i] end
@@ -2399,6 +2665,7 @@ function FX.spawnSession(editor, project, task, permissionMode, providerId, agen
     hs.osascript.applescript(spec.applescript)  -- Terminal login shell -> claude on PATH
     hs.alert.show("Claude Shepherd: spawning a session in " .. tostring(project))
   end
+  return true  -- R1-22: a real launch happened
 end
 
 -- Ask for a project + initial task, then spawn. (Interactive; not unit-tested -
@@ -2476,7 +2743,13 @@ function FX.abLaunch(spec)
     created[#created + 1] = { path = v.worktreePath, branch = v.branch }
   end
   for _, v in ipairs(plan.variants) do
-    FX.spawnSession("vscode", v.worktreePath, v.task, spec.mode, v.provider, nil, true, v.model)
+    -- R2-12: pass the explicit bare-claude sentinel ("") for a provider-less variant
+    -- (matching the respawn paths), NOT nil. spawnProviderKey treats nil as "use the
+    -- configured spawn.provider default" -- so a model-axis variant with a default
+    -- provider configured would inherit that provider's model and never apply v.model,
+    -- defeating the A/B model comparison. "" forces bare claude -> env stays nil ->
+    -- the modelOverride branch applies v.model as a raw ANTHROPIC_MODEL.
+    FX.spawnSession("vscode", v.worktreePath, v.task, spec.mode, v.provider or "", nil, true, v.model)
   end
   local reg = FX.readAbCohorts()
   reg.cohorts[plan.cohort] = { repoRoot = plan.repoRoot, base = plan.base, task = spec.task or "",
@@ -2649,7 +2922,8 @@ end
 -- { cmd, model, from, reason } so FX.feedTask can prepend a `/model` switch in the same
 -- atomic delivery. NO side effects (the caller ledgers + re-bases item.model only on a
 -- DELIVERED feed, so a skipped paste never logs a phantom switch). Off by default; the
--- raw task is classified after stripping the L4 routing scaffolding (same as renderFeed).
+-- the task is classified on the RENDERED text the session actually receives (renderFeed),
+-- not the un-expanded template -- so word-count tiers see the real prompt (R1-32).
 -- An FX member (not a main-chunk local) to stay under Lua's 200-local cap.
 function FX.autoModelPreface(item, task)
   if not (item and item.key) or item.remote then return nil end
@@ -2659,18 +2933,27 @@ function FX.autoModelPreface(item, task)
   if item.editor == "kitty" or item.editor == "terminal" then return nil end
   if not FX.autoModelOn(item.key) then return nil end
   if not core.isAnthropicSession(item.model, item.base_url) then return nil end
-  local _, afterB = core.taskBarrier(tostring(task or ""))
-  local _, bare = core.taskRoute(afterB)
-  local s = core.suggestModel(bare, loadConfig())
+  -- R1-32: classify on the SAME text the session will receive. renderFeed both strips
+  -- the L4 routing scaffolding (taskBarrier/taskRoute) AND expands the template
+  -- ({{prev_output}}, date built-ins), so suggestModel's word-count tiers reflect the
+  -- delivered prompt -- not a 2-word template that expands to hundreds of words.
+  local typed = renderFeed(task, item)
+  local s = core.suggestModel(typed, loadConfig())
   if not s or not s.model then return nil end
+  -- R3-03: compare against the LIVE model, not the spawn-time snapshot. item.model is
+  -- parsed from the status file (derived from $ANTHROPIC_MODEL at spawn) and reverts to
+  -- the spawn model ~1s after any in-session /model switch when refreshList rebuilds byKey.
+  -- live_model (set from the transcript tail in computeUsage) reflects the model the
+  -- session actually runs now; fall back to item.model when no live model is known.
+  local cur = item.live_model or item.model
   -- Skip a no-op switch: already on that family (priced ids) OR the exact same id.
   -- Guard nil families (empty current model / a custom unfamilied override) so a
   -- nil==nil can never wrongly skip a real switch.
-  local cf, sf = core.priceFamily(item.model), core.priceFamily(s.model)
-  if (sf and cf == sf) or item.model == s.model then return nil end
+  local cf, sf = core.priceFamily(cur), core.priceFamily(s.model)
+  if (sf and cf == sf) or cur == s.model then return nil end
   local cmd = core.modelCommand(s.model)
   if not cmd then return nil end
-  return { cmd = cmd, model = s.model, from = item.model, reason = s.reason }
+  return { cmd = cmd, model = s.model, from = cur, reason = s.reason }
 end
 
 -- 🔌 MCPs & Skills viewer payload. Config MCPs (env-redacted) merged with the
@@ -3348,7 +3631,7 @@ local function handleBridgeMsg(msg)
           local commit = core.queueFeedCommit(FX.feedTask(winTarget(item), renderFeed(task, item), pre and pre.cmd))
           if commit.persist then
             FX.writeQueue(qk, q2); stampTaskStart(item, task, "manual")
-            if pre then ledgerFor(item, { type = "model_change", from = pre.from, to = pre.model, by = "auto", reason = pre.reason }); item.model = pre.model end
+            if pre then ledgerFor(item, { type = "model_change", from = pre.from, to = pre.model, by = "auto", reason = pre.reason }); item.model = pre.model; FX.patchStatus(item.key, { model = pre.model }) end
           else print("[cc-queue] feed skipped (no window match) -- task kept queued") end
           ledgerFor(item, { type = commit.event, task = tostring(task):sub(1, 200), by = "manual" })
         end
@@ -3586,6 +3869,15 @@ local function handleBridgeMsg(msg)
   end
   if a == "clear" or a == "compact" then
     local item = byKey[tostring(payload.v or "")]
+    -- R3-17: clear/compact bypass handleAction (and its R2-07 remote refusal) and return
+    -- before the generic guard at the bottom, so a remote tile would type the slash command
+    -- into a LOCAL window matching the remote name. Refuse remote here -- the Lua side is the
+    -- authoritative chokepoint, not the (separately) disabled JS button.
+    if item and item.remote then
+      pcall(function() hs.alert.show("Claude Shepherd: '" .. a .. "' isn't available for remote session "
+        .. tostring(item.label or item.name) .. " (headless approve/deny only)") end)
+      return
+    end
     if item then
       -- One spec per action keeps cmd/title/msg in lockstep (no parallel ternaries).
       local SPEC = {
@@ -3618,7 +3910,17 @@ local function handleBridgeMsg(msg)
         FX.clearAutopilot(key)
         print("[cc-autopilot] off for " .. key)
       else
-        local mins = tonumber(core.config(loadConfig(), "policies.autopilot.minutes", 15)) or 15
+        local cfg = loadConfig()
+        -- R3-16: the gate (cc-approve.sh) honors the per-session autopilot file ONLY when
+        -- policies.autopilot.enabled is true (default off). With the flag off, arming would
+        -- be a dead control plus a FALSE autopilot_arm ledger entry and a misleading "on"
+        -- log. Refuse the arm when the feature is globally disabled.
+        if core.config(cfg, "policies.autopilot.enabled", false) ~= true then
+          print("[cc-autopilot] arm refused for " .. key .. " (disabled in Settings)")
+          pcall(function() hs.alert.show("Claude Shepherd: Autopilot is disabled in Settings") end)
+          return
+        end
+        local mins = tonumber(core.config(cfg, "policies.autopilot.minutes", 15)) or 15
         FX.setAutopilot(key, FX.now() + mins * 60)
         ledgerFor(byKey[key], { type = "autopilot_arm", minutes = mins })
         print("[cc-autopilot] on for " .. key .. " (" .. mins .. "m)")
@@ -3657,8 +3959,11 @@ local function handleBridgeMsg(msg)
     local on  = tostring(payload.text or "") == "1"
     local it  = byKey[key]
     if key == "" or not it then return end
-    if on and (it.remote or not core.isAnthropicSession(it.model, it.base_url)) then
-      pcall(function() hs.alert.show("Claude Shepherd: model auto-routing is for local native-Anthropic sessions only") end)
+    -- R1-31: reject kitty/terminal too -- their /model is an interactive picker so
+    -- autoModelPreface no-ops, making the opt-in a silent dead control otherwise.
+    if on and (it.remote or not core.isAnthropicSession(it.model, it.base_url)
+               or it.editor == "kitty" or it.editor == "terminal") then
+      pcall(function() hs.alert.show("Claude Shepherd: model auto-routing needs a local native-Anthropic chat-input session (VS Code/Cursor)") end)
       refresh(); return
     end
     FX.setAutoModel(key, on)
@@ -3685,8 +3990,10 @@ local function handleBridgeMsg(msg)
           { project = it and it.projectKey, projectKey = it and it.projectKey,
             group = it and it.group, providerId = prov and prov.id or nil, key = key }, name)
         if resolved.source ~= "fleet" then
-          local enc = core.json.encode({ autoAllow = resolved.autoAllow,
-            autoDeny = resolved.autoDeny, bundle = resolved.bundle })
+          local t = { autoAllow = resolved.autoAllow,
+            autoDeny = resolved.autoDeny, bundle = resolved.bundle }
+          if resolved.autopilot then t.autopilot = true end  -- bundle auto-approve (cc-approve reads .autopilot)
+          local enc = core.json.encode(t)
           FX.writeResolvedPolicy(key, enc); policyCache[key] = enc
         else
           FX.clearResolvedPolicy(key); policyCache[key] = nil
@@ -4252,7 +4559,11 @@ local function handleBridgeMsg(msg)
     end
     local text = (payload.text and tostring(payload.text) ~= "") and tostring(payload.text) or nil
     local n = 0
-    for _, k in ipairs(core.selectActionable(visible, action)) do
+    -- R1-07: thread the keystrokes flag so the bulk dispatcher and the per-tile
+    -- handler (4290) compute remote eligibility identically (the JS twin reads the
+    -- same injected flag via __BRIDGE_KEYSTROKES__).
+    local bulkKs = core.config(loadConfig(), "bridge.keystrokes", false) == true
+    for _, k in ipairs(core.selectActionable(visible, action, { keystrokes = bulkKs })) do
       local it = byKey[k]
       if it then
         -- Headless targets (kitty / armed-gate decisions) can all fire now. The
@@ -4343,6 +4654,7 @@ local function handleBridgeMsg(msg)
         -- using the same reliable pattern as Close (no separate dialog -> no console pop).
         { title = "Clear conversation", menu = {
             { title = "Confirm: clear ALL context for " .. shown, fn = function()
+                if item.remote then return end  -- R3-17: no clear/compact for remote tiles (defense in depth)
                 dispatchSerialized(item, "clear", function() FX.typeIntoWindow(winTarget(item), "/clear") end)
                 ledgerFor(item, { type = "clear" })
                 refresh()
@@ -4351,6 +4663,7 @@ local function handleBridgeMsg(msg)
         } },
         { title = "Compact", menu = {
             { title = "Confirm: compact (summarize) " .. shown, fn = function()
+                if item.remote then return end  -- R3-17: no clear/compact for remote tiles (defense in depth)
                 dispatchSerialized(item, "compact", function() FX.typeIntoWindow(winTarget(item), "/compact") end)
                 ledgerFor(item, { type = "compact" })
                 refresh()
@@ -4412,7 +4725,9 @@ local function handleBridgeMsg(msg)
                 end
                 -- rs.providerId=nil means a FAITHFUL bare-claude relaunch: pass the
                 -- explicit-none sentinel "" so it can't inherit the spawn.provider default.
-                FX.spawnSession(rs.editor, rs.project, nil, rs.permissionMode, rs.providerId or "")
+                -- rs.model (R1-24) carries a raw native A/B model so the relaunch isn't
+                -- the account default when no provider profile matched.
+                FX.spawnSession(rs.editor, rs.project, nil, rs.permissionMode, rs.providerId or "", nil, false, rs.model)
                 ledgerFor(item, { type = "respawn", cwd = rs.project, editor = rs.editor, provider = rs.providerId })
               end },
             { title = "Cancel", fn = function() end },
@@ -4483,19 +4798,15 @@ local function handleBridgeMsg(msg)
     end
     return
   end
-  -- Log operator actions that fall through to the generic handler (the rest log at
-  -- their own branch above). Navigation (focus/approve/deny/stop/answer) is NOT
-  -- logged: approve/deny are shell-owned, the others aren't state changes.
-  if a == "set-mode" then
-    ledgerFor(item, { type = "mode_change", from = item.permission_mode, to = tostring(payload.text or "") })
-  elseif a == "model" then
-    ledgerFor(item, { type = "model_change", from = item.model, to = tostring(payload.text or "") })
-  elseif a == "effort" then
-    ledgerFor(item, { type = "effort_change", from = item.effort, to = tostring(payload.text or "") })
-  end
-  -- NOTE: `continue` is ledgered POST-dispatch (gated on delivery) inside dispatch()
-  -- below -- L6 made handleAction("continue") delivery-gated, so an eager pre-dispatch
-  -- log would falsely record a skipped (no-window-match) resume as a success.
+  -- R3-08: capture the mode BEFORE dispatch; set-mode is ledgered POST-dispatch
+  -- (gated on delivery) inside dispatch() below, mirroring model/effort -- an eager
+  -- pre-dispatch log would falsely record a change the session never received on a
+  -- no-window-match skip.
+  local priorMode = item.permission_mode
+  -- NOTE: `continue`, `model`, and `effort` are ledgered POST-dispatch (gated on
+  -- delivery) inside dispatch() below -- handleAction returns nil on a no-window-match
+  -- skip, so an eager pre-dispatch log would falsely record a change the session never
+  -- received (R1-06: /model and /effort are only typed when a window matches).
   local text = payload.text and tostring(payload.text) or nil
   local function dispatch()
     local acted = core.handleAction(FX, item, a, text)
@@ -4513,6 +4824,28 @@ local function handleBridgeMsg(msg)
     if a == "continue" then
       ledgerFor(item, { type = "continue", outcome = (acted == "continue") and "ok" or "skipped" })
     end
+    -- model / effort: /model and /effort slash commands are only typed when a window
+    -- matches (R1-06). Ledger gated on delivery so a no-window-match skip records
+    -- model_skipped/effort_skipped (not a false change), and alert the operator.
+    if a == "model" then
+      if acted == "model" then
+        ledgerFor(item, { type = "model_change", from = item.model, to = tostring(text or "") })
+        -- R3-03: persist the switched model so it survives the 1s refreshList rebuild
+        -- (which otherwise reverts item.model to the spawn-time status snapshot, making
+        -- a later auto-route's no-op check compare against the wrong model).
+        item.model = tostring(text or ""); FX.patchStatus(item.key, { model = item.model })
+      else
+        ledgerFor(item, { type = "model_skipped", from = item.model, to = tostring(text or "") })
+        pcall(function() hs.alert.show("Claude Shepherd: no window match for " .. tostring(item.label or item.name) .. " — model NOT switched") end)
+      end
+    elseif a == "effort" then
+      if acted == "effort" then
+        ledgerFor(item, { type = "effort_change", from = item.effort, to = tostring(text or "") })
+      else
+        ledgerFor(item, { type = "effort_skipped", from = item.effort, to = tostring(text or "") })
+        pcall(function() hs.alert.show("Claude Shepherd: no window match for " .. tostring(item.label or item.name) .. " — effort NOT changed") end)
+      end
+    end
     -- set-mode fires Shift+Tab blind: no hook reports the new mode, so the stored
     -- permission_mode goes stale, the dropdown snaps back ~1s later, and a re-pick
     -- would compute the cycle count from the WRONG base (landing past the target).
@@ -4520,6 +4853,13 @@ local function handleBridgeMsg(msg)
     -- handleAction returns nil when FX.sendKeys reported a skip (window miss /
     -- dead kitty target), so the panel never claims a mode the session isn't in.
     -- The next real hook overwrites the optimistic value.
+    if a == "set-mode" then
+      -- R3-08: ledger gated on delivery (handleAction returns nil on a no-window-match
+      -- skip), so a mode that never reached the session records mode_skipped, not a
+      -- false mode_change. Mirrors model/effort.
+      ledgerFor(item, { type = (acted == "set-mode") and "mode_change" or "mode_skipped",
+                        from = priorMode, to = tostring(payload.text or "") })
+    end
     if acted == "set-mode" then
       item.permission_mode = tostring(payload.text or "")
       FX.patchStatus(item.key, { permission_mode = item.permission_mode })
@@ -5859,7 +6199,7 @@ local HTML = [[
       <!-- DR6: per-session model auto-routing. OFF by default, NEVER fleet-wide. When on,
            each queued/routed feed picks a model by task difficulty (cheap→Haiku, hard→Opus)
            and switches via /model just before the task. Local native-Anthropic sessions only. -->
-      <label class="ctl" id="d-automodel-lbl" title="Auto-pick the model per task by difficulty (cheap→Haiku, standard→Sonnet, hard→Opus) and switch via /model just before each queued/routed feed. Per-session only — never fleet-wide. Local native-Anthropic sessions only (a gateway serves fixed models).">
+      <label class="ctl" id="d-automodel-lbl" title="Auto-pick the model per task by difficulty (cheap→Haiku, standard→Sonnet, hard→Opus) and switch via /model just before each queued/routed feed. Per-session only — never fleet-wide. Local native-Anthropic chat-input sessions only (VS Code/Cursor; terminal/Kitty use an interactive /model picker, and a gateway serves fixed models).">
         <input type="checkbox" id="d-automodel" onchange="onAutoModelChange()"> Auto-model
       </label>
     </div>
@@ -6474,10 +6814,10 @@ local HTML = [[
         <label>Name<input type="text" id="bf-name" placeholder="e.g. tight"></label>
         <label>autoDeny — patterns to HOLD/escalate, one per line (e.g. Bash, Bash(rm*), Write)<textarea id="bf-deny" placeholder="Bash&#10;Write&#10;Edit"></textarea></label>
         <label>autoAllow — patterns to auto-approve, one per line<textarea id="bf-allow" placeholder="Read&#10;Bash(ls*)"></textarea></label>
-        <label>gateTools — per-bundle hold-for-approval list (space-separated; overrides fleet gate.tools)<input type="text" id="bf-gate" placeholder="(blank = inherit fleet gate.tools)"></label>
+        <label>gateTools — per-bundle hold-for-approval list (space-separated; not yet enforced at spawn)<input type="text" id="bf-gate" placeholder="(blank = inherit fleet gate.tools)"></label>
         <div class="pe-grid">
-          <label>Locked perm mode<select id="bf-lockmode"><option value="">(none)</option><option value="default">default</option><option value="acceptEdits">acceptEdits</option><option value="plan">plan</option></select></label>
-          <label>toolLimits — soft per-tool ceilings, "Tool=N" space-separated<input type="text" id="bf-limits" placeholder="Bash=5 Write=10"></label>
+          <label>Locked perm mode (not yet enforced)<select id="bf-lockmode"><option value="">(none)</option><option value="default">default</option><option value="acceptEdits">acceptEdits</option><option value="plan">plan</option></select></label>
+          <label>toolLimits — soft per-tool ceilings, "Tool=N" space-separated (advisory)<input type="text" id="bf-limits" placeholder="Bash=5 Write=10"></label>
         </div>
         <div class="pe-grid">
           <label class="pe-check"><input type="checkbox" id="bf-autopilot"> autopilot (auto-approve everything not denied)</label>
@@ -6577,6 +6917,7 @@ local HTML = [[
     // (injected). Drives the Appearance tab's live preview (applyAppearance twin).
     var APPEARANCE = __APPEARANCE_THEMES__;
     var BULK_RULES = __BULK_RULES__;  // injected from core.BULK_RULES (single source)
+    var BRIDGE_KEYSTROKES = __BRIDGE_KEYSTROKES__;  // bridge.keystrokes flag (remote bulk-eligibility twin)
     var lastItems = [];
     var selectedKey = null;
     var searchQuery = "";   // free-text tile filter (🔍); empty = show all
@@ -6875,7 +7216,15 @@ local HTML = [[
 
     function onThemeChange(){
       var t = document.getElementById("theme").value;
-      document.body.className = "theme-" + t;
+      // R1-28: swap ONLY the layout token; do NOT clobber the whole class list, which
+      // would drop the appearance classes applyAppearance sets (dense/calm) and the
+      // worklist-mode class -- a live-preview-only desync until the panel rebuilds.
+      // R1-29: keep body data-theme in lockstep (populateAppearance reads it to mark
+      // the active layout chip; clobbering only className left it stale).
+      var b = document.body;
+      b.className = b.className.replace(/(^|\s)theme-\S+/g, "").trim();
+      b.classList.add("theme-" + t);
+      b.setAttribute("data-theme", t);
       send("theme", t);
     }
 
@@ -6965,6 +7314,14 @@ local HTML = [[
       var rule = BULK_RULES[action]; if(!rule) return [];
       return (items || []).filter(function(it){
         if(it.stale || !it.key) return false;
+        // R3-09: mirror core.remoteActionAllowed so the bulk-bar count matches what
+        // Lua selectActionable will actually act on. Remote (bridge) tiles: headless
+        // approve/deny only (and only while gate=='waiting'). There is no remote-keystroke
+        // transport, so nudge/stop/clear/compact are NEVER bulk-eligible for a remote tile.
+        if(it.remote){
+          if(action === "approve" || action === "deny") return it.gate === "waiting";
+          return false;
+        }
         return (rule.match !== undefined) ? (it.status === rule.match) : (it.status !== rule.exclude);
       }).map(function(it){ return it.key; });
     }
@@ -7136,7 +7493,11 @@ local HTML = [[
     function apG(id){ return document.getElementById(id); }
     var apSaved = {};   // the persisted appearance; the revert target on Cancel
     function apIsHex(s){ return typeof s==="string" && /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(s); }
-    function apClamp(v,lo,hi,d){ v=parseFloat(v); if(isNaN(v))return d; return v<lo?lo:(v>hi?hi:v); }
+    // R1-30 / R3-13: match Lua appearanceClamp's tonumber-via-decimal-regex semantics --
+    // reject any non-pure-DECIMAL string (parseFloat("1.2x") -> 1.2 and "1.3e0" -> 1.3 both
+    // diverged from the Lua side, which has no [eE] alternative), so SSR CSS and the live
+    // preview agree on a garbage-suffix / exponential value (both fall back to the default).
+    function apClamp(v,lo,hi,d){ var n=(typeof v==="number")?v:((typeof v==="string"&&/^\s*[-+]?(\d+\.?\d*|\.\d+)\s*$/.test(v))?parseFloat(v):NaN); if(isNaN(n))return d; return n<lo?lo:(n>hi?hi:n); }
     function apThemeOf(key){ return (APPEARANCE.themes && APPEARANCE.themes[key]) || APPEARANCE.themes.midnight; }
     function resolveAp(ap){
       ap = ap || {};
@@ -7440,7 +7801,17 @@ local HTML = [[
         p.label = label; p.kind = card.querySelector(".p-kind").value; p.model = model;
         if(!p.id) p.id = slugify(label) || slugify(model);
         if(p.kind === "gateway"){
-          p.baseUrl = v(".p-baseurl"); p.authTokenEnv = v(".p-authenv");
+          p.baseUrl = v(".p-baseurl");
+          // R1-11: authTokenEnv is an env-var NAME interpolated into the spawn shell
+          // ("$NAME"); constrain to a POSIX identifier so a crafted name can't inject.
+          // A bad name is dropped (with an inline warning) -> token simply not sent.
+          var ate = v(".p-authenv");
+          if(ate && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(ate)){
+            var ael = card.querySelector(".p-authenv");
+            if(ael){ ael.value = ""; ael.placeholder = "invalid env-var name — must be A-Z, 0-9, _"; }
+            ate = "";
+          }
+          p.authTokenEnv = ate;
           p.smallFastModel = v(".p-smallfast"); p.headers = v(".p-headers");
         } else {
           // Kind switched (gateway -> claude): drop the gateway-only fields the
@@ -8557,7 +8928,10 @@ local HTML = [[
     }
     function syncAutoModel(it){
       var cb = document.getElementById("d-automodel"); if(!cb || !it) return;
-      var ok = !it.remote && !!it.anthropic;   // local native-Anthropic only
+      // R1-31: auto-routing's effect (autoModelPreface) bails for kitty/terminal (their
+      // /model is an interactive picker), so the gate MUST exclude them too -- else the
+      // checkbox is a dead control that persists a setting the delivery path ignores.
+      var ok = !it.remote && !!it.anthropic && it.editor !== 'kitty' && it.editor !== 'terminal';
       cb.checked = ok && !!it.auto_model;
       cb.disabled = !ok;
       var lbl = document.getElementById("d-automodel-lbl");
@@ -8578,7 +8952,7 @@ local HTML = [[
         }).join("");
         return '<div class="ask-q">'+(q.header?('<b>'+esc(q.header)+'</b> · '):'')+esc(q.question)+'</div>'
              + '<div class="ask-opts">'+opts+'</div>';
-      }).join("") + '<div class="ask-hint">Click an option — auto-selects on Kitty; jumps to the picker in VS Code (mouse-only there)</div>';
+      }).join("") + '<div class="ask-hint">Click an option — auto-selects on Kitty for a single-question ask; otherwise jumps to the picker (VS Code is mouse-only; multi-question asks are finished by hand)</div>';
       el.style.display="block";
     }
     function answerAsk(qi, oi){ if(selectedKey) send("answer", selectedKey, String(oi)); }
@@ -9492,11 +9866,11 @@ local HTML = [[
         var sub = document.createElement("div"); sub.className = "pe-sub";
         if(b.autoDeny && b.autoDeny.length){ var bd=document.createElement("span"); bd.className="pe-badge deny"; bd.textContent="deny "+b.autoDeny.length; sub.appendChild(bd); }
         if(b.autoAllow && b.autoAllow.length){ var ba=document.createElement("span"); ba.className="pe-badge allow"; ba.textContent="allow "+b.autoAllow.length; sub.appendChild(ba); }
-        if(b.gateTools){ var bg=document.createElement("span"); bg.className="pe-badge"; bg.textContent="gate: "+b.gateTools; sub.appendChild(bg); }
+        if(b.gateTools){ var bg=document.createElement("span"); bg.className="pe-badge"; bg.textContent="gate: "+b.gateTools+" (advisory)"; sub.appendChild(bg); }
         if(b.autopilot){ var bp=document.createElement("span"); bp.className="pe-badge"; bp.textContent="autopilot"; sub.appendChild(bp); }
         if(b.disableGlobal){ var bx=document.createElement("span"); bx.className="pe-badge"; bx.textContent="disableGlobal"; sub.appendChild(bx); }
-        if(b.lockedPermMode){ var bl=document.createElement("span"); bl.className="pe-badge"; bl.textContent="lock:"+b.lockedPermMode; sub.appendChild(bl); }
-        if(b.toolLimits){ var lk=Object.keys(b.toolLimits); if(lk.length){ var bt=document.createElement("span"); bt.className="pe-badge"; bt.textContent="limits "+lk.length; sub.appendChild(bt); } }
+        if(b.lockedPermMode){ var bl=document.createElement("span"); bl.className="pe-badge"; bl.textContent="lock:"+b.lockedPermMode+" (advisory)"; sub.appendChild(bl); }
+        if(b.toolLimits){ var lk=Object.keys(b.toolLimits); if(lk.length){ var bt=document.createElement("span"); bt.className="pe-badge"; bt.textContent="limits "+lk.length+" (advisory)"; sub.appendChild(bt); } }
         var det=document.createElement("span"); det.textContent = " " + ((b.autoDeny||[]).concat(b.autoAllow||[]).slice(0,4).join(", "));
         sub.appendChild(det);
         main.appendChild(sub); row.appendChild(main);
@@ -9860,11 +10234,15 @@ local HTML = [[
       if(e.type === "escalation" || e.type === "hung" || e.type === "auto_respawn" || e.type === "auto_continue") return true;
       return e.type === "decision" && e.by != null && e.by !== "human";
     }
-    // YYYY-MM-DD -> epoch seconds (UTC midnight, or end-of-day for `until`).
+    // YYYY-MM-DD -> epoch seconds (LOCAL midnight, or end-of-day for `until`).
+    // R3-12: events are DISPLAYED in LOCAL time (fmtTs uses getHours/getFullYear), so the
+    // since/until boundaries MUST also be local -- a UTC boundary excluded (and, worse,
+    // PURGED) a different set than the operator saw at the day edge. Matches the existing
+    // "local midnight" convention used elsewhere for day bucketing.
     function dateToTs(s, endOfDay){
       s = (s || "").trim(); if(!s) return null;
       var m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/); if(!m) return null;
-      var t = Date.UTC(+m[1], +m[2]-1, +m[3]) / 1000;
+      var t = new Date(+m[1], +m[2]-1, +m[3]).getTime() / 1000;
       return endOfDay ? t + 86399 : t;
     }
     function currentFilter(){
@@ -9895,20 +10273,24 @@ local HTML = [[
       var d = new Date(ts * 1000), p = function(n){ return (n<10?"0":"") + n; };
       return d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate())+" "+p(d.getHours())+":"+p(d.getMinutes());
     }
-    var EV_EMOJI = { session_start:"🟢", session_end:"⚪", prompt:"📝", tool_request:"🔧",
-      task_feed:"📥", mode_change:"🎚", model_change:"🤖", effort_change:"🎚", clear:"🧹",
-      compact:"🗜", nudge:"👉", autopilot_arm:"🛫", spawn:"✨", relabel:"🏷", redact:"🚫", purge:"🗑",
-      escalation:"🔴", hung:"⏳", auto_respawn:"♻️", auto_continue:"▶️", drain_close:"⛔" };
+    // R3-10: emoji + verb come from the injected NARRATE map (single source with
+    // cc-core.lua M.NARRATE) -- no hand-maintained EV_EMOJI/EV_VERB partial maps to drift.
+    // Each NARRATE entry is [emoji, verb]; `decision` derives its emoji from the outcome.
+    var NARRATE = __NARRATE__;
+    function evEmoji(t){ var n = NARRATE[t]; return (n && n[0]) || "•"; }
+    function evVerb(t){ var n = NARRATE[t]; return (n && n[1]) || t; }
     function evDesc(e){
       if(e.type === "decision"){
         return (e.outcome === "deny" ? "⛔" : "✅") + " " + (e.outcome || "?") + " " + (e.tool || "")
           + (e.summary ? (' "' + e.summary + '"') : "")
           + (e.by ? (" (" + e.by + (e.pattern ? (": " + e.pattern) : "") + ")") : "");
       }
-      var em = EV_EMOJI[e.type] || "•";
+      var em = evEmoji(e.type);
       var detail = e.prompt || e.summary || e.task || e.text || e.message || "";
       if(e.type === "mode_change" || e.type === "model_change" || e.type === "effort_change")
         detail = (e.from || "") + " → " + (e.to || "?");
+      else if(e.type === "model_skipped" || e.type === "effort_skipped" || e.type === "mode_skipped")
+        detail = (e.from || "") + " → " + (e.to || "?") + " (not sent — no window)";
       else if(e.type === "tool_request") detail = (e.tool || "") + (e.summary ? (' "' + e.summary + '"') : "");
       else if(e.type === "spawn") detail = (e.editor || "") + " " + (e.kind || "") + (e.dryRun ? " (dry-run)" : "");
       else if(e.type === "purge") detail = (e.count != null ? (e.count + " event(s)") : "");
@@ -9916,7 +10298,15 @@ local HTML = [[
       else if(e.type === "hung") detail = "no progress > " + (e.minutes || "?") + "m";
       else if(e.type === "auto_respawn") detail = (e.cwd || "") + (e.attempt ? (" (attempt " + e.attempt + ")") : "");
       else if(e.type === "auto_continue") detail = "resumed after API error" + (e.attempt ? (" (attempt " + e.attempt + ")") : "");
-      return em + " " + e.type + (detail ? (": " + detail) : "");
+      else if(e.type === "rule") detail = (e.rule || e.kind || "");
+      else if(e.type === "loop") detail = (e.repeats != null ? (e.repeats + "x") : "");
+      else if(e.type === "queue_starved") detail = (e.depth != null ? (e.depth + " queued") : "");
+      else if(e.type === "error") detail = (e.reason || e.message || "");
+      else if(e.type === "auto_respawn_blocked") detail = (e.reason || e.outcome || "");
+      // R3-10: the label is the NARRATE verb (single source), so EVERY known type
+      // renders its rich verb in Rows/Timeline, matching Review/Shift.
+      var label = evVerb(e.type);
+      return em + " " + label + (detail ? (": " + detail) : "");
     }
     function narr(e){ return fmtTs(e.ts) + "  " + (e.name || e.session_id || "?") + "  " + evDesc(e) + (e.redacted ? " [redacted]" : ""); }
     function auditRow(e){
@@ -10388,7 +10778,11 @@ local HTML = [[
     // visible set without duplicating the markup.
     function tileHtml(it){
       var st = it.status || "idle";
-      var label = LABELS[st] || st;
+      // R2-17 (defense-in-depth; core.parseStatusList already clamps status to the
+      // known set): sanitize the class token and escape the label fallback so an
+      // unknown status can never reach this innerHTML sink raw.
+      var stCls = /^[a-z]+$/.test(st) ? st : "idle";
+      var label = LABELS[st] || esc(st);
       // The elapsed-in-status age (2s/13s/11h) rides the status line -- right of the dot,
       // before the status words -- instead of taking its own meta row.
       var age = it.since ? fmtAge(it.since) : "";
@@ -10410,7 +10804,7 @@ local HTML = [[
       if(it.hung){ meta = (meta ? meta + " · " : "") + "⏳ stalled"; }
       if(it.looping){ meta = (meta ? meta + " · " : "") + "⟳ looping"; }   // L5 loop watchdog
       if(it.churn){ meta = (meta ? meta + " · " : "") + "♻️" + it.churn; }   // respawn/clear churn today
-      var cls = "tile s-" + st + (it.stale ? " stale" : "") + (it.collide ? " collide" : "") + (it.hung ? " hung" : "") + (it.escalate ? " escalate" : "") + (it.key === selectedKey ? " sel" : "");
+      var cls = "tile s-" + stCls + (it.stale ? " stale" : "") + (it.collide ? " collide" : "") + (it.hung ? " hung" : "") + (it.escalate ? " escalate" : "") + (it.key === selectedKey ? " sel" : "");
       return '<div class="'+cls+'" data-key="'+esc(it.key)+'" onclick="selectTile(\''+esc(it.key)+'\')" ondblclick="send(\'focus\',\''+esc(it.key)+'\')" oncontextmenu="showCtx(event,\''+esc(it.key)+'\')" title="Double-click to jump · right-click for more">'
            + '<span class="dot"></span>'
            + '<span class="name">'+esc(it.label || it.autoTitle || it.name)+(it.group ? ' <span class="gtag">🏷 '+esc(it.group)+'</span>' : '')+'</span>'
@@ -10507,9 +10901,23 @@ HTML = HTML:gsub("__INIT_THEME__", savedTheme)
 -- Inject the bulk-action targeting rules so the panel JS shares cc-core's single
 -- source of truth (the bulk-bar count can't drift from what selectActionable acts on).
 HTML = HTML:gsub("__BULK_RULES__", hs.json.encode(core.BULK_RULES))
+-- R1-07: inject the bridge.keystrokes flag so the JS actionableKeys mirror of
+-- remoteActionAllowed computes the bulk-bar count identically to Lua selectActionable.
+-- loadConfig isn't defined yet at HTML-build time; read the config file directly here.
+do
+  local _c = FX.readFile(CONFIG_FILE)
+  local _ok, _t = pcall(function() return core.json.decode(_c or "") end)
+  local _cfg = (_ok and type(_t) == "table") and _t or {}
+  HTML = HTML:gsub("__BRIDGE_KEYSTROKES__",
+    (core.config(_cfg, "bridge.keystrokes", false) == true) and "true" or "false")
+end
 -- Inject the L5 detail-panel tab list so the strip shares core.DETAIL_TABS (the
 -- normalizeTabState mirror + per-tab dispatch can't drift from the canonical ids).
 HTML = HTML:gsub("__DETAIL_TABS__", (hs.json.encode(core.DETAIL_TABS):gsub("%%", "%%%%")))
+-- R3-10: inject the canonical NARRATE map (emoji+verb per event type) so the JS evDesc
+-- twin derives its emoji + label from ONE source -- no hand-maintained EV_VERB/EV_EMOJI
+-- partial maps to drift out of sync with cc-core.lua NARRATE.
+HTML = HTML:gsub("__NARRATE__", (hs.json.encode(core.NARRATE):gsub("%%", "%%%%")))
 -- Inject the ⌨ hotkey legend, sourced from the real HOTKEY_* bindings (so the
 -- displayed combos can't drift from what's actually bound) via core.hotkeyLegend.
 local legendGlobals = {
@@ -10876,6 +11284,16 @@ local function runRules(ruleSet, it, edgeKind)
         ledgerFor(it, { type = "rule", rule = r.name, kind = edgeKind, by = "rule",
                         processor = "relabel", to = p.label })
       elseif p.kind == "nudge" and p.text and p.text ~= "" then
+        -- R2-08: never nudge a session sitting at its approval prompt. handleAction's
+        -- nudge PASTES text AND submits, so broadcasting into a y/n approval prompt
+        -- answers/corrupts the pending decision. This mirrors core.BULK_RULES.nudge,
+        -- which deliberately excludes status 'approval' for exactly this reason. A
+        -- 'feed' processor is the safe choice for an approval-edge rule.
+        if it.status == "approval" then
+          ledgerFor(it, { type = "rule", rule = r.name, kind = edgeKind, by = "rule",
+                          processor = "nudge_skipped", reason = "approval",
+                          text = tostring(p.text):sub(1, 200) })
+        else
         local target = it
         dispatchSerialized(target, "rule-nudge", function()
           local acted = core.handleAction(FX, target, "nudge", p.text)
@@ -10883,6 +11301,7 @@ local function runRules(ruleSet, it, edgeKind)
                               processor = (acted == "nudge") and "nudge" or "nudge_skipped",
                               text = tostring(p.text):sub(1, 200) })
         end)
+        end
       elseif p.kind == "feed" and p.text and p.text ~= "" then
         -- Enqueue a task onto the tile's queue; the existing auto-feed delivers it
         -- when the session next reaches done/idle (no direct keystroke). Resolve the
@@ -10911,7 +11330,20 @@ end
 
 -- Push current statuses into the webview + deck; run queue auto-feed and
 -- stale-approval escalation; keep the heartbeat fresh.
+-- R3-24: refresh() is a thin re-entrancy guard around refreshBody(). A dispatchSerialized
+-- closure for a KITTY target blocks on FX.runKittyChecked's t:waitUntilExit(), which PUMPS
+-- the Hammerspoon run loop -- so the 1Hz timer could otherwise fire a NESTED refresh mid-feed
+-- that rebuilds/swaps the shared prev table, reaps caches, and dispatches more spawn ladders
+-- interleaved with the in-flight feed. The guard drops a nested tick (the in-flight one is
+-- already producing fresh state); pcall ensures the flag is always cleared.
 function refresh()
+  if FX._refreshBusy then return end
+  FX._refreshBusy = true
+  local ok, err = pcall(FX._refreshBody)
+  FX._refreshBusy = false
+  if not ok then print("[cc-dashboard] refresh failed: " .. tostring(err)) end
+end
+function FX._refreshBody()
   local cfg = loadConfig()
   reconcileBridge(cfg)  -- SSH bridge timers track config (cheap diff per tick)
   pcall(function() FX.pollHostStats(false, cfg) end)  -- #6 host stats: self-gating (off by default) + throttled (HOST_TTL)
@@ -11148,7 +11580,10 @@ function refresh()
     -- DR6: per-session model auto-routing state for the detail toggle. it.anthropic
     -- gates the checkbox (the /model tier switch is local native-Anthropic only).
     it.anthropic = core.isAnthropicSession(it.model, it.base_url)
-    it.auto_model = (not it.remote) and it.anthropic and FX.autoModelOn(it.key) or false
+    -- R1-31: AND-in the editor check so a stale opt-in file can't make the panel read
+    -- back checked for a kitty/terminal session the effect would never route.
+    it.auto_model = (not it.remote) and it.anthropic and it.editor ~= "kitty" and it.editor ~= "terminal"
+      and FX.autoModelOn(it.key) or false
 
     -- Collision + risk indicators (Features B/E), both off by default.
     it.collide = collEnabled and (collFlags[it.key] or false) or nil
@@ -11259,7 +11694,7 @@ function refresh()
             FX.writeQueue(qk, q2)
             it.queue = core.queueDepth(q2)
             stampTaskStart(it, task, "autofeed")
-            if pre then ledgerFor(it, { type = "model_change", from = pre.from, to = pre.model, by = "auto", reason = pre.reason }); it.model = pre.model end
+            if pre then ledgerFor(it, { type = "model_change", from = pre.from, to = pre.model, by = "auto", reason = pre.reason }); it.model = pre.model; FX.patchStatus(it.key, { model = pre.model }) end
           else
             print("[cc-queue] feed skipped (no window match) -- task kept queued")
           end
@@ -11339,12 +11774,20 @@ function refresh()
     if step.spawn then  -- rs.canRespawn was true (the increment is gated on it)
       print("[cc-respawn] auto-relaunch " .. tostring(it.name)
         .. " (attempt " .. tostring(step.attempts) .. "/" .. autoRespawnMax .. ")")
-      ledgerFor(it, { type = "auto_respawn", outcome = "ok", cwd = rs.project, editor = rs.editor,
-        provider = rs.providerId, attempt = step.attempts })
       -- rs.providerId=nil = faithful bare claude: "" (explicit none) so the relaunch
-      -- can't silently pick up the spawn.provider default gateway.
-      FX.spawnSession(rs.editor, rs.project, nil, rs.permissionMode, rs.providerId or "")
-      FX.removeStatus(it.key)  -- drop the dead tile; the relaunch makes a fresh one
+      -- can't silently pick up the spawn.provider default gateway. rs.model carries a
+      -- raw native A/B model (R1-24) so the relaunch isn't the account default.
+      -- R1-22: spawnSession returns false on a dry-run NO-OP (the default config:
+      -- spawn.live=false). Only drop the dead tile + ledger "ok" when a REAL launch
+      -- happened -- otherwise the session would silently vanish and never relaunch,
+      -- and the audit trail would falsely claim success.
+      local launched = FX.spawnSession(rs.editor, rs.project, nil, rs.permissionMode,
+        rs.providerId or "", nil, false, rs.model)
+      ledgerFor(it, { type = "auto_respawn", outcome = launched and "ok" or "dryrun",
+        cwd = rs.project, editor = rs.editor, provider = rs.providerId, attempt = step.attempts })
+      if launched then
+        FX.removeStatus(it.key)  -- drop the dead tile; the relaunch makes a fresh one
+      end
     elseif step.wouldFire and rs and not rs.canRespawn then
       -- L6: a death that WOULD auto-respawn but can't -- previously a silent print.
       -- Ledger it once (the edge is debounced by stepAutoRespawn) so "failed
@@ -11358,18 +11801,27 @@ function refresh()
     -- typing "continue" after a grace delay, capped per folder. cc-core owns the timing/budget
     -- (since/attempts maps); the keystroke goes through the SAME serialized chokepoint the manual
     -- Continue button uses. Remote tiles are excluded (the keystroke targets a LOCAL window).
+    -- R3-23: pass statusKnown so a FAILED transcript-tail read (wantTail but tail==nil)
+    -- doesn't masquerade as "left the error state" and wipe the accumulated grace clock.
+    -- When no tail was wanted, status is authoritative -> known.
     local cstep = core.stepAutoContinue(autoContinueState, it,
       { enabled = autoContinueOn and not it.remote, now = now,
-        minSeconds = autoContinueDelay, maxAttempts = autoContinueMax })
+        minSeconds = autoContinueDelay, maxAttempts = autoContinueMax,
+        statusKnown = (not wantTail) or (tail ~= nil) })
     if cstep.fire then
       print("[cc-continue] auto-continue " .. tostring(it.name)
-        .. " (attempt " .. tostring(cstep.attempts) .. "/" .. autoContinueMax .. ")")
+        .. " (attempt " .. tostring((cstep.attempts or 0) + 1) .. "/" .. autoContinueMax .. ")")
       -- L6: ledger INSIDE the serialized closure so the outcome reflects DELIVERY
       -- (handleAction returns "continue" only when the keystroke actually landed).
+      -- R2-22: charge the per-window budget ONLY on confirmed delivery, so a
+      -- no-window-match session doesn't burn maxAttempts without ever continuing.
       local ct = it
+      local bk = cstep.budgetKey
       dispatchSerialized(ct, "continue", function()
         local acted = core.handleAction(FX, ct, "continue")
-        ledgerFor(ct, { type = "auto_continue", attempt = cstep.attempts,
+        if acted == "continue" then core.chargeAutoContinue(autoContinueState, bk) end
+        ledgerFor(ct, { type = "auto_continue",
+                        attempt = (acted == "continue") and autoContinueState.attempts[bk] or nil,
                         outcome = (acted == "continue") and "ok" or "skipped" })
       end)
     end
@@ -11411,6 +11863,35 @@ function refresh()
   core.reapUnbacked(summaryState.fired, newPrev)     -- L5
   core.reapUnbacked(summaryState.pending, newPrev)   -- L5
   core.reapUnbacked(gitChangeFiles, newPrev)         -- L5 Changes cache
+  -- R1-23: autoContinueState.since is tile-key keyed (cleared only when a STILL-PRESENT
+  -- tile leaves the error state); an errored tile that's pruned/closed before recovering
+  -- leaks its entry forever -- reap it like the siblings above.
+  core.reapUnbacked(autoContinueState.since, newPrev)
+  -- R2-23: watchdog/draining are tile-key keyed but cleared only inside the per-tile
+  -- loop (watchdogShouldReset / drain-close), which only visits LIVE tiles. A
+  -- working+non-stale tile (watchdog populated) or an armed-drain tile that vanishes
+  -- (SessionEnd/prune/respawn) before that edge leaks forever -- reap like the siblings.
+  core.reapUnbacked(watchdog, newPrev)
+  core.reapUnbacked(draining, newPrev)
+  -- R3-20: routePending (tile-key -> dispatch ts) is cleared only on a LIVE-tile visit
+  -- (routePendingDone) or inside the router's slot. A tile holding a fresh marker that
+  -- VANISHES (prune/SessionEnd/respawn/close) before the next visit leaks forever -- reap
+  -- it against the live tile set like the watchdog/draining siblings.
+  core.reapUnbacked(routePending, newPrev)
+  -- respawnAttempts / autoContinueState.attempts are now budgetKey-keyed (R2-21:
+  -- per terminal window, falling back to projectKey/cwd); cleared only on sustained
+  -- health or a clean done, so a folder/window abandoned while frozen leaks. Build a
+  -- live-budgetKey set from `list` (NOT newPrev, which is tile-key keyed) using the
+  -- SAME core.budgetKey the steppers use, and reap both against it.
+  if next(respawnAttempts) or next(autoContinueState.attempts) then
+    local liveBudgetKeys = {}
+    for _, it in ipairs(list) do
+      local bk = core.budgetKey(it)
+      if bk and bk ~= "" then liveBudgetKeys[bk] = true end
+    end
+    core.reapUnbacked(respawnAttempts, liveBudgetKeys)
+    core.reapUnbacked(autoContinueState.attempts, liveBudgetKeys)
+  end
   -- L5 PR status cache is keyed by repo ROOT (not tile key): reap roots no longer backing
   -- any live local tile, so it can't grow unbounded across many repos -- and drop + TERMINATE
   -- any in-flight poll latch for a vanished root (else a hung task ref leaks for a root we'll
@@ -11498,7 +11979,26 @@ function refresh()
           else
             routePending[item.key] = now
             dispatchSerialized(item, "queue-feed", function()
-              local task, q2 = core.queuePop(FX.readQueue(qk))
+              local freshQ = FX.readQueue(qk)
+              -- R1-18: the head may have changed since routeTask peeked (a queue-move
+              -- during the stagger delay). Re-validate the head's role/barrier against
+              -- the chosen member; on a mismatch, do NOT pop/feed -- clear pending and
+              -- let the next tick re-peek + re-pick against the reordered head.
+              if not core.routeFeedMatches(item, core.queuePeek(freshQ), members) then
+                print("[cc-route] head changed under the router slot -- refusing mismatched feed, task kept queued")
+                routePending[item.key] = nil; return
+              end
+              -- R2-20: re-check the chosen member is STILL free at dispatch time. The
+              -- snapshot item.status is frozen at tick time (still "done" here), so a
+              -- manual feed/nudge that drove this member into working/approval during
+              -- the stagger is invisible to routeFeedMatches -- a live re-stat catches
+              -- it so the routed paste never lands mid-turn. On not-free: keep queued.
+              local fresh = FX.liveStatusFor(item.key)
+              if fresh and not core.sessionFree(fresh, { now = now, pendingTimeout = core.ROUTE_PENDING_TIMEOUT }) then
+                print("[cc-route] member busy under the router slot -- task kept queued")
+                routePending[item.key] = nil; return
+              end
+              local task, q2 = core.queuePop(freshQ)
               if not task then routePending[item.key] = nil; return end
               print("[cc-route] feeding '" .. tostring(task) .. "' to " .. tostring(item.name))
               local pre = FX.autoModelPreface(item, task)   -- DR6 (nil unless opted-in + a different tier)
@@ -11506,7 +12006,7 @@ function refresh()
               if commit.persist then
                 FX.writeQueue(qk, q2)
                 stampTaskStart(item, task, "router")
-                if pre then ledgerFor(item, { type = "model_change", from = pre.from, to = pre.model, by = "auto", reason = pre.reason }); item.model = pre.model end
+                if pre then ledgerFor(item, { type = "model_change", from = pre.from, to = pre.model, by = "auto", reason = pre.reason }); item.model = pre.model; FX.patchStatus(item.key, { model = pre.model }) end
               else
                 print("[cc-route] feed skipped (no window match) -- task kept queued")
                 routePending[item.key] = nil  -- session stays eligible
@@ -11538,6 +12038,15 @@ function refresh()
         starvedSince[qk] = nil; starvedAlerted[qk] = nil
       end
     end
+  end
+  -- R3-20: starvedSince/starvedAlerted are queueKey-keyed and cleared only inside the
+  -- routing loop. A project whose tiles all vanish mid-episode (prune/respawn) never
+  -- gets that clear -- reap both against the live queueKey set (routeGroups keys).
+  do
+    local liveQk = {}
+    for qk in pairs(routeGroups) do liveQk[qk] = true end
+    core.reapUnbacked(starvedSince, liveQk)
+    core.reapUnbacked(starvedAlerted, liveQk)
   end
 
   -- Errored tiles were detected mid-loop (status overridden to "error"); re-sort so they
@@ -11628,8 +12137,10 @@ function refresh()
           it.policy_override = ovr
           it.policy_bundle = resolved.bundle
           if resolved.source ~= "fleet" then
-            local enc = core.json.encode({ autoAllow = resolved.autoAllow,
-              autoDeny = resolved.autoDeny, bundle = resolved.bundle })
+            local t = { autoAllow = resolved.autoAllow,
+              autoDeny = resolved.autoDeny, bundle = resolved.bundle }
+            if resolved.autopilot then t.autopilot = true end  -- bundle auto-approve (cc-approve reads .autopilot)
+            local enc = core.json.encode(t)
             if policyCache[it.key] ~= enc then
               FX.writeResolvedPolicy(it.key, enc); policyCache[it.key] = enc
             end
@@ -11732,9 +12243,12 @@ autoTitles = FX.loadAutoTitles()
 -- every tick) or each refresh would trigger the next one forever (pure check
 -- in cc-core; the heartbeat can't move out of STATUS_DIR -- cc-approve reads it
 -- there).
-M.timer = hs.timer.doEvery(POLL_SECONDS, refresh)
+-- Defense-in-depth: wrap the refresh drivers in pcall so a parse fault on a single
+-- malformed status file degrades ONE tick instead of permanently halting the 1Hz loop
+-- (cc-core now coerces the time fields, but a future parse path could still throw).
+M.timer = hs.timer.doEvery(POLL_SECONDS, function() pcall(refresh) end)
 M.watcher = hs.pathwatcher.new(STATUS_DIR, function(paths)
-  if core.watcherShouldRefresh(paths) then refresh() end
+  if core.watcherShouldRefresh(paths) then pcall(refresh) end
 end):start()
 -- Token usage (local, zero API cost): recompute fleet/per-session/window every 60s.
 M.usageTimer = hs.timer.doEvery(60, function() pcall(FX.computeUsage) end)

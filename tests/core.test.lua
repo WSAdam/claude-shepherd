@@ -129,6 +129,56 @@ do
   end
   eq("parse: old entry is stale", charlie.stale, true)
   eq("parse: fresh entry not stale", alpha.stale, false)
+  -- R2-17: status is clamped to the known set at the parse chokepoint so a hostile
+  -- (e.g. rsync-mirrored from a compromised host) value can't reach the panel's
+  -- innerHTML sink raw. Unknown -> "idle". Every known status passes through.
+  local xss = core.parseStatusList(
+    { entry("h", { name = "evil", status = '<img src=x onerror=alert(1)>', updated = now }) }, now, 90)
+  eq("R2-17: hostile status clamped to idle", xss[1].status, "idle")
+  for _, s in ipairs({ "idle", "working", "approval", "done", "error" }) do
+    local kept = core.parseStatusList({ entry("k", { name = "n", status = s, updated = now }) }, now, 90)
+    eq("R2-17: known status '" .. s .. "' preserved", kept[1].status, s)
+  end
+end
+
+-- ---- R1-01/R1-02: non-numeric updated/since must not crash the refresh tick --
+do
+  local now = 10000
+  -- A hand-edited / foreign / rsync-mirrored status file with non-numeric time
+  -- fields must parse without throwing (arithmetic is outside the decode pcall).
+  local okBool = pcall(function()
+    return core.parseStatusList({ entry("y", { name = "y", status = "working", updated = true }) }, now, 90)
+  end)
+  check("parse: boolean updated does not throw", okBool)
+  local okStr = pcall(function()
+    return core.parseStatusList({ entry("z", { name = "z", status = "working", updated = "not-a-number" }) }, now, 90)
+  end)
+  check("parse: non-numeric string updated does not throw", okStr)
+
+  local lst = core.parseStatusList({
+    entry("a", { name = "a", status = "working", updated = "soon", since = "oops" }),
+    entry("b", { name = "b", status = "approval", since = true, updated = now }),
+  }, now, 90)
+  local a, b
+  for _, it in ipairs(lst) do
+    if it.name == "a" then a = it end
+    if it.name == "b" then b = it end
+  end
+  eq("parse: garbage updated -> stale false", a.stale, false)
+  eq("parse: garbage updated -> coerced to nil", a.updated, nil)
+  eq("parse: garbage since -> coerced to nil", a.since, nil)
+  eq("parse: garbage since on approval -> coerced to nil", b.since, nil)
+  -- the parsed items must flow through the downstream raw-arithmetic consumers
+  -- without throwing, returning fail-closed values.
+  local okA = pcall(function() return core.approvalStale(b, now, 5) end)
+  check("approvalStale: garbage since does not throw", okA)
+  eq("approvalStale: garbage since -> false", core.approvalStale(b, now, 5), false)
+  eq("shouldPrune: garbage updated -> no ghost", core.shouldPrune(a, now, { pruneSeconds = 10 }), false)
+  -- raw (un-parsed) consumers are hardened too
+  eq("approvalStale: raw string since -> false",
+     core.approvalStale({ status = "approval", since = "oops" }, 5000, 300), false)
+  eq("approvalStale: raw boolean since -> false",
+     core.approvalStale({ status = "approval", since = true }, 5000, 300), false)
 end
 
 -- ---- resolveGesture: gate-aware short/long press ---------------------------
@@ -227,6 +277,39 @@ do
   -- L6: continue is delivery-gated — a no-window-match skip returns nil (accurate outcome)
   local rskip = newRecorder(); rskip._typeResult = false
   eq("continue: skip on no-window-match -> nil", core.handleAction(rskip.fx, normal, "continue"), nil)
+
+  -- R1-06: model/effort are delivery-gated too (typeIntoWindow false -> nil), so the
+  -- dashboard can ledger model_skipped/effort_skipped instead of a false change.
+  local rmskip = newRecorder(); rmskip._typeResult = false
+  eq("model: skip on no-window-match -> nil",
+     core.handleAction(rmskip.fx, normal, "model", "claude-opus-4-8"), nil)
+  local reskip = newRecorder(); reskip._typeResult = false
+  eq("effort: skip on no-window-match -> nil",
+     core.handleAction(reskip.fx, normal, "effort", "high"), nil)
+  -- positive control: a delivered model switch still returns "model"
+  r = newRecorder()
+  eq("model: delivered -> model", core.handleAction(r.fx, normal, "model", "claude-opus-4-8"), "model")
+
+  -- R2-16: a SINGLE single-select question on kitty drives the picker via answerKeys.
+  local askSingle = { key = "as1", name = "ask1", editor = "kitty",
+                      pending = { ask = { { question = "Q1", multiSelect = false } } } }
+  r = newRecorder()
+  eq("answer: single-question kitty -> answer (sendKeys)",
+     core.handleAction(r.fx, askSingle, "answer", "1"), "answer")
+  eq("answer: single-question uses sendKeys", r.last().op, "sendKeys")
+  -- A MULTI-QUESTION ask must JUMP (focusWindow), never drive the wrong picker --
+  -- answerAsk sends only the option index, not the question index.
+  eq("askIsMultiQuestion: 2 questions -> true",
+     core.askIsMultiQuestion({ pending = { ask = { { question = "Q1" }, { question = "Q2" } } } }), true)
+  eq("askIsMultiQuestion: 1 question -> false",
+     core.askIsMultiQuestion({ pending = { ask = { { question = "Q1" } } } }), false)
+  local askMultiQ = { key = "aq1", name = "ask2", editor = "kitty",
+                      pending = { ask = { { question = "Q1", multiSelect = false },
+                                          { question = "Q2", multiSelect = false } } } }
+  r = newRecorder()
+  eq("answer: multi-question kitty -> answer (jumps)",
+     core.handleAction(r.fx, askMultiQ, "answer", "1"), "answer")
+  eq("answer: multi-question jumps (focusWindow, NOT sendKeys)", r.last().op, "focusWindow")
 end
 
 -- ---- deckLayout: row-major fill + overflow ---------------------------------
@@ -406,6 +489,12 @@ do
       content = { { type = "text", text = text } } } })
   end
   local userline = core.json.encode({ type = "user", message = { role = "user" } })
+  -- a genuine human-typed prompt after the error (the operator typed "continue")
+  local humanline = core.json.encode({ type = "user", message = { role = "user",
+    content = { { type = "text", text = "continue" } } } })
+  -- an IDE-injected / tool-result-only user line (NOT real activity)
+  local injectline = core.json.encode({ type = "user", isMeta = true, message = { role = "user",
+    content = { { type = "tool_result", tool_use_id = "x", content = "ok" } } } })
 
   -- latest significant line is an api_error -> stuck; return its formatted message
   local stuck = aline("working on it") .. "\n" .. errline("Unable to connect to API (ECONNRESET)")
@@ -416,9 +505,14 @@ do
   -- an assistant line AFTER the error -> recovered, not stuck
   eq("error: assistant after error -> nil",
      core.transcriptError(errline("boom") .. "\n" .. aline("recovered")), nil)
-  -- a user line after the error (e.g. the user typed continue) -> nil
-  eq("error: user activity after error -> nil",
-     core.transcriptError(errline("boom") .. "\n" .. userline), nil)
+  -- R3-04: a GENUINE human-typed prompt after the error (user typed continue) -> nil
+  eq("error: genuine human prompt after error -> nil",
+     core.transcriptError(errline("boom") .. "\n" .. humanline), nil)
+  -- R3-04: an IDE-injected / tool-result / empty user line is NOT recovery -> still errored
+  check("error: bare user line after error is NOT recovery",
+     core.transcriptError(errline("boom") .. "\n" .. userline) ~= nil)
+  check("error: IDE-injected meta user line after error is NOT recovery",
+     core.transcriptError(errline("boom") .. "\n" .. injectline) ~= nil)
   -- no api_error at all -> nil
   eq("error: clean transcript -> nil", core.transcriptError(aline("all good")), nil)
   -- empty / garbled input is safe
@@ -1575,6 +1669,20 @@ do
   local gw2 = { kind = "gateway", baseUrl = "http://x" }
   eq("providerenv: gateway no-model/no-auth count", #core.providerEnv(gw2), 1)
 
+  -- R1-11: a malicious authTokenEnv (shell metachars) is DROPPED -> no token emitted
+  -- (fail-closed; the spawn shell can never run the injected substitution).
+  local gwbad = { kind = "gateway", baseUrl = "http://x", model = "m",
+                  authTokenEnv = "K\"; rm -rf ~ #" }
+  local eb = core.providerEnv(gwbad)
+  eq("providerenv: malicious authTokenEnv -> no token emitted",
+     (function() for _, x in ipairs(eb) do if x.name == "ANTHROPIC_AUTH_TOKEN" then return "leaked" end end return "dropped" end)(),
+     "dropped")
+  local gwsub = { kind = "gateway", baseUrl = "http://x", model = "m",
+                  authTokenEnv = "$(curl evil)" }
+  eq("providerenv: command-substitution authTokenEnv -> no token",
+     (function() for _, x in ipairs(core.providerEnv(gwsub)) do if x.name == "ANTHROPIC_AUTH_TOKEN" then return "leaked" end end return "dropped" end)(),
+     "dropped")
+
   -- envPrefix: literals single-quoted, secrets double-quoted (shell-expanded)
   eq("envprefix: empty list -> empty", core.envPrefix({}), "")
   eq("envprefix: nil -> empty", core.envPrefix(nil), "")
@@ -1699,6 +1807,11 @@ do
   local kne = core.spawnSpec("kitty", "/p", "go", { ssh = { host = "h" } })
   eq("spawnspec(kitty,ssh,no-env): bare inner unchanged",
      kne.argv[#kne.argv], "cd '/p' && claude 'go'")
+  -- R3-02: a metacharacter/dot-traversal host fail-CLOSES sshDest -> nil; the kitty
+  -- branch must abort with argv=nil + error, NOT silently drop the dest.
+  local kbad = core.spawnSpec("kitty", "/p", "go", { ssh = { host = "h", user = "u;reboot" } })
+  eq("spawnspec(kitty,ssh,bad-dest): argv nil (aborted)", kbad.argv, nil)
+  check("spawnspec(kitty,ssh,bad-dest): error set", kbad.error ~= nil)
 end
 
 -- ---- token usage: parse + aggregate transcript usage (zero-cost, local) -----
@@ -2003,6 +2116,21 @@ do
   eq("kittyCmd: cwd fallback selector", core.kittyCmd("focus", { cwd = "/proj" }, {})[#core.kittyCmd("focus", { cwd = "/proj" }, {})], "cwd:/proj")
   eq("kittyCmd: untargetable -> nil", core.kittyCmd("focus", {}, {}), nil)
   eq("kittyCmd: unknown action -> nil", core.kittyCmd("bogus", it, {}), nil)
+
+  -- R1-15: `ls` liveness-probe argv + the pure window-alive parser
+  local ls = core.kittyCmd("ls", it)
+  eq("kittyCmd: ls subcommand", ls[4], "ls")
+  eq("kittyCmd: ls --match", ls[5], "--match")
+  eq("kittyCmd: ls selector", ls[6], "id:7")
+  local liveJson = '[{"tabs":[{"windows":[{"id":7}]}]}]'
+  local emptyJson = '[]'
+  local noWinJson = '[{"tabs":[{"windows":[]}]}]'
+  eq("kittyWindowAlive: a matching window -> true", core.kittyWindowAlive(liveJson), true)
+  eq("kittyWindowAlive: empty array -> false (window gone)", core.kittyWindowAlive(emptyJson), false)
+  eq("kittyWindowAlive: tab with no windows -> false", core.kittyWindowAlive(noWinJson), false)
+  eq("kittyWindowAlive: empty string -> false (fail-closed)", core.kittyWindowAlive(""), false)
+  eq("kittyWindowAlive: garbage -> false (fail-closed)", core.kittyWindowAlive("not json"), false)
+  eq("kittyWindowAlive: nil -> false", core.kittyWindowAlive(nil), false)
 
   eq("kittyKeyToken: return -> enter", core.kittyKeyToken({ mods = {}, key = "return" }), "enter")
   eq("kittyKeyToken: escape -> esc", core.kittyKeyToken({ mods = {}, key = "escape" }), "esc")
@@ -2629,6 +2757,15 @@ do
   eq("risk: signals timeoutFallbacks", rh.signals.timeoutFallbacks, 1)
   eq("risk: signals staleApprovals", rh.signals.staleApprovals, 1)
 
+  -- R3-11: a bundle-scoped auto-deny (by='bundle:<name>') counts as an autoDeny hit,
+  -- while a bundle auto-ALLOW does not (gated on outcome=='deny').
+  eq("risk: bundle-scoped auto-deny counts as autoDeny hit", core.sessionRisk({
+    { ts = 1, type = "tool_request", session_id = "b", tool = "Bash" },
+    { ts = 2, type = "decision", session_id = "b", outcome = "deny", by = "bundle:locked", pattern = "Bash(rm*)" },
+    { ts = 3, type = "tool_request", session_id = "b", tool = "Write" },
+    { ts = 4, type = "decision", session_id = "b", outcome = "allow", by = "bundle:locked", pattern = "Write" },
+  }, {}).signals.autoDenyHits, 1)
+
   -- B2 (staleApprovals path): an auto-decision RESOLVES the request, so a later human
   -- decision with no intervening request must NOT be mis-paired as a slow approval.
   -- (Mirrors the blockedSeconds auto-clears-pending case but on the discrete counter;
@@ -2785,6 +2922,13 @@ do
   local b = core.respawnSpec({ editor = "terminal", cwd = "/x/r", model = "claude-future-9" }, cfg)
   eq("respawn: unknown anthropic still respawnable (bare claude)", b.canRespawn, true)
   check("respawn: unknown anthropic has nil providerId", b.providerId == nil)
+  -- R1-24: a no-profile native Anthropic tile carries its raw model so the relaunch
+  -- rebuilds it (not the account default). A profile match (model wins via env) and a
+  -- gateway session (base_url set) both leave .model nil.
+  eq("respawn: no-profile native carries the raw model", b.model, "claude-future-9")
+  eq("respawn: profile-matched tile -> nil model", a.model, nil)
+  eq("respawn: gateway tile -> nil model",
+     core.respawnSpec({ editor = "terminal", cwd = "/x/q", model = "gemini-2.5-pro", base_url = "http://localhost:4000" }, cfg).model, nil)
   -- faithful bare respawn: the FX call sites pass `rs.providerId or ""` (the
   -- explicit-none sentinel), so it must resolve to NO provider, never the
   -- spawn.provider default the config may carry.
@@ -2960,6 +3104,26 @@ do
     { ts = 200, type = "decision", session_id = "z", outcome = "allow" },
   })
   eq("history: equal-ts lastType = later event (>= tie-break)", tie[1].lastType, "decision")
+  -- R1-12: name/projectKey selection must be order-independent. The production caller
+  -- (FX.sendHistory) feeds events NEWEST-first (filterLedger sorts ts desc). Feed the
+  -- same shape and assert the LATEST non-empty name wins and the EARLIEST projectKey
+  -- (the stable pin) is kept -- the old code inverted both on newest-first input.
+  local newestFirst = core.sessionHistory({
+    { ts = 30, type = "relabel", session_id = "h", name = "new-name", projectKey = "pkNew" },
+    { ts = 20, type = "prompt",  session_id = "h", name = "mid-name", projectKey = "pkMid" },
+    { ts = 10, type = "session_start", session_id = "h", name = "old-name", projectKey = "pkOrig" },
+  })
+  eq("history: newest-first input -> latest non-empty name wins", newestFirst[1].name, "new-name")
+  eq("history: newest-first input -> earliest projectKey pinned", newestFirst[1].projectKey, "pkOrig")
+  -- internal ts-trackers must not leak into the emitted record
+  eq("history: _nameTs not emitted", newestFirst[1]._nameTs, nil)
+  eq("history: _pkTs not emitted", newestFirst[1]._pkTs, nil)
+  -- a blank name between two real ones must NOT override the latest real name
+  local blankGap = core.sessionHistory({
+    { ts = 30, type = "tool_request", session_id = "g" },               -- newest, no name
+    { ts = 20, type = "prompt",  session_id = "g", name = "real-name" },
+  })
+  eq("history: blank newest event keeps the real name", blankGap[1].name, "real-name")
   -- active sort secondary key: equal activity (prompts+tools) -> the more RECENT lastTs wins
   -- (this branch was never hit when the two sessions differed on activity). p: 1 prompt +
   -- 1 tool @ lastTs 300; q: 2 prompts @ lastTs 200 -> both activity 2, so p (newer) sorts first.
@@ -3101,6 +3265,44 @@ do
   check("notify: narrate hung", core.narrateEvent({ type = "hung" }):find("stalled", 1, true) ~= nil)
   check("notify: narrate auto_respawn", core.narrateEvent({ type = "auto_respawn" }):find("respawned", 1, true) ~= nil)
   check("notify: narrate drain_close", core.narrateEvent({ type = "drain_close" }):find("drained", 1, true) ~= nil)
+  -- R1-13: auto_continue must narrate (was missing from NARRATE -> raw type fallback,
+  -- a Lua<->JS twin drift in the Timeline / LLM-review text).
+  check("notify: narrate auto_continue emoji + verb",
+    core.narrateEvent({ type = "auto_continue" }):find("▶️", 1, true) ~= nil
+    and core.narrateEvent({ type = "auto_continue" }):find("resumed after API error", 1, true) ~= nil)
+  check("notify: narrate auto_continue is attempt-aware (mirrors JS evDesc)",
+    core.narrateEvent({ type = "auto_continue", attempt = 2 }):find("attempt 2", 1, true) ~= nil)
+  check("notify: auto_continue not a raw-type fallback",
+    core.narrateEvent({ type = "auto_continue" }):find("• auto_continue", 1, true) == nil)
+  -- R3-10: detail parity with the JS evDesc twin -- these types carry detail in non-default
+  -- fields, so narrateEvent must surface them (not render a bare verb).
+  check("R3-10: narrate loop includes Nx detail",
+    core.narrateEvent({ type = "loop", repeats = 3 }):find("3x", 1, true) ~= nil)
+  check("R3-10: narrate rule includes rule name",
+    core.narrateEvent({ type = "rule", rule = "auto-merge" }):find("auto-merge", 1, true) ~= nil)
+  check("R3-10: narrate queue_starved includes depth",
+    core.narrateEvent({ type = "queue_starved", depth = 5 }):find("5 queued", 1, true) ~= nil)
+  check("R3-10: narrate error uses reason (then message)",
+    core.narrateEvent({ type = "error", reason = "timeout" }):find("timeout", 1, true) ~= nil
+    and core.narrateEvent({ type = "error", message = "boom" }):find("boom", 1, true) ~= nil)
+  check("R3-10: narrate auto_respawn_blocked uses reason (then outcome)",
+    core.narrateEvent({ type = "auto_respawn_blocked", reason = "not respawnable here" }):find("not respawnable here", 1, true) ~= nil)
+  -- R3-10: NARRATE is exposed for single-source injection (__NARRATE__); every NARRATE
+  -- entry has [emoji, verb] so the JS twin can derive both.
+  check("R3-10: M.NARRATE exposed for injection", type(core.NARRATE) == "table" and core.NARRATE.error ~= nil)
+  check("R3-10: mode_skipped is in NARRATE (R3-08 twin)", core.NARRATE.mode_skipped ~= nil)
+  -- R2-14: nudge content lives ONLY in e.text; the Lua fallback must include it
+  -- (the JS evDesc twin already does) so the LLM review sees WHAT was nudged.
+  check("R2-14: narrate nudge includes e.text content",
+    core.narrateEvent({ type = "nudge", text = "run the tests" }):find("run the tests", 1, true) ~= nil)
+  -- R2-15: the parity-added types render their rich verb (not a bare "• <type>").
+  check("R2-15: narrate rule -> rich verb", core.narrateEvent({ type = "rule" }):find("rule fired", 1, true) ~= nil)
+  check("R2-15: narrate queue_starved -> rich verb",
+    core.narrateEvent({ type = "queue_starved" }):find("queued work waiting", 1, true) ~= nil)
+  check("R2-15: rule not a raw-type fallback",
+    core.narrateEvent({ type = "rule" }):find("• rule", 1, true) == nil)
+  check("R2-15: queue_starved not a raw-type fallback",
+    core.narrateEvent({ type = "queue_starved" }):find("• queue_starved", 1, true) == nil)
 end
 
 -- ---- SSH status bridge (roadmap #7): pure layer -----------------------------
@@ -3111,6 +3313,21 @@ do
   eq("bridge: dest nil host -> nil", core.sshDest({ user = "adam" }), nil)
   eq("bridge: dest empty host -> nil", core.sshDest({ host = "" }), nil)
   eq("bridge: dest non-table -> nil", core.sshDest("devbox"), nil)
+  -- R1-34: host/user with shell metacharacters fail SAFE (nil) so dest can't inject
+  -- when interpolated unquoted into the spawn shell string.
+  eq("bridge: dest malicious host -> nil", core.sshDest({ host = "h; rm -rf ~ #" }), nil)
+  eq("bridge: dest command-sub host -> nil", core.sshDest({ host = "$(curl evil)" }), nil)
+  eq("bridge: dest malicious user -> nil", core.sshDest({ host = "h", user = "u;reboot" }), nil)
+  eq("bridge: dest clean host.with-dashes ok", core.sshDest({ host = "dev-box.local" }), "dev-box.local")
+  -- R2-24: dot-traversal host/user must fail SAFE -- the bridge derives a mirror-dir
+  -- name from the dest, and a "." / ".." / "a..b" component would let rsync --delete
+  -- traverse out of MIRROR_DIR (e.g. ns=".." -> ~/.claude). The clean dotted form above stays valid.
+  eq("bridge: dest dotdot host -> nil", core.sshDest({ host = ".." }), nil)
+  eq("bridge: dest dot host -> nil", core.sshDest({ host = "." }), nil)
+  eq("bridge: dest embedded dotdot host -> nil", core.sshDest({ host = "a..b" }), nil)
+  eq("bridge: dest dotdot user -> nil", core.sshDest({ host = "h", user = ".." }), nil)
+  eq("bridge: malicious host -> sshWrap aborts to inner",
+     core.sshWrap("claude", { host = "h;reboot" }), "claude")
   -- sshWrap still works through sshDest (regression)
   check("bridge: sshWrap unchanged", core.sshWrap("cd /p && claude", { host = "h", user = "u" })
     :find("^ssh %-t u@h ") ~= nil)
@@ -3120,15 +3337,27 @@ do
   local cfgOn = { bridge = { enabled = true }, providers = {
     { id = "r1", ssh = { host = "devbox", user = "adam" } },
     { id = "r2", ssh = { host = "devbox", user = "adam" } },   -- same dest: deduped
-    { id = "r3", ssh = { host = "my box!", user = "a" } },     -- ns sanitized
+    { id = "r3", ssh = { host = "gpu.local", user = "a" } },   -- distinct dest
     { id = "local1" },                                          -- no ssh: skipped
     { id = "bad", ssh = { user = "x" } },                       -- no host: skipped
+    { id = "evil", ssh = { host = "h; rm -rf ~ #" } },          -- R1-34: rejected (unsafe)
+    { id = "trav", ssh = { host = ".." } },                     -- R2-24: rejected (traversal)
   } }
   local hosts = core.sshHosts(cfgOn)
-  eq("bridge: hosts deduped count", #hosts, 2)
+  eq("bridge: hosts deduped count (unsafe + traversal hosts dropped)", #hosts, 2)
   eq("bridge: host dest", hosts[1].dest, "adam@devbox")
-  eq("bridge: ns sanitized", hosts[2].ns, "my_box_")
+  eq("bridge: ns from dest", hosts[1].ns, "adam_devbox")
   eq("bridge: nil cfg -> {}", #core.sshHosts(nil), 0)
+  -- R1-25: two providers on the SAME host but different users must get DISTINCT ns
+  -- (ns derived from dest, not host) so reconcileBridge's want[ns]=h can't drop one.
+  local cfgCollide = { bridge = { enabled = true }, providers = {
+    { id = "a", ssh = { host = "devbox", user = "adam" } },
+    { id = "b", ssh = { host = "devbox", user = "root" } },
+  } }
+  local ch = core.sshHosts(cfgCollide)
+  eq("bridge: two users one host -> 2 entries", #ch, 2)
+  eq("bridge: distinct ns per dest",
+     (ch[1].ns ~= ch[2].ns) and "distinct" or "collided", "distinct")
   -- rsyncArgv: exact shape (BatchMode is load-bearing; home-relative remote path)
   eq("bridge: rsync argv", table.concat(core.rsyncArgv("adam@devbox", "/m/devbox"), " "),
      "rsync -az --delete --timeout=5 -e ssh -oBatchMode=yes -oConnectTimeout=3 "
@@ -3182,6 +3411,11 @@ do
   eq("bridge: decision no nonce", core.decisionContent("deny", '{"status":"approval"}'), "deny")
   eq("bridge: decision garbled json", core.decisionContent("allow", "{ not json"), "allow")
   eq("bridge: decision nil text", core.decisionContent("allow", nil), "allow")
+  -- R1-36: when a parallel hook cleared the pending block, fall back to top-level gate_nonce
+  eq("bridge: decision uses gate_nonce when pending cleared",
+     core.decisionContent("allow", '{"status":"approval","gate":"waiting","gate_nonce":"n-9"}'), "allow n-9")
+  eq("bridge: pending.nonce still preferred over gate_nonce",
+     core.decisionContent("allow", '{"gate_nonce":"top","pending":{"nonce":"n-1"}}'), "allow n-1")
   -- decisionSshArgv: exact shape + injection guards (nil, never best-effort)
   eq("bridge: decision argv", table.concat(core.decisionSshArgv("adam@devbox", "k-1", "allow n-1"), " "),
      "ssh -oBatchMode=yes -oConnectTimeout=3 adam@devbox "
@@ -3204,8 +3438,12 @@ do
   eq("bridge: remote stop blocked", core.remoteActionAllowed(rWait, "stop"), false)
   eq("bridge: remote focus blocked", core.remoteActionAllowed(rWait, "focus"), false)
   eq("bridge: remote autopilot blocked", core.remoteActionAllowed(rWait, "autopilot"), false)
-  eq("bridge: keystrokes flag unlocks nudge",
-     core.remoteActionAllowed(rWait, "nudge", { keystrokes = true }), true)
+  -- R3-09: there is no remote-keystroke transport, so the keystrokes flag NEVER unlocks
+  -- nudge/stop/clear/compact -- restoring agreement with handleAction's R2-07 refusal.
+  eq("bridge: keystrokes flag never unlocks nudge",
+     core.remoteActionAllowed(rWait, "nudge", { keystrokes = true }), false)
+  eq("bridge: keystrokes flag never unlocks stop",
+     core.remoteActionAllowed(rWait, "stop", { keystrokes = true }), false)
   eq("bridge: keystrokes flag never unlocks focus",
      core.remoteActionAllowed(rWait, "focus", { keystrokes = true }), false)
   eq("bridge: local item always allowed", core.remoteActionAllowed({ key = "l" }, "nudge"), true)
@@ -3218,9 +3456,14 @@ do
     { key = "devbox:r1", status = "approval", stale = false, remote = { host = "h" }, gate = "waiting" },
     { key = "devbox:r2", status = "working", stale = false, remote = { host = "h" } },
     { key = "l2", status = "working", stale = false },
+    -- R1-07: a remote approval tile WITHOUT gate=='waiting' must NOT be bulk-approvable
+    -- (no decision file to consume) -- this is the case the JS twin previously overcounted.
+    { key = "devbox:r3", status = "approval", stale = false, remote = { host = "h" } },
   }
   local app = core.selectActionable(fleet, "approve")
-  eq("bridge: bulk approve includes remote waiter", #app, 2)
+  eq("bridge: bulk approve includes remote waiter, excludes gateless remote", #app, 2)
+  eq("bridge: bulk approve excludes remote approval w/o gate",
+     (function() for _, k in ipairs(app) do if k == "devbox:r3" then return "present" end end return "absent" end)(), "absent")
   local stops = core.selectActionable(fleet, "stop")
   eq("bridge: bulk stop excludes remote", #stops, 1)
   eq("bridge: bulk stop hits the local one", stops[1], "l2")
@@ -3237,6 +3480,27 @@ do
   eq("bridge: handleAction routes to writeDecision", rec.last().op, "writeDecision")
   eq("bridge: writeDecision gets namespaced key", rec.last().a, "devbox:r1")
   eq("bridge: writeDecision verb", rec.last().b, "allow")
+  -- R1-26: a remote approval tile WITHOUT gate=='waiting' must NOT fall through to
+  -- actOnWindow (which would focus a LOCAL window matching the remote name + press
+  -- Enter). handleAction returns nil and records NO op for it.
+  local recR = newRecorder()
+  eq("bridge: remote approve w/o gate -> nil (no local keystroke)",
+     core.handleAction(recR.fx, { key = "devbox:r3", name = "remote-proj", remote = { host = "h" }, status = "approval" }, "approve"), nil)
+  eq("bridge: remote approve w/o gate records NO op", recR.count(), 0)
+  local recRd = newRecorder()
+  eq("bridge: remote deny w/o gate -> nil", core.handleAction(recRd.fx,
+     { key = "devbox:r3", name = "remote-proj", remote = { host = "h" }, status = "approval" }, "deny"), nil)
+  eq("bridge: remote deny w/o gate records NO op", recRd.count(), 0)
+  -- R2-07: the non-approve/deny window-effect branches (focus/stop/nudge/continue)
+  -- must ALSO fail closed for a remote tile -- the rule engine, Stream Deck, and
+  -- jump/cycle hotkey reach them without pre-gating, and they'd otherwise drive a
+  -- LOCAL window matching the remote name. handleAction returns nil + records NO op.
+  local remoteTile = { key = "devbox:r4", name = "remote-proj", remote = { host = "h" }, status = "working" }
+  for _, act in ipairs({ "focus", "stop", "nudge", "continue" }) do
+    local rrc = newRecorder()
+    eq("R2-07: remote " .. act .. " -> nil", core.handleAction(rrc.fx, remoteTile, act, "some text"), nil)
+    eq("R2-07: remote " .. act .. " records NO op", rrc.count(), 0)
+  end
 end
 
 -- ---- 4c-E project routing: free-set, pick, dispatch gating ------------------
@@ -3343,6 +3607,14 @@ do
        { globalOn = true, now = 100 }).key, "a")
   eq("route-dist: feeds despite a busy sibling (default)",
      core.routeTask(seqBusy, { tasks = { "t" }, routing = true }, { globalOn = true, now = 100 }).key, "a")
+  -- R2-19: a STALE 'working' member must NOT count as in-flight (a dead/frozen session
+  -- would otherwise hold a sequential queue forever behind a corpse).
+  local seqStale = { sess("a", "done", { since = 50 }), sess("b", "working", { stale = true }) }
+  eq("busy: stale working member is NOT in-flight",
+     core.projectBusy(seqStale, {}), false)
+  eq("route-seq: feeds past a STALE working sibling (not held by a corpse)",
+     core.routeTask(seqStale, core.queueSetMode({ tasks = { "t" }, routing = true }, "sequential"),
+       { globalOn = true, now = 100 }).key, "a")
   -- L4 join barriers: @all:/@any: hold a task until members finish
   eq("barrier: @all parses", (core.taskBarrier("@all: merge")), "all")
   eq("barrier: @all strips", select(2, core.taskBarrier("@all: merge")), "merge")
@@ -3350,6 +3622,17 @@ do
   eq("barrier: @role is not a barrier", core.taskBarrier("@review: x"), nil)
   eq("barrier: bare @all is literal", core.taskBarrier("@all:"), nil)
   eq("barrier: composes with a role", select(2, core.taskBarrier("@all: @review: x")), "@review: x")
+  -- R3-05: uppercase barrier is recognized (case-insensitive, mirroring role lowercasing)
+  eq("barrier: @ALL parses (case-insensitive)", (core.taskBarrier("@ALL: merge")), "all")
+  eq("barrier: @Any parses (case-insensitive)", (core.taskBarrier("@Any: go")), "any")
+  -- an uppercase barrier strips to the bare body with NO spurious role
+  eq("barrier: @ALL stripped body has no role",
+     core.taskRoute(select(2, core.taskBarrier("@ALL: x"))), nil)
+  -- R3-06: leading whitespace does not defeat barrier/role parsing
+  eq("barrier: leading space tolerated", (core.taskBarrier("  @all: merge")), "all")
+  eq("barrier: leading tab tolerated", (core.taskBarrier("\t@any: go")), "any")
+  eq("route: leading space tolerated role", (core.taskRoute("  @review: x")), "review")
+  eq("route: leading space stripped body", select(2, core.taskRoute("  @review: x")), "x")
   local allDone = { sess("a", "done"), sess("b", "done") }
   local oneWorking = { sess("a", "done"), sess("b", "working") }
   eq("barrier-met: all done -> all true", core.routeBarrierMet(allDone, "all"), true)
@@ -3358,6 +3641,12 @@ do
   eq("barrier-met: none done -> any false", core.routeBarrierMet({ sess("a", "working") }, "any"), false)
   eq("barrier-met: empty -> false", core.routeBarrierMet({}, "all"), false)
   eq("barrier-met: stale excluded", core.routeBarrierMet({ sess("a", "done", { stale = true }) }, "all"), false)
+  -- R2-18: a stale/remote sibling is EXCLUDED from the requirement, not a permanent
+  -- blocker -- it can never become `settled`, so counting it would make @all forever-unmet.
+  eq("barrier-met: stale sibling excluded -> all true",
+     core.routeBarrierMet({ sess("a", "done"), sess("b", "working", { stale = true }) }, "all"), true)
+  eq("barrier-met: remote sibling excluded -> all true",
+     core.routeBarrierMet({ sess("a", "done"), sess("b", "done", { remote = { host = "h" } }) }, "all"), true)
   local bq = { tasks = { "@all: merge" }, routing = true }
   eq("route-barrier: @all holds while one works",
      core.routeTask(oneWorking, bq, { globalOn = true, now = 100 }), nil)
@@ -3372,6 +3661,22 @@ do
        { tasks = { "@all: @review: ship" }, routing = true }, { globalOn = true, now = 100 }).key, "rv")
   eq("route-barrier: blocked head is not starved",
      core.queueStarved(oneWorking, bq, { minutes = 1, sinceTs = 0, now = 1000 }), false)
+  -- R1-18: routeFeedMatches re-validates the popped head against the chosen member so a
+  -- queue reorder during the dispatch delay can't feed a role-mismatched task.
+  local rvMember = sess("rv", "done", { since = 50, group = "review" })
+  local bdMember = sess("bd", "done", { since = 40, group = "build" })
+  local roleMembers = { rvMember, bdMember }
+  eq("feed-match: head @review: matches a review member",
+     core.routeFeedMatches(rvMember, "@review: ship", roleMembers), true)
+  eq("feed-match: head @review: does NOT match a build member (reorder hazard)",
+     core.routeFeedMatches(bdMember, "@review: ship", roleMembers), false)
+  eq("feed-match: an unaddressed head matches any member",
+     core.routeFeedMatches(bdMember, "plain task", roleMembers), true)
+  eq("feed-match: an unmet barrier head refuses the feed",
+     core.routeFeedMatches(rvMember, "@all: ship", oneWorking), false)
+  eq("feed-match: a met barrier + role head feeds the right member",
+     core.routeFeedMatches(rvMember, "@all: @review: ship", roleMembers), true)
+  eq("feed-match: nil item -> false", core.routeFeedMatches(nil, "x", roleMembers), false)
   -- L4 per-task timing: fire on the first done edge after a feed, with the duration
   eq("task-done: fires on working->done edge",
      core.stepTaskDone({ ts = 100 }, "working", "done", 160).durationS, 60)
@@ -3417,6 +3722,14 @@ do
      core.queueStarved(free, armed, { minutes = 5, sinceTs = 100, now = 999 }), false)
   eq("starve: minutes 0 -> never", core.queueStarved(busy, armed, { minutes = 0, sinceTs = 0, now = 999 }), false)
   eq("starve: unarmed -> false", core.queueStarved(busy, unarmed, { minutes = 5, sinceTs = 100, now = 999 }), false)
+  -- R1-16: a SEQUENTIAL queue with its one task in flight is PROGRESSING, not starved
+  -- (the lone working member makes routePick nil, which the distribute path reads as
+  -- starvation). The distribute queue with the same busy member still starves.
+  local seqArmed = core.queueSetMode({ tasks = { "t" }, routing = true }, "sequential")
+  eq("starve: sequential busy is NOT starved",
+     core.queueStarved(busy, seqArmed, { minutes = 5, sinceTs = 100, now = 100 + 301 }), false)
+  eq("starve: distribute busy (same member) still starves (control)",
+     core.queueStarved(busy, armed, { minutes = 5, sinceTs = 100, now = 100 + 301 }), true)
 end
 
 -- ---- Fleet-wide search (roadmap #3): argv builders + result parsing ---------
@@ -3675,12 +3988,18 @@ do
   eq("autocont: nil args -> false", core.shouldAutoContinue(nil), false)
 end
 
--- ---- stepAutoContinue: per-tile grace clock + per-folder fire budget --------
+-- ---- stepAutoContinue: per-tile grace clock + per-window fire budget --------
+-- R2-22: the budget is charged on CONFIRMED DELIVERY via chargeAutoContinue, not
+-- inside stepAutoContinue's pure gate -- so a no-window-match tile that fires but
+-- doesn't deliver never advances the cap. Tests simulate delivery by calling
+-- chargeAutoContinue(state, step.budgetKey) after each fire.
 do
   local st = { since = {}, attempts = {} }
   local function err(now) return core.stepAutoContinue(st,
     { key = "k1", projectKey = "pf", status = "error" },
     { enabled = true, minSeconds = 60, maxAttempts = 2, now = now }) end
+  -- charge-on-delivery helper: fire AND deliver
+  local function fired(now) local r = err(now); if r.fire then core.chargeAutoContinue(st, r.budgetKey) end; return r end
 
   -- the grace clock starts on first sighting; nothing fires until it elapses
   eq("step-cont: first error sighting does NOT fire", err(1000).fire, false)
@@ -3688,18 +4007,23 @@ do
   eq("step-cont: still inside the grace delay -> no fire", err(1030).fire, false)
   eq("step-cont: no premature charge", st.attempts["pf"], nil)
 
-  -- past the delay: fire once, charge one, and RESTART the clock (so retries are spaced
-  -- ~minSeconds apart rather than firing maxAttempts times on consecutive ticks)
-  local f1 = err(1061)
-  eq("step-cont: fires once past the grace delay", f1.fire, true)
-  eq("step-cont: charges one attempt", st.attempts["pf"], 1)
+  -- R2-22: a fired-but-UNDELIVERED attempt must NOT advance the budget (only the
+  -- clock restarts so it re-spaces instead of re-firing every tick).
+  local fu = err(1061)
+  eq("step-cont: fires once past the grace delay", fu.fire, true)
+  eq("R2-22: undelivered fire does NOT charge the budget", st.attempts["pf"], nil)
   eq("step-cont: fire restarts the grace clock", st.since["k1"], 1061)
   eq("step-cont: does not immediately re-fire next tick", err(1062).fire, false)
 
-  -- still errored a full delay later: second (final) fire, then the cap binds
-  eq("step-cont: second fire after another full delay", err(1122).fire, true)
+  -- a delivered fire (next window) DOES charge exactly one
+  local f1 = fired(1122)
+  eq("step-cont: delivered fire after another delay", f1.fire, true)
+  eq("R2-22: delivered fire charges one attempt", st.attempts["pf"], 1)
+
+  -- still errored a full delay later: second (final) delivered fire, then the cap binds
+  eq("step-cont: second fire after another full delay", fired(1183).fire, true)
   eq("step-cont: budget climbs to the cap", st.attempts["pf"], 2)
-  eq("step-cont: at cap -> no more fires even past the delay", err(1200).fire, false)
+  eq("step-cont: at cap -> no more fires even past the delay", err(1300).fire, false)
   eq("step-cont: capped budget holds", st.attempts["pf"], 2)
 
   -- a CLEAN completion resets the folder budget AND clears the tile clock; a still-dead
@@ -3713,6 +4037,24 @@ do
   core.stepAutoContinue(stB, { key = "kb", projectKey = "pfb", status = "done" },
     { enabled = true, minSeconds = 60, maxAttempts = 2, now = 2100 })
   eq("step-cont: a clean done resets the folder budget", stB.attempts["pfb"], nil)
+
+  -- R3-23: a FAILED-read tick (statusKnown=false) on a frozen-error tile must NOT wipe
+  -- the accumulated grace clock (status falls back to 'working' on a nil tail). The clock
+  -- survives and elapsed keeps accumulating; a genuine known status still clears it.
+  local stF = { since = { kf = 1000 }, attempts = {} }
+  local rF = core.stepAutoContinue(stF, { key = "kf", projectKey = "pff", status = "working" },
+    { enabled = true, minSeconds = 60, maxAttempts = 2, now = 1030, statusKnown = false })
+  eq("step-cont: failed-read tick does NOT clear the grace clock", stF.since["kf"], 1000)
+  eq("step-cont: failed-read tick does NOT fire", rF.fire, false)
+  -- after the read recovers and the tile is still errored, the SAME clock fires past delay
+  eq("step-cont: clock preserved across flicker fires past delay",
+    core.stepAutoContinue(stF, { key = "kf", projectKey = "pff", status = "error" },
+      { enabled = true, minSeconds = 60, maxAttempts = 2, now = 1100, statusKnown = true }).fire, true)
+  -- a KNOWN non-error status (statusKnown true, the default) still clears the clock
+  local stK = { since = { kk = 500 }, attempts = {} }
+  core.stepAutoContinue(stK, { key = "kk", projectKey = "pfk", status = "working" },
+    { enabled = true, minSeconds = 60, maxAttempts = 2, now = 2000, statusKnown = true })
+  eq("step-cont: known working still clears the clock", stK.since["kk"], nil)
 
   -- disabled never fires and never writes; keyless tiles never nil-key write
   local stC = { since = {}, attempts = {} }
@@ -3741,19 +4083,44 @@ do
   local function stepL(status, now) return core.stepAutoContinue(stL,
     { key = "kl", projectKey = "pfl", status = status },
     { enabled = true, minSeconds = 60, maxAttempts = 2, now = now }) end
+  -- R2-22: fire AND deliver (charge) -- the dashboard charges only on a landed keystroke
+  local function firedL(status, now) local r = stepL(status, now); if r.fire then core.chargeAutoContinue(stL, r.budgetKey) end; return r end
   stepL("error", 1000)                                   -- clock starts
-  eq("step-cont(seq): first fire after the delay", stepL("error", 1061).fire, true)
+  eq("step-cont(seq): first fire after the delay", firedL("error", 1061).fire, true)
   eq("step-cont(seq): budget at 1", stL.attempts["pfl"], 1)
   -- the continue drives the tile to `working`: clock clears, budget MUST hold
   eq("step-cont(seq): working does not fire", stepL("working", 1062).fire, false)
   eq("step-cont(seq): working held the budget at 1 (loop guard)", stL.attempts["pfl"], 1)
   -- still dead -> re-errors: a fresh clock, then the second fire COUNTS toward the cap
   stepL("error", 1100)                                   -- clock restarts on re-error
-  eq("step-cont(seq): second fire counts toward the cap", stepL("error", 1161).fire, true)
+  eq("step-cont(seq): second fire counts toward the cap", firedL("error", 1161).fire, true)
   eq("step-cont(seq): budget at the cap", stL.attempts["pfl"], 2)
   stepL("error", 1300)
   eq("step-cont(seq): capped -> no further fires", stepL("error", 1400).fire, false)
   eq("step-cont(seq): cap holds (no runaway loop)", stL.attempts["pfl"], 2)
+
+  -- R2-21: two parallel sessions in ONE folder but DIFFERENT terminal windows must keep
+  -- INDEPENDENT budgets -- a healthy sibling's reset must not zero the crash-looper's count.
+  eq("R2-21: budgetKey is per-window when kitty ids present",
+     core.budgetKey({ projectKey = "pf", kitty_listen_on = "unix:/s", kitty_window_id = "1" }), "pf@unix:/s#1")
+  eq("R2-21: budgetKey distinct per window",
+     core.budgetKey({ projectKey = "pf", kitty_listen_on = "unix:/s", kitty_window_id = "2" }), "pf@unix:/s#2")
+  eq("R2-21: budgetKey falls back to projectKey without kitty ids",
+     core.budgetKey({ projectKey = "pf" }), "pf")
+  -- respawn budget: two windows in one folder accumulate independently
+  local aw = {}
+  local function deadW(key, sid, wid) return { key = key, projectKey = "pf", status = "working",
+    stale = true, updated = 300, session_id = sid, kitty_listen_on = "unix:/s", kitty_window_id = wid } end
+  core.stepAutoRespawn(aw, deadW("w1a", "s1", "1"), { enabled = true, maxRetries = 2, wasStale = false,
+    now = 1000, staleSeconds = 90, respawnStaleSeconds = 600, canRespawn = true })
+  core.stepAutoRespawn(aw, deadW("w2a", "s2", "2"), { enabled = true, maxRetries = 2, wasStale = false,
+    now = 1000, staleSeconds = 90, respawnStaleSeconds = 600, canRespawn = true })
+  eq("R2-21: window 1 has its own budget", aw["pf@unix:/s#1"], 1)
+  eq("R2-21: window 2 has a SEPARATE budget", aw["pf@unix:/s#2"], 1)
+  -- a respawn reuses the SAME window -> the count carries across (new session_id, same wid)
+  core.stepAutoRespawn(aw, deadW("w1b", "s1b", "1"), { enabled = true, maxRetries = 2, wasStale = false,
+    now = 1000, staleSeconds = 90, respawnStaleSeconds = 600, canRespawn = true })
+  eq("R2-21: respawn reusing the window keeps counting toward the cap", aw["pf@unix:/s#1"], 2)
 end
 
 -- ---- bucketEvents: time-series sparkline buckets ---------------------------
@@ -4209,6 +4576,9 @@ do
     { ts = 210, type = "prompt",       projectKey = "P", session_id = "s1", name = "alpha" },
     { ts = 220, type = "decision",     projectKey = "P", session_id = "s1", name = "alpha", outcome = "deny",  by = "human" },
     { ts = 230, type = "decision",     projectKey = "P", session_id = "s1", name = "alpha", outcome = "allow", by = "router" },
+    -- R2-13: routed feeds are DELIVERED task_feed events (by=router), not decisions.
+    { ts = 235, type = "task_feed",    projectKey = "P", session_id = "s1", name = "alpha", by = "router", task = "do x" },
+    { ts = 236, type = "task_feed_skipped", projectKey = "P", session_id = "s1", name = "alpha", by = "router", task = "skip me" },
     { ts = 240, type = "auto_respawn", projectKey = "P", session_id = "s2", name = "alpha" },
     { ts = 250, type = "escalation",   projectKey = "Q", session_id = "s9", name = "beta", minutes = 6 },
     { ts = 260, type = "prompt",       projectKey = "Q", session_id = "s9", name = "beta" },
@@ -4222,7 +4592,8 @@ do
   eq("fleetStandup: allow counted", r.decisions.allow, 1)
   eq("fleetStandup: provenance records who decided (router)", r.provenance.router, 1)
   eq("fleetStandup: auto-respawn tallied", r.autoActions.auto_respawn, 1)
-  eq("fleetStandup: routed decisions counted", r.autoActions.routed, 1)
+  -- R2-13: only the DELIVERED task_feed counts; task_feed_skipped does NOT.
+  eq("fleetStandup: routed feeds counted (delivered only)", r.autoActions.routed, 1)
   eq("fleetStandup: escalation problem tallied", r.problems.escalation, 1)
   eq("fleetStandup: pre-window event excluded (prompts=alpha1+beta1)", r.totals.prompts, 2)
   check("fleetStandup: byProject rollup present", #r.byProject >= 2)
@@ -4719,7 +5090,8 @@ do
       "patterns": { "autoAllow": ["Read"], "autoDeny": ["Bash(rm*)"] },
       "bundles": {
         "read-only": { "autoDeny": ["Write","Edit"], "gateTools": "Bash Write Edit" },
-        "tight": { "autoDeny": ["Bash(curl*)"], "disableGlobal": true, "toolLimits": {"Bash": 3} }
+        "tight": { "autoDeny": ["Bash(curl*)"], "disableGlobal": true, "toolLimits": {"Bash": 3} },
+        "trusted": { "autopilot": true }
       },
       "attachments": [
         { "match": { "project": "secure-*" }, "bundle": "read-only" },
@@ -4751,6 +5123,12 @@ do
   check("resolvePolicy: union adds bundle deny",
         (function() for _, d in ipairs(att.autoDeny) do if d == "Write" then return true end end return false end)())
   eq("resolvePolicy: bundle gateTools wins over fleet", att.gateTools, "Bash Write Edit")
+
+  -- R1-04: a bundle with autopilot:true surfaces autopilot=true (so the panel can
+  -- persist it into the resolved-policy file the gate reads).
+  local ap = core.resolvePolicy(cfg, { project = "scratch" }, { bundle = "trusted" })
+  eq("resolvePolicy: bundle autopilot surfaced", ap.autopilot, true)
+  eq("resolvePolicy: non-autopilot bundle -> false", att.autopilot, false)
 
   -- disableGlobal drops the fleet lists; explicit override beats attachment
   local ov = core.resolvePolicy(cfg, { project = "secure-api" }, { bundle = "tight" })
@@ -5329,6 +5707,20 @@ do
   local cfgOv = core.json.decode('{"automodel":{"models":{"cheap":"haiku-lite","standard":"sonnet","hard":"opus-max"},"cheapMax":2}}')
   eq("suggestModel: model map override", core.suggestModel("rename foo", cfgOv).model, "haiku-lite")
   eq("suggestModel: cheapMax override pushes 3-word to standard", core.suggestModel("add new feature", cfgOv).tier, "standard")
+  -- R1-33: a PARTIAL models override (only cheap) must keep standard/hard working via
+  -- the defaults (was: M.config returns the node as-is, so standard/hard went nil ->
+  -- suggestModel returned nil for those tiers -- silent routing loss).
+  local cfgPartial = core.json.decode('{"automodel":{"models":{"cheap":"haiku-lite"}}}')
+  eq("suggestModel: partial override keeps cheap tier", core.suggestModel("fix a typo", cfgPartial).model, "haiku-lite")
+  eq("suggestModel: partial override falls back to default hard model",
+     core.suggestModel("refactor the auth module", cfgPartial).model, "opus")
+  eq("suggestModel: partial override falls back to default standard model",
+     core.suggestModel("please add a new endpoint that returns the list of active users for the dashboard view today", cfgPartial).model, "sonnet")
+  -- R2-28: an inverted/overlapping threshold config (cheapMax >= hardMin) must NOT
+  -- silently classify a long task as cheap -- the bad pair falls back to the defaults.
+  local cfgBad = core.json.decode('{"automodel":{"cheapMax":50,"hardMin":10}}')
+  eq("suggestModel: inverted thresholds -> long task still hard",
+     core.suggestModel(string.rep("word ", 45), cfgBad).tier, "hard")
 
   -- spawn: a brand-new project (opts.isNew) marks the extension spec coldStart, and the
   -- open args gain --disable-workspace-trust so the trust modal can't swallow the prompt.
@@ -5560,6 +5952,19 @@ do
   eq("appearance: scale clamp high", core.resolveAppearance({ scale = 5 }).scale, 1.4)
   eq("appearance: scale clamp low", core.resolveAppearance({ scale = 0.1 }).scale, 0.8)
   eq("appearance: scale numeric string", core.resolveAppearance({ scale = "1.2" }).scale, 1.2)
+  -- R1-30: a numeric-prefix-plus-garbage string must fall back to default (tonumber
+  -- rejects it); the JS apClamp twin is tightened to match so SSR CSS == live preview.
+  eq("appearance: garbage-suffix scale -> default", core.resolveAppearance({ scale = "1.2x" }).scale, 1.0)
+  eq("appearance: garbage-suffix tileMin -> default", core.resolveAppearance({ tileMin = "200px" }).tileMin, 170)
+  -- R2-26: a HEX string literal must fall back to default so the Lua side matches the
+  -- JS apClamp twin (which rejects hex). tonumber("0x96")==150 would otherwise make SSR
+  -- CSS disagree with the live preview.
+  eq("appearance: hex tileMin string -> default", core.resolveAppearance({ tileMin = "0x96" }).tileMin, 170)
+  eq("appearance: hex scale string -> default", core.resolveAppearance({ scale = "0x1.2" }).scale, 1.0)
+  -- R3-13: an EXPONENTIAL string literal must fall back to default on BOTH sides (the Lua
+  -- regex has no [eE] alternative; apClamp is tightened to drop its [eE] group to match).
+  eq("appearance: exponential scale string -> default", core.resolveAppearance({ scale = "1.3e0" }).scale, 1.0)
+  eq("appearance: exponential tileMin string -> default", core.resolveAppearance({ tileMin = "3e2" }).tileMin, 170)
   eq("appearance: tileMin clamp high", core.resolveAppearance({ tileMin = 9999 }).tileMin, 320)
   eq("appearance: tileMin clamp low", core.resolveAppearance({ tileMin = 10 }).tileMin, 120)
   eq("appearance: density dense passes", core.resolveAppearance({ density = "dense" }).density, "dense")
@@ -5622,6 +6027,30 @@ do
   eq("coldStartStep: not seen, over cap -> giveup", core.coldStartStep(false, 99, 25), "giveup")
   eq("coldStartStep: nil elapsed safe -> wait", core.coldStartStep(false, nil, 25), "wait")
   eq("coldStartStep: nil waitMax -> default-25 cap", core.coldStartStep(false, 25, nil), "giveup")
+
+  -- R1-09: spawnLadderKey gives each concurrent spawn its OWN window key so an A/B
+  -- cohort's ladders don't cancel each other; a repeat same-project spawn shares a key.
+  eq("spawnLadderKey: project path is the key", core.spawnLadderKey({ project = "/w/a" }), "/w/a")
+  eq("spawnLadderKey: distinct variants -> distinct keys",
+     core.spawnLadderKey({ project = "/w/v1" }) == core.spawnLadderKey({ project = "/w/v2" }), false)
+  eq("spawnLadderKey: same project -> same key (self-supersede)",
+     core.spawnLadderKey({ project = "/w/a" }), core.spawnLadderKey({ project = "/w/a" }))
+  eq("spawnLadderKey: falls back to name when no project", core.spawnLadderKey({ name = "proj" }), "proj")
+  eq("spawnLadderKey: empty spec -> default sentinel", core.spawnLadderKey({}), "__default__")
+
+  -- R3-07: spawnLadderWorst reserves the spawn ladder's worst-case wall-clock on the
+  -- shared injection tail so a concurrent dispatched paste can't cross-clobber it.
+  eq("spawnLadderWorst: warm extension ladder = 6.3s",
+     core.spawnLadderWorst({ flavor = "extension" }), 6.3)
+  eq("spawnLadderWorst: warm terminal ladder = 7.1s",
+     core.spawnLadderWorst({ flavor = "terminal" }), 7.1)
+  eq("spawnLadderWorst: cold-start sums head start + wait + activate + drive",
+     core.spawnLadderWorst({ flavor = "extension", coldStart = true, coldWindowWait = 25, coldActivate = 6 }),
+     2.0 + 25 + 6 + 7.1)
+  eq("spawnLadderWorst: cold-start defaults waitMax/activate when absent",
+     core.spawnLadderWorst({ coldStart = true }), 2.0 + 25 + 6 + 7.1)
+  eq("spawnLadderWorst: a positive reservation for any spec (no zero-slot)",
+     core.spawnLadderWorst({}) > 0, true)
 
   -- appearanceCss COMPLETENESS: every APPEARANCE_VARS token is emitted (catches a token
   -- added to the list but missed in the render loop). The SSR side single-sources the JS

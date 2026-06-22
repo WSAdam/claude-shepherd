@@ -76,6 +76,19 @@ assert_absent "sessionend removes the L2 resolved policy" "$CC_POLICY_DIR/$SID"
 assert_absent "sessionend removes the L2 policy override" "$CC_POLICY_OVERRIDE_DIR/$SID"
 assert_absent "sessionend removes the gated-tools override" "$CC_GATE_TOOLS_DIR/$SID"
 
+# R2-01: a same-status event whose existing .since is non-numeric (hand-edit /
+# rsync-mirror / partial write) must NOT wedge the tile. The writer must coerce
+# .since to numeric before --argjson, so the merge still advances `updated`.
+R201="r201"; R201CWD="/srv/r201"; R201F="$TMP/$R201.json"
+ev stop "{\"session_id\":\"$R201\",\"cwd\":\"$R201CWD\"}"
+# corrupt .since to a non-numeric value, then fire another same-status (stop) event
+jq '.since="soon" | .updated=1' "$R201F" > "$R201F.t" && mv "$R201F.t" "$R201F"
+ev stop "{\"session_id\":\"$R201\",\"cwd\":\"$R201CWD\"}"
+assert_eq "R2-01: non-numeric since does not wedge tile (updated advanced)" \
+  "true" "$([ "$(jq -r '.updated' "$R201F")" -gt 1 ] && echo true || echo false)"
+assert_eq "R2-01: since coerced to numeric" \
+  "true" "$(jq -r '(.since|type)=="number"' "$R201F")"
+
 # --- Phase 1: PermissionRequest gives a precise pending summary ---
 P="p1"; PCWD="/srv/api-server"; PF="$TMP/$P.json"
 ev pretooluse "{\"session_id\":\"$P\",\"cwd\":\"$PCWD\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"npm test -- --watch\"}}"
@@ -116,5 +129,73 @@ assert_eq "summarize: long command capped at 200" "200" "$(jq -r '.pending.summa
 ML="$(printf 'line1\nline2')"
 ev permissionrequest "{\"session_id\":\"$S\",\"cwd\":\"/x/p\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":$(printf '%s' "$ML" | jq -Rs .)}}"
 assert_eq "summarize: multi-line command collapsed to one line" "line1 line2" "$(jq -r '.pending.summary' "$SF")"
+
+# --- R1-03: jq-absent fallback must emit valid JSON even for nasty cwd paths ---
+# Run cc-status.sh with jq genuinely absent from PATH (a shimmed bin dir holding
+# only the coreutils cc-status needs, no jq), from a directory whose path contains
+# a double-quote and a backslash, and assert the written file is decodable JSON.
+# Without jq, cc_get returns "" so SESSION_ID is empty and the KEY falls back to
+# the sanitized cwd basename -- that's the only injection vector on this path.
+# R2-02: include raw C0 control bytes (ESC 0x1b, VT 0x0b) in the cwd so the
+# escaper's \uXXXX catch-all is exercised -- without it the file is malformed JSON
+# (control chars U+0000-U+001F must be escaped) and the tile is silently dropped.
+NASTY_DIR="$(printf '%s/we"ir\\d-%b%b-proj' "$TMP" '\033' '\013')"
+mkdir -p "$NASTY_DIR"
+SHIMBIN="$TMP/nojqbin"
+mkdir -p "$SHIMBIN"
+for b in bash sh date basename dirname mkdir mv rm cat printf sed awk tr cut grep ls cp env; do
+  src="$(command -v "$b" 2>/dev/null)" && [ -n "$src" ] && ln -sf "$src" "$SHIMBIN/$b"
+done
+NF="$TMP/$(printf '%s' "$(basename "$NASTY_DIR")" | tr -c 'A-Za-z0-9._-' '_').json"
+( cd "$NASTY_DIR" && PATH="$SHIMBIN" CC_STATUS_DIR="$TMP" \
+    "$SHIMBIN/bash" "$CC" sessionstart '{"cwd":"'"$NASTY_DIR"'"}' >/dev/null 2>&1 )
+if command -v python3 >/dev/null 2>&1; then
+  if python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$NF" >/dev/null 2>&1; then
+    assert_eq "no-jq fallback with quote+backslash cwd -> valid JSON" "ok" "ok"
+  else
+    assert_eq "no-jq fallback with quote+backslash cwd -> valid JSON" "ok" "INVALID-JSON"
+  fi
+  # the decoded cwd round-trips intact through the escaper
+  GOT_CWD="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["cwd"])' "$NF" 2>/dev/null)"
+  assert_eq "no-jq fallback preserves the raw cwd" "$NASTY_DIR" "$GOT_CWD"
+  # R2-27: the no-jq fallback must still emit `editor` (the auto-model guard and
+  # focusProject routing depend on it; omitting it fails the guard open).
+  HAS_ED="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print("yes" if d.get("editor") else "no")' "$NF" 2>/dev/null)"
+  assert_eq "R2-27: no-jq fallback emits editor field" "yes" "$HAS_ED"
+  # R3-25: the no-jq fallback writes atomically (temp + mv) and captures cc_now ONCE,
+  # so updated==since on a fresh write and no .tmp.$$ scratch file is left behind (a
+  # concurrent dashboard poll must see the complete file or the old one, never a torn one).
+  U="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["updated"])' "$NF" 2>/dev/null)"
+  S="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["since"])' "$NF" 2>/dev/null)"
+  assert_eq "R3-25: no-jq fresh write has updated==since (single cc_now)" "$U" "$S"
+  LEFT="$(ls "$TMP"/*.tmp.* 2>/dev/null | wc -l | tr -d ' ')"
+  assert_eq "R3-25: no-jq atomic write leaves no .tmp scratch file" "0" "$LEFT"
+else
+  echo "ok   - no-jq fallback test skipped (no python3 to validate JSON)"
+fi
+
+# R3-15: while the gate is armed (gate=="waiting"), a concurrent sibling pretooluse/
+# posttooluse on the SAME key must NOT advance `since` (the stale-approval escalation
+# clock) -- only del(.status, .since) in the gate-waiting branch keeps T1 owned by the
+# gate. `updated` still flows so the tile stays fresh.
+GK="gw1"
+GF="$TMP/$GK.json"
+T1=100000
+# Seed an armed-gate approval tile with since:T1.
+printf '{"session_id":"%s","name":"p","cwd":"/p","status":"approval","updated":%s,"since":%s,"gate":"waiting","gate_nonce":"n1","pending":{"tool":"Bash","summary":"x"}}\n' \
+  "$GK" "$T1" "$T1" > "$GF"
+sleep 1
+# A sibling posttooluse lands while the gate is still waiting.
+ev posttooluse "{\"session_id\":\"$GK\",\"cwd\":\"/p\",\"tool_name\":\"Read\",\"tool_input\":{}}"
+assert_json "R3-15: gate-waiting posttooluse preserves since (escalation clock)" "$GF" '.since' "$T1"
+assert_json "R3-15: gate-waiting posttooluse preserves status=approval" "$GF" '.status' "approval"
+GUP="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["updated"])' "$GF" 2>/dev/null || echo "")"
+if [ -n "$GUP" ]; then
+  if [ "$GUP" -gt "$T1" ]; then
+    assert_eq "R3-15: gate-waiting posttooluse still advances updated (tile fresh)" "fresh" "fresh"
+  else
+    assert_eq "R3-15: gate-waiting posttooluse still advances updated (tile fresh)" "fresh" "STALE"
+  fi
+fi
 
 finish

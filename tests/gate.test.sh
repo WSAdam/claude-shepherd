@@ -161,6 +161,18 @@ echo 1 > "$CC_AUTOPILOT_DIR/ap2"
 out="$(runpol x '{"session_id":"ap2","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"make deploy"}}')"
 assert_eq "expired autopilot -> no decision" "" "$out"
 
+# R2-04: an EMPTY (zero-byte) autopilot expiry file must be treated as 0 (fall
+# through), NOT trigger `[: integer expression expected`. cat of an existing empty
+# file succeeds, so `|| echo 0` never runs -> the sanitizer must include the ''
+# alternative. Assert no decision AND no stderr noise.
+: > "$CC_AUTOPILOT_DIR/apE"
+apE_req='{"session_id":"apE","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"make deploy"}}'
+err="$(printf '%s' "$apE_req" | CC_GATE_FLAG="$FLAG" CC_CONFIG_FILE="$POL" bash "$APP" 2>&1 >/dev/null)"
+out="$(runpol x "$apE_req")"
+assert_eq "R2-04: empty autopilot file -> no decision" "" "$out"
+assert_eq "R2-04: empty autopilot file -> no integer-expression error" "" \
+  "$(printf '%s' "$err" | grep -i 'integer expression' || true)"
+
 # B: approve-repeats (pre-seeded approved-set) -> allow
 mkdir -p "$CC_APPROVED_DIR"; printf 'Bash|git push\n' > "$CC_APPROVED_DIR/r1"
 out="$(runpol x '{"session_id":"r1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"git push"}}')"
@@ -187,6 +199,41 @@ assert_eq "config gate.tools: custom tool is gated -> allow" "allow" "$got"
 out="$(printf '%s' '{"session_id":"t2","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"ls"}}' \
     | CC_GATE_FLAG="$FLAG" CC_CONFIG_FILE="$TOOLSCFG" CC_PANEL_MAX_AGE=99999 bash "$APP" 2>/dev/null)"
 assert_eq "config gate.tools: tool outside list falls through" "" "$out"
+
+# R2-05: gate.tools hand-edited to a JSON ARRAY must still gate (jq -r prints one
+# element per line -> the space-delimited test never matches -> fail OPEN). The
+# type-aware read joins the array to a space-separated string.
+ARRCFG="$TMP/tools-arr.json"
+echo '{"gate":{"tools":["Bash","Write"]}}' > "$ARRCFG"
+( printf '%s' '{"session_id":"ta1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"ls"}}' \
+    | CC_GATE_FLAG="$FLAG" CC_CONFIG_FILE="$ARRCFG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=5 \
+    bash "$APP" > "$TMP/out_arr" 2>/dev/null ) &
+bg=$!
+answer ta1 allow
+wait $bg
+got="$(jq -r '.hookSpecificOutput.permissionDecision' "$TMP/out_arr" 2>/dev/null)"
+assert_eq "R2-05: gate.tools as JSON array still gates -> allow" "allow" "$got"
+
+# R3-19: a PRESENT-but-EMPTY gate.tools ("" or []) does NOT mean "gate nothing" -- it
+# falls back to the default 5 (Bash/Write/Edit/...) and warns once on stderr (an empty
+# value can't be told apart from unset; the supported "gate nothing" switches are the
+# gate flag and the per-session None sentinel). Bash must still be gated, and the warning
+# must be emitted.
+EMPTYCFG="$TMP/tools-empty.json"
+echo '{"gate":{"tools":[]}}' > "$EMPTYCFG"
+( printf '%s' '{"session_id":"te1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"ls"}}' \
+    | CC_GATE_FLAG="$FLAG" CC_CONFIG_FILE="$EMPTYCFG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=5 \
+    bash "$APP" > "$TMP/out_empty" 2>"$TMP/err_empty" ) &
+bg=$!
+answer te1 allow
+wait $bg
+got="$(jq -r '.hookSpecificOutput.permissionDecision' "$TMP/out_empty" 2>/dev/null)"
+assert_eq "R3-19: empty gate.tools falls back to default 5 (Bash still gated)" "allow" "$got"
+if grep -q "gate.tools is empty" "$TMP/err_empty" 2>/dev/null; then
+  assert_eq "R3-19: empty gate.tools warns on stderr" "warned" "warned"
+else
+  assert_eq "R3-19: empty gate.tools warns on stderr" "warned" "NO-WARNING"
+fi
 
 # ---- precedence + approveRepeats write path (improve cards) ----
 # A command matching BOTH autoDeny and autoAllow must be DENIED (safety first).
@@ -280,6 +327,18 @@ printf '{"autoAllow":["Bash(ls*)"],"bundle":"loose"}' > "$CC_POLICY_DIR/pol2"
 out="$(printf '%s' '{"session_id":"pol2","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"ls -la"}}' \
     | CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 bash "$APP" 2>/dev/null)"
 assert_eq "policy file: autoAllow allows" "allow" "$(decision "$out")"
+
+# B2) R1-04: bundle autopilot:true auto-allows a gated tool with no fleet flag
+printf '{"autopilot":true,"bundle":"loose"}' > "$CC_POLICY_DIR/polap"
+out="$(printf '%s' '{"session_id":"polap","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"anything goes"}}' \
+    | CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 bash "$APP" 2>/dev/null)"
+assert_eq "policy file: bundle autopilot allows" "allow" "$(decision "$out")"
+
+# B3) R1-04: autoDeny still beats bundle autopilot (deny must win)
+printf '{"autopilot":true,"autoDeny":["Bash(rm*)"],"bundle":"loose"}' > "$CC_POLICY_DIR/polapd"
+out="$(printf '%s' '{"session_id":"polapd","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"rm -rf build"}}' \
+    | CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 bash "$APP" 2>/dev/null)"
+assert_eq "policy file: autoDeny beats bundle autopilot" "deny" "$(decision "$out")"
 
 # C) policy file present but no rule matches -> routes to the panel (human decides)
 date +%s > "$HB"
@@ -469,5 +528,73 @@ wait $bgA
 gotB="$(jq -r '.hookSpecificOutput.permissionDecision' "$TMP/out_cc_b" 2>/dev/null)"
 assert_eq "concurrent same-key: the LAST request (panel-visible nonce) is answered" "allow" "$gotB"
 assert_eq "concurrent same-key: the earlier waiter degrades to the native prompt" "" "$(cat "$TMP/out_cc_a" 2>/dev/null)"
+
+# --- R1-36: a parallel cc-status.sh pretooluse clearing pending mid-gate must NOT
+#     drop the answerability -- the top-level gate_nonce survives + binds a same-second
+#     answer. Simulate the race: start the gate, wait for it to publish, then DELETE the
+#     pending block (as cc-status.sh's CLEAR_PENDING would), then answer via gate_nonce.
+date +%s > "$HB"
+GN='{"session_id":"gn1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"rm -rf q"}}'
+( printf '%s' "$GN" | CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=5 \
+    bash "$APP" > "$TMP/out_gn" 2>/dev/null ) &
+bg=$!
+wait_block "$TMP/gn1.json"
+# wait for the gate to publish gate_nonce, then simulate the racing pending-clear
+gnonce=""; i=0
+while [ "$i" -lt 100 ]; do
+  gnonce="$(jq -r '.gate_nonce // empty' "$TMP/gn1.json" 2>/dev/null)"
+  [ -n "$gnonce" ] && break
+  sleep 0.05; i=$((i+1))
+done
+assert_eq "gate publishes a top-level gate_nonce" "0" "$([ -n "$gnonce" ] && echo 0 || echo 1)"
+# cc-status.sh CLEAR_PENDING (read-modify-write) deletes the pending block out from under
+# the gate -- mimic that with a direct jq delete of the pending block.
+jq -c 'del(.pending)' "$TMP/gn1.json" > "$TMP/gn1.json.t" && mv "$TMP/gn1.json.t" "$TMP/gn1.json"
+# the panel answers using the surviving gate_nonce (decisionContent's fallback)
+printf 'allow %s' "$gnonce" > "$TMP/gn1.decision.tmp.$$"
+mv "$TMP/gn1.decision.tmp.$$" "$TMP/gn1.decision"
+wait $bg
+assert_eq "R1-36: gate_nonce survives a pending-clear -> same-second answer consumed" \
+  "allow" "$(jq -r '.hookSpecificOutput.permissionDecision' "$TMP/out_gn" 2>/dev/null)"
+
+# --- R1-37: on a poll-loop TIMEOUT (no answer), the gate clears its own pending block
+#     and reverts status to working, so the tile doesn't keep lying "waiting".
+date +%s > "$HB"
+TO='{"session_id":"to1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"sleep"}}'
+( printf '%s' "$TO" | CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=1 \
+    bash "$APP" > "$TMP/out_to" 2>/dev/null ) &
+bg=$!
+wait_block "$TMP/to1.json"
+wait $bg   # let it time out (no answer ever written)
+assert_eq "R1-37: timeout reverts status to working" "working" "$(jq -r '.status' "$TMP/to1.json" 2>/dev/null)"
+assert_eq "R1-37: timeout clears the stale pending block" "null" "$(jq -r '.pending' "$TMP/to1.json" 2>/dev/null)"
+assert_eq "R1-37: timeout clears the gate field" "null" "$(jq -r '.gate' "$TMP/to1.json" 2>/dev/null)"
+assert_eq "R1-37: timeout clears the gate_nonce" "null" "$(jq -r '.gate_nonce' "$TMP/to1.json" 2>/dev/null)"
+assert_eq "R1-37: timeout still falls through to native (no decision)" "" "$(cat "$TMP/out_to" 2>/dev/null)"
+
+# --- R3-18: ownership-aware gate teardown. When a waiter resolves/times out, it must
+#     ONLY delete the shared gate/gate_nonce if it is still the survivor. A concurrent
+#     sibling that re-armed the gate (new top-level gate_nonce) must keep its protection.
+#     Simulate: start a waiter, let it publish gate_nonce, then OVERWRITE the top-level
+#     gate_nonce with a sibling's value before the first waiter times out. After timeout,
+#     the gate/gate_nonce must SURVIVE (they belong to the sibling now).
+date +%s > "$HB"
+RT='{"session_id":"rt1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"sleep"}}'
+( printf '%s' "$RT" | CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=1 \
+    bash "$APP" > "$TMP/out_rt" 2>/dev/null ) &
+bg=$!
+wait_block "$TMP/rt1.json"
+# wait for the gate to publish gate_nonce, then a sibling re-arms with a NEW nonce
+i=0
+while [ "$i" -lt 100 ]; do
+  [ -n "$(jq -r '.gate_nonce // empty' "$TMP/rt1.json" 2>/dev/null)" ] && break
+  sleep 0.05; i=$((i+1))
+done
+jq -c '.gate_nonce="sibling-nonce"' "$TMP/rt1.json" > "$TMP/rt1.json.t" && mv "$TMP/rt1.json.t" "$TMP/rt1.json"
+wait $bg   # first waiter times out; its NONCE != current gate_nonce -> must NOT tear down
+assert_eq "R3-18: a non-survivor timeout leaves the sibling's gate armed" \
+  "waiting" "$(jq -r '.gate' "$TMP/rt1.json" 2>/dev/null)"
+assert_eq "R3-18: a non-survivor timeout leaves the sibling's gate_nonce intact" \
+  "sibling-nonce" "$(jq -r '.gate_nonce' "$TMP/rt1.json" 2>/dev/null)"
 
 finish

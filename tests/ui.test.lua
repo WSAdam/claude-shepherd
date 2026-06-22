@@ -587,6 +587,34 @@ do
         src:find('f>=0.95?"b6":f>=0.90?"b5"', 1, true) ~= nil)
   check("js-pin: ctx-bar CSS defines the calm band b0", src:find(".ctx-bar.b0 > i", 1, true) ~= nil)
   check("js-pin: ctx-bar CSS defines the critical band b6", src:find(".ctx-bar.b6 > i", 1, true) ~= nil)
+  -- R1-20: after() returns a wrapper whose :stop() reaps the pendingTimers entry (an
+  -- externally :stop()'d timer never fires, so its entry would otherwise leak forever).
+  check("after-pin: after() returns a stop-wrapper that reaps pendingTimers",
+        src:find("return { stop = function() pendingTimers[id] = nil;", 1, true) ~= nil)
+  -- R1-21: after()'s fired callback runs fn in pcall (per-beat isolation), and the
+  -- hand-rolled paste/sendKeys ladders pcall each step so a throw can't strand restore.
+  check("after-pin: after() callback runs fn in pcall",
+        src:find("local ok, err = pcall(fn)", 1, true) ~= nil)
+  check("ladder-pin: pasteIntoWindow pcalls each step + the ⌘V",
+        src:find("pcall(steps[i])", 1, true) ~= nil)
+  check("ladder-pin: sendKeys pcalls each keystroke",
+        src:find("pcall(function() hs.eventtap.keyStroke(k.mods or {}, k.key) end)", 1, true) ~= nil)
+  -- R1-17: writeQueue is durable (temp+rename) and readQueue backs up an undecodable
+  -- file instead of silently stripping its routing/mode flags.
+  check("queue-pin: writeQueue writes via temp+rename (durable)",
+        src:find('local tmp = path .. ".tmp." .. tostring(FX.now())', 1, true) ~= nil
+        and src:find("if not os.rename(tmp, path) then os.remove(tmp) end", 1, true) ~= nil)
+  check("queue-pin: readQueue backs up an undecodable queue (no silent disarm)",
+        src:find("undecodable queue", 1, true) ~= nil
+        and src:find('local bak = path .. ".bad." .. tostring(FX.now())', 1, true) ~= nil)
+  -- R3-09: the JS actionableKeys twin must mirror core.remoteActionAllowed (remote
+  -- approve/deny only when gate=='waiting'). There is NO remote-keystroke transport, so
+  -- nudge/stop/clear/compact must NEVER be bulk-eligible for a remote tile -- the JS twin
+  -- returns false for them, matching the Lua side after the keystrokes branch was removed.
+  check("bulk-pin: actionableKeys gates remote approve/deny on gate=='waiting'",
+        src:find('if(action === "approve" || action === "deny") return it.gate === "waiting";', 1, true) ~= nil)
+  check("bulk-pin: actionableKeys never bulk-keystrokes a remote tile",
+        src:find("if(BRIDGE_KEYSTROKES) return (action === \"nudge\"", 1, true) == nil)
   -- Folder scan must run deadlock-proof: via /bin/sh with stdout redirected to a file (NOT
   -- direct-exec hs.task, which stalls >64KB over a large tree), reading the file on exit,
   -- with a timeout backstop. Reverting to `hs.task.new(argv[1]` would reintroduce the hang.
@@ -604,7 +632,10 @@ do
   check("spawn-pin: cold-start ladder branches on spec.coldStart",
         src:find("if spec.coldStart == true then", 1, true) ~= nil)
   check("spawn-pin: cold-start polls for the window (focusProject false) before opening the panel",
-        src:find("focusProject(name, proj, nil, false)", 1, true) ~= nil
+        -- R2-09: the editor is threaded through (spec.editor), never nil, so a Cursor
+        -- spawn can't resolve to a VS Code window.
+        src:find("focusProject(name, proj, spec.editor, false)", 1, true) ~= nil
+        and src:find("focusProject(name, proj, nil, false)", 1, true) == nil
         and src:find("cold-start: window seen after", 1, true) ~= nil)
   check("spawn-pin: cold-start poll is BOUNDED via pure core.coldStartStep (giveup, can't hang)",
         src:find("core.coldStartStep(focusProject", 1, true) ~= nil
@@ -614,6 +645,17 @@ do
         src:find("spec.coldWindowWait", 1, true) ~= nil and src:find("spec.coldActivate", 1, true) ~= nil)
   check("spawn-pin: cold-start pastes the task (not char-typing)",
         src:find("hs.pasteboard.setContents(spec.task)", 1, true) ~= nil)
+  -- R1-09: per-window ladder map so concurrent A/B variants don't cancel each other.
+  check("spawn-pin: cold-start ladder keyed per window (core.spawnLadderKey)",
+        src:find("core.spawnLadderKey(spec)", 1, true) ~= nil
+        and src:find("spawnSeqHandlesByKey[ladderKey]", 1, true) ~= nil)
+  -- R1-19: the cold-start deliver path is delivery-gated (no paste on a window miss).
+  check("spawn-pin: cold-start task is delivery-gated (no paste on window miss)",
+        src:find("task NOT delivered", 1, true) ~= nil)
+  -- R1-10: the user's clipboard is saved + restored around the cold-start task paste.
+  check("spawn-pin: cold-start restores the user's clipboard after the task paste",
+        src:find("local prevClip = hs.pasteboard.readString()", 1, true) ~= nil
+        and src:find("if prevClip then pcall(function() hs.pasteboard.setContents(prevClip) end) end", 1, true) ~= nil)
   check("spawn-pin: new-project flag threaded from the modal (mode == new)",
         src:find("agentOpts, mode == \"new\")", 1, true) ~= nil)
   -- CLI-tools inventory (review of a4bef0c): the absolute-path install rule lives ONCE in
@@ -645,12 +687,19 @@ do
   if f then f:close() end
   check("inject-pin: dashboard source readable", #src > 0)
 
-  -- #2/#5: EVERY window-keystroke dispatch must reserve its slot through the
-  -- ONE chokepoint (dispatchSerialized). Raw core.staggerSlot arithmetic at a
-  -- call site is how drain/auto-feed/ctx-menu/Stream-Deck/hotkey paths drifted
-  -- out of serialization in round 2.
+  -- #2/#5: EVERY window-keystroke DISPATCH must reserve its slot through the ONE
+  -- chokepoint (dispatchSerialized). Raw core.staggerSlot arithmetic at a call site
+  -- is how drain/auto-feed/ctx-menu/Stream-Deck/hotkey paths drifted out of
+  -- serialization in round 2. R3-07 adds exactly ONE more legitimate call site:
+  -- spawnEditorWindow reserves the spawn ladder's worst-case on the SAME shared tail
+  -- (the spawn paste/type beats run on after() timers too, so they must serialize
+  -- against dispatched pastes). So the allowed count is now 2 (dispatchSerialized +
+  -- the spawn-ladder reservation); any further raw call is still a drift smell.
   local slotCalls = select(2, src:gsub("core%.staggerSlot%(", ""))
-  eq("inject-pin: staggerSlot called ONLY by the chokepoint", slotCalls, 1)
+  eq("inject-pin: staggerSlot called only by the 2 chokepoints (dispatch + R3-07 spawn ladder)", slotCalls, 2)
+  -- Pin the R3-07 reservation specifically so the second call site can't be a stray.
+  check("inject-pin: the 2nd staggerSlot site is the spawn-ladder reservation",
+        src:find("spawnDelay, injectionTailAt = core.staggerSlot(", 1, true) ~= nil)
   local sites = select(2, src:gsub("dispatchSerialized%(", ""))
   check("inject-pin: chokepoint wired at all dispatch sites (16 calls + def, got=" .. sites .. ")",
         sites >= 17)
@@ -674,7 +723,9 @@ do
         src:find('dispatchSerialized(ct, "continue", function()', 1, true) ~= nil
         and src:find('core.handleAction(FX, ct, "continue")', 1, true) ~= nil)
   check("inject-pin: auto-continue ledgers the resume",
-        src:find('type = "auto_continue", attempt = cstep.attempts', 1, true) ~= nil)
+        src:find('type = "auto_continue",', 1, true) ~= nil
+        -- R2-22: the budget is charged on confirmed delivery via chargeAutoContinue
+        and src:find('core.chargeAutoContinue(autoContinueState, bk)', 1, true) ~= nil)
   -- Remote-control startup sweep types /rc through the SAME serialized chokepoint.
   check("inject-pin: RC startup sweep serialized through the chokepoint",
         src:find('dispatchSerialized(it, "rc", function() FX.typeIntoWindow(winTarget(it), "/rc") end)', 1, true) ~= nil)
@@ -687,6 +738,11 @@ do
         src:find("if FX.pasteIntoWindow(winTarget(target), { text = prompt }) then", 1, true) ~= nil)
   check("audit-pin: skip announces review NOT sent",
         src:find("review NOT sent", 1, true) ~= nil)
+  -- R3-12: dateToTs boundaries are LOCAL (matching the local-time display), NOT UTC --
+  -- a UTC boundary would filter/PURGE a different set than shown at the day edge.
+  check("r3-12-pin: dateToTs uses local midnight (not Date.UTC)",
+        src:find("var t = new Date(+m[1], +m[2]-1, +m[3]).getTime() / 1000;", 1, true) ~= nil
+        and src:find("Date.UTC(+m[1], +m[2]-1, +m[3]) / 1000", 1, true) == nil)
 
   -- #1: an image nudge ledgers nudge_skipped (and alerts) on a skipped paste;
   -- a text nudge ledgers AFTER dispatch, gated on handleAction's result.
@@ -976,7 +1032,14 @@ do
         src:find('core.handleAction(FX, target, "nudge", p.text)', 1, true) ~= nil)
   check("l6-pin: once-state reaped on vanish", src:find("if tk and not newPrev[tk] then ruleFired[k] = nil", 1, true) ~= nil)
   -- L6 Inc 3: automation result ledger — outcome field + the previously-silent blocked branch
-  check("l6-pin: auto_respawn carries outcome", src:find('type = "auto_respawn", outcome = "ok"', 1, true) ~= nil)
+  -- R1-22: outcome reflects the REAL launch (ok on a real spawn, dryrun on the no-op),
+  -- and the dead tile is dropped only when a launch actually happened.
+  check("l6-pin: auto_respawn outcome gated on real launch",
+        src:find('outcome = launched and "ok" or "dryrun"', 1, true) ~= nil)
+  check("r1-22-pin: removeStatus gated on a real launch (no vanish on dry-run)",
+        src:find("if launched then", 1, true) ~= nil)
+  check("r1-22-pin: spawnSession returns false on a dry-run no-op",
+        src:find("return false  -- R1-22:", 1, true) ~= nil)
   check("l6-pin: blocked respawn now ledgered", src:find('type = "auto_respawn_blocked", outcome = "skipped"', 1, true) ~= nil)
   check("l6-pin: auto_continue outcome from delivery",
         src:find('outcome = (acted == "continue") and "ok" or "skipped"', 1, true) ~= nil)
@@ -1110,6 +1173,17 @@ do
   check("l5tab-pin: DETAIL_TABS injected single-source",
         src:find("__DETAIL_TABS__", 1, true) ~= nil
         and src:find('HTML:gsub("__DETAIL_TABS__"', 1, true) ~= nil)
+  -- R3-10: NARRATE (emoji+verb) is single-sourced via __NARRATE__; the JS evDesc twin
+  -- derives emoji + label from it (evEmoji/evVerb), and the hand-maintained EV_VERB/EV_EMOJI
+  -- partial maps are GONE so they can't drift from cc-core.lua NARRATE.
+  check("r3-10-pin: NARRATE injected single-source",
+        src:find("var NARRATE = __NARRATE__;", 1, true) ~= nil
+        and src:find('HTML:gsub("__NARRATE__"', 1, true) ~= nil)
+  check("r3-10-pin: evDesc derives emoji+label from NARRATE (no EV_VERB/EV_EMOJI maps)",
+        src:find("function evVerb(t)", 1, true) ~= nil
+        and src:find("var label = evVerb(e.type);", 1, true) ~= nil
+        and src:find("var EV_VERB = {", 1, true) == nil
+        and src:find("var EV_EMOJI = {", 1, true) == nil)
   check("l5tab-pin: tab bar + panels markup", src:find('<div id="d-tabs">', 1, true) ~= nil
         and src:find('class="d-panel" data-tab="activity"', 1, true) ~= nil
         and src:find('class="d-panel" data-tab="queue"', 1, true) ~= nil)
@@ -1245,6 +1319,41 @@ do
         and src:find("core.reapUnbacked(summaryState.fired, newPrev)", 1, true) ~= nil
         and src:find("core.reapUnbacked(summaryState.pending, newPrev)", 1, true) ~= nil
         and src:find("core.reapUnbacked(gitChangeFiles, newPrev)", 1, true) ~= nil)
+  -- R1-23: the auto-continue / respawn state tables are reaped too (no slow leak for
+  -- a tile pruned/abandoned while still in error/respawn state).
+  check("r1-23-pin: autoContinueState.since reaped (tile-key)",
+        src:find("core.reapUnbacked(autoContinueState.since, newPrev)", 1, true) ~= nil)
+  check("r1-23-pin: respawnAttempts + autoContinueState.attempts reaped (budgetKey)",
+        -- R2-21: reaped against the live budgetKey set (per-window), not bare projectKey
+        src:find("core.reapUnbacked(respawnAttempts, liveBudgetKeys)", 1, true) ~= nil
+        and src:find("core.reapUnbacked(autoContinueState.attempts, liveBudgetKeys)", 1, true) ~= nil)
+  check("r2-23-pin: watchdog + draining reaped on tile vanish",
+        src:find("core.reapUnbacked(watchdog, newPrev)", 1, true) ~= nil
+        and src:find("core.reapUnbacked(draining, newPrev)", 1, true) ~= nil)
+  -- R3-20: routePending + starved* are reaped so vanished tiles/projects can't leak
+  check("r3-20-pin: routePending reaped on tile vanish",
+        src:find("core.reapUnbacked(routePending, newPrev)", 1, true) ~= nil)
+  check("r3-20-pin: starved* reaped against live queueKeys",
+        src:find("core.reapUnbacked(starvedSince, liveQk)", 1, true) ~= nil
+        and src:find("core.reapUnbacked(starvedAlerted, liveQk)", 1, true) ~= nil)
+  -- R3-24: refresh() has a re-entrancy guard (a kitty feed's waitUntilExit pumps the loop)
+  check("r3-24-pin: refresh re-entrancy guard",
+        src:find("if FX._refreshBusy then return end", 1, true) ~= nil
+        and src:find("local ok, err = pcall(FX._refreshBody)", 1, true) ~= nil)
+  -- R3-07: spawn ladders reserve a slot on the SHARED injection tail (so a concurrent
+  -- dispatched paste queues behind them) and re-assert focus right before each task
+  -- paste/type beat (so a focus theft mid-ladder skips rather than typing into the
+  -- wrong window). The worst-case reservation comes from the pure core.spawnLadderWorst.
+  check("r3-07-pin: spawnEditorWindow reserves a shared-tail slot for the ladder",
+        src:find("spawnDelay, injectionTailAt = core.staggerSlot(", 1, true) ~= nil
+        and src:find("core.spawnLadderWorst(spec)", 1, true) ~= nil)
+  check("r3-07-pin: ladder entry beats are offset by spawnDelay",
+        src:find("delay = 3.0 + spawnDelay", 1, true) ~= nil
+        and src:find("termDriveBeats(3.0 + spawnDelay)", 1, true) ~= nil
+        and src:find("sched(2.0 + spawnDelay, poll)", 1, true) ~= nil)
+  check("r3-07-pin: warm + terminal task beats re-assert focus before paste/type",
+        src:find("warmMatched = focusProject(name, proj, spec.editor, true)\n        if warmMatched == false then", 1, true) ~= nil
+        and src:find("termMatched = focusProject(name, proj, spec.editor, true)\n          if termMatched == false then\n            print(\"[cc-orch] vscode terminal: no window match on re-assert", 1, true) ~= nil)
   -- #5 PR/MR status per tile (gh-backed, status-only)
   check("l5pr-pin: gh self-gates (resolveBin, absent -> false)",
         src:find("ghBinPath = (p and hs.fs.attributes(p)) and p or false", 1, true) ~= nil)
@@ -1256,6 +1365,18 @@ do
   -- prStatusTasks[root] forever, making the short-retry window dead code. core.prPollPlan
   -- now flags a stale in-flight task and FX terminates it before re-polling. The retry
   -- behavior itself is behavior-tested in core.test (prpoll: hung gh ... kills + re-polls).
+  -- R1-27: bridgeSync has a timeout backstop so a never-returning rsync task can't
+  -- pin b.running forever and permanently starve that host's sync.
+  check("bridge-pin: bridgeSync arms a per-host timeout backstop",
+        src:find("b.timeoutTimer = hs.timer.doAfter(backstop", 1, true) ~= nil)
+  check("bridge-pin: backstop terminates a wedged task + frees the slot",
+        src:find("sync timed out -- task wedged, slot freed", 1, true) ~= nil)
+  check("bridge-pin: backstop cancelled on normal exit",
+        src:find("R1-27: cancel the timeout backstop on a real exit", 1, true) ~= nil)
+  -- R1-38: a terminated/superseded folder scan's late exit callback must not clobber a
+  -- good folderIndex with an empty one (ownership compare against the live slot).
+  check("r1-38-pin: folder-scan exit callback guards against a terminated/superseded scan",
+        src:find("if folderScanTask ~= myTask then pcall(os.remove, outFile); return end", 1, true) ~= nil)
   check("l5pr-fix: hung gh task is terminated before re-poll (slot reclaimed)",
         src:find("if plan.killStale and inflight and inflight.task then", 1, true) ~= nil
         and src:find("inflight.task:terminate()", 1, true) ~= nil
@@ -1423,7 +1544,7 @@ do
         and src:find("if w and w:isMinimized() then w:unminimize() end", 1, true) ~= nil
         and src:find('panelIsOnScreen() and "Hide panel" or "Show panel"', 1, true) ~= nil)
   check("qol-pin: live model from the transcript tail synced onto the tile for the Model dropdown",
-        src:find("then it.model = st.lastModel end", 1, true) ~= nil)
+        src:find("then it.model = st.lastModel; it.live_model = st.lastModel end", 1, true) ~= nil)
   check("qol-pin: global hotkeys resolved from cc-config via pure core.resolveHotkeys (legend + binds share it)",
         src:find("core.resolveHotkeys(readConfigEarly())", 1, true) ~= nil
         and src:find("_hk.approveFront", 1, true) ~= nil
@@ -1540,10 +1661,10 @@ do
   check("dr6-pin: pasteIntoWindow submits the preface then settles before the main text",
         src:find("local preface =", 1, true) ~= nil
         and src:find("after(0.5, function() runFrom(1) end)", 1, true) ~= nil)
-  check("dr6-pin: autoModelPreface is local-native-only + classifies the bare task",
+  check("dr6-pin: autoModelPreface is local-native-only + classifies the rendered task",
         src:find("function FX.autoModelPreface(item, task)", 1, true) ~= nil
         and src:find("core.isAnthropicSession(item.model, item.base_url)", 1, true) ~= nil
-        and src:find("core.suggestModel(bare, loadConfig())", 1, true) ~= nil)
+        and src:find("core.suggestModel(typed, loadConfig())", 1, true) ~= nil)  -- R1-32: rendered, not bare template
   -- all THREE feed sites (manual / autofeed / router) consult it + ledger on delivery
   do
     local n = 0; for _ in src:gmatch("= FX%.autoModelPreface%(") do n = n + 1 end  -- call sites, not the def
@@ -1557,18 +1678,33 @@ do
         and src:find('a == "set-automodel"', 1, true) ~= nil)
   check("dr6-pin: set-automodel rejects remote/gateway sessions",
         src:find("it.remote or not core.isAnthropicSession(it.model, it.base_url)", 1, true) ~= nil)
+  -- R1-31: the gate must ALSO exclude kitty/terminal (the effect no-ops for them) at
+  -- all 3 opt-in sites, so the checkbox can't advertise a setting the delivery ignores.
+  check("r1-31-pin: set-automodel rejects kitty/terminal too",
+        src:find('it.editor == "kitty" or it.editor == "terminal") then', 1, true) ~= nil)
   check("dr6-pin: detail toggle wired + gated to local-native (checkbox disabled otherwise)",
         src:find('id="d-automodel"', 1, true) ~= nil
         and src:find("function onAutoModelChange()", 1, true) ~= nil
-        and src:find("var ok = !it.remote && !!it.anthropic;", 1, true) ~= nil)
+        and src:find("var ok = !it.remote && !!it.anthropic && it.editor !== 'kitty' && it.editor !== 'terminal';", 1, true) ~= nil)
   check("dr6-pin: per-tile auto_model/anthropic decoration is local-native short-circuited",
         src:find("it.anthropic = core.isAnthropicSession(it.model, it.base_url)", 1, true) ~= nil
-        and src:find("it.auto_model = (not it.remote) and it.anthropic and FX.autoModelOn(it.key)", 1, true) ~= nil)
+        and src:find('it.auto_model = (not it.remote) and it.anthropic and it.editor ~= "kitty" and it.editor ~= "terminal"', 1, true) ~= nil)
   -- review fixes (round 1):
   check("dr6-fix: auto-routing restricted to chat-input editors (kitty/terminal skipped)",
         src:find('item.editor == "kitty" or item.editor == "terminal" then return nil', 1, true) ~= nil)
+  -- R1-32: classify on the RENDERED (template-expanded) text, not the raw template.
+  check("r1-32-pin: autoModelPreface classifies the rendered feed text",
+        src:find("local typed = renderFeed(task, item)", 1, true) ~= nil
+        and src:find("local s = core.suggestModel(typed, loadConfig())", 1, true) ~= nil)
   check("dr6-fix: same-tier skip is nil-family-safe (no nil==nil wrong-skip)",
-        src:find("if (sf and cf == sf) or item.model == s.model then return nil end", 1, true) ~= nil)
+        src:find("if (sf and cf == sf) or cur == s.model then return nil end", 1, true) ~= nil)
+  -- R3-03: the no-op check compares against the LIVE model (live_model from the transcript
+  -- tail), not the stale spawn-time snapshot that refreshList reverts within 1s.
+  check("r3-03-pin: autoModelPreface compares against the live model",
+        src:find("local cur = item.live_model or item.model", 1, true) ~= nil)
+  check("r3-03-pin: delivered/manual model switch persisted via patchStatus(model)",
+        src:find("FX.patchStatus(item.key, { model = pre.model })", 1, true) ~= nil
+        and src:find("FX.patchStatus(item.key, { model = item.model })", 1, true) ~= nil)
   check("dr6-fix: kitty preface concatenated into ONE send-text (ordered, no socket race)",
         src:find("function dispatchSerialized(item, action, fn, extraStagger)", 1, true) ~= nil
         and src:find("BULK_STAGGER + (tonumber(extraStagger) or 0)", 1, true) ~= nil)
@@ -1587,7 +1723,7 @@ do
         src:find("function FX.abLaunch(spec)", 1, true) ~= nil
         and src:find("core.abCohortPlan(spec)", 1, true) ~= nil
         and src:find("core.gitWorktreeAddCmd(plan.repoRoot", 1, true) ~= nil
-        and src:find('FX.spawnSession("vscode", v.worktreePath, v.task, spec.mode, v.provider, nil, true, v.model)', 1, true) ~= nil)
+        and src:find('FX.spawnSession("vscode", v.worktreePath, v.task, spec.mode, v.provider or "", nil, true, v.model)', 1, true) ~= nil)
   check("dr7-pin: launch rolls back created worktrees + branches on a failed add",
         src:find("core.gitWorktreeRemoveCmd(plan.repoRoot, c.path)", 1, true) ~= nil
         and src:find("core.gitBranchDeleteCmd(plan.repoRoot, c.branch)", 1, true) ~= nil
@@ -1651,6 +1787,23 @@ do
         and src:find('settingsTab("general")', 1, true) ~= nil)
   check("appearance: layout chip uses the existing onThemeChange (hs.settings) path",
         src:find("function pickLayout(l)", 1, true) ~= nil and src:find("onThemeChange();", 1, true) ~= nil)
+  -- R1-28: onThemeChange swaps only the layout token (regex replace), never clobbers
+  -- the whole class list (which would drop dense/calm/worklist-mode). R1-29: it keeps
+  -- body data-theme in lockstep so the Appearance chip detection stays accurate.
+  check("r1-28-pin: onThemeChange swaps only the theme-* token (no className clobber)",
+        src:find('b.className.replace(/(^|\\s)theme-\\S+/g, "").trim()', 1, true) ~= nil
+        and src:find('b.classList.add("theme-" + t)', 1, true) ~= nil)
+  check("r1-28-pin: no whole-className clobber remains in onThemeChange",
+        src:find('document.body.className = "theme-" + t;', 1, true) == nil)
+  check("r1-29-pin: onThemeChange keeps body data-theme in sync",
+        src:find('b.setAttribute("data-theme", t)', 1, true) ~= nil)
+  -- R1-30 / R3-13: apClamp rejects non-pure-DECIMAL strings (matching the Lua
+  -- appearanceClamp regex, which has NO exponential [eE] alternative), so the live preview
+  -- agrees with the SSR CSS on a garbage-suffix OR exponential appearance value.
+  check("r1-30-pin: apClamp uses a pure-decimal regex guard (tonumber parity)",
+        src:find("/^\\s*[-+]?(\\d+\\.?\\d*|\\.\\d+)\\s*$/.test(v)", 1, true) ~= nil)
+  check("r3-13-pin: apClamp regex has NO exponential [eE] group (Lua-twin parity)",
+        src:find("([eE][-+]?\\d+)?", 1, true) == nil)
   check("appearance: look shape rules keyed off body[data-look]",
         src:find('body%[data%-look="flat"%] %.theme%-cards %.tile') ~= nil
         and src:find('body%[data%-look="slate"%] %.theme%-cards %.tile') ~= nil)

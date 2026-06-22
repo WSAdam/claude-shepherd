@@ -626,6 +626,10 @@ read it (the panel live within ~1s; the gate on the next hook fire).
   `Bash Write Edit MultiEdit NotebookEdit`); editable from ⚙ Settings. With the gate armed
   and all policies off ("Headless approvals"), these wait for your panel Approve/Deny —
   headless, no window pop — and fall back to Claude's native prompt if you don't answer.
+  Emptying `gate.tools` (to `""` or `[]`) does **not** mean "gate nothing" — it restores
+  the default 5 (and logs a warning), because a blank value can't be told apart from
+  unset. To gate nothing fleet-wide, disable the gate (`cc-gate.enabled`); to gate
+  nothing for one session, use the per-session **None** sentinel.
 - **policies.approveRepeats** — if you already approved the *exact* command in a
   session, auto-approve it next time.
 - **policies.autopilot** — the **Autopilot** button time-boxes a session to

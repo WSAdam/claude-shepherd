@@ -44,6 +44,31 @@ cc_config() {
   printf '%s' "$v"
 }
 
+# Read .gate.tools as a SPACE-separated string regardless of whether it was
+# written as a string ("Bash Write") or hand-edited to a JSON array
+# (["Bash","Write"]). jq -r on an array prints one element per line, which the
+# space-delimited gated-tool test in cc-approve.sh would never match, silently
+# disabling the gate (fail-open). Joining here keeps that security control closed.
+# KEEP IN SYNC with core.parseToolList in cc-core.lua (accepts space/comma lists).
+cc_config_toollist() {
+  { [ -f "$CC_CONFIG_FILE" ] && cc_have_jq; } || return 0
+  local out
+  out="$(jq -r 'if (.gate.tools|type)=="array" then (.gate.tools|join(" "))
+         elif (.gate.tools|type)=="string" then .gate.tools
+         else empty end' "$CC_CONFIG_FILE" 2>/dev/null)"
+  # R3-19: warn ONCE per process when gate.tools is PRESENT-but-empty (set to ""/[]).
+  # An empty list can't distinguish "gate nothing on purpose" from "unset", so the
+  # callers fall back to the default gated set -- a surprising silent override. The
+  # supported "gate nothing" switches are the gate flag (cc-gate.enabled) and the
+  # per-session None sentinel; say so loudly instead of failing silently.
+  if [ -z "$out" ] && [ -z "${_CC_GATE_TOOLS_EMPTY_WARNED:-}" ] \
+     && [ "$(jq -r 'if (.gate|has("tools")) then "y" else "n" end' "$CC_CONFIG_FILE" 2>/dev/null)" = "y" ]; then
+    echo "[cc-lib] ⚠️  gate.tools is empty — falling back to the default gated set; to gate nothing fleet-wide disable the gate (cc-gate.enabled) or use the per-session None sentinel" >&2
+    _CC_GATE_TOOLS_EMPTY_WARNED=1
+  fi
+  printf '%s' "$out"
+}
+
 # Print a config array's items, one per line (empty if missing).
 # Usage: cc_config_array '.policies.patterns.autoDeny'
 cc_config_array() {
@@ -91,6 +116,24 @@ cc_debug() {
 cc_get() {
   cc_have_jq || { printf ''; return 0; }
   printf '%s' "$1" | jq -r "${2} // empty" 2>/dev/null || printf ''
+}
+
+# Escape a string so it is safe to embed BETWEEN double quotes in a JSON literal.
+# Used by the jq-absent fallback path (cc-status.sh) so a cwd/name containing a
+# double-quote, backslash, control char, or newline still produces valid JSON.
+# Order matters: backslash first, then quote, then control chars, then collapse
+# any literal newlines to \n (awk, since the value may legally span lines).
+cc_json_str() {
+  printf '%s' "$1" \
+    | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' \
+          -e 's/'"$(printf '\010')"'/\\b/g' \
+          -e 's/'"$(printf '\014')"'/\\f/g' \
+          -e 's/'"$(printf '\015')"'/\\r/g' \
+          -e 's/'"$(printf '\011')"'/\\t/g' \
+    | LC_ALL=C awk 'BEGIN{ORS=""; for(i=0;i<256;i++) _o[sprintf("%c",i)]=i}
+        {if(NR>1)printf "\\n"; n=length($0);
+         for(i=1;i<=n;i++){c=substr($0,i,1); v=_o[c];
+           if(v<32) printf "\\u%04x", v; else printf "%s", c}}'
 }
 
 # Turn a session id (or any string) into a filesystem-safe key.
