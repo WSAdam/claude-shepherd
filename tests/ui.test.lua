@@ -1823,5 +1823,105 @@ do
         and src:find("vars = core.APPEARANCE_VARS", 1, true) ~= nil)
 end
 
+-- ---- F7: cost analytics (durable snapshots + Cost overlay) ----
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("f7-pin: snapshot writer gated + emits usage_snapshot",
+        src:find("function FX.writeUsageSnapshots()", 1, true) ~= nil
+        and src:find('type = "usage_snapshot"', 1, true) ~= nil)
+  check("f7-pin: snapshots fire from the usage timer path",
+        src:find("pcall(FX.writeUsageSnapshots)", 1, true) ~= nil)
+  check("f7-pin: open-cost-view aggregates via costSummary + costSeries",
+        src:find("core.costSummary(res.events)", 1, true) ~= nil and src:find("core.costSeries(res.events", 1, true) ~= nil)
+  check("f7-pin: cost overlay + opener + menu entry + chart receiver",
+        src:find('id="cost"', 1, true) ~= nil and src:find("function openCost()", 1, true) ~= nil
+        and src:find("menuPick('cost')", 1, true) ~= nil and src:find("window.ccCost = function", 1, true) ~= nil)
+  check("f7-pin: cost values esc()'d into the overlay", src:find("esc(fmtUsd(s.usd))", 1, true) ~= nil)
+end
+
+-- ---- F6 + F9: Diagnostics + Features overlays (☰ menu) ----
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("f6-pin: FX.doctorStatus gathers facts -> core.doctorChecks",
+        src:find("function FX.doctorStatus()", 1, true) ~= nil and src:find("core.doctorChecks({", 1, true) ~= nil)
+  check("f6-pin: open-doctor-view handler pushes ccDoctor",
+        src:find('a == "open-doctor-view"', 1, true) ~= nil and src:find("window.ccDoctor(", 1, true) ~= nil)
+  check("f6-pin: doctor overlay + opener + menu entry",
+        src:find('id="doctor"', 1, true) ~= nil and src:find("function openDoctor()", 1, true) ~= nil
+        and src:find("menuPick('doctor')", 1, true) ~= nil)
+  check("f9-pin: open-features-view handler pushes core.FEATURES",
+        src:find('a == "open-features-view"', 1, true) ~= nil and src:find("hs.json.encode(core.FEATURES)", 1, true) ~= nil)
+  check("f9-pin: features overlay + opener + menu entry",
+        src:find('id="features"', 1, true) ~= nil and src:find("function openFeatures()", 1, true) ~= nil
+        and src:find("menuPick('features')", 1, true) ~= nil)
+  check("f9-pin: features rows render what + why, esc()'d",
+        src:find("window.ccFeatures = function", 1, true) ~= nil and src:find("esc(f.why", 1, true) ~= nil)
+end
+
+-- ---- F4: transcript peek detail tab ----
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("f4-pin: transcript tab registered in DETAIL_TABS", core.detailTabIds().transcript == true)
+  check("f4-pin: handler reads a bounded tail via core.transcriptPeek",
+        src:find("core.transcriptPeek(FX.readTail", 1, true) ~= nil)
+  check("f4-pin: ccTranscript receiver + renderTranscript",
+        src:find("window.ccTranscript = function", 1, true) ~= nil
+        and src:find("function renderTranscript()", 1, true) ~= nil)
+  check("f4-pin: client-side search filters rows",
+        src:find("d-tr-search", 1, true) ~= nil and src:find("txt.toLowerCase().indexOf(q)", 1, true) ~= nil)
+  check("f4-pin: rows are esc()'d (XSS-safe sink)", src:find("esc(txt)", 1, true) ~= nil)
+  check("f4-pin: lazy-load on tab activation only",
+        src:find('send("detail-transcript", selectedKey)', 1, true) ~= nil)
+end
+
+-- ---- F3: visual theme editor (all-token pickers + export / import) ----
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("f3-pin: advanced all-color editor generated from APPEARANCE.vars (single-sourced)",
+        src:find("function renderAllColors()", 1, true) ~= nil)
+  check("f3-pin: readApForm reads advanced colors into ap.colors",
+        src:find('apG("a-all-on") && apG("a-all-on").checked', 1, true) ~= nil)
+  check("f3-pin: export builds theme JSON from the resolved palette",
+        src:find("function exportThemeUI()", 1, true) ~= nil)
+  check("f3-pin: import validates each color via apIsHex before applying",
+        src:find("function importThemeUI()", 1, true) ~= nil
+        and src:find("apIsHex(colors[k])", 1, true) ~= nil)
+  check("f3-pin: populate opens the advanced editor when extra tokens are overridden",
+        src:find("basic5", 1, true) ~= nil)
+  check("f3-pin: HTML carries the advanced toggle + theme-file IO",
+        src:find('id="a-all-on"', 1, true) ~= nil and src:find('id="a-theme-io"', 1, true) ~= nil)
+end
+
+-- ---- F8: incremental render (skip the full grid rebuild when nothing changed) ----
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("f8-pin: JS tileSignature twin defined", src:find("function tileSignature(v)", 1, true) ~= nil)
+  check("f8-pin: JS gridSignature twin defined", src:find("function gridSignature(list)", 1, true) ~= nil)
+  check("f8-pin: tileSignature sorts keys (canonical, encoder-order-independent)",
+        src:find("Object.keys(v).sort()", 1, true) ~= nil)
+  check("f8-pin: renderGrid computes the grid signature", src:find("var sig = gridSignature(vis)", 1, true) ~= nil)
+  check("f8-pin: renderGrid rebuilds ONLY on signature change",
+        src:find("if(sig !== lastGridSig){", 1, true) ~= nil)
+  check("f8-pin: lastGridSig cache reset on empty/filtered-empty",
+        select(2, src:gsub("lastGridSig = null", "")) >= 2)
+  check("f8-pin: updateAges refreshes only the churning .age text",
+        src:find("function updateAges(vis)", 1, true) ~= nil
+        and src:find('querySelector(".age")', 1, true) ~= nil)
+  check("f8-pin: updateAges uses fmtAge (same age fn as tileHtml)",
+        src:find("fmtAge(vis[i].since)", 1, true) ~= nil)
+  check("f8-pin: selection still handled separately (not in the signature)",
+        src:find("function paintSelection()", 1, true) ~= nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

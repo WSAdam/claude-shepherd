@@ -484,6 +484,8 @@ end
 -- lives in cc-core; this is just the IO + aggregation shell.)
 local usageState = {}      -- [path] = { offset, cum = {...}, recent = { {ts, buckets, anthropic} } }
 local lastUsagePayload = nil
+-- F7 throttle (FX._lastSnapshotAt) lives on FX, not a chunk-local, to respect the
+-- main function's 200-local cap.
 local lastOfficialUsage = nil   -- parsed { five_hour, seven_day, seven_day_sonnet, ... } or nil
 local lastOfficialFetch = 0     -- epoch of the last successful/attempted fetch (180s TTL)
 local lastOfficialStatus = nil  -- last fetch HTTP status, so we log only on CHANGE (no 3-min spam)
@@ -566,6 +568,7 @@ function FX.computeUsage()
   if wv then
     pcall(function() wv:evaluateJavaScript("window.ccUsage(" .. hs.json.encode(lastUsagePayload) .. ")") end)
   end
+  pcall(FX.writeUsageSnapshots)   -- F7: durable cost history (gated + throttled; defined below, after ledgerEnabled)
   return lastUsagePayload
 end
 
@@ -830,6 +833,36 @@ function FX.appendLedger(event)
   if f then f:write(core.json.encode(event) .. "\n"); f:close() end
 end
 
+-- F7: append a cumulative `usage_snapshot` ledger event per active session, so cost trends
+-- survive transcript compaction / session end. Gated on ledger.enabled AND
+-- ledger.usageSnapshots (default on), and throttled to ledger.usageSnapshotMinutes (10) so
+-- it adds only a handful of small events per interval. Called from FX.computeUsage's timer;
+-- core.costSeries diffs these into a daily series and core.costSummary takes the latest per
+-- session. Defined here (after ledgerEnabled/appendLedger) so those locals are in scope.
+function FX.writeUsageSnapshots()
+  if not ledgerEnabled() then return end
+  local cfg = loadConfig()
+  if core.config(cfg, "ledger.usageSnapshots", true) ~= true then return end
+  local minutes = tonumber(core.config(cfg, "ledger.usageSnapshotMinutes", 10)) or 10
+  local now = os.time()
+  if now - (FX._lastSnapshotAt or 0) < minutes * 60 then return end
+  FX._lastSnapshotAt = now
+  local pricing = core.config(cfg, "pricing", nil)
+  for key, it in pairs(byKey) do
+    local st = it.transcript_path and usageState[it.transcript_path]
+    if st and st.cum and (tonumber(st.cum.real) or 0) > 0 then
+      local cost = core.estimateCost(st.cum.byModel, pricing)
+      FX.appendLedger({
+        type = "usage_snapshot", session_id = it.session_id, key = key, name = it.name,
+        projectKey = it.projectKey, model = st.lastModel,
+        input = st.cum.input, output = st.cum.output,
+        cacheRead = st.cum.cacheRead, cacheCreate = st.cum.cacheCreate,
+        real = st.cum.real, estCostUsd = cost.usd,
+      })
+    end
+  end
+end
+
 -- Build + append an operator-action event from a live status item. `extra` holds
 -- the type-specific fields (must include `type`); identity fields come from the
 -- item (projectKey from the live value the dashboard already computes).
@@ -861,6 +894,52 @@ function FX.readLedger(opts)
   end
   local filtered, truncated = core.capLedgerSlice(core.filterLedger(events, opts), opts.limit)
   return { events = filtered, files = files, truncated = truncated, ts = FX.now() }
+end
+
+-- F6 (self-diagnostics): gather the live environment FACTS the doctor overlay reports,
+-- then classify them via the pure core.doctorChecks. Best-effort: every probe degrades to
+-- a safe default (nil/false) so a missing file or tool never throws.
+function FX.doctorStatus()
+  local function exists(p) return p and hs.fs.attributes(p) ~= nil end
+  local function hasTool(name)
+    local out = hs.execute("command -v " .. name, true)  -- true = user's shell/PATH
+    return type(out) == "string" and out:gsub("%s+", "") ~= ""
+  end
+  -- hooks wired into ~/.claude/settings.json (count distinct OUR_HOOK_SCRIPTS present)
+  local hooksWired = 0
+  local raw = FX.readFile((os.getenv("HOME") or "") .. "/.claude/settings.json")
+  if raw then
+    local okj, settings = pcall(function() return core.json.decode(raw) end)
+    if okj and type(settings) == "table" then
+      local seen = {}
+      for _, r in ipairs(core.parseHookInventory(settings) or {}) do
+        if r.script then seen[r.script] = true end
+      end
+      for _, name in ipairs(core.OUR_HOOK_SCRIPTS) do if seen[name] then hooksWired = hooksWired + 1 end end
+    end
+  end
+  local hbAge
+  local hb = FX.readFile(HEARTBEAT)
+  if hb then local n = tonumber((hb:gsub("%s+", ""))); if n then hbAge = math.max(0, os.time() - n) end end
+  local cfg = loadConfig()
+  local ledgerBytes = 0
+  for _, name in ipairs(FX.readDir(LEDGER_DIR)) do
+    local sz = FX.fileSize(LEDGER_DIR .. "/" .. name); if sz then ledgerBytes = ledgerBytes + sz end
+  end
+  local sessions = 0
+  for _, name in ipairs(FX.readDir(STATUS_DIR)) do
+    if name:match("%.json$") then sessions = sessions + 1 end
+  end
+  return core.doctorChecks({
+    jq = hasTool("jq"),
+    hooksWired = hooksWired, hooksTotal = #core.OUR_HOOK_SCRIPTS,
+    scriptsInstalled = exists(CLAUDE_DIR .. "/cc-status.sh") and exists(CLAUDE_DIR .. "/cc-approve.sh"),
+    heartbeatAgeSec = hbAge,
+    gateArmed = FX.readFile(GATE_FLAG) ~= nil,
+    ledgerEnabled = core.config(cfg, "ledger.enabled", false) == true,
+    ledgerBytes = ledgerBytes,
+    sessions = sessions,
+  })
 end
 
 -- Atomically rewrite the daily file `day` (UTC "YYYY-MM-DD"), nulling `fields` on
@@ -1652,7 +1731,13 @@ function FX.ghPrStatus(root)
   -- mark attempted NOW (debounce) but keep any prior data until the call returns
   prStatusByRoot[root] = { ts = now, data = cached and cached.data or nil }
   local ok = pcall(function()
-    local t = hs.task.new(gh, function(code, stdout)
+    -- Forward-declare so the callback closes over THIS task as an UPVALUE. With
+    -- `local t = hs.task.new(...)` the name `t` is not yet in scope inside its own
+    -- initializer, so the callback's core.prCallbackOwns(prStatusTasks[root], t)
+    -- would read a nil GLOBAL `t`, never match the stored task, and always bail --
+    -- silently never painting PR data. (Caught by luacheck W113; keep it green.)
+    local t
+    t = hs.task.new(gh, function(code, stdout)
       -- Paint ONLY if this task still owns the slot (core.prCallbackOwns). A stale-kill (hung
       -- re-poll) or a vanished-root reap replaces/clears the latch; a late callback from the
       -- superseded (terminated) task must DROP its result -- a SIGTERM'd gh exits non-zero, so
@@ -4005,6 +4090,30 @@ local function handleBridgeMsg(msg)
     refresh()
     return
   end
+  if a == "open-doctor-view" then
+    -- F6: gather live health facts (FX.doctorStatus) and push the classified rows.
+    pcall(function() wv:evaluateJavaScript("window.ccDoctor(" .. hs.json.encode(FX.doctorStatus()) .. ")") end)
+    return
+  end
+  if a == "open-features-view" then
+    -- F9: push the static in-app features list (single-sourced in core.FEATURES).
+    pcall(function() wv:evaluateJavaScript("window.ccFeatures(" .. hs.json.encode(core.FEATURES) .. ")") end)
+    return
+  end
+  if a == "open-cost-view" then
+    -- F7: aggregate durable usage_snapshot events into a fleet summary + a daily series.
+    local res = FX.readLedger({ types = { "usage_snapshot" }, limit = 0 })
+    local nowt = FX.now()
+    local tzOff = os.difftime(nowt, os.time(os.date("!*t", nowt)))  -- local seconds east of UTC
+    local data = {
+      enabled = ledgerEnabled(),
+      snapshots = core.config(loadConfig(), "ledger.usageSnapshots", true) == true,
+      summary = core.costSummary(res.events),
+      series = core.costSeries(res.events, { days = 14, tzOffset = tzOff, now = nowt }),
+    }
+    pcall(function() wv:evaluateJavaScript("window.ccCost(" .. hs.json.encode(data) .. ")") end)
+    return
+  end
   if a == "open-insights-view" then
     local res = FX.readLedger({})
     local maxBlock = tonumber(core.config(loadConfig(), "insights.maxBlockSeconds", 1800)) or 1800
@@ -4318,6 +4427,20 @@ local function handleBridgeMsg(msg)
     reply({ files = parsed.files, summary = parsed.summary, root = root })
     return
   end
+  if a == "detail-transcript" then
+    -- F4 Transcript peek: the selected session's recent human-readable turns. Reads a
+    -- bounded tail of its transcript JSONL; pure core.transcriptPeek extracts the user +
+    -- assistant rows. Selection/tab-triggered only, never on the 1Hz tick.
+    local key = tostring(payload.v or "")
+    local it = byKey[key]
+    local rows = {}
+    if it and it.transcript_path then
+      rows = core.transcriptPeek(FX.readTail(it.transcript_path, 131072), { n = 60, maxLen = 800 })
+    end
+    pcall(function() wv:evaluateJavaScript("window.ccTranscript("
+      .. jsString(key) .. ", " .. hs.json.encode(rows) .. ")") end)
+    return
+  end
   if a == "detail-diff" then
     -- L5 Changes tab: one file's unified diff, fetched on expand. Capped in
     -- FX.gitDiff. file (payload.text) is bridge-supplied, so it MUST be a member
@@ -4610,7 +4733,6 @@ local function handleBridgeMsg(msg)
     ctxMenu = hs.menubar.new(false)  -- false = not in the system menu bar
     if ctxMenu then
       local keyJson  = jsString(item.key)
-      local nameJson = jsString(item.label or item.name)
       local shown = item.label or item.name
       local cfg0 = loadConfig()
       -- Remote (bridge) tile: every other item is window/keystroke-shaped, so
@@ -5263,6 +5385,11 @@ local HTML = [[
   .ap-reset { background:var(--surface); color:var(--text-2); border:1px solid var(--border); border-radius:8px;
               padding:5px 12px; cursor:pointer; font-size:12px; }
   .ap-reset:hover { color:var(--text-strong); background:var(--surface-hover); }
+  .ap-themebtns { display:flex; gap:8px; margin-top:4px; }
+  .ap-io { width:100%; box-sizing:border-box; margin-top:6px; font-family:var(--font-mono,monospace); font-size:11px;
+           background:var(--surface-2); color:var(--text); border:1px solid var(--border); border-radius:8px; padding:7px; resize:vertical; }
+  .ap-msg { font-size:11px; margin-top:5px; min-height:14px; color:var(--dim); }
+  .ap-msg.ok { color:var(--ok); } .ap-msg.warn { color:var(--warn); } .ap-msg.err { color:var(--danger); }
   .ap-note { color:var(--dim); font-size:11px; margin:2px 0 6px; line-height:1.4; }
 
   /* ---- Look shape rules (body[data-look] -> tile/overlay chrome) -----------
@@ -5493,7 +5620,15 @@ local HTML = [[
   .d-panel.active { display:block; }
   #d-timeline { font-size:11px; }
   #d-timeline .tl-pre { white-space:pre-wrap; color:var(--text-2); font-family:ui-monospace,Menlo,monospace; font-size:11px; line-height:1.5; margin:0; }
-  #d-timeline .tl-empty, #d-changes .tl-empty, #d-checkpoints .tl-empty { color:var(--dim); font-size:11px; }
+  #d-timeline .tl-empty, #d-changes .tl-empty, #d-checkpoints .tl-empty, #d-transcript .tl-empty { color:var(--dim); font-size:11px; }
+  /* F4 Transcript peek tab */
+  .d-tr-search { width:100%; box-sizing:border-box; margin-bottom:7px; padding:5px 8px; font-size:11px;
+                 background:var(--surface-2); color:var(--text); border:1px solid var(--border); border-radius:7px; }
+  #d-transcript { max-height:300px; overflow-y:auto; display:flex; flex-direction:column; gap:7px; }
+  .tr-row { display:flex; gap:8px; font-size:11px; line-height:1.45; }
+  .tr-who { flex:0 0 42px; font-weight:600; color:var(--muted); text-align:right; }
+  .tr-user .tr-who { color:var(--accent); }
+  .tr-txt { flex:1; color:var(--text-2); white-space:pre-wrap; word-break:break-word; }
   /* DR3 Rewind tab: checkpoint/restore-point timeline + guarded /rewind action */
   #rw-head { display:flex; align-items:center; gap:8px; margin-bottom:6px; flex-wrap:wrap; }
   #b-rewind { font-size:11px; color:var(--warn); background:transparent; border:1px solid #5a4a22; border-radius:6px;
@@ -5782,6 +5917,32 @@ local HTML = [[
 /* Fleet insights overlay (Feature A; modeled on #audit). Pure read of the ledger. */
 #insights{ position:fixed; inset:0; background:var(--bg-overlay); z-index:11; display:none; flex-direction:column; font-size:12px; }
 #insights.show{ display:flex; }
+/* F6 Diagnostics + F9 Features + F7 Cost: shared simple overlay shell */
+#doctor, #features, #cost{ position:fixed; inset:0; background:var(--bg-overlay); z-index:12; display:none; flex-direction:column; font-size:12px; }
+#doctor.show, #features.show, #cost.show{ display:flex; }
+#doctor .ov-head, #features .ov-head, #cost .ov-head{ display:flex; align-items:center; justify-content:space-between; padding:12px 16px; border-bottom:1px solid var(--border); font-weight:600; color:var(--text); }
+#doctor .ov-body, #features .ov-body, #cost .ov-body{ flex:1; overflow-y:auto; padding:14px 16px; }
+#doctor .ov-foot, #features .ov-foot, #cost .ov-foot{ padding:10px 16px; border-top:1px solid var(--border); display:flex; gap:12px; align-items:center; color:var(--dim); font-size:11px; }
+#doctor .ov-foot button, #features .ov-foot button, #cost .ov-foot button{ background:var(--surface); color:var(--text-2); border:1px solid var(--border); border-radius:7px; padding:5px 12px; cursor:pointer; font-size:12px; }
+.cost-chart{ display:flex; align-items:flex-end; gap:4px; height:120px; margin-top:8px; padding-bottom:18px; }
+.cbar{ flex:1; display:flex; flex-direction:column; justify-content:flex-end; align-items:center; position:relative; height:100%; }
+.cbar-fill{ width:70%; background:var(--accent); border-radius:3px 3px 0 0; min-height:2px; }
+.cbar-x{ position:absolute; bottom:-16px; font-size:8px; color:var(--dim); white-space:nowrap; }
+.doc-row{ display:flex; gap:11px; align-items:flex-start; padding:9px 0; border-bottom:1px solid var(--border-weak); }
+.doc-ic{ flex:0 0 18px; font-size:13px; text-align:center; }
+.doc-main{ flex:1; }
+.doc-label{ color:var(--text); font-weight:600; }
+.doc-detail{ color:var(--text-3); font-size:11px; margin-top:1px; }
+.doc-fix{ color:var(--accent-text); font-size:11px; margin-top:2px; font-family:ui-monospace,Menlo,monospace; }
+.doc-ok .doc-ic{ color:var(--ok); } .doc-warn .doc-ic{ color:var(--warn); }
+.doc-crit .doc-ic{ color:var(--danger); } .doc-info .doc-ic{ color:var(--muted); }
+/* F9 Features list */
+.feat-row{ padding:11px 0; border-bottom:1px solid var(--border-weak); }
+.feat-title{ color:var(--text); font-weight:600; font-size:12.5px; }
+.feat-kind{ color:var(--accent-text); font-size:10px; text-transform:uppercase; letter-spacing:.04em; margin-left:7px; }
+.feat-what{ color:var(--text-2); margin-top:3px; line-height:1.5; }
+.feat-why{ color:var(--text-3); margin-top:3px; line-height:1.5; }
+.feat-why b{ color:var(--text-2); }
 #i-head{ display:flex; align-items:center; gap:8px; padding:8px 10px; border-bottom:1px solid var(--border); font-weight:600; }
 #i-head .s-x{ margin-left:auto; }
 #i-body{ flex:1; overflow:auto; padding:10px 12px; }
@@ -6024,6 +6185,9 @@ local HTML = [[
           <button class="tm-item" onclick="menuPick('mcpskills')"><span class="tm-ic">🔌</span> MCPs &amp; Skills</button>
           <button class="tm-item" onclick="menuPick('policies')"><span class="tm-ic">🛡</span> Policy bundles</button>
           <button class="tm-item" onclick="menuPick('rules')"><span class="tm-ic">⚙️</span> Automation rules</button>
+          <button class="tm-item" onclick="menuPick('cost')"><span class="tm-ic">💰</span> Cost &amp; tokens</button>
+          <button class="tm-item" onclick="menuPick('doctor')"><span class="tm-ic">🩺</span> Diagnostics</button>
+          <button class="tm-item" onclick="menuPick('features')"><span class="tm-ic">✨</span> Features list</button>
           <button id="tm-shift" class="tm-item" style="display:none" onclick="menuPick('shift')"><span class="tm-ic">📋</span> Shift report</button>
           <button class="tm-item" onclick="menuPick('notify')"><span class="tm-ic">🔔</span> Notifications<span id="tm-notify-badge"></span></button>
         </div>
@@ -6127,6 +6291,10 @@ local HTML = [[
       <div id="d-checkpoints"></div>
       <div id="rw-tl-head">Activity timeline</div>
       <div id="d-timeline"></div>
+    </div>
+    <div class="d-panel" data-tab="transcript">
+      <input type="text" id="d-tr-search" class="d-tr-search" placeholder="Search this session's recent messages…" oninput="renderTranscript()">
+      <div id="d-transcript"></div>
     </div>
     <div class="d-panel" data-tab="decisions">
       <div id="d-decisions"></div>
@@ -6266,6 +6434,19 @@ local HTML = [[
           <label class="ap-color">Needs you <input type="color" id="a-s-approval" oninput="previewAp()"></label>
           <label class="ap-color">Error <input type="color" id="a-s-error" oninput="previewAp()"></label>
         </div>
+      </div>
+      <div class="ap-grp">
+        <label class="ap-toggle"><input type="checkbox" id="a-all-on" onchange="onApAllToggle();previewAp()"> Advanced — edit every color (full palette)</label>
+        <div id="a-allcolors" class="ap-colors"></div>
+      </div>
+      <div class="ap-grp">
+        <div class="s-lbl">Theme file — export your palette to share/keep, or paste one to import</div>
+        <div class="ap-themebtns">
+          <button type="button" class="ap-reset" onclick="exportThemeUI()">Export…</button>
+          <button type="button" class="ap-reset" onclick="importThemeUI()">Import</button>
+        </div>
+        <textarea id="a-theme-io" class="ap-io" rows="4" placeholder="Click Export to get your theme JSON here, or paste a theme JSON and click Import." style="display:none;"></textarea>
+        <div id="a-theme-msg" class="ap-msg"></div>
       </div>
       <div class="ap-grp">
         <div class="s-lbl">Sizing</div>
@@ -6539,6 +6720,24 @@ local HTML = [[
       <button onclick="openInsights()">Refresh</button>
       <span id="i-info" class="n-dim"></span>
     </div>
+  </div>
+
+  <div id="doctor">
+    <div class="ov-head"><span>🩺 Diagnostics</span><button class="s-x" onclick="closeDoctor()">✕</button></div>
+    <div class="ov-body" id="doc-body"></div>
+    <div class="ov-foot"><button onclick="openDoctor()">Re-check</button><span>Health of hooks, the gate, jq, panel heartbeat &amp; ledger.</span></div>
+  </div>
+
+  <div id="features">
+    <div class="ov-head"><span>✨ What Shepherd can do</span><button class="s-x" onclick="closeFeatures()">✕</button></div>
+    <div class="ov-body" id="feat-body"></div>
+    <div class="ov-foot"><span>A plain-language tour of the main features.</span></div>
+  </div>
+
+  <div id="cost">
+    <div class="ov-head"><span>💰 Cost &amp; tokens</span><button class="s-x" onclick="closeCost()">✕</button></div>
+    <div class="ov-body" id="cost-body"></div>
+    <div class="ov-foot"><button onclick="openCost()">Refresh</button><span>Estimated API-equivalent $ from the audit ledger's usage snapshots.</span></div>
   </div>
 
   <div id="mcpskills">
@@ -7546,6 +7745,11 @@ local HTML = [[
         ap.status = { working:apG("a-s-working").value, done:apG("a-s-done").value,
                       approval:apG("a-s-approval").value, error:apG("a-s-error").value };
       }
+      if(apG("a-all-on") && apG("a-all-on").checked){   // F3: advanced overrides ALL tokens
+        ap.colors = ap.colors || {};
+        (APPEARANCE.vars||[]).forEach(function(pair){ var sk=pair[0], el=apG("a-all-"+sk);
+          if(el && apIsHex(el.value)) ap.colors[sk]=el.value; });
+      }
       return ap;
     }
     function renderThemeChips(active){
@@ -7593,6 +7797,57 @@ local HTML = [[
     }
     function onApColorsToggle(){ apG("a-colors").classList.toggle("show", apG("a-colors-on").checked); }
     function onApStatusToggle(){ apG("a-status").classList.toggle("show", apG("a-status-on").checked); }
+    // F3: advanced editor for EVERY color token, generated from APPEARANCE.vars (single-
+    // sourced so it can't drift from the Lua palette). Each picker previews live and, when
+    // the toggle is on, readApForm reads all of them into ap.colors.
+    function prettyVar(cssv){ return cssv.replace(/^--/,"").replace(/-/g," "); }
+    function normHex(v){ return (apIsHex(v) ? (v.length===4 ? ("#"+v[1]+v[1]+v[2]+v[2]+v[3]+v[3]) : v) : "#000000"); }
+    function renderAllColors(){
+      var box=apG("a-allcolors"); if(!box) return;
+      var r=resolveAp(readApForm()); box.innerHTML="";
+      (APPEARANCE.vars||[]).forEach(function(pair){
+        var sk=pair[0], cssv=pair[1];
+        var lab=document.createElement("label"); lab.className="ap-color"; lab.textContent=prettyVar(cssv)+" ";
+        var inp=document.createElement("input"); inp.type="color"; inp.id="a-all-"+sk;
+        inp.value=normHex(r.tokens[sk]); inp.oninput=previewAp;
+        lab.appendChild(inp); box.appendChild(lab);
+      });
+    }
+    function onApAllToggle(){ var on=apG("a-all-on").checked; if(on) renderAllColors();
+      apG("a-allcolors").classList.toggle("show", on); }
+    function apMsg(t,kind){ var m=apG("a-theme-msg"); if(!m) return; m.textContent=t||""; m.className="ap-msg "+(kind||""); }
+    function exportThemeUI(){
+      var r=resolveAp(readApForm()), colors={};
+      (APPEARANCE.vars||[]).forEach(function(pair){ var sk=pair[0], v=r.tokens[sk]; if(apIsHex(v)) colors[sk]=v; });
+      var obj={ v:1, scheme:r.scheme, look:r.look, font:r.font, scale:r.scale, tileMin:r.tileMin,
+                density:r.density, reduceMotion:r.reduceMotion, colors:colors };
+      var ta=apG("a-theme-io"); ta.style.display="block"; ta.value=JSON.stringify(obj,null,2);
+      ta.focus(); ta.select(); apMsg("Theme JSON ready below — copy it to save or share.","ok");
+    }
+    function importThemeUI(){
+      var ta=apG("a-theme-io"); ta.style.display="block";
+      var raw=(ta.value||"").trim();
+      if(!raw){ apMsg("Paste a theme JSON above first, then click Import.","warn"); ta.focus(); return; }
+      var obj; try{ obj=JSON.parse(raw); }catch(e){ apMsg("Not valid JSON: "+e.message,"err"); return; }
+      var colors=(obj&&obj.colors)||{}, known={};
+      (APPEARANCE.vars||[]).forEach(function(pair){ var sk=pair[0]; known[sk]=1; });
+      var n=0;
+      for(var k in colors){
+        if(!known[k]){ apMsg("Unknown color token: "+k,"err"); return; }
+        if(!apIsHex(colors[k])){ apMsg("Invalid hex for "+k+": "+colors[k],"err"); return; }
+        n++;
+      }
+      if(!n){ apMsg("That theme has no colors.","err"); return; }
+      if(obj.theme && APPEARANCE.themes[obj.theme]){ apG("a-theme").value=obj.theme; renderThemeChips(obj.theme); }
+      if(obj.font && APPEARANCE.fonts && APPEARANCE.fonts[obj.font]) apG("a-font").value=obj.font;
+      if(typeof obj.scale==="number"){ apG("a-scale").value=Math.round(obj.scale*100); }
+      if(typeof obj.tileMin==="number"){ apG("a-tilemin").value=obj.tileMin; }
+      apG("a-density").checked=(obj.density==="dense"); apG("a-motion").checked=(obj.reduceMotion===true);
+      apG("a-all-on").checked=true; renderAllColors();
+      for(var ck in colors){ var el=apG("a-all-"+ck); if(el) el.value=normHex(colors[ck]); }
+      apG("a-allcolors").classList.add("show");
+      previewAp(); apMsg("Imported "+n+" colors — preview updated. Click Save to keep it.","ok");
+    }
     function previewAp(){
       var sv=apG("a-scale-v"); if(sv) sv.textContent=(parseInt(apG("a-scale").value,10)||100)+"%";
       var tv=apG("a-tilemin-v"); if(tv) tv.textContent=(parseInt(apG("a-tilemin").value,10)||170);
@@ -7620,11 +7875,20 @@ local HTML = [[
       var lay=document.body.getAttribute("data-theme")||"cards";
       var chips=document.querySelectorAll("#a-layouts .ap-lc");
       Array.prototype.forEach.call(chips,function(b){ b.classList.toggle("on", b.getAttribute("data-layout")===lay); });
+      // F3: if the saved palette overrides tokens beyond the basic 5, open the full editor
+      // so they're visible AND survive a re-save (readApForm reads advanced only when on).
+      var basic5={bg:1,surface:1,border:1,text:1,muted:1}, extra=false;
+      for(var ck in ov){ if(!basic5[ck]){ extra=true; break; } }
+      apG("a-all-on").checked=extra; onApAllToggle();
+      if(extra){ for(var ck2 in ov){ var ae=apG("a-all-"+ck2); if(ae && apIsHex(ov[ck2])) ae.value=ov[ck2]; } }
+      apMsg("");
       applyAppearance(ap);
     }
     function resetAp(){
       apG("a-colors-on").checked=false; onApColorsToggle();
       apG("a-status-on").checked=false; onApStatusToggle();
+      apG("a-all-on").checked=false; onApAllToggle();
+      var tio=apG("a-theme-io"); if(tio){ tio.value=""; tio.style.display="none"; } apMsg("");
       apG("a-scale").value=100; apG("a-tilemin").value=170; apG("a-density").checked=false;
       apG("a-font").value="system"; apG("a-motion").checked=false; apG("a-accent").value="";
       pickTheme("midnight");   // reseeds inputs + accent swatches + previews
@@ -8525,6 +8789,13 @@ local HTML = [[
           } else { TIMELINE = { key: selectedKey, events: [] }; }
         }
         renderDetailTimeline();   // clears stale (key mismatch) or paints cache/pending
+      } else if(detailTab === "transcript"){
+        // F4: fetch the recent-conversation peek on tab-activation only, deduped by key.
+        if(TRANSCRIPT.key !== selectedKey){
+          TRANSCRIPT = { key: selectedKey, rows: null };   // pending (dedupes re-fetch)
+          send("detail-transcript", selectedKey);          // ccTranscript repaints
+        }
+        renderTranscript();
       } else if(detailTab === "changes"){
         if(CHANGES.key !== selectedKey){
           CHANGES = { key: selectedKey, data: null };   // pending (dedupes re-fetch)
@@ -8649,6 +8920,34 @@ local HTML = [[
     var CHANGES  = { key:null, data:null };
     var CH_DIFFS = {};   // root-relative path -> diff text (current selection)
     var CH_OPEN  = {};   // root-relative path -> true (expanded row)
+    // ---- F4: Transcript peek tab (rows===null while a fetch is in flight) ----
+    var TRANSCRIPT = { key:null, rows:null };
+    window.ccTranscript = function(key, rows){
+      if(key !== selectedKey) return;        // stale guard: only paint the current selection
+      TRANSCRIPT = { key: key, rows: rows || [] };
+      renderTranscript();
+    };
+    function renderTranscript(){
+      var box = document.getElementById("d-transcript"); if(!box) return;
+      if(TRANSCRIPT.key !== selectedKey){ box.innerHTML = ""; return; }
+      var rows = TRANSCRIPT.rows;
+      if(rows === null){ box.innerHTML = '<div class="tl-empty">Loading transcript…</div>'; return; }
+      if(!rows.length){ box.innerHTML = '<div class="tl-empty">No recent messages (or this session has no transcript yet).</div>'; return; }
+      var sb = document.getElementById("d-tr-search");
+      var q = ((sb && sb.value) || "").toLowerCase().trim();
+      var shown = 0, html = "";
+      for(var i=0;i<rows.length;i++){
+        var r = rows[i], txt = r.text || "";
+        if(q && txt.toLowerCase().indexOf(q) < 0) continue;
+        shown++;
+        var who = (r.role === "user") ? "You" : "Claude";
+        html += '<div class="tr-row tr-'+(r.role==="user"?"user":"asst")+'">'
+              + '<span class="tr-who">'+who+'</span>'
+              + '<span class="tr-txt">'+esc(txt)+'</span></div>';
+      }
+      if(q && shown===0){ html = '<div class="tl-empty">No messages match that search.</div>'; }
+      box.innerHTML = html;
+    }
     window.ccDetailChanges = function(key, data){
       if(key !== selectedKey) return;     // stale guard (consistent with ccDetailDiff)
       CHANGES = { key: key, data: data || { files:[], summary:{} } };
@@ -9121,6 +9420,87 @@ local HTML = [[
     // ---- Fleet insights view (Feature A) ------------------------------------
     function openInsights(){ send("open-insights-view"); }
     function closeInsights(){ document.getElementById("insights").classList.remove("show"); }
+    // ---- F6: Diagnostics ("doctor") overlay ----
+    function openDoctor(){ send("open-doctor-view"); document.getElementById("doctor").classList.add("show"); }
+    function closeDoctor(){ document.getElementById("doctor").classList.remove("show"); }
+    window.ccDoctor = function(rows){
+      rows = rows || [];
+      var ICON = { ok:"✓", warn:"⚠", crit:"✕", info:"•" };
+      var body = document.getElementById("doc-body"); if(!body) return;
+      var html = "";
+      for(var i=0;i<rows.length;i++){
+        var r = rows[i], st = r.status || "info";
+        html += '<div class="doc-row doc-'+esc(st)+'">'
+              + '<span class="doc-ic">'+(ICON[st]||"•")+'</span>'
+              + '<span class="doc-main"><span class="doc-label">'+esc(r.label||"")+'</span>'
+              + (r.detail ? '<div class="doc-detail">'+esc(r.detail)+'</div>' : '')
+              + (r.fix ? '<div class="doc-fix">'+esc(r.fix)+'</div>' : '')
+              + '</span></div>';
+      }
+      body.innerHTML = html || '<div class="tl-empty">No checks.</div>';
+    };
+    // ---- F9: Features list overlay (plain-language what + why per feature) ----
+    function openFeatures(){ send("open-features-view"); document.getElementById("features").classList.add("show"); }
+    function closeFeatures(){ document.getElementById("features").classList.remove("show"); }
+    window.ccFeatures = function(list){
+      list = list || [];
+      var body = document.getElementById("feat-body"); if(!body) return;
+      var html = "";
+      for(var i=0;i<list.length;i++){
+        var f = list[i];
+        html += '<div class="feat-row">'
+              + '<div class="feat-title">'+esc(f.title||"")
+              + (f.kind ? '<span class="feat-kind">'+esc(f.kind)+'</span>' : '')+'</div>'
+              + '<div class="feat-what">'+esc(f.what||"")+'</div>'
+              + '<div class="feat-why"><b>Why:</b> '+esc(f.why||"")+'</div>'
+              + '</div>';
+      }
+      body.innerHTML = html || '<div class="tl-empty">No features listed.</div>';
+    };
+    // ---- F7: Cost & tokens overlay ----
+    function openCost(){ send("open-cost-view"); document.getElementById("cost").classList.add("show"); }
+    function closeCost(){ document.getElementById("cost").classList.remove("show"); }
+    function fmtUsd(n){ n = n||0; return "$" + (n>=100 ? String(Math.round(n)) : n.toFixed(2)); }
+    function fmtTok(n){ n = n||0; if(n>=1e9) return (n/1e9).toFixed(1)+"B"; if(n>=1e6) return (n/1e6).toFixed(1)+"M";
+      if(n>=1e3) return (n/1e3).toFixed(1)+"k"; return String(Math.round(n)); }
+    function fmtDate(ep){ var dt=new Date((ep||0)*1000); return (dt.getMonth()+1)+"/"+dt.getDate(); }
+    window.ccCost = function(d){
+      d = d || {};
+      var body = document.getElementById("cost-body"); if(!body) return;
+      if(!d.enabled){
+        body.innerHTML = '<div class="tl-empty">The audit ledger is off. Turn it on (Settings → Audit log) and keep usage snapshots enabled to track token use and cost over time.</div>';
+        return;
+      }
+      var s = d.summary || {}, series = d.series || [], html = "";
+      html += '<div class="i-cards">'
+        + '<div class="i-card"><div class="v">'+esc(fmtUsd(s.usd))+'</div><div class="k">est. cost to date</div></div>'
+        + '<div class="i-card"><div class="v">'+esc(fmtTok(s.real))+'</div><div class="k">tokens used</div></div>'
+        + '<div class="i-card"><div class="v">'+esc(String(s.sessions||0))+'</div><div class="k">sessions tracked</div></div>'
+        + '</div>';
+      var maxUsd=0, anyUsd=false, maxReal=0;
+      for(var i=0;i<series.length;i++){ var r=series[i];
+        if(r.usd>maxUsd) maxUsd=r.usd; if(r.usd>0) anyUsd=true; if(r.real>maxReal) maxReal=r.real; }
+      var useUsd=anyUsd, top=useUsd?maxUsd:maxReal;
+      if(series.length && top>0){
+        html += '<div class="i-sec">Last '+series.length+' days ('+(useUsd?'cost':'tokens')+')</div><div class="cost-chart">';
+        for(var j=0;j<series.length;j++){ var row=series[j], val=useUsd?row.usd:row.real;
+          var h=Math.max(2, Math.round((val/top)*90)), lbl=fmtDate(row.dayEpoch), vtxt=useUsd?fmtUsd(val):fmtTok(val);
+          html += '<div class="cbar" title="'+esc(lbl+": "+vtxt)+'"><div class="cbar-fill" style="height:'+h+'px"></div><div class="cbar-x">'+esc(lbl)+'</div></div>';
+        }
+        html += '</div>';
+      } else {
+        html += '<div class="tl-empty">No usage recorded yet — snapshots are written every ~10 min while sessions run.</div>';
+      }
+      var ps = s.perSession || [];
+      if(ps.length){
+        html += '<div class="i-sec">By session</div><table class="i-tbl"><tr><th>session</th><th class="n">tokens</th><th class="n">est. $</th></tr>';
+        var lim=Math.min(ps.length,12);
+        for(var k=0;k<lim;k++){ var p=ps[k];
+          html += '<tr><td>'+esc(p.name||p.session_id||"?")+'</td><td class="n">'+esc(fmtTok(p.real))+'</td><td class="n">'+esc(fmtUsd(p.usd))+'</td></tr>'; }
+        html += '</table>';
+      }
+      body.innerHTML = html;
+    };
 
     // 🔌 MCPs & Skills viewer. Open renders instantly from config files (+ last
     // live status); Re-check runs `claude mcp list` for connectors + health.
@@ -10554,6 +10934,9 @@ local HTML = [[
       else if(which === "mcpskills") openMcpSkills();
       else if(which === "policies") openPolicyEd();
       else if(which === "rules") openRuleEd();
+      else if(which === "cost") openCost();
+      else if(which === "doctor") openDoctor();
+      else if(which === "features") openFeatures();
       else if(which === "shift"){ if(LEDGER_ON) openShiftReport(); }
       else if(which === "notify") openNotifications();
     }
@@ -10844,6 +11227,31 @@ local HTML = [[
     }
 
     var EMPTY_WAITING = 'Waiting for Claude Code sessions...<br>Start a session in any project.';
+
+    // F8 twins of core.tileSignature / core.gridSignature: a stable, key-SORTED
+    // serialization so a tile is re-rendered only when its item data changes. The live
+    // age is derived from `since` (not an item field), so an idle/unchanged fleet yields
+    // an identical grid signature tick-to-tick and we skip the innerHTML rebuild.
+    function tileSignature(v){
+      if(v === null || v === undefined) return String(v);
+      if(typeof v !== "object") return String(v);
+      if(Array.isArray(v)){
+        var a = []; for(var i=0;i<v.length;i++){ a.push(tileSignature(v[i])); }
+        return "["+a.join(",")+"]";
+      }
+      var keys = Object.keys(v).sort();
+      var parts = [];
+      // (use a temp `k` instead of indexing v with keys[j] inline -- the embedded JS
+      //  lives in a Lua long-bracket string, so a doubled close-bracket would end it.)
+      for(var j=0;j<keys.length;j++){ var k=keys[j]; parts.push(k+":"+tileSignature(v[k])); }
+      return "{"+parts.join(",")+"}";
+    }
+    function gridSignature(list){
+      var parts = []; for(var i=0;i<list.length;i++){ parts.push(tileSignature(list[i])); }
+      return parts.join("\n");
+    }
+    var lastGridSig = null;   // grid content+order signature of the last actual render
+
     // Render the grid from lastItems through the active search filter. Re-run both on
     // a fresh ccUpdate and on every keystroke in the search bar (no re-fetch needed).
     function renderGrid(){
@@ -10851,19 +11259,42 @@ local HTML = [[
       var empty = document.getElementById("empty");
       renderGroupChips();  // refresh the group filter row from the latest data
       if(lastItems.length === 0){
-        grid.innerHTML = ""; empty.innerHTML = EMPTY_WAITING; empty.style.display = "block";
+        grid.innerHTML = ""; lastGridSig = null; empty.innerHTML = EMPTY_WAITING; empty.style.display = "block";
         renderBulkBar([]); updateSearchCount(0, 0); return;
       }
       var vis = visibleItems();
       renderBulkBar(vis);  // fleet-action buttons reflect the visible (filtered) set
       if(vis.length === 0){
-        grid.innerHTML = ""; empty.innerHTML = "No sessions match your filter.";
+        grid.innerHTML = ""; lastGridSig = null; empty.innerHTML = "No sessions match your filter.";
         empty.style.display = "block"; updateSearchCount(0, lastItems.length); return;
       }
       empty.style.display = "none";
-      grid.innerHTML = vis.map(tileHtml).join("");
+      // F8: rebuild the grid HTML only when tile content/order actually changed; the
+      // common 1Hz tick (nothing structural changed) skips the full innerHTML reparse
+      // and just refreshes the churning age text below.
+      var sig = gridSignature(vis);
+      if(sig !== lastGridSig){
+        grid.innerHTML = vis.map(tileHtml).join("");
+        lastGridSig = sig;
+      }
+      updateAges(vis);
       paintSelection();
       updateSearchCount(vis.length, lastItems.length);
+    }
+    // F8: the per-tile elapsed age ("2s"/"5m") ticks every second even when nothing else
+    // changes -- update just those text nodes in place so a static fleet doesn't reparse
+    // the whole grid each refresh. When we skipped the rebuild, grid.children is in vis
+    // order (the same order that produced the matching signature), so index alignment holds.
+    function updateAges(vis){
+      var grid = document.getElementById("grid");
+      var kids = grid.children;
+      if(kids.length !== vis.length) return;  // structure mismatch -> a rebuild fixes it
+      for(var i=0;i<vis.length;i++){
+        var span = kids[i].querySelector(".age");
+        if(!span) continue;
+        var age = vis[i].since ? fmtAge(vis[i].since) : "";
+        if(span.textContent !== age){ span.textContent = age; }
+      }
     }
 
     function esc(s){

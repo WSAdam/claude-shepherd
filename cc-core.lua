@@ -113,6 +113,40 @@ function M.sortByStatus(list)
   return list
 end
 
+-- F8 (incremental render): a tile's rendered HTML is a pure function of its item
+-- fields -- the live "age" (2s/5m) is derived from `since` at render time, not stored
+-- on the item -- so a tile only needs re-rendering when its data actually changes.
+-- tileSignature is a stable, key-SORTED canonical serialization (independent of the
+-- JSON encoder's key order) and gridSignature folds the visible list, capturing both
+-- content AND order. When the grid signature is unchanged between 1Hz ticks the webview
+-- skips the whole innerHTML rebuild and only refreshes the churning age text. Selection
+-- (selectedKey) is a UI-only concern handled separately, so it is intentionally not an
+-- item field and never part of the signature. The webview keeps a byte-for-byte twin of
+-- these (pinned in ui.test); they need only be internally stable, not cross-language.
+function M.tileSignature(it)
+  local t = type(it)
+  if t == "table" then
+    local keys = {}
+    for k in pairs(it) do keys[#keys + 1] = k end
+    table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+    local parts = {}
+    for _, k in ipairs(keys) do
+      parts[#parts + 1] = tostring(k) .. ":" .. M.tileSignature(it[k])
+    end
+    return "{" .. table.concat(parts, ",") .. "}"
+  elseif t == "number" then
+    return string.format("%.14g", it)
+  end
+  return tostring(it)
+end
+
+function M.gridSignature(list)
+  if type(list) ~= "table" then return "" end
+  local parts = {}
+  for i = 1, #list do parts[i] = M.tileSignature(list[i]) end
+  return table.concat(parts, "\n")
+end
+
 -- Which action a deck/hotkey gesture maps to, given the session's gate state.
 -- kind: "primary" (short press) | "secondary" (long press).
 function M.resolveGesture(item, kind, opts)
@@ -1549,7 +1583,6 @@ end
 local STANDUP_LIFE   = { spawn = true, auto_respawn = true, respawn = true,
                          clear = true, continue = true, auto_continue = true,
                          drain_close = true }
-local STANDUP_AUTO   = { auto_respawn = true, auto_continue = true, drain_close = true }
 local STANDUP_PROBLEM = { escalation = true, hung = true, queue_starved = true }
 function M.fleetStandup(events, opts)
   opts = opts or {}
@@ -2220,6 +2253,60 @@ function M.transcriptRecent(text, n, maxLen)
   end
   local out = {}                       -- reverse newest-first -> chronological
   for i = #newest, 1, -1 do out[#out + 1] = newest[i] end
+  return out
+end
+
+-- F4 (transcript peek): the last N human-readable turns of a session's transcript, as
+-- { role = "user"|"assistant", ts, text } rows in chronological order (oldest first). Pulls
+-- assistant TEXT blocks and genuine human prompts (via userHasHumanText -- skips IDE
+-- file-open injections, tool-result-only user lines, and meta/snapshot lines), so the
+-- panel shows the actual conversation, not tool plumbing. Pure: the dashboard reads a
+-- bounded transcript tail and hands it here; the panel renders + searches client-side.
+function M.transcriptPeek(text, opts)
+  opts = (type(opts) == "table") and opts or {}
+  local n = tonumber(opts.n) or 40
+  local maxLen = tonumber(opts.maxLen) or 600
+  if type(text) ~= "string" or #text == 0 then return {} end
+  local function clean(s)
+    s = s:gsub("%s+", " "):gsub("^ +", ""):gsub(" +$", "")
+    if #s > maxLen then s = s:sub(1, maxLen - 1) .. "\226\128\166" end
+    return s
+  end
+  local function textOf(content)
+    if type(content) == "string" then return content end
+    if type(content) ~= "table" then return "" end
+    local buf = {}
+    for _, part in ipairs(content) do
+      if type(part) == "table" and part.type == "text" and type(part.text) == "string" and #part.text > 0 then
+        buf[#buf + 1] = part.text
+      end
+    end
+    return table.concat(buf, " ")
+  end
+  local lines = {}
+  for line in (text .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
+  local rows = {}                      -- collected newest-first, reversed at the end
+  for i = #lines, 1, -1 do
+    if #rows >= n then break end
+    local line = lines[i]
+    if line:find("^%s*{") then
+      local okj, obj = pcall(function() return M.json.decode(line) end)
+      if okj and type(obj) == "table" then
+        local role, raw
+        if obj.type == "assistant" and obj.message then
+          role, raw = "assistant", textOf(obj.message.content)
+        elseif obj.type == "user" and M.userHasHumanText(obj) then
+          role, raw = "user", textOf(obj.message and obj.message.content)
+        end
+        if role then
+          local t = clean(raw or "")
+          if #t > 0 then rows[#rows + 1] = { role = role, ts = obj.timestamp, text = t } end
+        end
+      end
+    end
+  end
+  local out = {}
+  for i = #rows, 1, -1 do out[#out + 1] = rows[i] end
   return out
 end
 
@@ -7160,13 +7247,14 @@ end
 --     (c) a per-id branch in maybeLoadActiveTab only if it needs special load
 --         behavior (cheap always-rendered tabs need nothing).
 M.DETAIL_TABS = {
-  { id = "activity",  label = "Activity" },
-  { id = "rewind",    label = "Rewind" },
-  { id = "decisions", label = "Decisions" },
-  { id = "usage",     label = "Usage" },
-  { id = "changes",   label = "Changes" },
-  { id = "subagents", label = "Agents" },
-  { id = "queue",     label = "Queue" },
+  { id = "activity",   label = "Activity" },
+  { id = "transcript", label = "Transcript" },  -- F4: recent conversation peek + search
+  { id = "rewind",     label = "Rewind" },
+  { id = "decisions",  label = "Decisions" },
+  { id = "usage",      label = "Usage" },
+  { id = "changes",    label = "Changes" },
+  { id = "subagents",  label = "Agents" },
+  { id = "queue",      label = "Queue" },
 }
 M.DETAIL_TAB_DEFAULT = "activity"
 
@@ -7666,6 +7754,84 @@ function M.estimateCost(byModel, pricing)
     end
   end
   return { usd = usd, priced = priced, unpriced = unpriced }
+end
+
+-- F7 (cost analytics): aggregate durable `usage_snapshot` ledger events (each a
+-- CUMULATIVE per-session reading written periodically by FX.writeUsageSnapshots) into a
+-- fleet cost summary -- the LATEST snapshot per session, summed. Pure; the dashboard reads
+-- the ledger and the Cost overlay renders this.
+function M.costSummary(events)
+  local latest = {}
+  for _, e in ipairs(events or {}) do
+    if type(e) == "table" and e.type == "usage_snapshot" and e.session_id then
+      local cur = latest[e.session_id]
+      if not cur or (tonumber(e.ts) or 0) >= (tonumber(cur.ts) or 0) then latest[e.session_id] = e end
+    end
+  end
+  local sum = { sessions = 0, real = 0, input = 0, output = 0, cacheRead = 0, cacheCreate = 0, usd = 0, perSession = {} }
+  for sid, e in pairs(latest) do
+    sum.sessions = sum.sessions + 1
+    sum.real = sum.real + (tonumber(e.real) or 0)
+    sum.input = sum.input + (tonumber(e.input) or 0)
+    sum.output = sum.output + (tonumber(e.output) or 0)
+    sum.cacheRead = sum.cacheRead + (tonumber(e.cacheRead) or 0)
+    sum.cacheCreate = sum.cacheCreate + (tonumber(e.cacheCreate) or 0)
+    sum.usd = sum.usd + (tonumber(e.estCostUsd) or 0)
+    sum.perSession[#sum.perSession + 1] = { session_id = sid, name = e.name, projectKey = e.projectKey,
+      model = e.model, real = tonumber(e.real) or 0, usd = tonumber(e.estCostUsd) or 0 }
+  end
+  table.sort(sum.perSession, function(a, b) return a.usd > b.usd end)
+  return sum
+end
+
+-- Daily cost/token series from the cumulative snapshots: for each day, the sum over
+-- sessions of (cumulative-at-end-of-day - cumulative-at-end-of-previous-day). A drop
+-- (transcript compaction/reset) clamps that session's delta to 0 for the day rather than
+-- going negative. opts.tzOffset (seconds east of UTC) buckets by LOCAL day; opts.now +
+-- opts.days bound the window. Returns ascending { dayEpoch, real, usd } rows. Pure.
+function M.costSeries(events, opts)
+  opts = (type(opts) == "table") and opts or {}
+  local days = math.max(1, math.floor(tonumber(opts.days) or 14))
+  local tz = tonumber(opts.tzOffset) or 0
+  local now = tonumber(opts.now) or 0
+  local function dayOf(ts) return math.floor(((tonumber(ts) or 0) + tz) / 86400) end
+  local today = dayOf(now)
+  local startDay = today - days + 1
+  local bySession = {}
+  for _, e in ipairs(events or {}) do
+    if type(e) == "table" and e.type == "usage_snapshot" and e.session_id then
+      bySession[e.session_id] = bySession[e.session_id] or {}
+      local g = bySession[e.session_id]
+      g[#g + 1] = { ts = tonumber(e.ts) or 0, real = tonumber(e.real) or 0,
+                    usd = tonumber(e.estCostUsd) or 0, day = dayOf(e.ts) }
+    end
+  end
+  local realByDay, usdByDay = {}, {}
+  for d = startDay, today do realByDay[d] = 0; usdByDay[d] = 0 end
+  for _, snaps in pairs(bySession) do
+    table.sort(snaps, function(a, b) return a.ts < b.ts end)
+    local function cumAt(d)
+      local real, usd = 0, 0
+      for _, s in ipairs(snaps) do
+        if s.day <= d then real, usd = s.real, s.usd else break end
+      end
+      return real, usd
+    end
+    local prevReal, prevUsd = cumAt(startDay - 1)
+    for d = startDay, today do
+      local cr, cu = cumAt(d)
+      local dr = cr - prevReal; if dr < 0 then dr = 0 end
+      local du = cu - prevUsd; if du < 0 then du = 0 end
+      realByDay[d] = realByDay[d] + dr
+      usdByDay[d] = usdByDay[d] + du
+      prevReal, prevUsd = cr, cu
+    end
+  end
+  local out = {}
+  for d = startDay, today do
+    out[#out + 1] = { dayEpoch = d * 86400 - tz, real = realByDay[d], usd = usdByDay[d] }
+  end
+  return out
 end
 
 -- ============================================================================
@@ -8169,6 +8335,150 @@ function M.appearanceCss(resolved)
   parts[#parts + 1] = "}"
   return table.concat(parts)
 end
+
+-- F3 (theme editor): a portable theme = the full resolved palette (all 26 color
+-- tokens) plus the non-color knobs, so it round-trips through export/import and can be
+-- saved under a name. exportTheme reads the colors off a RESOLVED appearance, so even a
+-- partial config exports the fully-resolved palette the user actually sees.
+function M.exportTheme(resolved)
+  resolved = (type(resolved) == "table") and resolved or M.resolveAppearance({})
+  local tok = (type(resolved.tokens) == "table") and resolved.tokens or {}
+  local colors = {}
+  for _, pair in ipairs(M.APPEARANCE_VARS) do
+    if appearanceIsHex(tok[pair[1]]) then colors[pair[1]] = tok[pair[1]] end
+  end
+  return {
+    v = 1,
+    scheme = resolved.scheme or "dark",
+    look = resolved.look or "card",
+    font = resolved.font or M.APPEARANCE_DEFAULT_FONT,
+    scale = resolved.scale or 1.0,
+    tileMin = resolved.tileMin or 170,
+    density = resolved.density or "comfortable",
+    reduceMotion = resolved.reduceMotion == true,
+    colors = colors,
+  }
+end
+
+-- importTheme validates EVERY supplied color is a known token + valid hex and returns a
+-- ready-to-apply appearance config (theme stays the base; colors carry the full override),
+-- or { ok=false, error }. It never returns a half-valid palette -- one bad token rejects
+-- the whole import so the live preview can't land in a broken state.
+function M.importTheme(obj)
+  if type(obj) ~= "table" then return { ok = false, error = "not a theme object" } end
+  local known = {}
+  for _, pair in ipairs(M.APPEARANCE_VARS) do known[pair[1]] = true end
+  local colors = (type(obj.colors) == "table") and obj.colors or {}
+  local out, n = {}, 0
+  for k, v in pairs(colors) do
+    if not known[k] then return { ok = false, error = "unknown color token: " .. tostring(k) } end
+    if not appearanceIsHex(v) then return { ok = false, error = "invalid hex for " .. tostring(k) .. ": " .. tostring(v) } end
+    out[k] = v; n = n + 1
+  end
+  if n == 0 then return { ok = false, error = "theme has no colors" } end
+  return { ok = true, appearance = {
+    theme = (type(obj.theme) == "string") and obj.theme or M.APPEARANCE_DEFAULT_THEME,
+    colors = out,
+    font = obj.font, scale = obj.scale, tileMin = obj.tileMin,
+    density = obj.density, reduceMotion = obj.reduceMotion == true,
+  } }
+end
+
+-- F6 (self-diagnostics): turn observed environment FACTS into an ordered list of health
+-- rows { label, status = "ok"|"warn"|"crit"|"info", detail, fix? }. Pure so the whole
+-- classification is unit-tested; the dashboard's FX.doctorStatus gathers the facts (tool
+-- presence, hook inventory, heartbeat age, ledger size) and feeds them in.
+local function fmtBytesShort(n)
+  n = tonumber(n) or 0
+  if n >= 1048576 then return string.format("%.1f MB", n / 1048576) end
+  if n >= 1024 then return string.format("%.0f KB", n / 1024) end
+  return tostring(math.floor(n)) .. " B"
+end
+
+function M.doctorChecks(facts)
+  facts = (type(facts) == "table") and facts or {}
+  local rows = {}
+  local function add(label, status, detail, fix)
+    rows[#rows + 1] = { label = label, status = status, detail = detail, fix = fix }
+  end
+
+  if facts.jq then add("jq installed", "ok", "JSON processing available")
+  else add("jq missing", "crit", "the hook scripts need jq to write session status", "brew install jq") end
+
+  local hw, ht = tonumber(facts.hooksWired) or 0, tonumber(facts.hooksTotal) or 0
+  if ht > 0 and hw >= ht then add("Claude Code hooks wired", "ok", hw .. "/" .. ht .. " hook scripts active")
+  elseif hw > 0 then add("Some hooks not wired", "warn", hw .. "/" .. ht .. " hook scripts active", "run: make setup")
+  else add("Hooks not installed", "crit", "no Shepherd hooks found in settings.json", "run: make setup") end
+
+  if facts.scriptsInstalled == false then
+    add("Hook scripts missing on disk", "crit", "cc-status.sh / cc-approve.sh not in ~/.claude", "run: make setup")
+  elseif facts.scriptsInstalled == true then
+    add("Hook scripts installed", "ok", "cc-status.sh / cc-approve.sh present")
+  end
+
+  local hb = facts.heartbeatAgeSec
+  if hb == nil then add("Panel heartbeat missing", "warn", "the panel hasn't written a heartbeat yet")
+  elseif tonumber(hb) and tonumber(hb) <= 10 then add("Panel live", "ok", "heartbeat " .. math.floor(tonumber(hb)) .. "s ago")
+  else add("Panel heartbeat stale", "warn", "last heartbeat " .. math.floor(tonumber(hb) or 0) .. "s ago") end
+
+  if facts.gateArmed then add("Headless approvals armed", "ok", "tool requests gate through this panel")
+  else add("Gate disarmed", "info", "auto-approve policies apply; arm it in Settings") end
+
+  if facts.ledgerEnabled then
+    add("Audit ledger on", "ok", fmtBytesShort(facts.ledgerBytes) .. " recorded")
+    if (tonumber(facts.ledgerBytes) or 0) > 52428800 then
+      add("Ledger is large", "warn", fmtBytesShort(facts.ledgerBytes) .. " — consider a shorter retention", "lower ledger.retentionDays")
+    end
+  else
+    add("Audit ledger off", "info", "enable it in Settings for history + cost trends")
+  end
+
+  local n = tonumber(facts.sessions) or 0
+  add(n .. " live session" .. ((n == 1) and "" or "s"), "info", "tiles currently tracked")
+  return rows
+end
+
+-- F9: the in-app "Features" list (☰ menu). Plain-language what + why for each headline
+-- capability, so the panel documents itself. Single-sourced here (pure data) so the
+-- overlay renders it and tests can pin the shape. `kind` tags the flavor for the chip.
+M.FEATURES = {
+  { key = "fleet", kind = "core", title = "Fleet dashboard",
+    what = "Every running Claude Code session shows up as a live tile — working, waiting on you, done, or errored.",
+    why = "Like an air-traffic screen for your AI helpers: see who needs attention at a glance instead of hunting through windows." },
+  { key = "gate", kind = "control", title = "Headless approvals",
+    what = "When a session wants to run something risky it pauses, and you approve or deny right from the panel.",
+    why = "You stay in control without editor windows popping up — and if you don't answer, it safely falls back instead of auto-running." },
+  { key = "transcript", kind = "new", title = "Transcript peek",
+    what = "Open a session's tile and read its recent back-and-forth, with a search box — without leaving the dashboard.",
+    why = "Triage what a session is actually doing (\"oh, it's stuck on a file path\") in a glance instead of switching windows." },
+  { key = "theme", kind = "new", title = "Visual theme editor",
+    what = "Pick any of 14 themes, or fine-tune every color with live pickers, then export your palette to a file to keep or share.",
+    why = "The look is yours — and the hard part (the theming engine) was already built, so this is pure customization." },
+  { key = "doctor", kind = "new", title = "Diagnostics",
+    what = "A one-screen health check: are the hooks installed, the gate armed, jq present, the panel heartbeat fresh, the ledger sized OK.",
+    why = "This app has a lot of moving parts in different places — when something silently isn't wired up, this turns a long head-scratch into a glance." },
+  { key = "cost", kind = "new", title = "Cost & token analytics",
+    what = "Per-session and fleet-wide token use and estimated dollar cost, plus a trend chart over time from the audit ledger.",
+    why = "Running many sessions adds up; this shows where the money goes so you can put the cheap work on a cheaper model." },
+  { key = "render", kind = "new", title = "Faster rendering",
+    what = "The grid now updates only the tiles that actually changed each second, instead of rebuilding the whole screen.",
+    why = "Same features, less wasted CPU and battery — it matters most with a big fleet, exactly when you're using it hardest." },
+  { key = "ledger", kind = "insight", title = "Audit ledger & insights",
+    what = "An optional local log of everything that happens, powering fleet insights, a shift report, and risk scoring.",
+    why = "Forensics and trends when you want them, off by default when you don't." },
+  { key = "queue", kind = "automation", title = "Task queue & auto-feed",
+    what = "Line up tasks for a session and have the next one fed automatically when it finishes; route work to whichever session is free.",
+    why = "Keep sessions busy without babysitting each handoff." },
+  { key = "recover", kind = "automation", title = "Auto-respawn & auto-continue",
+    what = "A stuck session can be respawned, and one frozen on an API error can be nudged to continue — within safe retry budgets.",
+    why = "Long-running fleets heal themselves instead of silently stalling overnight." },
+  { key = "spawn", kind = "core", title = "Spawn new sessions",
+    what = "Launch a new Claude Code session into any project — choose editor, permission mode, model/provider, and a first task.",
+    why = "Start work from the dashboard, with presets, instead of wiring up each terminal by hand." },
+  { key = "lint", kind = "quality", title = "Lint guard (under the hood)",
+    what = "A developer check that runs static analysis plus a guard against a specific timer bug this app has hit before.",
+    why = "Keeps the app reliable over time by catching whole classes of mistakes before they ship." },
+}
 
 -- ---- Cold-start spawn ladder: the bounded poll decision (pure) --------------
 -- The new-project extension ladder polls until the project window appears, then

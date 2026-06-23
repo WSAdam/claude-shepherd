@@ -6070,5 +6070,168 @@ do
   eq("appearance: junk tileMin string -> 170", core.resolveAppearance({ tileMin = "big" }).tileMin, 170)
 end
 
+-- F7: cost summary + daily series from cumulative usage_snapshot events
+do
+  local DAY = 86400
+  local evs = {
+    { type="usage_snapshot", session_id="A", ts=0*DAY+100, real=100, estCostUsd=1.0, name="alpha", model="opus" },
+    { type="usage_snapshot", session_id="A", ts=1*DAY+100, real=300, estCostUsd=3.0, name="alpha", model="opus" },
+    { type="usage_snapshot", session_id="B", ts=1*DAY+200, real=50,  estCostUsd=0.5, name="beta",  model="sonnet" },
+    { type="decision",       session_id="A", ts=1*DAY+300, outcome="allow" },  -- ignored
+  }
+  local sum = core.costSummary(evs)
+  eq("costSummary: 2 sessions", sum.sessions, 2)
+  eq("costSummary: latest-cumulative real (300+50)", sum.real, 350)
+  check("costSummary: usd sums latest (3.0+0.5)", math.abs(sum.usd - 3.5) < 1e-9)
+  eq("costSummary: perSession sorted by $ (alpha first)", sum.perSession[1].name, "alpha")
+  eq("costSummary: empty -> 0 sessions", core.costSummary({}).sessions, 0)
+
+  local series = core.costSeries(evs, { days = 2, tzOffset = 0, now = 1*DAY + 500 })
+  eq("costSeries: 2 day buckets", #series, 2)
+  eq("costSeries: day0 real delta (A from 0)", series[1].real, 100)
+  eq("costSeries: day1 real delta (A +200, B +50)", series[2].real, 250)
+  check("costSeries: day1 usd delta (~2.5)", math.abs(series[2].usd - 2.5) < 1e-9)
+
+  local reset = {
+    { type="usage_snapshot", session_id="C", ts=0*DAY+50, real=500, estCostUsd=5.0 },
+    { type="usage_snapshot", session_id="C", ts=1*DAY+50, real=20,  estCostUsd=0.2 },  -- transcript reset
+  }
+  local rs = core.costSeries(reset, { days = 2, tzOffset = 0, now = 1*DAY + 100 })
+  check("costSeries: reset day clamps to >= 0 (no negative)", rs[2].real >= 0)
+  eq("costSeries: empty -> N day rows", #core.costSeries({}, { days = 3, now = 5*DAY }), 3)
+end
+
+-- F6: doctor health classifier
+do
+  local function findRow(rows, statusWanted, labelSub)
+    for _, r in ipairs(rows) do
+      if (not statusWanted or r.status == statusWanted)
+         and (not labelSub or r.label:find(labelSub, 1, true)) then return r end
+    end
+    return nil
+  end
+  local function anyStatus(rows, s) for _, r in ipairs(rows) do if r.status == s then return true end end return false end
+
+  local healthy = core.doctorChecks({ jq=true, hooksWired=3, hooksTotal=3, scriptsInstalled=true,
+    heartbeatAgeSec=2, gateArmed=true, ledgerEnabled=true, ledgerBytes=1024, sessions=2 })
+  check("doctorChecks: healthy env -> no crit/warn", not anyStatus(healthy, "crit") and not anyStatus(healthy, "warn"))
+  check("doctorChecks: jq present -> ok", findRow(healthy, "ok", "jq") ~= nil)
+
+  local sick = core.doctorChecks({ jq=false, hooksWired=0, hooksTotal=3, scriptsInstalled=false,
+    heartbeatAgeSec=nil, gateArmed=false, ledgerEnabled=false, sessions=0 })
+  check("doctorChecks: jq missing -> crit + brew fix",
+        (function() local r=findRow(sick,"crit","jq"); return r and r.fix and r.fix:find("brew") ~= nil end)())
+  check("doctorChecks: no hooks -> crit", findRow(sick, "crit", "Hooks not installed") ~= nil)
+  check("doctorChecks: missing heartbeat -> warn", findRow(sick, "warn", "heartbeat") ~= nil)
+  check("doctorChecks: gate off -> info (not an alarm)", findRow(sick, "info", "Gate disarmed") ~= nil)
+
+  local partial = core.doctorChecks({ jq=true, hooksWired=1, hooksTotal=3, scriptsInstalled=true,
+    heartbeatAgeSec=120, ledgerEnabled=true, ledgerBytes=60*1024*1024, sessions=1 })
+  check("doctorChecks: partial hooks -> warn", findRow(partial, "warn", "Some hooks") ~= nil)
+  check("doctorChecks: stale heartbeat -> warn", findRow(partial, "warn", "stale") ~= nil)
+  check("doctorChecks: big ledger -> warn", findRow(partial, "warn", "large") ~= nil)
+  check("doctorChecks: 1 session -> singular label", findRow(partial, "info", "1 live session") ~= nil)
+  check("doctorChecks: non-table facts safe", #core.doctorChecks(nil) > 0)
+end
+
+-- F9: features list shape
+do
+  check("FEATURES: non-empty list", type(core.FEATURES) == "table" and #core.FEATURES >= 8)
+  local ok = true
+  for _, f in ipairs(core.FEATURES) do
+    if type(f.title) ~= "string" or type(f.what) ~= "string" or type(f.why) ~= "string" then ok = false end
+  end
+  check("FEATURES: every entry has title/what/why", ok)
+  local keys = {}; for _, f in ipairs(core.FEATURES) do keys[f.key] = true end
+  check("FEATURES: covers the new features (theme/transcript/doctor/cost/render)",
+        keys.theme and keys.transcript and keys.doctor and keys.cost and keys.render)
+end
+
+-- F4: transcript peek (user + assistant rows, chronological, noise filtered)
+do
+  local function L(t) return core.json.encode(t) end
+  local lines = {
+    L({ type="user", message={ role="user", content="first prompt" } }),
+    L({ type="assistant", message={ role="assistant", content={ { type="text", text="hi there" } } } }),
+    L({ type="user", isMeta=true, message={ role="user", content="ide file open" } }),                 -- meta -> skip
+    L({ type="user", message={ role="user", content={ { type="tool_result", content="x" } } } }),      -- tool-result -> skip
+    L({ type="assistant", message={ role="assistant", content={ { type="tool_use", name="Bash" } } } }), -- no text -> skip
+    L({ type="assistant", message={ role="assistant", content={ { type="text", text="done now" } } } }),
+  }
+  local text = table.concat(lines, "\n")
+  local rows = core.transcriptPeek(text, { n = 40 })
+  eq("transcriptPeek: keeps real turns only (3)", #rows, 3)
+  eq("transcriptPeek: chronological (first = user prompt)", rows[1].role, "user")
+  eq("transcriptPeek: user text", rows[1].text, "first prompt")
+  eq("transcriptPeek: assistant text", rows[2].text, "hi there")
+  eq("transcriptPeek: last row = final assistant turn", rows[3].text, "done now")
+
+  local capped = core.transcriptPeek(text, { n = 1 })
+  eq("transcriptPeek: n caps to newest", #capped, 1)
+  eq("transcriptPeek: newest kept on cap", capped[1].text, "done now")
+
+  local long = core.json.encode({ type="assistant", message={ role="assistant", content={ { type="text", text=string.rep("x", 50) } } } })
+  local tr = core.transcriptPeek(long, { maxLen = 10 })
+  check("transcriptPeek: truncates long text (+ ellipsis)", #tr[1].text < 20 and tr[1].text:find("\226\128\166") ~= nil)
+
+  eq("transcriptPeek: empty -> {}", #core.transcriptPeek("", {}), 0)
+  eq("transcriptPeek: nil -> {}", #core.transcriptPeek(nil), 0)
+  eq("transcriptPeek: corrupt line skipped", #core.transcriptPeek("{not json\n" .. lines[1], {}), 1)
+end
+
+-- F3: theme export / import round-trip + validation
+do
+  local nvars = #core.APPEARANCE_VARS
+  local exp = core.exportTheme(core.resolveAppearance({ theme = "dracula" }))
+  local cnt = 0; for _ in pairs(exp.colors) do cnt = cnt + 1 end
+  eq("exportTheme: exports every color token", cnt, nvars)
+  eq("exportTheme: dracula accent present", exp.colors.accent, "#bd93f9")
+  eq("exportTheme: carries scheme", exp.scheme, "dark")
+
+  local imp = core.importTheme(exp)
+  check("importTheme: valid theme -> ok", imp.ok == true)
+  eq("importTheme: round-trips accent", imp.appearance.colors.accent, "#bd93f9")
+  eq("import->resolve reproduces accent", core.resolveAppearance(imp.appearance).tokens.accent, "#bd93f9")
+
+  check("importTheme: rejects a bad hex (whole import fails, no half-valid palette)",
+        core.importTheme({ colors = { accent = "#bd93f9", bg = "nothex" } }).ok == false)
+  check("importTheme: rejects an unknown token",
+        core.importTheme({ colors = { nope = "#ffffff" } }).ok == false)
+  check("importTheme: rejects empty colors", core.importTheme({ colors = {} }).ok == false)
+  check("importTheme: non-table rejected", core.importTheme("x").ok == false)
+end
+
+-- F8: incremental render signatures
+do
+  local A = { key = "k1", status = "working", name = "alpha", since = 100 }
+  local B = { key = "k1", name = "alpha", since = 100, status = "working" } -- same data, different key order
+  eq("tileSignature: key-order independent (stable canonical form)",
+     core.tileSignature(A), core.tileSignature(B))
+  eq("tileSignature: identical item -> identical sig",
+     core.tileSignature(A), core.tileSignature({ key = "k1", status = "working", name = "alpha", since = 100 }))
+  check("tileSignature: a changed field changes the sig",
+     core.tileSignature(A) ~= core.tileSignature({ key = "k1", status = "idle", name = "alpha", since = 100 }))
+  check("tileSignature: a changed key changes the sig",
+     core.tileSignature(A) ~= core.tileSignature({ key = "k2", status = "working", name = "alpha", since = 100 }))
+  check("tileSignature: 'since' is part of the sig (status reset rebuilds)",
+     core.tileSignature(A) ~= core.tileSignature({ key = "k1", status = "working", name = "alpha", since = 200 }))
+  check("tileSignature: nested pending.summary captured",
+     core.tileSignature({ key="k", pending={ summary="rm x" } }) ~=
+     core.tileSignature({ key="k", pending={ summary="rm y" } }))
+
+  local L1  = { { key="a", status="idle" }, { key="b", status="working" } }
+  local L1b = { { key="a", status="idle" }, { key="b", status="working" } }
+  eq("gridSignature: identical lists -> identical sig", core.gridSignature(L1), core.gridSignature(L1b))
+  check("gridSignature: reordering tiles changes the sig",
+     core.gridSignature(L1) ~= core.gridSignature({ { key="b", status="working" }, { key="a", status="idle" } }))
+  check("gridSignature: adding a tile changes the sig",
+     core.gridSignature(L1) ~= core.gridSignature({ { key="a", status="idle" }, { key="b", status="working" }, { key="c", status="done" } }))
+  check("gridSignature: removing a tile changes the sig",
+     core.gridSignature(L1) ~= core.gridSignature({ { key="a", status="idle" } }))
+  check("gridSignature: a tile content change changes the sig",
+     core.gridSignature(L1) ~= core.gridSignature({ { key="a", status="error" }, { key="b", status="working" } }))
+  eq("gridSignature: non-table -> empty", core.gridSignature(nil), "")
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

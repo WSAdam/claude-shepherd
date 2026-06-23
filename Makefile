@@ -8,6 +8,20 @@ APP_DIR ?= $(HOME)/Applications
 test:
 	@bash tests/run.sh
 
+# Static analysis: luacheck (if installed) on the two production Lua files + a guard
+# against GC-unsafe (unretained) hs.timer.doAfter/doEvery. Degrades gracefully if
+# luacheck is absent (like `make doctor` does for rg/fd). Wired into `deploy` so
+# nothing ships that fails lint. Install luacheck: `brew install luacheck`.
+.PHONY: lint
+lint:
+	@if command -v luacheck >/dev/null 2>&1; then \
+		luacheck cc-core.lua claude-dashboard.lua || exit 1; \
+	else \
+		echo "⚠️  luacheck not installed — skipping static analysis (brew install luacheck)"; \
+	fi
+	@bash tests/lint-timers.sh
+	@luac -p cc-core.lua claude-dashboard.lua && echo "✅ lint: luac syntax OK"
+
 # Deploy the dashboard + its logic module to Hammerspoon. The running config
 # dofiles ~/.hammerspoon/claude-dashboard.lua, so edits in this repo aren't live
 # until they're copied. Run this after every change (then `make reload`).
@@ -41,9 +55,9 @@ doctor tools:
 reload:
 	@hs -c "_G.__ccReloadTimer = hs.timer.doAfter(0.4, function() hs.reload() end)" >/dev/null 2>&1 && echo "✅ Hammerspoon reloading (config re-read)" || echo "⚠️  'hs' CLI not available — reload from the Hammerspoon menu"
 
-# Test, deploy, then reload — one shot.
+# Lint, test, deploy, then reload — one shot.
 .PHONY: deploy
-deploy: test install reload
+deploy: lint test install reload
 
 # Build the standalone Shepherd.app Dock launcher (F6). Hand-rolled bundle (a
 # shell stub that opens the hammerspoon:// toggle URL) — NOT an osacompile
