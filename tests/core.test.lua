@@ -6099,6 +6099,18 @@ do
   local rs = core.costSeries(reset, { days = 2, tzOffset = 0, now = 1*DAY + 100 })
   check("costSeries: reset day clamps to >= 0 (no negative)", rs[2].real >= 0)
   eq("costSeries: empty -> N day rows", #core.costSeries({}, { days = 3, now = 5*DAY }), 3)
+
+  -- carry-in: a session that existed BEFORE the window must diff its first in-window day
+  -- against its pre-window cumulative, NOT from 0 (else pre-window spend is over-attributed
+  -- to the first bucket). The Cost overlay passes the FULL ledger (not a windowed slice), so
+  -- cumAt() finds the pre-window baseline. This pins that behavior.
+  local carryin = {
+    { type="usage_snapshot", session_id="D", ts=-1*DAY+50, real=1000, estCostUsd=10.0 },  -- before window
+    { type="usage_snapshot", session_id="D", ts=0*DAY+50, real=1050, estCostUsd=10.5 },    -- first in-window day
+  }
+  local ci = core.costSeries(carryin, { days = 2, tzOffset = 0, now = 1*DAY + 100 })
+  eq("costSeries: pre-window session diffs against carry-in (50, not 1050)", ci[1].real, 50)
+  check("costSeries: pre-window usd carry-in (~0.5)", math.abs(ci[1].usd - 0.5) < 1e-9)
 end
 
 -- F6: doctor health classifier
@@ -6151,7 +6163,7 @@ end
 do
   local function L(t) return core.json.encode(t) end
   local lines = {
-    L({ type="user", message={ role="user", content="first prompt" } }),
+    L({ type="user", timestamp="2026-06-23T00:00:00Z", message={ role="user", content="first prompt" } }),
     L({ type="assistant", message={ role="assistant", content={ { type="text", text="hi there" } } } }),
     L({ type="user", isMeta=true, message={ role="user", content="ide file open" } }),                 -- meta -> skip
     L({ type="user", message={ role="user", content={ { type="tool_result", content="x" } } } }),      -- tool-result -> skip
@@ -6165,6 +6177,8 @@ do
   eq("transcriptPeek: user text", rows[1].text, "first prompt")
   eq("transcriptPeek: assistant text", rows[2].text, "hi there")
   eq("transcriptPeek: last row = final assistant turn", rows[3].text, "done now")
+  eq("transcriptPeek: carries the source timestamp onto the row", rows[1].ts, "2026-06-23T00:00:00Z")
+  check("transcriptPeek: a line without a timestamp -> ts nil (no error)", rows[2].ts == nil)
 
   local capped = core.transcriptPeek(text, { n = 1 })
   eq("transcriptPeek: n caps to newest", #capped, 1)
