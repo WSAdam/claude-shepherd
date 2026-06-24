@@ -5309,6 +5309,9 @@ local HTML = [[
   .ds-dim { color:var(--dim); font-style:italic; }
   /* DR1 Agents tab: subagent fan-out rows */
   .sa-head { font-size:11px; color:var(--muted); margin:2px 0 6px; }
+  .sa-grp { font-size:10px; color:var(--accent-text); text-transform:uppercase; letter-spacing:.04em;
+            margin:10px 0 4px; padding-bottom:3px; border-bottom:1px solid var(--border-weak); }
+  .sa-grp:first-of-type { margin-top:2px; }
   .sa-row { display:flex; align-items:center; gap:6px; padding:5px 6px; border-radius:6px; cursor:pointer; }
   .sa-row:hover, .sa-row.open { background:var(--surface-2); }
   .sa-dot { width:8px; height:8px; border-radius:50%; background:#3a3d49; flex:0 0 auto; }
@@ -7115,6 +7118,19 @@ local HTML = [[
     // Appearance theme/overrides) so the JS-driven detail dot can't drift from the
     // CSS .s-* classes. KEEP these keys == cc-core APPEARANCE status mapping.
     var COLORS = { idle:"var(--st-idle)", working:"var(--st-working)", done:"var(--st-done)", approval:"var(--st-approval)", error:"var(--st-error)" };
+    // A done/idle session with live background agents (a Workflow fleet or delegated
+    // subagents still writing under subagents/) is NOT waiting on you -- the main turn
+    // ended but work continues underneath. Surface THAT as the primary state so
+    // "Ready for you" can't misread as "your move, follow up now". Display-only:
+    // it.status is left untouched (Stop hooks, auto-continue, notifications, queue
+    // auto-feed all key off the real status). tileHtml + renderDetail BOTH route
+    // through these so the dot colour and the words never drift apart.
+    function bgRunning(it){ return !!(it && it.bg_active && (it.status === "done" || it.status === "idle")); }
+    function effStatus(it){ return bgRunning(it) ? "working" : ((it && it.status) || "idle"); }
+    function statusWords(it){
+      if(bgRunning(it)){ var n = (it && it.bg_count) || 0; return "Running " + n + " agent" + (n === 1 ? "" : "s"); }
+      var st = (it && it.status) || "idle"; return LABELS[st] || st;
+    }
     // Appearance themes/defaults/var-list, single-sourced from cc-core APPEARANCE_*
     // (injected). Drives the Appearance tab's live preview (applyAppearance twin).
     var APPEARANCE = __APPEARANCE_THEMES__;
@@ -8895,23 +8911,44 @@ local HTML = [[
       if(!agents.length){ box.innerHTML = '<div class="tl-empty">No subagents — this session hasn\'t delegated to a subagent or run a workflow.</div>'; return; }
       var html = '<div class="sa-head">' + (tree.runningCount ? ('⚙ ' + tree.runningCount + ' running · ') : '')
                + agents.length + ' subagent' + (agents.length === 1 ? '' : 's') + '</div>';
+      // Group workflow agents under a per-workflow header (a Workflow fan-out shares
+      // one wf_<id>) with a running/total rollup; standalone subagents get their own
+      // group. mtime order (newest-first) is preserved within each group.
+      var groups = [], byG = {};
       agents.forEach(function(ag){
+        var gid = ag.wfId || "_solo";
+        var grp = byG[gid];
+        if(!grp){ grp = { wf: ag.wfId || null, agents: [] }; byG[gid] = grp; groups.push(grp); }
+        grp.agents.push(ag);
+      });
+      function rowHtml(ag){
         var open = !!SUB_OPEN[ag.name];
-        html += '<div class="sa-row' + (open ? ' open' : '') + '" data-name="' + esc(ag.name || '') + '" onclick="toggleSubagent(this)">'
+        var h = '<div class="sa-row' + (open ? ' open' : '') + '" data-name="' + esc(ag.name || '') + '" onclick="toggleSubagent(this)">'
               + '<span class="sa-dot' + (ag.running ? ' run' : '') + '"></span>'
               + '<span class="sa-name">' + esc(ag.label || ag.agentId || 'subagent') + '</span>'
-              + (ag.wfId ? '<span class="sa-wf">' + esc(ag.wfId) + '</span>' : '')
               + (ag.running ? '<span class="sa-badge">running</span>' : '')
               + '</div>';
         if(!open){
-          html += ag.lastLine ? '<div class="sa-doing">' + esc(ag.lastLine) + '</div>'
-                              : '<div class="sa-doing sa-idle">(no output captured yet)</div>';
+          h += ag.lastLine ? '<div class="sa-doing">' + esc(ag.lastLine) + '</div>'
+                           : '<div class="sa-doing sa-idle">(no output captured yet)</div>';
         } else {
           var det = SUB_DETAIL[ag.name];
-          if(det === undefined){ html += '<div class="sa-detail"><div class="tl-empty">Loading activity…</div></div>'; }
-          else if(!det.length){ html += '<div class="sa-detail"><div class="tl-empty">No assistant output captured yet.</div></div>'; }
-          else { html += '<div class="sa-detail"><pre class="tl-pre">' + esc(det.join("\n")) + '</pre></div>'; }
+          if(det === undefined){ h += '<div class="sa-detail"><div class="tl-empty">Loading activity…</div></div>'; }
+          else if(!det.length){ h += '<div class="sa-detail"><div class="tl-empty">No assistant output captured yet.</div></div>'; }
+          else { h += '<div class="sa-detail"><pre class="tl-pre">' + esc(det.join("\n")) + '</pre></div>'; }
         }
+        return h;
+      }
+      groups.forEach(function(grp){
+        if(grp.wf){
+          var runN = 0; grp.agents.forEach(function(a){ if(a.running) runN++; });
+          html += '<div class="sa-grp">⚙ Workflow <span class="sa-wf">' + esc(grp.wf) + '</span> · '
+                + grp.agents.length + ' agent' + (grp.agents.length === 1 ? '' : 's')
+                + ' · ' + (runN ? (runN + ' running') : 'idle') + '</div>';
+        } else if(groups.length > 1){
+          html += '<div class="sa-grp">Subagents · ' + grp.agents.length + '</div>';
+        }
+        grp.agents.forEach(function(ag){ html += rowHtml(ag); });
       });
       box.innerHTML = html;
     }
@@ -9294,11 +9331,12 @@ local HTML = [[
       if(!it){ d.classList.remove("show"); selectedKey=null; return; }
       d.classList.add("show");
       var st = it.status || "idle";
-      document.getElementById("d-dot").style.setProperty("--dc", COLORS[st] || "var(--st-idle)");
-      document.getElementById("d-dot").style.background = COLORS[st] || "var(--st-idle)";
+      var est = effStatus(it);   // background-aware (see bgRunning)
+      document.getElementById("d-dot").style.setProperty("--dc", COLORS[est] || "var(--st-idle)");
+      document.getElementById("d-dot").style.background = COLORS[est] || "var(--st-idle)";
       document.getElementById("d-name").textContent = it.label || it.name || "?";
       document.getElementById("d-status").textContent =
-        (LABELS[st] || st) + (it.since ? " - " + fmtAge(it.since) : "") + (it.stale ? " - stale" : "");
+        statusWords(it) + (it.since ? " - " + fmtAge(it.since) : "") + (it.stale && !bgRunning(it) ? " - stale" : "");
       var pend = document.getElementById("d-pending");
       if(it.pending && it.pending.summary){
         pend.textContent = "Wants: " + it.pending.summary + (it.gate === "waiting" ? "  (hands-free approve)" : "");
@@ -11168,8 +11206,9 @@ local HTML = [[
       // R2-17 (defense-in-depth; core.parseStatusList already clamps status to the
       // known set): sanitize the class token and escape the label fallback so an
       // unknown status can never reach this innerHTML sink raw.
-      var stCls = /^[a-z]+$/.test(st) ? st : "idle";
-      var label = LABELS[st] || esc(st);
+      var est = effStatus(it);   // background-aware: done/idle + live agents -> "working"
+      var stCls = /^[a-z]+$/.test(est) ? est : "idle";
+      var label = esc(statusWords(it));
       // The elapsed-in-status age (2s/13s/11h) rides the status line -- right of the dot,
       // before the status words -- instead of taking its own meta row.
       var age = it.since ? fmtAge(it.since) : "";
@@ -11191,7 +11230,7 @@ local HTML = [[
       if(it.hung){ meta = (meta ? meta + " · " : "") + "⏳ stalled"; }
       if(it.looping){ meta = (meta ? meta + " · " : "") + "⟳ looping"; }   // L5 loop watchdog
       if(it.churn){ meta = (meta ? meta + " · " : "") + "♻️" + it.churn; }   // respawn/clear churn today
-      var cls = "tile s-" + stCls + (it.stale ? " stale" : "") + (it.collide ? " collide" : "") + (it.hung ? " hung" : "") + (it.escalate ? " escalate" : "") + (it.key === selectedKey ? " sel" : "");
+      var cls = "tile s-" + stCls + (it.stale && !bgRunning(it) ? " stale" : "") + (it.collide ? " collide" : "") + (it.hung ? " hung" : "") + (it.escalate ? " escalate" : "") + (it.key === selectedKey ? " sel" : "");
       return '<div class="'+cls+'" data-key="'+esc(it.key)+'" onclick="selectTile(\''+esc(it.key)+'\')" ondblclick="send(\'focus\',\''+esc(it.key)+'\')" oncontextmenu="showCtx(event,\''+esc(it.key)+'\')" title="Double-click to jump · right-click for more">'
            + '<span class="dot"></span>'
            + '<span class="name">'+esc(it.label || it.autoTitle || it.name)+(it.group ? ' <span class="gtag">🏷 '+esc(it.group)+'</span>' : '')+'</span>'

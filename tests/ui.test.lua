@@ -1864,6 +1864,36 @@ do
         src:find("feat-cat", 1, true) ~= nil and src:find("f.cat !== curCat", 1, true) ~= nil)
 end
 
+-- ---- Background-aware status + Agents-tab workflow grouping ----
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  -- A done/idle session with live background agents must NOT read as "Ready for you".
+  check("bg-status: background-aware status helpers defined",
+        src:find("function bgRunning(it)", 1, true) ~= nil
+        and src:find("function effStatus(it)", 1, true) ~= nil
+        and src:find("function statusWords(it)", 1, true) ~= nil)
+  check("bg-status: override only fires for done/idle (real status untouched)",
+        src:find('it.bg_active && (it.status === "done" || it.status === "idle")', 1, true) ~= nil)
+  check("bg-status: running label counts the background agents",
+        src:find('"Running " + n + " agent"', 1, true) ~= nil)
+  check("bg-status: tile dot + words route through the helpers",
+        src:find("var est = effStatus(it)", 1, true) ~= nil
+        and src:find("var label = esc(statusWords(it))", 1, true) ~= nil)
+  check("bg-status: detail header dot + words route through the helpers",
+        src:find("COLORS[est]", 1, true) ~= nil
+        and src:find("statusWords(it) + (it.since", 1, true) ~= nil)
+  check("bg-status: stale suffix/dimming suppressed while background-running",
+        src:find("it.stale && !bgRunning(it)", 1, true) ~= nil)
+  -- Agents tab groups the Workflow fan-out under one header with a running/total rollup.
+  check("agents-tab: subagent rows grouped by workflow",
+        src:find("sa-grp", 1, true) ~= nil and src:find("byG[gid]", 1, true) ~= nil)
+  check("agents-tab: workflow group header shows a running/total rollup",
+        src:find("runN + ' running'", 1, true) ~= nil
+        and src:find("grp.agents.length + ' agent'", 1, true) ~= nil)
+end
+
 -- ---- F4: transcript peek detail tab ----
 do
   local f = io.open(ROOT .. "claude-dashboard.lua", "r")

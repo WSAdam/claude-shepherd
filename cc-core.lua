@@ -7875,9 +7875,10 @@ function M.subagentsDir(transcriptPath)
   return base .. "/subagents"
 end
 
--- Parse a subagent transcript's FIRST line -> { agentId, slug }. nil for
--- non-JSON / no agentId. The slug is a readable label Claude Code derives from
--- the agent's first prompt.
+-- Parse a subagent transcript's FIRST line -> { agentId, slug, prompt }. nil for
+-- non-JSON / no agentId. The slug is an auto-generated fleet name; `prompt` is the
+-- agent's first user message (the actual task it was handed) -- a much better label,
+-- since workflow agents all share a random slug ("great-prancy-hippo").
 function M.subagentMeta(firstLine)
   if type(firstLine) ~= "string" or not firstLine:find("^%s*{") then return nil end
   local okj, obj = pcall(function() return M.json.decode(firstLine) end)
@@ -7885,12 +7886,35 @@ function M.subagentMeta(firstLine)
   local id = obj.agentId or obj.agent_id
   if not id or tostring(id) == "" then return nil end
   local slug = obj.slug
-  return { agentId = tostring(id), slug = (type(slug) == "string" and slug ~= "") and slug or nil }
+  -- The first line is the agent's first user message; pull its text as the prompt.
+  -- content is either a bare string or an array of blocks -- take the first text block.
+  local prompt
+  local msg = obj.message
+  if type(msg) == "table" then
+    local c = msg.content
+    if type(c) == "string" then prompt = c
+    elseif type(c) == "table" then
+      for _, blk in ipairs(c) do
+        if type(blk) == "table" and blk.type == "text" and type(blk.text) == "string" and blk.text ~= "" then
+          prompt = blk.text; break
+        end
+      end
+    end
+  end
+  return { agentId = tostring(id), slug = (type(slug) == "string" and slug ~= "") and slug or nil,
+           prompt = (type(prompt) == "string" and prompt ~= "") and prompt or nil }
 end
 
--- A display label from a slug ("can-you-review-if-swirling-otter" -> "can you
--- review if swirling otter"); falls back to a short agentId. Pure.
-function M.subagentLabel(slug, agentId)
+-- A display label for a subagent row. Prefers the agent's first PROMPT (the real
+-- task) -- collapsed to one line and truncated -- because the auto-slug is often a
+-- random fleet name shared across a whole Workflow fan-out. Falls back to a humanized
+-- slug, then a short agentId. Pure.
+function M.subagentLabel(slug, agentId, prompt)
+  if type(prompt) == "string" then
+    local s = prompt:gsub("%s+", " "):gsub("^ +", ""):gsub(" +$", "")
+    if #s > 80 then s = s:sub(1, 80):gsub("%s+%S*$", "") .. "…" end
+    if s ~= "" then return s end
+  end
   if type(slug) == "string" and slug ~= "" then
     return (slug:gsub("%-+", " "))
   end
@@ -7932,7 +7956,7 @@ function M.subagentTree(files, now, opts)
       local running = (now > 0) and (now - mtime <= win) or false
       local lastLine = f.tail and M.transcriptSnippet(f.tail, opts.snippetLen or 120) or nil
       out.agents[#out.agents + 1] = {
-        agentId = agentId, slug = slug, label = M.subagentLabel(slug, agentId),
+        agentId = agentId, slug = slug, label = M.subagentLabel(slug, agentId, meta and meta.prompt),
         kind = wfId and "workflow" or "agent", wfId = wfId, name = name,
         mtime = mtime, running = running, lastLine = lastLine,
       }

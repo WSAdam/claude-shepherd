@@ -5607,10 +5607,28 @@ do
   eq("subagentMeta: slug", meta and meta.slug, "do-a-full-scan-sunny-panda")
   eq("subagentMeta: nil for non-json", core.subagentMeta("not json"), nil)
   eq("subagentMeta: nil when no agentId", core.subagentMeta(core.json.encode({ type = "user" })), nil)
+  -- prompt: the agent's first user message (the real task), as a string or a text block
+  eq("subagentMeta: prompt from string content",
+     core.subagentMeta(core.json.encode({ agentId = "z1", message = { role = "user", content = "Author the spec" } })).prompt,
+     "Author the spec")
+  eq("subagentMeta: prompt from first text block",
+     core.subagentMeta(core.json.encode({ agentId = "z2", message = { content = { { type = "text", text = "Review auth.ts" } } } })).prompt,
+     "Review auth.ts")
+  eq("subagentMeta: prompt nil when absent",
+     core.subagentMeta(core.json.encode({ agentId = "z3", slug = "s" })).prompt, nil)
 
   eq("subagentLabel: humanizes slug",
      core.subagentLabel("can-you-review-if-swirling-otter", "x"), "can you review if swirling otter")
   eq("subagentLabel: falls back to short id", core.subagentLabel(nil, "a382c84e9550c1460"), "agent a382c84e")
+  eq("subagentLabel: prefers the prompt over the slug",
+     core.subagentLabel("random-prancy-hippo", "x", "Verify the missing-password coercion path"),
+     "Verify the missing-password coercion path")
+  eq("subagentLabel: collapses whitespace in the prompt",
+     core.subagentLabel(nil, "x", "  do   a\nthing  "), "do a thing")
+  check("subagentLabel: truncates a long prompt with an ellipsis", (function()
+    local lbl = core.subagentLabel(nil, "x", string.rep("word ", 40))
+    return #lbl <= 84 and lbl:sub(-3) == "…"
+  end)())
 
   local now = 100000
   local tailA = core.json.encode(
@@ -5633,6 +5651,14 @@ do
   eq("subagentTree: kind=workflow", tree.agents[2].kind, "workflow")
   check("subagentTree: workflows map counts",
         tree.workflows["wf_abc123"] ~= nil and tree.workflows["wf_abc123"].count == 1)
+  -- a workflow agent's label comes from its first prompt, not its (random) fleet slug
+  local treeP = core.subagentTree({
+    { name = "workflows/wf_x/agent-p1.jsonl", mtime = now,
+      firstLine = core.json.encode({ agentId = "p1", slug = "great-prancy-hippo",
+        message = { content = { { type = "text", text = "Author a new OpenAPI spec file" } } } }) },
+  }, now, { activeWindow = 45 })
+  eq("subagentTree: label uses the agent's prompt, not the slug",
+     treeP.agents[1].label, "Author a new OpenAPI spec file")
 
   local function al(t) return core.json.encode({ type = "assistant", message = { content = { { type = "text", text = t } } } }) end
   local recentTail = al("first step") .. "\n" .. core.json.encode({ type = "user", message = { content = "x" } }) .. "\n" .. al("second step")
@@ -6166,6 +6192,18 @@ do
     end
   end
   check("FEATURES: categories are contiguous (one header each)", contiguous)
+  -- The overlay (ccFeatures) emits headers in FIRST-SEEN order, not from
+  -- FEATURE_CATEGORIES -- so the two are independent sources of truth that could
+  -- silently drift. Pin the pairing: first-seen category sequence must equal
+  -- FEATURE_CATEGORIES exactly (length too -- catches a declared category with no
+  -- entries, or entries whose category isn't declared).
+  local order, ordSeen = {}, {}
+  for _, f in ipairs(core.FEATURES) do
+    if f.cat and not ordSeen[f.cat] then ordSeen[f.cat] = true; order[#order + 1] = f.cat end
+  end
+  local orderOk = #order == #core.FEATURE_CATEGORIES
+  for i = 1, #core.FEATURE_CATEGORIES do if order[i] ~= core.FEATURE_CATEGORIES[i] then orderOk = false end end
+  check("FEATURES: first-seen category order matches FEATURE_CATEGORIES (render contract)", orderOk)
   local keys = {}; for _, f in ipairs(core.FEATURES) do keys[f.key] = true end
   check("FEATURES: covers the new features (theme/transcript/doctor/cost/render)",
         keys.theme and keys.transcript and keys.doctor and keys.cost and keys.render)

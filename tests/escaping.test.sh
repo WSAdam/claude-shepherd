@@ -38,13 +38,16 @@ raw_sinks="$(grep -nE "$SINK_RE" "$DASH" || true)"
 assert_eq "no user field concatenated RAW into panel HTML (must be esc()'d)" "" "$raw_sinks"
 
 # R2-17: the tile status reaches innerHTML twice (class token + label). The class
-# must use a sanitized token, and the label fallback must be esc()'d -- a hostile
-# bridged status string is also clamped in core.parseStatusList, but pin both JS
-# sinks so neither can silently re-open.
-assert_eq "tile status class uses a sanitized token (not raw st)" "yes" \
-  "$(has 'var stCls = /^[a-z]+$/.test(st) ? st : "idle";')"
-assert_eq "tile status class concatenates stCls, not raw st" "yes" "$(has '"tile s-" + stCls')"
-assert_eq "tile status label fallback is esc()'d" "yes" "$(has 'LABELS[st] || esc(st)')"
+# must use a sanitized token, and the label must be esc()'d -- a hostile bridged
+# status string is also clamped in core.parseStatusList, but pin both JS sinks so
+# neither can silently re-open. The token is `est` (effStatus: the background-aware
+# status -- done/idle + live agents -> "working"), still regex-sanitized here; the
+# label routes through esc(statusWords(it)) (statusWords returns a safe literal or the
+# raw status, which this esc() wraps before it reaches innerHTML).
+assert_eq "tile status class uses a sanitized token (not raw status)" "yes" \
+  "$(has 'var stCls = /^[a-z]+$/.test(est) ? est : "idle";')"
+assert_eq "tile status class concatenates stCls, not raw status" "yes" "$(has '"tile s-" + stCls')"
+assert_eq "tile status label is esc()'d at the sink" "yes" "$(has 'var label = esc(statusWords(it));')"
 
 # Positive control: prove the grep actually FIRES on a known-bad sink, so a broken regex
 # can't make the absence-assert above pass vacuously (a no-op tripwire is worse than none).
