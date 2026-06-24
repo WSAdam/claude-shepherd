@@ -1860,6 +1860,8 @@ do
         and src:find("menuPick('features')", 1, true) ~= nil)
   check("f9-pin: features rows render what + why, esc()'d",
         src:find("window.ccFeatures = function", 1, true) ~= nil and src:find("esc(f.why", 1, true) ~= nil)
+  check("f9-pin: features grouped under category headers",
+        src:find("feat-cat", 1, true) ~= nil and src:find("f.cat !== curCat", 1, true) ~= nil)
 end
 
 -- ---- F4: transcript peek detail tab ----

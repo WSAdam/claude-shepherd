@@ -6146,17 +6146,33 @@ do
   check("doctorChecks: non-table facts safe", #core.doctorChecks(nil) > 0)
 end
 
--- F9: features list shape
+-- F9: features list shape (comprehensive, categorized)
 do
-  check("FEATURES: non-empty list", type(core.FEATURES) == "table" and #core.FEATURES >= 8)
-  local ok = true
+  check("FEATURES: comprehensive list", type(core.FEATURES) == "table" and #core.FEATURES >= 25)
+  local cats = {}; for _, c in ipairs(core.FEATURE_CATEGORIES) do cats[c] = true end
+  local shapeOk, catOk = true, true
   for _, f in ipairs(core.FEATURES) do
-    if type(f.title) ~= "string" or type(f.what) ~= "string" or type(f.why) ~= "string" then ok = false end
+    if type(f.title) ~= "string" or type(f.what) ~= "string" or type(f.why) ~= "string" then shapeOk = false end
+    if not (f.cat and cats[f.cat]) then catOk = false end
   end
-  check("FEATURES: every entry has title/what/why", ok)
+  check("FEATURES: every entry has title/what/why", shapeOk)
+  check("FEATURES: every entry has a known category", catOk)
+  -- categories must be contiguous so the overlay renders each header exactly once
+  local seen, contiguous, last = {}, true, nil
+  for _, f in ipairs(core.FEATURES) do
+    if f.cat ~= last then
+      if seen[f.cat] then contiguous = false end
+      seen[f.cat] = true; last = f.cat
+    end
+  end
+  check("FEATURES: categories are contiguous (one header each)", contiguous)
   local keys = {}; for _, f in ipairs(core.FEATURES) do keys[f.key] = true end
   check("FEATURES: covers the new features (theme/transcript/doctor/cost/render)",
         keys.theme and keys.transcript and keys.doctor and keys.cost and keys.render)
+  check("FEATURES: covers major existing flows too",
+        keys.search and keys.policies and keys.automodel and keys.bridge and keys.agents and keys.ab and keys.usage and keys.rewind)
+  local newCount = 0; for _, f in ipairs(core.FEATURES) do if f.new then newCount = newCount + 1 end end
+  eq("FEATURES: the 5 new features are flagged", newCount, 5)
 end
 
 -- F4: transcript peek (user + assistant rows, chronological, noise filtered)

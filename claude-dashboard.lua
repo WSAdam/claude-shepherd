@@ -5937,6 +5937,9 @@ local HTML = [[
 .doc-ok .doc-ic{ color:var(--ok); } .doc-warn .doc-ic{ color:var(--warn); }
 .doc-crit .doc-ic{ color:var(--danger); } .doc-info .doc-ic{ color:var(--muted); }
 /* F9 Features list */
+.feat-cat{ color:var(--accent); font-weight:700; font-size:11px; text-transform:uppercase; letter-spacing:.06em;
+           margin:16px 0 4px; padding-bottom:4px; border-bottom:1px solid var(--border); }
+.feat-cat:first-child{ margin-top:0; }
 .feat-row{ padding:11px 0; border-bottom:1px solid var(--border-weak); }
 .feat-title{ color:var(--text); font-weight:600; font-size:12.5px; }
 .feat-kind{ color:var(--accent-text); font-size:10px; text-transform:uppercase; letter-spacing:.04em; margin-left:7px; }
@@ -9445,12 +9448,13 @@ local HTML = [[
     window.ccFeatures = function(list){
       list = list || [];
       var body = document.getElementById("feat-body"); if(!body) return;
-      var html = "";
+      var html = "", curCat = null;
       for(var i=0;i<list.length;i++){
         var f = list[i];
+        if(f.cat && f.cat !== curCat){ curCat = f.cat; html += '<div class="feat-cat">'+esc(curCat)+'</div>'; }
         html += '<div class="feat-row">'
               + '<div class="feat-title">'+esc(f.title||"")
-              + (f.kind ? '<span class="feat-kind">'+esc(f.kind)+'</span>' : '')+'</div>'
+              + (f.new ? '<span class="feat-kind">new</span>' : '')+'</div>'
               + '<div class="feat-what">'+esc(f.what||"")+'</div>'
               + '<div class="feat-why"><b>Why:</b> '+esc(f.why||"")+'</div>'
               + '</div>';
