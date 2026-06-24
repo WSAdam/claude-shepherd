@@ -366,13 +366,17 @@ custom lock and two field bug fixes. All pure logic + tests in cc-core; all depl
   wrapped in a `do … end`** — its locals (LOCK_FILE/lockHasher/lockState/lockRelease) would otherwise
   blow the main chunk's 200-local cap; only `FX.lockEngage` (table member) is reachable from the handler.
 - **DR1 — Subagent fan-out (Agents tab)** — Adam's sessions write `…/<sessionUuid>/subagents/agent-*.jsonl`
-  (first line carries `agentId`+`slug`) + `subagents/workflows/wf_*/`, NOT in-transcript `Task`/`isSidechain`
-  lines (0 of those exist locally — verified). `core.subagentsDir`/`subagentTree`/`subagentMeta`/
-  `subagentLabel` + `FX.subagentScan(dir, withContent)`; detail `Agents` tab (in `core.DETAIL_TABS`) lists
-  agents grouped by run, click to drill (`detail-subagent` → `core.transcriptRecent`, path-validated by
-  `core.subagentNameOk`).
-- **DR2 — Background-work badge** — green `⚙ N` tile pill via `core.backgroundActivity` over the same
-  `subagents/` mtimes (`subagents.activeWindow` default 45s); cheap mtime-only scan on the refresh tick.
+  (first line carries `agentId`+`slug`+ the agent's first `message.content` = its task prompt) +
+  `subagents/workflows/wf_*/`, NOT in-transcript `Task`/`isSidechain` lines (0 of those exist locally —
+  verified). `core.subagentsDir`/`subagentTree`/`subagentMeta`/`subagentLabel` (prefers the prompt over the
+  random fleet slug, collapsed + truncated) + `FX.subagentScan(dir, withContent)`; detail `Agents` tab (in
+  `core.DETAIL_TABS`) groups rows **under a per-Workflow header with a running/total rollup**, click to drill
+  (`detail-subagent` → `core.transcriptRecent`, path-validated by `core.subagentNameOk`).
+- **DR2 — Background-work indicator** — green `⚙ N` tile pill via `core.backgroundActivity` over the same
+  `subagents/` mtimes (`subagents.activeWindow` default 45s); cheap mtime-only scan on the refresh tick. A
+  done/idle session with live background agents also reports **"Running N agents"** instead of "Ready for
+  you" (display-only `bgRunning`/`effStatus`/`statusWords` in the panel JS; `it.status` stays untouched, so
+  hooks/auto-continue/notifications/queue-feed are unaffected).
 - **DR4 — Run score** — detail **Score** button → `core.runScore` (100 minus error 18 / deny 6 / loop 12 /
   respawn 14; `score.weights`) + `core.scoreTrend` (regression = last `window` non-increasing AND drop ≥
   `drop`); logs a `run_score` ledger event; `#d-score` readout cleared on selection change.

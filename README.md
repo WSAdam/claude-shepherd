@@ -69,13 +69,17 @@ All derived locally from the transcript Shepherd already tails — no extra hook
   "Audit log & insights") lists every recorded session with its activity, a fuzzy filter,
   sort + pin, and a multi-select delete.
 - **Subagent fan-out (Agents tab)** — when a session spawns subagents or runs a Workflow,
-  the detail panel's **Agents** tab lists each one (grouped by Workflow run) with a green
-  running dot and its latest "Doing:" line; click a row to drill into that agent's recent
-  output. Read from the `subagents/` tree Claude Code writes beside the transcript — no extra
-  hooks. Self-gates when a session has no subagents.
-- **Background-work badge** — a green **⚙ N** pill on a tile while background work is running
-  (delegated subagents or a Workflow fleet), so you can see at a glance which session is busy
-  behind the scenes. Tunable window: `subagents.activeWindow` (default 45s).
+  the detail panel's **Agents** tab lists each one, **grouped under a per-Workflow header
+  with a running/total rollup** (`⚙ Workflow wf_… · N agents · M running`). Each row is
+  labeled by the agent's **actual task prompt** (e.g. "Review auth.ts"), not its auto-slug,
+  with a green running dot and its latest "Doing:" line; click a row to drill into that
+  agent's recent output. Read from the `subagents/` tree Claude Code writes beside the
+  transcript — no extra hooks. Self-gates when a session has no subagents.
+- **Background-work indicator** — while background work is running (delegated subagents or a
+  Workflow fleet), the tile shows a green **⚙ N** pill, **and a done/idle session reports
+  "Running N agents" instead of "Ready for you"** (with the working dot) so a session that's
+  busy behind the scenes isn't mistaken for one waiting on your reply. The underlying status
+  is unchanged — this is display-only. Tunable window: `subagents.activeWindow` (default 45s).
 - **Run score** — a **Score** button in the detail panel rates the selected session 0–100 from
   the audit ledger (penalizes API errors, denied tools, loop episodes, and forced respawns),
   shows a ⚠ when recent sessions trend down, and a mini sparkline of the trend. Needs the Audit

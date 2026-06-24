@@ -4,6 +4,41 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-24 — Background-aware tile status + Agents-tab Workflow grouping
+
+A session that fires a background Workflow (or delegates to subagents) ends its main turn and
+goes `done`, so its tile read **"Ready for you"** while a fan-out of agents was still running
+underneath — easy to mistake for "your move." Two display fixes, plus the Agents tab now
+reflects Workflow structure. Pure logic stays in `cc-core` under unit test; the panel JS keeps
+its source-level tripwires.
+
+### Changed — background-aware tile status
+
+- A `done`/`idle` session with live background agents (`it.bg_active`) now reports **"Running N
+  agents"** with the working dot — on both the tile and the detail header — instead of "Ready
+  for you". The "stale" suffix/dimming is suppressed while background work runs.
+- **Display-only**: the real `it.status` is untouched, so Stop hooks, auto-continue,
+  notifications, and queue auto-feed are unaffected. Single-sourced JS helpers
+  `bgRunning`/`effStatus`/`statusWords` drive both sinks so the dot colour and the words can't
+  drift.
+
+### Changed — Agents tab groups by Workflow, labels by prompt
+
+- Subagent rows are grouped **under a per-Workflow header** with a running/total rollup
+  (`⚙ Workflow wf_… · N agents · M running`), instead of a flat list repeating the same
+  workflow badge on every row.
+- Each row is labeled by the agent's **actual first prompt** (e.g. "Review auth.ts") rather
+  than the random fleet slug ("…prancy-hippo"): `core.subagentMeta` now pulls the first user
+  message and `core.subagentLabel` prefers it (collapsed + truncated to one line).
+
+### Tests
+
+- `core`: subagent prompt/label extraction + tree labeling; the F9 Features list's first-seen
+  category order is now pinned against `FEATURE_CATEGORIES` (a render-order contract `ccFeatures`
+  relies on, surfaced in the f6feb37 review).
+- `ui`: the background-status helpers + Agents-tab grouping; the status XSS escaping tripwire
+  refreshed for the refactor.
+
 ## 2026-06-19 — Appearance system (themeable UI) + new-project cold-start fix
 
 A full visual refresh built on a new design-token layer, plus a fix for a field-reported
