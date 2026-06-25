@@ -252,13 +252,43 @@ do
   eq("ghost: alive-but-quiet twin in another window -> NOT pruned",
      #core.staleDuplicateKeys(parallel), 0)
 
-  -- no terminal identity (non-kitty editors) -> no death evidence, never prune
-  -- here; the 24h shouldPrune backstop owns that cleanup.
+  -- no window identity at all (no kitty handles AND no host_window) -> no death
+  -- evidence, never prune here; the 24h shouldPrune backstop owns that cleanup.
   local noId = {
     { key = "p", name = "api", projectKey = "p-api", stale = true },
     { key = "q", name = "api", projectKey = "p-api", stale = false },
   }
-  eq("ghost: no terminal identity -> NOT pruned", #core.staleDuplicateKeys(noId), 0)
+  eq("ghost: no window identity -> NOT pruned", #core.staleDuplicateKeys(noId), 0)
+
+  -- VS Code/Cursor have no kitty handles: the host_window pid (the claude process's
+  -- parent) is the per-window id. A /clear spawns a fresh claude under the SAME editor
+  -- window -> old (ghost) + new share host_window -> prune the stale one. THIS is the
+  -- bug that left a duplicate ChargebackSentinel tile lingering up to 24h.
+  local vsGhost = {
+    { key = "vold", name = "cbs", projectKey = "p-cbs", stale = true,  host_window = "1301" },
+    { key = "vnew", name = "cbs", projectKey = "p-cbs", stale = false, host_window = "1301" },
+  }
+  eq("ghost: VS Code /clear ghost (same host_window) -> prune the stale one",
+     core.staleDuplicateKeys(vsGhost)[1], "vold")
+  eq("ghost: VS Code prunes exactly one", #core.staleDuplicateKeys(vsGhost), 1)
+
+  -- two VS Code windows on the same project occupy DISTINCT host_window pids: the
+  -- resting one is a real parallel session, not a /clear ghost -> keep both.
+  local vsParallel = {
+    { key = "wa", name = "cbs", projectKey = "p-cbs", stale = true,  host_window = "1301" },
+    { key = "wb", name = "cbs", projectKey = "p-cbs", stale = false, host_window = "1302" },
+  }
+  eq("ghost: VS Code parallel windows (distinct host_window) -> NOT pruned",
+     #core.staleDuplicateKeys(vsParallel), 0)
+
+  -- the kitty/host namespaces don't cross-collide: a stale kitty tile whose bare wid
+  -- equals a live VS Code tile's host_window must NOT read as its twin.
+  local mixed = {
+    { key = "kx", name = "cbs", projectKey = "p-cbs", stale = true,
+      kitty_listen_on = sock, kitty_window_id = "1301" },
+    { key = "hx", name = "cbs", projectKey = "p-cbs", stale = false, host_window = "1301" },
+  }
+  eq("ghost: kitty wid vs vscode host_window don't cross-match", #core.staleDuplicateKeys(mixed), 0)
 
   -- a window id WITHOUT the socket is a HALF identity, i.e. NO identity: kitty
   -- exports KITTY_WINDOW_ID always but KITTY_LISTEN_ON only with remote control

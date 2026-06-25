@@ -46,4 +46,15 @@ assert_eq "cc_json_str: backslash -> double-backslash"   "${bs}${bs}"  "$(cc_jso
 assert_eq "cc_json_str: tab -> backslash-t"              "${bs}t"      "$(cc_json_str "$(printf '\t')")"
 assert_eq "cc_json_str: BEL 0x07 -> u-escape"            "${bs}u0007"  "$(cc_json_str "$(printf '\007')")"
 
+# cc_window_host: the non-kitty per-window id used to auto-prune /clear ghosts. The
+# process-tree walk to the claude ancestor is environment-dependent (can't be pinned
+# deterministically here), but its SAFE invariants must hold so it never harms the
+# hot hook path: empty + exit 0 under kitty (kitty uses its own window id), and it
+# must never error out (exit non-zero) no matter the ancestry.
+assert_eq "cc_window_host: empty under kitty" "" "$(KITTY_WINDOW_ID=9 cc_window_host)"
+KITTY_WINDOW_ID=9 cc_window_host >/dev/null 2>&1
+assert_eq "cc_window_host: exit 0 under kitty" "0" "$?"
+cc_window_host >/dev/null 2>&1
+assert_eq "cc_window_host: never errors (exit 0)" "0" "$?"
+
 finish

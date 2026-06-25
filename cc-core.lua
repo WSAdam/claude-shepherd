@@ -3623,22 +3623,31 @@ end
 -- Staleness alone is NOT death evidence: status files only change on hook events,
 -- so every alive session goes stale ~90s after finishing its turn -- with two
 -- parallel sessions in one folder, the resting one would otherwise be pruned while
--- it sits alive holding its result. The shared terminal IS the evidence: a /clear
--- reuses the same window (matching kitty identity), while genuine parallel sessions
--- occupy distinct windows. Tiles with no terminal identity (non-kitty editors) are
--- never pruned here; the 24h shouldPrune backstop owns that cleanup.
+-- it sits alive holding its result. The shared WINDOW is the evidence: a /clear
+-- reuses the same window, while genuine parallel sessions occupy distinct windows.
+-- The per-window id is kitty's socket+window pair, or (non-kitty editors like VS
+-- Code/Cursor) the `host_window` pid cc-status.sh captures -- the claude session
+-- process's parent, which a /clear keeps (a new session_id spawns a fresh claude
+-- under the SAME editor window) and which differs per window. Tiles with NO window
+-- identity at all are never pruned here; the 24h shouldPrune backstop owns those.
 function M.staleDuplicateKeys(list)
   local function projKey(it) return it.projectKey or it.cwd end
-  local function termId(it)  -- kitty socket+window pair; nil when unknown
+  local function termId(it)  -- a STABLE per-window id; nil when unknown
     local sock, wid = it.kitty_listen_on, it.kitty_window_id
-    -- A HALF identity is NO identity: kitty exports KITTY_WINDOW_ID always but
-    -- KITTY_LISTEN_ON only when remote control is configured, and window ids are
-    -- a per-INSTANCE counter from 1 -- so two default-config kitty instances both
-    -- yield window "1". Without the instance-disambiguating socket, matching on
-    -- the bare wid would prune a live parallel session as a false twin; fall to
-    -- the never-prune-here safe side instead (24h shouldPrune backstop cleans up).
-    if sock == nil or sock == "" or wid == nil or wid == "" then return nil end
-    return tostring(sock) .. "#" .. tostring(wid)
+    -- kitty: need BOTH socket and window id. A HALF identity is NO identity: kitty
+    -- exports KITTY_WINDOW_ID always but KITTY_LISTEN_ON only when remote control is
+    -- configured, and window ids are a per-INSTANCE counter from 1 -- so two default-
+    -- config kitty instances both yield window "1". Without the instance-disambiguating
+    -- socket, matching on the bare wid would prune a live parallel session as a false
+    -- twin; fall through to host_window / the never-prune-here safe side instead.
+    if sock ~= nil and sock ~= "" and wid ~= nil and wid ~= "" then
+      return "kitty:" .. tostring(sock) .. "#" .. tostring(wid)
+    end
+    -- non-kitty editors have no kitty handles: use the host-window pid (the claude
+    -- session process's parent -- stable across /clear, distinct per editor window).
+    local hw = it.host_window
+    if hw ~= nil and tostring(hw) ~= "" then return "host:" .. tostring(hw) end
+    return nil
   end
   local liveTerms = {}  -- projectKey -> { [termId] = true } for non-stale tiles
   for _, it in ipairs(list or {}) do

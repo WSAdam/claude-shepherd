@@ -104,6 +104,30 @@ cc_editor_app() {
   esac
 }
 
+# The stable per-WINDOW host pid for a non-Kitty (VS Code/Cursor) session: walk our
+# ancestry to the editor-integrated `claude` process (the one run with
+# `--output-format stream-json`) and return ITS parent pid -- the editor window's host.
+# A /clear spawns a fresh claude (new session_id) under the SAME host, so the old
+# (ghost) tile and the new tile share it, while distinct editor windows have distinct
+# hosts -- giving the panel a kitty-window-id equivalent to auto-prune /clear ghosts
+# (see core.staleDuplicateKeys). Prints empty for Kitty (it has its own window id) or
+# when no such ancestor is found within the bounded walk -- the safe side: the panel
+# then never auto-prunes the tile and the 24h backstop owns its cleanup.
+cc_window_host() {
+  [ -z "${KITTY_WINDOW_ID:-}" ] || { printf ''; return 0; }
+  local pid="$PPID" cmd i=0
+  while [ -n "$pid" ] && [ "$pid" -gt 1 ] && [ "$i" -lt 8 ]; do
+    cmd="$(ps -o command= -p "$pid" 2>/dev/null)"
+    case "$cmd" in
+      *"claude --output-format stream-json"*)
+        ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' '; return 0 ;;
+    esac
+    pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')"
+    i=$((i + 1))
+  done
+  printf ''
+}
+
 # Append a line to the debug log when CC_STATUS_DEBUG is set. Used to capture
 # raw hook stdin once during install so real payload field names can be locked.
 cc_debug() {

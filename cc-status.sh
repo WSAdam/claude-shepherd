@@ -236,6 +236,16 @@ PATCH="$(printf '%s' "$PATCH" | jq -c --arg ed "$EDITOR_KIND" '. + {editor:$ed}'
 [ -n "$KITTY_WID" ]  && PATCH="$(printf '%s' "$PATCH" | jq -c --arg v "$KITTY_WID"  '. + {kitty_window_id:$v}')"
 [ -n "$KITTY_SOCK" ] && PATCH="$(printf '%s' "$PATCH" | jq -c --arg v "$KITTY_SOCK" '. + {kitty_listen_on:$v}')"
 
+# Non-Kitty per-window host id (VS Code/Cursor) so the panel can auto-prune /clear
+# ghosts (kitty uses its window id above). Computed once per session: reuse the value
+# already in the file; only walk the process tree when it's absent (≈first event of a
+# session, incl. the fresh session a /clear mints) so the hot hook path stays cheap.
+if [ "$EDITOR_KIND" != "kitty" ]; then
+  HOST_WINDOW="$(cc_read_field "$KEY" '.host_window')"
+  [ -n "$HOST_WINDOW" ] || HOST_WINDOW="$(cc_window_host)"
+  [ -n "$HOST_WINDOW" ] && PATCH="$(printf '%s' "$PATCH" | jq -c --arg v "$HOST_WINDOW" '. + {host_window:$v}')"
+fi
+
 # Don't let a generic Notification clobber a precise pending that
 # PermissionRequest already recorded this turn.
 if [ -n "$SET_PENDING" ] && [ -n "$PENDING_IF_ABSENT" ]; then
