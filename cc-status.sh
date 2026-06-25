@@ -241,8 +241,7 @@ PATCH="$(printf '%s' "$PATCH" | jq -c --arg ed "$EDITOR_KIND" '. + {editor:$ed}'
 # already in the file; only walk the process tree when it's absent (≈first event of a
 # session, incl. the fresh session a /clear mints) so the hot hook path stays cheap.
 if [ "$EDITOR_KIND" != "kitty" ]; then
-  HOST_WINDOW="$(cc_read_field "$KEY" '.host_window')"
-  [ -n "$HOST_WINDOW" ] || HOST_WINDOW="$(cc_window_host)"
+  HOST_WINDOW="$(cc_host_window "$KEY")"   # reuse stored id; walk the tree only when absent
   [ -n "$HOST_WINDOW" ] && PATCH="$(printf '%s' "$PATCH" | jq -c --arg v "$HOST_WINDOW" '. + {host_window:$v}')"
 fi
 

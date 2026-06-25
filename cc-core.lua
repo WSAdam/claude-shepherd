@@ -3634,12 +3634,9 @@ function M.staleDuplicateKeys(list)
   local function projKey(it) return it.projectKey or it.cwd end
   local function termId(it)  -- a STABLE per-window id; nil when unknown
     local sock, wid = it.kitty_listen_on, it.kitty_window_id
-    -- kitty: need BOTH socket and window id. A HALF identity is NO identity: kitty
-    -- exports KITTY_WINDOW_ID always but KITTY_LISTEN_ON only when remote control is
-    -- configured, and window ids are a per-INSTANCE counter from 1 -- so two default-
-    -- config kitty instances both yield window "1". Without the instance-disambiguating
-    -- socket, matching on the bare wid would prune a live parallel session as a false
-    -- twin; fall through to host_window / the never-prune-here safe side instead.
+    -- kitty: need BOTH socket+window id -- a bare window id is a per-instance counter
+    -- (two default kitty instances both yield "1"), so a half identity falls through to
+    -- host_window / the safe side (full rationale in the header comment above).
     if sock ~= nil and sock ~= "" and wid ~= nil and wid ~= "" then
       return "kitty:" .. tostring(sock) .. "#" .. tostring(wid)
     end

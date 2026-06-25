@@ -115,17 +115,35 @@ cc_editor_app() {
 # then never auto-prunes the tile and the 24h backstop owns its cleanup.
 cc_window_host() {
   [ -z "${KITTY_WINDOW_ID:-}" ] || { printf ''; return 0; }
+  # Ancestry-walk depth cap. Observed shape is hook -> claude -> ext-host -> window-host
+  # (~3-4 hops), so 8 is ~2x headroom; raising it just costs one `ps` per extra hop.
+  local max_depth=8
   local pid="$PPID" cmd i=0
-  while [ -n "$pid" ] && [ "$pid" -gt 1 ] && [ "$i" -lt 8 ]; do
+  while [ -n "$pid" ] && [ "$pid" -gt 1 ] && [ "$i" -lt "$max_depth" ]; do
     cmd="$(ps -o command= -p "$pid" 2>/dev/null)"
+    # Match the editor-integrated claude -- the VS Code/Cursor extension launches it with
+    # `--output-format stream-json` -- LOOSELY, tolerant of reordered or injected flags,
+    # so a future launch-flag change doesn't silently break the walk (which would revert
+    # VS Code tiles to 24h-backstop-only ghost cleanup, with no error to signal it). Kept
+    # as a LITERAL case pattern (not a $var) so the glob behaves identically in bash/zsh/sh.
     case "$cmd" in
-      *"claude --output-format stream-json"*)
+      *claude*--output-format*stream-json*)
         ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' '; return 0 ;;
     esac
     pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')"
     i=$((i + 1))
   done
   printf ''
+}
+
+# The per-window host id for a session, computed at most ONCE per session: reuse the
+# value already in its status file, and only walk the process tree (cc_window_host)
+# when it's absent. This keeps every hook event after a session's first off the `ps`
+# path. Usage: cc_host_window "$key"  (empty when unknown / for Kitty).
+cc_host_window() {
+  local hw; hw="$(cc_read_field "$1" '.host_window')"
+  [ -n "$hw" ] && { printf '%s' "$hw"; return 0; }
+  cc_window_host
 }
 
 # Append a line to the debug log when CC_STATUS_DEBUG is set. Used to capture

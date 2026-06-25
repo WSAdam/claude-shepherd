@@ -264,6 +264,11 @@ do
   -- parent) is the per-window id. A /clear spawns a fresh claude under the SAME editor
   -- window -> old (ghost) + new share host_window -> prune the stale one. THIS is the
   -- bug that left a duplicate ChargebackSentinel tile lingering up to 24h.
+  -- BOUNDARY (do not "fix" by pinning the claude pid -- that breaks /clear pruning):
+  -- host_window is per-WINDOW, not per-pane (unlike kitty's window id), so two parallel
+  -- claude sessions in ONE VS Code window share it. The resting (stale) one is then
+  -- pruned here as a false twin -- an accepted, SELF-HEALING trade-off: its tile
+  -- reappears on that session's next hook event. (Same assertion as this /clear case.)
   local vsGhost = {
     { key = "vold", name = "cbs", projectKey = "p-cbs", stale = true,  host_window = "1301" },
     { key = "vnew", name = "cbs", projectKey = "p-cbs", stale = false, host_window = "1301" },
@@ -271,6 +276,31 @@ do
   eq("ghost: VS Code /clear ghost (same host_window) -> prune the stale one",
      core.staleDuplicateKeys(vsGhost)[1], "vold")
   eq("ghost: VS Code prunes exactly one", #core.staleDuplicateKeys(vsGhost), 1)
+
+  -- both twins stale (e.g. two /clears in quick succession, neither alive yet) -> no
+  -- live tile to serve as death evidence -> prune NOTHING here; the 24h shouldPrune
+  -- backstop owns that cleanup. Guards against a refactor that prunes any stale
+  -- duplicate sharing a termId regardless of whether the twin is actually live.
+  local staleBothDead = {
+    { key = "d1", name = "cbs", projectKey = "p-cbs", stale = true, host_window = "1301" },
+    { key = "d2", name = "cbs", projectKey = "p-cbs", stale = true, host_window = "1301" },
+  }
+  eq("ghost: both stale (no live twin) -> none pruned", #core.staleDuplicateKeys(staleBothDead), 0)
+
+  -- a HALF-present host id (only one side has it) is NO identity -- same safe-side rule
+  -- as the kitty half-identity. The side without host_window has a nil termId, so
+  -- neither orientation can match. (Realistic: a fresh /clear session's first event can
+  -- land BEFORE host_window is captured, so transient one-sided ids do occur.)
+  local vsHalfA = {
+    { key = "ha", name = "cbs", projectKey = "p-cbs", stale = true,  host_window = "1301" },
+    { key = "hb", name = "cbs", projectKey = "p-cbs", stale = false },
+  }
+  eq("ghost: stale has host_window, live lacks it -> NOT pruned", #core.staleDuplicateKeys(vsHalfA), 0)
+  local vsHalfB = {
+    { key = "hc", name = "cbs", projectKey = "p-cbs", stale = true },
+    { key = "hd", name = "cbs", projectKey = "p-cbs", stale = false, host_window = "1301" },
+  }
+  eq("ghost: live has host_window, stale lacks it -> NOT pruned", #core.staleDuplicateKeys(vsHalfB), 0)
 
   -- two VS Code windows on the same project occupy DISTINCT host_window pids: the
   -- resting one is a real parallel session, not a /clear ghost -> keep both.

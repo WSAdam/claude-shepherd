@@ -4,6 +4,39 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-25 — Auto-prune VS Code `/clear` ghost tiles
+
+A `/clear` (or restart) mints a new `session_id` — a new tile — while the old session's
+status file lingers with no `SessionEnd`. The panel already auto-pruned these ghosts, but
+only when the old and new tiles shared a **kitty** window id; VS Code/Cursor sessions
+carry none, so the ghost survived until the 24h backstop — leaving a visible duplicate
+tile (e.g. two ChargebackSentinel tiles).
+
+### Fixed — duplicate tiles after `/clear` in VS Code/Cursor
+
+- Non-kitty sessions now get a stable per-window id, mirroring kitty's model: a `/clear`
+  spawns a fresh `claude` process under the **same editor window**, so the claude
+  process's parent pid is stable across `/clear` and distinct per window — the VS Code
+  equivalent of the kitty window id that was missing.
+- `cc-lib.sh` `cc_window_host()` walks the hook's ancestry to the editor-integrated
+  `claude` process and returns its parent pid; `cc_host_window()` caches it (compute once
+  per session, reuse the stored value otherwise, so the hot hook path never re-walks).
+  `cc-status.sh` records it as `host_window`. `staleDuplicateKeys` then prunes a stale
+  VS Code ghost whose live twin shares the same `host_window` (namespaced `kitty:`/`host:`
+  so a window number can't collide with a pid).
+- Safe by construction: no id → never prunes (24h backstop owns it); a false-prune (two
+  real windows on one project) self-heals — the tile reappears on the session's next hook
+  event. The walk can never abort the hook (always exits 0).
+
+### Tests
+
+- `ui`: VS Code `/clear` ghost pruned; parallel windows (distinct `host_window`) kept;
+  both-stale (no live twin) and half-present-id cases prune nothing; kitty/host ids don't
+  cross-match.
+- `lib`: `cc_window_host` safe invariants (empty + exit 0 under kitty; never errors) and
+  the `cc_host_window` once-per-session contract (reuse stored id without walking; walk
+  only when absent).
+
 ## 2026-06-24 — Background-aware tile status + Agents-tab Workflow grouping
 
 A session that fires a background Workflow (or delegates to subagents) ends its main turn and

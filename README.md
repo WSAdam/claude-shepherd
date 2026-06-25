@@ -166,6 +166,10 @@ tile to **jump** straight to its window. **Right-click** a tile for a context me
   with **no window keystroke**, so it can't close a live session that shares the name.
   Use it for stale/orphan tiles (a session that ended without a clean `SessionEnd`). A
   still-running session simply reappears on its next hook event — so it's always safe.
+  Note: a `/clear` (or restart) leaves a stale **duplicate** tile behind; the panel now
+  **auto-prunes** these once the fresh session is live by matching the old + new tile to
+  the same terminal/editor **window** (kitty window id, or the host pid for VS Code/
+  Cursor), so you rarely need Forget for `/clear` ghosts.
 - **Drain (finish turn, then close)** — *shown when `drain.enabled`*: wait for the
   session to finish its in-flight turn, then close it (closes now if already idle/done).
 - **Respawn from cwd** — *shown when `respawn.enabled`*: relaunch a dead/stale session

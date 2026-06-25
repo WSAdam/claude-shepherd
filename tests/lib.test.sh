@@ -57,4 +57,20 @@ assert_eq "cc_window_host: exit 0 under kitty" "0" "$?"
 cc_window_host >/dev/null 2>&1
 assert_eq "cc_window_host: never errors (exit 0)" "0" "$?"
 
+# cc_host_window: the per-window id is computed at most ONCE per session -- reuse the
+# value already stored in the file, and only walk the process tree when it's absent.
+# This is the commit's whole performance claim, so pin both branches by stubbing the
+# two collaborators and watching which path runs. (Defined last: these stubs shadow
+# the real cc_read_field/cc_window_host for the rest of the file.)
+probe="$TMP/walk-probe"
+cc_window_host() { echo CALLED >> "$probe"; printf '9999'; }
+cc_read_field() { printf '1301'; }                       # file already has the id
+rm -f "$probe"
+assert_eq "cc_host_window: reuses the stored id"          "1301" "$(cc_host_window k)"
+assert_eq "cc_host_window: no process walk when present"  ""     "$(cat "$probe" 2>/dev/null)"
+cc_read_field() { printf ''; }                           # id absent -> must walk once
+rm -f "$probe"
+assert_eq "cc_host_window: walks when the id is absent"   "9999"   "$(cc_host_window k)"
+assert_eq "cc_host_window: walk fired when absent"        "CALLED" "$(tr -d '\n' < "$probe" 2>/dev/null)"
+
 finish
