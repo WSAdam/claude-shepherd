@@ -4170,12 +4170,14 @@ local function handleBridgeMsg(msg)
     pcall(function() wv:evaluateJavaScript("window.ccWorklist(" .. hs.json.encode(FX.worklistPayload()) .. ")") end)
     return
   end
-  if a == "worklist-add" or a == "worklist-toggle" or a == "worklist-remove" or a == "worklist-clear-done" then
+  if a == "worklist-add" or a == "worklist-toggle" or a == "worklist-remove"
+     or a == "worklist-edit" or a == "worklist-clear-done" then
     local scope = tostring(payload.v or "generic")
     local st = FX.readWorklist()
     if a == "worklist-add" then core.worklistAdd(st, scope, tostring(payload.text or ""), FX.worklistNewId(), FX.now())
     elseif a == "worklist-toggle" then core.worklistToggle(st, scope, tostring(payload.text or ""))
     elseif a == "worklist-remove" then core.worklistRemove(st, scope, tostring(payload.text or ""))
+    elseif a == "worklist-edit" then core.worklistEdit(st, scope, tostring(payload.text or ""), tostring(payload.edit or ""))
     else core.worklistClearDone(st, scope) end
     FX.writeWorklist(st)
     pcall(function() wv:evaluateJavaScript("window.ccWorklist(" .. hs.json.encode(FX.worklistPayload()) .. ")") end)
@@ -5529,6 +5531,10 @@ local HTML = [[
   .wl-item { display:flex; align-items:flex-start; gap:9px; padding:6px 4px; border-bottom:1px solid var(--border-weak); }
   .wl-cb { cursor:pointer; margin-top:2px; flex:0 0 auto; width:16px; height:16px; accent-color:var(--accent); }
   .wl-txt { color:var(--text); font-size:13px; line-height:1.4; word-break:break-word; white-space:pre-wrap; flex:1; }
+  /* Inline editor swapped in for .wl-txt on double-click (commit Enter/blur, cancel Esc). */
+  .wl-edit { flex:1; font:inherit; font-size:13px; line-height:1.4; color:var(--text); background:var(--surface-2);
+             border:1px solid var(--accent); border-radius:6px; padding:3px 6px; resize:none; overflow:hidden;
+             box-sizing:border-box; }
   /* Per-item ✕ delete: muted (same tone as the panel's other dim controls, ≥3:1
      contrast so it stays discoverable) and reddens on hover. */
   .wl-del { flex:0 0 auto; background:none; border:none; color:var(--dim); cursor:pointer; font-size:13px;
@@ -7604,7 +7610,7 @@ local HTML = [[
       var id = esc(String(it.id || ""));
       return '<div class="wl-item"><input type="checkbox" class="wl-cb" data-id="' + id + '"'
         + (isDone ? " checked" : "") + '>'
-        + '<span class="wl-txt">' + esc(it.text || "") + '</span>'
+        + '<span class="wl-txt" title="Double-click to edit">' + esc(it.text || "") + '</span>'
         + '<button class="wl-del" data-del="' + id + '" title="Delete">✕</button></div>';
     }
     function renderWorklist(){
@@ -7647,6 +7653,37 @@ local HTML = [[
     function worklistRemove(id){ send("worklist-remove", worklistScope, id); }
     function worklistClearDone(){ send("worklist-clear-done", worklistScope); }
     function worklistToggleDone(){ worklistDoneOpen = !worklistDoneOpen; renderWorklist(); }
+    // worklist-edit carries THREE values (scope + id + new text), so it can't use the
+    // 2-value send(); post the id as `text` and the new text as `edit`.
+    function worklistEditSend(id, text){
+      try { window.webkit.messageHandlers.cc.postMessage(JSON.stringify({a:"worklist-edit", v:worklistScope, text:id, edit:text})); }
+      catch(e){ console.log("send error", e); }
+    }
+    // Double-click an item to edit its text in place: swap the text span for a textarea.
+    // Enter (or click-away/blur) commits; Escape cancels; an empty or unchanged value
+    // just restores the row (worklistEdit ignores blanks, so an item can't be erased).
+    function startWorklistEdit(row, span, id){
+      if(!row || !span || row.querySelector(".wl-edit")) return;
+      var cur = span.textContent || "";
+      var inp = document.createElement("textarea");
+      inp.className = "wl-edit"; inp.value = cur; inp.rows = 1;
+      span.replaceWith(inp);
+      inp.focus(); inp.select(); autoGrow(inp);
+      var settled = false;
+      function commit(){
+        if(settled) return; settled = true;
+        var nt = (inp.value || "").trim();
+        if(nt && nt !== cur) worklistEditSend(id, nt);   // backend re-push re-renders the row
+        else renderWorklist();                            // unchanged / blank -> restore
+      }
+      function cancel(){ if(settled) return; settled = true; renderWorklist(); }
+      inp.addEventListener("keydown", function(e){
+        if(e.key === "Enter" && !e.shiftKey){ e.preventDefault(); commit(); }
+        else if(e.key === "Escape"){ e.preventDefault(); cancel(); }
+      });
+      inp.addEventListener("input", function(){ autoGrow(inp); });
+      inp.addEventListener("blur", commit);
+    }
     // Delegated handlers for the dynamically-rendered scope buttons + checkboxes
     // (data-attrs avoid the inline-attribute quoting bug with dynamic ids/keys).
     document.addEventListener("click", function(e){
@@ -7659,6 +7696,15 @@ local HTML = [[
     document.addEventListener("change", function(e){
       var cb = e.target;
       if(cb && cb.classList && cb.classList.contains("wl-cb")){ var id = cb.getAttribute("data-id"); if(id) worklistToggle(id); }
+    });
+    // Double-click a worklist row (but not its checkbox/delete) -> edit it in place.
+    document.addEventListener("dblclick", function(e){
+      var t = e.target; if(!t || !t.closest) return;
+      if(t.classList && (t.classList.contains("wl-cb") || t.classList.contains("wl-del"))) return;
+      var row = t.closest(".wl-item"); if(!row) return;
+      var cb = row.querySelector(".wl-cb"), span = row.querySelector(".wl-txt");
+      if(!cb || !span) return;
+      var id = cb.getAttribute("data-id"); if(id) startWorklistEdit(row, span, id);
     });
     function toggleSearch(){
       var b = document.getElementById("searchbar");

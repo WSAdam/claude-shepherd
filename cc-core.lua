@@ -6432,6 +6432,18 @@ function M.worklistRemove(state, scope, id)
   return state
 end
 
+-- Replace an item's text by id within a scope (the double-click inline edit). Trims;
+-- an empty/whitespace new text is IGNORED (keeps the original) so an accidental
+-- blank save can't erase an item. Unknown id is a no-op. Pure.
+function M.worklistEdit(state, scope, id, text)
+  text = type(text) == "string" and (text:gsub("^%s+", ""):gsub("%s+$", "")) or ""
+  if text == "" then return state end
+  for _, it in ipairs(M.worklistScopeList(state, scope)) do
+    if it.id == id then it.text = text; break end
+  end
+  return state
+end
+
 -- Drop the done items from a scope (the "Clear" on the Done area).
 function M.worklistClearDone(state, scope)
   if type(state) ~= "table" then return state or {} end

@@ -4,6 +4,17 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-26 — Edit a worklist item in place
+
+### Added — double-click a My List item to edit it
+
+Double-click any worklist row to edit its text inline (the text span swaps for a
+textarea). **Enter** or clicking away commits; **Escape** cancels; a blank or unchanged
+value just restores the row (`worklistEdit` ignores blanks, so an item can't be erased by
+an accidental empty save). Double-clicking the checkbox or ✕ delete is ignored. Wired as a
+`worklist-edit` action (carries scope + id + new text) and `core.worklistEdit`; the done
+flag is preserved across an edit.
+
 ## 2026-06-25 — Auto-prune VS Code `/clear` ghost tiles
 
 A `/clear` (or restart) mints a new `session_id` — a new tile — while the old session's

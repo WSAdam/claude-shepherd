@@ -1954,6 +1954,28 @@ do
         and src:find("grp.agents.length + ' agent'", 1, true) ~= nil)
 end
 
+-- ---- Worklist: double-click an item to edit it in place ----
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("wl-edit: backend handles the worklist-edit action",
+        src:find('a == "worklist-edit"', 1, true) ~= nil
+        and src:find("core.worklistEdit(st, scope", 1, true) ~= nil)
+  check("wl-edit: edit posts scope+id+text (id as `text`, new text as `edit`)",
+        src:find('a:"worklist-edit", v:worklistScope, text:id, edit:text', 1, true) ~= nil)
+  check("wl-edit: double-clicking a row starts an inline editor",
+        src:find("function startWorklistEdit(", 1, true) ~= nil
+        and src:find('addEventListener("dblclick"', 1, true) ~= nil
+        and src:find('t.closest(".wl-item")', 1, true) ~= nil)
+  check("wl-edit: dblclick ignores the checkbox + delete control",
+        src:find('t.classList.contains("wl-cb") || t.classList.contains("wl-del")', 1, true) ~= nil)
+  check("wl-edit: Enter commits, Escape cancels, blank/unchanged restores the row",
+        src:find('e.key === "Enter" && !e.shiftKey', 1, true) ~= nil
+        and src:find('e.key === "Escape"', 1, true) ~= nil
+        and src:find("worklistEditSend(id, nt)", 1, true) ~= nil)
+end
+
 -- ---- F4: transcript peek detail tab ----
 do
   local f = io.open(ROOT .. "claude-dashboard.lua", "r")

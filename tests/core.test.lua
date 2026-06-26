@@ -4911,6 +4911,20 @@ do
   -- toggle of an unknown id is a no-op (no crash)
   core.worklistToggle(st, "generic", "nope")
   eq("worklist: unknown-id toggle is a no-op", #core.worklistScopeList(st, "generic"), 1)
+  -- worklistEdit: the double-click inline edit -- change an item's text by id
+  core.worklistEdit(st, "generic", "g1", "call the bank URGENTLY")
+  eq("worklist: edit changes text by id", core.worklistScopeList(st, "generic")[1].text, "call the bank URGENTLY")
+  core.worklistEdit(st, "generic", "g1", "   spaced out   ")
+  eq("worklist: edit trims the new text", core.worklistScopeList(st, "generic")[1].text, "spaced out")
+  core.worklistEdit(st, "generic", "g1", "   ")
+  eq("worklist: edit ignores blank text (keeps original)", core.worklistScopeList(st, "generic")[1].text, "spaced out")
+  core.worklistToggle(st, "generic", "g1")          -- mark done, edit, expect done preserved
+  core.worklistEdit(st, "generic", "g1", "still done")
+  check("worklist: edit preserves the done flag", core.worklistScopeList(st, "generic")[1].done == true)
+  core.worklistToggle(st, "generic", "g1")          -- restore active for clarity
+  core.worklistEdit(st, "generic", "nope", "ghost")
+  eq("worklist: edit unknown id is a no-op", core.worklistScopeList(st, "generic")[1].text, "still done")
+  eq("worklist: edit unknown id adds nothing", #core.worklistScopeList(st, "generic"), 1)
   -- scope list for an unknown project is empty (no crash)
   eq("worklist: unknown scope -> empty", #core.worklistScopeList(st, "proj:/nope"), 0)
   -- tolerant of a nil/garbled state
