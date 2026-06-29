@@ -5006,6 +5006,139 @@ do
   eq("remove: unknown project scope is a no-op", #core.worklistScopeList(rm, "proj:/unknown"), 0)
 end
 
+-- ---- User stories editor: parse / serialize / hash (spec/product/user-stories.md) ----
+do
+  -- THE core safety invariant: serialize(parse(x).blocks) == x BYTE-FOR-BYTE for any
+  -- unmodified file that ends in a newline (so opening the tab and saving without edits
+  -- can never churn it).
+  local function rt(label, text)
+    local doc = core.parseUserStories(text)
+    eq("userStories rt: " .. label, core.serializeUserStories(doc.blocks), text)
+  end
+  rt("empty", "")
+  rt("trailing newline", "# Title\n\n## Area\n\n- a story\n- another\n")
+  rt("wrapped bullet", "## Chrome\n\n- Visit the root and see\n  the overview render\n- Click a thing\n")
+  rt("prose between sections", "# T\n\nintro para\n\n## A\n- one\n\nsome note\n\n## B\n- two\n")
+  rt("bullets before any heading", "# T\n\nintro\n\n- top one\n- top two\n\n## Later\n- grouped\n")
+  rt("headings only, no stories", "# T\n\n## Empty Area\n\n## Another\n")
+  rt("leading/trailing blank lines", "\n\n# T\n\n- s\n\n\n")
+  -- a file with NO final newline NORMALIZES (gains one): the old trailing-newline strip
+  -- left the last block "open", so an append glued onto it and corrupted the file (the
+  -- fleet's #2-5 finding). Adding the newline is the safe POSIX-text fix.
+  eq("userStories rt: no final newline normalizes to add one",
+     core.serializeUserStories(core.parseUserStories("# Title\n\n- a story").blocks), "# Title\n\n- a story\n")
+  eq("userStories rt: single line, no newline -> adds one",
+     core.serializeUserStories(core.parseUserStories("- lone story").blocks), "- lone story\n")
+
+  -- structure
+  local doc = core.parseUserStories("# T\n\n## Chrome\n\n- story one\n- story two\n\n## Overview\n\n- story three\n")
+  eq("userStories: story count", #doc.stories, 3)
+  eq("userStories: areas in order", table.concat(doc.areas, "|"), "Chrome|Overview")
+  eq("userStories: area tag", doc.stories[1].area, "Chrome")
+  eq("userStories: later area tag", doc.stories[3].area, "Overview")
+  eq("userStories: text parsed", doc.stories[1].text, "story one")
+  check("userStories: stable unique ids", doc.stories[1].id == "s1" and doc.stories[3].id == "s3")
+
+  -- wrapped bullet: continuation lines join into one text; src preserved verbatim
+  local w = core.parseUserStories("## A\n- first line\n  second line\n  third\n")
+  eq("userStories: wrapped joined to one text", w.stories[1].text, "first line second line third")
+  eq("userStories: wrapped src preserved", w.stories[1].src, "- first line\n  second line\n  third\n")
+
+  -- edit one story: only that line reserializes (single bullet); all else verbatim
+  local d2 = core.parseUserStories("# T\n\n## A\n\n- keep me\n- change me\n")
+  d2.stories[2].text = "changed"; d2.stories[2].dirty = true
+  eq("userStories: edit touches only the edited story",
+     core.serializeUserStories(d2.blocks), "# T\n\n## A\n\n- keep me\n- changed\n")
+
+  -- delete: drop a story block, the rest (incl. headings) stays
+  local d3 = core.parseUserStories("## A\n- one\n- two\n- three\n")
+  local kept = {}
+  for _, blk in ipairs(d3.blocks) do if blk.id ~= d3.stories[2].id then kept[#kept + 1] = blk end end
+  eq("userStories: delete drops only that story", core.serializeUserStories(kept), "## A\n- one\n- three\n")
+
+  -- add: a new dirty story (no src) emits a trimmed bullet; a blank new story is dropped
+  local d4 = core.parseUserStories("## A\n- one\n")
+  d4.blocks[#d4.blocks + 1] = { id = "new1", area = "A", text = "  brand new  ", dirty = true }
+  eq("userStories: add appends a trimmed bullet", core.serializeUserStories(d4.blocks), "## A\n- one\n- brand new\n")
+  local d5 = core.parseUserStories("## A\n- one\n")
+  d5.blocks[#d5.blocks + 1] = { id = "new2", area = "A", text = "   ", dirty = true }
+  eq("userStories: blank new story dropped", core.serializeUserStories(d5.blocks), "## A\n- one\n")
+
+  -- robustness: nil / junk blocks never crash or corrupt
+  eq("userStories: nil text -> empty doc", #core.parseUserStories(nil).stories, 0)
+  eq("userStories: serialize nil -> empty", core.serializeUserStories(nil), "")
+  eq("userStories: serialize skips junk blocks", core.serializeUserStories({ "x", 5, { raw = "ok\n" } }), "ok\n")
+  eq("userStories: --- rule / bare dash / *** are not stories",
+     #core.parseUserStories("---\n***\n-nope\n").stories, 0)
+
+  -- a story edited to contain newlines (Shift+Enter / paste) collapses to ONE bullet
+  -- so it can't inject fake structure (a "\n## heading" or a second "- bullet")
+  local d6 = core.parseUserStories("## A\n- one\n")
+  d6.blocks[#d6.blocks + 1] = { id = "new3", area = "A", text = "multi\nline\n## fake\n- inject", dirty = true }
+  eq("userStories: newlines in a story collapse to one bullet (no injection)",
+     core.serializeUserStories(d6.blocks), "## A\n- one\n- multi line ## fake - inject\n")
+
+  -- FENCED CODE (fleet #1, HIGH): a "- " line inside a ``` fence is RAW, not a
+  -- deletable story (deleting it would corrupt the fence).
+  local fenced = core.parseUserStories("## A\n- real story\n\n```\n- not a story\n```\n")
+  eq("userStories: fenced bullet is NOT a story", #fenced.stories, 1)
+  eq("userStories: fenced file round-trips byte-exact",
+     core.serializeUserStories(fenced.blocks), "## A\n- real story\n\n```\n- not a story\n```\n")
+  local keptF = {}
+  for _, blk in ipairs(fenced.blocks) do if blk.id ~= fenced.stories[1].id then keptF[#keptF + 1] = blk end end
+  eq("userStories: deleting the real story leaves the fence intact",
+     core.serializeUserStories(keptF), "## A\n\n```\n- not a story\n```\n")
+
+  -- ADD to a file with NO final newline must NOT glue onto the last line (fleet #2-5, HIGH)
+  local nn = core.parseUserStories("## Notes\nfinal line no newline")
+  nn.blocks[#nn.blocks + 1] = { id = "new9", area = "Notes", text = "added story", dirty = true }
+  eq("userStories: add to a no-newline file does not glue",
+     core.serializeUserStories(nn.blocks), "## Notes\nfinal line no newline\n- added story\n")
+  eq("userStories: the added story survives a re-parse",
+     #core.parseUserStories(core.serializeUserStories(nn.blocks)).stories, 1)
+
+  -- each ## heading anchors its OWN raw block tagged with the exact area (add placement)
+  local h = core.parseUserStories("## Auth\n\n## Authentication\n- b\n")
+  local tags = {}
+  for _, blk in ipairs(h.blocks) do if blk.headingArea then tags[#tags + 1] = blk.headingArea end end
+  eq("userStories: heading blocks tagged with the EXACT area", table.concat(tags, "|"), "Auth|Authentication")
+
+  -- CRLF (fleet #6,9,15): an edited story uses the file's prevailing newline; no mixing
+  local crlf = core.parseUserStories("## A\r\n- one\r\n")
+  eq("userStories: CRLF round-trips unchanged", core.serializeUserStories(crlf.blocks), "## A\r\n- one\r\n")
+  crlf.stories[1].text = "changed"; crlf.stories[1].dirty = true
+  eq("userStories: edited story keeps CRLF", core.serializeUserStories(crlf.blocks), "## A\r\n- changed\r\n")
+
+  -- bullet marker preserved on edit (fleet #20: no * -> - churn)
+  local star = core.parseUserStories("## A\n* one\n")
+  eq("userStories: marker captured", star.stories[1].marker, "*")
+  star.stories[1].text = "two"; star.stories[1].dirty = true
+  eq("userStories: edited story keeps its * marker", core.serializeUserStories(star.blocks), "## A\n* two\n")
+
+  -- a story edited/pasted to START with a bullet marker doesn't double up (re-verify #2)
+  local dm = core.parseUserStories("## A\n- one\n")
+  dm.stories[1].text = "- pasted with dash"; dm.stories[1].dirty = true
+  eq("userStories: leading bullet marker in edited text is not doubled",
+     core.serializeUserStories(dm.blocks), "## A\n- pasted with dash\n")
+
+  -- idempotency: a second parse->serialize of edited output is stable
+  local once = core.serializeUserStories(d4.blocks)
+  eq("userStories: edited output is round-trip stable", core.serializeUserStories(core.parseUserStories(once).blocks), once)
+
+  -- well-formedness soft hint: the MANDATORY "so that"
+  check("userStories wellFormed: full story", core.userStoryWellFormed("As a user, I want X, so that Y"))
+  check("userStories wellFormed: missing so-that -> false", not core.userStoryWellFormed("As a user, I want X"))
+  check("userStories wellFormed: case-insensitive", core.userStoryWellFormed("AS A admin, I WANT logs, SO THAT I can audit"))
+  check("userStories wellFormed: empty -> false", not core.userStoryWellFormed("   "))
+  check("userStories wellFormed: plain text -> false", not core.userStoryWellFormed("just do the thing"))
+
+  -- cheapHash: deterministic, change-sensitive, fixed width
+  eq("userStories hash: deterministic", core.cheapHash("hello world"), core.cheapHash("hello world"))
+  check("userStories hash: change-sensitive", core.cheapHash("a") ~= core.cheapHash("b"))
+  eq("userStories hash: 8 hex chars", #core.cheapHash("anything"), 8)
+  eq("userStories hash: nil safe", #core.cheapHash(nil), 8)
+end
+
 -- ---- L1: persona / extra flags / resolver / env ----------------------------
 do
   eq("personaPrompt: nil when empty", core.personaPrompt({ name = "x" }), nil)

@@ -1970,6 +1970,26 @@ function FX.writeFile(path, content)
   local f = io.open(path, "w"); if f then f:write(content); f:close() end
 end
 
+-- Cheap existence check (stat only, no read). True iff the path exists.
+function FX.fileExists(path)
+  return type(path) == "string" and path ~= "" and hs.fs.attributes(path) ~= nil
+end
+
+-- Atomic write (temp + rename, same durable idiom as patchStatus/writeDecision) so a
+-- crash / concurrent reader never sees a half-written file. Creates the parent dir if
+-- needed. Returns true on success. Used for the user's user-stories.md (their source
+-- file -- never leave it truncated). Caller has already validated the path.
+function FX.writeFileAtomic(path, content)
+  local dir = path:match("^(.*)/[^/]+$")
+  if dir then pcall(function() hs.fs.mkdir(dir) end) end
+  local tmp = path .. ".tmp." .. tostring(hs.processInfo and hs.processInfo.processID or "p")
+  local f = io.open(tmp, "w"); if not f then return false end
+  local ok = pcall(function() f:write(content) end); f:close()
+  if not ok then os.remove(tmp); return false end
+  if not os.rename(tmp, path) then os.remove(tmp); return false end
+  return true
+end
+
 -- Caffeinate / keep-awake (F2). Reading state needs no privileges; toggling does.
 -- Read the live keep-awake flag without sudo (pmset -g is unprivileged). Returns
 -- true/false, or nil if the flag couldn't be read (caller keeps the UI as-is).
@@ -4429,6 +4449,51 @@ local function handleBridgeMsg(msg)
     reply({ files = parsed.files, summary = parsed.summary, root = root })
     return
   end
+  if a == "detail-stories" then
+    -- User Stories tab: read + parse the project's spec/product/user-stories.md. The
+    -- path is FIXED relative to the session cwd (no client-supplied path component ->
+    -- no traversal surface). Local-only; the tab is gated on has_user_stories so this
+    -- only fires for sessions whose cwd actually has the file.
+    local key = tostring(payload.v or "")
+    local it = byKey[key]
+    local function reply(tbl)
+      pcall(function() wv:evaluateJavaScript("window.ccStories("
+        .. jsString(key) .. ", " .. hs.json.encode(tbl) .. ")") end)
+    end
+    if not it or it.remote or not it.cwd or it.cwd == "" then reply({ missing = true }); return end
+    local path = it.cwd .. "/spec/product/user-stories.md"
+    local content = FX.fileExists(path) and FX.readFile(path) or nil
+    if content == nil then reply({ missing = true }); return end
+    local doc = core.parseUserStories(content)
+    reply({ blocks = doc.blocks, areas = doc.areas, hash = core.cheapHash(content),
+            path = "spec/product/user-stories.md" })
+    return
+  end
+  if a == "stories-save" then
+    -- Persist the panel's edited blocks back to user-stories.md. Guards: re-read first
+    -- and REFUSE if the on-disk content no longer matches the hash the panel loaded (an
+    -- external edit -- never silently clobber it), refuse an empty serialization when the
+    -- file currently has content (a lost-blocks bug must not erase the user's file), and
+    -- write atomically (temp + rename). Re-parse + push the fresh state on success.
+    local key = tostring(payload.v or "")
+    local it = byKey[key]
+    local function reply(tbl)
+      pcall(function() wv:evaluateJavaScript("window.ccStoriesSaved("
+        .. jsString(key) .. ", " .. hs.json.encode(tbl) .. ")") end)
+    end
+    if not it or it.remote or not it.cwd or it.cwd == "" then reply({ ok = false, error = "no-project" }); return end
+    local path = it.cwd .. "/spec/product/user-stories.md"
+    local current = FX.fileExists(path) and FX.readFile(path) or nil
+    if current == nil then reply({ ok = false, error = "missing" }); return end
+    if core.cheapHash(current) ~= tostring(payload.hash or "") then reply({ ok = false, error = "changed" }); return end
+    if type(payload.blocks) ~= "table" then reply({ ok = false, error = "bad-payload" }); return end
+    local text = core.serializeUserStories(payload.blocks)
+    if text == "" and current ~= "" then reply({ ok = false, error = "empty-refused" }); return end
+    if not FX.writeFileAtomic(path, text) then reply({ ok = false, error = "write-failed" }); return end
+    local doc = core.parseUserStories(text)
+    reply({ ok = true, blocks = doc.blocks, areas = doc.areas, hash = core.cheapHash(text) })
+    return
+  end
   if a == "detail-transcript" then
     -- F4 Transcript peek: the selected session's recent human-readable turns. Reads a
     -- bounded tail of its transcript JSONL; pure core.transcriptPeek extracts the user +
@@ -5673,6 +5738,27 @@ local HTML = [[
   #d-changes .ch-diff pre { white-space:pre-wrap; font-family:ui-monospace,Menlo,monospace; font-size:11px; line-height:1.45; margin:0;
     background:var(--surface-2); border:1px solid var(--border-weak); border-radius:6px; padding:6px 8px; max-height:340px; overflow:auto; }
   #d-changes .ch-diff .da { color:var(--ok); } #d-changes .ch-diff .dd { color:var(--danger); } #d-changes .ch-diff .dh { color:#5a9fd6; }
+  /* User Stories tab */
+  #d-stories .us-head { display:flex; align-items:center; gap:8px; margin:2px 0 8px; }
+  #d-stories .us-path { color:var(--muted); font-size:11px; flex:1; word-break:break-all; }
+  #d-stories .us-dirty { color:var(--warn); font-size:11px; }
+  #d-stories .us-save { background:var(--surface); color:var(--accent-text); border:1px solid var(--accent);
+                        border-radius:7px; padding:3px 12px; font-size:12px; cursor:pointer; flex:0 0 auto; }
+  #d-stories .us-save[disabled] { color:var(--dim); border-color:var(--border); cursor:default; }
+  #d-stories .us-flash { color:var(--text-2); font-size:11px; margin:0 0 8px; }
+  #d-stories .us-grp { color:var(--accent-text); font-size:10px; text-transform:uppercase; letter-spacing:.04em;
+                       margin:12px 0 4px; padding-bottom:3px; border-bottom:1px solid var(--border-weak); }
+  #d-stories .us-row { display:flex; align-items:flex-start; gap:7px; padding:5px 4px; border-bottom:1px solid var(--border-weak); }
+  #d-stories .us-row:hover { background:var(--surface-2); }
+  #d-stories .us-txt { color:var(--text); font-size:13px; line-height:1.45; flex:1; white-space:pre-wrap; word-break:break-word; }
+  #d-stories .us-warn { color:var(--warn); flex:0 0 auto; cursor:help; }
+  #d-stories .us-del { flex:0 0 auto; background:none; border:none; color:var(--dim); cursor:pointer; font-size:13px; padding:2px 5px; border-radius:6px; }
+  #d-stories .us-del:hover { color:var(--danger); background:#2a1f24; }
+  #d-stories .us-edit { flex:1; font:inherit; font-size:13px; line-height:1.45; color:var(--text); background:var(--surface-2);
+                        border:1px solid var(--accent); border-radius:6px; padding:4px 7px; resize:none; overflow:hidden; box-sizing:border-box; }
+  #d-stories .us-add { margin:6px 0 2px; background:none; border:1px dashed var(--border); color:var(--text-3);
+                       border-radius:7px; padding:3px 10px; font-size:12px; cursor:pointer; }
+  #d-stories .us-add:hover { color:var(--accent-text); border-color:var(--accent); }
   #d-head { display:flex; align-items:center; gap:8px; }
   #d-dot  { width:10px; height:10px; border-radius:50%; background:var(--dc,var(--dim)); flex:0 0 auto; }
   #d-name { font-size:14px; font-weight:700; color:var(--text-strong); }
@@ -6316,6 +6402,9 @@ local HTML = [[
     </div>
     <div class="d-panel" data-tab="changes">
       <div id="d-changes"></div>
+    </div>
+    <div class="d-panel" data-tab="stories">
+      <div id="d-stories"></div>
     </div>
     <div class="d-panel" data-tab="subagents">
       <div id="d-subagents"></div>
@@ -7706,6 +7795,155 @@ local HTML = [[
       if(!cb || !span) return;
       var id = cb.getAttribute("data-id"); if(id) startWorklistEdit(row, span, id);
     });
+
+    // ---- User Stories tab: view/add/edit/save spec/product/user-stories.md ----
+    // Staged-edit model: load parses the file into ordered `blocks` (raw verbatim +
+    // story items); the user mutates stories in this LOCAL copy; an explicit Save
+    // serializes the blocks back (server re-reads + hash-guards against external edits).
+    var STORIES = { key:null, data:null, blocks:null, hash:null, dirty:false, editing:null, flash:null };
+    var storiesNewSeq = 0;
+    function itemHasStories(key){ var it = findItem(key); return !!(it && it.has_user_stories); }
+    // JS twin of core.userStoryWellFormed -- a soft hint only (the mandatory "so that").
+    function storyWellFormed(text){
+      var s = String(text || "").toLowerCase();
+      if(s.replace(/\s+/g, "") === "") return false;
+      return s.indexOf("as a") >= 0 && (s.indexOf("i want") >= 0 || s.indexOf("i'd like") >= 0) && s.indexOf("so that") >= 0;
+    }
+    window.ccStories = function(key, data){
+      if(key !== selectedKey) return;                          // stale guard
+      STORIES = { key:key, data:data || {}, blocks:(data && data.blocks) || null,
+                  hash:(data && data.hash) || "", dirty:false, editing:null, flash:null };
+      renderStories();
+    };
+    window.ccStoriesSaved = function(key, res){
+      if(key !== selectedKey) return;
+      if(res && res.ok){
+        STORIES.blocks = res.blocks || STORIES.blocks;
+        STORIES.hash = res.hash || STORIES.hash;
+        STORIES.dirty = false; STORIES.editing = null; STORIES.flash = "Saved ✓";
+      } else {
+        var er = (res && res.error) || "unknown";
+        var hint = er === "changed" ? " — file changed on disk; switch tabs to reload"
+                 : er === "empty-refused" ? " — refusing to write an empty file; delete user-stories.md in your editor if you truly want it gone"
+                 : "";
+        STORIES.flash = "⚠ Save failed: " + er + hint;
+      }
+      renderStories();
+    };
+    function storiesFindBlock(id){
+      var b = STORIES.blocks || [];
+      for(var i=0;i<b.length;i++){ if(b[i] && b[i].raw === undefined && b[i].id === id) return b[i]; }
+      return null;
+    }
+    function storiesInsertIndex(area){
+      var b = STORIES.blocks || [], lastStory = -1, headingIdx = -1;
+      for(var i=0;i<b.length;i++){
+        if(b[i] && b[i].raw === undefined && (b[i].area || "") === (area || "")) lastStory = i;
+        if(b[i] && b[i].raw !== undefined && area && b[i].headingArea === area) headingIdx = i;   // exact (not substring)
+      }
+      if(lastStory >= 0) return lastStory + 1;
+      if(headingIdx >= 0) return headingIdx + 1;
+      return b.length;
+    }
+    function storiesAdd(area){
+      if(!STORIES.blocks) STORIES.blocks = [];
+      var id = "new" + (++storiesNewSeq);
+      STORIES.blocks.splice(storiesInsertIndex(area), 0, { id:id, area:area || "", text:"", dirty:true });
+      STORIES.dirty = true; STORIES.editing = id; STORIES.flash = null;
+      renderStories();
+    }
+    function storiesDelete(id){
+      var b = STORIES.blocks; if(!b) return;
+      for(var i=0;i<b.length;i++){ if(b[i] && b[i].raw === undefined && b[i].id === id){ b.splice(i, 1); break; } }
+      STORIES.dirty = true; if(STORIES.editing === id) STORIES.editing = null;
+      renderStories();
+    }
+    function storiesCommitEdit(ta){
+      var sid = ta.getAttribute("data-sid"), blk = storiesFindBlock(sid);
+      if(!blk){ STORIES.editing = null; renderStories(); return; }
+      var nt = (ta.value || "").trim();
+      if(nt === ""){ storiesDelete(sid); return; }          // cleared -> drop the story
+      if(nt !== (blk.text || "")){ blk.text = nt; blk.dirty = true; STORIES.dirty = true; }
+      STORIES.editing = null; STORIES.flash = null; renderStories();
+    }
+    function storiesCancelEdit(ta){
+      var sid = ta.getAttribute("data-sid"), blk = storiesFindBlock(sid);
+      STORIES.editing = null;
+      if(blk && (blk.text || "") === "" && String(blk.id).indexOf("new") === 0){ storiesDelete(sid); return; }  // drop an unfilled new row
+      renderStories();
+    }
+    function storiesSave(){
+      if(!STORIES.dirty || !STORIES.blocks) return;
+      try { window.webkit.messageHandlers.cc.postMessage(JSON.stringify({ a:"stories-save", v:selectedKey, hash:STORIES.hash, blocks:STORIES.blocks })); }
+      catch(e){ console.log("stories-save error", e); }
+    }
+    function renderStories(){
+      var box = document.getElementById("d-stories"); if(!box) return;
+      if(STORIES.key !== selectedKey){ box.innerHTML = ""; return; }
+      var d = STORIES.data;
+      if(d === null){ box.innerHTML = '<div class="tl-empty">Loading user stories…</div>'; return; }
+      if(d && d.missing){ box.innerHTML = '<div class="tl-empty">No spec/product/user-stories.md in this project.</div>'; return; }
+      var html = '<div class="us-head"><span class="us-path">' + esc((d && d.path) || "spec/product/user-stories.md")
+        + (STORIES.dirty ? ' <span class="us-dirty">● unsaved</span>' : '') + '</span>'
+        + '<button class="us-save"' + (STORIES.dirty ? '' : ' disabled') + ' onclick="storiesSave()">Save</button></div>';
+      if(STORIES.flash){ html += '<div class="us-flash">' + esc(STORIES.flash) + '</div>'; }
+      // group story blocks by area (first-seen order), then surface empty declared areas
+      var groups = [], byArea = {}, b = STORIES.blocks || [];
+      for(var i=0;i<b.length;i++){
+        if(b[i] && b[i].raw === undefined){
+          var a = b[i].area || "";
+          if(byArea[a] === undefined){ byArea[a] = groups.length; groups.push({ area:a, items:[] }); }
+          var gi = byArea[a]; groups[gi].items.push(b[i]);   // gi avoids a nested subscript (a doubled close-bracket would end the Lua long-string)
+        }
+      }
+      var areas = (d && d.areas) || [];
+      areas.forEach(function(a){ if(byArea[a] === undefined){ byArea[a] = groups.length; groups.push({ area:a, items:[] }); } });
+      if(!groups.length){ groups.push({ area:"", items:[] }); }
+      groups.forEach(function(g){
+        html += '<div class="us-grp">' + (g.area ? esc(g.area) : "General") + '</div>';
+        g.items.forEach(function(blk){
+          if(STORIES.editing === blk.id){
+            html += '<div class="us-row editing"><textarea class="us-edit" data-sid="' + esc(blk.id) + '">' + esc(blk.text || "") + '</textarea></div>';
+          } else {
+            var warn = !storyWellFormed(blk.text) ? ' <span class="us-warn" title="Convention: As a &lt;role&gt;, I want &lt;capability&gt;, so that &lt;benefit&gt; — the &quot;so that&quot; is required">⚠</span>' : '';
+            html += '<div class="us-row" data-sid="' + esc(blk.id) + '" title="Double-click to edit">'
+              + '<span class="us-txt">' + esc(blk.text || "") + '</span>' + warn
+              + '<button class="us-del" data-del="' + esc(blk.id) + '" title="Delete">✕</button></div>';
+          }
+        });
+        html += '<button class="us-add" data-area="' + esc(g.area) + '">+ Add story</button>';
+      });
+      box.innerHTML = html;
+      if(STORIES.editing){
+        var ta = box.querySelector(".us-edit");
+        if(ta){
+          ta.focus(); ta.select(); autoGrow(ta);
+          ta.oninput = function(){ autoGrow(ta); };
+          ta.onkeydown = function(e){
+            if(e.key === "Enter" && !e.shiftKey){ e.preventDefault(); storiesCommitEdit(ta); }
+            else if(e.key === "Escape"){ e.preventDefault(); storiesCancelEdit(ta); }
+          };
+          ta.onblur = function(){ if(STORIES.editing) storiesCommitEdit(ta); };
+        }
+      }
+    }
+    // Double-click a story row (not the ✕) -> edit; click +Add / ✕ delete (delegated).
+    document.addEventListener("dblclick", function(e){
+      var t = e.target; if(!t || !t.closest) return;
+      if(t.classList && t.classList.contains("us-del")) return;
+      var row = t.closest(".us-row"); if(!row || row.classList.contains("editing")) return;
+      var panel = document.getElementById("d-stories"); if(!panel || !panel.contains(row)) return;
+      var sid = row.getAttribute("data-sid"); if(!sid) return;
+      STORIES.editing = sid; STORIES.flash = null; renderStories();
+    });
+    document.addEventListener("click", function(e){
+      var t = e.target; if(!t) return;
+      var del = (t.classList && t.classList.contains("us-del")) ? t : (t.closest ? t.closest(".us-del") : null);
+      if(del && del.getAttribute){ var did = del.getAttribute("data-del");
+        if(did && document.getElementById("d-stories") && document.getElementById("d-stories").contains(del)){ storiesDelete(did); return; } }
+      var add = (t.classList && t.classList.contains("us-add")) ? t : (t.closest ? t.closest(".us-add") : null);
+      if(add && add.getAttribute){ storiesAdd(add.getAttribute("data-area") || ""); return; }
+    });
     function toggleSearch(){
       var b = document.getElementById("searchbar");
       var show = !b.classList.contains("show");
@@ -8746,9 +8984,14 @@ local HTML = [[
         TIMELINE = { key:null, events:null };       // L5: inline timeline is per-session, lazy
         CHECKPOINTS = { key:null, data:null };      // DR3: rewind checkpoints are per-session, lazy
         CHANGES = { key:null, data:null }; CH_DIFFS = {}; CH_OPEN = {};  // git Changes: per-session
+        STORIES = { key:null, data:null, blocks:null, hash:null, dirty:false, editing:null, flash:null };  // per-session
         resetScoreReadout();   // DR4: clear the run-score readout on selection change
         closeTabMenu();
         loadTabState(key);          // restore this project's {selectedTab, unpinned}
+        // The stories tab is gated on the file existing; if the restored tab is
+        // "stories" but this project has none, fall back to the default view.
+        if(detailTab === "stories" && !itemHasStories(key)) detailTab = "activity";
+        lastSelectedHasStories = itemHasStories(key);   // seed the gated-tab tracker for ccUpdate
       }
       selectedKey = key; renderDetail(); paintSelection();
       renderTabBar(); applyTabVisibility();  // built per-selection, NOT on the 1s tick
@@ -8805,6 +9048,7 @@ local HTML = [[
       bar.innerHTML = "";
       DETAIL_TABS.forEach(function(t){
         if(detailUnpinned[t.id]) return;           // hidden for this project
+        if(t.id === "stories" && !itemHasStories(selectedKey)) return;  // gated: file must exist
         var b = document.createElement("button");
         b.className = "d-tab" + (t.id === detailTab ? " active" : "");
         b.textContent = t.label; b.title = t.label;
@@ -8867,6 +9111,14 @@ local HTML = [[
           send("detail-changes", selectedKey);          // ccDetailChanges repaints
         }
         renderDetailChanges();
+      } else if(detailTab === "stories"){
+        // Don't re-fetch while there are unsaved local edits (a re-push would discard
+        // them); only (re)load when switching to a different session's stories.
+        if(STORIES.key !== selectedKey){
+          STORIES = { key: selectedKey, data: null, blocks: null, hash: null, dirty: false, editing: null, flash: null };
+          send("detail-stories", selectedKey);          // ccStories repaints
+        }
+        renderStories();
       } else if(detailTab === "subagents"){
         if(SUBAGENTS.key !== selectedKey){
           SUBAGENTS = { key: selectedKey, tree: null };  // pending (dedupes re-fetch)
@@ -9117,6 +9369,7 @@ local HTML = [[
       var h = document.createElement("div"); h.className = "tm-h";
       h.textContent = "Tabs for this project"; m.appendChild(h);
       DETAIL_TABS.forEach(function(t){
+        if(t.id === "stories" && !itemHasStories(selectedKey)) return;  // gated tab: not offered when the file is absent
         var locked = (t.id === "activity");
         var lab = document.createElement("label"); if(locked) lab.className = "locked";
         var cb = document.createElement("input"); cb.type = "checkbox";
@@ -11221,6 +11474,7 @@ local HTML = [[
     var PANEL_PROVIDERS = [];
     var PANEL_BUNDLES = [];   // L2 policy-bundle names (detail-panel Policy dropdown)
     var lastSelectedStatus = null;
+    var lastSelectedHasStories = null;   // tracks the selected tile's user-stories-file presence (gated tab)
     window.ccUpdate = function(items, providers, bundles){
       lastItems = items || [];
       if(providers !== undefined) PANEL_PROVIDERS = providers || [];
@@ -11243,6 +11497,15 @@ local HTML = [[
         }
       }
       lastSelectedStatus = st;
+      // The User Stories tab is gated on the file existing; if that flips for the
+      // selected project mid-session (the file is created or deleted), rebuild the tab
+      // bar so the tab appears/disappears, and fall back off it if it just vanished.
+      var hs = sel ? !!sel.has_user_stories : false;
+      if(sel && lastSelectedHasStories !== null && hs !== lastSelectedHasStories){
+        if(detailTab === "stories" && !hs) detailTab = "activity";
+        renderTabBar(); applyTabVisibility(); maybeLoadActiveTab();
+      }
+      lastSelectedHasStories = sel ? hs : null;
     };
 
     // One tile's HTML. Extracted from ccUpdate so renderGrid can map the (filtered)
@@ -12045,6 +12308,13 @@ function FX._refreshBody()
         now, { activeWindow = tonumber(core.config(cfg, "subagents.activeWindow", 45)) or 45 })
       it.bg_active = bg.active
       it.bg_count = bg.count
+    end
+
+    -- User Stories tab gate: does this project carry spec/product/user-stories.md?
+    -- Cheap stat (local sessions only -- remote tiles have no local cwd). Drives the
+    -- conditional "User Stories" detail tab (renderTabBar skips it when absent).
+    if it.cwd and it.cwd ~= "" and not it.remote then
+      it.has_user_stories = FX.fileExists(it.cwd .. "/spec/product/user-stories.md") or nil
     end
 
     -- L5 OS-native banner on a fresh rising edge into approval/done (off by default;

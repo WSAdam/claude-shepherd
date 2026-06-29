@@ -1976,6 +1976,57 @@ do
         and src:find("worklistEditSend(id, nt)", 1, true) ~= nil)
 end
 
+-- ---- User Stories tab (spec/product/user-stories.md viewer/editor) ----
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("stories: HTML panel exists",
+        src:find('data-tab="stories"', 1, true) ~= nil and src:find('id="d-stories"', 1, true) ~= nil)
+  check("stories: backend load + save handlers",
+        src:find('a == "detail-stories"', 1, true) ~= nil and src:find('a == "stories-save"', 1, true) ~= nil)
+  check("stories: load reads the FIXED project path + parses via core",
+        src:find('"/spec/product/user-stories.md"', 1, true) ~= nil
+        and src:find("core.parseUserStories(content)", 1, true) ~= nil)
+  check("stories: save is hash-guarded against an external edit",
+        src:find('error = "changed"', 1, true) ~= nil and src:find("core.cheapHash(current)", 1, true) ~= nil)
+  check("stories: save refuses to erase a non-empty file (lost-blocks guard)",
+        src:find('error = "empty-refused"', 1, true) ~= nil)
+  check("stories: save serializes via core + writes atomically",
+        src:find("core.serializeUserStories(payload.blocks)", 1, true) ~= nil
+        and src:find("FX.writeFileAtomic(path, text)", 1, true) ~= nil)
+  check("stories: tab gated on per-item has_user_stories (bar + selection fallback)",
+        src:find('t.id === "stories" && !itemHasStories(selectedKey)', 1, true) ~= nil
+        and src:find('detailTab === "stories" && !itemHasStories(key)', 1, true) ~= nil)
+  check("stories: per-item flag set from a cheap stat in refresh",
+        src:find('it.has_user_stories = FX.fileExists(it.cwd .. "/spec/product/user-stories.md")', 1, true) ~= nil)
+  check("stories: lazy-loads on tab activation (not the 1Hz tick)",
+        src:find('send("detail-stories", selectedKey)', 1, true) ~= nil)
+  check("stories: staged add/edit/delete/save JS present",
+        src:find("function renderStories(", 1, true) ~= nil
+        and src:find("function storiesAdd(", 1, true) ~= nil
+        and src:find("function storiesCommitEdit(", 1, true) ~= nil
+        and src:find("function storiesDelete(", 1, true) ~= nil
+        and src:find("function storiesSave(", 1, true) ~= nil)
+  check("stories: double-click a row edits; +Add / ✕ delete wired",
+        src:find('t.closest(".us-row")', 1, true) ~= nil
+        and src:find('t.closest(".us-add")', 1, true) ~= nil
+        and src:find('t.closest(".us-del")', 1, true) ~= nil)
+  check("stories: Save disabled until dirty; soft so-that hint twin",
+        src:find("STORIES.dirty ? '' : ' disabled'", 1, true) ~= nil
+        and src:find("function storyWellFormed(", 1, true) ~= nil)
+  check("stories: no doubled-bracket in the embedded JS (would close the Lua [[ string)",
+        src:find("groups[byArea[a]].items", 1, true) == nil)
+  check("stories: add placement matches the heading area EXACTLY (not substring)",
+        src:find("b[i].headingArea === area", 1, true) ~= nil
+        and src:find('String(b[i].raw).indexOf("## "', 1, true) == nil)
+  check("stories: gated tab appears/disappears mid-session when the file flips",
+        src:find("lastSelectedHasStories", 1, true) ~= nil
+        and src:find('detailTab === "stories" && !hs', 1, true) ~= nil)
+  check("stories: empty-refused save shows a human-readable reason (not a raw token)",
+        src:find('er === "empty-refused"', 1, true) ~= nil)
+end
+
 -- ---- F4: transcript peek detail tab ----
 do
   local f = io.open(ROOT .. "claude-dashboard.lua", "r")

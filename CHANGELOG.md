@@ -4,6 +4,36 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-29 — Project-aware "User Stories" detail tab
+
+### Added — view / add / edit a project's spec/product/user-stories.md
+
+A **User Stories** detail tab appears **only when** the opened project carries
+`spec/product/user-stories.md`. It shows the file's stories grouped by capability area (the
+`##` headings), with **+ Add story** per area, **double-click** to edit a story inline, a ✕ to
+delete, and an explicit **Save** (staged edits, an "● unsaved" indicator, re-render on save).
+A soft ⚠ hint flags any story missing the mandatory "so that".
+
+The parser keeps every non-story line (title, intro, `##` headings, prose, blanks, fenced
+code) **verbatim**, so an unedited `\n`-terminated file round-trips byte-for-byte. Because it's
+the user's source file, saves are guarded: atomic temp+rename write, a content-hash guard that
+refuses to clobber an external edit, a refuse-to-write-empty guard, and newline-collapse +
+leading-marker strip so an edit can't inject fake structure. Per-file line endings (CRLF/LF)
+are preserved.
+
+### Adversarially verified
+
+Built test-first, then hardened by two multi-agent adversarial sweeps (44 agents). The first
+confirmed 21 findings; the data-safety ones were fixed: `- ` lines inside ` ``` ` fences are
+kept raw (deleting them no longer corrupts the fence); appending to a file with no final
+newline no longer glues onto the last line (silent corruption); new stories land under the
+exact capability area (heading-anchored, not substring-matched); CRLF files keep their endings;
+`*` markers are preserved. A re-verification sweep confirmed the fixes hold with **no
+regressions** (0 high/med) and added 2 polish fixes (no doubled marker on a pasted "- "; a
+human-readable "refusing to write an empty file" message). Accepted/documented LOW edges:
+duplicate same-name headings merge in the UI, and an indented fence written *inside* a bullet
+folds into that bullet's text — both round-trip-safe.
+
 ## 2026-06-26 — Edit a worklist item in place
 
 ### Added — double-click a My List item to edit it

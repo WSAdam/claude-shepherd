@@ -6492,6 +6492,161 @@ function M.worklistNormalize(t)
   return { generic = generic, byProject = byProject }
 end
 
+-- ---- User stories editor (spec/product/user-stories.md) -------------------
+-- Parse / edit / serialize a project's user-stories.md so the panel can show its
+-- stories (grouped by capability area) and add/edit/save them WITHOUT clobbering
+-- the file's non-story content. Model = "anchored blocks": every non-story line
+-- (the # title, intro prose, ## headings, blanks, trailing notes) is kept VERBATIM
+-- as a `raw` block; each bullet is a `story` block tagged with its `area` (the
+-- nearest preceding ## heading). The invariant the round-trip rests on: the
+-- concatenation of every block's raw/src text == the original file byte-for-byte,
+-- so serialize(parse(x)) == x exactly. Serialize re-emits a story as its original
+-- `src` when unchanged (zero churn) or `- <text>` when added/edited (`dirty`).
+
+-- A story bullet: up to 3 leading spaces, then - or * , a space, then the text.
+-- Returns the text (possibly "") or nil. A bare "-" / "---" rule / "***" is NOT a
+-- bullet (no required space after the marker).
+local function uslBullet(line)
+  return line:match("^ ? ? ?([%-%*]) (.*)$")   -- returns marker ("-"/"*"), text  (or nil)
+end
+-- An H2 heading's area name (trimmed), or nil. (Only ## -- the # title stays raw.)
+local function uslHeadingArea(line)
+  local h = line:match("^##%s+(.*)$")
+  return h and (h:gsub("%s+$", "")) or nil
+end
+-- A fenced-code delimiter (``` or ~~~, >=3, optional indent + info string).
+local function uslFence(line)
+  return line:match("^%s*```") ~= nil or line:match("^%s*~~~") ~= nil
+end
+-- A continuation line of a bullet: indented (>=2 spaces / a tab) + non-blank, and
+-- not itself a bullet or heading -- i.e. a wrapped tail of the bullet above it.
+local function uslIsContinuation(line)
+  if line:match("^%s*$") then return false end
+  if uslHeadingArea(line) or uslBullet(line) then return false end
+  return line:match("^  ") ~= nil or line:match("^\t") ~= nil
+end
+
+-- parseUserStories(text) -> { blocks, stories, areas }
+--   blocks  : ordered { {raw=".."[,headingArea]} | {id,area,marker,text,src} }
+--   stories : the story blocks, in order (same table refs as in blocks)
+--   areas   : ordered distinct non-empty area names (## headings), for grouping
+-- Round-trip: serialize(parse(x).blocks) == x byte-for-byte when x ends in a newline
+-- (the normal case); a file with no final newline gains one (a safe POSIX-text
+-- normalization -- the old trailing-newline strip caused appends to glue onto the last
+-- line, silently corrupting the file). Lines inside ```/~~~ fences are kept RAW (never
+-- parsed as stories), and each ## heading anchors its own raw block (tagged headingArea)
+-- so an add can be placed under the exact area even when it has no stories yet.
+function M.parseUserStories(text)
+  text = type(text) == "string" and text or ""
+  local blocks, stories, areas, seen = {}, {}, {}, {}
+  if text == "" then return { blocks = blocks, stories = stories, areas = areas } end
+  local lines = {}
+  for line in (text .. "\n"):gmatch("([^\n]*)\n") do lines[#lines + 1] = line end
+  if text:sub(-1) == "\n" then lines[#lines] = nil end   -- drop the phantom empty
+
+  local rawbuf, pendingHeadingArea
+  local function flushRaw()
+    if rawbuf then
+      local blk = { raw = rawbuf }
+      if pendingHeadingArea ~= nil then blk.headingArea = pendingHeadingArea; pendingHeadingArea = nil end
+      blocks[#blocks + 1] = blk; rawbuf = nil
+    end
+  end
+  local curArea, sid, i, inFence = "", 0, 1, false
+  while i <= #lines do
+    local line = lines[i]
+    if uslFence(line) then            -- fence delimiter: toggle, keep raw
+      inFence = not inFence
+      rawbuf = (rawbuf or "") .. line .. "\n"; i = i + 1
+    elseif inFence then               -- inside a code fence: raw, never a story
+      rawbuf = (rawbuf or "") .. line .. "\n"; i = i + 1
+    else
+      local marker, bt = uslBullet(line)
+      if marker ~= nil then
+        flushRaw()
+        local src, parts, j = line .. "\n", { (bt:gsub("%s+$", "")) }, i + 1
+        while j <= #lines and uslIsContinuation(lines[j]) do
+          src = src .. lines[j] .. "\n"
+          parts[#parts + 1] = (lines[j]:gsub("^%s+", ""):gsub("%s+$", ""))
+          j = j + 1
+        end
+        sid = sid + 1
+        local st = { id = "s" .. sid, area = curArea, marker = marker,
+                     text = table.concat(parts, " "), src = src }
+        blocks[#blocks + 1] = st; stories[#stories + 1] = st
+        i = j
+      else
+        local area = uslHeadingArea(line)
+        if area ~= nil then
+          flushRaw()                  -- close the prior run so this heading anchors its own block
+          curArea = area; pendingHeadingArea = area
+          if area ~= "" and not seen[area] then seen[area] = true; areas[#areas + 1] = area end
+        end
+        rawbuf = (rawbuf or "") .. line .. "\n"; i = i + 1
+      end
+    end
+  end
+  flushRaw()
+  return { blocks = blocks, stories = stories, areas = areas }
+end
+
+-- serializeUserStories(blocks) -> text. raw verbatim; a story emits its original `src`
+-- unless `dirty` (or it has no src -- a freshly-added story), in which case it emits a
+-- single-line `<marker> <text>` (marker preserved, default "-"). A story is ONE line:
+-- embedded newlines (a Shift+Enter / multi-line paste) collapse to spaces so an edit
+-- can't inject fake structure. A blank added story is dropped (not written as a bare
+-- "- "). New/edited lines use the file's PREVAILING newline (CRLF vs LF) so a save
+-- never mixes line endings.
+function M.serializeUserStories(blocks)
+  blocks = blocks or {}
+  local eol = "\n"
+  for _, b in ipairs(blocks) do
+    local s = type(b) == "table" and (b.raw or b.src) or nil
+    if type(s) == "string" and s:find("\r\n", 1, true) then eol = "\r\n"; break end
+  end
+  local out = {}
+  for _, b in ipairs(blocks) do
+    if type(b) ~= "table" then  -- skip junk
+    elseif b.raw ~= nil then
+      out[#out + 1] = tostring(b.raw)
+    else
+      local txt = type(b.text) == "string" and b.text or ""
+      if b.dirty or b.src == nil or b.src == "" then
+        local oneLine = txt:gsub("%s*[\r\n]+%s*", " "):gsub("^%s+", ""):gsub("%s+$", "")
+        oneLine = oneLine:gsub("^[%-%*]%s+", "")   -- a user-typed/pasted leading "- "/"* " must not double the marker
+        if oneLine ~= "" then
+          local mk = (b.marker == "*") and "*" or "-"
+          out[#out + 1] = mk .. " " .. oneLine .. eol
+        end
+      else
+        out[#out + 1] = tostring(b.src)
+      end
+    end
+  end
+  return table.concat(out)
+end
+
+-- Does a story line satisfy the team convention "As a <role>, I want <cap>, so that
+-- <benefit>" -- specifically the MANDATORY "so that"? Lenient + case-insensitive;
+-- used only for a soft UI hint, never to block a save. Empty -> false.
+function M.userStoryWellFormed(text)
+  local s = tostring(text or ""):lower()
+  if s:gsub("%s+", "") == "" then return false end
+  return s:find("as a", 1, true) ~= nil
+     and (s:find("i want", 1, true) ~= nil or s:find("i'd like", 1, true) ~= nil)
+     and s:find("so that", 1, true) ~= nil
+end
+
+-- A cheap, stable content hash (djb2) for the on-disk file -- the panel echoes the
+-- hash it loaded and the save handler refuses to write if the file changed underneath
+-- (an external edit), so a stale panel can't silently clobber it. Pure.
+function M.cheapHash(s)
+  s = tostring(s or "")
+  local h = 5381
+  for i = 1, #s do h = (h * 33 + s:byte(i)) % 4294967296 end
+  return string.format("%08x", h)
+end
+
 -- ===========================================================================
 -- L2 — Named policy / guardrail bundles + attachments
 -- ===========================================================================
@@ -7271,6 +7426,7 @@ M.DETAIL_TABS = {
   { id = "decisions",  label = "Decisions" },
   { id = "usage",      label = "Usage" },
   { id = "changes",    label = "Changes" },
+  { id = "stories",    label = "User Stories" },  -- gated: shows only when spec/product/user-stories.md exists
   { id = "subagents",  label = "Agents" },
   { id = "queue",      label = "Queue" },
 }
