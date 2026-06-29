@@ -4484,14 +4484,16 @@ local function handleBridgeMsg(msg)
     if not it or it.remote or not it.cwd or it.cwd == "" then reply({ ok = false, error = "no-project" }); return end
     local path = it.cwd .. "/spec/product/user-stories.md"
     local current = FX.fileExists(path) and FX.readFile(path) or nil
-    if current == nil then reply({ ok = false, error = "missing" }); return end
-    if core.cheapHash(current) ~= tostring(payload.hash or "") then reply({ ok = false, error = "changed" }); return end
-    if type(payload.blocks) ~= "table" then reply({ ok = false, error = "bad-payload" }); return end
-    local text = core.serializeUserStories(payload.blocks)
-    if text == "" and current ~= "" then reply({ ok = false, error = "empty-refused" }); return end
-    if not FX.writeFileAtomic(path, text) then reply({ ok = false, error = "write-failed" }); return end
-    local doc = core.parseUserStories(text)
-    reply({ ok = true, blocks = doc.blocks, areas = doc.areas, hash = core.cheapHash(text) })
+    -- core.storiesSaveDecision owns the pure guard order (missing/changed/bad-payload/
+    -- empty-refused) + serialization. NB the hash check is a best-effort OPTIMISTIC guard,
+    -- NOT a lock: an external write landing between this re-read and writeFileAtomic's
+    -- rename (a small TOCTOU window) would still win last-writer. That's acceptable for a
+    -- single local user driving one dashboard; a real file lock would be overkill here.
+    local dec = core.storiesSaveDecision(current, tostring(payload.hash or ""), payload.blocks)
+    if not dec.ok then reply({ ok = false, error = dec.error }); return end
+    if not FX.writeFileAtomic(path, dec.text) then reply({ ok = false, error = "write-failed" }); return end
+    local doc = core.parseUserStories(dec.text)
+    reply({ ok = true, blocks = doc.blocks, areas = doc.areas, hash = core.cheapHash(dec.text) })
     return
   end
   if a == "detail-transcript" then

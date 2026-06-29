@@ -1988,13 +1988,13 @@ do
   check("stories: load reads the FIXED project path + parses via core",
         src:find('"/spec/product/user-stories.md"', 1, true) ~= nil
         and src:find("core.parseUserStories(content)", 1, true) ~= nil)
-  check("stories: save is hash-guarded against an external edit",
-        src:find('error = "changed"', 1, true) ~= nil and src:find("core.cheapHash(current)", 1, true) ~= nil)
-  check("stories: save refuses to erase a non-empty file (lost-blocks guard)",
-        src:find('error = "empty-refused"', 1, true) ~= nil)
-  check("stories: save serializes via core + writes atomically",
-        src:find("core.serializeUserStories(payload.blocks)", 1, true) ~= nil
-        and src:find("FX.writeFileAtomic(path, text)", 1, true) ~= nil)
+  -- The save GUARDS (missing/changed/bad-payload/empty-refused + serialize) are pure in
+  -- core.storiesSaveDecision and tested behaviorally in core.test.lua; here we only pin
+  -- that the handler delegates to it and writes atomically (the IO it still owns).
+  check("stories: handler delegates the guards to core.storiesSaveDecision",
+        src:find("core.storiesSaveDecision(current,", 1, true) ~= nil)
+  check("stories: handler writes the decided text atomically",
+        src:find("FX.writeFileAtomic(path, dec.text)", 1, true) ~= nil)
   check("stories: tab gated on per-item has_user_stories (bar + selection fallback)",
         src:find('t.id === "stories" && !itemHasStories(selectedKey)', 1, true) ~= nil
         and src:find('detailTab === "stories" && !itemHasStories(key)', 1, true) ~= nil)

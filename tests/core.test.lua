@@ -5137,6 +5137,28 @@ do
   check("userStories hash: change-sensitive", core.cheapHash("a") ~= core.cheapHash("b"))
   eq("userStories hash: 8 hex chars", #core.cheapHash("anything"), 8)
   eq("userStories hash: nil safe", #core.cheapHash(nil), 8)
+
+  -- storiesSaveDecision: the save guards, exercised behaviorally (real calls, not a
+  -- source grep) -- this is the data-safety chokepoint the panel's stories-save runs.
+  local base = "## A\n- one\n- two\n"
+  local baseHash = core.cheapHash(base)
+  local baseBlocks = core.parseUserStories(base).blocks
+  eq("storiesSave: missing file (nil current) -> rejected", core.storiesSaveDecision(nil, baseHash, baseBlocks).error, "missing")
+  eq("storiesSave: hash mismatch -> changed (external edit, never clobber)",
+     core.storiesSaveDecision(base, "deadbeef", baseBlocks).error, "changed")
+  eq("storiesSave: non-table blocks -> bad-payload", core.storiesSaveDecision(base, baseHash, "nope").error, "bad-payload")
+  eq("storiesSave: empty serialization over a non-empty file -> empty-refused",
+     core.storiesSaveDecision(base, baseHash, {}).error, "empty-refused")
+  local clean = core.storiesSaveDecision(base, baseHash, baseBlocks)
+  check("storiesSave: unedited save ok", clean.ok == true)
+  eq("storiesSave: unedited save returns the file verbatim (zero churn)", clean.text, base)
+  local ed = core.parseUserStories(base)
+  ed.stories[1].text = "changed"; ed.stories[1].dirty = true
+  local edDec = core.storiesSaveDecision(base, baseHash, ed.blocks)
+  check("storiesSave: edited save ok", edDec.ok == true)
+  eq("storiesSave: edited save returns the edited markdown", edDec.text, "## A\n- changed\n- two\n")
+  check("storiesSave: empty file legitimately staying empty is allowed",
+        core.storiesSaveDecision("", core.cheapHash(""), {}).ok == true)
 end
 
 -- ---- L1: persona / extra flags / resolver / env ----------------------------

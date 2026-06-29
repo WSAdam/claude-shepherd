@@ -17,6 +17,10 @@ assert_eq "group filter chip label is esc()'d"  "yes" "$(has 'esc(g)')"
 assert_eq "per-tile group tag is esc()'d"        "yes" "$(has 'esc(it.group)')"
 assert_eq "tile display label/name is esc()'d"   "yes" "$(has 'esc(it.label')"
 assert_eq "worklist item text is esc()'d"        "yes" "$(has 'esc(it.text')"
+# user-stories.md content is fully user-authored -> both the story TEXT and the ## area
+# headings must be esc()'d before reaching the panel innerHTML (renderStories).
+assert_eq "user-story text is esc()'d"           "yes" "$(has 'esc(blk.text')"
+assert_eq "user-story area heading is esc()'d"   "yes" "$(has 'esc(g.area)')"
 
 # 2. esc() itself still entity-encodes the HTML metacharacters (not gutted to a no-op)
 assert_eq "esc() encodes &"  "yes" "$(has '.replace(/&/g,"&amp;")')"

@@ -6502,6 +6502,8 @@ end
 -- concatenation of every block's raw/src text == the original file byte-for-byte,
 -- so serialize(parse(x)) == x exactly. Serialize re-emits a story as its original
 -- `src` when unchanged (zero churn) or `- <text>` when added/edited (`dirty`).
+-- The usl* helpers (usl = User-Stories Lexer) are file-local line classifiers used
+-- only by parseUserStories to tokenize the file one line at a time.
 
 -- A story bullet: up to 3 leading spaces, then - or * , a space, then the text.
 -- Returns the text (possibly "") or nil. A bare "-" / "---" rule / "***" is NOT a
@@ -6552,6 +6554,15 @@ function M.parseUserStories(text)
       blocks[#blocks + 1] = blk; rawbuf = nil
     end
   end
+  -- Loop state (six locals, lifecycles differ):
+  --   rawbuf (string|nil)   -- accumulates consecutive non-story lines; emitted+cleared ONLY by flushRaw()
+  --   pendingHeadingArea    -- one-shot: set when a ## line is seen, consumed by the next flushRaw() so the
+  --                            heading's OWN raw block carries `headingArea` (exact add-placement)
+  --   curArea (string,"")   -- STICKY running area stamped on every story until the next ## reassigns it
+  --                            (starts "", not nil, so pre-heading bullets group under the empty area)
+  --   inFence (bool)        -- toggles on each ``` / ~~~ delimiter; forces lines raw while true
+  --   sid (int)             -- monotonic story-id counter feeding "s"..sid
+  --   i (cursor)            -- NOT always i+1: the bullet branch consumes [i..j) via uslIsContinuation and sets i = j
   local curArea, sid, i, inFence = "", 0, 1, false
   while i <= #lines do
     local line = lines[i]
@@ -6590,13 +6601,22 @@ function M.parseUserStories(text)
   return { blocks = blocks, stories = stories, areas = areas }
 end
 
--- serializeUserStories(blocks) -> text. raw verbatim; a story emits its original `src`
--- unless `dirty` (or it has no src -- a freshly-added story), in which case it emits a
--- single-line `<marker> <text>` (marker preserved, default "-"). A story is ONE line:
--- embedded newlines (a Shift+Enter / multi-line paste) collapse to spaces so an edit
--- can't inject fake structure. A blank added story is dropped (not written as a bare
--- "- "). New/edited lines use the file's PREVAILING newline (CRLF vs LF) so a save
--- never mixes line endings.
+-- Render an added/edited story as ONE bullet line (or nil to drop a blank one): collapse
+-- any embedded newlines (Shift+Enter / multi-line paste) to spaces so an edit can't
+-- inject fake structure, trim, strip a leading bullet marker the user may have typed (so
+-- it can't double up), then prefix the story's own marker (default "-") + the file's eol.
+local function uslBulletLine(b, eol)
+  local txt = (type(b.text) == "string" and b.text or "")
+    :gsub("%s*[\r\n]+%s*", " "):gsub("^%s+", ""):gsub("%s+$", ""):gsub("^[%-%*]%s+", "")
+  if txt == "" then return nil end
+  return ((b.marker == "*") and "*" or "-") .. " " .. txt .. eol
+end
+
+-- serializeUserStories(blocks) -> text. Three-way emit: a raw block verbatim; an
+-- unchanged story its original `src` (the zero-churn round-trip path); an added/edited
+-- (`dirty`, or no src) story a freshly-rendered single-line bullet via uslBulletLine
+-- (a blank one drops out). New/edited lines use the file's PREVAILING newline (CRLF vs
+-- LF) so a save never mixes line endings.
 function M.serializeUserStories(blocks)
   blocks = blocks or {}
   local eol = "\n"
@@ -6609,21 +6629,32 @@ function M.serializeUserStories(blocks)
     if type(b) ~= "table" then  -- skip junk
     elseif b.raw ~= nil then
       out[#out + 1] = tostring(b.raw)
+    elseif b.dirty or b.src == nil or b.src == "" then
+      local line = uslBulletLine(b, eol)
+      if line then out[#out + 1] = line end
     else
-      local txt = type(b.text) == "string" and b.text or ""
-      if b.dirty or b.src == nil or b.src == "" then
-        local oneLine = txt:gsub("%s*[\r\n]+%s*", " "):gsub("^%s+", ""):gsub("%s+$", "")
-        oneLine = oneLine:gsub("^[%-%*]%s+", "")   -- a user-typed/pasted leading "- "/"* " must not double the marker
-        if oneLine ~= "" then
-          local mk = (b.marker == "*") and "*" or "-"
-          out[#out + 1] = mk .. " " .. oneLine .. eol
-        end
-      else
-        out[#out + 1] = tostring(b.src)
-      end
+      out[#out + 1] = tostring(b.src)   -- unchanged story: verbatim, zero churn
     end
   end
   return table.concat(out)
+end
+
+-- Decide whether a stories-save may proceed, given the file's CURRENT on-disk content
+-- (nil = missing), the hash the panel loaded, and the panel's edited blocks. PURE -- the
+-- dashboard handler does the read/write/reply IO around it (and the no-project/path
+-- checks); this owns the guard order. Returns either
+--   { ok = false, error = "missing"|"changed"|"bad-payload"|"empty-refused" }  -- reject
+--   { ok = true, text = <serialized markdown> }                                -- write this
+-- Guards: the file must still exist; cheapHash(current) must match the loaded hash (else
+-- an external edit landed -- never clobber it); blocks must be a table; and a non-empty
+-- file must never be reduced to "" (a lost-blocks bug must not erase the user's file).
+function M.storiesSaveDecision(current, hash, blocks)
+  if type(current) ~= "string" then return { ok = false, error = "missing" } end
+  if M.cheapHash(current) ~= tostring(hash or "") then return { ok = false, error = "changed" } end
+  if type(blocks) ~= "table" then return { ok = false, error = "bad-payload" } end
+  local text = M.serializeUserStories(blocks)
+  if text == "" and current ~= "" then return { ok = false, error = "empty-refused" } end
+  return { ok = true, text = text }
 end
 
 -- Does a story line satisfy the team convention "As a <role>, I want <cap>, so that
@@ -6637,9 +6668,12 @@ function M.userStoryWellFormed(text)
      and s:find("so that", 1, true) ~= nil
 end
 
--- A cheap, stable content hash (djb2) for the on-disk file -- the panel echoes the
+-- A cheap, stable content hash (32-bit djb2) for the on-disk file -- the panel echoes the
 -- hash it loaded and the save handler refuses to write if the file changed underneath
--- (an external edit), so a stale panel can't silently clobber it. Pure.
+-- (an external edit), so a stale panel can't silently clobber it. Pure. NB: this is a
+-- change DETECTOR, not a cryptographic digest -- a match means "almost certainly
+-- unchanged", not "provably identical" (a 32-bit collision between two hand-edited
+-- markdown files is astronomically unlikely, and the worst case is one stale save).
 function M.cheapHash(s)
   s = tostring(s or "")
   local h = 5381
