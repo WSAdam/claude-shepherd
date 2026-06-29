@@ -202,6 +202,28 @@ rulings, data shapes) is in git history of `todos.md` and in `docs/feature-minin
   per-project $ + budget-alert rules; DR6 an LLM classify pass + fleet-wide opt-in once trusted; DR7 worktree
   cleanup of an abandoned (never-kept) cohort (`git worktree prune`).
 
+## State (2026-06-29) — User Stories detail tab (view/edit spec/product/user-stories.md)
+
+A gated **User Stories** detail tab (`core.DETAIL_TABS` `stories`), shown only when the selected
+project has `spec/product/user-stories.md` (per-item `has_user_stories` stat in the refresh;
+`renderTabBar`/⋯ menu/selection honor the gate, and `ccUpdate` re-renders the bar when the file
+appears/disappears mid-session via `lastSelectedHasStories`). Lazy `detail-stories` load +
+`stories-save` save handlers (local-only, fixed project path — no client path component).
+
+Pure core: **`M.parseUserStories`/`M.serializeUserStories`** — an "anchored block" model where
+every non-story line (title, intro, `##` headings, prose, blanks, **fenced code**) is a `raw`
+block kept VERBATIM and each bullet is a `story` tagged with `area` + `marker`. **Invariant:**
+`serialize(parse(x)) == x` byte-for-byte for a `\n`-terminated file; a no-final-newline file
+gains one (normalization — the old trailing-newline strip caused appends to glue + corrupt).
+A story is ONE line (embedded newlines collapse; a leading bullet marker is stripped) so an
+edit can't inject structure. Each `##` heading anchors its own raw block (tagged `headingArea`)
+so an add lands under the EXACT area. `M.cheapHash` backs the save concurrency guard;
+`M.userStoryWellFormed` the soft "so that" hint. Saves: re-read + hash-guard against an external
+edit, refuse an empty write over a non-empty file, atomic temp+rename (`FX.writeFileAtomic`).
+Built test-first, then hardened by two multi-agent adversarial sweeps (44 agents; 21 + 6 LOW
+findings triaged). Accepted LOW edges: duplicate same-name headings merge in the UI; an indented
+fence written inside a bullet folds into that bullet's text — both round-trip-safe.
+
 ## State (2026-06-19) — Appearance system (themeable UI) + new-project cold-start fix
 
 A full visual refresh: the panel stylesheet was converted to a **`:root` design-token layer**, and an

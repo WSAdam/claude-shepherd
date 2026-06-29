@@ -215,9 +215,11 @@ The **Wants** (the exact command) and **Why** (the assistant's reasoning before 
 request) clamp to two lines — **click to expand**.
 
 The detail panel groups its views into a **tab strip** — **Activity** (the default: status,
-wants/why, plan/TODO, lineage), **Timeline** (this session's recorded activity, inline),
-**Decisions** (the gate decision log), **Usage** (per-session token breakdown), **Changes**
-(see below), and **Queue**. The expensive tabs load only when opened. The **⋯** button hides
+wants/why, plan/TODO, lineage), **Transcript** (recent turns + search), **Rewind**
+(checkpoints + this session's recorded activity), **Decisions** (the gate decision log),
+**Usage** (per-session token breakdown), **Changes** (see below), **User Stories** (gated —
+see below), **Agents** (subagent/Workflow fan-out), and **Queue**. The expensive tabs load
+only when opened. The **⋯** button hides
 tabs you don't want; your choice (and the last-open tab) is remembered per project. A **⤓
 Export** button (also on the tile right-click menu) archives the session — its transcript
 `.jsonl` plus a `meta.json` (label, provider/model, lineage, activity counts) — into
@@ -229,6 +231,17 @@ The **Changes** tab shows the session folder's working tree: a list of changed f
 A/M/D/R/?? marks, and **click any file to expand its colorized diff** (rename-aware). Read-only,
 local sessions only, with a **↻ Refresh**. Nothing runs against the repo except `git status` /
 `git diff` from the repo root.
+
+#### User Stories tab (gated — view/edit `spec/product/user-stories.md`)
+
+Shown **only when** the session's project has `spec/product/user-stories.md` (it appears /
+disappears live if the file is created or deleted mid-session). It lists the file's stories
+grouped by capability area (the `##` headings), with **+ Add story** per area, **double-click**
+a story to edit it inline, **✕** to delete, and an explicit **Save** (staged edits, with an
+"● unsaved" indicator). A soft **⚠** flags any story missing the mandatory "so that". The file's
+non-story content — title, intro, headings, prose, fenced code — is preserved **verbatim**
+(an unedited file round-trips byte-for-byte), and saves are **hash-guarded** against an external
+edit and written atomically; an edit can't inject fake structure and `*`/CRLF are preserved.
 
 ### AskUserQuestion in the panel
 When a session calls **AskUserQuestion**, the hook captures the question + options and the panel

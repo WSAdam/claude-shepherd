@@ -6356,8 +6356,9 @@ do
         keys.theme and keys.transcript and keys.doctor and keys.cost and keys.render)
   check("FEATURES: covers major existing flows too",
         keys.search and keys.policies and keys.automodel and keys.bridge and keys.agents and keys.ab and keys.usage and keys.rewind)
+  check("FEATURES: lists the user-stories tab", keys.stories == true)
   local newCount = 0; for _, f in ipairs(core.FEATURES) do if f.new then newCount = newCount + 1 end end
-  eq("FEATURES: the 5 new features are flagged", newCount, 5)
+  eq("FEATURES: the 6 new features are flagged", newCount, 6)
 end
 
 -- F4: transcript peek (user + assistant rows, chronological, noise filtered)
