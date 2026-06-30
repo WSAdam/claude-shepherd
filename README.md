@@ -29,10 +29,13 @@ command** being requested (e.g. `wants: npm test -- --watch`, via the
 `PermissionRequest` hook). Selecting a tile also shows a **live activity peek**:
 the latest assistant line from that session's transcript ("Doing: …").
 
-Status is hook-driven, but a `done` tile **self-heals back to `working`** if the
-transcript shows the model resumed — so in Auto mode (where a text-only reply or an
-auto-continued turn can skip the `working` hooks) a tile no longer gets stuck on
-"Ready for you" while it's actually working. (`status.resumeSlack`, default 2s.)
+Status is hook-driven, but a `done` tile **self-heals back to `working`** when the
+transcript shows the turn resumed — the model wrote a new line *or* you typed a fresh
+prompt — so in Auto mode or the VS Code extension (where a text-only reply, an
+auto-continued turn, or a freshly submitted prompt can land before the `working` hooks
+do) a tile no longer gets stuck on "Ready for you" while it's actually working. Spurious
+IDE file-open lines are ignored, so opening a file never false-flags it.
+(`status.resumeSlack`, default 2s.)
 
 ### Session observability (L5)
 

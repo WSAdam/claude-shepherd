@@ -5964,6 +5964,57 @@ do
   check("resumed: within slack not flagged", core.transcriptResumed(aline("2026-06-18T14:00:01Z"), t0, 2) == false)
   check("resumed: nil updated -> false", core.transcriptResumed(aline("2026-06-18T14:00:30Z"), nil, 2) == false)
   check("resumed: empty tail -> false", core.transcriptResumed("", t0, 2) == false)
+
+  -- R3-04 fix: a genuine human prompt after a stale "done" MUST resume the tile, even
+  -- with no fresh assistant line yet (VS Code extension / Auto mode: the operator typed
+  -- a new prompt but no UserPromptSubmit hook reached us).
+  local function huline(ts, txt)   -- a genuine human-typed user prompt (array text block)
+    return core.json.encode({ type = "user", timestamp = ts, message = { role = "user",
+      content = { { type = "text", text = txt or "do the thing" } } } })
+  end
+  local function pairedUline(ts)    -- a real IDE submit: an <ide_opened_file> block + the prompt
+    return core.json.encode({ type = "user", timestamp = ts, message = { role = "user", content = {
+      { type = "text", text = "<ide_opened_file>opened /tmp/x.ts</ide_opened_file>" },
+      { type = "text", text = "also review this handoff" } } } })
+  end
+  local function diagUline(ts)      -- a bare IDE diagnostics injection (no human text)
+    return core.json.encode({ type = "user", timestamp = ts,
+      message = { role = "user", content = "<ide_diagnostics>3 problems</ide_diagnostics>" } })
+  end
+  check("resumed: genuine human prompt after stale done -> working",
+        core.transcriptResumed(aline("2026-06-18T14:00:00Z") .. "\n" .. huline("2026-06-18T14:00:30Z"), t0, 2) == true)
+  check("resumed: lone human prompt newer than done -> working (no assistant line yet)",
+        core.transcriptResumed(huline("2026-06-18T14:00:30Z"), t0, 2) == true)
+  check("resumed: IDE-paired prompt (ide block + human text) -> working",
+        core.transcriptResumed(aline("2026-06-18T14:00:00Z") .. "\n" .. pairedUline("2026-06-18T14:00:30Z"), t0, 2) == true)
+  check("resumed: bare ide_diagnostics line ignored",
+        core.transcriptResumed(aline("2026-06-18T14:00:00Z") .. "\n" .. diagUline("2026-06-18T14:05:00Z"), t0 + 1, 2) == false)
+  check("resumed: human prompt within slack not flagged",
+        core.transcriptResumed(huline("2026-06-18T14:00:01Z"), t0, 2) == false)
+end
+
+-- ---- userHasHumanText: genuine prompt vs IDE-context / meta / tool-result injection --
+do
+  local function u(content, extra)
+    local o = { type = "user", message = { role = "user", content = content } }
+    if extra then for k, v in pairs(extra) do o[k] = v end end
+    return o
+  end
+  check("human: plain string prompt -> true", core.userHasHumanText(u("fix the bug")) == true)
+  check("human: whitespace-only string -> false", core.userHasHumanText(u("   ")) == false)
+  check("human: isMeta -> false", core.userHasHumanText(u("hi", { isMeta = true })) == false)
+  check("human: bare ide_opened_file string -> false",
+        core.userHasHumanText(u("<ide_opened_file>foo</ide_opened_file>")) == false)
+  check("human: bare ide_diagnostics string -> false",
+        core.userHasHumanText(u("<ide_diagnostics>2 problems</ide_diagnostics>")) == false)
+  check("human: ide_selection block alongside a real prompt -> true",
+        core.userHasHumanText(u({ { type = "text", text = "<ide_selection>x</ide_selection>" },
+                                  { type = "text", text = "do it" } })) == true)
+  check("human: ide context prepended in one text block -> true",
+        core.userHasHumanText(u({ { type = "text", text = "<ide_opened_file>f</ide_opened_file>\n\nrun tests" } })) == true)
+  check("human: tool_result-only block -> false",
+        core.userHasHumanText(u({ { type = "tool_result", content = "ok" } })) == false)
+  check("human: non-table arg -> false", core.userHasHumanText("nope") == false)
 end
 
 -- ---- custom screen lock: salted-hash password ----------------------------

@@ -4,6 +4,32 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-30 — Status self-heal now covers a freshly typed prompt (VS Code / Auto mode)
+
+### Fixed — a tile stuck on "Ready for you" while actually working
+
+The stale-"done" self-heal only flipped a tile back to `working` when it saw a new
+**assistant** line in the transcript. In the VS Code extension (and Auto mode), a freshly
+submitted prompt lands in the transcript as a **user** line — before any assistant output is
+flushed — and no `UserPromptSubmit`/tool hook reaches Shepherd, so the tile kept showing "Ready
+for you" through the start of the new turn.
+
+`transcriptResumed` now also resumes on a **genuine human-typed `user` prompt** newer than the
+recorded "done" (bounded by `status.resumeSlack`, default 2s), not just a new assistant line —
+so a tile flips to **Working** within ~1s of you hitting send.
+
+To preserve the existing guard against the IDE's spurious `user` lines (a bare file-open writes
+an `<ide_opened_file>…</ide_opened_file>` user line with no prompt), the shared
+`userHasHumanText` discriminator now strips `<ide_*>` context wrappers (`ide_opened_file` /
+`ide_diagnostics` / `ide_selection`) and counts a line as human only if real text remains. A
+real IDE submit (an `<ide_opened_file>` block alongside the prompt) still resumes; a bare
+file-open still doesn't. This also stops the Transcript tab rendering bare IDE file-open lines
+as fake user turns.
+
+Verified against real transcripts on disk; added **15 unit tests** (the screenshot case, the
+IDE-paired prompt, a bare `ide_diagnostics` line, within-slack, and the `userHasHumanText`
+matrix). Pre-existing IDE-injection guards still pass.
+
 ## 2026-06-29 — Project-aware "User Stories" detail tab
 
 ### Added — view / add / edit a project's spec/product/user-stories.md

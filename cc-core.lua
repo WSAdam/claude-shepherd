@@ -2317,9 +2317,20 @@ end
 -- LATEST significant event -- a later `assistant`/`user` line means it recovered (or the
 -- user already typed continue), so return nil. Meta lines (snapshots, stop_hook_summary)
 -- are skipped. Pure; the caller (refresh) reads the tail and overrides the status.
+-- Strip the IDE-context wrappers the editor injects into user turns -- a file-open
+-- (<ide_opened_file>...</ide_opened_file>), diagnostics (<ide_diagnostics>...), or
+-- selection (<ide_selection>...) block -- leaving the human's own typed text, if any. A
+-- real IDE submission often pairs an <ide_opened_file> block WITH the actual prompt; a
+-- bare file-open writes the wrapper alone (which must NOT read as a human prompt). Pure.
+local function stripIdeContext(s)
+  if type(s) ~= "string" then return "" end
+  return (s:gsub("<ide_[%w_]+>.-</ide_[%w_]+>", " "))
+end
+
 -- R3-04: is this transcript `user` line a genuine human-typed prompt (vs an IDE
--- file-open injection, a meta line, or a tool-result-only user line)? A real prompt
--- carries non-empty text/string content and is not flagged isMeta. Pure helper.
+-- file-open/diagnostics/selection injection, a meta line, or a tool-result-only user
+-- line)? A real prompt carries non-empty text once IDE-context wrappers are stripped and
+-- is not flagged isMeta. Pure helper.
 function M.userHasHumanText(obj)
   if type(obj) ~= "table" then return false end
   if obj.isMeta then return false end
@@ -2327,14 +2338,14 @@ function M.userHasHumanText(obj)
   if type(m) ~= "table" then return false end
   local c = m.content
   if type(c) == "string" then
-    return c:gsub("%s+", "") ~= ""
+    return stripIdeContext(c):gsub("%s+", "") ~= ""
   end
   if type(c) == "table" then
     for _, part in ipairs(c) do
       if type(part) == "table" then
-        -- a tool_result block is not a human prompt; only text blocks count
+        -- a tool_result block is not a human prompt; only real text (sans IDE context) counts
         if part.type == "text" and type(part.text) == "string"
-           and part.text:gsub("%s+", "") ~= "" then
+           and stripIdeContext(part.text):gsub("%s+", "") ~= "" then
           return true
         end
       end
@@ -2382,13 +2393,16 @@ end
 -- Auto mode -- or whenever UserPromptSubmit / Pre/PostToolUse is missed (a text-only
 -- reply fires no tool hooks; remote-control / auto-continued prompts can skip
 -- UserPromptSubmit) -- the session resumes work but the tile keeps showing "Ready
--- for you". Detect resumption from the transcript tail: the model only writes
--- `assistant` lines while working, so a NEWEST assistant line timestamped AFTER the
--- status was last written (`updatedEpoch`, when Stop recorded "done") means the turn
--- restarted -> override done -> working. Keyed on assistant lines so IDE file-open
--- injections (user lines) and file-history snapshots never false-trigger; a
--- genuinely-done turn's own final assistant line is <= updatedEpoch (Stop fires after
--- it). `slack` (default 2s) absorbs same-second jitter. Pure (reuses isoToEpoch).
+-- for you". Detect resumption from the transcript tail: a NEWEST `assistant` line (the
+-- model writing) OR a genuine human-typed `user` prompt -- the operator starting a new
+-- turn the working hook never reported (common in the VS Code extension / Auto mode,
+-- where the prompt lands in the transcript before any assistant line is flushed) --
+-- timestamped AFTER the status was last written (`updatedEpoch`, when Stop recorded
+-- "done") means the turn restarted -> override done -> working. Spurious IDE `user` lines
+-- (file-open / diagnostics / meta / tool-result) fail userHasHumanText and are skipped,
+-- so opening a file never false-triggers; a genuinely-done turn's own final assistant
+-- line is <= updatedEpoch (Stop fires after it). `slack` (default 2s) absorbs same-second
+-- jitter. Pure (reuses userHasHumanText + isoToEpoch).
 function M.transcriptResumed(text, updatedEpoch, slack)
   updatedEpoch = tonumber(updatedEpoch)
   if not text or #text == 0 or not updatedEpoch then return false end
@@ -2399,7 +2413,8 @@ function M.transcriptResumed(text, updatedEpoch, slack)
     local line = lines[i]
     if line:find("^%s*{") then
       local okj, obj = pcall(function() return M.json.decode(line) end)
-      if okj and type(obj) == "table" and obj.type == "assistant" and obj.timestamp then
+      if okj and type(obj) == "table" and obj.timestamp
+         and (obj.type == "assistant" or (obj.type == "user" and M.userHasHumanText(obj))) then
         local ts = M.isoToEpoch(obj.timestamp)
         return (ts ~= nil) and (ts > updatedEpoch + slack) or false
       end
