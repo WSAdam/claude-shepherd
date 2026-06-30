@@ -4,6 +4,25 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-06-30 — Reverse-engineered product spec + user stories, and a how-to handoff
+
+### Added — `spec/product/{spec.md, user-stories.md}` for Shepherd itself
+
+Shepherd now carries its own `spec/product/spec.md` (the canonical rune:scope format,
+reverse-engineered from the shipped app) and `spec/product/user-stories.md` (**125 stories
+across 20 capability areas**, each in canonical "As a … I want … so that …" form). This also
+lights up Shepherd's own **User Stories** detail tab, which is gated on that file existing. The
+stories round-trip byte-for-byte through the parser with zero ⚠.
+
+### Added — `docs/reverse-engineering-user-stories.md`
+
+A project-portable playbook for generating `user-stories.md` + `spec.md` from an existing
+codebase — especially a **rune** project. Covers the canonical format, the parser/tab gotchas
+(only `## ` is an area; any `- ` line is a story, so intro/role lists must be prose), the rune
+mapping (`[MOD]` → area, `[REQ]`/`[ENT]` → one story, `[DTO]`/`[SRV]` folded in), the
+cake-as-fidelity-oracle for a scope ⇄ code round-trip, and a copy-paste verification snippet.
+Linked from the README's User Stories tab section.
+
 ## 2026-06-30 — Status self-heal now covers a freshly typed prompt (VS Code / Auto mode)
 
 ### Fixed — a tile stuck on "Ready for you" while actually working

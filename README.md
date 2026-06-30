@@ -246,6 +246,12 @@ non-story content — title, intro, headings, prose, fenced code — is preserve
 (an unedited file round-trips byte-for-byte), and saves are **hash-guarded** against an external
 edit and written atomically; an edit can't inject fake structure and `*`/CRLF are preserved.
 
+To **generate** these files for a project that doesn't have them yet — especially a **rune**
+project — see the playbook in
+[docs/reverse-engineering-user-stories.md](docs/reverse-engineering-user-stories.md). Shepherd's
+own [spec/product/spec.md](spec/product/spec.md) and
+[spec/product/user-stories.md](spec/product/user-stories.md) are a worked example.
+
 ### AskUserQuestion in the panel
 When a session calls **AskUserQuestion**, the hook captures the question + options and the panel
 renders them as clickable buttons under the detail. Clicking an option: on a **terminal (Kitty)**
