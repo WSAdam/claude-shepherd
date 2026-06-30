@@ -45,9 +45,10 @@ real IDE submit (an `<ide_opened_file>` block alongside the prompt) still resume
 file-open still doesn't. This also stops the Transcript tab rendering bare IDE file-open lines
 as fake user turns.
 
-Verified against real transcripts on disk; added **15 unit tests** (the screenshot case, the
-IDE-paired prompt, a bare `ide_diagnostics` line, within-slack, and the `userHasHumanText`
-matrix). Pre-existing IDE-injection guards still pass.
+Verified against real transcripts on disk; added **17 unit tests** (the screenshot case, the
+IDE-paired prompt, bare `ide_opened_file` / `ide_diagnostics` lines — in both string and
+array-content form — ignored end-to-end through `transcriptResumed`, within-slack, and the
+`userHasHumanText` matrix). Pre-existing IDE-injection guards still pass.
 
 ## 2026-06-29 — Project-aware "User Stories" detail tab
 

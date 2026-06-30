@@ -5981,6 +5981,14 @@ do
     return core.json.encode({ type = "user", timestamp = ts,
       message = { role = "user", content = "<ide_diagnostics>3 problems</ide_diagnostics>" } })
   end
+  local function openUline(ts)      -- a bare IDE file-open injection, STRING content (the headline false-trigger)
+    return core.json.encode({ type = "user", timestamp = ts,
+      message = { role = "user", content = "<ide_opened_file>opened /tmp/x.ts</ide_opened_file>" } })
+  end
+  local function openUlineArr(ts)   -- a bare IDE file-open injection, ARRAY content (drives the table branch)
+    return core.json.encode({ type = "user", timestamp = ts, message = { role = "user",
+      content = { { type = "text", text = "<ide_opened_file>opened /tmp/x.ts</ide_opened_file>" } } } })
+  end
   check("resumed: genuine human prompt after stale done -> working",
         core.transcriptResumed(aline("2026-06-18T14:00:00Z") .. "\n" .. huline("2026-06-18T14:00:30Z"), t0, 2) == true)
   check("resumed: lone human prompt newer than done -> working (no assistant line yet)",
@@ -5989,6 +5997,13 @@ do
         core.transcriptResumed(aline("2026-06-18T14:00:00Z") .. "\n" .. pairedUline("2026-06-18T14:00:30Z"), t0, 2) == true)
   check("resumed: bare ide_diagnostics line ignored",
         core.transcriptResumed(aline("2026-06-18T14:00:00Z") .. "\n" .. diagUline("2026-06-18T14:05:00Z"), t0 + 1, 2) == false)
+  -- The headline false-trigger: a lone <ide_opened_file> user line landing AFTER a stale done.
+  -- ts (14:05) is unambiguously > updatedEpoch (t0+1) + slack, so a pass proves it's rejected by
+  -- userHasHumanText (content strips to empty), NOT merely by the timestamp guard.
+  check("resumed: bare ide_opened_file line ignored (string content)",
+        core.transcriptResumed(aline("2026-06-18T14:00:00Z") .. "\n" .. openUline("2026-06-18T14:05:00Z"), t0 + 1, 2) == false)
+  check("resumed: bare ide_opened_file line ignored (array content / table branch)",
+        core.transcriptResumed(aline("2026-06-18T14:00:00Z") .. "\n" .. openUlineArr("2026-06-18T14:05:00Z"), t0 + 1, 2) == false)
   check("resumed: human prompt within slack not flagged",
         core.transcriptResumed(huline("2026-06-18T14:00:01Z"), t0, 2) == false)
 end
@@ -6007,6 +6022,8 @@ do
         core.userHasHumanText(u("<ide_opened_file>foo</ide_opened_file>")) == false)
   check("human: bare ide_diagnostics string -> false",
         core.userHasHumanText(u("<ide_diagnostics>2 problems</ide_diagnostics>")) == false)
+  check("human: bare ide_opened_file array block -> false",
+        core.userHasHumanText(u({ { type = "text", text = "<ide_opened_file>opened /tmp/x.ts</ide_opened_file>" } })) == false)
   check("human: ide_selection block alongside a real prompt -> true",
         core.userHasHumanText(u({ { type = "text", text = "<ide_selection>x</ide_selection>" },
                                   { type = "text", text = "do it" } })) == true)
