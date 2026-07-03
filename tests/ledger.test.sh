@@ -129,6 +129,21 @@ assert_eq "#23-utf8: capped multibyte line is valid JSON (no split byte)" "0" \
 assert_eq "#23-utf8: no U+FFFD replacement char (whole-codepoint trim)" "0" \
   "$(grep -c "$(printf '\xef\xbf\xbd')" "$LF")"
 
+# A2: a MIXED field whose 200-byte boundary bisects a multibyte char -- the uniform
+# case above cuts on a clean 4-byte multiple and never exercises capstr's mid-codepoint
+# trim. 197 ASCII + two 4-byte rockets => the 200-byte mark lands 3 bytes into the
+# first rocket; capstr must drop the WHOLE rocket (=> 197 bytes), not leave 3 dangling.
+rm -f "$LF"
+MIX="$(printf 'A%.0s' $(seq 1 197))$(printf '\xf0\x9f\x9a\x80\xf0\x9f\x9a\x80')"
+( . "$ROOT/cc-lib.sh"; cc_ledger_append "$(jq -nc --arg s "$MIX" \
+    '{type:"decision", session_id:"mix", summary:$s}')" )
+assert_eq "#23-utf8-mix: mid-codepoint cut drops the whole char (197 bytes, not 200)" "197" \
+  "$(jq -r '.summary|utf8bytelength' "$LF")"
+assert_eq "#23-utf8-mix: still valid JSON, no dangling bytes" "0" \
+  "$(jq -e . "$LF" >/dev/null 2>&1; echo $?)"
+assert_eq "#23-utf8-mix: no U+FFFD replacement char" "0" \
+  "$(grep -c "$(printf '\xef\xbf\xbd')" "$LF")"
+
 # B: many large fields -- tier-1 alone is 7*200 > 512, so the whole-line guard must
 # trim the longest field until the serialized line fits under the floor.
 rm -f "$LF"
@@ -140,5 +155,28 @@ assert_eq "#23-multi: 7 large fields -> whole line under the 512 floor" "under" 
   "$([ "$BYTES2" -lt 512 ] && echo under || echo "OVER($BYTES2)")"
 assert_eq "#23-multi: whole-line-trimmed record is still valid JSON" "0" \
   "$(jq -e . "$LF" >/dev/null 2>&1; echo $?)"
+
+# C: NESTED payload -- the whole-line guard trims the globally-longest string LEAF
+# (via paths/getpath). A top-level-only trim would spin forever here: three nested
+# 400-char leaves push the line past 480 while the only top-level string (session_id)
+# is short, so trimming it to empty makes no progress and cc_ledger_append -- run in
+# a $() substitution -- would HANG its caller. Guard with a background+kill watchdog
+# (macOS has no `timeout`) so a regression fails loudly instead of wedging CI.
+rm -f "$LF"
+BN="$(printf 'z%.0s' $(seq 1 400))"
+( . "$ROOT/cc-lib.sh"; cc_ledger_append "$(jq -nc --arg b "$BN" \
+    '{type:"t", session_id:"n", payload:{a:$b, b:$b, c:$b}}')" ) &
+NPID=$!
+NHANG=hang
+for _ in $(seq 1 25); do kill -0 "$NPID" 2>/dev/null || { NHANG=ok; break; }; sleep 0.2; done
+[ "$NHANG" = ok ] || kill -9 "$NPID" 2>/dev/null
+wait "$NPID" 2>/dev/null
+assert_eq "#23-nested: nested payload converges (no infinite loop / hang)" "ok" "$NHANG"
+assert_eq "#23-nested: nested record under the 512 floor" "under" \
+  "$([ "$(wc -c < "$LF" | tr -d ' ')" -lt 512 ] && echo under || echo over)"
+assert_eq "#23-nested: nested record still valid JSON" "0" \
+  "$(jq -e . "$LF" >/dev/null 2>&1; echo $?)"
+assert_eq "#23-nested: all three nested leaves survive (trimmed, not dropped)" "true" \
+  "$(jq -r '(.payload.a and .payload.b and .payload.c) != null' "$LF" 2>/dev/null)"
 
 finish

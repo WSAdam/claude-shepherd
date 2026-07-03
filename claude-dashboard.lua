@@ -373,6 +373,14 @@ FX._scratchDir = os.getenv("CC_SCRATCH_DIR") or ((os.getenv("HOME") or "") .. "/
 FX._scratchSeq = 0
 function FX.scratchFile(tag)
   if not FX._scratchReady then
+    -- Defense in depth: if the path was pre-planted as a SYMLINK, hs.fs.mkdir would
+    -- silently no-op and we'd write children into the attacker's target -- the very
+    -- TOCTOU this dir closes, moved up one level. Drop the link first (removes the
+    -- link, not its target), then mkdir a real dir we own. HOME is trusted on a
+    -- single-user Mac, so this rarely fires; the check is cheap and runs once.
+    local mode = nil
+    pcall(function() mode = hs.fs.symlinkAttributes(FX._scratchDir, "mode") end)
+    if mode == "link" then pcall(os.remove, FX._scratchDir) end
     hs.fs.mkdir(FX._scratchDir)  -- user-owned, non-world-writable even at the default 0755
     -- hs.fs has no chmod; tighten to 0700 (defense in depth) once, best-effort.
     pcall(function() os.execute("/bin/chmod 700 '" .. FX._scratchDir:gsub("'", "'\\''") .. "' >/dev/null 2>&1") end)

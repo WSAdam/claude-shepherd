@@ -332,19 +332,24 @@ cc_ledger_append() {
   # the line multi-KB, bash splits it across write()s, and concurrent appends
   # interleave mid-line and corrupt both records. Two-tier, measured in BYTES not
   # codepoints (jq `length`/`.[:n]` count codepoints -- 200 emoji = 800 bytes, so a
-  # per-char cap does NOT bound bytes): (1) `walk`+utf8bytelength caps every string
-  # at ANY depth to 200 bytes, trimming whole codepoints so no split UTF-8 byte
-  # reaches the file; (2) a whole-line guard trims the longest field until the
-  # serialized line is <=480 bytes -- under the 512 POSIX PIPE_BUF floor regardless
-  # of field count (tier 1 alone can't: N fields * 200 can still exceed it).
+  # per-char cap does NOT bound bytes): (1) `capstr` via `walk` caps every string at
+  # ANY depth to 200 bytes, trimming whole codepoints so no split UTF-8 byte reaches
+  # the file; (2) `trimLineToBytes` shaves the globally-longest STRING LEAF until the
+  # serialized line is <=480 bytes -- under the 512 POSIX PIPE_BUF floor regardless of
+  # field count (tier 1 alone can't: N fields * 200 can still exceed it). trimLongest
+  # targets the leaf `blen` actually measures (via paths/getpath) -- a top-level-only
+  # trim would spin forever on a record whose over-budget bytes live in a nested field.
   line="$(printf '%s' "$1" | jq -c --argjson v 1 --argjson ts "$now" --arg id "$id" '
     def capstr($n): if type == "string" and (utf8bytelength) > $n
                     then (.[:$n] | until((utf8bytelength) <= $n; .[:-1])) else . end;
     def blen: tojson | utf8bytelength;
+    def longestLeaf: . as $doc | reduce paths(strings) as $p ({p:null, n:-1};
+      ($doc | getpath($p) | utf8bytelength) as $l | if $l > .n then {p:$p, n:$l} else . end) | .p;
+    def trimLongest: longestLeaf as $p | if $p == null then . else setpath($p; getpath($p)[:-1]) end;
+    def trimLineToBytes($max): until(blen <= $max
+      or ([paths(strings) as $p | getpath($p) | select(length > 0)] | length) == 0; trimLongest);
     {v:$v, ts:$ts, id:$id} + .
     | walk(capstr(200))
-    | until(blen <= 480 or ([.. | strings | select(length > 0)] | length) == 0;
-        (to_entries | max_by(.value | if type == "string" then utf8bytelength else -1 end) | .key) as $k
-        | .[$k] |= (if type == "string" then .[:-1] else . end))' 2>/dev/null)" || return 0
+    | trimLineToBytes(480)' 2>/dev/null)" || return 0
   [ -n "$line" ] && printf '%s\n' "$line" >> "$file" 2>/dev/null || true
 }

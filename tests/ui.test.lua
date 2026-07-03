@@ -2201,6 +2201,11 @@ do
     -- shell side). Add a file to cc_remove but not FX.removeStatus (or vice-versa)
     -- and the counts diverge -- failing here and forcing the next author to touch
     -- BOTH removers (and the per-slot markers above).
+    -- NB: these are deliberately-brittle HEURISTIC token counts (`os.remove(` and
+    -- `$1`), not semantic ones. A pure refactor can shift them -- a batch/loop
+    -- remove, `os.remove (` with a space, or a `$1` in cc_remove used for anything
+    -- but a sidecar target (today it has none). A mismatch here means "re-check both
+    -- removers by hand", not necessarily a bug; realign the counts once verified.
     local rsBody = src:match("function FX%.removeStatus%(key%)(.-)\nend")
     local luaTargets = rsBody and select(2, rsBody:gsub("os%.remove%(", "")) or 0
     local shf = io.open(ROOT .. "cc-lib.sh", "r")
@@ -2234,6 +2239,32 @@ do
           b ~= nil and c ~= nil and (c - b) < 200)
     check("#15-pin: generation check still guards stale results",
           src:find("if gen ~= searchGen then return end", 1, true) ~= nil)
+  end
+
+  -- scratch-pin (review q87): the search/scan subprocess stdout goes to an
+  -- app-owned scratch file, NOT os.tmpname() in world-writable /tmp (a TOCTOU
+  -- symlink-plant vector). Source-shape pin (FX isn't loadable here, like the
+  -- #14/#15 pins): guards the two named regressions -- revert to os.tmpname, or a
+  -- dropped counter increment (which is what makes concurrent scans collision-free).
+  do
+    -- the real regression is an ASSIGNMENT from os.tmpname() at a scan site (the
+    -- word also appears in the explanatory comment, so match the usage, not a mention)
+    check("scratch-pin: no scan path assigns from os.tmpname()",
+          src:find("= os.tmpname()", 1, true) == nil)
+    check("scratch-pin: both scan sites route through FX.scratchFile",
+          src:find('FX.scratchFile("folderscan")', 1, true) ~= nil
+          and src:find('FX.scratchFile("search")', 1, true) ~= nil)
+    local sfBody = src:match("function FX%.scratchFile%(tag%)(.-)\nend")
+    check("scratch-pin: FX.scratchFile found", sfBody ~= nil)
+    sfBody = sfBody or ""
+    check("scratch-pin: path is contained in the app-owned scratch dir",
+          sfBody:find("FX._scratchDir ..", 1, true) ~= nil)
+    check("scratch-pin: the app dir is ~/.claude/cc-scratch (or CC_SCRATCH_DIR), not /tmp",
+          src:find('"/.claude/cc-scratch"', 1, true) ~= nil
+          and src:find('os.getenv("CC_SCRATCH_DIR")', 1, true) ~= nil)
+    check("scratch-pin: a per-call counter increment gives each scan a unique name",
+          sfBody:find("FX._scratchSeq = FX._scratchSeq + 1", 1, true) ~= nil
+          and sfBody:find(".. FX._scratchSeq", 1, true) ~= nil)
   end
 
   -- #22: gate-consumed files are written atomically (temp+rename) -- a torn

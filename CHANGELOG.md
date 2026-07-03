@@ -4,6 +4,45 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-07-03 — Second-pass review of the triage (q87): fix a latent ledger hang
+
+The review of the triage commit (`d99cc2f`) caught a real bug in the whole-line ledger
+guard added earlier that day, plus several test/robustness gaps. Verified each and
+incorporated all of them.
+
+### Fixed — the ledger whole-line guard could infinite-loop (hang) on a nested field
+
+The tier-2 guard trimmed only **top-level** keys (`to_entries | max_by`) but its
+termination test measured **nested** strings (`.. | strings`). A record whose over-budget
+bytes live in a nested object — with only short top-level strings — would trim those to
+empty, make no further progress, and spin forever. Because `cc_ledger_append` runs the
+filter in a `$(…)` substitution, that hangs the calling gate/status hook, not just the
+analytics line. It was latent (today's callers send only flat fields) but the code
+comment advertised nested support. The guard now shaves the **globally-longest string
+leaf** via `paths`/`getpath`/`setpath` — the leaf the byte count actually measures — so
+it always converges; the jq is refactored into named `def`s (`longestLeaf`,
+`trimLongest`, `trimLineToBytes`) that read as intent. Confirmed with a `#23-nested`
+watchdog test (a background+kill guard, since macOS has no `timeout`) that fails loudly
+on a hang instead of wedging CI.
+
+### Added — tests and hardening the review asked for
+
+- **`#23-utf8-mix`**: a mixed ASCII+multibyte field whose 200-byte boundary bisects a
+  4-byte char, pinning that `capstr` drops the **whole** codepoint (→ 197 bytes) rather
+  than leaving dangling bytes — the uniform-emoji case cut on a clean multiple and never
+  exercised that path.
+- **`scratch-pin`**: pins `FX.scratchFile`'s contract — no scan site assigns from
+  `os.tmpname()`, the path is contained in the app-owned `~/.claude/cc-scratch`, and the
+  per-call counter increment is present (a source-shape pin, matching the `#14`/`#15`
+  pins, since the dashboard module isn't loadable under the unit harness).
+- **`FX.scratchFile` symlink hardening**: if the scratch path was pre-planted as a
+  symlink, `hs.fs.mkdir` would no-op and children would land in the attacker's target;
+  it now drops a symlink at that path before creating the real dir (defense-in-depth —
+  HOME is trusted on a single-user Mac).
+- **`#13-drift` caveat**: noted inline that the target counts are a deliberately-brittle
+  heuristic tripwire — a mismatch means "re-check both removers by hand," not necessarily
+  a bug.
+
 ## 2026-07-03 — Review triage of the 2026-07-02 sweep (leaderboard q87)
 
 Incorporated the reviewable findings from the code review of commit `90471a8`, after
