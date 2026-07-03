@@ -31,10 +31,27 @@ ev pretooluse "$MULTI"
 assert_json "ask multiSelect captured"           "$F" '.pending.ask[0].multiSelect' "true"
 assert_json "ask 2nd question header captured"   "$F" '.pending.ask[1].header' "Env"
 
-# A plain (non-AskUserQuestion) pretooluse stays working with no ask payload.
+# Corrected behavior (native-approval shield in cc-status.sh): while an ask/approval
+# pending is LIVE, a sibling plain pretooluse (parallel subagents share the parent
+# session_id) must NOT wipe it back to "working" -- no further hook fires while the
+# prompt sits, so the wipe left a blocked session showing busy forever. The live
+# approval owns status/pending until its own resolution event.
 ev pretooluse '{"session_id":"ask1","cwd":"/U/x/proj","tool_name":"Bash","tool_input":{"command":"ls"}}'
-assert_json "plain pretooluse -> working"        "$F" '.status' "working"
-assert_json "plain pretooluse clears ask"        "$F" '.pending' "null"
+assert_json "sibling pretooluse keeps approval"  "$F" '.status' "approval"
+assert_json "sibling pretooluse keeps the ask"   "$F" '.pending.ask[0].header' "Feat"
+
+# The ask's own PostToolUse (same tool_name + same first question as the recorded
+# pending.summary) is the legitimate resolution: the answer was given, the tile
+# returns to working and the pending clears.
+ev posttooluse "$MULTI"
+assert_json "matching posttooluse -> working"     "$F" '.status' "working"
+assert_json "matching posttooluse clears pending" "$F" '.pending' "null"
+
+# With no live approval, a plain (non-AskUserQuestion) pretooluse stays working
+# with no ask payload.
+ev pretooluse '{"session_id":"ask1","cwd":"/U/x/proj","tool_name":"Bash","tool_input":{"command":"ls"}}'
+assert_json "plain pretooluse -> working"         "$F" '.status' "working"
+assert_json "plain pretooluse leaves no pending"  "$F" '.pending' "null"
 
 # F-001 (bug sweep): a new pending that has NO ask (a Write PermissionRequest) must
 # fully REPLACE a prior AskUserQuestion pending, not inherit its stale .pending.ask

@@ -4,6 +4,94 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-07-02 — Multi-agent bug-hunt sweep: 30 confirmed fixes across every flow
+
+A find → adversarially-verify → fix → regression-test sweep over the eight key flows
+(status ingestion, gated keystroke delivery, the webview UI, the audit ledger, tile
+lifecycle / ghost pruning, fleet search, the shell hooks, and cross-cutting
+timers/reentrancy). Thirty findings survived a three-lens adversarial pass (a
+correctness refuter, a reachability skeptic, and a test-evidence auditor; 2-of-3 to
+confirm — nearly all were unanimous). **Every one of the 30 has a regression test**
+that fails against the old behavior; the full suite (`make lint && make test`) is green.
+
+### Fixed — keystrokes / approvals could reach the wrong session
+
+- **Bulk & rule nudges never re-checked session status at fire time.** The
+  approval-exclusion was evaluated when the batch was *selected*, but delivery happens
+  seconds later on a stagger; a prompt that appeared in the gap could be answered by a
+  nudge meant for a different state. Dispatch now re-checks at fire time.
+- **Context-menu "Jump to window" and OS-notification clicks bypassed the serialized
+  injection tail,** so a focus-steal could land pending keystrokes in the wrong
+  session. Both now route through `dispatchSerialized`.
+- **Voice dictation handed a raw status item to `typeIntoWindow`,** breaking kitty
+  targeting; it now passes the resolved target.
+
+### Fixed — gate & native-permission integrity
+
+- The **armed gate now owns the tile's `status`/`since`/`pending` against every sibling
+  writer** (parallel subagents share a `session_id`), not just pre/post-tool events — a
+  concurrent `PermissionRequest`/`AskUserQuestion` could otherwise replace the pending
+  block so the panel showed one request while Approve answered another.
+- The **native permission prompt gets the same shielding** (the default, gate-off
+  install): a sibling event could wipe a live prompt's pending, freezing the tile on
+  "working" while the session was actually blocked on you.
+- **`approveRepeats` signatures are now injective:** the old `tr '\n' ' '` collapsed a
+  multi-line command to the single-line form, so approving `docker compose restart api`
+  once auto-allowed a newline-resliced *different* command.
+- The **no-`jq` fallback maps `permissionrequest` → `approval`** (was `working`), gate-
+  consumed files are written atomically, and the same-event gate-guard TOCTOU is closed.
+
+### Fixed — status ingestion no longer freezes the panel
+
+- **`parseStatusList` now hardens `cwd`/`transcript_path`,** not just name/updated — a
+  non-string value there used to crash the refresh tick on *every* poll, freezing the
+  whole dashboard.
+- The **stale-"done" self-heal no longer emits a phantom `working → done` edge** on a
+  stale tick or a one-off transcript-read failure (which had fired drain-close, queue
+  autofeed, onDone banners and done-rules into a mid-turn session). The heal is now
+  latched to the file's `updated` and dropped the instant a real write lands.
+- **Slash-command transcript lines** (`<command-name>…`) are no longer read as human
+  prompts (they had caused a false `done → working` flip and masked frozen-on-error
+  detection).
+- **`item.modeCycle` is now populated** (sticky `mode_cycle` membership in the status
+  file), so set-mode sizes its Shift+Tab press count to the session's real rotation
+  instead of miscounting bypass-enabled sessions.
+- **`cc_merge` self-heals a corrupt status file** (retry from `{}`) instead of wedging
+  that tile forever.
+
+### Fixed — fleet search
+
+- **Search no longer deadlocks forever on a common query.** A direct-exec `hs.task`
+  only drains stdout at termination, so >~64 KB of matches filled the pipe, blocked the
+  child, and left the panel on "searching…" with a wedged `rg`/`grep`. Output is now
+  redirected to a temp file (the folder-scan fix). The superseded-task callback also no
+  longer nils the shared latch before its ownership/generation check, and byte-based
+  truncation no longer splits multibyte characters into `` garbage.
+
+### Fixed — audit ledger & analytics
+
+- **Retention no longer deletes day files that still hold in-window events** (it could
+  purge up to 24 h early).
+- The **ledger "changed" edge is no longer consumed by non-refresh callers,** which had
+  left the notification badge and lineage map stale.
+- Large events are capped so ledger appends stay under `PIPE_BUF` (atomic), session-less
+  events no longer inflate aggregates as a phantom `?` session, and a task with one
+  long (>90 s) tool call no longer loses its `task_done` record.
+
+### Fixed — install / hooks & tile lifecycle
+
+- **`install.sh` hook-merge could never add a newly-shipped hook** to an event group
+  that already contained one of our scripts, so upgrades silently left `cc-popup`
+  unwired; the merge is now per-script. Hook scripts are also copied via a temp+rename
+  so a running `bash` isn't reading a truncated inode.
+- **Inherited `KITTY_*` env no longer forges a shared per-window identity.** A VS Code /
+  Cursor window cold-started from a kitty shell (`code .`) had handed every session it
+  hosts the launching kitty window's id — cross-window false prunes of live tiles and
+  misrouted keystrokes. Identity is now decided by the editor *detector*, and panel-side
+  prune sweeps a ghost's sibling files instead of orphaning them.
+- **Voice recording uses a per-recording wav path** and transcribes from ffmpeg's exit
+  callback, so a quick re-record or a slow finalize can't race a stale file.
+
 ## 2026-06-30 — Reverse-engineered product spec + user stories, and a how-to handoff
 
 ### Added — `spec/product/{spec.md, user-stories.md}` for Shepherd itself

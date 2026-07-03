@@ -198,4 +198,97 @@ if [ -n "$GUP" ]; then
   fi
 fi
 
+# --- #1: the gate-waiting guard covers the SET_PENDING writers too. While the
+# gate is armed, a concurrent PermissionRequest / AskUserQuestion pretooluse must
+# NOT replace the armed gate's pending block (nonce + tool + summary) with a
+# nonce-less one -- the panel would show one request while Approve answers another.
+AG="ag1"; AGF="$TMP/$AG.json"; AGT=100000
+printf '{"session_id":"%s","name":"p","cwd":"/p","status":"approval","updated":%s,"since":%s,"gate":"waiting","gate_nonce":"g-n","pending":{"nonce":"n1","tool":"Bash","summary":"rm -rf build"}}\n' \
+  "$AG" "$AGT" "$AGT" > "$AGF"
+ev permissionrequest "{\"session_id\":\"$AG\",\"cwd\":\"/p\",\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"/p/other.txt\"}}"
+assert_json "#1: permissionrequest keeps the gate's pending nonce"   "$AGF" '.pending.nonce'   "n1"
+assert_json "#1: permissionrequest keeps the gate's pending summary" "$AGF" '.pending.summary' "rm -rf build"
+assert_json "#1: permissionrequest keeps status=approval"            "$AGF" '.status' "approval"
+ev pretooluse "{\"session_id\":\"$AG\",\"cwd\":\"/p\",\"tool_name\":\"AskUserQuestion\",\"tool_input\":{\"questions\":[{\"question\":\"Pick one\",\"header\":\"Q\"}]}}"
+assert_json "#1: AskUserQuestion keeps the gate's pending nonce" "$AGF" '.pending.nonce' "n1"
+assert_json "#1: AskUserQuestion does not graft its ask block"   "$AGF" '.pending.ask' "null"
+# ...and the armed-gate guard now covers userpromptsubmit/stop as well (#17's
+# armed-gate extension): neither may strip the gate's pending mid-wait.
+ev userpromptsubmit "{\"session_id\":\"$AG\",\"cwd\":\"/p\",\"prompt_text\":\"unrelated sibling prompt\"}"
+assert_json "#1: userpromptsubmit keeps the gate's pending" "$AGF" '.pending.nonce' "n1"
+assert_json "#1: userpromptsubmit keeps status=approval"    "$AGF" '.status' "approval"
+ev stop "{\"session_id\":\"$AG\",\"cwd\":\"/p\"}"
+assert_json "#1: stop keeps the gate's pending"       "$AGF" '.pending.nonce' "n1"
+assert_json "#1: stop keeps status=approval"          "$AGF" '.status' "approval"
+assert_json "#1: the escalation clock stays the gate's T1" "$AGF" '.since' "$AGT"
+
+# --- #17: the native permission prompt (gate NOT armed -- the default install)
+# gets the same shielding. Once permissionrequest publishes {status:approval,
+# pending}, a concurrent sibling tool event (parallel subagents share the parent
+# session_id) must not wipe it back to "working"; the only tool event that clears
+# it is the approved tool's own PostToolUse (same tool + same recomputed summary).
+NP="np1"; NPF="$TMP/$NP.json"
+ev permissionrequest "{\"session_id\":\"$NP\",\"cwd\":\"/p\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"rm -rf build\"}}"
+assert_json "#17: permissionrequest arms the native pending" "$NPF" '.status' "approval"
+ev posttooluse "{\"session_id\":\"$NP\",\"cwd\":\"/p\",\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":\"/p/a.txt\"}}"
+assert_json "#17: sibling posttooluse keeps status=approval" "$NPF" '.status' "approval"
+assert_json "#17: sibling posttooluse keeps the pending"     "$NPF" '.pending.summary' "rm -rf build"
+ev pretooluse "{\"session_id\":\"$NP\",\"cwd\":\"/p\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"ls\"}}"
+assert_json "#17: sibling pretooluse keeps status=approval"  "$NPF" '.status' "approval"
+assert_json "#17: sibling pretooluse keeps the pending"      "$NPF" '.pending.summary' "rm -rf build"
+# same tool but a DIFFERENT command is another subagent's call, not the resolution
+ev posttooluse "{\"session_id\":\"$NP\",\"cwd\":\"/p\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"rm -rf build2\"}}"
+assert_json "#17: same-tool different-summary posttooluse keeps the pending" "$NPF" '.pending.summary' "rm -rf build"
+# the approved tool's own PostToolUse (same tool + same summary) resolves it
+ev posttooluse "{\"session_id\":\"$NP\",\"cwd\":\"/p\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"rm -rf build\"}}"
+assert_json "#17: the approved tool's own posttooluse -> working" "$NPF" '.status' "working"
+assert_json "#17: the approved tool's own posttooluse clears pending" "$NPF" '.pending' "null"
+# a FRESH PermissionRequest replaces a live native pending (newest wins)...
+ev permissionrequest "{\"session_id\":\"$NP\",\"cwd\":\"/p\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"make deploy\"}}"
+ev permissionrequest "{\"session_id\":\"$NP\",\"cwd\":\"/p\",\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"/p/z.txt\"}}"
+assert_json "#17: a fresh permissionrequest still replaces (tool)"    "$NPF" '.pending.tool' "Write"
+assert_json "#17: a fresh permissionrequest still replaces (summary)" "$NPF" '.pending.summary' "/p/z.txt"
+# ...and userpromptsubmit / stop still clear (the native-deny recovery path)
+ev userpromptsubmit "{\"session_id\":\"$NP\",\"cwd\":\"/p\",\"prompt_text\":\"try another way\"}"
+assert_json "#17: userpromptsubmit clears a native pending" "$NPF" '.pending' "null"
+assert_json "#17: userpromptsubmit -> working"              "$NPF" '.status' "working"
+ev permissionrequest "{\"session_id\":\"$NP\",\"cwd\":\"/p\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"make x\"}}"
+ev stop "{\"session_id\":\"$NP\",\"cwd\":\"/p\"}"
+assert_json "#17: stop clears a native pending" "$NPF" '.pending' "null"
+assert_json "#17: stop -> done"                 "$NPF" '.status' "done"
+
+# --- #7 (writer half): sticky mode_cycle membership. Once a session is observed
+# in an OPTIONAL permission mode (bypassPermissions/auto), the recorded membership
+# must accumulate and survive every later event that omits mode_cycle -- the
+# dashboard sizes set-mode's Shift+Tab press count from it.
+MC="mc1"; MCF="$TMP/$MC.json"
+ev userpromptsubmit "{\"session_id\":\"$MC\",\"cwd\":\"/p\",\"permission_mode\":\"bypassPermissions\",\"prompt_text\":\"go\"}"
+assert_json "#7: bypassPermissions observed -> mode_cycle records it" "$MCF" '.mode_cycle.bypassPermissions' "true"
+ev pretooluse "{\"session_id\":\"$MC\",\"cwd\":\"/p\",\"permission_mode\":\"default\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"ls\"}}"
+assert_json "#7: cycling back to default keeps the membership" "$MCF" '.mode_cycle.bypassPermissions' "true"
+assert_json "#7: current mode still tracked"                   "$MCF" '.permission_mode' "default"
+ev posttooluse "{\"session_id\":\"$MC\",\"cwd\":\"/p\",\"permission_mode\":\"auto\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"ls\"}}"
+assert_json "#7: auto observed -> membership accumulates (auto)"   "$MCF" '.mode_cycle.auto' "true"
+assert_json "#7: auto observed -> membership accumulates (bypass)" "$MCF" '.mode_cycle.bypassPermissions' "true"
+# a non-optional mode records no membership (base modes are always in the cycle)
+ev pretooluse "{\"session_id\":\"$MC\",\"cwd\":\"/p\",\"permission_mode\":\"plan\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"ls\"}}"
+assert_json "#7: non-optional modes add no membership" "$MCF" '.mode_cycle | length' "2"
+
+# --- #25: the no-jq degraded fallback must map permissionrequest -> approval
+# (the one state the panel exists to surface; it defaulted to "working"). Reuses
+# the jq-less SHIMBIN built for the R1-03 case above.
+NJ_DIR="$TMP/nojq-pr-proj"
+mkdir -p "$NJ_DIR"
+NJF="$TMP/nojq-pr-proj.json"
+( cd "$NJ_DIR" && PATH="$SHIMBIN" CC_STATUS_DIR="$TMP" \
+    "$SHIMBIN/bash" "$CC" permissionrequest </dev/null >/dev/null 2>&1 )
+assert_json "#25: no-jq permissionrequest -> approval" "$NJF" '.status' "approval"
+# the sibling degraded mappings are unchanged
+( cd "$NJ_DIR" && PATH="$SHIMBIN" CC_STATUS_DIR="$TMP" \
+    "$SHIMBIN/bash" "$CC" stop </dev/null >/dev/null 2>&1 )
+assert_json "#25: no-jq stop still -> done" "$NJF" '.status' "done"
+( cd "$NJ_DIR" && PATH="$SHIMBIN" CC_STATUS_DIR="$TMP" \
+    "$SHIMBIN/bash" "$CC" pretooluse </dev/null >/dev/null 2>&1 )
+assert_json "#25: no-jq pretooluse still -> working" "$NJF" '.status' "working"
+
 finish

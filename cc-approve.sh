@@ -120,7 +120,16 @@ SUMMARY="$(cc_get "$INPUT" '.tool_input.command')"
 [ -n "$SUMMARY" ] || SUMMARY="$(cc_get "$INPUT" '.tool_input.notebook_path')"
 [ -n "$SUMMARY" ] || SUMMARY="$(cc_get "$INPUT" '.tool_input.url')"
 if [ -n "$SUMMARY" ]; then
-  SIG="$(printf '%s|%s' "$TOOL" "$SUMMARY" | tr '\n' ' ')"
+  # The memo file is one SIG per line (grep -Fxq), so newlines in the summary
+  # must be encoded -- but LOSSLESSLY. The old `tr '\n' ' '` collapsed them to
+  # spaces, so `docker compose restart api` and `docker compose restart\napi`
+  # (two SEPARATE shell commands) shared one SIG and a single approval of the
+  # one-line form auto-allowed any newline-resliced variant. Escape '\' first,
+  # then newline -> '\n', so the encoding is injective; single-line summaries
+  # without backslashes keep their old byte-identical SIG.
+  SIG_SUM="${SUMMARY//\\/\\\\}"
+  SIG_SUM="${SIG_SUM//$'\n'/\\n}"
+  SIG="$(printf '%s|%s' "$TOOL" "$SIG_SUM")"
 else
   # No recognized field: keep the SIG per-request with a digest of the whole
   # tool_input (canonicalized by jq -S). A bare "Tool|Tool" SIG would let ONE

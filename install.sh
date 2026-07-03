@@ -7,12 +7,15 @@
 # first), ensures the dofile in ~/.hammerspoon/init.lua, and builds the
 # Shepherd.app Dock launcher. SAFE TO RE-RUN: a second run is a no-op.
 #
-# The hook merge mirrors core.mergeHooks (cc-core.lua, unit-tested): for each
-# event, append our group only if none of OUR scripts (cc-status/approve/popup.sh)
-# is wired yet; otherwise skip. Matching our exact names (not a bare "cc-" substring)
-# avoids colliding with a user's own cc-prefixed hook. The test() is an UNANCHORED
-# substring (KEEP IN SYNC with core.OUR_HOOK_SCRIPTS), so a contrived my-cc-status.sh
-# would be a false positive -- acceptable next to the old bare-"cc-" net.
+# The hook merge (cf. core.mergeHooks in cc-core.lua): for each event, append our
+# whole group if none of OUR scripts (cc-status/approve/popup.sh) is wired yet;
+# if SOME are wired (an older install, before a sibling hook existed), append just
+# the missing entries into the group we own — never skip the event outright, or
+# upgrades would leave newly-shipped hooks (cc-popup.sh) unwired forever.
+# Matching our exact names (not a bare "cc-" substring) avoids colliding with a
+# user's own cc-prefixed hook. The test() is an UNANCHORED substring (KEEP IN SYNC
+# with core.OUR_HOOK_SCRIPTS), so a contrived my-cc-status.sh would be a false
+# positive -- acceptable next to the old bare-"cc-" net.
 #
 # Env overrides (used by tests/install.test.sh to stay hermetic):
 #   CC_INSTALL_CLAUDE_DIR, CC_INSTALL_HS_DIR, CC_INSTALL_NO_APP
@@ -71,10 +74,28 @@ if [ "${1:-}" = "--tools-only" ] || [ -n "${CC_TOOLS_ONLY:-}" ]; then tooling_ch
 
 mkdir -p "$CLAUDE_DIR" "$HS_DIR"
 
+# Atomic file install: cp to a dot-prefixed temp in the destination dir, then mv
+# (same-dir rename) over the target. A plain `cp src dst` rewrites dst IN PLACE
+# (same inode, O_TRUNC): bash reads scripts lazily from its open fd, so a hook
+# mid-execution — e.g. a cc-approve.sh waiter blocked in its 120s poll loop with
+# the teardown still unread — would resume at its saved byte offset inside the
+# NEW content and execute garbled half-lines. rename swaps the directory entry;
+# running readers keep the old inode until they exit. Dot-prefix keeps the temp
+# out of the cc-*.sh chmod glob below.
+install_file() {
+  local src="$1" dstdir="$2" base
+  base="$(basename "$src")"
+  cp "$src" "$dstdir/.$base.tmp.$$" && mv -f "$dstdir/.$base.tmp.$$" "$dstdir/$base"
+}
+
 # 1. Scripts + core -> ~/.claude ; dashboard + core -> ~/.hammerspoon.
-cp "$HERE"/cc-lib.sh "$HERE"/cc-status.sh "$HERE"/cc-approve.sh "$HERE"/cc-popup.sh "$HERE"/cc-core.lua "$CLAUDE_DIR/"
+for f in cc-lib.sh cc-status.sh cc-approve.sh cc-popup.sh cc-core.lua; do
+  install_file "$HERE/$f" "$CLAUDE_DIR"
+done
 chmod +x "$CLAUDE_DIR"/cc-*.sh
-cp "$HERE"/claude-dashboard.lua "$HERE"/cc-core.lua "$HS_DIR/"
+for f in claude-dashboard.lua cc-core.lua; do
+  install_file "$HERE/$f" "$HS_DIR"
+done
 echo "✅ copied hook scripts + core -> $CLAUDE_DIR ; dashboard -> $HS_DIR"
 
 # 2. Merge hooks into settings.json (back up first; idempotent append-if-missing).
@@ -102,10 +123,31 @@ if have_jq; then
           then .hooks |= map(patch_approve)
           else . end)
         else . end));
+      def our_re: "cc-(status|approve|popup)\\.sh";
       .hooks //= {}
       | reduce ($tmpl.hooks | to_entries[]) as $e (.;
-          ([ (.hooks[$e.key] // [])[].hooks[]?.command? // empty ] | any(test("cc-(status|approve|popup)\\.sh"))) as $has
-          | if $has then . else .hooks[$e.key] = ((.hooks[$e.key] // []) + $e.value) end)
+          ([ (.hooks[$e.key] // [])[].hooks[]?.command? // empty ]) as $cmds
+          | if ($cmds | any(test(our_re))) | not
+            then .hooks[$e.key] = ((.hooks[$e.key] // []) + $e.value)
+            elif (.hooks[$e.key] | type) != "array" then .
+            else
+              # Per-entry upgrade: the event already carries SOME of our scripts,
+              # but a hook shipped AFTER that install (cc-popup.sh postdates the
+              # Stop/Notification/PermissionRequest wiring of early installs) is
+              # still missing. Skipping the whole template group would leave it
+              # unwired forever — instead append just OUR missing entries into
+              # the first group we already own, preserving its matcher.
+              ([ $e.value[].hooks[]?
+                 | select((.command? // "") | test(our_re))
+                 | (.command | capture("(?<n>" + our_re + ")").n) as $n
+                 | select(($cmds | any(contains($n))) | not) ]) as $missing
+              | if ($missing | length) == 0 then .
+                else .hooks[$e.key] |= (
+                  (map([.hooks[]?.command? // empty] | any(test(our_re))) | index(true)) as $i
+                  | if $i == null then . + [{hooks: $missing}]
+                    else .[$i].hooks += $missing end)
+                end
+            end)
       | .hooks |= migrate_timeout
     ' "$SETTINGS" 2>/dev/null)"
     if [ -z "$merged" ]; then
@@ -114,7 +156,11 @@ if have_jq; then
       echo "✅ hooks already present in $SETTINGS (no change)"
     else
       cp "$SETTINGS" "$SETTINGS.bak.$(date +%s)"
-      printf '%s\n' "$merged" > "$SETTINGS"
+      # Write-temp + rename, not `> "$SETTINGS"`: live Claude Code processes
+      # re-read settings.json, and an in-place truncate+write lets one read a
+      # half-written file. Same-dir mv is an atomic rename.
+      printf '%s\n' "$merged" > "$CLAUDE_DIR/.settings.json.tmp.$$" \
+        && mv -f "$CLAUDE_DIR/.settings.json.tmp.$$" "$SETTINGS"
       echo "✅ merged hooks into $SETTINGS (backup made)"
     fi
   fi

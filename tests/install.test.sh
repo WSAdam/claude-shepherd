@@ -166,6 +166,96 @@ assert_eq "newline-less init.lua: user's line intact" "local x = 1" "$(head -n 1
 assert_eq "newline-less init.lua: dofile on its OWN line" "1" \
   "$(grep -Fxc 'dofile(os.getenv("HOME") .. "/.hammerspoon/claude-dashboard.lua")' "$HSDIR6/init.lua")"
 
+# --- #19: an event group that already carries SOME of our scripts must still gain
+# a newly-shipped sibling hook. Installs from the dc92a23/e4efe32 era wired
+# Stop/Notification/PermissionRequest with only cc-status.sh (cc-popup.sh did not
+# exist yet); the old merge skipped the whole template group whenever ANY of our
+# scripts was present, leaving cc-popup unwired forever. The upgrade must append
+# just the missing entries into the group we already own (matcher preserved),
+# stay idempotent, and never duplicate what's already wired. ---
+CDIR8="$TMP/claude8"; HSDIR8="$TMP/hs8"; mkdir -p "$CDIR8"
+cat > "$CDIR8/settings.json" <<'JSON'
+{ "hooks": {
+    "Stop": [ { "hooks": [ { "type": "command", "command": "bash \"$HOME/.claude/cc-status.sh\" stop" } ] } ],
+    "Notification": [ { "matcher": "", "hooks": [ { "type": "command", "command": "bash \"$HOME/.claude/cc-status.sh\" notification" } ] } ],
+    "PermissionRequest": [ { "matcher": "", "hooks": [ { "type": "command", "command": "bash \"$HOME/.claude/cc-status.sh\" permissionrequest" } ] } ],
+    "PreToolUse": [ { "matcher": "", "hooks": [
+      { "type": "command", "command": "bash \"$HOME/.claude/cc-status.sh\" pretooluse" },
+      { "type": "command", "command": "bash \"$HOME/.claude/cc-approve.sh\"", "timeout": 130 } ] } ]
+} }
+JSON
+CC_INSTALL_CLAUDE_DIR="$CDIR8" CC_INSTALL_HS_DIR="$HSDIR8" CC_INSTALL_NO_APP=1 \
+  bash "$ROOT/install.sh" >/dev/null 2>&1
+assert_eq "#19: old-era install gains the 3 cc-popup wirings" "3" \
+  "$(grep -c 'cc-popup' "$CDIR8/settings.json")"
+assert_json "#19: Stop gains cc-popup" "$CDIR8/settings.json" \
+  '[.hooks.Stop[].hooks[].command] | any(contains("cc-popup.sh"))' "true"
+assert_json "#19: Notification gains cc-popup" "$CDIR8/settings.json" \
+  '[.hooks.Notification[].hooks[].command] | any(contains("cc-popup.sh"))' "true"
+assert_json "#19: PermissionRequest gains cc-popup" "$CDIR8/settings.json" \
+  '[.hooks.PermissionRequest[].hooks[].command] | any(contains("cc-popup.sh"))' "true"
+# appended INTO the group we own, not as a duplicate group
+assert_json "#19: Stop stays one group" "$CDIR8/settings.json" '.hooks.Stop | length' "1"
+assert_json "#19: PermissionRequest stays one group" "$CDIR8/settings.json" \
+  '.hooks.PermissionRequest | length' "1"
+assert_json "#19: the owned group's matcher is preserved" "$CDIR8/settings.json" \
+  '.hooks.PermissionRequest[0].matcher' ""
+# the already-wired entries were not duplicated
+assert_json "#19: cc-status not duplicated in Stop" "$CDIR8/settings.json" \
+  '[.hooks.Stop[].hooks[].command | select(contains("cc-status.sh"))] | length' "1"
+assert_json "#19: PreToolUse (fully wired) untouched" "$CDIR8/settings.json" \
+  '.hooks.PreToolUse[0].hooks | length' "2"
+# events absent from the old install are still added wholesale
+assert_json "#19: missing events still merged (SessionStart)" "$CDIR8/settings.json" \
+  '[.hooks.SessionStart[].hooks[].command] | any(contains("cc-status.sh"))' "true"
+before8="$(cat "$CDIR8/settings.json")"
+CC_INSTALL_CLAUDE_DIR="$CDIR8" CC_INSTALL_HS_DIR="$HSDIR8" CC_INSTALL_NO_APP=1 \
+  bash "$ROOT/install.sh" >/dev/null 2>&1
+assert_eq "#19: re-run is a no-op (no duplicate popup entries)" "$before8" "$(cat "$CDIR8/settings.json")"
+# a user's own group on the same event is untouched; ours receives the append
+CDIR9="$TMP/claude9"; HSDIR9="$TMP/hs9"; mkdir -p "$CDIR9"
+cat > "$CDIR9/settings.json" <<'JSON'
+{ "hooks": { "Stop": [
+    { "hooks": [ { "type": "command", "command": "echo mine" } ] },
+    { "hooks": [ { "type": "command", "command": "bash \"$HOME/.claude/cc-status.sh\" stop" } ] }
+] } }
+JSON
+CC_INSTALL_CLAUDE_DIR="$CDIR9" CC_INSTALL_HS_DIR="$HSDIR9" CC_INSTALL_NO_APP=1 \
+  bash "$ROOT/install.sh" >/dev/null 2>&1
+assert_json "#19: user's own group untouched by the per-entry upgrade" "$CDIR9/settings.json" \
+  '.hooks.Stop[0].hooks | length' "1"
+assert_json "#19: cc-popup lands in OUR group, not the user's" "$CDIR9/settings.json" \
+  '[.hooks.Stop[1].hooks[].command] | any(contains("cc-popup.sh"))' "true"
+
+# --- #21: installs must replace files by same-dir rename (new inode), never an
+# in-place cp/redirect truncate -- a hook process mid-execution (a cc-approve.sh
+# waiter blocked in its 120s poll) keeps reading its old inode instead of garbled
+# new bytes. Pin: the destination inode CHANGES across a re-install, content is
+# intact, exec bits survive, and no dot-temps are left behind. ---
+ino_of() { ls -i "$1" 2>/dev/null | awk '{print $1}'; }
+ino_app_before="$(ino_of "$CDIR/cc-approve.sh")"
+ino_dash_before="$(ino_of "$HSDIR/claude-dashboard.lua")"
+CC_INSTALL_CLAUDE_DIR="$CDIR" CC_INSTALL_HS_DIR="$HSDIR" CC_INSTALL_NO_APP=1 \
+  bash "$ROOT/install.sh" >/dev/null 2>&1
+assert_eq "#21: hook script re-installed onto a NEW inode (rename, not truncate)" "changed" \
+  "$([ -n "$ino_app_before" ] && [ "$(ino_of "$CDIR/cc-approve.sh")" != "$ino_app_before" ] && echo changed)"
+assert_eq "#21: dashboard re-installed onto a NEW inode" "changed" \
+  "$([ -n "$ino_dash_before" ] && [ "$(ino_of "$HSDIR/claude-dashboard.lua")" != "$ino_dash_before" ] && echo changed)"
+assert_eq "#21: re-installed script content intact" "same" \
+  "$(cmp -s "$ROOT/cc-approve.sh" "$CDIR/cc-approve.sh" && echo same)"
+assert_eq "#21: exec bit preserved across the rename install" "exec" \
+  "$([ -x "$CDIR/cc-approve.sh" ] && echo exec)"
+assert_eq "#21: no dot-temp files left in the claude dir" "0" \
+  "$(find "$CDIR" -name '.*.tmp.*' 2>/dev/null | wc -l | tr -d ' ')"
+assert_eq "#21: no dot-temp files left in the hs dir" "0" \
+  "$(find "$HSDIR" -name '.*.tmp.*' 2>/dev/null | wc -l | tr -d ' ')"
+# the settings.json rewrite (CDIR8 went through a real merge) is temp+rename too:
+# no .settings.json.tmp.* scratch left behind, and the merged file is valid JSON
+assert_eq "#21: no settings.json temp left after a real merge" "0" \
+  "$(find "$CDIR8" -name '.settings.json.tmp.*' 2>/dev/null | wc -l | tr -d ' ')"
+assert_eq "#21: merged settings.json is valid JSON" "0" \
+  "$(jq -e . "$CDIR8/settings.json" >/dev/null 2>&1; echo $?)"
+
 # --- tooling check (`install.sh --tools-only`, powers `make doctor`): reports status,
 # is NON-INTERACTIVE without a tty (never blocks tests/`make setup`), offers (prints) the
 # brew command for a missing optional accelerator, and NEVER hard-fails. Simulate

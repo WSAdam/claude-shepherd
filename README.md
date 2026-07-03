@@ -1154,3 +1154,7 @@ The authoritative "why" for each tag is the code comment next to it — it recor
 non-obvious invariant (usually a concurrency or fail-closed rule) the fix protects, so
 a later edit doesn't "simplify" the guard back into the bug. To trace one across the
 tree: `git log --grep='R2-17'` or `grep -rn 'R2-17' .`.
+
+The 2026-07-02 sweep (see the CHANGELOG) tracks its 30 findings as `#1`–`#30`, with
+regression tests named `#<id>-pin`; the same rule applies — the comment beside each
+`#<id>` is the authoritative "why", and `grep -rn '#18-pin' tests/` finds its test.

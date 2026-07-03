@@ -2088,5 +2088,198 @@ do
         src:find("function paintSelection()", 1, true) ~= nil)
 end
 
+-- =============================================================================
+-- Regression pins for the 2026-07 fix batch (dashboard half). The fixed logic
+-- lives in claude-dashboard.lua's refresh loop / FX layer, which has no headless
+-- runtime in this suite (same rationale as the Panel-JS tripwires above), so the
+-- load-bearing expressions are pinned at the source level; the pure halves are
+-- unit-tested in core.test.lua. Reformatting these lines can false-alarm; if one
+-- trips after a refactor, re-verify the BEHAVIOR it names before appeasing it.
+-- =============================================================================
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("regr-pin: dashboard source readable", #src > 0)
+
+  -- #2: the stale-'done' self-heal is LATCHED (FX._healedDone) so a tick with no
+  -- observable tail (display-stale skip / transient readTail failure) carries the
+  -- healed 'working' instead of snapping back to the raw-file 'done' -- the
+  -- pure-artifact working->done edge fired drain-close/autofeed/banners/rules
+  -- into a mid-turn session.
+  check("#2-pin: heal latch lives on FX (200-local cap)",
+        src:find("FX._healedDone = {}", 1, true) ~= nil)
+  check("#2-pin: heal records the frozen updated it healed against",
+        src:find("FX._healedDone[it.key] = it.updated", 1, true) ~= nil)
+  check("#2-pin: no-tail tick carries the heal (latch consulted)",
+        src:find("elseif tail == nil and FX._healedDone[it.key] ~= nil", 1, true) ~= nil
+        and src:find("FX._healedDone[it.key] == it.updated", 1, true) ~= nil)
+  check("#2-pin: a real hook write (new updated/status) drops the latch",
+        src:find("FX._healedDone[it.key] = nil", 1, true) ~= nil)
+  check("#2-pin: latch reaped with the other per-key state",
+        src:find("core.reapUnbacked(FX._healedDone, newPrev)", 1, true) ~= nil)
+
+  -- #4: per-task timing abandons taskStart only past the RESPAWN death threshold
+  -- (autoRespawnStale, default 600s), not the 90s display staleness -- a healthy
+  -- session running one long build/test goes display-stale mid-task and its
+  -- task_done record was silently lost.
+  check("#4-pin: abandon keyed to the respawn death threshold",
+        src:find("if it.updated ~= nil and (now - it.updated) > autoRespawnStale then", 1, true) ~= nil)
+  check("#4-pin: abandon comment names the death threshold",
+        src:find("taskStart[it.key] = nil  -- abandon: frozen past the death threshold", 1, true) ~= nil)
+  check("#4-pin: the old display-staleness abandon is gone",
+        src:find("abandon: a frozen session's in-flight task can't be timed", 1, true) == nil)
+
+  -- #5: voice dictation adapts the raw status item via winTarget (the kitty path
+  -- reads camelCase kittyWindowId/kittyListenOn; the raw snake_case item nil'd
+  -- both and fell back to the socketless cwd: probe), and the success alert is
+  -- delivery-gated instead of unconditional.
+  do
+    local p = src:find('dispatchSerialized(target, "voice", function()', 1, true)
+    check("#5-pin: voice dispatch found", p ~= nil)
+    local w = p and src:sub(p, p + 600) or ""
+    check("#5-pin: voice types via winTarget(target)",
+          w:find("FX.typeIntoWindow(winTarget(target), text)", 1, true) ~= nil)
+    check("#5-pin: voice alert is delivery-gated (skip reports NOT sent)",
+          w:find("text NOT sent", 1, true) ~= nil)
+  end
+
+  -- #6/#27: every nudge path re-checks the LIVE status at FIRE time
+  -- (FX.nudgeSafeNow, the router's R2-20 idiom) -- a stagger-delayed nudge's
+  -- Return must never answer an approval prompt that appeared meanwhile.
+  check("#6-pin: FX.nudgeSafeNow defined",
+        src:find("function FX.nudgeSafeNow(it)", 1, true) ~= nil)
+  check("#6-pin: nudgeSafeNow re-reads the live status file",
+        src:find("local fresh = it and FX.liveStatusFor(it.key) or nil", 1, true) ~= nil)
+  check("#6-pin: bulk-nudge slot re-checks at fire time",
+        src:find("if action == \"nudge\" and not FX.nudgeSafeNow(it) then", 1, true) ~= nil)
+  check("#27-pin: per-tile dispatch re-checks at fire time",
+        src:find("if a == \"nudge\" and not FX.nudgeSafeNow(item) then", 1, true) ~= nil)
+  check("#27-pin: per-tile skip is ledgered",
+        src:find('type = "nudge_skipped", reason = "approval"', 1, true) ~= nil)
+  check("#27-pin: rule-nudge slot re-checks at fire time",
+        src:find("if not FX.nudgeSafeNow(target) then", 1, true) ~= nil)
+  check("#27-pin: rule-nudge skip is ledgered as processor=nudge_skipped",
+        src:find('processor = "nudge_skipped", reason = "approval"', 1, true) ~= nil)
+
+  -- #9: ledgerSnapshot's one-shot `changed` edge is latched (ledgerCache.dirty)
+  -- so non-refresh callers (decision log, shift report, digest, per-tile banner)
+  -- can no longer eat it and starve the 🔔 badge / lineage recomputes; only
+  -- refresh() consumes.
+  check("#9-pin: ledgerSnapshot takes a consume flag",
+        src:find("function ledgerSnapshot(consume)", 1, true) ~= nil)
+  check("#9-pin: a non-consuming re-read latches dirty",
+        src:find("ledgerCache.dirty = not consume", 1, true) ~= nil)
+  check("#9-pin: consume drains the latch on a cache hit",
+        src:find("if consume and ledgerCache.dirty then", 1, true) ~= nil)
+  eq("#9-pin: exactly ONE consuming call site (refresh)",
+     select(2, src:gsub("ledgerSnapshot%(true%)", "")), 1)
+
+  -- #13: FX.removeStatus mirrors cc_remove -- ghost/orphan prune, Forget tile and
+  -- the auto-respawn dead-tile drop must not strand the per-key sibling files
+  -- (SessionEnd never fires for those sessions).
+  do
+    local p = src:find("function FX.removeStatus(key)", 1, true)
+    check("#13-pin: FX.removeStatus found", p ~= nil)
+    local body = p and src:sub(p, p + 1500) or ""
+    check("#13-pin: removes the decision file",
+          body:find('key .. ".decision")', 1, true) ~= nil)
+    check("#13-pin: sweeps decision claim files (incl. .parked)",
+          body:find('key .. ".decision.claim."', 1, true) ~= nil)
+    check("#13-pin: removes the gate-tools override", body:find("GATE_TOOLS_DIR", 1, true) ~= nil)
+    check("#13-pin: removes the autopilot expiry", body:find("AUTOPILOT_DIR", 1, true) ~= nil)
+    check("#13-pin: removes the resolved policy", body:find("POLICY_DIR", 1, true) ~= nil)
+    check("#13-pin: removes the policy override", body:find("POLICY_OVERRIDE_DIR", 1, true) ~= nil)
+    check("#13-pin: removes the approveRepeats memo", body:find("cc-approved", 1, true) ~= nil)
+    check("#13-pin: removes the automodel marker", body:find("cc-automodel", 1, true) ~= nil)
+  end
+
+  -- #14: fleet search runs via /bin/sh with stdout redirected to a temp file
+  -- (the folder-scan R1-38 fix): a direct-exec hs.task deadlocks once matches
+  -- exceed the ~64KB pipe buffer, hanging the panel at "searching…".
+  check("#14-pin: no direct-exec search task remains",
+        src:find("searchTask = hs.task.new(", 1, true) == nil)
+  check("#14-pin: search exit callback reads the redirect file",
+        src:find('local out = FX.readFile(outFile) or ""', 1, true) ~= nil)
+
+  -- #15/#29: the search exit callback checks OWNERSHIP first -- a superseded
+  -- query's terminate-triggered callback must not nil the NEWER task's latch
+  -- (which broke terminate-on-new-query and let the new task be GC'd mid-run).
+  do
+    local b = src:find("if searchTask ~= myTask then pcall(os.remove, outFile); return end", 1, true)
+    check("#15-pin: ownership check present in the search callback", b ~= nil)
+    local c = b and src:find("searchTask = nil", b, true) or nil
+    check("#15-pin: the latch release comes AFTER the ownership check",
+          b ~= nil and c ~= nil and (c - b) < 200)
+    check("#15-pin: generation check still guards stale results",
+          src:find("if gen ~= searchGen then return end", 1, true) ~= nil)
+  end
+
+  -- #22: gate-consumed files are written atomically (temp+rename) -- a torn
+  -- truncate-then-write read of .panel-alive judged the live panel dead (native
+  -- fallback), of the gate-tools override momentarily reverted the gated set,
+  -- of the autopilot expiry read as 0 (autopilot off).
+  check("#22-pin: heartbeat written atomically",
+        src:find("FX.writeFileAtomic(HEARTBEAT, tostring(now))", 1, true) ~= nil
+        and src:find("FX.writeFile(HEARTBEAT", 1, true) == nil)
+  check("#22-pin: autopilot expiry written atomically",
+        src:find("FX.writeFileAtomic(AUTOPILOT_DIR", 1, true) ~= nil
+        and src:find("FX.writeFile(AUTOPILOT_DIR", 1, true) == nil)
+  check("#22-pin: gate-tools override written atomically",
+        src:find("FX.writeFileAtomic(GATE_TOOLS_DIR", 1, true) ~= nil
+        and src:find("FX.writeFile(GATE_TOOLS_DIR", 1, true) == nil)
+  -- the atomic temp is `path .. ".tmp." .. pid`, so the heartbeat's temp name
+  -- still contains "/.panel-alive" and the pathwatcher self-ignore keeps
+  -- matching -- pin both halves (the naming and the matcher behavior).
+  check("#22-pin: writeFileAtomic temp keeps the path prefix",
+        src:find('local tmp = path .. ".tmp."', 1, true) ~= nil)
+  check("#22: watcher self-ignores the heartbeat's atomic temp file",
+        core.watcherShouldRefresh({ "/s/.panel-alive.tmp.123" }) == false)
+  check("#22: watcher still refreshes on real files next to the temp",
+        core.watcherShouldRefresh({ "/s/.panel-alive.tmp.123", "/s/abc.json" }) == true)
+
+  -- #26: the context-menu 'Jump to window' reserves a slot on the shared
+  -- injection tail like every sibling jump path -- a direct focus mid-chain
+  -- landed another dispatch's pending ⌘V/Return beats in the wrong session.
+  do
+    local p = src:find('{ title = "Jump to window", fn = function()', 1, true)
+    check("#26-pin: context-menu Jump found", p ~= nil)
+    local w = p and src:sub(p, p + 300) or ""
+    check("#26-pin: Jump routes through dispatchSerialized",
+          w:find('dispatchSerialized(item, "focus", function() core.handleAction(FX, item, "focus") end)', 1, true) ~= nil)
+  end
+
+  -- #28: FX.notify's click callback dispatches the focus through the serialized
+  -- tail, and the forward declaration precedes FX.notify so the reference
+  -- compiles as the upvalue (not a nil global).
+  do
+    local d = src:find("local dispatchSerialized", 1, true)
+    local n = src:find("function FX.notify(", 1, true)
+    check("#28-pin: dispatchSerialized declared before FX.notify",
+          d ~= nil and n ~= nil and d < n)
+    local body = n and src:sub(n, n + 1400) or ""
+    check("#28-pin: notify click reserves a serialized slot",
+          body:find('dispatchSerialized(it, "focus", function()', 1, true) ~= nil)
+    check("#28-pin: the focus itself still goes through focusProject",
+          body:find("focusProject(it.name, it.cwd, it.editor, true)", 1, true) ~= nil)
+  end
+
+  -- #30: each voice recording gets a unique wav (no fixed cc-voice.wav that a
+  -- re-record's -y could rewrite mid-transcription) and transcription fires from
+  -- ffmpeg's OWN exit callback (rec.transcribe), not a fixed 0.5s grace; the
+  -- self-stop branch is ownership-guarded.
+  check("#30-pin: per-recording unique wav path",
+        src:find("sd.voiceSeq = (sd.voiceSeq or 0) + 1", 1, true) ~= nil
+        and src:find('"cc-voice-" .. sd.voiceSeq', 1, true) ~= nil)
+  check("#30-pin: the fixed wav path is gone",
+        src:find("cc-voice.wav", 1, true) == nil)
+  check("#30-pin: the fixed 0.5s transcription grace is gone",
+        src:find("after(0.5, function() sdTranscribeAndSend", 1, true) == nil)
+  check("#30-pin: transcription fires from ffmpeg's exit callback",
+        src:find("if rec.transcribe then", 1, true) ~= nil)
+  check("#30-pin: self-stop branch is ownership-guarded",
+        src:find("elseif sd.recording and sd.voiceTask == t then", 1, true) ~= nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

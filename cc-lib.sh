@@ -82,14 +82,28 @@ cc_now() { date +%s; }
 # (records it per session) and cc-popup.sh (routes the focus-on-finish pop to the
 # right app). Returns: kitty | cursor | vscode | terminal.
 cc_detect_editor() {
+  # CLAUDE_CODE_ENTRYPOINT=claude-vscode is authoritative and decided FIRST: the
+  # VS Code/Cursor extension SETS it when spawning claude, so unlike KITTY_*/TERM
+  # it can't be inherited from whatever shell cold-started the editor. Testing the
+  # kitty env first meant a VS Code/Cursor launched from a kitty shell (`code .`)
+  # handed EVERY session it hosts the launching kitty window's identity: keystrokes
+  # routed to that kitty window and one forged per-window id was shared across all
+  # editor windows (cross-window false prunes in core.staleDuplicateKeys). The
+  # bundle id still disambiguates cursor-vs-vscode within the extension branch.
+  case "${CLAUDE_CODE_ENTRYPOINT:-}" in
+    claude-vscode)
+      case "${__CFBundleIdentifier:-}" in
+        *todesktop*|*[Cc]ursor*) echo cursor; return ;;
+      esac
+      echo vscode; return ;;
+  esac
   if [ -n "${KITTY_WINDOW_ID:-}" ] || [ "${TERM:-}" = "xterm-kitty" ]; then echo kitty; return; fi
   case "${__CFBundleIdentifier:-}" in
     *todesktop*|*[Cc]ursor*) echo cursor; return ;;
     *VSCode*|*VSCodium*)     echo vscode; return ;;
   esac
   case "${CLAUDE_CODE_ENTRYPOINT:-}" in
-    claude-vscode) echo vscode; return ;;
-    cli)           echo terminal; return ;;
+    cli) echo terminal; return ;;
   esac
   echo vscode  # safe default -> unchanged VS Code behavior
 }
@@ -114,7 +128,12 @@ cc_editor_app() {
 # when no such ancestor is found within the bounded walk -- the safe side: the panel
 # then never auto-prunes the tile and the 24h backstop owns its cleanup.
 cc_window_host() {
-  [ -z "${KITTY_WINDOW_ID:-}" ] || { printf ''; return 0; }
+  # Genuine kitty sessions have their own window id -- skip the walk. Decide by the
+  # DETECTOR, not raw KITTY_WINDOW_ID: that env var is inherited by a VS Code/Cursor
+  # cold-started from a kitty shell (`code .`), which would otherwise suppress
+  # host_window capture for every session those windows host -- silently reverting
+  # their /clear ghost cleanup to the 24h backstop (the regression 56622d1 fixed).
+  [ "$(cc_detect_editor)" != "kitty" ] || { printf ''; return 0; }
   # Ancestry-walk depth cap. Observed shape is hook -> claude -> ext-host -> window-host
   # (~3-4 hops), so 8 is ~2x headroom; raising it just costs one `ps` per extra hop.
   local max_depth=8
@@ -220,8 +239,18 @@ cc_merge() {
   if printf '%s' "$cur" | jq -c --argjson patch "$2" '. * $patch' > "$tmp" 2>/dev/null; then
     mv "$tmp" "$f"
   else
-    rm -f "$tmp" 2>/dev/null || true
-    return 1
+    # Self-heal a corrupt status file (hand-edit typo, partial rsync copy, truncated
+    # write): invalid JSON on disk fails the merge above on EVERY subsequent hook
+    # event -- no caller checks the return -- so the tile vanishes from the panel
+    # and the session can never republish itself until SessionEnd. Retry from {}:
+    # it succeeds iff the PATCH is valid (i.e. the failure was the file), rebuilding
+    # the tile from this event's fields; a bad patch still returns 1, file untouched.
+    if printf '{}' | jq -c --argjson patch "$2" '. * $patch' > "$tmp" 2>/dev/null; then
+      mv "$tmp" "$f"
+    else
+      rm -f "$tmp" 2>/dev/null || true
+      return 1
+    fi
   fi
 }
 
@@ -270,8 +299,9 @@ cc_remove() {
 # ---- Audit/event ledger ----------------------------------------------------
 # Append-only JSONL record of fleet activity, one event per line, in a per-day
 # (UTC) file under CC_LEDGER_DIR. OFF by default: nothing is written unless
-# `ledger.enabled` is true in cc-config.json. Lines are well under PIPE_BUF, so
-# concurrent O_APPEND writes from many sessions' hooks stay atomic.
+# `ledger.enabled` is true in cc-config.json. Lines are KEPT well under PIPE_BUF
+# (cc_ledger_append caps every string field), so concurrent O_APPEND writes from
+# many sessions' hooks stay atomic.
 CC_LEDGER_DIR="${CC_LEDGER_DIR:-${HOME}/.claude/cc-ledger}"
 
 cc_ledger_enabled() { [ "$(cc_config '.ledger.enabled' 'false')" = "true" ]; }
@@ -296,8 +326,16 @@ cc_ledger_append() {
   id="${now}-$$-${RANDOM}"
   day="$(date -u +%Y-%m-%d)"
   file="$CC_LEDGER_DIR/${day}.jsonl"
-  # {v,ts,id} first; caller fields merged on top (and win if they set any).
+  # {v,ts,id} first; caller fields merged on top (and win if they set any). Then
+  # ENFORCE the small-line invariant the header comment relies on: cap every string
+  # field at 200 chars (summarize_tool's cap in cc-status.sh). An uncapped field --
+  # the gate's full Bash command as a decision `summary`, a many-line prompt --
+  # makes the line multi-KB, and bash's printf flushes big lines through its ~1KB
+  # stdio buffer in MULTIPLE write()s, so two sessions appending concurrently can
+  # interleave mid-line and corrupt both records for the analytics/shift report.
   line="$(printf '%s' "$1" | jq -c --argjson v 1 --argjson ts "$now" --arg id "$id" \
-    '{v:$v, ts:$ts, id:$id} + .' 2>/dev/null)" || return 0
+    '{v:$v, ts:$ts, id:$id} + .
+     | with_entries(if (.value | type) == "string" and (.value | length) > 200
+                    then .value |= .[:200] else . end)' 2>/dev/null)" || return 0
   [ -n "$line" ] && printf '%s\n' "$line" >> "$file" 2>/dev/null || true
 }

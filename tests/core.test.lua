@@ -6539,5 +6539,214 @@ do
   eq("gridSignature: non-table -> empty", core.gridSignature(nil), "")
 end
 
+-- =============================================================================
+-- Regression pins for the 2026-07 fix batch (cc-core half). Each block names the
+-- bug it locks; a revert of the fix must fail here.
+-- =============================================================================
+
+-- ---- #3: parseStatusList coerces cwd/transcript_path to string-or-nil -------
+do
+  local now = 10000
+  -- A hand-edited / rsync-mirrored status file can legally carry a JSON bool or
+  -- number in cwd/transcript_path. Un-coerced, those reach the per-tile loop's
+  -- `it.cwd .. "/spec/..."` concat and io.open(it.transcript_path) OUTSIDE the
+  -- decode pcall -- and since the file persists, EVERY 1Hz tick aborts there.
+  local lst = core.parseStatusList({
+    entry("cb", { name = "cb", status = "working", updated = now, cwd = true,  transcript_path = false }),
+    entry("cn", { name = "cn", status = "working", updated = now, cwd = 123,   transcript_path = 456 }),
+    entry("ck", { name = "ck", status = "working", updated = now, cwd = "/real/path",
+                  transcript_path = "/h/.claude/projects/-real-path/s.jsonl" }),
+  }, now, 90)
+  local by = {}
+  for _, it in ipairs(lst) do by[it.name] = it end
+  eq("#3: boolean cwd -> nil", by.cb.cwd, nil)
+  eq("#3: boolean transcript_path -> nil", by.cb.transcript_path, nil)
+  eq("#3: numeric cwd -> nil", by.cn.cwd, nil)
+  eq("#3: numeric transcript_path -> nil", by.cn.transcript_path, nil)
+  eq("#3: string cwd preserved", by.ck.cwd, "/real/path")
+  eq("#3: string transcript_path preserved", by.ck.transcript_path,
+     "/h/.claude/projects/-real-path/s.jsonl")
+  -- the coercion must run BEFORE projectKey (whose fallback returns data.cwd raw)
+  check("#3: projectKey never a non-string (boolean cwd)", type(by.cb.projectKey) ~= "boolean")
+  check("#3: projectKey never a non-string (numeric cwd)", type(by.cn.projectKey) ~= "number")
+  -- the downstream truthy-guarded consumers must be able to concat safely
+  local okConcat = pcall(function()
+    for _, it in ipairs(lst) do
+      if it.cwd then local _ = it.cwd .. "/spec/product/user-stories.md" end
+      if it.transcript_path then local _ = it.transcript_path .. "" end
+    end
+  end)
+  check("#3: downstream concat over the parsed list never throws", okConcat)
+end
+
+-- ---- #7 (reader half): parseStatusList lifts mode_cycle -> item.modeCycle ---
+do
+  local now = 10000
+  local lst = core.parseStatusList({
+    entry("m1", { name = "m1", status = "working", updated = now,
+                  mode_cycle = { bypassPermissions = true } }),
+    entry("m2", { name = "m2", status = "working", updated = now, mode_cycle = "garbage" }),
+    entry("m3", { name = "m3", status = "working", updated = now }),
+  }, now, 90)
+  local by = {}
+  for _, it in ipairs(lst) do by[it.name] = it end
+  check("#7: mode_cycle table lifted onto item.modeCycle",
+        type(by.m1.modeCycle) == "table" and by.m1.modeCycle.bypassPermissions == true)
+  eq("#7: non-table mode_cycle normalizes to nil", by.m2.modeCycle, nil)
+  eq("#7: absent mode_cycle stays nil", by.m3.modeCycle, nil)
+end
+
+-- ---- #7 (action half): set-mode sizes the cycle from modeCycle + current mode
+do
+  -- A session spawned with --permission-mode bypassPermissions rotates through 4
+  -- modes; with modeCycle never populated the press count was computed over 3.
+  -- plan -> default over [default acceptEdits plan bypassPermissions] = 2 presses
+  -- (the 3-mode cycle would send 1, landing set-mode ON acceptEdits... and a later
+  -- wrap-around ON bypassPermissions while the panel shows the safe target).
+  -- (r.last() is nil-guarded: on regressed code these are 0-step no-ops with no
+  -- recorded effect, which must read as a clean FAIL, not abort the suite.)
+  local r = newRecorder()
+  core.handleAction(r.fx, { key = "k", name = "p", editor = "kitty", permission_mode = "plan",
+                            modeCycle = { bypassPermissions = true } }, "set-mode", "default")
+  eq("#7: bypass-enabled cycle -> plan->default = 2 presses",
+     r.last() and #r.last().b or 0, 2)
+
+  -- Definitional membership: a session sitting IN bypassPermissions has bypass in
+  -- its cycle even before any mode_cycle was persisted. Pre-fix this was a 0-step
+  -- no-op (cur not in the 3-mode cycle) -- leaving bypass was impossible.
+  r = newRecorder()
+  core.handleAction(r.fx, { key = "k", name = "p", editor = "kitty",
+                            permission_mode = "bypassPermissions" }, "set-mode", "default")
+  eq("#7: leaving bypass works (current mode joins the cycle)",
+     r.last() and r.last().op, "sendKeys")
+  eq("#7: bypass->default wraps = 1 press", r.last() and #r.last().b or 0, 1)
+
+  -- both optional modes recorded -> the full 5-mode cycle
+  r = newRecorder()
+  core.handleAction(r.fx, { key = "k", name = "p", editor = "kitty", permission_mode = "default",
+                            modeCycle = { bypassPermissions = true, auto = true } }, "set-mode", "auto")
+  eq("#7: 5-mode cycle -> default->auto = 4 presses", r.last() and #r.last().b or 0, 4)
+
+  -- target still outside the cycle -> unchanged no-op (no false keystrokes)
+  r = newRecorder()
+  core.handleAction(r.fx, { key = "k", name = "p", editor = "kitty",
+                            permission_mode = "default" }, "set-mode", "bypassPermissions")
+  eq("#7: un-enabled optional target stays a no-op", r.count(), 0)
+end
+
+-- ---- #8: ledger retention keeps a day file until its WHOLE day is expired ----
+do
+  local ep = core.ledgerFileEpoch("2026-01-01.jsonl")
+  check("#8: ledgerFileEpoch sanity", type(ep) == "number")
+  -- retention 1 day: cutoff = now - 86400. The file spans [ep, ep+86400); it may
+  -- only be deleted once ep+86400 <= cutoff. The old `ep < cutoff` deleted events
+  -- up to 24h INSIDE the "Keep for N days" window (written seconds before UTC
+  -- midnight, GC'd seconds after).
+  eq("#8: newest events still in-window -> file kept",
+     #core.expiredLedgerFiles({ "2026-01-01.jsonl" }, ep + 2 * 86400 - 1, 1), 0)
+  eq("#8: whole day at the cutoff boundary -> expired",
+     #core.expiredLedgerFiles({ "2026-01-01.jsonl" }, ep + 2 * 86400, 1), 1)
+  eq("#8: whole day past the cutoff -> expired",
+     #core.expiredLedgerFiles({ "2026-01-01.jsonl" }, ep + 3 * 86400, 1), 1)
+end
+
+-- ---- #10: fleetStats ignores session-less bookkeeping events for per-session rows
+do
+  local evs = {
+    { ts = 10, type = "prompt",        session_id = "s1", name = "alpha" },
+    { ts = 20, type = "purge",         removed = 2 },              -- retention tombstone
+    { ts = 30, type = "schedule_fire", name = "daily-digest" },    -- routine record
+    { ts = 40, type = "decision",      outcome = "allow", by = "human" },  -- sid-less decision
+  }
+  local st = core.fleetStats(evs, { now = 100, topN = 8 })
+  eq("#10: only the real session is counted", st.totals.sessions, 1)
+  eq("#10: session-less events still count in totals.events", st.totals.events, 4)
+  eq("#10: session-less decision still counted in decisions", st.decisions.allow, 1)
+  eq("#10: session-less decision still counted in provenance", st.provenance.human, 1)
+  eq("#10: mostActive has no phantom row", #st.mostActive, 1)
+  eq("#10: mostActive is the real session", st.mostActive[1].session_id, "s1")
+  for _, row in ipairs(st.mostActive) do
+    check("#10: no '?' session row rendered", row.session_id ~= "?")
+  end
+end
+
+-- ---- #11: slash-command transcript lines are machine bookkeeping, not prompts
+do
+  -- The exact on-disk shape (verified against a real local transcript): a /clear
+  -- (or /model, /cost, ...) is an ordinary non-meta `user` line whose content is
+  -- the <command-name>/<command-message>/<command-args> wrapper; local command
+  -- output lands as <local-command-stdout>.
+  local cmdContent = "<command-name>/clear</command-name>\n"
+    .. "<command-message>clear</command-message>\n<command-args></command-args>"
+  local function u(content, ts)
+    return { type = "user", timestamp = ts, message = { role = "user", content = content } }
+  end
+  check("#11: command wrapper is not a human prompt (string content)",
+        core.userHasHumanText(u(cmdContent)) == false)
+  check("#11: command wrapper is not a human prompt (array content)",
+        core.userHasHumanText({ type = "user", message = { role = "user",
+          content = { { type = "text", text = cmdContent } } } }) == false)
+  check("#11: local-command stdout is not a human prompt",
+        core.userHasHumanText(u("<local-command-stdout>4.2 MB used</local-command-stdout>")) == false)
+  -- a real prompt still registers, incl. next to an IDE wrapper
+  check("#11: genuine prompt still a human prompt",
+        core.userHasHumanText(u("run the tests")) == true)
+  check("#11: prompt paired with an IDE wrapper still registers",
+        core.userHasHumanText(u("<ide_opened_file>f</ide_opened_file>\nfix it")) == true)
+
+  -- (a) transcriptResumed: a /model line minutes after `done` must NOT flip the
+  -- tile back to working (the exact false-trigger class 6bb790b locked for
+  -- bare ide_opened_file, reintroduced for command lines by 809cf19).
+  local function aline(ts)
+    return core.json.encode({ type = "assistant", timestamp = ts,
+                              message = { content = { { type = "text", text = "x" } } } })
+  end
+  local cmdLine = core.json.encode(u(cmdContent, "2026-06-18T14:05:00Z"))
+  local t0 = core.isoToEpoch("2026-06-18T14:00:00Z")
+  check("#11: command line after stale done does NOT resume",
+        core.transcriptResumed(aline("2026-06-18T14:00:00Z") .. "\n" .. cmdLine, t0 + 1, 2) == false)
+
+  -- (b) transcriptError: a command line after an api_error is NOT recovery --
+  -- clearing the error status silenced auto-continue for a genuinely frozen session.
+  local errline = core.json.encode({ type = "system", subtype = "api_error",
+    error = { formatted = "Unable to connect to API" } })
+  check("#11: command line after api_error does NOT mask the error",
+        core.transcriptError(errline .. "\n" .. cmdLine) ~= nil)
+
+  -- (c) transcriptPeek: no fake user turn rendering the raw wrapper blob
+  local rows = core.transcriptPeek(aline("2026-06-18T14:00:00Z") .. "\n" .. cmdLine, { n = 10 })
+  for _, row in ipairs(rows) do
+    check("#11: peek never renders a <command-name> blob as a user turn",
+          not (row.role == "user" and row.text:find("<command-name>", 1, true)))
+  end
+end
+
+-- ---- #16: search hit text is repaired to whole UTF-8 characters --------------
+do
+  -- C-locale grep's `.{0,60}` context wrap counts BYTES, so a hit can start with
+  -- orphaned continuation bytes / end mid-sequence; hs.json.encode would sanitize
+  -- them to U+FFFD and the row renders visible '�' garbage.
+  local contTail = "\150\145"                    -- two orphaned continuation bytes
+  local res = core.parseSearchResults("/f.jsonl:1:" .. contTail .. "rocket tail\n")
+  eq("#16: leading continuation bytes dropped", res.hits[1].text, "rocket tail")
+
+  -- a trailing truncated sequence (first 2 bytes of a 4-byte emoji) is dropped
+  local res2 = core.parseSearchResults("/f.jsonl:2:abc\240\159\n")
+  eq("#16: trailing truncated sequence dropped", res2.hits[1].text, "abc")
+
+  -- the maxLen display slice is a byte slice too: slicing mid-emoji must not
+  -- leave the partial sequence before the ellipsis
+  local res3 = core.parseSearchResults("/f.jsonl:3:ab\240\159\154\128xyz\n", { maxLen = 4 })
+  eq("#16: maxLen slice mid-emoji repaired", res3.hits[1].text, "ab\226\128\166")
+
+  -- intact multibyte text passes through byte-for-byte
+  local intact = "\240\159\154\128 ok"           -- a whole rocket + ascii
+  local res4 = core.parseSearchResults("/f.jsonl:4:" .. intact .. "\n")
+  eq("#16: intact UTF-8 untouched", res4.hits[1].text, intact)
+  -- plain ASCII behavior is unchanged (exact bytes, incl. the maxLen backstop)
+  local res5 = core.parseSearchResults("/f.jsonl:5:" .. string.rep("x", 300) .. "\n", { maxLen = 10 })
+  eq("#16: ASCII maxLen behavior unchanged", res5.hits[1].text, string.rep("x", 10) .. "\226\128\166")
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

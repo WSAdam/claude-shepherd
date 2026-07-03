@@ -72,8 +72,11 @@ fi
 
 # Without jq we can't merge; write a minimal file so the panel still shows it.
 if ! cc_have_jq; then
+  # permissionrequest maps to approval like the jq path (line ~152) -- the fallback
+  # predates the PermissionRequest hook; defaulting it to "working" showed a session
+  # blocked on the permission prompt as busy (the opposite of the panel's purpose).
   case "$EVENT" in
-    notification) STATUS="approval" ;;
+    notification|permissionrequest) STATUS="approval" ;;
     stop) STATUS="done" ;;
     sessionstart) STATUS="idle" ;;
     *) STATUS="working" ;;
@@ -230,11 +233,34 @@ fi
 # panel can route per session and display current mode/effort.
 PATCH="$(printf '%s' "$PATCH" | jq -c --arg ed "$EDITOR_KIND" '. + {editor:$ed}')"
 [ -n "$PERMISSION_MODE" ] && PATCH="$(printf '%s' "$PATCH" | jq -c --arg v "$PERMISSION_MODE" '. + {permission_mode:$v}')"
+# Sticky cycle membership: once a session is ever observed in an OPTIONAL mode
+# (bypassPermissions/auto), that mode is in its real Shift+Tab rotation for the
+# session's lifetime. Record it under mode_cycle -- the final apply below uses
+# jq's RECURSIVE `. * $patch` merge, so memberships accumulate and every later
+# event that omits mode_cycle preserves it. cc-core's parseStatusList lifts this
+# onto item.modeCycle and handleAction sizes the set-mode press count from it;
+# without the record the dashboard computes wrap-arounds over the 3-mode cycle
+# while the session cycles through 4+, landing set-mode on the wrong (and
+# possibly permission-free) mode.
+case "$PERMISSION_MODE" in
+  bypassPermissions|auto)
+    PATCH="$(printf '%s' "$PATCH" | jq -c --arg v "$PERMISSION_MODE" '.mode_cycle = {($v): true}')" ;;
+esac
 [ -n "$EFFORT" ]     && PATCH="$(printf '%s' "$PATCH" | jq -c --arg v "$EFFORT"     '. + {effort:$v}')"
 [ -n "$MODEL" ]      && PATCH="$(printf '%s' "$PATCH" | jq -c --arg v "$MODEL"      '. + {model:$v}')"
 [ -n "$BASE_URL" ]   && PATCH="$(printf '%s' "$PATCH" | jq -c --arg v "$BASE_URL"   '. + {base_url:$v}')"
-[ -n "$KITTY_WID" ]  && PATCH="$(printf '%s' "$PATCH" | jq -c --arg v "$KITTY_WID"  '. + {kitty_window_id:$v}')"
-[ -n "$KITTY_SOCK" ] && PATCH="$(printf '%s' "$PATCH" | jq -c --arg v "$KITTY_SOCK" '. + {kitty_listen_on:$v}')"
+# Record kitty handles ONLY for sessions the detector classifies as kitty:
+# KITTY_WINDOW_ID/KITTY_LISTEN_ON are ordinary inherited env vars, so a VS Code/
+# Cursor cold-started from a kitty shell (`code .`) hands every hosted session
+# the launching kitty window's identity. Publishing that forged pair made
+# core.staleDuplicateKeys' termId (which prefers kitty sock#wid over host_window)
+# identical across ALL editor windows -- cross-window false prunes of live tiles,
+# a shared respawn budget, and dashboard keystrokes routed via `kitty @` into the
+# launching shell instead of the session.
+if [ "$EDITOR_KIND" = "kitty" ]; then
+  [ -n "$KITTY_WID" ]  && PATCH="$(printf '%s' "$PATCH" | jq -c --arg v "$KITTY_WID"  '. + {kitty_window_id:$v}')"
+  [ -n "$KITTY_SOCK" ] && PATCH="$(printf '%s' "$PATCH" | jq -c --arg v "$KITTY_SOCK" '. + {kitty_listen_on:$v}')"
+fi
 
 # Non-Kitty per-window host id (VS Code/Cursor) so the panel can auto-prune /clear
 # ghosts (kitty uses its window id above). Computed once per session: reuse the value
@@ -264,34 +290,84 @@ if [ -n "$SET_PENDING" ]; then
 fi
 
 # R1-36: cc-approve.sh (the gate) and THIS hook run in parallel under the same
-# PreToolUse matcher group, both read-modify-writing <key>.json. When the gate has
-# armed (gate=="waiting"), a pretooluse/posttooluse {status:working}+pending-clear
-# landing AFTER the gate's write would revert the approval status and delete the
-# pending block (incl. the nonce) out from under the panel. The gate owns the tile's
-# lifecycle while it's waiting, so leave status/pending untouched for these events.
+# PreToolUse matcher group, both read-modify-writing <key>.json. While the gate is
+# armed (gate=="waiting") it OWNS the tile's status/since/pending: a sibling event's
+# {status:working}+pending-clear would revert the approval status and delete the
+# pending block (incl. its nonce), and a sibling PermissionRequest/AskUserQuestion
+# would REPLACE the gate's pending with a nonce-less one -- the panel then shows one
+# request while Approve answers another (the decision still binds via gate_nonce).
+# So EVERY event that writes status/pending is guarded, not just pre/posttooluse;
+# the notification arms are already covered by PENDING_IF_ABSENT above.
+# R3-15: `since` is stripped too -- the gate recorded since:T1 (when the approval
+# started) and the dashboard's stale-approval escalation measures (now - since); a
+# sibling merge of since:$NOW would restart that clock every tick so the threshold
+# never trips. `updated` still flows (tile stays fresh).
+GATE_GUARDED=""
+case "$EVENT" in
+  pretooluse|posttooluse|userpromptsubmit|stop|permissionrequest) GATE_GUARDED="1" ;;
+esac
+
+# The NATIVE permission prompt (gate not armed -- the default install) needs the
+# same shielding: once permissionrequest publishes {status:approval, pending}, a
+# concurrent sibling pretooluse/posttooluse (parallel subagents share the parent
+# session_id) must not wipe it -- no further hook fires while the prompt sits, so
+# the tile would show "working" forever on a session actually blocked on you. The
+# one event that legitimately resolves it is the approved tool's own PostToolUse:
+# same tool_name AND the same summary the pending was recorded with (recomputed by
+# the same rules). userpromptsubmit/stop still clear (the prompt is gone once the
+# turn moves on -- also the recovery path after a native deny), and a SET_PENDING
+# event (a fresh PermissionRequest/AskUserQuestion) still replaces: newest wins.
+NATIVE_GUARDED=""
 case "$EVENT" in
   pretooluse|posttooluse)
-    if [ "$(cc_read_field "$KEY" '.gate')" = "waiting" ]; then
-      # don't override the armed gate's status, and don't clear its pending block.
-      # R3-15: ALSO strip `since` -- the gate recorded since:T1 (when the approval
-      # started) and the dashboard's stale-approval escalation measures (now - since).
-      # A concurrent sibling tool event on the same key would otherwise merge since:$NOW,
-      # restarting the "waiting since" clock every tick so the threshold never trips.
-      # `updated` still flows (tile stays fresh), only the escalation clock is preserved.
-      PATCH="$(printf '%s' "$PATCH" | jq -c 'del(.status, .since)')"
-      CLEAR_PENDING=""
+    if [ -z "$SET_PENDING" ]; then
+      NATIVE_GUARDED="1"
+      if [ "$EVENT" = "posttooluse" ]; then
+        P_TOOL="$(cc_read_field "$KEY" '.pending.tool')"
+        if [ -n "$P_TOOL" ] && [ "$P_TOOL" = "$(cc_get "$INPUT" '.tool_name')" ]; then
+          if [ "$P_TOOL" = "AskUserQuestion" ]; then
+            EV_SUM="$(cc_get "$INPUT" '.tool_input.questions[0].question')"
+          else
+            EV_SUM="$(summarize_tool "$INPUT" "$P_TOOL")"
+          fi
+          [ -n "$EV_SUM" ] || EV_SUM="$P_TOOL"
+          [ "$EV_SUM" = "$(cc_read_field "$KEY" '.pending.summary')" ] && NATIVE_GUARDED=""
+        fi
+      fi
     fi ;;
 esac
 
-# A new pending fully REPLACES the old one. cc_merge applies the patch with jq's
-# recursive `*`, which preserves an object key the patch doesn't carry -- so a new
-# pending WITHOUT an `ask` (e.g. a Write PermissionRequest following an
-# AskUserQuestion) would otherwise leave the stale `pending.ask` behind, leaking dead
-# option buttons onto an unrelated approval tile. Clear the old pending first so the
-# fresh one is authoritative.
-[ -n "$SET_PENDING" ] && cc_del_field "$KEY" "pending"
-cc_merge "$KEY" "$PATCH"
-[ -n "$CLEAR_PENDING" ] && cc_del_field "$KEY" "pending"
+# Apply the patch in ONE atomic read-modify-write (the cc_merge temp+mv idiom) with
+# the guard decided INSIDE the same jq pass on the same snapshot. The previous
+# read-.gate-then-merge left a TOCTOU window: cc-approve's arming merge could land
+# between the `.gate` read and our write, so the {status:working} merge + pending
+# delete reverted the freshly armed gate and the panel never showed the approval
+# for the whole GATE_TIMEOUT poll.
+# A new pending also fully REPLACES the old one here: jq's recursive `*` preserves
+# an object key the patch doesn't carry, so a new pending WITHOUT an `ask` (e.g. a
+# Write PermissionRequest following an AskUserQuestion) would otherwise leave the
+# stale `pending.ask` behind, leaking dead option buttons onto an unrelated
+# approval tile -- the old pending is dropped first so the fresh one is authoritative.
+MF="$(cc_file "$KEY")"
+MTMP="${MF}.tmp.$$"
+CUR="$(cat "$MF" 2>/dev/null)"
+[ -n "$CUR" ] || CUR='{}'
+if printf '%s' "$CUR" | jq -c \
+     --argjson patch "$PATCH" \
+     --arg gg "$GATE_GUARDED" --arg ng "$NATIVE_GUARDED" \
+     --arg setp "$SET_PENDING" --arg clrp "$CLEAR_PENDING" '
+   if ($gg != "" and .gate == "waiting")
+      or ($ng != "" and .status == "approval" and (.pending | type) == "object") then
+     # a live approval owns status/since/pending; only refresh the rest
+     . * ($patch | del(.status, .since, .pending))
+   else
+     (if $setp != "" then del(.pending) else . end) * $patch
+     | (if $clrp != "" then del(.pending) else . end)
+   end' > "$MTMP" 2>/dev/null; then
+  mv "$MTMP" "$MF"
+else
+  rm -f "$MTMP" 2>/dev/null || true
+fi
 
 # ---- Audit ledger: record the governance-relevant lifecycle event ----------
 # Tool usage is logged only when it needed a decision (PermissionRequest) or is an

@@ -329,6 +329,10 @@ end
 local FX = {}
 function FX.now() return os.time() end
 function FX.log(m) print(m) end
+-- Stale-"done" self-heal latch: tile key -> the file's frozen `updated` at the tick
+-- the heal fired (see the heal block in refresh). On FX (an existing module table),
+-- NOT a new top-level local -- this file is at Lua's 200-local ceiling.
+FX._healedDone = {}
 
 -- Panel geometry persistence (Step 1): remember the size/position the user last
 -- left the window so a Hammerspoon reload doesn't snap it back to the default.
@@ -1561,7 +1565,10 @@ end
 function FX.autopilotActive(key) return FX.autopilotExpiry(key) > FX.now() end
 function FX.setAutopilot(key, expiry)
   hs.fs.mkdir(AUTOPILOT_DIR)
-  FX.writeFile(AUTOPILOT_DIR .. "/" .. key, tostring(math.floor(expiry)))
+  -- Atomic (temp+rename): cc-approve.sh reads this on the gated hot path, and a
+  -- torn truncate-then-write read would evaluate as expiry 0 (autopilot off) --
+  -- same invariant FX.writeResolvedPolicy documents.
+  FX.writeFileAtomic(AUTOPILOT_DIR .. "/" .. key, tostring(math.floor(expiry)))
 end
 function FX.clearAutopilot(key) os.remove(AUTOPILOT_DIR .. "/" .. key) end
 
@@ -1570,7 +1577,10 @@ function FX.clearAutopilot(key) os.remove(AUTOPILOT_DIR .. "/" .. key) end
 function FX.gateToolsOverride(key) return FX.readFile(GATE_TOOLS_DIR .. "/" .. key) end
 function FX.setGateToolsOverride(key, str)
   hs.fs.mkdir(GATE_TOOLS_DIR)
-  FX.writeFile(GATE_TOOLS_DIR .. "/" .. key, str)
+  -- Atomic (temp+rename): cc-approve.sh reads this on the gated hot path -- a torn
+  -- truncate-then-write could make a "-" (gate nothing) session route one call to
+  -- the panel, or a narrowed list momentarily revert to the default gated tools.
+  FX.writeFileAtomic(GATE_TOOLS_DIR .. "/" .. key, str)
 end
 function FX.clearGateToolsOverride(key) os.remove(GATE_TOOLS_DIR .. "/" .. key) end
 
@@ -1869,6 +1879,13 @@ function FX.push(topic, title, msg)
       { Title = title or "Claude Shepherd", Priority = "high" }, function() end)
   end)
 end
+-- Forward-declared; defined next to the injection tail below. FX.notify's click
+-- callback and FX.runImprove's async HTTP callback both dispatch through it, and
+-- every window-keystroke dispatch must reserve a slot on the SHARED injection
+-- tail (R3 #2/#5). (Declared BEFORE FX.notify so its reference compiles as this
+-- upvalue, not a nil global.)
+local dispatchSerialized
+
 -- L5 OS-native banner (hs.notify). Click jumps to the session (best-effort focus via
 -- focusProject). Local-only, no network; off by default (gated by the caller).
 function FX.notify(title, text, opts)
@@ -1876,17 +1893,21 @@ function FX.notify(title, text, opts)
   pcall(function()
     local n = hs.notify.new(function()
       local it = opts.key and byKey[opts.key]
-      if it then pcall(function() focusProject(it.name, it.cwd, it.editor, true) end) end
+      -- R3 #2/#5: banners fire on approval/done edges -- exactly when an autofeed/
+      -- summary/rule paste chain may have ⌘V/Return beats pending on after()
+      -- timers. A direct focus here would raise this window mid-chain and land
+      -- those keys in the wrong session, so the jump reserves a slot on the
+      -- shared injection tail like every other focus launcher.
+      if it then
+        dispatchSerialized(it, "focus", function()
+          pcall(function() focusProject(it.name, it.cwd, it.editor, true) end)
+        end)
+      end
     end, { title = tostring(title or "Claude Shepherd"), informativeText = tostring(text or ""),
            withdrawAfter = 0 })
     n:send()
   end)
 end
-
--- Forward-declared; defined next to the injection tail below. FX.runImprove's
--- async HTTP callback dispatches a paste chain, and every window-keystroke
--- dispatch must reserve a slot on the SHARED injection tail (R3 #2/#5).
-local dispatchSerialized
 
 -- Improve button: pull this repo's un-applied leaderboard improvement cards and,
 -- instead of applying them wholesale (what /improve does), inject a REVIEW-first
@@ -2011,7 +2032,26 @@ function FX.setCaffeinate(on)
   return ok and true or false
 end
 
-function FX.removeStatus(key) os.remove(STATUS_DIR .. "/" .. key .. ".json") end
+-- Mirror cc_remove (cc-lib.sh): the panel-side removal paths -- ghost/orphan prune,
+-- Forget tile, auto-respawn's dead-tile drop -- are exactly the sessions SessionEnd
+-- never fires for, so deleting only <key>.json strands the per-key siblings forever
+-- (keys are unique UUIDs; nothing ever matches them again, and the dirs grow without
+-- bound across /clear churn). KEEP the file set IN SYNC with cc_remove.
+function FX.removeStatus(key)
+  local home = os.getenv("HOME") or ""
+  os.remove(STATUS_DIR .. "/" .. key .. ".json")
+  os.remove(STATUS_DIR .. "/" .. key .. ".decision")
+  local claimPrefix = key .. ".decision.claim."  -- covers .claim.* AND .claim.*.parked
+  for _, fn in ipairs(FX.readDir(STATUS_DIR)) do
+    if fn:sub(1, #claimPrefix) == claimPrefix then os.remove(STATUS_DIR .. "/" .. fn) end
+  end
+  os.remove(GATE_TOOLS_DIR .. "/" .. key)
+  os.remove((os.getenv("CC_APPROVED_DIR") or (home .. "/.claude/cc-approved")) .. "/" .. key)
+  os.remove(AUTOPILOT_DIR .. "/" .. key)
+  os.remove(POLICY_DIR .. "/" .. key)
+  os.remove(POLICY_OVERRIDE_DIR .. "/" .. key)
+  os.remove((os.getenv("CC_AUTOMODEL_DIR") or (home .. "/.claude/cc-automodel")) .. "/" .. key)
+end
 
 -- Merge fields into a session's status file (optimistic local patch -- e.g. the
 -- new permission_mode after set-mode, which fires no hook). temp+mv is atomic so
@@ -2190,6 +2230,18 @@ function dispatchSerialized(item, action, fn, extraStagger)
   delay, injectionTailAt = core.staggerSlot(injectionTailAt, hs.timer.absoluteTime() / 1e9,
     BULK_STAGGER + (tonumber(extraStagger) or 0))
   if delay > 0 then after(delay, fn) else fn() end
+end
+
+-- Fire-time nudge guard (R2-08 taken to DISPATCH time, like the router's R2-20):
+-- a nudge pastes text AND presses Return, and its serialized slot can fire
+-- seconds after selection (N x BULK_STAGGER on the shared tail). If the session
+-- reached its approval prompt meanwhile, the Return would accept the highlighted
+-- option -- silently approving a tool call nobody reviewed. Re-read the LIVE
+-- status file just before pasting; an unreadable file (remote/mirror tiles, a
+-- mid-write race) errs open, exactly like the selection-time filter did.
+function FX.nudgeSafeNow(it)
+  local fresh = it and FX.liveStatusFor(it.key) or nil
+  return not (fresh and fresh.status == "approval")
 end
 
 -- Focus a window, then send after a short delay, then restore prior focus.
@@ -4259,20 +4311,39 @@ local function handleBridgeMsg(msg)
     local args = core.searchArgv(kind, q, paths)
     if not args then return end  -- too-short query: JS already cleared the view
     local maxResults = tonumber(core.config(cfg, "search.maxResults", 200)) or 200
+    -- Run via /bin/sh with stdout REDIRECTED to a temp file (the folder-scan fix,
+    -- see R1-38 above): a direct-exec hs.task only drains stdout at termination,
+    -- so any common query (>~64KB of matches over ~/.claude/projects) blocks the
+    -- child on a full pipe, the callback never fires, and the panel shows
+    -- "searching…" forever with a wedged rg/grep left running.
+    local argv = { bin }
+    for _, x in ipairs(args) do argv[#argv + 1] = x end
+    local outFile = os.tmpname()
+    local cmd = core.folderScanShellCommand(argv, outFile)
     local ok = pcall(function()
-      searchTask = hs.task.new(bin, function(_, out)
+      local myTask  -- captured below; the exit callback uses it for an ownership check
+      myTask = hs.task.new("/bin/sh", function()
+        -- Ownership FIRST (R1-38 idiom): the exit callback fires on terminate()
+        -- too, so a superseded query's late callback must not nil the NEWER
+        -- task's latch (which would break terminate-on-new-query and let the
+        -- newer, now-unreferenced task be GC'd mid-run).
+        if searchTask ~= myTask then pcall(os.remove, outFile); return end
         searchTask = nil
+        local out = FX.readFile(outFile) or ""
+        pcall(os.remove, outFile)
         if gen ~= searchGen then return end  -- superseded by a newer query
-        local res = core.parseSearchResults(out or "", { limit = maxResults })
+        local res = core.parseSearchResults(out, { limit = maxResults })
         local items = {}
         for _, it in pairs(byKey) do items[#items + 1] = it end
         res.hits = core.annotateSearchHits(res.hits, items, LEDGER_DIR)
         res.q = q
         pcall(function() wv:evaluateJavaScript("window.ccSearch(" .. hs.json.encode(res) .. ")") end)
-      end, args)
-      if searchTask then searchTask:start() else error("task create failed") end
+      end, { "-c", cmd })
+      searchTask = myTask
+      if not searchTask then error("task create failed") end
+      searchTask:start()
     end)
-    if not ok then searchTask = nil end
+    if not ok then searchTask = nil; pcall(os.remove, outFile) end
     return
   end
   -- Open the audit overlay pre-scoped to a session found via fleet search (the
@@ -4764,7 +4835,17 @@ local function handleBridgeMsg(msg)
         -- window -- the chokepoint reserves a slot on the SHARED injection tail
         -- so each chain finishes before the next, including chains still pending
         -- from an earlier dispatch (a second bulk click must queue, not interleave).
-        dispatchSerialized(it, action, function() core.handleAction(FX, it, action, text) end)
+        dispatchSerialized(it, action, function()
+          -- selectActionable excluded approval targets at SELECTION time only;
+          -- this slot fires up to N x BULK_STAGGER later -- re-check live status
+          -- so a stagger-delayed nudge can't answer an approval prompt that
+          -- appeared meanwhile (FX.nudgeSafeNow).
+          if action == "nudge" and not FX.nudgeSafeNow(it) then
+            print("[cc-bulk] nudge skipped -- " .. tostring(it.name) .. " reached its approval prompt")
+            return
+          end
+          core.handleAction(FX, it, action, text)
+        end)
         ledgerFor(it, { type = "bulk_action", action = action })
         n = n + 1
       end
@@ -4823,8 +4904,12 @@ local function handleBridgeMsg(msg)
       local menu = {
         -- Jump focuses the editor window (double-click on a tile isn't always
         -- reliable, so offer it here too). Same effect as the detail-panel Jump.
+        -- Serialized (R3 #2/#5) like every sibling jump path (hotkeys, Stream
+        -- Deck, tile double-click): a direct focus here would raise this window
+        -- while an earlier chain's ⌘V/Return beats are still pending on after()
+        -- timers and land them in the wrong session.
         { title = "Jump to window", fn = function()
-            core.handleAction(FX, item, "focus")
+            dispatchSerialized(item, "focus", function() core.handleAction(FX, item, "focus") end)
           end },
         { title = "-" },
         { title = "Relabel…", fn = function()
@@ -5000,6 +5085,17 @@ local function handleBridgeMsg(msg)
   -- received (R1-06: /model and /effort are only typed when a window matches).
   local text = payload.text and tostring(payload.text) or nil
   local function dispatch()
+    -- Fire-time approval re-check (FX.nudgeSafeNow): this slot queues behind any
+    -- chains still pending on the shared tail, so the status seen at click time
+    -- can be seconds stale -- a nudge landing on a session that reached its
+    -- approval prompt meanwhile would answer the prompt (R2-08 at fire time).
+    if a == "nudge" and not FX.nudgeSafeNow(item) then
+      ledgerFor(item, { type = "nudge_skipped", reason = "approval",
+                        text = tostring(text or ""):sub(1, 200) })
+      pcall(function() hs.alert.show("Claude Shepherd: " .. tostring(item.label or item.name)
+        .. " is waiting for approval — nudge NOT sent") end)
+      return
+    end
     local acted = core.handleAction(FX, item, a, text)
     -- A text nudge is ledgered AFTER dispatch, gated on what was DELIVERED:
     -- handleAction returns nil when pasteIntoWindow reported a skip (no window
@@ -12000,8 +12096,10 @@ end
 -- daily file's size/mtime changes (cheap hs.fs.attributes scan; hooks append
 -- out-of-process) or the 30s TTL backstop expires (core.ledgerCacheStale).
 -- Shared by risk scoring, the gate decision log, and the notification badge.
--- Returns events, changed -- `changed` is true only when this call re-read the
--- files, so per-tick consumers (the 🔔 badge) can skip recompute on cache hits.
+-- Returns events, changed -- `changed` is true when this call re-read the files
+-- OR (for a consume=true caller) when any call since the last consume did, so
+-- per-tick consumers (the 🔔 badge) can skip recompute on cache hits without
+-- interleaved non-refresh reads eating the edge (see `dirty` below).
 -- Per-file parsed-event cache { [name] = { sig, events } }. Only files whose
 -- size:mtime fingerprint moved are re-read + re-decoded each tick (today's hot
 -- file on an append); the historical daily files are reused from memory instead
@@ -12010,8 +12108,13 @@ end
 -- thread). ledgerSnapshotCache holds the assembled, filtered + capped slice so an
 -- unchanged tick returns it without even re-sorting. core.ledgerCachePlan is the
 -- pure (unit-tested) decision; the I/O stays here.
-local ledgerCache = { byFile = {}, events = nil }   -- byFile: per-file parsed cache; events: assembled+capped slice
-function ledgerSnapshot()  -- assigns the forward-declared local (same as loadConfig)
+-- `dirty` latches a re-read triggered by a NON-refresh caller (decision log, shift
+-- report, notifications, the per-tile auto-approve banner, the digest routine): those
+-- calls warm the cache and would otherwise CONSUME the one-shot `changed` edge, so the
+-- next refresh() would see false and never recompute the 🔔 badge / lineage map. Only
+-- refresh() passes consume=true, which drains the latch along with its own edge.
+local ledgerCache = { byFile = {}, events = nil, dirty = false }   -- byFile: per-file parsed cache; events: assembled+capped slice
+function ledgerSnapshot(consume)  -- assigns the forward-declared local (same as loadConfig)
   local files = {}
   for _, fn in ipairs(FX.readDir(LEDGER_DIR)) do
     if fn:match("%.jsonl$") then
@@ -12023,6 +12126,10 @@ function ledgerSnapshot()  -- assigns the forward-declared local (same as loadCo
   table.sort(files, function(x, y) return x.name < y.name end)  -- chronological by name
   local plan = core.ledgerCachePlan(ledgerCache.byFile, files)
   if not plan.changed and ledgerCache.events then
+    if consume and ledgerCache.dirty then
+      ledgerCache.dirty = false
+      return ledgerCache.events, true  -- a non-refresh caller re-read since the last consume
+    end
     return ledgerCache.events, false
   end
   -- Re-read ONLY the changed files; reuse the rest from the per-file cache. (No
@@ -12043,6 +12150,9 @@ function ledgerSnapshot()  -- assigns the forward-declared local (same as loadCo
   -- Pure assembly (concat in chronological file order + global newest-2000 cap),
   -- matching the old FX.readLedger({}) slice. Unit-tested as core.assembleLedger.
   ledgerCache.events = core.assembleLedger(files, newByFile)
+  -- A consuming caller (refresh) observed this edge directly; anyone else latches
+  -- it so the next consume still reports the change.
+  ledgerCache.dirty = not consume
   return ledgerCache.events, true
 end
 
@@ -12081,6 +12191,16 @@ local function runRules(ruleSet, it, edgeKind)
         else
         local target = it
         dispatchSerialized(target, "rule-nudge", function()
+          -- The tick-time R2-08 check above can be seconds stale by the time this
+          -- slot fires (shared injection tail): re-check the LIVE status so a
+          -- delayed rule nudge can't answer an approval prompt that appeared
+          -- meanwhile (FX.nudgeSafeNow).
+          if not FX.nudgeSafeNow(target) then
+            ledgerFor(target, { type = "rule", rule = r.name, kind = edgeKind, by = "rule",
+                                processor = "nudge_skipped", reason = "approval",
+                                text = tostring(p.text):sub(1, 200) })
+            return
+          end
           local acted = core.handleAction(FX, target, "nudge", p.text)
           ledgerFor(target, { type = "rule", rule = r.name, kind = edgeKind, by = "rule",
                               processor = (acted == "nudge") and "nudge" or "nudge_skipped",
@@ -12184,12 +12304,14 @@ function FX._refreshBody()
     thresholds = core.config(cfg, "risk.thresholds", nil),
   } or nil
   -- Risk scoring + the 🔔 badge share ONE cached ledger snapshot per tick (not
-  -- per tile, and not a full re-parse -- see ledgerSnapshot above). A single
-  -- call also keeps the `changed` edge intact: a second call in the same tick
-  -- would always see the freshly-warmed cache and report false.
+  -- per tile, and not a full re-parse -- see ledgerSnapshot above). consume=true:
+  -- ONLY refresh drains the `changed`/dirty edge -- every other caller (decision
+  -- log, shift report, digest, the per-tile banner) merely warms the cache and
+  -- latches the edge for the next tick, so the badge/lineage recomputes can't be
+  -- starved by an interleaved non-refresh read.
   local ledgerOn = ledgerEnabled()
   local ledgerEvents, ledgerChanged = nil, false
-  if riskEnabled or ledgerOn then ledgerEvents, ledgerChanged = ledgerSnapshot() end
+  if riskEnabled or ledgerOn then ledgerEvents, ledgerChanged = ledgerSnapshot(true) end
   local now = FX.now()
   local newPrev = {}  -- key -> { status, stale, escalated }: rebuilt this refresh, swapped in below
                       -- (.stale = frozen past the RESPAWN threshold, not display staleness)
@@ -12272,9 +12394,30 @@ function FX._refreshBody()
     -- when "done" was recorded (it.updated), the turn resumed -> flip to working so the
     -- tile stops lying. Done FIRST so a resumed session flows through the working-keyed
     -- logic below (error/loop/hung) this same tick. Skips stale/remote (tail is nil there).
-    if tail and it.status == "done" and not it.stale
-       and core.transcriptResumed(tail, it.updated, core.config(cfg, "status.resumeSlack", 2)) then
-      it.status = "working"
+    -- The heal is LATCHED (FX._healedDone, key -> the frozen `updated` it healed against):
+    -- in the exact missed-hooks scenario it exists for, nothing bumps `updated`, so at
+    -- STALE_SECONDS the tile goes display-stale, wantTail stops reading the transcript,
+    -- and without the latch the status would snap back to the raw-file "done" -- a
+    -- pure-artifact working->done edge that fires drain-close, queue autofeed, onDone
+    -- banners and done-rules into a mid-turn session (a one-tick readTail failure did
+    -- the same). Any real hook write changes `updated`/status and drops the latch, so
+    -- the eventual REAL done still edges exactly once.
+    if it.status == "done" then
+      if tail and not it.stale
+         and core.transcriptResumed(tail, it.updated, core.config(cfg, "status.resumeSlack", 2)) then
+        it.status = "working"
+        FX._healedDone[it.key] = it.updated
+      elseif tail == nil and FX._healedDone[it.key] ~= nil
+         and FX._healedDone[it.key] == it.updated then
+        -- No tail observed this tick (stale skip / transient read failure) and the
+        -- file hasn't been rewritten since the heal: carry the healed status -- a
+        -- missing observation is not evidence the turn ended.
+        it.status = "working"
+      else
+        FX._healedDone[it.key] = nil  -- transcript says genuinely done, or the file moved on
+      end
+    else
+      FX._healedDone[it.key] = nil
     end
     -- Frozen-on-API-error detection: a `working` session whose latest transcript event
     -- is an api_error aborted WITHOUT a Stop hook -- it's stuck "working" but actually
@@ -12411,8 +12554,13 @@ function FX._refreshBody()
     -- next task). Fires before drain/feed so a completing task is always recorded.
     local started = taskStart[it.key]
     if started then
-      if it.stale then
-        taskStart[it.key] = nil  -- abandon: a frozen session's in-flight task can't be timed
+      -- Abandon only past the RESPAWN death threshold (autoRespawnStale), NOT the 90s
+      -- display staleness: no hook fires mid-tool-call, so a healthy session running one
+      -- long build/test (Bash tool timeout up to 600s) goes display-stale mid-task -- its
+      -- eventual done edge must still ledger task_done (abandoning at it.stale silently
+      -- lost timing for exactly the long tasks this exists to measure).
+      if it.updated ~= nil and (now - it.updated) > autoRespawnStale then
+        taskStart[it.key] = nil  -- abandon: frozen past the death threshold, no done edge is coming
       else
         local td = core.stepTaskDone(started, pv and pv.status, it.status, now)
         if td then
@@ -12651,6 +12799,7 @@ function FX._refreshBody()
   -- core.reapUnbacked so the unbounded-growth guard can't drift per table.
   core.reapUnbacked(taskStart, newPrev)
   core.reapUnbacked(loopAlerted, newPrev)
+  core.reapUnbacked(FX._healedDone, newPrev)         -- stale-"done" self-heal latch
   core.reapUnbacked(autoApproveFired, newPrev)       -- L5
   core.reapUnbacked(summaryState.fired, newPrev)     -- L5
   core.reapUnbacked(summaryState.pending, newPrev)   -- L5
@@ -12875,7 +13024,11 @@ function FX._refreshBody()
     pcall(function() wv:evaluateJavaScript("setLedgerOn(" .. tostring(ledgerOn) .. ")") end)
   end
 
-  FX.writeFile(HEARTBEAT, tostring(now))
+  -- Atomic (temp+rename): cc-approve.sh does a single no-retry `cat` of this file;
+  -- a read landing between a truncate and the write yields an empty HB, bash
+  -- arithmetic evaluates it as 0, AGE blows past the threshold, and the gate
+  -- judges the LIVE panel dead -- silently falling back to the native prompt.
+  FX.writeFileAtomic(HEARTBEAT, tostring(now))
   -- Overlay persistent relabels by project path (display-only; .name stays the
   -- real target). A new session in a labeled folder inherits the name (F1).
   core.applyLabelsByCwd(list, labels)
@@ -13110,6 +13263,7 @@ local function sdTranscribeAndSend(wav, cfg)
   local target = sdVoiceTarget()
   if not target then
     hs.alert.show("🎙 Voice: focus a project window first (couldn't tell which session)")
+    pcall(os.remove, wav)
     return
   end
   local whisper = resolveBin("whisper-cli", core.config(cfg, "voice.whisperBin", nil))
@@ -13117,11 +13271,13 @@ local function sdTranscribeAndSend(wav, cfg)
   if model:sub(1, 2) == "~/" then model = (os.getenv("HOME") or "") .. model:sub(2) end  -- whisper won't expand ~
   if not hs.fs.attributes(model) then
     hs.alert.show("🎙 Voice: model missing — " .. model)
+    pcall(os.remove, wav)
     return
   end
   hs.alert.show("🎙 Transcribing…")
   local autoSend = core.config(cfg, "voice.autoSend", true)
   local wt = hs.task.new(whisper, function(code, stdout, stderr)
+    pcall(os.remove, wav)  -- per-recording temp wav: whisper has read it; don't accumulate
     local text = tostring(stdout or "")
     text = text:gsub("%[[%d:%.%s%->]+%]", "")                 -- strip any stray [timestamps]
     text = text:gsub("^%s+", ""):gsub("%s+$", ""):gsub("%s+", " ")
@@ -13130,12 +13286,24 @@ local function sdTranscribeAndSend(wav, cfg)
     if text == "" or text:match("^[%[%(].-[%]%)]$") then hs.alert.show("🎙 Voice: nothing heard"); return end
     print("[cc-streamdeck] voice -> " .. tostring(target.name) .. ": " .. text)
     if autoSend then
-      dispatchSerialized(target, "voice", function() FX.typeIntoWindow(target, text) end)
+      -- winTarget adapts the raw status item to the camelCase fields the kitty
+      -- path reads (kittyWindowId/kittyListenOn) -- the raw item's snake_case
+      -- fields left both nil, so kittyCmd fell back to the ambiguous cwd: match
+      -- with no --to socket and the text was silently dropped. The alert is
+      -- delivery-gated (typeIntoWindow reports false on a skip), same contract
+      -- as the Improve/audit-review callers.
+      dispatchSerialized(target, "voice", function()
+        if FX.typeIntoWindow(winTarget(target), text) then
+          hs.alert.show("🎙 → " .. tostring(target.label or target.name) .. ": " .. text:sub(1, 48))
+        else
+          hs.alert.show("🎙 Voice: no window match for " .. tostring(target.label or target.name) .. " — text NOT sent")
+        end
+      end)
     else
       showPanel()
       pcall(function() wv:evaluateJavaScript("insertIntoNudge(" .. jsString(text) .. ")") end)
+      hs.alert.show("🎙 → " .. tostring(target.label or target.name) .. ": " .. text:sub(1, 48))
     end
-    hs.alert.show("🎙 → " .. tostring(target.label or target.name) .. ": " .. text:sub(1, 48))
   end, { "-m", model, "-f", wav, "-nt", "-np", "-l", "en" })
   if wt then wt:start() else hs.alert.show("🎙 Voice: couldn't run whisper-cli") end
 end
@@ -13145,33 +13313,48 @@ local function sdVoiceToggle()
   local cfg = loadConfig()
   if sd.recording then
     sd.recording = false; sdPaintAction("voice")
-    local task, wav = sd.voiceTask, sd.voiceWav
-    sd.voiceTask = nil
+    local task, rec = sd.voiceTask, sd.voiceRec
+    sd.voiceTask = nil; sd.voiceRec = nil
+    -- Transcribe from ffmpeg's EXIT callback (rec.transcribe), not a fixed 0.5s
+    -- grace: SIGTERM makes ffmpeg finalize the wav and the exit only fires after
+    -- that, so a slow finalize can no longer be read truncated -- and an immediate
+    -- re-record can't clobber the file mid-transcription (each recording also
+    -- gets its OWN wav path below; the old fixed path + `-y` let a double-tap
+    -- rewrite the wav while whisper was reading it, auto-SUBMITTING garbled text).
+    if rec then rec.transcribe = true end
     if task then pcall(function() task:terminate() end) end  -- SIGTERM -> ffmpeg finalizes the wav
-    after(0.5, function() sdTranscribeAndSend(wav, cfg) end)
     return
   end
   local ff = resolveBin("ffmpeg", core.config(cfg, "voice.ffmpegBin", nil))
   local mic = core.config(cfg, "voice.micDevice", ":0")  -- avfoundation audio-only input
   local maxSec = core.voiceMaxSeconds(cfg)  -- hard cap, clamped >0 (anti-runaway; see core.voiceMaxSeconds)
-  sd.voiceWav = (os.getenv("TMPDIR") or "/tmp/") .. "cc-voice.wav"
-  local t = hs.task.new(ff, function(code, so, se)
-    -- ffmpeg exited. If we're STILL "recording" here, it stopped ON ITS OWN (hit the -t cap,
-    -- mic permission denied, or a device error) rather than via our stop tap -- reset the UI so
-    -- the VOICE key can't get stuck on REC and ffmpeg can't keep recording unbounded (the 21-min
-    -- runaway). No transcribe: the user didn't tap stop.
-    if sd.recording then
-      sd.recording = false; sd.voiceTask = nil
+  sd.voiceSeq = (sd.voiceSeq or 0) + 1  -- unique per-recording wav (see the stop-tap comment)
+  local wav = (os.getenv("TMPDIR") or "/tmp/") .. "cc-voice-" .. sd.voiceSeq .. "-" .. tostring(os.time()) .. ".wav"
+  local rec = { transcribe = false }  -- per-recording state, closed over by ITS OWN exit callback
+  local t
+  t = hs.task.new(ff, function(code, so, se)
+    if rec.transcribe then
+      -- Our stop tap terminated this recording: ffmpeg has finalized the wav NOW.
+      rec.transcribe = false
+      sdTranscribeAndSend(wav, cfg)
+    elseif sd.recording and sd.voiceTask == t then
+      -- ffmpeg stopped ON ITS OWN (hit the -t cap, mic permission denied, or a
+      -- device error) rather than via our stop tap -- reset the UI so the VOICE key
+      -- can't get stuck on REC and ffmpeg can't keep recording unbounded (the 21-min
+      -- runaway). Guarded on OWNERSHIP (sd.voiceTask == t) so a superseded task's
+      -- late exit can't reset a newer recording's state. No transcribe: no stop tap.
+      sd.recording = false; sd.voiceTask = nil; sd.voiceRec = nil
       pcall(function() sdPaintAction("voice") end)
       hs.alert.show("🎙 Voice: recording ended (" .. maxSec .. "s cap or mic error) — tap to record")
+      pcall(os.remove, wav)
     end
     if code and code ~= 0 and code ~= 143 and code ~= 255 then
       print("[cc-streamdeck] ffmpeg exited " .. tostring(code) .. ": " .. tostring(se))
     end
   end, { "-hide_banner", "-loglevel", "error", "-f", "avfoundation", "-i", mic,
-         "-ar", "16000", "-ac", "1", "-t", tostring(maxSec), "-y", sd.voiceWav })
+         "-ar", "16000", "-ac", "1", "-t", tostring(maxSec), "-y", wav })
   if t and t:start() then
-    sd.voiceTask = t; sd.recording = true; sdPaintAction("voice")
+    sd.voiceTask = t; sd.voiceRec = rec; sd.recording = true; sdPaintAction("voice")
     hs.alert.show("🎙 Recording — tap VOICE again to send")
   else
     hs.alert.show("🎙 Voice: couldn't start ffmpeg (mic permission for Hammerspoon?)")

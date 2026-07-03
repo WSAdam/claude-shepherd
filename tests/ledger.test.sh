@@ -93,4 +93,25 @@ assert_eq "lifecycle: permissionrequest -> tool_request" "1" "$(lcount '.type=="
 printf '%s' '{"session_id":"L1","cwd":"/x/proj"}' | bash "$STAT" sessionend >/dev/null 2>&1
 assert_eq "lifecycle: sessionend -> session_end" "1" "$(lcount '.type=="session_end" and .session_id=="L1"')"
 
+# ---- #23: cc_ledger_append enforces the small-line (PIPE_BUF) invariant -------
+# The O_APPEND atomicity claim only holds for lines flushed in ONE write();
+# an uncapped string field (cc-approve's full Bash command as a decision summary,
+# a many-line prompt) made the line multi-KB, which bash's printf flushes in
+# multiple write()s -- two sessions appending concurrently could interleave
+# mid-line. The append itself must cap EVERY string field at 200 chars.
+rm -f "$LF"
+echo '{ "ledger": { "enabled": true } }' > "$CC_CONFIG_FILE"
+BIG="$(printf 'X%.0s' $(seq 1 8192))"
+( . "$ROOT/cc-lib.sh"; cc_ledger_append "$(jq -nc --arg s "$BIG" \
+    '{type:"decision", session_id:"cap1", outcome:"allow", by:"human", summary:$s, count:42}')" )
+assert_eq "#23: 8KB summary -> exactly one line" "1" "$(wc -l < "$LF" | tr -d ' ')"
+assert_eq "#23: capped line is valid JSON" "0" "$(jq -e . "$LF" >/dev/null 2>&1; echo $?)"
+assert_eq "#23: summary capped at 200 chars" "200" "$(jq -r '.summary | length' "$LF")"
+assert_eq "#23: short string fields untouched" "allow" "$(jq -r '.outcome' "$LF")"
+assert_eq "#23: non-string fields untouched" "42" "$(jq -r '.count' "$LF")"
+# the whole line must sit comfortably under PIPE_BUF (512 is the portable floor)
+BYTES="$(wc -c < "$LF" | tr -d ' ')"
+assert_eq "#23: capped line stays under the 512-byte PIPE_BUF floor" "under" \
+  "$([ "$BYTES" -lt 512 ] && echo under || echo "OVER($BYTES)")"
+
 finish

@@ -80,6 +80,18 @@ function M.parseStatusList(entries, now, staleSeconds)
       -- string-named tile and throw `attempt to compare number with string` inside
       -- sortByStatus's `<` comparator, aborting the (un-pcall'd) refresh tick.
       data.name = tostring(data.name)
+      -- Coerce cwd/transcript_path to string-or-nil at the parse chokepoint, same
+      -- threat model as name/updated/since above: a non-string value (JSON bool/
+      -- number, legal to hand-write or rsync-mirror) would otherwise reach the
+      -- `it.cwd .. "/spec/..."` concat and io.open(it.transcript_path) in the
+      -- per-tile refresh loop OUTSIDE the decode pcall -- and since the malformed
+      -- file persists on disk, EVERY 1Hz tick aborts at the same line, freezing
+      -- the panel and letting the .panel-alive heartbeat go stale (gate fails
+      -- open). nil is the honest "absent"; every downstream consumer already
+      -- truthy-guards both fields. Must run BEFORE projectKey, whose fallback
+      -- returns data.cwd raw.
+      if type(data.cwd) ~= "string" then data.cwd = nil end
+      if type(data.transcript_path) ~= "string" then data.transcript_path = nil end
       data.projectKey = M.projectKey(data)
       -- Coerce time fields to numbers at the parse chokepoint. A status file with a
       -- non-numeric `updated`/`since` (boolean, "soon", a date string -- all legal to
@@ -94,6 +106,12 @@ function M.parseStatusList(entries, now, staleSeconds)
       -- panel, so a hostile/compromised bridged host (parseMirrorList delegates here)
       -- could ship status='<img src=x onerror=...>' as stored XSS. Unknown -> "idle".
       if not M.STATUSES[data.status] then data.status = "idle" end
+      -- Part C: surface which OPTIONAL permission modes (bypassPermissions/auto)
+      -- are in this session's real Shift+Tab rotation -- persisted sticky in the
+      -- status file as `mode_cycle` (the hook merge preserves it across events).
+      -- handleAction's set-mode math reads item.modeCycle to size the cycle; a
+      -- non-table (absent/garbage) normalizes to nil (base 3-mode cycle).
+      data.modeCycle = (type(data.mode_cycle) == "table") and data.mode_cycle or nil
       data.stale = (data.updated ~= nil) and ((now - data.updated) > staleSeconds) or false
       list[#list + 1] = data
     end
@@ -271,7 +289,21 @@ function M.handleAction(fx, item, action, text)
     -- Cycle to permission mode `text` via Shift+Tab x N (Part C). Kitty reliable;
     -- VS Code best-effort (its mode switcher is mouse-only). N is 0 (no-op) when
     -- already there or the target isn't in the active cycle.
-    local n = M.modeCycleSteps(item.permission_mode or "default", text, item.modeCycle)
+    -- The session's ACTIVE cycle = the 3 base modes plus any optional modes known
+    -- to be in its rotation: the persisted mode_cycle (item.modeCycle, sticky from
+    -- the status hook) plus -- definitionally -- whatever mode it's in RIGHT NOW
+    -- (a session sitting in bypassPermissions has bypass in its cycle even before
+    -- any mode_cycle was recorded). Without this the press count is computed over
+    -- the 3-mode cycle while a bypass-enabled session rotates through 4 -- one
+    -- press short, landing ON bypassPermissions while the panel optimistically
+    -- shows the safer target mode.
+    local cur = item.permission_mode or "default"
+    local enabled = {}
+    if type(item.modeCycle) == "table" then
+      for m, on in pairs(item.modeCycle) do if on then enabled[m] = true end end
+    end
+    enabled[cur] = true  -- non-optional keys are ignored by modeCycleSteps
+    local n = M.modeCycleSteps(cur, text, enabled)
     if n <= 0 then return nil end
     local keys = {}
     for _ = 1, n do keys[#keys + 1] = { mods = { "shift" }, key = "tab" } end
@@ -918,8 +950,13 @@ function M.expiredLedgerFiles(filenames, now, retentionDays)
   if days <= 0 then return out end
   local cutoff = (tonumber(now) or 0) - days * 86400
   for _, fn in ipairs(filenames or {}) do
+    -- ep is the file's 00:00:00Z day START, but the file's events span the whole
+    -- UTC day [ep, ep+86400). Expire only when the day's END is at/before the
+    -- cutoff -- `ep < cutoff` would delete a file whose newest events are up to
+    -- 24h INSIDE the "Keep for N days" window (with retentionDays=1, events
+    -- written seconds before UTC midnight are irreversibly GC'd seconds after).
     local ep = M.ledgerFileEpoch(fn)
-    if ep and ep < cutoff then out[#out + 1] = fn end
+    if ep and ep + 86400 <= cutoff then out[#out + 1] = fn end
   end
   return out
 end
@@ -1201,6 +1238,36 @@ function M.searchArgv(kind, query, paths, opts)
   return argv
 end
 
+-- Drop broken UTF-8 at the EDGES of a byte-sliced string: leading continuation
+-- bytes (0x80-0xBF) and a trailing multibyte sequence cut short of its lead
+-- byte's declared length. Needed because C-locale grep's `.{0,CTX}` context
+-- wrap counts BYTES (hs.task children get launchd's env, no LANG), so a match
+-- boundary can land mid-character -- and because the maxLen display slice below
+-- is a byte slice too. hs.json.encode would sanitize the invalid bytes to
+-- U+FFFD, rendering visible '\239\191\189' garbage in the hit row. Interior
+-- bytes are untouched. Pure.
+local function trimUtf8Edges(s)
+  local i = 1
+  while i <= #s do
+    local b = s:byte(i)
+    if b >= 0x80 and b < 0xC0 then i = i + 1 else break end
+  end
+  if i > 1 then s = s:sub(i) end
+  local n = #s
+  local j = n
+  while j > 0 and n - j < 3 do
+    local b = s:byte(j)
+    if b < 0x80 then break end          -- ASCII tail: nothing dangling
+    if b >= 0xC0 then                   -- lead byte at j: is its sequence complete?
+      local need = (b >= 0xF0 and 4) or (b >= 0xE0 and 3) or 2
+      if n - j + 1 < need then s = s:sub(1, j - 1) end
+      break
+    end
+    j = j - 1                           -- continuation byte, keep scanning back
+  end
+  return s
+end
+
 -- Parse `file:line:matchtext` output lines -> { hits = {{file,line,text}},
 -- truncated }. Splits on the FIRST two colons only (the match text may contain
 -- colons); malformed lines are skipped. opts = { limit (default 200), maxLen
@@ -1214,7 +1281,11 @@ function M.parseSearchResults(output, opts)
     local file, ln, text = line:match("^(/[^:]+):(%d+):(.*)$")
     if file then
       if #hits >= limit then truncated = true; break end
-      if #text > maxLen then text = text:sub(1, maxLen) .. "…" end
+      -- Two byte-boundary hazards, one repair: the engine's context wrap can
+      -- split a multibyte char at either edge (C-locale grep counts bytes), and
+      -- the maxLen backstop is itself a byte slice. Trim to whole characters.
+      text = trimUtf8Edges(text)
+      if #text > maxLen then text = trimUtf8Edges(text:sub(1, maxLen)) .. "…" end
       hits[#hits + 1] = { file = file, line = tonumber(ln), text = text }
     end
   end
@@ -1414,35 +1485,47 @@ function M.fleetStats(events, opts)
   for _, e in ipairs(events or {}) do
     if type(e) == "table" then
       totals.events = totals.events + 1
-      local sid = e.session_id or e.key or "?"
-      local agg = bySession[sid]
-      if not agg then
-        agg = { session_id = sid, name = e.name, projectKey = e.projectKey,
-                prompts = 0, toolRequests = 0,
-                decisions = { allow = 0, deny = 0, fallback = 0 }, events = {} }
-        bySession[sid] = agg
-        order[#order + 1] = sid
+      -- Session-less bookkeeping events (retention purge tombstones, digest/routine
+      -- schedule_fire, A/B records) carry neither session_id nor key. They count in
+      -- the totals but must NOT accrete into a phantom "?" session row -- that row
+      -- would inflate totals.sessions ("Sessions active" in the Shift report) and
+      -- surface in the Insights "Most active sessions" table. sessionHistory
+      -- ignores sid-less events the same way.
+      local sid = e.session_id or e.key
+      local agg
+      if sid then
+        agg = bySession[sid]
+        if not agg then
+          agg = { session_id = sid, name = e.name, projectKey = e.projectKey,
+                  prompts = 0, toolRequests = 0,
+                  decisions = { allow = 0, deny = 0, fallback = 0 }, events = {} }
+          bySession[sid] = agg
+          order[#order + 1] = sid
+        end
+        if e.name and not agg.name then agg.name = e.name end
+        agg.events[#agg.events + 1] = e
       end
-      if e.name and not agg.name then agg.name = e.name end
-      agg.events[#agg.events + 1] = e
       local t = e.type
       if t == "prompt" then
-        totals.prompts = totals.prompts + 1; agg.prompts = agg.prompts + 1
+        totals.prompts = totals.prompts + 1
+        if agg then agg.prompts = agg.prompts + 1 end
       elseif t == "tool_request" then
         totals.toolRequests = totals.toolRequests + 1
-        agg.toolRequests = agg.toolRequests + 1
+        if agg then agg.toolRequests = agg.toolRequests + 1 end
       elseif t == "spawn" then
         totals.spawns = totals.spawns + 1
       elseif t == "decision" then
         totals.decisions = totals.decisions + 1
         local out = e.outcome
         if out == "allow" then
-          decisions.allow = decisions.allow + 1; agg.decisions.allow = agg.decisions.allow + 1
+          decisions.allow = decisions.allow + 1
+          if agg then agg.decisions.allow = agg.decisions.allow + 1 end
         elseif out == "deny" then
-          decisions.deny = decisions.deny + 1; agg.decisions.deny = agg.decisions.deny + 1
+          decisions.deny = decisions.deny + 1
+          if agg then agg.decisions.deny = agg.decisions.deny + 1 end
         elseif out == "fallback" then
           decisions.fallback = decisions.fallback + 1
-          agg.decisions.fallback = agg.decisions.fallback + 1
+          if agg then agg.decisions.fallback = agg.decisions.fallback + 1 end
         end
         provenance[e.by or "other"] = (provenance[e.by or "other"] or 0) + 1
       end
@@ -2324,7 +2407,19 @@ end
 -- bare file-open writes the wrapper alone (which must NOT read as a human prompt). Pure.
 local function stripIdeContext(s)
   if type(s) ~= "string" then return "" end
-  return (s:gsub("<ide_[%w_]+>.-</ide_[%w_]+>", " "))
+  s = s:gsub("<ide_[%w_]+>.-</ide_[%w_]+>", " ")
+  -- Slash-command invocations (/clear, /model, /cost, ...) are ALSO written as
+  -- ordinary non-meta `user` lines, wrapped in <command-name>/<command-message>/
+  -- <command-args> (their output as <local-command-stdout>). They are machine
+  -- bookkeeping, not a human prompt: a purely local command fires no hook and
+  -- starts no turn, so reading one as human text falsely flips a done tile back
+  -- to working (transcriptResumed) and masks a frozen-on-error session
+  -- (transcriptError reads it as recovery, silencing auto-continue) -- the same
+  -- false-trigger class 6bb790b locked down for bare ide_opened_file. Strip the
+  -- local-command wrapper first so stdout content can't confuse the closing tag.
+  s = s:gsub("<local%-command%-[%w_%-]+>.-</local%-command%-[%w_%-]+>", " ")
+  s = s:gsub("<command%-[%w_%-]+>.-</command%-[%w_%-]+>", " ")
+  return s
 end
 
 -- R3-04: is this transcript `user` line a genuine human-typed prompt (vs an IDE

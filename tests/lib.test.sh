@@ -49,13 +49,46 @@ assert_eq "cc_json_str: BEL 0x07 -> u-escape"            "${bs}u0007"  "$(cc_jso
 # cc_window_host: the non-kitty per-window id used to auto-prune /clear ghosts. The
 # process-tree walk to the claude ancestor is environment-dependent (can't be pinned
 # deterministically here), but its SAFE invariants must hold so it never harms the
-# hot hook path: empty + exit 0 under kitty (kitty uses its own window id), and it
-# must never error out (exit non-zero) no matter the ancestry.
-assert_eq "cc_window_host: empty under kitty" "" "$(KITTY_WINDOW_ID=9 cc_window_host)"
-KITTY_WINDOW_ID=9 cc_window_host >/dev/null 2>&1
+# hot hook path: empty + exit 0 under a GENUINE kitty session (kitty uses its own
+# window id), and it must never error out (exit non-zero) no matter the ancestry.
+# Corrected behavior: kitty-ness is decided by cc_detect_editor, NOT by raw
+# KITTY_WINDOW_ID (that env var is inherited by a VS Code/Cursor cold-started from
+# a kitty shell, where the walk SHOULD run), and CLAUDE_CODE_ENTRYPOINT=claude-vscode
+# is authoritative over the kitty env. The host running this test may itself set
+# that entrypoint (claude under the VS Code extension), so a genuine kitty session
+# must be simulated with the entrypoint cleared or the detector (correctly) says
+# vscode and the walk runs.
+assert_eq "cc_window_host: empty under kitty" "" \
+  "$(CLAUDE_CODE_ENTRYPOINT= KITTY_WINDOW_ID=9 cc_window_host)"
+CLAUDE_CODE_ENTRYPOINT= KITTY_WINDOW_ID=9 cc_window_host >/dev/null 2>&1
 assert_eq "cc_window_host: exit 0 under kitty" "0" "$?"
 cc_window_host >/dev/null 2>&1
 assert_eq "cc_window_host: never errors (exit 0)" "0" "$?"
+
+# ---- #24: cc_merge self-heals a corrupt status file --------------------------
+# Invalid JSON on disk (hand-edit typo, partial rsync copy, truncated write) used
+# to fail the merge on EVERY subsequent hook event -- no caller checks the return,
+# so the tile was wedged until SessionEnd. The retry-from-{} rebuild must succeed
+# iff the PATCH is valid; a bad patch still returns 1 with the file untouched.
+printf '{"name":"x", broken' > "$TMP/heal1.json"
+cc_merge heal1 '{"status":"working","session_id":"heal1"}'
+assert_eq "cc_merge #24: corrupt file self-heals (exit 0)" "0" "$?"
+assert_json "cc_merge #24: healed file rebuilt from the patch" "$TMP/heal1.json" '.status' "working"
+cc_merge heal1 '{"pending":{"summary":"s"}}'
+assert_json "cc_merge #24: subsequent merges keep prior state" "$TMP/heal1.json" '.status' "working"
+assert_json "cc_merge #24: subsequent merge applied"           "$TMP/heal1.json" '.pending.summary' "s"
+# a bad PATCH on a corrupt file still fails, file untouched
+printf 'garbage' > "$TMP/heal2.json"
+if cc_merge heal2 'not-json' 2>/dev/null; then rc=0; else rc=1; fi
+assert_eq "cc_merge #24: bad patch still returns 1"          "1" "$rc"
+assert_eq "cc_merge #24: bad patch leaves the file untouched" "garbage" "$(cat "$TMP/heal2.json")"
+# the happy path is unchanged (valid file + patch deep-merges)
+printf '{"a":1}' > "$TMP/heal3.json"
+cc_merge heal3 '{"b":2}'
+assert_json "cc_merge #24: happy-path merge keeps existing fields" "$TMP/heal3.json" '.a' "1"
+assert_json "cc_merge #24: happy-path merge applies the patch"     "$TMP/heal3.json" '.b' "2"
+# no scratch temp files left behind by the heal path
+assert_eq "cc_merge #24: no tmp leftovers" "0" "$(ls "$TMP"/*.tmp.* 2>/dev/null | wc -l | tr -d ' ')"
 
 # cc_host_window: the per-window id is computed at most ONCE per session -- reuse the
 # value already stored in the file, and only walk the process tree when it's absent.

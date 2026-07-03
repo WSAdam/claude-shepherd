@@ -597,4 +597,44 @@ assert_eq "R3-18: a non-survivor timeout leaves the sibling's gate armed" \
 assert_eq "R3-18: a non-survivor timeout leaves the sibling's gate_nonce intact" \
   "sibling-nonce" "$(jq -r '.gate_nonce' "$TMP/rt1.json" 2>/dev/null)"
 
+# ---- #18: approveRepeats SIG must not conflate newline-resliced commands ------
+# The old SIG collapsed newlines to spaces (tr '\n' ' '), so `docker compose
+# restart api` and `docker compose restart\napi` -- two SEPARATE shell commands --
+# shared one signature, and a single approval of the one-line form silently
+# auto-allowed the multi-line reslice. The encoding must be injective.
+rm -f "$CC_APPROVED_DIR"/* 2>/dev/null
+rm -f "$HB"
+# read path: a recorded ONE-LINE approval auto-allows the identical command...
+printf 'Bash|docker compose restart api\n' > "$CC_APPROVED_DIR/sg1"
+out="$(printf '%s' '{"session_id":"sg1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"docker compose restart api"}}' \
+  | CC_GATE_FLAG="$FLAG" CC_CONFIG_FILE="$REPCFG" bash "$APP" 2>/dev/null)"
+assert_eq "#18: identical one-line command auto-allows (control)" "allow" "$(decision "$out")"
+# ...but must NOT be inherited by the newline-resliced variant (no panel -> no output)
+out="$(printf '%s' '{"session_id":"sg1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"docker compose restart\napi"}}' \
+  | CC_GATE_FLAG="$FLAG" CC_CONFIG_FILE="$REPCFG" bash "$APP" 2>/dev/null)"
+assert_eq "#18: newline-resliced variant is NOT auto-allowed" "" "$out"
+# write path: a panel allow of a MULTI-LINE command records a lossless SIG
+# (backslash doubled, newline -> literal backslash-n)...
+date +%s > "$HB"
+MLREQ='{"session_id":"sg2","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"make build\nmake deploy"}}'
+( printf '%s' "$MLREQ" | CC_GATE_FLAG="$FLAG" CC_CONFIG_FILE="$REPCFG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=5 \
+    bash "$APP" >/dev/null 2>&1 ) &
+bg=$!; wait_block "$TMP/sg2.json"; answer sg2 allow; wait $bg
+assert_eq "#18: multi-line approval records the encoded SIG" \
+  'Bash|make build\nmake deploy' "$(cat "$CC_APPROVED_DIR/sg2" 2>/dev/null)"
+rm -f "$HB"
+# ...which auto-allows only the IDENTICAL multi-line command
+out="$(printf '%s' "$MLREQ" | CC_GATE_FLAG="$FLAG" CC_CONFIG_FILE="$REPCFG" bash "$APP" 2>/dev/null)"
+assert_eq "#18: identical multi-line command auto-allows" "allow" "$(decision "$out")"
+# and the space-joined one-line form does NOT inherit it
+out="$(printf '%s' '{"session_id":"sg2","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"make build make deploy"}}' \
+  | CC_GATE_FLAG="$FLAG" CC_CONFIG_FILE="$REPCFG" bash "$APP" 2>/dev/null)"
+assert_eq "#18: space-joined form does NOT inherit the approval" "" "$out"
+# injectivity corner: a command carrying a LITERAL backslash-n (two chars) must
+# not collide with the real-newline form's encoding
+printf 'Bash|a\\\\nb\n' > "$CC_APPROVED_DIR/sg3"   # SIG of literal a\nb: backslash doubled
+out="$(printf '%s' '{"session_id":"sg3","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"a\nb"}}' \
+  | CC_GATE_FLAG="$FLAG" CC_CONFIG_FILE="$REPCFG" bash "$APP" 2>/dev/null)"
+assert_eq "#18: real newline never matches a literal backslash-n SIG" "" "$out"
+
 finish
