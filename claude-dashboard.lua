@@ -358,6 +358,30 @@ function FX.readFile(path)
   local c = f:read("*a"); f:close(); return c
 end
 
+-- App-owned scratch path for a subprocess's redirected stdout (fleet search /
+-- folder scan). os.tmpname() hands back a predictable name in world-writable /tmp
+-- and does NOT create the file, so between the name and the shell's `>` open a
+-- local user can plant a symlink there (TOCTOU) and redirect our truncating write.
+-- A dir under ~/.claude that only we own closes that: another user can't create the
+-- symlink inside a directory they don't own. A per-process monotonic counter (NOT
+-- os.tmpname, NOT the unseeded math.random) keeps concurrent scans from colliding.
+-- Returns an absolute path, NOT yet created -- the caller's `>` creates it inside
+-- the private dir.
+-- State hangs off FX (not new file-level locals): the main chunk is at Lua's
+-- 200-local ceiling.
+FX._scratchDir = os.getenv("CC_SCRATCH_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-scratch")
+FX._scratchSeq = 0
+function FX.scratchFile(tag)
+  if not FX._scratchReady then
+    hs.fs.mkdir(FX._scratchDir)  -- user-owned, non-world-writable even at the default 0755
+    -- hs.fs has no chmod; tighten to 0700 (defense in depth) once, best-effort.
+    pcall(function() os.execute("/bin/chmod 700 '" .. FX._scratchDir:gsub("'", "'\\''") .. "' >/dev/null 2>&1") end)
+    FX._scratchReady = true
+  end
+  FX._scratchSeq = FX._scratchSeq + 1
+  return FX._scratchDir .. "/" .. tostring(tag or "scan") .. "-" .. tostring(FX.now()) .. "-" .. FX._scratchSeq
+end
+
 -- R2-20: re-read ONE tile's live status file and return the freshly-parsed item
 -- (nil if missing/unparseable). Used inside the router slot to re-check the chosen
 -- member's freedom at dispatch time -- the slot's snapshot `item.status` is frozen
@@ -1491,7 +1515,7 @@ function FX.scanFolders()
   -- exit. Direct-exec hs.task DEADLOCKS once a scan's stdout exceeds the OS pipe buffer (~64KB)
   -- over a large tree (the task waits for exit while the child blocks on a full pipe) -- a file
   -- keeps the task's pipe empty. core.folderScanShellCommand single-quotes argv + outFile.
-  local outFile = os.tmpname()
+  local outFile = FX.scratchFile("folderscan")
   local cmd = core.folderScanShellCommand(argv, outFile)
   local ok = pcall(function()
     local myTask  -- captured below; the exit callback uses it for an ownership check
@@ -4318,7 +4342,7 @@ local function handleBridgeMsg(msg)
     -- "searching…" forever with a wedged rg/grep left running.
     local argv = { bin }
     for _, x in ipairs(args) do argv[#argv + 1] = x end
-    local outFile = os.tmpname()
+    local outFile = FX.scratchFile("search")
     local cmd = core.folderScanShellCommand(argv, outFile)
     local ok = pcall(function()
       local myTask  -- captured below; the exit callback uses it for an ownership check

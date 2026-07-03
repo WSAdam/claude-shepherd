@@ -114,4 +114,31 @@ BYTES="$(wc -c < "$LF" | tr -d ' ')"
 assert_eq "#23: capped line stays under the 512-byte PIPE_BUF floor" "under" \
   "$([ "$BYTES" -lt 512 ] && echo under || echo "OVER($BYTES)")"
 
+# ---- #23 follow-up (review q87): cap by BYTES not codepoints, bound the WHOLE ---
+# line, not just each field. The original cap used jq length/.[:200] (codepoints),
+# so 200 emoji = 800 bytes and enough capped fields could still cross PIPE_BUF.
+# A: a multibyte field must cap by byte length AND never leave a split UTF-8 byte.
+rm -f "$LF"
+EM="$(printf '\xf0\x9f\x9a\x80%.0s' $(seq 1 250))"   # 250 rockets = 1000 bytes / 250 codepoints
+( . "$ROOT/cc-lib.sh"; cc_ledger_append "$(jq -nc --arg s "$EM" \
+    '{type:"decision", session_id:"utf8", summary:$s}')" )
+assert_eq "#23-utf8: multibyte summary capped by BYTES (<=200)" "under" \
+  "$([ "$(jq -r '.summary|utf8bytelength' "$LF")" -le 200 ] && echo under || echo over)"
+assert_eq "#23-utf8: capped multibyte line is valid JSON (no split byte)" "0" \
+  "$(jq -e . "$LF" >/dev/null 2>&1; echo $?)"
+assert_eq "#23-utf8: no U+FFFD replacement char (whole-codepoint trim)" "0" \
+  "$(grep -c "$(printf '\xef\xbf\xbd')" "$LF")"
+
+# B: many large fields -- tier-1 alone is 7*200 > 512, so the whole-line guard must
+# trim the longest field until the serialized line fits under the floor.
+rm -f "$LF"
+B400="$(printf 'Y%.0s' $(seq 1 400))"
+( . "$ROOT/cc-lib.sh"; cc_ledger_append "$(jq -nc --arg b "$B400" \
+    '{type:"t", session_id:$b, key:$b, name:$b, projectKey:$b, cwd:$b, prompt:$b, summary:$b}')" )
+BYTES2="$(wc -c < "$LF" | tr -d ' ')"
+assert_eq "#23-multi: 7 large fields -> whole line under the 512 floor" "under" \
+  "$([ "$BYTES2" -lt 512 ] && echo under || echo "OVER($BYTES2)")"
+assert_eq "#23-multi: whole-line-trimmed record is still valid JSON" "0" \
+  "$(jq -e . "$LF" >/dev/null 2>&1; echo $?)"
+
 finish

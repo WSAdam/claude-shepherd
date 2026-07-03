@@ -327,15 +327,24 @@ cc_ledger_append() {
   day="$(date -u +%Y-%m-%d)"
   file="$CC_LEDGER_DIR/${day}.jsonl"
   # {v,ts,id} first; caller fields merged on top (and win if they set any). Then
-  # ENFORCE the small-line invariant the header comment relies on: cap every string
-  # field at 200 chars (summarize_tool's cap in cc-status.sh). An uncapped field --
-  # the gate's full Bash command as a decision `summary`, a many-line prompt --
-  # makes the line multi-KB, and bash's printf flushes big lines through its ~1KB
-  # stdio buffer in MULTIPLE write()s, so two sessions appending concurrently can
-  # interleave mid-line and corrupt both records for the analytics/shift report.
-  line="$(printf '%s' "$1" | jq -c --argjson v 1 --argjson ts "$now" --arg id "$id" \
-    '{v:$v, ts:$ts, id:$id} + .
-     | with_entries(if (.value | type) == "string" and (.value | length) > 200
-                    then .value |= .[:200] else . end)' 2>/dev/null)" || return 0
+  # ENFORCE the small-line invariant the header comment relies on: an uncapped field
+  # (the gate's full Bash command as a decision `summary`, a many-line prompt) makes
+  # the line multi-KB, bash splits it across write()s, and concurrent appends
+  # interleave mid-line and corrupt both records. Two-tier, measured in BYTES not
+  # codepoints (jq `length`/`.[:n]` count codepoints -- 200 emoji = 800 bytes, so a
+  # per-char cap does NOT bound bytes): (1) `walk`+utf8bytelength caps every string
+  # at ANY depth to 200 bytes, trimming whole codepoints so no split UTF-8 byte
+  # reaches the file; (2) a whole-line guard trims the longest field until the
+  # serialized line is <=480 bytes -- under the 512 POSIX PIPE_BUF floor regardless
+  # of field count (tier 1 alone can't: N fields * 200 can still exceed it).
+  line="$(printf '%s' "$1" | jq -c --argjson v 1 --argjson ts "$now" --arg id "$id" '
+    def capstr($n): if type == "string" and (utf8bytelength) > $n
+                    then (.[:$n] | until((utf8bytelength) <= $n; .[:-1])) else . end;
+    def blen: tojson | utf8bytelength;
+    {v:$v, ts:$ts, id:$id} + .
+    | walk(capstr(200))
+    | until(blen <= 480 or ([.. | strings | select(length > 0)] | length) == 0;
+        (to_entries | max_by(.value | if type == "string" then utf8bytelength else -1 end) | .key) as $k
+        | .[$k] |= (if type == "string" then .[:-1] else . end))' 2>/dev/null)" || return 0
   [ -n "$line" ] && printf '%s\n' "$line" >> "$file" 2>/dev/null || true
 }

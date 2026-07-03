@@ -4,6 +4,50 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-07-03 — Review triage of the 2026-07-02 sweep (leaderboard q87)
+
+Incorporated the reviewable findings from the code review of commit `90471a8`, after
+verifying each against the code (two of the review's test-gap findings were already
+covered and are noted below rather than re-added).
+
+### Fixed — ledger line cap was by codepoints, not bytes (`cc-lib.sh`)
+
+The 2026-07-02 `#23` cap used jq `length` / `.[:200]`, which count **codepoints**, so a
+field of 200 emoji was 800 bytes and enough capped fields could still push a ledger line
+past the atomic-append floor the invariant depends on — the exact corruption `#23` set
+out to prevent. `cc_ledger_append` now caps in **bytes** (`utf8bytelength`, trimming
+whole codepoints so no split UTF-8 byte reaches the file), via `walk` so nested string
+fields are covered too, and adds a **whole-line guard** that trims the longest field
+until the serialized line is ≤ 480 bytes regardless of field count. Pinned by new
+`#23-utf8` / `#23-multi` tests.
+
+### Fixed — predictable temp path in the search/scan subprocess (`claude-dashboard.lua`)
+
+The fleet-search and folder-scan paths redirected a child's stdout to `os.tmpname()`, a
+predictable name in world-writable `/tmp` that isn't created up front — a local
+symlink-plant (TOCTOU) could redirect the truncating write. Both now use a new
+`FX.scratchFile`, which writes into an app-owned `~/.claude/cc-scratch` directory (only
+we can create entries there) with a per-process monotonic-counter suffix. (Noted in
+passing: `math.random` is never seeded, so the counter — not the RNG — guarantees
+uniqueness.)
+
+### Added — cross-language drift canary for the per-key file family
+
+`FX.removeStatus` (Lua) and `cc_remove` (shell) enumerate the same per-key sidecar files
+in two languages, bound only by a "KEEP IN SYNC" comment. A new `#13-drift` test asserts
+both functions reference the **same number** of per-key targets, so adding a sidecar to
+one remover but not the other fails CI instead of silently leaking files.
+
+### Not changed — verified already-covered or deliberately kept
+
+- **`expiredLedgerFiles` boundary** and **`trimUtf8Edges` edge handling**: the review
+  asked for exact-boundary / direct tests; both are already pinned by the `#8` and `#16`
+  blocks (including the single-second `<=` boundary and an intact-multibyte-preserved
+  case), so nothing was added.
+- **Long concurrency comments**: kept. Per the README "Review tags" section these blocks
+  are the authoritative record of the invariant a future edit must not "simplify" away;
+  a small legibility comment was added to the `install.sh` hook-merge instead.
+
 ## 2026-07-02 — Multi-agent bug-hunt sweep: 30 confirmed fixes across every flow
 
 A find → adversarially-verify → fix → regression-test sweep over the eight key flows

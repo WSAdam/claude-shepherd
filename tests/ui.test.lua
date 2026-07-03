@@ -2192,6 +2192,27 @@ do
     check("#13-pin: removes the policy override", body:find("POLICY_OVERRIDE_DIR", 1, true) ~= nil)
     check("#13-pin: removes the approveRepeats memo", body:find("cc-approved", 1, true) ~= nil)
     check("#13-pin: removes the automodel marker", body:find("cc-automodel", 1, true) ~= nil)
+
+    -- #13-drift (review q87): the per-key file family is encoded TWICE -- here and
+    -- in cc_remove (cc-lib.sh) -- bound only by a "KEEP IN SYNC" comment. The
+    -- markers above pin that the Lua side has every KNOWN slot, but can't catch a
+    -- NEW sidecar added to only one remover. Canary: both functions must reference
+    -- the SAME number of per-key targets (os.remove( on the Lua side, $1 on the
+    -- shell side). Add a file to cc_remove but not FX.removeStatus (or vice-versa)
+    -- and the counts diverge -- failing here and forcing the next author to touch
+    -- BOTH removers (and the per-slot markers above).
+    local rsBody = src:match("function FX%.removeStatus%(key%)(.-)\nend")
+    local luaTargets = rsBody and select(2, rsBody:gsub("os%.remove%(", "")) or 0
+    local shf = io.open(ROOT .. "cc-lib.sh", "r")
+    local shSrc = shf and shf:read("*a") or ""
+    if shf then shf:close() end
+    local rmBody = shSrc:match("\ncc_remove%(%)%s*{(.-)\n}")
+    local shellTargets = rmBody and select(2, rmBody:gsub("%$1", "")) or 0
+    check("#13-drift: FX.removeStatus target count parses (>=9)", luaTargets >= 9)
+    check("#13-drift: cc_remove target count parses (>=9)", shellTargets >= 9)
+    check("#13-drift: FX.removeStatus (" .. tostring(luaTargets) .. ") and cc_remove ("
+          .. tostring(shellTargets) .. ") reference the same per-key file count",
+          luaTargets == shellTargets)
   end
 
   -- #14: fleet search runs via /bin/sh with stdout redirected to a temp file

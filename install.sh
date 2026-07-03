@@ -143,6 +143,9 @@ if have_jq; then
                  | select(($cmds | any(contains($n))) | not) ]) as $missing
               | if ($missing | length) == 0 then .
                 else .hooks[$e.key] |= (
+                  # $i = index of the first existing group in this event that already
+                  # carries one of our scripts; append the missing siblings THERE so
+                  # they inherit its matcher. null (no such group) => add a fresh group.
                   (map([.hooks[]?.command? // empty] | any(test(our_re))) | index(true)) as $i
                   | if $i == null then . + [{hooks: $missing}]
                     else .[$i].hooks += $missing end)
