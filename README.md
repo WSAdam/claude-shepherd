@@ -510,7 +510,13 @@ Shepherd reads token usage straight from Claude Code's **local transcript files*
   Mtok, cache-aware) — an estimate (your subscription is flat-rate), hand-tunable via `pricing.<family>`;
   gateway/local models have unknown pricing and are excluded.
 - **Plan window bars (footer)** — your real **session (5h)** and **weekly** utilization %, matching
-  `claude.ai/settings/usage` and Claude Code's `/usage`, with reset times and a Sonnet-only line.
+  `claude.ai/settings/usage` and Claude Code's `/usage`, with reset times. Below them, a
+  **per-model weekly line** for any model the endpoint meters separately — a **`Weekly · Sonnet`**
+  line, and a **`Weekly · Fable`** (Fable 5) line drawn from the structured `limits[]` surface.
+  Each per-model line appears **only when that model is actually being metered** (active, or with
+  nonzero weekly usage); a model you don't use — or that isn't provisioned — draws **no row**, so
+  the footer never shows an empty `0%` line. (Fable 5 local per-session tokens/cost already roll up
+  in the per-model breakdown and the `~$` estimate via `core.PRICING.fable`.)
 
 The window bars come from Anthropic's OAuth usage endpoint (`/api/oauth/usage`) using your existing
 Claude Code login token (macOS Keychain or `CLAUDE_CODE_OAUTH_TOKEN`). **This is a metadata call —

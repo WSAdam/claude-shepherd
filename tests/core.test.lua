@@ -5644,6 +5644,57 @@ do
   sl, rc, np = core.officialUsageStep(np, 200, true)
   check("usage: good 200 after a garbage 200 still recovers", rc == true and np == 200)
 
+  -- officialModelLimits: pull per-model WEEKLY limits out of the OAuth payload's
+  -- `limits[]` (the model-scoped surface where Fable lives). Shape mirrors the live
+  -- endpoint: a session entry, a weekly_all entry (scope null), and a weekly_scoped
+  -- entry carrying scope.model.display_name.
+  local function fableLimit(pct, active)
+    return { kind = "weekly_scoped", group = "weekly", percent = pct, severity = "normal",
+             resets_at = "2026-07-14T06:59:59Z", scope = { model = { id = false, display_name = "Fable" } },
+             is_active = active }
+  end
+  local base = {
+    { kind = "session", group = "session", percent = 5, scope = false, is_active = true },
+    { kind = "weekly_all", group = "weekly", percent = 1, scope = false, is_active = false },
+  }
+  -- dormant Fable (0%, inactive) -> present but show=false ("hide when unavailable")
+  do
+    local L = { limits = { base[1], base[2], fableLimit(0, false) } }
+    local r = core.officialModelLimits(L)
+    check("modelLimits: dormant Fable parsed (1 entry)", #r == 1)
+    check("modelLimits: model name is Fable", r[1] and r[1].model == "Fable")
+    check("modelLimits: dormant (0%, inactive) -> show=false", r[1] and r[1].show == false)
+    check("modelLimits: percent + resetsAt carried", r[1] and r[1].percent == 0 and r[1].resetsAt == "2026-07-14T06:59:59Z")
+    check("modelLimits: weekly_all (scope=false) + session excluded", #r == 1)
+  end
+  -- active Fable -> show=true regardless of percent
+  do
+    local r = core.officialModelLimits({ limits = { fableLimit(0, true) } })
+    check("modelLimits: active Fable -> show=true", r[1] and r[1].show == true and r[1].active == true)
+  end
+  -- nonzero usage while inactive -> show=true (a hit cap still surfaces)
+  do
+    local r = core.officialModelLimits({ limits = { fableLimit(97, false) } })
+    check("modelLimits: 97% inactive -> show=true (capped usage visible)", r[1] and r[1].show == true and r[1].percent == 97)
+  end
+  -- multiple scoped models sorted by name; a malformed entry is skipped, not fatal
+  do
+    local L = { limits = {
+      { kind = "weekly_scoped", group = "weekly", percent = 10, scope = { model = { display_name = "Opus" } }, is_active = true },
+      fableLimit(50, true),
+      { kind = "weekly_scoped", group = "weekly", percent = 3, scope = { model = {} } },  -- no display_name -> skip
+      "junk", 42,                                                                          -- non-tables -> skip
+    } }
+    local r = core.officialModelLimits(L)
+    check("modelLimits: two valid scoped models (malformed skipped)", #r == 2)
+    check("modelLimits: sorted by model name (Fable < Opus)", r[1].model == "Fable" and r[2].model == "Opus")
+  end
+  -- defensive: no limits array / wrong types -> [] (never errors, never a nil deref)
+  eq("modelLimits: no limits key -> empty", #core.officialModelLimits({ five_hour = {} }), 0)
+  eq("modelLimits: limits not a table -> empty", #core.officialModelLimits({ limits = "x" }), 0)
+  eq("modelLimits: non-table payload -> empty", #core.officialModelLimits("nope"), 0)
+  eq("modelLimits: nil payload -> empty", #core.officialModelLimits(nil), 0)
+
   -- newestAutoApprove: newest automated allow ts; ignores human + denies + other sids
   local evs = {
     { type="decision", session_id="s", outcome="allow", by="autoAllow", ts=100 },

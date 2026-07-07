@@ -4,6 +4,34 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-07-07 — Track Fable 5 plan usage (per-model weekly line, hidden when dormant)
+
+### Added — a per-model weekly usage line (Fable 5 + any future scoped model)
+
+The Anthropic OAuth usage endpoint (already polled for the plan-window bars) carries a
+structured `limits[]` array with **model-scoped** weekly caps — a session limit, a
+weekly-all limit, and a `weekly_scoped` entry whose `scope.model.display_name` names the
+model (e.g. **Fable**). The footer now renders a **`Weekly · <model>`** bar for each
+metered model, so Fable 5 usage is visible alongside Session/Weekly/Sonnet.
+
+New pure `core.officialModelLimits(payload)` normalizes that array to
+`{ model, percent, severity, resetsAt, active, show }` and is **model-agnostic** — Fable
+today, and whatever Anthropic scopes next flows through unchanged (the endpoint already
+exposes dormant future buckets). The dashboard enriches the usage payload once with it, so
+both the immediate push and the 60s pass carry it.
+
+**Hidden when unavailable, by design.** A per-model line renders **only when that model is
+actually metered** — `show = is_active OR weekly percent > 0`. So a model you aren't using
+(Fable currently reports `0% / inactive`), or one that isn't provisioned / drops out of the
+payload, draws **no row** — the same null-guard the existing `Weekly · Sonnet` line uses,
+so the footer never shows an empty `0%` line. Verified against the live endpoint: Fable is
+dormant today and correctly hidden; a simulated active Fable surfaces as `Weekly · Fable`.
+(Fable 5 per-session local tokens/cost already rolled up via `core.PRICING.fable`.)
+
+Tests: `core.officialModelLimits` unit cases (dormant→hidden, active→shown, capped-usage→
+shown, multi-model sort, malformed/absent→`[]` no-throw) and `fable-usage` source pins for
+the enrichment + render wiring.
+
 ## 2026-07-03 — Second-pass review of the triage (q87): fix a latent ledger hang
 
 The review of the triage commit (`d99cc2f`) caught a real bug in the whole-line ledger

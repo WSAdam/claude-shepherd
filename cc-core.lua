@@ -7840,6 +7840,43 @@ function M.officialUsageStep(prev, status, bodyOk)
   return false, false, prev
 end
 
+-- Extract per-model WEEKLY limits from the official OAuth usage payload's `limits`
+-- array -- the structured, model-SCOPED surface (the flat `seven_day_<model>` fields
+-- are legacy and usually null). Anthropic reports a model's own weekly cap as a
+-- weekly-group entry carrying scope.model.display_name (e.g. "Fable", "Opus"), with
+-- `percent`, `severity`, `resets_at`, `is_active`. This is model-AGNOSTIC on purpose:
+-- Fable shows up today and any model Anthropic scopes later flows through unchanged.
+-- Returns a list of normalized { model, percent, severity, resetsAt, active, show }
+-- sorted by model; [] when the payload has no model-scoped weekly limit.
+--
+-- `show` is the UI gate that answers "don't show it when the model is unavailable":
+-- surface a line ONLY when the bucket is real+meaningful -- currently metering
+-- (is_active) OR carrying nonzero usage. A model that is dormant (Fable at 0% &
+-- inactive) or simply absent from `limits` yields show=false / no entry, so the row
+-- disappears exactly like the seven_day_sonnet null-guard -- no empty "0%" noise.
+function M.officialModelLimits(official)
+  if type(official) ~= "table" or type(official.limits) ~= "table" then return {} end
+  local out = {}
+  for _, e in ipairs(official.limits) do
+    if type(e) == "table" and e.group == "weekly" and type(e.scope) == "table"
+       and type(e.scope.model) == "table" and type(e.scope.model.display_name) == "string"
+       and e.scope.model.display_name ~= "" then
+      local pct = tonumber(e.percent)
+      local active = e.is_active == true
+      out[#out + 1] = {
+        model = e.scope.model.display_name,
+        percent = pct,
+        severity = (type(e.severity) == "string") and e.severity or nil,
+        resetsAt = (type(e.resets_at) == "string") and e.resets_at or nil,
+        active = active,
+        show = active or (pct ~= nil and pct > 0),
+      }
+    end
+  end
+  table.sort(out, function(a, b) return tostring(a.model) < tostring(b.model) end)
+  return out
+end
+
 -- ---- L5: PR/MR status per tile (gh-backed, status-only) -------------------
 -- Parse `gh pr view --json number,state,url,title,isDraft` output (a single JSON
 -- object for the current branch's PR) into a normalized { number, state, url,

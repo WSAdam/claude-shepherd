@@ -522,7 +522,7 @@ local usageState = {}      -- [path] = { offset, cum = {...}, recent = { {ts, bu
 local lastUsagePayload = nil
 -- F7 throttle (FX._lastSnapshotAt) lives on FX, not a chunk-local, to respect the
 -- main function's 200-local cap.
-local lastOfficialUsage = nil   -- parsed { five_hour, seven_day, seven_day_sonnet, ... } or nil
+local lastOfficialUsage = nil   -- parsed { five_hour, seven_day, seven_day_sonnet, limits, +modelLimits } or nil
 local lastOfficialFetch = 0     -- epoch of the last successful/attempted fetch (180s TTL)
 local lastOfficialStatus = nil  -- last fetch HTTP status, so we log only on CHANGE (no 3-min spam)
 local ccVersion = nil           -- "x.y.z" for the User-Agent (detected once)
@@ -680,6 +680,10 @@ function FX.fetchOfficialUsage(force)
     if recovered then print("[cc-usage] official usage recovered (HTTP 200)") end
     lastOfficialStatus = newPrev
     if not bodyOk then return end   -- no usable payload to render
+    -- Enrich once (before BOTH the immediate push and the 60s-pass `official` field
+    -- read lastOfficialUsage): structured per-model weekly limits (Fable + any future
+    -- scoped model), pre-gated so a dormant/unprovisioned model renders no line.
+    j.modelLimits = core.officialModelLimits(j)
     lastOfficialUsage = j
     -- push immediately so the bars update without waiting for the next 60s pass
     if wv then pcall(function()
@@ -11570,6 +11574,19 @@ local HTML = [[
           + pctBarRow("Weekly", (o.seven_day&&o.seven_day.utilization)||0, Math.round((o.seven_day&&o.seven_day.utilization)||0)+"%");
         if(o.seven_day_sonnet && o.seven_day_sonnet.utilization != null){
           rows += pctBarRow("Weekly · Sonnet", o.seven_day_sonnet.utilization, Math.round(o.seven_day_sonnet.utilization)+"%");
+        }
+        // Per-model weekly limits from the structured limits[] surface (Fable, and any
+        // future scoped model). core.officialModelLimits pre-gates to the ones worth
+        // showing (active or nonzero usage), so a dormant/unprovisioned model draws NO
+        // row — the "hide it when the model is unavailable" behavior.
+        if(o.modelLimits && o.modelLimits.length){
+          for(var mi=0; mi<o.modelLimits.length; mi++){
+            var ml = o.modelLimits[mi];
+            if(!ml || !ml.show || !ml.model) continue;
+            // skip a model already drawn via its named seven_day_<model> line (Sonnet today)
+            if(ml.model.toLowerCase()==="sonnet" && o.seven_day_sonnet && o.seven_day_sonnet.utilization != null) continue;
+            rows += pctBarRow("Weekly · " + ml.model, ml.percent||0, Math.round(ml.percent||0)+"%");
+          }
         }
         var reset5 = resetsIn(o.five_hour.resets_at), reset7 = resetsIn(o.seven_day && o.seven_day.resets_at);
         winEl.innerHTML = rows + '<span class="uf-approx" style="font-style:normal;">official · '
