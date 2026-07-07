@@ -85,9 +85,10 @@ do
   core.applyLabelsByCwd(fresh, { ["/Users/a/proj"] = "Web UI" })
   eq("labels-cwd: new session same cwd inherits", fresh[1].label, "Web UI")
 
-  -- nil map and a missing cwd are both no-ops (no crash)
-  core.applyLabelsByCwd({ { key = "x", name = "n" } }, nil)
-  check("labels-cwd: nil map / missing cwd safe", true)
+  -- nil map and a missing cwd are both no-ops (no crash, AND no label applied)
+  local safe = { { key = "x", name = "n" } }
+  core.applyLabelsByCwd(safe, nil)
+  eq("labels-cwd: nil map / missing cwd is a safe no-op (no label added)", safe[1].label, nil)
 end
 
 -- ---- projectKey: stable label key from transcript_path (immune to cwd drift) -

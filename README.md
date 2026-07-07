@@ -1113,7 +1113,10 @@ focuses a window, and never spawns a session. How that's possible:
   [tests/ledger.test.sh](tests/ledger.test.sh) (audit ledger append/retention),
   [tests/install.test.sh](tests/install.test.sh) (the installer against a temp `$HOME`), and
   [tests/escaping.test.sh](tests/escaping.test.sh) (the panel-webview XSS escaping tripwire).
-- **659 core + 104 ui + 132 bash checks, all side-effect-free.** Every new feature lands with its tests.
+- **2,743 core + 762 ui + 368 bash checks (+ a load-and-refresh smoke test), all side-effect-free.**
+  Every new feature lands with its tests, and the critical guards are **mutation-checked** — reverting
+  the fix has to turn its own test red — so an assertion can't quietly go vacuous. Source-shape "pins"
+  (used where a Hammerspoon-only path can't be loaded in the harness) are called out as such.
 
 Spawning is additionally gated by `spawn.live` (default off → log-but-don't-launch),
 with the `ORCH_DRY_RUN` code constant as a fixed safety net, so the live app never

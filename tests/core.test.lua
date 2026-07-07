@@ -4563,7 +4563,11 @@ do
   eq("lineageByProject: P auto-respawns", m["P"].autoRespawns, 1)
   eq("lineageByProject: P clears", m["P"].clears, 1)
   eq("lineageByProject: Q present (one session)", m["Q"].sessionCount, 1)
-  check("lineageByProject: pre-window project absent", true)  -- s0@50 excluded above, still 2 for P
+  -- the pre-window session s0@50 is excluded by sinceTs=100 (P counts s1,s2 only).
+  -- Re-run with a wider window: s0 now counts -> P=3, proving the boundary actually
+  -- filters, rather than the count of 2 merely reflecting a missing fixture row.
+  eq("lineageByProject: wider window includes pre-window s0 (P=3)",
+     core.lineageByProject(evs, 0)["P"].sessionCount, 3)
   -- projectLineage now delegates to lineageByProject -> identical numbers
   eq("projectLineage: delegates (sessions match map)", core.projectLineage(evs, "P", { sinceTs = 100 }).sessionCount, m["P"].sessionCount)
   eq("projectLineage: unknown project -> zeroed lineage", core.projectLineage(evs, "ZZ", { sinceTs = 100 }).sessionCount, 0)

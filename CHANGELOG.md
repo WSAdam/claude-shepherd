@@ -4,6 +4,24 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-07-07 — Test-suite pass: mutation-verify the critical guards, de-vacuum two checks
+
+A quality pass over the suite (now **2,743 core + 762 ui + 368 bash** checks, all green).
+
+- **Mutation-verified** the highest-value recent guards actually catch their regressions
+  (not just pass): reverting the ledger whole-line guard to its top-level-only form makes
+  `#23-nested` time out and fail; a codepoint (vs byte) cap makes `#23-utf8` fail; forcing
+  the Fable show-gate true makes `modelLimits: dormant → show=false` fail; deleting the
+  usage-payload enrichment makes the `fable-usage` source pin fail. All four turned red on
+  the mutation and green on restore.
+- **Removed two vacuous `check(…, true)` assertions** that only proved "didn't crash":
+  `labels-cwd` now asserts the nil-map/missing-cwd call adds **no label**, and the
+  lineage test now asserts a **wider window re-includes** the pre-window session
+  (`P=3`) — proving the `sinceTs` boundary actually filters rather than the count of 2
+  reflecting a missing fixture row.
+- Corrected the long-stale test-count line in the README (`659/104/132` → current totals)
+  and documented the mutation-check / source-pin discipline.
+
 ## 2026-07-07 — Track Fable 5 plan usage (per-model weekly line, hidden when dormant)
 
 ### Added — a per-model weekly usage line (Fable 5 + any future scoped model)
