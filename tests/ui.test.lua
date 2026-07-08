@@ -1318,19 +1318,25 @@ do
   check("usagelog-fix: official fetch uses pure core.officialUsageStep(prev,status,bodyOk)",
         src:find("core.officialUsageStep(lastOfficialStatus, status, bodyOk)", 1, true) ~= nil
         and src:find("official usage recovered (HTTP 200)", 1, true) ~= nil)
-  -- fable-usage: per-model weekly limits (Fable + any future scoped model) from the
-  -- OAuth `limits[]` surface. Extraction is pure+tested (core.officialModelLimits); the
-  -- callback enriches the payload once so both the immediate push and the 60s pass carry
-  -- it, and the footer renders a "Weekly · <model>" bar gated on ml.show (hide dormant).
-  check("fable-usage: payload enriched via pure core.officialModelLimits",
-        src:find("j.modelLimits = core.officialModelLimits(j)", 1, true) ~= nil)
-  check("fable-usage: footer iterates o.modelLimits and honors the show gate",
-        src:find("o.modelLimits && o.modelLimits.length", 1, true) ~= nil
-        and src:find("if(!ml || !ml.show || !ml.model) continue;", 1, true) ~= nil)
+  -- fable-usage: per-model weekly rows (Fable + any future scoped model) from the OAuth
+  -- limits[] surface. The show-gate AND the legacy-Sonnet de-dup are decided in pure,
+  -- unit-tested core (core.modelLimitRowsToShow, incl. the versioned-name prefix match),
+  -- so the callback enriches the payload once and the footer is a thin renderer.
+  check("fable-usage: payload enriched via pure core.modelLimitRowsToShow",
+        src:find("j.modelRows = core.modelLimitRowsToShow(j)", 1, true) ~= nil)
+  check("fable-usage: footer iterates the render-ready o.modelRows",
+        src:find("o.modelRows && o.modelRows.length", 1, true) ~= nil)
   check("fable-usage: renders a Weekly · <model> bar (Fable when active)",
         src:find('pctBarRow("Weekly · " + ml.model', 1, true) ~= nil)
-  check("fable-usage: de-dups a model already shown via its named seven_day_ line",
-        src:find('ml.model.toLowerCase()==="sonnet" && o.seven_day_sonnet', 1, true) ~= nil)
+  -- the JS-side show/dedup logic is GONE (moved to core) -- guard against it creeping back
+  check("fable-usage: no JS-side show/dedup remains (decided in core)",
+        src:find("ml.model.toLowerCase()", 1, true) == nil
+        and src:find("o.modelLimits", 1, true) == nil)
+  -- pctBarRow HTML-escapes its label: the Weekly·<model> row interpolates an
+  -- Anthropic-supplied display_name into innerHTML (defense in depth).
+  check("fable-usage: pctBarRow escapes its label before innerHTML",
+        src:find('String(lbl).replace(/[&<>"]/g', 1, true) ~= nil
+        and src:find('<span class="lbl">\'+l+\'</span>', 1, true) ~= nil)
   -- #3 export session archive: bridge handler, transcript cp (verbatim, large-safe),
   -- meta via core, ledger event, two entry points (detail button + ctx-menu).
   check("l5exp-pin: export-session handler", src:find('a == "export-session"', 1, true) ~= nil)

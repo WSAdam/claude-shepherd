@@ -5676,6 +5676,14 @@ do
     local r = core.officialModelLimits({ limits = { fableLimit(0, true) } })
     check("modelLimits: active Fable -> show=true", r[1] and r[1].show == true and r[1].active == true)
   end
+  -- active with an ABSENT percent -> show=true, percent stays nil (not coerced to 0).
+  -- The JS render is the only place the 0-fallback happens (Math.round(ml.percent||0)),
+  -- so core must hand it a genuine nil rather than masking it.
+  do
+    local r = core.officialModelLimits({ limits = { fableLimit(nil, true) } })
+    check("modelLimits: active + nil percent -> show=true, percent stays nil",
+          r[1] and r[1].show == true and r[1].percent == nil)
+  end
   -- nonzero usage while inactive -> show=true (a hit cap still surfaces)
   do
     local r = core.officialModelLimits({ limits = { fableLimit(97, false) } })
@@ -5698,6 +5706,54 @@ do
   eq("modelLimits: limits not a table -> empty", #core.officialModelLimits({ limits = "x" }), 0)
   eq("modelLimits: non-table payload -> empty", #core.officialModelLimits("nope"), 0)
   eq("modelLimits: nil payload -> empty", #core.officialModelLimits(nil), 0)
+
+  -- modelLimitRowsToShow: the render-ready rows -- show-filtered + de-duped against the
+  -- legacy Weekly·Sonnet line (drawn only when official.seven_day_sonnet.utilization is
+  -- non-nil). This is where the JS used to decide; lifting it here makes it testable.
+  local function scoped(name, pct, active)
+    return { kind = "weekly_scoped", group = "weekly", percent = pct, is_active = active,
+             scope = { model = { display_name = name } } }
+  end
+  -- dormant models are dropped (show=false), active/nonzero kept, sorted by name
+  do
+    local L = { limits = { scoped("Fable", 0, false), scoped("Opus", 12, true) } }
+    local r = core.modelLimitRowsToShow(L)
+    eq("rowsToShow: dormant Fable dropped, active Opus kept", #r, 1)
+    check("rowsToShow: kept row is Opus", r[1] and r[1].model == "Opus")
+  end
+  -- Sonnet de-dup: a scoped Sonnet collapses onto the legacy line when it renders...
+  do
+    local L = { seven_day_sonnet = { utilization = 5 }, limits = { scoped("Sonnet", 40, true) } }
+    eq("rowsToShow: scoped Sonnet de-duped vs the legacy Weekly·Sonnet line", #core.modelLimitRowsToShow(L), 0)
+  end
+  -- ...INCLUDING a VERSIONED name (the exact-match bug: "Sonnet 4.6" must still collapse)
+  do
+    local L = { seven_day_sonnet = { utilization = 5 }, limits = { scoped("Sonnet 4.6", 40, true) } }
+    eq("rowsToShow: versioned 'Sonnet 4.6' still de-dups (prefix, not exact)", #core.modelLimitRowsToShow(L), 0)
+  end
+  -- but WITHOUT a legacy Sonnet line, a scoped Sonnet is drawn (nothing to collide with)
+  do
+    local L = { limits = { scoped("Sonnet 4.6", 40, true) } }
+    local r = core.modelLimitRowsToShow(L)
+    check("rowsToShow: no legacy line -> scoped Sonnet is kept", #r == 1 and r[1].model == "Sonnet 4.6")
+  end
+  -- seven_day_sonnet PRESENT but utilization nil -> the legacy Weekly·Sonnet line does
+  -- NOT render, so a scoped Sonnet must NOT be de-duped. Pins the `utilization ~= nil`
+  -- conjunct of the sonnetLegacy gate (the JS mirror guards on it too); without this a
+  -- relaxed gate (`type(...)=="table"` alone) would wrongly hide the row and pass.
+  do
+    local L = { seven_day_sonnet = {}, limits = { scoped("Sonnet", 40, true) } }
+    local r = core.modelLimitRowsToShow(L)
+    check("rowsToShow: sonnet table present but utilization nil -> scoped Sonnet KEPT",
+          #r == 1 and r[1].model == "Sonnet")
+  end
+  -- a non-Sonnet family (Fable) is never touched by the Sonnet de-dup
+  do
+    local L = { seven_day_sonnet = { utilization = 5 }, limits = { scoped("Fable", 63, true) } }
+    local r = core.modelLimitRowsToShow(L)
+    check("rowsToShow: Fable unaffected by the Sonnet legacy line", #r == 1 and r[1].model == "Fable")
+  end
+  eq("rowsToShow: no payload -> empty", #core.modelLimitRowsToShow(nil), 0)
 
   -- newestAutoApprove: newest automated allow ts; ignores human + denies + other sids
   local evs = {

@@ -4,6 +4,43 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-07-07 — Triage the q90 review of the Fable-usage feature
+
+Verified all five findings against the code; incorporated all of them (none discarded).
+
+### Fixed — a versioned Sonnet name would draw a duplicate weekly row
+
+The webview de-dup that stops a scoped `Weekly · Sonnet` row from duplicating the legacy
+`seven_day_sonnet` line matched the display_name **exactly** (`=== "sonnet"`). If Anthropic
+scopes Sonnet as e.g. `"Sonnet 4.6"`, the exact match fails and **both** rows draw. Fixed
+with a case-insensitive **prefix** match.
+
+### Changed — the show-gate + de-dup decision now lives in pure, tested core
+
+Rather than fix the bug in un-unit-testable webview JS, the whole decision moved into a new
+pure `core.modelLimitRowsToShow(official)` — it returns the render-ready rows (show-filtered
+**and** Sonnet-deduped, prefix-aware). The callback enriches the payload with
+`j.modelRows`, and the footer JS is now a thin renderer. This makes the logic unit-testable
+(and is where the prefix bug was easiest to fix).
+
+### Hardened — the model label is HTML-escaped before `innerHTML`
+
+`pctBarRow` now escapes its label (`&<>"`). The `Weekly · <model>` rows interpolate an
+Anthropic-supplied `display_name` into `innerHTML`; escaping is defense-in-depth against an
+unexpected/compromised endpoint response (the numeric args were already safe). Static-label
+callers are unaffected (no special chars).
+
+### Also
+
+- Added tests: `modelLimitRowsToShow` show/de-dup cases incl. the **versioned-name** pin
+  (mutation-verified: reverting to exact-match fails it), and an **active + nil-percent**
+  case pinning that core hands the JS a genuine `nil` (the `Math.round(ml.percent||0)`
+  `0`-fallback stays JS-side). Trimmed the over-long `officialModelLimits` doc comment.
+- An adversarial verification pass over the diff surfaced one untested branch: the
+  `seven_day_sonnet` present-but-`utilization`-nil case (legacy line doesn't render → a
+  scoped Sonnet must **not** de-dup). Added a pin for it, mutation-verified (dropping the
+  `~= nil` conjunct now fails).
+
 ## 2026-07-07 — Test-suite pass: mutation-verify the critical guards, de-vacuum two checks
 
 A quality pass over the suite (now **2,743 core + 762 ui + 368 bash** checks, all green).

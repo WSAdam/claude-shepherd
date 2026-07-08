@@ -522,7 +522,7 @@ local usageState = {}      -- [path] = { offset, cum = {...}, recent = { {ts, bu
 local lastUsagePayload = nil
 -- F7 throttle (FX._lastSnapshotAt) lives on FX, not a chunk-local, to respect the
 -- main function's 200-local cap.
-local lastOfficialUsage = nil   -- parsed { five_hour, seven_day, seven_day_sonnet, limits, +modelLimits } or nil
+local lastOfficialUsage = nil   -- parsed { five_hour, seven_day, seven_day_sonnet, limits, +modelRows } or nil
 local lastOfficialFetch = 0     -- epoch of the last successful/attempted fetch (180s TTL)
 local lastOfficialStatus = nil  -- last fetch HTTP status, so we log only on CHANGE (no 3-min spam)
 local ccVersion = nil           -- "x.y.z" for the User-Agent (detected once)
@@ -681,9 +681,10 @@ function FX.fetchOfficialUsage(force)
     lastOfficialStatus = newPrev
     if not bodyOk then return end   -- no usable payload to render
     -- Enrich once (before BOTH the immediate push and the 60s-pass `official` field
-    -- read lastOfficialUsage): structured per-model weekly limits (Fable + any future
-    -- scoped model), pre-gated so a dormant/unprovisioned model renders no line.
-    j.modelLimits = core.officialModelLimits(j)
+    -- read lastOfficialUsage): the render-ready per-model weekly rows (Fable + any
+    -- future scoped model) -- already show-gated AND de-duped against the legacy
+    -- Weekly·Sonnet line by pure core, so the JS just iterates and draws.
+    j.modelRows = core.modelLimitRowsToShow(j)
     lastOfficialUsage = j
     -- push immediately so the bars update without waiting for the next 60s pass
     if wv then pcall(function()
@@ -11539,7 +11540,11 @@ local HTML = [[
     function pctBarRow(lbl, pct, valText){
       pct = Math.max(0, Math.min(100, Math.round(pct||0)));
       var lvl = pct>=90 ? "full" : (pct>=75 ? "warn" : "ok");
-      return '<div class="uf-win"><span class="lbl">'+lbl+'</span><span class="bar '+lvl+'"><i style="width:'+pct+'%"></i></span><span class="val">'+valText+'</span></div>';
+      // Escape the label: it's usually a static literal, but the Weekly·<model> rows
+      // interpolate an Anthropic-supplied display_name into innerHTML -- defense in
+      // depth against an unexpected/compromised endpoint. valText is numeric (safe).
+      var l = String(lbl).replace(/[&<>"]/g, function(c){ return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]; });
+      return '<div class="uf-win"><span class="lbl">'+l+'</span><span class="bar '+lvl+'"><i style="width:'+pct+'%"></i></span><span class="val">'+valText+'</span></div>';
     }
     function resetsIn(iso){
       if(!iso) return "";
@@ -11575,16 +11580,14 @@ local HTML = [[
         if(o.seven_day_sonnet && o.seven_day_sonnet.utilization != null){
           rows += pctBarRow("Weekly · Sonnet", o.seven_day_sonnet.utilization, Math.round(o.seven_day_sonnet.utilization)+"%");
         }
-        // Per-model weekly limits from the structured limits[] surface (Fable, and any
-        // future scoped model). core.officialModelLimits pre-gates to the ones worth
-        // showing (active or nonzero usage), so a dormant/unprovisioned model draws NO
-        // row — the "hide it when the model is unavailable" behavior.
-        if(o.modelLimits && o.modelLimits.length){
-          for(var mi=0; mi<o.modelLimits.length; mi++){
-            var ml = o.modelLimits[mi];
-            if(!ml || !ml.show || !ml.model) continue;
-            // skip a model already drawn via its named seven_day_<model> line (Sonnet today)
-            if(ml.model.toLowerCase()==="sonnet" && o.seven_day_sonnet && o.seven_day_sonnet.utilization != null) continue;
+        // Per-model weekly rows from the structured limits[] surface (Fable, and any
+        // future scoped model). core.modelLimitRowsToShow already dropped dormant/
+        // unprovisioned models (the "hide it when the model is unavailable" behavior)
+        // and de-duped the legacy Weekly·Sonnet line, so this is a thin draw. The model
+        // name is Anthropic-supplied text -> pctBarRow HTML-escapes its label.
+        if(o.modelRows && o.modelRows.length){
+          for(var mi=0; mi<o.modelRows.length; mi++){
+            var ml = o.modelRows[mi];
             rows += pctBarRow("Weekly · " + ml.model, ml.percent||0, Math.round(ml.percent||0)+"%");
           }
         }

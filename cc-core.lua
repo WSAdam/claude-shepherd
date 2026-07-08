@@ -7840,20 +7840,12 @@ function M.officialUsageStep(prev, status, bodyOk)
   return false, false, prev
 end
 
--- Extract per-model WEEKLY limits from the official OAuth usage payload's `limits`
--- array -- the structured, model-SCOPED surface (the flat `seven_day_<model>` fields
--- are legacy and usually null). Anthropic reports a model's own weekly cap as a
--- weekly-group entry carrying scope.model.display_name (e.g. "Fable", "Opus"), with
--- `percent`, `severity`, `resets_at`, `is_active`. This is model-AGNOSTIC on purpose:
--- Fable shows up today and any model Anthropic scopes later flows through unchanged.
--- Returns a list of normalized { model, percent, severity, resetsAt, active, show }
--- sorted by model; [] when the payload has no model-scoped weekly limit.
---
--- `show` is the UI gate that answers "don't show it when the model is unavailable":
--- surface a line ONLY when the bucket is real+meaningful -- currently metering
--- (is_active) OR carrying nonzero usage. A model that is dormant (Fable at 0% &
--- inactive) or simply absent from `limits` yields show=false / no entry, so the row
--- disappears exactly like the seven_day_sonnet null-guard -- no empty "0%" noise.
+-- Normalize the OAuth payload's model-scoped weekly `limits[]` (each carries
+-- scope.model.display_name, e.g. "Fable") to { model, percent, severity, resetsAt,
+-- active, show }, sorted by model; [] when there's no scoped weekly entry. Reads the
+-- structured limits[] surface, NOT the legacy flat `seven_day_<model>` fields (usually
+-- null). `show=false` for a dormant/absent model (not active AND no usage) so the
+-- footer draws no empty "0%" row -- the same null-guard the Weekly·Sonnet line uses.
 function M.officialModelLimits(official)
   if type(official) ~= "table" or type(official.limits) ~= "table" then return {} end
   local out = {}
@@ -7874,6 +7866,26 @@ function M.officialModelLimits(official)
     end
   end
   table.sort(out, function(a, b) return tostring(a.model) < tostring(b.model) end)
+  return out
+end
+
+-- The model-scoped weekly rows the footer should actually DRAW: officialModelLimits
+-- filtered to show==true, MINUS any model already drawn by a legacy `seven_day_<model>`
+-- line (today only Weekly·Sonnet, rendered when official.seven_day_sonnet.utilization
+-- is non-nil). The de-dup is a case-insensitive PREFIX match on the family name, so a
+-- versioned display_name ("Sonnet 4.6") still collapses onto the legacy Sonnet row
+-- instead of drawing a duplicate. Keeping this decision here (not in the webview JS)
+-- makes it unit-testable and leaves the JS a thin renderer.
+function M.modelLimitRowsToShow(official)
+  local sonnetLegacy = type(official) == "table" and type(official.seven_day_sonnet) == "table"
+    and official.seven_day_sonnet.utilization ~= nil
+  local out = {}
+  for _, m in ipairs(M.officialModelLimits(official)) do
+    if m.show then
+      local collidesSonnet = sonnetLegacy and tostring(m.model):lower():sub(1, 6) == "sonnet"
+      if not collidesSonnet then out[#out + 1] = m end
+    end
+  end
   return out
 end
 
