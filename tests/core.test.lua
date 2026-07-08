@@ -5755,6 +5755,57 @@ do
   end
   eq("rowsToShow: no payload -> empty", #core.modelLimitRowsToShow(nil), 0)
 
+  -- usageLimitAlerts: the plan-limit guard's pure decision -- one alert per window
+  -- crossing, keyed by resets_at so the same window never re-fires but a rolled
+  -- window re-arms. Covers session/weekly/legacy-Sonnet/per-model (Fable) bars.
+  local function officialAt(sessPct, weekPct, fablePct, resets)
+    return {
+      five_hour = { utilization = sessPct, resets_at = resets or "R1" },
+      seven_day = { utilization = weekPct, resets_at = resets or "R1" },
+      limits = { { kind = "weekly_scoped", group = "weekly", percent = fablePct,
+                   is_active = true, resets_at = resets or "R1",
+                   scope = { model = { display_name = "Fable" } } } },
+    }
+  end
+  do
+    local fired = {}
+    local a = core.usageLimitAlerts(officialAt(92, 10, 5), fired)
+    eq("limitAlerts: session 92% crosses default 90 -> one alert", #a, 1)
+    check("limitAlerts: alert is the session window", a[1] and a[1].key == "session" and a[1].percent == 92)
+    eq("limitAlerts: memo records the window", fired.session, "R1")
+    -- same window again -> silent (once per window, not per poll)
+    eq("limitAlerts: same resets_at stays silent", #core.usageLimitAlerts(officialAt(95, 10, 5), fired), 0)
+    -- window rolls (new resets_at) while still over -> re-arms exactly once
+    local b = core.usageLimitAlerts(officialAt(95, 10, 5, "R2"), fired)
+    eq("limitAlerts: rolled window re-fires once", #b, 1)
+  end
+  do
+    local fired = {}
+    local a = core.usageLimitAlerts(officialAt(10, 20, 97), fired)
+    eq("limitAlerts: Fable 97% fires the per-model window", #a, 1)
+    check("limitAlerts: per-model key + label", a[1] and a[1].key == "weekly:Fable"
+          and a[1].label == "Weekly · Fable")
+  end
+  do
+    -- legacy Sonnet line fires its own window key
+    local fired = {}
+    local o = { seven_day_sonnet = { utilization = 91, resets_at = "R1" } }
+    local a = core.usageLimitAlerts(o, fired)
+    check("limitAlerts: legacy Sonnet line fires weekly:Sonnet", #a == 1 and a[1].key == "weekly:Sonnet")
+  end
+  do
+    -- custom threshold + below-threshold silence + nil-percent guard
+    local fired = {}
+    eq("limitAlerts: custom threshold 50 fires at 55",
+       #core.usageLimitAlerts(officialAt(55, 1, 1), fired, { threshold = 50 }), 1)
+    eq("limitAlerts: below threshold silent", #core.usageLimitAlerts(officialAt(10, 10, 10), {}), 0)
+    local oNil = { limits = { { kind = "weekly_scoped", group = "weekly", is_active = true,
+                                scope = { model = { display_name = "Fable" } } } } }
+    eq("limitAlerts: active model with nil percent never fires", #core.usageLimitAlerts(oNil, {}), 0)
+  end
+  eq("limitAlerts: non-table payload -> empty", #core.usageLimitAlerts("x", {}), 0)
+  eq("limitAlerts: non-table memo -> empty (no throw)", #core.usageLimitAlerts(officialAt(99, 99, 99), nil), 0)
+
   -- newestAutoApprove: newest automated allow ts; ignores human + denies + other sids
   local evs = {
     { type="decision", session_id="s", outcome="allow", by="autoAllow", ts=100 },

@@ -1337,6 +1337,19 @@ do
   check("fable-usage: pctBarRow escapes its label before innerHTML",
         src:find('String(lbl).replace(/[&<>"]/g', 1, true) ~= nil
         and src:find('<span class="lbl">\'+l+\'</span>', 1, true) ~= nil)
+  -- limit-guard: the plan-limit warning wiring. Decision is pure+tested
+  -- (core.usageLimitAlerts); the callback owns the effects (one OS notification +
+  -- ledger event per window crossing) and the memo lives on FX (200-local ceiling).
+  check("limit-guard: memo on FX, not a new top-level local",
+        src:find("FX._usageAlertFired = {}", 1, true) ~= nil)
+  check("limit-guard: decision via pure core.usageLimitAlerts with the FX memo",
+        src:find("core.usageLimitAlerts(j, FX._usageAlertFired", 1, true) ~= nil)
+  check("limit-guard: config-gated (default ON) with a tunable threshold",
+        src:find('core.config(cfg, "usage.limitAlerts.enabled", true)', 1, true) ~= nil
+        and src:find('core.config(cfg, "usage.limitAlerts.thresholdPct", 90)', 1, true) ~= nil)
+  check("limit-guard: fires an OS notification and a usage_limit ledger event",
+        src:find('FX.notify("Claude plan: " .. a.label', 1, true) ~= nil
+        and src:find('type = "usage_limit", window = a.key', 1, true) ~= nil)
   -- #3 export session archive: bridge handler, transcript cp (verbatim, large-safe),
   -- meta via core, ledger event, two entry points (detail button + ctx-menu).
   check("l5exp-pin: export-session handler", src:find('a == "export-session"', 1, true) ~= nil)

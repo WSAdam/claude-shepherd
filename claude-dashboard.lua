@@ -646,6 +646,11 @@ local function ccUserAgent()
   return "claude-code/" .. ccVersion
 end
 
+-- Plan-limit guard memo: window key -> the resets_at it already warned for (one OS
+-- notification per window, re-armed when the window rolls). On FX, not a new
+-- top-level local -- this file is at Lua's 200-local ceiling.
+FX._usageAlertFired = {}
+
 -- Fetch the official usage window (async, non-blocking). force=true bypasses the TTL
 -- (the Update-now button); otherwise it no-ops if fetched within OFFICIAL_TTL seconds.
 function FX.fetchOfficialUsage(force)
@@ -685,6 +690,25 @@ function FX.fetchOfficialUsage(force)
     -- future scoped model) -- already show-gated AND de-duped against the legacy
     -- Weekly·Sonnet line by pure core, so the JS just iterates and draws.
     j.modelRows = core.modelLimitRowsToShow(j)
+    -- Plan-limit guard (default ON -- passive: no keystrokes, no session actions,
+    -- no model tokens): ONE OS notification per usage window when a bar crosses
+    -- usage.limitAlerts.thresholdPct (default 90) -- session, weekly, and every
+    -- per-model weekly line (Fable etc.). Field-motivated: a fleet sweep died
+    -- mid-run on the Fable weekly cap with zero warning. Toggle it off with
+    -- usage.limitAlerts.enabled=false in cc-config.json.
+    do
+      local cfg = loadConfig()
+      if core.config(cfg, "usage.limitAlerts.enabled", true) then
+        local th = tonumber(core.config(cfg, "usage.limitAlerts.thresholdPct", 90)) or 90
+        for _, a in ipairs(core.usageLimitAlerts(j, FX._usageAlertFired, { threshold = th })) do
+          FX.notify("Claude plan: " .. a.label .. " at " .. math.floor((a.percent or 0) + 0.5) .. "%",
+            "Approaching this window's cap -- work on it may be blocked at 100%. "
+            .. "Bars + reset times are in the panel footer.")
+          FX.appendLedger({ type = "usage_limit", window = a.key,
+            percent = math.floor((a.percent or 0) + 0.5), threshold = th })
+        end
+      end
+    end
     lastOfficialUsage = j
     -- push immediately so the bars update without waiting for the next 60s pass
     if wv then pcall(function()

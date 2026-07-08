@@ -7889,6 +7889,44 @@ function M.modelLimitRowsToShow(official)
   return out
 end
 
+-- Plan-limit guard: which usage windows just crossed the warning threshold and
+-- deserve ONE alert for the current window. Checks the session (5h) and weekly
+-- bars plus every per-model weekly row (modelLimitRowsToShow: Fable etc.) and the
+-- legacy Sonnet line. `fired` is the caller-held once-per-window memo, keyed by
+-- window id -> the resets_at it fired for: a later poll in the SAME window (same
+-- resets_at) stays silent, a NEW window (resets_at changed) re-arms -- so a cap
+-- you're still riding re-warns exactly once per week/session, never per poll.
+-- Mutates `fired` (promoteSummary-style) and returns the alerts to fire NOW as
+-- { key, label, percent, resetsAt }. Pure decision -- the caller owns the
+-- notification/ledger effects. opts.threshold: warn at >= this percent (default 90).
+function M.usageLimitAlerts(official, fired, opts)
+  if type(official) ~= "table" or type(fired) ~= "table" then return {} end
+  local th = tonumber(opts and opts.threshold) or 90
+  local out = {}
+  local function consider(key, label, pct, resetsAt)
+    pct = tonumber(pct)
+    if pct == nil or pct < th then return end
+    local window = tostring(resetsAt or "no-reset")
+    if fired[key] == window then return end       -- already warned for this window
+    fired[key] = window
+    out[#out + 1] = { key = key, label = label, percent = pct, resetsAt = resetsAt }
+  end
+  if type(official.five_hour) == "table" then
+    consider("session", "Session (5h)", official.five_hour.utilization, official.five_hour.resets_at)
+  end
+  if type(official.seven_day) == "table" then
+    consider("weekly", "Weekly", official.seven_day.utilization, official.seven_day.resets_at)
+  end
+  if type(official.seven_day_sonnet) == "table" and official.seven_day_sonnet.utilization ~= nil then
+    consider("weekly:Sonnet", "Weekly · Sonnet",
+      official.seven_day_sonnet.utilization, official.seven_day_sonnet.resets_at)
+  end
+  for _, m in ipairs(M.modelLimitRowsToShow(official)) do
+    consider("weekly:" .. tostring(m.model), "Weekly · " .. tostring(m.model), m.percent, m.resetsAt)
+  end
+  return out
+end
+
 -- ---- L5: PR/MR status per tile (gh-backed, status-only) -------------------
 -- Parse `gh pr view --json number,state,url,title,isDraft` output (a single JSON
 -- object for the current branch's PR) into a normalized { number, state, url,
