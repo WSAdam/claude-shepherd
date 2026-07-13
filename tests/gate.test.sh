@@ -637,4 +637,157 @@ out="$(printf '%s' '{"session_id":"sg3","cwd":"/x/p","tool_name":"Bash","tool_in
   | CC_GATE_FLAG="$FLAG" CC_CONFIG_FILE="$REPCFG" bash "$APP" 2>/dev/null)"
 assert_eq "#18: real newline never matches a literal backslash-n SIG" "" "$out"
 
+# ---- #25-pin: newline/tab-separated gated-tools lists must GATE, not fail open.
+# Lua's parseToolList/resolveGateTools split on ANY whitespace, so the panel shows
+# these lists as armed -- but the shell's space-delimited `case " $GATE_TOOLS "`
+# match required literal spaces: a multiline config string / one-tool-per-line
+# override file / tab-separated list gated NOTHING (the R2-05 fail-open class).
+# a) config string with an embedded newline: the token AFTER the \n is gated
+date +%s > "$HB"
+MLCFG="$TMP/tools-ml.json"
+printf '%s' '{"gate":{"tools":"Bash\nWrite"}}' > "$MLCFG"
+( printf '%s' '{"session_id":"ml1","cwd":"/x/p","tool_name":"Write","tool_input":{"file_path":"/x/p/a.txt"}}' \
+    | CC_GATE_FLAG="$FLAG" CC_CONFIG_FILE="$MLCFG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=5 \
+    bash "$APP" > "$TMP/out_ml1" 2>/dev/null ) &
+bg=$!; answer ml1 allow; wait $bg
+assert_eq "#25-pin: multiline gate.tools string gates the after-newline tool" \
+  "allow" "$(jq -r '.hookSpecificOutput.permissionDecision' "$TMP/out_ml1" 2>/dev/null)"
+# ...and a tool OUTSIDE the multiline list still falls straight through
+out="$(printf '%s' '{"session_id":"ml2","cwd":"/x/p","tool_name":"Read","tool_input":{"file_path":"/x"}}' \
+    | CC_GATE_FLAG="$FLAG" CC_CONFIG_FILE="$MLCFG" CC_PANEL_MAX_AGE=99999 bash "$APP" 2>/dev/null)"
+assert_eq "#25-pin: tool outside the multiline list falls through" "" "$out"
+# b) tab-separated config string
+date +%s > "$HB"
+TABCFG="$TMP/tools-tab.json"
+printf '%s' '{"gate":{"tools":"Bash\tWrite"}}' > "$TABCFG"
+( printf '%s' '{"session_id":"tb1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"rm -rf build"}}' \
+    | CC_GATE_FLAG="$FLAG" CC_CONFIG_FILE="$TABCFG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=5 \
+    bash "$APP" > "$TMP/out_tb1" 2>/dev/null ) &
+bg=$!; answer tb1 allow; wait $bg
+assert_eq "#25-pin: tab-separated gate.tools still gates" \
+  "allow" "$(jq -r '.hookSpecificOutput.permissionDecision' "$TMP/out_tb1" 2>/dev/null)"
+# c) per-session override file written one-tool-per-line (the natural shell idiom)
+date +%s > "$HB"
+printf 'WebFetch\nBash\n' > "$CC_GATE_TOOLS_DIR/ovnl"
+( printf '%s' '{"session_id":"ovnl","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"rm -rf build"}}' \
+    | CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=5 \
+    bash "$APP" > "$TMP/out_ovnl" 2>/dev/null ) &
+bg=$!; answer ovnl allow; wait $bg
+assert_eq "#25-pin: one-tool-per-line override file still gates" \
+  "allow" "$(jq -r '.hookSpecificOutput.permissionDecision' "$TMP/out_ovnl" 2>/dev/null)"
+
+# ---- #14-pin (#26): gate arming fully REPLACES the pending block. cc_merge is a
+# recursive jq merge, so a leftover AskUserQuestion `ask` array (published by
+# cc-status.sh for this same session key) used to ride into the armed pending and
+# render dead option buttons on the Bash approval tile -- clicking one fired
+# picker keystrokes into a session with no picker focused.
+date +%s > "$HB"
+printf '%s' '{"session_id":"ask1","name":"p","cwd":"/x/p","status":"approval","updated":100,"since":100,"pending":{"tool":"AskUserQuestion","summary":"Pick one","ask":[{"question":"Pick one","header":"Q"}]}}' > "$TMP/ask1.json"
+( printf '%s' '{"session_id":"ask1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"make x"}}' \
+    | CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=5 \
+    bash "$APP" > "$TMP/out_ask1" 2>/dev/null ) &
+bg=$!
+i=0; n=""
+while [ "$i" -lt 100 ]; do   # wait for the ARMED pending (nonce published)
+  n="$(jq -r '.pending.nonce // empty' "$TMP/ask1.json" 2>/dev/null)"
+  [ -n "$n" ] && break
+  sleep 0.05; i=$((i+1))
+done
+assert_eq "#14-pin: armed pending carries the gate's own tool" \
+  "Bash" "$(jq -r '.pending.tool' "$TMP/ask1.json" 2>/dev/null)"
+assert_eq "#14-pin: the stale AskUserQuestion ask array is dropped" \
+  "null" "$(jq -r '.pending.ask' "$TMP/ask1.json" 2>/dev/null)"
+answer ask1 allow; wait $bg
+assert_eq "#14-pin: the armed request still resolves normally" \
+  "allow" "$(jq -r '.hookSpecificOutput.permissionDecision' "$TMP/out_ask1" 2>/dev/null)"
+
+# ---- #12-pin (#27): the pending/status teardown is ownership-aware (the R3-18
+# completion). A resolving/timing-out waiter used to `cc_del_field pending` +
+# merge status:working UNCONDITIONALLY, wiping a sibling waiter's freshly
+# re-armed LIVE pending block (parallel subagents share the session key) -- the
+# sibling's approval never reached the panel and it silently timed out.
+# a) TIMEOUT path: waiter A times out while sibling B owns the tile
+date +%s > "$HB"
+( printf '%s' '{"session_id":"sib1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"slow thing"}}' \
+    | CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=2 \
+    bash "$APP" > "$TMP/out_sib1" 2>/dev/null ) &
+bg=$!
+wait_block "$TMP/sib1.json"
+i=0
+while [ "$i" -lt 100 ]; do   # wait for A's arming
+  [ -n "$(jq -r '.pending.nonce // empty' "$TMP/sib1.json" 2>/dev/null)" ] && break
+  sleep 0.05; i=$((i+1))
+done
+# sibling B re-arms: a FOREIGN nonce owns pending + gate now
+jq -c '.pending={tool:"Write",summary:"sibling req",message:"sibling req",nonce:"sib-n"}
+       | .gate="waiting" | .gate_nonce="sib-n" | .status="approval"' \
+  "$TMP/sib1.json" > "$TMP/sib1.json.t" && mv "$TMP/sib1.json.t" "$TMP/sib1.json"
+wait $bg   # A times out; it does NOT own the pending anymore
+assert_eq "#12-pin: timeout leaves the sibling's live pending intact" \
+  "sib-n" "$(jq -r '.pending.nonce' "$TMP/sib1.json" 2>/dev/null)"
+assert_eq "#12-pin: timeout leaves the sibling's tool visible" \
+  "Write" "$(jq -r '.pending.tool' "$TMP/sib1.json" 2>/dev/null)"
+assert_eq "#12-pin: timeout does not flip the sibling's tile to working" \
+  "approval" "$(jq -r '.status' "$TMP/sib1.json" 2>/dev/null)"
+assert_eq "#12-pin: the sibling's gate shield survives (R3-18 half still holds)" \
+  "waiting" "$(jq -r '.gate' "$TMP/sib1.json" 2>/dev/null)"
+assert_eq "#12-pin: A still degrades to the native prompt" "" "$(cat "$TMP/out_sib1" 2>/dev/null)"
+# b) RESOLVE path: waiter A is answered (own nonce) while sibling B owns the tile
+date +%s > "$HB"
+( printf '%s' '{"session_id":"sib2","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"echo hi"}}' \
+    | CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=5 \
+    bash "$APP" > "$TMP/out_sib2" 2>/dev/null ) &
+bg=$!
+wait_block "$TMP/sib2.json"
+nonceA=""; i=0
+while [ "$i" -lt 100 ]; do
+  nonceA="$(jq -r '.pending.nonce // empty' "$TMP/sib2.json" 2>/dev/null)"
+  [ -n "$nonceA" ] && break
+  sleep 0.05; i=$((i+1))
+done
+jq -c '.pending={tool:"Write",summary:"sibling req",message:"sibling req",nonce:"sib-n"}
+       | .gate="waiting" | .gate_nonce="sib-n" | .status="approval"' \
+  "$TMP/sib2.json" > "$TMP/sib2.json.t" && mv "$TMP/sib2.json.t" "$TMP/sib2.json"
+printf 'allow %s' "$nonceA" > "$TMP/sib2.decision.tmp.$$"   # panel answers waiter A by ITS nonce
+mv "$TMP/sib2.decision.tmp.$$" "$TMP/sib2.decision"
+wait $bg
+assert_eq "#12-pin: the answered waiter still resolves allow" \
+  "allow" "$(jq -r '.hookSpecificOutput.permissionDecision' "$TMP/out_sib2" 2>/dev/null)"
+assert_eq "#12-pin: an allow resolution leaves the sibling's pending intact" \
+  "sib-n" "$(jq -r '.pending.nonce' "$TMP/sib2.json" 2>/dev/null)"
+assert_eq "#12-pin: an allow resolution keeps the sibling's tile on approval" \
+  "approval" "$(jq -r '.status' "$TMP/sib2.json" 2>/dev/null)"
+
+# ---- #28-pin: the waiter VERIFIES its arming (~1Hz) and replays it if the
+# shared status file was clobbered mid-wait (cc-status.sh's residual snapshot->mv
+# lost-update window drops gate, pending AND gate_nonce in one shot -- the panel
+# then has nothing to answer and the waiter polled blind to the full timeout).
+date +%s > "$HB"
+( printf '%s' '{"session_id":"ra1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"make y"}}' \
+    | CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=6 \
+    bash "$APP" > "$TMP/out_ra1" 2>/dev/null ) &
+bg=$!
+wait_block "$TMP/ra1.json"
+GN1=""; i=0
+while [ "$i" -lt 100 ]; do   # capture the original arming nonce
+  GN1="$(jq -r '.gate_nonce // empty' "$TMP/ra1.json" 2>/dev/null)"
+  [ -n "$GN1" ] && break
+  sleep 0.05; i=$((i+1))
+done
+# simulate the clobber: a full pre-arm snapshot lands -- NO gate/pending/gate_nonce
+jq -nc '{session_id:"ra1",name:"p",cwd:"/x/p",status:"working",updated:1,since:1}' \
+  > "$TMP/ra1.json.t" && mv "$TMP/ra1.json.t" "$TMP/ra1.json"
+GN2=""; i=0
+while [ "$i" -lt 100 ]; do   # the ~1Hz verify pass must replay the arming
+  GN2="$(jq -r '.gate_nonce // empty' "$TMP/ra1.json" 2>/dev/null)"
+  [ -n "$GN2" ] && break
+  sleep 0.05; i=$((i+1))
+done
+assert_eq "#28-pin: clobbered arming is replayed with the SAME nonce" "$GN1" "$GN2"
+assert_eq "#28-pin: the replay restores the pending block" \
+  "Bash" "$(jq -r '.pending.tool' "$TMP/ra1.json" 2>/dev/null)"
+answer ra1 allow; wait $bg
+assert_eq "#28-pin: the re-armed request is panel-answerable" \
+  "allow" "$(jq -r '.hookSpecificOutput.permissionDecision' "$TMP/out_ra1" 2>/dev/null)"
+
 finish

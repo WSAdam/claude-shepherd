@@ -24,10 +24,14 @@ set -u
 
 GATE_FLAG="${CC_GATE_FLAG:-${HOME}/.claude/cc-gate.enabled}"
 # Gated tools: env override (tests) wins, else the panel-editable `gate.tools`
-# config string, else the default 5. Commas tolerated (normalized to spaces).
+# config string, else the default 5. Commas AND newlines/tabs are normalized to
+# spaces: core.parseToolList/resolveGateTools split on any whitespace, so a
+# hand-edited multiline "Bash\nWrite" string must gate too -- the space-only
+# match below would otherwise fail OPEN while the panel shows those tools as
+# gated (same fail-open class R2-05 fixed for the JSON-array form).
 GATE_TOOLS="${CC_GATE_TOOLS:-$(cc_config_toollist)}"
 GATE_TOOLS="${GATE_TOOLS:-Bash Write Edit MultiEdit NotebookEdit}"
-GATE_TOOLS="$(printf '%s' "$GATE_TOOLS" | tr ',' ' ')"
+GATE_TOOLS="$(printf '%s' "$GATE_TOOLS" | tr ',\n\t\r' '    ')"
 GATE_TIMEOUT="${CC_GATE_TIMEOUT:-120}"
 HEARTBEAT_MAX_AGE="${CC_PANEL_MAX_AGE:-5}"
 APPROVED_DIR="$CC_APPROVED_DIR"    # defined in cc-lib.sh so SessionEnd can clean it
@@ -88,12 +92,14 @@ KEY="$(cc_key "$SESSION_ID" "$CWD")"
 # Per-session gated-tools override (Feature D, least-privilege). A dedicated file
 # mirrors cc-autopilot/<key>: absent -> use the fleet GATE_TOOLS computed above;
 # "-"/"NONE" (any case) -> gate NOTHING for this session; else gate exactly the
-# listed tools. One cat, no jq, on the hot path.
+# listed tools (commas/newlines/tabs normalized to spaces -- a one-tool-per-line
+# file is the natural shell idiom and must gate, not silently fail open). One
+# cat, no jq, on the hot path.
 # KEEP IN SYNC with core.resolveGateTools in cc-core.lua: an EMPTY/whitespace file is
 # NOT a "gate nothing" sentinel -- it leaves the fleet GATE_TOOLS untouched (so a
 # blank or half-written override never silently disables the gate). Only "-"/"none".
 if [ -f "$GATE_TOOLS_DIR/$KEY" ]; then
-  OVR="$(cat "$GATE_TOOLS_DIR/$KEY" 2>/dev/null | tr ',' ' ')"
+  OVR="$(cat "$GATE_TOOLS_DIR/$KEY" 2>/dev/null | tr ',\n\t\r' '    ')"
   case "$(printf '%s' "$OVR" | tr -d '[:space:]' | tr 'A-Z' 'a-z')" in
     '')      : ;;                         # empty/whitespace -> no override (fleet default)
     -|none)  GATE_TOOLS="" ;;             # sentinel -> gate nothing this session
@@ -269,10 +275,34 @@ NONCE="$$.$NOW"
 # in the SAME event via its own read-modify-write race. A top-level field cc-status.sh
 # never touches survives that clear, so decisionContent can still bind a same-second
 # answer. cc-approve clears gate_nonce when it tears the gate down (below).
-cc_merge "$KEY" "$(jq -nc \
+# #14: the old pending block is dropped so the armed one is authoritative:
+# cc_merge is a recursive jq merge, so a key the fresh patch doesn't carry
+# survives -- a leftover AskUserQuestion `ask` array (published by cc-status.sh
+# for this same session key) would ride into the armed pending and render dead
+# option buttons on the approval tile (the same leak cc-status.sh's full-replace
+# fixed for its own writes). The del + merge happen in ONE atomic jq pass
+# (cc_merge's tmp+mv idiom, incl. its corrupt-file self-heal): a separate
+# cc_del_field-then-cc_merge leaves a window where a sibling's PermissionRequest
+# re-publishes an `ask` pending between the two writes and the merge leaks it
+# all over again.
+ARM_PATCH="$(jq -nc \
   --arg sid "$SESSION_ID" --arg name "$NAME" --arg cwd "$CWD" \
   --argjson now "$NOW" --arg tool "$TOOL" --arg sum "$SUMMARY" --arg nonce "$NONCE" \
   '{session_id:$sid, name:$name, cwd:$cwd, status:"approval", updated:$now, since:$now, gate:"waiting", gate_nonce:$nonce, pending:{tool:$tool, summary:$sum, message:$sum, nonce:$nonce}}')"
+ARM_FILE="$(cc_file "$KEY")"
+arm_gate() {
+  local tmp cur
+  tmp="${ARM_FILE}.tmp.$$"
+  cur="$(cat "$ARM_FILE" 2>/dev/null)"
+  [ -n "$cur" ] || cur='{}'
+  if printf '%s' "$cur" | jq -c --argjson patch "$ARM_PATCH" 'del(.pending) * $patch' > "$tmp" 2>/dev/null \
+     || jq -nc --argjson patch "$ARM_PATCH" '$patch' > "$tmp" 2>/dev/null; then
+    mv "$tmp" "$ARM_FILE"
+  else
+    rm -f "$tmp" 2>/dev/null || true
+  fi
+}
+arm_gate
 echo "[cc-approve] ⏳ waiting on panel for $TOOL ($KEY): $SUMMARY" >&2
 
 # Poll for the panel's decision (0.25s cadence). Load-bearing invariants --
@@ -321,6 +351,20 @@ while [ "$i" -lt "$ITERS" ]; do
       PARKED=$(( PARKED + 1 ))
     fi
   fi
+  # #28: verify/replay the arming (~1Hz). cc-status.sh's snapshot->jq->mv apply
+  # still has a residual lost-update window (and a bounded-retry exhaustion path)
+  # where its mv replaces the file with content computed from a PRE-ARM snapshot,
+  # dropping gate, pending AND gate_nonce in one clobber -- the panel then never
+  # shows this request and we poll blind to the full GATE_TIMEOUT. While still
+  # waiting, an EMPTY gate_nonce means nobody owns the gate (our arming was
+  # clobbered, or a resolved sibling tore the shared fields down while ours is
+  # still pending) -> replay our arming patch verbatim (same since:T1, so the
+  # stale-approval escalation clock isn't restarted -- R3-15). A FOREIGN nonce is
+  # a live sibling arm (R3-18 semantics: last armer owns the tile): touch nothing.
+  if [ $(( i % 4 )) -eq 0 ] && [ -z "$(cc_read_field "$KEY" '.gate_nonce')" ]; then
+    arm_gate
+    echo "[cc-approve] ♻️ re-armed gate for $TOOL ($KEY): arming was clobbered/torn down mid-wait" >&2
+  fi
   sleep 0.25
   i=$(( i + 1 ))
 done
@@ -342,16 +386,37 @@ fi
 # waiter's mtime check above, and cc_remove cleans up on SessionEnd.
 rm -f "$CLAIM" 2>/dev/null || true
 
-if [ "$DECISION" = "deny" ]; then
-  cc_del_field "$KEY" "pending"
+# #12 (R3-18 completion): the same ownership rule for the pending/status cleanup
+# the resolve/timeout branches below share -- the pending twin of the gate guard
+# above. Clearing unconditionally let the FIRST waiter to resolve/time out wipe a
+# sibling's freshly re-armed pending block and flip status back to "working"
+# (parallel subagents share the session key), so the sibling's approval never
+# reached the panel and it silently timed out to the native prompt. So: pending
+# is OURS (nonce match) -> full teardown (the R1-37 behavior); pending already
+# gone (single waiter resolved, or cc-status.sh's pending-clear race -- R1-36)
+# -> just drop the dead approval status; any OTHER live pending -- a sibling's
+# re-arm (foreign nonce) or a nonce-less NATIVE prompt cc-status.sh published
+# once our gate teardown lifted the gate=="waiting" shield -- owns the tile now:
+# touch nothing.
+clear_own_pending() {
+  local pn
+  pn="$(cc_read_field "$KEY" '.pending.nonce')"
+  if [ "$pn" = "$NONCE" ]; then
+    cc_del_field "$KEY" "pending"
+  elif [ "$(cc_read_field "$KEY" '.pending | type')" = "object" ]; then
+    return 0
+  fi
   cc_merge "$KEY" "$(jq -nc --argjson now "$(cc_now)" '{status:"working", updated:$now, since:$now}')"
+}
+
+if [ "$DECISION" = "deny" ]; then
+  clear_own_pending
   echo "[cc-approve] ❌ denied $TOOL ($KEY)" >&2
   ledger_decision deny human
   emit_deny "Denied from the Claude Shepherd panel."
   exit 0
 elif [ "$DECISION" = "allow" ]; then
-  cc_del_field "$KEY" "pending"
-  cc_merge "$KEY" "$(jq -nc --argjson now "$(cc_now)" '{status:"working", updated:$now, since:$now}')"
+  clear_own_pending
   # Remember this approval so approveRepeats can auto-allow it next time.
   if [ "$(cc_config '.policies.approveRepeats' 'false')" = "true" ]; then
     mkdir -p "$APPROVED_DIR"
@@ -367,9 +432,9 @@ fi
 # R1-37: clear our OWN published request state so the tile doesn't keep showing a
 # waiting-for-approval block with a now-dead nonce until the next hook event. This is
 # the session's own pending block (not the shared decision file), so it doesn't touch
-# the "never rm the decision file on timeout" invariant above.
-cc_del_field "$KEY" "pending"
-cc_merge "$KEY" "$(jq -nc --argjson now "$(cc_now)" '{status:"working", updated:$now, since:$now}')"
+# the "never rm the decision file on timeout" invariant above. Ownership-checked:
+# a sibling's re-armed pending must survive our timeout (see clear_own_pending).
+clear_own_pending
 echo "[cc-approve] ⚠️  timeout after ${GATE_TIMEOUT}s, falling back to native prompt ($KEY)" >&2
 ledger_decision fallback timeout-fallback
 exit 0

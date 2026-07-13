@@ -193,6 +193,21 @@ do
      core.resolveGesture(normal, "secondary", { longPressStops = true }), "stop")
 end
 
+-- ---- #9-pin: Stream Deck styling covers the error state ---------------------
+-- A frozen-on-API-error session ranks just below approvals (RANK.error) and the
+-- panel styles it distinctly (.s-error magenta) -- but SD_COLORS/SD_LABELS had no
+-- `error` entry, so sdButtonImage's `or SD_COLORS.idle` fallback painted the
+-- needs-attention key the same gray-blue as an idle session.
+do
+  check("#9-pin: SD_COLORS has an error entry", type(core.SD_COLORS.error) == "table")
+  check("#9-pin: error key color is NOT the idle fallback",
+        core.SD_COLORS.error ~= core.SD_COLORS.idle
+        and (core.SD_COLORS.error.red ~= core.SD_COLORS.idle.red
+             or core.SD_COLORS.error.green ~= core.SD_COLORS.idle.green
+             or core.SD_COLORS.error.blue ~= core.SD_COLORS.idle.blue))
+  eq("#9-pin: SD_LABELS names the error state", core.SD_LABELS.error, "ERROR")
+end
+
 -- ---- handleAction: routes to the right effect, gate-aware ------------------
 do
   local waiting = { key = "w1", name = "proj-w", gate = "waiting" }
@@ -1514,6 +1529,28 @@ do
   eq("spawnspec(vscode/provider-env): forced terminal flavor", ve.flavor, "terminal")
   check("spawnspec(vscode/provider-env): env rides the typed line",
         ve.postType:find("ANTHROPIC_MODEL=", 1, true) ~= nil)
+  -- #37-pin: the extension flavor launches ITS OWN claude and silently discarded
+  -- every launch flag -- an agent-profile spawn (persona/--mcp-config/--agent/
+  -- --add-dir/--plugin-dir) or a permission mode must force the typed terminal
+  -- line so the flags actually apply (mirrors the ssh / provider-env forcing).
+  local vp = core.spawnSpec("vscode", "/p", nil, { permissionMode = "plan" })
+  eq("#37-pin: permission mode forces the terminal flavor", vp.flavor, "terminal")
+  check("#37-pin: the mode rides the typed line",
+        vp.postType:find("--permission-mode plan", 1, true) ~= nil)
+  local va = core.spawnSpec("vscode", "/p", nil, { agentName = "rev" })
+  eq("#37-pin: agent-profile flag forces the terminal flavor", va.flavor, "terminal")
+  check("#37-pin: --agent rides the typed line",
+        va.postType:find("--agent rev", 1, true) ~= nil)
+  local vpersona = core.spawnSpec("vscode", "/p", nil, { appendSystemPrompt = "be terse" })
+  eq("#37-pin: persona forces the terminal flavor", vpersona.flavor, "terminal")
+  check("#37-pin: persona rides the typed line (quoted)",
+        vpersona.postType:find("'be terse'", 1, true) ~= nil)
+  -- --remote-control alone must NOT force it (defaults on; forcing would retire
+  -- the extension flavor entirely), and a flag-free spawn stays the extension.
+  eq("#37-pin: remote-control alone keeps the extension flavor",
+     core.spawnSpec("vscode", "/p", nil, { remoteControl = true }).flavor, "extension")
+  eq("#37-pin: flag-free spawn still defaults to the extension flavor",
+     core.spawnSpec("vscode", "/p", "do it", {}).flavor, "extension")
 
   local t = core.spawnSpec("terminal", "/p", "hi", { terminal = "Terminal" })
   eq("spawnspec(terminal): kind", t.kind, "terminal")
@@ -2457,6 +2494,18 @@ do
   check("narrateEvent: decision shows provenance",
     core.narrateEvent({ type = "decision", outcome = "deny", tool = "Bash", summary = "x",
                         by = "autoDeny", pattern = "Bash(rm*)" }):find("autoDeny", 1, true) ~= nil)
+  -- glyph-fix: a `fallback` decision (gate timed out / deferred to native) is NOT an
+  -- allow -- it must render with ⚠, not the allow ✅ (which read as "gate approved it").
+  do
+    local fb = core.narrateEvent({ type = "decision", outcome = "fallback", tool = "Bash",
+                                   summary = "make deploy", by = "timeout-fallback" })
+    check("narrateEvent: fallback decision uses ⚠, not ✅",
+          fb:find("⚠", 1, true) ~= nil and fb:find("✅", 1, true) == nil)
+    check("narrateEvent: deny still ⛔",
+          core.narrateEvent({ type = "decision", outcome = "deny", tool = "Bash" }):find("⛔", 1, true) ~= nil)
+    check("narrateEvent: allow still ✅",
+          core.narrateEvent({ type = "decision", outcome = "allow", tool = "Bash", by = "human" }):find("✅", 1, true) ~= nil)
+  end
   check("renderNarrative: contains a prompt line",
     core.renderNarrative(evs):find("fix bug", 1, true) ~= nil)
   check("renderNarrative: empty -> placeholder",
@@ -3002,6 +3051,29 @@ do
   eq("groups: nil map -> all ungrouped", list[1].group, nil)
 end
 
+-- ---- #35-pin: per-TILE group entries can split one project queue -------------
+-- Queue membership (queueKey) and the group axis were BOTH projectKey-keyed, so
+-- every member of a queue necessarily shared one group and '@role:' routing could
+-- never discriminate them (match-all or match-none). A session-key entry now wins
+-- over the projectKey cohort in applyGroups, so one member of a folder can carry
+-- its own role while its siblings keep the cohort tag.
+do
+  local list = {
+    { key = "s1", name = "a", projectKey = "proj-x" },
+    { key = "s2", name = "b", projectKey = "proj-x" },   -- same folder, same queue
+  }
+  core.applyGroups(list, { ["proj-x"] = "builders", ["s2"] = "reviewer" })
+  eq("#35-pin: untagged member keeps the project cohort", list[1].group, "builders")
+  eq("#35-pin: per-tile entry wins over the projectKey cohort", list[2].group, "reviewer")
+  -- memberRole (the @role: axis) now differs WITHIN one project queue
+  check("#35-pin: @role: axis discriminates queue members",
+        core.memberRole(list[1]) == "builders" and core.memberRole(list[2]) == "reviewer")
+  -- a per-tile entry alone (no cohort) resolves too, and setGroup can write it
+  local solo = { { key = "s3", name = "c", projectKey = "proj-y" } }
+  core.applyGroups(solo, core.setGroup({}, "s3", "docs"))
+  eq("#35-pin: tile-keyed setGroup entry resolves for that session", solo[1].group, "docs")
+end
+
 -- ---- selectActionable: which keys a bulk action targets --------------------
 do
   local list = {
@@ -3305,6 +3377,24 @@ do
     core.narrateEvent({ type = "queue_starved" }):find("• queue_starved", 1, true) == nil)
 end
 
+-- ---- #18-pin: usage_limit is a notification type -----------------------------
+-- The plan-limit guard fires an OS banner + a usage_limit ledger event, but the
+-- alert-type set was never extended, so the 🔔 history and the unseen badge
+-- silently dropped every plan-limit warning ("exactly the set of things that
+-- happened without you" -- which a passive usage-limit alert is).
+do
+  local evs = {
+    { ts = 90, type = "usage_limit", window = "weekly", percent = 93 },
+    { ts = 80, type = "escalation",  session_id = "s1" },
+  }
+  local n = core.notificationEvents(evs, {})
+  eq("#18-pin: usage_limit events reach the notification history", #n, 2)
+  eq("#18-pin: usage_limit kept newest-first", n[1].type, "usage_limit")
+  eq("#18-pin: NOTIFY_TYPES carries usage_limit", core.NOTIFY_TYPES.usage_limit, true)
+  eq("#18-pin: an unseen usage_limit counts toward the badge",
+     core.unseenNotificationCount(n, 85), 1)
+end
+
 -- ---- SSH status bridge (roadmap #7): pure layer -----------------------------
 do
   -- sshDest: the one dest formatter
@@ -3516,7 +3606,13 @@ do
   eq("route-free: working -> false", core.sessionFree(sess("a", "working"), {}), false)
   eq("route-free: approval -> false", core.sessionFree(sess("a", "approval"), {}), false)
   eq("route-free: error -> false", core.sessionFree(sess("a", "error"), {}), false)
-  eq("route-free: stale -> false", core.sessionFree(sess("a", "done", { stale = true }), {}), false)
+  -- #36: display-staleness no longer disqualifies -- hook-written status files go
+  -- stale ~90s after Stop (the NORMAL between-turns state; see staleDuplicateKeys'
+  -- header), so the old `stale -> false` pin made a whole project permanently
+  -- unroutable minutes after its sessions finished. A genuinely DEAD done tile is
+  -- caught by the delivery gate (feedTask finds no window -> task kept queued).
+  eq("route-free: stale done stays routable (#36)",
+     core.sessionFree(sess("a", "done", { stale = true }), {}), true)
   eq("route-free: remote -> false", core.sessionFree(sess("a", "done", { remote = { host = "h" } }), {}), false)
   eq("route-free: draining -> false", core.sessionFree(sess("a", "done"), { draining = true }), false)
   eq("route-free: fresh pending -> false",
@@ -3640,9 +3736,19 @@ do
   eq("barrier-met: one done -> any true", core.routeBarrierMet(oneWorking, "any"), true)
   eq("barrier-met: none done -> any false", core.routeBarrierMet({ sess("a", "working") }, "any"), false)
   eq("barrier-met: empty -> false", core.routeBarrierMet({}, "all"), false)
-  eq("barrier-met: stale excluded", core.routeBarrierMet({ sess("a", "done", { stale = true }) }, "all"), false)
-  -- R2-18: a stale/remote sibling is EXCLUDED from the requirement, not a permanent
-  -- blocker -- it can never become `settled`, so counting it would make @all forever-unmet.
+  -- #36: a stale DONE member is the normal between-turns state (hook-written status
+  -- files go stale ~90s after Stop), NOT a corpse -- it is settled and routable
+  -- (sessionFree no longer rejects stale), so it counts on both sides. The old
+  -- exclusion made "@all:" forever-unsatisfiable (total==0 -> false) for a project
+  -- whose members all finished >90s ago.
+  eq("barrier-met: stale done counts as settled (#36)",
+     core.routeBarrierMet({ sess("a", "done", { stale = true }) }, "all"), true)
+  eq("#36-pin: @any: satisfiable by a long-done (display-stale) member",
+     core.routeBarrierMet({ sess("a", "done", { stale = true }),
+                            sess("b", "working") }, "any"), true)
+  -- R2-18: a stale MID-TURN (working/approval -- died or froze mid-turn, can never
+  -- settle) or remote sibling is EXCLUDED from the requirement, not a permanent
+  -- blocker -- counting it would make @all forever-unmet.
   eq("barrier-met: stale sibling excluded -> all true",
      core.routeBarrierMet({ sess("a", "done"), sess("b", "working", { stale = true }) }, "all"), true)
   eq("barrier-met: remote sibling excluded -> all true",
@@ -3787,6 +3893,49 @@ do
   eq("fsearch: dead hit kind", hits[3].kind, "transcript")
   eq("fsearch: dead hit sessionId", hits[3].sessionId, "sid-999")
   eq("fsearch: dead hit has no tile key", hits[3].key, nil)
+end
+
+-- ---- #20-pin: subagent transcript hits resolve to the PARENT session ---------
+-- The recursive search reaches /projects/<ENC>/<sid>/subagents/agent-<id>.jsonl;
+-- the old basename extraction yielded sessionId "agent-<id>" (which the ledger
+-- keys nothing by) and a nil projectKey (two path segments follow <ENC>), so the
+-- hit row rendered who="?" and its audit overlay opened empty.
+do
+  local hits = {
+    { file = "/h/.claude/projects/-Users-a-proj/sid-123/subagents/agent-aad450.jsonl", line = 1, text = "s" },
+    { file = "/h/.claude/projects/-Users-a-dead/sid-999/subagents/agent-ffff.jsonl", line = 2, text = "d" },
+  }
+  local items = { { key = "k1", name = "proj", label = "my proj",
+                    transcript_path = "/h/.claude/projects/-Users-a-proj/sid-123.jsonl" } }
+  core.annotateSearchHits(hits, items, "/h/.claude/cc-ledger")
+  eq("#20-pin: subagent hit sessionId is the parent session", hits[1].sessionId, "sid-123")
+  eq("#20-pin: subagent hit projectKey resolves", hits[1].projectKey, "-Users-a-proj")
+  eq("#20-pin: subagent hit maps to the parent's live tile", hits[1].key, "k1")
+  eq("#20-pin: subagent hit takes the tile label", hits[1].name, "my proj")
+  eq("#20-pin: dead parent still yields the parent sessionId", hits[2].sessionId, "sid-999")
+  eq("#20-pin: dead parent projectKey resolves", hits[2].projectKey, "-Users-a-dead")
+  eq("#20-pin: dead parent has no tile key", hits[2].key, nil)
+end
+
+-- ---- #24-pin: maxPerFile caps HITS per file, not matching lines --------------
+-- rg --max-count / grep -m limit matching LINES, but -o fans one dense line out
+-- to a row per match -- transcript JSONL events are giant single lines, so one
+-- file could flood the whole `limit` before any other file's rows were reached.
+-- parseSearchResults enforces the real per-FILE cap.
+do
+  local fan = ("/a/dense.jsonl:1:hit\n"):rep(5) .. "/b/other.jsonl:2:hit\n"
+  local r = core.parseSearchResults(fan)
+  eq("#24-pin: default per-file cap 3 (5 fan-out rows -> 3)", #r.hits, 4)
+  eq("#24-pin: the other file's row still gets through", r.hits[4].file, "/b/other.jsonl")
+  eq("#24-pin: per-file overflow is not `truncated` (no limit hit)", r.truncated, false)
+  local r1 = core.parseSearchResults(fan, { maxPerFile = 1 })
+  eq("#24-pin: opts.maxPerFile honored", #r1.hits, 2)
+  eq("#24-pin: first hit per file wins", r1.hits[1].file, "/a/dense.jsonl")
+  -- the global limit check stays FIRST (pinned semantics: truncated flips when
+  -- limit is reached even while a file is being per-file capped)
+  local r2 = core.parseSearchResults(fan, { limit = 3 })
+  eq("#24-pin: limit still caps and flags truncated", #r2.hits, 3)
+  eq("#24-pin: truncated flag preserved", r2.truncated, true)
 end
 
 -- ---- shouldAutoRespawn: fire once on the unexpected-death edge --------------
@@ -3970,6 +4119,41 @@ do
   eq("step: capped edge does NOT over-charge the budget", a7["pf"], 2)
 end
 
+-- ---- liveBudgetKeys: the respawn-gap hold must survive across ticks (#4 fix) -----
+-- The original #4 patch was WRONG (caught by the loop-2 fix-validation): it wiped
+-- the hold whenever a tile reported the key, but the just-removed dead tile lingers
+-- one tick in the caller's list, so the hold died the same tick it was set and the
+-- retry budget was reaped during the relaunch gap -> maxRetries never bound. The
+-- fix moves the decision here and expires holds by DEADLINE only. This test walks
+-- the exact multi-tick timeline the bug needs.
+do
+  local deadTile = { session_id = "s1", cwd = "/p", kitty_listen_on = "unix:/s", kitty_window_id = "1" }
+  local bk = core.budgetKey(deadTile)
+  local holds = {}
+  -- Tick T: spawn site charged attempts[bk] and set the hold (deadline in the future).
+  holds[bk] = 1000 + 30
+  -- Reap at T: the just-removed dead tile still lingers in `list` this tick.
+  local liveT = core.liveBudgetKeys({ deadTile }, holds, 1000)
+  check("liveBudgetKeys T: key is live during the same tick", liveT[bk] == true)
+  check("liveBudgetKeys T: lingering dead tile does NOT wipe the hold", holds[bk] == 1030)
+  -- Tick T+1: dead tile's files gone, successor not landed -> NO tile reports bk.
+  -- Only the hold keeps it live; a counter backed solely by the hold must survive.
+  local attempts = { [bk] = 1 }
+  local liveT1 = core.liveBudgetKeys({}, holds, 1001)
+  check("liveBudgetKeys T+1: hold carries the key across the gap", liveT1[bk] == true)
+  core.reapUnbacked(attempts, liveT1)
+  check("liveBudgetKeys T+1: charged retry survives the gap (maxRetries can bind)", attempts[bk] == 1)
+  -- Deadline passes with no successor: expire the hold and reap the now-unbacked counter.
+  local liveExp = core.liveBudgetKeys({}, holds, 2000)
+  check("liveBudgetKeys: expired hold is cleared in place", holds[bk] == nil)
+  check("liveBudgetKeys: expired hold no longer keeps the key live", liveExp[bk] == nil)
+  core.reapUnbacked(attempts, liveExp)
+  check("liveBudgetKeys: unbacked counter reaped once the hold expires", attempts[bk] == nil)
+  -- A landed successor (its fresh tile carries the lineage bk) keeps the budget live.
+  local succ = { session_id = "s2", budget_lineage = bk }
+  check("liveBudgetKeys: landed successor (lineage) backs the key", core.liveBudgetKeys({ succ }, {}, 3000)[bk] == true)
+end
+
 -- ---- shouldAutoContinue: time-gated, capped resume of a frozen API error ----
 do
   local function with(o)
@@ -4121,6 +4305,34 @@ do
   core.stepAutoRespawn(aw, deadW("w1b", "s1b", "1"), { enabled = true, maxRetries = 2, wasStale = false,
     now = 1000, staleSeconds = 90, respawnStaleSeconds = 600, canRespawn = true })
   eq("R2-21: respawn reusing the window keeps counting toward the cap", aw["pf@unix:/s#1"], 2)
+
+  -- #19-pin: a kitty respawn does NOT reuse the window (fresh {kitty_pid} socket +
+  -- window id), so the successor's per-window key never equalled the charged one
+  -- and maxRetries could never bind. The spawner threads the predecessor's budget
+  -- key through CC_SHEPHERD_LINEAGE -> cc-status.sh budget_lineage, and budgetKey
+  -- PREFERS it, carrying the count across kitty generations.
+  eq("#19-pin: budget_lineage wins over the fresh per-window key",
+     core.budgetKey({ projectKey = "pf", budget_lineage = "pf@unix:/old#3",
+                      kitty_listen_on = "unix:/new", kitty_window_id = "1" }), "pf@unix:/old#3")
+  eq("#19-pin: empty lineage falls back to the R2-21 keying",
+     core.budgetKey({ projectKey = "pf", budget_lineage = "",
+                      kitty_listen_on = "unix:/s", kitty_window_id = "1" }), "pf@unix:/s#1")
+  eq("#19-pin: non-string lineage ignored",
+     core.budgetKey({ projectKey = "pf", budget_lineage = true }), "pf")
+  -- end-to-end: gen-2 (new socket/wid, lineage = gen-1's key) continues the SAME
+  -- budget entry, so the cap binds across generations instead of restarting at 0
+  local gen2 = { key = "w1c", projectKey = "pf", status = "working", stale = true,
+                 updated = 300, session_id = "s1c", budget_lineage = "pf@unix:/s#1",
+                 kitty_listen_on = "unix:/gen2", kitty_window_id = "1" }
+  local s2 = core.stepAutoRespawn(aw, gen2, { enabled = true, maxRetries = 5, wasStale = false,
+    now = 1000, staleSeconds = 90, respawnStaleSeconds = 600, canRespawn = true })
+  eq("#19-pin: lineage-carrying successor fires against the inherited budget", s2.spawn, true)
+  eq("#19-pin: the charge lands on the inherited key (2 -> 3)", aw["pf@unix:/s#1"], 3)
+  eq("#19-pin: no fresh per-window budget entry is minted", aw["pf@unix:/gen2#1"], nil)
+  local s3 = core.stepAutoRespawn(aw, gen2, { enabled = true, maxRetries = 3, wasStale = false,
+    now = 1000, staleSeconds = 90, respawnStaleSeconds = 600, canRespawn = true })
+  eq("#19-pin: maxRetries binds across generations (capped -> no fire)", s3.spawn, false)
+  eq("#19-pin: capped generation leaves the budget uncharged", aw["pf@unix:/s#1"], 3)
 end
 
 -- ---- bucketEvents: time-series sparkline buckets ---------------------------
@@ -5805,6 +6017,46 @@ do
   end
   eq("limitAlerts: non-table payload -> empty", #core.usageLimitAlerts("x", {}), 0)
   eq("limitAlerts: non-table memo -> empty (no throw)", #core.usageLimitAlerts(officialAt(99, 99, 99), nil), 0)
+
+  -- #1-pin: the memo is a SET of warned windows per key, not a single last-value
+  -- slot. A payload that alternates two representations of one window (resets_at
+  -- present <-> absent -- the changelog notes the legacy flat fields are "usually
+  -- null", i.e. unstable) used to flip the slot every 180s poll and re-fire
+  -- forever (4 alerts in 4 polls). Now: at most one alert per distinct window
+  -- string, then silence on every alternation.
+  do
+    local fired = {}
+    local withReset = { five_hour = { utilization = 95, resets_at = "R1" } }
+    local noReset   = { five_hour = { utilization = 95 } }  -- resets_at omitted
+    local total = #core.usageLimitAlerts(withReset, fired)       -- R1 window: fires
+    total = total + #core.usageLimitAlerts(noReset, fired)       -- "no-reset": fires once
+    total = total + #core.usageLimitAlerts(withReset, fired)     -- R1 again: silent
+    total = total + #core.usageLimitAlerts(noReset, fired)       -- nil again: silent
+    total = total + #core.usageLimitAlerts(withReset, fired)     -- still silent
+    eq("#1-pin: A<->nil resets_at jitter is bounded at 2 alerts, then silent", total, 2)
+    -- a genuinely NEW window still re-arms exactly once
+    eq("#1-pin: a real window roll still re-fires once",
+       #core.usageLimitAlerts({ five_hour = { utilization = 95, resets_at = "R2" } }, fired), 1)
+  end
+  -- #1-pin: rows are de-duped by key within one call. Two weekly-scoped limits[]
+  -- entries sharing a display_name (two metered versions both named "Sonnet")
+  -- used to BOTH fire on every poll (the second consider() overwrote the memo
+  -- the first had just written): 2 alerts/poll, forever.
+  do
+    local fired = {}
+    local twoSonnets = { limits = {
+      { kind = "weekly_scoped", group = "weekly", percent = 95, is_active = true,
+        resets_at = "RA", scope = { model = { display_name = "Sonnet" } } },
+      { kind = "weekly_scoped", group = "weekly", percent = 96, is_active = true,
+        resets_at = "RB", scope = { model = { display_name = "Sonnet" } } },
+    } }
+    eq("#1-pin: duplicate display_name rows fire ONCE (first eligible wins)",
+       #core.usageLimitAlerts(twoSonnets, fired), 1)
+    eq("#1-pin: the duplicate pair stays silent on the next poll",
+       #core.usageLimitAlerts(twoSonnets, fired), 0)
+    eq("#1-pin: ...and the poll after that (no ping-pong storm)",
+       #core.usageLimitAlerts(twoSonnets, fired), 0)
+  end
 
   -- newestAutoApprove: newest automated allow ts; ignores human + denies + other sids
   local evs = {

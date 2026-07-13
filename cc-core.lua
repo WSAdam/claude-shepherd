@@ -24,13 +24,17 @@ M.KEY_DENY    = { mods = {}, key = "escape" } -- cancel the prompt
 M.KEY_STOP    = { mods = {}, key = "escape" } -- interrupt the turn
 
 -- Stream Deck key colors/labels by status (used by the bootstrap's renderer).
+-- `error` (frozen on an API error -- dead until Continue) is a needs-attention
+-- state (RANK.error sorts it right after approvals) and must be visually
+-- distinct from idle: magenta, matching the panel's .s-error (--st-error #ec4899).
 M.SD_COLORS = {
   idle     = { red = 0.42, green = 0.45, blue = 0.50 },
   working  = { red = 0.96, green = 0.71, blue = 0.04 },
   done     = { red = 0.13, green = 0.77, blue = 0.37 },
   approval = { red = 0.94, green = 0.27, blue = 0.27 },
+  error    = { red = 0.93, green = 0.28, blue = 0.60 },
 }
-M.SD_LABELS = { idle = "idle", working = "working", done = "ready", approval = "NEEDS YOU" }
+M.SD_LABELS = { idle = "idle", working = "working", done = "ready", approval = "NEEDS YOU", error = "ERROR" }
 
 -- Read a config value from a decoded settings table by dotted path, returning
 -- `default` if any segment is missing. A stored `false` is preserved (returns
@@ -572,13 +576,21 @@ end
 -- STABLE projectKey (launch folder, immune to cd drift) so it sticks across
 -- close/reopen and a brand-new session in the same folder inherits it. Persistence
 -- (cc-groups.json) + group-scoped bulk actions live in the dashboard; pure bits here.
+-- #35: a projectKey-keyed group is shared by EVERY session in the folder -- but the
+-- @role: router (memberRole) needs to discriminate members of one project queue
+-- (queueKey == projectKey), so a per-TILE entry (keyed by the session's tile key)
+-- takes precedence over the project cohort. Tile keys (sanitized session ids /
+-- folder basenames) and projectKeys (encoded transcript dirs / cwd paths) live in
+-- disjoint namespaces, so one map holds both without collisions.
 
--- Tag each session with its group (in place), keyed by projectKey; a legacy cwd-keyed
--- entry resolves ONLY when the session has no projectKey (mirrors applyLabelsByCwd).
+-- Tag each session with its group (in place): a per-tile entry (session key) wins,
+-- then the projectKey cohort; a legacy cwd-keyed entry resolves ONLY when the
+-- session has no projectKey (mirrors applyLabelsByCwd).
 function M.applyGroups(list, groupsByKey)
   groupsByKey = groupsByKey or {}
   for _, it in ipairs(list or {}) do
-    it.group = (it.projectKey and groupsByKey[it.projectKey])
+    it.group = (it.key and groupsByKey[it.key])  -- #35: per-tile role override
+            or (it.projectKey and groupsByKey[it.projectKey])
             or (not it.projectKey and it.cwd and groupsByKey[it.cwd])  -- legacy cwd-keyed (ONLY when no projectKey)
             or nil
   end
@@ -647,14 +659,24 @@ function M.selectActionable(list, action, opts)
 end
 
 -- Does dispatching `action` on this session skip window focus entirely? kitty
--- routes through `kitty @` (headless) and an armed-gate approve/deny is a
--- decision-file write. Everything ELSE focuses a window and injects keystrokes
--- on timers, so the bulk dispatcher must stagger those: N synchronous dispatches
--- would all fire after the LAST focus and land every key in one window.
+-- routes through `kitty @` (focus-neutral send-key/send-text) and an armed-gate
+-- approve/deny is a decision-file write. Everything ELSE focuses a window and
+-- injects keystrokes on timers, so the bulk dispatcher must stagger those: N
+-- synchronous dispatches would all fire after the LAST focus and land every key
+-- in one window. EXCEPTION inside kitty: "focus" runs `kitty @ focus-window`,
+-- which RAISES the kitty OS window -- fired un-staggered it would hijack an
+-- in-flight chain's pending Cmd+V/Return beats into the kitty session, exactly
+-- the hazard the shared tail exists to prevent. Same for the "answer" fallback
+-- when key synthesis can't drive the picker (multi-select / multi-question:
+-- handleAction jumps via fx.focusWindow instead of sending keys).
 function M.actionIsHeadless(item, action)
   if not item then return false end
   if item.remote then return true end  -- bridge tiles never focus a local window
-  if item.editor == "kitty" then return true end
+  if item.editor == "kitty" then
+    if action == "focus" then return false end
+    if action == "answer" and (M.askIsMulti(item) or M.askIsMultiQuestion(item)) then return false end
+    return true
+  end
   return (action == "approve" or action == "deny") and item.gate == "waiting"
 end
 
@@ -1041,7 +1063,12 @@ function M.narrateEvent(e)
   if type(e) ~= "table" then return "" end
   local t = e.type
   if t == "decision" then
-    local emoji = (e.outcome == "deny") and "⛔" or "✅"
+    -- A `fallback` is neither an allow nor a deny: the gate timed out / had no rule
+    -- and HANDED OFF to Claude Code's native prompt. Give it a distinct glyph -- the
+    -- allow ✅ read as "the gate approved it", which it did NOT. ⚠ matches the audit
+    -- Rows view (dec-fallback). deny -> ⛔, fallback -> ⚠, allow (else) -> ✅.
+    local emoji = (e.outcome == "deny") and "⛔"
+      or (e.outcome == "fallback") and "⚠" or "✅"
     local by = e.by and (" (" .. tostring(e.by)
       .. (e.pattern and (": " .. tostring(e.pattern)) or "") .. ")") or ""
     return emoji .. " " .. tostring(e.outcome or "?") .. " " .. tostring(e.tool or "")
@@ -1170,11 +1197,13 @@ function M.gateDecisionSummary(events, sessionId, opts)
 end
 
 -- Which ledger events count as "a notification fired" (🔔 history): the alert
--- types the panel raises on its own (escalation / hung / auto_respawn) plus any
--- gate decision NOT made by a human (autoAllow/autoDeny/autopilot/approveRepeats/
--- timeout-*) -- exactly the set of things that happened without you. opts =
--- { sinceTs, limit (default 200) }. Newest-first (filterLedger order).
-M.NOTIFY_TYPES = { escalation = true, hung = true, auto_respawn = true, auto_continue = true }
+-- types the panel raises on its own (escalation / hung / auto_respawn /
+-- auto_continue / usage_limit) plus any gate decision NOT made by a human
+-- (autoAllow/autoDeny/autopilot/approveRepeats/timeout-*) -- exactly the set of
+-- things that happened without you. opts = { sinceTs, limit (default 200) }.
+-- Newest-first (filterLedger order).
+M.NOTIFY_TYPES = { escalation = true, hung = true, auto_respawn = true, auto_continue = true,
+                   usage_limit = true }
 function M.notificationEvents(events, opts)
   opts = opts or {}
   local out = {}
@@ -1223,6 +1252,9 @@ function M.searchArgv(kind, query, paths, opts)
   local q = tostring(query or ""):gsub("^%s+", ""):gsub("%s+$", "")
   if #q < M.SEARCH_MIN_QUERY then return nil end
   local ctx = tostring(tonumber(opts.ctx) or M.SEARCH_CTX)
+  -- NB: --max-count/-m limit matching LINES, not hits -- with -o a single dense
+  -- line still fans out to one row per match. parseSearchResults enforces the
+  -- true per-file hit cap (#24); these flags just bound the engine's work.
   local maxPerFile = tostring(tonumber(opts.maxPerFile) or 3)
   local wrapped = ".{0," .. ctx .. "}" .. M.escapeSearchPattern(q) .. ".{0," .. ctx .. "}"
   local argv
@@ -1271,22 +1303,34 @@ end
 -- Parse `file:line:matchtext` output lines -> { hits = {{file,line,text}},
 -- truncated }. Splits on the FIRST two colons only (the match text may contain
 -- colons); malformed lines are skipped. opts = { limit (default 200), maxLen
--- (default 200, display backstop) }.
+-- (default 200, display backstop), maxPerFile (default 3, matching searchArgv) }.
 function M.parseSearchResults(output, opts)
   opts = opts or {}
   local limit = tonumber(opts.limit) or 200
   local maxLen = tonumber(opts.maxLen) or 200
+  -- #24: --max-count/-m cap matching LINES per file, but -o then emits EVERY
+  -- non-overlapping match on a line as its own `file:line:text` row -- and
+  -- transcript JSONL events are giant single lines, so one dense file could
+  -- flood `limit` before any other file's rows were reached. Enforce the
+  -- intended per-FILE hit cap here (the flags stay as a cheap engine-side
+  -- pre-filter; this is the real cap).
+  local perFile = tonumber(opts.maxPerFile) or 3
+  local fileHits = {}
   local hits, truncated = {}, false
   for line in (tostring(output or "") .. "\n"):gmatch("(.-)\n") do
     local file, ln, text = line:match("^(/[^:]+):(%d+):(.*)$")
     if file then
       if #hits >= limit then truncated = true; break end
-      -- Two byte-boundary hazards, one repair: the engine's context wrap can
-      -- split a multibyte char at either edge (C-locale grep counts bytes), and
-      -- the maxLen backstop is itself a byte slice. Trim to whole characters.
-      text = trimUtf8Edges(text)
-      if #text > maxLen then text = trimUtf8Edges(text:sub(1, maxLen)) .. "…" end
-      hits[#hits + 1] = { file = file, line = tonumber(ln), text = text }
+      local nf = (fileHits[file] or 0) + 1
+      fileHits[file] = nf
+      if nf <= perFile then
+        -- Two byte-boundary hazards, one repair: the engine's context wrap can
+        -- split a multibyte char at either edge (C-locale grep counts bytes), and
+        -- the maxLen backstop is itself a byte slice. Trim to whole characters.
+        text = trimUtf8Edges(text)
+        if #text > maxLen then text = trimUtf8Edges(text:sub(1, maxLen)) .. "…" end
+        hits[#hits + 1] = { file = file, line = tonumber(ln), text = text }
+      end
     end
   end
   return { hits = hits, truncated = truncated }
@@ -1294,9 +1338,10 @@ end
 
 -- Tag each hit with provenance + map it back to a session. items = the parsed
 -- live status list. Adds per hit: kind ("transcript"|"ledger"), sessionId (the
--- transcript basename sans .jsonl), projectKey (the /projects/<ENC>/ segment --
--- same match as M.projectKey), and key/name when the file IS a live session's
--- transcript. Ledger hits only get kind = "ledger".
+-- transcript basename sans .jsonl; a nested subagent transcript resolves to its
+-- PARENT session), projectKey (the /projects/<ENC>/ segment -- same match as
+-- M.projectKey), and key/name when the file IS a live session's transcript.
+-- Ledger hits only get kind = "ledger".
 function M.annotateSearchHits(hits, items, ledgerDir)
   local byTranscript = {}
   for _, it in ipairs(items or {}) do
@@ -1309,9 +1354,18 @@ function M.annotateSearchHits(hits, items, ledgerDir)
       h.kind = "ledger"
     else
       h.kind = "transcript"
-      h.projectKey = f:match("/projects/([^/]+)/[^/]+%.jsonl$")
-      h.sessionId = f:match("/([^/]+)%.jsonl$")
-      local live = byTranscript[f]
+      -- #20: subagent transcripts live one level down (/projects/<ENC>/<sid>/
+      -- subagents/agent-<id>.jsonl), which the recursive search reaches. Fold
+      -- the path to the PARENT transcript (<...>/<sid>.jsonl) before extracting,
+      -- so projectKey / sessionId / the live-tile mapping all resolve to the
+      -- session the ledger + tiles key by -- the raw basename ("agent-<id>")
+      -- matches no projectKey, zero ledger events and no tile, so the hit row
+      -- rendered who="?" and its audit overlay opened empty.
+      local parent = f:match("^(.*)/subagents/[^/]+%.jsonl$")
+      local pf = parent and (parent .. ".jsonl") or f
+      h.projectKey = pf:match("/projects/([^/]+)/[^/]+%.jsonl$")
+      h.sessionId = pf:match("/([^/]+)%.jsonl$")
+      local live = byTranscript[pf]
       if live then h.key = live.key; h.name = live.label or live.name end
     end
   end
@@ -3260,13 +3314,20 @@ M.ROUTE_PENDING_TIMEOUT = 45
 -- Is this session eligible to receive routed work? v1 is deliberately
 -- done-only: an `idle` session may be one the operator is actively typing
 -- into, and a routed paste would land in their prompt (idle-inclusion is a
--- flagged follow-up). Excludes stale/error/remote/draining sessions and ones
--- with a FRESH pending routed feed (an expired marker no longer blocks).
+-- flagged follow-up). Excludes error/remote/draining sessions and ones with
+-- a FRESH pending routed feed (an expired marker no longer blocks).
+-- #36: display-staleness does NOT disqualify. Status files are hook-written,
+-- so a session parked at its prompt goes stale ~90s after Stop -- the NORMAL
+-- between-turns state (see staleDuplicateKeys' header), and exactly the
+-- "already done when the task was queued" member 4c-E exists to reach; the
+-- old `item.stale` rejection made a whole project permanently unroutable
+-- minutes after its sessions finished. A genuinely DEAD done tile is caught
+-- by the delivery gate instead (feedTask finds no window -> task kept
+-- queued) and eventually by prune -- death is window evidence, not age.
 function M.sessionFree(item, opts)
   opts = opts or {}
   if type(item) ~= "table" then return false end
   if item.status ~= "done" then return false end
-  if item.stale then return false end
   if item.remote then return false end
   if opts.draining then return false end
   if opts.pending ~= nil then
@@ -3281,11 +3342,12 @@ end
 -- until the current one finishes.) True if any member is mid-turn (working/approval)
 -- or carries a FRESH pending routed-feed marker. opts = { pending = map key->ts,
 -- now, pendingTimeout }.
--- R2-19: a STALE (dead/frozen) member must NOT count as in-flight -- a session that
+-- R2-19: a STALE mid-turn member must NOT count as in-flight -- a session that
 -- died/froze mid-turn keeps status=='working' and would otherwise hold a sequential
 -- queue forever behind a corpse, with no starvation alert (queueStarved suppresses
--- on the sequential-busy branch). Mirrors the `not it.stale` discipline in
--- sessionFree/routeBarrierMet (the PICK side already excludes stale).
+-- on the sequential-busy branch). NB (#36): stale here can only mean a mid-turn
+-- corpse -- the busy statuses are working/approval, and a stale DONE member is the
+-- normal between-turns state (routable via sessionFree, never busy anyway).
 function M.projectBusy(members, opts)
   opts = opts or {}
   local pending = opts.pending or {}
@@ -3319,9 +3381,12 @@ function M.taskRoute(task)
   return nil, task
 end
 
--- A member's role axis for @role: matching: its session GROUP (the shipped per-tile
--- cohort tag), lowercased. nil/blank -> nil. An UNLABELED task matches any member;
--- a LABELED task matches only members whose group equals the role.
+-- A member's role axis for @role: matching: its session GROUP, lowercased.
+-- nil/blank -> nil. An UNLABELED task matches any member; a LABELED task matches
+-- only members whose group equals the role. #35: queue membership is keyed by
+-- projectKey, so a projectKey-keyed group can never split one queue's members --
+-- discrimination requires the per-TILE group entries applyGroups now resolves
+-- first (set-group must be able to write them; see the dashboard bridge).
 function M.memberRole(item)
   local g = item and item.group
   if type(g) == "string" then
@@ -3354,16 +3419,21 @@ end
 -- Is a join barrier satisfied? "all" = every DRIVABLE member settled (done);
 -- "any" = at least one settled. Flat AND/OR over done-state -- no nested tree.
 -- nil/unknown mode -> true (not a barrier). Empty (or all-non-drivable) -> false.
--- R2-18: stale/remote members are EXCLUDED from the requirement, not permanent
--- blockers. They can never become `settled` (the PICK side, sessionFree, excludes
--- them), so counting them in `total` made "all" forever-unsatisfiable whenever any
--- sibling was dead/frozen/remote -- a silent permanent stall (routeTask returns nil
--- and queueStarved is suppressed). Matches sessionFree's drivable notion.
+-- R2-18: remote members and stale MID-TURN members (working/approval -- died or
+-- froze mid-turn, so they can never settle; the same corpse notion as
+-- projectBusy's R2-19) are EXCLUDED from the requirement, not permanent
+-- blockers -- counting them in `total` made "all" forever-unsatisfiable, a
+-- silent permanent stall (routeTask returns nil and queueStarved is suppressed).
+-- #36: a stale DONE member is the normal between-turns state, NOT a corpse --
+-- it is settled and routable (sessionFree no longer rejects stale), so it
+-- counts on both sides; excluding it made "@all:" forever-unsatisfiable for a
+-- project whose members all finished >90s ago. Matches sessionFree's drivable notion.
 function M.routeBarrierMet(members, mode)
   if mode ~= "all" and mode ~= "any" then return true end
   local settled, total = 0, 0
   for _, it in ipairs(members or {}) do
-    if type(it) == "table" and not it.stale and not it.remote then
+    if type(it) == "table" and not it.remote
+       and not (it.stale and it.status ~= "done") then
       total = total + 1
       if it.status == "done" then settled = settled + 1 end
     end
@@ -3552,14 +3622,53 @@ end
 -- per-folder sharing only there -- the same safe side staleDuplicateKeys takes).
 -- MUST NOT key by session_id: a respawn deliberately gives a NEW session_id but the
 -- SAME window, and the count must carry across respawns toward the cap.
+-- #19: a kitty respawn does NOT reuse the window -- FX.spawnSession launches a
+-- brand-new kitty instance (fresh {kitty_pid} socket + window id), so the
+-- successor's per-window key would never equal the charged one and maxRetries
+-- could never bind (a crash-looper piles up a frozen window + a fresh spawn per
+-- cycle, forever). The spawner therefore threads the predecessor's budget key
+-- through the relaunch env (CC_SHEPHERD_LINEAGE -> cc-status.sh publishes it as
+-- budget_lineage), and that lineage key WINS here so the count carries across
+-- kitty generations. Absent (any non-respawned session) -> the R2-21 keying below.
 function M.budgetKey(item)
   item = item or {}
+  if type(item.budget_lineage) == "string" and item.budget_lineage ~= "" then
+    return item.budget_lineage
+  end
   local pk = item.projectKey or item.cwd
   local sock, wid = item.kitty_listen_on, item.kitty_window_id
   if pk and sock ~= nil and sock ~= "" and wid ~= nil and wid ~= "" then
     return pk .. "@" .. tostring(sock) .. "#" .. tostring(wid)
   end
   return pk
+end
+
+-- The set of budget keys whose respawn/auto-continue attempt counters must SURVIVE
+-- this reap tick: any key backed by a live tile, PLUS any key still inside its
+-- respawn-gap HOLD window (holds[bk] = deadline epoch). Stale holds (now >= deadline)
+-- are expired in place. `now` = epoch.
+--
+-- The hold is what carries a just-charged retry across the multi-tick relaunch gap:
+-- the dead tile's files are already removed but its successor's SessionStart hasn't
+-- landed, so for a tick or more NO tile reports the key. Crucially the hold is
+-- expired ONLY by its deadline here -- NOT cleared just because some tile reports the
+-- key. The caller's `list` still holds the just-removed dead tile for one tick
+-- (removeStatus only unlinks files), so clearing the hold on "a tile reports bk"
+-- wiped it on the SAME tick the spawn site set it, and at T+1 the budget was reaped
+-- and maxRetries never bound (the #4 respawn-loop bug). Pure but for the hold expiry.
+function M.liveBudgetKeys(tiles, holds, now)
+  local live = {}
+  for _, it in ipairs(tiles or {}) do
+    local bk = M.budgetKey(it)
+    if bk and bk ~= "" then live[bk] = true end
+  end
+  local n = tonumber(now)
+  if type(holds) == "table" then
+    for bk, deadline in pairs(holds) do
+      if n and n < (tonumber(deadline) or 0) then live[bk] = true else holds[bk] = nil end
+    end
+  end
+  return live
 end
 
 function M.stepAutoRespawn(attempts, item, opts)
@@ -4659,7 +4768,19 @@ function M.spawnSpec(editor, project, task, opts)
   -- L1 "spawn from a saved agent": append profile-derived flags (persona, MCP
   -- config, --agent, --add-dir knowledge, --plugin-dir). All optional -> a
   -- non-agent spawn is byte-identical (spawnExtraFlags returns {}).
-  for _, f in ipairs(M.spawnExtraFlags(opts)) do flags[#flags + 1] = f end
+  local extraFlags = M.spawnExtraFlags(opts)
+  for _, f in ipairs(extraFlags) do flags[#flags + 1] = f end
+  -- #37: the VS Code/Cursor "extension" flavor launches ITS OWN claude (the
+  -- ⌘Esc panel), so launch flags can only apply via a typed launch line -- the
+  -- extension spec used to silently discard them ALL (persona, --mcp-config,
+  -- --agent, knowledge/plugin dirs, --permission-mode), leaving an agent-profile
+  -- spawn a vanilla claude while the ledger recorded spawn_agent. A permission
+  -- mode or any agent flag forces the terminal flavor (mirrors the ssh /
+  -- provider-env forcing below). --remote-control alone does NOT force it:
+  -- remoteControl.onSpawn defaults on, so forcing would retire the extension
+  -- flavor entirely -- that flag stays best-effort there, as before.
+  local flagsNeedTerminal = #extraFlags > 0
+    or (opts.permissionMode ~= nil and tostring(opts.permissionMode) ~= "")
   if editor == "kitty" then
     -- A fresh kitty window with remote control on a known socket (default ON), so
     -- click-to-answer / mode-switch (Part A) work without touching global config.
@@ -4714,10 +4835,11 @@ function M.spawnSpec(editor, project, task, opts)
     --     into the focused Claude input.
     --   "terminal": new integrated terminal + typed launch line (embedding the
     --     resolved claude path -- the terminal's PATH often lacks `claude`).
-    --     FORCED for ssh spawns (the extension can't run a remote claude) and
-    --     provider env (ANTHROPIC_* can only ride the typed line).
+    --     FORCED for ssh spawns (the extension can't run a remote claude),
+    --     provider env (ANTHROPIC_* can only ride the typed line), and a
+    --     permission mode / agent-profile flags (#37, same reason).
     local app = (editor == "cursor") and "Cursor" or "Visual Studio Code"
-    if not isSsh and not hasEnv and opts.vscodeFlavor ~= "terminal" then
+    if not isSsh and not hasEnv and not flagsNeedTerminal and opts.vscodeFlavor ~= "terminal" then
       return { kind = "vscode", editor = editor, app = app, project = project,
                flavor = "extension", task = task, coldStart = opts.isNew == true }
     end
@@ -7892,10 +8014,17 @@ end
 -- Plan-limit guard: which usage windows just crossed the warning threshold and
 -- deserve ONE alert for the current window. Checks the session (5h) and weekly
 -- bars plus every per-model weekly row (modelLimitRowsToShow: Fable etc.) and the
--- legacy Sonnet line. `fired` is the caller-held once-per-window memo, keyed by
--- window id -> the resets_at it fired for: a later poll in the SAME window (same
--- resets_at) stays silent, a NEW window (resets_at changed) re-arms -- so a cap
--- you're still riding re-warns exactly once per week/session, never per poll.
+-- legacy Sonnet line. `fired` is the caller-held once-per-window memo: fired[key]
+-- records the LAST window fired (kept as the display/back-compat slot), and a
+-- flat fired[key.."\0"..window] entry records EVERY window already warned for
+-- that key. A later poll in the SAME window stays silent, a NEW window
+-- (resets_at changed) re-arms -- so a cap you're still riding re-warns exactly
+-- once per week/session, never per poll. The suppression checks the SET, not
+-- just the last value: a payload that alternates two representations of one
+-- window (resets_at present <-> absent, legacy <-> scoped surface) would flip a
+-- single last-value slot every poll and re-fire indefinitely. Rows are also
+-- de-duped by key within one call (first eligible wins), so two limits[] rows
+-- sharing a display_name can't each fire and clobber the other's memo.
 -- Mutates `fired` (promoteSummary-style) and returns the alerts to fire NOW as
 -- { key, label, percent, resetsAt }. Pure decision -- the caller owns the
 -- notification/ledger effects. opts.threshold: warn at >= this percent (default 90).
@@ -7903,12 +8032,16 @@ function M.usageLimitAlerts(official, fired, opts)
   if type(official) ~= "table" or type(fired) ~= "table" then return {} end
   local th = tonumber(opts and opts.threshold) or 90
   local out = {}
+  local seen = {}  -- keys already considered THIS call (duplicate-row de-dup)
   local function consider(key, label, pct, resetsAt)
     pct = tonumber(pct)
     if pct == nil or pct < th then return end
+    if seen[key] then return end                  -- duplicate row for this key: first wins
+    seen[key] = true
     local window = tostring(resetsAt or "no-reset")
-    if fired[key] == window then return end       -- already warned for this window
+    if fired[key] == window or fired[key .. "\0" .. window] then return end  -- already warned
     fired[key] = window
+    fired[key .. "\0" .. window] = true
     out[#out + 1] = { key = key, label = label, percent = pct, resetsAt = resetsAt }
   end
   if type(official.five_hour) == "table" then

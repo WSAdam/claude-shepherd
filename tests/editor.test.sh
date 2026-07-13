@@ -90,4 +90,41 @@ run sessionstart '{"session_id":"gk","cwd":"/U/x/proj-gk"}' \
 assert_json "#12: genuine kitty still records the window id" "$F" '.kitty_window_id' "4"
 assert_json "#12: genuine kitty still records the socket"    "$F" '.kitty_listen_on' "unix:/tmp/k2"
 
+# --- #16-pin: effort/model are written from the spawn-time env ONLY when the
+# file doesn't carry one yet. The dashboard's set-effort/set-model persist a live
+# /effort--/model switch into the status file (FX.patchStatus); re-patching from
+# $CLAUDE_EFFORT/ANTHROPIC_MODEL on every hook event stomped that back to the
+# stale spawn-time value one event later (the dropdowns snapped back within ~1s).
+F="$TMP/eff.json"
+run userpromptsubmit '{"session_id":"eff","cwd":"/U/x/proj-e","prompt_text":"go"}' \
+  CLAUDE_CODE_ENTRYPOINT=cli TERM=xterm-256color CLAUDE_EFFORT=high ANTHROPIC_MODEL=model-a
+assert_json "#16-pin: first event captures the spawn-time effort" "$F" '.effort' "high"
+assert_json "#16-pin: first event captures the spawn-time model"  "$F" '.model' "model-a"
+# the dashboard persists a live switch (what FX.patchStatus writes)...
+jq -c '.effort="low" | .model="model-b"' "$F" > "$F.t" && mv "$F.t" "$F"
+# ...and a later hook event (env still the OLD spawn-time values) must keep it
+run pretooluse '{"session_id":"eff","cwd":"/U/x/proj-e","tool_name":"Bash","tool_input":{"command":"ls"}}' \
+  CLAUDE_CODE_ENTRYPOINT=cli TERM=xterm-256color CLAUDE_EFFORT=high ANTHROPIC_MODEL=model-a
+assert_json "#16-pin: a live /effort switch survives later hook events" "$F" '.effort' "low"
+assert_json "#16-pin: a live /model switch survives later hook events"  "$F" '.model' "model-b"
+assert_json "#16-pin: the event itself still merged (status advanced)"  "$F" '.status' "working"
+
+# --- #19-pin: a Shepherd kitty respawn carries its predecessor's retry-budget
+# key in CC_SHEPHERD_LINEAGE; cc-status.sh publishes it as budget_lineage so
+# core.budgetKey keys the successor to the SAME lineage (the relaunch's own
+# socket/window ids are brand new -- without this the respawn cap never binds).
+F="$TMP/lin.json"
+run sessionstart '{"session_id":"lin","cwd":"/U/x/proj-l"}' \
+  CLAUDE_CODE_ENTRYPOINT=cli TERM=xterm-kitty KITTY_WINDOW_ID=5 KITTY_LISTEN_ON=unix:/tmp/k5 \
+  CC_SHEPHERD_LINEAGE='pk@unix:/old#3'
+assert_json "#19-pin: kitty session publishes budget_lineage" "$F" '.budget_lineage' "pk@unix:/old#3"
+# kitty-gated like the handles: a VS Code session cold-started from that kitty
+# window's shell must NOT inherit the lineage (same forged-env threat as #12)
+F="$TMP/linv.json"
+run sessionstart '{"session_id":"linv","cwd":"/U/x/proj-lv"}' \
+  CLAUDE_CODE_ENTRYPOINT=claude-vscode __CFBundleIdentifier=com.microsoft.VSCode \
+  TERM=xterm-kitty KITTY_WINDOW_ID=5 KITTY_LISTEN_ON=unix:/tmp/k5 \
+  CC_SHEPHERD_LINEAGE='pk@unix:/old#3'
+assert_json "#19-pin: non-kitty session records no lineage" "$F" '.budget_lineage // "absent"' "absent"
+
 finish

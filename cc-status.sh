@@ -246,8 +246,17 @@ case "$PERMISSION_MODE" in
   bypassPermissions|auto)
     PATCH="$(printf '%s' "$PATCH" | jq -c --arg v "$PERMISSION_MODE" '.mode_cycle = {($v): true}')" ;;
 esac
-[ -n "$EFFORT" ]     && PATCH="$(printf '%s' "$PATCH" | jq -c --arg v "$EFFORT"     '. + {effort:$v}')"
-[ -n "$MODEL" ]      && PATCH="$(printf '%s' "$PATCH" | jq -c --arg v "$MODEL"      '. + {model:$v}')"
+# #16: effort/model come from the spawn-time env ($CLAUDE_EFFORT / ANTHROPIC_MODEL),
+# which does NOT track a live /effort or /model switch -- but the dashboard's
+# set-effort/set-model DO persist the switched value into this file (FX.patchStatus).
+# Re-patching from env on every hook event stomped that back to the stale spawn-time
+# value one event later (the Effort/Model dropdowns snapped back within ~1s). Write
+# each only when the file doesn't carry one yet (first event of a session, incl. the
+# fresh file a /clear mints): the spawn-time value still lands, a live switch survives.
+[ -n "$EFFORT" ] && [ -z "$(cc_read_field "$KEY" '.effort')" ] \
+  && PATCH="$(printf '%s' "$PATCH" | jq -c --arg v "$EFFORT" '. + {effort:$v}')"
+[ -n "$MODEL" ] && [ -z "$(cc_read_field "$KEY" '.model')" ] \
+  && PATCH="$(printf '%s' "$PATCH" | jq -c --arg v "$MODEL" '. + {model:$v}')"
 [ -n "$BASE_URL" ]   && PATCH="$(printf '%s' "$PATCH" | jq -c --arg v "$BASE_URL"   '. + {base_url:$v}')"
 # Record kitty handles ONLY for sessions the detector classifies as kitty:
 # KITTY_WINDOW_ID/KITTY_LISTEN_ON are ordinary inherited env vars, so a VS Code/
@@ -260,6 +269,13 @@ esac
 if [ "$EDITOR_KIND" = "kitty" ]; then
   [ -n "$KITTY_WID" ]  && PATCH="$(printf '%s' "$PATCH" | jq -c --arg v "$KITTY_WID"  '. + {kitty_window_id:$v}')"
   [ -n "$KITTY_SOCK" ] && PATCH="$(printf '%s' "$PATCH" | jq -c --arg v "$KITTY_SOCK" '. + {kitty_listen_on:$v}')"
+  # #19: a Shepherd kitty RESPAWN carries its predecessor's retry-budget key in
+  # CC_SHEPHERD_LINEAGE (set by FX.spawnSession). Publish it so core.budgetKey
+  # keys the successor's budget to the SAME lineage -- the relaunch's own
+  # socket/window ids are brand new, so without this the respawn cap never binds.
+  # Kitty-gated like the handles above: a VS Code session cold-started from that
+  # kitty window's shell must not inherit the lineage (same forged-env threat).
+  [ -n "${CC_SHEPHERD_LINEAGE:-}" ] && PATCH="$(printf '%s' "$PATCH" | jq -c --arg v "$CC_SHEPHERD_LINEAGE" '. + {budget_lineage:$v}')"
 fi
 
 # Non-Kitty per-window host id (VS Code/Cursor) so the panel can auto-prune /clear
@@ -348,14 +364,24 @@ esac
 # Write PermissionRequest following an AskUserQuestion) would otherwise leave the
 # stale `pending.ask` behind, leaking dead option buttons onto an unrelated
 # approval tile -- the old pending is dropped first so the fresh one is authoritative.
+# #28: the snapshot->jq->mv itself was still a lost-update window: cc-approve's
+# arming cc_merge (gate:"waiting" + gate_nonce + pending) can land between our
+# `cat` and our `mv` -- both hooks run in parallel for the same PreToolUse event --
+# and the mv then replaced the file with output computed from the PRE-ARM snapshot,
+# dropping gate, pending AND gate_nonce (unlike the jq-level clear R1-36 covers, a
+# full-file clobber loses the top-level nonce too: the panel never shows the request
+# and the waiter polls blind for the whole GATE_TIMEOUT). Optimistic-concurrency
+# commit: after computing the merge, re-read the file and only mv if it is still the
+# snapshot we computed from; otherwise recompute from the fresh content -- the
+# retried jq pass then sees gate=="waiting" and takes the guard branch, preserving
+# the arming. Bounded tries keep the hook from livelocking; the residual race
+# (re-check -> mv, a few syscalls, no jq spawn inside) is orders of magnitude
+# narrower than the ~15-30ms jq window it closes, and the exhausted-tries commit
+# equals the old behavior. Full closure needs the writers to share a lock or the
+# gate to verify/replay its arming (a cc-approve.sh change).
 MF="$(cc_file "$KEY")"
 MTMP="${MF}.tmp.$$"
-CUR="$(cat "$MF" 2>/dev/null)"
-[ -n "$CUR" ] || CUR='{}'
-if printf '%s' "$CUR" | jq -c \
-     --argjson patch "$PATCH" \
-     --arg gg "$GATE_GUARDED" --arg ng "$NATIVE_GUARDED" \
-     --arg setp "$SET_PENDING" --arg clrp "$CLEAR_PENDING" '
+MERGE_JQ='
    if ($gg != "" and .gate == "waiting")
       or ($ng != "" and .status == "approval" and (.pending | type) == "object") then
      # a live approval owns status/since/pending; only refresh the rest
@@ -363,11 +389,43 @@ if printf '%s' "$CUR" | jq -c \
    else
      (if $setp != "" then del(.pending) else . end) * $patch
      | (if $clrp != "" then del(.pending) else . end)
-   end' > "$MTMP" 2>/dev/null; then
-  mv "$MTMP" "$MF"
-else
-  rm -f "$MTMP" 2>/dev/null || true
-fi
+   end'
+APPLY_TRIES=0
+while :; do
+  CUR="$(cat "$MF" 2>/dev/null)"
+  [ -n "$CUR" ] || CUR='{}'
+  if printf '%s' "$CUR" | jq -c \
+       --argjson patch "$PATCH" \
+       --arg gg "$GATE_GUARDED" --arg ng "$NATIVE_GUARDED" \
+       --arg setp "$SET_PENDING" --arg clrp "$CLEAR_PENDING" \
+       "$MERGE_JQ" > "$MTMP" 2>/dev/null; then
+    :
+  # Self-heal a corrupt status file, same as cc_merge (cc-lib.sh): invalid JSON on
+  # disk fails the merge above on EVERY subsequent hook event, so the tile vanishes
+  # from the panel -- approvals included -- and the session can never republish
+  # itself until SessionEnd. Retry from {}: it succeeds iff the PATCH is valid
+  # (i.e. the failure was the file), rebuilding the tile from this event's fields.
+  # The guards read .gate/.status of the input, so from {} they simply don't fire.
+  # The #28 re-check below covers this branch too: if cc-approve's arming healed
+  # the file first, the next iteration merges into it instead of clobbering it.
+  elif printf '{}' | jq -c \
+       --argjson patch "$PATCH" \
+       --arg gg "$GATE_GUARDED" --arg ng "$NATIVE_GUARDED" \
+       --arg setp "$SET_PENDING" --arg clrp "$CLEAR_PENDING" \
+       "$MERGE_JQ" > "$MTMP" 2>/dev/null; then
+    :
+  else
+    rm -f "$MTMP" 2>/dev/null || true
+    break
+  fi
+  RECHECK="$(cat "$MF" 2>/dev/null)"
+  [ -n "$RECHECK" ] || RECHECK='{}'
+  if [ "$RECHECK" = "$CUR" ] || [ "$APPLY_TRIES" -ge 3 ]; then
+    mv "$MTMP" "$MF"
+    break
+  fi
+  APPLY_TRIES=$(( APPLY_TRIES + 1 ))
+done
 
 # ---- Audit ledger: record the governance-relevant lifecycle event ----------
 # Tool usage is logged only when it needed a decision (PermissionRequest) or is an

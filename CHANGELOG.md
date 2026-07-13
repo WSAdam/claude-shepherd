@@ -4,6 +4,52 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-07-13 — Multi-agent bug sweep #4: 36 confirmed fixes across every flow
+
+A find → adversarially-verify → fix → regression-test sweep over all ten key flows
+(plus a dedicated finder for the newest code). **36 findings** survived a three-lens
+adversarial pass; each is fixed and pinned by a `#<id>-pin` regression test. The sweep
+was interrupted twice by usage limits — its own independent fix-validation stage never
+ran — so an **adversarial validation pass** re-checked all 36 applied fixes afterward:
+**35 were sound, and it caught one (#4) that was a plausible-but-wrong patch**, now
+corrected below.
+
+### Fixed — highlights
+
+- **CRITICAL — kitty "jump" bypassed the serialized injection tail.** `actionIsHeadless`
+  classed a kitty `focus` (and multi-question `answer`) as headless, so `kitty @
+  focus-window` stole OS focus mid-chain and pending keystrokes landed in the wrong
+  session. Both now reserve a slot on the shared tail.
+- **MAJOR — `audit-review` had no remote-tile guard**, so "Review activity" pasted its
+  prompt into a *local* window matching a remote session's name; now refused for remote
+  tiles like clear/compact.
+- **MAJOR — background-aware status died once a tile went display-stale** (`bg_active`
+  was gated on `not it.stale`); a long-running background agent now still reports.
+- **MAJOR — subagent transcript search hits mis-annotated** (wrong session id, no
+  project): `annotateSearchHits` now folds a subagent path to its parent transcript.
+- **MAJOR (corrected here) — auto-respawn retry budget never bound.** The sweep's own
+  #4 patch was **wrong** — it wrote the relaunch-gap "hold" and then wiped it on the
+  same tick (the just-removed dead tile lingers one tick in the refresh `list`, and the
+  reap cleared the hold for any tile-backed key), so the budget was reaped during the
+  gap and `maxRetries` never capped an unbounded respawn loop. The reap decision moved
+  into a pure, unit-tested `core.liveBudgetKeys` that expires the hold **by deadline
+  only**; a multi-tick test walks the T / T+1 / expiry timeline (mutation-verified).
+- Plus: plan-limit alert memo now survives `hs.reload` (persisted via `hs.settings`);
+  a startup sweep prunes orphaned `~/.claude/cc-scratch` files; kitty `sendKeys` gets a
+  liveness probe before it reports delivery / re-bases the mode; effort selector no
+  longer snaps back after a live change; `cc-status.sh` self-heals a corrupt `<key>.json`
+  like `cc_merge`; the gate's arming write fully replaces a stale `pending.ask`; Stream
+  Deck shows a distinct magenta key for a frozen-on-error session; `usage_limit` alerts
+  reach the notification history/badge; search enforces a real per-*file* hit cap.
+
+### Fixed — a misleading gate glyph (from the "what are these alerts" question)
+
+A `fallback` decision (the gate timed out / had no rule and **handed off to Claude
+Code's native prompt**) rendered with the allow **`✅`** in the audit **Alerts** tab —
+reading as "the gate approved it," which it did not. All three decision renderers
+(`core.narrateEvent`, the audit **Rows** view, and the Alerts-tab `evDesc` twin) now show
+**`⚠`** for a fallback. `deny → ⛔`, `fallback → ⚠`, `allow → ✅`.
+
 ## 2026-07-07 — Triage the q90 review of the Fable-usage feature
 
 Verified all five findings against the code; incorporated all of them (none discarded).

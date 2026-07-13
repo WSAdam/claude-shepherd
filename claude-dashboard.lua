@@ -33,6 +33,22 @@ do
     end
     if pm.menubar then pcall(function() pm.menubar:delete() end) end
   end
+  -- #33: the prior instance's SSH-bridge doEvery timers live in its module-local
+  -- `bridge` table (exported on _G.__ccDashboard.bridge), out of reach of the
+  -- pm[...] list above. Left running they invoke the OLD FX.bridgeSync every tick
+  -- forever (the old refresh timer that drove reconcileBridge is stopped, so
+  -- nothing else ever stops them), doubling `rsync --delete` pipelines into the
+  -- same mirror dirs on every re-dofile. Stop timers + backstops, terminate any
+  -- in-flight rsync. Older instances predate the export: prev.bridge is nil, no-op.
+  if prev and type(prev.bridge) == "table" then
+    for _, b in pairs(prev.bridge) do
+      if type(b) == "table" then
+        if b.timer then pcall(function() b.timer:stop() end) end
+        if b.timeoutTimer then pcall(function() b.timeoutTimer:stop() end) end
+        if b.task then pcall(function() b.task:terminate() end) end
+      end
+    end
+  end
 end
 
 -- Load the pure-logic core sitting next to this file.
@@ -333,6 +349,13 @@ function FX.log(m) print(m) end
 -- the heal fired (see the heal block in refresh). On FX (an existing module table),
 -- NOT a new top-level local -- this file is at Lua's 200-local ceiling.
 FX._healedDone = {}
+-- Auto-respawn budget hold: budgetKey -> epoch deadline. A just-fired respawn charges
+-- respawnAttempts[budgetKey] and removeStatus()es the dead tile, so until the
+-- relaunch's SessionStart lands NO tile backs that key -- the liveBudgetKeys reap in
+-- refresh() would wipe the freshly-charged retry and maxRetries would never bind.
+-- Written at the spawn site, honored (as live) by the reap until the relaunch lands
+-- or the deadline passes. On FX, not a new top-level local (200-local ceiling).
+FX._respawnHold = {}
 
 -- Panel geometry persistence (Step 1): remember the size/position the user last
 -- left the window so a Hammerspoon reload doesn't snap it back to the default.
@@ -388,6 +411,22 @@ function FX.scratchFile(tag)
   end
   FX._scratchSeq = FX._scratchSeq + 1
   return FX._scratchDir .. "/" .. tostring(tag or "scan") .. "-" .. tostring(FX.now()) .. "-" .. FX._scratchSeq
+end
+
+-- Orphan sweep for the scratch dir. Every normal path os.remove()s its own file
+-- (exit callback, ownership check, the 15s backstop, the pcall-fail path), but a
+-- Hammerspoon quit/crash/shutdown mid-scan kills the /bin/sh child and strands the
+-- redirected file -- and unlike /tmp (which macOS purges periodically), nothing
+-- ever cleans ~/.claude/cc-scratch, so multi-MB folderscan orphans would accumulate
+-- forever. Called once at startup: at load time no scan of OURS can be in flight
+-- (the previous config's tasks/callbacks died with it), so everything present is a
+-- dead process's leftover. A missing dir self-gates (FX.readDir -> {}).
+function FX.pruneScratch()
+  for _, name in ipairs(FX.readDir(FX._scratchDir)) do
+    if name ~= "." and name ~= ".." then
+      pcall(os.remove, FX._scratchDir .. "/" .. name)
+    end
+  end
 end
 
 -- R2-20: re-read ONE tile's live status file and return the freshly-parsed item
@@ -647,9 +686,13 @@ local function ccUserAgent()
 end
 
 -- Plan-limit guard memo: window key -> the resets_at it already warned for (one OS
--- notification per window, re-armed when the window rolls). On FX, not a new
--- top-level local -- this file is at Lua's 200-local ceiling.
-FX._usageAlertFired = {}
+-- notification per window, re-armed when the window rolls). Persisted via hs.settings
+-- (like ccNotifySeen): FX is rebuilt on every hs.reload -- which every `make deploy`
+-- fires -- so an in-memory-only memo would re-warn every still-open window >= threshold
+-- after each reload, breaking the once-per-window promise. On FX, not a new top-level
+-- local -- this file is at Lua's 200-local ceiling.
+FX._usageAlertFired = hs.settings.get("ccUsageAlertFired")
+if type(FX._usageAlertFired) ~= "table" then FX._usageAlertFired = {} end
 
 -- Fetch the official usage window (async, non-blocking). force=true bypasses the TTL
 -- (the Update-now button); otherwise it no-ops if fetched within OFFICIAL_TTL seconds.
@@ -700,13 +743,17 @@ function FX.fetchOfficialUsage(force)
       local cfg = loadConfig()
       if core.config(cfg, "usage.limitAlerts.enabled", true) then
         local th = tonumber(core.config(cfg, "usage.limitAlerts.thresholdPct", 90)) or 90
-        for _, a in ipairs(core.usageLimitAlerts(j, FX._usageAlertFired, { threshold = th })) do
+        local alerts = core.usageLimitAlerts(j, FX._usageAlertFired, { threshold = th })
+        for _, a in ipairs(alerts) do
           FX.notify("Claude plan: " .. a.label .. " at " .. math.floor((a.percent or 0) + 0.5) .. "%",
             "Approaching this window's cap -- work on it may be blocked at 100%. "
             .. "Bars + reset times are in the panel footer.")
           FX.appendLedger({ type = "usage_limit", window = a.key,
             percent = math.floor((a.percent or 0) + 0.5), threshold = th })
         end
+        -- usageLimitAlerts mutated the memo iff anything fired; persist the marks so
+        -- they survive hs.reload (see the FX._usageAlertFired declaration).
+        if #alerts > 0 then hs.settings.set("ccUsageAlertFired", FX._usageAlertFired) end
       end
     end
     lastOfficialUsage = j
@@ -816,9 +863,20 @@ function FX.queueKeyFor(item)
   if qk and legacy and legacy ~= qk then
     local old = FX.readQueue(legacy)
     if core.queueDepth(old) > 0 then
-      FX.writeQueue(qk, core.queueMerge(FX.readQueue(qk), old))
-      FX.removeQueue(legacy)
-      print("[cc-queue] adopted legacy session queue " .. legacy .. " -> " .. qk)
+      local merged = core.queueMerge(FX.readQueue(qk), old)
+      FX.writeQueue(qk, merged)
+      -- #38: writeQueue fails SILENTLY (io.open on a bad QUEUE_DIR, a disk-full
+      -- truncated write, a failed rename) -- deleting the legacy file then would
+      -- destroy the only durable copy of its pending tasks. Verify the merge is
+      -- actually on disk (re-read; a truncated write also fails here via readQueue's
+      -- undecodable-backup path) before removing the legacy file; otherwise keep it
+      -- and let the next tick retry the adoption (temp+rename makes it all-or-nothing).
+      if core.queueDepth(FX.readQueue(qk)) >= core.queueDepth(merged) then
+        FX.removeQueue(legacy)
+        print("[cc-queue] adopted legacy session queue " .. legacy .. " -> " .. qk)
+      else
+        print("[cc-queue] ⚠️ legacy queue adoption write did not land -- keeping " .. legacy)
+      end
     end
   end
   return qk or legacy
@@ -830,6 +888,28 @@ end
 function FX.feedTask(target, task, preface)
   if preface and #preface > 0 then return FX.pasteIntoWindow(target, { text = task, preface = preface }) end
   return FX.typeIntoWindow(target, task)
+end
+
+-- #34: single-flight guard for the queue pop -> deliver -> persist critical
+-- section. For a kitty tile the feed slot runs SYNCHRONOUSLY (headless) and
+-- FX.runKittyChecked's waitUntilExit PUMPS the run loop mid-delivery -- the 1Hz
+-- refresh (router/autofeed) and queued bridge messages ("Feed next") fire NESTED
+-- while the shortened queue hasn't been written back yet, re-read the file (head
+-- still present), pop the SAME task, and deliver it twice. Every feed body runs
+-- through this guard: a nested/concurrent attempt is skipped -- the task stays
+-- queued and the level-triggered router/autofeed simply retries next tick.
+-- Returns true when fn ran, false when skipped (callers clear their pending
+-- markers on a skip). pcall'd so a throw mid-feed can't latch the flag forever.
+function FX.feedGuard(fn)
+  if FX._queueFeedBusy then
+    print("[cc-queue] feed already in flight (nested dispatch during delivery) -- skipped, task kept queued")
+    return false
+  end
+  FX._queueFeedBusy = true
+  local ok, err = pcall(fn)
+  FX._queueFeedBusy = false
+  if not ok then print("[cc-queue] feed failed: " .. tostring(err)) end
+  return true
 end
 
 -- Persistent relabels (F1): a JSON map of project path (cwd) -> override name.
@@ -1445,7 +1525,15 @@ function FX.bridgeSync(hostSpec)
   local args = {}
   for i = 2, #argv do args[#args + 1] = argv[i] end
   local ok = pcall(function()
-    local t = hs.task.new(bin, function(code)
+    local myTask  -- #32 R1-38 idiom: forward-declared so the exit callback can prove ownership
+    myTask = hs.task.new(bin, function(code)
+      -- #32: ownership FIRST (the folderScan/fleet-search R1-38 idiom). The backstop
+      -- below terminates a wedged rsync and frees the slot, but hs.task delivers this
+      -- callback only when the process REALLY dies -- possibly after the next tick
+      -- already started sync-2 on this same entry. A stale callback must not stop
+      -- sync-2's timeout timer, break its skip-if-running guard, or drop its retained
+      -- task handle (two concurrent `rsync --delete` runs tear the mirror).
+      if b.task ~= myTask then return end
       -- R1-27: cancel the timeout backstop on a real exit (cancel-on-normal-exit).
       if b.timeoutTimer then pcall(function() b.timeoutTimer:stop() end); b.timeoutTimer = nil end
       b.running = false
@@ -1458,6 +1546,7 @@ function FX.bridgeSync(hostSpec)
         print("[cc-bridge] " .. hostSpec.ns .. " rsync failed (exit " .. tostring(code) .. ")")
       end
     end, args)
+    local t = myTask
     if t then
       t:start()
       b.task = t   -- R2-25: retain so reconcileBridge can terminate an in-flight rsync on teardown
@@ -1471,7 +1560,9 @@ function FX.bridgeSync(hostSpec)
       local backstop = math.max(15, (tonumber(b.interval) or BRIDGE_SECONDS) * 3)
       b.timeoutTimer = hs.timer.doAfter(backstop, function()
         b.timeoutTimer = nil
-        if b.running then
+        -- #32: same ownership belt-and-braces as the exit callback -- a stale
+        -- backstop must never free a LATER sync's slot mid-run.
+        if b.running and b.task == myTask then
           pcall(function() t:terminate() end)
           b.running = false
           b.task = nil   -- R2-25: handle freed after the wedged-task terminate
@@ -1557,13 +1648,16 @@ function FX.scanFolders()
   local ok = pcall(function()
     local myTask  -- captured below; the exit callback uses it for an ownership check
     myTask = hs.task.new("/bin/sh", function()
-      if folderScanTimer then pcall(function() folderScanTimer:stop() end); folderScanTimer = nil end
       -- R1-38: the exit callback fires on terminate() too. If the 15s backstop already
       -- terminated this scan (and removed outFile), it nil'd folderScanTask -- so an
       -- ownership check (this task still owns the slot) prevents a late callback from
       -- overwriting a previously-good folderIndex with an EMPTY one (parseDirList("")
       -- -> {}) AND resetting the 60s-cache ts (which would block a rescan for ~60s).
+      -- #21: ownership BEFORE the timer stop (the fleet-search callback's order):
+      -- folderScanTimer is one shared slot, so a stale scan's late exit stopping it
+      -- first would disarm the CURRENT scan's backstop and pin the slot forever.
       if folderScanTask ~= myTask then pcall(os.remove, outFile); return end
+      if folderScanTimer then pcall(function() folderScanTimer:stop() end); folderScanTimer = nil end
       folderScanTask = nil
       local out = FX.readFile(outFile) or ""
       pcall(os.remove, outFile)
@@ -1961,7 +2055,17 @@ function FX.notify(title, text, opts)
       -- shared injection tail like every other focus launcher.
       if it then
         dispatchSerialized(it, "focus", function()
-          pcall(function() focusProject(it.name, it.cwd, it.editor, true) end)
+          -- Kitty needs the `kitty @ focus-window` short-circuit (FX.focusWindow):
+          -- focusProject only knows GUI editors, so it would raise an unrelated
+          -- editor window instead of the kitty window the banner advertised.
+          -- Target built inline (winTarget is declared below this function).
+          -- Non-kitty keeps the direct focusProject jump (the l5/#28-pinned path).
+          if it.editor == "kitty" then
+            pcall(function() FX.focusWindow({ name = it.name, cwd = it.cwd, editor = it.editor,
+              kittyWindowId = it.kitty_window_id, kittyListenOn = it.kitty_listen_on }) end)
+          else
+            pcall(function() focusProject(it.name, it.cwd, it.editor, true) end)
+          end
         end)
       end
     end, { title = tostring(title or "Claude Shepherd"), informativeText = tostring(text or ""),
@@ -2245,13 +2349,40 @@ local function after(delay, fn)
   -- but a timer that is :stop()'d externally (spawn supersession) never fires, so its
   -- entry would leak forever. Return a small wrapper whose :stop() ALSO reaps the
   -- entry (and still answers :stop() for callers that hold the handle).
-  local t = hs.timer.doAfter(delay, function()
+  -- #31: hs.timer callbacks are scheduled in the run loop's COMMON modes, which
+  -- include NSModalPanelRunLoopMode -- so pending beats keep firing WHILE
+  -- hs.dialog.blockAlert/textPrompt runs modally, and a chain's bare synthesized
+  -- Return presses the dialog's DEFAULT button (Purge / Delete / Yes / Keep
+  -- winner...). While a modal is up (FX._modalActive, set by FX.runModal around
+  -- every dialog site), re-arm the beat instead of running it; each chain
+  -- schedules its next beat from the previous one, so intra-chain order holds.
+  local t
+  local function fire()
+    if FX._modalActive then
+      t = hs.timer.doAfter(0.25, fire)   -- retained via pendingTimers[id] below
+      pendingTimers[id] = t
+      return
+    end
     pendingTimers[id] = nil
     local ok, err = pcall(fn)
     if not ok then print("[cc-after] timer callback failed: " .. tostring(err)) end
-  end)
+  end
+  t = hs.timer.doAfter(delay, fire)
   pendingTimers[id] = t
   return { stop = function() pendingTimers[id] = nil; if t then pcall(function() t:stop() end) end end }
+end
+
+-- #31: run a blocking hs.dialog call (blockAlert/textPrompt) with injection beats
+-- HELD -- see the fire() deferral in after() above. Every dialog site must route
+-- through this wrapper or a pending chain's Return activates the dialog's default
+-- (destructive) button and the chain's paste is swallowed by the dialog. Returns
+-- the dialog fn's first two results (textPrompt returns button + text).
+function FX.runModal(fn)
+  FX._modalActive = true
+  local ok, r1, r2 = pcall(fn)
+  FX._modalActive = false
+  if not ok then error(r1, 0) end
+  return r1, r2
 end
 
 -- Beat-list scheduling lives in core.runSequence (pure, scheduler-injected,
@@ -2290,7 +2421,10 @@ function dispatchSerialized(item, action, fn, extraStagger)
   -- monotonic base is self-consistent (initial tail 0 is in the past either way).
   delay, injectionTailAt = core.staggerSlot(injectionTailAt, hs.timer.absoluteTime() / 1e9,
     BULK_STAGGER + (tonumber(extraStagger) or 0))
-  if delay > 0 then after(delay, fn) else fn() end
+  -- #31: a zero-delay chain start must also hold while a modal dialog is up (the
+  -- 1Hz refresh fires during runModal's pump and can launch autofeed/drain chains);
+  -- routing it through after() picks up the fire()-time modal deferral.
+  if delay > 0 or FX._modalActive then after(math.max(delay, 0), fn) else fn() end
 end
 
 -- Fire-time nudge guard (R2-08 taken to DISPATCH time, like the router's R2-20):
@@ -2479,7 +2613,12 @@ function FX.sendKeys(target, keys)
   if isKitty(target) then
     local tokens = {}
     for _, k in ipairs(keys) do tokens[#tokens + 1] = core.kittyKeyToken(k) end
-    return runKitty(core.kittyCmd("key", kittyItem(target), { tokens = tokens }))
+    -- R1-15 applied to send-key too: bare runKitty returns true the instant the
+    -- `kitty @` process launches, never checking a window matched -- set-mode would
+    -- then re-base the stored permission_mode (and ledger a false mode_change) on an
+    -- undelivered send, and a later re-pick would cycle Shift+Tab from the wrong
+    -- base. Probe window liveness first, exactly like send-text.
+    return FX.runKittyChecked(kittyItem(target), core.kittyCmd("key", kittyItem(target), { tokens = tokens }))
   end
   local name = target.name
   print("[cc-dashboard] send keys -> " .. tostring(name) .. " (" .. #keys .. " keys)")
@@ -2813,6 +2952,21 @@ function FX.spawnSession(editor, project, task, permissionMode, providerId, agen
   if (not env) and type(modelOverride) == "string" and modelOverride ~= "" then
     env = { { name = "ANTHROPIC_MODEL", value = modelOverride, secret = false } }
   end
+  -- #19: respawn budget lineage (agentOpts.lineage, set by the two respawn
+  -- paths). A kitty relaunch is a brand-new kitty instance (fresh {kitty_pid}
+  -- socket + window id), so the successor's per-window budgetKey (R2-21) would
+  -- never match the predecessor's charged key and the respawn cap could never
+  -- bind. Thread the predecessor's budget key through the spawn env:
+  -- cc-status.sh publishes it as budget_lineage and core.budgetKey prefers it.
+  -- Kitty only -- VS Code/terminal budgets already carry via the projectKey
+  -- fallback, and an env entry would needlessly force the VS Code spawn onto
+  -- the typed-terminal flavor (spawnSpec's hasEnv gate).
+  local lineage = type(agentOpts) == "table" and agentOpts.lineage or nil
+  if type(lineage) == "string" and lineage ~= ""
+     and tostring(editor):lower() == "kitty" then
+    env = env or {}
+    env[#env + 1] = { name = "CC_SHEPHERD_LINEAGE", value = lineage, secret = false }
+  end
   local opts = {
     terminal       = ORCH_TERMINAL,
     kittyBin       = resolveBin("kitty", core.config(cfg, "spawn.kittyBin", nil)),
@@ -2890,11 +3044,13 @@ end
 -- the command building it relies on lives in cc-core and is tested.)
 function spawnPrompt()
   if not ORCH_ENABLED then return end
-  local b1, project = hs.dialog.textPrompt("New Claude session", "Project folder:",
-    ORCH_DEFAULT_DIR, "Next", "Cancel")
+  -- #31: FX.runModal holds pending injection beats while the prompt is up (a
+  -- chain's ⌘V/Return would otherwise type into / submit the dialog).
+  local b1, project = FX.runModal(function() return hs.dialog.textPrompt("New Claude session", "Project folder:",
+    ORCH_DEFAULT_DIR, "Next", "Cancel") end)
   if b1 ~= "Next" or not project or project == "" then return end
-  local b2, task = hs.dialog.textPrompt("New Claude session", "Initial task (optional):",
-    "", "Spawn", "Cancel")
+  local b2, task = FX.runModal(function() return hs.dialog.textPrompt("New Claude session", "Initial task (optional):",
+    "", "Spawn", "Cancel") end)
   if b2 ~= "Spawn" then return end
   local editor = core.config(loadConfig(), "spawn.editor", "terminal")
   FX.writeRecent(core.recentPush(FX.readRecent(), project))
@@ -3018,8 +3174,16 @@ function FX.abKeep(cohort, winnerLabel)
     if v.label ~= winnerLabel then
       local tile = FX.abTileForPath(v.worktreePath)
       if tile then
-        FX.closeWindow({ name = tile.name, cwd = tile.cwd, editor = tile.editor,
-          kittyWindowId = tile.kitty_window_id, kittyListenOn = tile.kitty_listen_on })
+        -- #29: serialize each loser's ⌘⇧W on the shared injection tail like every
+        -- other close path (ctx-menu, drain, bulk, detail panel). Called DIRECTLY in
+        -- this synchronous loop -- with ~100-300ms blocking git hs.execute()s between
+        -- iterations -- every scheduled close beat came due at once and fired
+        -- back-to-back into whichever window was frontmost: the second chord could
+        -- close the WINNER's window (or an unrelated VS Code project). Each slot
+        -- re-focuses its own loser right before its chord.
+        local target = { name = tile.name, cwd = tile.cwd, editor = tile.editor,
+          kittyWindowId = tile.kitty_window_id, kittyListenOn = tile.kitty_listen_on }
+        dispatchSerialized(tile, "close", function() FX.closeWindow(target) end)
         FX.removeStatus(tile.key)
       end
       hs.execute(core.gitWorktreeRemoveCmd(c.repoRoot, v.worktreePath) .. " 2>&1", true)
@@ -3509,10 +3673,12 @@ local function handleBridgeMsg(msg)
     local okk, req = pcall(function() return hs.json.decode(payload.text or "{}") end)
     if okk and type(req) == "table" and req.cohort and req.winner then
       pcall(function()
-        if hs.dialog.blockAlert("Keep \"" .. tostring(req.winner) .. "\"?",
+        -- #31: FX.runModal holds pending injection beats (a chain's Return would
+        -- press the default "Keep winner" button unconfirmed).
+        if FX.runModal(function() return hs.dialog.blockAlert("Keep \"" .. tostring(req.winner) .. "\"?",
              "Close the OTHER variants and remove their git worktrees? The winner's worktree "
              .. "and branch stay (merge it when ready). This can't be undone.",
-             "Keep winner", "Cancel") == "Keep winner" then
+             "Keep winner", "Cancel") end) == "Keep winner" then
           FX.abKeep(tostring(req.cohort), tostring(req.winner))
           refresh()
           wv:evaluateJavaScript("window.ccAb(" .. hs.json.encode(FX.abData()) .. ")")
@@ -3841,7 +4007,11 @@ local function handleBridgeMsg(msg)
       -- the head) and the pop decision still gates on feedTask's synchronous
       -- delivery result: only a DELIVERED paste pops the queue (persisting q2
       -- after a skipped paste would silently destroy the task).
+      -- #34: FX.feedGuard makes the pop->deliver->write single-flight -- a kitty
+      -- delivery pumps the run loop (waitUntilExit) and a nested router/autofeed
+      -- tick or a double-clicked "Feed next" would pop + deliver the SAME head twice.
       dispatchSerialized(item, a, function()
+        FX.feedGuard(function()
         local qk = FX.queueKeyFor(item)
         local task, q2 = core.queuePop(FX.readQueue(qk))
         if task then
@@ -3853,6 +4023,7 @@ local function handleBridgeMsg(msg)
           else print("[cc-queue] feed skipped (no window match) -- task kept queued") end
           ledgerFor(item, { type = commit.event, task = tostring(task):sub(1, 200), by = "manual" })
         end
+        end)
       end, item.auto_model and 0.8 or 0)   -- DR6: reserve extra stagger for the /model preface ladder
     end
     return
@@ -4106,7 +4277,9 @@ local function handleBridgeMsg(msg)
       }
       local s = SPEC[a]
       pcall(function()
-        if hs.dialog.blockAlert(s.title, s.msg, "Yes", "Cancel") == "Yes" then
+        -- #31: FX.runModal holds pending injection beats (a chain's Return would
+        -- press the default "Yes" and clear/compact a session unconfirmed).
+        if FX.runModal(function() return hs.dialog.blockAlert(s.title, s.msg, "Yes", "Cancel") end) == "Yes" then
           -- Serialized: /clear into the wrong session (an in-flight chain's
           -- focus) wipes a context that wasn't confirmed (R3 #2/#5).
           dispatchSerialized(item, a, function() FX.typeIntoWindow(winTarget(item), s.cmd) end)
@@ -4390,6 +4563,8 @@ local function handleBridgeMsg(msg)
         -- newer, now-unreferenced task be GC'd mid-run).
         if searchTask ~= myTask then pcall(os.remove, outFile); return end
         searchTask = nil
+        -- #23: cancel the wedge backstop on a real exit (ownership proven above).
+        if FX._searchTimer then pcall(function() FX._searchTimer:stop() end); FX._searchTimer = nil end
         local out = FX.readFile(outFile) or ""
         pcall(os.remove, outFile)
         if gen ~= searchGen then return end  -- superseded by a newer query
@@ -4403,6 +4578,22 @@ local function handleBridgeMsg(msg)
       searchTask = myTask
       if not searchTask then error("task create failed") end
       searchTask:start()
+      -- #23: wedge backstop (the folder scan's idiom, sized up for the grep fallback
+      -- grinding through big transcripts): a stuck mount / hung engine must never pin
+      -- "searching…" forever with no result, no error, and a wedged process left
+      -- running. Retained on FX (no new top-level local -- the 200-local cap). The
+      -- ownership check makes a superseded query's stale backstop a no-op.
+      if FX._searchTimer then pcall(function() FX._searchTimer:stop() end) end
+      FX._searchTimer = hs.timer.doAfter(30, function()
+        if searchTask ~= myTask then return end  -- a newer query owns the slot (and re-armed its own backstop)
+        FX._searchTimer = nil
+        pcall(function() searchTask:terminate() end)
+        searchTask = nil
+        pcall(os.remove, outFile)
+        print("[cc-search] search timed out (30s) -- engine terminated")
+        pcall(function() wv:evaluateJavaScript("window.ccSearch("
+          .. hs.json.encode({ q = q, hits = {}, timedOut = true }) .. ")") end)
+      end)
     end)
     if not ok then searchTask = nil; pcall(os.remove, outFile) end
     return
@@ -4506,12 +4697,14 @@ local function handleBridgeMsg(msg)
     end
     pcall(function()
       local nm = tostring(target.label or target.name or "this session")
-      if hs.dialog.blockAlert("Open the rewind picker?",
+      -- #31: FX.runModal holds pending injection beats (a chain's Return would
+      -- press the default "Open /rewind" unconfirmed).
+      if FX.runModal(function() return hs.dialog.blockAlert("Open the rewind picker?",
            "This types /rewind into \"" .. nm .. "\", opening Claude Code's restore-point "
            .. "picker — you still choose a point and confirm there.\n\n"
            .. "Note: rewind reverts Write / Edit / NotebookEdit changes only. Files changed "
            .. "by bash are NOT undone.",
-           "Open /rewind", "Cancel") ~= "Open /rewind" then return end
+           "Open /rewind", "Cancel") end) ~= "Open /rewind" then return end
       dispatchSerialized(target, a, function()
         if FX.typeIntoWindow(winTarget(target), "/rewind") then
           ledgerFor(target, { type = "rewind_open" })
@@ -4762,8 +4955,10 @@ local function handleBridgeMsg(msg)
     if core.purgeFilterIsScoped(f) then scope = "events matching the current filter"
     else f.all = true; scope = "ALL recorded events" end
     pcall(function()
-      if hs.dialog.blockAlert("Purge audit ledger",
-           "Permanently delete " .. scope .. "?\nThis cannot be undone.", "Purge", "Cancel") == "Purge" then
+      -- #31: FX.runModal holds pending injection beats (a chain's Return would
+      -- press the default "Purge" and delete the ledger unconfirmed).
+      if FX.runModal(function() return hs.dialog.blockAlert("Purge audit ledger",
+           "Permanently delete " .. scope .. "?\nThis cannot be undone.", "Purge", "Cancel") end) == "Purge" then
         local n = FX.purgeLedger(f)
         wv:evaluateJavaScript("window.ccAudit(" .. hs.json.encode(FX.readLedger({})) .. ")")
         hs.alert.show("Claude Shepherd: purged " .. n .. " event(s)")
@@ -4783,9 +4978,11 @@ local function handleBridgeMsg(msg)
     if #sessions == 0 then return end
     pcall(function()
       local label = (#sessions == 1) and "1 session" or (#sessions .. " sessions")
-      if hs.dialog.blockAlert("Delete session history",
+      -- #31: FX.runModal holds pending injection beats (a chain's Return would
+      -- press the default "Delete" and purge the sessions' history unconfirmed).
+      if FX.runModal(function() return hs.dialog.blockAlert("Delete session history",
            "Permanently delete all ledger events for " .. label .. "?\nThis cannot be undone.",
-           "Delete", "Cancel") == "Delete" then
+           "Delete", "Cancel") end) == "Delete" then
         local n = FX.purgeLedger({ sessions = sessions })
         -- Refresh BOTH views that share the overlay's data: the History tab (FX.sendHistory)
         -- and the audit Rows/Timeline cache (ccAudit) -- else switching tabs in the same open
@@ -4852,6 +5049,16 @@ local function handleBridgeMsg(msg)
     local target = byKey[tostring(payload.v or "")]
     if not target then
       pcall(function() hs.alert.show("Claude Shepherd: select a session first, then Review activity") end)
+      return
+    end
+    -- Remote (bridge) tiles: this branch bypasses handleAction's R2-07 chokepoint
+    -- (pastes directly via FX.pasteIntoWindow) and returns before the generic remote
+    -- refusal at the bottom, so a remote tile would focus a LOCAL window matching the
+    -- remote session's folder name and paste + submit the review prompt there -- the
+    -- exact R2-07/R3-17 shape clear/compact refuse explicitly. Refuse remote here too.
+    if target.remote then
+      pcall(function() hs.alert.show("Claude Shepherd: 'Review activity' isn't available for remote session "
+        .. tostring(target.label or target.name) .. " (headless approve/deny only)") end)
       return
     end
     f.limit = 0  -- review narrates the FULL filtered history, not the webview slice
@@ -5063,8 +5270,11 @@ local function handleBridgeMsg(msg)
                 -- rs.providerId=nil means a FAITHFUL bare-claude relaunch: pass the
                 -- explicit-none sentinel "" so it can't inherit the spawn.provider default.
                 -- rs.model (R1-24) carries a raw native A/B model so the relaunch isn't
-                -- the account default when no provider profile matched.
-                FX.spawnSession(rs.editor, rs.project, nil, rs.permissionMode, rs.providerId or "", nil, false, rs.model)
+                -- the account default when no provider profile matched. #19: carry the
+                -- budget lineage like the auto-respawn path, so a manually respawned
+                -- kitty crash-looper keeps counting toward the same retry budget
+                -- (matches the non-kitty behavior, where projectKey carries naturally).
+                FX.spawnSession(rs.editor, rs.project, nil, rs.permissionMode, rs.providerId or "", { lineage = core.budgetKey(item) }, false, rs.model)
                 ledgerFor(item, { type = "respawn", cwd = rs.project, editor = rs.editor, provider = rs.providerId })
               end },
             { title = "Cancel", fn = function() end },
@@ -5091,10 +5301,17 @@ local function handleBridgeMsg(msg)
   if a == "set-group" then
     -- Cohort tag keyed by the stable projectKey (like relabel), so it survives
     -- close/reopen and a new session in the same folder inherits it. Blank clears.
-    local gkey = item.projectKey or item.cwd
+    -- #35: scope=="session" (the group bar's "this session only" checkbox) keys by
+    -- the TILE key instead. Queue membership is projectKey-keyed, so a project-
+    -- keyed group can never split one queue's members for @role: routing -- a
+    -- per-tile entry (which core.applyGroups resolves FIRST) gives one member its
+    -- own role, e.g. a dedicated "@review:" session among three in one folder.
+    local gkey = (tostring(payload.scope or "") == "session" and item.key)
+      or item.projectKey or item.cwd
     groups = core.setGroup(groups, gkey, payload.text)
     FX.saveGroups(groups)
-    ledgerFor(item, { type = "group", to = groups[gkey] or "" })
+    ledgerFor(item, { type = "group", to = groups[gkey] or "",
+      scope = (gkey == item.key) and "session" or nil })
     print("[cc-dashboard] group " .. tostring(gkey) .. " -> " .. tostring(groups[gkey] or "(cleared)"))
     refresh()
     return
@@ -5189,6 +5406,11 @@ local function handleBridgeMsg(msg)
     elseif a == "effort" then
       if acted == "effort" then
         ledgerFor(item, { type = "effort_change", from = item.effort, to = tostring(text or "") })
+        -- Persist like model (R3-03): the status file's `effort` is the spawn-time
+        -- $CLAUDE_EFFORT (cc-status.sh) and never changes on a live /effort, so
+        -- without this patch the 1s refreshList rebuild reverts item.effort and
+        -- renderMeta snaps the Effort dropdown back to the stale value.
+        item.effort = tostring(text or ""); FX.patchStatus(item.key, { effort = item.effort })
       else
         ledgerFor(item, { type = "effort_skipped", from = item.effort, to = tostring(text or "") })
         pcall(function() hs.alert.show("Claude Shepherd: no window match for " .. tostring(item.label or item.name) .. " — effort NOT changed") end)
@@ -5394,15 +5616,26 @@ local function sdOnButton(deck, button, isDown)
     if sdRunAction then sdRunAction(act) end
     return
   end
-  if isDown then sd.downAt[button] = hs.timer.secondsSinceEpoch(); return end
+  if isDown then
+    sd.downAt[button] = hs.timer.secondsSinceEpoch()
+    -- #30: bind key -> session (the ITEM SNAPSHOT, with its gate state) at PRESS
+    -- time, like a panel tile's click carries the rendered tile's data-key. The 1Hz
+    -- sdRender reassigns sd.buttons[i] from the re-sorted list on every tick (even
+    -- panel-hidden), so a long press -- or any tap straddling a tick -- could resolve
+    -- against a DIFFERENT session on release, or against this session's NEW status
+    -- (done -> approval flips a focus tap into an unreviewed APPROVE).
+    sd.pressItem = sd.pressItem or {}
+    sd.pressItem[button] = sd.buttons[button] and byKey[sd.buttons[button]] or nil
+    return
+  end
   local t0 = sd.downAt[button]; sd.downAt[button] = nil
   local held = t0 and (hs.timer.secondsSinceEpoch() - t0) or 0
-  local key = sd.buttons[button]
-  local item = key and byKey[key] or nil
+  local item = sd.pressItem and sd.pressItem[button] or nil
+  if sd.pressItem then sd.pressItem[button] = nil end
   if not item then return end
   local kind = (held >= SD_LONG_PRESS) and "secondary" or "primary"
   local action = core.resolveGesture(item, kind, { longPressStops = SD_LONG_PRESS_STOPS })
-  print("[cc-streamdeck] key " .. button .. " " .. kind .. " -> " .. tostring(action) .. " " .. tostring(key))
+  print("[cc-streamdeck] key " .. button .. " " .. kind .. " -> " .. tostring(action) .. " " .. tostring(item.key))
   -- An ungated approve/stop is a window keystroke -> serialized (R3 #2/#5).
   dispatchSerialized(item, action, function() core.handleAction(FX, item, action) end)
 end
@@ -6468,6 +6701,7 @@ local HTML = [[
   <div id="setgroupbar" class="barrow">
     <span id="setgroupbar-label" class="barrow-label">Group:</span>
     <input id="setgroupbar-input" placeholder="group name (blank to clear)" onkeydown="groupKeydown(event)">
+    <label class="barrow-label" title="Key the group to THIS session only (a per-session role for @role: routing) instead of the whole project folder."><input type="checkbox" id="setgroupbar-tile"> this session only</label>
     <button onclick="commitGroup()">Set</button>
     <button onclick="hideBars()">Cancel</button>
   </div>
@@ -7397,8 +7631,8 @@ local HTML = [[
     var detailExpanded = { pending:false, activity:false };
     var pendingImage = null;  // data URL of an image pasted into the input
 
-    function send(a, v, text, img){
-      try { window.webkit.messageHandlers.cc.postMessage(JSON.stringify({a:a, v:v||"", text:text||"", img:img||""})); }
+    function send(a, v, text, img, scope){
+      try { window.webkit.messageHandlers.cc.postMessage(JSON.stringify({a:a, v:v||"", text:text||"", img:img||"", scope:scope||""})); }
       catch(e){ console.log("send error", e); }
     }
     function act(a){ if(selectedKey) send(a, selectedKey); }
@@ -7640,18 +7874,24 @@ local HTML = [[
       inp.focus(); inp.select();
     }
     // Assign/clear a session's group (cohort tag). Blank input clears it. Keyed
-    // server-side by the stable projectKey, like relabel.
+    // server-side by the stable projectKey, like relabel — unless the "this
+    // session only" box is ticked (#35): then it keys by the tile itself, giving
+    // ONE member of a project queue its own @role: routing target.
     function startGroup(key){
       var it = findItem(key); if(!it) return;
       hideBars();
       groupKey = key;
       var inp = document.getElementById("setgroupbar-input");
       inp.value = it.group || "";
+      document.getElementById("setgroupbar-tile").checked = false;
       document.getElementById("setgroupbar").classList.add("show");
       inp.focus(); inp.select();
     }
     function commitGroup(){
-      if(groupKey){ send("set-group", groupKey, (document.getElementById("setgroupbar-input").value||"").trim()); }
+      if(groupKey){
+        var scope = document.getElementById("setgroupbar-tile").checked ? "session" : "";
+        send("set-group", groupKey, (document.getElementById("setgroupbar-input").value||"").trim(), "", scope);
+      }
       hideBars();
     }
     function groupKeydown(e){
@@ -11111,7 +11351,8 @@ local HTML = [[
     // JS twin of core.notificationEvents' predicate: panel-raised alerts plus
     // any non-human gate decision (something happened without you).
     function isNotification(e){
-      if(e.type === "escalation" || e.type === "hung" || e.type === "auto_respawn" || e.type === "auto_continue") return true;
+      if(e.type === "escalation" || e.type === "hung" || e.type === "auto_respawn"
+         || e.type === "auto_continue" || e.type === "usage_limit") return true;
       return e.type === "decision" && e.by != null && e.by !== "human";
     }
     // YYYY-MM-DD -> epoch seconds (LOCAL midnight, or end-of-day for `until`).
@@ -11161,7 +11402,10 @@ local HTML = [[
     function evVerb(t){ var n = NARRATE[t]; return (n && n[1]) || t; }
     function evDesc(e){
       if(e.type === "decision"){
-        return (e.outcome === "deny" ? "⛔" : "✅") + " " + (e.outcome || "?") + " " + (e.tool || "")
+        // fallback = the gate deferred to the native prompt (NOT an allow) -> ⚠, matching
+        // the Rows view + core.narrateEvent; ✅ here misread as "the gate approved it".
+        var demoji = e.outcome === "deny" ? "⛔" : (e.outcome === "fallback" ? "⚠" : "✅");
+        return demoji + " " + (e.outcome || "?") + " " + (e.tool || "")
           + (e.summary ? (' "' + e.summary + '"') : "")
           + (e.by ? (" (" + e.by + (e.pattern ? (": " + e.pattern) : "") + ")") : "");
       }
@@ -11225,7 +11469,7 @@ local HTML = [[
       }
       if(auditView === "alerts" && !evs.length){
         body.innerHTML = '<div class="s-help" style="margin-left:0;">No alerts recorded. '
-          + 'Escalations, stall warnings, auto-respawns, and non-human gate decisions land here '
+          + 'Escalations, stall warnings, auto-respawns, usage-limit warnings, and non-human gate decisions land here '
           + '(the audit ledger must be enabled to record them).</div>';
         return;
       }
@@ -11383,7 +11627,8 @@ local HTML = [[
       if(res.q !== cur) return;  // a newer query superseded this result
       FS_HITS = res.hits || [];
       document.getElementById("fs-info").textContent =
-        FS_HITS.length + " hit(s)" + (res.truncated ? " (more not shown — narrow the search)" : "");
+        res.timedOut ? "search timed out (30s) — try a narrower query"
+        : FS_HITS.length + " hit(s)" + (res.truncated ? " (more not shown — narrow the search)" : "");
       var body = document.getElementById("fs-body");
       if(!FS_HITS.length){ body.innerHTML = '<div class="s-help" style="margin-left:0;">No matches.</div>'; return; }
       body.innerHTML = FS_HITS.map(function(h, i){
@@ -12523,7 +12768,13 @@ function FX._refreshBody()
     -- DR2: background / workflow-active badge. A session is running background work
     -- when files in its subagents/ tree (delegated subagents or a Workflow fleet) were
     -- touched within the window. Cheap mtime-only scan; self-gates (no dir -> inactive).
-    if it.transcript_path and not it.remote and not it.stale then
+    -- Deliberately NOT gated on it.stale: background agents fire no hooks on the
+    -- parent, so `updated` freezes at the Stop write and the tile goes display-stale
+    -- ~90s into exactly the long fleet run this badge exists for -- a stale gate would
+    -- flip a live 10-minute Workflow to dimmed "Ready for you - stale" mid-run. The
+    -- JS `stale && !bgRunning` suppression (pinned in ui.test.lua) needs bg_active
+    -- set on stale tiles to ever engage.
+    if it.transcript_path and not it.remote then
       local bg = core.backgroundActivity(
         FX.subagentScan(core.subagentsDir(it.transcript_path), false),
         now, { activeWindow = tonumber(core.config(cfg, "subagents.activeWindow", 45)) or 45 })
@@ -12700,7 +12951,10 @@ function FX._refreshBody()
         -- manual feed may have consumed the head while this slot waited) --
         -- and only a DELIVERED paste pops the queue (FX.feedTask returns false
         -- when the no-window-match guard skipped it).
+        -- #34: FX.feedGuard -- a kitty delivery pumps the run loop mid-slot, so a
+        -- nested tick/bridge feed would double-pop the same head (see FX.feedGuard).
         dispatchSerialized(it, "queue-feed", function()
+          FX.feedGuard(function()
           local task, q2 = core.queuePop(FX.readQueue(qk))
           if not task then return end
           print("[cc-queue] feeding '" .. tostring(task) .. "' to " .. it.name)
@@ -12715,6 +12969,7 @@ function FX._refreshBody()
             print("[cc-queue] feed skipped (no window match) -- task kept queued")
           end
           ledgerFor(it, { type = commit.event, task = tostring(task):sub(1, 200), by = "autofeed" })
+          end)
         end, it.auto_model and 0.8 or 0)   -- DR6: reserve extra stagger for the /model preface ladder
       end
     end
@@ -12775,8 +13030,16 @@ function FX._refreshBody()
     local step = core.stepAutoRespawn(respawnAttempts, it, {
       -- never auto-relaunch a session frozen on an API error: the user resumes it with
       -- Continue (same session/context), not a fresh respawn. Remote tiles are
-      -- never respawned (the relaunch would target a LOCAL editor window).
-      enabled = autoRespawnOn and it.status ~= "error" and not it.remote, maxRetries = autoRespawnMax,
+      -- never respawned (the relaunch would target a LOCAL editor window). A heal-
+      -- carried 'working' (FX._healedDone latched, set/cleared above this tick) is the
+      -- stale-'done' heal's own ALIVE verdict on a raw-'done' file -- a mid-turn
+      -- session whose hooks were missed, `updated` frozen at the old Stop write -- so
+      -- it must never read as frozen-at-working death evidence: the respawn would kill
+      -- the live session's tile and spawn a duplicate in the same folder. Raw 'done'
+      -- is excluded by shouldAutoRespawn anyway; this just keeps the heal's override
+      -- from smuggling it past that contract.
+      enabled = autoRespawnOn and it.status ~= "error" and not it.remote
+        and FX._healedDone[it.key] == nil, maxRetries = autoRespawnMax,
       intentional = (draining[it.key] ~= nil) or drained,
       -- nil pv = NO prior observation (first refresh after a reload, prev is in-memory):
       -- treat it as already-frozen so a reload can't mass-fire a "fresh" edge for every
@@ -12797,12 +13060,25 @@ function FX._refreshBody()
       -- spawn.live=false). Only drop the dead tile + ledger "ok" when a REAL launch
       -- happened -- otherwise the session would silently vanish and never relaunch,
       -- and the audit trail would falsely claim success.
+      -- #19: pass the dead tile's budget key as the relaunch lineage so a kitty
+      -- successor (new socket + window id) keeps charging the SAME budget entry
+      -- and maxRetries actually binds across generations (env CC_SHEPHERD_LINEAGE
+      -- -> cc-status.sh budget_lineage -> core.budgetKey preference).
       local launched = FX.spawnSession(rs.editor, rs.project, nil, rs.permissionMode,
-        rs.providerId or "", nil, false, rs.model)
+        rs.providerId or "", { lineage = core.budgetKey(it) }, false, rs.model)
       ledgerFor(it, { type = "auto_respawn", outcome = launched and "ok" or "dryrun",
         cwd = rs.project, editor = rs.editor, provider = rs.providerId, attempt = step.attempts })
       if launched then
         FX.removeStatus(it.key)  -- drop the dead tile; the relaunch makes a fresh one
+        -- The freshly-charged attempts[budgetKey] now backs NO tile until the relaunch's
+        -- SessionStart lands (seconds for a terminal, tens of seconds for a VS Code cold
+        -- start), so the liveBudgetKeys reap at the end of this refresh would wipe it and
+        -- every respawn generation would restart at attempts=0 -- an unbounded respawn
+        -- loop instead of the maxRetries cap. Hold the key as live for the relaunch gap
+        -- (the respawn stale threshold: no new death edge can fire sooner anyway); a
+        -- landed relaunch drops the hold, an expired one means no tile ever appeared
+        -- (nothing left for the budget to gate).
+        FX._respawnHold[core.budgetKey(it)] = now + autoRespawnStale
       end
     elseif step.wouldFire and rs and not rs.canRespawn then
       -- L6: a death that WOULD auto-respawn but can't -- previously a silent print.
@@ -12901,11 +13177,13 @@ function FX._refreshBody()
   -- live-budgetKey set from `list` (NOT newPrev, which is tile-key keyed) using the
   -- SAME core.budgetKey the steppers use, and reap both against it.
   if next(respawnAttempts) or next(autoContinueState.attempts) then
-    local liveBudgetKeys = {}
-    for _, it in ipairs(list) do
-      local bk = core.budgetKey(it)
-      if bk and bk ~= "" then liveBudgetKeys[bk] = true end
-    end
+    -- Live keys = tiles + un-expired respawn holds, decided by pure core so the
+    -- multi-tick relaunch-gap survival is unit-testable. The hold (set at the spawn
+    -- site) is expired ONLY by its deadline -- NOT wiped just because a tile reports
+    -- the key: the just-removed dead tile lingers one tick in `list`, so clearing on
+    -- "a tile reports bk" wiped the hold on the same tick and the budget was reaped
+    -- during the gap, so maxRetries never bound (#4). Both counters reap against it.
+    local liveBudgetKeys = core.liveBudgetKeys(list, FX._respawnHold, now)
     core.reapUnbacked(respawnAttempts, liveBudgetKeys)
     core.reapUnbacked(autoContinueState.attempts, liveBudgetKeys)
   end
@@ -12974,7 +13252,8 @@ function FX._refreshBody()
   end
 
   -- 4c-E project routing dispatcher: ONE feed per armed project per tick, to
-  -- whichever member is free (done, not stale/error/draining/pending). Runs
+  -- whichever member is free (done, not error/draining/pending; display-stale
+  -- `done` is the NORMAL between-turns state and stays routable -- #36). Runs
   -- AFTER the tile loop so it sees every member's final status this tick --
   -- two sessions finishing simultaneously yield exactly one deterministic
   -- pick. The pop stays inside the dispatchSerialized slot and delivery-gated
@@ -12995,7 +13274,12 @@ function FX._refreshBody()
             print("[cc-route] DRY-RUN would feed '" .. tostring(task) .. "' to " .. tostring(item.name))
           else
             routePending[item.key] = now
+            -- #34: FX.feedGuard -- a kitty delivery pumps the run loop mid-slot, so
+            -- a nested tick/bridge feed would double-pop the same head. A skipped
+            -- (guarded-out) attempt clears the pending marker: the member stays
+            -- eligible and the level-triggered router re-picks next tick.
             dispatchSerialized(item, "queue-feed", function()
+              if not FX.feedGuard(function()
               local freshQ = FX.readQueue(qk)
               -- R1-18: the head may have changed since routeTask peeked (a queue-move
               -- during the stagger delay). Re-validate the head's role/barrier against
@@ -13029,6 +13313,7 @@ function FX._refreshBody()
                 routePending[item.key] = nil  -- session stays eligible
               end
               ledgerFor(item, { type = commit.event, task = tostring(task):sub(1, 200), by = "router" })
+              end) then routePending[item.key] = nil end
             end, item.auto_model and 0.8 or 0)   -- DR6: reserve extra stagger for the /model preface ladder
           end
         end
@@ -13472,6 +13757,7 @@ refresh()
 after(1.0, function() pcall(FX.computeUsage) end)          -- first local pass
 after(1.5, function() pcall(function() FX.fetchOfficialUsage(true) end) end)  -- first official pass
 after(2.0, function() pcall(FX.expireLedger) end)          -- first retention pass
+after(2.5, function() pcall(FX.pruneScratch) end)          -- sweep scan/search orphans from a dead process
 
 -- Launch-on-startup defaults ON the first time Shepherd runs (so it comes back after
 -- a restart); the user's later choice in Settings is then respected (the real
@@ -13524,7 +13810,12 @@ do
 end
 
 -- Keep references alive so Lua does not garbage-collect them.
-_G.__ccDashboard = { webview = wv, controller = controller, module = M, core = core, fx = FX, toggle = togglePanel }
+-- #33: `bridge` is exported too -- the per-host rsync doEvery timers live in that
+-- module-local table, and the re-dofile guard at the top of this file can only
+-- stop what the PREVIOUS instance exposed here (else each in-VM re-dofile stacks
+-- another set of always-firing bridge timers racing rsync into the same mirror).
+_G.__ccDashboard = { webview = wv, controller = controller, module = M, core = core, fx = FX,
+                     toggle = togglePanel, bridge = bridge }
 
 -- Stop our long-lived handles on Hammerspoon quit/reload so the CGEventTap +
 -- repeating timers/pathwatcher are released cleanly (no leaked Mach port / run

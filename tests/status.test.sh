@@ -291,4 +291,22 @@ assert_json "#25: no-jq stop still -> done" "$NJF" '.status' "done"
     "$SHIMBIN/bash" "$CC" pretooluse </dev/null >/dev/null 2>&1 )
 assert_json "#25: no-jq pretooluse still -> working" "$NJF" '.status' "working"
 
+# --- #7-pin: the main status merge self-heals a CORRUPT <key>.json (the cc_merge
+# retry-from-{} discipline). Invalid JSON on disk (truncated write on power loss,
+# hand-edit typo, partial rsync copy) used to fail the inline jq merge on EVERY
+# subsequent hook event -- the tmp file was just removed and nothing was ever
+# written again, so the session was invisible on the panel until SessionEnd.
+HE="heal1"; HEF="$TMP/$HE.json"
+printf '{ not json' > "$HEF"
+ev userpromptsubmit "{\"session_id\":\"$HE\",\"cwd\":\"/srv/heal-proj\",\"prompt_text\":\"revive me\"}"
+assert_eq "#7-pin: corrupt file heals into valid JSON on the next event" \
+  "true" "$(jq -e . "$HEF" >/dev/null 2>&1 && echo true || echo false)"
+assert_json "#7-pin: healed tile rebuilt from the event (status)" "$HEF" '.status' "working"
+assert_json "#7-pin: healed tile rebuilt from the event (identity)" "$HEF" '.session_id' "$HE"
+assert_json "#7-pin: healed tile rebuilt from the event (prompt)" "$HEF" '.last_prompt' "revive me"
+# and the healed file merges normally from then on (not a one-shot write)
+ev stop "{\"session_id\":\"$HE\",\"cwd\":\"/srv/heal-proj\"}"
+assert_json "#7-pin: post-heal events merge again (stop -> done)" "$HEF" '.status' "done"
+assert_json "#7-pin: post-heal merge preserves earlier fields" "$HEF" '.last_prompt' "revive me"
+
 finish

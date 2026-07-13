@@ -503,6 +503,38 @@ do
   check("headless: nil item safe", core.actionIsHeadless(nil, "stop") == false)
 end
 
+-- ---- #10-pin: kitty "focus" is NOT headless (kitty @ focus-window raises) ----
+-- `kitty @ send-key/send-text` are focus-neutral, but the jump path runs
+-- `kitty @ focus-window`, which RAISES the kitty OS window -- fired un-staggered
+-- it hijacks an in-flight chain's pending Cmd+V/Return beats into the kitty
+-- session, exactly the hazard the shared injection tail exists to prevent. Same
+-- for "answer" when key synthesis can't drive the picker (multi-select /
+-- multi-question asks jump via fx.focusWindow instead of sending keys).
+do
+  local kitty = { key = "k", editor = "kitty" }
+  check("#10-pin: kitty focus reserves a tail slot (not headless)",
+        core.actionIsHeadless(kitty, "focus") == false)
+  local multiSel = { key = "k", editor = "kitty",
+    pending = { ask = { { question = "q", multiSelect = true } } } }
+  check("#10-pin: kitty answer on a multi-SELECT ask is not headless (jumps)",
+        core.actionIsHeadless(multiSel, "answer") == false)
+  local multiQ = { key = "k", editor = "kitty",
+    pending = { ask = { { question = "q1" }, { question = "q2" } } } }
+  check("#10-pin: kitty answer on a multi-QUESTION ask is not headless (jumps)",
+        core.actionIsHeadless(multiQ, "answer") == false)
+  local singleQ = { key = "k", editor = "kitty",
+    pending = { ask = { { question = "q1" } } } }
+  check("#10-pin: kitty answer on a single-select ask stays headless (send-key)",
+        core.actionIsHeadless(singleQ, "answer") == true)
+  -- every other kitty action keeps the focus-neutral `kitty @` fast path
+  check("#10-pin: kitty stop still headless", core.actionIsHeadless(kitty, "stop") == true)
+  check("#10-pin: kitty approve still headless", core.actionIsHeadless(kitty, "approve") == true)
+  -- remote tiles keep the unconditional headless short-circuit (bridge tiles
+  -- never focus a local window -- even for "focus")
+  check("#10-pin: remote kitty focus stays headless (bridge tile)",
+        core.actionIsHeadless({ key = "r", editor = "kitty", remote = { host = "h" } }, "focus") == true)
+end
+
 -- ---- set-mode optimistic re-base: return contract + patchedStatus -----------
 do
   -- handleAction reports WHAT it did so the dashboard can optimistically persist
@@ -2364,6 +2396,284 @@ do
         src:find("if rec.transcribe then", 1, true) ~= nil)
   check("#30-pin: self-stop branch is ownership-guarded",
         src:find("elseif sd.recording and sd.voiceTask == t then", 1, true) ~= nil)
+end
+
+-- =============================================================================
+-- Regression pins for the 2026-07-07/08 sweep (dashboard half). Same rationale
+-- as the batch above: the fixed logic lives in claude-dashboard.lua's FX layer /
+-- refresh loop / embedded JS, which has no headless runtime here, so the
+-- load-bearing expressions are pinned at the source level; the pure halves are
+-- behavior-tested in core.test.lua (and #10 above). Ids reference THIS sweep's
+-- bug list; if a pin trips after a refactor, re-verify the BEHAVIOR it names
+-- before appeasing it.
+-- =============================================================================
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("sweep-pin: dashboard source readable", #src > 0)
+
+  -- #2: the plan-limit alert memo survives hs.reload (every `make deploy`
+  -- reloads) via hs.settings, like ccNotifySeen -- an in-memory-only memo
+  -- re-warned every still-open window >= threshold after each deploy.
+  check("#2-pin: usage-alert memo loaded from hs.settings",
+        src:find('FX._usageAlertFired = hs.settings.get("ccUsageAlertFired")', 1, true) ~= nil
+        and src:find('if type(FX._usageAlertFired) ~= "table" then FX._usageAlertFired = {} end', 1, true) ~= nil)
+  check("#2-pin: memo persisted after a fired alert",
+        src:find('if #alerts > 0 then hs.settings.set("ccUsageAlertFired", FX._usageAlertFired) end', 1, true) ~= nil)
+  check("#2-pin: the bare reload-wiped reset is gone",
+        src:find("\nFX._usageAlertFired = {}\n", 1, true) == nil)
+
+  -- #3/#22: orphaned scan/search scratch files (Hammerspoon quit/crash mid-scan)
+  -- are swept at startup -- unlike /tmp, nothing else ever cleans the app dir.
+  check("#3-pin: FX.pruneScratch defined",
+        src:find("function FX.pruneScratch()", 1, true) ~= nil)
+  do
+    local body = src:match("function FX%.pruneScratch%(%)(.-)\nend") or ""
+    check("#3-pin: prune sweeps the app scratch dir (self-gating readDir)",
+          body:find("FX.readDir(FX._scratchDir)", 1, true) ~= nil
+          and body:find('pcall(os.remove, FX._scratchDir .. "/" .. name)', 1, true) ~= nil)
+  end
+  check("#3-pin: prune wired once at startup (retained after())",
+        src:find("after(2.5, function() pcall(FX.pruneScratch) end)", 1, true) ~= nil)
+
+  -- #4: a just-fired respawn's freshly-charged budget key backs NO tile until the
+  -- relaunch lands, so the liveBudgetKeys reap wiped it and maxRetries never
+  -- bound. The spawn site holds the key live for the relaunch gap.
+  check("#4b-pin: respawn hold table on FX (200-local cap)",
+        src:find("FX._respawnHold = {}", 1, true) ~= nil)
+  check("#4b-pin: hold written when the auto-respawn launches",
+        src:find("FX._respawnHold[core.budgetKey(it)] = now + autoRespawnStale", 1, true) ~= nil)
+  -- #4b-fix (loop-2 validation caught the original patch as wrong): the reap now
+  -- delegates to pure, unit-tested core.liveBudgetKeys, which expires holds by
+  -- DEADLINE only. The old inline reap wiped the hold whenever a tile reported the
+  -- key -- but the just-removed dead tile lingers one tick in `list`, so it wiped the
+  -- hold on the same tick the spawn site set it and the budget was reaped during the
+  -- relaunch gap (maxRetries never bound). Guard against that line creeping back:
+  check("#4b-fix: reap delegates to pure core.liveBudgetKeys",
+        src:find("core.liveBudgetKeys(list, FX._respawnHold, now)", 1, true) ~= nil)
+  -- glyph-fix: the Alerts-tab evDesc twin renders a `fallback` decision with ⚠ (a
+  -- gate hand-off to native), not the allow ✅ — matching core.narrateEvent + Rows.
+  check("glyph-fix: evDesc distinguishes a fallback decision (⚠, not ✅)",
+        src:find('e.outcome === "fallback" ? "⚠" : "✅"', 1, true) ~= nil)
+  check("#4b-fix: the same-tick hold-wipe is gone (no tile loop nils the hold)",
+        src:find("liveBudgetKeys[bk] = true; FX._respawnHold[bk] = nil", 1, true) == nil
+        and src:find("if now < deadline then liveBudgetKeys[bk] = true else FX._respawnHold[bk] = nil end", 1, true) == nil)
+
+  -- #5: bg_active/bg_count are computed for display-STALE tiles too -- background
+  -- agents fire no hooks on the parent, so the tile goes stale ~90s into exactly
+  -- the fleet run the badge exists for; the old `not it.stale` gate made the
+  -- pinned JS `stale && !bgRunning` suppression unsatisfiable.
+  check("#5b-pin: background scan no longer gated on display staleness",
+        src:find("if it.transcript_path and not it.remote then", 1, true) ~= nil)
+  check("#5b-pin: the stale-gated variant is gone",
+        src:find("if it.transcript_path and not it.remote and not it.stale then", 1, true) == nil)
+
+  -- #6: a heal-carried 'working' is the heal's own ALIVE verdict on a raw-'done'
+  -- file -- it must never feed stepAutoRespawn as frozen-at-working death
+  -- evidence (the respawn would kill a live mid-turn session's tile and spawn a
+  -- duplicate in the same folder).
+  check("#6b-pin: auto-respawn gate excludes heal-latched sessions",
+        src:find("and FX._healedDone[it.key] == nil, maxRetries = autoRespawnMax,", 1, true) ~= nil)
+
+  -- #11: audit-review ('Review activity') refuses remote tiles BEFORE building /
+  -- dispatching the paste -- the branch bypasses handleAction's R2-07 chokepoint
+  -- and would otherwise focus a LOCAL window matching the remote session's name
+  -- and inject the review prompt there (the clear/compact R3-17 shape).
+  do
+    local p = src:find('if a == "audit-review" then', 1, true)
+    check("#11-pin: audit-review branch found", p ~= nil)
+    local w = p and src:sub(p, p + 2200) or ""
+    local g = w:find("if target.remote then", 1, true)
+    local paste = w:find("FX.pasteIntoWindow(winTarget(target)", 1, true)
+    check("#11-pin: remote guard present in the branch", g ~= nil)
+    check("#11-pin: refusal names the limitation",
+          w:find("'Review activity' isn't available for remote session", 1, true) ~= nil)
+    check("#11-pin: the guard precedes the paste dispatch",
+          g ~= nil and paste ~= nil and g < paste)
+  end
+
+  -- #13: FX.sendKeys' kitty path probes window liveness (R1-15 idiom) instead of
+  -- trusting bare runKitty, which returns true the instant `kitty @` LAUNCHES --
+  -- set-mode re-based permission_mode (and ledgered mode_change) on sends into
+  -- a dead/closed window.
+  check("#13b-pin: sendKeys kitty path routes through runKittyChecked",
+        src:find('return FX.runKittyChecked(kittyItem(target), core.kittyCmd("key", kittyItem(target), { tokens = tokens }))', 1, true) ~= nil)
+  check("#13b-pin: the unprobed send-key ladder is gone",
+        src:find('return runKitty(core.kittyCmd("key", kittyItem(target), { tokens = tokens }))', 1, true) == nil)
+
+  -- #15: the notification-click jump short-circuits kitty to FX.focusWindow --
+  -- focusProject only knows GUI editors (no 'kitty' bundle/app entry), so it
+  -- raised an unrelated VS Code window instead of the kitty window the banner
+  -- advertised. Non-kitty keeps the direct focusProject jump (#28-pinned above).
+  do
+    local n = src:find("function FX.notify(", 1, true)
+    local body = n and src:sub(n, n + 2200) or ""
+    check("#15b-pin: notify click branches on kitty",
+          body:find('if it.editor == "kitty" then', 1, true) ~= nil)
+    check("#15b-pin: kitty jump goes through FX.focusWindow with an inline target",
+          body:find("FX.focusWindow({ name = it.name, cwd = it.cwd, editor = it.editor,", 1, true) ~= nil)
+  end
+
+  -- #16: a successful live /effort dispatch persists the new value (item.effort +
+  -- FX.patchStatus, the R3-03 model idiom) so the 1s refreshList rebuild doesn't
+  -- snap the Effort dropdown back to the spawn-time $CLAUDE_EFFORT.
+  check("#16-pin: effort change persisted like model",
+        src:find('item.effort = tostring(text or ""); FX.patchStatus(item.key, { effort = item.effort })', 1, true) ~= nil)
+
+  -- #18 (JS twin): isNotification includes usage_limit (Lua half pinned in
+  -- core.test.lua), and the Alerts empty-state names the new type.
+  check("#18-pin: JS isNotification counts usage_limit",
+        src:find('|| e.type === "usage_limit") return true;', 1, true) ~= nil)
+  check("#18-pin: Alerts empty-state mentions usage-limit warnings",
+        src:find("usage-limit warnings, and non-human gate decisions land here", 1, true) ~= nil)
+
+  -- #19: both respawn call sites thread the dead tile's budget key as lineage,
+  -- and FX.spawnSession injects it as spawn env for KITTY only (an env entry
+  -- would force the VS Code spawn onto the typed-terminal flavor; cc-status.sh
+  -- publishes it as budget_lineage, core.budgetKey prefers it -- core-pinned).
+  check("#19-pin: auto-respawn passes the lineage",
+        src:find('rs.providerId or "", { lineage = core.budgetKey(it) }, false, rs.model)', 1, true) ~= nil)
+  check("#19-pin: manual respawn passes the lineage",
+        src:find("{ lineage = core.budgetKey(item) }, false, rs.model)", 1, true) ~= nil)
+  check("#19-pin: spawn env carries CC_SHEPHERD_LINEAGE",
+        src:find('env[#env + 1] = { name = "CC_SHEPHERD_LINEAGE", value = lineage, secret = false }', 1, true) ~= nil)
+  check("#19-pin: lineage env injection is kitty-gated",
+        src:find('and tostring(editor):lower() == "kitty" then', 1, true) ~= nil)
+
+  -- #21: the folder-scan exit callback checks OWNERSHIP before stopping the
+  -- SHARED folderScanTimer slot -- stopped first, a stale scan's late exit
+  -- disarmed the CURRENT scan's 15s backstop (the fleet-search callback order).
+  do
+    local own = src:find("if folderScanTask ~= myTask then pcall(os.remove, outFile); return end", 1, true)
+    local stop = src:find("if folderScanTimer then pcall(function() folderScanTimer:stop() end); folderScanTimer = nil end", 1, true)
+    check("#21-pin: ownership check and timer stop both present", own ~= nil and stop ~= nil)
+    check("#21-pin: ownership check comes BEFORE the shared timer stop",
+          own ~= nil and stop ~= nil and own < stop and (stop - own) < 500)
+  end
+
+  -- #23: the fleet search has a wedge backstop (the folder scan's idiom): a
+  -- stuck mount / hung engine must never pin "searching…" forever. Retained on
+  -- FX (200-local cap), ownership-checked, cancelled on a real exit, and the
+  -- webview learns it timed out instead of waiting forever.
+  check("#23-pin: search backstop armed (30s, retained on FX)",
+        src:find("FX._searchTimer = hs.timer.doAfter(30, function()", 1, true) ~= nil)
+  check("#23-pin: stale backstop is a no-op (ownership check)",
+        src:find("if searchTask ~= myTask then return end", 1, true) ~= nil)
+  check("#23-pin: real exit cancels the backstop",
+        src:find("if FX._searchTimer then pcall(function() FX._searchTimer:stop() end); FX._searchTimer = nil end", 1, true) ~= nil)
+  check("#23-pin: timeout pushes an explicit timedOut result",
+        src:find("hs.json.encode({ q = q, hits = {}, timedOut = true })", 1, true) ~= nil)
+  check("#23-pin: JS renders the timeout instead of pinning 'searching…'",
+        src:find('res.timedOut ? "search timed out (30s)', 1, true) ~= nil)
+
+  -- #29: FX.abKeep closes each loser through the serialized injection tail (a
+  -- captured per-loser target), not a direct synchronous loop whose overdue
+  -- ⌘⇧W beats fired back-to-back into whatever was frontmost -- including the
+  -- WINNER's window.
+  check("#29-pin: abKeep loser close rides the injection tail",
+        src:find('dispatchSerialized(tile, "close", function() FX.closeWindow(target) end)', 1, true) ~= nil)
+  check("#29-pin: the direct un-serialized close is gone",
+        src:find("FX.closeWindow({ name = tile.name", 1, true) == nil)
+
+  -- #30 (Stream Deck gestures): key -> session binds at PRESS time (sdRender
+  -- reassigns sd.buttons every 1Hz tick, so a long press straddling a tick
+  -- resolved against a DIFFERENT session -- or this session's NEW gate state,
+  -- silently converting a focus tap into an approve).
+  check("#30b-pin: press snapshots the item under the finger",
+        src:find("sd.pressItem[button] = sd.buttons[button] and byKey[sd.buttons[button]] or nil", 1, true) ~= nil)
+  check("#30b-pin: release resolves against the press-time snapshot",
+        src:find("local item = sd.pressItem and sd.pressItem[button] or nil", 1, true) ~= nil)
+  check("#30b-pin: snapshot is one-shot (cleared on release)",
+        src:find("if sd.pressItem then sd.pressItem[button] = nil end", 1, true) ~= nil)
+  check("#30b-pin: release-time re-resolve is gone",
+        src:find("local key = sd.buttons[button]", 1, true) == nil)
+
+  -- #31: hs.timer callbacks fire in NSModalPanelRunLoopMode, so pending
+  -- injection beats pressed a modal dialog's destructive DEFAULT button
+  -- (Purge/Delete/Yes/Keep winner). after() defers beats while a modal is up;
+  -- FX.runModal brackets every dialog site; a zero-delay chain start also holds.
+  check("#31-pin: after() defers beats while a modal is active (re-armed, retained)",
+        src:find("if FX._modalActive then", 1, true) ~= nil
+        and src:find("hs.timer.doAfter(0.25, fire)", 1, true) ~= nil)
+  check("#31-pin: FX.runModal sets/clears the modal latch",
+        src:find("function FX.runModal(fn)", 1, true) ~= nil
+        and src:find("FX._modalActive = true", 1, true) ~= nil)
+  do
+    local wrapped = select(2, src:gsub("FX%.runModal%(function%(%) return hs%.dialog", ""))
+    local alerts  = select(2, src:gsub("hs%.dialog%.blockAlert%(", ""))
+    local prompts = select(2, src:gsub("hs%.dialog%.textPrompt%(", ""))
+    check("#31-pin: EVERY dialog site is runModal-wrapped (" .. wrapped .. " of "
+          .. (alerts + prompts) .. ")", wrapped > 0 and wrapped == alerts + prompts)
+  end
+  check("#31-pin: zero-delay chain starts also hold during a modal",
+        src:find("if delay > 0 or FX._modalActive then after(math.max(delay, 0), fn) else fn() end", 1, true) ~= nil)
+
+  -- #32: the bridgeSync rsync exit callback + timeout backstop are ownership-
+  -- checked (R1-38 idiom) -- a terminated wedged rsync's LATE exit stopped the
+  -- next sync's backstop, broke its skip-if-running guard, and dropped its
+  -- retained task handle.
+  check("#32-pin: bridge exit callback proves ownership first",
+        src:find("if b.task ~= myTask then return end", 1, true) ~= nil)
+  check("#32-pin: bridge backstop is ownership-checked too",
+        src:find("if b.running and b.task == myTask then", 1, true) ~= nil)
+
+  -- #33: the per-host bridge doEvery timers live in the module-local `bridge`
+  -- table; exporting it on _G.__ccDashboard lets the re-dofile guard stop the
+  -- PRIOR instance's timers (else every console re-dofile stacked another set
+  -- of always-firing rsync --delete pipelines into the same mirror dirs).
+  check("#33-pin: bridge table exported for the re-dofile guard",
+        src:find("toggle = togglePanel, bridge = bridge }", 1, true) ~= nil)
+  do
+    local g = src:find('if prev and type(prev.bridge) == "table" then', 1, true)
+    check("#33-pin: guard walks the prior instance's bridge entries", g ~= nil)
+    local w = g and src:sub(g, g + 500) or ""
+    check("#33-pin: guard stops timer + backstop and terminates in-flight rsync",
+          w:find("b.timer:stop()", 1, true) ~= nil
+          and w:find("b.timeoutTimer:stop()", 1, true) ~= nil
+          and w:find("b.task:terminate()", 1, true) ~= nil)
+  end
+
+  -- #34: the queue pop -> deliver -> persist critical section is single-flight
+  -- (FX.feedGuard): a kitty delivery's waitUntilExit PUMPS the run loop, letting
+  -- a nested tick/bridge message re-read the still-unwritten queue and pop +
+  -- deliver the same head twice.
+  check("#34-pin: FX.feedGuard defined",
+        src:find("function FX.feedGuard(fn)", 1, true) ~= nil)
+  do
+    local body = src:match("function FX%.feedGuard%(fn%)(.-)\nend") or ""
+    check("#34-pin: guard is pcall'd so a throw can't latch the flag",
+          body:find("local ok, err = pcall(fn)", 1, true) ~= nil
+          and body:find("FX._queueFeedBusy = false", 1, true) ~= nil)
+  end
+  eq("#34-pin: all 3 feed sites are guarded (manual + autofeed + router)",
+     select(2, src:gsub("FX%.feedGuard%(function%(%)", "")), 3)
+  check("#34-pin: a guarded-out router attempt clears its pending marker",
+        src:find("end) then routePending[item.key] = nil end", 1, true) ~= nil)
+
+  -- #35 (writer half): set-group accepts scope=='session' and keys the entry by
+  -- the TILE key (which core.applyGroups resolves first -- core-pinned), so ONE
+  -- member of a project queue can carry its own @role: routing target.
+  check("#35-pin: set-group keys by tile on scope=='session'",
+        src:find('local gkey = (tostring(payload.scope or "") == "session" and item.key)', 1, true) ~= nil)
+  check("#35-pin: group bar has the 'this session only' checkbox (reset on open)",
+        src:find('id="setgroupbar-tile"', 1, true) ~= nil
+        and src:find('document.getElementById("setgroupbar-tile").checked = false;', 1, true) ~= nil)
+  check("#35-pin: commitGroup sends the scope through send()'s 5th field",
+        src:find('var scope = document.getElementById("setgroupbar-tile").checked ? "session" : "";', 1, true) ~= nil
+        and src:find('scope:scope||""', 1, true) ~= nil)
+
+  -- #38: legacy queue adoption verifies the merged write actually LANDED
+  -- (re-read depth >= merged depth) before deleting the legacy file -- a silent
+  -- writeQueue failure otherwise destroyed the only durable copy of its tasks.
+  do
+    local v = src:find("if core.queueDepth(FX.readQueue(qk)) >= core.queueDepth(merged) then", 1, true)
+    local rm = src:find("FX.removeQueue(legacy)", 1, true)
+    check("#38-pin: adoption verifies the write before removing the legacy queue",
+          v ~= nil and rm ~= nil and v < rm and (rm - v) < 300)
+    check("#38-pin: a failed write keeps the legacy file (retry next tick)",
+          src:find("legacy queue adoption write did not land", 1, true) ~= nil)
+  end
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
