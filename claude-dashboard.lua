@@ -5191,6 +5191,12 @@ local function handleBridgeMsg(msg)
         { title = "Export session…", fn = function()
             pcall(function() wv:evaluateJavaScript("send('export-session', " .. keyJson .. ")") end)
           end },
+        -- A/B fork-to-compare, scoped to THIS project's folder (opens the modal with the
+        -- repo pre-filled; still editable). Was a global header button -- it's a
+        -- per-project action, so it lives here with the other per-tile actions.
+        { title = "⚖ A/B fork-to-compare…", fn = function()
+            pcall(function() wv:evaluateJavaScript("openAb(" .. jsString(item.cwd or "") .. ")") end)
+          end },
         { title = "-" },
         -- Clear / Compact: same effect as the detail-panel buttons (type the slash
         -- command into the session; headless on Kitty, best-effort in VS Code). A
@@ -5860,7 +5866,7 @@ local HTML = [[
   body[data-look="slate"] .theme-cards .tile { border-radius:16px; box-shadow:0 4px 14px rgba(0,0,0,.40); }
   body[data-look="slate"] .theme-cards .tile:hover { border-color:var(--accent); }
   body[data-look="slate"] #spawn, body[data-look="slate"] #caffeine, body[data-look="slate"] #lock,
-  body[data-look="slate"] #settings-btn, body[data-look="slate"] #b-ab, body[data-look="slate"] #menu-btn {
+  body[data-look="slate"] #settings-btn, body[data-look="slate"] #menu-btn {
     border-radius:999px; }
   body[data-look="flat"] .theme-cards .tile { background:transparent; border-color:transparent; box-shadow:none;
     border-radius:8px; padding:7px 8px; }
@@ -6659,7 +6665,6 @@ local HTML = [[
     <span class="t">Claude sessions</span>
     <span class="right">
       <button id="spawn" onclick="openNew()" title="Spawn a new Claude session">New</button>
-      <button id="b-ab" onclick="openAb()" title="A/B fork-to-compare — run the same task as 2+ variants (model and/or prompt) in isolated git worktrees, then score them side-by-side and keep the winner">⚖ A/B</button>
       <button id="caffeine" onclick="toggleCaffeine()" title="Keep this Mac awake — pmset disablesleep (asks for your password)">☕ Sleep ok</button>
       <button id="lock" onclick="lockMac()" title="Lock — block input until your password, while Claude sessions + remote control keep running (pair with Awake to close the lid locked)">🔒</button>
       <span id="menu-wrap">
@@ -8944,7 +8949,11 @@ local HTML = [[
 
     // ---- DR7: A/B fork-to-compare ----------------------------------------------
     var AB_PROVIDERS = [], AB_DATA = { cohorts:[] };
-    function openAb(){ send("open-ab"); }
+    // A/B is now a PER-PROJECT action (the tile right-click menu), not a global header
+    // button. openAb(repo) opens the modal pre-scoped to that project's folder; the repo
+    // field stays editable so you can still retarget or run A/B on any repo.
+    var AB_PREFILL = null;
+    function openAb(repo){ AB_PREFILL = (typeof repo === "string" && repo) ? repo : null; send("open-ab"); }
     function closeAb(){ document.getElementById("abmodal").classList.remove("show"); }
     // ccAb(data[, meta]): data = active cohorts (+ledger flag); meta (only on open) =
     // providers + recent repos. On open we seed the form + show the modal; later pushes
@@ -8958,6 +8967,9 @@ local HTML = [[
         if(!document.getElementById("ab-variants").children.length){
           addAbVariant("A","opus","",""); addAbVariant("B","sonnet","","");
         }
+        // Pre-fill the repo from the project the menu was opened on (still editable).
+        if(AB_PREFILL){ var rp = document.getElementById("ab-repo"); if(rp){ rp.value = AB_PREFILL; } }
+        AB_PREFILL = null;
         document.getElementById("abmodal").classList.add("show");
       }
       renderAbActive();

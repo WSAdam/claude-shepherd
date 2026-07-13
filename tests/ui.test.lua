@@ -1840,10 +1840,19 @@ do
   end
 
   -- ---- DR7: A/B fork-to-compare (panel flow, worktree isolation) --------------
-  check("dr7-pin: A/B modal + header entry wired",
+  -- A/B is now a PER-PROJECT action (tile right-click menu), not a global header button.
+  check("dr7-pin: A/B modal + open-ab bridge still wired",
         src:find('id="abmodal"', 1, true) ~= nil
-        and src:find('onclick="openAb()"', 1, true) ~= nil
         and src:find('a == "open-ab"', 1, true) ~= nil)
+  check("abproj-pin: the global header A/B button is GONE",
+        src:find('id="b-ab"', 1, true) == nil
+        and src:find('onclick="openAb()"', 1, true) == nil)
+  check("abproj-pin: A/B lives in the tile right-click context menu, scoped to its folder",
+        src:find("A/B fork-to-compare", 1, true) ~= nil
+        and src:find('openAb(" .. jsString(item.cwd or "")', 1, true) ~= nil)
+  check("abproj-pin: openAb(repo) pre-fills the (still-editable) repo field",
+        src:find("function openAb(repo){ AB_PREFILL", 1, true) ~= nil
+        and src:find('rp.value = AB_PREFILL', 1, true) ~= nil)
   check("dr7-pin: launch creates a worktree per variant then spawns into it (cold-start)",
         src:find("function FX.abLaunch(spec)", 1, true) ~= nil
         and src:find("core.abCohortPlan(spec)", 1, true) ~= nil

@@ -159,6 +159,11 @@ tile to **jump** straight to its window. **Right-click** a tile for a context me
   folder, recorded in `~/.claude/cc-labels.json`), so the name sticks even as the
   agent changes directories, and survives a Hammerspoon reload, a new instance, and
   close/reopen in the same folder. Relabel back to the folder name (or blank) to clear it.
+- **⚖ A/B fork-to-compare…** — run the same task as 2+ variants (different model
+  and/or prompt) in **isolated git worktrees** of this project, then score them side by
+  side and keep the winner. Opens the A/B panel **pre-scoped to this tile's folder**
+  (the repo field stays editable, so you can retarget or A/B any repo). *This is a
+  per-project action — it used to be a global button in the header.*
 - **Clear conversation / Compact** — native confirm, then run `/clear` or `/compact`
   in the session (same effect as the detail-panel buttons).
 - **Close instance** — confirm, then best-effort close the editor window (⌘⇧W) and

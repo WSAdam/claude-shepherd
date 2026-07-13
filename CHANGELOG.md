@@ -4,6 +4,16 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-07-13 — A/B fork-to-compare is now a per-project action
+
+The **⚖ A/B** entry moved off the global header (next to **New**) into the **tile
+right-click context menu**, where it belongs — A/B forks a specific project's repo, so
+it's a per-project action, not a fleet-wide one. Right-click a tile → **⚖ A/B
+fork-to-compare…** opens the A/B panel **pre-filled with that tile's folder** (the repo
+field stays editable, so you can still retarget or A/B any repo). The header button, its
+`#b-ab` styling, and the stale `onclick="openAb()"` test pin are gone; `openAb(repo)` now
+takes the pre-fill and the `open-ab` bridge / worktree-launch / judge flow are unchanged.
+
 ## 2026-07-13 — Multi-agent bug sweep #4: 36 confirmed fixes across every flow
 
 A find → adversarially-verify → fix → regression-test sweep over all ten key flows
