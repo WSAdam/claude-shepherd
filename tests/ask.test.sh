@@ -65,4 +65,34 @@ assert_json "F-001: pending tool is now the Write"        "$F" '.pending.tool' "
 assert_json "F-001: pending summary replaced by the Write" "$F" '.pending.summary' "/U/x/y.txt"
 assert_json "F-001: stale ask dropped on pending replace"  "$F" '.pending|has("ask")' "false"
 
+# --- stuck-approval regression (the "canary" bug): an AskUserQuestion armed via a
+# PermissionRequest recorded summary = the bare tool name (summarize_tool has no Ask
+# arm), and the resolve required the incoming QUESTION to equal that summary -- so the
+# ask's own PostToolUse never cleared it and the answered session showed "needs you"
+# forever while it worked on. Two fixes: the PermissionRequest arm now captures the
+# question + options, and the posttooluse resolve clears an AskUserQuestion on a
+# tool-name match (its own PostToolUse == the answer). ---
+SID2="ask2"; F2="$TMP/$SID2.json"
+PRQ='{"session_id":"ask2","cwd":"/U/x/proj","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Ship it?","header":"Go","multiSelect":false,"options":[{"label":"Yes","description":"go"},{"label":"No","description":"stop"}]}]}}'
+ev permissionrequest "$PRQ"
+assert_json "PRQ ask -> approval"                       "$F2" '.status' "approval"
+assert_json "PRQ ask summary is the QUESTION (not the tool name)" "$F2" '.pending.summary' "Ship it?"
+assert_json "PRQ ask captures options for the panel"    "$F2" '.pending.ask[0].options[0].label' "Yes"
+# a sibling Bash posttooluse must STILL keep the live approval (guard intact)
+ev posttooluse '{"session_id":"ask2","cwd":"/U/x/proj","tool_name":"Bash","tool_input":{"command":"ls"}}'
+assert_json "PRQ ask: sibling Bash keeps approval"      "$F2" '.status' "approval"
+# the ask's OWN posttooluse clears it even though the question text differs from a
+# tool-name summary (this is the exact clear that was broken)
+ev posttooluse "$PRQ"
+assert_json "PRQ ask: own posttooluse -> working"       "$F2" '.status' "working"
+assert_json "PRQ ask: own posttooluse clears pending"   "$F2" '.pending' "null"
+
+# And the pre-existing malformed shape (summary == the tool name, no ask -- the shape
+# already on disk for the stuck tile) still clears on the ask's PostToolUse.
+SID3="ask3"; F3="$TMP/$SID3.json"
+printf '{"session_id":"ask3","name":"c","cwd":"/U/x/proj","status":"approval","updated":1,"since":1,"pending":{"tool":"AskUserQuestion","summary":"AskUserQuestion","message":"AskUserQuestion"}}\n' > "$F3"
+ev posttooluse '{"session_id":"ask3","cwd":"/U/x/proj","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Whatever?","header":"H","multiSelect":false,"options":[{"label":"X","description":"x"}]}]}}'
+assert_json "legacy tool-name-summary pending clears on ask posttooluse" "$F3" '.status' "working"
+assert_json "legacy tool-name-summary pending is removed"                "$F3" '.pending' "null"
+
 finish

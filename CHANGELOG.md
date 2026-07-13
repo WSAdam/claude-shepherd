@@ -4,6 +4,26 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-07-13 — Fix: a tile stuck on "Needs you" (AskUserQuestion) while it works
+
+A session that asked an **AskUserQuestion**, got answered, and kept working could stay
+pinned on **"Needs you" / approval** forever (observed live on `canary`). Root cause was
+an asymmetry in `cc-status.sh`: when the ask was armed via a **PermissionRequest** (not a
+PreToolUse), `summarize_tool` — which has no AskUserQuestion arm — recorded
+`pending.summary` as the bare tool name `"AskUserQuestion"`. But the native-prompt guard's
+resolve cleared the pending **only if the answer's question text equaled that summary**, so
+`"<real question>" ≠ "AskUserQuestion"` → the ask's own PostToolUse never cleared it, and
+the guard then shielded `status:approval` against every subsequent working write (only
+`updated` flowed through, so the tile looked fresh while stuck). This was a regression from
+the native-prompt shielding fix.
+
+Two fixes: the resolve now clears an AskUserQuestion pending on a **tool-name match** (it's
+answered sequentially, so its own PostToolUse *is* the resolution) while keeping the
+summary check for every other tool; and the **PermissionRequest path now captures the
+question + options** (like PreToolUse), so the summary is the question and the panel can
+render the choices. Regression-tested (incl. the exact stuck-shape on disk), and the
+resolve fix is mutation-verified.
+
 ## 2026-07-13 — A/B fork-to-compare is now a per-project action
 
 The **⚖ A/B** entry moved off the global header (next to **New**) into the **tile

@@ -154,7 +154,16 @@ case "$EVENT" in
     # exact command/file being requested rather than a generic message.
     STATUS="approval"; SET_PENDING="1"; CLEAR_PENDING=""
     PENDING_TOOL="$(cc_get "$INPUT" '.tool_name')"
-    PENDING_MSG="$(summarize_tool "$INPUT" "$PENDING_TOOL")"
+    # AskUserQuestion can arrive as a PermissionRequest too (not only PreToolUse).
+    # Capture its questions/options like the PreToolUse arm so the summary is the
+    # QUESTION (not the bare tool name) and the panel can render the choices --
+    # summarize_tool has no AskUserQuestion case, so it would otherwise fall through
+    # to the tool name and leave an option-less "wants: AskUserQuestion" tile.
+    if [ "$PENDING_TOOL" = "AskUserQuestion" ]; then
+      ASK_JSON="$(printf '%s' "$INPUT" | jq -c '.tool_input.questions // empty' 2>/dev/null)"
+      PENDING_MSG="$(cc_get "$INPUT" '.tool_input.questions[0].question')"
+    fi
+    [ -n "$PENDING_MSG" ] || PENDING_MSG="$(summarize_tool "$INPUT" "$PENDING_TOOL")"
     ;;
   notification)
     NTYPE="$(cc_get "$INPUT" '.notification_type')"
@@ -342,12 +351,19 @@ case "$EVENT" in
         P_TOOL="$(cc_read_field "$KEY" '.pending.tool')"
         if [ -n "$P_TOOL" ] && [ "$P_TOOL" = "$(cc_get "$INPUT" '.tool_name')" ]; then
           if [ "$P_TOOL" = "AskUserQuestion" ]; then
-            EV_SUM="$(cc_get "$INPUT" '.tool_input.questions[0].question')"
+            # AskUserQuestion is answered SEQUENTIALLY (one in flight per turn), so its
+            # OWN PostToolUse IS the resolution -- a tool-name match is enough. Requiring
+            # the incoming question to equal the recorded summary wrongly pinned the tile
+            # on "approval" forever whenever the pending was armed via a PermissionRequest
+            # (summary = the bare tool name -- summarize_tool has no Ask arm), so the
+            # answered session showed "needs you" while it worked on. The summary check
+            # still guards every OTHER tool (a pending Bash vs a different Bash completing).
+            NATIVE_GUARDED=""
           else
             EV_SUM="$(summarize_tool "$INPUT" "$P_TOOL")"
+            [ -n "$EV_SUM" ] || EV_SUM="$P_TOOL"
+            [ "$EV_SUM" = "$(cc_read_field "$KEY" '.pending.summary')" ] && NATIVE_GUARDED=""
           fi
-          [ -n "$EV_SUM" ] || EV_SUM="$P_TOOL"
-          [ "$EV_SUM" = "$(cc_read_field "$KEY" '.pending.summary')" ] && NATIVE_GUARDED=""
         fi
       fi
     fi ;;
