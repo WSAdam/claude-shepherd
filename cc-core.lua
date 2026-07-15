@@ -8848,6 +8848,57 @@ M.APPEARANCE_THEMES = {
     stWorking = "#f5b50a", stDone = "#22c55e", stApproval = "#ef4444", stError = "#ec4899",
     ok = "#22c55e", danger = "#ef4444", warn = "#f5b50a", purple = "#a98bff",
   } },
+  -- Dark reds + blacks --------------------------------------------------------
+  ember = { label = "Ember", scheme = "dark", look = "card", tokens = {
+    bg = "#140a09", bgOverlay = "#100706", surface = "#241413", surface2 = "#1a0f0e",
+    surface3 = "#1e1110", surfaceHover = "#331b18", border = "#45231f", borderWeak = "#2c1613",
+    text = "#f3e6e3", text2 = "#e0c6c1", text3 = "#bd9c96", muted = "#9c7a74", dim = "#6f524d", textStrong = "#fff5f2",
+    accent = "#ff5a3c", accent2 = "#ff8c42", accentText = "#ff9d84", accentBg = "#37130c",
+    stIdle = "#7a5a54", stWorking = "#f5a623", stDone = "#54d17a", stApproval = "#ff5a3c", stError = "#ff77aa",
+    ok = "#54d17a", danger = "#ff4d3d", warn = "#f5a623", purple = "#cc8bff",
+  } },
+  bloodmoon = { label = "Blood Moon", scheme = "dark", look = "card", tokens = {
+    bg = "#0d0709", bgOverlay = "#090507", surface = "#1d0f13", surface2 = "#140b0e",
+    surface3 = "#180c10", surfaceHover = "#2a151c", border = "#3e1c27", borderWeak = "#26121a",
+    text = "#f1e1e7", text2 = "#dabcc7", text3 = "#b593a1", muted = "#946d7a", dim = "#684a54", textStrong = "#fff0f4",
+    accent = "#e11d48", accent2 = "#f43f5e", accentText = "#fb7185", accentBg = "#3a0d1c",
+    stIdle = "#6f505a", stWorking = "#eab308", stDone = "#34d399", stApproval = "#f43f5e", stError = "#e879f9",
+    ok = "#34d399", danger = "#f43f5e", warn = "#eab308", purple = "#c084fc",
+  } },
+  -- Dark greens + blacks ------------------------------------------------------
+  matrix = { label = "Matrix", scheme = "dark", look = "card", tokens = {
+    bg = "#000000", bgOverlay = "#000000", surface = "#0a130d", surface2 = "#07100a",
+    surface3 = "#060e08", surfaceHover = "#102013", border = "#1d3b23", borderWeak = "#122716",
+    text = "#c8f7d2", text2 = "#9ce8ac", text3 = "#6fbf83", muted = "#509465", dim = "#37704a", textStrong = "#e6ffec",
+    accent = "#00e676", accent2 = "#39ff9a", accentText = "#5cff9d", accentBg = "#042415",
+    stIdle = "#4a7a58", stWorking = "#eab308", stDone = "#00e676", stApproval = "#ff4d5e", stError = "#ff77c8",
+    ok = "#00e676", danger = "#ff4d5e", warn = "#eab308", purple = "#9d7bff",
+  } },
+  emerald = { label = "Emerald Night", scheme = "dark", look = "card", tokens = {
+    bg = "#06120f", bgOverlay = "#040e0b", surface = "#0f2019", surface2 = "#0a1712",
+    surface3 = "#0c1b15", surfaceHover = "#163027", border = "#204537", borderWeak = "#142e25",
+    text = "#dcf5ec", text2 = "#b9e6d6", text3 = "#8fc4b3", muted = "#669a8a", dim = "#497264", textStrong = "#effef8",
+    accent = "#2dd4bf", accent2 = "#34d399", accentText = "#5eead4", accentBg = "#0a2c24",
+    stIdle = "#5a8577", stWorking = "#fbbf24", stDone = "#34d399", stApproval = "#fb7185", stError = "#e879f9",
+    ok = "#34d399", danger = "#fb7185", warn = "#fbbf24", purple = "#a78bfa",
+  } },
+  -- Brighter -----------------------------------------------------------------
+  synthwave = { label = "Synthwave", scheme = "dark", look = "card", tokens = {
+    bg = "#1a0b2e", bgOverlay = "#150922", surface = "#2a1650", surface2 = "#200f3d",
+    surface3 = "#251345", surfaceHover = "#3a1f6b", border = "#4a2a7a", borderWeak = "#331d5a",
+    text = "#f5e9ff", text2 = "#e0c9ff", text3 = "#c0a0f0", muted = "#9a78d0", dim = "#6f52a0", textStrong = "#ffffff",
+    accent = "#ff2e97", accent2 = "#00e5ff", accentText = "#ff71c0", accentBg = "#3a1152",
+    stIdle = "#7a6aa0", stWorking = "#ffd23f", stDone = "#05ffa1", stApproval = "#ff2e63", stError = "#ff5cf4",
+    ok = "#05ffa1", danger = "#ff2e63", warn = "#ffd23f", purple = "#b967ff",
+  } },
+  cyberpunk = { label = "Cyberpunk", scheme = "dark", look = "card", tokens = {
+    bg = "#0a0a0f", bgOverlay = "#070709", surface = "#14141e", surface2 = "#0f0f17",
+    surface3 = "#12121a", surfaceHover = "#1e1e2c", border = "#2c2c3e", borderWeak = "#1d1d29",
+    text = "#f6f6ff", text2 = "#d6d6e8", text3 = "#a8a8c4", muted = "#7c7c98", dim = "#565670", textStrong = "#ffffff",
+    accent = "#fcee0a", accent2 = "#00fff5", accentText = "#fff95c", accentBg = "#2a2a08",
+    stIdle = "#6c6c88", stWorking = "#fcee0a", stDone = "#00ff9f", stApproval = "#ff003c", stError = "#ff00e5",
+    ok = "#00ff9f", danger = "#ff003c", warn = "#fcee0a", purple = "#bd6bff",
+  } },
 }
 
 -- Font-family stacks the Appearance > Font picker maps to (--font token). Keys are

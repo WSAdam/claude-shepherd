@@ -6713,8 +6713,29 @@ do
   eq("appearance: gruvboxlight scheme light", core.resolveAppearance({ theme = "gruvboxlight" }).scheme, "light")
   eq("appearance: monokai accent", core.resolveAppearance({ theme = "monokai" }).tokens.accent, "#66d9ef")
   eq("appearance: oled true-black bg", core.resolveAppearance({ theme = "oled" }).tokens.bg, "#000000")
+  -- new palettes (2 dark-red, 2 dark-green, 2 bright)
+  eq("appearance: ember accent", core.resolveAppearance({ theme = "ember" }).tokens.accent, "#ff5a3c")
+  eq("appearance: bloodmoon accent", core.resolveAppearance({ theme = "bloodmoon" }).tokens.accent, "#e11d48")
+  eq("appearance: matrix true-black bg", core.resolveAppearance({ theme = "matrix" }).tokens.bg, "#000000")
+  eq("appearance: emerald accent", core.resolveAppearance({ theme = "emerald" }).tokens.accent, "#2dd4bf")
+  eq("appearance: synthwave accent", core.resolveAppearance({ theme = "synthwave" }).tokens.accent, "#ff2e97")
+  eq("appearance: cyberpunk accent", core.resolveAppearance({ theme = "cyberpunk" }).tokens.accent, "#fcee0a")
   do local n = 0; for _ in pairs(core.APPEARANCE_THEMES) do n = n + 1 end
-     check("appearance: 16 built-in themes", n == 16) end
+     check("appearance: 22 built-in themes", n == 22) end
+  -- structural validity of EVERY theme: required fields + all token values are #rrggbb
+  do
+    local bad = {}
+    for key, t in pairs(core.APPEARANCE_THEMES) do
+      if type(t.label) ~= "string" or t.label == "" then bad[#bad + 1] = key .. ".label" end
+      if t.scheme ~= "dark" and t.scheme ~= "light" then bad[#bad + 1] = key .. ".scheme" end
+      if t.look ~= "card" and t.look ~= "slate" and t.look ~= "flat" then bad[#bad + 1] = key .. ".look" end
+      if type(t.tokens) ~= "table" then bad[#bad + 1] = key .. ".tokens"
+      else for tk, tv in pairs(t.tokens) do
+        if type(tv) ~= "string" or not tv:match("^#%x%x%x%x%x%x$") then bad[#bad + 1] = key .. "." .. tk end
+      end end
+    end
+    check("appearance: every theme is structurally valid (#rrggbb tokens)  [" .. table.concat(bad, ",") .. "]", #bad == 0)
+  end
 
   -- font: default system, valid passes, junk -> system; appearanceCss emits --font stack
   eq("appearance: default font system", core.resolveAppearance({}).font, "system")

@@ -4,6 +4,19 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-07-15 — Six new Appearance themes (22 total)
+
+Added to Settings → Appearance (each a token delta over Refined Midnight, live-previewed):
+
+- **Ember** & **Blood Moon** — dark reds on near-black (warm ember-orange / cool crimson).
+- **Matrix** & **Emerald Night** — dark greens on black (phosphor-green terminal / jewel-toned teal-emerald).
+- **Synthwave** & **Cyberpunk** — bright neons (magenta+cyan on deep indigo / yellow+cyan on near-black).
+
+Status colors stay semantically distinct in every palette (done = green, "needs you" =
+red, working = amber/yellow, error = magenta). A new test validates that **every** theme
+(all 22) is structurally sound — required `label`/`scheme`/`look` and all token values a
+valid `#rrggbb` — so a typo in a palette fails CI instead of shipping a broken swatch.
+
 ## 2026-07-13 — Self-heal a tile stuck on "Needs you" while it's actually working
 
 A generalization of the earlier AskUserQuestion fix. A session can sit on
