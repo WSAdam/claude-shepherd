@@ -6422,6 +6422,40 @@ do
         core.transcriptResumed(huline("2026-06-18T14:00:01Z"), t0, 2) == false)
 end
 
+-- ---- stale-"approval" self-heal: transcriptAwaitingTool ---------------------
+do
+  local function toolUse(name)  -- an assistant turn that emitted a tool_use (awaiting)
+    return core.json.encode({ type = "assistant", timestamp = "2026-07-15T18:00:00Z",
+      message = { content = { { type = "text", text = "let me run this" },
+                              { type = "tool_use", name = name or "Bash", input = { command = "ls" } } } } })
+  end
+  local function toolResult()  -- the user turn carrying that tool's result (completed)
+    return core.json.encode({ type = "user", timestamp = "2026-07-15T18:00:01Z",
+      message = { content = { { type = "tool_result", content = "ok" } } } })
+  end
+  local function asstText()    -- an assistant turn that ended with plain text
+    return core.json.encode({ type = "assistant", timestamp = "2026-07-15T18:00:02Z",
+      message = { content = { { type = "text", text = "done thinking" } } } })
+  end
+  local attach = '{"type":"attachment","x":1}'  -- non-conversational noise, must be skipped
+  -- GENUINE block: newest real event is a dangling tool_use -> awaiting (keep approval)
+  check("awaiting: dangling tool_use -> true", core.transcriptAwaitingTool(toolUse("Bash")) == true)
+  check("awaiting: dangling AskUserQuestion -> true", core.transcriptAwaitingTool(toolUse("AskUserQuestion")) == true)
+  -- STALE: the tool completed (result landed) -> not awaiting (heal to working)
+  check("awaiting: tool_use then tool_result -> false",
+        core.transcriptAwaitingTool(toolUse("Bash") .. "\n" .. toolResult()) == false)
+  -- attachment noise after the result is skipped; still not awaiting
+  check("awaiting: attachment after result is skipped -> false",
+        core.transcriptAwaitingTool(toolUse("Bash") .. "\n" .. toolResult() .. "\n" .. attach) == false)
+  -- assistant ended with text (no tool) -> not awaiting
+  check("awaiting: assistant text turn -> false", core.transcriptAwaitingTool(asstText()) == false)
+  -- newest wins: an OLD dangling tool_use followed by a completed newer one -> not awaiting
+  check("awaiting: newest completed pair wins over an older tool_use",
+        core.transcriptAwaitingTool(toolUse("Bash") .. "\n" .. toolResult() .. "\n" .. toolUse("Bash") .. "\n" .. toolResult()) == false)
+  check("awaiting: empty/garbage -> false",
+        core.transcriptAwaitingTool("") == false and core.transcriptAwaitingTool("not json\n{bad") == false)
+end
+
 -- ---- userHasHumanText: genuine prompt vs IDE-context / meta / tool-result injection --
 do
   local function u(content, extra)

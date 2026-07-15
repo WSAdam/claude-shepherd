@@ -2572,6 +2572,40 @@ function M.transcriptResumed(text, updatedEpoch, slack)
   return false
 end
 
+-- True if the session is genuinely AWAITING a tool: the newest real conversational
+-- message in the transcript is an assistant turn that emitted a tool_use (so the tool
+-- has been requested but its result hasn't landed). A session BLOCKED on a native
+-- permission prompt / AskUserQuestion sits exactly here -- the tool_use is written to
+-- the transcript before the tool runs, and nothing follows until it's approved/answered.
+-- A session that is merely WORKING has a completed tool_result (or plain assistant text)
+-- as its newest event. Used to tell a genuine "needs you" approval from a STALE one the
+-- native-prompt guard never cleared (a missed/mismatched resolution event). Pure.
+function M.transcriptAwaitingTool(text)
+  if type(text) ~= "string" or #text == 0 then return false end
+  local lines = {}
+  for line in (text .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
+  for i = #lines, 1, -1 do
+    local line = lines[i]
+    if line:find("^%s*{") then
+      local okj, obj = pcall(function() return M.json.decode(line) end)
+      if okj and type(obj) == "table" and type(obj.message) == "table"
+         and (obj.type == "assistant" or obj.type == "user") then
+        -- newest real conversational message wins -- decide from it and stop. Only an
+        -- assistant turn still holding an unanswered tool_use counts as "awaiting"; a
+        -- user message (a tool_result landed, or a fresh human prompt) or assistant
+        -- text (the turn ended) means the session is not blocked on a tool.
+        if obj.type == "assistant" and type(obj.message.content) == "table" then
+          for _, c in ipairs(obj.message.content) do
+            if type(c) == "table" and c.type == "tool_use" then return true end
+          end
+        end
+        return false
+      end
+    end
+  end
+  return false
+end
+
 -- Classify an error message into a coarse CAUSE (L5 error-reason taxonomy): pure
 -- keyword match over the lowercased text, most-specific first. The caller may
 -- override from non-message signals (a usage-limit autoDeny -> budget_exceeded, the

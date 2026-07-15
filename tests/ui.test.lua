@@ -2193,6 +2193,22 @@ do
   check("#2-pin: latch reaped with the other per-key state",
         src:find("core.reapUnbacked(FX._healedDone, newPrev)", 1, true) ~= nil)
 
+  -- stale-approval heal: a TOOL-scoped approval whose transcript is not awaiting a tool
+  -- is stale (the native-prompt guard never got its resolution event) -> heal to working.
+  -- Gated on it.pending.tool (a bare-notification approval is never hidden), decided by
+  -- the pure+tested core.transcriptAwaitingTool, and latched like the done heal.
+  check("appheal-pin: latch on FX (200-local cap) + reaped",
+        src:find("FX._healedApproval = {}", 1, true) ~= nil
+        and src:find("core.reapUnbacked(FX._healedApproval, newPrev)", 1, true) ~= nil)
+  check("appheal-pin: only a tool-scoped approval is eligible (bare notification kept)",
+        src:find('it.status == "approval" and type(it.pending) == "table" and it.pending.tool', 1, true) ~= nil)
+  check("appheal-pin: heals only when the transcript is NOT awaiting a tool",
+        src:find("not core.transcriptAwaitingTool(tail)", 1, true) ~= nil
+        and src:find("FX._healedApproval[it.key] = it.updated", 1, true) ~= nil)
+  check("appheal-pin: no-tail tick carries the heal via the latch",
+        src:find("elseif tail == nil and FX._healedApproval[it.key] ~= nil", 1, true) ~= nil
+        and src:find("FX._healedApproval[it.key] == it.updated", 1, true) ~= nil)
+
   -- #4: per-task timing abandons taskStart only past the RESPAWN death threshold
   -- (autoRespawnStale, default 600s), not the 90s display staleness -- a healthy
   -- session running one long build/test goes display-stale mid-task and its

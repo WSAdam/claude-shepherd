@@ -349,6 +349,9 @@ function FX.log(m) print(m) end
 -- the heal fired (see the heal block in refresh). On FX (an existing module table),
 -- NOT a new top-level local -- this file is at Lua's 200-local ceiling.
 FX._healedDone = {}
+-- Stale-"approval" self-heal latch (same shape/rationale as _healedDone): tile key ->
+-- the frozen `updated` at the tick a stuck approval was healed to working.
+FX._healedApproval = {}
 -- Auto-respawn budget hold: budgetKey -> epoch deadline. A just-fired respawn charges
 -- respawnAttempts[budgetKey] and removeStatus()es the dead tile, so until the
 -- relaunch's SessionStart lands NO tile backs that key -- the liveBudgetKeys reap in
@@ -12752,6 +12755,29 @@ function FX._refreshBody()
     else
       FX._healedDone[it.key] = nil
     end
+    -- Stale-"approval" self-heal: the native-prompt guard holds status=approval until a
+    -- matching resolution event, but that event can be missed -- an AskUserQuestion armed
+    -- via a PermissionRequest, or a Bash whose PostToolUse summary never re-matches the
+    -- pending (rapid/parallel tool calls under acceptEdits) -- so the tile shows "Needs
+    -- you" for minutes while the session works on. A GENUINELY blocked session is awaiting
+    -- a tool (its newest transcript event is a dangling assistant tool_use); a working one
+    -- has a completed tool_result. So: a TOOL-scoped approval whose transcript is not
+    -- awaiting a tool is stale -> heal to working. Gated on it.pending.tool so a bare
+    -- notification "needs you" (no tool) is never hidden. Latched like the done heal so a
+    -- display-stale tick (tail==nil) carries the healed status instead of snapping back.
+    if it.status == "approval" and type(it.pending) == "table" and it.pending.tool then
+      if tail and not it.stale and not core.transcriptAwaitingTool(tail) then
+        it.status = "working"
+        FX._healedApproval[it.key] = it.updated
+      elseif tail == nil and FX._healedApproval[it.key] ~= nil
+         and FX._healedApproval[it.key] == it.updated then
+        it.status = "working"
+      else
+        FX._healedApproval[it.key] = nil
+      end
+    else
+      FX._healedApproval[it.key] = nil
+    end
     -- Frozen-on-API-error detection: a `working` session whose latest transcript event
     -- is an api_error aborted WITHOUT a Stop hook -- it's stuck "working" but actually
     -- stopped. Override the status to "error" so it renders distinctly + offers Continue.
@@ -13164,6 +13190,7 @@ function FX._refreshBody()
   core.reapUnbacked(taskStart, newPrev)
   core.reapUnbacked(loopAlerted, newPrev)
   core.reapUnbacked(FX._healedDone, newPrev)         -- stale-"done" self-heal latch
+  core.reapUnbacked(FX._healedApproval, newPrev)     -- stale-"approval" self-heal latch
   core.reapUnbacked(autoApproveFired, newPrev)       -- L5
   core.reapUnbacked(summaryState.fired, newPrev)     -- L5
   core.reapUnbacked(summaryState.pending, newPrev)   -- L5

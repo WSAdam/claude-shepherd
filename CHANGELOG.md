@@ -4,6 +4,27 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-07-13 — Self-heal a tile stuck on "Needs you" while it's actually working
+
+A generalization of the earlier AskUserQuestion fix. A session can sit on
+**"Needs you" / approval** for minutes while it's plainly working (seen live on
+`ChargebackSentinel`, running Bash after Bash under `acceptEdits`). The native-prompt
+guard holds `status=approval` until it sees a *matching* resolution event, but that
+event can be missed — a Bash whose PostToolUse summary never re-matches the pending
+(rapid/parallel tool calls), or any other summary drift — so the tile lies while
+`updated` keeps flowing (the guard lets it through, so it even looks fresh).
+
+cc-status.sh can't fix this at the per-event level without breaking the guard that
+protects a genuine approval from a *parallel subagent's* tool completing. So the
+dashboard now **self-heals a stale approval from the transcript**, mirroring the
+stale-"done" heal: a genuinely blocked session's newest transcript event is a **dangling
+assistant `tool_use`** (awaiting its result); a working one has a completed
+**`tool_result`**. New pure `core.transcriptAwaitingTool(tail)` makes that call, and a
+**tool-scoped** approval (`it.pending.tool` set — a bare-notification "needs you" is
+never hidden) whose transcript is *not* awaiting a tool is healed to **working**, latched
+like the done heal so a display-stale tick carries it. Behavior-tested (incl. against the
+live stuck transcript) and mutation-verified.
+
 ## 2026-07-13 — Fix: a tile stuck on "Needs you" (AskUserQuestion) while it works
 
 A session that asked an **AskUserQuestion**, got answered, and kept working could stay
