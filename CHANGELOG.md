@@ -4,6 +4,25 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-07-16 — Don't hide a REAL permission prompt as "Working" (fix the over-heal)
+
+Same-day follow-up to the "stop "Needs you" flashing" change, which over-corrected: it
+assumed a native Bash approval in a permissive mode was always an auto-running tool and
+healed it to **Working** — but `acceptEdits` does *not* auto-run every Bash (compound
+commands still pop the **"Allow this bash command?"** dialog), so a genuine, blocking
+prompt read as "Working."
+
+The real distinguisher is the hook Claude Code fires: a genuine prompt raises a
+**Notification** (the dialog), while an auto-running tool only fires a **PermissionRequest**
+(a permission check). `cc-status.sh` now marks the pending **`prompt: true`** when a
+permission/elicitation Notification arrives (or a bare notification) — including onto a
+pending a PermissionRequest already recorded, via the recursive merge — and
+`core.approvalHealable` treats a `prompt` pending like an AskUserQuestion / gate approval:
+it stays **"Needs you"** until the transcript shows it resolved. A native approval with no
+`prompt` flag (an auto-running Bash) still reads **Working**. Behavior-tested (dialog-up
+stays / resolved heals / auto-run heals), mutation-verified, plus `cc-status.sh` tests
+that a Notification sets the flag and a PermissionRequest alone does not.
+
 ## 2026-07-16 — "Needs you" no longer flashes for a tool that's just running
 
 The previous stale-approval heal only fired once the transcript showed a tool had

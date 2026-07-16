@@ -35,6 +35,9 @@ ev notification "{\"session_id\":\"$SID\",\"cwd\":\"$CWD\",\"notification_type\"
 assert_json "notification -> approval" "$F" '.status' "approval"
 assert_json "pending summary set" "$F" '.pending.summary' "Allow Bash: ls"
 assert_json "last_prompt preserved across merge" "$F" '.last_prompt' "Fix the login bug"
+# prompt-flag: a permission Notification (the dialog is genuinely up) marks the pending
+# so the panel's stale-approval heal never treats it as an auto-running tool.
+assert_json "notification marks pending.prompt=true (a live dialog)" "$F" '.pending.prompt' "true"
 
 # notification idle_prompt -> done
 ev notification "{\"session_id\":\"$SID\",\"cwd\":\"$CWD\",\"notification_type\":\"idle_prompt\",\"message\":\"waiting\"}"
@@ -95,10 +98,15 @@ ev pretooluse "{\"session_id\":\"$P\",\"cwd\":\"$PCWD\",\"tool_name\":\"Bash\",\
 ev permissionrequest "{\"session_id\":\"$P\",\"cwd\":\"$PCWD\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"npm test -- --watch\"}}"
 assert_json "permissionrequest -> approval" "$PF" '.status' "approval"
 assert_json "permissionrequest Bash -> exact command" "$PF" '.pending.summary' "npm test -- --watch"
+# a PermissionRequest alone is a permission CHECK (may auto-resolve) -> no prompt flag,
+# so the heal can treat an auto-running tool as working
+assert_json "permissionrequest alone does NOT mark pending.prompt" "$PF" '(.pending.prompt // false)' "false"
 
-# a later generic Notification must NOT clobber the precise pending
+# a later generic Notification must NOT clobber the precise pending, but DOES mark it as
+# a live dialog (the genuine "Allow this bash command?" prompt is up)
 ev notification "{\"session_id\":\"$P\",\"cwd\":\"$PCWD\",\"notification_type\":\"permission_prompt\",\"message\":\"Claude needs permission\"}"
 assert_json "notification keeps precise pending" "$PF" '.pending.summary' "npm test -- --watch"
+assert_json "notification marks the existing pending.prompt=true" "$PF" '.pending.prompt' "true"
 
 # Write tool -> file_path summary
 W="p2"; WCWD="/srv/web"; WF="$TMP/$W.json"

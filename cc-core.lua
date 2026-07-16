@@ -2612,24 +2612,29 @@ end
 --   * a gate-armed approval (it.gate == "waiting"): the headless gate is explicitly
 --     blocked on your Approve/Deny.
 -- A NATIVE (gate==nil) permission approval for a non-interactive tool (Bash/Write/Read/
--- ...) in a PERMISSIVE mode (acceptEdits / bypassPermissions / auto) is just a tool
--- auto-RUNNING -- the PermissionRequest fired but nothing is blocking on you -- so it's
--- working. Every Bash a busy session runs would otherwise flash "Needs you" for the whole
--- command. In default mode we stay conservative: a native prompt there CAN block, so heal
--- only once the transcript proves the tool completed. `awaiting` = transcriptAwaitingTool
--- on the freshly-read tail, or nil when the tail wasn't read this tick (unknown).
+-- ...) in a PERMISSIVE mode (acceptEdits / bypassPermissions / auto) is USUALLY just a
+-- tool auto-RUNNING -- the PermissionRequest fired but nothing is blocking on you -- so
+-- it's working; every Bash a busy session runs would otherwise flash "Needs you" for the
+-- whole command. The EXCEPTION is when Claude Code is genuinely prompting (the "Allow
+-- this bash command?" dialog): cc-status.sh marks that pending `prompt:true` (a
+-- Notification fired, not just a permission check), and those stay "needs you". So the
+-- gate is `prompt` (genuine dialog) / AskUserQuestion / gate=="waiting" -> genuine, else
+-- an auto-running tool. `awaiting` = transcriptAwaitingTool on the freshly-read tail, or
+-- nil when the tail wasn't read this tick (unknown).
 M.APPROVAL_AUTORUN_MODES = { acceptEdits = true, bypassPermissions = true, auto = true }
 function M.approvalHealable(it, awaiting)
   if type(it) ~= "table" or it.status ~= "approval" then return false end
   local pending = it.pending
   if type(pending) ~= "table" or not pending.tool then return false end
-  -- Genuine-interaction pendings: heal ONLY when the transcript definitively shows the
-  -- session is no longer awaiting a tool (an answered ask / a resolved gated tool whose
-  -- clearing event we missed). Unknown (nil) or still-awaiting (true) -> keep "needs you".
-  if it.gate == "waiting" or pending.tool == "AskUserQuestion" then
+  -- Genuine-interaction pendings (a live native prompt dialog, an AskUserQuestion, or a
+  -- gate-armed approval): heal ONLY when the transcript definitively shows the session is
+  -- no longer awaiting a tool (it was answered/approved/denied and moved on). Unknown
+  -- (nil) or still-awaiting (true) -> keep "needs you" -- never hide a live dialog.
+  if pending.prompt == true or it.gate == "waiting" or pending.tool == "AskUserQuestion" then
     return awaiting == false
   end
-  -- Native, non-interactive approval: in an auto-running mode it's a tool executing.
+  -- Native, non-interactive approval with no live dialog: in an auto-running mode it's a
+  -- tool executing -> working.
   if M.APPROVAL_AUTORUN_MODES[it.permission_mode] then return true end
   -- Default mode: conservative -- only heal once the tool has completed.
   return awaiting == false

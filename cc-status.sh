@@ -123,6 +123,7 @@ SET_PROMPT=""
 SET_PENDING=""
 CLEAR_PENDING="1"
 PENDING_IF_ABSENT=""
+PROMPT_ACTIVE=""   # a genuine native prompt is up (Notification) -> mark pending.prompt
 PENDING_TOOL=""
 PENDING_MSG=""
 ASK_JSON=""
@@ -172,8 +173,11 @@ case "$EVENT" in
     case "$NTYPE" in
       *permission*|*elicitation_dialog*)
         # Generic fallback: only sets pending if PermissionRequest hasn't
-        # already recorded the precise command (PENDING_IF_ABSENT).
-        STATUS="approval"; SET_PENDING="1"; CLEAR_PENDING=""; PENDING_IF_ABSENT="1"
+        # already recorded the precise command (PENDING_IF_ABSENT). A Notification
+        # means Claude Code is GENUINELY prompting (the "Allow this bash command?"
+        # dialog is up), not just a permission CHECK that may auto-resolve -- mark
+        # the pending so the panel's stale-approval heal never hides it as "working".
+        STATUS="approval"; SET_PENDING="1"; CLEAR_PENDING=""; PENDING_IF_ABSENT="1"; PROMPT_ACTIVE="1"
         PENDING_TOOL="$(cc_get "$INPUT" '.tool_name')"
         ;;
       *idle*)
@@ -182,7 +186,7 @@ case "$EVENT" in
       "")
         # Type unknown (older builds): a bare Notification usually means
         # Claude wants you. Treat as approval and surface the message.
-        STATUS="approval"; SET_PENDING="1"; CLEAR_PENDING=""; PENDING_IF_ABSENT="1"
+        STATUS="approval"; SET_PENDING="1"; CLEAR_PENDING=""; PENDING_IF_ABSENT="1"; PROMPT_ACTIVE="1"
         ;;
       *)
         # auth_success / elicitation_complete / etc. - don't change status,
@@ -312,6 +316,16 @@ if [ -n "$SET_PENDING" ]; then
   if [ -n "$ASK_JSON" ]; then
     PATCH="$(printf '%s' "$PATCH" | jq -c --argjson ask "$ASK_JSON" '.pending.ask = $ask')"
   fi
+fi
+
+# A genuine native prompt is up (a Notification fired -- the "Allow this bash command?"
+# dialog -- not just a permission CHECK that may auto-resolve): mark the pending so the
+# panel's stale-approval heal keeps showing "needs you" instead of treating an
+# auto-running tool as working. Marks the NEW pending just written OR the precise one a
+# PermissionRequest already recorded this turn (PENDING_IF_ABSENT kept it): the recursive
+# `*` merge below adds .pending.prompt without clobbering tool/summary.
+if [ -n "$PROMPT_ACTIVE" ]; then
+  PATCH="$(printf '%s' "$PATCH" | jq -c '.pending = ((.pending // {}) + {prompt:true})')"
 fi
 
 # R1-36: cc-approve.sh (the gate) and THIS hook run in parallel under the same

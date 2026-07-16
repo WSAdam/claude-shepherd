@@ -6467,6 +6467,16 @@ do
         core.approvalHealable(tile({ pending = { tool = "Bash" }, permission_mode = "bypassPermissions" }), nil) == true)
   check("approvalHealable: auto native Write -> heal (true)",
         core.approvalHealable(tile({ pending = { tool = "Write" }, permission_mode = "auto" }), true) == true)
+  -- a GENUINE native prompt dialog (pending.prompt=true, set by cc-status.sh on a
+  -- Notification) stays "needs you" even in a permissive mode, even mid-dialog
+  -- (awaiting=true) and when the tail is unknown (awaiting=nil) -- this is the
+  -- regression fix: "Allow this bash command?" must not read as "Working".
+  check("approvalHealable: prompt dialog up (acceptEdits Bash) awaiting -> keep (false)",
+        core.approvalHealable(tile({ pending = { tool = "Bash", prompt = true }, permission_mode = "acceptEdits" }), true) == false)
+  check("approvalHealable: prompt dialog up, no tail -> keep (false)",
+        core.approvalHealable(tile({ pending = { tool = "Bash", prompt = true }, permission_mode = "acceptEdits" }), nil) == false)
+  check("approvalHealable: prompt resolved (answered/denied, not awaiting) -> heal (true)",
+        core.approvalHealable(tile({ pending = { tool = "Bash", prompt = true }, permission_mode = "acceptEdits" }), false) == true)
   -- AskUserQuestion genuinely needs you until the transcript stops awaiting
   check("approvalHealable: AskUserQuestion awaiting -> keep (false)",
         core.approvalHealable(tile({ pending = { tool = "AskUserQuestion" }, permission_mode = "acceptEdits" }), true) == false)
