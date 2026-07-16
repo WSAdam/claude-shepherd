@@ -6720,8 +6720,19 @@ do
   eq("appearance: emerald accent", core.resolveAppearance({ theme = "emerald" }).tokens.accent, "#2dd4bf")
   eq("appearance: synthwave accent", core.resolveAppearance({ theme = "synthwave" }).tokens.accent, "#ff2e97")
   eq("appearance: cyberpunk accent", core.resolveAppearance({ theme = "cyberpunk" }).tokens.accent, "#fcee0a")
+  -- neon family (Cyberpunk DNA): 3 reds, 3 greens, 4 more bright neons
+  eq("appearance: redline accent", core.resolveAppearance({ theme = "redline" }).tokens.accent, "#ff0040")
+  eq("appearance: magma accent", core.resolveAppearance({ theme = "magma" }).tokens.accent, "#ff3d00")
+  eq("appearance: plasma accent", core.resolveAppearance({ theme = "plasma" }).tokens.accent, "#ff0059")
+  eq("appearance: acid accent", core.resolveAppearance({ theme = "acid" }).tokens.accent, "#39ff14")
+  eq("appearance: toxic accent", core.resolveAppearance({ theme = "toxic" }).tokens.accent, "#ccff00")
+  eq("appearance: spearmint accent", core.resolveAppearance({ theme = "spearmint" }).tokens.accent, "#00ffa3")
+  eq("appearance: tron accent", core.resolveAppearance({ theme = "tron" }).tokens.accent, "#00fff5")
+  eq("appearance: hotline accent", core.resolveAppearance({ theme = "hotline" }).tokens.accent, "#ff2bd6")
+  eq("appearance: voltage accent", core.resolveAppearance({ theme = "voltage" }).tokens.accent, "#b026ff")
+  eq("appearance: laser accent", core.resolveAppearance({ theme = "laser" }).tokens.accent, "#00b3ff")
   do local n = 0; for _ in pairs(core.APPEARANCE_THEMES) do n = n + 1 end
-     check("appearance: 22 built-in themes", n == 22) end
+     check("appearance: 32 built-in themes", n == 32) end
   -- structural validity of EVERY theme: required fields + all token values are #rrggbb
   do
     local bad = {}

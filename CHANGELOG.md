@@ -4,6 +4,21 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-07-16 — Ten more neon themes (Cyberpunk family; 32 total)
+
+More in the Cyberpunk vein (near-black base + high-contrast neon accents), weighted to
+reds and greens as requested:
+
+- **Reds** — **Redline** (neon red + cyan), **Magma** (orange-red + gold), **Plasma**
+  (crimson-pink + cyan).
+- **Greens** — **Acid** (lime + magenta), **Toxic** (chartreuse + cyan), **Spearmint**
+  (mint + magenta).
+- **More** — **Tron** (cyan + orange), **Hotline** (hot magenta + cyan), **Voltage**
+  (electric purple + lime), **Laser** (electric blue + magenta).
+
+Status colors stay semantically distinct in each (done = green, "needs you" = red,
+working = amber, error = magenta). Covered by the same all-themes structural validator.
+
 ## 2026-07-15 — Six new Appearance themes (22 total)
 
 Added to Settings → Appearance (each a token delta over Refined Midnight, live-previewed):

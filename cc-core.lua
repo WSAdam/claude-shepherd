@@ -8899,6 +8899,90 @@ M.APPEARANCE_THEMES = {
     stIdle = "#6c6c88", stWorking = "#fcee0a", stDone = "#00ff9f", stApproval = "#ff003c", stError = "#ff00e5",
     ok = "#00ff9f", danger = "#ff003c", warn = "#fcee0a", purple = "#bd6bff",
   } },
+  -- Neon family (Cyberpunk DNA: near-black base + high-contrast neon accents) ---
+  -- Neon reds:
+  redline = { label = "Redline", scheme = "dark", look = "card", tokens = {
+    bg = "#0c0709", bgOverlay = "#080506", surface = "#170d10", surface2 = "#110a0c",
+    surface3 = "#140b0e", surfaceHover = "#211318", border = "#33191f", borderWeak = "#201216",
+    text = "#ffeef0", text2 = "#f0ccd2", text3 = "#c99aa2", muted = "#9c7079", dim = "#6e4a52", textStrong = "#ffffff",
+    accent = "#ff0040", accent2 = "#00e5ff", accentText = "#ff4d6d", accentBg = "#2e0512",
+    stIdle = "#6e4a52", stWorking = "#ffcc00", stDone = "#00ff9f", stApproval = "#ff0040", stError = "#ff2bd6",
+    ok = "#00ff9f", danger = "#ff0040", warn = "#ffcc00", purple = "#b26bff",
+  } },
+  magma = { label = "Magma", scheme = "dark", look = "card", tokens = {
+    bg = "#0d0806", bgOverlay = "#090504", surface = "#1a0f09", surface2 = "#130b07",
+    surface3 = "#160d08", surfaceHover = "#241408", border = "#3a1f0e", borderWeak = "#25140a",
+    text = "#fff0e6", text2 = "#f3d3bd", text3 = "#cda385", muted = "#9c7758", dim = "#6f5138", textStrong = "#ffffff",
+    accent = "#ff3d00", accent2 = "#ffc400", accentText = "#ff7a3d", accentBg = "#2e0f00",
+    stIdle = "#7a5a3a", stWorking = "#ffc400", stDone = "#8dff00", stApproval = "#ff3d00", stError = "#ff2bd6",
+    ok = "#8dff00", danger = "#ff3d00", warn = "#ffc400", purple = "#c46bff",
+  } },
+  plasma = { label = "Plasma", scheme = "dark", look = "card", tokens = {
+    bg = "#0d0609", bgOverlay = "#090406", surface = "#190c11", surface2 = "#12090c",
+    surface3 = "#150a0e", surfaceHover = "#251219", border = "#3c1826", borderWeak = "#261019",
+    text = "#ffe9ef", text2 = "#f3c6d2", text3 = "#cd97a6", muted = "#9c6f7c", dim = "#6e4a55", textStrong = "#ffffff",
+    accent = "#ff0059", accent2 = "#00e5ff", accentText = "#ff4d84", accentBg = "#2e001a",
+    stIdle = "#7a4a5a", stWorking = "#ffcc00", stDone = "#00ff9f", stApproval = "#ff0059", stError = "#ff2bd6",
+    ok = "#00ff9f", danger = "#ff0059", warn = "#ffcc00", purple = "#c46bff",
+  } },
+  -- Neon greens:
+  acid = { label = "Acid", scheme = "dark", look = "card", tokens = {
+    bg = "#080d07", bgOverlay = "#050905", surface = "#0e1a0b", surface2 = "#0a1308",
+    surface3 = "#0c160a", surfaceHover = "#152510", border = "#1f3a17", borderWeak = "#142612",
+    text = "#eeffe6", text2 = "#cdf0bd", text3 = "#9fca8c", muted = "#749c60", dim = "#4f7040", textStrong = "#ffffff",
+    accent = "#39ff14", accent2 = "#ff2e97", accentText = "#7dff5c", accentBg = "#0c2e00",
+    stIdle = "#5a7a48", stWorking = "#eaff00", stDone = "#00ff9f", stApproval = "#ff2e5c", stError = "#ff2bd6",
+    ok = "#00ff9f", danger = "#ff2e5c", warn = "#eaff00", purple = "#b26bff",
+  } },
+  toxic = { label = "Toxic", scheme = "dark", look = "card", tokens = {
+    bg = "#0a0d05", bgOverlay = "#070904", surface = "#141a08", surface2 = "#0e1306",
+    surface3 = "#111607", surfaceHover = "#1e2510", border = "#333a12", borderWeak = "#20260c",
+    text = "#f6ffe0", text2 = "#e0f0b8", text3 = "#b6ca86", muted = "#889c58", dim = "#617038", textStrong = "#ffffff",
+    accent = "#ccff00", accent2 = "#00fff5", accentText = "#e0ff5c", accentBg = "#252e00",
+    stIdle = "#6c7a3a", stWorking = "#ccff00", stDone = "#00ff9f", stApproval = "#ff2e5c", stError = "#ff2bd6",
+    ok = "#00ff9f", danger = "#ff2e5c", warn = "#ccff00", purple = "#b26bff",
+  } },
+  spearmint = { label = "Spearmint", scheme = "dark", look = "card", tokens = {
+    bg = "#05100c", bgOverlay = "#040b08", surface = "#0a1c15", surface2 = "#07140f",
+    surface3 = "#091812", surfaceHover = "#0f2c22", border = "#154034", borderWeak = "#0d2c22",
+    text = "#e6fff4", text2 = "#bdf3dd", text3 = "#8ccdb4", muted = "#5f9c84", dim = "#3f705c", textStrong = "#ffffff",
+    accent = "#00ffa3", accent2 = "#ff2bd6", accentText = "#5cffc0", accentBg = "#002e20",
+    stIdle = "#4a7a68", stWorking = "#ffcc00", stDone = "#39ff14", stApproval = "#ff2e5c", stError = "#ff2bd6",
+    ok = "#39ff14", danger = "#ff2e5c", warn = "#ffcc00", purple = "#b26bff",
+  } },
+  -- More bright neons:
+  tron = { label = "Tron", scheme = "dark", look = "card", tokens = {
+    bg = "#05090d", bgOverlay = "#040609", surface = "#0b141a", surface2 = "#080f14",
+    surface3 = "#0a1217", surfaceHover = "#122029", border = "#173341", borderWeak = "#0f2530",
+    text = "#e6faff", text2 = "#bde8f3", text3 = "#8cbccd", muted = "#5f8a9c", dim = "#3f6070", textStrong = "#ffffff",
+    accent = "#00fff5", accent2 = "#ff9d00", accentText = "#5cfff2", accentBg = "#002e2c",
+    stIdle = "#4a707a", stWorking = "#ff9d00", stDone = "#00ff9f", stApproval = "#ff2e5c", stError = "#ff2bd6",
+    ok = "#00ff9f", danger = "#ff2e5c", warn = "#ff9d00", purple = "#8c6bff",
+  } },
+  hotline = { label = "Hotline", scheme = "dark", look = "card", tokens = {
+    bg = "#0d060b", bgOverlay = "#090407", surface = "#190d16", surface2 = "#120a10",
+    surface3 = "#150b13", surfaceHover = "#241323", border = "#3a1934", borderWeak = "#251222",
+    text = "#ffe9fb", text2 = "#f3c6ec", text3 = "#cd97c2", muted = "#9c6f93", dim = "#6e4a66", textStrong = "#ffffff",
+    accent = "#ff2bd6", accent2 = "#00fff5", accentText = "#ff6be0", accentBg = "#2e0026",
+    stIdle = "#7a4a72", stWorking = "#ffcc00", stDone = "#00ff9f", stApproval = "#ff2e5c", stError = "#ff2bd6",
+    ok = "#00ff9f", danger = "#ff2e5c", warn = "#ffcc00", purple = "#c46bff",
+  } },
+  voltage = { label = "Voltage", scheme = "dark", look = "card", tokens = {
+    bg = "#0a0710", bgOverlay = "#07050b", surface = "#150e22", surface2 = "#0f0a19",
+    surface3 = "#120c1d", surfaceHover = "#20163a", border = "#2f1f52", borderWeak = "#1f1538",
+    text = "#f0e9ff", text2 = "#d6c6f3", text3 = "#a897cd", muted = "#7c6f9c", dim = "#564a70", textStrong = "#ffffff",
+    accent = "#b026ff", accent2 = "#39ff14", accentText = "#c96bff", accentBg = "#1f0033",
+    stIdle = "#6a5a8a", stWorking = "#ffcc00", stDone = "#39ff14", stApproval = "#ff2e5c", stError = "#ff2bd6",
+    ok = "#39ff14", danger = "#ff2e5c", warn = "#ffcc00", purple = "#b026ff",
+  } },
+  laser = { label = "Laser", scheme = "dark", look = "card", tokens = {
+    bg = "#05070d", bgOverlay = "#040509", surface = "#0b1020", surface2 = "#080c17",
+    surface3 = "#0a0e1b", surfaceHover = "#121a33", border = "#17264a", borderWeak = "#0f1a33",
+    text = "#e6ecff", text2 = "#bdccf3", text3 = "#8ca0cd", muted = "#5f739c", dim = "#3f5070", textStrong = "#ffffff",
+    accent = "#00b3ff", accent2 = "#ff2bd6", accentText = "#5cc0ff", accentBg = "#002a4d",
+    stIdle = "#4a5f7a", stWorking = "#ffcc00", stDone = "#00ff9f", stApproval = "#ff2e5c", stError = "#ff2bd6",
+    ok = "#00ff9f", danger = "#ff2e5c", warn = "#ffcc00", purple = "#8c6bff",
+  } },
 }
 
 -- Font-family stacks the Appearance > Font picker maps to (--font token). Keys are
