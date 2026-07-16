@@ -2202,11 +2202,12 @@ do
         and src:find("core.reapUnbacked(FX._healedApproval, newPrev)", 1, true) ~= nil)
   check("appheal-pin: only a tool-scoped approval is eligible (bare notification kept)",
         src:find('it.status == "approval" and type(it.pending) == "table" and it.pending.tool', 1, true) ~= nil)
-  check("appheal-pin: heals only when the transcript is NOT awaiting a tool",
-        src:find("not core.transcriptAwaitingTool(tail)", 1, true) ~= nil
+  check("appheal-pin: decision delegated to pure core.approvalHealable(it, awaiting)",
+        src:find("core.approvalHealable(it, awaiting)", 1, true) ~= nil
+        and src:find("awaiting = core.transcriptAwaitingTool(tail)", 1, true) ~= nil
         and src:find("FX._healedApproval[it.key] = it.updated", 1, true) ~= nil)
   check("appheal-pin: no-tail tick carries the heal via the latch",
-        src:find("elseif tail == nil and FX._healedApproval[it.key] ~= nil", 1, true) ~= nil
+        src:find("elseif awaiting == nil and FX._healedApproval[it.key] ~= nil", 1, true) ~= nil
         and src:find("FX._healedApproval[it.key] == it.updated", 1, true) ~= nil)
 
   -- #4: per-task timing abandons taskStart only past the RESPAWN death threshold

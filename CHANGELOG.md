@@ -4,6 +4,23 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-07-16 — "Needs you" no longer flashes for a tool that's just running
+
+The previous stale-approval heal only fired once the transcript showed a tool had
+*completed* — so while a Bash command was auto-running (its `tool_use` still dangling,
+no result yet), the tile flashed **"Needs you"** for the whole command. Under
+`acceptEdits`/`auto`/`bypassPermissions`, where every tool auto-runs, that's a false
+alarm on essentially every Bash.
+
+The heal decision moved into pure `core.approvalHealable(it, awaiting)`: a **native**
+(non-gate) permission approval for a non-interactive tool in a permissive mode is a tool
+**running → working**, healed immediately (it doesn't need you). Genuine interaction is
+untouched — an **AskUserQuestion** and a **gate-armed** approval (`gate == "waiting"`)
+still show "Needs you" until the transcript shows they're resolved, and **default** mode
+stays conservative (a native prompt there can truly block, so it heals only once the tool
+completes). Behavior-tested (11 cases incl. the exact acceptEdits-Bash case) and
+mutation-verified.
+
 ## 2026-07-16 — Ten more neon themes (Cyberpunk family; 32 total)
 
 More in the Cyberpunk vein (near-black base + high-contrast neon accents), weighted to

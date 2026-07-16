@@ -2606,6 +2606,35 @@ function M.transcriptAwaitingTool(text)
   return false
 end
 
+-- Should a status=="approval" tile be HEALED to "working" (i.e. it does NOT actually
+-- need you)? An approval means "waiting on the human" -- but that is only GENUINE for:
+--   * an AskUserQuestion pending (a real question), or
+--   * a gate-armed approval (it.gate == "waiting"): the headless gate is explicitly
+--     blocked on your Approve/Deny.
+-- A NATIVE (gate==nil) permission approval for a non-interactive tool (Bash/Write/Read/
+-- ...) in a PERMISSIVE mode (acceptEdits / bypassPermissions / auto) is just a tool
+-- auto-RUNNING -- the PermissionRequest fired but nothing is blocking on you -- so it's
+-- working. Every Bash a busy session runs would otherwise flash "Needs you" for the whole
+-- command. In default mode we stay conservative: a native prompt there CAN block, so heal
+-- only once the transcript proves the tool completed. `awaiting` = transcriptAwaitingTool
+-- on the freshly-read tail, or nil when the tail wasn't read this tick (unknown).
+M.APPROVAL_AUTORUN_MODES = { acceptEdits = true, bypassPermissions = true, auto = true }
+function M.approvalHealable(it, awaiting)
+  if type(it) ~= "table" or it.status ~= "approval" then return false end
+  local pending = it.pending
+  if type(pending) ~= "table" or not pending.tool then return false end
+  -- Genuine-interaction pendings: heal ONLY when the transcript definitively shows the
+  -- session is no longer awaiting a tool (an answered ask / a resolved gated tool whose
+  -- clearing event we missed). Unknown (nil) or still-awaiting (true) -> keep "needs you".
+  if it.gate == "waiting" or pending.tool == "AskUserQuestion" then
+    return awaiting == false
+  end
+  -- Native, non-interactive approval: in an auto-running mode it's a tool executing.
+  if M.APPROVAL_AUTORUN_MODES[it.permission_mode] then return true end
+  -- Default mode: conservative -- only heal once the tool has completed.
+  return awaiting == false
+end
+
 -- Classify an error message into a coarse CAUSE (L5 error-reason taxonomy): pure
 -- keyword match over the lowercased text, most-specific first. The caller may
 -- override from non-message signals (a usage-limit autoDeny -> budget_exceeded, the

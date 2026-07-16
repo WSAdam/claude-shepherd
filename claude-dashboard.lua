@@ -12756,20 +12756,21 @@ function FX._refreshBody()
       FX._healedDone[it.key] = nil
     end
     -- Stale-"approval" self-heal: the native-prompt guard holds status=approval until a
-    -- matching resolution event, but that event can be missed -- an AskUserQuestion armed
-    -- via a PermissionRequest, or a Bash whose PostToolUse summary never re-matches the
-    -- pending (rapid/parallel tool calls under acceptEdits) -- so the tile shows "Needs
-    -- you" for minutes while the session works on. A GENUINELY blocked session is awaiting
-    -- a tool (its newest transcript event is a dangling assistant tool_use); a working one
-    -- has a completed tool_result. So: a TOOL-scoped approval whose transcript is not
-    -- awaiting a tool is stale -> heal to working. Gated on it.pending.tool so a bare
-    -- notification "needs you" (no tool) is never hidden. Latched like the done heal so a
-    -- display-stale tick (tail==nil) carries the healed status instead of snapping back.
+    -- matching resolution event, but a session doesn't actually "need you" for a tool
+    -- that's merely auto-RUNNING. core.approvalStale owns the decision: a NATIVE
+    -- (non-gate) permission approval for a non-interactive tool in a permissive mode
+    -- (acceptEdits/bypass/auto) is a running tool -> working; an AskUserQuestion or a
+    -- gate-armed approval stays "needs you" until the transcript shows it's resolved.
+    -- `awaiting` is transcriptAwaitingTool on the fresh tail, or nil when we couldn't read
+    -- it this tick (display-stale). Latched (FX._healedApproval) so a no-tail tick carries
+    -- a prior heal for the transcript-dependent cases instead of snapping back.
     if it.status == "approval" and type(it.pending) == "table" and it.pending.tool then
-      if tail and not it.stale and not core.transcriptAwaitingTool(tail) then
+      local awaiting = nil
+      if tail and not it.stale then awaiting = core.transcriptAwaitingTool(tail) end
+      if core.approvalHealable(it, awaiting) then
         it.status = "working"
         FX._healedApproval[it.key] = it.updated
-      elseif tail == nil and FX._healedApproval[it.key] ~= nil
+      elseif awaiting == nil and FX._healedApproval[it.key] ~= nil
          and FX._healedApproval[it.key] == it.updated then
         it.status = "working"
       else

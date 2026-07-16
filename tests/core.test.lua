@@ -1380,7 +1380,7 @@ end
 do
   eq("escalate: fresh approval -> false", core.approvalStale({ status = "approval", since = 100 }, 150, 60), false)
   eq("escalate: old approval -> true", core.approvalStale({ status = "approval", since = 100 }, 200, 60), true)
-  eq("escalate: non-approval -> false", core.approvalStale({ status = "working", since = 0 }, 999, 60), false)
+  eq("escalate: non-approval -> false", core.approvalHealable({ status = "working", since = 0 }, 999, 60), false)
 end
 
 -- ---- Orchestrator: spawn command building + shell escaping ----------------
@@ -6454,6 +6454,44 @@ do
         core.transcriptAwaitingTool(toolUse("Bash") .. "\n" .. toolResult() .. "\n" .. toolUse("Bash") .. "\n" .. toolResult()) == false)
   check("awaiting: empty/garbage -> false",
         core.transcriptAwaitingTool("") == false and core.transcriptAwaitingTool("not json\n{bad") == false)
+end
+
+-- ---- approvalStale: does a status=approval tile actually NEED you? ----------
+do
+  local function tile(t) t.status = "approval"; return t end
+  -- native (gate=nil) Bash in a permissive mode = a running tool -> heal, even mid-run
+  -- (awaiting=true) and even when the tail is unknown (awaiting=nil)
+  check("approvalHealable: acceptEdits native Bash mid-run -> heal (true)",
+        core.approvalHealable(tile({ pending = { tool = "Bash" }, permission_mode = "acceptEdits" }), true) == true)
+  check("approvalHealable: bypass native Bash, no tail -> heal (true)",
+        core.approvalHealable(tile({ pending = { tool = "Bash" }, permission_mode = "bypassPermissions" }), nil) == true)
+  check("approvalHealable: auto native Write -> heal (true)",
+        core.approvalHealable(tile({ pending = { tool = "Write" }, permission_mode = "auto" }), true) == true)
+  -- AskUserQuestion genuinely needs you until the transcript stops awaiting
+  check("approvalHealable: AskUserQuestion awaiting -> keep (false)",
+        core.approvalHealable(tile({ pending = { tool = "AskUserQuestion" }, permission_mode = "acceptEdits" }), true) == false)
+  check("approvalHealable: AskUserQuestion resolved (not awaiting) -> heal (true)",
+        core.approvalHealable(tile({ pending = { tool = "AskUserQuestion" }, permission_mode = "acceptEdits" }), false) == true)
+  check("approvalHealable: AskUserQuestion unknown tail -> keep (false)",
+        core.approvalHealable(tile({ pending = { tool = "AskUserQuestion" }, permission_mode = "acceptEdits" }), nil) == false)
+  -- a gate-armed approval always needs you until resolved, even in a permissive mode
+  check("approvalHealable: gate=waiting Bash awaiting -> keep (false)",
+        core.approvalHealable(tile({ pending = { tool = "Bash" }, gate = "waiting", permission_mode = "acceptEdits" }), true) == false)
+  check("approvalHealable: gate=waiting resolved -> heal (true)",
+        core.approvalHealable(tile({ pending = { tool = "Bash" }, gate = "waiting", permission_mode = "acceptEdits" }), false) == true)
+  -- DEFAULT mode native Bash is conservative: a native prompt there can block, so keep
+  -- until the transcript shows the tool completed
+  check("approvalHealable: default-mode native Bash awaiting -> keep (false)",
+        core.approvalHealable(tile({ pending = { tool = "Bash" }, permission_mode = "default" }), true) == false)
+  check("approvalHealable: default-mode native Bash completed -> heal (true)",
+        core.approvalHealable(tile({ pending = { tool = "Bash" }, permission_mode = "default" }), false) == true)
+  -- guards: only approval tiles, only tool-scoped pendings
+  check("approvalHealable: non-approval tile -> false",
+        core.approvalHealable({ status = "working", pending = { tool = "Bash" }, permission_mode = "auto" }, false) == false)
+  check("approvalHealable: no pending tool (bare notification) -> false",
+        core.approvalHealable(tile({ pending = {}, permission_mode = "auto" }), false) == false
+        and core.approvalHealable(tile({ permission_mode = "auto" }), false) == false)
+  check("approvalHealable: nil arg safe", core.approvalHealable(nil, false) == false)
 end
 
 -- ---- userHasHumanText: genuine prompt vs IDE-context / meta / tool-result injection --
