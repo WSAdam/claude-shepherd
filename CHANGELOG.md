@@ -4,6 +4,31 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-07-16 — Never show a real permission prompt as "Working" (revert the guess)
+
+The prior "auto-running tool reads Working" heuristic guessed from `permission_mode`:
+`acceptEdits` was treated as "Bash auto-runs." That's wrong for a real VS Code session —
+`acceptEdits` auto-accepts *edits*, but Bash still raises the **"Allow this bash
+command?"** dialog — so genuine, blocking prompts read as "Working" (three reports with
+the dialog visible). It only auto-ran in the agent/harness session, which mislead the fix.
+
+The honest finding: a genuine dialog and a merely-running tool are **indistinguishable
+from the hook events** — a VS Code permission prompt fires only a `PermissionRequest` (no
+`Notification`), same as an auto-run. So `core.approvalHealable` is now **conservative**:
+a **dangling** tool call (the transcript's newest event is an unanswered `tool_use`) always
+stays **"Needs you"** — running *or* blocked, we don't hide it; it flips to **Working**
+only once the transcript proves the tool **finished** (which still heals the stuck-pending
+case). `permission_mode` no longer changes the outcome. Trade-off owned honestly: a tool
+that's *merely running* also reads "Needs you" until its result lands (cosmetic, and clears
+itself) — the safe side, since hiding a real prompt blocks a session unseen.
+
+Also added a **hook-event tracer** to settle this empirically instead of by inference:
+`cc_debug` now enables via a `~/.claude/.debug-hooks` flag file (not just the
+`CC_STATUS_DEBUG` env var), so raw hook payloads from a GUI-editor session can be captured
+to `~/.claude/.debug.log` — to confirm exactly which events fire for a prompt and whether
+any field distinguishes blocked-vs-running. (`pending.prompt`, set when a permission
+`Notification` *does* fire — terminal sessions — still short-circuits to "Needs you".)
+
 ## 2026-07-16 — Don't hide a REAL permission prompt as "Working" (fix the over-heal)
 
 Same-day follow-up to the "stop "Needs you" flashing" change, which over-corrected: it

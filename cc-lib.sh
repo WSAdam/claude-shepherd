@@ -165,10 +165,13 @@ cc_host_window() {
   cc_window_host
 }
 
-# Append a line to the debug log when CC_STATUS_DEBUG is set. Used to capture
-# raw hook stdin once during install so real payload field names can be locked.
+# Append a line to the debug log when tracing is on -- either the CC_STATUS_DEBUG env
+# var, or a `.debug-hooks` flag FILE in CC_DIR. The file trigger works for hooks spawned
+# by a GUI editor session (VS Code/Cursor) whose environment we can't set, so raw hook
+# payloads (event + full stdin) can be captured to lock down real field names / event
+# ordering without guessing. Off unless explicitly enabled.
 cc_debug() {
-  [ -n "${CC_STATUS_DEBUG:-}" ] || return 0
+  [ -n "${CC_STATUS_DEBUG:-}" ] || [ -f "$CC_DIR/.debug-hooks" ] || return 0
   printf '%s %s\n' "$(cc_now)" "$*" >> "$CC_DIR/.debug.log" 2>/dev/null || true
 }
 

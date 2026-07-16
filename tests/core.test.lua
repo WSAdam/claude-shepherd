@@ -6456,51 +6456,50 @@ do
         core.transcriptAwaitingTool("") == false and core.transcriptAwaitingTool("not json\n{bad") == false)
 end
 
--- ---- approvalStale: does a status=approval tile actually NEED you? ----------
+-- ---- approvalHealable: does a status=approval tile actually NEED you? --------
+-- CONSERVATIVE by design: a genuine "Allow this bash command?" dialog and a tool that is
+-- merely running are INDISTINGUISHABLE from hook events (a VS Code prompt fires only a
+-- PermissionRequest, no Notification), so a DANGLING tool call (awaiting=true) always
+-- stays "needs you". Heal only when the transcript proves the tool finished (awaiting
+-- =false). permission_mode does NOT change the outcome (an earlier mode-based heuristic
+-- wrongly showed real dialogs as "Working").
 do
   local function tile(t) t.status = "approval"; return t end
-  -- native (gate=nil) Bash in a permissive mode = a running tool -> heal, even mid-run
-  -- (awaiting=true) and even when the tail is unknown (awaiting=nil)
-  check("approvalHealable: acceptEdits native Bash mid-run -> heal (true)",
-        core.approvalHealable(tile({ pending = { tool = "Bash" }, permission_mode = "acceptEdits" }), true) == true)
-  check("approvalHealable: bypass native Bash, no tail -> heal (true)",
-        core.approvalHealable(tile({ pending = { tool = "Bash" }, permission_mode = "bypassPermissions" }), nil) == true)
-  check("approvalHealable: auto native Write -> heal (true)",
-        core.approvalHealable(tile({ pending = { tool = "Write" }, permission_mode = "auto" }), true) == true)
-  -- a GENUINE native prompt dialog (pending.prompt=true, set by cc-status.sh on a
-  -- Notification) stays "needs you" even in a permissive mode, even mid-dialog
-  -- (awaiting=true) and when the tail is unknown (awaiting=nil) -- this is the
-  -- regression fix: "Allow this bash command?" must not read as "Working".
-  check("approvalHealable: prompt dialog up (acceptEdits Bash) awaiting -> keep (false)",
-        core.approvalHealable(tile({ pending = { tool = "Bash", prompt = true }, permission_mode = "acceptEdits" }), true) == false)
-  check("approvalHealable: prompt dialog up, no tail -> keep (false)",
-        core.approvalHealable(tile({ pending = { tool = "Bash", prompt = true }, permission_mode = "acceptEdits" }), nil) == false)
-  check("approvalHealable: prompt resolved (answered/denied, not awaiting) -> heal (true)",
-        core.approvalHealable(tile({ pending = { tool = "Bash", prompt = true }, permission_mode = "acceptEdits" }), false) == true)
-  -- AskUserQuestion genuinely needs you until the transcript stops awaiting
-  check("approvalHealable: AskUserQuestion awaiting -> keep (false)",
-        core.approvalHealable(tile({ pending = { tool = "AskUserQuestion" }, permission_mode = "acceptEdits" }), true) == false)
-  check("approvalHealable: AskUserQuestion resolved (not awaiting) -> heal (true)",
-        core.approvalHealable(tile({ pending = { tool = "AskUserQuestion" }, permission_mode = "acceptEdits" }), false) == true)
-  check("approvalHealable: AskUserQuestion unknown tail -> keep (false)",
-        core.approvalHealable(tile({ pending = { tool = "AskUserQuestion" }, permission_mode = "acceptEdits" }), nil) == false)
-  -- a gate-armed approval always needs you until resolved, even in a permissive mode
-  check("approvalHealable: gate=waiting Bash awaiting -> keep (false)",
-        core.approvalHealable(tile({ pending = { tool = "Bash" }, gate = "waiting", permission_mode = "acceptEdits" }), true) == false)
-  check("approvalHealable: gate=waiting resolved -> heal (true)",
-        core.approvalHealable(tile({ pending = { tool = "Bash" }, gate = "waiting", permission_mode = "acceptEdits" }), false) == true)
-  -- DEFAULT mode native Bash is conservative: a native prompt there can block, so keep
-  -- until the transcript shows the tool completed
-  check("approvalHealable: default-mode native Bash awaiting -> keep (false)",
-        core.approvalHealable(tile({ pending = { tool = "Bash" }, permission_mode = "default" }), true) == false)
-  check("approvalHealable: default-mode native Bash completed -> heal (true)",
+  -- a dangling native tool -> KEEP "needs you", in EVERY mode (this is the fix: a real
+  -- "Allow this bash command?" dialog in acceptEdits must not read as "Working")
+  check("approvalHealable: acceptEdits native Bash mid-call (awaiting) -> keep (false)",
+        core.approvalHealable(tile({ pending = { tool = "Bash" }, permission_mode = "acceptEdits" }), true) == false)
+  check("approvalHealable: bypass native Bash awaiting -> keep (false)",
+        core.approvalHealable(tile({ pending = { tool = "Bash" }, permission_mode = "bypassPermissions" }), true) == false)
+  check("approvalHealable: auto native Write awaiting -> keep (false)",
+        core.approvalHealable(tile({ pending = { tool = "Write" }, permission_mode = "auto" }), true) == false)
+  check("approvalHealable: unknown tail (nil) -> keep (false)",
+        core.approvalHealable(tile({ pending = { tool = "Bash" }, permission_mode = "acceptEdits" }), nil) == false)
+  -- heal only once the transcript shows the tool finished (the STUCK-pending case: the
+  -- guard's resolution event was missed but the session has moved on)
+  check("approvalHealable: native tool completed (not awaiting) -> heal (true)",
+        core.approvalHealable(tile({ pending = { tool = "Bash" }, permission_mode = "acceptEdits" }), false) == true)
+  check("approvalHealable: default-mode native tool completed -> heal (true)",
         core.approvalHealable(tile({ pending = { tool = "Bash" }, permission_mode = "default" }), false) == true)
+  -- a CONFIRMED live prompt dialog (pending.prompt=true, set by cc-status.sh when a
+  -- permission Notification DOES fire -- terminal sessions) is never healed
+  check("approvalHealable: prompt dialog flag -> keep even if not awaiting (false)",
+        core.approvalHealable(tile({ pending = { tool = "Bash", prompt = true }, permission_mode = "acceptEdits" }), false) == false)
+  -- AskUserQuestion / gate follow the same awaiting rule
+  check("approvalHealable: AskUserQuestion awaiting -> keep (false)",
+        core.approvalHealable(tile({ pending = { tool = "AskUserQuestion" } }), true) == false)
+  check("approvalHealable: AskUserQuestion resolved -> heal (true)",
+        core.approvalHealable(tile({ pending = { tool = "AskUserQuestion" } }), false) == true)
+  check("approvalHealable: gate=waiting awaiting -> keep (false)",
+        core.approvalHealable(tile({ pending = { tool = "Bash" }, gate = "waiting" }), true) == false)
+  check("approvalHealable: gate=waiting resolved -> heal (true)",
+        core.approvalHealable(tile({ pending = { tool = "Bash" }, gate = "waiting" }), false) == true)
   -- guards: only approval tiles, only tool-scoped pendings
   check("approvalHealable: non-approval tile -> false",
-        core.approvalHealable({ status = "working", pending = { tool = "Bash" }, permission_mode = "auto" }, false) == false)
+        core.approvalHealable({ status = "working", pending = { tool = "Bash" } }, false) == false)
   check("approvalHealable: no pending tool (bare notification) -> false",
-        core.approvalHealable(tile({ pending = {}, permission_mode = "auto" }), false) == false
-        and core.approvalHealable(tile({ permission_mode = "auto" }), false) == false)
+        core.approvalHealable(tile({ pending = {} }), false) == false
+        and core.approvalHealable(tile({}), false) == false)
   check("approvalHealable: nil arg safe", core.approvalHealable(nil, false) == false)
 end
 

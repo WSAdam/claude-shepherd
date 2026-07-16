@@ -2611,32 +2611,26 @@ end
 --   * an AskUserQuestion pending (a real question), or
 --   * a gate-armed approval (it.gate == "waiting"): the headless gate is explicitly
 --     blocked on your Approve/Deny.
--- A NATIVE (gate==nil) permission approval for a non-interactive tool (Bash/Write/Read/
--- ...) in a PERMISSIVE mode (acceptEdits / bypassPermissions / auto) is USUALLY just a
--- tool auto-RUNNING -- the PermissionRequest fired but nothing is blocking on you -- so
--- it's working; every Bash a busy session runs would otherwise flash "Needs you" for the
--- whole command. The EXCEPTION is when Claude Code is genuinely prompting (the "Allow
--- this bash command?" dialog): cc-status.sh marks that pending `prompt:true` (a
--- Notification fired, not just a permission check), and those stay "needs you". So the
--- gate is `prompt` (genuine dialog) / AskUserQuestion / gate=="waiting" -> genuine, else
--- an auto-running tool. `awaiting` = transcriptAwaitingTool on the freshly-read tail, or
--- nil when the tail wasn't read this tick (unknown).
-M.APPROVAL_AUTORUN_MODES = { acceptEdits = true, bypassPermissions = true, auto = true }
+-- Heal a status=="approval" tile to "working" ONLY when the transcript shows the session
+-- is no longer awaiting a tool -- the pending's tool completed (its result landed) or the
+-- turn moved on. This heals the STUCK case (a native-guard pending the resolution event
+-- never cleared, e.g. a summary-mismatch) once the session is demonstrably past it.
+--
+-- A DANGLING tool_use (transcriptAwaitingTool == true) is deliberately KEPT as "needs
+-- you": it is either a tool still executing OR a live "Allow this bash command?" /
+-- AskUserQuestion dialog, and NOTHING available distinguishes them -- a genuine VS Code
+-- permission dialog fires only a PermissionRequest (same as an auto-running command), no
+-- Notification. Given the ambiguity we take the SAFE side: showing a real dialog as
+-- "Working" blocks the session unseen (the worse error); a brief "Needs you" while a
+-- command runs is only cosmetic and clears the moment its result lands. `pending.prompt`
+-- (a confirmed dialog, set by cc-status.sh when a permission Notification DOES fire --
+-- terminal sessions) is never healed. `awaiting` = transcriptAwaitingTool on the fresh
+-- tail, or nil when the tail wasn't read this tick -> keep "needs you".
 function M.approvalHealable(it, awaiting)
   if type(it) ~= "table" or it.status ~= "approval" then return false end
   local pending = it.pending
   if type(pending) ~= "table" or not pending.tool then return false end
-  -- Genuine-interaction pendings (a live native prompt dialog, an AskUserQuestion, or a
-  -- gate-armed approval): heal ONLY when the transcript definitively shows the session is
-  -- no longer awaiting a tool (it was answered/approved/denied and moved on). Unknown
-  -- (nil) or still-awaiting (true) -> keep "needs you" -- never hide a live dialog.
-  if pending.prompt == true or it.gate == "waiting" or pending.tool == "AskUserQuestion" then
-    return awaiting == false
-  end
-  -- Native, non-interactive approval with no live dialog: in an auto-running mode it's a
-  -- tool executing -> working.
-  if M.APPROVAL_AUTORUN_MODES[it.permission_mode] then return true end
-  -- Default mode: conservative -- only heal once the tool has completed.
+  if pending.prompt == true then return false end   -- a confirmed live prompt dialog
   return awaiting == false
 end
 
