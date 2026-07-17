@@ -207,10 +207,17 @@ esac
 
 NOW="$(cc_now)"
 
-# since = when we entered this status. Keep it if the status is unchanged so
-# the dashboard can show an accurate time-in-state.
+# since = when we entered this status OR when a fresh prompt was armed. Keep it if the
+# status is unchanged so the dashboard shows an accurate time-in-state -- EXCEPT when a new
+# pending is being armed (SET_PENDING): a back-to-back approval->approval (a stuck earlier
+# prompt whose resolution event was missed, then a NEW PermissionRequest) must advance
+# `since` to the new prompt's arm time. The dashboard's progressed-heal compares the
+# transcript against `since`; a preserved EARLIER arm time would read the live newer prompt
+# as "already moved past" and heal it to "working", hiding a session actually blocked on
+# you. A bg-agent SIBLING merge never sets SET_PENDING (it is NATIVE_GUARDED below), so this
+# does NOT restart the escalation clock every tick (the R3-15 concern still holds).
 PREV="$(cc_current_status "$KEY")"
-if [ "$STATUS" != "$PREV" ]; then
+if [ "$STATUS" != "$PREV" ] || [ -n "$SET_PENDING" ]; then
   SINCE="$NOW"
 else
   SINCE="$(cc_read_field "$KEY" '.since')"

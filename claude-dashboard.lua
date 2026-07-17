@@ -12778,21 +12778,33 @@ function FX._refreshBody()
       FX._healedDone[it.key] = nil
     end
     -- Stale-"approval" self-heal: the native-prompt guard holds status=approval until a
-    -- matching resolution event, but a session doesn't actually "need you" for a tool
-    -- that's merely auto-RUNNING. core.approvalStale owns the decision: a NATIVE
-    -- (non-gate) permission approval for a non-interactive tool in a permissive mode
-    -- (acceptEdits/bypass/auto) is a running tool -> working; an AskUserQuestion or a
-    -- gate-armed approval stays "needs you" until the transcript shows it's resolved.
-    -- `awaiting` is transcriptAwaitingTool on the fresh tail, or nil when we couldn't read
-    -- it this tick (display-stale). Latched (FX._healedApproval) so a no-tail tick carries
-    -- a prior heal for the transcript-dependent cases instead of snapping back.
+    -- matching resolution event, but a session that has MOVED PAST the pending doesn't
+    -- actually "need you". core.approvalHealable owns the decision and needs BOTH transcript
+    -- signals: `awaiting` (transcriptAwaitingTool -- a dangling tool_use, the terminal-CLI
+    -- block) AND `progressed` (transcriptResumed vs it.since -- has the transcript advanced
+    -- past when the approval was armed). `progressed` is load-bearing for the VS Code
+    -- extension, which buffers the assistant message so a live permission prompt writes NO
+    -- dangling tool_use -- awaiting alone read false and healed real prompts to "working".
+    -- Both nil when we couldn't read the tail this tick (display-stale). Latched
+    -- (FX._healedApproval, keyed by it.updated) so a prior heal carries instead of snapping
+    -- back to "Needs you" -- both on a NO-TAIL tick AND on a read tick where `progressed`
+    -- transiently DIPS (a >64KB final tool_result can push the qualifying assistant line out
+    -- of the fixed tail window). Carrying is SAFE (never hides a real prompt): a genuinely
+    -- blocked prompt is frozen before its own arm time, so progressed is false at its
+    -- it.updated -> it was never healed there -> the latch key can't match. A NEW prompt
+    -- rewrites the status file (fresh it.updated), so the stale latch key no longer matches
+    -- and the heal is re-evaluated. Only awaiting==true (a real dangling tool_use) forces a
+    -- re-evaluation regardless -- that never carries.
     if it.status == "approval" and type(it.pending) == "table" and it.pending.tool then
-      local awaiting = nil
-      if tail and not it.stale then awaiting = core.transcriptAwaitingTool(tail) end
-      if core.approvalHealable(it, awaiting) then
+      local awaiting, progressed = nil, nil
+      if tail and not it.stale then
+        awaiting = core.transcriptAwaitingTool(tail)
+        progressed = core.transcriptResumed(tail, it.since, core.config(cfg, "status.resumeSlack", 2))
+      end
+      if core.approvalHealable(it, awaiting, progressed) then
         it.status = "working"
         FX._healedApproval[it.key] = it.updated
-      elseif awaiting == nil and FX._healedApproval[it.key] ~= nil
+      elseif awaiting ~= true and FX._healedApproval[it.key] ~= nil
          and FX._healedApproval[it.key] == it.updated then
         it.status = "working"
       else

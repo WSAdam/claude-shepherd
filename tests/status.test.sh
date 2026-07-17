@@ -92,6 +92,20 @@ assert_eq "R2-01: non-numeric since does not wedge tile (updated advanced)" \
 assert_eq "R2-01: since coerced to numeric" \
   "true" "$(jq -r '(.since|type)=="number"' "$R201F")"
 
+# Finding-3: a SECOND PermissionRequest while status is ALREADY "approval" (a stuck/back-to-
+# back prompt) must ADVANCE `since` to the new arm time. Otherwise the dashboard's
+# progressed-heal compares the transcript against a STALE earlier arm time and heals the
+# live newer prompt to "working" (hiding it). Simulate a stuck approval by forcing since
+# to an old value, then fire a new (different) PermissionRequest; since must reset to now.
+BB="bb1"; BBCWD="/srv/bb"; BBF="$TMP/$BB.json"
+ev permissionrequest "{\"session_id\":\"$BB\",\"cwd\":\"$BBCWD\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"first cmd\"}}"
+jq '.since=1' "$BBF" > "$BBF.t" && mv "$BBF.t" "$BBF"   # stale earlier arm time
+ev permissionrequest "{\"session_id\":\"$BB\",\"cwd\":\"$BBCWD\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"second different cmd\"}}"
+assert_json "finding-3: back-to-back stays approval" "$BBF" '.status' "approval"
+assert_json "finding-3: new prompt replaces the pending summary" "$BBF" '.pending.summary' "second different cmd"
+assert_eq "finding-3: new PermissionRequest advances stale since (approval->approval)" \
+  "true" "$([ "$(jq -r '.since' "$BBF")" -gt 1 ] && echo true || echo false)"
+
 # --- Phase 1: PermissionRequest gives a precise pending summary ---
 P="p1"; PCWD="/srv/api-server"; PF="$TMP/$P.json"
 ev pretooluse "{\"session_id\":\"$P\",\"cwd\":\"$PCWD\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"npm test -- --watch\"}}"

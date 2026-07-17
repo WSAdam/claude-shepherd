@@ -2607,31 +2607,36 @@ function M.transcriptAwaitingTool(text)
 end
 
 -- Should a status=="approval" tile be HEALED to "working" (i.e. it does NOT actually
--- need you)? An approval means "waiting on the human" -- but that is only GENUINE for:
---   * an AskUserQuestion pending (a real question), or
---   * a gate-armed approval (it.gate == "waiting"): the headless gate is explicitly
---     blocked on your Approve/Deny.
--- Heal a status=="approval" tile to "working" ONLY when the transcript shows the session
--- is no longer awaiting a tool -- the pending's tool completed (its result landed) or the
--- turn moved on. This heals the STUCK case (a native-guard pending the resolution event
--- never cleared, e.g. a summary-mismatch) once the session is demonstrably past it.
+-- need you)? An approval means "waiting on the human". Heal a status=="approval" tile to
+-- "working" ONLY once the session has demonstrably MOVED PAST the pending, which takes
+-- BOTH signals to establish safely:
+--   * awaiting == false -- no DANGLING tool_use in the transcript (a tool_use written but
+--     not yet resolved). A terminal-CLI session blocked on "Allow this bash command?"
+--     sits exactly here (awaiting == true) and is kept "needs you".
+--   * progressed == true -- the transcript has advanced BEYOND when the approval was armed
+--     (transcriptResumed(tail, it.since): a newest real assistant/human-user line
+--     timestamped after `since`).
 --
--- A DANGLING tool_use (transcriptAwaitingTool == true) is deliberately KEPT as "needs
--- you": it is either a tool still executing OR a live "Allow this bash command?" /
--- AskUserQuestion dialog, and NOTHING available distinguishes them -- a genuine VS Code
--- permission dialog fires only a PermissionRequest (same as an auto-running command), no
--- Notification. Given the ambiguity we take the SAFE side: showing a real dialog as
--- "Working" blocks the session unseen (the worse error); a brief "Needs you" while a
--- command runs is only cosmetic and clears the moment its result lands. `pending.prompt`
--- (a confirmed dialog, set by cc-status.sh when a permission Notification DOES fire --
--- terminal sessions) is never healed. `awaiting` = transcriptAwaitingTool on the fresh
--- tail, or nil when the tail wasn't read this tick -> keep "needs you".
-function M.approvalHealable(it, awaiting)
+-- Why BOTH (this is the fix for the recurring "real prompt shows Working" bug): the VS
+-- Code extension BUFFERS the assistant message and only flushes it to the transcript
+-- AFTER the tool runs -- so a VS Code session blocked on a live permission dialog writes
+-- NO dangling tool_use (awaiting reads false, identical to a finished tool) and its
+-- transcript is frozen at the pre-prompt turn. `awaiting == false` ALONE therefore healed
+-- real VS Code prompts to "working", hiding a blocked session unseen (the worse error).
+-- `progressed` is the surface-agnostic discriminator: a genuine block has NO transcript
+-- activity after the arm time (progressed == false -> keep "needs you"); a stale/stuck
+-- pending (a native-guard resolution event that was missed, e.g. a summary-mismatch) has
+-- moved on (progressed == true -> heal). cc-status.sh advances `since` on every new
+-- PermissionRequest (newest wins) and shields it from sibling/bg-agent writes, so it
+-- tracks the CURRENT pending's arm time. `pending.prompt` (a confirmed dialog, set when a
+-- permission Notification DOES fire -- terminal sessions) is never healed. Either signal
+-- nil (tail not read this tick) -> not healed -> keep "needs you" (the safe side).
+function M.approvalHealable(it, awaiting, progressed)
   if type(it) ~= "table" or it.status ~= "approval" then return false end
   local pending = it.pending
   if type(pending) ~= "table" or not pending.tool then return false end
   if pending.prompt == true then return false end   -- a confirmed live prompt dialog
-  return awaiting == false
+  return awaiting == false and progressed == true
 end
 
 -- Classify an error message into a coarse CAUSE (L5 error-reason taxonomy): pure

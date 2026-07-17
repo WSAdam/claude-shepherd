@@ -4,6 +4,48 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-07-17 — Kill the "blocked prompt shows Working" bug for real (VS Code buffering)
+
+A session blocked on a live VS Code **"Allow this bash command?"** prompt kept reading as
+**"Working"** instead of **"Needs you"** — the fourth encounter with this bug. Root-caused
+against a live session this time: **the VS Code extension BUFFERS the assistant message and
+only flushes it to the transcript `.jsonl` AFTER the tool runs.** So a VS Code session
+blocked on a permission dialog writes **no dangling `tool_use`** — its newest assistant
+line reads `end_turn`. `core.transcriptAwaitingTool` therefore returns false (identical to
+a finished tool), and `core.approvalHealable` — which healed a `status=approval` tile to
+`working` whenever `awaiting==false` — hid the real prompt. Every prior fix keyed on the
+dangling `tool_use`, which **never exists in VS Code**. (Proven: the live `git diff` /
+`cp` prompts appeared **zero** times as written tool_use entries; the status file correctly
+said `approval` armed at 17:57:28 while the transcript was frozen at 17:45:17.)
+
+The fix makes the heal require **two** signals, not one: `awaiting==false` **and**
+`progressed==true`, where `progressed = core.transcriptResumed(tail, it.since)` — the
+transcript has a real assistant/human-user line timestamped **after the approval was
+armed**. A genuinely-blocked session is frozen *before* the arm time (`progressed=false` →
+stays "Needs you"); a stale/stuck pending has moved on (`progressed=true` → heals). This is
+surface-agnostic (works for terminal *and* VS Code) and keeps the terminal dangling-tool
+case ("needs you") intact. Verified on the captured live data: old rule → `WORKING` (the
+bug), new rule → `NEEDS YOU`.
+
+An adversarial multi-agent review of the fix surfaced two real edges, both fixed:
+
+- **Back-to-back approvals (approval→approval).** `cc-status.sh` advanced `since` only on a
+  status *change*, so a NEW `PermissionRequest` arriving while a *stuck* earlier approval
+  still read `approval` kept the old arm time — letting `progressed` heal the live newer
+  prompt (the same hide-a-prompt failure). `since` now also resets whenever a fresh pending
+  is armed (`SET_PENDING`), so it always tracks the current prompt's arm time. Background-
+  agent sibling merges never set `SET_PENDING` (they're `NATIVE_GUARDED`), so the R3-15
+  escalation clock is undisturbed.
+- **Transient heal snap-back.** The `FX._healedApproval` latch only carried a prior heal on
+  a *no-tail* tick, so a >64KB final tool_result that pushed the qualifying line out of the
+  tail window could flash an already-healed tile back to "Needs you". The latch now also
+  carries across a transient `progressed` dip (`awaiting ~= true`) — provably safe, since a
+  genuinely-blocked prompt is never healed at its own `it.updated`, so the latch key can't
+  match it.
+
+Added a `core.test` regression test (`VS Code live prompt (not awaiting, not progressed) ->
+keep`) and a `status.test.sh` test that a back-to-back `PermissionRequest` advances `since`.
+
 ## 2026-07-17 — Organize the theme picker into groups + add 18 video-game themes
 
 The Appearance > Theme picker had grown to 32 themes rendered as one flat wall of

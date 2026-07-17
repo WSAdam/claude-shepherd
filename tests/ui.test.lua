@@ -2212,12 +2212,18 @@ do
         and src:find("core.reapUnbacked(FX._healedApproval, newPrev)", 1, true) ~= nil)
   check("appheal-pin: only a tool-scoped approval is eligible (bare notification kept)",
         src:find('it.status == "approval" and type(it.pending) == "table" and it.pending.tool', 1, true) ~= nil)
-  check("appheal-pin: decision delegated to pure core.approvalHealable(it, awaiting)",
-        src:find("core.approvalHealable(it, awaiting)", 1, true) ~= nil
+  check("appheal-pin: decision delegated to pure core.approvalHealable(it, awaiting, progressed)",
+        src:find("core.approvalHealable(it, awaiting, progressed)", 1, true) ~= nil
         and src:find("awaiting = core.transcriptAwaitingTool(tail)", 1, true) ~= nil
         and src:find("FX._healedApproval[it.key] = it.updated", 1, true) ~= nil)
-  check("appheal-pin: no-tail tick carries the heal via the latch",
-        src:find("elseif awaiting == nil and FX._healedApproval[it.key] ~= nil", 1, true) ~= nil
+  -- The VS Code fix: heal also requires the transcript to have advanced past the arm time
+  -- (it.since) -- a live VS Code prompt writes no dangling tool_use, so awaiting alone is blind.
+  check("appheal-pin: progressed = transcriptResumed(tail, it.since) gates the heal",
+        src:find("progressed = core.transcriptResumed(tail, it.since", 1, true) ~= nil)
+  -- The latch carries a prior heal on a no-tail tick AND on a read tick where progressed
+  -- transiently dips (awaiting ~= true, so a real dangling tool_use still forces re-eval).
+  check("appheal-pin: latch carries the heal (no-tail OR transient progressed dip)",
+        src:find("elseif awaiting ~= true and FX._healedApproval[it.key] ~= nil", 1, true) ~= nil
         and src:find("FX._healedApproval[it.key] == it.updated", 1, true) ~= nil)
 
   -- #4: per-task timing abandons taskStart only past the RESPAWN death threshold
