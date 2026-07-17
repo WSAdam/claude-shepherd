@@ -9011,6 +9011,176 @@ M.APPEARANCE_THEMES = {
     stIdle = "#4a5f7a", stWorking = "#ffcc00", stDone = "#00ff9f", stApproval = "#ff2e5c", stError = "#ff2bd6",
     ok = "#00ff9f", danger = "#ff2e5c", warn = "#ffcc00", purple = "#8c6bff",
   } },
+  -- Video-game franchises: colorschemes drawn from famous game series -------
+  -- Nintendo & platformers:
+  mario = { label = "Super Mario", scheme = "dark", look = "card", tokens = {
+    bg = "#190f0c", bgOverlay = "#120a08", surface = "#241512", surface2 = "#1e120f",
+    surface3 = "#211310", surfaceHover = "#2e1b17", border = "#4a2b25", borderWeak = "#33201b",
+    text = "#fdf6f4", text2 = "#ecd9d4", text3 = "#c9a9a2", muted = "#b08d86", dim = "#7a5a54", textStrong = "#ffffff",
+    accent = "#e52521", accent2 = "#fbd000", accentText = "#ff8a80", accentBg = "#3a0f0c",
+    stIdle = "#86736d", stWorking = "#fbd000", stDone = "#4cc14f", stApproval = "#ff6b1a", stError = "#ff5ea8",
+    ok = "#4cc14f", danger = "#ec3a30", warn = "#fbd000", purple = "#a06be3",
+  } },
+  zelda = { label = "Legend of Zelda", scheme = "dark", look = "card", tokens = {
+    bg = "#0b140d", bgOverlay = "#070e08", surface = "#142013", surface2 = "#0f1a10",
+    surface3 = "#121d12", surfaceHover = "#1d2c1c", border = "#2a3d28", borderWeak = "#1e2e1c",
+    text = "#eef6ec", text2 = "#c8d6c4", text3 = "#97a894", muted = "#74856d", dim = "#4d5a47", textStrong = "#ffffff",
+    accent = "#f5d020", accent2 = "#4f9c2d", accentText = "#f6d95a", accentBg = "#33290a",
+    stIdle = "#6b7a66", stWorking = "#f0b429", stDone = "#57c838", stApproval = "#e8632a", stError = "#ec5fb0",
+    ok = "#57c838", danger = "#e5484d", warn = "#f0b429", purple = "#9d6cd8",
+  } },
+  sonic = { label = "Sonic", scheme = "dark", look = "card", tokens = {
+    bg = "#060c1a", bgOverlay = "#040813", surface = "#0f1a2e", surface2 = "#0a1424",
+    surface3 = "#0c1729", surfaceHover = "#16233d", border = "#24365a", borderWeak = "#182741",
+    text = "#eef3fc", text2 = "#cdd8ec", text3 = "#9fb0cd", muted = "#7a8cab", dim = "#536384", textStrong = "#ffffff",
+    accent = "#1b78e6", accent2 = "#e60012", accentText = "#6db0f7", accentBg = "#0e2545",
+    stIdle = "#64748f", stWorking = "#ffd700", stDone = "#3ec46d", stApproval = "#ff5230", stError = "#ff4f9a",
+    ok = "#3ec46d", danger = "#f0364a", warn = "#ffd700", purple = "#9b6bff",
+  } },
+  pokemon = { label = "Pokémon", scheme = "dark", look = "card", tokens = {
+    bg = "#0b0d1a", bgOverlay = "#07080f", surface = "#171a2e", surface2 = "#101223",
+    surface3 = "#131627", surfaceHover = "#21243c", border = "#333861", borderWeak = "#1f2238",
+    text = "#f3f4fb", text2 = "#d3d6ea", text3 = "#a2a6c4", muted = "#8589a3", dim = "#565a72", textStrong = "#ffffff",
+    accent = "#ee1515", accent2 = "#ffcb05", accentText = "#ff7a7a", accentBg = "#2a0808",
+    stIdle = "#6c7088", stWorking = "#ffcb05", stDone = "#3ecf6b", stApproval = "#ff7a2f", stError = "#ff5ca8",
+    ok = "#3ecf6b", danger = "#ff4444", warn = "#ffcb05", purple = "#8b6bff",
+  } },
+  minecraft = { label = "Minecraft", scheme = "dark", look = "card", tokens = {
+    bg = "#17140d", bgOverlay = "#100e07", surface = "#282216", surface2 = "#1d1910",
+    surface3 = "#221d13", surfaceHover = "#332b1c", border = "#453a24", borderWeak = "#2e2718",
+    text = "#f5f1e8", text2 = "#ddd6c4", text3 = "#afa891", muted = "#8f886f", dim = "#67614c", textStrong = "#ffffff",
+    accent = "#5ea833", accent2 = "#4aedd9", accentText = "#a4dd6f", accentBg = "#15220a",
+    stIdle = "#6f6a58", stWorking = "#f5b333", stDone = "#6ac23a", stApproval = "#e0602c", stError = "#ec72c4",
+    ok = "#6ac23a", danger = "#d84438", warn = "#f5b333", purple = "#a878f0",
+  } },
+  splatoon = { label = "Splatoon", scheme = "dark", look = "card", tokens = {
+    bg = "#14101c", bgOverlay = "#0f0c15", surface = "#211a2e", surface2 = "#191324",
+    surface3 = "#1d1729", surfaceHover = "#2b2239", border = "#3a2e4d", borderWeak = "#2c2340",
+    text = "#f4f0fb", text2 = "#d6cce8", text3 = "#a89cc0", muted = "#7d7196", dim = "#565068", textStrong = "#ffffff",
+    accent = "#ff2d95", accent2 = "#8ce600", accentText = "#ff8fc4", accentBg = "#3a0d24",
+    stIdle = "#6d6685", stWorking = "#ffc21f", stDone = "#33e07a", stApproval = "#ff5a2a", stError = "#e85cff",
+    ok = "#33e07a", danger = "#f5384f", warn = "#ffc21f", purple = "#b06bff",
+  } },
+  stardew = { label = "Stardew Valley", scheme = "dark", look = "card", tokens = {
+    bg = "#1c140d", bgOverlay = "#150f09", surface = "#2a1f14", surface2 = "#221810",
+    surface3 = "#261c12", surfaceHover = "#362815", border = "#4a3822", borderWeak = "#33261a",
+    text = "#f5ede2", text2 = "#d4c4aa", text3 = "#ac9a7d", muted = "#8a7a60", dim = "#665a45", textStrong = "#ffffff",
+    accent = "#7dbe4e", accent2 = "#e5a32b", accentText = "#a9d97a", accentBg = "#1c2a10",
+    stIdle = "#7a6f5e", stWorking = "#f0b829", stDone = "#6ab04c", stApproval = "#e8622a", stError = "#d9689e",
+    ok = "#6ab04c", danger = "#d94f3d", warn = "#f0b829", purple = "#a06cd5",
+  } },
+  -- Sci-fi & shooters:
+  halo = { label = "Halo", scheme = "dark", look = "card", tokens = {
+    bg = "#080d14", bgOverlay = "#050810", surface = "#131b26", surface2 = "#0e151f",
+    surface3 = "#111823", surfaceHover = "#1b2734", border = "#2a3a4d", borderWeak = "#1c2836",
+    text = "#eaf2fb", text2 = "#c4d4e4", text3 = "#93a6ba", muted = "#7286a0", dim = "#4d6178", textStrong = "#ffffff",
+    accent = "#4ec3f7", accent2 = "#6d8b2e", accentText = "#86d4fa", accentBg = "#0b2634",
+    stIdle = "#6a7d92", stWorking = "#ffc23c", stDone = "#52d16a", stApproval = "#ff7738", stError = "#ff5cc4",
+    ok = "#52d16a", danger = "#f4483f", warn = "#ffc23c", purple = "#a878ff",
+  } },
+  portal = { label = "Portal", scheme = "dark", look = "card", tokens = {
+    bg = "#0b0f16", bgOverlay = "#080b10", surface = "#17202c", surface2 = "#10151d",
+    surface3 = "#131924", surfaceHover = "#1f2a38", border = "#2c3a4d", borderWeak = "#212c3a",
+    text = "#eef3fa", text2 = "#c4cfdb", text3 = "#93a1b3", muted = "#6d7c90", dim = "#495568", textStrong = "#ffffff",
+    accent = "#00a2ff", accent2 = "#ff6a00", accentText = "#7cc4ff", accentBg = "#06283f",
+    stIdle = "#66788d", stWorking = "#ffb020", stDone = "#3fcf7f", stApproval = "#ff5722", stError = "#ff4d9d",
+    ok = "#3fcf7f", danger = "#ff3b52", warn = "#ffb020", purple = "#a878ff",
+  } },
+  doom = { label = "DOOM", scheme = "dark", look = "card", tokens = {
+    bg = "#160806", bgOverlay = "#0e0504", surface = "#221009", surface2 = "#1c0d08",
+    surface3 = "#1f0e08", surfaceHover = "#301810", border = "#5a2c20", borderWeak = "#38190f",
+    text = "#fbecea", text2 = "#e6cbc6", text3 = "#c99a94", muted = "#b07d78", dim = "#744944", textStrong = "#ffffff",
+    accent = "#e53935", accent2 = "#ff6b00", accentText = "#ff8a7a", accentBg = "#3a0f0b",
+    stIdle = "#6e5652", stWorking = "#ffbb00", stDone = "#5ec75a", stApproval = "#ff6f1a", stError = "#ff4d8d",
+    ok = "#5ec75a", danger = "#e53935", warn = "#ffbb00", purple = "#b06bff",
+  } },
+  fallout = { label = "Fallout", scheme = "dark", look = "card", tokens = {
+    bg = "#020600", bgOverlay = "#010300", surface = "#082412", surface2 = "#04100a",
+    surface3 = "#061a0e", surfaceHover = "#0c3018", border = "#13502a", borderWeak = "#0e3a1e",
+    text = "#d6ffd6", text2 = "#9fd6a6", text3 = "#6fa878", muted = "#588a60", dim = "#3a5a40", textStrong = "#ffffff",
+    accent = "#3fff3f", accent2 = "#ffb000", accentText = "#74ff74", accentBg = "#0a2c0a",
+    stIdle = "#5a6a5c", stWorking = "#ffb000", stDone = "#4fff6f", stApproval = "#ff7a1e", stError = "#ff5cbf",
+    ok = "#4fff6f", danger = "#ff4438", warn = "#ffb000", purple = "#a86bff",
+  } },
+  masseffect = { label = "Mass Effect", scheme = "dark", look = "card", tokens = {
+    bg = "#0a0d13", bgOverlay = "#06080c", surface = "#141a24", surface2 = "#0f141c",
+    surface3 = "#121822", surfaceHover = "#1e2632", border = "#2c3a4a", borderWeak = "#1e2836",
+    text = "#eef4fb", text2 = "#c4d2e0", text3 = "#93a4b6", muted = "#798a9c", dim = "#55636f", textStrong = "#ffffff",
+    accent = "#e63946", accent2 = "#4ec3f7", accentText = "#ff8f96", accentBg = "#330f13",
+    stIdle = "#6b7686", stWorking = "#ffcf33", stDone = "#35c988", stApproval = "#ff7a00", stError = "#ff4fa3",
+    ok = "#35c988", danger = "#ff4152", warn = "#ffcf33", purple = "#9b6bff",
+  } },
+  -- Modern epics:
+  bioshock = { label = "BioShock", scheme = "dark", look = "card", tokens = {
+    bg = "#08191c", bgOverlay = "#050f11", surface = "#103038", surface2 = "#0b2024",
+    surface3 = "#0d262b", surfaceHover = "#16404a", border = "#1f5560", borderWeak = "#184751",
+    text = "#e8fbf7", text2 = "#93bdb9", text3 = "#7ba8a4", muted = "#5f8a87", dim = "#456664", textStrong = "#ffffff",
+    accent = "#2ec4b6", accent2 = "#e8b923", accentText = "#6fe0d3", accentBg = "#0a2c2a",
+    stIdle = "#5c7e7d", stWorking = "#f0c530", stDone = "#5fd47a", stApproval = "#ff6a3d", stError = "#ff4d9e",
+    ok = "#5fd47a", danger = "#ff5252", warn = "#f0c530", purple = "#a97bff",
+  } },
+  persona = { label = "Persona 5", scheme = "dark", look = "card", tokens = {
+    bg = "#0c0404", bgOverlay = "#060202", surface = "#1a0a0a", surface2 = "#120606",
+    surface3 = "#160808", surfaceHover = "#241010", border = "#3a1414", borderWeak = "#250d0d",
+    text = "#fff0f0", text2 = "#f0d5d5", text3 = "#c99a9a", muted = "#a87070", dim = "#6e4444", textStrong = "#ffffff",
+    accent = "#e60012", accent2 = "#ffffff", accentText = "#ff6b6b", accentBg = "#2e0709",
+    stIdle = "#7c6a6a", stWorking = "#ffb02e", stDone = "#35d07a", stApproval = "#ff7a18", stError = "#ff3d88",
+    ok = "#35d07a", danger = "#ff2b3b", warn = "#ffb02e", purple = "#b06bff",
+  } },
+  hollowknight = { label = "Hollow Knight", scheme = "dark", look = "card", tokens = {
+    bg = "#0d131e", bgOverlay = "#090e17", surface = "#1a2436", surface2 = "#131b29",
+    surface3 = "#161f2e", surfaceHover = "#222d42", border = "#33415a", borderWeak = "#26324a",
+    text = "#dbe6ef", text2 = "#a3b6c6", text3 = "#7c93a6", muted = "#64798c", dim = "#46586a", textStrong = "#ffffff",
+    accent = "#bcd3e6", accent2 = "#4f93a8", accentText = "#cfe0ee", accentBg = "#15293c",
+    stIdle = "#5c6d7d", stWorking = "#eab73f", stDone = "#66bd88", stApproval = "#e0693a", stError = "#d17faa",
+    ok = "#6ec392", danger = "#e05446", warn = "#e8b04a", purple = "#a382d6",
+  } },
+  celeste = { label = "Celeste", scheme = "dark", look = "card", tokens = {
+    bg = "#1a1122", bgOverlay = "#130c19", surface = "#281a37", surface2 = "#1f1429",
+    surface3 = "#231630", surfaceHover = "#352649", border = "#4a3460", borderWeak = "#372544",
+    text = "#f6ecff", text2 = "#ddccea", text3 = "#ac9bc0", muted = "#8d7ba2", dim = "#635478", textStrong = "#ffffff",
+    accent = "#ff4d9d", accent2 = "#7a5ba6", accentText = "#ff90c4", accentBg = "#3c0f26",
+    stIdle = "#6f6486", stWorking = "#ffbe4d", stDone = "#6bd96b", stApproval = "#e5504e", stError = "#ff54c8",
+    ok = "#6bd96b", danger = "#e5504e", warn = "#ffbe4d", purple = "#a67fd6",
+  } },
+  eldenring = { label = "Elden Ring", scheme = "dark", look = "card", tokens = {
+    bg = "#131009", bgOverlay = "#0d0b06", surface = "#221d0f", surface2 = "#191509",
+    surface3 = "#1e1a0d", surfaceHover = "#2b2514", border = "#4a3f20", borderWeak = "#342c17",
+    text = "#f5efe0", text2 = "#ddd2b8", text3 = "#b3a582", muted = "#8f8360", dim = "#6b6247", textStrong = "#ffffff",
+    accent = "#e6b422", accent2 = "#d99a2b", accentText = "#f3cf6a", accentBg = "#2e2408",
+    stIdle = "#7a7358", stWorking = "#f0b429", stDone = "#86c166", stApproval = "#e2662e", stError = "#d072a0",
+    ok = "#86c166", danger = "#d9524a", warn = "#f0b429", purple = "#a07bc9",
+  } },
+  godofwar = { label = "God of War", scheme = "dark", look = "card", tokens = {
+    bg = "#0d1319", bgOverlay = "#090d12", surface = "#1c2731", surface2 = "#131b22",
+    surface3 = "#172029", surfaceHover = "#24303c", border = "#33414e", borderWeak = "#263039",
+    text = "#eef3f7", text2 = "#cdd8e0", text3 = "#9aa8b3", muted = "#7d8b96", dim = "#55626c", textStrong = "#ffffff",
+    accent = "#ff5722", accent2 = "#4ec3f7", accentText = "#ff9d6e", accentBg = "#3d1409",
+    stIdle = "#6f7d88", stWorking = "#f5b53f", stDone = "#5ac98a", stApproval = "#ff8534", stError = "#e85b9c",
+    ok = "#5ac98a", danger = "#ff4d3d", warn = "#f5b53f", purple = "#9d7bea",
+  } },
+}
+
+-- Ordered display grouping for the Appearance > Theme picker. APPEARANCE_THEMES is a
+-- hash table and hs.json.encode has no stable key order, so the JS twin would otherwise
+-- render chips in arbitrary hash order. THIS array is the single source of BOTH the group
+-- headers and the in-group chip order the picker renders (injected alongside the themes;
+-- the renderer walks groups in order). Every theme key must appear in exactly one group
+-- (a core.test invariant pins this both ways); a defensive "More" bucket in the JS twin
+-- catches any key that slips through so a theme is never silently unreachable.
+M.APPEARANCE_THEME_GROUPS = {
+  { id = "essentials", label = "Essentials",
+    themes = { "midnight", "slate", "flat", "contrast", "oled" } },
+  { id = "light", label = "Light",
+    themes = { "light", "solarizedlight", "gruvboxlight" } },
+  { id = "editor", label = "Editor Classics",
+    themes = { "nord", "dracula", "tokyonight", "gruvbox", "solarized", "rosepine", "catppuccin", "monokai" } },
+  { id = "moody", label = "Dark & Moody",
+    themes = { "ember", "bloodmoon", "matrix", "emerald" } },
+  { id = "neon", label = "Neon",
+    themes = { "synthwave", "cyberpunk", "redline", "magma", "plasma", "acid", "toxic", "spearmint", "tron", "hotline", "voltage", "laser" } },
+  { id = "games", label = "Video Games",
+    themes = { "mario", "zelda", "sonic", "pokemon", "minecraft", "splatoon", "stardew", "halo", "portal", "doom", "fallout", "masseffect", "bioshock", "persona", "hollowknight", "celeste", "eldenring", "godofwar" } },
 }
 
 -- Font-family stacks the Appearance > Font picker maps to (--font token). Keys are

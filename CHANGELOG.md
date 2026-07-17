@@ -4,6 +4,28 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-07-17 — Organize the theme picker into groups + add 18 video-game themes
+
+The Appearance > Theme picker had grown to 32 themes rendered as one flat wall of
+chips **in hash order** — `renderThemeChips` iterated `Object.keys(APPEARANCE.themes)`,
+whose order is whatever `hs.json.encode` emits for a Lua hash table, so the tidy
+source-code grouping never reached the UI. Introduced `core.APPEARANCE_THEME_GROUPS`,
+an **ordered array of `{ id, label, themes[] }`** that is now the single source of both
+the picker's chip order and its section headers (injected alongside the themes; the JS
+twin walks it and renders a labeled section per group, sweeping any un-grouped key into
+a trailing **More** section so a theme can never go missing). The 32 existing themes are
+sorted into **Essentials · Light · Editor Classics · Dark & Moody · Neon**.
+
+Added a sixth group, **Video Games** — 18 themes whose palettes are drawn from famous
+franchises: Super Mario, Legend of Zelda, Sonic, Pokémon, Minecraft, Splatoon, Stardew
+Valley, Halo, Portal, DOOM, Fallout (Pip-Boy phosphor green), Mass Effect (N7), BioShock,
+Persona 5, Hollow Knight, Celeste, Elden Ring, God of War. Each maps the franchise's
+signature colors onto the full 26-token palette and was checked for WCAG text/bg contrast
+(all ≥ 14:1), a monotonic surface ladder, and status-color legibility (working/done/
+approval/error stay hue-distinct rather than collapsing toward the accent). **50 built-in
+themes total.** A new core.test invariant pins that every theme belongs to exactly one
+group (no orphans, no duplicates), so a future theme can't silently fall out of the picker.
+
 ## 2026-07-16 — Never show a real permission prompt as "Working" (revert the guess)
 
 The prior "auto-running tool reads Working" heuristic guessed from `permission_mode`:

@@ -1906,6 +1906,16 @@ do
   check("appearance: themes/defaults/vars injected for the live-preview twin",
         src:find("var APPEARANCE = __APPEARANCE_THEMES__", 1, true) ~= nil
         and src:find('HTML = HTML:gsub("__APPEARANCE_THEMES__"', 1, true) ~= nil)
+  -- Grouped theme picker: the ordered groups are injected (single-sourced from
+  -- core.APPEARANCE_THEME_GROUPS) and the renderer walks them + sweeps un-grouped keys.
+  check("appearance: theme groups injected alongside themes",
+        src:find("groups = core.APPEARANCE_THEME_GROUPS", 1, true) ~= nil)
+  check("appearance: renderThemeChips walks APPEARANCE.groups (ordered headers, not hash order)",
+        src:find("groups=(APPEARANCE.groups||[])", 1, true) ~= nil
+        and src:find("groups.forEach(function(g){ section(", 1, true) ~= nil)
+  check("appearance: un-grouped theme keys swept into a trailing More section",
+        src:find("var leftover=Object.keys(APPEARANCE.themes).filter", 1, true) ~= nil
+        and src:find('section("More", leftover)', 1, true) ~= nil)
   check("appearance: applyAppearance twin merges defaults<-theme<-overrides like resolveAppearance",
         src:find("function applyAppearance(ap)", 1, true) ~= nil
         and src:find("function resolveAp(ap)", 1, true) ~= nil

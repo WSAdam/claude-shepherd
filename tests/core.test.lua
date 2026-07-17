@@ -6778,8 +6778,27 @@ do
   eq("appearance: hotline accent", core.resolveAppearance({ theme = "hotline" }).tokens.accent, "#ff2bd6")
   eq("appearance: voltage accent", core.resolveAppearance({ theme = "voltage" }).tokens.accent, "#b026ff")
   eq("appearance: laser accent", core.resolveAppearance({ theme = "laser" }).tokens.accent, "#00b3ff")
+  -- video-game franchises (18): each theme's signature accent resolves
+  eq("appearance: mario accent", core.resolveAppearance({ theme = "mario" }).tokens.accent, "#e52521")
+  eq("appearance: zelda accent", core.resolveAppearance({ theme = "zelda" }).tokens.accent, "#f5d020")
+  eq("appearance: sonic accent", core.resolveAppearance({ theme = "sonic" }).tokens.accent, "#1b78e6")
+  eq("appearance: pokemon accent", core.resolveAppearance({ theme = "pokemon" }).tokens.accent, "#ee1515")
+  eq("appearance: minecraft accent", core.resolveAppearance({ theme = "minecraft" }).tokens.accent, "#5ea833")
+  eq("appearance: splatoon accent", core.resolveAppearance({ theme = "splatoon" }).tokens.accent, "#ff2d95")
+  eq("appearance: stardew accent", core.resolveAppearance({ theme = "stardew" }).tokens.accent, "#7dbe4e")
+  eq("appearance: halo accent", core.resolveAppearance({ theme = "halo" }).tokens.accent, "#4ec3f7")
+  eq("appearance: portal accent", core.resolveAppearance({ theme = "portal" }).tokens.accent, "#00a2ff")
+  eq("appearance: doom accent", core.resolveAppearance({ theme = "doom" }).tokens.accent, "#e53935")
+  eq("appearance: fallout accent", core.resolveAppearance({ theme = "fallout" }).tokens.accent, "#3fff3f")
+  eq("appearance: masseffect accent", core.resolveAppearance({ theme = "masseffect" }).tokens.accent, "#e63946")
+  eq("appearance: bioshock accent", core.resolveAppearance({ theme = "bioshock" }).tokens.accent, "#2ec4b6")
+  eq("appearance: persona accent", core.resolveAppearance({ theme = "persona" }).tokens.accent, "#e60012")
+  eq("appearance: hollowknight accent", core.resolveAppearance({ theme = "hollowknight" }).tokens.accent, "#bcd3e6")
+  eq("appearance: celeste accent", core.resolveAppearance({ theme = "celeste" }).tokens.accent, "#ff4d9d")
+  eq("appearance: eldenring accent", core.resolveAppearance({ theme = "eldenring" }).tokens.accent, "#e6b422")
+  eq("appearance: godofwar accent", core.resolveAppearance({ theme = "godofwar" }).tokens.accent, "#ff5722")
   do local n = 0; for _ in pairs(core.APPEARANCE_THEMES) do n = n + 1 end
-     check("appearance: 32 built-in themes", n == 32) end
+     check("appearance: 50 built-in themes", n == 50) end
   -- structural validity of EVERY theme: required fields + all token values are #rrggbb
   do
     local bad = {}
@@ -6793,6 +6812,32 @@ do
       end end
     end
     check("appearance: every theme is structurally valid (#rrggbb tokens)  [" .. table.concat(bad, ",") .. "]", #bad == 0)
+  end
+
+  -- Theme grouping: the picker's chip ORDER + section HEADERS come only from
+  -- APPEARANCE_THEME_GROUPS (a hash-ordered theme table would render arbitrarily). Pin the
+  -- invariant BOTH ways -- every grouped key names a real theme, and every theme sits in
+  -- exactly one group -- so a newly-added theme can't silently fall out of the picker.
+  do
+    local groups = core.APPEARANCE_THEME_GROUPS
+    check("appearance: theme groups is a non-empty ordered array", type(groups) == "table" and #groups > 0)
+    local count, dup, missing, badmeta = {}, {}, {}, {}
+    for _, g in ipairs(groups or {}) do
+      if type(g.id) ~= "string" or g.id == "" or type(g.label) ~= "string" or g.label == "" or type(g.themes) ~= "table" then
+        badmeta[#badmeta + 1] = tostring(g and g.id)
+      end
+      for _, key in ipairs(g.themes or {}) do
+        if not core.APPEARANCE_THEMES[key] then missing[#missing + 1] = key end
+        if count[key] then dup[#dup + 1] = key end
+        count[key] = (count[key] or 0) + 1
+      end
+    end
+    local orphan = {}
+    for key in pairs(core.APPEARANCE_THEMES) do if not count[key] then orphan[#orphan + 1] = key end end
+    check("appearance: every group has id+label+themes  [" .. table.concat(badmeta, ",") .. "]", #badmeta == 0)
+    check("appearance: every grouped key names a real theme  [" .. table.concat(missing, ",") .. "]", #missing == 0)
+    check("appearance: no theme is listed in two groups  [" .. table.concat(dup, ",") .. "]", #dup == 0)
+    check("appearance: every theme belongs to exactly one group (no orphan)  [" .. table.concat(orphan, ",") .. "]", #orphan == 0)
   end
 
   -- font: default system, valid passes, junk -> system; appearanceCss emits --font stack

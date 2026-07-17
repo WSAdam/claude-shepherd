@@ -5831,6 +5831,10 @@ local HTML = [[
   /* ---- Appearance tab controls ---- */
   .ap-grp { margin:6px 0 12px; }
   .ap-chips { display:flex; flex-wrap:wrap; gap:7px; margin:4px 0 2px; }
+  /* Grouped theme picker: a small uppercase header above each group's chip row. */
+  .ap-theme-grp { font-size:10px; font-weight:700; letter-spacing:.05em; text-transform:uppercase;
+                  color:var(--muted); margin:13px 0 3px; }
+  #a-themes > .ap-theme-grp:first-child { margin-top:2px; }
   .ap-chip { display:flex; align-items:center; gap:7px; background:var(--surface); color:var(--text-2);
              border:1px solid var(--border); border-radius:10px; padding:6px 11px; cursor:pointer; font-size:12px; }
   .ap-chip:hover { background:var(--surface-hover); }
@@ -6891,7 +6895,7 @@ local HTML = [[
       <div class="ap-note">Pick a theme, then fine-tune colors and size. Changes preview live — <b>Save</b> keeps them, <b>Cancel</b> reverts.</div>
       <div class="ap-grp">
         <div class="s-lbl">Theme</div>
-        <div id="a-themes" class="ap-chips"></div>
+        <div id="a-themes"></div>
         <input type="hidden" id="a-theme" value="midnight">
       </div>
       <div class="ap-grp">
@@ -8462,16 +8466,33 @@ local HTML = [[
       }
       return ap;
     }
+    function themeChipEl(key, active){
+      var th=APPEARANCE.themes[key]; if(!th) return null;
+      var tok=apThemeTokens(key);
+      var c=document.createElement("button"); c.type="button"; c.className="ap-chip"+(key===active?" on":"");
+      c.onclick=function(){ pickTheme(key); };
+      c.innerHTML='<span class="ap-sw"><i style="background:'+esc(tok.bg)+'"></i><i style="background:'
+        +esc(tok.surface)+'"></i><i style="background:'+esc(tok.accent)+'"></i></span> '+esc(th.label);
+      return c;
+    }
+    // Grouped, ordered theme picker: walk APPEARANCE.groups (the single source of BOTH order
+    // and headers, injected from core.APPEARANCE_THEME_GROUPS) rendering one labeled section
+    // per group. Any theme key not covered by a group is swept into a trailing "More" section
+    // so a theme can never become unreachable if the group list drifts from the theme table.
     function renderThemeChips(active){
       var box=apG("a-themes"); if(!box) return; box.innerHTML="";
-      Object.keys(APPEARANCE.themes).forEach(function(key){
-        var th=APPEARANCE.themes[key], tok=apThemeTokens(key);
-        var c=document.createElement("button"); c.type="button"; c.className="ap-chip"+(key===active?" on":"");
-        c.onclick=function(){ pickTheme(key); };
-        c.innerHTML='<span class="ap-sw"><i style="background:'+esc(tok.bg)+'"></i><i style="background:'
-          +esc(tok.surface)+'"></i><i style="background:'+esc(tok.accent)+'"></i></span> '+esc(th.label);
-        box.appendChild(c);
-      });
+      var seen={}, groups=(APPEARANCE.groups||[]);
+      function section(label, keys){
+        var present=keys.filter(function(k){ return APPEARANCE.themes[k]; });
+        if(!present.length) return;
+        var h=document.createElement("div"); h.className="ap-theme-grp"; h.textContent=label; box.appendChild(h);
+        var row=document.createElement("div"); row.className="ap-chips";
+        present.forEach(function(k){ seen[k]=1; var el=themeChipEl(k,active); if(el) row.appendChild(el); });
+        box.appendChild(row);
+      }
+      groups.forEach(function(g){ section(g.label||g.id||"", (g.themes||[])); });
+      var leftover=Object.keys(APPEARANCE.themes).filter(function(k){ return !seen[k]; });
+      if(leftover.length) section("More", leftover);
     }
     function seedThemeColors(key){
       var tok=apThemeTokens(key);
@@ -12168,6 +12189,7 @@ do
   HTML = HTML:gsub("__APPEARANCE_THEMES__", (hs.json.encode({
     vars = core.APPEARANCE_VARS, defaults = core.APPEARANCE_DEFAULTS,
     themes = core.APPEARANCE_THEMES, fonts = core.APPEARANCE_FONTS,
+    groups = core.APPEARANCE_THEME_GROUPS,
   }):gsub("%%", "%%%%")))
   print("[cc-dashboard] starting with theme: " .. savedTheme .. " / look: " .. ap.look)
 end
