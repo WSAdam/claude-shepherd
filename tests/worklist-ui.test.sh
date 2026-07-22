@@ -3,25 +3,39 @@
 # on top of the pure cc-core worklist ops (those are behaviorally tested in
 # core.test.lua). Like escaping.test.sh, the panel JS has no headless runtime in this
 # Lua+bash suite, so this asserts the WIRING is present end-to-end: the front-end sink
-# (textarea + Shift+Enter, per-item ✕ delete) AND the Lua bridge that services it
-# (`worklist-remove` -> core.worklistRemove). It fails if a refactor silently drops a
-# leg of either feature. Re-verify behavior by eye when you intentionally touch these.
+# (the add/open item MODAL — subject + details + expected date — and the per-item ✕
+# delete) AND the Lua bridge that services it (`worklist-remove` -> core.worklistRemove).
+# It fails if a refactor silently drops a leg of either feature. Re-verify behavior by
+# eye when you intentionally touch these.
 
 . "$(dirname "$0")/lib.sh"
 
 DASH="$ROOT/claude-dashboard.lua"
 has() { grep -qF "$1" "$DASH" && echo yes || echo no; }
 
-# ---- Feature 1: multi-line add input (Enter adds, Shift+Enter newline, auto-grow) --
-# The add field must be a <textarea> (an <input type=text> cannot hold a newline).
-assert_eq "add field is a <textarea> (multi-line capable)" "yes" "$(has '<textarea id="wl-input"')"
-assert_eq "add input has NO single-line <input> remnant"   "no"  "$(has '<input id="wl-input"')"
-# Enter adds, Shift+Enter falls through to a newline.
-assert_eq "Enter-vs-Shift+Enter handler is wired"  "yes" "$(has 'onkeydown="onWorklistKey(event)"')"
-assert_eq "Shift+Enter is the newline escape hatch" "yes" "$(has '!e.shiftKey')"
-assert_eq "add input grows with content (oninput autoGrow)" "yes" "$(has 'oninput="autoGrow(this)"')"
-# After adding, the grown textarea height is reset (so the next item starts compact).
-assert_eq "add resets the textarea height" "yes" "$(has 'inp.style.height = "auto"')"
+# ---- Feature 1: the item modal is the ONE place an item is written -----------------
+# Adding opens the modal (there is no inline add field any more).
+assert_eq "add row is a modal-opening button" "yes" "$(has 'id="wl-addbtn" onclick="wlModalOpen('"'"''"'"')"')"
+assert_eq "no inline add textarea remnant"    "no"  "$(has '<textarea id="wl-input"')"
+# The modal collects all three fields...
+assert_eq "modal has a subject field"       "yes" "$(has 'id="wl-msubj"')"
+assert_eq "modal has a details field"       "yes" "$(has '<textarea id="wl-mdet"')"
+assert_eq "modal has a date field"          "yes" "$(has 'id="wl-mdue" type="date"')"
+# ...and Save posts them: a new item via worklist-add, an existing one via worklist-edit.
+assert_eq "add posts subject+details+due"   "yes" "$(has 'a:"worklist-add", v:worklistScope, text:subj, details:details, due:due')"
+assert_eq "edit posts id+subject+details+due" "yes" "$(has 'a:"worklist-edit", v:worklistScope, text:id, edit:subj, details:details, due:due')"
+# The Lua bridge forwards both extras to the pure core ops.
+assert_eq "Lua bridge reads payload.details/due" "yes" "$(has 'local extra = { details = tostring(payload.details or ""), due = tostring(payload.due or ""),')"
+# The checklist rides along; omitted -> nil, so core leaves an existing list alone.
+assert_eq "Lua bridge passes payload.steps through" "yes" "$(has 'steps = (type(payload.steps) == "table") and payload.steps or nil }')"
+assert_eq "modal has a checklist area"      "yes" "$(has 'id="wl-msteps"')"
+assert_eq "date arrows nudge a day"         "yes" "$(has 'onclick="wlDueShift(-1)"')"
+assert_eq "Lua add passes the extras"       "yes" "$(has 'FX.worklistNewId(), FX.now(), extra)')"
+assert_eq "Lua edit passes the extras"      "yes" "$(has 'tostring(payload.edit or ""), extra)')"
+# A row shows subject + date and opens the modal when clicked.
+assert_eq "row carries its open id"         "yes" "$(has 'class="wl-item" data-open="')"
+assert_eq "row click opens the modal"       "yes" "$(has 'if(rid) wlModalOpen(rid)')"
+assert_eq "row renders the due-date chip"   "yes" "$(has 'wlDueChip(it.due, isDone)')"
 
 # ---- Feature 2: per-item delete -----------------------------------------------------
 # Each rendered row carries a ✕ button tagged with its item id...
@@ -34,6 +48,17 @@ assert_eq "JS worklistRemove posts worklist-remove" "yes" "$(has 'send("worklist
 assert_eq "Lua bridge handles worklist-remove"   "yes" "$(has 'a == "worklist-remove"')"
 # Pin the full arg mapping: id arrives via payload.text (NOT payload.v, which is the scope).
 assert_eq "Lua bridge removes by payload.text id" "yes" "$(has 'core.worklistRemove(st, scope, tostring(payload.text')"
+
+# ---- Feature 3: the MASTER rollup tab (read-only, date-priority) ---------------------
+assert_eq "MASTER chip renders first"       "yes" "$(has 'data-scope="master"')"
+assert_eq "master rolls every scope up"     "yes" "$(has 'function wlMasterRows(')"
+assert_eq "undated items sort last"         "yes" "$(has '"9999-99-99"')"
+assert_eq "master hides the add row"        "yes" "$(has 'document.getElementById("wl-addrow").style.display = isMaster ? "none" : "flex"')"
+assert_eq "master row carries its home scope" "yes" "$(has 'data-mscope="')"
+assert_eq "clicking a master row jumps to that tab" "yes" "$(has 'worklistScope = ms; renderWorklist();')"
+# Ticking a master row writes to the item's OWN scope, never the visible tab.
+assert_eq "master row has its own checkbox"   "yes" "$(has 'class="wl-cb wl-mcb"')"
+assert_eq "master tick toggles in its home scope" "yes" "$(has 'if(ms && mid) send("worklist-toggle", ms, mid);')"
 
 # ---- XSS: the per-item id reaches two attributes; both go through esc() --------------
 # (item text is covered by escaping.test.sh; the id is server-minted but still escaped.)

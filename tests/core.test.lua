@@ -5141,6 +5141,45 @@ do
   core.worklistEdit(st, "generic", "nope", "ghost")
   eq("worklist: edit unknown id is a no-op", core.worklistScopeList(st, "generic")[1].text, "still done")
   eq("worklist: edit unknown id adds nothing", #core.worklistScopeList(st, "generic"), 1)
+  -- details + expected date (the item modal's other two fields)
+  core.worklistAdd(st, "generic", "ship the panel", "d1", 200,
+                   { details = "  subject is the row; this is the body  ", due = "2026-08-01" })
+  local d1 = core.worklistScopeList(st, "generic")[2]
+  eq("worklist: add stores trimmed details", d1.details, "subject is the row; this is the body")
+  eq("worklist: add stores the due date", d1.due, "2026-08-01")
+  -- an add with no extras still yields present-but-empty fields (never nil in the payload)
+  core.worklistAdd(st, "generic", "bare item", "d2", 201)
+  eq("worklist: bare add has empty details", core.worklistScopeList(st, "generic")[3].details, "")
+  eq("worklist: bare add has empty due", core.worklistScopeList(st, "generic")[3].due, "")
+  -- edit rewrites the extras it is GIVEN...
+  core.worklistEdit(st, "generic", "d1", "ship the panel", { details = "revised", due = "2026-09-09" })
+  eq("worklist: edit rewrites details", core.worklistScopeList(st, "generic")[2].details, "revised")
+  eq("worklist: edit rewrites due", core.worklistScopeList(st, "generic")[2].due, "2026-09-09")
+  -- ...clears one when it is sent empty (the modal always sends both)...
+  core.worklistEdit(st, "generic", "d1", "ship the panel", { details = "revised", due = "" })
+  eq("worklist: edit can clear the due date", core.worklistScopeList(st, "generic")[2].due, "")
+  -- ...and leaves them ALONE when the caller omits them entirely.
+  core.worklistEdit(st, "generic", "d1", "renamed")
+  eq("worklist: subject-only edit keeps details", core.worklistScopeList(st, "generic")[2].details, "revised")
+  eq("worklist: subject-only edit renames", core.worklistScopeList(st, "generic")[2].text, "renamed")
+  -- checklist steps: sanitized on the way in, counted for the row's progress chip
+  core.worklistEdit(st, "generic", "d1", "renamed",
+                    { steps = { { text = "  one  ", done = true }, { text = "two" }, { text = "  " }, "junk" } })
+  local steps = core.worklistScopeList(st, "generic")[2].steps
+  eq("worklist: blank + non-table steps dropped", #steps, 2)
+  eq("worklist: step text trimmed", steps[1].text, "one")
+  check("worklist: step done flag kept", steps[1].done == true)
+  check("worklist: step done defaults false", steps[2].done == false)
+  local sd, stot = core.worklistStepProgress(steps)
+  eq("worklist: step progress done", sd, 1)
+  eq("worklist: step progress total", stot, 2)
+  eq("worklist: progress of no steps", select(2, core.worklistStepProgress(nil)), 0)
+  -- an edit that omits steps leaves the checklist alone; sending {} clears it
+  core.worklistEdit(st, "generic", "d1", "renamed again")
+  eq("worklist: subject-only edit keeps steps", #core.worklistScopeList(st, "generic")[2].steps, 2)
+  core.worklistEdit(st, "generic", "d1", "renamed again", { steps = {} })
+  eq("worklist: empty steps clears the checklist", #core.worklistScopeList(st, "generic")[2].steps, 0)
+  core.worklistRemove(st, "generic", "d1"); core.worklistRemove(st, "generic", "d2")
   -- scope list for an unknown project is empty (no crash)
   eq("worklist: unknown scope -> empty", #core.worklistScopeList(st, "proj:/nope"), 0)
   -- tolerant of a nil/garbled state

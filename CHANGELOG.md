@@ -4,6 +4,65 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-07-22 — My List grows up: item modal, checklists, dates, MASTER rollup
+
+### Changed — the FLEET row is one line, and bulk nudge is gone
+
+**Nudge all** is removed: broadcasting one message to every visible session was noise, not a
+fix (the per-tile nudge and the queue cover the real cases). The row no longer wraps either —
+`#bulkbar` is a **size container** and the label/buttons scale with `cqw`
+(`clamp(9px,2.6cqw,12px)`), so **Approve all** / **Stop all** / **My List** shrink together
+instead of spilling onto a second row in a narrow panel.
+
+### Added — one modal per item: subject, details, checklist, expected date
+
+Adding is no longer an inline textarea. **＋ Add an item…** — and clicking any row — opens a
+single editor:
+
+- **Subject** (Enter saves) is the one line the list shows; **Details** is free-form context.
+- **Checklist**: sub-steps with their own checkboxes (**＋ Step**, Enter for the next, **✕** to
+  drop). Ticking a step **flushes the whole form immediately** so mid-work progress survives an
+  Esc — with a guard that an auto-flush only ever *updates*, so ticking inside a never-saved new
+  item can't sneak a phantom onto the list. Typing stays local (no re-render) so the caret never
+  jumps.
+- **Expected date**: the native picker plus **◀ ▶** to nudge a day at a time and **✕** to clear;
+  with no date set the first nudge lands on today.
+
+Rows now read *subject + 📝 + `2/5` progress + date chip* (dim / amber **Today**–**Tomorrow** /
+red **overdue**, and the progress chip greens at 100%). Esc or a backdrop click discards; the
+old double-click inline text editor is gone, replaced by the modal.
+
+Storage: items gained `details`, `due`, and `steps[]` in `cc-worklist.json`. `core.worklistAdd`
+/ `worklistEdit` take an `extra` table and **only write the keys present**, so an old
+subject-only item still loads and a caller that knows nothing about the new fields can't wipe
+them; new pure helpers `core.worklistSteps` (trim, drop blanks/junk) and
+`core.worklistStepProgress` back the chip.
+
+### Added — MASTER: every open item, by date priority
+
+A purple **MASTER** chip leads the scope row: a read-only rollup of every **open** item across
+Generic *and* every project, sorted soonest-first (undated last) and grouped **Overdue / Today /
+Next 7 days / Later / No date**, each row tagged with the list it came from. Ticking a row marks
+it done **in its own scope** (not the visible tab — master is a rollup), and clicking one
+switches to that tab with the item open. No add row on MASTER by design: non-project to-dos
+belong in Generic.
+
+### Changed — the worklist scales to the panel's real width
+
+`#worklist` became a size container: scope chips, list tags, subjects, and date/progress chips
+all step down with `cqw`, and master rows are a 4-column grid (tick · list · subject · chips) so
+columns line up and a long subject clamps to two lines instead of shoving the date chip onto a
+row of its own. Padding and gaps tightened throughout — roughly a third more list per screen at
+the width the panel actually lives at.
+
+### Tests
+
+`core.test.lua` covers details/due round-trips, present-key-only edits, and step
+sanitizing/progress; `worklist-ui.test.sh` (31 assertions) re-pins the wiring end-to-end —
+modal fields → bridge payload → core, the master rollup's sort/hidden-add-row/scope-jump, and
+that a master tick writes to its home scope; `ui.test.lua` pins the modal-only editor (and that
+the inline dblclick editor is gone). Suite green.
+
 ## 2026-07-17 — Kill the "blocked prompt shows Working" bug for real (VS Code buffering)
 
 A session blocked on a live VS Code **"Allow this bash command?"** prompt kept reading as

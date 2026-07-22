@@ -122,7 +122,8 @@ editors, the routine board) are intentionally omitted until they ship.
 
 - As a **fleet operator**, I want a search bar that filters the grid by name/project/status/group as I type, so that I can find a session fast in a large fleet.
 - As a **fleet operator**, I want to tag sessions into named groups and scope the grid to one, so that I can supervise a cohort of related sessions together.
-- As a **fleet operator**, I want bulk Approve all / Stop all / Nudge all over the currently visible sessions, so that I can act on many sessions at once instead of one by one.
+- As a **fleet operator**, I want bulk Approve all / Stop all over the currently visible sessions, so that I can act on many sessions at once instead of one by one.
+- As a **fleet operator**, I want the Fleet bar to shrink its buttons rather than wrap to a second row, so that a narrow panel keeps the whole fleet row on one line.
 - As a **fleet operator**, I want a custom persistent relabel per project keyed to its launch folder, so that a tile keeps a meaningful name across reloads, respawns, and directory changes.
 
 ## Global hotkeys
@@ -179,7 +180,14 @@ editors, the routine board) are intentionally omitted until they ship.
 
 - As a **fleet operator**, I want a built-in checklist that swaps in over the tiles, so that I can track my own to-dos without leaving the panel.
 - As a **fleet operator**, I want a global list plus one per currently-open project, persisted by launch-folder identity, so that a project's list survives close/reopen and respawn.
-- As a **fleet operator**, I want to add, check, delete, and clear worklist items with multi-line support, so that I can manage my list quickly inline.
+- As a **fleet operator**, I want to add, check, delete, and clear worklist items, so that I can manage my list without leaving the panel.
+- As a **fleet operator**, I want one modal that captures an item's subject, details, and expected date, so that a to-do carries its context instead of being a bare line of text.
+- As a **fleet operator**, I want to nudge an item's expected date a day at a time with ◀ ▶, so that I can reschedule without opening the date picker.
+- As a **fleet operator**, I want a checklist of sub-steps inside an item that saves the moment I tick one, so that I can check off mini pieces as I go without losing progress.
+- As a **fleet operator**, I want each list row to show its date (amber today, red overdue) and its checklist progress, so that I can see what's pressing at a glance.
+- As a **fleet operator**, I want a read-only MASTER tab that rolls every open item up by date priority, tagged with its list, so that I can see everything I owe across projects in one place.
+- As a **fleet operator**, I want to tick an item done from MASTER and have it write to its own list, so that I can clear work from the rollup without switching tabs.
+- As a **fleet operator**, I want clicking a MASTER row to jump to that item's tab with the item open, so that the rollup is a way in, not a dead end.
 
 ## Keeping the Mac & fleet running
 

@@ -2038,7 +2038,7 @@ do
         and src:find("grp.agents.length + ' agent'", 1, true) ~= nil)
 end
 
--- ---- Worklist: double-click an item to edit it in place ----
+-- ---- Worklist: click an item to open it in the add/edit modal ----
 do
   local f = io.open(ROOT .. "claude-dashboard.lua", "r")
   local src = f and f:read("*a") or ""
@@ -2046,18 +2046,21 @@ do
   check("wl-edit: backend handles the worklist-edit action",
         src:find('a == "worklist-edit"', 1, true) ~= nil
         and src:find("core.worklistEdit(st, scope", 1, true) ~= nil)
-  check("wl-edit: edit posts scope+id+text (id as `text`, new text as `edit`)",
-        src:find('a:"worklist-edit", v:worklistScope, text:id, edit:text', 1, true) ~= nil)
-  check("wl-edit: double-clicking a row starts an inline editor",
-        src:find("function startWorklistEdit(", 1, true) ~= nil
-        and src:find('addEventListener("dblclick"', 1, true) ~= nil
-        and src:find('t.closest(".wl-item")', 1, true) ~= nil)
-  check("wl-edit: dblclick ignores the checkbox + delete control",
+  check("wl-edit: edit posts scope+id+subject+details+due",
+        src:find('a:"worklist-edit", v:worklistScope, text:id, edit:subj, details:details, due:due', 1, true) ~= nil)
+  check("wl-edit: clicking a row opens the item modal",
+        src:find("function wlModalOpen(", 1, true) ~= nil
+        and src:find('t.closest(".wl-item")', 1, true) ~= nil
+        and src:find("if(rid) wlModalOpen(rid)", 1, true) ~= nil)
+  check("wl-edit: row click ignores the checkbox + delete control",
         src:find('t.classList.contains("wl-cb") || t.classList.contains("wl-del")', 1, true) ~= nil)
-  check("wl-edit: Enter commits, Escape cancels, blank/unchanged restores the row",
-        src:find('e.key === "Enter" && !e.shiftKey', 1, true) ~= nil
-        and src:find('e.key === "Escape"', 1, true) ~= nil
-        and src:find("worklistEditSend(id, nt)", 1, true) ~= nil)
+  check("wl-edit: modal saves a non-empty subject, Esc/backdrop discard",
+        src:find("function wlModalSave(", 1, true) ~= nil
+        and src:find('if(e.key === "Escape" && wlModalOpenNow()) wlModalClose();', 1, true) ~= nil
+        and src:find('e.target.id === "wl-modal"', 1, true) ~= nil)
+  check("wl-edit: the inline dblclick editor is gone (modal is the only editor)",
+        src:find("function startWorklistEdit(", 1, true) == nil
+        and src:find("worklistEditSend(id, nt)", 1, true) == nil)
 end
 
 -- ---- User Stories tab (spec/product/user-stories.md viewer/editor) ----

@@ -4483,10 +4483,14 @@ local function handleBridgeMsg(msg)
      or a == "worklist-edit" or a == "worklist-clear-done" then
     local scope = tostring(payload.v or "generic")
     local st = FX.readWorklist()
-    if a == "worklist-add" then core.worklistAdd(st, scope, tostring(payload.text or ""), FX.worklistNewId(), FX.now())
+    -- add/edit carry the modal's fields: subject + details + due date + checklist.
+    -- steps stays nil when the caller omitted it, so core leaves an existing list alone.
+    local extra = { details = tostring(payload.details or ""), due = tostring(payload.due or ""),
+                    steps = (type(payload.steps) == "table") and payload.steps or nil }
+    if a == "worklist-add" then core.worklistAdd(st, scope, tostring(payload.text or ""), FX.worklistNewId(), FX.now(), extra)
     elseif a == "worklist-toggle" then core.worklistToggle(st, scope, tostring(payload.text or ""))
     elseif a == "worklist-remove" then core.worklistRemove(st, scope, tostring(payload.text or ""))
-    elseif a == "worklist-edit" then core.worklistEdit(st, scope, tostring(payload.text or ""), tostring(payload.edit or ""))
+    elseif a == "worklist-edit" then core.worklistEdit(st, scope, tostring(payload.text or ""), tostring(payload.edit or ""), extra)
     else core.worklistClearDone(st, scope) end
     FX.writeWorklist(st)
     pcall(function() wv:evaluateJavaScript("window.ccWorklist(" .. hs.json.encode(FX.worklistPayload()) .. ")") end)
@@ -5968,43 +5972,77 @@ local HTML = [[
   .gchip:hover { background:var(--surface-hover); }
   .gchip.active { border-color:var(--accent); color:var(--accent-text); background:var(--accent-bg); }
   .gtag { font-size:10px; color:var(--muted); margin-left:5px; }
-  /* bulk fleet actions (shown only when actionable sessions exist) */
-  #bulkbar { display:none; align-items:center; flex-wrap:wrap; gap:6px; padding:6px 10px; border-bottom:1px solid var(--border); }
+  /* bulk fleet actions (shown only when actionable sessions exist).
+     ONE line, never wrapped: the row is a size container, so the label/buttons
+     scale down with cqw (1cqw = 1% of the bar's width) as the panel narrows
+     instead of spilling onto a second row. */
+  #bulkbar { display:none; align-items:center; flex-wrap:nowrap; gap:6px; padding:6px 10px; border-bottom:1px solid var(--border);
+             container-type:inline-size; }
   #bulkbar.show { display:flex; }
-  .bulk-lbl { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
+  .bulk-lbl { font-size:clamp(9px,2.2cqw,11px); color:var(--muted); text-transform:uppercase; letter-spacing:.04em;
+              flex:0 1 auto; min-width:0; overflow:hidden; }
   #bulkbar button { background:var(--surface); color:var(--text-2); border:1px solid var(--border); border-radius:8px;
-                    font-size:12px; padding:3px 10px; cursor:pointer; }
+                    font-size:clamp(9px,2.6cqw,12px); padding:3px clamp(4px,1.6cqw,10px); cursor:pointer;
+                    white-space:nowrap; flex:0 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; }
   #bulkbar button:hover { background:var(--surface-hover); }
   #bulkbar button.bulk-ap { border-color:var(--ok); color:var(--ok); }
   #bulkbar button.bulk-st { border-color:var(--danger); color:var(--danger); }
   /* 📋 Worklist: the My List toggle lives in the FLEET row (right-aligned). The
      fleet label/buttons render into #bulkbar-fleet only when needed; My List is
      always present. Clicking it swaps the #grid tiles area for the worklist. */
-  #bulkbar-fleet { display:flex; align-items:center; flex-wrap:wrap; gap:6px; }
-  #mylist-btn { margin-left:auto; }
+  #bulkbar-fleet { display:flex; align-items:center; flex-wrap:nowrap; gap:6px; min-width:0; flex:0 1 auto; }
+  #mylist-btn { margin-left:auto; flex:0 0 auto; }
   #mylist-btn.on { background:var(--accent-bg); border-color:var(--accent); color:var(--accent-text); }
   #worklist { display:none; padding:8px 10px 14px; }
   body.worklist-mode #grid, body.worklist-mode #empty { display:none !important; }
   body.worklist-mode #worklist { display:block; }
-  #wl-scopes { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:10px; }
+  /* The worklist is a size container too: at the narrow width the panel actually
+     lives at, the chips/rows step down a notch instead of spilling and wrapping. */
+  #worklist { container-type:inline-size; }
+  #wl-scopes { display:flex; flex-wrap:wrap; gap:4px; margin-bottom:8px; }
   .wl-scope { background:var(--surface); color:var(--text-2); border:1px solid var(--border); border-radius:14px;
-              padding:3px 12px; font-size:12px; cursor:pointer; }
+              padding:2px clamp(7px,2.4cqw,12px); font-size:clamp(10px,2.9cqw,12px); cursor:pointer;
+              max-width:100%; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .wl-scope.on { background:var(--accent-bg); border-color:var(--accent); color:var(--accent-text); font-weight:600; }
-  #wl-addrow { display:flex; gap:6px; margin-bottom:10px; align-items:flex-start; }
-  #wl-input { flex:1; background:var(--surface-2); color:var(--text); border:1px solid var(--border); border-radius:8px;
-              padding:6px 10px; font-size:13px; font-family:inherit; line-height:1.4;
-              resize:none; min-height:20px; max-height:220px; overflow-y:auto; }
-  #wl-input:focus { outline:none; border-color:var(--accent); }
-  #wl-addrow button { background:var(--surface); color:var(--text-2); border:1px solid var(--border); border-radius:8px;
-                      padding:6px 14px; cursor:pointer; }
-  #wl-addrow button:hover { background:var(--surface-hover); }
-  .wl-item { display:flex; align-items:flex-start; gap:9px; padding:6px 4px; border-bottom:1px solid var(--border-weak); }
-  .wl-cb { cursor:pointer; margin-top:2px; flex:0 0 auto; width:16px; height:16px; accent-color:var(--accent); }
-  .wl-txt { color:var(--text); font-size:13px; line-height:1.4; word-break:break-word; white-space:pre-wrap; flex:1; }
-  /* Inline editor swapped in for .wl-txt on double-click (commit Enter/blur, cancel Esc). */
-  .wl-edit { flex:1; font:inherit; font-size:13px; line-height:1.4; color:var(--text); background:var(--surface-2);
-             border:1px solid var(--accent); border-radius:6px; padding:3px 6px; resize:none; overflow:hidden;
-             box-sizing:border-box; }
+  /* MASTER: the cross-scope rollup tab, set apart from the real scopes. */
+  .wl-master { font-weight:700; letter-spacing:.06em; font-size:clamp(9px,2.7cqw,11px); color:var(--purple); border-color:#3d3560; }
+  .wl-master.on { background:#241f38; border-color:var(--purple); color:var(--purple); }
+  .wl-mgroup { font-size:10px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted);
+               margin:9px 0 1px; padding-top:5px; border-top:1px solid var(--border-weak); }
+  .wl-mgroup:first-child { margin-top:0; padding-top:0; border-top:none; }
+  .wl-mgroup.late { color:var(--danger); }
+  /* A master row is a 4-column grid (tick · list · subject · date) so the columns
+     line up down the page and a long subject clamps to two lines instead of
+     shoving the date chip onto a line of its own. */
+  .wl-mitem { display:grid; grid-template-columns:auto auto minmax(0,1fr) auto; align-items:center;
+              gap:5px; padding:4px 2px; }
+  .wl-mitem .wl-txt { font-size:clamp(11px,3cqw,12.5px); line-height:1.3; white-space:normal;
+                      display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; }
+  .wl-mitem .wl-due, .wl-mitem .wl-prog { margin-top:0; }
+  .wl-chips { display:flex; align-items:center; gap:4px; }
+  /* Which list a master row came from. */
+  .wl-tag { flex:0 0 auto; max-width:clamp(56px,22cqw,110px); font-size:clamp(8px,2.3cqw,10px); color:var(--text-3);
+            background:var(--surface-2); border:1px solid var(--border-weak); border-radius:5px; padding:1px 5px;
+            white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  /* Adding is a modal now (subject + details + date), so the row is one button. */
+  #wl-addrow { display:flex; gap:6px; margin-bottom:8px; align-items:flex-start; }
+  #wl-addbtn { flex:1; background:var(--surface-2); color:var(--text-2); border:1px dashed var(--border); border-radius:8px;
+               padding:6px 12px; font-size:12.5px; font-family:inherit; text-align:left; cursor:pointer; }
+  #wl-addbtn:hover { background:var(--surface-hover); border-color:var(--accent); color:var(--accent-text); }
+  /* A row is clickable (opens the item modal); the checkbox + ✕ opt out of that. */
+  .wl-item { display:flex; align-items:flex-start; gap:7px; padding:5px 3px; border-bottom:1px solid var(--border-weak);
+             cursor:pointer; border-radius:6px; }
+  .wl-item:hover { background:var(--surface-hover); }
+  .wl-cb { cursor:pointer; margin:1px 0 0; flex:0 0 auto; width:15px; height:15px; accent-color:var(--accent); }
+  .wl-txt { color:var(--text); font-size:clamp(11.5px,3.2cqw,13px); line-height:1.35; word-break:break-word;
+            white-space:pre-wrap; flex:1; min-width:0; }
+  .wl-note { color:var(--dim); font-size:11px; }
+  /* Expected date chip: dim by default, amber today, red once overdue. */
+  .wl-due { flex:0 0 auto; font-size:clamp(9px,2.6cqw,11px); color:var(--muted); background:var(--surface-2);
+            border:1px solid var(--border-weak); border-radius:999px; padding:1px 7px; margin-top:1px; white-space:nowrap; }
+  .wl-due.soon { color:var(--warn); border-color:#5a4a22; }
+  .wl-due.late { color:var(--danger); border-color:var(--danger); }
+  #wl-done .wl-due { opacity:.5; }
   /* Per-item ✕ delete: muted (same tone as the panel's other dim controls, ≥3:1
      contrast so it stays discoverable) and reddens on hover. */
   .wl-del { flex:0 0 auto; background:none; border:none; color:var(--dim); cursor:pointer; font-size:13px;
@@ -6021,6 +6059,56 @@ local HTML = [[
   #wl-done { display:none; }
   #wl-donewrap.open #wl-done { display:block; }
   #wl-done .wl-txt { color:var(--muted); text-decoration:line-through; }
+  /* Worklist item modal (add + open/edit). Backdrop + centered card, above the
+     panel chrome but below the full-screen overlays' own z-index band. */
+  #wl-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:13;
+              align-items:center; justify-content:center; padding:16px; }
+  #wl-modal.show { display:flex; }
+  #wl-mcard { width:100%; max-width:420px; max-height:88vh; display:flex; flex-direction:column;
+              background:var(--surface-3, var(--surface)); border:1px solid var(--border); border-radius:12px; overflow:hidden; }
+  #wl-mhead { display:flex; align-items:center; justify-content:space-between; padding:9px 12px;
+              border-bottom:1px solid var(--border); font-weight:700; color:var(--text-strong); font-size:13px; }
+  .wl-mx { background:none; border:none; color:var(--muted); cursor:pointer; font-size:14px; padding:2px 6px; }
+  .wl-mx:hover { color:var(--danger); }
+  #wl-mbody { padding:10px 12px; overflow-y:auto; }
+  .wl-mlbl { display:block; font-size:10px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted);
+             margin:8px 0 3px; }
+  .wl-mlbl:first-child { margin-top:0; }
+  /* A label with its own little control cluster on the right (date nudgers, ＋ Step). */
+  .wl-mrow { display:flex; align-items:center; gap:8px; }
+  .wl-mrow .wl-mlbl { margin-bottom:3px; }
+  .wl-mtools { margin-left:auto; display:flex; gap:4px; }
+  .wl-mtools button { background:var(--surface-2); color:var(--text-3); border:1px solid var(--border);
+                      border-radius:6px; font-size:11px; line-height:1; padding:3px 8px; cursor:pointer; }
+  .wl-mtools button:hover { background:var(--surface-hover); color:var(--accent-text); border-color:var(--accent); }
+  /* Checklist rows inside the modal: tick them as you go (each tick saves). */
+  #wl-msteps { display:flex; flex-direction:column; gap:3px; }
+  #wl-msteps:empty { display:none; }
+  .wl-step { display:flex; align-items:center; gap:7px; }
+  .wl-step input[type=checkbox] { flex:0 0 auto; width:14px; height:14px; accent-color:var(--accent); cursor:pointer; }
+  .wl-step input[type=text] { flex:1; min-width:0; background:var(--surface-2); color:var(--text); border:1px solid var(--border);
+                              border-radius:6px; padding:4px 7px; font-size:12px; font-family:inherit; }
+  .wl-step input[type=text]:focus { outline:none; border-color:var(--accent); }
+  .wl-step.done input[type=text] { color:var(--muted); text-decoration:line-through; }
+  .wl-step .wl-sx { flex:0 0 auto; background:none; border:none; color:var(--dim); cursor:pointer; font-size:12px; padding:2px 4px; }
+  .wl-step .wl-sx:hover { color:var(--danger); }
+  /* Checklist progress chip on the list row (green once every step is ticked). */
+  .wl-prog { flex:0 0 auto; font-size:clamp(9px,2.5cqw,11px); color:var(--muted); background:var(--surface-2);
+             border:1px solid var(--border-weak); border-radius:999px; padding:1px 6px; margin-top:1px; white-space:nowrap; }
+  .wl-prog.all { color:var(--ok); border-color:#2c5a3a; }
+  #wl-msubj, #wl-mdet, #wl-mdue { width:100%; box-sizing:border-box; background:var(--surface-2); color:var(--text);
+              border:1px solid var(--border); border-radius:8px; padding:6px 9px; font-size:13px;
+              font-family:inherit; line-height:1.4; }
+  #wl-mdet { resize:vertical; min-height:80px; }
+  #wl-mdue { color-scheme:dark; }
+  #wl-msubj:focus, #wl-mdet:focus, #wl-mdue:focus { outline:none; border-color:var(--accent); }
+  #wl-mfoot { display:flex; gap:8px; padding:10px 12px; border-top:1px solid var(--border); }
+  #wl-mfoot button { background:var(--surface); color:var(--text-2); border:1px solid var(--border); border-radius:8px;
+                     font-size:13px; padding:6px 14px; cursor:pointer; }
+  #wl-mfoot button:hover { background:var(--surface-hover); }
+  #wl-msave { margin-left:auto; color:var(--ok); border-color:var(--ok) !important; }
+  #wl-mdel { color:var(--danger); border-color:var(--danger) !important; }
+  #wl-mdel.hide { display:none; }
 
   /* status colors, shared by all themes via the --c variable */
   .s-idle     { --c:var(--st-idle); }
@@ -6738,9 +6826,7 @@ local HTML = [[
   <div id="worklist">
     <div id="wl-scopes"></div>
     <div id="wl-addrow">
-      <textarea id="wl-input" rows="1" maxlength="2000" placeholder="Add an item…  (Enter adds, Shift+Enter newline)"
-        onkeydown="onWorklistKey(event)" oninput="autoGrow(this)"></textarea>
-      <button onclick="worklistAddCurrent()">Add</button>
+      <button id="wl-addbtn" onclick="wlModalOpen('')">＋ Add an item…</button>
     </div>
     <div id="wl-active"></div>
     <div id="wl-donewrap">
@@ -6749,6 +6835,39 @@ local HTML = [[
         <button id="wl-clearbtn" onclick="event.stopPropagation(); worklistClearDone();">Clear</button>
       </div>
       <div id="wl-done"></div>
+    </div>
+  </div>
+  <!-- 📋 Worklist item modal: the ONE place an item is written (add) or read/changed
+       (click a row). Subject + details + expected date; the list shows subject+date. -->
+  <div id="wl-modal" onclick="wlModalBackdrop(event)">
+    <div id="wl-mcard">
+      <div id="wl-mhead"><span id="wl-mtitle">New item</span>
+        <button class="wl-mx" onclick="wlModalClose()" title="Close (Esc)">✕</button></div>
+      <div id="wl-mbody">
+        <label class="wl-mlbl" for="wl-msubj">Subject</label>
+        <input id="wl-msubj" maxlength="200" placeholder="What needs doing?" onkeydown="wlModalSubjKey(event)">
+        <label class="wl-mlbl" for="wl-mdet">Details</label>
+        <textarea id="wl-mdet" rows="5" maxlength="8000" placeholder="Context, links, acceptance…"></textarea>
+        <div class="wl-mrow">
+          <span class="wl-mlbl">Checklist</span>
+          <span class="wl-mtools"><button onclick="wlStepAdd()" title="Add a step">＋ Step</button></span>
+        </div>
+        <div id="wl-msteps"></div>
+        <div class="wl-mrow">
+          <label class="wl-mlbl" for="wl-mdue">Expected date</label>
+          <span class="wl-mtools">
+            <button onclick="wlDueShift(-1)" title="A day earlier">◀</button>
+            <button onclick="wlDueShift(1)" title="A day later">▶</button>
+            <button onclick="wlDueClear()" title="No date">✕</button>
+          </span>
+        </div>
+        <input id="wl-mdue" type="date">
+      </div>
+      <div id="wl-mfoot">
+        <button id="wl-mdel" onclick="wlModalDelete()">Delete</button>
+        <button onclick="wlModalClose()">Cancel</button>
+        <button id="wl-msave" onclick="wlModalSave()">Save</button>
+      </div>
     </div>
   </div>
 
@@ -8073,14 +8192,13 @@ local HTML = [[
       if(!fleet) return;
       var nAp = actionableKeys("approve", vis).length;
       var nSt = actionableKeys("stop", vis).length;
-      var nLv = actionableKeys("nudge", vis).length;
       // approve-all earns its place at 1 (clearing an approval backlog is the point);
-      // stop/nudge need 2+, since acting on one session is the per-tile button's job.
-      if(!(nAp >= 1 || nSt >= 2 || nLv >= 2)){ fleet.innerHTML = ""; return; }
+      // stop needs 2+, since acting on one session is the per-tile button's job.
+      // No bulk nudge: broadcasting the same text to the fleet was noise, not a fix.
+      if(!(nAp >= 1 || nSt >= 2)){ fleet.innerHTML = ""; return; }
       var html = '<span class="bulk-lbl">Fleet</span>';
       if(nAp >= 1) html += '<button class="bulk-ap" onclick="bulkAction(\'approve\')">✅ Approve all (' + nAp + ')</button>';
       if(nSt >= 2) html += '<button class="bulk-st" onclick="bulkAction(\'stop\')">■ Stop all (' + nSt + ')</button>';
-      if(nLv >= 2) html += '<button onclick="bulkAction(\'nudge\')">👉 Nudge all (' + nLv + ')</button>';
       fleet.innerHTML = html;
     }
     // ---- 📋 In-app worklist (toggled into the #grid area) -------------------
@@ -8108,25 +8226,117 @@ local HTML = [[
       // double-quoted, which would terminate the double-quoted attribute. A delegated
       // change listener reads data-id instead. esc() escapes quotes for the attribute.
       var id = esc(String(it.id || ""));
-      return '<div class="wl-item"><input type="checkbox" class="wl-cb" data-id="' + id + '"'
+      var due = wlDueChip(it.due, isDone);
+      return '<div class="wl-item" data-open="' + id + '" title="Click to open">'
+        + '<input type="checkbox" class="wl-cb" data-id="' + id + '"'
         + (isDone ? " checked" : "") + '>'
-        + '<span class="wl-txt" title="Double-click to edit">' + esc(it.text || "") + '</span>'
+        + '<span class="wl-txt">' + esc(it.text || "")
+        + ((it.details && String(it.details).trim()) ? ' <span class="wl-note" title="Has details">📝</span>' : '')
+        + '</span>' + wlProgChip(it.steps) + due
         + '<button class="wl-del" data-del="' + id + '" title="Delete">✕</button></div>';
+    }
+    // hs.json encodes an empty Lua list as {}, so every steps read goes through this.
+    function wlStepList(v){ return Array.isArray(v) ? v : []; }
+    // "2/5" checklist chip on the list row; green once every step is ticked.
+    function wlProgChip(steps){
+      var l = wlStepList(steps); if(!l.length) return "";
+      var d = 0;
+      for(var i = 0; i < l.length; i++){ if(l[i] && l[i].done) d++; }
+      return '<span class="wl-prog' + (d === l.length ? " all" : "") + '" title="Checklist">' + d + '/' + l.length + '</span>';
+    }
+    // The expected-date chip: "Jul 21" (plus the year when it isn't this one), tinted
+    // amber for today/tomorrow and red once overdue. A done item never nags (no tint).
+    function wlDueChip(due, isDone){
+      var d = String(due || "").trim();
+      var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(d);
+      if(!m) return "";
+      var y = +m[1], mo = +m[2], da = +m[3];
+      var MON = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+      var now = new Date(), today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      var dt = new Date(y, mo - 1, da);
+      var days = Math.round((dt - today) / 86400000);
+      var cls = isDone ? "" : (days < 0 ? " late" : (days <= 1 ? " soon" : ""));
+      var label = (MON[mo - 1] || mo) + " " + da + (y === now.getFullYear() ? "" : " " + y);
+      if(!isDone && days === 0) label = "Today";
+      else if(!isDone && days === 1) label = "Tomorrow";
+      return '<span class="wl-due' + cls + '">' + esc(label) + '</span>';
+    }
+    // ---- MASTER: every scope's open items, rolled up by date priority ---------
+    // Read-only on purpose (adding belongs on a real scope -- Generic for anything
+    // that isn't a project). A row carries the scope it came from, so clicking it
+    // switches to that tab and opens the item there.
+    function wlMasterRows(){
+      var rows = [];
+      var take = function(scope, label, items){
+        (Array.isArray(items) ? items : []).forEach(function(it){
+          if(!it || it.done) return;                       // master shows OPEN work only
+          rows.push({ scope:scope, label:label, it:it, key:wlDueSort(it.due) });
+        });
+      };
+      take("generic", "Generic", worklistData && worklistData.generic);
+      ((worklistData && worklistData.projects) || []).forEach(function(p){ take(p.key, p.label || p.key, p.items); });
+      // Soonest first; undated sinks to the bottom; same-date ties keep scopes together.
+      rows.sort(function(a, b){
+        if(a.key !== b.key) return a.key < b.key ? -1 : 1;
+        return String(a.label).localeCompare(String(b.label));
+      });
+      return rows;
+    }
+    function wlDueSort(due){
+      var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(due || "").trim());
+      return m ? m[0] : "9999-99-99";                      // no date -> last
+    }
+    // Bucket label for the master list's group headers.
+    function wlBucket(due){
+      var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(due || "").trim());
+      if(!m) return "No date";
+      var now = new Date(), today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      var days = Math.round((new Date(+m[1], +m[2] - 1, +m[3]) - today) / 86400000);
+      if(days < 0) return "Overdue";
+      if(days === 0) return "Today";
+      if(days <= 7) return "Next 7 days";
+      return "Later";
+    }
+    function renderMaster(box){
+      var rows = wlMasterRows();
+      if(!rows.length){ box.innerHTML = '<div class="wl-empty">Nothing open across your lists.</div>'; return; }
+      var html = "", bucket = null;
+      rows.forEach(function(r){
+        var b = wlBucket(r.it.due);
+        if(b !== bucket){ bucket = b; html += '<div class="wl-mgroup' + (b === "Overdue" ? " late" : "") + '">' + esc(b) + '</div>'; }
+        var sc = esc(String(r.scope)), mid = esc(String(r.it.id || ""));
+        html += '<div class="wl-item wl-mitem" data-mscope="' + sc + '" data-mid="' + mid + '" title="Open in ' + esc(r.label) + '">'
+          + '<input type="checkbox" class="wl-cb wl-mcb" data-mscope="' + sc + '" data-mid="' + mid + '" title="Mark done">'
+          + '<span class="wl-tag">' + esc(r.label) + '</span>'
+          + '<span class="wl-txt">' + esc(r.it.text || "")
+          + ((r.it.details && String(r.it.details).trim()) ? ' <span class="wl-note" title="Has details">📝</span>' : '')
+          + '</span><span class="wl-chips">' + wlProgChip(r.it.steps) + wlDueChip(r.it.due, false) + '</span></div>';
+      });
+      box.innerHTML = html;
     }
     function renderWorklist(){
       if(!worklistData) return;
       var projs = Array.isArray(worklistData.projects) ? worklistData.projects : [];
       // current scope's project may have closed -> fall back to Generic
-      if(worklistScope !== "generic"){
+      if(worklistScope !== "generic" && worklistScope !== "master"){
         var ok = false;
         for(var i = 0; i < projs.length; i++){ if(projs[i].key === worklistScope){ ok = true; break; } }
         if(!ok) worklistScope = "generic";
       }
-      var sc = '<button class="wl-scope' + (worklistScope === "generic" ? " on" : "") + '" data-scope="generic">Generic</button>';
+      var sc = '<button class="wl-scope wl-master' + (worklistScope === "master" ? " on" : "") + '" data-scope="master">MASTER</button>'
+             + '<button class="wl-scope' + (worklistScope === "generic" ? " on" : "") + '" data-scope="generic">Generic</button>';
       projs.forEach(function(p){
         sc += '<button class="wl-scope' + (worklistScope === p.key ? " on" : "") + '" data-scope="' + esc(String(p.key)) + '">' + esc(p.label || p.key) + '</button>';
       });
       document.getElementById("wl-scopes").innerHTML = sc;
+      // MASTER is a read-only rollup: no add row, no per-scope Done drawer.
+      var isMaster = (worklistScope === "master");
+      document.getElementById("wl-addrow").style.display = isMaster ? "none" : "flex";
+      if(isMaster){
+        renderMaster(document.getElementById("wl-active"));
+        document.getElementById("wl-donewrap").style.display = "none";
+        return;
+      }
       var active = [], done = [];
       wlScopeItems(worklistScope).forEach(function(it){ (it.done ? done : active).push(it); });
       document.getElementById("wl-active").innerHTML = active.length
@@ -8140,71 +8350,158 @@ local HTML = [[
       document.getElementById("wl-donecaret").textContent = worklistDoneOpen ? "▾" : "▸";
     }
     function worklistPick(scope){ worklistScope = scope; renderWorklist(); }
-    // Enter adds; Shift+Enter falls through to insert a newline (multi-line items).
-    function onWorklistKey(e){ if(e.key === "Enter" && !e.shiftKey){ e.preventDefault(); worklistAddCurrent(); } }
-    function worklistAddCurrent(){
-      var inp = document.getElementById("wl-input");
-      var t = (inp.value || "").trim();
-      if(!t) return;
-      send("worklist-add", worklistScope, t);
-      inp.value = ""; inp.style.height = "auto"; inp.focus();  // reset the auto-grown height
-    }
     function worklistToggle(id){ send("worklist-toggle", worklistScope, id); }
     function worklistRemove(id){ send("worklist-remove", worklistScope, id); }
     function worklistClearDone(){ send("worklist-clear-done", worklistScope); }
     function worklistToggleDone(){ worklistDoneOpen = !worklistDoneOpen; renderWorklist(); }
-    // worklist-edit carries THREE values (scope + id + new text), so it can't use the
-    // 2-value send(); post the id as `text` and the new text as `edit`.
-    function worklistEditSend(id, text){
-      try { window.webkit.messageHandlers.cc.postMessage(JSON.stringify({a:"worklist-edit", v:worklistScope, text:id, edit:text})); }
+    // add/edit both carry FOUR values (scope + subject + details + due), more than the
+    // 2-value send() takes, so they post the bridge message directly. On edit the id
+    // rides as `text` and the new subject as `edit` (add has no id, so subject is `text`).
+    function worklistAddSend(subj, details, due, steps){
+      try { window.webkit.messageHandlers.cc.postMessage(JSON.stringify({a:"worklist-add", v:worklistScope, text:subj, details:details, due:due, steps:steps})); }
       catch(e){ console.log("send error", e); }
     }
-    // Double-click an item to edit its text in place: swap the text span for a textarea.
-    // Enter (or click-away/blur) commits; Escape cancels; an empty or unchanged value
-    // just restores the row (worklistEdit ignores blanks, so an item can't be erased).
-    function startWorklistEdit(row, span, id){
-      if(!row || !span || row.querySelector(".wl-edit")) return;
-      var cur = span.textContent || "";
-      var inp = document.createElement("textarea");
-      inp.className = "wl-edit"; inp.value = cur; inp.rows = 1;
-      span.replaceWith(inp);
-      inp.focus(); inp.select(); autoGrow(inp);
-      var settled = false;
-      function commit(){
-        if(settled) return; settled = true;
-        var nt = (inp.value || "").trim();
-        if(nt && nt !== cur) worklistEditSend(id, nt);   // backend re-push re-renders the row
-        else renderWorklist();                            // unchanged / blank -> restore
-      }
-      function cancel(){ if(settled) return; settled = true; renderWorklist(); }
-      inp.addEventListener("keydown", function(e){
-        if(e.key === "Enter" && !e.shiftKey){ e.preventDefault(); commit(); }
-        else if(e.key === "Escape"){ e.preventDefault(); cancel(); }
-      });
-      inp.addEventListener("input", function(){ autoGrow(inp); });
-      inp.addEventListener("blur", commit);
+    function worklistEditSend(id, subj, details, due, steps){
+      try { window.webkit.messageHandlers.cc.postMessage(JSON.stringify({a:"worklist-edit", v:worklistScope, text:id, edit:subj, details:details, due:due, steps:steps})); }
+      catch(e){ console.log("send error", e); }
     }
-    // Delegated handlers for the dynamically-rendered scope buttons + checkboxes
-    // (data-attrs avoid the inline-attribute quoting bug with dynamic ids/keys).
+    // ---- Worklist item modal: the one editor for an item ---------------------
+    // wlModalId = "" -> adding; an id -> editing that item in the CURRENT scope.
+    // wlModalSteps is the modal's LOCAL copy of the checklist (committed on Save,
+    // or immediately on a tick/add/delete once the item exists).
+    var wlModalId = null, wlModalSteps = [];
+    function wlFindItem(id){
+      var l = wlScopeItems(worklistScope);
+      for(var i = 0; i < l.length; i++){ if(String(l[i].id) === String(id)) return l[i]; }
+      return null;
+    }
+    function wlModalOpen(id){
+      var it = id ? wlFindItem(id) : null;
+      if(id && !it) return;                       // row vanished under us
+      wlModalId = id || "";
+      document.getElementById("wl-mtitle").textContent = it ? "Item" : "New item";
+      document.getElementById("wl-msubj").value = it ? (it.text || "") : "";
+      document.getElementById("wl-mdet").value  = it ? (it.details || "") : "";
+      document.getElementById("wl-mdue").value  = it ? (it.due || "") : "";
+      wlModalSteps = wlStepList(it && it.steps).map(function(s){ return { text:String(s.text || ""), done:!!s.done }; });
+      wlRenderSteps();
+      document.getElementById("wl-mdel").classList.toggle("hide", !it);
+      document.getElementById("wl-modal").classList.add("show");
+      var s = document.getElementById("wl-msubj"); s.focus(); s.select();
+    }
+    function wlModalClose(){ wlModalId = null; wlModalSteps = []; document.getElementById("wl-modal").classList.remove("show"); }
+    function wlModalOpenNow(){ return document.getElementById("wl-modal").classList.contains("show"); }
+    // Click the backdrop (not the card) to dismiss.
+    function wlModalBackdrop(e){ if(e && e.target && e.target.id === "wl-modal") wlModalClose(); }
+    // Enter in the subject field saves (details is multi-line, so it keeps Enter).
+    function wlModalSubjKey(e){ if(e.key === "Enter"){ e.preventDefault(); wlModalSave(); } }
+    // keepOpen: a checklist tick / step add / step delete flushes the whole form so the
+    // progress can't be lost, without yanking the modal out from under the user.
+    function wlModalSave(keepOpen){
+      // An auto-flush only ever UPDATES: a not-yet-saved new item must not sneak onto
+      // the list because a checkbox was ticked -- it waits for the explicit Save.
+      if(keepOpen && !wlModalId) return;
+      var subj = (document.getElementById("wl-msubj").value || "").trim();
+      if(!subj){ if(!keepOpen) document.getElementById("wl-msubj").focus(); return; }  // subject is the item
+      var det = (document.getElementById("wl-mdet").value || "").trim();
+      var due = (document.getElementById("wl-mdue").value || "").trim();
+      var steps = wlModalSteps.filter(function(s){ return String(s.text || "").trim() !== ""; })
+                              .map(function(s){ return { text:String(s.text).trim(), done:!!s.done }; });
+      if(wlModalId) worklistEditSend(wlModalId, subj, det, due, steps); else worklistAddSend(subj, det, due, steps);
+      if(!keepOpen) wlModalClose();                // the backend re-push re-renders the list
+    }
+    function wlModalDelete(){
+      if(!wlModalId) return;
+      if(!confirm("Delete this item?")) return;
+      worklistRemove(wlModalId); wlModalClose();
+    }
+    // ---- Expected date: ◀ ▶ nudge it a day at a time, ✕ clears it -------------
+    function wlDateStr(d){
+      var p = function(n){ return (n < 10 ? "0" : "") + n; };
+      return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate());
+    }
+    function wlDueShift(days){
+      var el = document.getElementById("wl-mdue");
+      var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec((el.value || "").trim());
+      var n = new Date(), d;
+      // No date yet -> the first nudge lands on today (then keep nudging from there).
+      if(m){ d = new Date(+m[1], +m[2] - 1, +m[3]); d.setDate(d.getDate() + days); }
+      else { d = new Date(n.getFullYear(), n.getMonth(), n.getDate()); }
+      el.value = wlDateStr(d);
+    }
+    function wlDueClear(){ document.getElementById("wl-mdue").value = ""; }
+    // ---- Checklist: sub-steps you tick off inside the item --------------------
+    // Rebuilt wholesale on add/tick/delete; typing writes straight into the array
+    // (no re-render) so the caret never jumps.
+    function wlRenderSteps(){
+      var box = document.getElementById("wl-msteps"); if(!box) return;
+      box.innerHTML = "";
+      wlModalSteps.forEach(function(s, i){
+        var row = document.createElement("div");
+        row.className = "wl-step" + (s.done ? " done" : "");
+        var cb = document.createElement("input");
+        cb.type = "checkbox"; cb.checked = !!s.done; cb.title = "Tick this step";
+        cb.addEventListener("change", function(){
+          wlModalSteps[i].done = cb.checked;
+          row.classList.toggle("done", cb.checked);
+          wlModalSave(true);                       // ticking saves right away
+        });
+        var tx = document.createElement("input");
+        tx.type = "text"; tx.value = s.text || ""; tx.placeholder = "Step…"; tx.maxLength = 300;
+        tx.addEventListener("input", function(){ wlModalSteps[i].text = tx.value; });
+        tx.addEventListener("keydown", function(e){
+          if(e.key === "Enter"){ e.preventDefault(); wlStepAdd(); }   // Enter = next step
+        });
+        var x = document.createElement("button");
+        x.className = "wl-sx"; x.textContent = "✕"; x.title = "Remove this step";
+        x.addEventListener("click", function(){
+          wlModalSteps.splice(i, 1); wlRenderSteps(); wlModalSave(true);
+        });
+        row.appendChild(cb); row.appendChild(tx); row.appendChild(x);
+        box.appendChild(row);
+      });
+    }
+    function wlStepAdd(){
+      // Don't stack empty rows: an unfilled step at the end just takes the focus back.
+      var last = wlModalSteps[wlModalSteps.length - 1];
+      if(!last || String(last.text || "").trim() !== "") wlModalSteps.push({ text:"", done:false });
+      wlRenderSteps();
+      var ins = document.querySelectorAll("#wl-msteps input[type=text]");
+      if(ins.length) ins[ins.length - 1].focus();
+    }
+    // Delegated handlers for the dynamically-rendered scope buttons, checkboxes and
+    // rows (data-attrs avoid the inline-attribute quoting bug with dynamic ids/keys).
     document.addEventListener("click", function(e){
       var t = e.target; if(!t) return;
       var sb = (t.classList && t.classList.contains("wl-scope")) ? t : (t.closest ? t.closest(".wl-scope") : null);
       if(sb && sb.getAttribute){ var s = sb.getAttribute("data-scope"); if(s !== null) worklistPick(s); }
       var db = (t.classList && t.classList.contains("wl-del")) ? t : (t.closest ? t.closest(".wl-del") : null);
-      if(db && db.getAttribute){ var did = db.getAttribute("data-del"); if(did) worklistRemove(did); }
+      if(db && db.getAttribute){ var did = db.getAttribute("data-del"); if(did){ worklistRemove(did); return; } }
+      // Click a row (but not its checkbox / ✕) -> open the item modal.
+      if(!t.closest) return;
+      if(t.classList && (t.classList.contains("wl-cb") || t.classList.contains("wl-del"))) return;
+      var row = t.closest(".wl-item"); if(!row || !row.getAttribute) return;
+      // A MASTER row belongs to another scope: switch to that tab, then open it there.
+      var ms = row.getAttribute("data-mscope");
+      if(ms){
+        var mid = row.getAttribute("data-mid");
+        worklistScope = ms; renderWorklist();
+        if(mid) wlModalOpen(mid);
+        return;
+      }
+      var rid = row.getAttribute("data-open"); if(rid) wlModalOpen(rid);
     });
     document.addEventListener("change", function(e){
       var cb = e.target;
-      if(cb && cb.classList && cb.classList.contains("wl-cb")){ var id = cb.getAttribute("data-id"); if(id) worklistToggle(id); }
-    });
-    // Double-click a worklist row (but not its checkbox/delete) -> edit it in place.
-    document.addEventListener("dblclick", function(e){
-      var t = e.target; if(!t || !t.closest) return;
-      if(t.classList && (t.classList.contains("wl-cb") || t.classList.contains("wl-del"))) return;
-      var row = t.closest(".wl-item"); if(!row) return;
-      var cb = row.querySelector(".wl-cb"), span = row.querySelector(".wl-txt");
-      if(!cb || !span) return;
-      var id = cb.getAttribute("data-id"); if(id) startWorklistEdit(row, span, id);
+      if(!cb || !cb.classList || !cb.classList.contains("wl-cb")) return;
+      // A MASTER row's tick belongs to ITS scope, not the tab you're looking at
+      // (master is a rollup, so worklistScope would be the wrong list to write to).
+      if(cb.classList.contains("wl-mcb")){
+        var ms = cb.getAttribute("data-mscope"), mid = cb.getAttribute("data-mid");
+        if(ms && mid) send("worklist-toggle", ms, mid);
+        return;
+      }
+      var id = cb.getAttribute("data-id"); if(id) worklistToggle(id);
     });
 
     // ---- User Stories tab: view/add/edit/save spec/product/user-stories.md ----
@@ -11763,6 +12060,10 @@ local HTML = [[
     });
     document.addEventListener("keydown", function(e){
       if(e.key === "Escape" && document.getElementById("keymenu").classList.contains("show")) closeKeyhelp();
+    });
+    // Esc closes the 📋 worklist item modal (discarding the edit).
+    document.addEventListener("keydown", function(e){
+      if(e.key === "Escape" && wlModalOpenNow()) wlModalClose();
     });
     // Esc closes the 🔌 MCPs & Skills viewer (read-only; no sub-form).
     document.addEventListener("keydown", function(e){

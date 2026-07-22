@@ -192,10 +192,12 @@ cc-exports/                     archived sessions (transcript + meta.json)
 - **Detail panel** with a tab strip — Activity, Transcript, Rewind, Decisions, Usage, Changes
   (git status + diff), **User Stories** (gated on `spec/product/user-stories.md`), Agents, Queue —
   expensive tabs load on open; the ⋯ menu hides tabs and remembers your last-open tab per project.
-- **Fleet navigation:** search, groups + group chips, bulk Approve/Stop/Nudge over the visible set.
+- **Fleet navigation:** search, groups + group chips, bulk Approve/Stop over the visible set.
 - **Global hotkeys** (remappable): approve front, **jump-to-the-session-that-needs-you**, cycle,
   spawn, show/hide; a live legend so they never drift.
-- **Worklist** (My List): a built-in per-project + global checklist.
+- **Worklist** (My List): a built-in per-project + global checklist — items carry subject,
+  details, a tickable sub-step checklist and an expected date, with a MASTER tab rolling every
+  open item up by date priority across lists.
 - **Keep the fleet alive:** ☕ caffeinate (holds with the lid closed) + 🔒 soft lock (blocks input
   while everything keeps running; force-unlock chord so a typo can't lock you out).
 - **Remote (SSH bridge):** rsync-pulled remote `cc-status/` renders remote sessions as headless-

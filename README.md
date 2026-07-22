@@ -308,9 +308,10 @@ For supervising many sessions at once (always on; nothing automatic):
   the stable project identity, so it survives close/reopen, in `~/.claude/cc-groups.json`).
   When groups exist, a chip row lets you scope the grid to one group (composes with search).
 - **Bulk actions** — a **Fleet** bar acts on whatever's currently visible (post
-  search/group) at once: **Approve all** waiting sessions, **Stop all** working ones
-  (confirm), or **Nudge all** (broadcast text). Buttons show live counts and appear only
-  when there's something to act on; bulk nudge skips sessions sitting at an approval prompt.
+  search/group) at once: **Approve all** waiting sessions or **Stop all** working ones
+  (confirm). Buttons show live counts and appear only when there's something to act on, and
+  the row scales its type down rather than wrapping when the panel is narrow. (There is no
+  bulk nudge — broadcasting one message to the fleet was noise, not a fix.)
 - **📜 Timeline** — the detail-panel **Timeline** button opens the audit overlay scoped to
   that one session's chronological history (needs the ledger enabled).
 
@@ -869,17 +870,32 @@ Read-only — Shepherd never edits your MCP config, skills, or tools; it just sh
 
 ## Worklist (My List)
 
-A dead-simple checklist built into the panel — no code hooks, just add → check → clear. The
+A checklist built into the panel — no code hooks, just add → work → check. The
 **📋 My List** button on the right of the FLEET row swaps the session tiles for the worklist (click
 again to go back; the fleet bulk buttons still appear only when there's something to act on).
 
-- **Scopes** — a **Generic** (global) list plus one button per **currently-open project**, labeled
-  with that project's relabel name. Lists are stored in `~/.claude/cc-worklist.json` keyed by the
-  **stable launch-folder identity** (same as relabels/groups), so a project's list persists across
-  close / reopen / respawn — a closed project just has no button until a session reopens there.
-- **Add / check / delete / clear** — type and **Enter** to add (**Shift+Enter** for a newline; the
-  box grows as you type, so items can be multi-line); checking an item moves it to a collapsed
-  **Done** area; the **✕** on any row deletes it outright; **Clear** empties Done for that scope.
+- **Scopes** — a **MASTER** rollup, a **Generic** (global) list, plus one button per
+  **currently-open project**, labeled with that project's relabel name. Lists are stored in
+  `~/.claude/cc-worklist.json` keyed by the **stable launch-folder identity** (same as
+  relabels/groups), so a project's list persists across close / reopen / respawn — a closed
+  project just has no button until a session reopens there.
+- **The item modal** — **＋ Add an item…** (or clicking any row) opens one editor with:
+  - **Subject** — the one line the list shows. Enter saves.
+  - **Details** — free-form notes/context, as long as you like.
+  - **Checklist** — sub-steps with their own checkboxes (**＋ Step**, Enter for the next one,
+    **✕** to drop one). Ticking a step **saves immediately**, so mid-work progress can't be lost;
+    the list row shows a `2/5` chip that turns green when every step is done.
+  - **Expected date** — the native picker, plus **◀ ▶** to nudge it a day at a time and **✕** to
+    clear it. With no date set, the first ◀/▶ lands on today.
+
+  Esc or a backdrop click discards; **Delete** (edit mode only) removes the item after a confirm.
+- **The list** — each row shows subject + date chip (dim normally, amber for **Today**/**Tomorrow**,
+  red once **overdue**), a 📝 when it has details, and its checklist progress. Checking a row moves
+  it to a collapsed **Done** area; the **✕** deletes it; **Clear** empties Done for that scope.
+- **MASTER** — a read-only, date-priority rollup of every **open** item across Generic *and* every
+  project, grouped **Overdue / Today / Next 7 days / Later / No date** and tagged with the list it
+  came from. Tick a row to mark it done in its own list, or click it to jump to that tab with the
+  item open. No adding from MASTER — that's what Generic and the project tabs are for.
 
 ## Install (about 5 minutes)
 

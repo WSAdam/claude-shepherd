@@ -6690,13 +6690,53 @@ function M.worklistScopeList(state, scope)
   return (state.byProject or {})[scope] or {}
 end
 
+-- Trim helper for the worklist's user-typed fields (nil/non-string -> "").
+local function wlTrim(s)
+  if type(s) ~= "string" then return "" end
+  return (s:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+-- Sanitize an item's checklist: a LIST of { text, done } with trimmed, non-empty
+-- text (a blank step is dropped, so an unfilled row can't persist). Anything that
+-- isn't a list of tables normalizes to an empty list. Pure.
+function M.worklistSteps(v)
+  local out = {}
+  if type(v) ~= "table" then return out end
+  for _, s in ipairs(v) do
+    if type(s) == "table" then
+      local t = wlTrim(s.text)
+      if t ~= "" then out[#out + 1] = { text = t, done = s.done == true } end
+    end
+  end
+  return out
+end
+
+-- Count a checklist as done/total (the list row's progress chip). Pure.
+function M.worklistStepProgress(steps)
+  local done, total = 0, 0
+  for _, s in ipairs(type(steps) == "table" and steps or {}) do
+    if type(s) == "table" then
+      total = total + 1
+      if s.done == true then done = done + 1 end
+    end
+  end
+  return done, total
+end
+
 -- Append a trimmed item to a scope (empty/whitespace text is ignored). The caller
 -- supplies a unique id (FX mints it) + now; pure here for deterministic tests.
-function M.worklistAdd(state, scope, text, id, now)
+-- `text` is the item's SUBJECT; the optional `extra` table carries the long-form
+-- { details = "...", due = "YYYY-MM-DD", steps = {{text,done},...} } the modal
+-- collects. All are optional -- an item with only a subject stays valid (older
+-- files have exactly that).
+function M.worklistAdd(state, scope, text, id, now, extra)
   state = type(state) == "table" and state or {}
-  text = type(text) == "string" and (text:gsub("^%s+", ""):gsub("%s+$", "")) or ""
+  text = wlTrim(text)
   if text == "" then return state end
-  local item = { id = tostring(id or ""), text = text, done = false, ts = tonumber(now) or 0 }
+  extra = type(extra) == "table" and extra or {}
+  local item = { id = tostring(id or ""), text = text, done = false, ts = tonumber(now) or 0,
+                 details = wlTrim(extra.details), due = wlTrim(extra.due),
+                 steps = M.worklistSteps(extra.steps) }
   if scope == nil or scope == "generic" then
     if type(state.generic) ~= "table" then state.generic = {} end
     state.generic[#state.generic + 1] = item
@@ -6731,14 +6771,25 @@ function M.worklistRemove(state, scope, id)
   return state
 end
 
--- Replace an item's text by id within a scope (the double-click inline edit). Trims;
--- an empty/whitespace new text is IGNORED (keeps the original) so an accidental
--- blank save can't erase an item. Unknown id is a no-op. Pure.
-function M.worklistEdit(state, scope, id, text)
-  text = type(text) == "string" and (text:gsub("^%s+", ""):gsub("%s+$", "")) or ""
+-- Replace an item's fields by id within a scope (the item modal's Save). Trims; an
+-- empty/whitespace new subject is IGNORED (keeps the original) so an accidental
+-- blank save can't erase an item. `extra` = { details, due, steps }: only the keys
+-- PRESENT are written, so a caller that knows nothing about them leaves them alone,
+-- while the modal (which always sends all three) can clear any by sending ""/{}.
+-- Unknown id is a no-op. Pure.
+function M.worklistEdit(state, scope, id, text, extra)
+  text = wlTrim(text)
   if text == "" then return state end
   for _, it in ipairs(M.worklistScopeList(state, scope)) do
-    if it.id == id then it.text = text; break end
+    if it.id == id then
+      it.text = text
+      if type(extra) == "table" then
+        if extra.details ~= nil then it.details = wlTrim(extra.details) end
+        if extra.due ~= nil then it.due = wlTrim(extra.due) end
+        if extra.steps ~= nil then it.steps = M.worklistSteps(extra.steps) end
+      end
+      break
+    end
   end
   return state
 end
