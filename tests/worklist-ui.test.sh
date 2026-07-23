@@ -30,6 +30,8 @@ assert_eq "Lua bridge reads payload.details/due" "yes" "$(has 'local extra = { d
 assert_eq "Lua bridge passes payload.steps through" "yes" "$(has 'steps = (type(payload.steps) == "table") and payload.steps or nil }')"
 assert_eq "modal has a checklist area"      "yes" "$(has 'id="wl-msteps"')"
 assert_eq "date arrows nudge a day"         "yes" "$(has 'onclick="wlDueShift(-1)"')"
+assert_eq "date has a reset-to-today control" "yes" "$(has 'onclick="wlDueReset()"')"
+assert_eq "date can be cleared for a no-date item" "yes" "$(has 'onclick="wlDueClear()"')"
 assert_eq "Lua add passes the extras"       "yes" "$(has 'FX.worklistNewId(), FX.now(), extra)')"
 assert_eq "Lua edit passes the extras"      "yes" "$(has 'tostring(payload.edit or ""), extra)')"
 # A row shows subject + date and opens the modal when clicked.

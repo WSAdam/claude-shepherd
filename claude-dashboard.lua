@@ -6858,7 +6858,8 @@ local HTML = [[
           <span class="wl-mtools">
             <button onclick="wlDueShift(-1)" title="A day earlier">◀</button>
             <button onclick="wlDueShift(1)" title="A day later">▶</button>
-            <button onclick="wlDueClear()" title="No date">✕</button>
+            <button onclick="wlDueReset()" title="Reset to today">↻</button>
+            <button class="wl-dclear" onclick="wlDueClear()" title="No date — save without one">Clear</button>
           </span>
         </div>
         <input id="wl-mdue" type="date">
@@ -7961,6 +7962,15 @@ local HTML = [[
       var el = document.getElementById("nudge");
       if(!el) return;
       el.addEventListener("paste", function(e){
+        // If the worklist item modal is open, a paste that WebKit misroutes to the
+        // nudge box below belongs in the modal field the user is actually editing.
+        // Redirect the text there and swallow it so it never lands in nudge.
+        if(wlModalOpenNow()){
+          e.preventDefault();
+          var txt = e.clipboardData ? e.clipboardData.getData("text") : "";
+          wlPasteIntoModal(txt);
+          return;
+        }
         var items = (e.clipboardData && e.clipboardData.items) || [];
         for(var i=0;i<items.length;i++){
           if(items[i].type && items[i].type.indexOf("image") === 0){
@@ -8382,15 +8392,39 @@ local HTML = [[
       document.getElementById("wl-mtitle").textContent = it ? "Item" : "New item";
       document.getElementById("wl-msubj").value = it ? (it.text || "") : "";
       document.getElementById("wl-mdet").value  = it ? (it.details || "") : "";
-      document.getElementById("wl-mdue").value  = it ? (it.due || "") : "";
+      // A NEW item defaults its expected date to today (Clear drops it); an existing
+      // item shows whatever it was saved with (which may be no date at all).
+      document.getElementById("wl-mdue").value  = it ? (it.due || "") : wlDateStr(new Date());
       wlModalSteps = wlStepList(it && it.steps).map(function(s){ return { text:String(s.text || ""), done:!!s.done }; });
       wlRenderSteps();
       document.getElementById("wl-mdel").classList.toggle("hide", !it);
       document.getElementById("wl-modal").classList.add("show");
-      var s = document.getElementById("wl-msubj"); s.focus(); s.select();
+      // Focus AFTER the modal actually paints: a synchronous .focus() the same tick
+      // the overlay flips from display:none is dropped by WebKit, leaving focus (and
+      // thus ⌘V paste) on the nudge field below. rAF lets the layout settle first.
+      requestAnimationFrame(function(){ var s = document.getElementById("wl-msubj"); s.focus(); s.select(); });
     }
     function wlModalClose(){ wlModalId = null; wlModalSteps = []; document.getElementById("wl-modal").classList.remove("show"); }
     function wlModalOpenNow(){ return document.getElementById("wl-modal").classList.contains("show"); }
+    // Last modal text field the user touched (subject/details/a step), so a paste that
+    // WebKit misroutes to the nudge box can be steered back to the right field.
+    var wlLastField = null;
+    document.getElementById("wl-mcard").addEventListener("focusin", function(e){
+      var t = e.target;
+      if(t && (t.id === "wl-msubj" || t.id === "wl-mdet" || (t.closest && t.closest(".wl-step")))) wlLastField = t;
+    });
+    function wlPasteIntoModal(txt){
+      if(!txt) return;
+      var el = (wlLastField && document.getElementById("wl-mcard").contains(wlLastField))
+             ? wlLastField : document.getElementById("wl-msubj");
+      el.focus();
+      var a = el.selectionStart, b = el.selectionEnd, v = el.value;
+      if(typeof a === "number" && typeof b === "number"){
+        el.value = v.slice(0, a) + txt + v.slice(b);
+        el.selectionStart = el.selectionEnd = a + txt.length;   // caret after the paste
+      } else { el.value = v + txt; }
+      el.dispatchEvent(new Event("input", { bubbles:true }));    // step rows mirror into wlModalSteps
+    }
     // Click the backdrop (not the card) to dismiss.
     function wlModalBackdrop(e){ if(e && e.target && e.target.id === "wl-modal") wlModalClose(); }
     // Enter in the subject field saves (details is multi-line, so it keeps Enter).
@@ -8429,7 +8463,8 @@ local HTML = [[
       else { d = new Date(n.getFullYear(), n.getMonth(), n.getDate()); }
       el.value = wlDateStr(d);
     }
-    function wlDueClear(){ document.getElementById("wl-mdue").value = ""; }
+    function wlDueReset(){ document.getElementById("wl-mdue").value = wlDateStr(new Date()); }  // ↻ back to today
+    function wlDueClear(){ document.getElementById("wl-mdue").value = ""; }                     // no date (save without one)
     // ---- Checklist: sub-steps you tick off inside the item --------------------
     // Rebuilt wholesale on add/tick/delete; typing writes straight into the array
     // (no re-render) so the caret never jumps.

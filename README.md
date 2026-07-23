@@ -885,8 +885,9 @@ again to go back; the fleet bulk buttons still appear only when there's somethin
   - **Checklist** — sub-steps with their own checkboxes (**＋ Step**, Enter for the next one,
     **✕** to drop one). Ticking a step **saves immediately**, so mid-work progress can't be lost;
     the list row shows a `2/5` chip that turns green when every step is done.
-  - **Expected date** — the native picker, plus **◀ ▶** to nudge it a day at a time and **✕** to
-    clear it. With no date set, the first ◀/▶ lands on today.
+  - **Expected date** — a new item defaults to **today**; the native picker plus **◀ ▶** nudge
+    it a day at a time, **↻** resets to today, and **Clear** drops the date so the item can be
+    saved without one. With no date set, the first ◀/▶ lands on today.
 
   Esc or a backdrop click discards; **Delete** (edit mode only) removes the item after a confirm.
 - **The list** — each row shows subject + date chip (dim normally, amber for **Today**/**Tomorrow**,

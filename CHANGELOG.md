@@ -4,6 +4,25 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-07-23 — My List polish: date defaults, reset/clear split, paste fix
+
+Follow-ups to the item modal from the day before:
+
+- **Date controls split into ↻ reset and Clear.** The single **✕** on the EXPECTED DATE
+  row became **↻** (reset the field back to today) and a separate **Clear** button that
+  empties it. Saving already tolerated an empty date, so Clear is the deliberate "no date"
+  path.
+- **New items default to today.** Opening the modal for a *new* item pre-fills the expected
+  date with today (Clear drops it); an existing item still shows exactly what it was saved
+  with, empty date included.
+- **Paste into the modal actually works.** Pasting a subject was landing in the **nudge box
+  below** instead of the modal field. Root cause: the modal called `.focus()` the same tick
+  it flipped from `display:none`, and WebKit drops a focus call mid-paint — so focus (and
+  ⌘V) stayed on nudge. Focus now runs inside `requestAnimationFrame`, after the overlay
+  paints. Belt-and-suspenders: the nudge paste handler, when the modal is open, redirects a
+  misrouted paste into the last modal field the user touched (subject / details / a step) at
+  the caret and swallows the event so nothing leaks into nudge.
+
 ## 2026-07-22 — My List grows up: item modal, checklists, dates, MASTER rollup
 
 ### Changed — the FLEET row is one line, and bulk nudge is gone
