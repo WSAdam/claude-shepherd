@@ -6749,10 +6749,16 @@ function M.worklistAdd(state, scope, text, id, now, extra)
 end
 
 -- Flip an item's done flag by id within a scope (checking moves it to the Done
--- area in the UI; unchecking brings it back).
-function M.worklistToggle(state, scope, id)
+-- area in the UI; unchecking brings it back). Stamps `doneTs` (epoch seconds) the
+-- moment it becomes done, so the "recently completed" rollup can window the last N
+-- days; unchecking clears it. `now` is optional (pure/testable).
+function M.worklistToggle(state, scope, id, now)
   for _, it in ipairs(M.worklistScopeList(state, scope)) do
-    if it.id == id then it.done = not it.done; break end
+    if it.id == id then
+      it.done = not it.done
+      if it.done then it.doneTs = tonumber(now) or 0 else it.doneTs = nil end
+      break
+    end
   end
   return state
 end
@@ -6804,6 +6810,18 @@ function M.worklistClearDone(state, scope)
   if scope == nil or scope == "generic" then state.generic = kept
   else state.byProject = state.byProject or {}; state.byProject[scope] = kept end
   return state
+end
+
+-- Best-effort friendly name for a project scope key when no live session, relabel,
+-- or auto-title is available. Claude encodes an absolute path /a/b/c as -a-b-c, so
+-- strip a leading "-Users-<user>-" (and an optional "Programming-") to leave the
+-- project portion. Dashes inside a folder name are ambiguous, so this is a fallback
+-- only -- a real relabel/auto-title is always preferred. Pure.
+function M.projectKeyLabel(key)
+  key = type(key) == "string" and key or ""
+  if key == "" then return "" end
+  local rest = key:gsub("^%-[Uu]sers%-[^%-]+%-", ""):gsub("^Programming%-", "")
+  return rest ~= "" and rest or key
 end
 
 -- Split a scope's items into active + done lists (UI helper; pure).

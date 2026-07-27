@@ -5108,15 +5108,17 @@ do
   eq("worklist: blank text ignored", #core.worklistScopeList(st, "generic"), 2)
   -- new items start active (not done)
   check("worklist: new item active", core.worklistScopeList(st, "generic")[1].done == false)
-  -- toggle moves to done; toggle again brings back
-  core.worklistToggle(st, "generic", "g1")
+  -- toggle moves to done (stamping doneTs); toggle again brings back (clearing it)
+  core.worklistToggle(st, "generic", "g1", 5000)
   check("worklist: toggle sets done", core.worklistScopeList(st, "generic")[1].done == true)
+  eq("worklist: toggle stamps doneTs", core.worklistScopeList(st, "generic")[1].doneTs, 5000)
   local active, done = core.worklistSplit(core.worklistScopeList(st, "generic"))
   eq("worklist: split active", #active, 1)
   eq("worklist: split done", #done, 1)
   eq("worklist: split done is the toggled one", done[1].id, "g1")
-  core.worklistToggle(st, "generic", "g1")
+  core.worklistToggle(st, "generic", "g1", 6000)
   check("worklist: toggle back to active", core.worklistScopeList(st, "generic")[1].done == false)
+  check("worklist: un-done clears doneTs", core.worklistScopeList(st, "generic")[1].doneTs == nil)
   -- clearDone removes only done items, only in that scope
   core.worklistToggle(st, "generic", "g2")          -- mark "send invoice" done
   core.worklistToggle(st, "proj:/Users/adam/qb", "p1")  -- mark project item done
@@ -5180,6 +5182,14 @@ do
   core.worklistEdit(st, "generic", "d1", "renamed again", { steps = {} })
   eq("worklist: empty steps clears the checklist", #core.worklistScopeList(st, "generic")[2].steps, 0)
   core.worklistRemove(st, "generic", "d1"); core.worklistRemove(st, "generic", "d2")
+  -- projectKeyLabel: friendly fallback name from a Claude project-dir key
+  eq("worklist: label strips home prefix",
+     core.projectKeyLabel("-Users-adam-Programming-ChargebackSentinel"), "ChargebackSentinel")
+  eq("worklist: label strips Programming too",
+     core.projectKeyLabel("-Users-adam-Programming-claude-instance-manager"), "claude-instance-manager")
+  eq("worklist: label leaves a plain key alone", core.projectKeyLabel("mything"), "mything")
+  eq("worklist: label of empty is empty", core.projectKeyLabel(""), "")
+  eq("worklist: label of non-string is empty", core.projectKeyLabel(nil), "")
   -- scope list for an unknown project is empty (no crash)
   eq("worklist: unknown scope -> empty", #core.worklistScopeList(st, "proj:/nope"), 0)
   -- tolerant of a nil/garbled state

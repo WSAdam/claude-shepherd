@@ -61,6 +61,15 @@ assert_eq "clicking a master row jumps to that tab" "yes" "$(has 'worklistScope 
 # Ticking a master row writes to the item's OWN scope, never the visible tab.
 assert_eq "master row has its own checkbox"   "yes" "$(has 'class="wl-cb wl-mcb"')"
 assert_eq "master tick toggles in its home scope" "yes" "$(has 'if(ms && mid) send("worklist-toggle", ms, mid);')"
+# MASTER "Recently completed" drawer: last-7-days window, sorted newest-first.
+assert_eq "master has a recently-completed drawer" "yes" "$(has 'id="wl-mdonewrap"')"
+assert_eq "recently-completed windows 7 days"  "yes" "$(has '7 * 86400')"
+assert_eq "toggle stamps a completion time"    "yes" "$(has 'core.worklistToggle(st, scope, tostring(payload.text or ""), FX.now())')"
+# Per-scope Done is ordered by due date.
+assert_eq "done rows sorted by due date"       "yes" "$(has 'done.sort(function(a, b){ return wlDueSort(b.due)')"
+# Offline projects (a saved list but no live session) still get a tab + MASTER rows.
+assert_eq "payload adds offline projects from byProject" "yes" "$(has 'for k, list in pairs(st.byProject or {}) do')"
+assert_eq "offline projects are labeled from persisted stores" "yes" "$(has 'or autos[k] or core.projectKeyLabel(k)')"
 
 # ---- XSS: the per-item id reaches two attributes; both go through esc() --------------
 # (item text is covered by escaping.test.sh; the id is server-minted but still escaped.)

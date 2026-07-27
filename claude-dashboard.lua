@@ -3378,13 +3378,17 @@ function FX.mcpSkillsPayload()
   }
 end
 
--- 📋 Worklist payload: the generic list + one entry per CURRENTLY-OPEN project
--- (distinct projectKey from the last render), each labeled with its relabel name
--- (falls back to the folder name) and carrying that folder's saved items. Lists
--- persist for every folder in cc-worklist.json; a closed project just has no
--- button until a session reopens there.
+-- 📋 Worklist payload: the generic list + one entry per project that either has a
+-- LIVE session right now OR a saved (non-empty) list in cc-worklist.json. Live
+-- projects come first (in render order, with their live label); any project whose
+-- window is closed/idle but still owns items follows, labeled from its persisted
+-- relabel / auto-title (both keyed by the same stable projectKey) or a derived
+-- folder name. This is what keeps a project's tab -- and its rows in MASTER --
+-- present regardless of whether a window happens to be open.
 function FX.worklistPayload()
   local st = FX.readWorklist()
+  local labels = FX.loadLabels()
+  local autos = FX.loadAutoTitles()
   local seen, projects = {}, {}
   for _, it in ipairs(lastRenderList or {}) do
     local k = it.projectKey
@@ -3392,11 +3396,26 @@ function FX.worklistPayload()
       seen[k] = true
       projects[#projects + 1] = {
         key = k,
-        label = (it.label and it.label ~= "" and it.label) or it.name or k,
+        label = (it.label and it.label ~= "" and it.label) or it.name
+                or labels[k] or autos[k] or core.projectKeyLabel(k),
         items = core.worklistScopeList(st, k),
       }
     end
   end
+  -- Offline projects that still own a list -> their own tab, sorted by label so the
+  -- order is stable across renders (live tiles keep their render order above).
+  local offline = {}
+  for k, list in pairs(st.byProject or {}) do
+    if type(k) == "string" and k ~= "" and not seen[k] and type(list) == "table" and #list > 0 then
+      offline[#offline + 1] = {
+        key = k,
+        label = (labels[k] and labels[k] ~= "" and labels[k]) or autos[k] or core.projectKeyLabel(k),
+        items = list,
+      }
+    end
+  end
+  table.sort(offline, function(a, b) return tostring(a.label):lower() < tostring(b.label):lower() end)
+  for _, p in ipairs(offline) do projects[#projects + 1] = p end
   return { generic = core.worklistScopeList(st, "generic"), projects = projects }
 end
 
@@ -4488,7 +4507,7 @@ local function handleBridgeMsg(msg)
     local extra = { details = tostring(payload.details or ""), due = tostring(payload.due or ""),
                     steps = (type(payload.steps) == "table") and payload.steps or nil }
     if a == "worklist-add" then core.worklistAdd(st, scope, tostring(payload.text or ""), FX.worklistNewId(), FX.now(), extra)
-    elseif a == "worklist-toggle" then core.worklistToggle(st, scope, tostring(payload.text or ""))
+    elseif a == "worklist-toggle" then core.worklistToggle(st, scope, tostring(payload.text or ""), FX.now())
     elseif a == "worklist-remove" then core.worklistRemove(st, scope, tostring(payload.text or ""))
     elseif a == "worklist-edit" then core.worklistEdit(st, scope, tostring(payload.text or ""), tostring(payload.edit or ""), extra)
     else core.worklistClearDone(st, scope) end
@@ -6059,6 +6078,17 @@ local HTML = [[
   #wl-done { display:none; }
   #wl-donewrap.open #wl-done { display:block; }
   #wl-done .wl-txt { color:var(--muted); text-decoration:line-through; }
+  /* MASTER's "Recently completed" drawer — shown only in master mode (JS toggles the
+     inline display), same collapsed-drawer look as Done. */
+  #wl-mdonewrap { display:none; margin-top:12px; }
+  #wl-mdonehd { display:flex; align-items:center; gap:6px; color:var(--text-3); font-weight:600; font-size:12px;
+                cursor:pointer; padding:5px 4px; border-top:1px solid var(--border); }
+  #wl-mdonehd .wl-count { color:var(--dim); font-weight:500; }
+  #wl-mdone { display:none; }
+  #wl-mdonewrap.open #wl-mdone { display:block; }
+  #wl-mdone .wl-txt { color:var(--muted); text-decoration:line-through; }
+  /* Completion-date stamp on a done row (distinct from the due-date chip). */
+  .wl-donedate { flex:0 0 auto; font-size:clamp(9px,2.5cqw,10.5px); color:var(--dim); white-space:nowrap; margin-top:1px; }
   /* Worklist item modal (add + open/edit). Backdrop + centered card, above the
      panel chrome but below the full-screen overlays' own z-index band. */
   #wl-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.55); z-index:13;
@@ -6835,6 +6865,13 @@ local HTML = [[
         <button id="wl-clearbtn" onclick="event.stopPropagation(); worklistClearDone();">Clear</button>
       </div>
       <div id="wl-done"></div>
+    </div>
+    <!-- MASTER only: a collapsed drawer that reveals items completed in the last 7 days. -->
+    <div id="wl-mdonewrap">
+      <div id="wl-mdonehd" onclick="wlMasterDoneToggle()">
+        <span id="wl-mdonecaret">▸</span> Recently completed <span id="wl-mdonecount" class="wl-count"></span>
+      </div>
+      <div id="wl-mdone"></div>
     </div>
   </div>
   <!-- 📋 Worklist item modal: the ONE place an item is written (add) or read/changed
@@ -7962,10 +7999,13 @@ local HTML = [[
       var el = document.getElementById("nudge");
       if(!el) return;
       el.addEventListener("paste", function(e){
-        // If the worklist item modal is open, a paste that WebKit misroutes to the
-        // nudge box below belongs in the modal field the user is actually editing.
-        // Redirect the text there and swallow it so it never lands in nudge.
-        if(wlModalOpenNow()){
+        // WKWebView keeps the nudge box as its native paste target even when the
+        // worklist modal is open and a modal field is DOM-focused, so ⌘V fires the
+        // paste HERE. If the modal is open, that text belongs in the modal field the
+        // user last touched — redirect it and swallow the event. (This element-level
+        // handler is the one WebKit reliably fires; a document-capture backstop also
+        // exists but can't be trusted alone.)
+        if(wlModalIsOpen){
           e.preventDefault();
           var txt = e.clipboardData ? e.clipboardData.getData("text") : "";
           wlPasteIntoModal(txt);
@@ -8339,16 +8379,20 @@ local HTML = [[
         sc += '<button class="wl-scope' + (worklistScope === p.key ? " on" : "") + '" data-scope="' + esc(String(p.key)) + '">' + esc(p.label || p.key) + '</button>';
       });
       document.getElementById("wl-scopes").innerHTML = sc;
-      // MASTER is a read-only rollup: no add row, no per-scope Done drawer.
+      // MASTER is a read-only rollup: no add row, no per-scope Done drawer, but its own
+      // "Recently completed" drawer instead.
       var isMaster = (worklistScope === "master");
       document.getElementById("wl-addrow").style.display = isMaster ? "none" : "flex";
+      document.getElementById("wl-donewrap").style.display = isMaster ? "none" : "";
+      document.getElementById("wl-mdonewrap").style.display = isMaster ? "block" : "none";
       if(isMaster){
         renderMaster(document.getElementById("wl-active"));
-        document.getElementById("wl-donewrap").style.display = "none";
+        renderMasterDone();
         return;
       }
       var active = [], done = [];
       wlScopeItems(worklistScope).forEach(function(it){ (it.done ? done : active).push(it); });
+      done.sort(function(a, b){ return wlDueSort(b.due) < wlDueSort(a.due) ? -1 : 1; });  // by due date, newest first
       document.getElementById("wl-active").innerHTML = active.length
         ? active.map(function(it){ return wlItemRow(it, false); }).join("")
         : '<div class="wl-empty">No items — add one above.</div>';
@@ -8358,6 +8402,49 @@ local HTML = [[
       dw.style.display = done.length ? "block" : "none";
       dw.classList.toggle("open", worklistDoneOpen);
       document.getElementById("wl-donecaret").textContent = worklistDoneOpen ? "▾" : "▸";
+    }
+    // ---- MASTER: "Recently completed" (last 7 days across every scope) --------
+    var worklistMasterDoneOpen = false;
+    function wlMasterDoneToggle(){ worklistMasterDoneOpen = !worklistMasterDoneOpen; renderMasterDone(); }
+    // doneTs is epoch SECONDS (Lua os.time()); the window is the last 7 days.
+    function wlMasterDoneRows(){
+      var cutoff = Math.floor(Date.now() / 1000) - 7 * 86400, rows = [];
+      var take = function(scope, label, items){
+        (Array.isArray(items) ? items : []).forEach(function(it){
+          if(!it || !it.done) return;
+          var dts = +it.doneTs || 0;
+          if(dts >= cutoff) rows.push({ scope:scope, label:label, it:it, dts:dts });
+        });
+      };
+      take("generic", "Generic", worklistData && worklistData.generic);
+      ((worklistData && worklistData.projects) || []).forEach(function(p){ take(p.key, p.label || p.key, p.items); });
+      rows.sort(function(a, b){ return b.dts - a.dts; });   // most recently completed first
+      return rows;
+    }
+    // "Jul 23" completion stamp from an epoch-seconds timestamp.
+    function wlDoneStamp(dts){
+      if(!dts) return "";
+      var d = new Date(dts * 1000);
+      var MON = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+      return MON[d.getMonth()] + " " + d.getDate();
+    }
+    function renderMasterDone(){
+      var wrap = document.getElementById("wl-mdonewrap");
+      var rows = wlMasterDoneRows();
+      document.getElementById("wl-mdonecount").textContent = rows.length ? "(" + rows.length + ")" : "";
+      wrap.classList.toggle("open", worklistMasterDoneOpen);
+      document.getElementById("wl-mdonecaret").textContent = worklistMasterDoneOpen ? "▾" : "▸";
+      if(!worklistMasterDoneOpen){ document.getElementById("wl-mdone").innerHTML = ""; return; }
+      document.getElementById("wl-mdone").innerHTML = rows.length
+        ? rows.map(function(r){
+            var sc = esc(String(r.scope)), mid = esc(String(r.it.id || ""));
+            return '<div class="wl-item wl-mitem" data-mscope="' + sc + '" data-mid="' + mid + '" title="Open in ' + esc(r.label) + '">'
+              + '<input type="checkbox" class="wl-cb wl-mcb" data-mscope="' + sc + '" data-mid="' + mid + '" checked title="Uncheck to reopen">'
+              + '<span class="wl-tag">' + esc(r.label) + '</span>'
+              + '<span class="wl-txt">' + esc(r.it.text || "") + '</span>'
+              + '<span class="wl-chips">' + wlDueChip(r.it.due, true) + '<span class="wl-donedate" title="Completed">✓ ' + esc(wlDoneStamp(r.dts)) + '</span></span></div>';
+          }).join("")
+        : '<div class="wl-empty">Nothing completed in the last 7 days.</div>';
     }
     function worklistPick(scope){ worklistScope = scope; renderWorklist(); }
     function worklistToggle(id){ send("worklist-toggle", worklistScope, id); }
@@ -8398,14 +8485,20 @@ local HTML = [[
       wlModalSteps = wlStepList(it && it.steps).map(function(s){ return { text:String(s.text || ""), done:!!s.done }; });
       wlRenderSteps();
       document.getElementById("wl-mdel").classList.toggle("hide", !it);
+      wlModalIsOpen = true;
       document.getElementById("wl-modal").classList.add("show");
       // Focus AFTER the modal actually paints: a synchronous .focus() the same tick
       // the overlay flips from display:none is dropped by WebKit, leaving focus (and
       // thus ⌘V paste) on the nudge field below. rAF lets the layout settle first.
-      requestAnimationFrame(function(){ var s = document.getElementById("wl-msubj"); s.focus(); s.select(); });
+      requestAnimationFrame(function(){ var s = document.getElementById("wl-msubj"); s.focus(); s.select(); wlLastField = s; });
     }
-    function wlModalClose(){ wlModalId = null; wlModalSteps = []; document.getElementById("wl-modal").classList.remove("show"); }
-    function wlModalOpenNow(){ return document.getElementById("wl-modal").classList.contains("show"); }
+    function wlModalClose(){ wlModalIsOpen = false; wlModalId = null; wlModalSteps = []; wlLastField = null;
+      document.getElementById("wl-modal").classList.remove("show"); }
+    // A plain boolean, NOT a DOM-class read: WebKit was firing the paste on the nudge
+    // box (its native first responder) at a moment the classList check came back false,
+    // so the paste leaked downward. An explicit flag set in open/close can't race.
+    var wlModalIsOpen = false;
+    function wlModalOpenNow(){ return wlModalIsOpen; }
     // Last modal text field the user touched (subject/details/a step), so a paste that
     // WebKit misroutes to the nudge box can be steered back to the right field.
     var wlLastField = null;
@@ -8413,10 +8506,25 @@ local HTML = [[
       var t = e.target;
       if(t && (t.id === "wl-msubj" || t.id === "wl-mdet" || (t.closest && t.closest(".wl-step")))) wlLastField = t;
     });
+    // THE fix for "paste lands in the nudge box": a capture-phase listener on the whole
+    // document runs before ANY element's own paste handler, so no matter which element
+    // WebKit delivers ⌘V to (the misrouted nudge box included), while the modal is open
+    // we swallow it and insert into the modal field the user last touched.
+    document.addEventListener("paste", function(e){
+      if(!wlModalIsOpen) return;
+      e.preventDefault(); e.stopPropagation();
+      var txt = e.clipboardData ? e.clipboardData.getData("text") : "";
+      if(txt) wlPasteIntoModal(txt);          // images have no text -> ignored, never attached to nudge
+    }, true);
+    // Both the element-level nudge handler and the document-capture backstop may try
+    // to service the same ⌘V; a one-tick guard means whichever wins, we insert exactly
+    // once (never a doubled paste).
+    var wlPasteBusy = false;
     function wlPasteIntoModal(txt){
-      if(!txt) return;
-      var el = (wlLastField && document.getElementById("wl-mcard").contains(wlLastField))
-             ? wlLastField : document.getElementById("wl-msubj");
+      if(!txt || wlPasteBusy) return;
+      wlPasteBusy = true; setTimeout(function(){ wlPasteBusy = false; }, 0);
+      var card = document.getElementById("wl-mcard");
+      var el = (wlLastField && card.contains(wlLastField)) ? wlLastField : document.getElementById("wl-msubj");
       el.focus();
       var a = el.selectionStart, b = el.selectionEnd, v = el.value;
       if(typeof a === "number" && typeof b === "number"){

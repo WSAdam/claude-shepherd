@@ -4,6 +4,42 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-07-27 — My List: persistent project tabs, Recently completed, the real paste fix
+
+### Fixed — project tabs and MASTER now persist regardless of session state
+
+A project's worklist tab (and its rows in MASTER) vanished the moment its session went
+idle/closed — the payload only ever listed projects with a **live** tile, even though the
+items were safe in `cc-worklist.json`. So an idle ChargebackSentinel dropped off the scope
+row and MASTER showed "Nothing open" until you typed into that session to wake it. Now
+`FX.worklistPayload` includes **every project that owns a non-empty list**, live or not:
+live projects first (render order, live label), then offline ones sorted by label and named
+from their persisted relabel / auto-title (both keyed by the same stable `projectKey`) or a
+derived folder name (`core.projectKeyLabel`, e.g. `-Users-adam-Programming-Foo` → `Foo`).
+A project's to-dos no longer disappear when you close its window.
+
+### Added — MASTER "Recently completed" + due-date-ordered Done
+
+- **Recently completed drawer on MASTER** — a collapsed drawer that reveals every item
+  finished in the **last 7 days** across all lists, most-recent first, tagged with its list and
+  stamped with a ✓ completion date. Unchecking a row reopens it in its own scope.
+- Marking an item done now stamps a **completion time** (`doneTs`, epoch seconds) so the
+  window can be computed; unchecking clears it. Items completed *before* this change have no
+  stamp and won't appear until re-completed.
+- Each scope's **Done** area is now **ordered by due date** (newest first) instead of
+  insertion order.
+
+### Fixed — pasting into a modal field, for real this time
+
+The 2026-07-23 "paste fix" did not hold: that change moved the redirect onto a
+`document`-capture paste listener and **removed it from the nudge box's own handler** — but
+WKWebView keeps the nudge box as its native paste target and fires ⌘V on *that element's*
+listener, not reliably on document-capture, so the one handler that actually runs was the one
+I deleted, and pastes kept landing in the nudge box. The redirect is back on the nudge
+element's own paste handler (guarded by the plain `wlModalIsOpen` boolean), inserting the
+text into the last modal field you touched (subject / details / a step) at the caret; the
+document-capture listener stays as a backstop and a one-tick guard prevents any double-insert.
+
 ## 2026-07-23 — My List polish: date defaults, reset/clear split, paste fix
 
 Follow-ups to the item modal from the day before:

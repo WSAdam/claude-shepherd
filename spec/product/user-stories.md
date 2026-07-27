@@ -179,7 +179,7 @@ editors, the routine board) are intentionally omitted until they ship.
 ## Worklist (My List)
 
 - As a **fleet operator**, I want a built-in checklist that swaps in over the tiles, so that I can track my own to-dos without leaving the panel.
-- As a **fleet operator**, I want a global list plus one per currently-open project, persisted by launch-folder identity, so that a project's list survives close/reopen and respawn.
+- As a **fleet operator**, I want a global list plus one tab per project that has a live session OR a saved list, persisted by launch-folder identity, so that a project's to-dos never disappear when its window is idle or closed.
 - As a **fleet operator**, I want to add, check, delete, and clear worklist items, so that I can manage my list without leaving the panel.
 - As a **fleet operator**, I want one modal that captures an item's subject, details, and expected date, so that a to-do carries its context instead of being a bare line of text.
 - As a **fleet operator**, I want to nudge an item's expected date a day at a time with ◀ ▶, so that I can reschedule without opening the date picker.
@@ -188,6 +188,9 @@ editors, the routine board) are intentionally omitted until they ship.
 - As a **fleet operator**, I want a read-only MASTER tab that rolls every open item up by date priority, tagged with its list, so that I can see everything I owe across projects in one place.
 - As a **fleet operator**, I want to tick an item done from MASTER and have it write to its own list, so that I can clear work from the rollup without switching tabs.
 - As a **fleet operator**, I want clicking a MASTER row to jump to that item's tab with the item open, so that the rollup is a way in, not a dead end.
+- As a **fleet operator**, I want a MASTER "Recently completed" drawer showing what I finished in the last 7 days across all lists, so that I can review recent progress without hunting through each scope's Done.
+- As a **fleet operator**, I want each scope's Done area ordered by due date, so that completed work reads in a predictable order.
+- As a **fleet operator**, I want to paste text into any modal field (subject, details, a step), so that I can drop in context without it landing in the nudge box.
 
 ## Keeping the Mac & fleet running
 

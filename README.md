@@ -875,10 +875,11 @@ A checklist built into the panel — no code hooks, just add → work → check.
 again to go back; the fleet bulk buttons still appear only when there's something to act on).
 
 - **Scopes** — a **MASTER** rollup, a **Generic** (global) list, plus one button per
-  **currently-open project**, labeled with that project's relabel name. Lists are stored in
-  `~/.claude/cc-worklist.json` keyed by the **stable launch-folder identity** (same as
-  relabels/groups), so a project's list persists across close / reopen / respawn — a closed
-  project just has no button until a session reopens there.
+  project that **has a live session _or_ still owns a saved list**, labeled with that project's
+  relabel name. Lists are stored in `~/.claude/cc-worklist.json` keyed by the **stable
+  launch-folder identity** (same as relabels/groups). A project's tab and its items **persist
+  whether or not a window is open** — an idle or closed project keeps its button (labeled from its
+  saved relabel / auto-title) until you clear the list, so its to-dos never disappear on you.
 - **The item modal** — **＋ Add an item…** (or clicking any row) opens one editor with:
   - **Subject** — the one line the list shows. Enter saves.
   - **Details** — free-form notes/context, as long as you like.
@@ -892,11 +893,14 @@ again to go back; the fleet bulk buttons still appear only when there's somethin
   Esc or a backdrop click discards; **Delete** (edit mode only) removes the item after a confirm.
 - **The list** — each row shows subject + date chip (dim normally, amber for **Today**/**Tomorrow**,
   red once **overdue**), a 📝 when it has details, and its checklist progress. Checking a row moves
-  it to a collapsed **Done** area; the **✕** deletes it; **Clear** empties Done for that scope.
+  it to a collapsed **Done** area (ordered by due date); the **✕** deletes it; **Clear** empties Done
+  for that scope.
 - **MASTER** — a read-only, date-priority rollup of every **open** item across Generic *and* every
   project, grouped **Overdue / Today / Next 7 days / Later / No date** and tagged with the list it
   came from. Tick a row to mark it done in its own list, or click it to jump to that tab with the
-  item open. No adding from MASTER — that's what Generic and the project tabs are for.
+  item open. A collapsed **Recently completed** drawer reveals everything finished in the **last 7
+  days** across all lists, newest first, each stamped with its ✓ completion date. No adding from
+  MASTER — that's what Generic and the project tabs are for.
 
 ## Install (about 5 minutes)
 
