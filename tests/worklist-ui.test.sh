@@ -38,6 +38,18 @@ assert_eq "Lua edit passes the extras"      "yes" "$(has 'tostring(payload.edit 
 assert_eq "row carries its open id"         "yes" "$(has 'class="wl-item" data-open="')"
 assert_eq "row click opens the modal"       "yes" "$(has 'if(rid) wlModalOpen(rid)')"
 assert_eq "row renders the due-date chip"   "yes" "$(has 'wlDueChip(it.due, isDone)')"
+# ⌘V paste into a modal field goes through the Lua clipboard bridge (WKWebView won't
+# deliver the paste event to a JS handler reliably), and the nudge box is read-only meanwhile.
+# THE paste bug: the panel's single ⌘V eventtap swallows the keystroke panel-wide and
+# used to force-feed EVERY paste to the nudge box, so no in-page handler could ever run.
+# It must route to the modal's focused field while the modal is open.
+assert_eq "the ⌘V tap checks the modal flag first" "yes" "$(has 'if txt and #txt > 0 and FX.wlModalOpen then')"
+assert_eq "the tap routes the clipboard to the modal" "yes" "$(has 'wv:evaluateJavaScript("window.wlReceiveClipboard(" .. jsString(txt) .. ")")')"
+assert_eq "modal open/close sets the Lua flag"  "yes" "$(has 'FX.wlModalOpen = (tostring(payload.v or "") == "open")')"
+assert_eq "JS announces the modal open"         "yes" "$(has 'send("worklist-modal", "open")')"
+assert_eq "JS announces the modal close"        "yes" "$(has 'send("worklist-modal", "close")')"
+assert_eq "clipboard text lands in a modal field" "yes" "$(has 'window.wlReceiveClipboard = function(txt)')"
+assert_eq "nudge is read-only while the modal is open" "yes" "$(has 'if(nud) nud.readOnly = true;')"
 
 # ---- Feature 2: per-item delete -----------------------------------------------------
 # Each rendered row carries a ✕ button tagged with its item id...
@@ -67,6 +79,13 @@ assert_eq "recently-completed windows 7 days"  "yes" "$(has '7 * 86400')"
 assert_eq "toggle stamps a completion time"    "yes" "$(has 'core.worklistToggle(st, scope, tostring(payload.text or ""), FX.now())')"
 # Per-scope Done is ordered by due date.
 assert_eq "done rows sorted by due date"       "yes" "$(has 'done.sort(function(a, b){ return wlDueSort(b.due)')"
+# EVERY scope's done row carries both dates (expected + ✓ completed), not just MASTER.
+assert_eq "done rows show due AND completed"   "yes" "$(has 'wlDueChip(it.due, isDone)
+                + (isDone ? wlDoneChip(it.doneTs) : "")')"
+assert_eq "the ✓ stamp is a shared helper"     "yes" "$(has 'function wlDoneChip(dts)')"
+assert_eq "master reuses the same ✓ helper"    "yes" "$(has 'wlDueChip(r.it.due, true) + wlDoneChip(r.dts)')"
+# An item finished before completion times existed has no stamp (never "✓ NaN").
+assert_eq "no timestamp renders no stamp"      "yes" "$(has 'return s ? ')"
 # Offline projects (a saved list but no live session) still get a tab + MASTER rows.
 assert_eq "payload adds offline projects from byProject" "yes" "$(has 'for k, list in pairs(st.byProject or {}) do')"
 assert_eq "offline projects are labeled from persisted stores" "yes" "$(has 'or autos[k] or core.projectKeyLabel(k)')"

@@ -4,7 +4,37 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
-## 2026-07-27 — My List: persistent project tabs, Recently completed, the real paste fix
+## 2026-07-29 — The ⌘V paste bug, root-caused at last (+ both dates on every Done row)
+
+### Fixed — pasting into the item modal: it was an eventtap all along
+
+Three previous attempts failed because they all fixed the wrong layer. The panel runs a
+Hammerspoon **eventtap** (`M.pasteTap`) that grabs ⌘V whenever the panel is focused, calls
+`handlePanelPaste()`, and **returns `true` to swallow the keystroke** — and that handler
+unconditionally did `insertIntoNudge(text)`. So the keystroke was intercepted at the OS
+level and force-fed to the nudge box **before the webview ever saw it**: no DOM `paste`
+listener, no `keydown` listener, no focus or `readOnly` trick could possibly have worked,
+because the page was never given the event. (Earlier notes in this file blaming WKWebView
+paste routing were wrong; Shepherd was doing it to itself.)
+
+`handlePanelPaste` now checks a flag first: while the worklist item modal is open it routes
+the clipboard to `window.wlReceiveClipboard(...)`, which inserts at the caret of the focused
+modal field (subject / details / a checklist step). Image pastes and ordinary nudge pastes
+are unchanged when the modal is closed. The JS sets the flag via
+`send("worklist-modal", "open"/"close")`, and the receiver resolves its own target field
+(`document.activeElement` → last-touched field → subject) since there's no DOM event to read
+one from. A `keydown` fallback that asks Lua for the clipboard remains for the case where the
+OS watchdog has disabled the tap.
+
+### Added — every Done row shows the expected date AND the completion date
+
+The ✓ completion stamp was MASTER-only. Now every scope's **Done** drawer shows the same
+pairing as MASTER's Recently-completed: the (dimmed, untinted) expected-date chip plus a
+`✓ Jul 29` stamp, both rendered through one shared `wlDoneChip` helper so the two surfaces
+can't drift. An item completed before completion times were recorded has no timestamp, so it
+renders no stamp rather than a bogus date.
+
+## 2026-07-27 — My List: persistent project tabs, Recently completed, the paste attempt that missed
 
 ### Fixed — project tabs and MASTER now persist regardless of session state
 
@@ -29,7 +59,7 @@ A project's to-dos no longer disappear when you close its window.
 - Each scope's **Done** area is now **ordered by due date** (newest first) instead of
   insertion order.
 
-### Fixed — pasting into a modal field, for real this time
+### Fixed — pasting into a modal field, for real this time (it wasn't — see 2026-07-29)
 
 The 2026-07-23 "paste fix" did not hold: that change moved the redirect onto a
 `document`-capture paste listener and **removed it from the nudge box's own handler** — but

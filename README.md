@@ -893,8 +893,8 @@ again to go back; the fleet bulk buttons still appear only when there's somethin
   Esc or a backdrop click discards; **Delete** (edit mode only) removes the item after a confirm.
 - **The list** — each row shows subject + date chip (dim normally, amber for **Today**/**Tomorrow**,
   red once **overdue**), a 📝 when it has details, and its checklist progress. Checking a row moves
-  it to a collapsed **Done** area (ordered by due date); the **✕** deletes it; **Clear** empties Done
-  for that scope.
+  it to a collapsed **Done** area (ordered by due date), where each row shows **both** its expected
+  date and a **✓ completion date**; the **✕** deletes it; **Clear** empties Done for that scope.
 - **MASTER** — a read-only, date-priority rollup of every **open** item across Generic *and* every
   project, grouped **Overdue / Today / Next 7 days / Later / No date** and tagged with the list it
   came from. Tick a row to mark it done in its own list, or click it to jump to that tab with the

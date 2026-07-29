@@ -190,6 +190,7 @@ editors, the routine board) are intentionally omitted until they ship.
 - As a **fleet operator**, I want clicking a MASTER row to jump to that item's tab with the item open, so that the rollup is a way in, not a dead end.
 - As a **fleet operator**, I want a MASTER "Recently completed" drawer showing what I finished in the last 7 days across all lists, so that I can review recent progress without hunting through each scope's Done.
 - As a **fleet operator**, I want each scope's Done area ordered by due date, so that completed work reads in a predictable order.
+- As a **fleet operator**, I want every Done row to show both the date it was expected and the date I actually finished it, so that I can see whether I hit my own deadlines.
 - As a **fleet operator**, I want to paste text into any modal field (subject, details, a step), so that I can drop in context without it landing in the nudge box.
 
 ## Keeping the Mac & fleet running

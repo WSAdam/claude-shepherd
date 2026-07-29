@@ -3419,6 +3419,14 @@ function FX.worklistPayload()
   return { generic = core.worklistScopeList(st, "generic"), projects = projects }
 end
 
+-- ---- ⌘V into the worklist item modal ---------------------------------------
+-- The panel already runs ONE eventtap (M.pasteTap) that swallows ⌘V whenever the
+-- panel is focused and force-feeds the text to the nudge box. That is why no
+-- in-page paste handler ever fired for the item modal: the keystroke never reached
+-- the webview at all. This flag lets that single tap route the clipboard to the
+-- modal's focused field instead while the modal is up (see handlePanelPaste).
+FX.wlModalOpen = false
+
 -- Single message bridge. JS posts JSON: {a=action, v=key, text=optional}.
 local controller = hs.webview.usercontent.new("cc")
 -- ============================================================================
@@ -4496,6 +4504,22 @@ local function handleBridgeMsg(msg)
   -- just renders; add/toggle/clear-done mutate cc-worklist.json then re-push.
   if a == "worklist-load" then
     pcall(function() wv:evaluateJavaScript("window.ccWorklist(" .. hs.json.encode(FX.worklistPayload()) .. ")") end)
+    return
+  end
+  -- 📋 Clipboard bridge for the item modal: WKWebView routes ⌘V through the native
+  -- responder chain to the nudge box no matter which modal field is DOM-focused, and
+  -- a JS paste handler can't reliably catch it. So the modal's ⌘V keydown asks HERE
+  -- for the real clipboard text and the JS inserts it into the focused field itself.
+  if a == "worklist-clipboard" then
+    local txt = ""
+    pcall(function() txt = hs.pasteboard.readString() or "" end)
+    pcall(function() wv:evaluateJavaScript("window.wlReceiveClipboard(" .. hs.json.encode(txt) .. ")") end)
+    return
+  end
+  -- The modal tells us when it opens/closes so the panel's ⌘V tap knows to route the
+  -- clipboard into the modal's focused field instead of the nudge box.
+  if a == "worklist-modal" then
+    FX.wlModalOpen = (tostring(payload.v or "") == "open")
     return
   end
   if a == "worklist-add" or a == "worklist-toggle" or a == "worklist-remove"
@@ -7999,18 +8023,6 @@ local HTML = [[
       var el = document.getElementById("nudge");
       if(!el) return;
       el.addEventListener("paste", function(e){
-        // WKWebView keeps the nudge box as its native paste target even when the
-        // worklist modal is open and a modal field is DOM-focused, so ⌘V fires the
-        // paste HERE. If the modal is open, that text belongs in the modal field the
-        // user last touched — redirect it and swallow the event. (This element-level
-        // handler is the one WebKit reliably fires; a document-capture backstop also
-        // exists but can't be trusted alone.)
-        if(wlModalIsOpen){
-          e.preventDefault();
-          var txt = e.clipboardData ? e.clipboardData.getData("text") : "";
-          wlPasteIntoModal(txt);
-          return;
-        }
         var items = (e.clipboardData && e.clipboardData.items) || [];
         for(var i=0;i<items.length;i++){
           if(items[i].type && items[i].type.indexOf("image") === 0){
@@ -8276,13 +8288,17 @@ local HTML = [[
       // double-quoted, which would terminate the double-quoted attribute. A delegated
       // change listener reads data-id instead. esc() escapes quotes for the attribute.
       var id = esc(String(it.id || ""));
-      var due = wlDueChip(it.due, isDone);
+      // A done row carries BOTH dates: the expected date it was due (dimmed, no nag
+      // tint) and a ✓ stamp of when it was actually completed -- the same pairing
+      // MASTER's Recently-completed drawer shows, now on every scope's Done area.
+      var chips = wlProgChip(it.steps) + wlDueChip(it.due, isDone)
+                + (isDone ? wlDoneChip(it.doneTs) : "");
       return '<div class="wl-item" data-open="' + id + '" title="Click to open">'
         + '<input type="checkbox" class="wl-cb" data-id="' + id + '"'
         + (isDone ? " checked" : "") + '>'
         + '<span class="wl-txt">' + esc(it.text || "")
         + ((it.details && String(it.details).trim()) ? ' <span class="wl-note" title="Has details">📝</span>' : '')
-        + '</span>' + wlProgChip(it.steps) + due
+        + '</span>' + chips
         + '<button class="wl-del" data-del="' + id + '" title="Delete">✕</button></div>';
     }
     // hs.json encodes an empty Lua list as {}, so every steps read goes through this.
@@ -8428,6 +8444,12 @@ local HTML = [[
       var MON = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
       return MON[d.getMonth()] + " " + d.getDate();
     }
+    // The "✓ Jul 23" completed stamp. Renders NOTHING without a timestamp, so items
+    // finished before completion times were recorded simply show no stamp.
+    function wlDoneChip(dts){
+      var s = wlDoneStamp(+dts || 0);
+      return s ? '<span class="wl-donedate" title="Completed">✓ ' + esc(s) + '</span>' : "";
+    }
     function renderMasterDone(){
       var wrap = document.getElementById("wl-mdonewrap");
       var rows = wlMasterDoneRows();
@@ -8442,7 +8464,7 @@ local HTML = [[
               + '<input type="checkbox" class="wl-cb wl-mcb" data-mscope="' + sc + '" data-mid="' + mid + '" checked title="Uncheck to reopen">'
               + '<span class="wl-tag">' + esc(r.label) + '</span>'
               + '<span class="wl-txt">' + esc(r.it.text || "") + '</span>'
-              + '<span class="wl-chips">' + wlDueChip(r.it.due, true) + '<span class="wl-donedate" title="Completed">✓ ' + esc(wlDoneStamp(r.dts)) + '</span></span></div>';
+              + '<span class="wl-chips">' + wlDueChip(r.it.due, true) + wlDoneChip(r.dts) + '</span></div>';
           }).join("")
         : '<div class="wl-empty">Nothing completed in the last 7 days.</div>';
     }
@@ -8486,6 +8508,10 @@ local HTML = [[
       wlRenderSteps();
       document.getElementById("wl-mdel").classList.toggle("hide", !it);
       wlModalIsOpen = true;
+      // Belt to the ⌘V bridge's suspenders: while the modal is up, make the nudge box
+      // read-only so a paste WKWebView misroutes there can't actually land in it.
+      var nud = document.getElementById("nudge"); if(nud) nud.readOnly = true;
+      send("worklist-modal", "open");     // arms the Lua ⌘V eventtap (see FX.wlPasteTapSet)
       document.getElementById("wl-modal").classList.add("show");
       // Focus AFTER the modal actually paints: a synchronous .focus() the same tick
       // the overlay flips from display:none is dropped by WebKit, leaving focus (and
@@ -8493,6 +8519,8 @@ local HTML = [[
       requestAnimationFrame(function(){ var s = document.getElementById("wl-msubj"); s.focus(); s.select(); wlLastField = s; });
     }
     function wlModalClose(){ wlModalIsOpen = false; wlModalId = null; wlModalSteps = []; wlLastField = null;
+      var nud = document.getElementById("nudge"); if(nud) nud.readOnly = false;
+      send("worklist-modal", "close");    // disarms the ⌘V eventtap
       document.getElementById("wl-modal").classList.remove("show"); }
     // A plain boolean, NOT a DOM-class read: WebKit was firing the paste on the nudge
     // box (its native first responder) at a moment the classList check came back false,
@@ -8506,32 +8534,53 @@ local HTML = [[
       var t = e.target;
       if(t && (t.id === "wl-msubj" || t.id === "wl-mdet" || (t.closest && t.closest(".wl-step")))) wlLastField = t;
     });
-    // THE fix for "paste lands in the nudge box": a capture-phase listener on the whole
-    // document runs before ANY element's own paste handler, so no matter which element
-    // WebKit delivers ⌘V to (the misrouted nudge box included), while the modal is open
-    // we swallow it and insert into the modal field the user last touched.
-    document.addEventListener("paste", function(e){
+    // THE reliable fix for "paste lands in the nudge box": don't rely on the DOM paste
+    // event at all (WKWebView routes ⌘V through the native responder chain to the nudge
+    // box, and a JS paste handler can't be trusted to catch it). Instead catch the ⌘V
+    // KEYDOWN on a modal field (keydown fires reliably — typing works), remember the
+    // exact field + caret, ask Lua for the real clipboard text, and insert it ourselves.
+    var wlPasteReq = null;   // { el, a, b } captured at ⌘V time; resolved async by the bridge
+    document.getElementById("wl-mcard").addEventListener("keydown", function(e){
       if(!wlModalIsOpen) return;
-      e.preventDefault(); e.stopPropagation();
-      var txt = e.clipboardData ? e.clipboardData.getData("text") : "";
-      if(txt) wlPasteIntoModal(txt);          // images have no text -> ignored, never attached to nudge
-    }, true);
-    // Both the element-level nudge handler and the document-capture backstop may try
-    // to service the same ⌘V; a one-tick guard means whichever wins, we insert exactly
-    // once (never a doubled paste).
-    var wlPasteBusy = false;
-    function wlPasteIntoModal(txt){
-      if(!txt || wlPasteBusy) return;
-      wlPasteBusy = true; setTimeout(function(){ wlPasteBusy = false; }, 0);
+      if(!(e.metaKey || e.ctrlKey) || (e.key !== "v" && e.key !== "V")) return;
+      var el = document.activeElement;
+      if(!el || !document.getElementById("wl-mcard").contains(el)) el = wlLastField;
+      // Only text fields: the date input and buttons don't take a text paste.
+      if(!wlIsTextField(el)) return;
+      e.preventDefault();          // stop WKWebView's native paste (which would hit nudge)
+      wlPasteReq = { el: el, a: el.selectionStart, b: el.selectionEnd };
+      send("worklist-clipboard");  // Lua replies via window.wlReceiveClipboard
+    });
+    // Lua hands the real clipboard text here (from the eventtap, or the keydown
+    // fallback above). Self-sufficient: it resolves the target field itself, because
+    // the eventtap path has no DOM event to have captured one from.
+    window.wlReceiveClipboard = function(txt){
+      var r = wlPasteReq; wlPasteReq = null;
+      if(!wlModalIsOpen || !txt) return;
       var card = document.getElementById("wl-mcard");
-      var el = (wlLastField && card.contains(wlLastField)) ? wlLastField : document.getElementById("wl-msubj");
+      var el = (r && r.el) || null;
+      if(!el){
+        var act = document.activeElement;
+        el = (act && card.contains(act) && wlIsTextField(act)) ? act
+           : ((wlLastField && card.contains(wlLastField)) ? wlLastField : document.getElementById("wl-msubj"));
+      }
+      if(!el) return;
+      // Caret from the captured keydown when we have it, else the field's live selection.
+      var a = (r && typeof r.a === "number") ? r.a : el.selectionStart;
+      var b = (r && typeof r.b === "number") ? r.b : el.selectionEnd;
+      var v = el.value;
       el.focus();
-      var a = el.selectionStart, b = el.selectionEnd, v = el.value;
       if(typeof a === "number" && typeof b === "number"){
         el.value = v.slice(0, a) + txt + v.slice(b);
         el.selectionStart = el.selectionEnd = a + txt.length;   // caret after the paste
       } else { el.value = v + txt; }
       el.dispatchEvent(new Event("input", { bubbles:true }));    // step rows mirror into wlModalSteps
+    };
+    // The modal's pasteable text fields: subject, details, a checklist step.
+    function wlIsTextField(el){
+      if(!el || !el.id) return el && el.tagName === "INPUT" && el.closest && el.closest(".wl-step");
+      return el.id === "wl-msubj" || el.id === "wl-mdet"
+          || (el.tagName === "INPUT" && el.closest && el.closest(".wl-step"));
     }
     // Click the backdrop (not the card) to dismiss.
     function wlModalBackdrop(e){ if(e && e.target && e.target.id === "wl-modal") wlModalClose(); }
@@ -12776,6 +12825,16 @@ local function handlePanelPaste()
   local img = hs.pasteboard.readImage()
   print(string.format("[cc-dashboard] ⌘V: textlen=%d img=%s",
     txt and #txt or 0, tostring(img ~= nil)))
+  -- The worklist item modal owns ⌘V while it's up. This tap swallows the keystroke
+  -- for the WHOLE panel, so without this branch every paste was force-fed to the
+  -- nudge box no matter which field had focus -- the long-standing "I can't paste
+  -- into Subject/Details/a step" bug. wlReceiveClipboard drops it at the caret of
+  -- the focused modal field instead.
+  if txt and #txt > 0 and FX.wlModalOpen then
+    wv:evaluateJavaScript("window.wlReceiveClipboard(" .. jsString(txt) .. ")")
+    print("[cc-dashboard] ⌘V: routed to the worklist modal")
+    return
+  end
   if txt and #txt > 0 then
     wv:evaluateJavaScript("insertIntoNudge(" .. jsString(txt) .. ")")
     print("[cc-dashboard] ⌘V: inserted text len=" .. #txt)
