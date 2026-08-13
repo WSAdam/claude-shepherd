@@ -137,6 +137,11 @@
     "enabled": false
   },
 
+  "prune": {
+    "_comment": "Ghost-tile auto-delete: removes a tile (status file + its decision/policy/gate state) once stale for `hours`. 0 = never (default) — tiles persist indefinitely. Only the age-based backstop for otherwise-legitimate tiles; a stale tile with no session_id at all (a botched-hook orphan) is always removed regardless of this setting.",
+    "hours": 0
+  },
+
   "respawn": {
     "_comment": "One-click respawn (Feature F). OFF by default. Adds a right-click 'Respawn from cwd' action that relaunches a dead/stale session from its last working dir + matched provider profile + editor. A gateway session whose provider profile is no longer in `providers` can't be respawned (its auth env can't be reconstructed).",
     "enabled": false,

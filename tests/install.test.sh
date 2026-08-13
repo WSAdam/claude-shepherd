@@ -6,6 +6,11 @@
 
 . "$(dirname "$0")/lib.sh"
 
+# Keep every install.sh call below hermetic and fast: without this the new pre-flight
+# gate would re-enter `make test` -> run.sh -> this file -> install.sh, unbounded.
+# The gate's own tests near the end clear it per-call to exercise the real thing.
+export CC_INSTALL_SKIP_TESTS=1
+
 TMP="$(mktemp_dir)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -275,5 +280,95 @@ assert_eq "tools-only: did NOT run the prompt text" "0" "$(grep -Fc 'install fd 
 # --tools-only exits before any copy/merge: a temp claude dir must NOT be created
 assert_eq "tools-only: touches no config (early exit before copy)" "0" \
   "$([ -e "$TMP/tools-claude" ] && echo 1 || echo 0)"
+
+# tools-only also reports lua and Hammerspoon.app. lua present (real PATH) vs absent
+# (the controlled TOOLDIR above has no lua), and the app probe is a directory check
+# redirected via CC_INSTALL_HAMMERSPOON_APP.
+assert_eq "tools-only: lua reported missing when absent from PATH" "1" \
+  "$(grep -Fc 'MISSING (required to run the tests)' "$TOUT")"
+FAKEHS="$TMP/Hammerspoon.app"; mkdir -p "$FAKEHS"
+HSOUT="$TMP/hs-present.out"
+CC_INSTALL_HAMMERSPOON_APP="$FAKEHS" bash "$ROOT/install.sh" --tools-only </dev/null >"$HSOUT" 2>&1
+assert_eq "tools-only: Hammerspoon.app reported present with its path" "1" "$(grep -Fc "$FAKEHS" "$HSOUT")"
+HSOUT2="$TMP/hs-absent.out"
+CC_INSTALL_HAMMERSPOON_APP="$TMP/nope.app" bash "$ROOT/install.sh" --tools-only </dev/null >"$HSOUT2" 2>&1
+assert_eq "tools-only: Hammerspoon.app reported missing when absent" "1" \
+  "$(grep -Fc 'Hammerspoon.app MISSING' "$HSOUT2")"
+assert_eq "tools-only: still exits 0 with Hammerspoon missing (never hard-fails)" "0" "$?"
+
+# --- pre-flight test gate: aborts BEFORE settings.json/init.lua when the suite is red,
+# proceeds when green, and is bypassable. A fake `make` on a PATH-double stands in for
+# the real suite (and touches a sentinel, so we can prove it was/wasn't invoked). ---
+MAKEDIR="$TMP/fakemake"; mkdir -p "$MAKEDIR"
+SENTINEL="$TMP/make-ran"
+for b in lua jq cp mv mkdir chmod date grep tail printf basename find; do
+  src="$(command -v "$b" 2>/dev/null)"; [ -n "$src" ] && ln -sf "$src" "$MAKEDIR/$b"
+done
+write_fake_make() {  # $1 = exit code
+  cat > "$MAKEDIR/make" <<EOF
+#!/usr/bin/env bash
+touch "$SENTINEL"
+exit $1
+EOF
+  chmod +x "$MAKEDIR/make"
+}
+
+# gate aborts on a failing suite
+write_fake_make 1; rm -f "$SENTINEL"
+GCDIR="$TMP/gate-fail-claude"; GHDIR="$TMP/gate-fail-hs"
+CC_INSTALL_SKIP_TESTS= CC_INSTALL_CLAUDE_DIR="$GCDIR" CC_INSTALL_HS_DIR="$GHDIR" CC_INSTALL_NO_APP=1 \
+  PATH="$MAKEDIR:/usr/bin:/bin" bash "$ROOT/install.sh" >"$TMP/gate-fail.out" 2>&1
+assert_eq "gate: a red suite exits nonzero" "1" "$?"
+assert_eq "gate: prints the abort message" "1" "$(grep -Fc 'pre-flight tests failed' "$TMP/gate-fail.out")"
+assert_eq "gate: step-1 copy DID happen (copy-then-abort, not a partial mess)" "1" \
+  "$([ -e "$GCDIR/cc-lib.sh" ] && echo 1 || echo 0)"
+assert_eq "gate: settings.json NOT written" "0" "$([ -e "$GCDIR/settings.json" ] && echo 1 || echo 0)"
+assert_eq "gate: init.lua dofile NOT added" "0" "$([ -e "$GHDIR/init.lua" ] && echo 1 || echo 0)"
+
+# gate proceeds on a green suite
+write_fake_make 0; rm -f "$SENTINEL"
+GCDIR2="$TMP/gate-ok-claude"; GHDIR2="$TMP/gate-ok-hs"
+CC_INSTALL_SKIP_TESTS= CC_INSTALL_CLAUDE_DIR="$GCDIR2" CC_INSTALL_HS_DIR="$GHDIR2" CC_INSTALL_NO_APP=1 \
+  PATH="$MAKEDIR:/usr/bin:/bin" bash "$ROOT/install.sh" >"$TMP/gate-ok.out" 2>&1
+assert_eq "gate: a green suite writes settings.json" "1" \
+  "$([ -e "$GCDIR2/settings.json" ] && echo 1 || echo 0)"
+assert_eq "gate: a green suite adds the init.lua dofile" "1" \
+  "$(grep -Fc 'claude-dashboard.lua' "$GHDIR2/init.lua" 2>/dev/null || echo 0)"
+assert_eq "gate: prints the pass message" "1" "$(grep -Fc 'pre-flight tests passed' "$TMP/gate-ok.out")"
+
+# --skip-tests bypasses the gate entirely — `make` is never even invoked (sentinel absent)
+write_fake_make 1; rm -f "$SENTINEL"
+GCDIR3="$TMP/gate-skip-claude"; GHDIR3="$TMP/gate-skip-hs"
+CC_INSTALL_SKIP_TESTS= CC_INSTALL_CLAUDE_DIR="$GCDIR3" CC_INSTALL_HS_DIR="$GHDIR3" CC_INSTALL_NO_APP=1 \
+  PATH="$MAKEDIR:/usr/bin:/bin" bash "$ROOT/install.sh" --skip-tests >"$TMP/gate-skip.out" 2>&1
+assert_eq "gate: --skip-tests installs despite a red suite" "1" \
+  "$([ -e "$GCDIR3/settings.json" ] && echo 1 || echo 0)"
+assert_eq "gate: --skip-tests never invokes make at all" "0" \
+  "$([ -e "$SENTINEL" ] && echo 1 || echo 0)"
+assert_eq "gate: --skip-tests prints the skip notice" "1" \
+  "$(grep -Fc 'pre-flight tests skipped' "$TMP/gate-skip.out")"
+
+# CC_INSTALL_SKIP_TESTS=1 is the env-var spelling of the same bypass
+rm -f "$SENTINEL"
+GCDIR4="$TMP/gate-env-claude"; GHDIR4="$TMP/gate-env-hs"
+CC_INSTALL_SKIP_TESTS=1 CC_INSTALL_CLAUDE_DIR="$GCDIR4" CC_INSTALL_HS_DIR="$GHDIR4" CC_INSTALL_NO_APP=1 \
+  PATH="$MAKEDIR:/usr/bin:/bin" bash "$ROOT/install.sh" >/dev/null 2>&1
+assert_eq "gate: CC_INSTALL_SKIP_TESTS=1 bypasses too" "1" \
+  "$([ -e "$GCDIR4/settings.json" ] && echo 1 || echo 0)"
+assert_eq "gate: env bypass never invokes make either" "0" \
+  "$([ -e "$SENTINEL" ] && echo 1 || echo 0)"
+
+# a missing `lua` aborts cleanly (cannot verify => do not touch config). Like the fd
+# case above, lua is not a system tool, so /usr/bin:/bin can't supply it.
+NOLUA="$TMP/nolua"; mkdir -p "$NOLUA"
+for b in jq make; do src="$(command -v "$b" 2>/dev/null)"; [ -n "$src" ] && ln -sf "$src" "$NOLUA/$b"; done
+GCDIR5="$TMP/gate-nolua-claude"; GHDIR5="$TMP/gate-nolua-hs"
+CC_INSTALL_SKIP_TESTS= CC_INSTALL_CLAUDE_DIR="$GCDIR5" CC_INSTALL_HS_DIR="$GHDIR5" CC_INSTALL_NO_APP=1 \
+  PATH="$NOLUA:/usr/bin:/bin" bash "$ROOT/install.sh" >"$TMP/gate-nolua.out" 2>&1
+assert_eq "gate: missing lua exits nonzero" "1" "$?"
+assert_eq "gate: missing lua prints 'cannot verify'" "1" \
+  "$(grep -Fc 'cannot verify: lua not found' "$TMP/gate-nolua.out")"
+assert_eq "gate: missing lua writes no settings.json" "0" \
+  "$([ -e "$GCDIR5/settings.json" ] && echo 1 || echo 0)"
 
 finish

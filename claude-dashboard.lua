@@ -129,7 +129,6 @@ local PANEL_W       = 580
 local DEFAULT_THEME = "cards"  -- cards | bar | contrast | dots
 local STALE_SECONDS = 90       -- dim a tile after this long with no updates
 local PRUNE_NO_SID  = true     -- delete stale tiles that have no session_id (orphans)
-local PRUNE_SECONDS = 86400    -- also delete any tile older than this (24h ghost backstop; 0=off)
 local FOCUS_DELAY   = 0.12     -- wait after focusing before sending keystrokes
 local BULK_STAGGER  = 1.5      -- gap between bulk window-keystroke targets (> the
                                -- worst-case paste ladder, so chains never interleave)
@@ -7182,6 +7181,10 @@ local HTML = [[
       <label class="s-row"><input type="checkbox" id="s-coll-en"> Amber-flag tiles when 2+ active sessions share a folder</label>
       <label class="s-row"><input type="checkbox" id="s-coll-git"> Compare by git repo root (not just the exact folder)</label>
 
+      <div class="s-sec">Tile cleanup</div>
+      <label class="s-row">Auto-delete a tile after <input type="number" id="s-prune-hours" class="s-num" min="0"> hours idle (0 = never)</label>
+      <div class="s-help">Deletes the tile's status file (and any decision/policy/gate state) once it's been untouched this long — irreversible, but a live session just reappears on its next hook event. 0 (default) keeps tiles forever. A tile with no session_id at all (a botched-hook orphan) is always cleaned up regardless of this setting.</div>
+
       <div class="s-sec">Graceful drain</div>
       <label class="s-row"><input type="checkbox" id="s-drain-en"> Show "finish turn, then close" in the tile right-click menu</label>
 
@@ -9167,6 +9170,7 @@ local HTML = [[
       val("s-risk-stale",cv(cfg,"risk.thresholds.staleSeconds",300));
       ck("s-coll-en",    cv(cfg,"collision.enabled",false));
       ck("s-coll-git",   cv(cfg,"collision.useGitRoot",false));
+      val("s-prune-hours", cv(cfg,"prune.hours",0));
       ck("s-drain-en",   cv(cfg,"drain.enabled",false));
       ck("s-resp-en",    cv(cfg,"respawn.enabled",false));
       ck("s-resp-auto",  cv(cfg,"respawn.auto.enabled",false));
@@ -9391,6 +9395,7 @@ local HTML = [[
                 thresholds: { med: num("s-risk-med",34), high: num("s-risk-high",67),
                               staleSeconds: num("s-risk-stale",300) } },
         collision: { enabled: ck("s-coll-en"), useGitRoot: ck("s-coll-git") },
+        prune: { hours: num("s-prune-hours", 0) },
         drain: { enabled: ck("s-drain-en") },
         respawn: { enabled: ck("s-resp-en"),
                    auto: { enabled: ck("s-resp-auto"), maxRetries: num("s-resp-max",3),
@@ -12895,11 +12900,14 @@ function refreshList()
   end
   local raw = core.parseStatusList(entries, FX.now(), STALE_SECONDS)
   -- Prune orphans: stale tiles with no session_id, or any tile older than the
-  -- 24h backstop. (SessionEnd can't clean these; staleness only dims them.)
+  -- configured ghost backstop. (SessionEnd can't clean these; staleness only dims them.)
   -- Also prune /clear "ghosts": a stale tile whose project has a fresher live tile.
   local now = FX.now()
+  local cfg = loadConfig()
+  local pruneHours = tonumber(core.config(cfg, "prune.hours", 0)) or 0
+  local pruneSeconds = pruneHours > 0 and (pruneHours * 3600) or 0
   local list = {}
-  local pruneOpts = { pruneNoSid = PRUNE_NO_SID, pruneSeconds = PRUNE_SECONDS }
+  local pruneOpts = { pruneNoSid = PRUNE_NO_SID, pruneSeconds = pruneSeconds }
   local ghost = {}
   for _, k in ipairs(core.staleDuplicateKeys(raw)) do ghost[k] = true end
   for _, it in ipairs(raw) do
@@ -12930,7 +12938,7 @@ function refreshList()
       end
     end
     if #mentries > 0 then
-      local slack = tonumber(core.config(loadConfig(), "bridge.staleSlackSeconds", 15)) or 15
+      local slack = tonumber(core.config(cfg, "bridge.staleSlackSeconds", 15)) or 15
       local remoteList = core.parseMirrorList({ ns = ns, host = b.host, dest = b.dest },
         mentries, now, STALE_SECONDS, { slack = slack })
       local syncStale = (now - (b.lastOkTs or 0)) > 3 * (b.interval or BRIDGE_SECONDS)

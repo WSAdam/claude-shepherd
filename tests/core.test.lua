@@ -1376,6 +1376,31 @@ do
      core.shouldPrune(orphan, 1000, { pruneNoSid = false, pruneSeconds = 0 }), false)
 end
 
+-- ---- prune.hours → seconds conversion contract ----------------------------
+-- Mirrors refreshList()'s read: core.config(cfg,"prune.hours",0) -> seconds.
+do
+  local function pruneSecondsFor(cfg)
+    local hours = tonumber(core.config(cfg, "prune.hours", 0)) or 0
+    return hours > 0 and (hours * 3600) or 0
+  end
+
+  eq("prune.hours absent -> 0 = never", pruneSecondsFor({}), 0)
+  eq("prune.hours 0 -> never", pruneSecondsFor({ prune = { hours = 0 } }), 0)
+  eq("prune.hours 1 -> 3600", pruneSecondsFor({ prune = { hours = 1 } }), 3600)
+  eq("prune.hours 24 -> 86400 (the old hardcoded value)",
+     pruneSecondsFor({ prune = { hours = 24 } }), 86400)
+  -- a garbage value must degrade to "never", not error or prune everything
+  eq("prune.hours garbage -> never", pruneSecondsFor({ prune = { hours = "abc" } }), 0)
+
+  -- default config => a day-old real session survives, but an orphan still goes
+  local dayOld = { stale = true, session_id = "abc", updated = 0 }
+  local opts = { pruneNoSid = true, pruneSeconds = pruneSecondsFor({}) }
+  eq("prune.hours default: day-old session kept", core.shouldPrune(dayOld, 90000, opts), false)
+  eq("prune.hours default: orphan still pruned",
+     core.shouldPrune({ stale = true, session_id = "", updated = 0 },
+                      90000, { pruneNoSid = true, pruneSeconds = pruneSecondsFor({}) }), true)
+end
+
 -- ---- Policy A: approvalStale ----------------------------------------------
 do
   eq("escalate: fresh approval -> false", core.approvalStale({ status = "approval", since = 100 }, 150, 60), false)

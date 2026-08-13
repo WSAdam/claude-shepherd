@@ -4,6 +4,44 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-08-13 — The installer verifies itself before touching your config
+
+### Added — a pre-flight test gate in `install.sh`
+
+`make setup` now runs the full test suite **between** the file copy and the hook merge. If
+the suite is red, the install aborts before `settings.json` or `init.lua` is modified —
+you're left with only the copied files, never a half-wired config. A missing `lua` is
+treated the same way ("cannot verify" ⇒ don't touch anything) rather than silently
+skipping verification.
+
+Bypass with `bash install.sh --skip-tests` or `CC_INSTALL_SKIP_TESTS=1`.
+`tests/install.test.sh` exports the latter so its own 14 `install.sh` calls don't recurse
+back into `make test`; the gate's behavior is covered by tests that clear it per-call.
+
+**Perf note:** every `install.sh` run now runs the suite (~35s on this machine). Modest,
+but real — `--skip-tests` is there for tight loops.
+
+### Added — `tooling_check` reports `lua` and Hammerspoon.app
+
+The check previously only knew about `jq` (required) and the `rg`/`fd` accelerators. It now
+also reports `lua` (required to run the tests) and probes for **Hammerspoon.app** on disk,
+offering `brew install --cask hammerspoon` on the same interactive prompt the accelerators
+use. The brew-prompt body is now one shared `offer_brew_install` helper instead of a
+copy-pasted fork. `--tools-only` / `make doctor` stays read-only and never hard-fails.
+`CC_INSTALL_HAMMERSPOON_APP` redirects the app probe (tests use it).
+
+## 2026-08-13 — Session tiles persist indefinitely by default (configurable auto-cleanup)
+
+### Changed — tiles no longer auto-delete after 24 hours
+
+The hardcoded 24-hour ghost-prune backstop (distinct from display staleness and `/clear`
+dedup) has been replaced with a configurable `prune.hours` setting (⚙ Settings → Tile
+cleanup). Default is 0 = never, so tiles now persist indefinitely. Orphan tiles with no
+`session_id` (from a botched hook fire) are still always cleaned up.
+
+**Upgrade note:** if you relied on the old implicit 24-hour auto-cleanup, set
+`prune.hours` to `24` in `cc-config.json` or via Settings.
+
 ## 2026-07-29 — The ⌘V paste bug, root-caused at last (+ both dates on every Done row)
 
 ### Fixed — pasting into the item modal: it was an eventtap all along

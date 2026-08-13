@@ -18,7 +18,13 @@
 # positive -- acceptable next to the old bare-"cc-" net.
 #
 # Env overrides (used by tests/install.test.sh to stay hermetic):
-#   CC_INSTALL_CLAUDE_DIR, CC_INSTALL_HS_DIR, CC_INSTALL_NO_APP
+#   CC_INSTALL_CLAUDE_DIR, CC_INSTALL_HS_DIR, CC_INSTALL_NO_APP,
+#   CC_INSTALL_HAMMERSPOON_APP (path probed for Hammerspoon.app)
+#
+# Pre-flight test gate: before the hook merge touches your real settings.json /
+# init.lua, `make test` must pass. Bypass with `--skip-tests` or
+# CC_INSTALL_SKIP_TESTS=1 (tests/install.test.sh exports the latter so its own
+# install.sh calls don't recurse back into the suite).
 
 set -u
 
@@ -32,6 +38,31 @@ DOFILE_LINE='dofile(os.getenv("HOME") .. "/.hammerspoon/claude-dashboard.lua")'
 
 have_jq() { command -v jq >/dev/null 2>&1; }
 have() { command -v "$1" >/dev/null 2>&1; }
+have_lua() { command -v lua >/dev/null 2>&1; }
+HAMMERSPOON_APP="${CC_INSTALL_HAMMERSPOON_APP:-/Applications/Hammerspoon.app}"
+have_hammerspoon() { [ -d "$HAMMERSPOON_APP" ]; }
+
+# Offer to `brew install` a missing tool when interactive (a tty on /dev/tty); otherwise
+# just print the command. $2 = "--cask" for a cask. Never fails the caller.
+offer_brew_install() {
+  local tool="$1" cask="${2:-}" label
+  label="brew install ${cask:+$cask }$tool"
+  if have brew; then
+    if [ -t 1 ] && [ -r /dev/tty ]; then
+      printf '      install %s now with Homebrew? [y/N] ' "$tool"
+      read -r ans </dev/tty 2>/dev/null || ans=""
+      case "$ans" in
+        y|Y) brew install ${cask:+$cask} "$tool" && printf '      ✅ installed %s\n' "$tool" \
+               || printf '      ⚠️  %s failed — run it by hand\n' "$label";;
+        *)   printf '      skipped — enable later with: %s\n' "$label";;
+      esac
+    else
+      printf '      to enable: %s\n' "$label"
+    fi
+  else
+    printf '      Homebrew not found — install %s, then it is auto-detected\n' "$tool"
+  fi
+}
 
 # Tooling status: jq (required) + the rg/fd accelerators (optional — they make fleet search
 # and the spawn modal's folder scan faster/gitignore-aware, but degrade to grep/find when
@@ -42,6 +73,15 @@ tooling_check() {
   echo "🔧 Tooling check:"
   if have_jq; then printf '   ✅ %-4s %s\n' jq "$(command -v jq)"
   else printf '   ❌ %-4s MISSING (required) — install: brew install jq\n' jq; fi
+  # lua runs the test suite (the pre-flight gate); required unless you --skip-tests
+  if have_lua; then printf '   ✅ %-4s %s\n' lua "$(command -v lua)"
+  else printf '   ❌ %-4s MISSING (required to run the tests) — install: brew install lua\n' lua; fi
+  # Hammerspoon hosts the panel itself — probed on disk, not on PATH
+  if have_hammerspoon; then printf '   ✅ %-4s %s\n' hs "$HAMMERSPOON_APP"
+  else
+    printf '   ❌ %-4s Hammerspoon.app MISSING (required) — the panel needs it\n' hs
+    offer_brew_install hammerspoon --cask
+  fi
   # tool:fallback pairs (optional accelerators)
   for entry in rg:grep fd:find; do
     tool="${entry%%:*}"; fb="${entry##*:}"
@@ -49,21 +89,7 @@ tooling_check() {
       printf '   ✅ %-4s %s\n' "$tool" "$(command -v "$tool")"
     else
       printf '   ⚠️  %-4s missing — degrades to %s\n' "$tool" "$fb"
-      if have brew; then
-        if [ -t 1 ] && [ -r /dev/tty ]; then
-          printf '      install %s now with Homebrew? [y/N] ' "$tool"
-          read -r ans </dev/tty 2>/dev/null || ans=""
-          case "$ans" in
-            y|Y) brew install "$tool" && printf '      ✅ installed %s\n' "$tool" \
-                   || printf '      ⚠️  brew install %s failed — run it by hand\n' "$tool";;
-            *)   printf '      skipped — enable later with: brew install %s\n' "$tool";;
-          esac
-        else
-          printf '      to enable: brew install %s\n' "$tool"
-        fi
-      else
-        printf '      Homebrew not found — install %s, then it is auto-detected\n' "$tool"
-      fi
+      offer_brew_install "$tool"
     fi
   done
 }
@@ -71,6 +97,32 @@ tooling_check() {
 # `install.sh --tools-only` (or CC_TOOLS_ONLY=1): just run the tooling check and exit
 # (powers `make doctor`). Defined before any copy/merge so it never touches your config.
 if [ "${1:-}" = "--tools-only" ] || [ -n "${CC_TOOLS_ONLY:-}" ]; then tooling_check; exit 0; fi
+
+SKIP_TESTS=0
+for arg in "$@"; do [ "$arg" = "--skip-tests" ] && SKIP_TESTS=1; done
+[ -n "${CC_INSTALL_SKIP_TESTS:-}" ] && SKIP_TESTS=1
+
+# Pre-flight gate (step 1.5): prove the code works BEFORE the hook merge rewrites
+# settings.json or appends to init.lua. A hard abort here leaves only step 1's copied
+# files behind — no half-wired config. `lua` missing is treated the same as a failing
+# test: we cannot verify, so we do not touch your config.
+run_test_gate() {
+  if [ "$SKIP_TESTS" -eq 1 ]; then
+    echo "⏭️  pre-flight tests skipped (--skip-tests)"
+    return 0
+  fi
+  if ! have_lua; then
+    echo "❌ cannot verify: lua not found — install it (brew install lua) or re-run with --skip-tests"
+    exit 1
+  fi
+  echo "🧪 running pre-flight tests..."
+  if ! make -C "$HERE" test; then
+    echo "❌ pre-flight tests failed — aborting before touching your settings.json/init.lua."
+    echo "   Fix the failures above, or re-run with --skip-tests to bypass."
+    exit 1
+  fi
+  echo "✅ pre-flight tests passed"
+}
 
 mkdir -p "$CLAUDE_DIR" "$HS_DIR"
 
@@ -97,6 +149,9 @@ for f in claude-dashboard.lua cc-core.lua; do
   install_file "$HERE/$f" "$HS_DIR"
 done
 echo "✅ copied hook scripts + core -> $CLAUDE_DIR ; dashboard -> $HS_DIR"
+
+# 1.5. Pre-flight test gate — nothing below this line runs if the suite is red.
+run_test_gate
 
 # 2. Merge hooks into settings.json (back up first; idempotent append-if-missing).
 if have_jq; then

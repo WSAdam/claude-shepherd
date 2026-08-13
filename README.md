@@ -728,6 +728,9 @@ These extend the panel without changing any existing behavior when left off:
   folder. Detection only — it can't lock another process's writes.
 - **drain** — a right-click **Drain (finish turn, then close)** action: waits for the
   current turn to finish, then closes (closes immediately if already idle/done).
+- **prune** — auto-delete tiles after they've been idle for `prune.hours` (0 = never,
+  default). Set in ⚙ Settings → Tile cleanup. Tiles persist indefinitely by default; a
+  stale tile with no `session_id` (an orphan from a botched hook) is always cleaned up.
 - **respawn** — a right-click **Respawn from cwd** action that relaunches a dead/stale
   session from its last working dir + matched provider + editor. `respawn.auto.enabled`
   adds **automatic** respawn: a session whose status file freezes **mid-turn** (status
@@ -904,10 +907,15 @@ again to go back; the fleet bulk buttons still appear only when there's somethin
 
 ## Install (about 5 minutes)
 
-1. **Install Hammerspoon** (free) and `jq` (required for the rich tiles):
+**Prerequisite:** [Claude Code](https://claude.com/claude-code) must already be installed
+and run at least once. Shepherd supervises *existing* Claude Code sessions — it doesn't
+install or replace Claude Code.
+
+1. **Install Hammerspoon** (free), `jq` (required for the rich tiles), and `lua`
+   (runs the test suite the installer gates on):
    ```
    brew install --cask hammerspoon
-   brew install jq
+   brew install jq lua
    ```
    Launch Hammerspoon once and grant it Accessibility permission when asked
    (System Settings > Privacy & Security > Accessibility). It needs that to focus
@@ -920,20 +928,26 @@ again to go back; the fleet bulk buttons still appear only when there's somethin
    ```
    brew install ripgrep fd
    ```
-   `make setup` checks for these at the end and offers to install any that are missing; run
-   **`make doctor`** any time to see which engine each path is using (and confirm it in the
-   Hammerspoon console — a fleet search logs `[cc-search] engine=rg …`, a folder scan
-   `[cc-spawn] folder scan: fd …`).
+   `make setup` checks for these at the end and offers to install any that are missing
+   (including Hammerspoon itself, as a safety net if you skipped it above — though you'll
+   still have to grant Accessibility permission by hand); run **`make doctor`** any time to
+   see which engine each path is using (and confirm it in the Hammerspoon console — a fleet
+   search logs `[cc-search] engine=rg …`, a folder scan `[cc-spawn] folder scan: fd …`).
 
 2. **Run the installer** (idempotent — safe to re-run):
    ```
    make setup
    ```
-   This copies the hook scripts + logic into `~/.claude` and `~/.hammerspoon`,
-   **merges** the hooks into `~/.claude/settings.json` (backing it up first and
-   preserving any hooks you already have), ensures the `dofile(...)` line in
+   This copies the hook scripts + logic into `~/.claude` and `~/.hammerspoon`, runs the
+   **pre-flight test suite**, **merges** the hooks into `~/.claude/settings.json` (backing
+   it up first and preserving any hooks you already have), ensures the `dofile(...)` line in
    `~/.hammerspoon/init.lua`, builds **Shepherd.app** (a Dock launcher — see below), and
-   runs the **tooling check** (jq / ripgrep / fd).
+   runs the **tooling check** (jq / lua / Hammerspoon / ripgrep / fd).
+
+   The pre-flight gate runs **before** anything touches your `settings.json` or `init.lua`:
+   if the suite is red (or `lua` is missing so it can't run), the install aborts with only
+   the copied files in place — never a half-wired config. Bypass with
+   `bash install.sh --skip-tests` (or `CC_INSTALL_SKIP_TESTS=1`) if you need to.
 
 3. Click the Hammerspoon menu-bar icon and choose **Reload Config**.
 
@@ -1162,9 +1176,10 @@ Layout: [cc-core.lua](cc-core.lua) (logic) + [claude-dashboard.lua](claude-dashb
 - **Window size is remembered:** resize/move the panel and it's saved (in
   `hs.settings`); a reload restores it instead of snapping back to the default. If a
   saved frame ends up off-screen or too small, it falls back to the top-right default.
-- **Orphan tiles self-clean:** a status file with no `session_id` that goes stale
-  (from a hook fire that lacked one), or any tile older than 24h, is auto-pruned —
-  so dead/duplicate tiles don't pile up. (`PRUNE_NO_SID` / `PRUNE_SECONDS`.)
+- **Tiles persist by default:** status files stick around indefinitely. A stale tile
+  with no `session_id` at all (a botched-hook orphan) is always auto-cleaned. To
+  auto-delete tiles after idle time, set `prune.hours` in ⚙ Settings → Tile cleanup
+  (0 = never, default).
 - **Window not focusing:** open the Hammerspoon Console and double-click a tile.
   The log shows whether a title match was found. Focus matches the folder name in
   the VS Code window title (the default title format).
