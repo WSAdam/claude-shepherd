@@ -6193,6 +6193,47 @@ do
     eq("jitter-pin: memo stays at one entry (no per-poll growth)", entries, 1)
   end
 
+  -- ---- migrate-pin: a memo written by a pre-tier build is swept once ---------
+  -- Entries are key\0window\0tier now. Pre-tier builds wrote key\0window (and a
+  -- bare scalar key slot), and the jitter bug wrote one per poll -- a live memo
+  -- carried 90 of them, unprunable because an ISO-string window has no ordering.
+  -- They can never satisfy a lookup, so the sweep drops them by SHAPE.
+  do
+    local memo = {
+      ["session"] = "2026-07-17T21:50:00.049995+00:00",              -- scalar slot
+      ["weekly:Fable\0" .. "2026-08-25T06:59:59.534520+00:00"] = true, -- pre-tier
+      ["weekly:Fable\0" .. "2026-08-25T07:00:00.587257+00:00"] = true, -- pre-tier
+      ["weekly:Fable\0" .. "1787641200" .. "\0" .. "95"] = true,       -- current shape
+      ["session\0" .. "R1" .. "\0" .. "90"] = true,                    -- current shape
+    }
+    local dropped = core.migrateUsageAlertMemo(memo)
+    eq("migrate-pin: drops every pre-tier entry", dropped, 3)
+    local left = 0; for _ in pairs(memo) do left = left + 1 end
+    eq("migrate-pin: keeps exactly the current-shape entries", left, 2)
+    check("migrate-pin: an unorderable but CURRENT-shape window survives",
+          memo["session\0" .. "R1" .. "\0" .. "90"] == true)
+    eq("migrate-pin: re-running the sweep is a no-op", core.migrateUsageAlertMemo(memo), 0)
+    eq("migrate-pin: a non-table memo is tolerated", core.migrateUsageAlertMemo(nil), 0)
+  end
+
+  -- ---- cap-pin: unorderable windows are bounded by count ---------------------
+  -- A resets_at that never parses cannot be pruned by age, so the per-key entry
+  -- count is the only bound available. Real alternation needs 2; the cap sits far
+  -- above that, and suppression for the CURRENT window is never what gets evicted.
+  do
+    local fired = {}
+    for i = 1, 40 do
+      local o = { five_hour = { utilization = 95, resets_at = "garbage-" .. i } }
+      core.usageLimitAlerts(o, fired)
+    end
+    local n = 0; for _ in pairs(fired) do n = n + 1 end
+    check("cap-pin: 40 unorderable windows stay bounded (<= 8)", n <= 8)
+    -- the window we are in right now must still suppress
+    local last = { five_hour = { utilization = 95, resets_at = "garbage-40" } }
+    eq("cap-pin: the current window is never the entry evicted",
+       #core.usageLimitAlerts(last, fired), 0)
+  end
+
   -- ---- tier-pin: alerts escalate as the bar climbs ---------------------------
   -- Once-per-window alone under-warns: cross 90 early in the week and you hear
   -- nothing again while sailing into the cap. Alerts are keyed per RUNG

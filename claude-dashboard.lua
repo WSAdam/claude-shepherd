@@ -695,6 +695,16 @@ end
 -- local -- this file is at Lua's 200-local ceiling.
 FX._usageAlertFired = hs.settings.get("ccUsageAlertFired")
 if type(FX._usageAlertFired) ~= "table" then FX._usageAlertFired = {} end
+-- Sweep entries left by a pre-tier build. They can never satisfy a lookup again,
+-- and the older jitter bug wrote one per poll -- a live memo held 90 of them.
+-- Persist immediately so the sweep is paid once, not on every reload.
+do
+  local dropped = core.migrateUsageAlertMemo(FX._usageAlertFired)
+  if dropped > 0 then
+    hs.settings.set("ccUsageAlertFired", FX._usageAlertFired)
+    print("[cc-usage] pruned " .. dropped .. " stale plan-limit memo entries")
+  end
+end
 
 -- Fetch the official usage window (async, non-blocking). force=true bypasses the TTL
 -- (the Update-now button); otherwise it no-ops if fetched within OFFICIAL_TTL seconds.

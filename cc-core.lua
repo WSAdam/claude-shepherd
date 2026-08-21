@@ -8221,6 +8221,62 @@ function M.usageAlertTier(pct, threshold)
   return best
 end
 
+-- Most entries one key may hold. Ordering-comparable windows are pruned exactly
+-- (see pruneMemoKey); windows from an UNPARSEABLE resets_at cannot be ordered, so
+-- they are bounded by count instead. Real alternation between two representations
+-- of one window needs 2 entries -- this sits far above that.
+local USAGE_MEMO_CAP = 8
+
+-- Drop `fired` entries for `key` that can no longer matter, keeping the memo from
+-- growing without bound. Two rules, in order:
+--   1. any window PROVABLY older than `win` (both parse as epoch buckets), plus the
+--      pre-tier scalar slot a previous build persisted;
+--   2. if the key is still over USAGE_MEMO_CAP, its oldest unorderable windows,
+--      by sorted key for determinism.
+-- Rule 1 is deliberately conservative. An unparseable resets_at has no ordering, and
+-- dropping the alternate representation of the CURRENT window on each poll would
+-- re-fire forever -- the exact bug the set-based memo exists to prevent.
+local function pruneMemoKey(fired, key, win)
+  local curNum = tonumber(win)
+  local prefix = win .. "\0"
+  local others, drop = {}, {}
+  for k in pairs(fired) do
+    if k == key then
+      drop[#drop + 1] = k                                  -- pre-tier scalar slot
+    else
+      local owner, rest = k:match("^(.-)%z(.*)$")
+      if owner == key and rest:sub(1, #prefix) ~= prefix then
+        local wn = tonumber(rest:match("^(.-)%z") or rest)
+        if curNum and wn and wn < curNum then drop[#drop + 1] = k
+        else others[#others + 1] = k end
+      end
+    end
+  end
+  local excess = (#others + 1) - USAGE_MEMO_CAP
+  if excess > 0 then
+    table.sort(others)
+    for i = 1, excess do drop[#drop + 1] = others[i] end
+  end
+  for _, k in ipairs(drop) do fired[k] = nil end
+  return #drop
+end
+
+-- One-time migration for a memo persisted by an older build. Entries are
+-- key\0window\0tier now; anything with fewer parts (a pre-tier key\0window entry,
+-- or the bare scalar slot) can never satisfy a lookup again, so it is dead weight
+-- that would otherwise sit in the settings store forever -- a real memo carried 90
+-- such entries after the jitter bug. Returns the count dropped. Mutates `fired`.
+function M.migrateUsageAlertMemo(fired)
+  if type(fired) ~= "table" then return 0 end
+  local drop = {}
+  for k in pairs(fired) do
+    local _, nuls = tostring(k):gsub("%z", "")
+    if nuls ~= 2 then drop[#drop + 1] = k end
+  end
+  for _, k in ipairs(drop) do fired[k] = nil end
+  return #drop
+end
+
 -- Plan-limit guard: which usage windows deserve an alert right now. Checks the
 -- session (5h) and weekly bars plus every per-model weekly row
 -- (modelLimitRowsToShow: Fable etc.) and the legacy Sonnet line.
@@ -8251,28 +8307,7 @@ function M.usageLimitAlerts(official, fired, opts)
     local tier = M.usageAlertTier(pct, th)
     if tier == nil then return end                -- below the warning threshold
     local win = M.usageWindowId(resetsAt)
-    -- Prune this key's entries for windows we can PROVE are older, plus the
-    -- obsolete pre-tier scalar slot left by an older build's persisted memo.
-    --
-    -- "Prove" is load-bearing. A parseable resets_at yields a numeric window id,
-    -- so ordering is real and a rolled window's entries are dead. An UNPARSEABLE
-    -- one has no ordering, and those entries are kept: a payload that alternates
-    -- two representations of the same window (resets_at present <-> absent) must
-    -- stay bounded, and dropping the other representation on each poll would
-    -- re-fire forever -- the exact bug the set-based memo was built to stop.
-    local curNum = tonumber(win)
-    local drop = {}
-    for k in pairs(fired) do
-      if k == key then drop[#drop + 1] = k       -- pre-tier scalar slot
-      else
-        local owner, rest = k:match("^(.-)%z(.*)$")
-        if owner == key then
-          local wn = tonumber(rest:match("^(.-)%z") or rest)
-          if curNum and wn and wn < curNum then drop[#drop + 1] = k end
-        end
-      end
-    end
-    for _, k in ipairs(drop) do fired[k] = nil end
+    pruneMemoKey(fired, key, win)
     local slot = key .. "\0" .. win .. "\0" .. tostring(tier)
     if fired[slot] then return end                -- this rung already warned
     fired[slot] = true
