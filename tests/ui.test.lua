@@ -2570,6 +2570,31 @@ do
   -- core.test.lua), and the Alerts empty-state names the new type.
   check("#18-pin: JS isNotification counts usage_limit",
         src:find('|| e.type === "usage_limit") return true;', 1, true) ~= nil)
+
+  -- limit-display (JS twins): the Alerts panel drew "• usage_limit" with no detail
+  -- because usage_limit had no NARRATE entry and no evDesc branch, the session
+  -- column rendered "?" for an account-wide event, and NO audit row of any type
+  -- was clickable. All four halves pinned here against the Lua originals.
+  check("limit-display: evDesc has a usage_limit branch",
+        src:find('else if(e.type === "usage_limit") detail = usageLimitDetail(e);', 1, true) ~= nil)
+  check("limit-display: JS twin of core.usageWindowLabel",
+        src:find('function usageWindowLabel(key)', 1, true) ~= nil
+        and src:find('if(k === "session") return "Session (5h)";', 1, true) ~= nil)
+  check("limit-display: JS twin of core.usageLimitDetail shows percent + threshold",
+        src:find('function usageLimitDetail(e)', 1, true) ~= nil
+        and src:find('" at " + Math.round(+e.percent) + "%"', 1, true) ~= nil
+        and src:find('" (warns at " + Math.round(+e.threshold) + "%)"', 1, true) ~= nil)
+  check("limit-display: an account-wide event shows an em dash, not '?'",
+        src:find('var ACCOUNT_SCOPED = { usage_limit: 1 };', 1, true) ~= nil
+        and src:find('ACCOUNT_SCOPED[e.type] ? "—" : "?"', 1, true) ~= nil)
+  check("limit-display: rows carrying detail are clickable and expand",
+        src:find('function auditToggle(el)', 1, true) ~= nil
+        and src:find('onclick="auditToggle(this)"', 1, true) ~= nil
+        and src:find(".a-item.open .a-detail{ display:grid; }", 1, true) ~= nil)
+  -- the redact button lives INSIDE the clickable row: without stopPropagation a
+  -- redact click would also toggle the detail open.
+  check("limit-display: redact click does not also toggle the row",
+        src:find('onclick="event.stopPropagation();auditRedact(', 1, true) ~= nil)
   check("#18-pin: Alerts empty-state mentions usage-limit warnings",
         src:find("usage-limit warnings, and non-human gate decisions land here", 1, true) ~= nil)
 

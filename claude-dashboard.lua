@@ -750,8 +750,12 @@ function FX.fetchOfficialUsage(force)
           FX.notify("Claude plan: " .. a.label .. " at " .. math.floor((a.percent or 0) + 0.5) .. "%",
             "Approaching this window's cap -- work on it may be blocked at 100%. "
             .. "Bars + reset times are in the panel footer.")
-          FX.appendLedger({ type = "usage_limit", window = a.key,
-            percent = math.floor((a.percent or 0) + 0.5), threshold = th })
+          -- Carry the LABEL and the rung, not just the raw key: the audit row
+          -- renders from these (core.usageLimitDetail / its JS evDesc twin), and
+          -- an event that only knew `window` used to draw as a bare verb.
+          FX.appendLedger({ type = "usage_limit", window = a.key, label = a.label,
+            percent = math.floor((a.percent or 0) + 0.5), threshold = th,
+            tier = a.tier, resets_at = a.resetsAt })
         end
         -- usageLimitAlerts mutated the memo iff anything fired; persist the marks so
         -- they survive hs.reload (see the FX._usageAlertFired declaration).
@@ -6513,15 +6517,25 @@ local HTML = [[
 .h-stat{ color:var(--text-3); flex:1; font-size:11px; }
 .h-when{ color:var(--dim); white-space:nowrap; font-variant-numeric:tabular-nums; font-size:11px; }
 #a-body{ flex:1; overflow:auto; padding:6px 10px; }
-.a-row{ display:flex; gap:8px; align-items:baseline; padding:3px 0; border-bottom:1px solid var(--border-weak); }
+.a-item{ border-bottom:1px solid var(--border-weak); }
+.a-row{ display:flex; gap:8px; align-items:baseline; padding:3px 0; }
+.a-item.has-detail .a-row{ cursor:pointer; }
+.a-item.has-detail:hover .a-row{ background:var(--surface-2); }
 .a-ts{ color:var(--dim); white-space:nowrap; font-variant-numeric:tabular-nums; }
 .a-name{ color:var(--text-3); white-space:nowrap; max-width:120px; overflow:hidden; text-overflow:ellipsis; }
 .a-desc{ color:var(--text-2); flex:1; word-break:break-word; }
 .a-redacted{ color:var(--dim); }
 .a-redact{ background:none; border:1px solid #3a2c2c; color:#d08; border-radius:5px; padding:1px 6px; cursor:pointer; font-size:11px; }
 .a-narr{ white-space:pre-wrap; color:var(--text-2); font-family:ui-monospace,Menlo,monospace; font-size:11px; line-height:1.5; margin:0; }
+/* Row detail: hidden until the row is clicked. A two-column definition list so
+   field names stay scannable down the left edge. */
+.a-detail{ display:none; grid-template-columns:auto 1fr; gap:2px 10px; margin:0 0 6px 0;
+  padding:6px 8px; background:var(--surface-2); border-radius:6px; font-size:11px; }
+.a-item.open .a-detail{ display:grid; }
+.a-detail dt{ color:var(--dim); white-space:nowrap; }
+.a-detail dd{ color:var(--text-2); margin:0; word-break:break-word; font-variant-numeric:tabular-nums; }
 /* notification history (roadmap #6): "since you last looked" highlight + 🔔 badge */
-.a-row.unseen{ background:var(--accent-bg); border-left:2px solid var(--accent); padding-left:6px; }
+.a-item.unseen{ background:var(--accent-bg); border-left:2px solid var(--accent); padding-left:6px; }
 /* collapsed toolbar: one list button (☰) opens a drawer of the views */
 #menu-wrap{ position:relative; display:inline-flex; }
 #menu-btn{ background:var(--surface); color:var(--text-2); border:1px solid var(--border); border-radius:8px;
@@ -11930,6 +11944,30 @@ local HTML = [[
     var NARRATE = __NARRATE__;
     function evEmoji(t){ var n = NARRATE[t]; return (n && n[0]) || "•"; }
     function evVerb(t){ var n = NARRATE[t]; return (n && n[1]) || t; }
+    // Account-wide events: real, but not attributable to a session. The name
+    // column shows an em dash rather than "?", which reads as missing data.
+    var ACCOUNT_SCOPED = { usage_limit: 1 };
+    function evWho(e){
+      return e.name || e.session_id || (ACCOUNT_SCOPED[e.type] ? "—" : "?");
+    }
+    // JS twin of core.usageWindowLabel / core.usageLimitDetail. Kept in step with
+    // the Lua originals so Rows/Timeline and Review/Shift word a plan-limit row
+    // identically; both derive the label from `window` when the event predates
+    // the label field.
+    function usageWindowLabel(key){
+      var k = String(key == null ? "" : key);
+      if(k === "session") return "Session (5h)";
+      if(k === "weekly") return "Weekly";
+      var m = k.match(/^weekly:(.+)$/);
+      if(m) return "Weekly · " + m[1];
+      return k !== "" ? k : "usage";
+    }
+    function usageLimitDetail(e){
+      var s = String(e.label ? e.label : usageWindowLabel(e.window));
+      if(e.percent != null) s += " at " + Math.round(+e.percent) + "%";
+      if(e.threshold != null) s += " (warns at " + Math.round(+e.threshold) + "%)";
+      return s;
+    }
     function evDesc(e){
       if(e.type === "decision"){
         // fallback = the gate deferred to the native prompt (NOT an allow) -> ⚠, matching
@@ -11957,22 +11995,50 @@ local HTML = [[
       else if(e.type === "queue_starved") detail = (e.depth != null ? (e.depth + " queued") : "");
       else if(e.type === "error") detail = (e.reason || e.message || "");
       else if(e.type === "auto_respawn_blocked") detail = (e.reason || e.outcome || "");
+      else if(e.type === "usage_limit") detail = usageLimitDetail(e);
       // R3-10: the label is the NARRATE verb (single source), so EVERY known type
       // renders its rich verb in Rows/Timeline, matching Review/Shift.
       var label = evVerb(e.type);
       return em + " " + label + (detail ? (": " + detail) : "");
     }
-    function narr(e){ return fmtTs(e.ts) + "  " + (e.name || e.session_id || "?") + "  " + evDesc(e) + (e.redacted ? " [redacted]" : ""); }
+    function narr(e){ return fmtTs(e.ts) + "  " + evWho(e) + "  " + evDesc(e) + (e.redacted ? " [redacted]" : ""); }
+    // Fields the detail pane never repeats: either already in the row header, or
+    // pure ledger plumbing.
+    var DETAIL_SKIP = { ts:1, id:1, v:1, type:1, name:1, session_id:1, redacted:1 };
+    // Every field the event actually carries, as a definition list. Built from the
+    // event itself rather than a per-type template, so a type nobody wrote a
+    // renderer for still opens into something useful instead of a dead row.
+    function auditDetail(e){
+      var rows = "";
+      if(e.session_id) rows += '<dt>session</dt><dd>' + esc(e.session_id) + '</dd>';
+      Object.keys(e).forEach(function(k){
+        if(DETAIL_SKIP[k]) return;
+        var v = e[k];
+        if(v == null || v === "") return;
+        if(typeof v === "object"){ try { v = JSON.stringify(v); } catch(err){ v = String(v); } }
+        rows += '<dt>' + esc(k) + '</dt><dd>' + esc(String(v)) + '</dd>';
+      });
+      if(!rows) return "";
+      return '<dl class="a-detail">' + rows + '</dl>';
+    }
+    // Toggle one row open. Rows are independent (no accordion): comparing two
+    // alerts side by side is the common reason to open one at all.
+    function auditToggle(el){
+      if(el && el.classList) el.classList.toggle("open");
+    }
     function auditRow(e){
       var hasContent = (e.prompt || e.summary || e.task || e.text || e.message);
       var canRedact = hasContent && !e.redacted;
       var unseen = auditView === "alerts" && LAST_SEEN > 0 && (e.ts || 0) > LAST_SEEN;
-      return '<div class="a-row' + (unseen ? ' unseen' : '') + '">'
+      var detail = auditDetail(e);
+      return '<div class="a-item' + (unseen ? ' unseen' : '') + (detail ? ' has-detail' : '') + '"'
+        + (detail ? ' onclick="auditToggle(this)" title="Click for detail"' : '') + '>'
+        + '<div class="a-row">'
         + '<span class="a-ts">' + esc(fmtTs(e.ts)) + '</span>'
-        + '<span class="a-name">' + esc(e.name || e.session_id || "?") + '</span>'
+        + '<span class="a-name">' + esc(evWho(e)) + '</span>'
         + '<span class="a-desc">' + esc(evDesc(e)) + (e.redacted ? ' <i class="a-redacted">[redacted]</i>' : '') + '</span>'
-        + (canRedact ? '<button class="a-redact" onclick="auditRedact(\'' + e.id + '\',' + (e.ts || 0) + ')">redact</button>' : '')
-        + '</div>';
+        + (canRedact ? '<button class="a-redact" onclick="event.stopPropagation();auditRedact(\'' + e.id + '\',' + (e.ts || 0) + ')">redact</button>' : '')
+        + '</div>' + detail + '</div>';
     }
     function populateAuditSessions(){
       var sel = document.getElementById("a-f-session"), cur = sel.value, seen = {};

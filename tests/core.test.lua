@@ -3400,6 +3400,27 @@ do
     core.narrateEvent({ type = "rule" }):find("• rule", 1, true) == nil)
   check("R2-15: queue_starved not a raw-type fallback",
     core.narrateEvent({ type = "queue_starved" }):find("• queue_starved", 1, true) == nil)
+  -- usage_limit was added as a notification type but never given a NARRATE entry,
+  -- so it fell through to the "• <raw type>" fallback AND had no detail branch:
+  -- the Alerts panel drew "• usage_limit" while the event carried the window,
+  -- the percentage and the threshold. Both halves pinned here.
+  check("limit-display: usage_limit is not a raw-type fallback",
+    core.narrateEvent({ type = "usage_limit" }):find("• usage_limit", 1, true) == nil)
+  do
+    local rich = core.narrateEvent({ type = "usage_limit", window = "weekly:Fable",
+      label = "Weekly · Fable", percent = 98, threshold = 90 })
+    check("limit-display: renders window, percent and threshold",
+      rich:find("Weekly · Fable", 1, true) ~= nil
+      and rich:find("98%", 1, true) ~= nil and rich:find("90%", 1, true) ~= nil)
+    -- events written before the row carried `label` must still read as prose:
+    -- the label is re-derived from `window`.
+    eq("limit-display: a pre-label event renders identically",
+       core.narrateEvent({ type = "usage_limit", window = "weekly:Fable",
+                           percent = 98, threshold = 90 }), rich)
+  end
+  eq("limit-display: session key label", core.usageWindowLabel("session"), "Session (5h)")
+  eq("limit-display: plain weekly label", core.usageWindowLabel("weekly"), "Weekly")
+  eq("limit-display: scoped weekly label", core.usageWindowLabel("weekly:Fable"), "Weekly · Fable")
 end
 
 -- ---- #18-pin: usage_limit is a notification type -----------------------------
@@ -6058,9 +6079,17 @@ do
     local a = core.usageLimitAlerts(officialAt(92, 10, 5), fired)
     eq("limitAlerts: session 92% crosses default 90 -> one alert", #a, 1)
     check("limitAlerts: alert is the session window", a[1] and a[1].key == "session" and a[1].percent == 92)
-    eq("limitAlerts: memo records the window", fired.session, "R1")
-    -- same window again -> silent (once per window, not per poll)
-    eq("limitAlerts: same resets_at stays silent", #core.usageLimitAlerts(officialAt(95, 10, 5), fired), 0)
+    -- The memo is keyed key\0window\0tier. There is no scalar fired[key] slot any
+    -- more: it recorded only the LAST window and, once alerts became per-rung,
+    -- could not answer the only question asked of the memo ("has THIS rung of
+    -- THIS window warned?"). A stale one from an older build is pruned on sight.
+    -- built by concatenation: "\090" would parse as the single char 90 ('Z'),
+    -- not a NUL followed by "90".
+    check("limitAlerts: memo records key\\0window\\0tier",
+          fired["session" .. "\0" .. "R1" .. "\0" .. "90"] == true and fired.session == nil)
+    -- same window AND same rung -> silent (once per rung, not per poll)
+    eq("limitAlerts: same resets_at + same rung stays silent",
+       #core.usageLimitAlerts(officialAt(93, 10, 5), fired), 0)
     -- window rolls (new resets_at) while still over -> re-arms exactly once
     local b = core.usageLimitAlerts(officialAt(95, 10, 5, "R2"), fired)
     eq("limitAlerts: rolled window re-fires once", #b, 1)
@@ -6112,6 +6141,80 @@ do
     eq("#1-pin: a real window roll still re-fires once",
        #core.usageLimitAlerts({ five_hour = { utilization = 95, resets_at = "R2" } }, fired), 1)
   end
+  -- ---- jitter-pin: the window identity must survive a jittering resets_at -----
+  -- The OAuth usage API recomputes resets_at per request at microsecond precision
+  -- and it wobbles either side of the true boundary. Keyed on the RAW string, a
+  -- live memo held 77 distinct "windows" for one weekly window spanning
+  -- 06:59:59.534520 to 07:00:00.587257 -- so every 180s poll re-armed the guard
+  -- and re-fired (77 banners + 77 ledger rows in one evening) while the memo grew
+  -- one permanent entry per poll. usageWindowId buckets to a stable id instead.
+  do
+    -- verbatim samples pulled from the live memo, straddling the minute boundary
+    local jitter = {
+      "2026-08-25T06:59:59.534520+00:00", "2026-08-25T06:59:59.666716+00:00",
+      "2026-08-25T06:59:59.779065+00:00", "2026-08-25T07:00:00.159411+00:00",
+      "2026-08-25T07:00:00.295220+00:00", "2026-08-25T07:00:00.587257+00:00",
+    }
+    local ids = {}
+    for _, s in ipairs(jitter) do ids[core.usageWindowId(s)] = true end
+    local n = 0; for _ in pairs(ids) do n = n + 1 end
+    eq("jitter-pin: sub-second wobble across a minute edge -> ONE window id", n, 1)
+
+    -- ROUNDING, not truncation: the samples above sit either side of 07:00, which
+    -- truncation would split into two buckets and re-fire once per boundary cross.
+    check("jitter-pin: rounds to the nearest bucket, not the floor",
+          core.usageWindowId("2026-08-25T06:59:59+00:00")
+          == core.usageWindowId("2026-08-25T07:00:00+00:00"))
+
+    -- the same instant written at three UTC offsets is one window
+    local tz = {}
+    for _, s in ipairs({ "2026-08-25T07:00:00+00:00", "2026-08-25T09:00:00+02:00",
+                         "2026-08-25T02:00:00-05:00", "2026-08-25T07:00:00Z" }) do
+      tz[core.usageWindowId(s)] = true
+    end
+    local tn = 0; for _ in pairs(tz) do tn = tn + 1 end
+    eq("jitter-pin: one instant, four offset spellings -> ONE window id", tn, 1)
+
+    -- unparseable / absent input degrades to the previous identity, never a throw
+    eq("jitter-pin: absent resets_at -> the single no-reset window",
+       core.usageWindowId(nil), "no-reset")
+    eq("jitter-pin: unparseable resets_at falls back to the raw string",
+       core.usageWindowId("R1"), "R1")
+
+    -- end to end: 60 jittered polls at a steady 98% are ONE alert, and the memo
+    -- does not grow (the unbounded-growth half of the same bug).
+    local fired, total = {}, 0
+    for i = 1, 60 do
+      local o = { five_hour = { utilization = 98, resets_at = jitter[(i % #jitter) + 1] } }
+      total = total + #core.usageLimitAlerts(o, fired)
+    end
+    local entries = 0; for _ in pairs(fired) do entries = entries + 1 end
+    eq("jitter-pin: 60 jittered polls at 98% -> exactly one alert", total, 1)
+    eq("jitter-pin: memo stays at one entry (no per-poll growth)", entries, 1)
+  end
+
+  -- ---- tier-pin: alerts escalate as the bar climbs ---------------------------
+  -- Once-per-window alone under-warns: cross 90 early in the week and you hear
+  -- nothing again while sailing into the cap. Alerts are keyed per RUNG
+  -- (threshold, then 95, then 99), so getting worse re-warns while a steady bar
+  -- stays quiet.
+  do
+    eq("tier-pin: below threshold -> no rung", core.usageAlertTier(89, 90), nil)
+    eq("tier-pin: at the threshold -> the threshold rung", core.usageAlertTier(90, 90), 90)
+    eq("tier-pin: 98 sits on the 95 rung", core.usageAlertTier(98, 90), 95)
+    eq("tier-pin: 99.4 sits on the 99 rung", core.usageAlertTier(99.4, 90), 99)
+    -- a threshold above a rung swallows it (no double-warn at 95 when told 97)
+    eq("tier-pin: threshold 97 -> 98 stays on the 97 rung", core.usageAlertTier(98, 97), 97)
+
+    local fired, seq = {}, {}
+    for _, p in ipairs({ 91, 92, 96, 97, 99, 99 }) do
+      local o = { five_hour = { utilization = p, resets_at = "2026-08-25T07:00:00+00:00" } }
+      seq[#seq + 1] = #core.usageLimitAlerts(o, fired)
+    end
+    eq("tier-pin: 91,92,96,97,99,99 -> warn, silent, warn, silent, warn, silent",
+       table.concat(seq, ","), "1,0,1,0,1,0")
+  end
+
   -- #1-pin: rows are de-duped by key within one call. Two weekly-scoped limits[]
   -- entries sharing a display_name (two metered versions both named "Sonnet")
   -- used to BOTH fire on every poll (the second consider() overwrote the memo

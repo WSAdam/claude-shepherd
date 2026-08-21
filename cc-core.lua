@@ -1051,6 +1051,7 @@ local NARRATE = {
   remote_decision = { "📡", "remote decision sent" },
   rewind_open   = { "↶", "opened the rewind picker" },
   mode_skipped  = { "🎚", "mode NOT changed (no window)" },
+  usage_limit   = { "🪫", "approaching plan limit" },
 }
 -- R3-10: expose NARRATE so the dashboard can inject it as data (__NARRATE__) and the JS
 -- evDesc twin derives BOTH its emoji and verb label from this single source -- otherwise
@@ -1100,6 +1101,8 @@ function M.narrateEvent(e)
     detail = e.reason or e.message
   elseif t == "auto_respawn_blocked" then
     detail = e.reason or e.outcome
+  elseif t == "usage_limit" then
+    detail = M.usageLimitDetail(e)
   else
     -- R2-14: include e.text (matches the JS evDesc twin) -- nudge/nudge_skipped
     -- ledger events carry their operator/broadcast content ONLY in .text, so
@@ -8147,53 +8150,164 @@ function M.modelLimitRowsToShow(official)
   return out
 end
 
--- Plan-limit guard: which usage windows just crossed the warning threshold and
--- deserve ONE alert for the current window. Checks the session (5h) and weekly
--- bars plus every per-model weekly row (modelLimitRowsToShow: Fable etc.) and the
--- legacy Sonnet line. `fired` is the caller-held once-per-window memo: fired[key]
--- records the LAST window fired (kept as the display/back-compat slot), and a
--- flat fired[key.."\0"..window] entry records EVERY window already warned for
--- that key. A later poll in the SAME window stays silent, a NEW window
--- (resets_at changed) re-arms -- so a cap you're still riding re-warns exactly
--- once per week/session, never per poll. The suppression checks the SET, not
--- just the last value: a payload that alternates two representations of one
--- window (resets_at present <-> absent, legacy <-> scoped surface) would flip a
--- single last-value slot every poll and re-fire indefinitely. Rows are also
--- de-duped by key within one call (first eligible wins), so two limits[] rows
--- sharing a display_name can't each fire and clobber the other's memo.
+-- Days since the epoch for a civil Y/M/D (Hinnant's algorithm). Pure integer
+-- math -- os.time would read the string as LOCAL time and shift the bucket by
+-- the machine's UTC offset.
+local function daysFromCivil(y, m, d)
+  y = (m <= 2) and (y - 1) or y
+  local era = math.floor(y / 400)
+  local yoe = y - era * 400
+  local doy = math.floor((153 * (m + ((m > 2) and -3 or 9)) + 2) / 5) + d - 1
+  local doe = yoe * 365 + math.floor(yoe / 4) - math.floor(yoe / 100) + doy
+  return era * 146097 + doe - 719468
+end
+
+-- Stable identity for one usage window, derived from its resets_at.
+--
+-- The window CANNOT be keyed on the raw resets_at string. The OAuth usage API
+-- recomputes that timestamp per request at microsecond precision and it jitters
+-- either side of the true boundary -- one live memo held 77 distinct strings for
+-- a single weekly window, spanning 06:59:59.534520 to 07:00:00.587257. Keyed
+-- raw, every 180s poll looked like a brand-new window, so the once-per-window
+-- guard re-armed and re-fired on every poll (77 banners + 77 ledger rows) and
+-- the memo grew one permanent entry per poll, forever.
+--
+-- So: parse to an epoch second, normalize the UTC offset (a `Z`/absent offset is
+-- already UTC), and ROUND -- not truncate -- to the nearest bucket. Rounding
+-- matters: that observed jitter straddles a minute boundary, which truncation
+-- would still split into two buckets. A 60s bucket absorbs +/-30s of drift,
+-- ~60x the jitter actually seen. Unparseable input falls back to the raw string
+-- (previous behaviour), and an absent resets_at to a single "no-reset" window.
+function M.usageWindowId(resetsAt, opts)
+  local s = tostring(resetsAt or "")
+  if s == "" then return "no-reset" end
+  local bucket = tonumber(opts and opts.bucketSeconds) or 60
+  local y, mo, d, h, mi, sec = s:match("^(%d%d%d%d)%-(%d%d)%-(%d%d)[Tt ](%d%d):(%d%d):(%d%d)")
+  if not y then return s end
+  local epoch = daysFromCivil(tonumber(y), tonumber(mo), tonumber(d)) * 86400
+    + tonumber(h) * 3600 + tonumber(mi) * 60 + tonumber(sec)
+  local sign, oh, om = s:match("([+%-])(%d%d):?(%d%d)%s*$")
+  if sign then
+    local off = tonumber(oh) * 3600 + tonumber(om) * 60
+    epoch = epoch + ((sign == "-") and off or -off)   -- carry to UTC
+  end
+  return tostring(math.floor((epoch + bucket / 2) / bucket) * bucket)
+end
+
+-- Human label for a usage window key. ONE source for the wording, so the alert
+-- banner, the ledger row and a replay of an OLD event (written before the row
+-- carried a label) all read identically.
+function M.usageWindowLabel(key)
+  local k = tostring(key or "")
+  if k == "session" then return "Session (5h)" end
+  if k == "weekly" then return "Weekly" end
+  local model = k:match("^weekly:(.+)$")
+  if model then return "Weekly · " .. model end
+  return (k ~= "") and k or "usage"
+end
+
+-- The escalation ladder: the configured threshold, then 95, then 99. Returns the
+-- highest rung `pct` has reached, or nil below the threshold. Alerts are keyed
+-- per rung, so riding a cap upward re-warns as it gets WORSE instead of going
+-- silent after the first ping -- while still never repeating a rung.
+function M.usageAlertTier(pct, threshold)
+  pct = tonumber(pct)
+  local th = tonumber(threshold) or 90
+  if pct == nil or pct < th then return nil end
+  local best = th
+  for _, rung in ipairs({ 95, 99 }) do
+    if rung > th and pct >= rung then best = rung end
+  end
+  return best
+end
+
+-- Plan-limit guard: which usage windows deserve an alert right now. Checks the
+-- session (5h) and weekly bars plus every per-model weekly row
+-- (modelLimitRowsToShow: Fable etc.) and the legacy Sonnet line.
+--
+-- `fired` is the caller-held memo, one flat `key\0window\0tier` entry per rung
+-- already warned. A later poll on the same rung stays silent; a new window or a
+-- higher rung re-arms. Entries for a key's OTHER windows are pruned on the way
+-- through -- the memo is only ever asked about the window we are in now, so the
+-- rest is dead weight that used to accumulate without bound.
+--
+-- Rows are de-duped by key within one call (first eligible wins), so two limits[]
+-- rows sharing a display_name can't each fire.
+--
 -- Mutates `fired` (promoteSummary-style) and returns the alerts to fire NOW as
--- { key, label, percent, resetsAt }. Pure decision -- the caller owns the
--- notification/ledger effects. opts.threshold: warn at >= this percent (default 90).
+-- { key, label, percent, resetsAt, window, tier }. Pure decision -- the caller
+-- owns the notification/ledger effects. opts.threshold: warn at >= this percent
+-- (default 90).
 function M.usageLimitAlerts(official, fired, opts)
   if type(official) ~= "table" or type(fired) ~= "table" then return {} end
   local th = tonumber(opts and opts.threshold) or 90
   local out = {}
   local seen = {}  -- keys already considered THIS call (duplicate-row de-dup)
-  local function consider(key, label, pct, resetsAt)
+  local function consider(key, pct, resetsAt)
     pct = tonumber(pct)
-    if pct == nil or pct < th then return end
+    if pct == nil then return end
     if seen[key] then return end                  -- duplicate row for this key: first wins
     seen[key] = true
-    local window = tostring(resetsAt or "no-reset")
-    if fired[key] == window or fired[key .. "\0" .. window] then return end  -- already warned
-    fired[key] = window
-    fired[key .. "\0" .. window] = true
-    out[#out + 1] = { key = key, label = label, percent = pct, resetsAt = resetsAt }
+    local tier = M.usageAlertTier(pct, th)
+    if tier == nil then return end                -- below the warning threshold
+    local win = M.usageWindowId(resetsAt)
+    -- Prune this key's entries for windows we can PROVE are older, plus the
+    -- obsolete pre-tier scalar slot left by an older build's persisted memo.
+    --
+    -- "Prove" is load-bearing. A parseable resets_at yields a numeric window id,
+    -- so ordering is real and a rolled window's entries are dead. An UNPARSEABLE
+    -- one has no ordering, and those entries are kept: a payload that alternates
+    -- two representations of the same window (resets_at present <-> absent) must
+    -- stay bounded, and dropping the other representation on each poll would
+    -- re-fire forever -- the exact bug the set-based memo was built to stop.
+    local curNum = tonumber(win)
+    local drop = {}
+    for k in pairs(fired) do
+      if k == key then drop[#drop + 1] = k       -- pre-tier scalar slot
+      else
+        local owner, rest = k:match("^(.-)%z(.*)$")
+        if owner == key then
+          local wn = tonumber(rest:match("^(.-)%z") or rest)
+          if curNum and wn and wn < curNum then drop[#drop + 1] = k end
+        end
+      end
+    end
+    for _, k in ipairs(drop) do fired[k] = nil end
+    local slot = key .. "\0" .. win .. "\0" .. tostring(tier)
+    if fired[slot] then return end                -- this rung already warned
+    fired[slot] = true
+    out[#out + 1] = { key = key, label = M.usageWindowLabel(key), percent = pct,
+                      resetsAt = resetsAt, window = win, tier = tier }
   end
   if type(official.five_hour) == "table" then
-    consider("session", "Session (5h)", official.five_hour.utilization, official.five_hour.resets_at)
+    consider("session", official.five_hour.utilization, official.five_hour.resets_at)
   end
   if type(official.seven_day) == "table" then
-    consider("weekly", "Weekly", official.seven_day.utilization, official.seven_day.resets_at)
+    consider("weekly", official.seven_day.utilization, official.seven_day.resets_at)
   end
   if type(official.seven_day_sonnet) == "table" and official.seven_day_sonnet.utilization ~= nil then
-    consider("weekly:Sonnet", "Weekly · Sonnet",
-      official.seven_day_sonnet.utilization, official.seven_day_sonnet.resets_at)
+    consider("weekly:Sonnet", official.seven_day_sonnet.utilization, official.seven_day_sonnet.resets_at)
   end
   for _, m in ipairs(M.modelLimitRowsToShow(official)) do
-    consider("weekly:" .. tostring(m.model), "Weekly · " .. tostring(m.model), m.percent, m.resetsAt)
+    consider("weekly:" .. tostring(m.model), m.percent, m.resetsAt)
   end
   return out
+end
+
+-- One-line detail for a usage_limit ledger row, shared by narrateEvent and its JS
+-- evDesc twin so Rows/Timeline and Review/Shift read identically. Falls back to
+-- deriving the label from `window` so events written before the row carried a
+-- label still render as prose rather than a bare verb.
+function M.usageLimitDetail(e)
+  if type(e) ~= "table" then return "" end
+  local label = e.label
+  if label == nil or label == "" then label = M.usageWindowLabel(e.window) end
+  local s = tostring(label)
+  local pct = tonumber(e.percent)
+  if pct then s = s .. " at " .. tostring(math.floor(pct + 0.5)) .. "%" end
+  local th = tonumber(e.threshold)
+  if th then s = s .. " (warns at " .. tostring(math.floor(th)) .. "%)" end
+  return s
 end
 
 -- ---- L5: PR/MR status per tile (gh-backed, status-only) -------------------
