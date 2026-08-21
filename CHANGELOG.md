@@ -4,6 +4,52 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-08-21 — Plan-limit alerts fire once per window again, and say something
+
+### Fixed — a warning every 3 minutes instead of once per window
+
+The plan-limit guard promised "one alert per usage window". It was firing on **every**
+180-second usage poll: 77 macOS banners and 77 ledger rows in a single evening, all for one
+weekly window sitting at 98%.
+
+The dedupe logic was correct; the key it deduped on was not. A window was identified by the
+raw `resets_at` string from the usage API, and that timestamp is recomputed per request at
+microsecond precision, wobbling either side of the true boundary. One live memo held **77
+distinct strings for a single window**, spanning `06:59:59.534520` to `07:00:00.587257`. Every
+poll therefore looked like a brand-new window, re-armed the guard, and fired again — while
+the memo grew one permanent entry per poll, forever.
+
+`core.usageWindowId` now parses `resets_at`, normalizes the UTC offset, and **rounds** to a
+60-second bucket. Rounding rather than truncating is the point: the observed jitter straddles
+a minute edge, which a floor would still split in two.
+
+Stale windows are pruned, but only ones **provably** older. An unparseable `resets_at` has no
+ordering, and dropping the alternate representation of the current window on each poll would
+re-fire forever — the exact bug the set-based memo was built to stop. Windows that can't be
+ordered are bounded by count instead, and the current window is never what gets evicted.
+
+Entries written by the older build are swept once at load (a live memo went from 93 to 1).
+
+### Added — alerts escalate as the bar climbs
+
+Once-per-window alone under-warns: cross 90% early in the week and you hear nothing more
+while sailing into the cap. Alerts are now keyed per **rung** — the configured threshold,
+then 95%, then 99% — so getting worse re-warns, while a steady bar stays quiet. At most three
+alerts per window.
+
+### Fixed — the Alerts row showed none of what it had collected
+
+`usage_limit` was never given a `NARRATE` entry or an `evDesc` branch, so the panel drew a
+bare `• usage_limit` while the event carried the window, the percentage and the threshold.
+It now reads **`🪫 approaching plan limit: Weekly · Fable at 98% (warns at 90%)`**, derived
+from one shared label helper — so an event written before the row carried a label renders
+identically.
+
+The name column showed `?` for plan-limit events, which reads as missing data; account-wide
+events now show an em dash. And **audit rows of every type expand on click** to show the
+fields the event actually carries — previously no row in the panel was clickable at all, and
+types with no redactable content had no affordance whatsoever.
+
 ## 2026-08-13 — The installer verifies itself before touching your config
 
 ### Added — a pre-flight test gate in `install.sh`
