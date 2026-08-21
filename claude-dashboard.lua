@@ -757,14 +757,17 @@ function FX.fetchOfficialUsage(force)
         local th = tonumber(core.config(cfg, "usage.limitAlerts.thresholdPct", 90)) or 90
         local alerts = core.usageLimitAlerts(j, FX._usageAlertFired, { threshold = th })
         for _, a in ipairs(alerts) do
-          FX.notify("Claude plan: " .. a.label .. " at " .. math.floor((a.percent or 0) + 0.5) .. "%",
+          -- Show the RUNG, not a rounded percent. Rounding here would print "99%"
+          -- for a 98.6% reading whose rung is 98, then print "99%" again on the
+          -- real 99 -- two alerts claiming the same number.
+          FX.notify("Claude plan: " .. a.label .. " at " .. tostring(a.tier) .. "%",
             "Approaching this window's cap -- work on it may be blocked at 100%. "
             .. "Bars + reset times are in the panel footer.")
           -- Carry the LABEL and the rung, not just the raw key: the audit row
           -- renders from these (core.usageLimitDetail / its JS evDesc twin), and
           -- an event that only knew `window` used to draw as a bare verb.
           FX.appendLedger({ type = "usage_limit", window = a.key, label = a.label,
-            percent = math.floor((a.percent or 0) + 0.5), threshold = th,
+            percent = a.tier, threshold = th,
             tier = a.tier, resets_at = a.resetsAt })
         end
         -- usageLimitAlerts mutated the memo iff anything fired; persist the marks so
@@ -11974,7 +11977,7 @@ local HTML = [[
     }
     function usageLimitDetail(e){
       var s = String(e.label ? e.label : usageWindowLabel(e.window));
-      if(e.percent != null) s += " at " + Math.round(+e.percent) + "%";
+      if(e.percent != null) s += " at " + Math.floor(+e.percent) + "%";
       if(e.threshold != null) s += " (warns at " + Math.round(+e.threshold) + "%)";
       return s;
     }

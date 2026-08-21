@@ -539,15 +539,16 @@ warning. It covers the session (5h) bar, the weekly bar, and every per-model wee
 (`Weekly · Fable` and friends). Entirely passive: no keystrokes, no session actions, no model
 tokens.
 
-Alerts are **once per window per rung**. The rungs are your threshold, then 95%, then 99%, so a
-bar climbing toward the cap warns again as it gets worse, while a bar sitting still stays quiet —
-at most three notifications per window, and the window re-arms when it resets.
+Alerts are **once per whole percentage point**. Crossing 90% warns, then 91%, then 92%, and so on
+up to 100% — so a bar climbing toward the cap keeps you posted as it gets worse, while a bar
+sitting still stays quiet (drift within a single point, 90.1% → 90.7%, is silent). A jump doesn't
+backfill: straight from 90% to 95% warns once, for 95%. The window re-arms when it resets.
 
 ```jsonc
 "usage": {
   "limitAlerts": {
     "enabled": true,      // false turns the warnings off entirely
-    "thresholdPct": 90    // first warning at this %; rungs at 95 and 99 follow
+    "thresholdPct": 90    // first warning at this %, then one per point above it
   }
 }
 ```

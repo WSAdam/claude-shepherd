@@ -8206,19 +8206,18 @@ function M.usageWindowLabel(key)
   return (k ~= "") and k or "usage"
 end
 
--- The escalation ladder: the configured threshold, then 95, then 99. Returns the
--- highest rung `pct` has reached, or nil below the threshold. Alerts are keyed
--- per rung, so riding a cap upward re-warns as it gets WORSE instead of going
--- silent after the first ping -- while still never repeating a rung.
+-- The escalation ladder: every WHOLE PERCENT from the threshold up. Returns the
+-- rung `pct` currently sits on (its floor), or nil below the threshold. Alerts are
+-- keyed per rung, so each new percentage point warns exactly once -- 90, then 91,
+-- then 92 -- while drift inside one point (90.1 -> 90.7) stays silent.
+--
+-- Flooring means a jump never backfills: 90 straight to 95 warns once, for 95, not
+-- five times for the points it skipped.
 function M.usageAlertTier(pct, threshold)
   pct = tonumber(pct)
   local th = tonumber(threshold) or 90
   if pct == nil or pct < th then return nil end
-  local best = th
-  for _, rung in ipairs({ 95, 99 }) do
-    if rung > th and pct >= rung then best = rung end
-  end
-  return best
+  return math.floor(pct)
 end
 
 -- Most entries one key may hold. Ordering-comparable windows are pruned exactly
@@ -8282,10 +8281,12 @@ end
 -- (modelLimitRowsToShow: Fable etc.) and the legacy Sonnet line.
 --
 -- `fired` is the caller-held memo, one flat `key\0window\0tier` entry per rung
--- already warned. A later poll on the same rung stays silent; a new window or a
--- higher rung re-arms. Entries for a key's OTHER windows are pruned on the way
--- through -- the memo is only ever asked about the window we are in now, so the
--- rest is dead weight that used to accumulate without bound.
+-- already warned (a rung is a whole percent -- see usageAlertTier). A later poll on
+-- the same rung stays silent; a new window or a higher percent re-arms. Entries for
+-- a key's OTHER windows are pruned on the way through -- the memo is only ever
+-- asked about the window we are in now, so the rest is dead weight that used to
+-- accumulate without bound. Same-window rungs are NOT pruned: they are what makes
+-- each percentage point warn once, and a window tops out at ~11 of them.
 --
 -- Rows are de-duped by key within one call (first eligible wins), so two limits[]
 -- rows sharing a display_name can't each fire.
@@ -8338,8 +8339,10 @@ function M.usageLimitDetail(e)
   local label = e.label
   if label == nil or label == "" then label = M.usageWindowLabel(e.window) end
   local s = tostring(label)
+  -- FLOOR, not round: the alert rung is the floor of the percentage, so rounding
+  -- here would print a number the alert was never keyed on.
   local pct = tonumber(e.percent)
-  if pct then s = s .. " at " .. tostring(math.floor(pct + 0.5)) .. "%" end
+  if pct then s = s .. " at " .. tostring(math.floor(pct)) .. "%" end
   local th = tonumber(e.threshold)
   if th then s = s .. " (warns at " .. tostring(math.floor(th)) .. "%)" end
   return s

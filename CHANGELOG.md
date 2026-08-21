@@ -30,12 +30,14 @@ ordered are bounded by count instead, and the current window is never what gets 
 
 Entries written by the older build are swept once at load (a live memo went from 93 to 1).
 
-### Added — alerts escalate as the bar climbs
+### Added — one warning per whole percentage point
 
 Once-per-window alone under-warns: cross 90% early in the week and you hear nothing more
-while sailing into the cap. Alerts are now keyed per **rung** — the configured threshold,
-then 95%, then 99% — so getting worse re-warns, while a steady bar stays quiet. At most three
-alerts per window.
+while sailing into the cap. Alerts are now keyed per **percentage point** — 90%, then 91%,
+then 92%, up to 100% — so a climbing bar keeps you posted as it gets worse, while drift inside
+a single point (90.1% → 90.7%) stays quiet. The rung is the floor of the percentage, so a jump
+never backfills: straight from 90% to 95% warns once, for 95%, not five times for the points it
+skipped. A window tops out at 11 alerts and re-arms when it resets.
 
 ### Fixed — the Alerts row showed none of what it had collected
 

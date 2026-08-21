@@ -2582,7 +2582,7 @@ do
         and src:find('if(k === "session") return "Session (5h)";', 1, true) ~= nil)
   check("limit-display: JS twin of core.usageLimitDetail shows percent + threshold",
         src:find('function usageLimitDetail(e)', 1, true) ~= nil
-        and src:find('" at " + Math.round(+e.percent) + "%"', 1, true) ~= nil
+        and src:find('" at " + Math.floor(+e.percent) + "%"', 1, true) ~= nil
         and src:find('" (warns at " + Math.round(+e.threshold) + "%)"', 1, true) ~= nil)
   check("limit-display: an account-wide event shows an em dash, not '?'",
         src:find('var ACCOUNT_SCOPED = { usage_limit: 1 };', 1, true) ~= nil

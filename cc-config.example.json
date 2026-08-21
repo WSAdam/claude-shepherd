@@ -173,7 +173,7 @@
 
   "usage": {
     "limitAlerts": {
-      "_comment": "Plan-limit guard (ON by default, passive — no keystrokes, no session actions, no model tokens). Raises ONE macOS notification + a usage_limit audit row when a plan window crosses thresholdPct: the session (5h) bar, the weekly bar, and every per-model weekly line. Alerts are once per window per RUNG — thresholdPct, then 95, then 99 — so a bar climbing toward the cap re-warns as it gets worse while a steady bar stays quiet, and the window re-arms when it resets. Set enabled=false to turn the warnings off.",
+      "_comment": "Plan-limit guard (ON by default, passive — no keystrokes, no session actions, no model tokens). Raises ONE macOS notification + a usage_limit audit row when a plan window crosses thresholdPct: the session (5h) bar, the weekly bar, and every per-model weekly line. Alerts are once per WHOLE PERCENTAGE POINT — 90, then 91, then 92, up to 100 — so a bar climbing toward the cap keeps warning as it gets worse, while drift inside one point (90.1 -> 90.7) stays quiet. A jump does not backfill skipped points, and the window re-arms when it resets. Set enabled=false to turn the warnings off.",
       "enabled": true,
       "thresholdPct": 90
     }

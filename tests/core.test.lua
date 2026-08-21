@@ -3418,6 +3418,17 @@ do
        core.narrateEvent({ type = "usage_limit", window = "weekly:Fable",
                            percent = 98, threshold = 90 }), rich)
   end
+  -- The printed number must be the RUNG the alert was keyed on. Rounding would
+  -- print "99%" for a 98.6% reading keyed on 98, then "99%" again on the real 99 --
+  -- two alerts claiming the same number.
+  do
+    local e = { type = "usage_limit", window = "weekly", percent = 98.6, threshold = 90 }
+    check("limit-display: the percent shown is floored to the rung, never rounded up",
+      core.narrateEvent(e):find("at 98%", 1, true) ~= nil
+      and core.narrateEvent(e):find("at 99%", 1, true) == nil)
+    eq("limit-display: and it matches usageAlertTier exactly",
+       "at " .. tostring(core.usageAlertTier(98.6, 90)) .. "%", "at 98%")
+  end
   eq("limit-display: session key label", core.usageWindowLabel("session"), "Session (5h)")
   eq("limit-display: plain weekly label", core.usageWindowLabel("weekly"), "Weekly")
   eq("limit-display: scoped weekly label", core.usageWindowLabel("weekly:Fable"), "Weekly · Fable")
@@ -6083,13 +6094,13 @@ do
     -- more: it recorded only the LAST window and, once alerts became per-rung,
     -- could not answer the only question asked of the memo ("has THIS rung of
     -- THIS window warned?"). A stale one from an older build is pruned on sight.
-    -- built by concatenation: "\090" would parse as the single char 90 ('Z'),
-    -- not a NUL followed by "90".
+    -- built by concatenation: "\092" would parse as the single char 92 ('\'),
+    -- not a NUL followed by "92". The rung is the whole percent, so 92% -> "92".
     check("limitAlerts: memo records key\\0window\\0tier",
-          fired["session" .. "\0" .. "R1" .. "\0" .. "90"] == true and fired.session == nil)
-    -- same window AND same rung -> silent (once per rung, not per poll)
-    eq("limitAlerts: same resets_at + same rung stays silent",
-       #core.usageLimitAlerts(officialAt(93, 10, 5), fired), 0)
+          fired["session" .. "\0" .. "R1" .. "\0" .. "92"] == true and fired.session == nil)
+    -- same window, same rung -> silent, including drift inside the percentage point
+    eq("limitAlerts: the same percentage point stays silent",
+       #core.usageLimitAlerts(officialAt(92.4, 10, 5), fired), 0)
     -- window rolls (new resets_at) while still over -> re-arms exactly once
     local b = core.usageLimitAlerts(officialAt(95, 10, 5, "R2"), fired)
     eq("limitAlerts: rolled window re-fires once", #b, 1)
@@ -6234,26 +6245,44 @@ do
        #core.usageLimitAlerts(last, fired), 0)
   end
 
-  -- ---- tier-pin: alerts escalate as the bar climbs ---------------------------
+  -- ---- tier-pin: one warning per whole percentage point -----------------------
   -- Once-per-window alone under-warns: cross 90 early in the week and you hear
-  -- nothing again while sailing into the cap. Alerts are keyed per RUNG
-  -- (threshold, then 95, then 99), so getting worse re-warns while a steady bar
-  -- stays quiet.
+  -- nothing again while sailing into the cap. A rung is a whole PERCENT, so 90,
+  -- 91, 92 ... each warn exactly once, while drift inside one point is silent.
   do
     eq("tier-pin: below threshold -> no rung", core.usageAlertTier(89, 90), nil)
     eq("tier-pin: at the threshold -> the threshold rung", core.usageAlertTier(90, 90), 90)
-    eq("tier-pin: 98 sits on the 95 rung", core.usageAlertTier(98, 90), 95)
-    eq("tier-pin: 99.4 sits on the 99 rung", core.usageAlertTier(99.4, 90), 99)
-    -- a threshold above a rung swallows it (no double-warn at 95 when told 97)
-    eq("tier-pin: threshold 97 -> 98 stays on the 97 rung", core.usageAlertTier(98, 97), 97)
+    eq("tier-pin: each whole percent is its own rung", core.usageAlertTier(98, 90), 98)
+    eq("tier-pin: the rung is the FLOOR, not a round", core.usageAlertTier(99.4, 90), 99)
+    eq("tier-pin: 99.6 still sits on 99, not 100", core.usageAlertTier(99.6, 90), 99)
+    eq("tier-pin: a raised threshold still reports the real percent",
+       core.usageAlertTier(98, 97), 98)
+    eq("tier-pin: just under the threshold is silent", core.usageAlertTier(96.9, 97), nil)
 
+    -- climbing point by point warns each time; a fractional wobble inside one
+    -- point does not; a repeat does not.
     local fired, seq = {}, {}
-    for _, p in ipairs({ 91, 92, 96, 97, 99, 99 }) do
+    for _, p in ipairs({ 90, 90.4, 90.9, 91, 92, 92, 95, 100 }) do
       local o = { five_hour = { utilization = p, resets_at = "2026-08-25T07:00:00+00:00" } }
       seq[#seq + 1] = #core.usageLimitAlerts(o, fired)
     end
-    eq("tier-pin: 91,92,96,97,99,99 -> warn, silent, warn, silent, warn, silent",
-       table.concat(seq, ","), "1,0,1,0,1,0")
+    eq("tier-pin: 90, 90.4, 90.9, 91, 92, 92, 95, 100 -> warn only on a NEW point",
+       table.concat(seq, ","), "1,0,0,1,1,0,1,1")
+
+    -- a jump does not backfill the points it skipped
+    local f2 = {}
+    local jump = { five_hour = { utilization = 95, resets_at = "2026-08-25T07:00:00+00:00" } }
+    eq("tier-pin: a jump from nowhere to 95 warns ONCE, not once per skipped point",
+       #core.usageLimitAlerts(jump, f2), 1)
+
+    -- a full 90 -> 100 climb is bounded at 11 rungs for the window
+    local f3 = {}
+    for p = 90, 100 do
+      local o = { five_hour = { utilization = p, resets_at = "2026-08-25T07:00:00+00:00" } }
+      core.usageLimitAlerts(o, f3)
+    end
+    local n = 0; for _ in pairs(f3) do n = n + 1 end
+    eq("tier-pin: a 90->100 climb leaves exactly 11 memo entries", n, 11)
   end
 
   -- #1-pin: rows are de-duped by key within one call. Two weekly-scoped limits[]
