@@ -531,6 +531,30 @@ it spends no model tokens**; it's polled at most every **180s**, sends the token
 is unreachable, the bars **fall back** to a labeled local approximation (rolling 5h/7d token sums
 from your Anthropic-session transcripts).
 
+### Plan-limit warnings (on by default)
+
+When any plan window crosses **90%**, Shepherd raises one macOS notification and records a
+`usage_limit` row in the audit ledger — so a long unattended run doesn't die on a cap with no
+warning. It covers the session (5h) bar, the weekly bar, and every per-model weekly line
+(`Weekly · Fable` and friends). Entirely passive: no keystrokes, no session actions, no model
+tokens.
+
+Alerts are **once per window per rung**. The rungs are your threshold, then 95%, then 99%, so a
+bar climbing toward the cap warns again as it gets worse, while a bar sitting still stays quiet —
+at most three notifications per window, and the window re-arms when it resets.
+
+```jsonc
+"usage": {
+  "limitAlerts": {
+    "enabled": true,      // false turns the warnings off entirely
+    "thresholdPct": 90    // first warning at this %; rungs at 95 and 99 follow
+  }
+}
+```
+
+Click any row in the ledger's 🔔 **Alerts** view to expand the full detail — which window, the
+exact percentage, the threshold that tripped it, and when that window resets.
+
 **Honest limits:** usage is shown in **tokens, not dollars** (subscription cost is flat; gateway/
 local model pricing is unknown). For **gateway** sessions (Gemini/OpenAI) cumulative usage still
 appears (whatever the gateway reports; cache tokens ~0) — set a per-provider `contextLimit` (e.g.

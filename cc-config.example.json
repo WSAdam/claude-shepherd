@@ -171,6 +171,14 @@
     "sweepOnStartup": true
   },
 
+  "usage": {
+    "limitAlerts": {
+      "_comment": "Plan-limit guard (ON by default, passive — no keystrokes, no session actions, no model tokens). Raises ONE macOS notification + a usage_limit audit row when a plan window crosses thresholdPct: the session (5h) bar, the weekly bar, and every per-model weekly line. Alerts are once per window per RUNG — thresholdPct, then 95, then 99 — so a bar climbing toward the cap re-warns as it gets worse while a steady bar stays quiet, and the window re-arms when it resets. Set enabled=false to turn the warnings off.",
+      "enabled": true,
+      "thresholdPct": 90
+    }
+  },
+
   "insights": {
     "_comment": "Fleet insights view (Feature A) — the 📊 toolbar button. A read-only aggregate of the ledger (turns/session, approval & denial rates, decision provenance, time the fleet spent blocked on you). Always available like the audit view; shows zeros until the ledger is enabled. maxBlockSeconds caps a single request→approval gap when summing 'time blocked on you', so an overnight idle isn't counted.",
     "maxBlockSeconds": 1800
