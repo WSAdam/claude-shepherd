@@ -169,8 +169,15 @@ for b in bash sh date basename dirname mkdir mv rm cat printf sed awk tr cut gre
   src="$(command -v "$b" 2>/dev/null)" && [ -n "$src" ] && ln -sf "$src" "$SHIMBIN/$b"
 done
 NF="$TMP/$(printf '%s' "$(basename "$NASTY_DIR")" | tr -c 'A-Za-z0-9._-' '_').json"
+# stdin MUST be closed: cc-status.sh reads its hook payload with
+# INPUT="$(cat)", unconditionally and to EOF. The JSON below is passed as $2 and
+# is never read, so this call wants EMPTY input -- but without </dev/null it
+# inherits the caller's stdin and blocks forever on one that never closes (a
+# backgrounded `make test`/`make deploy`, which is how this suite hung for 16
+# minutes at 0% CPU). Every other cc-status.sh call in the suite pipes its JSON,
+# so this was the only exposed one.
 ( cd "$NASTY_DIR" && PATH="$SHIMBIN" CC_STATUS_DIR="$TMP" \
-    "$SHIMBIN/bash" "$CC" sessionstart '{"cwd":"'"$NASTY_DIR"'"}' >/dev/null 2>&1 )
+    "$SHIMBIN/bash" "$CC" sessionstart '{"cwd":"'"$NASTY_DIR"'"}' >/dev/null 2>&1 </dev/null )
 if command -v python3 >/dev/null 2>&1; then
   if python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$NF" >/dev/null 2>&1; then
     assert_eq "no-jq fallback with quote+backslash cwd -> valid JSON" "ok" "ok"
