@@ -2576,9 +2576,22 @@ do
 
   -- spawnframe-pin: match the editor window you already have, so a spawn isn't born
   -- full-width underneath the panel.
-  check("spawnframe-pin: the frame is captured BEFORE `open` (else we copy the new window)",
-        src:find("local wantFrame, frameWhy = FX.spawnTargetFrame(spec.editor, loadConfig())", 1, true) ~= nil
-        and src:find("Capture the target frame BEFORE `open` runs", 1, true) ~= nil)
+  -- Both decisions must precede `open`: afterwards the project HAS a window either
+  -- way (so willCreate is unanswerable) and the new one is frontmost (so we would
+  -- copy its full-width frame onto itself).
+  check("spawnframe-pin: willCreate + the frame are both decided BEFORE `open`",
+        src:find("local willCreate = not FX.hasEditorWindowFor(name, proj, spec.editor)", 1, true) ~= nil
+        and src:find("if willCreate then wantFrame, frameWhy = FX.spawnTargetFrame(spec.editor, loadConfig()) end", 1, true) ~= nil
+        and src:find("Both of these MUST be decided before `open` runs", 1, true) ~= nil)
+  -- The bug this replaced: sizing was gated on spec.coldStart, which is ONLY set for
+  -- a brand-new project. Closing a window and reopening the SAME project runs the
+  -- warm ladder and still creates a window, so it was never sized.
+  check("spawnframe-pin: a REOPEN is sized too (warm ladder creates a window)",
+        src:find("if warmMatched then FX.applySpawnFrame(wantFrame, frameWhy) end", 1, true) ~= nil
+        and src:find("A REOPEN lands here, not on the cold path", 1, true) ~= nil)
+  check("spawnframe-pin: a warm REUSE is never resized (willCreate stays false -> nil frame)",
+        src:find("function FX.hasEditorWindowFor(name, cwd, editor)", 1, true) ~= nil
+        and src:find("it must not\n-- steal focus, because it runs before `open`", 1, true) ~= nil)
   check("spawnframe-pin: an existing window's frame wins, panel-band is the fallback",
         src:find("function FX.spawnTargetFrame(editor, cfg)", 1, true) ~= nil
         and src:find('return { x = f.x, y = f.y, w = f.w, h = f.h }, "match"', 1, true) ~= nil

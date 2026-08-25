@@ -387,8 +387,9 @@ Click **New** (or **⌘⌥S**) to open the **New session** modal:
   window you already have open, instead of the full-width frame macOS `open` hands it (which
   lands underneath a right-docked Shepherd panel and has to be dragged back every time). With
   no window to copy, it takes the larger free band beside the panel; with neither, it's left
-  alone. Cold-start spawns only — a **warm** spawn reuses a window you already placed, so it's
-  never moved out from under you. Off with `spawn.matchWindowSize: false`.
+  alone. It applies whenever the spawn actually **creates** a window — including reopening a
+  project you just closed — and never when `open` **reuses** a window you already placed, so a
+  window is never moved out from under you. Off with `spawn.matchWindowSize: false`.
 - **Presets** — ▶ chips that spawn a saved folder+editor+mode+provider bundle in one click;
   "Save as preset" in the footer captures the current form (`~/.claude/cc-presets.json`,
   ✕ on a chip deletes). Picking a known folder also recalls the editor/mode/provider you

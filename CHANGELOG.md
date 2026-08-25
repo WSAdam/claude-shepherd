@@ -22,10 +22,17 @@ right-docked panel without being told which. A panel floating mid-screen leaves 
 and a band narrower than 480px is refused — the window is left alone rather than crammed, and
 the same goes for a panel that isn't on this screen at all.
 
-**Cold-start spawns only.** A warm spawn reuses a window you already placed, and moving that
-would be a surprise rather than a convenience. Sizing is best-effort and wrapped, so a window
-that refuses the frame can never break the spawn ladder's remaining beats (extension open, task
-delivery). Set `spawn.matchWindowSize: false` for stock macOS placement.
+**The gate is "will this spawn create a window", not "is it a cold start".** `open` reuses a
+window that already has the project — moving that would be a surprise — and creates one
+otherwise. Crucially that includes **reopening a project you just closed**, which is *not*
+`spec.coldStart` (that flag only marks a brand-new project) and runs the warm ladder. Gating on
+`coldStart` therefore missed the single most common case; the check is now a non-focusing twin of
+`focusProject`'s matcher, run before `open` while the answer still exists.
+
+Sizing is best-effort and wrapped, so a window that refuses the frame can never break the spawn
+ladder's remaining beats (extension open, task delivery), and it is attempted twice on the warm
+path — folded into existing beats, so the task timing is unchanged. Set
+`spawn.matchWindowSize: false` for stock macOS placement.
 
 *Implementation note:* the two helpers hang off `FX` rather than becoming top-level locals —
 the main chunk is at Lua's 200-local ceiling — and `panelVisible` is now forward-declared beside

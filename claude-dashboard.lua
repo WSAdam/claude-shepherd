@@ -2752,6 +2752,32 @@ function FX.spawnTargetFrame(editor, cfg)
   return f, f and "beside-panel" or nil
 end
 
+-- Does a window for this project ALREADY exist? The non-focusing twin of
+-- focusProject's matcher (same two passes, same core predicates) -- it must not
+-- steal focus, because it runs before `open`.
+--
+-- This is the real question behind "should we size the new window": `open` REUSES a
+-- window that already has the project, and moving one the operator already placed
+-- would be a surprise. It creates a new one otherwise -- including on a REOPEN,
+-- which is not spec.coldStart (that flag only marks a brand-new project) and is
+-- exactly the case the first cut of this feature missed.
+function FX.hasEditorWindowFor(name, cwd, editor)
+  local okApp, app = pcall(findEditorApp, editor)
+  if not okApp or not app then return false end
+  local titles = {}
+  for i, w in ipairs(app:allWindows() or {}) do titles[i] = (w:title() or "") end
+  for _, needle in ipairs(core.focusCandidates(name, cwd, os.getenv("USER"))) do
+    if core.bestWindowFor(titles, needle) then return true end
+  end
+  local needle = string.lower(name or "")
+  if needle ~= "" then
+    for _, t in ipairs(titles) do
+      if t ~= "" and string.lower(t):find(needle, 1, true) then return true end
+    end
+  end
+  return false
+end
+
 -- Put the just-spawned window on `frame`. Best-effort by design: a window that
 -- refuses the frame (or vanished mid-flight) must never break the spawn ladder,
 -- which still has the extension-open and task-delivery beats to run.
@@ -2792,14 +2818,17 @@ local function spawnEditorWindow(spec)
   local spawnDelay
   spawnDelay, injectionTailAt = core.staggerSlot(
     injectionTailAt, hs.timer.absoluteTime() / 1e9, core.spawnLadderWorst(spec))
-  -- Capture the target frame BEFORE `open` runs: once the new window exists it is
-  -- the frontmost one, and we'd end up copying its full-width frame onto itself.
-  local wantFrame, frameWhy = FX.spawnTargetFrame(spec.editor, loadConfig())
+  local proj = spec.project
+  local name = proj and proj:match("([^/]+)/?$") or nil
+  -- Both of these MUST be decided before `open` runs. Afterwards the project has a
+  -- window either way (so "will it create one" is unanswerable), and the new window
+  -- is frontmost (so we'd copy its full-width frame onto itself).
+  local willCreate = not FX.hasEditorWindowFor(name, proj, spec.editor)
+  local wantFrame, frameWhy
+  if willCreate then wantFrame, frameWhy = FX.spawnTargetFrame(spec.editor, loadConfig()) end
   local t = hs.task.new("/usr/bin/open", nil, core.vscodeOpenArgs(spec))
   if t then t:start() end
   hs.alert.show("Claude Shepherd: opening " .. spec.app .. " — starting claude (best-effort)")
-  local proj = spec.project
-  local name = proj and proj:match("([^/]+)/?$") or nil
   -- Cold-start timing: a NEW window (the new-project case) takes seconds to be
   -- input-ready. Beats run via core.runSequence (see its header for the
   -- column/pcall semantics); handles are captured into spawnSeqHandles so the
@@ -2899,8 +2928,22 @@ local function spawnEditorWindow(spec)
     local warmPrevClip
     -- R3-07: offset the first beat by spawnDelay so the whole ladder runs in its
     -- reserved injection-tail slot (queued behind any in-flight dispatch chain).
-    local beats = { { delay = 3.0 + spawnDelay, fn = function() warmMatched = focusProject(name, proj, spec.editor, true) end },
+    local beats = { { delay = 3.0 + spawnDelay, fn = function()
+        warmMatched = focusProject(name, proj, spec.editor, true)
+        -- A REOPEN lands here, not on the cold path: spec.coldStart only marks a
+        -- brand-new project, so closing a window and reopening the same project
+        -- takes the warm ladder while still creating a window. Size it, but only
+        -- when `open` actually made one (willCreate) and we matched it.
+        if warmMatched then FX.applySpawnFrame(wantFrame, frameWhy) end
+      end },
       { delay = 1.0, fn = function()
+        -- Second sizing attempt, folded into this beat rather than a new one so the
+        -- task beats below keep their timing. A reopen usually has its window by the
+        -- 3s beat (the app is already running), but a slower one lands by now.
+        if wantFrame and warmMatched ~= true then
+          warmMatched = focusProject(name, proj, spec.editor, true)
+        end
+        if warmMatched then FX.applySpawnFrame(wantFrame, frameWhy) end
         print("[cc-orch] vscode: opening the Claude Code extension (⌘Esc)")
         hs.eventtap.keyStroke({ "cmd" }, "escape")
       end } }
@@ -2916,6 +2959,7 @@ local function spawnEditorWindow(spec)
           print("[cc-orch] vscode warm: no window match -- task NOT delivered")
           return
         end
+        FX.applySpawnFrame(wantFrame, frameWhy)   -- re-assert: VS Code restores geometry late
         print("[cc-orch] vscode: pasting initial task into the Claude input")
         warmPrevClip = hs.pasteboard.readString()
         hs.pasteboard.setContents(spec.task)
