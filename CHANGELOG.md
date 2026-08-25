@@ -4,6 +4,34 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-08-21 — A spawned editor window inherits the size you already use
+
+### Added — `spawn.matchWindowSize` (on by default)
+
+macOS `open` gives a brand-new VS Code/Cursor window a **full-width** frame. With the Shepherd
+panel docked to the right, every spawn therefore landed *underneath* the panel and had to be
+dragged back by hand.
+
+A spawn now takes the frame of the editor window you already have open — which already encodes
+however you've arranged your screen. The frame is captured **before** `open` runs, because once
+the new window exists it is the frontmost one and we'd copy its full-width frame onto itself.
+
+With no window to copy (the first one of the day), it falls back to `core.frameBesidePanel`:
+the larger free band beside the panel, full height, with an 8px gap. That handles a left- or
+right-docked panel without being told which. A panel floating mid-screen leaves only slivers,
+and a band narrower than 480px is refused — the window is left alone rather than crammed, and
+the same goes for a panel that isn't on this screen at all.
+
+**Cold-start spawns only.** A warm spawn reuses a window you already placed, and moving that
+would be a surprise rather than a convenience. Sizing is best-effort and wrapped, so a window
+that refuses the frame can never break the spawn ladder's remaining beats (extension open, task
+delivery). Set `spawn.matchWindowSize: false` for stock macOS placement.
+
+*Implementation note:* the two helpers hang off `FX` rather than becoming top-level locals —
+the main chunk is at Lua's 200-local ceiling — and `panelVisible` is now forward-declared beside
+`wv`, since its assignment sits ~10k lines below this use and would otherwise compile to a nil
+global, silently disabling the fallback.
+
 ## 2026-08-21 — Hide a session without closing it
 
 ### Added — "Hide tile (keep session running)"

@@ -1,0 +1,1204 @@
+<title>Template Editor Redesign</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap">
+
+<style>
+/* ============================================================
+   TOKENS &mdash; lifted verbatim from ChargebackSentinel/assets/styles.css.
+   Light is the base; dark is redefined at token level only, three times
+   (bare :root, prefers-color-scheme, [data-theme]) so an un-stamped
+   system-theme viewer resolves correctly too.
+   ============================================================ */
+:root {
+  --tpe-50:#f2f1f4; --tpe-100:#e4e3e8; --tpe-200:#cac7d1; --tpe-300:#afabba;
+  --tpe-400:#958fa3; --tpe-500:#7a738c; --tpe-600:#625c70; --tpe-700:#494554;
+  --tpe-800:#312e38; --tpe-900:#18171c; --tpe-950:#111014;
+  --apr-100:#fde6ce; --apr-400:#f99c39; --apr-500:#f78308; --apr-600:#c66906; --apr-700:#944f05;
+
+  --bg:#fbfaf7;
+  --bg-elev:#ffffff;
+  --bg-sunken:#f4f2ed;
+  --fg:var(--tpe-900);
+  --fg-muted:var(--tpe-500);
+  --fg-subtle:var(--tpe-400);
+  /* One step past --fg-muted on the same Taupe ramp. Secondary copy set at
+     11-16px cleared only ~4.0-4.3 against --bg-sunken on the app's tokens;
+     this keeps it in-system and over 4.5. */
+  --fg-read:var(--tpe-600);
+  --border:rgba(24,23,28,0.08);
+  --border-strong:rgba(24,23,28,0.14);
+
+  --accent:oklch(0.71 0.18 145);
+  --accent-fg:#ffffff;
+  --accent-soft:oklch(0.95 0.06 145);
+  --accent-soft-fg:oklch(0.45 0.14 145);
+
+  --neg:#f40b42;
+  --neg-soft:#fee7ec;
+  --amber-fg:#9a6316;
+  --amber-soft:#fdf8ef;
+  --amber-line:#f0e3ce;
+
+  /* doc-chrome only: editorial marks, never product UI */
+  --mark:var(--apr-700);
+  --mark-fg:#ffffff;
+  --mark-soft:#fef3e6;
+  --mark-line:rgba(198,105,6,0.28);
+
+  --shadow-sm:0 1px 2px rgba(24,23,28,.04), 0 1px 3px rgba(24,23,28,.06);
+  --shadow-lg:0 12px 24px -8px rgba(24,23,28,.12), 0 8px 16px -8px rgba(24,23,28,.08);
+  --shadow-xl:0 24px 48px -12px rgba(24,23,28,.18);
+  --stage-ground:#211f28;
+
+  --radius:14px; --radius-sm:10px; --radius-lg:20px;
+  --font-display:"Instrument Serif","Times New Roman",serif;
+  --font-sans:"Inter Tight",Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  --font-mono:"JetBrains Mono","SFMono-Regular",ui-monospace,monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:#0c0b10; --bg-elev:#18171c; --bg-sunken:#08070b;
+    --fg:#f6f4f0; --fg-muted:#afabba; --fg-subtle:#7a738c; --fg-read:var(--tpe-200);
+    --border:rgba(255,255,255,0.08); --border-strong:rgba(255,255,255,0.16);
+    --accent-soft:oklch(0.30 0.10 145 / 0.4); --accent-soft-fg:oklch(0.82 0.14 145);
+    --neg:#f86d8d; --neg-soft:rgba(244,11,66,0.14);
+    --amber-fg:#e0a95c; --amber-soft:rgba(224,169,92,0.10); --amber-line:rgba(224,169,92,0.22);
+    --mark:var(--apr-400); --mark-fg:#231201;
+    --mark-soft:rgba(249,156,57,0.12); --mark-line:rgba(249,156,57,0.30);
+    --shadow-sm:0 1px 2px rgba(0,0,0,.4);
+    --shadow-lg:0 12px 24px -8px rgba(0,0,0,.5);
+    --shadow-xl:0 24px 48px -12px rgba(0,0,0,.6);
+    --stage-ground:#050409;
+  }
+}
+:root[data-theme="dark"] {
+  --bg:#0c0b10; --bg-elev:#18171c; --bg-sunken:#08070b;
+  --fg:#f6f4f0; --fg-muted:#afabba; --fg-subtle:#7a738c; --fg-read:var(--tpe-200);
+  --border:rgba(255,255,255,0.08); --border-strong:rgba(255,255,255,0.16);
+  --accent-soft:oklch(0.30 0.10 145 / 0.4); --accent-soft-fg:oklch(0.82 0.14 145);
+  --neg:#f86d8d; --neg-soft:rgba(244,11,66,0.14);
+  --amber-fg:#e0a95c; --amber-soft:rgba(224,169,92,0.10); --amber-line:rgba(224,169,92,0.22);
+  --mark:var(--apr-400); --mark-fg:#231201;
+  --mark-soft:rgba(249,156,57,0.12); --mark-line:rgba(249,156,57,0.30);
+  --shadow-sm:0 1px 2px rgba(0,0,0,.4);
+  --shadow-lg:0 12px 24px -8px rgba(0,0,0,.5);
+  --shadow-xl:0 24px 48px -12px rgba(0,0,0,.6);
+  --stage-ground:#050409;
+}
+
+/* ============================================================ DOC CHROME */
+* { box-sizing:border-box; }
+body {
+  margin:0;
+  background:var(--bg);
+  color:var(--fg);
+  font-family:var(--font-sans);
+  font-size:16px;
+  line-height:1.6;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap { max-width:1080px; margin:0 auto; padding:0 32px; }
+
+.eyebrow {
+  font-family:var(--font-mono);
+  font-size:11px;
+  font-weight:500;
+  letter-spacing:0.13em;
+  text-transform:uppercase;
+  color:var(--fg-read);
+}
+
+/* --- masthead --- */
+.masthead { padding:76px 0 44px; border-bottom:1px solid var(--border); }
+.masthead h1 {
+  font-family:var(--font-display);
+  font-weight:400;
+  font-size:clamp(44px,6vw,68px);
+  line-height:1.02;
+  letter-spacing:-0.02em;
+  margin:16px 0 0;
+  text-wrap:balance;
+}
+.thesis {
+  max-width:60ch; margin:20px 0 0;
+  font-size:17.5px; color:var(--fg-read);
+}
+.thesis strong { color:var(--fg); font-weight:600; }
+.facts {
+  display:flex; flex-wrap:wrap; gap:0;
+  margin-top:36px; border-top:1px solid var(--border);
+}
+.fact {
+  flex:1 1 190px; padding:16px 20px 16px 0;
+  border-right:1px solid var(--border);
+}
+.fact:last-child { border-right:0; }
+.fact dt {
+  font-family:var(--font-mono); font-size:10.5px; letter-spacing:0.12em;
+  text-transform:uppercase; color:var(--fg-read); margin:0 0 5px;
+}
+.fact dd { margin:0; font-size:14.5px; font-weight:500; }
+
+/* --- generic section --- */
+section { padding:64px 0 0; }
+h2 {
+  font-family:var(--font-display); font-weight:400;
+  font-size:34px; letter-spacing:-0.015em; margin:12px 0 0;
+}
+.lede { max-width:62ch; color:var(--fg-read); margin:12px 0 0; font-size:16px; }
+
+/* --- diagnosis grid --- */
+.diagnosis {
+  margin-top:32px; display:grid; gap:1px;
+  background:var(--border);
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  overflow:hidden;
+  grid-template-columns:repeat(auto-fit,minmax(255px,1fr));
+}
+.dx { background:var(--bg-elev); padding:22px 22px 24px; }
+.dx h3 {
+  margin:10px 0 7px; font-size:15.5px; font-weight:600; letter-spacing:-0.01em;
+}
+.dx p { margin:0; font-size:14px; color:var(--fg-read); line-height:1.55; }
+.dx code {
+  font-family:var(--font-mono); font-size:12.5px;
+  background:var(--bg-sunken); padding:1px 5px; border-radius:5px; color:var(--fg);
+}
+.dx-tag {
+  display:inline-block; font-family:var(--font-mono); font-size:10px;
+  letter-spacing:0.1em; text-transform:uppercase;
+  color:var(--mark); border:1px solid var(--mark-line);
+  background:var(--mark-soft); border-radius:999px; padding:2px 8px;
+}
+
+/* ============================================================ STAGE */
+.stage-outer { margin-top:44px; }
+.toolbar {
+  display:flex; flex-wrap:wrap; gap:10px; align-items:center;
+  padding:12px 14px; border:1px solid var(--border);
+  border-radius:var(--radius) var(--radius) 0 0;
+  background:var(--bg-elev); border-bottom:0;
+}
+.tb-label {
+  font-family:var(--font-mono); font-size:10px; letter-spacing:0.12em;
+  text-transform:uppercase; color:var(--fg-subtle); margin-right:2px;
+}
+.seg { display:inline-flex; background:var(--bg-sunken); border-radius:9px; padding:3px; gap:2px; }
+.seg button {
+  font-family:var(--font-sans); font-size:12.5px; font-weight:500;
+  border:0; background:transparent; color:var(--fg-muted);
+  padding:5px 11px; border-radius:7px; cursor:pointer; transition:all .15s ease;
+}
+.seg button:hover { color:var(--fg); }
+.seg button[aria-pressed="true"] {
+  background:var(--bg-elev); color:var(--fg); box-shadow:var(--shadow-sm);
+}
+.toolbar .spacer { flex:1 1 auto; }
+.tb-note { font-size:12.5px; color:var(--fg-subtle); }
+:where(.toolbar) button:focus-visible,
+.stage button:focus-visible, .stage input:focus-visible, .stage [tabindex]:focus-visible,
+.pin:focus-visible {
+  outline:2px solid var(--mark); outline-offset:2px;
+}
+
+.stage {
+  position:relative;
+  background:var(--stage-ground);
+  border:1px solid var(--border);
+  border-radius:0 0 var(--radius) var(--radius);
+  padding:56px 60px 60px;
+  overflow-x:auto;
+  background-image:radial-gradient(circle at 50% 0%, rgba(255,255,255,.05), transparent 62%);
+}
+
+/* ============================================================ THE MODAL */
+.modal {
+  position:relative;
+  width:100%; max-width:880px; margin:0 auto;
+  background:var(--bg-elev);
+  border:1px solid var(--border);
+  border-radius:var(--radius-lg);
+  box-shadow:var(--shadow-xl);
+  display:flex; flex-direction:column;
+  overflow:visible;
+  font-size:14px;
+}
+/* Every band is a positioning context for its annotation pin. */
+.band { position:relative; }
+
+.pin {
+  position:absolute; left:-17px; top:14px;
+  width:24px; height:24px; border-radius:50%;
+  background:var(--mark); color:var(--mark-fg);
+  font-family:var(--font-mono); font-size:11px; font-weight:700;
+  display:grid; place-items:center; cursor:pointer;
+  border:2px solid var(--bg-elev);
+  box-shadow:0 2px 8px rgba(0,0,0,.28);
+  z-index:6; padding:0; transition:transform .15s ease;
+}
+.pin:hover, .pin.is-live { transform:scale(1.18); }
+/* Pin 4 marks the validation slot; that band is empty outside the warning
+   state, so its pin would land on top of pin 5. Both rules only ever
+   HIDE, so their order does not matter. */
+#stage-section:not([data-state="warning"]) .pin[data-pin="4"] { display:none; }
+#stage-section[data-annotations="off"] .pin { display:none; }
+
+/* --- header band --- */
+.m-head {
+  padding:24px 26px 18px;
+  display:flex; align-items:flex-start; gap:16px;
+}
+.m-head .titles { flex:1 1 auto; min-width:0; }
+.m-eyebrow {
+  font-family:var(--font-mono); font-size:10px; font-weight:500;
+  letter-spacing:0.14em; text-transform:uppercase; color:var(--fg-read);
+  display:flex; align-items:center; gap:8px;
+}
+.m-title {
+  font-family:var(--font-display); font-weight:400;
+  font-size:30px; line-height:1.1; letter-spacing:-0.018em;
+  margin:5px 0 0;
+}
+.icon-btn {
+  flex:0 0 auto;
+  width:32px; height:32px; border-radius:9px;
+  border:1px solid transparent; background:transparent;
+  color:var(--fg-muted); cursor:pointer;
+  display:grid; place-items:center; transition:all .15s ease;
+}
+.icon-btn:hover { background:var(--bg-sunken); color:var(--fg); }
+
+/* --- scope banner --- */
+.scope {
+  margin:0 26px 20px;
+  display:flex; gap:11px; align-items:flex-start;
+  background:var(--amber-soft);
+  border:1px solid var(--amber-line);
+  border-radius:var(--radius-sm);
+  padding:11px 14px;
+}
+.scope svg { flex:0 0 auto; margin-top:1px; color:var(--amber-fg); }
+.scope p { margin:0; font-size:13px; line-height:1.5; color:var(--fg); }
+.scope b { font-weight:600; color:var(--amber-fg); }
+.scope .aside { color:var(--fg-muted); }
+
+/* --- editor band --- */
+.ed-label {
+  display:flex; align-items:baseline; gap:10px;
+  padding:0 26px 8px;
+}
+.ed-label h4 {
+  margin:0; font-size:12.5px; font-weight:600; letter-spacing:-0.005em;
+}
+.ed-label .hint {
+  font-family:var(--font-mono); font-size:11px; color:var(--fg-subtle);
+  margin-left:auto;
+}
+.editor {
+  position:relative;
+  margin:0 26px;
+  border:1px solid var(--border-strong);
+  border-radius:var(--radius-sm);
+  background:var(--bg-sunken);
+  transition:border-color .15s ease, box-shadow .15s ease;
+}
+.editor:focus-within { border-color:var(--accent); box-shadow:0 0 0 4px var(--accent-soft); }
+[data-state="warning"] .editor { border-color:var(--amber-line); }
+.editor-src {
+  margin:0; padding:16px 18px;
+  height:252px; overflow:auto;
+  font-family:var(--font-mono); font-size:12.5px; line-height:1.72;
+  color:var(--fg); white-space:pre-wrap; word-break:break-word;
+  tab-size:2;
+}
+.editor-src:focus { outline:none; }
+.editor-src .h { color:var(--fg-muted); font-weight:500; }
+.editor-src .tok {
+  color:var(--accent-soft-fg); background:var(--accent-soft);
+  border-radius:4px; padding:1px 2px; font-weight:500;
+}
+.editor-src .tok.bad {
+  color:var(--amber-fg); background:var(--amber-soft);
+  box-shadow:inset 0 -1.5px 0 var(--amber-fg);
+}
+.editor-src .tok.fn { color:var(--fg); background:var(--bg-elev); border:1px solid var(--border-strong); }
+.caret {
+  display:inline-block; width:1.5px; height:1.05em; vertical-align:-0.18em;
+  background:var(--accent); margin-left:-1px;
+  animation:blink 1.15s steps(1) infinite;
+}
+@keyframes blink { 0%,49%{opacity:1} 50%,100%{opacity:0} }
+
+/* --- meter --- */
+.meter {
+  display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+  padding:9px 14px; border-top:1px solid var(--border);
+  font-family:var(--font-mono); font-size:11px; color:var(--fg-read);
+}
+.meter .bar {
+  flex:0 0 88px; height:3px; border-radius:2px;
+  background:var(--border-strong); overflow:hidden;
+}
+.meter .bar i { display:block; height:100%; width:18%; background:var(--fg-subtle); border-radius:2px; }
+.meter .grow { flex:1 1 auto; }
+.dirty {
+  display:none; align-items:center; gap:6px;
+  color:var(--amber-fg); font-weight:500;
+}
+.dirty::before {
+  content:""; width:6px; height:6px; border-radius:50%;
+  background:var(--amber-fg); box-shadow:0 0 0 3px var(--amber-soft);
+}
+[data-state="unsaved"] .dirty, [data-state="warning"] .dirty, [data-state="typing"] .dirty { display:inline-flex; }
+
+/* --- validation slot --- */
+.alert {
+  display:none; gap:10px; align-items:flex-start;
+  margin:12px 26px 0; padding:10px 13px;
+  border-radius:var(--radius-sm); font-size:12.5px; line-height:1.5;
+  background:var(--amber-soft); border:1px solid var(--amber-line);
+}
+.alert svg { flex:0 0 auto; margin-top:2px; color:var(--amber-fg); }
+.alert b { color:var(--amber-fg); }
+.alert code { font-family:var(--font-mono); font-size:11.5px; }
+[data-state="warning"] .alert { display:flex; }
+
+/* --- variable rail --- */
+.rail {
+  margin-top:20px;
+  border-top:1px solid var(--border);
+  background:var(--bg-sunken);
+}
+.rail-head {
+  display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+  padding:14px 26px 10px;
+}
+.rail-head h4 { margin:0; font-size:12.5px; font-weight:600; }
+.rail-head .hint { font-size:12px; color:var(--fg-read); }
+.rail-head .hint code {
+  font-family:var(--font-mono); background:var(--bg-elev);
+  border:1px solid var(--border); border-radius:4px; padding:1px 4px; font-size:11px;
+}
+.search {
+  margin-left:auto; position:relative; flex:0 0 190px;
+}
+.search svg { position:absolute; left:9px; top:50%; transform:translateY(-50%); color:var(--fg-subtle); }
+.search input {
+  width:100%; font-family:var(--font-sans); font-size:12.5px; color:var(--fg);
+  padding:6px 10px 6px 28px; border-radius:8px;
+  border:1px solid var(--border-strong); background:var(--bg-elev);
+  transition:all .15s ease;
+}
+.search input::placeholder { color:var(--fg-muted); }
+.search input:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft); }
+
+.groups {
+  display:flex; gap:4px; overflow-x:auto;
+  padding:0 26px 10px; scrollbar-width:none;
+}
+.groups::-webkit-scrollbar { display:none; }
+.gtab {
+  flex:0 0 auto;
+  font-family:var(--font-sans); font-size:12px; font-weight:500;
+  border:1px solid var(--border); background:var(--bg-elev); color:var(--fg-muted);
+  border-radius:999px; padding:4px 11px; cursor:pointer;
+  display:inline-flex; align-items:center; gap:6px; transition:all .15s ease;
+}
+.gtab:hover { color:var(--fg); border-color:var(--border-strong); }
+.gtab span {
+  font-family:var(--font-mono); font-size:10px; color:var(--fg-subtle);
+}
+.gtab[aria-pressed="true"] {
+  background:var(--fg); border-color:var(--fg); color:var(--bg-elev);
+}
+.gtab[aria-pressed="true"] span { color:var(--bg-elev); opacity:.6; }
+
+.chips {
+  display:flex; flex-wrap:wrap; gap:5px;
+  padding:0 26px 16px;
+  max-height:112px; overflow-y:auto;
+  align-content:flex-start;
+}
+.chip {
+  display:inline-flex; align-items:center; gap:6px;
+  font-family:var(--font-mono); font-size:11.5px; font-weight:400;
+  color:var(--fg); background:var(--bg-elev);
+  border:1px solid var(--border-strong); border-radius:7px;
+  padding:4px 8px 4px 5px; cursor:grab; transition:all .13s ease;
+  position:relative;
+}
+.chip:hover { border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft); }
+.chip::before {
+  content:""; flex:0 0 auto; width:3px; height:11px; border-radius:2px;
+  background:
+    radial-gradient(circle,var(--fg-subtle) 45%,transparent 46%) 0 0/3px 4px repeat-y;
+  opacity:.55;
+}
+.chip.used { border-color:var(--accent); background:var(--accent-soft); color:var(--accent-soft-fg); }
+.chip.used::after {
+  content:""; width:4px; height:4px; border-radius:50%; background:var(--accent);
+}
+.chip.ai { border-style:dashed; }
+.chip .tip {
+  position:absolute; bottom:calc(100% + 7px); left:0;
+  font-family:var(--font-sans); font-size:11.5px; line-height:1.4;
+  background:var(--tpe-900); color:#f6f4f0;
+  padding:6px 9px; border-radius:7px; width:max-content; max-width:230px;
+  opacity:0; pointer-events:none; transition:opacity .13s ease;
+  box-shadow:var(--shadow-lg); z-index:8;
+}
+.chip:hover .tip { opacity:1; }
+
+/* --- autocomplete popup --- */
+.ac {
+  display:none;
+  position:absolute; left:18px; top:118px; z-index:7;
+  width:330px; padding:5px;
+  background:var(--bg-elev); border:1px solid var(--border-strong);
+  border-radius:var(--radius-sm); box-shadow:var(--shadow-xl);
+}
+[data-state="typing"] .ac { display:block; }
+.ac-hd {
+  font-family:var(--font-mono); font-size:9.5px; letter-spacing:.12em;
+  text-transform:uppercase; color:var(--fg-read); padding:5px 8px 6px;
+}
+.ac-row {
+  display:flex; align-items:baseline; gap:9px;
+  padding:6px 8px; border-radius:7px; font-size:12px;
+}
+.ac-row code { font-family:var(--font-mono); font-size:11.5px; color:var(--fg); }
+.ac-row em { font-style:normal; color:var(--fg-read); font-size:11.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.ac-row.on { background:var(--accent-soft); }
+.ac-row.on code, .ac-row.on em { color:var(--accent-soft-fg); }
+.ac-ft {
+  border-top:1px solid var(--border); margin-top:4px; padding:7px 8px 3px;
+  font-family:var(--font-mono); font-size:10px; color:var(--fg-read);
+  display:flex; gap:12px; flex-wrap:wrap;
+}
+.ac-ft kbd {
+  font-family:var(--font-mono); background:var(--bg-sunken);
+  border:1px solid var(--border); border-bottom-width:2px;
+  border-radius:4px; padding:0 4px; color:var(--fg-muted);
+}
+
+/* --- footer --- */
+.m-foot {
+  display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+  padding:14px 26px; border-top:1px solid var(--border);
+  background:var(--bg-elev);
+  border-radius:0 0 var(--radius-lg) var(--radius-lg);
+}
+.m-foot .spacer { flex:1 1 auto; }
+.btn {
+  display:inline-flex; align-items:center; gap:7px;
+  font-family:var(--font-sans); font-size:13px; font-weight:500;
+  padding:8px 14px; border-radius:9px;
+  border:1px solid var(--border-strong); background:var(--bg-elev); color:var(--fg);
+  cursor:pointer; transition:all .15s ease; letter-spacing:-0.005em;
+}
+.btn:hover { background:var(--bg-sunken); }
+.btn-quiet {
+  border-color:transparent; background:transparent; color:var(--fg-read);
+  padding:8px 10px; font-size:12.5px;
+}
+.btn-quiet:hover { background:var(--bg-sunken); color:var(--fg); }
+.btn-accent {
+  background:var(--accent); color:var(--accent-fg); border-color:var(--accent);
+  box-shadow:0 1px 0 rgba(255,255,255,.2) inset, 0 6px 14px -6px var(--accent);
+}
+.btn-accent:hover { filter:brightness(1.05); }
+.btn-accent[aria-disabled="true"] {
+  background:var(--bg-sunken); color:var(--fg-read);
+  border-color:var(--border-strong); box-shadow:none; cursor:default;
+}
+/* Exactly one primary is in the layout at a time; .btn's inline-flex is
+   overridden here by source order, and the [data-state] rules outrank both. */
+.save-idle, .save-live { display:none; }
+[data-state="clean"] .save-idle { display:inline-flex; }
+[data-state="unsaved"] .save-live,
+[data-state="warning"] .save-live,
+[data-state="typing"] .save-live { display:inline-flex; }
+
+/* ============================================================ LEGEND */
+.legend { margin-top:36px; display:grid; gap:1px; background:var(--border);
+  border:1px solid var(--border); border-radius:var(--radius); overflow:hidden; }
+.note {
+  background:var(--bg-elev); padding:18px 22px;
+  display:grid; grid-template-columns:26px 1fr; gap:16px; align-items:start;
+  transition:background .2s ease;
+}
+.note.is-live { background:var(--mark-soft); }
+.note .n {
+  width:24px; height:24px; border-radius:50%;
+  background:var(--mark); color:var(--mark-fg);
+  font-family:var(--font-mono); font-size:11px; font-weight:700;
+  display:grid; place-items:center; margin-top:1px;
+}
+.note h3 { margin:0 0 5px; font-size:15px; font-weight:600; letter-spacing:-0.01em; }
+.note p { margin:0; font-size:14px; color:var(--fg-read); line-height:1.6; max-width:72ch; }
+.note p + p { margin-top:7px; }
+.note code {
+  font-family:var(--font-mono); font-size:12.5px;
+  background:var(--bg-sunken); padding:1px 5px; border-radius:5px; color:var(--fg);
+}
+.note .was {
+  display:inline-block; font-family:var(--font-mono); font-size:11px;
+  color:var(--fg-subtle); border-left:2px solid var(--border-strong);
+  padding-left:8px; margin-top:8px;
+}
+
+/* ============================================================ TABLES */
+.tbl-scroll { overflow-x:auto; margin-top:28px; border:1px solid var(--border); border-radius:var(--radius); }
+table { border-collapse:collapse; width:100%; font-size:13.5px; min-width:640px; }
+thead th {
+  text-align:left; font-family:var(--font-mono); font-size:10px;
+  letter-spacing:.12em; text-transform:uppercase; color:var(--fg-read);
+  padding:11px 18px; border-bottom:1px solid var(--border); font-weight:500;
+  background:var(--bg-sunken);
+}
+tbody td { padding:12px 18px; border-bottom:1px solid var(--border); vertical-align:top; color:var(--fg-read); }
+tbody tr:last-child td { border-bottom:0; }
+tbody td:first-child { color:var(--fg); font-weight:500; }
+tbody code { font-family:var(--font-mono); font-size:12px; color:var(--fg); }
+.pill {
+  display:inline-block; font-family:var(--font-mono); font-size:10px;
+  letter-spacing:.08em; text-transform:uppercase; padding:2px 7px; border-radius:999px;
+  border:1px solid var(--border-strong); color:var(--fg-muted); white-space:nowrap;
+}
+.pill.reuse { color:var(--accent-soft-fg); background:var(--accent-soft); border-color:transparent; }
+.pill.new { color:var(--mark); background:var(--mark-soft); border-color:var(--mark-line); }
+
+.closing {
+  margin:64px 0 90px; padding-top:28px; border-top:1px solid var(--border);
+  font-size:14px; color:var(--fg-read); max-width:70ch;
+}
+.closing code { font-family:var(--font-mono); font-size:12.5px; color:var(--fg-muted); }
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration:.001ms !important; transition-duration:.001ms !important; }
+}
+@media (max-width:860px) {
+  .wrap { padding:0 20px; }
+  .stage { padding:44px 22px 44px; }
+  .pin { left:6px; top:-11px; }
+  .m-head, .ed-label, .rail-head, .groups, .chips, .m-foot { padding-left:18px; padding-right:18px; }
+  .scope, .editor, .alert { margin-left:18px; margin-right:18px; }
+  .ac { left:10px; width:auto; right:10px; }
+  .search { margin-left:0; flex:1 1 100%; }
+}
+</style>
+
+<div class="wrap">
+
+  <!-- ============================ MASTHEAD ============================ -->
+  <header class="masthead">
+    <div class="eyebrow">Chargeback Portal &nbsp;&middot;&nbsp; Design proposal &nbsp;&middot;&nbsp; Form only</div>
+    <h1>Template&nbsp;Editor Redesign</h1>
+    <p class="thesis">
+      The response-template editor already does the right things &mdash; <strong>{{ autocomplete, drag-in
+      chips, reset paths, save-time validation</strong> &mdash; and hides almost all of them. This is a
+      rebuild of the <strong>form</strong> only: same modal, same behaviors, same code paths,
+      restructured so an operator can see what they're about to change and find the variable
+      they need without reading a wall.
+    </p>
+    <dl class="facts">
+      <div class="fact"><dt>Container</dt><dd>Centered modal, retained</dd></div>
+      <div class="fact"><dt>Direction</dt><dd>Modernized inside the palette</dd></div>
+      <div class="fact"><dt>System</dt><dd>Existing tokens, zero new hues</dd></div>
+      <div class="fact"><dt>Stack</dt><dd>Fresh 2 &middot; Preact &middot; plain CSS</dd></div>
+    </dl>
+  </header>
+
+  <!-- ============================ DIAGNOSIS ============================ -->
+  <section>
+    <div class="eyebrow">01 &mdash; The read</div>
+    <h2>What the current screen costs</h2>
+    <p class="lede">
+      Five problems, all of them layout and hierarchy. None of them require touching
+      <code>intellisense.ts</code>, <code>model.ts</code>, or any save path.
+    </p>
+
+    <div class="diagnosis">
+      <div class="dx">
+        <span class="dx-tag">Wall</span>
+        <h3>27 undifferentiated chips</h3>
+        <p>The palette dumps every variable and the <code>llm()</code> snippet into one
+        flat run of ghost buttons. Nothing groups them, nothing filters them, and the
+        <code>btn-ghost</code> styling gives them no edge &mdash; they read as prose, not as
+        draggable objects.</p>
+      </div>
+      <div class="dx">
+        <span class="dx-tag">Buried</span>
+        <h3>Blast radius as body copy</h3>
+        <p>&ldquo;This edits the CATEGORY template &mdash; every dispute it wins re-renders it&rdquo; is the
+        single most consequential fact on the screen, and it's set as a muted grey
+        paragraph the eye skips on the way to the textarea.</p>
+      </div>
+      <div class="dx">
+        <span class="dx-tag">Typo</span>
+        <h3>A missing space, shipping</h3>
+        <p>The paragraph renders as <code>&hellip;including this.{{variable}} interpolates&hellip;</code> &mdash;
+        two sentences fused. It's a symptom: that paragraph is carrying scope warning,
+        syntax tutorial, and a cross-reference at once.</p>
+      </div>
+      <div class="dx">
+        <span class="dx-tag">Flat</span>
+        <h3>No state, anywhere</h3>
+        <p>Nothing shows whether there are unsaved edits, how close the template is to the
+        8,000-character ceiling, or which variables are already in use. <em>Save template</em>
+        silently disables itself with no explanation.</p>
+      </div>
+      <div class="dx">
+        <span class="dx-tag">Weight</span>
+        <h3>Four buttons, one voice</h3>
+        <p><em>Reset to template</em> rewrites this dispute's draft. <em>Use default template</em>
+        discards the authored text. <em>Close</em> does nothing. All three carry identical
+        weight, and the two that destroy work sit closest to the primary.</p>
+      </div>
+      <div class="dx">
+        <span class="dx-tag">Raw</span>
+        <h3>An unstyled text well</h3>
+        <p>The textarea is a bare monospace box. <code>{{tokens}}</code> &mdash; the whole point of
+        the format &mdash; get no visual separation from the prose they sit inside, so proofreading
+        a letter means hunting for braces.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================ THE STAGE ============================ -->
+  <section id="stage-section" data-annotations="on" data-state="clean">
+    <div class="eyebrow">02 &mdash; The proposal</div>
+    <h2>The rebuilt modal</h2>
+    <p class="lede">
+      Interactive: switch themes, toggle the annotation pins, and step through the four states
+      the modal actually has. The variable tabs and the search field are live.
+    </p>
+
+    <div class="stage-outer">
+      <div class="toolbar">
+        <span class="tb-label">Theme</span>
+        <div class="seg" id="seg-theme">
+          <button type="button" data-theme-set="light" aria-pressed="true">Light</button>
+          <button type="button" data-theme-set="dark" aria-pressed="false">Dark</button>
+        </div>
+        <span class="tb-label" style="margin-left:8px">State</span>
+        <div class="seg" id="seg-state">
+          <button type="button" data-state-set="clean" aria-pressed="true">Clean</button>
+          <button type="button" data-state-set="unsaved" aria-pressed="false">Unsaved</button>
+          <button type="button" data-state-set="warning" aria-pressed="false">Warning</button>
+          <button type="button" data-state-set="typing" aria-pressed="false">Typing {{</button>
+        </div>
+        <span class="spacer"></span>
+        <div class="seg" id="seg-anno">
+          <button type="button" data-anno-set="on" aria-pressed="true">Annotations</button>
+          <button type="button" data-anno-set="off" aria-pressed="false">Clean view</button>
+        </div>
+      </div>
+
+      <div class="stage">
+        <div class="modal" role="group" aria-label="Template editor mockup">
+
+          <!-- 1 &middot; header -->
+          <div class="band">
+            <button class="pin" type="button" data-pin="1" aria-label="Annotation 1">1</button>
+            <div class="m-head">
+              <div class="titles">
+                <div class="m-eyebrow">Category template</div>
+                <h3 class="m-title">Default</h3>
+              </div>
+              <button class="icon-btn" type="button" aria-label="Close">
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2 2l10 10M12 2L2 12"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <!-- 2 &middot; scope -->
+          <div class="band">
+            <button class="pin" type="button" data-pin="2" style="top:-3px" aria-label="Annotation 2">2</button>
+            <div class="scope">
+              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M8 1.6l6.2 11.2H1.8L8 1.6z"/><path d="M8 6.4v3.1"/><path d="M8 11.3h.01"/></svg>
+              <p>
+                Saving re-renders <b>12 open disputes</b> in this category.
+                <span class="aside">Letters an operator has already edited by hand keep their own text.</span>
+              </p>
+            </div>
+          </div>
+
+          <!-- 3 &middot; editor -->
+          <div class="band">
+            <button class="pin" type="button" data-pin="3" style="top:24px" aria-label="Annotation 3">3</button>
+            <div class="ed-label">
+              <h4>Letter template</h4>
+              <span class="hint">Markdown &nbsp;&middot;&nbsp; {{variables}}</span>
+            </div>
+            <div class="editor">
+              <div class="ac" role="listbox" aria-label="Variable completions">
+                <div class="ac-hd">Matching &ldquo;ref&rdquo;</div>
+                <div class="ac-row on"><code>{{refundStatement}}</code><em>Honest refund sentence (empty when none)</em></div>
+                <div class="ac-row"><code>{{refundKind}}</code><em>none / partial / full / unknown</em></div>
+                <div class="ac-row"><code>{{refundedDate}}</code><em>Matched payment refund date (ET)</em></div>
+                <div class="ac-row"><code>{{refundedAmountFormatted}}</code><em>Known refunded total</em></div>
+                <div class="ac-row"><code>{{referenceNumber}}</code><em>Reference number</em></div>
+                <div class="ac-ft">
+                  <span><kbd>&uarr;</kbd><kbd>&darr;</kbd> move</span>
+                  <span><kbd>&crarr;</kbd> insert</span>
+                  <span><kbd>esc</kbd> dismiss</span>
+                </div>
+              </div>
+              <div class="editor-src" tabindex="0" role="textbox" aria-readonly="true" aria-label="Template source"><span class="h">## Cover Letter</span>
+
+To the Dispute Resolution Team:
+
+We are writing in response to chargeback case <span class="tok">{{caseNumber}}</span> regarding a charge of <span class="tok">{{amountFormatted}}</span> on a <span class="tok">{{cardBrand}}</span> card ending in <span class="tok">{{last4}}</span>, received <span class="tok">{{disputeDate}}</span> under reason code <span class="tok">{{reasonCode}}</span>.
+
+Monster Reservations Group (MRG) sells prepaid vacation packages and reservations by phone. Charges settle at booking time, before travel; a booked package has value whether or not the guest ultimately travels.
+
+<span class="h">## Timeline of Events</span>
+
+- <span class="tok">{{settledDate}}</span>: The guest booked and paid in full via <span class="tok">{{cardBrand}}</span> card ending <span class="tok">{{last4}}</span>.
+- <span class="tok">{{disputeDate}}</span>: Chargeback filed by the issuing bank (reason <span class="tok">{{reasonCode}}</span> &mdash; <span class="tok">{{reasonLabel}}</span>).
+- <span class="tok">{{todayDate}}</span>: This response submitted.
+
+<span class="h">## What Was Purchased</span>
+
+<span class="tok">{{chargeDetail}}</span>
+
+<span class="h">## Guest Contact History</span>
+
+<span class="tok">{{contactSummary}}</span>
+<span class="tok fn">{{ llm("summarize the guest contact history", guestNotes) }}</span>
+
+<span class="h">## Refund Position</span>
+
+<span class="tok bad">{{refundNarrative}}</span><span class="caret"></span></div>
+              <div class="meter">
+                <span>1,412 / 8,000</span>
+                <span class="bar"><i></i></span>
+                <span>13 variables &middot; 1 function</span>
+                <span class="grow"></span>
+                <span class="dirty">Unsaved changes</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 4 &middot; validation -->
+          <div class="band">
+            <button class="pin" type="button" data-pin="4" style="top:-3px" aria-label="Annotation 4">4</button>
+            <div class="alert">
+              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="8" cy="8" r="6.4"/><path d="M8 4.9v3.6"/><path d="M8 11.1h.01"/></svg>
+              <div>
+                <b>Unknown variable.</b>
+                <code>{{refundNarrative}}</code> isn't in the vocabulary &mdash; it will render as blank.
+                Closest match: <code>{{refundStatement}}</code>. You can still save.
+              </div>
+            </div>
+          </div>
+
+          <!-- 5 &middot; variable rail -->
+          <div class="band">
+            <button class="pin" type="button" data-pin="5" style="top:18px" aria-label="Annotation 5">5</button>
+            <div class="rail">
+              <div class="rail-head">
+                <h4>Variables</h4>
+                <span class="hint">Type <code>{{</code> in the letter, or drag a chip in</span>
+                <div class="search">
+                  <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="6" cy="6" r="4.4"/><path d="M9.4 9.4L12.5 12.5"/></svg>
+                  <input type="search" id="var-search" placeholder="Filter 27 variables" aria-label="Filter variables">
+                </div>
+              </div>
+              <div class="groups" id="var-groups" role="group" aria-label="Variable groups"></div>
+              <div class="chips" id="var-chips"></div>
+            </div>
+          </div>
+
+          <!-- 6 &middot; footer -->
+          <div class="band">
+            <button class="pin" type="button" data-pin="6" style="top:14px" aria-label="Annotation 6">6</button>
+            <div class="m-foot">
+              <button class="btn btn-quiet" type="button">Reset this dispute's draft</button>
+              <button class="btn btn-quiet" type="button">Restore original template</button>
+              <span class="spacer"></span>
+              <button class="btn" type="button">Close</button>
+              <button class="btn btn-accent save-idle" type="button" aria-disabled="true">No changes to save</button>
+              <button class="btn btn-accent save-live" type="button">Save template</button>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+    <!-- ============================ LEGEND ============================ -->
+    <div class="legend" id="legend">
+      <div class="note" data-note="1">
+        <div class="n">1</div>
+        <div>
+          <h3>The title says what kind of thing this is</h3>
+          <p>A mono eyebrow carries the type &mdash; <code>CATEGORY TEMPLATE</code> &mdash; and the serif
+          display face carries only the name. The operator learns the scope from the label
+          instead of from a sentence.</p>
+          <p class="was">was: &ldquo;Edit template: Default&rdquo;</p>
+        </div>
+      </div>
+      <div class="note" data-note="2">
+        <div class="n">2</div>
+        <div>
+          <h3>Blast radius becomes a caution band, not a paragraph</h3>
+          <p>The consequence gets the amber treatment the design system already reserves for
+          &ldquo;this changes what the thing below it means&rdquo; &mdash; the same tokens the partial-chargeback
+          scope note uses. One sentence, a bolded count, and the exception stated plainly.</p>
+          <p>The syntax tutorial and the <code>/categories</code> cross-reference move out of
+          here entirely: <code>{{</code> is explained on the variable rail, where it's used.
+          That also retires the fused-sentence typo.</p>
+          <p class="was">was: a five-line muted paragraph ending &ldquo;&hellip;including this.{{variable}} interpolates dispute fields (full list on /categories).&rdquo;</p>
+        </div>
+      </div>
+      <div class="note" data-note="3">
+        <div class="n">3</div>
+        <div>
+          <h3>The letter gets an editor frame and token highlighting</h3>
+          <p>Variables render as accent-tinted pills, function calls get an outlined treatment,
+          and Markdown headings drop to muted &mdash; so scanning for what's interpolated takes a
+          glance instead of a brace-hunt. A single unknown token picks up the amber underline
+          on the spot.</p>
+          <p>Below it, a hairline meter carries the three numbers that were invisible: character
+          count against the 8,000 ceiling, how many variables are in play, and whether there
+          are unsaved edits.</p>
+        </div>
+      </div>
+      <div class="note" data-note="4">
+        <div class="n">4</div>
+        <div>
+          <h3>Validation gets a slot instead of a red line</h3>
+          <p>Warnings from <code>templateWarnings()</code> are non-blocking and should look it &mdash;
+          amber, with the nearest real variable named. Blocking errors from
+          <code>templateError()</code> use the same slot in <code>--neg</code>, and only those
+          disable the save.</p>
+          <p>Because the slot is always in the layout, nothing jumps when a message appears.</p>
+        </div>
+      </div>
+      <div class="note" data-note="5">
+        <div class="n">5</div>
+        <div>
+          <h3>The chip wall becomes a rail with structure</h3>
+          <p>Seven groups derived from the catalog's own labels &mdash; Guest, Case, Charge, Refund,
+          Dates, Raw, AI &mdash; plus a filter that reaches any of the 27 in a keystroke. The rail
+          scrolls inside a fixed height, so the footer never gets pushed off a short viewport.</p>
+          <p>Chips become objects: mono type, a grip, a real border. Ones already used in the
+          letter carry the accent and a dot, which turns &ldquo;what have I not covered?&rdquo; into a
+          visual question. Hovering shows the catalog label that today only lives in a
+          <code>title</code> attribute.</p>
+          <p>The <code>{{</code> autocomplete popup &mdash; already built and already good &mdash; gets a
+          header, aligned labels, and a keyboard-hint footer so the shortcuts are discoverable
+          rather than folklore.</p>
+        </div>
+      </div>
+      <div class="note" data-note="6">
+        <div class="n">6</div>
+        <div>
+          <h3>The footer separates intent by weight and by side</h3>
+          <p>The two destructive paths sit left, quiet, and say what they actually do &mdash;
+          &ldquo;Reset this dispute's draft&rdquo; and &ldquo;Restore original template&rdquo; instead of two
+          near-identical &ldquo;template&rdquo; labels. Close and Save sit right, in that order,
+          with only Save carrying the accent.</p>
+          <p>The disabled primary states its reason &mdash; <em>No changes to save</em> &mdash; rather than
+          greying out silently.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================ ANATOMY ============================ -->
+  <section>
+    <div class="eyebrow">03 &mdash; Structure</div>
+    <h2>Three bands and a pinned footer</h2>
+    <p class="lede">
+      The modal reads top-to-bottom as three questions in the order an operator asks them.
+      Everything else is chrome.
+    </p>
+    <div class="tbl-scroll">
+      <table>
+        <thead>
+          <tr><th>Band</th><th>Answers</th><th>Holds</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Scope</td>
+            <td>&ldquo;What am I about to change, and who does it hit?&rdquo;</td>
+            <td>Type eyebrow, template name, close, caution band</td>
+          </tr>
+          <tr>
+            <td>Canvas</td>
+            <td>&ldquo;What does the letter say?&rdquo;</td>
+            <td>Framed editor, token highlighting, autocomplete, meter, validation slot</td>
+          </tr>
+          <tr>
+            <td>Supply</td>
+            <td>&ldquo;What can I put in it?&rdquo;</td>
+            <td>Filter, seven groups, chips with used-state, drag affordance</td>
+          </tr>
+          <tr>
+            <td>Commit</td>
+            <td>&ldquo;How do I get out of here?&rdquo;</td>
+            <td>Destructive left &middot; exits right &middot; one accent</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============================ IMPLEMENTATION ============================ -->
+  <section>
+    <div class="eyebrow">04 &mdash; Build</div>
+    <h2>What this costs to ship</h2>
+    <p class="lede">
+      Two files carry almost all of it. Every color, radius, shadow, and face already exists in
+      <code>assets/styles.css</code> &mdash; the redesign adds component classes, not tokens.
+    </p>
+    <div class="tbl-scroll">
+      <table>
+        <thead>
+          <tr><th>Piece</th><th>Where</th><th>Kind</th><th>Notes</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Modal shell, header, scope band, footer</td>
+            <td><code>islands/queue/ResponseUploadPanel.tsx</code></td>
+            <td><span class="pill new">markup</span></td>
+            <td>Replaces the inline-styled header/paragraph/button row. Same handlers, same
+            <code>tplBusy</code> / <code>tplText</code> state.</td>
+          </tr>
+          <tr>
+            <td>Rail, groups, filter, chip states</td>
+            <td><code>components/categories/TemplateEditor.tsx</code></td>
+            <td><span class="pill new">markup</span></td>
+            <td>Group membership is a static map over <code>TEMPLATE_PALETTE</code>. Used-state
+            reuses <code>templateVarNames()</code>, already exported.</td>
+          </tr>
+          <tr>
+            <td>Autocomplete popup restyle</td>
+            <td><code>TemplateEditor.tsx</code></td>
+            <td><span class="pill reuse">CSS only</span></td>
+            <td><code>suggestVars</code>, <code>activeVarQuery</code>, <code>applyVarCompletion</code>
+            untouched &mdash; only the rendered rows change.</td>
+          </tr>
+          <tr>
+            <td>Token highlighting</td>
+            <td><code>TemplateEditor.tsx</code></td>
+            <td><span class="pill new">new</span></td>
+            <td>Standard highlighted-overlay behind a transparent-text textarea; the textarea
+            stays the source of truth so drag-drop and caret math are unchanged.</td>
+          </tr>
+          <tr>
+            <td>Meter, validation slot</td>
+            <td><code>TemplateEditor.tsx</code></td>
+            <td><span class="pill reuse">wiring</span></td>
+            <td>Reads <code>TEMPLATE_MAX_CHARS</code>, <code>templateWarnings()</code>,
+            <code>templateError()</code> &mdash; all already computed at save time.</td>
+          </tr>
+          <tr>
+            <td>Component CSS</td>
+            <td><code>assets/styles.css</code></td>
+            <td><span class="pill reuse">tokens exist</span></td>
+            <td>New classes only. Uses <code>--amber-*</code>, <code>--accent-soft</code>,
+            <code>--bg-sunken</code>, <code>--radius-sm</code> as-is; dark mode follows for free.</td>
+          </tr>
+          <tr>
+            <td>&ldquo;12 open disputes&rdquo;</td>
+            <td>panel props</td>
+            <td><span class="pill new">one number</span></td>
+            <td>The only new data on the screen. If the count isn't cheap to pass, the band
+            degrades to the sentence without it &mdash; everything else holds.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <p class="closing">
+    Form only, as scoped. No save path, validation rule, completion behavior, or drag mechanic
+    changes &mdash; <code>lib/categories/intellisense.ts</code> and <code>lib/categories/model.ts</code>
+    are untouched, and the existing tests keep passing. The mockup above is capped at 880px for
+    this page; the real modal keeps its <code>max-width: 960px</code>.
+  </p>
+
+</div>
+
+<script>
+(function () {
+  var root = document.documentElement;
+  var section = document.getElementById("stage-section");
+
+  /* ---------- segmented controls ---------- */
+  function bindSeg(id, attr, apply) {
+    var box = document.getElementById(id);
+    if (!box) return;
+    box.addEventListener("click", function (e) {
+      var btn = e.target.closest("button[" + attr + "]");
+      if (!btn) return;
+      Array.prototype.forEach.call(box.querySelectorAll("button"), function (b) {
+        b.setAttribute("aria-pressed", String(b === btn));
+      });
+      apply(btn.getAttribute(attr));
+    });
+  }
+  bindSeg("seg-theme", "data-theme-set", function (v) { root.setAttribute("data-theme", v); });
+  bindSeg("seg-state", "data-state-set", function (v) { section.setAttribute("data-state", v); });
+  bindSeg("seg-anno", "data-anno-set", function (v) { section.setAttribute("data-annotations", v); });
+
+  /* Reflect the viewer's resolved theme in the toggle on first paint. */
+  try {
+    if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) {
+      root.setAttribute("data-theme", "dark");
+      var tb = document.querySelectorAll("#seg-theme button");
+      if (tb.length === 2) {
+        tb[0].setAttribute("aria-pressed", "false");
+        tb[1].setAttribute("aria-pressed", "true");
+      }
+    }
+  } catch (err) { /* theme detection is a nicety, never a blocker */ }
+
+  /* ---------- pin \u2194 legend ---------- */
+  document.addEventListener("click", function (e) {
+    var pin = e.target.closest(".pin");
+    if (!pin) return;
+    var n = pin.getAttribute("data-pin");
+    var note = document.querySelector('.note[data-note="' + n + '"]');
+    Array.prototype.forEach.call(document.querySelectorAll(".note, .pin"), function (el) {
+      el.classList.remove("is-live");
+    });
+    if (note) {
+      note.classList.add("is-live");
+      pin.classList.add("is-live");
+      note.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  });
+
+  /* ---------- variable rail ---------- */
+  var GROUPS = [
+    { name: "Guest", vars: [
+      ["guestName", "Guest name (blank when unknown)"],
+      ["guestEmail", "Guest email"],
+      ["contactSummary", "Honest contact-history sentence, with call IDs"],
+      ["contactCount", "How many times the guest contacted us"],
+      ["callIds", "Call IDs whose recordings we can produce"]
+    ]},
+    { name: "Case", vars: [
+      ["caseNumber", "Case number"],
+      ["merchantName", "Merchant display name"],
+      ["provider", "Provider"],
+      ["referenceNumber", "Reference number"],
+      ["reasonCode", "Reason code"],
+      ["reasonLabel", "Reason meaning"],
+      ["disputeContext", "Operator context for this dispute"]
+    ]},
+    { name: "Charge", vars: [
+      ["amountFormatted", "Disputed amount ($1,234.56)"],
+      ["cardBrand", "Card brand"],
+      ["last4", "Card last 4"],
+      ["chargeDetail", "Matched charge detail (what was purchased)"]
+    ]},
+    { name: "Refund", vars: [
+      ["refundStatement", "Honest refund sentence (empty when none)"],
+      ["refundKind", "Refund kind (none / partial / full / unknown)"],
+      ["refundedAmountFormatted", "Known refunded total ($, blank when unknown)"],
+      ["refundedDate", "Matched payment refund date (ET)"]
+    ]},
+    { name: "Dates", vars: [
+      ["disputeDate", "Dispute date (ET)"],
+      ["receivedDate", "Received date (provider)"],
+      ["settledDate", "Matched payment settled date (ET)"],
+      ["todayDate", "Today (ET)"]
+    ]},
+    { name: "Raw", vars: [
+      ["raw.MerchantComment", "Raw: bank request text"],
+      ["raw.ExceptionType", "Raw: exception type"]
+    ]},
+    { name: "AI", vars: [
+      ["llm(...)", "AI-written passage from a prompt plus dispute facts (metered under the daily cap)"]
+    ]}
+  ];
+  var USED = {
+    caseNumber: 1, amountFormatted: 1, cardBrand: 1, last4: 1, disputeDate: 1,
+    reasonCode: 1, reasonLabel: 1, settledDate: 1, todayDate: 1,
+    chargeDetail: 1, contactSummary: 1, "llm(...)": 1
+  };
+
+  var tabsBox = document.getElementById("var-groups");
+  var chipsBox = document.getElementById("var-chips");
+  var search = document.getElementById("var-search");
+  var activeGroup = "Guest";
+
+  GROUPS.forEach(function (g) {
+    var b = document.createElement("button");
+    b.type = "button";
+    b.className = "gtab";
+    b.setAttribute("data-group", g.name);
+    b.setAttribute("aria-pressed", String(g.name === activeGroup));
+    b.innerHTML = g.name + " <span>" + g.vars.length + "</span>";
+    tabsBox.appendChild(b);
+  });
+
+  function render() {
+    var q = (search.value || "").trim().toLowerCase();
+    var rows = [];
+    GROUPS.forEach(function (g) {
+      g.vars.forEach(function (v) {
+        var hit = q
+          ? (v[0].toLowerCase().indexOf(q) !== -1 || v[1].toLowerCase().indexOf(q) !== -1)
+          : g.name === activeGroup;
+        if (hit) rows.push(v);
+      });
+    });
+    chipsBox.textContent = "";
+    if (rows.length === 0) {
+      var none = document.createElement("span");
+      none.style.cssText = "font-size:12.5px;color:var(--fg-subtle);padding:4px 0";
+      none.textContent = "No variable matches \u201c" + search.value + "\u201d.";
+      chipsBox.appendChild(none);
+      return;
+    }
+    rows.forEach(function (v) {
+      var c = document.createElement("span");
+      c.className = "chip" + (USED[v[0]] ? " used" : "") + (v[0] === "llm(...)" ? " ai" : "");
+      c.setAttribute("draggable", "true");
+      var label = document.createElement("span");
+      label.textContent = v[0];
+      var tip = document.createElement("span");
+      tip.className = "tip";
+      tip.textContent = v[1];
+      c.appendChild(label);
+      c.appendChild(tip);
+      chipsBox.appendChild(c);
+    });
+  }
+
+  tabsBox.addEventListener("click", function (e) {
+    var b = e.target.closest(".gtab");
+    if (!b) return;
+    activeGroup = b.getAttribute("data-group");
+    search.value = "";
+    Array.prototype.forEach.call(tabsBox.querySelectorAll(".gtab"), function (t) {
+      t.setAttribute("aria-pressed", String(t === b));
+    });
+    render();
+  });
+  search.addEventListener("input", function () {
+    if (search.value.trim() !== "") {
+      Array.prototype.forEach.call(tabsBox.querySelectorAll(".gtab"), function (t) {
+        t.setAttribute("aria-pressed", "false");
+      });
+    } else {
+      Array.prototype.forEach.call(tabsBox.querySelectorAll(".gtab"), function (t) {
+        t.setAttribute("aria-pressed", String(t.getAttribute("data-group") === activeGroup));
+      });
+    }
+    render();
+  });
+
+  render();
+})();
+</script>

@@ -2574,6 +2574,31 @@ do
   check("#18-pin: JS isNotification counts usage_limit",
         src:find('|| e.type === "usage_limit") return true;', 1, true) ~= nil)
 
+  -- spawnframe-pin: match the editor window you already have, so a spawn isn't born
+  -- full-width underneath the panel.
+  check("spawnframe-pin: the frame is captured BEFORE `open` (else we copy the new window)",
+        src:find("local wantFrame, frameWhy = FX.spawnTargetFrame(spec.editor, loadConfig())", 1, true) ~= nil
+        and src:find("Capture the target frame BEFORE `open` runs", 1, true) ~= nil)
+  check("spawnframe-pin: an existing window's frame wins, panel-band is the fallback",
+        src:find("function FX.spawnTargetFrame(editor, cfg)", 1, true) ~= nil
+        and src:find('return { x = f.x, y = f.y, w = f.w, h = f.h }, "match"', 1, true) ~= nil
+        and src:find("core.frameBesidePanel(scr:frame(), pf, { gap = 8 })", 1, true) ~= nil)
+  check("spawnframe-pin: config-gated, default ON",
+        src:find('core.config(cfg, "spawn.matchWindowSize", true) ~= true', 1, true) ~= nil)
+  -- Only the COLD path: a warm spawn reuses a window the operator already placed.
+  check("spawnframe-pin: applied on the cold-start window match, and re-asserted",
+        src:find("FX.applySpawnFrame(wantFrame, frameWhy)", 1, true) ~= nil
+        and src:find("if matched then FX.applySpawnFrame(wantFrame, frameWhy) end", 1, true) ~= nil)
+  check("spawnframe-pin: sizing is best-effort and can't break the spawn ladder",
+        src:find("function FX.applySpawnFrame(frame, why)", 1, true) ~= nil
+        and src:find("if not frame then return end", 1, true) ~= nil)
+  -- The main chunk sits at Lua's 200-local ceiling, so these hang off FX; and
+  -- panelVisible is assigned ~10k lines BELOW its use here, so it must be
+  -- forward-declared or it compiles to a nil global and the fallback silently dies.
+  check("spawnframe-pin: panelVisible is forward-declared beside wv",
+        src:find("local panelVisible       -- forward-declared", 1, true) ~= nil
+        and src:find("panelVisible = true   -- forward-declared beside `wv`", 1, true) ~= nil)
+
   -- hidden-pin (UI): "Forget tile" deleted a file that the hooks immediately
   -- rewrote, so a live session's tile popped back. Hide is a display mark, applied
   -- at the RENDER payload so every automation pass still sees the session.

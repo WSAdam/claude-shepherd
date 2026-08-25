@@ -1,0 +1,1302 @@
+<title>The Letter Proofing Workspace</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter+Tight:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap">
+
+<style>
+/* ============================================================
+   TOKENS - the ChargebackSentinel design system, verbatim from
+   assets/styles.css. Light is the base; dark is redefined at token
+   level three times so the un-stamped system-theme viewer resolves too.
+   ============================================================ */
+:root {
+  --tpe-50:#f2f1f4; --tpe-100:#e4e3e8; --tpe-200:#cac7d1; --tpe-300:#afabba;
+  --tpe-400:#958fa3; --tpe-500:#7a738c; --tpe-600:#625c70; --tpe-700:#494554;
+  --tpe-800:#312e38; --tpe-900:#18171c; --tpe-950:#111014;
+  --apr-100:#fde6ce; --apr-400:#f99c39; --apr-500:#f78308; --apr-600:#c66906; --apr-700:#944f05;
+  --blu-50:#e5eeff; --blu-500:#0059ff; --blu-700:#003699;
+
+  --bg:#fbfaf7; --bg-elev:#ffffff; --bg-sunken:#f4f2ed;
+  --fg:var(--tpe-900); --fg-muted:var(--tpe-500); --fg-subtle:var(--tpe-400);
+  --fg-read:var(--tpe-600);
+  --border:rgba(24,23,28,0.08); --border-strong:rgba(24,23,28,0.14);
+
+  --accent:oklch(0.71 0.18 145); --accent-fg:#ffffff;
+  --accent-soft:oklch(0.95 0.06 145); --accent-soft-fg:oklch(0.45 0.14 145);
+  --pos:oklch(0.62 0.13 155); --pos-soft:oklch(0.94 0.05 155);
+  --neg:#f40b42; --neg-soft:#fee7ec; --neg-text:#c30934;
+  --amber-fg:#9a6316; --amber-soft:#fdf8ef; --amber-line:#f0e3ce;
+
+  /* doc chrome only: editorial marks, deliberately NOT the product accent */
+  --mark:var(--apr-700); --mark-fg:#ffffff;
+  --mark-soft:#fef3e6; --mark-line:rgba(198,105,6,0.28);
+
+  --shadow-sm:0 1px 2px rgba(24,23,28,.04), 0 1px 3px rgba(24,23,28,.06);
+  --shadow-lg:0 12px 24px -8px rgba(24,23,28,.12), 0 8px 16px -8px rgba(24,23,28,.08);
+  --shadow-xl:0 24px 48px -12px rgba(24,23,28,.18);
+  --stage-ground:#211f28;
+
+  --radius:14px; --radius-sm:10px; --radius-lg:20px;
+  /* How far the stage escapes the 1060px reading column. .wrap's content box is
+     996px at full width, so a bleed of (100vw - 1036)/2 makes the stage exactly
+     100vw - 40px. 100vw counts the scrollbar, which only ever makes the result
+     narrower than the client box - so this can widen to fill without overflowing.
+     max() floors it at 0 for viewports too narrow to give anything back. */
+  --bleed:max(0px, calc((100vw - 1036px) / 2));
+  --font-display:"Instrument Serif","Times New Roman",serif;
+  --font-sans:"Inter Tight",Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  --font-mono:"JetBrains Mono","SFMono-Regular",ui-monospace,monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:#0c0b10; --bg-elev:#18171c; --bg-sunken:#08070b;
+    --fg:#f6f4f0; --fg-muted:#afabba; --fg-subtle:#7a738c; --fg-read:var(--tpe-200);
+    --border:rgba(255,255,255,0.08); --border-strong:rgba(255,255,255,0.16);
+    --accent-soft:oklch(0.30 0.10 145 / 0.4); --accent-soft-fg:oklch(0.82 0.14 145);
+    --pos:oklch(0.74 0.14 155); --pos-soft:oklch(0.30 0.10 155 / 0.3);
+    --neg:#f86d8d; --neg-soft:rgba(244,11,66,0.14); --neg-text:#f86d8d;
+    --amber-fg:#e0a95c; --amber-soft:rgba(224,169,92,0.10); --amber-line:rgba(224,169,92,0.22);
+    --blu-50:rgba(0,89,255,0.14); --blu-700:#99bdff;
+    --mark:var(--apr-400); --mark-fg:#231201;
+    --mark-soft:rgba(249,156,57,0.12); --mark-line:rgba(249,156,57,0.30);
+    --shadow-sm:0 1px 2px rgba(0,0,0,.4);
+    --shadow-lg:0 12px 24px -8px rgba(0,0,0,.5);
+    --shadow-xl:0 24px 48px -12px rgba(0,0,0,.6);
+    --stage-ground:#050409;
+  }
+}
+:root[data-theme="dark"] {
+  --bg:#0c0b10; --bg-elev:#18171c; --bg-sunken:#08070b;
+  --fg:#f6f4f0; --fg-muted:#afabba; --fg-subtle:#7a738c; --fg-read:var(--tpe-200);
+  --border:rgba(255,255,255,0.08); --border-strong:rgba(255,255,255,0.16);
+  --accent-soft:oklch(0.30 0.10 145 / 0.4); --accent-soft-fg:oklch(0.82 0.14 145);
+  --pos:oklch(0.74 0.14 155); --pos-soft:oklch(0.30 0.10 155 / 0.3);
+  --neg:#f86d8d; --neg-soft:rgba(244,11,66,0.14); --neg-text:#f86d8d;
+  --amber-fg:#e0a95c; --amber-soft:rgba(224,169,92,0.10); --amber-line:rgba(224,169,92,0.22);
+  --blu-50:rgba(0,89,255,0.14); --blu-700:#99bdff;
+  --mark:var(--apr-400); --mark-fg:#231201;
+  --mark-soft:rgba(249,156,57,0.12); --mark-line:rgba(249,156,57,0.30);
+  --shadow-sm:0 1px 2px rgba(0,0,0,.4);
+  --shadow-lg:0 12px 24px -8px rgba(0,0,0,.5);
+  --shadow-xl:0 24px 48px -12px rgba(0,0,0,.6);
+  --stage-ground:#050409;
+}
+
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--fg);
+  font-family:var(--font-sans); font-size:16px; line-height:1.6;
+  -webkit-font-smoothing:antialiased; }
+.wrap { max-width:1060px; margin:0 auto; padding:0 32px; }
+.eyebrow { font-family:var(--font-mono); font-size:11px; font-weight:500;
+  letter-spacing:.13em; text-transform:uppercase; color:var(--fg-read); }
+
+/* ---------------- masthead ---------------- */
+.masthead { padding:78px 0 46px; border-bottom:1px solid var(--border); }
+.masthead h1 { font-family:var(--font-display); font-weight:400;
+  font-size:clamp(46px,6.6vw,74px); line-height:1.0; letter-spacing:-.022em;
+  margin:16px 0 0; text-wrap:balance; max-width:16ch; }
+.thesis { max-width:62ch; margin:22px 0 0; font-size:17.5px; color:var(--fg-read); }
+.thesis strong { color:var(--fg); font-weight:600; }
+.facts { display:flex; flex-wrap:wrap; margin-top:36px; border-top:1px solid var(--border); }
+.fact { flex:1 1 175px; padding:16px 20px 16px 0; border-right:1px solid var(--border); }
+.fact:last-child { border-right:0; }
+.fact dt { font-family:var(--font-mono); font-size:10.5px; letter-spacing:.12em;
+  text-transform:uppercase; color:var(--fg-read); margin:0 0 5px; }
+.fact dd { margin:0; font-size:14.5px; font-weight:500; }
+
+section { padding:66px 0 0; }
+h2 { font-family:var(--font-display); font-weight:400; font-size:36px;
+  letter-spacing:-.017em; margin:12px 0 0; text-wrap:balance; }
+.lede { max-width:64ch; color:var(--fg-read); margin:14px 0 0; font-size:16px; }
+.lede strong { color:var(--fg); font-weight:600; }
+
+/* ---------------- the reframe ---------------- */
+.reframe { margin-top:34px; display:grid; grid-template-columns:1fr 1fr; gap:1px;
+  background:var(--border); border:1px solid var(--border);
+  border-radius:var(--radius); overflow:hidden; }
+.rf { background:var(--bg-elev); padding:24px 24px 26px; }
+.rf.was { background:var(--bg-sunken); }
+.rf-tag { display:inline-block; font-family:var(--font-mono); font-size:10px;
+  letter-spacing:.11em; text-transform:uppercase; padding:3px 9px; border-radius:999px;
+  border:1px solid var(--border-strong); color:var(--fg-read); }
+.rf.is .rf-tag { color:var(--mark); background:var(--mark-soft); border-color:var(--mark-line); }
+.rf h3 { margin:12px 0 8px; font-size:19px; font-weight:600; letter-spacing:-.015em;
+  font-family:var(--font-display); font-weight:400; font-size:24px; }
+.rf p { margin:0; font-size:14.5px; color:var(--fg-read); line-height:1.6; }
+.rf p + p { margin-top:9px; }
+.rf code { font-family:var(--font-mono); font-size:12.5px; background:var(--bg);
+  padding:1px 5px; border-radius:5px; color:var(--fg); }
+.rf.was code { background:var(--bg-elev); }
+
+/* ---------------- toolbar + stage ---------------- */
+.stage-outer { margin-top:40px; margin-inline:calc(-1 * var(--bleed)); }
+.toolbar { display:flex; flex-wrap:wrap; gap:10px; align-items:center;
+  padding:12px 14px; border:1px solid var(--border); border-bottom:0;
+  border-radius:var(--radius) var(--radius) 0 0; background:var(--bg-elev); }
+.tb-label { font-family:var(--font-mono); font-size:10px; letter-spacing:.12em;
+  text-transform:uppercase; color:var(--fg-read); }
+.seg { display:inline-flex; background:var(--bg-sunken); border-radius:9px; padding:3px; gap:2px; }
+.seg button { font-family:var(--font-sans); font-size:12.5px; font-weight:500; border:0;
+  background:transparent; color:var(--fg-read); padding:5px 11px; border-radius:7px;
+  cursor:pointer; transition:background .15s ease, color .15s ease; }
+.seg button:hover { color:var(--fg); }
+.seg button[aria-pressed="true"] { background:var(--bg-elev); color:var(--fg); box-shadow:var(--shadow-sm); }
+.toolbar .spacer { flex:1 1 auto; }
+button:focus-visible, input:focus-visible, [tabindex]:focus-visible {
+  outline:2px solid var(--mark); outline-offset:2px; }
+
+.stage { position:relative; background:var(--stage-ground);
+  border:1px solid var(--border); border-radius:0 0 var(--radius) var(--radius);
+  padding:38px 18px 40px; overflow-x:auto;
+  background-image:radial-gradient(circle at 50% 0%, rgba(255,255,255,.05), transparent 62%); }
+
+/* ============================================================
+   THE WORKSPACE
+   ============================================================ */
+.ws { position:relative; min-width:812px; max-width:none; margin:0 auto;
+  background:var(--bg-elev); border:1px solid var(--border);
+  border-radius:var(--radius-lg); box-shadow:var(--shadow-xl);
+  display:flex; flex-direction:column; font-size:14px; overflow:visible; }
+.zone { position:relative; }
+
+.pin { position:absolute; width:23px; height:23px; border-radius:50%;
+  background:var(--mark); color:var(--mark-fg); font-family:var(--font-mono);
+  font-size:10.5px; font-weight:700; display:grid; place-items:center; cursor:pointer;
+  border:2px solid var(--bg-elev); box-shadow:0 2px 8px rgba(0,0,0,.3);
+  z-index:9; padding:0; transition:transform .15s ease; }
+.pin:hover, .pin.is-live { transform:scale(1.2); }
+#stage-section[data-annotations="off"] .pin { display:none; }
+
+/* ---- header ---- */
+.ws-head { display:flex; align-items:flex-start; gap:20px; padding:20px 24px 16px;
+  border-bottom:1px solid var(--border); }
+.ws-id { flex:1 1 auto; min-width:0; }
+.ws-eyebrow { font-family:var(--font-mono); font-size:10px; font-weight:500;
+  letter-spacing:.14em; text-transform:uppercase; color:var(--fg-read); }
+.ws-title { font-family:var(--font-display); font-weight:400; font-size:29px;
+  line-height:1.08; letter-spacing:-.018em; margin:4px 0 0; }
+.ws-acts { display:flex; align-items:center; gap:8px; flex:0 0 auto; padding-top:6px; }
+
+/* the scope strip: a control, not a warning */
+.scope { display:flex; align-items:center; gap:0; margin:12px 24px 0;
+  border:1px solid var(--border-strong); border-radius:var(--radius-sm);
+  overflow:hidden; background:var(--bg-sunken); }
+.scope-seg { display:flex; align-items:center; gap:9px; padding:9px 14px;
+  border-right:1px solid var(--border); font-size:12.5px; color:var(--fg-read); }
+.scope-seg:last-child { border-right:0; }
+.scope-seg b { color:var(--fg); font-weight:600;
+  font-family:var(--font-mono); font-size:12.5px; }
+.scope-seg.warn b { color:var(--amber-fg); }
+.scope-dot { width:7px; height:7px; border-radius:50%; flex:0 0 auto; }
+.scope-dot.ok { background:var(--pos); }
+.scope-dot.warn { background:var(--amber-fg); }
+.scope-dot.hold { background:var(--fg-subtle); }
+.scope .grow { flex:1 1 auto; }
+.scope-link { margin-left:auto; font-size:12px; color:var(--fg-read);
+  padding:9px 14px; border-left:1px solid var(--border); background:transparent;
+  border-top:0; border-right:0; border-bottom:0; font-family:var(--font-sans);
+  cursor:pointer; transition:background .15s ease, color .15s ease; }
+.scope-link:hover { background:var(--bg-elev); color:var(--fg); }
+
+/* ---- body grid: source | letter | rail ---- */
+.ws-body { display:grid;
+  grid-template-columns:minmax(0,1fr) minmax(0,1.15fr) clamp(208px,16%,252px);
+  gap:0; margin:16px 0 0; border-top:1px solid var(--border); min-height:452px; }
+#stage-section[data-view="source"] .ws-body,
+#stage-section[data-view="letter"] .ws-body {
+  grid-template-columns:minmax(0,1fr) clamp(208px,16%,252px); }
+#stage-section[data-view="source"] .pane-letter { display:none; }
+#stage-section[data-view="letter"] .pane-source { display:none; }
+#stage-section[data-view="letter"] .pin[data-pin="3"] { display:none; }
+#stage-section[data-view="source"] .pin[data-pin="4"],
+#stage-section[data-view="source"] .pin[data-pin="5"],
+#stage-section[data-view="source"] .pin[data-pin="6"] { display:none; }
+
+.pane { display:flex; flex-direction:column; min-width:0;
+  border-right:1px solid var(--border); }
+.pane:last-child { border-right:0; }
+.pane-head { display:flex; align-items:center; gap:10px; padding:10px 16px;
+  border-bottom:1px solid var(--border); background:var(--bg-sunken); min-height:44px; }
+.pane-head h4 { margin:0; font-family:var(--font-mono); font-size:10px; font-weight:500;
+  letter-spacing:.13em; text-transform:uppercase; color:var(--fg-read); }
+.pane-head .grow { flex:1 1 auto; }
+
+/* ---- source ---- */
+.src { flex:1 1 auto; margin:0; padding:16px 18px; overflow:auto; max-height:408px;
+  font-family:var(--font-mono); font-size:12.5px; line-height:1.75; color:var(--fg);
+  white-space:pre-wrap; word-break:break-word; background:var(--bg-sunken); }
+.src:focus { outline:none; }
+.src .h { color:var(--fg-read); font-weight:500; }
+.src .tok { color:var(--accent-soft-fg); background:var(--accent-soft);
+  border-radius:4px; padding:1px 2px; font-weight:500; }
+.src .tok.fn { color:var(--fg); background:var(--bg-elev); border:1px solid var(--border-strong); }
+.src .tok.bad { color:var(--amber-fg); background:var(--amber-soft);
+  box-shadow:inset 0 -1.5px 0 var(--amber-fg); }
+.src .tok.thin { opacity:1; box-shadow:inset 0 -1.5px 0 var(--amber-fg); }
+.caret { display:inline-block; width:1.5px; height:1.05em; vertical-align:-.18em;
+  background:var(--accent); margin-left:-1px; animation:blink 1.15s steps(1) infinite; }
+@keyframes blink { 0%,49%{opacity:1} 50%,100%{opacity:0} }
+
+/* ---- the letter ---- */
+.pane-letter .pane-head { background:var(--bg-sunken); }
+.caseNav { display:flex; align-items:center; gap:2px; }
+.caseNav button { width:24px; height:24px; border-radius:6px; border:1px solid var(--border-strong);
+  background:var(--bg-elev); color:var(--fg-read); cursor:pointer; display:grid;
+  place-items:center; font-size:11px; transition:background .15s ease, color .15s ease; }
+.caseNav button:hover { background:var(--bg-sunken); color:var(--fg); }
+.caseChip { font-family:var(--font-mono); font-size:11.5px; color:var(--fg);
+  padding:0 8px; white-space:nowrap; }
+.caseChip span { color:var(--fg-read); }
+.letter { flex:1 1 auto; overflow:auto; max-height:408px; padding:26px 30px 30px;
+  background:var(--bg-elev); }
+.letter-doc { max-width:58ch; margin:0 auto; }
+.letter h4 { font-family:var(--font-display); font-weight:400; font-size:19px;
+  letter-spacing:-.012em; margin:22px 0 9px; color:var(--fg); }
+.letter h4:first-child { margin-top:0; }
+.letter p { margin:0 0 11px; font-size:14px; line-height:1.66; color:var(--fg); }
+.letter ul { margin:0 0 11px; padding-left:17px; }
+.letter li { font-size:14px; line-height:1.66; margin-bottom:4px; }
+/* an interpolated value: faint tint marks data, not prose */
+.v { background:var(--accent-soft); border-radius:3px;
+  box-shadow:0 0 0 1px var(--accent-soft); }
+/* a value that rendered EMPTY for this dispute */
+.v-blank { display:inline-block; min-width:52px; height:.95em; vertical-align:-.13em;
+  border-radius:3px; background:var(--amber-soft);
+  box-shadow:inset 0 0 0 1px var(--amber-line); position:relative; }
+.v-blank::after { content:""; position:absolute; inset:0;
+  background:repeating-linear-gradient(-45deg, transparent 0 3px, var(--amber-line) 3px 4px); }
+.v-ai { background:var(--blu-50); border-radius:3px; box-shadow:0 0 0 1px var(--blu-50); }
+/* a whole section that renders empty */
+.sec-empty { border-left:2px solid var(--amber-fg); padding-left:12px;
+  margin:0 0 12px; background:var(--amber-soft); border-radius:0 6px 6px 0; }
+.sec-empty h4 { margin-top:0; }
+.sec-empty .flag { display:flex; align-items:center; gap:7px; font-size:11.5px;
+  color:var(--amber-fg); padding:0 0 9px; font-weight:500; }
+.letter-legend { display:flex; flex-wrap:wrap; gap:14px; padding:10px 16px;
+  border-top:1px solid var(--border); background:var(--bg-sunken);
+  font-size:11px; color:var(--fg-read); }
+.letter-legend i { display:inline-block; width:11px; height:11px; border-radius:3px;
+  vertical-align:-2px; margin-right:6px; }
+.lg-v { background:var(--accent-soft); box-shadow:0 0 0 1px var(--accent-soft); }
+.lg-b { background:var(--amber-soft); box-shadow:inset 0 0 0 1px var(--amber-line); }
+.lg-a { background:var(--blu-50); box-shadow:0 0 0 1px var(--blu-50); }
+
+/* ---- the rail ---- */
+.rail { background:var(--bg-sunken); display:flex; flex-direction:column; min-width:0; }
+.rail-tabs { display:flex; gap:3px; padding:9px 12px; border-bottom:1px solid var(--border);
+  min-height:44px; align-items:center; }
+.rtab { font-family:var(--font-sans); font-size:12px; font-weight:500; border:1px solid var(--border);
+  background:var(--bg-elev); color:var(--fg-read); border-radius:999px; padding:4px 11px;
+  cursor:pointer; display:inline-flex; align-items:center; gap:6px;
+  transition:background .15s ease, color .15s ease, border-color .15s ease; }
+.rtab:hover { color:var(--fg); border-color:var(--border-strong); }
+.rtab[aria-pressed="true"] { background:var(--fg); border-color:var(--fg); color:var(--bg-elev); }
+.rtab b { font-family:var(--font-mono); font-size:10px; font-weight:500; opacity:.65; }
+.rail-body { flex:1 1 auto; overflow:auto; max-height:408px; }
+#stage-section[data-rail="vars"] .rail-cov,
+#stage-section[data-rail="cov"]  .rail-vars { display:none; }
+#stage-section[data-rail="vars"] .pin[data-pin="7"] { display:none; }
+#stage-section[data-rail="cov"]  .pin[data-pin="8"] { display:none; }
+
+.cov-intro { padding:12px 12px 10px; font-size:12px; color:var(--fg-read);
+  border-bottom:1px solid var(--border); line-height:1.5; }
+.cov-intro b { color:var(--fg); font-weight:600; }
+.cov-row { display:block; width:100%; text-align:left; padding:9px 12px;
+  border:0; border-bottom:1px solid var(--border); background:transparent;
+  cursor:pointer; font-family:var(--font-sans);
+  transition:background .13s ease; }
+.cov-row:hover { background:var(--bg-elev); }
+.cov-top { display:flex; align-items:baseline; gap:8px; }
+.cov-key { font-family:var(--font-mono); font-size:11.5px; color:var(--fg);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.cov-n { margin-left:auto; padding-left:8px; font-family:var(--font-mono); font-size:10.5px;
+  color:var(--fg-read); font-variant-numeric:tabular-nums; flex:0 0 auto; }
+.cov-bar { height:3px; border-radius:2px; background:var(--border-strong);
+  margin-top:6px; overflow:hidden; }
+.cov-bar i { display:block; height:100%; border-radius:2px; }
+.cov-row.ok      .cov-bar i { background:var(--pos); }
+.cov-row.hollow  .cov-bar i { background:var(--amber-fg); }
+.cov-row.broken  .cov-bar i { background:var(--neg); }
+.cov-row.unknown .cov-bar i { background:var(--neg); }
+.cov-row.broken  .cov-key, .cov-row.broken  .cov-n,
+.cov-row.unknown .cov-key, .cov-row.unknown .cov-n { color:var(--neg-text); }
+.cov-row.hollow  .cov-key { color:var(--amber-fg); }
+/* a severity read as shape, not only as hue */
+.cov-key::before { content:""; display:inline-block; width:5px; height:5px;
+  border-radius:50%; margin-right:7px; vertical-align:middle; background:var(--pos); }
+.cov-row.hollow  .cov-key::before { background:var(--amber-fg); border-radius:1px; }
+.cov-row.broken  .cov-key::before,
+.cov-row.unknown .cov-key::before { background:var(--neg);
+  border-radius:0; transform:rotate(45deg); }
+.cov-note { font-size:11px; color:var(--fg-read); margin-top:5px; line-height:1.45; }
+
+.vars-head { padding:11px 12px 9px; border-bottom:1px solid var(--border); }
+.search { position:relative; }
+.search svg { position:absolute; left:9px; top:50%; transform:translateY(-50%); color:var(--fg-read); }
+.search input { width:100%; font-family:var(--font-sans); font-size:12.5px; color:var(--fg);
+  padding:6px 10px 6px 28px; border-radius:8px; border:1px solid var(--border-strong);
+  background:var(--bg-elev); transition:border-color .15s ease, box-shadow .15s ease; }
+.search input::placeholder { color:var(--fg-read); }
+.search input:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft); }
+.groups { display:flex; flex-wrap:wrap; gap:4px; padding:10px 12px 0; }
+.gtab { font-family:var(--font-sans); font-size:11.5px; font-weight:500; border:1px solid var(--border);
+  background:var(--bg-elev); color:var(--fg-read); border-radius:999px; padding:3px 9px;
+  cursor:pointer; display:inline-flex; align-items:center; gap:5px;
+  transition:background .15s ease, color .15s ease, border-color .15s ease; }
+.gtab:hover { color:var(--fg); border-color:var(--border-strong); }
+.gtab b { font-family:var(--font-mono); font-size:9.5px; font-weight:500; color:var(--fg-read); }
+.gtab[aria-pressed="true"] { background:var(--fg); border-color:var(--fg); color:var(--bg-elev); }
+.gtab[aria-pressed="true"] b { color:var(--bg-elev); opacity:.6; }
+.chips { display:flex; flex-wrap:wrap; gap:5px; padding:11px 12px 14px; }
+.chip { display:inline-flex; align-items:center; gap:6px; font-family:var(--font-mono);
+  font-size:11px; color:var(--fg); background:var(--bg-elev);
+  border:1px solid var(--border-strong); border-radius:7px; padding:4px 8px 4px 5px;
+  cursor:grab; position:relative;
+  transition:border-color .13s ease, box-shadow .13s ease; }
+.chip:hover { border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft); }
+.chip::before { content:""; flex:0 0 auto; width:3px; height:11px; border-radius:2px;
+  background:radial-gradient(circle,var(--fg-subtle) 45%,transparent 46%) 0 0/3px 4px repeat-y;
+  opacity:.55; }
+.chip.used { border-color:var(--accent); background:var(--accent-soft); color:var(--accent-soft-fg); }
+.chip.used::after { content:""; width:4px; height:4px; border-radius:50%; background:var(--accent); }
+.chip.ai { border-style:dashed; }
+.chip .tip { position:absolute; bottom:calc(100% + 7px); left:0; font-family:var(--font-sans);
+  font-size:11.5px; line-height:1.4; background:var(--tpe-900); color:#f6f4f0;
+  padding:6px 9px; border-radius:7px; width:max-content; max-width:210px; opacity:0;
+  pointer-events:none; transition:opacity .13s ease; box-shadow:var(--shadow-lg); z-index:12; }
+.chip:hover .tip { opacity:1; }
+
+/* ---- status bar ---- */
+.ws-foot { display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+  padding:10px 16px; border-top:1px solid var(--border); background:var(--bg-elev);
+  border-radius:0 0 var(--radius-lg) var(--radius-lg);
+  font-family:var(--font-mono); font-size:11px; color:var(--fg-read); }
+.ws-foot .grow { flex:1 1 auto; }
+.ws-foot .sep { width:1px; height:13px; background:var(--border-strong); }
+.ws-foot .warnpill { display:inline-flex; align-items:center; gap:6px; color:var(--amber-fg); }
+.ws-foot .warnpill::before { content:""; width:6px; height:6px; border-radius:50%;
+  background:var(--amber-fg); box-shadow:0 0 0 3px var(--amber-soft); }
+.linkbtn { font-family:var(--font-sans); font-size:12px; background:transparent; border:0;
+  color:var(--fg-read); cursor:pointer; padding:3px 6px; border-radius:6px;
+  transition:background .15s ease, color .15s ease; }
+.linkbtn:hover { background:var(--bg-sunken); color:var(--fg); }
+
+/* ---- buttons ---- */
+.btn { display:inline-flex; align-items:center; gap:7px; font-family:var(--font-sans);
+  font-size:13px; font-weight:500; padding:8px 14px; border-radius:9px;
+  border:1px solid var(--border-strong); background:var(--bg-elev); color:var(--fg);
+  cursor:pointer; letter-spacing:-.005em;
+  transition:background .15s ease, filter .15s ease; }
+.btn:hover { background:var(--bg-sunken); }
+.btn-accent { background:var(--accent); color:var(--accent-fg); border-color:var(--accent);
+  box-shadow:0 1px 0 rgba(255,255,255,.2) inset, 0 6px 14px -6px var(--accent); }
+.btn-accent:hover { filter:brightness(1.05); background:var(--accent); }
+.btn-accent b { font-family:var(--font-mono); font-size:10.5px; font-weight:500; opacity:.8; }
+.icon-btn { width:32px; height:32px; border-radius:9px; border:1px solid transparent;
+  background:transparent; color:var(--fg-read); cursor:pointer; display:grid; place-items:center;
+  transition:background .15s ease, color .15s ease; }
+.icon-btn:hover { background:var(--bg-sunken); color:var(--fg); }
+
+/* ---------------- legend ---------------- */
+.legend { margin-top:38px; display:grid; gap:1px; background:var(--border);
+  border:1px solid var(--border); border-radius:var(--radius); overflow:hidden; }
+.note { background:var(--bg-elev); padding:19px 22px; display:grid;
+  grid-template-columns:25px 1fr; gap:16px; align-items:start; transition:background .2s ease; }
+.note.is-live { background:var(--mark-soft); }
+.note .n { width:23px; height:23px; border-radius:50%; background:var(--mark); color:var(--mark-fg);
+  font-family:var(--font-mono); font-size:10.5px; font-weight:700; display:grid;
+  place-items:center; margin-top:2px; }
+.note h3 { margin:0 0 6px; font-size:15.5px; font-weight:600; letter-spacing:-.012em; }
+.note p { margin:0; font-size:14px; color:var(--fg-read); line-height:1.6; max-width:70ch; }
+.note p + p { margin-top:8px; }
+.note code { font-family:var(--font-mono); font-size:12.5px; background:var(--bg-sunken);
+  padding:1px 5px; border-radius:5px; color:var(--fg); }
+
+/* ---------------- tables ---------------- */
+.tbl-scroll { overflow-x:auto; margin-top:28px; border:1px solid var(--border);
+  border-radius:var(--radius); }
+table { border-collapse:collapse; width:100%; font-size:13.5px; min-width:660px; }
+thead th { text-align:left; font-family:var(--font-mono); font-size:10px; letter-spacing:.12em;
+  text-transform:uppercase; color:var(--fg-read); padding:11px 18px;
+  border-bottom:1px solid var(--border); font-weight:500; background:var(--bg-sunken); }
+tbody td { padding:12px 18px; border-bottom:1px solid var(--border); vertical-align:top;
+  color:var(--fg-read); }
+tbody tr:last-child td { border-bottom:0; }
+tbody td:first-child { color:var(--fg); font-weight:500; }
+tbody code { font-family:var(--font-mono); font-size:12px; color:var(--fg); }
+.pill { display:inline-block; font-family:var(--font-mono); font-size:10px; letter-spacing:.08em;
+  text-transform:uppercase; padding:2px 7px; border-radius:999px;
+  border:1px solid var(--border-strong); color:var(--fg-read); white-space:nowrap; }
+.pill.form { color:var(--accent-soft-fg); background:var(--accent-soft); border-color:transparent; }
+.pill.newcap { color:var(--mark); background:var(--mark-soft); border-color:var(--mark-line); }
+
+.closing { margin:66px 0 92px; padding-top:28px; border-top:1px solid var(--border);
+  font-size:14px; color:var(--fg-read); max-width:70ch; }
+.closing code { font-family:var(--font-mono); font-size:12.5px; color:var(--fg); }
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration:.001ms !important; transition-duration:.001ms !important; }
+}
+/* Under the three-column floor the workspace stacks rather than making the
+   reader scroll the stage sideways to find the rail. */
+@media (max-width:900px) {
+  .wrap { padding:0 20px; }
+  .stage { padding:30px 14px 34px; }
+  .reframe { grid-template-columns:1fr; }
+  .ws { min-width:0; }
+  .ws-body,
+  #stage-section[data-view="source"] .ws-body,
+  #stage-section[data-view="letter"] .ws-body { grid-template-columns:minmax(0,1fr); }
+  .pane { border-right:0; border-bottom:1px solid var(--border); }
+  .pane:last-child { border-bottom:0; }
+  .src, .letter, .rail-body { max-height:300px; }
+  .ws-head { flex-wrap:wrap; }
+  /* Three buttons and a mono case number are both wider than a phone; let each
+     cluster claim its own line instead of pushing the stage sideways. */
+  .ws-acts { width:100%; justify-content:flex-end; flex-wrap:wrap; padding-top:0; }
+  .pane-head { flex-wrap:wrap; row-gap:8px; }
+  .caseNav { width:100%; justify-content:space-between; }
+  .caseChip { flex:1 1 auto; text-align:center; overflow:hidden; text-overflow:ellipsis; }
+  .scope { flex-wrap:wrap; }
+  .scope-seg { flex:1 1 auto; }
+  .scope-link { margin-left:0; border-left:0; border-top:1px solid var(--border); width:100%;
+    text-align:left; }
+  /* Annotation pins are a desktop review affordance - stacked, they would all
+     land on the same corner. The legend below reads on its own. */
+  .pin { display:none !important; }
+}
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <div class="eyebrow">Chargeback Portal &middot; Response templates &middot; Rethink</div>
+    <h1>The Letter Proofing Workspace</h1>
+    <p class="thesis">
+      The template editor was designed as a place to type. But nobody's real problem is typing &mdash;
+      it's that <strong>a variable can render blank and no one finds out until a bank reads the
+      letter</strong>. <code>guestName</code> is "blank when unknown." <code>refundStatement</code>
+      is "empty when none." A blank leaves a <code>## Guest Contact History</code> heading with
+      nothing under it, in a document arguing for money.
+      So: stop building an editor. Build a proofing bench.
+    </p>
+    <dl class="facts">
+      <div class="fact"><dt>Hero object</dt><dd>The rendered letter</dd></div>
+      <div class="fact"><dt>Container</dt><dd>Full-height workspace</dd></div>
+      <div class="fact"><dt>New idea</dt><dd>Coverage across cases</dd></div>
+      <div class="fact"><dt>System</dt><dd>Existing tokens only</dd></div>
+    </dl>
+  </header>
+
+  <section>
+    <div class="eyebrow">01 &mdash; The turn</div>
+    <h2>What changed in the thinking</h2>
+    <p class="lede">
+      The first pass restructured the modal: grouped the variable wall, gave the blast radius a
+      caution band, added a meter. All true, all worth keeping &mdash; and all still in service of a
+      screen whose central object is a textarea. That's the part that was wrong.
+    </p>
+    <div class="reframe">
+      <div class="rf was">
+        <span class="rf-tag">First pass</span>
+        <h3>A better place to type</h3>
+        <p>The template is the object. The operator writes <code>{{contactSummary}}</code>, sees a
+        green pill, and has no idea whether that produces a paragraph or nothing at all.</p>
+        <p>"Affects 12 disputes" is a warning &mdash; a thing to feel bad about and click past.
+        Validation only catches variables that <em>don't exist</em>, never ones that exist and
+        come back empty.</p>
+      </div>
+      <div class="rf is">
+        <span class="rf-tag">This pass</span>
+        <h3>A bench for proofing letters</h3>
+        <p>The rendered letter is the object; the source is the tool that shapes it. You read the
+        letter the way the bank will read it, against a real dispute, and page through the others.</p>
+        <p>"12 disputes" stops being a warning and becomes the <b>proofing set</b>. And every
+        variable gets a coverage count &mdash; how many of those 12 it actually renders on &mdash; so a
+        silent blank becomes a number you can see before you save.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="stage-section" data-annotations="on" data-view="split" data-rail="cov">
+    <div class="eyebrow">02 &mdash; The design</div>
+    <h2>The workspace</h2>
+    <p class="lede">
+      Fully interactive. The letter really renders &mdash; page through the twelve disputes with the
+      arrows and watch blanks and empty sections appear. <strong>Coverage is computed live</strong>
+      from those same twelve records, so every number below is real, not drawn.
+    </p>
+
+    <div class="stage-outer">
+      <div class="toolbar">
+        <span class="tb-label">Theme</span>
+        <div class="seg" id="seg-theme">
+          <button type="button" data-theme-set="light" aria-pressed="true">Light</button>
+          <button type="button" data-theme-set="dark" aria-pressed="false">Dark</button>
+        </div>
+        <span class="spacer"></span>
+        <div class="seg" id="seg-anno">
+          <button type="button" data-anno-set="on" aria-pressed="true">Annotations</button>
+          <button type="button" data-anno-set="off" aria-pressed="false">Clean view</button>
+        </div>
+      </div>
+
+      <div class="stage">
+        <div class="ws" role="group" aria-label="Letter proofing workspace mockup">
+
+          <div class="zone">
+            <button class="pin" type="button" data-pin="1" style="left:-14px;top:14px" aria-label="Annotation 1">1</button>
+            <div class="ws-head">
+              <div class="ws-id">
+                <div class="ws-eyebrow">Category template</div>
+                <h3 class="ws-title">Default</h3>
+              </div>
+              <div class="ws-acts">
+                <button class="linkbtn" type="button">Compare with live</button>
+                <button class="btn" type="button">Close</button>
+                <button class="btn btn-accent" type="button">Save template <b>&#8984;S</b></button>
+              </div>
+            </div>
+          </div>
+
+          <div class="zone">
+            <button class="pin" type="button" data-pin="2" style="left:-14px;top:6px" aria-label="Annotation 2">2</button>
+            <div class="scope">
+              <div class="scope-seg"><span class="scope-dot ok"></span>Re-renders <b>12</b> open disputes</div>
+              <div class="scope-seg"><span class="scope-dot hold"></span><b>3</b> keep hand-edited letters</div>
+              <div class="scope-seg warn"><span class="scope-dot warn"></span><b id="scope-holes">&mdash;</b> read with a broken sentence</div>
+              <span class="grow"></span>
+              <button class="scope-link" type="button">Review all 12 &rarr;</button>
+            </div>
+          </div>
+
+          <div class="ws-body">
+
+            <!-- SOURCE -->
+            <div class="pane pane-source zone">
+              <button class="pin" type="button" data-pin="3" style="left:-14px;top:10px" aria-label="Annotation 3">3</button>
+              <div class="pane-head">
+                <h4>Template</h4>
+                <span class="grow"></span>
+                <div class="seg" id="seg-view">
+                  <button type="button" data-view-set="source" aria-pressed="false">Source</button>
+                  <button type="button" data-view-set="split" aria-pressed="true">Split</button>
+                  <button type="button" data-view-set="letter" aria-pressed="false">Letter</button>
+                </div>
+              </div>
+              <div class="src" id="src" tabindex="0" role="textbox" aria-readonly="true" aria-label="Template source"></div>
+            </div>
+
+            <!-- LETTER -->
+            <div class="pane pane-letter zone">
+              <button class="pin" type="button" data-pin="4" style="left:10px;top:-11px" aria-label="Annotation 4">4</button>
+              <button class="pin" type="button" data-pin="5" style="left:10px;top:150px" aria-label="Annotation 5">5</button>
+              <button class="pin" type="button" data-pin="6" style="left:10px;top:300px" aria-label="Annotation 6">6</button>
+              <div class="pane-head">
+                <h4>Renders as</h4>
+                <span class="grow"></span>
+                <div class="caseNav">
+                  <button type="button" id="case-prev" aria-label="Previous dispute">&#9664;</button>
+                  <span class="caseChip" id="case-chip"></span>
+                  <button type="button" id="case-next" aria-label="Next dispute">&#9654;</button>
+                </div>
+              </div>
+              <div class="letter"><div class="letter-doc" id="letter"></div></div>
+              <div class="letter-legend">
+                <span><i class="lg-v"></i>from dispute data</span>
+                <span><i class="lg-b"></i>renders empty for this dispute</span>
+                <span><i class="lg-a"></i>AI passage</span>
+              </div>
+            </div>
+
+            <!-- RAIL -->
+            <div class="pane rail zone">
+              <button class="pin" type="button" data-pin="7" style="left:10px;top:-11px" aria-label="Annotation 7">7</button>
+              <button class="pin" type="button" data-pin="8" style="left:10px;top:-11px" aria-label="Annotation 8">8</button>
+              <div class="rail-tabs">
+                <button class="rtab" type="button" data-rail-set="cov" aria-pressed="true">Coverage <b id="cov-count"></b></button>
+                <button class="rtab" type="button" data-rail-set="vars" aria-pressed="false">Variables <b>27</b></button>
+              </div>
+              <div class="rail-body">
+                <div class="rail-cov">
+                  <div class="cov-intro">Every variable in this template, across the <b>12 disputes</b> it re-renders. Worst first.</div>
+                  <div id="cov-list"></div>
+                </div>
+                <div class="rail-vars">
+                  <div class="vars-head">
+                    <div class="search">
+                      <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="6" cy="6" r="4.4"/><path d="M9.4 9.4L12.5 12.5"/></svg>
+                      <input type="search" id="var-search" placeholder="Filter 27 variables" aria-label="Filter variables">
+                    </div>
+                    <div class="groups" id="var-groups"></div>
+                  </div>
+                  <div class="chips" id="var-chips"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="ws-foot">
+            <span id="foot-chars"></span>
+            <span class="sep"></span>
+            <span id="foot-vars"></span>
+            <span class="sep"></span>
+            <span class="warnpill" id="foot-warn"></span>
+            <span class="grow"></span>
+            <button class="linkbtn" type="button">Reset this dispute's draft</button>
+            <button class="linkbtn" type="button">Restore original template</button>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+    <div class="legend" id="legend">
+      <div class="note" data-note="1">
+        <div class="n">1</div>
+        <div>
+          <h3>Workspace chrome, not dialog chrome</h3>
+          <p>Save and Close move to the top-right where a workspace keeps them, freeing the bottom
+          edge for status. The title is just the template's name; a mono eyebrow carries what kind
+          of thing it is. <code>Compare with live</code> sits next to Save because "what am I
+          actually changing?" is a question you ask right before committing.</p>
+        </div>
+      </div>
+      <div class="note" data-note="2">
+        <div class="n">2</div>
+        <div>
+          <h3>The blast radius becomes an instrument</h3>
+          <p>The same fact the old paragraph buried &mdash; this hits 12 disputes &mdash; is now three
+          readings: how many re-render, how many are insulated because someone edited them by hand,
+          and <em>how many come out with a sentence broken in half</em>. That third number counts
+          only the failures worth stopping for, not every honest empty section, and it is computed
+          from the template you are editing.</p>
+          <p>A warning tells you to be careful. This tells you what to go look at, and gives you a
+          way in.</p>
+        </div>
+      </div>
+      <div class="note" data-note="3">
+        <div class="n">3</div>
+        <div>
+          <h3>The source is a tool, sized like one</h3>
+          <p>Token highlighting, Markdown headings dropped to muted, function calls outlined.
+          The <code>Source / Split / Letter</code> switch lives on this pane because it governs how
+          much room the source gets &mdash; full width while you write, half while you check, gone while
+          you proofread.</p>
+        </div>
+      </div>
+      <div class="note" data-note="4">
+        <div class="n">4</div>
+        <div>
+          <h3>Proof against a real dispute, then the next one</h3>
+          <p>Not sample data &mdash; an actual case from the 12 this template re-renders, with the
+          arrows to page through them. Most template bugs are invisible on the happy-path record and
+          obvious on the third one you check.</p>
+        </div>
+      </div>
+      <div class="note" data-note="5">
+        <div class="n">5</div>
+        <div>
+          <h3>Values are marked as values</h3>
+          <p>Interpolated text carries a faint accent tint, so you can see at a glance which
+          sentences are authored and which came from the dispute. It's the rendered-side answer to
+          token highlighting, and it makes a letter that's <em>mostly data</em> look different from
+          one that's mostly argument.</p>
+        </div>
+      </div>
+      <div class="note" data-note="6">
+        <div class="n">6</div>
+        <div>
+          <h3>The hole is drawn, not omitted</h3>
+          <p>This is the whole point. A variable that renders empty shows as a hatched gap instead
+          of silently closing up &mdash; and when a blank leaves an entire section with nothing under
+          it, the section gets flagged bodily.</p>
+          <p>Page to dispute 3 and watch <code>## Guest Contact History</code> become a heading with
+          nothing beneath it, while the timeline reads
+          <code>- Mar 30, 2026 -  booked and paid in full.</code> That is what the bank
+          would have received.</p>
+        </div>
+      </div>
+      <div class="note" data-note="7">
+        <div class="n">7</div>
+        <div>
+          <h3>Coverage, graded by how the blank fails</h3>
+          <p>Every variable in the template, ranked worst-first across the proofing set. But a raw
+          fill count would cry wolf, because two variables can both be "empty on 9 of 12" and mean
+          completely different things. The grade comes from <em>where the token sits</em>:</p>
+          <p><code>{{guestName}}</code> sits mid-sentence, so an empty one ships
+          <code>- Jan 08, 2026 -  booked and paid in full.</code> to a bank. Broken prose &mdash;
+          red, and worth stopping for. <code>{{refundStatement}}</code> stands alone on its line,
+          so an empty one collapses its section instead, which the letter already flags bodily.
+          Amber, and often correct: plenty of these disputes genuinely had no refund.</p>
+          <p>The useful part is that this is <strong>derived from the template</strong>, not from a
+          hand-maintained list of which variables are allowed to be blank. Move a token into a
+          sentence and its grade changes by itself. Clicking a row jumps the letter to a dispute
+          where that variable is missing.</p>
+        </div>
+      </div>
+      <div class="note" data-note="8">
+        <div class="n">8</div>
+        <div>
+          <h3>The palette, kept &mdash; but demoted</h3>
+          <p>The grouped, filterable variable rail from the first pass survives intact; it was the
+          right fix for the 27-chip wall. It just isn't the main event anymore, so it shares the
+          rail with Coverage instead of occupying the bottom of the screen. Chips already used in
+          the template carry the accent.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="eyebrow">03 &mdash; Scope</div>
+    <h2>What's re-layout, and what's new</h2>
+    <p class="lede">
+      You scoped the first pass form-only. This one isn't, and I'd rather say so plainly than bury
+      it &mdash; the proofing idea needs behavior that doesn't exist yet. Everything in the first
+      block is free; everything in the second is a real build, listed so you can cut it.
+    </p>
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>Piece</th><th>Kind</th><th>What it needs</th></tr></thead>
+        <tbody>
+          <tr><td>Workspace layout, header, status bar</td><td><span class="pill form">form</span></td>
+            <td>Markup and CSS in the existing modal shell. Same open/close path.</td></tr>
+          <tr><td>Token highlighting, grouped variable rail</td><td><span class="pill form">form</span></td>
+            <td>Carried over from the first pass. No logic change.</td></tr>
+          <tr><td>Source / Split / Letter switch</td><td><span class="pill form">form</span></td>
+            <td>One piece of local state.</td></tr>
+          <tr><td>Rendered letter preview</td><td><span class="pill newcap">new</span></td>
+            <td><code>renderTemplate()</code> already exists and is tested &mdash; this calls it against
+            one dispute's vars and renders the Markdown. The cheapest new capability here.</td></tr>
+          <tr><td>Blank + empty-section marking</td><td><span class="pill newcap">new</span></td>
+            <td>Render with sentinel values instead of <code>""</code>, then mark them. Purely a
+            render-time concern; the saved template is untouched.</td></tr>
+          <tr><td>Dispute pager</td><td><span class="pill newcap">new</span></td>
+            <td>The list of disputes this category template affects, plus their built vars.
+            The panel knows the category; the query is the work.</td></tr>
+          <tr><td>Coverage</td><td><span class="pill newcap">new</span></td>
+            <td>Build vars for all N disputes, count non-empty per variable. Needs the same query as
+            the pager, so they ship together or not at all.</td></tr>
+          <tr><td>Blank severity grading</td><td><span class="pill form">free</span></td>
+            <td>Derived from the template by checking whether a token shares its line with prose.
+            No catalog flag, no new field, nothing to keep in sync &mdash; about fifteen lines.</td></tr>
+          <tr><td>Compare with live</td><td><span class="pill newcap">new</span></td>
+            <td>A diff of editor text against the saved template. Nice, not load-bearing &mdash; cut
+            first if something has to go.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="lede" style="margin-top:22px">
+      If you want only the free half, it degrades honestly: the workspace layout, the switch, and
+      the rail all stand on their own, and the letter pane becomes a preview against the single
+      dispute already open in the panel &mdash; still better than editing blind, without the query work.
+    </p>
+  </section>
+
+  <p class="closing">
+    Built on the app's own system &mdash; Instrument Serif, Inter Tight, JetBrains Mono, the Taupe-Grey
+    ramp, the green accent, <code>--amber-*</code> for caution, <code>--pos</code>/<code>--neg</code>
+    for coverage severity. No new color tokens. The twelve disputes are fixtures drawn from
+    <code>lib/fixtures.ts</code>'s real reason codes, providers, and merchants; coverage is computed
+    from them at runtime, so nothing in the rail is a drawing.
+  </p>
+
+  <p class="closing" style="margin-top:-58px">
+    One finding worth passing on, from measuring this page: the shipped primary button pair &mdash;
+    <code>--accent-fg</code> white on <code>--accent</code> green &mdash; measures
+    <strong>2.41:1</strong>, well under the 4.5 floor for its 13px label, in both themes. The Save
+    button above is left exactly as the app renders it rather than quietly corrected inside one
+    mockup, because it is an app-wide token pair and not a template-editor decision. Dropping
+    <code>--accent</code> to roughly <code>oklch(0.52 0.16 145)</code> for button surfaces clears it
+    without moving the hue. Everything else on this page measures above 4.5 in both themes.
+  </p>
+
+</div>
+
+<script>
+(function () {
+  var root = document.documentElement;
+  var sec  = document.getElementById("stage-section");
+
+  /* ============================ the template ============================ */
+  var TPL = [
+    "## Cover Letter",
+    "",
+    "To the Dispute Resolution Team:",
+    "",
+    "We are writing in response to chargeback case {{caseNumber}} regarding a charge of {{amountFormatted}} on a {{cardBrand}} card ending in {{last4}}, received {{disputeDate}} under reason code {{reasonCode}} ({{reasonLabel}}).",
+    "",
+    "{{merchantName}} sells prepaid vacation packages and reservations by phone. Charges settle at booking time, before travel; a booked package has value whether or not the guest ultimately travels.",
+    "",
+    "## Timeline",
+    "",
+    "- {{settledDate}} - {{guestName}} booked and paid in full.",
+    "- {{disputeDate}} - Chargeback filed by the issuing bank.",
+    "- {{todayDate}} - This response submitted.",
+    "",
+    "## What Was Purchased",
+    "",
+    "{{chargeDetail}}",
+    "",
+    "## Guest Contact History",
+    "",
+    "{{contactSummary}}",
+    "",
+    "{{ llm(\"summarize the guest contact history\", guestNotes) }}",
+    "",
+    "## Refund Position",
+    "",
+    "{{refundStatement}}",
+    "",
+    "## Closing",
+    "",
+    "We ask that this dispute be resolved in the merchant's favor. Reference {{referenceNumber}}."
+  ].join("\n");
+
+  /* How a blank FAILS depends on where the token sits, and that is derivable
+     from the template itself - no hand-maintained catalog flag needed.
+       inline  {{guestName}} mid-sentence -> an empty leaves broken prose:
+               "- Jan 08, 2026 -  booked and paid in full."
+       block   {{refundStatement}} alone on its line -> an empty collapses the
+               section, which the letter already flags bodily.
+     Same blank, two different severities. Conflating them is what makes a
+     coverage readout cry wolf. */
+  function placement(t, key) {
+    var lines = t.split("\n");
+    for (var i = 0; i < lines.length; i++) {
+      if (lines[i].indexOf("{{" + key + "}}") === -1) continue;
+      var rest = lines[i].replace(/\{\{[^}]*\}\}/g, "").replace(/^-\s*/, "")
+                         .replace(/[\s-]+/g, " ").trim();
+      if (rest !== "") return "inline";
+    }
+    return "block";
+  }
+
+  /* ============================ 12 real-ish disputes ============================ */
+  var M = "Monster Reservations Group";
+  function d(o) {
+    var base = { merchantName:M, provider:"TRX", todayDate:"Aug 25, 2026",
+      guestEmail:"", chargeDetail:"", contactSummary:"", refundStatement:"", guestName:"" };
+    for (var k in o) base[k] = o[k];
+    return base;
+  }
+  var DISPUTES = [
+    d({ caseNumber:"TRX-9F2C-4A81-1041", guestName:"Marcus Holloway", amountFormatted:"$2,340.00",
+        cardBrand:"Mastercard", last4:"8842", reasonCode:"10.4", reasonLabel:"Fraud - card-absent environment",
+        disputeDate:"May 12, 2026", settledDate:"Jan 08, 2026", referenceNumber:"MCRM-2026-05241",
+        chargeDetail:"Monster Week package for two, Cabo San Lucas, Mar 14-21 2026, paid in full at booking.",
+        contactSummary:"The guest contacted us three times between January and March; recordings are available for call IDs 88213, 88490 and 89122." }),
+    d({ caseNumber:"TRX-C2A9-7F13-1003", guestName:"Priya Sharma", amountFormatted:"$1,489.00",
+        cardBrand:"Visa", last4:"2207", reasonCode:"13.7", reasonLabel:"Cancelled merchandise/services",
+        disputeDate:"Jun 02, 2026", settledDate:"Feb 19, 2026", referenceNumber:"MCRM-2026-04023",
+        chargeDetail:"Monster Isle Resorts, seven-night stay, Apr 03-10 2026, non-refundable rate.",
+        contactSummary:"The guest contacted us twice in February; a recording is available for call ID 90455.",
+        refundStatement:"A partial refund of $220.00 was issued on Mar 02, 2026 for the resort fee only." }),
+    d({ caseNumber:"TRX-D7B4-2E05-1004", amountFormatted:"$204.99",
+        cardBrand:"Visa", last4:"5318", reasonCode:"12.5", reasonLabel:"Incorrect amount",
+        disputeDate:"Jun 14, 2026", settledDate:"Mar 30, 2026", referenceNumber:"MCRM-2026-06110",
+        chargeDetail:"Monster Spa & Wellness day package, single guest, Apr 22 2026." }),
+    d({ caseNumber:"NXO-4471-B0C2-2210", guestName:"Daniel Okafor", amountFormatted:"$3,120.00",
+        cardBrand:"Amex", last4:"1009", reasonCode:"13.1", reasonLabel:"Merchandise/services not received",
+        disputeDate:"Jun 28, 2026", settledDate:"Dec 11, 2025", referenceNumber:"MCRM-2025-11884",
+        provider:"Nexio", merchantName:"Monster Isle Resorts",
+        chargeDetail:"Monster Isle Resorts, ocean-view suite, ten nights, Feb 02-12 2026.",
+        contactSummary:"The guest contacted us once in January; a recording is available for call ID 87001." }),
+    d({ caseNumber:"NXO-4468-9D31-2214", amountFormatted:"$862.50",
+        cardBrand:"Visa", last4:"7734", reasonCode:"4853", reasonLabel:"Goods/Services not received",
+        disputeDate:"Jul 03, 2026", settledDate:"Apr 05, 2026", referenceNumber:"MCRM-2026-07002",
+        provider:"Nexio",
+        contactSummary:"The guest contacted us four times in April and May; recordings are available for call IDs 91204, 91330, 91807 and 92016.",
+        refundStatement:"A full refund of $862.50 was issued on Jul 09, 2026." }),
+    d({ caseNumber:"TRX-A102-5C77-1052", guestName:"Sasha Neruda", amountFormatted:"$1,975.00",
+        cardBrand:"Mastercard", last4:"4460", reasonCode:"13.1", reasonLabel:"Merchandise/services not received",
+        disputeDate:"Jul 08, 2026", settledDate:"Feb 27, 2026", referenceNumber:"MCRM-2026-05590",
+        chargeDetail:"Monster Week package for four, Playa del Carmen, May 01-08 2026.",
+        contactSummary:"The guest contacted us twice in March; recordings are available for call IDs 89440 and 89512." }),
+    d({ caseNumber:"AMX-7781-1F40-3301", guestName:"Theo Lindqvist", amountFormatted:"$4,410.00",
+        cardBrand:"Amex", last4:"3002", reasonCode:"4837", reasonLabel:"No cardholder authorization",
+        disputeDate:"Jul 15, 2026", settledDate:"Nov 22, 2025", referenceNumber:"MCRM-2025-10442",
+        provider:"AMEX", merchantName:"Monster Cruises",
+        chargeDetail:"Monster Cruises, seven-night Caribbean itinerary, balcony stateroom, Jan 18-25 2026." }),
+    d({ caseNumber:"NMI-2260-8E19-4407", guestName:"Alex Duran", amountFormatted:"$389.00",
+        cardBrand:"Discover", last4:"6621", reasonCode:"13.7", reasonLabel:"Cancelled merchandise/services",
+        disputeDate:"Jul 21, 2026", settledDate:"May 14, 2026", referenceNumber:"MCRM-2026-08115",
+        provider:"NMI", merchantName:"Monster Spa & Wellness",
+        chargeDetail:"Monster Spa & Wellness weekend retreat, single occupancy, Jun 06-08 2026.",
+        contactSummary:"The guest contacted us once in June; a recording is available for call ID 93380.",
+        refundStatement:"A partial refund of $89.00 was issued on Jun 30, 2026 for the unused treatment credit." }),
+    d({ caseNumber:"TRX-B845-3A20-1061", guestName:"Maya Restrepo", amountFormatted:"$2,088.00",
+        cardBrand:"Visa", last4:"9915", reasonCode:"11.3", reasonLabel:"No authorization",
+        disputeDate:"Jul 30, 2026", settledDate:"Mar 12, 2026", referenceNumber:"MCRM-2026-06318",
+        chargeDetail:"Monster Week package for two, Tulum, Jun 12-19 2026.",
+        contactSummary:"The guest contacted us three times in June; recordings are available for call IDs 92771, 92890 and 93104." }),
+    d({ caseNumber:"TRX-E330-6B58-1066", guestName:"Jordan Vail", amountFormatted:"$1,150.00",
+        cardBrand:"Mastercard", last4:"2288", reasonCode:"4855", reasonLabel:"Non-receipt of merchandise",
+        disputeDate:"Aug 04, 2026", settledDate:"Apr 28, 2026", referenceNumber:"MCRM-2026-07741",
+        chargeDetail:"Monster Adventures guided excursion package, two guests, Jul 09-13 2026.",
+        provider:"Everyware", merchantName:"Monster Adventures" }),
+    d({ caseNumber:"NXO-4502-C7A6-2231", guestName:"Nadia Farouk", amountFormatted:"$2,740.00",
+        cardBrand:"Visa", last4:"5107", reasonCode:"13.1", reasonLabel:"Merchandise/services not received",
+        disputeDate:"Aug 11, 2026", settledDate:"Jan 30, 2026", referenceNumber:"MCRM-2026-03209",
+        provider:"Nexio", merchantName:"Monster Isle Resorts",
+        chargeDetail:"Monster Isle Resorts, garden villa, six nights, Mar 20-26 2026.",
+        contactSummary:"The guest contacted us twice in February; recordings are available for call IDs 88902 and 89033." }),
+    d({ caseNumber:"TRX-F914-0D72-1074", amountFormatted:"$675.00",
+        cardBrand:"Visa", last4:"8043", reasonCode:"13.7", reasonLabel:"Cancelled merchandise/services",
+        disputeDate:"Aug 18, 2026", settledDate:"Jun 02, 2026", referenceNumber:"MCRM-2026-08890",
+        chargeDetail:"Monster Adventures day excursion, four guests, Jul 24 2026.",
+        provider:"Everyware", merchantName:"Monster Adventures" })
+  ];
+
+  /* ============================ template parsing ============================ */
+  var TOKEN = /\{\{\s*([^}]+?)\s*\}\}/g;
+  function tokensIn(t) {
+    var out = [], m; TOKEN.lastIndex = 0;
+    while ((m = TOKEN.exec(t)) !== null) out.push(m[1]);
+    return out;
+  }
+  function isFn(k) { return k.indexOf("(") !== -1; }
+
+  function esc(s) {
+    return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  }
+
+  /* ---- source view: highlight headings, tokens, functions ---- */
+  function renderSource(t) {
+    var html = esc(t).replace(/\{\{\s*([^}]+?)\s*\}\}/g, function (whole, key) {
+      var cls = isFn(key) ? "tok fn" : "tok";
+      if (!isFn(key) && !(key in DISPUTES[0])) cls = "tok bad";
+      return '<span class="' + cls + '">' + whole + "</span>";
+    });
+    html = html.replace(/^(##\s.*)$/gm, '<span class="h">$1</span>');
+    return html + '<span class="caret"></span>';
+  }
+
+  /* ---- letter view: render Markdown-ish against one dispute ---- */
+  function interpolate(line, vars) {
+    return esc(line).replace(/\{\{\s*([^}]+?)\s*\}\}/g, function (whole, key) {
+      if (isFn(key)) {
+        return '<span class="v-ai">The guest reached out repeatedly over several months, '
+             + 'consistently about the same booking.</span>';
+      }
+      var val = vars[key];
+      if (val === undefined || val === null || val === "") {
+        return '<span class="v-blank" title="' + esc(key) + ' renders empty for this dispute"></span>';
+      }
+      return '<span class="v">' + esc(val) + "</span>";
+    });
+  }
+
+  function renderLetter(t, vars) {
+    var lines = t.split("\n");
+    var blocks = [], cur = null;
+    function flush() { if (cur) { blocks.push(cur); cur = null; } }
+    for (var i = 0; i < lines.length; i++) {
+      var raw = lines[i];
+      if (raw.trim() === "") { flush(); continue; }
+      if (raw.indexOf("## ") === 0) {
+        flush();
+        blocks.push({ kind: "h", html: esc(raw.slice(3)) });
+        continue;
+      }
+      if (raw.indexOf("- ") === 0) {
+        if (!cur || cur.kind !== "ul") { flush(); cur = { kind: "ul", items: [] }; }
+        cur.items.push(interpolate(raw.slice(2), vars));
+        continue;
+      }
+      if (!cur || cur.kind !== "p") { flush(); cur = { kind: "p", parts: [] }; }
+      cur.parts.push(interpolate(raw, vars));
+    }
+    flush();
+
+    /* A block is "empty" when everything it renders is a blank marker. */
+    function isEmptyBlock(b) {
+      if (b.kind === "h") return false;
+      var txt = (b.kind === "ul" ? b.items.join("") : b.parts.join(""));
+      var stripped = txt.replace(/<span class="v-blank"[^>]*><\/span>/g, "")
+                        .replace(/<[^>]+>/g, "").trim();
+      return stripped === "";
+    }
+
+    var out = [], k = 0;
+    while (k < blocks.length) {
+      var b = blocks[k];
+      if (b.kind === "h") {
+        /* gather this section's body blocks */
+        var body = [], j = k + 1;
+        while (j < blocks.length && blocks[j].kind !== "h") { body.push(blocks[j]); j++; }
+        var allEmpty = body.length > 0 && body.every(isEmptyBlock);
+        var inner = "<h4>" + b.html + "</h4>" + body.map(blockHtml).join("");
+        if (allEmpty) {
+          out.push('<div class="sec-empty"><h4>' + b.html + "</h4>"
+            + '<div class="flag">'
+            + '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M8 1.6l6.2 11.2H1.8L8 1.6z"/><path d="M8 6.4v3.1"/><path d="M8 11.3h.01"/></svg>'
+            + "This section renders with nothing under it for this dispute.</div>"
+            + body.map(blockHtml).join("") + "</div>");
+        } else {
+          out.push(inner);
+        }
+        k = j;
+        continue;
+      }
+      out.push(blockHtml(b));
+      k++;
+    }
+    return out.join("");
+  }
+  function blockHtml(b) {
+    if (b.kind === "ul") return "<ul><li>" + b.items.join("</li><li>") + "</li></ul>";
+    return "<p>" + b.parts.join(" ") + "</p>";
+  }
+
+  /* ============================ coverage ============================ */
+  var RANK = { unknown:0, broken:1, hollow:2, ok:3 };
+  function coverage(t) {
+    var keys = tokensIn(t).filter(function (k) { return !isFn(k); });
+    var seen = {}, order = [];
+    keys.forEach(function (k) { if (!seen[k]) { seen[k] = 1; order.push(k); } });
+    return order.map(function (key) {
+      var filled = 0;
+      DISPUTES.forEach(function (dd) {
+        var v = dd[key];
+        if (v !== undefined && v !== null && v !== "") filled++;
+      });
+      var known = (key in DISPUTES[0]);
+      var where = placement(t, key);
+      var kind = !known ? "unknown"
+               : filled === DISPUTES.length ? "ok"
+               : where === "inline" ? "broken" : "hollow";
+      return { key:key, filled:filled, total:DISPUTES.length, where:where, kind:kind };
+    }).sort(function (a, b) {
+      if (RANK[a.kind] !== RANK[b.kind]) return RANK[a.kind] - RANK[b.kind];
+      if (a.filled !== b.filled) return a.filled - b.filled;
+      return a.key.localeCompare(b.key);
+    });
+  }
+
+  /* ============================ paint ============================ */
+  var idx = 0;
+  var COV = coverage(TPL);
+
+  function paintLetter() {
+    var dd = DISPUTES[idx];
+    document.getElementById("letter").innerHTML = renderLetter(TPL, dd);
+    document.getElementById("case-chip").innerHTML =
+      esc(dd.caseNumber) + ' <span>&middot; ' + (idx + 1) + " of " + DISPUTES.length + "</span>";
+  }
+
+  function paintCoverage() {
+    var host = document.getElementById("cov-list");
+    host.textContent = "";
+    COV.forEach(function (c) {
+      var pct = Math.round((c.filled / c.total) * 100);
+      var miss = c.total - c.filled;
+      var b = document.createElement("button");
+      b.type = "button";
+      b.className = "cov-row " + c.kind;
+      b.setAttribute("data-key", c.key);
+      var note = "";
+      if (c.kind === "unknown") {
+        note = "Not in the vocabulary - renders blank on every dispute.";
+      } else if (c.kind === "broken") {
+        note = "Sits mid-sentence. On " + miss + " of them the letter reads with a hole in it.";
+      } else if (c.kind === "hollow") {
+        note = "Stands alone, so on " + miss + " the section renders empty. Flagged in the letter.";
+      }
+      note = note ? '<div class="cov-note">' + note + "</div>" : "";
+      b.innerHTML =
+        '<div class="cov-top"><span class="cov-key">' + esc(c.key) + "</span>"
+        + '<span class="cov-n">' + c.filled + "/" + c.total + "</span></div>"
+        + '<div class="cov-bar"><i style="width:' + pct + '%"></i></div>' + note;
+      host.appendChild(b);
+    });
+    document.getElementById("cov-count").textContent = String(COV.length);
+
+    /* The header's third reading counts only the failures worth acting on:
+       disputes where a blank lands MID-SENTENCE and breaks the prose. Counting
+       every honest empty section here is what turns a readout into noise. */
+    var broken = COV.filter(function (c) { return c.kind === "broken" || c.kind === "unknown"; });
+    var holes = 0;
+    DISPUTES.forEach(function (dd) {
+      var bad = broken.some(function (c) {
+        var v = dd[c.key];
+        return (v === undefined || v === null || v === "");
+      });
+      if (bad) holes++;
+    });
+    document.getElementById("scope-holes").textContent = String(holes);
+
+    var toks = tokensIn(TPL);
+    document.getElementById("foot-chars").textContent =
+      TPL.length.toLocaleString() + " / 8,000 characters";
+    document.getElementById("foot-vars").textContent =
+      COV.length + " variables, " + toks.filter(isFn).length + " function";
+    var risky = COV.filter(function (c) { return c.kind === "broken" || c.kind === "unknown"; }).length;
+    document.getElementById("foot-warn").textContent =
+      risky === 0 ? "no broken prose"
+                  : risky + (risky === 1 ? " variable breaks" : " variables break") + " a sentence";
+  }
+
+  document.getElementById("src").innerHTML = renderSource(TPL);
+  paintLetter();
+  paintCoverage();
+
+  /* ============================ interaction ============================ */
+  function bindSeg(id, attr, apply) {
+    var box = document.getElementById(id);
+    if (!box) return;
+    box.addEventListener("click", function (e) {
+      var btn = e.target.closest("button[" + attr + "]");
+      if (!btn) return;
+      Array.prototype.forEach.call(box.querySelectorAll("button"), function (b) {
+        b.setAttribute("aria-pressed", String(b === btn));
+      });
+      apply(btn.getAttribute(attr));
+    });
+  }
+  bindSeg("seg-theme", "data-theme-set", function (v) { root.setAttribute("data-theme", v); });
+  bindSeg("seg-anno",  "data-anno-set",  function (v) { sec.setAttribute("data-annotations", v); });
+  bindSeg("seg-view",  "data-view-set",  function (v) { sec.setAttribute("data-view", v); });
+
+  document.querySelector(".rail-tabs").addEventListener("click", function (e) {
+    var b = e.target.closest("[data-rail-set]");
+    if (!b) return;
+    Array.prototype.forEach.call(document.querySelectorAll(".rtab"), function (t) {
+      t.setAttribute("aria-pressed", String(t === b));
+    });
+    sec.setAttribute("data-rail", b.getAttribute("data-rail-set"));
+  });
+
+  function step(n) {
+    idx = (idx + n + DISPUTES.length) % DISPUTES.length;
+    paintLetter();
+  }
+  document.getElementById("case-prev").addEventListener("click", function () { step(-1); });
+  document.getElementById("case-next").addEventListener("click", function () { step(1); });
+
+  /* clicking a coverage row jumps to a dispute where that variable is blank */
+  document.getElementById("cov-list").addEventListener("click", function (e) {
+    var row = e.target.closest(".cov-row");
+    if (!row) return;
+    var key = row.getAttribute("data-key");
+    for (var i = 0; i < DISPUTES.length; i++) {
+      var j = (idx + 1 + i) % DISPUTES.length;
+      var v = DISPUTES[j][key];
+      if (v === undefined || v === null || v === "") { idx = j; paintLetter(); return; }
+    }
+    sec.setAttribute("data-view", "letter");
+  });
+
+  /* theme: reflect the viewer's resolved preference on first paint */
+  try {
+    if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) {
+      root.setAttribute("data-theme", "dark");
+      var tb = document.querySelectorAll("#seg-theme button");
+      if (tb.length === 2) {
+        tb[0].setAttribute("aria-pressed", "false");
+        tb[1].setAttribute("aria-pressed", "true");
+      }
+    }
+  } catch (err) { /* a nicety, never a blocker */ }
+
+  /* pins -> legend */
+  document.addEventListener("click", function (e) {
+    var pin = e.target.closest(".pin");
+    if (!pin) return;
+    var n = pin.getAttribute("data-pin");
+    var note = document.querySelector('.note[data-note="' + n + '"]');
+    Array.prototype.forEach.call(document.querySelectorAll(".note, .pin"), function (el) {
+      el.classList.remove("is-live");
+    });
+    if (note) {
+      note.classList.add("is-live");
+      pin.classList.add("is-live");
+      note.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  });
+
+  /* ============================ variable palette ============================ */
+  var GROUPS = [
+    { name:"Guest",  vars:[["guestName","Guest name (blank when unknown)"],["guestEmail","Guest email"],
+      ["contactSummary","Honest contact-history sentence, with call IDs"],
+      ["contactCount","How many times the guest contacted us"],["callIds","Call IDs whose recordings we can produce"]] },
+    { name:"Case",   vars:[["caseNumber","Case number"],["merchantName","Merchant display name"],["provider","Provider"],
+      ["referenceNumber","Reference number"],["reasonCode","Reason code"],["reasonLabel","Reason meaning"],
+      ["disputeContext","Operator context for this dispute"]] },
+    { name:"Charge", vars:[["amountFormatted","Disputed amount ($1,234.56)"],["cardBrand","Card brand"],
+      ["last4","Card last 4"],["chargeDetail","Matched charge detail (what was purchased)"]] },
+    { name:"Refund", vars:[["refundStatement","Honest refund sentence (empty when none)"],
+      ["refundKind","Refund kind (none / partial / full / unknown)"],
+      ["refundedAmountFormatted","Known refunded total ($, blank when unknown)"],
+      ["refundedDate","Matched payment refund date (ET)"]] },
+    { name:"Dates",  vars:[["disputeDate","Dispute date (ET)"],["receivedDate","Received date (provider)"],
+      ["settledDate","Matched payment settled date (ET)"],["todayDate","Today (ET)"]] },
+    { name:"Raw",    vars:[["raw.MerchantComment","Raw: bank request text"],["raw.ExceptionType","Raw: exception type"]] },
+    { name:"AI",     vars:[["llm(...)","AI-written passage from a prompt plus dispute facts"]] }
+  ];
+  var USED = {};
+  tokensIn(TPL).forEach(function (k) { USED[isFn(k) ? "llm(...)" : k] = 1; });
+
+  var tabsBox = document.getElementById("var-groups");
+  var chipsBox = document.getElementById("var-chips");
+  var search = document.getElementById("var-search");
+  var activeGroup = "Case";
+
+  GROUPS.forEach(function (g) {
+    var b = document.createElement("button");
+    b.type = "button"; b.className = "gtab";
+    b.setAttribute("data-group", g.name);
+    b.setAttribute("aria-pressed", String(g.name === activeGroup));
+    b.innerHTML = g.name + " <b>" + g.vars.length + "</b>";
+    tabsBox.appendChild(b);
+  });
+
+  function paintChips() {
+    var q = (search.value || "").trim().toLowerCase();
+    var rows = [];
+    GROUPS.forEach(function (g) {
+      g.vars.forEach(function (v) {
+        var hit = q ? (v[0].toLowerCase().indexOf(q) !== -1 || v[1].toLowerCase().indexOf(q) !== -1)
+                    : g.name === activeGroup;
+        if (hit) rows.push(v);
+      });
+    });
+    chipsBox.textContent = "";
+    if (rows.length === 0) {
+      var none = document.createElement("span");
+      none.style.cssText = "font-size:12px;color:var(--fg-read)";
+      none.textContent = "No variable matches that.";
+      chipsBox.appendChild(none);
+      return;
+    }
+    rows.forEach(function (v) {
+      var c = document.createElement("span");
+      c.className = "chip" + (USED[v[0]] ? " used" : "") + (v[0] === "llm(...)" ? " ai" : "");
+      c.setAttribute("draggable", "true");
+      var label = document.createElement("span"); label.textContent = v[0];
+      var tip = document.createElement("span"); tip.className = "tip"; tip.textContent = v[1];
+      c.appendChild(label); c.appendChild(tip);
+      chipsBox.appendChild(c);
+    });
+  }
+  tabsBox.addEventListener("click", function (e) {
+    var b = e.target.closest(".gtab");
+    if (!b) return;
+    activeGroup = b.getAttribute("data-group");
+    search.value = "";
+    Array.prototype.forEach.call(tabsBox.querySelectorAll(".gtab"), function (t) {
+      t.setAttribute("aria-pressed", String(t === b));
+    });
+    paintChips();
+  });
+  search.addEventListener("input", function () {
+    var searching = search.value.trim() !== "";
+    Array.prototype.forEach.call(tabsBox.querySelectorAll(".gtab"), function (t) {
+      t.setAttribute("aria-pressed", String(!searching && t.getAttribute("data-group") === activeGroup));
+    });
+    paintChips();
+  });
+  paintChips();
+})();
+</script>

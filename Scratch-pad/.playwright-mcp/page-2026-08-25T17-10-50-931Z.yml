@@ -1,0 +1,358 @@
+- generic [ref=f2e2]:
+  - banner [ref=f2e3]:
+    - generic [ref=f2e4]: Chargeback Portal Â· Design proposal Â· Form only
+    - heading "Template Editor Redesign" [level=1] [ref=f2e5]
+    - paragraph [ref=f2e6]:
+      - text: The response-template editor already does the right things â€”
+      - strong [ref=f2e7]: "{{ autocomplete, drag-in chips, reset paths, save-time validation"
+      - text: â€” and hides almost all of them. This is a rebuild of the
+      - strong [ref=f2e8]: form
+      - text: "only: same modal, same behaviors, same code paths, restructured so an operator can see what they're about to change and find the variable they need without reading a wall."
+    - generic [ref=f2e9]:
+      - generic [ref=f2e10]:
+        - term [ref=f2e11]: Container
+        - definition [ref=f2e12]: Centered modal, retained
+      - generic [ref=f2e13]:
+        - term [ref=f2e14]: Direction
+        - definition [ref=f2e15]: Modernized inside the palette
+      - generic [ref=f2e16]:
+        - term [ref=f2e17]: System
+        - definition [ref=f2e18]: Existing tokens, zero new hues
+      - generic [ref=f2e19]:
+        - term [ref=f2e20]: Stack
+        - definition [ref=f2e21]: Fresh 2 Â· Preact Â· plain CSS
+  - generic [ref=f2e22]:
+    - generic [ref=f2e23]: 01 â€” The read
+    - heading "What the current screen costs" [level=2] [ref=f2e24]
+    - paragraph [ref=f2e25]:
+      - text: Five problems, all of them layout and hierarchy. None of them require touching
+      - code [ref=f2e26]: intellisense.ts
+      - text: ","
+      - code [ref=f2e27]: model.ts
+      - text: ", or any save path."
+    - generic [ref=f2e28]:
+      - generic [ref=f2e29]:
+        - generic [ref=f2e30]: Wall
+        - heading "27 undifferentiated chips" [level=3] [ref=f2e31]
+        - paragraph [ref=f2e32]:
+          - text: The palette dumps every variable and the
+          - code [ref=f2e33]: llm()
+          - text: snippet into one flat run of ghost buttons. Nothing groups them, nothing filters them, and the
+          - code [ref=f2e34]: btn-ghost
+          - text: styling gives them no edge â€” they read as prose, not as draggable objects.
+      - generic [ref=f2e35]:
+        - generic [ref=f2e36]: Buried
+        - heading "Blast radius as body copy" [level=3] [ref=f2e37]
+        - paragraph [ref=f2e38]: "â€œThis edits the CATEGORY template â€” every dispute it wins re-renders itâ€\x9d is the single most consequential fact on the screen, and it's set as a muted grey paragraph the eye skips on the way to the textarea."
+      - generic [ref=f2e39]:
+        - generic [ref=f2e40]: Typo
+        - heading "A missing space, shipping" [level=3] [ref=f2e41]
+        - paragraph [ref=f2e42]:
+          - text: The paragraph renders as
+          - code [ref=f2e43]: "â€¦including this.{{variable}} interpolatesâ€¦"
+          - text: "â€” two sentences fused. It's a symptom: that paragraph is carrying scope warning, syntax tutorial, and a cross-reference at once."
+      - generic [ref=f2e44]:
+        - generic [ref=f2e45]: Flat
+        - heading "No state, anywhere" [level=3] [ref=f2e46]
+        - paragraph [ref=f2e47]:
+          - text: Nothing shows whether there are unsaved edits, how close the template is to the 8,000-character ceiling, or which variables are already in use.
+          - emphasis [ref=f2e48]: Save template
+          - text: silently disables itself with no explanation.
+      - generic [ref=f2e49]:
+        - generic [ref=f2e50]: Weight
+        - heading "Four buttons, one voice" [level=3] [ref=f2e51]
+        - paragraph [ref=f2e52]:
+          - emphasis [ref=f2e53]: Reset to template
+          - text: rewrites this dispute's draft.
+          - emphasis [ref=f2e54]: Use default template
+          - text: discards the authored text.
+          - emphasis [ref=f2e55]: Close
+          - text: does nothing. All three carry identical weight, and the two that destroy work sit closest to the primary.
+      - generic [ref=f2e56]:
+        - generic [ref=f2e57]: Raw
+        - heading "An unstyled text well" [level=3] [ref=f2e58]
+        - paragraph [ref=f2e59]:
+          - text: The textarea is a bare monospace box.
+          - code [ref=f2e60]: "{{tokens}}"
+          - text: â€” the whole point of the format â€” get no visual separation from the prose they sit inside, so proofreading a letter means hunting for braces.
+  - generic [ref=f2e61]:
+    - generic [ref=f2e62]: 02 â€” The proposal
+    - heading "The rebuilt modal" [level=2] [ref=f2e63]
+    - paragraph [ref=f2e64]: "Interactive: switch themes, toggle the annotation pins, and step through the four states the modal actually has. The variable tabs and the search field are live."
+    - generic [ref=f2e65]:
+      - generic [ref=f2e66]:
+        - generic [ref=f2e67]: Theme
+        - generic [ref=f2e68]:
+          - button "Light" [pressed] [ref=f2e69] [cursor=pointer]
+          - button "Dark" [ref=f2e70] [cursor=pointer]
+        - generic [ref=f2e71]: State
+        - generic [ref=f2e72]:
+          - button "Clean" [pressed] [ref=f2e73] [cursor=pointer]
+          - button "Unsaved" [ref=f2e74] [cursor=pointer]
+          - button "Warning" [ref=f2e75] [cursor=pointer]
+          - 'button "Typing {{" [ref=f2e76] [cursor=pointer]'
+        - generic [ref=f2e77]:
+          - button "Annotations" [pressed] [ref=f2e78] [cursor=pointer]
+          - button "Clean view" [ref=f2e79] [cursor=pointer]
+      - group "Template editor mockup" [ref=f2e81]:
+        - generic [ref=f2e82]:
+          - button "Annotation 1" [ref=f2e83] [cursor=pointer]: "1"
+          - generic [ref=f2e84]:
+            - generic [ref=f2e85]:
+              - generic [ref=f2e86]: Category template
+              - heading "Default" [level=3] [ref=f2e87]
+            - button "Close" [ref=f2e88] [cursor=pointer]
+        - generic [ref=f2e91]:
+          - button "Annotation 2" [ref=f2e92] [cursor=pointer]: "2"
+          - paragraph [ref=f2e96]: Saving re-renders 12 open disputes in this category. Letters an operator has already edited by hand keep their own text.
+        - generic [ref=f2e97]:
+          - button "Annotation 3" [ref=f2e98] [cursor=pointer]: "3"
+          - generic [ref=f2e99]:
+            - heading "Letter template" [level=4] [ref=f2e100]
+            - generic [ref=f2e101]: "Markdown Â· {{variables}}"
+          - generic [ref=f2e102]:
+            - textbox "Template source" [ref=f2e103]
+            - generic [ref=f2e105]:
+              - generic [ref=f2e106]: 1,412 / 8,000
+              - generic [ref=f2e109]: 13 variables Â· 1 function
+        - generic [ref=f2e110]:
+          - button "Annotation 5" [ref=f2e111] [cursor=pointer]: "5"
+          - generic [ref=f2e112]:
+            - generic [ref=f2e113]:
+              - heading "Variables" [level=4] [ref=f2e114]
+              - generic [ref=f2e115]:
+                - text: Type
+                - code [ref=f2e116]: "{{"
+                - text: in the letter, or drag a chip in
+              - searchbox "Filter variables" [ref=f2e121]
+            - group "Variable groups" [ref=f2e122]:
+              - button "Guest 5" [pressed] [ref=f2e123] [cursor=pointer]:
+                - text: Guest
+                - generic [ref=f2e124]: "5"
+              - button "Case 7" [ref=f2e125] [cursor=pointer]:
+                - text: Case
+                - generic [ref=f2e126]: "7"
+              - button "Charge 4" [ref=f2e127] [cursor=pointer]:
+                - text: Charge
+                - generic [ref=f2e128]: "4"
+              - button "Refund 4" [ref=f2e129] [cursor=pointer]:
+                - text: Refund
+                - generic [ref=f2e130]: "4"
+              - button "Dates 4" [ref=f2e131] [cursor=pointer]:
+                - text: Dates
+                - generic [ref=f2e132]: "4"
+              - button "Raw 2" [ref=f2e133] [cursor=pointer]:
+                - text: Raw
+                - generic [ref=f2e134]: "2"
+              - button "AI 1" [ref=f2e135] [cursor=pointer]:
+                - text: AI
+                - generic [ref=f2e136]: "1"
+            - generic [ref=f2e137]:
+              - generic [ref=f2e138]:
+                - generic [ref=f2e139]: guestName
+                - generic: Guest name (blank when unknown)
+              - generic [ref=f2e140]:
+                - generic [ref=f2e141]: guestEmail
+                - generic: Guest email
+              - generic [ref=f2e142]:
+                - generic [ref=f2e143]: contactSummary
+                - generic: Honest contact-history sentence, with call IDs
+              - generic [ref=f2e144]:
+                - generic [ref=f2e145]: contactCount
+                - generic: How many times the guest contacted us
+              - generic [ref=f2e146]:
+                - generic [ref=f2e147]: callIds
+                - generic: Call IDs whose recordings we can produce
+        - generic [ref=f2e148]:
+          - button "Annotation 6" [ref=f2e149] [cursor=pointer]: "6"
+          - generic [ref=f2e150]:
+            - button "Reset this dispute's draft" [ref=f2e151] [cursor=pointer]
+            - button "Restore original template" [ref=f2e152] [cursor=pointer]
+            - button "Close" [ref=f2e153] [cursor=pointer]
+            - button "No changes to save" [disabled] [ref=f2e154]
+    - generic [ref=f2e155]:
+      - generic [ref=f2e156]:
+        - generic [ref=f2e157]: "1"
+        - generic [ref=f2e158]:
+          - heading "The title says what kind of thing this is" [level=3] [ref=f2e159]
+          - paragraph [ref=f2e160]:
+            - text: A mono eyebrow carries the type â€”
+            - code [ref=f2e161]: CATEGORY TEMPLATE
+            - text: â€” and the serif display face carries only the name. The operator learns the scope from the label instead of from a sentence.
+          - paragraph [ref=f2e162]: "was: â€œEdit template: Defaultâ€\x9d"
+      - generic [ref=f2e163]:
+        - generic [ref=f2e164]: "2"
+        - generic [ref=f2e165]:
+          - heading "Blast radius becomes a caution band, not a paragraph" [level=3] [ref=f2e166]
+          - paragraph [ref=f2e167]: "The consequence gets the amber treatment the design system already reserves for â€œthis changes what the thing below it meansâ€\x9d â€” the same tokens the partial-chargeback scope note uses. One sentence, a bolded count, and the exception stated plainly."
+          - paragraph [ref=f2e168]:
+            - text: The syntax tutorial and the
+            - code [ref=f2e169]: /categories
+            - text: "cross-reference move out of here entirely:"
+            - code [ref=f2e170]: "{{"
+            - text: is explained on the variable rail, where it's used. That also retires the fused-sentence typo.
+          - paragraph [ref=f2e171]: "was: a five-line muted paragraph ending â€œâ€¦including this.{{variable}} interpolates dispute fields (full list on /categories).â€\x9d"
+      - generic [ref=f2e172]:
+        - generic [ref=f2e173]: "3"
+        - generic [ref=f2e174]:
+          - heading "The letter gets an editor frame and token highlighting" [level=3] [ref=f2e175]
+          - paragraph [ref=f2e176]: Variables render as accent-tinted pills, function calls get an outlined treatment, and Markdown headings drop to muted â€” so scanning for what's interpolated takes a glance instead of a brace-hunt. A single unknown token picks up the amber underline on the spot.
+          - paragraph [ref=f2e177]: "Below it, a hairline meter carries the three numbers that were invisible: character count against the 8,000 ceiling, how many variables are in play, and whether there are unsaved edits."
+      - generic [ref=f2e178]:
+        - generic [ref=f2e179]: "4"
+        - generic [ref=f2e180]:
+          - heading "Validation gets a slot instead of a red line" [level=3] [ref=f2e181]
+          - paragraph [ref=f2e182]:
+            - text: Warnings from
+            - code [ref=f2e183]: templateWarnings()
+            - text: are non-blocking and should look it â€” amber, with the nearest real variable named. Blocking errors from
+            - code [ref=f2e184]: templateError()
+            - text: use the same slot in
+            - code [ref=f2e185]: "--neg"
+            - text: ", and only those disable the save."
+          - paragraph [ref=f2e186]: Because the slot is always in the layout, nothing jumps when a message appears.
+      - generic [ref=f2e187]:
+        - generic [ref=f2e188]: "5"
+        - generic [ref=f2e189]:
+          - heading "The chip wall becomes a rail with structure" [level=3] [ref=f2e190]
+          - paragraph [ref=f2e191]: Seven groups derived from the catalog's own labels â€” Guest, Case, Charge, Refund, Dates, Raw, AI â€” plus a filter that reaches any of the 27 in a keystroke. The rail scrolls inside a fixed height, so the footer never gets pushed off a short viewport.
+          - paragraph [ref=f2e192]:
+            - text: "Chips become objects: mono type, a grip, a real border. Ones already used in the letter carry the accent and a dot, which turns â€œwhat have I not covered?â€\x9d into a visual question. Hovering shows the catalog label that today only lives in a"
+            - code [ref=f2e193]: title
+            - text: attribute.
+          - paragraph [ref=f2e194]:
+            - text: The
+            - code [ref=f2e195]: "{{"
+            - text: autocomplete popup â€” already built and already good â€” gets a header, aligned labels, and a keyboard-hint footer so the shortcuts are discoverable rather than folklore.
+      - generic [ref=f2e196]:
+        - generic [ref=f2e197]: "6"
+        - generic [ref=f2e198]:
+          - heading "The footer separates intent by weight and by side" [level=3] [ref=f2e199]
+          - paragraph [ref=f2e200]: "The two destructive paths sit left, quiet, and say what they actually do â€” â€œReset this dispute's draftâ€\x9d and â€œRestore original templateâ€\x9d instead of two near-identical â€œtemplateâ€\x9d labels. Close and Save sit right, in that order, with only Save carrying the accent."
+          - paragraph [ref=f2e201]:
+            - text: The disabled primary states its reason â€”
+            - emphasis [ref=f2e202]: No changes to save
+            - text: â€” rather than greying out silently.
+  - generic [ref=f2e203]:
+    - generic [ref=f2e204]: 03 â€” Structure
+    - heading "Three bands and a pinned footer" [level=2] [ref=f2e205]
+    - paragraph [ref=f2e206]: The modal reads top-to-bottom as three questions in the order an operator asks them. Everything else is chrome.
+    - table [ref=f2e208]:
+      - rowgroup [ref=f2e209]:
+        - row [ref=f2e210]:
+          - columnheader "Band" [ref=f2e211]
+          - columnheader "Answers" [ref=f2e212]
+          - columnheader "Holds" [ref=f2e213]
+      - rowgroup [ref=f2e214]:
+        - row [ref=f2e215]:
+          - cell "Scope" [ref=f2e216]
+          - 'cell "â€œWhat am I about to change, and who does it hit?â€" [ref=f2e217]'
+          - cell "Type eyebrow, template name, close, caution band" [ref=f2e218]
+        - row [ref=f2e219]:
+          - cell "Canvas" [ref=f2e220]
+          - 'cell "â€œWhat does the letter say?â€" [ref=f2e221]'
+          - cell "Framed editor, token highlighting, autocomplete, meter, validation slot" [ref=f2e222]
+        - row [ref=f2e223]:
+          - cell "Supply" [ref=f2e224]
+          - 'cell "â€œWhat can I put in it?â€" [ref=f2e225]'
+          - cell "Filter, seven groups, chips with used-state, drag affordance" [ref=f2e226]
+        - row [ref=f2e227]:
+          - cell "Commit" [ref=f2e228]
+          - 'cell "â€œHow do I get out of here?â€" [ref=f2e229]'
+          - cell "Destructive left Â· exits right Â· one accent" [ref=f2e230]
+  - generic [ref=f2e231]:
+    - generic [ref=f2e232]: 04 â€” Build
+    - heading "What this costs to ship" [level=2] [ref=f2e233]
+    - paragraph [ref=f2e234]:
+      - text: Two files carry almost all of it. Every color, radius, shadow, and face already exists in
+      - code [ref=f2e235]: assets/styles.css
+      - text: â€” the redesign adds component classes, not tokens.
+    - table [ref=f2e237]:
+      - rowgroup [ref=f2e238]:
+        - row [ref=f2e239]:
+          - columnheader "Piece" [ref=f2e240]
+          - columnheader "Where" [ref=f2e241]
+          - columnheader "Kind" [ref=f2e242]
+          - columnheader "Notes" [ref=f2e243]
+      - rowgroup [ref=f2e244]:
+        - row [ref=f2e245]:
+          - cell "Modal shell, header, scope band, footer" [ref=f2e246]
+          - cell [ref=f2e247]:
+            - code [ref=f2e248]: islands/queue/ResponseUploadPanel.tsx
+          - cell "markup" [ref=f2e249]
+          - cell [ref=f2e251]:
+            - text: Replaces the inline-styled header/paragraph/button row. Same handlers, same
+            - code [ref=f2e252]: tplBusy
+            - text: /
+            - code [ref=f2e253]: tplText
+            - text: state.
+        - row [ref=f2e254]:
+          - cell "Rail, groups, filter, chip states" [ref=f2e255]
+          - cell [ref=f2e256]:
+            - code [ref=f2e257]: components/categories/TemplateEditor.tsx
+          - cell "markup" [ref=f2e258]
+          - cell [ref=f2e260]:
+            - text: Group membership is a static map over
+            - code [ref=f2e261]: TEMPLATE_PALETTE
+            - text: . Used-state reuses
+            - code [ref=f2e262]: templateVarNames()
+            - text: ", already exported."
+        - row [ref=f2e263]:
+          - cell "Autocomplete popup restyle" [ref=f2e264]
+          - cell [ref=f2e265]:
+            - code [ref=f2e266]: TemplateEditor.tsx
+          - cell "CSS only" [ref=f2e267]
+          - cell [ref=f2e269]:
+            - code [ref=f2e270]: suggestVars
+            - text: ","
+            - code [ref=f2e271]: activeVarQuery
+            - text: ","
+            - code [ref=f2e272]: applyVarCompletion
+            - text: untouched â€” only the rendered rows change.
+        - row [ref=f2e273]:
+          - cell "Token highlighting" [ref=f2e274]
+          - cell [ref=f2e275]:
+            - code [ref=f2e276]: TemplateEditor.tsx
+          - cell "new" [ref=f2e277]
+          - cell "Standard highlighted-overlay behind a transparent-text textarea; the textarea stays the source of truth so drag-drop and caret math are unchanged." [ref=f2e279]
+        - row [ref=f2e280]:
+          - cell "Meter, validation slot" [ref=f2e281]
+          - cell [ref=f2e282]:
+            - code [ref=f2e283]: TemplateEditor.tsx
+          - cell "wiring" [ref=f2e284]
+          - cell [ref=f2e286]:
+            - text: Reads
+            - code [ref=f2e287]: TEMPLATE_MAX_CHARS
+            - text: ","
+            - code [ref=f2e288]: templateWarnings()
+            - text: ","
+            - code [ref=f2e289]: templateError()
+            - text: â€” all already computed at save time.
+        - row [ref=f2e290]:
+          - cell "Component CSS" [ref=f2e291]
+          - cell [ref=f2e292]:
+            - code [ref=f2e293]: assets/styles.css
+          - cell "tokens exist" [ref=f2e294]
+          - cell [ref=f2e296]:
+            - text: New classes only. Uses
+            - code [ref=f2e297]: "--amber-*"
+            - text: ","
+            - code [ref=f2e298]: "--accent-soft"
+            - text: ","
+            - code [ref=f2e299]: "--bg-sunken"
+            - text: ","
+            - code [ref=f2e300]: "--radius-sm"
+            - text: as-is; dark mode follows for free.
+        - row [ref=f2e301]:
+          - 'cell "â€œ12 open disputesâ€" [ref=f2e302]'
+          - cell "panel props" [ref=f2e303]
+          - cell "one number" [ref=f2e304]
+          - cell "The only new data on the screen. If the count isn't cheap to pass, the band degrades to the sentence without it â€” everything else holds." [ref=f2e306]
+  - paragraph [ref=f2e307]:
+    - text: Form only, as scoped. No save path, validation rule, completion behavior, or drag mechanic changes â€”
+    - code [ref=f2e308]: lib/categories/intellisense.ts
+    - text: and
+    - code [ref=f2e309]: lib/categories/model.ts
+    - text: are untouched, and the existing tests keep passing. The mockup above is capped at 880px for this page; the real modal keeps its
+    - code [ref=f2e310]: "max-width: 960px"
+    - text: .

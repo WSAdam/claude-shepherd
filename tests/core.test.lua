@@ -3452,6 +3452,39 @@ do
      core.unseenNotificationCount(n, 85), 1)
 end
 
+-- ---- spawnframe-pin: a spawned window must not be born under the panel ------
+-- `open` gives a brand-new VS Code window a FULL-WIDTH frame, so on a setup with
+-- the Shepherd panel docked right the editor lands underneath it and has to be
+-- dragged back on every spawn. When there's no existing window to copy, this picks
+-- the larger free band beside the panel.
+do
+  local screen = { x = 0, y = 0, w = 3024, h = 1890 }
+  local right = core.frameBesidePanel(screen, { x = 2444, y = 0, w = 580, h = 1890 })
+  check("spawnframe-pin: panel docked RIGHT -> window fills the space to its left",
+        right ~= nil and right.x == 0 and right.w == 2444 and right.h == 1890)
+  local left = core.frameBesidePanel(screen, { x = 0, y = 0, w = 580, h = 1890 })
+  check("spawnframe-pin: panel docked LEFT -> window starts past it",
+        left ~= nil and left.x == 580 and left.w == 2444)
+  -- the gap is honoured on whichever side wins
+  local gapped = core.frameBesidePanel(screen, { x = 2444, y = 0, w = 580, h = 1890 }, { gap = 8 })
+  eq("spawnframe-pin: the gap comes off the winning band", gapped.w, 2436)
+
+  -- No unambiguous answer -> nil, meaning "leave the window alone". Cramming the
+  -- editor into a sliver would be worse than the full-width default.
+  eq("spawnframe-pin: a mid-screen panel leaving only slivers -> nil",
+     core.frameBesidePanel({ x = 0, y = 0, w = 1200, h = 900 },
+                           { x = 300, y = 0, w = 600, h = 900 }), nil)
+  eq("spawnframe-pin: a panel on ANOTHER screen isn't covering this one -> nil",
+     core.frameBesidePanel(screen, { x = 4000, y = 0, w = 580, h = 1890 }), nil)
+  eq("spawnframe-pin: a band under minWidth is refused",
+     core.frameBesidePanel(screen, { x = 400, y = 0, w = 2624, h = 1890 }, { minWidth = 480 }), nil)
+  -- garbage in never throws, and never returns a bogus frame
+  eq("spawnframe-pin: non-table screen -> nil", core.frameBesidePanel(nil, { x = 0, y = 0, w = 1, h = 1 }), nil)
+  eq("spawnframe-pin: non-table panel -> nil", core.frameBesidePanel(screen, "nope"), nil)
+  eq("spawnframe-pin: a panel with no numeric size -> nil",
+     core.frameBesidePanel(screen, { x = 0, y = 0 }), nil)
+end
+
 -- ---- hidden-pin: operator-hidden tiles --------------------------------------
 -- "Forget tile" only unlinked the status file, which is a PROJECTION of a live
 -- session: any of the 8 hooks rewrote it within seconds, so a live session's tile

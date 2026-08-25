@@ -1,0 +1,4 @@
+[     255ms] TypeError: Cannot set properties of null (setting 'innerHTML')
+    at http://localhost:8732/letter-proofing-workspace.html:1059:44
+    at http://localhost:8732/letter-proofing-workspace.html:1219:3
+[     292ms] [ERROR] Failed to load resource: the server responded with a status of 404 (File not found) @ http://localhost:8732/favicon.ico:0

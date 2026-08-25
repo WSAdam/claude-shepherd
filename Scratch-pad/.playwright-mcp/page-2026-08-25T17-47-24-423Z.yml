@@ -1,0 +1,276 @@
+- generic [ref=f6e7]:
+  - text: Chargeback Portal · Response templates · Rethink
+  - heading "The Letter Proofing Workspace" [level=1] [ref=f6e8]
+  - generic [ref=f6e9]:
+    - text: The template editor was designed as a place to type. But nobody's real problem is typing — it's that
+    - strong [ref=f6e10]: a variable can render blank and no one finds out until a bank reads the letter
+    - text: .
+    - code [ref=f6e11]: guestName
+    - text: is "blank when unknown."
+    - code [ref=f6e12]: refundStatement
+    - text: is "empty when none." A blank leaves a
+    - code [ref=f6e13]: "## Guest Contact History"
+    - text: "heading with nothing under it, in a document arguing for money. So: stop building an editor. Build a proofing bench."
+    - paragraph
+    - generic [ref=f6e15]:
+      - term [ref=f6e16]: Hero object
+      - definition [ref=f6e17]: The rendered letter
+      - generic [ref=f6e18]:
+        - term [ref=f6e19]: Container
+        - definition [ref=f6e20]: Full-height workspace
+        - generic [ref=f6e21]:
+          - term [ref=f6e22]: New idea
+          - definition [ref=f6e23]: Coverage across cases
+          - generic [ref=f6e24]:
+            - term [ref=f6e25]: System
+            - definition [ref=f6e26]: Existing tokens only
+            - generic [ref=f6e28]:
+              - text: 01 — The turn
+              - heading "What changed in the thinking" [level=2] [ref=f6e29]
+              - generic [ref=f6e30]:
+                - text: "The first pass restructured the modal: grouped the variable wall, gave the blast radius a caution band, added a meter. All true, all worth keeping — and all still in service of a screen whose central object is a textarea. That's the part that was wrong."
+                - paragraph
+                - generic [ref=f6e33]:
+                  - text: First pass
+                  - heading "A better place to type" [level=3] [ref=f6e34]
+                  - paragraph [ref=f6e35]:
+                    - text: The template is the object. The operator writes
+                    - code [ref=f6e36]: "{{contactSummary}}"
+                    - text: ", sees a green pill, and has no idea whether that produces a paragraph or nothing at all."
+                  - paragraph [ref=f6e37]:
+                    - text: "\"Affects 12 disputes\" is a warning — a thing to feel bad about and click past. Validation only catches variables that"
+                    - emphasis [ref=f6e38]: don't exist
+                    - text: ", never ones that exist and come back empty."
+                  - generic [ref=f6e40]:
+                    - text: This pass
+                    - heading "A bench for proofing letters" [level=3] [ref=f6e41]
+                    - paragraph [ref=f6e42]: The rendered letter is the object; the source is the tool that shapes it. You read the letter the way the bank will read it, against a real dispute, and page through the others.
+                    - paragraph [ref=f6e43]: "\"12 disputes\" stops being a warning and becomes the proofing set. And every variable gets a coverage count — how many of those 12 it actually renders on — so a silent blank becomes a number you can see before you save."
+            - generic [ref=f6e45]:
+              - text: 02 — The design
+              - heading "The workspace" [level=2] [ref=f6e46]
+              - generic [ref=f6e47]:
+                - text: Fully interactive. The letter really renders — page through the twelve disputes with the arrows and watch blanks and empty sections appear.
+                - strong [ref=f6e48]: Coverage is computed live
+                - text: from those same twelve records, so every number below is real, not drawn.
+                - paragraph
+                - generic [ref=f6e51]:
+                  - text: Theme
+                  - generic [ref=f6e53]:
+                    - text: Light
+                    - generic [ref=f6e54]:
+                      - text: Dark
+                      - generic [ref=f6e57]:
+                        - text: Annotations
+                        - generic [ref=f6e58]:
+                          - text: Clean view
+                          - generic [ref=f6e62]:
+                            - text: "1"
+                            - generic [ref=f6e65]:
+                              - text: Category template
+                              - generic [ref=f6e66]:
+                                - text: Default
+                                - generic [ref=f6e68]:
+                                  - text: Compare with live
+                                  - generic [ref=f6e69]:
+                                    - text: Close
+                                    - generic [ref=f6e70]:
+                                      - text: Save template ⌘S
+                                      - generic [ref=f6e72]:
+                                        - text: "2"
+                                        - generic [ref=f6e75]:
+                                          - text: Re-renders 12 open disputes
+                                          - generic [ref=f6e77]:
+                                            - text: 3 keep hand-edited letters
+                                            - generic [ref=f6e80]:
+                                              - text: — render with a gap
+                                              - generic [ref=f6e82]:
+                                                - text: Review all 12 →
+                                                - generic [ref=f6e85]:
+                                                  - text: "3"
+                                                  - generic [ref=f6e86]:
+                                                    - heading "Template" [level=4] [ref=f6e87]
+                                                    - generic [ref=f6e90]:
+                                                      - text: Source
+                                                      - generic [ref=f6e91]:
+                                                        - text: Split
+                                                        - generic [ref=f6e92]:
+                                                          - text: Letter
+                                                          - generic [ref=f6e95]:
+                                                            - text: "4"
+                                                            - generic [ref=f6e96]:
+                                                              - text: "5"
+                                                              - generic [ref=f6e97]:
+                                                                - text: "6"
+                                                                - generic [ref=f6e98]:
+                                                                  - heading "Renders as" [level=4] [ref=f6e99]
+                                                                  - generic [ref=f6e102]:
+                                                                    - text: ◀
+                                                                    - generic [ref=f6e104]:
+                                                                      - text: ▶
+                                                                      - generic [ref=f6e107]:
+                                                                        - generic [ref=f6e108]: from dispute data
+                                                                        - generic [ref=f6e109]: renders empty here
+                                                                        - generic [ref=f6e110]: AI passage
+                                                                        - generic [ref=f6e112]:
+                                                                          - text: "7"
+                                                                          - generic [ref=f6e113]:
+                                                                            - text: "8"
+                                                                            - generic [ref=f6e115]:
+                                                                              - text: Coverage
+                                                                              - generic [ref=f6e117]:
+                                                                                - text: Variables 27
+                                                                                - generic [ref=f6e120]:
+                                                                                  - text: Every variable in this template, across the 12 disputes it re-renders. Worst first.
+                                                                                  - generic [ref=f6e138]:
+                                                                                    - text: Reset this dispute's draft
+                                                                                    - generic [ref=f6e139]:
+                                                                                      - text: Restore original template
+                                                                                      - generic [ref=f6e142]:
+                                                                                        - text: "1"
+                                                                                        - generic [ref=f6e143]:
+                                                                                          - heading "Workspace chrome, not dialog chrome" [level=3] [ref=f6e144]
+                                                                                          - paragraph [ref=f6e145]:
+                                                                                            - text: Save and Close move to the top-right where a workspace keeps them, freeing the bottom edge for status. The title is just the template's name; a mono eyebrow carries what kind of thing it is.
+                                                                                            - code [ref=f6e146]: Compare with live
+                                                                                            - text: sits next to Save because "what am I actually changing?" is a question you ask right before committing.
+                                                                                        - generic [ref=f6e148]:
+                                                                                          - text: "2"
+                                                                                          - generic [ref=f6e149]:
+                                                                                            - heading "The blast radius becomes an instrument" [level=3] [ref=f6e150]
+                                                                                            - paragraph [ref=f6e151]:
+                                                                                              - text: "The same fact the old paragraph buried — this hits 12 disputes — is now three readings with dots: how many re-render, how many are insulated because someone edited them by hand, and"
+                                                                                              - emphasis [ref=f6e152]: how many come out with a gap in them
+                                                                                              - text: . That third number is computed from the template you're editing and updates as you type.
+                                                                                            - paragraph [ref=f6e153]: A warning tells you to be careful. This tells you what to go look at, and gives you a way in.
+                                                                                          - generic [ref=f6e155]:
+                                                                                            - text: "3"
+                                                                                            - generic [ref=f6e156]:
+                                                                                              - heading "The source is a tool, sized like one" [level=3] [ref=f6e157]
+                                                                                              - paragraph [ref=f6e158]:
+                                                                                                - text: Token highlighting, Markdown headings dropped to muted, function calls outlined. The
+                                                                                                - code [ref=f6e159]: Source / Split / Letter
+                                                                                                - text: switch lives on this pane because it governs how much room the source gets — full width while you write, half while you check, gone while you proofread.
+                                                                                            - generic [ref=f6e161]:
+                                                                                              - text: "4"
+                                                                                              - generic [ref=f6e162]:
+                                                                                                - heading "Proof against a real dispute, then the next one" [level=3] [ref=f6e163]
+                                                                                                - paragraph [ref=f6e164]: Not sample data — an actual case from the 12 this template re-renders, with the arrows to page through them. Most template bugs are invisible on the happy-path record and obvious on the third one you check.
+                                                                                              - generic [ref=f6e166]:
+                                                                                                - text: "5"
+                                                                                                - generic [ref=f6e167]:
+                                                                                                  - heading "Values are marked as values" [level=3] [ref=f6e168]
+                                                                                                  - paragraph [ref=f6e169]:
+                                                                                                    - text: Interpolated text carries a faint accent tint, so you can see at a glance which sentences are authored and which came from the dispute. It's the rendered-side answer to token highlighting, and it makes a letter that's
+                                                                                                    - emphasis [ref=f6e170]: mostly data
+                                                                                                    - text: look different from one that's mostly argument.
+                                                                                                - generic [ref=f6e172]:
+                                                                                                  - text: "6"
+                                                                                                  - generic [ref=f6e173]:
+                                                                                                    - heading "The hole is drawn, not omitted" [level=3] [ref=f6e174]
+                                                                                                    - paragraph [ref=f6e175]: This is the whole point. A variable that renders empty shows as a hatched gap instead of silently closing up — and when a blank leaves an entire section with nothing under it, the section gets flagged bodily.
+                                                                                                    - paragraph [ref=f6e176]:
+                                                                                                      - text: Page to a dispute with no contact notes and watch
+                                                                                                      - code [ref=f6e177]: "## Guest Contact History"
+                                                                                                      - text: become an empty heading. That is what the bank would have received.
+                                                                                                  - generic [ref=f6e179]:
+                                                                                                    - text: "7"
+                                                                                                    - generic [ref=f6e180]:
+                                                                                                      - 'heading "Coverage: the number nobody had" [level=3] [ref=f6e181]'
+                                                                                                      - paragraph [ref=f6e182]:
+                                                                                                        - text: Every variable used in the template, ranked by how often it comes back empty across the proofing set.
+                                                                                                        - code [ref=f6e183]: caseNumber
+                                                                                                        - text: renders on all 12.
+                                                                                                        - code [ref=f6e184]: guestName
+                                                                                                        - text: misses 3.
+                                                                                                        - code [ref=f6e185]: refundStatement
+                                                                                                        - text: only fires on the disputes that actually had a refund — which is correct, and labelled as expected rather than flagged.
+                                                                                                      - paragraph [ref=f6e186]:
+                                                                                                        - text: "That distinction is the design's real work: separating"
+                                                                                                        - emphasis [ref=f6e187]: a blank that's honest
+                                                                                                        - text: from
+                                                                                                        - emphasis [ref=f6e188]: a blank that's a bug
+                                                                                                        - text: . Clicking a row jumps the letter to a case where it's missing.
+                                                                                                    - generic [ref=f6e190]:
+                                                                                                      - text: "8"
+                                                                                                      - generic [ref=f6e191]:
+                                                                                                        - heading "The palette, kept — but demoted" [level=3] [ref=f6e192]
+                                                                                                        - paragraph [ref=f6e193]: The grouped, filterable variable rail from the first pass survives intact; it was the right fix for the 27-chip wall. It just isn't the main event anymore, so it shares the rail with Coverage instead of occupying the bottom of the screen. Chips already used in the template carry the accent.
+                                                                                                      - generic [ref=f6e195]:
+                                                                                                        - text: 03 — Scope
+                                                                                                        - heading "What's re-layout, and what's new" [level=2] [ref=f6e196]
+                                                                                                        - generic [ref=f6e197]:
+                                                                                                          - text: You scoped the first pass form-only. This one isn't, and I'd rather say so plainly than bury it — the proofing idea needs behavior that doesn't exist yet. Everything in the first block is free; everything in the second is a real build, listed so you can cut it.
+                                                                                                          - paragraph
+                                                                                                          - generic [ref=f6e198]:
+                                                                                                            - table [ref=f6e199]:
+                                                                                                              - rowgroup [ref=f6e200]:
+                                                                                                                - row [ref=f6e201]:
+                                                                                                                  - columnheader "Piece" [ref=f6e202]
+                                                                                                                  - columnheader "Kind" [ref=f6e203]
+                                                                                                                  - columnheader "What it needs" [ref=f6e204]
+                                                                                                              - rowgroup [ref=f6e205]:
+                                                                                                                - row [ref=f6e206]:
+                                                                                                                  - cell "Workspace layout, header, status bar" [ref=f6e207]
+                                                                                                                  - cell "form" [ref=f6e208]
+                                                                                                                  - cell "Markup and CSS in the existing modal shell. Same open/close path." [ref=f6e209]
+                                                                                                                - row [ref=f6e210]:
+                                                                                                                  - cell "Token highlighting, grouped variable rail" [ref=f6e211]
+                                                                                                                  - cell "form" [ref=f6e212]
+                                                                                                                  - cell "Carried over from the first pass. No logic change." [ref=f6e213]
+                                                                                                                - row [ref=f6e214]:
+                                                                                                                  - cell "Source / Split / Letter switch" [ref=f6e215]
+                                                                                                                  - cell "form" [ref=f6e216]
+                                                                                                                  - cell "One piece of local state." [ref=f6e217]
+                                                                                                                - row [ref=f6e218]:
+                                                                                                                  - cell "Rendered letter preview" [ref=f6e219]
+                                                                                                                  - cell "new" [ref=f6e220]
+                                                                                                                  - cell [ref=f6e221]:
+                                                                                                                    - code [ref=f6e222]: renderTemplate()
+                                                                                                                    - text: already exists and is tested — this calls it against one dispute's vars and renders the Markdown. The cheapest new capability here.
+                                                                                                                - row [ref=f6e223]:
+                                                                                                                  - cell "Blank + empty-section marking" [ref=f6e224]
+                                                                                                                  - cell "new" [ref=f6e225]
+                                                                                                                  - cell [ref=f6e226]:
+                                                                                                                    - text: Render with sentinel values instead of
+                                                                                                                    - code [ref=f6e227]: "\"\""
+                                                                                                                    - text: ", then mark them. Purely a render-time concern; the saved template is untouched."
+                                                                                                                - row [ref=f6e228]:
+                                                                                                                  - cell "Dispute pager" [ref=f6e229]
+                                                                                                                  - cell "new" [ref=f6e230]
+                                                                                                                  - cell "The list of disputes this category template affects, plus their built vars. The panel knows the category; the query is the work." [ref=f6e231]
+                                                                                                                - row [ref=f6e232]:
+                                                                                                                  - cell "Coverage" [ref=f6e233]
+                                                                                                                  - cell "new" [ref=f6e234]
+                                                                                                                  - cell "Build vars for all N disputes, count non-empty per variable. Needs the same query as the pager, so they ship together or not at all." [ref=f6e235]
+                                                                                                                - row [ref=f6e236]:
+                                                                                                                  - cell "Expected-blank classification" [ref=f6e237]
+                                                                                                                  - cell "new" [ref=f6e238]
+                                                                                                                  - cell [ref=f6e239]:
+                                                                                                                    - text: A flag on the catalog marking variables that are
+                                                                                                                    - emphasis [ref=f6e240]: designed
+                                                                                                                    - text: to be empty (
+                                                                                                                    - code [ref=f6e241]: refundStatement
+                                                                                                                    - text: ","
+                                                                                                                    - code [ref=f6e242]: contactSummary
+                                                                                                                    - text: ). One boolean per entry in
+                                                                                                                    - code [ref=f6e243]: TEMPLATE_VAR_CATALOG
+                                                                                                                    - text: — without it, coverage cries wolf.
+                                                                                                                - row [ref=f6e244]:
+                                                                                                                  - cell "Compare with live" [ref=f6e245]
+                                                                                                                  - cell "new" [ref=f6e246]
+                                                                                                                  - cell "A diff of editor text against the saved template. Nice, not load-bearing — cut first if something has to go." [ref=f6e247]
+                                                                                                            - generic [ref=f6e248]:
+                                                                                                              - text: "If you want only the free half, it degrades honestly: the workspace layout, the switch, and the rail all stand on their own, and the letter pane becomes a preview against the single dispute already open in the panel — still better than editing blind, without the query work."
+                                                                                                              - paragraph
+                                                                                                      - generic [ref=f6e249]:
+                                                                                                        - text: Built on the app's own system — Instrument Serif, Inter Tight, JetBrains Mono, the Taupe-Grey ramp, the green accent,
+                                                                                                        - code [ref=f6e250]: "--amber-*"
+                                                                                                        - text: for caution,
+                                                                                                        - code [ref=f6e251]: "--pos"
+                                                                                                        - text: /
+                                                                                                        - code [ref=f6e252]: "--neg"
+                                                                                                        - text: for coverage severity. No new color tokens. The twelve disputes are fixtures drawn from
+                                                                                                        - code [ref=f6e253]: lib/fixtures.ts
+                                                                                                        - text: "'s real reason codes, providers, and merchants; coverage is computed from them at runtime, so nothing in the rail is a drawing."
+                                                                                                        - paragraph

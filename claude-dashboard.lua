@@ -202,6 +202,8 @@ local groups = {}        -- projectKey -> group name (cohort tag); loaded from d
 local autoTitles = {}    -- projectKey -> derived tile title (L5; cached once per project)
 local ctxMenu            -- holds the live right-click popup menu (so it isn't GC'd)
 local wv                 -- the webview; forward-declared so the controller can push to it
+local panelVisible       -- forward-declared: FX.spawnTargetFrame (far above its assignment)
+                         -- must see the UPVALUE, not compile to a nil global
 local lastJumpKey = nil  -- for the cycle-jump hotkey
 local spawnPrompt        -- forward declaration (defined after FX)
 -- One per-tile snapshot of the LAST refresh, keyed by tile key: status (auto-feed
@@ -2708,6 +2710,62 @@ end
 -- manual spawn of the same project supersedes ITS OWN prior ladder; distinct windows
 -- (cohort variants) keep independent ladders. Module-level: GC-safe.
 local spawnSeqHandlesByKey = {}
+-- Where a newly spawned editor window should land. `open` hands a brand-NEW VS Code
+-- window a full-width frame, which on a panel-docked-right setup buries the editor
+-- under Shepherd and has to be dragged back every single spawn.
+--
+-- Preference order:
+--   1. the frontmost EXISTING window of the same editor -- "the size it is right
+--      now", which already encodes however the operator has arranged their screen
+--      (and is what they actually asked for);
+--   2. no such window (first one of the day): the larger free band beside the panel,
+--      via core.frameBesidePanel.
+-- nil means leave the window alone: no reference, and no unambiguous band.
+--
+-- MUST be called BEFORE `open` runs, while the frontmost window is still the old
+-- one. Off with spawn.matchWindowSize=false.
+function FX.spawnTargetFrame(editor, cfg)
+  if core.config(cfg, "spawn.matchWindowSize", true) ~= true then return nil end
+  local okApp, app = pcall(findEditorApp, editor)
+  if okApp and app then
+    local w = app:focusedWindow()
+    if not (w and w:isStandard()) then
+      for _, c in ipairs(app:allWindows() or {}) do
+        if c and c:isStandard() then w = c; break end
+      end
+    end
+    if w and w:isStandard() then
+      local okF, f = pcall(function() return w:frame() end)
+      if okF and f and f.w and f.w > 0 and f.h and f.h > 0 then
+        return { x = f.x, y = f.y, w = f.w, h = f.h }, "match"
+      end
+    end
+  end
+  -- Fall back to the band beside the panel, but only while the panel is actually
+  -- up -- a hidden panel is covering nothing, so full width is fine.
+  if not (wv and panelVisible) then return nil end
+  local okP, pf = pcall(function() return wv:frame() end)
+  if not okP or not pf then return nil end
+  local scr = hs.screen.mainScreen()
+  if not scr then return nil end
+  local f = core.frameBesidePanel(scr:frame(), pf, { gap = 8 })
+  return f, f and "beside-panel" or nil
+end
+
+-- Put the just-spawned window on `frame`. Best-effort by design: a window that
+-- refuses the frame (or vanished mid-flight) must never break the spawn ladder,
+-- which still has the extension-open and task-delivery beats to run.
+function FX.applySpawnFrame(frame, why)
+  if not frame then return end
+  local w = hs.window.focusedWindow()
+  if not w then return end
+  pcall(function()
+    w:setFrame(frame)
+    print(string.format("[cc-orch] sized spawned window (%s): %dx%d at %d,%d",
+      tostring(why), frame.w, frame.h, frame.x, frame.y))
+  end)
+end
+
 local function spawnEditorWindow(spec)
   print("[cc-orch] " .. spec.editor .. " spawn: open " .. spec.app .. " at " .. tostring(spec.project))
   local ladderKey = core.spawnLadderKey(spec)
@@ -2734,6 +2792,9 @@ local function spawnEditorWindow(spec)
   local spawnDelay
   spawnDelay, injectionTailAt = core.staggerSlot(
     injectionTailAt, hs.timer.absoluteTime() / 1e9, core.spawnLadderWorst(spec))
+  -- Capture the target frame BEFORE `open` runs: once the new window exists it is
+  -- the frontmost one, and we'd end up copying its full-width frame onto itself.
+  local wantFrame, frameWhy = FX.spawnTargetFrame(spec.editor, loadConfig())
   local t = hs.task.new("/usr/bin/open", nil, core.vscodeOpenArgs(spec))
   if t then t:start() end
   hs.alert.show("Claude Shepherd: opening " .. spec.app .. " — starting claude (best-effort)")
@@ -2764,6 +2825,9 @@ local function spawnEditorWindow(spec)
         -- to front (a different project). Best-effort ⌘1/⌘Esc panel-open is harmless
         -- on the activated app, but the task is only delivered on a real match.
         local matched = focusProject(name, proj, spec.editor, true)
+        -- Re-assert: VS Code restores its remembered geometry during startup, which
+        -- lands AFTER the first sizing on a cold window. Cheap and idempotent.
+        if matched then FX.applySpawnFrame(wantFrame, frameWhy) end
         -- R3-22: guard the FOCUS constants exactly as pasteIntoWindow does -- the
         -- comments at FOCUS_EDITOR_KEY/FOCUS_CHAT_KEY invite setting them to nil for
         -- terminal sessions, and an index-on-nil here would throw inside the after()
@@ -2808,6 +2872,10 @@ local function spawnEditorWindow(spec)
         local step = core.coldStartStep(focusProject(name, proj, spec.editor, false), elapsed, waitMax)
         if step == "open" then  -- window appeared + got focused
           print(string.format("[cc-orch] vscode cold-start: window seen after ~%.0fs; waiting %ss for the extension to activate", elapsed, activate))
+          -- Size it now, while we know the just-matched window holds focus. Only the
+          -- COLD path does this: a warm spawn reuses a window the operator already
+          -- placed, and resizing that would be a surprise, not a convenience.
+          FX.applySpawnFrame(wantFrame, frameWhy)
           sched(activate, deliver)
         elseif step == "wait" then
           elapsed = elapsed + 1.0
@@ -12928,7 +12996,7 @@ PANEL_START_TS = FX.now()  -- anchor the Shift report's "since opened" window
 print("[cc-dashboard] panel shown")
 
 -- Show/hide so the panel can be dismissed (minimize-to-menubar) and reopened.
-local panelVisible = true
+panelVisible = true   -- forward-declared beside `wv`
 -- Tracks whether the panel webview is the KEY window. The panel is a floating,
 -- non-activating webview, so it can be key (receiving keys) without Hammerspoon
 -- being the frontmost app — hs.window/frontmostApplication can't tell. The

@@ -504,6 +504,42 @@ function M.resolvePanelRect(saved, screenFrame, defaults)
   return defaultPanelRect(screenFrame, defaults)
 end
 
+-- The frame a freshly spawned editor window should take when there is no existing
+-- window to copy: the larger of the two free bands beside the Shepherd panel, full
+-- height. `open` gives a brand-new VS Code window a full-width frame, which on a
+-- setup with the panel docked right lands the editor UNDERNEATH it every time.
+--
+-- Picking the larger side handles left- and right-docked panels without asking
+-- which it is. A panel floating mid-screen leaves two narrow bands; if the winner
+-- is under opts.minWidth we return nil, meaning "no sensible answer -- leave the
+-- window alone" rather than cramming the editor into a sliver. nil is also the
+-- answer when the panel doesn't overlap this screen at all (it's on another
+-- display, so it isn't covering anything here).
+-- opts.gap: pixels to leave between the window and the panel. opts.minWidth:
+-- narrowest acceptable result (default 480).
+function M.frameBesidePanel(screenFrame, panelFrame, opts)
+  local sf, pf = screenFrame, panelFrame
+  if type(sf) ~= "table" or type(pf) ~= "table" then return nil end
+  if not (isNum(sf.x) and isNum(sf.y) and isNum(sf.w) and isNum(sf.h)) then return nil end
+  if not (isNum(pf.x) and isNum(pf.y) and isNum(pf.w) and isNum(pf.h)) then return nil end
+  local gap  = tonumber(opts and opts.gap) or 0
+  local minW = tonumber(opts and opts.minWidth) or 480
+  -- A panel that doesn't overlap this screen isn't in the way.
+  local overlaps = pf.x < sf.x + sf.w and pf.x + pf.w > sf.x
+    and pf.y < sf.y + sf.h and pf.y + pf.h > sf.y
+  if not overlaps then return nil end
+  local leftW  = pf.x - sf.x                        -- free band left of the panel
+  local rightW = (sf.x + sf.w) - (pf.x + pf.w)      -- free band right of it
+  local f
+  if leftW >= rightW then
+    f = { x = sf.x, y = sf.y, w = leftW - gap, h = sf.h }
+  else
+    f = { x = pf.x + pf.w + gap, y = sf.y, w = rightW - gap, h = sf.h }
+  end
+  if f.w < minW then return nil end
+  return f
+end
+
 -- ---- Relabels (Step 3) -----------------------------------------------------
 -- Apply in-memory display labels onto a session list, in place. `labels` maps a
 -- session key -> override name. Only the DISPLAY field (.label) is set; .name

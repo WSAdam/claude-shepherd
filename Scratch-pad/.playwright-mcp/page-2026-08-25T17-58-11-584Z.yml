@@ -1,0 +1,359 @@
+- generic [ref=f12e2]:
+  - banner [ref=f12e3]:
+    - generic [ref=f12e4]: Chargeback Portal · Response templates · Rethink
+    - heading "The Letter Proofing Workspace" [level=1] [ref=f12e5]
+    - paragraph [ref=f12e6]:
+      - text: The template editor was designed as a place to type. But nobody's real problem is typing — it's that
+      - strong [ref=f12e7]: a variable can render blank and no one finds out until a bank reads the letter
+      - text: .
+      - code [ref=f12e8]: guestName
+      - text: is "blank when unknown."
+      - code [ref=f12e9]: refundStatement
+      - text: is "empty when none." A blank leaves a
+      - code [ref=f12e10]: "## Guest Contact History"
+      - text: "heading with nothing under it, in a document arguing for money. So: stop building an editor. Build a proofing bench."
+    - generic [ref=f12e11]:
+      - generic [ref=f12e12]:
+        - term [ref=f12e13]: Hero object
+        - definition [ref=f12e14]: The rendered letter
+      - generic [ref=f12e15]:
+        - term [ref=f12e16]: Container
+        - definition [ref=f12e17]: Full-height workspace
+      - generic [ref=f12e18]:
+        - term [ref=f12e19]: New idea
+        - definition [ref=f12e20]: Coverage across cases
+      - generic [ref=f12e21]:
+        - term [ref=f12e22]: System
+        - definition [ref=f12e23]: Existing tokens only
+  - generic [ref=f12e24]:
+    - generic [ref=f12e25]: 01 — The turn
+    - heading "What changed in the thinking" [level=2] [ref=f12e26]
+    - paragraph [ref=f12e27]: "The first pass restructured the modal: grouped the variable wall, gave the blast radius a caution band, added a meter. All true, all worth keeping — and all still in service of a screen whose central object is a textarea. That's the part that was wrong."
+    - generic [ref=f12e28]:
+      - generic [ref=f12e29]:
+        - generic [ref=f12e30]: First pass
+        - heading "A better place to type" [level=3] [ref=f12e31]
+        - paragraph [ref=f12e32]:
+          - text: The template is the object. The operator writes
+          - code [ref=f12e33]: "{{contactSummary}}"
+          - text: ", sees a green pill, and has no idea whether that produces a paragraph or nothing at all."
+        - paragraph [ref=f12e34]:
+          - text: "\"Affects 12 disputes\" is a warning — a thing to feel bad about and click past. Validation only catches variables that"
+          - emphasis [ref=f12e35]: don't exist
+          - text: ", never ones that exist and come back empty."
+      - generic [ref=f12e36]:
+        - generic [ref=f12e37]: This pass
+        - heading "A bench for proofing letters" [level=3] [ref=f12e38]
+        - paragraph [ref=f12e39]: The rendered letter is the object; the source is the tool that shapes it. You read the letter the way the bank will read it, against a real dispute, and page through the others.
+        - paragraph [ref=f12e40]: "\"12 disputes\" stops being a warning and becomes the proofing set. And every variable gets a coverage count — how many of those 12 it actually renders on — so a silent blank becomes a number you can see before you save."
+  - generic [ref=f12e41]:
+    - generic [ref=f12e42]: 02 — The design
+    - heading "The workspace" [level=2] [ref=f12e43]
+    - paragraph [ref=f12e44]:
+      - text: Fully interactive. The letter really renders — page through the twelve disputes with the arrows and watch blanks and empty sections appear.
+      - strong [ref=f12e45]: Coverage is computed live
+      - text: from those same twelve records, so every number below is real, not drawn.
+    - generic [ref=f12e46]:
+      - generic [ref=f12e47]:
+        - generic [ref=f12e48]: Theme
+        - generic [ref=f12e49]:
+          - button "Light" [pressed] [ref=f12e50] [cursor=pointer]
+          - button "Dark" [ref=f12e51] [cursor=pointer]
+        - generic [ref=f12e52]:
+          - button "Annotations" [pressed] [ref=f12e53] [cursor=pointer]
+          - button "Clean view" [ref=f12e54] [cursor=pointer]
+      - group "Letter proofing workspace mockup" [ref=f12e56]:
+        - generic [ref=f12e58]:
+          - generic [ref=f12e59]:
+            - generic [ref=f12e60]: Category template
+            - heading "Default" [level=3] [ref=f12e61]
+          - generic [ref=f12e62]:
+            - button "Compare with live" [ref=f12e63] [cursor=pointer]
+            - button "Close" [ref=f12e64] [cursor=pointer]
+            - button "Save template ⌘S" [ref=f12e65] [cursor=pointer]:
+              - text: Save template
+              - generic [ref=f12e66]: ⌘S
+        - generic [ref=f12e68]:
+          - generic [ref=f12e69]:
+            - text: Re-renders
+            - generic [ref=f12e71]: "12"
+            - text: open disputes
+          - generic [ref=f12e72]:
+            - generic [ref=f12e74]: "3"
+            - text: keep hand-edited letters
+          - generic [ref=f12e75]:
+            - generic [ref=f12e77]: "3"
+            - text: read with a broken sentence
+          - button "Review all 12 →" [ref=f12e78] [cursor=pointer]
+        - generic [ref=f12e79]:
+          - generic [ref=f12e80]:
+            - generic [ref=f12e81]:
+              - heading "Template" [level=4] [ref=f12e82]
+              - generic [ref=f12e83]:
+                - button "Source" [ref=f12e84] [cursor=pointer]
+                - button "Split" [pressed] [ref=f12e85] [cursor=pointer]
+                - button "Letter" [ref=f12e86] [cursor=pointer]
+            - textbox "Template source" [ref=f12e87]
+          - generic [ref=f12e89]:
+            - generic [ref=f12e90]:
+              - heading "Renders as" [level=4] [ref=f12e91]
+              - generic [ref=f12e92]:
+                - button "Previous dispute" [ref=f12e93] [cursor=pointer]: ◀
+                - generic [ref=f12e94]: TRX-9F2C-4A81-1041 · 1 of 12
+                - button "Next dispute" [ref=f12e95] [cursor=pointer]: ▶
+            - generic [ref=f12e97]:
+              - heading "Cover Letter" [level=4] [ref=f12e98]
+              - paragraph [ref=f12e99]: "To the Dispute Resolution Team:"
+              - paragraph [ref=f12e100]: We are writing in response to chargeback case TRX-9F2C-4A81-1041 regarding a charge of $2,340.00 on a Mastercard card ending in 8842, received May 12, 2026 under reason code 10.4 (Fraud - card-absent environment).
+              - paragraph [ref=f12e101]: Monster Reservations Group sells prepaid vacation packages and reservations by phone. Charges settle at booking time, before travel; a booked package has value whether or not the guest ultimately travels.
+              - heading "Timeline" [level=4] [ref=f12e102]
+              - list [ref=f12e103]:
+                - listitem [ref=f12e104]: Jan 08, 2026 - Marcus Holloway booked and paid in full.
+                - listitem [ref=f12e105]: May 12, 2026 - Chargeback filed by the issuing bank.
+                - listitem [ref=f12e106]: Aug 25, 2026 - This response submitted.
+              - heading "What Was Purchased" [level=4] [ref=f12e107]
+              - paragraph [ref=f12e108]: Monster Week package for two, Cabo San Lucas, Mar 14-21 2026, paid in full at booking.
+              - heading "Guest Contact History" [level=4] [ref=f12e109]
+              - paragraph [ref=f12e110]: The guest contacted us three times between January and March; recordings are available for call IDs 88213, 88490 and 89122.
+              - paragraph [ref=f12e111]: The guest reached out repeatedly over several months, consistently about the same booking.
+              - generic [ref=f12e112]:
+                - heading "Refund Position" [level=4] [ref=f12e113]
+                - generic [ref=f12e114]: This section renders with nothing under it for this dispute.
+                - paragraph [ref=f12e117]:
+                  - generic "refundStatement renders empty for this dispute" [ref=f12e118]
+              - heading "Closing" [level=4] [ref=f12e119]
+              - paragraph [ref=f12e120]: We ask that this dispute be resolved in the merchant's favor. Reference MCRM-2026-05241.
+            - generic [ref=f12e121]:
+              - generic [ref=f12e122]: from dispute data
+              - generic [ref=f12e124]: renders empty for this dispute
+              - generic [ref=f12e126]: AI passage
+          - generic [ref=f12e128]:
+            - generic [ref=f12e129]:
+              - button "Coverage 15" [pressed] [ref=f12e130] [cursor=pointer]:
+                - text: Coverage
+                - generic [ref=f12e131]: "15"
+              - button "Variables 27" [ref=f12e132] [cursor=pointer]:
+                - text: Variables
+                - generic [ref=f12e133]: "27"
+            - generic [ref=f12e135]:
+              - generic [ref=f12e136]: Every variable in this template, across the 12 disputes it re-renders. Worst first.
+              - generic [ref=f12e137]:
+                - button "guestName 9/12 Sits mid-sentence. On 3 of them the letter reads with a hole in it." [ref=f12e138] [cursor=pointer]:
+                  - generic [ref=f12e139]:
+                    - generic [ref=f12e140]: guestName
+                    - generic [ref=f12e141]: 9/12
+                  - generic [ref=f12e144]: Sits mid-sentence. On 3 of them the letter reads with a hole in it.
+                - button "refundStatement 3/12 Stands alone, so on 9 the section renders empty. Flagged in the letter." [ref=f12e145] [cursor=pointer]:
+                  - generic [ref=f12e146]:
+                    - generic [ref=f12e147]: refundStatement
+                    - generic [ref=f12e148]: 3/12
+                  - generic [ref=f12e151]: Stands alone, so on 9 the section renders empty. Flagged in the letter.
+                - button "contactSummary 8/12 Stands alone, so on 4 the section renders empty. Flagged in the letter." [ref=f12e152] [cursor=pointer]:
+                  - generic [ref=f12e153]:
+                    - generic [ref=f12e154]: contactSummary
+                    - generic [ref=f12e155]: 8/12
+                  - generic [ref=f12e158]: Stands alone, so on 4 the section renders empty. Flagged in the letter.
+                - button "chargeDetail 11/12 Stands alone, so on 1 the section renders empty. Flagged in the letter." [ref=f12e159] [cursor=pointer]:
+                  - generic [ref=f12e160]:
+                    - generic [ref=f12e161]: chargeDetail
+                    - generic [ref=f12e162]: 11/12
+                  - generic [ref=f12e165]: Stands alone, so on 1 the section renders empty. Flagged in the letter.
+                - button "amountFormatted 12/12" [ref=f12e166] [cursor=pointer]:
+                  - generic [ref=f12e167]:
+                    - generic [ref=f12e168]: amountFormatted
+                    - generic [ref=f12e169]: 12/12
+                - button "cardBrand 12/12" [ref=f12e172] [cursor=pointer]:
+                  - generic [ref=f12e173]:
+                    - generic [ref=f12e174]: cardBrand
+                    - generic [ref=f12e175]: 12/12
+                - button "caseNumber 12/12" [ref=f12e178] [cursor=pointer]:
+                  - generic [ref=f12e179]:
+                    - generic [ref=f12e180]: caseNumber
+                    - generic [ref=f12e181]: 12/12
+                - button "disputeDate 12/12" [ref=f12e184] [cursor=pointer]:
+                  - generic [ref=f12e185]:
+                    - generic [ref=f12e186]: disputeDate
+                    - generic [ref=f12e187]: 12/12
+                - button "last4 12/12" [ref=f12e190] [cursor=pointer]:
+                  - generic [ref=f12e191]:
+                    - generic [ref=f12e192]: last4
+                    - generic [ref=f12e193]: 12/12
+                - button "merchantName 12/12" [ref=f12e196] [cursor=pointer]:
+                  - generic [ref=f12e197]:
+                    - generic [ref=f12e198]: merchantName
+                    - generic [ref=f12e199]: 12/12
+                - button "reasonCode 12/12" [ref=f12e202] [cursor=pointer]:
+                  - generic [ref=f12e203]:
+                    - generic [ref=f12e204]: reasonCode
+                    - generic [ref=f12e205]: 12/12
+                - button "reasonLabel 12/12" [ref=f12e208] [cursor=pointer]:
+                  - generic [ref=f12e209]:
+                    - generic [ref=f12e210]: reasonLabel
+                    - generic [ref=f12e211]: 12/12
+                - button "referenceNumber 12/12" [ref=f12e214] [cursor=pointer]:
+                  - generic [ref=f12e215]:
+                    - generic [ref=f12e216]: referenceNumber
+                    - generic [ref=f12e217]: 12/12
+                - button "settledDate 12/12" [ref=f12e220] [cursor=pointer]:
+                  - generic [ref=f12e221]:
+                    - generic [ref=f12e222]: settledDate
+                    - generic [ref=f12e223]: 12/12
+                - button "todayDate 12/12" [ref=f12e226] [cursor=pointer]:
+                  - generic [ref=f12e227]:
+                    - generic [ref=f12e228]: todayDate
+                    - generic [ref=f12e229]: 12/12
+        - generic [ref=f12e232]:
+          - generic [ref=f12e233]: 940 / 8,000 characters
+          - generic [ref=f12e235]: 15 variables, 1 function
+          - generic [ref=f12e237]: 1 variable breaks a sentence
+          - button "Reset this dispute's draft" [ref=f12e238] [cursor=pointer]
+          - button "Restore original template" [ref=f12e239] [cursor=pointer]
+    - generic [ref=f12e240]:
+      - generic [ref=f12e241]:
+        - generic [ref=f12e242]: "1"
+        - generic [ref=f12e243]:
+          - heading "Workspace chrome, not dialog chrome" [level=3] [ref=f12e244]
+          - paragraph [ref=f12e245]:
+            - text: Save and Close move to the top-right where a workspace keeps them, freeing the bottom edge for status. The title is just the template's name; a mono eyebrow carries what kind of thing it is.
+            - code [ref=f12e246]: Compare with live
+            - text: sits next to Save because "what am I actually changing?" is a question you ask right before committing.
+      - generic [ref=f12e247]:
+        - generic [ref=f12e248]: "2"
+        - generic [ref=f12e249]:
+          - heading "The blast radius becomes an instrument" [level=3] [ref=f12e250]
+          - paragraph [ref=f12e251]:
+            - text: "The same fact the old paragraph buried — this hits 12 disputes — is now three readings: how many re-render, how many are insulated because someone edited them by hand, and"
+            - emphasis [ref=f12e252]: how many come out with a sentence broken in half
+            - text: . That third number counts only the failures worth stopping for, not every honest empty section, and it is computed from the template you are editing.
+          - paragraph [ref=f12e253]: A warning tells you to be careful. This tells you what to go look at, and gives you a way in.
+      - generic [ref=f12e254]:
+        - generic [ref=f12e255]: "3"
+        - generic [ref=f12e256]:
+          - heading "The source is a tool, sized like one" [level=3] [ref=f12e257]
+          - paragraph [ref=f12e258]:
+            - text: Token highlighting, Markdown headings dropped to muted, function calls outlined. The
+            - code [ref=f12e259]: Source / Split / Letter
+            - text: switch lives on this pane because it governs how much room the source gets — full width while you write, half while you check, gone while you proofread.
+      - generic [ref=f12e260]:
+        - generic [ref=f12e261]: "4"
+        - generic [ref=f12e262]:
+          - heading "Proof against a real dispute, then the next one" [level=3] [ref=f12e263]
+          - paragraph [ref=f12e264]: Not sample data — an actual case from the 12 this template re-renders, with the arrows to page through them. Most template bugs are invisible on the happy-path record and obvious on the third one you check.
+      - generic [ref=f12e265]:
+        - generic [ref=f12e266]: "5"
+        - generic [ref=f12e267]:
+          - heading "Values are marked as values" [level=3] [ref=f12e268]
+          - paragraph [ref=f12e269]:
+            - text: Interpolated text carries a faint accent tint, so you can see at a glance which sentences are authored and which came from the dispute. It's the rendered-side answer to token highlighting, and it makes a letter that's
+            - emphasis [ref=f12e270]: mostly data
+            - text: look different from one that's mostly argument.
+      - generic [ref=f12e271]:
+        - generic [ref=f12e272]: "6"
+        - generic [ref=f12e273]:
+          - heading "The hole is drawn, not omitted" [level=3] [ref=f12e274]
+          - paragraph [ref=f12e275]: This is the whole point. A variable that renders empty shows as a hatched gap instead of silently closing up — and when a blank leaves an entire section with nothing under it, the section gets flagged bodily.
+          - paragraph [ref=f12e276]:
+            - text: Page to dispute 3 and watch
+            - code [ref=f12e277]: "## Guest Contact History"
+            - text: become a heading with nothing beneath it, while the timeline reads
+            - code [ref=f12e278]: "- Mar 30, 2026 - booked and paid in full."
+            - text: That is what the bank would have received.
+      - generic [ref=f12e279]:
+        - generic [ref=f12e280]: "7"
+        - generic [ref=f12e281]:
+          - heading "Coverage, graded by how the blank fails" [level=3] [ref=f12e282]
+          - paragraph [ref=f12e283]:
+            - text: Every variable in the template, ranked worst-first across the proofing set. But a raw fill count would cry wolf, because two variables can both be "empty on 9 of 12" and mean completely different things. The grade comes from
+            - emphasis [ref=f12e284]: where the token sits
+            - text: ":"
+          - paragraph [ref=f12e285]:
+            - code [ref=f12e286]: "{{guestName}}"
+            - text: sits mid-sentence, so an empty one ships
+            - code [ref=f12e287]: "- Jan 08, 2026 - booked and paid in full."
+            - text: to a bank. Broken prose — red, and worth stopping for.
+            - code [ref=f12e288]: "{{refundStatement}}"
+            - text: "stands alone on its line, so an empty one collapses its section instead, which the letter already flags bodily. Amber, and often correct: plenty of these disputes genuinely had no refund."
+          - paragraph [ref=f12e289]:
+            - text: The useful part is that this is
+            - strong [ref=f12e290]: derived from the template
+            - text: ", not from a hand-maintained list of which variables are allowed to be blank. Move a token into a sentence and its grade changes by itself. Clicking a row jumps the letter to a dispute where that variable is missing."
+      - generic [ref=f12e291]:
+        - generic [ref=f12e292]: "8"
+        - generic [ref=f12e293]:
+          - heading "The palette, kept — but demoted" [level=3] [ref=f12e294]
+          - paragraph [ref=f12e295]: The grouped, filterable variable rail from the first pass survives intact; it was the right fix for the 27-chip wall. It just isn't the main event anymore, so it shares the rail with Coverage instead of occupying the bottom of the screen. Chips already used in the template carry the accent.
+  - generic [ref=f12e296]:
+    - generic [ref=f12e297]: 03 — Scope
+    - heading "What's re-layout, and what's new" [level=2] [ref=f12e298]
+    - paragraph [ref=f12e299]: You scoped the first pass form-only. This one isn't, and I'd rather say so plainly than bury it — the proofing idea needs behavior that doesn't exist yet. Everything in the first block is free; everything in the second is a real build, listed so you can cut it.
+    - table [ref=f12e301]:
+      - rowgroup [ref=f12e302]:
+        - row [ref=f12e303]:
+          - columnheader "Piece" [ref=f12e304]
+          - columnheader "Kind" [ref=f12e305]
+          - columnheader "What it needs" [ref=f12e306]
+      - rowgroup [ref=f12e307]:
+        - row [ref=f12e308]:
+          - cell "Workspace layout, header, status bar" [ref=f12e309]
+          - cell "form" [ref=f12e310]
+          - cell "Markup and CSS in the existing modal shell. Same open/close path." [ref=f12e312]
+        - row [ref=f12e313]:
+          - cell "Token highlighting, grouped variable rail" [ref=f12e314]
+          - cell "form" [ref=f12e315]
+          - cell "Carried over from the first pass. No logic change." [ref=f12e317]
+        - row [ref=f12e318]:
+          - cell "Source / Split / Letter switch" [ref=f12e319]
+          - cell "form" [ref=f12e320]
+          - cell "One piece of local state." [ref=f12e322]
+        - row [ref=f12e323]:
+          - cell "Rendered letter preview" [ref=f12e324]
+          - cell "new" [ref=f12e325]
+          - cell [ref=f12e327]:
+            - code [ref=f12e328]: renderTemplate()
+            - text: already exists and is tested — this calls it against one dispute's vars and renders the Markdown. The cheapest new capability here.
+        - row [ref=f12e329]:
+          - cell "Blank + empty-section marking" [ref=f12e330]
+          - cell "new" [ref=f12e331]
+          - cell [ref=f12e333]:
+            - text: Render with sentinel values instead of
+            - code [ref=f12e334]: "\"\""
+            - text: ", then mark them. Purely a render-time concern; the saved template is untouched."
+        - row [ref=f12e335]:
+          - cell "Dispute pager" [ref=f12e336]
+          - cell "new" [ref=f12e337]
+          - cell "The list of disputes this category template affects, plus their built vars. The panel knows the category; the query is the work." [ref=f12e339]
+        - row [ref=f12e340]:
+          - cell "Coverage" [ref=f12e341]
+          - cell "new" [ref=f12e342]
+          - cell "Build vars for all N disputes, count non-empty per variable. Needs the same query as the pager, so they ship together or not at all." [ref=f12e344]
+        - row [ref=f12e345]:
+          - cell "Blank severity grading" [ref=f12e346]
+          - cell "free" [ref=f12e347]
+          - cell "Derived from the template by checking whether a token shares its line with prose. No catalog flag, no new field, nothing to keep in sync — about fifteen lines." [ref=f12e349]
+        - row [ref=f12e350]:
+          - cell "Compare with live" [ref=f12e351]
+          - cell "new" [ref=f12e352]
+          - cell "A diff of editor text against the saved template. Nice, not load-bearing — cut first if something has to go." [ref=f12e354]
+    - paragraph [ref=f12e355]: "If you want only the free half, it degrades honestly: the workspace layout, the switch, and the rail all stand on their own, and the letter pane becomes a preview against the single dispute already open in the panel — still better than editing blind, without the query work."
+  - paragraph [ref=f12e356]:
+    - text: Built on the app's own system — Instrument Serif, Inter Tight, JetBrains Mono, the Taupe-Grey ramp, the green accent,
+    - code [ref=f12e357]: "--amber-*"
+    - text: for caution,
+    - code [ref=f12e358]: "--pos"
+    - text: /
+    - code [ref=f12e359]: "--neg"
+    - text: for coverage severity. No new color tokens. The twelve disputes are fixtures drawn from
+    - code [ref=f12e360]: lib/fixtures.ts
+    - text: "'s real reason codes, providers, and merchants; coverage is computed from them at runtime, so nothing in the rail is a drawing."
+  - paragraph [ref=f12e361]:
+    - text: "One finding worth passing on, from measuring this page: the shipped primary button pair —"
+    - code [ref=f12e362]: "--accent-fg"
+    - text: white on
+    - code [ref=f12e363]: "--accent"
+    - text: green — measures
+    - strong [ref=f12e364]: 2.41:1
+    - text: ", well under the 4.5 floor for its 13px label, in both themes. The Save button above is left exactly as the app renders it rather than quietly corrected inside one mockup, because it is an app-wide token pair and not a template-editor decision. Dropping"
+    - code [ref=f12e365]: "--accent"
+    - text: to roughly
+    - code [ref=f12e366]: oklch(0.52 0.16 145)
+    - text: for button surfaces clears it without moving the hue. Everything else on this page measures above 4.5 in both themes.

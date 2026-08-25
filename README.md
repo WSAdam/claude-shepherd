@@ -383,6 +383,12 @@ Click **New** (or **⌘⌥S**) to open the **New session** modal:
   prompt), so new-project spawns get extra settle time, open VS Code with `--disable-workspace-trust`,
   re-assert the chat-input focus, and **paste** the initial task — so the prompt reliably lands and the
   session actually starts.
+- **Window placement** — a spawned VS Code/Cursor window inherits the frame of the editor
+  window you already have open, instead of the full-width frame macOS `open` hands it (which
+  lands underneath a right-docked Shepherd panel and has to be dragged back every time). With
+  no window to copy, it takes the larger free band beside the panel; with neither, it's left
+  alone. Cold-start spawns only — a **warm** spawn reuses a window you already placed, so it's
+  never moved out from under you. Off with `spawn.matchWindowSize: false`.
 - **Presets** — ▶ chips that spawn a saved folder+editor+mode+provider bundle in one click;
   "Save as preset" in the footer captures the current form (`~/.claude/cc-presets.json`,
   ✕ on a chip deletes). Picking a known folder also recalls the editor/mode/provider you
