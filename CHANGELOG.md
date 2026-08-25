@@ -4,6 +4,40 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-08-21 — Hide a session without closing it
+
+### Added — "Hide tile (keep session running)"
+
+"Forget tile" removed a tile and it came straight back. That was working as designed and
+the design was the problem: the tile is a **projection** of `~/.claude/cc-status/<key>.json`,
+and eight Claude Code hooks (`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`,
+`PermissionRequest`, `Notification`, `Stop`, `SessionEnd`) rewrite that file constantly.
+Deleting it only sticks when nothing is left to rewrite it — fine for a stale orphan, useless
+for a live session. "Forget" was carrying two intents and only serving one.
+
+**Hide** serves the other. It takes a session off the grid and changes nothing else: it keeps
+running, and every automation pass still sees it — gate decisions, autofeed, escalation,
+policies, auto-respawn. Filtering happens at the **render payload**, not in `refreshList`, so
+hiding is a display decision and nothing more. The Stream Deck honours it too, so a hidden
+session doesn't hold a physical key.
+
+The mark is keyed on the tile key, which is the sanitized **`session_id`**. That is what makes
+"hidden until I reopen the project" fall out for free — the same session stays hidden for its
+whole life, while reopening the project produces a new `session_id`, a new key, and a normal
+visible tile. No expiry logic, nothing to tune.
+
+Marks are swept once their session ends (the tile disappears, so the mark can never match
+again), which keeps `~/.claude/cc-hidden.json` from growing without bound.
+
+### Added — ☰ → 🙈 Hidden sessions
+
+The way back. The row appears with a count only when something is hidden, and each entry shows
+the session's **live status** — so hiding one that later blocks on approval leaves it plainly
+findable rather than lost. Restore one at a time, or all at once.
+
+"Forget tile (no close)" is now **"Forget tile (stale orphan only)"**, named for the case it
+actually handles.
+
 ## 2026-08-21 — Plan-limit alerts fire once per window again, and say something
 
 ### Fixed — a warning every 3 minutes instead of once per window

@@ -1,0 +1,124 @@
+- generic [ref=e1]:
+  - generic [ref=e2]:
+    - generic [ref=e3]:
+      - generic [ref=e4]: QB Stamp · chargebacks
+      - button "Reopen the modal" [ref=e5] [cursor=pointer]
+    - heading "Open cases" [level=2] [ref=e6]
+    - generic [ref=e7]:
+      - generic [ref=e8]: 5512-8842-11
+      - generic [ref=e9]:
+        - text: M. Okonkwo
+        - emphasis [ref=e10]: "· res #1520910"
+      - generic [ref=e11]: $249.00
+      - generic [ref=e12]: Ready to stamp
+    - generic [ref=e13]:
+      - generic [ref=e14]: 5512-8839-04
+      - generic [ref=e15]:
+        - text: R. Vasquez
+        - emphasis [ref=e16]: "· res #1519774"
+      - generic [ref=e17]: $1,180.00
+      - generic [ref=e18]: Matching
+    - generic [ref=e19]:
+      - generic [ref=e20]: 5512-8830-77
+      - generic [ref=e21]:
+        - text: T. Lindqvist
+        - emphasis [ref=e22]: "· res #1518206"
+      - generic [ref=e23]: $96.50
+      - generic [ref=e24]: Awaiting docs
+  - dialog [ref=e25]:
+    - generic [ref=e27]:
+      - generic [ref=e28]:
+        - generic [ref=e29]:
+          - generic [ref=e30]: QB Stamp · Finish
+          - heading "All writes verified" [level=1] [ref=e31]
+          - generic [ref=e32]:
+            - generic [ref=e33]: Case 5512-8842-11
+            - generic [ref=e34]: ·
+            - generic [ref=e35]: M. Okonkwo
+            - generic [ref=e36]: ·
+            - generic [ref=e37]: Mastercard ····4411
+        - generic [ref=e38]:
+          - generic [ref=e39]:
+            - generic [ref=e40]: ✓5 of 5 verified
+            - generic [ref=e41]: 14:32:07
+          - button "Close" [active] [ref=e42] [cursor=pointer]: ✕
+      - generic [ref=e43]:
+        - generic [ref=e44]:
+          - generic [ref=e45]: Partial chargeback
+          - generic [ref=e46]: $249.00
+          - generic [ref=e47]: disputed of $449.00 matched
+          - generic [ref=e48]: allocated largest payment first
+        - generic [ref=e51]:
+          - generic [ref=e52]: "#3127299 $249.00 disputed"
+          - generic [ref=e53]: "#3127288 $200.00 un-disputed — not written"
+      - generic [ref=e55]:
+        - generic [ref=e56]:
+          - generic [ref=e57]: Field
+          - generic [ref=e58]: Before
+          - generic [ref=e59]: Written
+          - generic [ref=e60]: Read back from QB
+        - generic [ref=e61]:
+          - generic [ref=e62]: Payments
+          - link "#3127299 ↗" [ref=e63] [cursor=pointer]:
+            - /url: "#"
+        - generic [ref=e64]:
+          - generic [ref=e65]: Chargeback Date
+          - generic [ref=e66]: —
+          - generic [ref=e67]: 2026-08-21
+          - generic [ref=e68]:
+            - generic [ref=e69]: ✓
+            - text: 2026-08-21
+        - generic [ref=e70]:
+          - generic [ref=e71]: Chargeback Amount
+          - generic [ref=e72]: —
+          - generic [ref=e73]: "249.00"
+          - generic [ref=e74]:
+            - generic [ref=e75]: ✓
+            - text: "249"
+            - superscript [ref=e76]: ≈
+        - generic [ref=e77]:
+          - generic [ref=e78]: Reservation
+          - link "#1520910 ↗" [ref=e79] [cursor=pointer]:
+            - /url: "#"
+        - group [ref=e80]:
+          - generic "Chargeback note · append-only ▸ — CHARGEBACK RECEIVED — guest… not returned †" [ref=e81] [cursor=pointer]:
+            - generic [ref=e82]:
+              - generic [ref=e83]: Chargeback note · append-only ▸
+              - generic [ref=e84]: —
+              - generic [ref=e85]: CHARGEBACK RECEIVED — guest…
+              - generic [ref=e86]:
+                - text: not returned
+                - superscript [ref=e87]: †
+        - generic [ref=e88]:
+          - generic [ref=e89]: Package Summary
+          - link "#1961442 ↗" [ref=e90] [cursor=pointer]:
+            - /url: "#"
+        - generic [ref=e91]:
+          - generic [ref=e92]: Chargeback Date
+          - generic [ref=e93]: —
+          - generic [ref=e94]: 2026-08-21
+          - generic [ref=e95]:
+            - generic [ref=e96]: ✓
+            - text: 2026-08-21
+        - generic [ref=e97]:
+          - generic [ref=e98]: Chargeback Amount · full dispute
+          - generic [ref=e99]: —
+          - generic [ref=e100]: "249.00"
+          - generic [ref=e101]:
+            - generic [ref=e102]: ✓
+            - text: "249"
+            - superscript [ref=e103]: ≈
+        - generic [ref=e104]:
+          - paragraph [ref=e105]:
+            - generic [ref=e106]: ≈
+            - generic [ref=e107]: Compared numerically. QuickBooks returns amounts without trailing zeros.
+          - paragraph [ref=e108]:
+            - generic [ref=e109]: †
+            - generic [ref=e110]: Write-only field — a CRM automation consumes the note, so QuickBooks never reads it back. Delivery confirmed by write receipt 8841-c.
+      - generic [ref=e111]:
+        - generic [ref=e112]: Approving marks the case reconciled and closes it.
+        - button "Flag a mismatch" [ref=e113] [cursor=pointer]
+        - generic [ref=e114]:
+          - generic [ref=e115]: ⌘
+          - generic [ref=e116]: ↵
+        - button "Approve" [ref=e117] [cursor=pointer]

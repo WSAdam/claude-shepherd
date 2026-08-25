@@ -1720,8 +1720,11 @@ do
         src:find("if sd.sig[i] ~= sig then", 1, true) ~= nil)
   check("sd-pin: panel ccUpdate push skipped when the panel is hidden (panelVisible gate)",
         src:find("running JS into a hidden webview is wasted work", 1, true) ~= nil)
+  -- Forget still unlinks the status file with NO window keystroke; it is now
+  -- labelled for the case it actually handles (a stale orphan), because on a LIVE
+  -- session the hooks rewrite that file within seconds. Hide covers the live case.
   check("sd-pin: 'Forget tile' drops the tile via removeStatus with NO window close (orphan-safe)",
-        src:find('title = "Forget tile (no close)"', 1, true) ~= nil
+        src:find('title = "Forget tile (stale orphan only)"', 1, true) ~= nil
         and src:find("FX.removeStatus(item.key)", 1, true) ~= nil)
   -- Bar presence + perSession fallback is glue (grep); the bucket math/clamp is pinned by VALUE
   -- in core.test (contextBucket) and wired here via core.contextBucket in the repaint signature.
@@ -2570,6 +2573,37 @@ do
   -- core.test.lua), and the Alerts empty-state names the new type.
   check("#18-pin: JS isNotification counts usage_limit",
         src:find('|| e.type === "usage_limit") return true;', 1, true) ~= nil)
+
+  -- hidden-pin (UI): "Forget tile" deleted a file that the hooks immediately
+  -- rewrote, so a live session's tile popped back. Hide is a display mark, applied
+  -- at the RENDER payload so every automation pass still sees the session.
+  check("hidden-pin: Hide is offered on the tile menu and marks, never deletes",
+        src:find('title = "Hide tile (keep session running)"', 1, true) ~= nil
+        and src:find("FX.setHidden(item.key, true)", 1, true) ~= nil)
+  check("hidden-pin: Forget is relabelled for the case it actually handles",
+        src:find('title = "Forget tile (stale orphan only)"', 1, true) ~= nil)
+  -- The load-bearing one: filtering must happen on the payload, NOT in refreshList,
+  -- or a hidden session silently drops out of the gate/autofeed/escalation passes.
+  check("hidden-pin: only the render payload is filtered",
+        src:find("core.partitionHidden(list, hiddenMap)", 1, true) ~= nil
+        and src:find("local payload = (#shownList == 0)", 1, true) ~= nil)
+  check("hidden-pin: the Stream Deck hides them too (no key held by a hidden tile)",
+        src:find("sdRender(shownList)", 1, true) ~= nil)
+  check("hidden-pin: marks for ended sessions are swept (no unbounded growth)",
+        src:find("FX.saveHidden(hiddenMap)", 1, true) ~= nil
+        and src:find("dropped \" .. #stale .. \" hidden mark(s)", 1, true) ~= nil)
+  check("hidden-pin: there is a way back, under the hamburger",
+        src:find("function openHidden()", 1, true) ~= nil
+        and src:find('menuPick(\'hidden\')', 1, true) ~= nil
+        and src:find('if a == "unhide-tile"', 1, true) ~= nil
+        and src:find('if a == "unhide-all"', 1, true) ~= nil)
+  -- Hiding one that later blocks on approval must not make it unfindable: the
+  -- drawer row carries a count, and each row shows its live status.
+  check("hidden-pin: the count is badged so hidden sessions stay discoverable",
+        src:find("function setHiddenCount(n)", 1, true) ~= nil
+        and src:find("setHiddenCount(\" .. tostring(#hiddenList) .. \")", 1, true) ~= nil)
+  check("hidden-pin: each restore row shows the session's live status",
+        src:find('var st = h.stale ? "stale" : (h.status || "");', 1, true) ~= nil)
 
   -- limit-display (JS twins): the Alerts panel drew "• usage_limit" with no detail
   -- because usage_limit had no NARRATE entry and no evDesc branch, the session

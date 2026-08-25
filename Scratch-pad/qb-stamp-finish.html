@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QB Stamp — Finish</title>
+<style>
+  :root{
+    --bg:#efedea;
+    --sheet:#fff;
+    --ink:#17150f;
+    --ink-2:#5c574e;
+    --ink-3:#938d82;
+    --ink-4:#b8b2a7;
+    --line:#e6e2db;
+    --line-2:#f1eee9;
+    --tint:#faf8f5;
+    --ok:#1a7f45;
+    --ok-soft:#eef6f0;
+    --amber:#9a6316;
+    --amber-soft:#fdf8ef;
+    --amber-line:#f0e3ce;
+    --link:#1f4fd8;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Helvetica,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:14px;
+    line-height:1.45;-webkit-font-smoothing:antialiased;
+    font-variant-numeric:tabular-nums;
+  }
+  button{font:inherit;cursor:pointer;transition:.12s}
+
+  /* ================= app behind ================= */
+  .app{max-width:1020px;margin:0 auto;padding:24px 28px}
+  .app-bar{display:flex;align-items:center;margin-bottom:26px}
+  .logo{font-size:13px;font-weight:700;letter-spacing:-.01em}
+  .logo span{color:var(--ink-3);font-weight:450}
+  .app h2{font-size:12px;letter-spacing:.07em;text-transform:uppercase;color:var(--ink-3);margin:0 0 10px}
+  .case{
+    display:grid;grid-template-columns:118px 1fr 100px 104px;gap:14px;align-items:center;
+    padding:13px 16px;border:1px solid var(--line);border-radius:9px;
+    background:var(--sheet);margin-bottom:7px;font-size:13px;
+  }
+  .case .cid{font-family:var(--mono);font-size:12px;color:var(--ink-3)}
+  .case .who em{font-style:normal;color:var(--ink-3)}
+  .case .amt{font-family:var(--mono);text-align:right}
+  .case .st{justify-self:end;font-size:11px;font-weight:650;color:var(--ink-3)}
+  .case.active .st{color:var(--amber)}
+
+  /* ================= modal shell ================= */
+  dialog{padding:0;border:none;background:transparent;max-width:none;max-height:none;
+         width:100%;height:100%;overflow:visible}
+  dialog::backdrop{background:rgba(23,21,15,.34);backdrop-filter:blur(3px);animation:fade .2s ease-out}
+  @keyframes fade{from{opacity:0}}
+  @keyframes rise{from{opacity:0;transform:translateY(8px)}}
+  .wrap{position:fixed;inset:0;display:grid;place-items:center;padding:24px}
+  .modal{
+    width:min(780px,100%);max-height:calc(100vh - 48px);display:flex;flex-direction:column;
+    background:var(--sheet);border-radius:12px;overflow:hidden;
+    box-shadow:0 0 0 1px rgba(23,21,15,.07),0 18px 50px -12px rgba(23,21,15,.30),
+               0 4px 12px -4px rgba(23,21,15,.10);
+    animation:rise .22s cubic-bezier(.2,.9,.3,1);
+  }
+
+  /* ---------------- header ---------------- */
+  .head{padding:22px 26px 18px;flex:none;display:flex;gap:20px;align-items:flex-start;
+        border-bottom:1px solid transparent;transition:border-color .15s}
+  .modal.scrolled .head{border-bottom-color:var(--line)}
+  .head-main{flex:1;min-width:0}
+  .eyebrow{font-size:10.5px;letter-spacing:.11em;text-transform:uppercase;font-weight:700;color:var(--ink-4)}
+  .eyebrow b{color:var(--ink-3);font-weight:700}
+  h1{margin:7px 0 0;font-size:25px;line-height:1.12;letter-spacing:-.022em;font-weight:640}
+  .ident{margin:8px 0 0;font-size:13px;color:var(--ink-2);display:flex;flex-wrap:wrap;gap:9px;align-items:baseline}
+  .ident .sep{color:var(--ink-4)}
+  .ident .mono{font-family:var(--mono);font-size:12.5px}
+  .head-side{display:flex;align-items:flex-start;gap:4px;flex:none}
+  .stat{text-align:right;padding-top:2px}
+  .stat .n{font-size:15px;font-weight:660;color:var(--ok);letter-spacing:-.01em;white-space:nowrap}
+  .stat .n .glyph{margin-right:4px}
+  .stat .t{font-size:11px;color:var(--ink-3);margin-top:2px;white-space:nowrap;font-family:var(--mono)}
+  .x{width:30px;height:30px;border:none;background:transparent;color:var(--ink-4);
+     font-size:15px;border-radius:7px;display:grid;place-items:center;margin:-2px -6px 0 6px}
+  .x:hover{background:var(--line-2);color:var(--ink)}
+
+  /* ---------------- scope band ---------------- */
+  .scope{background:var(--amber-soft);border-top:1px solid var(--amber-line);
+         border-bottom:1px solid var(--amber-line);padding:13px 26px 14px;flex:none}
+  .scope-top{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap}
+  .scope-tag{font-size:10px;letter-spacing:.09em;text-transform:uppercase;font-weight:750;color:var(--amber)}
+  .scope-amt{font-family:var(--mono);font-size:15px;font-weight:650;letter-spacing:-.01em}
+  .scope-of{font-size:13px;color:var(--ink-2)}
+  .scope-of b{font-family:var(--mono);font-weight:600;color:var(--ink);font-size:12.5px}
+  .scope-rule{margin-left:auto;font-size:11.5px;color:var(--amber)}
+  .bar{display:flex;height:6px;border-radius:3px;overflow:hidden;background:#0000000f;margin:10px 0 8px}
+  .bar i{background:var(--amber)}
+  .scope-legend{display:flex;gap:18px;flex-wrap:wrap;font-size:11.5px;color:var(--ink-2)}
+  .scope-legend .k{font-family:var(--mono);color:var(--ink)}
+  .scope-legend .q{color:var(--ink-3)}
+
+  /* ---------------- ledger ---------------- */
+  .body{overflow-y:auto;overscroll-behavior:contain;flex:1}
+  .ledger{padding:0 26px}
+
+  .trow{
+    display:grid;
+    grid-template-columns:minmax(0,1fr) 66px minmax(0,172px) minmax(0,178px);
+    gap:16px;align-items:baseline;padding:9px 0;
+  }
+  .trow > *{min-width:0}
+
+  .colhead{
+    padding:14px 0 7px;border-bottom:1px solid var(--line);
+    font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;font-weight:700;color:var(--ink-4);
+  }
+
+  .grp{display:flex;align-items:center;gap:8px;padding:14px 0 4px}
+  .grp .name{font-size:11px;letter-spacing:.08em;text-transform:uppercase;font-weight:750;color:var(--ink-3)}
+  .grp .id{font-family:var(--mono);font-size:12px;color:var(--link);text-decoration:none}
+  .grp .id:hover{text-decoration:underline}
+  .grp .id .a{font-size:9px;opacity:.65}
+
+  .r{border-top:1px solid var(--line-2)}
+  .grp + .r,.grp + details.note{border-top:none}
+  .field{font-size:13.5px;font-weight:550;letter-spacing:-.005em}
+  .field .q{color:var(--ink-3);font-weight:400;font-size:12px}
+  .before{font-family:var(--mono);font-size:12.5px;color:var(--ink-4)}
+  .after{font-family:var(--mono);font-size:12.5px;color:var(--ink);font-weight:560;
+         white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .after.prose{font-weight:450;color:var(--ink-2);font-size:12px}
+  .rb{font-family:var(--mono);font-size:12.5px;color:var(--ok);font-weight:560;
+      display:flex;align-items:baseline;gap:6px}
+  .rb .g{font-size:10px}
+  .rb.na{color:var(--ink-3);font-weight:450}
+  sup.fn{font-family:var(--sans);font-size:10px;color:var(--ink-3);margin-left:2px;top:-.35em;position:relative}
+
+  details.note{border-top:1px solid var(--line-2)}
+  details.note > summary{list-style:none;cursor:pointer}
+  details.note > summary::-webkit-details-marker{display:none}
+  details.note > summary:hover .field{color:#000}
+  details.note .field::after{
+    content:"▸";font-size:8px;color:var(--ink-4);margin-left:7px;display:inline-block;transition:.15s
+  }
+  details.note[open] .field::after{transform:rotate(90deg)}
+  .notebody{
+    margin:0 0 14px;padding:11px 13px;background:var(--tint);border:1px solid var(--line);
+    border-radius:8px;font-family:var(--mono);font-size:11.5px;line-height:1.65;color:var(--ink-2);
+    white-space:pre-wrap;
+  }
+
+  .notes{
+    border-top:1px solid var(--line);margin-top:6px;padding:11px 0 16px;
+    display:grid;gap:5px;font-size:11.5px;color:var(--ink-3);line-height:1.5;
+  }
+  .notes p{margin:0;display:flex;gap:8px}
+  .notes .m{font-family:var(--sans);color:var(--ink-4);flex:none;width:9px;font-weight:700}
+
+  /* ---------------- footer ---------------- */
+  .foot{flex:none;display:flex;align-items:center;gap:16px;padding:13px 26px;
+        border-top:1px solid var(--line);background:var(--tint)}
+  .foot-note{flex:1;min-width:0;font-size:12px;color:var(--ink-3)}
+  .approve{background:var(--ink);color:#fff;border:none;height:34px;padding:0 18px;
+           border-radius:8px;font-size:13px;font-weight:640;letter-spacing:-.005em}
+  .approve:hover{background:#000}
+  .approve:disabled{opacity:.4;cursor:default}
+  :focus{outline:none}
+  :focus-visible{outline:2px solid var(--link);outline-offset:2px;border-radius:6px}
+  .keys{font-size:11px;color:var(--ink-4);display:flex;gap:4px;align-items:center}
+  kbd{font-family:var(--sans);font-size:10px;font-weight:650;color:var(--ink-3);background:var(--sheet);
+      border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:1px 4px}
+  .done-msg{display:none;flex:1;font-size:12.5px;color:var(--ok);font-weight:600;align-items:center;gap:7px}
+  .modal.done .done-msg{display:flex}
+  .modal.done .foot-note,.modal.done .keys{display:none}
+  .modal.done .body,.modal.done .scope{opacity:.42;pointer-events:none;transition:.25s}
+  .undo{background:none;border:none;color:var(--link);font:inherit;font-size:12.5px;
+        text-decoration:underline;padding:0;font-weight:550}
+
+  @media (max-width:680px){
+    .wrap{padding:0}
+    .modal{width:100%;height:100%;max-height:100vh;border-radius:0}
+    .trow{grid-template-columns:minmax(0,1fr) minmax(0,142px);gap:6px 14px;padding:12px 0}
+    .colhead{display:none}
+    .before{display:none}
+    .r .field{grid-column:1}
+    .after{grid-column:1;font-size:12px}
+    .rb{grid-column:2;grid-row:1/span 2;justify-content:flex-end}
+    .scope-rule{margin-left:0;width:100%}
+    .case{grid-template-columns:1fr auto;row-gap:5px}
+    .case .cid,.case .st{grid-column:2;justify-self:end}
+  }
+  @media (prefers-reduced-motion:reduce){*{animation:none!important}}
+</style>
+</head>
+<body>
+
+<div class="app">
+  <div class="app-bar">
+    <div class="logo">QB Stamp <span>· chargebacks</span></div>
+    <button class="approve" style="margin-left:auto" onclick="openModal()">Reopen the modal</button>
+  </div>
+  <h2>Open cases</h2>
+  <div class="case active">
+    <span class="cid">5512-8842-11</span><span class="who">M. Okonkwo <em>· res #1520910</em></span>
+    <span class="amt">$249.00</span><span class="st">Ready to stamp</span>
+  </div>
+  <div class="case">
+    <span class="cid">5512-8839-04</span><span class="who">R. Vasquez <em>· res #1519774</em></span>
+    <span class="amt">$1,180.00</span><span class="st">Matching</span>
+  </div>
+  <div class="case">
+    <span class="cid">5512-8830-77</span><span class="who">T. Lindqvist <em>· res #1518206</em></span>
+    <span class="amt">$96.50</span><span class="st">Awaiting docs</span>
+  </div>
+</div>
+
+<dialog id="dlg">
+ <div class="wrap" data-backdrop>
+  <div class="modal" id="modal">
+
+    <div class="head">
+      <div class="head-main">
+        <div class="eyebrow">QB Stamp <b>·</b> Finish</div>
+        <h1>All writes verified</h1>
+        <div class="ident">
+          <span class="mono">Case 5512-8842-11</span>
+          <span class="sep">·</span>
+          <span>M. Okonkwo</span>
+          <span class="sep">·</span>
+          <span class="mono">Mastercard ····4411</span>
+        </div>
+      </div>
+      <div class="head-side">
+        <div class="stat">
+          <div class="n"><span class="glyph">✓</span>5 of 5 verified</div>
+          <div class="t">14:32:07</div>
+        </div>
+        <button class="x" aria-label="Close" onclick="closeModal()">✕</button>
+      </div>
+    </div>
+
+    <div class="scope">
+      <div class="scope-top">
+        <span class="scope-tag">Partial chargeback</span>
+        <span class="scope-amt">$249.00</span>
+        <span class="scope-of">disputed of <b>$449.00</b> matched</span>
+        <span class="scope-rule">allocated largest payment first</span>
+      </div>
+      <div class="bar"><i style="width:55.46%"></i></div>
+      <div class="scope-legend">
+        <span><span class="k">#3127299</span> <span class="q">$249.00 disputed</span></span>
+        <span><span class="k">#3127288</span> <span class="q">$200.00 un-disputed — not written</span></span>
+      </div>
+    </div>
+
+    <div class="body" id="mbody">
+      <div class="ledger">
+
+        <div class="trow colhead">
+          <span>Field</span><span>Before</span><span>Written</span><span>Read back from QB</span>
+        </div>
+
+        <div class="grp">
+          <span class="name">Payments</span>
+          <a class="id" href="#">#3127299 <span class="a">↗</span></a>
+        </div>
+
+        <div class="trow r">
+          <div class="field">Chargeback Date</div>
+          <div class="before">—</div>
+          <div class="after">2026-08-21</div>
+          <div class="rb"><span class="g">✓</span>2026-08-21</div>
+        </div>
+
+        <div class="trow r">
+          <div class="field">Chargeback Amount</div>
+          <div class="before">—</div>
+          <div class="after">249.00</div>
+          <div class="rb"><span class="g">✓</span>249<sup class="fn">≈</sup></div>
+        </div>
+
+        <div class="grp">
+          <span class="name">Reservation</span>
+          <a class="id" href="#">#1520910 <span class="a">↗</span></a>
+        </div>
+
+        <details class="note">
+          <summary>
+            <div class="trow">
+              <div class="field">Chargeback note <span class="q">· append-only</span></div>
+              <div class="before">—</div>
+              <div class="after prose">CHARGEBACK RECEIVED — guest…</div>
+              <div class="rb na">not returned<sup class="fn">†</sup></div>
+            </div>
+          </summary>
+          <div class="notebody">CHARGEBACK RECEIVED — guest disputed $249.00 Mastercard charge
+on payment #3127299 (auth 8841). Case 5512-8842-11, received
+2026-08-21. Deadline to respond: 2026-09-04.
+Remaining $200.00 on payment #3127288 is not disputed.</div>
+        </details>
+
+        <div class="grp">
+          <span class="name">Package Summary</span>
+          <a class="id" href="#">#1961442 <span class="a">↗</span></a>
+        </div>
+
+        <div class="trow r">
+          <div class="field">Chargeback Date</div>
+          <div class="before">—</div>
+          <div class="after">2026-08-21</div>
+          <div class="rb"><span class="g">✓</span>2026-08-21</div>
+        </div>
+
+        <div class="trow r">
+          <div class="field">Chargeback Amount <span class="q">· full dispute</span></div>
+          <div class="before">—</div>
+          <div class="after">249.00</div>
+          <div class="rb"><span class="g">✓</span>249<sup class="fn">≈</sup></div>
+        </div>
+
+        <div class="notes">
+          <p><span class="m">≈</span><span>Compared numerically. QuickBooks returns amounts without trailing zeros.</span></p>
+          <p><span class="m">†</span><span>Write-only field — a CRM automation consumes the note, so QuickBooks never reads it back. Delivery confirmed by write receipt <span style="font-family:var(--mono)">8841-c</span>.</span></p>
+        </div>
+
+      </div>
+    </div>
+
+    <div class="foot">
+      <div class="foot-note">Approving marks the case reconciled and closes it.</div>
+      <div class="done-msg">✓ Stamped — <button class="undo" onclick="undo()">undo</button></div>
+      <div class="keys"><kbd>⌘</kbd><kbd>↵</kbd></div>
+      <button class="approve" id="approve" autofocus onclick="approve()">Approve</button>
+    </div>
+
+  </div>
+ </div>
+</dialog>
+
+<script>
+  var dlg=document.getElementById('dlg'),modal=document.getElementById('modal'),mbody=document.getElementById('mbody');
+  function openModal(){ if(!dlg.open){ dlg.showModal(); mbody.scrollTop=0; } }
+  function closeModal(){ if(dlg.open) dlg.close(); }
+  dlg.addEventListener('click',function(e){ if(e.target.hasAttribute('data-backdrop')) closeModal(); });
+  mbody.addEventListener('scroll',function(){ modal.classList.toggle('scrolled',mbody.scrollTop>2); });
+  function approve(){ modal.classList.add('done');
+    var b=document.getElementById('approve'); b.textContent='Approved'; b.disabled=true; }
+  function undo(){ modal.classList.remove('done');
+    var b=document.getElementById('approve'); b.textContent='Approve'; b.disabled=false; }
+  document.addEventListener('keydown',function(e){
+    if(dlg.open&&(e.metaKey||e.ctrlKey)&&e.key==='Enter'){ e.preventDefault(); approve(); } });
+  openModal();
+</script>
+
+</body>
+</html>

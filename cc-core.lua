@@ -3953,6 +3953,46 @@ function M.staleDuplicateKeys(list)
   return keys
 end
 
+-- ---- Hidden tiles (operator-hidden, session left running) -------------------
+-- Split a status list into what the panel should DRAW and what the operator has
+-- hidden, and report tombstones that match no live tile so the caller can drop
+-- them.
+--
+-- `hidden` is { [key] = hiddenAtTs }. A tile key is the sanitized session_id
+-- (cc_lib's cc_key), which is what makes "hidden until I reopen the project" fall
+-- out for free: the SAME session stays hidden for its whole life, while a new
+-- session in that folder gets a new session_id, a new key, and draws normally.
+--
+-- Hiding is a DISPLAY decision only. The caller keeps running every tile through
+-- the automation passes (gate, autofeed, escalation, policies) and filters just
+-- the render payload, so a hidden session goes on being fully managed.
+--
+-- The stale sweep is what keeps the tombstone file from growing without bound: a
+-- key with no tile left means that session ended (SessionEnd unlinks the status
+-- file), so its tombstone can never match anything again. Returns
+-- visible, hiddenItems, staleKeys -- hiddenItems ordered as given, staleKeys sorted.
+function M.partitionHidden(list, hidden)
+  local items = (type(list) == "table") and list or {}
+  local marks = (type(hidden) == "table") and hidden or {}
+  local visible, hiddenItems, live = {}, {}, {}
+  for _, it in ipairs(items) do
+    local k = (type(it) == "table") and it.key or nil
+    if k ~= nil and marks[k] then
+      live[k] = true
+      hiddenItems[#hiddenItems + 1] = it
+    else
+      if k ~= nil then live[k] = true end
+      visible[#visible + 1] = it
+    end
+  end
+  local stale = {}
+  for k in pairs(marks) do
+    if not live[k] then stale[#stale + 1] = tostring(k) end
+  end
+  table.sort(stale)
+  return visible, hiddenItems, stale
+end
+
 -- ---- Same-directory collision warning (Feature B) --------------------------
 -- Flag tiles where 2+ ACTIVE sessions (working/approval, not stale -- i.e. the
 -- ones that could be writing right now) share a working dir, so two agents editing

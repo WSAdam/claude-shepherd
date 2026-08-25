@@ -94,6 +94,7 @@ local AUTOPILOT_DIR = os.getenv("CC_AUTOPILOT_DIR") or (os.getenv("HOME") .. "/.
 local GATE_TOOLS_DIR = os.getenv("CC_GATE_TOOLS_DIR") or (os.getenv("HOME") .. "/.claude/cc-gate-tools")
 local GATE_FLAG     = os.getenv("CC_GATE_FLAG") or (os.getenv("HOME") .. "/.claude/cc-gate.enabled")
 local LABELS_FILE   = os.getenv("CC_LABELS_FILE") or (os.getenv("HOME") .. "/.claude/cc-labels.json")
+local HIDDEN_FILE   = os.getenv("CC_HIDDEN_FILE") or (os.getenv("HOME") .. "/.claude/cc-hidden.json")
 local AUTOTITLE_FILE = os.getenv("CC_AUTOTITLE_FILE") or (os.getenv("HOME") .. "/.claude/cc-autotitles.json")
 local RULES_FILE    = os.getenv("CC_RULES_FILE") or (os.getenv("HOME") .. "/.claude/cc-rules.json")
 local SCHEDULES_FILE = os.getenv("CC_SCHEDULES_FILE") or (os.getenv("HOME") .. "/.claude/cc-schedules.json")
@@ -942,6 +943,30 @@ end
 function FX.saveLabels(labelsByCwd)
   hs.fs.mkdir(CLAUDE_DIR)
   FX.writeFile(LABELS_FILE, core.json.encode(labelsByCwd or {}))
+end
+
+-- Hidden tiles: a JSON map of tile key -> the epoch second it was hidden. The tile
+-- key is the sanitized session_id, so a mark covers exactly ONE session -- reopen
+-- the project and the new session gets a new key and draws normally, with no
+-- expiry logic to get wrong. Missing/garbled file -> nothing hidden (fail-visible:
+-- a corrupt file must never silently swallow the fleet).
+function FX.loadHidden()
+  local c = FX.readFile(HIDDEN_FILE)
+  if not c or #c == 0 then return {} end
+  local ok, t = pcall(function() return core.json.decode(c) end)
+  return (ok and type(t) == "table") and t or {}
+end
+function FX.saveHidden(map)
+  hs.fs.mkdir(CLAUDE_DIR)
+  FX.writeFile(HIDDEN_FILE, core.json.encode(map or {}))
+end
+-- Hide/unhide one tile. `on=false` unhides. Returns the updated map.
+function FX.setHidden(key, on)
+  if not key or key == "" then return FX.loadHidden() end
+  local map = FX.loadHidden()
+  if on == false then map[key] = nil else map[key] = FX.now() end
+  FX.saveHidden(map)
+  return map
 end
 -- L5 auto-titles: projectKey -> derived tile title (cc-autotitles.json). Computed
 -- once per project (from its first prompt) and cached so the title is stable.
@@ -4447,6 +4472,35 @@ local function handleBridgeMsg(msg)
     pcall(function() wv:evaluateJavaScript("window.ccDoctor(" .. hs.json.encode(FX.doctorStatus()) .. ")") end)
     return
   end
+  if a == "open-hidden-view" then
+    -- The restore list. Sends only what the row needs to identify a session --
+    -- never a prompt body (the panel's audit view owns content, this doesn't).
+    local rows = {}
+    for _, it in ipairs(FX._hiddenItems or {}) do
+      rows[#rows + 1] = { key = it.key, name = it.name, cwd = it.cwd,
+                          status = it.status, stale = it.stale and true or nil }
+    end
+    table.sort(rows, function(x, y) return tostring(x.name) < tostring(y.name) end)
+    pcall(function() wv:evaluateJavaScript("window.ccHidden(" .. hs.json.encode(rows) .. ")") end)
+    return
+  end
+  if a == "unhide-tile" then
+    local hk = tostring(payload.v or "")
+    if hk ~= "" then
+      FX.setHidden(hk, false)
+      print("[cc-dashboard] restored hidden tile " .. hk)
+      refresh()
+      pcall(function() wv:evaluateJavaScript("send('open-hidden-view')") end)
+    end
+    return
+  end
+  if a == "unhide-all" then
+    FX.saveHidden({})
+    print("[cc-dashboard] restored all hidden tiles")
+    refresh()
+    pcall(function() wv:evaluateJavaScript("send('open-hidden-view')") end)
+    return
+  end
   if a == "open-features-view" then
     -- F9: push the static in-app features list (single-sourced in core.FEATURES).
     pcall(function() wv:evaluateJavaScript("window.ccFeatures(" .. hs.json.encode(core.FEATURES) .. ")") end)
@@ -5300,12 +5354,25 @@ local function handleBridgeMsg(msg)
               end },
             { title = "Cancel", fn = function() end },
         } },
+        -- Hide leaves the session completely alone -- still running, still gated,
+        -- still auto-fed -- and only stops DRAWING it. Use for a live session you
+        -- don't want on screen. It stays hidden for the life of that session
+        -- (the mark is keyed on session_id), so reopening the project brings back a
+        -- fresh tile. Restore early via the hamburger menu's "Hidden sessions".
+        { title = "Hide tile (keep session running)", fn = function()
+            FX.setHidden(item.key, true)
+            print("[cc-dashboard] hid tile " .. tostring(item.key) .. " (" .. tostring(shown) .. ")")
+            refresh()
+          end },
         -- Forget JUST drops the dashboard tile (removeStatus) with NO window keystroke, so --
         -- unlike "Close instance" -- it can't match + close a live twin that shares this name
-        -- (the title-match hazard). Safe for stale orphans; a still-live session simply
-        -- reappears on its next hook event, so no confirm is needed.
-        { title = "Forget tile (no close)", fn = function()
+        -- (the title-match hazard). It is for STALE ORPHANS: the status file is a
+        -- projection of a live session, so deleting it only sticks if nothing is left
+        -- to rewrite it -- a still-live session reappears on its next hook event.
+        -- To make a live session go away, use Hide above.
+        { title = "Forget tile (stale orphan only)", fn = function()
             FX.removeStatus(item.key)
+            FX.setHidden(item.key, false)   -- never leave a mark for a tile we just deleted
             print("[cc-dashboard] forgot tile " .. tostring(item.key) .. " (" .. tostring(shown) .. ")")
             refresh()
           end },
@@ -6586,11 +6653,24 @@ local HTML = [[
 #insights{ position:fixed; inset:0; background:var(--bg-overlay); z-index:11; display:none; flex-direction:column; font-size:12px; }
 #insights.show{ display:flex; }
 /* F6 Diagnostics + F9 Features + F7 Cost: shared simple overlay shell */
-#doctor, #features, #cost{ position:fixed; inset:0; background:var(--bg-overlay); z-index:12; display:none; flex-direction:column; font-size:12px; }
-#doctor.show, #features.show, #cost.show{ display:flex; }
-#doctor .ov-head, #features .ov-head, #cost .ov-head{ display:flex; align-items:center; justify-content:space-between; padding:12px 16px; border-bottom:1px solid var(--border); font-weight:600; color:var(--text); }
-#doctor .ov-body, #features .ov-body, #cost .ov-body{ flex:1; overflow-y:auto; padding:14px 16px; }
-#doctor .ov-foot, #features .ov-foot, #cost .ov-foot{ padding:10px 16px; border-top:1px solid var(--border); display:flex; gap:12px; align-items:center; color:var(--dim); font-size:11px; }
+#doctor, #features, #cost, #hiddenview{ position:fixed; inset:0; background:var(--bg-overlay); z-index:12; display:none; flex-direction:column; font-size:12px; }
+#doctor.show, #features.show, #cost.show, #hiddenview.show{ display:flex; }
+#doctor .ov-head, #features .ov-head, #cost .ov-head, #hiddenview .ov-head{ display:flex; align-items:center; justify-content:space-between; padding:12px 16px; border-bottom:1px solid var(--border); font-weight:600; color:var(--text); }
+#doctor .ov-body, #features .ov-body, #cost .ov-body, #hiddenview .ov-body{ flex:1; overflow-y:auto; padding:14px 16px; }
+#doctor .ov-foot, #features .ov-foot, #cost .ov-foot, #hiddenview .ov-foot{ padding:10px 16px; border-top:1px solid var(--border); display:flex; gap:12px; align-items:center; color:var(--dim); font-size:11px; }
+/* Hidden-sessions rows: name + path, live status chip, and the way back */
+.hv-row{ display:flex; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid var(--border-weak); }
+.hv-main{ flex:1; min-width:0; }
+.hv-name{ color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.hv-cwd{ color:var(--dim); font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.hv-st{ font-size:10px; padding:1px 6px; border-radius:8px; background:var(--surface-2); color:var(--text-3); white-space:nowrap; }
+.hv-st.approval{ background:var(--accent-bg); color:var(--accent); }
+.hv-restore, .hv-all{ background:none; border:1px solid var(--border); color:var(--text-2); border-radius:6px;
+  padding:2px 10px; cursor:pointer; font-size:11px; white-space:nowrap; }
+.hv-restore:hover, .hv-all:hover{ background:var(--surface-2); color:var(--text); }
+.hv-all{ margin-left:auto; }
+#tm-hidden-badge{ margin-left:6px; background:var(--accent); color:var(--bg); border-radius:8px;
+  padding:0 6px; font-size:10px; }
 #doctor .ov-foot button, #features .ov-foot button, #cost .ov-foot button{ background:var(--surface); color:var(--text-2); border:1px solid var(--border); border-radius:7px; padding:5px 12px; cursor:pointer; font-size:12px; }
 .cost-chart{ display:flex; align-items:flex-end; gap:4px; height:120px; margin-top:8px; padding-bottom:18px; }
 .cbar{ flex:1; display:flex; flex-direction:column; justify-content:flex-end; align-items:center; position:relative; height:100%; }
@@ -6859,6 +6939,7 @@ local HTML = [[
           <button class="tm-item" onclick="menuPick('doctor')"><span class="tm-ic">🩺</span> Diagnostics</button>
           <button class="tm-item" onclick="menuPick('features')"><span class="tm-ic">✨</span> Features list</button>
           <button id="tm-shift" class="tm-item" style="display:none" onclick="menuPick('shift')"><span class="tm-ic">📋</span> Shift report</button>
+          <button id="tm-hidden" class="tm-item" style="display:none" onclick="menuPick('hidden')"><span class="tm-ic">🙈</span> Hidden sessions<span id="tm-hidden-badge"></span></button>
           <button class="tm-item" onclick="menuPick('notify')"><span class="tm-ic">🔔</span> Notifications<span id="tm-notify-badge"></span></button>
         </div>
       </span>
@@ -7449,6 +7530,15 @@ local HTML = [[
     <div class="ov-head"><span>✨ What Shepherd can do</span><button class="s-x" onclick="closeFeatures()">✕</button></div>
     <div class="ov-body" id="feat-body"></div>
     <div class="ov-foot"><span>A plain-language tour of the main features.</span></div>
+  </div>
+
+  <div id="hiddenview">
+    <div class="ov-head"><span>🙈 Hidden sessions</span><button class="s-x" onclick="closeHidden()">✕</button></div>
+    <div class="ov-body" id="hidden-body"></div>
+    <div class="ov-foot">
+      <span>Hidden sessions keep running — they are only kept off the grid.</span>
+      <button class="hv-all" onclick="unhideAll()">Restore all</button>
+    </div>
   </div>
 
   <div id="cost">
@@ -10735,6 +10825,46 @@ local HTML = [[
       }
       body.innerHTML = html || '<div class="tl-empty">No checks.</div>';
     };
+    // ---- Hidden sessions overlay: restore anything hidden off the grid -------
+    // A hidden session is still running and still managed; this is the way back.
+    function openHidden(){ send("open-hidden-view"); document.getElementById("hiddenview").classList.add("show"); }
+    function closeHidden(){ document.getElementById("hiddenview").classList.remove("show"); }
+    function unhideOne(k){ send("unhide-tile", k); }
+    function unhideAll(){ send("unhide-all"); }
+    // Count badge on the drawer row + the row itself (hidden when nothing is hidden,
+    // so the menu does not grow a dead entry for a feature you never use).
+    function setHiddenCount(n){
+      var row = document.getElementById("tm-hidden"), b = document.getElementById("tm-hidden-badge");
+      if(!row || !b) return;
+      row.style.display = n > 0 ? "" : "none";
+      b.textContent = n > 0 ? String(n) : "";
+    }
+    window.ccHidden = function(list){
+      list = list || [];
+      var body = document.getElementById("hidden-body"); if(!body) return;
+      if(list.length === 0){
+        body.innerHTML = '<div class="s-help" style="margin-left:0;">Nothing is hidden. '
+          + 'Hide a session from its tile menu — it keeps running, it just leaves the grid '
+          + 'until you reopen that project.</div>';
+        return;
+      }
+      var html = "";
+      for(var i=0;i<list.length;i++){
+        var h = list[i];
+        // Surfacing the live status here is deliberate: hiding a session that later
+        // needs approval must not make it unfindable.
+        var st = h.stale ? "stale" : (h.status || "");
+        html += '<div class="hv-row">'
+             +   '<div class="hv-main">'
+             +     '<div class="hv-name">' + esc(h.name || h.key || "?") + '</div>'
+             +     '<div class="hv-cwd">' + esc(h.cwd || "") + '</div>'
+             +   '</div>'
+             +   (st ? '<span class="hv-st ' + esc(st) + '">' + esc(st) + '</span>' : '')
+             +   '<button class="hv-restore" onclick="unhideOne(\'' + esc(h.key) + '\')">Restore</button>'
+             + '</div>';
+      }
+      body.innerHTML = html;
+    };
     // ---- F9: Features list overlay (plain-language what + why per feature) ----
     function openFeatures(){ send("open-features-view"); document.getElementById("features").classList.add("show"); }
     function closeFeatures(){ document.getElementById("features").classList.remove("show"); }
@@ -12292,6 +12422,7 @@ local HTML = [[
       else if(which === "doctor") openDoctor();
       else if(which === "features") openFeatures();
       else if(which === "shift"){ if(LEDGER_ON) openShiftReport(); }
+      else if(which === "hidden") openHidden();
       else if(which === "notify") openNotifications();
     }
     // Close the drawer on any click outside it (the button's onclick stops propagation,
@@ -14134,8 +14265,26 @@ function FX._refreshBody()
   -- running JS into a hidden webview is wasted work every tick; re-showing repopulates it on the
   -- next tick (<=1s). Gate on our own `panelVisible` flag (reliable, set by hide/show) rather than
   -- a window query. The Stream Deck + the rest of the tick still run, so nothing else goes stale.
+  -- Hidden tiles (operator-hidden, session left running). Filtered HERE, at the
+  -- render payload -- not in refreshList -- so every automation pass above
+  -- (gate, autofeed, escalation, policies, respawn) still sees a hidden session
+  -- and goes on managing it. Hiding is a display decision, nothing more.
+  -- The stale sweep drops marks whose session has ended, so the file cannot grow
+  -- without bound; it costs one table walk per tick.
+  local hiddenMap = FX.loadHidden()
+  local shownList, hiddenList = list, {}
+  if next(hiddenMap) ~= nil then
+    local stale
+    shownList, hiddenList, stale = core.partitionHidden(list, hiddenMap)
+    if #stale > 0 then
+      for _, k in ipairs(stale) do hiddenMap[k] = nil end
+      FX.saveHidden(hiddenMap)
+      print("[cc-dashboard] dropped " .. #stale .. " hidden mark(s) for ended session(s)")
+    end
+  end
+  FX._hiddenItems = hiddenList   -- the ☰ "Hidden sessions" view reads this
   if panelVisible then
-    local payload = (#list == 0) and "[]" or hs.json.encode(list)
+    local payload = (#shownList == 0) and "[]" or hs.json.encode(shownList)
     local provs = core.config(cfg, "providers", nil)  -- reuse the cfg loaded above
     local provJson = (type(provs) == "table") and hs.json.encode(provs) or "[]"
     local bundleNames = {}
@@ -14143,13 +14292,19 @@ function FX._refreshBody()
     table.sort(bundleNames)
     local bundleJson = hs.json.encode(bundleNames)
     wv:evaluateJavaScript("window.ccUpdate(" .. payload .. ", " .. provJson .. ", " .. bundleJson .. ")")
+    -- Badge the count so a hidden session is always discoverable. This is the
+    -- safety valve for hiding one that later blocks on approval: it stays hidden
+    -- as asked, but the fleet never silently loses a session you can't find.
+    pcall(function() wv:evaluateJavaScript("setHiddenCount(" .. tostring(#hiddenList) .. ")") end)
   end
 
-  -- Paint the Stream Deck from the SAME fully-decorated `list` the panel just got. MUST run
-  -- after applyLabelsByCwd + the auto-title pass above, else the keys show the raw folder name
-  -- instead of your relabel/auto-title. blink toggles each tick so an approval key pulses.
+  -- Paint the Stream Deck from the SAME fully-decorated list the panel just got --
+  -- shownList, so a hidden tile doesn't keep occupying a physical key either.
+  -- MUST run after applyLabelsByCwd + the auto-title pass above, else the keys show
+  -- the raw folder name instead of your relabel/auto-title. blink toggles each tick
+  -- so an approval key pulses.
   sd.blink = not sd.blink
-  sdRender(list)
+  sdRender(shownList)
 
   -- Reflect the live keep-awake state in the toggle on a light cadence (every 10
   -- polls, not every 1s) so a `pmset -g` subprocess doesn't run each second. The

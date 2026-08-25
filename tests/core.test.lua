@@ -3452,6 +3452,45 @@ do
      core.unseenNotificationCount(n, 85), 1)
 end
 
+-- ---- hidden-pin: operator-hidden tiles --------------------------------------
+-- "Forget tile" only unlinked the status file, which is a PROJECTION of a live
+-- session: any of the 8 hooks rewrote it within seconds, so a live session's tile
+-- popped straight back. Hiding is a display mark instead, keyed on the tile key
+-- (the sanitized session_id) so it covers exactly one session.
+do
+  local list = { { key = "a", name = "alpha" }, { key = "b", name = "beta" },
+                 { key = "c", name = "gamma" } }
+  local vis, hid, stale = core.partitionHidden(list, { b = 111 })
+  eq("hidden-pin: a marked tile leaves the drawn list", #vis, 2)
+  eq("hidden-pin: and is reported as hidden", #hid, 1)
+  check("hidden-pin: the right one moved", hid[1].key == "b"
+        and vis[1].key == "a" and vis[2].key == "c")
+  eq("hidden-pin: nothing stale while its tile is live", #stale, 0)
+
+  -- The GC: a mark whose session ENDED (SessionEnd unlinks the status file, so the
+  -- tile is gone) can never match again. Without this sweep the file grows forever.
+  local _, _, stale2 = core.partitionHidden(list, { b = 111, ghost = 222, alsoGone = 333 })
+  eq("hidden-pin: marks with no tile are swept", #stale2, 2)
+  eq("hidden-pin: swept keys are sorted", table.concat(stale2, ","), "alsoGone,ghost")
+
+  -- Reopening the project is the natural un-hide: a new session means a new
+  -- session_id, so the old mark simply does not match the new key.
+  local reopened = { { key = "b2", name = "beta" } }
+  local vis3, hid3, stale3 = core.partitionHidden(reopened, { b = 111 })
+  eq("hidden-pin: a reopened project draws again under its new key", #vis3, 1)
+  eq("hidden-pin: and the old session's mark is hidden-nothing", #hid3, 0)
+  eq("hidden-pin: so the stale mark is swept", table.concat(stale3, ","), "b")
+
+  -- degenerate inputs must never swallow the fleet
+  eq("hidden-pin: no marks -> everything is drawn", #core.partitionHidden(list, {}), 3)
+  eq("hidden-pin: a garbled marks table is treated as nothing hidden",
+     #core.partitionHidden(list, "not-a-table"), 3)
+  eq("hidden-pin: a nil list is empty, not an error", #core.partitionHidden(nil, { b = 1 }), 0)
+  -- a tile with no key at all is always drawn (never silently swallowed)
+  eq("hidden-pin: a keyless tile is always drawn",
+     #core.partitionHidden({ { name = "no key" } }, { b = 1 }), 1)
+end
+
 -- ---- SSH status bridge (roadmap #7): pure layer -----------------------------
 do
   -- sshDest: the one dest formatter

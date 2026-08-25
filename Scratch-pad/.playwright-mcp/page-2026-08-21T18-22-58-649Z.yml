@@ -1,0 +1,144 @@
+- generic [ref=e1]:
+  - generic [ref=e2]:
+    - generic [ref=e3]:
+      - generic [ref=e4]: QB Stamp · chargebacks
+      - button "Reopen the modal" [ref=e5] [cursor=pointer]
+    - heading "Open cases" [level=2] [ref=e6]
+    - generic [ref=e7]:
+      - generic [ref=e8]: 5512-8842-11
+      - generic [ref=e9]:
+        - text: M. Okonkwo
+        - emphasis [ref=e10]: "· res #1520910"
+      - generic [ref=e11]: $249.00
+      - generic [ref=e12]: Ready to stamp
+    - generic [ref=e13]:
+      - generic [ref=e14]: 5512-8839-04
+      - generic [ref=e15]:
+        - text: R. Vasquez
+        - emphasis [ref=e16]: "· res #1519774"
+      - generic [ref=e17]: $1,180.00
+      - generic [ref=e18]: Matching
+    - generic [ref=e19]:
+      - generic [ref=e20]: 5512-8830-77
+      - generic [ref=e21]:
+        - text: T. Lindqvist
+        - emphasis [ref=e22]: "· res #1518206"
+      - generic [ref=e23]: $96.50
+      - generic [ref=e24]: Awaiting docs
+  - dialog [ref=e25]:
+    - generic [ref=e27]:
+      - generic [ref=e28]:
+        - generic [ref=e29]:
+          - generic [ref=e30]:
+            - generic [ref=e31]: QB Stamp
+            - generic [ref=e32]: /
+            - generic [ref=e33]: Finish
+          - heading "All writes verified" [level=1] [ref=e34]
+          - paragraph [ref=e35]: Every field was written, then read back from QuickBooks and compared. 3 records · 5 fields · last checked 14:32:07.
+        - generic [ref=e36]:
+          - generic [ref=e37]: 5 / 5 verified
+          - button "Close" [active] [ref=e39] [cursor=pointer]: ✕
+      - generic [ref=e40]:
+        - generic [ref=e41]:
+          - generic [ref=e42]:
+            - generic [ref=e43]: Partial chargeback
+            - generic [ref=e44]: $249.00 disputed against $449.00 matched
+            - generic [ref=e45]: "allocation rule: largest payment first"
+          - generic [ref=e49]:
+            - generic [ref=e50]:
+              - text: Disputed
+              - generic [ref=e52]: $249.00
+              - text: "→ payment #3127299"
+            - generic [ref=e53]:
+              - text: Un-disputed
+              - generic [ref=e55]: $200.00
+              - text: "→ payment #3127288 (untouched)"
+        - generic [ref=e56]:
+          - generic [ref=e57]:
+            - generic [ref=e58]:
+              - generic [ref=e59]: Payments
+              - link "#3127299 ↗" [ref=e60] [cursor=pointer]:
+                - /url: "#"
+              - generic [ref=e61]: 2 fields
+            - generic [ref=e62]:
+              - generic [ref=e63]: ✓
+              - generic [ref=e64]:
+                - generic [ref=e65]: Chargeback Date
+                - generic [ref=e66]:
+                  - generic [ref=e67]: empty
+                  - generic [ref=e68]: →
+                  - generic [ref=e69]: 2026-08-21
+              - generic [ref=e70]:
+                - generic [ref=e71]: Read back
+                - text: 2026-08-21
+            - generic [ref=e72]:
+              - generic [ref=e73]: ✓
+              - generic [ref=e74]:
+                - generic [ref=e75]: Chargeback Amount
+                - generic [ref=e76]:
+                  - generic [ref=e77]: empty
+                  - generic [ref=e78]: →
+                  - generic [ref=e79]: "249.00"
+              - generic [ref=e80]:
+                - generic [ref=e81]: Read back
+                - text: "249"
+                - generic [ref=e82]: numeric match — QB drops trailing zeros
+          - generic [ref=e83]:
+            - generic [ref=e84]:
+              - generic [ref=e85]: Reservation
+              - link "#1520910 ↗" [ref=e86] [cursor=pointer]:
+                - /url: "#"
+              - generic [ref=e87]: 1 field
+            - generic [ref=e88]:
+              - generic [ref=e89]: ✓
+              - generic [ref=e90]:
+                - generic [ref=e91]: Chargeback note · append-only
+                - generic [ref=e92]: CHARGEBACK RECEIVED — guest disputed $249.00 Mastercard charge…
+                - group [ref=e94]:
+                  - generic "▸ Show full note" [ref=e95] [cursor=pointer]
+              - generic [ref=e96]:
+                - generic [ref=e97]: Not read back
+                - text: write-only field
+                - generic [ref=e98]: A CRM automation consumes the note, so QB never returns it. Delivery confirmed by the write receipt.
+          - generic [ref=e99]:
+            - generic [ref=e100]:
+              - generic [ref=e101]: Package Summary
+              - link "#1961442 ↗" [ref=e102] [cursor=pointer]:
+                - /url: "#"
+              - generic [ref=e103]: 2 fields
+            - generic [ref=e104]:
+              - generic [ref=e105]: ✓
+              - generic [ref=e106]:
+                - generic [ref=e107]: Chargeback Date
+                - generic [ref=e108]:
+                  - generic [ref=e109]: empty
+                  - generic [ref=e110]: →
+                  - generic [ref=e111]: 2026-08-21
+              - generic [ref=e112]:
+                - generic [ref=e113]: Read back
+                - text: 2026-08-21
+            - generic [ref=e114]:
+              - generic [ref=e115]: ✓
+              - generic [ref=e116]:
+                - generic [ref=e117]: Chargeback Amount · full dispute
+                - generic [ref=e118]:
+                  - generic [ref=e119]: empty
+                  - generic [ref=e120]: →
+                  - generic [ref=e121]: "249.00"
+              - generic [ref=e122]:
+                - generic [ref=e123]: Read back
+                - text: "249"
+                - generic [ref=e124]: numeric match
+            - generic [ref=e125]:
+              - generic [ref=e126]: –
+              - generic [ref=e127]: "Payment #3127288 · $200.00 un-disputed — no write, left as-is"
+      - generic [ref=e128]:
+        - generic [ref=e129]: Approving stamps this chargeback as reconciled and closes the case in QB Stamp.
+        - generic [ref=e130]:
+          - generic [ref=e131]: ⌘
+          - generic [ref=e132]: ↵
+          - text: approve
+          - generic [ref=e133]: ·
+          - generic [ref=e134]: esc
+          - text: close
+        - button "Approve" [ref=e135] [cursor=pointer]
