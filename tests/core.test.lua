@@ -5400,6 +5400,176 @@ do
   eq("remove: unknown project scope is a no-op", #core.worklistScopeList(rm, "proj:/unknown"), 0)
 end
 
+-- ---- TODO.md import: parser + merge + tombstones (2026-08-31) ----------------
+-- Feature contract: a project's TODO.md checkboxes import into its worklist as
+-- individual items. The file's [x] arrives as fileDone (the automation's claim);
+-- the user's verification click is the ONLY writer of done/doneTs, ever.
+do
+  -- parseTodoFile: Markdown checkbox extraction
+  local p = core.parseTodoFile("- [ ] alpha\n- [x] beta\n")
+  eq("todo parse: count", #p, 2)
+  eq("todo parse: order", p[1].text, "alpha")
+  check("todo parse: [ ] not done", p[1].done == false)
+  check("todo parse: [x] done", p[2].done == true)
+  p = core.parseTodoFile("* [ ] star\n+ [X] plus\n  - [ ]   indented text  \n")
+  eq("todo parse: star/plus bullets + indent", #p, 3)
+  check("todo parse: [X] counts as done", p[2].done == true)
+  eq("todo parse: text trimmed", p[3].text, "indented text")
+  p = core.parseTodoFile("# heading\nprose line\n\n- plain bullet\n-[ ] nospace\n- [ ]   \n- [y] weird\n- [ ] real\n")
+  eq("todo parse: non-checkbox lines ignored", #p, 1)
+  eq("todo parse: the one real line", p[1].text, "real")
+  p = core.parseTodoFile("- [ ] a\r\n- [x] b\r\n")
+  eq("todo parse: CRLF tolerated", #p, 2)
+  eq("todo parse: no stray CR in text", p[2].text, "b")
+  -- duplicates collapse to first position; done is OR'd across copies (either order)
+  p = core.parseTodoFile("- [ ] dup\n- [x] other\n- [x] dup\n")
+  eq("todo parse: duplicate collapses", #p, 2)
+  eq("todo parse: duplicate keeps first position", p[1].text, "dup")
+  check("todo parse: duplicate ORs done ([ ] then [x])", p[1].done == true)
+  p = core.parseTodoFile("- [x] dup\n- [ ] dup\n")
+  check("todo parse: duplicate ORs done ([x] then [ ])", p[1].done == true)
+  -- caps: 500 entries, 500 chars of text
+  local big = {}
+  for i = 1, 501 do big[i] = "- [ ] item " .. i end
+  eq("todo parse: entry cap 500", #core.parseTodoFile(table.concat(big, "\n")), 500)
+  p = core.parseTodoFile("- [ ] " .. string.rep("z", 600) .. "\n")
+  eq("todo parse: text truncated to 500", #p[1].text, 500)
+  eq("todo parse: nil -> empty", #core.parseTodoFile(nil), 0)
+  eq("todo parse: non-string -> empty", #core.parseTodoFile(42), 0)
+
+  -- worklistImportTodos: merge into a project scope
+  local nid = 0
+  local function idgen() nid = nid + 1; return "t" .. nid end
+  local now = 1000
+  local st = { generic = {}, byProject = {} }
+  local c = core.worklistImportTodos(st, "projA", core.parseTodoFile("- [ ] alpha\n- [x] beta\n"), now, idgen)
+  local lst = core.worklistScopeList(st, "projA")
+  eq("todo import: added count", c.added, 2)
+  eq("todo import: items appended in file order", lst[1].text .. "|" .. lst[2].text, "alpha|beta")
+  eq("todo import: id minted", lst[1].id, "t1")
+  eq("todo import: ts stamped", lst[1].ts, 1000)
+  eq("todo import: empty details present", lst[1].details, "")
+  eq("todo import: empty due present", lst[1].due, "")
+  eq("todo import: empty steps present", #lst[1].steps, 0)
+  eq("todo import: src marker", lst[1].src, "todo")
+  eq("todo import: srcText = file line", lst[2].srcText, "beta")
+  -- THE HARD RULE: a file [x] arrives as fileDone, NEVER as done
+  check("todo import HARD RULE: [x] sets fileDone", lst[2].fileDone == true)
+  check("todo import HARD RULE: [x] does NOT set done", lst[2].done == false)
+  check("todo import HARD RULE: [x] does NOT stamp doneTs", lst[2].doneTs == nil)
+  check("todo import: [ ] leaves fileDone unset", lst[1].fileDone == nil)
+  -- re-import after the automation flips alpha to [x]
+  c = core.worklistImportTodos(st, "projA", core.parseTodoFile("- [x] alpha\n- [x] beta\n"), now, idgen)
+  eq("todo sync: nothing re-added", c.added, 0)
+  eq("todo sync: flip counted as update", c.updated, 1)
+  check("todo sync: fileDone flips on", lst[1].fileDone == true)
+  check("todo sync HARD RULE: done still false after flip", lst[1].done == false)
+  -- the user verifies alpha; later syncs must not clear or re-set that
+  core.worklistToggle(st, "projA", "t1", 2000)
+  c = core.worklistImportTodos(st, "projA", core.parseTodoFile("- [ ] alpha\n- [x] beta\n"), now, idgen)
+  check("todo sync: [x]->[ ] clears fileDone", lst[1].fileDone == nil)
+  check("todo sync HARD RULE: verify survives [ ] resync", lst[1].done == true)
+  eq("todo sync HARD RULE: doneTs untouched by resync", lst[1].doneTs, 2000)
+  c = core.worklistImportTodos(st, "projA", core.parseTodoFile("- [x] alpha\n- [x] beta\n"), now, idgen)
+  check("todo sync HARD RULE: verify survives [x] resync", lst[1].done == true)
+  eq("todo sync HARD RULE: doneTs still untouched", lst[1].doneTs, 2000)
+  -- srcText linkage: renaming the display text in the modal keeps the file link
+  core.worklistEdit(st, "projA", "t2", "beta (renamed by hand)")
+  c = core.worklistImportTodos(st, "projA", core.parseTodoFile("- [ ] alpha\n- [ ] beta\n"), now, idgen)
+  eq("todo sync: rename adds nothing", c.added, 0)
+  check("todo sync: renamed item still linked via srcText", lst[2].fileDone == nil)
+  eq("todo sync: renamed display text kept", lst[2].text, "beta (renamed by hand)")
+  -- tombstones: removed / cleared items never resurrect
+  core.worklistRemove(st, "projA", "t1")
+  c = core.worklistImportTodos(st, "projA", core.parseTodoFile("- [ ] alpha\n- [ ] beta\n"), now, idgen)
+  eq("todo tombstone: removed item not re-added", c.added, 0)
+  eq("todo tombstone: list length after remove+resync", #core.worklistScopeList(st, "projA"), 1)
+  core.worklistToggle(st, "projA", "t2", 3000)      -- the user verifies beta...
+  core.worklistClearDone(st, "projA")               -- ...and clears the Done drawer
+  c = core.worklistImportTodos(st, "projA", core.parseTodoFile("- [ ] alpha\n- [ ] beta\n"), now, idgen)
+  eq("todo tombstone: cleared items not re-added", c.added, 0)
+  eq("todo tombstone: scope stays empty", #core.worklistScopeList(st, "projA"), 0)
+  -- a NEW line still imports after tombstoning old ones
+  c = core.worklistImportTodos(st, "projA", core.parseTodoFile("- [ ] alpha\n- [ ] gamma\n"), now, idgen)
+  eq("todo tombstone: new line still imports", c.added, 1)
+  eq("todo tombstone: the new line is gamma", core.worklistScopeList(st, "projA")[1].text, "gamma")
+
+  -- fileMissing: a line that vanishes flags the item; reappearing clears it
+  nid = 0
+  local st2 = { generic = {}, byProject = {} }
+  core.worklistImportTodos(st2, "projM", core.parseTodoFile("- [ ] m1\n- [ ] m2\n"), now, idgen)
+  c = core.worklistImportTodos(st2, "projM", core.parseTodoFile("- [ ] m1\n"), now, idgen)
+  local lm = core.worklistScopeList(st2, "projM")
+  eq("todo missing: count reported", c.missing, 1)
+  check("todo missing: vanished line flagged", lm[2].fileMissing == true)
+  check("todo missing: surviving line unflagged", lm[1].fileMissing == nil)
+  eq("todo missing: item kept, not removed", #lm, 2)
+  c = core.worklistImportTodos(st2, "projM", core.parseTodoFile("- [ ] m1\n- [x] m2\n"), now, idgen)
+  check("todo missing: reappearing line clears the flag", lm[2].fileMissing == nil)
+  check("todo missing: reappearing line syncs fileDone", lm[2].fileDone == true)
+  -- appends land at the END (import never reorders the user's list)
+  core.worklistImportTodos(st2, "projM", core.parseTodoFile("- [ ] m1\n- [x] m2\n- [ ] m3\n"), now, idgen)
+  eq("todo append: new line goes last", core.worklistScopeList(st2, "projM")[3].text, "m3")
+
+  -- scope isolation + unlinked manual twins
+  nid = 0
+  local st3 = { generic = { { id = "g1", text = "dup", done = false, ts = 1 } },
+                byProject = { projB = { { id = "b1", text = "dup", done = false, ts = 1 } } } }
+  core.worklistImportTodos(st3, "projC", core.parseTodoFile("- [x] dup\n"), now, idgen)
+  eq("todo isolation: generic untouched", #core.worklistScopeList(st3, "generic"), 1)
+  check("todo isolation: generic twin not badged", core.worklistScopeList(st3, "generic")[1].fileDone == nil)
+  eq("todo isolation: other project untouched", #core.worklistScopeList(st3, "projB"), 1)
+  check("todo isolation: other project twin not badged", core.worklistScopeList(st3, "projB")[1].fileDone == nil)
+  eq("todo isolation: import lands in its own scope", #core.worklistScopeList(st3, "projC"), 1)
+  -- a manual (no-src) item in the SAME scope is not linked; the line imports separately
+  core.worklistAdd(st3, "projC", "manual twin", "h1", 50)
+  c = core.worklistImportTodos(st3, "projC", core.parseTodoFile("- [x] dup\n- [x] manual twin\n"), now, idgen)
+  local lc = core.worklistScopeList(st3, "projC")
+  eq("todo manual twin: file line imports as its own item", #lc, 3)
+  check("todo manual twin: manual item never badged", lc[2].fileDone == nil)
+  check("todo manual twin: imported twin badged", lc[3].fileDone == true)
+  -- guards: bad scope keys and bad state are inert
+  c = core.worklistImportTodos(st3, "", core.parseTodoFile("- [ ] x\n"), now, idgen)
+  eq("todo guard: empty key adds nothing", c.added, 0)
+  c = core.worklistImportTodos(st3, "generic", core.parseTodoFile("- [ ] x\n"), now, idgen)
+  eq("todo guard: generic scope refused", c.added, 0)
+  eq("todo guard: generic list untouched", #core.worklistScopeList(st3, "generic"), 1)
+  c = core.worklistImportTodos(st3, "master", core.parseTodoFile("- [ ] x\n"), now, idgen)
+  eq("todo guard: master scope refused", c.added, 0)
+  check("todo guard: non-table state does not crash", (pcall(core.worklistImportTodos, "junk", "p", {}, 1, idgen)))
+  c = core.worklistImportTodos(st3, "projC", nil, now, idgen)
+  eq("todo guard: nil parsed adds nothing", c.added, 0)
+
+  -- worklistNormalize carries todoMeta (cwd/mtime/seen) with DISTINCT seen tables
+  local sharedSeen = {}
+  local n = core.worklistNormalize({
+    generic = {},
+    byProject = { pA = { { id = "1", text = "x", src = "todo", srcText = "x", fileDone = true, fileMissing = true } } },
+    todoMeta = { pA = { cwd = "/a/b", mtime = 123, seen = { alpha = true, beta = true } },
+                 pB = { cwd = "", mtime = "77", seen = sharedSeen },
+                 pC = { seen = sharedSeen },
+                 [7] = { seen = {} }, pJunk = "notatable" },
+  })
+  eq("todo normalize: cwd preserved", n.todoMeta.pA.cwd, "/a/b")
+  eq("todo normalize: mtime preserved", n.todoMeta.pA.mtime, 123)
+  check("todo normalize: seen entries preserved", n.todoMeta.pA.seen.alpha == true and n.todoMeta.pA.seen.beta == true)
+  check("todo normalize: empty cwd healed to nil", n.todoMeta.pB.cwd == nil)
+  eq("todo normalize: numeric-string mtime coerced", n.todoMeta.pB.mtime, 77)
+  check("todo normalize: EMPTY seen meta survives (enrollment marker)",
+        type(n.todoMeta.pC) == "table" and type(n.todoMeta.pC.seen) == "table")
+  check("todo normalize: interned seen tables split", not rawequal(n.todoMeta.pB.seen, n.todoMeta.pC.seen))
+  n.todoMeta.pB.seen.poison = true
+  check("todo normalize: split seen tables do not cross-pollute", n.todoMeta.pC.seen.poison == nil)
+  check("todo normalize: numeric project key dropped", n.todoMeta[7] == nil)
+  check("todo normalize: non-table meta dropped", n.todoMeta.pJunk == nil)
+  check("todo normalize: absent todoMeta -> empty table",
+        type(core.worklistNormalize({}).todoMeta) == "table" and next(core.worklistNormalize({}).todoMeta) == nil)
+  -- imported-item fields ride through normalize untouched
+  local ni = core.worklistScopeList(n, "pA")[1]
+  check("todo normalize: item src/srcText/fileDone/fileMissing preserved",
+        ni.src == "todo" and ni.srcText == "x" and ni.fileDone == true and ni.fileMissing == true)
+end
+
 -- ---- User stories editor: parse / serialize / hash (spec/product/user-stories.md) ----
 do
   -- THE core safety invariant: serialize(parse(x).blocks) == x BYTE-FOR-BYTE for any
@@ -7347,7 +7517,8 @@ do
         keys.search and keys.policies and keys.automodel and keys.bridge and keys.agents and keys.ab and keys.usage and keys.rewind)
   check("FEATURES: lists the user-stories tab", keys.stories == true)
   local newCount = 0; for _, f in ipairs(core.FEATURES) do if f.new then newCount = newCount + 1 end end
-  eq("FEATURES: the 6 new features are flagged", newCount, 6)
+  -- 2026-08-31: 6 -> 7 when the worklist gained the TODO.md import (re-flagged new).
+  eq("FEATURES: the 7 new features are flagged", newCount, 7)
 end
 
 -- F4: transcript peek (user + assistant rows, chronological, noise filtered)

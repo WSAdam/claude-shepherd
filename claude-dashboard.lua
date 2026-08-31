@@ -1489,6 +1489,126 @@ function FX.worklistNewId()
   return string.format("%d-%04d", FX.now(), math.random(0, 9999))
 end
 
+-- ---- TODO.md import/auto-sync (file -> worklist; the file is NEVER written) --
+-- A project's TODO.md (automation-written Markdown checkboxes) imports into that
+-- project's worklist tab via core.parseTodoFile/worklistImportTodos. todoMeta in
+-- cc-worklist.json records the resolved root + last-synced mtime + tombstones;
+-- meta presence enrolls the project in the per-tick mtime watch. All state hangs
+-- off FX (the main chunk sits at the 200-local cap).
+
+-- Resolve where a project's TODO.md lives: the git root beats the raw cwd (the
+-- agent cd's into subdirs), degrading to cwd outside a repo.
+function FX.todoRoot(cwd)
+  if type(cwd) ~= "string" or cwd == "" then return nil end
+  return FX.gitRoot(cwd) or cwd
+end
+
+-- Rebuild the projectKey -> TODO.md path watch map from persisted todoMeta. The
+-- in-memory mtime survives (the persisted one only seeds unknown keys), so a
+-- Shepherd restart re-syncs once iff the file moved while it was down --
+-- idempotent anyway thanks to the tombstones.
+function FX.todoRebuildWatch(st)
+  FX._todoMtime = FX._todoMtime or {}
+  local w = {}
+  for k, meta in pairs((st or {}).todoMeta or {}) do
+    if type(k) == "string" and type(meta) == "table"
+       and type(meta.cwd) == "string" and meta.cwd ~= "" then
+      w[k] = meta.cwd .. "/TODO.md"
+      if FX._todoMtime[k] == nil then FX._todoMtime[k] = tonumber(meta.mtime) end
+    end
+  end
+  FX._todoWatch = w
+end
+
+-- Import a batch of projects' TODO.md files. entries = { {key, cwd?}, ... }; a
+-- live cwd wins (and re-records a drifted root), else the recorded meta.cwd. One
+-- worklist write for the whole batch. Returns aggregate counts for the toast.
+-- The import never touches an item's done/doneTs (core enforces): the file's [x]
+-- lands as the fileDone badge, and only the user's click verifies an item.
+function FX.todoImportProjects(entries, stArg)
+  local st = stArg or FX.readWorklist()
+  local r = { projects = 0, added = 0, updated = 0, missing = 0, skipped = 0 }
+  FX._todoMtime = FX._todoMtime or {}
+  for _, e in ipairs(entries or {}) do
+    local key = type(e) == "table" and e.key or nil
+    if type(key) == "string" and key ~= "" then
+      local meta = (st.todoMeta or {})[key]
+      local root = FX.todoRoot(e.cwd) or (type(meta) == "table" and meta.cwd or nil)
+      local content = root and FX.readFile(root .. "/TODO.md") or nil
+      if not content then
+        r.skipped = r.skipped + 1
+      else
+        local c = core.worklistImportTodos(st, key, core.parseTodoFile(content),
+                                           FX.now(), FX.worklistNewId)
+        meta = st.todoMeta[key]                  -- core guaranteed the container
+        meta.cwd = root
+        meta.mtime = tonumber(hs.fs.attributes(root .. "/TODO.md", "modification")) or meta.mtime
+        FX._todoMtime[key] = meta.mtime
+        r.projects = r.projects + 1
+        r.added, r.updated, r.missing = r.added + c.added, r.updated + c.updated, r.missing + c.missing
+      end
+    end
+  end
+  if r.projects > 0 then
+    FX.writeWorklist(st)
+    FX.todoRebuildWatch(st)
+  end
+  return r
+end
+
+-- The global "All projects" sweep: every live local tile + every enrolled
+-- offline project (its root was recorded at import time). A never-imported
+-- project with no live session has no discoverable root -- skipped by design.
+function FX.todoImportAll()
+  local st = FX.readWorklist()
+  local entries, seenK = {}, {}
+  for _, it in ipairs(lastRenderList or {}) do
+    local k = it.projectKey
+    if type(k) == "string" and k ~= "" and not seenK[k]
+       and it.cwd and it.cwd ~= "" and not it.remote then
+      seenK[k] = true
+      entries[#entries + 1] = { key = k, cwd = it.cwd }
+    end
+  end
+  for k, meta in pairs(st.todoMeta or {}) do
+    if type(k) == "string" and k ~= "" and not seenK[k] and type(meta) == "table" and meta.cwd then
+      seenK[k] = true
+      entries[#entries + 1] = { key = k }
+    end
+  end
+  return FX.todoImportProjects(entries, st)
+end
+
+-- 1 Hz auto-sync sweep (runs on the refresh tick): stat each enrolled project's
+-- TODO.md and re-import the changed ones. The 2s settle guard skips a file whose
+-- mtime is younger than 2s -- an automation may be mid-write, and the still-newer
+-- mtime retries it next tick. A vanished file is silently skipped (sync resumes
+-- if it returns). First call lazy-seeds the watch map with one worklist read; an
+-- un-enrolled install stays a pure pairs{} no-op forever after.
+function FX.todoAutoSyncTick(list)
+  if FX._todoWatch == nil then FX.todoRebuildWatch(FX.readWorklist()) end
+  local queued = nil
+  local now = FX.now()
+  local liveCwd = {}
+  for _, it in ipairs(list or {}) do
+    if it.projectKey and it.cwd and it.cwd ~= "" and not it.remote then
+      liveCwd[it.projectKey] = it.cwd
+    end
+  end
+  for key, path in pairs(FX._todoWatch) do
+    local m = tonumber(hs.fs.attributes(path, "modification"))
+    if m and m ~= FX._todoMtime[key] and (now - m) >= 2 then
+      queued = queued or {}
+      queued[#queued + 1] = { key = key, cwd = liveCwd[key] }
+    end
+  end
+  if not queued then return end
+  local r = FX.todoImportProjects(queued)
+  r.auto = true
+  pcall(function() wv:evaluateJavaScript("window.ccWorklist(" .. hs.json.encode(FX.worklistPayload()) .. ")") end)
+  pcall(function() wv:evaluateJavaScript("window.ccTodoImported(" .. hs.json.encode(r) .. ")") end)
+end
+
 -- L3 definition source: enumerate prompt-definition files (*.prompt / *.md, skip
 -- README) in `dir` -> { {stem, text}, ... }. Synchronous readDir+readFile (a flat,
 -- bounded dir, like FX.listSkills -- not the async folder-scan). Missing dir -> {}.
@@ -3542,16 +3662,24 @@ function FX.worklistPayload()
   local st = FX.readWorklist()
   local labels = FX.loadLabels()
   local autos = FX.loadAutoTitles()
+  local tmeta = st.todoMeta or {}
   local seen, projects = {}, {}
   for _, it in ipairs(lastRenderList or {}) do
     local k = it.projectKey
     if k and k ~= "" and not seen[k] then
       seen[k] = true
+      -- TODO.md button gating: hasTodo = a file exists at the project's root
+      -- (live root, else the enrolled one); todoOn = already enrolled in sync.
+      local tm = tmeta[k]
+      local root = (not it.remote) and FX.todoRoot(it.cwd) or nil
+      if not root and type(tm) == "table" then root = tm.cwd end
       projects[#projects + 1] = {
         key = k,
         label = (it.label and it.label ~= "" and it.label) or it.name
                 or labels[k] or autos[k] or core.projectKeyLabel(k),
         items = core.worklistScopeList(st, k),
+        todoOn = (tm ~= nil) or nil,
+        hasTodo = (root and FX.fileExists(root .. "/TODO.md")) or nil,
       }
     end
   end
@@ -3560,10 +3688,13 @@ function FX.worklistPayload()
   local offline = {}
   for k, list in pairs(st.byProject or {}) do
     if type(k) == "string" and k ~= "" and not seen[k] and type(list) == "table" and #list > 0 then
+      local tm = tmeta[k]
       offline[#offline + 1] = {
         key = k,
         label = (labels[k] and labels[k] ~= "" and labels[k]) or autos[k] or core.projectKeyLabel(k),
         items = list,
+        todoOn = (tm ~= nil) or nil,
+        hasTodo = (type(tm) == "table" and tm.cwd and FX.fileExists(tm.cwd .. "/TODO.md")) or nil,
       }
     end
   end
@@ -4719,6 +4850,27 @@ local function handleBridgeMsg(msg)
     else core.worklistClearDone(st, scope) end
     FX.writeWorklist(st)
     pcall(function() wv:evaluateJavaScript("window.ccWorklist(" .. hs.json.encode(FX.worklistPayload()) .. ")") end)
+    return
+  end
+  -- TODO.md import: pull a project's TODO checkboxes into its worklist tab. The
+  -- scope in `v` is a projectKey used ONLY as a store key + live-tile lookup --
+  -- never a path component (the path is the tile's own cwd / the recorded root,
+  -- mirroring detail-stories' no-traversal posture).
+  if a == "todo-import" or a == "todo-import-all" then
+    local r
+    if a == "todo-import" then
+      local scope = tostring(payload.v or "")
+      if scope == "" or scope == "generic" or scope == "master" then return end
+      local cwd = nil
+      for _, it in ipairs(lastRenderList or {}) do
+        if it.projectKey == scope and it.cwd and it.cwd ~= "" and not it.remote then cwd = it.cwd; break end
+      end
+      r = FX.todoImportProjects({ { key = scope, cwd = cwd } })
+    else
+      r = FX.todoImportAll()
+    end
+    pcall(function() wv:evaluateJavaScript("window.ccWorklist(" .. hs.json.encode(FX.worklistPayload()) .. ")") end)
+    pcall(function() wv:evaluateJavaScript("window.ccTodoImported(" .. hs.json.encode(r or {}) .. ")") end)
     return
   end
   if a == "open-audit-view" then
@@ -6242,6 +6394,19 @@ local HTML = [[
               padding:2px clamp(7px,2.4cqw,12px); font-size:clamp(10px,2.9cqw,12px); cursor:pointer;
               max-width:100%; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .wl-scope.on { background:var(--accent-bg); border-color:var(--accent); color:var(--accent-text); font-weight:600; }
+  /* TODO.md import row + badges. .wl-fdone is the AUTOMATION's [x] claim from the
+     file -- deliberately a chip, never the checkbox (that stays the user's
+     verification alone). Amber while unverified, quiet once the box is ticked. */
+  #wl-todorow { display:flex; align-items:center; gap:6px; margin-bottom:8px; }
+  #wl-todobtn, #wl-todoall { background:var(--surface); color:var(--text-2); border:1px solid var(--border);
+    border-radius:14px; padding:2px clamp(7px,2.4cqw,12px); font-size:clamp(10px,2.8cqw,12px);
+    cursor:pointer; white-space:nowrap; }
+  #wl-todobtn:hover, #wl-todoall:hover { background:var(--surface-hover); border-color:var(--accent); color:var(--accent-text); }
+  #wl-todoflash { font-size:clamp(9px,2.6cqw,11px); color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .wl-fdone { flex:0 0 auto; font-size:clamp(9px,2.5cqw,11px); color:var(--ok); background:var(--surface-2);
+    border:1px solid #2c5a3a; border-radius:8px; padding:0 5px; white-space:nowrap; }
+  .wl-fdone.need { color:var(--warn); border-color:#5a4a22; }
+  .wl-fmiss { flex:0 0 auto; font-size:clamp(9px,2.5cqw,11px); color:var(--muted); }
   /* MASTER: the cross-scope rollup tab, set apart from the real scopes. */
   .wl-master { font-weight:700; letter-spacing:.06em; font-size:clamp(9px,2.7cqw,11px); color:var(--purple); border-color:#3d3560; }
   .wl-master.on { background:#241f38; border-color:var(--purple); color:var(--purple); }
@@ -7098,6 +7263,11 @@ local HTML = [[
   <div id="empty">Waiting for Claude Code sessions...<br>Start a session in any project.</div>
   <div id="worklist">
     <div id="wl-scopes"></div>
+    <div id="wl-todorow">
+      <button id="wl-todobtn" onclick="todoImportScope()" title="Import this project's TODO.md checkboxes as list items">⇪ Import TODO.md</button>
+      <button id="wl-todoall" onclick="todoImportAll()" title="Import/refresh TODO.md for every known project">⇪ All projects</button>
+      <span id="wl-todoflash"></span>
+    </div>
     <div id="wl-addrow">
       <button id="wl-addbtn" onclick="wlModalOpen('')">＋ Add an item…</button>
     </div>
@@ -8524,7 +8694,7 @@ local HTML = [[
       // tint) and a ✓ stamp of when it was actually completed -- the same pairing
       // MASTER's Recently-completed drawer shows, now on every scope's Done area.
       var chips = wlProgChip(it.steps) + wlDueChip(it.due, isDone)
-                + (isDone ? wlDoneChip(it.doneTs) : "");
+                + (isDone ? wlDoneChip(it.doneTs) : "") + wlFileBadges(it, isDone);
       return '<div class="wl-item" data-open="' + id + '" title="Click to open">'
         + '<input type="checkbox" class="wl-cb" data-id="' + id + '"'
         + (isDone ? " checked" : "") + '>'
@@ -8541,6 +8711,16 @@ local HTML = [[
       var d = 0;
       for(var i = 0; i < l.length; i++){ if(l[i] && l[i].done) d++; }
       return '<span class="wl-prog' + (d === l.length ? " all" : "") + '" title="Checklist">' + d + '/' + l.length + '</span>';
+    }
+    // TODO.md badges: the automation's [x] claim ("✓ auto") + a vanished-line ⚠.
+    // A chip on purpose -- NEVER the row checkbox, which stays the user's
+    // verification alone. Amber (need) until the user ticks the box themselves.
+    function wlFileBadges(it, isDone){
+      var h = "";
+      if(it && it.fileDone) h += '<span class="wl-fdone' + (isDone ? "" : " need")
+        + '" title="Automation marked this done in TODO.md — tick the box once YOU have verified it">✓ auto</span>';
+      if(it && it.fileMissing) h += '<span class="wl-fmiss" title="This line is no longer in TODO.md">⚠</span>';
+      return h;
     }
     // The expected-date chip: "Jul 21" (plus the year when it isn't this one), tinted
     // amber for today/tomorrow and red once overdue. A done item never nags (no tint).
@@ -8608,7 +8788,7 @@ local HTML = [[
           + '<span class="wl-tag">' + esc(r.label) + '</span>'
           + '<span class="wl-txt">' + esc(r.it.text || "")
           + ((r.it.details && String(r.it.details).trim()) ? ' <span class="wl-note" title="Has details">📝</span>' : '')
-          + '</span><span class="wl-chips">' + wlProgChip(r.it.steps) + wlDueChip(r.it.due, false) + '</span></div>';
+          + '</span><span class="wl-chips">' + wlProgChip(r.it.steps) + wlDueChip(r.it.due, false) + wlFileBadges(r.it, false) + '</span></div>';
       });
       box.innerHTML = html;
     }
@@ -8627,6 +8807,15 @@ local HTML = [[
         sc += '<button class="wl-scope' + (worklistScope === p.key ? " on" : "") + '" data-scope="' + esc(String(p.key)) + '">' + esc(p.label || p.key) + '</button>';
       });
       document.getElementById("wl-scopes").innerHTML = sc;
+      // TODO.md import row: the per-project button only on a project tab that has
+      // (or already imported) a TODO.md; the All-projects sweep is always offered.
+      var curProj = null;
+      projs.forEach(function(p){ if(p.key === worklistScope) curProj = p; });
+      var tb = document.getElementById("wl-todobtn");
+      if(tb){
+        tb.style.display = (curProj && (curProj.hasTodo || curProj.todoOn)) ? "" : "none";
+        tb.textContent = (curProj && curProj.todoOn) ? "↻ Sync TODO.md" : "⇪ Import TODO.md";
+      }
       // MASTER is a read-only rollup: no add row, no per-scope Done drawer, but its own
       // "Recently completed" drawer instead.
       var isMaster = (worklistScope === "master");
@@ -8705,6 +8894,21 @@ local HTML = [[
     function worklistRemove(id){ send("worklist-remove", worklistScope, id); }
     function worklistClearDone(){ send("worklist-clear-done", worklistScope); }
     function worklistToggleDone(){ worklistDoneOpen = !worklistDoneOpen; renderWorklist(); }
+    // TODO.md import senders + the result toast. Import/sync NEVER checks items:
+    // the file's [x] arrives as the "✓ auto" chip and the checkbox stays yours.
+    function todoImportScope(){ if(worklistScope !== "generic" && worklistScope !== "master") send("todo-import", worklistScope); }
+    function todoImportAll(){ send("todo-import-all"); }
+    var wlTodoFlashTimer = null;
+    window.ccTodoImported = function(r){
+      r = r || {};
+      var el = document.getElementById("wl-todoflash"); if(!el) return;
+      var msg = (r.added|0) + " new, " + (r.updated|0) + " updated";
+      if(r.missing|0) msg += ", " + (r.missing|0) + " missing";
+      if(!(r.projects|0) && (r.skipped|0)) msg = "no TODO.md found";
+      el.textContent = (r.auto ? "TODO.md synced — " : "TODO.md imported — ") + msg;
+      if(wlTodoFlashTimer) clearTimeout(wlTodoFlashTimer);
+      wlTodoFlashTimer = setTimeout(function(){ el.textContent = ""; }, 6000);
+    };
     // add/edit both carry FOUR values (scope + subject + details + due), more than the
     // 2-value send() takes, so they post the bridge message directly. On edit the id
     // rides as `text` and the new subject as `edit` (add has no id, so subject is `text`).
@@ -14263,6 +14467,10 @@ function FX._refreshBody()
   core.sortByStatus(list)
   -- Hand the fully-annotated list to the jump hotkey (it.hung / error status / sorted).
   lastRenderList = list
+  -- TODO.md auto-sync: enrolled projects (todoMeta) re-import when the file's
+  -- mtime moves. One stat per enrolled project per tick; runs panel-hidden too,
+  -- so the store keeps up even when the worklist isn't open.
+  FX.todoAutoSyncTick(list)
 
   -- 🔔 unseen-notification badge. The snapshot scan is the same cheap attributes
   -- pass risk scoring pays; the filter only reruns when the snapshot actually

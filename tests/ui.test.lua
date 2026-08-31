@@ -2066,6 +2066,30 @@ do
         and src:find("worklistEditSend(id, nt)", 1, true) == nil)
 end
 
+-- ---- Worklist: TODO.md import (file -> list; user-only verification) ----
+-- 2026-08-31: a project's TODO.md checkboxes import as worklist items. The file's
+-- [x] renders as a chip; the row checkbox stays the user's verification alone.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("wl-todo: backend handles both import actions and re-pushes list + toast",
+        src:find('a == "todo-import" or a == "todo-import-all"', 1, true) ~= nil
+        and src:find('"window.ccTodoImported(" .. hs.json.encode(r or {})', 1, true) ~= nil)
+  check("wl-todo: badges render in scope rows AND the MASTER rollup",
+        src:find("function wlFileBadges(it, isDone)", 1, true) ~= nil
+        and src:find("+ wlFileBadges(it, isDone);", 1, true) ~= nil
+        and src:find("+ wlFileBadges(r.it, false) +", 1, true) ~= nil)
+  check("wl-todo: per-project button gated on hasTodo/todoOn with a sync label flip",
+        src:find("curProj.hasTodo || curProj.todoOn", 1, true) ~= nil
+        and src:find('"↻ Sync TODO.md" : "⇪ Import TODO.md"', 1, true) ~= nil)
+  check("wl-todo: auto-sync runs on the tick right after lastRenderList is set",
+        src:find("lastRenderList = list\n  -- TODO.md auto-sync", 1, true) ~= nil
+        and src:find("FX.todoAutoSyncTick(list)", 1, true) ~= nil)
+  check("wl-todo: HARD RULE -- the checkbox is never driven by fileDone",
+        src:find('fileDone ? " checked"', 1, true) == nil)
+end
+
 -- ---- User Stories tab (spec/product/user-stories.md viewer/editor) ----
 do
   local f = io.open(ROOT .. "claude-dashboard.lua", "r")

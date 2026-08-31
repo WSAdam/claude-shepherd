@@ -6919,7 +6919,10 @@ end
 -- then pollutes the other. Rebuilding into separate tables breaks that alias.
 -- Also drops stray non-string keys / non-table items, which self-heals a file
 -- already corrupted by the old aliasing bug (its byProject is a numeric-keyed
--- array). Pure.
+-- array). todoMeta (the TODO.md sync state: { cwd, mtime, seen } per project)
+-- gets the same treatment -- each project's `seen` tombstone set is rebuilt into
+-- its own fresh table, and a meta with an EMPTY seen is kept: meta presence is
+-- what enrolls a project in auto-sync. Pure.
 function M.worklistNormalize(t)
   t = type(t) == "table" and t or {}
   local generic = {}
@@ -6936,7 +6939,123 @@ function M.worklistNormalize(t)
       end
     end
   end
-  return { generic = generic, byProject = byProject }
+  local todoMeta = {}
+  if type(t.todoMeta) == "table" then
+    for k, v in pairs(t.todoMeta) do
+      if type(k) == "string" and type(v) == "table" then
+        local seen = {}
+        if type(v.seen) == "table" then
+          for sk, sv in pairs(v.seen) do
+            if type(sk) == "string" and sv then seen[sk] = true end
+          end
+        end
+        todoMeta[k] = { cwd = (type(v.cwd) == "string" and v.cwd ~= "") and v.cwd or nil,
+                        mtime = tonumber(v.mtime), seen = seen }
+      end
+    end
+  end
+  return { generic = generic, byProject = byProject, todoMeta = todoMeta }
+end
+
+-- ---- TODO.md import (file -> worklist; Shepherd never writes the file) -------
+-- A project's TODO.md (Markdown checkboxes, written by automations under an
+-- append-only contract) imports into that project's worklist as individual
+-- items. Two states per item: fileDone mirrors the file's [x] (the automation's
+-- own done-claim, shown as a badge), while the EXISTING done field stays the
+-- user's verification click. HARD RULE: nothing here reads or writes done /
+-- doneTs -- worklistToggle (the user's click) is their only writer.
+
+-- Extract checkbox lines: `- [ ] text` / `- [x] text` (also * / + bullets,
+-- indent, [X], CRLF). Non-checkbox lines are ignored. Exact-duplicate texts
+-- collapse to the first occurrence with their done flags OR'd (any [x] copy
+-- counts as the claim). Text capped at 500 chars, list at 500 entries. Pure.
+function M.parseTodoFile(content)
+  local out = {}
+  if type(content) ~= "string" or content == "" then return out end
+  local byText = {}
+  for line in (content .. "\n"):gmatch("([^\n]*)\n") do
+    line = line:gsub("\r$", "")
+    local mark, text = line:match("^%s*[%-%*%+]%s+%[([ xX])%]%s+(.+)$")
+    if mark then
+      text = wlTrim(text):sub(1, 500)
+      if text ~= "" then
+        local done = mark ~= " "
+        local e = byText[text]
+        if e then
+          e.done = e.done or done
+        elseif #out < 500 then
+          e = { text = text, done = done }
+          out[#out + 1] = e
+          byText[text] = e
+        end
+      end
+    end
+  end
+  return out
+end
+
+-- Merge parsed TODO.md lines into a project's worklist. Identity = the file
+-- line's text, stored as srcText at import so the user can reword an item's
+-- display text without breaking the link; only items marked src=="todo" ever
+-- match (a manually-added twin is never badged). todoMeta[projectKey].seen
+-- tombstones every line ever imported, so an item the user removed or cleared
+-- after verifying never resurrects on the next sync. A line missing from the
+-- file flags its item fileMissing (kept, never removed). meta.cwd/mtime are
+-- FX-owned I/O facts -- untouched here. Returns { added, updated, missing }
+-- counts for the panel's toast. Pure.
+function M.worklistImportTodos(state, projectKey, parsed, now, idgen)
+  local counts = { added = 0, updated = 0, missing = 0 }
+  if type(state) ~= "table" then return counts end
+  if type(projectKey) ~= "string" or projectKey == "" or projectKey == "generic"
+     or projectKey == "master" then return counts end
+  parsed = type(parsed) == "table" and parsed or {}
+  if type(state.byProject) ~= "table" then state.byProject = {} end
+  if type(state.byProject[projectKey]) ~= "table" then state.byProject[projectKey] = {} end
+  if type(state.todoMeta) ~= "table" then state.todoMeta = {} end
+  if type(state.todoMeta[projectKey]) ~= "table" then state.todoMeta[projectKey] = {} end
+  local meta = state.todoMeta[projectKey]
+  if type(meta.seen) ~= "table" then meta.seen = {} end
+  local list = state.byProject[projectKey]
+  local byText = {}
+  for _, e in ipairs(parsed) do
+    if type(e) == "table" and type(e.text) == "string" and e.text ~= "" then
+      byText[e.text] = { done = e.done == true, matched = false }
+    end
+  end
+  -- Pass 1: refresh fileDone/fileMissing on already-imported items.
+  for _, it in ipairs(list) do
+    if type(it) == "table" and it.src == "todo" then
+      local key = (type(it.srcText) == "string" and it.srcText ~= "") and it.srcText or it.text
+      local e = byText[key]
+      if e then
+        local nfd = e.done and true or nil
+        if it.fileDone ~= nfd or it.fileMissing then counts.updated = counts.updated + 1 end
+        it.fileDone = nfd
+        it.fileMissing = nil
+        e.matched = true
+        meta.seen[key] = true  -- self-heal a tombstone lost to an older file
+      else
+        if not it.fileMissing then counts.updated = counts.updated + 1 end
+        it.fileMissing = true
+        counts.missing = counts.missing + 1
+      end
+    end
+  end
+  -- Pass 2: append never-seen lines, in file order, as unverified items.
+  for _, e in ipairs(parsed) do
+    if type(e) == "table" and type(e.text) == "string" and e.text ~= "" then
+      local b = byText[e.text]
+      if b and not b.matched and not meta.seen[e.text] then
+        list[#list + 1] = { id = tostring(idgen and idgen() or ""), text = e.text, done = false,
+                            ts = tonumber(now) or 0, details = "", due = "", steps = {},
+                            src = "todo", srcText = e.text, fileDone = b.done and true or nil }
+        b.matched = true
+        meta.seen[e.text] = true
+        counts.added = counts.added + 1
+      end
+    end
+  end
+  return counts
 end
 
 -- ---- User stories editor (spec/product/user-stories.md) -------------------
@@ -9705,9 +9824,11 @@ M.FEATURES = {
   { key = "rewind", cat = "Control", title = "Rewind & checkpoints",
     what = "Open Claude Code's restore-point picker for a session and roll back its file edits.",
     why = "Undo a wrong turn (with confirmation) without leaving the dashboard." },
-  { key = "worklist", cat = "Control", title = "Worklist (My List)",
-    what = "A personal checklist of things to hand to sessions.",
-    why = "Keep your own to-dos right next to the fleet that does them." },
+  { key = "worklist", cat = "Control", new = true, title = "Worklist (My List)",
+    what = "A personal checklist of things to hand to sessions. Imports each project's "
+        .. "TODO.md checkboxes as verify-me items and keeps them synced as automations tick them off.",
+    why = "Keep your own to-dos right next to the fleet that does them -- and click-verify "
+        .. "what an automation claims it finished." },
   { key = "stories", cat = "Control", new = true, title = "User stories",
     what = "When a project has spec/product/user-stories.md, a gated tab shows its stories by capability area — add, edit, and save them in place.",
     why = "Curate the product's user stories next to the sessions building it, without leaving the panel." },

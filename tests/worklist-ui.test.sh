@@ -94,6 +94,36 @@ assert_eq "offline projects are labeled from persisted stores" "yes" "$(has 'or 
 # (item text is covered by escaping.test.sh; the id is server-minted but still escaped.)
 assert_eq "item id is esc()'d before the attribute" "yes" "$(has 'esc(String(it.id || ""))')"
 
+# ---- Feature 4: TODO.md import (file -> list; the checkbox stays the user's) --------
+# 2026-08-31: a project's TODO.md checkboxes import as worklist items; the file's [x]
+# renders as the "✓ auto" chip while the row checkbox remains the user's verification.
+assert_eq "import button posts todoImportScope"  "yes" "$(has 'id="wl-todobtn" onclick="todoImportScope()"')"
+assert_eq "all-projects button posts todoImportAll" "yes" "$(has 'id="wl-todoall" onclick="todoImportAll()"')"
+assert_eq "import result toast target exists"    "yes" "$(has 'id="wl-todoflash"')"
+assert_eq "JS sends todo-import with the scope"  "yes" "$(has 'send("todo-import", worklistScope)')"
+assert_eq "JS sends todo-import-all"             "yes" "$(has 'send("todo-import-all")')"
+assert_eq "Lua bridge handles both imports"      "yes" "$(has 'a == "todo-import" or a == "todo-import-all"')"
+assert_eq "bridge delegates to FX.todoImportProjects" "yes" "$(has 'r = FX.todoImportProjects({ { key = scope, cwd = cwd } })')"
+assert_eq "FX import delegates to the pure core merge" "yes" "$(has 'core.worklistImportTodos(st, key, core.parseTodoFile(content),')"
+assert_eq "import pushes the toast payload"      "yes" "$(has 'window.ccTodoImported(')"
+assert_eq "toast handler exists"                 "yes" "$(has 'window.ccTodoImported = function(r)')"
+# Badges: the automation's [x] is a chip, amber until the user verifies.
+assert_eq "fileDone renders the ✓ auto chip"     "yes" "$(has 'class="wl-fdone')"
+assert_eq "unverified fileDone gets the amber tint" "yes" "$(has '(isDone ? "" : " need")')"
+assert_eq "vanished lines get the ⚠ chip"        "yes" "$(has 'class="wl-fmiss"')"
+assert_eq "MASTER rows show the badges too"      "yes" "$(has 'wlFileBadges(r.it, false)')"
+# HARD-RULE tripwires: the row checkbox is driven ONLY by the user's done flag --
+# never by fileDone. If either of these flips, the feature's core contract broke.
+assert_eq "checkbox driven only by isDone"       "yes" "$(has '+ (isDone ? " checked" : "") + ')"
+assert_eq "fileDone never drives the checkbox (1)" "no" "$(has 'fileDone ? " checked"')"
+assert_eq "fileDone never drives the checkbox (2)" "no" "$(has 'it.fileDone ? " checked"')"
+# Shepherd never WRITES a TODO.md (read-only input: readFile + mtime stat).
+assert_eq "no write path targets TODO.md"        "no"  "$(has 'writeFile(root .. "/TODO.md"')"
+# Auto-sync rides the refresh tick off persisted todoMeta enrollment.
+assert_eq "tick calls the auto-sync sweep"       "yes" "$(has 'FX.todoAutoSyncTick(list)')"
+assert_eq "sync stats the file mtime"            "yes" "$(has 'hs.fs.attributes(path, "modification")')"
+assert_eq "payload gates the button on hasTodo/todoOn" "yes" "$(has 'curProj.hasTodo || curProj.todoOn')"
+
 # Positive control: prove `has` actually distinguishes present/absent, so a typo in a
 # needle above can't make an assert pass vacuously.
 assert_eq "control: a string that cannot exist is absent" "no" "$(has 'wl-this-token-does-not-exist-xyzzy')"
