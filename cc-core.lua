@@ -540,6 +540,58 @@ function M.frameBesidePanel(screenFrame, panelFrame, opts)
   return f
 end
 
+-- ---- Per-session tile identity (two chats in ONE project) -------------------
+-- The tile's name is per-PROJECT (folder basename, or a relabel keyed by
+-- projectKey), which is right until a second session opens in the same folder --
+-- then both cards read identically and neither says which chat it is. Claude Code
+-- keeps each session's own chat title in its transcript as an "ai-title" record
+-- (the same string the editor shows on the tab), which is exactly the missing
+-- per-session fact. All pure; the FX layer reads the file.
+
+-- The session's current chat title from a transcript (tail is fine). The record
+-- is re-appended as the title evolves, so the LAST one wins. A blank title is not
+-- a title. Torn/garbage lines are skipped -- a tail read starts mid-line, and a
+-- transcript is full of huge tool payloads. Returns a trimmed string, or nil.
+function M.aiTitleFromTranscript(text)
+  if type(text) ~= "string" or text == "" then return nil end
+  local found = nil
+  for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+    -- Cheap prefilter only -- the real gate is e.type below. Key ORDER is not
+    -- assumed (a record is an object, not a fixed string), and a title quoted
+    -- INSIDE another record escapes its quotes, so it cannot match here and is
+    -- rejected by the type check even if it did.
+    if line:find('"type":"ai-title"', 1, true) then
+      local ok, e = pcall(function() return M.json.decode(line) end)
+      if ok and type(e) == "table" and e.type == "ai-title" and type(e.aiTitle) == "string" then
+        local t = e.aiTitle:gsub("^%s+", ""):gsub("%s+$", "")
+        if t ~= "" then found = t end
+      end
+    end
+  end
+  return found
+end
+
+-- Which projectKeys have MORE THAN ONE live session right now. Only those tiles
+-- need a per-session title; a project with one session keeps its clean card.
+function M.dupProjectKeys(list)
+  local seen, dup = {}, {}
+  for _, it in ipairs(list or {}) do
+    local k = type(it) == "table" and it.projectKey or nil
+    if type(k) == "string" and k ~= "" then
+      if seen[k] then dup[k] = true else seen[k] = true end
+    end
+  end
+  return dup
+end
+
+-- Stable stand-in for a session with no chat title yet (brand new, or a
+-- transcript whose tail carries no ai-title record): the head of its id.
+function M.shortSessionId(sid)
+  sid = type(sid) == "string" and sid or ""
+  local head = sid:match("^[%w]+")
+  return head and head:sub(1, 6) or ""
+end
+
 -- ---- Relabels (Step 3) -----------------------------------------------------
 -- Apply in-memory display labels onto a session list, in place. `labels` maps a
 -- session key -> override name. Only the DISPLAY field (.label) is set; .name

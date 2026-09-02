@@ -1609,6 +1609,27 @@ function FX.todoAutoSyncTick(list)
   pcall(function() wv:evaluateJavaScript("window.ccTodoImported(" .. hs.json.encode(r) .. ")") end)
 end
 
+-- ---- Per-session chat title (two sessions in ONE project) -------------------
+-- Claude Code keeps each session's own chat title in its transcript as an
+-- "ai-title" record -- the same string the editor shows on its tab. Read it ONLY
+-- for tiles that actually need telling apart (a project running more than one
+-- session) and cache it per session for a minute, so the 1s tick never re-reads a
+-- transcript tail in steady state. 128KB of tail is ample: the record is
+-- re-appended as the chat evolves, so the newest one is always near the end.
+function FX.sessionAiTitle(item)
+  local key = item and item.key
+  local path = item and item.transcript_path
+  if not key or type(path) ~= "string" or path == "" then return nil end
+  FX._sessTitle = FX._sessTitle or {}
+  local now = FX.now()
+  local c = FX._sessTitle[key]
+  if c and (now - c.ts) < 60 then return c.title end
+  local tail = FX.readTail(path, 131072)
+  local title = tail and core.aiTitleFromTranscript(tail) or nil
+  FX._sessTitle[key] = { title = title, ts = now }
+  return title
+end
+
 -- L3 definition source: enumerate prompt-definition files (*.prompt / *.md, skip
 -- README) in `dir` -> { {stem, text}, ... }. Synchronous readDir+readFile (a flat,
 -- bounded dir, like FX.listSkills -- not the async folder-scan). Missing dir -> {}.
@@ -13012,7 +13033,9 @@ local HTML = [[
       // The elapsed-in-status age (2s/13s/11h) rides the status line -- right of the dot,
       // before the status words -- instead of taking its own meta row.
       var age = it.since ? fmtAge(it.since) : "";
-      var meta = "";
+      // Two chats in ONE project: lead the meta line with THIS session's chat
+      // title, so the pair is tellable apart. Only set when a project is doubled up.
+      var meta = it.sessTitle ? ("\u21b3 " + it.sessTitle) : "";
       if(st === "approval" && it.pending && it.pending.summary){
         meta = "wants: " + it.pending.summary;
       } else if(st === "error"){
@@ -14538,6 +14561,32 @@ function FX._refreshBody()
       end
     end
     if dirty then FX.saveAutoTitles(autoTitles) end
+  end
+  -- Two sessions in ONE project used to render as IDENTICAL cards: the name (and
+  -- any relabel) is per-projectKey, so nothing on either tile said which chat it
+  -- was. Give each of those tiles its own chat title -- and only those, so a
+  -- project running a single session keeps its clean card.
+  do
+    local dupKeys = core.dupProjectKeys(list)
+    if next(dupKeys) ~= nil then
+      local live = {}
+      for _, it in ipairs(list) do
+        live[it.key] = true
+        if it.projectKey and dupKeys[it.projectKey] then
+          local t = FX.sessionAiTitle(it)
+          if not t or t == "" then
+            local sid = core.shortSessionId(it.session_id or it.key)
+            t = (sid ~= "") and ("#" .. sid) or nil
+          end
+          it.sessTitle = t
+        end
+      end
+      -- reap titles of sessions that are gone (bounded, runs only while a project
+      -- is doubled up)
+      for k in pairs(FX._sessTitle or {}) do
+        if not live[k] then FX._sessTitle[k] = nil end
+      end
+    end
   end
   -- (.group is applied earlier in the tick — see the comment after refreshList() —
   -- so the routing dispatcher can match @role: against a member's group.)

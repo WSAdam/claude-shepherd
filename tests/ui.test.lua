@@ -2096,6 +2096,29 @@ do
         and src:find("return wlDueSort(b.due) < wlDueSort(a.due) ? -1 : 1;", 1, true) == nil)
 end
 
+-- ---- Per-session tile identity (two chats in ONE project) ----
+-- 2026-09-02: two live sessions in one folder rendered as identical cards.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("sessTitle: the tick asks core which projects are doubled up",
+        src:find("local dupKeys = core.dupProjectKeys(list)", 1, true) ~= nil)
+  check("sessTitle: ONLY doubled-up projects get a per-session title",
+        src:find("if it.projectKey and dupKeys[it.projectKey] then", 1, true) ~= nil
+        and src:find("it.sessTitle = t", 1, true) ~= nil)
+  check("sessTitle: falls back to a short session id when a chat has no title yet",
+        src:find("core.shortSessionId(it.session_id or it.key)", 1, true) ~= nil)
+  check("sessTitle: the reader is cached so the 1s tick never re-reads a tail",
+        src:find("function FX.sessionAiTitle(item)", 1, true) ~= nil
+        and src:find("if c and (now - c.ts) < 60 then return c.title end", 1, true) ~= nil
+        and src:find("core.aiTitleFromTranscript(tail)", 1, true) ~= nil)
+  check("sessTitle: dead sessions are reaped from the title cache",
+        src:find("if not live[k] then FX._sessTitle[k] = nil end", 1, true) ~= nil)
+  check("sessTitle: the tile leads its meta line with the chat title",
+        src:find('var meta = it.sessTitle ? ("\\u21b3 " + it.sessTitle) : "";', 1, true) ~= nil)
+end
+
 -- ---- User Stories tab (spec/product/user-stories.md viewer/editor) ----
 do
   local f = io.open(ROOT .. "claude-dashboard.lua", "r")

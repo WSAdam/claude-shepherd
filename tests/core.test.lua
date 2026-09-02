@@ -5570,6 +5570,67 @@ do
         ni.src == "todo" and ni.srcText == "x" and ni.fileDone == true and ni.fileMissing == true)
 end
 
+-- ---- Per-session tile identity (two chats in ONE project) -------------------
+-- 2026-09-02: two live sessions in the same folder rendered as identical cards --
+-- the folder name and any relabel are per-PROJECT, so nothing on either card said
+-- which chat it was. Claude Code keeps each session's own chat title in the
+-- transcript as an "ai-title" record; these read it and decide who needs one.
+do
+  local J = core.json.encode
+  local function line(t) return J(t) .. "\n" end
+  -- aiTitleFromTranscript: the LAST ai-title record wins (the title is re-appended
+  -- as the chat evolves, so earlier ones are stale).
+  local tx = line({ type = "bridge-session", sessionId = "s1" })
+     .. line({ type = "ai-title", aiTitle = "First working title", sessionId = "s1" })
+     .. line({ type = "user", message = { role = "user", content = "hi" } })
+     .. line({ type = "ai-title", aiTitle = "Category template editor scroll to error", sessionId = "s1" })
+  eq("aiTitle: last record wins", core.aiTitleFromTranscript(tx), "Category template editor scroll to error")
+  eq("aiTitle: trims surrounding space",
+     core.aiTitleFromTranscript(line({ type = "ai-title", aiTitle = "  padded title  " })), "padded title")
+  -- quotes/newlines/unicode survive the JSON round-trip (a title is model-written)
+  eq("aiTitle: survives quotes and unicode",
+     core.aiTitleFromTranscript(line({ type = "ai-title", aiTitle = 'the "N of 5" header — fix' })),
+     'the "N of 5" header — fix')
+  -- an empty/blank title is not a title: fall through to whatever came before
+  eq("aiTitle: blank title ignored, earlier one kept",
+     core.aiTitleFromTranscript(line({ type = "ai-title", aiTitle = "Real title" })
+                                 .. line({ type = "ai-title", aiTitle = "   " })), "Real title")
+  check("aiTitle: no ai-title record -> nil", core.aiTitleFromTranscript(line({ type = "user" })) == nil)
+  check("aiTitle: empty text -> nil", core.aiTitleFromTranscript("") == nil)
+  check("aiTitle: non-string -> nil", core.aiTitleFromTranscript(nil) == nil)
+  -- a tail read can start mid-line and transcripts carry huge tool payloads: a
+  -- torn or non-JSON line must be skipped, never crash the tick.
+  check("aiTitle: torn/garbage lines are skipped",
+        core.aiTitleFromTranscript('{"type":"ai-tit\n{ not json at all\n'
+                                   .. line({ type = "ai-title", aiTitle = "Survivor" })) == "Survivor")
+  -- a record that merely MENTIONS ai-title (a pasted log line) is not one
+  check("aiTitle: a non-ai-title record is not read",
+        core.aiTitleFromTranscript(line({ type = "user", message = { role = "user",
+              content = '{"type":"ai-title","aiTitle":"pasted into a prompt"}' } })) == nil)
+
+  -- dupProjectKeys: which projects currently have MORE THAN ONE live session
+  local one = { { projectKey = "pA", key = "k1" }, { projectKey = "pB", key = "k2" } }
+  check("dupKeys: one session per project -> none flagged", next(core.dupProjectKeys(one)) == nil)
+  local two = { { projectKey = "pA", key = "k1" }, { projectKey = "pB", key = "k2" },
+                { projectKey = "pA", key = "k3" } }
+  local d = core.dupProjectKeys(two)
+  check("dupKeys: the shared project is flagged", d.pA == true)
+  check("dupKeys: the solo project is NOT flagged", d.pB == nil)
+  local three = { { projectKey = "pA" }, { projectKey = "pA" }, { projectKey = "pA" } }
+  check("dupKeys: three in one project still flags once", core.dupProjectKeys(three).pA == true)
+  -- a session with no projectKey (or an empty one) can't collide with anything
+  local blank = { { projectKey = "" }, { projectKey = "" }, { projectKey = nil }, { key = "x" } }
+  check("dupKeys: empty/absent projectKeys are ignored", next(core.dupProjectKeys(blank)) == nil)
+  check("dupKeys: nil list is safe", next(core.dupProjectKeys(nil)) == nil)
+
+  -- shortSessionId: the stable stand-in when a session has no title yet
+  eq("shortSid: first 6 of a uuid", core.shortSessionId("a7ff3937-5d86-4ab3-a064-2be2afc919c7"), "a7ff39")
+  eq("shortSid: short input is kept whole", core.shortSessionId("ab12"), "ab12")
+  eq("shortSid: stops at the first dash", core.shortSessionId("ab-cdef123"), "ab")
+  eq("shortSid: non-string -> empty", core.shortSessionId(nil), "")
+  eq("shortSid: empty -> empty", core.shortSessionId(""), "")
+end
+
 -- ---- User stories editor: parse / serialize / hash (spec/product/user-stories.md) ----
 do
   -- THE core safety invariant: serialize(parse(x).blocks) == x BYTE-FOR-BYTE for any
