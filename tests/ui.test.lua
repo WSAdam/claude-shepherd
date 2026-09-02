@@ -2088,6 +2088,12 @@ do
         and src:find("FX.todoAutoSyncTick(list)", 1, true) ~= nil)
   check("wl-todo: HARD RULE -- the checkbox is never driven by fileDone",
         src:find('fileDone ? " checked"', 1, true) == nil)
+  -- 2026-09-02: the Done drawer sorted by due date, so items ticked on different
+  -- days came back arbitrarily (every imported item has no due date -> all tied).
+  check("wl-todo: Done drawer orders by the completion stamp, newest first",
+        src:find("var at = +a.doneTs || 0, bt = +b.doneTs || 0;", 1, true) ~= nil
+        and src:find("if(at !== bt) return bt - at;", 1, true) ~= nil
+        and src:find("return wlDueSort(b.due) < wlDueSort(a.due) ? -1 : 1;", 1, true) == nil)
 end
 
 -- ---- User Stories tab (spec/product/user-stories.md viewer/editor) ----

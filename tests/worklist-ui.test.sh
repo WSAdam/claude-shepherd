@@ -77,8 +77,10 @@ assert_eq "master tick toggles in its home scope" "yes" "$(has 'if(ms && mid) se
 assert_eq "master has a recently-completed drawer" "yes" "$(has 'id="wl-mdonewrap"')"
 assert_eq "recently-completed windows 7 days"  "yes" "$(has '7 * 86400')"
 assert_eq "toggle stamps a completion time"    "yes" "$(has 'core.worklistToggle(st, scope, tostring(payload.text or ""), FX.now())')"
-# Per-scope Done is ordered by due date.
-assert_eq "done rows sorted by due date"       "yes" "$(has 'done.sort(function(a, b){ return wlDueSort(b.due)')"
+# Per-scope Done is ordered by completion time. REQUIREMENT CHANGE 2026-09-02: this
+# asserted "sorted by due date" until the Done drawer was found returning items ticked
+# on different days in arbitrary order -- see Feature 5 below.
+assert_eq "done rows sorted, newest completion first" "yes" "$(has 'done.sort(function(a, b){')"
 # EVERY scope's done row carries both dates (expected + ✓ completed), not just MASTER.
 assert_eq "done rows show due AND completed"   "yes" "$(has 'wlDueChip(it.due, isDone)
                 + (isDone ? wlDoneChip(it.doneTs) : "")')"
@@ -123,6 +125,18 @@ assert_eq "no write path targets TODO.md"        "no"  "$(has 'writeFile(root ..
 assert_eq "tick calls the auto-sync sweep"       "yes" "$(has 'FX.todoAutoSyncTick(list)')"
 assert_eq "sync stats the file mtime"            "yes" "$(has 'hs.fs.attributes(path, "modification")')"
 assert_eq "payload gates the button on hasTodo/todoOn" "yes" "$(has 'curProj.hasTodo || curProj.todoOn')"
+
+# ---- Feature 5: the Done drawer is ordered by WHEN IT WAS TICKED --------------------
+# 2026-09-02: the drawer sorted by DUE DATE, so items verified on different days came
+# back in arbitrary order -- and every TODO-imported item has no due date, so all of
+# them tied. The old comparator also returned 1 on a tie (never 0), which is an
+# inconsistent comparator: V8 scrambles an all-tied list outright.
+assert_eq "done sorts on the completion stamp first" "yes" "$(has 'var at = +a.doneTs || 0, bt = +b.doneTs || 0;')"
+assert_eq "newest completion first"                  "yes" "$(has 'if(at !== bt) return bt - at;')"
+assert_eq "undated ties fall back to the due date"   "yes" "$(has 'if(ad !== bd) return ad < bd ? 1 : -1;')"
+assert_eq "a genuine tie keeps list order (returns 0)" "yes" "$(has 'return 0;                                   // a real tie')"
+# The due-date-only comparator that caused it must be gone for good.
+assert_eq "no due-date-only done comparator"         "no"  "$(has 'return wlDueSort(b.due) < wlDueSort(a.due) ? -1 : 1;')"
 
 # Positive control: prove `has` actually distinguishes present/absent, so a typo in a
 # needle above can't make an assert pass vacuously.

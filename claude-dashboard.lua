@@ -8829,7 +8829,19 @@ local HTML = [[
       }
       var active = [], done = [];
       wlScopeItems(worklistScope).forEach(function(it){ (it.done ? done : active).push(it); });
-      done.sort(function(a, b){ return wlDueSort(b.due) < wlDueSort(a.due) ? -1 : 1; });  // by due date, newest first
+      // Done is the record of what you just verified, so it reads newest-TICKED
+      // first. doneTs is stamped by worklistToggle; items finished before stamps
+      // existed (0) sink to the bottom, ordered by due date among themselves. A
+      // real tie MUST return 0: the old comparator returned 1 for every tie, which
+      // is an inconsistent comparator, and V8 scrambles an all-tied list outright
+      // -- which is what every TODO-imported item is, since none carry a due date.
+      done.sort(function(a, b){
+        var at = +a.doneTs || 0, bt = +b.doneTs || 0;
+        if(at !== bt) return bt - at;
+        var ad = wlDueSort(a.due), bd = wlDueSort(b.due);
+        if(ad !== bd) return ad < bd ? 1 : -1;
+        return 0;                                   // a real tie
+      });
       document.getElementById("wl-active").innerHTML = active.length
         ? active.map(function(it){ return wlItemRow(it, false); }).join("")
         : '<div class="wl-empty">No items — add one above.</div>';
