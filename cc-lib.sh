@@ -127,7 +127,13 @@ cc_editor_app() {
 # (see core.staleDuplicateKeys). Prints empty for Kitty (it has its own window id) or
 # when no such ancestor is found within the bounded walk -- the safe side: the panel
 # then never auto-prunes the tile and the 24h backstop owns its cleanup.
-cc_window_host() {
+# The claude session process's OWN pid, and its parent (the per-window host id), from
+# ONE walk: "<session_pid> <host_pid>", or empty when unknown / under kitty. The
+# session pid is what tells a /clear ghost from a live sibling -- /clear keeps the
+# SAME process and mints a new session id, so the retired session and its replacement
+# are the only two tiles that can ever share one pid (a second chat is its own
+# process). Callers below keep their single-value contracts.
+cc_window_pair() {
   # Genuine kitty sessions have their own window id -- skip the walk. Decide by the
   # DETECTOR, not raw KITTY_WINDOW_ID: that env var is inherited by a VS Code/Cursor
   # cold-started from a kitty shell (`code .`), which would otherwise suppress
@@ -147,7 +153,7 @@ cc_window_host() {
     # as a LITERAL case pattern (not a $var) so the glob behaves identically in bash/zsh/sh.
     case "$cmd" in
       *claude*--output-format*stream-json*)
-        ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' '; return 0 ;;
+        printf '%s %s' "$pid" "$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')"; return 0 ;;
     esac
     pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')"
     i=$((i + 1))
@@ -155,10 +161,29 @@ cc_window_host() {
   printf ''
 }
 
+# The per-window host id (the walk's second field). Contract unchanged: one value,
+# empty when unknown / under kitty, always exit 0.
+cc_window_host() {
+  local pair; pair="$(cc_window_pair)"
+  [ -n "$pair" ] || { printf ''; return 0; }
+  printf '%s' "${pair#* }"
+}
+
 # The per-window host id for a session, computed at most ONCE per session: reuse the
 # value already in its status file, and only walk the process tree (cc_window_host)
 # when it's absent. This keeps every hook event after a session's first off the `ps`
 # path. Usage: cc_host_window "$key"  (empty when unknown / for Kitty).
+# The session's own process pid, computed at most ONCE per session: reuse the value
+# already in its status file, and only walk the tree when it's absent -- same posture
+# as cc_host_window. Usage: cc_session_pid "$key"  (empty when unknown / for Kitty).
+cc_session_pid() {
+  local sp; sp="$(cc_read_field "$1" '.session_pid')"
+  [ -n "$sp" ] && { printf '%s' "$sp"; return 0; }
+  local pair; pair="$(cc_window_pair)"
+  [ -n "$pair" ] || { printf ''; return 0; }
+  printf '%s' "${pair%% *}"
+}
+
 cc_host_window() {
   local hw; hw="$(cc_read_field "$1" '.host_window')"
   [ -n "$hw" ] && { printf '%s' "$hw"; return 0; }

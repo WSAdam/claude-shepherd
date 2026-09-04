@@ -2124,6 +2124,14 @@ do
         src:find("\\u21b3", 1, true) == nil)
   check("sessTitle: the repeated project name is trimmed off the chat title",
         src:find("t = core.trimTitlePrefix(t, it.name)", 1, true) ~= nil)
+  -- 2026-09-04: a titleless chat showed a bare hex id, which read as noise.
+  check("sessTitle: a chat with no title yet says so in words",
+        src:find('t = (sid ~= "") and ("new chat #" .. sid) or "new chat"', 1, true) ~= nil
+        and src:find('("#" .. sid)', 1, true) == nil)
+  -- /clear ghosts are reaped on sight, not after the 90s staleness window
+  check("clearGhost: the tick asks core which sessions were retired by a /clear",
+        src:find("for _, k in ipairs(core.supersededSessionKeys(raw)) do retired[k] = true end", 1, true) ~= nil
+        and src:find("elseif ghost[it.key] or retired[it.key] then", 1, true) ~= nil)
 end
 
 -- ---- User Stories tab (spec/product/user-stories.md viewer/editor) ----

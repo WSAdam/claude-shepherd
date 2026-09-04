@@ -13473,13 +13473,19 @@ function refreshList()
   local pruneOpts = { pruneNoSid = PRUNE_NO_SID, pruneSeconds = pruneSeconds }
   local ghost = {}
   for _, k in ipairs(core.staleDuplicateKeys(raw)) do ghost[k] = true end
+  -- A /clear keeps the SAME process and mints a new session id, so the session it
+  -- retired is a ghost the INSTANT its replacement appears -- no need to wait out
+  -- the 90s staleness the rule above depends on (which left two cards on screen).
+  local retired = {}
+  for _, k in ipairs(core.supersededSessionKeys(raw)) do retired[k] = true end
   for _, it in ipairs(raw) do
     if core.shouldPrune(it, now, pruneOpts) then
       FX.removeStatus(it.key)
       print("[cc-dashboard] pruned orphan tile: " .. tostring(it.name) .. " (" .. it.key .. ")")
-    elseif ghost[it.key] then
+    elseif ghost[it.key] or retired[it.key] then
       FX.removeStatus(it.key)
-      print("[cc-dashboard] pruned ghost duplicate: " .. tostring(it.name) .. " (" .. it.key .. ")")
+      print("[cc-dashboard] pruned " .. (retired[it.key] and "retired session" or "ghost duplicate")
+            .. ": " .. tostring(it.name) .. " (" .. it.key .. ")")
     else
       list[#list + 1] = it
     end
@@ -14583,8 +14589,11 @@ function FX._refreshBody()
             t = core.trimTitlePrefix(t, (it.label and it.label ~= "" and it.label) or it.autoTitle or it.name)
             t = core.trimTitlePrefix(t, it.name)
           else
+            -- A chat too new to have a title yet: say so in words. A bare hex id
+            -- read as noise on the card; the id stays only to keep two fresh
+            -- chats in one project distinguishable.
             local sid = core.shortSessionId(it.session_id or it.key)
-            t = (sid ~= "") and ("#" .. sid) or nil
+            t = (sid ~= "") and ("new chat #" .. sid) or "new chat"
           end
           it.sessTitle = t
         end

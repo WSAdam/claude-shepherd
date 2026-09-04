@@ -106,4 +106,30 @@ rm -f "$probe"
 assert_eq "cc_host_window: walks when the id is absent"   "9999"   "$(cc_host_window k)"
 assert_eq "cc_host_window: walk fired when absent"        "CALLED" "$(tr -d '\n' < "$probe" 2>/dev/null)"
 
+# cc_window_pair / cc_session_pid (2026-09-04): /clear keeps the SAME claude process
+# and mints a NEW session id, so the retired session's tile is only tellable from a
+# live one by the process they share. The walk already located that process to derive
+# host_window and threw its pid away; the pair returns both from ONE walk.
+assert_eq "cc_window_pair: empty under kitty" "" \
+  "$(CLAUDE_CODE_ENTRYPOINT= KITTY_WINDOW_ID=9 cc_window_pair)"
+CLAUDE_CODE_ENTRYPOINT= KITTY_WINDOW_ID=9 cc_window_pair >/dev/null 2>&1
+assert_eq "cc_window_pair: exit 0 under kitty" "0" "$?"
+cc_window_pair >/dev/null 2>&1
+assert_eq "cc_window_pair: never errors (exit 0)" "0" "$?"
+# cc_window_host keeps its ONE-value contract by reading the pair's second field, so
+# every existing caller (and the status file's host_window) is unchanged.
+cc_window_pair() { printf '4242 9999'; }
+assert_eq "cc_window_host: still prints only the host id" "9999" "$(cc_window_host)"
+# cc_session_pid mirrors cc_host_window: reuse the stored value, walk only when absent.
+probe2="$TMP/pid-probe"
+cc_window_pair() { echo CALLED >> "$probe2"; printf '4242 9999'; }
+cc_read_field() { printf '777'; }                        # file already has the pid
+rm -f "$probe2"
+assert_eq "cc_session_pid: reuses the stored pid"         "777" "$(cc_session_pid k)"
+assert_eq "cc_session_pid: no process walk when present"  ""    "$(cat "$probe2" 2>/dev/null)"
+cc_read_field() { printf ''; }                           # absent -> must walk once
+rm -f "$probe2"
+assert_eq "cc_session_pid: walks when the pid is absent"  "4242"   "$(cc_session_pid k)"
+assert_eq "cc_session_pid: walk fired when absent"        "CALLED" "$(tr -d '\n' < "$probe2" 2>/dev/null)"
+
 finish

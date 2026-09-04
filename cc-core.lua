@@ -584,6 +584,40 @@ function M.dupProjectKeys(list)
   return dup
 end
 
+-- Tiles left behind by a /clear. Clearing context does NOT start a new process:
+-- the SAME claude process mints a new session id, so the retired session and its
+-- replacement are the only two tiles that can ever share one session_pid (a second
+-- chat in the same editor window is its own process -- one window hosts many, so
+-- host_window cannot tell these apart). Keep the newest tile per pid and return the
+-- rest: they are dead the moment the newer one exists, with no need to wait out the
+-- staleness window. A tile with no pid is never flagged. Pure.
+function M.supersededSessionKeys(list)
+  local best = {}
+  local function rank(it) return tonumber(it.since) or 0, tonumber(it.updated) or 0 end
+  local function pidOf(it)
+    local p = (type(it) == "table") and it.session_pid or nil
+    if p == nil then return nil end
+    p = tostring(p)
+    return (p ~= "") and p or nil
+  end
+  for _, it in ipairs(list or {}) do
+    local p = pidOf(it)
+    if p and it.key then
+      local a1, a2 = rank(it)
+      local cur = best[p]
+      if not cur or a1 > cur.a1 or (a1 == cur.a1 and a2 > cur.a2) then
+        best[p] = { key = it.key, a1 = a1, a2 = a2 }
+      end
+    end
+  end
+  local keys = {}
+  for _, it in ipairs(list or {}) do
+    local p = pidOf(it)
+    if p and it.key and best[p] and best[p].key ~= it.key then keys[#keys + 1] = it.key end
+  end
+  return keys
+end
+
 -- A chat title usually LEADS with the project's own name ("ChargebackSentinel
 -- provider go-live handoff") -- which the tile headline already says. On a narrow
 -- card that repeat spends the whole line, so two sessions ellipsise down to the

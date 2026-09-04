@@ -305,6 +305,12 @@ fi
 if [ "$EDITOR_KIND" != "kitty" ]; then
   HOST_WINDOW="$(cc_host_window "$KEY")"   # reuse stored id; walk the tree only when absent
   [ -n "$HOST_WINDOW" ] && PATCH="$(printf '%s' "$PATCH" | jq -c --arg v "$HOST_WINDOW" '. + {host_window:$v}')"
+  # The session's OWN process pid, from the same walk. host_window cannot tell a
+  # /clear ghost from a live sibling -- one editor window hosts many sessions -- but
+  # /clear keeps the SAME process and mints a new session id, so a shared pid means
+  # one of the two tiles is a retired session. Cached in the file like host_window.
+  SESSION_PID="$(cc_session_pid "$KEY")"
+  [ -n "$SESSION_PID" ] && PATCH="$(printf '%s' "$PATCH" | jq -c --arg v "$SESSION_PID" '. + {session_pid:$v}')"
 fi
 
 # Don't let a generic Notification clobber a precise pending that

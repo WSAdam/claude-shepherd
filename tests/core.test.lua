@@ -5668,6 +5668,48 @@ do
   eq("titleTrim: empty title passes through", T("", "x"), "")
 end
 
+-- ---- /clear ghosts: a retired session shares its replacement's process ------
+-- 2026-09-04: clearing context left TWO cards for one chat. /clear does not start a
+-- new process -- the SAME claude process mints a new session id -- so the retired
+-- session's tile lingered until the 90s staleness window let the duplicate reaper
+-- take it. Sharing a pid IS the proof: a second chat is its own process.
+do
+  local K = core.supersededSessionKeys
+  local function keys(t) local o={} for _,k in ipairs(t) do o[#o+1]=k end table.sort(o) return table.concat(o,",") end
+  -- the reported case: one process, the old session and the one /clear minted
+  local cleared = { { key = "old", session_pid = "60409", since = 100, updated = 140 },
+                    { key = "new", session_pid = "60409", since = 200, updated = 200 } }
+  eq("superseded: the retired session is flagged", keys(K(cleared)), "old")
+  -- ...and NEVER the survivor, however the list is ordered
+  local rev = { cleared[2], cleared[1] }
+  eq("superseded: order does not change the verdict", keys(K(rev)), "old")
+  -- two chats in ONE editor window are DIFFERENT processes: neither is a ghost.
+  -- (host_window cannot decide this -- one window hosts many sessions.)
+  local twoChats = { { key = "a", session_pid = "111", host_window = "59116", since = 100, updated = 100 },
+                     { key = "b", session_pid = "222", host_window = "59116", since = 200, updated = 900 } }
+  check("superseded: two chats in one window are both kept", #K(twoChats) == 0)
+  -- three sessions cleared in a row: only the newest survives
+  local thrice = { { key = "s1", session_pid = "7", since = 10 },
+                   { key = "s2", session_pid = "7", since = 20 },
+                   { key = "s3", session_pid = "7", since = 30 } }
+  eq("superseded: repeated clears leave only the newest", keys(K(thrice)), "s1,s2")
+  -- a tile with no pid (kitty, or a session whose first event predates the field)
+  -- is never touched: absence of proof is not proof
+  local noPid = { { key = "x", since = 100 }, { key = "y", since = 200 },
+                  { key = "z", session_pid = "", since = 300 } }
+  check("superseded: tiles with no pid are left alone", #K(noPid) == 0)
+  -- a pid with a single tile is not a duplicate of anything
+  check("superseded: a lone session is never flagged",
+        #K({ { key = "solo", session_pid = "9", since = 1 } }) == 0)
+  -- a numeric pid and its string spelling are the SAME process
+  eq("superseded: pid type does not matter",
+     keys(K({ { key = "old", session_pid = 42, since = 1 }, { key = "new", session_pid = "42", since = 2 } })), "old")
+  -- falls back to `updated` when a tile carries no `since`
+  eq("superseded: ranks on updated when since is absent",
+     keys(K({ { key = "old", session_pid = "5", updated = 10 }, { key = "new", session_pid = "5", updated = 20 } })), "old")
+  check("superseded: nil list is safe", #K(nil) == 0)
+end
+
 -- ---- User stories editor: parse / serialize / hash (spec/product/user-stories.md) ----
 do
   -- THE core safety invariant: serialize(parse(x).blocks) == x BYTE-FOR-BYTE for any

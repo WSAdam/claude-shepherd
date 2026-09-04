@@ -338,4 +338,13 @@ ev stop "{\"session_id\":\"$HE\",\"cwd\":\"/srv/heal-proj\"}"
 assert_json "#7-pin: post-heal events merge again (stop -> done)" "$HEF" '.status' "done"
 assert_json "#7-pin: post-heal merge preserves earlier fields" "$HEF" '.last_prompt' "revive me"
 
+# session_pid (2026-09-04): the writer publishes the session's own process pid beside
+# host_window, from the same one-per-session walk. It is what lets the panel reap a
+# /clear ghost on sight -- host_window cannot, since one editor window hosts many
+# sessions. (The walk itself is covered in lib.test.sh; this pins the publish.)
+assert_eq "status writer publishes session_pid" "yes" \
+  "$(grep -qF 'session_pid:$v' "$ROOT/cc-status.sh" && echo yes || echo no)"
+assert_eq "session_pid comes from the cached helper" "yes" \
+  "$(grep -qF 'SESSION_PID="$(cc_session_pid "$KEY")"' "$ROOT/cc-status.sh" && echo yes || echo no)"
+
 finish

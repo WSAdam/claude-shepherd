@@ -2,6 +2,7 @@
 # doubles): they never touch ~/.claude/cc-status, fire keystrokes, or spawn.
 
 HS_DIR ?= $(HOME)/.hammerspoon
+CLAUDE_DIR ?= $(HOME)/.claude
 APP_DIR ?= $(HOME)/Applications
 
 .PHONY: test
@@ -29,6 +30,12 @@ lint:
 install:
 	@cp claude-dashboard.lua cc-core.lua "$(HS_DIR)/"
 	@echo "✅ copied claude-dashboard.lua + cc-core.lua -> $(HS_DIR)/"
+# The hooks run from $(CLAUDE_DIR), so a deploy that ships only the Lua leaves edits
+# to the status writer SILENTLY unshipped -- the panel reloads, the hooks do not.
+# Mirrors install.sh's file set (same scripts, same chmod).
+	@cp cc-lib.sh cc-status.sh cc-approve.sh cc-popup.sh cc-core.lua "$(CLAUDE_DIR)/"
+	@chmod +x "$(CLAUDE_DIR)"/cc-*.sh
+	@echo "✅ copied hook scripts + core -> $(CLAUDE_DIR)/"
 
 # First-run setup: copy scripts + core into place, merge hooks (with a backup),
 # ensure the init.lua dofile, and build the Dock launcher. Idempotent.
