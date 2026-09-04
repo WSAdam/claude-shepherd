@@ -13035,7 +13035,9 @@ local HTML = [[
       var age = it.since ? fmtAge(it.since) : "";
       // Two chats in ONE project: lead the meta line with THIS session's chat
       // title, so the pair is tellable apart. Only set when a project is doubled up.
-      var meta = it.sessTitle ? ("\u21b3 " + it.sessTitle) : "";
+      // A SPEECH glyph, not an arrow: an arrow here read as "this session is
+      // running something", which is what the green bg-run pill means.
+      var meta = it.sessTitle ? ("\ud83d\udcac " + it.sessTitle) : "";
       if(st === "approval" && it.pending && it.pending.summary){
         meta = "wants: " + it.pending.summary;
       } else if(st === "error"){
@@ -14574,7 +14576,13 @@ function FX._refreshBody()
         live[it.key] = true
         if it.projectKey and dupKeys[it.projectKey] then
           local t = FX.sessionAiTitle(it)
-          if not t or t == "" then
+          if t and t ~= "" then
+            -- The card's headline already says the project, and a chat title
+            -- usually repeats it -- which on a narrow tile ellipsises away the
+            -- only part that differs. Spend the line on what actually differs.
+            t = core.trimTitlePrefix(t, (it.label and it.label ~= "" and it.label) or it.autoTitle or it.name)
+            t = core.trimTitlePrefix(t, it.name)
+          else
             local sid = core.shortSessionId(it.session_id or it.key)
             t = (sid ~= "") and ("#" .. sid) or nil
           end

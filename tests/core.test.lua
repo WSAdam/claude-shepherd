@@ -5631,6 +5631,43 @@ do
   eq("shortSid: empty -> empty", core.shortSessionId(""), "")
 end
 
+-- ---- Session title: drop the project name it repeats ------------------------
+-- 2026-09-04: the per-session titles landed, and both cards STILL read alike --
+-- a chat title leads with the project's own name ("ChargebackSentinel provider
+-- go-live handoff"), which the tile headline already says, so on a narrow card
+-- the ellipsis ate the only part that differed.
+do
+  local T = core.trimTitlePrefix
+  -- the two live titles that exposed it (note the tile's label carries a SPACE
+  -- the title does not: a relabel and an ai-title spell the project differently)
+  eq("titleTrim: live case A", T("ChargebackSentinel provider go-live handoff", "Chargeback Sentinel"),
+     "provider go-live handoff")
+  eq("titleTrim: live case B", T("ChargebackSentinel sales batch commit and providers", "Chargeback Sentinel"),
+     "sales batch commit and providers")
+  -- letters/digits only, case-insensitive, so spelling/punctuation can't defeat it
+  eq("titleTrim: case-insensitive", T("chargebacksentinel foo", "Chargeback Sentinel"), "foo")
+  eq("titleTrim: name spelled with a dash", T("Chargeback-Sentinel foo", "ChargebackSentinel"), "foo")
+  eq("titleTrim: separator after the prefix is eaten", T("ChargebackSentinel - foo", "ChargebackSentinel"), "foo")
+  eq("titleTrim: colon separator", T("ChargebackSentinel: foo", "ChargebackSentinel"), "foo")
+  -- a title that does NOT lead with the name is left alone
+  eq("titleTrim: unrelated title untouched", T("Category template editor scroll to error", "Chargeback Sentinel"),
+     "Category template editor scroll to error")
+  -- a near-miss must NOT be trimmed (it is a different word, not a prefix)
+  eq("titleTrim: near-miss word is not a prefix", T("Chargebacks are broken", "ChargebackSentinel"),
+     "Chargebacks are broken")
+  -- never blank a card: if nothing survives the trim, keep the whole title
+  eq("titleTrim: title == name is kept whole", T("ChargebackSentinel", "Chargeback Sentinel"), "ChargebackSentinel")
+  eq("titleTrim: name plus only punctuation is kept whole", T("ChargebackSentinel --", "ChargebackSentinel"),
+     "ChargebackSentinel --")
+  -- degenerate inputs pass straight through
+  eq("titleTrim: shorter than the name is kept", T("Charge", "ChargebackSentinel"), "Charge")
+  eq("titleTrim: empty name is a no-op", T("some title", ""), "some title")
+  eq("titleTrim: nil name is a no-op", T("some title", nil), "some title")
+  eq("titleTrim: punctuation-only name is a no-op", T("some title", "---"), "some title")
+  check("titleTrim: nil title passes through", T(nil, "x") == nil)
+  eq("titleTrim: empty title passes through", T("", "x"), "")
+end
+
 -- ---- User stories editor: parse / serialize / hash (spec/product/user-stories.md) ----
 do
   -- THE core safety invariant: serialize(parse(x).blocks) == x BYTE-FOR-BYTE for any

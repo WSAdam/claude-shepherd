@@ -2115,8 +2115,15 @@ do
         and src:find("core.aiTitleFromTranscript(tail)", 1, true) ~= nil)
   check("sessTitle: dead sessions are reaped from the title cache",
         src:find("if not live[k] then FX._sessTitle[k] = nil end", 1, true) ~= nil)
+  -- 2026-09-04 REQUIREMENT CHANGE: this pinned an arrow glyph. The arrow read as
+  -- "this session is running something" (the green bg-run pill's job), so the
+  -- chat-title line uses a speech glyph now.
   check("sessTitle: the tile leads its meta line with the chat title",
-        src:find('var meta = it.sessTitle ? ("\\u21b3 " + it.sessTitle) : "";', 1, true) ~= nil)
+        src:find('var meta = it.sessTitle ? ("\\ud83d\\udcac " + it.sessTitle) : "";', 1, true) ~= nil)
+  check("sessTitle: no arrow glyph on the chat-title line",
+        src:find("\\u21b3", 1, true) == nil)
+  check("sessTitle: the repeated project name is trimmed off the chat title",
+        src:find("t = core.trimTitlePrefix(t, it.name)", 1, true) ~= nil)
 end
 
 -- ---- User Stories tab (spec/product/user-stories.md viewer/editor) ----

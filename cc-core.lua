@@ -584,6 +584,37 @@ function M.dupProjectKeys(list)
   return dup
 end
 
+-- A chat title usually LEADS with the project's own name ("ChargebackSentinel
+-- provider go-live handoff") -- which the tile headline already says. On a narrow
+-- card that repeat spends the whole line, so two sessions ellipsise down to the
+-- same "ChargebackSentinel ..." and the disambiguator disambiguates nothing.
+-- Drop a leading run matching the tile's name, comparing LETTERS AND DIGITS only
+-- (a relabel "Chargeback Sentinel" must match a title's "ChargebackSentinel"),
+-- then eat the separator behind it. A near-miss is not a prefix, and a title with
+-- nothing left over is kept whole -- never blank a card. Pure.
+function M.trimTitlePrefix(title, name)
+  if type(title) ~= "string" or title == "" then return title end
+  if type(name) ~= "string" or name == "" then return title end
+  local want = name:lower():gsub("[^%w]", "")
+  if want == "" then return title end
+  local wi, ti = 1, 1
+  while wi <= #want and ti <= #title do
+    local c = title:sub(ti, ti)
+    if c:match("%w") then
+      if c:lower() ~= want:sub(wi, wi) then return title end
+      wi = wi + 1
+    end
+    ti = ti + 1
+  end
+  if wi <= #want then return title end                  -- title ran out first
+  -- The next char must not be alphanumeric, or this is a longer WORD that merely
+  -- starts the same way ("Chargebacks..." is not the project "ChargebackSentinel").
+  local nxt = title:sub(ti, ti)
+  if nxt ~= "" and nxt:match("%w") then return title end
+  local rest = title:sub(ti):gsub("^[%s%-:_/·,.]+", "")
+  return (rest ~= "") and rest or title
+end
+
 -- Stable stand-in for a session with no chat title yet (brand new, or a
 -- transcript whose tail carries no ai-title record): the head of its id.
 function M.shortSessionId(sid)
