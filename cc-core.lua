@@ -1005,6 +1005,19 @@ function M.endSessionVerdict(it, psOut)
   return true
 end
 
+-- A tab-less leftover that has stayed tab-less AND quiet for the whole grace period is ended by
+-- Shepherd itself (2026-09-14: the Sept 11 conversation's process lingered three days after a new
+-- conversation started in its tab, keeping the real tab "shared"). graceSeconds 0 = off. Never a
+-- session that's working, waiting on Adam, running background agents, or remote.
+function M.tablessAutoEndDue(it, tablessSince, now, graceSeconds)
+  graceSeconds = tonumber(graceSeconds) or 0
+  if graceSeconds <= 0 or type(it) ~= "table" or not it.tabless or it.remote or it.bg_active then return false end
+  if it.status ~= "done" and it.status ~= "idle" then return false end
+  now = tonumber(now) or 0
+  if now - (tonumber(tablessSince) or now) < graceSeconds then return false end
+  return now - (tonumber(it.updated) or now) >= graceSeconds
+end
+
 -- Doctor: the VS Code windows hosting sessions (by host_window) vs the ones with a fresh
 -- bridge registry. Kitty and remote tiles have no VS Code window here. `registries` maps
 -- host pid -> decoded registry (or nil). Returns { windows, covered, missing = {names} }.

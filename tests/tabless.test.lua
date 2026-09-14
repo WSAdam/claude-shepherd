@@ -158,5 +158,33 @@ check("...and drops its card", not exists(T .. "/status/957b.json"))
 tick()
 I = items()
 check("the real tab no longer shares its window", I["6698"] and I["6698"].sharedWindow == nil)
+
+-- ---- 2026-09-14 live: the Sept 11 conversation's claude process lingered for three days after a
+-- new conversation started in the Chargeback Sentinel tab, until Adam asked. A leftover that stays
+-- tab-less and idle past the grace period is now ended by Shepherd itself, and says so. ----
+local toasts = {}
+do local real = fx.alert; fx.alert = function(m, s) toasts[#toasts + 1] = tostring(m); return real(m, s) end end
+for _, s in ipairs({ { "a11", "3100", "Nexio rematch run", "done", now - 3600 }, { "a12", "3200", "Busy leftover", "working", now } }) do
+  write(T .. "/" .. s[1] .. ".jsonl", '{"type":"ai-title","aiTitle":"' .. s[3] .. '","sessionId":"' .. s[1] .. '"}\n')
+  write(T .. "/status/" .. s[1] .. ".json", string.format(
+    '{"status":"%s","session_id":"%s","name":"ChargebackSentinel","cwd":"%s","since":%d,"updated":%d,"editor":"vscode","host_window":"1051","session_pid":"%s","transcript_path":"%s"}',
+    s[4], s[1], REPO, s[5], s[5], s[2], T .. "/" .. s[1] .. ".jsonl"))
+  PS[s[2]] = "1051 /Users/adam/.vscode/extensions/anthropic.claude-code-2.1.268-darwin-arm64/resources/native-binary/claude --output-format stream-json"
+end
+write(BR .. "/1051.json", json.encode({ v = 1, pid = 1051, version = "0.4.0", tabs = { { label = "Chargeback Sentinel hand…", group = 1, active = true } }, at = os.time() }))
+kills = {}
+tick(); tick()
+I = items()
+check("both leftovers are marked tab-less", I.a11 and I.a11.tabless == true and I.a12 and I.a12.tabless == true)
+check("...and neither is ended the moment it's marked", #kills == 0)
+fx._tablessSince.a11 = os.time() - 700   -- tab-less (and idle) for longer than the 10-minute grace period
+fx._tablessSince.a12 = os.time() - 700
+tick()
+check("an idle leftover past the grace period is ended by Shepherd  (killed=" .. table.concat(kills, ",") .. ")",
+      #kills == 1 and kills[1] == "3100" and not exists(T .. "/status/a11.json"))
+check("...with a toast saying so", table.concat(toasts, " | "):find("no tab for", 1, true) ~= nil)
+check("a working leftover is left alone", exists(T .. "/status/a12.json"))
+tick()
+check("...and isn't retried every tick (one attempt each)", #kills == 1)
 check("no keystroke anywhere", taps == 0)
 finish()

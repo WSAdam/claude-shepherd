@@ -166,6 +166,11 @@
     "waitSeconds": 900
   },
 
+  "tabless": {
+    "_comment": "Leftover claude processes with no tab (a new conversation was started in their tab). Shepherd marks them '⊘ no tab' with End session, and ends one by itself once it has been tab-less AND idle for autoEndMinutes (default 10) -- after a ps check that it's still that window's claude process, never one that's working, waiting on you or running agents -- with a toast saying so. Its chat stays saved. 0 = never end them automatically.",
+    "autoEndMinutes": 10
+  },
+
   "tabBridge": {
     "_comment": "The Shepherd tab bridge, a companion VS Code extension (ON by default; make install puts it in VS Code with its own CLI, no Marketplace). Not the SSH remote \"bridge\" above. It runs in every VS Code window and closes ONE Claude tab by name through VS Code's tab API -- so Close works on a session that shares its window, with no keystroke, and only when exactly one Claude tab there carries that session's name. false = Close on shared-window sessions stays refused.",
     "enabled": true

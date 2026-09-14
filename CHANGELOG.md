@@ -4,6 +4,19 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-14 — Leftover processes end themselves
+
+### Fixed — a leftover claude process kept a real tab "sharing its window" for days
+
+Starting a new conversation in the Chargeback Sentinel tab left the Sept 11 conversation's claude
+process running for three days. Shepherd marked it "⊘ no tab" with End session, but until someone
+clicked it the real tab counted as sharing its window, so nudges and queued tasks were refused.
+Shepherd now ends such a leftover by itself once it has been tab-less **and** idle for
+`tabless.autoEndMinutes` (default 10; 0 = off). It re-checks with `ps` first, never touches a
+session that's working, waiting on Adam or running agents, tries each session once, and says so in
+a toast. The chat stays saved. Fixtures: `core.tablessAutoEndDue` (tests/core.test.lua) and the live
+case in tests/tabless.test.lua.
+
 ## 2026-09-12 — The worktree demo
 
 ### Added — a repeatable, end-to-end demo of the parallel worktree flow

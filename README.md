@@ -330,7 +330,10 @@ that match no tab are exactly that surplus and have stayed so for 20 seconds, th
 in Instances and in the detail panel, with **End session**. End asks first, checks with `ps` that
 the pid is still a `claude` process of that window, stops it and drops the card; the chat stays in
 its transcript. It's never offered for a session that has a tab. Until it's ended, a tab-less
-session still counts toward "sharing its window" (it might really be in the sidebar).
+session still counts toward "sharing its window" (it might really be in the sidebar) — so Shepherd
+**ends it by itself** once it has been tab-less and idle for `tabless.autoEndMinutes` (default 10;
+0 = off), with the same `ps` check, never for a session that's working, waiting on you or running
+agents, and says so in a toast.
 
 **Right-click** a tile for a context menu:
 

@@ -9306,5 +9306,28 @@ do
   check("empty session: no transcript path at all is unknown, never empty", core.isEmptyChat({ status = "idle" }, nil) == false)
 end
 
+-- ---- Tab-less sessions end themselves (2026-09-14) ------------------------------------------
+-- 2026-09-14 live: starting a new conversation in the Chargeback Sentinel tab left the Sept 11
+-- conversation's claude process running for three days; it made the real tab "share its window"
+-- (keystrokes refused) until Adam asked. A leftover that stays tab-less and idle is ended.
+do
+  local now = 100000
+  local function lo(over)
+    local it = { key = "old", status = "done", tabless = true, updated = now - 3600 }
+    for k, v in pairs(over or {}) do it[k] = v end
+    return it
+  end
+  check("auto-end: tab-less and idle past the grace period -> due", core.tablessAutoEndDue(lo(), now - 700, now, 600) == true)
+  check("auto-end: tab-less only just now -> not yet", core.tablessAutoEndDue(lo(), now - 60, now, 600) == false)
+  check("auto-end: still active within the grace period -> not yet",
+        core.tablessAutoEndDue(lo({ updated = now - 30 }), now - 700, now, 600) == false)
+  check("auto-end: a working session is never ended", core.tablessAutoEndDue(lo({ status = "working" }), now - 700, now, 600) == false)
+  check("auto-end: nor one waiting on Adam", core.tablessAutoEndDue(lo({ status = "approval" }), now - 700, now, 600) == false)
+  check("auto-end: nor one with background agents running", core.tablessAutoEndDue(lo({ bg_active = true }), now - 700, now, 600) == false)
+  check("auto-end: nor one that has a tab", core.tablessAutoEndDue(lo({ tabless = false }), now - 700, now, 600) == false)
+  check("auto-end: a grace period of 0 switches it off", core.tablessAutoEndDue(lo(), now - 7000, now, 0) == false)
+  check("auto-end: nor a remote session", core.tablessAutoEndDue(lo({ remote = { host = "box" } }), now - 700, now, 600) == false)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

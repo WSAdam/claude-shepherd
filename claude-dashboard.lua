@@ -3194,14 +3194,31 @@ function FX.annotateTabless(list, cfg)
     end
   end
   for k in pairs(FX._tablessSince) do if not live[k] then FX._tablessSince[k] = nil end end
+  -- 2026-09-14: a leftover that stays tab-less and idle past the grace period is ended by
+  -- Shepherd itself (tabless.autoEndMinutes, default 10; 0 = off). One attempt per session:
+  -- FX.endSession re-checks with ps, and a refusal isn't retried every tick.
+  FX._tablessAutoTried = FX._tablessAutoTried or {}
+  local grace = (tonumber(core.config(cfg, "tabless.autoEndMinutes", 10)) or 10) * 60
+  for _, it in ipairs(list or {}) do
+    if it.tabless and not FX._tablessAutoTried[it.key]
+       and core.tablessAutoEndDue(it, FX._tablessSince[it.key], now, grace) then
+      FX._tablessAutoTried[it.key] = true
+      FX.endSession(it.key, { auto = true, minutes = math.floor(grace / 60), item = it })
+    end
+  end
 end
 
 -- End session: stop a tab-less session's leftover claude process (the webview confirms first).
 -- Checked with ps right before the signal; its chat stays in its transcript.
-function FX.endSession(key)
-  local it
-  for _, x in ipairs(FX._shownItems or {}) do if x.key == key then it = x end end
-  for _, x in ipairs(FX._hiddenItems or {}) do if x.key == key then it = x end end
+-- opts.auto (2026-09-14): Shepherd ended it on its own after the grace period -- a refusal is
+-- logged, not alerted, and the toast says why it went. opts.item: the current tick's tile.
+function FX.endSession(key, opts)
+  opts = type(opts) == "table" and opts or {}
+  local it = opts.item
+  if not it then
+    for _, x in ipairs(FX._shownItems or {}) do if x.key == key then it = x end end
+    for _, x in ipairs(FX._hiddenItems or {}) do if x.key == key then it = x end end
+  end
   if not it then return false end
   local name = tostring(it.label or it.name or "?")
   local psOut
@@ -3212,12 +3229,16 @@ function FX.endSession(key)
   if not ok then
     print("[cc-dashboard] ⚠️ End session refused for '" .. name .. "': " .. tostring(why))
     if gone then FX.removeStatus(key); return true end
-    pcall(function() FX.alert("Won't end " .. name .. ": " .. tostring(why)) end)
+    if not opts.auto then pcall(function() FX.alert("Won't end " .. name .. ": " .. tostring(why)) end) end
     return false
   end
   pcall(function() hs.execute("kill -TERM " .. tostring(it.session_pid)) end)
-  print("[cc-dashboard] ✅ ended the tab-less session '" .. name .. "' (pid " .. tostring(it.session_pid) .. ")")
-  pcall(function() FX.alert("Ended " .. name .. "'s leftover session -- its chat is saved") end)
+  print("[cc-dashboard] ✅ ended the tab-less session '" .. name .. "' (pid " .. tostring(it.session_pid) .. ")"
+    .. (opts.auto and " on its own, after its grace period" or ""))
+  local msg = opts.auto
+    and ("Ended " .. name .. "'s leftover session (no tab for " .. tostring(opts.minutes or 10) .. " min) -- its chat is saved")
+    or ("Ended " .. name .. "'s leftover session -- its chat is saved")
+  pcall(function() FX.alert(msg) end)
   FX.removeStatus(key)
   return true
 end
