@@ -216,10 +216,13 @@ run the script there — so fenced tabs ask from outside and step back in to reb
   worktree and the branch — never forced. Merges in one repo run **one at a time, in the order you
   clicked**; the rest show *queued (next in line)* and start on their own. **Not yet** sends your
   note back, and the unit stays in its worktree.
-- **The tab closes itself.** Once `done` reports the merge, Shepherd checks with its own git that
-  the merged commit is in main and the worktree is gone, waits for the session's last turn to end,
-  and has the tab bridge close that tab — a batch unit's tab by the tag the bridge gave it, any
-  other (or an untagged one) by its name, on a single match. If it can't (no bridge in that
+- **A unit's own tab closes itself.** Once `done` reports the merge, Shepherd checks with its own git
+  that the merged commit is in main and the worktree is gone, waits for the session's last turn to
+  end, and — **only for a tab it opened for that job** (a batch unit's, or one started with **New
+  worktree tab** or resumed from Instances) — has the tab bridge close it: a batch unit's tab by the
+  tag the bridge gave it, any other by its name, on a single match. A main chat that did a unit
+  itself in a worktree stays open: its finished request is cleared and a toast says *✓ Merged … —
+  its chat stays open*. If it can't (no bridge in that
   window, a tab name shared by two tabs, a terminal session) or git disagrees, the card says
   *merged — close its tab yourself* and why, with **Close tab** (try again now) and **Dismiss**
   (clear it from the card); a *blocked* unit's card has Dismiss too.

@@ -9329,5 +9329,21 @@ do
   check("auto-end: nor a remote session", core.tablessAutoEndDue(lo({ remote = { host = "box" } }), now - 700, now, 600) == false)
 end
 
+-- ---- Only a tab opened for the job closes after its merge (2026-09-14) ----------------------
+-- 2026-09-14 live: the main Chargeback Sentinel chat did a unit itself in a worktree and merged;
+-- Shepherd closed its tab, taking the conversation Adam was working in with it.
+do
+  check("unit tab: a New worktree tab's first prompt",
+        core.isUnitTabPrompt(core.worktreeTabPrompt({ branch = "fix/x", slug = "x" }, "Do the thing.")) == true)
+  check("unit tab: a resume-a-worktree tab's first prompt",
+        core.isUnitTabPrompt(core.enterWorktreePrompt("/r/.claude/worktrees/x", "fix/x")) == true)
+  check("unit tab: Adam's own first prompt isn't one",
+        core.isUnitTabPrompt("review the following and work on a plan to have this be the way by which we operate writes") == false)
+  check("unit tab: no prompt at all isn't one", core.isUnitTabPrompt(nil) == false)
+  check("closes after merge: a batch unit's tab, whatever its first prompt", core.mergeClosesTab(true, nil) == true)
+  check("closes after merge: a New worktree tab", core.mergeClosesTab(false, core.worktreeTabPrompt({ branch = "fix/x", slug = "x" }, "")) == true)
+  check("closes after merge: never a main chat that did a unit itself", core.mergeClosesTab(false, "review the following") == false)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

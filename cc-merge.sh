@@ -13,7 +13,8 @@
 # isn't running, 2 refused (the reason is printed).
 #
 # done: after the fast-forward merge, confirms the branch is in the base, removes the
-# worktree and the branch (never forced) and tells Shepherd, which then closes the tab.
+# worktree and the branch (never forced) and tells Shepherd, which then closes the tab if it
+# opened it for the unit (a batch unit or a New worktree tab); a main chat stays open.
 #
 # The answer is a decision file bound to the request's nonce, claimed with mv (the approval
 # gate's pattern): an answer meant for another request is put back, never consumed.
@@ -153,7 +154,8 @@ $( [ "$inside" = yes ] || echo "0. EnterWorktree with path $wt (you asked from t
 5. Run the full suite on $base; it must be green. Do the project's own post-merge steps too
    (its CLAUDE.md -- e.g. a redeploy from $base).
 6. ~/.claude/cc-merge.sh done --result merged
-   It confirms the merge, removes the worktree and the branch, and Shepherd closes this tab.
+   It confirms the merge and removes the worktree and the branch. If Shepherd opened this tab for
+   the unit (a batch unit or a New worktree tab), it closes it; a main chat stays open.
    If you can't finish: ~/.claude/cc-merge.sh done --result blocked --note "<why>" -- then stop.
 EOF
             exit 0
@@ -213,7 +215,7 @@ cmd_done() {
   fi
   if [ -z "$problem" ]; then
     update_req '.phase = "merged" | .sha = $s | .doneAt = $t' --arg s "$sha" --argjson t "$now"
-    echo "✅ Merged $branch into $base; the worktree and the branch are gone. Shepherd closes this tab once your turn ends."
+    echo "✅ Merged $branch into $base; the worktree and the branch are gone. If Shepherd opened this tab for the unit, it closes it once your turn ends; a main chat stays open."
   else
     update_req '.phase = "merged-dirty" | .sha = $s | .note = $n | .doneAt = $t' \
       --arg s "$sha" --arg n "${problem:0:500}" --argjson t "$now"

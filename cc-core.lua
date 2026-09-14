@@ -1780,6 +1780,26 @@ function M.mergeCloseDue(item, now)
   return (tonumber(now) or 0) - (tonumber(item.since) or 0) >= 3
 end
 
+-- Which tab may Shepherd close after a merge? (2026-09-14: the main Chargeback Sentinel chat did a
+-- unit itself in a worktree, merged, and Shepherd closed its tab -- the conversation Adam was in.)
+-- Only a tab opened for that one job: a batch unit's (known by its tag), or one Shepherd opened with
+-- its own prompt -- New worktree tab (core.worktreeTabPrompt) or a resumed worktree
+-- (core.enterWorktreePrompt). Any other chat stays open.
+M.UNIT_TAB_PROMPTS = {
+  { "Start unit ", " in its own worktree: call EnterWorktree with name " },
+  { "Resume work in the worktree at ", ": call EnterWorktree with path " },
+}
+function M.isUnitTabPrompt(text)
+  if type(text) ~= "string" then return false end
+  for _, p in ipairs(M.UNIT_TAB_PROMPTS) do
+    if text:sub(1, #p[1]) == p[1] and text:find(p[2], 1, true) then return true end
+  end
+  return false
+end
+function M.mergeClosesTab(isBatchUnit, firstPrompt)
+  return isBatchUnit == true or M.isUnitTabPrompt(firstPrompt)
+end
+
 -- The card's one line for a merge state.
 function M.mergeLine(v)
   if type(v) ~= "table" then return nil end

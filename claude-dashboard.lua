@@ -3439,6 +3439,16 @@ end
 FX._mergeVerify = {}     -- nonce -> { at, ok, why }
 FX._mergeCloseTry = {}   -- nonce -> { at, regAt, why }
 FX._mergeClosing = {}    -- nonce -> true: the bridge has the close command
+
+-- A session's first prompt (what the chat was started with), from its transcript's head.
+function FX.sessionFirstPrompt(it)
+  local path = it and it.transcript_path
+  if type(path) ~= "string" or path == "" then return nil end
+  local head
+  pcall(function() local f = io.open(path, "rb"); if f then head = f:read(16384); f:close() end end)
+  return core.firstPromptFromTranscript(head)
+end
+
 function FX.mergeAutoClose(r, it)
   if FX._mergeClosing[r.nonce] then return nil end
   local now = FX.now()
@@ -3452,6 +3462,16 @@ function FX.mergeAutoClose(r, it)
   end
   if not v.ok then return "close its tab yourself once you've looked: " .. tostring(v.why) end
   if not core.mergeCloseDue(it, now) then return nil end
+  -- 2026-09-14: only a tab Shepherd opened for this job closes (a batch unit's, a New worktree tab).
+  -- A main chat that did the unit itself stays open: its finished request is cleared, with a toast.
+  if not core.mergeClosesTab(FX.fleetUnitTagOf(it) ~= nil, FX.sessionFirstPrompt(it)) then
+    FX._mergeClosing[r.nonce] = true
+    FX.mergeAlert("✓ Merged " .. tostring(r.branch) .. " into " .. tostring(r.base) .. " -- "
+      .. tostring(it.label or it.name or "the session") .. "'s chat stays open")
+    os.remove(FX.MERGE_DIR .. "/" .. r.key .. ".json")
+    os.remove(FX.MERGE_DIR .. "/" .. r.key .. ".decision")
+    return nil
+  end
   local reg = FX.tabBridgeRegistry(it.host_window)
   -- retry only when the window's tabs change (a heartbeat alone changes nothing), or every 5 min
   local sig = "none"

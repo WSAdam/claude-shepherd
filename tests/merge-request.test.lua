@@ -39,7 +39,11 @@ for i, s in ipairs(S) do
   write(T .. "/status/" .. key .. ".json", string.format(
     '{"status":"done","session_id":"%s","name":"%s","cwd":"%s","since":%d,"updated":%d,"editor":"vscode","host_window":"%d","session_pid":"%d","transcript_path":"%s"}',
     key, key, wt, now - 60, now - 60, 700 + i, 900 + i, T .. "/" .. key .. ".jsonl"))
-  write(T .. "/" .. key .. ".jsonl", '{"type":"ai-title","aiTitle":"Fix ' .. key .. ' tab","sessionId":"' .. key .. '"}\n')
+  -- 2026-09-14 requirement change: only a tab opened for the job closes after its merge, so these
+  -- sessions are New worktree tabs -- their first prompt is Shepherd's "Start unit …" prompt.
+  write(T .. "/" .. key .. ".jsonl", '{"type":"user","message":{"role":"user","content":"Start unit ' .. branch
+    .. ' in its own worktree: call EnterWorktree with name \\"' .. key .. '\\", then rename its branch."}}\n'
+    .. '{"type":"ai-title","aiTitle":"Fix ' .. key .. ' tab","sessionId":"' .. key .. '"}\n')
   write(MD .. "/" .. key .. ".json", json.encode({ v = 1, key = key, session_id = key, pid = tostring(900 + i),
     nonce = "n-" .. key, worktree = wt, branch = branch, base = "main", commonDir = repo .. "/.git",
     summary = "Unit " .. key .. " <b>bold</b>", tests = "make test: green", ahead = 1, at = now, phase = "requested" }))
@@ -228,6 +232,25 @@ I = items()
 check("a merge Shepherd can't verify never closes the tab", #inbox(703) == 0)
 check("...and the card says to close it by hand, and why  (" .. tostring(I.b1 and I.b1.merge and I.b1.merge.line) .. ")",
       I.b1 and I.b1.merge and I.b1.merge.line:find("still there", 1, true) ~= nil)
+
+-- 2026-09-14 live: Adam's main Chargeback Sentinel chat did a unit itself in a worktree, merged, and
+-- Shepherd closed its tab -- the very chat he was working in. Only a tab opened for the job closes.
+write(T .. "/m1.jsonl", '{"type":"user","message":{"role":"user","content":"review the following and work on a plan to have this be the way by which we operate writes"}}\n'
+  .. '{"type":"ai-title","aiTitle":"Flexible Chargeback Payloads migration plan","sessionId":"m1"}\n')
+write(T .. "/status/m1.json", string.format(
+  '{"status":"done","session_id":"m1","name":"ChargebackSentinel","cwd":"/r/M","since":%d,"updated":%d,"editor":"vscode","host_window":"790","session_pid":"990","transcript_path":"%s"}',
+  now - 60, now - 60, T .. "/m1.jsonl"))
+registry(790, { "Flexible Chargeback Payl…" })
+write(MD .. "/m1.json", json.encode({ v = 1, key = "m1", session_id = "m1", pid = "990", nonce = "n-m1",
+  worktree = "/r/M/.claude/worktrees/reconcile", branch = "fix/reconcile-upload-atomic", base = "master", commonDir = "/r/M/.git",
+  summary = "atomic upload", tests = "deno task test: green", ahead = 1, at = now, phase = "merged", sha = "abc1234def" }))
+alerts = {}
+tick(); tick()
+check("a main chat that did the unit itself is never closed after its merge", #inbox(790) == 0)
+check("...its finished request is cleared, so no red card is left with nothing to press", read(MD .. "/m1.json") == nil)
+check("...and a toast says its chat stays open  (" .. table.concat(alerts, " | ") .. ")",
+      table.concat(alerts, " "):find("stays open", 1, true) ~= nil)
+check("...and its card stays", read(T .. "/status/m1.json") ~= nil)
 
 -- Not yet, with a note
 quiet(function() fx.mergeHold("c1", "rename the helper first") end)

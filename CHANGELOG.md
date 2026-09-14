@@ -4,6 +4,20 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-14 — A merge never closes your main chat
+
+### Fixed — Shepherd closed the chat Adam was working in after its merge
+
+The main Chargeback Sentinel chat did a unit itself in a worktree, asked to merge, merged and pushed —
+and Shepherd then closed its tab, as it does for every session whose merge it has verified, taking
+the conversation Adam was working in with it (it could be resumed, but the tab was gone). After a
+merge Shepherd now closes only a tab it opened for that one job: a batch unit's tab (known by its
+tag), or one opened with its own prompt — **New worktree tab** or a resumed worktree
+(`core.isUnitTabPrompt`). Any other chat stays open; its finished request is cleared and a toast says
+"✓ Merged … — its chat stays open". `cc-merge.sh done` and the global CLAUDE.md say so too.
+Fixtures: `core.mergeClosesTab` (tests/core.test.lua) and the live case in
+tests/merge-request.test.lua (a main chat's merge sends no close).
+
 ## 2026-09-14 — Leftover processes end themselves
 
 ### Fixed — a leftover claude process kept a real tab "sharing its window" for days
