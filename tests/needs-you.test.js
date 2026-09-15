@@ -28,6 +28,7 @@ function slice(startNeedle, endNeedle) {
 const parts = {
   labels: slice("    var LABELS = {", "};\n"),
   bg: slice("    function bgRunning(it){", "}\n"),
+  driving: slice("    function isDriving(it){", "}\n"),
   needs: slice("    function needsYouNow(it){", "}\n"),
   eff: slice("    function effStatus(it){", "}\n"),
   words: slice("    function statusWords(it){", "\n    }\n"),
@@ -56,6 +57,17 @@ eq("a plain finished session still reads Ready for you", api.statusWords(plain),
 check("...and doesn't need Adam", !api.needsYouNow(plain));
 const merging = { key: "m", status: "working", merge: { phase: "merging", needsYou: false } };
 eq("a merge already running doesn't need Adam", api.effStatus(merging), "working");
+
+// 2026-09-15 live: the Chargeback Sentinel driver handed its 2 units their tasks and ended its turn;
+// its card read a green "Ready for you" while both units worked.
+const driving = { key: "drv", status: "done", fleet: { phase: "approved", needsYou: false, units: [{}, {}] } };
+eq("a driver whose batch is running is working, not ready", api.effStatus(driving), "working");
+eq("...and says it's driving its units", api.statusWords(driving), "Driving 2 units");
+eq("...one unit, singular", api.statusWords({ key: "d1", status: "idle", fleet: { phase: "approved", units: [{}] } }), "Driving 1 unit");
+eq("a driver whose batch ended reads Ready for you again",
+   api.statusWords({ key: "d2", status: "done", fleet: { phase: "stopped", units: [{}, {}] } }), "Ready for you");
+eq("a driving session that asks Adam something still reads Needs you",
+   api.statusWords({ key: "d3", status: "approval", askHeld: true, fleet: { phase: "approved", units: [{}] } }), "Needs you");
 
 const tile = slice("    function tileHtml(it){", "\n    }\n") || "";
 check("the tile pulses whenever it needs Adam (class needs)", tile.indexOf('(needsYouNow(it) ? " needs" : "")') >= 0);

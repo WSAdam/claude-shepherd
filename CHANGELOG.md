@@ -4,6 +4,18 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-15 — A driving session says it's driving
+
+### Fixed — a batch's driver read "Ready for you" while its units worked
+
+The Chargeback Sentinel driver handed its two units their tasks and ended its turn, as drivers do;
+its card then read a green **Ready for you** while both units were working, and flipped to a unit
+only after Adam had looked at it. While its batch runs, a driver now reads **Driving 2 units** in
+the working colour and keeps its card ahead of the working units (`core.isDriving`, rank 4.5) — so
+nothing flips once seen. A unit that needs Adam, or finished and hasn't been looked at, still comes
+first; once the batch ends, the driver is an ordinary session again. Fixtures: tests/core.test.lua
+(rank and card order) and tests/needs-you.test.js (colour and words).
+
 ## 2026-09-14 — A merge never closes your main chat
 
 ### Fixed — Shepherd closed the chat Adam was working in after its merge

@@ -1243,6 +1243,13 @@ end
 
 -- How badly an instance wants you: 1 approval (incl. a question / gate) · 2 error ·
 -- 3 hung · 4 finished and not jumped-to since it finished · 5 anything else.
+-- A session driving a batch that's running (2026-09-15). The driver ends its turn once its units have
+-- their tasks, but it isn't done: its units are working. (A proposal awaiting Adam isn't "driving".)
+function M.isDriving(it)
+  return type(it) == "table" and type(it.fleet) == "table" and it.fleet.phase == "approved"
+    and (it.status == "done" or it.status == "idle") or false
+end
+
 function M.instanceTier(it, seenAt)
   local st = it and it.status
   -- 2026-09-11: a question held for Adam (FX.annotateAsks) outranks everything: its answer is
@@ -1255,6 +1262,9 @@ function M.instanceTier(it, seenAt)
   if st == "approval" then return 1 end
   if st == "error" then return 2 end
   if it and it.hung then return 3 end
+  -- 2026-09-15: the driver of a running batch is at work through its units -- never "ready for you",
+  -- and it keeps its card ahead of the working units (4.5), so the card doesn't flip once seen.
+  if M.isDriving(it) then return 4.5 end
   if st == "done" and not it.bg_active then
     local seen = type(seenAt) == "table" and tonumber(seenAt[it.key]) or nil
     if not seen or seen < (tonumber(it.since) or 0) then return 4 end
@@ -1311,7 +1321,7 @@ local STACK_BUCKETS = { "approval", "error", "hung", "ready", "working", "done",
 local function stackBucket(it, seenAt)
   local tier = M.instanceTier(it, seenAt)
   return (tier <= 1 and "approval") or (tier == 2 and "error") or (tier == 3 and "hung")
-      or (tier == 4 and "ready") or tostring(it.status or "idle")
+      or (tier == 4 and "ready") or (tier == 4.5 and "working") or tostring(it.status or "idle")
 end
 function M.stackInstances(shown, seenAt, prevLeads, hidden)
   prevLeads = type(prevLeads) == "table" and prevLeads or {}

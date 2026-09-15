@@ -10213,9 +10213,13 @@ local HTML = [[
     // click, a held question. The card must say so as loudly as an approval does -- a finished
     // driver used to read a green "Ready for you" while its batch waited for him.
     function needsYouNow(it){ return !!(it && (it.askHeld || (it.merge && it.merge.needsYou) || (it.fleet && it.fleet.needsYou))); }
-    function effStatus(it){ return needsYouNow(it) ? "approval" : (bgRunning(it) ? "working" : ((it && it.status) || "idle")); }
+    // A driver whose batch is running (2026-09-15): it ended its turn once its units had their tasks,
+    // but its units are working -- the card says so instead of a green "Ready for you" (core.isDriving).
+    function isDriving(it){ return !!(it && it.fleet && it.fleet.phase === "approved" && (it.status === "done" || it.status === "idle")); }
+    function effStatus(it){ return needsYouNow(it) ? "approval" : ((bgRunning(it) || isDriving(it)) ? "working" : ((it && it.status) || "idle")); }
     function statusWords(it){
       if(needsYouNow(it)) return LABELS.approval;
+      if(isDriving(it)){ var nu = (it.fleet.units || []).length; return "Driving " + nu + " unit" + (nu === 1 ? "" : "s"); }
       if(bgRunning(it)){ var n = (it && it.bg_count) || 0; return "Running " + n + " agent" + (n === 1 ? "" : "s"); }
       var st = (it && it.status) || "idle"; return LABELS[st] || st;
     }

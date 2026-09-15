@@ -9345,5 +9345,26 @@ do
   check("closes after merge: never a main chat that did a unit itself", core.mergeClosesTab(false, "review the following") == false)
 end
 
+-- ---- A driver of a running batch keeps its card as working (2026-09-15) --------------------
+-- 2026-09-15 live: the Chargeback Sentinel driver handed out 2 units and ended its turn; its card read
+-- a green "Ready for you" (a finished turn not yet looked at) while both units worked, then flipped to
+-- a unit once Adam had looked at it.
+do
+  local drv = { key = "drv", status = "done", since = 100, updated = 100, fleet = { phase = "approved", needsYou = false } }
+  local u1 = { key = "u1", status = "working", since = 150, updated = 190 }
+  local u2 = { key = "u2", status = "working", since = 150, updated = 195 }
+  eq("a driver whose batch is running ranks as driving, not ready for you", core.instanceTier(drv, {}), 4.5)
+  check("driving: its card leads with the driver while the units work", core.rankInstances({ u1, u2, drv }, {})[1].key == "drv")
+  check("driving: ...even once Adam has looked at it (no flip)", core.rankInstances({ u1, u2, drv }, { drv = 200 })[1].key == "drv")
+  local ready = { key = "u3", status = "done", since = 180, updated = 180 }
+  check("driving: a unit that finished and hasn't been looked at still comes first", core.rankInstances({ drv, ready }, {})[1].key == "u3")
+  eq("a driver whose batch ended is an ordinary finished session again",
+     core.instanceTier({ key = "drv", status = "done", since = 100, fleet = { phase = "stopped" } }, {}), 4)
+  check("isDriving: a running batch's driver that ended its turn", core.isDriving(drv) == true)
+  check("isDriving: not while the driver itself is working", core.isDriving({ status = "working", fleet = { phase = "approved" } }) == false)
+  check("isDriving: not a proposal still waiting for Adam",
+        core.isDriving({ status = "done", fleet = { phase = "proposed", needsYou = true } }) == false)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)
