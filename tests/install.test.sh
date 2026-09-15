@@ -336,8 +336,12 @@ CC_INSTALL_SKIP_TESTS= CC_INSTALL_CLAUDE_DIR="$GCDIR" CC_INSTALL_HS_DIR="$GHDIR"
   PATH="$MAKEDIR:/usr/bin:/bin" bash "$ROOT/install.sh" >"$TMP/gate-fail.out" 2>&1
 assert_eq "gate: a red suite exits nonzero" "1" "$?"
 assert_eq "gate: prints the abort message" "1" "$(grep -Fc 'pre-flight tests failed' "$TMP/gate-fail.out")"
-assert_eq "gate: step-1 copy DID happen (copy-then-abort, not a partial mess)" "1" \
+# 2026-09-15 requirement change: the copy ran BEFORE the gate, so a red suite still put the
+# untested hook scripts where the already-wired hooks run them. A red suite now copies nothing.
+assert_eq "gate: a red suite copies no hook scripts into the claude dir" "0" \
   "$([ -e "$GCDIR/cc-lib.sh" ] && echo 1 || echo 0)"
+assert_eq "gate: a red suite copies no dashboard into the hammerspoon dir" "0" \
+  "$([ -e "$GHDIR/claude-dashboard.lua" ] && echo 1 || echo 0)"
 assert_eq "gate: settings.json NOT written" "0" "$([ -e "$GCDIR/settings.json" ] && echo 1 || echo 0)"
 assert_eq "gate: init.lua dofile NOT added" "0" "$([ -e "$GHDIR/init.lua" ] && echo 1 || echo 0)"
 
@@ -431,5 +435,106 @@ printf '#!/bin/sh\nexit 1\n' > "$FAKEBIN/hs"
 out="$(PATH="$FAKEBIN:$PATH" make -C "$ROOT" --no-print-directory reload 2>&1)"
 case "$out" in *"not available"*) got=warns ;; *) got="$out" ;; esac
 assert_eq "make reload: a failing hs CLI still warns" "warns" "$got"
+
+# ---- installer bugs from the 2026-09-15 review ----
+F="$TMP/fx"; mkdir -p "$F"
+
+# 2026-09-15: run.sh calls `node` for ~10 suites, but neither the tooling check nor the gate named
+# it, so a machine without node got "pre-flight tests failed" and a wall of "command not found".
+# (Once the gate checks node, the gate tests above need node in their PATH double too.)
+NONODE="$F/nojs-bin"; mkdir -p "$NONODE"
+for b in lua jq; do src="$(command -v "$b" 2>/dev/null)"; [ -n "$src" ] && ln -sf "$src" "$NONODE/$b"; done
+PATH="$NONODE:/usr/bin:/bin" bash "$ROOT/install.sh" --tools-only </dev/null >"$F/nojs-tools.out" 2>&1
+assert_eq "tooling check names node when it's missing (the test gate needs it)" "named" \
+  "$(grep -q 'node' "$F/nojs-tools.out" && echo named || echo silent)"
+printf '#!/usr/bin/env bash\ntouch "%s"\nexit 0\n' "$F/nojs-make-ran" > "$NONODE/make"; chmod +x "$NONODE/make"
+CC_INSTALL_SKIP_TESTS= CC_INSTALL_CLAUDE_DIR="$F/nojs-claude" CC_INSTALL_HS_DIR="$F/nojs-hs" CC_INSTALL_NO_APP=1 \
+  PATH="$NONODE:/usr/bin:/bin" bash "$ROOT/install.sh" </dev/null >"$F/nojs-gate.out" 2>&1
+rc=$?
+assert_eq "gate: a missing node stops the install and says so, before the suite runs" "stopped" \
+  "$([ "$rc" -ne 0 ] && grep -q 'node' "$F/nojs-gate.out" && [ ! -e "$F/nojs-make-ran" ] && echo stopped || echo ran)"
+
+# 2026-09-15: the merge wrote a temp file and renamed it over settings.json, so a symlinked
+# (dotfiles-managed) settings.json became a plain file and the dotfiles copy never got the hooks.
+LC="$F/link-claude"; mkdir -p "$LC" "$F/dotfiles"
+echo '{"model":"opus"}' > "$F/dotfiles/settings.json"
+ln -s "$F/dotfiles/settings.json" "$LC/settings.json"
+CC_INSTALL_CLAUDE_DIR="$LC" CC_INSTALL_HS_DIR="$F/link-hs" CC_INSTALL_NO_APP=1 \
+  bash "$ROOT/install.sh" >/dev/null 2>&1
+assert_eq "a symlinked settings.json stays a symlink after the hook merge" "link" \
+  "$([ -L "$LC/settings.json" ] && echo link || echo file)"
+assert_json "...and the file it points to gains the hooks" "$F/dotfiles/settings.json" \
+  '[.hooks.Stop[]?.hooks[]?.command] | any(contains("cc-status.sh"))' "true"
+
+# 2026-09-15: install_file's cp failure was never checked (no set -e), so a checkout missing
+# cc-ask.sh printed "copied" and "install complete", exit 0, with the hook wired to a missing file.
+PR="$F/partial-repo"; mkdir -p "$PR"
+cp "$ROOT"/install.sh "$ROOT"/settings-hooks.json "$ROOT"/cc-*.sh "$ROOT"/cc-core.lua "$ROOT"/claude-dashboard.lua "$PR/"
+rm "$PR/cc-ask.sh"
+CC_INSTALL_CLAUDE_DIR="$F/partial-claude" CC_INSTALL_HS_DIR="$F/partial-hs" CC_INSTALL_NO_APP=1 \
+  bash "$PR/install.sh" </dev/null >"$F/partial.out" 2>&1
+rc=$?
+assert_eq "a checkout missing a hook script fails the install (nonzero exit)" "fail" \
+  "$([ "$rc" -ne 0 ] && echo fail || echo ok)"
+assert_eq "...and never prints install complete" "0" "$(grep -c 'install complete' "$F/partial.out")"
+
+# 2026-09-15: the no-op check compared jq's re-serialisation with the raw file, so a fully wired
+# settings.json in any other layout (4-space indent) was rewritten and backed up on every run.
+IC="$F/indent-claude"; mkdir -p "$IC"
+jq --indent 4 . "$CDIR/settings.json" > "$IC/settings.json"
+before_i="$(cat "$IC/settings.json")"
+CC_INSTALL_CLAUDE_DIR="$IC" CC_INSTALL_HS_DIR="$F/indent-hs" CC_INSTALL_NO_APP=1 \
+  bash "$ROOT/install.sh" >/dev/null 2>&1
+assert_eq "a fully wired settings.json in another layout is left byte-for-byte alone" "$before_i" "$(cat "$IC/settings.json")"
+assert_eq "...and no backup is made" "0" "$(ls "$IC" | grep -c '\.bak\.')"
+
+# 2026-09-15: an object-valued Stop group made jq's `+` fail, and the installer reported the
+# valid JSON as "couldn't parse", pointing the user at the wrong problem.
+OC="$F/obj-claude"; mkdir -p "$OC"
+echo '{"hooks":{"Stop":{"hooks":[{"type":"command","command":"echo mine"}]}}}' > "$OC/settings.json"
+CC_INSTALL_CLAUDE_DIR="$OC" CC_INSTALL_HS_DIR="$F/obj-hs" CC_INSTALL_NO_APP=1 \
+  bash "$ROOT/install.sh" >"$F/obj.out" 2>&1
+assert_eq "valid JSON with an object-valued Stop group is never reported as unparseable" "0" \
+  "$(grep -c "couldn't parse" "$F/obj.out")"
+assert_json "...and the user's object-valued Stop group is left intact" "$OC/settings.json" \
+  '.hooks.Stop.hooks[0].command' "echo mine"
+
+# 2026-09-15: patch_approve only added a timeout when none was set, so an existing cc-approve.sh
+# entry at 60s kept it, and Claude Code killed the 120s approval wait halfway.
+TC="$F/t60-claude"; mkdir -p "$TC"
+cat > "$TC/settings.json" <<'JSON'
+{ "hooks": { "PreToolUse": [ { "matcher": "", "hooks": [
+  { "type": "command", "command": "bash \"$HOME/.claude/cc-status.sh\" pretooluse" },
+  { "type": "command", "command": "bash \"$HOME/.claude/cc-approve.sh\"", "timeout": 60 } ] } ] } }
+JSON
+CC_INSTALL_CLAUDE_DIR="$TC" CC_INSTALL_HS_DIR="$F/t60-hs" CC_INSTALL_NO_APP=1 \
+  bash "$ROOT/install.sh" >/dev/null 2>&1
+assert_json "an existing cc-approve.sh timeout under 130s is raised to 130" "$TC/settings.json" \
+  '.hooks.PreToolUse[0].hooks[1].timeout' "130"
+
+# 2026-09-15: the dofile check was a bare grep for "claude-dashboard.lua", so a commented-out
+# line counted as installed and a re-install never re-added the dashboard.
+CH="$F/comment-hs"; mkdir -p "$CH"
+printf -- '-- dofile(os.getenv("HOME") .. "/.hammerspoon/claude-dashboard.lua")\n' > "$CH/init.lua"
+CC_INSTALL_CLAUDE_DIR="$F/comment-claude" CC_INSTALL_HS_DIR="$CH" CC_INSTALL_NO_APP=1 \
+  bash "$ROOT/install.sh" >/dev/null 2>&1
+assert_eq "a commented-out dashboard line doesn't count: install adds a live dofile" "1" \
+  "$(grep -Fxc 'dofile(os.getenv("HOME") .. "/.hammerspoon/claude-dashboard.lua")' "$CH/init.lua")"
+
+# 2026-09-15: add-to-dock.sh built the tile's file:// URL from the raw path, so an app under a
+# path with a space (a HOME like "/Users/Jane Doe") got an unencoded URL the Dock can't resolve.
+# defaults/killall/xattr are doubles: the real Dock is never touched.
+DB="$F/dock-bin"; mkdir -p "$DB"
+cat > "$DB/defaults" <<EOF
+#!/bin/sh
+[ "\$1" = write ] && echo "\$*" >> "$F/defaults.calls"
+exit 0
+EOF
+printf '#!/bin/sh\nexit 0\n' > "$DB/killall"; printf '#!/bin/sh\nexit 0\n' > "$DB/xattr"
+chmod +x "$DB/defaults" "$DB/killall" "$DB/xattr"
+SPACED="$F/Jane Doe/Applications/Shepherd.app"; mkdir -p "$SPACED"
+PATH="$DB:/usr/bin:/bin" bash "$ROOT/app/add-to-dock.sh" "$SPACED" >/dev/null 2>&1
+assert_eq "add-to-dock: a path with a space is percent-encoded in the Dock tile's URL" "encoded" \
+  "$(grep -q 'Jane%20Doe' "$F/defaults.calls" 2>/dev/null && echo encoded || echo raw)"
 
 finish
