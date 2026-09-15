@@ -244,7 +244,8 @@ Ask a Claude session to run several units in parallel and it can drive the whole
    empty Claude tab in the repo's window, works out which new session is that tab (one tab opening
    per repo at a time), and hands back its name and the unit's message. The driver sends it with
    **SendMessage** — the tab starts working with no Enter pressed, under its own permissions — and
-   gets notified when the unit goes idle.
+   gets notified when the unit goes idle. While the batch runs, the driver's card reads **Driving N
+   units** in the working colour and stays ahead of its units (anything that needs you still leads).
 4. Each unit finishes with the ready-to-merge flow above. With merge permission, Shepherd approves
    a unit's merge on the batch's grant **only** for that unit's own session on its own branch, once
    its own git check passes — one merge per repo at a time; without it, units wait for your Merge.

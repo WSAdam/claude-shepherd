@@ -183,6 +183,18 @@ the CLI and a VS Code tab. A release, a timeout (`ask.waitSeconds`, ≤ 3600) or
 nothing, and the tab's own picker is the fallback. Approve/Deny never act on a held question.
 **[DECISION D-19]**
 
+After a verified merge Shepherd closes **only a tab it opened for that one job** — a batch unit's
+(known by its tag) or one started with its own prompt (New worktree tab, a resumed worktree). A main
+chat that did a unit itself in a worktree stays open; its finished request is cleared with a toast.
+(2026-09-14: closing every merged session's tab took Adam's working conversation with it.)
+**[DECISION D-20]**
+
+Shepherd never types a slash command into a VS Code/Cursor tab that the extension lacks: the chat
+input's slash menu fuzzy-matches and the autocomplete Return runs its guess. The Remote Control
+startup sweep therefore types `/rc` into **terminal** sessions only; extension tabs get Remote
+Control from their launch flags. (2026-09-15: `/rc` ran `/deep-research` in VS Code tabs on every
+Shepherd reload, 11 times in a week.) **[DECISION D-21]**
+
 ## 6. Observability (local, derived, zero extra hooks)
 
 All from the transcript Shepherd already tails — **no extra hooks, no model tokens**:

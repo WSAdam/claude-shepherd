@@ -91,6 +91,16 @@ and the README's "Testing & development" section.
 - Messages go through `FX.alert` (a toast in the panel); never call `hs.alert.show` directly —
   Adam found its centre-screen overlay covering every window (`tests/ui.test.lua` pins one caller).
   Stubbed-panel tests read messages from `ccToast(...)` calls or by wrapping `fx.alert`.
+- After a merge Shepherd closes ONLY a tab it opened for that job (`core.mergeClosesTab`: a batch
+  unit's tag, or a first prompt that is Shepherd's own "Start unit …" / "Resume work in the
+  worktree at …"). Never widen it: it once closed Adam's main chat, which had done a unit itself.
+- Never type a slash command into a VS Code/Cursor tab that the extension doesn't have: the paste
+  path's autocomplete Return runs whatever the slash menu fuzzy-matches (`/rc` ran `/deep-research`
+  on every reload). The Remote Control sweep is terminal-only (`core.RC_SWEEP_EDITORS`). When a
+  session "does something on its own", check the ledger's prompt events against the console first.
+- A tab-less leftover is ended by Shepherd after `tabless.autoEndMinutes` (`core.tablessAutoEndDue`,
+  through `FX.endSession`'s ps check); a running batch's driver ranks 4.5 (`core.isDriving`) so its
+  card reads Driving and never flips.
 - Scripts reach `~/.claude` by RENAME (`make install`, `install.sh`): bash reads a running
   script lazily, so rewriting one in place garbles a hook that's mid-run.
 - `vscode://anthropic.claude-code/open?prompt=` opens a new Claude tab in the ACTIVE editor
