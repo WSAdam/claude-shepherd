@@ -1651,9 +1651,16 @@ do
   check("rcspec(kitty): no flag when off", table.concat(rkOff.argv, " "):find("--remote-control", 1, true) == nil)
 
   -- remoteControlSweepTargets: only real, local, non-stale, quiescent (idle/done) sessions
+  -- 2026-09-15 requirement change: only TERMINAL sessions (kitty / terminal), where /rc is a real
+  -- command. Live since 2026-09-08: every Shepherd reload typed /rc into idle VS Code tabs; the
+  -- extension has no /rc, its slash menu fuzzy-matched "rc" to /deep-research, and the
+  -- autocomplete Return ran it (11 times across five sessions, "/rc/rc" twice).
   local list = {
-    { key = "a", status = "idle",     session_id = "s1" },                 -- target
-    { key = "b", status = "done",     session_id = "s2" },                 -- target
+    { key = "a", status = "idle",     session_id = "s1", editor = "kitty" },     -- target
+    { key = "b", status = "done",     session_id = "s2", editor = "terminal" },  -- target
+    { key = "j", status = "idle",     session_id = "s10", editor = "vscode" },   -- VS Code tab: no /rc there: skip
+    { key = "k", status = "done",     session_id = "s11", editor = "cursor" },   -- Cursor tab: same: skip
+    { key = "l", status = "idle",     session_id = "s12" },                      -- unknown editor: skip
     { key = "c", status = "working",  session_id = "s3" },                 -- mid-turn: skip
     { key = "d", status = "approval", session_id = "s4" },                 -- mid-prompt: skip
     { key = "e", status = "error",    session_id = "s5" },                 -- errored: skip
@@ -8599,10 +8606,11 @@ do
 
   check("guard: the router never picks a shared-window session", not core.sessionFree(vs("s", "100", { sharedWindow = 2 })))
   check("guard: ...a lone finished session is still free", core.sessionFree(vs("c", "200")))
+  -- 2026-09-15 requirement change: the /rc sweep types into terminal sessions only, so no VS Code
+  -- session -- shared or lone -- is ever a target (the extension has no /rc; see rcsweep above).
   local sweep = core.remoteControlSweepTargets({ vs("s", "100", { sharedWindow = 2, session_id = "s" }),
                                                  vs("c", "200", { session_id = "c" }) })
-  eq("guard: the /rc startup sweep skips shared-window sessions", #sweep, 1)
-  eq("guard: ...and still reaches the lone one", sweep[1] and sweep[1].key, "c")
+  eq("guard: the /rc startup sweep never types into a VS Code session, shared or lone", #sweep, 0)
 end
 
 -- ---- Companion extension: close an exact Claude tab (2026-09-11) ------------------

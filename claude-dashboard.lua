@@ -9633,7 +9633,7 @@ local HTML = [[
 
       <div class="s-sec">Claude Code Remote Control (drive sessions from claude.ai / mobile)</div>
       <label class="s-row"><input type="checkbox" id="s-rc-spawn"> Launch new sessions with <code>--remote-control</code> (auto-register RC)</label>
-      <label class="s-row"><input type="checkbox" id="s-rc-sweep"> On startup, type <code>/rc</code> into already-running sessions</label>
+      <label class="s-row"><input type="checkbox" id="s-rc-sweep"> On startup, type <code>/rc</code> into already-running terminal sessions (never a VS Code/Cursor tab — the extension has no <code>/rc</code>)</label>
       <div class="s-help">Distinct from Kitty remote control above (that lets Shepherd drive the window). This is Claude Code's own Remote Control — continue a local session from claude.ai or the Claude app. New Shepherd spawns get the <code>--remote-control</code> flag (native-Anthropic, local sessions only — RC rejects gateway/ssh providers); the startup sweep covers sessions started outside Shepherd. To auto-enable RC for sessions you start in a terminal yourself, run <code>/config</code> in Claude Code and set <b>Enable Remote Control for all sessions</b> (no settings.json key is documented for it).<br><b>⚠ On by default:</b> a session with Remote Control can be driven from your claude.ai account, so anyone with access to that account (or the Claude app) can type into a <i>local</i> shell session — this widens the trust boundary from "whoever is at this machine" to "whoever can reach my claude.ai". Turn it off if that's broader than you want.</div>
 
       <div class="s-sec">SSH status bridge (remote sessions as tiles)</div>

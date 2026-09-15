@@ -5580,10 +5580,16 @@ end
 -- runs cleanly; working/approval/error tiles are skipped so we never inject mid-turn or over a
 -- pending permission prompt. Pure filter; the dashboard fires the keystrokes through the
 -- serialized chokepoint. (/rc is idempotent -- a second run just opens the status panel.)
+-- 2026-09-15: TERMINAL sessions only (kitty / terminal), where /rc is a real command. The VS Code /
+-- Cursor extension has no /rc: its slash menu fuzzy-matched "rc" to /deep-research and the paste
+-- path's autocomplete Return ran it -- on every Shepherd reload, into every idle VS Code tab
+-- (11 times since 2026-09-08). Extension tabs get Remote Control from their launch flags instead.
+M.RC_SWEEP_EDITORS = { kitty = true, terminal = true }
 function M.remoteControlSweepTargets(list)
   local out = {}
   for _, it in ipairs(list or {}) do
     if it and not it.remote and not it.stale
+       and M.RC_SWEEP_EDITORS[it.editor]
        and (it.status == "idle" or it.status == "done")
        and it.session_id ~= nil and tostring(it.session_id) ~= ""
        and not M.keystrokeBlocked(it)   -- /rc is typed: never into a shared window

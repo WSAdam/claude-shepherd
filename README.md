@@ -645,9 +645,10 @@ window):
   applies only to **local, native-Anthropic** sessions: Remote Control needs a claude.ai login
   and rejects gateway/SSH providers, so the flag is skipped for those.
 - **On startup** (`remoteControl.sweepOnStartup`) — when Shepherd starts, it types `/rc` into
-  already-running idle/finished local sessions, so after a computer restart Remote Control is
-  re-armed across the fleet (it skips sessions mid-turn or waiting on a prompt; `/rc` is harmless
-  to repeat).
+  already-running idle/finished local **terminal** sessions (kitty / terminal), so after a computer
+  restart Remote Control is re-armed across them (it skips sessions mid-turn or waiting on a prompt;
+  `/rc` is harmless to repeat). It never types into a VS Code/Cursor tab: the extension has no
+  `/rc`, and its slash menu used to turn it into `/deep-research`.
 - **Sessions you start yourself in a terminal** aren't Shepherd-spawned, so to auto-register them
   run `/config` inside Claude Code once and set **Enable Remote Control for all sessions** — there
   is no settings.json key documented for that toggle, so Shepherd can't set it for you.

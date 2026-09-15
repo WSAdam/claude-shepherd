@@ -4,6 +4,19 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-15 — No more surprise /deep-research
+
+### Fixed — Shepherd's Remote Control sweep ran /deep-research in VS Code tabs
+
+Every time Hammerspoon reloaded (each `make deploy`, every restart), the Remote Control startup sweep
+typed `/rc` + Return into idle chats. The VS Code / Cursor extension has no `/rc`: its slash menu
+fuzzy-matched "rc" to **/deep-r**esear**c**h, and the paste path's autocomplete Return ran it — 11
+times across five sessions since 2026-09-08 (and twice it appended to itself as `/rc/rc`). The sweep
+now types `/rc` only into **terminal** sessions (kitty / terminal), where it's a real command;
+extension tabs get Remote Control from their launch flags. Found by matching the audit ledger's
+`/deep-research` prompts to Shepherd's `[cc-rc] startup sweep` log lines, two seconds apart.
+Fixture: `rcsweep` in tests/core.test.lua (VS Code, Cursor and unknown-editor sessions are skipped).
+
 ## 2026-09-15 — A driving session says it's driving
 
 ### Fixed — a batch's driver read "Ready for you" while its units worked
