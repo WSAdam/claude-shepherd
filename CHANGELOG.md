@@ -4,6 +4,19 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-15 — A leftover tab after a merge is housekeeping
+
+### Fixed — a merged unit's unclosable tab made its card red "Needs you"
+
+A batch unit in Chargeback Sentinel merged `feat/api-call-meter`, but that window still runs the old
+tab bridge (0.1.0, no unit tags) and the unit's tab had no name, so Shepherd couldn't close it. The
+card turned red **Needs you** and outranked the working driver and units, though nothing waited on
+Adam. Only a merge waiting for his click, or a unit that came back blocked, now reads Needs you; a
+merged unit whose tab is still open (or a merge with leftovers) is a quiet line on the card, with
+**Close tab** and **Dismiss** still in its review. Fixtures: `core.mergeNeedsYou` and `mergeView` in
+tests/core.test.lua, the unclosable-tab case in tests/merge-request.test.lua, the review's buttons in
+tests/needs-you.test.js.
+
 ## 2026-09-15 — No more surprise /deep-research
 
 ### Fixed — Shepherd's Remote Control sweep ran /deep-research in VS Code tabs

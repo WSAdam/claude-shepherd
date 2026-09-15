@@ -1755,13 +1755,14 @@ function M.mergeQueue(reqs, approved, sent, now)
   return out
 end
 
--- Does this merge state want Adam? A request he hasn't answered, one that came back blocked
--- or merged with leftovers, or a merged unit whose tab he has to close himself.
+-- Does this merge state want Adam? Only a request he hasn't answered, or a unit that came back
+-- blocked. 2026-09-15: a merged unit whose tab Shepherd couldn't close, or a merge with leftovers,
+-- is housekeeping -- its card says so quietly (Close tab / Dismiss in the review) instead of a red
+-- "Needs you" that outranked the working driver and units while nothing waited on him.
 function M.mergeNeedsYou(v)
   if type(v) ~= "table" then return false end
   if v.phase == "requested" then return not v.queued and not v.sent end
-  if v.phase == "merged" then return v.closeNote ~= nil end
-  return v.phase == "blocked" or v.phase == "merged-dirty"
+  return v.phase == "blocked"
 end
 
 -- After `done --result merged`: Shepherd re-checks with its own git before closing the tab --

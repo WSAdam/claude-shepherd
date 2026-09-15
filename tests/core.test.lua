@@ -9374,5 +9374,23 @@ do
         core.isDriving({ status = "done", fleet = { phase = "proposed", needsYou = true } }) == false)
 end
 
+-- ---- A merged unit's leftover tab is housekeeping, not Needs you (2026-09-15) --------------
+-- 2026-09-15 live: a batch unit merged feat/api-call-meter, but its window's old tab bridge (0.1.0)
+-- couldn't tag the unit's tab and the tab had no name, so Shepherd couldn't close it; the card
+-- turned red "Needs you" and outranked the working driver and units, though nothing waited on Adam.
+do
+  check("merge needs Adam: a request waiting for his click", core.mergeNeedsYou({ phase = "requested" }) == true)
+  check("merge needs Adam: ...not once it's queued behind another", core.mergeNeedsYou({ phase = "requested", queued = 1 }) == false)
+  check("merge needs Adam: a unit that came back blocked", core.mergeNeedsYou({ phase = "blocked" }) == true)
+  check("merge needs Adam: NOT a merged unit whose tab couldn't be closed (housekeeping)",
+        core.mergeNeedsYou({ phase = "merged", closeNote = "close its tab yourself: no tab is tagged" }) == false)
+  check("merge needs Adam: NOT a merge with leftovers (worktree/branch still there)",
+        core.mergeNeedsYou({ phase = "merged-dirty", note = "the worktree wasn't removed" }) == false)
+  local mv = core.mergeView({ phase = "merged", branch = "feat/api-call-meter", base = "master", key = "u", nonce = "n",
+                              worktree = "/r/CS/.claude/worktrees/api-call-meter", commonDir = "/r/CS/.git" }, nil, nil,
+                            { closeNote = "close its tab yourself: its tab has no name yet" })
+  check("the merged card still says to close its tab, quietly", mv.needsYou == false and tostring(mv.line):find("close its tab yourself", 1, true) ~= nil)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

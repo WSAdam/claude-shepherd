@@ -232,6 +232,9 @@ I = items()
 check("a merge Shepherd can't verify never closes the tab", #inbox(703) == 0)
 check("...and the card says to close it by hand, and why  (" .. tostring(I.b1 and I.b1.merge and I.b1.merge.line) .. ")",
       I.b1 and I.b1.merge and I.b1.merge.line:find("still there", 1, true) ~= nil)
+-- 2026-09-15 live: a merged unit's tab Shepherd couldn't close turned its card red "Needs you",
+-- ahead of the working driver and units -- but a tab left open is housekeeping, not a wait on Adam.
+check("...quietly: a merged unit's leftover tab doesn't make its card Needs you", I.b1 and I.b1.merge and I.b1.merge.needsYou == false)
 
 -- 2026-09-14 live: Adam's main Chargeback Sentinel chat did a unit itself in a worktree, merged, and
 -- Shepherd closed its tab -- the very chat he was working in. Only a tab opened for the job closes.

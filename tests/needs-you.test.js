@@ -76,8 +76,10 @@ check("the pulse is styled", /\.tile\.needs \{ animation:askglow/.test(src));
 // 2026-09-11 live: "merged -- close its tab yourself" made the card red with nothing to press. Every
 // finished merge state that needs Adam gets buttons in the review: Close tab (merged, tab open) and Dismiss.
 const rm = slice("    function renderMerge(it){", "\n    }\n") || "";
-check("the review shows its finished-state buttons when a finished merge needs Adam",
-      rm.indexOf('document.getElementById("dm-done").style.display = (!asking && m.needsYou) ? "flex" : "none";') >= 0);
+// 2026-09-15 requirement change: a merged unit's leftover tab is no longer "needs you" (it's
+// housekeeping), but its review keeps the buttons -- any finished merge with a note gets them.
+check("the review shows its finished-state buttons for any finished merge with a note (needs you or not)",
+      rm.indexOf('document.getElementById("dm-done").style.display = (!asking && (m.needsYou || m.closeNote || m.phase === "merged-dirty")) ? "flex" : "none";') >= 0);
 check("...Close tab only while the merged unit's tab is still open",
       rm.indexOf('document.getElementById("dm-closetab").style.display = (m.phase === "merged" && m.closeNote) ? "" : "none";') >= 0);
 check("the buttons exist and send their actions",

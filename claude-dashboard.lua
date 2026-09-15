@@ -13203,7 +13203,7 @@ local HTML = [[
       mergeFillList(document.getElementById("dm-commits"), asking ? commits : [], function(c){ return (c.h || "") + "  " + (c.s || ""); });
       mergeFillList(document.getElementById("dm-files"), asking ? files : [], function(f){ return (f.st || "") + "  " + (f.path || ""); });
       document.getElementById("dm-acts").style.display = asking ? "flex" : "none";
-      document.getElementById("dm-done").style.display = (!asking && m.needsYou) ? "flex" : "none";
+      document.getElementById("dm-done").style.display = (!asking && (m.needsYou || m.closeNote || m.phase === "merged-dirty")) ? "flex" : "none";
       document.getElementById("dm-closetab").style.display = (m.phase === "merged" && m.closeNote) ? "" : "none";
       var bm = document.getElementById("dm-merge");
       bm.disabled = !(m.ready && !m.queued);
