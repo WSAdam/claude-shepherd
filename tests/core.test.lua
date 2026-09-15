@@ -8354,9 +8354,11 @@ do
     return t
   end
   local order = function(ranked) local o = {} for i, it in ipairs(ranked) do o[i] = it.key end return table.concat(o, ",") end
-  eq("lead: approval beats error beats hung beats ready beats working",
+  -- 2026-09-15 requirement change: a running instance now ranks above a finished one (a project with a
+  -- session still at work reads Working, not Ready for you); blocked ones still come first.
+  eq("lead: approval beats error beats hung beats working beats ready",
      order(core.rankInstances({ m("w", "working", 1), m("r", "done", 5), m("h", "working", 2, 2, { hung = true }),
-                                m("e", "error", 3), m("a", "approval", 4) }, {})), "a,e,h,r,w")
+                                m("e", "error", 3), m("a", "approval", 4) }, {})), "a,e,h,w,r")
   eq("lead: two blocked instances -> the one waiting longest first",
      order(core.rankInstances({ m("new", "approval", 50), m("old", "approval", 10) }, {})), "old,new")
   eq("lead: two finished, unseen -> the newest result first",
@@ -8364,8 +8366,9 @@ do
   eq("lead: a finished instance you've jumped to since it finished stops outranking",
      order(core.rankInstances({ m("seen", "done", 10, 10), m("busy", "working", 5, 40) }, { seen = 20 })), "busy,seen")
   eq("lead: ...until it finishes again", core.instanceTier(m("seen", "done", 30), { seen = 20 }), 4)
+  -- 2026-09-15 requirement change: it still isn't waiting on you, and it now ranks as running.
   eq("lead: a finished one still running background agents isn't waiting on you",
-     core.instanceTier(m("bg", "done", 10, 10, { bg_active = true }), {}), 5)
+     core.instanceTier(m("bg", "done", 10, 10, { bg_active = true }), {}), core.TIER_RUNNING)
   eq("lead: nothing needs you -> the most recently active",
      order(core.rankInstances({ m("idle", "idle", 1, 100), m("work", "working", 1, 200) }, {})), "work,idle")
   eq("lead: two working instances don't swap on every hook event (30s hold)",
@@ -9361,11 +9364,13 @@ do
   local drv = { key = "drv", status = "done", since = 100, updated = 100, fleet = { phase = "approved", needsYou = false } }
   local u1 = { key = "u1", status = "working", since = 150, updated = 190 }
   local u2 = { key = "u2", status = "working", since = 150, updated = 195 }
-  eq("a driver whose batch is running ranks as driving, not ready for you", core.instanceTier(drv, {}), 4.5)
+  eq("a driver whose batch is running ranks as driving, not ready for you", core.instanceTier(drv, {}), core.TIER_DRIVING)
   check("driving: its card leads with the driver while the units work", core.rankInstances({ u1, u2, drv }, {})[1].key == "drv")
   check("driving: ...even once Adam has looked at it (no flip)", core.rankInstances({ u1, u2, drv }, { drv = 200 })[1].key == "drv")
   local ready = { key = "u3", status = "done", since = 180, updated = 180 }
-  check("driving: a unit that finished and hasn't been looked at still comes first", core.rankInstances({ drv, ready }, {})[1].key == "u3")
+  -- 2026-09-15 requirement change: a running batch means the project is still at work, so its driver
+  -- now leads over a unit that finished (which shows in the card's "also:" line instead).
+  check("driving: the driver of a running batch leads over a unit that finished", core.rankInstances({ drv, ready }, {})[1].key == "drv")
   eq("a driver whose batch ended is an ordinary finished session again",
      core.instanceTier({ key = "drv", status = "done", since = 100, fleet = { phase = "stopped" } }, {}), 4)
   check("isDriving: a running batch's driver that ended its turn", core.isDriving(drv) == true)
@@ -9390,6 +9395,28 @@ do
                               worktree = "/r/CS/.claude/worktrees/api-call-meter", commonDir = "/r/CS/.git" }, nil, nil,
                             { closeNote = "close its tab yourself: its tab has no name yet" })
   check("the merged card still says to close its tab, quietly", mv.needsYou == false and tostring(mv.line):find("close its tab yourself", 1, true) ~= nil)
+end
+
+-- ---- A project card reads Working while any of its sessions runs (2026-09-15) ---------------
+-- 2026-09-15 live: Chargeback Sentinel's card read "36s Ready for you" while the driver in that window was
+-- still working ("Concocting..."): two finished, never-looked-at tabs ranked above the running session.
+do
+  local sk = "repo:/Users/adam/Programming/ChargebackSentinel/.git"
+  local a = { key = "2f10d20a", status = "done", since = 1789491210, updated = 1789491210, stackKey = sk }
+  local b = { key = "f905132d", status = "done", since = 1789491824, updated = 1789491824, stackKey = sk }
+  local w = { key = "94076fc5", status = "working", since = 1789491928, updated = 1789491928, stackKey = sk }
+  eq("a project card leads with its running session, not a finished one, while anything runs",
+     core.rankInstances({ a, b, w }, {})[1].key, "94076fc5")
+  core.stackInstances({ a, b, w }, {}, {}, {})
+  check("...so the card's lead is the running one", w.stackLead == true and a.stackLead == false and b.stackLead == false)
+  local also = {} for _, e in ipairs(w.stackAlso or {}) do also[#also + 1] = e.n .. " " .. e.b end
+  eq("...and its 'also' line still says the others finished", table.concat(also, " · "), "2 ready")
+  eq("a finished session still leads once nothing in the project runs",
+     core.rankInstances({ a, b }, {})[1].key, "f905132d")
+  eq("a finished session whose background agents still run counts as running",
+     core.rankInstances({ a, { key = "bg", status = "done", since = 1789491900, updated = 1789491900, bg_active = true } }, {})[1].key, "bg")
+  eq("a blocked session still outranks a running one",
+     core.rankInstances({ w, { key = "ap", status = "approval", since = 1789491950 } }, {})[1].key, "ap")
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))

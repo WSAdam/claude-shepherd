@@ -4,6 +4,18 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-15 — A project at work never reads Ready for you
+
+### Fixed — a card read "Ready for you" while one of its sessions was still working
+
+Chargeback Sentinel's card read **36s Ready for you** while the driver in that window was still
+working: two finished, never-looked-at tabs ranked above the running session, so one of them led the
+card. A running instance (or one whose background agents still run) now ranks above a finished one,
+with a batch's driver ahead of its units; blocked instances still come first. The card, its
+double-click jump and its "also:" line all follow the same order, so the card reads **Working** and the
+finished tabs show as "also: 2 ready". Fixture: the live status snapshot in tests/core.test.lua
+(requirement change to three older lead-order pins).
+
 ## 2026-09-15 — A leftover tab after a merge is housekeeping
 
 ### Fixed — a merged unit's unclosable tab made its card red "Needs you"

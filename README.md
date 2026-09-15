@@ -170,9 +170,11 @@ per project**, not one per session.
   works the same way — a new tab in the repo's window whose prompt re-enters that worktree —
   while a sibling worktree still opens in its own window. VS Code and Cursor only.
 - **What the card shows.** The instance that most needs you — blocked longest first
-  (approval or question, then error, then stalled), then the newest *finished* one you haven't
-  jumped to yet, else the most recently active — with its branch chip and an
-  "also: 1 working · 1 idle" line for the rest. A stationary lead is held for 30s so two busy
+  (approval or question, then error, then stalled), then one that's still **running** (a
+  batch's driver first), then the newest *finished* one you haven't jumped to yet, else the
+  most recently active — with its branch chip and an "also: 2 ready · 1 idle" line for the
+  rest. A project with anything still at work reads **Working**, never *Ready for you*; its
+  finished instances wait in the "also:" line. A stationary lead is held for 30s so two busy
   instances don't swap the card every few seconds. The card is named after the main checkout
   (its relabel, if any); **Relabel** on a card renames the whole repo.
 - **Double-click** a card to jump to that same instance. Once you've jumped to a finished

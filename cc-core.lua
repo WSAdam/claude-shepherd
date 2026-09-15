@@ -1241,8 +1241,12 @@ function M.stackLabelKey(it)
   return it.projectKey or it.cwd
 end
 
--- How badly an instance wants you: 1 approval (incl. a question / gate) · 2 error ·
--- 3 hung · 4 finished and not jumped-to since it finished · 5 anything else.
+-- Which instance leads a card, lowest first: 0 a question held for you · 1 approval, or a
+-- merge / batch waiting for you · 2 error · 3 hung · 3.4 driving a running batch ·
+-- 3.5 running · 4 finished and not jumped-to since it finished · 5 anything else.
+-- 2026-09-15: running ranks ABOVE finished. The card reads as its lead, and a project with a
+-- session still at work isn't "Ready for you"; the finished ones show in its "also:" line.
+M.TIER_DRIVING, M.TIER_RUNNING = 3.4, 3.5
 -- A session driving a batch that's running (2026-09-15). The driver ends its turn once its units have
 -- their tasks, but it isn't done: its units are working. (A proposal awaiting Adam isn't "driving".)
 function M.isDriving(it)
@@ -1263,9 +1267,12 @@ function M.instanceTier(it, seenAt)
   if st == "error" then return 2 end
   if it and it.hung then return 3 end
   -- 2026-09-15: the driver of a running batch is at work through its units -- never "ready for you",
-  -- and it keeps its card ahead of the working units (4.5), so the card doesn't flip once seen.
-  if M.isDriving(it) then return 4.5 end
-  if st == "done" and not it.bg_active then
+  -- and it keeps its card ahead of the working units (TIER_DRIVING), so the card doesn't flip once seen.
+  if M.isDriving(it) then return M.TIER_DRIVING end
+  -- 2026-09-15: a session at work (or one whose background agents still run) outranks a finished
+  -- one: Chargeback Sentinel's card read "Ready for you" while its driver was still working.
+  if st == "working" or (it and it.bg_active) then return M.TIER_RUNNING end
+  if st == "done" then
     local seen = type(seenAt) == "table" and tonumber(seenAt[it.key]) or nil
     if not seen or seen < (tonumber(it.since) or 0) then return 4 end
   end
@@ -1275,8 +1282,10 @@ end
 -- Blocked tiers wait longest-first, finished ones freshest-first, the rest most recently
 -- active first. STACK_LEAD_HOLD keeps a stationary lead in place until a challenger is
 -- that many seconds fresher: two working instances would otherwise swap the card (and
--- force a grid rebuild) on every hook event.
+-- force a grid rebuild) on every hook event. It holds only within one of the "most
+-- recently active" tiers (driving, running, anything else), never across tiers.
 M.STACK_LEAD_HOLD = 30
+local HOLD_TIERS = { [M.TIER_DRIVING] = true, [M.TIER_RUNNING] = true, [5] = true }
 function M.rankInstances(members, seenAt, prevLead)
   local arr = {}
   for _, it in ipairs(members or {}) do arr[#arr + 1] = { it = it, tier = M.instanceTier(it, seenAt) } end
@@ -1295,11 +1304,11 @@ function M.rankInstances(members, seenAt, prevLead)
     end
     return tostring(ai.key) < tostring(bi.key)
   end)
-  if #arr > 1 and arr[1].tier == 5 and prevLead ~= nil then
+  if #arr > 1 and HOLD_TIERS[arr[1].tier] and prevLead ~= nil then
     for i = 2, #arr do
       local e = arr[i]
       if e.it.key == prevLead then
-        if e.tier == 5 and (tonumber(arr[1].it.updated) or 0) - (tonumber(e.it.updated) or 0) < M.STACK_LEAD_HOLD then
+        if e.tier == arr[1].tier and (tonumber(arr[1].it.updated) or 0) - (tonumber(e.it.updated) or 0) < M.STACK_LEAD_HOLD then
           table.remove(arr, i)
           table.insert(arr, 1, e)
         end
@@ -1321,7 +1330,8 @@ local STACK_BUCKETS = { "approval", "error", "hung", "ready", "working", "done",
 local function stackBucket(it, seenAt)
   local tier = M.instanceTier(it, seenAt)
   return (tier <= 1 and "approval") or (tier == 2 and "error") or (tier == 3 and "hung")
-      or (tier == 4 and "ready") or (tier == 4.5 and "working") or tostring(it.status or "idle")
+      or (tier == 4 and "ready") or ((tier == M.TIER_DRIVING or tier == M.TIER_RUNNING) and "working")
+      or tostring(it.status or "idle")
 end
 function M.stackInstances(shown, seenAt, prevLeads, hidden)
   prevLeads = type(prevLeads) == "table" and prevLeads or {}
