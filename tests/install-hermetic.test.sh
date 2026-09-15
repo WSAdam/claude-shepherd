@@ -13,7 +13,7 @@ trap 'rm -rf "$TMP"' EXIT
 # 2026-09-15: install.test.sh symlinked the HOST's rg/brew into its tool double and asserted they
 # were present, so a machine without them failed the gate and `make setup` aborted.
 BIN="$TMP/bin"; mkdir -p "$BIN"
-for b in bash lua jq make; do
+for b in bash lua node jq make; do
   src="$(command -v "$b" 2>/dev/null)"; [ -n "$src" ] && ln -sf "$src" "$BIN/$b"
 done
 bash "$ROOT/tests/install.test.sh" </dev/null 2>&1 | grep '^FAIL' | sort > "$TMP/with-tools"

@@ -35,10 +35,25 @@ if command -v dockutil >/dev/null 2>&1; then
   exit 0
 fi
 
+# Percent-encode a path for a file:// URL: every byte outside the unreserved set (and
+# "/") becomes %XX. 2026-09-15: the raw path went in, so a HOME with a space gave the
+# Dock a URL it can't resolve.
+urlencode() {
+  local LC_ALL=C s="$1" i c v out=""   # C locale: walk BYTES, so UTF-8 encodes per byte
+  for (( i = 0; i < ${#s}; i++ )); do
+    c="${s:i:1}"
+    case "$c" in
+      [A-Za-z0-9/._~-]) out+="$c" ;;
+      *) v="$(printf '%d' "'$c")"; out+="$(printf '%%%02X' "$(( v & 255 ))")" ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
 # Fallback: append a persistent-apps tile pointing at the app bundle, then restart
 # the Dock so the change shows. The Dock restart is a ~1s flicker; nothing else.
 TILE="<dict><key>tile-data</key><dict><key>file-data</key><dict>\
-<key>_CFURLString</key><string>file://${APP}/</string>\
+<key>_CFURLString</key><string>file://$(urlencode "$APP")/</string>\
 <key>_CFURLStringType</key><integer>15</integer></dict></dict></dict>"
 defaults write com.apple.dock persistent-apps -array-add "$TILE"
 killall Dock 2>/dev/null || true

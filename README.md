@@ -1183,16 +1183,18 @@ install or replace Claude Code.
    ```
    make setup
    ```
-   This copies the hook scripts + logic into `~/.claude` and `~/.hammerspoon`, runs the
-   **pre-flight test suite**, **merges** the hooks into `~/.claude/settings.json` (backing
-   it up first and preserving any hooks you already have), ensures the `dofile(...)` line in
+   This runs the **pre-flight test suite**, copies the hook scripts + logic into `~/.claude`
+   and `~/.hammerspoon`, **merges** the hooks into `~/.claude/settings.json` (backing it up
+   first and preserving any hooks you already have; a symlinked settings.json stays a
+   symlink and the file it points to gets the hooks), ensures the `dofile(...)` line in
    `~/.hammerspoon/init.lua`, builds **Shepherd.app** (a Dock launcher — see below), and
-   runs the **tooling check** (jq / lua / Hammerspoon / ripgrep / fd).
+   runs the **tooling check** (jq / lua / node / Hammerspoon / ripgrep / fd).
 
-   The pre-flight gate runs **before** anything touches your `settings.json` or `init.lua`:
-   if the suite is red (or `lua` is missing so it can't run), the install aborts with only
-   the copied files in place — never a half-wired config. Bypass with
-   `bash install.sh --skip-tests` (or `CC_INSTALL_SKIP_TESTS=1`) if you need to.
+   The pre-flight gate runs **before** anything is copied or touches your `settings.json`
+   or `init.lua`: if the suite is red (or `lua` / `node` is missing so it can't run), the
+   install aborts having changed nothing — never untested hooks under live wiring, never a
+   half-wired config. Bypass with `bash install.sh --skip-tests` (or
+   `CC_INSTALL_SKIP_TESTS=1`) if you need to.
 
 3. Click the Hammerspoon menu-bar icon and choose **Reload Config**.
 

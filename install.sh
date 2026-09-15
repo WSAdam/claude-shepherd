@@ -21,8 +21,9 @@
 #   CC_INSTALL_CLAUDE_DIR, CC_INSTALL_HS_DIR, CC_INSTALL_NO_APP,
 #   CC_INSTALL_HAMMERSPOON_APP (path probed for Hammerspoon.app)
 #
-# Pre-flight test gate: before the hook merge touches your real settings.json /
-# init.lua, `make test` must pass. Bypass with `--skip-tests` or
+# Pre-flight test gate: before ANYTHING is copied or merged, `make test` must pass
+# (2026-09-15: the copy used to run first, so a red suite still put untested hook
+# scripts where the already-wired hooks run them). Bypass with `--skip-tests` or
 # CC_INSTALL_SKIP_TESTS=1 (tests/install.test.sh exports the latter so its own
 # install.sh calls don't recurse back into the suite).
 
@@ -73,9 +74,12 @@ tooling_check() {
   echo "🔧 Tooling check:"
   if have_jq; then printf '   ✅ %-4s %s\n' jq "$(command -v jq)"
   else printf '   ❌ %-4s MISSING (required) — install: brew install jq\n' jq; fi
-  # lua runs the test suite (the pre-flight gate); required unless you --skip-tests
-  if have_lua; then printf '   ✅ %-4s %s\n' lua "$(command -v lua)"
-  else printf '   ❌ %-4s MISSING (required to run the tests) — install: brew install lua\n' lua; fi
+  # lua + node run the test suite (the pre-flight gate); required unless you --skip-tests
+  # (2026-09-15: node was never named, so a machine without it hit "command not found")
+  for t in lua node; do
+    if have "$t"; then printf '   ✅ %-4s %s\n' "$t" "$(command -v "$t")"
+    else printf '   ❌ %-4s MISSING (required to run the tests) — install: brew install %s\n' "$t" "$t"; fi
+  done
   # Hammerspoon hosts the panel itself — probed on disk, not on PATH
   if have_hammerspoon; then printf '   ✅ %-4s %s\n' hs "$HAMMERSPOON_APP"
   else
@@ -102,19 +106,23 @@ SKIP_TESTS=0
 for arg in "$@"; do [ "$arg" = "--skip-tests" ] && SKIP_TESTS=1; done
 [ -n "${CC_INSTALL_SKIP_TESTS:-}" ] && SKIP_TESTS=1
 
-# Pre-flight gate (step 1.5): prove the code works BEFORE the hook merge rewrites
-# settings.json or appends to init.lua. A hard abort here leaves only step 1's copied
-# files behind — no half-wired config. `lua` missing is treated the same as a failing
-# test: we cannot verify, so we do not touch your config.
+# Pre-flight gate (step 1): prove the code works BEFORE anything is copied into
+# ~/.claude / ~/.hammerspoon or merged into settings.json / init.lua. A hard abort here
+# leaves nothing behind. A missing `lua` or `node` (the suite needs both) is treated the
+# same as a failing test: we cannot verify, so we do not touch your config.
 run_test_gate() {
   if [ "$SKIP_TESTS" -eq 1 ]; then
     echo "⏭️  pre-flight tests skipped (--skip-tests)"
     return 0
   fi
-  if ! have_lua; then
-    echo "❌ cannot verify: lua not found — install it (brew install lua) or re-run with --skip-tests"
-    exit 1
-  fi
+  local missing=0 t
+  for t in lua node; do
+    if ! have "$t"; then
+      echo "❌ cannot verify: $t not found — install it (brew install $t) or re-run with --skip-tests"
+      missing=1
+    fi
+  done
+  [ "$missing" -eq 1 ] && exit 1
   echo "🧪 running pre-flight tests..."
   if ! make -C "$HERE" test; then
     echo "❌ pre-flight tests failed — aborting before touching your settings.json/init.lua."
@@ -140,31 +148,62 @@ install_file() {
   cp "$src" "$dstdir/.$base.tmp.$$" && mv -f "$dstdir/.$base.tmp.$$" "$dstdir/$base"
 }
 
-# 1. Scripts + core -> ~/.claude ; dashboard + core -> ~/.hammerspoon.
-for f in cc-lib.sh cc-status.sh cc-approve.sh cc-popup.sh cc-merge.sh cc-fleet.sh cc-ask.sh cc-core.lua; do
-  install_file "$HERE/$f" "$CLAUDE_DIR"
+CLAUDE_FILES="cc-lib.sh cc-status.sh cc-approve.sh cc-popup.sh cc-merge.sh cc-fleet.sh cc-ask.sh cc-core.lua"
+HS_FILES="claude-dashboard.lua cc-core.lua"
+
+# 0. Every file we ship must be in the checkout, or we'd wire a hook to a file that
+# doesn't exist (2026-09-15: a missing cc-ask.sh printed "copied" and "install complete").
+for f in $CLAUDE_FILES $HS_FILES settings-hooks.json; do
+  if [ ! -r "$HERE/$f" ]; then
+    echo "❌ $f is missing from the checkout ($HERE) — aborting before touching anything."
+    exit 1
+  fi
 done
-chmod +x "$CLAUDE_DIR"/cc-*.sh
-for f in claude-dashboard.lua cc-core.lua; do
-  install_file "$HERE/$f" "$HS_DIR"
+
+# 1. Pre-flight test gate — nothing below this line runs if the suite is red.
+run_test_gate
+
+# 2. Scripts + core -> ~/.claude ; dashboard + core -> ~/.hammerspoon. Only the scripts we
+# ship get +x: a user's own cc-*.sh in ~/.claude is theirs to mode.
+for f in $CLAUDE_FILES; do
+  install_file "$HERE/$f" "$CLAUDE_DIR" || { echo "❌ couldn't copy $f -> $CLAUDE_DIR"; exit 1; }
+  case "$f" in *.sh) chmod +x "$CLAUDE_DIR/$f" ;; esac
+done
+for f in $HS_FILES; do
+  install_file "$HERE/$f" "$HS_DIR" || { echo "❌ couldn't copy $f -> $HS_DIR"; exit 1; }
 done
 echo "✅ copied hook scripts + core -> $CLAUDE_DIR ; dashboard -> $HS_DIR"
 
-# 1.5. Pre-flight test gate — nothing below this line runs if the suite is red.
-run_test_gate
+# Follow a symlink chain to the real file (a dotfiles-managed settings.json is a link;
+# 2026-09-15: renaming over the link replaced it with a plain file and the dotfiles copy
+# never got the hooks). Relative link targets resolve against the link's own directory.
+resolve_link() {
+  local p="$1" t n=0
+  while [ -L "$p" ] && [ "$n" -lt 40 ]; do
+    t="$(readlink "$p")"
+    case "$t" in /*) p="$t" ;; *) p="$(dirname "$p")/$t" ;; esac
+    n=$((n + 1))
+  done
+  printf '%s' "$p"
+}
 
-# 2. Merge hooks into settings.json (back up first; idempotent append-if-missing).
+# 3. Merge hooks into settings.json (back up first; idempotent append-if-missing).
 if have_jq; then
   if [ ! -f "$SETTINGS" ]; then
     jq --argjson tmpl "$(cat "$TEMPLATE")" -n '{hooks: $tmpl.hooks}' > "$SETTINGS"
     echo "✅ wrote hooks to new $SETTINGS"
+  elif ! jq -e . "$SETTINGS" >/dev/null 2>&1; then
+    echo "⚠️  couldn't parse $SETTINGS — leaving it; merge $TEMPLATE by hand"
   else
+    merge_err="$CLAUDE_DIR/.settings.merge.err.$$"
     merged="$(jq --argjson tmpl "$(cat "$TEMPLATE")" '
       # Give an existing cc-approve.sh hook entry the 130s timeout it needs
       # (the gate polls up to 120s; Claude Code'\''s 60s default would kill it
-      # mid-wait). Idempotent: entries that already carry a timeout pass through.
+      # mid-wait). Idempotent; a value at or above 130 passes through, a lower one
+      # (2026-09-15: an old 60 was kept, and the wait was killed halfway) is raised.
       def patch_approve:
-        if ((.command? // "") | test("cc-approve\\.sh")) and (has("timeout") | not)
+        if ((.command? // "") | test("cc-approve\\.sh"))
+           and (((.timeout? // 0) | if type == "number" then . else 0 end) < 130)
         then . + {timeout: 130} else . end;
       # SHAPE-PRESERVING migration over every event group (including ones we
       # do not own). Invariants — pinned by install.test.sh'\''s "shape:" checks:
@@ -181,10 +220,14 @@ if have_jq; then
       def our_re: "cc-(status|approve|popup)\\.sh";
       .hooks //= {}
       | reduce ($tmpl.hooks | to_entries[]) as $e (.;
-          ([ (.hooks[$e.key] // [])[].hooks[]?.command? // empty ]) as $cmds
-          | if ($cmds | any(test(our_re))) | not
-            then .hooks[$e.key] = ((.hooks[$e.key] // []) + $e.value)
-            elif (.hooks[$e.key] | type) != "array" then .
+          # An event group that is not a list (a hand-edited object) is left exactly as
+          # it is -- 2026-09-15: `[]` on it made the filter fail and the valid file was
+          # reported as unparseable. The shell warns about it after the merge.
+          (if ((.hooks[$e.key] // []) | type) == "array" then .hooks[$e.key] // [] else [] end) as $grp
+          | ([ $grp[].hooks[]?.command? // empty ]) as $cmds
+          | if ((.hooks[$e.key] // []) | type) != "array" then .
+            elif ($cmds | any(test(our_re))) | not
+            then .hooks[$e.key] = ($grp + $e.value)
             else
               # Per-entry upgrade: the event already carries SOME of our scripts,
               # but a hook shipped AFTER that install (cc-popup.sh postdates the
@@ -216,27 +259,44 @@ if have_jq; then
         else .hooks.PreToolUse = ((.hooks.PreToolUse // [])
                + [ $tmpl.hooks.PreToolUse[] | select(.matcher == "AskUserQuestion") ])
         end
-    ' "$SETTINGS" 2>/dev/null)"
+    ' "$SETTINGS" 2>"$merge_err")"
     if [ -z "$merged" ]; then
-      echo "⚠️  couldn't parse $SETTINGS — leaving it; merge $TEMPLATE by hand"
-    elif [ "$merged" = "$(cat "$SETTINGS")" ]; then
+      echo "⚠️  hook merge failed on $SETTINGS — leaving it; merge $TEMPLATE by hand"
+      sed 's/^/      jq: /' "$merge_err"
+    # Compare through jq's printer on both sides (2026-09-15: the raw file was compared
+    # with jq's re-serialisation, so a fully wired file in any other layout was rewritten
+    # and backed up on every run).
+    elif [ "$merged" = "$(jq . "$SETTINGS")" ]; then
       echo "✅ hooks already present in $SETTINGS (no change)"
     else
       cp "$SETTINGS" "$SETTINGS.bak.$(date +%s)"
       # Write-temp + rename, not `> "$SETTINGS"`: live Claude Code processes
       # re-read settings.json, and an in-place truncate+write lets one read a
-      # half-written file. Same-dir mv is an atomic rename.
-      printf '%s\n' "$merged" > "$CLAUDE_DIR/.settings.json.tmp.$$" \
-        && mv -f "$CLAUDE_DIR/.settings.json.tmp.$$" "$SETTINGS"
+      # half-written file. Same-dir mv is an atomic rename -- in the REAL file's
+      # directory, so a symlinked settings.json stays a link to an updated file.
+      real="$(resolve_link "$SETTINGS")"
+      printf '%s\n' "$merged" > "$(dirname "$real")/.settings.json.tmp.$$" \
+        && mv -f "$(dirname "$real")/.settings.json.tmp.$$" "$real"
       echo "✅ merged hooks into $SETTINGS (backup made)"
+    fi
+    rm -f "$merge_err"
+    # Events we ship hooks for whose group is not a list were left alone above; say so,
+    # or the user believes those hooks are wired.
+    if [ -n "$merged" ]; then
+      for ev in $(printf '%s' "$merged" | jq -r --argjson tmpl "$(cat "$TEMPLATE")" \
+          '[ ($tmpl.hooks | keys[]) as $k | select((.hooks[$k] // []) | type != "array") | $k ] | .[]'); do
+        echo "⚠️  hooks.$ev in $SETTINGS is an object, not a list — its Shepherd hooks weren't wired; make it a list and re-run"
+      done
     fi
   fi
 else
   echo "⚠️  jq not found — install jq, then merge $TEMPLATE into $SETTINGS"
 fi
 
-# 3. Ensure init.lua dofiles the dashboard.
-if [ ! -f "$INIT" ] || ! grep -Fq "claude-dashboard.lua" "$INIT"; then
+# 4. Ensure init.lua dofiles the dashboard. Any non-comment line that loads it counts
+# (a user may load it their own way; a second load would double every hotkey and timer),
+# a commented-out one does not (2026-09-15: a bare grep counted it and never re-added).
+if [ ! -f "$INIT" ] || ! grep -v '^[[:space:]]*--' "$INIT" | grep -Fq "claude-dashboard.lua"; then
   # A pre-existing init.lua may lack a trailing newline; appending straight onto
   # its last line would glue the dofile into invalid Lua (breaking the user's
   # whole config). Separate first. ($() strips a trailing \n, so non-empty
@@ -248,19 +308,19 @@ else
   echo "✅ dofile already in $INIT"
 fi
 
-# 4. Build the Dock launcher (skipped in tests). Hand-rolled bundle -- no
+# 5. Build the Dock launcher (skipped in tests). Hand-rolled bundle -- no
 # osacompile dependency (see app/build-app.sh for why applets were dropped).
 if [ -z "${CC_INSTALL_NO_APP:-}" ]; then
   make -C "$HERE" app || echo "⚠️  Shepherd.app build skipped"
 fi
 
-# 4b. The companion VS Code extension (vscode-bridge/): lets Shepherd close one exact
+# 5b. The companion VS Code extension (vscode-bridge/): lets Shepherd close one exact
 # Claude tab without keystrokes. Local package + VS Code's own CLI, warn-only.
 if [ -z "${CC_INSTALL_NO_BRIDGE:-}" ]; then
   make -C "$HERE" --no-print-directory tab-bridge || echo "⚠️  Shepherd tab bridge install skipped"
 fi
 
-# 5. Tooling check (jq required; rg/fd optional accelerators). Non-interactive when no tty,
+# 6. Tooling check (jq required; rg/fd optional accelerators). Non-interactive when no tty,
 # so tests and `make setup` never block; re-runnable any time via `make doctor`.
 tooling_check
 

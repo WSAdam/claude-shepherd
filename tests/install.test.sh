@@ -280,9 +280,12 @@ assert_eq "#21: merged settings.json is valid JSON" "0" \
 # --- tooling check (`install.sh --tools-only`, powers `make doctor`): reports status,
 # is NON-INTERACTIVE without a tty (never blocks tests/`make setup`), offers (prints) the
 # brew command for a missing optional accelerator, and NEVER hard-fails. Simulate
-# "brew present, fd missing" with a controlled PATH of symlinks (jq/rg/brew, no fd). ---
+# "brew present, fd missing" with a controlled PATH: the real jq plus STUB rg/brew executables
+# (the check only asks `command -v`; 2026-09-15: symlinking the host's rg/brew made this
+# suite, and so `make setup`, fail on a machine without them). No fd. ---
 TOOLDIR="$TMP/tools"; mkdir -p "$TOOLDIR"
-for b in jq rg brew; do src="$(command -v "$b" 2>/dev/null)"; [ -n "$src" ] && ln -sf "$src" "$TOOLDIR/$b"; done
+ln -sf "$(command -v jq)" "$TOOLDIR/jq"
+for b in rg brew; do printf '#!/bin/sh\nexit 0\n' > "$TOOLDIR/$b"; chmod +x "$TOOLDIR/$b"; done
 # fd intentionally absent (and not a system tool, so /usr/bin:/bin won't supply it)
 TOUT="$TMP/tools.out"
 PATH="$TOOLDIR:/usr/bin:/bin" bash "$ROOT/install.sh" --tools-only </dev/null >"$TOUT" 2>&1
@@ -300,8 +303,12 @@ assert_eq "tools-only: touches no config (early exit before copy)" "0" \
 # tools-only also reports lua and Hammerspoon.app. lua present (real PATH) vs absent
 # (the controlled TOOLDIR above has no lua), and the app probe is a directory check
 # redirected via CC_INSTALL_HAMMERSPOON_APP.
+# 2026-09-15 requirement change: node is reported the same way, so each tool's line is
+# counted on its own name rather than by the shared wording.
 assert_eq "tools-only: lua reported missing when absent from PATH" "1" \
-  "$(grep -Fc 'MISSING (required to run the tests)' "$TOUT")"
+  "$(grep -Ec 'lua +MISSING \(required to run the tests\)' "$TOUT")"
+assert_eq "tools-only: node reported missing when absent from PATH" "1" \
+  "$(grep -Ec 'node +MISSING \(required to run the tests\)' "$TOUT")"
 FAKEHS="$TMP/Hammerspoon.app"; mkdir -p "$FAKEHS"
 HSOUT="$TMP/hs-present.out"
 CC_INSTALL_HAMMERSPOON_APP="$FAKEHS" bash "$ROOT/install.sh" --tools-only </dev/null >"$HSOUT" 2>&1
@@ -317,7 +324,7 @@ assert_eq "tools-only: still exits 0 with Hammerspoon missing (never hard-fails)
 # the real suite (and touches a sentinel, so we can prove it was/wasn't invoked). ---
 MAKEDIR="$TMP/fakemake"; mkdir -p "$MAKEDIR"
 SENTINEL="$TMP/make-ran"
-for b in lua jq cp mv mkdir chmod date grep tail printf basename find; do
+for b in lua node jq cp mv mkdir chmod date grep tail printf basename find; do
   src="$(command -v "$b" 2>/dev/null)"; [ -n "$src" ] && ln -sf "$src" "$MAKEDIR/$b"
 done
 write_fake_make() {  # $1 = exit code
@@ -381,7 +388,7 @@ assert_eq "gate: env bypass never invokes make either" "0" \
 # a missing `lua` aborts cleanly (cannot verify => do not touch config). Like the fd
 # case above, lua is not a system tool, so /usr/bin:/bin can't supply it.
 NOLUA="$TMP/nolua"; mkdir -p "$NOLUA"
-for b in jq make; do src="$(command -v "$b" 2>/dev/null)"; [ -n "$src" ] && ln -sf "$src" "$NOLUA/$b"; done
+for b in jq node make; do src="$(command -v "$b" 2>/dev/null)"; [ -n "$src" ] && ln -sf "$src" "$NOLUA/$b"; done
 GCDIR5="$TMP/gate-nolua-claude"; GHDIR5="$TMP/gate-nolua-hs"
 CC_INSTALL_SKIP_TESTS= CC_INSTALL_CLAUDE_DIR="$GCDIR5" CC_INSTALL_HS_DIR="$GHDIR5" CC_INSTALL_NO_APP=1 \
   PATH="$NOLUA:/usr/bin:/bin" bash "$ROOT/install.sh" >"$TMP/gate-nolua.out" 2>&1
@@ -536,5 +543,14 @@ SPACED="$F/Jane Doe/Applications/Shepherd.app"; mkdir -p "$SPACED"
 PATH="$DB:/usr/bin:/bin" bash "$ROOT/app/add-to-dock.sh" "$SPACED" >/dev/null 2>&1
 assert_eq "add-to-dock: a path with a space is percent-encoded in the Dock tile's URL" "encoded" \
   "$(grep -q 'Jane%20Doe' "$F/defaults.calls" 2>/dev/null && echo encoded || echo raw)"
+
+# 2026-09-15: step 1 ran `chmod +x "$CLAUDE_DIR"/cc-*.sh`, a glob over the whole dir, so a user's
+# own cc-prefixed script in ~/.claude had its mode changed by an install that never shipped it.
+MC="$F/mode-claude"; mkdir -p "$MC"
+printf '#!/bin/sh\necho mine\n' > "$MC/cc-mine.sh"; chmod 644 "$MC/cc-mine.sh"
+CC_INSTALL_CLAUDE_DIR="$MC" CC_INSTALL_HS_DIR="$F/mode-hs" CC_INSTALL_NO_APP=1 \
+  bash "$ROOT/install.sh" >/dev/null 2>&1
+assert_eq "a user's own cc-*.sh in the claude dir keeps its mode (install chmods only what it ships)" "644" \
+  "$(stat -f '%Lp' "$MC/cc-mine.sh" 2>/dev/null || stat -c '%a' "$MC/cc-mine.sh")"
 
 finish
