@@ -8131,6 +8131,9 @@ local HTML = [[
   /* a merge request waiting for you (or one that came back blocked) */
   .tile.merge { box-shadow:0 0 0 2px #14b8a6, 0 0 10px #14b8a6; }
   #d-merge { display:none; margin:6px 0; padding:8px 10px; border:1px solid #14b8a6; border-radius:8px; font-size:12px; }
+  /* 2026-09-15: the request's text, commits, files and diff scroll in a capped body, so the
+     Merge / Not yet row below it never leaves the panel however wordy the request is */
+  #d-merge .dm-body { max-height:220px; overflow-y:auto; }
   #d-merge .dm-head { font-weight:600; }
   #d-merge .dm-sub, #d-merge .dm-tests { opacity:.85; margin-top:3px; white-space:pre-wrap; }
   #d-merge .dm-problems { color:var(--warn); margin-top:4px; }
@@ -9299,13 +9302,16 @@ local HTML = [[
     <!-- Ready to merge (2026-09-11): a fixed skeleton that renderMerge fills with
          textContent only; the note input is never rebuilt, so a half-typed note survives. -->
     <div id="d-merge">
-      <div class="dm-head" id="dm-head"></div>
-      <div class="dm-sub" id="dm-sub"></div>
-      <div class="dm-tests" id="dm-tests"></div>
-      <div class="dm-problems" id="dm-problems"></div>
-      <ul class="dm-commits" id="dm-commits"></ul>
-      <ul class="dm-files" id="dm-files"></ul>
-      <pre id="dm-diff"></pre>
+      <!-- the body scrolls (capped); the buttons rows below it stay in view (2026-09-15) -->
+      <div class="dm-body">
+        <div class="dm-head" id="dm-head"></div>
+        <div class="dm-sub" id="dm-sub"></div>
+        <div class="dm-tests" id="dm-tests"></div>
+        <div class="dm-problems" id="dm-problems"></div>
+        <ul class="dm-commits" id="dm-commits"></ul>
+        <ul class="dm-files" id="dm-files"></ul>
+        <pre id="dm-diff"></pre>
+      </div>
       <div class="dm-acts" id="dm-acts">
         <button id="dm-merge" onclick="mergeAct('merge-approve')" title="Tell the session to rebase, run the tests, fast-forward main and remove its worktree">⇡ Merge</button>
         <input id="dm-note" maxlength="500" placeholder="Note for the session (optional)">
