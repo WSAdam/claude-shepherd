@@ -45,6 +45,9 @@ echo ""
 echo "== bash: uninstaller =="
 bash "$DIR/uninstall.test.sh" || fail=1
 echo ""
+echo "== bash: double-click bootstrap =="
+bash "$DIR/bootstrap.test.sh" || fail=1
+echo ""
 echo "== bash: installer suite without the optional tools (no rg/fd/Homebrew) =="
 bash "$DIR/install-hermetic.test.sh" || fail=1
 echo ""
