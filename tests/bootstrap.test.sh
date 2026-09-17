@@ -68,8 +68,15 @@ esac"
   fi
 }
 
+# The "bare machine" cases only mean anything if the prerequisites really are unreachable.
+# A literal "/usr/bin:/bin" tail assumed they never live there -- true on macOS, where they
+# come from Homebrew, and FALSE on Linux, where apt puts lua, luac and node straight in
+# /usr/bin. On Linux the bare machine silently arrived with lua and node already installed,
+# so the "brew installs it" assertions proved nothing. (2026-09-17, found by the CI job.)
+BARESYS="$(sysbin_without "$TMP/sysbin-bare" lua luac node nodejs rg fd fdfind)"
+
 run_bootstrap() {
-  HOME="$M/home" PATH="$BIN:/usr/bin:/bin" \
+  HOME="$M/home" PATH="$BIN:$BARESYS" \
   CC_BOOT_BREW_PATHS="$BREWBIN/brew" CC_BOOT_APP_DIRS="$APPS" CC_BOOT_ZPROFILE="$M/home/.zprofile" \
   CC_BOOT_INSTALL="echo install.sh >> '$CALLS'" \
     bash "$ROOT/bootstrap.sh" "$@" > "$M/out" 2>&1

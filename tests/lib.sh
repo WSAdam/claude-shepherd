@@ -10,6 +10,34 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 mktemp_dir() { mktemp -d 2>/dev/null || mktemp -d -t ccshepherd; }
 
+# sysbin_without <outdir> <tool>... - mirror /usr/bin + /bin into <outdir> as symlinks,
+# leaving out the named tools, and echo <outdir>. Use it in place of a literal
+# "/usr/bin:/bin" wherever a test proves install.sh REPORTS or ABORTS on a missing tool.
+#
+# 2026-09-17: those tests faked "absent" with PATH="$STUBS:/usr/bin:/bin" on the stated
+# assumption that lua/node are never system tools -- true on macOS, where they come from
+# Homebrew, and FALSE on Linux, where apt puts lua, luac and node straight in /usr/bin.
+# Running the suite on Linux (the new CI job) found both of them silently passing the
+# probe, so the assertions proved nothing there. Scrubbing by name is platform-neutral:
+# the tool is genuinely unreachable, and every other system utility still is.
+sysbin_without() { # <outdir> <tool>...
+  local out="$1"; shift
+  mkdir -p "$out"
+  local d f b t skip
+  for d in /usr/bin /bin; do
+    [ -d "$d" ] || continue
+    for f in "$d"/*; do
+      [ -x "$f" ] || continue
+      b="${f##*/}"
+      skip=0
+      for t in "$@"; do [ "$b" = "$t" ] && skip=1 && break; done
+      [ "$skip" = 1 ] && continue
+      [ -e "$out/$b" ] || ln -s "$f" "$out/$b" 2>/dev/null || true
+    done
+  done
+  printf '%s' "$out"
+}
+
 assert_eq() { # <name> <expected> <actual>
   TESTS_RUN=$((TESTS_RUN + 1))
   if [ "$2" = "$3" ]; then

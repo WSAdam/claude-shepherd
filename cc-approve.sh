@@ -327,7 +327,13 @@ while [ "$i" -lt "$ITERS" ]; do
     if [ -n "$RNONCE" ]; then
       [ "$RNONCE" = "$NONCE" ] && OURS=1
     else
-      MTIME="$(stat -f %m "$CLAIM" 2>/dev/null || stat -c %Y "$CLAIM" 2>/dev/null)"
+      # GNU stat FIRST, BSD second. `-f` is not a portable "BSD-only" probe: on GNU
+      # coreutils `stat -f` means FILE SYSTEM status and SUCCEEDS, so a BSD-first
+      # fallback returns a mount point ("/") instead of an mtime and every legacy
+      # answer is judged stale. `stat -c` is rejected outright by BSD stat (exit 1,
+      # nothing on stdout), so this order is unambiguous on both. (2026-09-17, found
+      # by running the suite on Linux in CI.)
+      MTIME="$(stat -c %Y "$CLAIM" 2>/dev/null || stat -f %m "$CLAIM" 2>/dev/null)"
       case "$MTIME" in ''|*[!0-9]*) MTIME=0 ;; esac
       [ "$MTIME" -gt "$NOW" ] && OURS=1
     fi

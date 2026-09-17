@@ -414,7 +414,9 @@ assert_eq "stale (backdated) decision is ignored -> timeout, no output" "" "$(ca
 # (a hardlink shares the inode) with its mtime intact so an entitled sibling can
 # still consume it.
 assert_eq "stale decision is restored after timeout (not rm'd)" "allow" "$(cat "$TMP/st1.decision" 2>/dev/null)"
-mt="$(stat -f %m "$TMP/st1.decision" 2>/dev/null || stat -c %Y "$TMP/st1.decision" 2>/dev/null)"
+# GNU stat first: `stat -f` means file-system status on GNU and SUCCEEDS, so a
+# BSD-first fallback reads a mount point, not an mtime (2026-09-17, seen on Linux).
+mt="$(stat -c %Y "$TMP/st1.decision" 2>/dev/null || stat -f %m "$TMP/st1.decision" 2>/dev/null)"
 assert_eq "restore preserves the stale mtime (hardlink, not a rewrite)" "preserved" \
   "$([ -n "$mt" ] && [ "$mt" -lt 1600000000 ] && echo preserved)"
 

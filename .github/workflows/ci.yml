@@ -1,0 +1,88 @@
+# Plain CI for Claude Shepherd: `make lint` + `make test` on Linux, no LLM, no agents.
+# The repo is public and handed to coworkers, so the suite has to run somewhere other
+# than Adam's laptop. Everything here is bash + Lua + node; the Playwright browser
+# suites and the deno demo suite self-skip when their tooling is absent, and we leave
+# them skipping rather than install a browser stack for CI.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  suite:
+    name: make lint && make test (ubuntu)
+    runs-on: ubuntu-latest
+    # A hang guard, not a budget: measured at 1m15s in an ubuntu container and 2m07s on
+    # macOS. (Both were minutes slower until this branch fixed tests/install.test.sh's
+    # reload case, which sat out a 300s sleep three times per run — see the comment there.)
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # A full checkout: tests/worktree-hygiene.test.sh runs `git ls-files` against
+          # the real checkout to prove every file a clone needs is tracked.
+          fetch-depth: 0
+
+      - name: Install Lua and luarocks
+        run: |
+          sudo apt-get update -qq
+          # liblua5.4-dev: luacheck pulls in luafilesystem, a C module that needs the headers.
+          sudo apt-get install -y --no-install-recommends lua5.4 liblua5.4-dev luarocks
+
+      - name: Point the bare names `lua` and `luac` at 5.4
+        run: |
+          # The Makefile and tests/run.sh invoke `lua` and `luac`, not lua5.4/luac5.4, and
+          # `make lint` hard-fails without luac. Debian DOES ship both bare names — as
+          # alternatives pointing at Lua 5.1. That is not a harmless difference: 5.1 has no
+          # `~` (bitwise xor), which cc-core.lua uses, so lint dies at the first hash
+          # function and the dashboard fails to load. /usr/local/bin precedes /usr/bin on
+          # the runner's PATH, so these shadow the 5.1 alternatives. (2026-09-17: caught by
+          # running the suite on Linux — the whole Lua suite had been running on 5.1.)
+          sudo ln -sf /usr/bin/lua5.4  /usr/local/bin/lua
+          sudo ln -sf /usr/bin/luac5.4 /usr/local/bin/luac
+          lua -v
+          luac -v
+
+      - name: Fail unless lua and luac really are 5.4
+        run: |
+          # A silent fallback to 5.1 makes the suite meaningless rather than red, so assert it.
+          lua  -v 2>&1 | grep -q 'Lua 5\.4' || { echo "::error::lua is not 5.4: $(lua -v 2>&1)";  exit 1; }
+          luac -v 2>&1 | grep -q 'Lua 5\.4' || { echo "::error::luac is not 5.4: $(luac -v 2>&1)"; exit 1; }
+
+      - name: Install luacheck
+        run: |
+          # --lua-version=5.4 is required, not cosmetic: Debian's luarocks defaults to Lua
+          # 5.1, so a bare `luarocks install` builds luacheck's luafilesystem dependency
+          # against /usr/include/lua5.1 and ignores the liblua5.4-dev installed above.
+          # Version pinned to what Adam runs locally, so a new luacheck release can't
+          # redden CI on its own.
+          # LUA_INCDIR pinned too, and load-bearing: luarocks infers the header prefix from
+          # the `lua` it finds first, so the /usr/local/bin/lua shim above sends it hunting
+          # in /usr/local/include and it fails with "Failed finding Lua header files".
+          sudo luarocks --lua-version=5.4 install luacheck 1.2.0 LUA_INCDIR=/usr/include/lua5.4
+          luacheck --version
+
+      - name: Fail if luacheck is missing
+        run: |
+          # `make lint` prints a warning and exits 0 when luacheck is absent. That is right
+          # for a laptop and wrong for CI: a broken install step would leave the lint job
+          # green with no static analysis at all. Make it loud instead.
+          command -v luacheck >/dev/null || {
+            echo "::error::luacheck is not on PATH — make lint would silently skip static analysis"
+            exit 1
+          }
+
+      - name: Tool versions
+        run: |
+          bash --version | head -1
+          node --version
+          jq --version
+          git --version
+
+      - name: make lint
+        run: make lint
+
+      - name: make test
+        run: make test

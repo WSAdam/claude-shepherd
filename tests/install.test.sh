@@ -286,9 +286,11 @@ assert_eq "#21: merged settings.json is valid JSON" "0" \
 TOOLDIR="$TMP/tools"; mkdir -p "$TOOLDIR"
 ln -sf "$(command -v jq)" "$TOOLDIR/jq"
 for b in rg brew; do printf '#!/bin/sh\nexit 0\n' > "$TOOLDIR/$b"; chmod +x "$TOOLDIR/$b"; done
-# fd intentionally absent (and not a system tool, so /usr/bin:/bin won't supply it)
+# fd, lua and node intentionally absent: sysbin_without scrubs them out of the system
+# dirs by name, so "missing" holds on Linux too (apt puts lua/node in /usr/bin).
 TOUT="$TMP/tools.out"
-PATH="$TOOLDIR:/usr/bin:/bin" bash "$ROOT/install.sh" --tools-only </dev/null >"$TOUT" 2>&1
+NOTOOLS="$(sysbin_without "$TMP/sysbin-notools" fd lua luac node nodejs)"
+PATH="$TOOLDIR:$NOTOOLS" bash "$ROOT/install.sh" --tools-only </dev/null >"$TOUT" 2>&1
 assert_eq "tools-only: exits 0 (a missing optional never hard-fails)" "0" "$?"
 assert_eq "tools-only: prints the tooling header" "1" "$(grep -Fc 'Tooling check' "$TOUT")"
 assert_eq "tools-only: jq reported present with its path" "1" "$(grep -Fc "$TOOLDIR/jq" "$TOUT")"
@@ -416,17 +418,26 @@ assert_eq "gate: env bypass never invokes make either" "0" \
   "$([ -e "$SENTINEL" ] && echo 1 || echo 0)"
 
 # a missing `lua` aborts cleanly (cannot verify => do not touch config). Like the fd
-# case above, lua is not a system tool, so /usr/bin:/bin can't supply it.
+# case above, lua is scrubbed out of the system dirs by name rather than assumed absent
+# -- apt ships /usr/bin/lua and /usr/bin/luac on Linux.
 NOLUA="$TMP/nolua"; mkdir -p "$NOLUA"
-for b in jq node make; do src="$(command -v "$b" 2>/dev/null)"; [ -n "$src" ] && ln -sf "$src" "$NOLUA/$b"; done
+for b in jq node; do src="$(command -v "$b" 2>/dev/null)"; [ -n "$src" ] && ln -sf "$src" "$NOLUA/$b"; done
+# The fake `make`, never the real one: the gate must abort on the missing lua BEFORE it
+# reaches `make test`, and the sentinel proves it. 2026-09-17: with the real make here and
+# lua reachable (Linux), install.sh ran the suite -- from inside the suite -- and recursed.
+write_fake_make 0; rm -f "$SENTINEL"
+ln -sf "$MAKEDIR/make" "$NOLUA/make"
+NOLUASYS="$(sysbin_without "$TMP/sysbin-nolua" lua luac)"
 GCDIR5="$TMP/gate-nolua-claude"; GHDIR5="$TMP/gate-nolua-hs"
 CC_INSTALL_SKIP_TESTS= CC_INSTALL_CLAUDE_DIR="$GCDIR5" CC_INSTALL_HS_DIR="$GHDIR5" CC_INSTALL_NO_APP=1 \
-  PATH="$NOLUA:/usr/bin:/bin" bash "$ROOT/install.sh" >"$TMP/gate-nolua.out" 2>&1
+  PATH="$NOLUA:$NOLUASYS" bash "$ROOT/install.sh" >"$TMP/gate-nolua.out" 2>&1
 assert_eq "gate: missing lua exits nonzero" "1" "$?"
 assert_eq "gate: missing lua prints 'cannot verify'" "1" \
   "$(grep -Fc 'cannot verify: lua not found' "$TMP/gate-nolua.out")"
 assert_eq "gate: missing lua writes no settings.json" "0" \
   "$([ -e "$GCDIR5/settings.json" ] && echo 1 || echo 0)"
+assert_eq "gate: missing lua aborts before make is ever invoked" "0" \
+  "$([ -e "$SENTINEL" ] && echo 1 || echo 0)"
 
 # ---- make install swaps scripts in with a rename (2026-09-11) ----
 # `make install` used plain `cp`, which rewrites a script IN PLACE: bash reads a script lazily
@@ -454,10 +465,29 @@ assert_eq "make install: ships cc-ask.sh, executable" "yes" "$got"
 # The reload drops Hammerspoon's IPC port; an `hs -c` caught mid-reply then waited forever
 # (a deploy sat 10 minutes on it). The recipe waits ~10s at most, then stops the client.
 FAKEBIN="$TMP/fakehs"; mkdir -p "$FAKEBIN"
-printf '#!/bin/sh\nsleep 300\n' > "$FAKEBIN/hs"; chmod +x "$FAKEBIN/hs"
+# `exec`, deliberately, and the capture below is a file rather than "$(...)". Together they
+# cost the suite ~15 minutes of pure dead wait per run until 2026-09-17. Without `exec` the
+# recipe's kill reaches the wrapper shell and orphans `sleep 300` onto init; a command
+# substitution then stays open until EVERY descendant closes the write end, so the reader sat
+# out the whole 300s that make had finished with after 10. install-hermetic re-runs this suite
+# twice, so that happened three times per `make test`: 16m32s -> 1m15s in an ubuntu container,
+# 8m36s -> 2m07s on macOS. It also surfaced as this test intermittently going red at 336s and
+# 613s, which is how it was found.
+printf '#!/bin/sh\nexec sleep 300\n' > "$FAKEBIN/hs"; chmod +x "$FAKEBIN/hs"
 start=$(date +%s)
-out="$(PATH="$FAKEBIN:$PATH" make -C "$ROOT" --no-print-directory reload 2>&1)"
+PATH="$FAKEBIN:$PATH" make -C "$ROOT" --no-print-directory reload >"$TMP/reload.out" 2>&1
 took=$(( $(date +%s) - start ))
+out="$(cat "$TMP/reload.out")"
+# Two assertions, and both earn their place. The message is the deterministic one: the
+# recipe can only print it after the wait loop gives up and kills the client. The wall
+# clock stays at 15s against a ~10s budget -- it is what would catch the cap itself
+# regressing (a cap that fired at 45s would print the same message and satisfy any looser
+# bound). It was briefly raised to 60s while this test was going red at 336s under load;
+# that turned out to be the capture pipe and the orphaned sleep above, not a tight bound,
+# so the bound goes back. If it ever flakes at 15s again, that is a finding to report --
+# not a number to raise.
+case "$out" in *"hung after sending and was stopped"*) got=stopped ;; *) got="$out" ;; esac
+assert_eq "make reload: a hung hs CLI is stopped, not waited on" "stopped" "$got"
 [ "$took" -le 15 ] && got=returned || got="blocked ${took}s"
 assert_eq "make reload: a hung hs CLI can't block it" "returned" "$got"
 case "$out" in *"hung"*) got=says ;; *) got=silent ;; esac
@@ -481,12 +511,15 @@ F="$TMP/fx"; mkdir -p "$F"
 # (Once the gate checks node, the gate tests above need node in their PATH double too.)
 NONODE="$F/nojs-bin"; mkdir -p "$NONODE"
 for b in lua jq; do src="$(command -v "$b" 2>/dev/null)"; [ -n "$src" ] && ln -sf "$src" "$NONODE/$b"; done
-PATH="$NONODE:/usr/bin:/bin" bash "$ROOT/install.sh" --tools-only </dev/null >"$F/nojs-tools.out" 2>&1
+# node scrubbed out of the system dirs by name -- apt puts /usr/bin/node on Linux, so a
+# literal "/usr/bin:/bin" tail handed this test the very tool it is proving absent.
+NONODESYS="$(sysbin_without "$F/sysbin-nonode" node nodejs)"
+PATH="$NONODE:$NONODESYS" bash "$ROOT/install.sh" --tools-only </dev/null >"$F/nojs-tools.out" 2>&1
 assert_eq "tooling check names node when it's missing (the test gate needs it)" "named" \
   "$(grep -q 'node' "$F/nojs-tools.out" && echo named || echo silent)"
 printf '#!/usr/bin/env bash\ntouch "%s"\nexit 0\n' "$F/nojs-make-ran" > "$NONODE/make"; chmod +x "$NONODE/make"
 CC_INSTALL_SKIP_TESTS= CC_INSTALL_CLAUDE_DIR="$F/nojs-claude" CC_INSTALL_HS_DIR="$F/nojs-hs" CC_INSTALL_NO_APP=1 \
-  PATH="$NONODE:/usr/bin:/bin" bash "$ROOT/install.sh" </dev/null >"$F/nojs-gate.out" 2>&1
+  PATH="$NONODE:$NONODESYS" bash "$ROOT/install.sh" </dev/null >"$F/nojs-gate.out" 2>&1
 rc=$?
 assert_eq "gate: a missing node stops the install and says so, before the suite runs" "stopped" \
   "$([ "$rc" -ne 0 ] && grep -q 'node' "$F/nojs-gate.out" && [ ! -e "$F/nojs-make-ran" ] && echo stopped || echo ran)"
@@ -581,7 +614,7 @@ printf '#!/bin/sh\necho mine\n' > "$MC/cc-mine.sh"; chmod 644 "$MC/cc-mine.sh"
 CC_INSTALL_CLAUDE_DIR="$MC" CC_INSTALL_HS_DIR="$F/mode-hs" CC_INSTALL_NO_APP=1 \
   bash "$ROOT/install.sh" >/dev/null 2>&1
 assert_eq "a user's own cc-*.sh in the claude dir keeps its mode (install chmods only what it ships)" "644" \
-  "$(stat -f '%Lp' "$MC/cc-mine.sh" 2>/dev/null || stat -c '%a' "$MC/cc-mine.sh")"
+  "$(stat -c '%a' "$MC/cc-mine.sh" 2>/dev/null || stat -f '%Lp' "$MC/cc-mine.sh")"
 
 # ---- a fresh install gets Adam's working setup (2026-09-17) ----
 # Handing Shepherd to a coworker: a fresh install should behave like Adam's machine -- his Shepherd

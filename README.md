@@ -1450,6 +1450,10 @@ Claude Shepherd has a **side-effect-free** test suite. Run it with:
 make test          # or: bash tests/run.sh
 ```
 
+**CI.** `.github/workflows/ci.yml` runs `make lint` and `make test` on `ubuntu-latest`
+for every push and pull request, so the suite isn't only ever run on one laptop. The
+Playwright browser suites and the Deno demo suite self-skip there — CI installs neither.
+
 **Deploying changes.** Hammerspoon runs the **copies** in `~/.hammerspoon/`
 (`init.lua` does `dofile(... claude-dashboard.lua)`), so edits in this repo are
 **not live until copied**. After a change:
