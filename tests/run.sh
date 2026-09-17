@@ -74,6 +74,9 @@ echo ""
 echo "== node: the merge review keeps its buttons in view in a real browser (skips without Playwright) =="
 node "$DIR/merge-review.browser.test.js" || fail=1
 echo ""
+echo "== node: project-card layout geometry in a real browser (skips without Playwright) =="
+node "$DIR/card-layout.browser.test.js" || fail=1
+echo ""
 echo "== node: project cards (behavioral, runs the shipped fold + card extras) =="
 node "$DIR/stack-fold.test.js" || fail=1
 echo ""

@@ -8150,7 +8150,9 @@ local HTML = [[
   #grid { display:grid; gap:var(--gap); padding:var(--pad); }
   .tile { cursor:pointer; position:relative; }
   .tile.sel { outline:2px solid var(--accent); outline-offset:1px; }
-  .tile.stale { opacity:.45; }
+  /* 2026-09-17: a quiet card read as faded-out when it was in fact waiting for Adam.
+     Only a genuinely idle card fades now (tileHtml's staleDim), and more gently. */
+  .tile.stale { opacity:.6; }
   /* collision (Feature B): amber ring. Defined BEFORE .escalate so the red
      escalate ring wins when a tile is somehow both. */
   .tile.collide { box-shadow:0 0 0 2px var(--warn), 0 0 10px var(--warn); }
@@ -8197,6 +8199,13 @@ local HTML = [[
     color:var(--ok); border:1px solid #2f6b43; background:#1c2a20; }
   .bg-run .spin { display:inline-block; animation:spin 1.4s linear infinite; }
   @keyframes spin { to { transform:rotate(360deg); } }
+  /* 2026-09-17: .srow (dot + status line) and .badges (risk / PR / background agents) are
+     grouping wrappers the CARDS theme lays out. Every other theme places .dot / .label /
+     the badges itself, so here the wrappers vanish and their children stay DIRECT tile
+     children -- display:contents, which is what keeps bar / dots / contrast laid out as
+     before. The one knock-on: the dot's markup now follows .name, so the two flex-row
+     themes give it order:-1 to keep it leading (.theme-bar .dot / .theme-dots .dot). */
+  .srow, .badges { display:contents; }
   .name { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .dot  { border-radius:50%; flex:0 0 auto; }
   .meta { font-size:11px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -8216,6 +8225,7 @@ local HTML = [[
   .ctx-bar.b6 { animation:pulse 1.6s ease-in-out infinite; }
   .ctx-bar .pct { position:absolute; top:50%; right:4px; transform:translateY(-50%); font-size:9px; line-height:1;
                   font-weight:600; color:#fff; text-shadow:0 0 2px rgba(0,0,0,.95), 0 0 3px rgba(0,0,0,.85); pointer-events:none; }
+  .theme-cards .ctx-bar { margin-top:auto; }  /* 2026-09-17: bars line up along a row's bottom edge */
   .theme-bar .ctx-bar, .theme-dots .ctx-bar { display:none; }  /* compact themes: badge in detail only */
   /* usage footer under the grid */
   #usage-foot { border-top:1px solid var(--border); padding:6px 10px; font-size:11px; color:var(--text-3); }
@@ -8430,17 +8440,31 @@ local HTML = [[
 
   /* THEME: cards (default) ------------------------------------------------ */
   .theme-cards #grid { grid-template-columns:repeat(auto-fill,minmax(var(--tile-min),1fr)); }
-  .theme-cards .tile { display:grid; grid-template-areas:"name name" "dot label" "meta meta";
-                       grid-template-columns:auto 1fr; gap:4px 8px; align-items:center;
+  /* 2026-09-17: a FLEX COLUMN, not a grid. As a grid whose implicit auto rows shared the
+     surplus height, a sparse card stretched to its row-neighbour spread its few rows apart
+     with big dead gaps; and .label living in grid column 2 indented the status row away from
+     the title's left edge. Now every row is a full-width column child on one left edge, the
+     rows stay packed at the top, and .ctx-bar's margin-top:auto lines the bars up along the
+     row's bottom edge. */
+  .theme-cards .tile { display:flex; flex-direction:column; align-items:stretch; gap:4px;
                        background:var(--surface); border:1px solid var(--border); border-radius:var(--radius-lg);
                        box-shadow:var(--shadow);
                        padding:var(--pad) calc(var(--pad) + 2px); transition:transform .06s, background .15s, box-shadow .15s, border-color .15s; }
   .theme-cards .tile:hover  { background:var(--surface-hover); }
   .theme-cards .tile:active { transform:scale(.98); }
-  .theme-cards .name  { grid-area:name; color:var(--text); font-size:14px; font-weight:600; }
-  .theme-cards .dot   { grid-area:dot; width:10px; height:10px; background:var(--c); }
-  .theme-cards .label { grid-area:label; font-size:12px; color:var(--text-3); }
-  .theme-cards .meta  { grid-area:meta; }
+  .theme-cards .name  { color:var(--text); font-size:14px; font-weight:600; }
+  .theme-cards .dot   { width:10px; height:10px; background:var(--c); }
+  /* the status row: dot · age · status words · branch chip, all on ONE line. The chip
+     ellipsises in place (flex:0 1 auto + min-width:0) instead of wrapping under the text. */
+  .theme-cards .srow  { display:flex; align-items:center; gap:6px; min-width:0; }
+  .theme-cards .label { display:flex; align-items:center; gap:6px; flex:1 1 auto; min-width:0;
+                        white-space:nowrap; overflow:hidden; font-size:12px; color:var(--text-3); }
+  .theme-cards .stk-br { flex:0 1 auto; min-width:0; max-width:none; margin-left:0; }
+  /* risk / PR / background agents share ONE row, each sized to its own content (the column
+     would otherwise give each badge a full-width row of its own). */
+  .theme-cards .badges { display:flex; align-items:center; justify-content:flex-start;
+                         flex-wrap:wrap; gap:6px; min-width:0; }
+  .theme-cards .badges > * { margin-left:0; flex:0 0 auto; }
   .theme-cards .s-approval { border-color:var(--c); }
   .theme-cards .s-approval .dot, .theme-cards .s-error .dot { animation:pulse 1s infinite; }
 
@@ -8450,7 +8474,9 @@ local HTML = [[
                      background:var(--surface); border:1px solid var(--border); border-radius:999px;
                      padding:6px 12px; }
   .theme-bar .tile:hover { background:var(--surface-hover); }
-  .theme-bar .dot   { width:9px; height:9px; background:var(--c); }
+  /* 2026-09-17: the dot's markup moved INSIDE the status row (.srow, display:contents here),
+     which put it after .name in this theme's flex order -- order:-1 keeps it leading the pill. */
+  .theme-bar .dot   { width:9px; height:9px; background:var(--c); order:-1; }
   .theme-bar .name  { color:var(--text); font-size:13px; font-weight:600; }
   .theme-bar .label, .theme-bar .meta { display:none; }
   .theme-bar .s-approval .dot, .theme-bar .s-error .dot { animation:pulse 1s infinite; }
@@ -8472,7 +8498,7 @@ local HTML = [[
   .theme-dots .tile { display:flex; align-items:center; gap:8px; padding:5px 8px;
                       border-radius:6px; }
   .theme-dots .tile:hover { background:var(--surface); }
-  .theme-dots .dot   { width:8px; height:8px; background:var(--c); }
+  .theme-dots .dot   { width:8px; height:8px; background:var(--c); order:-1; }  /* leads the row -- see .theme-bar .dot */
   .theme-dots .name  { color:var(--text-2); font-size:12px; }
   .theme-dots .label, .theme-dots .meta { display:none; }
   .theme-dots .s-approval .dot, .theme-dots .s-error .dot { animation:pulse 1s infinite; }
@@ -8493,6 +8519,8 @@ local HTML = [[
   .theme-bar .stk-btn:not(.multi):not(.needs), .theme-dots .stk-btn:not(.multi):not(.needs) { opacity:.55; }
   .theme-cards .tile:has(.stk-btn:active) { transform:none; }         /* pressing the button doesn't press the card */
   .tile.sel.sel-other { outline-style:dashed; }                       /* the card holds the selected instance, but draws another */
+  /* the 9em cap keeps the chip inside its cell in the grid-laid themes; the CARDS theme
+     lifts it (max-width:none) because there the chip is a flex item that sizes itself. */
   .stk-br { display:inline-block; max-width:9em; vertical-align:bottom; margin-left:5px; padding:0 5px; font-size:10px;
             color:var(--text-3); border:1px solid var(--border); border-radius:6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .stk-also { grid-column:1 / -1; font-size:11px; color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -10261,6 +10289,11 @@ local HTML = [[
     // but its units are working -- the card says so instead of a green "Ready for you" (core.isDriving).
     function isDriving(it){ return !!(it && it.fleet && it.fleet.phase === "approved" && (it.status === "done" || it.status === "idle")); }
     function effStatus(it){ return needsYouNow(it) ? "approval" : ((bgRunning(it) || isDriving(it)) ? "working" : ((it && it.status) || "idle")); }
+    // 2026-09-17: every card whose status file was older than 90s faded to .45, so a quiet
+    // "Ready for you" -- and a card waiting on Adam -- read as dead. Only a genuinely IDLE
+    // card dims now: effStatus already lifts needs-you, a running batch and live background
+    // agents out of "idle", so this one check covers all of them.
+    function staleDim(it){ return !!(it && it.stale && effStatus(it) === "idle"); }
     function statusWords(it){
       if(needsYouNow(it)) return LABELS.approval;
       if(isDriving(it)){ var nu = (it.fleet.units || []).length; return "Driving " + nu + " unit" + (nu === 1 ? "" : "s"); }
@@ -15601,22 +15634,27 @@ local HTML = [[
       if(it.hung){ meta = (meta ? meta + " · " : "") + "⏳ stalled"; }
       if(it.looping){ meta = (meta ? meta + " · " : "") + "⟳ looping"; }   // L5 loop watchdog
       if(it.churn){ meta = (meta ? meta + " · " : "") + "♻️" + it.churn; }   // respawn/clear churn today
-      var cls = "tile s-" + stCls + (it.stale && !bgRunning(it) ? " stale" : "") + (it.collide ? " collide" : "") + (it.hung ? " hung" : "") + (it.escalate ? " escalate" : "") + ((it.merge && it.merge.needsYou) || (it.fleet && it.fleet.needsYou) ? " merge" : "") + (needsYouNow(it) ? " needs" : "") + (it.key === selectedKey ? " sel" : "");
+      var cls = "tile s-" + stCls + (staleDim(it) ? " stale" : "") + (it.collide ? " collide" : "") + (it.hung ? " hung" : "") + (it.escalate ? " escalate" : "") + ((it.merge && it.merge.needsYou) || (it.fleet && it.fleet.needsYou) ? " merge" : "") + (needsYouNow(it) ? " needs" : "") + (it.key === selectedKey ? " sel" : "");
       // select + double-click jump are decided at mousedown by onGridMouseDown (below):
       // a grid rebuild mid-press detaches the tile, so inline click handlers were lost
       // data-stack: this card's project stack (focus-group + the Instances button read it)
       return '<div class="'+cls+'" data-key="'+esc(it.key)+'"'+(it.stackKey ? ' data-stack="'+esc(it.stackKey)+'"' : '')+' oncontextmenu="showCtx(event,\''+esc(it.key)+'\')" title="Double-click to jump to the instance that needs you · right-click for more">'
-           + '<span class="dot"></span>'
            + '<span class="name">'+(it.stackName ? esc(it.stackName) : esc(it.label || it.autoTitle || it.name))+(it.group ? ' <span class="gtag">🏷 '+esc(it.group)+'</span>' : '')+'</span>'
-           + '<span class="label">'+(age ? '<span class="age">'+esc(age)+'</span> ' : '')+label+stackBranchChip(it)+'</span>'
-           + riskBadge(it)
-           + prBadgeHtml(it)
-           + bgBadge(it)
+           + '<span class="srow"><span class="dot"></span>'
+           + '<span class="label">'+(age ? '<span class="age">'+esc(age)+'</span> ' : '')+label+stackBranchChip(it)+'</span></span>'
+           + badgesHtml(it)
            + (meta ? '<span class="meta">'+esc(meta)+'</span>' : '')
            + stackAlsoHtml(it)
            + ctxBarHtml(it)
            + stackBtnHtml(it)
            + '</div>';
+    }
+    // 2026-09-17: risk / PR / background-agents used to be loose siblings, each taking a tile
+    // row of its own in the cards theme. One badges row now holds them -- emitted ONLY when at
+    // least one badge exists, so a card without any gains no empty row.
+    function badgesHtml(it){
+      var b = riskBadge(it) + prBadgeHtml(it) + bgBadge(it);
+      return b ? '<span class="badges">'+b+'</span>' : "";
     }
     // ---- Project stacks: the card's extras ----------------------------------------
     // Branch chip only where it tells instances apart (a multi-instance card, or a lone

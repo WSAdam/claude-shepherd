@@ -4,6 +4,32 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-17 — Project cards read as one column again
+
+### Fixed — a sparse card's rows spread apart, its branch chip wrapped, and quiet cards looked dead
+
+Three things about the FLEET grid's cards theme, from a screenshot:
+
+- **Dead gaps.** `#grid` stretches every tile to its row's tallest, and `.tile` was itself a
+  grid whose implicit auto rows (badges, "also", context bar) shared that surplus height — so a
+  sparse card's few rows drifted apart. `.tile` is a **flex column** now, with `.ctx-bar`
+  carrying `margin-top:auto`: content stays packed at the top and the context bars line up along
+  the row's bottom edge.
+- **The indented status line.** `.label` sat in grid column 2, so the age, status words and
+  branch chip started right of the title's left edge — and with no `nowrap` on `.label` and a
+  `max-width:9em` chip, a long status line wrapped the chip onto a second line. The status dot
+  now leads a one-line status row (`.srow`), the chip ellipsises in place, and title, status row,
+  badges, speech-bubble line and bar all share one left edge. Risk, PR and background-agent
+  badges are one `.badges` row, emitted only when at least one exists.
+- **Dimmed while waiting.** `.tile.stale` faded every card whose status file was over 90s old,
+  so a quiet "Ready for you" (and a card waiting on Adam) read as dead. Only a genuinely idle
+  card dims now (`staleDim`), and at `.6` rather than `.45`.
+
+`.srow` and `.badges` are `display:contents` outside the cards theme, so the bar, dots and
+contrast themes place `.dot`, `.label` and the badges exactly as before (the dot takes
+`order:-1` in bar/dots, where the markup move would otherwise have put it after the name).
+`tests/card-layout.browser.test.js` measures all of it as geometry in a real browser.
+
 ## 2026-09-17 — A clone has everything the install reads
 
 ### Fixed — a coworker's clone had no default settings, and its install stopped in the test gate
