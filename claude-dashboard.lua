@@ -2674,6 +2674,17 @@ function FX.closeTab(it, opts)
   return true
 end
 
+-- Wait for the bridge's answer to a command (FX.tabBridgePollResults reads it).
+function FX.tabBridgeTrack(id, pending)
+  FX._tabBridgePending[id] = pending
+  if not FX._tabBridgeTimer then
+    FX._tabBridgeTimer = hs.timer.doEvery(0.5, function()
+      FX.tabBridgePollResults()
+      if next(FX._tabBridgePending) == nil and FX._tabBridgeTimer then FX._tabBridgeTimer:stop(); FX._tabBridgeTimer = nil end
+    end)
+  end
+end
+
 -- Collect the bridge's answers: ok -> the tab is gone, drop the card; refused -> say why;
 -- no answer within FX.TAB_BRIDGE_ANSWER_WAIT -> withdraw the command so it can't fire late.
 function FX.tabBridgePollResults()
@@ -2684,7 +2695,15 @@ function FX.tabBridgePollResults()
       os.remove(resFile)
       FX._tabBridgePending[id] = nil
       local ok, res = pcall(function() return core.json.decode(raw) end)
-      if p.op == "close-empty" and ok and type(res) == "table" and res.ok == true then
+      if p.op == "expect" then
+        if ok and type(res) == "table" and res.ok == true then
+          print("[cc-dashboard] ✅ the Shepherd tab bridge (host " .. p.hw .. ") will tag " .. p.name .. "'s tab")
+        else
+          local why = (ok and type(res) == "table" and res.reason) or "no reason given"
+          print("[cc-dashboard] ❌ the Shepherd tab bridge (host " .. p.hw .. ") won't tag " .. p.name .. "'s tab: " .. tostring(why))
+          pcall(function() FX.alert(p.name:gsub("^%l", string.upper) .. "'s tab won't close by itself after its merge: " .. tostring(why)) end)
+        end
+      elseif p.op == "close-empty" and ok and type(res) == "table" and res.ok == true then
         -- which of the identical empty chats went is unknown: its own SessionEnd clears its card
         print("[cc-dashboard] ✅ the Shepherd tab bridge closed an empty chat (host " .. p.hw .. ")")
       elseif p.op == "select" then   -- bringing a tab forward: logged, never alerted
@@ -2703,6 +2722,9 @@ function FX.tabBridgePollResults()
       FX._tabBridgePending[id] = nil
       if p.op == "select" then
         print("[cc-dashboard] ⚠️ the tab bridge didn't answer a select for '" .. p.name .. "'")
+      elseif p.op == "expect" then
+        print("[cc-dashboard] ⚠️ the Shepherd tab bridge (host " .. p.hw .. ") didn't answer the expect for " .. p.name)
+        pcall(function() FX.alert(p.name:gsub("^%l", string.upper) .. "'s tab won't close by itself after its merge: its window's tab bridge didn't answer") end)
       else
         print("[cc-dashboard] ⚠️ the Shepherd tab bridge (host " .. p.hw .. ") didn't answer -- close of '" .. p.name .. "' withdrawn")
         pcall(function() FX.alert("The Shepherd tab bridge didn't answer, so " .. p.name .. "'s tab is still open.") end)
@@ -2902,6 +2924,20 @@ end
 -- Open a unit's tab: an empty Claude tab in the repo's window; FX.fleetTabPoll then finds the
 -- new session. One tab opening per repo at a time, so two new sessions can't be confused.
 function FX.fleetOpenTab(b, slug, req)
+  -- 2026-09-17: a window still running a bridge without "expect" refuses the unit's tag, and the
+  -- tab could never be closed after its merge (2026-09-15, bridge 0.1.0). Refuse before opening.
+  -- (A window Shepherd has to open loads the installed bridge, so only an open one is checked.)
+  do
+    local host = FX.fleetRepoHost(b.repo)
+    local reg = host and FX.tabBridgeRegistry(host)
+    if type(reg) == "table" and not core.tabBridgeSupports(reg.version, "expect") then
+      local why = b.repo .. "'s VS Code window runs tab bridge " .. tostring(reg.version or "?")
+        .. ", which can't tag a unit's tab -- Developer: Reload Window there, then ask again"
+      print("[cc-dashboard] ⚠️ didn't open unit " .. slug .. "'s tab: " .. why)
+      FX.fleetAnswer(b.id, slug, { nonce = req.nonce, ok = false, reason = why })
+      return
+    end
+  end
   local state = FX.fleetState(b.id)
   local key = b.id .. "|" .. slug
   local t = { at = FX.now(), nonce = req.nonce, repo = b.repo }
@@ -2925,6 +2961,8 @@ function FX.fleetOpenTab(b, slug, req)
       if host then
         local cmd = core.tabBridgeCommand("expect-" .. slug, nil, FX.now(), "expect", core.fleetUnitTag(b.id, slug))
         FX.writeFileAtomic(FX.TAB_BRIDGE_DIR .. "/" .. host .. ".in/" .. cmd.id .. ".json", core.json.encode(cmd))
+        -- 2026-09-17: its answer is read, so a refused tag is said now, not found at merge time
+        FX.tabBridgeTrack(cmd.id, { op = "expect", hw = host, label = core.fleetUnitTag(b.id, slug), name = "unit " .. slug, at = FX.now() })
       end
     end,
     onDone = function(sent, why)

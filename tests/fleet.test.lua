@@ -33,7 +33,9 @@ local function status(key, cwd, pid, extra)
 end
 status("drv", "/r/A", "4242")
 write(SD .. "/4242.json", json.encode({ pid = 4242, sessionId = "drv", name = "A-drv", cwd = "/r/A" }))
-write(BR .. "/701.json", json.encode({ v = 1, pid = 701, version = "0.2.0", folders = { "/r/A" }, tabs = {}, at = now }))
+-- 2026-09-17 requirement change: this was 0.2.0, but a unit's tab now opens only in a window
+-- whose bridge can tag it ("expect", 0.3.0+), so the healthy window runs the current bridge.
+write(BR .. "/701.json", json.encode({ v = 1, pid = 701, version = "0.4.0", folders = { "/r/A" }, tabs = {}, at = now }))
 write(FD .. "/b1.json", json.encode({ v = 1, id = "b1", nonce = "n-b1", driver = { session_id = "drv", pid = "4242", name = "A-drv" },
   repo = "/r/A", commonDir = "/r/A/.git", title = "Two helpers", mergeWhenGreen = true, at = now, phase = "proposed",
   units = { { type = "feat", slug = "alpha", task = "Add alpha.", branch = "feat/alpha" },
@@ -279,6 +281,44 @@ tick()
 local s3 = decoded(FD .. "/b3.state.json")
 check("a batch whose repo is gone ends itself", s3 and s3.grant and s3.grant.stopped == true and s3.grant.finished == "its repo is gone")
 alerts = {}
+
+-- ---- a unit's tab and an out-of-date tab bridge (2026-09-17) ----
+-- 2026-09-15 live: ChargebackSentinel's window still ran tab bridge 0.1.0, which has no "expect";
+-- it refused every unit's expect ("unknown op"), nobody read the answer, and no unit's tab ever
+-- closed after its merge -- found only at merge time as "no tab in its window is tagged".
+do
+  local before = #opened
+  write(BR .. "/701.json", json.encode({ v = 1, pid = 701, version = "0.1.0", folders = { "/r/A" }, tabs = {}, at = os.time() }))
+  write(FD .. "/b1.tab-beta.json", json.encode({ v = 1, batch = "b1", slug = "beta", session_id = "drv", nonce = "t-beta-old", at = os.time() }))
+  tick()
+  local old = decoded(FD .. "/b1.tab-beta.answer")
+  check("a unit's tab is refused up front when its window's tab bridge can't tag it  (" .. tostring(old and old.reason) .. ")",
+        old and old.ok == false and old.nonce == "t-beta-old" and tostring(old.reason):find("Reload Window", 1, true) ~= nil)
+  check("...and no tab is opened for it", #opened == before)
+  os.remove(FD .. "/b1.tab-beta.answer"); os.remove(FD .. "/b1.tab-beta.json")
+  fx._fleetTabs["b1|beta"] = nil
+
+  write(BR .. "/701.json", json.encode({ v = 1, pid = 701, version = "0.4.0", folders = { "/r/A" }, tabs = {}, at = os.time() }))
+  write(FD .. "/b1.tab-beta.json", json.encode({ v = 1, batch = "b1", slug = "beta", session_id = "drv", nonce = "t-beta-new", at = os.time() }))
+  tick()
+  check("a window whose bridge can tag the unit's tab gets it opened", #opened == before + 1)
+  alerts = {}
+  quiet(function() opened[#opened].beforeOpen() end)
+  local exp2
+  for _, c in ipairs(inboxCmds()) do if c.op == "expect" and c.unit == "b1:beta" then exp2 = c end end
+  check("...after telling its bridge to expect it", exp2 ~= nil)
+  if exp2 then
+    os.remove(BR .. "/701.in/" .. exp2.id .. ".json")
+    write(BR .. "/701.out/" .. exp2.id .. ".json", json.encode({ v = 1, id = exp2.id, ok = false, reason = "unknown op" }))
+  end
+  quiet(function() fx.tabBridgePollResults() end)
+  check("a refused expect warns that the unit's tab won't close after its merge",
+        alerted("beta") >= 1 and alerted("unknown op") >= 1)
+  check("...and the answer is collected", exp2 and read(BR .. "/701.out/" .. exp2.id .. ".json") == nil)
+  os.remove(FD .. "/b1.tab-beta.answer"); os.remove(FD .. "/b1.tab-beta.json")
+  fx._fleetTabs["b1|beta"] = nil
+  alerts = {}
+end
 
 -- Stop
 quiet(function() fx.batchStop("drv", "b1") end)

@@ -2,7 +2,7 @@
   "name": "shepherd-bridge",
   "displayName": "Shepherd Bridge",
   "description": "Lets Claude Shepherd, the local Hammerspoon fleet console, see this window's Claude Code tabs and close or bring forward one by name. Local files only, no network.",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "publisher": "local",
   "license": "MIT",
   "engines": {

@@ -169,6 +169,7 @@ Module._load = realLoad;
   const ctx = { subscriptions: subs, extension: { packageJSON: pkg } };
   ext.activate(ctx);
   const regFile = path.join(DIR, process.pid + ".json");
+  const regTabs0 = () => JSON.parse(fs.readFileSync(regFile, "utf8")).tabs;
   check("activate writes this window's registry, named by the extension host pid", fs.existsSync(regFile));
   const r = JSON.parse(fs.readFileSync(regFile, "utf8"));
   eq("...listing its Claude tabs only", r.tabs.length, 3);
@@ -223,7 +224,7 @@ Module._load = realLoad;
   await ext._test.processInbox();
   check("select: two tabs sharing the name -> refused, no command run", (result("s2") || {}).ok === false && executed.length === 0);
   check("select: no tab with the name -> refused", (result("s3") || {}).ok === false);
-  eq("the registry reports the bridge's version", JSON.parse(fs.readFileSync(regFile, "utf8")).version, "0.4.0");   // 2026-09-11: 0.4.0 closes empty chats
+  eq("the registry reports the bridge's version", JSON.parse(fs.readFileSync(regFile, "utf8")).version, "0.5.0");   // 2026-09-11: 0.4.0 closes empty chats; 2026-09-17: 0.5.0 tags a unit tab that opened just before its expect
 
   // 2026-09-11: a tab Shepherd opens for a batch unit never gets a name (its task arrives by
   // message, so no chat title) -- every such tab reads "Claude Code". The bridge remembers the
@@ -257,6 +258,41 @@ Module._load = realLoad;
   send({ v: 1, id: "u3", op: "close", unit: "b1:cheer", at: at() });
   await ext._test.processInbox();
   check("close by unit: once it's gone, refused", (result("u3") || {}).ok === false);
+  // 2026-09-17: Shepherd writes the expect and opens the tab a moment later; if the tab opens
+  // before the bridge reads its inbox (a window just starting), the old bridge waited for a
+  // NEXT tab -- the unit's own stayed untagged and could never be closed by its tag.
+  liveGroups[0].tabs.splice(liveGroups[0].tabs.indexOf(later), 1);   // closed: no other tab just opened
+  const early = claudeTab("Claude Code");
+  liveGroups[0].tabs.push(early);
+  tabListeners.forEach((cb) => cb({ opened: [early], closed: [], changed: [] }));
+  send({ v: 1, id: "e3", op: "expect", unit: "b1:wave", at: at() });
+  await ext._test.processInbox();
+  ext._test.writeRegistry();
+  check("expect: a Claude tab that opened just before the expect arrived is that unit's",
+        (result("e3") || {}).ok === true && regTabs0().filter((t) => t.unit === "b1:wave").length === 1);
+  const after = claudeTab("Claude Code");
+  liveGroups[0].tabs.push(after);
+  tabListeners.forEach((cb) => cb({ opened: [after], closed: [], changed: [] }));
+  ext._test.writeRegistry();
+  eq("expect: ...and the next tab to open is not tagged too", regTabs0().filter((t) => t.unit === "b1:wave").length, 1);
+  const older = claudeTab("Claude Code");
+  liveGroups[0].tabs.push(older);
+  tabListeners.forEach((cb) => cb({ opened: [older], closed: [], changed: [] }));
+  send({ v: 1, id: "e4", op: "expect", unit: "b1:bye", at: at() + 4 });
+  await ext._test.processInbox();
+  ext._test.writeRegistry();
+  check("expect: a tab that opened well before the expect was written is not the unit's",
+        (result("e4") || {}).ok === true && regTabs0().filter((t) => t.unit === "b1:bye").length === 0);
+  const unitTab = claudeTab("Claude Code");
+  liveGroups[0].tabs.push(unitTab);
+  tabListeners.forEach((cb) => cb({ opened: [unitTab], closed: [], changed: [] }));
+  ext._test.writeRegistry();
+  check("expect: ...it waits for the unit's tab to open instead", regTabs0().filter((t) => t.unit === "b1:bye").length === 1);
+  liveGroups[0].tabs.splice(liveGroups[0].tabs.indexOf(early), 1);
+  liveGroups[0].tabs.splice(liveGroups[0].tabs.indexOf(after), 1);
+  liveGroups[0].tabs.splice(liveGroups[0].tabs.indexOf(older), 1);
+  liveGroups[0].tabs.splice(liveGroups[0].tabs.indexOf(unitTab), 1);
+  ext._test.writeRegistry();
   // an empty chat: any untagged "Claude Code" tab, when Shepherd's count matches
   liveGroups[0].tabs.push(claudeTab("Claude Code"), claudeTab("Claude Code"));
   ext._test.writeRegistry();

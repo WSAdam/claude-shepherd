@@ -31,6 +31,8 @@ let busy = false;
 const EXPECT_MS = 90000;
 const unitTags = new WeakMap();   // tab -> unit tag ("<batch>:<slug>"): tabs this bridge saw open for a unit
 let expecting = null;             // { unit, until }: tag the next Claude tab that opens
+const openedAt = new WeakMap();   // tab -> ms it was seen opening (a unit's tab may open before its expect is read)
+const EXPECT_EARLY_MS = 2000;     // a tab that opened this long before the expect was written can still be the unit's
 
 function log(msg) { if (out) out.appendLine(new Date().toISOString() + " " + msg); }
 
@@ -44,6 +46,9 @@ function snapshot() { return lib.claudeTabs(vscode.window.tabGroups.all, (t) => 
 
 // A tab opened while Shepherd is expecting one becomes that unit's tab (it never gets a name).
 function onTabsChanged(e) {
+  if (e && Array.isArray(e.opened)) {
+    for (const tab of e.opened) if (lib.isClaudeTab(tab)) openedAt.set(tab, Date.now());
+  }
   if (expecting && e && Array.isArray(e.opened)) {
     if (Date.now() > expecting.until) expecting = null;
     for (const tab of e.opened) {
@@ -103,6 +108,24 @@ async function processInbox() {
         continue;
       }
       if (v.cmd.op === "expect") {
+        // 2026-09-17: the unit's tab may already have opened (Shepherd writes the expect, then opens
+        // the tab; a window that's just starting reads its inbox late). Exactly one untagged Claude
+        // tab seen opening since just before the expect was written is the unit's.
+        const since = Number(cmd.at) * 1000 - EXPECT_EARLY_MS;   // validateCommand checked cmd.at
+        const early = [];
+        for (const g of vscode.window.tabGroups.all) {
+          for (const t of g.tabs) {
+            if (lib.isClaudeTab(t) && !unitTags.has(t) && (openedAt.get(t) || 0) >= since) early.push(t);
+          }
+        }
+        if (early.length === 1) {
+          unitTags.set(early[0], v.cmd.unit);
+          expecting = null;
+          log("✅ the Claude tab that just opened is unit " + v.cmd.unit);
+          answer(id, { ok: true });
+          scheduleWrite();
+          continue;
+        }
         expecting = { unit: v.cmd.unit, until: Date.now() + EXPECT_MS };
         log("🔍 expecting a new Claude tab for unit " + v.cmd.unit);
         answer(id, { ok: true });

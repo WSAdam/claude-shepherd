@@ -4,6 +4,24 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-17 — A batch unit's tab can be closed again
+
+### Fixed — no batch unit's tab ever closed after its merge
+
+In both ChargebackSentinel batches on 2026-09-15, every unit merged but its tab stayed open:
+*no tab in its window is tagged as unit …*. That window had loaded tab bridge 0.1.0 before the bridge
+learned `expect` (0.3.0), so it refused every unit's tag as "unknown op" — the answers were still on
+disk, never read — and Shepherd answered the tab request ok anyway. Now:
+- a unit's tab is refused up front when its window's bridge is too old to tag it, with
+  *Developer: Reload Window there, then ask again* (`core.tabBridgeSupports`);
+- Shepherd reads the bridge's answer to every expect and toasts when a tag is refused or unanswered;
+- the bridge (0.5.0) also tags a unit's tab that opened a moment before the expect was read (a window
+  just starting reads its inbox late), when it is the only untagged Claude tab that just opened.
+
+Fixtures: the out-of-date-bridge block in tests/fleet.test.lua, `tabBridgeSupports` in
+tests/core.test.lua, the early-tab cases in tests/bridge.test.js. Requirement change: the fleet
+suite's healthy window now reports bridge 0.4.0 (it said 0.2.0, which can't tag a unit's tab).
+
 ## 2026-09-17 — A quiet Hammerspoon console
 
 ### Fixed — "LuaSkin: Error deserialising JSON" every 30 seconds

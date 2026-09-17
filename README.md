@@ -244,7 +244,11 @@ Ask a Claude session to run several units in parallel and it can drive the whole
    what it asked for — untick it to keep merges for yourself. **Approve batch** or **Deny** (+ a note).
 3. On approval it runs `cc-fleet.sh tab --batch <id> --unit <name>` per unit: Shepherd opens an
    empty Claude tab in the repo's window, works out which new session is that tab (one tab opening
-   per repo at a time), and hands back its name and the unit's message. The driver sends it with
+   per repo at a time), and hands back its name and the unit's message. First it tells that window's
+   tab bridge to tag the new tab as the unit's (the tab never gets a name, so the tag is how Shepherd
+   closes it after the merge); a window still running a bridge too old to tag it is refused up front
+   with *Developer: Reload Window there, then ask again*, and a tag the bridge refuses raises a toast
+   at once instead of surfacing at merge time. The driver sends it with
    **SendMessage** — the tab starts working with no Enter pressed, under its own permissions — and
    gets notified when the unit goes idle. While the batch runs, the driver's card reads **Driving N
    units** in the working colour and stays ahead of its units (anything that needs you still leads).
@@ -1221,7 +1225,8 @@ picks one — but they're interchangeable. A card whose window has any shows *�
 this window (never used)* with **Close them** (and each gets **Close** in the Instances view); the
 bridge (0.4.0) then closes any untagged "Claude Code" tab, and only while their number still equals
 the empty sessions Shepherd counted there, so a restored old chat (which also reads "Claude Code")
-is never closed by mistake. `"tabBridge": { "enabled": false }` in `~/.claude/cc-config.json` stops Shepherd using
+is never closed by mistake. A batch unit's tab is tagged instead of named (0.3.0+; since 0.5.0 also
+when the tab opened a moment before the tag request arrived). `"tabBridge": { "enabled": false }` in `~/.claude/cc-config.json` stops Shepherd using
 it (it's not the SSH remote `"bridge"` section, which mirrors other machines' sessions).
 
 ### Shepherd.app — a Dock launcher

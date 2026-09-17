@@ -834,6 +834,15 @@ local function versionAtLeast(v, want)
   return true
 end
 
+-- 2026-09-17: which bridge build first knew each op. A window keeps the bridge it loaded until
+-- Developer: Reload Window, and an older one refuses a newer op as "unknown op".
+M.TAB_BRIDGE_OP_SINCE = { close = "0.1.0", select = "0.2.0", expect = "0.3.0" }
+function M.tabBridgeSupports(version, op)
+  local since = M.TAB_BRIDGE_OP_SINCE[op]
+  if not since or type(version) ~= "string" or not version:match("^%d+%.%d+") then return false end
+  return versionAtLeast(version, since)
+end
+
 function M.emptyChatsVerdict(reg, emptyCount, now)
   emptyCount = math.floor(tonumber(emptyCount) or 0)
   if emptyCount < 1 then return false, "no empty chats in that window" end

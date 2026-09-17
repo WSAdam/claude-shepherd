@@ -9168,6 +9168,15 @@ do
   local uc = core.tabBridgeCommand("k", nil, 5, "close", "b1:cheer")
   check("unit tab: the command names the unit, not a label", uc.unit == "b1:cheer" and uc.label == nil and uc.op == "close")
   eq("unit tab: the batch unit's tag", core.fleetUnitTag("b1", "cheer"), "b1:cheer")
+  -- 2026-09-15 live: windows still ran tab bridge 0.1.0, which refuses "expect" as an unknown op
+  check("bridge ops: 0.1.0 can close but not select or expect",
+        core.tabBridgeSupports("0.1.0", "close") and not core.tabBridgeSupports("0.1.0", "select")
+        and not core.tabBridgeSupports("0.1.0", "expect"))
+  check("bridge ops: 0.2.0 selects, 0.3.0 and later expect",
+        core.tabBridgeSupports("0.2.0", "select") and not core.tabBridgeSupports("0.2.9", "expect")
+        and core.tabBridgeSupports("0.3.0", "expect") and core.tabBridgeSupports("0.10.0", "expect"))
+  check("bridge ops: an unknown version or op is not supported",
+        not core.tabBridgeSupports(nil, "close") and not core.tabBridgeSupports("0.4.0", "rename"))
   local tlist = { { key = "u1", editor = "vscode", host_window = "9" }, { key = "u2", editor = "vscode", host_window = "9" } }
   local treg = { ["9"] = { at = 995, tabs = { { label = "Claude Code", unit = "b1:cheer" } } } }
   local tl2 = core.tablessKeys(tlist, treg, { u1 = { "Claude Code", "unit:b1:cheer" }, u2 = { "Old chat" } }, 1000)

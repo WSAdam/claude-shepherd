@@ -68,7 +68,10 @@ and the README's "Testing & development" section.
   only while that count equals Shepherd's empty sessions there (`core.emptyChatsVerdict`) -- a
   restored old chat reads "Claude Code" too but has no session. Never add another op, and never use the
   Claude URI to reveal a tab (D-14). Bump its `package.json` version with every change, or
-  `make install` won't reinstall it; running windows pick it up after a reload.
+  `make install` won't reinstall it; running windows pick it up after a reload. A window keeps
+  the bridge it loaded, so before relying on an op check `core.tabBridgeSupports(reg.version, op)`
+  and read every command's answer (`FX.tabBridgeTrack`) -- on 2026-09-15 every expect went to a
+  0.1.0 window, was refused as "unknown op" unread, and no unit's tab ever closed.
 - The tab bridge's switch is `tabBridge.*`; plain `bridge.*` is the SSH remote bridge
   (`FX.bridgeSync`). Keep the two apart in config keys, names and wording.
 - Ready to merge is its own channel (`cc-merge.sh`, `~/.claude/cc-merge/`), not the approval
