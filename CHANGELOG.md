@@ -4,6 +4,24 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-17 — A clone has everything the install reads
+
+### Fixed — a coworker's clone had no default settings, and its install stopped in the test gate
+
+`defaults/cc-config.json` was never committed: the `.gitignore` rule that keeps personal
+`cc-config.json` files out of the repo also matched it, so `git add` skipped it without a word.
+A clone installed without Adam's settings, and the uninstall suite (which checks those settings
+survive) failed the installer's test gate. The file now ships (`!/defaults/cc-config.json`);
+tests/worktree-hygiene.test.sh checks every file the installers read is tracked, and the install
+test no longer passes by comparing two missing files. Found by running the suite in a fresh clone
+with a fresh HOME, no git identity, Lua 5.5.1, Node 26, macOS's jq and no deno/hs/luacheck.
+
+### Changed — a failed test gate says what failed
+
+The abort now lists the failing tests and the path of the full test log
+(`$TMPDIR/shepherd-install-tests.log`), instead of only "SOME TESTS FAILED" thousands of lines
+below the failure.
+
 ## 2026-09-17 — Installs with Homebrew's Lua 5.5
 
 ### Fixed — a fresh install stopped in its test gate: "attempt to assign to const variable 'line'"

@@ -124,8 +124,15 @@ run_test_gate() {
   done
   [ "$missing" -eq 1 ] && exit 1
   echo "🧪 running pre-flight tests..."
-  if ! make -C "$HERE" test; then
+  # The run is kept in a log, and a failure is summarised at the end (2026-09-17: the one failing
+  # test sat thousands of lines above "SOME TESTS FAILED" on a coworker's screen).
+  local log="${CC_INSTALL_TEST_LOG:-${TMPDIR:-/tmp}/shepherd-install-tests.log}"
+  make -C "$HERE" test 2>&1 | tee "$log"
+  if [ "${PIPESTATUS[0]}" -ne 0 ]; then
     echo "❌ pre-flight tests failed — aborting before touching your settings.json/init.lua."
+    echo "   Failing:"
+    grep -E '^(FAIL - |lua: |node: )|: error:|^Error' "$log" | head -n 40 | sed 's/^/     /'
+    echo "   Full test log: $log"
     echo "   Fix the failures above, or re-run with --skip-tests to bypass."
     exit 1
   fi

@@ -37,6 +37,17 @@ for p in Scratch-pad docs/feature-mining docs/orchestrator-next.md docs/hardware
   got="$(git -C "$ROOT" ls-files -- "$p" | wc -l | tr -d ' ')"
   assert_eq "$p is not tracked in this (public) repo" "0" "$got"
 done
+# 2026-09-17 live: a coworker's clone had no defaults/cc-config.json -- the `cc-config.json` ignore
+# rule (for personal configs) silently kept it out of the commit, so his install lacked Adam's
+# settings and its test gate failed. Every file the installers read must be in a clone.
+for p in install.sh bootstrap.sh uninstall.sh "Install Shepherd.command" "Uninstall Shepherd.command" \
+         settings-hooks.json defaults/cc-config.json defaults/claude-settings.json methodology/CLAUDE.md \
+         cc-lib.sh cc-status.sh cc-approve.sh cc-popup.sh cc-merge.sh cc-fleet.sh cc-ask.sh cc-core.lua \
+         claude-dashboard.lua app/build-app.sh vscode-bridge/package.json vscode-bridge/extension.js \
+         vscode-bridge/lib.js vscode-bridge/build-vsix.sh vscode-bridge/install-vsix.sh Makefile tests/run.sh; do
+  got="$(git -C "$ROOT" ls-files -- "$p" | wc -l | tr -d ' ')"
+  assert_eq "$p is tracked, so a clone can install" "1" "$got"
+done
 for p in Scratch-pad/anything.html docs/feature-mining/x.md docs/orchestrator-next.md docs/hardware-verification.md todos.md; do
   if git -C "$REPO" check-ignore -q "$p"; then got=ignored; else got=untracked; fi
   assert_eq "$p is gitignored" "ignored" "$got"

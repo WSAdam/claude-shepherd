@@ -17,6 +17,8 @@ cc-queue/
 cc-approved/
 cc-autopilot/
 cc-config.json
+# ...but the installer's default settings ship with the repo (2026-09-17)
+!/defaults/cc-config.json
 cc-labels.json
 cc-recent-dirs.json
 *.decision

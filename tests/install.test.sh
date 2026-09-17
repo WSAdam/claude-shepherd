@@ -343,6 +343,26 @@ CC_INSTALL_SKIP_TESTS= CC_INSTALL_CLAUDE_DIR="$GCDIR" CC_INSTALL_HS_DIR="$GHDIR"
   PATH="$MAKEDIR:/usr/bin:/bin" bash "$ROOT/install.sh" >"$TMP/gate-fail.out" 2>&1
 assert_eq "gate: a red suite exits nonzero" "1" "$?"
 assert_eq "gate: prints the abort message" "1" "$(grep -Fc 'pre-flight tests failed' "$TMP/gate-fail.out")"
+# 2026-09-17 live: a coworker's install ended "SOME TESTS FAILED" with the failing test scrolled
+# thousands of lines up, so nobody could say what broke. The abort names the failures and the log.
+cat > "$MAKEDIR/make" <<EOF
+#!/usr/bin/env bash
+touch "$SENTINEL"
+echo "ok   - fine one"; echo "FAIL - alpha broke"
+for i in \$(seq 1 300); do echo "ok   - filler \$i"; done
+echo "FAIL - beta broke"; echo "❌ SOME TESTS FAILED"
+exit 1
+EOF
+chmod +x "$MAKEDIR/make"; ln -sf "$(command -v seq)" "$MAKEDIR/seq"; ln -sf "$(command -v tee)" "$MAKEDIR/tee"
+CC_INSTALL_SKIP_TESTS= CC_INSTALL_CLAUDE_DIR="$TMP/gate-list-claude" CC_INSTALL_HS_DIR="$TMP/gate-list-hs" CC_INSTALL_NO_APP=1 \
+  CC_INSTALL_TEST_LOG="$TMP/gate-list.log" PATH="$MAKEDIR:/usr/bin:/bin" bash "$ROOT/install.sh" >"$TMP/gate-list.out" 2>&1
+tail_after_abort="$(sed -n '/pre-flight tests failed/,$p' "$TMP/gate-list.out")"
+assert_eq "gate: the abort lists each failing test after the message" "2" \
+  "$(printf '%s\n' "$tail_after_abort" | grep -cE '^ *FAIL - (alpha|beta) broke')"
+assert_eq "gate: ...and says where the full test log is" "1" \
+  "$(printf '%s\n' "$tail_after_abort" | grep -Fc "$TMP/gate-list.log")"
+assert_eq "gate: ...which holds the whole run" "1" "$(grep -c 'filler 300' "$TMP/gate-list.log" 2>/dev/null || true)"
+write_fake_make 1
 # 2026-09-15 requirement change: the copy ran BEFORE the gate, so a red suite still put the
 # untested hook scripts where the already-wired hooks run them. A red suite now copies nothing.
 assert_eq "gate: a red suite copies no hook scripts into the claude dir" "0" \
@@ -561,8 +581,10 @@ DF="$F/defaults"; mkdir -p "$DF"
 count() { grep -cE "$1" "$2" 2>/dev/null || true; }   # grep -c already prints 0 on no match
 CC_INSTALL_CLAUDE_DIR="$DF/claude" CC_INSTALL_HS_DIR="$DF/hs" CC_INSTALL_NO_APP=1 \
   bash "$ROOT/install.sh" >/dev/null 2>&1
+# 2026-09-17: this compared two missing files as "same" when defaults/cc-config.json wasn't in the clone
 assert_eq "fresh install: Shepherd settings are Adam's defaults" "same" \
-  "$(cmp -s <(jq -S . "$ROOT/defaults/cc-config.json") <(jq -S . "$DF/claude/cc-config.json" 2>/dev/null) && echo same || echo different)"
+  "$([ -s "$DF/claude/cc-config.json" ] && cmp -s <(jq -S . "$ROOT/defaults/cc-config.json") <(jq -S . "$DF/claude/cc-config.json") && echo same || echo different)"
+assert_json "fresh install: ...which really launch sessions (spawn.live)" "$DF/claude/cc-config.json" '.spawn.live' "true"
 assert_json "fresh install: worktrees branch from HEAD" "$DF/claude/settings.json" '.worktree.baseRef' "head"
 assert_json "fresh install: Remote Control on at startup" "$DF/claude/settings.json" '.remoteControlAtStartup' "true"
 assert_json "fresh install: push notifications on" "$DF/claude/settings.json" '.agentPushNotifEnabled' "true"

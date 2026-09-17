@@ -1,0 +1,119 @@
+{
+  "autoContinue": {
+    "enabled": false,
+    "delaySeconds": 60,
+    "maxAttempts": 3
+  },
+  "autoTitle": {
+    "enabled": false
+  },
+  "focus": {
+    "popOnComplete": false,
+    "popOnApproval": false
+  },
+  "summary": {
+    "enabled": false
+  },
+  "spawn": {
+    "kittyRemote": true,
+    "kittyAutoRemote": true,
+    "live": true,
+    "provider": "",
+    "editor": "vscode",
+    "vscodeFlavor": "extension"
+  },
+  "risk": {
+    "enabled": false,
+    "thresholds": {
+      "med": 34,
+      "high": 67,
+      "staleSeconds": 300
+    }
+  },
+  "notifications": {
+    "banner": {
+      "onDone": false,
+      "onApproval": false,
+      "onAutoApproved": false
+    }
+  },
+  "gate": {
+    "tools": "Bash Write Edit MultiEdit NotebookEdit"
+  },
+  "escalation": {
+    "pushTopic": "",
+    "push": false,
+    "enabled": false,
+    "minutes": 5,
+    "loop": {
+      "repeats": 3,
+      "enabled": false
+    },
+    "sound": false
+  },
+  "insights": {
+    "hostStats": false,
+    "maxBlockSeconds": 1800
+  },
+  "appearance": {
+    "reduceMotion": false,
+    "tileMin": 170,
+    "density": "comfortable",
+    "font": "system",
+    "theme": "cyberpunk",
+    "scale": 1
+  },
+  "drain": {
+    "enabled": false
+  },
+  "prStatus": {
+    "enabled": false
+  },
+  "respawn": {
+    "auto": {
+      "enabled": false,
+      "staleSeconds": 600,
+      "maxRetries": 3
+    },
+    "enabled": false
+  },
+  "ledger": {
+    "maxTotalMB": 50,
+    "captureTypes": [],
+    "enabled": true,
+    "retentionDays": 30
+  },
+  "remoteControl": {
+    "sweepOnStartup": true,
+    "onSpawn": true
+  },
+  "queue": {
+    "autofeed": false,
+    "routing": {
+      "enabled": false,
+      "starveMinutes": 0
+    },
+    "dryRun": false
+  },
+  "bridge": {
+    "enabled": false,
+    "intervalSeconds": 2
+  },
+  "collision": {
+    "enabled": false,
+    "useGitRoot": false
+  },
+  "providers": [],
+  "policies": {
+    "autopilot": {
+      "minutes": 15,
+      "enabled": false
+    },
+    "patterns": {
+      "enabled": false,
+      "autoAllow": [],
+      "autoDeny": []
+    },
+    "approveRepeats": false
+  }
+}
