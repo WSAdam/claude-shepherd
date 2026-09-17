@@ -4,6 +4,29 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-17 — Install by double-click, with Adam's setup as the default
+
+### Added — "Install Shepherd.command" and "Uninstall Shepherd.command"
+
+Handing Shepherd to a coworker meant a list of Homebrew commands on a Mac that might not even have
+Homebrew. Double-clicking **Install Shepherd.command** now installs whatever is missing — the Xcode
+command-line tools, Homebrew, jq / lua / node (and ripgrep / fd), Hammerspoon, VS Code, Claude Code
+and its VS Code extension — then Shepherd, restarts Hammerspoon and opens the Accessibility pane.
+Anything already installed is skipped; a required piece that fails stops before your settings are
+touched. **Uninstall Shepherd.command** (or `make uninstall`, `PURGE=1` for settings and history)
+removes Shepherd's hooks, scripts, dashboard, init.lua line, app, tab bridge and methodology block,
+keeping your own hooks and text. Fixtures: tests/bootstrap.test.sh (stub tools on a bare and a ready
+fake Mac), tests/uninstall.test.sh.
+
+### Added — a fresh install works like Adam's machine
+
+The installer now writes Adam's Shepherd settings (`defaults/cc-config.json`) when you have none,
+fills in the Claude Code settings the worktree flow relies on (worktrees from HEAD, Remote Control at
+startup, push notifications, effort high) where you haven't set them, and adds the methodology —
+worktrees, ready-to-merge, batches, tests first with fixtures (`methodology/CLAUDE.md`) — to
+`~/.claude/CLAUDE.md` in a marked block. Fixtures: the defaults cases in tests/install.test.sh. The
+README's install section now covers the double-click path, node as a prerequisite, and uninstalling.
+
 ## 2026-09-17 — The public repo ships only what an install runs on
 
 ### Removed — internal files from the repo

@@ -614,7 +614,8 @@ Click **New** (or **⌘⌥S**) to open the **New session** modal:
 - **Provider** — which model/backend to launch this session against (see "Providers & models" below).
 - **Initial task** (optional).
 
-Spawning is **dry-run until you opt in**: leave it off to log the exact command to
+Spawning is **dry-run until you opt in** (the installer's default settings opt in; a hand-made
+config without `spawn.live` stays dry-run): leave it off to log the exact command to
 `~/.claude/cc-shepherd.log` without launching, or flip **"Actually launch"** in ⚙ Settings → Spawn
 (`spawn.live`; the `ORCH_DRY_RUN` code default stays as a safety net). The new session shows up as a
 tile automatically. (The ⌘⌥S hotkey falls back to two native prompts if the modal can't open.)
@@ -1019,7 +1020,7 @@ Two header overlays read fleet activity. Both are **local and cost no model toke
   `~/.claude/cc-ledger/YYYY-MM-DD.jsonl` (one event per line): session start/end,
   prompts, tool requests, gate **decisions** (with provenance — autoDeny / autoAllow /
   autopilot / approveRepeats / human / timeout), mode/model/effort changes, nudges,
-  clears, compacts, spawns, relabels. **Off by default** — enable `ledger.enabled` (it's
+  clears, compacts, spawns, relabels. **Off in code**, on in the installer's default settings — `ledger.enabled` (it's
   the source of data for everything below). The overlay has **Rows** + **Timeline** tabs,
   filters by session/type/date, and per-row **redact**, **export**, and **purge**.
   Retention is GC'd ~hourly by `ledger.retentionDays` / `ledger.maxTotalMB`. A **Review
@@ -1155,54 +1156,80 @@ again to go back; the fleet bulk buttons still appear only when there's somethin
   days** across all lists, newest first, each stamped with its ✓ completion date. No adding from
   MASTER — that's what Generic and the project tabs are for.
 
-## Install (about 5 minutes)
+## Install
 
-**Prerequisite:** [Claude Code](https://claude.com/claude-code) must already be installed
-and run at least once. Shepherd supervises *existing* Claude Code sessions — it doesn't
-install or replace Claude Code.
+Shepherd runs on **macOS** and supervises Claude Code sessions in **VS Code** (and terminals).
 
-1. **Install Hammerspoon** (free), `jq` (required for the rich tiles), and `lua`
-   (runs the test suite the installer gates on):
-   ```
-   brew install --cask hammerspoon
-   brew install jq lua
-   ```
-   Launch Hammerspoon once and grant it Accessibility permission when asked
-   (System Settings > Privacy & Security > Accessibility). It needs that to focus
-   windows and send keystrokes.
+### The easy way — double-click
 
-   **Optional accelerators** (`jq` is the only hard dependency — everything else degrades
-   gracefully): [ripgrep](https://github.com/BurntSushi/ripgrep) speeds up fleet-wide search
-   and [fd](https://github.com/sharkdp/fd) makes the New-session folder scan faster and
-   gitignore-aware. Without them, search falls back to `grep` and folder scan to `find`.
-   ```
-   brew install ripgrep fd
-   ```
-   `make setup` checks for these at the end and offers to install any that are missing
-   (including Hammerspoon itself, as a safety net if you skipped it above — though you'll
-   still have to grant Accessibility permission by hand); run **`make doctor`** any time to
-   see which engine each path is using (and confirm it in the Hammerspoon console — a fleet
-   search logs `[cc-search] engine=rg …`, a folder scan `[cc-spawn] folder scan: fd …`).
+1. Download the repo (GitHub → **Code → Download ZIP**, then unzip) or `git clone` it.
+2. Double-click **`Install Shepherd.command`**. The first time, macOS may say it's from an
+   unidentified developer: right-click it → **Open** → **Open**.
+3. A Terminal window installs whatever this Mac is missing, skipping anything already there:
+   - the Xcode command-line tools (click **Install** in macOS's dialog, then wait),
+   - [Homebrew](https://brew.sh) (it asks for your Mac password),
+   - `jq`, `lua` and `node` (required), `ripgrep` and `fd` (faster search, optional),
+   - Hammerspoon and VS Code,
+   - Claude Code and its VS Code extension,
+   - then Shepherd itself (`install.sh`, below), and restarts Hammerspoon.
+4. Once, by hand: turn on **Hammerspoon** in System Settings → Privacy & Security →
+   **Accessibility** (the installer opens that pane), and sign in to Claude in VS Code's Claude
+   Code panel. The panel appears top-right.
 
-2. **Run the installer** (idempotent — safe to re-run):
-   ```
-   make setup
-   ```
-   This runs the **pre-flight test suite**, copies the hook scripts + logic into `~/.claude`
-   and `~/.hammerspoon`, **merges** the hooks into `~/.claude/settings.json` (backing it up
-   first and preserving any hooks you already have; a symlinked settings.json stays a
-   symlink and the file it points to gets the hooks), ensures the `dofile(...)` line in
-   `~/.hammerspoon/init.lua`, builds **Shepherd.app** (a Dock launcher — see below), and
-   runs the **tooling check** (jq / lua / node / Hammerspoon / ripgrep / fd).
+Re-running it is safe: finished steps are skipped. If a required piece won't install, it stops
+before touching your Claude or Hammerspoon settings and says what to fix.
 
-   The pre-flight gate runs **before** anything is copied or touches your `settings.json`
-   or `init.lua`: if the suite is red (or `lua` / `node` is missing so it can't run), the
-   install aborts having changed nothing — never untested hooks under live wiring, never a
-   half-wired config. Bypass with `bash install.sh --skip-tests` (or
-   `CC_INSTALL_SKIP_TESTS=1`) if you need to.
+### What the install sets up
 
-3. Click the Hammerspoon menu-bar icon and choose **Reload Config**.
+- **Shepherd** — hook scripts + logic into `~/.claude` and `~/.hammerspoon`, its hooks **merged**
+  into `~/.claude/settings.json` (backed up first; your own hooks stay; a symlinked settings.json
+  stays a symlink), the `dofile(...)` line in `~/.hammerspoon/init.lua`, **Shepherd.app** (a Dock
+  launcher, below) and the **tab bridge** VS Code extension.
+- **Default settings** — Shepherd's settings as the author runs them daily
+  ([defaults/cc-config.json](defaults/cc-config.json)), written only if you have no
+  `~/.claude/cc-config.json`. Change anything later in ⚙ Settings. Notably on: **Actually launch**
+  (New really opens sessions), the audit ledger, Remote Control for spawned sessions, VS Code as
+  the editor.
+- **Claude Code settings the workflow relies on** ([defaults/claude-settings.json](defaults/claude-settings.json)):
+  worktrees branch from your current HEAD, Remote Control at startup, push notifications, effort
+  high — each added only where you haven't set it yourself.
+- **The methodology** ([methodology/CLAUDE.md](methodology/CLAUDE.md)) — how Claude sessions work
+  with Shepherd: units in worktrees, ready-to-merge reviews, batches of parallel units, tests first
+  with regression fixtures. It goes into `~/.claude/CLAUDE.md` between two marker lines (your own
+  text stays; re-installing replaces just that block). Skipped if your CLAUDE.md already has a
+  `## Parallel Worktree Workflow` section.
 
+### By hand
+
+Prerequisites: [Claude Code](https://claude.com/claude-code) (run once), VS Code, and
+```
+brew install --cask hammerspoon
+brew install jq lua node        # required: jq for the tiles, lua + node run the test gate
+brew install ripgrep fd         # optional: faster fleet search and folder scan
+```
+Launch Hammerspoon once and grant it Accessibility (System Settings > Privacy & Security >
+Accessibility) — it needs that to focus windows and send keystrokes. Then:
+```
+make setup
+```
+It runs the **pre-flight test suite** first: if the suite is red (or `lua` / `node` is missing so it
+can't run), the install aborts having changed nothing. Bypass with `bash install.sh --skip-tests`
+(or `CC_INSTALL_SKIP_TESTS=1`). It ends with the **tooling check** (jq / lua / node / Hammerspoon /
+ripgrep / fd); run **`make doctor`** any time to see it again (a fleet search logs
+`[cc-search] engine=rg …`, a folder scan `[cc-spawn] folder scan: fd …` in the Hammerspoon
+console). Finally click the Hammerspoon menu-bar icon → **Reload Config**.
+
+### Uninstall
+
+Double-click **`Uninstall Shepherd.command`**, or run `make uninstall`. It removes Shepherd's hooks
+from `~/.claude/settings.json` (backup made; your own hooks and settings stay), the scripts and
+dashboard it copied, its `init.lua` line, the methodology block in `~/.claude/CLAUDE.md`,
+Shepherd.app and the tab bridge. Shepherd's settings and history (`cc-config.json`, `cc-status/`,
+the ledger, …) stay unless you answer yes to deleting them (or `make uninstall PURGE=1`).
+Hammerspoon, VS Code, Claude Code and the Homebrew packages stay installed. Reload Hammerspoon
+afterwards to close the panel.
+
+### The panel
 The panel appears top-right. Drag it by its title bar, resize it, and it floats
 above other windows and shows on every Space.
 

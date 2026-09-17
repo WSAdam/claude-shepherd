@@ -126,3 +126,10 @@ and the README's "Testing & development" section.
 
 - Finished, rebased, green units fast-forward into main. Push main and deploy when Adam
   says ship. No AI attribution in commits.
+- The repo is public and handed to coworkers: track only what a fresh install needs to run
+  Adam's daily methodology (`tests/worktree-hygiene.test.sh` lists what stays local).
+- A fresh install copies Adam's setup: `defaults/cc-config.json` (his `~/.claude/cc-config.json`),
+  `defaults/claude-settings.json`, and `methodology/CLAUDE.md` (the worktree + test-first sections
+  of his global CLAUDE.md). When he changes those at home, refresh the copies here.
+- `Install Shepherd.command` → `bootstrap.sh` (prerequisites) → `install.sh`; `uninstall.sh`
+  reverses `install.sh` -- a new file `install.sh` ships goes in both file lists.
