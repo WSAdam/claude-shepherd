@@ -4,6 +4,18 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-17 — Installs with Homebrew's Lua 5.5
+
+### Fixed — a fresh install stopped in its test gate: "attempt to assign to const variable 'line'"
+
+A coworker's double-click install got Homebrew's current `lua`, 5.5, where a for-loop variable is
+read-only. `cc-core.lua` assigned to one in eight places (`queueSplitLines`, `parseTodoFile`,
+`parseDirList`, the kitty.conf rewrite, the cron field matcher, the keyword matcher), so the file
+didn't compile, every suite that loads it failed, and the installer aborted before installing. Each
+loop now copies its variable into a local. Checked by compiling every Lua file with Lua 5.5 and
+running the whole suite under it. Fixture: tests/loopvar.test.lua scans every tracked Lua file for an
+assignment to a for-loop variable, so the rule holds on Lua 5.4 machines too.
+
 ## 2026-09-17 — Install by double-click, with Adam's setup as the default
 
 ### Added — "Install Shepherd.command" and "Uninstall Shepherd.command"

@@ -90,6 +90,9 @@ echo ""
 echo "== bash: worktree hygiene (.gitignore keeps git worktree remove unblocked) =="
 bash "$DIR/worktree-hygiene.test.sh" || fail=1
 echo ""
+echo "== lua: no assignment to a for-loop variable (read-only in Lua 5.5) =="
+lua "$DIR/loopvar.test.lua" || fail=1
+echo ""
 echo "== lua: cc-core =="
 lua "$DIR/core.test.lua" || fail=1
 echo ""

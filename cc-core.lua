@@ -574,8 +574,8 @@ local function countWords(s)
 end
 local function anyKeyword(haystack, words)
   if type(words) ~= "table" then return nil end
-  for _, w in ipairs(words) do
-    w = tostring(w):lower()
+  for _, word in ipairs(words) do
+    local w = tostring(word):lower()
     if w ~= "" and haystack:find(w, 1, true) then return w end
   end
   return nil
@@ -5003,8 +5003,8 @@ end
 -- the bulk-add bridge action and its tests agree on the rules.
 function M.queueSplitLines(text)
   local out = {}
-  for line in (tostring(text or "") .. "\n"):gmatch("(.-)\n") do
-    line = line:gsub("\r$", ""):gsub("^%s+", ""):gsub("%s+$", "")
+  for rawLine in (tostring(text or "") .. "\n"):gmatch("(.-)\n") do
+    local line = rawLine:gsub("\r$", ""):gsub("^%s+", ""):gsub("%s+$", "")
     line = line:gsub("^[-*]%s+", ""):gsub("^%d+[.%)]%s+", "")
     -- a line that was ONLY a marker ("- ", "3.") trims to the bare marker --
     -- drop it (it's list scaffolding, not a task). "-x flag" stays a task.
@@ -6776,7 +6776,8 @@ function M.kittyConfWithRemote(confText, socket)
   confText = tostring(confText or "")
   socket = (socket and #socket > 0) and socket or M.KITTY_SOCKET
   local lines, sawAllow, sawListen, rewrote = {}, false, false, false
-  for line in (confText .. "\n"):gmatch("(.-)\n") do
+  for confLine in (confText .. "\n"):gmatch("(.-)\n") do
+    local line = confLine
     local av = line:match("^%s*allow_remote_control%s+(%S+)")
     if av then
       sawAllow = true
@@ -7206,8 +7207,8 @@ end
 function M.parseDirList(stdout, cap)
   cap = tonumber(cap) or 5000
   local out, seen = {}, {}
-  for line in (tostring(stdout or "") .. "\n"):gmatch("(.-)\n") do
-    line = M.normDir(line:gsub("\r$", ""):gsub("^%s+", ""):gsub("%s+$", ""))
+  for rawLine in (tostring(stdout or "") .. "\n"):gmatch("(.-)\n") do
+    local line = M.normDir(rawLine:gsub("\r$", ""):gsub("^%s+", ""):gsub("%s+$", ""))
     if #line > 0 and not seen[line] then
       seen[line] = true
       out[#out + 1] = line
@@ -8791,8 +8792,8 @@ function M.parseTodoFile(content)
   local out = {}
   if type(content) ~= "string" or content == "" then return out end
   local byText = {}
-  for line in (content .. "\n"):gmatch("([^\n]*)\n") do
-    line = line:gsub("\r$", "")
+  for rawLine in (content .. "\n"):gmatch("([^\n]*)\n") do
+    local line = rawLine:gsub("\r$", "")
     local mark, text = line:match("^%s*[%-%*%+]%s+%[([ xX])%]%s+(.+)$")
     if mark then
       text = wlTrim(text):sub(1, 500)
@@ -9608,8 +9609,8 @@ end
 -- Match one cron field spec against an integer value within [lo,hi]. Supports
 -- "*", "N", "A-B", "A,B,C", "*/S", "A-B/S" (and lists of those). Pure.
 local function cronFieldMatch(spec, value, lo, hi)
-  for part in (tostring(spec or "*") .. ","):gmatch("([^,]*),") do
-    part = part:gsub("%s", "")
+  for rawPart in (tostring(spec or "*") .. ","):gmatch("([^,]*),") do
+    local part = rawPart:gsub("%s", "")
     if part ~= "" then
       local base, step = part, 1
       local b, s = part:match("^(.-)/(%d+)$")
