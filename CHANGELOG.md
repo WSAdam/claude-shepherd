@@ -4,6 +4,17 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-17 — A quiet Hammerspoon console
+
+### Fixed — "LuaSkin: Error deserialising JSON" every 30 seconds
+
+Since 2026-09-11 the Shepherd log gained that error about every 30 seconds (over 18,000 lines). To name a
+tab after its chat's first prompt, Shepherd reads the first 16 KB of the transcript. When the first user
+record is longer than that (a pasted image: one ChargebackSentinel session's is 468 KB), the read ends
+mid-line, and decoding the torn line made LuaSkin log the error even inside `pcall`; the 30s tab-name
+cache repeated it forever. Only whole lines are decoded now. Fixture: the torn-head case in
+tests/core.test.lua, which spies on the decoder.
+
 ## 2026-09-15 — A project at work never reads Ready for you
 
 ### Fixed — a card read "Ready for you" while one of its sessions was still working

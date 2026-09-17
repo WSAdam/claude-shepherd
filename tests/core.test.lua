@@ -8893,6 +8893,25 @@ do
     .. '{"type":"user","message":{"role":"user","content":"<task-notification>\\n<task-id>x</task-id></task-notification>"}}\n'
   eq("first prompt: a tab that starts with a slash command is named after the command (/clear)",
      core.firstPromptFromTranscript(clearHead), "/clear")
+
+  -- ---- torn transcript head (2026-09-17) ----
+  -- 2026-09-17 live: a session's first prompt was a 468 KB record, so the 16 KB head read ended mid-line;
+  -- decoding that torn line made LuaSkin log "Error deserialising JSON" every 30s (pcall can't hush it).
+  do
+    local realDecode, decoded = core.json.decode, {}
+    core.json.decode = function(s) decoded[#decoded + 1] = s; return realDecode(s) end
+    local torn = '{"type":"queue-operation","operation":"enqueue"}\n'
+      .. '{"type":"queue-operation","operation":"dequeue"}\n'
+      .. '{"type":"user","message":{"role":"user","content":[{"type":"image","source":{"data":"iVBORw0KGgoAAAANSUhEUg'
+    local ok, got = pcall(core.firstPromptFromTranscript, torn)
+    local sawTorn = false
+    for _, s in ipairs(decoded) do if s:find('"type":"image"', 1, true) then sawTorn = true end end
+    decoded = {}
+    local whole = core.firstPromptFromTranscript('{"type":"queue-operation"}\n{"type":"user","message":{"role":"user","content":"hello there"}}\n')
+    core.json.decode = realDecode
+    check("first prompt: a head that ends mid-record never decodes the torn line", ok and got == nil and not sawTorn)
+    eq("first prompt: a whole, newline-terminated user line still counts", whole, "hello there")
+  end
   local names = core.claudeTabCandidates({ custom = nil, ai = "Project onboarding", first = "from your printed guide show me the onboarding", last = "go" })
   check("tab names: every name the tab could show, cut like the tab cuts them",
         #names == 3 and names[1] == "Project onboarding" and names[2] == "from your printed guide …" and names[3] == "go")

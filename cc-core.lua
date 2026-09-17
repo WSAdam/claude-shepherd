@@ -953,7 +953,9 @@ end
 -- skipped), trimmed; nil when there's none. A fresh tab is named after it until its AI title lands.
 function M.firstPromptFromTranscript(head)
   if type(head) ~= "string" then return nil end
-  for line in (head .. "\n"):gmatch("([^\n]*)\n") do
+  -- 2026-09-17: only whole lines. The head is a fixed-size read, so its last line may be torn,
+  -- and decoding a torn line makes LuaSkin log a JSON error even inside pcall.
+  for line in head:gmatch("([^\n]*)\n") do
     if line:find('"type":"user"', 1, true) then
       local ok, e = pcall(function() return M.json.decode(line) end)
       if ok and type(e) == "table" and e.type == "user" and not e.isMeta and type(e.message) == "table" then
