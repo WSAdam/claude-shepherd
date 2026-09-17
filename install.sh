@@ -293,6 +293,66 @@ else
   echo "⚠️  jq not found — install jq, then merge $TEMPLATE into $SETTINGS"
 fi
 
+# 3b. The Claude Code settings the worktree flow relies on (defaults/claude-settings.json:
+# worktrees branch from HEAD, Remote Control at startup, push notifications, effort) --
+# each added only where the user has no value of their own (2026-09-17: a coworker's fresh
+# install should work like Adam's machine without overriding anything they chose).
+DEFAULT_CLAUDE_SETTINGS="$HERE/defaults/claude-settings.json"
+if have_jq && [ -r "$DEFAULT_CLAUDE_SETTINGS" ] && [ -f "$SETTINGS" ] && jq -e . "$SETTINGS" >/dev/null 2>&1; then
+  filled="$(jq --argjson d "$(cat "$DEFAULT_CLAUDE_SETTINGS")" '
+    . as $orig
+    | try (reduce ($d | paths(scalars)) as $p (.;
+             if getpath($p) == null then setpath($p; $d | getpath($p)) else . end))
+      catch $orig' "$SETTINGS" 2>/dev/null)"
+  if [ -n "$filled" ] && [ "$filled" != "$(jq . "$SETTINGS")" ]; then
+    cp "$SETTINGS" "$SETTINGS.bak.$(date +%s)"
+    real="$(resolve_link "$SETTINGS")"
+    printf '%s\n' "$filled" > "$(dirname "$real")/.settings.json.tmp.$$" \
+      && mv -f "$(dirname "$real")/.settings.json.tmp.$$" "$real"
+    echo "✅ added Shepherd's default Claude Code settings you hadn't set (backup made)"
+  fi
+fi
+
+# 3c. Shepherd's own settings: Adam's (defaults/cc-config.json) on a machine that has none.
+# An existing ~/.claude/cc-config.json is the user's and is never touched.
+if [ ! -e "$CLAUDE_DIR/cc-config.json" ] && [ -r "$HERE/defaults/cc-config.json" ]; then
+  install_file "$HERE/defaults/cc-config.json" "$CLAUDE_DIR" \
+    && echo "✅ wrote Shepherd's default settings -> $CLAUDE_DIR/cc-config.json"
+fi
+
+# 3d. The methodology Claude sessions follow with Shepherd (methodology/CLAUDE.md) goes into
+# ~/.claude/CLAUDE.md between two marker lines: appended once, replaced on a re-install, and
+# skipped for a CLAUDE.md that already keeps the worktree workflow by hand (Adam's own).
+METHODOLOGY="$HERE/methodology/CLAUDE.md"
+MD="$CLAUDE_DIR/CLAUDE.md"
+MARK_START='<!-- shepherd-methodology:start (written by the Shepherd installer; re-installing replaces this block) -->'
+MARK_END='<!-- shepherd-methodology:end -->'
+if [ -r "$METHODOLOGY" ]; then
+  if [ -f "$MD" ] && grep -q 'shepherd-methodology:start' "$MD"; then
+    tmpmd="$(dirname "$(resolve_link "$MD")")/.CLAUDE.md.tmp.$$"
+    awk -v s="$MARK_START" -v e="$MARK_END" -v src="$METHODOLOGY" '
+      /shepherd-methodology:start/ { print s; while ((getline l < src) > 0) print l; skip = 1; next }
+      /shepherd-methodology:end/   { print e; skip = 0; next }
+      !skip { print }' "$MD" > "$tmpmd"
+    if cmp -s "$tmpmd" "$MD"; then rm -f "$tmpmd"; echo "✅ Shepherd methodology already current in $MD"
+    else mv -f "$tmpmd" "$(resolve_link "$MD")"; echo "✅ updated the Shepherd methodology block in $MD"; fi
+  elif [ -f "$MD" ] && grep -q '^## Parallel Worktree Workflow' "$MD"; then
+    echo "✅ $MD already has the worktree workflow -- Shepherd methodology not added"
+  else
+    {
+      if [ -s "$MD" ]; then
+        cat "$MD"
+        [ -n "$(tail -c1 "$MD")" ] && printf '\n'
+        printf '\n'
+      fi
+      printf '%s\n' "$MARK_START"; cat "$METHODOLOGY"; printf '%s\n' "$MARK_END"
+    } > "$CLAUDE_DIR/.CLAUDE.md.tmp.$$"
+    real="$MD"; [ -e "$MD" ] && real="$(resolve_link "$MD")"
+    mv -f "$CLAUDE_DIR/.CLAUDE.md.tmp.$$" "$real"
+    echo "✅ added the Shepherd methodology to $MD"
+  fi
+fi
+
 # 4. Ensure init.lua dofiles the dashboard. Any non-comment line that loads it counts
 # (a user may load it their own way; a second load would double every hotkey and timer),
 # a commented-out one does not (2026-09-15: a bare grep counted it and never re-added).

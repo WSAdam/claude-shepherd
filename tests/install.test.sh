@@ -553,4 +553,62 @@ CC_INSTALL_CLAUDE_DIR="$MC" CC_INSTALL_HS_DIR="$F/mode-hs" CC_INSTALL_NO_APP=1 \
 assert_eq "a user's own cc-*.sh in the claude dir keeps its mode (install chmods only what it ships)" "644" \
   "$(stat -f '%Lp' "$MC/cc-mine.sh" 2>/dev/null || stat -c '%a' "$MC/cc-mine.sh")"
 
+# ---- a fresh install gets Adam's working setup (2026-09-17) ----
+# Handing Shepherd to a coworker: a fresh install should behave like Adam's machine -- his Shepherd
+# settings, the Claude Code settings the worktree flow relies on, and the methodology his sessions
+# follow -- without overwriting anything the user already set.
+DF="$F/defaults"; mkdir -p "$DF"
+count() { grep -cE "$1" "$2" 2>/dev/null || true; }   # grep -c already prints 0 on no match
+CC_INSTALL_CLAUDE_DIR="$DF/claude" CC_INSTALL_HS_DIR="$DF/hs" CC_INSTALL_NO_APP=1 \
+  bash "$ROOT/install.sh" >/dev/null 2>&1
+assert_eq "fresh install: Shepherd settings are Adam's defaults" "same" \
+  "$(cmp -s <(jq -S . "$ROOT/defaults/cc-config.json") <(jq -S . "$DF/claude/cc-config.json" 2>/dev/null) && echo same || echo different)"
+assert_json "fresh install: worktrees branch from HEAD" "$DF/claude/settings.json" '.worktree.baseRef' "head"
+assert_json "fresh install: Remote Control on at startup" "$DF/claude/settings.json" '.remoteControlAtStartup' "true"
+assert_json "fresh install: push notifications on" "$DF/claude/settings.json" '.agentPushNotifEnabled' "true"
+assert_json "fresh install: effort high" "$DF/claude/settings.json" '.effortLevel' "high"
+assert_json "fresh install: the hooks are still wired" "$DF/claude/settings.json" \
+  '[.hooks.Stop[].hooks[].command | contains("cc-status.sh")] | any' "true"
+assert_eq "fresh install: CLAUDE.md gets the methodology in one marked block" "1" \
+  "$(count 'shepherd-methodology:start' "$DF/claude/CLAUDE.md")"
+assert_eq "fresh install: ...with the worktree flow and the test-first rules" "2" \
+  "$(count '^## (Parallel Worktree Workflow|Test-First & Regression Fixtures)$' "$DF/claude/CLAUDE.md")"
+md_before="$(cat "$DF/claude/CLAUDE.md" 2>/dev/null)"
+CC_INSTALL_CLAUDE_DIR="$DF/claude" CC_INSTALL_HS_DIR="$DF/hs" CC_INSTALL_NO_APP=1 \
+  bash "$ROOT/install.sh" >/dev/null 2>&1
+assert_eq "re-run: the methodology block is not duplicated" "$md_before" "$(cat "$DF/claude/CLAUDE.md" 2>/dev/null)"
+
+# the user's own choices win
+UC="$DF/user"; mkdir -p "$UC"
+printf '{"appearance":{"theme":"light"}}\n' > "$UC/cc-config.json"
+printf '{"effortLevel":"low","worktree":{"baseRef":"fresh"},"agentPushNotifEnabled":false}\n' > "$UC/settings.json"
+printf '# my rules\n\nBe brief.\n' > "$UC/CLAUDE.md"
+CC_INSTALL_CLAUDE_DIR="$UC" CC_INSTALL_HS_DIR="$DF/uhs" CC_INSTALL_NO_APP=1 \
+  bash "$ROOT/install.sh" >/dev/null 2>&1
+assert_json "existing Shepherd settings are never overwritten" "$UC/cc-config.json" '.appearance.theme' "light"
+assert_json "a user's own effort level is kept" "$UC/settings.json" '.effortLevel' "low"
+assert_json "a user's own worktree base is kept" "$UC/settings.json" '.worktree.baseRef' "fresh"
+assert_json "a user's own false is kept (push notifications off)" "$UC/settings.json" '.agentPushNotifEnabled' "false"
+assert_json "...while a setting they never made is added" "$UC/settings.json" '.remoteControlAtStartup' "true"
+assert_eq "the user's own CLAUDE.md text is kept above the block" "# my rules" "$(head -n 1 "$UC/CLAUDE.md")"
+assert_eq "...and the block is appended" "1" "$(count 'shepherd-methodology:end' "$UC/CLAUDE.md")"
+
+# an older block is replaced, text around it untouched
+OB="$DF/old"; mkdir -p "$OB"
+printf 'top\n<!-- shepherd-methodology:start -->\nstale rules\n<!-- shepherd-methodology:end -->\nbottom\n' > "$OB/CLAUDE.md"
+CC_INSTALL_CLAUDE_DIR="$OB" CC_INSTALL_HS_DIR="$DF/ohs" CC_INSTALL_NO_APP=1 \
+  bash "$ROOT/install.sh" >/dev/null 2>&1
+assert_eq "re-install replaces an older methodology block" "0" "$(grep -c 'stale rules' "$OB/CLAUDE.md")"
+assert_eq "...keeping the text before it" "top" "$(head -n 1 "$OB/CLAUDE.md")"
+assert_eq "...and after it" "bottom" "$(tail -n 1 "$OB/CLAUDE.md")"
+assert_eq "...with the current methodology inside" "1" "$(grep -c '^## Parallel Worktree Workflow$' "$OB/CLAUDE.md")"
+
+# someone who already keeps this methodology by hand (Adam) doesn't get a second copy
+HB="$DF/hand"; mkdir -p "$HB"
+printf '# Global\n\n## Parallel Worktree Workflow\n\nmine\n' > "$HB/CLAUDE.md"
+CC_INSTALL_CLAUDE_DIR="$HB" CC_INSTALL_HS_DIR="$DF/hhs" CC_INSTALL_NO_APP=1 \
+  bash "$ROOT/install.sh" >/dev/null 2>&1
+assert_eq "a CLAUDE.md that already has the worktree workflow gets no block" "0" \
+  "$(grep -c 'shepherd-methodology:start' "$HB/CLAUDE.md")"
+
 finish
