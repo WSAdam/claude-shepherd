@@ -1,6 +1,6 @@
 #!/bin/bash
 # Double-click to install Claude Shepherd and everything it needs (bootstrap.sh).
-# macOS may say it's from an unidentified developer the first time: right-click it → Open.
+# A downloaded copy is blocked the first time: right-click it → Open, or System Settings → Privacy & Security → Open Anyway.
 cd "$(dirname "$0")" || exit 1
 bash ./bootstrap.sh
 status=$?

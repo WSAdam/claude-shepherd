@@ -1163,8 +1163,9 @@ Shepherd runs on **macOS** and supervises Claude Code sessions in **VS Code** (a
 ### The easy way — double-click
 
 1. Download the repo (GitHub → **Code → Download ZIP**, then unzip) or `git clone` it.
-2. Double-click **`Install Shepherd.command`**. The first time, macOS may say it's from an
-   unidentified developer: right-click it → **Open** → **Open**.
+2. Double-click **`Install Shepherd.command`**. A downloaded copy is blocked the first time
+   ("unidentified developer" / "Apple could not verify"): right-click it → **Open** → **Open**, or on
+   newer macOS click **Open Anyway** in System Settings → Privacy & Security. A `git clone` isn't blocked.
 3. A Terminal window installs whatever this Mac is missing, skipping anything already there:
    - the Xcode command-line tools (click **Install** in macOS's dialog, then wait),
    - [Homebrew](https://brew.sh) (it asks for your Mac password),
