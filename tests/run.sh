@@ -42,6 +42,9 @@ echo ""
 echo "== bash: installer =="
 bash "$DIR/install.test.sh" || fail=1
 echo ""
+echo "== bash: uninstaller =="
+bash "$DIR/uninstall.test.sh" || fail=1
+echo ""
 echo "== bash: installer suite without the optional tools (no rg/fd/Homebrew) =="
 bash "$DIR/install-hermetic.test.sh" || fail=1
 echo ""

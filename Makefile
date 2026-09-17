@@ -59,6 +59,12 @@ tab-bridge:
 setup:
 	@bash install.sh
 
+# Remove Shepherd: its hooks, scripts, dashboard, init.lua line, app, VS Code bridge and the
+# methodology block in ~/.claude/CLAUDE.md. Settings and state stay; PURGE=1 removes them too.
+.PHONY: uninstall
+uninstall:
+	@bash uninstall.sh $(if $(PURGE),--purge,)
+
 # The worktree demo (demo/GUIDE.md): a fresh little Deno app, opened in a new VS Code window,
 # where "run the worktree demo" drives two units in parallel to main. Same as `deno task demo`.
 .PHONY: demo
