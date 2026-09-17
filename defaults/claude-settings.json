@@ -2,5 +2,14 @@
   "worktree": { "baseRef": "head" },
   "remoteControlAtStartup": true,
   "agentPushNotifEnabled": true,
-  "effortLevel": "high"
+  "effortLevel": "high",
+  "permissions": {
+    "deny": [
+      "Bash(git add -f:*)",
+      "Bash(git add --force:*)",
+      "Write(**/.env.example)",
+      "Write(**/.env.sample)",
+      "Write(**/.env.template)"
+    ]
+  }
 }

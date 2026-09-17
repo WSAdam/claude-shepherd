@@ -605,6 +605,10 @@ assert_eq "fresh install: CLAUDE.md gets the methodology in one marked block" "1
   "$(count 'shepherd-methodology:start' "$DF/claude/CLAUDE.md")"
 assert_eq "fresh install: ...with the worktree flow and the test-first rules" "2" \
   "$(count '^## (Parallel Worktree Workflow|Test-First & Regression Fixtures)$' "$DF/claude/CLAUDE.md")"
+# 2026-09-17: the secrets rules were prose in Adam's own CLAUDE.md only -- the shipped methodology
+# carries them too, alongside the permissions.deny rules that now enforce them.
+assert_eq "fresh install: ...and the secrets rules the deny list enforces" "1" \
+  "$(count '^## Secrets & Environment Files$' "$DF/claude/CLAUDE.md")"
 md_before="$(cat "$DF/claude/CLAUDE.md" 2>/dev/null)"
 CC_INSTALL_CLAUDE_DIR="$DF/claude" CC_INSTALL_HS_DIR="$DF/hs" CC_INSTALL_NO_APP=1 \
   bash "$ROOT/install.sh" >/dev/null 2>&1
@@ -642,5 +646,59 @@ CC_INSTALL_CLAUDE_DIR="$HB" CC_INSTALL_HS_DIR="$DF/hhs" CC_INSTALL_NO_APP=1 \
   bash "$ROOT/install.sh" >/dev/null 2>&1
 assert_eq "a CLAUDE.md that already has the worktree workflow gets no block" "0" \
   "$(grep -c 'shepherd-methodology:start' "$HB/CLAUDE.md")"
+
+# ---- the shipped defaults deny the secrets paths (2026-09-17) ----
+# The methodology states the secrets rules in prose only; nothing enforced them. The shipped
+# defaults now carry a permissions.deny list. Step 3b's `paths(scalars)` walk is POSITIONAL for
+# arrays, so a user with a deny list of their own would have kept theirs at index 0 and never got
+# ours (and a shorter list would have been interleaved by index) -- deny merges as a union.
+DENY_RULES=('Bash(git add -f:*)' 'Bash(git add --force:*)'
+            'Write(**/.env.example)' 'Write(**/.env.sample)' 'Write(**/.env.template)')
+deny_count() { # <settings.json> <rule> -> how many times the rule appears in permissions.deny
+  jq -r --arg r "$2" '[.permissions.deny[]? | select(. == $r)] | length' "$1" 2>/dev/null
+}
+PD="$F/deny"; mkdir -p "$PD"
+CC_INSTALL_CLAUDE_DIR="$PD/fresh" CC_INSTALL_HS_DIR="$PD/fhs" CC_INSTALL_NO_APP=1 \
+  bash "$ROOT/install.sh" >/dev/null 2>&1
+for rule in "${DENY_RULES[@]}"; do
+  assert_eq "fresh install denies $rule" "1" "$(deny_count "$PD/fresh/settings.json" "$rule")"
+done
+
+# a re-install must not append a second copy of anything
+CC_INSTALL_CLAUDE_DIR="$PD/fresh" CC_INSTALL_HS_DIR="$PD/fhs" CC_INSTALL_NO_APP=1 \
+  bash "$ROOT/install.sh" >/dev/null 2>&1
+for rule in "${DENY_RULES[@]}"; do
+  assert_eq "re-run adds no duplicate of $rule" "1" "$(deny_count "$PD/fresh/settings.json" "$rule")"
+done
+assert_json "re-run leaves the deny list exactly the rules we ship" "$PD/fresh/settings.json" \
+  '.permissions.deny | length' "${#DENY_RULES[@]}"
+
+# a user who already keeps a deny list of their own
+UD="$PD/user"; mkdir -p "$UD"
+printf '%s\n' '{"permissions":{"deny":["Read(./secrets/**)","Bash(curl:*)"],"allow":["Bash(ls:*)"]},"effortLevel":"low"}' \
+  > "$UD/settings.json"
+CC_INSTALL_CLAUDE_DIR="$UD" CC_INSTALL_HS_DIR="$PD/uhs" CC_INSTALL_NO_APP=1 \
+  bash "$ROOT/install.sh" >/dev/null 2>&1
+assert_eq "a user's own deny entries all survive the merge" "1 1" \
+  "$(deny_count "$UD/settings.json" 'Read(./secrets/**)') $(deny_count "$UD/settings.json" 'Bash(curl:*)')"
+for rule in "${DENY_RULES[@]}"; do
+  assert_eq "...and they gain $rule" "1" "$(deny_count "$UD/settings.json" "$rule")"
+done
+assert_json "...their own entries keep their place at the front" "$UD/settings.json" \
+  '.permissions.deny[0]' "Read(./secrets/**)"
+assert_json "...their allow list is untouched" "$UD/settings.json" \
+  '.permissions.allow | join(",")' "Bash(ls:*)"
+assert_json "...and their other settings still win" "$UD/settings.json" '.effortLevel' "low"
+assert_json "...while a setting they never made is still added" "$UD/settings.json" '.worktree.baseRef' "head"
+
+# a user who already denies one of ours keeps one copy, not two
+OD="$PD/overlap"; mkdir -p "$OD"
+printf '%s\n' '{"permissions":{"deny":["Write(**/.env.sample)"]}}' > "$OD/settings.json"
+CC_INSTALL_CLAUDE_DIR="$OD" CC_INSTALL_HS_DIR="$PD/ohs" CC_INSTALL_NO_APP=1 \
+  bash "$ROOT/install.sh" >/dev/null 2>&1
+assert_eq "a rule the user already denies is not added twice" "1" \
+  "$(deny_count "$OD/settings.json" 'Write(**/.env.sample)')"
+assert_json "...and the rest are added alongside it" "$OD/settings.json" \
+  '.permissions.deny | length' "${#DENY_RULES[@]}"
 
 finish

@@ -102,6 +102,13 @@ parallel.
   the current HEAD (`worktree.baseRef: "head"` in settings), not from the working tree —
   commit before spawning them.
 
+## Secrets & Environment Files
+
+- NEVER create `.env.example`, `.env.sample`, `.env.template`, or any `.env.*` template file — in any project, ever. Document required environment variables in the README (a list with descriptions) instead.
+- Treat `.env` and any credential/key file (service-account JSON, PEM, etc.) as never-commit. Never `git add -f` them, and never remove a `.gitignore` entry that protects them.
+- A worktree gets its own copy of `.env` from the main checkout (gitignored files don't come with a worktree) — through `.worktreeinclude` in a tab, by `cp` in a sibling folder — never committed, never templated, with its own `PORT` whenever it runs a server.
+- These are enforced, not just stated: the settings Shepherd installs carry `permissions.deny` rules for `git add -f` / `git add --force` and for writing `.env.example` / `.env.sample` / `.env.template`, so a session is refused before it can ask. Reading `.env` is not denied — sessions legitimately need it.
+
 ## Test-First & Regression Fixtures
 
 - **No production code before a failing test.** Features: write the test that describes the behaviour first, then implement. Bugs: extract the broken state into a fixture — a literal snapshot of the input, state or payload that triggers it — write a test that fails against it, then fix. The fixture ships with the branch; it is part of the deliverable.

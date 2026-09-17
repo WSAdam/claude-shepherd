@@ -1193,7 +1193,12 @@ before touching your Claude or Hammerspoon settings and says what to fix.
   the editor.
 - **Claude Code settings the workflow relies on** ([defaults/claude-settings.json](defaults/claude-settings.json)):
   worktrees branch from your current HEAD, Remote Control at startup, push notifications, effort
-  high — each added only where you haven't set it yourself.
+  high — each added only where you haven't set it yourself. Plus **permission deny rules** that
+  enforce the methodology's secrets rules instead of just stating them: `git add -f` and
+  `git add --force` (both spellings), and writing `.env.example` / `.env.sample` / `.env.template`.
+  Reading `.env` is *not* denied — sessions legitimately need it. If you already keep a
+  `permissions.deny` list, yours is merged with ours: every entry you had stays, ours are appended
+  where missing, and re-installing adds no duplicates.
 - **The methodology** ([methodology/CLAUDE.md](methodology/CLAUDE.md)) — how Claude sessions work
   with Shepherd: units in worktrees, ready-to-merge reviews, batches of parallel units, tests first
   with regression fixtures. It goes into `~/.claude/CLAUDE.md` between two marker lines (your own
@@ -1229,6 +1234,17 @@ Shepherd.app and the tab bridge. Shepherd's settings and history (`cc-config.jso
 the ledger, …) stay unless you answer yes to deleting them (or `make uninstall PURGE=1`).
 Hammerspoon, VS Code, Claude Code and the Homebrew packages stay installed. Reload Hammerspoon
 afterwards to close the panel.
+
+The **Claude Code settings** the install filled in — including the `permissions.deny` rules above —
+are left alone, the same as the other defaults: once they're in `~/.claude/settings.json` they're
+yours, and the uninstaller can't tell them from a rule you wrote. To drop the deny rules, edit
+`~/.claude/settings.json` and remove the entries from `permissions.deny`, or run:
+
+```bash
+jq '.permissions.deny -= ["Bash(git add -f:*)","Bash(git add --force:*)",
+      "Write(**/.env.example)","Write(**/.env.sample)","Write(**/.env.template)"]' \
+  ~/.claude/settings.json > /tmp/s.json && mv /tmp/s.json ~/.claude/settings.json
+```
 
 ### The panel
 The panel appears top-right. Drag it by its title bar, resize it, and it floats

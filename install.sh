@@ -302,15 +302,30 @@ else
 fi
 
 # 3b. The Claude Code settings the worktree flow relies on (defaults/claude-settings.json:
-# worktrees branch from HEAD, Remote Control at startup, push notifications, effort) --
-# each added only where the user has no value of their own (2026-09-17: a coworker's fresh
-# install should work like Adam's machine without overriding anything they chose).
+# worktrees branch from HEAD, Remote Control at startup, push notifications, effort, and the
+# permission deny rules that enforce the methodology's secrets rules) -- each scalar added only
+# where the user has no value of their own (2026-09-17: a coworker's fresh install should work
+# like Adam's machine without overriding anything they chose).
+# permissions.deny is merged as a UNION, not by the scalar walk: `paths(scalars)` addresses an
+# array element by INDEX, so a user with a deny list of their own would keep theirs at index 0 and
+# never get ours, and a shorter list would be interleaved by index. Their entries keep their place
+# at the front; ours are appended only where absent; no duplicates either way.
 DEFAULT_CLAUDE_SETTINGS="$HERE/defaults/claude-settings.json"
 if have_jq && [ -r "$DEFAULT_CLAUDE_SETTINGS" ] && [ -f "$SETTINGS" ] && jq -e . "$SETTINGS" >/dev/null 2>&1; then
   filled="$(jq --argjson d "$(cat "$DEFAULT_CLAUDE_SETTINGS")" '
     . as $orig
-    | try (reduce ($d | paths(scalars)) as $p (.;
-             if getpath($p) == null then setpath($p; $d | getpath($p)) else . end))
+    | ($d.permissions.deny // []) as $ours
+    | try (
+        (reduce ($d | paths(scalars) | select(.[0:2] != ["permissions", "deny"])) as $p (.;
+           if getpath($p) == null then setpath($p; $d | getpath($p)) else . end))
+        | (try getpath(["permissions", "deny"]) catch "unreadable") as $theirs
+        | if ($ours | length) == 0 or $theirs == "unreadable"
+             or ($theirs != null and ($theirs | type) != "array")
+          then .
+          else setpath(["permissions", "deny"];
+                 reduce ((($theirs // []) + $ours) | .[]) as $rule ([];
+                   if any(.[]; . == $rule) then . else . + [$rule] end))
+          end)
       catch $orig' "$SETTINGS" 2>/dev/null)"
   if [ -n "$filled" ] && [ "$filled" != "$(jq . "$SETTINGS")" ]; then
     cp "$SETTINGS" "$SETTINGS.bak.$(date +%s)"
