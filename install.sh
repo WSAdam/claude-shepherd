@@ -131,7 +131,8 @@ run_test_gate() {
   if [ "${PIPESTATUS[0]}" -ne 0 ]; then
     echo "❌ pre-flight tests failed — aborting before touching your settings.json/init.lua."
     echo "   Failing:"
-    grep -E '^(FAIL - |lua: |node: )|: error:|^Error' "$log" | head -n 40 | sed 's/^/     /'
+    # -a: a log with a stray NUL is still text (2026-09-17: grep printed "Binary file matches")
+    grep -aE '^(FAIL - |lua: |node: )|: error:|^Error' "$log" | head -n 40 | sed 's/^/     /'
     echo "   Full test log: $log"
     echo "   Fix the failures above, or re-run with --skip-tests to bypass."
     exit 1

@@ -5,6 +5,8 @@
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 fail=0
+# a CC_* override set in the calling shell must not reach the suites
+. "$DIR/hermetic-env.sh"
 
 echo "== bash: config =="
 bash "$DIR/config.test.sh" || fail=1
@@ -41,6 +43,9 @@ bash "$DIR/ledger.test.sh" || fail=1
 echo ""
 echo "== bash: installer =="
 bash "$DIR/install.test.sh" || fail=1
+echo ""
+echo "== bash: suites ignore CC_* variables from the calling shell =="
+bash "$DIR/hermetic-env.test.sh" || fail=1
 echo ""
 echo "== bash: uninstaller =="
 bash "$DIR/uninstall.test.sh" || fail=1

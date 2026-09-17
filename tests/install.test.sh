@@ -362,6 +362,16 @@ assert_eq "gate: the abort lists each failing test after the message" "2" \
 assert_eq "gate: ...and says where the full test log is" "1" \
   "$(printf '%s\n' "$tail_after_abort" | grep -Fc "$TMP/gate-list.log")"
 assert_eq "gate: ...which holds the whole run" "1" "$(grep -c 'filler 300' "$TMP/gate-list.log" 2>/dev/null || true)"
+# 2026-09-17: in a real run grep called the log "Binary file ... matches" and listed nothing
+cat > "$MAKEDIR/make" <<EOF
+#!/usr/bin/env bash
+printf 'ok   - a\\0b\\n'; echo "FAIL - gamma broke"; exit 1
+EOF
+chmod +x "$MAKEDIR/make"
+CC_INSTALL_SKIP_TESTS= CC_INSTALL_CLAUDE_DIR="$TMP/gate-bin-claude" CC_INSTALL_HS_DIR="$TMP/gate-bin-hs" CC_INSTALL_NO_APP=1 \
+  CC_INSTALL_TEST_LOG="$TMP/gate-bin.log" PATH="$MAKEDIR:/usr/bin:/bin" bash "$ROOT/install.sh" >"$TMP/gate-bin.out" 2>&1
+assert_eq "gate: a log grep would call binary still lists the failing test" "1" \
+  "$(sed -n '/pre-flight tests failed/,$p' "$TMP/gate-bin.out" | grep -ac 'FAIL - gamma broke')"
 write_fake_make 1
 # 2026-09-15 requirement change: the copy ran BEFORE the gate, so a red suite still put the
 # untested hook scripts where the already-wired hooks run them. A red suite now copies nothing.
