@@ -29,4 +29,17 @@ assert_eq "a worktree holding its TODO.md removes cleanly without --force" "remo
 if git -C "$REPO" check-ignore -q .claude/worktrees/anything; then got=ignored; else got=untracked; fi
 assert_eq "Claude-made worktrees under .claude/worktrees/ are gitignored" "ignored" "$got"
 
+# 2026-09-17: the public repo tracked 31 Scratch-pad/ files -- Chargeback portal pages, design
+# mockups and Playwright snapshots from other work -- plus notes only our own work on Shepherd
+# uses. A fresh install gets what it runs on (code, README, CLAUDE.md, context.md, spec, demo);
+# these stay local only.
+for p in Scratch-pad docs/feature-mining docs/orchestrator-next.md docs/hardware-verification.md todos.md; do
+  got="$(git -C "$ROOT" ls-files -- "$p" | wc -l | tr -d ' ')"
+  assert_eq "$p is not tracked in this (public) repo" "0" "$got"
+done
+for p in Scratch-pad/anything.html docs/feature-mining/x.md docs/orchestrator-next.md docs/hardware-verification.md todos.md; do
+  if git -C "$REPO" check-ignore -q "$p"; then got=ignored; else got=untracked; fi
+  assert_eq "$p is gitignored" "ignored" "$got"
+done
+
 finish

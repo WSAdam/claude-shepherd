@@ -4,6 +4,17 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-17 — The public repo ships only what an install runs on
+
+### Removed — internal files from the repo
+
+The repo is public and tracked 31 `Scratch-pad/` files (Chargeback portal pages, design mockups,
+Playwright snapshots from other work) plus notes only our own work on Shepherd used:
+`docs/feature-mining/`, `docs/orchestrator-next.md`, `docs/hardware-verification.md` and an empty
+`todos.md`. They are untracked and gitignored (they stay on disk and in git history). What a fresh
+install runs on — code, README, CLAUDE.md, context.md, spec, demo — stays. Fixture:
+tests/worktree-hygiene.test.sh checks none of them is tracked and each is ignored.
+
 ## 2026-09-17 — A batch unit's tab can be closed again
 
 ### Fixed — no batch unit's tab ever closed after its merge

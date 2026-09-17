@@ -1087,8 +1087,7 @@ as **⇄ tiles** with live status. Remote tiles are **headless-only**: Approve/D
 back over ssh as nonce-bound decision files; keystroke actions (nudge/stop/clear/…) are
 disabled. Remote staleness gets `bridge.staleSlackSeconds` of slack for sync lag, and a
 stalled sync shows "bridge offline" on the tile. The remote box needs this repo's
-`make install` run on it. Off by default; see todos.md for the hardware-verification
-checklist.
+`make install` run on it. Off by default, and not yet verified on real hardware.
 
 ## MCPs & Skills viewer
 

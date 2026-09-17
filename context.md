@@ -1,8 +1,8 @@
 # Context — Claude Shepherd
 
 Orientation for working in this repo: architecture, invariants, and workflow. Other docs:
-user-facing [README.md](README.md), dated history [CHANGELOG.md](CHANGELOG.md), what's left
-[todos.md](todos.md), design rationale [docs/orchestrator-next.md](docs/orchestrator-next.md).
+user-facing [README.md](README.md), dated history [CHANGELOG.md](CHANGELOG.md). Older planning notes
+(`todos.md`, `docs/orchestrator-next.md`, `docs/feature-mining/`) are in git history only (untracked 2026-09-17).
 
 ## What it is
 
@@ -179,9 +179,9 @@ webview doesn't want): `gron`/`yq`/`htmlq`/`hexyl`, `jc`, `eza`/`bat`/`tv`/`fzf`
 ## Deferred / not-yet-built (as of the 2026-06-19 todos reset)
 
 Consciously-left-unbuilt work, kept here so the todos wipe loses nothing — full per-item detail (FOR/AGAINST
-rulings, data shapes) is in git history of `todos.md` and in `docs/feature-mining/*`.
+rulings, data shapes) is in git history of `todos.md` and `docs/feature-mining/*`.
 
-- **Needs hardware (runbook ready):** [docs/hardware-verification.md](docs/hardware-verification.md) — verify
+- **Needs hardware (runbook ready):** `docs/hardware-verification.md` (git history) — verify
   the `core.KITTY_KEY` send-key tokens + AskUserQuestion `answerKeys` nav on a real Kitty box, and the SSH
   status-bridge 8-step checklist (remote install / headless-only assumption, rsync+openrsync round-trip,
   decision round-trip, `BatchMode` auth, clock-skew → `bridge.staleSlackSeconds`, the `bridge.keystrokes`
@@ -552,7 +552,7 @@ in the AI-leaderboard reviews of the #4/#5 commits. New KEEP-IN-SYNC + invariant
 ## State (2026-06-14)
 
 **Feature-mining → build:** 5 top AI apps (LiteLLM/crewAI/OpenHands/cline/AutoGPT) were adversarially
-mined into a backlog L1–L7 (see [todos.md](todos.md); per-project reports in `docs/feature-mining/`).
+mined into a backlog L1–L7 (`todos.md` and the per-project reports in `docs/feature-mining/`, both in git history).
 **L1 — Agent Profiles ("spawn from a saved agent")** is the first shipped (see [CHANGELOG.md](CHANGELOG.md)):
 a pure-`cc-core` registry layer (`cc-agents.json` + `cc-mcp.json`, validator, `resolveAgent`, `mcpConfig`,
 `personaPrompt`, `spawnExtraFlags`, skills parser) plus the New-Session modal's Agents chip row, Save-as-agent,
@@ -696,6 +696,6 @@ bands (calm <50, every 10% to 90, critical last-5%); (2) **Auto-Continue** auto-
 API-error tile after a grace delay (bounded per-folder, off by default); (3) **Auto-Remote-
 Control** launches new spawns with `--remote-control` and sweeps `/rc` into running sessions on
 startup. Routing follow-ups were **deliberately deferred** (UX-blocked — see todos.md). Suite:
-**1260 core + 210 ui + 177 bash** checks, all green. Remaining work is in [todos.md](todos.md):
-the **needs-hardware** runbook ([docs/hardware-verification.md](docs/hardware-verification.md))
+**1260 core + 210 ui + 177 bash** checks, all green. Remaining work was in `todos.md` (git history):
+the **needs-hardware** runbook (`docs/hardware-verification.md`, git history)
 for the Kitty tokens + the SSH bridge, and the deferred routing follow-ups.

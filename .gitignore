@@ -39,3 +39,10 @@ TODO.md
 
 # The companion VS Code extension's packages (make bridge builds them here).
 /build/
+
+# Internal to our own work on Shepherd -- a fresh install never needs these (2026-09-17)
+Scratch-pad/
+docs/feature-mining/
+docs/orchestrator-next.md
+docs/hardware-verification.md
+todos.md
