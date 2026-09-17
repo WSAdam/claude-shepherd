@@ -147,7 +147,11 @@
   "merge": {
     "_comment": "Ready to merge (ON by default). A worktree tab that finishes a unit runs ~/.claude/cc-merge.sh request in the background; its card says 'ready to merge <branch> -> main' and the detail panel shows the review (commits, files, full diff, the session's summary and test claim). Shepherd checks the worktree with its own git first. Merge tells the waiting session to rebase, test, fast-forward main and clean up -- one merge per repo at a time, in the order you click; Not yet sends your note back. No keystrokes. false = requests are ignored.",
     "enabled": true,
-    "closeTab": true
+    "closeTab": true,
+    "_comment_gates": "The test gate Shepherd runs ITSELF (off unless you list one). Everything else in the review is checked with Shepherd's own git; the tests were the session's word. A gate names the suite Shepherd runs in the unit's worktree before it calls the request ready: while it runs the card says 'checking', a red or timed-out run blocks Merge (and a batch unit's merge on your grant) and the review shows the command, the exit code and the last 15 lines of its output -- the session's own test line stays, labelled advisory. The SAME suite runs once in the main checkout after the merge; if main is red the unit's tab stays open and the card says so. One run per request per commit (a new commit in the worktree re-runs it), through your login shell so it finds your PATH. match works like policies.attachments: project/group/key globs, first entry wins, an absent field is a wildcard; project is matched against the session's project key (its transcript's project folder, else its cwd). timeoutSeconds defaults to 900. With no gates listed nothing runs and the flow is exactly as before.",
+    "gates": [
+      { "match": { "project": "*claude-instance-manager*" }, "command": "make lint && make test", "timeoutSeconds": 900 }
+    ]
   },
 
   "fleet": {

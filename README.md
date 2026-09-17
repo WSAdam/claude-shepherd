@@ -211,6 +211,25 @@ run the script there — so fenced tabs ask from outside and step back in to reb
 - **The review** (the detail panel, or **Review** in the Instances view): the session's summary,
   the tests it reports, how far ahead of main it is and whether main moved on, the commits, the
   changed files, and **Full diff**.
+- **Shepherd can run the tests itself.** Everything else in the review is checked with Shepherd's
+  own git; the test line was the session's word. List the project's suite under `merge.gates` and
+  Shepherd runs it — in the unit's worktree, through your login shell, one run per request per
+  commit (a new commit in the worktree re-runs it):
+
+  ```json
+  "merge": { "gates": [
+    { "match": { "project": "*my-repo*" }, "command": "make lint && make test", "timeoutSeconds": 900 }
+  ] }
+  ```
+
+  While it runs the card says *checking* and **Merge** is refused; a red or timed-out run blocks
+  the merge — Adam's button **and** a batch unit's merge on your grant — and the review shows the
+  command, the exit code and the last 15 lines of the suite's own output. The session's test line
+  stays, relabelled *advisory*. After the merge the **same suite runs once in the main checkout**:
+  if main is red, the unit's tab stays open and the card says so. `match` works like
+  `policies.attachments` (project / group / key globs, first entry wins, an absent field is a
+  wildcard; `project` is the session's project key). With no `gates` listed nothing runs and the
+  flow is exactly as it was.
 - **Merge** tells the waiting session to go: rebase on main (conflicts settled by the tests —
   both sides' tests must pass, or it stops and reports *blocked*), run the suite, `ExitWorktree`,
   `git merge --ff-only` in the main checkout, run the suite on main, then

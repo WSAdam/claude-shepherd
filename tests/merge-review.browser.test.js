@@ -65,6 +65,11 @@ const review = { key: "k1", merge: {
   commits: [{ h: "dfb0b18", s: "Ten installer fixes: gate before copy, node, symlinks, layouts, shapes, the Dock URL" },
             { h: "331632d", s: "Red fixtures for ten installer bugs from the 2026-09-15 review" }],
   files: files, problems: [],
+  // 2026-09-17: the gate Shepherd ran itself adds a line with up to 15 lines of suite output --
+  // it scrolls with the body like everything else, so the buttons must still stay in view.
+  gate: { state: "failed", code: 2, command: "make lint && make test",
+          tail: Array.from({ length: 15 }, (_, i) =>
+            "FAIL - a fairly wordy behaviour-named check that failed on line " + (i + 1)).join("\n") },
 } };
 
 (async () => {

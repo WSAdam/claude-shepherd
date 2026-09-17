@@ -9447,5 +9447,95 @@ do
      core.rankInstances({ w, { key = "ap", status = "approval", since = 1789491950 } }, {})[1].key, "ap")
 end
 
+-- ---- Shepherd runs the project's test gate before a merge review (2026-09-17) -------------
+-- Until now the one part of the review Shepherd took on trust was the session's own --tests
+-- string. merge.gates lets Shepherd run the project's suite itself, in the worktree, and a red
+-- gate blocks the merge -- Adam's Merge button and a batch unit's delegated merge alike.
+do
+  local cfg = { merge = { gates = {
+    { match = { project = "repo:*claude-instance-manager*" }, command = "make lint && make test", timeoutSeconds = 900 },
+    { match = {}, command = "deno task test" },
+  } } }
+  local shep = { projectKey = "repo:/Users/adam/Programming/claude-instance-manager/.git" }
+  local other = { projectKey = "repo:/Users/adam/Programming/Elsewhere/.git" }
+  local g = core.mergeGateFor(cfg, shep)
+  eq("a merge gate matches its project by glob", g and g.command, "make lint && make test")
+  eq("...with its own timeout", g and g.timeoutSeconds, 900)
+  eq("a wildcard gate catches every other project", (core.mergeGateFor(cfg, other) or {}).command, "deno task test")
+  eq("...with the default timeout when none is given", (core.mergeGateFor(cfg, other) or {}).timeoutSeconds, 900)
+  check("no merge.gates configured -> no gate at all (behaviour is exactly as before)",
+        core.mergeGateFor({}, shep) == nil and core.mergeGateFor(nil, shep) == nil)
+  check("a gate entry with no command is ignored",
+        core.mergeGateFor({ merge = { gates = { { match = {}, command = "" } } } }, shep) == nil)
+  local strict = { merge = { gates = { { match = { project = "repo:/r/A/.git" }, command = "make test" } } } }
+  check("a gate whose project doesn't match is not used", core.mergeGateFor(strict, other) == nil)
+
+  -- the gate re-runs when the worktree gains a commit: its key carries the HEAD sha
+  local req = { nonce = "n-a1", key = "a1" }
+  eq("a gate key is the request's nonce and the worktree HEAD sha", core.mergeGateKey(req, "abc1234"), "n-a1|abc1234")
+  check("...so a new commit is a new key", core.mergeGateKey(req, "abc1234") ~= core.mergeGateKey(req, "def5678"))
+  check("a non-hex sha never reaches the key", (core.mergeGateKey(req, "; rm -rf /") or ""):find("rm", 1, true) == nil)
+
+  -- the shell line: single-quoted paths, stdout AND stderr to the log file
+  local cmd = core.mergeGateCmd({ command = "make lint && make test" }, "/r/A/.claude/worktrees/it's", "/tmp/cc/g.log")
+  check("the gate command cds into the worktree, single-quoted  (" .. tostring(cmd) .. ")",
+        cmd:find("cd '/r/A/.claude/worktrees/it'\\''s'", 1, true) ~= nil)
+  check("...runs the configured command", cmd:find("make lint && make test", 1, true) ~= nil)
+  check("...and sends stdout AND stderr to the log file", cmd:find("> '/tmp/cc/g.log' 2>&1", 1, true) ~= nil)
+  check("a gate command with no worktree or no log file is refused",
+        core.mergeGateCmd({ command = "make test" }, "", "/tmp/x") == nil
+        and core.mergeGateCmd({ command = "make test" }, "/r/A", "") == nil)
+
+  -- readiness: each arm of the gate
+  local facts = { listed = true, head = "fix/a1", clean = true, dirty = {}, ahead = 1, behind = 0, commits = {}, files = {} }
+  local r = { branch = "fix/a1", base = "main" }
+  check("no gate -> ready, as before", core.mergeReadiness(r, facts, {}).ready == true)
+  local rd = core.mergeReadiness(r, facts, {}, { state = "running", command = "make test" })
+  check("a gate still running keeps the request checking, never ready", rd.checking == true and rd.ready == false)
+  rd = core.mergeReadiness(r, facts, {}, { state = "passed", code = 0, command = "make test" })
+  check("a gate that passed leaves the request ready", rd.ready == true and rd.checking ~= true)
+  rd = core.mergeReadiness(r, facts, {}, { state = "failed", code = 2, command = "make lint && make test" })
+  check("a gate that failed blocks the merge, naming the command and the exit code  (" .. tostring(rd.problems[1]) .. ")",
+        rd.ready == false and rd.problems[1]:find("make lint && make test", 1, true) ~= nil
+        and rd.problems[1]:find("2", 1, true) ~= nil)
+  rd = core.mergeReadiness(r, facts, {}, { state = "timedOut", command = "make test" })
+  check("a gate that timed out blocks the merge too  (" .. tostring(rd.problems[1]) .. ")",
+        rd.ready == false and (rd.problems[1] or ""):find("timed out", 1, true) ~= nil)
+
+  -- the review carries the gate: state, code, command and the tail of its log
+  local lines = {}
+  for i = 1, 40 do lines[#lines + 1] = "line " .. i end
+  local mreq = { phase = "requested", branch = "fix/a1", base = "main", worktree = "/r/A/.claude/worktrees/a1",
+                 summary = "unit a1", tests = "make test: green", nonce = "n-a1", key = "a1", at = 1 }
+  local v = core.mergeView(mreq, core.mergeReadiness(r, facts, {}, { state = "failed", code = 2, command = "make test" }),
+                           facts, {}, { state = "failed", code = 2, command = "make test",
+                                        output = table.concat(lines, "\n") })
+  check("the review carries the gate's state, code and command",
+        v.gate and v.gate.state == "failed" and v.gate.code == 2 and v.gate.command == "make test")
+  check("...and only the tail of its log", v.gate.tail:find("line 40", 1, true) ~= nil
+        and v.gate.tail:find("line 1\n", 1, true) == nil)
+  local n = 0
+  for _ in (v.gate.tail .. "\n"):gmatch("[^\n]*\n") do n = n + 1 end
+  check("...about fifteen lines of it  (got=" .. n .. ")", n <= 16)
+  check("a review with no gate carries none", core.mergeView(mreq, nil, facts, {}).gate == nil)
+  -- a merge that left main red is Adam's problem, unlike a merely un-closed tab
+  check("main red after the merge wants Adam",
+        core.mergeNeedsYou({ phase = "merged", gate = { state = "failed", code = 2, command = "make test" } }) == true)
+  check("...while a green post-merge gate stays quiet",
+        core.mergeNeedsYou({ phase = "merged", gate = { state = "passed", code = 0 } }) == false)
+
+  -- the facts command now reports the worktree's HEAD sha, so a new commit re-runs the gate
+  local fc = core.mergeFactsCmd({ commonDir = "/r/A/.git", worktree = "/r/A/.claude/worktrees/a1",
+                                  branch = "fix/a1", base = "main" })
+  check("the facts command asks for the worktree's HEAD sha", fc:find("@@sha", 1, true) ~= nil
+        and fc:find("rev-parse HEAD", 1, true) ~= nil)
+  local parsed = core.parseMergeFacts("@@listed\n@@head\nfix/a1\n@@status\n@@ahead\n1\n@@behind\n0\n"
+    .. "@@commits\n@@stat\n@@files\n@@sha\nabc1234def5678\n",
+    { worktree = "/r/A/.claude/worktrees/a1", branch = "fix/a1" })
+  eq("...and the facts carry it", parsed.sha, "abc1234def5678")
+  eq("the main checkout of a request is its common dir without the .git",
+     core.mergeMainRoot({ commonDir = "/r/A/.git" }), "/r/A")
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

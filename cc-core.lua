@@ -1671,6 +1671,9 @@ function M.mergeFactsCmd(req)
   return table.concat({
     "echo @@listed", G .. " worktree list --porcelain 2>/dev/null",
     "echo @@head", W .. " symbolic-ref --quiet --short HEAD 2>/dev/null",
+    -- the worktree's HEAD commit: the test gate (2026-09-17) is keyed on it, so a new
+    -- commit in the worktree re-runs the suite instead of reusing the old verdict
+    "echo @@sha", W .. " rev-parse HEAD 2>/dev/null",
     "echo @@status", W .. " status --porcelain 2>/dev/null | head -n 20",
     "echo @@ahead", G .. " rev-list --count " .. range .. " 2>/dev/null",
     "echo @@behind", G .. " rev-list --count " .. req.branch .. ".." .. req.base .. " 2>/dev/null",
@@ -1694,6 +1697,7 @@ function M.parseMergeFacts(out, req)
     if M.normDir(e.path) == req.worktree and e.branch == req.branch then f.listed = true end
   end
   f.head = first("head"); if f.head == "" then f.head = nil end
+  f.sha = first("sha"):match("^%x+$") or nil
   for _, l in ipairs(sec.status or {}) do if l:match("%S") then f.dirty[#f.dirty + 1] = l end end
   f.clean = (#f.dirty == 0)
   f.ahead = tonumber(first("ahead"):match("%d+") or "") or 0
@@ -1710,9 +1714,78 @@ function M.parseMergeFacts(out, req)
   return f
 end
 
+-- ---- The test gate Shepherd runs itself (2026-09-17) ------------------------------------
+-- Everything else in the review is checked with Shepherd's own git; the one part it took on
+-- trust was the session's --tests string. A project may name the suite Shepherd should run
+-- itself, in the worktree, before the review calls the unit ready:
+--   merge.gates = [ { match = { project = "<glob>" }, command = "make lint && make test",
+--                     timeoutSeconds = 900 } ]
+-- With no gate configured nothing runs and the flow is exactly as it was. Matching reuses the
+-- policy-attachment pattern (M.globEq on project/group/key, first match wins).
+M.MERGE_GATE_TIMEOUT = 900   -- seconds, when an entry doesn't say
+M.MERGE_GATE_TAIL_LINES = 15 -- of the gate's log that reach the review
+M.MERGE_GATE_TAIL_CHARS = 4000
+
+function M.mergeGateFor(cfg, item)
+  local gates = M.config(cfg, "merge.gates", nil)
+  if type(gates) ~= "table" then return nil end
+  item = item or {}
+  local project = item.projectKey or item.project
+  for _, g in ipairs(gates) do
+    if type(g) == "table" and type(g.command) == "string" and g.command ~= "" then
+      local m = type(g.match) == "table" and g.match or {}
+      if M.globEq(m.project, project) and M.globEq(m.group, item.group) and M.globEq(m.key, item.key) then
+        return { command = g.command,
+                 timeoutSeconds = tonumber(g.timeoutSeconds) or M.MERGE_GATE_TIMEOUT }
+      end
+    end
+  end
+  return nil
+end
+
+-- One gate run per request AND per commit: a unit that pushes a fix after a red gate gets a
+-- fresh run, and a re-ask on the same commit reuses the verdict. A non-hex sha never lands
+-- in the key (git's answer is hex; anything else is "?" and simply never matches a later one).
+function M.mergeGateKey(req, sha)
+  if type(req) ~= "table" or type(req.nonce) ~= "string" or req.nonce == "" then return nil end
+  local s = (type(sha) == "string" and sha:match("^%x+$")) and sha or "?"
+  return req.nonce .. "|" .. s
+end
+
+-- The shell line: cd into `dir`, run the configured command, stdout AND stderr into `outFile`
+-- (a `make test` log runs past the OS pipe buffer, so the caller redirects to a file rather
+-- than reading a task's pipe). Paths are single-quoted exactly as mergeFactsCmd quotes them;
+-- the command itself is the operator's own config line and goes through verbatim.
+function M.mergeGateCmd(gate, dir, outFile)
+  if type(gate) ~= "table" or type(gate.command) ~= "string" or gate.command == "" then return nil end
+  if type(dir) ~= "string" or dir == "" then return nil end
+  if type(outFile) ~= "string" or outFile == "" then return nil end
+  local function sq(s) return "'" .. tostring(s):gsub("'", "'\\''") .. "'" end
+  return "{ cd " .. sq(dir) .. " && " .. gate.command .. " ; } > " .. sq(outFile) .. " 2>&1"
+end
+
+-- The main checkout a merge lands in: the request's common dir without its .git.
+function M.mergeMainRoot(req)
+  local d = type(req) == "table" and req.commonDir or nil
+  if type(d) ~= "string" then return nil end
+  local root = d:match("^(.*)/%.git$")
+  return (root and root ~= "") and root or nil
+end
+
+-- The last `n` lines of a gate's log, for the review.
+function M.lastLines(s, n)
+  if type(s) ~= "string" or s == "" then return "" end
+  n = tonumber(n) or 15
+  local lines = {}
+  for line in (s:gsub("\n$", "") .. "\n"):gmatch("([^\n]*)\n") do lines[#lines + 1] = line end
+  local from = math.max(1, #lines - n + 1)
+  return table.concat(lines, "\n", from, #lines)
+end
+
 -- Is the request mergeable right now, by Shepherd's own reading of git? `item` is the
 -- session's tile (its current worktree). Main having moved on is fine: the session rebases.
-function M.mergeReadiness(req, facts, item)
+-- `gate` (optional) is this request's test-gate record: { state, code, command }.
+function M.mergeReadiness(req, facts, item, gate)
   local out = { ready = false, checking = false, problems = {} }
   if type(facts) ~= "table" then out.checking = true; return out end
   local p = out.problems
@@ -1725,7 +1798,16 @@ function M.mergeReadiness(req, facts, item)
   -- (2026-09-11: no "the session left that worktree" rule any more -- a fenced tab now leaves
   -- its worktree to ask, so Claude Code's worktree guard never has to judge cc-merge.sh. The
   -- worktree itself is still checked above: listed, on its branch, clean, ahead.)
-  out.ready = (#p == 0)
+  if type(gate) == "table" then
+    local st = gate.state
+    if st == "running" then out.checking = true
+    elseif st == "failed" then
+      p[#p + 1] = "the test gate failed: " .. tostring(gate.command) .. " exited " .. tostring(gate.code or "?")
+    elseif st == "timedOut" then
+      p[#p + 1] = "the test gate timed out: " .. tostring(gate.command)
+    end
+  end
+  out.ready = (#p == 0) and not out.checking
   return out
 end
 
@@ -1783,6 +1865,10 @@ end
 function M.mergeNeedsYou(v)
   if type(v) ~= "table" then return false end
   if v.phase == "requested" then return not v.queued and not v.sent end
+  -- 2026-09-17: a merge that left MAIN red is not housekeeping -- the post-merge gate ran the
+  -- project's own suite in the main checkout and it didn't pass, so the card says so loudly.
+  if v.phase == "merged" and type(v.gate) == "table"
+     and (v.gate.state == "failed" or v.gate.state == "timedOut") then return true end
   return v.phase == "blocked"
 end
 
@@ -1856,7 +1942,7 @@ end
 
 -- What the card and the review get: no nonce, session id or pid (those only travel between
 -- the script and Shepherd's decision writer). `q` = { queued = n, sent = bool }.
-function M.mergeView(req, rd, facts, q)
+function M.mergeView(req, rd, facts, q, gate)
   q = q or {}
   local v = {
     phase = req.phase, branch = req.branch, base = req.base, folder = req.worktree:match("([^/]+)/?$"),
@@ -1871,6 +1957,13 @@ function M.mergeView(req, rd, facts, q)
   end
   if type(facts) == "table" then
     v.ahead, v.behind, v.stat, v.commits, v.files = facts.ahead, facts.behind, facts.stat, facts.commits, facts.files
+  end
+  -- The gate Shepherd ran itself (2026-09-17): its verdict, and the tail of its log, so the
+  -- review says what failed without Adam going to look for the log.
+  if type(gate) == "table" and gate.state then
+    v.gate = { state = gate.state, code = tonumber(gate.code), command = capChars(tostring(gate.command or ""), 300),
+               tail = capChars(M.lastLines(gate.tail or gate.output or "", M.MERGE_GATE_TAIL_LINES),
+                               M.MERGE_GATE_TAIL_CHARS) }
   end
   v.line = M.mergeLine(v)
   v.needsYou = M.mergeNeedsYou(v)

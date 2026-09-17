@@ -3190,5 +3190,32 @@ do
   check("the panel has the toast that FX.alert fills", src:find("function ccToast(", 1, true) ~= nil)
 end
 
+-- ---- The test gate's own line in the merge review (2026-09-17) --------------------------
+-- Shepherd runs the project's suite itself now, so the review has a line of its own for that
+-- verdict -- and the session's --tests string, which used to be the whole story, is relabelled
+-- advisory. Source pins: the panel JS has no headless runtime in this suite.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("the review has a line for the gate Shepherd ran", src:find('id="dm-gate"', 1, true) ~= nil)
+  local review = src:match("\n    function renderMerge%(it%)%{.-\n    %}\n") or ""
+  check("renderMerge fills it", #review > 0 and review:find('getElementById("dm-gate")', 1, true) ~= nil)
+  check("...with textContent, never innerHTML (the gate's tail is a suite's own output)",
+        review:find("innerHTML", 1, true) == nil and review:find("gEl.textContent", 1, true) ~= nil)
+  check("...and the session's own test claim now reads as advisory",
+        review:find("(advisory)", 1, true) ~= nil)
+  check("the gate line sits inside the review's scrolling body, so the buttons stay in view",
+        (src:match('<div class="dm%-body">.-</div>%s*<div class="dm%-acts"') or ""):find('id="dm%-gate"') ~= nil)
+  -- 2026-09-17: a make test log is far past the OS pipe buffer -- a direct-exec hs.task would
+  -- deadlock, so the gate must go through the login shell with its output redirected to a file.
+  local start = src:match("\nfunction FX%.mergeGateStart%(.-\n  return g\nend\n") or ""
+  check("the gate runs through the login shell, with its output redirected to a scratch file",
+        #start > 0 and start:find('"-l", "-c", cmd', 1, true) ~= nil
+        and start:find("FX.scratchFile(", 1, true) ~= nil)
+  check("...and its timeout backstop timer is retained on the record, never bare",
+        start:find("g.timer = hs.timer.doAfter(", 1, true) ~= nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

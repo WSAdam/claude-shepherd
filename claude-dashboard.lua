@@ -3398,6 +3398,105 @@ function FX.mergeFacts(req, force)
   return facts
 end
 
+-- ---- The test gate Shepherd runs itself (2026-09-17) --------------------------------------
+-- Everything else in the review is Shepherd's own git; the tests were the session's word.
+-- merge.gates names the suite Shepherd runs ITSELF, in the worktree, before the review calls a
+-- unit ready (and once more in the main checkout after the merge, before the tab closes).
+-- ONE run per core.mergeGateKey (the request's nonce + the worktree's HEAD sha), started from
+-- annotateMerges and cached -- never one per 1 Hz tick. The command runs through the LOGIN
+-- shell ($SHELL -l -c, like FX.liveMcpList) so a project's `make test` finds Adam's PATH, with
+-- stdout AND stderr redirected to a scratch file: a direct-exec hs.task DEADLOCKS once the
+-- child fills the OS pipe buffer (~64KB) and a make test log is far past that (FX.scanFolders).
+-- State on FX, not new chunk-level locals: the main chunk is at Lua's 200-local cap.
+FX._mergeGates = {}       -- gate key -> record: the pre-merge run, in the worktree
+FX._mergeGatesPost = {}   -- gate key -> record: the post-merge run, in the main checkout
+
+-- Start (or return) the one run for this gate key. `slot` is the table it lives in, so the
+-- pre- and post-merge runs of the same commit can't collide (an ff-merge makes both shas equal).
+function FX.mergeGateStart(slot, gkey, gate, dir, nonce, where)
+  local g = slot[gkey]
+  if g then return g end
+  local outFile = FX.scratchFile("mergegate")
+  local cmd = core.mergeGateCmd(gate, dir, outFile)
+  if not cmd then return nil end
+  g = { state = "running", command = gate.command, at = FX.now(), nonce = nonce, where = where }
+  slot[gkey] = g
+  local shell = os.getenv("SHELL")
+  if not shell or shell == "" then shell = "/bin/zsh" end
+  local ok = pcall(function()
+    local myTask   -- captured below; the exit callback checks it still owns the slot
+    myTask = hs.task.new(shell, function(code)
+      -- Ownership FIRST (FX.scanFolders' lesson): the exit callback fires on terminate() too,
+      -- so a superseded or timed-out run must never overwrite the record that replaced it.
+      if slot[gkey] ~= g or g.task ~= myTask then pcall(os.remove, outFile); return end
+      if g.timer then pcall(function() g.timer:stop() end); g.timer = nil end
+      g.task = nil
+      g.output = FX.readFile(outFile) or ""
+      pcall(os.remove, outFile)
+      if g.state ~= "timedOut" then   -- the backstop already ruled; its terminate lands here
+        g.code = tonumber(code) or 1
+        g.state = (g.code == 0) and "passed" or "failed"
+      end
+      g.doneAt = FX.now()
+      print("[cc-dashboard] merge gate (" .. tostring(where) .. ") " .. tostring(gate.command)
+        .. " -> " .. tostring(g.state) .. " (exit " .. tostring(g.code) .. ")")
+    end, { "-l", "-c", cmd })
+    if not myTask then error("task create failed") end
+    myTask:setWorkingDirectory(dir)
+    g.task = myTask
+    myTask:start()
+    -- Backstop: a wedged suite must never pin a merge request as "checking" forever. The timer
+    -- is RETAINED on the record (which FX holds), so GC can't eat it before it fires.
+    g.timer = hs.timer.doAfter(gate.timeoutSeconds, function()
+      if slot[gkey] ~= g then return end
+      g.timer = nil
+      if g.task then
+        g.state = "timedOut"
+        pcall(function() g.task:terminate() end)
+        print("[cc-dashboard] ⚠️ merge gate timed out after " .. tostring(gate.timeoutSeconds)
+          .. "s: " .. tostring(gate.command))
+      end
+    end)
+    print("[cc-dashboard] ▶ merge gate (" .. tostring(where) .. ") " .. tostring(gate.command)
+      .. " in " .. tostring(dir))
+  end)
+  if not ok then
+    g.state, g.code, g.task = "failed", -1, nil
+    g.output = "Shepherd couldn't launch the test gate"
+    pcall(os.remove, outFile)
+  end
+  return g
+end
+
+-- The pre-merge gate for a request: the project's own suite, in the unit's worktree.
+function FX.mergeGate(r, facts, cfg)
+  local gate = core.mergeGateFor(cfg, FX._mergeItems[r.key])
+  if not gate then return nil end
+  local gkey = core.mergeGateKey(r, facts and facts.sha)
+  if not gkey then return nil end
+  return FX.mergeGateStart(FX._mergeGates, gkey, gate, r.worktree, r.nonce, "worktree")
+end
+
+-- The post-merge gate: the same suite, in the MAIN checkout, before the unit's tab is closed.
+function FX.mergeGatePost(r, cfg)
+  local gate = core.mergeGateFor(cfg, FX._mergeItems[r.key])
+  if not gate then return nil end
+  local root, gkey = core.mergeMainRoot(r), core.mergeGateKey(r, r.sha)
+  if not root or not gkey then return nil end
+  return FX.mergeGateStart(FX._mergeGatesPost, gkey, gate, root, r.nonce, "main")
+end
+
+-- Forget the runs of requests that are gone (a merged, dismissed or vanished unit).
+function FX.mergeGatePrune(reqs)
+  local live = {}
+  for _, r in pairs(reqs or {}) do live[r.nonce] = true end
+  for _, slot in ipairs({ FX._mergeGates, FX._mergeGatesPost }) do
+    for gkey, g in pairs(slot) do
+      if not live[g.nonce] and not g.task then slot[gkey] = nil end
+    end
+  end
+end
+
 -- The answer, bound to the nonce ON DISK (never a remembered one). true + the request on success.
 function FX.writeMergeDecision(key, verdict, note)
   local r = core.parseMergeRequest(FX.readFile(FX.MERGE_DIR .. "/" .. key .. ".json"))
@@ -3415,7 +3514,8 @@ end
 function FX.releaseMerge(key)
   local r, it = FX._mergeReqs[key], FX._mergeItems[key]
   if not r then FX._mergeApproved[key] = nil; return false end
-  local rd = core.mergeReadiness(r, FX.mergeFacts(r, true), it)
+  local f = FX.mergeFacts(r, true)
+  local rd = core.mergeReadiness(r, f, it, FX.mergeGate(r, f, loadConfig()))
   if not rd.ready then
     FX._mergeApproved[key] = nil
     FX.mergeAlert("⚠️ " .. r.branch .. " is no longer ready to merge (" .. tostring(rd.problems[1]) .. ") -- it's waiting for you again")
@@ -3437,7 +3537,8 @@ end
 function FX.mergeApprove(key)
   local r = FX._mergeReqs[key]
   if not r or r.phase ~= "requested" then FX.mergeAlert("⚠️ That merge request is gone"); return false end
-  local rd = core.mergeReadiness(r, FX.mergeFacts(r, true), FX._mergeItems[key])
+  local f = FX.mergeFacts(r, true)
+  local rd = core.mergeReadiness(r, f, FX._mergeItems[key], FX.mergeGate(r, f, loadConfig()))
   if not rd.ready then
     FX.mergeAlert("⚠️ Can't merge " .. r.branch .. " yet: " .. tostring(rd.problems[1] or "still checking"))
     return false
@@ -3574,12 +3675,15 @@ function FX.annotateMerges(list, cfg, bannerOn)
     if it then reqs[key], items[key] = r, it end
   end
   FX._mergeReqs, FX._mergeItems = reqs, items
+  FX.mergeGatePrune(reqs)
   -- Batch driving (2026-09-11): a unit's OWN ready request is approved on its batch's grant
   -- (only when Adam granted merges); anything else waits for his click as usual.
   for key, r in pairs(reqs) do
     if r.phase == "requested" and not FX._mergeApproved[key] and not FX._mergeSent[key] then
       local b = FX.fleetDelegates(r)
-      if b and core.mergeReadiness(r, FX.mergeFacts(r), items[key]).ready then
+      -- the test gate gates a delegated merge exactly as it gates Adam's Merge button
+      local f = b and FX.mergeFacts(r) or nil
+      if b and core.mergeReadiness(r, f, items[key], FX.mergeGate(r, f, cfg)).ready then
         FX._mergeApproved[key] = { nonce = r.nonce, at = FX.now(), delegated = true }
         FX.mergeAlert("⇡ merging " .. r.branch .. " on your batch grant (\"" .. b.title .. "\")")
       end
@@ -3601,18 +3705,30 @@ function FX.annotateMerges(list, cfg, bannerOn)
   q = core.mergeQueue(reqs, FX._mergeApproved, FX._mergeSent, FX.now())   -- after this tick's releases
   for key, r in pairs(reqs) do
     local it = items[key]
-    local facts, rd
+    local facts, rd, gate
     FX.fleetRecordResult(r)   -- a batch unit's outcome (its batch ends itself once all are in)
     if r.phase == "requested" then
       facts = FX.mergeFacts(r)
-      rd = core.mergeReadiness(r, facts, it)
+      gate = FX.mergeGate(r, facts, cfg)
+      rd = core.mergeReadiness(r, facts, it, gate)
     end
     local closeNote
-    if r.phase == "merged" and core.config(cfg, "merge.closeTab", true) ~= false then
-      closeNote = FX.mergeAutoClose(r, it)
+    if r.phase == "merged" then
+      -- 2026-09-17: the same gate runs ONCE in the main checkout before the unit's tab closes,
+      -- so a merge that left main red is caught here instead of by the next unit to ask.
+      gate = FX.mergeGatePost(r, cfg)
+      if gate and gate.state == "running" then
+        closeNote = "running " .. tostring(gate.command) .. " on " .. tostring(r.base) .. " first"
+      elseif gate and (gate.state == "failed" or gate.state == "timedOut") then
+        closeNote = tostring(r.base) .. " is red after the merge: " .. tostring(gate.command)
+          .. ((gate.state == "timedOut") and " timed out" or (" exited " .. tostring(gate.code)))
+          .. " -- its tab stays open"
+      elseif core.config(cfg, "merge.closeTab", true) ~= false then
+        closeNote = FX.mergeAutoClose(r, it)
+      end
     end
     it.merge = core.mergeView(r, rd, facts, { queued = q.queued[key], sent = FX._mergeSent[key] ~= nil,
-                                               closeNote = closeNote })
+                                               closeNote = closeNote }, gate)
     if it.merge.needsYou and not (r.phase == "requested" and rd and rd.checking) then
       local tag = r.nonce .. "|" .. r.phase
       if not FX._mergeAlerted[tag] then
@@ -8176,6 +8292,11 @@ local HTML = [[
   #d-merge .dm-body { max-height:220px; overflow-y:auto; }
   #d-merge .dm-head { font-weight:600; }
   #d-merge .dm-sub, #d-merge .dm-tests { opacity:.85; margin-top:3px; white-space:pre-wrap; }
+  /* the gate Shepherd ran itself (2026-09-17) -- its verdict outranks the session's own claim */
+  #d-merge .dm-gate { margin-top:4px; white-space:pre-wrap; font-family:ui-monospace,Menlo,monospace; font-size:11px; }
+  #d-merge .dm-gate.g-failed { color:var(--danger); }
+  #d-merge .dm-gate.g-timedOut { color:var(--warn); }
+  #d-merge .dm-gate.g-passed { color:var(--ok); }
   #d-merge .dm-problems { color:var(--warn); margin-top:4px; }
   #d-merge ul { margin:4px 0 0 16px; padding:0; max-height:120px; overflow:auto; }
   #d-merge .dm-files li { font-family:ui-monospace,Menlo,monospace; font-size:11px; }
@@ -9373,6 +9494,7 @@ local HTML = [[
         <div class="dm-head" id="dm-head"></div>
         <div class="dm-sub" id="dm-sub"></div>
         <div class="dm-tests" id="dm-tests"></div>
+        <div class="dm-gate" id="dm-gate"></div>
         <div class="dm-problems" id="dm-problems"></div>
         <ul class="dm-commits" id="dm-commits"></ul>
         <ul class="dm-files" id="dm-files"></ul>
@@ -13272,7 +13394,18 @@ local HTML = [[
       document.getElementById("dm-head").textContent = m.line || "";
       var facts = mergeFactsLine(m);
       document.getElementById("dm-sub").textContent = (m.summary ? m.summary : "") + (facts ? (m.summary ? "\n" : "") + facts : "");
-      document.getElementById("dm-tests").textContent = m.tests ? "Tests, as the session reports them: " + m.tests : "";
+      // the session's own claim is advisory now: the gate below it is Shepherd's own run
+      document.getElementById("dm-tests").textContent = m.tests ? "Tests, as the session reports them (advisory): " + m.tests : "";
+      var gEl = document.getElementById("dm-gate");
+      var gt = m.gate;
+      gEl.className = "dm-gate" + (gt ? " g-" + String(gt.state).replace(/[^a-zA-Z]/g, "") : "");
+      if(!gt){ gEl.textContent = ""; }
+      else if(gt.state === "running"){ gEl.textContent = "Test gate: Shepherd is running " + (gt.command || "") + "…"; }
+      else if(gt.state === "passed"){ gEl.textContent = "Test gate: " + (gt.command || "") + " passed (Shepherd ran it)"; }
+      else {
+        var head = gt.state === "timedOut" ? " timed out" : " exited " + (gt.code === undefined ? "?" : gt.code);
+        gEl.textContent = "Test gate: " + (gt.command || "") + head + (gt.tail ? "\n" + gt.tail : "");
+      }
       var probs = Array.isArray(m.problems) ? m.problems : [];
       document.getElementById("dm-problems").textContent = (asking && probs.length) ? "Not ready: " + probs.join("; ") : "";
       var commits = Array.isArray(m.commits) ? m.commits : [];

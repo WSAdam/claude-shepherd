@@ -76,6 +76,7 @@ local function webviewHandle()
     { __index = function() return function() return webviewHandle() end end })
 end
 local settingsStore, frame = {}, { x = 0, y = 0, w = 1920, h = 1080 }
+local EXISTS = {}   -- fake absolute paths hs.fs.attributes should report as real directories
 local hs = {
   json = json,
   fs = {
@@ -85,6 +86,9 @@ local hs = {
       local i = 0; return function() i = i + 1; return files[i] end
     end,
     attributes = function(path)
+      -- EXISTS names the few fake paths a test needs git/Shepherd to believe in (a batch's repo
+      -- root: an absent one makes the batch "finished -- its repo is gone" before it can merge).
+      if EXISTS[tostring(path)] then return { mode = "directory" } end
       return nil, "cannot obtain information from file '" .. tostring(path) .. "': No such file or directory"
     end,
     mkdir = function() return true end,
@@ -130,6 +134,27 @@ local fakeApp = { allWindows = function() return {} end, activate = function() e
 rawset(hs.application, "applicationsForBundleID", function() return { fakeApp } end)
 rawset(hs.application, "find", function() return fakeApp end)
 rawset(hs.window, "focusedWindow", function() focusCalls = focusCalls + 1; return nil end)
+-- 2026-09-17 (test gate): hs.task here was the generic mkstub, which swallows a launch whole --
+-- a task-based gate would have silently no-op'd and every run would have looked green. Tasks are
+-- recorders now: each keeps the argv it was launched with, its working directory and its exit
+-- callback, and the test fires that callback itself. Same for the backstop timers.
+local TASKS, TIMERS = {}, {}
+rawset(hs.task, "new", function(bin, cb, args)
+  local t = { bin = bin, cb = cb, args = args or {}, dir = false, running = false, terminated = false }
+  function t:start() self.running = true; return self end
+  function t:setWorkingDirectory(d) self.dir = d; return true end
+  function t:terminate() self.terminated = true; self.running = false; return true end
+  function t:isRunning() return self.running end
+  TASKS[#TASKS + 1] = t
+  return setmetatable(t, { __index = function() return function() return nil end end })
+end)
+rawset(hs.timer, "doAfter", function(secs, fn)
+  local t = { secs = secs, fn = fn, stopped = false }
+  function t:stop() self.stopped = true end
+  function t:start() return self end
+  TIMERS[#TIMERS + 1] = t
+  return t
+end)
 hs.reload = function() end
 setmetatable(hs, { __index = function() return mkstub() end })
 _G.hs = hs
@@ -291,6 +316,179 @@ check("...and the card stops needing Adam", dI and dI.merge == nil)
 -- closing a session drops its merge files
 quiet(function() fx.removeStatus("c1") end)
 check("removing a session drops its merge request and decision", read(MD .. "/c1.json") == nil and read(MD .. "/c1.decision") == nil)
+
+-- ---- Shepherd runs the project's test gate itself before the review (2026-09-17) ------------
+-- The one part of the review Shepherd took on trust was the session's --tests string. With a
+-- merge.gates entry for the project, Shepherd runs the project's own suite in the worktree and
+-- the verdict is its own: a red or still-running gate blocks Adam's Merge AND a batch unit's
+-- delegated merge, and the same suite runs in the main checkout before the unit's tab closes.
+local FD = T .. "/.claude/cc-fleet"
+os.execute('mkdir -p "' .. FD .. '"')
+write(T .. "/.claude/cc-config.json", json.encode({ merge = { gates = {
+  { match = { project = "/r/G/*" }, command = "GATE-G", timeoutSeconds = 5 },
+  { match = { project = "/r/K/*" }, command = "GATE-K" },
+} } }))
+
+local function gateTasks(needle)
+  local out = {}
+  for _, t in ipairs(TASKS) do
+    if type(t.args[3]) == "string" and t.args[3]:find(needle, 1, true) then out[#out + 1] = t end
+  end
+  return out
+end
+local function gateLog(t) return t.args[3]:match("> '([^']+)' 2>&1") end
+local function endGate(t, code, text)
+  local f = gateLog(t)
+  os.execute('mkdir -p "' .. (f:match("^(.*)/[^/]+$") or ".") .. '"')
+  write(f, text or "")
+  quiet(function() t.cb(code, "", "") end)
+end
+local function setFacts(wt, repo, branch, sha)
+  FACTS[wt] = table.concat({ "@@listed", "worktree " .. repo, "HEAD a", "branch refs/heads/main", "",
+    "worktree " .. wt, "HEAD b", "branch refs/heads/" .. branch, "",
+    "@@head", branch, "@@sha", sha, "@@status", "", "@@ahead", "1", "@@behind", "0",
+    "@@commits", "abc1234\tthe unit's change", "@@stat", " 1 file changed", "@@files", "M\tapp.lua", "" }, "\n")
+end
+local function newUnit(key, repo, branch, sha, host, pid)
+  local wt = repo .. "/.claude/worktrees/" .. key
+  write(T .. "/" .. key .. ".jsonl", '{"type":"user","message":{"role":"user","content":"Start unit ' .. branch
+    .. ' in its own worktree: call EnterWorktree with name \\"' .. key .. '\\", then rename its branch."}}\n')
+  write(T .. "/status/" .. key .. ".json", string.format(
+    '{"status":"done","session_id":"%s","name":"%s","cwd":"%s","since":%d,"updated":%d,"editor":"vscode","host_window":"%d","session_pid":"%d","transcript_path":"%s"}',
+    key, key, wt, now - 60, now - 60, host, pid, T .. "/" .. key .. ".jsonl"))
+  write(MD .. "/" .. key .. ".json", json.encode({ v = 1, key = key, session_id = key, pid = tostring(pid),
+    nonce = "n-" .. key, worktree = wt, branch = branch, base = "main", commonDir = repo .. "/.git",
+    summary = "unit " .. key, tests = "make test: all green, honest", ahead = 1, at = now, phase = "requested" }))
+  setFacts(wt, repo, branch, sha)
+  return wt
+end
+
+-- an ungated project is untouched: no gate runs, and the request is ready at once
+local hWt = newUnit("h1", "/r/H", "fix/h1", "aaa000", 791, 991)
+alerts = {}
+tick()
+I = items()
+check("a project with no merge.gates entry runs nothing and is ready as before  (" .. tostring(I.h1 and I.h1.merge and I.h1.merge.line) .. ")",
+      I.h1 and I.h1.merge and I.h1.merge.ready == true and I.h1.merge.gate == nil)
+check("...no task was launched for it", #gateTasks("GATE-") == 0)
+check("...and its request can be merged straight away", (function()
+  quiet(function() fx.mergeApprove("h1") end); return decision("h1") ~= nil end)())
+os.remove(MD .. "/h1.json"); os.remove(MD .. "/h1.decision"); os.remove(T .. "/status/h1.json")
+local _ = hWt
+
+-- a gated project: the suite runs in the worktree, and the request waits for its verdict
+local gWt = newUnit("g1", "/r/G", "fix/g1", "aaa111", 792, 992)
+tick()
+local gt = gateTasks("GATE-G")[1]
+check("a gated project's merge request runs the project's own suite  (" .. tostring(gt and gt.args[3]) .. ")", gt ~= nil)
+if not gt then finish() end
+check("...in the unit's worktree", gt.dir == gWt)
+check("...through the login shell, so the suite finds Adam's PATH", gt.args[1] == "-l" and gt.args[2] == "-c")
+check("...with stdout and stderr redirected to a file, never read from a pipe",
+      gt.args[3]:find("2>&1", 1, true) ~= nil and gateLog(gt) ~= nil)
+I = items()
+check("while the gate runs the request is checking, never ready  (" .. tostring(I.g1.merge.line) .. ")",
+      I.g1.merge.ready == false and I.g1.merge.checking == true)
+quiet(function() fx.mergeApprove("g1") end)
+check("Merge is refused while the gate is still running", decision("g1") == nil)
+tick(); tick()
+check("the gate runs ONCE per request, not once per tick", #gateTasks("GATE-G") == 1)
+
+-- the backstop terminates a gate that never finishes
+local backstop
+for _, t in ipairs(TIMERS) do if t.secs == 5 and not t.stopped then backstop = t end end
+check("the gate's timeout is armed as a retained backstop timer", backstop ~= nil)
+quiet(function() backstop.fn() end)
+check("...and it terminates the wedged suite", gt.terminated == true)
+endGate(gt, 143, "make: *** [test] Terminated\n")
+tick()
+I = items()
+check("a gate that timed out blocks the merge  (" .. tostring(I.g1.merge.line) .. ")",
+      I.g1.merge.ready == false and I.g1.merge.line:find("timed out", 1, true) ~= nil)
+check("...and the review says which command  (" .. tostring(I.g1.merge.gate and I.g1.merge.gate.state) .. ")",
+      I.g1.merge.gate.state == "timedOut" and I.g1.merge.gate.command == "GATE-G")
+
+-- a new commit in the worktree is a new gate key: the suite runs again
+setFacts(gWt, "/r/G", "fix/g1", "bbb222")
+quiet(function() fx.mergeFacts(fx._mergeReqs.g1, true) end)
+tick()
+check("a new HEAD sha re-runs the gate", #gateTasks("GATE-G") == 2)
+local gt2 = gateTasks("GATE-G")[2]
+local log = {}
+for i = 1, 30 do log[#log + 1] = "suite line " .. i end
+log[#log + 1] = "FAILED 2 of 40 tests"
+endGate(gt2, 2, table.concat(log, "\n"))
+tick()
+I = items()
+check("a red gate blocks the merge and says so on the card  (" .. tostring(I.g1.merge.line) .. ")",
+      I.g1.merge.ready == false and I.g1.merge.line:find("test gate failed", 1, true) ~= nil
+      and I.g1.merge.line:find("GATE-G", 1, true) ~= nil)
+check("...with the tail of the suite's own output in the review",
+      I.g1.merge.gate.state == "failed" and I.g1.merge.gate.code == 2
+      and I.g1.merge.gate.tail:find("FAILED 2 of 40 tests", 1, true) ~= nil
+      and I.g1.merge.gate.tail:find("suite line 1\n", 1, true) == nil)
+check("...and the session's own test claim is still carried, as a claim", I.g1.merge.tests:find("honest", 1, true) ~= nil)
+alerts = {}
+quiet(function() fx.mergeApprove("g1") end)
+check("Merge on a red gate is refused, nothing written", decision("g1") == nil and alerted("Can't merge fix/g1 yet") == 1)
+
+-- the fix lands: a third sha, and this time the suite is green
+setFacts(gWt, "/r/G", "fix/g1", "ccc333")
+quiet(function() fx.mergeFacts(fx._mergeReqs.g1, true) end)
+tick()
+endGate(gateTasks("GATE-G")[3], 0, "40 passed\n")
+tick()
+I = items()
+check("a green gate lets the request through  (" .. tostring(I.g1.merge.line) .. ")",
+      I.g1.merge.ready == true and I.g1.merge.line == "⇡ ready to merge fix/g1 → main")
+check("...and the review says Shepherd ran it", I.g1.merge.gate.state == "passed")
+quiet(function() fx.mergeApprove("g1") end)
+check("...so Merge goes through", decision("g1") and decision("g1").nonce == "n-g1")
+
+-- a batch unit's DELEGATED merge is gated exactly the same way
+EXISTS["/r/K"] = true
+local kWt = newUnit("k1", "/r/K", "fix/k1", "ddd444", 793, 993)
+write(FD .. "/bk1.json", json.encode({ v = 1, id = "bk1", nonce = "n-bk1", phase = "approved",
+  repo = "/r/K", commonDir = "/r/K/.git", driver = { session_id = "kdrv", pid = "994", name = "driver" },
+  title = "gated batch", mergeWhenGreen = true, at = now,
+  units = { { type = "fix", slug = "k1", branch = "fix/k1", task = "do the unit" } } }))
+write(FD .. "/bk1.state.json", json.encode({ grant = { approved = true, grantMerge = true, at = now },
+  units = { k1 = { session = { id = "k1" } } } }))
+tick()
+local kt = gateTasks("GATE-K")[1]
+check("a batch unit's request runs its project's gate too", kt ~= nil and kt.dir == kWt)
+check("...and while it runs the batch grant does NOT merge it", decision("k1") == nil)
+endGate(kt, 1, "1 failing spec\n")
+tick()
+check("a red gate blocks the delegated merge on Adam's batch grant", decision("k1") == nil)
+I = items()
+check("...and the unit's card says the gate failed  (" .. tostring(I.k1.merge.line) .. ")",
+      I.k1.merge.line:find("test gate failed", 1, true) ~= nil)
+setFacts(kWt, "/r/K", "fix/k1", "eee555")
+quiet(function() fx.mergeFacts(fx._mergeReqs.k1, true) end)
+tick()
+endGate(gateTasks("GATE-K")[2], 0, "all green\n")
+tick()
+check("once the gate is green the batch grant merges the unit", decision("k1") and decision("k1").nonce == "n-k1")
+
+-- after the merge the same suite runs in the MAIN checkout, before the tab closes
+os.remove(MD .. "/g1.decision")
+registry(792, { "Fix g1 tab" })
+setPhase("g1", "merged", { sha = "abc1234def" })
+alerts = {}
+tick()
+local post = gateTasks("GATE-G")[4]
+check("a merged unit runs the gate once more, in the main checkout", post ~= nil and post.dir == "/r/G")
+check("...and its tab is not closed while that runs", #inbox(792) == 0)
+endGate(post, 2, "make test: 1 failed on main\n")
+tick()
+I = items()
+check("main red after the merge: the tab stays open", #inbox(792) == 0)
+check("...the card says so  (" .. tostring(I.g1.merge.line) .. ")",
+      I.g1.merge.line:find("is red after the merge", 1, true) ~= nil)
+check("...it wants Adam, unlike a merely un-closed tab", I.g1.merge.needsYou == true)
+check("...and Shepherd said so once, in the panel  (" .. table.concat(alerts, " | ") .. ")",
+      alerted("is red after the merge") == 1)
 
 check("the whole flow never focused a window or pressed a key", taps == 0 and focusCalls == 0)
 finish()
