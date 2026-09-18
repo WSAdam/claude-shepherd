@@ -307,6 +307,12 @@ Ask a Claude session to run several units in parallel and it can drive the whole
    no more merges on its grant. A batch also **ends itself** once every unit has merged or
    blocked (or its repo is gone): Shepherd records each unit's outcome from its merge request, says
    *batch finished: … (2 merged)* once, and the panel leaves the driver's card.
+6. While it runs, the batch review groups the units **by outcome** — *✅ 2 merged — alpha, delta*,
+   *⛔ 1 blocked — beta*, *⏳ 1 working — gamma*, *· 1 not opened — eps* — and each unit's row leads
+   with its result. `cc-fleet.sh status --batch <id>` prints the same grouping as JSON: `counts`,
+   `outcomes` (the slugs in each bucket), a per-unit `units` list (branch, outcome, result, session)
+   and your `grant` as Shepherd recorded it. A unit with its session and no result is *working*;
+   one with no session yet is *unopened*; *merged-dirty* counts as merged.
 
 Your approval lives in Shepherd (`~/.claude/cc-fleet/<id>.state.json`), never in the proposal's own
 file. `"fleet": { "enabled": false }` makes Shepherd ignore proposals.

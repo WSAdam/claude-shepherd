@@ -331,5 +331,10 @@ check("a tab request after Stop is refused, with the reason", ab and ab.ok == fa
 tick()
 I = items()
 check("the driver's card says the batch stopped", I.drv.fleet and I.drv.fleet.line:find("stopped", 1, true) ~= nil)
+-- 2026-09-18 batch outcomes: the review gets its units grouped by outcome, from Shepherd's own state
+local bsum = I.drv.fleet and type(I.drv.fleet.summary) == "table" and table.concat(I.drv.fleet.summary, " / ") or ""
+check("the driver's review groups the batch's units by outcome  (" .. bsum .. ")",
+      bsum:find("alpha", 1, true) ~= nil and bsum:find("beta", 1, true) ~= nil
+      and type(I.drv.fleet.outcomes) == "table" and I.drv.fleet.units[1].outcome ~= nil)
 check("no keystroke anywhere", taps == 0)
 finish()

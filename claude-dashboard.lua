@@ -8463,6 +8463,7 @@ local HTML = [[
   #d-batch { display:none; margin:6px 0; padding:8px 10px; border:1px solid #14b8a6; border-radius:8px; font-size:12px; }
   #d-batch .dm-head { font-weight:600; }
   #d-batch .dm-sub { opacity:.85; margin-top:3px; white-space:pre-wrap; }
+  #d-batch #db-summary { display:none; opacity:1; margin-top:6px; padding:2px 8px; border-left:2px solid #14b8a6; font-variant-numeric:tabular-nums; }
   #d-batch ul { margin:4px 0 0 16px; padding:0; max-height:140px; overflow:auto; }
   #d-batch label { display:block; margin-top:6px; }
   #d-batch .dm-acts { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; align-items:center; }
@@ -9684,6 +9685,7 @@ local HTML = [[
     <div id="d-batch">
       <div class="dm-head" id="db-head"></div>
       <div class="dm-sub" id="db-sub"></div>
+      <div class="dm-sub" id="db-summary"></div>
       <ul id="db-units"></ul>
       <label id="db-mergewrap"><input type="checkbox" id="db-merge"> Claude may merge these when green (each still passes Shepherd's own git check, one per repo at a time)</label>
       <div class="dm-acts" id="db-acts">
@@ -13616,9 +13618,14 @@ local HTML = [[
       document.getElementById("db-sub").textContent = b.phase === "proposed"
         ? "Approving lets Claude open these units' tabs in " + (b.repo || "the repo") + "'s window and hand them their tasks. Each unit still asks to merge."
         : (b.phase === "approved" ? "Approved" + (b.grantMerge ? ", with merges on its grant." : "; you merge each unit.") : "");
+      // Grouped by outcome (2026-09-18): core.batchView's summary lines, one per non-empty bucket.
+      var sum = Array.isArray(b.summary) ? b.summary : [];
+      var sumEl = document.getElementById("db-summary");
+      sumEl.textContent = sum.join("\n");
+      sumEl.style.display = sum.length ? "" : "none";
       var units = Array.isArray(b.units) ? b.units : [];
       mergeFillList(document.getElementById("db-units"), units, function(u){
-        return (u.branch || "") + (u.session ? "  ⇢ " + u.session : (u.opening ? "  (opening its tab…)" : "")) + " — " + (u.task || "");
+        return (u.result ? "[" + u.result + "] " : "") + (u.branch || "") + (u.session ? "  ⇢ " + u.session : (u.opening ? "  (opening its tab…)" : "")) + " — " + (u.task || "");
       });
       var proposed = b.phase === "proposed";
       document.getElementById("db-mergewrap").style.display = proposed ? "" : "none";

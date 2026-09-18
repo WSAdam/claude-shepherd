@@ -84,6 +84,14 @@ ask="$(sed -n '/^    function renderAsk(it){/,/^    }$/p' "$DASH")"
 assert_eq "the answer form renderer exists" "found" "$got"
 case "$ask" in *innerHTML*) got=innerHTML ;; *) got=textContent ;; esac
 assert_eq "the answer form fills itself with textContent only (never innerHTML)" "textContent" "$got"
+# 2026-09-18 (batch outcomes): the batch review shows slugs, results and summary lines a session wrote.
+batchr="$(sed -n '/^    function renderBatch(it){/,/^    }$/p' "$DASH")"
+[ -n "$batchr" ] && got=found || got=missing
+assert_eq "the batch review renderer exists" "found" "$got"
+case "$batchr" in *innerHTML*) got=innerHTML ;; *) got=textContent ;; esac
+assert_eq "the batch review fills itself with textContent only (never innerHTML)" "textContent" "$got"
+case "$batchr" in *db-summary*) got=yes ;; *) got=no ;; esac
+assert_eq "...its outcome summary included" "yes" "$got"
 assert_eq "an answer label reaches an Instances row through esc()" "yes" "$(has "'\">' + esc(lbl) + '</button>'")"
 assert_eq "the stack name reaches the card through esc()" "yes" "$(has 'esc(it.stackName)')"
 assert_eq "a branch reaches the card through esc()"       "yes" "$(has 'esc(it.branch)')"

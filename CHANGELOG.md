@@ -4,6 +4,23 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-18 — A batch's results are grouped by outcome
+
+### Added — merged / blocked / working / unopened, in the review and in `cc-fleet.sh status`
+
+`cc-fleet.sh status` printed four scalars and Shepherd's entire raw state file; the batch review
+listed units with no outcome at all (`core.batchView` left `result` out), and `core.batchFinished`
+counted merged and blocked units only to throw the counts away as a string. The unit of analysis is
+now the outcome (the idea is mini-swe-agent's batch view): `core.batchOutcomes(batch, state)` returns
+four slug lists in the batch's own unit order — *merged* (merged-dirty counts), *blocked*, *working*
+(its session exists, no result yet) and *unopened* (no session; a tab still opening has none).
+`batchFinished` counts through it and returns exactly what it did. `batchView` gives every unit its
+`result` and `outcome`, an `outcomes` roll-up, and — once the batch is approved — `summary` lines
+(`core.batchOutcomeLines`), which the review shows in `#db-summary` through `textContent` only; a
+proposal shows none, since "every unit unopened" says nothing. `status` prints `counts`, `outcomes`,
+a shaped `units` list and the recorded `grant` instead of the dump (no pids, no `before` snapshot),
+still valid JSON, and reads a missing or torn state file as "every unit unopened".
+
 ## 2026-09-18 — A leftover stuck at Working no longer outranks the session you're using
 
 ### Changed — auto-end now covers a leftover whose turn was interrupted (a requirement change)

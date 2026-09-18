@@ -9233,6 +9233,68 @@ do
   eq("a finished batch says so on the card", fv.line, "⇉ batch finished: Two helpers (2 merged)")
 end
 
+-- ---- Batch outcomes: a batch's units grouped by how they ended, not dumped row by row (2026-09-18) ----
+-- The unit of analysis is the outcome: merged / blocked / working / unopened, each a slug list in
+-- the batch's own unit order. batchFinished counted these and threw the counts away as a string;
+-- batchView left a unit's result out entirely, so the review couldn't show it.
+do
+  local function unit(t, slug) return { type = t, slug = slug, task = "Do " .. slug .. ".", branch = t .. "/" .. slug } end
+  local ob = core.parseBatch(core.json.encode({
+    v = 1, id = "b1758", nonce = "n1", driver = { session_id = "drv", pid = "4242", name = "repo-drv" },
+    repo = "/r/main", commonDir = "/r/main/.git", title = "Five units", mergeWhenGreen = true,
+    units = { unit("feat", "alpha"), unit("fix", "beta"), unit("ui", "gamma"), unit("docs", "delta"), unit("feat", "eps") },
+    at = 100, phase = "approved" }))
+  local function list(t) return table.concat(t or { "<nil>" }, ",") end
+  local state = { units = {
+    alpha = { session = { id = "sa", name = "main-a1" }, result = "merged" },
+    beta  = { session = { id = "sb", name = "main-b1" }, result = "blocked" },
+    gamma = { session = { id = "sg", name = "main-g1" } },
+    delta = { session = { id = "sd", name = "main-d1" }, result = "merged-dirty" },
+    eps   = { opening = true } } }
+  local o = core.batchOutcomes(ob, state)
+  eq("outcomes: merged units, merged-dirty counting as merged, in the batch's order", list(o.merged), "alpha,delta")
+  eq("outcomes: blocked units", list(o.blocked), "beta")
+  eq("outcomes: a unit with a session and no result is working, not blocked", list(o.working), "gamma")
+  eq("outcomes: a unit whose tab is still opening has no session yet -> unopened", list(o.unopened), "eps")
+  local empty = core.batchOutcomes(ob, {})
+  eq("outcomes: an empty state = every unit unopened", list(empty.unopened), "alpha,beta,gamma,delta,eps")
+  check("...and nothing in any other bucket", #empty.merged == 0 and #empty.blocked == 0 and #empty.working == 0)
+  eq("outcomes: a state that isn't a table is an empty state", list(core.batchOutcomes(ob, nil).unopened), "alpha,beta,gamma,delta,eps")
+  eq("outcomes: a result Shepherd never writes is not an outcome -- still working",
+     list(core.batchOutcomes(ob, { units = { alpha = { session = { id = "sa" }, result = "exploded" } } }).working), "alpha")
+  check("outcomes: no batch -> four empty buckets, never an error",
+        #core.batchOutcomes(nil, state).merged == 0 and #core.batchOutcomes({}, state).unopened == 0)
+
+  local og = { approved = true, grantMerge = true, at = 100 }
+  check("finished: still not while a unit is working or unopened", core.batchFinished(ob, og, state, false) == false)
+  state.units.gamma.result = "blocked"
+  state.units.eps = { session = { id = "se" }, result = "merged" }
+  local fin, why = core.batchFinished(ob, og, state, false)
+  check("finished: the same reason it always gave, counted through the outcomes  (" .. tostring(why) .. ")",
+        fin == true and why == "3 merged, 2 blocked")
+  check("finished: a batch with no units never finishes on its own",
+        core.batchFinished({ units = {} }, og, {}, false) == false)
+
+  state.units.gamma.result = nil
+  state.units.eps = { opening = true }
+  local v = core.batchView(ob, og, state)
+  check("view: each unit carries its result and its outcome bucket",
+        v.units[1].result == "merged" and v.units[1].outcome == "merged"
+        and v.units[4].result == "merged-dirty" and v.units[4].outcome == "merged"
+        and v.units[2].outcome == "blocked" and v.units[3].result == nil and v.units[3].outcome == "working"
+        and v.units[5].outcome == "unopened")
+  eq("view: the roll-up is the same grouping", list(v.outcomes.merged) .. "|" .. list(v.outcomes.working), "alpha,delta|gamma")
+  eq("view: the summary names each non-empty bucket with its count and slugs", table.concat(v.summary, "\n"),
+     "✅ 2 merged — alpha, delta\n⛔ 1 blocked — beta\n⏳ 1 working — gamma\n· 1 not opened — eps")
+  state.units.beta.result = "merged"
+  eq("view: an empty bucket gets no line", table.concat(core.batchView(ob, og, state).summary, "\n"),
+     "✅ 3 merged — alpha, beta, delta\n⏳ 1 working — gamma\n· 1 not opened — eps")
+  check("view: a proposal has no summary -- every unit unopened says nothing", core.batchView(ob, nil, {}).summary == nil)
+  check("view: nor has a denied batch", core.batchView(ob, { denied = true }, {}).summary == nil)
+  check("view: a stopped batch keeps its summary (that's when Adam reads it)",
+        type(core.batchView(ob, { approved = true, stopped = true }, state).summary) == "table")
+end
+
 -- ---- Shepherd answers: a session's question answered from its card (2026-09-11) ----------
 -- cc-ask.sh holds a session's AskUserQuestion while Shepherd runs (ask_nonce + ask_until on the
 -- status file, the questions in pending.ask); Adam's click becomes <key>.answer, which the hook

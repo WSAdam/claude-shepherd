@@ -11,7 +11,7 @@
 #   cc-fleet.sh tab --batch <id> --unit <slug> [--wait-max 120]
 #       Shepherd opens an empty Claude tab in the repo's window and answers with the new
 #       session's name and the message to send it (SendMessage). Driver only; approved batches only.
-#   cc-fleet.sh status --batch <id>     Shepherd's view of the units (JSON)
+#   cc-fleet.sh status --batch <id>     Shepherd's view of the units, grouped by outcome (JSON)
 #   cc-fleet.sh stop --batch <id>       ends the batch; its permissions go with it
 #
 # The approval lives in Shepherd (its own <id>.state.json), never in this file's word: a
@@ -196,8 +196,26 @@ cmd_status() {
   while [ $# -gt 0 ]; do case "$1" in --batch) id="${2:-}"; shift 2 ;; *) refuse "unknown option: $1" ;; esac; done
   local bf; bf="$(batch_file "$id")"
   [ -f "$bf" ] || refuse "no batch $id"
-  jq -n --slurpfile b "$bf" --slurpfile s <(cat "$FLEET_DIR/$id.state.json" 2>/dev/null || echo '{}') \
-    '{batch: $b[0].id, title: $b[0].title, phase: $b[0].phase, repo: $b[0].repo, shepherd: $s[0]}'
+  # Grouped by outcome, the way core.batchOutcomes groups them (merged-dirty counts as merged; a
+  # session and no result = working; no session = unopened). Shepherd's state file is the source;
+  # a missing or torn one reads as empty, so every unit is unopened.
+  local state
+  state="$(jq -c 'if type == "object" then . else {} end' "$FLEET_DIR/$id.state.json" 2>/dev/null)" || state=""
+  [ -n "$state" ] || state='{}'
+  jq -n --slurpfile b "$bf" --argjson s "$state" '
+    def outcome($us):
+      if ($us.result == "merged" or $us.result == "merged-dirty") then "merged"
+      elif $us.result == "blocked" then "blocked"
+      elif (($us.session | type) == "object") then "working"
+      else "unopened" end;
+    ($s.units | if type == "object" then . else {} end) as $su
+    | [ $b[0].units[] | . as $u | ($su[$u.slug] | if type == "object" then . else {} end) as $us
+        | { slug: $u.slug, branch: $u.branch, outcome: outcome($us),
+            result: ($us.result // null), session: ($us.session.name? // null) } ] as $units
+    | ([ "merged", "blocked", "working", "unopened" ]
+       | map(. as $k | { key: $k, value: [ $units[] | select(.outcome == $k) | .slug ] }) | from_entries) as $o
+    | { batch: $b[0].id, title: $b[0].title, phase: $b[0].phase, repo: $b[0].repo,
+        grant: ($s.grant // null), counts: ($o | map_values(length)), outcomes: $o, units: $units }'
   exit 0
 }
 

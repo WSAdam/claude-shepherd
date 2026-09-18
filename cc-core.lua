@@ -2553,21 +2553,49 @@ function M.fleetUnitOfRequest(batch, state, req)
   return nil
 end
 
+-- Which bucket one unit is in (2026-09-18), from Shepherd's own state for it: merged (merged-dirty
+-- counts), blocked, working (it has its session and no result yet) or unopened (no session -- a
+-- tab that is still opening hasn't produced one).
+function M.batchUnitOutcome(us)
+  us = type(us) == "table" and us or {}
+  if us.result == "merged" or us.result == "merged-dirty" then return "merged" end
+  if us.result == "blocked" then return "blocked" end
+  return type(us.session) == "table" and "working" or "unopened"
+end
+
+-- A batch's units grouped by outcome: four slug lists, each in the batch's own unit order.
+function M.batchOutcomes(batch, state)
+  local o = { merged = {}, blocked = {}, working = {}, unopened = {} }
+  for _, u in ipairs(type(batch) == "table" and type(batch.units) == "table" and batch.units or {}) do
+    local us = type(state) == "table" and type(state.units) == "table" and state.units[u.slug] or nil
+    local bucket = o[M.batchUnitOutcome(us)]
+    bucket[#bucket + 1] = u.slug
+  end
+  return o
+end
+
+-- The grouping as lines for the review and the log: one per non-empty bucket, count then slugs.
+function M.batchOutcomeLines(o)
+  local lines = {}
+  for _, row in ipairs({ { "merged", "✅", "merged" }, { "blocked", "⛔", "blocked" },
+                         { "working", "⏳", "working" }, { "unopened", "·", "not opened" } }) do
+    local slugs = type(o) == "table" and o[row[1]] or nil
+    if type(slugs) == "table" and #slugs > 0 then
+      lines[#lines + 1] = row[2] .. " " .. #slugs .. " " .. row[3] .. " — " .. table.concat(slugs, ", ")
+    end
+  end
+  return lines
+end
+
 -- Has an approved batch run its course? (2026-09-11: a driver that never ran stop left "driving
 -- 2 units" on its card for hours.) Every unit has an outcome -- merged (merged-dirty counts) or
 -- blocked -- or its repo is gone. Returns true + the reason the card shows.
 function M.batchFinished(batch, grant, state, repoGone)
   if type(batch) ~= "table" or type(grant) ~= "table" or not grant.approved or grant.stopped then return false end
   if repoGone then return true, "its repo is gone" end
-  local merged, blocked = 0, 0
-  for _, u in ipairs(batch.units or {}) do
-    local us = type(state) == "table" and type(state.units) == "table" and state.units[u.slug] or nil
-    local r = type(us) == "table" and us.result or nil
-    if r == "merged" or r == "merged-dirty" then merged = merged + 1
-    elseif r == "blocked" then blocked = blocked + 1
-    else return false end
-  end
-  if merged + blocked == 0 then return false end
+  local o = M.batchOutcomes(batch, state)
+  local merged, blocked = #o.merged, #o.blocked
+  if #o.working + #o.unopened > 0 or merged + blocked == 0 then return false end
   return true, merged .. " merged" .. (blocked > 0 and (", " .. blocked .. " blocked") or "")
 end
 
@@ -2582,10 +2610,15 @@ function M.batchView(batch, grant, state)
     local us = type(state) == "table" and type(state.units) == "table" and state.units[u.slug] or {}
     units[#units + 1] = { type = u.type, slug = u.slug, branch = u.branch, task = capChars(u.task, 300),
                           session = type(us.session) == "table" and us.session.name or nil,
-                          opening = us.opening and true or nil }
+                          opening = us.opening and true or nil,
+                          result = type(us.result) == "string" and capChars(us.result, 40) or nil,
+                          outcome = M.batchUnitOutcome(us) }
   end
   local v = { id = batch.id, title = batch.title, repo = folder, phase = phase, units = units,
-              mergeWhenGreen = batch.mergeWhenGreen, grantMerge = grant.grantMerge and true or nil }
+              mergeWhenGreen = batch.mergeWhenGreen, grantMerge = grant.grantMerge and true or nil,
+              outcomes = M.batchOutcomes(batch, state) }
+  -- Grouped by outcome once the batch has run at all; before that every unit is unopened.
+  if grant.approved then v.summary = M.batchOutcomeLines(v.outcomes) end
   if phase == "proposed" then v.line = "⇉ proposes " .. n .. " unit" .. ((n == 1) and "" or "s") .. " in " .. folder
   elseif phase == "approved" then
     v.line = "⇉ driving " .. n .. " unit" .. ((n == 1) and "" or "s") .. " in " .. folder .. (grant.grantMerge and " · merges delegated" or "")

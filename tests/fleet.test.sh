@@ -117,6 +117,41 @@ assert_eq "...with its reason" "yes" "$got"
 fleet drv s1 status --batch "$ID"
 grep -q "repo-a1" "$TMP/s1.out" && got=yes || got=no
 assert_eq "status prints Shepherd's view of the units" "yes" "$got"
+
+# ---- status groups the units by outcome (2026-09-18) ----
+# It used to print four scalars plus Shepherd's ENTIRE raw state file: no grouping, and the
+# proposal's units (their branches) never appeared. The unit of analysis is the outcome.
+sj() { jq -r "$1" "$TMP/$2.out" 2>/dev/null; }
+assert_eq "status: valid JSON (driver sessions parse it)" "yes" "$(jq -e . "$TMP/s1.out" >/dev/null 2>&1 && echo yes || echo no)"
+assert_eq "status: a unit with its session and no result is working" "alpha" "$(sj '.outcomes.working | join(",")' s1)"
+assert_eq "status: a unit with no tab yet is unopened" "beta" "$(sj '.outcomes.unopened | join(",")' s1)"
+assert_eq "status: counts for all four buckets, the empty ones too" "0 0 1 1" \
+  "$(sj '.counts | "\(.merged) \(.blocked) \(.working) \(.unopened)"' s1)"
+assert_eq "status: each unit shows its branch, outcome and session" "feat/alpha working repo-a1 | fix/beta unopened -" \
+  "$(sj '[.units[] | "\(.branch) \(.outcome) \(.session // "-")"] | join(" | ")' s1)"
+assert_eq "status: the raw state dump is gone" "null" "$(sj '.shepherd' s1)"
+jq -n '{grant: {approved: true, grantMerge: true, at: 5}, before: {"1": {}},
+        units: {alpha: {session: {id: "s-a1", name: "repo-a1", pid: 7}, result: "merged-dirty"},
+                beta:  {session: {id: "s-b1", name: "repo-b1", pid: 8}, result: "blocked"}}}' > "$FD/$ID.state.json"
+fleet drv s2 status --batch "$ID"
+assert_eq "status: merged-dirty counts as merged, blocked is blocked" "alpha / beta" \
+  "$(sj '(.outcomes.merged | join(",")) + " / " + (.outcomes.blocked | join(","))' s2)"
+assert_eq "status: ...and the unit keeps its exact result" "merged-dirty" "$(sj '.units[0].result' s2)"
+assert_eq "status: Adam's grant as Shepherd recorded it" "true true" "$(sj '"\(.grant.approved) \(.grant.grantMerge)"' s2)"
+assert_eq "status: none of Shepherd's bookkeeping (pids, the before snapshot)" "clean" \
+  "$(grep -q -e '"pid"' -e '"before"' "$TMP/s2.out" && echo leaked || echo clean)"
+rm -f "$FD/$ID.state.json"
+fleet drv s3 status --batch "$ID"
+assert_eq "status: no state file yet = every unit unopened" "alpha,beta 2" \
+  "$(sj '(.outcomes.unopened | join(",")) + " " + (.counts.unopened | tostring)' s3)"
+assert_eq "status: ...and no grant" "null" "$(sj '.grant' s3)"
+printf '{"units":{"alpha":{"session":{"name":"repo-a1"}}}}' > "$FD/$ID.state.json"
+printf 'garbage{' > "$TMP/keep.state"; cp "$FD/$ID.state.json" "$TMP/good.state"; cp "$TMP/keep.state" "$FD/$ID.state.json"
+fleet drv s4 status --batch "$ID"
+assert_eq "status: a torn state file still answers, every unit unopened" "0 alpha,beta" \
+  "$(echo "$(cat "$TMP/s4.rc") $(sj '.outcomes.unopened | join(",")' s4)")"
+cp "$TMP/good.state" "$FD/$ID.state.json"
+
 fleet drv st stop --batch "$ID"
 assert_eq "stop: exit 0" "0" "$(cat "$TMP/st.rc")"
 assert_json "stop: the proposal is stopped" "$B" .phase stopped

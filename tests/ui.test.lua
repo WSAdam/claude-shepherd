@@ -3334,5 +3334,23 @@ do
         and rbody:find('key .. ".decision.note.tmp."', 1, true) ~= nil)
 end
 
+-- ---- batch review: the units grouped by outcome (2026-09-18) ----
+-- core.batchView hands the review its summary lines (one per non-empty outcome bucket); the
+-- panel only places them. Written by sessions' slugs, so textContent only.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("batch outcomes: the review has a summary block above its unit list",
+        src:find('<div class="dm-sub" id="db-summary"></div>\n      <ul id="db-units"></ul>', 1, true) ~= nil)
+  check("batch outcomes: it is filled from the view's summary lines through textContent",
+        src:find('var sum = Array.isArray(b.summary) ? b.summary : [];', 1, true) ~= nil
+        and src:find('sumEl.textContent = sum.join("\\n");', 1, true) ~= nil)
+  check("batch outcomes: ...and hidden when there is nothing to group (a proposal)",
+        src:find('sumEl.style.display = sum.length ? "" : "none";', 1, true) ~= nil)
+  check("batch outcomes: a unit's row leads with its exact result once it has one",
+        src:find('(u.result ? "[" + u.result + "] " : "")', 1, true) ~= nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)
