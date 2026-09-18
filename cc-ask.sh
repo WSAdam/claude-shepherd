@@ -14,9 +14,16 @@
 #      its picker and hands Claude "The user answered: …" (spiked 2026-09-11, CLI + VS Code).
 #
 # Out of the way (no output: the tab shows its own picker, exactly as without the hook)
-# when ask.enabled is false, the panel heartbeat is stale, there are no questions, Adam
-# releases the question, or ask.waitSeconds (default 900, max 3600) runs out.
+# unless ask.enabled is true (OPT-IN since 2026-09-18: Settings > Approvals, or the config),
+# and when the panel heartbeat is stale, there are no questions, Adam releases the question,
+# or ask.waitSeconds (default 900, max 3600) runs out.
 # Only the decision JSON is ever written to stdout; logs go to stderr.
+#
+# The round trip (2026-09-18, measured live): the status dir's watcher is slowed by the panel's
+# own 1Hz heartbeat there (a question took 626-1127ms to show), so once the card has the question
+# the hook touches $CC_ASK_DIR/.poke -- Shepherd watches that quiet dir and refreshes in ~11ms.
+# The answer is looked for every 0.1s (was 0.25s) against a real deadline; a sleep per round,
+# never a busy loop (0.1s costs ~3% of one core, only while a question is held).
 
 set -u
 
@@ -24,12 +31,13 @@ set -u
 . "$(dirname "$0")/cc-lib.sh" 2>/dev/null || . "$HOME/.claude/cc-lib.sh"
 
 HEARTBEAT_MAX_AGE="${CC_PANEL_MAX_AGE:-5}"
-POLL="${CC_ASK_POLL:-0.25}"
+POLL="${CC_ASK_POLL:-0.1}"
 
 INPUT="$(cat 2>/dev/null || true)"
 cc_have_jq || exit 0
 [ "$(cc_get "$INPUT" '.tool_name')" = "AskUserQuestion" ] || exit 0
-[ "$(cc_config '.ask.enabled' 'true')" = "false" ] && exit 0
+# Opt-in (2026-09-18): only an explicit true holds a question; anything else is the tab's picker.
+[ "$(cc_config '.ask.enabled' 'false')" = "true" ] || exit 0
 
 # Shepherd must be alive (fresh heartbeat), or we'd hold the question for nobody.
 HB_FILE="$(cc_heartbeat_file)"
@@ -61,10 +69,16 @@ ARM="$(jq -nc --arg n "$NONCE" --argjson u "$UNTIL" '{ask_nonce:$n, ask_until:$u
 
 # Let go of the question on every way out (answered, released, timed out, Esc/SIGTERM) --
 # only if it is still ours: a newer question on this session owns the fields then.
+# One jq + one mv (2026-09-18: it was a read and two rewrites, ~60ms between the answer and
+# the session resuming -- Claude Code waits for the hook to exit, trap included).
 let_go() {
-  if [ "$(cc_read_field "$KEY" '.ask_nonce')" = "$NONCE" ]; then
-    cc_del_field "$KEY" "ask_nonce"
-    cc_del_field "$KEY" "ask_until"
+  local f tmp
+  f="$(cc_file "$KEY")"; tmp="${f}.tmp.$$"
+  if [ -f "$f" ] && jq -c --arg n "$NONCE" 'select(.ask_nonce == $n) | del(.ask_nonce, .ask_until)' "$f" > "$tmp" 2>/dev/null \
+     && [ -s "$tmp" ]; then
+    mv "$tmp" "$f"
+  else
+    rm -f "$tmp" 2>/dev/null || true
   fi
   rm -f "$CLAIM" 2>/dev/null || true
 }
@@ -74,9 +88,12 @@ trap 'exit 0' TERM INT HUP
 cc_merge "$KEY" "$ARM"
 echo "[cc-ask] ⏳ holding the question for Shepherd ($KEY, up to ${WAIT}s)" >&2
 
-ITERS="$(awk -v w="$WAIT" -v p="$POLL" 'BEGIN { printf "%d", w / p }')"
-i=0
-while [ "$i" -lt "$ITERS" ]; do
+# A real deadline (bash's own SECONDS: no fork), not a round count -- at a short poll the
+# rounds' own overhead made a counted loop outlast ask_until by ~7%.
+SECONDS=0
+last_rearm=-1
+poked=0
+while [ "$SECONDS" -lt "$WAIT" ]; do
   if [ -f "$ANSWER_FILE" ] && mv "$ANSWER_FILE" "$CLAIM" 2>/dev/null; then
     BODY="$(cat "$CLAIM" 2>/dev/null)"
     rm -f "$CLAIM" 2>/dev/null || true
@@ -99,11 +116,19 @@ while [ "$i" -lt "$ITERS" ]; do
   fi
   # cc-status.sh's read-modify-write can land a pre-arm snapshot over ours (#28): put the
   # nonce back (~1Hz) so the card keeps its buttons. A foreign nonce is a newer question.
-  if [ $(( i % 4 )) -eq 0 ] && [ -z "$(cc_read_field "$KEY" '.ask_nonce')" ]; then
-    cc_merge "$KEY" "$ARM"
+  if [ "$SECONDS" -ne "$last_rearm" ]; then
+    last_rearm="$SECONDS"
+    [ -z "$(cc_read_field "$KEY" '.ask_nonce')" ] && cc_merge "$KEY" "$ARM"
+  fi
+  # Wake the panel once the card can show the question: our nonce AND cc-status.sh's pending.ask
+  # are both on the status file. Looked for during the first 5s only; after that the panel's own
+  # tick has it anyway, and an idle hold costs one sleep per round and nothing else.
+  if [ "$poked" -eq 0 ] && [ "$SECONDS" -lt 5 ] \
+     && jq -e --arg n "$NONCE" '.ask_nonce == $n and ((.pending.ask // []) | length > 0)' "$(cc_file "$KEY")" >/dev/null 2>&1; then
+    : > "$CC_ASK_DIR/.poke" 2>/dev/null || true
+    poked=1
   fi
   sleep "$POLL"
-  i=$(( i + 1 ))
 done
 
 echo "[cc-ask] ⌛ no answer in ${WAIT}s -- the tab's picker takes over ($KEY)" >&2

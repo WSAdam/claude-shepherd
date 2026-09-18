@@ -964,7 +964,15 @@ function M.firstPromptFromTranscript(head)
   if type(head) ~= "string" then return nil end
   -- 2026-09-17: only whole lines. The head is a fixed-size read, so its last line may be torn,
   -- and decoding a torn line makes LuaSkin log a JSON error even inside pcall.
-  for line in head:gmatch("([^\n]*)\n") do
+  -- 2026-09-18: walked with a plain find, never `head:gmatch("([^\n]*)\n")` -- with no newline to
+  -- find in the torn last line that pattern backtracks from every start position (quadratic: a
+  -- 16KB torn line cost 1s), and this runs on Hammerspoon's one thread. It froze the panel.
+  local pos = 1
+  while true do
+    local nl = head:find("\n", pos, true)
+    if not nl then break end   -- what's left is the torn line
+    local line = head:sub(pos, nl - 1)
+    pos = nl + 1
     if line:find('"type":"user"', 1, true) then
       local ok, e = pcall(function() return M.json.decode(line) end)
       if ok and type(e) == "table" and e.type == "user" and not e.isMeta and type(e.message) == "table" then
@@ -6213,6 +6221,18 @@ function M.watcherShouldRefresh(paths)
   return false
 end
 
+-- The ask dir's watcher (2026-09-18): the status dir's is slowed by the panel's own 1Hz heartbeat
+-- writes there (12-1443ms to deliver, measured live), so cc-ask.sh touches ASK_POKE in the quiet
+-- ask dir once a held question is ready to show (~11ms). Only that file refreshes the panel:
+-- Shepherd's own answer files and the hook's claims land there too, and need no refresh each.
+M.ASK_POKE = ".poke"
+function M.askPokeShouldRefresh(paths)
+  for _, p in ipairs(paths or {}) do
+    if tostring(p):match("([^/]*)$") == M.ASK_POKE then return true end
+  end
+  return false
+end
+
 -- ---- Image paste (Step 5) --------------------------------------------------
 -- Parse a clipboard image data URL ("data:image/png;base64,...."), returning
 -- its mime, a normalized lowercase file extension, and the base64 payload.
@@ -6288,6 +6308,8 @@ M.SETTINGS_KEEP_SUBKEYS = {
   -- #6 host stats: maxBlockSeconds + hostStats are form-managed; the hand-edited
   -- hostPressure.{cpu,mem,disk} thresholds (no UI input) must survive a Save.
   insights = { "hostPressure" },
+  -- 2026-09-18: Settings > Approvals manages ask.enabled only; the hand-edited wait survives.
+  ask = { "waitSeconds", "_comment" },
 }
 function M.overlayConfig(cfg, incoming)
   cfg = type(cfg) == "table" and cfg or {}

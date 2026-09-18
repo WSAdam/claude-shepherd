@@ -310,23 +310,35 @@ for the mechanics.
 
 ### Answer questions from Shepherd
 
+**Off by default — turn it on in ⚙ Settings → Approvals → "Answer questions in Shepherd"** (or
+`"ask": { "enabled": true }` in `~/.claude/cc-config.json`). It used to switch itself on; since
+2026-09-18 it is opt-in, because a question answered on the card has to be at least as good as one
+answered in the tab, and that is a choice to make rather than a default to discover. With it off,
+questions go straight to the tab, exactly as Claude Code does on its own. A config that already
+says `"enabled": true` keeps it on.
+
 When a session needs your decision it asks with Claude Code's question tool (AskUserQuestion).
-While Shepherd is running, the `cc-ask.sh` hook **holds that question for Shepherd** instead of
-showing it in the tab:
+With the setting on and Shepherd running, the `cc-ask.sh` hook **holds that question for Shepherd**
+instead of showing it in the tab:
 
 - **The card pulses** and says *❓ asks you: …*, it leads its project card, and you get one alert
-  (plus an OS banner if approval banners are on).
-- **The answers are buttons** in its detail panel and on its Instances row. One click on a
+  (plus an OS banner if approval banners are on). The hook wakes the panel itself, so the question
+  is on the card in a fraction of a second rather than on the next 1-second tick.
+- **The answers are buttons** in its detail panel and on its Instances row, **each with its
+  explanation written out under its label** — the same text the tab shows, wrapped in full, not a
+  hover tooltip. One click on a
   single-choice question answers it. With several parts or multi-select, pick per part (or type your
   own answer under **Other…**) and press **Send answers**. Either way the answer goes straight to
-  the session as the tool's own answer; no tab to find, no keystrokes.
+  the session as the tool's own answer; no tab to find, no keystrokes. The hook looks for your
+  answer every 0.1s, so the session is moving again about a tenth of a second after the click.
 - **Answer in the tab instead** hands the question back to the tab's own picker and takes you
   there. The tab's picker also takes over after `ask.waitSeconds` (default 900) and whenever
   Shepherd isn't running, so nothing waits on a panel that's gone.
 - Approve / Deny (and Approve all) skip a held question: it's answered with its own buttons.
 
 Your answer is `~/.claude/cc-ask/<key>.answer`, bound to the question it's for. The hook is wired by
-`make setup`; `"ask": { "enabled": false }` sends every question straight to the tab again.
+`make setup`; unticking the setting (`"ask": { "enabled": false }`, or no `enabled` at all) sends
+every question straight to the tab again, from the next question on.
 
 ### Messages
 

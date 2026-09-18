@@ -59,6 +59,7 @@ local function webviewHandle()
     end },
     { __index = function() return function() return webviewHandle() end end })
 end
+local WATCHERS = {}
 local settingsStore, frame = {}, { x = 0, y = 0, w = 1920, h = 1080 }
 local hs = {
   json = json,
@@ -77,7 +78,8 @@ local hs = {
   screen = { mainScreen = function() return { frame = function() return frame end, fullFrame = function() return frame end } end },
   execute = function() return "" end,
   hotkey = { bind = function() return mkstub() end },
-  pathwatcher = { new = function() return mkstub() end },
+  -- keep every watcher's dir + callback, so the test can fire one the way FSEvents would
+  pathwatcher = { new = function(dir, cb) WATCHERS[#WATCHERS + 1] = { dir = dir, cb = cb }; return mkstub() end },
   menubar = { new = function() return mkstub() end },
   autoLaunch = function() return false end,
   alert = { show = function(s) overlays[#overlays + 1] = tostring(s) end },
@@ -187,6 +189,44 @@ check("Answer in the tab instead hands it back to the tab's picker", body and bo
 os.remove(ANS)
 click("answer", "s1", "0")
 check("...after which Shepherd doesn't answer it", not exists(ANS))
+
+-- ---- a new question reaches the panel at once (2026-09-18) ----
+-- 2026-09-18 measured live: a held question took 626-1127ms to show. The status dir's watcher is
+-- slowed by the panel's own 1Hz heartbeat writes there (12-1443ms to deliver); a watcher on the
+-- quiet ask dir delivers in ~11ms, and cc-ask.sh touches .poke there once the card can show it.
+do
+  local askWatch
+  for _, w in ipairs(WATCHERS) do if w.dir == ASK then askWatch = w end end
+  check("Shepherd watches the ask dir, not only the status dir", askWatch ~= nil and type(askWatch.cb) == "function")
+  local bodies, realBody = 0, fx._refreshBody
+  fx._refreshBody = function(...) bodies = bodies + 1; return realBody(...) end
+  session("500.5", Q1)
+  if askWatch then quiet(function() askWatch.cb({ ASK .. "/.poke" }) end) end
+  fx._refreshBody = realBody
+  check("the hook's poke refreshes the panel right away, without waiting for the tick  (refreshes=" .. bodies .. ")", bodies == 1)
+  local seen = item()
+  check("...so the card has the new question", seen ~= nil and seen.askHeld == true and seen.ask_nonce == "500.5")
+  bodies = 0
+  fx._refreshBody = function(...) bodies = bodies + 1; return realBody(...) end
+  if askWatch then quiet(function() askWatch.cb({ ASK .. "/s1.answer.tmp.1" }) end) end
+  fx._refreshBody = realBody
+  check("Shepherd's own answer-file writes there don't set off a refresh each", bodies == 0)
+
+  -- the click shows at once: the card's buttons used to stay live until the next 1Hz tick
+  session("600.6", Q2); tick()
+  check("(a held two-part question is on the card)", item() ~= nil and item().askHeld == true)
+  click("answer-ask", "s1", json.encode({ { labels = { "Ham" } }, { labels = { "Small" } } }))
+  check("Send answers clears the question off the card at once, no tick needed", item() ~= nil and item().askHeld ~= true)
+  os.remove(ANS)
+  session("700.7", Q1); tick()
+  click("release-ask", "s1")
+  check("...and so does Answer in the tab instead", item() ~= nil and item().askHeld ~= true)
+  os.remove(ANS)
+  session("800.8", Q1); tick()
+  click("answer", "s1", "1")
+  check("...and so does a one-click answer", exists(ANS) and item() ~= nil and item().askHeld ~= true)
+  os.remove(ANS)
+end
 
 check("no keystroke anywhere", taps == 0)
 check("no on-screen overlay anywhere in the flow  (" .. table.concat(overlays, " | ") .. ")", #overlays == 0)

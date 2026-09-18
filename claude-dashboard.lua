@@ -28,7 +28,7 @@ do
   local prev = _G.__ccDashboard
   local pm = prev and prev.module
   if pm then
-    for _, k in ipairs({ "pasteTap", "timer", "watcher", "usageTimer", "officialUsageTimer" }) do
+    for _, k in ipairs({ "pasteTap", "timer", "watcher", "askWatcher", "usageTimer", "officialUsageTimer" }) do
       if pm[k] then pcall(function() pm[k]:stop() end) end
     end
     if pm.menubar then pcall(function() pm.menubar:delete() end) end
@@ -3420,7 +3420,16 @@ function FX.answerAsk(key, payload)
     first = type(a) == "table" and table.concat(a, ", ") or tostring(a)
   end
   print("[cc-dashboard] ✅ answered " .. tostring(it and (it.label or it.name) or key) .. ": " .. tostring(first))
+  FX.askRepaint()
   return true
+end
+
+-- 2026-09-18: the click shows at once. An answered question's buttons used to stay live until the
+-- next 1Hz tick, which read as "did that register?". FX._askSent is already set, so this refresh
+-- drops the question off the card; a no-op when the answer came from inside a refresh.
+function FX.askRepaint()
+  if FX._refreshBusy then return end
+  pcall(refresh)
 end
 
 -- Approve/Deny on a held question: there is no prompt in the tab for their keys (core refuses).
@@ -3446,6 +3455,7 @@ function FX.releaseAsk(key)
   print("[cc-dashboard] ↩️ question handed back to the tab of " .. tostring(it.label or it.name or key))
   -- then take Adam to that tab, where its picker is about to appear
   pcall(function() dispatchSerialized(it, "focus", function() core.handleAction(FX, it, "focus") end) end)
+  FX.askRepaint()
   return true
 end
 
@@ -8901,6 +8911,14 @@ local HTML = [[
   #d-ask .ask-opt { font-size:11px; color:var(--accent-text); background:var(--surface); border:1px solid #3a4a66;
     border-radius:8px; padding:3px 10px; cursor:pointer; font-family:inherit; }
   #d-ask .ask-opt:hover { background:var(--surface-hover); border-color:#5a7bb0; }
+  /* 2026-09-18: options that explain themselves -- one per row, the description wrapped under
+     its label at full length (never one clipped line, never only a tooltip). */
+  #d-ask .ask-opts.rich { flex-direction:column; flex-wrap:nowrap; align-items:stretch; }
+  #d-ask .ask-opts.rich .ask-opt { display:block; width:100%; box-sizing:border-box; text-align:left; padding:5px 10px; }
+  #d-ask .ask-opts.rich .ask-lbl { display:block; font-weight:600; font-size:12px; }
+  #d-ask .ask-desc { display:block; margin-top:2px; font-size:11px; line-height:1.4; color:var(--text-2);
+    white-space:normal; overflow-wrap:anywhere; }
+  #d-ask .ask-opt.on .ask-desc { color:var(--surface); }
   #d-ask .ask-hint { font-size:11px; color:var(--dim); margin-top:6px; }
   #d-ask.held { border:1px solid var(--st-approval); border-radius:8px; padding:6px 8px 8px; }
   #d-ask .ask-opt.on { background:var(--accent-text); color:var(--surface); border-color:var(--accent-text); }
@@ -9887,6 +9905,10 @@ local HTML = [[
       <div class="s-help">One switch: arms the gate AND turns off every auto-approve policy. Approve/Deny then go through this panel with no editor window popping, and Claude still can't run a gated tool until you say so. If you don't answer in ~2&nbsp;min (or the panel is closed) it safely falls back to Claude's own prompt — it never auto-approves.</div>
       <div class="s-lbl">Gated tools (space or comma separated — only these wait for you; reads stay instant)</div>
       <label class="s-row"><input type="text" id="s-gate-tools" class="s-txt" placeholder="Bash Write Edit MultiEdit NotebookEdit"></label>
+
+      <div class="s-sec">Questions</div>
+      <label class="s-row"><input type="checkbox" id="s-ask-en"> Answer questions in Shepherd (a session's AskUserQuestion is held for its card)</label>
+      <div class="s-help">Off by default. On: while Shepherd is running, a session's question is held by the cc-ask.sh hook and you answer it on its card &mdash; each option with its explanation &mdash; with no tab. "Answer in the tab instead" hands it back, and the tab's own picker takes over after 15&nbsp;min or when Shepherd isn't running. Off: questions go straight to the tab, as Claude Code does on its own. Takes effect on the next question; needs the hooks from <code>make setup</code>.</div>
 
       <div class="s-sec">Approval gate (advanced)</div>
       <label class="s-row"><input type="checkbox" id="s-gate"> Arm the approval gate (route permission prompts to this panel)</label>
@@ -12009,7 +12031,7 @@ local HTML = [[
     var SETTINGS_TABS=[{id:"general",label:"General"},{id:"appearance",label:"Appearance"},{id:"approvals",label:"Approvals"},{id:"automation",label:"Automation"},{id:"observability",label:"Observability"},{id:"spawn",label:"Spawn"}];
     function settingsTabFor(t){ t=(t||"").trim(); function s(p){ return t.indexOf(p)===0; }
       if(s("Appearance")) return "appearance";
-      if(s("Headless approvals")||s("Approval gate")||s("Policies")) return "approvals";
+      if(s("Headless approvals")||s("Questions")||s("Approval gate")||s("Policies")) return "approvals";
       if(s("Queue")||s("Escalation")||s("Graceful drain")||s("Respawn")||s("Auto-Continue")) return "automation";
       if(s("Risk score")||s("Same-folder")||s("Insights")||s("Observability")||s("Hooks")||s("Audit log")) return "observability";
       if(s("Editor window pop")||s("Spawn")||s("Claude Code Remote Control")||s("SSH status bridge")||s("Providers")) return "spawn";
@@ -12060,6 +12082,7 @@ local HTML = [[
       ck("s-coll-git",   cv(cfg,"collision.useGitRoot",false));
       val("s-prune-hours", cv(cfg,"prune.hours",0));
       ck("s-drain-en",   cv(cfg,"drain.enabled",false));
+      ck("s-ask-en",     cv(cfg,"ask.enabled",false));   // 2026-09-18 opt-in: must match cc-ask.sh's default
       ck("s-resp-en",    cv(cfg,"respawn.enabled",false));
       ck("s-resp-auto",  cv(cfg,"respawn.auto.enabled",false));
       val("s-resp-max",  cv(cfg,"respawn.auto.maxRetries",3));
@@ -12285,6 +12308,8 @@ local HTML = [[
         collision: { enabled: ck("s-coll-en"), useGitRoot: ck("s-coll-git") },
         prune: { hours: num("s-prune-hours", 0) },
         drain: { enabled: ck("s-drain-en") },
+        // ask carries NO waitSeconds key: SETTINGS_KEEP_SUBKEYS preserves a hand-edited one.
+        ask: { enabled: ck("s-ask-en") },
         respawn: { enabled: ck("s-resp-en"),
                    auto: { enabled: ck("s-resp-auto"), maxRetries: num("s-resp-max",3),
                            staleSeconds: num("s-resp-stale",600) } },
@@ -13447,16 +13472,23 @@ local HTML = [[
         if(q.header){ head.appendChild(askEl("b", null, q.header)); head.appendChild(document.createTextNode(" · ")); }
         head.appendChild(document.createTextNode(String(q.question || "")));
         el.appendChild(head);
-        var row = askEl("div", "ask-opts");
-        (q.options || []).forEach(function(o, oi){
-          var b = askEl("button", "ask-opt", o && o.label);
-          b.title = (o && o.description) || "";
+        var opts = q.options || [];
+        // 2026-09-18: an option's description is the trade-off Adam is choosing between. It was
+        // only the button's title (a hover tooltip), so he chose blind; it is text on the card now,
+        // wrapped under its label. Any description at all -> one option per row (.rich).
+        var rich = opts.some(function(o){ return !!(o && o.description); });
+        var row = askEl("div", rich ? "ask-opts rich" : "ask-opts");
+        opts.forEach(function(o, oi){
+          var b = askEl("button", "ask-opt");
+          b.appendChild(askEl("span", "ask-lbl", o && o.label));
+          if(o && o.description) b.appendChild(askEl("span", "ask-desc", o.description));
           b.onclick = function(){
             if(!held || simple){ answerAsk(qi, oi); return; }
             askToggle(ASKF.ask, ASKF.picks, qi, o.label);
             var sel = ASKF.picks[qi].labels;
             var bs = row.querySelectorAll(".ask-opt");
-            for(var k = 0; k < bs.length; k++){ bs[k].classList.toggle("on", sel.indexOf(bs[k].textContent) >= 0); }
+            // by position, not by the button's text: that now carries the description too
+            for(var k = 0; k < bs.length; k++){ var ok = opts[k]; bs[k].classList.toggle("on", !!ok && sel.indexOf(ok.label) >= 0); }
             if(send1) send1.disabled = !askComplete(ASKF.ask, ASKF.picks);
           };
           row.appendChild(b);
@@ -17893,6 +17925,14 @@ M.timer = hs.timer.doEvery(POLL_SECONDS, function() pcall(refresh) end)
 M.watcher = hs.pathwatcher.new(STATUS_DIR, function(paths)
   if core.watcherShouldRefresh(paths) then pcall(refresh) end
 end):start()
+-- 2026-09-18: a held question took 626-1127ms to reach the card. FSEvents defers events in a dir
+-- that is written every second, and the heartbeat makes STATUS_DIR exactly that (12-1443ms to
+-- deliver, measured live); the quiet ask dir delivers in ~11ms. cc-ask.sh touches .poke there once
+-- its question is on the status file, and only that file refreshes (core.askPokeShouldRefresh).
+hs.fs.mkdir(FX.ASK_DIR)
+M.askWatcher = hs.pathwatcher.new(FX.ASK_DIR, function(paths)
+  if core.askPokeShouldRefresh(paths) then pcall(refresh) end
+end):start()
 -- Token usage (local, zero API cost): recompute fleet/per-session/window every 60s.
 M.usageTimer = hs.timer.doEvery(60, function() pcall(FX.computeUsage) end)
 -- Official plan-usage window (metadata call, no model tokens): refresh every 180s.
@@ -18160,7 +18200,7 @@ _G.__ccDashboard = { webview = wv, controller = controller, module = M, core = c
 do
   local priorShutdown = hs.shutdownCallback
   hs.shutdownCallback = function()
-    for _, k in ipairs({ "pasteTap", "timer", "watcher", "usageTimer", "officialUsageTimer" }) do
+    for _, k in ipairs({ "pasteTap", "timer", "watcher", "askWatcher", "usageTimer", "officialUsageTimer" }) do
       if M[k] then pcall(function() M[k]:stop() end) end
     end
     if priorShutdown then pcall(priorShutdown) end

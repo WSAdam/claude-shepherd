@@ -165,8 +165,8 @@
   },
 
   "ask": {
-    "_comment": "Answer questions from Shepherd (ON by default; needs make setup to wire the cc-ask.sh hook). While Shepherd is running, a session's AskUserQuestion is held by the hook: the card pulses with the question and its answers are buttons in Shepherd, so your click answers the session with no tab. Answer in the tab instead hands it back to the tab's picker, which also takes over after waitSeconds (max 3600) or when Shepherd isn't running. false = questions go straight to the tab as before.",
-    "enabled": true,
+    "_comment": "Answer questions from Shepherd (OFF by default since 2026-09-18 -- opt in here or with Settings > Approvals > 'Answer questions in Shepherd'; needs make setup to wire the cc-ask.sh hook). It used to default on; answering on the card has to be at least as good as answering in the tab, so it is now a choice, and only an explicit true holds a question. true: while Shepherd is running, a session's AskUserQuestion is held by the hook: the card pulses with the question and its answers are buttons in Shepherd, each with its description written out, so your click answers the session with no tab. Answer in the tab instead hands it back to the tab's picker, which also takes over after waitSeconds (max 3600) or when Shepherd isn't running. false or absent = questions go straight to the tab, as Claude Code does on its own. A config that already says true keeps it on.",
+    "enabled": false,
     "waitSeconds": 900
   },
 

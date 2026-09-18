@@ -3236,5 +3236,29 @@ do
         src:find("core.postMergeGateDue(r, FX._mergeGates)", 1, true) ~= nil)
 end
 
+-- ---- answering questions in Shepherd: opt-in, and woken through the ask dir (2026-09-18) ----
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  local h = io.open(ROOT .. "cc-ask.sh", "r")
+  local hook = h and h:read("*a") or ""
+  if h then h:close() end
+  check("ask opt-in: the hook holds a question only on an explicit true",
+        hook:find([[[ "$(cc_config '.ask.enabled' 'false')" = "true" ] || exit 0]], 1, true) ~= nil)
+  check("ask opt-in: ...and the Settings form shows the same default, so a Save can't flip it",
+        src:find('ck("s-ask-en",     cv(cfg,"ask.enabled",false))', 1, true) ~= nil
+        and src:find('ask: { enabled: ck("s-ask-en") }', 1, true) ~= nil)
+  check("ask poke: the ask dir's watcher is retained on the module and only .poke refreshes",
+        src:find("M.askWatcher = hs.pathwatcher.new(FX.ASK_DIR", 1, true) ~= nil
+        and src:find("if core.askPokeShouldRefresh(paths) then pcall(refresh) end", 1, true) ~= nil)
+  local _, stops = src:gsub('"watcher", "askWatcher"', "")
+  check("ask poke: ...and it is stopped with the others on a re-dofile and on shutdown  (lists=" .. stops .. ")", stops == 2)
+  check("ask poke: the hook touches the file Shepherd watches for",
+        hook:find('"$CC_ASK_DIR/.poke"', 1, true) ~= nil and core.ASK_POKE == ".poke")
+  check("ask options: a description is never left to the button's title alone",
+        src:find("b.title = (o && o.description)", 1, true) == nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

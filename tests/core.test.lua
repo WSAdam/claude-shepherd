@@ -9864,5 +9864,47 @@ do
   eq("...and names the full log", v.gate.log, "/tmp/cc-gate-1.log")
 end
 
+-- ---- the panel froze: a torn transcript head took a second to parse (2026-09-18) ----
+-- 2026-09-18 live: the refresh tick measured 544ms avg / 942ms max in the running VM, 475ms of it
+-- FX.annotateMerges -> FX.sessionFirstPrompt. The 2026-09-17 whole-lines pattern `([^\n]*)\n` has
+-- no newline to find in the head's torn last line, so it backtracks from every start position:
+-- quadratic (4KB 65ms, 8KB 264ms, 16KB 1018ms), on Hammerspoon's one thread, every tick.
+do
+  local tornLine = '{"type":"user","message":{"role":"user","content":[{"type":"image","source":{"data":"'
+    .. string.rep("iVBORw0KGgo", 3000)   -- a 33KB record the fixed-size read cut mid-line
+  local torn = '{"type":"queue-operation","operation":"enqueue"}\n'
+    .. '{"type":"queue-operation","operation":"dequeue"}\n' .. tornLine
+  local t0 = os.clock()
+  local got = core.firstPromptFromTranscript(torn)
+  local ms = (os.clock() - t0) * 1000
+  check(string.format("first prompt: a long torn last line parses in linear time  (%.0fms, want < 100)", ms),
+        got == nil and ms < 100)
+  eq("first prompt: a prompt on a whole line before the torn one is still found",
+     core.firstPromptFromTranscript('{"type":"user","message":{"role":"user","content":"hello there"}}\n' .. tornLine),
+     "hello there")
+  local t1 = os.clock()
+  local none = core.firstPromptFromTranscript(string.rep("x", 33000))
+  local ms1 = (os.clock() - t1) * 1000
+  check(string.format("first prompt: a head that is ONE torn line is nil, fast  (%.0fms, want < 100)", ms1),
+        none == nil and ms1 < 100)
+end
+
+-- ---- answering questions in Shepherd: the poke, and the opt-in checkbox (2026-09-18) ----
+do
+  check("ask poke: the hook's .poke in the ask dir refreshes the panel",
+        core.askPokeShouldRefresh({ "/Users/a/.claude/cc-ask/.poke" }) == true)
+  check("ask poke: Shepherd's own answer file there doesn't",
+        core.askPokeShouldRefresh({ "/Users/a/.claude/cc-ask/s1.answer", "/Users/a/.claude/cc-ask/s1.answer.claim.42" }) == false)
+  check("ask poke: a session that happens to be keyed like it doesn't either",
+        core.askPokeShouldRefresh({ "/Users/a/.claude/cc-ask/my.poke.answer" }) == false)
+  check("ask poke: nothing changed, nothing to do", core.askPokeShouldRefresh(nil) == false and core.askPokeShouldRefresh({}) == false)
+  -- the Settings checkbox saves ask = { enabled = … } wholesale: a hand-set wait must survive it
+  local saved = core.overlayConfig({ ask = { enabled = false, waitSeconds = 1200, _comment = "mine" } },
+                                   { ask = { enabled = true } })
+  check("settings save: ticking Answer questions in Shepherd turns ask.enabled on", saved.ask.enabled == true)
+  eq("settings save: ...and keeps a hand-edited ask.waitSeconds", saved.ask.waitSeconds, 1200)
+  eq("settings save: ...and the block's _comment", saved.ask._comment, "mine")
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

@@ -103,6 +103,9 @@ echo ""
 echo "== node: project-card layout geometry in a real browser (skips without Playwright) =="
 node "$DIR/card-layout.browser.test.js" || fail=1
 echo ""
+echo "== node: a held question's options read like the tab's, and the opt-in checkbox, in a real browser (skips without Playwright) =="
+node "$DIR/ask-options.browser.test.js" || fail=1
+echo ""
 echo "== node: project cards (behavioral, runs the shipped fold + card extras) =="
 node "$DIR/stack-fold.test.js" || fail=1
 echo ""

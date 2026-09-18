@@ -13,6 +13,10 @@ trap 'rm -rf "$TMP"' EXIT
 export CC_STATUS_DIR="$TMP/status" CC_ASK_DIR="$TMP/ask" CC_ASK_POLL=0.1 CC_CONFIG_FILE="$TMP/cc-config.json"
 mkdir -p "$CC_STATUS_DIR"
 H="$ROOT/cc-ask.sh"
+# 2026-09-18 the REQUIREMENT changed (no bug came back): answering in Shepherd is opt-in now, so
+# the held-question cases below run as a user who turned it on. The default has its own section.
+opt_in() { printf '{"ask":{"enabled":true}}' > "$CC_CONFIG_FILE"; }
+opt_in
 SF="$CC_STATUS_DIR/s1.json"
 
 Q1='[{"question":"Which colour?","header":"Colour","multiSelect":false,"options":[{"label":"Red","description":"warm"},{"label":"Blue"}]}]'
@@ -52,7 +56,7 @@ assert_eq "a stale heartbeat counts as not running" "" "$out"
 fresh; alive; printf '{"ask":{"enabled":false}}' > "$CC_CONFIG_FILE"
 out="$(input | CC_ASK_WAIT=20 bash "$H")"
 assert_eq "ask.enabled false: the tab's picker as before" "" "$out"
-rm -f "$CC_CONFIG_FILE"
+opt_in
 
 fresh; alive
 out="$(input AskUserQuestion '[]' | CC_ASK_WAIT=20 bash "$H")"
@@ -128,6 +132,73 @@ N2="$(wait_nonce)" || N2=""
 assert_eq "a clobbered nonce is written back, unchanged" "$N" "$N2"
 answer "$(jq -nc --arg n "$N" '{nonce:$n, release:true}')"
 wait_for "$TMP/rc.f"
+
+# ---- answering in Shepherd is opt-in (2026-09-18) ----
+# 2026-09-18: answering on the card had been worse than the tab (blind options, a frozen panel),
+# so it no longer switches itself on: with no ask.enabled in the config the question goes to the tab.
+held_within() { # <name>: did the hook publish a nonce within ~1.5s, or end without one?
+  local i; for i in $(seq 1 15); do
+    [ -n "$(jq -r '.ask_nonce // empty' "$SF" 2>/dev/null)" ] && { echo held; return; }
+    [ -e "$TMP/rc.$1" ] && { echo "went to the tab"; return; }
+    sleep 0.1
+  done; echo "went to the tab"
+}
+fresh; alive; rm -f "$CC_CONFIG_FILE"
+run g "" "" 3
+assert_eq "no ask.enabled in the config: the question goes to the tab" "went to the tab" "$(held_within g)"
+wait_for "$TMP/rc.g"
+assert_eq "...with nothing on stdout" "" "$(cat "$TMP/out.g")"
+case "$(cat "$TMP/err.g")" in *holding*) got=held ;; *) got=never ;; esac
+assert_eq "...and it was never held, not held and timed out" "never" "$got"
+
+fresh; alive; printf '{"ask":{"waitSeconds":30}}' > "$CC_CONFIG_FILE"
+run h "" "" 3
+assert_eq "an ask block with no enabled key is still off" "went to the tab" "$(held_within h)"
+wait_for "$TMP/rc.h"
+
+fresh; alive; opt_in
+run i
+assert_eq "an explicit ask.enabled true still holds the question for the card" "held" "$(held_within i)"
+N="$(wait_nonce)" || N=""
+answer "$(jq -nc --arg n "$N" '{nonce:$n, release:true}')"
+wait_for "$TMP/rc.i"
+
+# ---- the round trip is quick, and the hook stays cheap (2026-09-18) ----
+# 2026-09-18 measured live: the card showed the question 626-1127ms after the hook armed (the
+# status dir's watcher is slowed by the panel's own 1Hz heartbeat writes there), and the session
+# resumed 104-366ms after the click (a 0.25s poll). The hook now wakes the panel through the quiet
+# ask dir, polls every 0.1s against a real deadline, and lets go in one write.
+mkdir -p "$TMP/bin"
+cat > "$TMP/bin/sleep" <<'STUB'
+#!/bin/sh
+echo "$1" >> "$SLEEP_LOG"
+exec /bin/sleep "$1"
+STUB
+chmod +x "$TMP/bin/sleep"
+fresh; alive
+export SLEEP_LOG="$TMP/sleeps"; : > "$SLEEP_LOG"
+(input | env -u CC_ASK_POLL PATH="$TMP/bin:$PATH" CC_ASK_WAIT=2 bash "$H" > "$TMP/out.j" 2> "$TMP/err.j"; echo $? > "$TMP/rc.j") &
+wait_for "$TMP/rc.j"
+longest="$(sort -n "$SLEEP_LOG" | tail -1)"
+awk -v l="${longest:-9}" 'BEGIN { exit !(l <= 0.1) }' && got=yes || got="no (sleeps ${longest:-none}s)"
+assert_eq "by default the hook looks for the answer at least every 0.1s" "yes" "$got"
+awk -v l="$(sort -n "$SLEEP_LOG" | head -1)" 'BEGIN { exit !(l >= 0.05) }' && got=yes || got=no
+assert_eq "...and never busy-loops (every wait is a real sleep of 0.05s or more)" "yes" "$got"
+n="$(wc -l < "$SLEEP_LOG" | tr -d ' ')"
+[ "$n" -le 25 ] && got=yes || got="no ($n sleeps in a 2s wait)"
+assert_eq "...for as long as the wait, not a fixed number of rounds" "yes" "$got"
+
+fresh; alive
+run k
+N="$(wait_nonce)" || N=""
+sleep 0.4
+assert_absent "the panel isn't woken before the card has the question to show" "$CC_ASK_DIR/.poke"
+jq -c --argjson q "$Q1" '. + {pending:{tool:"AskUserQuestion", ask:$q}}' "$SF" > "$SF.t" && mv "$SF.t" "$SF"
+wait_for "$CC_ASK_DIR/.poke" && got=yes || got=no
+assert_eq "once the question is on the status file, the hook wakes the panel (a write in the ask dir)" "yes" "$got"
+assert_eq "...without disturbing the nonce" "$N" "$(jq -r '.ask_nonce // empty' "$SF")"
+answer "$(jq -nc --arg n "$N" '{nonce:$n, release:true}')"
+wait_for "$TMP/rc.k"
 
 # ---- SessionEnd leaves no answer behind ----
 mkdir -p "$CC_ASK_DIR"; : > "$CC_ASK_DIR/s1.answer"; : > "$CC_ASK_DIR/s1.answer.claim.99"
