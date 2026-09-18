@@ -171,7 +171,7 @@
   },
 
   "tabless": {
-    "_comment": "Leftover claude processes with no tab (a new conversation was started in their tab). Shepherd marks them '⊘ no tab' with End session, and ends one by itself once it has been tab-less AND idle for autoEndMinutes (default 10) -- after a ps check that it's still that window's claude process, never one that's working, waiting on you or running agents -- with a toast saying so. Its chat stays saved. 0 = never end them automatically.",
+    "_comment": "Leftover claude processes with no tab (a new conversation was started in their tab). Shepherd marks them '⊘ no tab' with End session, and ends one by itself once it has been tab-less AND idle for autoEndMinutes (default 10) -- after a ps check that it's still that window's claude process, never one that's waiting on you or running agents, and one that reads Working only when its transcript ends in the 'Request interrupted by user' marker (quiet alone never counts: a long build is just as quiet) -- with a toast saying so. Its chat stays saved. 0 = never end them automatically.",
     "autoEndMinutes": 10
   },
 

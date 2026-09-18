@@ -1027,14 +1027,38 @@ end
 -- A tab-less leftover that has stayed tab-less AND quiet for the whole grace period is ended by
 -- Shepherd itself (2026-09-14: the Sept 11 conversation's process lingered three days after a new
 -- conversation started in its tab, keeping the real tab "shared"). graceSeconds 0 = off. Never a
--- session that's working, waiting on Adam, running background agents, or remote.
+-- session that's waiting on Adam, running background agents, or remote.
+-- 2026-09-18 REQUIREMENT CHANGE (not a bug fix -- "never a session that's working" was deliberate
+-- and in the README): a leftover frozen at "working" IS ended, but only on positive proof that
+-- its turn is over. Live: Voice-Agent's leftover read "2h Working" because its turn had been
+-- interrupted, and an interrupt fires no Stop hook -- the one case auto-end exists for was the one
+-- it skipped. QUIET IS NOT PROOF: a status file is written on hook events only (no heartbeat), so
+-- a session inside one 15-minute build is exactly as quiet as an orphan, and ending a busy session
+-- is far worse than the bug. So "working" also needs it.interruptedAt (M.transcriptInterrupted:
+-- the interrupt marker is still the transcript's newest record), itself older than the grace.
+-- No marker -> never due, however stale. FX.endSession's ps check still runs after this.
 function M.tablessAutoEndDue(it, tablessSince, now, graceSeconds)
   graceSeconds = tonumber(graceSeconds) or 0
   if graceSeconds <= 0 or type(it) ~= "table" or not it.tabless or it.remote or it.bg_active then return false end
-  if it.status ~= "done" and it.status ~= "idle" then return false end
   now = tonumber(now) or 0
+  if it.status == "working" then
+    local at = tonumber(it.interruptedAt)
+    if not at or now - at < graceSeconds then return false end
+  elseif it.status ~= "done" and it.status ~= "idle" then
+    return false
+  end
   if now - (tonumber(tablessSince) or now) < graceSeconds then return false end
   return now - (tonumber(it.updated) or now) >= graceSeconds
+end
+
+-- A tab-less session whose "working" has gone quiet (2026-09-18): it has no tab to watch it in
+-- and no hook has written for STALE_SECONDS, so it must not claim its project's card as the
+-- session at work -- Voice-Agent's leftover led the card at "2h Working" over the session Adam
+-- was using. Ranking only: nothing is ended on this (see M.tablessAutoEndDue for that bar).
+-- A quiet session WITH a tab keeps its rank -- that is what a long build looks like.
+function M.tablessStalled(it)
+  return type(it) == "table" and it.tabless == true and it.status == "working" and it.stale == true
+    and not it.bg_active and not it.remote or false
 end
 
 -- Doctor: the VS Code windows hosting sessions (by host_window) vs the ones with a fresh
@@ -1440,7 +1464,9 @@ function M.instanceTier(it, seenAt, now)
   if M.isDriving(it) then return M.TIER_DRIVING end
   -- 2026-09-15: a session at work (or one whose background agents still run) outranks a finished
   -- one: Chargeback Sentinel's card read "Ready for you" while its driver was still working.
-  if st == "working" or (it and it.bg_active) then return M.TIER_RUNNING end
+  -- 2026-09-18: except a tab-less leftover gone quiet at "working" (M.tablessStalled) -- it led
+  -- Voice-Agent's card at "2h Working" over the session Adam was using.
+  if (st == "working" and not M.tablessStalled(it)) or (it and it.bg_active) then return M.TIER_RUNNING end
   if st == "done" then
     local seen = type(seenAt) == "table" and tonumber(seenAt[it.key]) or nil
     if not seen or seen < (tonumber(it.since) or 0) then return 4 end
@@ -1500,6 +1526,7 @@ local function stackBucket(it, seenAt)
   local tier = M.instanceTier(it, seenAt)
   return (tier <= 1 and "approval") or (tier == 2 and "error") or (tier == 3 and "hung")
       or (tier == 4 and "ready") or ((tier == M.TIER_DRIVING or tier == M.TIER_RUNNING) and "working")
+      or (M.tablessStalled(it) and "idle")   -- 2026-09-18: never "also: 1 working" for a quiet leftover
       or tostring(it.status or "idle")
 end
 function M.stackInstances(shown, seenAt, prevLeads, hidden)
@@ -4675,6 +4702,46 @@ function M.transcriptResumed(text, updatedEpoch, slack)
     end
   end
   return false
+end
+
+-- When was the turn INTERRUPTED, if that is the last thing that happened? (2026-09-18)
+-- An interrupt (Esc / Stop, or a tab going away mid-tool) writes a `user` record whose text is
+-- "[Request interrupted by user]" / "[Request interrupted by user for tool use]" and fires NO
+-- Stop hook -- so the status file stays "working" for good (live: Voice-Agent's leftover read
+-- "2h Working"). Returns the marker's epoch ONLY while it is the transcript's NEWEST
+-- conversational record: any assistant line, prompt or tool_result after it means the session
+-- moved on. This is the one positive signal that a quiet "working" session is over and not
+-- merely quiet -- status files are written on hook events only, so one long tool call is just as
+-- quiet. Bookkeeping records (last-prompt, ai-title, ...) carry no message and are skipped. An
+-- untimed marker is nil: the caller has to be able to age it. Lines are walked with a plain
+-- find (never a `*` pattern -- a torn line made one quadratic), and the torn last line is dropped.
+M.INTERRUPT_MARKER = "[Request interrupted by user"
+function M.transcriptInterrupted(text)
+  if type(text) ~= "string" or #text == 0 then return nil end
+  local lines, pos = {}, 1
+  while true do
+    local nl = text:find("\n", pos, true)
+    if not nl then break end   -- what's left is a torn line
+    lines[#lines + 1] = text:sub(pos, nl - 1)
+    pos = nl + 1
+  end
+  for i = #lines, 1, -1 do
+    local line = lines[i]
+    if line:sub(1, 1) == "{" and (line:find('"type":"user"', 1, true) or line:find('"type":"assistant"', 1, true)) then
+      local okj, obj = pcall(function() return M.json.decode(line) end)
+      if okj and type(obj) == "table" and type(obj.message) == "table"
+         and (obj.type == "assistant" or obj.type == "user") then
+        -- the newest conversational record decides, whatever it is
+        if obj.type ~= "user" or obj.isMeta then return nil end
+        local c, first = obj.message.content, nil
+        if type(c) == "string" then first = c
+        elseif type(c) == "table" and #c == 1 and type(c[1]) == "table" and c[1].type == "text" then first = c[1].text end
+        if type(first) ~= "string" or first:sub(1, #M.INTERRUPT_MARKER) ~= M.INTERRUPT_MARKER then return nil end
+        return M.isoToEpoch(obj.timestamp)
+      end
+    end
+  end
+  return nil
 end
 
 -- True if the session is genuinely AWAITING a tool: the newest real conversational

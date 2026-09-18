@@ -9398,6 +9398,99 @@ do
   check("auto-end: nor a remote session", core.tablessAutoEndDue(lo({ remote = { host = "box" } }), now - 700, now, 600) == false)
 end
 
+-- ---- A tab-less leftover frozen at Working (2026-09-18) ------------------------------------
+-- 2026-09-18 live: Voice-Agent's card read "2h Working" for a tab-less leftover (pid 97175 alive,
+-- status=working, updated 9276s ago) and buried the session Adam was using under "also: 1 ready
+-- for you". Cause: its turn was INTERRUPTED -- an interrupt fires no Stop hook, so the status file
+-- froze at "working", the one status tablessAutoEndDue refused. REQUIREMENT CHANGE (the README
+-- said "never for a session that's working"): a working leftover IS ended when its transcript's
+-- newest record is the interrupt marker. Quiet alone never is: status files are written only on
+-- hook events, so a 15-minute build looks exactly as stale as an orphan.
+do
+  local now = 1789746908
+  local RESULT = '{"parentUuid":"a","isSidechain":false,"type":"user","message":{"role":"user","content":[{"tool_use_id":"t1","type":"tool_result","content":"ok"}]},"timestamp":"2026-09-18T13:20:32.577Z"}'
+  local MARKER = '{"parentUuid":"b","isSidechain":false,"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]},"timestamp":"2026-09-18T13:20:32.578Z"}'
+  local TRAILER = '{"type":"last-prompt","lastPrompt":"x","sessionId":"s"}\n{"type":"ai-title","aiTitle":"Voice agent","sessionId":"s"}\n'
+    .. '{"type":"atis-latch","atis":1,"sessionId":"s"}\n{"type":"bridge-session","bridgeSessionId":"b","sessionId":"s"}\n'
+  local ASSISTANT = '{"parentUuid":"c","isSidechain":false,"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t2","name":"Bash","input":{}}]},"timestamp":"2026-09-18T13:25:00.000Z"}'
+  local PROMPT = '{"parentUuid":"d","isSidechain":false,"type":"user","message":{"role":"user","content":[{"type":"text","text":"carry on with the build"}]},"timestamp":"2026-09-18T13:26:00.000Z"}'
+  local markerAt = core.isoToEpoch("2026-09-18T13:20:32.578Z")
+
+  check("interrupted: the live tail (tool_result, the marker, then bookkeeping records) -> the marker's time",
+        core.transcriptInterrupted(RESULT .. "\n" .. MARKER .. "\n" .. TRAILER) == markerAt and markerAt ~= nil)
+  check("interrupted: the plain marker counts too",
+        core.transcriptInterrupted((MARKER:gsub(" for tool use", "")) .. "\n") == markerAt)
+  check("interrupted: a session mid-build (VS Code buffers the tool_use: newest record is a tool_result) -> nil",
+        core.transcriptInterrupted(RESULT .. "\n" .. TRAILER) == nil)
+  check("interrupted: the model wrote again after the interrupt -> nil",
+        core.transcriptInterrupted(MARKER .. "\n" .. ASSISTANT .. "\n") == nil)
+  check("interrupted: a new prompt after the interrupt -> nil",
+        core.transcriptInterrupted(MARKER .. "\n" .. PROMPT .. "\n" .. TRAILER) == nil)
+  check("interrupted: a prompt that merely quotes the marker mid-sentence -> nil",
+        core.transcriptInterrupted((PROMPT:gsub("carry on", "why did it say [Request interrupted by user] when I")) .. "\n") == nil)
+  check("interrupted: a marker with no timestamp can't be timed -> nil",
+        core.transcriptInterrupted((MARKER:gsub(',"timestamp":"[^"]*"', "")) .. "\n") == nil)
+  check("interrupted: a torn last line is ignored, the whole lines before it still decide",
+        core.transcriptInterrupted(MARKER .. "\n" .. ASSISTANT:sub(1, 60)) == markerAt)
+  check("interrupted: nothing to read -> nil", core.transcriptInterrupted(nil) == nil and core.transcriptInterrupted("") == nil)
+  do   -- the CLAUDE.md trap: a long torn line must not backtrack (the panel froze on one)
+    local t0 = os.clock()
+    core.transcriptInterrupted(MARKER .. "\n" .. string.rep("x", 262144))
+    check("interrupted: a 256KB torn line costs next to nothing", os.clock() - t0 < 0.05)
+  end
+
+  -- the real case: tab-less, working, updated 9276s ago, interrupted at that same moment
+  local function orphan(over)
+    local it = { key = "613af0db", status = "working", tabless = true, stale = true,
+                 updated = now - 9276, interruptedAt = now - 9276, session_pid = "97175" }
+    for k, v in pairs(over or {}) do it[k] = v end
+    return it
+  end
+  check("auto-end: tab-less, frozen at working 9276s by an interrupted turn -> due",
+        core.tablessAutoEndDue(orphan(), now - 9000, now, 600) == true)
+  check("auto-end: tab-less and working, updated 30s ago (genuinely busy) -> NOT due",
+        core.tablessAutoEndDue(orphan({ updated = now - 30, stale = false, interruptedAt = false }), now - 9000, now, 600) == false)
+  check("auto-end: working and quiet for 9276s but NOT interrupted (a long build writes no status) -> NOT due",
+        core.tablessAutoEndDue(orphan({ interruptedAt = false }), now - 9000, now, 600) == false)
+  check("auto-end: interrupted only 30s ago -> not yet, even if the status file is old",
+        core.tablessAutoEndDue(orphan({ interruptedAt = now - 30 }), now - 9000, now, 600) == false)
+  check("auto-end: interrupted long ago but a hook wrote 30s ago (it moved on) -> not due",
+        core.tablessAutoEndDue(orphan({ updated = now - 30 }), now - 9000, now, 600) == false)
+  check("auto-end: an interrupted orphan with background agents running -> never",
+        core.tablessAutoEndDue(orphan({ bg_active = true }), now - 9000, now, 600) == false)
+  check("auto-end: an interrupted orphan on a remote host -> never",
+        core.tablessAutoEndDue(orphan({ remote = { host = "box" } }), now - 9000, now, 600) == false)
+  check("auto-end: an interrupted session WITH a tab -> never",
+        core.tablessAutoEndDue(orphan({ tabless = false }), now - 9000, now, 600) == false)
+  check("End session: still never offered for a session that has a tab",
+        core.endSessionVerdict(orphan({ tabless = false, host_window = "1504" }), "1504 /x/claude") == false)
+  check("auto-end: an approval is never ended, interrupted or not",
+        core.tablessAutoEndDue(orphan({ status = "approval" }), now - 9000, now, 600) == false)
+  check("auto-end: switched off (0) -> never", core.tablessAutoEndDue(orphan(), now - 9000, now, 0) == false)
+
+  -- ranking: the orphan must not lead the card over the session Adam is using
+  local live = { key = "d0ec424c", status = "done", since = now - 180, updated = now - 180 }
+  check("rank: a tab-less session stale at working does not rank as running",
+        core.instanceTier(orphan(), {}, now) ~= core.TIER_RUNNING)
+  check("rank: ...so the ready session leads the card",
+        core.rankInstances({ orphan(), live }, {})[1].key == "d0ec424c")
+  check("rank: tab-less and working, updated 30s ago -> still running, and still leads",
+        core.instanceTier(orphan({ updated = now - 30, stale = false, interruptedAt = false }), {}, now) == core.TIER_RUNNING
+        and core.rankInstances({ orphan({ updated = now - 30, stale = false, interruptedAt = false }), live }, {})[1].key == "613af0db")
+  check("rank: a stale working session WITH a tab still ranks as running (a long build)",
+        core.instanceTier(orphan({ tabless = false }), {}, now) == core.TIER_RUNNING)
+  check("rank: a stale tab-less session whose background agents run still ranks as running",
+        core.instanceTier(orphan({ bg_active = true }), {}, now) == core.TIER_RUNNING)
+  do
+    local a, b = orphan({ stackKey = "va" }), { key = "d0ec424c", status = "done", since = now - 180, updated = now - 180, stackKey = "va" }
+    core.stackInstances({ a, b }, {}, {})
+    local working = 0
+    for _, e in ipairs(b.stackAlso or {}) do if e.b == "working" then working = working + e.n end end
+    check("rank: the lead's \"also:\" line doesn't count the orphan as working",
+          b.stackLead == true and working == 0)
+  end
+end
+
 -- ---- Only a tab opened for the job closes after its merge (2026-09-14) ----------------------
 -- 2026-09-14 live: the main Chargeback Sentinel chat did a unit itself in a worktree and merged;
 -- Shepherd closed its tab, taking the conversation Adam was working in with it.

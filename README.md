@@ -391,8 +391,16 @@ the pid is still a `claude` process of that window, stops it and drops the card;
 its transcript. It's never offered for a session that has a tab. Until it's ended, a tab-less
 session still counts toward "sharing its window" (it might really be in the sidebar) — so Shepherd
 **ends it by itself** once it has been tab-less and idle for `tabless.autoEndMinutes` (default 10;
-0 = off), with the same `ps` check, never for a session that's working, waiting on you or running
-agents, and says so in a toast.
+0 = off), with the same `ps` check, never for a session that's waiting on you or running agents,
+and says so in a toast. A leftover that reads **Working** is ended only on proof that its turn is
+over: the newest record in its transcript is Claude Code's own *Request interrupted by user* marker
+(an interrupted turn fires no Stop hook, so its status stays "working" for good), and that marker,
+the status file and the missing tab are all older than `tabless.autoEndMinutes`. Being quiet is
+never enough — hooks write a session's status only when something happens, so a session inside one
+long build is exactly as quiet as a leftover, and it is left alone. (Until 2026-09-18 a working
+session was never ended at all; that left the interrupted leftover on its card for good.) A
+tab-less session gone quiet at Working also stops leading its project's card: a session you're
+actually using ranks above it, and the "also:" line doesn't count it as working.
 
 **Right-click** a tile for a context menu:
 

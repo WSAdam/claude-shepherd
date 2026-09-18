@@ -3326,6 +3326,8 @@ function FX.annotateTabless(list, cfg)
   -- 2026-09-14: a leftover that stays tab-less and idle past the grace period is ended by
   -- Shepherd itself (tabless.autoEndMinutes, default 10; 0 = off). One attempt per session:
   -- FX.endSession re-checks with ps, and a refusal isn't retried every tick.
+  -- 2026-09-18: a leftover frozen at "working" counts too, but only with it.interruptedAt (the
+  -- refresh loop stamps it from the transcript) -- quiet alone never ends a working session.
   FX._tablessAutoTried = FX._tablessAutoTried or {}
   local grace = (tonumber(core.config(cfg, "tabless.autoEndMinutes", 10)) or 10) * 60
   for _, it in ipairs(list or {}) do
@@ -17021,6 +17023,13 @@ function FX._refreshBody()
       local err = core.transcriptError(tail)
       if err then it.status = "error"; it.error_message = err.message; it.error_reason = err.reason end
     end
+    -- 2026-09-18: an INTERRUPTED turn fires no Stop hook, so its status file stays "working" for
+    -- good (Voice-Agent's tab-less leftover read "2h Working"). Stamp when the interrupt happened,
+    -- only while it is still the transcript's newest record -- the one positive proof
+    -- core.tablessAutoEndDue accepts for a "working" leftover. No tail this tick -> no stamp ->
+    -- nothing is ended on it (the safe side). Same tail as above: no extra read.
+    -- Always assigned, so a value in the status file itself can never stand in for the transcript.
+    it.interruptedAt = (tail and it.status == "working") and core.transcriptInterrupted(tail) or nil
 
     -- L5 loop watchdog (off by default): flag a working session repeating the SAME
     -- tool call (e.g. re-running a failing command). Reuses the tail already read; a

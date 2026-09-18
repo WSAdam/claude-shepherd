@@ -4,6 +4,38 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-18 — A leftover stuck at Working no longer outranks the session you're using
+
+### Changed — auto-end now covers a leftover whose turn was interrupted (a requirement change)
+
+Voice-Agent's card read "2h Working" for a tab-less leftover (pid 97175, alive, status `working`,
+last written 2h35m earlier) and buried the session Adam was using under "also: 1 ready for you".
+Its transcript showed why: the turn had been **interrupted**, and an interrupt fires no Stop hook,
+so the status file stayed `working` for good. Auto-end skipped every working session — on purpose,
+and the README said so — which made the one case it exists for the one case it could never reach.
+
+What made this delicate: **a status file is written only on hook events; there is no per-session
+heartbeat.** A session inside one 15-minute build is exactly as quiet as an orphan, so staleness
+cannot tell them apart, and ending a busy session would be far worse than the bug. The rule
+therefore asks for positive proof. A Working leftover is ended only when the newest conversational
+record in its transcript is Claude Code's own `[Request interrupted by user…]` marker
+(`core.transcriptInterrupted`, stamped as `it.interruptedAt` from the tail the tick already reads),
+and the marker, the status file and the missing tab are all older than `tabless.autoEndMinutes` —
+on top of every guard from before: tab-less, not remote, no background agents, one attempt, and
+`FX.endSession`'s `ps` check. No marker → never ended, however stale.
+
+### Fixed — a tab-less session gone quiet at Working led its project's card
+
+`core.instanceTier` ranked every `working` status as running. A session that is tab-less **and**
+stale (`core.tablessStalled`) no longer does, and the card's "also:" line doesn't count it as
+working. Ranking only — nothing is ended on staleness. A quiet session *with* a tab keeps its rank
+(that is what a long build looks like), as does one whose background agents run.
+
+Fixtures: the live transcript tail and status values in tests/core.test.lua (including the two
+no-vacuous-pass cases: Working and written 30 s ago; Working, quiet for 2h35m, *not* interrupted)
+and the end-to-end case in tests/tabless.test.lua. Not covered here: an interrupted session that
+still HAS a tab also reads Working until its next prompt — a separate unit.
+
 ## 2026-09-18 — The panel was freezing, and it was not the feature anyone suspected
 
 ### Fixed — a quadratic transcript parse stalled the whole panel

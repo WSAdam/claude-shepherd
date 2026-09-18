@@ -186,5 +186,38 @@ check("...with a toast saying so", table.concat(toasts, " | "):find("no tab for"
 check("a working leftover is left alone", exists(T .. "/status/a12.json"))
 tick()
 check("...and isn't retried every tick (one attempt each)", #kills == 1)
+
+-- ---- 2026-09-18 live: Voice-Agent's leftover (pid 97175) sat at "2h Working" -- its turn had been
+-- interrupted, an interrupt fires no Stop hook, and auto-end skipped every "working" session. The
+-- interrupt marker as the transcript's newest record is what ends it; a leftover that is only
+-- QUIET (a long build writes no status either) is left alone. ----
+local function iso(t) return os.date("!%Y-%m-%dT%H:%M:%S.000Z", t) end
+local frozen = os.time() - 9276
+local RESULT = '{"isSidechain":false,"type":"user","message":{"role":"user","content":[{"tool_use_id":"t1","type":"tool_result","content":"ok"}]},"timestamp":"' .. iso(frozen) .. '"}\n'
+local MARKER = '{"isSidechain":false,"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]},"timestamp":"' .. iso(frozen) .. '"}\n'
+for _, s in ipairs({ { "a13", "3300", "Interrupted leftover", RESULT .. MARKER }, { "a14", "3400", "Long build leftover", RESULT } }) do
+  write(T .. "/" .. s[1] .. ".jsonl", '{"type":"ai-title","aiTitle":"' .. s[3] .. '","sessionId":"' .. s[1] .. '"}\n' .. s[4]
+    .. '{"type":"last-prompt","lastPrompt":"x","sessionId":"' .. s[1] .. '"}\n')
+  write(T .. "/status/" .. s[1] .. ".json", string.format(
+    '{"status":"working","session_id":"%s","name":"ChargebackSentinel","cwd":"%s","since":%d,"updated":%d,"editor":"vscode","host_window":"1051","session_pid":"%s","transcript_path":"%s"}',
+    s[1], REPO, frozen, frozen, s[2], T .. "/" .. s[1] .. ".jsonl"))
+  PS[s[2]] = "1051 /Users/adam/.vscode/extensions/anthropic.claude-code-2.1.270-darwin-arm64/resources/native-binary/claude --output-format stream-json"
+end
+write(BR .. "/1051.json", json.encode({ v = 1, pid = 1051, version = "0.4.0", tabs = { { label = "Chargeback Sentinel hand…", group = 1, active = true } }, at = os.time() }))
+kills = {}
+tick(); tick()
+I = items()
+check("the interrupted and the quiet leftover are both marked tab-less", I.a13 and I.a13.tabless == true and I.a14 and I.a14.tabless == true)
+check("...the interrupted one carries when its turn was interrupted", I.a13 and I.a13.interruptedAt == frozen)
+check("...the quiet one doesn't", I.a14 and not I.a14.interruptedAt)
+check("neither ranks above the real tab's finished session on the card",
+      I["6698"] and I.a13 and I.a14 and I.a13.stackRank > I["6698"].stackRank and I.a14.stackRank > I["6698"].stackRank)
+fx._tablessSince.a13 = os.time() - 700
+fx._tablessSince.a14 = os.time() - 700
+tick()
+check("a leftover frozen at Working by an interrupted turn is ended by Shepherd  (killed=" .. table.concat(kills, ",") .. ")",
+      #kills == 1 and kills[1] == "3300" and not exists(T .. "/status/a13.json"))
+check("a leftover that is only quiet at Working (a long build) is left alone", exists(T .. "/status/a14.json"))
+check("...and so is the one that's busy right now", exists(T .. "/status/a12.json"))
 check("no keystroke anywhere", taps == 0)
 finish()
