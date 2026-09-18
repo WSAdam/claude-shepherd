@@ -205,7 +205,13 @@ run the script there — so fenced tabs ask from outside and step back in to reb
 - **The card** says *⇡ ready to merge fix/x → main* and reads **Needs you** with a red dot and a
   pulsing red ring — like an approval, and like every card waiting on you (a batch to approve, a
   question) — leads its project card, and you get one alert (plus an OS banner if approval banners
-  are on). A card that says Needs you always has something to press.
+  are on). **A card that says Needs you always has something to press** — and only then. A card
+  ranks as needing you when a live counterpart will actually receive your answer *and* the card
+  offers something that changes the outcome. Anything else — a merge request whose `cc-merge.sh`
+  has gone, a question whose session exited, a merged unit or a blocked merge where the only
+  button is *Dismiss*, a connection blip the session is still retrying — is a **Heads-up**
+  instead: on the card, dismissible, with one line saying why, but never red, never pulsing and
+  never ranked above a session that is working.
   Shepherd checks the request with **its own git** first — the worktree is one of the repo's, on
   the requested branch, clean and ahead of main — and says what's wrong otherwise.
 - **The review** (the detail panel, or **Review** in the Instances view): the session's summary,
@@ -223,10 +229,18 @@ run the script there — so fenced tabs ask from outside and step back in to reb
   ```
 
   While it runs the card says *checking* and **Merge** is refused; a red or timed-out run blocks
-  the merge — Adam's button **and** a batch unit's merge on your grant — and the review shows the
-  command, the exit code and the last 15 lines of the suite's own output. The session's test line
-  stays, relabelled *advisory*. After the merge the **same suite runs once in the main checkout**:
-  if main is red, the unit's tab stays open and the card says so. `match` works like
+  the merge — Adam's button **and** a batch unit's merge on your grant — and the review leads with
+  the **failing lines** of the suite's own output (`FAIL`, `not ok`, an `N run, M failed` summary),
+  names the full log's path, and keeps the last lines underneath as context. The session's test
+  line stays, relabelled *advisory*. **One gate runs per repo at a time**, pre- and post-merge
+  sharing the lane: a project's suite usually isn't safe to run twice in one checkout, and two
+  concurrent runs kill each other and both report a failure about a tree that is green. A suite
+  that **couldn't run at all** (its own concurrency lock, a missing command, a worktree that has
+  gone) is told apart from one that failed: it still holds the merge — nothing was proven — but it
+  says so plainly, it never turns the card red, and it is retried a minute and a half later.
+  After the merge the **same suite runs once in the main checkout**, but only for a request whose
+  own pre-merge gate ran in this Shepherd session — turning `merge.gates` on never gates merges
+  that already happened. If main is red, the unit's tab stays open and the card says so. `match` works like
   `policies.attachments` (project / group / key globs, first entry wins, an absent field is a
   wildcard; `project` is the session's project key). With no `gates` listed nothing runs and the
   flow is exactly as it was.

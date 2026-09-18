@@ -77,6 +77,7 @@ local function webviewHandle()
 end
 local settingsStore, frame = {}, { x = 0, y = 0, w = 1920, h = 1080 }
 local EXISTS = {}   -- fake absolute paths hs.fs.attributes should report as real directories
+local DEAD = {}     -- pid (string) -> true: a process the fake ps must report as gone
 local hs = {
   json = json,
   fs = {
@@ -97,6 +98,16 @@ local hs = {
   screen = { mainScreen = function() return { frame = function() return frame end, fullFrame = function() return frame end } end },
   execute = function(cmd)
     cmd = tostring(cmd or "")
+    -- 2026-09-17: the liveness probe behind the needs-you rule. Every pid is alive unless a
+    -- test says otherwise (DEAD[pid] = true), so the checks written before this existed are
+    -- unaffected -- exactly what a real machine reports for sessions that are still running.
+    if cmd:find("ps -o pid=", 1, true) then
+      local out = {}
+      for d in (cmd:match("%-p ([%d,]+)") or ""):gmatch("%d+") do
+        if not DEAD[d] then out[#out + 1] = "  " .. d end
+      end
+      return table.concat(out, "\n") .. "\n"
+    end
     if cmd:find("@@listed", 1, true) then return FACTS[cmd:match("%-C '([^']+)'") or ""] or "" end
     if cmd:find("merge-base --is-ancestor", 1, true) then return VERIFY_OUT end
     if cmd:find("diff --no-color", 1, true) then return "diff --git a/app.txt b/app.txt\n+<script>x</script>\n" end
@@ -156,6 +167,10 @@ rawset(hs.timer, "doAfter", function(secs, fn)
   return t
 end)
 hs.reload = function() end
+-- The liveness probe sends Shepherd's OWN pid along as a control: a ps that can't see us isn't
+-- one to trust, and every answer is then "unknown" (= assume alive). Give the stub a real one
+-- so the probe is actually exercised here instead of degrading to unknown.
+hs.processInfo = { processID = 10000, bundleID = "org.hammerspoon.Hammerspoon" }
 setmetatable(hs, { __index = function() return mkstub() end })
 _G.hs = hs
 
@@ -327,6 +342,7 @@ os.execute('mkdir -p "' .. FD .. '"')
 write(T .. "/.claude/cc-config.json", json.encode({ merge = { gates = {
   { match = { project = "/r/G/*" }, command = "GATE-G", timeoutSeconds = 5 },
   { match = { project = "/r/K/*" }, command = "GATE-K" },
+  { match = { project = "/r/S/*" }, command = "GATE-S" },
 } } }))
 
 local function gateTasks(needle)
@@ -489,6 +505,177 @@ check("...the card says so  (" .. tostring(I.g1.merge.line) .. ")",
 check("...it wants Adam, unlike a merely un-closed tab", I.g1.merge.needsYou == true)
 check("...and Shepherd said so once, in the panel  (" .. table.concat(alerts, " | ") .. ")",
       alerted("is red after the merge") == 1)
+
+-- ---- The gate never runs retroactively, never twice in one checkout (2026-09-17) ----------
+-- Adam configured merge.gates at 15:58; two units that had merged HOURS earlier each got a
+-- post-merge gate started right then, in the same main checkout, at the same moment. They ran
+-- `make lint && make test` concurrently there -- install.test.sh shells out to the real make
+-- and the reload test kills hs processes -- so they killed each other and both said `exited 2`
+-- about a main that was green. Two cards then pulsed red "Needs you" for hours, on merges
+-- hours old, where the only affordance was Dismiss.
+local core = dash.core
+local mWt = newUnit("m1", "/r/G", "fix/m1", "fff666", 794, 994)
+local _ = mWt
+setPhase("m1", "merged", { sha = "fff666" })
+local beforeG = #gateTasks("GATE-G")
+alerts = {}
+tick(); tick()
+check("a merge whose own pre-merge gate never ran here is NOT gated retroactively",
+      #gateTasks("GATE-G") == beforeG)
+I = items()
+check("...and its card never claims main is red over a gate that never ran  ("
+      .. tostring(I.m1 and I.m1.merge and I.m1.merge.line) .. ")",
+      I.m1 and I.m1.merge and (I.m1.merge.line or ""):find("is red after the merge", 1, true) == nil)
+check("...so it isn't ranked as needing Adam", I.m1.needsYou ~= "needs")
+
+-- one gate per repo at a time, pre- and post-merge sharing the lane
+local s1Wt = newUnit("s1", "/r/S", "fix/s1", "111aaa", 795, 995)
+local s2Wt = newUnit("s2", "/r/S", "fix/s2", "222bbb", 796, 996)
+local __ = s1Wt; local ___ = s2Wt
+tick()
+check("two units in ONE repo start one gate, not two  (" .. #gateTasks("GATE-S") .. ")",
+      #gateTasks("GATE-S") == 1)
+I = items()
+local states = { I.s1.merge.gate and I.s1.merge.gate.state, I.s2.merge.gate and I.s2.merge.gate.state }
+table.sort(states)
+check("...one runs while the other queues  (" .. table.concat(states, "+") .. ")",
+      states[1] == "queued" and states[2] == "running")
+check("...and the queued one reads as still checking, NEVER as ready-with-no-gate",
+      I.s1.merge.ready == false and I.s1.merge.checking == true
+      and I.s2.merge.ready == false and I.s2.merge.checking == true)
+tick(); tick()
+check("...and it stays one gate however many ticks pass", #gateTasks("GATE-S") == 1)
+endGate(gateTasks("GATE-S")[1], 0, "ok - all good\n-- suite: 12 run, 0 failed --\n")
+tick()
+check("the queued gate starts as soon as the lane is free", #gateTasks("GATE-S") == 2)
+
+-- COULDN'T-RUN is not FAILED: the suite refusing to start says nothing about the code
+endGate(gateTasks("GATE-S")[2], 2,
+        "make: *** [test] Error " .. core.TEST_LOCK_EXIT .. "\n" .. core.TEST_LOCK_TOKEN .. "\n")
+tick()
+I = items()
+local norun = (I.s1.merge.gate.state == "couldntRun") and I.s1 or I.s2
+check("a gate that couldn't run is told apart from one that failed  ("
+      .. tostring(norun.merge.gate.state) .. ")", norun.merge.gate.state == "couldntRun")
+check("...the card says it couldn't run, not that the tests failed  ("
+      .. tostring(norun.merge.line) .. ")",
+      (norun.merge.line or ""):find("couldn't run", 1, true) ~= nil
+      and (norun.merge.line or ""):find("failed", 1, true) == nil)
+check("...and the request is still not ready (it was never proven green)", norun.merge.ready == false)
+
+-- ...and it must not let a delegated batch merge through either
+EXISTS["/r/S"] = true
+write(FD .. "/bs1.json", json.encode({ v = 1, id = "bs1", nonce = "n-bs1", phase = "approved",
+  repo = "/r/S", commonDir = "/r/S/.git", driver = { session_id = "sdrv", pid = "997", name = "driver" },
+  title = "serialised batch", mergeWhenGreen = true, at = now,
+  units = { { type = "fix", slug = norun.key, branch = norun.merge.branch, task = "do the unit" } } }))
+write(FD .. "/bs1.state.json", json.encode({ grant = { approved = true, grantMerge = true, at = now },
+  units = { [norun.key] = { session = { id = norun.key } } } }))
+tick()
+check("a gate that couldn't run never auto-approves a delegated batch merge",
+      decision(norun.key) == nil)
+
+-- ...and it is retried, so Adam's own hand-run of the same suite can't wedge the request
+do
+  local before = #gateTasks("GATE-S")
+  tick()
+  check("a couldn't-run gate is not retried straight away", #gateTasks("GATE-S") == before)
+  for _, slot in ipairs({ fx._mergeGates, fx._mergeGatesPost }) do
+    for _, g in pairs(slot) do
+      if g.state == "couldntRun" then g.doneAt = os.time() - core.GATE_RETRY_AFTER - 1 end
+    end
+  end
+  tick()
+  check("...but it is once the grace has passed", #gateTasks("GATE-S") == before + 1)
+  endGate(gateTasks("GATE-S")[before + 1], 0, "ok - all green\n")
+  tick()
+  I = items()
+  check("...and a green retry lets the request through", (I.s1.merge.ready or I.s2.merge.ready) == true)
+end
+
+-- a red gate has to be actionable: the FAILING lines, and where the whole log is
+local rWt = newUnit("r1", "/r/G", "fix/r1", "999zzz", 798, 998)
+local ____ = rWt
+tick()
+local rt = gateTasks("GATE-G")[beforeG + 1]
+check("the red-gate unit's suite runs", rt ~= nil)
+if rt then
+  local noisy = {}
+  for i = 1, 40 do noisy[#noisy + 1] = "ok   - fine " .. i end
+  table.insert(noisy, 6, "FAIL - empty section renders when refundStatement is blank")
+  noisy[#noisy + 1] = "-- ui.test.lua: 120 run, 1 failed --"
+  for i = 1, 20 do noisy[#noisy + 1] = "ok   - later suite " .. i end
+  endGate(rt, 2, table.concat(noisy, "\n") .. "\n")
+  tick()
+  I = items()
+  local rg = I.r1.merge.gate
+  check("a red gate surfaces the FAILING lines, not the trailing noise  ("
+        .. tostring(rg and rg.fails) .. ")",
+        rg and rg.fails and rg.fails:find("refundStatement is blank", 1, true) ~= nil
+        and rg.fails:find("120 run, 1 failed", 1, true) ~= nil
+        and rg.fails:find("later suite 20", 1, true) == nil)
+  check("...and names the full log, kept on disk so Adam can read it", rg.log ~= nil
+        and read(rg.log) ~= nil)
+end
+
+-- ---- "Needs you" only when a live counterpart will get the answer (2026-09-17) ------------
+-- Adam's rule: never say "Needs you" when he can't do anything about it.
+local function freshProbe() fx._alive = {} end
+-- a merge request whose cc-merge.sh has gone: his click would write a decision nobody claims
+local nWt = newUnit("n1", "/r/N", "fix/n1", "n00001", 799, 999)
+local _____ = nWt
+local nreq = json.decode(read(MD .. "/n1.json")); nreq.wait_pid = 31999
+write(MD .. "/n1.json", json.encode(nreq))
+tick()
+I = items()
+check("a merge request whose script is still waiting needs Adam  ("
+      .. tostring(I.n1.needsYou) .. ")", I.n1.needsYou == "needs")
+DEAD["31999"] = true; freshProbe()
+tick()
+I = items()
+check("...and once that process is gone it is only a heads-up", I.n1.needsYou == "fyi")
+check("...which ranks below a working session", core.instanceTier(I.n1, {}, os.time()) > core.TIER_RUNNING)
+check("...and says why, on the card", (I.n1.needsYouWhy or ""):find("waiting", 1, true) ~= nil)
+DEAD["31999"] = nil; freshProbe()
+
+-- a held question whose asking session's process has gone
+local qKey = "q1"
+write(T .. "/" .. qKey .. ".jsonl", '{"type":"user","message":{"role":"user","content":"hi"}}\n')
+write(T .. "/status/" .. qKey .. ".json", json.encode({ status = "approval", session_id = qKey,
+  name = qKey, cwd = "/r/Q", since = now - 10, updated = now - 10, editor = "vscode",
+  host_window = "800", session_pid = "31888", transcript_path = T .. "/" .. qKey .. ".jsonl",
+  ask_nonce = "an-q1", ask_until = now + 3600,
+  pending = { tool = "AskUserQuestion", ask = { { question = "Which way?",
+    options = { { label = "A" }, { label = "B" } } } } } }))
+tick()
+I = items()
+check("a held question on a live session needs Adam  (" .. tostring(I.q1 and I.q1.needsYou) .. ")",
+      I.q1 and I.q1.needsYou == "needs")
+DEAD["31888"] = true; freshProbe()
+tick()
+I = items()
+check("...and once its session's process is gone it is only a heads-up", I.q1.needsYou == "fyi")
+DEAD["31888"] = nil; freshProbe()
+
+-- a transient API error is the session's to retry, not Adam's to fix (the VPN blip)
+write(T .. "/" .. qKey .. ".jsonl", '{"type":"user","message":{"role":"user","content":"hi"}}\n')
+write(T .. "/status/" .. qKey .. ".json", json.encode({ status = "error", session_id = qKey,
+  name = qKey, cwd = "/r/Q", since = now - 2, updated = now - 2, editor = "vscode",
+  host_window = "800", session_pid = "31888", transcript_path = T .. "/" .. qKey .. ".jsonl",
+  error_reason = "runtime_error", error_message = "Connection error." }))
+tick()
+I = items()
+check("a fresh connection error is a heads-up, not a red Error  (" .. tostring(I.q1.needsYou) .. ")",
+      I.q1.needsYou == "fyi" and I.q1.needsYouSource == "error")
+check("...and its card ranks below a working session", core.instanceTier(I.q1, {}, os.time()) > core.TIER_RUNNING)
+-- ...but a usage limit is his to act on, straight away
+write(T .. "/status/" .. qKey .. ".json", json.encode({ status = "error", session_id = qKey,
+  name = qKey, cwd = "/r/Q", since = now - 2, updated = now - 2, editor = "vscode",
+  host_window = "800", session_pid = "31888", transcript_path = T .. "/" .. qKey .. ".jsonl",
+  error_reason = "budget_exceeded", error_message = "usage limit reached" }))
+tick()
+I = items()
+check("a usage limit still goes red at once", I.q1.needsYou == "needs")
 
 check("the whole flow never focused a window or pressed a key", taps == 0 and focusCalls == 0)
 finish()

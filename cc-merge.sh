@@ -117,10 +117,16 @@ cmd_request() {
     jq -n --arg key "$KEY" --arg sid "$SID" --arg pid "${CLAUDE_PID:-}" --arg nonce "$nonce" \
        --arg wt "$wt" --arg branch "$branch" --arg base "$base" --arg common "$common" \
        --arg summary "${summary:0:1000}" --arg tests "${tests:0:300}" \
-       --argjson ahead "$ahead" --argjson at "$now" \
+       --argjson ahead "$ahead" --argjson at "$now" --argjson waitpid "$$" \
        '{v: 1, key: $key, session_id: $sid, pid: $pid, nonce: $nonce, worktree: $wt, branch: $branch,
          base: $base, commonDir: $common, summary: $summary, tests: $tests, ahead: $ahead, at: $at,
-         phase: "requested"}' > "$tmp" && mv "$tmp" "$REQ" || refuse "couldn't write the request in $MERGE_DIR"
+         wait_pid: $waitpid, phase: "requested"}' > "$tmp" && mv "$tmp" "$REQ" || refuse "couldn't write the request in $MERGE_DIR"
+  else
+    # Re-asking on the SAME request (a foreground wait that ran out): the nonce is kept so an
+    # answer given in between isn't lost, but the process waiting for it is a NEW one. Shepherd
+    # checks wait_pid with ps before calling the card "Needs you" (2026-09-17), so a stale pid
+    # here would read as "nobody is waiting" and quietly stop asking Adam for his click.
+    update_req '.wait_pid = $p' --argjson p "$$" || true
   fi
   echo "⏳ Asked Shepherd to merge $branch into $base ($ahead commit(s) ahead). Waiting for Adam's answer..."
 

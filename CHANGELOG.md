@@ -4,6 +4,52 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-17 — "Needs you" only when you can actually do something
+
+### Fixed — two cards pulsed red for hours over merges that were already done
+
+`merge.gates` was configured at 15:58. Two units that had merged **hours earlier** each got a
+post-merge test gate started retroactively at that moment; both ran `make lint && make test` in
+the **same main checkout at once** — `install.test.sh` shells out to the real `make` there and the
+reload test kills `hs` processes — so they killed each other and both reported `exited 2`. Main was
+green the whole time. The two cards then pulsed a red **Needs you** for hours, on work nobody was
+still doing, where the only affordance was *Dismiss*. That trains you to dismiss reds, which
+destroys the gate's whole purpose.
+
+- **One rule, one predicate.** All five needs-you sources — a held question, a merge, a batch
+  proposal, a permission prompt, an error — now go through `core.needsYouKind`. A card ranks as
+  needing you only if **(a)** a live counterpart will actually receive your answer and **(b)** the
+  card offers an affordance that *changes* something. Acknowledge-only never counts. Liveness is a
+  single batched `ps` in `FX.probeAlive` (Shepherd's own pid rides along as a control, so a probe
+  that can't be trusted degrades to "assume alive" and never hides a real question); the decision
+  itself is pure.
+- **A new Heads-up state.** Anything failing either half — a merge request whose `cc-merge.sh` has
+  gone, a question or proposal whose session exited, a merged-but-red or blocked merge, a stale
+  error on a session that has exited — is on the card with a line saying why, dismissible, and
+  ranked **below** working sessions (`core.TIER_FYI`). Not red, no pulse.
+- **Transient API errors stop crying wolf.** Starting a VPN turned a card red with
+  `[runtime error] Connectio…`; the fault healed itself and the session was back to *working* 40s
+  later. A connection error, timeout or overloaded model on a live session now reads **Retrying**
+  for a 75-second grace window and escalates only if it persists past it, flaps three times in ten
+  minutes, or the session is dead or frozen. A usage limit (`budget_exceeded`) is unchanged — that
+  is genuinely yours to act on — and one you cancelled yourself never pulses.
+
+### Fixed — the test gate itself
+
+- **Never retroactive.** Only a request whose own pre-merge gate ran in this Shepherd session gets
+  a post-merge gate (`core.postMergeGateDue`).
+- **One gate per repo at a time**, pre- and post-merge sharing the lane
+  (`core.mergeGateReleases`, the shape `core.mergeQueue` already uses). A queued gate reads as
+  *checking*, never as "no gate configured".
+- **`tests/run.sh` refuses a second concurrent run in the same checkout** — exit 9 and a machine
+  token, because `make` masks a recipe's exit code as 2. This also protects your own hand-run.
+- **Couldn't-run is not failed.** A suite that never started (that lock, a missing command, a
+  worktree that has gone) says nothing about the code: it still holds the merge and still refuses
+  a delegated batch merge, but it isn't red, and it is retried after 90 seconds.
+- **A red gate is actionable.** The review leads with the *failing* lines (`FAIL`, `not ok`,
+  `N run, M failed` with M > 0) instead of the last 15 lines of whatever ran afterwards, and names
+  the full log's path.
+
 ## 2026-09-17 — Project cards read as one column again
 
 ### Fixed — a sparse card's rows spread apart, its branch chip wrapped, and quiet cards looked dead

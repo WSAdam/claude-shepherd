@@ -92,6 +92,14 @@ assert_json "...the summary" "$MD/s1.json" .summary "Fix the demo"
 assert_json "...the test claim" "$MD/s1.json" .tests "make test: green"
 assert_json "...and waits for an answer" "$MD/s1.json" .phase requested
 assert_json "...bound to a nonce" "$MD/s1.json" '.nonce | length > 0' true
+# 2026-09-17: the card said "Needs you" for merge requests nobody was waiting on any more --
+# Adam's click would write a decision file that no process ever claims. The request names the
+# PROCESS that is waiting, so Shepherd can check it with ps before ranking the card red.
+assert_json "...and names the process waiting for the answer" "$MD/s1.json" \
+  '.wait_pid | tostring | test("^[0-9]+$")' true
+wp="$(jq -r .wait_pid "$MD/s1.json")"
+kill -0 "$wp" 2>/dev/null && got=alive || got=gone
+assert_eq "...which is alive while it waits" "alive" "$got"
 answer s1 merge "" "someone-else"
 sleep 0.6
 [ -e "$TMP/rc.s1" ] && got=exited || got=waiting
@@ -130,9 +138,15 @@ assert_eq "a withdrawn request: exit 5" "5" "$(cat "$TMP/rc.s3")"
 req "$WT" s4 --wait-max 1
 assert_eq "--wait-max: still waiting -> exit 4" "4" "$(cat "$TMP/rc.s4")"
 n1="$(jq -r .nonce "$MD/s4.json")"
+wp1="$(jq -r .wait_pid "$MD/s4.json")"
 req "$WT" s4 --wait-max 5 & bg=$!
 sleep 0.4
 assert_json "asking again keeps the same request (Adam's click can't be lost in between)" "$MD/s4.json" .nonce "$n1"
+# ...but the waiting PROCESS is a new one, and the request must name it -- otherwise the card
+# reads "nobody is waiting" off the dead first attempt and stops asking Adam for his click.
+wp2="$(jq -r .wait_pid "$MD/s4.json")"
+[ "$wp2" != "$wp1" ] && got=refreshed || got=stale
+assert_eq "...while the waiting process is re-stamped on every ask" "refreshed" "$got"
 answer s4 merge "" "$n1"
 wait $bg
 assert_eq "...and the first request's answer is honoured" "0" "$(cat "$TMP/rc.s4")"

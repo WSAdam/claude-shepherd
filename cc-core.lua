@@ -1265,17 +1265,160 @@ function M.isDriving(it)
     and (it.status == "done" or it.status == "idle") or false
 end
 
-function M.instanceTier(it, seenAt)
+-- ---- "Needs you" only when Adam can actually do something (2026-09-17) -----------------
+-- Live: he configured merge.gates, and TWO units that had merged hours earlier each got a
+-- post-merge test gate started retroactively the moment the config appeared. Both ran
+-- `make lint && make test` in the SAME main checkout at once and killed each other
+-- (install.test.sh shells out to the real make in the checkout; the reload test kills hs
+-- processes), so both reported `exited 2` -- while main was green. Two cards pulsed red
+-- "Needs you" for hours, on merges hours old, where the only affordance was Dismiss. That
+-- trains him to dismiss reds, which destroys the gate's whole purpose.
+--
+-- THE RULE: a card ranks as needing Adam ONLY IF
+--   (a) a live counterpart will actually receive his answer, and
+--   (b) the card offers an affordance that CHANGES something -- acknowledge-only never counts.
+-- Anything failing either half becomes a HEADS-UP: still on the card, still dismissible, but
+-- never red and never ranked above a session that is working (M.TIER_FYI).
+--
+-- Liveness is FX's job (a ps probe, the precedent being FX.endSession's); this decides. The
+-- tile carries what FX found:
+--   it.procAlive          -- the session's own claude process (nil = not probed = assume alive)
+--   it.merge.waiterAlive  -- the cc-merge.sh waiting for the decision (same convention)
+--   it.errorEpisode       -- { since, count, first } from M.errorEpisodeStep
+M.TIER_FYI = 3.7
+M.FYI_WORD = "Heads-up"
+
+-- A cause that usually clears itself: a connection blip, a timeout, an overloaded model.
+-- (2026-09-17 live: Adam started a VPN, a card went red with "[runtime error] Connectio..."
+-- and outranked every working session; the fault healed itself and the session was back to
+-- "working" 40s later, with nothing that was ever his to do.) budget_exceeded is deliberately
+-- NOT here -- a usage limit is something he acts on: wait, or switch.
+M.ERROR_TRANSIENT = { runtime_error = true, timeout = true, model_error = true }
+-- 75s: past a retry round-trip and past the 40s the VPN blip took to heal, while still well
+-- inside the time it takes him to walk back to the screen. Still failing after 75s is an
+-- outage, not a blip.
+M.ERROR_GRACE = 75
+M.ERROR_FLAPS = 3           -- episodes inside the window that make it his problem anyway
+M.ERROR_FLAP_WINDOW = 600
+
+-- One tile's error episode across ticks. `prev` is last tick's record; the caller keeps the
+-- table (FX._errorEpisodes). `since` is the CURRENT episode's start and is dropped the moment
+-- the session writes any newer non-error status; `count`/`first` remember the flapping inside
+-- M.ERROR_FLAP_WINDOW, so three short blips in ten minutes still escalate.
+function M.errorEpisodeStep(it, prev, now)
+  now = tonumber(now) or 0
+  local p = type(prev) == "table" and prev or nil
+  local inWindow = p ~= nil and (now - (tonumber(p.first) or now) < M.ERROR_FLAP_WINDOW)
+  if type(it) ~= "table" or it.status ~= "error" then
+    if inWindow and (tonumber(p.count) or 0) > 0 then return { count = p.count, first = p.first } end
+    return nil
+  end
+  if p and p.since then return p end   -- the same episode, still running
+  local count, first = 1, now
+  if inWindow then count = (tonumber(p.count) or 0) + 1; first = tonumber(p.first) or now end
+  return { since = now, count = count, first = first }
+end
+
+-- THE one predicate behind every source that can make a card say "Needs you" -- a held
+-- question, a merge, a batch proposal, a permission prompt, an error. Returns
+-- "needs" | "fyi" | nil, plus the source and (for a heads-up) a short why for the card.
+function M.needsYouKind(it, now)
+  if type(it) ~= "table" then return nil end
+  now = tonumber(now) or os.time()
+  local alive = (it.procAlive ~= false)   -- nil = not probed = assume alive (never hide a real ask)
+
+  -- 1. a question cc-ask.sh is holding: the answer file only reaches a live session.
+  if it.askHeld then
+    if not alive then return "fyi", "ask", "the session that asked has gone" end
+    return "needs", "ask"
+  end
+
+  -- 2. a merge. Only a REQUEST is answerable, and only while its cc-merge.sh still waits;
+  -- "merged but main went red" and "blocked" offer Dismiss and nothing else.
+  local m = type(it.merge) == "table" and it.merge or nil
+  if m and m.needsYou then
+    if m.phase == "requested" then
+      if m.waiterAlive == false then return "fyi", "merge", "nothing is waiting for the answer any more" end
+      return "needs", "merge"
+    end
+    return "fyi", "merge", "nothing here changes it -- Dismiss once you've read it"
+  end
+
+  -- 3. a batch proposal: the grant is delivered to the proposing session.
+  local f = type(it.fleet) == "table" and it.fleet or nil
+  if f and f.needsYou then
+    if not alive then return "fyi", "fleet", "the session that proposed it has gone" end
+    return "needs", "fleet"
+  end
+
+  -- 4. a permission prompt. An armed gate takes a decision file; anything else (a gate that
+  -- timed out into the native prompt) is Approve/Deny as KEYSTROKES, which a window shared by
+  -- several sessions refuses outright -- so from here there is nothing to press.
+  if it.status == "approval" then
+    if not alive then return "fyi", "approval", "the session has gone" end
+    if it.gate ~= "waiting" and M.keystrokeBlocked(it) then
+      return "fyi", "approval", "answer it in its own tab -- its window hosts other sessions"
+    end
+    return "needs", "approval"
+  end
+
+  -- 5. an error. A transient cause on a live session is something the session itself retries.
+  if it.status == "error" then
+    -- A STALE error on a session that has exited is history, not news: nothing is still
+    -- happening and there is no turn to continue. (Respawn is on its menu whenever he wants it.)
+    if not alive and it.stale then return "fyi", "error", "that session has exited" end
+    local reason = tostring(it.error_reason or "unknown")
+    if reason == "user_cancelled" then return "fyi", "error", "you stopped it yourself" end
+    if not M.ERROR_TRANSIENT[reason] then return "needs", "error" end
+    if not alive or it.hung then return "needs", "error" end   -- nothing is left to retry it
+    local ep = type(it.errorEpisode) == "table" and it.errorEpisode or {}
+    if (tonumber(ep.count) or 1) >= M.ERROR_FLAPS then return "needs", "error" end
+    if now - (tonumber(ep.since) or now) >= M.ERROR_GRACE then return "needs", "error" end
+    return "fyi", "error", "a connection fault -- it should clear itself"
+  end
+  return nil
+end
+
+function M.needsYouNow(it, now) return M.needsYouKind(it, now) == "needs" end
+
+-- The liveness probe the rule above runs on: ONE ps for the whole handful of pids a decision
+-- depends on this tick (never one call per session). Only digits reach the command line, and
+-- only pids a needs-you decision actually hangs on are ever asked about. nil = nothing to ask.
+function M.alivePsCmd(pids)
+  local list, seen = {}, {}
+  for p in pairs(pids or {}) do
+    local d = tostring(p):match("^%d+$")
+    if d and not seen[d] then seen[d] = true; list[#list + 1] = d end
+  end
+  if #list == 0 then return nil end
+  table.sort(list)
+  return "ps -o pid= -p " .. table.concat(list, ",") .. " 2>/dev/null"
+end
+
+-- ps's answer -> the set of pids that are still there. Anything it didn't list is gone.
+function M.parseAlivePids(out)
+  local seen = {}
+  for line in (tostring(out or "") .. "\n"):gmatch("([^\n]*)\n") do
+    local d = line:match("^%s*(%d+)%s*$")
+    if d then seen[tostring(tonumber(d))] = true end
+  end
+  return seen
+end
+
+function M.instanceTier(it, seenAt, now)
   local st = it and it.status
+  -- 2026-09-17: all five needs-you sources (a held question, a merge, a batch proposal, an
+  -- approval, an error) go through ONE predicate, so a card can't claim Adam when he has
+  -- nothing to press. A heads-up keeps its own tier BELOW the working sessions.
   -- 2026-09-11: a question held for Adam (FX.annotateAsks) outranks everything: its answer is
   -- right on the card, while a merged unit's "close its tab yourself" can wait.
-  if it and it.askHeld then return 0 end
-  -- 2026-09-11: a merge request waiting for Adam (or one that came back blocked) needs him
-  -- as much as an approval does.
-  if it and type(it.merge) == "table" and it.merge.needsYou then return 1 end
-  if it and type(it.fleet) == "table" and it.fleet.needsYou then return 1 end   -- a batch waiting for Adam
-  if st == "approval" then return 1 end
-  if st == "error" then return 2 end
+  local kind, source = M.needsYouKind(it, now)
+  if kind == "fyi" then return M.TIER_FYI end
+  if kind == "needs" then
+    if source == "ask" then return 0 end
+    if source == "error" then return 2 end
+    return 1    -- a merge, a batch proposal, or an approval waiting for him
+  end
   if it and it.hung then return 3 end
   -- 2026-09-15: the driver of a running batch is at work through its units -- never "ready for you",
   -- and it keeps its card ahead of the working units (TIER_DRIVING), so the card doesn't flip once seen.
@@ -1653,6 +1796,9 @@ function M.parseMergeRequest(raw)
   if not mergeRefOk(t.branch) or not mergeRefOk(t.base) then return nil end
   return {
     key = t.key, session_id = t.session_id, pid = tostring(t.pid or ""), nonce = t.nonce,
+    -- 2026-09-17: the cc-merge.sh process waiting for the answer. Shepherd checks it with ps
+    -- before calling the card "Needs you": a click that reaches nothing isn't Adam's to make.
+    waitPid = ((tonumber(t.wait_pid) or 0) > 0) and math.tointeger(tonumber(t.wait_pid)) or nil,
     worktree = M.normDir(t.worktree), commonDir = M.normDir(t.commonDir), branch = t.branch, base = t.base,
     summary = capChars(t.summary, 1000), tests = capChars(t.tests, 300), note = capChars(t.note, 500),
     sha = (type(t.sha) == "string" and t.sha:match("^%x+$")) and t.sha or nil,
@@ -1743,6 +1889,106 @@ function M.mergeGateFor(cfg, item)
   return nil
 end
 
+-- Only a request whose OWN pre-merge gate ran in THIS Shepherd lifecycle may be post-merge
+-- gated. 2026-09-17: merge.gates was configured at 15:58, and two units that had merged hours
+-- earlier (15:48 and before) each got a post-merge gate started right then, in the same main
+-- checkout, at the same moment -- a gate run on work nobody was still doing. `preRuns` is the
+-- pre-merge slot (records carrying the request's nonce).
+function M.postMergeGateDue(req, preRuns)
+  if type(req) ~= "table" or type(req.nonce) ~= "string" or req.nonce == "" then return false end
+  for _, g in pairs(preRuns or {}) do
+    if type(g) == "table" and g.nonce == req.nonce then return true end
+  end
+  return false
+end
+
+-- One gate run per repo at a time, pre- and post-merge sharing the lane. The two retroactive
+-- gates above ran `make lint && make test` in ONE checkout concurrently and killed each other
+-- (install.test.sh shells out to the real make there; the reload test kills hs processes), so
+-- both said `exited 2` about a main that was green. Same shape as M.mergeQueue's per-repo
+-- busy-ness. `runs` = { key, state, commonDir, at } records; returns the keys that may start.
+function M.mergeGateReleases(runs)
+  local busy, byRepo = {}, {}
+  for _, g in pairs(runs or {}) do
+    if type(g) == "table" and g.commonDir then
+      if g.state == "running" then busy[g.commonDir] = true
+      elseif g.state == "queued" then
+        byRepo[g.commonDir] = byRepo[g.commonDir] or {}
+        table.insert(byRepo[g.commonDir], g)
+      end
+    end
+  end
+  local out = {}
+  for repo, list in pairs(byRepo) do
+    if not busy[repo] then
+      table.sort(list, function(a, b)
+        local aa, bb = tonumber(a.at) or 0, tonumber(b.at) or 0
+        if aa ~= bb then return aa < bb end
+        return tostring(a.key) < tostring(b.key)
+      end)
+      out[#out + 1] = list[1].key
+    end
+  end
+  table.sort(out)
+  return out
+end
+
+-- tests/run.sh refuses a second concurrent run in one checkout: the suite shells out to the
+-- real make in the checkout and kills hs processes, so two runs there corrupt each other's
+-- results. Its own exit code and a machine token, because `make` masks a recipe's exit code
+-- as 2 and the token is what survives that.
+M.TEST_LOCK_EXIT = 9
+M.TEST_LOCK_TOKEN = "CC_TEST_SUITE_LOCKED"
+-- ...and the same idea for the gate's own wrapper: a folder that has gone (M.mergeGateCmd).
+M.GATE_NORUN_TOKEN = "CC_GATE_CANNOT_RUN"
+
+-- Did the gate FAIL, or could it not run at all? A suite that refused to start (the run.sh
+-- lock, a missing command, a folder that's gone) says NOTHING about the code, and calling
+-- that red is exactly what teaches Adam to dismiss reds.
+M.GATE_NORUN_CODES = { [126] = true, [127] = true, [M.TEST_LOCK_EXIT] = true }
+function M.mergeGateOutcome(code, output)
+  code = tonumber(code)
+  if code == 0 then return "passed" end
+  local s = tostring(output or "")
+  if s:find(M.TEST_LOCK_TOKEN, 1, true) or s:find(M.GATE_NORUN_TOKEN, 1, true) then return "couldntRun" end
+  if s:lower():find("command not found", 1, true) then return "couldntRun" end
+  if code and M.GATE_NORUN_CODES[code] then return "couldntRun" end
+  return "failed"
+end
+
+-- A gate that COULDN'T run is retried; a verdict is not. The usual reason for couldn't-run is
+-- Adam's own hand-run of the same suite holding the checkout's lock, which clears in minutes --
+-- a record that never retried would wedge the request until the unit pushed a new commit.
+M.GATE_RETRY_AFTER = 90
+function M.mergeGateRetryDue(g, now)
+  if type(g) ~= "table" or g.state ~= "couldntRun" then return false end
+  return (tonumber(now) or 0) - (tonumber(g.doneAt) or tonumber(g.at) or 0) >= M.GATE_RETRY_AFTER
+end
+
+-- The lines of a gate's log that say what FAILED, so a red gate is actionable. The last 15
+-- lines were trailing noise from whatever ran after the failure. Matches the shapes this
+-- repo's suites actually emit: "FAIL - ...", TAP's "not ok ...", a "N run, M failed" summary
+-- with M > 0, and a bare ❌ line.
+M.MERGE_GATE_FAIL_LINES = 12
+function M.gateFailureLines(output, maxLines)
+  if type(output) ~= "string" or output == "" then return "" end
+  maxLines = tonumber(maxLines) or M.MERGE_GATE_FAIL_LINES
+  local out = {}
+  for line in (output:gsub("\n$", "") .. "\n"):gmatch("([^\n]*)\n") do
+    local hit = line:find("^%s*FAIL") ~= nil or line:find("FAIL %- ") ~= nil
+             or line:find("^%s*not ok") ~= nil or line:find("❌", 1, true) ~= nil
+    if not hit then
+      local n = tonumber(line:match("%d+%s+run,%s+(%d+)%s+failed") or "")
+      hit = (n ~= nil and n > 0)
+    end
+    if hit then
+      out[#out + 1] = line
+      if #out >= maxLines then break end
+    end
+  end
+  return table.concat(out, "\n")
+end
+
 -- One gate run per request AND per commit: a unit that pushes a fix after a red gate gets a
 -- fresh run, and a re-ask on the same commit reuses the verdict. A non-hex sha never lands
 -- in the key (git's answer is hex; anything else is "?" and simply never matches a later one).
@@ -1756,12 +2002,16 @@ end
 -- (a `make test` log runs past the OS pipe buffer, so the caller redirects to a file rather
 -- than reading a task's pipe). Paths are single-quoted exactly as mergeFactsCmd quotes them;
 -- the command itself is the operator's own config line and goes through verbatim.
+-- 2026-09-17: a folder that has gone (a removed worktree) says the TOKEN and exits with the
+-- couldn't-run code, so it reads as COULDN'T RUN rather than as a red suite -- a `cd` failure
+-- used to be exit 1, indistinguishable from a real test failure.
 function M.mergeGateCmd(gate, dir, outFile)
   if type(gate) ~= "table" or type(gate.command) ~= "string" or gate.command == "" then return nil end
   if type(dir) ~= "string" or dir == "" then return nil end
   if type(outFile) ~= "string" or outFile == "" then return nil end
   local function sq(s) return "'" .. tostring(s):gsub("'", "'\\''") .. "'" end
-  return "{ cd " .. sq(dir) .. " && " .. gate.command .. " ; } > " .. sq(outFile) .. " 2>&1"
+  return "{ cd " .. sq(dir) .. " || { echo " .. M.GATE_NORUN_TOKEN .. ": cannot enter " .. sq(dir)
+    .. "; exit " .. M.TEST_LOCK_EXIT .. "; }; " .. gate.command .. " ; } > " .. sq(outFile) .. " 2>&1"
 end
 
 -- The main checkout a merge lands in: the request's common dir without its .git.
@@ -1800,11 +2050,19 @@ function M.mergeReadiness(req, facts, item, gate)
   -- worktree itself is still checked above: listed, on its branch, clean, ahead.)
   if type(gate) == "table" then
     local st = gate.state
-    if st == "running" then out.checking = true
+    -- "queued" waits behind another gate in the same repo (M.mergeGateReleases) -- it reads as
+    -- CHECKING, never as "no gate configured", which would call the request ready unchecked.
+    if st == "running" or st == "queued" then out.checking = true
     elseif st == "failed" then
       p[#p + 1] = "the test gate failed: " .. tostring(gate.command) .. " exited " .. tostring(gate.code or "?")
     elseif st == "timedOut" then
       p[#p + 1] = "the test gate timed out: " .. tostring(gate.command)
+    -- 2026-09-17: a suite that never started says nothing about the code. It still holds the
+    -- merge (it wasn't proven green, and a delegated batch merge must not go through on it),
+    -- but it says so honestly instead of claiming the tests failed.
+    elseif st == "couldntRun" then
+      p[#p + 1] = "the test gate couldn't run: " .. tostring(gate.command) .. " never started ("
+        .. tostring(gate.why or "see its log") .. ")"
     end
   end
   out.ready = (#p == 0) and not out.checking
@@ -1961,9 +2219,16 @@ function M.mergeView(req, rd, facts, q, gate)
   -- The gate Shepherd ran itself (2026-09-17): its verdict, and the tail of its log, so the
   -- review says what failed without Adam going to look for the log.
   if type(gate) == "table" and gate.state then
+    local log = gate.tail or gate.output or ""
+    -- 2026-09-17: the tail alone was the trailing noise of whatever ran after the failure, so
+    -- a red gate said nothing Adam could act on. The FAILING lines lead; the tail stays as
+    -- context; the full log keeps its path so he can go and read it.
+    local fails = capChars(M.gateFailureLines(log, M.MERGE_GATE_FAIL_LINES), M.MERGE_GATE_TAIL_CHARS)
     v.gate = { state = gate.state, code = tonumber(gate.code), command = capChars(tostring(gate.command or ""), 300),
-               tail = capChars(M.lastLines(gate.tail or gate.output or "", M.MERGE_GATE_TAIL_LINES),
-                               M.MERGE_GATE_TAIL_CHARS) }
+               tail = capChars(M.lastLines(log, M.MERGE_GATE_TAIL_LINES), M.MERGE_GATE_TAIL_CHARS),
+               fails = (fails ~= "") and fails or nil,
+               log = (type(gate.logPath) == "string" and gate.logPath ~= "") and gate.logPath or nil,
+               why = (type(gate.why) == "string" and gate.why ~= "") and capChars(gate.why, 200) or nil }
   end
   v.line = M.mergeLine(v)
   v.needsYou = M.mergeNeedsYou(v)

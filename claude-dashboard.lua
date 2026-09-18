@@ -3085,6 +3085,97 @@ function FX.annotateFleet(list, cfg, bannerOn)
   end
 end
 
+-- ---- "Needs you" only when Adam can actually act (2026-09-17) -----------------------------
+-- The rule and the whole decision live in core.needsYouKind; this is the half that can't be
+-- pure -- the ps probe behind "will a live counterpart actually receive his answer" -- plus
+-- the per-tile error-episode bookkeeping the transient-error arm reads. State on FX, not new
+-- chunk-level locals: the main chunk is at Lua's 200-local cap.
+FX.ALIVE_TTL = 15        -- seconds a pid's liveness is reused before ps is asked again
+FX.ALIVE_KEEP = 300      -- ...and how long a cached answer is kept at all
+FX._alive = {}           -- pid (string) -> { at, alive }
+FX._errorEpisodes = {}   -- tile key -> core.errorEpisodeStep's record
+
+-- Ask ps about the handful of pids a needs-you decision hangs on, in ONE call (never one per
+-- session per tick), cached for ALIVE_TTL. Shepherd's OWN pid rides along as a control: a ps
+-- that can't see us isn't a ps to trust, and every answer is then "unknown" -- which
+-- core.needsYouKind reads as alive, so a broken probe can never HIDE a real question.
+function FX.probeAlive(pids)
+  local out, ask, now = {}, {}, FX.now()
+  for p in pairs(pids or {}) do
+    local d = tostring(p):match("^%d+$")
+    if d then
+      local c = FX._alive[d]
+      if c and now - c.at < FX.ALIVE_TTL then out[d] = c.alive else ask[d] = true end
+    end
+  end
+  for d, c in pairs(FX._alive) do if now - c.at > FX.ALIVE_KEEP then FX._alive[d] = nil end end
+  if next(ask) == nil then return out end
+  local me = tostring(type(rawget(hs, "processInfo")) == "table" and hs.processInfo.processID or "")
+  me = me:match("^%d+$")
+  if not me then return out end   -- no control pid: don't trust any answer
+  ask[me] = true
+  local res
+  pcall(function() res = hs.execute(core.alivePsCmd(ask)) end)
+  if type(res) ~= "string" then return out end
+  local seen = core.parseAlivePids(res)
+  if not seen[me] then
+    print("[cc-dashboard] ⚠️ ps didn't report Shepherd's own pid -- liveness unknown this tick")
+    return out
+  end
+  for d in pairs(ask) do
+    if d ~= me then
+      FX._alive[d] = { at = now, alive = seen[d] == true }
+      out[d] = seen[d] == true
+    end
+  end
+  return out
+end
+
+-- Stamp every tile with THE verdict: "needs" (red, ranked to the top of its card), "fyi" (a
+-- heads-up -- on the card, dismissible, never red, never above a working session) or "no".
+-- Runs AFTER the merge/fleet/ask/tabless annotations and the error+hung detection, so it sees
+-- every source at once, and BEFORE the stack ranking (core.instanceTier reads the same
+-- predicate) and the panel push (the webview gets the tile as it stands here).
+function FX.annotateNeedsYou(list)
+  local now = FX.now()
+  -- Only the pids a decision actually depends on -- a few per tick at most.
+  local want, waiters = {}, {}
+  for _, it in ipairs(list or {}) do
+    it.needsYou, it.needsYouSource, it.needsYouWhy = nil, nil, nil
+    it.procAlive, it.errorEpisode = nil, nil
+    if type(it.merge) == "table" then it.merge.waiterAlive = nil end
+    if not it.remote then
+      if it.askHeld or it.status == "approval" or it.status == "error"
+         or (type(it.fleet) == "table" and it.fleet.needsYou) then
+        local p = tostring(it.session_pid or ""):match("^%d+$")
+        if p then want[p] = true end
+      end
+      local wp = it.key and FX._mergeWaitPids[it.key]
+      if wp and type(it.merge) == "table" and it.merge.needsYou then
+        waiters[it.key] = tostring(wp)
+        want[tostring(wp)] = true
+      end
+    end
+  end
+  local alive = FX.probeAlive(want)
+  local live = {}
+  for _, it in ipairs(list or {}) do
+    live[it.key] = true
+    if not it.remote then
+      local p = tostring(it.session_pid or ""):match("^%d+$")
+      if p and alive[p] ~= nil then it.procAlive = alive[p] end
+      local wp = waiters[it.key]
+      if wp and alive[wp] ~= nil then it.merge.waiterAlive = alive[wp] end
+    end
+    local ep = core.errorEpisodeStep(it, FX._errorEpisodes[it.key], now)
+    FX._errorEpisodes[it.key] = ep
+    it.errorEpisode = ep
+    local kind, source, why = core.needsYouKind(it, now)
+    it.needsYou, it.needsYouSource, it.needsYouWhy = kind or "no", source, why
+  end
+  for k in pairs(FX._errorEpisodes) do if not live[k] then FX._errorEpisodes[k] = nil end end
+end
+
 -- ---- Tab-less sessions (2026-09-11) -----------------------------------------------
 -- A claude process left running with no tab (a new conversation started in its tab) is
 -- marked it.tabless once the mismatch has held for FX.TABLESS_AFTER seconds (a tab's name
@@ -3295,6 +3386,7 @@ FX._mergeFacts = {}      -- nonce -> { at, facts }
 FX._mergeAlerted = {}    -- "<nonce>|<phase>" -> true: each state alerts once
 FX._mergeReqs = {}       -- key -> request, live sessions only (last tick)
 FX._mergeItems = {}      -- key -> the session's tile (last tick)
+FX._mergeWaitPids = {}   -- key -> the cc-merge.sh pid waiting for the answer (never on the tile)
 
 -- ---- Shepherd answers (2026-09-11) ------------------------------------------------------
 -- cc-ask.sh holds a session's AskUserQuestion while this panel runs; Adam answers it on the
@@ -3411,16 +3503,57 @@ end
 FX._mergeGates = {}       -- gate key -> record: the pre-merge run, in the worktree
 FX._mergeGatesPost = {}   -- gate key -> record: the post-merge run, in the main checkout
 
--- Start (or return) the one run for this gate key. `slot` is the table it lives in, so the
+-- Claim (or return) the one run for this gate key. `slot` is the table it lives in, so the
 -- pre- and post-merge runs of the same commit can't collide (an ff-merge makes both shas equal).
-function FX.mergeGateStart(slot, gkey, gate, dir, nonce, where)
+-- A new record starts QUEUED and the pump launches it when its repo's lane is free -- 2026-09-17:
+-- two gates ran `make lint && make test` in the SAME main checkout at once and killed each other.
+function FX.mergeGateStart(slot, gkey, gate, dir, nonce, where, commonDir)
   local g = slot[gkey]
-  if g then return g end
+  -- A gate that COULDN'T run (most often Adam's own hand-run of the same suite holding the
+  -- checkout's lock) goes back in the queue after the grace; a verdict never does.
+  if g and core.mergeGateRetryDue(g, FX.now()) then
+    if g.logPath then pcall(os.remove, g.logPath) end
+    g.state, g.code, g.why, g.output, g.logPath, g.at = "queued", nil, nil, nil, nil, FX.now()
+    print("[cc-dashboard] ↻ retrying the test gate that couldn't run: " .. tostring(g.command))
+  end
+  if not g then
+    if not core.mergeGateCmd(gate, dir, "/dev/null") then return nil end
+    g = { state = "queued", command = gate.command, at = FX.now(), nonce = nonce, where = where,
+          commonDir = commonDir, dir = dir, timeoutSeconds = gate.timeoutSeconds }
+    slot[gkey] = g
+  end
+  FX.mergeGatePump()
+  return g
+end
+
+-- One gate run per repo at a time, pre- and post-merge sharing the lane (core.mergeGateReleases
+-- decides; this only launches what it names). Called from every mergeGateStart and once per
+-- tick, so a queued gate starts the moment the lane frees.
+function FX.mergeGatePump()
+  local runs, byKey = {}, {}
+  for si, slot in ipairs({ FX._mergeGates, FX._mergeGatesPost }) do
+    for gkey, g in pairs(slot) do
+      local rec = { key = si .. "|" .. gkey, state = g.state, commonDir = g.commonDir, at = g.at,
+                    slot = slot, gkey = gkey, g = g }
+      runs[#runs + 1] = rec
+      byKey[rec.key] = rec
+    end
+  end
+  for _, key in ipairs(core.mergeGateReleases(runs)) do
+    local r = byKey[key]
+    if r then FX.mergeGateLaunch(r.slot, r.gkey, r.g) end
+  end
+end
+
+-- Actually run one queued gate. A folder that has gone (a removed worktree) is COULDN'T-RUN,
+-- never a failure: a suite that never started says nothing about the code.
+function FX.mergeGateLaunch(slot, gkey, g)
+  if g.state ~= "queued" then return g end
   local outFile = FX.scratchFile("mergegate")
-  local cmd = core.mergeGateCmd(gate, dir, outFile)
-  if not cmd then return nil end
-  g = { state = "running", command = gate.command, at = FX.now(), nonce = nonce, where = where }
-  slot[gkey] = g
+  local cmd = core.mergeGateCmd({ command = g.command }, g.dir, outFile)
+  if not cmd then g.state, g.why = "couldntRun", "no command"; return g end
+  local gate, dir, where = { command = g.command, timeoutSeconds = g.timeoutSeconds }, g.dir, g.where
+  g.state = "running"
   local shell = os.getenv("SHELL")
   if not shell or shell == "" then shell = "/bin/zsh" end
   local ok = pcall(function()
@@ -3432,11 +3565,15 @@ function FX.mergeGateStart(slot, gkey, gate, dir, nonce, where)
       if g.timer then pcall(function() g.timer:stop() end); g.timer = nil end
       g.task = nil
       g.output = FX.readFile(outFile) or ""
-      pcall(os.remove, outFile)
       if g.state ~= "timedOut" then   -- the backstop already ruled; its terminate lands here
         g.code = tonumber(code) or 1
-        g.state = (g.code == 0) and "passed" or "failed"
+        -- 2026-09-17: a suite that REFUSED TO START (the run.sh lock, a missing command) says
+        -- nothing about the code. Calling that red is what teaches Adam to dismiss reds.
+        g.state = core.mergeGateOutcome(g.code, g.output)
+        if g.state == "couldntRun" then g.why = "the suite refused to start" end
       end
+      -- A green run's log is noise; anything else keeps its log so the card can name it.
+      if g.state == "passed" then pcall(os.remove, outFile) else g.logPath = outFile end
       g.doneAt = FX.now()
       print("[cc-dashboard] merge gate (" .. tostring(where) .. ") " .. tostring(gate.command)
         .. " -> " .. tostring(g.state) .. " (exit " .. tostring(g.code) .. ")")
@@ -3461,7 +3598,8 @@ function FX.mergeGateStart(slot, gkey, gate, dir, nonce, where)
       .. " in " .. tostring(dir))
   end)
   if not ok then
-    g.state, g.code, g.task = "failed", -1, nil
+    -- The launch itself failed -- again, nothing about the code.
+    g.state, g.code, g.task, g.why = "couldntRun", -1, nil, "Shepherd couldn't launch it"
     g.output = "Shepherd couldn't launch the test gate"
     pcall(os.remove, outFile)
   end
@@ -3474,16 +3612,20 @@ function FX.mergeGate(r, facts, cfg)
   if not gate then return nil end
   local gkey = core.mergeGateKey(r, facts and facts.sha)
   if not gkey then return nil end
-  return FX.mergeGateStart(FX._mergeGates, gkey, gate, r.worktree, r.nonce, "worktree")
+  return FX.mergeGateStart(FX._mergeGates, gkey, gate, r.worktree, r.nonce, "worktree", r.commonDir)
 end
 
 -- The post-merge gate: the same suite, in the MAIN checkout, before the unit's tab is closed.
+-- 2026-09-17: ONLY for a request whose own pre-merge gate ran in this Shepherd lifecycle
+-- (core.postMergeGateDue). Without that, configuring merge.gates started a gate on every merge
+-- already on disk -- two of them at once, in one checkout, hours after the units were done.
 function FX.mergeGatePost(r, cfg)
   local gate = core.mergeGateFor(cfg, FX._mergeItems[r.key])
   if not gate then return nil end
+  if not core.postMergeGateDue(r, FX._mergeGates) then return nil end
   local root, gkey = core.mergeMainRoot(r), core.mergeGateKey(r, r.sha)
   if not root or not gkey then return nil end
-  return FX.mergeGateStart(FX._mergeGatesPost, gkey, gate, root, r.nonce, "main")
+  return FX.mergeGateStart(FX._mergeGatesPost, gkey, gate, root, r.nonce, "main", r.commonDir)
 end
 
 -- Forget the runs of requests that are gone (a merged, dismissed or vanished unit).
@@ -3492,7 +3634,10 @@ function FX.mergeGatePrune(reqs)
   for _, r in pairs(reqs or {}) do live[r.nonce] = true end
   for _, slot in ipairs({ FX._mergeGates, FX._mergeGatesPost }) do
     for gkey, g in pairs(slot) do
-      if not live[g.nonce] and not g.task then slot[gkey] = nil end
+      if not live[g.nonce] and not g.task then
+        if g.logPath then pcall(os.remove, g.logPath) end   -- a red gate's kept log goes with it
+        slot[gkey] = nil
+      end
     end
   end
 end
@@ -3661,7 +3806,10 @@ end
 -- state that wants Adam. Requests whose session is gone are ignored (and never block a repo).
 function FX.annotateMerges(list, cfg, bannerOn)
   for _, it in ipairs(list or {}) do it.merge = nil end
-  if core.config(cfg, "merge.enabled", true) == false then FX._mergeReqs, FX._mergeItems = {}, {}; return end
+  if core.config(cfg, "merge.enabled", true) == false then
+    FX._mergeReqs, FX._mergeItems, FX._mergeWaitPids = {}, {}, {}
+    return
+  end
   local byKey, byPid = {}, {}
   for _, it in ipairs(list or {}) do
     if it.key and not it.remote then
@@ -3674,8 +3822,9 @@ function FX.annotateMerges(list, cfg, bannerOn)
     local it = byKey[key] or (r.pid ~= "" and byPid[r.pid]) or nil   -- a /clear keeps the process
     if it then reqs[key], items[key] = r, it end
   end
-  FX._mergeReqs, FX._mergeItems = reqs, items
+  FX._mergeReqs, FX._mergeItems, FX._mergeWaitPids = reqs, items, {}
   FX.mergeGatePrune(reqs)
+  FX.mergeGatePump()   -- a gate queued behind another in its repo starts as soon as the lane frees
   -- Batch driving (2026-09-11): a unit's OWN ready request is approved on its batch's grant
   -- (only when Adam granted merges); anything else waits for his click as usual.
   for key, r in pairs(reqs) do
@@ -3717,7 +3866,7 @@ function FX.annotateMerges(list, cfg, bannerOn)
       -- 2026-09-17: the same gate runs ONCE in the main checkout before the unit's tab closes,
       -- so a merge that left main red is caught here instead of by the next unit to ask.
       gate = FX.mergeGatePost(r, cfg)
-      if gate and gate.state == "running" then
+      if gate and (gate.state == "running" or gate.state == "queued") then
         closeNote = "running " .. tostring(gate.command) .. " on " .. tostring(r.base) .. " first"
       elseif gate and (gate.state == "failed" or gate.state == "timedOut") then
         closeNote = tostring(r.base) .. " is red after the merge: " .. tostring(gate.command)
@@ -3729,6 +3878,9 @@ function FX.annotateMerges(list, cfg, bannerOn)
     end
     it.merge = core.mergeView(r, rd, facts, { queued = q.queued[key], sent = FX._mergeSent[key] ~= nil,
                                                closeNote = closeNote }, gate)
+    -- The process actually waiting for Adam's answer (2026-09-17). Kept OFF the tile -- it's a
+    -- pid, and the whole tile is what the webview gets -- so FX.annotateNeedsYou reads it here.
+    FX._mergeWaitPids[key] = (r.phase == "requested") and r.waitPid or nil
     if it.merge.needsYou and not (r.phase == "requested" and rd and rd.checking) then
       local tag = r.nonce .. "|" .. r.phase
       if not FX._mergeAlerted[tag] then
@@ -8763,6 +8915,13 @@ local HTML = [[
   .tile.needs { animation:askglow 1.2s ease-in-out infinite; }
   @keyframes askglow { 0%,100% { box-shadow:0 0 0 3px var(--st-approval); } 50% { box-shadow:0 0 0 3px var(--st-approval), 0 0 22px var(--st-approval); } }
   .tile.needs .meta { color:var(--st-approval); font-weight:600; }
+  /* 2026-09-17: a heads-up -- something worth seeing that is NOT Adam's to act on (a merge
+     nobody is waiting on, a merged unit whose main went red, a connection blip the session is
+     retrying). Visible and dismissible, deliberately NOT red and deliberately not pulsing:
+     two such cards pulsed red for hours with only Dismiss to press, which trains him to
+     dismiss reds and destroys the gate's whole purpose. */
+  .tile.fyi { box-shadow:0 0 0 1px var(--warn); }
+  .tile.fyi .meta { color:var(--warn); }
   .in-ask { display:flex; flex-wrap:wrap; gap:4px; margin-top:4px; }
   #d-meta { display:none; font-size:11px; color:var(--muted); margin:8px 0 0; }
   #d-lineage { display:none; font-size:11px; color:var(--muted); margin:4px 0 0; }
@@ -10390,7 +10549,9 @@ local HTML = [[
 
   <script>
     var LABELS = { idle:"Idle", working:"Working",
-                   approval:"Needs you", done:"Ready for you", error:"Error" };
+                   approval:"Needs you", done:"Ready for you", error:"Error",
+                   // 2026-09-17: a card with something to say that is NOT Adam's to act on.
+                   fyi:"Heads-up", retrying:"Retrying" };
     // status colors are single-sourced to the :root --st-* tokens (set by the
     // Appearance theme/overrides) so the JS-driven detail dot can't drift from the
     // CSS .s-* classes. KEEP these keys == cc-core APPEARANCE status mapping.
@@ -10406,18 +10567,46 @@ local HTML = [[
     // Waiting on Adam without a permission prompt (2026-09-11): a batch to approve, a merge to
     // click, a held question. The card must say so as loudly as an approval does -- a finished
     // driver used to read a green "Ready for you" while its batch waited for him.
-    function needsYouNow(it){ return !!(it && (it.askHeld || (it.merge && it.merge.needsYou) || (it.fleet && it.fleet.needsYou))); }
+    // 2026-09-17: the verdict is ONE decision, made in cc-core (needsYouKind) and stamped on
+    // every tile as it.needsYou -- "needs" (he can actually do something), "fyi" (a heads-up:
+    // on the card, dismissible, but never red and never ranked above a working session) or
+    // "no". Two long-finished merges pulsed red for hours with only Dismiss to press, which
+    // trains him to dismiss reds. The legacy fallback covers a tile Lua hasn't stamped (older
+    // bridged host, a test fixture); a stamped tile ALWAYS wins, "no" included.
+    function needsYouNow(it){
+      if(it && it.needsYou) return it.needsYou === "needs";
+      return !!(it && (it.askHeld || (it.merge && it.merge.needsYou) || (it.fleet && it.fleet.needsYou)));
+    }
+    function headsUp(it){ return !!(it && it.needsYou === "fyi"); }
+    // The teal ring stays what it always was -- a merge or a batch waiting for him -- but it now
+    // follows the verdict: a merge nobody is waiting on any more gets the quiet .fyi ring instead.
+    function mergeRing(it){
+      if(!needsYouNow(it)) return false;
+      if(it && it.needsYouSource) return it.needsYouSource === "merge" || it.needsYouSource === "fleet";
+      return !!(it && ((it.merge && it.merge.needsYou) || (it.fleet && it.fleet.needsYou)));
+    }
     // A driver whose batch is running (2026-09-15): it ended its turn once its units had their tasks,
     // but its units are working -- the card says so instead of a green "Ready for you" (core.isDriving).
     function isDriving(it){ return !!(it && it.fleet && it.fleet.phase === "approved" && (it.status === "done" || it.status === "idle")); }
-    function effStatus(it){ return needsYouNow(it) ? "approval" : ((bgRunning(it) || isDriving(it)) ? "working" : ((it && it.status) || "idle")); }
+    // A heads-up takes the NEUTRAL dot: not the red approval one (nothing waits on him) and not
+    // the card's own "error"/"done" colour (it isn't the plain thing either). Its .tile.fyi ring
+    // is what makes it visible.
+    function effStatus(it){
+      if(needsYouNow(it)) return "approval";
+      if(headsUp(it)) return "idle";
+      return (bgRunning(it) || isDriving(it)) ? "working" : ((it && it.status) || "idle");
+    }
     // 2026-09-17: every card whose status file was older than 90s faded to .45, so a quiet
     // "Ready for you" -- and a card waiting on Adam -- read as dead. Only a genuinely IDLE
     // card dims now: effStatus already lifts needs-you, a running batch and live background
     // agents out of "idle", so this one check covers all of them.
-    function staleDim(it){ return !!(it && it.stale && effStatus(it) === "idle"); }
+    // 2026-09-17: ...and a heads-up is never dimmed either -- it still has something to say.
+    function staleDim(it){ return !!(it && it.stale && effStatus(it) === "idle" && !headsUp(it)); }
     function statusWords(it){
       if(needsYouNow(it)) return LABELS.approval;
+      // A transient API error the session is retrying (a connection blip, a timeout, an
+      // overloaded model): the card says so instead of a red Error nobody can act on.
+      if(headsUp(it)) return it.needsYouSource === "error" ? LABELS.retrying : LABELS.fyi;
       if(isDriving(it)){ var nu = (it.fleet.units || []).length; return "Driving " + nu + " unit" + (nu === 1 ? "" : "s"); }
       if(bgRunning(it)){ var n = (it && it.bg_count) || 0; return "Running " + n + " agent" + (n === 1 ? "" : "s"); }
       var st = (it && it.status) || "idle"; return LABELS[st] || st;
@@ -13401,10 +13590,23 @@ local HTML = [[
       gEl.className = "dm-gate" + (gt ? " g-" + String(gt.state).replace(/[^a-zA-Z]/g, "") : "");
       if(!gt){ gEl.textContent = ""; }
       else if(gt.state === "running"){ gEl.textContent = "Test gate: Shepherd is running " + (gt.command || "") + "…"; }
+      else if(gt.state === "queued"){ gEl.textContent = "Test gate: " + (gt.command || "") + " is queued behind another run in this repo…"; }
       else if(gt.state === "passed"){ gEl.textContent = "Test gate: " + (gt.command || "") + " passed (Shepherd ran it)"; }
+      // 2026-09-17: a suite that never started says nothing about the code -- say that, plainly,
+      // instead of "the tests failed".
+      else if(gt.state === "couldntRun"){
+        gEl.textContent = "Test gate: " + (gt.command || "") + " couldn't run ("
+          + (gt.why || "see its log") + ") — nothing was proven either way"
+          + (gt.log ? "\nfull log: " + gt.log : "");
+      }
       else {
         var head = gt.state === "timedOut" ? " timed out" : " exited " + (gt.code === undefined ? "?" : gt.code);
-        gEl.textContent = "Test gate: " + (gt.command || "") + head + (gt.tail ? "\n" + gt.tail : "");
+        // The FAILING lines lead: the tail alone was whatever ran after the failure, so a red
+        // gate said nothing Adam could act on. The tail stays underneath as context.
+        gEl.textContent = "Test gate: " + (gt.command || "") + head
+          + (gt.fails ? "\n" + gt.fails : "")
+          + (gt.log ? "\nfull log: " + gt.log : "")
+          + (gt.tail ? "\n--- last lines ---\n" + gt.tail : "");
       }
       var probs = Array.isArray(m.problems) ? m.problems : [];
       document.getElementById("dm-problems").textContent = (asking && probs.length) ? "Not ready: " + probs.join("; ") : "";
@@ -15756,6 +15958,9 @@ local HTML = [[
       } else if(it.tabless){
         meta = TABLESS_T;   // a claude process with no tab in its window (2026-09-11)
       }
+      // 2026-09-17: a heads-up says WHY it isn't his to act on, so the card explains itself
+      // instead of leaving a quiet ring he has to interpret.
+      if(headsUp(it) && it.needsYouWhy){ meta = (meta ? meta + " · " : "") + it.needsYouWhy; }
       if(it.remote){ meta = (meta ? meta + " · " : "") + "⇄ " + (it.remote.host || "remote")
                             + (it.bridgeStale ? " (bridge offline)" : ""); }
       if(it.queue > 0){ meta = (meta ? meta + " · " : "") + (it.routed ? "⇉" : "+") + it.queue + " queued"; }
@@ -15767,7 +15972,9 @@ local HTML = [[
       if(it.hung){ meta = (meta ? meta + " · " : "") + "⏳ stalled"; }
       if(it.looping){ meta = (meta ? meta + " · " : "") + "⟳ looping"; }   // L5 loop watchdog
       if(it.churn){ meta = (meta ? meta + " · " : "") + "♻️" + it.churn; }   // respawn/clear churn today
-      var cls = "tile s-" + stCls + (staleDim(it) ? " stale" : "") + (it.collide ? " collide" : "") + (it.hung ? " hung" : "") + (it.escalate ? " escalate" : "") + ((it.merge && it.merge.needsYou) || (it.fleet && it.fleet.needsYou) ? " merge" : "") + (needsYouNow(it) ? " needs" : "") + (it.key === selectedKey ? " sel" : "");
+      // 2026-09-17: the teal merge ring and the red pulse both follow THE verdict now, not the
+      // raw merge/fleet flags -- a merge nobody is waiting on any more gets the quiet .fyi ring.
+      var cls = "tile s-" + stCls + (staleDim(it) ? " stale" : "") + (it.collide ? " collide" : "") + (it.hung ? " hung" : "") + (it.escalate ? " escalate" : "") + (mergeRing(it) ? " merge" : "") + (needsYouNow(it) ? " needs" : "") + (headsUp(it) ? " fyi" : "") + (it.key === selectedKey ? " sel" : "");
       // select + double-click jump are decided at mousedown by onGridMouseDown (below):
       // a grid rebuild mid-press detaches the tile, so inline click handlers were lost
       // data-stack: this card's project stack (focus-group + the Instances button read it)
@@ -17453,6 +17660,10 @@ function FX._refreshBody()
   FX.annotateTabless(list, cfg)   -- a claude process with no tab in its window (2026-09-11)
   FX.annotateAsks(list, bannerOn)   -- a question held for Adam by cc-ask.sh (2026-09-11)
   FX.annotateEmptyChats(list)       -- never-used "Claude Code" chats, closable from the card (2026-09-11)
+  -- 2026-09-17: LAST of the annotations -- it needs every source at once. One predicate decides
+  -- whether each card really needs Adam (a live counterpart AND an affordance that changes
+  -- something) or is only a heads-up; the ranking and the panel both read what it stamps.
+  FX.annotateNeedsYou(list)
   -- Two sessions in ONE project used to render as IDENTICAL cards: the name (and
   -- any relabel) is per-projectKey, so nothing on either tile said which chat it
   -- was. Give each of those tiles its own chat title -- and only those, so a

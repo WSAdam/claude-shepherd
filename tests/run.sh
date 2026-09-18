@@ -5,6 +5,32 @@
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 fail=0
+
+# One run of this suite per checkout (2026-09-17). It is genuinely not concurrency-safe here:
+# install.test.sh shells out to the real `make` in this checkout, and the reload test kills hs
+# processes -- so two runs in one checkout corrupt each other's results. Shepherd's merge test
+# gate started two of them at once in the same main checkout; both died and reported `exited 2`
+# about a main that was green, and two cards pulsed red for hours over it. This also protects
+# Adam's own hand-run. The lock is PER CHECKOUT (a worktree has its own tests/), so parallel
+# units are unaffected. Exit code + token are pinned in cc-core (TEST_LOCK_EXIT/_TOKEN): `make`
+# masks a recipe's exit code as 2, so the token is what survives a wrapper.
+CC_TEST_LOCK="$DIR/.run.lock"
+cc_take_lock() { mkdir "$CC_TEST_LOCK" 2>/dev/null && printf '%s\n' "$$" > "$CC_TEST_LOCK/pid"; }
+if ! cc_take_lock; then
+  holder="$(cat "$CC_TEST_LOCK/pid" 2>/dev/null | tr -dc '0-9')"
+  if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
+    echo "CC_TEST_SUITE_LOCKED"
+    echo "❌ tests/run.sh is already running in this checkout (pid $holder)."
+    echo "   The suite shells out to make and kills hs processes, so two runs here corrupt"
+    echo "   each other. Wait for that run, or remove $CC_TEST_LOCK if the process is gone."
+    exit 9
+  fi
+  # Its holder is gone (a killed run, a reboot): take it over rather than wedge forever.
+  rm -rf "$CC_TEST_LOCK"
+  cc_take_lock || { echo "CC_TEST_SUITE_LOCKED"; echo "❌ couldn't take $CC_TEST_LOCK"; exit 9; }
+fi
+trap 'rm -rf "$CC_TEST_LOCK"' EXIT
+
 # a CC_* override set in the calling shell must not reach the suites
 . "$DIR/hermetic-env.sh"
 
@@ -97,6 +123,9 @@ bash "$DIR/prune-ui.test.sh" || fail=1
 echo ""
 echo "== bash: worktree hygiene (.gitignore keeps git worktree remove unblocked) =="
 bash "$DIR/worktree-hygiene.test.sh" || fail=1
+echo ""
+echo "== bash: the suite refuses a second concurrent run in one checkout =="
+bash "$DIR/run-lock.test.sh" || fail=1
 echo ""
 echo "== lua: no assignment to a for-loop variable (read-only in Lua 5.5) =="
 lua "$DIR/loopvar.test.lua" || fail=1

@@ -3209,12 +3209,20 @@ do
         (src:match('<div class="dm%-body">.-</div>%s*<div class="dm%-acts"') or ""):find('id="dm%-gate"') ~= nil)
   -- 2026-09-17: a make test log is far past the OS pipe buffer -- a direct-exec hs.task would
   -- deadlock, so the gate must go through the login shell with its output redirected to a file.
-  local start = src:match("\nfunction FX%.mergeGateStart%(.-\n  return g\nend\n") or ""
+  -- (2026-09-17: the launch moved out of mergeGateStart into mergeGateLaunch, so a gate can be
+  -- QUEUED behind another run in the same repo instead of starting on top of it. Same body.)
+  local start = src:match("\nfunction FX%.mergeGateLaunch%(.-\n  return g\nend\n") or ""
   check("the gate runs through the login shell, with its output redirected to a scratch file",
         #start > 0 and start:find('"-l", "-c", cmd', 1, true) ~= nil
         and start:find("FX.scratchFile(", 1, true) ~= nil)
   check("...and its timeout backstop timer is retained on the record, never bare",
         start:find("g.timer = hs.timer.doAfter(", 1, true) ~= nil)
+  -- 2026-09-17: one gate run per repo at a time, pre- and post-merge sharing the lane, and a
+  -- post-merge gate only for a request whose own pre-merge gate ran in this Shepherd lifecycle.
+  check("only a queued gate is ever launched", start:find('if g.state ~= "queued" then return g end', 1, true) ~= nil)
+  check("the pump asks cc-core which gates may start", src:find("core.mergeGateReleases(runs)", 1, true) ~= nil)
+  check("...and the post-merge gate asks whether it is due at all",
+        src:find("core.postMergeGateDue(r, FX._mergeGates)", 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

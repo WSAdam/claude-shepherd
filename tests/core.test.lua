@@ -9044,10 +9044,21 @@ do
   eq("card: merged", core.mergeLine(core.mergeView(mg, nil, nil, {})), "✓ merged fix/demo into main")
   check("view: the webview never gets the nonce, session id or pid",
         v.nonce == nil and v.session_id == nil and v.pid == nil and v.folder == "demo")
+  -- 2026-09-17: the process actually waiting for Adam's answer, so a request nobody is waiting
+  -- on stops ranking as "Needs you". It stays on the REQUEST, never in the view the panel gets.
+  eq("the request carries the pid of the process waiting for the answer",
+     core.parseMergeRequest(reqJson({ wait_pid = 4711 })).waitPid, 4711)
+  eq("...and an older request without one simply has none",
+     core.parseMergeRequest(reqJson({})).waitPid, nil)
+  check("...and the view never carries it", core.mergeView(
+     core.parseMergeRequest(reqJson({ wait_pid = 4711 })), nil, nil, {}).waitPid == nil)
 
   local function tier(view) return core.instanceTier({ key = "s1", status = "done", since = 1, merge = view }, {}) end
   eq("tier: a merge request waiting for Adam needs you", tier(v), 1)
-  eq("tier: ...a blocked merge too", tier(core.mergeView(bl, nil, nil, {})), 1)
+  -- 2026-09-17 REQUIREMENT CHANGE (not a regression): a blocked merge's review offers Dismiss
+  -- and nothing else, so it is acknowledge-only and ranks as a heads-up, not a red "Needs you".
+  -- Adam's rule: never say "Needs you" when he can't do anything about it.
+  eq("tier: ...while a blocked merge is only a heads-up", tier(core.mergeView(bl, nil, nil, {})), core.TIER_FYI)
   check("tier: a queued or running merge doesn't", tier(core.mergeView(r, ok, f, { queued = 1 })) ~= 1 and tier(core.mergeView(ap, nil, nil, {})) ~= 1)
 
   -- after the merge: Shepherd re-checks with its own git, then closes the tab (U3)
@@ -9485,6 +9496,14 @@ do
   check("a gate command with no worktree or no log file is refused",
         core.mergeGateCmd({ command = "make test" }, "", "/tmp/x") == nil
         and core.mergeGateCmd({ command = "make test" }, "/r/A", "") == nil)
+  -- 2026-09-17: a removed worktree made `cd` exit 1 -- indistinguishable from a red suite, so
+  -- the card said the tests failed about a suite that never ran.
+  check("...and a folder that's gone says so and exits with the couldn't-run code",
+        cmd:find(core.GATE_NORUN_TOKEN, 1, true) ~= nil
+        and cmd:find("exit " .. core.TEST_LOCK_EXIT, 1, true) ~= nil)
+  eq("...which reads as couldn't-run, not as a failure",
+     core.mergeGateOutcome(core.TEST_LOCK_EXIT, core.GATE_NORUN_TOKEN .. ": cannot enter '/r/A/w'"),
+     "couldntRun")
 
   -- readiness: each arm of the gate
   local facts = { listed = true, head = "fix/a1", clean = true, dirty = {}, ahead = 1, behind = 0, commits = {}, files = {} }
@@ -9535,6 +9554,289 @@ do
   eq("...and the facts carry it", parsed.sha, "abc1234def5678")
   eq("the main checkout of a request is its common dir without the .git",
      core.mergeMainRoot({ commonDir = "/r/A/.git" }), "/r/A")
+end
+
+
+-- ---- Never say "Needs you" when Adam can't act (2026-09-17) ----------------
+-- Live: two long-finished merges got a post-merge test gate started retroactively when
+-- merge.gates first appeared in the config; both ran `make lint && make test` in the SAME
+-- main checkout at once, killed each other, and reported `exited 2` while main was green.
+-- The cards pulsed red "Needs you" for hours on merges hours old, where the only affordance
+-- was Dismiss -- which trains Adam to dismiss reds. THE RULE: a card needs Adam only if
+-- (a) a live counterpart will actually receive his answer and (b) the card offers an
+-- affordance that CHANGES something. Everything else is a heads-up: visible, dismissible,
+-- never red, never ranked above a working session.
+do
+  local NOW = 1000000
+  local function kind(it) local k = core.needsYouKind(it, NOW); return k end
+  local function src(it) local _, s = core.needsYouKind(it, NOW); return s end
+
+  -- 1. a question held for Adam (cc-ask.sh)
+  local ask = { key = "q", status = "approval", askHeld = true }
+  eq("a held question on a live session needs Adam", kind(ask), "needs")
+  eq("...from the ask", src(ask), "ask")
+  eq("a held question whose session's process is gone is only a heads-up",
+     kind({ key = "q", status = "approval", askHeld = true, procAlive = false }), "fyi")
+  eq("...and an unprobed session is assumed alive (never hide a real question)",
+     kind({ key = "q", status = "approval", askHeld = true, procAlive = nil }), "needs")
+
+  -- 2. a merge request waiting for Adam's click
+  local req = { key = "m", status = "done", merge = { phase = "requested", needsYou = true } }
+  eq("a merge request with its script still waiting needs Adam", kind(req), "needs")
+  eq("...from the merge", src(req), "merge")
+  eq("a merge request whose cc-merge.sh is gone is only a heads-up",
+     kind({ key = "m", status = "done",
+            merge = { phase = "requested", needsYou = true, waiterAlive = false } }), "fyi")
+  -- acknowledge-only states: Dismiss changes nothing
+  eq("a merged unit that left main red is a heads-up, not a red Needs you",
+     kind({ key = "m", status = "done", merge = { phase = "merged", needsYou = true,
+            gate = { state = "failed", code = 2 } } }), "fyi")
+  eq("a merge that came back blocked is a heads-up too (Dismiss only)",
+     kind({ key = "m", status = "done", merge = { phase = "blocked", needsYou = true } }), "fyi")
+
+  -- 3. a batch proposal waiting for Adam
+  eq("a batch proposal from a live driver needs Adam",
+     kind({ key = "d", status = "done", fleet = { phase = "proposed", needsYou = true } }), "needs")
+  eq("a batch proposal whose proposing session exited is only a heads-up",
+     kind({ key = "d", status = "done", procAlive = false,
+            fleet = { phase = "proposed", needsYou = true } }), "fyi")
+
+  -- 4. a permission prompt
+  local appr = { key = "a", status = "approval", gate = "waiting", pending = { tool = "Bash" } }
+  eq("a live permission prompt with an armed gate needs Adam", kind(appr), "needs")
+  eq("...from the approval", src(appr), "approval")
+  eq("a permission prompt whose session exited is only a heads-up",
+     kind({ key = "a", status = "approval", gate = "waiting", procAlive = false,
+            pending = { tool = "Bash" } }), "fyi")
+  -- the gate timed out (cc-approve.sh dropped gate/gate_nonce and fell back to the native
+  -- prompt): Approve/Deny become keystrokes -- which a shared window refuses outright.
+  eq("a timed-out gate in a shared window can't be answered from here, so it's a heads-up",
+     kind({ key = "a", status = "approval", sharedWindow = 3, editor = "vscode",
+            pending = { tool = "Bash" } }), "fyi")
+  eq("...but in its own window the keystroke still works, so it needs Adam",
+     kind({ key = "a", status = "approval", sharedWindow = 1, editor = "vscode",
+            pending = { tool = "Bash" } }), "needs")
+
+  -- 5. errors: a transient cause on a live session is not Adam's to fix (2026-09-17 live:
+  -- starting a VPN turned a card red with "[runtime error] Connectio..."; the blip healed
+  -- itself and the session was back to "working" 40s later).
+  local blip = { key = "e", status = "error", error_reason = "runtime_error",
+                 errorEpisode = { since = NOW - 5, count = 1 } }
+  eq("a fresh connection blip on a live session is a heads-up, not a red Error", kind(blip), "fyi")
+  eq("...from the error", src(blip), "error")
+  eq("...and it is still a heads-up at 40s, when the real one healed itself",
+     kind({ key = "e", status = "error", error_reason = "runtime_error",
+            errorEpisode = { since = NOW - 40, count = 1 } }), "fyi")
+  eq("a connection error that never clears escalates past the grace window",
+     kind({ key = "e", status = "error", error_reason = "runtime_error",
+            errorEpisode = { since = NOW - core.ERROR_GRACE - 1, count = 1 } }), "needs")
+  eq("an error that keeps flapping escalates however fresh this episode is",
+     kind({ key = "e", status = "error", error_reason = "runtime_error",
+            errorEpisode = { since = NOW - 1, count = core.ERROR_FLAPS } }), "needs")
+  eq("a transient error on a dead session escalates at once -- nothing is left to retry it",
+     kind({ key = "e", status = "error", error_reason = "runtime_error", procAlive = false,
+            errorEpisode = { since = NOW - 1, count = 1 } }), "needs")
+  -- ...but once that card has gone display-stale it is HISTORY, not news: the session exited,
+  -- nothing is still happening, and ranking it above working sessions is pure noise.
+  eq("a stale error on a session that has exited is only a heads-up",
+     kind({ key = "e", status = "error", error_reason = "runtime_error", procAlive = false,
+            stale = true, errorEpisode = { since = NOW - 400, count = 1 } }), "fyi")
+  eq("...and so is a stale usage limit on one that has exited",
+     kind({ key = "e", status = "error", error_reason = "budget_exceeded", procAlive = false,
+            stale = true }), "fyi")
+  eq("...while a stale error on a session that is STILL RUNNING is not excused",
+     kind({ key = "e", status = "error", error_reason = "budget_exceeded", stale = true }), "needs")
+  eq("...and so does one on a frozen session",
+     kind({ key = "e", status = "error", error_reason = "runtime_error", hung = true,
+            errorEpisode = { since = NOW - 1, count = 1 } }), "needs")
+  eq("a timeout is transient too", kind({ key = "e", status = "error", error_reason = "timeout",
+            errorEpisode = { since = NOW - 1, count = 1 } }), "fyi")
+  eq("an overloaded model is transient too", kind({ key = "e", status = "error",
+            error_reason = "model_error", errorEpisode = { since = NOW - 1, count = 1 } }), "fyi")
+  -- a usage limit is something Adam genuinely acts on: wait, or switch. Never downgraded.
+  eq("a usage limit needs Adam straight away", kind({ key = "e", status = "error",
+            error_reason = "budget_exceeded", errorEpisode = { since = NOW - 1, count = 1 } }), "needs")
+  eq("an unclassified error still needs Adam straight away", kind({ key = "e", status = "error",
+            error_reason = "unknown", errorEpisode = { since = NOW - 1, count = 1 } }), "needs")
+  eq("an error he cancelled himself is not news", kind({ key = "e", status = "error",
+            error_reason = "user_cancelled", errorEpisode = { since = NOW - 1, count = 1 } }), "fyi")
+  -- an error with no episode recorded yet (first tick) starts its own grace window
+  eq("the first tick of a transient error starts its grace window",
+     kind({ key = "e", status = "error", error_reason = "runtime_error" }), "fyi")
+
+  -- nothing at all
+  eq("a plain finished session needs nothing", kind({ key = "p", status = "done" }), nil)
+  eq("a working session needs nothing", kind({ key = "w", status = "working" }), nil)
+
+  -- ---- the tiers ----
+  eq("a live held question still leads its card", core.instanceTier(ask, {}, NOW), 0)
+  eq("a live merge request still ranks with the approvals", core.instanceTier(req, {}, NOW), 1)
+  eq("a live permission prompt still ranks with the approvals", core.instanceTier(appr, {}, NOW), 1)
+  eq("a persistent error still ranks above a working session",
+     core.instanceTier({ key = "e", status = "error", error_reason = "budget_exceeded" }, {}, NOW), 2)
+  local fyiTier = core.instanceTier({ key = "m", status = "done",
+    merge = { phase = "blocked", needsYou = true } }, {}, NOW)
+  eq("a heads-up gets the heads-up tier", fyiTier, core.TIER_FYI)
+  check("...which ranks BELOW a working session", fyiTier > core.TIER_RUNNING)
+  check("...and below a driving one", fyiTier > core.TIER_DRIVING)
+  eq("a blip's card doesn't outrank a working session either",
+     core.instanceTier(blip, {}, NOW), core.TIER_FYI)
+
+  -- the whole 2026-09-17 VPN fixture, end to end: error at T, "working" at T+40, and the
+  -- card must never once have been ranked as needing Adam.
+  local ep = nil
+  local rankedNeedsYou = false
+  for t = 0, 40 do
+    local tile = { key = "vpn", status = (t < 40) and "error" or "working",
+                   error_reason = (t < 40) and "runtime_error" or nil }
+    ep = core.errorEpisodeStep(tile, ep, NOW + t)
+    tile.errorEpisode = ep
+    local k = core.needsYouKind(tile, NOW + t)
+    if k == "needs" then rankedNeedsYou = true end
+  end
+  check("the VPN blip never once ranked as needing Adam", rankedNeedsYou == false)
+  eq("...and the episode is over once the session writes a newer non-error status",
+     ep and ep.since or nil, nil)
+
+  -- ...but a connection failure that never heals does escalate (no blanket suppression)
+  local ep2, escalatedAt = nil, nil
+  for t = 0, core.ERROR_GRACE + 5 do
+    local tile = { key = "down", status = "error", error_reason = "runtime_error" }
+    ep2 = core.errorEpisodeStep(tile, ep2, NOW + t)
+    tile.errorEpisode = ep2
+    if core.needsYouKind(tile, NOW + t) == "needs" and not escalatedAt then escalatedAt = t end
+  end
+  check("a connection failure that never heals does go red  (at t=" .. tostring(escalatedAt) .. ")",
+        escalatedAt ~= nil and escalatedAt > 60)
+
+  -- ...and one that flaps three times in the window goes red even though each blip is short
+  local ep3, flapNeeds = nil, false
+  for round = 1, core.ERROR_FLAPS do
+    for t = 1, 3 do
+      local tile = { key = "flap", status = "error", error_reason = "runtime_error" }
+      ep3 = core.errorEpisodeStep(tile, ep3, NOW + round * 100 + t)
+      tile.errorEpisode = ep3
+      if core.needsYouKind(tile, NOW + round * 100 + t) == "needs" then flapNeeds = true end
+    end
+    -- it heals between rounds, but the episode count is remembered inside the flap window
+    ep3 = core.errorEpisodeStep({ key = "flap", status = "working" }, ep3, NOW + round * 100 + 4)
+  end
+  check("an error that flaps " .. core.ERROR_FLAPS .. " times in the window goes red", flapNeeds)
+end
+
+
+-- ---- the liveness probe behind the needs-you rule (2026-09-17) --------------
+-- The decision is pure (core.needsYouKind); the PROBE is FX's, and it asks ps for the whole
+-- handful of pids at once -- never one call per session per tick.
+do
+  eq("no pids -> no probe at all", core.alivePsCmd({}), nil)
+  local cmd = core.alivePsCmd({ ["41"] = true, ["7"] = true })
+  check("the probe asks ps for every pid in one call  (" .. tostring(cmd) .. ")",
+        cmd:find("^ps ") ~= nil and cmd:find("-p ", 1, true) ~= nil
+        and cmd:find("7", 1, true) ~= nil and cmd:find("41", 1, true) ~= nil)
+  check("...and only digits ever reach the command line",
+        core.alivePsCmd({ ["1; rm -rf /"] = true, ["12"] = true }):find("rm", 1, true) == nil)
+  local seen = core.parseAlivePids("  PID\n   41\n    7\n")
+  check("ps's answer says which pids are still there", seen["41"] == true and seen["7"] == true)
+  check("...and nothing else is", seen["99"] == nil)
+  check("an empty answer means none of them are", next(core.parseAlivePids("")) == nil)
+end
+
+-- ---- The test gate: never retroactive, one per repo, honest about failure (2026-09-17) ----
+do
+  -- 2026-09-17: merge.gates was configured at 15:58; two units that had merged HOURS earlier
+  -- (15:48 and before) each got a post-merge gate started right then, in the same main
+  -- checkout, at the same moment. Only a request whose OWN pre-merge gate ran in this
+  -- Shepherd lifecycle may be post-merge gated.
+  local req = { nonce = "n1", phase = "merged" }
+  check("a merge whose pre-merge gate never ran here is NOT gated retroactively",
+        core.postMergeGateDue(req, {}) == false)
+  check("...nor when some OTHER request's gate ran",
+        core.postMergeGateDue(req, { { nonce = "n2" } }) == false)
+  check("a merge whose own pre-merge gate ran here is post-merge gated",
+        core.postMergeGateDue(req, { { nonce = "n1" } }) == true)
+  check("a request with no nonce is never gated", core.postMergeGateDue({ phase = "merged" },
+        { { nonce = "n1" } }) == false)
+
+  -- One run per repo at a time, pre- and post-merge sharing the lane: the two retroactive
+  -- gates ran `make lint && make test` in ONE checkout concurrently and killed each other.
+  local rel = core.mergeGateReleases({
+    { key = "a", state = "queued", commonDir = "/r/A/.git", at = 10 },
+    { key = "b", state = "queued", commonDir = "/r/A/.git", at = 5 },
+    { key = "c", state = "queued", commonDir = "/r/B/.git", at = 7 },
+  })
+  eq("two queued gates on one repo release one at a time", #rel, 2)
+  check("...the earlier one first", rel[1] == "b" or rel[2] == "b")
+  check("...and the other repo goes in parallel", rel[1] == "c" or rel[2] == "c")
+  check("...never the later one in the busy repo", rel[1] ~= "a" and rel[2] ~= "a")
+  local rel2 = core.mergeGateReleases({
+    { key = "run", state = "running", commonDir = "/r/A/.git", at = 1 },
+    { key = "b", state = "queued", commonDir = "/r/A/.git", at = 5 },
+  })
+  eq("nothing starts in a repo whose gate is already running", #rel2, 0)
+  local rel3 = core.mergeGateReleases({
+    { key = "post", state = "queued", commonDir = "/r/A/.git", at = 9 },
+    { key = "pre", state = "running", commonDir = "/r/A/.git", at = 1 },
+  })
+  eq("a post-merge gate waits for the pre-merge one in the same repo -- one lane", #rel3, 0)
+
+  -- A queued gate must read as "still checking", never as "no gate configured".
+  local r = { branch = "fix/a", base = "main" }
+  local facts = { listed = true, head = "fix/a", clean = true, ahead = 1, dirty = {} }
+  local rd = core.mergeReadiness(r, facts, {}, { state = "queued", command = "make test" })
+  check("a queued gate keeps the request in 'checking', not ready", rd.checking == true and rd.ready == false)
+
+  -- COULDN'T-RUN vs FAILED: a suite that refused to start says nothing about the code.
+  eq("a green gate passed", core.mergeGateOutcome(0, "ALL GREEN"), "passed")
+  eq("a red gate failed", core.mergeGateOutcome(2, "FAIL - something"), "failed")
+  eq("a missing command couldn't run", core.mergeGateOutcome(127, "make: command not found"), "couldntRun")
+  eq("the suite's own concurrency lock couldn't run",
+     core.mergeGateOutcome(2, "make: *** [test] Error " .. core.TEST_LOCK_EXIT
+       .. "\n" .. core.TEST_LOCK_TOKEN .. "\n"), "couldntRun")
+  eq("...and directly, without make in between",
+     core.mergeGateOutcome(core.TEST_LOCK_EXIT, core.TEST_LOCK_TOKEN), "couldntRun")
+  -- ...and it is RETRIED: the usual reason is Adam's own hand-run of the same suite holding the
+  -- lock, which clears in minutes. A verdict that never retried would wedge the request until
+  -- the unit pushed a new commit -- turning a passing branch into a permanent "not ready".
+  check("a gate that couldn't run is retried once the grace has passed",
+        core.mergeGateRetryDue({ state = "couldntRun", doneAt = 100 }, 100 + core.GATE_RETRY_AFTER) == true)
+  check("...but not straight away", core.mergeGateRetryDue({ state = "couldntRun", doneAt = 100 }, 101) == false)
+  check("a gate that FAILED is never retried on its own -- that verdict stands",
+        core.mergeGateRetryDue({ state = "failed", code = 2, doneAt = 100 }, 100 + 10000) == false)
+  check("...nor is one that passed, timed out, or is still going",
+        core.mergeGateRetryDue({ state = "passed", doneAt = 100 }, 1e9) == false
+        and core.mergeGateRetryDue({ state = "timedOut", doneAt = 100 }, 1e9) == false
+        and core.mergeGateRetryDue({ state = "running", at = 100 }, 1e9) == false)
+  local rdN = core.mergeReadiness(r, facts, {}, { state = "couldntRun", command = "make test" })
+  check("a gate that couldn't run leaves the request not ready", rdN.ready == false)
+  check("...and says so, rather than claiming the tests failed",
+        tostring(rdN.problems[1]):find("couldn't run", 1, true) ~= nil)
+  check("a couldn't-run post-merge gate is NOT red",
+        core.mergeNeedsYou({ phase = "merged", gate = { state = "couldntRun" } }) == false)
+
+  -- A red gate has to be actionable: the FAILING lines, not the trailing noise.
+  local log = {}
+  for i = 1, 60 do log[#log + 1] = "ok   - fine " .. i end
+  table.insert(log, 12, "FAIL - empty section renders when refundStatement is blank")
+  table.insert(log, 30, "not ok 7 - the merge review keeps its buttons in view")
+  table.insert(log, 44, "-- ui.test.lua: 120 run, 2 failed --")
+  log[#log + 1] = "-- done-order.test.js: 18 run, 0 failed --"
+  local text = table.concat(log, "\n")
+  local fl = core.gateFailureLines(text, 10)
+  check("the failing lines carry the FAIL line", fl:find("refundStatement is blank", 1, true) ~= nil)
+  check("...and the TAP 'not ok' line", fl:find("not ok 7", 1, true) ~= nil)
+  check("...and the 'N run, M failed' summary with M > 0", fl:find("120 run, 2 failed", 1, true) ~= nil)
+  check("...but not a suite that passed", fl:find("0 failed", 1, true) == nil)
+  check("...and not the trailing noise", fl:find("fine 60", 1, true) == nil)
+  eq("a green log has no failing lines", core.gateFailureLines("ok - a\nok - b\n", 10), "")
+
+  -- the review carries the failing lines and the log's own path, so Adam can go read it
+  local mreq = { phase = "requested", branch = "fix/a", base = "main", worktree = "/r/A/w/a",
+                 summary = "s", tests = "t", at = 1 }
+  local v = core.mergeView(mreq, nil, nil, {}, { state = "failed", code = 2, command = "make test",
+                                                 output = text, logPath = "/tmp/cc-gate-1.log" })
+  check("the review shows the failing lines", (v.gate.fails or ""):find("not ok 7", 1, true) ~= nil)
+  eq("...and names the full log", v.gate.log, "/tmp/cc-gate-1.log")
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))

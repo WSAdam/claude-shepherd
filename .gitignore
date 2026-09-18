@@ -48,3 +48,6 @@ docs/feature-mining/
 docs/orchestrator-next.md
 docs/hardware-verification.md
 todos.md
+
+# The suite serialises itself per checkout (tests/run-lock.test.sh)
+tests/.run.lock
