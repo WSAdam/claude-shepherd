@@ -9999,5 +9999,117 @@ do
   eq("settings save: ...and the block's _comment", saved.ask._comment, "mine")
 end
 
+-- ---- the merge review checks the summary's CLAIMS against the diff (2026-09-18) ----
+-- Shepherd runs the suite itself, but nothing checked whether what the session WROTE was true:
+-- "adds regression tests" over a diff with no test file in it read exactly like an honest one.
+-- The check is tri-state and WARN ONLY -- it informs the review, it never gates the merge.
+do
+  local function req(summary, tests)
+    return { phase = "requested", branch = "fix/demo", base = "main", worktree = "/r/A/w", commonDir = "/r/A/.git",
+             nonce = "n1", session_id = "s-a1", summary = summary, tests = tests or "make test: ALL GREEN" }
+  end
+  local function facts(files)
+    return { listed = true, head = "fix/demo", clean = true, dirty = {}, ahead = 1, behind = 0,
+             commits = { { h = "abc1234", s = "a fix" } }, files = files, stat = "" }
+  end
+  local function testsClaim(r, f)
+    for _, c in ipairs(core.mergeClaimCheck(r, f) or {}) do if c.claim == "tests were added" then return c end end
+    return {}
+  end
+  local codeOnly = { { st = "M", path = "cc-core.lua" }, { st = "M", path = "claude-dashboard.lua" } }
+  local withTest = { { st = "M", path = "cc-core.lua" }, { st = "M", path = "tests/core.test.lua" } }
+
+  -- a claim the diff backs up
+  local okc = testsClaim(req("Fixes the alert loop. Adds a regression test for the broken case."), facts(withTest))
+  eq("claim check: 'adds a regression test' + a test path in the diff is ok", okc.verdict, "ok")
+  check("claim check: ...and the evidence names the test path", tostring(okc.evidence):find("tests/core.test.lua", 1, true) ~= nil)
+  eq("claim check: 'tests added' (the passive) is a claim too",
+     testsClaim(req("Alert loop fixed; fixtures were added for each bug."), facts(withTest)).verdict, "ok")
+  eq("claim check: a claim made only in the --tests text counts",
+     testsClaim(req("Fixes the alert loop.", "new fixture in tests/, make test green"), facts(withTest)).verdict, "ok")
+
+  -- a claim the diff does NOT back up
+  local bad = testsClaim(req("Fixes the alert loop. Adds a regression test for the broken case."), facts(codeOnly))
+  eq("claim check: a claim of added tests with no test path in the diff is flagged", bad.verdict, "flagged")
+  check("claim check: ...the evidence quotes what the session said and counts the files",
+        tostring(bad.evidence):find("Adds a regression test", 1, true) ~= nil and tostring(bad.evidence):find("2 changed file", 1, true) ~= nil)
+  eq("claim check: a DELETED test file is not a test that was added",
+     testsClaim(req("Adds a regression test."), facts({ { st = "M", path = "cc-core.lua" }, { st = "D", path = "tests/old.test.lua" } })).verdict,
+     "flagged")
+
+  -- no claim: couldn't tell, never a failure
+  local none = testsClaim(req("Fixes the alert loop in alerts.lua."), facts(codeOnly))
+  eq("claim check: a summary that makes no claim about tests is 'couldn't tell', not a failure", none.verdict, "couldntTell")
+  eq("claim check: saying the tests were RUN is not a claim they were added (the gate covers that)",
+     testsClaim(req("Fixes the alert loop.", "make lint && make test: ALL GREEN (119/119)"), facts(codeOnly)).verdict, "couldntTell")
+  eq("claim check: a negated sentence is never read as a claim",
+     testsClaim(req("Docs only. No new tests were needed."), facts(codeOnly)).verdict, "couldntTell")
+  eq("claim check: 'new' far from 'tests' is not a claim",
+     testsClaim(req("The new panel block renders under the gate and passes the tests."), facts(codeOnly)).verdict, "couldntTell")
+  eq("claim check: git hasn't answered yet -> couldn't tell", testsClaim(req("Adds a regression test."), nil).verdict, "couldntTell")
+  local cut = {}
+  for i = 1, 200 do cut[i] = { st = "M", path = "src/file-" .. i .. ".lua" } end
+  eq("claim check: a file list cut at 200 can't prove a test is missing -> couldn't tell",
+     testsClaim(req("Adds a regression test."), facts(cut)).verdict, "couldntTell")
+  eq("claim check: an empty request doesn't throw", testsClaim({}, facts(codeOnly)).verdict, "couldntTell")
+  for _, c in ipairs(core.mergeClaimCheck(req("Adds a regression test."), facts(codeOnly))) do
+    check("claim check: every verdict is one of the three", c.verdict == "ok" or c.verdict == "flagged" or c.verdict == "couldntTell")
+  end
+
+  -- renames: parseMergeFacts joins the two paths into one string and cuts R100 to "R"
+  local parsed = core.parseMergeFacts("@@files\nR100\tcheck/alerts.lua\ttests/alerts.test.lua\nM\tcc-core.lua\n",
+                                      { worktree = "/r/A/w", branch = "fix/demo" })
+  eq("claim check: a test path that arrives as a rename (parseMergeFacts' own form) is recognised",
+     testsClaim(req("Adds a regression test."), parsed).verdict, "ok")
+  eq("claim check: ...and the ' -> ' form too",
+     testsClaim(req("Adds a regression test."), facts({ { st = "R", path = "check/alerts.lua -> tests/alerts.test.lua" } })).verdict, "ok")
+  eq("claim check: a test moved OUT of the tests (rename away) is not a test that was added",
+     testsClaim(req("Adds a regression test."), facts({ { st = "R", path = "tests/alerts.test.lua → archive/alerts.lua" } })).verdict, "flagged")
+
+  -- what counts as a test path
+  for _, p in ipairs({ "tests/core.test.lua", "src/refund/refund.test.ts", "pkg/store_test.go", "app/test_views.py",
+                       "spec/models/user_spec.rb", "src/__tests__/a.js", "tests/fixtures/torn-line.jsonl",
+                       "components/Card/isolate/cases/empty/empty.json", "e2e/login.spec.ts" }) do
+    check("test path: " .. p, core.isTestPath(p) == true)
+  end
+  for _, p in ipairs({ "cc-core.lua", "src/contest.ts", "docs/latest.md", "spec/runes/refund.rune", "src/attestation.go", "" }) do
+    check("not a test path: '" .. p .. "'", core.isTestPath(p) == false)
+  end
+  check("not a test path: nil", core.isTestPath(nil) == false)
+
+  -- WARN ONLY. The no-vacuous-pass case: the claim IS flagged, and nothing is held by it.
+  local r, f = req("Fixes the alert loop. Adds a regression test for the broken case."), facts(codeOnly)
+  eq("warn only: (control) the claim is flagged", testsClaim(r, f).verdict, "flagged")
+  local rd = core.mergeReadiness(r, f, {}, { state = "passed", code = 0, command = "make test" })
+  check("warn only: with a flagged claim the request is still ready to merge", rd.ready == true and rd.checking == false)
+  eq("warn only: ...and the flag is not among its problems", #rd.problems, 0)
+  local b = { units = { { slug = "demo", branch = "fix/demo" } } }
+  local state = { units = { demo = { session = { id = "s-a1" } } } }
+  check("warn only: ...and a delegated batch merge is still allowed",
+        core.fleetDelegatedMerge(b, { approved = true, grantMerge = true }, state, r) == true)
+  local v = core.mergeView(r, rd, f, {})
+  check("the review carries the claim check beside the gate", type(v.claims) == "table" and #v.claims >= 1)
+  local vc; for _, c in ipairs(v.claims or {}) do if c.claim == "tests were added" then vc = c end end
+  eq("...with the flagged verdict", (vc or {}).verdict, "flagged")
+  check("...the Merge button's own inputs are untouched: ready, no problems, the usual card line",
+        v.ready == true and #v.problems == 0 and v.line == "⇡ ready to merge fix/demo → main")
+  check("...and a flagged claim is not a reason the card needs Adam beyond the request itself",
+        v.needsYou == core.mergeView(req("Fixes the alert loop."), rd, f, {}).needsYou)
+  local merged = req("Adds a regression test."); merged.phase = "merged"
+  check("a finished merge carries no claim check (there is no diff to read any more)",
+        core.mergeView(merged, nil, nil, {}).claims == nil)
+  -- a summary is the session's free text: it reaches the view capped, like the rest
+  local long = testsClaim(req("Adds a regression test " .. string.rep("x", 900) .. "."), facts(codeOnly))
+  check("the quoted claim is capped", #tostring(long.evidence) <= 300)
+  -- it runs every tick for every open request, on Hammerspoon's one thread (measured 0.6ms)
+  local many = {}
+  for i = 1, 199 do many[i] = { st = "M", path = "src/module-" .. i .. "/deeper/file-" .. i .. ".lua" } end
+  local wordy = req(string.rep("Reworks the alert loop and the panel wiring around it. ", 18), string.rep("x", 300))
+  local t0 = os.clock()
+  for _ = 1, 20 do core.mergeClaimCheck(wordy, facts(many)) end
+  local ms = (os.clock() - t0) * 1000 / 20
+  check(string.format("the claim check on a full-size request is cheap  (%.2fms, want < 20)", ms), ms < 20)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

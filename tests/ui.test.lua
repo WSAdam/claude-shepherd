@@ -3236,6 +3236,34 @@ do
         src:find("core.postMergeGateDue(r, FX._mergeGates)", 1, true) ~= nil)
 end
 
+-- ---- the merge review shows the claim check, and nothing else reads it (2026-09-18) ----
+-- core.mergeClaimCheck is a heuristic over the session's English: it WARNS in the review and
+-- gates nothing. Source pins: the block exists inside the scrolling body, renderMerge fills it
+-- with textContent, a flag is warn-coloured (never the danger red of a failed gate), and the
+-- Lua side -- readiness, the queue, the delegated batch merge -- never looks at it.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("the review has a block for the claim check, inside its scrolling body, under the gate",
+        (src:match('<div class="dm%-body">.-</div>%s*<div class="dm%-acts"') or ""):find('id="dm%-gate"></div>%s*<div class="dm%-claims" id="dm%-claims">') ~= nil)
+  local review = src:match("\n    function renderMerge%(it%)%{.-\n    %}\n") or ""
+  check("renderMerge fills it, with textContent (the evidence quotes the session's own words)",
+        review:find('getElementById("dm-claims")', 1, true) ~= nil and review:find("cEl.textContent", 1, true) ~= nil
+        and review:find("innerHTML", 1, true) == nil)
+  check("...and says it is a hint, so a flag is never read as a gate", review:find("a hint, not a gate", 1, true) ~= nil)
+  local css = src:match("#d%-merge %.dm%-claims%.c%-flagged %{(.-)%}") or ""
+  check("a flagged claim is warn-coloured, never the danger red of a failed gate",
+        css:find("var(--warn)", 1, true) ~= nil and css:find("--danger", 1, true) == nil)
+  local htmlFrom = src:find("local HTML = [[", 1, true) or 1
+  local _, htmlTo = src:find("\n]]\n", htmlFrom, true)
+  local luaSide = src:sub(1, htmlFrom - 1) .. src:sub(htmlTo or #src)
+  check("(control) the Lua on both sides of the panel HTML was found, and it does check readiness",
+        #luaSide > 1000 and luaSide:find("core.mergeReadiness(", 1, true) ~= nil)
+  check("WARN ONLY: no Lua wiring reads the claim check -- it can't hold a merge or a batch's delegated one",
+        luaSide:find("mergeClaimCheck", 1, true) == nil and luaSide:find("%.claims") == nil)
+end
+
 -- ---- answering questions in Shepherd: opt-in, and woken through the ask dir (2026-09-18) ----
 do
   local f = io.open(ROOT .. "claude-dashboard.lua", "r")

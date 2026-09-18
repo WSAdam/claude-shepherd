@@ -70,6 +70,10 @@ const review = { key: "k1", merge: {
   gate: { state: "failed", code: 2, command: "make lint && make test",
           tail: Array.from({ length: 15 }, (_, i) =>
             "FAIL - a fairly wordy behaviour-named check that failed on line " + (i + 1)).join("\n") },
+  // 2026-09-18: the claim check adds a block under the gate -- more height in the body, and the
+  // evidence quotes the session's own words, so it is also where markup would try to get in.
+  claims: [{ claim: "tests were added", verdict: "flagged",
+             evidence: "it says \"Each bug has a <img src=x onerror=window.__pwned=1> new fixture\", but no test or fixture path is among the 40 changed files" }],
 } };
 
 (async () => {
@@ -111,6 +115,41 @@ const review = { key: "k1", merge: {
     return !!b && !!b.querySelector("#dm-files") && !!b.querySelector("#dm-diff") && !b.querySelector("#dm-acts") && !b.querySelector("#dm-done");
   });
   check("the file list and the diff scroll with the body; the buttons rows sit outside it", inside);
+
+  // ---- the claim check (2026-09-18): shown, warn-coloured, inert, and it holds nothing ----
+  const claims = await page.evaluate(() => {
+    const el = document.getElementById("dm-claims");
+    if (!el) return null;
+    const cs = getComputedStyle(el);
+    const gate = getComputedStyle(document.getElementById("dm-gate"));
+    return { text: el.textContent, flagged: el.classList.contains("c-flagged"), color: cs.color, gateColor: gate.color,
+             kids: el.children.length, pwned: window.__pwned === 1,
+             inBody: !!document.querySelector("#d-merge .dm-body #dm-claims"),
+             mergeDisabled: document.getElementById("dm-merge").disabled };
+  });
+  check("the review shows the claim check", !!claims && claims.text.indexOf("tests were added") >= 0
+    && claims.text.indexOf("no test or fixture path") >= 0);
+  if (claims) {
+    check("...as a hint, in so many words", claims.text.indexOf("a hint, not a gate") >= 0);
+    check("...flagged in the warn colour, not the failed gate's red  (claims=" + claims.color + " gate=" + claims.gateColor + ")",
+      claims.flagged && claims.color !== claims.gateColor);
+    check("...the session's words arrive as text: no element was built from them, nothing ran", claims.kids === 0 && !claims.pwned);
+    check("...inside the scrolling body", claims.inBody);
+    check("WARN ONLY: a flagged claim leaves the Merge button enabled", claims.mergeDisabled === false);
+  }
+  const quiet = await page.evaluate((r) => {
+    const calm = JSON.parse(JSON.stringify(r));
+    calm.merge.claims = [{ claim: "tests were added", verdict: "couldntTell", evidence: "the summary makes no claim about tests (the diff touches 0 test paths)" }];
+    renderMerge(calm);
+    const el = document.getElementById("dm-claims");
+    const out = { unknown: el.textContent, unknownFlagged: el.classList.contains("c-flagged") };
+    delete calm.merge.claims;
+    renderMerge(calm);
+    out.none = el.textContent;
+    return out;
+  }, review);
+  check("no claim reads couldn't tell, unflagged", quiet.unknown.indexOf("couldn't tell") >= 0 && !quiet.unknownFlagged);
+  check("a review with no claim check at all (an older record) leaves the block empty", quiet.none === "");
 
   await browser.close();
   finish();

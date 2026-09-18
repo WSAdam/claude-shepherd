@@ -1849,6 +1849,9 @@ function M.parseMergeRequest(raw)
   }
 end
 
+-- The file list is cut here; the claim check (M.mergeClaimCheck) reads a full list as "cut".
+M.MERGE_FACTS_MAX_FILES = 200
+
 -- The one shell line that gathers everything the review and the readiness check need, in
 -- @@sections. Paths are quoted; refs were validated by parseMergeRequest.
 function M.mergeFactsCmd(req)
@@ -1867,7 +1870,7 @@ function M.mergeFactsCmd(req)
     "echo @@behind", G .. " rev-list --count " .. req.branch .. ".." .. req.base .. " 2>/dev/null",
     "echo @@commits", G .. " log --format='%h%x09%s' -n 50 " .. range .. " 2>/dev/null",
     "echo @@stat", G .. " diff --shortstat " .. dots .. " 2>/dev/null",
-    "echo @@files", G .. " diff --name-status " .. dots .. " 2>/dev/null | head -n 200",
+    "echo @@files", G .. " diff --name-status " .. dots .. " 2>/dev/null | head -n " .. M.MERGE_FACTS_MAX_FILES,
   }, "; ")
 end
 
@@ -2272,9 +2275,166 @@ function M.mergeView(req, rd, facts, q, gate)
                log = (type(gate.logPath) == "string" and gate.logPath ~= "") and gate.logPath or nil,
                why = (type(gate.why) == "string" and gate.why ~= "") and capChars(gate.why, 200) or nil }
   end
+  -- The claim check (2026-09-18): WARN ONLY. It rides beside the gate for the review to show
+  -- and is read by nothing else -- not readiness, not the card line, not "needs you".
+  if req.phase == "requested" then v.claims = M.mergeClaimCheck(req, facts) end
   v.line = M.mergeLine(v)
   v.needsYou = M.mergeNeedsYou(v)
   return v
+end
+
+-- ---- The claim check (2026-09-18) ---------------------------------------------------
+-- Shepherd runs the suite itself (the gate above); nothing checked whether what the session
+-- WROTE in its summary is true. This reads the session's free text against the diff's file
+-- list -- both already in hand at review time, no new git call. (The idea is Stirrup's
+-- validating finish tool, which won't let a run end until the files it claims exist.)
+--
+-- WARN ONLY, by Adam's call: a heuristic reading English WILL have false positives, and two
+-- false red gates taught him to distrust the panel. So the result rides on the review
+-- (mergeView's v.claims) and NEVER enters mergeReadiness' problems: Merge stays clickable and a
+-- delegated batch merge goes through regardless. It informs; it does not gate.
+--
+-- Tri-state like M.mergeGateOutcome: "ok" (the diff backs the claim up), "flagged" (it
+-- doesn't), "couldntTell" (no claim was made, or the diff can't settle it). No claim is
+-- couldn't-tell, never a failure.
+--
+-- The one claim read so far: "tests / fixtures were added" -> at least one test path among the
+-- added/changed files. What it deliberately does NOT try to detect:
+--   * that tests were RUN or are green ("make test: ALL GREEN", "119/119") -- the gate's job;
+--   * phrasing without a verb of adding next to the noun ("covered by", "each bug has a
+--     fixture", "test-first", "proven red") -- those read as no claim, i.e. couldn't tell;
+--   * "spec": in a rune project a spec is the product spec, not a test;
+--   * any clause with a negation in it ("no new tests were needed") -- skipped whole;
+--   * whether the named test file is the one that changed, or whether the test is any good;
+--   * anything not in English.
+M.CLAIM_OK, M.CLAIM_FLAGGED, M.CLAIM_UNKNOWN = "ok", "flagged", "couldntTell"
+M.CLAIM_TESTS_ADDED = "tests were added"
+M.CLAIM_QUOTE_CHARS = 120
+
+local TEST_DIRS = { test = true, tests = true, ["__tests__"] = true, fixture = true, fixtures = true,
+                    testdata = true, e2e = true, isolate = true }
+
+-- Is this path a test or a fixture? Conservative on the YES side: a directory that is only
+-- ever tests, or a basename in one of the usual test shapes. `spec/` is not one (rune).
+function M.isTestPath(path)
+  if type(path) ~= "string" or path == "" then return false end
+  local base = path:match("([^/]+)$") or path
+  local dirs = path:sub(1, #path - #base):lower()
+  for seg in dirs:gmatch("([^/]+)/") do
+    if TEST_DIRS[seg] then return true end
+  end
+  local lb = base:lower()
+  if lb:find(".test.", 1, true) or lb:find(".spec.", 1, true) or lb:find("_test.", 1, true)
+     or lb:find("_spec.", 1, true) or lb:find("-test.", 1, true) or lb:sub(1, 5) == "test_" then
+    return true
+  end
+  return base:find("%lTests?%.%w+$") ~= nil  -- FooTest.java, BarTests.cs (case matters: not attestation.go)
+end
+
+-- The path a changed file ends up at. parseMergeFacts joins a rename's two paths with " → "
+-- (and cuts R100 to "R"); " -> " is git's own spelling, accepted too. A plain find, last arrow wins.
+local function claimDestPath(p)
+  if type(p) ~= "string" then return "" end
+  for _, arrow in ipairs({ " → ", " -> " }) do
+    local at, from = nil, 1
+    while true do
+      local s, e = p:find(arrow, from, true)
+      if not s then break end
+      at, from = e, e + 1
+    end
+    if at then p = p:sub(at + 1) end
+  end
+  return p
+end
+
+local CLAIM_ADD = {}
+for w in ("add adds added adding write writes wrote written writing create creates created creating "
+       .. "ship ships shipped shipping include includes included including introduce introduces introduced"):gmatch("%a+") do
+  CLAIM_ADD[w] = true
+end
+local CLAIM_NOUN = { test = true, tests = true, fixture = true, fixtures = true }
+local CLAIM_NEG = { no = true, ["not"] = true, none = true, without = true, never = true, zero = true,
+                    nor = true, cannot = true }
+
+-- Does this one clause say tests were added? A verb of adding up to 4 words BEFORE the noun
+-- ("adds a failing regression test"), or up to 2 AFTER it ("fixtures were added"), or "new"
+-- up to 2 before it ("new regression tests"). Any negation in the clause -> no.
+local function clauseClaimsTests(clause)
+  local words = {}
+  for w in clause:lower():gmatch("[%a']+") do
+    if CLAIM_NEG[w] or w:sub(-3) == "n't" then return false end
+    words[#words + 1] = w
+  end
+  for j, w in ipairs(words) do
+    if CLAIM_NOUN[w] then
+      for i = math.max(1, j - 4), math.min(#words, j + 2) do
+        if i ~= j then
+          local v = words[i]
+          if CLAIM_ADD[v] then return true end
+          if v == "new" and i < j and j - i <= 2 then return true end
+        end
+      end
+    end
+  end
+  return false
+end
+
+-- The first clause of `text` that claims tests were added, trimmed; nil for none. Clauses end
+-- at a newline, ";" or ",", or at . ! ? followed by a space or the end -- so the dots inside
+-- tests/core.test.lua don't end one. A byte walk with plain finds (the text is capped anyway).
+local function testsAddedClaim(text)
+  if type(text) ~= "string" or text == "" then return nil end
+  local from, n = 1, #text
+  local function take(to)
+    local clause = text:sub(from, to):match("^%s*(.-)%s*$")
+    from = to + 1
+    return (clause ~= "" and clauseClaimsTests(clause)) and clause or nil
+  end
+  for i = 1, n do
+    local c = text:sub(i, i)
+    local nxt = text:sub(i + 1, i + 1)
+    local ends = (c == "\n" or c == ";" or c == ",")
+      or ((c == "." or c == "!" or c == "?") and (nxt == "" or nxt == " " or nxt == "\n" or nxt == "\t"))
+    if ends then
+      local hit = take(i)
+      if hit then return hit end
+    end
+  end
+  return take(n)
+end
+
+function M.mergeClaimCheck(req, facts)
+  req = type(req) == "table" and req or {}
+  local function one(verdict, evidence)
+    return { { claim = M.CLAIM_TESTS_ADDED, verdict = verdict, evidence = capChars(evidence, 300) } }
+  end
+  local quote = testsAddedClaim(req.summary) or testsAddedClaim(req.tests)
+  if type(facts) ~= "table" or type(facts.files) ~= "table" then
+    return one(M.CLAIM_UNKNOWN, "the diff isn't in yet")
+  end
+  local hits = {}
+  for _, f in ipairs(facts.files) do
+    if type(f) == "table" and f.st ~= "D" then
+      local p = claimDestPath(f.path)
+      if M.isTestPath(p) then hits[#hits + 1] = capChars(p, 80) end
+    end
+  end
+  if not quote then
+    return one(M.CLAIM_UNKNOWN, "the summary makes no claim about tests (the diff touches " .. #hits
+      .. " test path" .. (#hits == 1 and "" or "s") .. ")")
+  end
+  if #hits > 0 then
+    local shown = table.concat(hits, ", ", 1, math.min(3, #hits))
+    return one(M.CLAIM_OK, shown .. ((#hits > 3) and (" (+" .. (#hits - 3) .. " more)") or ""))
+  end
+  quote = capChars(quote, M.CLAIM_QUOTE_CHARS)
+  -- the file list is cut (mergeFactsCmd): a test path may sit past the cut, so nothing is proven
+  if #facts.files >= M.MERGE_FACTS_MAX_FILES then
+    return one(M.CLAIM_UNKNOWN, "it says \"" .. quote .. "\", and the file list is cut at "
+      .. M.MERGE_FACTS_MAX_FILES .. " -- a test path may be past the cut")
+  end
+  return one(M.CLAIM_FLAGGED, "it says \"" .. quote .. "\", but no test or fixture path is among the "
+    .. #facts.files .. " changed file" .. (#facts.files == 1 and "" or "s"))
 end
 
 -- ---- Batch driving (2026-09-11) ---------------------------------------------------

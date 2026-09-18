@@ -8461,6 +8461,9 @@ local HTML = [[
   #d-merge .dm-gate.g-failed { color:var(--danger); }
   #d-merge .dm-gate.g-timedOut { color:var(--warn); }
   #d-merge .dm-gate.g-passed { color:var(--ok); }
+  /* the claim check (2026-09-18) is a hint: muted, warn at most -- never the gate's red */
+  #d-merge .dm-claims { margin-top:4px; white-space:pre-wrap; font-size:11px; opacity:.8; }
+  #d-merge .dm-claims.c-flagged { color:var(--warn); opacity:1; }
   #d-merge .dm-problems { color:var(--warn); margin-top:4px; }
   #d-merge ul { margin:4px 0 0 16px; padding:0; max-height:120px; overflow:auto; }
   #d-merge .dm-files li { font-family:ui-monospace,Menlo,monospace; font-size:11px; }
@@ -9677,6 +9680,7 @@ local HTML = [[
         <div class="dm-sub" id="dm-sub"></div>
         <div class="dm-tests" id="dm-tests"></div>
         <div class="dm-gate" id="dm-gate"></div>
+        <div class="dm-claims" id="dm-claims"></div>
         <div class="dm-problems" id="dm-problems"></div>
         <ul class="dm-commits" id="dm-commits"></ul>
         <ul class="dm-files" id="dm-files"></ul>
@@ -13651,6 +13655,20 @@ local HTML = [[
           + (gt.log ? "\nfull log: " + gt.log : "")
           + (gt.tail ? "\n--- last lines ---\n" + gt.tail : "");
       }
+      // 2026-09-18: the claim check (core.mergeClaimCheck) reads the session's summary against
+      // the diff. It is a heuristic over English, so it WARNS here and gates nothing: the Merge
+      // button below never looks at it.
+      var cEl = document.getElementById("dm-claims");
+      var cl = (asking && Array.isArray(m.claims)) ? m.claims : [];
+      var cLines = [], cFlag = false;
+      for(var ci=0; ci<cl.length; ci++){
+        var c = cl[ci] || {};
+        if(c.verdict === "flagged"){ cFlag = true; cLines.push("Claim check (a hint, not a gate): ⚠ it says " + (c.claim || "") + " — " + (c.evidence || "")); }
+        else if(c.verdict === "ok"){ cLines.push("Claim check (a hint, not a gate): ✓ " + (c.claim || "") + " — " + (c.evidence || "")); }
+        else { cLines.push("Claim check (a hint, not a gate): couldn't tell — " + (c.evidence || "")); }
+      }
+      cEl.className = "dm-claims" + (cFlag ? " c-flagged" : "");
+      cEl.textContent = cLines.join("\n");
       var probs = Array.isArray(m.problems) ? m.problems : [];
       document.getElementById("dm-problems").textContent = (asking && probs.length) ? "Not ready: " + probs.join("; ") : "";
       var commits = Array.isArray(m.commits) ? m.commits : [];

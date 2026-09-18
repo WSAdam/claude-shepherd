@@ -246,6 +246,18 @@ run the script there — so fenced tabs ask from outside and step back in to reb
   `policies.attachments` (project / group / key globs, first entry wins, an absent field is a
   wildcard; `project` is the session's project key). With no `gates` listed nothing runs and the
   flow is exactly as it was.
+- **The claim check — a hint, never a gate.** The gate proves the suite is green; it doesn't prove
+  what the session *wrote* is true. The review reads the summary and the tests line against the
+  changed files it already has (no extra git call): a summary that says tests or fixtures were
+  **added** should come with at least one test path among the added or changed files (a `tests/`,
+  `__tests__/`, `fixtures/`, `e2e/` or `isolate/` folder, or a `*.test.*` / `*_test.*` /
+  `test_*` / `*.spec.*` file; a rename counts by where it ends up, a deletion doesn't). It answers
+  one of three ways — *ok* with the paths, *flagged* with the sentence it read and the file count,
+  or *couldn't tell* when no such claim was made, the diff isn't in yet, or the file list was cut
+  at 200. It reads English with a small, conservative matcher (a verb of adding next to
+  "test"/"fixture"; any negated clause is skipped; "tests green" is the gate's business, not a
+  claim), so it **warns in the review and holds nothing**: Merge stays clickable and a batch
+  unit's delegated merge goes through with a flag up.
 - **Merge** tells the waiting session to go: rebase on main (conflicts settled by the tests —
   both sides' tests must pass, or it stops and reports *blocked*), run the suite, `ExitWorktree`,
   `git merge --ff-only` in the main checkout, run the suite on main, then
