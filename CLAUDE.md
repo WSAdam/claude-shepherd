@@ -134,6 +134,13 @@ and the README's "Testing & development" section.
   ran every tick per finished merge whose tab stayed open, freezing the WHOLE panel (tick
   544ms avg / 942ms max). A plain `find`-based line walk is 0.016ms for the same result.
   Walk lines with `find`, never a `*`-quantified pattern, over anything that can end mid-line.
+- An interrupted turn fires no Stop hook, so the status file stays `working` for good. Status
+  files are written on hook EVENTS only -- there is no per-session heartbeat (`.panel-alive` is
+  the panel's own) -- so quiet is never proof a session is finished, and staleness alone cannot
+  tell a 15-minute build from an orphan. Before acting on a `working` session, require the
+  transcript's interrupt marker (`core.transcriptInterrupted`), not its age. Adam's Voice-Agent
+  card read "2h Working" for a process interrupted at 13:20:32, outranking the session he was
+  actually using.
 - Hammerspoon is single-threaded: any synchronous `hs.execute` stalls the entire panel, and
   there are ~35 of them. Before blaming a feature for "freezing", TIME THE TICK in the live
   VM -- the offender may be nowhere near the thing you were using when you noticed.
