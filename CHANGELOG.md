@@ -4,6 +4,108 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-18 — The panel was freezing, and it was not the feature anyone suspected
+
+### Fixed — a quadratic transcript parse stalled the whole panel
+
+Answering a question on a card felt so bad that removing the feature was on the table. Measuring
+the running VM found the cause somewhere else entirely: `core.firstPromptFromTranscript` matched
+whole lines with `("([^\n]*)\n")`, which backtracks quadratically over the torn last line of its
+fixed-size 16KB read — 4KB 65ms, 8KB 264ms, **16KB 1018ms**. It ran uncached every tick for each
+finished merge whose tab stayed open, and every 30s per VS Code session. The refresh tick was
+**544ms average, 942ms peak**, with 475ms of it in `FX.annotateMerges`. The whole panel froze;
+questions were simply what you happened to be doing when you noticed.
+
+The pattern came from f1252be, itself a fix — for LuaSkin logging JSON errors on torn lines. A
+plain `find`-based line walk gives identical results in **0.016ms**. Tick is now **70ms average**
+and `annotateMerges` **8.2ms**.
+
+- **Questions arrive in ~20ms instead of ~830ms.** FSEvents defers events in a directory written
+  constantly, and the heartbeat makes the status dir exactly that (12–1443ms to deliver). The hook
+  now touches a quiet `cc-ask/.poke` once its question is published, and Shepherd watches that.
+- **Click-to-resume 226ms → ~99ms**, with the hook poll at 0.1s on a real deadline and the let-go
+  a single write.
+- **Options are readable.** Each option's `description` was only a `title` tooltip, so you chose
+  blind between labels. It is wrapped text under the label now — the actual reason answering in
+  Shepherd had been worse than answering in the tab.
+
+### Changed — answering in Shepherd is on by default, with a switch
+
+It was made opt-in while the above was unexplained, then put back on once it was fixed: the
+reasons to avoid it were gone. **⚙ Settings → Approvals → "Answer questions in Shepherd"** stays,
+so it can be turned off without editing JSON. The hook and the Settings form are pinned to the
+same default, so opening Settings and pressing Save cannot silently flip it.
+
+### Changed — the model controls are opt-in, and off by default
+
+Every detail panel carried Effort, Mode, Model, Gate, Policy and Auto-model whether or not anyone
+used them. They now live behind **⚙ Settings → Appearance → "Model controls"**, default off.
+Hidden is the CSS default, so the conditional rule is the one that *shows* the row, and the boot
+class list is seeded from the saved setting so it cannot flash on open. Deliberately not a theme
+attribute: importing someone else's palette must not change which controls you see.
+
+### Known — the tick is fast, not clean
+
+28 of 473 ticks still exceed 200ms, from unrelated work: `command -v kitty` through the login
+shell (649ms avg) and `sessionTabCandidates` (a sync grep plus a 128KB tail parse, max 307ms).
+
+## 2026-09-17 — Shepherd runs the test gate itself
+
+### Added — the merge review stops taking the session's word for the tests
+
+Every other fact in a merge review was checked with Shepherd's own git; the test result was free
+text the session typed into `cc-merge.sh --tests`. Now, with a gate configured, Shepherd runs the
+project's own suite in the unit's worktree before the request is ready, and again in the main
+checkout after the merge.
+
+- `merge.gates` — `{ match: { project: "<glob>" }, command: "make lint && make test",
+  timeoutSeconds: 900 }`, matched like `policies.attachments`, first entry wins. **With no gate
+  listed nothing runs and the flow is exactly as before.**
+- While it runs the card says *checking*; a red or timed-out run blocks Merge (and a batch unit's
+  merge on your grant) and the review shows the command, the exit code and the failing lines from
+  the log, with the full log's path. The session's own test line stays, labelled advisory.
+- A red gate on `main` after a merge keeps the unit's tab open and says so.
+- One gate per repo at a time; a gate only runs post-merge for a request whose own pre-merge gate
+  ran; "couldn't run" (lock held, worktree gone, command missing) is distinguished from "failed",
+  is not red, and retries after 90s. `tests/run.sh` takes a per-checkout lock and refuses a second
+  run — the suite is not concurrency-safe in one checkout, and a hand-run must not wedge a gate.
+
+## 2026-09-17 — The suite runs on Linux, and CI runs the suite
+
+### Added — GitHub Actions on push and pull request
+
+`make lint` + `make test` on `ubuntu-latest`. No LLM anywhere in it. Running the suite on another
+platform for the first time found more than it cost:
+
+- **A production bug.** `stat -f %m f || stat -c %Y f` was a "BSD first, GNU second" probe — but on
+  GNU coreutils `-f` means *filesystem* status and **succeeds**, so the fallback never ran and the
+  mtime was a mount point. In `cc-approve.sh` that judged every legacy pre-nonce decision stale and
+  silently discarded the click. Flipped to GNU-first: BSD `stat` rejects `-c` outright.
+- **Five assertions that proved nothing.** Tests faked "tool is missing" with
+  `PATH="$STUBS:/usr/bin:/bin"` on the premise that lua and node are never system tools — true on
+  macOS with Homebrew, false on Linux, where apt puts them in `/usr/bin`. They had been passing for
+  the wrong reason, and one then reached the real `make test` from inside the suite and recursed.
+  `sysbin_without` in `tests/lib.sh` makes "absent" mean absent on both.
+- **~15 minutes of dead wait per run, on every platform.** The `make reload` fake `hs` was
+  `#!/bin/sh` + `sleep 300` with no `exec`, so the kill hit the wrapper and orphaned the sleep;
+  the test captured output with `$( )`, which stays open until every descendant closes the write
+  end. Three copies run per `make test`. **8m36s → 2m07s on macOS.**
+
+## 2026-09-17 — The shipped settings deny the secrets paths
+
+### Added — deny-by-design in the defaults
+
+`defaults/claude-settings.json` ships `permissions.deny` for `git add -f`, `git add --force` and
+writing any `.env.example` / `.env.sample` / `.env.template`. The global CLAUDE.md stated these
+rules in prose; nothing enforced them.
+
+### Fixed — a user's own deny list was being shadowed
+
+`install.sh` merged the defaults with `reduce ($d | paths(scalars))`, which for an array is
+**positional**: a user with their own `permissions.deny[0]` kept theirs and never received ours,
+and an overlapping rule produced a duplicate. `permissions.deny` is now a union — every entry the
+user has is kept, in place, and ours are appended only where absent.
+
 ## 2026-09-17 — "Needs you" only when you can actually do something
 
 ### Fixed — two cards pulsed red for hours over merges that were already done

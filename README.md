@@ -460,6 +460,10 @@ The detail panel has:
   suggest where applicable — *not* wholesale edits), so you approve a plan before any
   changes. Shows "No improvements found" when the latest push's insights are already
   claimed. Needs `LB_URL` / `GRADE_PREVIEW_TOKEN` in your shell (`~/.zshrc`).
+The next six — Effort, Mode, Model, Gate, Policy and Auto-model — are **hidden unless you turn
+them on** in ⚙ Settings → Appearance → **"Model controls"** (off by default). They stay available
+for anyone who uses them, without every panel carrying six controls you never touch.
+
 - **Effort** dropdown — set the session's reasoning effort (Low/Medium/High/XHigh) live; sends
   the `/effort <level>` slash command.
 - **Mode** dropdown — switch the permission mode (Default / Accept edits / Plan) live via

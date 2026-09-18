@@ -128,6 +128,18 @@ and the README's "Testing & development" section.
   window match re-checked right before the URI goes out; never follow it with a keystroke.
 - When live behaviour contradicts the code, dump the running state with `hs -c` before
   theorising (and compare the Hammerspoon process start time with the deployed files).
+- A whole-lines Lua pattern over a FIXED-SIZE read backtracks quadratically on the torn last
+  line. `("([^\n]*)\n")` in `core.firstPromptFromTranscript` (f1252be, itself a fix for JSON
+  spam on torn lines) cost 201ms on one 16KB head -- 4KB 65ms, 8KB 264ms, 16KB 1018ms -- and
+  ran every tick per finished merge whose tab stayed open, freezing the WHOLE panel (tick
+  544ms avg / 942ms max). A plain `find`-based line walk is 0.016ms for the same result.
+  Walk lines with `find`, never a `*`-quantified pattern, over anything that can end mid-line.
+- Hammerspoon is single-threaded: any synchronous `hs.execute` stalls the entire panel, and
+  there are ~35 of them. Before blaming a feature for "freezing", TIME THE TICK in the live
+  VM -- the offender may be nowhere near the thing you were using when you noticed.
+- FSEvents defers events in a directory that is written constantly. The status dir gets a
+  heartbeat every second, so a watcher on it delivered in 12-1443ms; a quiet directory
+  delivers in ~11ms. Signal through a quiet dir (`cc-ask/.poke`), not a busy one.
 
 ## Tests
 
