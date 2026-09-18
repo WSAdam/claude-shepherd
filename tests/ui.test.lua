@@ -3292,5 +3292,47 @@ do
         src:find("b.title = (o && o.description)", 1, true) == nil)
 end
 
+-- ---- a denial carries Adam's reason back to the session (2026-09-18) ----
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  local _, inputs = src:gsub('id="deny%-note"', "")
+  eq("deny note: the input is declared once, in the skeleton (never rebuilt by a render)", inputs, 1)
+  check("deny note: it sits right after the Deny button, capped at core.DENY_NOTE_MAX",
+        src:find('<button id="b-deny"    onclick="act(\'deny\')">Deny</button>\n      <input id="deny-note" maxlength="500"', 1, true) ~= nil
+        and core.DENY_NOTE_MAX == 500)
+  local actBody = src:match("\n    function act%(a%)%{(.-)\n    %}") or ""
+  check("deny note: act('deny') sends the input's text with the deny",
+        actBody:find('if(a === "deny" && dn){ send(a, selectedKey, dn.value || ""); dn.value = ""; return; }', 1, true) ~= nil)
+  check("deny note: every other action still goes out bare", actBody:find("send(a, selectedKey);", 1, true) ~= nil)
+  check("deny note: Enter in the input denies with that reason",
+        src:find("function onDenyNoteKey(e){", 1, true) ~= nil
+        and src:find('onkeydown="onDenyNoteKey(event)"', 1, true) ~= nil)
+  check("deny note: the input shows only while a LOCAL gate is waiting (the one path that can carry it)",
+        src:find('dnote.style.display = (gateWait && !remote) ? "" : "none";', 1, true) ~= nil)
+  check("deny note: a note typed for one session never follows the selection to another",
+        src:find('var dnSel = document.getElementById("deny-note"); if(dnSel) dnSel.value = "";', 1, true) ~= nil)
+
+  -- FX: the sidecar lands BEFORE the decision, atomically, and only for a deny
+  local wp = src:find("function FX.writeDecision(key, value, note)", 1, true)
+  check("deny note: FX.writeDecision takes the note", wp ~= nil)
+  local wbody = wp and src:sub(wp, (src:find("\nend\n", wp, true) or wp)) or ""
+  local sidecarAt = wbody:find("core.decisionNoteContent(note, statusText)", 1, true)
+  local decisionAt = wbody:find("os.rename(tmp, path)", 1, true)
+  check("deny note: the sidecar is written before the decision file it belongs to",
+        sidecarAt ~= nil and decisionAt ~= nil and sidecarAt < decisionAt)
+  check("deny note: the sidecar is temp+rename like the decision",
+        wbody:find('os.rename(noteTmp, path .. ".note")', 1, true) ~= nil)
+  check("deny note: only a deny writes one", wbody:find('value == "deny"', 1, true) ~= nil)
+  check("deny note: a remote deny drops the note and says so",
+        wbody:find("[cc-bridge] deny note dropped", 1, true) ~= nil)
+  local rp = src:find("function FX.removeStatus(key)", 1, true)
+  local rbody = rp and src:sub(rp, rp + 1800) or ""
+  check("deny note: FX.removeStatus drops the sidecar (cc_remove's twin)",
+        rbody:find('key .. ".decision.note")', 1, true) ~= nil
+        and rbody:find('key .. ".decision.note.tmp."', 1, true) ~= nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

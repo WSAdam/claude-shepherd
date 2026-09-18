@@ -16,8 +16,8 @@ local function newRecorder()
   local r = { calls = {}, _now = 1000, _geometry = nil, _imagePath = "/tmp/cc-img-test.png",
               _pasteResult = nil, _sendKeysResult = nil, _typeResult = nil }
 
-  local function rec(op, a, b)
-    r.calls[#r.calls + 1] = { op = op, a = a, b = b }
+  local function rec(op, a, b, c)
+    r.calls[#r.calls + 1] = { op = op, a = a, b = b, c = c }
   end
   -- Window effects now receive a target TABLE {name,cwd,editor,kittyWindowId,
   -- kittyListenOn} (Part A). Surface target.name as `.a` so existing name
@@ -41,7 +41,7 @@ local function newRecorder()
     saveGeometry    = function(frame) rec("saveGeometry", frame) end,
     loadGeometry    = function() rec("loadGeometry"); return r._geometry end,
     writeImageTemp  = function(b64) rec("writeImageTemp", b64); return r._imagePath end,
-    writeDecision   = function(key, value) rec("writeDecision", key, value) end,
+    writeDecision   = function(key, value, note) rec("writeDecision", key, value, note) end,
     answerAsk       = function(key, payload) rec("answerAsk", key, payload); return true end,
     spawnSession    = function(editor, project, task) rec("spawnSession", editor, { project = project, task = task }) end,
     readDir         = function() return {} end,

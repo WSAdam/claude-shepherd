@@ -10,6 +10,7 @@
 # State layout (all under CC_DIR):
 #   <key>.json       one file per session (key = sanitized session_id)
 #   <key>.decision   panel writes "allow"/"deny" here to answer the gate
+#   <key>.decision.note   the reason typed beside Deny, {"nonce","note"} (written first)
 #   .panel-alive     panel heartbeat (epoch seconds); gate only blocks if fresh
 #
 # Everything here logs to stderr only — stdout is reserved for hook decisions.
@@ -327,6 +328,7 @@ CC_ASK_DIR="${CC_ASK_DIR:-${HOME}/.claude/cc-ask}"
 # new key, so this just stops orphans accumulating).
 cc_remove() {
   rm -f "$(cc_file "$1")" "$(cc_decision_file "$1")" "$(cc_decision_file "$1")".claim.* \
+    "$(cc_decision_file "$1")".note "$(cc_decision_file "$1")".note.tmp.* \
     "$CC_GATE_TOOLS_DIR/$1" "$CC_APPROVED_DIR/$1" "$CC_AUTOPILOT_DIR/$1" \
     "$CC_POLICY_DIR/$1" "$CC_POLICY_OVERRIDE_DIR/$1" "$CC_AUTOMODEL_DIR/$1" \
     "$CC_MERGE_DIR/$1.json" "$CC_MERGE_DIR/$1.decision" "$CC_MERGE_DIR/$1.decision".claim.* \

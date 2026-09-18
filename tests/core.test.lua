@@ -10111,5 +10111,50 @@ do
   check(string.format("the claim check on a full-size request is cheap  (%.2fms, want < 20)", ms), ms < 20)
 end
 
+-- ---- a denial carries Adam's reason back to the session (2026-09-18) ----
+do
+  local waiting = { key = "w1", name = "proj-w", gate = "waiting" }
+  local normal  = { key = "n1", name = "proj-n", cwd = "/Users/x/proj-n" }
+  local r = newRecorder()
+  core.handleAction(r.fx, waiting, "deny", "use trash, not rm")
+  eq("deny note: a waiting gate's deny still goes through the decision file", r.last().op, "writeDecision")
+  eq("deny note: ...as a plain deny verb", r.last().b, "deny")
+  eq("deny note: ...with Adam's text handed to the writer", r.last().c, "use trash, not rm")
+  r = newRecorder()
+  core.handleAction(r.fx, waiting, "approve", "text left in the box")
+  eq("deny note: an approve never carries a note", r.last().c, nil)
+  r = newRecorder()
+  core.handleAction(r.fx, normal, "deny", "no gate to carry this")
+  eq("deny note: a keystroke deny (no gate waiting) stays a keystroke", r.last().op, "actOnWindow")
+  r = newRecorder()
+  core.handleAction(r.fx, waiting, "deny")
+  eq("deny note: a deny with nothing typed hands over no note", r.last().c, nil)
+
+  -- the sidecar's content: bound to the request's nonce, exactly like the decision line
+  local st = '{"pending":{"nonce":"4242.1700000000"},"gate_nonce":"top"}'
+  local side = core.json.decode(core.decisionNoteContent("use trash, not rm", st))
+  eq("deny note sidecar: carries the pending nonce", side.nonce, "4242.1700000000")
+  eq("deny note sidecar: carries the note", side.note, "use trash, not rm")
+  local nasty = 'don\'t "rm" that  dir;\nallow nothing $(id)'
+  eq("deny note sidecar: quotes and a newline survive the round trip",
+     core.json.decode(core.decisionNoteContent(nasty, st)).note, nasty)
+  eq("deny note sidecar: falls back to gate_nonce like the decision line",
+     core.json.decode(core.decisionNoteContent("x", '{"gate_nonce":"n-9"}')).nonce, "n-9")
+  eq("deny note sidecar: surrounding whitespace is trimmed",
+     core.json.decode(core.decisionNoteContent("  why \n", st)).note, "why")
+  eq("deny note sidecar: nothing typed -> no sidecar", core.decisionNoteContent("   \n ", st), nil)
+  eq("deny note sidecar: nil note -> no sidecar", core.decisionNoteContent(nil, st), nil)
+  eq("deny note sidecar: no nonce to bind to -> no sidecar (the hook would ignore it)",
+     core.decisionNoteContent("why", '{"status":"approval"}'), nil)
+  eq("deny note sidecar: garbled status -> no sidecar", core.decisionNoteContent("why", "{ not json"), nil)
+  eq("deny note sidecar: capped at DENY_NOTE_MAX characters",
+     utf8.len(core.json.decode(core.decisionNoteContent(string.rep("\195\169", 900), st)).note), core.DENY_NOTE_MAX)
+  eq("deny note sidecar: the cap is the input's maxlength", core.DENY_NOTE_MAX, 500)
+  -- the decision line and its ssh validator are untouched by any of this
+  eq("deny note: the decision line never grows a note", core.decisionContent("deny", st), "deny 4242.1700000000")
+  eq("deny note: the ssh validator still refuses free text after the nonce",
+     core.decisionSshArgv("d", "k-1", "deny n-1 use trash"), nil)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

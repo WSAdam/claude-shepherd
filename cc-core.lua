@@ -200,9 +200,13 @@ end
 -- waiting, but a non-waiting remote tile must fail closed -- never fall through to
 -- actOnWindow, which would focus a LOCAL window matching the remote name and press a
 -- key. Returns true when it acted (caller keeps the action) or nil to bail (no ledger).
-local function gatedDecision(fx, item, tgt, verb, keyConst)
+-- `note` (2026-09-18): the reason Adam typed beside Deny. It only ever travels with a
+-- headless deny -- the writer puts it in a sidecar next to the decision file
+-- (M.decisionNoteContent), never in the decision line. A keystroke deny has no channel
+-- for it (Claude Code's own prompt takes Escape, not text), so it is dropped there.
+local function gatedDecision(fx, item, tgt, verb, keyConst, note)
   if item.gate == "waiting" then
-    fx.writeDecision(item.key, verb)  -- headless: write "allow"/"deny <nonce>"
+    fx.writeDecision(item.key, verb, note)  -- headless: write "allow"/"deny <nonce>"
     return true
   elseif item.remote then
     return nil                        -- remote + not waiting: never touch a local window
@@ -308,7 +312,8 @@ function M.handleAction(fx, item, action, text)
     -- via remoteActionAllowed the way the webview/bulk paths do).
     if not gatedDecision(fx, item, tgt, "allow", M.KEY_APPROVE) then return nil end
   elseif action == "deny" then
-    if not gatedDecision(fx, item, tgt, "deny", M.KEY_DENY) then return nil end
+    local note = (type(text) == "string" and text:match("%S")) and text or nil
+    if not gatedDecision(fx, item, tgt, "deny", M.KEY_DENY, note) then return nil end
   elseif action == "stop" then
     fx.actOnWindow(tgt, M.KEY_STOP)
   elseif action == "nudge" then
@@ -7016,7 +7021,7 @@ end
 -- and the REMOTE ssh write share one implementation: garbled/missing JSON
 -- degrades to the bare verb (cc-approve.sh accepts both; a mismatched nonce is
 -- ignored there, so the worst case is a no-op).
-function M.decisionContent(value, statusText)
+local function decisionNonce(statusText)
   local nonce
   pcall(function()
     local st = M.json.decode(tostring(statusText or ""))
@@ -7031,7 +7036,30 @@ function M.decisionContent(value, statusText)
       nonce = st.gate_nonce
     end
   end)
+  return nonce
+end
+
+function M.decisionContent(value, statusText)
+  local nonce = decisionNonce(statusText)
   return nonce and (tostring(value) .. " " .. nonce) or tostring(value)
+end
+
+-- The deny-note sidecar (2026-09-18): the reason Adam typed beside Deny, for
+-- <key>.decision.note. The decision line above is a bare "<verb> <nonce>" that
+-- cc-approve.sh reads with `read -r` and decisionSshArgv hard-validates, so free text
+-- never goes in it; the note rides beside it as JSON {nonce, note}, bound to the SAME
+-- nonce (the hook ignores a note whose nonce isn't its own). nil = write no sidecar:
+-- nothing typed, or no nonce to bind to (a bare legacy decision can't prove the note
+-- belongs to its request). Trimmed and capped like the input it comes from.
+M.DENY_NOTE_MAX = 500
+function M.decisionNoteContent(note, statusText)
+  if type(note) ~= "string" then return nil end
+  local trimmed = note:match("^%s*(.-)%s*$")
+  if trimmed == "" then return nil end
+  local nonce = decisionNonce(statusText)
+  if not nonce then return nil end
+  local ok, out = pcall(M.json.encode, { nonce = nonce, note = M.capChars(trimmed, M.DENY_NOTE_MAX) })
+  return ok and out or nil
 end
 
 -- argv for routing a decision back to the remote box. The remote write keeps

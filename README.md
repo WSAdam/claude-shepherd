@@ -568,6 +568,13 @@ Two paths, and it matters which one your sessions use:
    Approve/Deny write a decision file the hook honors — **no window focus, no
    keystrokes** — while Claude still can't run a gated tool until you decide. Works
    for terminal *and* VS Code-extension sessions. See "Headless approvals" below.
+   While a request is waiting, a **Why?** box sits beside Deny: whatever you type goes
+   back with the refusal (*"Denied from the Claude Shepherd panel: use trash, not rm"*),
+   so the session learns why and changes course instead of just failing. Optional, 500
+   characters, Enter denies with it. It travels in a sidecar file
+   (`<session_id>.decision.note`, bound to the same request nonce as the decision),
+   never in the decision line itself; the audit ledger records it as the decision's
+   `reason`. A remote (SSH bridge) tile has no such box — a remote deny carries no note.
 
 2. **Per-session effects.** Jump, Stop, Nudge/Feed, Clear/Compact, answer, mode-switch.
    On **Kitty** these run headlessly via `kitty @` (no window focus). On **VS Code /
@@ -1158,8 +1165,9 @@ A provider can carry `ssh: {"host": "devbox", "user": "adam"}` — its sessions 
 bridge** enabled, Shepherd also rsync-pulls each such host's remote `~/.claude/cc-status/`
 (every `bridge.intervalSeconds`, key-based auth required) so those remote sessions render
 as **⇄ tiles** with live status. Remote tiles are **headless-only**: Approve/Deny route
-back over ssh as nonce-bound decision files; keystroke actions (nudge/stop/clear/…) are
-disabled. Remote staleness gets `bridge.staleSlackSeconds` of slack for sync lag, and a
+back over ssh as nonce-bound decision files (the verb and nonce only — a deny's typed
+reason is local-only and is dropped for a remote tile); keystroke actions
+(nudge/stop/clear/…) are disabled. Remote staleness gets `bridge.staleSlackSeconds` of slack for sync lag, and a
 stalled sync shows "bridge offline" on the tile. The remote box needs this repo's
 `make install` run on it. Off by default, and not yet verified on real hardware.
 

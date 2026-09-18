@@ -792,4 +792,127 @@ answer ra1 allow; wait $bg
 assert_eq "#28-pin: the re-armed request is panel-answerable" \
   "allow" "$(jq -r '.hookSpecificOutput.permissionDecision' "$TMP/out_ra1" 2>/dev/null)"
 
+# ---- a denial carries Adam's reason back to the session (2026-09-18) ----
+# The note never rides the decision line (a bare "<verb> <nonce>", read with
+# `read -r VERB RNONCE _` and hard-validated for the ssh path): it travels in a
+# sidecar, <key>.decision.note = {"nonce":..,"note":..}, written BEFORE the
+# decision exactly like FX.writeDecision does, and bound to the same nonce.
+DEFAULT_DENY="Denied from the Claude Shepherd panel."
+start_gated() { # $1 = session id, $2 = out file [, extra env assignments via env]
+  date +%s > "$HB"
+  ( printf '%s' "{\"session_id\":\"$1\",\"cwd\":\"/x/p\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"rm -rf build\"}}" \
+      | CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=5 \
+      bash "$APP" > "$2" 2>/dev/null ) &
+  bg=$!
+  wait_block "$TMP/$1.json"
+}
+wait_nonce() { # $1 = key -> prints the published request nonce
+  local n="" i=0
+  while [ "$i" -lt 100 ]; do
+    n="$(jq -r '.pending.nonce // empty' "$TMP/$1.json" 2>/dev/null)"
+    [ -n "$n" ] && break
+    sleep 0.05; i=$((i+1))
+  done
+  printf '%s' "$n"
+}
+deny_with_note() { # $1 = key, $2 = note, $3 = nonce for the SIDECAR (default: the real one)
+  local n; n="$(wait_nonce "$1")"
+  jq -nc --arg nonce "${3:-$n}" --arg note "$2" '{nonce:$nonce, note:$note}' > "$TMP/$1.decision.note.tmp.$$"
+  mv "$TMP/$1.decision.note.tmp.$$" "$TMP/$1.decision.note"
+  printf 'deny %s' "$n" > "$TMP/$1.decision.tmp.$$"
+  mv "$TMP/$1.decision.tmp.$$" "$TMP/$1.decision"
+}
+
+# a note reaches permissionDecisionReason
+start_gated dn1 "$TMP/out_dn1"
+deny_with_note dn1 "use trash, not rm"
+wait $bg
+assert_eq "deny note: the session is still denied" \
+  "deny" "$(jq -r '.hookSpecificOutput.permissionDecision' "$TMP/out_dn1" 2>/dev/null)"
+assert_eq "deny note: Adam's reason reaches permissionDecisionReason" \
+  "Denied from the Claude Shepherd panel: use trash, not rm" \
+  "$(jq -r '.hookSpecificOutput.permissionDecisionReason' "$TMP/out_dn1" 2>/dev/null)"
+# the sidecar is gone after the decision is claimed
+assert_absent "deny note: the sidecar is gone once the decision is claimed" "$TMP/dn1.decision.note"
+
+# no note keeps the current string byte-for-byte
+start_gated dn2 "$TMP/out_dn2"
+answer dn2 deny
+wait $bg
+assert_eq "deny with no note keeps today's reason byte-for-byte" \
+  "$DEFAULT_DENY" "$(jq -r '.hookSpecificOutput.permissionDecisionReason' "$TMP/out_dn2" 2>/dev/null)"
+
+# spaces, quotes and a newline never corrupt the decision line or the nonce match
+NASTY="$(printf 'don'\''t "rm" that  dir;\nallow nothing $(id) `id`')"
+start_gated dn3 "$TMP/out_dn3"
+deny_with_note dn3 "$NASTY"
+wait $bg
+assert_eq "deny note with quotes+newline: still one valid deny JSON" \
+  "deny" "$(jq -r '.hookSpecificOutput.permissionDecision' "$TMP/out_dn3" 2>/dev/null)"
+assert_eq "deny note with quotes+newline: arrives verbatim" \
+  "Denied from the Claude Shepherd panel: $NASTY" \
+  "$(jq -r '.hookSpecificOutput.permissionDecisionReason' "$TMP/out_dn3" 2>/dev/null)"
+
+# the contract across the language line: the sidecar the PANEL's own encoder produces
+# (core.decisionNoteContent, from the live status file) is the one the hook reads
+start_gated dn9 "$TMP/out_dn9"
+wait_nonce dn9 >/dev/null
+NOTE_IN="$NASTY" NOTE_ROOT="$ROOT" NOTE_STATUS="$TMP/dn9.json" NOTE_OUT="$TMP/dn9.decision.note" lua -e '
+  local root, status, out = os.getenv("NOTE_ROOT"), os.getenv("NOTE_STATUS"), os.getenv("NOTE_OUT")
+  local core = dofile(root .. "/cc-core.lua"); core.json = dofile(root .. "/tests/support/json.lua")
+  local f = io.open(status, "r"); local text = f:read("*a"); f:close()
+  local o = io.open(out, "w"); o:write(core.decisionNoteContent(os.getenv("NOTE_IN"), text)); o:close()
+'
+answer dn9 deny
+wait $bg
+assert_eq "deny note: the panel encoder's sidecar is read verbatim by the hook" \
+  "Denied from the Claude Shepherd panel: $NASTY" \
+  "$(jq -r '.hookSpecificOutput.permissionDecisionReason' "$TMP/out_dn9" 2>/dev/null)"
+
+# a note whose nonce does not match is ignored (a leftover from another request)
+start_gated dn4 "$TMP/out_dn4"
+deny_with_note dn4 "meant for some other request" "999.1"
+wait $bg
+assert_eq "deny note bound to another nonce is ignored" \
+  "$DEFAULT_DENY" "$(jq -r '.hookSpecificOutput.permissionDecisionReason' "$TMP/out_dn4" 2>/dev/null)"
+assert_eq "deny note bound to another nonce is left for its owner" "999.1" \
+  "$(jq -r '.nonce' "$TMP/dn4.decision.note" 2>/dev/null)"
+
+# a garbled sidecar never blocks the deny
+start_gated dn5 "$TMP/out_dn5"
+printf 'not json {{{' > "$TMP/dn5.decision.note"
+answer dn5 deny
+wait $bg
+assert_eq "garbled deny note: the deny still lands with the default reason" \
+  "$DEFAULT_DENY" "$(jq -r '.hookSpecificOutput.permissionDecisionReason' "$TMP/out_dn5" 2>/dev/null)"
+
+# an ALLOW never picks a note up, and still clears the one bound to it
+start_gated dn6 "$TMP/out_dn6"
+n6="$(wait_nonce dn6)"
+jq -nc --arg nonce "$n6" '{nonce:$nonce, note:"stale"}' > "$TMP/dn6.decision.note"
+answer dn6 allow
+wait $bg
+assert_eq "allow with a bound note: still a plain allow" \
+  '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}' "$(cat "$TMP/out_dn6")"
+assert_absent "allow with a bound note: the sidecar is cleared" "$TMP/dn6.decision.note"
+
+# SessionEnd sweep: cc_remove takes the sidecar with the rest of the key's files
+printf '{}' > "$TMP/dn7.json"; printf '{"nonce":"1.1","note":"x"}' > "$TMP/dn7.decision.note"
+( . "$ROOT/cc-lib.sh"; cc_remove dn7 ) >/dev/null 2>&1
+assert_absent "cc_remove sweeps the deny-note sidecar" "$TMP/dn7.decision.note"
+
+# the ledger's human-deny event carries the reason
+echo '{ "ledger": { "enabled": true } }' > "$TMP/ledger-cfg.json"
+date +%s > "$HB"
+( printf '%s' '{"session_id":"dn8","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"rm -rf build"}}' \
+    | CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=5 \
+      CC_CONFIG_FILE="$TMP/ledger-cfg.json" CC_LEDGER_DIR="$TMP/ledger" \
+    bash "$APP" > "$TMP/out_dn8" 2>/dev/null ) &
+bg=$!
+wait_block "$TMP/dn8.json"
+deny_with_note dn8 "wrong directory"
+wait $bg
+assert_eq "ledger: the human deny records Adam's reason" "wrong directory" \
+  "$(cat "$TMP"/ledger/*.jsonl 2>/dev/null | jq -r 'select(.type=="decision" and .session_id=="dn8").reason')"
+
 finish

@@ -153,15 +153,17 @@ esac
 
 # Append a `decision` event to the audit ledger. The gate branch IS the provenance.
 # $1=outcome (allow|deny|fallback)  $2=by  $3=pattern (optional)
+# $4=reason (optional): the note Adam typed beside Deny in the panel.
 ledger_decision() {
   cc_ledger_enabled || return 0
   cc_ledger_append "$(jq -nc \
     --arg sid "$SESSION_ID" --arg key "$KEY" --arg name "$NAME" \
     --arg pk "$PROJECT_KEY" --arg cwd "$CWD" --arg tool "$TOOL" --arg sum "$SUMMARY" \
-    --arg out "$1" --arg by "$2" --arg pat "${3:-}" \
+    --arg out "$1" --arg by "$2" --arg pat "${3:-}" --arg why "${4:-}" \
     '{type:"decision", session_id:$sid, key:$key, name:$name, projectKey:$pk, cwd:$cwd,
       tool:$tool, summary:$sum, outcome:$out, by:$by}
-     + (if $pat == "" then {} else {pattern:$pat} end)')"
+     + (if $pat == "" then {} else {pattern:$pat} end)
+     + (if $why == "" then {} else {reason:$why} end)')"
 }
 
 # ---- Policy evaluation (Phase 4c) -----------------------------------------
@@ -315,6 +317,24 @@ echo "[cc-approve] ⏳ waiting on panel for $TOOL ($KEY): $SUMMARY" >&2
 #   4. a not-ours answer is RESTORED via atomic hardlink (mtime-preserving;
 #      EEXIST protects a fresh write) or PARKED on collision -- never rm'd,
 #      and there is no rm on timeout.
+# The deny note (2026-09-18): the reason Adam typed beside Deny. It never rides the
+# decision line above (free text would break `read -r VERB RNONCE _` and the ssh
+# validator, core.decisionSshArgv) -- the panel writes it FIRST to a sidecar,
+# <key>.decision.note = {"nonce":..,"note":..}, bound to the same request nonce.
+# Taken only once OUR decision is claimed and only on a nonce match; a note bound to
+# another request (a sibling's, a leftover) is left alone, and anything unreadable
+# just means the default reason -- the note is secondary, the deny always lands.
+NOTE_FILE="${DECISION_FILE}.note"
+DENY_NOTE=""
+take_note() {
+  [ -f "$NOTE_FILE" ] || return 0
+  local nn
+  nn="$(jq -r '.nonce // empty | tostring' "$NOTE_FILE" 2>/dev/null)" || nn=""
+  { [ -n "$nn" ] && [ "$nn" = "$NONCE" ]; } || return 0
+  DENY_NOTE="$(jq -r '.note // empty | tostring | .[0:500]' "$NOTE_FILE" 2>/dev/null)" || DENY_NOTE=""
+  rm -f "$NOTE_FILE" 2>/dev/null || true
+}
+
 ITERS=$(( GATE_TIMEOUT * 4 ))
 DECISION=""
 PARKED=0
@@ -340,6 +360,7 @@ while [ "$i" -lt "$ITERS" ]; do
     if [ "$OURS" = 1 ]; then
       DECISION="$VERB"
       rm -f "$CLAIM" 2>/dev/null || true
+      take_note   # an allow clears its sidecar too; only the deny branch uses the text
       break
     fi
     if ln "$CLAIM" "$DECISION_FILE" 2>/dev/null; then   # atomic no-clobber restore
@@ -417,6 +438,12 @@ clear_own_pending() {
 
 if [ "$DECISION" = "deny" ]; then
   clear_own_pending
+  if [ -n "$DENY_NOTE" ]; then
+    echo "[cc-approve] ❌ denied $TOOL ($KEY) with a note" >&2
+    ledger_decision deny human "" "$DENY_NOTE"
+    emit_deny "Denied from the Claude Shepherd panel: $DENY_NOTE"
+    exit 0
+  fi
   echo "[cc-approve] ❌ denied $TOOL ($KEY)" >&2
   ledger_decision deny human
   emit_deny "Denied from the Claude Shepherd panel."

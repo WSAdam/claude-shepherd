@@ -2554,9 +2554,12 @@ function FX.removeStatus(key)
   local home = os.getenv("HOME") or ""
   os.remove(STATUS_DIR .. "/" .. key .. ".json")
   os.remove(STATUS_DIR .. "/" .. key .. ".decision")
+  os.remove(STATUS_DIR .. "/" .. key .. ".decision.note")   -- the reason typed beside Deny
   local claimPrefix = key .. ".decision.claim."  -- covers .claim.* AND .claim.*.parked
+  local notePrefix = key .. ".decision.note.tmp."
   for _, fn in ipairs(FX.readDir(STATUS_DIR)) do
     if fn:sub(1, #claimPrefix) == claimPrefix then os.remove(STATUS_DIR .. "/" .. fn) end
+    if fn:sub(1, #notePrefix) == notePrefix then os.remove(STATUS_DIR .. "/" .. fn) end
   end
   os.remove(GATE_TOOLS_DIR .. "/" .. key)
   os.remove((os.getenv("CC_APPROVED_DIR") or (home .. "/.claude/cc-approved")) .. "/" .. key)
@@ -3935,9 +3938,15 @@ end
 -- box instead: nonce read from the mirror copy (≤ a few seconds old; a stale
 -- nonce is ignored by the remote gate, worst case a no-op), write executed as
 -- a temp+mv over ssh (core.decisionSshArgv -- validated argv, BatchMode).
-function FX.writeDecision(key, value)
+-- `note` (2026-09-18): the reason Adam typed beside Deny. Free text never goes in the
+-- decision line (the hook reads it with `read -r`, and the ssh argv validator exists to
+-- keep anything else out of a remote shell): it goes in a sidecar, <key>.decision.note,
+-- written FIRST so it is complete by the time the hook claims the decision, and bound to
+-- the same nonce (core.decisionNoteContent). A remote session's deny drops the note.
+function FX.writeDecision(key, value, note)
   local ns, rawKey = core.splitNamespacedKey(key)
   if ns then
+    if note then print("[cc-bridge] deny note dropped: a remote decision carries no note -> " .. tostring(key)) end
     local b = bridge[ns]
     if not b or not b.dest then
       print("[cc-bridge] decision dropped: no live bridge for host " .. tostring(ns))
@@ -3960,11 +3969,22 @@ function FX.writeDecision(key, value)
     return
   end
   local path = STATUS_DIR .. "/" .. key .. ".decision"
-  local content = core.decisionContent(value, FX.readFile(STATUS_DIR .. "/" .. key .. ".json"))
+  local statusText = FX.readFile(STATUS_DIR .. "/" .. key .. ".json")
+  local content = core.decisionContent(value, statusText)
+  local noted = false
+  if value == "deny" and note then
+    local side = core.decisionNoteContent(note, statusText)
+    if side then
+      local noteTmp = path .. ".note.tmp." .. tostring(FX.now())
+      local nf = io.open(noteTmp, "w")
+      if nf then nf:write(side); nf:close(); noted = os.rename(noteTmp, path .. ".note") and true or false end
+    end
+    if not noted then print("[cc-dashboard] ⚠️ deny note not written (no nonce to bind it to, or the write failed) -> " .. tostring(key)) end
+  end
   local tmp = path .. ".tmp." .. tostring(FX.now())
   local f = io.open(tmp, "w")
   if f then f:write(content); f:close(); os.rename(tmp, path) end
-  print("[cc-dashboard] decision " .. tostring(content) .. " -> " .. tostring(key))
+  print("[cc-dashboard] decision " .. tostring(content) .. (noted and " (with a note)" or "") .. " -> " .. tostring(key))
 end
 
 -- ---- Kitty effect routing (Part A): run effects headlessly via `kitty @` ----
@@ -8971,6 +8991,9 @@ local HTML = [[
   #d-actions button:hover { background:var(--surface-hover); }
   #b-approve { border-color:var(--ok); color:var(--ok); }
   #b-deny, #b-stop { border-color:var(--danger); color:var(--danger); }
+  /* the reason that goes back with a Deny -- shown only while a local gate is waiting */
+  #deny-note { flex:1 1 140px; min-width:120px; background:var(--surface); color:var(--text);
+               border:1px solid var(--border); border-radius:8px; font-size:12px; padding:5px 8px; }
   #b-clear { border-color:#b9772a; color:var(--warn); }
   #b-improve { border-color:var(--accent); color:var(--accent-text); }
   .sep { flex-basis:100%; height:0; }
@@ -9759,6 +9782,7 @@ local HTML = [[
       <button id="b-jump"    onclick="act('focus')">Jump</button>
       <button id="b-approve" onclick="act('approve')">Approve</button>
       <button id="b-deny"    onclick="act('deny')">Deny</button>
+      <input id="deny-note" maxlength="500" placeholder="Why? (goes back with Deny)" onkeydown="onDenyNoteKey(event)" title="Optional. Sent to the session as the reason its tool call was refused, so it can change course instead of just failing. Enter denies with this reason.">
       <button id="b-stop"    onclick="act('stop')">Stop</button>
       <button id="b-auto"    onclick="act('autopilot')">Autopilot</button>
       <span class="sep"></span>
@@ -10659,7 +10683,15 @@ local HTML = [[
       try { window.webkit.messageHandlers.cc.postMessage(JSON.stringify({a:a, v:v||"", text:text||"", img:img||"", scope:scope||""})); }
       catch(e){ console.log("send error", e); }
     }
-    function act(a){ if(selectedKey) send(a, selectedKey); }
+    // Deny carries the reason typed beside it (2026-09-18): the session reads it as WHY the
+    // tool call was refused. The input is declared once in the skeleton and cleared on send.
+    function act(a){
+      if(!selectedKey) return;
+      var dn = document.getElementById("deny-note");
+      if(a === "deny" && dn){ send(a, selectedKey, dn.value || ""); dn.value = ""; return; }
+      send(a, selectedKey);
+    }
+    function onDenyNoteKey(e){ if(e.key === "Enter"){ e.preventDefault(); act("deny"); } }
     // Grow the textarea with its content, up to the CSS max-height.
     function autoGrow(el){ el.style.height = "auto"; el.style.height = Math.min(el.scrollHeight, 220) + "px"; }
     function resetInput(el){ el.value=""; el.style.height="auto"; clearImage(); }
@@ -12826,6 +12858,7 @@ local HTML = [[
     function selectTile(key){
       if(key !== selectedKey){
         detailExpanded = { pending:false, activity:false };
+        var dnSel = document.getElementById("deny-note"); if(dnSel) dnSel.value = "";   // a reason is for ONE session's request
         requestDecisions(key);  // gate decision log loads per selection, not per tick
         queueListOpen = false; renderQueueList();   // queue editor is per-session
         tplOpen = false; renderTemplates();
@@ -13817,6 +13850,13 @@ local HTML = [[
       }
       var bdeny = document.getElementById("b-deny");
       lockCtl(bdeny, (remote && !remoteWait) ? REMOTE_T : ((shared && !gateWait) ? SHARED_T : ""));
+      // The deny reason travels only with a headless deny on THIS machine (a sidecar beside the
+      // gate's decision file): a keystroke deny has nowhere to put it, a remote one drops it.
+      var dnote = document.getElementById("deny-note");
+      if(dnote){
+        dnote.style.display = (gateWait && !remote) ? "" : "none";
+        if(!(gateWait && !remote)) dnote.value = "";
+      }
       // Errored session: the Approve button becomes Continue (types "continue" + Enter to
       // resume the aborted turn). Restored to Approve for every other status.
       var bap = document.getElementById("b-approve");
