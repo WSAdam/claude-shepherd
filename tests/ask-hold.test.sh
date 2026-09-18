@@ -13,8 +13,9 @@ trap 'rm -rf "$TMP"' EXIT
 export CC_STATUS_DIR="$TMP/status" CC_ASK_DIR="$TMP/ask" CC_ASK_POLL=0.1 CC_CONFIG_FILE="$TMP/cc-config.json"
 mkdir -p "$CC_STATUS_DIR"
 H="$ROOT/cc-ask.sh"
-# 2026-09-18 the REQUIREMENT changed (no bug came back): answering in Shepherd is opt-in now, so
-# the held-question cases below run as a user who turned it on. The default has its own section.
+# 2026-09-18: answering in Shepherd is ON by default (it was briefly opt-in the same day -- see the
+# default section below for why that was reversed). The held cases still set it explicitly, so they
+# pin the hold behaviour itself rather than riding on whatever the default happens to be.
 opt_in() { printf '{"ask":{"enabled":true}}' > "$CC_CONFIG_FILE"; }
 opt_in
 SF="$CC_STATUS_DIR/s1.json"
@@ -133,9 +134,13 @@ assert_eq "a clobbered nonce is written back, unchanged" "$N" "$N2"
 answer "$(jq -nc --arg n "$N" '{nonce:$n, release:true}')"
 wait_for "$TMP/rc.f"
 
-# ---- answering in Shepherd is opt-in (2026-09-18) ----
-# 2026-09-18: answering on the card had been worse than the tab (blind options, a frozen panel),
-# so it no longer switches itself on: with no ask.enabled in the config the question goes to the tab.
+# ---- answering in Shepherd is on unless switched off (2026-09-18) ----
+# REQUIREMENT CHANGE, not a regression. Earlier the same day these cases expected the opposite:
+# answering on the card was worse than the tab (blind options, a frozen panel), so it was made
+# opt-in. Measuring proved the freeze was NOT this feature -- a quadratic transcript parse
+# (f1252be) stalled the whole panel -- and with that fixed, options readable and click-to-resume
+# at ~99ms, the reasons for opting out were gone. So the default is back on, and the Settings
+# checkbox stays: the point of that work was that it can be turned OFF without editing JSON.
 held_within() { # <name>: did the hook publish a nonce within ~1.5s, or end without one?
   local i; for i in $(seq 1 15); do
     [ -n "$(jq -r '.ask_nonce // empty' "$SF" 2>/dev/null)" ] && { echo held; return; }
@@ -145,15 +150,15 @@ held_within() { # <name>: did the hook publish a nonce within ~1.5s, or end with
 }
 fresh; alive; rm -f "$CC_CONFIG_FILE"
 run g "" "" 3
-assert_eq "no ask.enabled in the config: the question goes to the tab" "went to the tab" "$(held_within g)"
+assert_eq "no ask.enabled in the config: the question is held for the card" "held" "$(held_within g)"
 wait_for "$TMP/rc.g"
 assert_eq "...with nothing on stdout" "" "$(cat "$TMP/out.g")"
 case "$(cat "$TMP/err.g")" in *holding*) got=held ;; *) got=never ;; esac
-assert_eq "...and it was never held, not held and timed out" "never" "$got"
+assert_eq "...having genuinely held it, then timed out to the tab" "held" "$got"
 
 fresh; alive; printf '{"ask":{"waitSeconds":30}}' > "$CC_CONFIG_FILE"
 run h "" "" 3
-assert_eq "an ask block with no enabled key is still off" "went to the tab" "$(held_within h)"
+assert_eq "an ask block with no enabled key is still on" "held" "$(held_within h)"
 wait_for "$TMP/rc.h"
 
 fresh; alive; opt_in

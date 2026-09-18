@@ -135,13 +135,18 @@ multi.ask_nonce = "100.2";
   check("multi-part: the clicked option lights up, and only it  (got=" + JSON.stringify(on) + ")",
         on.length === 4 && on[0] === false && on[1] === true && on[2] === false && on[3] === false);
 
-  // ---- answering in Shepherd is opt-in, with a real checkbox (2026-09-18) ----
-  // ask.enabled used to default ON with no way to turn it off short of editing JSON.
+  // ---- answering in Shepherd has a real checkbox (2026-09-18) ----
+  // It used to be ON with no way to turn it off short of editing JSON. It was briefly made
+  // opt-in the same day, then put back ON once the freeze behind that (a quadratic transcript
+  // parse elsewhere, f1252be) was fixed and the options were made readable -- so what this
+  // pins is the SWITCH existing and round-tripping, not which way the default happens to point.
   const box = await page.evaluate(() => {
     const el = document.getElementById("s-ask-en");
     if (!el) return null;
     showSettings({}, false, false);
-    const offByDefault = el.checked === false;
+    const onByDefault = el.checked === true;
+    showSettings({ ask: { enabled: false } }, false, false);
+    const offWhenCleared = el.checked === false;
     showSettings({ ask: { enabled: true, waitSeconds: 1200 } }, false, false);
     const onWhenSet = el.checked === true;
     let row = el; while (row && !(row.getAttribute && row.getAttribute("data-stab"))) row = row.parentElement;
@@ -150,12 +155,13 @@ multi.ask_nonce = "100.2";
     let saved = null;
     window.__sent.forEach((m) => { try { const o = JSON.parse(m); const c = o.text ? JSON.parse(o.text) : null;
       if (c && c.config && c.config.ask) saved = c.config.ask; else if (c && c.ask) saved = c.ask; } catch (e) { /* not it */ } });
-    return { offByDefault, onWhenSet, tab: row ? row.getAttribute("data-stab") : null, saved,
+    return { onByDefault, offWhenCleared, onWhenSet, tab: row ? row.getAttribute("data-stab") : null, saved,
              label: (el.parentElement.textContent || "").trim() };
   });
   check("Settings has an Answer questions in Shepherd checkbox", box !== null);
   if (box) {
-    check("...off when the config says nothing", box.offByDefault);
+    check("...on when the config says nothing", box.onByDefault);
+    check("...off for a user who switched it off", box.offWhenCleared);
     check("...on for a user whose config has ask.enabled true", box.onWhenSet);
     check("...on the Approvals tab  (got=" + box.tab + ")", box.tab === "approvals");
     check("...saved as ask.enabled  (got=" + JSON.stringify(box.saved) + ")", !!box.saved && box.saved.enabled === true);

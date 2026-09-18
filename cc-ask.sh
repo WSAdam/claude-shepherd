@@ -14,7 +14,7 @@
 #      its picker and hands Claude "The user answered: …" (spiked 2026-09-11, CLI + VS Code).
 #
 # Out of the way (no output: the tab shows its own picker, exactly as without the hook)
-# unless ask.enabled is true (OPT-IN since 2026-09-18: Settings > Approvals, or the config),
+# when ask.enabled is switched off (Settings > Approvals, or the config),
 # and when the panel heartbeat is stale, there are no questions, Adam releases the question,
 # or ask.waitSeconds (default 900, max 3600) runs out.
 # Only the decision JSON is ever written to stdout; logs go to stderr.
@@ -36,8 +36,10 @@ POLL="${CC_ASK_POLL:-0.1}"
 INPUT="$(cat 2>/dev/null || true)"
 cc_have_jq || exit 0
 [ "$(cc_get "$INPUT" '.tool_name')" = "AskUserQuestion" ] || exit 0
-# Opt-in (2026-09-18): only an explicit true holds a question; anything else is the tab's picker.
-[ "$(cc_config '.ask.enabled' 'false')" = "true" ] || exit 0
+# On unless switched off. It was briefly opt-in on 2026-09-18, when answering on the card was
+# worse than the tab; the freeze behind that turned out to be a quadratic transcript parse
+# elsewhere (f1252be), not this hook, so the default went back on once it was fixed.
+[ "$(cc_config '.ask.enabled' 'true')" = "true" ] || exit 0
 
 # Shepherd must be alive (fresh heartbeat), or we'd hold the question for nobody.
 HB_FILE="$(cc_heartbeat_file)"

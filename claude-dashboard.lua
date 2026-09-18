@@ -12082,7 +12082,7 @@ local HTML = [[
       ck("s-coll-git",   cv(cfg,"collision.useGitRoot",false));
       val("s-prune-hours", cv(cfg,"prune.hours",0));
       ck("s-drain-en",   cv(cfg,"drain.enabled",false));
-      ck("s-ask-en",     cv(cfg,"ask.enabled",false));   // 2026-09-18 opt-in: must match cc-ask.sh's default
+      ck("s-ask-en",     cv(cfg,"ask.enabled",true));    // must match cc-ask.sh's default
       ck("s-resp-en",    cv(cfg,"respawn.enabled",false));
       ck("s-resp-auto",  cv(cfg,"respawn.auto.enabled",false));
       val("s-resp-max",  cv(cfg,"respawn.auto.maxRetries",3));

@@ -310,12 +310,14 @@ for the mechanics.
 
 ### Answer questions from Shepherd
 
-**Off by default — turn it on in ⚙ Settings → Approvals → "Answer questions in Shepherd"** (or
-`"ask": { "enabled": true }` in `~/.claude/cc-config.json`). It used to switch itself on; since
-2026-09-18 it is opt-in, because a question answered on the card has to be at least as good as one
-answered in the tab, and that is a choice to make rather than a default to discover. With it off,
-questions go straight to the tab, exactly as Claude Code does on its own. A config that already
-says `"enabled": true` keeps it on.
+**On by default — switch it off in ⚙ Settings → Approvals → "Answer questions in Shepherd"** (or
+`"ask": { "enabled": false }` in `~/.claude/cc-config.json`). It was briefly opt-in on 2026-09-18,
+when answering on the card felt worse than answering in the tab: the options showed their
+descriptions only as hover tooltips, and the panel would freeze. The freeze turned out to be a
+quadratic transcript parse elsewhere in the panel, not this feature. With that fixed, the
+descriptions written out in full, and click-to-resume around 100ms, the default went back on —
+but the switch stays, so it can be turned off without editing JSON. With it off, questions go
+straight to the tab, exactly as Claude Code does on its own.
 
 When a session needs your decision it asks with Claude Code's question tool (AskUserQuestion).
 With the setting on and Shepherd running, the `cc-ask.sh` hook **holds that question for Shepherd**

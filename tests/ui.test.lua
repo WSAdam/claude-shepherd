@@ -3244,10 +3244,14 @@ do
   local h = io.open(ROOT .. "cc-ask.sh", "r")
   local hook = h and h:read("*a") or ""
   if h then h:close() end
-  check("ask opt-in: the hook holds a question only on an explicit true",
-        hook:find([[[ "$(cc_config '.ask.enabled' 'false')" = "true" ] || exit 0]], 1, true) ~= nil)
-  check("ask opt-in: ...and the Settings form shows the same default, so a Save can't flip it",
-        src:find('ck("s-ask-en",     cv(cfg,"ask.enabled",false))', 1, true) ~= nil
+  -- 2026-09-18: the DEFAULT flipped back to on (the freeze it was turned off for was a
+  -- quadratic transcript parse elsewhere, f1252be). What still matters, and is what these
+  -- two pin together, is that the hook and the Settings form name the SAME default -- if they
+  -- disagree, opening Settings and pressing Save silently flips the feature.
+  check("ask default: the hook holds a question unless it is switched off",
+        hook:find([[[ "$(cc_config '.ask.enabled' 'true')" = "true" ] || exit 0]], 1, true) ~= nil)
+  check("ask default: ...and the Settings form shows the same default, so a Save can't flip it",
+        src:find('ck("s-ask-en",     cv(cfg,"ask.enabled",true))', 1, true) ~= nil
         and src:find('ask: { enabled: ck("s-ask-en") }', 1, true) ~= nil)
   check("ask poke: the ask dir's watcher is retained on the module and only .poke refreshes",
         src:find("M.askWatcher = hs.pathwatcher.new(FX.ASK_DIR", 1, true) ~= nil
