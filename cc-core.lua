@@ -1333,14 +1333,21 @@ function M.needsYouKind(it, now)
     return "needs", "ask"
   end
 
-  -- 2. a merge. Only a REQUEST is answerable, and only while its cc-merge.sh still waits;
-  -- "merged but main went red" and "blocked" offer Dismiss and nothing else.
+  -- 2. a merge. A REQUEST is answerable only while its cc-merge.sh still waits for the answer.
+  -- A BLOCKED unit stays his: its card carries the note the unit gave when it gave up, and the
+  -- affordance isn't the Dismiss button -- it's the stalled tab and the branch sitting there,
+  -- which he can read, redirect or take over. (2026-09-17: this arm briefly made "blocked" a
+  -- heads-up on the "acknowledge-only" reading. That was wrong: with several units running in
+  -- parallel, a blocked one going quiet is exactly how work gets silently lost -- a worse
+  -- failure than the nagging this rule exists to stop.) A MERGED unit whose post-merge gate went
+  -- red hours ago, with its worktree already gone, really does leave nothing but acknowledging.
   local m = type(it.merge) == "table" and it.merge or nil
   if m and m.needsYou then
     if m.phase == "requested" then
       if m.waiterAlive == false then return "fyi", "merge", "nothing is waiting for the answer any more" end
       return "needs", "merge"
     end
+    if m.phase == "blocked" then return "needs", "merge" end
     return "fyi", "merge", "nothing here changes it -- Dismiss once you've read it"
   end
 

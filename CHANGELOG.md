@@ -24,9 +24,12 @@ destroys the gate's whole purpose.
   that can't be trusted degrades to "assume alive" and never hides a real question); the decision
   itself is pure.
 - **A new Heads-up state.** Anything failing either half — a merge request whose `cc-merge.sh` has
-  gone, a question or proposal whose session exited, a merged-but-red or blocked merge, a stale
-  error on a session that has exited — is on the card with a line saying why, dismissible, and
-  ranked **below** working sessions (`core.TIER_FYI`). Not red, no pulse.
+  gone, a question or proposal whose session exited, a merged unit whose post-merge gate went red
+  hours ago with its worktree already removed, a stale error on a session that has exited — is on
+  the card with a line saying why, dismissible, and ranked **below** working sessions
+  (`core.TIER_FYI`). Not red, no pulse. A unit that came back **blocked** is *not* one of these:
+  the affordance there isn't the Dismiss button, it's the stalled tab and the branch, and a
+  blocked unit going quiet is how parallel work gets silently lost.
 - **Transient API errors stop crying wolf.** Starting a VPN turned a card red with
   `[runtime error] Connectio…`; the fault healed itself and the session was back to *working* 40s
   later. A connection error, timeout or overloaded model on a live session now reads **Retrying**

@@ -208,10 +208,12 @@ run the script there — so fenced tabs ask from outside and step back in to reb
   are on). **A card that says Needs you always has something to press** — and only then. A card
   ranks as needing you when a live counterpart will actually receive your answer *and* the card
   offers something that changes the outcome. Anything else — a merge request whose `cc-merge.sh`
-  has gone, a question whose session exited, a merged unit or a blocked merge where the only
-  button is *Dismiss*, a connection blip the session is still retrying — is a **Heads-up**
-  instead: on the card, dismissible, with one line saying why, but never red, never pulsing and
-  never ranked above a session that is working.
+  has gone, a question whose session exited, a merged unit whose post-merge gate went red hours
+  ago with its worktree already removed, a connection blip the session is still retrying — is a
+  **Heads-up** instead: on the card, dismissible, with one line saying why, but never red, never
+  pulsing and never ranked above a session that is working. A unit that came back **blocked**
+  stays Needs you: the affordance isn't the Dismiss button, it's the stalled tab and the branch,
+  and a blocked unit going quiet is how parallel work gets silently lost.
   Shepherd checks the request with **its own git** first — the worktree is one of the repo's, on
   the requested branch, clean and ahead of main — and says what's wrong otherwise.
 - **The review** (the detail panel, or **Review** in the Instances view): the session's summary,

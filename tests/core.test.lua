@@ -9055,10 +9055,14 @@ do
 
   local function tier(view) return core.instanceTier({ key = "s1", status = "done", since = 1, merge = view }, {}) end
   eq("tier: a merge request waiting for Adam needs you", tier(v), 1)
-  -- 2026-09-17 REQUIREMENT CHANGE (not a regression): a blocked merge's review offers Dismiss
-  -- and nothing else, so it is acknowledge-only and ranks as a heads-up, not a red "Needs you".
-  -- Adam's rule: never say "Needs you" when he can't do anything about it.
-  eq("tier: ...while a blocked merge is only a heads-up", tier(core.mergeView(bl, nil, nil, {})), core.TIER_FYI)
+  -- 2026-09-17: the needs-you rule ("only when Adam can actually do something") was briefly
+  -- read as making this a heads-up, because the review's only button is Dismiss. That reasoning
+  -- was wrong and the assertion is back: the affordance isn't the button, it's the stalled tab
+  -- and the branch -- the card carries the note the unit gave when it gave up, and he can read
+  -- it, redirect the unit or take it over. With units running in parallel, a blocked one going
+  -- quiet is how work gets silently lost. Only "merged, and main went red hours ago with the
+  -- worktree already gone" is genuinely acknowledge-only.
+  eq("tier: ...a blocked merge too", tier(core.mergeView(bl, nil, nil, {})), 1)
   check("tier: a queued or running merge doesn't", tier(core.mergeView(r, ok, f, { queued = 1 })) ~= 1 and tier(core.mergeView(ap, nil, nil, {})) ~= 1)
 
   -- after the merge: Shepherd re-checks with its own git, then closes the tab (U3)
@@ -9591,8 +9595,14 @@ do
   eq("a merged unit that left main red is a heads-up, not a red Needs you",
      kind({ key = "m", status = "done", merge = { phase = "merged", needsYou = true,
             gate = { state = "failed", code = 2 } } }), "fyi")
-  eq("a merge that came back blocked is a heads-up too (Dismiss only)",
-     kind({ key = "m", status = "done", merge = { phase = "blocked", needsYou = true } }), "fyi")
+  -- ...but a unit that gave up is still Adam's: the note it left is on the card, and the tab and
+  -- the branch are sitting there for him to read, redirect or take over. A blocked unit going
+  -- quiet is how parallel work gets silently lost -- worse than the nagging this rule stops.
+  eq("a merge that came back blocked still needs Adam",
+     kind({ key = "m", status = "done", merge = { phase = "blocked", needsYou = true } }), "needs")
+  eq("...even once its own session's process has gone (the branch is still there to take over)",
+     kind({ key = "m", status = "done", procAlive = false,
+            merge = { phase = "blocked", needsYou = true } }), "needs")
 
   -- 3. a batch proposal waiting for Adam
   eq("a batch proposal from a live driver needs Adam",
@@ -9675,7 +9685,7 @@ do
   eq("a persistent error still ranks above a working session",
      core.instanceTier({ key = "e", status = "error", error_reason = "budget_exceeded" }, {}, NOW), 2)
   local fyiTier = core.instanceTier({ key = "m", status = "done",
-    merge = { phase = "blocked", needsYou = true } }, {}, NOW)
+    merge = { phase = "merged", needsYou = true, gate = { state = "failed", code = 2 } } }, {}, NOW)
   eq("a heads-up gets the heads-up tier", fyiTier, core.TIER_FYI)
   check("...which ranks BELOW a working session", fyiTier > core.TIER_RUNNING)
   check("...and below a driving one", fyiTier > core.TIER_DRIVING)

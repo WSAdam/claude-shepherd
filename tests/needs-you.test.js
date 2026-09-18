@@ -104,9 +104,16 @@ check("a merged-but-red card is NOT ranked as needing Adam", !api.needsYouNow(he
 check("...it is a heads-up", api.headsUp(headsUp));
 eq("...so its dot isn't the red approval one", api.effStatus(headsUp), "idle");
 eq("...and it says Heads-up, not Needs you", api.statusWords(headsUp), "Heads-up");
-const blocked = { key: "b", status: "done", needsYou: "fyi", needsYouSource: "merge",
-                  merge: { phase: "blocked", needsYou: true } };
-check("a blocked merge is a heads-up too (Dismiss changes nothing)", !api.needsYouNow(blocked) && api.headsUp(blocked));
+// A blocked unit is NOT one of these: it left a note, and its tab and branch are still there for
+// Adam to read, redirect or take over -- cc-core keeps it "needs" (see core.test.lua).
+const blockedUnit = { key: "b", status: "done", needsYou: "needs", needsYouSource: "merge",
+                      merge: { phase: "blocked", needsYou: true, line: "⚠ merge blocked: the tests disagree" } };
+check("a blocked unit still needs Adam, and still pulses", api.needsYouNow(blockedUnit) && !api.headsUp(blockedUnit));
+// ...a request nobody is waiting on any more IS: his click would write a decision no one claims.
+const orphaned = { key: "o", status: "done", needsYou: "fyi", needsYouSource: "merge",
+                   needsYouWhy: "nothing is waiting for the answer any more",
+                   merge: { phase: "requested", needsYou: true } };
+check("a merge request whose script has gone is a heads-up", !api.needsYouNow(orphaned) && api.headsUp(orphaned));
 const noStamp = { key: "n", status: "done", needsYou: "no", merge: { phase: "merged", needsYou: true } };
 check("a tile stamped 'no' needs nothing, whatever its sources say", !api.needsYouNow(noStamp) && !api.headsUp(noStamp));
 
