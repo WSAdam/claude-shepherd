@@ -11959,6 +11959,10 @@ function M.resolveAppearance(ap)
     density = (ap.density == "dense") and "dense" or "comfortable",
     font = (type(ap.font) == "string" and M.APPEARANCE_FONTS[ap.font]) and ap.font or M.APPEARANCE_DEFAULT_FONT,
     reduceMotion = ap.reduceMotion == true,
+    -- 2026-09-18: the Effort/Mode/Model/Gate/Policy/Auto-model row is opt-in. It stays
+    -- available for anyone who wants it, but a panel shouldn't carry six controls its
+    -- owner has never touched. Not a theme attribute -- importTheme deliberately drops it.
+    modelControls = ap.modelControls == true,
   }
 end
 

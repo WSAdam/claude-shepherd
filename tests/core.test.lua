@@ -7739,6 +7739,21 @@ do
   -- reduce motion: bool passthrough, default false
   check("appearance: reduceMotion default false", core.resolveAppearance({}).reduceMotion == false)
   check("appearance: reduceMotion true", core.resolveAppearance({ reduceMotion = true }).reduceMotion == true)
+
+  -- ---- model controls are opt-in (2026-09-18) ----
+  -- Adam has never used Effort/Mode/Model/Gate/Policy/Auto-model; they sat in every detail
+  -- panel regardless. They stay available, but off unless asked for.
+  check("appearance: model controls off unless asked for",
+        core.resolveAppearance({}).modelControls == false)
+  check("appearance: model controls on when set",
+        core.resolveAppearance({ modelControls = true }).modelControls == true)
+  check("appearance: a non-boolean model-controls setting is not truthy",
+        core.resolveAppearance({ modelControls = "yes" }).modelControls == false)
+  -- It is a panel preference, not a look: an exported/imported THEME must not carry it,
+  -- or importing someone's palette would silently change which controls you see.
+  check("appearance: a theme import never carries model controls",
+        core.importTheme({ colors = { accent = "#ff8800" }, modelControls = true })
+          .appearance.modelControls == nil)
 end
 
 -- ---- Review-fix: cold-start poll bound + appearanceCss completeness + junk coercion ----

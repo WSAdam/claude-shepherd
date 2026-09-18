@@ -8929,7 +8929,10 @@ local HTML = [[
   #d-decisions { display:none; font-size:11px; color:var(--muted); margin:6px 0 0; line-height:1.5; }
   #d-decisions .dec-deny { color:#e88; }
   #d-decisions .dec-fallback { color:var(--warn); }
-  #d-controls { display:flex; flex-wrap:wrap; gap:10px; margin:8px 0 0; }
+  /* 2026-09-18: opt-in (Appearance > Model controls). Hidden is the default, so the
+     rule that SHOWS it is the conditional one -- a panel with no body class stays clean. */
+  #d-controls { display:none; flex-wrap:wrap; gap:10px; margin:8px 0 0; }
+  body.mctl #d-controls { display:flex; }
   #d-controls .ctl { font-size:11px; color:var(--accent-text); display:flex; align-items:center; gap:4px; }
   #d-controls select { background:var(--surface-2); color:var(--text); border:1px solid var(--border);
     border-radius:6px; font-size:11px; padding:2px 4px; }
@@ -9483,7 +9486,7 @@ local HTML = [[
 <!-- Appearance: active theme + operator overrides as :root token overrides
      (cc-core.appearanceCss), cascading over the Midnight defaults above. -->
 <style id="appearance-root">__APPEARANCE_CSS__</style></head>
-<body class="theme-__INIT_THEME__ __INIT_DENSITY__" data-theme="__INIT_THEME__" data-look="__INIT_LOOK__">
+<body class="theme-__INIT_THEME__ __INIT_DENSITY__ __INIT_MCTL__" data-theme="__INIT_THEME__" data-look="__INIT_LOOK__">
   <div id="bar">
     <span class="t">Claude sessions</span>
     <span class="right">
@@ -9870,6 +9873,7 @@ local HTML = [[
             <span class="ap-val" id="a-tilemin-v">170</span></div>
           <div class="ap-srow"><label class="ap-toggle"><input type="checkbox" id="a-density" onchange="previewAp()"> Compact density</label></div>
           <div class="ap-srow"><label class="ap-toggle"><input type="checkbox" id="a-motion" onchange="previewAp()"> Reduce motion (no pulsing / spinning)</label></div>
+          <div class="ap-srow"><label class="ap-toggle" title="Show the per-session Effort, Mode, Model, Gate, Policy and Auto-model controls in the detail panel. Off by default: they stay available, but a panel you never use them from stays clear."><input type="checkbox" id="a-mctl" onchange="previewAp()"> Model controls (Effort, Mode, Model, Gate, Policy, Auto-model)</label></div>
         </div>
       </div>
       <div class="ap-grp"><button type="button" class="ap-reset" onclick="resetAp()">Reset appearance to defaults</button></div>
@@ -11797,7 +11801,8 @@ local HTML = [[
                scale:apClamp(ap.scale,0.8,1.4,1.0), tileMin:Math.round(apClamp(ap.tileMin,120,320,170)),
                density:(ap.density==="dense")?"dense":"comfortable",
                font:(ap.font && APPEARANCE.fonts && APPEARANCE.fonts[ap.font])?ap.font:"system",
-               reduceMotion: ap.reduceMotion===true };
+               reduceMotion: ap.reduceMotion===true,
+               modelControls: ap.modelControls===true };
     }
     function applyAppearance(ap){
       var r = resolveAp(ap), root = document.documentElement;
@@ -11810,6 +11815,7 @@ local HTML = [[
       document.body.setAttribute("data-look", r.look);
       document.body.classList.toggle("dense", r.density==="dense");
       document.body.classList.toggle("calm", r.reduceMotion===true);
+      document.body.classList.toggle("mctl", r.modelControls===true);
     }
     function apThemeTokens(key){ return resolveAp({ theme:key }).tokens; }  // theme base, no overrides
     function fillColor(id,val){ var el=apG(id); if(!el||!apIsHex(val)) return;
@@ -11818,6 +11824,7 @@ local HTML = [[
       var ap = { theme: apG("a-theme").value,
                  font: apG("a-font").value,
                  reduceMotion: apG("a-motion").checked,
+                 modelControls: apG("a-mctl").checked,
                  scale: (parseInt(apG("a-scale").value,10)||100)/100,
                  tileMin: parseInt(apG("a-tilemin").value,10)||170,
                  density: apG("a-density").checked ? "dense" : "comfortable" };
@@ -11964,6 +11971,7 @@ local HTML = [[
       apG("a-accent").value=acc; fillColor("a-c-accent", acc||tok.accent); renderAccentSwatches(acc);
       apG("a-font").value=(ap.font && APPEARANCE.fonts && APPEARANCE.fonts[ap.font])?ap.font:"system";
       apG("a-motion").checked=(ap.reduceMotion===true);
+      apG("a-mctl").checked=(ap.modelControls===true);
       fillColor("a-c-bg", ov.bg||tok.bg); fillColor("a-c-surface", ov.surface||tok.surface);
       fillColor("a-c-border", ov.border||tok.border); fillColor("a-c-text", ov.text||tok.text);
       fillColor("a-c-muted", ov.muted||tok.muted);
@@ -11993,6 +12001,7 @@ local HTML = [[
       var tio=apG("a-theme-io"); if(tio){ tio.value=""; tio.style.display="none"; } apMsg("");
       apG("a-scale").value=100; apG("a-tilemin").value=170; apG("a-density").checked=false;
       apG("a-font").value="system"; apG("a-motion").checked=false; apG("a-accent").value="";
+      apG("a-mctl").checked=false;   // reset = the default, and the default is off
       pickTheme("midnight");   // reseeds inputs + accent swatches + previews
     }
     // Settings tabs: assign every #s-body section (+ its rows) to a tab by its header
@@ -16301,6 +16310,7 @@ do
   HTML = HTML:gsub("__APPEARANCE_CSS__", (core.appearanceCss(ap):gsub("%%", "%%%%")))
   HTML = HTML:gsub("__INIT_LOOK__", ap.look)
   HTML = HTML:gsub("__INIT_DENSITY__", (ap.density == "dense" and "dense " or "") .. (ap.reduceMotion and "calm" or ""))
+  HTML = HTML:gsub("__INIT_MCTL__", ap.modelControls and "mctl" or "")
   HTML = HTML:gsub("__APPEARANCE_THEMES__", (hs.json.encode({
     vars = core.APPEARANCE_VARS, defaults = core.APPEARANCE_DEFAULTS,
     themes = core.APPEARANCE_THEMES, fonts = core.APPEARANCE_FONTS,

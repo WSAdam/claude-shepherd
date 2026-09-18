@@ -2093,6 +2093,17 @@ do
   check("appearance b2: reduce-motion body.calm rule + toggle",
         src:find("body.calm *", 1, true) ~= nil and src:find('id="a-motion"', 1, true) ~= nil
         and src:find('classList.toggle("calm"', 1, true) ~= nil)
+  -- ---- model controls are opt-in (2026-09-18) ----
+  -- The Effort/Mode/Model/Gate/Policy/Auto-model row is hidden unless the setting is on,
+  -- so the default panel doesn't carry six controls Adam has never used.
+  check("model controls: hidden by default, shown only under body.mctl",
+        src:find("#d-controls { display:none", 1, true) ~= nil
+        and src:find("body.mctl #d-controls { display:flex", 1, true) ~= nil)
+  check("model controls: a settings checkbox drives a body class",
+        src:find('id="a-mctl"', 1, true) ~= nil
+        and src:find('classList.toggle("mctl"', 1, true) ~= nil)
+  check("model controls: the boot class list is seeded so the row can't flash on open",
+        src:find("__INIT_MCTL__", 1, true) ~= nil)
   check("appearance b2: accent quick-swatches (dedicated, not gated by the custom palette)",
         src:find("function renderAccentSwatches(active)", 1, true) ~= nil
         and src:find("function pickAccent(hex)", 1, true) ~= nil and src:find('id="a-accent-sw"', 1, true) ~= nil)
