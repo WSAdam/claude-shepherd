@@ -2407,11 +2407,12 @@ function FX.notify(title, text, opts)
           -- Kitty needs the `kitty @ focus-window` short-circuit (FX.focusWindow):
           -- focusProject only knows GUI editors, so it would raise an unrelated
           -- editor window instead of the kitty window the banner advertised.
-          -- Target built inline (winTarget is declared below this function).
+          -- FX.targetFor, not a table literal: winTarget is declared below this function,
+          -- but FX.targetFor is not, and it is what carries `key` and `shared` (2026-09-19 --
+          -- the literal dropped both, so FX.refuseShared read 0 and could never refuse).
           -- Non-kitty keeps the direct focusProject jump (the l5/#28-pinned path).
           if it.editor == "kitty" then
-            pcall(function() FX.focusWindow({ name = it.name, cwd = it.cwd, editor = it.editor,
-              kittyWindowId = it.kitty_window_id, kittyListenOn = it.kitty_listen_on }) end)
+            pcall(function() FX.focusWindow(FX.targetFor(it)) end)
           else
             pcall(function() focusProject(it.name, it.cwd, it.editor, true, { origin = it.originDir }) end)
           end

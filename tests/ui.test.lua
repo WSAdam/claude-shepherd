@@ -2676,7 +2676,7 @@ do
     local n = src:find("function FX.notify(", 1, true)
     check("#28-pin: dispatchSerialized declared before FX.notify",
           d ~= nil and n ~= nil and d < n)
-    local body = n and src:sub(n, n + 1400) or ""
+    local body = n and src:sub(n, n + 1700) or ""
     check("#28-pin: notify click reserves a serialized slot",
           body:find('dispatchSerialized(it, "focus", function()', 1, true) ~= nil)
     -- REQUIREMENT CHANGE 2026-09-10: the call also carries the session's origin folder
@@ -2815,8 +2815,11 @@ do
     local body = n and src:sub(n, n + 2200) or ""
     check("#15b-pin: notify click branches on kitty",
           body:find('if it.editor == "kitty" then', 1, true) ~= nil)
-    check("#15b-pin: kitty jump goes through FX.focusWindow with an inline target",
-          body:find("FX.focusWindow({ name = it.name, cwd = it.cwd, editor = it.editor,", 1, true) ~= nil)
+    -- REQUIREMENT CHANGE 2026-09-19: the target was built inline here because winTarget is
+    -- declared further down the file. FX.targetFor isn't, and only it carries `key` and
+    -- `shared` -- the fields FX.refuseShared needs to refuse a shared window at all.
+    check("#15b-pin: kitty jump goes through FX.focusWindow with an FX.targetFor target",
+          body:find("FX.focusWindow(FX.targetFor(it))", 1, true) ~= nil)
   end
 
   -- #16: a successful live /effort dispatch persists the new value (item.effort +
@@ -3267,6 +3270,34 @@ do
         #luaSide > 1000 and luaSide:find("core.mergeReadiness(", 1, true) ~= nil)
   check("WARN ONLY: no Lua wiring reads the claim check -- it can't hold a merge or a batch's delegated one",
         luaSide:find("mergeClaimCheck", 1, true) == nil and luaSide:find("%.claims") == nil)
+end
+
+-- ---- every window effect gets its target from FX.targetFor (2026-09-19) ----
+-- CLAUDE.md's rule: build every target with FX.targetFor(it), because that is what carries
+-- `key` (the per-session dedupe for the refusal alert) and `shared` (the shared-window count
+-- FX.refuseShared reads). A hand-built table literal silently drops both -- refuseShared then
+-- reads 0 and never refuses, which is the keystroke going to whichever tab is in front.
+-- The notification-click handler was building one inline, with a comment saying why: winTarget
+-- is declared further down the file. FX.targetFor is not -- it is defined near the top, and
+-- that is what the call site should have used. Harmless as it stood (kitty-only branch, and
+-- refuseShared short-circuits on kitty) but one editor-branch edit from the real thing.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  local literals = {}
+  for _, fn in ipairs({ "focusWindow", "pasteIntoWindow", "typeIntoWindow", "closeWindow", "feedTask" }) do
+    -- a call whose first argument opens a table literal: FX.focusWindow({ ... })
+    for pos in src:gmatch("()FX%." .. fn .. "%(%s*{") do
+      local line = select(2, src:sub(1, pos):gsub("\n", "")) + 1
+      literals[#literals + 1] = fn .. " at line " .. line
+    end
+  end
+  check("targets: no window effect is called with a hand-built table  (" ..
+        (#literals > 0 and table.concat(literals, ", ") or "none") .. ")", #literals == 0)
+  check("targets: FX.targetFor is defined above the notification handler that needs it",
+        (src:find("function FX.targetFor(it)", 1, true) or math.huge)
+        < (src:find("dispatchSerialized(it, \"focus\"", 1, true) or 0))
 end
 
 -- ---- answering questions in Shepherd: opt-in, and woken through the ask dir (2026-09-18) ----
