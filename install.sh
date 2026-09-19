@@ -316,7 +316,8 @@ if have_jq && [ -r "$DEFAULT_CLAUDE_SETTINGS" ] && [ -f "$SETTINGS" ] && jq -e .
     . as $orig
     | ($d.permissions.deny // []) as $ours
     | try (
-        (reduce ($d | paths(scalars) | select(.[0:2] != ["permissions", "deny"])) as $p (.;
+        (reduce ($d | paths(type != "object" and type != "array")
+                    | select(.[0:2] != ["permissions", "deny"])) as $p (.;
            if getpath($p) == null then setpath($p; $d | getpath($p)) else . end))
         | (try getpath(["permissions", "deny"]) catch "unreadable") as $theirs
         | if ($ours | length) == 0 or $theirs == "unreadable"
@@ -337,10 +338,36 @@ if have_jq && [ -r "$DEFAULT_CLAUDE_SETTINGS" ] && [ -f "$SETTINGS" ] && jq -e .
 fi
 
 # 3c. Shepherd's own settings: Adam's (defaults/cc-config.json) on a machine that has none.
-# An existing ~/.claude/cc-config.json is the user's and is never touched.
-if [ ! -e "$CLAUDE_DIR/cc-config.json" ] && [ -r "$HERE/defaults/cc-config.json" ]; then
-  install_file "$HERE/defaults/cc-config.json" "$CLAUDE_DIR" \
-    && echo "✅ wrote Shepherd's default settings -> $CLAUDE_DIR/cc-config.json"
+DEFAULT_CC_CONFIG="$HERE/defaults/cc-config.json"
+USER_CC_CONFIG="$CLAUDE_DIR/cc-config.json"
+if [ ! -e "$USER_CC_CONFIG" ] && [ -r "$DEFAULT_CC_CONFIG" ]; then
+  install_file "$DEFAULT_CC_CONFIG" "$CLAUDE_DIR" \
+    && echo "✅ wrote Shepherd's default settings -> $USER_CC_CONFIG"
+# ...and on an UPGRADE, each setting added only where the user has no value of their own --
+# the same scalar walk 3b does for the Claude Code settings (2026-09-19: an existing config
+# used to be skipped whole, so a machine that installed Shepherd before a feature shipped
+# never saw its shipped default, and three of them contradict the in-code fallback --
+# spawn.editor vscode/terminal, spawn.live true/false, ledger.enabled true/false. A coworker
+# who pulled a newer Shepherd kept launching sessions into a terminal that never really
+# started). Their own value always wins, `false` included; a config we can't parse is left
+# exactly as it is, typo and all, rather than rewritten.
+elif have_jq && [ -r "$DEFAULT_CC_CONFIG" ] && [ -f "$USER_CC_CONFIG" ] \
+     && jq -e . "$USER_CC_CONFIG" >/dev/null 2>&1; then
+  # paths(type != "object" and type != "array"), not paths(scalars): jq's `scalars` emits the
+  # value itself, so a shipped `false` is FALSY and paths(scalars) silently skips it -- every
+  # off-by-default setting we ship would never reach a machine that lacks the key.
+  cc_filled="$(jq --argjson d "$(cat "$DEFAULT_CC_CONFIG")" '
+    . as $orig
+    | try (reduce ($d | paths(type != "object" and type != "array")) as $p (.;
+             if getpath($p) == null then setpath($p; $d | getpath($p)) else . end))
+      catch $orig' "$USER_CC_CONFIG" 2>/dev/null)"
+  if [ -n "$cc_filled" ] && [ "$cc_filled" != "$(jq . "$USER_CC_CONFIG")" ]; then
+    cp "$USER_CC_CONFIG" "$USER_CC_CONFIG.bak.$(date +%s)"
+    real_cc="$(resolve_link "$USER_CC_CONFIG")"
+    printf '%s\n' "$cc_filled" > "$(dirname "$real_cc")/.cc-config.json.tmp.$$" \
+      && mv -f "$(dirname "$real_cc")/.cc-config.json.tmp.$$" "$real_cc" \
+      && echo "✅ added Shepherd settings you hadn't set (backup made)"
+  fi
 fi
 
 # 3d. The methodology Claude sessions follow with Shepherd (methodology/CLAUDE.md) goes into

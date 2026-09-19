@@ -649,7 +649,7 @@ assert_eq "re-run: the methodology block is not duplicated" "$md_before" "$(cat 
 
 # the user's own choices win
 UC="$DF/user"; mkdir -p "$UC"
-printf '{"appearance":{"theme":"light"}}\n' > "$UC/cc-config.json"
+printf '{"appearance":{"theme":"light"},"ledger":{"enabled":false}}\n' > "$UC/cc-config.json"
 printf '{"effortLevel":"low","worktree":{"baseRef":"fresh"},"agentPushNotifEnabled":false}\n' > "$UC/settings.json"
 printf '# my rules\n\nBe brief.\n' > "$UC/CLAUDE.md"
 CC_INSTALL_CLAUDE_DIR="$UC" CC_INSTALL_HS_DIR="$DF/uhs" CC_INSTALL_NO_APP=1 \
@@ -661,6 +661,38 @@ assert_json "a user's own false is kept (push notifications off)" "$UC/settings.
 assert_json "...while a setting they never made is added" "$UC/settings.json" '.remoteControlAtStartup' "true"
 assert_eq "the user's own CLAUDE.md text is kept above the block" "# my rules" "$(head -n 1 "$UC/CLAUDE.md")"
 assert_eq "...and the block is appended" "1" "$(count 'shepherd-methodology:end' "$UC/CLAUDE.md")"
+
+# ---- upgrading: a Shepherd setting you never made is filled in (2026-09-19) ----
+# An existing cc-config.json used to be skipped whole, so a machine that installed Shepherd
+# before a feature shipped never saw its shipped default -- and three of them contradict the
+# in-code fallback (spawn.editor vscode/terminal, spawn.live true/false, ledger.enabled
+# true/false). A coworker who pulls a newer Shepherd would keep launching sessions into a
+# terminal that never really starts. Same rule as the Claude Code settings above: fill only
+# where they have no value of their own.
+assert_json "upgrade: a Shepherd setting you never made is filled in (spawn.live)" \
+  "$UC/cc-config.json" '.spawn.live' "true"
+assert_json "upgrade: ...and the editor new sessions open in" "$UC/cc-config.json" '.spawn.editor' "vscode"
+assert_json "upgrade: your own false is kept, never refilled (ledger stays off)" \
+  "$UC/cc-config.json" '.ledger.enabled' "false"
+# A whole section arrives -- and this one's leaves are all `false`, which pins the jq quirk
+# that started this: paths(scalars) treats a false value as falsy and skips it, so every
+# off-by-default setting we ship would have been left out of an upgraded config.
+assert_json "upgrade: a whole section you never had arrives (notifications)" \
+  "$UC/cc-config.json" '.notifications | type' "object"
+assert_json "upgrade: ...including a default that ships as false" \
+  "$UC/cc-config.json" '.notifications.banner.onDone' "false"
+cfg_before="$(jq -S . "$UC/cc-config.json")"
+CC_INSTALL_CLAUDE_DIR="$UC" CC_INSTALL_HS_DIR="$DF/uhs" CC_INSTALL_NO_APP=1 \
+  bash "$ROOT/install.sh" >/dev/null 2>&1
+assert_eq "upgrade: a second run changes nothing" "$cfg_before" "$(jq -S . "$UC/cc-config.json")"
+# A hand-edited config that isn't valid JSON is left exactly as it is -- never rewritten,
+# never backed up over -- so the user can fix their typo.
+BC="$DF/badcfg"; mkdir -p "$BC"
+printf '{"appearance": {"theme": "light",}\n' > "$BC/cc-config.json"
+CC_INSTALL_CLAUDE_DIR="$BC" CC_INSTALL_HS_DIR="$DF/bhs" CC_INSTALL_NO_APP=1 \
+  bash "$ROOT/install.sh" >/dev/null 2>&1
+assert_eq "upgrade: a cc-config.json that isn't valid JSON is left untouched" \
+  '{"appearance": {"theme": "light",}' "$(cat "$BC/cc-config.json")"
 
 # an older block is replaced, text around it untouched
 OB="$DF/old"; mkdir -p "$OB"
