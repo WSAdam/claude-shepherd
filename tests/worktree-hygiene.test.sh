@@ -54,4 +54,33 @@ for p in Scratch-pad/anything.html docs/feature-mining/x.md docs/orchestrator-ne
   assert_eq "$p is gitignored" "ignored" "$got"
 done
 
+# 2026-09-18: tests/fixtures/transcripts/ holds windows cut from REAL session transcripts, for
+# tests/transcript-replay.test.lua. It is tracked on purpose, and only ever scrubbed: a raw
+# transcript carries prompts, paths and client names, and this repo is public. Every tracked
+# fixture is small (no LFS here), has no CRLF (CI replays it on Linux, byte for byte) and holds
+# no word outside vocabulary.txt (check-scrubbed.js); nothing else may live in that folder.
+FXT="tests/fixtures/transcripts"
+got="$(git -C "$ROOT" ls-files -- "$FXT" | grep -c '\.jsonl$')"
+if [ "$got" -ge 1 ]; then got=yes; else got=no; fi
+assert_eq "transcript fixtures are tracked, so a clone can replay them" "yes" "$got"
+got="$(git -C "$ROOT" ls-files -- "$FXT" | grep -v -e '\.jsonl$' -e '/scrub\.js$' -e '/check-scrubbed\.js$' -e '/vocabulary\.txt$' -e '/README\.md$' | wc -l | tr -d ' ')"
+assert_eq "nothing but fixtures, the scrubber, its checker and their notes is tracked in $FXT" "0" "$got"
+while IFS= read -r f; do
+  [ -n "$f" ] || continue
+  size="$(wc -c < "$ROOT/$f" | tr -d ' ')"
+  if [ "$size" -le 102400 ]; then got=small; else got="$size bytes"; fi
+  assert_eq "$f is under 100KB" "small" "$got"
+  if LC_ALL=C grep -q "$(printf '\r')" "$ROOT/$f"; then got=crlf; else got=lf; fi
+  assert_eq "$f has no carriage returns" "lf" "$got"
+  if node "$ROOT/$FXT/check-scrubbed.js" "$ROOT/$f" >/dev/null 2>&1; then got=scrubbed; else got=readable; fi
+  assert_eq "$f holds no readable text" "scrubbed" "$got"
+done <<EOF
+$(git -C "$ROOT" ls-files -- "$FXT" | grep '\.jsonl$')
+EOF
+# ...and the checker itself goes red on the real thing: one unscrubbed record among scrubbed ones.
+printf '%s\n' '{"type":"user","message":{"role":"user","content":"xxxx xxx"}}' \
+  '{"type":"user","message":{"role":"user","content":"please fix the refund page"}}' > "$TMP/raw.jsonl"
+if node "$ROOT/$FXT/check-scrubbed.js" "$TMP/raw.jsonl" >/dev/null 2>&1; then got=passed; else got=refused; fi
+assert_eq "a fixture with one unscrubbed prompt in it is refused" "refused" "$got"
+
 finish

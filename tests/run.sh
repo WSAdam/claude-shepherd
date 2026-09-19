@@ -136,6 +136,9 @@ echo ""
 echo "== lua: cc-core =="
 lua "$DIR/core.test.lua" || fail=1
 echo ""
+echo "== lua: transcript parsers replayed over scrubbed windows of real transcripts (tests/fixtures/transcripts/) =="
+HOME="$(mktemp -d)" lua "$DIR/transcript-replay.test.lua" || fail=1
+echo ""
 echo "== lua: panel UX =="
 lua "$DIR/ui.test.lua" || fail=1
 echo ""
