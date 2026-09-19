@@ -1312,13 +1312,41 @@ ripgrep / fd); run **`make doctor`** any time to see it again (a fleet search lo
 `[cc-search] engine=rg …`, a folder scan `[cc-spawn] folder scan: fd …` in the Hammerspoon
 console). Finally click the Hammerspoon menu-bar icon → **Reload Config**.
 
+### Upgrading — after a `git pull`
+
+```
+git pull
+make setup
+```
+
+**`make setup`, not `make install`.** `make install` only copies the scripts and the dashboard; it
+never touches `~/.claude/settings.json`, the default settings or the methodology block. A release
+that adds a *hook* (as the held-question hook was added) would land on disk and never run. `make
+setup` is the full installer — the same one a fresh install runs, safe to re-run, and a no-op where
+nothing changed. It re-runs the pre-flight suite, so it also tells you if the version you pulled is
+red on your machine before it changes anything.
+
+Then, once it finishes:
+
+1. **Hammerspoon** menu-bar icon → **Reload Config**. Hammerspoon runs the copies in
+   `~/.hammerspoon`, and it doesn't reload them on its own.
+2. In each **VS Code window that was already open**: ⌘⇧P → **Developer: Reload Window**. A window
+   holds the tab bridge extension it loaded at startup, so until it reloads it keeps running the
+   older one. ⚙ **Doctor** says so explicitly (*"An older tab bridge runs in N VS Code windows"*),
+   and also checks all four hooks are wired.
+
+Upgrading never overwrites a setting you made. Shepherd settings added since your install are filled
+in where you have no value of your own (your `false` stays `false`), your `~/.claude/CLAUDE.md` keeps
+everything outside the methodology block, and a backup is made before either file is rewritten.
+
 ### Uninstall
 
 Double-click **`Uninstall Shepherd.command`**, or run `make uninstall`. It removes Shepherd's hooks
 from `~/.claude/settings.json` (backup made; your own hooks and settings stay), the scripts and
 dashboard it copied, its `init.lua` line, the methodology block in `~/.claude/CLAUDE.md`,
 Shepherd.app and the tab bridge. Shepherd's settings and history (`cc-config.json`, `cc-status/`,
-the ledger, …) stay unless you answer yes to deleting them (or `make uninstall PURGE=1`).
+the ledger, …) stay: the double-click uninstaller asks first and deletes them only if you answer
+yes, while `make uninstall` always keeps them unless you ask for `make uninstall PURGE=1`.
 Hammerspoon, VS Code, Claude Code and the Homebrew packages stay installed. Reload Hammerspoon
 afterwards to close the panel.
 

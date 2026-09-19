@@ -766,4 +766,26 @@ assert_eq "a rule the user already denies is not added twice" "1" \
 assert_json "...and the rest are added alongside it" "$OD/settings.json" \
   '.permissions.deny | length' "${#DENY_RULES[@]}"
 
+# ---- upgrading: `make install` is not the upgrade command (2026-09-19) ----
+# The only "after a change" command the README carried was `make install`, which copies files
+# and nothing else. A release that ADDS a hook (as the held-question hook did) would land on
+# disk and never run, because nothing rewrote settings.json. These pin the difference the
+# README's Upgrading section now spells out, so the docs can't drift from it silently.
+MI="$TMP/makeinstall"; mkdir -p "$MI/claude" "$MI/hs"
+make -C "$ROOT" install CLAUDE_DIR="$MI/claude" HS_DIR="$MI/hs" NO_TAB_BRIDGE=1 >/dev/null 2>&1
+exists "make install copies the hook scripts" "$MI/claude/cc-ask.sh"
+assert_eq "make install alone wires NO hooks (it never writes settings.json)" "absent" \
+  "$([ -e "$MI/claude/settings.json" ] && echo present || echo absent)"
+assert_eq "...nor the default settings" "absent" \
+  "$([ -e "$MI/claude/cc-config.json" ] && echo present || echo absent)"
+assert_eq "...nor the methodology block" "absent" \
+  "$([ -e "$MI/claude/CLAUDE.md" ] && echo present || echo absent)"
+readme_up="$(sed -n '/^### Upgrading/,/^### Uninstall/p' "$ROOT/README.md")"
+assert_eq "the README has an Upgrading section" "yes" \
+  "$([ -n "$readme_up" ] && echo yes || echo no)"
+assert_eq "...telling you to run make setup" "yes" \
+  "$(printf '%s' "$readme_up" | grep -q 'make setup' && echo yes || echo no)"
+assert_eq "...and warning that make install is not enough" "yes" \
+  "$(printf '%s' "$readme_up" | grep -q 'make install' && echo yes || echo no)"
+
 finish
