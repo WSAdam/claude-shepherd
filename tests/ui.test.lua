@@ -3352,5 +3352,19 @@ do
         src:find('(u.result ? "[" + u.result + "] " : "")', 1, true) ~= nil)
 end
 
+-- ---- the Instances row reads the verdict (2026-09-18) ----
+-- It re-derived "needs you" from the raw status -- the old five-source test, inlined, outliving
+-- the rule that replaced it -- so a card demoted to a heads-up still came out red in that list.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("instances row: reads needsYou instead of re-deriving it",
+        src:find("var nk = im.needsYou;", 1, true) ~= nil
+        and src:find('var needs = nk ? (nk === "needs")', 1, true) ~= nil)
+  check("instances row: a heads-up loses the red dot too",
+        src:find('if(nk === "fyi") st = "idle";', 1, true) ~= nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

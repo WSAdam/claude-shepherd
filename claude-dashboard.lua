@@ -14065,7 +14065,14 @@ local HTML = [[
         var im = members[i];
         var st = /^[a-z]+$/.test(im.status || "") ? im.status : "idle";
         var mg = im.merge || null;   // ready to merge (core.mergeView, trimmed by instancesPayload)
-        var needs = st === "approval" || st === "error" || !!im.hung || !!(mg && mg.needsYou);
+        // 2026-09-18: READ the verdict core.needsYouKind already reached; never re-derive one
+        // here. This line used to be the old five-source test, inlined, and it outlived the
+        // rule that replaced it everywhere else -- so a card demoted to a quiet heads-up still
+        // came out red in this list, with nothing Adam could do to clear it.
+        var nk = im.needsYou;
+        var needs = nk ? (nk === "needs")
+                       : (st === "approval" || st === "error" || !!im.hung || !!(mg && mg.needsYou));
+        if(nk === "fyi") st = "idle";
         var ak = im.ask || null;   // a question held for Adam (core.askView): answered right on the row
         var sub = ak ? "❓ asks you: " + (ak.question || "") : (im.pendingSummary ? "wants: " + im.pendingSummary : ((mg && mg.line) || (im.tabless ? TABLESS_T : "") || im.sessTitle || ""));
         var askRow = "";

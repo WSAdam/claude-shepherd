@@ -10218,5 +10218,43 @@ do
      core.decisionSshArgv("d", "k-1", "deny n-1 use trash"), nil)
 end
 
+-- ---- a red nobody can clear (2026-09-18) ----
+-- Live state Adam hit: the transcript-fixtures unit asked a question, cc-ask's hold timed out
+-- and handed it back to the tab's picker, so the card sat status="approval" with pending.ask
+-- still set, no ask_nonce, alive, in a window shared by 11 sessions. Two faults, one card:
+-- the verdict went quiet on a unit that was genuinely blocked, and the Instances list painted
+-- it red anyway because it re-derived "needs you" from the raw status instead of the verdict.
+do
+  local function askPending(over)
+    local it = { key = "k1", status = "approval", stale = true, sharedWindow = 11,
+                 editor = "vscode", procAlive = true,
+                 pending = { ask = { { question = "how do you want the fixtures cut?" } } } }
+    for k, v in pairs(over or {}) do it[k] = v end
+    return it
+  end
+  -- A QUESTION is not a permission prompt. A prompt lapses on its own; a question leaves the
+  -- unit blocked until he answers it, so the affordance is the stalled tab -- exactly the
+  -- reasoning that keeps a blocked merge red (2026-09-18, see the merge arm above).
+  local kind, source, why = core.needsYouKind(askPending(), os.time())
+  eq("a question whose hold lapsed still needs Adam, shared window or not", kind, "needs")
+  eq("...and says it is a question", source, "ask")
+  check("...and points him at the tab", type(why) == "string" and why:find("tab", 1, true) ~= nil)
+  -- No vacuous pass: a real PERMISSION prompt in a shared window is still a heads-up, because
+  -- Approve/Deny there are keystrokes the window refuses -- nothing to press from here.
+  eq("a permission prompt in a shared window is still only a heads-up",
+     (core.needsYouKind(askPending({ pending = { summary = "Bash: rm -rf" } }), os.time())), "fyi")
+  eq("...and an armed gate is answerable, so it needs him",
+     (core.needsYouKind(askPending({ gate = "waiting", pending = { summary = "Bash: ls" } }), os.time())), "needs")
+  eq("a question whose session has gone is history",
+     (core.needsYouKind(askPending({ procAlive = false }), os.time())), "fyi")
+
+  -- The Instances row must READ the verdict, not re-derive one. instancesPayload dropped it,
+  -- so the row fell back to the raw status and painted a demoted card red.
+  local it = askPending({ needsYou = "fyi", needsYouSource = "approval" })
+  local row = core.instancesPayload("repo:/r/.git", { it }, {}, {}, {}).members[1]
+  eq("the instances row carries the verdict", row.needsYou, "fyi")
+  eq("...and its source", row.needsYouSource, "approval")
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

@@ -1400,6 +1400,22 @@ function M.needsYouKind(it, now)
   -- several sessions refuses outright -- so from here there is nothing to press.
   if it.status == "approval" then
     if not alive then return "fyi", "approval", "the session has gone" end
+    -- 2026-09-18: a QUESTION is not a permission prompt, and the difference decides this.
+    -- A prompt lapses on its own -- the session falls back to its native picker and carries
+    -- on -- so when Shepherd cannot press anything there really is nothing here. A question
+    -- (cc-ask's hold lapsed back to the tab's picker, but pending.ask is still set) leaves the
+    -- unit BLOCKED until Adam answers it, and the affordance is the stalled tab, not a button
+    -- in this panel. That is the same reasoning that keeps a blocked merge red. It went quiet
+    -- on a unit that had been waiting on him, and he only noticed because the row was red for
+    -- an unrelated reason.
+    local p = type(it.pending) == "table" and it.pending or nil
+    local asking = p and type(p.ask) == "table" and #p.ask > 0
+    if asking then
+      if it.gate ~= "waiting" and M.keystrokeBlocked(it) then
+        return "needs", "ask", "answer it in its own tab -- its window hosts other sessions"
+      end
+      return "needs", "ask"
+    end
     if it.gate ~= "waiting" and M.keystrokeBlocked(it) then
       return "fyi", "approval", "answer it in its own tab -- its window hosts other sessions"
     end
@@ -1651,6 +1667,9 @@ function M.instancesPayload(stackKey, members, hidden, worktrees, opts)
       hidden = isHidden or nil, lead = it.stackLead and true or nil, rank = it.stackRank,
       wtRoot = it.wtRoot, branch = it.branch, detached = it.detached, isMainWt = it.isMainWt,
       editor = it.editor, pendingSummary = (it.status == "approval") and ps or nil,
+      -- 2026-09-18: the row must READ the verdict, never re-derive one from the raw status.
+      -- Dropping these two fields is what let the Instances list paint a demoted card red.
+      needsYou = it.needsYou, needsYouSource = it.needsYouSource,
       bgActive = it.bg_active and true or nil,
       tabless = it.tabless and true or nil,
       ask = it.askHeld and it.askView or nil,   -- a question held for Adam (cc-ask.sh), answered on the row
