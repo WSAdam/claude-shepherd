@@ -2921,8 +2921,13 @@ do
         and src:find(".a-item.open .a-detail{ display:grid; }", 1, true) ~= nil)
   -- the redact button lives INSIDE the clickable row: without stopPropagation a
   -- redact click would also toggle the detail open.
+  -- 2026-09-19: the call moved from the attribute (which used to read
+  -- onclick="event.stopPropagation();auditRedact('<id>',<ts>)") into the handler, because
+  -- interpolating the ledger's id there put it inside a JS string inside an HTML attribute.
+  -- Same requirement, one level in: the handler takes the event and stops it itself.
   check("limit-display: redact click does not also toggle the row",
-        src:find('onclick="event.stopPropagation();auditRedact(', 1, true) ~= nil)
+        src:find('onclick="auditRedact(event)"', 1, true) ~= nil
+        and (src:match("function auditRedact%(ev%)(.-)\n    }") or ""):find("ev.stopPropagation()", 1, true) ~= nil)
   check("#18-pin: Alerts empty-state mentions usage-limit warnings",
         src:find("usage-limit warnings, and non-human gate decisions land here", 1, true) ~= nil)
 

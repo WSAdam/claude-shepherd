@@ -79,6 +79,23 @@ assert_eq "the merge review fills itself with textContent only (never innerHTML)
 tmp="$(mktemp)"; cp "$DASH" "$tmp"; printf '%s\n' "html += '<b>' + ak.question + '</b>';" >> "$tmp"
 planted="$(grep -cE "$SINK_RE" "$tmp")"; rm -f "$tmp"
 assert_eq "deny-list grep fires on a planted raw held-question sink" "1" "$planted"
+
+# 2026-09-19 (audit ledger): the deny-list above is per-FIELD, so it could only ever see the
+# prefixes someone remembered to add -- it knew it./im./iw./mg./ak. and not `e.` (a ledger
+# event), which is how the redact button came to put e.id straight into an onclick: a JS
+# string literal inside an HTML attribute, two nested contexts, neither escaped.
+# This rule is per-SINK instead, so a new field name can't walk past it: no event-handler
+# attribute anywhere in the panel may interpolate a bare property. An identifier that a
+# handler needs rides in a data- attribute and is read back with getAttribute, the way the
+# tile buttons already do it (data-key, data-stack). Indices, esc()'d and tplQuote()'d values
+# are fine and stay -- it is the bare `+ thing.field` inside on*="..." that is banned.
+HANDLER_RE="on[a-z]+=\\\\?\"[^\"]*'[[:space:]]*\+[[:space:]]*[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_]"
+raw_handlers="$(grep -nE "$HANDLER_RE" "$DASH" || true)"
+assert_eq "no event handler interpolates a bare property (use a data- attribute)" "" "$raw_handlers"
+tmp="$(mktemp)"; cp "$DASH" "$tmp"
+printf '%s\n' "html += '<button onclick=\"zap(\\'' + ev.id + '\\')\">z</button>';" >> "$tmp"
+planted="$(grep -cE "$HANDLER_RE" "$tmp")"; rm -f "$tmp"
+assert_eq "handler grep fires on a planted interpolated id (no vacuous pass)" "1" "$planted"
 ask="$(sed -n '/^    function renderAsk(it){/,/^    }$/p' "$DASH")"
 [ -n "$ask" ] && got=found || got=missing
 assert_eq "the answer form renderer exists" "found" "$got"

@@ -10824,7 +10824,7 @@ local HTML = [[
       html += TEMPLATES.map(function(t){
         var nm = tplQuote(t.name);
         var badge = (t.vars && t.vars.length) ? '<span class="tpl-badge" title="has variables">{{ }}</span>' : '';
-        var ver = (t.version && t.version > 1) ? '<span class="tpl-ver">v' + t.version + '</span>' : '';
+        var ver = (t.version && t.version > 1) ? '<span class="tpl-ver">v' + esc(t.version) + '</span>' : '';
         return '<div class="tpl-row" onclick="templateInsert(' + nm + ')">'
           + '<span class="tpl-name">' + esc(t.name) + badge + ver + '</span>'
           + '<span class="tpl-text">' + esc(t.body || "") + '</span>'
@@ -15551,7 +15551,8 @@ local HTML = [[
         + '<span class="a-ts">' + esc(fmtTs(e.ts)) + '</span>'
         + '<span class="a-name">' + esc(evWho(e)) + '</span>'
         + '<span class="a-desc">' + esc(evDesc(e)) + (e.redacted ? ' <i class="a-redacted">[redacted]</i>' : '') + '</span>'
-        + (canRedact ? '<button class="a-redact" onclick="event.stopPropagation();auditRedact(\'' + e.id + '\',' + (e.ts || 0) + ')">redact</button>' : '')
+        + (canRedact ? '<button class="a-redact" data-aid="' + esc(e.id || "") + '" data-ats="' + esc(String(e.ts || 0))
+            + '" onclick="auditRedact(event)">redact</button>' : '')
         + '</div>' + detail + '</div>';
     }
     function populateAuditSessions(){
@@ -15587,8 +15588,16 @@ local HTML = [[
         ? evs.map(auditRow).join("")
         : '<div class="s-help" style="margin-left:0;">No events in range.</div>';
     }
-    function auditRedact(id, ts){
-      send("audit-redact", "", JSON.stringify({ id: id, ts: ts,
+    // The id and ts are read back off the button, never interpolated into this handler
+    // (2026-09-19): they come from a ledger JSONL file on disk, and an onclick is a JS
+    // string inside an HTML attribute -- two nested contexts, the same reason the tile
+    // buttons read data-key/data-stack instead (stackBtnHtml, prBadgeHtml).
+    function auditRedact(ev){
+      if(ev){ ev.stopPropagation(); }
+      var b = ev && ev.currentTarget ? ev.currentTarget : null;
+      if(!b || !b.getAttribute) return;
+      send("audit-redact", "", JSON.stringify({ id: b.getAttribute("data-aid") || "",
+        ts: (+b.getAttribute("data-ats") || 0),
         fields: ["prompt","summary","task","text","message","command"] }));
     }
     function auditReview(){ send("audit-review", selectedKey || "", JSON.stringify(serverFilter())); }

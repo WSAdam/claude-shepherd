@@ -91,6 +91,9 @@ echo ""
 echo "== node: Done-drawer ordering (behavioral, runs the shipped comparator) =="
 node "$DIR/done-order.test.js" || fail=1
 echo ""
+echo "== node: a ledger row's redact button can't smuggle in markup (behavioral, runs the shipped row) =="
+node "$DIR/audit-row-escaping.test.js" || fail=1
+echo ""
 echo "== node: tile presses (behavioral, runs the shipped press logic) =="
 node "$DIR/tile-dblclick.test.js" || fail=1
 echo ""
