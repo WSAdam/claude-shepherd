@@ -68,6 +68,22 @@ for p in Scratch-pad/anything.html docs/feature-mining/x.md docs/orchestrator-ne
   if git -C "$REPO" check-ignore -q "$p"; then got=ignored; else got=untracked; fi
   assert_eq "$p is gitignored" "ignored" "$got"
 done
+# 2026-09-19: an unrelated 27MB project (its own .env inside) was sitting untracked in the repo
+# root -- one `git add -A` from being published here. Another checkout parked in this one is
+# always someone's mistake, never something to commit, so the ignore rule is anchored to the
+# root and the folder stays where it is until its owner moves it.
+mkdir -p "$REPO/Chargeback-sdks/src"
+printf 'x\n' > "$REPO/Chargeback-sdks/src/mod.ts"
+if git -C "$REPO" check-ignore -q Chargeback-sdks/src/mod.ts; then got=ignored; else got=untracked; fi
+assert_eq "a stray project folder in the repo root is gitignored, not stageable" "ignored" "$got"
+git -C "$REPO" add -A 2>/dev/null
+got="$(git -C "$REPO" diff --cached --name-only -- Chargeback-sdks | wc -l | tr -d ' ')"
+assert_eq "...so even git add -A stages none of it" "0" "$got"
+# ...and the rule is anchored: a nested folder of that name elsewhere is not swept up.
+mkdir -p "$REPO/demo/Chargeback-sdks"
+printf 'y\n' > "$REPO/demo/Chargeback-sdks/keep.ts"
+if git -C "$REPO" check-ignore -q demo/Chargeback-sdks/keep.ts; then got=ignored; else got=untracked; fi
+assert_eq "...while a same-named folder deeper in the tree is untouched" "untracked" "$got"
 
 # 2026-09-18: tests/fixtures/transcripts/ holds windows cut from REAL session transcripts, for
 # tests/transcript-replay.test.lua. It is tracked on purpose, and only ever scrubbed: a raw

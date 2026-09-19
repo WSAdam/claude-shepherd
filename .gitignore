@@ -42,6 +42,12 @@ TODO.md
 # The companion VS Code extension's packages (make bridge builds them here).
 /build/
 
+# Another project parked inside this checkout (2026-09-19). 27MB of an unrelated repo, its
+# own .env inside it, sat untracked in the root -- one `git add -A` from being published in
+# this public repo. A checkout inside a checkout is always a mistake, never a commit; anchored
+# to the root so a folder of that name deeper in the tree is unaffected.
+/Chargeback-sdks/
+
 # Internal to our own work on Shepherd -- a fresh install never needs these (2026-09-17)
 Scratch-pad/
 docs/feature-mining/
