@@ -10667,7 +10667,15 @@ local HTML = [[
       if(headsUp(it)) return it.needsYouSource === "error" ? LABELS.retrying : LABELS.fyi;
       if(isDriving(it)){ var nu = (it.fleet.units || []).length; return "Driving " + nu + " unit" + (nu === 1 ? "" : "s"); }
       if(bgRunning(it)){ var n = (it && it.bg_count) || 0; return "Running " + n + " agent" + (n === 1 ? "" : "s"); }
-      var st = (it && it.status) || "idle"; return LABELS[st] || st;
+      // 2026-09-18: a working session that is waiting INSIDE a tool call says which one and
+      // for how long, so a nine-minute Bash reads as work rather than as a card that has
+      // stopped moving. Under a minute it is just "Working" -- no point counting seconds.
+      var st = (it && it.status) || "idle";
+      if(st === "working" && it && typeof it.tool_started_at === "number"){
+        var secs = Math.max(0, Math.floor(Date.now() / 1000) - it.tool_started_at);
+        if(secs >= 60) return "Working - " + esc(it.tool_name || "a tool") + " " + fmtAge(it.tool_started_at);
+      }
+      return LABELS[st] || st;
     }
     // Appearance themes/defaults/var-list, single-sourced from cc-core APPEARANCE_*
     // (injected). Drives the Appearance tab's live preview (applyAppearance twin).
@@ -16913,6 +16921,9 @@ function FX._refreshBody()
   local escTopic   = tostring(core.config(cfg, "escalation.pushTopic", ""))
   local hungOn     = core.config(cfg, "escalation.hung.enabled", false) == true
   local hungMin    = tonumber(core.config(cfg, "escalation.hung.minutes", 5)) or 5
+  -- 2026-09-18: a transcript does not grow until a tool RETURNS, so a long Bash read as a stall.
+  -- A tool in flight explains the silence until the TOOL has itself run this long.
+  local hungToolMin = tonumber(core.config(cfg, "escalation.hung.toolMinutes", 30)) or 30
   local apEnabled  = core.config(cfg, "policies.autopilot.enabled", false) == true
   local drainOn    = core.config(cfg, "drain.enabled", false) == true
   local autoRespawnOn  = core.config(cfg, "respawn.auto.enabled", false) == true
@@ -17358,7 +17369,7 @@ function FX._refreshBody()
     -- progress past the threshold; nag once per stall, reusing the escalation
     -- sound/push prefs. Distinct from approvalStale (which covers waiting on you).
     local w = watchdog[it.key]
-    if hungOn and core.isHung(it, w and w.ts, now, hungMin * 60) then
+    if hungOn and core.isHung(it, w and w.ts, now, hungMin * 60, hungToolMin * 60) then
       it.hung = true
       if w and not w.alerted then
         w.alerted = true

@@ -10256,5 +10256,40 @@ do
   eq("...and its source", row.needsYouSource, "approval")
 end
 
+-- ---- busy inside a tool call is not frozen (2026-09-18) ----
+-- The hung watchdog keys off TRANSCRIPT GROWTH, and a transcript does not grow until the tool
+-- returns -- so a nine-minute Bash looked exactly like a wedged session. PreToolUse/PostToolUse
+-- already fire for every tool and carry tool_use_id (verified against a real payload), so the
+-- status file can say what is in flight and since when.
+do
+  local now = 1000000
+  local function busy(over)
+    local it = { status = "working", tool_name = "Bash", tool_started_at = now - 540 }  -- 9 min
+    for k, v in pairs(over or {}) do it[k] = v end
+    return it
+  end
+  local t = core.toolInFlight(busy(), now)
+  eq("a tool in flight is reported with its name", t and t.name, "Bash")
+  eq("...and how long it has been running", t and t.seconds, 540)
+  eq("no tool in flight reports nothing", core.toolInFlight({ status = "working" }, now), nil)
+  eq("a non-numeric start is not a tool in flight",
+     core.toolInFlight(busy({ tool_started_at = "soon" }), now), nil)
+
+  -- The watchdog. 5 min of no transcript growth USED to be hung; a tool call explains it.
+  local hung5, toolCap = 300, 1800
+  eq("a session nine minutes into a Bash call is not hung",
+     core.isHung(busy(), now - 600, now, hung5, toolCap), false)
+  eq("...but one with no tool in flight still is",
+     core.isHung({ status = "working" }, now - 600, now, hung5, toolCap), true)
+  -- No vacuous pass: a tool call that has itself run absurdly long is still a hang.
+  eq("a tool call that has run far past the tool cap is hung after all",
+     core.isHung(busy({ tool_started_at = now - 3600 }), now - 600, now, hung5, toolCap), true)
+  eq("a stale session is never judged by its tool call",
+     core.isHung(busy({ stale = true }), now - 600, now, hung5, toolCap), false)
+  -- Old callers pass four arguments; they must keep working exactly as before.
+  eq("without a tool cap the watchdog behaves as it always did",
+     core.isHung({ status = "working" }, now - 600, now, hung5), true)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

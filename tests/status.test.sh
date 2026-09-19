@@ -347,4 +347,30 @@ assert_eq "status writer publishes session_pid" "yes" \
 assert_eq "session_pid comes from the cached helper" "yes" \
   "$(grep -qF 'SESSION_PID="$(cc_session_pid "$KEY")"' "$ROOT/cc-status.sh" && echo yes || echo no)"
 
+# ---- what the session is waiting ON (2026-09-18) ----
+# The hung watchdog keys off transcript growth, and a transcript does not grow until a tool
+# RETURNS -- so a nine-minute Bash read as a wedged session. Both tool events carry tool_use_id,
+# which is what keeps a parallel subagent (same session_id, same status file) from clearing the
+# main turn's in-flight tool.
+T="$TMP/tool.json"
+TSID="tooler"
+tf() { printf '%s' "$2" | bash "$CC" "$1" >/dev/null 2>&1; }
+TF="$CC_STATUS_DIR/$TSID.json"
+tf pretooluse "{\"session_id\":\"$TSID\",\"cwd\":\"$CWD\",\"tool_name\":\"Bash\",\"tool_use_id\":\"tu_1\",\"tool_input\":{\"command\":\"make test\"}}"
+assert_json "pretooluse records the tool in flight" "$TF" '.tool_name' "Bash"
+assert_json "...with the id that will clear it" "$TF" '.tool_use_id' "tu_1"
+got="$(jq -r '.tool_started_at | if type=="number" then "number" else "no" end' "$TF" 2>/dev/null)"
+assert_eq "...and when it started, as a number" "number" "$got"
+
+# A parallel subagent finishing its own tool must NOT clear the main turn's.
+tf posttooluse "{\"session_id\":\"$TSID\",\"cwd\":\"$CWD\",\"tool_name\":\"Read\",\"tool_use_id\":\"tu_other\",\"duration_ms\":12}"
+assert_json "a subagent's posttooluse leaves another tool in flight alone" "$TF" '.tool_name' "Bash"
+assert_json "...and keeps its id" "$TF" '.tool_use_id' "tu_1"
+
+# The matching posttooluse clears it.
+tf posttooluse "{\"session_id\":\"$TSID\",\"cwd\":\"$CWD\",\"tool_name\":\"Bash\",\"tool_use_id\":\"tu_1\",\"duration_ms\":540000}"
+got="$(jq -r '.tool_started_at // "cleared"' "$TF" 2>/dev/null)"
+assert_eq "the matching posttooluse clears the in-flight tool" "cleared" "$got"
+assert_json "...and the session is still working" "$TF" '.status' "working"
+
 finish

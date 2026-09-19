@@ -139,6 +139,18 @@ case "$EVENT" in
     ;;
   pretooluse|posttooluse)
     STATUS="working"
+    # 2026-09-18: what the session is waiting ON. The transcript does not grow until a tool
+    # RETURNS, so a nine-minute Bash used to look exactly like a wedged session to the hung
+    # watchdog. Both events carry tool_use_id, so a parallel subagent's PostToolUse (they share
+    # one session_id, and one status file) cannot clear the main turn's in-flight tool.
+    TOOL_ID="$(cc_get "$INPUT" '.tool_use_id')"
+    if [ "$EVENT" = "pretooluse" ]; then
+      TOOL_NAME="$(cc_get "$INPUT" '.tool_name')"
+      TOOL_SET="1"
+    else
+      HELD="$(cc_read_field "$KEY" '.tool_use_id')"
+      if [ -z "$HELD" ] || [ "$HELD" = "$TOOL_ID" ]; then TOOL_CLEAR="1"; fi
+    fi
     # AskUserQuestion carries the multiple-choice questions in tool_input; capture
     # them so the panel can render the options (the session is now waiting on you).
     if [ "$EVENT" = "pretooluse" ] && [ "$(cc_get "$INPUT" '.tool_name')" = "AskUserQuestion" ]; then
@@ -237,6 +249,16 @@ PATCH="$(jq -nc \
   --argjson updated "$NOW" \
   --argjson since "$SINCE" \
   '{session_id:$sid, name:$name, cwd:$cwd, status:$status, updated:$updated, since:$since}')"
+
+# The in-flight tool rides on the patch (no extra jq spawn beyond this one): set on
+# PreToolUse, nulled on the matching PostToolUse. Null rather than deleted because the patch is
+# a deep MERGE -- the reader treats a non-numeric tool_started_at as nothing in flight.
+if [ -n "${TOOL_SET:-}" ]; then
+  PATCH="$(printf '%s' "$PATCH" | jq -c --arg tn "$TOOL_NAME" --arg ti "$TOOL_ID" --argjson ta "$NOW" \
+    '. + {tool_name:$tn, tool_use_id:$ti, tool_started_at:$ta}')"
+elif [ -n "${TOOL_CLEAR:-}" ]; then
+  PATCH="$(printf '%s' "$PATCH" | jq -c '. + {tool_name:null, tool_use_id:null, tool_started_at:null}')"
+fi
 
 if [ -n "$SET_PROMPT" ]; then
   TRIMMED="$(printf '%s' "$SET_PROMPT" | cut -c1-200)"

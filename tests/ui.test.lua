@@ -3366,5 +3366,20 @@ do
         src:find('if(nk === "fyi") st = "idle";', 1, true) ~= nil)
 end
 
+-- ---- a long tool call is work, not a stalled card (2026-09-18) ----
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("statusWords: a working session names the tool it is waiting inside",
+        src:find('st === "working" && it && typeof it.tool_started_at === "number"', 1, true) ~= nil
+        and src:find('return "Working - " + esc(it.tool_name', 1, true) ~= nil)
+  check("statusWords: under a minute stays plain Working",
+        src:find("if(secs >= 60)", 1, true) ~= nil)
+  check("watchdog: the tool cap is passed to core.isHung",
+        src:find("core.isHung(it, w and w.ts, now, hungMin * 60, hungToolMin * 60)", 1, true) ~= nil
+        and src:find('escalation.hung.toolMinutes', 1, true) ~= nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

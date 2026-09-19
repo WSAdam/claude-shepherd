@@ -6450,9 +6450,30 @@ end
 -- (lastProgressTs nil) isn't flagged -- we only flag a stall we can actually time.
 -- Complements approvalStale: that covers a session waiting on YOU; this covers one
 -- wedged on its own (an infinite tool loop, a hung command) that never escalates.
-function M.isHung(item, lastProgressTs, now, thresholdSec)
+-- 2026-09-18: what the session is waiting ON, from the status file. cc-status.sh stamps
+-- tool_name + tool_started_at on PreToolUse and clears them on the matching PostToolUse
+-- (matched by tool_use_id, which both events carry, so a parallel subagent's Post cannot
+-- clear the main turn's Pre). nil = nothing in flight, or a start we cannot time.
+function M.toolInFlight(item, now)
+  if type(item) ~= "table" then return nil end
+  local started = tonumber(item.tool_started_at)
+  if not started then return nil end
+  return { name = tostring(item.tool_name or "a tool"), seconds = (tonumber(now) or 0) - started }
+end
+
+-- toolCapSec (optional) is what makes the watchdog honest: the transcript does not grow until a
+-- tool RETURNS, so a nine-minute Bash was indistinguishable from a wedged session and read as
+-- hung. A tool in flight explains the silence -- until the tool has itself run past the cap, at
+-- which point the tool is the thing that is stuck and this is a hang again. Callers that pass no
+-- cap behave exactly as before.
+function M.isHung(item, lastProgressTs, now, thresholdSec, toolCapSec)
   if not item or item.status ~= "working" or item.stale then return false end
   if not lastProgressTs then return false end
+  local cap = tonumber(toolCapSec)
+  if cap then
+    local t = M.toolInFlight(item, now)
+    if t and t.seconds <= cap then return false end
+  end
   return ((tonumber(now) or 0) - (tonumber(lastProgressTs) or 0)) > (tonumber(thresholdSec) or 0)
 end
 
