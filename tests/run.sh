@@ -171,6 +171,9 @@ echo ""
 echo "== lua: Shepherd answers -- a held question answered from the card (behavioral, stubbed hs) =="
 HOME="$(mktemp -d)" lua "$DIR/ask.test.lua" || fail=1
 echo ""
+echo "== lua+sh: a session's files are reaped by BOTH removers, parked and torn ones too (behavioral) =="
+HOME="$(mktemp -d)" lua "$DIR/reap-session-files.test.lua" || fail=1
+echo ""
 echo "== node: the answer form (behavioral, runs the shipped form helpers) =="
 node "$DIR/ask-form.test.js" || fail=1
 echo ""

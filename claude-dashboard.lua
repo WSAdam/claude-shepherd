@@ -2557,9 +2557,11 @@ function FX.removeStatus(key)
   os.remove(STATUS_DIR .. "/" .. key .. ".decision.note")   -- the reason typed beside Deny
   local claimPrefix = key .. ".decision.claim."  -- covers .claim.* AND .claim.*.parked
   local notePrefix = key .. ".decision.note.tmp."
+  local tornPrefix = key .. ".json.tmp."   -- a status write killed between write and rename
   for _, fn in ipairs(FX.readDir(STATUS_DIR)) do
     if fn:sub(1, #claimPrefix) == claimPrefix then os.remove(STATUS_DIR .. "/" .. fn) end
     if fn:sub(1, #notePrefix) == notePrefix then os.remove(STATUS_DIR .. "/" .. fn) end
+    if fn:sub(1, #tornPrefix) == tornPrefix then os.remove(STATUS_DIR .. "/" .. fn) end
   end
   os.remove(GATE_TOOLS_DIR .. "/" .. key)
   os.remove((os.getenv("CC_APPROVED_DIR") or (home .. "/.claude/cc-approved")) .. "/" .. key)
@@ -2572,14 +2574,21 @@ function FX.removeStatus(key)
   os.remove(mergeDir .. "/" .. key .. ".json")
   os.remove(mergeDir .. "/" .. key .. ".decision")
   local mclaim = key .. ".decision.claim."
+  -- cc-merge.sh parks an answer that isn't its own as <key>.decision.parked.<pid> -- its own
+  -- shape, outside .decision.claim.*, so it used to survive the session it belonged to
+  -- (2026-09-19). .decision.tmp.* is FX.writeFileAtomic's temp, leaked by a crash mid-rename.
+  local mparked, mtmp = key .. ".decision.parked.", key .. ".decision.tmp."
   for _, fn in ipairs(FX.readDir(mergeDir)) do
     if fn:sub(1, #mclaim) == mclaim then os.remove(mergeDir .. "/" .. fn) end
+    if fn:sub(1, #mparked) == mparked then os.remove(mergeDir .. "/" .. fn) end
+    if fn:sub(1, #mtmp) == mtmp then os.remove(mergeDir .. "/" .. fn) end
   end
   -- Adam's answer to a held question (cc_remove drops the same files)
   os.remove(FX.ASK_DIR .. "/" .. key .. ".answer")
-  local aclaim = key .. ".answer.claim."
+  local aclaim, atmp = key .. ".answer.claim.", key .. ".answer.tmp."
   for _, fn in ipairs(FX.readDir(FX.ASK_DIR)) do
     if fn:sub(1, #aclaim) == aclaim then os.remove(FX.ASK_DIR .. "/" .. fn) end
+    if fn:sub(1, #atmp) == atmp then os.remove(FX.ASK_DIR .. "/" .. fn) end
   end
 end
 

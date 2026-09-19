@@ -326,13 +326,22 @@ CC_ASK_DIR="${CC_ASK_DIR:-${HOME}/.claude/cc-ask}"
 # file and the per-session gated-tools override, approveRepeats memo, autopilot
 # expiry, L2 policy files, and the model auto-routing opt-in (a new session gets a
 # new key, so this just stops orphans accumulating).
+# The *.parked.* and *.tmp.* globs are the leftovers of an interrupted handover
+# (2026-09-19): cc-merge.sh parks an answer that isn't its own as
+# <key>.decision.parked.<pid>, and every writer here goes temp-then-rename, so a
+# crash in between leaves <key>.json.tmp.<pid> and friends. Both used to outlive
+# the session that owned them -- keys are UUIDs, so nothing matched them again.
+# KEEP THE FILE SET IN SYNC with FX.removeStatus in claude-dashboard.lua.
 cc_remove() {
-  rm -f "$(cc_file "$1")" "$(cc_decision_file "$1")" "$(cc_decision_file "$1")".claim.* \
+  rm -f "$(cc_file "$1")" "$(cc_file "$1")".tmp.* "$(cc_decision_file "$1")" \
+    "$(cc_decision_file "$1")".claim.* \
     "$(cc_decision_file "$1")".note "$(cc_decision_file "$1")".note.tmp.* \
     "$CC_GATE_TOOLS_DIR/$1" "$CC_APPROVED_DIR/$1" "$CC_AUTOPILOT_DIR/$1" \
     "$CC_POLICY_DIR/$1" "$CC_POLICY_OVERRIDE_DIR/$1" "$CC_AUTOMODEL_DIR/$1" \
     "$CC_MERGE_DIR/$1.json" "$CC_MERGE_DIR/$1.decision" "$CC_MERGE_DIR/$1.decision".claim.* \
-    "$CC_ASK_DIR/$1.answer" "$CC_ASK_DIR/$1.answer".claim.* 2>/dev/null || true
+    "$CC_MERGE_DIR/$1.decision".parked.* "$CC_MERGE_DIR/$1.decision".tmp.* \
+    "$CC_ASK_DIR/$1.answer" "$CC_ASK_DIR/$1.answer".claim.* \
+    "$CC_ASK_DIR/$1.answer".tmp.* 2>/dev/null || true
 }
 
 # ---- Audit/event ledger ----------------------------------------------------
