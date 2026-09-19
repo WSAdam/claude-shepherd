@@ -3281,6 +3281,15 @@ do
   check("ask default: ...and the Settings form shows the same default, so a Save can't flip it",
         src:find('ck("s-ask-en",     cv(cfg,"ask.enabled",true))', 1, true) ~= nil
         and src:find('ask: { enabled: ck("s-ask-en") }', 1, true) ~= nil)
+  -- 2026-09-19: the help text under that checkbox still opened with "Off by default." from the
+  -- one day the feature was opt-in, so the pane told you the opposite of what the tick beside it
+  -- was doing -- and a coworker upgrading would read it as a feature they had to go turn on.
+  do
+    local help = src:match('id="s%-ask%-en"[^\n]-\n%s*<div class="s%-help">(.-)</div>') or ""
+    check("ask default: ...and the help under it doesn't say the opposite  (len=" .. #help .. ")",
+          #help > 100 and help:find("Off by default", 1, true) == nil
+          and help:find("On by default", 1, true) ~= nil)
+  end
   check("ask poke: the ask dir's watcher is retained on the module and only .poke refreshes",
         src:find("M.askWatcher = hs.pathwatcher.new(FX.ASK_DIR", 1, true) ~= nil
         and src:find("if core.askPokeShouldRefresh(paths) then pcall(refresh) end", 1, true) ~= nil)

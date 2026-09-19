@@ -357,8 +357,8 @@ instead of showing it in the tab:
 - Approve / Deny (and Approve all) skip a held question: it's answered with its own buttons.
 
 Your answer is `~/.claude/cc-ask/<key>.answer`, bound to the question it's for. The hook is wired by
-`make setup`; unticking the setting (`"ask": { "enabled": false }`, or no `enabled` at all) sends
-every question straight to the tab again, from the next question on.
+`make setup`; unticking the setting (`"ask": { "enabled": false }`) sends every question straight to
+the tab again, from the next question on. A config that says nothing about `ask` leaves it on.
 
 ### Messages
 

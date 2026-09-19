@@ -9940,7 +9940,7 @@ local HTML = [[
 
       <div class="s-sec">Questions</div>
       <label class="s-row"><input type="checkbox" id="s-ask-en"> Answer questions in Shepherd (a session's AskUserQuestion is held for its card)</label>
-      <div class="s-help">Off by default. On: while Shepherd is running, a session's question is held by the cc-ask.sh hook and you answer it on its card &mdash; each option with its explanation &mdash; with no tab. "Answer in the tab instead" hands it back, and the tab's own picker takes over after 15&nbsp;min or when Shepherd isn't running. Off: questions go straight to the tab, as Claude Code does on its own. Takes effect on the next question; needs the hooks from <code>make setup</code>.</div>
+      <div class="s-help">On by default. On: while Shepherd is running, a session's question is held by the cc-ask.sh hook and you answer it on its card &mdash; each option with its explanation &mdash; with no tab. "Answer in the tab instead" hands it back, and the tab's own picker takes over after 15&nbsp;min or when Shepherd isn't running. Off: questions go straight to the tab, as Claude Code does on its own. Takes effect on the next question; needs the hooks from <code>make setup</code>.</div>
 
       <div class="s-sec">Approval gate (advanced)</div>
       <label class="s-row"><input type="checkbox" id="s-gate"> Arm the approval gate (route permission prompts to this panel)</label>
