@@ -28,7 +28,12 @@ lint:
 # until they're copied. Run this after every change (then `make reload`).
 .PHONY: install
 install:
-	@cp claude-dashboard.lua cc-core.lua "$(HS_DIR)/"
+# Same rename rule as the hooks below (and as install.sh): a plain `cp` truncates the
+# destination in place, and Hammerspoon's pathwatcher can fire mid-write and load half a
+# chunk -- of a file this size, most of a second's worth of bytes.
+	@for f in claude-dashboard.lua cc-core.lua; do \
+		cp "$$f" "$(HS_DIR)/.$$f.tmp.$$$$" && mv -f "$(HS_DIR)/.$$f.tmp.$$$$" "$(HS_DIR)/$$f" || exit 1; \
+	done
 	@echo "✅ copied claude-dashboard.lua + cc-core.lua -> $(HS_DIR)/"
 # The hooks run from $(CLAUDE_DIR), so a deploy that ships only the Lua leaves edits
 # to the status writer SILENTLY unshipped -- the panel reloads, the hooks do not.

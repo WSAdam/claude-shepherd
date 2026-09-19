@@ -445,6 +445,13 @@ assert_eq "gate: missing lua aborts before make is ever invoked" "0" \
 # resumed at its byte offset inside the NEW file. A rename leaves the running copy intact.
 MCDIR="$TMP/make-claude"; MHDIR="$TMP/make-hs"; mkdir -p "$MCDIR" "$MHDIR"
 printf 'old\n' > "$MCDIR/cc-approve.sh"; printf 'old\n' > "$MCDIR/cc-merge.sh"
+# 2026-09-19: the Lua pair was still going in with a plain `cp` -- an in-place truncate of a
+# 1MB file that Hammerspoon's pathwatcher can reload mid-write, loading half a chunk. The rule
+# the target states for the hooks applies to these two as well; install.sh already did it.
+printf 'old\n' > "$MHDIR/claude-dashboard.lua"; printf 'old\n' > "$MHDIR/cc-core.lua"
+ino_of_mk() { ls -i "$1" 2>/dev/null | awk '{print $1}'; }
+mk_dash_ino="$(ino_of_mk "$MHDIR/claude-dashboard.lua")"
+mk_core_ino="$(ino_of_mk "$MHDIR/cc-core.lua")"
 exec 7< "$MCDIR/cc-approve.sh"       # a "running hook" holding the old file open
 make -C "$ROOT" --no-print-directory install HS_DIR="$MHDIR" CLAUDE_DIR="$MCDIR" NO_TAB_BRIDGE=1 >/dev/null 2>&1
 assert_eq "make install: exit 0" "0" "$?"
@@ -460,6 +467,14 @@ exists "install.sh: ships cc-merge.sh too" "$CDIR/cc-merge.sh"
 exists "install.sh: ships cc-fleet.sh too" "$CDIR/cc-fleet.sh"
 [ -x "$MCDIR/cc-ask.sh" ] && cmp -s "$ROOT/cc-ask.sh" "$MCDIR/cc-ask.sh" && got=yes || got=no
 assert_eq "make install: ships cc-ask.sh, executable" "yes" "$got"
+assert_eq "make install: the dashboard lands on a NEW inode too (rename, not truncate)" "changed" \
+  "$([ -n "$mk_dash_ino" ] && [ "$(ino_of_mk "$MHDIR/claude-dashboard.lua")" != "$mk_dash_ino" ] && echo changed)"
+assert_eq "make install: ...and so does cc-core.lua" "changed" \
+  "$([ -n "$mk_core_ino" ] && [ "$(ino_of_mk "$MHDIR/cc-core.lua")" != "$mk_core_ino" ] && echo changed)"
+cmp -s "$ROOT/claude-dashboard.lua" "$MHDIR/claude-dashboard.lua" && got=new || got=stale
+assert_eq "make install: ...with the new dashboard really in place" "new" "$got"
+ls -a "$MHDIR" | grep -q '\.tmp\.' && got=leftovers || got=clean
+assert_eq "make install: leaves no temp files in the hammerspoon dir" "clean" "$got"
 
 # ---- make reload never blocks a deploy (2026-09-11) ----
 # The reload drops Hammerspoon's IPC port; an `hs -c` caught mid-reply then waited forever
