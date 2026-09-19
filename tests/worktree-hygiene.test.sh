@@ -12,6 +12,19 @@ source "$(dirname "$0")/lib.sh"
 TMP="$(mktemp_dir)"
 trap 'rm -rf "$TMP"' EXIT
 
+# 2026-09-19: half of this file asserts against the REAL checkout's git index -- what a clone
+# ships, and what it must not. Outside a git repo `git ls-files` exits 128 with empty output,
+# so every one of those read 0 and the suite went red: the README offers a ZIP download as the
+# first install step, and install.sh gates on this suite, so an unzipped copy aborted its own
+# install. There is nothing to assert about an index that isn't there, so those checks skip --
+# loudly, naming the reason -- and everything else (the throwaway repo below, the fixture
+# scrubbing) still runs. In a real checkout nothing changes.
+if git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then HAVE_INDEX=yes; else HAVE_INDEX=no; fi
+skip_index() {
+  TESTS_RUN=$((TESTS_RUN + 1))
+  echo "skip - $1 (no git index here -- a ZIP download, not a clone)"
+}
+
 REPO="$TMP/repo"
 WT="$TMP/repo-fix-demo"
 git init -q "$REPO"
@@ -34,6 +47,7 @@ assert_eq "Claude-made worktrees under .claude/worktrees/ are gitignored" "ignor
 # uses. A fresh install gets what it runs on (code, README, CLAUDE.md, context.md, spec, demo);
 # these stay local only.
 for p in Scratch-pad docs/feature-mining docs/orchestrator-next.md docs/hardware-verification.md todos.md; do
+  if [ "$HAVE_INDEX" = no ]; then skip_index "$p is not tracked in this (public) repo"; continue; fi
   got="$(git -C "$ROOT" ls-files -- "$p" | wc -l | tr -d ' ')"
   assert_eq "$p is not tracked in this (public) repo" "0" "$got"
 done
@@ -46,6 +60,7 @@ for p in install.sh bootstrap.sh uninstall.sh "Install Shepherd.command" "Uninst
          claude-dashboard.lua app/build-app.sh vscode-bridge/package.json vscode-bridge/extension.js \
          vscode-bridge/lib.js vscode-bridge/build-vsix.sh vscode-bridge/install-vsix.sh Makefile tests/run.sh \
          .github/workflows/ci.yml; do
+  if [ "$HAVE_INDEX" = no ]; then skip_index "$p is tracked, so a clone can install"; continue; fi
   got="$(git -C "$ROOT" ls-files -- "$p" | wc -l | tr -d ' ')"
   assert_eq "$p is tracked, so a clone can install" "1" "$got"
 done
@@ -60,11 +75,18 @@ done
 # fixture is small (no LFS here), has no CRLF (CI replays it on Linux, byte for byte) and holds
 # no word outside vocabulary.txt (check-scrubbed.js); nothing else may live in that folder.
 FXT="tests/fixtures/transcripts"
-got="$(git -C "$ROOT" ls-files -- "$FXT" | grep -c '\.jsonl$')"
-if [ "$got" -ge 1 ]; then got=yes; else got=no; fi
-assert_eq "transcript fixtures are tracked, so a clone can replay them" "yes" "$got"
-got="$(git -C "$ROOT" ls-files -- "$FXT" | grep -v -e '\.jsonl$' -e '/scrub\.js$' -e '/check-scrubbed\.js$' -e '/vocabulary\.txt$' -e '/README\.md$' | wc -l | tr -d ' ')"
-assert_eq "nothing but fixtures, the scrubber, its checker and their notes is tracked in $FXT" "0" "$got"
+if [ "$HAVE_INDEX" = no ]; then
+  skip_index "transcript fixtures are tracked, so a clone can replay them"
+  skip_index "nothing but fixtures, the scrubber, its checker and their notes is tracked in $FXT"
+else
+  got="$(git -C "$ROOT" ls-files -- "$FXT" | grep -c '\.jsonl$')"
+  if [ "$got" -ge 1 ]; then got=yes; else got=no; fi
+  assert_eq "transcript fixtures are tracked, so a clone can replay them" "yes" "$got"
+  got="$(git -C "$ROOT" ls-files -- "$FXT" | grep -v -e '\.jsonl$' -e '/scrub\.js$' -e '/check-scrubbed\.js$' -e '/vocabulary\.txt$' -e '/README\.md$' | wc -l | tr -d ' ')"
+  assert_eq "nothing but fixtures, the scrubber, its checker and their notes is tracked in $FXT" "0" "$got"
+fi
+# The per-fixture checks below read the files themselves, not the index, so they run either
+# way: outside a repo the list comes from the folder instead of `git ls-files`.
 while IFS= read -r f; do
   [ -n "$f" ] || continue
   size="$(wc -c < "$ROOT/$f" | tr -d ' ')"
@@ -75,7 +97,8 @@ while IFS= read -r f; do
   if node "$ROOT/$FXT/check-scrubbed.js" "$ROOT/$f" >/dev/null 2>&1; then got=scrubbed; else got=readable; fi
   assert_eq "$f holds no readable text" "scrubbed" "$got"
 done <<EOF
-$(git -C "$ROOT" ls-files -- "$FXT" | grep '\.jsonl$')
+$(if [ "$HAVE_INDEX" = yes ]; then git -C "$ROOT" ls-files -- "$FXT" | grep '\.jsonl$'
+   else (cd "$ROOT" && ls -1 "$FXT"/*.jsonl 2>/dev/null); fi)
 EOF
 # ...and the checker itself goes red on the real thing: one unscrubbed record among scrubbed ones.
 printf '%s\n' '{"type":"user","message":{"role":"user","content":"xxxx xxx"}}' \

@@ -795,6 +795,28 @@ assert_eq "...nor the default settings" "absent" \
   "$([ -e "$MI/claude/cc-config.json" ] && echo present || echo absent)"
 assert_eq "...nor the methodology block" "absent" \
   "$([ -e "$MI/claude/CLAUDE.md" ] && echo present || echo absent)"
+# ---- a ZIP download still installs (2026-09-19) ----
+# The README's first install step offers "GitHub -> Code -> Download ZIP, then unzip", and
+# install.sh gates on the full suite before it touches anything. But worktree-hygiene.test.sh
+# asserts against the real checkout's git INDEX (`git ls-files`), which outside a repo exits
+# 128 with empty output -- every "is tracked, so a clone can install" assertion read 0, the
+# suite went red, and the double-click installer aborted on a copy that was perfectly fine.
+# The index assertions are about what a CLONE ships, so outside a repo there is nothing to
+# assert: they skip, loudly, and the rest of the suite still runs.
+ZIPDIR="$TMP/zipcopy"; mkdir -p "$ZIPDIR"
+(cd "$ROOT" && tar --exclude=.git --exclude=node_modules -cf - . 2>/dev/null) | (cd "$ZIPDIR" && tar -xf - 2>/dev/null)
+assert_eq "(fixture: the unzipped copy has no .git)" "none" \
+  "$([ -e "$ZIPDIR/.git" ] && echo present || echo none)"
+exists "(fixture: ...but it does have the suite)" "$ZIPDIR/tests/worktree-hygiene.test.sh"
+zip_out="$(cd "$ZIPDIR" && bash tests/worktree-hygiene.test.sh 2>&1)"; zip_rc=$?
+assert_eq "the hygiene suite passes in a copy with no .git (a ZIP download)" "0" "$zip_rc"
+assert_eq "...and says why it skipped the git-index checks" "yes" \
+  "$(printf '%s' "$zip_out" | grep -qi 'skip' && echo yes || echo no)"
+# ...while in a real checkout it still asserts them for real.
+repo_out="$(cd "$ROOT" && bash tests/worktree-hygiene.test.sh 2>&1)"
+assert_eq "...but in a real checkout it still checks the index" "yes" \
+  "$(printf '%s' "$repo_out" | grep -q 'is tracked, so a clone can install' && echo yes || echo no)"
+
 readme_up="$(sed -n '/^### Upgrading/,/^### Uninstall/p' "$ROOT/README.md")"
 assert_eq "the README has an Upgrading section" "yes" \
   "$([ -n "$readme_up" ] && echo yes || echo no)"
