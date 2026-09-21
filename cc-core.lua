@@ -9393,6 +9393,39 @@ function M.worklistEdit(state, scope, id, text, extra)
 end
 
 -- Drop the done items from a scope (the "Clear" on the Done area).
+-- Mark every open item in one scope done, in one pass (2026-09-21). Adam's
+-- claude-instance-manager tab held 307 unchecked items and each tick was its own read,
+-- write and push of the whole store -- catching up meant minutes of clicking a panel
+-- that froze on every click. Returns how many it actually marked, which is what the
+-- confirmation counts and what the panel reports afterwards.
+-- An item that was ALREADY done keeps its own doneTs: the Done drawer is ordered by it,
+-- so restamping would shuffle work finished days ago up to the top.
+function M.worklistMarkAllDone(state, scope, now)
+  if type(state) ~= "table" then return 0 end
+  local n = 0
+  for _, it in ipairs(M.worklistScopeList(state, scope)) do
+    if not it.done then
+      it.done = true
+      it.doneTs = tonumber(now) or 0
+      n = n + 1
+    end
+  end
+  return n
+end
+
+-- ...and the same across every scope, for the MASTER tab -- which is a rollup of every
+-- project's open work, so marking there marks each item in ITS OWN list, never master's
+-- (master has no list of its own). Returns the total marked.
+function M.worklistMarkAllEverywhere(state, now)
+  if type(state) ~= "table" then return 0 end
+  local n = M.worklistMarkAllDone(state, "generic", now)
+  local keys = {}
+  for k in pairs(state.byProject or {}) do keys[#keys + 1] = k end
+  table.sort(keys)                                  -- stable order, so a count is reproducible
+  for _, k in ipairs(keys) do n = n + M.worklistMarkAllDone(state, k, now) end
+  return n
+end
+
 function M.worklistClearDone(state, scope)
   if type(state) ~= "table" then return state or {} end
   local kept = {}

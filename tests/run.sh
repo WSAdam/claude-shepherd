@@ -106,6 +106,9 @@ echo ""
 echo "== node: My List -- a check-off lands at once, collapsed Done isn't built (real browser) =="
 node "$DIR/worklist-checkoff.browser.test.js" || fail=1
 echo ""
+echo "== node: My List -- Mark all done asks first, and counts what it would change (real browser) =="
+node "$DIR/worklist-markall.browser.test.js" || fail=1
+echo ""
 echo "== node: project-card layout geometry in a real browser (skips without Playwright) =="
 node "$DIR/card-layout.browser.test.js" || fail=1
 echo ""

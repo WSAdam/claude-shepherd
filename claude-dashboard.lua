@@ -7031,6 +7031,21 @@ local function handleBridgeMsg(msg)
     FX.wlModalOpen = (tostring(payload.v or "") == "open")
     return
   end
+  -- Mark a whole tab done in one go: ONE read, ONE write, ONE push, however many items
+  -- (2026-09-21). The panel asks first -- it carries the count in its confirmation -- and
+  -- is told back how many were actually marked, since the tab may have moved under it.
+  -- MASTER is a rollup of every project's open work, so marking there marks each item in
+  -- its own list (core.worklistMarkAllEverywhere), never a list of master's own.
+  if a == "worklist-mark-all" then
+    local scope = tostring(payload.v or "generic")
+    local st = FX.readWorklist()
+    local n = (scope == "master") and core.worklistMarkAllEverywhere(st, FX.now())
+                                  or core.worklistMarkAllDone(st, scope, FX.now())
+    if n > 0 then FX.writeWorklist(st) end
+    pcall(function() wv:evaluateJavaScript("window.ccWorklist(" .. hs.json.encode(FX.worklistPayload()) .. ")") end)
+    pcall(function() wv:evaluateJavaScript("window.wlMarkedAll(" .. tostring(n) .. ")") end)
+    return
+  end
   if a == "worklist-add" or a == "worklist-toggle" or a == "worklist-remove"
      or a == "worklist-edit" or a == "worklist-clear-done" then
     local scope = tostring(payload.v or "generic")
@@ -9665,6 +9680,7 @@ local HTML = [[
     <div id="wl-todorow">
       <button id="wl-todobtn" onclick="todoImportScope()" title="Import this project's TODO.md checkboxes as list items">⇪ Import TODO.md</button>
       <button id="wl-todoall" onclick="todoImportAll()" title="Import/refresh TODO.md for every known project">⇪ All projects</button>
+      <button id="wl-markall" onclick="worklistMarkAll()" title="Tick off everything still open on this tab (asks first)">✓ Mark all done</button>
       <span id="wl-todoflash"></span>
     </div>
     <div id="wl-addrow">
@@ -11399,6 +11415,14 @@ local HTML = [[
         tb.style.display = (curProj && (curProj.hasTodo || curProj.todoOn)) ? "" : "none";
         tb.textContent = (curProj && curProj.todoOn) ? "↻ Sync TODO.md" : "⇪ Import TODO.md";
       }
+      // Mark all: offered on every tab INCLUDING master, and only while there is something
+      // left to mark -- a button that would do nothing shouldn't be there to be clicked.
+      var mb = document.getElementById("wl-markall");
+      if(mb){
+        var openN = wlOpenCount(worklistScope);
+        mb.style.display = openN ? "" : "none";
+        mb.textContent = "✓ Mark all " + openN + " done";
+      }
       // MASTER is a read-only rollup: no add row, no per-scope Done drawer, but its own
       // "Recently completed" drawer instead.
       var isMaster = (worklistScope === "master");
@@ -11492,6 +11516,41 @@ local HTML = [[
           }).join("")
         : '<div class="wl-empty">Nothing completed in the last 7 days.</div>';
     }
+    // How many items a Mark all would actually change, on the tab you're looking at.
+    // MASTER is a rollup of every project's open work, so there it counts all of them.
+    function wlOpenCount(scope){
+      var n = 0;
+      var count = function(list){
+        (Array.isArray(list) ? list : []).forEach(function(it){ if(it && !it.done) n++; });
+      };
+      if(scope === "master"){
+        count(worklistData && worklistData.generic);
+        ((worklistData && worklistData.projects) || []).forEach(function(p){ count(p.items); });
+      } else {
+        count(wlScopeItems(scope));
+      }
+      return n;
+    }
+    // Ticking off a backlog one row at a time is the thing this was built to stop, but it is
+    // still the only bulk action here that changes every row at once -- so it asks, with the
+    // count in the question, and on MASTER says out loud that it reaches every project.
+    // Lua does the work in one read and one write and answers with the real count.
+    function worklistMarkAll(){
+      var n = wlOpenCount(worklistScope);
+      if(!n) return;
+      var where = (worklistScope === "master")
+        ? "Mark all " + n + " open item" + (n === 1 ? "" : "s") + " done, across every project?"
+        : "Mark all " + n + " open item" + (n === 1 ? "" : "s") + " on this tab done?";
+      if(!confirm(where)) return;
+      send("worklist-mark-all", worklistScope);
+    }
+    window.wlMarkedAll = function(n){
+      var el = document.getElementById("wl-todoflash"); if(!el) return;
+      n = n | 0;
+      el.textContent = n ? ("Marked " + n + " done") : "Nothing left to mark";
+      if(wlTodoFlashTimer) clearTimeout(wlTodoFlashTimer);
+      wlTodoFlashTimer = setTimeout(function(){ el.textContent = ""; }, 6000);
+    };
     function worklistPick(scope){ worklistScope = scope; renderWorklist(); }
     function worklistToggle(id){ send("worklist-toggle", worklistScope, id); }
     function worklistRemove(id){ send("worklist-remove", worklistScope, id); }

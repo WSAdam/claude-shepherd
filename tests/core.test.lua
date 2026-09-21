@@ -10291,5 +10291,50 @@ do
      core.isHung({ status = "working" }, now - 600, now, hung5), true)
 end
 
+-- ---- My List: mark a whole tab done in one go (2026-09-21) ----
+-- Adam's claude-instance-manager tab held 307 unchecked items, and each click cost a read,
+-- a write and a push -- so catching up meant minutes of clicking a frozen panel. Marking a
+-- whole scope is one operation over one read and one write.
+do
+  local now = 1700000000
+  local st = { generic = {}, byProject = {} }
+  core.worklistAdd(st, "generic", "one", "g1", now)
+  core.worklistAdd(st, "generic", "two", "g2", now)
+  core.worklistAdd(st, "generic", "three", "g3", now)
+  core.worklistAdd(st, "projA", "a1", "a1", now)
+  core.worklistToggle(st, "generic", "g2", now - 500)     -- already done, earlier
+
+  local n = core.worklistMarkAllDone(st, "generic", now)
+  eq("markAllDone reports how many it marked", n, 2)
+  local g = core.worklistScopeList(st, "generic")
+  eq("markAllDone: every item in the scope is done", (g[1].done and g[2].done and g[3].done) == true, true)
+  eq("markAllDone stamps the ones it marked", g[1].doneTs, now)
+  -- An item already done keeps the time it was ACTUALLY done: the Done drawer is ordered by
+  -- doneTs, so restamping would shuffle work you finished days ago to the top of the list.
+  eq("markAllDone leaves an already-done item's own time alone", g[2].doneTs, now - 500)
+  eq("markAllDone leaves other scopes alone",
+     core.worklistScopeList(st, "projA")[1].done == true, false)
+  eq("markAllDone on an all-done scope marks nothing", core.worklistMarkAllDone(st, "generic", now), 0)
+  eq("markAllDone on an unknown scope is a no-op", core.worklistMarkAllDone(st, "nope", now), 0)
+  eq("markAllDone on a nil state doesn't throw", core.worklistMarkAllDone(nil, "generic", now), 0)
+
+  -- MASTER marks every scope's open items, each in its own list (Adam's call 2026-09-21).
+  local m = { generic = {}, byProject = {} }
+  core.worklistAdd(m, "generic", "g", "g1", now)
+  core.worklistAdd(m, "projA", "a", "a1", now)
+  core.worklistAdd(m, "projA", "b", "a2", now)
+  core.worklistAdd(m, "projB", "c", "b1", now)
+  core.worklistToggle(m, "projB", "b1", now - 900)
+  eq("markAllDone counts every open item across every scope",
+     core.worklistMarkAllEverywhere(m, now), 3)
+  eq("...generic is done", core.worklistScopeList(m, "generic")[1].done, true)
+  eq("...and each project's items are done in their own list",
+     (core.worklistScopeList(m, "projA")[1].done and core.worklistScopeList(m, "projA")[2].done) == true, true)
+  eq("...and an item already done keeps its own time",
+     core.worklistScopeList(m, "projB")[1].doneTs, now - 900)
+  eq("a second sweep marks nothing", core.worklistMarkAllEverywhere(m, now), 0)
+  eq("markAllEverywhere on a nil state doesn't throw", core.worklistMarkAllEverywhere(nil, now), 0)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)
