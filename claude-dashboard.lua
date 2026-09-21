@@ -11242,6 +11242,23 @@ local HTML = [[
       for(var i = 0; i < projs.length; i++){ if(projs[i].key === scope) return Array.isArray(projs[i].items) ? projs[i].items : []; }
       return [];
     }
+    // Tick the item in the copy we already hold, so the list moves on the click itself
+    // (2026-09-21). It used to sit there until Lua read the store, mutated it, wrote it and
+    // pushed the whole thing back -- about half a second on Adam's list, with the panel
+    // frozen for the read. Lua is still told, and its push still replaces this guess when it
+    // lands; this only decides what the list shows in between. Mirrors core.worklistToggle:
+    // done flips, doneTs is stamped on the way in and dropped on the way out.
+    function wlFlipLocal(scope, id){
+      var list = wlScopeItems(scope);
+      for(var i = 0; i < list.length; i++){
+        if(list[i] && String(list[i].id) === String(id)){
+          list[i].done = !list[i].done;
+          if(list[i].done) list[i].doneTs = Math.floor(Date.now() / 1000); else delete list[i].doneTs;
+          return true;
+        }
+      }
+      return false;
+    }
     function wlItemRow(it, isDone){
       // data-id (NOT an inline onchange with JSON.stringify): the stringified id is
       // double-quoted, which would terminate the double-quoted attribute. A delegated
@@ -11401,17 +11418,25 @@ local HTML = [[
       // real tie MUST return 0: the old comparator returned 1 for every tie, which
       // is an inconsistent comparator, and V8 scrambles an all-tied list outright
       // -- which is what every TODO-imported item is, since none carry a due date.
-      done.sort(function(a, b){
-        var at = +a.doneTs || 0, bt = +b.doneTs || 0;
-        if(at !== bt) return bt - at;
-        var ad = wlDueSort(a.due), bd = wlDueSort(b.due);
-        if(ad !== bd) return ad < bd ? 1 : -1;
-        return 0;                                   // a real tie
-      });
+      // Sorted and built only when the drawer is OPEN (2026-09-21). #wl-done is
+      // display:none until you expand it, and this used to sort and build every row
+      // behind it on every render -- 614 hidden rows per click on Adam's Chargeback tab,
+      // each with its own esc() calls and date arithmetic. The count below is read from
+      // done.length, which costs nothing, so the header still says how many there are.
+      if(worklistDoneOpen){
+        done.sort(function(a, b){
+          var at = +a.doneTs || 0, bt = +b.doneTs || 0;
+          if(at !== bt) return bt - at;
+          var ad = wlDueSort(a.due), bd = wlDueSort(b.due);
+          if(ad !== bd) return ad < bd ? 1 : -1;
+          return 0;                                   // a real tie
+        });
+      }
       document.getElementById("wl-active").innerHTML = active.length
         ? active.map(function(it){ return wlItemRow(it, false); }).join("")
         : '<div class="wl-empty">No items — add one above.</div>';
-      document.getElementById("wl-done").innerHTML = done.map(function(it){ return wlItemRow(it, true); }).join("");
+      document.getElementById("wl-done").innerHTML = worklistDoneOpen
+        ? done.map(function(it){ return wlItemRow(it, true); }).join("") : "";
       document.getElementById("wl-donecount").textContent = done.length ? "(" + done.length + ")" : "";
       var dw = document.getElementById("wl-donewrap");
       dw.style.display = done.length ? "block" : "none";
@@ -11704,10 +11729,11 @@ local HTML = [[
       // (master is a rollup, so worklistScope would be the wrong list to write to).
       if(cb.classList.contains("wl-mcb")){
         var ms = cb.getAttribute("data-mscope"), mid = cb.getAttribute("data-mid");
-        if(ms && mid) send("worklist-toggle", ms, mid);
+        if(ms && mid){ wlFlipLocal(ms, mid); renderWorklist(); send("worklist-toggle", ms, mid); }
         return;
       }
-      var id = cb.getAttribute("data-id"); if(id) worklistToggle(id);
+      var id = cb.getAttribute("data-id");
+      if(id){ wlFlipLocal(worklistScope, id); renderWorklist(); worklistToggle(id); }
     });
 
     // ---- User Stories tab: view/add/edit/save spec/product/user-stories.md ----

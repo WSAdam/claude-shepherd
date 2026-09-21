@@ -72,7 +72,11 @@ assert_eq "master row carries its home scope" "yes" "$(has 'data-mscope="')"
 assert_eq "clicking a master row jumps to that tab" "yes" "$(has 'worklistScope = ms; renderWorklist();')"
 # Ticking a master row writes to the item's OWN scope, never the visible tab.
 assert_eq "master row has its own checkbox"   "yes" "$(has 'class="wl-cb wl-mcb"')"
-assert_eq "master tick toggles in its home scope" "yes" "$(has 'if(ms && mid) send("worklist-toggle", ms, mid);')"
+# 2026-09-21: the tick also flips the local copy first, so the row moves on the click instead
+# of waiting for Lua's push. Same requirement -- BOTH the optimistic flip and the message must
+# name `ms` (the row's home scope), never worklistScope (the tab you happen to be looking at).
+assert_eq "master tick toggles in its home scope" "yes" "$(has 'send("worklist-toggle", ms, mid);')"
+assert_eq "...and its optimistic flip uses that same scope" "yes" "$(has 'wlFlipLocal(ms, mid);')"
 # MASTER "Recently completed" drawer: last-7-days window, sorted newest-first.
 assert_eq "master has a recently-completed drawer" "yes" "$(has 'id="wl-mdonewrap"')"
 assert_eq "recently-completed windows 7 days"  "yes" "$(has '7 * 86400')"
