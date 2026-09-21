@@ -1581,6 +1581,50 @@ function FX.writeWorklist(state)
     FX._wlCache = nil
   end
 end
+-- The archive (cc-worklist-archive.json): done work aged out of the live store, same shape
+-- so the same readers understand it (2026-09-21). Its own file ON PURPOSE -- the point of
+-- archiving is that the store the panel reads on every check-off stops carrying it, so this
+-- one is read only when the Archive tab is opened, and never on the toggle path.
+function FX.archiveFile()
+  return os.getenv("CC_WORKLIST_ARCHIVE_FILE")
+         or (os.getenv("HOME") .. "/.claude/cc-worklist-archive.json")
+end
+function FX.readArchive()
+  local c = FX.readFile(FX.archiveFile())
+  if not c or #c == 0 then return { generic = {}, byProject = {} } end
+  local ok, t = pcall(function() return core.json.decode(c) end)
+  return core.worklistNormalize((ok and t) or {})
+end
+function FX.writeArchive(state)
+  local f = FX.archiveFile()
+  local dir = f:match("^(.*)/[^/]+$")
+  if dir then hs.fs.mkdir(dir) end
+  FX.writeFile(f, core.json.encode(state or { generic = {}, byProject = {} }))
+end
+
+-- Once a day, move done work older than worklist.archiveAfterDays out of the live store.
+-- Nothing here runs on a click: it is checked from the same tick that syncs TODO.md, and
+-- core.worklistArchiveIsDue keeps it to one run a day. Returns how many moved.
+function FX.worklistArchiveTick()
+  local cfg = loadConfig()
+  if core.config(cfg, "worklist.archive", true) ~= true then return 0 end
+  local last = hs.settings.get("ccWorklistArchivedAt")
+  if not core.worklistArchiveIsDue(last, FX.now()) then return 0 end
+  hs.settings.set("ccWorklistArchivedAt", FX.now())
+  local days = tonumber(core.config(cfg, "worklist.archiveAfterDays", 10)) or 10
+  local st = FX.readWorklist()
+  local arch = FX.readArchive()
+  local moved = core.worklistArchiveDue(st, arch, FX.now(), days)
+  if moved > 0 then
+    -- Archive FIRST: if the second write fails, the work is in both files rather than
+    -- neither, and the next pass finds nothing to move because it is already gone.
+    FX.writeArchive(arch)
+    FX.writeWorklist(st)
+    print("[cc-dashboard] 🗄 My List: archived " .. moved .. " item(s) done over " .. days .. " days ago")
+  end
+  return moved
+end
+
 -- Mint a unique worklist item id (time + small random; collisions are irrelevant
 -- for a hand-curated list). Pure-core ops take the id so they stay deterministic.
 function FX.worklistNewId()
@@ -7011,6 +7055,29 @@ local function handleBridgeMsg(msg)
   end
   -- 📋 In-app worklist (generic + per-project checklists; no code hooks). load
   -- just renders; add/toggle/clear-done mutate cc-worklist.json then re-push.
+  -- The archive is a SEPARATE file, read only when its tab is opened -- the whole point of
+  -- aging items out is that the store read on every check-off stops carrying them, so it
+  -- must never join the normal payload (2026-09-21).
+  if a == "worklist-archive-load" then
+    local arch = FX.readArchive()
+    local rows, labels, autos = {}, FX.loadLabels(), FX.loadAutoTitles()
+    local function take(scope, list)
+      for _, it in ipairs(list or {}) do
+        rows[#rows + 1] = { scope = scope, text = it.text, doneTs = it.doneTs, due = it.due,
+                            details = it.details,
+                            label = (scope == "generic") and "Generic"
+                                    or (labels[scope] or autos[scope] or core.projectKeyLabel(scope)) }
+      end
+    end
+    take("generic", arch.generic)
+    local keys = {}
+    for k in pairs(arch.byProject or {}) do keys[#keys + 1] = k end
+    table.sort(keys)
+    for _, k in ipairs(keys) do take(k, arch.byProject[k]) end
+    table.sort(rows, function(x, y) return (tonumber(x.doneTs) or 0) > (tonumber(y.doneTs) or 0) end)
+    pcall(function() wv:evaluateJavaScript("window.ccWorklistArchive(" .. hs.json.encode({ rows = rows }) .. ")") end)
+    return
+  end
   if a == "worklist-load" then
     pcall(function() wv:evaluateJavaScript("window.ccWorklist(" .. hs.json.encode(FX.worklistPayload()) .. ")") end)
     return
@@ -8711,6 +8778,10 @@ local HTML = [[
   .wl-mitem .wl-txt { font-size:clamp(11px,3cqw,12.5px); line-height:1.3; white-space:normal;
                       display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; }
   .wl-mitem .wl-due, .wl-mitem .wl-prog { margin-top:0; }
+  /* An archived row is the record, not the working list: no checkbox, so one column fewer,
+     and not clickable (2026-09-21). */
+  .wl-arch { grid-template-columns:auto minmax(0,1fr) auto; cursor:default; }
+  .wl-arch:hover { background:transparent; }
   .wl-chips { display:flex; align-items:center; gap:4px; }
   /* Which list a master row came from. */
   .wl-tag { flex:0 0 auto; max-width:clamp(56px,22cqw,110px); font-size:clamp(8px,2.3cqw,10px); color:var(--text-3);
@@ -11395,7 +11466,9 @@ local HTML = [[
       if(!worklistData) return;
       var projs = Array.isArray(worklistData.projects) ? worklistData.projects : [];
       // current scope's project may have closed -> fall back to Generic
-      if(worklistScope !== "generic" && worklistScope !== "master"){
+      // "archive" is a tab of its own, like master -- not a project key, so it must be
+      // exempt here or selecting it would bounce straight back to Generic.
+      if(worklistScope !== "generic" && worklistScope !== "master" && worklistScope !== "archive"){
         var ok = false;
         for(var i = 0; i < projs.length; i++){ if(projs[i].key === worklistScope){ ok = true; break; } }
         if(!ok) worklistScope = "generic";
@@ -11405,6 +11478,9 @@ local HTML = [[
       projs.forEach(function(p){
         sc += '<button class="wl-scope' + (worklistScope === p.key ? " on" : "") + '" data-scope="' + esc(String(p.key)) + '">' + esc(p.label || p.key) + '</button>';
       });
+      // Work aged out of the store lives in its own file and its own tab -- kept for
+      // reference, never carried by the list you work from (2026-09-21).
+      sc += '<button class="wl-scope' + (worklistScope === "archive" ? " on" : "") + '" data-scope="archive" title="Done work older than the archive window, kept for reference">\u{1F5C4} Archive</button>';
       document.getElementById("wl-scopes").innerHTML = sc;
       // TODO.md import row: the per-project button only on a project tab that has
       // (or already imported) a TODO.md; the All-projects sweep is always offered.
@@ -11422,6 +11498,16 @@ local HTML = [[
         var openN = wlOpenCount(worklistScope);
         mb.style.display = openN ? "" : "none";
         mb.textContent = "✓ Mark all " + openN + " done";
+      }
+      // The Archive is read-only too, and its rows come from their own file: ask for them
+      // the first time it is opened, render what we have meanwhile (2026-09-21).
+      if(worklistScope === "archive"){
+        document.getElementById("wl-addrow").style.display = "none";
+        document.getElementById("wl-donewrap").style.display = "none";
+        document.getElementById("wl-mdonewrap").style.display = "none";
+        if(!worklistArchive){ send("worklist-archive-load"); }
+        renderArchive(document.getElementById("wl-active"));
+        return;
       }
       // MASTER is a read-only rollup: no add row, no per-scope Done drawer, but its own
       // "Recently completed" drawer instead.
@@ -11469,6 +11555,27 @@ local HTML = [[
     }
     // ---- MASTER: "Recently completed" (last 7 days across every scope) --------
     var worklistMasterDoneOpen = false;
+    // Archived rows: newest-completed first, each labelled with the project it came from.
+    // Read-only -- no checkbox, no delete: this is the record, not the working list.
+    var worklistArchive = null;
+    window.ccWorklistArchive = function(d){
+      worklistArchive = (d && Array.isArray(d.rows)) ? d.rows : [];
+      if(worklistScope === "archive") renderWorklist();
+    };
+    function renderArchive(box){
+      if(!box) return;
+      if(!worklistArchive){ box.innerHTML = '<div class="wl-empty">Loading the archive…</div>'; return; }
+      if(!worklistArchive.length){
+        box.innerHTML = '<div class="wl-empty">Nothing archived yet — done work moves here once it is more than the archive window old.</div>';
+        return;
+      }
+      box.innerHTML = worklistArchive.map(function(r){
+        return '<div class="wl-item wl-mitem wl-arch">'
+          + '<span class="wl-tag">' + esc(r.label || r.scope || "") + '</span>'
+          + '<span class="wl-txt">' + esc(r.text || "") + '</span>'
+          + '<span class="wl-chips">' + wlDueChip(r.due, true) + wlDoneChip(r.doneTs) + '</span></div>';
+      }).join("");
+    }
     function wlMasterDoneToggle(){ worklistMasterDoneOpen = !worklistMasterDoneOpen; renderMasterDone(); }
     // doneTs is epoch SECONDS (Lua os.time()); the window is the last 7 days.
     function wlMasterDoneRows(){
@@ -18058,6 +18165,9 @@ function FX._refreshBody()
   -- right after lastRenderList was set, and every auto-sync renamed a relabelled
   -- project's tab back to its folder name.)
   FX.todoAutoSyncTick(list)
+  -- ...and once a day, age done work out of the store into the archive (2026-09-21).
+  -- core.worklistArchiveIsDue makes every other tick a compare and nothing more.
+  pcall(FX.worklistArchiveTick)
   local hiddenMap = FX.loadHidden()
   local shownList, hiddenList = list, {}
   if next(hiddenMap) ~= nil then

@@ -10336,5 +10336,57 @@ do
   eq("markAllEverywhere on a nil state doesn't throw", core.worklistMarkAllEverywhere(nil, now), 0)
 end
 
+-- ---- My List: done work older than N days moves to an archive (2026-09-21) ----
+-- Adam's store reached 778KB, 442 of its items done more than ten days earlier. He wanted
+-- them kept -- "so i can keep my previous stuff for referencing" -- just not in the list he
+-- works from every day. Moving them out is what keeps the main store small.
+do
+  local DAY = 86400
+  local now = 1700000000
+  local st = { generic = {}, byProject = {} }
+  core.worklistAdd(st, "generic", "open one", "g1", now)
+  core.worklistAdd(st, "generic", "done ages ago", "g2", now)
+  core.worklistAdd(st, "generic", "done just now", "g3", now)
+  core.worklistAdd(st, "projA", "old project item", "a1", now)
+  core.worklistAdd(st, "projA", "still open", "a2", now)
+  core.worklistToggle(st, "generic", "g2", now - 20 * DAY)
+  core.worklistToggle(st, "generic", "g3", now - 1 * DAY)
+  core.worklistToggle(st, "projA", "a1", now - 11 * DAY)
+
+  local arch = { generic = {}, byProject = {} }
+  local n = core.worklistArchiveDue(st, arch, now, 10)
+  eq("archive: moves the done work older than the window", n, 2)
+  eq("archive: ...leaving what is still open", #core.worklistScopeList(st, "generic"), 2)
+  eq("archive: ...and what was done recently", core.worklistScopeList(st, "generic")[2].id, "g3")
+  eq("archive: ...and taking the old one out of the project too",
+     #core.worklistScopeList(st, "projA"), 1)
+  eq("archive: an open item is never archived, however old",
+     core.worklistScopeList(st, "projA")[1].id, "a2")
+  eq("archive: the archived item is kept, in its own scope",
+     core.worklistScopeList(arch, "projA")[1].id, "a1")
+  eq("archive: ...with the time it was done", core.worklistScopeList(arch, "generic")[1].doneTs, now - 20 * DAY)
+  eq("archive: a second pass finds nothing left", core.worklistArchiveDue(st, arch, now, 10), 0)
+  eq("archive: ...and doesn't duplicate what it already holds", #core.worklistScopeList(arch, "generic"), 1)
+
+  -- A done item with no doneTs (written before stamps existed) can't be judged old, so it
+  -- stays: guessing would archive work someone finished this morning.
+  local ns = { generic = { { id = "n1", text = "no stamp", done = true } }, byProject = {} }
+  eq("archive: a done item with no completion time is left alone",
+     core.worklistArchiveDue(ns, { generic = {}, byProject = {} }, now, 10), 0)
+  eq("archive: nil state is a no-op", core.worklistArchiveDue(nil, arch, now, 10), 0)
+  eq("archive: nil archive is a no-op", core.worklistArchiveDue(st, nil, now, 10), 0)
+  -- Zero or nonsense windows must not archive the lot: the guard is a positive number.
+  eq("archive: a zero window archives nothing",
+     core.worklistArchiveDue({ generic = { { id = "z", done = true, doneTs = now - DAY } } },
+                             { generic = {}, byProject = {} }, now, 0), 0)
+
+  -- Once a day, not on every tick.
+  eq("archive due when never run", core.worklistArchiveIsDue(nil, now), true)
+  eq("archive not due an hour after a run", core.worklistArchiveIsDue(now - 3600, now), false)
+  eq("archive due a day after a run", core.worklistArchiveIsDue(now - DAY - 60, now), true)
+  eq("a clock that jumped backwards doesn't wedge it for good",
+     core.worklistArchiveIsDue(now + 5 * DAY, now), true)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

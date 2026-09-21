@@ -9426,6 +9426,50 @@ function M.worklistMarkAllEverywhere(state, now)
   return n
 end
 
+-- Move done work older than `days` out of the live store and into `archive`, keeping its
+-- scope (2026-09-21). Adam's store reached 778KB with 442 items done more than ten days
+-- earlier, and every read of it paid for them; he wanted them kept for reference, just not
+-- in the list he works from. Returns how many moved.
+-- Only a DONE item with a real doneTs can be judged old: an item written before stamps
+-- existed carries none, and guessing would archive work finished this morning.
+function M.worklistArchiveDue(state, archive, now, days)
+  if type(state) ~= "table" or type(archive) ~= "table" then return 0 end
+  local win = tonumber(days)
+  if not win or win <= 0 then return 0 end          -- never let a bad window archive the lot
+  local cutoff = (tonumber(now) or 0) - win * 86400
+  archive.generic = archive.generic or {}
+  archive.byProject = archive.byProject or {}
+  local moved = 0
+  local function sweep(list, into)
+    if type(list) ~= "table" then return list end
+    local kept = {}
+    for _, it in ipairs(list) do
+      local ts = tonumber(it and it.doneTs)
+      if it and it.done and ts and ts <= cutoff then
+        into[#into + 1] = it
+        moved = moved + 1
+      else
+        kept[#kept + 1] = it
+      end
+    end
+    return kept
+  end
+  state.generic = sweep(state.generic or {}, archive.generic)
+  for k, list in pairs(state.byProject or {}) do
+    archive.byProject[k] = archive.byProject[k] or {}
+    state.byProject[k] = sweep(list, archive.byProject[k])
+  end
+  return moved
+end
+
+-- Once a day, not on every tick. A `lastRun` in the future (the clock moved back, or a
+-- restore from a machine ahead of this one) counts as due rather than wedging it forever.
+function M.worklistArchiveIsDue(lastRun, now)
+  local last, t = tonumber(lastRun), tonumber(now) or 0
+  if not last or last > t then return true end
+  return (t - last) >= 86400
+end
+
 function M.worklistClearDone(state, scope)
   if type(state) ~= "table" then return state or {} end
   local kept = {}

@@ -1,6 +1,12 @@
 {
   "_comment": "Claude Shepherd settings. Copy to ~/.claude/cc-config.json and flip what you want ON. Everything here is OFF by default; nothing auto-acts until you enable it.",
 
+  "worklist": {
+    "_comment": "My List. archive: once a day, work you finished more than archiveAfterDays ago moves out of cc-worklist.json into cc-worklist-archive.json -- nothing is deleted, and the Archive tab shows it (read-only, newest first, tagged with the project it came from). This is the one thing here that is ON by default (2026-09-21): the live store is re-read on every check-off, so what it carries is what a click costs, and Adam's had grown to 778KB with 442 items done over ten days earlier. Set archive:false to keep everything in the live list.",
+    "archive": true,
+    "archiveAfterDays": 10
+  },
+
   "queue": {
     "autofeed": false,
     "dryRun": false,

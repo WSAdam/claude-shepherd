@@ -149,6 +149,7 @@ core.json.decode = function(s)
   return v
 end
 local function post(tbl) quiet(function() CALLBACK({ body = json.encode(tbl) }) end) end
+local function realDecodeFile(path) return realDecode(readf(path) or "{}") end
 local function lastPayload()
   for i = #jsCalls, 1, -1 do
     local body = jsCalls[i]:match("^window%.ccWorklist%((.*)%)$")
@@ -215,6 +216,64 @@ a1.generic[#a1.generic + 1] = { id = "junk", text = "never written" }
 local a2 = fx.readWorklist()
 check("mutating a returned worklist doesn't change the next read",
       a2.byProject[PROJ][2].text ~= "scribbled on by a caller" and #a2.generic == 0)
+
+-- ---- the daily archive moves old done work out of the store (2026-09-21) ----
+-- Adam: "once a day moves everything from already done that is older than 10 days to an
+-- archive list, that way i can keep my previous stuff for referencing etc but the main list
+-- stays smaller". The point is the MAIN store shrinking, so what is asserted is that the
+-- items left it, that they are all still there in the archive's own file, and that the tick
+-- does it once a day rather than on every pass.
+do
+  local DAY = 86400
+  local nowT = os.time()
+  local ARCH = T .. "/archive.json"
+  ENV.CC_WORKLIST_ARCHIVE_FILE = ARCH
+  local st = { generic = {}, byProject = { [PROJ] = {
+    { id = "old1", text = "done long ago", done = true, doneTs = nowT - 30 * DAY },
+    { id = "old2", text = "also long ago", done = true, doneTs = nowT - 11 * DAY },
+    { id = "new1", text = "done this morning", done = true, doneTs = nowT - 3600 },
+    { id = "open1", text = "still to do" },
+  } }, todoMeta = {} }
+  write(WL, json.encode(st))
+  MTIME[WL] = nowT + 100                       -- the cache must not serve the old content
+  settingsStore.ccWorklistArchivedAt = nil     -- never archived on this machine
+
+  local moved = select(2, quiet(function() return fx.worklistArchiveTick() end))
+  check("the daily pass archives the done work older than the window  (moved=" .. tostring(moved) .. ")",
+        moved == 2)
+  local left = realDecodeFile(WL)
+  local ids = {}
+  for _, it in ipairs((left.byProject or {})[PROJ] or {}) do ids[#ids + 1] = it.id end
+  table.sort(ids)
+  check("...the main list keeps only recent and open work  (" .. table.concat(ids, ",") .. ")",
+        table.concat(ids, ",") == "new1,open1")
+  local arch = realDecodeFile(ARCH)
+  local aids = {}
+  for _, it in ipairs((arch.byProject or {})[PROJ] or {}) do aids[#aids + 1] = it.id end
+  table.sort(aids)
+  check("...and the archive has them, in their own file  (" .. table.concat(aids, ",") .. ")",
+        table.concat(aids, ",") == "old1,old2")
+  check("...with the time each was actually done",
+        (function()
+          for _, it in ipairs((arch.byProject or {})[PROJ] or {}) do
+            if it.id == "old1" then return it.doneTs == nowT - 30 * DAY end
+          end
+        end)() == true)
+
+  -- ...and not again on the next pass: it is a daily job, not a per-tick one.
+  local again = select(2, quiet(function() return fx.worklistArchiveTick() end))
+  check("a second pass the same day does nothing  (moved=" .. tostring(again) .. ")", again == 0)
+  -- A day later it runs again, and finds the item that has since aged out.
+  settingsStore.ccWorklistArchivedAt = nowT - DAY - 60
+  local st2 = realDecodeFile(WL)
+  st2.byProject[PROJ][1].doneTs = nowT - 20 * DAY      -- "done this morning" is now old
+  write(WL, json.encode(st2))
+  MTIME[WL] = nowT + 200
+  local nextDay = select(2, quiet(function() return fx.worklistArchiveTick() end))
+  check("a day later it runs again  (moved=" .. tostring(nextDay) .. ")", nextDay == 1)
+  check("...and the archive keeps what it already had, plus the new one",
+        #((realDecodeFile(ARCH).byProject or {})[PROJ] or {}) == 3)
+end
 
 os.execute('rm -rf "' .. T .. '"')
 finish()

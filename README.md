@@ -1236,6 +1236,17 @@ again to go back; the fleet bulk buttons still appear only when there's somethin
   red once **overdue**), a 📝 when it has details, and its checklist progress. Checking a row moves
   it to a collapsed **Done** area (ordered by due date), where each row shows **both** its expected
   date and a **✓ completion date**; the **✕** deletes it; **Clear** empties Done for that scope.
+- **✓ Mark all N done** — ticks off everything still open on the tab you're looking at, in one
+  operation. It **asks first**, with the count in the question, and the button is labeled with that
+  count and hidden when there's nothing left to mark. On **MASTER** it marks every project's open
+  items — each in its own list — and says so in the question.
+- **🗄 Archive** — once a day, work you finished more than **10 days** ago moves out of the live
+  list into `~/.claude/cc-worklist-archive.json`, and the **Archive** tab shows it: newest first,
+  each row tagged with the project it came from, read-only. Nothing is deleted — the point is that
+  the list you work from stays small, since it's the one the panel re-reads on every check-off.
+  The archive is a separate file and is fetched **only when you open that tab**. Tune it in
+  `~/.claude/cc-config.json`: `worklist.archiveAfterDays` (default `10`) and `worklist.archive`
+  (`false` turns it off).
 - **MASTER** — a read-only, date-priority rollup of every **open** item across Generic *and* every
   project, grouped **Overdue / Today / Next 7 days / Later / No date** and tagged with the list it
   came from. Tick a row to mark it done in its own list, or click it to jump to that tab with the
