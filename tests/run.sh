@@ -153,6 +153,9 @@ echo ""
 echo "== lua: My List auto-sync keeps renamed tabs (behavioral, stubbed hs) =="
 HOME="$(mktemp -d)" lua "$DIR/worklist-autosync.test.lua" || fail=1
 echo ""
+echo "== lua: My List -- a check-off doesn't re-decode the whole store (behavioral, stubbed hs) =="
+HOME="$(mktemp -d)" lua "$DIR/worklist-perf.test.lua" || fail=1
+echo ""
 echo "== lua: My List -- one tab per project across worktrees (behavioral, stubbed hs + git) =="
 HOME="$(mktemp -d)" lua "$DIR/worklist-worktrees.test.lua" || fail=1
 echo ""

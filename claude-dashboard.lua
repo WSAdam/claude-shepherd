@@ -1514,16 +1514,54 @@ function FX.readInstalledMcp()
   return core.extractInstalledMcp(t)
 end
 
+-- Deep copy, for handing out a private copy of cached state (see FX.readWorklist).
+-- Tables only; the worklist store holds nothing else. Cycles would not terminate --
+-- it is decoded JSON, which cannot contain any.
+function FX.deepCopy(o)
+  if type(o) ~= "table" then return o end
+  local n = {}
+  for k, v in pairs(o) do n[k] = FX.deepCopy(v) end
+  return n
+end
+
 -- In-app worklist store (cc-worklist.json): { generic = [...], byProject = { key = [...] } }.
 -- Operator data, same posture as presets/labels. Missing/garbled -> empty lists.
+--
+-- CACHED against the file's mtime+size (2026-09-21). Adam's store reached 778KB / 1,065
+-- items, and decoding it measured 257ms of the 266ms a read cost -- on Hammerspoon's single
+-- thread, so the whole panel stopped for it. A check-off paid that TWICE (once here for the
+-- mutation, once inside FX.worklistPayload to build the push), which is what made working
+-- through a backlog feel like half a second per click.
+--
+-- Callers mutate what they get back (`local st = FX.readWorklist()` then core.worklist*
+-- edits it in place), so the cache keeps its own copy and hands out a deep one: measured at
+-- 1.7ms against 231ms for a fresh read, and a caller that mutates without writing can't
+-- corrupt it. The panel is the only writer of this file, and FX.writeWorklist refreshes the
+-- cache itself, so the mtime+size check exists for edits made OUTSIDE it (a hand-edit, a
+-- restore from one of our .bak files) -- those must win, or a stale list would be served for
+-- good. An external edit landing in the same second AND leaving the byte count identical
+-- would be missed until the next write; that is the same bound FX._todoMtime lives with.
 function FX.readWorklist()
   local WORKLIST_FILE = os.getenv("CC_WORKLIST_FILE") or (os.getenv("HOME") .. "/.claude/cc-worklist.json")
+  local a = hs.fs.attributes(WORKLIST_FILE)
+  local mtime, size = a and a.modification, a and a.size
+  local cached = FX._wlCache
+  if cached and mtime and size and cached.path == WORKLIST_FILE
+     and cached.mtime == mtime and cached.size == size then
+    return FX.deepCopy(cached.state)
+  end
   local c = FX.readFile(WORKLIST_FILE)
   if not c or #c == 0 then return { generic = {}, byProject = {} } end
   local ok, t = pcall(function() return core.json.decode(c) end)
   -- core.worklistNormalize rebuilds distinct containers -- REQUIRED because
   -- hs.json.decode interns empty {} into one shared table (aliasing generic<->byProject).
-  return core.worklistNormalize((ok and t) or {})
+  local st = core.worklistNormalize((ok and t) or {})
+  if mtime and size then
+    FX._wlCache = { path = WORKLIST_FILE, mtime = mtime, size = size, state = st }
+    return FX.deepCopy(st)
+  end
+  FX._wlCache = nil
+  return st
 end
 function FX.writeWorklist(state)
   local WORKLIST_FILE = os.getenv("CC_WORKLIST_FILE") or (os.getenv("HOME") .. "/.claude/cc-worklist.json")
@@ -1532,6 +1570,16 @@ function FX.writeWorklist(state)
   local dir = WORKLIST_FILE:match("^(.*)/[^/]+$")
   if dir then hs.fs.mkdir(dir) end
   FX.writeFile(WORKLIST_FILE, core.json.encode(state or { generic = {}, byProject = {} }))
+  -- Seed the cache from what we just wrote, so the read that always follows a mutation
+  -- (FX.worklistPayload, building the push) costs a copy instead of a second decode.
+  -- Normalized like the read path's, so both hand out the same shape.
+  local a = hs.fs.attributes(WORKLIST_FILE)
+  if a and a.modification and a.size then
+    FX._wlCache = { path = WORKLIST_FILE, mtime = a.modification, size = a.size,
+                    state = core.worklistNormalize(FX.deepCopy(state or {})) }
+  else
+    FX._wlCache = nil
+  end
 end
 -- Mint a unique worklist item id (time + small random; collisions are irrelevant
 -- for a hand-curated list). Pure-core ops take the id so they stay deterministic.
