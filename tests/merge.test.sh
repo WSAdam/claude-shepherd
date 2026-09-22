@@ -36,6 +36,11 @@ req() { # <dir> <session> [args...] -> stdout+stderr in $TMP/out.<session>, exit
      > "$TMP/out.$s" 2>&1; echo $? > "$TMP/rc.$s")
 }
 wait_for() { local i; for i in $(seq 1 60); do [ -e "$1" ] && return 0; sleep 0.1; done; return 1; }
+# <session> <pid>: wait until the request names a DIFFERENT waiting process than <pid>, i.e.
+# until a resumed request has stamped its own. Kept local to this suite on purpose -- tests/lib.sh
+# is shared by every bash suite, so a helper only this one needs doesn't belong there.
+wait_for_wait_pid() { local i; for i in $(seq 1 60); do
+  [ "$(jq -r .wait_pid "$MD/$1.json" 2>/dev/null)" != "$2" ] && return 0; sleep 0.1; done; return 1; }
 answer() { # <session> <verdict> [note] [nonce]: what Shepherd writes
   local n="${4:-$(jq -r .nonce "$MD/$1.json")}"
   jq -n --arg n "$n" --arg v "$2" --arg note "${3:-}" '{nonce:$n, verdict:$v, note:$note}' > "$MD/$1.decision.tmp"
@@ -81,7 +86,7 @@ assert_eq "no refusal left a request behind" "none" "$got"
 
 # ---- a request, a stranger's answer, then Merge ----
 alive
-req "$WT" s1 & bg=$!
+req "$WT" s1 --wait-max 1 & bg=$!
 wait_for "$MD/s1.json"
 assert_json "the request names its session" "$MD/s1.json" .session_id s1
 assert_json "...its pid" "$MD/s1.json" .pid 4242
@@ -92,6 +97,48 @@ assert_json "...the summary" "$MD/s1.json" .summary "Fix the demo"
 assert_json "...the test claim" "$MD/s1.json" .tests "make test: green"
 assert_json "...and waits for an answer" "$MD/s1.json" .phase requested
 assert_json "...bound to a nonce" "$MD/s1.json" '.nonce | length > 0' true
+n_s1="$(jq -r .nonce "$MD/s1.json")"
+
+# ---- a stranger's answer is claimed, rejected and put back (2026-09-22) ----
+# 2026-09-22: this block sampled `[ -e "$MD/s1.decision" ]` ONCE, 0.6s after planting the
+# answer, and read [eaten] about 1 run in 8. The file legitimately does not exist for part of
+# every poll: cc-merge.sh claims it with `mv "$DEC" "$claim"` (cc-merge.sh:142) and restores a
+# foreign one with `ln "$claim" "$DEC"` (cc-merge.sh:175), and the gap between those two lines
+# holds a jq fork -- measured at 5.5% of instants with CC_MERGE_POLL=0.1. So never sample while
+# a claimer runs: bound the waiter with --wait-max, let it EXIT, and assert when no claim window
+# can exist (tests/gate.test.sh:400-416 already does this for cc-approve.sh's identical pattern).
+# Planted by hand rather than through answer(): the inode has to be read BEFORE the file appears
+# at the polled name, or reading it is itself a sample inside the claim window. Same tmp+mv idiom
+# answer() uses (what FX.writeMergeDecision does), and the same reason gate.test.sh:405-409 plants
+# its own file. GNU stat first: `stat -f` means file-system status on GNU and SUCCEEDS, so a
+# BSD-first fallback reads a mount point, not an inode (the ordering gate.test.sh:417 settled).
+jq -n '{nonce:"someone-else", verdict:"merge", note:""}' > "$MD/s1.decision.tmp"
+dec_ino0="$(stat -c %i "$MD/s1.decision.tmp" 2>/dev/null || stat -f %i "$MD/s1.decision.tmp" 2>/dev/null)"
+mv "$MD/s1.decision.tmp" "$MD/s1.decision"
+wait $bg
+assert_eq "an answer for another request is ignored (still waiting)" "4" "$(cat "$TMP/rc.s1")"
+grep -q "Still waiting for Adam" "$TMP/out.s1" && got=yes || got=no
+assert_eq "...the waiter says so and leaves the request open" "yes" "$got"
+assert_json "...the request is still unanswered" "$MD/s1.json" .phase requested
+[ -e "$MD/s1.decision" ] && got=kept || got=eaten
+assert_eq "...and put back, never deleted" "kept" "$got"
+# Present is not enough: it must be the SAME file, untouched -- the stranger's nonce verbatim,
+# and the same inode, which only the `ln` put-back can give (a rewrite would mint a new one).
+assert_json "...still holding the stranger's nonce, unread" "$MD/s1.decision" .nonce "someone-else"
+dec_ino1="$(stat -c %i "$MD/s1.decision" 2>/dev/null || stat -f %i "$MD/s1.decision" 2>/dev/null)"
+assert_eq "...put back as a hardlink, not rewritten" "same" \
+  "$([ -n "$dec_ino0" ] && [ "$dec_ino0" = "$dec_ino1" ] && echo same)"
+ls "$MD"/s1.decision.claim.* >/dev/null 2>&1 && got=some || got=none
+assert_eq "...leaving no half-claimed copy behind" "none" "$got"
+ls "$MD"/s1.decision.parked.* >/dev/null 2>&1 && got=some || got=none
+assert_eq "...and nothing parked (no new answer landed mid-claim)" "none" "$got"
+rm -f "$MD/s1.decision"
+
+# The same unit asks again on the SAME request -- the nonce survives, the waiting process is new.
+wp0="$(jq -r .wait_pid "$MD/s1.json")"
+req "$WT" s1 & bg=$!
+wait_for_wait_pid s1 "$wp0"
+assert_json "asking again keeps the request (Adam's click can't be lost in between)" "$MD/s1.json" .nonce "$n_s1"
 # 2026-09-17: the card said "Needs you" for merge requests nobody was waiting on any more --
 # Adam's click would write a decision file that no process ever claims. The request names the
 # PROCESS that is waiting, so Shepherd can check it with ps before ranking the card red.
@@ -100,13 +147,6 @@ assert_json "...and names the process waiting for the answer" "$MD/s1.json" \
 wp="$(jq -r .wait_pid "$MD/s1.json")"
 kill -0 "$wp" 2>/dev/null && got=alive || got=gone
 assert_eq "...which is alive while it waits" "alive" "$got"
-answer s1 merge "" "someone-else"
-sleep 0.6
-[ -e "$TMP/rc.s1" ] && got=exited || got=waiting
-assert_eq "an answer for another request is ignored (still waiting)" "waiting" "$got"
-[ -e "$MD/s1.decision" ] && got=kept || got=eaten
-assert_eq "...and put back, never deleted" "kept" "$got"
-rm -f "$MD/s1.decision"
 answer s1 merge
 wait $bg
 assert_eq "Merge: the script exits 0" "0" "$(cat "$TMP/rc.s1")"
