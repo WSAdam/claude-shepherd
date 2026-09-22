@@ -9183,6 +9183,20 @@ local HTML = [[
   #tpl-menu { display:none; margin-top:4px; border:1px solid var(--border); border-radius:8px;
               background:var(--surface-3); max-height:160px; overflow-y:auto; }
   #tpl-menu.show { display:block; }
+  /* 2026-09-22: Appearance > "Hide the detail panel's controls" (opt-in). Adam doesn't want
+     the buttons or the nudge box on screen. Hiding #d-actions outright would take away the
+     panel's ONLY Deny (the hotkey approves the front-most session; nothing is bound to Deny),
+     so renderDetail stamps dc-gate / dc-err (core.detailChromeMode) and the :not() rules below
+     bring back exactly the buttons that case needs. CSS only -- #d-actions' markup is pinned
+     byte for byte by tests/ui.test.lua, so no class may be added to its children.
+     ORDER MATTERS: `body.mctl #d-controls { display:flex }` above has EQUAL specificity, so
+     only source order decides. These rules must stay below it (tests/ui.test.lua pins that). */
+  body.nochrome #d-controls, body.nochrome #nudge-row,
+  body.nochrome #tpl-menu,   body.nochrome #nudge-chip { display:none; }
+  body.nochrome #d-actions { display:none; }
+  body.nochrome #d-actions.dc-gate, body.nochrome #d-actions.dc-err { display:flex; }
+  body.nochrome #d-actions.dc-gate > :not(#b-approve):not(#b-deny):not(#deny-note):not(#b-stop) { display:none; }
+  body.nochrome #d-actions.dc-err  > :not(#b-approve) { display:none; }
   .tpl-row { display:flex; align-items:center; gap:6px; padding:4px 8px;
              border-bottom:1px solid var(--border-weak); font-size:12px; cursor:pointer; }
   .tpl-row:hover { background:var(--surface); }
@@ -9686,7 +9700,7 @@ local HTML = [[
 <!-- Appearance: active theme + operator overrides as :root token overrides
      (cc-core.appearanceCss), cascading over the Midnight defaults above. -->
 <style id="appearance-root">__APPEARANCE_CSS__</style></head>
-<body class="theme-__INIT_THEME__ __INIT_DENSITY__ __INIT_MCTL__" data-theme="__INIT_THEME__" data-look="__INIT_LOOK__">
+<body class="theme-__INIT_THEME__ __INIT_DENSITY__ __INIT_MCTL__ __INIT_CHROME__" data-theme="__INIT_THEME__" data-look="__INIT_LOOK__">
   <div id="bar">
     <span class="t">Claude sessions</span>
     <span class="right">
@@ -10082,6 +10096,7 @@ local HTML = [[
           <div class="ap-srow"><label class="ap-toggle"><input type="checkbox" id="a-density" onchange="previewAp()"> Compact density</label></div>
           <div class="ap-srow"><label class="ap-toggle"><input type="checkbox" id="a-motion" onchange="previewAp()"> Reduce motion (no pulsing / spinning)</label></div>
           <div class="ap-srow"><label class="ap-toggle" title="Show the per-session Effort, Mode, Model, Gate, Policy and Auto-model controls in the detail panel. Off by default: they stay available, but a panel you never use them from stays clear."><input type="checkbox" id="a-mctl" onchange="previewAp()"> Model controls (Effort, Mode, Model, Gate, Policy, Auto-model)</label></div>
+          <div class="ap-srow"><label class="ap-toggle" title="Takes the detail panel's button row, model-control row and nudge box off screen. Approve, Deny, the deny reason and Stop come back on their own while a session is waiting on you, and Continue while one has errored — so you never lose the only way to refuse a gated tool. A held question and the plan/TODO box are content, and stay."><input type="checkbox" id="a-nochrome" onchange="previewAp()"> Hide the detail panel's controls (Jump, Stop, nudge&hellip;)</label></div>
         </div>
       </div>
       <div class="ap-grp"><button type="button" class="ap-reset" onclick="resetAp()">Reset appearance to defaults</button></div>
@@ -12199,7 +12214,8 @@ local HTML = [[
                density:(ap.density==="dense")?"dense":"comfortable",
                font:(ap.font && APPEARANCE.fonts && APPEARANCE.fonts[ap.font])?ap.font:"system",
                reduceMotion: ap.reduceMotion===true,
-               modelControls: ap.modelControls===true };
+               modelControls: ap.modelControls===true,
+               hideDetailChrome: ap.hideDetailChrome===true };
     }
     function applyAppearance(ap){
       var r = resolveAp(ap), root = document.documentElement;
@@ -12213,6 +12229,7 @@ local HTML = [[
       document.body.classList.toggle("dense", r.density==="dense");
       document.body.classList.toggle("calm", r.reduceMotion===true);
       document.body.classList.toggle("mctl", r.modelControls===true);
+      document.body.classList.toggle("nochrome", r.hideDetailChrome===true);
     }
     function apThemeTokens(key){ return resolveAp({ theme:key }).tokens; }  // theme base, no overrides
     function fillColor(id,val){ var el=apG(id); if(!el||!apIsHex(val)) return;
@@ -12222,6 +12239,7 @@ local HTML = [[
                  font: apG("a-font").value,
                  reduceMotion: apG("a-motion").checked,
                  modelControls: apG("a-mctl").checked,
+                 hideDetailChrome: apG("a-nochrome").checked,
                  scale: (parseInt(apG("a-scale").value,10)||100)/100,
                  tileMin: parseInt(apG("a-tilemin").value,10)||170,
                  density: apG("a-density").checked ? "dense" : "comfortable" };
@@ -12369,6 +12387,7 @@ local HTML = [[
       apG("a-font").value=(ap.font && APPEARANCE.fonts && APPEARANCE.fonts[ap.font])?ap.font:"system";
       apG("a-motion").checked=(ap.reduceMotion===true);
       apG("a-mctl").checked=(ap.modelControls===true);
+      apG("a-nochrome").checked=(ap.hideDetailChrome===true);
       fillColor("a-c-bg", ov.bg||tok.bg); fillColor("a-c-surface", ov.surface||tok.surface);
       fillColor("a-c-border", ov.border||tok.border); fillColor("a-c-text", ov.text||tok.text);
       fillColor("a-c-muted", ov.muted||tok.muted);
@@ -12399,6 +12418,7 @@ local HTML = [[
       apG("a-scale").value=100; apG("a-tilemin").value=170; apG("a-density").checked=false;
       apG("a-font").value="system"; apG("a-motion").checked=false; apG("a-accent").value="";
       apG("a-mctl").checked=false;   // reset = the default, and the default is off
+      apG("a-nochrome").checked=false;   // ditto: an absent key leaves the panel as it ships
       pickTheme("midnight");   // reseeds inputs + accent swatches + previews
     }
     // Settings tabs: assign every #s-body section (+ its rows) to a tab by its header
@@ -14080,6 +14100,16 @@ local HTML = [[
       if(p.key === selectedKey){ var it = findItem(selectedKey); if(it) renderMerge(it); }
     };
 
+    // Twin of core.detailChromeMode (cc-core.lua) -- keep the two in step. Which part of
+    // #d-actions survives Appearance > "Hide the detail panel's controls": everything when
+    // the toggle is off, the gate buttons while a session waits (that is the panel's only
+    // Deny), Continue alone for an errored one, nothing otherwise.
+    function detailChromeMode(hidden, gate, status){
+      if(!hidden) return "full";
+      if(gate === "waiting") return "gate";
+      if(status === "error") return "error";
+      return "none";
+    }
     function renderDetail(){
       var d = document.getElementById("detail");
       var it = selectedKey ? findItem(selectedKey) : null;
@@ -14215,6 +14245,16 @@ local HTML = [[
       // Continue (keystrokes) never does. A shared window: the same rule.
       lockCtl(bap, (remote && (!remoteWait || st === "error")) ? REMOTE_T
         : ((shared && (!gateWait || st === "error")) ? SHARED_T : ""));
+      // 2026-09-22: re-stamped every tick so the revealed gate row disappears again the
+      // moment the gate is answered. The body class does the hiding; these two say which
+      // subset the CSS lets back through (see the body.nochrome rules).
+      var dact = document.getElementById("d-actions");
+      if(dact){
+        var mode = detailChromeMode(document.body.classList.contains("nochrome"), it.gate, st);
+        var dcls = dact.classList;
+        dcls.toggle("dc-gate", mode === "gate");
+        dcls.toggle("dc-err", mode === "error");
+      }
       applyExpand();
       // NB: the tab bar + inline timeline are (re)built on selection / tab-click /
       // pin-toggle -- NOT here. renderDetail runs every 1s tick for the selected
@@ -16761,6 +16801,7 @@ do
   HTML = HTML:gsub("__INIT_LOOK__", ap.look)
   HTML = HTML:gsub("__INIT_DENSITY__", (ap.density == "dense" and "dense " or "") .. (ap.reduceMotion and "calm" or ""))
   HTML = HTML:gsub("__INIT_MCTL__", ap.modelControls and "mctl" or "")
+  HTML = HTML:gsub("__INIT_CHROME__", ap.hideDetailChrome and "nochrome" or "")
   HTML = HTML:gsub("__APPEARANCE_THEMES__", (hs.json.encode({
     vars = core.APPEARANCE_VARS, defaults = core.APPEARANCE_DEFAULTS,
     themes = core.APPEARANCE_THEMES, fonts = core.APPEARANCE_FONTS,

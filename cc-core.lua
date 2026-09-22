@@ -12435,6 +12435,10 @@ function M.resolveAppearance(ap)
     -- available for anyone who wants it, but a panel shouldn't carry six controls its
     -- owner has never touched. Not a theme attribute -- importTheme deliberately drops it.
     modelControls = ap.modelControls == true,
+    -- 2026-09-22: hide the detail panel's bottom chrome (#d-actions, #d-controls, the nudge
+    -- box). Same posture as modelControls -- a panel preference, not a look, so importTheme
+    -- and exportTheme both leave it alone. See M.detailChromeMode for what comes back.
+    hideDetailChrome = ap.hideDetailChrome == true,
   }
 end
 
@@ -12453,6 +12457,21 @@ function M.appearanceCss(resolved)
   parts[#parts + 1] = "--font:" .. (M.APPEARANCE_FONTS[resolved.font] or M.APPEARANCE_FONTS.system) .. ";"
   parts[#parts + 1] = "}"
   return table.concat(parts)
+end
+
+-- ---- the detail panel's bottom chrome (2026-09-22) ----
+-- Which of #d-actions the panel shows while Appearance > "Hide the detail panel's controls"
+-- is on. Hiding it outright would take away the panel's only Deny -- the hotkey approves the
+-- front-most session, and nothing is bound to Deny -- so a session that is actually WAITING
+-- brings Approve/Deny/the reason/Stop back, and an errored one brings back the Approve button
+-- alone (it re-labels itself Continue). A waiting gate outranks an error: with a gate up,
+-- Adam still needs to be able to refuse it.
+--   "full" = the toggle is off, show everything.  "none" = show nothing.
+function M.detailChromeMode(hidden, gate, status)
+  if not hidden then return "full" end
+  if gate == "waiting" then return "gate" end
+  if status == "error" then return "error" end
+  return "none"
 end
 
 -- F3 (theme editor): a portable theme = the full resolved palette (all 26 color

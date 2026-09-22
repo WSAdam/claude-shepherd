@@ -103,6 +103,9 @@ echo ""
 echo "== node: the merge review keeps its buttons in view in a real browser (skips without Playwright) =="
 node "$DIR/merge-review.browser.test.js" || fail=1
 echo ""
+echo "== node: hiding the detail panel's chrome, and the gate bringing it back (real browser) =="
+node "$DIR/detail-chrome.browser.test.js" || fail=1
+echo ""
 echo "== node: My List -- a check-off lands at once, collapsed Done isn't built (real browser) =="
 node "$DIR/worklist-checkoff.browser.test.js" || fail=1
 echo ""

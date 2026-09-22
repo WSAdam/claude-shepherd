@@ -496,6 +496,22 @@ The next six — Effort, Mode, Model, Gate, Policy and Auto-model — are **hidd
 them on** in ⚙ Settings → Appearance → **"Model controls"** (off by default). They stay available
 for anyone who uses them, without every panel carrying six controls you never touch.
 
+⚙ Settings → Appearance → **"Hide the detail panel's controls"** (off by default) goes further
+and takes the whole bottom of the panel off screen: the button row, the model-control row, the
+nudge box and its chip, and the task-template menu. What it leaves behind is the part you can't
+reach any other way:
+
+- a session **waiting on the approval gate** brings back **Approve, Deny, the deny reason and
+  Stop** — and only those — then hides them again the moment you answer. Without that the
+  toggle would remove the only Deny there is: the ⌘⌥A hotkey approves the front-most waiting
+  session, and nothing is bound to Deny.
+- an **errored** session brings back the Approve button alone, which already reads **Continue**.
+- a **held question** (AskUserQuestion) and the **plan / TODO** box are content, not chrome, and
+  stay exactly as they are — questions keep their own answer buttons.
+
+Known consequence: the nudge box is hidden, not disabled, so ⌘V still pastes into it. The
+setting is a panel preference, not a look — exporting or importing a theme never carries it.
+
 - **Effort** dropdown — set the session's reasoning effort (Low/Medium/High/XHigh) live; sends
   the `/effort <level>` slash command.
 - **Mode** dropdown — switch the permission mode (Default / Accept edits / Plan) live via

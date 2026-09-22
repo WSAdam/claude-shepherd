@@ -2104,6 +2104,48 @@ do
         and src:find('classList.toggle("mctl"', 1, true) ~= nil)
   check("model controls: the boot class list is seeded so the row can't flash on open",
         src:find("__INIT_MCTL__", 1, true) ~= nil)
+  -- ---- hiding the detail panel's bottom chrome (2026-09-22) ----
+  -- Adam does not want the detail panel's buttons or nudge box on screen. CSS only: the body
+  -- class hides, renderDetail stamps a state class on #d-actions, and a :not() selector
+  -- reveals just the buttons a waiting gate (or an error) needs -- no markup change, because
+  -- the Deny button + deny-note markup is pinned byte for byte further down this file.
+  check("detail chrome: the body class hides the bottom rows",
+        src:find("body.nochrome #d-controls", 1, true) ~= nil
+        and src:find("body.nochrome #nudge-row", 1, true) ~= nil
+        and src:find("body.nochrome #tpl-menu", 1, true) ~= nil
+        and src:find("body.nochrome #nudge-chip", 1, true) ~= nil
+        and src:find("body.nochrome #d-actions { display:none", 1, true) ~= nil)
+  -- The trap: `body.mctl #d-controls { display:flex }` has EQUAL specificity, so only source
+  -- order decides which wins. Hiding must come last, or turning model controls on would
+  -- resurrect the row the toggle is meant to remove.
+  do
+    local mctl = src:find("body.mctl #d-controls", 1, true)
+    local noch = src:find("body.nochrome #d-controls", 1, true)
+    check("detail chrome: the hiding rule sits AFTER body.mctl #d-controls (equal specificity)",
+          mctl ~= nil and noch ~= nil and mctl < noch)
+  end
+  -- The reveal set, pinned literally: widening it (a new button quietly escaping the hide)
+  -- has to fail here rather than surface on Adam's panel.
+  check("detail chrome: a waiting gate reveals Approve/Deny/reason/Stop and nothing else",
+        src:find("body.nochrome #d-actions.dc-gate > :not(#b-approve):not(#b-deny):not(#deny-note):not(#b-stop) { display:none; }", 1, true) ~= nil)
+  check("detail chrome: an errored session reveals the Approve (Continue) button alone",
+        src:find("body.nochrome #d-actions.dc-err  > :not(#b-approve) { display:none; }", 1, true) ~= nil)
+  check("detail chrome: the gate + error rows are shown again once stamped",
+        src:find("body.nochrome #d-actions.dc-gate, body.nochrome #d-actions.dc-err { display:flex; }", 1, true) ~= nil)
+  check("detail chrome: a settings checkbox drives the body class",
+        src:find('id="a-nochrome"', 1, true) ~= nil
+        and src:find('classList.toggle("nochrome"', 1, true) ~= nil)
+  check("detail chrome: the boot class list is seeded so the chrome can't flash on open",
+        src:find("__INIT_CHROME__", 1, true) ~= nil)
+  check("detail chrome: the setting round-trips through the appearance form",
+        src:find("hideDetailChrome: ap.hideDetailChrome===true", 1, true) ~= nil
+        and src:find('hideDetailChrome: apG("a-nochrome").checked', 1, true) ~= nil
+        and src:find('apG("a-nochrome").checked=(ap.hideDetailChrome===true)', 1, true) ~= nil
+        and src:find('apG("a-nochrome").checked=false', 1, true) ~= nil)
+  check("detail chrome: renderDetail re-stamps the state class every tick",
+        src:find("function detailChromeMode(hidden, gate, status)", 1, true) ~= nil
+        and src:find('dcls.toggle("dc-gate"', 1, true) ~= nil
+        and src:find('dcls.toggle("dc-err"', 1, true) ~= nil)
   check("appearance b2: accent quick-swatches (dedicated, not gated by the custom palette)",
         src:find("function renderAccentSwatches(active)", 1, true) ~= nil
         and src:find("function pickAccent(hex)", 1, true) ~= nil and src:find('id="a-accent-sw"', 1, true) ~= nil)

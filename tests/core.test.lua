@@ -7807,6 +7807,39 @@ do
   check("appearance: a theme import never carries model controls",
         core.importTheme({ colors = { accent = "#ff8800" }, modelControls = true })
           .appearance.modelControls == nil)
+
+  -- ---- hiding the detail panel's bottom chrome (2026-09-22) ----
+  -- Adam does not want to see the detail panel's buttons or nudge box any more. Off by
+  -- default, so an absent key leaves today's panel exactly as it is.
+  check("appearance: the detail chrome is hidden only when asked for",
+        core.resolveAppearance({}).hideDetailChrome == false)
+  check("appearance: the detail chrome hides when set",
+        core.resolveAppearance({ hideDetailChrome = true }).hideDetailChrome == true)
+  check("appearance: a non-boolean hide-chrome setting is not truthy",
+        core.resolveAppearance({ hideDetailChrome = "yes" }).hideDetailChrome == false)
+  -- Same rule as model controls: a palette you share must not change which buttons you see.
+  check("appearance: a theme import never carries the hide-chrome setting",
+        core.importTheme({ colors = { accent = "#ff8800" }, hideDetailChrome = true })
+          .appearance.hideDetailChrome == nil)
+  check("appearance: an exported theme never carries the hide-chrome setting",
+        core.exportTheme(core.resolveAppearance({ hideDetailChrome = true })).hideDetailChrome == nil)
+
+  -- The reveal rule. Hiding the chrome outright would take away the panel's ONLY Deny --
+  -- the hotkey approves the front-most session and there is no Deny binding -- so a waiting
+  -- gate brings Approve/Deny/reason/Stop back, and an errored session brings back Continue
+  -- alone (the Approve button re-labels itself). A gate outranks an error.
+  eq("detail chrome: off means the whole row, whatever the session is doing",
+     core.detailChromeMode(false, "waiting", "error"), "full")
+  eq("detail chrome: a waiting gate reveals the gate buttons",
+     core.detailChromeMode(true, "waiting", "working"), "gate")
+  eq("detail chrome: a waiting gate outranks an error",
+     core.detailChromeMode(true, "waiting", "error"), "gate")
+  eq("detail chrome: an errored session with no gate reveals Continue alone",
+     core.detailChromeMode(true, nil, "error"), "error")
+  eq("detail chrome: a plain working session shows nothing",
+     core.detailChromeMode(true, nil, "working"), "none")
+  eq("detail chrome: an empty gate is not a waiting one",
+     core.detailChromeMode(true, "", "done"), "none")
 end
 
 -- ---- Review-fix: cold-start poll bound + appearanceCss completeness + junk coercion ----
