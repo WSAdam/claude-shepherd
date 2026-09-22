@@ -1382,6 +1382,11 @@ function M.needsYouKind(it, now)
   if m and m.needsYou then
     if m.phase == "requested" then
       if m.waiterAlive == false then return "fyi", "merge", "nothing is waiting for the answer any more" end
+      -- 2026-09-22: while the readiness gate runs, the review's Merge button is disabled --
+      -- there is nothing on the card to press. Two of these at once read as Shepherd re-asking
+      -- the merge Adam had JUST approved, in red, above every working session. It re-ranks
+      -- itself the moment the gate finishes; mergeNeedsYou stays true so the review still renders.
+      if m.checking then return "fyi", "merge", "the test gate is still running -- nothing to press yet" end
       return "needs", "merge"
     end
     if m.phase == "blocked" then return "needs", "merge" end

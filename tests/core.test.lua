@@ -9991,6 +9991,74 @@ do
 end
 
 
+-- ---- A merge still in its test gate has nothing to press (2026-09-22) ------
+-- Live: two units asked to merge at once. Adam approved one; while it merged, the OTHER
+-- request's card pulsed red "Needs you -- merge request: checking..." above every working
+-- session, with its Merge button disabled -- so it read as Shepherd re-asking what he had
+-- just answered. Cause: M.mergeNeedsYou excludes queued and sent but NOT checking, and
+-- needsYouKind's merge arm turned that straight into "needs". The panel already knew better
+-- in two other places (the button is disabled unless `ready && !queued`, and the toast path
+-- skips a checking request) -- the rule had simply never reached the tile ranking.
+-- The fix is in needsYouKind only: a requested merge whose readiness gate is still running is
+-- a heads-up. mergeNeedsYou is left alone so the review card keeps rendering.
+do
+  local NOW = 1000000
+  local function kind(it) local k = core.needsYouKind(it, NOW); return k end
+  local function why(it) local _, _, w = core.needsYouKind(it, NOW); return w end
+  local function requested(extra)
+    local m = { phase = "requested", needsYou = true }
+    for k, v in pairs(extra or {}) do m[k] = v end
+    return { key = "m", status = "done", merge = m }
+  end
+
+  eq("a merge request still in its test gate is a heads-up, not a red Needs you",
+     kind(requested({ checking = true })), "fyi")
+  eq("...and says why there is nothing to press",
+     why(requested({ checking = true })), "the test gate is still running -- nothing to press yet")
+  eq("...once the gate has finished, the same request needs Adam",
+     kind(requested({ checking = false })), "needs")
+  eq("...and a request that never carried a gate state at all still needs Adam",
+     kind(requested()), "needs")
+  -- the states this rule must NOT disturb
+  eq("a request whose cc-merge.sh has gone is still a heads-up",
+     kind(requested({ checking = false, waiterAlive = false })), "fyi")
+  eq("a merge that came back blocked still needs Adam (2026-09-17 stays)",
+     kind({ key = "m", status = "done", merge = { phase = "blocked", needsYou = true } }), "needs")
+  eq("a merged unit that left main red is still a heads-up",
+     kind({ key = "m", status = "done", merge = { phase = "merged", needsYou = true,
+            gate = { state = "failed", code = 2 } } }), "fyi")
+  -- mergeNeedsYou itself is untouched: the review card must keep rendering while it checks.
+  check("a checking request still counts as a merge that concerns Adam",
+        core.mergeNeedsYou({ phase = "requested", checking = true }) == true)
+  check("a queued request still doesn't",
+        core.mergeNeedsYou({ phase = "requested", queued = 2 }) == false)
+  check("a sent request still doesn't",
+        core.mergeNeedsYou({ phase = "requested", sent = true }) == false)
+
+  -- the tier: a checking request sits with the other heads-ups, below anything running
+  local checkingTier = core.instanceTier(requested({ checking = true }), {}, NOW)
+  eq("a checking merge request gets the heads-up tier", checkingTier, core.TIER_FYI)
+  check("...which ranks BELOW a working session", checkingTier > core.TIER_RUNNING)
+  check("...and below the driver of its own batch", checkingTier > core.TIER_DRIVING)
+  check("...while a finished gate outranks a working session again",
+        core.instanceTier(requested({ checking = false }), {}, NOW) < core.TIER_RUNNING)
+
+  -- THE FIXTURE (2026-09-22): the two cards Adam actually saw, in one repo.
+  local approved = { key = "u1", status = "done",
+                     merge = { phase = "approved",
+                               needsYou = core.mergeNeedsYou({ phase = "approved" }) } }
+  local stillChecking = { key = "u2", status = "done",
+                          merge = { phase = "requested", checking = true,
+                                    needsYou = core.mergeNeedsYou({ phase = "requested", checking = true }) } }
+  eq("a merge still in its gate never outranks the merge you just approved",
+     kind(stillChecking), "fyi")
+  eq("...and the one he already approved asks nothing at all", kind(approved), nil)
+  check("...so neither card ranks above a session that is working",
+        core.instanceTier(stillChecking, {}, NOW) > core.TIER_RUNNING
+        and (core.needsYouKind(approved, NOW) == nil))
+end
+
+
 -- ---- the liveness probe behind the needs-you rule (2026-09-17) --------------
 -- The decision is pure (core.needsYouKind); the PROBE is FX's, and it asks ps for the whole
 -- handful of pids at once -- never one call per session per tick.
