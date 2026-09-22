@@ -275,6 +275,10 @@ check("...and the card says to close it by hand, and why  (" .. tostring(I.b1 an
 -- 2026-09-15 live: a merged unit's tab Shepherd couldn't close turned its card red "Needs you",
 -- ahead of the working driver and units -- but a tab left open is housekeeping, not a wait on Adam.
 check("...quietly: a merged unit's leftover tab doesn't make its card Needs you", I.b1 and I.b1.merge and I.b1.merge.needsYou == false)
+-- 2026-09-22: ...and it offers no Close tab button either -- close was never tried here, and
+-- pressing it would defeat the very verification that is holding the tab open.
+check("...and no Close tab button, which would defeat the verification guard",
+      I.b1 and I.b1.merge and I.b1.merge.canCloseTab == nil)
 
 -- 2026-09-14 live: Adam's main Chargeback Sentinel chat did a unit itself in a worktree, merged, and
 -- Shepherd closed its tab -- the very chat he was working in. Only a tab opened for the job closes.
@@ -496,6 +500,9 @@ tick()
 local post = gateTasks("GATE-G")[4]
 check("a merged unit runs the gate once more, in the main checkout", post ~= nil and post.dir == "/r/G")
 check("...and its tab is not closed while that runs", #inbox(792) == 0)
+I = items()
+check("...nor offered as a button, which would bypass the gate outright (2026-09-22)",
+      I.g1.merge.canCloseTab == nil)
 endGate(post, 2, "make test: 1 failed on main\n")
 tick()
 I = items()
@@ -503,6 +510,8 @@ check("main red after the merge: the tab stays open", #inbox(792) == 0)
 check("...the card says so  (" .. tostring(I.g1.merge.line) .. ")",
       I.g1.merge.line:find("is red after the merge", 1, true) ~= nil)
 check("...it wants Adam, unlike a merely un-closed tab", I.g1.merge.needsYou == true)
+check("...and its own note says the tab stays open, so no button offers to close it anyway",
+      I.g1.merge.canCloseTab == nil)
 check("...and Shepherd said so once, in the panel  (" .. table.concat(alerts, " | ") .. ")",
       alerted("is red after the merge") == 1)
 
@@ -636,6 +645,7 @@ do
         (I.t2.merge.line or ""):find("queued behind another run in this repo", 1, true) ~= nil
         and (I.t2.merge.line or ""):find("running GATE-S", 1, true) == nil)
   check("...and the unit's tab is not closed while it waits", #inbox(802) == 0)
+  check("...nor offered as a button while the guard holds it open", I.t2.merge.canCloseTab == nil)
   os.remove(MD .. "/t1.json"); os.remove(T .. "/status/t1.json")
   os.remove(MD .. "/t2.json"); os.remove(T .. "/status/t2.json")
   tick()
@@ -664,6 +674,64 @@ if rt then
         and rg.fails:find("later suite 20", 1, true) == nil)
   check("...and names the full log, kept on disk so Adam can read it", rg.log ~= nil
         and read(rg.log) ~= nil)
+end
+
+-- ---- Close tab is offered only where a press could still close the tab (2026-09-22) -------
+-- Live: a merged batch unit's tab couldn't be closed and the review offered a Close tab button
+-- that re-ran the identical refusal every press -- the window had been reloaded, so the bridge
+-- had forgotten its tags, and a batch unit's tab never gets a name. Neither channel could ever
+-- identify that tab again. The button was drawn from the mere existence of a closeNote.
+do
+  EXISTS["/r/X"] = true
+  -- (a) a refusal a press COULD still fix: two tabs in its window share the tab's name
+  local xWt = newUnit("x1", "/r/X", "fix/x1", "xx1111", 810, 1010)
+  local _x1 = xWt
+  write(T .. "/x1.jsonl", '{"type":"user","message":{"role":"user","content":"Start unit fix/x1'
+    .. ' in its own worktree: call EnterWorktree with name \\"x1\\", then rename its branch."}}\n'
+    .. '{"type":"ai-title","aiTitle":"Fix x1 tab","sessionId":"x1"}\n')
+  registry(810, { "Fix x1 tab", "Fix x1 tab" })
+  setPhase("x1", "merged", { sha = "abc1234def" })
+  tick()
+  I = items()
+  check("a merged unit whose tab can't be told apart yet says so  (" .. tostring(I.x1.merge.line) .. ")",
+        (I.x1.merge.line or ""):find("share the name", 1, true) ~= nil)
+  check("...and keeps its Close tab button: that refusal can heal", I.x1.merge.canCloseTab == true)
+  check("...while nothing was written to the bridge's inbox", #inbox(810) == 0)
+
+  -- (b) ADAM'S CASE: a batch unit, the window reloaded (tags gone), and a tab with no name
+  local yWt = newUnit("y1", "/r/X", "fix/y1", "yy2222", 811, 1011)
+  local _y1 = yWt
+  write(T .. "/y1.jsonl", "")   -- a tab Shepherd opened for a unit never gets a name
+  write(FD .. "/bx1.json", json.encode({ v = 1, id = "bx1", nonce = "n-bx1", phase = "approved",
+    repo = "/r/X", commonDir = "/r/X/.git", driver = { session_id = "xdrv", pid = "1012", name = "driver" },
+    title = "close-tab batch", at = now,
+    units = { { type = "fix", slug = "y1", branch = "fix/y1", task = "do the unit" } } }))
+  write(FD .. "/bx1.state.json", json.encode({ grant = { approved = true, at = now },
+    units = { y1 = { session = { id = "y1" } } } }))
+  registry(811, { "Claude Code", "Claude Code" })
+  setPhase("y1", "merged", { sha = "abc1234def" })
+  tick()
+  I = items()
+  check("a merged unit neither channel can identify explains itself  (" .. tostring(I.y1.merge.line) .. ")",
+        (I.y1.merge.line or ""):find("tagged as unit", 1, true) ~= nil
+        and (I.y1.merge.line or ""):find("and by name:", 1, true) ~= nil)
+  check("...and offers NO Close tab button: that refusal can never heal", I.y1.merge.canCloseTab == nil)
+  local ySent, yWhy, yRetry = table.unpack({ quiet(function() return fx.closeTab(I.y1, { quiet = true }) end) }, 2, 4)
+  check("...because the close itself reports the refusal as terminal  (" .. tostring(yWhy) .. ")",
+        ySent == false and yRetry == false)
+  check("...and nothing was written to the bridge's inbox", #inbox(811) == 0)
+  alerts = {}
+  quiet(function() fx.mergeCloseTab("y1") end)
+  check("...pressing it anyway from a tick-stale panel is refused, and still writes nothing",
+        #inbox(811) == 0)
+  check("...saying why, in the panel  (" .. table.concat(alerts, " | ") .. ")",
+        table.concat(alerts, " "):find("tagged as unit", 1, true) ~= nil)
+  check("...and neither card is a red Needs you: a leftover tab is housekeeping (2026-09-15)",
+        I.x1.merge.needsYou == false and I.y1.merge.needsYou == false)
+  os.remove(MD .. "/x1.json"); os.remove(T .. "/status/x1.json")
+  os.remove(MD .. "/y1.json"); os.remove(T .. "/status/y1.json")
+  os.remove(FD .. "/bx1.json"); os.remove(FD .. "/bx1.state.json")
+  tick()
 end
 
 -- ---- "Needs you" only when a live counterpart will get the answer (2026-09-17) ------------

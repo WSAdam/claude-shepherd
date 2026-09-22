@@ -9319,6 +9319,104 @@ do
   eq("a finished batch says so on the card", fv.line, "⇉ batch finished: Two helpers (2 merged)")
 end
 
+
+-- ---- Close tab is offered only where it could actually close the tab (2026-09-22) --------
+-- Live: a batch unit merged, Shepherd couldn't close its tab, and the review offered a Close
+-- tab button that re-ran the identical refusal every time Adam pressed it. The window had been
+-- reloaded, so the bridge had forgotten its tags -- and a batch unit's tab never gets a name --
+-- so NEITHER channel could identify that tab, ever. The button was shown whenever a closeNote
+-- existed, and a closeNote has five sources: four of them are GUARDS deliberately holding the
+-- tab open (a post-merge gate running, one queued behind it, main red after the merge, a merge
+-- Shepherd could not verify), where pressing it would have bypassed the guard outright.
+-- The verdict is pure now (core.tabCloseVerdict), it says whether a refusal can ever heal, and
+-- only the one refusal a press could still fix keeps its button.
+do
+  local NOW = 1000
+  local ureg = { at = 995, tabs = { { label = "Claude Code", unit = "b1:cheer" }, { label = "Claude Code" } } }
+
+  -- 1. can this refusal heal? Only the tag-is-gone branch is terminal: a tag is handed out
+  -- solely by the bridge's `expect` op as a tab OPENS, and nothing re-tags an existing tab.
+  local uok, uwhy, uret = core.tabBridgeUnitVerdict(ureg, "b1:cheer", NOW)
+  check("a tab found by its tag closes, as before", uok == true and uret == true)
+  local u0, w0, r0 = core.tabBridgeUnitVerdict(ureg, "b1:wave", NOW)
+  check("no tab carries the tag: refused, and it can NEVER heal", u0 == false and r0 == false)
+  eq("...with its wording unchanged", w0,
+     "no tab in its window is tagged as unit b1:wave (a window reload forgets the tags)")
+  local _, w2, r2 = core.tabBridgeUnitVerdict(
+    { at = 995, tabs = { { unit = "b1:cheer" }, { unit = "b1:cheer" } } }, "b1:cheer", NOW)
+  check("two tabs claiming one unit CAN heal (one of them closes)", r2 == true)
+  eq("...with its wording unchanged", w2, "2 tabs claim unit b1:cheer")
+  check("a bridge that isn't running, or has gone stale, heals with a reload",
+        select(3, core.tabBridgeUnitVerdict(nil, "b1:cheer", NOW)) == true
+        and select(3, core.tabBridgeUnitVerdict({ at = 1, tabs = ureg.tabs }, "b1:cheer", NOW)) == true)
+  local _ = uwhy
+
+  -- must not disturb: tabBridgeCloseVerdict is UNCHANGED -- every one of its refusals can heal,
+  -- so it says nothing about retryability and still returns exactly ok, why.
+  for _, c in ipairs({ { ureg, "Gone" }, { ureg, nil }, { nil, "Fix login" },
+                       { { v = 1, at = 1, tabs = ureg.tabs }, "Fix login" } }) do
+    local cok, cwhy, cextra = core.tabBridgeCloseVerdict(c[1], c[2], NOW)
+    check("close-by-name still answers ok, why and nothing more  (" .. tostring(cwhy) .. ")",
+          cok == false and type(cwhy) == "string" and cextra == nil)
+  end
+  check("close verdict: one tab with the name still closes", core.tabBridgeCloseVerdict(
+        { at = 995, tabs = { { label = "Fix login" } } }, "Fix login", NOW) == true)
+
+  -- 2. the one verdict both channels go through
+  local okA, _, _, byA = core.tabCloseVerdict(ureg, "b1:cheer", nil, NOW)
+  check("the unit's tag identifies its tab", okA == true and byA == "unit")
+  local okB, _, _, byB = core.tabCloseVerdict({ at = 995, tabs = { { label = "Fix login" } } }, nil, "Fix login", NOW)
+  check("a session with no unit is closed by its tab's name", okB == true and byB == "label")
+  local okC, _, _, byC = core.tabCloseVerdict({ at = 995, tabs = { { label = "Fix cheer" } } },
+                                              "b1:cheer", "Fix cheer", NOW)
+  check("a unit whose tag a window reload forgot is still closed by its tab's name",
+        okC == true and byC == "label")
+  -- ADAM'S CASE: the tags are gone AND a batch unit's tab never got a name
+  local blind = { at = 995, tabs = { { label = "Claude Code" }, { label = "Claude Code" } } }
+  local okD, whyD, retD, byD = core.tabCloseVerdict(blind, "b1:cheer", nil, NOW)
+  check("neither channel can identify the tab: refused  (" .. tostring(whyD) .. ")", okD == false and byD == nil)
+  check("...and that refusal can NEVER heal", retD == false)
+  check("...the reason names both channels it tried",
+        whyD:find("tagged as unit", 1, true) ~= nil and whyD:find("and by name:", 1, true) ~= nil)
+  check("...but a name that simply doesn't match a tab YET can heal",
+        select(3, core.tabCloseVerdict(blind, "b1:cheer", "Fix cheer", NOW)) == true)
+  check("...and a bridge that isn't running heals with a reload",
+        select(3, core.tabCloseVerdict(nil, nil, "Fix login", NOW)) == true)
+  check("a plain session whose tab can't be named yet is still only a heads-up, and retryable",
+        select(3, core.tabCloseVerdict(ureg, nil, nil, NOW)) == true)
+
+  -- 3. the button: once per closeNote source, true ONLY for the refusal a press could fix
+  local mreq = { phase = "merged", branch = "fix/x", base = "main", at = NOW,
+                 worktree = "/r/A/.claude/worktrees/x", sha = "abcdef1234567" }
+  local function note(n, can) return core.mergeView(mreq, nil, nil, { closeNote = n, canCloseTab = can }) end
+  local guards = {
+    "running make test on main first",
+    "make test on main is queued behind another run in this repo",
+    "main is red after the merge: make test exited 2 -- its tab stays open",
+    "close its tab yourself once you've looked: the worktree is still there",
+  }
+  for _, g in ipairs(guards) do
+    local gv = note(g, nil)
+    check("a guard note explains itself with NO button  (" .. g:sub(1, 34) .. "...)",
+          gv.closeNote == g and gv.canCloseTab == nil)
+    check("...and the card still says what is happening", gv.line:find(g, 1, true) ~= nil)
+  end
+  local retryV = note("close its tab yourself: 2 Claude tabs in its window share the name \"Fix x\"", true)
+  local deadV = note("close its tab yourself: no tab in its window is tagged as unit b1:cheer"
+                     .. " (a window reload forgets the tags); and by name: its tab has no name yet,"
+                     .. " so it can't be told apart", nil)
+  check("the ONE refusal a press could still fix keeps its button", retryV.canCloseTab == true)
+  check("...and the refusal that can never heal does not -- it explains instead", deadV.canCloseTab == nil)
+  check("...both still say so on the card", retryV.line:find("share the name", 1, true) ~= nil
+        and deadV.line:find("tagged as unit", 1, true) ~= nil)
+  -- must not disturb: 2026-09-15 -- a merged unit whose tab is still open is housekeeping
+  check("a merged unit whose tab can't be closed is still NOT a red Needs you",
+        retryV.needsYou == false and deadV.needsYou == false)
+  check("...and a request that hasn't merged never carries the flag at all",
+        core.mergeView({ phase = "requested", branch = "fix/x", base = "main", at = NOW,
+                         worktree = "/r/A/.claude/worktrees/x" },
+                       { ready = true, problems = {} }, nil, { canCloseTab = true }).canCloseTab == nil)
+end
 -- ---- Batch outcomes: a batch's units grouped by how they ended, not dumped row by row (2026-09-18) ----
 -- The unit of analysis is the outcome: merged / blocked / working / unopened, each a slug list in
 -- the batch's own unit order. batchFinished counted these and threw the counts away as a string;

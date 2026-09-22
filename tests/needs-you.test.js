@@ -83,8 +83,16 @@ const rm = slice("    function renderMerge(it){", "\n    }\n") || "";
 // housekeeping), but its review keeps the buttons -- any finished merge with a note gets them.
 check("the review shows its finished-state buttons for any finished merge with a note (needs you or not)",
       rm.indexOf('document.getElementById("dm-done").style.display = (!asking && (m.needsYou || m.closeNote || m.phase === "merged-dirty")) ? "flex" : "none";') >= 0);
-check("...Close tab only while the merged unit's tab is still open",
-      rm.indexOf('document.getElementById("dm-closetab").style.display = (m.phase === "merged" && m.closeNote) ? "" : "none";') >= 0);
+// 2026-09-22 requirement change: a closeNote is no longer proof that Close tab could do
+// anything. Four of its five sources are GUARDS deliberately holding the tab open (a post-merge
+// gate running, one queued behind it, main red after the merge, a merge Shepherd couldn't
+// verify) and a fifth refusal can be terminal -- Adam's reloaded window had forgotten its bridge
+// tags, and a batch unit's tab never gets a name, so the button re-ran the identical refusal
+// every press. Lua decides (core.tabCloseVerdict -> m.canCloseTab); the panel reads THAT.
+check("...Close tab only where pressing it could actually close the tab",
+      rm.indexOf('document.getElementById("dm-closetab").style.display = (m.phase === "merged" && m.canCloseTab) ? "" : "none";') >= 0);
+check("...and never straight off the note, which four guards also write",
+      rm.indexOf('(m.phase === "merged" && m.closeNote)') < 0);
 check("the buttons exist and send their actions",
       src.indexOf("mergeAct('merge-close-tab')") >= 0 && src.indexOf("mergeAct('merge-dismiss')") >= 0);
 check("Shepherd handles both actions",

@@ -2735,34 +2735,27 @@ function FX.closeTab(it, opts)
   if type(it) ~= "table" or it.remote then return false, "it isn't a local session" end
   if it.editor == "kitty" or it.editor == "terminal" then return false, "it runs in a terminal, not a VS Code tab" end
   local name = tostring(it.label or it.name or "?")
-  local function refuse(why)
+  local function refuse(why, retryable)
     if not (opts and opts.quiet) then
       FX._closeTabWhy[tostring(it.key)] = why
       pcall(function() FX.alert("Can't close " .. name .. "'s tab: " .. why) end)
     end
     print("[cc-dashboard] ⚠️ Close NOT sent for '" .. name .. "': " .. why)
-    return false, why
+    return false, why, retryable ~= false
   end
   if core.config(loadConfig(), "tabBridge.enabled", true) == false then
     return refuse("the Shepherd tab bridge is switched off (tabBridge.enabled)")
   end
   local hw = tostring(it.host_window or "")
-  -- a batch unit's tab is targeted by the tag its bridge gave it (it never gets a name)
+  -- a batch unit's tab is targeted by the tag its bridge gave it (it never gets a name); which
+  -- channel names it, the fall-back to the tab's own name, and whether a refusal can ever heal
+  -- are all core.tabCloseVerdict's call now -- the panel has to ask the same question.
   local unit = FX.fleetUnitTagOf(it)
-  local label = unit and ("unit " .. unit) or FX.sessionTabLabel(it)
-  local ok, why
-  if unit then
-    ok, why = core.tabBridgeUnitVerdict(FX.tabBridgeRegistry(hw), unit, FX.now())
-    -- 2026-09-11: no tab carries the tag (a window reload, or a tab Shepherd didn't open):
-    -- fall back to the tab's name, still only on a single match
-    if not ok then
-      local byName = FX.sessionTabLabel(it)
-      local nok, nwhy = core.tabBridgeCloseVerdict(FX.tabBridgeRegistry(hw), byName, FX.now())
-      if nok then unit, label, ok, why = nil, byName, true, nil
-      else why = why .. "; and by name: " .. tostring(nwhy) end
-    end
-  else ok, why = core.tabBridgeCloseVerdict(FX.tabBridgeRegistry(hw), label, FX.now()) end
-  if not ok then return refuse(why) end
+  local byName = FX.sessionTabLabel(it)
+  local ok, why, retryable, by = core.tabCloseVerdict(FX.tabBridgeRegistry(hw), unit, byName, FX.now())
+  if not ok then return refuse(why, retryable) end
+  if by ~= "unit" then unit = nil end
+  local label = unit and ("unit " .. unit) or byName
   local cmd = core.tabBridgeCommand(it.key, label, FX.now(), "close", unit)
   local file = FX.TAB_BRIDGE_DIR .. "/" .. hw .. ".in/" .. cmd.id .. ".json"
   if not FX.writeFileAtomic(file, core.json.encode(cmd)) then
@@ -3865,6 +3858,8 @@ function FX.mergeAutoClose(r, it)
     v = { at = now, ok = ok, why = why }
     FX._mergeVerify[r.nonce] = v
   end
+  -- a merge Shepherd could not verify is a GUARD, not a retry: closing the tab here would
+  -- defeat the verification, and close was never even tried. No button (2026-09-22).
   if not v.ok then return "close its tab yourself once you've looked: " .. tostring(v.why) end
   if not core.mergeCloseDue(it, now) then return nil end
   -- 2026-09-14: only a tab Shepherd opened for this job closes (a batch unit's, a New worktree tab).
@@ -3886,15 +3881,19 @@ function FX.mergeAutoClose(r, it)
     sig = table.concat(parts, "|")
   end
   local t = FX._mergeCloseTry[r.nonce]
-  if t and now - t.at < 300 and sig == t.sig then return t.why end
-  local sent, why = FX.closeTab(it, { quiet = true })
+  if t and now - t.at < 300 and sig == t.sig then return t.why, t.can end
+  local sent, why, retryable = FX.closeTab(it, { quiet = true })
   if sent then
     FX._mergeClosing[r.nonce] = true
     FX._mergeCloseTry[r.nonce] = nil
     return nil
   end
-  FX._mergeCloseTry[r.nonce] = { at = now, sig = sig, why = "close its tab yourself: " .. tostring(why) }
-  return FX._mergeCloseTry[r.nonce].why
+  -- The one note a press could still act on -- and only while the refusal can heal. Adam's
+  -- reloaded window had forgotten its tags and the unit's tab never got a name, so pressing
+  -- Close tab re-ran the identical refusal, every time.
+  FX._mergeCloseTry[r.nonce] = { at = now, sig = sig, can = retryable and true or nil,
+                                 why = "close its tab yourself: " .. tostring(why) }
+  return FX._mergeCloseTry[r.nonce].why, FX._mergeCloseTry[r.nonce].can
 end
 
 -- A finished merge's buttons (2026-09-11): a red card must have something to press.
@@ -3902,6 +3901,14 @@ end
 function FX.mergeCloseTab(key)
   local r, it = FX._mergeReqs[key], FX._mergeItems[key]
   if not (r and it) then FX.mergeAlert("⚠️ That merge is gone"); return false end
+  -- 2026-09-22: the panel only draws the button where the last view said a press could work,
+  -- but the webview can be a tick stale -- so the same rule is enforced here, where the four
+  -- guard notes (a post-merge gate running or queued, main red, a merge not verified) live.
+  local last = type(it.merge) == "table" and it.merge or nil
+  if last and last.closeNote and not last.canCloseTab then
+    FX.mergeAlert("⚠️ " .. tostring(last.closeNote))
+    return false
+  end
   FX._mergeCloseTry[r.nonce] = nil
   local sent = FX.closeTab(it)
   if sent then FX._mergeClosing[r.nonce] = true end
@@ -3982,7 +3989,7 @@ function FX.annotateMerges(list, cfg, bannerOn)
       gate = FX.mergeGate(r, facts, cfg)
       rd = core.mergeReadiness(r, facts, it, gate)
     end
-    local closeNote
+    local closeNote, canCloseTab
     if r.phase == "merged" then
       -- 2026-09-17: the same gate runs ONCE in the main checkout before the unit's tab closes,
       -- so a merge that left main red is caught here instead of by the next unit to ask.
@@ -3999,11 +4006,11 @@ function FX.annotateMerges(list, cfg, bannerOn)
           .. ((gate.state == "timedOut") and " timed out" or (" exited " .. tostring(gate.code)))
           .. " -- its tab stays open"
       elseif core.config(cfg, "merge.closeTab", true) ~= false then
-        closeNote = FX.mergeAutoClose(r, it)
+        closeNote, canCloseTab = FX.mergeAutoClose(r, it)
       end
     end
     it.merge = core.mergeView(r, rd, facts, { queued = q.queued[key], sent = FX._mergeSent[key] ~= nil,
-                                               closeNote = closeNote }, gate)
+                                               closeNote = closeNote, canCloseTab = canCloseTab }, gate)
     -- The process actually waiting for Adam's answer (2026-09-17). Kept OFF the tile -- it's a
     -- pid, and the whole tile is what the webview gets -- so FX.annotateNeedsYou reads it here.
     FX._mergeWaitPids[key] = (r.phase == "requested") and r.waitPid or nil
@@ -14089,7 +14096,7 @@ local HTML = [[
       mergeFillList(document.getElementById("dm-files"), asking ? files : [], function(f){ return (f.st || "") + "  " + (f.path || ""); });
       document.getElementById("dm-acts").style.display = asking ? "flex" : "none";
       document.getElementById("dm-done").style.display = (!asking && (m.needsYou || m.closeNote || m.phase === "merged-dirty")) ? "flex" : "none";
-      document.getElementById("dm-closetab").style.display = (m.phase === "merged" && m.closeNote) ? "" : "none";
+      document.getElementById("dm-closetab").style.display = (m.phase === "merged" && m.canCloseTab) ? "" : "none";
       var bm = document.getElementById("dm-merge");
       bm.disabled = !(m.ready && !m.queued);
       bm.title = m.queued ? "Already queued behind another merge in this repo"

@@ -884,14 +884,42 @@ end
 function M.fleetUnitTag(batchId, slug) return tostring(batchId) .. ":" .. tostring(slug) end
 
 -- May the bridge close/select this unit's tab? A fresh registry with exactly one tab tagged for it.
+-- Third return (2026-09-22): could this refusal ever heal? A reload brings the bridge back and a
+-- duplicate tag goes when one of the two tabs closes -- but a tag is handed out SOLELY by the
+-- bridge's `expect` op as a tab opens, and nothing re-tags an existing tab, so once no tab
+-- carries it the answer never changes. The panel needs that to stop offering a dead button.
 function M.tabBridgeUnitVerdict(reg, unit, now)
-  if type(reg) ~= "table" or type(reg.tabs) ~= "table" then return false, "the Shepherd tab bridge isn't running in its VS Code window" end
-  if (tonumber(now) or 0) - (tonumber(reg.at) or 0) > M.TAB_BRIDGE_FRESH then return false, "the Shepherd tab bridge in its VS Code window stopped reporting" end
+  if type(reg) ~= "table" or type(reg.tabs) ~= "table" then return false, "the Shepherd tab bridge isn't running in its VS Code window", true end
+  if (tonumber(now) or 0) - (tonumber(reg.at) or 0) > M.TAB_BRIDGE_FRESH then return false, "the Shepherd tab bridge in its VS Code window stopped reporting", true end
   local n = 0
   for _, t in ipairs(reg.tabs) do if type(t) == "table" and t.unit == unit then n = n + 1 end end
-  if n == 1 then return true end
-  if n == 0 then return false, "no tab in its window is tagged as unit " .. tostring(unit) .. " (a window reload forgets the tags)" end
-  return false, n .. " tabs claim unit " .. tostring(unit)
+  if n == 1 then return true, nil, true end
+  if n == 0 then return false, "no tab in its window is tagged as unit " .. tostring(unit) .. " (a window reload forgets the tags)", false end
+  return false, n .. " tabs claim unit " .. tostring(unit), true
+end
+
+-- The whole question "may Shepherd close this session's tab, and if not, could that ever
+-- change?" -- by the unit's bridge tag first, falling back to the tab's name, exactly as the
+-- imperative version inside FX.closeTab did. It lives here (2026-09-22) because the PANEL has
+-- to ask it too: the review offered a Close tab button for every refusal, including the one
+-- Adam hit -- a reloaded window that had forgotten its tags, on a batch unit's tab that never
+-- gets a name, so neither channel could identify that tab ever again.
+-- Returns ok, why, retryable, by ("unit" or "label" -- which channel names the tab).
+function M.tabCloseVerdict(reg, unit, label, now)
+  if not unit then
+    local ok, why = M.tabBridgeCloseVerdict(reg, label, now)
+    if ok then return true, nil, true, "label" end
+    return false, why, true, nil   -- every close-by-name refusal can heal
+  end
+  local ok, why, retryable = M.tabBridgeUnitVerdict(reg, unit, now)
+  if ok then return true, nil, true, "unit" end
+  local nok, nwhy = M.tabBridgeCloseVerdict(reg, label, now)
+  if nok then return true, nil, true, "label" end
+  -- Terminal only when BOTH channels are blind for good: the tag can never come back AND there
+  -- is no name to try at all. A name that simply doesn't match a tab yet may still match one.
+  local named = type(label) == "string" and label ~= ""
+  return false, tostring(why) .. "; and by name: " .. tostring(nwhy),
+         (retryable or named) and true or false, nil
 end
 
 -- Which name to ask the bridge to bring forward: the first of the session's possible tab names
@@ -2303,6 +2331,9 @@ function M.mergeView(req, rd, facts, q, gate)
     summary = req.summary, tests = req.tests, note = req.note, at = req.at,
     sha = req.sha and req.sha:sub(1, 7) or nil, queued = q.queued, sent = q.sent and true or nil,
     closeNote = (req.phase == "merged") and q.closeNote or nil,
+    -- 2026-09-22: Close tab is offered ONLY where pressing it could still close the tab -- never
+    -- for a note that is a guard holding the tab open, and never for a refusal that can't heal.
+    canCloseTab = (req.phase == "merged") and q.canCloseTab and true or nil,
   }
   if req.phase == "requested" then
     v.ready = rd and rd.ready or false
