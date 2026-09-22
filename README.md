@@ -208,8 +208,9 @@ run the script there — so fenced tabs ask from outside and step back in to reb
   are on). **A card that says Needs you always has something to press** — and only then. A card
   ranks as needing you when a live counterpart will actually receive your answer *and* the card
   offers something that changes the outcome. Anything else — a merge request whose `cc-merge.sh`
-  has gone, a question whose session exited, a merged unit whose post-merge gate went red hours
-  ago with its worktree already removed, a connection blip the session is still retrying — is a
+  has gone, a question whose session exited, a merge request whose test gate is still running
+  (nothing to press yet — it turns red on its own the moment the gate finishes), a merged unit
+  whose post-merge gate went red hours ago with its worktree already removed, a connection blip the session is still retrying — is a
   **Heads-up** instead: on the card, dismissible, with one line saying why, but never red, never
   pulsing and never ranked above a session that is working. A unit that came back **blocked**
   stays Needs you: the affordance isn't the Dismiss button, it's the stalled tab and the branch,
@@ -230,13 +231,16 @@ run the script there — so fenced tabs ask from outside and step back in to reb
   ] }
   ```
 
-  While it runs the card says *checking* and **Merge** is refused; a red or timed-out run blocks
-  the merge — Adam's button **and** a batch unit's merge on your grant — and the review leads with
+  While it runs the card says *checking* and **Merge** is refused. A gate still waiting for its
+  repo's lane says it is *queued behind another run in this repo* instead — the card, its reason
+  and the review all name which of the two it is, and a queued gate holds the merge just the same.
+  A red or timed-out run blocks the merge — Adam's button **and** a batch unit's merge on your grant — and the review leads with
   the **failing lines** of the suite's own output (`FAIL`, `not ok`, an `N run, M failed` summary),
   names the full log's path, and keeps the last lines underneath as context. The session's test
   line stays, relabelled *advisory*. **One gate runs per repo at a time**, pre- and post-merge
   sharing the lane: a project's suite usually isn't safe to run twice in one checkout, and two
-  concurrent runs kill each other and both report a failure about a tree that is green. A suite
+  concurrent runs kill each other and both report a failure about a tree that is green. (Runs in
+  different worktrees don't share a checkout, so they don't collide.) A suite
   that **couldn't run at all** (its own concurrency lock, a missing command, a worktree that has
   gone) is told apart from one that failed: it still holds the merge — nothing was proven — but it
   says so plainly, it never turns the card red, and it is retried a minute and a half later.
@@ -273,8 +277,11 @@ run the script there — so fenced tabs ask from outside and step back in to reb
   itself in a worktree stays open: its finished request is cleared and a toast says *✓ Merged … —
   its chat stays open*. If it can't (no bridge in that
   window, a tab name shared by two tabs, a terminal session) or git disagrees, the card says
-  *merged — close its tab yourself* and why, with **Close tab** (try again now) and **Dismiss**
-  (clear it from the card); a *blocked* unit's card has Dismiss too.
+  *merged — close its tab yourself* and why, with **Dismiss** (clear it from the card), and
+  **Close tab** (try again now) only where a press could actually close it — never while a
+  post-merge gate runs or queues, while main is red, for a merge Shepherd couldn't verify, or
+  when the tab can never be identified again (a batch unit's tab after its window reloaded: the
+  bridge forgot its tag, and unit tabs never get a name). A *blocked* unit's card has Dismiss too.
   `"merge": { "closeTab": false }` leaves every tab open.
 - No keystrokes: the request and your answer are files in `~/.claude/cc-merge/`, and the answer is
   bound to the request it's for. `"merge": { "enabled": false }` makes Shepherd ignore requests.
@@ -395,8 +402,9 @@ session's name (its chat title, as the tab shows it). A fresh tab still named "C
 tabs with the same name, or a window without the bridge keep Close refused, with the reason.
 Each refusal is logged and raises an alert (at most once a minute per session); the
 detail panel greys those controls and says how many sessions share the window. **Jump**,
-**hands-free approvals** (the gate's decision file), Queue add, Gate and Policy still work, and
-kitty sessions are unaffected. A queued task simply waits. `keystrokes.refuseSharedWindow:
+**hands-free approvals** (the gate's decision file), **ready-to-merge** answers (decision files
+too — the shared-window banner sits above the keystroke controls, not the merge review), Queue
+add, Gate and Policy still work, and kitty sessions are unaffected. A queued task simply waits. `keystrokes.refuseSharedWindow:
 false` in `~/.claude/cc-config.json` turns the guard off. **Jump** (and double-click, and Focus in
 Instances) brings the session's window forward and then asks that window's tab bridge to bring
 **the session's own tab** to the front — when one of its names (custom title, AI title, first
