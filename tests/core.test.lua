@@ -5532,6 +5532,59 @@ do
   eq("remove: unknown project scope is a no-op", #core.worklistScopeList(rm, "proj:/unknown"), 0)
 end
 
+-- ---- My List search: token-AND filter over a worklist (2026-09-22) ----------
+-- The Archive tab alone holds 442 rows and grows ~440 every ten days, and My List
+-- had no filter at all. One box filters whichever tab is selected; these are the
+-- pure halves, twinned in the panel JS (wlSearchToks / wlMatches) the same way
+-- filterTiles is twinned by tileMatches. POSITIONAL args on worklistMatches, not an
+-- item table: the three call sites carry three different row shapes (a plain item, a
+-- MASTER {scope,label,it} row, an archive {scope,label,text,details,due,doneTs} row).
+do
+  local list = {
+    { id = "a", text = "Ship the installer fixes", details = "needs a chmod pass", due = "2026-09-25" },
+    { id = "b", text = "Renew the domain", details = "", due = "2026-10-02" },
+    { id = "c", text = "Installer smoke test", details = "run it on a clean HOME", due = "" },
+  }
+  eq("wl-search: blank query keeps all", #core.filterWorklist(list, ""), 3)
+  eq("wl-search: nil query keeps all", #core.filterWorklist(list, nil), 3)
+  eq("wl-search: whitespace query keeps all", #core.filterWorklist(list, "   "), 3)
+  eq("wl-search: subject substring", #core.filterWorklist(list, "installer"), 2)
+  eq("wl-search: case-insensitive", #core.filterWorklist(list, "INSTALLER"), 2)
+  check("wl-search: returns the matching item", core.filterWorklist(list, "domain")[1].id == "b")
+  -- details never reaches the screen, so searching it costs nothing and finds the
+  -- note the item was actually written for.
+  eq("wl-search: matches the never-displayed details", #core.filterWorklist(list, "chmod"), 1)
+  check("wl-search: the details match is the right row", core.filterWorklist(list, "clean HOME")[1].id == "c")
+  -- a due date is plain text, so "2026-09" filters a month
+  eq("wl-search: matches the due date month", #core.filterWorklist(list, "2026-09"), 1)
+  eq("wl-search: token-AND narrows", #core.filterWorklist(list, "installer smoke"), 1)
+  eq("wl-search: token-AND miss -> empty", #core.filterWorklist(list, "installer domain"), 0)
+  eq("wl-search: no match -> empty", #core.filterWorklist(list, "zzz"), 0)
+  eq("wl-search: nil list -> empty", #core.filterWorklist(nil, "x"), 0)
+
+  -- the project label a MASTER/archive row carries is searchable too
+  eq("wl-search: matches the row's project label",
+     #core.filterWorklist({ { text = "one", label = "Shepherd" }, { text = "two", label = "Chargeback" } }, "shepherd"), 1)
+
+  -- tokens: lowercased, whitespace-collapsed, blank -> none
+  local t = core.worklistSearchTokens("  A  b ")
+  eq("wl-search: tokens count", #t, 2)
+  eq("wl-search: tokens lowercased (1st)", t[1], "a")
+  eq("wl-search: tokens lowercased (2nd)", t[2], "b")
+  eq("wl-search: blank query yields no tokens", #core.worklistSearchTokens(""), 0)
+  eq("wl-search: nil query yields no tokens", #core.worklistSearchTokens(nil), 0)
+
+  -- worklistMatches is positional, and an empty token list passes everything
+  check("wl-search: no tokens matches anything", core.worklistMatches({}, "x", "", "", "") == true)
+  check("wl-search: nil tokens matches anything", core.worklistMatches(nil, "x", "", "", "") == true)
+  check("wl-search: matches across the joined fields",
+        core.worklistMatches({ "ship", "chmod" }, "Ship it", "needs a chmod pass", "", "") == true)
+  check("wl-search: one missing token fails the row",
+        core.worklistMatches({ "ship", "nope" }, "Ship it", "needs a chmod pass", "", "") == false)
+  check("wl-search: nil fields do not crash",
+        core.worklistMatches({ "ship" }, "Ship it", nil, nil, nil) == true)
+end
+
 -- ---- TODO.md import: parser + merge + tombstones (2026-08-31) ----------------
 -- Feature contract: a project's TODO.md checkboxes import into its worklist as
 -- individual items. The file's [x] arrives as fileDone (the automation's claim);

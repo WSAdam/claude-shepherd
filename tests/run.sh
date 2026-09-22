@@ -112,6 +112,9 @@ echo ""
 echo "== node: My List -- the Archive tab, fetched only when opened (real browser) =="
 node "$DIR/worklist-archive.browser.test.js" || fail=1
 echo ""
+echo "== node: My List -- the filter box, filtering whichever tab is selected (real browser) =="
+node "$DIR/worklist-search.browser.test.js" || fail=1
+echo ""
 echo "== node: project-card layout geometry in a real browser (skips without Playwright) =="
 node "$DIR/card-layout.browser.test.js" || fail=1
 echo ""

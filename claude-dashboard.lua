@@ -8746,6 +8746,15 @@ local HTML = [[
               padding:2px clamp(7px,2.4cqw,12px); font-size:clamp(10px,2.9cqw,12px); cursor:pointer;
               max-width:100%; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .wl-scope.on { background:var(--accent-bg); border-color:var(--accent); color:var(--accent-text); font-weight:600; }
+  /* One filter box for whichever tab is selected (2026-09-22). It lives OUTSIDE every
+     node renderWorklist rewrites, so its value, focus and caret survive each render --
+     the input IS the query state, and the query persists across tab switches on purpose. */
+  #wl-searchrow { display:flex; align-items:center; gap:6px; margin-bottom:8px; }
+  #wl-search { flex:1; min-width:0; background:var(--surface-2); color:var(--text); border:1px solid var(--border);
+    border-radius:8px; padding:3px clamp(7px,2.4cqw,10px); font-size:clamp(10px,2.9cqw,12.5px); font-family:inherit; }
+  #wl-search::placeholder { color:var(--muted); }
+  #wl-search:focus { outline:none; border-color:var(--accent); }
+  #wl-search-count { flex:0 0 auto; font-size:clamp(9px,2.6cqw,11px); color:var(--muted); white-space:nowrap; }
   /* TODO.md import row + badges. .wl-fdone is the AUTOMATION's [x] claim from the
      file -- deliberately a chip, never the checkbox (that stays the user's
      verification alone). Amber while unverified, quiet once the box is ticked. */
@@ -9748,6 +9757,10 @@ local HTML = [[
   <div id="empty">Waiting for Claude Code sessions...<br>Start a session in any project.</div>
   <div id="worklist">
     <div id="wl-scopes"></div>
+    <div id="wl-searchrow">
+      <input type="text" id="wl-search" placeholder="Filter this list…" oninput="renderWorklist()" onkeydown="wlSearchKey(event)">
+      <span id="wl-search-count"></span>
+    </div>
     <div id="wl-todorow">
       <button id="wl-todobtn" onclick="todoImportScope()" title="Import this project's TODO.md checkboxes as list items">⇪ Import TODO.md</button>
       <button id="wl-todoall" onclick="todoImportAll()" title="Import/refresh TODO.md for every known project">⇪ All projects</button>
@@ -11329,6 +11342,41 @@ local HTML = [[
       for(var i = 0; i < projs.length; i++){ if(projs[i].key === scope) return Array.isArray(projs[i].items) ? projs[i].items : []; }
       return [];
     }
+    // ---- My List filter: one box, filtering whichever tab is selected -------
+    // JS twins of core.worklistSearchTokens / core.worklistMatches (token-AND over
+    // subject + details + due + the project label a rollup/archive row carries),
+    // mirrored here so typing stays instant -- exactly as tileMatches twins
+    // core.filterTiles. The two must stay in sync.
+    //
+    // There is NO worklistQuery variable: #wl-search sits outside the only four nodes
+    // renderWorklist rewrites (#wl-scopes, #wl-active, #wl-done, #wl-mdone), so the
+    // input IS the state -- value, focus and caret survive every render and every Lua
+    // push, and the query carries across a tab switch on purpose.
+    function wlSearchToks(){
+      var el = document.getElementById("wl-search"), toks = [];
+      ((el && el.value) || "").toLowerCase().split(/\s+/).forEach(function(t){ if(t) toks.push(t); });
+      return toks;
+    }
+    function wlMatches(toks, text, details, due, label){
+      if(!toks.length) return true;
+      var hay = [text||"", details||"", due||"", label||""].join(" ").toLowerCase();
+      for(var i=0;i<toks.length;i++){ if(hay.indexOf(toks[i]) < 0) return false; }
+      return true;
+    }
+    function wlSearchKey(e){
+      if(e.key === "Escape"){
+        e.preventDefault();
+        var el = document.getElementById("wl-search");
+        if(el) el.value = "";
+        renderWorklist();
+      }
+    }
+    // Twin of updateSearchCount (the tile bar's): "N / M shown", blank with no query.
+    function wlSearchCount(shown, total){
+      var el = document.getElementById("wl-search-count"); if(!el) return;
+      var box = document.getElementById("wl-search");
+      el.textContent = (((box && box.value) || "").trim() && total) ? (shown + " / " + total + " shown") : "";
+    }
     // Tick the item in the copy we already hold, so the list moves on the click itself
     // (2026-09-21). It used to sit there until Lua read the store, mutated it, wrote it and
     // pushed the whole thing back -- about half a second on Adam's list, with the panel
@@ -11446,8 +11494,15 @@ local HTML = [[
       return "Later";
     }
     function renderMaster(box){
-      var rows = wlMasterRows();
-      if(!rows.length){ box.innerHTML = '<div class="wl-empty">Nothing open across your lists.</div>'; return; }
+      var rows = wlMasterRows(), total = rows.length, toks = wlSearchToks();
+      // Filtered BEFORE the bucket-header loop below, so a header only appears where a
+      // row survived -- otherwise "Overdue" would sit alone over nothing.
+      rows = rows.filter(function(r){ return wlMatches(toks, r.it.text, r.it.details, r.it.due, r.label); });
+      wlSearchCount(rows.length, total);
+      if(!rows.length){
+        box.innerHTML = '<div class="wl-empty">' + (total ? "Nothing matches the filter." : "Nothing open across your lists.") + '</div>';
+        return;
+      }
       var html = "", bucket = null;
       rows.forEach(function(r){
         var b = wlBucket(r.it.due);
@@ -11493,10 +11548,15 @@ local HTML = [[
       }
       // Mark all: offered on every tab INCLUDING master, and only while there is something
       // left to mark -- a button that would do nothing shouldn't be there to be clicked.
+      // It also steps aside while the filter box is non-empty (2026-09-22): wlOpenCount
+      // counts the UNFILTERED list, so beside three visible rows the button would read
+      // "✓ Mark all 442 done" -- and do exactly that. A button that wouldn't do what the
+      // screen implies shouldn't be there either. ("Mark all N shown done" would need a
+      // new payload shape and a new core op; it's a TODO follow-up, not this.)
       var mb = document.getElementById("wl-markall");
       if(mb){
         var openN = wlOpenCount(worklistScope);
-        mb.style.display = openN ? "" : "none";
+        mb.style.display = (openN && !wlSearchToks().length) ? "" : "none";
         mb.textContent = "✓ Mark all " + openN + " done";
       }
       // The Archive is read-only too, and its rows come from their own file: ask for them
@@ -11522,6 +11582,15 @@ local HTML = [[
       }
       var active = [], done = [];
       wlScopeItems(worklistScope).forEach(function(it){ (it.done ? done : active).push(it); });
+      // The filter covers ACTIVE items only. `done` is deliberately left alone: the
+      // drawer keeps its lazy build below, and #wl-donecount keeps reading the
+      // unfiltered done.length. A plain item carries no project label ("" below) --
+      // the tab it is on IS its project.
+      var toks = wlSearchToks(), activeTotal = active.length;
+      if(toks.length){
+        active = active.filter(function(it){ return wlMatches(toks, it.text, it.details, it.due, ""); });
+      }
+      wlSearchCount(active.length, activeTotal);
       // Done is the record of what you just verified, so it reads newest-TICKED
       // first. doneTs is stamped by worklistToggle; items finished before stamps
       // existed (0) sink to the bottom, ordered by due date among themselves. A
@@ -11544,7 +11613,7 @@ local HTML = [[
       }
       document.getElementById("wl-active").innerHTML = active.length
         ? active.map(function(it){ return wlItemRow(it, false); }).join("")
-        : '<div class="wl-empty">No items — add one above.</div>';
+        : '<div class="wl-empty">' + (activeTotal ? "Nothing matches the filter." : "No items — add one above.") + '</div>';
       document.getElementById("wl-done").innerHTML = worklistDoneOpen
         ? done.map(function(it){ return wlItemRow(it, true); }).join("") : "";
       document.getElementById("wl-donecount").textContent = done.length ? "(" + done.length + ")" : "";
@@ -11564,12 +11633,20 @@ local HTML = [[
     };
     function renderArchive(box){
       if(!box) return;
-      if(!worklistArchive){ box.innerHTML = '<div class="wl-empty">Loading the archive…</div>'; return; }
-      if(!worklistArchive.length){
-        box.innerHTML = '<div class="wl-empty">Nothing archived yet — done work moves here once it is more than the archive window old.</div>';
+      if(!worklistArchive){ box.innerHTML = '<div class="wl-empty">Loading the archive…</div>'; wlSearchCount(0, 0); return; }
+      // The archive has no active/done split, so it is searched whole -- including each
+      // row's `details`, which rides in the payload but is never rendered, so matching
+      // on it is free. Archive rows have NO id; never assume one.
+      var toks = wlSearchToks(), total = worklistArchive.length;
+      var rows = worklistArchive.filter(function(r){ return wlMatches(toks, r.text, r.details, r.due, r.label || r.scope); });
+      wlSearchCount(rows.length, total);
+      if(!rows.length){
+        box.innerHTML = '<div class="wl-empty">' + (total
+          ? "Nothing archived matches the filter."
+          : "Nothing archived yet — done work moves here once it is more than the archive window old.") + '</div>';
         return;
       }
-      box.innerHTML = worklistArchive.map(function(r){
+      box.innerHTML = rows.map(function(r){
         return '<div class="wl-item wl-mitem wl-arch">'
           + '<span class="wl-tag">' + esc(r.label || r.scope || "") + '</span>'
           + '<span class="wl-txt">' + esc(r.text || "") + '</span>'

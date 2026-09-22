@@ -9502,6 +9502,51 @@ function M.worklistSplit(items)
   return active, done
 end
 
+-- ---- My List search (free-text, one box per tab) ---------------------------
+-- 2026-09-22: the Archive tab alone holds 442 rows and gains ~440 every ten days,
+-- and My List had no filter anywhere. One box filters whichever tab is selected.
+-- Token-AND and case-insensitive, matching filterTiles (the transcript's plain
+-- substring is the outlier, not the convention) -- and MIRRORED in the panel JS
+-- (wlSearchToks / wlMatches), which must stay in sync, exactly as tileMatches
+-- mirrors filterTiles.
+--
+-- The searchable text is subject + details + due + the project label a rollup or
+-- archive row carries. `details` never reaches the screen, so searching it is free
+-- and finds the note an item was actually written for; `due` is plain text, so
+-- "2026-09" filters a month.
+--
+-- POSITIONAL args on worklistMatches rather than an item table: the three call
+-- sites carry three different row shapes (a plain item; a MASTER {scope,label,it};
+-- an archive {scope,label,text,details,due,doneTs}). Positional means no per-row
+-- repacking on every keystroke, and one JS twin instead of three.
+function M.worklistSearchTokens(query)
+  local toks = {}
+  for tok in tostring(query or ""):lower():gmatch("%S+") do toks[#toks + 1] = tok end
+  return toks
+end
+
+function M.worklistMatches(toks, text, details, due, label)
+  if not toks or #toks == 0 then return true end
+  local hay = string.lower(table.concat({
+    tostring(text or ""), tostring(details or ""), tostring(due or ""), tostring(label or ""),
+  }, " "))
+  for _, t in ipairs(toks) do
+    if not hay:find(t, 1, true) then return false end
+  end
+  return true
+end
+
+-- Convenience over a plain item list (a blank query is a pass-through).
+function M.filterWorklist(items, query)
+  local toks = M.worklistSearchTokens(query)
+  if #toks == 0 then return items or {} end
+  local out = {}
+  for _, it in ipairs(items or {}) do
+    if M.worklistMatches(toks, it.text, it.details, it.due, it.label) then out[#out + 1] = it end
+  end
+  return out
+end
+
 -- Normalize a decoded worklist into DISTINCT, correctly-shaped containers:
 -- generic = a fresh LIST, byProject = a fresh MAP of string-key -> list. This is
 -- load-bearing: hs.json.decode INTERNS empty {} into a single shared table, so a

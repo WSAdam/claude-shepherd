@@ -1227,6 +1227,17 @@ again to go back; the fleet bulk buttons still appear only when there's somethin
   **every worktree's** `TODO.md` — a line present in several copies imports once, a line that exists
   only on a branch carries a **⎇ branch** chip until it reaches main's copy, and a removed
   worktree's items stay put (not flagged missing — the file simply left with the worktree).
+- **Filter** — the box under the tabs filters **whichever tab you're on**: a project tab that
+  project, **MASTER** the rollup (bucket headers follow the survivors), **🗄 Archive** every
+  archived row. Case-insensitive, and every word must match — `installer smoke` finds only rows
+  carrying both. It searches the subject, the **details** (so a term you only wrote in an item's
+  notes still finds it), the expected date (`2026-09` filters a month) and, on MASTER/Archive, the
+  project the row came from. The count beside it reads **N / M shown**; **Esc** clears it. Two
+  deliberate limits: **Done drawers are not filtered** (they're built only when you expand one, so
+  a filter would make the panel build every hidden row on every keystroke), and **✓ Mark all N
+  done** hides itself while a filter is on — its count is of the *whole* tab, so next to three
+  filtered rows it would both claim and do something the screen doesn't show. The query stays put
+  when you switch tabs — one box, filtering whatever tab you flick to.
 - **The item modal** — **＋ Add an item…** (or clicking any row) opens one editor with:
   - **Subject** — the one line the list shows. Enter saves.
   - **Details** — free-form notes/context, as long as you like.

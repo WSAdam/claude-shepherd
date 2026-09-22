@@ -166,6 +166,17 @@ assert_eq "a genuine tie keeps list order (returns 0)" "yes" "$(has 'return 0;  
 # The due-date-only comparator that caused it must be gone for good.
 assert_eq "no due-date-only done comparator"         "no"  "$(has 'return wlDueSort(b.due) < wlDueSort(a.due) ? -1 : 1;')"
 
+# ---- Feature 6: one filter box, filtering whichever tab is selected -----------------
+# 2026-09-22: the Archive tab holds 442 rows and gains ~440 every ten days, and My List
+# had no filter at all. The box is its own state -- it sits outside every node
+# renderWorklist rewrites, so value/focus/caret survive each render.
+assert_eq "My List has a filter box"                 "yes" "$(has '<input type="text" id="wl-search"')"
+assert_eq "typing re-renders the current tab"        "yes" "$(has 'oninput="renderWorklist()"')"
+assert_eq "Escape clears the filter"                 "yes" "$(has 'function wlSearchKey(e){')"
+# wlOpenCount counts the UNFILTERED list, so a visible Mark-all would claim a count the
+# screen contradicts -- and act on it.
+assert_eq "Mark all hides while a filter is on"      "yes" "$(has 'mb.style.display = (openN && !wlSearchToks().length) ? "" : "none";')"
+
 # Positive control: prove `has` actually distinguishes present/absent, so a typo in a
 # needle above can't make an assert pass vacuously.
 assert_eq "control: a string that cannot exist is absent" "no" "$(has 'wl-this-token-does-not-exist-xyzzy')"

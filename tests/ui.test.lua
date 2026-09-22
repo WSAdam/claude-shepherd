@@ -2248,6 +2248,68 @@ do
         and src:find("return wlDueSort(b.due) < wlDueSort(a.due) ? -1 : 1;", 1, true) == nil)
 end
 
+-- ---- Worklist: one filter box for whichever tab is selected (2026-09-22) ----
+-- 442 archived rows and no filter anywhere in My List. ONE box, filtering the
+-- CURRENT tab: a project tab that project, MASTER the rollup, Archive all of it.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("wl-search: the box re-renders the list as you type",
+        src:find('<input type="text" id="wl-search"', 1, true) ~= nil
+        and src:find('oninput="renderWorklist()"', 1, true) ~= nil
+        and src:find('onkeydown="wlSearchKey(event)"', 1, true) ~= nil)
+  check("wl-search: Escape clears the box and restores the list",
+        src:find("function wlSearchKey(e){", 1, true) ~= nil
+        and src:find('if(e.key === "Escape"){', 1, true) ~= nil)
+  -- THE reason there is no worklistQuery variable: #wl-search sits OUTSIDE the four
+  -- nodes renderWorklist rewrites (#wl-scopes, #wl-active, #wl-done, #wl-mdone), so
+  -- the value, the focus and the caret survive every render and every Lua push.
+  -- Inside a rebuilt container, typing would lose focus after one character.
+  do
+    local iScopes = src:find('<div id="wl-scopes"></div>', 1, true)
+    local iSearch = src:find('<div id="wl-searchrow">', 1, true)
+    local iTodo   = src:find('<div id="wl-todorow">', 1, true)
+    check("wl-search: the box sits after the scope chips and before the TODO row",
+          iScopes and iSearch and iTodo and iScopes < iSearch and iSearch < iTodo or false)
+    -- The identifier appears in that comment, so pin the forms a REAL variable would
+    -- take (a declaration, an assignment) rather than the bare word.
+    check("wl-search: the input is the state -- no worklistQuery variable to drift",
+          src:find("worklistQuery =", 1, true) == nil
+          and src:find("worklistQuery,", 1, true) == nil
+          and src:find("worklistQuery;", 1, true) == nil)
+  end
+  -- All THREE render branches consult the matcher, each with its own row shape.
+  check("wl-search: MASTER filters the rollup",
+        src:find("return wlMatches(toks, r.it.text, r.it.details, r.it.due, r.label);", 1, true) ~= nil)
+  check("wl-search: the Archive is searched whole, its never-displayed details included",
+        src:find("return wlMatches(toks, r.text, r.details, r.due, r.label || r.scope);", 1, true) ~= nil)
+  check("wl-search: a project/Generic tab filters its ACTIVE items",
+        src:find('return wlMatches(toks, it.text, it.details, it.due, "");', 1, true) ~= nil)
+  check("wl-search: the JS twin mirrors core.worklistMatches positionally",
+        src:find("function wlMatches(toks, text, details, due, label){", 1, true) ~= nil
+        and src:find("function wlSearchToks(){", 1, true) ~= nil)
+  check("wl-search: the count reads N / M shown, like the tile bar's",
+        src:find('id="wl-search-count"', 1, true) ~= nil
+        and src:find('(shown + " / " + total + " shown")', 1, true) ~= nil)
+  -- NEGATIVE PIN: the Done drawer is NOT filtered. It keeps its lazy build (it is
+  -- display:none until expanded, and building it cost 614 hidden rows per click on
+  -- Adam's Chargeback tab), and #wl-donecount keeps reading the UNFILTERED length.
+  check("wl-search: the Done drawer is left unfiltered and still lazily built",
+        src:find("done.map(function(it){ return wlItemRow(it, true); }).join(\"\")", 1, true) ~= nil
+        and src:find('document.getElementById("wl-donecount").textContent = done.length', 1, true) ~= nil
+        and src:find("done = done.filter", 1, true) == nil
+        and src:find("done.filter(function", 1, true) == nil)
+  -- THE FOOTGUN: wlOpenCount counts the UNFILTERED list, so while a filter is on the
+  -- button would read "Mark all 442 done" beside three rows -- and do exactly that.
+  check("wl-search: Mark all steps aside while a filter is on",
+        src:find('mb.style.display = (openN && !wlSearchToks().length) ? "" : "none";', 1, true) ~= nil)
+  -- A filter that matches nothing must not read like an empty list.
+  check("wl-search: an empty result says so, and doesn't say 'add one above'",
+        src:find('"Nothing matches the filter."', 1, true) ~= nil
+        and src:find('"Nothing archived matches the filter."', 1, true) ~= nil)
+end
+
 -- ---- Per-session tile identity (two chats in ONE project) ----
 -- 2026-09-02: two live sessions in one folder rendered as identical cards.
 do
