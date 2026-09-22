@@ -10059,6 +10059,129 @@ do
 end
 
 
+-- ---- A queued test gate is waiting for the lane, not "checking" (2026-09-22) -----------
+-- Live, the same afternoon as the block above: several units asked to merge in one repo, where
+-- only ONE test gate may run at a time (core.mergeGateReleases). The gates behind it sat QUEUED
+-- -- and the panel told three different stories about the same request: the card said "merge
+-- request: checking fix/...", needsYouKind's reason said "the test gate is still running" (it
+-- had not started), and the review one click away already said "queued behind another run in
+-- this repo". Adam watched a card sit like that for ~11 minutes. Cause: M.mergeReadiness
+-- collapsed running and queued into one out.checking and the queued-ness never left the
+-- function. The fix carries it out: mergeGateReleases also names who is WAITING and where in
+-- the lane, and readiness/view/line/needsYouKind say which of the two checking states it is.
+-- A queued gate still blocks the merge -- it was never proven green.
+do
+  local NOW = 1000000
+
+  -- 1. the lane: who starts, and who is waiting where
+  local rel, waiting = core.mergeGateReleases({
+    { key = "run", state = "running", commonDir = "/r/A/.git", at = 1 },
+    { key = "w1", state = "queued", commonDir = "/r/A/.git", at = 5 },
+    { key = "w2", state = "queued", commonDir = "/r/A/.git", at = 9 },
+  })
+  eq("nothing starts in a repo whose lane is busy", #rel, 0)
+  eq("...and the gate that queued first is #1 in line", waiting.w1, 1)
+  eq("...the next one behind it #2", waiting.w2, 2)
+  local rel2, waiting2 = core.mergeGateReleases({
+    { key = "a", state = "queued", commonDir = "/r/B/.git", at = 3 },
+    { key = "b", state = "queued", commonDir = "/r/B/.git", at = 4 },
+  })
+  eq("in a free lane the earliest queued gate starts", rel2[1], "a")
+  check("...so it is not waiting for anything", waiting2.a == nil)
+  eq("...and the one behind it is #1 in line", waiting2.b, 1)
+  -- ADDITIVE: the release list is still the first return, so every existing caller is unaffected
+  eq("the keys that may start are still the FIRST return value",
+     core.mergeGateReleases({ { key = "solo", state = "queued", commonDir = "/r/C/.git", at = 1 } })[1], "solo")
+
+  -- 2. readiness: which checking state is it?
+  local req = { phase = "requested", branch = "fix/q", base = "main", nonce = "n-q", at = NOW,
+                worktree = "/r/A/.claude/worktrees/q", summary = "the unit's change" }
+  local facts = { listed = true, head = "fix/q", clean = true, ahead = 1, behind = 0, dirty = {} }
+  local runGate  = { state = "running", command = "make test" }
+  local waitGate = { state = "queued", command = "make test", lane = 2 }
+  local rdRun  = core.mergeReadiness(req, facts, {}, runGate)
+  local rdWait = core.mergeReadiness(req, facts, {}, waitGate)
+  check("a queued gate still keeps the request checking and NOT ready",
+        rdWait.checking == true and rdWait.ready == false)
+  check("...and now says which checking state it is", rdWait.gateQueued == true)
+  eq("...and where in the lane it is waiting", rdWait.gateLane, 2)
+  check("a RUNNING gate is checking but not queued",
+        rdRun.checking == true and rdRun.gateQueued == nil and rdRun.gateLane == nil)
+  local rdNoLane = core.mergeReadiness(req, facts, {}, { state = "queued", command = "make test" })
+  check("a queued gate whose lane hasn't been stamped yet still reads as queued",
+        rdNoLane.gateQueued == true and rdNoLane.gateLane == nil)
+
+  -- 3. the view and the card's one line
+  local vRun  = core.mergeView(req, rdRun, facts, {}, runGate)
+  local vWait = core.mergeView(req, rdWait, facts, {}, waitGate)
+  eq("the running request keeps its line, word for word", vRun.line, "⇡ merge request: checking fix/q")
+  check("the waiting one says the gate is queued behind another run in this repo",
+        vWait.line:find("queued behind another run in this repo", 1, true) ~= nil)
+  check("...and the two lines differ", vWait.line ~= vRun.line)
+  check("...only the waiting one names its place in the lane",
+        vWait.line:find("#2", 1, true) ~= nil and vRun.line:find("#", 1, true) == nil)
+  check("...and the card now agrees with the review it opens", vWait.checking == true
+        and vWait.gateQueued == true and vWait.gate.state == "queued")
+
+  -- 4. v.gateQueued is NOT v.queued: the approval queue's position is a different thing entirely
+  check("a queued GATE leaves the approval queue's position alone", vWait.queued == nil)
+  local vQ2 = core.mergeView(req, rdRun, facts, { queued = 2 }, runGate)
+  local vQ1 = core.mergeView(req, rdRun, facts, { queued = 1 }, runGate)
+  local vSent = core.mergeView(req, rdRun, facts, { sent = true }, runGate)
+  check("...and a place in the APPROVAL queue never reads as a queued gate",
+        vQ2.queued == 2 and vQ2.gateQueued == nil)
+  eq("the approval-queue line is byte-identical", vQ2.line, "⇡ queued to merge fix/q (#2 in line)")
+  eq("...including next-in-line", vQ1.line, "⇡ queued to merge fix/q (next in line)")
+  eq("...and the approved-and-starting line", vSent.line, "⇡ merge approved: fix/q is starting")
+
+  -- 5. needs-you: a gate that hasn't started is a heads-up that says so
+  local function tile(m) return { key = "m", status = "done", merge = m } end
+  local function kind(m) return (core.needsYouKind(tile(m), NOW)) end
+  local function why(m) local _, _, w = core.needsYouKind(tile(m), NOW); return w end
+  local waitM = { phase = "requested", needsYou = true, checking = true, gateQueued = true, gateLane = 2 }
+  local runM  = { phase = "requested", needsYou = true, checking = true }
+  eq("a merge whose gate is queued is a heads-up", kind(waitM), "fyi")
+  check("...and its reason says it is waiting, never that it is running",
+        why(waitM):find("queued", 1, true) ~= nil and why(waitM):find("still running", 1, true) == nil)
+  -- the states this rule must NOT disturb (d9dd37a's fixture, re-pinned so the two can't drift)
+  eq("a RUNNING gate keeps d9dd37a's reason, word for word", why(runM),
+     "the test gate is still running -- nothing to press yet")
+  eq("...and its tier", kind(runM), "fyi")
+  eq("a request whose gate has finished still needs Adam",
+     kind({ phase = "requested", needsYou = true, checking = false }), "needs")
+  eq("a request that never carried a gate state still needs Adam",
+     kind({ phase = "requested", needsYou = true }), "needs")
+  eq("a merge that came back blocked still needs Adam",
+     kind({ phase = "blocked", needsYou = true }), "needs")
+  check("a queued gate still counts as a merge that concerns Adam, so the review renders",
+        core.mergeNeedsYou({ phase = "requested", checking = true, gateQueued = true }) == true)
+
+  -- THE FIXTURE (2026-09-22): the two cards in one repo, one gate running, one waiting for it.
+  local uRun = tile(core.mergeView({ phase = "requested", branch = "fix/run", base = "main",
+                                     worktree = "/r/A/.claude/worktrees/run", at = NOW },
+                                   core.mergeReadiness({ branch = "fix/run", base = "main" },
+                                     { listed = true, head = "fix/run", clean = true, ahead = 1, dirty = {} },
+                                     {}, { state = "running", command = "make test" }),
+                                   nil, {}, { state = "running", command = "make test" }))
+  local uWait = tile(core.mergeView({ phase = "requested", branch = "fix/wait", base = "main",
+                                      worktree = "/r/A/.claude/worktrees/wait", at = NOW },
+                                    core.mergeReadiness({ branch = "fix/wait", base = "main" },
+                                      { listed = true, head = "fix/wait", clean = true, ahead = 1, dirty = {} },
+                                      {}, { state = "queued", command = "make test", lane = 1 }),
+                                    nil, {}, { state = "queued", command = "make test", lane = 1 }))
+  check("the card of the gate that is RUNNING and the one still WAITING no longer read the same",
+        uRun.merge.line ~= uWait.merge.line)
+  check("...the waiting one says it hasn't started",
+        uWait.merge.line:find("queued behind another run in this repo", 1, true) ~= nil)
+  check("...and neither is ready: a gate that never ran proves nothing",
+        uRun.merge.ready == false and uWait.merge.ready == false)
+  eq("...both are heads-ups", kind(uRun.merge), "fyi")
+  eq("...both of them", kind(uWait.merge), "fyi")
+  check("...so neither outranks a session that is working",
+        core.instanceTier(uRun, {}, NOW) > core.TIER_RUNNING
+        and core.instanceTier(uWait, {}, NOW) > core.TIER_RUNNING)
+end
+
 -- ---- the liveness probe behind the needs-you rule (2026-09-17) --------------
 -- The decision is pure (core.needsYouKind); the PROBE is FX's, and it asks ps for the whole
 -- handful of pids at once -- never one call per session per tick.

@@ -3656,7 +3656,11 @@ function FX.mergeGatePump()
       byKey[rec.key] = rec
     end
   end
-  for _, key in ipairs(core.mergeGateReleases(runs)) do
+  local release, waiting = core.mergeGateReleases(runs)
+  -- 2026-09-22: stamp where each gate is in its repo's lane, so a request whose gate has not
+  -- STARTED can say so instead of claiming the suite is running (core.mergeReadiness reads it).
+  for _, rec in ipairs(runs) do rec.g.lane = waiting[rec.key] end
+  for _, key in ipairs(release) do
     local r = byKey[key]
     if r then FX.mergeGateLaunch(r.slot, r.gkey, r.g) end
   end
@@ -3983,8 +3987,13 @@ function FX.annotateMerges(list, cfg, bannerOn)
       -- 2026-09-17: the same gate runs ONCE in the main checkout before the unit's tab closes,
       -- so a merge that left main red is caught here instead of by the next unit to ask.
       gate = FX.mergeGatePost(r, cfg)
-      if gate and (gate.state == "running" or gate.state == "queued") then
+      -- 2026-09-22: running and queued are two different things here too -- a post-merge gate
+      -- that is still waiting for the repo's one lane must not claim it is running the suite.
+      if gate and gate.state == "running" then
         closeNote = "running " .. tostring(gate.command) .. " on " .. tostring(r.base) .. " first"
+      elseif gate and gate.state == "queued" then
+        closeNote = tostring(gate.command) .. " on " .. tostring(r.base)
+          .. " is queued behind another run in this repo"
       elseif gate and (gate.state == "failed" or gate.state == "timedOut") then
         closeNote = tostring(r.base) .. " is red after the merge: " .. tostring(gate.command)
           .. ((gate.state == "timedOut") and " timed out" or (" exited " .. tostring(gate.code)))

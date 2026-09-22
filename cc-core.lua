@@ -1386,6 +1386,11 @@ function M.needsYouKind(it, now)
       -- there is nothing on the card to press. Two of these at once read as Shepherd re-asking
       -- the merge Adam had JUST approved, in red, above every working session. It re-ranks
       -- itself the moment the gate finishes; mergeNeedsYou stays true so the review still renders.
+      -- 2026-09-22: ...and a gate that hasn't STARTED says so. Saying "still running" about a
+      -- gate queued behind another run in the repo was the card's third contradicting story.
+      if m.gateQueued then
+        return "fyi", "merge", "its test gate is queued behind another run in this repo -- it hasn't started yet"
+      end
       if m.checking then return "fyi", "merge", "the test gate is still running -- nothing to press yet" end
       return "needs", "merge"
     end
@@ -1981,6 +1986,9 @@ end
 -- (install.test.sh shells out to the real make there; the reload test kills hs processes), so
 -- both said `exited 2` about a main that was green. Same shape as M.mergeQueue's per-repo
 -- busy-ness. `runs` = { key, state, commonDir, at } records; returns the keys that may start.
+-- 2026-09-22: and, ADDITIVELY as a second value (exactly as M.mergeQueue already does), who is
+-- WAITING and where in the lane -- key -> position. Without it the queued-ness never left this
+-- function and a gate that had not started was reported as one that was running.
 function M.mergeGateReleases(runs)
   local busy, byRepo = {}, {}
   for _, g in pairs(runs or {}) do
@@ -1992,19 +2000,19 @@ function M.mergeGateReleases(runs)
       end
     end
   end
-  local out = {}
+  local out, waiting = {}, {}
   for repo, list in pairs(byRepo) do
-    if not busy[repo] then
-      table.sort(list, function(a, b)
-        local aa, bb = tonumber(a.at) or 0, tonumber(b.at) or 0
-        if aa ~= bb then return aa < bb end
-        return tostring(a.key) < tostring(b.key)
-      end)
-      out[#out + 1] = list[1].key
-    end
+    table.sort(list, function(a, b)
+      local aa, bb = tonumber(a.at) or 0, tonumber(b.at) or 0
+      if aa ~= bb then return aa < bb end
+      return tostring(a.key) < tostring(b.key)
+    end)
+    local start = 1
+    if not busy[repo] then out[#out + 1] = list[1].key; start = 2 end
+    for i = start, #list do waiting[list[i].key] = i - start + 1 end
   end
   table.sort(out)
-  return out
+  return out, waiting
 end
 
 -- tests/run.sh refuses a second concurrent run in one checkout: the suite shells out to the
@@ -2126,7 +2134,15 @@ function M.mergeReadiness(req, facts, item, gate)
     local st = gate.state
     -- "queued" waits behind another gate in the same repo (M.mergeGateReleases) -- it reads as
     -- CHECKING, never as "no gate configured", which would call the request ready unchecked.
-    if st == "running" or st == "queued" then out.checking = true
+    -- 2026-09-22: and it says WHICH checking state it is. Collapsing the two here was the whole
+    -- bug: the card claimed the gate was running when it had not started, while the review
+    -- (which reads gate.state itself) said "queued behind another run in this repo".
+    if st == "running" or st == "queued" then
+      out.checking = true
+      if st == "queued" then
+        out.gateQueued = true
+        out.gateLane = tonumber(gate.lane)
+      end
     elseif st == "failed" then
       p[#p + 1] = "the test gate failed: " .. tostring(gate.command) .. " exited " .. tostring(gate.code or "?")
     elseif st == "timedOut" then
@@ -2259,6 +2275,12 @@ function M.mergeLine(v)
     if v.queued then
       return "⇡ queued to merge " .. b .. " (" .. ((v.queued == 1) and "next" or ("#" .. v.queued)) .. " in line)"
     end
+    -- 2026-09-22: BEFORE the checking branch and AFTER the approval-queue one above, so the
+    -- approval-queue strings are untouched: v.gateQueued is the TEST lane, v.queued is Adam's.
+    if v.gateQueued then
+      return "⇡ merge request: " .. b .. "'s test gate is queued behind another run in this repo"
+        .. ((tonumber(v.gateLane) or 0) > 0 and (" (#" .. v.gateLane .. " in line)") or "")
+    end
     if v.checking then return "⇡ merge request: checking " .. b end
     if not v.ready then return "⇡ merge request: " .. tostring((v.problems or {})[1] or "not ready yet") end
     return "⇡ ready to merge " .. b .. " → " .. base
@@ -2285,6 +2307,10 @@ function M.mergeView(req, rd, facts, q, gate)
   if req.phase == "requested" then
     v.ready = rd and rd.ready or false
     v.checking = (rd == nil) or (rd.checking == true)
+    -- NEVER v.queued: that is the APPROVAL queue's position (q.queued above), a different
+    -- thing entirely. This one is the repo's single TEST-gate lane.
+    v.gateQueued = (rd and rd.gateQueued) and true or nil
+    v.gateLane = rd and rd.gateLane or nil
     v.problems = rd and rd.problems or {}
   end
   if type(facts) == "table" then

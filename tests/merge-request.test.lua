@@ -543,6 +543,31 @@ check("...one runs while the other queues  (" .. table.concat(states, "+") .. ")
 check("...and the queued one reads as still checking, NEVER as ready-with-no-gate",
       I.s1.merge.ready == false and I.s1.merge.checking == true
       and I.s2.merge.ready == false and I.s2.merge.checking == true)
+-- 2026-09-22: ...and the card says WHICH of the two checking states it is. Collapsing them made
+-- the waiting card claim "checking", needsYouKind say "the test gate is still running" (it had
+-- not started), and the review say "queued behind another run in this repo" -- three stories.
+do
+  local sRun  = (I.s1.merge.gate.state == "running") and I.s1 or I.s2
+  local sWait = (I.s1.merge.gate.state == "queued") and I.s1 or I.s2
+  check("the RUNNING gate's card still reads 'checking', word for word  ("
+        .. tostring(sRun.merge.line) .. ")",
+        sRun.merge.line == "⇡ merge request: checking " .. sRun.merge.branch
+        and sRun.merge.gateQueued == nil)
+  check("...while the one waiting for the lane says it hasn't started  ("
+        .. tostring(sWait.merge.line) .. ")",
+        sWait.merge.gateQueued == true
+        and sWait.merge.line:find("queued behind another run in this repo", 1, true) ~= nil)
+  check("...and names its place in that repo's one lane", sWait.merge.line:find("#1 in line", 1, true) ~= nil)
+  check("...so the card now says what the review beside it says", sWait.merge.gate.state == "queued")
+  check("...a queued GATE is never read as a place in the APPROVAL queue", sWait.merge.queued == nil)
+  check("...neither is ready: a gate that never ran proves nothing",
+        sRun.merge.ready == false and sWait.merge.ready == false)
+  check("...and the waiting card's reason says it is waiting, not that it is running  ("
+        .. tostring(sWait.needsYouWhy) .. ")",
+        sRun.needsYou == "fyi" and sWait.needsYou == "fyi"
+        and (sWait.needsYouWhy or ""):find("queued behind another run", 1, true) ~= nil
+        and (sWait.needsYouWhy or ""):find("still running", 1, true) == nil)
+end
 tick(); tick()
 check("...and it stays one gate however many ticks pass", #gateTasks("GATE-S") == 1)
 endGate(gateTasks("GATE-S")[1], 0, "ok - all good\n-- suite: 12 run, 0 failed --\n")
@@ -591,6 +616,29 @@ do
   tick()
   I = items()
   check("...and a green retry lets the request through", (I.s1.merge.ready or I.s2.merge.ready) == true)
+end
+
+-- ...and the same collapse one line away: a POST-merge gate waiting for the repo's one lane
+-- told the merged unit's card it was "running make test on main first" (2026-09-22).
+do
+  local t1Wt = newUnit("t1", "/r/S", "fix/t1", "aa1111", 801, 1001)
+  local _t1 = t1Wt
+  tick()   -- t1's gate takes the lane
+  local t2Wt = newUnit("t2", "/r/S", "fix/t2", "bb2222", 802, 1002)
+  local _t2 = t2Wt
+  tick()   -- t2's own pre-merge gate queues behind it (so its post-merge gate is due later)
+  registry(802, { "Fix t2 tab" })
+  setPhase("t2", "merged", { sha = "bb2222" })
+  tick()
+  I = items()
+  check("a post-merge gate queued behind another run says so, never 'running ... first'  ("
+        .. tostring(I.t2.merge.line) .. ")",
+        (I.t2.merge.line or ""):find("queued behind another run in this repo", 1, true) ~= nil
+        and (I.t2.merge.line or ""):find("running GATE-S", 1, true) == nil)
+  check("...and the unit's tab is not closed while it waits", #inbox(802) == 0)
+  os.remove(MD .. "/t1.json"); os.remove(T .. "/status/t1.json")
+  os.remove(MD .. "/t2.json"); os.remove(T .. "/status/t2.json")
+  tick()
 end
 
 -- a red gate has to be actionable: the FAILING lines, and where the whole log is
