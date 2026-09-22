@@ -66,6 +66,11 @@ assert_absent() { # <name> <path>
   fi
 }
 
+# wait until a path exists: 0 once it does, 1 after <tries> 0.1s polls (default 60 = 6s)
+wait_for() { # <path> [tries]
+  local i; for i in $(seq 1 "${2:-60}"); do [ -e "$1" ] && return 0; sleep 0.1; done; return 1
+}
+
 finish() {
   echo "-- $(basename "$0"): $TESTS_RUN run, $TESTS_FAIL failed --"
   [ "$TESTS_FAIL" -eq 0 ]

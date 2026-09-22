@@ -35,7 +35,6 @@ req() { # <dir> <session> [args...] -> stdout+stderr in $TMP/out.<session>, exit
   (cd "$d" && CLAUDE_CODE_SESSION_ID="$s" CLAUDE_PID=4242 bash "$M" request --summary "Fix the demo" --tests "make test: green" "$@" \
      > "$TMP/out.$s" 2>&1; echo $? > "$TMP/rc.$s")
 }
-wait_for() { local i; for i in $(seq 1 60); do [ -e "$1" ] && return 0; sleep 0.1; done; return 1; }
 # <session> <pid>: wait until the request names a DIFFERENT waiting process than <pid>, i.e.
 # until a resumed request has stamped its own. Kept local to this suite on purpose -- tests/lib.sh
 # is shared by every bash suite, so a helper only this one needs doesn't belong there.

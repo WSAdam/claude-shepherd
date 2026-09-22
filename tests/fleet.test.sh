@@ -26,7 +26,6 @@ fleet() { # <session> <out-name> args... -> $TMP/<out>.out and $TMP/<out>.rc
   local s="$1" o="$2"; shift 2
   (cd "$REPO" && CLAUDE_CODE_SESSION_ID="$s" CLAUDE_PID=4242 bash "$F" "$@" > "$TMP/$o.out" 2>&1; echo $? > "$TMP/$o.rc")
 }
-wait_for() { local i; for i in $(seq 1 60); do [ -e "$1" ] && return 0; sleep 0.1; done; return 1; }
 newest_batch() { ls -t "$FD"/b*.json 2>/dev/null | grep -v -E '\.(state|tab-)' | head -n 1; }
 decide() { # <batch file> <verdict> <grantMerge> [note] [nonce]
   local id n; id="$(jq -r .id "$1")"; n="${5:-$(jq -r .nonce "$1")}"

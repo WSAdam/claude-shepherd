@@ -30,7 +30,6 @@ run() { # <name> [tool] [questions] [wait]: the hook in the background; stdout i
   local n="$1"
   (input "${2:-}" "${3:-}" | CC_ASK_WAIT="${4:-20}" bash "$H" > "$TMP/out.$n" 2> "$TMP/err.$n"; echo $? > "$TMP/rc.$n") &
 }
-wait_for() { local i; for i in $(seq 1 80); do [ -e "$1" ] && return 0; sleep 0.1; done; return 1; }
 wait_nonce() { local i n; for i in $(seq 1 80); do n="$(jq -r '.ask_nonce // empty' "$SF" 2>/dev/null)"; [ -n "$n" ] && { printf '%s' "$n"; return 0; }; sleep 0.1; done; return 1; }
 answer() { # <json body> : what Shepherd writes
   mkdir -p "$CC_ASK_DIR"; printf '%s' "$1" > "$CC_ASK_DIR/s1.answer.tmp" && mv "$CC_ASK_DIR/s1.answer.tmp" "$CC_ASK_DIR/s1.answer"
@@ -73,7 +72,7 @@ until_at="$(jq -r '.ask_until // 0' "$SF")"; now=$(date +%s)
 [ "$until_at" -ge $(( now + 15 )) ] && [ "$until_at" -le $(( now + 21 )) ] && got=yes || got="no ($until_at vs $now)"
 assert_eq "...and when it falls back to the tab (ask_until)" "yes" "$got"
 answer "$(jq -nc --arg n "$N" '{nonce:$n, answers:{"Which colour?":"Blue"}}')"
-wait_for "$TMP/rc.a"
+wait_for "$TMP/rc.a" 80
 assert_eq "an answer with the right nonce: exit 0" "0" "$(cat "$TMP/rc.a")"
 assert_json "...allows the tool" "$TMP/out.a" '.hookSpecificOutput.permissionDecision' "allow"
 assert_json "...as a PreToolUse decision" "$TMP/out.a" '.hookSpecificOutput.hookEventName' "PreToolUse"
@@ -90,7 +89,7 @@ fresh; alive
 run b "" "$Q2"
 N="$(wait_nonce)" || N=""
 answer "$(jq -nc --arg n "$N" '{nonce:$n, answers:{"Which toppings?":["Cheese","Ham"], "Which size?":"extra large please"}}')"
-wait_for "$TMP/rc.b"
+wait_for "$TMP/rc.b" 80
 assert_json "a multi-select answer stays a list" "$TMP/out.b" '.hookSpecificOutput.updatedInput.answers["Which toppings?"] | join(",")' "Cheese,Ham"
 assert_json "free text goes through as the answer" "$TMP/out.b" '.hookSpecificOutput.updatedInput.answers["Which size?"]' "extra large please"
 
@@ -104,7 +103,7 @@ sleep 0.5
 assert_eq "an answer with another nonce is ignored (still waiting)" "waiting" "$got"
 assert_absent "...and thrown away" "$CC_ASK_DIR/s1.answer"
 answer "$(jq -nc --arg n "$N" '{nonce:$n, release:true}')"
-wait_for "$TMP/rc.c"
+wait_for "$TMP/rc.c" 80
 assert_eq "Answer in the tab instead: the hook says nothing" "" "$(cat "$TMP/out.c")"
 assert_eq "...and lets go" "" "$(jq -r '.ask_nonce // empty' "$SF")"
 
@@ -116,11 +115,11 @@ sleep 0.5
 [ -e "$TMP/rc.d" ] && got=ended || got=waiting
 assert_eq "an empty answer is ignored (still waiting)" "waiting" "$got"
 answer "$(jq -nc --arg n "$N" '{nonce:$n, release:true}')"
-wait_for "$TMP/rc.d"
+wait_for "$TMP/rc.d" 80
 
 fresh; alive
 run e "" "" 1
-wait_for "$TMP/rc.e"; sleep 0.1
+wait_for "$TMP/rc.e" 80; sleep 0.1
 assert_eq "no answer before the wait runs out: the hook says nothing" "" "$(cat "$TMP/out.e")"
 assert_eq "...and lets go of the question" "" "$(jq -r '.ask_nonce // empty' "$SF")"
 
@@ -132,7 +131,7 @@ printf '{"name":"proj","status":"approval"}' > "$SF"
 N2="$(wait_nonce)" || N2=""
 assert_eq "a clobbered nonce is written back, unchanged" "$N" "$N2"
 answer "$(jq -nc --arg n "$N" '{nonce:$n, release:true}')"
-wait_for "$TMP/rc.f"
+wait_for "$TMP/rc.f" 80
 
 # ---- answering in Shepherd is on unless switched off (2026-09-18) ----
 # REQUIREMENT CHANGE, not a regression. Earlier the same day these cases expected the opposite:
@@ -151,7 +150,7 @@ held_within() { # <name>: did the hook publish a nonce within ~1.5s, or end with
 fresh; alive; rm -f "$CC_CONFIG_FILE"
 run g "" "" 3
 assert_eq "no ask.enabled in the config: the question is held for the card" "held" "$(held_within g)"
-wait_for "$TMP/rc.g"
+wait_for "$TMP/rc.g" 80
 assert_eq "...with nothing on stdout" "" "$(cat "$TMP/out.g")"
 case "$(cat "$TMP/err.g")" in *holding*) got=held ;; *) got=never ;; esac
 assert_eq "...having genuinely held it, then timed out to the tab" "held" "$got"
@@ -159,14 +158,14 @@ assert_eq "...having genuinely held it, then timed out to the tab" "held" "$got"
 fresh; alive; printf '{"ask":{"waitSeconds":30}}' > "$CC_CONFIG_FILE"
 run h "" "" 3
 assert_eq "an ask block with no enabled key is still on" "held" "$(held_within h)"
-wait_for "$TMP/rc.h"
+wait_for "$TMP/rc.h" 80
 
 fresh; alive; opt_in
 run i
 assert_eq "an explicit ask.enabled true still holds the question for the card" "held" "$(held_within i)"
 N="$(wait_nonce)" || N=""
 answer "$(jq -nc --arg n "$N" '{nonce:$n, release:true}')"
-wait_for "$TMP/rc.i"
+wait_for "$TMP/rc.i" 80
 
 # ---- the round trip is quick, and the hook stays cheap (2026-09-18) ----
 # 2026-09-18 measured live: the card showed the question 626-1127ms after the hook armed (the
@@ -183,7 +182,7 @@ chmod +x "$TMP/bin/sleep"
 fresh; alive
 export SLEEP_LOG="$TMP/sleeps"; : > "$SLEEP_LOG"
 (input | env -u CC_ASK_POLL PATH="$TMP/bin:$PATH" CC_ASK_WAIT=2 bash "$H" > "$TMP/out.j" 2> "$TMP/err.j"; echo $? > "$TMP/rc.j") &
-wait_for "$TMP/rc.j"
+wait_for "$TMP/rc.j" 80
 longest="$(sort -n "$SLEEP_LOG" | tail -1)"
 awk -v l="${longest:-9}" 'BEGIN { exit !(l <= 0.1) }' && got=yes || got="no (sleeps ${longest:-none}s)"
 assert_eq "by default the hook looks for the answer at least every 0.1s" "yes" "$got"
@@ -199,11 +198,11 @@ N="$(wait_nonce)" || N=""
 sleep 0.4
 assert_absent "the panel isn't woken before the card has the question to show" "$CC_ASK_DIR/.poke"
 jq -c --argjson q "$Q1" '. + {pending:{tool:"AskUserQuestion", ask:$q}}' "$SF" > "$SF.t" && mv "$SF.t" "$SF"
-wait_for "$CC_ASK_DIR/.poke" && got=yes || got=no
+wait_for "$CC_ASK_DIR/.poke" 80 && got=yes || got=no
 assert_eq "once the question is on the status file, the hook wakes the panel (a write in the ask dir)" "yes" "$got"
 assert_eq "...without disturbing the nonce" "$N" "$(jq -r '.ask_nonce // empty' "$SF")"
 answer "$(jq -nc --arg n "$N" '{nonce:$n, release:true}')"
-wait_for "$TMP/rc.k"
+wait_for "$TMP/rc.k" 80
 
 # ---- SessionEnd leaves no answer behind ----
 mkdir -p "$CC_ASK_DIR"; : > "$CC_ASK_DIR/s1.answer"; : > "$CC_ASK_DIR/s1.answer.claim.99"

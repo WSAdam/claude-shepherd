@@ -132,4 +132,18 @@ rm -f "$probe2"
 assert_eq "cc_session_pid: walks when the pid is absent"  "4242"   "$(cc_session_pid k)"
 assert_eq "cc_session_pid: walk fired when absent"        "CALLED" "$(tr -d '\n' < "$probe2" 2>/dev/null)"
 
+# ---- wait_for, the shared test helper (2026-09-22) ----
+# merge.test.sh, fleet.test.sh and ask-hold.test.sh each carried their own copy, differing only
+# in how many 0.1s tries they allowed; it lives once in tests/lib.sh now.
+wf="$TMP/wait-for-target"
+( sleep 0.3; : > "$wf" ) &
+wait_for "$wf" 30 && got=0 || got=$?
+assert_eq "wait_for: returns 0 once the path appears while it waits" "0" "$got"
+wait "$!" 2>/dev/null
+wait_for "$TMP/never-appears" 3 && got=0 || got=$?
+assert_eq "wait_for: returns 1 when the path never appears within its tries" "1" "$got"
+: > "$TMP/already-there"
+wait_for "$TMP/already-there" && got=0 || got=$?
+assert_eq "wait_for: a path already there returns at once with the default tries" "0" "$got"
+
 finish
