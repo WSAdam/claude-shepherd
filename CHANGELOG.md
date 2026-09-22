@@ -4,6 +4,84 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-22 — My List gets a filter, the detail panel can go quiet, merges say what they're doing
+
+### Added — a filter box on My List, one per tab
+
+The Archive tab holds 442 rows and gains about 440 every ten days, and My List had no search at all.
+One box under the tab chips now filters whichever tab is selected: a project tab, MASTER (filtered
+before the bucket headers are built, so a header only shows where a row survived), or the Archive.
+It is token-AND and case-insensitive like the tile bar, and it matches the subject, the details, the
+expected date and the project label — details never reach the screen, so a filter finds the note an
+item was actually written for, and `2026-09` filters a month. The query survives every render and
+carries across a tab switch, because the input sits outside the nodes the list rewrites.
+
+Two things stay as they were on purpose. Done drawers aren't filtered: they're built only when
+expanded, and filtering them would build 614 hidden rows per keystroke on the Chargeback tab. And
+"Mark all N done" hides while the box has text, because it counts the unfiltered list — beside three
+matching rows it would read "Mark all 442 done", and do it. A "Mark all N shown done" is a
+follow-up. Pure halves in `core.worklistSearchTokens` / `worklistMatches` / `filterWorklist`; a new
+`worklist-search.browser.test.js` drives it in headless Chromium.
+
+### Added — Appearance › "Hide the detail panel's controls"
+
+Off by default. On, it takes away the detail panel's buttons, nudge box and template menu. Hiding
+them outright would remove the only Deny, so the chrome brings back exactly what's needed and no
+more: a session waiting on the gate shows Approve, Deny, the deny reason and Stop until the gate is
+answered; an errored session shows the Approve button alone (it reads Continue). A waiting gate
+outranks an error. Held questions and the plan box are content, not chrome, and stay. CSS only —
+`core.detailChromeMode` is the predicate — and the setting is never carried by an exported or
+imported theme, so a palette you share can't change which buttons someone sees.
+
+### Fixed — a merge still in its test gate pulsed red "Needs you"
+
+With two units asking to merge, the one whose readiness gate was still running ranked red above
+every working session with a disabled Merge button — nothing to press, and it read as Shepherd
+re-asking a merge that was already under way. `needsYouKind` now makes it a heads-up with the reason
+on the card; it goes red on its own the tick the gate finishes.
+
+### Fixed — a merge whose gate is queued said "checking"
+
+Only one test gate runs per repo, so the rest queue — and the panel told three stories about the same
+request: the card said "checking", the Needs-you reason said the gate was running (it hadn't
+started), and the review said "queued behind another run". Adam watched one sit like that for eleven
+minutes. `core.mergeGateReleases` now reports who is waiting and where in the lane, readiness carries
+`gateQueued` / `gateLane`, and the card, the reason and the review all say which of the two it is. A
+queued gate still blocks the merge. The same collapse on a post-merge gate ("running make test on
+main first" while it was only waiting) is fixed too.
+
+### Fixed — Close tab was offered where no press could close the tab
+
+A merged batch unit's tab couldn't be closed — the window had been reloaded, so the tab bridge had
+forgotten its tag, and unit tabs never get a name — yet the review kept offering Close tab, which
+re-ran the same refusal on every press. The button was drawn whenever a close note existed, and four
+of a close note's five sources are guards deliberately holding the tab open (a post-merge gate
+running or queued, main red after the merge, a merge Shepherd couldn't verify). `core.tabCloseVerdict`
+now decides in one place whether a refusal can ever heal, and the button shows only where it can.
+
+### Fixed — the shared-window banner sat on top of the merge review
+
+"Shares its VS Code window with N other Claude sessions — Shepherd won't type into it" was marked up
+right under the header, so it rendered above the ready-to-merge review and read as a warning about
+the Merge button. Merge decisions are files and work regardless of window sharing; the banner is
+about keystroke controls only, and it now heads those. Markup move only.
+
+### Fixed — the Contrast layout theme stretched the background-agents pill across the card
+
+In `body.theme-contrast` the badges wrapper was `display: contents`, so the badges became loose items
+of the tile's `auto 1fr` grid and whichever landed in the 1fr column stretched to 74% of the card. The
+wrapper is now laid out the way the Cards theme already does it, pinned to the title's column; the
+pill measures 29px. Bar and Dots were measured too and were already fine.
+
+### Fixed — a flaky `merge.test.sh` assertion
+
+"A stranger's answer is put back, never deleted" slept 0.6s and sampled the decision file once — but
+`cc-merge.sh` claims the file with `mv` and restores a foreign one with `ln`, and between the two
+the file doesn't exist (5.5% of samples). About 1 run in 8 went red on a busy machine. The test now
+lets the waiter exit before asserting anything, as `gate.test.sh` already does for the same pattern in
+`cc-approve.sh`, and checks more: the waiter's own exit 4, the same inode, and no leftover claim
+file. 0/30 red loaded and idle, against 1/30 before.
+
 ## 2026-09-22 — A session can ask whether Shepherd is running
 
 ### Added — `cc-fleet.sh alive`, and the rule that stops the wrong question being asked
