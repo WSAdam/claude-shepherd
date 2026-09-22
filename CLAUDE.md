@@ -101,7 +101,9 @@ and the README's "Testing & development" section.
   window before it goes red -- on 2026-09-17 a VPN blip turned a card red and outranked every
   working session for a fault that healed itself in 40s.
 - A project's suite is usually NOT safe to run twice in one checkout (`install.test.sh` shells out
-  to the real `make` there; the reload test kills `hs` processes). One merge gate runs per repo at
+  to the real `make` there; its reload test stops only its own fake `hs`, never the real one).
+  Runs in DIFFERENT checkouts share no state -- only CPU, which the suite's timing bounds feel --
+  so the lock stays per checkout. One merge gate runs per repo at
   a time, pre- and post-merge sharing the lane (`core.mergeGateReleases`), `tests/run.sh` refuses
   a second concurrent run itself (exit `core.TEST_LOCK_EXIT` + `core.TEST_LOCK_TOKEN` -- `make`
   masks a recipe's exit code as 2), and a gate that COULDN'T run is never reported as one that

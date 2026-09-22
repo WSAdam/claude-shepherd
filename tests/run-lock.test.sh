@@ -3,8 +3,8 @@
 #
 # 2026-09-17: Shepherd's merge test gate started TWO runs of `make lint && make test` in the
 # same main checkout at the same moment. The suite is genuinely not concurrency-safe there --
-# install.test.sh shells out to the real `make` in the checkout, and the reload test kills hs
-# processes -- so the two runs killed each other and both reported `exited 2`, while main was
+# install.test.sh shells out to the real `make` in the checkout (its reload test stops only its
+# own fake `hs`, never the real one) -- so the two runs killed each other and both reported `exited 2`, while main was
 # green. Shepherd now serialises its own gates, and the suite refuses the overlap itself, which
 # also protects Adam's own hand-run. Exit code and token are core.TEST_LOCK_EXIT / _TOKEN.
 #

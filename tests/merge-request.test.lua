@@ -519,7 +519,7 @@ check("...and Shepherd said so once, in the panel  (" .. table.concat(alerts, " 
 -- Adam configured merge.gates at 15:58; two units that had merged HOURS earlier each got a
 -- post-merge gate started right then, in the same main checkout, at the same moment. They ran
 -- `make lint && make test` concurrently there -- install.test.sh shells out to the real make
--- and the reload test kills hs processes -- so they killed each other and both said `exited 2`
+-- in that checkout -- so they killed each other and both said `exited 2`
 -- about a main that was green. Two cards then pulsed red "Needs you" for hours, on merges
 -- hours old, where the only affordance was Dismiss.
 local core = dash.core
