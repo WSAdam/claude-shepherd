@@ -15,6 +15,12 @@
 // from git + the subagent scan, which a temp-dir fixture cannot produce -- the panel's own
 // window.ccUpdate is the real entry point either way.
 //
+// 2026-09-17 (measured and fixed 2026-09-22): the same DENSE item under the CONTRAST layout
+// theme -- risk / PR / agents are loose grid items there, because .badges is display:contents
+// and the contrast tile is an `auto 1fr` grid, so whichever badge lands in the 1fr column is
+// blockified and stretched right across the card (pill 195px on a 276px card, ratio 0.70).
+// Every layout theme is now measured by the one pack() helper against the one threshold.
+//
 // Needs Playwright (the isolate runner's copy, or CC_PLAYWRIGHT=<module path>); without it
 // this prints an explicit skip, like `make lint` does for a missing luacheck.
 // Usage: node tests/card-layout.browser.test.js
@@ -101,13 +107,25 @@ const DENSE = {
   const cardsTheme = await page.evaluate(() => document.body.className.indexOf("theme-cards") >= 0);
   check("the panel is rendering the cards theme", cardsTheme);
 
-  const geo = await page.evaluate(() => {
+  // pack(k) measures one card. It is installed on the page (window.__pack) rather than being
+  // local to one evaluate, so the SAME helper and the SAME thresholds measure every layout
+  // theme: window.__packTheme(theme, items, keys) performs the shipped theme switch (the exact
+  // class dance onThemeChange does), re-renders, and packs each key.
+  await page.evaluate(() => {
     const r = (el) => { if (!el) return null; const b = el.getBoundingClientRect();
       return { x: b.x, y: b.y, w: b.width, h: b.height, right: b.right, bottom: b.bottom }; };
     const tile = (k) => document.querySelector('.tile[data-key="' + k + '"]');
-    const pack = (k) => {
+    window.__pack = (k) => {
       const t = tile(k);
       if (!t) return null;
+      // display:contents leaves the wrapper boxless, so the badges ROW is measured as the union
+      // of the badges themselves -- the edge a reader actually sees, in every theme.
+      const kids = Array.prototype.slice.call(t.querySelectorAll(".badges > *"))
+        .map((el) => el.getBoundingClientRect()).filter((b) => b.width > 0 || b.height > 0);
+      const row = kids.length ? { x: Math.min.apply(null, kids.map((b) => b.x)),
+        y: Math.min.apply(null, kids.map((b) => b.y)),
+        w: Math.max.apply(null, kids.map((b) => b.right)) - Math.min.apply(null, kids.map((b) => b.x)),
+        h: Math.max.apply(null, kids.map((b) => b.bottom)) - Math.min.apply(null, kids.map((b) => b.y)) } : null;
       return {
         tile: r(t), name: r(t.querySelector(".name")), label: r(t.querySelector(".label")),
         meta: r(t.querySelector(".meta")), dot: r(t.querySelector(".dot")),
@@ -115,6 +133,9 @@ const DENSE = {
         br: r(t.querySelector(".stk-br")), ctx: r(t.querySelector(".ctx-bar")),
         also: r(t.querySelector(".stk-also")), bg: r(t.querySelector(".bg-run")),
         badges: r(t.querySelector(".badges")), risk: r(t.querySelector(".risk")),
+        badgeRow: row,
+        badgesDisplay: (() => { const b = t.querySelector(".badges");
+          return b ? getComputedStyle(b).display : null; })(),
         badgeCount: t.querySelectorAll(".badges").length,
         opacity: getComputedStyle(t).opacity, stale: t.classList.contains("stale"),
         labelLines: (() => { const l = t.querySelector(".label");
@@ -124,8 +145,17 @@ const DENSE = {
           return Math.round(l.getBoundingClientRect().height / lh); })(),
       };
     };
-    return { sparse: pack("sparse"), dense: pack("dense") };
+    window.__packTheme = (theme, items, keys) => {
+      document.body.className = document.body.className.replace(/(^|\s)theme-\S+/g, "").trim();
+      document.body.classList.add("theme-" + theme);
+      lastGridSig = null;
+      window.ccUpdate(items);
+      const o = {};
+      for (const k of keys) o[k] = window.__pack(k);
+      return o;
+    };
   });
+  const geo = await page.evaluate(() => ({ sparse: window.__pack("sparse"), dense: window.__pack("dense") }));
 
   check("both cards rendered", !!(geo.sparse && geo.dense));
   if (!geo.sparse || !geo.dense) { await browser.close(); finish(); }
@@ -192,6 +222,53 @@ const DENSE = {
   check("a card with no risk, PR or agents emits no badges row  (got=" + s.badgeCount + ")",
     s.badgeCount === 0);
 
+  // ---- the badges row keeps its shape in EVERY layout theme, not just cards ---------------
+  // 2026-09-17: risk / PR / agents are loose grid items in theme-contrast, so whichever lands
+  // in the 1fr column stretches across the card. `.badges` is display:contents (8657), which
+  // dissolves the wrapper and makes each badge a direct child of the `auto 1fr` contrast tile
+  // grid (8948-8951); the cards theme repairs that (8927-8929) and contrast had no such rule.
+  // Measured in a real browser on the DENSE item above: pill 195px on a 276px card, ratio 0.70.
+  // Same item, same thresholds, one loop -- so the two themes can never drift apart again.
+  const themed = {};
+  for (const theme of ["cards", "contrast"]) {
+    themed[theme] = (await page.evaluate((a) => window.__packTheme(a.theme, a.items, ["dense"]),
+      { theme, items: [SPARSE, DENSE] })).dense;
+  }
+  for (const theme of ["cards", "contrast"]) {
+    const c = themed[theme];
+    check("theme " + theme + ": the dense card rendered for the badge measurements", !!c);
+    if (!c) continue;
+    check("theme " + theme + ": the agents pill is as wide as its content, not the whole card  (pill="
+      + Math.round(c.bg.w) + " card=" + Math.round(c.tile.w) + " ratio="
+      + (c.bg.w / c.tile.w).toFixed(2) + ")", c.bg.w < c.tile.w * 0.6);
+    check("theme " + theme + ": the badges start at the title's left edge  (badges.x="
+      + Math.round(c.badgeRow.x) + " name.x=" + Math.round(c.name.x) + ")",
+      Math.abs(c.badgeRow.x - c.name.x) <= 1.5);
+    check("theme " + theme + ": risk and agents share ONE row  (risk.y=" + Math.round(c.risk.y)
+      + " bg.y=" + Math.round(c.bg.y) + ")",
+      !!(c.risk && c.bg) && Math.abs((c.risk.y + c.risk.h / 2) - (c.bg.y + c.bg.h / 2)) <= 3);
+  }
+  // The contrast tile's first grid column is the status dot's: a badge auto-placed into it
+  // would widen the column away from the 18px the theme draws.
+  check("theme contrast: the dot column is still 18px wide  (dot="
+    + Math.round(themed.contrast.dot.w) + "x" + Math.round(themed.contrast.dot.h) + ")",
+    Math.abs(themed.contrast.dot.w - 18) <= 0.5 && Math.abs(themed.contrast.dot.h - 18) <= 0.5);
+
+  // The two single-row themes hide .label / .meta but NOT the badges, so the same loose-item
+  // question applies there -- measured against the same threshold.
+  for (const theme of ["bar", "dots"]) {
+    const c = (await page.evaluate((a) => window.__packTheme(a.theme, a.items, ["dense"]),
+      { theme, items: [SPARSE, DENSE] })).dense;
+    check("theme " + theme + ": the dense card rendered for the badge measurements", !!c);
+    if (!c) continue;
+    check("theme " + theme + ": the agents pill is as wide as its content, not the whole card  (pill="
+      + Math.round(c.bg.w) + " card=" + Math.round(c.tile.w) + " ratio="
+      + (c.bg.w / c.tile.w).toFixed(2) + ")", c.bg.w < c.tile.w * 0.6);
+    check("theme " + theme + ": the badges sit on the pill's one row, beside the title  (bg.y="
+      + Math.round(c.bg.y) + " name.y=" + Math.round(c.name.y) + ")",
+      Math.abs((c.bg.y + c.bg.h / 2) - (c.name.y + c.name.h / 2)) <= 3);
+  }
+
   // --- (a) a stretched sparse card keeps its content packed at the top ---------------------
   check("the sparse card really is stretched to its neighbour's height  (sparse="
     + Math.round(s.tile.h) + " dense=" + Math.round(d.tile.h) + ")", s.tile.h >= d.tile.h - 1);
@@ -242,8 +319,13 @@ const DENSE = {
     if (!t) continue;
     check("theme " + theme + ": the status-row wrapper is display:contents  (got=" + t.srowContents + ")",
       t.srowContents === "contents");
-    check("theme " + theme + ": the badges wrapper is display:contents  (got=" + t.badgesContents + ")",
-      t.badgesContents === "contents");
+    // REQUIREMENT CHANGE (2026-09-22): .srow stays display:contents in all three themes, but
+    // the CONTRAST theme now lays the badges wrapper out itself -- exactly as the cards theme
+    // does -- because dissolving it is what let a badge become a stretched grid item. bar and
+    // dots still dissolve it: their tiles are flex rows, where loose badges lay out correctly.
+    check("theme " + theme + ": the badges wrapper is " + (theme === "contrast" ? "laid out by the theme" : "display:contents")
+      + "  (got=" + t.badgesContents + ")",
+      theme === "contrast" ? t.badgesContents === "flex" : t.badgesContents === "contents");
     check("theme " + theme + ": the dot is still drawn  (" + (t.dot ? Math.round(t.dot.w) + "x" + Math.round(t.dot.h) : "none") + ")",
       !!t.dot && t.dot.w > 0 && t.dot.h > 0);
     check("theme " + theme + ": the background-agents badge is still drawn",

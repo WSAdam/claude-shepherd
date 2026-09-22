@@ -8953,6 +8953,14 @@ local HTML = [[
   .theme-contrast .name  { grid-area:name; color:var(--text-strong); font-size:16px; font-weight:700; }
   .theme-contrast .label { grid-area:label; color:var(--text-2); font-size:13px; }
   .theme-contrast .meta  { grid-area:meta; }
+  /* 2026-09-22: risk / PR / agents were loose grid items here -- .badges is display:contents,
+     so each badge auto-placed into this `auto 1fr` grid and whichever landed in the 1fr column
+     was blockified and stretched across the card (pill 195px on a 276px card). Lay the wrapper
+     out, like the CARDS theme does, and pin it to column 2 the way .stk-also is, so the badges
+     start on the title's left edge and never widen the dot's column. */
+  .theme-contrast .badges { display:flex; grid-column:2; align-items:center;
+                            justify-content:flex-start; flex-wrap:wrap; gap:6px; min-width:0; }
+  .theme-contrast .badges > * { margin-left:0; flex:0 0 auto; }
   .theme-contrast .s-approval, .theme-contrast .s-error { animation:pulse 1.2s infinite; }
 
   /* THEME: dots (minimal vertical list) ----------------------------------- */
