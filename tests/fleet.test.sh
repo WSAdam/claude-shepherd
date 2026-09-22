@@ -173,4 +173,40 @@ batch '{"title":"Slow","units":[{"type":"docs","slug":"delta","task":"t"}]}'
 fleet drv p3 propose --file "$TMP/batch.json" --wait-max 1
 assert_eq "--wait-max: still waiting -> exit 4" "4" "$(cat "$TMP/p3.rc")"
 
+# ---- `alive`: the one honest way to ask whether Shepherd is up (2026-09-22) ----
+# 2026-09-22: a session checked with `pgrep -fl -i shepherd`, found nothing, and told Adam
+# "Shepherd isn't running" -- while he was looking at its question ON the card. There is no
+# process called Shepherd: it is Lua running inside Hammerspoon, and the only true signal is
+# the panel's heartbeat. Nothing documented how to ask, so the session guessed.
+# It answers WITHOUT a Claude session id too: a session that can't run the panel's other
+# commands must still be able to find out why.
+alive
+(cd "$REPO" && env -u CLAUDE_CODE_SESSION_ID bash "$F" alive > "$TMP/al.out" 2>&1; echo $? > "$TMP/al.rc")
+assert_eq "alive: a fresh heartbeat exits 0" "0" "$(cat "$TMP/al.rc")"
+case "$(cat "$TMP/al.out")" in *"is running"*) got=yes ;; *) got=no ;; esac
+assert_eq "alive: ...and says so in words" "yes" "$got"
+case "$(cat "$TMP/al.out")" in *Hammerspoon*) got=yes ;; *) got=no ;; esac
+assert_eq "alive: ...naming what actually hosts it, so pgrep is never the next idea" "yes" "$got"
+
+# A heartbeat older than the window reads as down -- and says what to do about it.
+printf '%s' "$(( $(date +%s) - 600 ))" > "$CC_STATUS_DIR/.panel-alive"
+(cd "$REPO" && bash "$F" alive > "$TMP/al2.out" 2>&1; echo $? > "$TMP/al2.rc")
+assert_eq "alive: a stale heartbeat exits 6, like the other commands" "6" "$(cat "$TMP/al2.rc")"
+case "$(cat "$TMP/al2.out")" in *"isn't running"*) got=yes ;; *) got=no ;; esac
+assert_eq "alive: ...and says that plainly" "yes" "$got"
+case "$(cat "$TMP/al2.out")" in *600*|*"10m"*|*"10 m"*) got=yes ;; *) got=no ;; esac
+assert_eq "alive: ...with how stale the heartbeat is, not just a verdict" "yes" "$got"
+
+# No heartbeat file at all (Shepherd never started on this machine) is down, not a crash.
+rm -f "$CC_STATUS_DIR/.panel-alive"
+(cd "$REPO" && bash "$F" alive > "$TMP/al3.out" 2>&1; echo $? > "$TMP/al3.rc")
+assert_eq "alive: no heartbeat at all exits 6" "6" "$(cat "$TMP/al3.rc")"
+case "$(cat "$TMP/al3.out")" in *"isn't running"*|*"never"*) got=yes ;; *) got=no ;; esac
+assert_eq "alive: ...and still explains itself" "yes" "$got"
+# A garbled heartbeat (a torn write) is down, never a pass or a crash.
+printf 'not-a-number' > "$CC_STATUS_DIR/.panel-alive"
+(cd "$REPO" && bash "$F" alive > "$TMP/al4.out" 2>&1; echo $? > "$TMP/al4.rc")
+assert_eq "alive: a garbled heartbeat exits 6" "6" "$(cat "$TMP/al4.rc")"
+alive
+
 finish

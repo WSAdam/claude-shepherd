@@ -29,7 +29,12 @@ PANEL_MAX_AGE="${CC_MERGE_PANEL_MAX_AGE:-30}"
 refuse() { echo "❌ cc-fleet: $*"; exit 2; }
 command -v jq >/dev/null 2>&1 || refuse "jq is required"
 SID="${CLAUDE_CODE_SESSION_ID:-}"
-[ -n "$SID" ] || refuse "not inside a Claude Code session (CLAUDE_CODE_SESSION_ID is unset)"
+# `alive` is exempt: it answers "is Shepherd up?", which is exactly what a caller that can't
+# run the rest of these commands needs to know (2026-09-22). Everything else acts on a batch
+# and is meaningless without a session to own it.
+if [ "${1:-}" != "alive" ]; then
+  [ -n "$SID" ] || refuse "not inside a Claude Code session (CLAUDE_CODE_SESSION_ID is unset)"
+fi
 
 shepherd_alive() {
   local hb now
@@ -231,11 +236,39 @@ cmd_stop() {
   exit 0
 }
 
+# Is Shepherd up? The one honest answer, because there is nothing else to look at.
+# 2026-09-22: a session checked with `pgrep -fl -i shepherd`, found nothing and told Adam
+# "Shepherd isn't running" -- while he was looking at that very question on its card. There
+# is NO process called Shepherd: it is Lua (claude-dashboard.lua) running inside
+# Hammerspoon, and ~/Applications/Shepherd.app is only a launcher. The panel's heartbeat is
+# the signal every other command here already uses; this just says it out loud, so a session
+# never has to invent a test. Deliberately usable with no Claude session id: a session that
+# can't run the rest still needs to find out why.
+cmd_alive() {
+  local hb now age
+  now="$(date +%s)"
+  hb="$(tr -dc '0-9' < "$(cc_heartbeat_file)" 2>/dev/null)"
+  if [ -n "$hb" ] && [ "$((now - hb))" -le "$PANEL_MAX_AGE" ]; then
+    echo "✅ Shepherd is running (panel heartbeat $((now - hb))s old, inside Hammerspoon)."
+    exit 0
+  fi
+  if [ -z "$hb" ]; then
+    echo "⚠️ Shepherd isn't running: it has written no panel heartbeat (it may never have started here)."
+  else
+    age="$((now - hb))"
+    echo "⚠️ Shepherd isn't running: its panel heartbeat is ${age}s old (stale past ${PANEL_MAX_AGE}s)."
+  fi
+  echo "   Shepherd is Lua inside Hammerspoon -- there is no process called Shepherd, so pgrep"
+  echo "   proves nothing. Adam starts it from Shepherd.app, or Hammerspoon -> Reload Config."
+  exit 6
+}
+
 case "${1:-}" in
   propose) shift; cmd_propose "$@" ;;
   tab)     shift; cmd_tab "$@" ;;
   status)  shift; cmd_status "$@" ;;
   stop)    shift; cmd_stop "$@" ;;
-  *) echo "usage: cc-fleet.sh propose --file <batch.json> | tab --batch <id> --unit <slug> | status --batch <id> | stop --batch <id>"
+  alive)   shift; cmd_alive "$@" ;;
+  *) echo "usage: cc-fleet.sh propose --file <batch.json> | tab --batch <id> --unit <slug> | status --batch <id> | stop --batch <id> | alive"
      exit 2 ;;
 esac

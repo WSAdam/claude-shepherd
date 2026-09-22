@@ -121,6 +121,14 @@ and the README's "Testing & development" section.
 - A tab-less leftover is ended by Shepherd after `tabless.autoEndMinutes` (`core.tablessAutoEndDue`,
   through `FX.endSession`'s ps check); a running batch's driver ranks 4.5 (`core.isDriving`) so its
   card reads Driving and never flips.
+- Shepherd has NO process of its own: it is Lua inside Hammerspoon, and `~/Applications/Shepherd.app`
+  is only a launcher. `pgrep -i shepherd` finds nothing while the panel is plainly running -- on
+  2026-09-22 a session checked exactly that way, concluded "Shepherd isn't running" and asked Adam
+  how to proceed, in a question `cc-ask.sh` was at that moment rendering on its card (that hook needs
+  a heartbeat <=5s old, so the card WAS the disproof). The only signal is the panel heartbeat
+  `~/.claude/cc-status/.panel-alive`, which `shepherd_alive()` reads in cc-fleet.sh/cc-merge.sh (30s)
+  and cc-ask.sh (5s). `cc-fleet.sh alive` says it out loud; it is the one subcommand exempt from the
+  CLAUDE_CODE_SESSION_ID guard, since a caller that can't run the others needs to know why.
 - Scripts reach `~/.claude` by RENAME (`make install`, `install.sh`): bash reads a running
   script lazily, so rewriting one in place garbles a hook that's mid-run.
 - `vscode://anthropic.claude-code/open?prompt=` opens a new Claude tab in the ACTIVE editor

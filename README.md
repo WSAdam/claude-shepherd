@@ -317,6 +317,12 @@ Ask a Claude session to run several units in parallel and it can drive the whole
 Your approval lives in Shepherd (`~/.claude/cc-fleet/<id>.state.json`), never in the proposal's own
 file. `"fleet": { "enabled": false }` makes Shepherd ignore proposals.
 
+**Is Shepherd running?** `~/.claude/cc-fleet.sh alive` answers it — exit 0 with the panel
+heartbeat's age, exit 6 with why not. It's the one subcommand that works outside a Claude session,
+because a session that can't run the others is exactly the one that needs to know. Shepherd has
+**no process of its own** — it's Lua running inside Hammerspoon, and `Shepherd.app` is only a
+launcher — so `pgrep`/`ps` for "shepherd" finds nothing whether it's up or not.
+
 ### Try it: the worktree demo
 
 `deno task demo` (or `make demo`) sets up a fresh little Deno app and opens it in a new VS Code

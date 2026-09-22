@@ -98,6 +98,11 @@ parallel.
   approvals and ready-to-merge still work, and Close goes through its tab bridge (a local VS
   Code extension) that closes just that tab. A unit that needs the keystroke automation gets
   its own window.
+  **Shepherd has no process of its own** — it is Lua running inside **Hammerspoon**, and
+  `Shepherd.app` is only a launcher — so `pgrep`/`ps` for "shepherd" finds nothing and proves
+  nothing. Don't pre-check at all: run the command you actually want (`cc-fleet.sh propose`,
+  `cc-merge.sh request`) and let its exit 6 tell you. If you must ask outright,
+  `~/.claude/cc-fleet.sh alive` answers it (exit 0 up, 6 down, with the heartbeat's age).
 - **Subagents.** Worktree-isolated subagents (e.g. an implement fleet) start from
   the current HEAD (`worktree.baseRef: "head"` in settings), not from the working tree —
   commit before spawning them.
