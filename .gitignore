@@ -39,6 +39,9 @@ Shepherd.app/
 TODO.md
 .claude/worktrees/
 
+# Page snapshots the Playwright MCP writes into the session's cwd (2026-09-22)
+.playwright-mcp/
+
 # The companion VS Code extension's packages (make bridge builds them here).
 /build/
 

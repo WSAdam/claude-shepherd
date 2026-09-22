@@ -42,6 +42,11 @@ assert_eq "a worktree holding its TODO.md removes cleanly without --force" "remo
 if git -C "$REPO" check-ignore -q .claude/worktrees/anything; then got=ignored; else got=untracked; fi
 assert_eq "Claude-made worktrees under .claude/worktrees/ are gitignored" "ignored" "$got"
 
+# 2026-09-22: the Playwright MCP writes its page snapshots to .playwright-mcp/ in the session's
+# cwd, and one sat untracked in the root of this public repo -- one `git add -A` from shipping.
+if git -C "$REPO" check-ignore -q .playwright-mcp/page-snapshot.yml; then got=ignored; else got=untracked; fi
+assert_eq "Playwright MCP snapshots under .playwright-mcp/ are gitignored" "ignored" "$got"
+
 # 2026-09-17: the public repo tracked 31 Scratch-pad/ files -- Chargeback portal pages, design
 # mockups and Playwright snapshots from other work -- plus notes only our own work on Shepherd
 # uses. A fresh install gets what it runs on (code, README, CLAUDE.md, context.md, spec, demo);
