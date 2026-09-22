@@ -2,6 +2,12 @@
 // (headless Chromium) browser, fills the ready-to-merge review with a long summary and a long
 // file list, and measures where the Merge button lands.
 //
+// 2026-09-22: "why are you asking for a merge I cannot do here". Cause: the shared-window banner
+// ("Shepherd won't type into it") was marked up directly under #d-head, so it rendered ABOVE the
+// ready-to-merge review and read as a warning about the Merge buttons -- which are decision files
+// (FX.writeMergeDecision), work fine in a shared window, and are in no SHARED_IDS. The banner
+// governs the keystroke controls in #d-actions and now sits with them.
+//
 // 2026-09-15: "I shouldn't need to scroll down to be able to click merge". Cause: #d-merge grew
 // with its summary, commits and files, and the dm-acts row (Merge / note / Not yet) sat under
 // all of it -- a wordy request pushed the buttons off the panel. The review's BODY now has a
@@ -56,7 +62,10 @@ const update = fs.readFileSync(path.join(out, "update.js"), "utf8");
 // two commits and a file list -- plus a long file list, since a big unit ships many files.
 const files = [];
 for (let i = 0; i < 40; i++) files.push({ st: i % 3 ? "M" : "A", path: "src/module-" + i + "/some/deeper/file-" + i + ".lua" });
-const review = { key: "k1", merge: {
+// sharedWindow: 3 (2026-09-22) -- this session's VS Code window hosts two others, so the
+// keystroke controls grey out and the shared-window banner renders. The merge review is
+// unaffected: its buttons write decision files.
+const review = { key: "k1", sharedWindow: 3, merge: {
   phase: "requested", sent: false, ready: true, queued: false, base: "main", ahead: 2,
   line: "⇡ ready to merge fix/installer-fixtures → main",
   stat: "6 files changed, 279 insertions(+), 54 deletions(-)",
@@ -92,7 +101,12 @@ const review = { key: "k1", merge: {
   });
   await page.goto("file://" + path.join(out, "panel.html"));
   await page.evaluate((code) => { (0, eval)(code); }, update);
-  await page.evaluate((r) => { selectedKey = r.key; renderDetail(); renderMerge(r); }, review);
+  // The panel's own path: the fixture's k1 item carries the review and the shared-window count,
+  // and renderDetail fills the banner and calls renderMerge itself.
+  await page.evaluate((r) => {
+    Object.assign(findItem(r.key), r);
+    selectedKey = r.key; renderDetail();
+  }, review);
 
   const box = await page.locator("#d-merge").boundingBox();
   const btn = await page.locator("#dm-merge").boundingBox();
@@ -115,6 +129,29 @@ const review = { key: "k1", merge: {
     return !!b && !!b.querySelector("#dm-files") && !!b.querySelector("#dm-diff") && !b.querySelector("#dm-acts") && !b.querySelector("#dm-done");
   });
   check("the file list and the diff scroll with the body; the buttons rows sit outside it", inside);
+
+  // ---- the shared-window banner governs the keystroke controls, not the merge review ----
+  // 2026-09-22: it rendered above #d-merge and read as "you cannot merge here".
+  const banner = await page.evaluate(() => {
+    const b = document.getElementById("d-shared");
+    const acts = document.getElementById("d-actions");
+    const merge = document.getElementById("d-merge");
+    const r = (el) => { const x = el.getBoundingClientRect(); return { top: x.top, h: x.height }; };
+    return { text: b.textContent, display: getComputedStyle(b).display,
+             b: r(b), merge: r(merge), acts: r(acts) };
+  });
+  check("the shared-window banner is actually on screen  (display=" + banner.display + " h="
+    + Math.round(banner.b.h) + "px)", banner.display !== "none" && banner.b.h > 0
+    && banner.text.indexOf("won't type into it") >= 0);
+  check("...below the ready-to-merge review, which shared windows do not block  (banner.top="
+    + Math.round(banner.b.top) + " merge.top=" + Math.round(banner.merge.top) + ")",
+    banner.b.top > banner.merge.top);
+  check("...and directly above the keystroke controls it governs  (banner.top="
+    + Math.round(banner.b.top) + " actions.top=" + Math.round(banner.acts.top) + ")",
+    banner.b.top < banner.acts.top);
+  check("the Merge button is live in a shared window (decisions are files, not keystrokes)",
+    (await page.evaluate(() => document.getElementById("dm-merge").disabled)) === false
+    && (await page.evaluate(() => document.getElementById("b-stop").disabled)) === true);
 
   // ---- the claim check (2026-09-18): shown, warn-coloured, inert, and it holds nothing ----
   const claims = await page.evaluate(() => {

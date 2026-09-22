@@ -9874,7 +9874,6 @@ local HTML = [[
       <span id="d-wt"></span>
       <span id="d-status"></span>
     </div>
-    <div id="d-shared"></div>
     <div id="d-empty"><span id="de-text"></span> <button id="b-closeempty" onclick="if(selectedKey) send('close-empty', selectedKey, 'all')" title="Close the never-used chats in this window (they're all named Claude Code)">Close them</button></div>
     <!-- Batch driving (2026-09-11): a batch this session proposes or drives; filled with textContent
          only; the note and the checkbox are never rebuilt by a re-render. -->
@@ -9976,6 +9975,10 @@ local HTML = [[
       </div>
       <div id="queue-list"></div>
     </div>
+    <!-- The shared-window banner heads the KEYSTROKE controls it governs (2026-09-22). It used to
+         sit under #d-head, above the merge review -- which is decided by files, works in a shared
+         window, and made Adam ask "why are you asking for a merge I cannot do here". -->
+    <div id="d-shared"></div>
     <div id="d-actions">
       <button id="b-jump"    onclick="act('focus')">Jump</button>
       <button id="b-approve" onclick="act('approve')">Approve</button>

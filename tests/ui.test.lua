@@ -3227,6 +3227,17 @@ do
         d:find('var SHARED_IDS = ["b-stop","b-clear","b-compact","b-improve","b-nudge","b-feed","b-rewind","effort","mode","d-model"];', 1, true) ~= nil
         and d:find('document.getElementById("d-shared")', 1, true) ~= nil
         and src:find('<div id="d-shared"></div>', 1, true) ~= nil)
+  -- 2026-09-22: the banner sat directly under #d-head, ~20 lines above the ready-to-merge
+  -- review and ~100 above #d-actions -- so it read as a warning about the Merge buttons, which
+  -- are decision FILES (FX.writeMergeDecision), never keystrokes, and are in no SHARED_IDS.
+  do
+    local iMerge = src:find('<div id="d-merge">', 1, true)
+    local iShared = src:find('<div id="d-shared"></div>', 1, true)
+    local iActions = src:find('<div id="d-actions">', 1, true)
+    check("sharedwin-pin: the banner heads the keystroke controls, not the merge review  (merge="
+          .. tostring(iMerge) .. " shared=" .. tostring(iShared) .. " actions=" .. tostring(iActions) .. ")",
+          iMerge and iShared and iActions and iMerge < iShared and iShared < iActions or false)
+  end
 end
 
 -- ---- New worktree tab: a Claude tab through the extension's URI (2026-09-10) ----
