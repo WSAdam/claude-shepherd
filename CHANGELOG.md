@@ -4,6 +4,106 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-22 — A session can ask whether Shepherd is running
+
+### Added — `cc-fleet.sh alive`, and the rule that stops the wrong question being asked
+
+A session ran `pgrep -fl -i shepherd`, found nothing, and told Adam *"Shepherd isn't running and
+the repo has no worktree setup. How do you want this run?"* — in a question he was at that moment
+reading **on its card in Shepherd**. The card was the disproof: `cc-ask.sh` holds a question only
+while the panel heartbeat is 5s old or less, so Shepherd was provably alive at the instant the
+session said otherwise.
+
+**There is no process called Shepherd.** `claude-dashboard.lua` is `dofile`'d by
+`~/.hammerspoon/init.lua`, so the process is **Hammerspoon**, and `~/Applications/Shepherd.app` is
+only a launcher. `pgrep` finds nothing whether the panel is up or down. The one true signal is the
+panel heartbeat `~/.claude/cc-status/.panel-alive`, which every script here already reads through
+`shepherd_alive()` — cc-fleet.sh and cc-merge.sh at 30s, cc-ask.sh at 5s.
+
+So this was a documentation gap, not a broken check: nothing told a session how to ask, and left to
+improvise it reached for the one test that cannot work. `cc-fleet.sh alive` now answers outright —
+exit 0 with the heartbeat's age, exit 6 with why not and what starts it. It is deliberately the one
+subcommand exempt from the `CLAUDE_CODE_SESSION_ID` guard, because a caller that cannot run the
+others is exactly the one that needs to know why. A missing or garbled heartbeat reads as down,
+never as a pass or a crash.
+
+The methodology carries the rest, since that is what reaches every session on every machine: don't
+pre-check at all — run the command you actually want and let its exit 6 answer; if you must ask
+outright, ask this. Nine fixtures in `tests/fleet.test.sh` cover fresh, stale, absent and garbled
+heartbeats.
+
+## 2026-09-21 — My List stops costing half a second a click
+
+### Fixed — a check-off decoded the whole store twice, and built 614 rows nobody was looking at
+
+"Big delays between clicking it and it being marked as done." Adam's `cc-worklist.json` had reached
+**778KB / 1,065 items**, and every tick of a checkbox froze the entire panel — Hammerspoon is
+single-threaded, so this was the whole app, not just the list.
+
+Measured in the live VM before assuming anything: `FX.readWorklist()` cost **266ms**, 257ms of it
+decoding the store; the JS render was **8ms**; nothing on the path shelled out. The cost was simply
+that a check-off decoded the store **twice** — once in the handler to mutate it, then again inside
+`FX.worklistPayload` to build the push. Twenty clicks, forty decodes of every project's items.
+
+The read is now cached against the file's mtime and size, and `FX.writeWorklist` seeds that cache
+from what it just wrote, so the read that always follows a mutation costs a copy instead of a
+decode. Callers mutate what they get back, so the cache keeps its own copy and hands out a deep one
+— **1.7ms against 231ms** for a fresh read, and a caller that mutates without writing cannot
+corrupt it. Edits made outside the panel still win, since mtime+size are checked on every read.
+Live, after: a cached read is **3.1ms** and a payload build **4.7ms**.
+
+The list also stopped waiting for any of it: the panel already holds the items, so it flips the one
+you ticked itself, re-renders, and then tells Lua — whose push still replaces that guess when it
+lands. And `renderWorklist` no longer sorts and builds every Done row while the drawer is collapsed
+(614 hidden rows per click on the Chargeback tab); the header's count reads `done.length` either
+way.
+
+### Added — Mark all done, and a daily archive
+
+**✓ Mark all N done** ticks off everything still open on a tab in one operation. It asks first with
+the count in the question, is labelled with that count, and hides itself when there is nothing left
+to mark. On **MASTER** it marks every project's open items — each in its own list — and says so in
+the question. An item already done keeps the `doneTs` it had, since the Done drawer is ordered by
+that stamp.
+
+**🗄 Archive:** once a day, work finished more than `worklist.archiveAfterDays` (default 10) ago
+moves out of the live store into `cc-worklist-archive.json`. Nothing is deleted — the Archive tab
+shows it newest-first, each row tagged with the project it came from, read-only. It is a separate
+file *on purpose*: the store is re-read on every check-off, so what it carries is what a click
+costs, and the archive is fetched only when its tab is opened. The first sweep moved **442 items**
+and took Adam's live store from 778KB to 522KB. `worklist.archive: false` turns it off.
+
+## 2026-09-19 — An older install upgrades cleanly
+
+### Fixed — nine things between `git pull` and a working panel
+
+Handing Shepherd to a coworker who already had an older install: the pull was safe, but an
+*upgrade* was gappier than a fresh install.
+
+`install.sh` skipped an existing `~/.claude/cc-config.json` whole, so a machine that installed
+before a feature shipped never saw its default — and three of ours contradict the in-code fallback
+(`spawn.editor`, `spawn.live`, `ledger.enabled`), so sessions launched into a terminal that never
+really started. It now fills only the keys the user has no value of their own for, as step 3b
+already did for the Claude Code settings. Both walks also stopped using `paths(scalars)`: jq's
+`scalars` emits the value, so a shipped `false` is falsy and was silently skipped — every
+off-by-default setting we ship would have been left out of an upgraded config.
+
+The README gained an **Upgrading** section, because the only "after a change" command anywhere was
+`make install`, which copies files and nothing else — a release that adds a *hook* landed on disk
+and was wired into nothing. `git pull && make setup`, then Reload Config and *Developer: Reload
+Window*.
+
+Also: a parked merge answer (`<key>.decision.parked.<pid>`, cc-merge.sh's `ln` fallback) and every
+write temp are now reaped with their session — neither remover knew those shapes, and session keys
+are UUIDs, so nothing ever matched them again. `make install` swaps the two Lua files into
+`~/.hammerspoon` by rename rather than truncating them in place. The ledger's redact button stopped
+interpolating `e.id` into an `onclick` (a JS string inside an HTML attribute, neither escaped), and
+the escaping tripwire gained a per-**sink** rule alongside its per-field deny-list, which could only
+ever see prefixes someone had remembered to add. A notification click builds its window target with
+`FX.targetFor`, so `key` and `shared` are no longer dropped. And the hygiene suite skips its
+git-index assertions outside a checkout — the README offers a ZIP download, and `install.sh` gates
+on the suite, so an unzipped copy used to abort its own install.
+
 ## 2026-09-18 — A batch's results are grouped by outcome
 
 ### Added — merged / blocked / working / unopened, in the review and in `cc-fleet.sh status`
