@@ -4,6 +4,23 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-24 — The lock screen shows what's ready to merge
+
+### Fixed — a ready-to-merge read "All quiet" on the lock screen
+
+The lock decided what wanted you from the session's raw status. A merge request sits on a session
+whose turn has ended (status `done`), so Chargeback Sentinel's card read "Needs you · ⇡ ready to
+merge fix/health-filing-gaps → master" while the lock said "All quiet". The lock now reads the same
+Needs-you verdict as the cards (`core.needsYouKind`, stamped by `FX.annotateNeedsYou`) through a new
+pure `core.lockState`. A merge you can press gets its own teal ring, the card's merge colour, and
+the summary line says "1 ready to merge". Rings rank needs you, then ready to merge, then errored,
+then working.
+
+Using the one verdict also fixes the rest of that gap in both directions. A held question or a
+batch proposal on a finished session now rings amber. A prompt the card calls a heads-up (nothing
+Shepherd can press), or an error still in its grace window, no longer counts as needing you. A
+merge whose test gate is still running draws no ring until there's something to press.
+
 ## 2026-09-22 — My List gets a filter, the detail panel can go quiet, merges say what they're doing
 
 ### Added — a filter box on My List, one per tab

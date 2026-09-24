@@ -687,6 +687,16 @@ type). Pair it with **Awake** to close the lid locked and leave the fleet workin
 so a typo can't lock you out, and `killall Hammerspoon` / a reboot always releases it. For a
 true security boundary use the real macOS lock — but it stops keystroke-driven control.
 
+While it's up, the lock shows the clock and one ring per project that has something going
+on, so you can tell what's happening without unlocking. A working project's ring spins in its
+own colour. A project that needs you (a prompt, a held question, a batch proposal, a blocked
+merge) holds a full amber ring. One that's **ready to merge** holds a teal ring, the same teal
+as the card's merge outline. An error holds a red ring. The line under the rings counts
+sessions, e.g. `2 working  ·  1 needs you  ·  1 ready to merge`, and reads "All quiet" only
+when nothing is running or waiting. The lock decides "needs you" the same way the cards do, so
+something the card shows only as a heads-up (a merge whose test gate is still running, an
+error in its grace window) doesn't ring there either.
+
 ## Spawn new sessions
 
 Click **New** (or **⌘⌥S**) to open the **New session** modal:
