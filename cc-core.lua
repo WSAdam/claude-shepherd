@@ -2769,20 +2769,42 @@ local function spreadHues(entries)
   return entries
 end
 
+-- What one session shows on the lock. Whether it wants Adam is the cards' own verdict
+-- (core.needsYouKind, stamped as it.needsYou / it.needsYouSource by FX.annotateNeedsYou),
+-- never the raw status: 2026-09-24, a ready-to-merge on a "done" session read "All quiet"
+-- while its card said "Needs you". A merge he can press gets its own state; a blocked
+-- merge, a held question, a batch proposal and a prompt all read as "approval". A stamped
+-- verdict always wins ("fyi" and "no" included); an unstamped item asks needsYouKind.
+function M.lockState(it)
+  if type(it) ~= "table" then return nil end
+  local kind, source = it.needsYou, it.needsYouSource
+  if kind == nil then kind, source = M.needsYouKind(it) end
+  if kind == "needs" then
+    if source == "merge" and type(it.merge) == "table" and it.merge.phase == "requested" then
+      return "merge"
+    end
+    if source == "error" then return "error" end
+    return "approval"
+  end
+  if it.status == "working" then return "working" end
+  return nil
+end
+
 -- One ring per PROJECT that is doing something, ranked by how badly it wants you:
--- a project waiting on approval outranks one that errored, which outranks one
--- merely working. Two sessions in one project share a ring (and the louder of
--- their states). Idle/done sessions draw nothing. The row is capped so a big fleet
--- cannot overflow the screen, while `counts` stays honest about the whole fleet.
--- Same-state rings sort alphabetically so the row cannot reshuffle between frames.
+-- a project waiting on approval outranks one ready to merge, which outranks one that
+-- errored, which outranks one merely working. Two sessions in one project share a ring
+-- (and the louder of their states). Idle/done sessions draw nothing. The row is capped
+-- so a big fleet cannot overflow the screen, while `counts` stays honest about the
+-- whole fleet. Same-state rings sort alphabetically so the row cannot reshuffle
+-- between frames.
 function M.lockBoard(list, maxN)
-  local RANK = { approval = 1, error = 2, working = 3 }
-  local byProject, counts = {}, { working = 0, approval = 0, error = 0, total = 0 }
+  local RANK = { approval = 1, merge = 2, error = 3, working = 4 }
+  local byProject, counts = {}, { working = 0, approval = 0, merge = 0, error = 0, total = 0 }
   for _, it in ipairs(list or {}) do
     if type(it) == "table" then
       counts.total = counts.total + 1
-      local st = tostring(it.status or "")
-      if RANK[st] then
+      local st = M.lockState(it)
+      if st and RANK[st] then
         counts[st] = counts[st] + 1
         -- one ring per PROJECT CARD: a repo's worktrees share its stackKey (and so
         -- one ring and one colour that can't change when the card's lead does)
@@ -2824,6 +2846,7 @@ function M.lockSummary(counts, ringCount)
   local total = tonumber(counts.total) or 0
   local working = tonumber(counts.working) or 0
   local approval = tonumber(counts.approval) or 0
+  local merge = tonumber(counts.merge) or 0
   local errored = tonumber(counts.error) or 0
   if total == 0 then return "No sessions" end
   if (tonumber(ringCount) or 0) == 0 then
@@ -2832,6 +2855,7 @@ function M.lockSummary(counts, ringCount)
   local parts = {}
   if working > 0 then parts[#parts + 1] = working .. " working" end
   if approval > 0 then parts[#parts + 1] = approval .. (approval == 1 and " needs you" or " need you") end
+  if merge > 0 then parts[#parts + 1] = merge .. " ready to merge" end
   if errored > 0 then parts[#parts + 1] = errored .. " errored" end
   return table.concat(parts, "  ·  ")
 end

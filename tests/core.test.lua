@@ -6015,6 +6015,83 @@ do
   check("board: nil list is safe", #B(nil, 6).entries == 0)
 end
 
+-- ---- The lock reads the cards' Needs-you verdict: ready to merge (2026-09-24) ----
+-- The lock has to agree with the cards about what wants Adam. It now reads the one decision
+-- (core.needsYouKind, stamped as it.needsYou / it.needsYouSource), and a merge he can press
+-- gets its own ring and its own words.
+do
+  local B, S = core.lockBoard, core.lockSummary
+  -- 2026-09-24: lockBoard counted raw status only, so a ready-to-merge on a "done" session read "All quiet".
+  local CS = "-Users-adam-Programming-ChargebackSentinel"
+  local fleet = {
+    { key = "cs1", projectKey = CS, stackKey = CS, stackName = "Chargeback Sentinel", status = "done",
+      needsYou = "needs", needsYouSource = "merge",
+      merge = { phase = "requested", needsYou = true, ready = true,
+                branch = "fix/health-filing-gaps", base = "master" } },
+    { key = "cs2", projectKey = CS, stackKey = CS, stackName = "Chargeback Sentinel", status = "done", needsYou = "no" },
+    { key = "sh", projectKey = "-Users-adam-Programming-claude-instance-manager", name = "Shepherd",
+      status = "done", needsYou = "no" },
+    { key = "wg", projectKey = "-Users-adam-Programming-wgsUltra", name = "wgsUltra", status = "idle", needsYou = "no" },
+  }
+  local b = B(fleet, 6)
+  eq("lock: a ready-to-merge on a finished session draws a ring", #b.entries, 1)
+  eq("lock: ...a merge ring", b.entries[1].state, "merge")
+  eq("lock: ...named for the project", b.entries[1].label, "Chargeback Sentinel")
+  eq("lock: ready to merge is counted per session", b.counts.merge, 1)
+  eq("lock: the summary says ready to merge, not all quiet", S(b.counts, #b.entries), "1 ready to merge")
+
+  local function one(it) local r = B({ it }, 6); return r.entries[1] and r.entries[1].state, r end
+  -- an older host / a fixture with no stamped verdict asks needsYouKind itself
+  eq("lock: an unstamped merge request falls back to needsYouKind",
+     one({ projectKey = "p", name = "p", status = "done", merge = { phase = "requested", needsYou = true } }), "merge")
+  -- a stamped verdict ALWAYS wins -- the card and the lock never disagree
+  eq("lock: a merge whose test gate is still running draws nothing",
+     one({ projectKey = "p", name = "p", status = "done", needsYou = "fyi", needsYouSource = "merge",
+           merge = { phase = "requested", needsYou = true, checking = true } }), nil)
+  eq("lock: a merge nobody waits on any more draws nothing",
+     one({ projectKey = "p", name = "p", status = "done",
+           merge = { phase = "requested", needsYou = true, waiterAlive = false } }), nil)
+  eq("lock: a blocked merge reads as needing you",
+     one({ projectKey = "p", name = "p", status = "done", needsYou = "needs", needsYouSource = "merge",
+           merge = { phase = "blocked", needsYou = true } }), "approval")
+  eq("lock: a held question on a working session reads as needing you",
+     one({ projectKey = "p", name = "p", status = "working", needsYou = "needs", needsYouSource = "ask" }), "approval")
+  eq("lock: a batch proposal on a finished session reads as needing you",
+     one({ projectKey = "p", name = "p", status = "done", needsYou = "needs", needsYouSource = "fleet" }), "approval")
+  local st, r = one({ projectKey = "p", name = "p", status = "approval", needsYou = "fyi", needsYouSource = "approval" })
+  eq("lock: a prompt the card calls a heads-up is not counted as needing you", st, nil)
+  eq("lock: ...and not in the count", r.counts.approval, 0)
+  eq("lock: an error still in its grace window is not red on the lock",
+     one({ projectKey = "p", name = "p", status = "error", needsYou = "fyi", needsYouSource = "error" }), nil)
+  eq("lock: an error the card calls red is red on the lock",
+     one({ projectKey = "p", name = "p", status = "error", needsYou = "needs", needsYouSource = "error" }), "error")
+  eq("lock: a working session with nothing for Adam still spins",
+     one({ projectKey = "p", name = "p", status = "working", needsYou = "no" }), "working")
+
+  local ranked = B({
+    { projectKey = "pW", name = "w", status = "working", needsYou = "no" },
+    { projectKey = "pE", name = "e", status = "error", needsYou = "needs", needsYouSource = "error" },
+    { projectKey = "pM", name = "m", status = "done", needsYou = "needs", needsYouSource = "merge",
+      merge = { phase = "requested", needsYou = true } },
+    { projectKey = "pA", name = "a", status = "approval", needsYou = "needs", needsYouSource = "approval" },
+  }, 8)
+  local order = {}
+  for i, e in ipairs(ranked.entries) do order[i] = e.state end
+  eq("lock: needs you outranks ready to merge outranks errored outranks working",
+     table.concat(order, ","), "approval,merge,error,working")
+  local mixed = B({
+    { projectKey = "pX", name = "x", status = "working", needsYou = "no" },
+    { projectKey = "pX", name = "x", status = "done", needsYou = "needs", needsYouSource = "merge",
+      merge = { phase = "requested", needsYou = true } },
+  }, 8)
+  eq("lock: ready to merge beats working within one project", mixed.entries[1].state, "merge")
+
+  eq("summary: two ready to merge", S({ total = 5, merge = 2 }, 2), "2 ready to merge")
+  eq("summary: the full picture with a merge",
+     S({ total = 10, working = 4, approval = 2, merge = 1, error = 1 }, 6),
+     "4 working  ·  2 need you  ·  1 ready to merge  ·  1 errored")
+end
+
 -- ---- User stories editor: parse / serialize / hash (spec/product/user-stories.md) ----
 do
   -- THE core safety invariant: serialize(parse(x).blocks) == x BYTE-FOR-BYTE for any

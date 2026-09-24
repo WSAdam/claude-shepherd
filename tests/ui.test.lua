@@ -2406,6 +2406,9 @@ do
         and src:find("local function lockPaint(canvases, board, spin)", 1, true) ~= nil)
   check("lock: an unused ring slot is skipped, not drawn empty",
         src:find('track.action, ring.action, lbl.text = "skip", "skip", ""', 1, true) ~= nil)
+  -- 2026-09-24: a ready-to-merge ring wears the card's merge teal (.tile.merge, #14b8a6)
+  check("lock: a ready-to-merge ring is teal, like the card's merge ring",
+        src:find('elseif e.state == "merge" then col = { hue = 0.48', 1, true) ~= nil)
   check("lock: only a WORKING project spins; a blocked one holds a full ring",
         src:find("if e.state == \"working\" then", 1, true) ~= nil
         and src:find("ring.startAngle, ring.endAngle = 0, 359.9", 1, true) ~= nil)

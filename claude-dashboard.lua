@@ -5892,8 +5892,10 @@ local function lockPaint(canvases, board, spin)
           local col = { hue = e.color.hue / 360, saturation = e.color.saturation,
                         brightness = e.color.brightness, alpha = 1.0 }
           -- A blocked project pulses amber and an errored one red: colour carries
-          -- the identity, brightness carries the urgency.
+          -- the identity, brightness carries the urgency. A merge waiting on Adam
+          -- wears the card's merge teal (.tile.merge, #14b8a6).
           if e.state == "approval" then col = { hue = 0.11, saturation = 0.85, brightness = 1.0 }
+          elseif e.state == "merge" then col = { hue = 0.48, saturation = 0.89, brightness = 0.9 }
           elseif e.state == "error" then col = { hue = 0.0, saturation = 0.75, brightness = 1.0 } end
           track.action, ring.action = "stroke", "stroke"
           track.center = { x = x, y = track.center.y }
