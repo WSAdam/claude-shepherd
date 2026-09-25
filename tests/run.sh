@@ -62,6 +62,9 @@ echo ""
 echo "== bash: batch driving (cc-fleet.sh) =="
 bash "$DIR/fleet.test.sh" || fail=1
 echo ""
+echo "== bash: commit stats -- your commits in the repos Claude worked in (cc-commits.sh) =="
+bash "$DIR/commits.test.sh" || fail=1
+echo ""
 echo "== bash: questions held for Shepherd (cc-ask.sh) =="
 bash "$DIR/ask-hold.test.sh" || fail=1
 echo ""
@@ -91,6 +94,9 @@ bash "$DIR/worklist-ui.test.sh" || fail=1
 echo ""
 echo "== node: Done-drawer ordering (behavioral, runs the shipped comparator) =="
 node "$DIR/done-order.test.js" || fail=1
+echo ""
+echo "== node: commit stats -- the Today / This week lines and their drawer (behavioral, runs the shipped block) =="
+node "$DIR/commits-render.test.js" || fail=1
 echo ""
 echo "== node: a ledger row's redact button can't smuggle in markup (behavioral, runs the shipped row) =="
 node "$DIR/audit-row-escaping.test.js" || fail=1
@@ -127,6 +133,9 @@ node "$DIR/ask-options.browser.test.js" || fail=1
 echo ""
 echo "== node: Instances -- checkboxes, Select finished and Close selected (real browser) =="
 node "$DIR/instances-select.browser.test.js" || fail=1
+echo ""
+echo "== node: commit stats -- the lines fit a narrow panel, the drawer opens and stays open (real browser) =="
+node "$DIR/commits-layout.browser.test.js" || fail=1
 echo ""
 echo "== node: project cards (behavioral, runs the shipped fold + card extras) =="
 node "$DIR/stack-fold.test.js" || fail=1
@@ -192,6 +201,9 @@ HOME="$(mktemp -d)" lua "$DIR/fleet.test.lua" || fail=1
 echo ""
 echo "== lua: ready to merge -- review, one merge per repo, Not yet (behavioral, stubbed hs + git) =="
 HOME="$(mktemp -d)" lua "$DIR/merge-request.test.lua" || fail=1
+echo ""
+echo "== lua: commit stats -- one count at a time, cached, a hung one reclaimed (behavioral, stubbed hs) =="
+HOME="$(mktemp -d)" lua "$DIR/commits-refresh.test.lua" || fail=1
 echo ""
 echo "== lua: Shepherd answers -- a held question answered from the card (behavioral, stubbed hs) =="
 HOME="$(mktemp -d)" lua "$DIR/ask.test.lua" || fail=1

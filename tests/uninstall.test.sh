@@ -43,7 +43,7 @@ assert_json "the user's own Stop hook is kept" "$C/settings.json" '.hooks.Stop[0
 assert_json "...as the only Stop group" "$C/settings.json" '.hooks.Stop | length' "1"
 assert_json "an event left with no hooks is dropped" "$C/settings.json" '.hooks | has("PreToolUse")' "false"
 assert_json "the user's other settings are kept" "$C/settings.json" '.model' "opus"
-for f in cc-lib.sh cc-status.sh cc-approve.sh cc-popup.sh cc-merge.sh cc-fleet.sh cc-ask.sh cc-core.lua; do
+for f in cc-lib.sh cc-status.sh cc-approve.sh cc-popup.sh cc-merge.sh cc-fleet.sh cc-ask.sh cc-commits.sh cc-core.lua; do
   assert_eq "removes $f from the claude dir" "gone" "$([ -e "$C/$f" ] && echo there || echo gone)"
 done
 assert_eq "a user's own cc-*.sh is kept" "there" "$([ -e "$C/cc-mine.sh" ] && echo there || echo gone)"

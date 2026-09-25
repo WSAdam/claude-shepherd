@@ -8093,8 +8093,10 @@ do
   -- 2026-09-11: 9 -> 10 for the ready-to-merge flow ("merge", flagged new).
   -- 2026-09-11: 10 -> 11 for batch driving ("fleet", flagged new).
   -- 2026-09-11: 11 -> 12 for answering questions from Shepherd ("answers", flagged new).
-  eq("FEATURES: the 12 new features are flagged", newCount, 12)
+  -- 2026-09-25: 12 -> 13 for the commit stats under the fleet block ("commits", flagged new).
+  eq("FEATURES: the 13 new features are flagged", newCount, 13)
   check("FEATURES: lists answering questions from Shepherd", keys.answers == true)
+  check("FEATURES: lists the commit stats", keys.commits == true)
 end
 
 -- F4: transcript peek (user + assistant rows, chronological, noise filtered)
@@ -10984,6 +10986,130 @@ do
   eq("instances: the payload counts the finished rows", ip.finishedN, 1)
   core.stackInstances({ a, b, c }, {}, {}, {})
   eq("stack: every member knows how many of its card's sessions are finished", c.stackFinished, 1)
+end
+
+-- ---- Commit stats: today and this Mon–Sun week (2026-09-25) ----
+-- Every fixture is EDT (-4h). "now" is Fri 2026-09-25 11:00 local = 15:00Z.
+do
+  local EDT = -4 * 3600
+  local NOW = 1790348400          -- Fri 09-25 11:00 EDT
+  local MON = 1789963200          -- Mon 09-21 00:00 EDT (04:00Z)
+
+  -- 2026-09-25: os.difftime(now, os.time(os.date("!*t", now))) reads -5h on EDT (the UTC table
+  -- is taken as standard time), so the offset comes from %z instead.
+  eq("tz: %z -0400 is 4h west of UTC", core.tzOffsetFromZ("-0400"), -14400)
+  eq("tz: %z +0530 is 5h30 east of UTC", core.tzOffsetFromZ("+0530"), 19800)
+  eq("tz: %z +0000 is UTC", core.tzOffsetFromZ("+0000"), 0)
+  eq("tz: an unparseable %z gives nil", core.tzOffsetFromZ("EDT"), nil)
+
+  eq("week: a Friday's week starts that Monday at local midnight", core.localWeekStart(NOW, EDT), MON)
+  eq("week: Sunday 23:59 local still belongs to the Monday before it (Mon–Sun, not Sun–Sat)",
+     core.localWeekStart(1790567940, EDT), MON)
+  eq("week: Monday 00:00 local starts a new week", core.localWeekStart(1790568000, EDT), 1790568000)
+  eq("week: in UTC the same Friday's week starts Monday 00:00Z", core.localWeekStart(NOW, 0), MON - 4 * 3600)
+
+  local T = "\t"
+  local function hdr(sha, at, email, subject) return "\1" .. sha .. T .. at .. T .. email .. T .. subject end
+  local log = table.concat({
+    "@@repo" .. T .. "/r/alpha" .. T .. "adam@x.com",
+    hdr("aaa1", 1790341200, "Adam@X.com", "feat: today" .. T .. "with a tab"),   -- Fri 09:00, mixed case
+    "",
+    "10" .. T .. "2" .. T .. "src/a.lua",
+    "300" .. T .. "100" .. T .. "package-lock.json",
+    "-" .. T .. "-" .. T .. "img.png",
+    hdr("aaa2", 1790280000, "adam@x.com", "thu work"),                     -- Thu 16:00
+    "",
+    "5" .. T .. "5" .. T .. "src/{a.js => b.js}",
+    hdr("aaa3", 1790042400, "adam@x.com", "monday night"),                 -- Mon 22:00 local = Tue 02:00Z
+    "",
+    "1" .. T .. "0" .. T .. "README.md",
+    hdr("aaa4", 1790341200, "bob@x.com", "someone else"),
+    "",
+    "50" .. T .. "0" .. T .. "b.lua",
+    hdr("aaa5", 1790341200, "madam@x.com", "a lookalike address"),
+    "",
+    "60" .. T .. "0" .. T .. "m.lua",
+    hdr("aaa6", 1789740000, "adam@x.com", "last fri morning"),             -- Fri 09-18 10:00, before the point
+    "",
+    "7" .. T .. "0" .. T .. "x.lua",
+    hdr("aaa7", 1789747200, "adam@x.com", "last fri noon"),                -- Fri 09-18 12:00, after it
+    "",
+    "8" .. T .. "0" .. T .. "x.lua",
+    hdr("bbb8", 1790280000, "adam@x.com", "thu work"),                     -- a rebased copy of aaa2
+    "",
+    "5" .. T .. "5" .. T .. "src/b.js",
+    "@@repo" .. T .. "/r/beta" .. T .. "adam@x.com",
+    hdr("aaa1", 1790341200, "adam@x.com", "feat: today" .. T .. "with a tab"),   -- the same commit in a clone
+    "",
+    "10" .. T .. "2" .. T .. "src/a.lua",
+    hdr("ccc1", 1790280060, "adam@x.com", "beta thu"),
+    "",
+    "2" .. T .. "1" .. T .. "b.txt",
+    "@@repo" .. T .. "/r/gamma" .. T,
+  }, "\n")
+
+  local p = core.parseCommitLog(log)
+  eq("parse: three repos, in output order", #p.repos, 3)
+  eq("parse: the repo root", p.repos[1].root, "/r/alpha")
+  eq("parse: the repo's emails", p.repos[1].emails[1], "adam@x.com")
+  eq("parse: a repo with no identity has no emails", #p.repos[3].emails, 0)
+  local c1 = p.repos[1].commits[1]
+  eq("parse: a subject keeps its tab", c1.subject, "feat: today\twith a tab")
+  eq("parse: the author epoch is a number", c1.at, 1790341200)
+  eq("parse: every numstat line is a file", #c1.files, 3)
+  eq("parse: a binary file counts 0 added", c1.files[3].add, 0)
+  eq("parse: a rename keeps its numstat path", p.repos[1].commits[2].files[1].path, "src/{a.js => b.js}")
+  eq("parse: a torn last line without a newline still parses",
+     #core.parseCommitLog(log .. "\n" .. hdr("ddd1", 1790341200, "adam@x.com", "torn")).repos[3].commits, 1)
+  eq("parse: nil input is an empty result", #core.parseCommitLog(nil).repos, 0)
+
+  local labels = { [core.encodeProjectPath("/r/alpha")] = "Alpha Label" }
+  local w = core.commitWeek(p, { now = NOW, tzOffset = EDT, labels = labels })
+  eq("commits: today counts one commit", w.today.commits, 1)
+  eq("commits: today's lines skip the lockfile", w.today.add, 10)
+  eq("commits: today's deletions skip the lockfile", w.today.del, 2)
+  eq("commits: the week has four of mine (other authors, lookalikes, clones and rebased copies drop out)",
+     w.week.commits, 4)
+  eq("commits: week lines added", w.week.add, 18)
+  eq("commits: week lines deleted", w.week.del, 8)
+  eq("commits: last week so far stops at the same point last week", w.lastWeekSoFar.commits, 1)
+  eq("commits: last week so far has that commit's lines", w.lastWeekSoFar.add, 7)
+  eq("commits: seven days, Monday first", #w.days, 7)
+  eq("commits: Monday night local lands on Monday", w.days[1].commits, 1)
+  eq("commits: Thursday has two", w.days[4].commits, 2)
+  check("commits: Friday is today", w.days[5].isToday == true and w.days[5].commits == 1)
+  check("commits: the weekend is still ahead", w.days[6].future == true and w.days[7].future == true)
+  check("commits: today isn't future, and Monday isn't either", not w.days[5].future and not w.days[1].future)
+  eq("commits: each day knows its local midnight", w.days[2].dayEpoch, MON + 86400)
+  eq("commits: projects rank by week commits", w.repos[1].root, "/r/alpha")
+  eq("commits: a project's name comes from its relabel", w.repos[1].name, "Alpha Label")
+  eq("commits: an unlabelled project is its folder name", w.repos[2].name, "beta")
+  eq("commits: a project has its week", w.repos[1].week.commits, 3)
+  eq("commits: a project has its own Mon–Sun days", w.repos[1].days[4].commits, 1)
+  eq("commits: a project lists its week's commits", #w.repos[1].commits, 3)
+  eq("commits: a project's commits come newest first", w.repos[1].commits[1].sha, "aaa1")
+  check("commits: a repo with no identity is still listed, and says so", w.repos[3].root == "/r/gamma" and w.repos[3].noIdentity == true)
+  eq("commits: recent has all six of mine since last Monday", #w.recent, 6)
+  eq("commits: recent is newest first", w.recent[1].sha, "aaa1")
+  eq("commits: recent names the project", w.recent[1].repo, "Alpha Label")
+  eq("commits: recent is ordered by time across projects", w.recent[2].sha, "ccc1")
+  eq("commits: the identity is listed once, lower-cased", #w.emails, 1)
+  eq("commits: the repo count", w.repoCount, 3)
+  check("commits: some identity found", not w.noIdentity)
+
+  local ex = core.commitWeek(p, { now = NOW, tzOffset = EDT, exclude = { "src/*.lua" } })
+  eq("commits: a configured glob drops those files' lines", ex.today.add, 0)
+  eq("commits: ...but the commit still counts", ex.today.commits, 1)
+
+  local none = core.commitWeek(core.parseCommitLog("@@repo\t/r/gamma\t"), { now = NOW, tzOffset = EDT })
+  check("commits: no identity anywhere is flagged", none.noIdentity == true and none.week.commits == 0)
+  local empty = core.commitWeek(core.parseCommitLog(""), { now = NOW, tzOffset = EDT })
+  check("commits: no repos is not a missing identity", empty.noIdentity ~= true and empty.repoCount == 0)
+
+  eq("commits: the transcript lookback defaults to 14 days", core.commitsLookbackDays({}), 14)
+  eq("commits: a longer lookback is kept", core.commitsLookbackDays({ commits = { lookbackDays = 30 } }), 30)
+  eq("commits: the lookback never drops below last week's start", core.commitsLookbackDays({ commits = { lookbackDays = 3 } }), 14)
+  eq("commits: a junk lookback falls back", core.commitsLookbackDays({ commits = { lookbackDays = "x" } }), 14)
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))

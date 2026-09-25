@@ -3573,5 +3573,40 @@ do
         and src:find('val("s-clean-hours", cv(cfg,"cleanup.idleHours",12));', 1, true) ~= nil)
 end
 
+-- ---- Commit stats under the fleet block (2026-09-25) ----
+do
+  local function slurp(p) local f = io.open(ROOT .. p, "r"); local s = f and f:read("*a") or ""; if f then f:close() end; return s end
+  local src = slurp("claude-dashboard.lua")
+  local usage, commits, detail = src:find('<div id="usage-foot">', 1, true), src:find('<div id="commit-foot"', 1, true),
+                                 src:find('<div id="detail">', 1, true)
+  check("commits: the block sits right under the fleet usage block",
+        usage ~= nil and commits ~= nil and detail ~= nil and usage < commits and commits < detail)
+  local ur = src:find('if a == "usage-refresh" then', 1, true)
+  local urEnd = ur and src:find("\n  end\n", ur, true)
+  check("commits: Update now also refreshes the commit stats",
+        ur ~= nil and urEnd ~= nil and src:sub(ur, urEnd):find("FX.refreshCommits(true)", 1, true) ~= nil)
+  check("commits: opening the drawer asks for a fresh count", src:find('if a == "commits-open" then', 1, true) ~= nil)
+  check("commits: the 60s push timer is retained", src:find("M.commitsTimer = hs.timer.doEvery(", 1, true) ~= nil)
+  local stops = 0
+  for _ in src:gmatch('"usageTimer", "officialUsageTimer", "commitsTimer" }') do stops = stops + 1 end
+  eq("commits: both the re-load and the quit teardown stop the timer", stops, 2)
+  check("commits: the first count is retained through after()", src:find("after(3.0, function() pcall(FX.refreshCommits) end)", 1, true) ~= nil)
+  check("commits: a late callback checks it still owns the slot",
+        src:find("core.prCallbackOwns(FX._commits.inflight", 1, true) ~= nil)
+  check("commits: the local offset comes from %z", src:find('core.tzOffsetFromZ(os.date("%z"', 1, true) ~= nil)
+  local rc = src:find("function FX.refreshCommits(", 1, true)
+  local rcEnd = rc and src:find("\nend\n", rc, true)
+  local body = (rc and rcEnd) and src:sub(rc, rcEnd) or ""
+  check("commits: git runs in an hs.task, never on the tick",
+        body:find('hs.task.new("/bin/sh"', 1, true) ~= nil and body:find("hs.execute", 1, true) == nil)
+  check("commits: the panel receiver exists", src:find("window.ccCommits = function", 1, true) ~= nil)
+  for _, p in ipairs({ "Makefile", "install.sh", "uninstall.sh" }) do
+    check("commits: " .. p .. " ships cc-commits.sh", slurp(p):find("cc-commits.sh", 1, true) ~= nil)
+  end
+  local listed = false
+  for _, f in ipairs(core.FEATURES) do if f.key == "commits" then listed = true end end
+  check("commits: the Features list explains it", listed)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

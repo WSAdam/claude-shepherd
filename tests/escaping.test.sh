@@ -21,6 +21,9 @@ assert_eq "worklist item text is esc()'d"        "yes" "$(has 'esc(it.text')"
 # headings must be esc()'d before reaching the panel innerHTML (renderStories).
 assert_eq "user-story text is esc()'d"           "yes" "$(has 'esc(blk.text')"
 assert_eq "user-story area heading is esc()'d"   "yes" "$(has 'esc(g.area)')"
+# commit stats (2026-09-25): commit subjects are anyone's text, and project names are relabels
+assert_eq "commit subject is esc()'d"            "yes" "$(has 'esc(c.subject')"
+assert_eq "commit project name is esc()'d"       "yes" "$(has 'esc(r.name')"
 
 # 2. esc() itself still entity-encodes the HTML metacharacters (not gutted to a no-op)
 assert_eq "esc() encodes &"  "yes" "$(has '.replace(/&/g,"&amp;")')"

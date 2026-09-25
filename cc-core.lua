@@ -11840,6 +11840,207 @@ function M.costSeries(events, opts)
 end
 
 -- ============================================================================
+-- Commit stats (2026-09-25): today and this Mon–Sun week, from local git. cc-commits.sh
+-- prints every repo a Claude session worked in and the user's own commits there -- whose
+-- commits is each repo's git identity, so every install counts its own user -- and these
+-- parse and bucket that output. Author dates, so a rebased or ff-merged unit counts on the
+-- day the work was written.
+-- ============================================================================
+
+-- os.date("%z") ("-0400", "+0530") -> seconds east of UTC; nil when unparseable. The
+-- os.difftime(now, os.time(os.date("!*t", now))) idiom reads an hour off during daylight
+-- saving time: os.time takes the UTC table as standard time.
+function M.tzOffsetFromZ(z)
+  local sign, hh, mm = tostring(z or ""):match("^([%+%-])(%d%d):?(%d%d)$")
+  if not sign then return nil end
+  local off = tonumber(hh) * 3600 + tonumber(mm) * 60
+  return sign == "-" and -off or off
+end
+
+-- Monday 00:00 local of the week holding `now`, as an epoch. Day 0 (1970-01-01) was a
+-- Thursday. tzOffset is today's, so a week that crossed a DST change is off by that hour.
+function M.localWeekStart(now, tzOffset)
+  local tz = tonumber(tzOffset) or 0
+  local day = math.floor(((tonumber(now) or 0) + tz) / 86400)
+  return (day - (day + 3) % 7) * 86400 - tz
+end
+
+-- How many days of transcripts name the repos (commits.lookbackDays): never under 14, or a
+-- repo worked in only early last week would drop out of last week's pace.
+function M.commitsLookbackDays(cfg)
+  local n = tonumber(M.config(cfg, "commits.lookbackDays", 14)) or 14
+  return math.max(14, math.floor(n))
+end
+
+-- A project's name in the commit stats: its card relabel, else its folder -- the name its
+-- project card shows (applyStackIdentity reads the same key).
+function M.repoDisplayName(root, labels)
+  local lbl = (type(labels) == "table" and root) and labels[M.encodeProjectPath(root)] or nil
+  if type(lbl) == "string" and lbl ~= "" then return lbl end
+  return tostring(root or ""):match("([^/]+)/*$") or tostring(root or "?")
+end
+
+-- Files whose lines never count (the commit still does): lockfiles and build output, where
+-- one install or rebuild would swamp a day's real work. commits.excludeFiles adds globs.
+M.COMMIT_EXCLUDE_DEFAULT = {
+  "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb", "deno.lock",
+  "Cargo.lock", "go.sum", "poetry.lock", "Pipfile.lock", "uv.lock", "Gemfile.lock", "composer.lock",
+  "*.min.js", "*.min.css", "*.map",
+}
+
+-- cc-commits.sh output -> { repos = { { root, emails, commits = { { sha, at, email, subject,
+-- files = { { add, del, path } } } } } } }, in output order. Walks lines with find, never a
+-- *-quantified whole-line pattern: the scratch file can end mid-line.
+function M.parseCommitLog(text)
+  local out = { repos = {} }
+  local s = type(text) == "string" and text or ""
+  local repo, commit
+  local pos, n = 1, #s
+  while pos <= n do
+    local e = s:find("\n", pos, true)
+    local line = s:sub(pos, (e or (n + 1)) - 1)
+    pos = (e or n) + 1
+    if line:sub(-1) == "\r" then line = line:sub(1, -2) end
+    if line:sub(1, 7) == "@@repo\t" then
+      local rest = line:sub(8)
+      local tab = rest:find("\t", 1, true)
+      local emails = {}
+      for raw in (tab and rest:sub(tab + 1) or ""):gmatch("[^,]+") do
+        local em = raw:match("^%s*(.-)%s*$")
+        if em ~= "" then emails[#emails + 1] = em end
+      end
+      repo = { root = tab and rest:sub(1, tab - 1) or rest, emails = emails, commits = {} }
+      out.repos[#out.repos + 1] = repo
+      commit = nil
+    elseif line:sub(1, 1) == "\1" and repo then
+      -- \1<sha>\t<author epoch>\t<author email>\t<subject>: the subject may hold tabs
+      local f, p = {}, 2
+      for _ = 1, 3 do
+        local t = line:find("\t", p, true)
+        if not t then break end
+        f[#f + 1] = line:sub(p, t - 1); p = t + 1
+      end
+      if #f == 3 and tonumber(f[2]) then
+        commit = { sha = f[1], at = tonumber(f[2]), email = f[3], subject = line:sub(p), files = {} }
+        repo.commits[#repo.commits + 1] = commit
+      else
+        commit = nil
+      end
+    elseif commit and line ~= "" then
+      local a, d, path = line:match("^([%d%-]+)\t([%d%-]+)\t(.+)$")   -- numstat; "-" = binary
+      if a then commit.files[#commit.files + 1] = { add = tonumber(a) or 0, del = tonumber(d) or 0, path = path } end
+    end
+  end
+  return out
+end
+
+-- Is this numstat path one whose lines don't count? A rename reads "dir/{old => new}.ext" or
+-- "old => new": judge the new name, by basename and by whole path.
+local function commitFileExcluded(path, globs)
+  local p = tostring(path or ""):gsub("{[^{}]- => ([^{}]-)}", "%1")
+  local arrow = p:find(" => ", 1, true)
+  if arrow then p = p:sub(arrow + 4) end
+  local base = p:match("([^/]+)$") or p
+  for _, g in ipairs(globs) do
+    if M.globEq(g, base) or M.globEq(g, p) then return true end
+  end
+  return false
+end
+
+-- Bucket parsed commits into today, this week (Mon 00:00 local on), the same stretch of last
+-- week (its Monday up to exactly 7 days ago: the pace comparison), seven Mon..Sun days and a
+-- row per project. A commit counts once: only the repo's own identity (exact address, any
+-- case), once per SHA (two clones of one repo) and once per email|time|subject (a rebased copy
+-- still on another ref). opts: now, tzOffset, labels (card relabels), exclude (extra globs),
+-- recent (how many latest commits to list, default 15). Pure.
+function M.commitWeek(parsed, opts)
+  opts = type(opts) == "table" and opts or {}
+  local tz = tonumber(opts.tzOffset) or 0
+  local now = tonumber(opts.now) or 0
+  local labels = type(opts.labels) == "table" and opts.labels or {}
+  local globs = {}
+  for _, g in ipairs(M.COMMIT_EXCLUDE_DEFAULT) do globs[#globs + 1] = g end
+  if type(opts.exclude) == "table" then
+    for _, g in ipairs(opts.exclude) do
+      if type(g) == "string" and g ~= "" then globs[#globs + 1] = g end   -- globEq("") matches everything
+    end
+  end
+  local WEEK = 7 * 86400
+  local weekStart = M.localWeekStart(now, tz)
+  local lastStart, lastPoint = weekStart - WEEK, now - WEEK
+  local function dayOf(ts) return math.floor((ts + tz) / 86400) end
+  local firstDay, today = dayOf(weekStart), dayOf(now)
+  local function blank() return { commits = 0, add = 0, del = 0 } end
+  local function bump(b, c) b.commits = b.commits + 1; b.add = b.add + c.add; b.del = b.del + c.del end
+  local function week7()
+    local d = {}
+    for i = 1, 7 do
+      local dn = firstDay + i - 1
+      d[i] = { commits = 0, add = 0, del = 0, dayEpoch = dn * 86400 - tz,
+               isToday = (dn == today) or nil, future = (dn > today) or nil }
+    end
+    return d
+  end
+  local res = { today = blank(), week = blank(), lastWeekSoFar = blank(), days = week7(),
+                repos = {}, recent = {}, emails = {}, repoCount = 0, weekStart = weekStart }
+  local seenSha, seenKey, allEmails, anyIdentity = {}, {}, {}, false
+  local order = {}
+  for idx, r in ipairs(type(parsed) == "table" and type(parsed.repos) == "table" and parsed.repos or {}) do
+    res.repoCount = res.repoCount + 1
+    local mine = {}
+    for _, e in ipairs(r.emails or {}) do
+      local le = tostring(e):lower()
+      if le ~= "" then mine[le] = true; allEmails[le] = true; anyIdentity = true end
+    end
+    local name = M.repoDisplayName(r.root, labels)
+    local row = { root = r.root, name = name, today = blank(), week = blank(), lastWeekSoFar = blank(),
+                  days = week7(), commits = {}, noIdentity = (next(mine) == nil) or nil }
+    order[row] = idx
+    for _, c in ipairs(r.commits or {}) do
+      local at = tonumber(c.at)
+      local email = tostring(c.email or ""):lower()
+      local key = email .. "|" .. tostring(at) .. "|" .. tostring(c.subject)
+      if at and at >= lastStart and mine[email] and not seenSha[c.sha] and not seenKey[key] then
+        seenSha[c.sha] = true; seenKey[key] = true
+        local add, del = 0, 0
+        for _, f in ipairs(c.files or {}) do
+          if not commitFileExcluded(f.path, globs) then
+            add = add + (tonumber(f.add) or 0); del = del + (tonumber(f.del) or 0)
+          end
+        end
+        local cc = { sha = c.sha, at = at, subject = c.subject, add = add, del = del, repo = name }
+        res.recent[#res.recent + 1] = cc
+        if at >= weekStart and at < weekStart + WEEK then
+          local i = dayOf(at) - firstDay + 1
+          bump(res.week, cc); bump(row.week, cc)
+          bump(res.days[i], cc); bump(row.days[i], cc)
+          if dayOf(at) == today then bump(res.today, cc); bump(row.today, cc) end
+          row.commits[#row.commits + 1] = cc
+        elseif at < lastPoint then
+          bump(res.lastWeekSoFar, cc); bump(row.lastWeekSoFar, cc)
+        end
+        if not row.lastAt or at > row.lastAt then row.lastAt = at end
+      end
+    end
+    table.sort(row.commits, function(a, b) return a.at > b.at end)
+    while #row.commits > 50 do table.remove(row.commits) end
+    res.repos[#res.repos + 1] = row
+  end
+  table.sort(res.repos, function(a, b)
+    if a.week.commits ~= b.week.commits then return a.week.commits > b.week.commits end
+    if (a.lastAt or 0) ~= (b.lastAt or 0) then return (a.lastAt or 0) > (b.lastAt or 0) end
+    return order[a] < order[b]
+  end)
+  table.sort(res.recent, function(a, b) return a.at > b.at end)
+  local keep = math.max(0, math.floor(tonumber(opts.recent) or 15))
+  while #res.recent > keep do table.remove(res.recent) end
+  for e in pairs(allEmails) do res.emails[#res.emails + 1] = e end
+  table.sort(res.emails)
+  res.noIdentity = (res.repoCount > 0 and not anyIdentity) or nil
+  return res
+end
+
+-- ============================================================================
 -- Custom in-app screen lock: salted-hash password. NEVER stores plaintext. The
 -- hasher (hs.hash.SHA256 in prod, a fake in tests) is injected so the salt+compare
 -- logic is pure and testable; the FX layer owns the real hash + cc-lock.json IO.
@@ -12907,6 +13108,9 @@ M.FEATURES = {
   { key = "usage", cat = "See what's happening", title = "Plan usage meter",
     what = "Your real Claude plan's 5-hour and 7-day usage windows, read live.",
     why = "Know how close you are to your plan limits at a glance." },
+  { key = "commits", cat = "See what's happening", new = true, title = "Commits today and this week",
+    what = "Under the usage bars: your commits today and this Mon–Sun week, with lines added and removed, a bar per day and how you're pacing against the same point last week. Click for each project and the latest commits. It counts your own commits (each repo's git user.email, plus commits.authorEmails) in every repo Claude worked in over the last two weeks, straight from local git -- unpushed and worktree branches included, lockfiles left out of the line counts.",
+    why = "A quick read on how much got shipped, per project, without leaving the panel -- and it counts whoever is using Shepherd, with nothing to set up." },
   { key = "shift", cat = "See what's happening", title = "Shift report",
     what = "A narrative end-of-shift summary of what the whole fleet did.",
     why = "A readable recap instead of scrolling raw logs." },

@@ -878,6 +878,20 @@ Shepherd reads token usage straight from Claude Code's **local transcript files*
   nonzero weekly usage); a model you don't use — or that isn't provisioned — draws **no row**, so
   the footer never shows an empty `0%` line. (Fable 5 local per-session tokens/cost already roll up
   in the per-model breakdown and the `~$` estimate via `core.PRICING.fable`.)
+- **Commits today / this week (under the plan bars)** — `Today  4 commits · +312 −40` and
+  `This week  25 commits · +4.3k −174 · ↑8 vs last wk`, with a Mon–Sun bar per day (today outlined).
+  The pace compares this week with the same stretch of last week (its Monday up to exactly 7 days
+  ago). Click either line for the drawer: each project's today and week with its own day bars
+  (click a project for its commits) and the latest commits across all of them. Counted from
+  **local git** by `~/.claude/cc-commits.sh`, so unpushed work and worktree branches count, and a
+  commit is dated by when it was written (a rebased unit still lands on its real day). **Whose
+  commits:** each repo's `git config user.email` plus `commits.authorEmails` — nothing about the
+  user is hardcoded, so every install counts its own user. **Which repos:** every repo a Claude
+  session worked in during the last two weeks (from the transcripts in `~/.claude/projects`,
+  removed worktrees included). A commit counts once across clones and rebased copies; lockfiles
+  and minified/map files don't count toward lines. git runs in the background every 5 min, on
+  **Update now**, and when the drawer opens — never on the panel's tick. `commits.enabled: false`
+  hides it; the other `commits.*` keys are documented in `cc-config.example.json`.
 
 The window bars come from Anthropic's OAuth usage endpoint (`/api/oauth/usage`) using your existing
 Claude Code login token (macOS Keychain or `CLAUDE_CODE_OAUTH_TOKEN`). **This is a metadata call —

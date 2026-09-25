@@ -465,6 +465,9 @@ ls -a "$MCDIR" | grep -q '\.tmp\.' && got=leftovers || got=clean
 assert_eq "make install: leaves no temp files behind" "clean" "$got"
 exists "install.sh: ships cc-merge.sh too" "$CDIR/cc-merge.sh"
 exists "install.sh: ships cc-fleet.sh too" "$CDIR/cc-fleet.sh"
+exists "install.sh: ships cc-commits.sh too" "$CDIR/cc-commits.sh"
+[ -x "$MCDIR/cc-commits.sh" ] && cmp -s "$ROOT/cc-commits.sh" "$MCDIR/cc-commits.sh" && got=yes || got=no
+assert_eq "make install: ships cc-commits.sh, executable" "yes" "$got"
 [ -x "$MCDIR/cc-ask.sh" ] && cmp -s "$ROOT/cc-ask.sh" "$MCDIR/cc-ask.sh" && got=yes || got=no
 assert_eq "make install: ships cc-ask.sh, executable" "yes" "$got"
 assert_eq "make install: the dashboard lands on a NEW inode too (rename, not truncate)" "changed" \

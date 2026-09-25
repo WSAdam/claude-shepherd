@@ -28,7 +28,7 @@ do
   local prev = _G.__ccDashboard
   local pm = prev and prev.module
   if pm then
-    for _, k in ipairs({ "pasteTap", "timer", "watcher", "askWatcher", "usageTimer", "officialUsageTimer" }) do
+    for _, k in ipairs({ "pasteTap", "timer", "watcher", "askWatcher", "usageTimer", "officialUsageTimer", "commitsTimer" }) do
       if pm[k] then pcall(function() pm[k]:stop() end) end
     end
     if pm.menubar then pcall(function() pm.menubar:delete() end) end
@@ -2371,6 +2371,89 @@ end
 function FX.prDataForRoot(root)
   local c = root and prStatusByRoot[root]
   return (c and c.data) or nil
+end
+
+-- ---- Commit stats (2026-09-25): Today / This week under the fleet block ----
+-- cc-commits.sh (git log over every repo Claude worked in, ~2s for a few repos) runs in an
+-- hs.task with stdout redirected to a scratch file, at most every commits.refreshSeconds;
+-- FX.pushCommits re-buckets the cached parse every 60s so midnight and the pace point move
+-- without re-running git. cache = { ts, data = core.parseCommitLog(...) }, the shape
+-- core.prPollPlan reads; inflight = { task, ts } retains the task (GC) and dates it (hung).
+FX._commits = { cache = nil, inflight = nil, stale = nil }
+function FX.pushCommits()
+  local cfg = loadConfig()
+  local data
+  if core.config(cfg, "commits.enabled", true) == false then
+    data = { enabled = false }
+  else
+    local c = FX._commits.cache
+    if not (c and c.data) then return end   -- nothing counted yet: the block stays hidden
+    local now = os.time()
+    data = core.commitWeek(c.data, { now = now, tzOffset = core.tzOffsetFromZ(os.date("%z", now)) or 0,
+      labels = FX.loadLabels(), exclude = core.config(cfg, "commits.excludeFiles", nil) })
+    data.ts = c.countedAt
+    data.stale = FX._commits.stale
+    data.lookbackDays = core.commitsLookbackDays(cfg)
+  end
+  pcall(function() wv:evaluateJavaScript("window.ccCommits(" .. hs.json.encode(data) .. ")") end)
+end
+-- force: true = count now, a number = count if the last one is older than that many seconds.
+function FX.refreshCommits(force)
+  local cfg = loadConfig()
+  if core.config(cfg, "commits.enabled", true) == false then return end
+  local script = CLAUDE_DIR .. "/cc-commits.sh"
+  if not hs.fs.attributes(script) then return end   -- not installed yet: make install ships it
+  local st, now = FX._commits, os.time()
+  local ttl = math.max(30, tonumber(core.config(cfg, "commits.refreshSeconds", 300)) or 300)
+  if force == true then ttl = 0 elseif tonumber(force) then ttl = math.min(ttl, tonumber(force)) end
+  local plan = core.prPollPlan(st.cache, st.inflight, now, { ttl = ttl, retryTtl = 30, deadline = 90 })
+  if plan.act ~= "start" then return end
+  if plan.killStale and st.inflight and st.inflight.task then
+    pcall(function() st.inflight.task:terminate() end)   -- a hung count: reclaim the slot
+    print("⚠️ [cc-dashboard] commits: the last count hung past 90s; starting over")
+  end
+  st.inflight = nil
+  -- From last week's Monday (the pace comparison), plus a day of slack for the time zone.
+  local since = core.localWeekStart(now, core.tzOffsetFromZ(os.date("%z", now)) or 0) - 8 * 86400
+  local argv = { "/bin/bash", script, "--since", tostring(since),
+                 "--lookback-days", tostring(core.commitsLookbackDays(cfg)) }
+  local aliases = core.config(cfg, "commits.authorEmails", nil)
+  for _, e in ipairs(type(aliases) == "table" and aliases or {}) do
+    if type(e) == "string" and e ~= "" then argv[#argv + 1] = "--email"; argv[#argv + 1] = e end
+  end
+  local outFile = FX.scratchFile("commits")
+  local cmd = core.folderScanShellCommand(argv, outFile)
+  -- Mark the attempt now (debounce) but keep the last good count until this one lands.
+  st.cache = { ts = now, data = st.cache and st.cache.data or nil, countedAt = st.cache and st.cache.countedAt or nil }
+  local started = hs.timer.secondsSinceEpoch()
+  print("🚀 [cc-dashboard] commits: counting (" .. (force and "asked" or "timer") .. ")")
+  local ok = pcall(function()
+    local t   -- forward-declared: the callback's ownership check needs THIS task as an upvalue
+    t = hs.task.new("/bin/sh", function(code)
+      if not core.prCallbackOwns(FX._commits.inflight, t) then pcall(os.remove, outFile); return end
+      FX._commits.inflight = nil
+      local out = FX.readFile(outFile) or ""
+      pcall(os.remove, outFile)
+      local ms = math.floor((hs.timer.secondsSinceEpoch() - started) * 1000)
+      if code == 0 then
+        local parsed = core.parseCommitLog(out)
+        FX._commits.cache = { ts = os.time(), data = parsed, countedAt = os.time() }
+        FX._commits.stale = nil
+        print("✅ [cc-dashboard] commits: " .. #parsed.repos .. " repo(s) counted in " .. ms .. "ms")
+      else
+        FX._commits.stale = true
+        print("❌ [cc-dashboard] commits: cc-commits.sh exited " .. tostring(code) .. " after " .. ms .. "ms; keeping the last count")
+      end
+      pcall(FX.pushCommits)
+    end, { "-c", cmd })
+    if not t then error("task create failed") end
+    FX._commits.inflight = { task = t, ts = now }
+    t:start()
+  end)
+  if not ok then
+    FX._commits.inflight = nil; FX._commits.stale = true; pcall(os.remove, outFile)
+    print("❌ [cc-dashboard] commits: couldn't start cc-commits.sh")
+  end
 end
 
 -- Live MCP health via `claude mcp list` (async; ~1-2s). Triggered ONLY by the 🔌
@@ -6103,6 +6186,12 @@ local function handleBridgeMsg(msg)
   if a == "usage-refresh" then
     pcall(function() FX.fetchOfficialUsage(true) end)  -- force the official window (bypass TTL)
     pcall(FX.computeUsage)  -- recompute local totals immediately (no model tokens either way)
+    pcall(function() FX.refreshCommits(true) end)  -- recount commits too (async: repaints when git returns)
+    return
+  end
+  if a == "commits-open" then
+    -- The commit drawer opened: recount if the last count is over a minute old (async).
+    pcall(function() FX.refreshCommits(60) end)
     return
   end
   if a == "caffeinate" then
@@ -8688,7 +8777,7 @@ local HTML = [[
     border-radius:8px; padding:7px 8px; }
   body[data-look="flat"] .theme-cards .tile:hover { background:var(--surface-2); }
   body[data-look="flat"] .theme-cards #grid { gap:2px; }
-  body[data-look="flat"] #usage-foot, body[data-look="flat"] #bar { border-color:var(--border-weak); }
+  body[data-look="flat"] #usage-foot, body[data-look="flat"] #commit-foot, body[data-look="flat"] #bar { border-color:var(--border-weak); }
 
   /* shared bits */
   #grid { display:grid; gap:var(--gap); padding:var(--pad); }
@@ -8792,6 +8881,38 @@ local HTML = [[
   .uf-win .bar.ok > i { background:var(--purple); } .uf-win .bar.warn > i { background:var(--warn); } .uf-win .bar.full > i { background:var(--danger); }
   .uf-win .val { color:var(--text-3); min-width:64px; text-align:right; }
   .uf-approx { color:var(--dim); font-style:italic; }
+  /* commit stats under the usage footer (2026-09-25): Today / This week + the drawer */
+  #commit-foot { border-top:1px solid var(--border); padding:6px 10px; font-size:11px; color:var(--text-3); }
+  #commit-foot:empty { display:none; }
+  .cf-row { display:flex; align-items:center; gap:6px; cursor:pointer; line-height:18px; }
+  .cf-row .lbl { width:78px; flex:none; color:var(--muted); white-space:nowrap; }
+  .cf-row:hover .cf-val { color:var(--text); }
+  .cf-val { flex:1; min-width:0; color:var(--text-2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .cf-caret { display:inline-block; width:11px; color:var(--dim); }
+  .cf-dim { color:var(--dim); }
+  .cf-pace { color:var(--muted); } .cf-pace.up { color:var(--ok); } .cf-pace.down { color:var(--warn); }
+  .cf-strip { display:inline-flex; align-items:flex-end; gap:2px; height:14px; flex:none; }
+  .cf-strip.small { height:10px; }
+  .cf-bar { width:5px; height:100%; display:flex; align-items:flex-end; }
+  .cf-bar > i { display:block; width:100%; background:var(--purple); border-radius:1px; opacity:.7; }
+  .cf-bar.zero > i { background:var(--border); opacity:1; }
+  .cf-bar.today > i { opacity:1; box-shadow:0 0 0 1px var(--text-2); }
+  .cf-bar.future > i { background:transparent; box-shadow:inset 0 0 0 1px var(--border); height:3px !important; opacity:1; }
+  .cf-drawer { margin-top:6px; padding-top:4px; border-top:1px dashed var(--border); max-height:45vh; overflow:auto; }
+  .cf-sec { color:var(--muted); font-size:10px; letter-spacing:.04em; text-transform:uppercase; margin:6px 0 3px; }
+  .cf-tbl { width:100%; border-collapse:collapse; }
+  .cf-tbl th { text-align:left; font-weight:normal; color:var(--dim); font-size:10px; }
+  .cf-tbl th.n, .cf-tbl td.n { text-align:right; white-space:nowrap; }
+  .cf-tbl td { padding:2px 6px 2px 0; color:var(--text-2); vertical-align:middle; }
+  .cf-repo { cursor:pointer; } .cf-repo:hover td { color:var(--text); } .cf-repo.idle td { color:var(--dim); }
+  .cf-sub td { padding:0 0 4px 12px; }
+  .cf-commit { display:flex; gap:6px; line-height:17px; min-width:0; }
+  .cf-when { flex:none; width:54px; color:var(--dim); }
+  .cf-proj { flex:none; max-width:110px; color:var(--purple); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .cf-subj { flex:1; min-width:0; color:var(--text-2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .cf-foot { margin-top:6px; color:var(--dim); font-size:10px; }
+  .cf-empty { padding:4px 0; color:var(--dim); }
+  #commit-foot code { font-family:ui-monospace,Menlo,monospace; font-size:10px; }
   #d-usage { font-size:11px; color:var(--text-3); margin-top:6px; }
   #d-usage .um-row { display:flex; justify-content:space-between; gap:8px; }
   #empty { color:var(--dim); font-size:13px; padding:18px; text-align:center; }
@@ -9963,6 +10084,7 @@ local HTML = [[
     </div>
     <div class="uf-windows" id="uf-windows"></div>
   </div>
+  <div id="commit-foot"></div>
 
   <div id="detail">
     <div id="d-head">
@@ -16561,6 +16683,127 @@ local HTML = [[
       }
     }
 
+    // ---- Commit stats (2026-09-25) ----
+    // Today / This week under the fleet block, from local git (cc-commits.sh -> core.commitWeek,
+    // pushed by FX.pushCommits). commitFootHtml is pure: tests/commits-render.test.js slices this
+    // block out and runs it, so keep window.* and DOM work outside the markers.
+    var LAST_COMMITS = null, CM_OPEN = {};
+    var COMMITS_OPEN = (function(){ try { return localStorage.getItem("cc-commitsOpen") === "1"; } catch(e){ return false; } })();
+    var CF_DAYS = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
+    function cfArr(a){ return Array.isArray(a) ? a : []; }   // hs.json sends an empty Lua table as {}
+    function cfNum(b){ b = b || {}; return { commits: b.commits||0, add: b.add||0, del: b.del||0 }; }
+    function cfCount(n){ return n + (n === 1 ? " commit" : " commits"); }
+    function fmtLines(add, del){ return "+" + fmtTok(add||0) + " −" + fmtTok(del||0); }
+    function commitAgo(ts, nowSec){
+      var s = Math.max(0, (nowSec||0) - (ts||0));
+      if(s < 60) return "just now";
+      if(s < 3600) return Math.floor(s/60) + "m ago";
+      if(s < 86400) return Math.floor(s/3600) + "h ago";
+      return Math.floor(s/86400) + "d ago";
+    }
+    // Noon of the day, so a label never slips a date across a DST hour.
+    function cfDayLabel(ep, i){ var dt = new Date(((ep||0) + 43200) * 1000); return CF_DAYS[i] + " " + (dt.getMonth()+1) + "/" + dt.getDate(); }
+    function commitStrip(days, small){
+      days = cfArr(days);
+      var max = 1, html = "";
+      for(var i=0;i<days.length;i++){ if((days[i].commits||0) > max) max = days[i].commits; }
+      for(var j=0;j<7;j++){
+        var d = days[j] || {}, n = d.commits||0;
+        var h = n > 0 ? Math.max(2, Math.round(n / max * (small ? 10 : 14))) : 1;
+        var cls = "cf-bar" + (n ? "" : " zero") + (d.isToday ? " today" : "") + (d.future ? " future" : "");
+        var tip = cfDayLabel(d.dayEpoch, j) + ": " + cfCount(n) + (n ? " · " + fmtLines(d.add, d.del) : "");
+        html += '<span class="'+cls+'" title="'+esc(tip)+'"><i style="height:'+h+'px"></i></span>';
+      }
+      return '<span class="cf-strip'+(small ? ' small' : '')+'">'+html+'</span>';
+    }
+    // The week against the same stretch of last week (its Monday up to exactly 7 days ago).
+    function commitPace(w, last){
+      var diff = w.commits - last.commits;
+      var tip = esc("Same point last week: " + cfCount(last.commits) + " · " + fmtLines(last.add, last.del));
+      if(diff > 0) return '<span class="cf-pace up" title="'+tip+'">↑'+diff+' vs last wk</span>';
+      if(diff < 0) return '<span class="cf-pace down" title="'+tip+'">↓'+(-diff)+' vs last wk</span>';
+      return '<span class="cf-pace" title="'+tip+'">= last wk</span>';
+    }
+    function commitFootHtml(d, open, openRepos, nowSec){
+      if(!d) return '<div class="cf-row"><span class="lbl">Commits</span><span class="cf-val cf-dim">counting…</span></div>';
+      if(d.noIdentity) return '<div class="cf-row"><span class="lbl">Commits</span><span class="cf-val cf-dim">Set '
+        + '<code>git config --global user.email</code> to count your commits</span></div>';
+      var t = cfNum(d.today), w = cfNum(d.week), last = cfNum(d.lastWeekSoFar), days = cfArr(d.days);
+      var tip = open ? "Hide the commit details" : "Show commits by project and the latest ones";
+      var stale = d.stale ? ' <span class="cf-dim" title="The last count failed; this is the one before it">· stale</span>' : '';
+      var html = '<div class="cf-row" onclick="commitsToggle()" title="'+tip+'">'
+        + '<span class="lbl"><span class="cf-caret">'+(open ? "▾" : "▸")+'</span>Today</span>'
+        + '<span class="cf-val">'+cfCount(t.commits)+' · '+fmtLines(t.add, t.del)+stale+'</span></div>'
+        + '<div class="cf-row" onclick="commitsToggle()" title="'+tip+'">'
+        + '<span class="lbl"><span class="cf-caret"></span>This week</span>'
+        + '<span class="cf-val">'+cfCount(w.commits)+' · '+fmtLines(w.add, w.del)+' · '+commitPace(w, last)+'</span>'
+        + (days.length === 7 ? commitStrip(days) : '') + '</div>';
+      if(!open) return html;
+      var repos = cfArr(d.repos), recent = cfArr(d.recent), emails = cfArr(d.emails), lookback = d.lookbackDays || 14;
+      var dr = '<div class="cf-drawer">';
+      if(!repos.length){
+        dr += '<div class="cf-empty">No repos yet — this counts the repos Claude worked in during the last '+lookback+' days.</div>';
+      } else {
+        dr += '<div class="cf-sec">By project</div><table class="cf-tbl">'
+          + '<tr><th>project</th><th class="n">today</th><th class="n">this week</th><th></th></tr>';
+        for(var i=0;i<repos.length;i++){
+          var r = repos[i], rt = cfNum(r.today), rw = cfNum(r.week), isOpen = !!(openRepos && openRepos[r.root]);
+          dr += '<tr class="cf-repo'+(rw.commits ? '' : ' idle')+'" data-root="'+esc(r.root||"")+'" onclick="commitsRepoToggle(this)" title="'+esc(r.root||"")+'">'
+            + '<td><span class="cf-caret">'+(isOpen ? "▾" : "▸")+'</span>'+esc(r.name||"")
+            + (r.noIdentity ? ' <span class="cf-dim">(no git identity)</span>' : '')+'</td>'
+            + '<td class="n">'+rt.commits+(rt.commits ? ' <span class="cf-dim">'+fmtLines(rt.add, rt.del)+'</span>' : '')+'</td>'
+            + '<td class="n">'+rw.commits+(rw.commits ? ' <span class="cf-dim">'+fmtLines(rw.add, rw.del)+'</span>' : '')+'</td>'
+            + '<td>'+(cfArr(r.days).length === 7 ? commitStrip(r.days, true) : '')+'</td></tr>';
+          if(isOpen){
+            var cs = cfArr(r.commits);
+            dr += '<tr class="cf-sub"><td colspan="4">';
+            if(!cs.length) dr += '<div class="cf-dim">No commits this week.</div>';
+            for(var k=0;k<cs.length;k++){
+              var c = cs[k];
+              dr += '<div class="cf-commit"><span class="cf-when">'+esc(commitAgo(c.at, nowSec))+'</span>'
+                + '<span class="cf-subj" title="'+esc(c.subject||"")+'">'+esc(c.subject||"")+'</span>'
+                + '<span class="cf-dim">'+fmtLines(c.add, c.del)+'</span></div>';
+            }
+            dr += '</td></tr>';
+          }
+        }
+        dr += '</table>';
+      }
+      if(recent.length){
+        dr += '<div class="cf-sec">Recent</div>';
+        for(var m=0;m<recent.length;m++){
+          var rc = recent[m];
+          dr += '<div class="cf-commit"><span class="cf-when">'+esc(commitAgo(rc.at, nowSec))+'</span>'
+            + '<span class="cf-proj">'+esc(rc.repo||"")+'</span>'
+            + '<span class="cf-subj" title="'+esc(rc.subject||"")+'">'+esc(rc.subject||"")+'</span>'
+            + '<span class="cf-dim">'+fmtLines(rc.add, rc.del)+'</span></div>';
+        }
+      }
+      var n = d.repoCount || 0;
+      dr += '<div class="cf-foot">Counting commits by '+esc(emails.length ? emails.join(", ") : "your git identity")
+        + ' in '+n+(n === 1 ? ' repo' : ' repos')+' Claude worked in (last '+lookback+' days) · lockfiles don\'t count toward lines'
+        + (d.ts ? ' · updated '+esc(commitAgo(d.ts, nowSec)) : '')+'</div>';
+      return html + dr + '</div>';
+    }
+    function renderCommitFoot(){
+      var el = document.getElementById("commit-foot"); if(!el) return;
+      if(LAST_COMMITS && LAST_COMMITS.enabled === false){ el.innerHTML = ""; return; }
+      el.innerHTML = commitFootHtml(LAST_COMMITS, COMMITS_OPEN, CM_OPEN, Math.floor(Date.now()/1000));
+    }
+    function commitsToggle(){
+      COMMITS_OPEN = !COMMITS_OPEN;
+      try { localStorage.setItem("cc-commitsOpen", COMMITS_OPEN ? "1" : "0"); } catch(e){}
+      if(COMMITS_OPEN) send("commits-open");
+      renderCommitFoot();
+    }
+    function commitsRepoToggle(el){
+      var root = el.getAttribute("data-root"); if(!root) return;
+      if(CM_OPEN[root]) delete CM_OPEN[root]; else CM_OPEN[root] = true;
+      renderCommitFoot();
+    }
+    // ---- end commit stats ----
+    window.ccCommits = function(d){ LAST_COMMITS = d || null; renderCommitFoot(); };
+
     // Per-session cumulative breakdown in the detail panel (from the 60s usage pass).
     function renderDetailUsage(it){
       var du = document.getElementById("d-usage"); if(!du) return;
@@ -18605,6 +18848,9 @@ M.askWatcher = hs.pathwatcher.new(FX.ASK_DIR, function(paths)
 end):start()
 -- Token usage (local, zero API cost): recompute fleet/per-session/window every 60s.
 M.usageTimer = hs.timer.doEvery(60, function() pcall(FX.computeUsage) end)
+-- Commit stats: re-bucket every 60s (midnight, the pace point) and re-run git once the last
+-- count is commits.refreshSeconds old. Both no-op when commits.enabled is false.
+M.commitsTimer = hs.timer.doEvery(60, function() pcall(FX.refreshCommits); pcall(FX.pushCommits) end)
 -- Official plan-usage window (metadata call, no model tokens): refresh every 180s.
 M.officialUsageTimer = hs.timer.doEvery(OFFICIAL_TTL, function()
   pcall(FX.fetchOfficialUsage)
@@ -18805,6 +19051,7 @@ after(1.0, function() pcall(FX.computeUsage) end)          -- first local pass
 after(1.5, function() pcall(function() FX.fetchOfficialUsage(true) end) end)  -- first official pass
 after(2.0, function() pcall(FX.expireLedger) end)          -- first retention pass
 after(2.5, function() pcall(FX.pruneScratch) end)          -- sweep scan/search orphans from a dead process
+after(3.0, function() pcall(FX.refreshCommits) end)        -- first commit count (after the scratch sweep)
 
 -- Launch-on-startup defaults ON the first time Shepherd runs (so it comes back after
 -- a restart); the user's later choice in Settings is then respected (the real
@@ -18870,7 +19117,7 @@ _G.__ccDashboard = { webview = wv, controller = controller, module = M, core = c
 do
   local priorShutdown = hs.shutdownCallback
   hs.shutdownCallback = function()
-    for _, k in ipairs({ "pasteTap", "timer", "watcher", "askWatcher", "usageTimer", "officialUsageTimer" }) do
+    for _, k in ipairs({ "pasteTap", "timer", "watcher", "askWatcher", "usageTimer", "officialUsageTimer", "commitsTimer" }) do
       if M[k] then pcall(function() M[k]:stop() end) end
     end
     if priorShutdown then pcall(priorShutdown) end

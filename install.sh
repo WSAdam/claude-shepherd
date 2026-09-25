@@ -156,7 +156,7 @@ install_file() {
   cp "$src" "$dstdir/.$base.tmp.$$" && mv -f "$dstdir/.$base.tmp.$$" "$dstdir/$base"
 }
 
-CLAUDE_FILES="cc-lib.sh cc-status.sh cc-approve.sh cc-popup.sh cc-merge.sh cc-fleet.sh cc-ask.sh cc-core.lua"
+CLAUDE_FILES="cc-lib.sh cc-status.sh cc-approve.sh cc-popup.sh cc-merge.sh cc-fleet.sh cc-ask.sh cc-commits.sh cc-core.lua"
 HS_FILES="claude-dashboard.lua cc-core.lua"
 
 # 0. Every file we ship must be in the checkout, or we'd wire a hook to a file that

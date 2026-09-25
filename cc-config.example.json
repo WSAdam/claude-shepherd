@@ -233,6 +233,15 @@
     }
   },
 
+  "commits": {
+    "_comment": "Commit stats under the fleet usage bars (ON by default, read-only): your commits today and this Mon–Sun week with lines added/removed, a bar per day, the pace against the same point last week, and a drawer per project. Counted from LOCAL git by ~/.claude/cc-commits.sh in every repo a Claude session worked in during the last lookbackDays (never under 14), unpushed and worktree branches included, dated by when each commit was written. Whose commits: each repo's `git config user.email` -- a repo-local or includeIf identity wins -- plus authorEmails, extra addresses of yours (an old one, GitHub's ...@users.noreply.github.com for web edits). Never put someone else's address there: a fresh install copies this file. Lockfiles and minified/map files never count toward lines; excludeFiles adds globs (matched against the file name and the path). git runs every refreshSeconds (min 30) in the background, on Update now, and when the drawer opens.",
+    "enabled": true,
+    "authorEmails": [],
+    "excludeFiles": [],
+    "refreshSeconds": 300,
+    "lookbackDays": 14
+  },
+
   "insights": {
     "_comment": "Fleet insights view (Feature A) — the 📊 toolbar button. A read-only aggregate of the ledger (turns/session, approval & denial rates, decision provenance, time the fleet spent blocked on you). Always available like the audit view; shows zeros until the ledger is enabled. maxBlockSeconds caps a single request→approval gap when summing 'time blocked on you', so an overnight idle isn't counted.",
     "maxBlockSeconds": 1800
