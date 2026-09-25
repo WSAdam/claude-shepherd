@@ -101,8 +101,8 @@ const payload = {
 
     const hidden = await page.evaluate(() => getComputedStyle(document.getElementById("commit-foot")).display);
     check("before the first count the block takes no space" + W, hidden === "none");
-    // The toolbar's own sideways overflow (the #theme select pokes 2px past 400px) is not this
-    // block's: judge the block against the page as it was before it rendered.
+    // Judge the block against the page as it was before it rendered, so an overflow elsewhere is
+    // never blamed on it. (That baseline was the toolbar's 2px at 400px until 6aa662c; it's 0 now.)
     const base = await page.evaluate(() => Math.max(0, document.documentElement.scrollWidth - window.innerWidth));
 
     await page.evaluate((p) => window.ccCommits(p), payload);
