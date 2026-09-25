@@ -2389,7 +2389,7 @@ function FX.pushCommits()
     local c = FX._commits.cache
     if not (c and c.data) then return end   -- nothing counted yet: the block stays hidden
     local now = os.time()
-    data = core.commitWeek(c.data, { now = now, tzOffset = core.tzOffsetFromZ(os.date("%z", now)) or 0,
+    data = core.commitWeek(c.data, { now = now, tzOffset = core.localTzOffset(now),
       labels = FX.loadLabels(), exclude = core.config(cfg, "commits.excludeFiles", nil) })
     data.ts = c.countedAt
     data.stale = FX._commits.stale
@@ -2414,7 +2414,7 @@ function FX.refreshCommits(force)
   end
   st.inflight = nil
   -- From last week's Monday (the pace comparison), plus a day of slack for the time zone.
-  local since = core.localWeekStart(now, core.tzOffsetFromZ(os.date("%z", now)) or 0) - 8 * 86400
+  local since = core.localWeekStart(now, core.localTzOffset(now)) - 8 * 86400
   local argv = { "/bin/bash", script, "--since", tostring(since),
                  "--lookback-days", tostring(core.commitsLookbackDays(cfg)) }
   local aliases = core.config(cfg, "commits.authorEmails", nil)
@@ -7186,7 +7186,8 @@ local function handleBridgeMsg(msg)
     -- F7: aggregate durable usage_snapshot events into a fleet summary + a daily series.
     local res = FX.readLedger({ types = { "usage_snapshot" }, limit = 0 })
     local nowt = FX.now()
-    local tzOff = os.difftime(nowt, os.time(os.date("!*t", nowt)))  -- local seconds east of UTC
+    -- Today's offset for the whole window: right after a clock change, older days are an hour off.
+    local tzOff = core.localTzOffset(nowt)
     local data = {
       enabled = ledgerEnabled(),
       snapshots = core.config(loadConfig(), "ledger.usageSnapshots", true) == true,

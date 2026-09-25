@@ -11857,6 +11857,12 @@ function M.tzOffsetFromZ(z)
   return sign == "-" and -off or off
 end
 
+-- Local seconds east of UTC at `now`, daylight saving included -- the one way every caller
+-- (cost chart, commit stats) gets it. tests/tz-offset.test.lua pins it under fixed zones.
+function M.localTzOffset(now)
+  return M.tzOffsetFromZ(os.date("%z", now)) or 0
+end
+
 -- Monday 00:00 local of the week holding `now`, as an epoch. Day 0 (1970-01-01) was a
 -- Thursday. tzOffset is today's, so a week that crossed a DST change is off by that hour.
 function M.localWeekStart(now, tzOffset)

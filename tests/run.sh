@@ -167,6 +167,9 @@ echo ""
 echo "== lua: cc-core =="
 lua "$DIR/core.test.lua" || fail=1
 echo ""
+echo "== lua: local UTC offset under pinned time zones (tz-offset) =="
+lua "$DIR/tz-offset.test.lua" || fail=1
+echo ""
 echo "== lua: transcript parsers replayed over scrubbed windows of real transcripts (tests/fixtures/transcripts/) =="
 HOME="$(mktemp -d)" lua "$DIR/transcript-replay.test.lua" || fail=1
 echo ""

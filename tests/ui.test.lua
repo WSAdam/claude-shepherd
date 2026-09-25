@@ -3593,7 +3593,8 @@ do
   check("commits: the first count is retained through after()", src:find("after(3.0, function() pcall(FX.refreshCommits) end)", 1, true) ~= nil)
   check("commits: a late callback checks it still owns the slot",
         src:find("core.prCallbackOwns(FX._commits.inflight", 1, true) ~= nil)
-  check("commits: the local offset comes from %z", src:find('core.tzOffsetFromZ(os.date("%z"', 1, true) ~= nil)
+  -- 2026-09-25: the %z parse moved into core.localTzOffset (tests/tz-offset.test.lua proves it); the requirement is unchanged.
+  check("commits: the local offset comes from %z", src:find("core.localTzOffset(", 1, true) ~= nil)
   local rc = src:find("function FX.refreshCommits(", 1, true)
   local rcEnd = rc and src:find("\nend\n", rc, true)
   local body = (rc and rcEnd) and src:sub(rc, rcEnd) or ""
@@ -3606,6 +3607,19 @@ do
   local listed = false
   for _, f in ipairs(core.FEATURES) do if f.key == "commits" then listed = true end end
   check("commits: the Features list explains it", listed)
+end
+
+-- ---- Local UTC offset follows daylight saving (2026-09-25) ----
+do
+  -- 2026-09-25: open-cost-view used os.difftime(now, os.time(os.date("!*t", now))); os.time reads that UTC table as standard time, so EDT came out -5h and the cost chart's days sat an hour late.
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("tz: the dashboard never derives the offset from a UTC table", src:find('os.date("!*t"', 1, true) == nil)
+  local cv = src:find('if a == "open-cost-view" then', 1, true)
+  local cvEnd = cv and src:find("\n  end\n", cv, true)
+  check("tz: open-cost-view takes its offset from core.localTzOffset",
+        cv ~= nil and cvEnd ~= nil and src:sub(cv, cvEnd):find("core.localTzOffset(nowt)", 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
