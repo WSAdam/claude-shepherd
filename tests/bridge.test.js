@@ -103,13 +103,24 @@ check("command: close an empty chat (\"Claude Code\", with Shepherd's count) is 
 eq("command: ...and keeps the count", lib.validateCommand(emptyCmd, Date.now()).cmd.empty, 2);
 check("command: 'empty' only for the name \"Claude Code\"", !lib.validateCommand(Object.assign({}, emptyCmd, { label: "Fix sibling window" }), Date.now()).ok);
 check("command: 'empty' only for close", !lib.validateCommand(Object.assign({}, emptyCmd, { op: "select" }), Date.now()).ok);
-check("command: 'empty' must be a count from 1 to 20", !lib.validateCommand(Object.assign({}, emptyCmd, { empty: 0 }), Date.now()).ok
+check("command: 'empty' must be a whole count from 1 (up to 99 since 2026-09-25)", !lib.validateCommand(Object.assign({}, emptyCmd, { empty: 0 }), Date.now()).ok
       && !lib.validateCommand(Object.assign({}, emptyCmd, { empty: "2" }), Date.now()).ok);
 const eTabs = [{ label: "Claude Code", active: true }, { label: "Claude Code", unit: "b1:x" }, { label: "Fix" }, { label: "Claude Code" }];
 const pe = lib.pickEmpty(eTabs, 2);
 check("pick empty: one untagged \"Claude Code\" tab, preferring one not in front", pe.hit === eTabs[3]);
 const pe3 = lib.pickEmpty(eTabs, 3);
 check("pick empty: the count doesn't match -> refused (a tagged unit's tab never counts)", !pe3.hit && /2 untagged/.test(pe3.reason));
+
+// 2026-09-25: carryTags -- a rebuild hands every tab a new object; the tags follow by position
+const o1 = {}, o2 = {}, n1 = {}, n2 = {};
+const prevT = [{ tab: o1, gi: 0, label: "Plan", unit: undefined }, { tab: o2, gi: 0, label: "Claude Code", unit: "b1:x", openedAt: 5 }];
+const ct = lib.carryTags(prevT, [{ tab: n1, gi: 0, label: "Plan" }, { tab: n2, gi: 0, label: "Claude Code" }]);
+check("carryTags: all-new objects, same tabs in the same places -> the tags follow",
+      ct.carry && ct.carry[1].unit === "b1:x" && ct.carry[1].openedAt === 5 && ct.carry[0].unit === undefined);
+check("carryTags: the same objects (a plain open or close) -> nothing to carry",
+      lib.carryTags(prevT, [{ tab: o1, gi: 0, label: "Plan" }, { tab: o2, gi: 0, label: "Claude Code" }, { tab: n1, gi: 0, label: "Claude Code" }]).carry === null);
+const moved = lib.carryTags(prevT, [{ tab: n2, gi: 0, label: "Claude Code" }, { tab: n1, gi: 0, label: "Plan" }]);
+check("carryTags: the tabs changed places too -> never guesses, and counts the tag lost", moved.carry === null && moved.lost === 1);
 
 // ---- the real extension.js against a fake vscode, in a temp bridge dir ----
 const DIR = fs.mkdtempSync(path.join(os.tmpdir(), "cc-bridge-"));
@@ -122,6 +133,7 @@ const closed = [];
 const subs = [];
 const executed = [];
 const tabListeners = [];
+const groupListeners = [];
 const GROUP_CMDS = ["First", "Second", "Third", "Fourth", "Fifth", "Sixth", "Seventh", "Eighth"]
   .map((n) => "workbench.action.focus" + n + "EditorGroup");
 let focusedGroup = 0;
@@ -150,7 +162,7 @@ const fakeVscode = {
         return true;
       },
       onDidChangeTabs: (cb) => { tabListeners.push(cb); return { dispose() {} }; },
-      onDidChangeTabGroups: () => ({ dispose() {} }),
+      onDidChangeTabGroups: (cb) => { groupListeners.push(cb); return { dispose() {} }; },
     },
     createOutputChannel: () => ({ appendLine() {}, dispose() {} }),
   },
@@ -224,7 +236,7 @@ Module._load = realLoad;
   await ext._test.processInbox();
   check("select: two tabs sharing the name -> refused, no command run", (result("s2") || {}).ok === false && executed.length === 0);
   check("select: no tab with the name -> refused", (result("s3") || {}).ok === false);
-  eq("the registry reports the bridge's version", JSON.parse(fs.readFileSync(regFile, "utf8")).version, "0.5.0");   // 2026-09-11: 0.4.0 closes empty chats; 2026-09-17: 0.5.0 tags a unit tab that opened just before its expect
+  eq("the registry reports the bridge's version", JSON.parse(fs.readFileSync(regFile, "utf8")).version, "0.6.0");   // 2026-09-11: 0.4.0 closes empty chats; 2026-09-17: 0.5.0 tags a unit tab that opened just before its expect; 2026-09-25: 0.6.0 keeps tags across VS Code's tab rebuild
 
   // 2026-09-11: a tab Shepherd opens for a batch unit never gets a name (its task arrives by
   // message, so no chat title) -- every such tab reads "Claude Code". The bridge remembers the
@@ -314,6 +326,93 @@ Module._load = realLoad;
         lib.validateCommand({ v: 1, id: "x", op: "close", unit: "b1:cheer", at: Math.floor(Date.now() / 1000) }, Date.now()).ok === true);
   check("command: a unit tag with odd characters is refused",
         !lib.validateCommand({ v: 1, id: "x", op: "close", unit: "b1 cheer/..", at: Math.floor(Date.now() / 1000) }, Date.now()).ok);
+
+  // ---- tags survive VS Code rebuilding its tab objects (2026-09-25) ----
+  // 2026-09-25: 34 merged wgsUltra unit tabs never closed. The bridge tagged each one as it opened,
+  // but VS Code 1.104 rebuilds EVERY Tab object (MainThreadEditorTabs `default: this.v()` ->
+  // $acceptEditorTabModel) on EDITORS_SELECTION -- every tab switch -- and fires only
+  // onDidChangeTabGroups, so the WeakMap keyed by the old objects forgot every tag.
+  const rebuild = () => {   // what VS Code does: same tabs, same order, all-new group and tab objects
+    const copies = liveGroups.map((g) => groupOf({ viewColumn: g.viewColumn,
+      tabs: g.tabs.map((t) => Object.assign({}, t, { input: t.input instanceof TabInputWebview
+        ? new TabInputWebview(t.input.viewType) : new TabInputText(t.input && t.input.uri) })) }));
+    liveGroups.length = 0;
+    copies.forEach((g) => liveGroups.push(g));
+    groupListeners.forEach((cb) => cb({ opened: [], closed: [], changed: liveGroups.slice() }));
+  };
+  const openClaude = (label) => {
+    const t = claudeTab(label);
+    liveGroups[0].tabs.splice(liveGroups[0].tabs.length - 1, 0, t);   // before the file tab
+    tabListeners.forEach((cb) => cb({ opened: [t], closed: [], changed: [] }));
+    return t;
+  };
+  const unitsNow = () => regTabs().map((t) => t.unit).filter(Boolean).sort().join(",");
+  liveGroups.length = 0;
+  liveGroups.push(groupOf({ viewColumn: 1, tabs: [claudeTab("Local serve fixture plan", true),
+                                                  { label: "Guest-facing product brief.md", input: new TabInputText("/r/brief.md") }] }));
+  for (const slug of ["alpha", "beta", "gamma"]) {
+    send({ v: 1, id: "rb-" + slug, op: "expect", unit: "b2:" + slug, at: at() + 3 });   // +3: never an "early" tab
+    await ext._test.processInbox();
+    openClaude("Claude Code");
+  }
+  ext._test.writeRegistry();
+  eq("rebuild fixture: three unit tabs tagged as they opened", unitsNow(), "b2:alpha,b2:beta,b2:gamma");
+  rebuild();
+  ext._test.writeRegistry();
+  eq("a unit tab keeps its tag after VS Code rebuilds its tab objects on a tab switch", unitsNow(), "b2:alpha,b2:beta,b2:gamma");
+  rebuild();
+  rebuild();
+  ext._test.writeRegistry();
+  eq("...and after several rebuilds in a row", unitsNow(), "b2:alpha,b2:beta,b2:gamma");
+  const betaTab = liveGroups[0].tabs[2];
+  send({ v: 1, id: "rb-close", op: "close", unit: "b2:beta", at: at() });
+  await ext._test.processInbox();
+  ext._test.writeRegistry();
+  check("close by unit after a rebuild closes that exact tab",
+        (result("rb-close") || {}).ok === true && liveGroups[0].tabs.indexOf(betaTab) < 0 && unitsNow() === "b2:alpha,b2:gamma");
+  // a rebuild that ALSO changed the tab list: the bridge can't tell which tab is which -> never guesses
+  const removed = liveGroups[0].tabs.splice(1, 1)[0];   // b2:alpha's tab went while VS Code rebuilt
+  rebuild();
+  ext._test.writeRegistry();
+  eq("a rebuild that also changed the tab list carries no tags", unitsNow(), "");
+  check("(fixture sanity: a Claude tab was removed)", lib.isClaudeTab(removed));
+
+  // expect's early path read openedAt from the same WeakMap: a tab switch between the unit's tab
+  // opening and the bridge reading its inbox left the unit untagged for good.
+  liveGroups.length = 0;
+  liveGroups.push(groupOf({ viewColumn: 1, tabs: [claudeTab("Local serve fixture plan", true),
+                                                  { label: "Guest-facing product brief.md", input: new TabInputText("/r/brief.md") }] }));
+  ext._test.writeRegistry();
+  openClaude("Claude Code");
+  rebuild();
+  send({ v: 1, id: "rb-early", op: "expect", unit: "b3:early", at: at() });
+  await ext._test.processInbox();
+  ext._test.writeRegistry();
+  check("expect tags a unit tab that opened just before it, with a tab switch in between",
+        (result("rb-early") || {}).ok === true && unitsNow() === "b3:early");
+
+  // the empty-chat countdown relies on the bridge reading its inbox in name order
+  liveGroups.length = 0;
+  liveGroups.push(groupOf({ viewColumn: 1, tabs: [claudeTab("Claude Code"), claudeTab("Claude Code")] }));
+  ext._test.writeRegistry();
+  const closedBeforeOrder = closed.length;
+  const realReaddir = fs.readdirSync;
+  fs.readdirSync = function (p) {   // an unsorted directory listing (APFS gives no order guarantee)
+    const names = realReaddir.apply(fs, arguments);
+    return String(p) === inbox ? names.slice().sort().reverse() : names;
+  };
+  const ts = at();
+  send({ v: 1, id: "empty-97-" + ts, op: "close", label: "Claude Code", empty: 2, at: ts });
+  send({ v: 1, id: "empty-98-" + ts, op: "close", label: "Claude Code", empty: 1, at: ts });
+  try { await ext._test.processInbox(); } finally { fs.readdirSync = realReaddir; }
+  check("the inbox runs in name order, so an empty-chat countdown closes both chats",
+        closed.length === closedBeforeOrder + 2 && (result("empty-98-" + ts) || {}).ok === true);
+
+  // 2026-09-25: Close selected closes every unnamed tab in a window through this count (Adam's call)
+  check("command: an empty-count close of 38 is accepted",
+        lib.validateCommand(Object.assign({}, emptyCmd, { empty: 38, at: Math.floor(Date.now() / 1000) }), Date.now()).ok === true);
+  check("command: ...but not past 99 (the id's two digits)",
+        !lib.validateCommand(Object.assign({}, emptyCmd, { empty: 100, at: Math.floor(Date.now() / 1000) }), Date.now()).ok);
 
   ext.deactivate();
   check("deactivate removes the registry (Shepherd stops trusting this window)", !fs.existsSync(regFile));

@@ -728,6 +728,23 @@ do
         table.concat(alerts, " "):find("tagged as unit", 1, true) ~= nil)
   check("...and neither card is a red Needs you: a leftover tab is housekeeping (2026-09-15)",
         I.x1.merge.needsYou == false and I.y1.merge.needsYou == false)
+  -- 2026-09-25: 34 merged wgsUltra units logged "Close NOT sent ... no tab is tagged" every 5
+  -- minutes for two days: a refusal that can never heal was re-asked on the 5-minute timer.
+  local asks, realClose, realNow = 0, fx.closeTab, fx.now
+  fx.closeTab = function(it, ...) if it and it.key == "y1" then asks = asks + 1 end; return realClose(it, ...) end
+  fx.now = function() return realNow() + 400 end
+  local function registryAt(host, labels, at)
+    local tabs = {}
+    for _, l in ipairs(labels) do tabs[#tabs + 1] = { label = l, group = 1, active = false } end
+    write(BR .. "/" .. host .. ".json", json.encode({ v = 1, pid = host, version = "0.1.0", tabs = tabs, at = at }))
+  end
+  registryAt(811, { "Claude Code", "Claude Code" }, realNow() + 400)   -- fresh, same tabs
+  tick()
+  check("a merged unit whose tab tag is gone is refused once, not re-asked every 5 minutes  (asks=" .. asks .. ")", asks == 0)
+  registryAt(811, { "Claude Code", "Claude Code", "Claude Code" }, realNow() + 400)
+  tick()
+  check("...but asked again once its window's tabs change  (asks=" .. asks .. ")", asks == 1)
+  fx.closeTab, fx.now = realClose, realNow
   os.remove(MD .. "/x1.json"); os.remove(T .. "/status/x1.json")
   os.remove(MD .. "/y1.json"); os.remove(T .. "/status/y1.json")
   os.remove(FD .. "/bx1.json"); os.remove(FD .. "/bx1.state.json")

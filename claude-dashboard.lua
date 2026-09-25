@@ -3881,7 +3881,9 @@ function FX.mergeAutoClose(r, it)
     sig = table.concat(parts, "|")
   end
   local t = FX._mergeCloseTry[r.nonce]
-  if t and now - t.at < 300 and sig == t.sig then return t.why, t.can end
+  -- a refusal that can never heal waits for the tabs to change, never the 5-min timer (2026-09-25:
+  -- 34 wgsUltra units logged "Close NOT sent" every 5 minutes for two days)
+  if t and sig == t.sig and (not t.can or now - t.at < 300) then return t.why, t.can end
   local sent, why, retryable = FX.closeTab(it, { quiet = true })
   if sent then
     FX._mergeClosing[r.nonce] = true

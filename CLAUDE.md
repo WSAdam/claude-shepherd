@@ -72,6 +72,14 @@ and the README's "Testing & development" section.
   the bridge it loaded, so before relying on an op check `core.tabBridgeSupports(reg.version, op)`
   and read every command's answer (`FX.tabBridgeTrack`) -- on 2026-09-15 every expect went to a
   0.1.0 window, was refused as "unknown op" unread, and no unit's tab ever closed.
+- VS Code rebuilds EVERY `Tab` object on a tab switch (`EDITORS_SELECTION` falls to
+  `MainThreadEditorTabs`' full rebuild; it also fires on each close, and on group index/label/lock
+  changes) and reports that only through `onDidChangeTabGroups`. Anything the bridge keys by tab
+  object is forgotten unless `rehome()` carries it over by position (`lib.carryTags`, 0.6.0). Before
+  0.6.0 a unit's tag lived until the first click, so 34 merged wgsUltra unit tabs (2026-09-25) never
+  closed. The 2026-09-22 note blamed a window reload, but that extension host had been up for days.
+  Read the bridge's own log (`~/Library/Application Support/Code/logs/<session>/window<N>/exthost/output_logging_*/*Shepherd Bridge.log`)
+  before theorising.
 - The tab bridge's switch is `tabBridge.*`; plain `bridge.*` is the SSH remote bridge
   (`FX.bridgeSync`). Keep the two apart in config keys, names and wording.
 - Ready to merge is its own channel (`cc-merge.sh`, `~/.claude/cc-merge/`), not the approval

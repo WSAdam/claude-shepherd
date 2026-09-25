@@ -69,8 +69,9 @@ function validateCommand(cmd, nowMs) {
       && (typeof cmd.label !== "string" || cmd.label === "" || cmd.label.length > 200)) return { error: "bad label" };
   // 2026-09-11: close ANY empty chat -- only "Claude Code" tabs, with Shepherd's count of them
   const hasEmpty = cmd.empty !== undefined && cmd.empty !== null;
+  // 2026-09-25: up to 99 (the countdown id's two digits) -- Close selected sends every unnamed tab
   if (hasEmpty && (cmd.op !== "close" || hasUnit || cmd.label !== EMPTY_LABEL
-      || !Number.isInteger(cmd.empty) || cmd.empty < 1 || cmd.empty > 20)) return { error: "bad empty close" };
+      || !Number.isInteger(cmd.empty) || cmd.empty < 1 || cmd.empty > 99)) return { error: "bad empty close" };
   const at = Number(cmd.at), now = nowMs / 1000;
   if (!Number.isFinite(at) || now - at > MAX_CMD_AGE_S || at - now > 5) return { error: "stale command" };
   return { ok: true, cmd: { id: cmd.id, op: cmd.op, label: hasUnit ? undefined : cmd.label, unit: hasUnit ? cmd.unit : undefined,
@@ -103,5 +104,22 @@ function pickUnit(tabs, unit) {
   return { reason: `${hits.length} Claude tabs claim unit ${unit}` };
 }
 
+// 2026-09-25: VS Code rebuilds EVERY Tab object on a tab switch (EDITORS_SELECTION -> a full
+// $acceptEditorTabModel), so anything keyed by the tab object -- a unit's tag, when it opened --
+// is forgotten unless it's carried over. `prev` is the Claude tabs as last seen, in window order
+// ({ tab, gi, label, unit, openedAt }); `cur` the ones now ({ tab, gi, label }). Only a rebuild is
+// carried (not one current tab object was seen before), and only when the tabs are still the same
+// ones in the same places -- otherwise the bridge can't tell which is which, and never guesses.
+// Returns { carry: [{ unit, openedAt }] per `cur` index, or null; lost: tags dropped }.
+function carryTags(prev, cur) {
+  prev = prev || []; cur = cur || [];
+  if (prev.length === 0 || cur.length === 0) return { carry: null, lost: 0 };
+  const seen = new Set(prev.map((p) => p.tab));
+  if (cur.some((c) => seen.has(c.tab))) return { carry: null, lost: 0 };   // same objects: nothing was rebuilt
+  const same = prev.length === cur.length && prev.every((p, i) => p.gi === cur[i].gi && p.label === cur[i].label);
+  if (!same) return { carry: null, lost: prev.filter((p) => p.unit).length };
+  return { carry: prev.map((p) => ({ unit: p.unit, openedAt: p.openedAt })), lost: 0 };
+}
+
 module.exports = { CLAUDE_VIEW, ID_RE, UNIT_RE, isClaudeTab, claudeTabs, registryFor, validateCommand,
-                   pickExactlyOne, pickUnit, pickEmpty, selectCommands };
+                   pickExactlyOne, pickUnit, pickEmpty, selectCommands, carryTags };

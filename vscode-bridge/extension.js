@@ -42,10 +42,38 @@ function writeAtomic(file, text) {
   fs.renameSync(tmp, file);
 }
 
-function snapshot() { return lib.claudeTabs(vscode.window.tabGroups.all, (t) => unitTags.get(t)); }
+// 2026-09-25: VS Code rebuilds every Tab object on a tab switch and says so only through
+// onDidChangeTabGroups -- the tags keyed by the old objects were forgotten, so no merged unit's
+// tab ever closed. Before anything reads a tag, carry the tags over to the new objects.
+let lastClaude = [];              // the Claude tabs as last seen, in window order: { tab, gi, label }
+function rehome() {
+  const cur = [];
+  vscode.window.tabGroups.all.forEach((g, gi) => {
+    ((g && g.tabs) || []).forEach((tab) => { if (lib.isClaudeTab(tab)) cur.push({ tab, gi, label: String(tab.label || "") }); });
+  });
+  const prev = lastClaude.map((p) => ({ tab: p.tab, gi: p.gi, label: p.label, unit: unitTags.get(p.tab), openedAt: openedAt.get(p.tab) }));
+  const r = lib.carryTags(prev, cur);
+  if (r.carry) {
+    r.carry.forEach((c, i) => {
+      if (c.unit) unitTags.set(cur[i].tab, c.unit);
+      if (c.openedAt) openedAt.set(cur[i].tab, c.openedAt);
+    });
+  } else if (r.lost > 0) {
+    log("⚠️ VS Code rebuilt its tabs with changes -- " + r.lost + " unit tag(s) lost");
+  }
+  lastClaude = cur;
+}
+
+function snapshot() { rehome(); return lib.claudeTabs(vscode.window.tabGroups.all, (t) => unitTags.get(t)); }
+
+function onTabGroupsChanged() {
+  rehome();
+  scheduleWrite();
+}
 
 // A tab opened while Shepherd is expecting one becomes that unit's tab (it never gets a name).
 function onTabsChanged(e) {
+  rehome();
   if (e && Array.isArray(e.opened)) {
     for (const tab of e.opened) if (lib.isClaudeTab(tab)) openedAt.set(tab, Date.now());
   }
@@ -93,7 +121,9 @@ async function processInbox() {
   busy = true;
   try {
     let names = [];
-    try { names = fs.readdirSync(INBOX).filter((n) => n.endsWith(".json")); } catch (e) { return; }
+    // sorted: Shepherd names an empty-chat countdown so the larger count runs first (2026-09-25)
+    try { names = fs.readdirSync(INBOX).filter((n) => n.endsWith(".json")).sort(); } catch (e) { return; }
+    rehome();
     for (const name of names) {
       const file = path.join(INBOX, name);
       let raw;
@@ -192,7 +222,7 @@ function activate(context) {
   writeRegistry();
   context.subscriptions.push(
     vscode.window.tabGroups.onDidChangeTabs(onTabsChanged),
-    vscode.window.tabGroups.onDidChangeTabGroups(scheduleWrite),
+    vscode.window.tabGroups.onDidChangeTabGroups(onTabGroupsChanged),
     vscode.workspace.onDidChangeWorkspaceFolders(scheduleWrite),
     { dispose: stop },
   );
