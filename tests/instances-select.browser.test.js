@@ -171,6 +171,49 @@ function payload(extra) {
         cs.length === 1 && JSON.stringify(JSON.parse(cs[0].text).sort()) === JSON.stringify(["u1"]));
   check("...and the selection clears", accepted.checked.length === 0);
 
+  // 2026-09-25, Adam: "after i click close selected and the close works i want it to switch back
+  // from the instances screen to the normal screen". The close is async: a session leaves the list
+  // only once its tab bridge confirms the tab is gone, so the list itself says when it worked.
+  const shown = () => page.evaluate(() => document.getElementById("instances").classList.contains("show"));
+  check("right after Close selected the view stays up (nothing has closed yet)", await shown());
+  await page.evaluate((p) => { window.ccInstances(p); }, payload({ stackName: "wgsUltra (tick)" }));
+  check("...and while the closing session is still listed", await shown());
+  await page.evaluate((p) => { window.__sent = []; window.ccInstances(p); },
+    Object.assign(payload(), { members: payload().members.filter((m) => m.key !== "u1") }));
+  check("once every session it closed has left the list, it goes back to the normal screen", !(await shown()));
+  check("...telling Lua the view closed",
+        (await page.evaluate(() => window.__sent.map((m) => JSON.parse(m).a))).indexOf("close-instances") >= 0);
+
+  // a close that doesn't fully work leaves the view up, showing what's still open
+  const closeTwo = async () => {
+    await page.evaluate((a) => { openInstancesFor(a.sk); window.ccInstances(a.p); }, { sk: SK, p: payload() });
+    await page.evaluate(() => {
+      window.__answer = true;
+      document.querySelector('#inst-body .in-ck[data-ck="u1"]').click();
+      document.querySelector('#inst-body .in-ck[data-ck="c1"]').click();
+      document.getElementById("inst-closesel").click();
+    });
+  };
+  await closeTwo();
+  await page.evaluate((p) => { window.ccInstances(p); },
+    Object.assign(payload(), { members: payload().members.filter((m) => m.key !== "u1") }));
+  check("if one of the closed sessions is still there, the view stays up", await shown());
+  // ...and the wait ends: a session that leaves much later (closed some other way) doesn't pull the
+  // view down under Adam
+  await page.evaluate(() => { INST_CLOSE_WAIT_MS = 50; });
+  await closeTwo();
+  await page.waitForTimeout(120);
+  await page.evaluate((p) => { window.ccInstances(p); },
+    Object.assign(payload(), { members: payload().members.filter((m) => m.key !== "u1" && m.key !== "c1") }));
+  check("after the wait runs out, a late departure leaves the view where it is", await shown());
+  await page.evaluate(() => { INST_CLOSE_WAIT_MS = 20000; });
+  // leaving the view by hand forgets the close: the next project's view isn't pulled down
+  await closeTwo();
+  await page.evaluate(() => { closeInstances(); });
+  await page.evaluate((a) => { openInstancesFor(a.sk); window.ccInstances(a.p); },
+    { sk: SK, p: Object.assign(payload(), { members: payload().members.filter((m) => m.key !== "u1" && m.key !== "c1") }) });
+  check("...and closing the view by hand forgets the pending close", await shown());
+
   // the card: "N finished" only from two up, and it opens Instances with them already checked
   const chip = await page.evaluate(() => ({
     three: stackAlsoHtml({ stackFinished: 3, stackAlso: [{ b: "ready", n: 27 }] }),

@@ -14640,10 +14640,10 @@ local HTML = [[
     // checkout first, then folder) so a live re-render never moves a row under the
     // pointer; a re-render also waits for an in-progress press to finish; and keys ride
     // data attributes read by one delegated listener, never interpolated into a handler.
-    var INST = { stackKey: null, data: null, sig: null, opening: {}, deferred: false, pressing: false, sel: {}, preselect: false };
+    var INST = { stackKey: null, data: null, sig: null, opening: {}, deferred: false, pressing: false, sel: {}, preselect: false, closing: null };
     function openInstancesFor(sk, withNewTab, preselect){
       if(!sk) return;
-      INST = { stackKey: sk, data: null, sig: null, opening: {}, deferred: false, pressing: false, sel: {}, preselect: !!preselect };
+      INST = { stackKey: sk, data: null, sig: null, opening: {}, deferred: false, pressing: false, sel: {}, preselect: !!preselect, closing: null };
       document.getElementById("inst-title").textContent = "Instances";
       document.getElementById("inst-foot").textContent = "";
       document.getElementById("inst-body").innerHTML = '<div class="in-empty">Loading…</div>';
@@ -14658,7 +14658,7 @@ local HTML = [[
       if(!ov || !ov.classList.contains("show")) return;
       ov.classList.remove("show");
       closeNewTabForm();
-      INST = { stackKey: null, data: null, sig: null, opening: {}, deferred: false, pressing: false, sel: {}, preselect: false };
+      INST = { stackKey: null, data: null, sig: null, opening: {}, deferred: false, pressing: false, sel: {}, preselect: false, closing: null };
       send("close-instances");
     }
     function instBackdrop(e){ if(e && e.target && e.target.id === "instances") closeInstances(); }
@@ -14667,8 +14667,24 @@ local HTML = [[
       if(!ov || !ov.classList.contains("show")) return;               // closed: a late reply is dropped
       if(!p || !INST.stackKey || p.stackKey !== INST.stackKey) return; // a reply for a card we left
       INST.data = p;
+      if(instCloseWorked(p)){ closeInstances(); return; }
       renderInstances(false);
     };
+    // 2026-09-25, Adam: once Close selected has worked, go back to the normal screen. A session
+    // leaves this list only when its tab bridge confirms the tab is gone, so the list says when:
+    // every key it asked to close is gone. One still listed (refused, or the bridge never answered;
+    // the toast says why) keeps the view up; after INST_CLOSE_WAIT_MS (the bridge withdraws an
+    // unanswered close after 10s) it stops waiting, so a late departure never pulls the view down.
+    var INST_CLOSE_WAIT_MS = 20000;
+    function instCloseWorked(p){
+      var c = INST.closing;
+      if(!c) return false;
+      if(Date.now() - c.at > INST_CLOSE_WAIT_MS){ INST.closing = null; return false; }
+      var left = {};
+      instList(p.members).forEach(function(im){ left[im.key] = true; });
+      for(var i=0;i<c.keys.length;i++){ var k = c.keys[i]; if(left[k]) return false; }
+      return true;
+    }
     function instList(v){ return Array.isArray(v) ? v : []; }     // hs.json encodes an empty list as {}
     function instStatusWord(im){
       var w = im.hung ? "Stalled"
@@ -14815,6 +14831,7 @@ local HTML = [[
       if(!keys.length) return;
       if(!confirm("Close " + keys.length + " Claude tab" + (keys.length === 1 ? "" : "s") + "?\n\nEach one's session ends; its conversation stays in history. Unnamed \"Claude Code\" tabs close only when every unnamed tab in their window is selected.")) return;
       send("close-sessions", INST.stackKey, JSON.stringify(keys));
+      INST.closing = { keys: keys, at: Date.now() };   // back to the normal screen once they've all gone
       INST.sel = {};
       renderInstances(true);
     }
