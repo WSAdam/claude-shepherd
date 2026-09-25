@@ -123,6 +123,25 @@ function payload(extra) {
   check("...keeps what was already checked", s.boxes.c1.checked === true);
   check("...and never a row that can't be closed", s.boxes.w1.checked === false);
 
+  // 2026-09-25, Adam: "i'm going to need a select all button in that view as well then i'll
+  // unselect any non working tab" -- check everything closable, then uncheck what to keep
+  await page.evaluate(() => { instSelectNone(); });
+  const all = await page.evaluate(() => {
+    const b = document.getElementById("inst-selall");
+    return b ? { there: true, text: b.textContent, off: b.disabled } : { there: false };
+  });
+  check("the bar has a Select all button, counting the rows that can be closed  (" + all.text + ")",
+        all.there === true && /\(2\)/.test(all.text) && all.off === false);
+  await page.evaluate(() => { document.getElementById("inst-selall").click(); });
+  s = await state();
+  check("Select all checks every closable row", s.boxes.u1.checked === true && s.boxes.c1.checked === true);
+  check("...never a disabled one", s.boxes.w1.checked === false);
+  check("...and Close selected counts them  (" + s.closesel + ")", /\(2\)/.test(s.closesel));
+  await page.evaluate(() => { document.querySelector('#inst-body .in-ck[data-ck="c1"]').click(); });
+  s = await state();
+  check("...then unchecking one leaves the rest  (" + s.closesel + ")", s.boxes.c1.checked === false && /\(1\)/.test(s.closesel));
+  await page.evaluate(() => { document.getElementById("inst-selfin").click(); });
+
   // a key that leaves the view drops out of the selection
   await page.evaluate((p) => { window.ccInstances(p); },
     Object.assign(payload(), { members: payload().members.filter((m) => m.key !== "c1") }));

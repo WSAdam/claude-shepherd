@@ -27,7 +27,8 @@ window's tabs to change. Windows pick up 0.6.0 after **Developer: Reload Window*
 ### Added — Close selected in Instances, and "N finished" on the card
 
 Every Instances row has a checkbox. **Select finished** checks the sessions whose merge landed and
-those finished longer than `cleanup.idleHours` (Settings → Tile cleanup, default 12).
+those finished longer than `cleanup.idleHours` (Settings → Tile cleanup, default 12);
+**Select all** checks every row that can be closed, so you uncheck only what you want to keep.
 **Close selected** asks first, then Lua re-checks each key (`core.cleanupVerdict`: never working,
 holding a question, mid-merge or gating, running background agents, or driving a batch). It then
 closes each tab through the bridge (`core.cleanupPlan`): by its unit tag, by its name, or, for a

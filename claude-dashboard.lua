@@ -10519,7 +10519,7 @@ local HTML = [[
   <div id="instances" onclick="instBackdrop(event)">
     <div id="inst-card" role="dialog" aria-label="Instances">
       <div class="ov-head"><span id="inst-title">Instances</span><button id="inst-newtab" class="in-btn" onclick="openNewTabForm()" title="Open a new Claude tab in this repo's window that starts its own worktree (.claude/worktrees/). The prompt is typed in for you; nothing is sent until you press Return.">＋ New worktree tab</button><button class="s-x" onclick="closeInstances()" title="Close (Esc)">✕</button></div>
-      <div id="inst-clean"><button id="inst-selfin" class="in-btn" onclick="instSelectFinished()">Select finished</button><button id="inst-selnone" class="in-btn" onclick="instSelectNone()">Clear</button><button id="inst-closesel" class="in-btn" onclick="instCloseSelected()" disabled>Close selected</button></div>
+      <div id="inst-clean"><button id="inst-selfin" class="in-btn" onclick="instSelectFinished()">Select finished</button><button id="inst-selall" class="in-btn" onclick="instSelectAll()" title="Check every session that can be closed -- then uncheck the ones to keep">Select all</button><button id="inst-selnone" class="in-btn" onclick="instSelectNone()">Clear</button><button id="inst-closesel" class="in-btn" onclick="instCloseSelected()" disabled>Close selected</button></div>
       <div class="ov-body" id="inst-body"></div>
       <div id="inst-new">
         <div class="nt-row">
@@ -14651,9 +14651,12 @@ local HTML = [[
     function instCleanBar(){
       var p = INST.data, bar = document.getElementById("inst-clean");
       if(!p || !bar) return;
-      var members = instList(p.members), any = false;
-      members.forEach(function(im){ if(im.selectable) any = true; });
-      bar.classList.toggle("show", any);
+      var members = instList(p.members), closable = 0;
+      members.forEach(function(im){ if(im.selectable) closable++; });
+      bar.classList.toggle("show", closable > 0);
+      var sa = document.getElementById("inst-selall");
+      sa.textContent = "Select all" + (closable ? " (" + closable + ")" : "");
+      sa.disabled = closable === 0;
       var fin = p.finishedN|0, n = Object.keys(INST.sel).length;
       var sf = document.getElementById("inst-selfin"), cs = document.getElementById("inst-closesel");
       sf.textContent = "Select finished" + (fin ? " (" + fin + ")" : "");
@@ -14665,6 +14668,11 @@ local HTML = [[
     }
     function instSelectFinished(){
       instList(INST.data && INST.data.members).forEach(function(im){ if(im.selectable && im.finished) INST.sel[im.key] = true; });
+      renderInstances(true);
+    }
+    // 2026-09-25, Adam: check everything closable, then uncheck what to keep
+    function instSelectAll(){
+      instList(INST.data && INST.data.members).forEach(function(im){ if(im.selectable) INST.sel[im.key] = true; });
       renderInstances(true);
     }
     function instSelectNone(){ INST.sel = {}; renderInstances(true); }

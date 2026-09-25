@@ -188,7 +188,8 @@ per project**, not one per session.
   **Instances…** opens the same view.
 - **Clearing finished sessions.** Every Instances row has a checkbox. **Select finished** checks
   the sessions whose merge landed and those finished longer than **Settings → Tile cleanup**
-  allows (`cleanup.idleHours`, default 12; 0 = merged ones only). **Close selected** asks first,
+  allows (`cleanup.idleHours`, default 12; 0 = merged ones only); **Select all** checks every row
+  that can be closed, to uncheck the ones to keep. **Close selected** asks first,
   then closes those tabs through the tab bridge. Shepherd re-checks every one, so a session that
   is working, holding a question, mid-merge or driving a batch is never closed. Unnamed
   "Claude Code" tabs (a batch unit's) look identical, so they close only when **every** unnamed tab
