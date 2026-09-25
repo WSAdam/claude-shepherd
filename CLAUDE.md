@@ -66,7 +66,10 @@ and the README's "Testing & development" section.
   label for them; a window reload forgets the tags). One narrow exception (0.4.0): close with
   `empty: <count>` closes ANY untagged "Claude Code" tab (never-used chats are interchangeable),
   only while that count equals Shepherd's empty sessions there (`core.emptyChatsVerdict`) -- a
-  restored old chat reads "Claude Code" too but has no session. Never add another op, and never use the
+  restored old chat reads "Claude Code" too but has no session. Widened 2026-09-25 (Adam's call)
+  for Instances' Close selected: unnamed sessions close by that same count only when EVERY unnamed
+  session in the window is selected (`core.unnamedTabsVerdict`, cap 99 from bridge 0.6.0). Nothing
+  closes a finished session on its own: Close selected suggests, Adam confirms. Never add another op, and never use the
   Claude URI to reveal a tab (D-14). Bump its `package.json` version with every change, or
   `make install` won't reinstall it; running windows pick it up after a reload. A window keeps
   the bridge it loaded, so before relying on an op check `core.tabBridgeSupports(reg.version, op)`

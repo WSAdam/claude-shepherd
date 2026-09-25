@@ -3544,5 +3544,34 @@ do
         and src:find('escalation.hung.toolMinutes', 1, true) ~= nil)
 end
 
+-- ---- Close selected: the panel asks, Lua decides (2026-09-25) ----
+-- 34 merged wgsUltra unit tabs piled up with no way to clear them. The checkboxes only name keys;
+-- whether a session may close is Lua's call, re-made from fresh state, never the panel's word.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  local body = src:match("function FX%.closeSessions%(text%)(.-)\nend\n") or ""
+  check("close selected: Lua re-vets every key with core.cleanupVerdict",
+        body:find("core.cleanupVerdict(byK[k], now, idle)", 1, true) ~= nil)
+  check("close selected: ...plans the closes in core (tag, name, or a window's unnamed tabs by count)",
+        body:find("core.cleanupPlan(all, regs, tags, labels, selected, now)", 1, true) ~= nil)
+  check("close selected: ...and never presses a key or focuses a window",
+        body ~= "" and not body:find("keyStroke", 1, true) and not body:find("dispatchSerialized", 1, true)
+        and not body:find("closeWindow", 1, true))
+  check("close selected: the message routes to FX.closeSessions",
+        src:find('if a == "close-sessions" then FX.closeSessions(tostring(payload.text or "")); return end', 1, true) ~= nil)
+  check("close selected: each row's checkbox key goes through esc()",
+        src:find([[class="in-ck" data-ck="' + esc(im.key) + '"']], 1, true) ~= nil)
+  check("close selected: a disabled checkbox's reason goes through esc()",
+        src:find([[' disabled title="' + esc(im.cleanWhy]], 1, true) ~= nil)
+  check("close selected: the tick stamps the verdict before the stacks count it",
+        (src:find("FX.annotateCleanup(list, cfg)", 1, true) or math.huge)
+          < (src:find("FX._stackLeads = core.stackInstances(", 1, true) or 0))
+  check("close selected: Settings -> Tile cleanup saves cleanup.idleHours",
+        src:find('cleanup: { idleHours: num("s-clean-hours", 12) },', 1, true) ~= nil
+        and src:find('val("s-clean-hours", cv(cfg,"cleanup.idleHours",12));', 1, true) ~= nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

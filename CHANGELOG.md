@@ -4,6 +4,39 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-25 — Merged unit tabs close again, and Instances can clear the rest
+
+### Fixed — a batch unit's tab never closed after its merge
+
+wgsUltra's card counted 37 sessions: 34 merged batch-unit tabs, each still running `claude`, all
+refused with *no tab in its window is tagged as unit …* and re-logged every five minutes for two
+days. The tab bridge did tag each tab as it opened, but it kept the tags in a `WeakMap` keyed by
+VS Code's `Tab` objects. VS Code 1.104 rebuilds every one of those objects on a tab switch
+(`EDITORS_SELECTION` falls through to a full `$acceptEditorTabModel`), and on every close, and
+reports the rebuild only through `onDidChangeTabGroups`. So a tag lived until the first click.
+The 2026-09-22 note blamed a window reload, but that extension host had been up for days.
+
+Bridge 0.6.0 remembers the Claude tabs it last saw. When every tab object is new but the tabs are
+the same ones in the same places, it carries each tag, and each tab's open time, over to the new
+objects (`lib.carryTags`). It never guesses when the list changed too. The open time fixes
+`expect`'s early path, which had left some units untagged from the start. The bridge now reads its
+inbox in name order, which the empty-chat countdown relies on, and accepts a count of up to 99.
+Shepherd no longer re-asks a close that can never succeed every five minutes; it waits for that
+window's tabs to change. Windows pick up 0.6.0 after **Developer: Reload Window**.
+
+### Added — Close selected in Instances, and "N finished" on the card
+
+Every Instances row has a checkbox. **Select finished** checks the sessions whose merge landed and
+those finished longer than `cleanup.idleHours` (Settings → Tile cleanup, default 12).
+**Close selected** asks first, then Lua re-checks each key (`core.cleanupVerdict`: never working,
+holding a question, mid-merge or gating, running background agents, or driving a batch). It then
+closes each tab through the bridge (`core.cleanupPlan`): by its unit tag, by its name, or, for a
+window's unnamed "Claude Code" tabs, all together by count. That count close is the empty-chat
+rule widened: it runs only when every unnamed session in the window is selected, and the window
+shows exactly that many untagged "Claude Code" tabs, so a restored old chat still stops it. A card
+with two or more finished sessions shows **🧹 N finished**, which opens Instances with them checked.
+Nothing closes on its own.
+
 ## 2026-09-24 — The lock screen shows what's ready to merge
 
 ### Fixed — a ready-to-merge read "All quiet" on the lock screen

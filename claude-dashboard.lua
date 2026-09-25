@@ -2804,6 +2804,8 @@ function FX.tabBridgePollResults()
       elseif p.op == "close-empty" and ok and type(res) == "table" and res.ok == true then
         -- which of the identical empty chats went is unknown: its own SessionEnd clears its card
         print("[cc-dashboard] ✅ the Shepherd tab bridge closed an empty chat (host " .. p.hw .. ")")
+        -- ...but the last of a Close selected countdown means every one of them has gone (2026-09-25)
+        if type(p.keys) == "table" then for _, k in ipairs(p.keys) do FX.removeStatus(k) end end
       elseif p.op == "select" then   -- bringing a tab forward: logged, never alerted
         print("[cc-dashboard] " .. ((ok and type(res) == "table" and res.ok == true) and "✅ brought forward" or "⚠️ couldn't bring forward")
           .. " '" .. p.name .. "'s tab \"" .. p.label .. "\"" .. ((ok and type(res) == "table" and res.reason) and (": " .. tostring(res.reason)) or ""))
@@ -3337,14 +3339,26 @@ function FX.closeEmptyChats(key, which)
   local ok, why = core.emptyChatsVerdict(FX.tabBridgeRegistry(hw), n, FX.now())
   if not ok then FX.alert("Can't close the empty chats: " .. tostring(why)); return false end
   local howMany = (which == "one") and 1 or n
+  if not FX.sendEmptyCountdown(hw, n, howMany, { key = key, name = "an empty chat" }) then
+    FX.alert("Couldn't reach the Shepherd tab bridge in that window"); return false
+  end
+  print("[cc-dashboard] 🧹 asked the Shepherd tab bridge (host " .. hw .. ") to close " .. howMany .. " empty chat(s)")
+  return true
+end
+
+-- Close `howMany` of a window's `n` interchangeable "Claude Code" tabs, largest count first (the
+-- bridge reads its inbox in name order and re-checks the count before each close). pend.keys rides
+-- on the LAST command: once it's answered ok, every tab in the countdown has gone (2026-09-25).
+function FX.sendEmptyCountdown(hw, n, howMany, pend)
+  pend = pend or {}
   for i = 0, howMany - 1 do
     local cmd = core.tabBridgeEmptyCommand(n - i, FX.now())
     if not FX.writeFileAtomic(FX.TAB_BRIDGE_DIR .. "/" .. hw .. ".in/" .. cmd.id .. ".json", core.json.encode(cmd)) then
-      FX.alert("Couldn't reach the Shepherd tab bridge in that window"); return false
+      return false
     end
-    FX._tabBridgePending[cmd.id] = { op = "close-empty", key = key, hw = hw, label = core.EMPTY_TAB_LABEL, name = "an empty chat", at = FX.now() }
+    FX._tabBridgePending[cmd.id] = { op = "close-empty", key = pend.key, hw = hw, label = core.EMPTY_TAB_LABEL,
+      name = pend.name or "an empty chat", at = FX.now(), keys = (i == howMany - 1) and pend.keys or nil }
   end
-  print("[cc-dashboard] 🧹 asked the Shepherd tab bridge (host " .. hw .. ") to close " .. howMany .. " empty chat(s)")
   if not FX._tabBridgeTimer then
     FX._tabBridgeTimer = hs.timer.doEvery(0.5, function()
       FX.tabBridgePollResults()
@@ -3352,6 +3366,74 @@ function FX.closeEmptyChats(key, which)
     end)
   end
   return true
+end
+
+-- ---- Close selected (2026-09-25) ------------------------------------------------------------
+-- wgsUltra's card counted 37, mostly merged unit tabs no one could close. Instances' checkboxes
+-- send their keys here; each is re-vetted (core.cleanupVerdict -- never the panel's word), then
+-- closed through the tab bridge: by tag or name, or a window's unnamed tabs all together by count
+-- (core.cleanupPlan). Nothing closes on its own -- Adam's call: suggest, never auto-close.
+function FX.annotateCleanup(list, cfg)
+  local now = FX.now()
+  local idle = tonumber(core.config(cfg, "cleanup.idleHours", core.CLEANUP_IDLE_HOURS)) or core.CLEANUP_IDLE_HOURS
+  for _, it in ipairs(list or {}) do
+    it.cleanSelectable, it.cleanFinished, it.cleanWhy = core.cleanupVerdict(it, now, idle)
+  end
+end
+
+function FX.closeSessions(text)
+  local okj, keys = pcall(function() return core.json.decode(text or "[]") end)
+  if not okj or type(keys) ~= "table" or #keys == 0 then return false end
+  local cfg = loadConfig()
+  if core.config(cfg, "tabBridge.enabled", true) == false then
+    FX.alert("Can't close them: the Shepherd tab bridge is switched off (tabBridge.enabled)"); return false
+  end
+  local now = FX.now()
+  local idle = tonumber(core.config(cfg, "cleanup.idleHours", core.CLEANUP_IDLE_HOURS)) or core.CLEANUP_IDLE_HOURS
+  local all, byK = {}, {}
+  for _, src in ipairs({ FX._shownItems or {}, FX._hiddenItems or {} }) do
+    for _, it in ipairs(src) do all[#all + 1] = it; byK[it.key] = it end
+  end
+  local selected, refused, hws = {}, {}, {}
+  for _, raw in ipairs(keys) do
+    local k = tostring(raw)
+    local ok, _, why = core.cleanupVerdict(byK[k], now, idle)
+    if ok then selected[k] = true; hws[tostring(byK[k].host_window)] = true
+    else refused[#refused + 1] = { key = k, why = why } end
+  end
+  local regs, tags, labels = {}, {}, {}
+  for hw in pairs(hws) do regs[hw] = FX.tabBridgeRegistry(hw) end
+  for _, it in ipairs(all) do
+    if hws[tostring(it.host_window or "")] then
+      tags[it.key] = FX.fleetUnitTagOf(it)
+      labels[it.key] = FX.sessionTabLabel(it) or ""
+    end
+  end
+  local plan = core.cleanupPlan(all, regs, tags, labels, selected, now)
+  local sent = 0
+  for _, e in ipairs(plan.byTab) do
+    local ok, why = FX.closeTab(byK[e.key], { quiet = true })
+    if ok then sent = sent + 1 else refused[#refused + 1] = { key = e.key, why = why } end
+  end
+  for _, c in ipairs(plan.byCount) do
+    if FX.sendEmptyCountdown(c.hw, c.n, c.n, { key = c.keys[1], keys = c.keys, name = c.n .. " unnamed Claude tab(s)" }) then
+      sent = sent + c.n
+      print("[cc-dashboard] 🧹 asked the Shepherd tab bridge (host " .. c.hw .. ") to close " .. c.n .. " unnamed tab(s)")
+    else
+      for _, k in ipairs(c.keys) do refused[#refused + 1] = { key = k, why = "couldn't reach the Shepherd tab bridge in that window" } end
+    end
+  end
+  for _, r in ipairs(plan.refused) do refused[#refused + 1] = r end
+  local msg = (sent > 0) and ("🧹 Closing " .. sent .. " tab" .. (sent == 1 and "" or "s")) or "Nothing closed"
+  if #refused > 0 then
+    local first = refused[1]
+    local who = byK[first.key] and (byK[first.key].label or byK[first.key].name) or first.key
+    msg = msg .. " · " .. #refused .. " left open -- " .. tostring(who) .. ": " .. tostring(first.why)
+  end
+  print("[cc-dashboard] 🧹 close selected: " .. sent .. " sent, " .. #refused .. " left open")
+  for _, r in ipairs(refused) do print("[cc-dashboard] ⚠️ close selected left " .. tostring(r.key) .. " open: " .. tostring(r.why)) end
+  FX.alert(msg)
+  return sent > 0
 end
 
 -- After a Jump lands on a VS Code window: ask its tab bridge to bring this session's own tab
@@ -6964,6 +7046,8 @@ local function handleBridgeMsg(msg)
   if a == "end-session" then FX.endSession(tostring(payload.v or "")); return end   -- tab-less only (verdict in core)
   -- empty chats (2026-09-11): v = a session key in that window, text = "one" | "all"
   if a == "close-empty" then FX.closeEmptyChats(tostring(payload.v or ""), tostring(payload.text or "all")); return end
+  -- Close selected (2026-09-25): v = stackKey, text = JSON list of session keys (re-vetted in Lua)
+  if a == "close-sessions" then FX.closeSessions(tostring(payload.text or "")); return end
   -- Shepherd answers (2026-09-11): v = session key, text = JSON picks (checked in core)
   if a == "answer-ask" then FX.answerAskFromPanel(tostring(payload.v or ""), tostring(payload.text or "")); return end
   if a == "release-ask" then FX.releaseAsk(tostring(payload.v or "")); return end
@@ -9014,6 +9098,8 @@ local HTML = [[
   .stk-br { display:inline-block; max-width:9em; vertical-align:bottom; margin-left:5px; padding:0 5px; font-size:10px;
             color:var(--text-3); border:1px solid var(--border); border-radius:6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .stk-also { grid-column:1 / -1; font-size:11px; color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .stk-fin { font:inherit; font-size:10px; margin-right:6px; padding:0 6px; border-radius:6px; border:1px solid var(--border); background:var(--surface-2); color:var(--text-2); cursor:pointer; }
+  .stk-fin:hover { border-color:var(--accent); color:var(--text-strong); }
   .theme-contrast .stk-also { grid-column:2; }
   .theme-bar .stk-also, .theme-dots .stk-also { display:none; }
   #d-wt { margin-left:6px; font-size:11px; color:var(--text-3); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:12em; display:inline-block; vertical-align:bottom; }
@@ -9457,6 +9543,13 @@ local HTML = [[
 .in-btn:hover{ border-color:var(--accent); color:var(--text-strong); }
 .in-btn:disabled{ opacity:.5; cursor:default; }
 .in-empty{ padding:12px 6px; color:var(--dim); }
+/* Close selected (2026-09-25): a checkbox per row, a bar above the rows */
+.in-ck{ flex:0 0 auto; margin:0; cursor:pointer; accent-color:var(--accent); }
+.in-ck:disabled{ cursor:default; opacity:.3; }
+#inst-clean{ display:none; gap:6px; align-items:center; padding:6px 12px; border-bottom:1px solid var(--border); }
+#inst-clean.show{ display:flex; }
+#inst-closesel{ margin-left:auto; }
+#inst-closesel:not(:disabled){ border-color:var(--accent); color:var(--text-strong); }
 /* New worktree tab: a header button + a form OUTSIDE #inst-body (re-renders rewrite that) */
 #inst-newtab{ display:none; margin-left:auto; white-space:nowrap; }
 #inst-newtab.show{ display:inline-block; }
@@ -10170,6 +10263,7 @@ local HTML = [[
 
       <div class="s-sec">Tile cleanup</div>
       <label class="s-row">Auto-delete a tile after <input type="number" id="s-prune-hours" class="s-num" min="0"> hours idle (0 = never)</label>
+      <label class="s-row" title="Instances' Select finished checks these, and a card with two or more says N finished. Nothing closes by itself.">Count a session as finished after <input type="number" id="s-clean-hours" class="s-num" min="0"> hours idle (0 = only merged ones)</label>
       <div class="s-help">Deletes the tile's status file (and any decision/policy/gate state) once it's been untouched this long — irreversible, but a live session just reappears on its next hook event. 0 (default) keeps tiles forever. A tile with no session_id at all (a botched-hook orphan) is always cleaned up regardless of this setting.</div>
 
       <div class="s-sec">Graceful drain</div>
@@ -10425,6 +10519,7 @@ local HTML = [[
   <div id="instances" onclick="instBackdrop(event)">
     <div id="inst-card" role="dialog" aria-label="Instances">
       <div class="ov-head"><span id="inst-title">Instances</span><button id="inst-newtab" class="in-btn" onclick="openNewTabForm()" title="Open a new Claude tab in this repo's window that starts its own worktree (.claude/worktrees/). The prompt is typed in for you; nothing is sent until you press Return.">＋ New worktree tab</button><button class="s-x" onclick="closeInstances()" title="Close (Esc)">✕</button></div>
+      <div id="inst-clean"><button id="inst-selfin" class="in-btn" onclick="instSelectFinished()">Select finished</button><button id="inst-selnone" class="in-btn" onclick="instSelectNone()">Clear</button><button id="inst-closesel" class="in-btn" onclick="instCloseSelected()" disabled>Close selected</button></div>
       <div class="ov-body" id="inst-body"></div>
       <div id="inst-new">
         <div class="nt-row">
@@ -12507,6 +12602,7 @@ local HTML = [[
       ck("s-coll-en",    cv(cfg,"collision.enabled",false));
       ck("s-coll-git",   cv(cfg,"collision.useGitRoot",false));
       val("s-prune-hours", cv(cfg,"prune.hours",0));
+      val("s-clean-hours", cv(cfg,"cleanup.idleHours",12));
       ck("s-drain-en",   cv(cfg,"drain.enabled",false));
       ck("s-ask-en",     cv(cfg,"ask.enabled",true));    // must match cc-ask.sh's default
       ck("s-resp-en",    cv(cfg,"respawn.enabled",false));
@@ -12733,6 +12829,7 @@ local HTML = [[
                               staleSeconds: num("s-risk-stale",300) } },
         collision: { enabled: ck("s-coll-en"), useGitRoot: ck("s-coll-git") },
         prune: { hours: num("s-prune-hours", 0) },
+        cleanup: { idleHours: num("s-clean-hours", 12) },
         drain: { enabled: ck("s-drain-en") },
         // ask carries NO waitSeconds key: SETTINGS_KEEP_SUBKEYS preserves a hand-edited one.
         ask: { enabled: ck("s-ask-en") },
@@ -14409,10 +14506,10 @@ local HTML = [[
     // checkout first, then folder) so a live re-render never moves a row under the
     // pointer; a re-render also waits for an in-progress press to finish; and keys ride
     // data attributes read by one delegated listener, never interpolated into a handler.
-    var INST = { stackKey: null, data: null, sig: null, opening: {}, deferred: false, pressing: false };
-    function openInstancesFor(sk, withNewTab){
+    var INST = { stackKey: null, data: null, sig: null, opening: {}, deferred: false, pressing: false, sel: {}, preselect: false };
+    function openInstancesFor(sk, withNewTab, preselect){
       if(!sk) return;
-      INST = { stackKey: sk, data: null, sig: null, opening: {}, deferred: false, pressing: false };
+      INST = { stackKey: sk, data: null, sig: null, opening: {}, deferred: false, pressing: false, sel: {}, preselect: !!preselect };
       document.getElementById("inst-title").textContent = "Instances";
       document.getElementById("inst-foot").textContent = "";
       document.getElementById("inst-body").innerHTML = '<div class="in-empty">Loading…</div>';
@@ -14427,7 +14524,7 @@ local HTML = [[
       if(!ov || !ov.classList.contains("show")) return;
       ov.classList.remove("show");
       closeNewTabForm();
-      INST = { stackKey: null, data: null, sig: null, opening: {}, deferred: false, pressing: false };
+      INST = { stackKey: null, data: null, sig: null, opening: {}, deferred: false, pressing: false, sel: {}, preselect: false };
       send("close-instances");
     }
     function instBackdrop(e){ if(e && e.target && e.target.id === "instances") closeInstances(); }
@@ -14457,8 +14554,17 @@ local HTML = [[
       Object.keys(INST.opening).forEach(function(path){
         if(roots[path] || now - INST.opening[path] > 20000) delete INST.opening[path];
       });
-      var sig = tileSignature(p) + "|" + Object.keys(INST.opening).sort().join(",");
-      if(!force && sig === INST.sig){ instAges(); return; }
+      // 2026-09-25: the checkboxes -- a key that left or can't be closed any more drops out; opened
+      // from a card's "N finished", the finished rows arrive already checked
+      var selOk = {};
+      members.forEach(function(im){ if(im.selectable) selOk[im.key] = true; });
+      Object.keys(INST.sel).forEach(function(k){ if(!selOk[k]) delete INST.sel[k]; });
+      if(INST.preselect && members.length){
+        INST.preselect = false;
+        members.forEach(function(im){ if(im.selectable && im.finished) INST.sel[im.key] = true; });
+      }
+      var sig = tileSignature(p) + "|" + Object.keys(INST.opening).sort().join(",") + "|" + Object.keys(INST.sel).sort().join(",");
+      if(!force && sig === INST.sig){ instAges(); instCleanBar(); return; }
       INST.sig = sig;
       document.getElementById("inst-newtab").classList.toggle("show", !!p.canNewTab);   // VS Code/Cursor repos only
       document.getElementById("inst-title").textContent = (p.stackName || "Project") + " — instances";
@@ -14489,6 +14595,9 @@ local HTML = [[
         }
         var canMerge = !!(mg && mg.phase === "requested" && mg.ready && !mg.queued && !mg.sent);
         html += '<div class="in-row' + (needs ? ' needs' : '') + (im.hidden ? ' hid' : '') + '">'
+             +   '<input type="checkbox" class="in-ck" data-ck="' + esc(im.key) + '"'
+             +     (im.selectable ? ' title="Select to close its tab"' : ' disabled title="' + esc(im.cleanWhy || "can't be closed from here") + '"')
+             +     (INST.sel[im.key] ? ' checked' : '') + '>'
              +   '<span class="in-dot in-st-' + st + '"></span>'
              +   '<div class="in-main">'
              +     '<div class="in-name"><span class="in-folder">' + esc(im.folder || im.key) + '</span>'
@@ -14535,6 +14644,37 @@ local HTML = [[
       var y = body.scrollTop;
       body.innerHTML = html;
       body.scrollTop = y;
+      instCleanBar();
+    }
+    // Select finished / Close selected (2026-09-25). Lua re-vets every key (core.cleanupVerdict)
+    // and closes through the tab bridge; nothing here decides what may close.
+    function instCleanBar(){
+      var p = INST.data, bar = document.getElementById("inst-clean");
+      if(!p || !bar) return;
+      var members = instList(p.members), any = false;
+      members.forEach(function(im){ if(im.selectable) any = true; });
+      bar.classList.toggle("show", any);
+      var fin = p.finishedN|0, n = Object.keys(INST.sel).length;
+      var sf = document.getElementById("inst-selfin"), cs = document.getElementById("inst-closesel");
+      sf.textContent = "Select finished" + (fin ? " (" + fin + ")" : "");
+      sf.disabled = fin === 0;
+      sf.title = "Check every session whose merge landed, or that has sat finished longer than Settings → Tile cleanup allows";
+      cs.textContent = "Close selected" + (n ? " (" + n + ")" : "");
+      cs.disabled = n === 0;
+      document.getElementById("inst-selnone").style.display = n ? "" : "none";
+    }
+    function instSelectFinished(){
+      instList(INST.data && INST.data.members).forEach(function(im){ if(im.selectable && im.finished) INST.sel[im.key] = true; });
+      renderInstances(true);
+    }
+    function instSelectNone(){ INST.sel = {}; renderInstances(true); }
+    function instCloseSelected(){
+      var keys = Object.keys(INST.sel);
+      if(!keys.length) return;
+      if(!confirm("Close " + keys.length + " Claude tab" + (keys.length === 1 ? "" : "s") + "?\n\nEach one's session ends; its conversation stays in history. Unnamed \"Claude Code\" tabs close only when every unnamed tab in their window is selected.")) return;
+      send("close-sessions", INST.stackKey, JSON.stringify(keys));
+      INST.sel = {};
+      renderInstances(true);
     }
     function instAges(){
       document.querySelectorAll("#inst-body .in-age").forEach(function(s){
@@ -14547,6 +14687,14 @@ local HTML = [[
       var body = document.getElementById("inst-body");
       if(!body) return;
       body.addEventListener("mousedown", function(){ INST.pressing = true; });
+      body.addEventListener("change", function(e){
+        var t = e.target;
+        if(!t || !t.classList || !t.classList.contains("in-ck")) return;
+        var k = t.getAttribute("data-ck");
+        if(!k) return;
+        if(t.checked) INST.sel[k] = true; else delete INST.sel[k];
+        instCleanBar();
+      });
       document.addEventListener("mouseup", function(){
         if(!INST.pressing) return;
         INST.pressing = false;
@@ -16544,7 +16692,17 @@ local HTML = [[
         var e = a[i];
         if(e && e.n > 0) parts.push(e.n + " " + (STACK_WORDS[e.b] || "other"));
       }
-      return parts.length ? '<span class="stk-also">'+esc("also: " + parts.join(" · "))+'</span>' : "";
+      // 2026-09-25: "🧹 N finished" -- merged, or idle past cleanup.idleHours; opens Instances with them checked
+      var fin = it.stackFinished|0;
+      var chip = fin >= 2 ? '<button type="button" class="stk-fin" data-nodbl title="Close the finished sessions from Instances" onclick="openInstancesFinished(event)">🧹 ' + fin + ' finished</button>' : "";
+      if(!parts.length && !chip) return "";
+      return '<span class="stk-also">' + chip + (parts.length ? esc("also: " + parts.join(" · ")) : "") + '</span>';
+    }
+    function openInstancesFinished(ev){
+      if(ev){ ev.stopPropagation(); }
+      var tile = ev && ev.target && ev.target.closest ? ev.target.closest(".tile") : null;
+      var sk = tile && tile.getAttribute("data-stack");
+      if(sk) openInstancesFor(sk, false, true);
     }
     // The top-right corner button on every (local) card: opens the Instances view. Shows
     // the instance count when there's more than one, and a pulsing dot when ANOTHER
@@ -18334,6 +18492,7 @@ function FX._refreshBody()
   -- double-click jumps to). Hidden sessions never lead or count, so this runs on the
   -- SHOWN list; the previous leads feed the anti-flap hold (core.rankInstances).
   FX.seedSeen(list)
+  FX.annotateCleanup(list, cfg)   -- 2026-09-25: Instances' checkboxes and the card's "N finished"
   FX._stackLeads = core.stackInstances(shownList, FX.seenAt(), FX._stackLeads, hiddenList)
   if panelVisible then
     FX.pushInstances(false)

@@ -922,6 +922,127 @@ function M.tabCloseVerdict(reg, unit, label, now)
          (retryable or named) and true or false, nil
 end
 
+-- ---- Finished sessions: cleared from Instances (2026-09-25) ----
+-- wgsUltra's card counted 37: 34 merged unit tabs no one closed. Instances has a checkbox per
+-- session and Close selected; "Select finished" checks the merged ones and those idle past
+-- cleanup.idleHours. Nothing here closes by itself -- Adam's call: suggest, never auto-close.
+M.CLEANUP_IDLE_HOURS = 12
+-- May Instances offer to close this session (its checkbox), and is it finished? Only a VS Code /
+-- Cursor tab the bridge can reach, whose turn is over and whose work isn't still landing.
+-- Returns selectable, finished, why (the disabled checkbox's reason).
+function M.cleanupVerdict(it, now, idleHours)
+  if type(it) ~= "table" then return false, false, "no such session" end
+  if it.remote then return false, false, "it runs on another machine" end
+  if it.editor ~= "vscode" and it.editor ~= "cursor" then return false, false, "close it in its terminal" end
+  if tostring(it.host_window or "") == "" then return false, false, "Shepherd doesn't know which VS Code window it's in" end
+  if it.status ~= "done" and it.status ~= "idle" then
+    return false, false, "it isn't finished (" .. tostring(it.status or "?") .. ")"
+  end
+  if it.bg_active then return false, false, "its background agents are still running" end
+  if M.isDriving(it) then return false, false, "it's driving a batch" end
+  local mg = type(it.merge) == "table" and it.merge or nil
+  local phase = mg and mg.phase
+  if phase == "requested" or phase == "approved" then return false, false, "its merge is still in flight" end
+  local gs = mg and type(mg.gate) == "table" and mg.gate.state
+  if gs == "running" or gs == "queued" then return false, false, "its merge's test gate is still running" end
+  local finished = false
+  if it.needsYou ~= "needs" then
+    if phase == "merged" or phase == "merged-dirty" then
+      finished = true
+    else
+      local h = tonumber(idleHours) or M.CLEANUP_IDLE_HOURS
+      local since = tonumber(it.since) or tonumber(it.updated)
+      finished = h > 0 and since ~= nil and (tonumber(now) or 0) - since >= h * 3600
+    end
+  end
+  return true, finished, nil
+end
+
+-- Unnamed tabs all read "Claude Code" and can't be told apart, so the bridge closes them by count
+-- (the empty-chat rule, widened 2026-09-25): only when EVERY unnamed session in that window is being
+-- closed, and the window's untagged "Claude Code" tabs number exactly those -- a restored old chat
+-- (a "Claude Code" tab with no session) makes the numbers differ, and nothing closes.
+function M.unnamedTabsVerdict(reg, selectedN, unnamedN, now)
+  selectedN, unnamedN = math.floor(tonumber(selectedN) or 0), math.floor(tonumber(unnamedN) or 0)
+  if unnamedN > selectedN then
+    local o = unnamedN - selectedN
+    return false, o .. " other unnamed Claude tab" .. (o == 1 and " in that window isn't" or "s in that window aren't")
+      .. " selected -- unnamed tabs can't be told apart, so close them all together or not at all"
+  end
+  if type(reg) ~= "table" or type(reg.tabs) ~= "table" then
+    return false, "the Shepherd tab bridge isn't running in that VS Code window (Developer: Reload Window there once)"
+  end
+  if (tonumber(now) or 0) - (tonumber(reg.at) or 0) > M.TAB_BRIDGE_FRESH then
+    return false, "the Shepherd tab bridge in that VS Code window stopped reporting"
+  end
+  local n = 0
+  for _, t in ipairs(reg.tabs) do
+    if type(t) == "table" and t.label == M.EMPTY_TAB_LABEL and not t.unit then n = n + 1 end
+  end
+  if n ~= selectedN then
+    return false, "that window shows " .. n .. " unnamed \"" .. M.EMPTY_TAB_LABEL .. "\" tab(s) but Shepherd has "
+      .. selectedN .. " unnamed session(s) there -- a restored old chat may be among them, so none is closed"
+  end
+  if n > 20 and not versionAtLeast(reg.version, "0.6.0") then
+    return false, "that window's Shepherd tab bridge (" .. tostring(reg.version)
+      .. ") closes at most 20 unnamed tabs -- Developer: Reload Window there once"
+  end
+  if n > 1 and not versionAtLeast(reg.version, "0.4.0") then
+    return false, "that window's Shepherd tab bridge is older (" .. tostring(reg.version)
+      .. ") -- Developer: Reload Window there once"
+  end
+  return true
+end
+
+-- Close selected: how each selected session's tab goes. `members` is every live session (so a
+-- window's unselected unnamed ones are seen too), `regs` hw -> bridge registry, `tags` key -> unit
+-- tag, `labels` key -> the tab's strict name ("" = none), `selected` key -> true (already vetted by
+-- cleanupVerdict). byTab: close by tag or name (core.tabCloseVerdict); byCount: { hw, n, keys } for
+-- a window's unnamed tabs; refused: { key, why }.
+function M.cleanupPlan(members, regs, tags, labels, selected, now)
+  regs, tags, labels, selected = regs or {}, tags or {}, labels or {}, selected or {}
+  local plan = { byTab = {}, byCount = {}, refused = {} }
+  local function hwOf(it) return tostring(it.host_window or "") end
+  local function unnamed(it)
+    if it.remote or (it.editor ~= "vscode" and it.editor ~= "cursor") or hwOf(it) == "" then return false end
+    local label = labels[it.key]
+    if type(label) == "string" and label ~= "" then return false end
+    local tag, reg = tags[it.key], regs[hwOf(it)]
+    if tag and type(reg) == "table" and type(reg.tabs) == "table" then
+      for _, t in ipairs(reg.tabs) do if type(t) == "table" and t.unit == tag then return false end end
+    end
+    return true
+  end
+  local unnamedIn, unnamedSel, order = {}, {}, {}
+  for _, it in ipairs(members or {}) do
+    if type(it) == "table" and unnamed(it) then unnamedIn[hwOf(it)] = (unnamedIn[hwOf(it)] or 0) + 1 end
+  end
+  for _, it in ipairs(members or {}) do
+    if type(it) == "table" and selected[it.key] then
+      local hw = hwOf(it)
+      local ok, why, _, by = M.tabCloseVerdict(regs[hw], tags[it.key], labels[it.key], now)
+      if ok then
+        plan.byTab[#plan.byTab + 1] = { key = it.key, hw = hw, by = by }
+      elseif unnamed(it) then
+        if not unnamedSel[hw] then unnamedSel[hw] = {}; order[#order + 1] = hw end
+        table.insert(unnamedSel[hw], it.key)
+      else
+        plan.refused[#plan.refused + 1] = { key = it.key, why = why }
+      end
+    end
+  end
+  for _, hw in ipairs(order) do
+    local keys = unnamedSel[hw]
+    local ok, why = M.unnamedTabsVerdict(regs[hw], #keys, unnamedIn[hw] or 0, now)
+    if ok then
+      plan.byCount[#plan.byCount + 1] = { hw = hw, n = #keys, keys = keys }
+    else
+      for _, k in ipairs(keys) do plan.refused[#plan.refused + 1] = { key = k, why = why } end
+    end
+  end
+  return plan
+end
+
 -- Which name to ask the bridge to bring forward: the first of the session's possible tab names
 -- (core.claudeTabCandidates) that names exactly ONE tab in a fresh registry. Bringing a tab
 -- forward is harmless, so the looser name list is fine here (close stays on the strict label).
@@ -1606,13 +1727,17 @@ function M.stackInstances(shown, seenAt, prevLeads, hidden)
   local leads = {}
   for _, k in ipairs(order) do
     local ranked = M.rankInstances(groups[k], seenAt, prevLeads[k])
-    local buckets = {}
-    for i, it in ipairs(ranked) do buckets[i] = stackBucket(it, seenAt) end
+    local buckets, finished = {}, 0
+    for i, it in ipairs(ranked) do
+      buckets[i] = stackBucket(it, seenAt)
+      if it.cleanSelectable and it.cleanFinished then finished = finished + 1 end
+    end
     for i, it in ipairs(ranked) do
       it.stackLead = (i == 1)
       it.stackRank = i
       it.stackSize = #ranked
       it.stackHidden = hiddenN[k] or 0
+      it.stackFinished = finished   -- 2026-09-25: the card's "N finished" (Close them from Instances)
       local counts, needs = {}, 0
       for j, b in ipairs(buckets) do
         if j ~= i then
@@ -1712,6 +1837,9 @@ function M.instancesPayload(stackKey, members, hidden, worktrees, opts)
       tabless = it.tabless and true or nil,
       ask = it.askHeld and it.askView or nil,   -- a question held for Adam (cc-ask.sh), answered on the row
       emptyChat = it.emptyChat and true or nil, -- a never-used "Claude Code" chat: Close on the row
+      -- 2026-09-25: its checkbox (core.cleanupVerdict, stamped by FX.annotateCleanup)
+      selectable = it.cleanSelectable and true or nil, finished = it.cleanFinished and true or nil,
+      cleanWhy = (not it.cleanSelectable) and it.cleanWhy or nil,
       -- ready to merge: just what the row shows (the review lives in the detail panel)
       merge = (type(it.merge) == "table") and { phase = it.merge.phase, line = it.merge.line,
         needsYou = it.merge.needsYou, ready = it.merge.ready, queued = it.merge.queued, sent = it.merge.sent } or nil,
@@ -1744,9 +1872,11 @@ function M.instancesPayload(stackKey, members, hidden, worktrees, opts)
         pending = type(opts.pending) == "table" and opts.pending[w.path] and true or nil }
     end
   end
+  local finishedN = 0
+  for _, r in ipairs(rows) do if r.selectable and r.finished then finishedN = finishedN + 1 end end
   return { stackKey = stackKey, stackName = opts.stackName, repoKey = opts.repoKey, mainRoot = opts.mainRoot,
            gone = (#rows == 0), members = rows, worktrees = idle, listError = opts.listError,
-           canNewTab = opts.canNewTab and true or nil }
+           canNewTab = opts.canNewTab and true or nil, finishedN = finishedN }
 end
 
 -- ---- New worktree tab (2026-09-10) ------------------------------------------------

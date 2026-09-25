@@ -810,5 +810,72 @@ tick()
 I = items()
 check("a usage limit still goes red at once", I.q1.needsYou == "needs")
 
+-- ---- Close selected (2026-09-25) ----------------------------------------------------------
+-- 2026-09-25: wgsUltra's card counted 37 -- 34 merged unit tabs no one could close. Instances'
+-- Close selected sends keys; Lua re-vets each one and closes through the tab bridge: a named tab
+-- by its name, a window's unnamed "Claude Code" tabs all together by count -- never keystrokes.
+do
+  local function reg6(host, labels)
+    os.execute('mkdir -p "' .. BR .. '/' .. host .. '.in" "' .. BR .. '/' .. host .. '.out"')
+    local tabs = {}
+    for _, l in ipairs(labels) do tabs[#tabs + 1] = { label = l, group = 1, active = false } end
+    write(BR .. "/" .. host .. ".json", json.encode({ v = 1, pid = host, version = "0.6.0", tabs = tabs, at = os.time() }))
+  end
+  local pidN = 40000
+  local function sess(key, host, status, title)
+    pidN = pidN + 1   -- one claude process each (a shared pid reads as a /clear ghost)
+    write(T .. "/" .. key .. ".jsonl", title and ('{"type":"user","message":{"role":"user","content":"hello"}}\n'
+      .. '{"type":"ai-title","aiTitle":"' .. title .. '","sessionId":"' .. key .. '"}\n') or "")
+    write(T .. "/status/" .. key .. ".json", json.encode({ status = status, session_id = key, name = "wgsUltra",
+      cwd = "/r/W", since = now - 50 * 3600, updated = now - 50 * 3600, editor = "vscode",
+      host_window = tostring(host), session_pid = tostring(pidN), transcript_path = T .. "/" .. key .. ".jsonl" }))
+  end
+  sess("nm", 820, "done", "Fix nm tab")
+  sess("un1", 820, "done", nil)          -- a unit's tab: its task arrived by message, so no name
+  sess("un2", 820, "done", nil)
+  sess("wk", 821, "working", "Busy unit")
+  reg6(820, { "Fix nm tab", "Claude Code", "Claude Code" })
+  reg6(821, { "Busy unit" })
+  tick()
+  I = items()
+  check("close selected fixture: the sessions are on the panel", I.nm and I.un1 and I.un2 and I.wk)
+  check("...the finished ones can be selected and the working one can't",
+        I.nm.cleanSelectable and I.un1.cleanSelectable and I.wk.cleanSelectable == false)
+  alerts = {}
+  quiet(function() fx.closeSessions(json.encode({ "nm", "un1", "un2", "wk", "ghost" })) end)
+  local sent820, cmds = inbox(820), {}
+  for _, f in ipairs(sent820) do cmds[#cmds + 1] = json.decode(read(BR .. "/820.in/" .. f)) end
+  local byLabel, counts = 0, {}
+  for _, c in ipairs(cmds) do
+    if c.label == "Fix nm tab" and c.op == "close" then byLabel = byLabel + 1 end
+    if c.empty then counts[#counts + 1] = c.empty end
+  end
+  table.sort(counts)
+  check("Close selected: the named chat closes by its name", byLabel == 1)
+  check("...and the window's two unnamed tabs by count, two then one  (" .. table.concat(counts, ",") .. ")",
+        #counts == 2 and counts[1] == 1 and counts[2] == 2)
+  check("...a working session is never sent, whatever the panel asked", #inbox(821) == 0)
+  check("...and the toast says what went and what didn't  (" .. table.concat(alerts, " | ") .. ")",
+        table.concat(alerts, " "):find("Closing 3 tabs", 1, true) ~= nil
+        and table.concat(alerts, " "):find("2 left open", 1, true) ~= nil)
+  for _, c in ipairs(cmds) do write(BR .. "/820.out/" .. c.id .. ".json", json.encode({ v = 1, id = c.id, ok = true })) end
+  quiet(function() fx.tabBridgePollResults() end)
+  check("once the bridge confirms, every closed session's card goes",
+        read(T .. "/status/nm.json") == nil and read(T .. "/status/un1.json") == nil and read(T .. "/status/un2.json") == nil)
+  check("...and the working one stays", read(T .. "/status/wk.json") ~= nil)
+
+  -- an unnamed session left unselected in that window: no unnamed tab closes there
+  sess("un3", 822, "done", nil); sess("un4", 822, "done", nil)
+  reg6(822, { "Claude Code", "Claude Code" })
+  tick()
+  alerts = {}
+  quiet(function() fx.closeSessions(json.encode({ "un3" })) end)
+  check("Close selected: one of two unnamed tabs selected -> nothing sent", #inbox(822) == 0)
+  check("...saying why  (" .. table.concat(alerts, " | ") .. ")",
+        table.concat(alerts, " "):find("other unnamed Claude tab", 1, true) ~= nil)
+  for _, k in ipairs({ "wk", "un3", "un4" }) do os.remove(T .. "/status/" .. k .. ".json") end
+  tick()
+end
+
 check("the whole flow never focused a window or pressed a key", taps == 0 and focusCalls == 0)
 finish()

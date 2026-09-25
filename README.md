@@ -186,6 +186,14 @@ per project**, not one per session.
   the normal spawn path; only a worktree the repo itself lists can be opened). The button shows
   the instance count, and a pulsing dot when *another* instance needs you. Right-click →
   **Instances…** opens the same view.
+- **Clearing finished sessions.** Every Instances row has a checkbox. **Select finished** checks
+  the sessions whose merge landed and those finished longer than **Settings → Tile cleanup**
+  allows (`cleanup.idleHours`, default 12; 0 = merged ones only). **Close selected** asks first,
+  then closes those tabs through the tab bridge. Shepherd re-checks every one, so a session that
+  is working, holding a question, mid-merge or driving a batch is never closed. Unnamed
+  "Claude Code" tabs (a batch unit's) look identical, so they close only when **every** unnamed tab
+  in that window is selected. A card with two or more finished sessions shows **🧹 N finished**,
+  which opens Instances with them already checked. Nothing closes on its own.
 - The detail panel stays on the instance you selected even if the card starts showing a
   different one (the card then gets a dashed outline), so a nudge never goes to the wrong
   worktree. Search matches branches and chat titles too; bulk actions still act only on the

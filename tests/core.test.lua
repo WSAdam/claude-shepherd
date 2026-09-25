@@ -10840,5 +10840,135 @@ do
      core.worklistArchiveIsDue(now + 5 * DAY, now), true)
 end
 
+-- ---- Finished sessions are cleared from Instances (2026-09-25) ----
+-- 2026-09-25: wgsUltra's card counted 37 -- 34 merged batch-unit tabs whose post-merge close was
+-- refused (the bridge had lost their tags), a driver and 4 working units -- and nothing offered a
+-- way to clear them. Instances gets a checkbox per session and Close selected; Adam's call: suggest,
+-- never auto-close, and close unnamed tabs only when every unnamed tab in the window is selected.
+do
+  local now = 1790343000
+  local function s(t)
+    local it = { key = "k", status = "done", editor = "vscode", host_window = "85500", since = now - 3600, updated = now - 3600 }
+    for k, v in pairs(t or {}) do it[k] = v end
+    return it
+  end
+  local sel, fin, why = core.cleanupVerdict(s({ merge = { phase = "merged" } }), now, 12)
+  check("cleanup: a merged session is selectable and finished", sel == true and fin == true and why == nil)
+  sel, fin = core.cleanupVerdict(s({ merge = { phase = "merged-dirty" } }), now, 12)
+  check("cleanup: ...so is one merged with a cleanup step left over", sel == true and fin == true)
+  sel, fin = core.cleanupVerdict(s(), now, 12)
+  check("cleanup: done an hour ago is selectable but not finished yet", sel == true and fin == false)
+  sel, fin = core.cleanupVerdict(s({ since = now - 13 * 3600 }), now, 12)
+  check("cleanup: done longer than cleanup.idleHours is finished", sel == true and fin == true)
+  sel, fin = core.cleanupVerdict(s({ status = "idle", since = now - 13 * 3600 }), now, 12)
+  check("cleanup: ...idle too", sel == true and fin == true)
+  sel, fin = core.cleanupVerdict(s({ since = now - 13 * 3600 }), now, 0)
+  check("cleanup: idleHours 0 -> only a merge counts as finished", sel == true and fin == false)
+  sel, fin = core.cleanupVerdict(s({ since = now - 13 * 3600, needsYou = "needs" }), now, 12)
+  check("cleanup: a session that needs Adam is never counted finished", sel == true and fin == false)
+  sel, fin = core.cleanupVerdict(s({ merge = { phase = "merged" }, needsYou = "needs" }), now, 12)
+  check("cleanup: ...not even a merged one (its post-merge gate went red)", sel == true and fin == false)
+  eq("cleanup: the default idle threshold is 12 hours", core.CLEANUP_IDLE_HOURS, 12)
+  for _, c in ipairs({
+    { "a working session", { status = "working" } },
+    { "one waiting on an approval or a question", { status = "approval" } },
+    { "one whose background agents are running", { bg_active = true } },
+    { "one whose merge is requested", { merge = { phase = "requested" } } },
+    { "one whose merge is approved", { merge = { phase = "approved" } } },
+    { "a merged one still in its test gate", { merge = { phase = "merged", gate = { state = "running" } } } },
+    { "a merged one queued for its test gate", { merge = { phase = "merged", gate = { state = "queued" } } } },
+    { "a batch's driver", { fleet = { phase = "approved" } } },
+    { "a terminal session", { editor = "terminal" } },
+    { "a kitty session", { editor = "kitty" } },
+    { "a remote session", { remote = true } },
+    { "one with no known window", { host_window = "" } },
+  }) do
+    local ok2, fin2, w = core.cleanupVerdict(s(c[2]), now, 12)
+    check("cleanup: not selectable -- " .. c[1] .. "  (" .. tostring(w) .. ")",
+          ok2 == false and fin2 == false and type(w) == "string" and w ~= "")
+  end
+
+  -- the plan: which selected tabs the bridge can close, and how
+  local function reg(labels, ver, at)
+    local t = {}
+    for _, x in ipairs(labels) do t[#t + 1] = type(x) == "table" and x or { label = x } end
+    return { v = 1, version = ver or "0.6.0", tabs = t, at = at or now }
+  end
+  -- Adam's window, literally: a named driver, 34 merged unit sessions and 4 working units -- every
+  -- unit's tab untagged (0.5.0 lost them) and unnamed (a unit's task arrives by message)
+  local members, tags, labels, selected = {}, {}, {}, {}
+  local function add(key, status, label)
+    members[#members + 1] = { key = key, status = status, editor = "vscode", host_window = "85500" }
+    labels[key] = label or ""
+  end
+  add("drv", "done", "Local serve fixture plan")
+  local tabs = { "Local serve fixture plan" }
+  for i = 1, 34 do add("u" .. i, "done"); selected["u" .. i] = true; tabs[#tabs + 1] = "Claude Code" end
+  for i = 1, 4 do add("w" .. i, "working"); tabs[#tabs + 1] = "Claude Code" end
+  local regs = { ["85500"] = reg(tabs) }
+  local p = core.cleanupPlan(members, regs, tags, labels, selected, now)
+  check("cleanup plan: 4 unnamed working units unselected -> none of the 34 unnamed tabs is closed",
+        #p.byTab == 0 and #p.byCount == 0 and #p.refused == 34)
+  check("...and each says why  (" .. tostring(p.refused[1] and p.refused[1].why) .. ")",
+        p.refused[1] and p.refused[1].why:find("4 other unnamed", 1, true) ~= nil)
+  for i = 1, 4 do members[35 + i].status = "done"; selected["w" .. i] = true end
+  p = core.cleanupPlan(members, regs, tags, labels, selected, now)
+  check("cleanup plan: once every unnamed tab is selected -> one count close of all 38",
+        #p.byCount == 1 and p.byCount[1].hw == "85500" and p.byCount[1].n == 38 and #p.byCount[1].keys == 38
+        and #p.byTab == 0 and #p.refused == 0)
+  selected.drv = true
+  p = core.cleanupPlan(members, regs, tags, labels, selected, now)
+  check("cleanup plan: the named driver closes by its own name, beside the count",
+        #p.byTab == 1 and p.byTab[1].key == "drv" and p.byTab[1].by == "label" and #p.byCount == 1)
+  selected.drv = nil
+  -- a restored old chat reads "Claude Code" but has no session: the numbers differ, nothing closes
+  local withOld = { "Local serve fixture plan" }
+  for _ = 1, 39 do withOld[#withOld + 1] = "Claude Code" end
+  p = core.cleanupPlan(members, { ["85500"] = reg(withOld) }, tags, labels, selected, now)
+  check("cleanup plan: one more \"Claude Code\" tab than unnamed sessions -> none closed  ("
+        .. tostring(p.refused[1] and p.refused[1].why) .. ")",
+        #p.byCount == 0 and #p.refused == 38 and p.refused[1].why:find("restored old chat", 1, true) ~= nil)
+  p = core.cleanupPlan(members, { ["85500"] = reg(tabs, "0.5.0") }, tags, labels, selected, now)
+  check("cleanup plan: a 0.5.0 bridge closes at most 20 by count -> reload first  ("
+        .. tostring(p.refused[1] and p.refused[1].why) .. ")",
+        #p.byCount == 0 and p.refused[1] and p.refused[1].why:find("Reload Window", 1, true) ~= nil)
+  p = core.cleanupPlan(members, { ["85500"] = reg(tabs, "0.6.0", now - 120) }, tags, labels, selected, now)
+  check("cleanup plan: a bridge that stopped reporting closes nothing", #p.byCount == 0 and #p.byTab == 0 and #p.refused == 38)
+
+  -- a unit whose tag its window still carries closes by the tag, and is not "unnamed"
+  local m2 = { { key = "a", status = "done", editor = "vscode", host_window = "900" },
+               { key = "b", status = "done", editor = "vscode", host_window = "900" },
+               { key = "c", status = "done", editor = "vscode", host_window = "900" } }
+  local r2 = { ["900"] = reg({ { label = "Claude Code", unit = "b9:a" }, "Claude Code", "Fix the login" }) }
+  p = core.cleanupPlan(m2, r2, { a = "b9:a" }, { a = "", b = "", c = "Fix the login" }, { a = true, b = true, c = true }, now)
+  local by = {}
+  for _, e in ipairs(p.byTab) do by[e.key] = e.by end
+  check("cleanup plan: a tagged unit closes by its tag, a named chat by its name",
+        by.a == "unit" and by.c == "label" and #p.byTab == 2)
+  check("...and the one unnamed, untagged tab closes by count (the tagged tab never counts)",
+        #p.byCount == 1 and p.byCount[1].n == 1 and p.byCount[1].keys[1] == "b")
+  -- a named session whose name matches no tab is refused -- never counted as unnamed
+  p = core.cleanupPlan(m2, { ["900"] = reg({ "Claude Code", "Claude Code", "Something else" }) },
+                       {}, { a = "", b = "", c = "Fix the login" }, { a = true, b = true, c = true }, now)
+  local refusedC
+  for _, e in ipairs(p.refused) do if e.key == "c" then refusedC = e.why end end
+  check("cleanup plan: a named chat whose tab doesn't carry its name is refused, with the reason  ("
+        .. tostring(refusedC) .. ")", refusedC ~= nil and refusedC:find("Fix the login", 1, true) ~= nil)
+  check("...while the two unnamed ones still close by count", #p.byCount == 1 and p.byCount[1].n == 2)
+
+  -- Instances rows and the card carry the verdict
+  local a = { key = "a", stackKey = "repo:/r/.git", status = "done", cleanSelectable = true, cleanFinished = true }
+  local b = { key = "b", stackKey = "repo:/r/.git", status = "working", cleanSelectable = false, cleanWhy = "it isn't finished (working)" }
+  local c = { key = "c", stackKey = "repo:/r/.git", status = "done", cleanSelectable = true, cleanFinished = false }
+  local ip = core.instancesPayload("repo:/r/.git", { a, b, c }, {}, {}, {})
+  local rows = {}
+  for _, r in ipairs(ip.members) do rows[r.key] = r end
+  check("instances: a finished row is selectable and marked finished", rows.a.selectable == true and rows.a.finished == true)
+  check("instances: a working row isn't selectable, and says why", rows.b.selectable == nil and rows.b.cleanWhy == "it isn't finished (working)")
+  eq("instances: the payload counts the finished rows", ip.finishedN, 1)
+  core.stackInstances({ a, b, c }, {}, {}, {})
+  eq("stack: every member knows how many of its card's sessions are finished", c.stackFinished, 1)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)
