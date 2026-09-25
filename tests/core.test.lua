@@ -10935,6 +10935,22 @@ do
   p = core.cleanupPlan(members, { ["85500"] = reg(tabs, "0.6.0", now - 120) }, tags, labels, selected, now)
   check("cleanup plan: a bridge that stopped reporting closes nothing", #p.byCount == 0 and #p.byTab == 0 and #p.refused == 38)
 
+  -- 2026-09-25 live: Adam selected 35 of wgsUltra's 36 unnamed tabs (the 36th a unit still working)
+  -- and was told "1 other unnamed Claude tab isn't selected" -- but that window's 0.5.0 bridge closes
+  -- at most 20, so waiting for the unit would only have traded one refusal for another. The blocker
+  -- no selection can fix is named first.
+  local m36, sel35, lab36 = {}, {}, {}
+  local tabs36 = { "Local serve fixture plan" }
+  for i = 1, 36 do
+    m36[#m36 + 1] = { key = "z" .. i, status = (i == 36) and "working" or "done", editor = "vscode", host_window = "85500" }
+    lab36["z" .. i] = ""
+    if i < 36 then sel35["z" .. i] = true end
+    tabs36[#tabs36 + 1] = "Claude Code"
+  end
+  p = core.cleanupPlan(m36, { ["85500"] = reg(tabs36, "0.5.0") }, {}, lab36, sel35, now)
+  check("cleanup plan: an old bridge with more than 20 unnamed tabs says reload first, before the selection  ("
+        .. tostring(p.refused[1] and p.refused[1].why) .. ")",
+        #p.refused == 35 and p.refused[1].why:find("Reload Window", 1, true) ~= nil)
   -- a unit whose tag its window still carries closes by the tag, and is not "unnamed"
   local m2 = { { key = "a", status = "done", editor = "vscode", host_window = "900" },
                { key = "b", status = "done", editor = "vscode", host_window = "900" },

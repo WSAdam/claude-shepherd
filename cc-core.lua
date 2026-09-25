@@ -962,18 +962,29 @@ end
 -- (the empty-chat rule, widened 2026-09-25): only when EVERY unnamed session in that window is being
 -- closed, and the window's untagged "Claude Code" tabs number exactly those -- a restored old chat
 -- (a "Claude Code" tab with no session) makes the numbers differ, and nothing closes.
+-- The window's own blockers (no bridge, a silent one, one too old for this many) are named before
+-- the selection: no choice of checkboxes can fix those (2026-09-25 live -- see core.test.lua).
 function M.unnamedTabsVerdict(reg, selectedN, unnamedN, now)
   selectedN, unnamedN = math.floor(tonumber(selectedN) or 0), math.floor(tonumber(unnamedN) or 0)
-  if unnamedN > selectedN then
-    local o = unnamedN - selectedN
-    return false, o .. " other unnamed Claude tab" .. (o == 1 and " in that window isn't" or "s in that window aren't")
-      .. " selected -- unnamed tabs can't be told apart, so close them all together or not at all"
-  end
   if type(reg) ~= "table" or type(reg.tabs) ~= "table" then
     return false, "the Shepherd tab bridge isn't running in that VS Code window (Developer: Reload Window there once)"
   end
   if (tonumber(now) or 0) - (tonumber(reg.at) or 0) > M.TAB_BRIDGE_FRESH then
     return false, "the Shepherd tab bridge in that VS Code window stopped reporting"
+  end
+  local need = math.max(unnamedN, selectedN)
+  if need > 20 and not versionAtLeast(reg.version, "0.6.0") then
+    return false, "that window's Shepherd tab bridge (" .. tostring(reg.version)
+      .. ") closes at most 20 unnamed tabs -- Developer: Reload Window there once"
+  end
+  if need > 1 and not versionAtLeast(reg.version, "0.4.0") then
+    return false, "that window's Shepherd tab bridge is older (" .. tostring(reg.version)
+      .. ") -- Developer: Reload Window there once"
+  end
+  if unnamedN > selectedN then
+    local o = unnamedN - selectedN
+    return false, o .. " other unnamed Claude tab" .. (o == 1 and " in that window isn't" or "s in that window aren't")
+      .. " selected -- unnamed tabs can't be told apart, so close them all together or not at all"
   end
   local n = 0
   for _, t in ipairs(reg.tabs) do
@@ -982,14 +993,6 @@ function M.unnamedTabsVerdict(reg, selectedN, unnamedN, now)
   if n ~= selectedN then
     return false, "that window shows " .. n .. " unnamed \"" .. M.EMPTY_TAB_LABEL .. "\" tab(s) but Shepherd has "
       .. selectedN .. " unnamed session(s) there -- a restored old chat may be among them, so none is closed"
-  end
-  if n > 20 and not versionAtLeast(reg.version, "0.6.0") then
-    return false, "that window's Shepherd tab bridge (" .. tostring(reg.version)
-      .. ") closes at most 20 unnamed tabs -- Developer: Reload Window there once"
-  end
-  if n > 1 and not versionAtLeast(reg.version, "0.4.0") then
-    return false, "that window's Shepherd tab bridge is older (" .. tostring(reg.version)
-      .. ") -- Developer: Reload Window there once"
   end
   return true
 end
