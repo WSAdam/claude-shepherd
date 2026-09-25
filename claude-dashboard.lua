@@ -8638,8 +8638,19 @@ local HTML = [[
   /* header with theme switcher */
   #bar { display:flex; align-items:center; justify-content:space-between;
          padding:6px 10px; gap:8px; border-bottom:1px solid var(--border); }
-  #bar .t { color:var(--muted); font-size:11px; letter-spacing:.04em; text-transform:uppercase; }
-  #bar .right { display:flex; align-items:center; gap:6px; }
+  #bar .t { color:var(--muted); font-size:11px; letter-spacing:.04em; text-transform:uppercase;
+            white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; }
+  #bar .right { display:flex; align-items:center; gap:6px; flex:0 0 auto; margin-left:auto;
+                flex-wrap:wrap; justify-content:flex-end; row-gap:4px; }
+  /* A narrow panel (the webview's viewport IS the panel; it resizes down to core.PANEL_MIN_W = 200).
+     The row needs 10 padding + 109 one-line title + 8 gap + 326 controls (New 42, Sleep ok 83,
+     lock 33, menu 32, settings 26, theme 80, 5 gaps of 6) + 10 padding = 463px, so below 470 (a
+     few px spare for the menu's notify badge) the title hides and the controls take the row.
+     Below their own 346px they wrap onto a second, right-aligned row. */
+  @media (max-width: 469px) {
+    #bar .t { display:none; }
+    #bar .right { flex-shrink:1; }
+  }
   #theme { background:var(--surface); color:var(--text); border:1px solid var(--border);
            border-radius:8px; font-size:12px; padding:3px 6px; }
   #spawn { background:var(--surface); color:var(--ok); border:1px solid var(--ok); border-radius:8px;

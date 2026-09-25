@@ -137,6 +137,9 @@ echo ""
 echo "== node: commit stats -- the lines fit a narrow panel, the drawer opens and stays open (real browser) =="
 node "$DIR/commits-layout.browser.test.js" || fail=1
 echo ""
+echo "== node: the top toolbar fits a narrow panel -- title hides, controls wrap, no sideways scroll (real browser) =="
+node "$DIR/toolbar-width.browser.test.js" || fail=1
+echo ""
 echo "== node: project cards (behavioral, runs the shipped fold + card extras) =="
 node "$DIR/stack-fold.test.js" || fail=1
 echo ""
