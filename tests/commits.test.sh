@@ -168,4 +168,36 @@ assert_eq "exactly the four commit results are found" "4" "$(sess | wc -l | tr -
 CC_COMMITS_ENGINE=grep bash "$S" --since $(( NOW - 14 * DAY )) --lookback-days 14 --projects-dir "$PROJ" > "$TMP/sess.grep"
 assert_eq "without ripgrep, grep finds exactly the same sessions" "$(sess)" "$(grep "^@@commitsess	" "$TMP/sess.grep")"
 
+# 2026-09-28: live, 2 of the day's 33 commits linked: most sessions commit with `git commit -q`,
+# which prints no "[branch sha] subject" line. The subject is read from the command itself --
+# a heredoc's first line, a -m message, or the first line of a -F file that still exists -- in
+# a Bash tool_use record shaped like Claude Code's own (VS Code 2.1.280), JSON-escaped.
+tool_use() { # <iso> <command, JSON-escaped>
+  printf '{"parentUuid":"p2","isSidechain":false,"message":{"model":"claude-opus-5-5","id":"msg_1","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_2","name":"Bash","input":{"command":"%s","description":"Commit"},"caller":{"type":"direct"}}]},"type":"assistant","uuid":"u2","timestamp":"%s","cwd":"%s","sessionId":"sess-quiet"}\n' \
+    "$2" "$1" "$ALPHA"
+}
+QUIET="$PROJ/alpha/sess-quiet.jsonl"
+MSGF="$TMP/commit-msg.txt"
+printf 'From a message file\n\nThe body.\n' > "$MSGF"
+{
+  tool_use "$T1" "git add -A && git commit -q -F - <<'EOF'\\nA quiet heredoc commit\\n\\nThe body.\\nEOF"
+  tool_use "$T2" 'git commit -q -m \"A quiet -m commit\"'
+  tool_use "$T2" "git commit -q -m \\\"\$(cat <<'EOF'\\nClaude Code's own style\\n\\nThe body.\\nEOF\\n)\\\""
+  tool_use "$T3" "git commit -q -F $MSGF"
+  tool_use "$T3" 'git commit -q --amend --no-edit'
+  tool_use "$T3" 'echo \"use git commit to save\"'
+  said "$T3" 'Next: git commit -q -m \"Only a plan\"'
+} > "$QUIET"
+bash "$S" --since $(( NOW - 14 * DAY )) --lookback-days 14 --projects-dir "$PROJ" > "$TMP/quiet"
+cmds() { grep "^@@commitcmd	" "$1"; }
+assert_eq "a quiet commit's heredoc names its transcript, time and subject" \
+  "@@commitcmd${TAB}$QUIET${TAB}$T1${TAB}A quiet heredoc commit" "$(cmds "$TMP/quiet" | grep -F 'heredoc')"
+assert_eq "...and so does a -m message" "A quiet -m commit" "$(cmds "$TMP/quiet" | grep -F -- '-m commit' | cut -f4)"
+assert_eq "...and Claude Code's -m \"\$(cat <<'EOF' ...)\" style" "Claude Code's own style" "$(cmds "$TMP/quiet" | grep -F 'own style' | cut -f4)"
+assert_eq "...and the first line of a -F message file" "From a message file" "$(cmds "$TMP/quiet" | grep -F 'message file' | cut -f4)"
+assert_eq "an amend without a new message, an echo and a plan in text name no subject" "4" "$(cmds "$TMP/quiet" | wc -l | tr -d ' ')"
+assert_eq "the quiet commands add no @@commitsess line" "4" "$(sess | wc -l | tr -d ' ')"
+CC_COMMITS_ENGINE=grep bash "$S" --since $(( NOW - 14 * DAY )) --lookback-days 14 --projects-dir "$PROJ" > "$TMP/quiet.grep"
+assert_eq "without ripgrep, grep finds exactly the same commands" "$(cmds "$TMP/quiet")" "$(cmds "$TMP/quiet.grep")"
+
 finish

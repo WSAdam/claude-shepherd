@@ -132,8 +132,11 @@ project for its commits) and the latest commits across all of them.
   dimmed, once it has ended. Nothing goes in the commit message. `git commit` prints
   `[branch sha] subject` into the session's Bash result, and Shepherd matches that line to the
   commit by subject and author time (the record at most 15 minutes after the commit, the nearest
-  one winning), so a rebased commit keeps its link. A subagent's commit belongs to its parent
-  session. Commits made outside Claude, or with `git commit -q`, show no session. The scan uses
+  one winning), so a rebased commit keeps its link. `git commit -q` prints nothing, so Shepherd
+  also reads the subject from the `git commit` command itself: a heredoc's first line, a `-m`
+  message, or the first line of a `-F` file that still exists (that record comes up to 15 minutes
+  *before* the commit). A subagent's commit belongs to its parent session. Commits made outside
+  Claude show no session. The scan uses
   ripgrep when it's installed (well under a second over two weeks of transcripts) and grep
   otherwise (a few seconds, still in the background).
 - git runs in the background every 5 minutes, on **Update now**, and when the drawer opens (if the

@@ -12476,6 +12476,24 @@ function M.parseCommitLog(text)
           at = at, branch = f[3], sha = f[4], subject = commitSessionSubject(line:sub(p)) }
       end
       commit = nil
+    elseif line:sub(1, 12) == "@@commitcmd\t" then
+      -- @@commitcmd\t<transcript>\t<ISO time>\t<subject, JSON-escaped> (2026-09-28): the subject a
+      -- `git commit` command gave, read from the command itself -- `git commit -q` prints no
+      -- "[branch sha]" line. Its record comes BEFORE the commit (kind "cmd": commitSessionFor).
+      local f, p = {}, 13
+      for _ = 1, 2 do
+        local t = line:find("\t", p, true)
+        if not t then break end
+        f[#f + 1] = line:sub(p, t - 1); p = t + 1
+      end
+      local at = #f == 2 and M.isoToEpoch(f[2]) or nil
+      if at then
+        local parent = f[1]:match("^(.*)/subagents/")
+        local transcript = parent and (parent .. ".jsonl") or f[1]
+        out.sessions[#out.sessions + 1] = { transcript = transcript, id = transcript:match("([^/]+)%.jsonl$"),
+          at = at, kind = "cmd", subject = commitSessionSubject(line:sub(p)) }
+      end
+      commit = nil
     elseif line:sub(1, 1) == "\1" and repo then
       -- \1<sha>\t<author epoch>\t<author email>\t<subject>: the subject may hold tabs
       local f, p = {}, 2
@@ -12530,7 +12548,17 @@ function M.commitSessionFor(sessions, c)
   local best, bestD, bestSha
   for _, s in ipairs(sessions) do
     local d = tonumber(s.at) and (s.at - at) or nil
-    if s.subject == subject and d and d >= -M.COMMIT_SESSION_EARLY and d <= M.COMMIT_SESSION_LATE then
+    -- What git printed comes after the commit (up to LATE later, EARLY of clock slop before);
+    -- the command that made it comes before, so a "cmd" record's window is the mirror image.
+    local inWindow = false
+    if d then
+      if s.kind == "cmd" then
+        inWindow = d >= -M.COMMIT_SESSION_LATE and d <= M.COMMIT_SESSION_EARLY
+      else
+        inWindow = d >= -M.COMMIT_SESSION_EARLY and d <= M.COMMIT_SESSION_LATE
+      end
+    end
+    if s.subject == subject and inWindow then
       local ad = math.abs(d)
       local shaHit = type(s.sha) == "string" and s.sha ~= "" and sha:sub(1, #s.sha) == s.sha
       if not best or ad < bestD or (ad == bestD and shaHit and not bestSha) then

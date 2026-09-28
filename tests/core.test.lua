@@ -11535,6 +11535,24 @@ do
   eq("session links: commitSessionFor matches one commit",
      (core.commitSessionFor(sp.sessions, { sha = "aaa9", at = 1790341200, subject = "feat: today\twith a tab" }) or {}).id, "s-one")
 
+  -- 2026-09-28: live, 2 of the day's 33 commits linked: most sessions commit with `git commit -q`,
+  -- which prints no "[branch sha] subject" line. cc-commits.sh now also lists the subject from the
+  -- git commit command itself (@@commitcmd), a record written BEFORE the commit it makes.
+  local function cmd(path, iso, subject) return "@@commitcmd" .. T .. path .. T .. iso .. T .. subject end
+  local cp = core.parseCommitLog(log .. "\n" .. table.concat({
+    cmd(P .. "c-early.jsonl", "2026-09-18T15:50:00.000Z", "last fri noon"),              -- 10 min before aaa7
+    cmd(P .. "c-after.jsonl", "2026-09-25T13:02:30.000Z", "feat: today\\twith a tab"),   -- 2.5 min AFTER aaa1
+    cmd(P .. "c-bad.jsonl", "not-a-time", "x"),
+  }, "\n"))
+  eq("commit commands: every @@commitcmd line with a real time is kept", #cp.sessions, 2)
+  eq("commit commands: ...marked as a command, with no sha", tostring(cp.sessions[1].kind) .. "|" .. tostring(cp.sessions[1].sha), "cmd|nil")
+  eq("commit commands: ...its subject JSON-unescaped", cp.sessions[2].subject, "feat: today\twith a tab")
+  local cw = core.commitWeek(cp, { now = NOW, tzOffset = EDT })
+  local function cmdBy(sha) for _, c in ipairs(cw.recent) do if c.sha == sha then return c end end end
+  eq("commit commands: a quiet commit links to the session whose command made it minutes before",
+     cmdBy("aaa7") and cmdBy("aaa7").session and cmdBy("aaa7").session.id, "c-early")
+  eq("commit commands: a command written after the commit didn't make it", cmdBy("aaa1") and cmdBy("aaa1").session, nil)
+
   -- Transcript is offered only while the session is live: a tile with that session id (or transcript).
   core.annotateCommitSessions(sw, {
     { key = "k-one", session_id = "s-one", label = "Alpha tab", name = "alpha" },

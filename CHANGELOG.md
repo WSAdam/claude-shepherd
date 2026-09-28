@@ -24,6 +24,7 @@ One line per unit as it merges; the section gets its date and full write-up when
 - One list of shipped files (`SHIPPED`) that install.sh, uninstall.sh, `make install` and the tests all read, and `make setup` wires every hook a new release adds to an existing install: a new script on an event Shepherd already uses, and a new matcher group on any event (not only PreToolUse). A re-run changes nothing, and uninstall removes exactly what install added.
 - Each commit in the commit drawer names the session that made it, and a live one opens its Transcript: `cc-commits.sh` lists the `[branch sha] subject` lines `git commit` printed into the transcripts (`@@commitsess`), matched to commits by subject and author time so a rebase keeps the link. Commit messages are untouched.
 - Talk mode: one click in the tile menu or the detail panel makes a session discussion only (`~/.claude/cc-talk/<key>`, a TALK badge on the tile). Its edits outside `~/.claude/` and the scratchpads, and every shell command that isn't read-only (`cc_cmd_readonly`), are denied with "Talk mode: discussion only", gate armed or not; the ledger records `by: "talk"`.
+- Commits made with `git commit -q` link to their session too: the subject is read from the `git commit` command (a heredoc, `-m`, or a `-F` file), which lifted today's linked commits from 2 of 33 to 33 of 33.
 
 ## 2026-09-25 — Merged unit tabs close again, and Instances can clear the rest
 

@@ -16,6 +16,7 @@
 #   \x01<sha><TAB><author epoch><TAB><author email><TAB><subject>
 #   <added><TAB><deleted><TAB><path>               git --numstat ("-" for a binary file)
 #   @@commitsess<TAB><transcript><TAB><ISO time><TAB><branch><TAB><short sha><TAB><subject>
+#   @@commitcmd<TAB><transcript><TAB><ISO time><TAB><subject>
 #
 # The @@commitsess lines come last: every "[branch sha] subject" that `git commit` printed into
 # a Bash tool result, in the transcripts touched since <epoch>, with that record's timestamp and
@@ -23,6 +24,10 @@
 # time, so each commit links to the session that made it without a word in its message. A grep
 # over the records, never a JSON decode: ripgrep when installed (~0.3s over 900MB of
 # transcripts), else grep (~5s). CC_COMMITS_ENGINE=grep forces the fallback (the tests use it).
+# 2026-09-28: `git commit -q` prints no such line, and most sessions commit that way, so the
+# same scan also reads the subject from each Bash tool_use's git commit command (@@commitcmd):
+# a heredoc's first line, a -m message, or the first line of a -F file that still exists. That
+# record is written before the commit it makes.
 #
 # Shepherd runs it in an hs.task with stdout redirected to a scratch file (a pipe deadlocks
 # past ~64KB). Exit 2 on a bad argument.
@@ -102,19 +107,61 @@ commit_sessions() {
   fi
   local scan
   if [ "$engine" = rg ]; then
-    scan=(rg --no-config --no-messages --no-heading --with-filename --no-line-number -e "$re")
+    scan=(rg --no-config --no-messages --no-heading --with-filename --no-line-number -e "$re" -e 'git commit')
   else
-    scan=(env LC_ALL=C grep -H -E -e "$re")
+    scan=(env LC_ALL=C grep -H -E -e "$re" -e 'git commit')
   fi
   find "$projects" -type f -name '*.jsonl' -mmin "-$mins" -exec "${scan[@]}" {} + 2>/dev/null |
-    LC_ALL=C awk '{
+    LC_ALL=C awk '
+    function trim(x) { sub(/^ +/, "", x); sub(/ +$/, "", x); return x }
+    # The subject a git commit command gives its commit, still JSON-escaped ("" when it names none).
+    function commit_subject(cmd,    r, t, q, e, p, f, line) {
+      r = index(cmd, "git commit")
+      if (r == 0) return ""
+      t = substr(cmd, r + 10)
+      if (match(t, /<<-?\047?(\\")?[A-Za-z_][A-Za-z0-9_]*\047?(\\")?\\n/)) {   # heredoc: its first line
+        t = substr(t, RSTART + RLENGTH); e = index(t, "\\n")
+        return trim(e ? substr(t, 1, e - 1) : "")
+      }
+      if (match(t, /(^| )-[A-Za-z]*m +(\\"|\047)/)) {                             # -m "..." or -m (single-quoted)
+        q = substr(t, RSTART + RLENGTH - 1, 1); t = substr(t, RSTART + RLENGTH)
+        e = (q == "\"") ? index(t, "\\\"") : index(t, "\047")
+        p = index(t, "\\n"); if (p && (!e || p < e)) e = p
+        return trim(e ? substr(t, 1, e - 1) : "")
+      }
+      if (match(t, /(^| )-[A-Za-z]*F +\/[^ ;&|]+/)) {                             # -F <file>: its first line
+        f = substr(t, RSTART, RLENGTH); sub(/^ ?-[A-Za-z]*F +/, "", f)
+        line = ""
+        if ((getline line < f) > 0) { close(f); return trim(line) }
+        close(f)
+      }
+      return ""
+    }
+    {
       i = index($0, ".jsonl:")
       if (i == 0) next
       path = substr($0, 1, i + 5); body = substr($0, i + 7)
-      if (index(body, "\"tool_result\"") == 0) next
       if (!match(body, /"timestamp":"[^"]*"/)) next
       ts = substr(body, RSTART + 13, RLENGTH - 14)
       split("", seen)
+      if (index(body, "\"type\":\"tool_use\"") && index(body, "\"name\":\"Bash\"") && index(body, "git commit")) {
+        s = body
+        while ((k = index(s, "\"command\":\"")) > 0) {
+          s = substr(s, k + 11); n = length(s); j = 1; cmd = ""
+          while (j <= n) {                     # the JSON string, still escaped, up to its closing quote
+            ch = substr(s, j, 1)
+            if (ch == "\\") { cmd = cmd substr(s, j, 2); j += 2; continue }
+            if (ch == "\"") break
+            cmd = cmd ch; j++
+          }
+          s = substr(s, j + 1)
+          subj = commit_subject(cmd)
+          if (subj == "" || (("cmd\t" subj) in seen)) continue
+          seen["cmd\t" subj] = 1
+          print "@@commitcmd\t" path "\t" ts "\t" subj
+        }
+      }
+      if (index(body, "\"tool_result\"") == 0) next
       s = body
       while (match(s, /\[[^]\\" ]+( [^]\\" ]+)? [0-9a-f]{7,40}\] ([^\\"]|\\[^n])*/)) {
         m = substr(s, RSTART, RLENGTH); s = substr(s, RSTART + RLENGTH)
