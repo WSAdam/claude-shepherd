@@ -401,4 +401,120 @@ got="$(jq -r '.tool_started_at // "cleared"' "$TF" 2>/dev/null)"
 assert_eq "the matching posttooluse clears the in-flight tool" "cleared" "$got"
 assert_json "...and the session is still working" "$TF" '.status' "working"
 
+# ---- what a new session is told at SessionStart: handoff notes (2026-09-28) ----
+# A fresh or respawned session started blank. Claude Code adds a SessionStart hook's stdout to the
+# session's context, so cc-status.sh prints cc_session_context there, once, at the end. ev() above
+# throws stdout away; evout() keeps it. After /clear: a one-line pointer to the note the session
+# before it left (the same claude process, matched by pid). After a respawn: the whole note, once.
+NOTES="$CC_NOTES_DIR"
+mkdir -p "$NOTES/pending"
+# The pid match is for editor tabs; pin the editor so a kitty shell running the suite can't change it.
+evout() { printf '%s' "$2" | CLAUDE_CODE_ENTRYPOINT=claude-vscode bash "$CC" "$1" 2>/dev/null; }
+seed() { printf '%s' "$2" > "$CC_STATUS_DIR/$1.json"; }   # a status file the hook will merge into
+hash_of() { lua - "$ROOT/cc-core.lua" "$1" <<'LUA'
+io.write(dofile(arg[1]).cheapHash(arg[2]))
+LUA
+}
+PCWD="/Users/x/Programming/handoff-proj"
+
+got="$(evout sessionstart "{\"session_id\":\"fresh0\",\"cwd\":\"$PCWD\",\"source\":\"startup\"}")"
+assert_eq "a plain startup with no note prints nothing" "" "$got"
+got="$(evout stop "{\"session_id\":\"fresh0\",\"cwd\":\"$PCWD\"}")"
+assert_eq "no other event prints to stdout" "" "$got"
+
+# /clear: the pointer
+printf '<!-- cc-handoff match:pid-4242-99 -->\n# Handoff: handoff-proj\nLast turn: made progress, 2026-09-28 17:54\n' > "$NOTES/old1.handoff.md"
+printf '<!-- cc-handoff match:pid-4242-99 -->\n# Handoff: handoff-proj\nLast turn: did nothing, 2026-09-27 09:00\n' > "$NOTES/older.handoff.md"
+touch -t 202609270900 "$NOTES/older.handoff.md"
+printf '<!-- cc-handoff match:pid-5555-99 -->\n# Handoff: another tab in the same window\nLast turn: done, 2026-09-28 18:00\n' > "$NOTES/tab2.handoff.md"
+seed clear1 '{"session_id":"clear1","session_pid":"4242","host_window":"99"}'
+got="$(evout sessionstart "{\"session_id\":\"clear1\",\"cwd\":\"$PCWD\",\"source\":\"clear\"}")"
+assert_eq "after /clear the part is labelled" "[Shepherd: handoff]" "$(printf '%s\n' "$got" | head -1)"
+body="$(printf '%s\n' "$got" | sed 1d)"
+assert_eq "...and is one line" "1" "$(printf '%s\n' "$body" | grep -c .)"
+case "$body" in *"$NOTES/old1.handoff.md"*) r=yes ;; *) r="no: $body" ;; esac
+assert_eq "...pointing at the newest note this claude process left" "yes" "$r"
+case "$body" in *"made progress"*) r=yes ;; *) r="no: $body" ;; esac
+assert_eq "...saying how that turn ended" "yes" "$r"
+assert_json "the status file is still written" "$CC_STATUS_DIR/clear1.json" '.status' "idle"
+seed clear2 '{"session_id":"clear2","session_pid":"7777","host_window":"99"}'
+got="$(evout sessionstart "{\"session_id\":\"clear2\",\"cwd\":\"$PCWD\",\"source\":\"clear\"}")"
+assert_eq "a /clear in a process that left no note gets no pointer" "" "$got"
+got="$(evout sessionstart "{\"session_id\":\"clear9\",\"cwd\":\"$PCWD\",\"source\":\"clear\"}")"
+assert_eq "...nor one whose claude pid is unknown" "" "$got"
+
+# respawn: the pending note, consumed once
+H="$(hash_of "$PCWD")"
+printf '# Handoff: handoff-proj\nLast turn: blocked, 2026-09-28 18:10\n\n## Last result\nThe push was denied.\n' > "$NOTES/pending/cwd-$H.md"
+got="$(evout sessionstart "{\"session_id\":\"resumed1\",\"cwd\":\"$PCWD\",\"source\":\"resume\"}")"
+assert_eq "a resumed session is told nothing" "" "$got"
+assert_eq "...and leaves the pending note for the respawn" "yes" "$([ -f "$NOTES/pending/cwd-$H.md" ] && echo yes || echo no)"
+got="$(evout sessionstart "{\"session_id\":\"respawn1\",\"cwd\":\"$PCWD\",\"source\":\"startup\"}")"
+assert_eq "a respawned session starts with the note, labelled" "[Shepherd: handoff]" "$(printf '%s\n' "$got" | head -1)"
+case "$got" in *"## Last result"*"The push was denied."*) r=yes ;; *) r="no: $got" ;; esac
+assert_eq "...the whole note" "yes" "$r"
+assert_absent "...which is consumed" "$NOTES/pending/cwd-$H.md"
+got="$(evout sessionstart "{\"session_id\":\"respawn2\",\"cwd\":\"$PCWD\",\"source\":\"startup\"}")"
+assert_eq "...once: the next startup there is told nothing" "" "$got"
+got="$(ls "$NOTES/pending" | tr '\n' ' ')"
+assert_eq "...and no claim file is left behind" "" "$got"
+
+# a kitty respawn's note is named by its lineage (cc-status.sh publishes it as budget_lineage)
+LIN="/x/handoff-proj@unix:/tmp/kitty-12#3"
+printf '# Handoff: kitty\n\n## Last result\nkitty lineage note\n' > "$NOTES/pending/lineage-$(hash_of "$LIN").md"
+seed kitty1 "{\"session_id\":\"kitty1\",\"budget_lineage\":\"$LIN\"}"
+got="$(evout sessionstart "{\"session_id\":\"kitty1\",\"cwd\":\"/elsewhere\",\"source\":\"startup\"}")"
+case "$got" in *"kitty lineage note"*) r=yes ;; *) r="no: $got" ;; esac
+assert_eq "a kitty respawn finds its note by lineage" "yes" "$r"
+
+# a pending note nobody took within the hour is stale: dropped, not shown to a later session
+printf '# Handoff: stale\n' > "$NOTES/pending/cwd-$H.md"
+touch -t 202609010000 "$NOTES/pending/cwd-$H.md"
+got="$(evout sessionstart "{\"session_id\":\"late1\",\"cwd\":\"$PCWD\",\"source\":\"startup\"}")"
+assert_eq "a pending note older than an hour isn't shown" "" "$got"
+assert_absent "...and is dropped" "$NOTES/pending/cwd-$H.md"
+
+# Shepherd's own internal runs never take a note
+printf '# Handoff: internal\n' > "$NOTES/pending/cwd-$H.md"
+got="$(CC_SHEPHERD_INTERNAL=1 evout sessionstart "{\"session_id\":\"int1\",\"cwd\":\"$PCWD\",\"source\":\"startup\"}")"
+assert_eq "an internal run is told nothing" "" "$got"
+assert_eq "...and leaves the note" "yes" "$([ -f "$NOTES/pending/cwd-$H.md" ] && echo yes || echo no)"
+rm -f "$NOTES/pending/cwd-$H.md"
+
+# the cap: the context is labelled per part and never longer than CC_CONTEXT_MAX
+awk 'BEGIN { for (i = 0; i < 400; i++) print "line " i " of a very long handoff note, padded out to fifty chars" }' > "$NOTES/pending/cwd-$H.md"
+got="$(evout sessionstart "{\"session_id\":\"big1\",\"cwd\":\"$PCWD\",\"source\":\"startup\"}")"
+n="$(printf '%s' "$got" | wc -c | tr -d ' ')"
+if [ "$n" -le 8000 ] && [ "$n" -gt 7000 ]; then r=capped; else r="$n chars"; fi
+assert_eq "a long note is cut at the cap (8000 characters)" "capped" "$r"
+case "$got" in *"[cut: Shepherd's session context is capped at 8000 characters]") r=yes ;; *) r=no ;; esac
+assert_eq "...and says so at the end" "yes" "$r"
+got="$(
+  . "$ROOT/cc-lib.sh"
+  _cc_ctx_extra() { printf 'second part for %s\n' "$1"; }
+  _cc_ctx_huge() { awk 'BEGIN { for (i = 0; i < 100; i++) print "huge part line " i }'; }
+  CC_CONTEXT_PARTS="extra huge extra" CC_CONTEXT_MAX=300 cc_session_context startup nokey /nowhere
+)"
+assert_eq "each part is labelled with its name" "[Shepherd: extra]" "$(printf '%s\n' "$got" | head -1)"
+case "$got" in *"[Shepherd: huge]"*) r=yes ;; *) r=no ;; esac
+assert_eq "...the next part too" "yes" "$r"
+n="$(printf '%s' "$got" | wc -c | tr -d ' ')"
+if [ "$n" -le 300 ]; then r=capped; else r="$n chars"; fi
+assert_eq "the cap is on the total, across parts" "capped" "$r"
+assert_eq "...and a part past the cap is left out" "1" "$(printf '%s\n' "$got" | grep -c 'Shepherd: extra')"
+
+# the shell and Lua agree on the names (Lua writes the notes, the hook reads them)
+. "$ROOT/cc-lib.sh"
+for p in "$PCWD" "/Users/x/Programmierung/Büro Ω" ""; do
+  assert_eq "cc_hash matches core.cheapHash for [$p]" "$(hash_of "$p")" "$(cc_hash "$p")"
+done
+lua_match() { lua - "$ROOT/cc-core.lua" "$@" <<'LUA'
+io.write(dofile(arg[1]).handoffMatch({ editor = arg[2], session_pid = arg[3], host_window = arg[4],
+  kitty_listen_on = arg[5], kitty_window_id = arg[6] }) or "")
+LUA
+}
+assert_eq "cc_handoff_match matches core.handoffMatch for an editor tab" "$(lua_match vscode 4242 99 "" "")" "$(cc_handoff_match vscode 4242 99 "" "")"
+assert_eq "...and for a kitty window" "$(lua_match kitty "" "" unix:/tmp/kitty-12 3)" "$(cc_handoff_match kitty "" "" unix:/tmp/kitty-12 3)"
+assert_eq "...and neither matches without a pid" "$(lua_match vscode "" 99 "" "")" "$(cc_handoff_match vscode "" 99 "" "")"
+
 finish

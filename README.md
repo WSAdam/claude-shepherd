@@ -80,7 +80,7 @@ Every feature below has a reference page one click away. The panel lists the sam
 
 ### Automate
 
-The automatic behaviours here are off until you turn them on.
+The automatic behaviours here are off until you turn them on, except handoff notes.
 
 - [**Task queue & auto-feed**](docs/automation.md#task-queue): line up tasks per session, feed the
   next when one finishes, and route a project's tasks to whichever session is free.
@@ -90,6 +90,8 @@ The automatic behaviours here are off until you turn them on.
   session to a cheaper or stronger model based on how hard it looks.
 - [**Auto-respawn & auto-continue**](docs/automation.md#auto-respawn-and-auto-continue): relaunch a
   session that died mid-turn, or resume one frozen on an API error, within retry budgets.
+- [**Handoff notes**](docs/automation.md#handoff-notes): each finished turn leaves a note; after
+  /clear the new session is told where it is, and a respawned session starts with it.
 - [**Automation rules**](docs/automation.md#automation-rules): when a session finishes, errors or
   stalls, log it, relabel it, nudge it or feed it.
 - [**Routines**](docs/automation.md#routines): spawn a session or push a digest on a cron schedule.

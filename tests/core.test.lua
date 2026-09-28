@@ -8438,7 +8438,9 @@ do
   -- 2026-09-28: 13 -> 14 for how each turn ended ("turns", flagged new).
   -- 2026-09-28: 14 -> 15 for always-ask commands ("alwaysask", flagged new).
   -- 2026-09-28: 15 -> 16 for talk mode ("talk", flagged new).
-  eq("FEATURES: the 16 new features are flagged", newCount, 16)
+  -- 2026-09-28: 16 -> 17 for handoff notes ("handoffs", flagged new).
+  eq("FEATURES: the 17 new features are flagged", newCount, 17)
+  check("FEATURES: lists handoff notes", keys.handoffs == true)
   check("FEATURES: lists talk mode", keys.talk == true)
   check("FEATURES: lists how each turn ended", keys.turns == true)
   check("FEATURES: lists always-ask commands", keys.alwaysask == true)
@@ -11776,6 +11778,99 @@ do
   eq("always-ask: the bundle editor keeps alwaysAsk", core.policyBundleNorm({ alwaysAsk = { " kubectl delete ", "" } }).alwaysAsk[1], "kubectl delete")
   eq("always-ask: an empty alwaysAsk is dropped on normalize", core.policyBundleNorm({ alwaysAsk = {} }).alwaysAsk, nil)
   eq("always-ask: a non-list alwaysAsk is refused", core.validatePolicyBundle({ alwaysAsk = "git push" }).ok, false)
+end
+
+-- ---- handoff notes (2026-09-28) ----
+-- A fresh or respawned session starts blank: nothing told it what the last one did. On each done
+-- edge Shepherd writes ~/.claude/cc-notes/<key>.handoff.md from the turn's evidence; a /clear gets
+-- a one-line pointer to it (matched by the claude pid), a respawn gets the whole note once.
+do
+  local J = core.json.encode
+  local n = 0
+  local function prompt(t) return J({ type = "user", origin = { kind = "human" }, promptSource = "sdk",
+    message = { role = "user", content = { { type = "text", text = t } } } }) end
+  local function said(t) return J({ type = "assistant", message = { role = "assistant", content = { { type = "text", text = t } } } }) end
+  local function call(name, input, content, isErr)
+    n = n + 1
+    local id = "toolu_h" .. n
+    return J({ type = "assistant", message = { role = "assistant",
+               content = { { type = "tool_use", id = id, name = name, input = input } } } }) .. "\n"
+        .. J({ type = "user", message = { role = "user",
+               content = { { type = "tool_result", tool_use_id = id, content = content or "ok", is_error = isErr or nil } } } })
+  end
+  local function turn(...) return table.concat({ ... }, "\n") .. "\n" end
+  local function edit(p) return call("Edit", { file_path = p, old_string = "a", new_string = "b" }) end
+
+  -- turnEvidence names the files the turn edited, and keeps what its errors said
+  local ev = core.turnEvidence(turn(prompt("fix login"), edit("/r/auth.ts"), edit("/r/auth.ts"),
+    call("Write", { file_path = "/r/auth.test.ts", content = "x" }),
+    call("Bash", { command = "make test" }, "FAIL - login keeps the session\nexpected 1 got 0", true),
+    edit("/Users/x/.claude/cc-notes/k.handoff.md"),
+    call("MultiEdit", { file_path = "/r/session.ts", edits = { { old_string = "a", new_string = "b" } } }),
+    said("Fixed the session check; the login test passes now.")))
+  eq("turnEvidence lists each edited file once, in order", table.concat(ev.files or {}, ","), "/r/auth.ts,/r/auth.test.ts,/r/session.ts")
+  eq("...leaving Shepherd's own notes out", #(ev.files or {}), 3)
+  eq("...and keeps what an error said, on one line", (ev.errorTexts or {})[1], "FAIL - login keeps the session expected 1 got 0")
+  local many = { prompt("rename everything") }
+  for i = 1, 60 do many[#many + 1] = edit("/r/f" .. i .. ".ts") end
+  for i = 1, 8 do many[#many + 1] = call("Bash", { command = "false" }, "boom " .. i, true) end
+  many[#many + 1] = said("Renamed.")
+  local evMany = core.turnEvidence(turn(table.unpack(many)))
+  eq("turnEvidence keeps at most 50 files", #evMany.files, 50)
+  eq("...counting the rest", evMany.filesMore, 10)
+  eq("turnEvidence keeps the 5 newest errors", #evMany.errorTexts, 5)
+  eq("...newest last", evMany.errorTexts[5], "boom 8")
+
+  -- the match token: the claude process (and its window) for an editor tab, the kitty window for kitty
+  eq("an editor tab is matched by its claude pid and window", core.handoffMatch({ editor = "vscode", session_pid = "4242", host_window = "99" }), "pid-4242-99")
+  eq("...a pid without a known window still matches", core.handoffMatch({ editor = "cursor", session_pid = 4242 }), "pid-4242-0")
+  eq("a kitty session is matched by its window", core.handoffMatch({ editor = "kitty", kitty_listen_on = "unix:/tmp/kitty-12", kitty_window_id = "3" }),
+     "kitty-" .. core.cheapHash("unix:/tmp/kitty-12#3"))
+  eq("no pid, no match", core.handoffMatch({ editor = "vscode", host_window = "99" }), nil)
+  eq("a pid that isn't a number doesn't match", core.handoffMatch({ editor = "vscode", session_pid = "4242; rm", host_window = "99" }), nil)
+
+  -- the note
+  local it = { key = "k1", name = "my-project", session_id = "sid-1", cwd = "/r", editor = "vscode",
+               session_pid = "4242", host_window = "99", transcript_path = "/h/.claude/projects/-r/sid-1.jsonl" }
+  local note = core.handoffNote(it, ev, { label = "made progress", now = os.time({ year = 2026, month = 9, day = 28, hour = 17, min = 54 }),
+    todos = { "Login keeps the session after a refresh (auth.ts)" } })
+  eq("the note's first line carries its match token", note:match("^([^\n]*)"), "<!-- cc-handoff match:pid-4242-99 -->")
+  check("the note is titled with the session's name", note:find("\n# Handoff: my-project\n", 1, true) ~= nil)
+  check("the note says how the last turn ended, and when", note:find("\nLast turn: made progress, 2026-09-28 17:54\n", 1, true) ~= nil)
+  check("the note names the transcript", note:find("Transcript: /h/.claude/projects/-r/sid-1.jsonl", 1, true) ~= nil)
+  check("the note has the last result", note:find("## Last result\nFixed the session check; the login test passes now.", 1, true) ~= nil)
+  check("the note lists the files touched", note:find("## Files touched\n- /r/auth.ts\n- /r/auth.test.ts\n- /r/session.ts\n", 1, true) ~= nil)
+  check("the note lists the errors", note:find("## Errors\n- FAIL - login keeps the session expected 1 got 0\n", 1, true) ~= nil)
+  check("the note's next step is the first open TODO line", note:find("## Next\n- [ ] Login keeps the session after a refresh (auth.ts)", 1, true) ~= nil)
+  local bare = core.handoffNote({ key = "k2", cwd = "/q" }, core.turnEvidence(turn(prompt("hi"), said("Hello."))), { label = "did nothing", now = 0 })
+  check("a note with no pid has no match token", not bare:find("cc-handoff match:", 1, true))
+  check("...is titled by its folder", bare:find("# Handoff: q\n", 1, true) ~= nil)
+  check("...and says none for what it didn't do", bare:find("## Files touched\n- none\n", 1, true) ~= nil and bare:find("## Errors\n- none\n", 1, true) ~= nil)
+  check("...and leaves out Next when there are no open TODO lines", not bare:find("## Next", 1, true))
+  local longText = string.rep("x", 5000)
+  local big = core.handoffNote(it, { lastText = longText, files = evMany.files, filesMore = evMany.filesMore, errorTexts = {} }, { label = "made progress", now = 0 })
+  check("a long last result is cut", #big < 5000 and big:find("x… %[cut%]") ~= nil)
+  check("...and the files past the cap are counted", big:find("- … and 10 more\n", 1, true) ~= nil)
+
+  -- where a respawn leaves the note for the session that replaces it
+  eq("a kitty respawn's pending note is named by its lineage", core.pendingNoteId("kitty", "/r@unix:/tmp/kitty-12#3", "/r"),
+     "lineage-" .. core.cheapHash("/r@unix:/tmp/kitty-12#3"))
+  eq("...Kitty spelled any way", core.pendingNoteId("Kitty", "L", "/r"), "lineage-" .. core.cheapHash("L"))
+  eq("any other respawn's by its folder", core.pendingNoteId("vscode", "/r", "/r"), "cwd-" .. core.cheapHash("/r"))
+  eq("...as is a kitty one without a lineage", core.pendingNoteId("kitty", "", "/r"), "cwd-" .. core.cheapHash("/r"))
+
+  -- notes are pruned after 14 days
+  local now = 2000000000
+  local drop = core.notesToPrune({
+    { name = "old.handoff.md", mode = "file", mtime = now - 15 * 86400 },
+    { name = "fresh.handoff.md", mode = "file", mtime = now - 13 * 86400 },
+    { name = "gone.handoff.md.tmp.9", mode = "file", mtime = now - 20 * 86400 },
+    { name = "pending", mode = "directory", mtime = now - 30 * 86400 },
+    { name = ".", mode = "directory", mtime = 0 },
+  }, now)
+  table.sort(drop)
+  eq("notes older than 14 days are pruned, fresh ones and folders kept", table.concat(drop, ","), "gone.handoff.md.tmp.9,old.handoff.md")
+  eq("a note with no mtime is kept", #core.notesToPrune({ { name = "x.handoff.md", mode = "file" } }, now), 0)
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))

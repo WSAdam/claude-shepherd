@@ -17,6 +17,9 @@ mktemp_dir() { mktemp -d 2>/dev/null || mktemp -d -t ccshepherd; }
 CC_TEST_ISOLATION="$(mktemp_dir)"
 export CC_LEDGER_DIR="${CC_LEDGER_DIR:-$CC_TEST_ISOLATION/ledger}"
 export CC_CONFIG_FILE="${CC_CONFIG_FILE:-$CC_TEST_ISOLATION/cc-config.json}"
+# 2026-09-28: SessionStart reads (and consumes) the handoff notes a respawn leaves in
+# ~/.claude/cc-notes/pending; a suite's fake session must never take a real one.
+export CC_NOTES_DIR="${CC_NOTES_DIR:-$CC_TEST_ISOLATION/cc-notes}"
 
 # sysbin_without <outdir> <tool>... - mirror /usr/bin + /bin into <outdir> as symlinks,
 # leaving out the named tools, and echo <outdir>. Use it in place of a literal

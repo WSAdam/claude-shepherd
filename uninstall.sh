@@ -43,7 +43,7 @@ fi
 # Shepherd's settings and state under ~/.claude (--purge only)
 STATE="cc-ab.json cc-agents.json cc-approved cc-ask cc-automodel cc-autopilot cc-autotitles.json cc-bridge
   cc-config.json cc-exports cc-fleet cc-gate-tools cc-gate.enabled cc-groups.json cc-hidden.json cc-labels.json
-  cc-ledger cc-lock.json cc-mcp-configs cc-mcp.json cc-merge cc-policy cc-policy-override cc-presets.json
+  cc-ledger cc-lock.json cc-mcp-configs cc-mcp.json cc-merge cc-notes cc-policy cc-policy-override cc-presets.json
   cc-prompts cc-queue cc-recent-dirs.json cc-rules.json cc-schedules.json cc-scratch cc-shepherd.log
   cc-status cc-status-mirror cc-talk cc-templates.json cc-usage-state.json cc-worklist.json"
 

@@ -1345,3 +1345,119 @@ _cc_ro_gitconfig() {   # git config that reads: --get*, --list, get, list, or on
   done
   [ "$rd" = 1 ] || [ "$pos" -le 1 ]                    # git config key reads; key value sets
 }
+
+# ---- What a new session is told at SessionStart (2026-09-28) --------------------------------
+# Claude Code adds a SessionStart hook's stdout to the new session's context. cc-status.sh prints
+# cc_session_context there, once, at the end. The context is built from parts: each is a function
+# _cc_ctx_<name>, given (source key cwd), that prints its text or nothing. The builder labels each
+# part "[Shepherd: <name>]" and caps the total at CC_CONTEXT_MAX characters; a part that would pass
+# the cap is cut, and the parts after it are left out. A new part goes in CC_CONTEXT_PARTS.
+CC_NOTES_DIR="${CC_NOTES_DIR:-${HOME}/.claude/cc-notes}"
+CC_CONTEXT_PARTS="handoff"
+CC_CONTEXT_MAX=8000
+CC_PENDING_MAX_AGE=3600   # a respawn's note nobody took within the hour is stale
+
+cc_session_context() { # $1 source (startup|resume|clear|compact), $2 key, $3 cwd
+  [ -z "${CC_SHEPHERD_INTERNAL:-}" ] || return 0   # Shepherd's own runs take nothing
+  local out="" name part block keep
+  local cut="[cut: Shepherd's session context is capped at $CC_CONTEXT_MAX characters]"
+  for name in $CC_CONTEXT_PARTS; do
+    part="$("_cc_ctx_$name" "$1" "$2" "$3")"
+    [ -n "$part" ] || continue
+    block="[Shepherd: $name]"$'\n'"$part"
+    [ -z "$out" ] || block=$'\n\n'"$block"
+    if [ $(( ${#out} + ${#block} + 1 )) -gt "$CC_CONTEXT_MAX" ]; then
+      keep=$(( CC_CONTEXT_MAX - ${#cut} - 2 ))
+      [ "$keep" -ge 0 ] || keep=0
+      out="$out$block"
+      out="${out:0:$keep}"$'\n'"$cut"
+      break
+    fi
+    out="$out$block"
+  done
+  [ -z "$out" ] || printf '%s\n' "$out"
+}
+
+# 32-bit djb2 of $1's bytes as 8 hex digits: the same as core.cheapHash, so the shell finds the
+# files Lua names with it. (Hex by hand: some awks print a large %x wrong.)
+cc_hash() {
+  printf '%s' "$1" | od -An -v -tu1 | awk 'BEGIN { h = 5381 }
+    { for (i = 1; i <= NF; i++) h = (h * 33 + $i) % 4294967296 }
+    END { s = ""; for (i = 0; i < 8; i++) { d = h % 16; s = substr("0123456789abcdef", d + 1, 1) s; h = (h - d) / 16 }
+          printf "%s", s }'
+}
+
+cc_mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null; }   # GNU first: its -f means file system
+
+# The process a handoff note belongs to -- the same token as core.handoffMatch: an editor tab's
+# claude pid and window (a /clear keeps both), or a kitty window. Empty when neither is known.
+cc_handoff_match() { # $1 editor, $2 session_pid, $3 host_window, $4 kitty socket, $5 kitty window id
+  case "$1" in
+    [Kk][Ii][Tt][Tt][Yy])
+      [ -n "$4" ] && [ -n "$5" ] || return 0
+      printf 'kitty-%s' "$(cc_hash "$4#$5")" ;;
+    *)
+      case "$2" in ''|*[!0-9]*) return 0 ;; esac
+      local host="$3"
+      case "$host" in ''|*[!0-9]*) host=0 ;; esac
+      printf 'pid-%s-%s' "$2" "$host" ;;
+  esac
+}
+
+# The handoff part: after /clear a one-line pointer to the note the session before it left (the
+# same claude process); after a respawn the whole note Shepherd left in pending/, taken once.
+# A resumed or compacted session still has its own context, so it is told nothing.
+_cc_ctx_handoff() { # $1 source, $2 key, $3 cwd
+  case "$1" in
+    clear) _cc_handoff_pointer "$2" ;;
+    startup) _cc_handoff_pending "$2" "$3" ;;
+  esac
+}
+
+_cc_handoff_pointer() { # $1 key
+  local key="$1" us=$'\x1f' ed pid host sock wid tok f m best=0 note="" last
+  cc_have_jq || return 0
+  IFS="$us" read -r ed pid host sock wid <<EOF
+$(jq -r --arg us "$us" '[.editor, .session_pid, .host_window, .kitty_listen_on, .kitty_window_id]
+  | map(. // "" | tostring) | join($us)' "$(cc_file "$key")" 2>/dev/null)
+EOF
+  tok="$(cc_handoff_match "$ed" "$pid" "$host" "$sock" "$wid")"
+  [ -n "$tok" ] || return 0
+  while IFS= read -r f; do
+    [ -n "$f" ] && [ "$f" != "$CC_NOTES_DIR/$key.handoff.md" ] || continue
+    m="$(cc_mtime "$f")"
+    case "$m" in ''|*[!0-9]*) m=0 ;; esac
+    if [ -z "$note" ] || [ "$m" -gt "$best" ]; then best="$m"; note="$f"; fi
+  done <<EOF
+$(grep -l -F -x -- "<!-- cc-handoff match:$tok -->" "$CC_NOTES_DIR"/*.handoff.md 2>/dev/null)
+EOF
+  [ -n "$note" ] || return 0
+  last="$(sed -n 's/^Last turn: //p' "$note" 2>/dev/null | head -1)"
+  printf 'Before /clear, this session left a handoff note%s: %s -- read it to pick up where it left off.\n' \
+    "${last:+ (last turn: $last)}" "$note"
+}
+
+_cc_handoff_pending() { # $1 key, $2 cwd
+  local key="$1" cwd="$2" lin id f claim m now
+  lin="$(cc_read_field "$key" '.budget_lineage')"
+  set -- "cwd-$(cc_hash "$cwd")"
+  [ -z "$lin" ] || set -- "lineage-$(cc_hash "$lin")" "$@"
+  now="$(cc_now)"
+  for id in "$@"; do
+    f="$CC_NOTES_DIR/pending/$id.md"
+    [ -f "$f" ] || continue
+    claim="$f.claim.$$"
+    mv "$f" "$claim" 2>/dev/null || continue   # another session took it first
+    m="$(cc_mtime "$claim")"
+    case "$m" in ''|*[!0-9]*) m=0 ;; esac
+    if [ $(( now - m )) -le "$CC_PENDING_MAX_AGE" ]; then
+      printf 'Shepherd respawned this session in place of one that stopped. The note it left:\n\n'
+      cat "$claim"
+      rm -f "$claim"
+      echo "[cc-lib] ✅ handed the respawned session its note ($id)" >&2
+      return 0
+    fi
+    rm -f "$claim"
+    echo "[cc-lib] ⚠️ dropped a stale handoff note ($id): nobody took it within the hour" >&2
+  done
+}

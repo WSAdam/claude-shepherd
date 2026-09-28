@@ -206,5 +206,27 @@ do
   eq("turn out of reach: no torn line reaches the JSON decoder", failedDecodes, 0)
 end
 
+-- ---- tail-turn-made-progress: the handoff note a real turn leaves (2026-09-28) -------------------
+-- 2026-09-28: a fresh or respawned session started blank. On the done edge Shepherd now writes a
+-- handoff note from the same evidence the turn label reads: the last result, the files the turn
+-- touched, its errors and the transcript. Read over the real window, the note is built from it.
+-- (scrub.js masks tool inputs' keys too -- file_path reads xxxx_xxxx -- so this window's two edits
+-- name no file; core.test.lua and handoff.test.lua cover the file list.)
+do
+  failedDecodes = 0
+  local tail = readTail(FIXTURES .. "tail-turn-made-progress.jsonl", 89500)
+  local ev = core.turnEvidence(tail or "")
+  eq("a real turn's two edits are counted", ev and ev.edits, 2)
+  eq("...though the scrubbed inputs name no file", ev and ev.files and #ev.files, 0)
+  local path = FIXTURES .. "tail-turn-made-progress.jsonl"
+  local note = core.handoffNote({ key = "k", name = "proj", cwd = "/r", editor = "vscode", session_pid = "4242",
+    host_window = "99", transcript_path = path }, ev, { label = core.turnOutcome(ev), now = 0 })
+  check("its handoff note is headed by the match token", note:find("<!-- cc-handoff match:pid-4242-99 -->\n", 1, true) == 1)
+  check("...says how it ended", note:find("\nLast turn: made progress, ", 1, true) ~= nil)
+  check("...carries its last result", note:find("## Last result\n" .. (ev and ev.lastText or "?"):sub(1, 40), 1, true) ~= nil)
+  check("...and names its transcript", note:find("Transcript: " .. path, 1, true) ~= nil)
+  eq("handoff: no torn line reaches the JSON decoder", failedDecodes, 0)
+end
+
 print(string.format("\n%d checks, %d failed", run, failed))
 os.exit(failed == 0 and 0 or 1)

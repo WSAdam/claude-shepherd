@@ -5284,10 +5284,13 @@ function M.turnEvidence(text)
   if not start then
     if peerAt then start, origin = peerAt, "peer" else start = 0 end
   end
+  -- files/filesMore/errorTexts (2026-09-28) feed the handoff note (M.handoffNote): each edited
+  -- path once, in order, and the newest few errors, one line each.
   local ev = { origin = origin, complete = false, edits = 0, mutating = 0, reads = 0, tests = 0,
                other = 0, errors = 0, denials = 0, todoDone = 0, committed = false, asked = false,
-               planPut = false, apiError = false, endedDenied = false, textLen = 0 }
-  local commits, lastResult = {}, nil
+               planPut = false, apiError = false, endedDenied = false, textLen = 0,
+               files = {}, filesMore = 0, errorTexts = {} }
+  local commits, lastResult, seenFile = {}, nil, {}
   for i = start + 1, #spans do
     local obj = decode(i, true)
     local c = obj and type(obj.message) == "table" and obj.message.content or nil
@@ -5303,6 +5306,11 @@ function M.turnEvidence(text)
             local path = tostring(input.file_path or input.notebook_path or "")
             if not path:find("/.claude/cc-notes/", 1, true) then
               ev.edits = ev.edits + 1
+              if path ~= "" and not seenFile[path] then
+                seenFile[path] = true
+                if #ev.files < M.HANDOFF.files then ev.files[#ev.files + 1] = path
+                else ev.filesMore = ev.filesMore + 1 end
+              end
               if path:match("TODO%.md$") then
                 local before, after = 0, 0
                 local pairs_ = (type(input.edits) == "table") and input.edits or { input }
@@ -5339,6 +5347,11 @@ function M.turnEvidence(text)
               body = table.concat(t, " ")
             end
             local low = tostring(body or ""):lower()
+            local said = tostring(body or ""):gsub("%s+", " "):gsub("^ ", ""):gsub(" $", "")
+            if said ~= "" then
+              ev.errorTexts[#ev.errorTexts + 1] = said:sub(1, M.HANDOFF.errorChars)
+              if #ev.errorTexts > M.HANDOFF.errors then table.remove(ev.errorTexts, 1) end
+            end
             if low:find("denied", 1, true) or low:find("rejected", 1, true) or low:find("doesn't want to proceed", 1, true) then
               ev.denials = ev.denials + 1; lastResult = "denied"
             else
@@ -5365,6 +5378,90 @@ function M.turnOutcome(ev)
   if ev.edits > 0 or ev.mutating > 0 or ev.tests > 0 or ev.other > 0 then return "made progress" end
   if ev.reads > 0 or ev.textLen >= 300 then return "only planned" end
   return "did nothing"
+end
+
+-- ---- Handoff notes (2026-09-28) ---------------------------------------------------------------
+-- A fresh or respawned session starts blank. On each done edge Shepherd writes
+-- ~/.claude/cc-notes/<key>.handoff.md from the turn's evidence (FX.writeHandoff); a /clear gets a
+-- one-line pointer to the note its claude process left, and a respawn the whole note, once
+-- (cc_session_context in cc-lib.sh prints both at SessionStart). The shell reads what Lua writes,
+-- so the match token and the pending note's name are computed the same way on both sides:
+-- cc_handoff_match and cc_hash in cc-lib.sh (tests/status.test.sh runs both against these).
+M.HANDOFF = { files = 50, errors = 5, errorChars = 200, lastChars = 1500, todos = 15, keepDays = 14 }
+
+-- The process a note belongs to: an editor tab's claude pid and its window (a /clear keeps both),
+-- or a kitty window. nil when neither is known -- that note gets no pointer. Pure.
+function M.handoffMatch(it)
+  if type(it) ~= "table" then return nil end
+  if tostring(it.editor or ""):lower() == "kitty" then
+    local sock, wid = tostring(it.kitty_listen_on or ""), tostring(it.kitty_window_id or "")
+    if sock == "" or wid == "" then return nil end
+    return "kitty-" .. M.cheapHash(sock .. "#" .. wid)
+  end
+  local pid, host = tostring(it.session_pid or ""), tostring(it.host_window or "")
+  if not pid:match("^%d+$") then return nil end
+  return "pid-" .. pid .. "-" .. (host:match("^%d+$") and host or "0")
+end
+
+-- The note itself, as Markdown. opts = { label, now, todos = { open TODO line texts } }. Pure.
+function M.handoffNote(it, ev, opts)
+  it, ev, opts = type(it) == "table" and it or {}, type(ev) == "table" and ev or {}, type(opts) == "table" and opts or {}
+  local H, L = M.HANDOFF, {}
+  local function add(s) L[#L + 1] = s end
+  local match = M.handoffMatch(it)
+  if match then add("<!-- cc-handoff match:" .. match .. " -->") end
+  local cwd = tostring(it.cwd or "")
+  local name = it.name and tostring(it.name) ~= "" and tostring(it.name) or cwd:match("([^/]+)/?$") or tostring(it.key or "session")
+  add("# Handoff: " .. name)
+  add("Last turn: " .. tostring(opts.label or "unknown") .. ", " .. os.date("%Y-%m-%d %H:%M", tonumber(opts.now) or os.time()))
+  add((it.session_id and ("Session: " .. tostring(it.session_id) .. " · ") or "") .. "cwd: " .. cwd)
+  if it.transcript_path then add("Transcript: " .. tostring(it.transcript_path)) end
+  add("")
+  add("## Last result")
+  local last = tostring(ev.lastText or ""):gsub("^%s+", ""):gsub("%s+$", "")
+  if #last > H.lastChars then last = last:sub(1, H.lastChars) .. "… [cut]" end
+  add(last ~= "" and last or "(no reply)")
+  add("")
+  add("## Files touched")
+  local files = type(ev.files) == "table" and ev.files or {}
+  for _, f in ipairs(files) do add("- " .. tostring(f)) end
+  if #files == 0 then add("- none") end
+  if (tonumber(ev.filesMore) or 0) > 0 then add("- … and " .. ev.filesMore .. " more") end
+  add("")
+  add("## Errors")
+  local errs = type(ev.errorTexts) == "table" and ev.errorTexts or {}
+  for _, e in ipairs(errs) do add("- " .. tostring(e)) end
+  if #errs == 0 then add("- none") end
+  local todos = type(opts.todos) == "table" and opts.todos or {}
+  if #todos > 0 then
+    add("")
+    add("## Next")
+    for i = 1, math.min(#todos, H.todos) do add("- [ ] " .. tostring(todos[i])) end
+    if #todos > H.todos then add("- … and " .. (#todos - H.todos) .. " more open TODO lines") end
+  end
+  return table.concat(L, "\n") .. "\n"
+end
+
+-- Where a respawn leaves the note for the session that replaces it (cc-notes/pending/<id>.md):
+-- a kitty relaunch carries its lineage (CC_SHEPHERD_LINEAGE, published as budget_lineage), any
+-- other is found by its folder. Pure.
+function M.pendingNoteId(editor, lineage, cwd)
+  if tostring(editor or ""):lower() == "kitty" and type(lineage) == "string" and lineage ~= "" then
+    return "lineage-" .. M.cheapHash(lineage)
+  end
+  return "cwd-" .. M.cheapHash(tostring(cwd or ""))
+end
+
+-- The files in a notes folder to prune: older than 14 days. entries = { { name, mode, mtime } }. Pure.
+function M.notesToPrune(entries, now, days)
+  local out, cutoff = {}, (tonumber(now) or 0) - (tonumber(days) or M.HANDOFF.keepDays) * 86400
+  for _, e in ipairs(type(entries) == "table" and entries or {}) do
+    if type(e) == "table" and e.mode == "file" and type(e.name) == "string"
+       and tonumber(e.mtime) and tonumber(e.mtime) < cutoff then
+      out[#out + 1] = e.name
+    end
+  end
+  return out
 end
 
 function M.transcriptError(text)
@@ -13856,6 +13953,9 @@ M.FEATURES = {
   { key = "recover", cat = "Automate", title = "Auto-respawn & auto-continue",
     what = "Respawn a stuck session and nudge one frozen on an API error to continue — within safe retry budgets.",
     why = "A long-running fleet heals itself instead of silently stalling overnight." },
+  { key = "handoffs", cat = "Automate", new = true, title = "Handoff notes",
+    what = "Each time a session finishes a turn, Shepherd writes a handoff note: the last result, the files it touched, its errors, the worktree's open TODO lines and the transcript. After /clear the fresh session is told where the note is; a respawned session starts with the whole note. Notes are kept 14 days in ~/.claude/cc-notes.",
+    why = "A new session picks up where the last one left off instead of starting blank." },
   { key = "policies", cat = "Automate", title = "Policy bundles & autopilot",
     what = "Reusable auto-allow/deny rules per session or fleet, plus a timed autopilot that approves everything for a while.",
     why = "Pre-decide the routine calls so you only ever see the ones that matter." },

@@ -1284,9 +1284,83 @@ function FX.stepTurnLabel(it, pv, ledgerOn)
         ledgerFor(it, { type = "turn_outcome", label = label, origin = ev.origin, edits = ev.edits,
                         tests = ev.tests, errors = ev.errors, denials = ev.denials })
       end
+      -- 2026-09-28: the same evidence becomes the session's handoff note, on the fresh edge only.
+      if st.edge then
+        local okw, why = pcall(FX.writeHandoff, it, ev, label)
+        if not okw then print("[cc-dashboard] ❌ handoff note for " .. tostring(key) .. ": " .. tostring(why)) end
+      end
     end
   end
   it.turnLabel = st.label
+end
+
+-- Handoff notes (2026-09-28): a fresh or respawned session started blank. On each done edge the
+-- turn's evidence becomes ~/.claude/cc-notes/<key>.handoff.md (core.handoffNote); a respawn copies
+-- it to cc-notes/pending/ for the session that replaces it (FX.writePendingHandoff, from
+-- FX.spawnSession). cc-status.sh prints them at SessionStart through cc_session_context
+-- (cc-lib.sh): a pointer after /clear, the whole note once after a respawn. Pruned after 14 days.
+FX.NOTES_DIR = os.getenv("CC_NOTES_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-notes")
+FX._notesPrunedAt = 0
+-- The worktree's open TODO lines: TODO.md at the session's git root (else its cwd).
+function FX.openTodos(cwd)
+  if type(cwd) ~= "string" or cwd == "" then return {} end
+  local out = {}
+  for _, e in ipairs(core.parseTodoFile(FX.readFile((FX.gitRoot(cwd) or cwd) .. "/TODO.md") or "")) do
+    if not e.done then out[#out + 1] = e.text end
+  end
+  return out
+end
+function FX.writeHandoff(it, ev, label)
+  if type(it) ~= "table" or type(it.key) ~= "string" or type(ev) ~= "table" then return nil end
+  local path = FX.NOTES_DIR .. "/" .. it.key .. ".handoff.md"
+  local note = core.handoffNote(it, ev, { label = label, now = FX.now(), todos = FX.openTodos(it.cwd) })
+  if not FX.writeFileAtomic(path, note) then
+    print("[cc-dashboard] ⚠️ couldn't write the handoff note " .. path)
+    return nil
+  end
+  if FX.now() - (FX._notesPrunedAt or 0) >= 3600 then pcall(FX.pruneNotes, FX.now()) end
+  return path
+end
+-- A respawn leaves the dead session's note for the one that replaces it: built fresh from its
+-- transcript (a death mid-turn is newer than its last done edge's note), else the note it left.
+-- Returns the pending note's path, or nil when there is nothing to hand over.
+function FX.writePendingHandoff(deadKey, editor, lineage, project)
+  if type(deadKey) ~= "string" or deadKey == "" then return nil end
+  local note
+  local item = FX.liveStatusFor(deadKey)
+  if item and item.transcript_path then
+    local ev = core.turnEvidence(FX.readTail(item.transcript_path, FX.TURN_TAIL_BYTES) or "")
+    if ev then
+      local label = core.turnOutcome(ev) or "no reply yet"
+      if item.status ~= "done" then label = "cut off mid-turn, " .. label end
+      note = core.handoffNote(item, ev, { label = label, now = FX.now(), todos = FX.openTodos(item.cwd or project) })
+    end
+  end
+  note = note or FX.readFile(FX.NOTES_DIR .. "/" .. deadKey .. ".handoff.md")
+  if type(note) ~= "string" or note == "" then return nil end
+  pcall(function() hs.fs.mkdir(FX.NOTES_DIR) end)
+  local path = FX.NOTES_DIR .. "/pending/" .. core.pendingNoteId(editor, lineage, project) .. ".md"
+  if not FX.writeFileAtomic(path, note) then
+    print("[cc-dashboard] ⚠️ couldn't leave a handoff note for the respawn of " .. deadKey)
+    return nil
+  end
+  print("[cc-dashboard] ✅ handoff note left for the respawn of " .. deadKey .. ": " .. path)
+  return path
+end
+-- Notes and pending notes older than 14 days (core.notesToPrune). At startup, then hourly.
+function FX.pruneNotes(now)
+  FX._notesPrunedAt = now or FX.now()
+  for _, dir in ipairs({ FX.NOTES_DIR, FX.NOTES_DIR .. "/pending" }) do
+    local entries = {}
+    for _, name in ipairs(FX.readDir(dir)) do
+      local a = hs.fs.attributes(dir .. "/" .. name)
+      if type(a) == "table" then entries[#entries + 1] = { name = name, mode = a.mode, mtime = a.modification } end
+    end
+    for _, name in ipairs(core.notesToPrune(entries, FX._notesPrunedAt)) do
+      os.remove(dir .. "/" .. name)
+      print("[cc-dashboard] 🔍 pruned the old handoff note " .. dir .. "/" .. name)
+    end
+  end
 end
 
 -- Read + parse + filter the ledger. opts = { session, sinceTs, untilTs, types,
@@ -5378,10 +5452,18 @@ function FX.spawnSession(editor, project, task, permissionMode, providerId, agen
     FX.alert("Claude Shepherd (dry-run): would spawn " .. spec.kind .. " in " .. tostring(project))
     return false  -- R1-22: a dry-run launched NOTHING; callers must not act as if it did
   end
+  -- 2026-09-28: a respawn (agentOpts.except = the dead tile it replaces) leaves the new session the
+  -- dead one's handoff note, written before the launch so its SessionStart can't miss it.
+  local handoff = nil
+  if type(agentOpts) == "table" and type(agentOpts.except) == "string" then
+    local okh, p = pcall(FX.writePendingHandoff, agentOpts.except, editor, lineage, project)
+    handoff = okh and p or nil
+  end
   if spec.kind == "kitty" then
     -- R3-02: a nil argv means spawnSpec fail-closed (e.g. invalid ssh dest). Abort
     -- and log instead of crashing on table.concat / indexing a nil argv.
     if not spec.argv then
+      if handoff then os.remove(handoff) end
       print("[cc-orch] kitty spawn aborted: " .. tostring(spec.error))
       pcall(function() FX.alert("Claude Shepherd: kitty spawn aborted (" .. tostring(spec.error) .. ")") end)
       return false
@@ -19403,6 +19485,7 @@ after(1.0, function() pcall(FX.computeUsage) end)          -- first local pass
 after(1.5, function() pcall(function() FX.fetchOfficialUsage(true) end) end)  -- first official pass
 after(2.0, function() pcall(FX.expireLedger) end)          -- first retention pass
 after(2.5, function() pcall(FX.pruneScratch) end)          -- sweep scan/search orphans from a dead process
+after(3, function() pcall(FX.pruneNotes, FX.now()) end)     -- handoff notes older than 14 days
 after(3.0, function() pcall(FX.refreshCommits) end)        -- first commit count (after the scratch sweep)
 
 -- Launch-on-startup defaults ON the first time Shepherd runs (so it comes back after

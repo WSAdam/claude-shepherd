@@ -75,7 +75,7 @@
       "staleSeconds": 600,
       "maxRetries": 3
     },
-    "enabled": false
+    "enabled": true
   },
   "ledger": {
     "maxTotalMB": 50,

@@ -551,5 +551,13 @@ if cc_ledger_enabled; then
   esac
 fi
 
+# ---- What the new session is told (2026-09-28) ----
+# Claude Code adds SessionStart stdout to the session's context; nothing else here prints to
+# stdout. Printed once, last, after the status file is written: the parts read this session's
+# identity (claude pid, kitty lineage) from it.
+if [ "$EVENT" = "sessionstart" ]; then
+  cc_session_context "$(cc_get "$INPUT" '.source')" "$KEY" "$CWD"
+fi
+
 echo "[cc-status] ✅ $EVENT -> $STATUS for '$NAME' ($KEY)" >&2
 exit 0

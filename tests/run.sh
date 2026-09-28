@@ -257,6 +257,9 @@ echo ""
 echo "== lua: a new session in a window that already has a Claude tab gets its own tab (behavioral, stubbed hs) =="
 HOME="$(mktemp -d)" lua "$DIR/spawn-open-window.test.lua" || fail=1
 echo ""
+echo "== lua: handoff notes -- written on the done edge, left for a respawn, pruned after 14 days (behavioral, stubbed hs + git) =="
+HOME="$(mktemp -d)" lua "$DIR/handoff.test.lua" || fail=1
+echo ""
 
 if [ "$fail" -eq 0 ]; then
   echo "✅ ALL GREEN"

@@ -89,8 +89,9 @@ per-session only (`~/.claude/cc-automodel/<key>`).
 
 ## Auto-respawn and auto-continue
 
-- **Respawn** (`respawn.enabled`): a right-click **Respawn from cwd** action that relaunches a dead
-  or stale session from its last working directory with the matched provider and editor.
+- **Respawn** (`respawn.enabled`, on in a fresh install): a right-click **Respawn from cwd** action
+  that relaunches a dead or stale session from its last working directory with the matched provider
+  and editor. The new session starts with the dead one's [handoff note](#handoff-notes).
 - **Auto-respawn** (`respawn.auto.enabled`): a session whose status file freezes **mid-turn** (status
   `working` with no hook write for `respawn.auto.staleSeconds`, default 600, well above the longest
   tool call) is relaunched, capped by `respawn.auto.maxRetries` **per launch folder** (per window
@@ -105,6 +106,28 @@ per-session only (`~/.claude/cc-automodel/<key>`).
 
 Each automatic action records an `outcome` in the ledger, and a death that can't be respawned is
 logged instead of failing silently.
+
+### Handoff notes
+
+A fresh or respawned session picks up where the last one left off.
+
+- **The note.** Each time a session finishes a turn, Shepherd writes
+  `~/.claude/cc-notes/<session>.handoff.md` from the transcript: how the turn ended, the last
+  result, the files it touched, its errors, the worktree's open `TODO.md` lines (under **Next**) and
+  the transcript's path. It's the same read that labels a finished card.
+- **After `/clear`.** The fresh session is told, in one line, where the note of the conversation
+  before it is. The note is found by the claude process (its pid and window; a kitty window for
+  kitty), so another tab in the same window never gets it.
+- **After a respawn.** Before relaunching, Shepherd writes the dead session's note to
+  `~/.claude/cc-notes/pending/`, built fresh from its transcript, so a session that died mid-turn
+  says so. The new session starts with the whole note, once. A note nobody takes within the hour is
+  dropped, and a dry run leaves none.
+- **A resumed or compacted session** keeps its own context and is told nothing.
+- **Cleanup.** Notes older than 14 days are pruned at startup and then hourly.
+
+How it reaches the session: Claude Code adds a SessionStart hook's output to the new session's
+context. `cc-status.sh` prints `cc_session_context` (`cc-lib.sh`) there: each part is labelled
+`[Shepherd: <part>]` and the whole is capped at 8,000 characters.
 
 ## Escalation and watchdogs
 
