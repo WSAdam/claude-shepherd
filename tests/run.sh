@@ -211,6 +211,9 @@ echo ""
 echo "== lua: ready to merge -- review, one merge per repo, Not yet (behavioral, stubbed hs + git) =="
 HOME="$(mktemp -d)" lua "$DIR/merge-request.test.lua" || fail=1
 echo ""
+echo "== lua: token totals -- each message once, subagents included, 1-hour cache priced (behavioral, stubbed hs) =="
+HOME="$(mktemp -d)" lua "$DIR/usage-totals.test.lua" || fail=1
+echo ""
 echo "== lua: commit stats -- one count at a time, cached, a hung one reclaimed (behavioral, stubbed hs) =="
 HOME="$(mktemp -d)" lua "$DIR/commits-refresh.test.lua" || fail=1
 echo ""

@@ -37,21 +37,24 @@ to `/compact`.
 The footer under the grid shows cumulative tokens across active sessions. The headline **excludes
 cache reads** (input + output + cache creation), because cache reads dominate the gross count but
 aren't how the plan is metered; the gross figure is on hover. It is recomputed every 60 seconds
-(reading only new bytes) and on **Update now**.
+(reading only new bytes) and on **Update now**. Each API message counts once (Claude Code repeats
+its usage on every record it writes for that message), and a session's subagent transcripts count
+toward its total, so the figures match Claude Code's own cost records.
 
 It also shows an **`~$X est.`** API-equivalent dollar figure from a per-model price table
 (`core.PRICING`, cache-aware, at Anthropic list prices). Your subscription is flat-rate, so this is
 an estimate. Gateway and local models have unknown prices and are left out.
 
-| Family | Input | Output | Cache write | Cache read |
-|--------|------:|-------:|------------:|-----------:|
-| opus   | $5    | $25    | $6.25       | $0.50      |
-| sonnet | $3    | $15    | $3.75       | $0.30      |
-| haiku  | $1    | $5     | $1.25       | $0.10      |
-| fable  | $10   | $50    | $12.50      | $1.00      |
+| Family | Input | Output | Cache write (5 min) | Cache write (1 hour) | Cache read |
+|--------|------:|-------:|--------------------:|---------------------:|-----------:|
+| opus   | $5    | $25    | $6.25               | $10                  | $0.50      |
+| sonnet | $3    | $15    | $3.75               | $6                   | $0.30      |
+| haiku  | $1    | $5     | $1.25               | $2                   | $0.10      |
+| fable  | $10   | $50    | $12.50              | $20                  | $1.00      |
 
-Dollars per million tokens. Override any of them with
-`pricing.<family>.{input,output,cacheWrite,cacheRead}`.
+Dollars per million tokens. Claude Code's main thread writes 1-hour cache entries; each write is
+priced at its own rate. Override any of them with
+`pricing.<family>.{input,output,cacheWrite,cacheWrite1h,cacheRead}`.
 
 ### Plan window bars
 

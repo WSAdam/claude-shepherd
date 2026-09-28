@@ -608,10 +608,11 @@ local lastOfficialUsage = nil   -- parsed { five_hour, seven_day, seven_day_sonn
 local lastOfficialFetch = 0     -- epoch of the last successful/attempted fetch (180s TTL)
 local lastOfficialStatus = nil  -- last fetch HTTP status, so we log only on CHANGE (no 3-min spam)
 local ccVersion = nil           -- "x.y.z" for the User-Agent (detected once)
-local function blankCum() return { input = 0, output = 0, cacheRead = 0, cacheCreate = 0, total = 0, real = 0, byModel = {} } end
+local function blankCum() return { input = 0, output = 0, cacheRead = 0, cacheCreate = 0, cacheCreate1h = 0, total = 0, real = 0, byModel = {} } end
 local function addBuckets(dst, e)
   dst.input = dst.input + e.input; dst.output = dst.output + e.output
   dst.cacheRead = dst.cacheRead + e.cacheRead; dst.cacheCreate = dst.cacheCreate + e.cacheCreate
+  dst.cacheCreate1h = (dst.cacheCreate1h or 0) + (e.cacheCreate1h or 0)   -- priced at the 1-hour rate
   dst.total = dst.input + dst.output + dst.cacheRead + dst.cacheCreate
   dst.real = dst.input + dst.output + dst.cacheCreate  -- excl. cache reads (meaningful headline)
 end
@@ -650,6 +651,53 @@ function FX.sessionOneM(it)
   FX._oneM[it.key] = { at = now, v = v }
   return v
 end
+-- 2026-09-28: read one transcript file's new bytes into its usage state `st` and return st.
+-- Claude Code writes each API message as one record PER CONTENT BLOCK with the whole message's
+-- usage repeated, so a message counts once per id (core.usageNew) -- summing every record read
+-- 79.7M cache reads where Claude Code's own cost-state says 44.5M. Only complete lines are
+-- consumed: a line torn at the read boundary waits for the next pass instead of being skipped.
+-- `main` = the session's own transcript (not a subagent's): only it sets the context fill/model.
+function FX.scanUsageFile(path, st, baseUrl, main)
+  st = st or { offset = 0, cum = blankCum(), recent = {}, seen = core.usageSeen() }
+  st.seen = st.seen or core.usageSeen()
+  local text, newSize = FX.readFrom(path, st.offset)
+  if newSize and newSize < st.offset then   -- file replaced: start over
+    st.offset, st.cum, st.recent, st.seen = 0, blankCum(), {}, core.usageSeen()
+    text, newSize = FX.readFrom(path, 0)
+  end
+  if not text or #text == 0 then return st end
+  local pos, consumed = 1, 0
+  while true do
+    local nl = text:find("\n", pos, true)
+    if not nl then break end
+    local e = core.parseUsageLine(text:sub(pos, nl - 1))
+    if e then
+      if main then st.lastContext = core.contextTokens(e); st.lastModel = e.model end
+      if core.usageNew(st.seen, e) then
+        addBuckets(st.cum, e)
+        local mk = e.model or "unknown"
+        st.cum.byModel[mk] = st.cum.byModel[mk] or blankCum()
+        addBuckets(st.cum.byModel[mk], e)
+        st.recent[#st.recent + 1] = { ts = e.ts, input = e.input, output = e.output,
+          cacheRead = e.cacheRead, cacheCreate = e.cacheCreate,
+          anthropic = core.isAnthropicSession(e.model, baseUrl) }
+      end
+    end
+    consumed, pos = nl, nl + 1
+  end
+  st.offset = st.offset + consumed
+  return st
+end
+-- A session's subagent transcripts: <transcript without .jsonl>/subagents/*.jsonl.
+function FX.subagentTranscripts(path)
+  local dir = tostring(path or ""):gsub("%.jsonl$", "") .. "/subagents"
+  local out = {}
+  for _, name in ipairs(FX.readDir(dir)) do
+    if name:match("%.jsonl$") then out[#out + 1] = dir .. "/" .. name end
+  end
+  table.sort(out)
+  return out
+end
 function FX.computeUsage()
   local cfg = loadConfig()                 -- for per-provider contextLimit
   local now = os.time()
@@ -661,30 +709,29 @@ function FX.computeUsage()
     local path = it.transcript_path
     if path and path ~= "" then
       seen[path] = true
-      local st = usageState[path] or { offset = 0, cum = blankCum(), recent = {} }
-      local text, newSize = FX.readFrom(path, st.offset)
-      if newSize and newSize < st.offset then st.cum = blankCum(); st.recent = {} end  -- file replaced
-      if text and #text > 0 then
-        for line in (text .. "\n"):gmatch("(.-)\n") do
-          local e = core.parseUsageLine(line)
-          if e then
-            addBuckets(st.cum, e)
-            local mk = e.model or "unknown"
-            st.cum.byModel[mk] = st.cum.byModel[mk] or blankCum()
-            addBuckets(st.cum.byModel[mk], e)
-            st.lastContext = core.contextTokens(e)  -- most recent turn = current context fill
-            st.lastModel = e.model
-            st.recent[#st.recent + 1] = { ts = e.ts, input = e.input, output = e.output,
-              cacheRead = e.cacheRead, cacheCreate = e.cacheCreate,
-              anthropic = core.isAnthropicSession(e.model, it.base_url) }
-          end
-        end
-      end
-      st.offset = newSize or st.offset
+      local st = FX.scanUsageFile(path, usageState[path], it.base_url, true)
       local pruned = {}  -- keep only events inside the 7d window
       for _, ev in ipairs(st.recent) do if ev.ts and ev.ts >= cutoff7d then pruned[#pruned + 1] = ev end end
       st.recent = pruned
       usageState[path] = st
+      -- 2026-09-28: the session's subagents spend on its behalf (80% of one session's cache
+      -- writes); their transcripts sit beside the main one and were never read. `sess` is the
+      -- session's total: the main transcript's cumulative plus every subagent's.
+      local sess = blankCum()
+      addBuckets(sess, st.cum)
+      for m, v in pairs(st.cum.byModel) do sess.byModel[m] = sess.byModel[m] or blankCum(); addBuckets(sess.byModel[m], v) end
+      local recentAll = { st.recent }
+      for _, sp in ipairs(FX.subagentTranscripts(path)) do
+        seen[sp] = true
+        local sst = FX.scanUsageFile(sp, usageState[sp], it.base_url, false)
+        local spruned = {}
+        for _, ev in ipairs(sst.recent) do if ev.ts and ev.ts >= cutoff7d then spruned[#spruned + 1] = ev end end
+        sst.recent = spruned
+        usageState[sp] = sst
+        addBuckets(sess, sst.cum)
+        for m, v in pairs(sst.cum.byModel) do sess.byModel[m] = sess.byModel[m] or blankCum(); addBuckets(sess.byModel[m], v) end
+        recentAll[#recentAll + 1] = sst.recent
+      end
       -- Surface the LIVE model (the transcript tail's most recent assistant turn) onto the tile so
       -- the detail panel's Model dropdown shows + preselects it. The status-file `model` is a
       -- spawn-time snapshot of $ANTHROPIC_MODEL that goes stale after an in-session /model switch;
@@ -698,15 +745,17 @@ function FX.computeUsage()
         ctoks = st.lastContext
         cfrac = core.contextFractionFor(cfg, st.lastModel or it.model, ctoks, { oneM = oneM })
       end
-      perSession[key] = { total = st.cum.total, real = st.cum.real, input = st.cum.input,
-        output = st.cum.output, cacheRead = st.cum.cacheRead, cacheCreate = st.cum.cacheCreate,
-        byModel = st.cum.byModel, context_tokens = ctoks, context_frac = cfrac }
-      addBuckets(fleet, st.cum)
-      for m, v in pairs(st.cum.byModel) do
+      perSession[key] = { total = sess.total, real = sess.real, input = sess.input,
+        output = sess.output, cacheRead = sess.cacheRead, cacheCreate = sess.cacheCreate,
+        cacheCreate1h = sess.cacheCreate1h, byModel = sess.byModel, context_tokens = ctoks, context_frac = cfrac }
+      addBuckets(fleet, sess)
+      for m, v in pairs(sess.byModel) do
         fleet.byModel[m] = fleet.byModel[m] or blankCum(); addBuckets(fleet.byModel[m], v)
       end
       local anthro = {}  -- plan-window approximation counts Anthropic sessions only
-      for _, ev in ipairs(st.recent) do if ev.anthropic then anthro[#anthro + 1] = ev end end
+      for _, rl in ipairs(recentAll) do
+        for _, ev in ipairs(rl) do if ev.anthropic then anthro[#anthro + 1] = ev end end
+      end
       w5h = w5h + core.usageInWindow(anthro, now, core.WINDOW_5H)
       w7d = w7d + core.usageInWindow(anthro, now, core.WINDOW_7D)
     end
@@ -1113,16 +1162,20 @@ function FX.writeUsageSnapshots()
   if now - (FX._lastSnapshotAt or 0) < minutes * 60 then return end
   FX._lastSnapshotAt = now
   local pricing = core.config(cfg, "pricing", nil)
+  -- 2026-09-28: the session's whole total (main transcript + subagents, from the usage pass),
+  -- not the main transcript's alone.
+  local per = lastUsagePayload and lastUsagePayload.perSession or {}
   for key, it in pairs(byKey) do
+    local s = per[key]
     local st = it.transcript_path and usageState[it.transcript_path]
-    if st and st.cum and (tonumber(st.cum.real) or 0) > 0 then
-      local cost = core.estimateCost(st.cum.byModel, pricing)
+    if s and (tonumber(s.real) or 0) > 0 then
+      local cost = core.estimateCost(s.byModel, pricing)
       FX.appendLedger({
         type = "usage_snapshot", session_id = it.session_id, key = key, name = it.name,
-        projectKey = it.projectKey, model = st.lastModel,
-        input = st.cum.input, output = st.cum.output,
-        cacheRead = st.cum.cacheRead, cacheCreate = st.cum.cacheCreate,
-        real = st.cum.real, estCostUsd = cost.usd,
+        projectKey = it.projectKey, model = st and st.lastModel,
+        input = s.input, output = s.output,
+        cacheRead = s.cacheRead, cacheCreate = s.cacheCreate,
+        real = s.real, estCostUsd = cost.usd,
       })
     end
   end

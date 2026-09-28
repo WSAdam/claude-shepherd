@@ -5578,19 +5578,45 @@ end
 -- same `^%s*{` guard as transcriptSnippet so it never logs a decode error).
 function M.parseUsageLine(line)
   if type(line) ~= "string" or not line:find("^%s*{") then return nil end
+  -- 2026-09-28: most transcript bytes are user/tool lines; skip them before the JSON decode.
+  if not line:find('"usage"', 1, true) then return nil end
   local okj, obj = pcall(function() return M.json.decode(line) end)
   if not okj or type(obj) ~= "table" or obj.type ~= "assistant" then return nil end
   local m = obj.message
   if type(m) ~= "table" or type(m.usage) ~= "table" then return nil end
   local u = m.usage
+  local cc = type(u.cache_creation) == "table" and u.cache_creation or {}
   return {
     model       = m.model,
+    -- 2026-09-28: one API message is written as one record PER CONTENT BLOCK, each repeating the
+    -- message's whole usage -- count it once per id (core.usageNew).
+    msgId       = type(m.id) == "string" and m.id or nil,
     ts          = M.isoToEpoch(obj.timestamp),
     input       = tonumber(u.input_tokens) or 0,
     output      = tonumber(u.output_tokens) or 0,
     cacheRead   = tonumber(u.cache_read_input_tokens) or 0,
     cacheCreate = tonumber(u.cache_creation_input_tokens) or 0,
+    -- the part of cacheCreate written with the 1-hour TTL (priced 2x input, not 1.25x)
+    cacheCreate1h = tonumber(cc.ephemeral_1h_input_tokens) or 0,
   }
+end
+
+-- The message ids a transcript's usage pass has already counted. Bounded: a message's records
+-- are written back to back, so only recent ids can repeat. Pure.
+function M.usageSeen(cap)
+  return { ids = {}, order = {}, cap = tonumber(cap) or 512 }
+end
+-- Is this usage event new (and remember it)? An event with no message id always counts.
+function M.usageNew(seen, e)
+  local id = type(e) == "table" and e.msgId or nil
+  if not id or type(seen) ~= "table" then return true end
+  if seen.ids[id] then return false end
+  seen.ids[id] = true
+  seen.order[#seen.order + 1] = id
+  while #seen.order > seen.cap do
+    seen.ids[table.remove(seen.order, 1)] = nil
+  end
+  return true
 end
 
 -- Current context size from a usage event: the prompt side (input + both cache
@@ -5614,18 +5640,20 @@ end
 -- cache_creation) -- the meaningful "tokens used" headline, since cache reads dominate
 -- the gross count but are cheap and not how the plan is metered.
 function M.sumUsage(events)
-  local s = { input = 0, output = 0, cacheRead = 0, cacheCreate = 0, total = 0, real = 0, byModel = {} }
+  local s = { input = 0, output = 0, cacheRead = 0, cacheCreate = 0, cacheCreate1h = 0, total = 0, real = 0, byModel = {} }
   for _, e in ipairs(events or {}) do
     s.input = s.input + (e.input or 0)
     s.output = s.output + (e.output or 0)
     s.cacheRead = s.cacheRead + (e.cacheRead or 0)
     s.cacheCreate = s.cacheCreate + (e.cacheCreate or 0)
+    s.cacheCreate1h = s.cacheCreate1h + (e.cacheCreate1h or 0)
     local key = e.model or "unknown"
-    local bm = s.byModel[key] or { input = 0, output = 0, cacheRead = 0, cacheCreate = 0, total = 0, real = 0 }
+    local bm = s.byModel[key] or { input = 0, output = 0, cacheRead = 0, cacheCreate = 0, cacheCreate1h = 0, total = 0, real = 0 }
     bm.input = bm.input + (e.input or 0)
     bm.output = bm.output + (e.output or 0)
     bm.cacheRead = bm.cacheRead + (e.cacheRead or 0)
     bm.cacheCreate = bm.cacheCreate + (e.cacheCreate or 0)
+    bm.cacheCreate1h = bm.cacheCreate1h + (e.cacheCreate1h or 0)
     bm.total = bm.input + bm.output + bm.cacheRead + bm.cacheCreate
     bm.real = bm.input + bm.output + bm.cacheCreate
     s.byModel[key] = bm
@@ -11751,11 +11779,13 @@ end
 -- Hand-tunable via cc-config `pricing.<family>`. Source: Anthropic pricing
 -- (Opus 4.x 5/25, Sonnet 4.6 3/15, Haiku 4.5 1/5, Fable 5 10/50), 2026-06-18.
 -- ============================================================================
+-- cacheWrite1h (2026-09-28): the 1-hour-TTL cache-write rate, 2x input. Claude Code's main thread
+-- writes 1-hour cache (subagents write 5-minute), so pricing it at cacheWrite undercounted.
 M.PRICING = {
-  opus   = { input = 5.0,  output = 25.0, cacheWrite = 6.25, cacheRead = 0.50 },
-  sonnet = { input = 3.0,  output = 15.0, cacheWrite = 3.75, cacheRead = 0.30 },
-  haiku  = { input = 1.0,  output = 5.0,  cacheWrite = 1.25, cacheRead = 0.10 },
-  fable  = { input = 10.0, output = 50.0, cacheWrite = 12.5, cacheRead = 1.00 },
+  opus   = { input = 5.0,  output = 25.0, cacheWrite = 6.25, cacheWrite1h = 10.0, cacheRead = 0.50 },
+  sonnet = { input = 3.0,  output = 15.0, cacheWrite = 3.75, cacheWrite1h = 6.0,  cacheRead = 0.30 },
+  haiku  = { input = 1.0,  output = 5.0,  cacheWrite = 1.25, cacheWrite1h = 2.0,  cacheRead = 0.10 },
+  fable  = { input = 10.0, output = 50.0, cacheWrite = 12.5, cacheWrite1h = 20.0, cacheRead = 1.00 },
 }
 
 -- Map a model id to its price FAMILY (opus/sonnet/haiku/fable), or nil for a
@@ -11778,10 +11808,11 @@ function M.priceFor(model, pricing)
   local over = type(pricing) == "table" and pricing[fam] or nil
   if type(over) ~= "table" then return base end
   return {
-    input      = tonumber(over.input) or base.input,
-    output     = tonumber(over.output) or base.output,
-    cacheWrite = tonumber(over.cacheWrite) or base.cacheWrite,
-    cacheRead  = tonumber(over.cacheRead) or base.cacheRead,
+    input        = tonumber(over.input) or base.input,
+    output       = tonumber(over.output) or base.output,
+    cacheWrite   = tonumber(over.cacheWrite) or base.cacheWrite,
+    cacheWrite1h = tonumber(over.cacheWrite1h) or base.cacheWrite1h,
+    cacheRead    = tonumber(over.cacheRead) or base.cacheRead,
   }
 end
 
@@ -11794,10 +11825,14 @@ function M.estimateCost(byModel, pricing)
     local p = type(u) == "table" and M.priceFor(model, pricing) or nil
     if p then
       priced = true
+      -- cacheCreate includes the 1-hour writes; price those at their own rate
+      local cw = tonumber(u.cacheCreate) or 0
+      local cw1h = math.min(cw, tonumber(u.cacheCreate1h) or 0)
       usd = usd
         + (tonumber(u.input) or 0)       / 1e6 * p.input
         + (tonumber(u.output) or 0)      / 1e6 * p.output
-        + (tonumber(u.cacheCreate) or 0) / 1e6 * p.cacheWrite
+        + (cw - cw1h)                    / 1e6 * p.cacheWrite
+        + cw1h                           / 1e6 * (p.cacheWrite1h or p.cacheWrite)
         + (tonumber(u.cacheRead) or 0)   / 1e6 * p.cacheRead
     elseif type(u) == "table" then
       unpriced[#unpriced + 1] = tostring(model)

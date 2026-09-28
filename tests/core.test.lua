@@ -11178,5 +11178,55 @@ do
   eq("save: the form's gate tools land", out.gate.tools, "Bash Write")
 end
 
+-- ---- Token totals count each message once and price 1-hour cache writes (2026-09-28) ----
+-- 2026-09-28: Claude Code writes one assistant record per content block, each repeating the whole
+-- message's usage, and the usage pass summed every record: one session read 79.7M cache reads where
+-- Claude Code's own cost-state says 44.5M. Main-thread cache writes are 1-hour (2x input price) but
+-- were priced at the 5-minute rate (1.25x).
+do
+  local function rec(id, blockType, u)
+    return core.json.encode({ type = "assistant", timestamp = "2026-09-28T12:00:00.000Z",
+      message = { model = "claude-opus-5-5", id = id, type = "message", role = "assistant",
+        content = { { type = blockType } }, usage = u } })
+  end
+  local uA = { input_tokens = 2, output_tokens = 134, cache_read_input_tokens = 25792,
+               cache_creation_input_tokens = 21302,
+               cache_creation = { ephemeral_1h_input_tokens = 21302, ephemeral_5m_input_tokens = 0 } }
+  local uB = { input_tokens = 1, output_tokens = 50, cache_read_input_tokens = 47094,
+               cache_creation_input_tokens = 300,
+               cache_creation = { ephemeral_1h_input_tokens = 0, ephemeral_5m_input_tokens = 300 } }
+  -- message A as three records (thinking, text, tool_use), then message B as one
+  local lines = { rec("msg_A", "thinking", uA), rec("msg_A", "text", uA), rec("msg_A", "tool_use", uA), rec("msg_B", "text", uB) }
+  local e1 = core.parseUsageLine(lines[1])
+  eq("usage: a record carries its message id", e1 and e1.msgId, "msg_A")
+  eq("usage: ...and its 1-hour cache writes", e1 and e1.cacheCreate1h, 21302)
+  eq("usage: a line with no usage block is skipped", core.parseUsageLine('{"type":"user","message":{"role":"user"}}'), nil)
+  local seen = core.usageSeen()
+  local counted = {}
+  for _, l in ipairs(lines) do
+    local e = core.parseUsageLine(l)
+    if e and core.usageNew(seen, e) then counted[#counted + 1] = e end
+  end
+  eq("usage: a message split over three records counts once", #counted, 2)
+  local s = core.sumUsage(counted)
+  eq("usage: cache reads are the message totals, not three times A", s.cacheRead, 25792 + 47094)
+  eq("usage: output too", s.output, 134 + 50)
+  eq("usage: 1-hour cache writes are summed", s.cacheCreate1h, 21302)
+  check("usage: a record with no message id is always counted", core.usageNew(seen, { input = 1 }) and core.usageNew(seen, { input = 1 }))
+  -- the seen set stays bounded (duplicates are consecutive; old ids fall out)
+  local ring = core.usageSeen(4)
+  for i = 1, 10 do core.usageNew(ring, { msgId = "m" .. i }) end
+  check("usage: the seen set is bounded", #ring.order <= 4)
+  check("usage: ...and still remembers the newest ids", not core.usageNew(ring, { msgId = "m10" }))
+  -- pricing: 1-hour cache writes at 2x input, 5-minute at 1.25x
+  local c1 = core.estimateCost({ ["claude-opus-5-5"] = { cacheCreate = 1000000, cacheCreate1h = 1000000 } }, nil)
+  eq("usage: 1M one-hour cache-write tokens on Opus cost $10", c1.usd, 10.0)
+  local c2 = core.estimateCost({ ["claude-opus-5-5"] = { cacheCreate = 1000000, cacheCreate1h = 0 } }, nil)
+  eq("usage: 1M five-minute cache-write tokens on Opus cost $6.25", c2.usd, 6.25)
+  local c3 = core.estimateCost({ ["claude-opus-5-5"] = { cacheCreate = 1000000, cacheCreate1h = 500000 } }, nil)
+  eq("usage: a half-and-half split costs $8.125", c3.usd, 8.125)
+  eq("usage: a pricing override can set the 1-hour rate", core.priceFor("claude-opus-5-5", { opus = { cacheWrite1h = 12 } }).cacheWrite1h, 12)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)
