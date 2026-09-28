@@ -189,4 +189,5 @@ and the README's "Testing & development" section.
   `defaults/claude-settings.json`, and `methodology/CLAUDE.md` (the worktree + test-first sections
   of his global CLAUDE.md). When he changes those at home, refresh the copies here.
 - `Install Shepherd.command` → `bootstrap.sh` (prerequisites) → `install.sh`; `uninstall.sh`
-  reverses `install.sh` -- a new file `install.sh` ships goes in both file lists.
+  reverses `install.sh`. A new shipped file is one line in `SHIPPED` (plus its wiring in
+  `settings-hooks.json` for a hook): the installers, the Makefile and the tests all read that list.
