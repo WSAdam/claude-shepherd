@@ -187,3 +187,14 @@ synthetic
 API
 Error
 Overloaded
+origin
+kind
+peer
+human
+task
+notification
+xhigh
+opus
+worktree
+state
+relocated

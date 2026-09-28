@@ -23,7 +23,8 @@
 // their gaps kept, and any key this file doesn't know is masked too (file-history records key
 // objects by file path). The few strings the parsers read -- record and block types, roles,
 // models, built-in tool names, the interrupt marker, Claude Code's own <command-*>/<ide_*> tags,
-// generic API-error words -- are kept by the lists below. check-scrubbed.js then proves the
+// generic API-error words, a prompt's origin kind (human, peer, task-notification) -- are kept by
+// the lists below. check-scrubbed.js then proves the
 // output holds no word outside vocabulary.txt, and this script refuses to write one that does.
 "use strict";
 const fs = require("fs");
@@ -44,7 +45,7 @@ const KNOWN_KEYS = new Set(`type subtype sessionId version content timestamp cwd
   isSnapshotUpdate trackedFileBackups hookName hookEvent stdout stderr exitCode command hookCount
   hookInfos hookErrors preventedContinuation stopReason hasOutput retryInMs retryAttempt
   maxRetries rateLimits isNetworkDown connection isSSLError code cause status headers source
-  media_type data summary`.split(/\s+/).filter(Boolean));
+  media_type data summary origin kind`.split(/\s+/).filter(Boolean));
 
 // Below these keys nothing is structural: tool inputs/results, attachments, snapshots.
 const FREE_FORM = new Set(["input", "toolUseResult", "attachment", "snapshot", "data", "hookInfos", "diagnostics"]);
@@ -52,7 +53,7 @@ const FREE_FORM = new Set(["input", "toolUseResult", "attachment", "snapshot", "
 // A value under one of these keys is kept when it is a bare identifier (never inside FREE_FORM).
 const IDENT_VALUE_KEYS = new Set(["type", "subtype", "role", "stop_reason", "level", "userType",
   "entrypoint", "service_tier", "permissionMode", "operation", "mode", "speed", "effort",
-  "inference_geo", "hookEvent", "media_type"]);
+  "inference_geo", "hookEvent", "media_type", "kind"]);
 const IDENT = /^[A-Za-z][A-Za-z0-9_\-\/]{0,40}$/;
 const MODEL = /^(claude-[a-z0-9.\-]{1,40}|<synthetic>)$/;
 const VERSION = /^\d+\.\d+\.\d+$/;

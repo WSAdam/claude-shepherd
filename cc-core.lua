@@ -5241,13 +5241,21 @@ function M.turnEvidence(text)
     local okj, obj = pcall(function() return M.json.decode(line) end)
     return okj and type(obj) == "table" and obj or nil
   end
-  local start, origin
+  -- The turn starts at the newest prompt Adam (or Shepherd) sent. 2026-09-28: a batch unit never
+  -- gets one -- every prompt it has is its driver's message, a peer's -- and a long turn's prompt can
+  -- sit megabytes back, so neither ever got a label. With no such prompt in the tail, the turn starts
+  -- at the newest message another session sent; with none of those either, the whole tail is inside
+  -- a turn that began before it (start 0, no origin).
+  local start, origin, peerAt
   for i = #spans, 1, -1 do
     local obj = decode(i, false)
     local o = obj and M.promptOrigin(obj)
     if o == "human" or o == "shepherd" then start, origin = i, o; break end
+    if o == "peer" and not peerAt then peerAt = i end
   end
-  if not start then return nil end
+  if not start then
+    if peerAt then start, origin = peerAt, "peer" else start = 0 end
+  end
   local ev = { origin = origin, complete = false, edits = 0, mutating = 0, reads = 0, tests = 0,
                other = 0, errors = 0, denials = 0, todoDone = 0, committed = false, asked = false,
                planPut = false, apiError = false, endedDenied = false, textLen = 0 }

@@ -769,6 +769,24 @@ do
   eq("a torn last line leaves the turn readable", core.turnOutcome(ev), "made progress")
   eq("...counting its edits", ev and ev.edits, 1)
   eq("...and its test runs", ev and ev.tests, 1)
+  -- 2026-09-28: live, no finished card got a label: all five done sessions had no prompt from Adam
+  -- in the tail read -- four were batch units, whose every prompt is the driver's message (a
+  -- peer's), and one was a turn whose prompt sat 2.6MB back -- so the walk found no start at all.
+  local edit = call("Edit", { file_path = "/r/a.ts", old_string = "a", new_string = "b" })
+  ev = core.turnEvidence(turn(J(peer), edit, said("Fixed.")))
+  eq("a batch unit's turn starts at the driver's message", core.turnOutcome(ev), "made progress")
+  eq("...whose origin is a peer's", ev and ev.origin, "peer")
+  eq("...and a notification in it still belongs to that turn",
+     label(turn(J(peer), edit, said("Fixed."), J(notif), said("The build finished."))), "made progress")
+  eq("...and a driver's message is its own turn after the unit's work",
+     label(turn(J(peer), edit, said("Fixed."), J(peer), said("Noted, nothing left to do."))), "did nothing")
+  eq("Adam's prompt still starts the turn when a peer's message comes after it",
+     label(turn(prompt("fix it"), edit, said("Fixed."), J(peer), said("Noted."))), "made progress")
+  ev = core.turnEvidence(turn(call("Bash", { command = "make test" }, "ALL GREEN"), edit, said("Done.")))
+  eq("a tail with no prompt at all is inside one turn, so all of it counts", core.turnOutcome(ev), "made progress")
+  eq("...its prompt is older than the read, so there's no origin", ev and ev.origin, nil)
+  eq("...and it counts every edit in the tail", ev and ev.edits, 1)
+  eq("a tail of bookkeeping only still has no label", label(turn(J(summary))), nil)
   -- the Instances row says it too, only while the session is finished
   local p = core.instancesPayload("s", { { key = "k", status = "done", turnLabel = "made progress", cwd = "/r/a" },
                                           { key = "w", status = "working", turnLabel = "made progress", cwd = "/r/b" } }, {}, {}, {})

@@ -41,7 +41,9 @@ Instances rows and the Stream Deck show an errored session as **Error** in magen
   same, and the ledger records a `turn_outcome` event. What Shepherd sends on its own
   (auto-continue, a rule's nudge or continue, the self-summary) starts with `[shepherd]`, so those
   turns never read as yours; your own **Continue** click still types a plain `continue`. Task
-  notifications and compaction summaries don't count as prompts either.
+  notifications and compaction summaries don't count as prompts either. A batch unit, which only
+  ever gets its driver's messages, is labelled from the newest of those. When the turn's prompt is
+  further back than the last 256KB of the transcript, the label covers that whole 256KB.
 - A `done` tile **self-heals back to `working`** when the transcript shows the turn resumed (the
   model wrote a new line, or you typed a fresh prompt). In Auto mode or the VS Code extension, a
   text-only reply or an auto-continued turn can land before the `working` hooks do, so a tile no

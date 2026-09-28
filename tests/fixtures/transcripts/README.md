@@ -54,6 +54,21 @@ the turn's own prompt (`origin.kind: "human"`) among the scrubbed records, count
 label the turn *made progress*. Cut with `--tail 89500 --end-after system/stop_hook_summary:4`;
 a 90,000-byte cut split a kept key in the torn first line, so the window was moved.
 
+**`tail-unit-turn-from-peer.jsonl`** — the last 60,000 bytes of a real batch unit's session, up
+to the Stop of its last turn (2026-09-28). A batch unit never gets a prompt from Adam: every one is
+its driver's message, a `user` record with `origin.kind: "peer"` and `isMeta: true`. Here the
+driver says the merge has landed and the unit answers in one paragraph with no tools, so
+`core.turnEvidence` has to start the turn at that message and label it *only planned*. Cut with
+`--tail 60000`.
+
+**`tail-turn-prompt-out-of-reach.jsonl`** — the last 90,000 bytes of another unit's session, up to
+the Stop of its merge-and-deploy turn (2026-09-28). The message that started the turn is 600KB
+back, so the window holds no prompt at all: the whole window is inside one turn, which ran eight
+commands that change things and reads *made progress*. Cut with `--tail 90000`.
+
+`scrub.js` keeps a prompt's `origin.kind` (`human`, `peer`, `task-notification`) since these two
+were cut; the fixtures above them were cut before that, so their `origin` is masked.
+
 ## Regenerating
 
 `node scrub.js <transcript.jsonl> [--bytes N] > out.jsonl`, then

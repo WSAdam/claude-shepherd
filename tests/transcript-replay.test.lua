@@ -178,5 +178,33 @@ do
   eq("turn: no torn line reaches the JSON decoder", failedDecodes, 0)
 end
 
+-- ---- tail-unit-turn-from-peer: a batch unit's last turn, labelled (2026-09-28) -------------------
+-- 2026-09-28: live, no finished card had a turn label: the walk looked only for Adam's or
+-- Shepherd's prompt, and a batch unit never gets one -- its every prompt is its driver's message
+-- (origin.kind "peer", isMeta). This window ends on the Stop of a real unit's last turn: its driver
+-- said the merge had landed, and it answered in one paragraph and stopped.
+do
+  failedDecodes = 0
+  local tail = readTail(FIXTURES .. "tail-unit-turn-from-peer.jsonl", 60000)   -- the window it was cut for
+  local ev = core.turnEvidence(tail or "")
+  eq("a batch unit's last turn starts at its driver's message", ev and ev.origin, "peer")
+  eq("...and a reply of one paragraph and no tools only planned", core.turnOutcome(ev), "only planned")
+  eq("turn from a peer: no torn line reaches the JSON decoder", failedDecodes, 0)
+end
+
+-- ---- tail-turn-prompt-out-of-reach: a turn whose prompt is older than the read (2026-09-28) -----
+-- 2026-09-28: the same bug from the other side. A turn whose prompt sits further back than the
+-- tick reads (here a unit's merge-and-deploy turn, its driver's message 600KB before the end) holds
+-- no prompt at all in the window, so it had no label either. The whole window is inside that turn.
+do
+  failedDecodes = 0
+  local tail = readTail(FIXTURES .. "tail-turn-prompt-out-of-reach.jsonl", 90000)   -- the window it was cut for
+  local ev = core.turnEvidence(tail or "")
+  eq("a turn whose prompt is out of reach is read from the whole window", core.turnOutcome(ev), "made progress")
+  eq("...with no prompt to name its origin", ev and ev.origin, nil)
+  eq("...counting the commands that changed things", ev and ev.mutating, 8)
+  eq("turn out of reach: no torn line reaches the JSON decoder", failedDecodes, 0)
+end
+
 print(string.format("\n%d checks, %d failed", run, failed))
 os.exit(failed == 0 and 0 or 1)
