@@ -2701,6 +2701,10 @@ do
         src:find("searchTask = hs.task.new(", 1, true) == nil)
   check("#14-pin: search exit callback reads the redirect file",
         src:find('local out = FX.readFile(outFile) or ""', 1, true) ~= nil)
+  -- 2026-09-28: tools/ledger-quarantine.sh parks the suites' synthetic events in
+  -- cc-ledger/quarantine/, which the recursive fleet search would still return.
+  check("fleet search skips the ledger's quarantine/ folder",
+        src:find('core.searchArgv(kind, q, paths, { excludeDirs = { "quarantine" } })', 1, true) ~= nil)
 
   -- #15/#29: the search exit callback checks OWNERSHIP first -- a superseded
   -- query's terminate-triggered callback must not nil the NEWER task's latch

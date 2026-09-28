@@ -10,6 +10,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 mktemp_dir() { mktemp -d 2>/dev/null || mktemp -d -t ccshepherd; }
 
+# 2026-09-28: a hook driven by a suite that set only CC_STATUS_DIR read the REAL
+# ~/.claude/cc-config.json (Adam's has the ledger on) and appended the suite's fake events to
+# the real ~/.claude/cc-ledger -- ~15k over a month. Every suite now gets its own ledger dir and
+# an empty config unless it sets its own after sourcing this file (tests/ledger-isolation.test.sh).
+CC_TEST_ISOLATION="$(mktemp_dir)"
+export CC_LEDGER_DIR="${CC_LEDGER_DIR:-$CC_TEST_ISOLATION/ledger}"
+export CC_CONFIG_FILE="${CC_CONFIG_FILE:-$CC_TEST_ISOLATION/cc-config.json}"
+
 # sysbin_without <outdir> <tool>... - mirror /usr/bin + /bin into <outdir> as symlinks,
 # leaving out the named tools, and echo <outdir>. Use it in place of a literal
 # "/usr/bin:/bin" wherever a test proves install.sh REPORTS or ABORTS on a missing tool.
@@ -73,6 +81,7 @@ wait_for() { # <path> [tries]
 
 finish() {
   echo "-- $(basename "$0"): $TESTS_RUN run, $TESTS_FAIL failed --"
+  [ -n "${CC_TEST_ISOLATION:-}" ] && rm -rf "$CC_TEST_ISOLATION"
   [ "$TESTS_FAIL" -eq 0 ]
   exit $?
 }

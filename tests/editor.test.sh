@@ -13,7 +13,8 @@ CC="$ROOT/cc-status.sh"
 # run <event> <json> [VAR=val ...] - clean env + only the vars we pass.
 run() {
   local ev="$1" json="$2"; shift 2
-  env -i HOME="$HOME" PATH="$PATH" CC_STATUS_DIR="$TMP" "$@" \
+  env -i HOME="$HOME" PATH="$PATH" CC_STATUS_DIR="$TMP" \
+    CC_LEDGER_DIR="$CC_LEDGER_DIR" CC_CONFIG_FILE="$CC_CONFIG_FILE" "$@" \
     bash "$CC" "$ev" <<<"$json" >/dev/null 2>&1
 }
 

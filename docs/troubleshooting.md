@@ -85,6 +85,21 @@ also for a policy that allowed it: the Decisions tab and the audit ledger record
 - **A tile never appears.** Check that the hooks are wired (Diagnostics), then capture what your
   Claude Code version sends ([Development → Confirm your hook payloads](development.md#confirm-your-hook-payloads)).
 
+## Insights or History list sessions that never ran
+
+Before 2026-09-28, running Shepherd's own test suite (`make test`, which `make setup` and the
+installer run too) with the audit ledger on wrote the suite's fake events into your real ledger:
+sessions in folders like `/p`, `/U/x/proj` or `/srv/…`. `tools/ledger-quarantine.sh` moves them out
+of the ledger into `~/.claude/cc-ledger/quarantine/` (nothing is deleted) and says how many it moved:
+
+```bash
+tools/ledger-quarantine.sh --dry-run   # count only
+tools/ledger-quarantine.sh
+```
+
+Today's file is left alone while hooks are still writing to it; run the script again tomorrow for
+that one.
+
 ## Jump lands on the wrong window, or none
 
 Focus matches the project's folder name in the VS Code window title (the default title format), then

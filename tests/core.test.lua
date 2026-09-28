@@ -4178,6 +4178,25 @@ do
   eq("#20-pin: dead parent has no tile key", hits[2].key, nil)
 end
 
+-- ---- Fleet search skips the ledger's quarantine/ folder (2026-09-28) ---------
+-- 2026-09-28: tools/ledger-quarantine.sh moves ~15k synthetic test events into
+-- cc-ledger/quarantine/ -- but the search recurses into the ledger dir, so up to 3 fake
+-- hits per quarantined day file would still crowd the 200-hit cap.
+do
+  local ra = core.searchArgv("rg", "auth.ts", { "/h/.claude/projects", "/h/.claude/cc-ledger" },
+                             { excludeDirs = { "quarantine" } })
+  local rs = table.concat(ra, " ")
+  eq("fleet search (rg) skips a quarantine/ folder", rs:find("-g *.jsonl -g !quarantine/ -e ", 1, true) ~= nil, true)
+  eq("...and still searches both roots", rs:sub(-#"/h/.claude/projects /h/.claude/cc-ledger"),
+     "/h/.claude/projects /h/.claude/cc-ledger")
+  local ga = core.searchArgv("grep", "auth.ts", { "/h/.claude/projects" }, { excludeDirs = { "quarantine" } })
+  eq("fleet search (grep) skips a quarantine/ folder",
+     table.concat(ga, " "):find("--include=*.jsonl --exclude-dir=quarantine -e ", 1, true) ~= nil, true)
+  -- a name that isn't a plain folder name never reaches the engine as a pattern
+  local odd = table.concat(core.searchArgv("rg", "auth.ts", { "/p" }, { excludeDirs = { "a/b", "", "-x", ".." } }), " ")
+  eq("an exclusion that isn't a plain folder name is dropped", odd:find("!", 1, true), nil)
+end
+
 -- ---- #24-pin: maxPerFile caps HITS per file, not matching lines --------------
 -- rg --max-count / grep -m limit matching LINES, but -o fans one dense line out
 -- to a row per match -- transcript JSONL events are giant single lines, so one

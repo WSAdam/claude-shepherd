@@ -3819,6 +3819,8 @@ M.SEARCH_CTX = 60  -- chars of context captured around the match
 -- transcript lines are multi-KB JSON, so emitting ONLY the wrapped match keeps
 -- the output tiny by construction (no --json parsing, no giant lines).
 -- Returns nil for a too-short query (< SEARCH_MIN_QUERY after trim).
+-- opts.excludeDirs = folder NAMES skipped at any depth (the ledger's quarantine/);
+-- anything that isn't a plain name (a slash, a leading dash or dot, blank) is dropped.
 function M.searchArgv(kind, query, paths, opts)
   opts = opts or {}
   local q = tostring(query or ""):gsub("^%s+", ""):gsub("%s+$", "")
@@ -3832,12 +3834,22 @@ function M.searchArgv(kind, query, paths, opts)
   local argv
   if kind == "rg" then
     argv = { "--no-config", "-i", "-n", "-o", "--no-heading", "--with-filename",
-             "--max-count", maxPerFile, "--max-filesize", "50M", "-g", "*.jsonl",
-             "-e", wrapped }
+             "--max-count", maxPerFile, "--max-filesize", "50M", "-g", "*.jsonl" }
   else
     argv = { "-r", "-I", "-i", "-n", "-o", "-H", "-E", "-m", maxPerFile,
-             "--include=*.jsonl", "-e", wrapped }
+             "--include=*.jsonl" }
   end
+  for _, raw in ipairs(opts.excludeDirs or {}) do
+    local d = tostring(raw)
+    if d:match("^[%w_][%w_.-]*$") then
+      if kind == "rg" then
+        argv[#argv + 1] = "-g"; argv[#argv + 1] = "!" .. d .. "/"
+      else
+        argv[#argv + 1] = "--exclude-dir=" .. d
+      end
+    end
+  end
+  argv[#argv + 1] = "-e"; argv[#argv + 1] = wrapped
   for _, p in ipairs(paths or {}) do argv[#argv + 1] = tostring(p) end
   return argv
 end

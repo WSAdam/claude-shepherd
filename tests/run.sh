@@ -71,6 +71,12 @@ echo ""
 echo "== bash: audit ledger =="
 bash "$DIR/ledger.test.sh" || fail=1
 echo ""
+echo "== bash: no suite writes into the real ledger =="
+bash "$DIR/ledger-isolation.test.sh" || fail=1
+echo ""
+echo "== bash: synthetic test events move out of a ledger into quarantine/ =="
+bash "$DIR/ledger-quarantine.test.sh" || fail=1
+echo ""
 echo "== bash: installer =="
 bash "$DIR/install.test.sh" || fail=1
 echo ""

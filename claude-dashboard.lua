@@ -7493,7 +7493,7 @@ local function handleBridgeMsg(msg)
       .. (kind ~= "rg" and "  (install ripgrep for faster fleet search)" or ""))
     local paths = { (os.getenv("HOME") or "") .. "/.claude/projects" }
     if hs.fs.attributes(LEDGER_DIR) then paths[#paths + 1] = LEDGER_DIR end
-    local args = core.searchArgv(kind, q, paths)
+    local args = core.searchArgv(kind, q, paths, { excludeDirs = { "quarantine" } })
     if not args then return end  -- too-short query: JS already cleared the view
     local maxResults = tonumber(core.config(cfg, "search.maxResults", 200)) or 200
     -- Run via /bin/sh with stdout REDIRECTED to a temp file (the folder-scan fix,
