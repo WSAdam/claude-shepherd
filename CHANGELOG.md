@@ -18,6 +18,7 @@ One line per unit as it merges; the section gets its date and full write-up when
 - A finished card says how its last turn ended (done / made progress / only planned / did nothing / blocked / needs follow-up), Shepherd's own sends are marked `[shepherd]`, and task notifications or compaction summaries are no longer read as Adam's prompt.
 - A session whose turn ended while a background shell job still runs reads **Running 1 job** instead of "Ready for you", until the job finishes or is stopped; dev servers and watchers don't count, and a job stops counting after 30 minutes.
 - Batch units and very long turns get their turn label too: with no prompt from you in the last 256KB, the turn starts at the newest message from another session, or covers the whole 256KB.
+- One worktree, one agent: Shepherd won't spawn or respawn a session into a linked worktree another live session is using, and a new `cc-worktree-guard.sh` hook denies EnterWorktree into one; `make setup` now adds every per-tool PreToolUse hook group an existing install lacks, not only the question hook's.
 
 ## 2026-09-25 — Merged unit tabs close again, and Instances can clear the rest
 
