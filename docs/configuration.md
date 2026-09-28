@@ -54,7 +54,7 @@ The panel re-reads the file within about a second (except `hotkeys`, which need 
 
 | Section | What it controls | Reference |
 |---------|------------------|-----------|
-| `gate`, `policies`, `ask` | Gated tools, auto-allow/deny, always-ask commands, bundles, Autopilot, held questions | [Approvals and policies](approvals-and-policies.md) |
+| `gate`, `policies`, `ask` | Gated tools, the worktree fence, auto-allow/deny, always-ask commands, bundles, Autopilot, held questions | [Approvals and policies](approvals-and-policies.md) |
 | `merge`, `fleet`, `tabBridge` | Ready to merge, merge gates, batches, the tab bridge | [Merging and batches](merging-and-batches.md) |
 | `queue`, `templates`, `automodel` | Task queue, routing, templates, model auto-routing | [Automation](automation.md) |
 | `respawn`, `autoContinue`, `drain`, `prune`, `cleanup`, `tabless` | Recovery and cleanup | [Automation](automation.md), [Controls](controls.md#sessions-with-no-tab) |
@@ -76,7 +76,7 @@ A starting point for the most common switches:
   "focus":      { "popOnComplete": false, "popOnApproval": false },
   "spawn":      { "editor": "vscode", "live": false, "kittyRemote": true, "kittyAutoRemote": true,
                   "searchRoots": [], "searchDepth": 4 },
-  "gate":       { "tools": "Bash Write Edit MultiEdit NotebookEdit" },
+  "gate":       { "tools": "Bash Write Edit MultiEdit NotebookEdit", "fence": true },
   "ledger":     { "enabled": false, "retentionDays": 30, "maxTotalMB": 0 },
   "risk":       { "enabled": false },
   "collision":  { "enabled": false, "useGitRoot": false },

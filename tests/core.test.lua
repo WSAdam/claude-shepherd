@@ -8439,8 +8439,10 @@ do
   -- 2026-09-28: 14 -> 15 for always-ask commands ("alwaysask", flagged new).
   -- 2026-09-28: 15 -> 16 for talk mode ("talk", flagged new).
   -- 2026-09-28: 16 -> 17 for handoff notes ("handoffs", flagged new).
-  eq("FEATURES: the 17 new features are flagged", newCount, 17)
+  -- 2026-09-28: 17 -> 18 for the worktree fence ("fence", flagged new).
+  eq("FEATURES: the 18 new features are flagged", newCount, 18)
   check("FEATURES: lists handoff notes", keys.handoffs == true)
+  check("FEATURES: lists the worktree fence", keys.fence ~= nil)
   check("FEATURES: lists talk mode", keys.talk == true)
   check("FEATURES: lists how each turn ended", keys.turns == true)
   check("FEATURES: lists always-ask commands", keys.alwaysask == true)
@@ -11871,6 +11873,25 @@ do
   table.sort(drop)
   eq("notes older than 14 days are pruned, fresh ones and folders kept", table.concat(drop, ","), "gone.handoff.md.tmp.9,old.handoff.md")
   eq("a note with no mtime is kept", #core.notesToPrune({ { name = "x.handoff.md", mode = "file" } }, now), 0)
+end
+
+-- ---- worktree fence (2026-09-28) ----
+-- Build program unit 7. gate.fence (cc-approve.sh) keeps a session out of its repo's sibling
+-- worktrees. The Settings form rebuilds `gate` from gate.tools alone, so fence must ride through a
+-- Save the way policies.alwaysAsk does; the Features list names it.
+do
+  local keeps = false
+  for _, k in ipairs(core.SETTINGS_KEEP_SUBKEYS.gate or {}) do if k == "fence" then keeps = true end end
+  check("fence: fence is in SETTINGS_KEEP_SUBKEYS.gate", keeps)
+  local out = core.overlayConfig(
+    { gate = { tools = "Bash", fence = true } },
+    { gate = { tools = "Bash Write" } })
+  eq("fence: a Settings Save keeps gate.fence", out.gate.fence, true)
+  eq("fence: ...and still takes the form's gate.tools", out.gate.tools, "Bash Write")
+  local keys = {}
+  for _, f in ipairs(core.FEATURES) do keys[f.key] = f end
+  check("fence: FEATURES lists the worktree fence, flagged new", keys.fence ~= nil and keys.fence.new == true)
+  check("fence: ...in the Control group", keys.fence ~= nil and keys.fence.cat == "Control")
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))

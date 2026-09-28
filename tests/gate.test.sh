@@ -1364,4 +1364,158 @@ touch "$TALK/tk4"
 ( CC_TALK_DIR="$TALK"; . "$ROOT/cc-lib.sh"; cc_remove tk4 ) >/dev/null 2>&1
 assert_absent "talk: cc_remove drops the talk-mode flag" "$TALK/tk4"
 
+# ---- worktree fence (build program unit 7, 2026-09-28) ---------------------------------------
+# With gate.fence on, a session can't change a sibling worktree of its own repo: one with the same
+# git common dir and a different toplevel. The main checkout is a sibling of a linked worktree, but
+# a session whose cwd IS the main checkout may change main. Denied, gate armed or not: an Edit-family
+# file in a sibling; mutating git aimed at one through -C, --git-dir, --work-tree, GIT_DIR= or
+# GIT_WORK_TREE=, or after cd <sibling>; a redirection into one. Read-only git is fine, and so is the
+# session's own approved merge (git -C <main> merge --ff-only <its branch>).
+FR="$(cd "$TMP" && pwd -P)/fence"
+MAIN="$FR/main"; WA="$MAIN/.claude/worktrees/a"; WB="$MAIN/.claude/worktrees/b"
+fgit() { git -c user.name=t -c user.email=t@example.com -c init.defaultBranch=main "$@"; }
+fgit init -q "$MAIN"
+fgit -C "$MAIN" commit -q --allow-empty -m init
+fgit -C "$MAIN" worktree add -q "$WA" -b wa
+fgit -C "$MAIN" worktree add -q "$WB" -b wb
+mkdir -p "$WA/sub" "$FR/plain"
+fgit init -q "$FR/other"
+FCFG="$TMP/fence-on.json"; printf '{ "gate": { "fence": true } }' > "$FCFG"
+FOFF="$TMP/fence-off.json"; printf '{ "gate": { "fence": false } }' > "$FOFF"
+FMERGE="$TMP/fmerge"; mkdir -p "$FMERGE"
+fence_req() { # $1 session, $2 cwd, $3 tool, $4 tool_input JSON
+  jq -nc --arg s "$1" --arg c "$2" --arg t "$3" --argjson i "$4" '{session_id:$s, cwd:$c, tool_name:$t, tool_input:$i}'
+}
+fence() { # $1 session, $2 cwd, $3 tool, $4 tool_input JSON [, env assignments that override]
+  fence_req "$1" "$2" "$3" "$4" \
+    | env CC_CONFIG_FILE="$FCFG" CC_GATE_FLAG="$AA_NOFLAG" CC_MERGE_DIR="$FMERGE" "${@:5}" bash "$APP" 2>/dev/null
+}
+edit_in() { jq -nc --arg p "$1" '{file_path:$p, old_string:"a", new_string:"b"}'; }
+cmd_in() { jq -nc --arg c "$1" '{command:$c}'; }
+fdeny() { # $1 name, $2 cwd, $3 command -> denied
+  assert_eq "fence: $1" "deny" "$(decision "$(fence f1 "$2" Bash "$(cmd_in "$3")")")"
+}
+fallow() { # $1 name, $2 cwd, $3 command -> left alone
+  assert_eq "fence: $1" "" "$(fence f1 "$2" Bash "$(cmd_in "$3")")"
+}
+rm -f "$HB"
+
+# the Edit family
+out="$(fence f1 "$WA" Edit "$(edit_in "$WB/x.txt")")"
+assert_eq "fence: an Edit into a sibling worktree is denied, gate unarmed" "deny" "$(decision "$out")"
+assert_eq "fence: ...naming the path" "Worktree fence: $WB/x.txt belongs to another worktree of this repo" "$(reason "$out")"
+out="$(fence f1 "$WA" Write "$(jq -nc --arg p "$MAIN/README.md" '{file_path:$p, content:"x"}')")"
+assert_eq "fence: a Write into the main checkout from a linked worktree is denied" "deny" "$(decision "$out")"
+out="$(fence f1 "$WA" NotebookEdit "$(jq -nc --arg p "$WB/n.ipynb" '{notebook_path:$p, new_source:"x"}')")"
+assert_eq "fence: a NotebookEdit into a sibling is denied" "deny" "$(decision "$out")"
+out="$(fence f1 "$WA" Edit "$(edit_in "$WA/../b/deep/new.txt")")"
+assert_eq "fence: a path that climbs into a sibling is denied" "deny" "$(decision "$out")"
+assert_eq "fence: own edits go on" "" "$(fence f1 "$WA" Edit "$(edit_in "$WA/sub/new.txt")")"
+assert_eq "fence: ...a relative one too" "" "$(fence f1 "$WA" Edit "$(edit_in "sub/x.txt")")"
+assert_eq "fence: a session in the main checkout may change main" "" "$(fence f1 "$MAIN" Edit "$(edit_in "$MAIN/README.md")")"
+out="$(fence f1 "$MAIN" Edit "$(edit_in "$WB/x.txt")")"
+assert_eq "fence: ...but not a linked worktree under it" "deny" "$(decision "$out")"
+assert_eq "fence: another repo is not a sibling" "" "$(fence f1 "$WA" Edit "$(edit_in "$FR/other/x.txt")")"
+assert_eq "fence: a folder in no repo is not a sibling" "" "$(fence f1 "$WA" Edit "$(edit_in "$FR/plain/x.txt")")"
+assert_eq "fence: reading a sibling goes on" "" "$(fence f1 "$WA" Read "$(jq -nc --arg p "$WB/x.txt" '{file_path:$p}')")"
+
+# mutating git aimed at a sibling
+out="$(fence f1 "$WA" Bash "$(cmd_in "git -C $WB commit -m x")")"
+assert_eq "fence: git -C sibling commit is denied" "deny" "$(decision "$out")"
+assert_eq "fence: ...naming the sibling" "Worktree fence: $WB belongs to another worktree of this repo" "$(reason "$out")"
+fdeny "git -C <main> commit from a linked worktree is denied" "$WA" "git -C $MAIN commit -m x"
+fdeny "a relative git -C ../b is denied" "$WA" "git -C ../b add ."
+fdeny "cd sibling && git commit is denied" "$WA" "cd $WB && git commit -m x"
+fdeny "cd ../b; git add is denied" "$WA" "cd ../b; git add -A"
+fdeny "(cd sibling && git commit) is denied" "$WA" "(cd $WB && git commit -m x)"
+fdeny "sh -c \"cd sibling && git commit\" is denied" "$WA" "sh -c \"cd $WB && git commit -m x\""
+fdeny "git --git-dir=<sibling's> commit is denied" "$WA" "git --git-dir=$MAIN/.git/worktrees/b commit -m x"
+fdeny "GIT_DIR=<main's .git> git commit is denied" "$WA" "GIT_DIR=$MAIN/.git git commit -m x"
+fdeny "git --work-tree=sibling add is denied" "$WA" "git --work-tree=$WB add ."
+fdeny "GIT_WORK_TREE=sibling git add is denied" "$WA" "GIT_WORK_TREE=$WB git add -A"
+fdeny "git -C sibling checkout is denied" "$WA" "git -C $WB checkout -b other"
+fdeny "a redirection into a sibling is denied" "$WA" "cd $WB && git log > log.txt"
+fdeny "...an absolute one too" "$WA" "git log > $WB/log.txt"
+fdeny "a session in main can't commit in a linked worktree under it" "$MAIN" "git -C $WB commit -m x"
+out="$(fence f1 "$WA" Bash "$(cmd_in "git -C $WB push")")"
+assert_eq "fence: deny wins over an always-ask hold" "deny" "$(decision "$out")"
+
+# read-only git and the session's own tree
+fallow "git -C sibling status is allowed" "$WA" "git -C $WB status"
+fallow "git -C main log / diff / show are allowed" "$WA" "git -C $MAIN log --oneline -3 && git -C $MAIN diff && git -C $MAIN show HEAD"
+fallow "git -C main rev-parse / merge-base / worktree list are allowed" "$WA" "git -C $MAIN rev-parse HEAD; git -C $MAIN merge-base main wa; git -C $MAIN worktree list"
+fallow "cd sibling && git status is allowed" "$WA" "cd $WB && git status && git log -1"
+fallow "cd sibling && git log > /dev/null is allowed" "$WA" "cd $WB && git log > /dev/null 2>&1"
+fallow "own git goes on" "$WA" "git add -A && git commit -m x"
+fallow "git -C <own> commit goes on" "$WA" "git -C $WA commit -m x"
+fallow "cd sub && git commit goes on" "$WA" "cd sub && git commit -m x"
+fallow "a quoted cd in a commit message is only words" "$WA" "git commit -m \"cd $WB && git commit\""
+fallow "a session in main may commit main" "$MAIN" "git commit -m x && git -C $MAIN merge --ff-only wa"
+fallow "another repo is not a sibling (git)" "$WA" "git -C $FR/other commit -m x"
+
+# fence off: everything goes on
+assert_eq "fence off: an Edit into a sibling goes on" "" "$(fence f1 "$WA" Edit "$(edit_in "$WB/x.txt")" CC_CONFIG_FILE="$FOFF")"
+assert_eq "fence off: git -C sibling commit goes on" "" "$(fence f1 "$WA" Bash "$(cmd_in "git -C $WB commit -m x")" CC_CONFIG_FILE="$FOFF")"
+assert_eq "fence unset: an Edit into a sibling goes on" "" "$(fence f1 "$WA" Edit "$(edit_in "$WB/x.txt")" CC_CONFIG_FILE="$TMP/none.json")"
+
+# the one exception: this session's own approved merge
+fmreq() { # $1 session, $2 phase, $3 branch
+  jq -nc --arg p "$2" --arg b "$3" --arg w "$WA" --arg c "$MAIN/.git" \
+    '{v:1, phase:$p, branch:$b, base:"main", worktree:$w, commonDir:$c}' > "$FMERGE/$1.json"
+}
+FFM="$(cmd_in "git -C $MAIN merge --ff-only wa")"
+fmreq f9 approved wa
+assert_eq "fence: the approved merge git -C <main> merge --ff-only <own branch> goes on" "" "$(fence f9 "$WA" Bash "$FFM")"
+assert_eq "fence: ...and its cd <main> && form" "" "$(fence f9 "$WA" Bash "$(cmd_in "cd $MAIN && git merge --ff-only wa")")"
+assert_eq "fence: ...but no other branch" "deny" "$(decision "$(fence f9 "$WA" Bash "$(cmd_in "git -C $MAIN merge --ff-only wb")")")"
+assert_eq "fence: ...and no merge that isn't --ff-only" "deny" "$(decision "$(fence f9 "$WA" Bash "$(cmd_in "git -C $MAIN merge wa")")")"
+assert_eq "fence: ...and nothing chained after it" "deny" \
+  "$(decision "$(fence f9 "$WA" Bash "$(cmd_in "git -C $MAIN merge --ff-only wa && git -C $MAIN commit -m x")")")"
+assert_eq "fence: another session's approval doesn't count" "deny" "$(decision "$(fence f8 "$WA" Bash "$FFM")")"
+fmreq f9 requested wa
+assert_eq "fence: a merge request not yet approved doesn't count" "deny" "$(decision "$(fence f9 "$WA" Bash "$FFM")")"
+fmreq f9 approved wb
+assert_eq "fence: an approval for another branch doesn't count" "deny" "$(decision "$(fence f9 "$WA" Bash "$FFM")")"
+
+# the ledger: by fence
+echo '{ "gate": { "fence": true }, "ledger": { "enabled": true } }' > "$TMP/fence-ledger.json"
+fence f1 "$WA" Bash "$(cmd_in "git -C $WB commit -m x")" CC_CONFIG_FILE="$TMP/fence-ledger.json" CC_LEDGER_DIR="$TMP/fenceledger" >/dev/null
+assert_eq "fence ledger: the denial is recorded by fence" "deny|fence|git -C $WB commit -m x" \
+  "$(cat "$TMP"/fenceledger/*.jsonl 2>/dev/null | jq -r 'select(.type=="decision" and .session_id=="f1") | "\(.outcome)|\(.by)|\(.summary)"')"
+
+# the cheap path: a plain command, an own edit and own git spawn no git (this hook runs for every
+# tool call); a request aimed outside the cwd's own toplevel does
+GSPY="$TMP/gitspy"; mkdir -p "$GSPY"; REALGIT="$(command -v git)"
+printf '#!/bin/sh\necho git >> "%s/calls"\nexec "%s" "$@"\n' "$GSPY" "$REALGIT" > "$GSPY/git"; chmod +x "$GSPY/git"
+gitspy() { # $1 tool, $2 tool_input JSON -> git calls for session f1 in worktree a
+  rm -f "$GSPY/calls"
+  fence_req f1 "$WA" "$1" "$2" | PATH="$GSPY:$PATH" CC_CONFIG_FILE="$FCFG" CC_GATE_FLAG="$AA_NOFLAG" \
+    CC_MERGE_DIR="$FMERGE" bash "$APP" >/dev/null 2>&1
+  grep -c . "$GSPY/calls" 2>/dev/null || echo 0
+}
+assert_eq "fence: a plain command spawns no git" "0" "$(gitspy Bash "$(cmd_in "make build")")"
+assert_eq "fence: an own edit spawns no git" "0" "$(gitspy Edit "$(edit_in "$WA/sub/new.txt")")"
+assert_eq "fence: an edit outside any repo spawns no git" "0" "$(gitspy Edit "$(edit_in "$FR/plain/x.txt")")"
+assert_eq "fence: own git spawns no git" "0" "$(gitspy Bash "$(cmd_in "git add -A && git commit -m x")")"
+assert_eq "fence: cd into its own subfolder spawns no git" "0" "$(gitspy Bash "$(cmd_in "cd sub && git commit -m x")")"
+assert_eq "fence: ...and the spy does see a sibling one (control)" "yes" \
+  "$([ "$(gitspy Bash "$(cmd_in "git -C $WB commit -m x")")" -gt 0 ] && echo yes || echo no)"
+# jq: any config file costs a jq or two at load (the malformed check, gate.tools), so the fence's
+# own cost is the difference between the fence on and off
+jqspy() { # $1 config, $2 tool, $3 tool_input JSON -> jq calls
+  rm -f "$SPY/calls"
+  fence_req f1 "$WA" "$2" "$3" | PATH="$SPY:$PATH" CC_CONFIG_FILE="$1" CC_GATE_FLAG="$AA_NOFLAG" bash "$APP" >/dev/null 2>&1
+  grep -c . "$SPY/calls" 2>/dev/null || echo 0
+}
+assert_eq "fence: an own edit spawns no jq beyond what the fence off costs" \
+  "$(jqspy "$FOFF" Edit "$(edit_in "$WA/sub/new.txt")")" "$(jqspy "$FCFG" Edit "$(edit_in "$WA/sub/new.txt")")"
+assert_eq "fence: ...nor does a plain command" \
+  "$(jqspy "$FOFF" Bash "$(cmd_in "make build")")" "$(jqspy "$FCFG" Bash "$(cmd_in "make build")")"
+assert_eq "fence: ...nor own git" \
+  "$(jqspy "$FOFF" Bash "$(cmd_in "git commit -m x")")" "$(jqspy "$FCFG" Bash "$(cmd_in "git commit -m x")")"
+
+# defaults/: a fresh install has the fence on
+assert_eq "fence: defaults/cc-config.json turns gate.fence on" "true" \
+  "$(jq -r '.gate.fence' "$ROOT/defaults/cc-config.json")"
+
 finish

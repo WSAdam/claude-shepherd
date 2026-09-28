@@ -7397,6 +7397,8 @@ M.SETTINGS_KEEP_SUBKEYS = {
   -- Save and every Headless toggle deleted the bundles and attachments (edited in their own view).
   -- alwaysAsk (2026-09-28): the form sends it, but a Save from a form that doesn't must keep it.
   policies = { "bundles", "attachments", "alwaysAsk" },
+  -- fence (2026-09-28): the form rebuilds `gate` from gate.tools alone; the worktree fence has no input.
+  gate = { "fence" },
   escalation = { "hung" },
   risk = { "weights" },
   bridge = { "staleSlackSeconds", "keystrokes" },
@@ -13913,6 +13915,9 @@ M.FEATURES = {
   { key = "talk", cat = "Control", new = true, title = "Talk mode",
     what = "One click in a tile's menu or the detail panel puts a session in discussion-only mode: it can read, search and run read-only commands (ls, cat, grep, git log...), but edits outside ~/.claude/ and its scratchpad, and shell commands that change things, are denied. A TALK badge marks the tile.",
     why = "Ask a session to explain, review or plan without it changing anything -- whatever the gate, autopilot or its permission mode says." },
+  { key = "fence", cat = "Control", new = true, title = "Worktree fence",
+    what = "A session can't edit files in another worktree of its own repo, or run git that changes one (git -C <other> commit, cd <other> && git add, --work-tree, GIT_DIR=...). Read-only git (status, log, diff) still works, and a session in the main checkout may change main. Its own approved merge into main is the one exception.",
+    why = "Parallel units stay in their own lanes: a slip of a path never lands one unit's change in another's branch -- whatever the gate or its permission mode says." },
   { key = "actions", cat = "Control", title = "Jump, nudge, stop, clear",
     what = "Act on any session from its tile — focus its window, send it a message, stop it, or clear its context.",
     why = "Drive a session without switching to it." },

@@ -12,7 +12,9 @@ full working rules the sessions follow are in [methodology/CLAUDE.md](../methodo
 By default each unit is its own **Claude tab in the repo's one VS Code window**. The tab starts in
 the main checkout and calls `EnterWorktree`, which creates `.claude/worktrees/<slug>` and fences
 the session off from main. A unit that needs its own dev server or browser gets a sibling worktree
-(`../<repo>-<slug>`) in its own VS Code window instead.
+(`../<repo>-<slug>`) in its own VS Code window instead. Shepherd's
+[worktree fence](approvals-and-policies.md#worktree-fence) keeps each session out of the others'
+worktrees, whichever kind it started in.
 
 On the grid, the main checkout and every worktree fold into **one project card** (see
 [Fleet → Project cards and Instances](fleet.md#project-cards-and-instances)).

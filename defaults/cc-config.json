@@ -38,7 +38,8 @@
     }
   },
   "gate": {
-    "tools": "Bash Write Edit MultiEdit NotebookEdit"
+    "tools": "Bash Write Edit MultiEdit NotebookEdit",
+    "fence": true
   },
   "escalation": {
     "pushTopic": "",

@@ -35,6 +35,8 @@ How a session's requests reach you, what can answer them without you, and what n
   Code's own prompt shows whatever its mode.
 - **Talk mode only ever refuses.** A session you put in [talk mode](#talk-mode) has its edits and
   its commands that change things denied, gate armed or not, and nothing automatic can approve them.
+- **A session stays in its own worktree.** With the [worktree fence](#worktree-fence) on, a session
+  can't edit files in another worktree of its repo or run git that changes one, gate armed or not.
 - **Questions are yours.** A question a session asks with AskUserQuestion is answered only by you,
   from the card or in the tab. Approve / Deny and Approve all skip it.
 - **Merges are yours.** A unit merges only when you press **Merge**, or on a batch's grant you gave,
@@ -185,6 +187,51 @@ outside the Edit family and Bash aren't checked, and a path under `~/.claude/` c
 `~/.claude/` even when it is a symlink to somewhere else.
 The hook reads talk mode in pure bash first: with no session in talk mode, or only another one, it
 starts no `jq`.
+
+## Worktree fence
+
+Parallel units each work in their own worktree. The worktree fence keeps a session there: it can't
+change a **sibling worktree**, another worktree of the same repo. It is `gate.fence` in
+`~/.claude/cc-config.json`, on in a fresh install's defaults (it has no Settings switch, and a Save
+keeps it).
+
+A sibling is a folder with the same `git rev-parse --git-common-dir` as the session's cwd but a
+different `--show-toplevel`. The main checkout is a sibling of every linked worktree, so a unit
+can't change main from its worktree. A session whose cwd **is** the main checkout may change main:
+the post-merge steps run there after `ExitWorktree`. It still can't change a linked worktree, even
+one inside it under `.claude/worktrees/`.
+
+While it is on, whether or not the gate is armed:
+
+- **Edits into a sibling are denied** (Edit, Write, MultiEdit, NotebookEdit), including a path that
+  climbs into one with `..`.
+- **Git that changes a sibling is denied**: git aimed at one with `-C <dir>`, `--git-dir`,
+  `--work-tree`, `GIT_DIR=` or `GIT_WORK_TREE=`, or run after `cd <sibling>` (or `pushd`) in the
+  same command line, also inside `(…)`, `sh -c "…"` and `$(…)`. A redirection into a sibling
+  (`> <sibling>/log.txt`) in such a command is denied too.
+- **Read-only git goes on**: `status`, `log`, `diff`, `show`, `rev-parse`, `merge-base`,
+  `worktree list` and the rest of [talk mode's read-only git](#talk-mode).
+- **The one exception** is the session's own merge after you approve it: `git -C <main> merge
+  --ff-only <its branch>` (or `cd <main> && git merge --ff-only <its branch>`) goes on while its
+  [merge request](merging-and-batches.md#ready-to-merge) is approved, for that branch only and with
+  nothing else in the command.
+- The denial reads **"Worktree fence: `<path>` belongs to another worktree of this repo"**, and the
+  audit ledger records it as `outcome: "deny"`, `by: "fence"`.
+
+Like talk mode, the fence only ever refuses, before the [always-ask](#always-ask-commands) check and
+the gate. A command that is both, like `git -C <sibling> push`, is denied, not held, and no gate
+policy, Autopilot, bundle or permission mode can approve it.
+
+It guards against accidents; it isn't a sandbox. A folder named by a variable or a command
+(`git -C "$DIR" commit`, `cd $(…)`) can't be judged and goes on, `git worktree remove <path>` isn't
+judged by its path (the manual finish runs it from main), and other commands that write files
+(`cp`, `sed -i`, a script) aren't checked. A `cd` counts for the rest of the command line, even
+after a `(…)` closes.
+
+It stays cheap because the hook runs for every tool call. The first look is pure bash: an edit in
+the session's own tree (or in no repo), a command that names no git or `cd`, and git with no `-C`,
+`cd` or redirection start no `jq` and no `git`. Only a path outside the cwd's own toplevel costs a
+`git rev-parse`.
 
 ## Policies
 

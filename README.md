@@ -123,6 +123,8 @@ The automatic behaviours here are off until you turn them on, except handoff not
   pass them.
 - [**Talk mode**](docs/approvals-and-policies.md#talk-mode): one click makes a session discussion
   only; it can read and talk, but its edits and commands that change things are denied.
+- [**Worktree fence**](docs/approvals-and-policies.md#worktree-fence): a session can't edit another
+  worktree of its repo or run git that changes one, except its own approved merge into main.
 - [**Policy bundles & autopilot**](docs/approvals-and-policies.md#policies): reusable allow and deny
   rules per session or fleet, and a time-boxed autopilot.
 - [**Shared-window guard**](docs/controls.md#sessions-that-share-a-window): Shepherd won't type into

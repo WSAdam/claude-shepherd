@@ -26,6 +26,10 @@
 # an Edit-family call outside ~/.claude/ and the scratchpads, or a Bash command that isn't
 # read-only (cc_cmd_readonly in cc-lib.sh), is denied, whatever the gate or a policy says.
 #
+# Worktree fence (2026-09-28) comes next, with gate.fence on: an Edit-family file in a sibling
+# worktree of the session's repo, or mutating git / a redirection aimed at one, is denied (the
+# session's own approved ff-only merge into main excepted), whatever the gate or a policy says.
+#
 # Only the decision JSON is ever written to stdout; logs go to stderr.
 
 set -u
@@ -180,6 +184,42 @@ if cc_talk_candidate "$INPUT"; then
     echo "[cc-approve] 💬 talk mode denied $TALK_DENY: $TOOL ($KEY)" >&2
     ledger_decision deny talk
     emit_deny "Talk mode: discussion only"
+    exit 0
+  fi
+fi
+
+# ---- Worktree fence (build program unit 7, 2026-09-28) --------------------------------------
+# With gate.fence on, gate armed or not: a session can't change a sibling worktree of its own repo
+# (cc-lib.sh's fence section) -- an Edit-family file in one, mutating git aimed at one, a
+# redirection into one. Like talk mode it only ever denies, and it comes before the always-ask
+# layer, so a command that is both (git -C <sibling> push) is denied rather than held. The one
+# exception is the session's own approved merge, git -C <main> merge --ff-only <its branch>. The
+# first look is pure bash: an own edit, a plain command or own git starts no jq and no git.
+if cc_fence_candidate "$INPUT" && cc_have_jq && [ "$(cc_config '.gate.fence' 'false')" = "true" ]; then
+  [ -n "$KEY" ] || load_identity
+  [ -n "$SIG" ] || load_summary
+  FENCE_PATH=""
+  case "$TOOL" in
+    Edit|Write|MultiEdit|NotebookEdit)
+      cc_fence_sibling "$SUMMARY" "$CWD" && FENCE_PATH="$SUMMARY" ;;
+    Bash)
+      cc_fence_targets "$SUMMARY" "$CWD"
+      for FT in ${CC_FENCE_T[@]+"${CC_FENCE_T[@]}"}; do
+        F_KIND="${FT%%"$_CC_AA_US"*}"; FT="${FT#*"$_CC_AA_US"}"
+        F_PATH="${FT%%"$_CC_AA_US"*}"; F_BRANCH="${FT#*"$_CC_AA_US"}"
+        cc_fence_sibling "$F_PATH" "$CWD" "$F_KIND" || continue
+        if [ -n "$F_BRANCH" ] && cc_fence_main && cc_fence_merge_ok "$KEY" "$F_BRANCH"; then
+          echo "[cc-approve] 🚧 worktree fence: the approved merge of $F_BRANCH goes on ($KEY)" >&2
+          continue
+        fi
+        FENCE_PATH="$F_PATH"; break
+      done ;;
+  esac
+  if [ -n "$FENCE_PATH" ]; then
+    case "$FENCE_PATH" in /*) ;; *) FENCE_PATH="$CWD/$FENCE_PATH" ;; esac
+    echo "[cc-approve] 🚧 worktree fence denied $TOOL into $FENCE_PATH ($KEY)" >&2
+    ledger_decision deny fence
+    emit_deny "Worktree fence: $FENCE_PATH belongs to another worktree of this repo"
     exit 0
   fi
 fi

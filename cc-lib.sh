@@ -426,6 +426,7 @@ _CC_SC_PLAIN=$'^[^\\\\\'"$`[:space:];&|<>()#]+'   # a run of characters with no 
 _CC_SC_DQPLAIN=$'^[^"\\\\$`]+'                     # ...inside double quotes
 _CC_SC_CMD=(); _CC_SC_IN=(); _CC_SC_BAD=""; _CC_SC_END=0; _CC_AA_W=(); _CC_AA_EXTRAS=()
 _CC_SC_OUT=""   # output redirections that write a file (talk mode reads it), one per line
+_CC_SC_OUTAT=() # ...and for each, the index in _CC_SC_CMD of the command it belongs to (the fence)
 _CC_AA_KWRE=""; _CC_AA_ASSIGNS=""
 
 # The pure-bash first look (this hook runs for every tool call): 0 when the always-ask layer
@@ -558,7 +559,7 @@ _cc_sc_cmd() {    # end the simple command
   local k idx
   _cc_sc_word
   # an output redirection with no target word: >(...) runs a command on what's written
-  if [ "$redir" = 1 ] && [ -n "$rout" ]; then _CC_SC_OUT="$_CC_SC_OUT>("$'\n'; fi
+  if [ "$redir" = 1 ] && [ -n "$rout" ]; then _CC_SC_OUT="$_CC_SC_OUT>("$'\n'; _CC_SC_OUTAT+=(${#_CC_SC_CMD[@]}); fi
   if [ "$ncur" -gt 0 ]; then
     _CC_SC_CMD+=("$cur"); _CC_SC_IN+=("$herestr")
     idx=$(( ${#_CC_SC_CMD[@]} - 1 ))
@@ -575,6 +576,7 @@ _cc_sc_out() {    # the target of an output redirection: record it unless it wri
     [ "$kind" = dup ] && [[ $word =~ ^([0-9]+-?|-)$ ]] && return 0   # >&2, >&-: a descriptor
   fi
   _CC_SC_OUT="$_CC_SC_OUT$word"$'\n'
+  _CC_SC_OUTAT+=(${#_CC_SC_CMD[@]})   # the command it belongs to is appended next
 }
 
 _cc_sc_heredocs() {   # at the start of a line: read the bodies of the heredocs opened above it
@@ -1460,4 +1462,353 @@ _cc_handoff_pending() { # $1 key, $2 cwd
     rm -f "$claim"
     echo "[cc-lib] ⚠️ dropped a stale handoff note ($id): nobody took it within the hour" >&2
   done
+}
+
+# ---- Worktree fence (build program unit 7, 2026-09-28) --------------------------------------
+# With gate.fence on, a session can't change a sibling worktree of its own repo: another worktree
+# with the same git common dir (git rev-parse --git-common-dir) and a different toplevel, asked of
+# the target's nearest existing folder. The main checkout is a sibling of every linked worktree,
+# but a session whose cwd IS the main checkout changes main as its own tree (the post-merge steps
+# run there after ExitWorktree). cc-approve.sh denies an Edit-family file in a sibling, and in a
+# Bash command that names git or cd: mutating git aimed at a sibling (-C, --git-dir, --work-tree,
+# GIT_DIR=, GIT_WORK_TREE=, or after cd / pushd <sibling>) and an output redirection into one.
+# Read-only git (_cc_ro_git: status, log, diff, show, rev-parse, merge-base, worktree list...) is
+# fine, and so is the session's own approved merge, git -C <main> merge --ff-only <its branch>
+# (cc_fence_merge_ok). Cheap first: a path whose nearest .git, found in pure bash, is the cwd's
+# own (or that has none) is judged without git; only a path outside the cwd's own toplevel costs a
+# git rev-parse. A folder named by an expansion ($DIR, $(...)) can't be judged and goes on: the
+# fence guards against accidents, it isn't a sandbox. KEEP IN SYNC with
+# docs/approvals-and-policies.md#worktree-fence.
+CC_FENCE_TOP=""   # the sibling cc_fence_sibling found: its toplevel (a git dir for kind gitdir)
+CC_FENCE_T=()     # cc_fence_targets' findings, each kind US path US branch
+_CC_FENCE_TOP=""; _CC_FENCE_J=""
+_CC_FENCE_OWN=""; _CC_FENCE_OWN_TOP=""; _CC_FENCE_OWN_COMMON=""; _CC_FENCE_OWN_GITDIR=""
+
+# The pure-bash first look (this hook runs for every tool call): 0 when the fence must read the
+# request. gate.fence has to be on; an Edit-family call qualifies unless its file is plainly in
+# the cwd's own tree (or in none), a Bash call only when its command names git, cd or pushd and
+# something that can point elsewhere (cd, pushd, -C, --git-dir, --work-tree, GIT_DIR,
+# GIT_WORK_TREE, a redirection). $1 = the hook's JSON.
+cc_fence_candidate() {
+  local re tool txt="" cmd cwd p
+  re='"tool_name"[[:space:]]*:[[:space:]]*"(Edit|Write|MultiEdit|NotebookEdit|Bash)"'
+  [[ $1 =~ $re ]] || return 1
+  tool="${BASH_REMATCH[1]}"
+  [ -f "$CC_CONFIG_FILE" ] || return 1
+  IFS= read -r -d '' txt < "$CC_CONFIG_FILE" 2>/dev/null
+  re='"fence"[[:space:]]*:[[:space:]]*true'
+  [[ $txt =~ $re ]] || return 1                      # jq has the last word on the flag
+  if [ "$tool" = Bash ]; then
+    cmd="$1"
+    re='"command"[[:space:]]*:[[:space:]]*"(([^"\\]|\\.)*)"'
+    [[ $1 =~ $re ]] && cmd="${BASH_REMATCH[1]}"
+    re='(^|[^[:alnum:]_]|\\[nrt])(git|cd|pushd)([^[:alnum:]_]|$)'   # \n \t: JSON escapes
+    [[ $cmd =~ $re ]] || return 1
+    re='(^|[^[:alnum:]_]|\\[nrt])(cd|pushd|-C|--git-dir|--work-tree|GIT_DIR|GIT_WORK_TREE)([^[:alnum:]_]|$)|>'
+    [[ $cmd =~ $re ]]
+    return
+  fi
+  re='"cwd"[[:space:]]*:[[:space:]]*"([^"\\]*)"'
+  [[ $1 =~ $re ]] || return 0
+  cwd="${BASH_REMATCH[1]}"
+  re='"(file_path|notebook_path)"[[:space:]]*:[[:space:]]*"([^"\\]*)"'
+  [[ $1 =~ $re ]] || return 0
+  p="${BASH_REMATCH[2]}"
+  case "$p" in /*) ;; *) p="$cwd/$p" ;; esac
+  ! cc_fence_cheap_own "$p" "$cwd"
+}
+
+# 0 when path $1 is plainly in the cwd $2's own tree, or in no git tree at all, judged in pure
+# bash: the nearest .git at or above the path's nearest existing folder is the cwd's own (or there
+# is none), with no ".." and no symlink on the way. 1 means git has to say.
+cc_fence_cheap_own() {
+  local p="${1%/}" own
+  case "$p" in /*) ;; *) return 1 ;; esac
+  case "$p/" in */../*|*/./*) return 1 ;; esac
+  _cc_fence_top "$2" || return 1
+  own="$_CC_FENCE_TOP"
+  [ -n "$own" ] || return 0                          # the cwd is in no repo: it has no siblings
+  while [ -n "$p" ] && [ ! -d "$p" ]; do p="${p%/*}"; done
+  _cc_fence_top "$p" || return 1
+  [ -z "$_CC_FENCE_TOP" ] || [ "$_CC_FENCE_TOP" = "$own" ]
+}
+
+_cc_fence_top() {   # the nearest folder at or above $1 holding a .git -> _CC_FENCE_TOP ("": none); 1 on a symlink
+  local d="${1%/}"
+  _CC_FENCE_TOP=""
+  while :; do
+    if [ -e "$d/.git" ]; then _CC_FENCE_TOP="${d:-/}"; return 0; fi
+    [ -n "$d" ] || return 0
+    [ -L "$d" ] && return 1
+    d="${d%/*}"
+  done
+}
+
+_cc_fence_own() {   # the cwd $1's own worktree, asked of git once per run; 1 when it isn't in one
+  local out
+  if [ -z "$_CC_FENCE_OWN" ]; then
+    _CC_FENCE_OWN=none
+    if out="$(git -C "$1" rev-parse --path-format=absolute --show-toplevel --git-common-dir --git-dir 2>/dev/null)"; then
+      _CC_FENCE_OWN_TOP="${out%%$'\n'*}"; out="${out#*$'\n'}"
+      _CC_FENCE_OWN_COMMON="${out%%$'\n'*}"; _CC_FENCE_OWN_GITDIR="${out#*$'\n'}"
+      _CC_FENCE_OWN=yes
+    fi
+  fi
+  [ "$_CC_FENCE_OWN" = yes ]
+}
+
+# Is path $1 (relative to the cwd $2) in a sibling worktree of the cwd's? 0 + CC_FENCE_TOP, the
+# sibling's toplevel. $3 = gitdir when $1 is a git dir (--git-dir, GIT_DIR): then it is a
+# sibling's when git calls it another git dir of the same repo.
+cc_fence_sibling() {
+  local p="$1" cwd="$2" kind="${3:-tree}" out common where
+  CC_FENCE_TOP=""
+  [ -n "$p" ] || return 1
+  case "$p" in /*) ;; *) p="$cwd/$p" ;; esac
+  cc_fence_cheap_own "$p" "$cwd" && return 1
+  _cc_fence_own "$cwd" || return 1
+  if [ "$kind" = gitdir ]; then
+    out="$(git --git-dir="$p" rev-parse --path-format=absolute --git-common-dir --git-dir 2>/dev/null)" || return 1
+    common="${out%%$'\n'*}"; where="${out#*$'\n'}"
+    { [ "$common" = "$_CC_FENCE_OWN_COMMON" ] && [ "$where" != "$_CC_FENCE_OWN_GITDIR" ]; } || return 1
+  else
+    while [ -n "$p" ] && [ ! -d "$p" ]; do p="${p%/*}"; done
+    out="$(git -C "${p:-/}" rev-parse --path-format=absolute --git-common-dir --show-toplevel 2>/dev/null)" || return 1
+    common="${out%%$'\n'*}"; where="${out#*$'\n'}"
+    { [ "$common" = "$_CC_FENCE_OWN_COMMON" ] && [ "$where" != "$_CC_FENCE_OWN_TOP" ]; } || return 1
+  fi
+  CC_FENCE_TOP="$where"
+}
+
+cc_fence_main() {   # is the sibling cc_fence_sibling just found the main checkout (or its git dir)?
+  [ "$CC_FENCE_TOP" = "$_CC_FENCE_OWN_COMMON" ] || [ "$CC_FENCE_TOP/.git" = "$_CC_FENCE_OWN_COMMON" ]
+}
+
+# Is branch $2 this session's own merge, approved by Adam? $1 = its key. The request cc-merge.sh
+# wrote (CC_MERGE_DIR/<key>.json) must be approved, for this branch, from this worktree and repo.
+cc_fence_merge_ok() {
+  local f="$CC_MERGE_DIR/$1.json"
+  { [ -n "$2" ] && [ -f "$f" ] && _cc_fence_own "${CWD:-$PWD}"; } || return 1
+  [ "$(jq -r --arg b "$2" --arg w "$_CC_FENCE_OWN_TOP" --arg c "$_CC_FENCE_OWN_COMMON" \
+    'if .phase == "approved" and .branch == $b and .worktree == $w and .commonDir == $c then "yes" else "no" end' \
+    "$f" 2>/dev/null)" = yes ]
+}
+
+# What a Bash command changes, and where. $1 = the command, $2 = the cwd. Fills CC_FENCE_T with
+# kind US path US branch: kind tree is a folder a mutating git runs in (-C, cd) or its
+# --work-tree, or a redirection's file; kind gitdir is a mutating git's --git-dir / GIT_DIR.
+# branch is set when the git command is exactly merge --ff-only <branch>. The same parse as
+# cc_always_ask_match (_cc_sh_scan); a cd holds for the rest of the line, even out of a (...).
+cc_fence_targets() {
+  CC_FENCE_T=()
+  _cc_fence_text "$1" "$2" 0
+}
+
+_cc_fence_text() {   # $1 shell text, $2 the folder it starts in ("": can't tell), $3 nesting depth
+  local dir="$2" depth="$3" k j o
+  local -a cmds=() outs=() outat=() stack=()
+  [ "$depth" -le 6 ] || return 0
+  _CC_SC_CMD=(); _CC_SC_IN=(); _CC_SC_BAD=""; _CC_SC_OUT=""; _CC_SC_OUTAT=()
+  _cc_sh_scan "$1" top 0
+  [ ${#_CC_SC_CMD[@]} -eq 0 ] || cmds=("${_CC_SC_CMD[@]}")
+  if [ -n "$_CC_SC_OUT" ]; then
+    [ ${#_CC_SC_OUTAT[@]} -eq 0 ] || outat=("${_CC_SC_OUTAT[@]}")
+    while IFS= read -r o; do outs+=("$o"); done <<< "${_CC_SC_OUT%$'\n'}"
+  fi
+  for k in ${cmds[@]+"${!cmds[@]}"}; do
+    for j in ${outat[@]+"${!outat[@]}"}; do          # the files this command's redirections write
+      [ "${outat[j]}" = "$k" ] || continue
+      _cc_fence_join "$dir" "${outs[j]:-}" && CC_FENCE_T+=("tree$_CC_AA_US$_CC_FENCE_J$_CC_AA_US")
+    done
+    _cc_aa_words "${cmds[k]}"
+    _cc_fence_cmd "$depth" ${_CC_AA_W[@]+"${_CC_AA_W[@]}"}
+  done
+}
+
+_cc_fence_join() {   # path $2 from folder $1 ("": can't tell) -> _CC_FENCE_J; 1 when it can't be told
+  case "$2" in
+    '') return 1 ;;
+    /*) _CC_FENCE_J="$2" ;;
+    '~') _CC_FENCE_J="$HOME" ;;
+    '~/'*) _CC_FENCE_J="$HOME/${2:2}" ;;
+    '~'*) return 1 ;;                                # ~user
+    *) [ -n "$1" ] || return 1; _CC_FENCE_J="${1%/}/$2" ;;
+  esac
+}
+
+# One simple command: follow cd / pushd / popd (the caller's dir and stack) and record what a
+# mutating git changes. $1 depth, then its words. Looks through keywords, NAME=value prefixes and
+# wrappers to the command that runs.
+_cc_fence_cmd() {
+  local depth="$1" x k=0 n base at gd="" wt="" hasc j joined
+  local -a w=() d=()
+  shift
+  for x in "$@"; do
+    case "$x" in
+      "$_CC_AA_DYN"*) w+=("${x#"$_CC_AA_DYN"}"); d+=(1) ;;
+      *) w+=("$x"); d+=(0) ;;
+    esac
+  done
+  n=${#w[@]}
+  at="$dir"                                          # env -C moves this one command only
+  while :; do
+    while [ "$k" -lt "$n" ]; do
+      case "${w[k]}" in '!'|'{'|'}'|then|do|else|elif|if|while|until|fi|done|esac) k=$((k + 1)); continue ;; esac
+      if [[ ${w[k]} =~ $_CC_AA_ASSIGN_RE ]]; then
+        case "${w[k]}" in
+          GIT_DIR=*) gd="${w[k]#*=}"; [ "${d[k]}" = 0 ] || gd="" ;;
+          GIT_WORK_TREE=*) wt="${w[k]#*=}"; [ "${d[k]}" = 0 ] || wt="" ;;
+        esac
+        k=$((k + 1)); continue
+      fi
+      break
+    done
+    [ "$k" -lt "$n" ] || return 0
+    [ "${d[k]}" = 0 ] || return 0                      # $CMD: can't tell what runs
+    base="${w[k]##*/}"
+    case "$base" in
+      sudo|doas) k=$((k + 1)); _cc_aa_opts '-u -g -C -D -h -p -r -t -T -U' ;;
+      env)
+        k=$((k + 1))
+        while [ "$k" -lt "$n" ]; do
+          case "${w[k]}" in
+            -C|--chdir)
+              if [ "${d[k+1]:-1}" = 0 ] && _cc_fence_join "$at" "${w[k+1]}"; then at="$_CC_FENCE_J"; else at=""; fi
+              k=$((k + 2)) ;;
+            --chdir=*)
+              if [ "${d[k]}" = 0 ] && _cc_fence_join "$at" "${w[k]#*=}"; then at="$_CC_FENCE_J"; else at=""; fi
+              k=$((k + 1)) ;;
+            -S|--split-string)
+              [ "${d[k+1]:-1}" = 0 ] && _cc_fence_text "${w[k+1]}" "$at" $((depth + 1))
+              return 0 ;;
+            -u|--unset) k=$((k + 2)) ;;
+            --) k=$((k + 1)); break ;;
+            -*) k=$((k + 1)) ;;
+            *) break ;;
+          esac
+        done ;;
+      time) k=$((k + 1)); _cc_aa_opts '-f -o' ;;
+      nohup|builtin|exec) k=$((k + 1)); [ "${w[k]:-}" = -- ] && k=$((k + 1)) ;;
+      nice) k=$((k + 1)); _cc_aa_opts '-n' ;;
+      caffeinate) k=$((k + 1)); _cc_aa_opts '-t -w' ;;
+      timeout) k=$((k + 1)); _cc_aa_opts '-s -k --signal --kill-after'; k=$((k + 1)) ;;
+      command)
+        k=$((k + 1))
+        while [ "$k" -lt "$n" ]; do
+          case "${w[k]}" in
+            --) k=$((k + 1)); break ;;
+            -*v*|-*V*) return 0 ;;                     # command -v: a lookup, nothing runs
+            -*) k=$((k + 1)) ;;
+            *) break ;;
+          esac
+        done ;;
+      xargs)
+        k=$((k + 1))
+        _cc_aa_opts '-I -L -n -P -s -E -d -a --max-args --max-procs --max-lines --delimiter --arg-file --replace --eof' ;;
+      sh|bash|zsh|dash|ksh)
+        k=$((k + 1)); hasc=0
+        while [ "$k" -lt "$n" ]; do
+          case "${w[k]}" in
+            --) k=$((k + 1)); break ;;
+            --rcfile|--init-file) k=$((k + 2)) ;;
+            --*) k=$((k + 1)) ;;
+            -*c*) hasc=1; k=$((k + 1)) ;;
+            -*o|+*o|-O|+O) k=$((k + 2)) ;;
+            -*|+*) k=$((k + 1)) ;;
+            *) break ;;
+          esac
+        done
+        [ "$hasc" = 1 ] && [ "$k" -lt "$n" ] && [ "${d[k]}" = 0 ] && _cc_fence_text "${w[k]}" "$at" $((depth + 1))
+        return 0 ;;
+      eval)
+        joined=""; j=$((k + 1))
+        while [ "$j" -lt "$n" ]; do
+          [ "${d[j]}" = 0 ] || return 0
+          joined="$joined ${w[j]}"; j=$((j + 1))
+        done
+        _cc_fence_text "$joined" "$at" $((depth + 1))
+        return 0 ;;
+      cd|pushd)
+        j=$((k + 1))
+        while [ "$j" -lt "$n" ]; do
+          case "${w[j]}" in --) j=$((j + 1)); break ;; -[LPe@n]|-LP|-PL) j=$((j + 1)) ;; *) break ;; esac
+        done
+        [ "$base" = pushd ] && stack+=("$dir")
+        if [ "$j" -ge "$n" ]; then dir="$HOME"
+        elif [ "${d[j]}" = 0 ] && [ "${w[j]}" != - ] && _cc_fence_join "$dir" "${w[j]}"; then dir="$_CC_FENCE_J"
+        else dir=""; fi                                # cd $X, cd -: can't tell from here on
+        return 0 ;;
+      popd)
+        if [ ${#stack[@]} -gt 0 ]; then
+          dir="${stack[${#stack[@]}-1]}"; unset "stack[${#stack[@]}-1]"
+        else dir=""; fi
+        return 0 ;;
+      git) _cc_fence_git; return 0 ;;
+      *) return 0 ;;
+    esac
+  done
+}
+
+# A git command at w[k] (on _cc_fence_cmd's locals): record the worktree and git dir it changes,
+# unless it only reads. -c is left out of the read-only judgement: it can't aim git elsewhere.
+_cc_fence_git() {
+  local j=$((k + 1)) x sub si br="" ff=0 pos=0
+  local -a rw=(git)
+  while [ "$j" -lt "$n" ]; do                        # git's own options come first
+    x="${w[j]}"
+    case "$x" in
+      -C) if [ "${d[j+1]:-1}" = 0 ] && _cc_fence_join "$at" "${w[j+1]}"; then at="$_CC_FENCE_J"; else at=""; fi
+          j=$((j + 2)); continue ;;
+      --git-dir|--work-tree)
+          if [ "${d[j+1]:-1}" = 0 ]; then x="${w[j+1]}"; else x=""; fi
+          if [ "${w[j]}" = --git-dir ]; then gd="$x"; else wt="$x"; fi
+          j=$((j + 2)); continue ;;
+      --git-dir=*) gd="${x#*=}"; [ "${d[j]}" = 0 ] || gd="" ;;
+      --work-tree=*) wt="${x#*=}"; [ "${d[j]}" = 0 ] || wt="" ;;
+      -c|--config-env|--namespace|--super-prefix) j=$((j + 2)); continue ;;
+      --config-env=*|--exec-path=*) ;;
+      -*) rw+=("$x") ;;
+      *) break ;;
+    esac
+    j=$((j + 1))
+  done
+  [ "$j" -lt "$n" ] || return 0                      # git --version
+  sub="${w[j]}"; si=$(( ${#rw[@]} + 1 ))              # where its arguments start in rw
+  while [ "$j" -lt "$n" ]; do
+    if [ "${d[j]}" = 1 ]; then rw+=("$_CC_AA_DYN${w[j]}"); else rw+=("${w[j]}"); fi
+    j=$((j + 1))
+  done
+  _cc_fence_ro "${rw[@]}" && return 0
+  if [ "$sub" = merge ]; then                        # merge --ff-only <branch>, and nothing else
+    for x in "${rw[@]:si}"; do
+      case "$x" in
+        --ff-only) ff=$((ff + 1)) ;;
+        -*|"$_CC_AA_DYN"*) ff=9 ;;
+        *) br="$x"; pos=$((pos + 1)) ;;
+      esac
+    done
+    { [ "$ff" = 1 ] && [ "$pos" = 1 ]; } || br=""
+  fi
+  if [ -n "$wt" ]; then
+    _cc_fence_join "$at" "$wt" && CC_FENCE_T+=("tree$_CC_AA_US$_CC_FENCE_J$_CC_AA_US$br")
+  elif [ -n "$at" ]; then
+    CC_FENCE_T+=("tree$_CC_AA_US$at$_CC_AA_US$br")
+  fi
+  if [ -n "$gd" ]; then
+    _cc_fence_join "$at" "$gd" && CC_FENCE_T+=("gitdir$_CC_AA_US$_CC_FENCE_J$_CC_AA_US$br")
+  fi
+  return 0
+}
+
+_cc_fence_ro() {   # read-only git? $@ = its words (git first), DYN marking an expansion
+  local k=0 n x
+  local -a w=() d=()
+  for x in "$@"; do
+    case "$x" in
+      "$_CC_AA_DYN"*) w+=("${x#"$_CC_AA_DYN"}"); d+=(1) ;;
+      *) w+=("$x"); d+=(0) ;;
+    esac
+  done
+  n=${#w[@]}
+  _cc_ro_git
 }
