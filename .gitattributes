@@ -1,0 +1,4 @@
+# Lists that parallel units each append to. A merge or rebase takes both sides' lines instead
+# of stopping on a conflict (2026-09-28, tests/worktree-hygiene.test.sh).
+/CHANGELOG.md merge=union
+tests/fixtures/transcripts/vocabulary.txt merge=union

@@ -60,3 +60,7 @@ todos.md
 
 # The suite serialises itself per checkout (tests/run-lock.test.sh)
 tests/.run.lock
+
+# Deno writes a lock file wherever a script with remote imports runs. Nothing here imports a
+# remote package (the demo is local-only), so one in the root is a leftover (2026-09-28).
+/deno.lock

@@ -127,4 +127,44 @@ printf '%s\n' '{"type":"user","message":{"role":"user","content":"xxxx xxx"}}' \
 if node "$ROOT/$FXT/check-scrubbed.js" "$TMP/raw.jsonl" >/dev/null 2>&1; then got=passed; else got=refused; fi
 assert_eq "a fixture with one unscrubbed prompt in it is refused" "refused" "$got"
 
+# 2026-09-28: the build program runs 2-3 units at once, and each adds its own line under
+# CHANGELOG.md's Unreleased heading and its fixtures' words to vocabulary.txt -- so every
+# rebase after the first stopped on those two files alone. Both are lists where each side's
+# lines belong in the result, so .gitattributes merges them with git's built-in union driver.
+UREPO="$TMP/union"
+git init -q "$UREPO"
+[ -f "$ROOT/.gitattributes" ] && cp "$ROOT/.gitattributes" "$UREPO/.gitattributes"
+mkdir -p "$UREPO/$FXT"
+printf '# Changelog\n\n## Unreleased\n\n- first\n\n## 2026-09-25\n\n- older\n' > "$UREPO/CHANGELOG.md"
+printf 'alpha\nbeta\n' > "$UREPO/$FXT/vocabulary.txt"
+ugit() { git -C "$UREPO" -c user.email=t@example.invalid -c user.name=t "$@"; }
+ugit add -A && ugit commit -qm init
+base="$(ugit rev-parse HEAD)"
+ugit checkout -qb unit-a
+printf '# Changelog\n\n## Unreleased\n\n- first\n- unit a\n\n## 2026-09-25\n\n- older\n' > "$UREPO/CHANGELOG.md"
+printf 'gamma\n' >> "$UREPO/$FXT/vocabulary.txt"
+ugit commit -qam "unit a"
+ugit checkout -qb unit-b "$base"
+printf '# Changelog\n\n## Unreleased\n\n- first\n- unit b\n\n## 2026-09-25\n\n- older\n' > "$UREPO/CHANGELOG.md"
+printf 'delta\n' >> "$UREPO/$FXT/vocabulary.txt"
+ugit commit -qam "unit b"
+if ugit rebase -q unit-a >/dev/null 2>&1; then got=clean; else got=conflicted; ugit rebase --abort >/dev/null 2>&1; fi
+assert_eq "two units adding CHANGELOG and vocabulary lines in the same place rebase without a conflict" "clean" "$got"
+got="$(grep -c -e '^- unit a$' -e '^- unit b$' "$UREPO/CHANGELOG.md")"
+assert_eq "...and the CHANGELOG keeps both units' lines" "2" "$got"
+got="$(grep -c -e '^gamma$' -e '^delta$' "$UREPO/$FXT/vocabulary.txt")"
+assert_eq "...and vocabulary.txt keeps both units' words" "2" "$got"
+if [ "$HAVE_INDEX" = no ]; then skip_index ".gitattributes is tracked, so every clone and worktree merges that way"
+else
+  got="$(git -C "$ROOT" ls-files -- .gitattributes | wc -l | tr -d ' ')"
+  assert_eq ".gitattributes is tracked, so every clone and worktree merges that way" "1" "$got"
+fi
+
+# 2026-09-28: Deno writes deno.lock into whatever folder a script with remote imports runs in.
+# Nothing tracked here imports a remote package (the demo is local-only), so a lock in the root
+# is always a leftover -- one sat untracked since 2026-09-25 (deno-dom + turndown, from a
+# one-off script) and made main look dirty to every merge check.
+if git -C "$REPO" check-ignore -q deno.lock; then got=ignored; else got=untracked; fi
+assert_eq "a stray deno.lock in the repo root is gitignored" "ignored" "$got"
+
 finish

@@ -4,6 +4,17 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## Unreleased — build program
+
+One line per unit as it merges; the section gets its date and full write-up when the program ends.
+
+- The README is a ~280-line front page; the reference detail moved to eleven pages under `docs/`, and `tests/readme.test.sh` keeps the feature tour in step with `core.FEATURES`.
+- A session set to `[1m]` (in settings.json, settings.local.json or a spawn's model) reads a 1M context window, so its context bar no longer shows 100% at 200k.
+- Settings Save keeps policy bundles, attachments, `spawn.matchWindowSize` and `_`-prefixed notes instead of deleting them.
+- Token totals count each API message once (Claude Code writes one record per content block), include subagent transcripts, and price 1-hour cache writes at their own rate.
+- The test suites no longer write fake events into the real audit ledger; `tools/ledger-quarantine.sh` moves the ones already there to `cc-ledger/quarantine/`, and fleet search skips that folder.
+- Parallel units' CHANGELOG lines and fixture vocabulary merge without conflicts (`.gitattributes` union), and a stray `deno.lock` is ignored.
+
 ## 2026-09-25 — Merged unit tabs close again, and Instances can clear the rest
 
 ### Fixed — a batch unit's tab never closed after its merge
