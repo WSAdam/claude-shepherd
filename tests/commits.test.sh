@@ -121,4 +121,51 @@ assert_eq "a missing projects dir lists nothing and succeeds" "0:0" "$?:$(wc -l 
 assert_eq "defaults/cc-config.json ships no author emails" "0" \
   "$(jq -r '(.commits.authorEmails // []) | length' "$ROOT/defaults/cc-config.json")"
 
+# ---- Commits link to the session that made them (2026-09-28) ----
+# The link comes from the transcripts, never the commit message (no trailers): what `git commit`
+# prints -- "[branch sha] subject" -- in a Bash tool result, with that record's timestamp. The
+# fixture lines are shaped like Claude Code's own (VS Code 2.1.280): the output twice, once in
+# message.content and once in toolUseResult.stdout, JSON-escaped, timestamp between the two.
+iso() { perl -MPOSIX -e 'print strftime("%Y-%m-%dT%H:%M:%S.335Z", gmtime($ARGV[0]))' "$1"; }
+tool_result() { # <iso> <stdout, JSON-escaped>
+  printf '{"parentUuid":"p1","isSidechain":false,"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_1","type":"tool_result","content":"%s","is_error":false}]},"uuid":"u1","timestamp":"%s","toolUseResult":{"stdout":"%s","stderr":"","interrupted":false,"isImage":false,"noOutputExpected":false},"userType":"external","entrypoint":"claude-vscode","cwd":"%s","sessionId":"sess-commit"}\n' \
+    "$2" "$1" "$2" "$ALPHA"
+}
+said() { # <iso> <text>: the assistant quoting a commit line is not a commit
+  printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"%s"}]},"timestamp":"%s","cwd":"%s"}\n' "$2" "$1" "$ALPHA"
+}
+T1="$(iso $(( NOW - 3600 )))"; T2="$(iso $(( NOW - 1800 )))"; T3="$(iso $(( NOW - 600 )))"
+SESS="$PROJ/alpha/sess-commit.jsonl"
+{
+  printf '{"type":"user","cwd":"%s","sessionId":"sess-commit"}\n' "$ALPHA"
+  tool_result "$T1" '[feat/unit 1a2b3c4] A \"quoted\" subject\n 1 file changed, 1 insertion(+)\n create mode 100644 unit.txt'
+  tool_result "$T2" '[detached HEAD 05f0943] Rebased by hand\n 2 files changed, 3 insertions(+)'
+  tool_result "$T3" '[main (root-commit) 0123abc] First commit\n 1 file changed, 1 insertion(+)'
+  said "$T3" 'Committed as [main 7654321] Only a mention\n'
+} > "$SESS"
+mkdir -p "$PROJ/alpha/sess-commit/subagents"
+tool_result "$T2" '[feat/sub 89abcde] Made by a subagent\n 1 file changed' > "$PROJ/alpha/sess-commit/subagents/agent-a1.jsonl"
+mkdir -p "$PROJ/stale"
+tool_result "$T1" '[main 5555555] Too old to scan\n 1 file changed' > "$PROJ/stale/old.jsonl"
+perl -e '$t = time - 20 * 86400; utime($t, $t, $ARGV[0])' "$PROJ/stale/old.jsonl"
+
+git config --file "$GIT_CONFIG_GLOBAL" user.email me@example.invalid   # the no-identity case above removed it
+bash "$S" --since $(( NOW - 14 * DAY )) --lookback-days 14 --projects-dir "$PROJ" > "$TMP/sess" 2> "$TMP/sess.err"
+assert_eq "session scan: exits 0" "0" "$?"
+sess() { grep "^@@commitsess	" "$TMP/sess"; }
+TAB="$(printf '\t')"
+assert_eq "a commit's tool result names its transcript, time, branch, sha and subject (once, not per copy)" \
+  "@@commitsess${TAB}$SESS${TAB}$T1${TAB}feat/unit${TAB}1a2b3c4${TAB}A \\\"quoted\\\" subject" \
+  "$(sess | grep -F 1a2b3c4)"
+assert_eq "a detached HEAD commit keeps its two-word branch" "detached HEAD" "$(sess | grep -F 05f0943 | cut -f4)"
+assert_eq "a root commit's branch drops the (root-commit) note" "main|First commit" \
+  "$(sess | grep -F 0123abc | cut -f4,6 | tr '\t' '|')"
+assert_eq "the assistant quoting a commit line is not a commit" "0" "$(sess | grep -c 7654321)"
+assert_eq "a subagent's transcript is scanned too" "$PROJ/alpha/sess-commit/subagents/agent-a1.jsonl" \
+  "$(sess | grep -F 89abcde | cut -f2)"
+assert_eq "a transcript untouched since before --since isn't read" "0" "$(sess | grep -c 5555555)"
+assert_eq "exactly the four commit results are found" "4" "$(sess | wc -l | tr -d ' ')"
+CC_COMMITS_ENGINE=grep bash "$S" --since $(( NOW - 14 * DAY )) --lookback-days 14 --projects-dir "$PROJ" > "$TMP/sess.grep"
+assert_eq "without ripgrep, grep finds exactly the same sessions" "$(sess)" "$(grep "^@@commitsess	" "$TMP/sess.grep")"
+
 finish

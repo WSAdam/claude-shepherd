@@ -11486,6 +11486,67 @@ do
   eq("commits: a longer lookback is kept", core.commitsLookbackDays({ commits = { lookbackDays = 30 } }), 30)
   eq("commits: the lookback never drops below last week's start", core.commitsLookbackDays({ commits = { lookbackDays = 3 } }), 14)
   eq("commits: a junk lookback falls back", core.commitsLookbackDays({ commits = { lookbackDays = "x" } }), 14)
+
+  -- ---- Commits link to the session that made them (2026-09-28) ----
+  -- `git commit` prints "[branch sha] subject" into the committing session's transcript;
+  -- cc-commits.sh lists each as @@commitsess and commitWeek matches it by subject + author time,
+  -- never by sha alone: a rebase gives the commit a new one. Nothing goes in the message.
+  local P = "/h/.claude/projects/-r-alpha/"
+  local function sess(path, iso, branch, sha, subject)
+    return "@@commitsess" .. T .. path .. T .. iso .. T .. branch .. T .. sha .. T .. subject
+  end
+  local sp = core.parseCommitLog(log .. "\n" .. table.concat({
+    sess(P .. "s-one.jsonl", "2026-09-25T13:00:05.120Z", "main", "aaa1", "feat: today\\twith a tab"),   -- 5s after aaa1
+    sess(P .. "s-two/subagents/agent-x.jsonl", "2026-09-24T20:00:03.000Z", "feat/thu", "0ld5ha1", "thu work"),  -- aaa2 before its rebase
+    sess(P .. "s-late.jsonl", "2026-09-22T05:00:00.000Z", "main", "aaa3", "monday night"),         -- aaa3's subject, 3h later
+    sess(P .. "s-far.jsonl", "2026-09-24T20:11:00.000Z", "detached HEAD", "ccc1", "beta thu"),      -- a rebase's copy, 10 min on
+    sess(P .. "s-near.jsonl", "2026-09-24T20:01:04.000Z", "main", "c0ffee1", "beta thu"),          -- ccc1 as it was made
+    sess(P .. "s-early.jsonl", "2026-09-18T15:50:00.000Z", "main", "aaa7", "last fri noon"),       -- 10 min BEFORE aaa7 was written
+    sess(P .. "s-bad.jsonl", "not-a-time", "main", "aaa1", "feat: today"),
+    sess(P .. "s-quote.jsonl", "2026-09-25T13:00:06.000Z", "main", "abc1234", 'A \\"quoted\\" subject'),
+  }, "\n"))
+  eq("session links: every @@commitsess line with a real time is kept", #sp.sessions, 7)
+  eq("session links: they never become a repo's commits", #sp.repos[3].commits, 0)
+  local s1 = sp.sessions[1]
+  eq("session links: the transcript", s1.transcript, P .. "s-one.jsonl")
+  eq("session links: the session id is the transcript's name", s1.id, "s-one")
+  eq("session links: the record's time, in epoch seconds", s1.at, 1790341205)
+  eq("session links: the branch and the sha git printed", s1.branch .. " " .. s1.sha, "main aaa1")
+  eq("session links: the subject is JSON-unescaped (a tab)", s1.subject, "feat: today\twith a tab")
+  eq("session links: ...and an escaped quote", sp.sessions[7].subject, 'A "quoted" subject')
+  eq("session links: a subagent's commit belongs to its parent session", sp.sessions[2].id, "s-two")
+  eq("session links: ...whose transcript is the parent's", sp.sessions[2].transcript, P .. "s-two.jsonl")
+  eq("session links: nil input has no sessions", #core.parseCommitLog(nil).sessions, 0)
+
+  local sw = core.commitWeek(sp, { now = NOW, tzOffset = EDT })
+  local function recentBy(sha) for _, c in ipairs(sw.recent) do if c.sha == sha then return c end end end
+  eq("session links: a commit links to the session that printed it", recentBy("aaa1").session and recentBy("aaa1").session.id, "s-one")
+  eq("session links: a rebased sha still matches by subject and author time",
+     recentBy("aaa2").session and recentBy("aaa2").session.id, "s-two")
+  eq("session links: a same-subject commit hours apart doesn't match", recentBy("aaa3").session, nil)
+  eq("session links: the nearest record wins over a rebase's copy printed later",
+     recentBy("ccc1").session and recentBy("ccc1").session.id, "s-near")
+  eq("session links: a record from before the commit was written doesn't match", recentBy("aaa7").session, nil)
+  eq("session links: a project's commit rows carry the session too", sw.repos[1].commits[1].session and sw.repos[1].commits[1].session.id, "s-one")
+  eq("session links: the link names the branch it was committed on", recentBy("aaa1").session.branch, "main")
+  eq("session links: without @@commitsess lines nothing links", core.commitWeek(p, { now = NOW, tzOffset = EDT }).recent[1].session, nil)
+  eq("session links: commitSessionFor matches one commit",
+     (core.commitSessionFor(sp.sessions, { sha = "aaa9", at = 1790341200, subject = "feat: today\twith a tab" }) or {}).id, "s-one")
+
+  -- Transcript is offered only while the session is live: a tile with that session id (or transcript).
+  core.annotateCommitSessions(sw, {
+    { key = "k-one", session_id = "s-one", label = "Alpha tab", name = "alpha" },
+    { key = "k-near", transcript_path = P .. "s-near.jsonl", name = "beta" },
+  })
+  eq("session links: a live session carries its tile key", recentBy("aaa1").session.key, "k-one")
+  eq("session links: ...and the tile's name", recentBy("aaa1").session.name, "Alpha tab")
+  eq("session links: a transcript path finds a live tile too", recentBy("ccc1").session.key, "k-near")
+  eq("session links: an ended session has no key", recentBy("aaa2").session.key, nil)
+  core.annotateCommitSessions(sw, {})
+  eq("session links: a session that ends loses its key on the next pass", recentBy("aaa1").session.key, nil)
+  local again = core.commitWeek(sp, { now = NOW, tzOffset = EDT })
+  core.annotateCommitSessions(again, { { key = "k-one", session_id = "s-one" } })
+  eq("session links: annotating one push leaves the parsed cache untouched", sp.sessions[1].key, nil)
 end
 
 -- ---- Sessions set to [1m] read a 1M context window (2026-09-28) ----

@@ -3673,6 +3673,19 @@ do
   local listed = false
   for _, f in ipairs(core.FEATURES) do if f.key == "commits" then listed = true end end
   check("commits: the Features list explains it", listed)
+
+  -- 2026-09-28: each commit links to the session that made them, found in the transcripts
+  local pc = src:find("function FX.pushCommits(", 1, true)
+  local pcEnd = pc and src:find("\nend\n", pc, true)
+  check("commit sessions: each push marks which linked sessions are live",
+        pc ~= nil and pcEnd ~= nil and src:sub(pc, pcEnd):find("core.annotateCommitSessions(", 1, true) ~= nil)
+  local ot = src:find("function commitOpenTranscript(el){", 1, true)
+  local otEnd = ot and src:find("\n    }\n", ot, true)
+  local otBody = (ot and otEnd) and src:sub(ot, otEnd) or ""
+  check("commit sessions: Transcript selects that session's tile and opens its Transcript tab",
+        otBody:find("selectTile(k)", 1, true) ~= nil and otBody:find('setDetailTab("transcript"', 1, true) ~= nil)
+  check("commit sessions: cc-commits.sh lists the commits each transcript printed",
+        slurp("cc-commits.sh"):find("@@commitsess", 1, true) ~= nil)
 end
 
 -- ---- Local UTC offset follows daylight saving (2026-09-25) ----

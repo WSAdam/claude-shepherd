@@ -12425,11 +12425,21 @@ M.COMMIT_EXCLUDE_DEFAULT = {
   "*.min.js", "*.min.css", "*.map",
 }
 
+-- A subject as cc-commits.sh lifts it out of a transcript: still JSON-escaped (\" \\ \t \uXXXX).
+-- Decoded through the injected JSON parser; left as it is if that fails.
+local function commitSessionSubject(raw)
+  if not raw:find("\\", 1, true) or not (M.json and M.json.decode) then return raw end
+  local ok, arr = pcall(M.json.decode, '["' .. raw .. '"]')
+  return (ok and type(arr) == "table" and type(arr[1]) == "string") and arr[1] or raw
+end
+
 -- cc-commits.sh output -> { repos = { { root, emails, commits = { { sha, at, email, subject,
--- files = { { add, del, path } } } } } } }, in output order. Walks lines with find, never a
--- *-quantified whole-line pattern: the scratch file can end mid-line.
+-- files = { { add, del, path } } } } } }, sessions = { { transcript, id, at, branch, sha,
+-- subject } } }, in output order. A subagent's transcript (<sid>/subagents/.../agent-*.jsonl)
+-- counts as its parent session's. Walks lines with find, never a *-quantified whole-line
+-- pattern: the scratch file can end mid-line.
 function M.parseCommitLog(text)
-  local out = { repos = {} }
+  local out = { repos = {}, sessions = {} }
   local s = type(text) == "string" and text or ""
   local repo, commit
   local pos, n = 1, #s
@@ -12448,6 +12458,22 @@ function M.parseCommitLog(text)
       end
       repo = { root = tab and rest:sub(1, tab - 1) or rest, emails = emails, commits = {} }
       out.repos[#out.repos + 1] = repo
+      commit = nil
+    elseif line:sub(1, 13) == "@@commitsess\t" then
+      -- @@commitsess\t<transcript>\t<ISO time>\t<branch>\t<sha>\t<subject, JSON-escaped>
+      local f, p = {}, 14
+      for _ = 1, 4 do
+        local t = line:find("\t", p, true)
+        if not t then break end
+        f[#f + 1] = line:sub(p, t - 1); p = t + 1
+      end
+      local at = #f == 4 and M.isoToEpoch(f[2]) or nil
+      if at then
+        local parent = f[1]:match("^(.*)/subagents/")
+        local transcript = parent and (parent .. ".jsonl") or f[1]
+        out.sessions[#out.sessions + 1] = { transcript = transcript, id = transcript:match("([^/]+)%.jsonl$"),
+          at = at, branch = f[3], sha = f[4], subject = commitSessionSubject(line:sub(p)) }
+      end
       commit = nil
     elseif line:sub(1, 1) == "\1" and repo then
       -- \1<sha>\t<author epoch>\t<author email>\t<subject>: the subject may hold tabs
@@ -12484,12 +12510,70 @@ local function commitFileExcluded(path, globs)
   return false
 end
 
+-- How far a transcript record may sit from a commit's author time and still be the one that
+-- printed it. git stamps the author time a moment before it prints, so a record is never much
+-- EARLIER; it can be later by as long as the Bash call ran on (`git commit && make deploy`, and
+-- the Bash tool's cap is 10 minutes).
+M.COMMIT_SESSION_EARLY = 60
+M.COMMIT_SESSION_LATE = 900
+
+-- The session that made commit c ({ sha, at, subject }), from parseCommitLog's sessions: same
+-- subject, a record inside the window above, the nearest one winning, then one whose printed sha
+-- starts c's. Never the sha alone: a rebase gives the commit a new one (and keeps its author time
+-- and subject), and the session that rebased it later printed that new sha -- it didn't make it.
+-- nil when nothing matches. Pure.
+function M.commitSessionFor(sessions, c)
+  if type(sessions) ~= "table" or type(c) ~= "table" then return nil end
+  local at, subject, sha = tonumber(c.at), c.subject, tostring(c.sha or "")
+  if not at or type(subject) ~= "string" then return nil end
+  local best, bestD, bestSha
+  for _, s in ipairs(sessions) do
+    local d = tonumber(s.at) and (s.at - at) or nil
+    if s.subject == subject and d and d >= -M.COMMIT_SESSION_EARLY and d <= M.COMMIT_SESSION_LATE then
+      local ad = math.abs(d)
+      local shaHit = type(s.sha) == "string" and s.sha ~= "" and sha:sub(1, #s.sha) == s.sha
+      if not best or ad < bestD or (ad == bestD and shaHit and not bestSha) then
+        best, bestD, bestSha = s, ad, shaHit
+      end
+    end
+  end
+  return best
+end
+
+-- Mark each linked commit in a commitWeek result with its session's live tile: session.key and
+-- session.name while a tile has that session id (or transcript), cleared otherwise. The drawer
+-- offers Transcript only with a key. items: the panel's status items. Mutates and returns data.
+function M.annotateCommitSessions(data, items)
+  if type(data) ~= "table" then return data end
+  local bySid, byPath = {}, {}
+  for _, it in ipairs(type(items) == "table" and items or {}) do
+    if type(it) == "table" and it.key then
+      if it.session_id then bySid[tostring(it.session_id)] = it end
+      if it.transcript_path then byPath[tostring(it.transcript_path)] = it end
+    end
+  end
+  local function mark(c)
+    local s = type(c) == "table" and c.session or nil
+    if type(s) ~= "table" then return end
+    local live = (s.id and bySid[s.id]) or (s.transcript and byPath[s.transcript]) or nil
+    local name = live and tostring(live.label or live.name or "") or ""
+    s.key = live and live.key or nil
+    s.name = name ~= "" and name or nil
+  end
+  for _, c in ipairs(type(data.recent) == "table" and data.recent or {}) do mark(c) end
+  for _, r in ipairs(type(data.repos) == "table" and data.repos or {}) do
+    for _, c in ipairs(type(r) == "table" and type(r.commits) == "table" and r.commits or {}) do mark(c) end
+  end
+  return data
+end
+
 -- Bucket parsed commits into today, this week (Mon 00:00 local on), the same stretch of last
 -- week (its Monday up to exactly 7 days ago: the pace comparison), seven Mon..Sun days and a
 -- row per project. A commit counts once: only the repo's own identity (exact address, any
 -- case), once per SHA (two clones of one repo) and once per email|time|subject (a rebased copy
--- still on another ref). opts: now, tzOffset, labels (card relabels), exclude (extra globs),
--- recent (how many latest commits to list, default 15). Pure.
+-- still on another ref). Each listed commit carries session = { id, transcript, branch } when a
+-- transcript shows which session made it (commitSessionFor). opts: now, tzOffset, labels (card
+-- relabels), exclude (extra globs), recent (how many latest commits to list, default 15). Pure.
 function M.commitWeek(parsed, opts)
   opts = type(opts) == "table" and opts or {}
   local tz = tonumber(opts.tzOffset) or 0
@@ -12522,6 +12606,7 @@ function M.commitWeek(parsed, opts)
                 repos = {}, recent = {}, emails = {}, repoCount = 0, weekStart = weekStart }
   local seenSha, seenKey, allEmails, anyIdentity = {}, {}, {}, false
   local order = {}
+  local sessions = type(parsed) == "table" and type(parsed.sessions) == "table" and parsed.sessions or {}
   for idx, r in ipairs(type(parsed) == "table" and type(parsed.repos) == "table" and parsed.repos or {}) do
     res.repoCount = res.repoCount + 1
     local mine = {}
@@ -12546,6 +12631,8 @@ function M.commitWeek(parsed, opts)
           end
         end
         local cc = { sha = c.sha, at = at, subject = c.subject, add = add, del = del, repo = name }
+        local s = M.commitSessionFor(sessions, c)
+        if s then cc.session = { id = s.id, transcript = s.transcript, branch = s.branch } end   -- a copy: annotating never touches the cache
         res.recent[#res.recent + 1] = cc
         if at >= weekStart and at < weekStart + WEEK then
           local i = dayOf(at) - firstDay + 1
@@ -13761,7 +13848,7 @@ M.FEATURES = {
     what = "Your real Claude plan's 5-hour and 7-day usage windows, read live.",
     why = "Know how close you are to your plan limits at a glance." },
   { key = "commits", cat = "See what's happening", new = true, title = "Commits today and this week",
-    what = "Under the usage bars: your commits today and this Mon–Sun week, with lines added and removed, a bar per day and how you're pacing against the same point last week. Click for each project and the latest commits. It counts your own commits (each repo's git user.email, plus commits.authorEmails) in every repo Claude worked in over the last two weeks, straight from local git -- unpushed and worktree branches included, lockfiles left out of the line counts.",
+    what = "Under the usage bars: your commits today and this Mon–Sun week, with lines added and removed, a bar per day and how you're pacing against the same point last week. Click for each project and the latest commits. It counts your own commits (each repo's git user.email, plus commits.authorEmails) in every repo Claude worked in over the last two weeks, straight from local git -- unpushed and worktree branches included, lockfiles left out of the line counts. Each commit names the session that made it, found in the transcripts rather than the commit message; click a live one for its Transcript.",
     why = "A quick read on how much got shipped, per project, without leaving the panel -- and it counts whoever is using Shepherd, with nothing to set up." },
   { key = "shift", cat = "See what's happening", title = "Shift report",
     what = "A narrative end-of-shift summary of what the whole fleet did.",

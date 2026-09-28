@@ -2577,6 +2577,10 @@ function FX.pushCommits()
     local now = os.time()
     data = core.commitWeek(c.data, { now = now, tzOffset = core.localTzOffset(now),
       labels = FX.loadLabels(), exclude = core.config(cfg, "commits.excludeFiles", nil) })
+    -- which linked sessions are still a tile (the drawer offers their Transcript)
+    local items = {}
+    for _, it in pairs(byKey) do items[#items + 1] = it end
+    core.annotateCommitSessions(data, items)
     data.ts = c.countedAt
     data.stale = FX._commits.stale
     data.lookbackDays = core.commitsLookbackDays(cfg)
@@ -9128,6 +9132,9 @@ local HTML = [[
   .cf-when { flex:none; width:54px; color:var(--dim); }
   .cf-proj { flex:none; max-width:110px; color:var(--purple); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .cf-subj { flex:1; min-width:0; color:var(--text-2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .cf-sess { flex:none; max-width:84px; color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  button.cf-sess { background:none; border:0; padding:0; font:inherit; line-height:inherit; cursor:pointer; color:var(--accent-text); }
+  button.cf-sess:hover { text-decoration:underline; }
   .cf-foot { margin-top:6px; color:var(--dim); font-size:10px; }
   .cf-empty { padding:4px 0; color:var(--dim); }
   #commit-foot code { font-family:ui-monospace,Menlo,monospace; font-size:10px; }
@@ -16975,6 +16982,19 @@ local HTML = [[
       }
       return '<span class="cf-strip'+(small ? ' small' : '')+'">'+html+'</span>';
     }
+    // The session that made a commit (2026-09-28; core.commitWeek finds it in the transcripts,
+    // core.annotateCommitSessions adds key + name while it's live): a live one is a button that
+    // opens its Transcript; an ended one shows its id, dimmed. No session, no chip.
+    function commitSessHtml(s){
+      if(!s || !s.id) return '';
+      var sid = String(s.id), on = s.branch ? ' on ' + s.branch : '';
+      if(s.key){
+        var nm = s.name || sid.slice(0, 8);
+        return '<button class="cf-sess live" data-sk="'+esc(s.key)+'" onclick="event.stopPropagation();commitOpenTranscript(this)"'
+          + ' title="'+esc('Made by ' + nm + on + ' — open its Transcript')+'">'+esc(nm)+'</button>';
+      }
+      return '<span class="cf-sess" title="'+esc('Made by session ' + sid + on + ' (ended)')+'">'+esc(sid.slice(0, 8))+'</span>';
+    }
     // The week against the same stretch of last week (its Monday up to exactly 7 days ago).
     function commitPace(w, last){
       var diff = w.commits - last.commits;
@@ -17021,7 +17041,7 @@ local HTML = [[
               var c = cs[k];
               dr += '<div class="cf-commit"><span class="cf-when">'+esc(commitAgo(c.at, nowSec))+'</span>'
                 + '<span class="cf-subj" title="'+esc(c.subject||"")+'">'+esc(c.subject||"")+'</span>'
-                + '<span class="cf-dim">'+fmtLines(c.add, c.del)+'</span></div>';
+                + '<span class="cf-dim">'+fmtLines(c.add, c.del)+'</span>'+commitSessHtml(c.session)+'</div>';
             }
             dr += '</td></tr>';
           }
@@ -17035,7 +17055,7 @@ local HTML = [[
           dr += '<div class="cf-commit"><span class="cf-when">'+esc(commitAgo(rc.at, nowSec))+'</span>'
             + '<span class="cf-proj">'+esc(rc.repo||"")+'</span>'
             + '<span class="cf-subj" title="'+esc(rc.subject||"")+'">'+esc(rc.subject||"")+'</span>'
-            + '<span class="cf-dim">'+fmtLines(rc.add, rc.del)+'</span></div>';
+            + '<span class="cf-dim">'+fmtLines(rc.add, rc.del)+'</span>'+commitSessHtml(rc.session)+'</div>';
         }
       }
       var n = d.repoCount || 0;
@@ -17059,6 +17079,12 @@ local HTML = [[
       var root = el.getAttribute("data-root"); if(!root) return;
       if(CM_OPEN[root]) delete CM_OPEN[root]; else CM_OPEN[root] = true;
       renderCommitFoot();
+    }
+    // A live session's chip: select its tile and show its Transcript tab (not saved as the
+    // project's tab choice), the way Instances' Details selects a tile.
+    function commitOpenTranscript(el){
+      var k = el.getAttribute("data-sk"); if(!k) return;
+      selectTile(k); setDetailTab("transcript", false);
     }
     // ---- end commit stats ----
     window.ccCommits = function(d){ LAST_COMMITS = d || null; renderCommitFoot(); };

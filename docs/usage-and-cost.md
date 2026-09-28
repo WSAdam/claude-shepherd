@@ -127,6 +127,15 @@ project for its commits) and the latest commits across all of them.
 - **Which repos**: every repo a Claude session worked in during the last two weeks (from the
   transcripts in `~/.claude/projects`, removed worktrees included). A commit counts once across
   clones and rebased copies; lockfiles and minified or map files don't count toward lines.
+- **Which session made it**: each commit in the drawer ends with the session that made it: the
+  tile's name while that session is open (click it for its **Transcript** tab), or the session id,
+  dimmed, once it has ended. Nothing goes in the commit message. `git commit` prints
+  `[branch sha] subject` into the session's Bash result, and Shepherd matches that line to the
+  commit by subject and author time (the record at most 15 minutes after the commit, the nearest
+  one winning), so a rebased commit keeps its link. A subagent's commit belongs to its parent
+  session. Commits made outside Claude, or with `git commit -q`, show no session. The scan uses
+  ripgrep when it's installed (well under a second over two weeks of transcripts) and grep
+  otherwise (a few seconds, still in the background).
 - git runs in the background every 5 minutes, on **Update now**, and when the drawer opens (if the
   last count is over a minute old), never on the panel's tick. `commits.enabled: false` hides it; the other `commits.*` keys are documented in
   [cc-config.example.json](../cc-config.example.json).

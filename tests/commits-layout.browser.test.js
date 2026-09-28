@@ -98,6 +98,12 @@ const payload = {
     await page.goto("file://" + path.join(out, "panel.html"));
     await page.evaluate((code) => { (0, eval)(code); }, update);
     const W = " @" + width + "px";
+    // 2026-09-28: every other commit links the session that made it -- a live one (a real tile of
+    // the captured panel) offers its Transcript, an ended one shows its id.
+    const liveKey = await page.evaluate(() => (typeof lastItems !== "undefined" && lastItems.length) ? lastItems[0].key : null);
+    const LIVE = { id: "4e1d8fc9-435c-414e-8b97-9018cc625a56", key: liveKey, name: "claude-instance-manager on a long branch", branch: "feat/x" };
+    payload.recent.forEach((c, i) => { c.session = i % 2 ? { id: "9ccf71cf-40ef-4d30-9627-eaaccfb586df", branch: "main" } : LIVE; });
+    payload.repos[0].commits[0].session = LIVE;
 
     const hidden = await page.evaluate(() => getComputedStyle(document.getElementById("commit-foot")).display);
     check("before the first count the block takes no space" + W, hidden === "none");
@@ -160,6 +166,37 @@ const payload = {
     });
     check("a project row lists its commits" + W, sub !== null && sub.text.indexOf("ReceiptSource") >= 0);
     check("...a long subject ellipsizes rather than wrapping the row" + W, sub !== null && sub.clipped);
+
+    // the session chips fit the row and leave the subject room; the live one opens its Transcript
+    const chips = await page.evaluate(() => {
+      const rows = Array.from(document.querySelectorAll("#commit-foot .cf-commit"));
+      const withChip = rows.filter((r) => r.querySelector(".cf-sess"));
+      const r = (el) => el.getBoundingClientRect();
+      return {
+        rows: withChip.length, live: document.querySelectorAll("#commit-foot .cf-sess.live").length,
+        overflow: withChip.some((row) => row.scrollWidth > row.clientWidth + 1),
+        outside: withChip.some((row) => r(row.querySelector(".cf-sess")).right > r(row).right + 0.5),
+        minSubj: Math.min.apply(null, withChip.map((row) => r(row.querySelector(".cf-subj")).width)),
+        pageOverflow: document.documentElement.scrollWidth - window.innerWidth,
+      };
+    });
+    check("every recent commit and the expanded one carry a session" + W, chips.rows === 16 && chips.live === 9);
+    check("a session chip stays inside its row" + W, !chips.overflow && !chips.outside);
+    check("...and leaves the subject real room (" + Math.round(chips.minSubj) + "px)" + W, chips.minSubj >= 60);
+    check("the chips add no sideways scroll" + W, chips.pageOverflow <= base);
+    await page.evaluate(() => { window.__sent.length = 0; });
+    await page.click("#commit-foot .cf-sess.live");
+    const opened = await page.evaluate((k) => {
+      const p = document.querySelector('#detail .d-panel[data-tab="transcript"]');
+      return { sent: window.__sent.slice(), active: !!(p && p.classList.contains("active")),
+               shown: document.getElementById("detail").classList.contains("show"),
+               drawer: !!document.querySelector("#commit-foot .cf-drawer"), selected: selectedKey === k };
+    }, liveKey);
+    check("Transcript selects the session that made the commit" + W, opened.selected && opened.shown);
+    check("...opens its Transcript tab" + W, opened.active);
+    check("...and asks Lua for that transcript" + W,
+      opened.sent.some((m) => m.indexOf('"a":"detail-transcript"') >= 0 && m.indexOf(JSON.stringify(liveKey)) >= 0));
+    check("...leaving the drawer open" + W, opened.drawer);
 
     // and a click on the lines closes it again
     await page.click("#commit-foot .cf-row");

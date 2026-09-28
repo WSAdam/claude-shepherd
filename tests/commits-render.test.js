@@ -102,6 +102,32 @@ check("a collapsed project doesn't list its commits", html.indexOf("feat: &lt;im
 html = api.commitFootHtml(data, true, { "/r/alpha": true }, NOW);
 check("an expanded project lists its week's commits, escaped", html.indexOf("feat: &lt;img") >= 0);
 
+// ---- the session that made each commit (2026-09-28) --------------------------------------
+// core.commitWeek links a commit to the transcript that printed it; annotateCommitSessions adds
+// the tile's key and name while that session is live. Only a live one offers its Transcript.
+const LIVE = { id: "4e1d8fc9-435c-414e-8b97-9018cc625a56", key: 'k"1', name: "Alpha " + XSS, branch: "feat/x" };
+const ENDED = { id: "9ccf71cf-40ef-4d30-9627-eaaccfb586df", branch: "main" };
+const linked = Object.assign({}, data, {
+  recent: [
+    Object.assign({}, data.recent[0], { session: LIVE }),
+    { repo: "Alpha", sha: "bbb2", at: NOW - 7200, subject: "ended one", add: 1, del: 0, session: ENDED },
+    { repo: "Alpha", sha: "ccc3", at: NOW - 9000, subject: "by hand", add: 1, del: 0 },
+  ],
+});
+html = api.commitFootHtml(linked, true, {}, NOW);
+const count = (s, needle) => s.split(needle).length - 1;
+check("a live session's commit offers its Transcript, keyed to its tile",
+  /<button class="cf-sess live"[^>]*data-sk="k&quot;1"/.test(html));
+check("...named after its tile, escaped", html.indexOf("Alpha &lt;img") >= 0 && html.indexOf(XSS) < 0);
+check("...and its tooltip says it opens the Transcript", /class="cf-sess live"[^>]*title="[^"]*Transcript/.test(html));
+check("an ended session shows its short id", html.indexOf(">9ccf71cf<") >= 0);
+check("...with no Transcript to open", count(html, "data-sk=") === 1);
+check("a commit no transcript printed shows no session", count(html, 'class="cf-sess') === 2);
+html = api.commitFootHtml(Object.assign({}, linked, {
+  repos: [Object.assign({}, data.repos[0], { commits: [Object.assign({}, data.repos[0].commits[0], { session: LIVE })] })],
+  recent: [] }), true, { "/r/alpha": true }, NOW);
+check("an expanded project's commit links its session too", count(html, 'class="cf-sess live"') === 1);
+
 // ---- edge states ----------------------------------------------------------------------
 check("before the first count it says so", api.commitFootHtml(null, false, {}, NOW).indexOf("counting") >= 0);
 let threw = null;

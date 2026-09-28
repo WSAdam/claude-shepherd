@@ -15,6 +15,14 @@
 #   @@repo<TAB><main checkout><TAB><email,email>   one per repo; no emails = no identity, no log
 #   \x01<sha><TAB><author epoch><TAB><author email><TAB><subject>
 #   <added><TAB><deleted><TAB><path>               git --numstat ("-" for a binary file)
+#   @@commitsess<TAB><transcript><TAB><ISO time><TAB><branch><TAB><short sha><TAB><subject>
+#
+# The @@commitsess lines come last: every "[branch sha] subject" that `git commit` printed into
+# a Bash tool result, in the transcripts touched since <epoch>, with that record's timestamp and
+# the subject still JSON-escaped. core.commitWeek matches them to commits by subject and author
+# time, so each commit links to the session that made it without a word in its message. A grep
+# over the records, never a JSON decode: ripgrep when installed (~0.3s over 900MB of
+# transcripts), else grep (~5s). CC_COMMITS_ENGINE=grep forces the fallback (the tests use it).
 #
 # Shepherd runs it in an hs.task with stdout redirected to a scratch file (a pipe deadlocks
 # past ~64KB). Exit 2 on a bad argument.
@@ -75,4 +83,51 @@ repo_roots | while IFS= read -r root; do
     --since="@$since" -F -i "${authors[@]}" --numstat \
     --format='%x01%H%x09%at%x09%ae%x09%s' 2>/dev/null
 done
+
+# Which session made each commit: what `git commit` printed ("[feat/x 1a2b3c4] subject",
+# "[detached HEAD 05f0943] ...", "[main (root-commit) 0123abc] ...") inside a tool result, in
+# every transcript (subagents' too) written since <epoch>. A record carries its output twice
+# (message.content and toolUseResult.stdout), so one line prints once. An assistant merely
+# quoting such a line is not a tool result and doesn't count.
+commit_sessions() {
+  [ -d "$projects" ] || return 0
+  local now mins engine re
+  now="$(date +%s)"
+  mins=$(( (now - since) / 60 + 2 ))
+  [ "$mins" -gt 0 ] || mins=1
+  re='\[[^]\\" ]+( [^]\\" ]+)? [0-9a-f]{7,40}\] '
+  engine="${CC_COMMITS_ENGINE:-}"
+  if [ -z "$engine" ]; then
+    if command -v rg >/dev/null 2>&1; then engine=rg; else engine=grep; fi
+  fi
+  local scan
+  if [ "$engine" = rg ]; then
+    scan=(rg --no-config --no-messages --no-heading --with-filename --no-line-number -e "$re")
+  else
+    scan=(env LC_ALL=C grep -H -E -e "$re")
+  fi
+  find "$projects" -type f -name '*.jsonl' -mmin "-$mins" -exec "${scan[@]}" {} + 2>/dev/null |
+    LC_ALL=C awk '{
+      i = index($0, ".jsonl:")
+      if (i == 0) next
+      path = substr($0, 1, i + 5); body = substr($0, i + 7)
+      if (index(body, "\"tool_result\"") == 0) next
+      if (!match(body, /"timestamp":"[^"]*"/)) next
+      ts = substr(body, RSTART + 13, RLENGTH - 14)
+      split("", seen)
+      s = body
+      while (match(s, /\[[^]\\" ]+( [^]\\" ]+)? [0-9a-f]{7,40}\] ([^\\"]|\\[^n])*/)) {
+        m = substr(s, RSTART, RLENGTH); s = substr(s, RSTART + RLENGTH)
+        cb = index(m, "] ")
+        n = split(substr(m, 2, cb - 2), part, " ")
+        branch = part[1]
+        for (k = 2; k < n; k++) if (part[k] != "(root-commit)") branch = branch " " part[k]
+        key = branch "\t" part[n] "\t" substr(m, cb + 2)
+        if (key in seen) continue
+        seen[key] = 1
+        print "@@commitsess\t" path "\t" ts "\t" key
+      }
+    }' | LC_ALL=C sort -u | head -n 5000
+}
+commit_sessions
 exit 0

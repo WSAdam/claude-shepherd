@@ -56,7 +56,8 @@ Every feature below has a reference page one click away. The panel lists the sam
 - [**Plan usage meter**](docs/usage-and-cost.md#plan-window-bars): your real 5-hour and weekly plan
   usage, with a warning at every point past 90%.
 - [**Commits today and this week**](docs/usage-and-cost.md#commits-today-and-this-week): your
-  commits and lines changed, per day and per project, straight from local git.
+  commits and lines changed, per day and per project, straight from local git, each linked to the
+  session that made it.
 - [**Shift report**](docs/usage-and-cost.md#shift-report): a summary of what the fleet did while you
   were away.
 
