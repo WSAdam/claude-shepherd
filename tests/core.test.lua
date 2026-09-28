@@ -11141,5 +11141,42 @@ do
   eq("1m: the status file's model is kept as statusModel", l[1] and l[1].statusModel, "opus[1m]")
 end
 
+-- ---- Settings Save keeps hand-kept keys in the blocks it rebuilds (2026-09-28) ----
+-- 2026-09-28: the Settings form rebuilds `policies` wholesale and SETTINGS_KEEP_SUBKEYS had no
+-- policies entry, so every Save (and every Headless toggle, which saves) deleted policy bundles
+-- and attachments; spawn.matchWindowSize=false silently flipped back to true the same way.
+do
+  local disk = core.json.decode([[{
+    "policies": {
+      "_bundles_comment": "named rule sets",
+      "bundles": { "careful": { "autoDeny": ["Bash(git push*)"] } },
+      "attachments": [ { "match": { "project": "*" }, "bundle": "careful" } ],
+      "patterns": { "enabled": true, "autoAllow": ["Read"], "autoDeny": [] }
+    },
+    "spawn": { "editor": "vscode", "matchWindowSize": false },
+    "gate": { "_comment": "the hold list", "tools": "Bash" },
+    "queue": { "autofeed": false, "routing": { "_comment": "route by role", "enabled": false } }
+  }]])
+  -- what persistSettings sends (form-shaped: only the fields the form manages)
+  local form = core.json.decode([[{
+    "policies": { "approveRepeats": false, "autopilot": { "enabled": false, "minutes": 15 },
+                  "patterns": { "enabled": false, "autoAllow": ["Grep"], "autoDeny": [] } },
+    "spawn": { "editor": "terminal", "live": true },
+    "gate": { "tools": "Bash Write" },
+    "queue": { "autofeed": true, "dryRun": false, "routing": { "enabled": true, "starveMinutes": 0 } }
+  }]])
+  local out = core.overlayConfig(disk, form)
+  check("save: policy bundles survive a Settings Save", type(out.policies.bundles) == "table" and out.policies.bundles.careful ~= nil)
+  check("save: policy attachments survive a Settings Save", type(out.policies.attachments) == "table" and #out.policies.attachments == 1)
+  eq("save: ...while the form's own patterns still replace the old ones", out.policies.patterns.autoAllow[1], "Grep")
+  eq("save: ...and its autopilot lands", out.policies.autopilot.minutes, 15)
+  eq("save: spawn.matchWindowSize=false survives a Save", out.spawn.matchWindowSize, false)
+  eq("save: ...while the form's spawn.editor lands", out.spawn.editor, "terminal")
+  eq("save: a block's _comment survives", out.gate._comment, "the hold list")
+  eq("save: a nested block's _comment survives", out.queue.routing._comment, "route by role")
+  eq("save: a policies _bundles_comment survives", out.policies._bundles_comment, "named rule sets")
+  eq("save: the form's gate tools land", out.gate.tools, "Bash Write")
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

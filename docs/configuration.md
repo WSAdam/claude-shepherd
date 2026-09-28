@@ -15,10 +15,11 @@ default. A fresh install writes the author's daily settings
 
 Click **⚙** in the header for a form with most switches and a one-line explanation of each. **Save**
 writes `~/.claude/cc-config.json` (creating it if missing) and arms or disarms the gate. Blocks the
-form doesn't show survive a Save, and so do a few hand-tuned keys inside the blocks it does show
-(such as `risk.weights`, `spawn.searchRoots` or `bridge.staleSlackSeconds`). Other hand-added keys
-inside a form-managed block are dropped on Save; see the policy-bundle
-[known issue](approvals-and-policies.md#named-policy-bundles). Its tabs:
+form doesn't show survive a Save, and so do the hand-kept keys inside the blocks it does show: the
+[policy bundles and attachments](approvals-and-policies.md#named-policy-bundles),
+`spawn.matchWindowSize`, `risk.weights`, `spawn.searchRoots`, `bridge.staleSlackSeconds` and the
+like, plus any `_`-prefixed note such as `_comment`. Any other key you add by hand inside a
+form-managed block is dropped on Save. Its tabs:
 
 - **General**: launch Shepherd at login; tile cleanup (`prune.hours`, `cleanup.idleHours`).
 - **Appearance**: the layout, themes, colours, font, sizing, and the detail-panel switches

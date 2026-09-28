@@ -3641,5 +3641,18 @@ do
         and src:find("/.claude/settings.local.json", 1, true) ~= nil)
 end
 
+-- ---- The gate's fallback is described accurately (2026-09-28) ----
+-- 2026-09-28: Settings said an unanswered gate "safely falls back to Claude's own prompt — it never
+-- auto-approves". cc-approve.sh falls back SILENTLY, so Claude Code's permission mode decides: a
+-- prompt in Manual mode, but auto/bypass mode can run the tool with nobody asked.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("gate help: no longer promises it never auto-approves", src:find("it never auto-approves.</div>", 1, true) == nil)
+  check("gate help: says Claude Code's own permission mode decides",
+        src:find("Claude Code's own permission mode decides", 1, true) ~= nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

@@ -6843,8 +6843,12 @@ end
 -- avoided: array-valued keys (providers, policies.patterns.*) must be REPLACED,
 -- not index-merged. Mutates + returns cfg.
 M.SETTINGS_KEEP_SUBKEYS = {
+  -- 2026-09-28: matchWindowSize has no input either; a Save flipped a hand-set false back on.
   spawn = { "kittyBin", "kittySocket", "searchRoots", "searchDepth", "fdBin", "claudeBin",
-            "coldWindowWaitSeconds", "coldActivateSeconds" },
+            "coldWindowWaitSeconds", "coldActivateSeconds", "matchWindowSize" },
+  -- 2026-09-28: the form rebuilds `policies` from approveRepeats/autopilot/patterns only, so every
+  -- Save and every Headless toggle deleted the bundles and attachments (edited in their own view).
+  policies = { "bundles", "attachments" },
   escalation = { "hung" },
   risk = { "weights" },
   bridge = { "staleSlackSeconds", "keystrokes" },
@@ -6866,6 +6870,23 @@ function M.overlayConfig(cfg, incoming)
     if type(cfg[block]) == "table" and type(incoming[block]) == "table" then
       for _, k in ipairs(subs) do
         if incoming[block][k] == nil then incoming[block][k] = cfg[block][k] end
+      end
+    end
+  end
+  -- 2026-09-28: "_"-prefixed keys ("_comment", "_bundles_comment") are notes someone wrote into a
+  -- block the form rebuilds; carry them over too, one nesting level deep (queue.routing._comment).
+  -- Numeric (array) keys are never carried, so lists like providers or autoAllow still replace.
+  local function carryNotes(dst, src)
+    for k, v in pairs(src) do
+      if type(k) == "string" and k:sub(1, 1) == "_" and dst[k] == nil then dst[k] = v end
+    end
+  end
+  for block, inc in pairs(incoming) do
+    local old = cfg[block]
+    if type(inc) == "table" and type(old) == "table" then
+      carryNotes(inc, old)
+      for k, sub in pairs(inc) do
+        if type(sub) == "table" and type(old[k]) == "table" then carryNotes(sub, old[k]) end
       end
     end
   end

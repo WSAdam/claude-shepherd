@@ -10401,7 +10401,7 @@ local HTML = [[
 
       <div class="s-sec">Headless approvals</div>
       <label class="s-row"><input type="checkbox" id="s-headless" onchange="onHeadlessToggle()"> <b>Headless approvals (recommended)</b></label>
-      <div class="s-help">One switch: arms the gate AND turns off every auto-approve policy. Approve/Deny then go through this panel with no editor window popping, and Claude still can't run a gated tool until you say so. If you don't answer in ~2&nbsp;min (or the panel is closed) it safely falls back to Claude's own prompt — it never auto-approves.</div>
+      <div class="s-help">One switch: arms the gate AND turns off every auto-approve policy. Approve/Deny then go through this panel with no editor window popping, and Claude still can't run a gated tool until you say so. If you don't answer in ~2&nbsp;min (or the panel is closed), the gate steps aside and Claude Code's own permission mode decides: in Manual mode Claude asks you in its tab, but in auto or bypass mode the tool may run without asking.</div>
       <div class="s-lbl">Gated tools (space or comma separated — only these wait for you; reads stay instant)</div>
       <label class="s-row"><input type="text" id="s-gate-tools" class="s-txt" placeholder="Bash Write Edit MultiEdit NotebookEdit"></label>
 

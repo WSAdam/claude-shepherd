@@ -153,11 +153,8 @@ allow-list, and like every policy they only act on the tools in `gate.tools`.
 
 **The 🛡 Policy bundles editor** (☰ menu) creates, edits and deletes bundles and attachments in the
 panel (the starters prefill the form) and writes them to `cc-config.json`, so you don't have to
-hand-edit the JSON. It warns that bundles are enforced only while the gate is armed.
-
-> **Known issue:** saving ⚙ Settings (including flipping Headless approvals) currently rewrites the
-> `policies` block without `bundles` and `attachments`, which deletes them. Until that's fixed,
-> re-check the 🛡 editor after a Settings save, or keep a copy of those two keys.
+hand-edit the JSON. It warns that bundles are enforced only while the gate is armed. Saving ⚙
+Settings (or flipping Headless approvals) keeps your bundles and attachments.
 
 ## Answer questions from Shepherd
 
