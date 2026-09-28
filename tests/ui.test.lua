@@ -3763,5 +3763,39 @@ do
         and src:find('if(s("Headless approvals")||s("Questions")||s("Approval gate")||s("Policies")||s("Always ask")) return "approvals";', 1, true) ~= nil)
 end
 
+-- ---- talk mode on the tile menu, the detail panel and the tile (2026-09-28) ----
+-- Build program unit 6: a one-click per-session "discussion only" mode. The flag file is
+-- ~/.claude/cc-talk/<key> (cc-approve.sh reads it); the tile menu and the detail panel's
+-- button both toggle it through FX.toggleTalk, and the tile wears a TALK badge.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("talk: the flag lives in cc-talk/ (CC_TALK_DIR, as cc-lib.sh has it)",
+        src:find('FX.TALK_DIR = os.getenv("CC_TALK_DIR") or (os.getenv("HOME") .. "/.claude/cc-talk")', 1, true) ~= nil)
+  check("talk: FX.talkOn, FX.setTalk and FX.toggleTalk exist",
+        src:find("function FX.talkOn(key)", 1, true) ~= nil and src:find("function FX.setTalk(key, on)", 1, true) ~= nil
+        and src:find("function FX.toggleTalk(it)", 1, true) ~= nil)
+  local tg = src:match("function FX%.toggleTalk%(it%)(.-)\n  end") or ""
+  check("talk: a toggle is recorded in the ledger", tg:find('ledgerFor(it, { type = "talk_toggle"', 1, true) ~= nil)
+  check("talk: a remote tile can't toggle it (the flag is local)", tg:find("it.remote", 1, true) ~= nil)
+  local p = src:find('if a == "ctx-menu" then', 1, true)
+  local menu = p and src:sub(p, (src:find('if a == "relabel" then', p, true) or p)) or ""
+  check("talk: the tile menu offers Talk mode, checked while it's on",
+        menu:find('{ title = "Talk mode (discussion only)", checked = FX.talkOn(item.key),', 1, true) ~= nil)
+  check("talk: ...and the menu item toggles it", menu:find("fn = function() FX.toggleTalk(item) end", 1, true) ~= nil)
+  check("talk: the detail panel has a Talk mode button",
+        src:find('<button id="b-talk"', 1, true) ~= nil and src:find("onclick=\"act('talk')\"", 1, true) ~= nil)
+  check("talk: the talk action toggles it", src:find('if a == "talk" then\n    FX.toggleTalk(item)', 1, true) ~= nil)
+  check("talk: the button reads back the state", src:find('bt.textContent = it.talk ? "Talk mode: ON" : "Talk mode";', 1, true) ~= nil)
+  check("talk: a remote tile greys the button", src:find('["b-jump","b-stop","b-auto","b-talk",', 1, true) ~= nil)
+  check("talk: each tile carries it.talk from the flag",
+        src:find("it.talk = (not it.remote) and FX.talkOn(it.key) or false", 1, true) ~= nil)
+  local badge = src:match("function talkBadge%(it%)(.-)\n    }") or ""
+  check("talk: the TALK badge goes through esc()", badge:find('esc("TALK")', 1, true) ~= nil
+        and badge:find("if(!it.talk) return", 1, true) ~= nil)
+  check("talk: the badge rides the tile's badges row", src:find("var b = talkBadge(it) + riskBadge(it)", 1, true) ~= nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

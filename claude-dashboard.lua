@@ -2379,6 +2379,31 @@ do
   end
 end
 
+-- Talk mode (build program unit 6, 2026-09-28): a one-click per-session "discussion only"
+-- mode. The flag's presence under cc-talk/<key> = on; cc-approve.sh reads it (CC_TALK_DIR in
+-- cc-lib.sh) and denies edits outside ~/.claude/ and the scratchpads, and every Bash command
+-- that isn't read-only. Reaped with the key's other files (cc_remove / FX.removeStatus).
+do
+  FX.TALK_DIR = os.getenv("CC_TALK_DIR") or (os.getenv("HOME") .. "/.claude/cc-talk")
+  function FX.talkOn(key) return key ~= nil and FX.readFile(FX.TALK_DIR .. "/" .. key) ~= nil end
+  function FX.setTalk(key, on)
+    if on then hs.fs.mkdir(FX.TALK_DIR); FX.writeFile(FX.TALK_DIR .. "/" .. key, "1")
+    else os.remove(FX.TALK_DIR .. "/" .. key) end
+  end
+  -- The tile menu and the detail panel's button both land here. A remote tile's hook reads
+  -- ITS host's cc-talk/, so a flag written here would be a dead control.
+  function FX.toggleTalk(it)
+    if not it or not it.key or it.remote then return end
+    local on = not FX.talkOn(it.key)
+    FX.setTalk(it.key, on)
+    ledgerFor(it, { type = "talk_toggle", on = on, text = on and "on" or "off" })
+    print("[cc-talk] talk mode for " .. tostring(it.key) .. " -> " .. (on and "ON" or "off"))
+    pcall(function() FX.alert("Claude Shepherd: talk mode " .. (on and "on" or "off") .. " for "
+      .. tostring(it.label or it.name or it.key)) end)
+    refresh()
+  end
+end
+
 -- L2 named policy bundles. The override file = the session's chosen bundle name
 -- (detail-panel Policy dropdown); the resolved file = core.resolvePolicy output
 -- the gate (cc-approve.sh) reads. KEEP IN SYNC: cc-approve.sh reads POLICY_DIR/<key>.
@@ -2935,6 +2960,7 @@ function FX.removeStatus(key)
   os.remove(POLICY_DIR .. "/" .. key)
   os.remove(POLICY_OVERRIDE_DIR .. "/" .. key)
   os.remove((os.getenv("CC_AUTOMODEL_DIR") or (home .. "/.claude/cc-automodel")) .. "/" .. key)
+  os.remove(FX.TALK_DIR .. "/" .. key)   -- talk mode's flag
   -- ready-to-merge request + Shepherd's answer (cc_remove drops the same files)
   local mergeDir = os.getenv("CC_MERGE_DIR") or (home .. "/.claude/cc-merge")
   os.remove(mergeDir .. "/" .. key .. ".json")
@@ -8215,6 +8241,12 @@ local function handleBridgeMsg(msg)
       return
     end
   end
+  -- Talk mode (build program unit 6): the detail panel's button. The tile menu calls
+  -- FX.toggleTalk itself; a remote tile was refused just above.
+  if a == "talk" then
+    FX.toggleTalk(item)
+    return
+  end
   if a == "ctx-menu" then
     -- Right-click: show a real macOS popup menu at the cursor. Its items kick off
     -- IN-WEBVIEW interactions (no native dialog -> no console pop).
@@ -8271,6 +8303,10 @@ local function handleBridgeMsg(msg)
             pcall(function() wv:evaluateJavaScript("openAb(" .. jsString(item.cwd or "") .. ")") end)
           end },
         { title = "-" },
+        -- Talk mode (build program unit 6): read and talk, change nothing. A flag file, not
+        -- a keystroke, so it works in a shared window too.
+        { title = "Talk mode (discussion only)", checked = FX.talkOn(item.key),
+          fn = function() FX.toggleTalk(item) end },
         -- Clear / Compact: same effect as the detail-panel buttons (type the slash
         -- command into the session; headless on Kitty, best-effort in VS Code). A
         -- native confirm-submenu keeps the destructive /clear behind one more click,
@@ -9062,6 +9098,9 @@ local HTML = [[
   .bg-run { font-size:10px; margin-left:6px; padding:1px 6px; border-radius:8px;
     color:var(--ok); border:1px solid #2f6b43; background:#1c2a20; }
   .bg-run .spin { display:inline-block; animation:spin 1.4s linear infinite; }
+  /* 2026-09-28: talk mode (build program unit 6) -- the session reads and talks, changes nothing */
+  .talk { font-size:10px; margin-left:6px; padding:1px 6px; border-radius:8px; font-weight:600;
+    letter-spacing:.04em; color:var(--accent-text); border:1px solid var(--accent); background:var(--accent-bg); }
   @keyframes spin { to { transform:rotate(360deg); } }
   /* 2026-09-17: .srow (dot + status line) and .badges (risk / PR / background agents) are
      grouping wrappers the CARDS theme lays out. Every other theme places .dot / .label /
@@ -10430,6 +10469,7 @@ local HTML = [[
       <input id="deny-note" maxlength="500" placeholder="Why? (goes back with Deny)" onkeydown="onDenyNoteKey(event)" title="Optional. Sent to the session as the reason its tool call was refused, so it can change course instead of just failing. Enter denies with this reason.">
       <button id="b-stop"    onclick="act('stop')">Stop</button>
       <button id="b-auto"    onclick="act('autopilot')">Autopilot</button>
+      <button id="b-talk"    onclick="act('talk')" title="Talk mode: this session can read and talk but not change anything. Edits outside ~/.claude/ and its scratchpad, and shell commands that aren't read-only, are denied. Click again to turn it off.">Talk mode</button>
       <span class="sep"></span>
       <button id="b-clear"   onclick="act('clear')">Clear</button>
       <button id="b-compact" onclick="act('compact')">Compact</button>
@@ -14664,6 +14704,9 @@ local HTML = [[
       var ba = document.getElementById("b-auto");
       ba.textContent = it.autopilot ? "Autopilot: ON" : "Autopilot";
       ba.style.color = it.autopilot ? "#8fd4a3" : "#e8e9ee";
+      var bt = document.getElementById("b-talk");
+      bt.textContent = it.talk ? "Talk mode: ON" : "Talk mode";
+      bt.style.color = it.talk ? "#8fd4a3" : "#e8e9ee";
       // Remote (bridge) tiles are headless-only: grey every keystroke-shaped
       // control. Approve/Deny stay live only while the remote gate is waiting
       // (they route over ssh as decision files). Queue add/edit and the route
@@ -14691,7 +14734,7 @@ local HTML = [[
           if(el.hasAttribute("data-t0")){ el.title = el.getAttribute("data-t0"); el.removeAttribute("data-t0"); }
         }
       }
-      ["b-jump","b-stop","b-auto","b-clear","b-compact","b-improve","b-nudge","b-feed","b-rewind",
+      ["b-jump","b-stop","b-auto","b-talk","b-clear","b-compact","b-improve","b-nudge","b-feed","b-rewind",
        "effort","mode","d-model","d-gate","d-policy","nudge"].forEach(function(id){
         var el = document.getElementById(id); if(!el) return;
         var why = (remote && id !== "b-rewind") ? REMOTE_T : ((shared && SHARED_IDS.indexOf(id) >= 0) ? SHARED_T : "");
@@ -17207,8 +17250,13 @@ local HTML = [[
     // row of its own in the cards theme. One badges row now holds them -- emitted ONLY when at
     // least one badge exists, so a card without any gains no empty row.
     function badgesHtml(it){
-      var b = riskBadge(it) + prBadgeHtml(it) + bgBadge(it);
+      var b = talkBadge(it) + riskBadge(it) + prBadgeHtml(it) + bgBadge(it);
       return b ? '<span class="badges">'+b+'</span>' : "";
+    }
+    // 2026-09-28: talk mode (build program unit 6) -- this session can read and talk, not change.
+    function talkBadge(it){
+      if(!it.talk) return "";
+      return '<span class="talk" title="Talk mode: discussion only. Edits and commands that change things are denied.">'+esc("TALK")+'</span>';
     }
     // ---- Project stacks: the card's extras ----------------------------------------
     // Branch chip only where it tells instances apart (a multi-instance card, or a lone
@@ -18320,6 +18368,8 @@ function FX._refreshBody()
     -- back checked for a kitty/terminal session the effect would never route.
     it.auto_model = (not it.remote) and it.anthropic and it.editor ~= "kitty" and it.editor ~= "terminal"
       and FX.autoModelOn(it.key) or false
+    -- Talk mode (build program unit 6): the TALK badge and the detail button read it.
+    it.talk = (not it.remote) and FX.talkOn(it.key) or false
 
     -- Collision + risk indicators (Features B/E), both off by default.
     it.collide = collEnabled and (collFlags[it.key] or false) or nil

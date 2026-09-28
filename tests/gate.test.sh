@@ -1190,4 +1190,178 @@ assert_eq "always-ask: an empty extras list spawns no extra jq" "$base" "$(spyco
 assert_eq "always-ask: ...while a real one is read (control)" "yes" \
   "$([ "$(spycount "$TMP/aa-somex.json")" -gt "$base" ] && echo yes || echo no)"
 
+# ---- talk mode (build program unit 6, 2026-09-28) ------------------------------------------
+# A session in talk mode (~/.claude/cc-talk/<key>, the panel's toggle) can read and talk but not
+# change anything: the Edit family is denied outside ~/.claude/ and the scratchpads
+# (/private/tmp/claude-*/), and a Bash command that isn't read-only (cc_cmd_readonly in
+# cc-lib.sh) is denied -- gate armed or not. Talk mode only ever denies; what it lets through
+# goes on to the always-ask layer and the gate as before.
+
+# -- the judge (cc_cmd_readonly in cc-lib.sh) --
+roj() { # $1 command -> "readonly" | "changes"
+  ( . "$ROOT/cc-lib.sh"
+    if cc_cmd_readonly "$1"; then printf 'readonly'; else printf 'changes'; fi ) 2>/dev/null
+}
+ro() { assert_eq "talk: read-only: $1" "readonly" "$(roj "$1")"; }
+rw() { assert_eq "talk: not read-only: $1" "changes" "$(roj "$1")"; }
+
+ro 'ls -la'
+ro 'git status && ls'
+ro 'cat README.md | head -20'
+ro 'grep -rn "talk" docs/ | wc -l'
+ro 'rg -n foo --glob "*.lua"'
+ro 'tail -n 50 cc-lib.sh'
+ro 'find . -name "*.lua" -not -path "./.claude/*"'
+ro "sed -n '1,20p' cc-approve.sh"
+ro "sed -n -e '/^## /p' -e '\$=' README.md"
+ro "jq -r '.status' ~/.claude/cc-status/x.json"
+ro 'git log --oneline -5'
+ro "git log --format='%h %s' | head"
+ro 'git diff HEAD~1 -- cc-lib.sh'
+ro 'git show --stat HEAD'
+ro 'git branch --list'
+ro 'git branch -a'
+ro 'git -C ../main status'
+ro 'git config --get user.name'
+ro 'git stash list'
+ro 'git worktree list'
+ro 'ls 2>/dev/null || true'
+ro 'grep foo a.txt 2>&1 | sort | uniq -c'
+ro 'cd docs && ls'
+ro 'echo "rm -rf / > x"'
+ro "$(printf 'cat <<EOF\ntext > not-a-file\nEOF')"
+ro 'LC_ALL=C sort file.txt'
+ro 'find . -type f | xargs grep -l foo'
+ro 'bash -c "git status"'
+ro 'wc -l $(git ls-files)'
+ro 'diff <(ls a) <(ls b)'
+ro 'ls # a comment > x'
+ro 'for f in *.md; do head -3 "$f"; done'
+
+rw 'make build'
+rw 'rm file'
+rw 'mkdir x'
+rw 'echo hi > notes.txt'
+rw 'ls >> log.txt'
+rw 'ls 2> err.log'
+rw 'cat a &> b'
+rw 'ls > $OUT'
+rw 'sort -o out.txt in.txt'
+rw 'uniq in.txt out.txt'
+rw "sed -i '' s/a/b/ f"
+rw 'sed -ni p f'
+rw "sed 's/a/b/' f"
+rw "sed -n 'w out.txt' f"
+rw "sed -n 's/a/b/w out.txt' f"
+rw "sed -n '1e date' f"
+rw 'find . -name x -delete'
+rw 'find . -exec cat {} \;'
+rw 'git commit -m "x"'
+rw 'git branch new-feature'
+rw 'git branch -D old'
+rw 'git checkout main'
+rw 'git stash'
+rw 'git config user.name x'
+rw 'git -c core.pager=less log'
+rw 'git diff --output=patch.txt'
+rw 'git push'
+rw 'ls && touch x'
+rw 'echo $(touch x)'
+rw 'cat `rm x`'
+rw 'bash -c "touch x"'
+rw '$EDITOR notes.md'
+rw 'eval ls'
+rw './ls'
+rw 'npm test'
+rw 'tee out.txt < in.txt'
+rw 'rg --pre ./conv foo'
+rw 'printf x | xargs rm'
+rw 'GIT_EXTERNAL_DIFF=./x git diff'
+rw 'diff <(ls a) >(tee b)'
+rw 'sudo ls'
+
+# -- the hook (cc-approve.sh) --
+TALK="$TMP/talk"; mkdir -p "$TALK"
+TH="$TMP/talkhome"; mkdir -p "$TH/.claude"
+talk_req() { # $1 session, $2 tool, $3 tool_input JSON
+  printf '{"session_id":"%s","cwd":"/x/p","tool_name":"%s","tool_input":%s}' "$1" "$2" "$3"
+}
+talk() { # $1 session, $2 tool, $3 tool_input JSON [, env assignments that override]
+  talk_req "$1" "$2" "$3" \
+    | env HOME="$TH" CC_TALK_DIR="$TALK" CC_GATE_FLAG="$AA_NOFLAG" "${@:4}" bash "$APP" 2>/dev/null
+}
+touch "$TALK/tk1"
+rm -f "$HB"
+out="$(talk tk1 Edit '{"file_path":"/x/p/cc-lib.sh","old_string":"a","new_string":"b"}')"
+assert_eq "talk: an Edit in the project is denied, gate unarmed" "deny" "$(decision "$out")"
+assert_eq "talk: ...with the talk-mode reason" "Talk mode: discussion only" "$(reason "$out")"
+for t in Write MultiEdit; do
+  out="$(talk tk1 "$t" '{"file_path":"/x/p/new.md","content":"x"}')"
+  assert_eq "talk: a $t in the project is denied" "deny" "$(decision "$out")"
+done
+out="$(talk tk1 NotebookEdit '{"notebook_path":"/x/p/n.ipynb","new_source":"x"}')"
+assert_eq "talk: a NotebookEdit in the project is denied" "deny" "$(decision "$out")"
+out="$(talk tk1 Write "{\"file_path\":\"$TH/.claude/projects/p/memory/note.md\",\"content\":\"x\"}")"
+assert_eq "talk: a Write under ~/.claude/ goes on (memory, plans)" "" "$out"
+out="$(talk tk1 Write '{"file_path":"/private/tmp/claude-503/proj/sess/scratchpad/a.md","content":"x"}')"
+assert_eq "talk: a Write in a session scratchpad goes on" "" "$out"
+out="$(talk tk1 Write "{\"file_path\":\"$TH/.claude/../Programming/x.md\",\"content\":\"x\"}")"
+assert_eq "talk: a path that climbs out of ~/.claude/ is denied" "deny" "$(decision "$out")"
+out="$(talk tk1 Write '{"file_path":"/private/tmp/claude-503/../../Users/x.md","content":"x"}')"
+assert_eq "talk: ...and one that climbs out of the scratchpad" "deny" "$(decision "$out")"
+out="$(talk tk1 Write "{\"file_path\":\"$TH/.claudette/x.md\",\"content\":\"x\"}")"
+assert_eq "talk: a sibling of ~/.claude/ is not ~/.claude/" "deny" "$(decision "$out")"
+out="$(talk tk1 Bash '{"command":"git status && ls"}')"
+assert_eq "talk: a read-only command goes on" "" "$out"
+out="$(talk tk1 Bash '{"command":"make build"}')"
+assert_eq "talk: a command that isn't read-only is denied" "deny" "$(decision "$out")"
+assert_eq "talk: ...with the talk-mode reason (Bash)" "Talk mode: discussion only" "$(reason "$out")"
+out="$(talk tk1 Bash '{"command":"echo hi > notes.txt"}')"
+assert_eq "talk: a redirect to a file is denied" "deny" "$(decision "$out")"
+out="$(talk tk1 Read '{"file_path":"/x/p/a.txt"}')"
+assert_eq "talk: reading goes on" "" "$out"
+out="$(talk tk2 Edit '{"file_path":"/x/p/cc-lib.sh","old_string":"a","new_string":"b"}')"
+assert_eq "talk: another session's flag doesn't bind this one" "" "$out"
+
+# deny wins over an always-ask hold; a read-only always-ask command stays held
+out="$(talk tk1 Bash '{"command":"git push"}')"
+assert_eq "talk: an always-ask command is denied, not held (deny wins)" "deny" "$(decision "$out")"
+printf '{ "policies": { "alwaysAsk": { "patterns": ["cat secrets*"] } } }' > "$TMP/talk-aa.json"
+out="$(talk tk1 Bash '{"command":"cat secrets.txt"}' CC_CONFIG_FILE="$TMP/talk-aa.json")"
+assert_eq "talk: a read-only always-ask command stays held (ask, no panel)" "ask" "$(decision "$out")"
+
+# nothing automatic passes it: autoAllow, autopilot (the gate armed)
+out="$(talk tk1 Bash '{"command":"make build"}' CC_GATE_FLAG="$FLAG" CC_CONFIG_FILE="$AAPOL")"
+assert_eq "talk: autoAllow can't pass a denied command" "deny" "$(decision "$out")"
+echo 9999999999 > "$CC_AUTOPILOT_DIR/tk1"
+out="$(talk tk1 Bash '{"command":"make build"}' CC_GATE_FLAG="$FLAG" CC_CONFIG_FILE="$AAPOL")"
+assert_eq "talk: autopilot can't pass it" "deny" "$(decision "$out")"
+out="$(talk tk2 Bash '{"command":"make build"}' CC_GATE_FLAG="$FLAG" CC_CONFIG_FILE="$AAPOL")"
+assert_eq "talk: ...while the same policies pass it for a session not in talk mode" "allow" "$(decision "$out")"
+
+# the ledger: by talk
+echo '{ "ledger": { "enabled": true } }' > "$TMP/talk-ledger.json"
+talk tk1 Bash '{"command":"make build"}' CC_CONFIG_FILE="$TMP/talk-ledger.json" CC_LEDGER_DIR="$TMP/talkledger" >/dev/null
+assert_eq "talk ledger: the denial is recorded by talk" "deny|talk|make build" \
+  "$(cat "$TMP"/talkledger/*.jsonl 2>/dev/null | jq -r 'select(.type=="decision" and .session_id=="tk1") | "\(.outcome)|\(.by)|\(.summary)"')"
+
+# the cheap check: with no session in talk mode, or only another one, nothing here starts a jq
+TALK0="$TMP/talk-empty"; mkdir -p "$TALK0"
+talkspy() { # $1 talk dir, $2 session -> jq calls for a Write in the project, gate unarmed
+  rm -f "$SPY/calls"
+  talk_req "$2" Write '{"file_path":"/x/p/a","content":"x"}' \
+    | PATH="$SPY:$PATH" CC_TALK_DIR="$1" CC_GATE_FLAG="$AA_NOFLAG" CC_CONFIG_FILE="$TMP/none.json" bash "$APP" >/dev/null 2>&1
+  grep -c . "$SPY/calls" 2>/dev/null || echo 0
+}
+assert_eq "talk: an empty cc-talk/ spawns no jq" "0" "$(talkspy "$TALK0" tk3)"
+assert_eq "talk: no cc-talk/ at all spawns no jq" "0" "$(talkspy "$TMP/talk-none" tk3)"
+assert_eq "talk: another session's flag spawns no jq for this one" "0" "$(talkspy "$TALK" tk3)"
+assert_eq "talk: ...and the spy does see a session in talk mode (control)" "yes" \
+  "$([ "$(talkspy "$TALK" tk1)" -gt 0 ] && echo yes || echo no)"
+
+# SessionEnd sweep: cc_remove takes the flag with the rest of the key's files
+touch "$TALK/tk4"
+( CC_TALK_DIR="$TALK"; . "$ROOT/cc-lib.sh"; cc_remove tk4 ) >/dev/null 2>&1
+assert_absent "talk: cc_remove drops the talk-mode flag" "$TALK/tk4"
+
 finish

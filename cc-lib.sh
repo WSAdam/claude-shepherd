@@ -321,6 +321,9 @@ CC_MERGE_DIR="${CC_MERGE_DIR:-${HOME}/.claude/cc-merge}"
 # Adam's answers to a held AskUserQuestion (cc-ask.sh), per session key. Default MUST match
 # the dashboard's FX.ASK_DIR.
 CC_ASK_DIR="${CC_ASK_DIR:-${HOME}/.claude/cc-ask}"
+# Talk mode's per-session flag (build program unit 6, 2026-09-28): presence = on, written by the
+# panel's toggle, read by cc-approve.sh. Default MUST match the dashboard's FX.TALK_DIR.
+CC_TALK_DIR="${CC_TALK_DIR:-${HOME}/.claude/cc-talk}"
 
 # Remove a session entirely (used by SessionEnd) plus any stray decision/claim
 # file and the per-session gated-tools override, approveRepeats memo, autopilot
@@ -341,7 +344,7 @@ cc_remove() {
     "$CC_MERGE_DIR/$1.json" "$CC_MERGE_DIR/$1.decision" "$CC_MERGE_DIR/$1.decision".claim.* \
     "$CC_MERGE_DIR/$1.decision".parked.* "$CC_MERGE_DIR/$1.decision".tmp.* \
     "$CC_ASK_DIR/$1.answer" "$CC_ASK_DIR/$1.answer".claim.* \
-    "$CC_ASK_DIR/$1.answer".tmp.* 2>/dev/null || true
+    "$CC_ASK_DIR/$1.answer".tmp.* "$CC_TALK_DIR/$1" 2>/dev/null || true
 }
 
 # ---- Audit/event ledger ----------------------------------------------------
@@ -422,6 +425,7 @@ _CC_AA_ASSIGN_RE='^[A-Za-z_][A-Za-z0-9_]*\+?='
 _CC_SC_PLAIN=$'^[^\\\\\'"$`[:space:];&|<>()#]+'   # a run of characters with no shell meaning
 _CC_SC_DQPLAIN=$'^[^"\\\\$`]+'                     # ...inside double quotes
 _CC_SC_CMD=(); _CC_SC_IN=(); _CC_SC_BAD=""; _CC_SC_END=0; _CC_AA_W=(); _CC_AA_EXTRAS=()
+_CC_SC_OUT=""   # output redirections that write a file (talk mode reads it), one per line
 _CC_AA_KWRE=""; _CC_AA_ASSIGNS=""
 
 # The pure-bash first look (this hook runs for every tool call): 0 when the always-ask layer
@@ -492,11 +496,12 @@ cc_always_ask_match() {
 # keeps the expansion's source text) and its heredoc / here-string to _CC_SC_IN. mode "sub"
 # is the inside of a $( and stops at its closing ")", leaving the next index in _CC_SC_END.
 # The inside of a $(...) or `...` runs too, so its commands are appended as it is met. A
-# heredoc that never ends leaves its text in _CC_SC_BAD.
+# heredoc that never ends leaves its text in _CC_SC_BAD. An output redirection whose target
+# is a file (not /dev/null, a tty or a descriptor copy) adds that target to _CC_SC_OUT.
 _cc_sh_scan() {
   local LC_ALL=C
   local s="$1" mode="$2" i="$3" n=${#1}
-  local c c2 j rest line word="" inw=0 wdyn=0 wq=0 redir=0 hd=0 hdstrip=0 hs=0 depth=0
+  local c c2 j rest line word="" inw=0 wdyn=0 wq=0 redir=0 rout="" hd=0 hdstrip=0 hs=0 depth=0
   local cur="" ncur=0 herestr=""
   local -a hdd=() hds=() hdc=()
   while [ "$i" -lt "$n" ]; do
@@ -518,7 +523,7 @@ _cc_sh_scan() {
       \#) if [ "$inw" = 1 ]; then word="$word#"; i=$((i + 1))
           else rest="${s:i}"; line="${rest%%$'\n'*}"; i=$((i + ${#line})); fi ;;
       '&') if [ "${s:i+1:1}" = '>' ]; then           # &> and &>> redirect, not a separator
-             _cc_sc_word; redir=1; i=$((i + 2)); [ "${s:i:1}" = '>' ] && i=$((i + 1))
+             _cc_sc_word; redir=1; rout=file; i=$((i + 2)); [ "${s:i:1}" = '>' ] && i=$((i + 1))
            else _cc_sc_cmd; i=$((i + 1)); fi ;;
       ';'|'|') _cc_sc_cmd; i=$((i + 1)) ;;
       '<'|'>') _cc_sc_redirect ;;
@@ -538,6 +543,7 @@ _cc_sh_scan() {
 _cc_sc_word() {   # end the word being built
   [ "$inw" = 1 ] || return 0
   if [ "$redir" = 1 ]; then redir=0                  # a redirection's target, not an argument
+    [ -z "$rout" ] || _cc_sc_out
   elif [ "$hd" = 1 ]; then hdd+=("$word"); hds+=("$hdstrip"); hdc+=(-1); hd=0
   elif [ "$hs" = 1 ]; then herestr="$herestr$word"; hs=0
   else
@@ -551,12 +557,24 @@ _cc_sc_word() {   # end the word being built
 _cc_sc_cmd() {    # end the simple command
   local k idx
   _cc_sc_word
+  # an output redirection with no target word: >(...) runs a command on what's written
+  if [ "$redir" = 1 ] && [ -n "$rout" ]; then _CC_SC_OUT="$_CC_SC_OUT>("$'\n'; fi
   if [ "$ncur" -gt 0 ]; then
     _CC_SC_CMD+=("$cur"); _CC_SC_IN+=("$herestr")
     idx=$(( ${#_CC_SC_CMD[@]} - 1 ))
     for k in ${hdc[@]+"${!hdc[@]}"}; do [ "${hdc[k]}" = -1 ] && hdc[k]=$idx; done
   fi
-  cur=""; ncur=0; herestr=""; redir=0; hd=0; hs=0
+  cur=""; ncur=0; herestr=""; redir=0; rout=""; hd=0; hs=0
+}
+
+_cc_sc_out() {    # the target of an output redirection: record it unless it writes no file
+  local kind="$rout"
+  rout=""
+  if [ "$wdyn" = 0 ]; then
+    case "$word" in /dev/null|/dev/stdout|/dev/stderr|/dev/tty) return 0 ;; esac
+    [ "$kind" = dup ] && [[ $word =~ ^([0-9]+-?|-)$ ]] && return 0   # >&2, >&-: a descriptor
+  fi
+  _CC_SC_OUT="$_CC_SC_OUT$word"$'\n'
 }
 
 _cc_sc_heredocs() {   # at the start of a line: read the bodies of the heredocs opened above it
@@ -584,8 +602,14 @@ _cc_sc_redirect() {   # at < or >: the next word is a target (or a heredoc's del
     if [ "${s:i+2:1}" = '<' ]; then hs=1; i=$((i + 3))
     else hd=1; hdstrip=0; i=$((i + 2)); [ "${s:i:1}" = '-' ] && { hdstrip=1; i=$((i + 1)); }; fi
   else
+    # rout: file for >, >>, >|, <> and &>; dup for >& (a descriptor copy, or bash's &> spelling)
+    local op="${s:i:1}"
     redir=1; i=$((i + 1))
-    case "${s:i:1}" in '>'|'&'|'|') i=$((i + 1)) ;; esac
+    case "${s:i:1}" in
+      '&') [ "$op" = '<' ] || rout=dup; i=$((i + 1)) ;;
+      '>'|'|') rout=file; i=$((i + 1)) ;;
+      *) [ "$op" = '<' ] || rout=file ;;
+    esac
   fi
 }
 
@@ -939,4 +963,385 @@ _cc_aa_rules() {   # the built-in list, on the command at w[k]
     j=$((j + 1))
   done
   return 1
+}
+
+# ---- Talk mode (build program unit 6, 2026-09-28) -------------------------------------------
+# A session in talk mode (CC_TALK_DIR/<key>, the panel's toggle) can read and talk but not
+# change anything. cc-approve.sh denies its Edit-family calls outside ~/.claude/ and the
+# scratchpads (cc_talk_path_ok), and every Bash command that isn't read-only (cc_cmd_readonly).
+# Talk mode is a guard against changing things by accident, not a sandbox: an MCP tool, or a
+# symlink under ~/.claude/, is out of its reach.
+
+# The pure-bash first look (this hook runs for every tool call): 0 when the request is an
+# Edit-family or Bash call from a session whose flag file exists. With no flag file at all it
+# costs one glob. $1 = the hook's JSON.
+cc_talk_candidate() {
+  local f re
+  for f in "$CC_TALK_DIR"/*; do
+    [ -e "$f" ] || return 1                          # no flag file: nobody is in talk mode
+    break
+  done
+  re='"tool_name"[[:space:]]*:[[:space:]]*"(Edit|Write|MultiEdit|NotebookEdit|Bash)"'
+  [[ $1 =~ $re ]] || return 1
+  re='"session_id"[[:space:]]*:[[:space:]]*"([^"]+)"'
+  [[ $1 =~ $re ]] || return 1
+  [ -f "$CC_TALK_DIR/${BASH_REMATCH[1]//[^A-Za-z0-9._-]/_}" ]   # cc_key's sanitizing, in bash
+}
+
+# May the Edit family write path $1 in talk mode? Only under ~/.claude/ (memory, plans) or in a
+# session's scratchpad (/private/tmp/claude-*/, also spelt /tmp/claude-*/), never through "..".
+cc_talk_path_ok() {
+  case "/$1/" in */../*) return 1 ;; esac
+  case "$1" in
+    "$HOME"/.claude/?*) return 0 ;;
+    /private/tmp/claude-*/?*|/tmp/claude-*/?*) return 0 ;;
+  esac
+  return 1
+}
+
+# Is this Bash command read-only? $1 = the command. The same parse as cc_always_ask_match
+# (_cc_sh_scan: && || ; | & and newlines, quotes, $(...), backticks, heredocs), then every
+# command in it against a short list of readers (_cc_ro_cmd). A redirection to a file, a heredoc
+# that never ends, a command named by an expansion ($CMD), a path outside the system bin dirs
+# (./ls), or anything not on the list is not read-only. KEEP IN SYNC with
+# docs/approvals-and-policies.md#talk-mode.
+cc_cmd_readonly() { _cc_ro_text "$1" 0; }
+
+_cc_ro_text() {   # $1 shell text, $2 nesting depth (sh -c inside sh -c)
+  local depth="$2" k
+  local -a cmds=()
+  [ "$depth" -le 6 ] || return 1
+  _CC_SC_CMD=(); _CC_SC_IN=(); _CC_SC_BAD=""; _CC_SC_OUT=""
+  _cc_sh_scan "$1" top 0
+  { [ -z "$_CC_SC_BAD" ] && [ -z "$_CC_SC_OUT" ]; } || return 1
+  if [ ${#_CC_SC_CMD[@]} -gt 0 ]; then cmds=("${_CC_SC_CMD[@]}"); fi
+  for k in ${cmds[@]+"${!cmds[@]}"}; do
+    _cc_aa_words "${cmds[k]}"
+    _cc_ro_cmd "$depth" 0 ${_CC_AA_W[@]+"${_CC_AA_W[@]}"} || return 1
+  done
+  return 0
+}
+
+# One simple command. $1 depth, $2 = 1 when xargs adds words to it from its input, then its
+# words. Looks through keywords, NAME=value prefixes and wrappers to the command that runs.
+_cc_ro_cmd() {
+  local depth="$1" viaxargs="$2" x k=0 n base hasc
+  local -a w=() d=()
+  shift 2
+  for x in "$@"; do
+    case "$x" in
+      "$_CC_AA_DYN"*) w+=("${x#"$_CC_AA_DYN"}"); d+=(1) ;;
+      *) w+=("$x"); d+=(0) ;;
+    esac
+  done
+  n=${#w[@]}
+  while :; do
+    while [ "$k" -lt "$n" ]; do
+      case "${w[k]}" in '!'|'{'|'}'|then|do|else|elif|if|while|until|fi|done|esac) k=$((k + 1)); continue ;; esac
+      if [[ ${w[k]} =~ $_CC_AA_ASSIGN_RE ]]; then
+        x="${w[k]%%=*}"; _cc_ro_name "${x%+}" "${w[k]#*=}" || return 1
+        k=$((k + 1)); continue
+      fi
+      break
+    done
+    [ "$k" -lt "$n" ] || return 0                      # only keywords and assignments
+    [ "${d[k]}" = 0 ] || return 1                      # $CMD args: can't tell what runs
+    case "${w[k]}" in
+      /bin/*|/usr/bin/*|/usr/local/bin/*|/opt/homebrew/bin/*) ;;
+      */*) return 1 ;;                                 # ./ls, bin/cat: not the system's reader
+    esac
+    base="${w[k]##*/}"
+    if [ "$viaxargs" = 1 ]; then                       # its input can add any option
+      case "$base" in
+        cat|head|tail|wc|ls|grep|egrep|fgrep|echo|printf|stat|du|basename|dirname|realpath|readlink|cmp|md5|md5sum|shasum|sha1sum|sha256sum|cksum|strings|nl|jq) ;;
+        *) return 1 ;;
+      esac
+    fi
+    case "$base" in
+      # wrappers: judge the command they run
+      time) k=$((k + 1)); while [ "${w[k]:-}" = -p ]; do k=$((k + 1)); done; continue ;;
+      nice) k=$((k + 1)); _cc_aa_opts '-n'; continue ;;
+      timeout) k=$((k + 1)); _cc_aa_opts '-s -k --signal --kill-after'; k=$((k + 1)); continue ;;
+      builtin) k=$((k + 1)); continue ;;
+      command)
+        k=$((k + 1))
+        while [ "$k" -lt "$n" ]; do
+          case "${w[k]}" in
+            --) k=$((k + 1)); break ;;
+            -*v*|-*V*) return 0 ;;                     # command -v: a lookup, nothing runs
+            -*) k=$((k + 1)) ;;
+            *) break ;;
+          esac
+        done
+        continue ;;
+      env)
+        k=$((k + 1))
+        while [ "$k" -lt "$n" ]; do
+          case "${w[k]}" in
+            -u|--unset|-C|--chdir) k=$((k + 2)) ;;
+            -i|-0|--ignore-environment|--null|-) k=$((k + 1)) ;;
+            --) k=$((k + 1)); break ;;
+            -*) return 1 ;;                            # -S splits a string into a command
+            *) break ;;
+          esac
+        done
+        continue ;;
+      xargs)
+        k=$((k + 1))
+        _cc_aa_opts '-I -L -n -P -s -E -d -a --max-args --max-procs --max-lines --delimiter --arg-file --replace --eof'
+        [ "$k" -lt "$n" ] || return 0                  # no command: xargs echoes
+        viaxargs=1; continue ;;
+      sh|bash|zsh|dash|ksh)
+        k=$((k + 1)); hasc=0
+        while [ "$k" -lt "$n" ]; do
+          case "${w[k]}" in
+            --) k=$((k + 1)); break ;;
+            --rcfile|--init-file) return 1 ;;
+            --*) k=$((k + 1)) ;;
+            -*c*) hasc=1; k=$((k + 1)) ;;
+            -*o|+*o|-O|+O) k=$((k + 2)) ;;
+            -*|+*) k=$((k + 1)) ;;
+            *) break ;;
+          esac
+        done
+        { [ "$hasc" = 1 ] && [ "$k" -lt "$n" ] && [ "${d[k]}" = 0 ]; } || return 1   # a script file, stdin
+        _cc_ro_text "${w[k]}" $((depth + 1)); return $? ;;
+      # readers
+      cat|head|tail|wc|ls|pwd|echo|printf|true|false|:|test|'['|'[['|which|type|whereis|stat|du|df|basename|dirname|realpath|readlink|date|uname|whoami|id|printenv|diff|cmp|comm|cut|tr|column|nl|paste|rev|fold|seq|strings|od|hexdump|md5|md5sum|shasum|sha1sum|sha256sum|cksum|jq|grep|egrep|fgrep|cd|pushd|popd|sleep|exit|set|ps|pgrep|lsof|case)
+        return 0 ;;
+      file) _cc_ro_no '-C --compile' ;;              # -C compiles a magic file
+      rg) _cc_ro_no '--pre*' ;;                      # --pre runs a program on each file
+      tree) _cc_ro_no '-o' ;;
+      find) _cc_ro_no '-exec -execdir -ok -okdir -delete -fprint -fprint0 -fprintf -fls' ;;
+      sort) _cc_ro_no '-o* -[!-]*o* --output* --compress-program*' ;;
+      uniq) _cc_ro_uniq ;;
+      sed) _cc_ro_sed ;;
+      git) _cc_ro_git ;;
+      gh)
+        case "${w[k+1]:-} ${w[k+2]:-}" in
+          'pr view'|'pr list'|'pr diff'|'pr checks'|'pr status'|'issue view'|'issue list'|'issue status'|\
+          'run view'|'run list'|'repo view'|'release view'|'release list'|'workflow list'|'workflow view'|'auth status')
+            return 0 ;;
+        esac
+        return 1 ;;
+      export|read)                                     # names they set, like NAME=value
+        x=$((k + 1))
+        while [ "$x" -lt "$n" ]; do
+          case "${w[x]}" in
+            -a|-d|-i|-n|-N|-p|-t|-u) [ "$base" = read ] && x=$((x + 1)) ;;
+            -*) ;;
+            *) _cc_ro_name "${w[x]%%=*}" "${w[x]#*=}" || return 1 ;;
+          esac
+          x=$((x + 1))
+        done
+        return 0 ;;
+      for) _cc_ro_name "${w[k+1]:-}" x; return $? ;;
+      *) return 1 ;;
+    esac
+    return $?
+  done
+}
+
+# May a read-only command line set variable $1 (to $2)? Not one that makes a reader run
+# something (GIT_EXTERNAL_DIFF, PAGER, PATH, zsh's tied path...): a script's own lowercase
+# variables, and a few display settings.
+_cc_ro_name() {
+  case "$1" in
+    path|fpath|cdpath|manpath|module_path) return 1 ;;
+    *[a-z]*) return 0 ;;
+    LC_*|LANG|LANGUAGE|TZ|NO_COLOR|FORCE_COLOR|CLICOLOR|CLICOLOR_FORCE|COLUMNS|LINES|TERM|GREP_COLOR|GREP_COLORS) return 0 ;;
+    GIT_PAGER|PAGER) case "$2" in ''|cat) return 0 ;; esac ;;
+  esac
+  return 1
+}
+
+_cc_ro_no() {   # 0 when none of w[$2..] (default: the command's arguments) matches a glob in $1
+  local j="${2:-$((k + 1))}" g
+  local -a gs=()
+  read -r -a gs <<< "$1"
+  while [ "$j" -lt "$n" ]; do
+    for g in "${gs[@]}"; do
+      # shellcheck disable=SC2053  # the list is globs on purpose
+      [[ ${w[j]} == $g ]] && return 1
+    done
+    j=$((j + 1))
+  done
+  return 0
+}
+
+_cc_ro_uniq() {   # uniq reads one file; a second one is where it writes
+  local j=$((k + 1)) c=0
+  while [ "$j" -lt "$n" ]; do
+    case "${w[j]}" in
+      -f|-s|-w|--skip-fields|--skip-chars|--check-chars) j=$((j + 1)) ;;
+      -) c=$((c + 1)) ;;
+      -*) ;;
+      *) c=$((c + 1)) ;;
+    esac
+    j=$((j + 1))
+  done
+  [ "$c" -le 1 ]
+}
+
+# sed that only prints: -n, no -i/-I (in place), no -f (a script we can't see), and no w/W
+# command, w flag or e (runs a command) in the script.
+_cc_ro_sed() {
+  local j=$((k + 1)) x quiet=0 given=0 sc
+  local -a scripts=()
+  while [ "$j" -lt "$n" ]; do
+    x="${w[j]}"
+    case "$x" in
+      --) [ "$given" = 1 ] || scripts+=("${w[j+1]:-}"); break ;;
+      -e|--expression) scripts+=("${w[j+1]:-}"); given=1; j=$((j + 2)); continue ;;
+      --expression=*) scripts+=("${x#*=}"); given=1 ;;
+      -n|--quiet|--silent) quiet=1 ;;
+      -f|--file|--file=*|--in-place|--in-place=*) return 1 ;;
+      --*) ;;
+      -*)
+        case "$x" in *[iIf]*) return 1 ;; esac
+        case "$x" in *n*) quiet=1 ;; esac
+        case "$x" in
+          *e) scripts+=("${w[j+1]:-}"); given=1; j=$((j + 2)); continue ;;
+          *e*) scripts+=("${x#*e}"); given=1 ;;
+        esac ;;
+      *) [ "$given" = 1 ] || { scripts+=("$x"); given=1; } ;;   # the script, then files
+    esac
+    j=$((j + 1))
+  done
+  [ "$quiet" = 1 ] || return 1
+  for sc in ${scripts[@]+"${scripts[@]}"}; do _cc_ro_sedscript "$sc" || return 1; done
+  return 0
+}
+
+_cc_ro_sedscript() {   # $1 a sed script: 0 when it only prints, deletes, holds and substitutes
+  local s="$1" i=0 n=${#1} c dl
+  while [ "$i" -lt "$n" ]; do
+    c="${s:i:1}"
+    case "$c" in
+      ' '|$'\t'|$'\n'|';'|'{'|'}'|'!'|','|'~'|'+'|'$'|[0-9]) i=$((i + 1)) ;;   # addresses, separators
+      /) i=$((i + 1)); _cc_ro_upto / || return 1 ;;                            # /regex/
+      \\) dl="${s:i+1:1}"; i=$((i + 2)); _cc_ro_upto "$dl" || return 1 ;;      # \cregexc
+      s|y)
+        dl="${s:i+1:1}"; i=$((i + 2))
+        { [ -n "$dl" ] && _cc_ro_upto "$dl" && _cc_ro_upto "$dl"; } || return 1
+        if [ "$c" = s ]; then
+          while [ "$i" -lt "$n" ]; do
+            case "${s:i:1}" in
+              [0-9gpiImM]) i=$((i + 1)) ;;
+              w|W|e) return 1 ;;                                               # s///w file, s///e
+              *) break ;;
+            esac
+          done
+        fi ;;
+      p|P|=|l|q|Q|n|N|d|D|h|H|g|G|x|z|F) i=$((i + 1)) ;;
+      b|t|T|:|r|R|a|i|c|'#')            # a label, a file it reads, text it prints: to the line's end
+        while [ "$i" -lt "$n" ] && [ "${s:i:1}" != $'\n' ]; do
+          [ "${s:i:1}" = ';' ] && [ "$c" != '#' ] && [ "$c" != a ] && [ "$c" != i ] && [ "$c" != c ] && break
+          i=$((i + 1))
+        done ;;
+      *) return 1 ;;                                                            # w, W, e, anything else
+    esac
+  done
+  return 0
+}
+
+_cc_ro_upto() {   # move i past the next unescaped $1 in s; 1 when there is none
+  local ch
+  while [ "$i" -lt "$n" ]; do
+    ch="${s:i:1}"
+    if [ "$ch" = '\' ]; then i=$((i + 2)); continue; fi
+    i=$((i + 1))
+    [ "$ch" = "$1" ] && return 0
+  done
+  return 1
+}
+
+# git that only reads: status, log, diff, show and friends, and the listing forms of branch,
+# tag, stash, worktree, remote, reflog and config. -c (core.pager, diff.external) and
+# --output=<file> are not.
+_cc_ro_git() {
+  local j=$((k + 1)) sub
+  while [ "$j" -lt "$n" ]; do                        # git's own options come first
+    case "${w[j]}" in
+      -c|--config-env|--config-env=*|--exec-path=*) return 1 ;;
+      -C|--git-dir|--work-tree|--namespace|--super-prefix) j=$((j + 2)) ;;
+      -*) j=$((j + 1)) ;;
+      *) break ;;
+    esac
+  done
+  [ "$j" -lt "$n" ] || return 0                      # git --version
+  [ "${d[j]}" = 0 ] || return 1                      # git $SUB
+  sub="${w[j]}"; j=$((j + 1))
+  _cc_ro_no '--output --output=*' "$j" || return 1
+  case "$sub" in
+    status|log|diff|show|blame|annotate|shortlog|describe|rev-parse|rev-list|ls-files|ls-tree|ls-remote|\
+    cat-file|show-ref|for-each-ref|merge-base|name-rev|count-objects|check-ignore|check-attr|whatchanged|\
+    diff-tree|diff-files|diff-index|range-diff|cherry|var|version|help|show-branch)
+      return 0 ;;
+    grep) _cc_ro_no '-O* --open-files-in-pager*' "$j"; return $? ;;   # -O runs a pager command
+    branch) _cc_ro_listing "$j" dDmMcCuft l \
+              '--delete* --move* --copy* --set-upstream* --unset-upstream --edit-description --force --track* --no-track --create-reflog --recurse-submodules'
+            return $? ;;
+    tag) _cc_ro_listing "$j" asufdmFe ln \
+           '--annotate --sign --local-user* --force --delete --message* --file* --edit --no-sign --cleanup* --create-reflog --trailer*'
+         return $? ;;
+    stash) case "${w[j]:-}" in list|show) return 0 ;; esac; return 1 ;;
+    worktree) [ "${w[j]:-}" = list ]; return $? ;;
+    remote) case "${w[j]:-}" in ''|-v|--verbose|show|get-url) return 0 ;; esac; return 1 ;;
+    reflog) case "${w[j]:-}" in ''|show|exists) return 0 ;; esac; return 1 ;;
+    config) _cc_ro_gitconfig "$j"; return $? ;;
+  esac
+  return 1
+}
+
+# git branch / tag: only the listing forms. $1 its first word, $2 the short options that
+# change something, $3 the short options that list, $4 the long ones that change (globs).
+# A name with no listing option creates one.
+_cc_ro_listing() {
+  local j="$1" x pos=0 list=0 g
+  local -a lm=()
+  read -r -a lm <<< "$4"
+  while [ "$j" -lt "$n" ]; do
+    x="${w[j]}"
+    case "$x" in
+      --list|--show-current) list=1 ;;
+      --contains|--no-contains|--merged|--no-merged|--points-at)
+        list=1; case "${w[j+1]:-}" in ''|-*) ;; *) j=$((j + 1)) ;; esac ;;
+      --contains=*|--no-contains=*|--merged=*|--no-merged=*|--points-at=*) list=1 ;;
+      --sort|--format) j=$((j + 1)) ;;
+      --*) for g in ${lm[@]+"${lm[@]}"}; do
+             # shellcheck disable=SC2053
+             [[ $x == $g ]] && return 1
+           done ;;
+      -?*) [[ ${x:1} =~ [$2] ]] && return 1
+           [[ ${x:1} =~ [$3] ]] && list=1 ;;
+      *) pos=$((pos + 1)) ;;
+    esac
+    j=$((j + 1))
+  done
+  [ "$pos" = 0 ] || [ "$list" = 1 ]
+}
+
+_cc_ro_gitconfig() {   # git config that reads: --get*, --list, get, list, or one bare key
+  local j="$1" x pos=0 rd=0
+  while [ "$j" -lt "$n" ]; do
+    x="${w[j]}"
+    case "$x" in
+      --get|--get-all|--get-regexp|--get-urlmatch|--get-color|--get-colorbool|--list|-l) rd=1 ;;
+      -f|--file|--blob|--type|--default) j=$((j + 1)) ;;
+      --show-origin|--show-scope|--name-only|-z|--null|--includes|--no-includes|--global|--system|\
+      --local|--worktree|--bool|--int|--bool-or-int|--path|--expiry-date|--type=*|--default=*|\
+      --file=*|--blob=*) ;;
+      -*) return 1 ;;                                  # --add, --unset, --replace-all, --edit ...
+      *) if [ "$pos" = 0 ]; then
+           case "$x" in
+             get|list) rd=1 ;;
+             set|unset|rename-section|remove-section|edit) return 1 ;;
+           esac
+         fi
+         pos=$((pos + 1)) ;;
+    esac
+    j=$((j + 1))
+  done
+  [ "$rd" = 1 ] || [ "$pos" -le 1 ]                    # git config key reads; key value sets
 }

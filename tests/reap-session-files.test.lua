@@ -30,7 +30,9 @@ do local p = io.popen("mktemp -d 2>/dev/null"); T = p and p:read("*l"); if p the
 if not T or T == "" then check("mktemp a fixture dir", false); finish() end
 
 local STATUS, MERGE, ASK = T .. "/status", T .. "/cc-merge", T .. "/cc-ask"
-os.execute(('mkdir -p "%s" "%s" "%s" "%s/repo"'):format(STATUS, MERGE, ASK, T))
+-- 2026-09-28: talk mode's per-session flag (build program unit 6) is one of the family too
+local TALK = T .. "/cc-talk"
+os.execute(('mkdir -p "%s" "%s" "%s" "%s" "%s/repo"'):format(STATUS, MERGE, ASK, TALK, T))
 local function write(path, s) local f = io.open(path, "w"); if f then f:write(s); f:close() end end
 local function exists(p) local h = io.open(p, "r"); if h then h:close(); return true end; return false end
 
@@ -56,6 +58,7 @@ local function plant()
   write(ASK .. "/" .. KEY .. ".answer", '{"answers":{}}')
   write(ASK .. "/" .. KEY .. ".answer.claim.4242", '{"answers":{}}')
   write(ASK .. "/" .. KEY .. ".answer.tmp.5150", '{"answers"')
+  write(TALK .. "/" .. KEY, "1")
 end
 
 -- Every file above must be gone after a reap. Named for what it is, so a failure reads as
@@ -76,11 +79,13 @@ local TARGETS = {
   { "the answer to a held question",   ASK .. "/" .. KEY .. ".answer" },
   { "a claimed answer",                ASK .. "/" .. KEY .. ".answer.claim.4242" },
   { "a torn answer",                   ASK .. "/" .. KEY .. ".answer.tmp.5150" },
+  { "the talk-mode flag",              TALK .. "/" .. KEY },
 }
 
 -- A second session's files must SURVIVE both reaps -- a prefix sweep must not eat the fleet.
 local OTHER = {
   STATUS .. "/k90.json", MERGE .. "/k90.decision.parked.4242", ASK .. "/k90.answer.tmp.5150",
+  TALK .. "/k90",
 }
 local function plantOther() for _, p in ipairs(OTHER) do write(p, "{}") end end
 
@@ -91,10 +96,10 @@ check("(fixture: the parked merge answer exists before the reap)",
 os.execute(([[
   export CC_STATUS_DIR=%q CC_MERGE_DIR=%q CC_ASK_DIR=%q
   export CC_GATE_TOOLS_DIR=%q CC_APPROVED_DIR=%q CC_AUTOPILOT_DIR=%q
-  export CC_POLICY_DIR=%q CC_POLICY_OVERRIDE_DIR=%q CC_AUTOMODEL_DIR=%q
+  export CC_POLICY_DIR=%q CC_POLICY_OVERRIDE_DIR=%q CC_AUTOMODEL_DIR=%q CC_TALK_DIR=%q
   . %q; cc_remove %s
 ]]):format(STATUS, MERGE, ASK, T .. "/gt", T .. "/ap", T .. "/au",
-           T .. "/po", T .. "/pov", T .. "/am", ROOT .. "cc-lib.sh", KEY) .. " >/dev/null 2>&1")
+           T .. "/po", T .. "/pov", T .. "/am", TALK, ROOT .. "cc-lib.sh", KEY) .. " >/dev/null 2>&1")
 for _, t in ipairs(TARGETS) do
   check("cc_remove drops " .. t[1], not exists(t[2]))
 end
@@ -162,6 +167,7 @@ local ENV = { CC_STATUS_DIR = STATUS, CC_MERGE_DIR = MERGE, CC_ASK_DIR = ASK,
               CC_GATE_TOOLS_DIR = T .. "/gt", CC_APPROVED_DIR = T .. "/ap",
               CC_AUTOPILOT_DIR = T .. "/au", CC_POLICY_DIR = T .. "/po",
               CC_POLICY_OVERRIDE_DIR = T .. "/pov", CC_AUTOMODEL_DIR = T .. "/am",
+              CC_TALK_DIR = TALK,
               CC_WORKLIST_FILE = T .. "/worklist.json", CC_LABELS_FILE = T .. "/labels.json",
               HOME = T }
 os.getenv = function(k) if ENV[k] ~= nil then return ENV[k] end; return realGetenv(k) end

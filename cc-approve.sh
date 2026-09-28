@@ -22,6 +22,10 @@
 # answers "ask" so Claude Code's own prompt shows, never nothing. An Approve is never
 # remembered.
 #
+# Talk mode (2026-09-28) comes before all of it: for a session in talk mode (CC_TALK_DIR/<key>)
+# an Edit-family call outside ~/.claude/ and the scratchpads, or a Bash command that isn't
+# read-only (cc_cmd_readonly in cc-lib.sh), is denied, whatever the gate or a policy says.
+#
 # Only the decision JSON is ever written to stdout; logs go to stderr.
 
 set -u
@@ -152,6 +156,34 @@ ledger_decision() {
      + (if $why == "" then {} else {reason:$why} end)')"
 }
 
+# ---- Talk mode (build program unit 6, 2026-09-28) -------------------------
+# Before everything else, gate armed or not: a session in talk mode (the panel's toggle, the
+# flag file CC_TALK_DIR/<key>) can read and talk but not change anything. An Edit-family call
+# outside ~/.claude/ and the scratchpads (cc_talk_path_ok), or a Bash command that isn't
+# read-only (cc_cmd_readonly), is denied. Talk mode only ever denies: what it lets through goes
+# on to the always-ask layer and the gate below, so an always-ask command it lets through is
+# still held, and one it refuses is denied rather than held (deny wins). The first look is pure
+# bash, like always-ask's: with no session in talk mode, or only another one, it starts no jq.
+if cc_talk_candidate "$INPUT"; then
+  if ! cc_have_jq; then   # the request can't be read, so nothing talk mode judges goes through
+    printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Talk mode: discussion only"}}'
+    exit 0
+  fi
+  load_identity
+  load_summary
+  TALK_DENY=""
+  case "$TOOL" in
+    Edit|Write|MultiEdit|NotebookEdit) cc_talk_path_ok "$SUMMARY" || TALK_DENY="an edit outside ~/.claude/ and the scratchpads" ;;
+    Bash) cc_cmd_readonly "$SUMMARY" || TALK_DENY="a command that isn't read-only" ;;
+  esac
+  if [ -n "$TALK_DENY" ]; then
+    echo "[cc-approve] 💬 talk mode denied $TALK_DENY: $TOOL ($KEY)" >&2
+    ledger_decision deny talk
+    emit_deny "Talk mode: discussion only"
+    exit 0
+  fi
+fi
+
 # ---- Always ask (build program unit 5, 2026-09-28) ------------------------
 # Before the gate-flag exit: an always-ask command is held whether or not the gate is armed.
 # This hook runs for every tool call, so cc_always_ask_candidate looks first in pure bash:
@@ -160,9 +192,9 @@ ledger_decision() {
 # resolved policy file). A bundle can add to the list, never take from it.
 ALWAYS_ASK=""
 if cc_always_ask_candidate "$INPUT" && cc_have_jq; then
-  load_identity
+  [ -n "$KEY" ] || load_identity
   if [ "$TOOL" = "Bash" ]; then
-    load_summary
+    [ -n "$SIG" ] || load_summary
     AA_EXTRAS="$(cc_config_array '.policies.alwaysAsk.patterns')"
     [ -f "$POLICY_DIR/$KEY" ] \
       && AA_EXTRAS="$AA_EXTRAS"$'\n'"$(jq -r '.alwaysAsk[]? // empty' "$POLICY_DIR/$KEY" 2>/dev/null)"

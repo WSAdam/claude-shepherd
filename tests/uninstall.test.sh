@@ -24,6 +24,7 @@ printf '<plist><dict><key>CFBundleIdentifier</key><string>com.claude-shepherd.la
   > "$A/Shepherd.app/Contents/Info.plist"
 printf '{}' > "$C/cc-status/abc.json"
 printf '{"version":1,"files":{}}' > "$C/cc-usage-state.json"
+mkdir -p "$C/cc-talk"; printf '1' > "$C/cc-talk/abc"
 mkdir -p "$C/cc-bridge"; printf '0.5.0' > "$C/cc-bridge/.installed"
 FAKE="$TMP/code"
 printf '#!/bin/sh\necho "$*" >> "%s"\nexit 0\n' "$TMP/code.calls" > "$FAKE"; chmod +x "$FAKE"
@@ -71,6 +72,8 @@ assert_eq "--purge removes Shepherd's settings" "gone" "$([ -e "$C/cc-config.jso
 assert_eq "--purge removes Shepherd's state" "gone" "$([ -e "$C/cc-status" ] && echo there || echo gone)"
 # 2026-09-28: the saved usage totals (cc-usage-state.json) are Shepherd's state too
 assert_eq "--purge removes the saved usage totals" "gone" "$([ -e "$C/cc-usage-state.json" ] && echo there || echo gone)"
+# 2026-09-28: talk mode's per-session flags (cc-talk/) are Shepherd's state too
+assert_eq "--purge removes the talk-mode flags" "gone" "$([ -e "$C/cc-talk" ] && echo there || echo gone)"
 assert_eq "--purge still keeps the user's own files" "there" "$([ -e "$C/cc-mine.sh" ] && echo there || echo gone)"
 
 # a CLAUDE.md that is only the block (a fresh machine) is removed, not left empty

@@ -119,6 +119,8 @@ The automatic behaviours here are off until you turn them on.
 - [**Always-ask commands**](docs/approvals-and-policies.md#always-ask-commands): `git push`,
   `rm -rf`, history rewrites and publish always wait for your click, and no autopilot or rule can
   pass them.
+- [**Talk mode**](docs/approvals-and-policies.md#talk-mode): one click makes a session discussion
+  only; it can read and talk, but its edits and commands that change things are denied.
 - [**Policy bundles & autopilot**](docs/approvals-and-policies.md#policies): reusable allow and deny
   rules per session or fleet, and a time-boxed autopilot.
 - [**Shared-window guard**](docs/controls.md#sessions-that-share-a-window): Shepherd won't type into

@@ -38,6 +38,9 @@ In order (a remote SSH-bridge tile offers only Relabel and Set group):
   provider/model, lineage and activity counts) into `~/.claude/cc-exports/` and reveal it in Finder.
 - **⚖ A/B fork-to-compare…**: run the same task as 2+ variants in isolated git worktrees of this
   project, then compare them and keep the winner ([Automation](automation.md#ab-compare)).
+- **Talk mode (discussion only)**: checked while on. The session can read and talk but not change
+  anything: edits and commands that change things are denied, and the tile wears a **TALK** badge
+  ([Approvals and policies](approvals-and-policies.md#talk-mode)). Click again to turn it off.
 - **Clear conversation / Compact**: confirm, then run `/clear` or `/compact` in the session.
 - **Close instance**: confirm, then close the session and remove the tile. In a window shared with
   other sessions the tab bridge closes just its Claude tab (a batch unit's by its tag, any other by
@@ -73,6 +76,8 @@ In order (a remote SSH-bridge tile offers only Relabel and Set group):
   **Auto-Continue** does this for you ([Automation](automation.md#auto-respawn-and-auto-continue)).
 - **Autopilot**: time-box a session to auto-approve all its gated prompts (needs the gate and
   `policies.autopilot.enabled`).
+- **Talk mode**: the same toggle as the context menu's; it reads **Talk mode: ON** while it's on
+  ([Approvals and policies](approvals-and-policies.md#talk-mode)).
 - **Clear / Compact**: confirm, then run `/clear` or `/compact` in the session.
 - **Score**: rate the session 0–100 from the audit ledger
   ([Usage and cost](usage-and-cost.md#run-score)).

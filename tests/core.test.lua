@@ -8437,7 +8437,9 @@ do
   -- 2026-09-25: 12 -> 13 for the commit stats under the fleet block ("commits", flagged new).
   -- 2026-09-28: 13 -> 14 for how each turn ended ("turns", flagged new).
   -- 2026-09-28: 14 -> 15 for always-ask commands ("alwaysask", flagged new).
-  eq("FEATURES: the 15 new features are flagged", newCount, 15)
+  -- 2026-09-28: 15 -> 16 for talk mode ("talk", flagged new).
+  eq("FEATURES: the 16 new features are flagged", newCount, 16)
+  check("FEATURES: lists talk mode", keys.talk == true)
   check("FEATURES: lists how each turn ended", keys.turns == true)
   check("FEATURES: lists always-ask commands", keys.alwaysask == true)
   check("FEATURES: lists answering questions from Shepherd", keys.answers == true)
