@@ -93,6 +93,13 @@ release that adds a *hook* (as the held-question hook did) would land on disk an
 where nothing changed. It re-runs the pre-flight suite, so it also tells you if the version you
 pulled is red on your machine before it changes anything.
 
+What it does to your hooks on an upgrade: every hook script the new version wires that your
+`settings.json` doesn't run yet is added, on every event. A new script on an event Shepherd already
+uses joins the group Shepherd owns there. A hook that runs for one tool or one kind of error only
+(its own matcher, like the question hook's `AskUserQuestion`) gets a group of its own, so it never
+runs for everything. Your own hook groups are never edited, a script already wired anywhere in an
+event is left where it is, and running `make setup` again changes nothing.
+
 Then, once it finishes:
 
 1. **Hammerspoon** menu-bar icon → **Reload Config**. Hammerspoon runs the copies in
@@ -100,7 +107,7 @@ Then, once it finishes:
 2. In each **VS Code window that was already open**: ⌘⇧P → **Developer: Reload Window**. A window
    holds the tab bridge extension it loaded at startup, so until it reloads it keeps running the
    older one. 🩺 **Diagnostics** says so explicitly (*"An older tab bridge runs in N VS Code
-   windows"*), and also checks that all four hooks are wired.
+   windows"*), and also checks that every Shepherd hook is wired.
 
 Upgrading never overwrites a setting you made. Shepherd settings added since your install are
 filled in where you have no value of your own (your `false` stays `false`), and `cc-config.json`

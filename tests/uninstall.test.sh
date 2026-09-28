@@ -80,4 +80,33 @@ CC_INSTALL_CLAUDE_DIR="$C2" CC_INSTALL_HS_DIR="$TMP/hs2" CC_UNINSTALL_APP_DIR="$
   bash "$ROOT/uninstall.sh" >/dev/null 2>&1
 assert_eq "a CLAUDE.md holding only the methodology is removed" "gone" "$([ -e "$C2/CLAUDE.md" ] && echo there || echo gone)"
 
+# 2026-09-28: uninstall.sh kept its own copy of the file list and of the hook names, so a script
+# a later release ships (newhook_repo, tests/lib.sh) would be installed and wired, then left
+# behind by the uninstall -- a hook still wired to a script it just deleted. Both now come from
+# SHIPPED, and the uninstall takes out exactly what the install put in.
+NH="$(newhook_repo "$TMP/newhook-repo")"
+C3="$TMP/claude3"; H3="$TMP/hs3"; mkdir -p "$C3"
+cat > "$C3/settings.json" <<'JSON'
+{ "model": "opus", "hooks": {
+    "Stop": [ { "hooks": [ { "type": "command", "command": "echo mine" } ] } ],
+    "StopFailure": [ { "matcher": "rate_limit", "hooks": [ { "type": "command", "command": "echo limited" } ] } ],
+    "PreToolUse": [ { "matcher": "Bash", "hooks": [ { "type": "command", "command": "echo bash" } ] } ],
+    "PreCompact": [ { "hooks": [ { "type": "command", "command": "echo compacting" } ] } ] } }
+JSON
+users_hooks="$(jq -S .hooks "$C3/settings.json")"
+CC_INSTALL_CLAUDE_DIR="$C3" CC_INSTALL_HS_DIR="$H3" bash "$NH/install.sh" >/dev/null 2>&1
+assert_eq "(fixture: the install wired the new hook)" "yes" \
+  "$(grep -q 'cc-newhook.sh' "$C3/settings.json" && [ -e "$C3/cc-newhook.sh" ] && echo yes || echo no)"
+CC_INSTALL_CLAUDE_DIR="$C3" CC_INSTALL_HS_DIR="$H3" CC_UNINSTALL_APP_DIR="$A" CC_CODE_CLI="$FAKE" \
+  bash "$NH/uninstall.sh" >/dev/null 2>&1
+assert_eq "uninstall removes exactly the hooks install added (the user's own are all that's left)" \
+  "$users_hooks" "$(jq -S .hooks "$C3/settings.json")"
+assert_eq "uninstall removes a script a later release added to SHIPPED" "gone" \
+  "$([ -e "$C3/cc-newhook.sh" ] && echo there || echo gone)"
+left=""
+for f in $(cd "$NH" && ls -1 cc-*.sh cc-core.lua claude-dashboard.lua); do
+  [ -e "$C3/$f" ] || [ -e "$H3/$f" ] && left="$left $f"
+done
+assert_eq "...and every other file it shipped" "" "$left"
+
 finish

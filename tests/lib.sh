@@ -79,6 +79,25 @@ wait_for() { # <path> [tries]
   local i; for i in $(seq 1 "${2:-60}"); do [ -e "$1" ] && return 0; sleep 0.1; done; return 1
 }
 
+# newhook_repo <dir> - a copy of this checkout's installer that ships ONE hook more than the real
+# one: cc-newhook.sh, listed in SHIPPED, added to the Stop group Shepherd already owns and wired in
+# a new StopFailure group of its own (matcher rate_limit). It stands in for the next release that
+# adds a hook, so the upgrade path is tested before one exists. Echoes <dir>.
+newhook_repo() {
+  local d="$1"
+  mkdir -p "$d"
+  cp "$ROOT"/install.sh "$ROOT"/uninstall.sh "$ROOT"/Makefile "$ROOT"/cc-*.sh "$ROOT"/cc-core.lua \
+     "$ROOT"/claude-dashboard.lua "$d/"
+  [ -r "$ROOT/SHIPPED" ] && cp "$ROOT/SHIPPED" "$d/"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$d/cc-newhook.sh"
+  printf 'cc-newhook.sh         claude hook\n' >> "$d/SHIPPED"
+  jq '.hooks.Stop[0].hooks += [{type: "command", command: "bash \"$HOME/.claude/cc-newhook.sh\" stop"}]
+      | .hooks.StopFailure += [{matcher: "rate_limit", hooks: [
+          {type: "command", command: "bash \"$HOME/.claude/cc-newhook.sh\" ratelimit"}]}]' \
+    "$ROOT/settings-hooks.json" > "$d/settings-hooks.json"
+  printf '%s' "$d"
+}
+
 finish() {
   echo "-- $(basename "$0"): $TESTS_RUN run, $TESTS_FAIL failed --"
   [ -n "${CC_TEST_ISOLATION:-}" ] && rm -rf "$CC_TEST_ISOLATION"

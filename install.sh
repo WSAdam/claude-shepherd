@@ -7,14 +7,16 @@
 # first), ensures the dofile in ~/.hammerspoon/init.lua, and builds the
 # Shepherd.app Dock launcher. SAFE TO RE-RUN: a second run is a no-op.
 #
-# The hook merge (cf. core.mergeHooks in cc-core.lua): for each event, append our
-# whole group if none of OUR scripts (cc-status/approve/popup.sh) is wired yet;
-# if SOME are wired (an older install, before a sibling hook existed), append just
-# the missing entries into the group we own — never skip the event outright, or
-# upgrades would leave newly-shipped hooks (cc-popup.sh) unwired forever.
-# Matching our exact names (not a bare "cc-" substring) avoids colliding with a
-# user's own cc-prefixed hook. The test() is an UNANCHORED substring (KEEP IN SYNC
-# with core.OUR_HOOK_SCRIPTS), so a contrived my-cc-status.sh would be a false
+# The files it copies, and which of them are hooks, come from SHIPPED (one line per file).
+#
+# The hook merge, per matcher group of EVERY event in settings-hooks.json: a script of ours
+# that the event doesn't run yet is added -- into the group we already own with that matcher
+# (never a user's own group), or else as a group of its own carrying the template's matcher.
+# So an upgrade gains a new script on an event it already has AND a new per-tool/per-error
+# group on any event, and a re-run changes nothing. A script counts as wired by its name
+# anywhere in the event (the path and arguments may differ between releases). Matching our
+# exact names (not a bare "cc-" substring) avoids colliding with a user's own cc-prefixed
+# hook; it is an UNANCHORED substring, so a contrived my-cc-status.sh would be a false
 # positive -- acceptable next to the old bare-"cc-" net.
 #
 # Env overrides (used by tests/install.test.sh to stay hermetic):
@@ -156,8 +158,22 @@ install_file() {
   cp "$src" "$dstdir/.$base.tmp.$$" && mv -f "$dstdir/.$base.tmp.$$" "$dstdir/$base"
 }
 
-CLAUDE_FILES="cc-lib.sh cc-status.sh cc-approve.sh cc-popup.sh cc-merge.sh cc-fleet.sh cc-ask.sh cc-commits.sh cc-worktree-guard.sh cc-core.lua"
-HS_FILES="claude-dashboard.lua cc-core.lua"
+# The shipped files: SHIPPED's names carrying tag $1 (claude, hs or hook). Data lines start with
+# a letter or digit; everything else is a comment.
+shipped() {
+  awk -v t="$1" '$1 ~ /^[A-Za-z0-9]/ { for (i = 2; i <= NF; i++) if ($i == t) { print $1; next } }' "$HERE/SHIPPED"
+}
+CLAUDE_FILES=""; HS_FILES=""; HOOK_RE=""
+if [ -r "$HERE/SHIPPED" ]; then
+  CLAUDE_FILES="$(shipped claude | tr '\n' ' ')"
+  HS_FILES="$(shipped hs | tr '\n' ' ')"
+  # Our hook scripts as one regex for jq: cc-status\.sh|cc-approve\.sh|...
+  HOOK_RE="$(shipped hook | sed 's/\./\\./g' | paste -sd '|' -)"
+fi
+if [ -z "$CLAUDE_FILES" ] || [ -z "$HS_FILES" ] || [ -z "$HOOK_RE" ]; then
+  echo "❌ SHIPPED is missing or empty in the checkout ($HERE) — aborting before touching anything."
+  exit 1
+fi
 
 # 0. Every file we ship must be in the checkout, or we'd wire a hook to a file that
 # doesn't exist (2026-09-15: a missing cc-ask.sh printed "copied" and "install complete").
@@ -204,7 +220,7 @@ if have_jq; then
     echo "⚠️  couldn't parse $SETTINGS — leaving it; merge $TEMPLATE by hand"
   else
     merge_err="$CLAUDE_DIR/.settings.merge.err.$$"
-    merged="$(jq --argjson tmpl "$(cat "$TEMPLATE")" '
+    merged="$(jq --argjson tmpl "$(cat "$TEMPLATE")" --arg hook_re "$HOOK_RE" '
       # Give an existing cc-approve.sh hook entry the 130s timeout it needs
       # (the gate polls up to 120s; Claude Code'\''s 60s default would kill it
       # mid-wait). Idempotent; a value at or above 130 passes through, a lower one
@@ -225,53 +241,47 @@ if have_jq; then
           then .hooks |= map(patch_approve)
           else . end)
         else . end));
-      def our_re: "cc-(status|approve|popup)\\.sh";
+      # The script of ours (a SHIPPED hook) an entry runs, or null.
+      def script_of:
+        (.command? // null) as $c
+        | if ($c | type) == "string"
+          then ([ $c | capture("(?<n>" + $hook_re + ")").n ] | first)
+          else null end;
+      # A group'\''s entries, when it is a real group: an object holding a hooks list.
+      def entries: if type == "object" and ((.hooks? // null) | type) == "array" then .hooks[] else empty end;
+      # "", "*" and no matcher all mean every tool (every error, every notification).
+      def mkey: (if type == "object" then (.matcher? // "") else "" end) | if . == "*" then "" else . end;
       .hooks //= {}
       | reduce ($tmpl.hooks | to_entries[]) as $e (.;
           # An event group that is not a list (a hand-edited object) is left exactly as
           # it is -- 2026-09-15: `[]` on it made the filter fail and the valid file was
           # reported as unparseable. The shell warns about it after the merge.
-          (if ((.hooks[$e.key] // []) | type) == "array" then .hooks[$e.key] // [] else [] end) as $grp
-          | ([ $grp[].hooks[]?.command? // empty ]) as $cmds
-          | if ((.hooks[$e.key] // []) | type) != "array" then .
-            elif ($cmds | any(test(our_re))) | not
-            then .hooks[$e.key] = ($grp + $e.value)
-            else
-              # Per-entry upgrade: the event already carries SOME of our scripts,
-              # but a hook shipped AFTER that install (cc-popup.sh postdates the
-              # Stop/Notification/PermissionRequest wiring of early installs) is
-              # still missing. Skipping the whole template group would leave it
-              # unwired forever — instead append just OUR missing entries into
-              # the first group we already own, preserving its matcher.
-              ([ $e.value[].hooks[]?
-                 | select((.command? // "") | test(our_re))
-                 | (.command | capture("(?<n>" + our_re + ")").n) as $n
-                 | select(($cmds | any(contains($n))) | not) ]) as $missing
+          if ((.hooks[$e.key] // []) | type) != "array" then .
+          else
+            # Per template group (2026-09-28: the per-entry upgrade knew only
+            # cc-(status|approve|popup).sh and only PreToolUse'\''s per-tool groups were
+            # migrated, so a new script on an event we already own, or a new matcher group
+            # on any other event, never reached an existing install). Its scripts the
+            # event does not run yet go into the group WE own with the same matcher --
+            # never a user'\''s own group, never a group with another matcher (a per-tool
+            # hook dropped into the matcher-"" group would run for every tool) -- or, with
+            # no such group, in a group of their own carrying the template'\''s matcher.
+            .hooks[$e.key] = reduce $e.value[] as $g ((.hooks[$e.key] // []);
+              . as $grps
+              | ($g | mkey) as $m
+              | [ $g.hooks[] | script_of as $n
+                  | select($n != null and ([ $grps[] | entries | script_of ] | any(. == $n) | not)) ] as $missing
               | if ($missing | length) == 0 then .
-                else .hooks[$e.key] |= (
-                  # $i = index of the first existing group in this event that already
-                  # carries one of our scripts; append the missing siblings THERE so
-                  # they inherit its matcher. null (no such group) => add a fresh group.
-                  (map([.hooks[]?.command? // empty] | any(test(our_re))) | index(true)) as $i
-                  | if $i == null then . + [{hooks: $missing}]
-                    else .[$i].hooks += $missing end)
-                end
-            end)
+                else
+                  ([ range(0; length) as $i
+                     | select(($grps[$i] | mkey) == $m
+                              and ([ $grps[$i] | entries | script_of | select(. != null) ] | length) > 0)
+                     | $i ] | first) as $i
+                  | if $i == null then . + [ $g + {hooks: $missing} ]
+                    else .[$i].hooks += $missing end
+                end)
+          end)
       | .hooks |= migrate_timeout
-      # A script that lives in its OWN PreToolUse group -- cc-ask.sh (2026-09-11, matcher
-      # AskUserQuestion, a long timeout: it holds the question for Shepherd), cc-worktree-guard.sh
-      # (2026-09-28, matcher EnterWorktree) -- is never picked up by the per-entry upgrade above,
-      # which would drop it into the matcher-"" group and run it for every tool. So an install
-      # that predates one gets that template group itself, once. Each group is checked on its
-      # own: the cc-ask-only check this replaced skipped the whole step whenever cc-ask.sh was
-      # wired, so no later group could ever have reached an existing install.
-      | reduce ($tmpl.hooks.PreToolUse[] | select((.matcher // "") != "")) as $g (.;
-          ([ $g.hooks[]?.command? // empty | capture("(?<n>cc-[a-z-]+\\.sh)").n ]) as $names
-          | if ($names | length) == 0 then .
-            elif ((.hooks.PreToolUse // []) | type) != "array" then .
-            elif ([ (.hooks.PreToolUse // [])[]?.hooks[]?.command? // empty ]
-                  | any(. as $c | $names | any(. as $n | $c | contains($n)))) then .
-            else .hooks.PreToolUse = ((.hooks.PreToolUse // []) + [ $g ]) end)
     ' "$SETTINGS" 2>"$merge_err")"
     if [ -z "$merged" ]; then
       echo "⚠️  hook merge failed on $SETTINGS — leaving it; merge $TEMPLATE by hand"

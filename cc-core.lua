@@ -7392,8 +7392,8 @@ end
 -- match is an UNANCHORED substring -- commands appear both bare (`bash cc-status.sh`)
 -- and pathed (`/x/cc-status.sh`), so we can't anchor on a leading `/`; a contrived
 -- user hook whose basename ENDS in one of these (e.g. my-cc-status.sh) is a false
--- positive, acceptable next to the old bare-"cc-" net. KEEP IN SYNC with install.sh's
--- jq `any(test("cc-(status|approve|popup)\\.sh"))`.
+-- positive, acceptable next to the old bare-"cc-" net. KEEP IN SYNC with SHIPPED's `hook`
+-- lines, which install.sh wires and uninstall.sh removes (tests/core.test.lua checks).
 M.OUR_HOOK_SCRIPTS = { "cc-status.sh", "cc-approve.sh", "cc-popup.sh", "cc-ask.sh", "cc-worktree-guard.sh" }
 function M.mergeHooks(existing, template)
   existing = type(existing) == "table" and existing or {}

@@ -23,28 +23,34 @@ lint:
 	@bash tests/lint-timers.sh
 	@luac -p cc-core.lua claude-dashboard.lua && echo "✅ lint: luac syntax OK"
 
+# The shipped files come from the one list, SHIPPED (install.sh and uninstall.sh read it too):
+# $(call shipped,hs) is what goes to $(HS_DIR), $(call shipped,claude) what goes to $(CLAUDE_DIR).
+shipped = $(shell awk -v t=$(1) '$$1 ~ /^[A-Za-z0-9]/ { for (i = 2; i <= NF; i++) if ($$i == t) { print $$1; next } }' SHIPPED)
+
 # Deploy the dashboard + its logic module to Hammerspoon. The running config
 # dofiles ~/.hammerspoon/claude-dashboard.lua, so edits in this repo aren't live
 # until they're copied. Run this after every change (then `make reload`).
 .PHONY: install
 install:
+	@[ -n "$(call shipped,hs)" ] && [ -n "$(call shipped,claude)" ] \
+		|| { echo "❌ SHIPPED is missing or empty -- nothing to install"; exit 1; }
 # Same rename rule as the hooks below (and as install.sh): a plain `cp` truncates the
 # destination in place, and Hammerspoon's pathwatcher can fire mid-write and load half a
 # chunk -- of a file this size, most of a second's worth of bytes.
-	@for f in claude-dashboard.lua cc-core.lua; do \
+	@for f in $(call shipped,hs); do \
 		cp "$$f" "$(HS_DIR)/.$$f.tmp.$$$$" && mv -f "$(HS_DIR)/.$$f.tmp.$$$$" "$(HS_DIR)/$$f" || exit 1; \
 	done
-	@echo "✅ copied claude-dashboard.lua + cc-core.lua -> $(HS_DIR)/"
+	@echo "✅ copied $(call shipped,hs) -> $(HS_DIR)/"
 # The hooks run from $(CLAUDE_DIR), so a deploy that ships only the Lua leaves edits
 # to the status writer SILENTLY unshipped -- the panel reloads, the hooks do not.
-# Mirrors install.sh's file set (same scripts, same chmod).
+# Same file set as install.sh (SHIPPED), same chmod: only the scripts we ship get +x.
 # Each script is swapped in with a RENAME, never rewritten in place: bash reads a script
 # lazily from its open fd, so a hook running right now (a gate waiter, a merge request
 # waiting for Adam) would resume inside the new file's bytes. Same rule as install.sh.
-	@for f in cc-lib.sh cc-status.sh cc-approve.sh cc-popup.sh cc-merge.sh cc-fleet.sh cc-ask.sh cc-commits.sh cc-worktree-guard.sh cc-core.lua; do \
+	@for f in $(call shipped,claude); do \
 		cp "$$f" "$(CLAUDE_DIR)/.$$f.tmp.$$$$" && mv -f "$(CLAUDE_DIR)/.$$f.tmp.$$$$" "$(CLAUDE_DIR)/$$f" || exit 1; \
+		case "$$f" in *.sh) chmod +x "$(CLAUDE_DIR)/$$f" ;; esac; \
 	done
-	@chmod +x "$(CLAUDE_DIR)"/cc-*.sh
 	@echo "✅ copied hook scripts + core -> $(CLAUDE_DIR)/"
 	@[ -n "$(NO_TAB_BRIDGE)" ] || $(MAKE) --no-print-directory tab-bridge
 

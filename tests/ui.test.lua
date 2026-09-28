@@ -3662,8 +3662,13 @@ do
   check("commits: git runs in an hs.task, never on the tick",
         body:find('hs.task.new("/bin/sh"', 1, true) ~= nil and body:find("hs.execute", 1, true) == nil)
   check("commits: the panel receiver exists", src:find("window.ccCommits = function", 1, true) ~= nil)
+  -- 2026-09-28 requirement change: the three no longer spell out their own file lists; each reads
+  -- SHIPPED, so cc-commits.sh ships when SHIPPED sends it to ~/.claude and each of them reads SHIPPED
+  -- (install.test.sh checks the copies themselves match SHIPPED).
+  check("commits: SHIPPED sends cc-commits.sh to ~/.claude",
+        slurp("SHIPPED"):find("\ncc%-commits%.sh%s+[^\n]*claude") ~= nil)
   for _, p in ipairs({ "Makefile", "install.sh", "uninstall.sh" }) do
-    check("commits: " .. p .. " ships cc-commits.sh", slurp(p):find("cc-commits.sh", 1, true) ~= nil)
+    check("commits: " .. p .. " ships cc-commits.sh (reads SHIPPED)", slurp(p):find("SHIPPED", 1, true) ~= nil)
   end
   local listed = false
   for _, f in ipairs(core.FEATURES) do if f.key == "commits" then listed = true end end

@@ -2664,6 +2664,23 @@ do
   for i = 1, #wantScripts do if got[i] ~= wantScripts[i] then scriptsOk = false end end
   check("mergeHooks: OUR_HOOK_SCRIPTS == {cc-approve, cc-ask, cc-popup, cc-status, cc-worktree-guard}.sh exactly", scriptsOk)
 
+  -- 2026-09-28: SHIPPED is the one list of shipped files; its `hook` lines are what install.sh
+  -- wires and uninstall.sh removes. OUR_HOOK_SCRIPTS (the panel's hook inventory and Diagnostics)
+  -- must name the same scripts, or a new hook is installed but never counted, or counted but never
+  -- installed.
+  local shippedHooks = {}
+  local fh = io.open(ROOT .. "SHIPPED", "r")
+  if fh then
+    for line in fh:lines() do
+      local name, tags = line:match("^([%w][%w%.%-]*)%s*(.*)$")
+      if name and (" " .. tags .. " "):find(" hook ", 1, true) then shippedHooks[#shippedHooks + 1] = name end
+    end
+    fh:close()
+  end
+  table.sort(shippedHooks)
+  eq("SHIPPED's hook scripts are exactly core.OUR_HOOK_SCRIPTS",
+     table.concat(shippedHooks, ","), table.concat(got, ","))
+
   -- L5 hooks inspector: flatten settings.json hooks into per-hook rows
   local settings = { hooks = {
     Stop = { { hooks = { { type = "command", command = "bash $HOME/.claude/cc-status.sh" } } } },

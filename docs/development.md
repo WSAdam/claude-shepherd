@@ -104,6 +104,22 @@ A plain reload without `make install` first just re-runs the *old* copy. Changes
 `settings.json` wiring need `make setup`. After a deploy, check the **running** code with `hs -c`,
 for example `hs -c 'return type(_G.__ccDashboard.core.someNewFn)'`.
 
+## Adding a shipped script
+
+Every file the installers copy is one line in [SHIPPED](../SHIPPED): its name, where it goes
+(`claude` for `~/.claude`, `hs` for `~/.hammerspoon`), and `hook` if Claude Code runs it as a hook.
+`install.sh`, `uninstall.sh`, `make install` and the hygiene test all read that list, so a new
+script is one line there and nothing else to keep in step. A new **hook** also needs:
+
+- its wiring in [settings-hooks.json](../settings-hooks.json): an entry in an existing group, or a
+  group of its own with a `matcher` if it should run for one tool or one kind of event only;
+- its name in `core.OUR_HOOK_SCRIPTS` in cc-core.lua (the panel's hook inventory and Diagnostics).
+
+The suite checks that SHIPPED's hooks, `core.OUR_HOOK_SCRIPTS` and the scripts
+`settings-hooks.json` runs are the same set, and that both installers copy exactly SHIPPED's files.
+`make setup` then wires the new hook into an existing install, without touching the user's own
+hooks.
+
 ## Test it without Claude
 
 Each command writes one fake event; the panel should update within a second. The status scripts

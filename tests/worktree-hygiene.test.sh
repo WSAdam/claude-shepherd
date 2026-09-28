@@ -59,11 +59,12 @@ done
 # 2026-09-17 live: a coworker's clone had no defaults/cc-config.json -- the `cc-config.json` ignore
 # rule (for personal configs) silently kept it out of the commit, so his install lacked Adam's
 # settings and its test gate failed. Every file the installers read must be in a clone.
+# 2026-09-28: the shipped scripts come from SHIPPED, the one list the installers read, so a new
+# one is held to this check without a second edit here.
 for p in install.sh bootstrap.sh uninstall.sh "Install Shepherd.command" "Uninstall Shepherd.command" \
          settings-hooks.json defaults/cc-config.json defaults/claude-settings.json methodology/CLAUDE.md \
-         cc-lib.sh cc-status.sh cc-approve.sh cc-popup.sh cc-merge.sh cc-fleet.sh cc-ask.sh cc-commits.sh \
-         cc-worktree-guard.sh cc-core.lua \
-         claude-dashboard.lua app/build-app.sh vscode-bridge/package.json vscode-bridge/extension.js \
+         SHIPPED $(awk '$1 ~ /^[A-Za-z0-9]/ { print $1 }' "$ROOT/SHIPPED" 2>/dev/null) \
+         app/build-app.sh vscode-bridge/package.json vscode-bridge/extension.js \
          vscode-bridge/lib.js vscode-bridge/build-vsix.sh vscode-bridge/install-vsix.sh Makefile tests/run.sh \
          .github/workflows/ci.yml; do
   if [ "$HAVE_INDEX" = no ]; then skip_index "$p is tracked, so a clone can install"; continue; fi

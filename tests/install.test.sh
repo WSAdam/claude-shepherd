@@ -592,7 +592,8 @@ assert_json "...and the file it points to gains the hooks" "$F/dotfiles/settings
 # 2026-09-15: install_file's cp failure was never checked (no set -e), so a checkout missing
 # cc-ask.sh printed "copied" and "install complete", exit 0, with the hook wired to a missing file.
 PR="$F/partial-repo"; mkdir -p "$PR"
-cp "$ROOT"/install.sh "$ROOT"/settings-hooks.json "$ROOT"/cc-*.sh "$ROOT"/cc-core.lua "$ROOT"/claude-dashboard.lua "$PR/"
+# 2026-09-28: the checkout copy carries SHIPPED too, so the install stops on cc-ask.sh itself.
+cp "$ROOT"/install.sh "$ROOT"/settings-hooks.json "$ROOT"/SHIPPED "$ROOT"/cc-*.sh "$ROOT"/cc-core.lua "$ROOT"/claude-dashboard.lua "$PR/"
 rm "$PR/cc-ask.sh"
 CC_INSTALL_CLAUDE_DIR="$F/partial-claude" CC_INSTALL_HS_DIR="$F/partial-hs" CC_INSTALL_NO_APP=1 \
   bash "$PR/install.sh" </dev/null >"$F/partial.out" 2>&1
@@ -600,6 +601,14 @@ rc=$?
 assert_eq "a checkout missing a hook script fails the install (nonzero exit)" "fail" \
   "$([ "$rc" -ne 0 ] && echo fail || echo ok)"
 assert_eq "...and never prints install complete" "0" "$(grep -c 'install complete' "$F/partial.out")"
+assert_eq "...and names the missing script" "1" "$(grep -c 'cc-ask.sh is missing' "$F/partial.out")"
+# ...and a checkout without the list itself stops the same way, before anything is copied.
+rm "$PR/SHIPPED"; cp "$ROOT/cc-ask.sh" "$PR/"
+CC_INSTALL_CLAUDE_DIR="$F/noship-claude" CC_INSTALL_HS_DIR="$F/noship-hs" CC_INSTALL_NO_APP=1 \
+  bash "$PR/install.sh" </dev/null >"$F/noship.out" 2>&1
+rc=$?
+assert_eq "a checkout without SHIPPED fails the install, saying so, having copied nothing" "stopped" \
+  "$([ "$rc" -ne 0 ] && grep -q 'SHIPPED is missing' "$F/noship.out" && [ ! -e "$F/noship-claude/cc-lib.sh" ] && echo stopped || echo ran)"
 
 # 2026-09-15: the no-op check compared jq's re-serialisation with the raw file, so a fully wired
 # settings.json in any other layout (4-space indent) was rewritten and backed up on every run.
@@ -868,5 +877,68 @@ assert_eq "...and warning that make install is not enough" "yes" \
 readme_up="$(grep '^\*\*Upgrade\*\*' "$ROOT/README.md")"
 assert_eq "the README's Upgrade line says make setup, not make install" "yes" \
   "$(printf '%s' "$readme_up" | grep -q 'make setup' && printf '%s' "$readme_up" | grep -q 'not `make install`' && echo yes || echo no)"
+
+# ---- a release that adds a hook reaches an existing install (2026-09-28) ----
+# install.sh's per-entry upgrade knew only cc-(status|approve|popup).sh, and only PreToolUse's
+# per-tool groups were migrated, so a new script on an event Shepherd already owns -- or a new
+# matcher group on any other event -- never reached a machine installed before it. newhook_repo
+# (tests/lib.sh) is that next release: one more shipped hook, in the Stop group Shepherd owns and
+# in a StopFailure group of its own.
+NH="$(newhook_repo "$TMP/newhook-repo")"
+NC="$TMP/newhook-claude"; NHS="$TMP/newhook-hs"; mkdir -p "$NC"
+cat > "$NC/settings.json" <<'JSON'
+{ "model": "opus", "hooks": {
+    "Stop": [ { "hooks": [ { "type": "command", "command": "echo mine" } ] } ],
+    "PreCompact": [ { "hooks": [ { "type": "command", "command": "echo compacting" } ] } ] } }
+JSON
+# today's release first: the machine as it stands before the new hook ships
+CC_INSTALL_CLAUDE_DIR="$NC" CC_INSTALL_HS_DIR="$NHS" CC_INSTALL_NO_APP=1 \
+  bash "$ROOT/install.sh" >/dev/null 2>&1
+stop_groups="$(jq '.hooks.Stop | length' "$NC/settings.json")"
+CC_INSTALL_CLAUDE_DIR="$NC" CC_INSTALL_HS_DIR="$NHS" CC_INSTALL_NO_APP=1 \
+  bash "$NH/install.sh" >/dev/null 2>&1
+assert_json "make setup on an existing install adds a new hook script on an event Shepherd already uses (Stop)" \
+  "$NC/settings.json" '[.hooks.Stop[].hooks[].command | select(contains("cc-newhook.sh"))] | length' "1"
+assert_json "...into the Stop group Shepherd already owns" "$NC/settings.json" \
+  '[.hooks.Stop[] | select(any(.hooks[]; .command | contains("cc-status.sh"))) | .hooks[].command | select(contains("cc-newhook.sh"))] | length' "1"
+assert_json "...so Stop gains no group" "$NC/settings.json" '.hooks.Stop | length' "$stop_groups"
+assert_json "...and the user's own Stop group is untouched" "$NC/settings.json" \
+  '.hooks.Stop[0].hooks | map(.command) | join(",")' "echo mine"
+assert_json "make setup on an existing install adds a new matcher group on StopFailure" "$NC/settings.json" \
+  '[.hooks.StopFailure[] | select(.matcher == "rate_limit") | .hooks[].command | select(contains("cc-newhook.sh"))] | length' "1"
+assert_json "...never inside the every-error StopFailure group" "$NC/settings.json" \
+  '[.hooks.StopFailure[] | select((.matcher // "") == "") | .hooks[].command | select(contains("cc-newhook.sh"))] | length' "0"
+assert_json "...which keeps its cc-status.sh hook" "$NC/settings.json" \
+  '[.hooks.StopFailure[] | select((.matcher // "") == "") | .hooks[].command | select(contains("cc-status.sh"))] | length' "1"
+assert_json "the user's own hook on an event Shepherd doesn't use survives the upgrade" "$NC/settings.json" \
+  '.hooks.PreCompact[0].hooks[0].command' "echo compacting"
+[ -x "$NC/cc-newhook.sh" ] && cmp -s "$NH/cc-newhook.sh" "$NC/cc-newhook.sh" && got=yes || got=no
+assert_eq "install.sh copies a script added to SHIPPED, executable" "yes" "$got"
+upgraded="$(cat "$NC/settings.json")"; baks="$(ls "$NC" | grep -c '\.bak\.')"
+CC_INSTALL_CLAUDE_DIR="$NC" CC_INSTALL_HS_DIR="$NHS" CC_INSTALL_NO_APP=1 \
+  bash "$NH/install.sh" >/dev/null 2>&1
+assert_eq "a re-run after the upgrade leaves settings.json byte-identical" "$upgraded" "$(cat "$NC/settings.json")"
+assert_eq "...and makes no backup" "$baks" "$(ls "$NC" | grep -c '\.bak\.')"
+NMC="$TMP/newhook-make-claude"; NMH="$TMP/newhook-make-hs"; mkdir -p "$NMC" "$NMH"
+make -C "$NH" --no-print-directory install CLAUDE_DIR="$NMC" HS_DIR="$NMH" NO_TAB_BRIDGE=1 >/dev/null 2>&1
+[ -x "$NMC/cc-newhook.sh" ] && got=yes || got=no
+assert_eq "make install ships a script added to SHIPPED, executable" "yes" "$got"
+
+# ---- one list of shipped files (2026-09-28) ----
+# The same file list was written out five times (the Makefile, both CLAUDE_FILES, the hygiene
+# test, core.OUR_HOOK_SCRIPTS), so a new script could be copied by one installer and not the other,
+# or copied and never removed. SHIPPED is the one list; these hold everything else to it.
+shipped() { awk -v t="$1" '$1 ~ /^[A-Za-z0-9]/ { for (i = 2; i <= NF; i++) if ($i == t) { print $1; next } }' "$ROOT/SHIPPED" 2>/dev/null | LC_ALL=C sort; }
+listing() { (cd "$1" && ls -1 | grep -v -e '^settings\.json' -e '^cc-config\.json' -e '^CLAUDE\.md$' -e '^init\.lua$' | LC_ALL=C sort); }
+assert_eq "SHIPPED names the files that go to ~/.claude" "yes" "$([ -n "$(shipped claude)" ] && echo yes || echo no)"
+missing_src=""
+for f in $(shipped claude) $(shipped hs); do [ -r "$ROOT/$f" ] || missing_src="$missing_src $f"; done
+assert_eq "every file SHIPPED names is in the checkout" "" "$missing_src"
+assert_eq "install.sh copies exactly SHIPPED's ~/.claude files" "$(shipped claude)" "$(listing "$DF/claude")"
+assert_eq "install.sh copies exactly SHIPPED's ~/.hammerspoon files" "$(shipped hs)" "$(listing "$DF/hs")"
+assert_eq "make install copies exactly SHIPPED's ~/.claude files" "$(shipped claude)" "$(listing "$MI/claude")"
+assert_eq "make install copies exactly SHIPPED's ~/.hammerspoon files" "$(shipped hs)" "$(listing "$MI/hs")"
+wired="$(jq -r '[.hooks[][].hooks[].command | capture("(?<n>cc-[a-z-]+\\.sh)").n] | unique | .[]' "$ROOT/settings-hooks.json")"
+assert_eq "the scripts settings-hooks.json wires are exactly SHIPPED's hooks" "$(shipped hook)" "$wired"
 
 finish
