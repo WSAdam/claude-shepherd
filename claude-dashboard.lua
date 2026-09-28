@@ -564,9 +564,11 @@ end
 -- A job's completion notice is written into the transcript, so the count is read again only when
 -- the transcript changes: one stat a tick per finished tile, and a job that outlives display
 -- staleness keeps its count. A session that isn't done or idle is working anyway: 0.
+-- Servers never count, and a job stops counting maxAge seconds after it started (Adam's call), so
+-- the cached job list is aged against the clock on every call.
 FX.JOBS_TAIL_BYTES = 262144
-FX._bgJobs = {}   -- key -> { mt, n }
-function FX.backgroundJobsFor(it)
+FX._bgJobs = {}   -- key -> { mt, list }
+function FX.backgroundJobsFor(it, now, maxAge)
   local key, path = it and it.key, it and it.transcript_path
   if not key then return 0 end
   if type(path) ~= "string" or it.remote or (it.status ~= "done" and it.status ~= "idle") then
@@ -575,10 +577,11 @@ function FX.backgroundJobsFor(it)
   end
   local mt = hs.fs.attributes(path, "modification")
   local c = FX._bgJobs[key]
-  if c and c.mt == mt then return c.n end
-  local n = core.backgroundJobs(FX.readTail(path, FX.JOBS_TAIL_BYTES) or "")
-  FX._bgJobs[key] = { mt = mt, n = n }
-  return n
+  if not (c and c.mt == mt) then
+    c = { mt = mt, list = core.backgroundJobList(FX.readTail(path, FX.JOBS_TAIL_BYTES) or "") }
+    FX._bgJobs[key] = c
+  end
+  return core.liveBackgroundJobs(c.list, now, maxAge)
 end
 
 -- DR3 (Rewind tab): stream a transcript, returning ONLY its file-history-snapshot
@@ -18157,7 +18160,7 @@ function FX._refreshBody()
       it.bg_active = bg.active
       it.bg_count = bg.count
       -- 2026-09-28: a background shell job is background work too (it ran "Ready for you" before)
-      it.bg_jobs = FX.backgroundJobsFor(it)
+      it.bg_jobs = FX.backgroundJobsFor(it, now, 60 * (tonumber(core.config(cfg, "subagents.jobMaxMinutes", 30)) or 30))
       it.bg_active = it.bg_active or it.bg_jobs > 0
     end
 

@@ -29,8 +29,9 @@ Instances rows and the Stream Deck show an errored session as **Error** in magen
   [Merging and batches → The card](merging-and-batches.md#the-card)).
 - A working session waiting inside one tool for over a minute says which tool and for how long
   (*Working - Bash 9m*), so a long build reads as work.
-- A done or idle session with live subagents or a Workflow reads **Running N agents**, and a batch
-  driver whose units are working reads **Driving N units**. The underlying status is unchanged;
+- A done or idle session with live subagents or a Workflow reads **Running N agents**, one with a
+  background shell job still going reads **Running 1 job** (both: *Running 2 agents · 1 job*), and
+  a batch driver whose units are working reads **Driving N units**. The underlying status is unchanged;
   this is display only.
 - A **Ready for you** card says how its last turn went, read from the transcript since the newest
   prompt: **done** (a `TODO.md` line ticked to `[x]`, or a commit), **made progress** (edits,
@@ -149,6 +150,13 @@ hooks.
 While background work is running, the tile shows a green **⚙ N** pill, and a done or idle session
 reads **Running N agents** instead of "Ready for you", so a session busy behind the scenes isn't
 mistaken for one waiting on you (`subagents.activeWindow`, default 45s).
+
+Background **shell jobs** count too: a Bash command the session started with `run_in_background`
+keeps the card at **Running 1 job** until its completion notice lands in the transcript or the
+session stops it. A server or watcher (`deno task dev`, `npm start`, `http.server`, `--watch`,
+`tail -f`, a `serve.ts`) never finishes, so it doesn't count, and any other job stops counting
+30 minutes after it started (`subagents.jobMaxMinutes`). While a job counts, the card also isn't
+offered to Close selected, closed after its merge, or ended as a tab-less leftover.
 
 ### User Stories tab
 

@@ -2916,11 +2916,17 @@ do
   -- again only when the transcript changes -- its completion notice changes it -- so a job that
   -- outlives display staleness keeps the card Running.
   check("a background shell job keeps the session running",
-        src:find("it.bg_jobs = FX.backgroundJobsFor(it)", 1, true) ~= nil
+        src:find("it.bg_jobs = FX.backgroundJobsFor(it, now, ", 1, true) ~= nil
         and src:find("it.bg_active = it.bg_active or it.bg_jobs > 0", 1, true) ~= nil)
+  -- 2026-09-28 requirement change (Adam's call): servers are left out and a job stops counting
+  -- subagents.jobMaxMinutes after it started, so the cache holds the job LIST (re-read only when
+  -- the transcript changes) and ages it against the clock every tick.
   check("...counted from the transcript, re-read only when it changes",
-        src:find("function FX.backgroundJobsFor(it)", 1, true) ~= nil
-        and src:find("core.backgroundJobs(FX.readTail(path, FX.JOBS_TAIL_BYTES)", 1, true) ~= nil)
+        src:find("function FX.backgroundJobsFor(it, now, maxAge)", 1, true) ~= nil
+        and src:find("core.backgroundJobList(FX.readTail(path, FX.JOBS_TAIL_BYTES)", 1, true) ~= nil)
+  check("...and aged every tick, capped at subagents.jobMaxMinutes (30)",
+        src:find("return core.liveBackgroundJobs(c.list, now, maxAge)", 1, true) ~= nil
+        and src:find('it.bg_jobs = FX.backgroundJobsFor(it, now, 60 * (tonumber(core.config(cfg, "subagents.jobMaxMinutes", 30)) or 30))', 1, true) ~= nil)
   check("the running pill counts jobs as well as agents", src:find("var n = (it.bg_count || 0) + (it.bg_jobs || 0);", 1, true) ~= nil)
 
   -- #6: a heal-carried 'working' is the heal's own ALIVE verdict on a raw-'done'

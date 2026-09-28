@@ -7615,6 +7615,59 @@ do
   eq("an empty tail has none", core.backgroundJobs(""), 0)
 end
 
+-- ---- A background dev server doesn't hold a card at Running (2026-09-28) ----------------------
+-- 2026-09-28: reviewing the job count against live transcripts, ChargebackSentinel's session had
+-- started `deno task dev` with run_in_background at 13:26 and ended its turn; the server was still
+-- listening an hour later. A server never finishes, so that card would have read "Running 1 job"
+-- for good -- and bg_active also holds the post-merge tab close, Close selected and tab-less
+-- auto-end. Adam's call: a server/watcher command is no job, and any other job stops counting
+-- 30 minutes after it started.
+do
+  local J = core.json.encode
+  local n = 0
+  local function start(jobId, command, ts)
+    n = n + 1
+    local id = "toolu_srv" .. n
+    return J({ type = "assistant", timestamp = ts, message = { role = "assistant", content = {
+             { type = "tool_use", id = id, name = "Bash",
+               input = { command = command, description = "In the background", run_in_background = true } } } } })
+      .. "\n" .. J({ type = "user", timestamp = ts, message = { role = "user", content = {
+             { type = "tool_result", tool_use_id = id,
+               content = "Command running in background with ID: " .. jobId .. ". Output is being written to: /private/tmp/claude-503/p/s/tasks/" .. jobId .. ".output" } } } })
+  end
+  local function tail(...) return table.concat({ ... }, "\n") .. "\n" end
+  local T0 = "2026-09-28T17:26:00.000Z"
+  local at = core.isoToEpoch(T0)
+
+  check("a dev server is a server", core.isServerCommand("deno task dev > /private/tmp/s/dev-5173.log 2>&1"))
+  check("...and so is a named dev script", core.isServerCommand("npm run dev:ui"))
+  check("...a static file server", core.isServerCommand("python3 -m http.server 8000"))
+  check("...a watcher", core.isServerCommand("deno test -A --watch"))
+  check("...and a followed log", core.isServerCommand("tail -f server.log"))
+  check("...and npm start", core.isServerCommand("cd ui && npm start"))
+  check("a suite piped to /dev/null is no server", not core.isServerCommand("make test > /dev/null 2>&1"))
+  check("a build is no server", not core.isServerCommand("npm run build"))
+  check("a plain test run is no server", not core.isServerCommand("deno test -A"))
+
+  eq("a dev server started in the background is not a job the card waits on",
+     core.backgroundJobs(tail(start("srv1", "deno task dev > /tmp/dev.log 2>&1", T0))), 0)
+  eq("a suite beside a dev server is still counted",
+     core.backgroundJobs(tail(start("srv1", "deno task dev", T0), start("t1", "make test", T0))), 1)
+  eq("a job 29 minutes old still counts",
+     core.backgroundJobs(tail(start("t1", "make test", T0)), at + 29 * 60, 1800), 1)
+  eq("a job 31 minutes old no longer holds the card",
+     core.backgroundJobs(tail(start("t1", "make test", T0)), at + 31 * 60, 1800), 0)
+  eq("a job with no start time can't be aged, so under a cap it isn't counted",
+     core.backgroundJobs(tail(start("t1", "make test", nil)), at, 1800), 0)
+  local list = core.backgroundJobList(tail(start("t1", "make test", T0), start("srv1", "npm run dev", T0)))
+  eq("the job list carries each running job's start time", #list == 1 and list[1].id == "t1" and list[1].at, at)
+  eq("counting a cached list ages it against the clock", core.liveBackgroundJobs(list, at + 31 * 60, 1800), 0)
+  -- a job holds Close selected too, so its refusal can't blame agents alone
+  eq("Close selected refuses a session with background work by naming the work, not agents",
+     select(3, core.cleanupVerdict({ key = "k", editor = "vscode", host_window = "1", status = "done", since = 0,
+       bg_active = true }, 100, 12)), "its background work is still running")
+end
+
 -- ---- stale-"done" self-heal: transcript-resumed override ------------------
 do
   local function aline(ts)

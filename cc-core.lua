@@ -957,7 +957,7 @@ function M.cleanupVerdict(it, now, idleHours)
   if it.status ~= "done" and it.status ~= "idle" then
     return false, false, "it isn't finished (" .. tostring(it.status or "?") .. ")"
   end
-  if it.bg_active then return false, false, "its background agents are still running" end
+  if it.bg_active then return false, false, "its background work is still running" end
   if M.isDriving(it) then return false, false, "it's driving a batch" end
   local mg = type(it.merge) == "table" and it.merge or nil
   local phase = mg and mg.phase
@@ -12568,8 +12568,34 @@ end
 -- merely quotes the words starts nothing. A <task-notification> naming the id ends it (a prompt
 -- when the session was idle, a queued_command attachment mid-turn), and so does TaskStop. Lines
 -- are walked with a plain find (the torn last line is dropped); only candidate lines are decoded.
-function M.backgroundJobs(text)
-  if type(text) ~= "string" or text == "" then return 0 end
+-- 2026-09-28 (Adam's call): a server or watcher (M.isServerCommand) never finishes, so it is no job
+-- the card waits on; M.backgroundJobList leaves it out, and M.liveBackgroundJobs ages the rest.
+
+-- A command that runs until it's stopped: a dev server, a static server, a watcher, a followed log.
+-- Words are matched whole, per shell token, so `make test > /dev/null` is no server.
+M.SERVER_WORDS = { dev = true, serve = true, server = true, start = true, watch = true,
+  preview = true, ["http.server"] = true, ["--watch"] = true }
+M.SERVER_SCRIPT_EXTS = { ts = true, js = true, mjs = true, cjs = true, py = true, sh = true, rb = true }
+function M.isServerCommand(cmd)
+  if type(cmd) ~= "string" then return false end
+  local tailing = false
+  for raw in cmd:gmatch("[^%s;|&()]+") do
+    local token = raw:gsub("^[\"']+", ""):gsub("[\"']+$", ""):lower()
+    local base = token:match("^[^:=]+") or token          -- dev:ui -> dev, --watch=x -> --watch
+    if M.SERVER_WORDS[base] then return true end
+    local name, ext = (token:match("[^/]+$") or ""):match("^(.-)%.(%w+)$")   -- src/serve.ts -> serve
+    if name and M.SERVER_SCRIPT_EXTS[ext] and M.SERVER_WORDS[name] then return true end
+    if tailing and token:match("^%-%a*[fF]") then return true end
+    if token == "tail" then tailing = true end
+  end
+  return false
+end
+
+-- The background jobs a transcript tail still has running, servers left out: { id, at, command }
+-- per job in start order, `at` the epoch seconds its start was written (nil if unstamped).
+function M.backgroundJobList(text)
+  local out = {}
+  if type(text) ~= "string" or text == "" then return out end
   local calls, started, ended, order = {}, {}, {}, {}
   local pos = 1
   while true do
@@ -12586,7 +12612,9 @@ function M.backgroundJobs(text)
         if obj.type == "assistant" and type(c) == "table" then
           for _, p in ipairs(c) do
             if type(p) == "table" and p.type == "tool_use" and type(p.input) == "table" then
-              if p.name == "Bash" and p.input.run_in_background == true and p.id then calls[p.id] = true end
+              if p.name == "Bash" and p.input.run_in_background == true and p.id then
+                calls[p.id] = { command = type(p.input.command) == "string" and p.input.command or "" }
+              end
               if p.name == "TaskStop" then
                 local id = p.input.task_id or p.input.shell_id
                 if type(id) == "string" then ended[id] = true end
@@ -12603,7 +12631,10 @@ function M.backgroundJobs(text)
                 body = table.concat(t, " ")
               end
               local id = tostring(body or ""):match("Command running in background with ID: ([%w_%-]+)")
-              if id and not started[id] then started[id] = true; order[#order + 1] = id end
+              if id and not started[id] then
+                started[id] = { id = id, at = M.isoToEpoch(obj.timestamp), command = calls[p.tool_use_id].command }
+                order[#order + 1] = id
+              end
             end
           end
         end
@@ -12622,9 +12653,25 @@ function M.backgroundJobs(text)
       end
     end
   end
+  for _, id in ipairs(order) do
+    if not ended[id] and not M.isServerCommand(started[id].command) then out[#out + 1] = started[id] end
+  end
+  return out
+end
+
+-- How many of a job list still count at `now`: under a cap (maxAge seconds) a job counts for that
+-- long after its start, and an unstamped one, which can't be aged, not at all. No cap: every job.
+function M.liveBackgroundJobs(list, now, maxAge)
+  now, maxAge = tonumber(now), tonumber(maxAge)
   local n = 0
-  for _, id in ipairs(order) do if not ended[id] then n = n + 1 end end
+  for _, job in ipairs(type(list) == "table" and list or {}) do
+    if not (now and maxAge and maxAge > 0) or (job.at and now - job.at < maxAge) then n = n + 1 end
+  end
   return n
+end
+
+function M.backgroundJobs(text, now, maxAge)
+  return M.liveBackgroundJobs(M.backgroundJobList(text), now, maxAge)
 end
 
 -- DR2: cheap background-activity check for the hot tile loop. Any subagent file

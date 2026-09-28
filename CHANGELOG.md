@@ -16,6 +16,7 @@ One line per unit as it merges; the section gets its date and full write-up when
 - Parallel units' CHANGELOG lines and fixture vocabulary merge without conflicts (`.gitattributes` union), and a stray `deno.lock` is ignored.
 - A turn that ends on an API error or a usage limit reads as an error instead of Working (the transcript's `isApiErrorMessage` record, and a new StopFailure hook); a usage limit reads `[budget exceeded]` with its reset time, and auto-continue skips it.
 - A finished card says how its last turn ended (done / made progress / only planned / did nothing / blocked / needs follow-up), Shepherd's own sends are marked `[shepherd]`, and task notifications or compaction summaries are no longer read as Adam's prompt.
+- A session whose turn ended while a background shell job still runs reads **Running 1 job** instead of "Ready for you", until the job finishes or is stopped; dev servers and watchers don't count, and a job stops counting after 30 minutes.
 
 ## 2026-09-25 — Merged unit tabs close again, and Instances can clear the rest
 
