@@ -6985,23 +6985,103 @@ function M.shouldAutoContinue(args)
   return (tonumber(args.attempts) or 0) < cap                        -- under the per-folder budget
 end
 
+-- ---- Back-off when turns change nothing (2026-09-28) ------------------------------------------
+-- Every done used to reset the attempt budget, a turn that did nothing included, and a continue
+-- rule typed "continue" on every done edge: a stuck session was nudged every minute, forever. Now
+-- each finished turn's label (FX.stepTurnLabel -> it.turnLabel) feeds a streak per budget key: did
+-- nothing / only planned bump it and keep the budget; made progress / done reset both; Adam's own
+-- prompt (it.turnOrigin == "human", from M.promptOrigin) restarts it. From the second no-progress
+-- turn in a row the next continue -- auto-continue's or a rule's -- waits M.backoffSeconds.
+M.AUTO_CONTINUE_BACKOFF = { startSeconds = 120, maxSeconds = 1800 }
+M.NO_PROGRESS_TURNS = { ["did nothing"] = true, ["only planned"] = true }
+M.PROGRESS_TURNS = { ["made progress"] = true, done = true }
+
+-- How long the next continue waits after `streak` no-progress turns in a row: nothing for 0 or 1,
+-- then startSeconds, doubling, capped at maxSeconds. startSeconds 0 turns it off. Pure.
+function M.backoffSeconds(streak, startSeconds, maxSeconds)
+  local n = tonumber(streak) or 0
+  local start = tonumber(startSeconds) or M.AUTO_CONTINUE_BACKOFF.startSeconds
+  local cap = tonumber(maxSeconds) or M.AUTO_CONTINUE_BACKOFF.maxSeconds
+  if not (n >= 2) or not (start > 0) then return 0 end
+  if not (cap >= start) then cap = start end
+  local wait = start
+  for _ = 3, n do
+    if wait >= cap then break end
+    wait = wait * 2
+  end
+  return math.min(wait, cap)
+end
+
+-- A rule's continue (the L6 `continue` processor) is held here instead of typed on its edge, so
+-- the same back-off covers it: stepAutoContinue hands it back as `result.rule` once the wait is
+-- over. One per tile -- a second continue rule on the same edge doesn't stack another. Pure but
+-- for `state`.
+function M.queueRuleContinue(state, item, ruleName, edgeKind, now)
+  if type(state) ~= "table" or type(item) ~= "table" or item.key == nil then return end
+  state.rule = state.rule or {}
+  if state.rule[item.key] then return end
+  state.rule[item.key] = { name = ruleName, edge = edgeKind, status = item.status, at = tonumber(now) or 0 }
+end
+
 -- Advance auto-continue bookkeeping for one tile per tick; return whether to fire "continue"
--- now. Mutates `state` = { since = {key->ts}, attempts = {projectKey->count} } in place:
+-- now. Mutates `state` = { since = {key->ts}, attempts = {projectKey->count},
+-- streak = {budgetKey->no-progress turns}, turnSeen = {key->true}, rule = {key->held rule continue} }:
 --   * stamp `since[key]` on the first error sighting (the grace clock starts here);
 --   * a fire restarts that clock (since=now) so retries are spaced ~minSeconds apart rather
 --     than firing maxAttempts times on consecutive ticks while the tile is still "error";
 --   * leaving error clears the tile's clock, and reaching a CLEAN completion (done/idle) --
 --     never the `working` the continue itself produces -- resets the folder budget, so a
---     still-dead connection that re-errors keeps counting toward the cap instead of looping.
---   item : { key, projectKey, cwd, status }
---   opts : { enabled, minSeconds, maxAttempts, now }
--- returns: { fire, elapsed, attempts }
+--     still-dead connection that re-errors keeps counting toward the cap instead of looping;
+--   * 2026-09-28: a done is judged by its turn label, once per turn (turnSeen): did nothing /
+--     only planned keep the budget and bump the streak, and from a streak of 2 the grace is
+--     M.backoffSeconds instead of minSeconds. A done whose label is still coming
+--     (it.turnLabelPending) waits for it; one with no label at all resets the budget as before.
+--   item : { key, projectKey, cwd, status, error_reason, turnLabel, turnOrigin, turnLabelPending }
+--   opts : { enabled, minSeconds, maxAttempts, now, statusKnown, backoffStart, backoffMax, rulesOn }
+-- returns: { fire, elapsed, attempts, budgetKey, streak,
+--            backoff = seconds a continue still waits on the back-off (nil when it isn't),
+--            rule = { name, edge } when a held rule continue is due now }
 function M.stepAutoContinue(state, item, opts)
   state = state or {}; state.since = state.since or {}; state.attempts = state.attempts or {}
+  state.streak = state.streak or {}; state.turnSeen = state.turnSeen or {}; state.rule = state.rule or {}
   opts = opts or {}; item = item or {}
   local key = item.key
   local pk = M.budgetKey(item) or key  -- R2-21: per-window budget (see budgetKey)
   if not key then return { fire = false } end
+  -- R3-23: a FAILED-read tick (statusKnown==false) can't say what the session is doing, so it
+  -- judges no turn and drops no held rule continue (see the grace-clock note below).
+  if opts.statusKnown ~= false then
+    if item.status == "done" then
+      if not state.turnSeen[key] and item.turnLabel ~= nil then
+        state.turnSeen[key] = true
+        if item.turnOrigin == "human" then state.streak[pk] = nil end
+        if M.NO_PROGRESS_TURNS[item.turnLabel] then
+          state.streak[pk] = (state.streak[pk] or 0) + 1
+        else
+          state.attempts[pk] = nil
+          if M.PROGRESS_TURNS[item.turnLabel] then state.streak[pk] = nil end
+        end
+      elseif item.turnLabel == nil and not item.turnLabelPending then
+        state.attempts[pk] = nil   -- nothing to judge the turn by (no transcript): as before
+      end
+    else
+      state.turnSeen[key] = nil
+    end
+    local held = state.rule[key]
+    if held and (opts.rulesOn == false or held.status ~= item.status) then state.rule[key] = nil end
+  end
+  local wait = M.backoffSeconds(state.streak[pk], opts.backoffStart, opts.backoffMax)
+  local out = { fire = false, budgetKey = pk, streak = state.streak[pk] }
+  local held = state.rule[key]
+  if held and not (item.status == "done" and item.turnLabelPending) then
+    local waited = (tonumber(opts.now) or 0) - (tonumber(held.at) or 0)
+    if waited >= wait then
+      state.rule[key] = nil
+      out.rule = { name = held.name, edge = held.edge }
+    else
+      out.backoff = wait - waited
+    end
+  end
   if item.status ~= "error" then
     -- R3-23: distinguish "left the error state" from "couldn't determine status this
     -- tick". The dashboard derives status=='error' from a fresh transcript-tail read;
@@ -7012,26 +7092,34 @@ function M.stepAutoContinue(state, item, opts)
     -- FAILED-read tick (statusKnown==false) preserves an already-running grace clock and
     -- does not fire (we can't confirm the session is still errored).
     if opts.statusKnown == false and state.since[key] ~= nil then
-      return { fire = false }
+      return out
     end
     state.since[key] = nil
-    if item.status == "done" or item.status == "idle" then state.attempts[pk] = nil end
-    return { fire = false }
+    if item.status == "idle" then state.attempts[pk] = nil end
+    out.attempts = state.attempts[pk]
+    return out
   end
   if state.since[key] == nil then state.since[key] = opts.now end
   local elapsed = (tonumber(opts.now) or 0) - (tonumber(state.since[key]) or 0)
   local n = state.attempts[pk] or 0
-  local fire = (opts.enabled == true) and M.shouldAutoContinue({
-    status = item.status, reason = item.error_reason, elapsed = elapsed,
-    minSeconds = opts.minSeconds, attempts = n, maxAttempts = opts.maxAttempts }) or false
+  local minSeconds = tonumber(opts.minSeconds) or 0
+  local gate = { status = item.status, reason = item.error_reason, elapsed = elapsed,
+                 minSeconds = math.max(minSeconds, wait), attempts = n, maxAttempts = opts.maxAttempts }
+  local fire = (opts.enabled == true) and M.shouldAutoContinue(gate) or false
   -- R2-22: restart the grace clock on a fired attempt (so a fired-but-undelivered
   -- tile re-spaces instead of re-firing every tick), but DO NOT charge the budget
   -- here -- the charge happens on CONFIRMED delivery via chargeAutoContinue. A
   -- session whose window can't be matched would otherwise burn maxAttempts without
   -- ever typing "continue" (handleAction returns nil / ledgers skipped on a miss).
   if fire then state.since[key] = opts.now end
-  return { fire = fire, elapsed = elapsed, attempts = pk and state.attempts[pk] or nil,
-           budgetKey = pk }
+  -- The card says "backing off" only while the back-off -- not the plain grace -- holds a
+  -- continue that will come (auto-continue on, budget left, no usage limit).
+  if not fire and opts.enabled == true and wait > minSeconds and elapsed < wait then
+    gate.elapsed = wait
+    if M.shouldAutoContinue(gate) then out.backoff = math.max(out.backoff or 0, wait - elapsed) end
+  end
+  out.fire, out.elapsed, out.attempts = fire, elapsed, pk and state.attempts[pk] or nil
+  return out
 end
 
 -- R2-22: charge one auto-continue attempt against the per-window budget. Called by
@@ -7415,6 +7503,9 @@ M.SETTINGS_KEEP_SUBKEYS = {
   insights = { "hostPressure" },
   -- 2026-09-18: Settings > Approvals manages ask.enabled only; the hand-edited wait survives.
   ask = { "waitSeconds", "_comment" },
+  -- 2026-09-28: the form rebuilds autoContinue from enabled/delaySeconds/maxAttempts; the
+  -- back-off (startSeconds/maxSeconds) has no input.
+  autoContinue = { "backoff" },
 }
 function M.overlayConfig(cfg, incoming)
   cfg = type(cfg) == "table" and cfg or {}

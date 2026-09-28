@@ -244,6 +244,9 @@ echo ""
 echo "== node: a finished card says how its turn ended (behavioral, runs the shipped turnTail) =="
 node "$DIR/turn-label.test.js" || fail=1
 echo ""
+echo "== node: a card waiting out auto-continue's back-off says so (behavioral, runs the shipped backoffTail) =="
+node "$DIR/backoff-hint.test.js" || fail=1
+echo ""
 echo "== node: ⌘V lands in the focused field, not the nudge box (behavioral, runs the shipped paste helpers) =="
 node "$DIR/paste-target.test.js" || fail=1
 echo ""

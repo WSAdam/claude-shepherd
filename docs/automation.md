@@ -133,11 +133,20 @@ per-session only (`~/.claude/cc-automodel/<key>`).
   for Kitty sessions). The budget
   resets only after sustained healthy running, so a crash-looping folder can't thrash. A session
   waiting on an **approval is never auto-respawned**; that's the escalation's job.
-- **Auto-Continue** (`autoContinue.enabled`, ⚙ Settings): when a tile shows the magenta **Error**
-  state, after `autoContinue.delaySeconds` (default 60) Shepherd types `continue`, capped by
-  `autoContinue.maxAttempts` **per launch folder** (per window for Kitty; default 3). The budget
-  resets on a clean turn, so
-  a dead connection can't loop. It resumes the *same* session instead of relaunching it.
+- **Auto-Continue** (`autoContinue.enabled`, ⚙ Settings, on in a fresh install): when a tile shows
+  the magenta **Error** state, after `autoContinue.delaySeconds` (default 60) Shepherd types
+  `continue`, capped by `autoContinue.maxAttempts` **per launch folder** (per window for Kitty;
+  default 3). The budget resets on a turn that changed something, so a dead connection can't loop.
+  It resumes the *same* session instead of relaunching it.
+- **Back-off** (`autoContinue.backoff.startSeconds`, default 120; `autoContinue.backoff.maxSeconds`,
+  default 1800): a turn whose [label](fleet.md#statuses) is **did nothing** or **only planned**
+  doesn't reset the budget, and counts toward a streak kept per launch folder (per window for
+  Kitty). From the second such turn in a row, the next continue waits 2 minutes instead of the
+  grace delay, then 4, 8, 16, and at most 30. The card reads **backing off · 4m** while it waits.
+  Your own prompt (a **Continue** click included) restarts the streak, and so does a turn that made
+  progress or finished something (a `TODO.md` line or a commit). The same wait holds a rule's
+  `continue` ([rules](#automation-rules)), which is dropped if the session starts a turn meanwhile.
+  `startSeconds: 0` turns the back-off off.
 
 Each automatic action records an `outcome` in the ledger, and a death that can't be respawned is
 logged instead of failing silently.
@@ -219,7 +228,8 @@ automations above. Create and edit them in **⚙️ Automation rules** (☰ menu
 - **processor.kind**: `log` (write an audit note), `relabel` (rename the tile to `label`), `nudge`
   (type `text` into the session through the same delivery-gated path as a manual nudge, once it
   [can take it](#when-automation-types)), `feed` (add `text` to the session's project queue, for
-  auto-feed or routing to deliver) or `continue` (resume an errored turn).
+  auto-feed or routing to deliver) or `continue` (resume an errored turn; held by
+  [auto-continue's back-off](#auto-respawn-and-auto-continue) after turns that change nothing).
 - **once**: fire at most once per rule per tile, until Hammerspoon reloads.
 
 ```json

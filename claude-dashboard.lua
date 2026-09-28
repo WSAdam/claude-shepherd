@@ -211,7 +211,7 @@ local spawnPrompt        -- forward declaration (defined after FX)
 -- Rebuilt-and-swapped each refresh so a vanished tile drops out; see refresh().
 local prev = {}
 local respawnAttempts = {}  -- projectKey (NOT tile key) -> auto-respawn count; resets when healthy
-local autoContinueState = { since = {}, attempts = {} }  -- key->first-error ts; projectKey->continue count
+local autoContinueState = { since = {}, attempts = {}, streak = {}, turnSeen = {}, rule = {} }  -- key->first-error ts; projectKey->continue count; see core.stepAutoContinue
 -- L5 self-summary guards (tile key -> true). BOTH `fired` and `pending` MUST be
 -- declared up front: the end-of-refresh reap does `for k in pairs(summaryState.pending)`,
 -- but stepSelfSummary (which lazily creates pending) never runs when self-summary is
@@ -1280,6 +1280,7 @@ function FX.stepTurnLabel(it, pv, ledgerOn)
     local label = core.turnOutcome(ev)
     if label then
       st.label = label
+      st.origin = ev.origin   -- whose prompt started it: auto-continue's back-off restarts on Adam's (2026-09-28)
       if st.edge and ledgerOn then
         ledgerFor(it, { type = "turn_outcome", label = label, origin = ev.origin, edits = ev.edits,
                         tests = ev.tests, errors = ev.errors, denials = ev.denials })
@@ -1292,6 +1293,9 @@ function FX.stepTurnLabel(it, pv, ledgerOn)
     end
   end
   it.turnLabel = st.label
+  it.turnOrigin = st.origin
+  -- core.stepAutoContinue waits for a label still coming before it judges the turn
+  it.turnLabelPending = (st.label == nil and st.tries < 5) or nil
 end
 
 -- Handoff notes (2026-09-28): a fresh or respawned session started blank. On each done edge the
@@ -11565,6 +11569,13 @@ local HTML = [[
       if(!it || it.status !== "done" || !TURN_LABELS.hasOwnProperty(it.turnLabel)) return "";
       return " · " + it.turnLabel;
     }
+    // 2026-09-28: a card whose next continue waits out auto-continue's back-off says so, in whole
+    // minutes rounded up (core.stepAutoContinue sets it.backoffSeconds); anything else says nothing.
+    function backoffTail(it){
+      var s = it && it.backoffSeconds;
+      if(typeof s !== "number" || !(s > 0)) return "";
+      return " · backing off · " + Math.ceil(s / 60) + "m";
+    }
     function statusWords(it){
       if(needsYouNow(it)) return LABELS.approval;
       // A transient API error the session is retrying (a connection blip, a timeout, an
@@ -14872,7 +14883,7 @@ local HTML = [[
         dwt.style.display = showWt ? "" : "none";
       }
       document.getElementById("d-status").textContent =
-        statusWords(it) + (it.since ? " - " + fmtAge(it.since) : "") + (it.stale && !bgRunning(it) ? " - stale" : "");
+        statusWords(it) + (it.since ? " - " + fmtAge(it.since) : "") + (it.stale && !bgRunning(it) ? " - stale" : "") + backoffTail(it);
       var pend = document.getElementById("d-pending");
       if(it.pending && it.pending.summary){
         pend.textContent = "Wants: " + it.pending.summary + (it.gate === "waiting" ? "  (hands-free approve)" : "");
@@ -17397,6 +17408,7 @@ local HTML = [[
       var est = effStatus(it);   // background-aware: done/idle + live agents -> "working"
       var stCls = /^[a-z]+$/.test(est) ? est : "idle";
       var label = esc(statusWords(it));
+      label += esc(backoffTail(it));   // 2026-09-28: "backing off · 4m" while auto-continue waits
       // The elapsed-in-status age (2s/13s/11h) rides the status line -- right of the dot,
       // before the status words -- instead of taking its own meta row.
       var age = it.since ? fmtAge(it.since) : "";
@@ -18221,16 +18233,9 @@ local function runRules(ruleSet, it, edgeKind)
         end
       elseif p.kind == "continue" then
         -- Resume an errored/stuck session by typing "continue" (delivery-gated,
-        -- same path as the manual Continue button + Auto-Continue).
-        local target = it
-        FX.typeWhenReady(target, "rule-continue", function()
-          local acted = core.handleAction(FX, target, "continue", core.shepherdSays("continue"))
-          ledgerFor(target, { type = "rule", rule = r.name, kind = edgeKind, by = "rule",
-                              processor = (acted == "continue") and "continue" or "continue_skipped" })
-        end, { onRefused = function(why)
-          ledgerFor(target, { type = "rule", rule = r.name, kind = edgeKind, by = "rule",
-                              processor = "continue_skipped", reason = why })
-        end })
+        -- same path as the manual Continue button + Auto-Continue). 2026-09-28: held, not typed
+        -- on the edge -- the tick's auto-continue step types it once the back-off allows.
+        core.queueRuleContinue(autoContinueState, it, r.name, edgeKind, FX.now())
       end
     end
   end
@@ -18845,10 +18850,28 @@ function FX._refreshBody()
     -- doesn't masquerade as "left the error state" and wipe the accumulated grace clock.
     -- When no tail was wanted, status is authoritative -> known.
     -- A session in a shared window (core.keystrokeBlocked) never fires: "continue" is typed.
+    -- 2026-09-28: turns that change nothing back it off (autoContinue.backoff.*), and a rule's
+    -- continue held by core.queueRuleContinue comes back here as cstep.rule once it's due.
     local cstep = core.stepAutoContinue(autoContinueState, it,
       { enabled = autoContinueOn and not it.remote and not core.keystrokeBlocked(it), now = now,
         minSeconds = autoContinueDelay, maxAttempts = autoContinueMax,
+        backoffStart = tonumber(core.config(cfg, "autoContinue.backoff.startSeconds", 120)),
+        backoffMax = tonumber(core.config(cfg, "autoContinue.backoff.maxSeconds", 1800)),
+        rulesOn = ruleSet ~= nil,
         statusKnown = (not wantTail) or (tail ~= nil) })
+    it.backoffSeconds = cstep.backoff   -- the card's "backing off · 4m"
+    if cstep.rule then
+      local target, rname, redge = it, cstep.rule.name, cstep.rule.edge
+      print("[cc-continue] 🚀 rule '" .. tostring(rname) .. "' continues " .. tostring(it.name))
+      FX.typeWhenReady(target, "rule-continue", function()
+        local acted = core.handleAction(FX, target, "continue", core.shepherdSays("continue"))
+        ledgerFor(target, { type = "rule", rule = rname, kind = redge, by = "rule",
+                            processor = (acted == "continue") and "continue" or "continue_skipped" })
+      end, { onRefused = function(why)
+        ledgerFor(target, { type = "rule", rule = rname, kind = redge, by = "rule",
+                            processor = "continue_skipped", reason = why })
+      end })
+    end
     if cstep.fire then
       print("[cc-continue] auto-continue " .. tostring(it.name)
         .. " (attempt " .. tostring((cstep.attempts or 0) + 1) .. "/" .. autoContinueMax .. ")")
@@ -18914,6 +18937,8 @@ function FX._refreshBody()
   -- tile leaves the error state); an errored tile that's pruned/closed before recovering
   -- leaks its entry forever -- reap it like the siblings above.
   core.reapUnbacked(autoContinueState.since, newPrev)
+  core.reapUnbacked(autoContinueState.rule, newPrev)       -- a held rule continue (2026-09-28)
+  core.reapUnbacked(autoContinueState.turnSeen, newPrev)   -- ...and the turn it last judged
   core.reapUnbacked(FX._turnLabel, newPrev)
   core.reapUnbacked(FX._bgJobs, newPrev)
   core.reapUnbacked(FX._typing.held, newPrev)     -- readiness before typing: a vanished session's hold
@@ -18934,7 +18959,7 @@ function FX._refreshBody()
   -- health or a clean done, so a folder/window abandoned while frozen leaks. Build a
   -- live-budgetKey set from `list` (NOT newPrev, which is tile-key keyed) using the
   -- SAME core.budgetKey the steppers use, and reap both against it.
-  if next(respawnAttempts) or next(autoContinueState.attempts) then
+  if next(respawnAttempts) or next(autoContinueState.attempts) or next(autoContinueState.streak) then
     -- Live keys = tiles + un-expired respawn holds, decided by pure core so the
     -- multi-tick relaunch-gap survival is unit-testable. The hold (set at the spawn
     -- site) is expired ONLY by its deadline -- NOT wiped just because a tile reports
@@ -18944,6 +18969,7 @@ function FX._refreshBody()
     local liveBudgetKeys = core.liveBudgetKeys(list, FX._respawnHold, now)
     core.reapUnbacked(respawnAttempts, liveBudgetKeys)
     core.reapUnbacked(autoContinueState.attempts, liveBudgetKeys)
+    core.reapUnbacked(autoContinueState.streak, liveBudgetKeys)   -- the back-off's streak (2026-09-28)
   end
   -- L5 PR status cache is keyed by repo ROOT (not tile key): reap roots no longer backing
   -- any live local tile, so it can't grow unbounded across many repos -- and drop + TERMINATE

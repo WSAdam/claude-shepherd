@@ -161,6 +161,22 @@ local it3 = { key = "k3", name = "proj", status = "working", cwd = PROJ, transcr
 FX.stepTurnLabel(it3, { status = "working" }, false)
 check("a working tile writes no note", not exists(NOTES .. "/k3.handoff.md"))
 
+-- ---- auto-continue's back-off reads whose prompt started the turn (2026-09-28) ----
+-- 2026-09-28: the streak of turns that changed nothing resets on Adam's prompt, so the label step
+-- keeps the turn's origin, and says while a label is still coming (the budget waits for it).
+eq("the done edge records whose prompt started the turn", it.turnOrigin, "human")
+eq("...and nothing is pending once the label is in", it.turnLabelPending, nil)
+local UNREPLIED = HOME .. "/sid-4.jsonl"
+writeFile(UNREPLIED, rec({ type = "user", origin = { kind = "human" }, message = { role = "user", content = { { type = "text", text = "go on" } } } }))
+local it4 = { key = "k4", name = "proj", status = "done", cwd = PROJ, editor = "vscode", transcript_path = UNREPLIED }
+FX._turnReads = 0
+FX.stepTurnLabel(it4, { status = "working" }, false)
+eq("a done tile whose reply isn't in the transcript yet has no label", it4.turnLabel, nil)
+eq("...and says its label is still coming", it4.turnLabelPending, true)
+for _ = 1, 5 do FX._turnReads = 0; FX.stepTurnLabel(it4, { status = "done" }, false) end
+eq("...until the reads run out", it4.turnLabelPending, nil)
+eq("a working tile has no origin", it3.turnOrigin, nil)
+
 -- ---- a respawn leaves the note for the session that replaces it ------------------------------
 writeFile(HOME .. "/status/dead1.json", json.encode({ session_id = "dead1", name = "proj", status = "working", cwd = PROJ,
   editor = "vscode", transcript_path = TRANSCRIPT, updated = os.time() - 900, since = os.time() - 900 }))

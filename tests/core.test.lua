@@ -12023,5 +12023,183 @@ do
      core.routeTask({ busy, mB }, seq, { globalOn = true, skip = { w = true } }), nil)
 end
 
+-- ---- auto-continue backs off when turns change nothing (2026-09-28) ----
+-- 2026-09-28: every done reset the attempt budget, "did nothing" turns included, and a continue rule
+-- typed "continue" on every done edge, so a stuck session was nudged every minute, forever.
+do
+  local function tile(status, label, extra)
+    local t = { key = "k", projectKey = "p", status = status, turnLabel = label }
+    for k, v in pairs(extra or {}) do t[k] = v end
+    return t
+  end
+  local function step(st, it, now, extra)
+    local o = { enabled = true, minSeconds = 60, maxAttempts = 3, backoffStart = 120, backoffMax = 1800, now = now }
+    for k, v in pairs(extra or {}) do o[k] = v end
+    return core.stepAutoContinue(st, it, o)
+  end
+
+  -- the wait: from the second no-progress turn in a row, 2 minutes doubling up to 30
+  eq("backoff: no streak, no wait", core.backoffSeconds(0, 120, 1800), 0)
+  eq("backoff: one turn that changed nothing waits nothing yet", core.backoffSeconds(1, 120, 1800), 0)
+  eq("backoff: the second in a row waits 2 minutes", core.backoffSeconds(2, 120, 1800), 120)
+  eq("backoff: the third doubles to 4", core.backoffSeconds(3, 120, 1800), 240)
+  eq("backoff: ...then 8", core.backoffSeconds(4, 120, 1800), 480)
+  eq("backoff: ...then 16", core.backoffSeconds(5, 120, 1800), 960)
+  eq("backoff: capped at 30 minutes", core.backoffSeconds(6, 120, 1800), 1800)
+  eq("backoff: ...however long the streak runs", core.backoffSeconds(500, 120, 1800), 1800)
+  eq("backoff: defaults to 2 minutes", core.backoffSeconds(2), 120)
+  eq("backoff: ...capped at 30 by default", core.backoffSeconds(9), 1800)
+  eq("backoff: startSeconds 0 turns it off", core.backoffSeconds(5, 0, 1800), 0)
+  eq("backoff: a junk streak waits nothing", core.backoffSeconds("x", 120, 1800), 0)
+
+  -- the streak: one per finished turn that did nothing or only planned, per budget key
+  local st = {}
+  step(st, tile("done", "did nothing"), 100)
+  eq("streak: a turn that did nothing counts one", (st.streak or {}).p, 1)
+  step(st, tile("done", "did nothing"), 101)
+  eq("streak: ...once, however many ticks the tile stays done", (st.streak or {}).p, 1)
+  step(st, tile("working"), 110)
+  step(st, tile("done", "only planned"), 150)
+  eq("streak: an only-planned turn right after makes two", (st.streak or {}).p, 2)
+  local sflick = { streak = { p = 1 } }
+  step(sflick, tile("done", "did nothing"), 100)
+  step(sflick, tile("working"), 101, { statusKnown = false })
+  step(sflick, tile("done", "did nothing"), 102)
+  eq("streak: a failed transcript read between ticks doesn't count the same turn twice", sflick.streak.p, 2)
+  local sk = {}
+  step(sk, { key = "a", projectKey = "pa", status = "done", turnLabel = "did nothing" }, 1)
+  step(sk, { key = "b", projectKey = "pb", status = "done", turnLabel = "made progress" }, 1)
+  eq("streak: kept per budget key -- another folder's progress doesn't reset it", (sk.streak or {}).pa, 1)
+
+  -- the budget: a no-progress turn no longer resets it
+  local sb = { attempts = { p = 2 } }
+  step(sb, tile("done", "did nothing"), 100)
+  eq("budget: a turn that did nothing doesn't reset the attempt budget", sb.attempts.p, 2)
+  step(sb, tile("working"), 110)
+  step(sb, tile("done", "only planned"), 120)
+  eq("budget: ...nor does one that only planned", sb.attempts.p, 2)
+  step(sb, tile("working"), 130)
+  step(sb, tile("done", "made progress"), 140)
+  eq("budget: a turn that made progress resets it", sb.attempts.p, nil)
+  eq("reset: ...and the streak", (sb.streak or {}).p, nil)
+  local sp = { attempts = { p = 1 }, streak = { p = 1 } }
+  step(sp, tile("done", nil, { turnLabelPending = true }), 100)
+  eq("pending label: a done still waiting for its label leaves the budget alone", sp.attempts.p, 1)
+  step(sp, tile("done", "did nothing"), 101)
+  eq("pending label: ...and counts the label once it's in", sp.streak.p, 2)
+  eq("pending label: ...still without resetting the budget", sp.attempts.p, 1)
+  local sf = { streak = { p = 2 }, attempts = { p = 2 } }
+  step(sf, tile("done", "needs follow-up"), 100)
+  eq("needs follow-up: the streak holds (it neither changed nothing nor made progress)", sf.streak.p, 2)
+  eq("needs follow-up: the budget resets like any clean turn", sf.attempts.p, nil)
+
+  -- resets: a human prompt, or a turn that changed something
+  local sh = { streak = { p = 4 } }
+  step(sh, tile("done", "did nothing", { turnOrigin = "human" }), 100)
+  eq("reset: a turn Adam prompted restarts the streak (and, doing nothing, counts one)", sh.streak.p, 1)
+  local ss = { streak = { p = 4 } }
+  step(ss, tile("done", "did nothing", { turnOrigin = "shepherd" }), 100)
+  eq("reset: Shepherd's own continue is no human prompt", ss.streak.p, 5)
+  local sd = { streak = { p = 4 } }
+  step(sd, tile("done", "done"), 100)
+  eq("reset: a done turn (a TODO flipped, a commit) resets it", (sd.streak or {}).p, nil)
+
+  -- the error path: the next continue waits the back-off instead of the 60s grace
+  local se = { streak = { p = 2 } }
+  eq("error: the first sighting starts the clock", step(se, tile("error"), 1000).fire, false)
+  local r = step(se, tile("error"), 1061)
+  eq("error: past the 60s grace but inside the 2-minute back-off, no continue", r.fire, false)
+  eq("error: ...the tile is told how long it still waits", r.backoff, 59)
+  eq("error: at 2 minutes it continues", step(se, tile("error"), 1120).fire, true)
+  local s1 = { streak = { p = 1 } }
+  step(s1, tile("error"), 1000)
+  local r1 = step(s1, tile("error"), 1060)
+  eq("error: after one no-progress turn the plain 60s grace still applies", r1.fire, true)
+  eq("error: ...with no back-off hint", r1.backoff, nil)
+  local s4 = { streak = { p = 4 } }
+  step(s4, tile("error"), 0)
+  eq("error: four in a row wait 8 minutes", step(s4, tile("error"), 479).fire, false)
+  eq("error: ...and continue then", step(s4, tile("error"), 480).fire, true)
+  local sc = { streak = { p = 12 } }
+  step(sc, tile("error"), 0)
+  eq("error: at the cap it waits 30 minutes", step(sc, tile("error"), 1799).fire, false)
+  eq("error: ...and continues then", step(sc, tile("error"), 1800).fire, true)
+  local soff = { streak = { p = 3 } }
+  step(soff, tile("error"), 0, { enabled = false })
+  eq("error: auto-continue off shows no back-off", step(soff, tile("error"), 10, { enabled = false }).backoff, nil)
+  local sx = { streak = { p = 3 }, attempts = { p = 3 } }
+  step(sx, tile("error"), 0)
+  eq("error: a spent budget shows no back-off (it won't continue at all)", step(sx, tile("error"), 10).backoff, nil)
+  local sl = { streak = { p = 3 } }
+  step(sl, tile("error", nil, { error_reason = "budget_exceeded" }), 0)
+  eq("error: nor does a usage limit", step(sl, tile("error", nil, { error_reason = "budget_exceeded" }), 10).backoff, nil)
+  local sz = { streak = { p = 5 } }
+  step(sz, tile("error"), 0, { backoffStart = 0 })
+  eq("error: backoff.startSeconds 0 keeps the plain grace", step(sz, tile("error"), 60, { backoffStart = 0 }).fire, true)
+
+  -- a natural sequence: continue -> nothing -> error -> continue -> nothing -> error -> the wait
+  local sn = {}
+  local function fired(it, now) local x = step(sn, it, now); if x.fire then core.chargeAutoContinue(sn, x.budgetKey) end; return x end
+  step(sn, tile("error"), 0)
+  eq("seq: the first continue after the grace", fired(tile("error"), 60).fire, true)
+  step(sn, tile("working"), 61)
+  step(sn, tile("done", "did nothing", { turnOrigin = "shepherd" }), 70)
+  step(sn, tile("working"), 80)
+  step(sn, tile("error"), 90)
+  eq("seq: after one empty turn the second continue keeps the grace", fired(tile("error"), 150).fire, true)
+  step(sn, tile("working"), 151)
+  step(sn, tile("done", "did nothing", { turnOrigin = "shepherd" }), 160)
+  step(sn, tile("working"), 170)
+  step(sn, tile("error"), 180)
+  eq("seq: after two in a row the grace alone no longer continues", fired(tile("error"), 240).fire, false)
+  eq("seq: ...the back-off does", fired(tile("error"), 300).fire, true)
+  eq("seq: the budget kept counting through the empty turns", sn.attempts.p, 3)
+
+  -- the rule path: a rule's continue waits the same back-off
+  local sr = { streak = { p = 1 } }
+  core.queueRuleContinue(sr, tile("done", "did nothing"), "keep-going", "done", 500)
+  local q1 = step(sr, tile("done", "did nothing"), 500)
+  eq("rule: the turn is counted before the rule's continue is judged", sr.streak.p, 2)
+  eq("rule: ...so the second empty turn in a row holds the continue", q1.rule, nil)
+  eq("rule: ...and the tile says for how long", q1.backoff, 120)
+  eq("rule: still held a minute later", step(sr, tile("done", "did nothing"), 560).rule, nil)
+  local q2 = step(sr, tile("done", "did nothing"), 620)
+  eq("rule: at 2 minutes the rule's continue goes", (q2.rule or {}).name, "keep-going")
+  eq("rule: ...naming its edge", (q2.rule or {}).edge, "done")
+  eq("rule: ...once", step(sr, tile("done", "did nothing"), 621).rule, nil)
+  local sr0 = {}
+  core.queueRuleContinue(sr0, tile("done", "made progress"), "keep-going", "done", 10)
+  eq("rule: after a turn that made progress it goes the same tick",
+     (step(sr0, tile("done", "made progress"), 10).rule or {}).name, "keep-going")
+  local srp = { streak = { p = 1 } }
+  core.queueRuleContinue(srp, tile("done", nil, { turnLabelPending = true }), "keep-going", "done", 10)
+  eq("rule: waits while the turn's label is still coming",
+     step(srp, tile("done", nil, { turnLabelPending = true }), 10).rule, nil)
+  local srm = { streak = { p = 3 } }
+  core.queueRuleContinue(srm, tile("done", "did nothing"), "keep-going", "done", 10)
+  step(srm, tile("done", "did nothing"), 10)
+  step(srm, tile("working"), 20)
+  eq("rule: a session that started a turn meanwhile drops the held continue", (srm.rule or {}).k, nil)
+  local sro = {}
+  core.queueRuleContinue(sro, tile("error"), "r", "error", 10)
+  eq("rule: nothing fires once the rules engine is off", step(sro, tile("error"), 10, { rulesOn = false }).rule, nil)
+  local sre = {}
+  core.queueRuleContinue(sre, tile("error"), "r", "error", 10)
+  eq("rule: a rule's continue doesn't need autoContinue.enabled",
+     (step(sre, tile("error"), 10, { enabled = false }).rule or {}).name, "r")
+  local srh = { streak = { p = 2 } }
+  core.queueRuleContinue(srh, tile("working"), "unstick", "hung", 0)
+  eq("rule: a hung-edge continue waits too", step(srh, tile("working"), 119).rule, nil)
+  eq("rule: ...until the back-off is over", (step(srh, tile("working"), 120).rule or {}).edge, "hung")
+
+  -- Settings Save keeps the hand-edited back-off
+  local keeps = false
+  for _, k in ipairs(core.SETTINGS_KEEP_SUBKEYS.autoContinue or {}) do if k == "backoff" then keeps = true end end
+  check("backoff: autoContinue.backoff is in SETTINGS_KEEP_SUBKEYS", keeps)
+  local kept = core.overlayConfig({ autoContinue = { enabled = true, backoff = { startSeconds = 60, maxSeconds = 600 } } },
+    { autoContinue = { enabled = false, delaySeconds = 60, maxAttempts = 3 } })
+  eq("backoff: a Settings Save keeps it", ((kept.autoContinue or {}).backoff or {}).maxSeconds, 600)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

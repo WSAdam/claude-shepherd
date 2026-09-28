@@ -1,8 +1,12 @@
 {
   "autoContinue": {
-    "enabled": false,
+    "enabled": true,
     "delaySeconds": 60,
-    "maxAttempts": 3
+    "maxAttempts": 3,
+    "backoff": {
+      "startSeconds": 120,
+      "maxSeconds": 1800
+    }
   },
   "autoTitle": {
     "enabled": false

@@ -3833,9 +3833,14 @@ do
 
   local rules = src:match("local function runRules%(ruleSet, it, edgeKind%)(.-)\nend\n") or ""
   check("readiness: a rule's nudge asks first", rules:find('FX.typeWhenReady(target, "rule-nudge", function(', 1, true) ~= nil)
-  check("readiness: a rule's continue asks first", rules:find('FX.typeWhenReady(target, "rule-continue", function(', 1, true) ~= nil)
+  -- 2026-09-28 (requirement changed, feat/no-progress-backoff): a rule's continue is held by
+  -- auto-continue's back-off (core.queueRuleContinue in runRules) and typed from the tick once due,
+  -- so it asks first there now; still never dispatched around readiness in either place.
+  local tick = src:match("function FX%._refreshBody%(%)(.-)\nend\n") or ""
+  check("readiness: a rule's continue asks first", tick:find('FX.typeWhenReady(target, "rule-continue", function(', 1, true) ~= nil)
   check("readiness: ...and neither dispatches around it",
-        not rules:find('dispatchSerialized(target, "rule-nudge"', 1, true) and not rules:find('dispatchSerialized(target, "rule-continue"', 1, true))
+        not rules:find('dispatchSerialized(target, "rule-nudge"', 1, true) and not rules:find('dispatchSerialized(target, "rule-continue"', 1, true)
+        and not tick:find('dispatchSerialized(target, "rule-continue"', 1, true))
   local body = src:match("function FX%._refreshBody%(%)(.-)\nend\n") or ""
   check("readiness: auto-feed asks first", body:find('FX.typeWhenReady(it, "autofeed", function(', 1, true) ~= nil)
   check("readiness: the router asks first", body:find('FX.typeWhenReady(item, "router", function(', 1, true) ~= nil)
@@ -3859,6 +3864,49 @@ do
   check("readiness: FX.kittyType writes the text, then the Return on its own",
         kt:find('core.kittyCmd("text", item, { text = line })', 1, true) ~= nil
         and kt:find('core.kittyCmd("key", item, { token = "enter" })', 1, true) ~= nil)
+end
+
+-- ---- auto-continue backs off when turns change nothing (2026-09-28) ----
+-- 2026-09-28: a stuck session was nudged every minute: every done reset the budget, and a continue
+-- rule typed on every done edge. core.stepAutoContinue now keeps a no-progress streak and waits.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("backoff: the turn label step records whose prompt started the turn",
+        src:find("it.turnOrigin = st.origin", 1, true) ~= nil)
+  check("backoff: ...and says while a label is still coming",
+        src:find("it.turnLabelPending = (st.label == nil and st.tries < 5) or nil", 1, true) ~= nil)
+  check("backoff: auto-continue reads autoContinue.backoff.startSeconds (default 120)",
+        src:find('backoffStart = tonumber(core.config(cfg, "autoContinue.backoff.startSeconds", 120))', 1, true) ~= nil)
+  check("backoff: ...and autoContinue.backoff.maxSeconds (default 1800)",
+        src:find('backoffMax = tonumber(core.config(cfg, "autoContinue.backoff.maxSeconds", 1800))', 1, true) ~= nil)
+  check("backoff: the tile carries how long it still waits", src:find("it.backoffSeconds = cstep.backoff", 1, true) ~= nil)
+  check("backoff: a rule's continue is held by the same back-off, not typed on the edge",
+        src:find("core.queueRuleContinue(autoContinueState, it, r.name, edgeKind, FX.now())", 1, true) ~= nil)
+  check("backoff: ...and typed from the tick once it's due",
+        src:find('if cstep.rule then', 1, true) ~= nil
+        and src:find('FX.typeWhenReady(target, "rule-continue", function()', 1, true) ~= nil)
+  check("backoff: a rule's held continue is dropped when the rules engine is off",
+        src:find("rulesOn = ruleSet ~= nil", 1, true) ~= nil)
+  check("backoff: per-tile state is reaped with the tile",
+        src:find("core.reapUnbacked(autoContinueState.rule, newPrev)", 1, true) ~= nil
+        and src:find("core.reapUnbacked(autoContinueState.turnSeen, newPrev)", 1, true) ~= nil)
+  check("backoff: the streak is reaped against the live budget keys",
+        src:find("core.reapUnbacked(autoContinueState.streak, liveBudgetKeys)", 1, true) ~= nil
+        and src:find("or next(autoContinueState.streak) then", 1, true) ~= nil)
+  check("backoff: the card shows 'backing off' through esc()",
+        src:find("var label = esc(statusWords(it));\n      label += esc(backoffTail(it));", 1, true) ~= nil)
+  check("backoff: ...and so does the detail panel",
+        src:find('(it.stale && !bgRunning(it) ? " - stale" : "") + backoffTail(it);', 1, true) ~= nil)
+  local df = io.open(ROOT .. "defaults/cc-config.json", "r")
+  local dsrc = df and df:read("*a") or ""
+  if df then df:close() end
+  local okd, dcfg = pcall(core.json.decode, dsrc)
+  local ac = okd and type(dcfg) == "table" and dcfg.autoContinue or {}
+  eq("backoff: a fresh install has auto-continue on", ac.enabled, true)
+  eq("backoff: ...backing off from 2 minutes", (ac.backoff or {}).startSeconds, 120)
+  eq("backoff: ...up to 30", (ac.backoff or {}).maxSeconds, 1800)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
