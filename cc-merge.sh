@@ -6,13 +6,15 @@
 #   cc-merge.sh done --result merged|blocked [--note "<why>"]
 #
 # request: checks the unit can merge (its own worktree, on a branch, clean, ahead of the
-# base), asks Shepherd, then waits for Adam's answer. Run it in the BACKGROUND and end the
+# base, no conflict markers added), asks Shepherd, then waits for Adam's answer. Run it in the BACKGROUND and end the
 # turn: Claude Code wakes the session when it exits. Asking again from the same unit keeps
 # the same request. Exit codes: 0 MERGE APPROVED (the steps follow), 3 NOT YET (Adam's note
 # follows), 4 still waiting (--wait-max ran out), 5 the request was withdrawn, 6 Shepherd
 # isn't running, 2 refused (the reason is printed).
 #
-# done: after the fast-forward merge, confirms the branch is in the base, removes the
+# done: after the fast-forward merge, confirms the branch is in the base and that main is sound
+# (its checkout on the base, tracked files clean, no conflict markers landed, no stash entries
+# newer than the request -- else it refuses and removes nothing), removes the
 # worktree and the branch (never forced) and tells Shepherd, which then closes the tab if it
 # opened it for the unit (a batch unit or a New worktree tab); a main chat stays open.
 #
@@ -41,6 +43,35 @@ update_req() { # <jq filter> [jq args...]
   local filter="$1"; shift
   local tmp="$REQ.tmp.$$"
   if jq "$@" "$filter" "$REQ" > "$tmp" 2>/dev/null; then mv "$tmp" "$REQ"; else rm -f "$tmp"; return 1; fi
+}
+
+# ---- merge hardening (2026-09-28): the checks Shepherd's own git makes, mirrored here ----
+# The conflict-marker lines a diff ADDS, as "count<TAB>path" per file: 7 of < or > followed by a
+# space, or a line of exactly 7 = -- never whitespace errors. The same program as cc-core.lua's
+# MERGE_MARKER_AWK.
+MARKER_AWK='/^diff --git /{h=1;next} h&&/^\+\+\+ /{f=substr($0,7);next} /^@@/{h=0;next} !h&&(/^\+(<<<<<<<|>>>>>>>) /||/^\+=======\r?$/){n[f]++} END{for(k in n)print n[k]"\t"k}'
+marker_lines() { # <git-dir> <diff range...>
+  local gd="$1"; shift
+  git --git-dir="$gd" diff --no-color --no-ext-diff --no-textconv -U0 --src-prefix=a/ --dst-prefix=b/ "$@" 2>/dev/null \
+    | awk "$MARKER_AWK" | head -n 20
+}
+marker_total() { printf '%s\n' "$1" | awk -F'\t' '{n += $1} END {print n + 0}'; }
+marker_files() { printf '%s\n' "$1" | awk -F'\t' '{print "   " $2 " (" $1 ")"}'; }
+# main's tip just before <branch> was merged: the entry before the branch's own reflog entry
+# ("merge <branch>: Fast-forward"), else the one before <sha> arrived. Empty when neither is there.
+premerge_tip() { # <git-dir> <base> <branch> <sha>
+  local from
+  from="$(git --git-dir="$1" reflog show --format='%H %gs' "refs/heads/$2" -n 500 2>/dev/null \
+    | awk -v b="$3:" 'f{print $1;exit} $2=="merge"&&($3==b||$3=="refs/heads/" b){f=1}')"
+  [ -n "$from" ] || from="$(git --git-dir="$1" reflog show --format=%H "refs/heads/$2" -n 500 2>/dev/null \
+    | awk -v s="$4" 'f{print $1;exit} index($1,s)==1{f=1}')"
+  printf '%s' "$from"
+}
+stash_count() { # <git-dir>: the repo's stash entries (shared by every worktree)
+  local n
+  n="$(git --git-dir="$1" rev-list --walk-reflogs --count refs/stash 2>/dev/null)"
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  printf '%s' "$n"
 }
 
 cmd_request() {
@@ -93,6 +124,13 @@ cmd_request() {
   local ahead
   ahead="$(g rev-list --count "refs/heads/$base..HEAD" 2>/dev/null)"
   [ "${ahead:-0}" -gt 0 ] 2>/dev/null || refuse "nothing to merge: $branch has no commits that $base doesn't"
+  local marks
+  marks="$(marker_lines "$common" "refs/heads/$base...refs/heads/$branch")"
+  if [ -n "$marks" ]; then
+    echo "❌ cc-merge: $(marker_total "$marks") conflict-marker line(s) in the unit's changes -- resolve them and commit first:"
+    marker_files "$marks"
+    exit 2
+  fi
 
   local now hb
   now="$(date +%s)"
@@ -118,9 +156,10 @@ cmd_request() {
        --arg wt "$wt" --arg branch "$branch" --arg base "$base" --arg common "$common" \
        --arg summary "${summary:0:1000}" --arg tests "${tests:0:300}" \
        --argjson ahead "$ahead" --argjson at "$now" --argjson waitpid "$$" \
+       --argjson stash "$(stash_count "$common")" \
        '{v: 1, key: $key, session_id: $sid, pid: $pid, nonce: $nonce, worktree: $wt, branch: $branch,
          base: $base, commonDir: $common, summary: $summary, tests: $tests, ahead: $ahead, at: $at,
-         wait_pid: $waitpid, phase: "requested"}' > "$tmp" && mv "$tmp" "$REQ" || refuse "couldn't write the request in $MERGE_DIR"
+         wait_pid: $waitpid, stash_count: $stash, phase: "requested"}' > "$tmp" && mv "$tmp" "$REQ" || refuse "couldn't write the request in $MERGE_DIR"
   else
     # Re-asking on the SAME request (a foreground wait that ran out): the nonce is kept so an
     # answer given in between isn't lost, but the process waiting for it is a NEW one. Shepherd
@@ -213,6 +252,43 @@ cmd_done() {
   local sha main err problem=""
   sha="$(git --git-dir="$common" rev-parse "refs/heads/$base")"
   main="${common%/.git}"
+  # 2026-09-28 (merge hardening): main is checked before anything is removed -- the same facts
+  # Shepherd's own git verifies afterwards (core.mergeVerifyCmd). A refusal leaves the request
+  # approved, the worktree and the branch as they were: fix it and run done again.
+  local head dirty from marks stash0 stash1 notyours
+  notyours="   If it isn't yours to fix: ~/.claude/cc-merge.sh done --result blocked --note \"<what you found>\""
+  head="$(git -C "$main" symbolic-ref --quiet --short HEAD 2>/dev/null)"
+  if [ "$head" != "$base" ]; then
+    echo "❌ cc-merge: the main checkout is on ${head:-a detached HEAD}, not $base -- git switch $base there, then run done again."
+    echo "$notyours"; exit 2
+  fi
+  dirty="$(git -C "$main" status --porcelain --untracked-files=no 2>/dev/null)"
+  if [ -n "$dirty" ]; then
+    echo "❌ cc-merge: uncommitted changes to tracked files in the main checkout -- commit or restore them (never stash), then run done again:"
+    printf '%s\n' "$dirty" | head -n 10
+    echo "$notyours"; exit 2
+  fi
+  from="$(premerge_tip "$common" "$base" "$branch" "$sha")"
+  if [ -n "$from" ]; then
+    marks="$(marker_lines "$common" "$from" "$sha")"
+    if [ -n "$marks" ]; then
+      echo "❌ cc-merge: $(marker_total "$marks") conflict-marker line(s) landed in $base with the merge -- remove them in a commit on $base (suite green), then run done again:"
+      marker_files "$marks"
+      echo "$notyours"; exit 2
+    fi
+  fi
+  stash0="$(jq -r '.stash_count // empty' "$REQ" 2>/dev/null)"
+  case "$stash0" in *[!0-9]*) stash0="" ;; esac
+  if [ -n "$stash0" ]; then
+    stash1="$(stash_count "$common")"
+    if [ "$stash1" -gt "$stash0" ]; then
+      local k=$((stash1 - stash0)) entries="entries"
+      [ "$k" -eq 1 ] && entries="entry"
+      echo "❌ cc-merge: $k new stash $entries since the request ($stash0 → $stash1). Restore stashes by hash, never a bare pop:"
+      echo "   git stash list --format='%H %gs' names each one; git stash apply <hash>, then drop that entry (find its stash@{n} by its message first), and run done again."
+      echo "$notyours"; exit 2
+    fi
+  fi
   if [ -d "$wt" ]; then
     err="$(git -C "$main" worktree remove "$wt" 2>&1)" || problem="the worktree wasn't removed ($err)"
   fi

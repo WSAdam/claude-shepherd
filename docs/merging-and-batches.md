@@ -71,7 +71,15 @@ the stalled tab and the branch, and a blocked unit going quiet is how parallel w
 lost.
 
 Shepherd checks the request with **its own git** first: the worktree is one of the repo's, on the
-requested branch, clean and ahead of main. Otherwise it says what's wrong.
+requested branch, clean and ahead of main, and its changes add **no conflict markers**. Otherwise it
+says what's wrong.
+
+A conflict marker is a line the unit's diff adds that starts with seven `<` or seven `>` and a
+space, or is exactly seven `=`. That's what a rebase conflict "resolved" with its markers still in
+leaves behind. Only added lines count, so a marker-like line the unit never touched can't hold its
+merge. Whitespace problems don't count either (no `git diff --check`). A Markdown heading
+underlined with exactly seven `=` looks the same as a marker, so write that heading with `#`.
+`cc-merge.sh request` refuses such a unit on the spot and names the files.
 
 ### The review
 
@@ -139,7 +147,12 @@ delegated merge goes through with a flag up.
 3. `ExitWorktree`, then `git merge --ff-only` in the main checkout,
 4. run the suite on main,
 5. `cc-merge.sh done --result merged`, which confirms the branch is in main and removes the
-   worktree and the branch, never forced.
+   worktree and the branch, never forced. Before it removes anything it also checks main: the main
+   checkout is on main, its **tracked** files are clean (untracked files like `TODO.md` or scratch
+   notes never count), no conflict markers came in with the merge, and the stash has no entries
+   newer than the request. If one fails it refuses, says how to fix it (restore stashes by hash,
+   never a bare pop), and leaves the worktree and the branch alone. The unit fixes it and runs
+   `done` again, or reports *blocked* if it isn't the unit's to fix.
 
 Merges in one repo run **one at a time, in the order you clicked**. The rest show
 *queued (next in line)* and start on their own. **Not yet** sends your note back, and the unit
@@ -148,7 +161,13 @@ stays in its worktree.
 ### A unit's own tab closes itself
 
 Once `done` reports the merge, Shepherd checks with its own git that the merged commit is in main
-and the worktree is gone, and waits for the session's last turn to end. Then, **only for a tab it
+and the worktree is gone. It runs `done`'s checks on main again too: on main, tracked files clean,
+no stash entries newer than the request, and no conflict markers in the merge. The merge's range
+starts at main's reflog entry for the branch (`merge <branch>: Fast-forward`), so a later commit
+can't hide markers the merge brought in, and one that removes them clears them. A request made
+before this check existed carries no stash count and skips that one check. A merge verified once
+stays verified, so a later change in main isn't blamed on a unit whose tab is only waiting for its
+last turn to end. Then Shepherd waits for that turn to end. Then, **only for a tab it
 opened for that job** (a batch unit's, or one started with **New worktree tab** or resumed from
 Instances), it has the tab bridge close it: a batch unit's tab by the tag the bridge gave it, any
 other by its name, on a single match.

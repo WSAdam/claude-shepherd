@@ -80,6 +80,13 @@ parallel.
 
   Never `rm -rf` a worktree folder — git keeps tracking it; run `git worktree list` now and
   then to catch strays. The same branch can't be checked out in two worktrees.
+
+  The stash is shared by every worktree and session of a repo: commit work in progress
+  instead. If you must stash, tag it (`git stash push -u -m "<unique-tag>"`) and **restore
+  stashes by hash, never a bare pop** (`git stash list --format='%H %gs'`, then `git stash
+  apply <hash>`, then drop that entry) — a pop can take another session's entry. `cc-merge.sh
+  done` checks main before it removes anything: the main checkout on main, its tracked files
+  clean, no conflict markers landed, no stash entries newer than the request.
 - **Merge conflicts: the tests are the oracle.** Both sides arrive with tests that record
   what each branch protects. Read both sides' tests before touching the conflicted code,
   keep the resolution that satisfies both, and replay a bugfix branch's fixture against the

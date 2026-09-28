@@ -269,4 +269,151 @@ assert_absent "cc_remove drops the merge request" "$MD/s9.json"
 assert_absent "...its decision" "$MD/s9.decision"
 assert_absent "...and any claimed decision" "$MD/s9.decision.claim.1"
 
+# ---- merge hardening: a bad merge is caught before and after it lands (2026-09-28) ----
+# Build program unit 18. `request` refuses a unit whose changes add conflict-marker lines; `done`
+# checks main after the fast-forward (on the base, tracked files clean -- untracked never count --
+# no markers landed, no stash entries since the request) before it removes anything. Shepherd's
+# own commands (core.mergeFactsCmd / core.mergeVerifyCmd) run against this same real repo too.
+# Marker lines are built at run time: a literal one at column 0 here would trip the very check.
+LT="$(printf '%7s' '' | tr ' ' '<')"; EQ="$(printf '%7s' '' | tr ' ' '=')"; GT="$(printf '%7s' '' | tr ' ' '>')"
+conflicted() { printf 'keep\n%s HEAD\nmine\n%s\ntheirs\n%s fix/x\n' "$LT" "$EQ" "$GT"; }
+approve() { # <slug> <branch> <session>: a unit asks from its worktree and Adam clicks Merge
+  unit "$1" "$2"
+  req "$REPO/.claude/worktrees/$1" "$3" & local bg=$!
+  wait_for "$MD/$3.json"; answer "$3" merge; wait $bg
+}
+# <facts|verify> <request file>: one line -- what cc-core's own command and parser make of this repo
+lua_core() { lua - "$ROOT" "$@" <<'LUA'
+local root, what, file = arg[1], arg[2], arg[3]
+local core = dofile(root .. "/cc-core.lua"); core.json = dofile(root .. "/tests/support/json.lua")
+local fh = io.open(file); local req = core.parseMergeRequest(fh:read("a")); fh:close()
+local p = io.popen(what == "facts" and core.mergeFactsCmd(req) or core.mergeVerifyCmd(req))
+local out = p:read("a"); p:close()
+if what == "facts" then
+  local rd = core.mergeReadiness(req, core.parseMergeFacts(out, req), {})
+  print((rd.ready and "ready" or "not ready") .. ": " .. (rd.problems[1] or ""))
+else
+  local ok, why = core.mergeVerified(req, out)
+  print((ok and "verified" or "not verified") .. ": " .. tostring(why or ""))
+end
+LUA
+}
+COMMON="$(git -C "$REPO" rev-parse --path-format=absolute --git-common-dir)"
+lua_awk="$(sed -n 's/^M.MERGE_MARKER_AWK = \[=\[\(.*\)\]=\]$/\1/p' "$ROOT/cc-core.lua")"
+sh_awk="$(sed -n "s/^MARKER_AWK='\(.*\)'$/\1/p" "$ROOT/cc-merge.sh")"
+[ -n "$lua_awk" ] && [ "$lua_awk" = "$sh_awk" ] && got=same || got=different
+assert_eq "cc-merge.sh and Shepherd count markers with the same awk program" "same" "$got"
+reqfile() { # <file> <slug> <branch>: a requested-phase request for that unit, as cc-merge.sh writes it
+  jq -n --arg wt "$(cd "$REPO/.claude/worktrees/$2" && pwd -P)" --arg b "$3" --arg c "$COMMON" \
+    '{v: 1, key: "x", session_id: "x", nonce: "n.1", worktree: $wt, branch: $b, base: "main",
+      commonDir: $c, summary: "s", tests: "t", ahead: 1, at: 1, phase: "requested"}' > "$1"
+}
+
+# before: a unit whose own diff carries markers
+unit mark fix/mark
+conflicted > "$REPO/.claude/worktrees/mark/app2.txt"
+g "$REPO/.claude/worktrees/mark" add -A && g "$REPO/.claude/worktrees/mark" commit -qm "resolve (badly)"
+req "$REPO/.claude/worktrees/mark" mk1 --wait-max 1
+assert_eq "request: a unit whose changes add conflict markers is refused" "2" "$(cat "$TMP/rc.mk1")"
+grep -q "3 conflict-marker line(s)" "$TMP/out.mk1" && grep -q "app2.txt" "$TMP/out.mk1" && got=yes || got=no
+assert_eq "...counting the lines and naming the file" "yes" "$got"
+assert_absent "...and no request is written" "$MD/mk1.json"
+reqfile "$TMP/mark.json" mark fix/mark
+lua_core facts "$TMP/mark.json" > "$TMP/lc"
+grep -q "^not ready: 3 conflict-marker line(s) in the unit's changes (app2.txt)" "$TMP/lc" && got=yes || got=no
+assert_eq "Shepherd's review, by its own git: the same unit isn't ready  ($(cat "$TMP/lc"))" "yes" "$got"
+unit tidy fix/tidy
+printf 'Title\nno markers, just text with <<< and === inside\n' > "$REPO/.claude/worktrees/tidy/notes.md"
+g "$REPO/.claude/worktrees/tidy" add -A && g "$REPO/.claude/worktrees/tidy" commit -qm "notes"
+reqfile "$TMP/tidy.json" tidy fix/tidy
+lua_core facts "$TMP/tidy.json" > "$TMP/lc"
+assert_eq "...and a unit without them is ready" "ready: " "$(cat "$TMP/lc")"
+
+# after: done checks main before it removes anything
+approve hd1 fix/hd1 h1
+assert_json "the request snapshots the stash count when it's made" "$MD/h1.json" .stash_count 0
+git -C "$REPO" merge -q --ff-only fix/hd1
+git -C "$REPO" switch -q -c side
+done_ h1 --result merged
+assert_eq "done: the main checkout isn't on main -> refused" "2" "$(cat "$TMP/drc.h1")"
+grep -q "main checkout is on side, not main" "$TMP/dout.h1" && got=yes || got=no
+assert_eq "...saying where it is" "yes" "$got"
+[ -d "$REPO/.claude/worktrees/hd1" ] && got=kept || got=removed
+assert_eq "...removing nothing" "kept" "$got"
+assert_json "...and the request stays approved" "$MD/h1.json" .phase approved
+git -C "$REPO" switch -q main
+git -C "$REPO" branch -q -d side
+
+printf 'local edit\n' >> "$REPO/app.txt"
+printf 'scratch\n' > "$REPO/scratch.txt"
+done_ h1 --result merged
+assert_eq "done: a tracked file changed in main -> refused" "2" "$(cat "$TMP/drc.h1")"
+grep -q "app.txt" "$TMP/dout.h1" && got=yes || got=no
+assert_eq "...naming it" "yes" "$got"
+grep -q "scratch.txt" "$TMP/dout.h1" && got=listed || got=ignored
+assert_eq "...but never an untracked file" "ignored" "$got"
+git -C "$REPO" restore app.txt
+
+printf 'stashed edit\n' >> "$REPO/app.txt"
+g "$REPO" stash push -q -m merge-hardening-test
+done_ h1 --result merged
+assert_eq "done: a stash entry appeared since the request -> refused" "2" "$(cat "$TMP/drc.h1")"
+grep -q "1 new stash entry since the request (0 → 1)" "$TMP/dout.h1" && grep -q "by hash, never a bare pop" "$TMP/dout.h1" && got=yes || got=no
+assert_eq "...saying so, and to restore stashes by hash" "yes" "$got"
+STASHED="$(git -C "$REPO" stash list --format='%H %gs' | awk '/merge-hardening-test/{print $1}')"
+git -C "$REPO" stash apply -q "$STASHED" > /dev/null
+git -C "$REPO" stash drop -q
+git -C "$REPO" restore app.txt
+
+done_ h1 --result merged
+assert_eq "done: main on main, clean but for an untracked file, the stash as it was -> merged" "0" "$(cat "$TMP/drc.h1")"
+assert_json "...phase merged" "$MD/h1.json" .phase merged
+lua_core verify "$MD/h1.json" > "$TMP/lc"
+assert_eq "Shepherd's own git verifies the same merge" "verified: " "$(cat "$TMP/lc")"
+printf 'late edit\n' >> "$REPO/app.txt"
+lua_core verify "$MD/h1.json" > "$TMP/lc"
+grep -q "^not verified: uncommitted changes to tracked files in the main checkout (app.txt)" "$TMP/lc" && got=yes || got=no
+assert_eq "...and not once a tracked file in main is dirty  ($(cat "$TMP/lc"))" "yes" "$got"
+git -C "$REPO" restore app.txt
+g "$REPO" stash push -q --include-untracked -m merge-hardening-test2
+lua_core verify "$MD/h1.json" > "$TMP/lc"
+grep -q "^not verified: 1 new stash entry since the request" "$TMP/lc" && got=yes || got=no
+assert_eq "...nor once the stash grew  ($(cat "$TMP/lc"))" "yes" "$got"
+STASHED="$(git -C "$REPO" stash list --format='%H %gs' | awk '/merge-hardening-test2/{print $1}')"
+git -C "$REPO" stash apply -q "$STASHED" > /dev/null
+git -C "$REPO" stash drop -q
+jq 'del(.stash_count)' "$MD/h1.json" > "$TMP/h1-old.json"
+g "$REPO" stash push -q --include-untracked -m merge-hardening-test3
+lua_core verify "$TMP/h1-old.json" > "$TMP/lc"
+assert_eq "...while an older request with no stash snapshot still verifies" "verified: " "$(cat "$TMP/lc")"
+STASHED="$(git -C "$REPO" stash list --format='%H %gs' | awk '/merge-hardening-test3/{print $1}')"
+git -C "$REPO" stash apply -q "$STASHED" > /dev/null
+git -C "$REPO" stash drop -q
+[ -f "$REPO/scratch.txt" ] && got=kept || got=lost
+assert_eq "(fixture: the untracked file came back from its stash)" "kept" "$got"
+
+# a rebase conflict resolved badly AFTER the approval: the markers land with the fast-forward
+approve hd2 fix/hd2 h2
+conflicted > "$REPO/.claude/worktrees/hd2/app3.txt"
+g "$REPO/.claude/worktrees/hd2" add -A && g "$REPO/.claude/worktrees/hd2" commit -qm "resolve (badly)"
+git -C "$REPO" merge -q --ff-only fix/hd2
+g "$REPO" commit -q --allow-empty -m "an unrelated commit on main after the merge"
+done_ h2 --result merged
+assert_eq "done: conflict markers landed in main -> refused" "2" "$(cat "$TMP/drc.h2")"
+grep -q "3 conflict-marker line(s) landed in main" "$TMP/dout.h2" && grep -q "app3.txt" "$TMP/dout.h2" && got=yes || got=no
+assert_eq "...found from the merge's own reflog entry, past a later commit" "yes" "$got"
+[ -d "$REPO/.claude/worktrees/hd2" ] && got=kept || got=removed
+assert_eq "...removing nothing" "kept" "$got"
+jq --arg s "$(git -C "$REPO" rev-parse main)" '.phase = "merged" | .sha = $s' "$MD/h2.json" > "$TMP/h2-merged.json"
+lua_core verify "$TMP/h2-merged.json" > "$TMP/lc"
+grep -q "^not verified: 3 conflict-marker line(s) landed in main (app3.txt)" "$TMP/lc" && got=yes || got=no
+assert_eq "Shepherd's own git sees the markers in main too  ($(cat "$TMP/lc"))" "yes" "$got"
+printf 'resolved\n' > "$REPO/app3.txt"
+g "$REPO" commit -qam "remove the leftover markers"
+done_ h2 --result merged
+assert_eq "done: once a commit on main removes them -> merged" "0" "$(cat "$TMP/drc.h2")"
+lua_core verify "$MD/h2.json" > "$TMP/lc"
+assert_eq "...and Shepherd verifies it" "verified: " "$(cat "$TMP/lc")"
+rm -f "$REPO/scratch.txt"
+
 finish

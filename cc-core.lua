@@ -2088,11 +2088,55 @@ function M.parseMergeRequest(raw)
     sha = (type(t.sha) == "string" and t.sha:match("^%x+$")) and t.sha or nil,
     ahead = tonumber(t.ahead), at = tonumber(t.at) or 0, approvedAt = tonumber(t.approvedAt),
     doneAt = tonumber(t.doneAt), phase = t.phase,
+    -- 2026-09-28 (merge hardening): the repo's stash count when the unit asked. Optional -- an
+    -- older request has none, and the post-merge "no new stash entries" check is then skipped.
+    stashCount = (tonumber(t.stash_count) or -1) >= 0 and math.tointeger(tonumber(t.stash_count)) or nil,
   }
 end
 
 -- The file list is cut here; the claim check (M.mergeClaimCheck) reads a full list as "cut".
 M.MERGE_FACTS_MAX_FILES = 200
+
+-- ---- Conflict markers (2026-09-28, merge hardening) ---------------------------------------
+-- The awk program that turns a unified diff into "count<TAB>path" lines: how many real
+-- conflict-marker lines the diff ADDS to each file -- 7 of < or > followed by a space, or a line
+-- of exactly 7 = (never `git diff --check`, which also reports whitespace errors). Added lines
+-- only, so a marker-like line the unit never touched can't hold its merge. cc-merge.sh runs the
+-- same program (MARKER_AWK) for request and done.
+M.MERGE_MARKER_AWK = [=[/^diff --git /{h=1;next} h&&/^\+\+\+ /{f=substr($0,7);next} /^@@/{h=0;next} !h&&(/^\+(<<<<<<<|>>>>>>>) /||/^\+=======\r?$/){n[f]++} END{for(k in n)print n[k]"\t"k}]=]
+local function markerCmd(G, range)
+  return G .. " diff --no-color --no-ext-diff --no-textconv -U0 --src-prefix=a/ --dst-prefix=b/ " .. range
+    .. " 2>/dev/null | awk '" .. M.MERGE_MARKER_AWK .. "' | head -n 20"
+end
+-- "count<TAB>path" lines -> total and sorted files. Anything else (the verify's "?" for a merge
+-- git's reflog can't place) counts as nothing.
+local function parseMarkerLines(lines)
+  local total, files = 0, {}
+  for _, l in ipairs(lines or {}) do
+    local n, p = l:match("^(%d+)\t(.+)$")
+    if n then total = total + tonumber(n); files[#files + 1] = p end
+  end
+  table.sort(files)
+  return total, files
+end
+local function markerProblem(total, files, where)
+  local shown = {}
+  for i = 1, math.min(#files, 3) do shown[i] = files[i] end
+  local more = (#files > 3) and (" and " .. (#files - 3) .. " more") or ""
+  return total .. " conflict-marker line(s) " .. where .. " (" .. table.concat(shown, ", ") .. more .. ")"
+end
+
+-- The @@name sections of a facts/verify command's output: name -> its lines (a bare marker like
+-- @@in is present with no lines).
+local function mergeSections(out)
+  local sec, cur = {}, nil
+  for line in (out .. "\n"):gmatch("([^\n]*)\n") do
+    local name = line:match("^@@(%a+)$")
+    if name then cur = name; sec[cur] = sec[cur] or {}
+    elseif cur then table.insert(sec[cur], line) end
+  end
+  return sec
+end
 
 -- The one shell line that gathers everything the review and the readiness check need, in
 -- @@sections. Paths are quoted; refs were validated by parseMergeRequest.
@@ -2113,17 +2157,14 @@ function M.mergeFactsCmd(req)
     "echo @@commits", G .. " log --format='%h%x09%s' -n 50 " .. range .. " 2>/dev/null",
     "echo @@stat", G .. " diff --shortstat " .. dots .. " 2>/dev/null",
     "echo @@files", G .. " diff --name-status " .. dots .. " 2>/dev/null | head -n " .. M.MERGE_FACTS_MAX_FILES,
+    -- 2026-09-28: the conflict-marker lines the unit's own changes add, per file
+    "echo @@markers", markerCmd(G, dots),
   }, "; ")
 end
 
 function M.parseMergeFacts(out, req)
   if type(out) ~= "string" or type(req) ~= "table" then return nil end
-  local sec, cur = {}, nil
-  for line in (out .. "\n"):gmatch("([^\n]*)\n") do
-    local name = line:match("^@@(%a+)$")
-    if name then cur = name; sec[cur] = sec[cur] or {}
-    elseif cur then table.insert(sec[cur], line) end
-  end
+  local sec = mergeSections(out)
   local function first(name) return ((sec[name] or {})[1] or ""):match("^%s*(.-)%s*$") end
   local f = { commits = {}, files = {}, dirty = {}, listed = false }
   for _, e in ipairs(M.parseWorktreePorcelain(table.concat(sec.listed or {}, "\n"))) do
@@ -2144,6 +2185,7 @@ function M.parseMergeFacts(out, req)
     local st, p = l:match("^(%u%d*)\t(.+)$")
     if st then f.files[#f.files + 1] = { st = st:sub(1, 1), path = (p:gsub("\t", " → ")) } end
   end
+  f.markers, f.markerFiles = parseMarkerLines(sec.markers)
   return f
 end
 
@@ -2335,6 +2377,10 @@ function M.mergeReadiness(req, facts, item, gate)
   end
   if not facts.clean then p[#p + 1] = "uncommitted changes in the worktree (" .. #(facts.dirty or {}) .. " file(s))" end
   if (tonumber(facts.ahead) or 0) <= 0 then p[#p + 1] = "nothing to merge: 0 commits ahead of " .. req.base end
+  -- 2026-09-28 (merge hardening): a rebase conflict "resolved" with its markers still in
+  if (tonumber(facts.markers) or 0) > 0 then
+    p[#p + 1] = markerProblem(facts.markers, facts.markerFiles or {}, "in the unit's changes") .. " -- resolve them and commit"
+  end
   -- (2026-09-11: no "the session left that worktree" rule any more -- a fenced tab now leaves
   -- its worktree to ask, so Claude Code's worktree guard never has to judge cc-merge.sh. The
   -- worktree itself is still checked above: listed, on its branch, clean, ahead.)
@@ -2430,17 +2476,75 @@ end
 
 -- After `done --result merged`: Shepherd re-checks with its own git before closing the tab --
 -- the merged commit is in the base, and the worktree is gone. The sha was validated as hex.
+-- 2026-09-28 (merge hardening): and main itself -- its checkout is on the base, its TRACKED files
+-- are clean (untracked TODO.md and scratch files never count), no conflict markers came in with
+-- the merge, and the stash has no entries the request didn't see. The merge's range starts at
+-- main's tip just before the branch's own reflog entry ("merge <branch>: Fast-forward"), else
+-- just before the merged commit; it ends at the merged commit, so a later commit that removes
+-- leftover markers clears them and one that doesn't touch them can't hide them.
 function M.mergeVerifyCmd(req)
-  local G = "git --git-dir='" .. tostring(req.commonDir):gsub("'", "'\\''") .. "'"
-  return G .. " merge-base --is-ancestor " .. tostring(req.sha) .. " refs/heads/" .. req.base
-    .. " 2>/dev/null && echo @@in; echo @@list; " .. G .. " worktree list --porcelain 2>/dev/null"
+  local function sq(s) return "'" .. tostring(s):gsub("'", "'\\''") .. "'" end
+  local G = "git --git-dir=" .. sq(req.commonDir)
+  local sha, base = tostring(req.sha), req.base
+  local log = G .. " reflog show --format='%H %gs' refs/heads/" .. base .. " -n 500 2>/dev/null"
+  local parts = {
+    G .. " merge-base --is-ancestor " .. sha .. " refs/heads/" .. base .. " 2>/dev/null && echo @@in",
+    "echo @@mainhead", G .. " symbolic-ref --quiet --short HEAD 2>/dev/null",
+  }
+  local root = M.mergeMainRoot(req)
+  if root then
+    parts[#parts + 1] = "echo @@maindirty"
+    parts[#parts + 1] = "{ git -C " .. sq(root) .. " status --porcelain --untracked-files=no 2>/dev/null || echo '?'; } | head -n 20"
+  end
+  parts[#parts + 1] = "echo @@markers"
+  parts[#parts + 1] = "from=$(" .. log .. " | awk -v b=" .. tostring(req.branch)
+    .. [[: 'f{print $1;exit} $2=="merge"&&($3==b||$3=="refs/heads/" b){f=1}')]]
+  parts[#parts + 1] = "[ -n \"$from\" ] || from=$(" .. G .. " reflog show --format=%H refs/heads/" .. base
+    .. " -n 500 2>/dev/null | awk -v s=" .. sha .. " 'f{print $1;exit} index($1,s)==1{f=1}')"
+  parts[#parts + 1] = "if [ -n \"$from\" ]; then " .. markerCmd(G, "\"$from\" " .. sha) .. "; else echo '?'; fi"
+  parts[#parts + 1] = "echo @@stash"
+  parts[#parts + 1] = "{ " .. G .. " rev-list --walk-reflogs --count refs/stash 2>/dev/null || echo 0; }"
+  parts[#parts + 1] = "echo @@list"
+  parts[#parts + 1] = G .. " worktree list --porcelain 2>/dev/null"
+  return table.concat(parts, "; ")
 end
 
+-- A section the output doesn't carry at all (an older command, or no main checkout to look in)
+-- isn't judged; one it carries is.
 function M.mergeVerified(req, out)
   if type(req) ~= "table" or not req.sha then return false, "no merged commit was recorded" end
   if type(out) ~= "string" then return false, "git didn't answer" end
-  if not out:find("@@in", 1, true) then return false, "the merged commit isn't in " .. req.base end
-  for _, e in ipairs(M.parseWorktreePorcelain(out:match("@@list\n(.*)$") or "")) do
+  local sec = mergeSections(out)
+  if not sec["in"] then return false, "the merged commit isn't in " .. req.base end
+  local function first(name) return ((sec[name] or {})[1] or ""):match("^%s*(.-)%s*$") end
+  if sec.mainhead then
+    local head = first("mainhead")
+    if head ~= req.base then
+      return false, "the main checkout is on " .. (head ~= "" and head or "a detached HEAD") .. ", not " .. req.base
+    end
+  end
+  if sec.maindirty then
+    local dirty = {}
+    for _, l in ipairs(sec.maindirty) do
+      if l:match("^%s*%?%s*$") then return false, "git couldn't read the main checkout's status" end
+      if l:match("%S") and not l:match("^%?%? ") then dirty[#dirty + 1] = l:sub(4) end
+    end
+    if #dirty > 0 then
+      return false, "uncommitted changes to tracked files in the main checkout (" .. table.concat(dirty, ", ", 1, math.min(#dirty, 3))
+        .. ((#dirty > 3) and (" and " .. (#dirty - 3) .. " more") or "") .. ")"
+    end
+  end
+  if sec.markers then
+    local total, files = parseMarkerLines(sec.markers)
+    if total > 0 then return false, markerProblem(total, files, "landed in " .. req.base) end
+  end
+  local stash = tonumber(first("stash"))
+  if sec.stash and req.stashCount and stash and stash > req.stashCount then
+    local k = stash - req.stashCount
+    return false, k .. " new stash " .. (k == 1 and "entry" or "entries") .. " since the request ("
+      .. req.stashCount .. " → " .. stash .. "): restore stashes by hash, never a bare pop"
+  end
+  for _, e in ipairs(M.parseWorktreePorcelain(table.concat(sec.list or {}, "\n"))) do
     if M.normDir(e.path) == req.worktree then return false, "the worktree is still there" end
   end
   return true

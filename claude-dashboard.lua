@@ -4310,7 +4310,10 @@ function FX.mergeAutoClose(r, it)
   if FX._mergeClosing[r.nonce] then return nil end
   local now = FX.now()
   local v = FX._mergeVerify[r.nonce]
-  if not v or now - v.at >= 10 then
+  -- 2026-09-28 (merge hardening): a merge verified once stays verified. The check now reads main
+  -- itself (on the base, clean, no markers, no new stash), and main moves on -- a later edit there
+  -- must not be pinned on a unit whose tab is only waiting for its last turn to end.
+  if not v or (not v.ok and now - v.at >= 10) then
     local out
     if r.sha then pcall(function() out = hs.execute(core.mergeVerifyCmd(r)) end) end
     local ok, why = core.mergeVerified(r, out)

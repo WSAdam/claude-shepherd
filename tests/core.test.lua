@@ -12201,5 +12201,115 @@ do
   eq("backoff: a Settings Save keeps it", ((kept.autoContinue or {}).backoff or {}).maxSeconds, 600)
 end
 
+-- ---- merge hardening: a bad merge is caught before and after it lands (2026-09-28) ----
+-- Build program unit 18. Before: the review counts conflict-marker lines the unit's diff adds
+-- (never whitespace errors) and any count holds the merge. After: Shepherd's own git checks main
+-- is on the base, its TRACKED files are clean, no markers landed, and the stash didn't grow since
+-- the request (an optional field: an older request without it still verifies). No fixture here
+-- holds a marker line at column 0 -- the parsers read git's "count<TAB>path" summary instead.
+do
+  local function reqJson(over)
+    local t = { v = 1, key = "s1", session_id = "s1", pid = "4242", nonce = "11.100.7",
+                worktree = "/r/main/.claude/worktrees/demo", branch = "fix/demo", base = "main",
+                commonDir = "/r/main/.git", summary = "Fix the demo", tests = "make test: green",
+                ahead = 2, at = 100, phase = "requested" }
+    for k, v in pairs(over or {}) do if v == false then t[k] = nil else t[k] = v end end
+    return core.json.encode(t)
+  end
+  local r = core.parseMergeRequest(reqJson())
+
+  -- before: the facts count marker lines the unit ADDS, per file
+  local cmd = core.mergeFactsCmd(r)
+  check("facts: a @@markers section reads the unit's own diff (base...branch), no textconv or external diff",
+        cmd:find("echo @@markers", 1, true) ~= nil and cmd:find("--no-ext-diff --no-textconv -U0", 1, true) ~= nil
+        and cmd:find("main...fix/demo 2>/dev/null | awk", 1, true) ~= nil)
+  check("facts: ...counting real markers (7 of < or > then a space, or a line of exactly 7 =), not whitespace errors",
+        cmd:find("(<<<<<<<|>>>>>>>) /", 1, true) ~= nil and cmd:find("=======\\r?$/", 1, true) ~= nil
+        and cmd:find("--check", 1, true) == nil)
+  local base = "@@head\nfix/demo\n@@status\n@@ahead\n2\n@@behind\n0\n"
+  local f = core.parseMergeFacts(base .. "@@markers\n3\tapp.lua\n1\tREADME.md\n", r)
+  eq("facts: the marker lines are summed across files", f.markers, 4)
+  eq("facts: ...and the files named, sorted", table.concat(f.markerFiles, ","), "README.md,app.lua")
+  local clean = core.parseMergeFacts(base .. "@@markers\n", r)
+  eq("facts: no markers -> a count of 0", clean.markers, 0)
+  eq("facts: an older facts output with no @@markers section reads as 0", core.parseMergeFacts(base, r).markers, 0)
+  local function facts(over) local t = { listed = true, head = "fix/demo", clean = true, ahead = 2, dirty = {}, markers = 0, markerFiles = {} }
+    for k, v in pairs(over or {}) do t[k] = v end return t end
+  check("ready: no marker lines", core.mergeReadiness(r, facts()).ready == true)
+  local rd = core.mergeReadiness(r, facts({ markers = 4, markerFiles = { "README.md", "app.lua" } }))
+  check("not ready: a unit whose changes carry conflict markers can't merge  (" .. tostring(rd.problems[1]) .. ")",
+        rd.ready == false and (rd.problems[1] or ""):find("4 conflict-marker line(s)", 1, true) ~= nil
+        and (rd.problems[1] or ""):find("README.md, app.lua", 1, true) ~= nil)
+  rd = core.mergeReadiness(r, facts({ markers = 5, markerFiles = { "a", "b", "c", "d", "e" } }))
+  check("not ready: ...naming three files and counting the rest  (" .. tostring(rd.problems[1]) .. ")",
+        (rd.problems[1] or ""):find("(a, b, c and 2 more)", 1, true) ~= nil)
+
+  -- the request snapshots the stash count: a new OPTIONAL field
+  eq("request: the stash count at the time of asking is kept", core.parseMergeRequest(reqJson({ stash_count = 2 })).stashCount, 2)
+  eq("request: ...an older request without it has none (and still parses)", r and r.stashCount, nil)
+  eq("request: ...a nonsense count is dropped, never trusted", core.parseMergeRequest(reqJson({ stash_count = -1 })).stashCount, nil)
+  eq("request: ...so is a fraction", core.parseMergeRequest(reqJson({ stash_count = 1.5 })).stashCount, nil)
+
+  -- after: the verify command gathers the new facts with Shepherd's own git
+  local mg = core.parseMergeRequest(reqJson({ phase = "merged", sha = "abc1234def", stash_count = 1 }))
+  local vcmd = core.mergeVerifyCmd(mg)
+  check("verify: reads main's checked-out branch", vcmd:find("echo @@mainhead; git --git-dir='/r/main/.git' symbolic-ref --quiet --short HEAD", 1, true) ~= nil)
+  check("verify: ...main's TRACKED changes only (TODO.md and scratch files never count)",
+        vcmd:find("git -C '/r/main' status --porcelain --untracked-files=no", 1, true) ~= nil)
+  check("verify: ...the markers the merge brought in: main's reflog entry before the merged commit, diffed to it",
+        vcmd:find("reflog show --format=%H refs/heads/main", 1, true) ~= nil
+        and vcmd:find("awk -v s=abc1234def", 1, true) ~= nil and vcmd:find('-U0 --src-prefix=a/ --dst-prefix=b/ "$from" abc1234def', 1, true) ~= nil)
+  check("verify: ...and the stash count", vcmd:find("echo @@stash; { git --git-dir='/r/main/.git' rev-list --walk-reflogs --count refs/stash", 1, true) ~= nil)
+  local listLast = "echo @@list; git --git-dir='/r/main/.git' worktree list --porcelain 2>/dev/null"
+  check("verify: ...with the worktree list still last", vcmd:sub(-#listLast) == listLast)
+  check("verify: ...and the merge found by the branch's own reflog entry first",
+        vcmd:find([[awk -v b=fix/demo: 'f{print $1;exit} $2=="merge"&&($3==b||$3=="refs/heads/" b){f=1}']], 1, true) ~= nil)
+
+  local function out(over)
+    local s = { mainhead = "main", maindirty = "", markers = "", stash = "1" }
+    for k, v in pairs(over or {}) do s[k] = v end
+    local parts = { "@@in" }
+    for _, k in ipairs({ "mainhead", "maindirty", "markers", "stash" }) do
+      if s[k] ~= false then parts[#parts + 1] = "@@" .. k; if s[k] ~= "" then parts[#parts + 1] = s[k] end end
+    end
+    parts[#parts + 1] = "@@list\nworktree /r/main\nHEAD a\nbranch refs/heads/main\n"
+    return table.concat(parts, "\n")
+  end
+  local ok, why = core.mergeVerified(mg, out())
+  check("verified: in main, worktree gone, main on main and clean, no markers, no new stash  (" .. tostring(why) .. ")", ok == true)
+  ok, why = core.mergeVerified(mg, out({ mainhead = "fix/demo" }))
+  check("not verified: the main checkout is on another branch  (" .. tostring(why) .. ")",
+        ok == false and why:find("main checkout is on fix/demo, not main", 1, true) ~= nil)
+  ok, why = core.mergeVerified(mg, out({ mainhead = "" }))
+  check("not verified: ...or on a detached HEAD  (" .. tostring(why) .. ")", ok == false and why:find("detached HEAD", 1, true) ~= nil)
+  ok, why = core.mergeVerified(mg, out({ maindirty = " M cc-core.lua\nM  README.md" }))
+  check("not verified: a dirty tracked file in main  (" .. tostring(why) .. ")",
+        ok == false and why:find("uncommitted changes to tracked files", 1, true) ~= nil and why:find("cc-core.lua, README.md", 1, true) ~= nil)
+  ok, why = core.mergeVerified(mg, out({ maindirty = "?? TODO.md\n?? scratch.txt" }))
+  check("verified: untracked files in main never count  (" .. tostring(why) .. ")", ok == true)
+  ok, why = core.mergeVerified(mg, out({ maindirty = "?" }))
+  check("not verified: git couldn't read main's status  (" .. tostring(why) .. ")", ok == false and why:find("couldn't read", 1, true) ~= nil)
+  ok, why = core.mergeVerified(mg, out({ markers = "2\tcc-core.lua" }))
+  check("not verified: conflict markers landed in main  (" .. tostring(why) .. ")",
+        ok == false and why:find("2 conflict-marker line(s) landed in main (cc-core.lua)", 1, true) ~= nil)
+  ok, why = core.mergeVerified(mg, out({ markers = "?" }))
+  check("verified: a merge git's reflog can't place skips the marker check (the review already checked the branch)  (" .. tostring(why) .. ")", ok == true)
+  ok, why = core.mergeVerified(mg, out({ stash = "3" }))
+  check("not verified: the stash grew since the request  (" .. tostring(why) .. ")",
+        ok == false and why:find("2 new stash entries since the request (1 → 3)", 1, true) ~= nil
+        and why:find("restore stashes by hash, never a bare pop", 1, true) ~= nil)
+  ok, why = core.mergeVerified(mg, out({ stash = "2" }))
+  check("not verified: ...one new entry, said in the singular  (" .. tostring(why) .. ")", ok == false and why:find("1 new stash entry since", 1, true) ~= nil)
+  ok = core.mergeVerified(mg, out({ stash = "0" }))
+  check("verified: fewer stash entries than before is fine (someone dropped one)", ok == true)
+  local old = core.parseMergeRequest(reqJson({ phase = "merged", sha = "abc1234def" }))
+  ok, why = core.mergeVerified(old, out({ stash = "7" }))
+  check("verified: an older request with no stash snapshot still verifies  (" .. tostring(why) .. ")", ok == true)
+  ok, why = core.mergeVerified(mg, "@@in\n@@list\nworktree /r/main\nHEAD a\nbranch refs/heads/main\n")
+  check("verified: an older verify output without the new sections still verifies  (" .. tostring(why) .. ")", ok == true)
+  ok, why = core.mergeVerified(mg, out({ mainhead = "fix/demo", maindirty = " M a.lua" }))
+  check("not verified: the first problem is the one reported  (" .. tostring(why) .. ")", why:find("fix/demo", 1, true) ~= nil)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

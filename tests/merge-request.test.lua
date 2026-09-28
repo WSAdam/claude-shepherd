@@ -877,5 +877,61 @@ do
   tick()
 end
 
+-- ---- merge hardening: main itself is checked after the merge (2026-09-28) ---------------------
+-- Build program unit 18. Shepherd's post-merge verify reads main too: a merged unit whose main
+-- checkout has uncommitted tracked changes keeps its tab open and says why. And a merge verified
+-- once stays verified: the new checks read main, which moves on (Adam edits a file, the next unit
+-- merges), and that must not be pinned on a unit whose tab is only waiting for its last turn to end.
+do
+  local realNow, savedVerify = fx.now, VERIFY_OUT
+  local function mainState(dirty)
+    return "@@in\n@@mainhead\nmain\n@@maindirty\n" .. (dirty and " M app.lua\n" or "")
+      .. "@@markers\n@@stash\n0\n@@list\nworktree /r/Q\nHEAD a\nbranch refs/heads/main\n"
+  end
+  local function qUnit(key, host, pid)
+    newUnit(key, "/r/Q", "fix/" .. key, "qq" .. pid, host, pid)
+    write(T .. "/" .. key .. ".jsonl", '{"type":"user","message":{"role":"user","content":"Start unit fix/' .. key
+      .. ' in its own worktree: call EnterWorktree with name \\"' .. key .. '\\", then rename its branch."}}\n'
+      .. '{"type":"ai-title","aiTitle":"Fix ' .. key .. ' tab","sessionId":"' .. key .. '"}\n')
+    registry(host, { "Fix " .. key .. " tab" })
+  end
+
+  qUnit("q1", 830, 1030)
+  VERIFY_OUT = mainState(true)
+  setPhase("q1", "merged", { sha = "abc1234def" })
+  tick()
+  I = items()
+  check("a merged unit whose main checkout has uncommitted tracked changes keeps its tab open", #inbox(830) == 0)
+  check("...and the card says why  (" .. tostring(I.q1 and I.q1.merge and I.q1.merge.line) .. ")",
+        I.q1 and I.q1.merge and (I.q1.merge.line or ""):find("uncommitted changes to tracked files", 1, true) ~= nil)
+  VERIFY_OUT = mainState(false)
+  fx.now = function() return realNow() + 11 end
+  tick()
+  check("...and closes it once main is clean again", #inbox(830) == 1)
+  fx.now = realNow
+
+  -- verified while the session is still working, then main changes before its turn ends
+  qUnit("q2", 831, 1031)
+  local st = json.decode(read(T .. "/status/q2.json")); st.status = "working"
+  write(T .. "/status/q2.json", json.encode(st))
+  VERIFY_OUT = mainState(false)
+  setPhase("q2", "merged", { sha = "abc1234def" })
+  tick()
+  check("a merge verified while its session still works: no close yet", #inbox(831) == 0)
+  VERIFY_OUT = mainState(true)
+  fx.now = function() return realNow() + 11 end
+  tick()
+  I = items()
+  check("...a later change in main isn't pinned on it: it stays verified  (" .. tostring(I.q2 and I.q2.merge and I.q2.merge.line) .. ")",
+        I.q2 and I.q2.merge and (I.q2.merge.line or ""):find("uncommitted", 1, true) == nil)
+  st.status = "done"; st.since = realNow() - 60
+  write(T .. "/status/q2.json", json.encode(st))
+  tick()
+  check("...and its tab closes when the turn ends", #inbox(831) == 1)
+  fx.now, VERIFY_OUT = realNow, savedVerify
+  for _, k in ipairs({ "q1", "q2" }) do os.remove(MD .. "/" .. k .. ".json"); os.remove(T .. "/status/" .. k .. ".json") end
+  tick()
+end
+
 check("the whole flow never focused a window or pressed a key", taps == 0 and focusCalls == 0)
 finish()
