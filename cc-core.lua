@@ -6694,16 +6694,19 @@ end
 -- key ascending as the tiebreak; a missing `since` reads as "just changed"
 -- (lowest priority). members = parsed items sharing one queueKey. opts =
 -- { draining = map key->bool, pending = map key->ts, now, pendingTimeout,
--- role = label|nil }. With a role set, only members whose memberRole matches are
--- eligible (conditional routing). Returns the chosen tile key, or nil when none free.
+-- role = label|nil, skip = map key->true }. With a role set, only members whose memberRole
+-- matches are eligible (conditional routing). 2026-09-28: `skip` holds out members a send was
+-- refused for (M.typingHeld) -- from the pick only, never from busy/barrier checks. Returns
+-- the chosen tile key, or nil when none free.
 function M.routePick(members, opts)
   opts = opts or {}
   local draining = opts.draining or {}
   local pending = opts.pending or {}
+  local skip = opts.skip or {}
   local role = opts.role
   local best, bestSince
   for _, it in ipairs(members or {}) do
-    if (role == nil or M.memberRole(it) == role)
+    if not skip[it.key] and (role == nil or M.memberRole(it) == role)
        and M.sessionFree(it, { draining = draining[it.key], pending = pending[it.key],
                                now = opts.now, pendingTimeout = opts.pendingTimeout }) then
       local since = tonumber(it.since) or math.huge
@@ -6734,7 +6737,7 @@ function M.routeTask(members, q, opts)
   if barrier and not M.routeBarrierMet(members, barrier) then return nil end  -- hold until met
   local role = select(1, M.taskRoute(afterB))  -- @role: (possibly after the barrier)
   local key = M.routePick(members, { draining = opts.draining, pending = opts.pending,
-    now = opts.now, pendingTimeout = opts.pendingTimeout, role = role })
+    now = opts.now, pendingTimeout = opts.pendingTimeout, role = role, skip = opts.skip })
   if not key then return nil end
   return { key = key, role = role, barrier = barrier }
 end
@@ -8363,6 +8366,7 @@ end
 --   close -> @ [--to S] close-window --match SEL
 --   key   -> @ [--to S] send-key   --match SEL <token...>
 --   text  -> @ [--to S] send-text  --match SEL -- <text>
+--   get-text -> @ [--to S] get-text --match SEL --extent screen --ansi
 -- kitty's --match fallback for a session with no window id: that EXACT folder.
 -- The cwd query is a regex searched anywhere, so a bare "cwd:/p" also hit /p-fix-y
 -- siblings and shells cd'd into a subfolder (2026-09-10): anchor it, and quote it
@@ -8415,6 +8419,11 @@ function M.kittyCmd(action, item, payload)
     -- an empty/no-window result means the target window is gone, so a feed must NOT
     -- report delivered (the queued task would be popped + lost).
     argv[#argv + 1] = "ls"; argv[#argv + 1] = "--match"; argv[#argv + 1] = sel
+  elseif action == "get-text" then
+    -- 2026-09-28: the visible screen WITH its formatting, read right before an automated send
+    -- (M.kittyScreenState): dim is the only thing that tells a prompt suggestion from typed text.
+    argv[#argv + 1] = "get-text"; argv[#argv + 1] = "--match"; argv[#argv + 1] = sel
+    argv[#argv + 1] = "--extent"; argv[#argv + 1] = "screen"; argv[#argv + 1] = "--ansi"
   else
     return nil
   end
@@ -8452,6 +8461,216 @@ function M.kittyWindowAlive(lsOutput)
     return false
   end
   return hasWindow(data)
+end
+
+-- ---- Readiness before typing (2026-09-28) -----------------------------------------------
+-- Build program unit 11: an automated send types only when the session can take it. The
+-- status file says whether a turn, an approval, a held question or a tool is in flight; in
+-- kitty, `kitty @ get-text --ansi` (M.kittyCmd "get-text") also shows what is on screen --
+-- Adam's half-typed prompt, a picker, the trust dialog -- which no status file records.
+
+-- kitty's --ansi screen text -> lines of cells { ch, dim, inv }. kitty writes SGR as it
+-- changes (`\27[22;2m` dim, `\27[7m` inverse, `\27[38:2:r:g:bm` colours, `\27[m` reset) and
+-- carries it across line ends, so the state is tracked over the whole text. Other escapes
+-- (--add-cursor's CSI, OSC 8 hyperlinks) and wrap-marker CRs are dropped.
+local function kittyCells(text)
+  local lines, cur, dim, inv = {}, {}, false, false
+  local i, n = 1, #text
+  local function sgr(params)
+    local toks = {}
+    for p in (params .. ";"):gmatch("([^;]*);") do toks[#toks + 1] = p end
+    local k = 1
+    while k <= #toks do
+      local p = toks[k]
+      local code = tonumber(p:match("^(%d*)")) or 0
+      if p:find(":", 1, true) then
+        code = -1                                            -- 38:2:r:g:b and kin: one token
+      elseif code == 38 or code == 48 or code == 58 then     -- 38;5;n / 38;2;r;g;b
+        k = k + ((toks[k + 1] == "5") and 2 or (toks[k + 1] == "2") and 4 or 0)
+      end
+      if code == 0 then dim, inv = false, false
+      elseif code == 2 then dim = true
+      elseif code == 22 then dim = false
+      elseif code == 7 then inv = true
+      elseif code == 27 then inv = false end
+      k = k + 1
+    end
+  end
+  while i <= n do
+    local c = text:byte(i)
+    if c == 27 then
+      local nx = text:sub(i + 1, i + 1)
+      if nx == "[" then
+        local j = i + 2
+        while j <= n do
+          local b = text:byte(j)
+          if b >= 0x40 and b <= 0x7e then break end
+          j = j + 1
+        end
+        if text:sub(j, j) == "m" then sgr(text:sub(i + 2, j - 1)) end
+        i = j + 1
+      elseif nx == "]" then
+        local j = i + 2
+        while j <= n do
+          local b = text:byte(j)
+          if b == 7 then break end
+          if b == 27 and text:sub(j + 1, j + 1) == "\\" then j = j + 1; break end
+          j = j + 1
+        end
+        i = j + 1
+      else
+        i = i + 2
+      end
+    elseif c == 10 then
+      lines[#lines + 1] = cur; cur = {}; i = i + 1
+    elseif c == 13 then
+      i = i + 1
+    else
+      local len = (c >= 0xF0 and 4) or (c >= 0xE0 and 3) or (c >= 0xC0 and 2) or 1
+      cur[#cur + 1] = { ch = text:sub(i, i + len - 1), dim = dim, inv = inv }
+      i = i + len
+    end
+  end
+  lines[#lines + 1] = cur
+  return lines
+end
+
+local RULE_CH, BORDER_CH = "\226\148\128", { ["\226\148\130"] = true, ["\226\149\173"] = true,   -- ─ │ ╭
+  ["\226\149\174"] = true, ["\226\149\176"] = true, ["\226\149\175"] = true }                      -- ╮ ╰ ╯
+M.KITTY_PROMPT_GLYPHS = { ["\226\157\175"] = true, [">"] = true, ["!"] = true }                 -- ❯ > !(bash)
+
+local function cellsPlain(cells)
+  local out = {}
+  for _, c in ipairs(cells) do out[#out + 1] = c.ch end
+  return table.concat(out)
+end
+-- A composer border: a run of ─ (Claude Code draws its prompt box with top and bottom rules
+-- only; older builds drew a whole round box, so corners are allowed too).
+local function isRule(cells)
+  local count = 0
+  for _, c in ipairs(cells) do
+    if c.ch == RULE_CH then count = count + 1
+    elseif not (c.ch == " " or BORDER_CH[c.ch]) then return false end
+  end
+  return count >= 8
+end
+
+-- What the kitty screen shows: { state = "empty" | "text" | "menu" | "trust" | "none", text }.
+--   empty: a composer with nothing typed (a dim placeholder or prompt suggestion doesn't count:
+--          Claude Code draws it as the cursor, inverse, on its first letter and the rest dim);
+--   text:  a composer holding typed text (returned in .text);
+--   menu:  a picker or the session survey (a digit typed there answers it);
+--   trust: the trust dialog;
+--   none:  no composer on screen at all (unreadable, still starting, a full-screen view).
+function M.kittyScreenState(text)
+  if type(text) ~= "string" or text == "" then return { state = "none" } end
+  local lines = kittyCells(text)
+  local bottom, top
+  for i = #lines, 1, -1 do
+    if isRule(lines[i]) then
+      if not bottom then bottom = i elseif i < bottom - 1 then top = i; break else bottom = i end
+    end
+  end
+  local first = top and lines[top + 1]
+  local glyphAt
+  if first then
+    for j, c in ipairs(first) do
+      if c.ch ~= " " and not BORDER_CH[c.ch] then
+        if M.KITTY_PROMPT_GLYPHS[c.ch] then glyphAt = j end
+        break
+      end
+    end
+  end
+  if not glyphAt then
+    for _, cells in ipairs(lines) do
+      local p = cellsPlain(cells)
+      if p:find("trust this folder", 1, true) or p:find("Do you trust the files", 1, true)
+         or p:find("Quick safety check", 1, true) then return { state = "trust" } end
+    end
+    for _, cells in ipairs(lines) do
+      local p = cellsPlain(cells)
+      if p:find("^%s*\226\157\175%s*%d+[%.%)]") or p:find("Enter to confirm", 1, true)
+         or p:find("Esc to cancel", 1, true) or p:find("Esc to exit", 1, true) then
+        return { state = "menu" }
+      end
+    end
+    return { state = "none" }
+  end
+  -- The session survey renders just above the composer, which stays up underneath it.
+  for i = math.max(1, top - 6), top - 1 do
+    local p = cellsPlain(lines[i])
+    if p:find("How is Claude doing this session", 1, true) or p:find("Did this memory help", 1, true) then
+      return { state = "menu" }
+    end
+  end
+  local typed = {}
+  for i = top + 1, bottom - 1 do
+    local cells, row = lines[i], {}
+    for j, c in ipairs(cells) do
+      local skip = (i == top + 1 and j <= glyphAt) or BORDER_CH[c.ch] or c.dim
+        or (c.inv and (c.ch == " " or (cells[j + 1] and cells[j + 1].dim)))
+      row[#row + 1] = skip and " " or c.ch
+    end
+    typed[#typed + 1] = (table.concat(row):gsub("%s+$", ""))
+  end
+  local s = table.concat(typed, "\n"):gsub("^%s+", ""):gsub("%s+$", "")
+  if s == "" then return { state = "empty" } end
+  return { state = "text", text = s }
+end
+
+-- May an automated send type into this session now? true, or false + why (+ the seconds left
+-- when the only thing missing is the settle time, so the sender can wait instead of refusing):
+--   not mid-turn, not waiting on an approval or a question cc-ask.sh holds, no tool in flight,
+--   at most one Shepherd send queued for it (it.typing_queued, counting this one), settled for
+--   M.READY_SETTLE_SECONDS since its last hook write, and -- when a kitty screen is given --
+--   an empty composer with no menu or trust dialog up. The dashboard passes kitty's screen at
+--   send time ("" when get-text failed, which refuses); nil means the status checks only (VS
+--   Code, whose single-tab windows are the only ones typed into, and the scheduling check).
+--   A display-stale done session is fine: that is the normal between-turns state.
+M.READY_SETTLE_SECONDS = 3
+function M.readyToType(it, screen, now)
+  if type(it) ~= "table" then return false, "no session" end
+  if it.remote then return false, "remote" end
+  now = tonumber(now) or os.time()
+  if it.status == "working" then return false, "working" end
+  if M.askHeld(it, now) then return false, "question" end
+  if it.status == "approval" or it.gate == "waiting" then return false, "approval" end
+  if M.toolInFlight(it, now) then return false, "tool" end
+  if (tonumber(it.typing_queued) or 0) > 1 then return false, "queued" end
+  if screen ~= nil then
+    local st = M.kittyScreenState(screen).state
+    if st == "text" then return false, "composer" end
+    if st == "menu" or st == "trust" then return false, st end
+    if st ~= "empty" then return false, "no composer" end
+  end
+  local updated = tonumber(it.updated)
+  if updated then
+    local left = M.READY_SETTLE_SECONDS - (now - updated)
+    if left > 0 then return false, "settling", left end
+  end
+  return true
+end
+
+-- The view a send is judged on at fire time: the tick's item (it carries the tick's own
+-- verdicts -- a transcript-detected "error", a healed "done") unless the status file was
+-- written since the tick, when the file's fresh state wins. An unreadable file keeps the tick's.
+function M.typingView(tickItem, live)
+  if type(live) ~= "table" then return tickItem end
+  if type(tickItem) ~= "table" then return live end
+  if tonumber(live.updated) == tonumber(tickItem.updated) then return tickItem end
+  return live
+end
+
+-- A refusal holds the session for one episode: until its status or its status file changes.
+-- The sender skips a held session instead of retrying (and ledgering) every tick.
+function M.typingEpisode(it)
+  if type(it) ~= "table" then return "" end
+  return tostring(it.status) .. "|" .. tostring(it.updated)
+end
+function M.typingHeld(held, it)
+  if type(held) ~= "table" or type(it) ~= "table" or it.key == nil then return false end
+  local h = held[it.key]
+  return type(h) == "table" and h.episode == M.typingEpisode(it)
 end
 
 -- ---- Window focus matching (extracted from focusProject; review #4) --------

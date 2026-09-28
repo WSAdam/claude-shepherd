@@ -11894,5 +11894,134 @@ do
   check("fence: ...in the Control group", keys.fence ~= nil and keys.fence.cat == "Control")
 end
 
+-- ---- readiness before typing (2026-09-28) ----
+-- Build program unit 11: an automated send (auto-feed, the router, a rule's nudge/continue,
+-- auto-continue, the self-summary, the /rc sweep) types only when the session can take it --
+-- never mid-turn, never into a question or an approval, never over Adam's half-typed prompt in
+-- kitty. core.readyToType decides; kitty's screen comes from `kitty @ get-text --ansi`.
+do
+  local NOW = 10000
+  local function tile(over)
+    local t = { key = "k1", status = "done", editor = "vscode", updated = NOW - 10, typing_queued = 1 }
+    for k, v in pairs(over or {}) do t[k] = v end
+    return t
+  end
+  local function ready(over, screen, now)
+    local ok, why, wait = core.readyToType(tile(over), screen, now or NOW)
+    return ok, why, wait
+  end
+  local ok, why = ready()
+  check("readyToType: a finished, settled session with nothing queued can take it", ok == true and why == nil)
+  eq("readyToType: an idle session can take it", (ready({ status = "idle" })), true)
+  eq("readyToType: a session frozen on an API error can take auto-continue", (ready({ status = "error" })), true)
+  ok, why = ready({ status = "working" })
+  check("readyToType: never mid-turn  (why=" .. tostring(why) .. ")", ok == false and why == "working")
+  ok, why = ready({ status = "approval", pending = { tool = "Bash", summary = "ls" } })
+  check("readyToType: never into an approval prompt  (why=" .. tostring(why) .. ")", ok == false and why == "approval")
+  ok, why = ready({ gate = "waiting" })
+  check("readyToType: never while the gate waits on Adam  (why=" .. tostring(why) .. ")", ok == false and why == "approval")
+  ok, why = ready({ status = "approval", ask_nonce = "n1", ask_until = NOW + 600,
+                    pending = { ask = { { question = "Which?", options = { { label = "A" } } } } } })
+  check("readyToType: never into a question cc-ask.sh holds  (why=" .. tostring(why) .. ")", ok == false and why == "question")
+  ok, why = ready({ tool_name = "Bash", tool_started_at = NOW - 40 })
+  check("readyToType: never while a tool is in flight  (why=" .. tostring(why) .. ")", ok == false and why == "tool")
+  ok, why = ready({ typing_queued = 2 })
+  check("readyToType: at most one queued send per session  (why=" .. tostring(why) .. ")", ok == false and why == "queued")
+  eq("readyToType: no count means nothing else queued", (ready({ typing_queued = false })), true)
+  local w
+  ok, why, w = ready({ updated = NOW - 1 })
+  check("readyToType: waits until the session has settled 3 seconds  (why=" .. tostring(why) .. ")",
+        ok == false and why == "settling")
+  eq("readyToType: ...and says how long is left", w, 2)
+  eq("readyToType: settled at exactly 3 seconds", (ready({ updated = NOW - core.READY_SETTLE_SECONDS })), true)
+  ok, why = ready({ status = "working", updated = NOW - 1 })
+  check("readyToType: a busy session is refused, not asked to wait  (why=" .. tostring(why) .. ")", why == "working")
+  ok, why = ready({ remote = true })
+  check("readyToType: never a remote tile (no local window)  (why=" .. tostring(why) .. ")", ok == false and why == "remote")
+  check("readyToType: no session, no typing", core.readyToType(nil, nil, NOW) == false)
+  eq("readyToType: a display-stale done session (the normal between-turns state) can take it",
+     (ready({ stale = true, updated = NOW - 600 })), true)
+
+  -- kitty: the screen decides the rest. Fixtures are Claude Code's composer shapes rendered
+  -- through kitty's own screen, exactly as `kitty @ get-text --ansi` returns them.
+  local function screen(name)
+    local f = assert(io.open(HERE .. "fixtures/kitty-screens/" .. name .. ".ansi", "rb"))
+    local s = f:read("*a"); f:close(); return s
+  end
+  local function st(name) return (core.kittyScreenState(screen(name)) or {}).state end
+  eq("kitty screen: an empty composer (the placeholder is dim)", st("empty-composer"), "empty")
+  eq("kitty screen: Adam's half-typed prompt", st("typed-text"), "text")
+  eq("kitty screen: ...what he typed is read back", (core.kittyScreenState(screen("typed-text")) or {}).text, "run the tests")
+  eq("kitty screen: typed text with the cursor inside it", st("typed-text-cursor-inside"), "text")
+  eq("kitty screen: ...read back whole", (core.kittyScreenState(screen("typed-text-cursor-inside")) or {}).text, "run the tests")
+  eq("kitty screen: one letter under the cursor is typed text, not a placeholder", st("typed-one-letter"), "text")
+  eq("kitty screen: the dim prompt suggestion is ignored", st("dim-suggestion"), "empty")
+  eq("kitty screen: a picker menu is open", st("model-menu"), "menu")
+  eq("kitty screen: the trust dialog is open", st("trust-dialog"), "trust")
+  eq("kitty screen: the session survey sits above the composer (a digit would answer it)", st("session-survey"), "menu")
+  eq("kitty screen: an unreadable screen shows no composer", core.kittyScreenState("").state, "none")
+  eq("kitty screen: nil shows no composer", core.kittyScreenState(nil).state, "none")
+  eq("kitty screen: plain text without a composer shows none", core.kittyScreenState("$ ls\nfoo bar\n").state, "none")
+
+  local k = { editor = "kitty", kitty_window_id = "7" }
+  eq("readyToType kitty: an empty composer takes it", (ready(k, screen("empty-composer"))), true)
+  eq("readyToType kitty: the dim suggestion doesn't block it", (ready(k, screen("dim-suggestion"))), true)
+  ok, why = ready(k, screen("typed-text"))
+  check("readyToType kitty: never over Adam's typed text  (why=" .. tostring(why) .. ")", ok == false and why == "composer")
+  ok, why = ready(k, screen("model-menu"))
+  check("readyToType kitty: never into an open menu  (why=" .. tostring(why) .. ")", ok == false and why == "menu")
+  ok, why = ready(k, screen("trust-dialog"))
+  check("readyToType kitty: never into the trust dialog  (why=" .. tostring(why) .. ")", ok == false and why == "trust")
+  ok, why = ready(k, screen("session-survey"))
+  check("readyToType kitty: never while the survey is up  (why=" .. tostring(why) .. ")", ok == false and why == "menu")
+  ok, why = ready(k, "")
+  check("readyToType kitty: an unreadable screen refuses (fail closed)  (why=" .. tostring(why) .. ")",
+        ok == false and why == "no composer")
+  ok, why = ready({ editor = "kitty", status = "working" }, screen("empty-composer"))
+  check("readyToType kitty: the status checks still come first  (why=" .. tostring(why) .. ")", why == "working")
+
+  -- the get-text op: the visible screen, with its formatting (dim is how a suggestion is told apart)
+  local g = core.kittyCmd("get-text", { kitty_window_id = "7", kitty_listen_on = "unix:/tmp/k" }) or {}
+  eq("kittyCmd get-text: the argv", table.concat(g, " "),
+     "@ --to unix:/tmp/k get-text --match id:7 --extent screen --ansi")
+  eq("kittyCmd get-text: untargetable -> nil", core.kittyCmd("get-text", {}), nil)
+
+  -- fire time: the tick's view (with its error / heal overrides) unless the status file moved on
+  local tickItem = { key = "k1", status = "error", updated = 500, name = "a" }
+  eq("typingView: an unreadable status file keeps the tick's view", core.typingView(tickItem, nil).status, "error")
+  eq("typingView: an unchanged file keeps the tick's override (error, not the raw working)",
+     core.typingView(tickItem, { key = "k1", status = "working", updated = 500 }).status, "error")
+  eq("typingView: a file written since the tick wins",
+     core.typingView(tickItem, { key = "k1", status = "working", updated = 507 }).status, "working")
+
+  -- a refusal holds the session until its status changes: one ledger event, no retry per tick
+  local held = {}
+  local t1 = { key = "k1", status = "done", updated = 500 }
+  eq("typingHeld: nothing held yet", core.typingHeld(held, t1), false)
+  held.k1 = { episode = core.typingEpisode(t1), reason = "composer" }
+  eq("typingHeld: held while the status is unchanged", core.typingHeld(held, t1), true)
+  eq("typingHeld: ...on every later tick", core.typingHeld(held, { key = "k1", status = "done", updated = 500, name = "x" }), true)
+  eq("typingHeld: released when the status file moves on",
+     core.typingHeld(held, { key = "k1", status = "done", updated = 530 }), false)
+  eq("typingHeld: released when the status changes",
+     core.typingHeld(held, { key = "k1", status = "working", updated = 500 }), false)
+  eq("typingHeld: another session isn't held", core.typingHeld(held, { key = "k2", status = "done", updated = 500 }), false)
+
+  -- the router: a held member is skipped for the pick only -- it still counts for a sequential
+  -- queue's busy check and a barrier, so holding a working member can't let a second task in
+  local rq = { routing = true, tasks = { "t1" } }
+  local mA = { key = "a", status = "done", since = 1, cwd = "/p" }
+  local mB = { key = "b", status = "done", since = 2, cwd = "/p" }
+  eq("routeTask: the longest-idle member is picked", (core.routeTask({ mA, mB }, rq, { globalOn = true }) or {}).key, "a")
+  eq("routeTask: a held member is skipped; the next free one is picked",
+     (core.routeTask({ mA, mB }, rq, { globalOn = true, skip = { a = true } }) or {}).key, "b")
+  eq("routeTask: nobody free when every member is held",
+     core.routeTask({ mA, mB }, rq, { globalOn = true, skip = { a = true, b = true } }), nil)
+  local seq = { routing = true, mode = "sequential", tasks = { "t1" } }
+  local busy = { key = "w", status = "working", since = 0, cwd = "/p" }
+  eq("routeTask: a held working member still holds a sequential queue",
+     core.routeTask({ busy, mB }, seq, { globalOn = true, skip = { w = true } }), nil)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

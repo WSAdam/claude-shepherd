@@ -4580,7 +4580,9 @@ end
 -- is present do we send (returning true); otherwise return false so the caller keeps
 -- the task queued. Synchronous (hs.task:waitUntilExit) because the call sites need a
 -- synchronous delivery result for their pop/commit decision.
-function FX.runKittyChecked(item, sendArgv)
+-- sync (2026-09-28): wait for the send itself to finish, so a write that must land before the
+-- next one (FX.kittyType's text before its Return) can't race it to the control socket.
+function FX.runKittyChecked(item, sendArgv, sync)
   if not sendArgv then return false end  -- un-targetable -> not delivered
   local lsArgv = core.kittyCmd("ls", item)
   if lsArgv then
@@ -4595,13 +4597,41 @@ function FX.runKittyChecked(item, sendArgv)
       return false
     end
   end
+  if sync then return FX.runKittySync(sendArgv) end
   return runKitty(sendArgv)
+end
+-- One kitty @ command, waited for. True when it ran and exited 0.
+function FX.runKittySync(argv)
+  if not argv then return false end
+  local bin = resolveBin("kitty", core.config(loadConfig(), "spawn.kittyBin", nil))
+  print("[cc-kitty] " .. bin .. " " .. table.concat(argv, " "))
+  local code
+  local ok = pcall(function()
+    local t = hs.task.new(bin, nil, argv)
+    if t then t:start(); t:waitUntilExit(); code = t:terminationStatus() end
+  end)
+  if not ok or code ~= 0 then print("[cc-kitty] ❌ command failed (exit " .. tostring(code) .. ")") end
+  return ok and code == 0
 end
 local function isKitty(target) return type(target) == "table" and target.editor == "kitty" end
 -- Adapt the handleAction target to the field names core.kittyCmd reads.
 local function kittyItem(target)
   return { kitty_window_id = target.kittyWindowId,
            kitty_listen_on = target.kittyListenOn, cwd = target.cwd }
+end
+-- 2026-09-28: what a kitty session's window shows right now, with its formatting (`get-text
+-- --ansi`), for core.readyToType. nil when it can't be read (the caller refuses on that).
+function FX.kittyScreen(target)
+  local argv = core.kittyCmd("get-text", kittyItem(target))
+  if not argv then return nil end
+  local bin = resolveBin("kitty", core.config(loadConfig(), "spawn.kittyBin", nil))
+  local out
+  local ok = pcall(function()
+    local t = hs.task.new(bin, function(code, so) if code == 0 then out = so end end, argv)
+    if t then t:start(); t:waitUntilExit() end
+  end)
+  if not ok or not out then print("[cc-kitty] ⚠️ get-text failed for '" .. tostring(target.name) .. "'") end
+  return ok and out or nil
 end
 -- Build a window-effect target from a status item (for the direct, non-handleAction
 -- call sites: feedTask / clear / compact / image-paste). See FX.targetFor.
@@ -4718,6 +4748,67 @@ function FX.nudgeSafeNow(it)
   return not (fresh and fresh.status == "approval")
 end
 
+-- ---- Readiness before typing (2026-09-28) ----
+-- Build program unit 11. Every AUTOMATED send -- auto-feed, the router, a rule's nudge or
+-- continue, auto-continue, the self-summary, the /rc sweep -- comes here instead of straight to
+-- dispatchSerialized. It waits out the settle time, then, in the serialized slot right before
+-- typing, asks core.readyToType about the live status file and (kitty) the screen. A refusal
+-- ledgers ONE typing_refused event and holds the session until its status changes
+-- (core.typingHeld), so no sender re-tries it every tick. Manual actions never come here.
+FX._typing = { queued = {}, held = {} }   -- key -> sends scheduled, not yet fired; key -> the held episode
+-- view (optional): what the refusal was judged on -- at send time the live status file, whose
+-- episode the hold keys on; the ledger event keeps the tile's own identity (projectKey).
+function FX.typingRefused(it, typist, why, view)
+  local key = type(it) == "table" and it.key or nil
+  if not key then return end
+  FX._typing.held[key] = { episode = core.typingEpisode(view or it), reason = why, typist = typist }
+  print("[cc-dashboard] ⚠️ " .. tostring(typist) .. " NOT typed into '" .. tostring(it.label or it.name)
+    .. "': " .. tostring(why) .. " -- held until its status changes")
+  ledgerFor(it, { type = "typing_refused", by = typist, reason = why })
+end
+-- fn() types (it runs in the serialized slot only once the session is ready). Returns false
+-- when the send was refused now or the session is held; opts.onRefused(why) runs on every
+-- refusal, now or at send time, so a caller can release what it reserved. opts.extraStagger
+-- passes through to dispatchSerialized.
+function FX.typeWhenReady(it, typist, fn, opts)
+  opts = opts or {}
+  local key = type(it) == "table" and it.key or nil
+  local function refused(why)
+    if opts.onRefused then pcall(opts.onRefused, why) end
+    return false
+  end
+  if not key then return refused("no session") end
+  if core.typingHeld(FX._typing.held, it) then return refused("held") end
+  local q = FX._typing.queued
+  local view = setmetatable({ typing_queued = (q[key] or 0) + 1 }, { __index = it })
+  local ok, why, wait = core.readyToType(view, nil, FX.now())
+  if not ok and why ~= "settling" then
+    FX.typingRefused(it, typist, why)
+    return refused(why)
+  end
+  q[key] = (q[key] or 0) + 1
+  print("[cc-dashboard] 🔍 " .. tostring(typist) .. " -> '" .. tostring(it.label or it.name) .. "' "
+    .. ((tonumber(wait) or 0) > 0 and ("waits " .. tostring(wait) .. "s to settle") or "is due"))
+  after(math.min(math.max(tonumber(wait) or 0, 0), core.READY_SETTLE_SECONDS), function()
+    dispatchSerialized(it, typist, function()
+      local n = q[key] or 1
+      q[key] = (n > 1) and (n - 1) or nil
+      local live = core.typingView(it, FX.liveStatusFor(key))
+      local fireView = setmetatable({ typing_queued = n }, { __index = live })
+      -- kitty: the screen too; an unreadable one ("") refuses
+      local screen = (it.editor == "kitty") and (FX.kittyScreen(FX.targetFor(it)) or "") or nil
+      local ready, why2 = core.readyToType(fireView, screen, FX.now())
+      if not ready then
+        FX.typingRefused(it, typist, why2, live)
+        refused(why2)
+        return
+      end
+      fn()
+    end, opts.extraStagger)
+  end)
+  return true
+end
+
 -- Focus a window, then send after a short delay, then restore prior focus.
 -- Takes the full target so focusProject gets the cwd (its subfolder-session
 -- ancestor matching) and the editor kind. If the window can't be POSITIVELY
@@ -4750,12 +4841,42 @@ end
 -- prior focus AFTER the final Return. (sendToWindow restores too early for these
 -- multi-step sequences — it re-focuses while ⌘V/Return are still pending, so the
 -- keystrokes hit the wrong window. That race was the chronic nudge flakiness.)
+-- 2026-09-28: kitty types each line and its Return as TWO writes. One `send-text "...\r"` lands
+-- as one burst, which Claude Code's input can read as a paste -- the Return becomes a newline in
+-- the composer instead of submitting it. The first text goes synchronously, after the liveness
+-- probe (R1-15), so the result is a real delivery; each Return is its own send-key a beat later,
+-- and a second line (a /model preface's task) follows its predecessor's Return.
+FX.KITTY_RETURN_GAP = 0.15
+function FX.kittyType(target, lines)
+  local item = kittyItem(target)
+  local writes = {}
+  for _, line in ipairs(lines or {}) do
+    local w = core.kittyCmd("text", item, { text = line })
+    if w then writes[#writes + 1] = w end
+  end
+  local enter = core.kittyCmd("key", item, { token = "enter" })
+  if #writes == 0 or not enter then return false end
+  if not FX.runKittyChecked(item, writes[1], true) then return false end
+  local function returnAfter(i)
+    after(FX.KITTY_RETURN_GAP, function()
+      FX.runKittySync(enter)
+      if writes[i + 1] then
+        after(0.5, function()   -- let a slash command apply before the next line lands
+          if FX.runKittySync(writes[i + 1]) then returnAfter(i + 1) end
+        end)
+      end
+    end)
+  end
+  returnAfter(1)
+  return true
+end
+
 function FX.typeIntoWindow(target, text)
-  -- kitty: one headless send-text (trailing \r submits); no focus / chat-key dance.
-  -- R1-15: probe the window is alive FIRST so a feed into a closed window reports
-  -- false (caller keeps the task queued) instead of a false delivery.
+  -- kitty: headless send-text, then its Return as a second write (FX.kittyType); no focus /
+  -- chat-key dance. R1-15: probe the window is alive FIRST so a feed into a closed window
+  -- reports false (caller keeps the task queued) instead of a false delivery.
   if isKitty(target) then
-    return FX.runKittyChecked(kittyItem(target), core.kittyCmd("text", kittyItem(target), { text = text .. "\r" }))
+    return FX.kittyType(target, { text })
   end
   -- VS Code: char-by-char keystrokes were flaky and slash commands never submitted.
   -- Route through the same reliable clipboard-paste path as nudges (it handles the
@@ -4779,15 +4900,16 @@ function FX.pasteIntoWindow(target, payload)
   payload = payload or {}
   local preface = (type(payload.preface) == "string" and #payload.preface > 0) and payload.preface or nil
   -- kitty: no clipboard-image attach via @; send the text (if any) headlessly. A preface
-  -- is concatenated into the SAME send-text so the two submits keep their order (two
-  -- separate `@ send-text` processes would race the control socket). The no-preface path
-  -- is byte-identical to before. (DR6 auto-routing never prefaces a kitty/terminal feed.)
+  -- goes first; FX.kittyType sequences the writes (each waited for), so the two submits keep
+  -- their order and never race the control socket. 2026-09-28: each line and its Return are
+  -- separate writes. (DR6 auto-routing never prefaces a kitty/terminal feed.)
   if isKitty(target) then
-    local txt = (preface and (preface .. "\r") or "")
-      .. ((payload.text and #payload.text > 0) and (payload.text .. "\r") or "")
-    if txt == "" then return false end
+    local lines = {}
+    if preface then lines[#lines + 1] = preface end
+    if payload.text and #payload.text > 0 then lines[#lines + 1] = payload.text end
+    if #lines == 0 then return false end
     -- R1-15: liveness-probe so a paste into a dead window reports false (task stays queued).
-    return FX.runKittyChecked(kittyItem(target), core.kittyCmd("text", kittyItem(target), { text = txt }))
+    return FX.kittyType(target, lines)
   end
   -- a shared window: refuse before any focus or clipboard change; false = not delivered,
   -- so a queued task stays queued (FX.refuseShared)
@@ -18062,7 +18184,9 @@ local function runRules(ruleSet, it, edgeKind)
                           text = tostring(p.text):sub(1, 200) })
         else
         local target = it
-        dispatchSerialized(target, "rule-nudge", function()
+        -- 2026-09-28: typed only once the session can take it (FX.typeWhenReady): a nudge
+        -- rule on a working edge (hung/loop) is refused -- ledgered once -- not typed mid-turn.
+        FX.typeWhenReady(target, "rule-nudge", function()
           -- The tick-time R2-08 check above can be seconds stale by the time this
           -- slot fires (shared injection tail): re-check the LIVE status so a
           -- delayed rule nudge can't answer an approval prompt that appeared
@@ -18077,7 +18201,11 @@ local function runRules(ruleSet, it, edgeKind)
           ledgerFor(target, { type = "rule", rule = r.name, kind = edgeKind, by = "rule",
                               processor = (acted == "nudge") and "nudge" or "nudge_skipped",
                               text = tostring(p.text):sub(1, 200) })
-        end)
+        end, { onRefused = function(why)
+          ledgerFor(target, { type = "rule", rule = r.name, kind = edgeKind, by = "rule",
+                              processor = "nudge_skipped", reason = why,
+                              text = tostring(p.text):sub(1, 200) })
+        end })
         end
       elseif p.kind == "feed" and p.text and p.text ~= "" then
         -- Enqueue a task onto the tile's queue; the existing auto-feed delivers it
@@ -18095,11 +18223,14 @@ local function runRules(ruleSet, it, edgeKind)
         -- Resume an errored/stuck session by typing "continue" (delivery-gated,
         -- same path as the manual Continue button + Auto-Continue).
         local target = it
-        dispatchSerialized(target, "rule-continue", function()
+        FX.typeWhenReady(target, "rule-continue", function()
           local acted = core.handleAction(FX, target, "continue", core.shepherdSays("continue"))
           ledgerFor(target, { type = "rule", rule = r.name, kind = edgeKind, by = "rule",
                               processor = (acted == "continue") and "continue" or "continue_skipped" })
-        end)
+        end, { onRefused = function(why)
+          ledgerFor(target, { type = "rule", rule = r.name, kind = edgeKind, by = "rule",
+                              processor = "continue_skipped", reason = why })
+        end })
       end
     end
   end
@@ -18566,7 +18697,9 @@ function FX._refreshBody()
         -- when the no-window-match guard skipped it).
         -- #34: FX.feedGuard -- a kitty delivery pumps the run loop mid-slot, so a
         -- nested tick/bridge feed would double-pop the same head (see FX.feedGuard).
-        dispatchSerialized(it, "queue-feed", function()
+        -- 2026-09-28: FX.typeWhenReady -- fed only once the session can take it; a refusal
+        -- keeps the task queued for the next done edge.
+        FX.typeWhenReady(it, "autofeed", function()
           FX.feedGuard(function()
           local task, q2 = core.queuePop(FX.readQueue(qk))
           if not task then return end
@@ -18583,7 +18716,7 @@ function FX._refreshBody()
           end
           ledgerFor(it, { type = commit.event, task = tostring(task):sub(1, 200), by = "autofeed" })
           end)
-        end, it.auto_model and 0.8 or 0)   -- DR6: reserve extra stagger for the /model preface ladder
+        end, { extraStagger = it.auto_model and 0.8 or 0 })   -- DR6: reserve extra stagger for the /model preface ladder
       end
     end
 
@@ -18725,7 +18858,9 @@ function FX._refreshBody()
       -- no-window-match session doesn't burn maxAttempts without ever continuing.
       local ct = it
       local bk = cstep.budgetKey
-      dispatchSerialized(ct, "continue", function()
+      -- 2026-09-28: typed only once the session can take it (FX.typeWhenReady); a refusal
+      -- spends no budget and holds the tile until its status changes.
+      FX.typeWhenReady(ct, "auto-continue", function()
         local acted = core.handleAction(FX, ct, "continue", core.shepherdSays("continue"))
         if acted == "continue" then core.chargeAutoContinue(autoContinueState, bk) end
         ledgerFor(ct, { type = "auto_continue",
@@ -18744,13 +18879,15 @@ function FX._refreshBody()
         { enabled = not core.keystrokeBlocked(it), prevStatus = pv and pv.status or nil })
       if sstep.fire then
         local su = it
-        dispatchSerialized(su, "summary", function()
+        -- 2026-09-28: typed only once the session can take it (FX.typeWhenReady). A refusal
+        -- (e.g. a queued feed got there first) clears pending, so the next real done retries.
+        FX.typeWhenReady(su, "summary", function()
           -- promote pending->fired on a landed paste (so the summary's own done is
           -- skipped), else clear pending so the next real done retries.
           local landed = FX.pasteIntoWindow(winTarget(su), { text = core.shepherdSays(core.summaryPrompt(su)) })
           core.promoteSummary(summaryState, su.key, landed and true or false)
           if landed and ledgerOn then ledgerFor(su, { type = "summary" }) end
-        end)
+        end, { onRefused = function() core.promoteSummary(summaryState, su.key, false) end })
       end
     else
       -- Feature toggled OFF: clear any guard left armed mid-episode so re-enabling
@@ -18779,6 +18916,8 @@ function FX._refreshBody()
   core.reapUnbacked(autoContinueState.since, newPrev)
   core.reapUnbacked(FX._turnLabel, newPrev)
   core.reapUnbacked(FX._bgJobs, newPrev)
+  core.reapUnbacked(FX._typing.held, newPrev)     -- readiness before typing: a vanished session's hold
+  core.reapUnbacked(FX._typing.queued, newPrev)   -- ...and its count of sends not yet fired
   -- R2-23: watchdog/draining are tile-key keyed but cleared only inside the per-tile
   -- loop (watchdogShouldReset / drain-close), which only visits LIVE tiles. A
   -- working+non-stale tile (watchdog populated) or an armed-drain tile that vanishes
@@ -18881,7 +19020,13 @@ function FX._refreshBody()
   if routingOn then
     for qk, members in pairs(routeGroups) do
       local q = FX.readQueue(qk)
-      local pick = core.routeTask(members, q, { globalOn = true, draining = draining,
+      -- 2026-09-28: a member a send was refused for sits out until its status changes, so the
+      -- level-triggered router can't re-pick it (and re-ledger the refusal) every tick.
+      local held = {}
+      for _, m in ipairs(members) do
+        if core.typingHeld(FX._typing.held, m) then held[m.key] = true end
+      end
+      local pick = core.routeTask(members, q, { globalOn = true, skip = held, draining = draining,
         pending = routePending, now = now, pendingTimeout = core.ROUTE_PENDING_TIMEOUT })
       if pick then
         starvedSince[qk] = nil; starvedAlerted[qk] = nil
@@ -18897,7 +19042,9 @@ function FX._refreshBody()
             -- a nested tick/bridge feed would double-pop the same head. A skipped
             -- (guarded-out) attempt clears the pending marker: the member stays
             -- eligible and the level-triggered router re-picks next tick.
-            dispatchSerialized(item, "queue-feed", function()
+            -- 2026-09-28: FX.typeWhenReady -- a refused member is held (skipped above) until its
+            -- status changes, and its pending marker is released.
+            FX.typeWhenReady(item, "router", function()
               if not FX.feedGuard(function()
               local freshQ = FX.readQueue(qk)
               -- R1-18: the head may have changed since routeTask peeked (a queue-move
@@ -18933,7 +19080,8 @@ function FX._refreshBody()
               end
               ledgerFor(item, { type = commit.event, task = tostring(task):sub(1, 200), by = "router" })
               end) then routePending[item.key] = nil end
-            end, item.auto_model and 0.8 or 0)   -- DR6: reserve extra stagger for the /model preface ladder
+            end, { extraStagger = item.auto_model and 0.8 or 0,   -- DR6: reserve extra stagger for the /model preface ladder
+                   onRefused = function() routePending[item.key] = nil end })
           end
         end
       elseif core.queueRouted(q) and core.queueDepth(q) > 0 then
@@ -19531,7 +19679,8 @@ do
       if #targets > 0 then
         print("[cc-rc] startup sweep: /rc -> " .. #targets .. " running session(s)")
         for _, it in ipairs(targets) do
-          dispatchSerialized(it, "rc", function() FX.typeIntoWindow(winTarget(it), "/rc") end)
+          -- 2026-09-28: only once the session can take it -- never over a half-typed prompt
+          FX.typeWhenReady(it, "rc-sweep", function() FX.typeIntoWindow(winTarget(it), "/rc") end)
         end
       end
     end)

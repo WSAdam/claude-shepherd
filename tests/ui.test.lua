@@ -837,8 +837,13 @@ do
   -- the specific launchers round 3 caught bypassing the tail:
   check("inject-pin: refresh() drain close serialized",
         src:find('dispatchSerialized(it, "close", function() core.handleAction(FX, it, "close") end)', 1, true) ~= nil)
+  -- REQUIREMENT CHANGE 2026-09-28 (unit 11, readiness before typing): the automated typists reach
+  -- the chokepoint through FX.typeWhenReady, which asks core.readyToType first and then
+  -- dispatches through dispatchSerialized itself -- still serialized, pinned via twrSerialized.
+  local twrSerialized = (src:match("function FX%.typeWhenReady%(it, typist, fn, opts%)(.-)\nend\n") or "")
+    :find("dispatchSerialized(it, typist, function()", 1, true) ~= nil
   check("inject-pin: refresh() auto-feed serialized (pop inside the slot)",
-        src:find('dispatchSerialized(it, "queue-feed", function()', 1, true) ~= nil)
+        twrSerialized and src:find('FX.typeWhenReady(it, "autofeed", function()\n          FX.feedGuard(function()', 1, true) ~= nil)
   check("inject-pin: per-tile close no longer skips the tail",
         src:find('dispatchSerialized(item, a, function() core.handleAction(FX, item, "close") end)', 1, true) ~= nil)
   check("inject-pin: ctx-menu clear serialized",
@@ -853,7 +858,7 @@ do
   -- 2026-09-28 requirement change: the send now carries Shepherd's mark (core.shepherdSays); still
   -- the same serialized, delivery-gated call.
   check("inject-pin: auto-continue serialized through the chokepoint",
-        src:find('dispatchSerialized(ct, "continue", function()', 1, true) ~= nil
+        twrSerialized and src:find('FX.typeWhenReady(ct, "auto-continue", function()', 1, true) ~= nil
         and src:find('core.handleAction(FX, ct, "continue", core.shepherdSays("continue"))', 1, true) ~= nil)
   check("inject-pin: auto-continue ledgers the resume",
         src:find('type = "auto_continue",', 1, true) ~= nil
@@ -861,7 +866,7 @@ do
         and src:find('core.chargeAutoContinue(autoContinueState, bk)', 1, true) ~= nil)
   -- Remote-control startup sweep types /rc through the SAME serialized chokepoint.
   check("inject-pin: RC startup sweep serialized through the chokepoint",
-        src:find('dispatchSerialized(it, "rc", function() FX.typeIntoWindow(winTarget(it), "/rc") end)', 1, true) ~= nil)
+        twrSerialized and src:find('FX.typeWhenReady(it, "rc-sweep", function() FX.typeIntoWindow(winTarget(it), "/rc") end)', 1, true) ~= nil)
   check("inject-pin: RC sweep targets come from cc-core",
         src:find("core.remoteControlSweepTargets(list)", 1, true) ~= nil)
 
@@ -1491,8 +1496,12 @@ do
         src:find("core.stepSelfSummary(summaryState, it", 1, true) ~= nil
         and src:find('prevStatus = pv and pv.status or nil', 1, true) ~= nil)
   -- 2026-09-28 requirement change: the summary prompt now carries Shepherd's mark; same chokepoint.
+  -- REQUIREMENT CHANGE 2026-09-28 (unit 11): reached through FX.typeWhenReady, which asks
+  -- core.readyToType and then dispatches through dispatchSerialized itself.
   check("l5sum-pin: summary typed via serialized chokepoint",
-        src:find('dispatchSerialized(su, "summary"', 1, true) ~= nil
+        (src:match("function FX%.typeWhenReady%(it, typist, fn, opts%)(.-)\nend\n") or "")
+          :find("dispatchSerialized(it, typist, function()", 1, true) ~= nil
+        and src:find('FX.typeWhenReady(su, "summary", function()', 1, true) ~= nil
         and src:find("FX.pasteIntoWindow(winTarget(su), { text = core.shepherdSays(core.summaryPrompt(su)) })", 1, true) ~= nil)
   -- review fix: the summary ledger is delivery-gated (only when the paste landed).
   check("l5sum-fix: summary ledger gated on delivery",
@@ -3795,6 +3804,61 @@ do
   check("talk: the TALK badge goes through esc()", badge:find('esc("TALK")', 1, true) ~= nil
         and badge:find("if(!it.talk) return", 1, true) ~= nil)
   check("talk: the badge rides the tile's badges row", src:find("var b = talkBadge(it) + riskBadge(it)", 1, true) ~= nil)
+end
+
+-- ---- readiness before typing: every automated typist asks first (2026-09-28) ----
+-- Build program unit 11: auto-feed, the router, a rule's nudge/continue, auto-continue, the
+-- self-summary and the /rc sweep all type through FX.typeWhenReady, which asks core.readyToType
+-- (kitty: with the screen from FX.kittyScreen) in the serialized slot, right before typing.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  local twr = src:match("function FX%.typeWhenReady%(it, typist, fn, opts%)(.-)\nend\n") or ""
+  check("readiness: FX.typeWhenReady exists  (len=" .. #twr .. ")", #twr > 0)
+  check("readiness: it asks core.readyToType", twr:find("core.readyToType(", 1, true) ~= nil)
+  check("readiness: ...with kitty's screen read right before typing", twr:find("FX.kittyScreen(", 1, true) ~= nil)
+  check("readiness: ...in the serialized slot", twr:find("dispatchSerialized(", 1, true) ~= nil)
+  local refusedFn = src:match("function FX%.typingRefused%(it, typist, why, view%)(.-)\nend\n") or ""
+  check("readiness: a refusal is ledgered as typing_refused (once: it sets the hold)",
+        twr:find("FX.typingRefused(", 1, true) ~= nil
+        and refusedFn:find('ledgerFor(it, { type = "typing_refused", by = typist, reason = why })', 1, true) ~= nil
+        and refusedFn:find("FX._typing.held[key] = { episode = core.typingEpisode(view or it)", 1, true) ~= nil)
+  check("readiness: a send-time refusal holds on the live view's episode, ledgered as the tile",
+        twr:find("FX.typingRefused(it, typist, why2, live)", 1, true) ~= nil)
+  check("readiness: a held session is skipped until its status changes", twr:find("core.typingHeld(", 1, true) ~= nil)
+  check("readiness: the fire-time view is the live status file", twr:find("core.typingView(", 1, true) ~= nil
+        and twr:find("FX.liveStatusFor(", 1, true) ~= nil)
+  check("readiness: FX.kittyScreen reads get-text", src:find('core.kittyCmd("get-text", kittyItem(target))', 1, true) ~= nil)
+
+  local rules = src:match("local function runRules%(ruleSet, it, edgeKind%)(.-)\nend\n") or ""
+  check("readiness: a rule's nudge asks first", rules:find('FX.typeWhenReady(target, "rule-nudge", function(', 1, true) ~= nil)
+  check("readiness: a rule's continue asks first", rules:find('FX.typeWhenReady(target, "rule-continue", function(', 1, true) ~= nil)
+  check("readiness: ...and neither dispatches around it",
+        not rules:find('dispatchSerialized(target, "rule-nudge"', 1, true) and not rules:find('dispatchSerialized(target, "rule-continue"', 1, true))
+  local body = src:match("function FX%._refreshBody%(%)(.-)\nend\n") or ""
+  check("readiness: auto-feed asks first", body:find('FX.typeWhenReady(it, "autofeed", function(', 1, true) ~= nil)
+  check("readiness: the router asks first", body:find('FX.typeWhenReady(item, "router", function(', 1, true) ~= nil)
+  check("readiness: auto-continue asks first", body:find('FX.typeWhenReady(ct, "auto-continue", function(', 1, true) ~= nil)
+  check("readiness: the self-summary asks first", body:find('FX.typeWhenReady(su, "summary", function(', 1, true) ~= nil)
+  check("readiness: no automated feed/continue/summary dispatches around it",
+        not body:find('dispatchSerialized(it, "queue-feed"', 1, true) and not body:find('dispatchSerialized(item, "queue-feed"', 1, true)
+        and not body:find('dispatchSerialized(ct, "continue"', 1, true) and not body:find('dispatchSerialized(su, "summary"', 1, true))
+  check("readiness: the router skips a held member instead of re-picking it every tick",
+        body:find("core.typingHeld(FX._typing.held, m)", 1, true) ~= nil)
+  check("readiness: a vanished session's hold and count are reaped",
+        body:find("core.reapUnbacked(FX._typing.held, newPrev)", 1, true) ~= nil
+        and body:find("core.reapUnbacked(FX._typing.queued, newPrev)", 1, true) ~= nil)
+  check("readiness: the /rc sweep asks first", src:find('FX.typeWhenReady(it, "rc-sweep", function(', 1, true) ~= nil
+        and not src:find('dispatchSerialized(it, "rc"', 1, true))
+
+  -- kitty: the text and the Return are two writes (one "text\r" write reads as a paste)
+  check("readiness: kitty never sends text and Return in one write",
+        not src:find('{ text = text .. "\\r" }', 1, true) and not src:find('(payload.text .. "\\r")', 1, true))
+  local kt = src:match("function FX%.kittyType%(target, lines%)(.-)\nend\n") or ""
+  check("readiness: FX.kittyType writes the text, then the Return on its own",
+        kt:find('core.kittyCmd("text", item, { text = line })', 1, true) ~= nil
+        and kt:find('core.kittyCmd("key", item, { token = "enter" })', 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

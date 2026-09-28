@@ -6,7 +6,42 @@ Every **automatic** behaviour on this page is **off until you turn it on**, in �
 Automation or in `~/.claude/cc-config.json`; the manual tools (Queue, Feed next, templates, A/B
 compare, a routine's **Run**) work without a switch. Automatic actions that type into a session are delivery-gated (a task
 leaves the queue only once it reached the session's window), skip sessions whose window hosts other
-sessions, and are recorded in the audit ledger.
+sessions, wait until the session can take the text ([below](#when-automation-types)), and are
+recorded in the audit ledger.
+
+## When automation types
+
+Auto-feed, project routing, a rule's `nudge` or `continue`, auto-continue, the post-run
+self-summary and the startup `/rc` sweep all type into a session without you. Each one waits until
+the session can take it:
+
+- **Never mid-turn**: not while the session is working, waiting on an approval or on a question
+  Shepherd holds, or running a tool.
+- **Settled**: at least 3 seconds after the session's last status change. A send on a turn that
+  just ended waits out the rest; it isn't dropped.
+- **One at a time**: at most one automatic send queued per session. When two fire on the same turn
+  end (auto-feed and the self-summary, say), the first goes and the second is refused.
+- **Kitty**: right before typing, Shepherd reads the window (`kitty @ get-text`) and types only
+  into an empty composer. A dim prompt suggestion counts as empty; your half-typed text, an open
+  menu or picker, the session survey or the trust dialog refuse the send, and so does a screen it
+  can't read. The text and its Return go as two writes, so Claude Code submits the text instead
+  of taking it as a paste.
+- **VS Code**: only a window with one Claude tab is typed into at all
+  ([shared windows](controls.md#sessions-that-share-a-window)); the status checks above apply.
+
+The checks run when the sender fires and again right before the keys go out, against the live
+status file, so a turn that started in between is caught.
+
+A refused send records one `typing_refused` event in the ledger: `by` names the sender, `reason`
+says why (`working`, `approval`, `question`, `tool`, `queued`, `composer`, `menu`, `trust`,
+`no composer`). Shepherd then leaves that session alone until its status changes, instead of trying
+again every second. What happens to the send depends on the sender: a queued task stays queued for
+the next turn end, routing picks another free session, the self-summary tries again after the next
+turn, and a rule's nudge or continue is skipped (`nudge_skipped` / `continue_skipped` with the
+reason). A nudge rule on a `hung` or `loop` edge fires while the session is still working, so it is
+always refused.
+
+Your own clicks (Nudge, Feed next, Continue and the rest) aren't gated: when you act, it types.
 
 ## Task queue
 
@@ -182,9 +217,9 @@ automations above. Create and edit them in **⚙️ Automation rules** (☰ menu
   absent means fleet-wide. (A `provider` match doesn't work yet: sessions don't carry the field it
   compares.)
 - **processor.kind**: `log` (write an audit note), `relabel` (rename the tile to `label`), `nudge`
-  (type `text` into the session through the same delivery-gated path as a manual nudge), `feed`
-  (add `text` to the session's project queue, for auto-feed or routing to deliver) or `continue`
-  (resume an errored turn).
+  (type `text` into the session through the same delivery-gated path as a manual nudge, once it
+  [can take it](#when-automation-types)), `feed` (add `text` to the session's project queue, for
+  auto-feed or routing to deliver) or `continue` (resume an errored turn).
 - **once**: fire at most once per rule per tile, until Hammerspoon reloads.
 
 ```json

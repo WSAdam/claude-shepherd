@@ -1,0 +1,11 @@
+[m[38:2:255:255:255m⏺[39m Done. All 412 checks pass.
+
+[m[38:2:136:136:136m────────────────────────────────────────────────────────────
+[m[22;1mSelect model
+[m[22;2mSwitch between Claude models.
+
+[m❯ 1. Default (recommended)
+[m  2. Sonnet
+[m  3. Haiku
+
+[m[22;2mEnter to confirm · Esc to exit
