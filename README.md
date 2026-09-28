@@ -34,6 +34,8 @@ Every feature below has a reference page one click away. The panel lists the sam
 
 - [**Fleet dashboard**](docs/fleet.md#statuses): every session is a live tile: working, needs you,
   ready, or errored.
+- [**How each turn ended**](docs/fleet.md#statuses): a finished card says whether its last turn got
+  done, made progress, only planned, did nothing, got blocked, or needs follow-up.
 - [**Project cards & instances**](docs/fleet.md#project-cards-and-instances): a repo and its
   worktrees share one card that leads with the instance that needs you; its corner button lists
   every instance.

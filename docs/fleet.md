@@ -32,6 +32,15 @@ Instances rows and the Stream Deck show an errored session as **Error** in magen
 - A done or idle session with live subagents or a Workflow reads **Running N agents**, and a batch
   driver whose units are working reads **Driving N units**. The underlying status is unchanged;
   this is display only.
+- A **Ready for you** card says how its last turn went, read from the transcript since the newest
+  prompt: **done** (a `TODO.md` line ticked to `[x]`, or a commit), **made progress** (edits,
+  commands that change things, test runs), **only planned** (it only read, or explained at
+  length), **did nothing**, **blocked** (it stopped on a denial or an API error) or **needs
+  follow-up** (it asked you, put up a plan, or ended on a question). Its Instances row says the
+  same, and the ledger records a `turn_outcome` event. What Shepherd sends on its own
+  (auto-continue, a rule's nudge or continue, the self-summary) starts with `[shepherd]`, so those
+  turns never read as yours; your own **Continue** click still types a plain `continue`. Task
+  notifications and compaction summaries don't count as prompts either.
 - A `done` tile **self-heals back to `working`** when the transcript shows the turn resumed (the
   model wrote a new line, or you typed a fresh prompt). In Auto mode or the VS Code extension, a
   text-only reply or an auto-continued turn can land before the `working` hooks do, so a tile no

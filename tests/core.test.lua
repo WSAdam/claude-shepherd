@@ -289,6 +289,11 @@ do
   eq("continue: returns continue when delivered", core.handleAction(r.fx, normal, "continue"), "continue")
   eq("continue: typeIntoWindow op", r.last().op, "typeIntoWindow")
   eq("continue: types the word continue", r.last().b, "continue")
+  -- 2026-09-28: an automated continue carries Shepherd's mark (core.shepherdSays), so the
+  -- transcript tells it from Adam's own; his Continue click above still types the bare word.
+  r = newRecorder()
+  core.handleAction(r.fx, normal, "continue", core.shepherdSays("continue"))
+  eq("continue: an automated one types the [shepherd]-marked text", r.last().b, "[shepherd] continue")
   -- L6: continue is delivery-gated — a no-window-match skip returns nil (accurate outcome)
   local rskip = newRecorder(); rskip._typeResult = false
   eq("continue: skip on no-window-match -> nil", core.handleAction(rskip.fx, normal, "continue"), nil)
@@ -667,6 +672,110 @@ do
   eq("plan: no plan/todos -> nil", core.planFromTranscript(chat), nil)
   eq("plan: empty -> nil", core.planFromTranscript(""), nil)
   eq("plan: garbage line skipped", core.planFromTranscript("{ not json\n" .. todoLine) ~= nil, true)
+end
+
+-- ---- Whose prompt it is, and how the turn ended (2026-09-28) --------------------------------
+-- 2026-09-28: userHasHumanText counted task-notification records -- and compaction summaries --
+-- as Adam's prompts (non-meta text), so the detail panel's peek showed them as his, an error read
+-- as recovered the moment a notification arrived, and nothing could say which turns Adam started.
+-- Record shapes are copied from real transcripts (Claude Code 2.1.2x, VS Code).
+do
+  local J = core.json.encode
+  local function user(fields, content)
+    local o = { type = "user", message = { role = "user", content = content } }
+    for k, v in pairs(fields or {}) do o[k] = v end
+    return o
+  end
+  local function T(t) return { { type = "text", text = t } } end
+  local typed   = user({ origin = { kind = "human" }, promptSource = "sdk" }, T("fix the login bug"))
+  local marked  = user({ origin = { kind = "human" }, promptSource = "sdk" }, T("[shepherd] continue"))
+  local notif   = user({ origin = { kind = "task-notification" }, promptSource = "system" },
+                       "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>")
+  local peer    = user({ isMeta = true, origin = { kind = "peer", from = "uds:/tmp/cc-socks/1.sock" }, promptSource = "system" },
+                       T("Another Claude session sent a message:\n<cross-session-message>hi</cross-session-message>"))
+  local summary = user({ isCompactSummary = true, isVisibleInTranscriptOnly = true },
+                       "This session is being continued from a previous conversation that ran out of context.")
+  local older   = user({ promptSource = "sdk" }, T("can you just run 7/2 through 7/12"))   -- a build before `origin`
+  local olderN  = user({}, "<task-notification>\n<task-id>b2</task-id>\n</task-notification>")
+  local result  = user({}, { { type = "tool_result", tool_use_id = "t", content = "ok" } })
+  local image   = user({ isMeta = true }, T("[Image: source: /tmp/x.png]"))
+  eq("a prompt Adam typed is his", core.promptOrigin(typed), "human")
+  eq("a prompt Shepherd sent is marked [shepherd]", core.promptOrigin(marked), "shepherd")
+  eq("a task notification is a notification", core.promptOrigin(notif), "notification")
+  eq("another session's message is a peer's", core.promptOrigin(peer), "peer")
+  eq("a compaction summary is bookkeeping", core.promptOrigin(summary), "meta")
+  eq("a prompt from a build before `origin` is still Adam's", core.promptOrigin(older), "human")
+  eq("...and a notification there is still a notification", core.promptOrigin(olderN), "notification")
+  eq("a tool result is no prompt", core.promptOrigin(result), nil)
+  eq("an attached image line is bookkeeping", core.promptOrigin(image), "meta")
+  eq("a task notification is not a human prompt", core.userHasHumanText(notif), false)
+  eq("...nor a compaction summary", core.userHasHumanText(summary), false)
+  eq("...nor another session's message", core.userHasHumanText(peer), false)
+  eq("Adam's prompt still is", core.userHasHumanText(typed), true)
+  eq("a Shepherd send starts a turn too", core.userHasHumanText(marked), true)
+  local errLine = J({ type = "system", subtype = "api_error", error = { formatted = "Connection error." } })
+  check("an error followed by a task notification is still an error", core.transcriptError(errLine .. "\n" .. J(notif)) ~= nil)
+  eq("a task notification newer than done doesn't read as a resumed turn",
+     core.transcriptResumed(J(user({ timestamp = "2026-09-28T12:00:10Z", origin = { kind = "task-notification" } }, "<task-notification>x</task-notification>")),
+       core.isoToEpoch("2026-09-28T12:00:00Z")), false)
+  eq("shepherdSays marks what Shepherd sends", core.shepherdSays("continue"), "[shepherd] continue")
+  eq("...and never marks it twice", core.shepherdSays("[shepherd] continue"), "[shepherd] continue")
+
+  -- the turn: everything from the newest prompt Adam (or Shepherd) sent to the end of the tail
+  local n = 0
+  local function prompt(t) return J(user({ origin = { kind = "human" }, promptSource = "sdk" }, T(t))) end
+  local function said(t) return J({ type = "assistant", message = { role = "assistant", content = T(t) } }) end
+  local function call(name, input, content, isErr)
+    n = n + 1
+    local id = "toolu_" .. n
+    return J({ type = "assistant", message = { role = "assistant",
+               content = { { type = "tool_use", id = id, name = name, input = input } } } }) .. "\n"
+        .. J({ type = "user", message = { role = "user",
+               content = { { type = "tool_result", tool_use_id = id, content = content or "ok", is_error = isErr or nil } } } })
+  end
+  local function turn(...) return table.concat({ ... }, "\n") .. "\n" end
+  local function label(tail) return core.turnOutcome(core.turnEvidence(tail)) end
+  local long = string.rep("The login handler reads the session cookie before the CSRF check. ", 8)
+  eq("a turn that did nothing says so", label(turn(prompt("thanks"), said("You're welcome."))), "did nothing")
+  eq("a turn that only read and explained only planned",
+     label(turn(prompt("how does login work?"), call("Read", { file_path = "/r/auth.ts" }), call("Grep", { pattern = "csrf" }), said(long))), "only planned")
+  eq("read-only commands change nothing",
+     label(turn(prompt("where are we?"), call("Bash", { command = "git status && git diff --stat | head -5" }), said(long))), "only planned")
+  eq("an edit is progress", label(turn(prompt("fix it"), call("Edit", { file_path = "/r/auth.ts", old_string = "a", new_string = "b" }), said("Fixed the check."))), "made progress")
+  eq("a command that changes things is progress", label(turn(prompt("set it up"), call("Bash", { command = "mkdir -p build && cp a b" }), said("Set up."))), "made progress")
+  eq("running the tests is progress", label(turn(prompt("run the tests"), call("Bash", { command = "make test" }, "ALL GREEN"), said("All green."))), "made progress")
+  eq("a TODO line flipped to [x] is done",
+     label(turn(prompt("fix it"), call("Edit", { file_path = "/r/TODO.md", old_string = "- [ ] fix login", new_string = "- [x] fix login" }), said("Fixed and ticked."))), "done")
+  eq("a commit is done", label(turn(prompt("ship it"), call("Bash", { command = "git commit -q -m 'Fix login'" }), said("Committed."))), "done")
+  eq("a question at the end needs follow-up",
+     label(turn(prompt("fix it"), call("Edit", { file_path = "/r/a.ts", old_string = "a", new_string = "b" }), said("Fixed. Should I update the docs too?"))), "needs follow-up")
+  eq("asking with AskUserQuestion needs follow-up", label(turn(prompt("plan it"), call("AskUserQuestion", { questions = {} }), said("Waiting on you."))), "needs follow-up")
+  eq("a plan put up for approval needs follow-up", label(turn(prompt("plan it"), call("ExitPlanMode", { plan = "1. do it" }), said("Here's the plan."))), "needs follow-up")
+  eq("a denial it stopped on is blocked",
+     label(turn(prompt("push it"), call("Bash", { command = "git push" }, "Permission to use Bash with command git push has been denied.", true), said("The push was denied. Want me to try another way?"))), "blocked")
+  eq("a command that failed but was followed by work isn't blocked",
+     label(turn(prompt("fix it"), call("Bash", { command = "make test" }, "1 failed", true), call("Edit", { file_path = "/r/a.ts", old_string = "a", new_string = "b" }), said("Fixed the failing test."))), "made progress")
+  eq("only the newest turn counts",
+     label(turn(prompt("fix it"), call("Edit", { file_path = "/r/a.ts", old_string = "a", new_string = "b" }), said("Fixed."), prompt("thanks"), said("Anytime."))), "did nothing")
+  eq("a notification's turn after Adam's still belongs to his",
+     label(turn(prompt("fix it"), call("Edit", { file_path = "/r/a.ts", old_string = "a", new_string = "b" }), said("Fixed."), J(notif), said("The build finished."))), "made progress")
+  eq("a Shepherd continue starts a turn of its own",
+     label(turn(prompt("fix it"), call("Edit", { file_path = "/r/a.ts", old_string = "a", new_string = "b" }), said("Fixed."), J(marked), said("Nothing left."))), "did nothing")
+  eq("writing Shepherd's own notes isn't progress",
+     label(turn(prompt("save notes"), call("Write", { file_path = "/Users/x/.claude/cc-notes/k.handoff.md", content = "x" }), said("Saved."))), "did nothing")
+  eq("a turn with no reply yet has no label (the tail is read again)", label(turn(prompt("fix it"))), nil)
+  local ev = core.turnEvidence(turn(prompt("fix it"), call("Edit", { file_path = "/r/a.ts", old_string = "a", new_string = "b" }),
+                                    call("Bash", { command = "make test" }), said("Done.")) .. '{"type":"assistant","mess')
+  eq("a torn last line leaves the turn readable", core.turnOutcome(ev), "made progress")
+  eq("...counting its edits", ev and ev.edits, 1)
+  eq("...and its test runs", ev and ev.tests, 1)
+  -- the Instances row says it too, only while the session is finished
+  local p = core.instancesPayload("s", { { key = "k", status = "done", turnLabel = "made progress", cwd = "/r/a" },
+                                          { key = "w", status = "working", turnLabel = "made progress", cwd = "/r/b" } }, {}, {}, {})
+  local byKey = {}
+  for _, r in ipairs(p.members or {}) do byKey[r.key] = r end
+  eq("a finished Instances row carries its turn label", (byKey.k or {}).turnLabel, "made progress")
+  eq("...a working one doesn't", (byKey.w or {}).turnLabel, nil)
 end
 
 -- ---- deriveAutoTitle: tile title from the first prompt ----------------------
@@ -8192,7 +8301,9 @@ do
   -- 2026-09-11: 10 -> 11 for batch driving ("fleet", flagged new).
   -- 2026-09-11: 11 -> 12 for answering questions from Shepherd ("answers", flagged new).
   -- 2026-09-25: 12 -> 13 for the commit stats under the fleet block ("commits", flagged new).
-  eq("FEATURES: the 13 new features are flagged", newCount, 13)
+  -- 2026-09-28: 13 -> 14 for how each turn ended ("turns", flagged new).
+  eq("FEATURES: the 14 new features are flagged", newCount, 14)
+  check("FEATURES: lists how each turn ended", keys.turns == true)
   check("FEATURES: lists answering questions from Shepherd", keys.answers == true)
   check("FEATURES: lists the commit stats", keys.commits == true)
 end

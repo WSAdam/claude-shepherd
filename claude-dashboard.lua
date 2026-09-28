@@ -1192,6 +1192,43 @@ local function ledgerFor(item, extra)
   FX.appendLedger(ev)
 end
 
+-- How a finished tile's last turn ended (2026-09-28): core.turnOutcome over the transcript tail,
+-- read on the fresh done edge -- or, after a reload, the first time a done tile is seen, at most
+-- FX.TURN_READS_PER_TICK of those a tick -- and kept while the tile stays done. A reply not in
+-- the transcript yet is read again next tick, up to 5 times. Only a fresh edge is ledgered.
+FX.TURN_TAIL_BYTES = 262144
+FX.TURN_READS_PER_TICK = 3
+FX._turnLabel = {}   -- key -> { label, tries, edge }
+FX._turnReads = 0    -- reads spent this tick (reset at the top of the tile loop)
+function FX.stepTurnLabel(it, pv, ledgerOn)
+  local key = type(it) == "table" and it.key or nil
+  if not key then return end
+  if it.status ~= "done" or it.remote or type(it.transcript_path) ~= "string" then
+    FX._turnLabel[key] = nil; it.turnLabel = nil
+    return
+  end
+  local st = FX._turnLabel[key]
+  local fresh = pv ~= nil and pv.status ~= "done"
+  if fresh or st == nil then
+    st = { tries = 0, edge = fresh }
+    FX._turnLabel[key] = st
+  end
+  if st.label == nil and st.tries < 5 and (st.edge or FX._turnReads < FX.TURN_READS_PER_TICK) then
+    st.tries = st.tries + 1
+    FX._turnReads = FX._turnReads + 1
+    local ev = core.turnEvidence(FX.readTail(it.transcript_path, FX.TURN_TAIL_BYTES) or "")
+    local label = core.turnOutcome(ev)
+    if label then
+      st.label = label
+      if st.edge and ledgerOn then
+        ledgerFor(it, { type = "turn_outcome", label = label, origin = ev.origin, edits = ev.edits,
+                        tests = ev.tests, errors = ev.errors, denials = ev.denials })
+      end
+    end
+  end
+  it.turnLabel = st.label
+end
+
 -- Read + parse + filter the ledger. opts = { session, sinceTs, untilTs, types,
 -- limit }. Caps the slice (newest-first) so a huge ledger can't bloat the webview
 -- payload; limit <= 0 disables the cap (the export/review full-data paths).
@@ -11182,6 +11219,13 @@ local HTML = [[
     // agents out of "idle", so this one check covers all of them.
     // 2026-09-17: ...and a heads-up is never dimmed either -- it still has something to say.
     function staleDim(it){ return !!(it && it.stale && effStatus(it) === "idle" && !headsUp(it)); }
+    // 2026-09-28: how a finished session's last turn ended (core.turnOutcome), after its status
+    // word -- only on a finished tile, and only a label from the known set.
+    var TURN_LABELS = { "done":1, "made progress":1, "only planned":1, "did nothing":1, "blocked":1, "needs follow-up":1 };
+    function turnTail(it){
+      if(!it || it.status !== "done" || !TURN_LABELS.hasOwnProperty(it.turnLabel)) return "";
+      return " · " + it.turnLabel;
+    }
     function statusWords(it){
       if(needsYouNow(it)) return LABELS.approval;
       // A transient API error the session is retrying (a connection blip, a timeout, an
@@ -11197,7 +11241,7 @@ local HTML = [[
         var secs = Math.max(0, Math.floor(Date.now() / 1000) - it.tool_started_at);
         if(secs >= 60) return "Working - " + esc(it.tool_name || "a tool") + " " + fmtAge(it.tool_started_at);
       }
-      return LABELS[st] || st;
+      return (LABELS[st] || st) + turnTail(it);
     }
     // Appearance themes/defaults/var-list, single-sourced from cc-core APPEARANCE_*
     // (injected). Drives the Appearance tab's live preview (applyAppearance twin).
@@ -14778,7 +14822,7 @@ local HTML = [[
     function instStatusWord(im){
       var w = im.hung ? "Stalled"
             : (im.bgActive && (im.status === "done" || im.status === "idle")) ? "Running agents"
-            : (LABELS[im.status] || "Idle");
+            : (LABELS[im.status] || "Idle") + turnTail(im);
       return (im.hidden ? "Hidden · " : "") + w + (im.stale ? " (quiet)" : "");
     }
     function renderInstances(force){
@@ -17775,7 +17819,7 @@ local function runRules(ruleSet, it, edgeKind)
                                 text = tostring(p.text):sub(1, 200) })
             return
           end
-          local acted = core.handleAction(FX, target, "nudge", p.text)
+          local acted = core.handleAction(FX, target, "nudge", core.shepherdSays(p.text))
           ledgerFor(target, { type = "rule", rule = r.name, kind = edgeKind, by = "rule",
                               processor = (acted == "nudge") and "nudge" or "nudge_skipped",
                               text = tostring(p.text):sub(1, 200) })
@@ -17798,7 +17842,7 @@ local function runRules(ruleSet, it, edgeKind)
         -- same path as the manual Continue button + Auto-Continue).
         local target = it
         dispatchSerialized(target, "rule-continue", function()
-          local acted = core.handleAction(FX, target, "continue")
+          local acted = core.handleAction(FX, target, "continue", core.shepherdSays("continue"))
           ledgerFor(target, { type = "rule", rule = r.name, kind = edgeKind, by = "rule",
                               processor = (acted == "continue") and "continue" or "continue_skipped" })
         end)
@@ -17887,6 +17931,7 @@ function FX._refreshBody()
   -- latches the edge for the next tick, so the badge/lineage recomputes can't be
   -- starved by an interleaved non-refresh read.
   local ledgerOn = ledgerEnabled()
+  FX._turnReads = 0   -- FX.stepTurnLabel's per-tick budget for labelling tiles already done at a reload
   local ledgerEvents, ledgerChanged = nil, false
   if riskEnabled or ledgerOn then ledgerEvents, ledgerChanged = ledgerSnapshot(true) end
   local now = FX.now()
@@ -18178,6 +18223,10 @@ function FX._refreshBody()
                       message = it.error_message })
     end
 
+    -- 2026-09-28: how its last turn ended (done / made progress / only planned / did nothing /
+    -- blocked / needs follow-up), for the card and its Instances row.
+    FX.stepTurnLabel(it, pv, ledgerOn)
+
     -- L4 per-task timing: a fed queue task finishes on its first done edge -- ledger
     -- the duration + role, then clear the marker (the autofeed below may re-stamp the
     -- next task). Fires before drain/feed so a completing task is always recorded.
@@ -18416,7 +18465,7 @@ function FX._refreshBody()
       local ct = it
       local bk = cstep.budgetKey
       dispatchSerialized(ct, "continue", function()
-        local acted = core.handleAction(FX, ct, "continue")
+        local acted = core.handleAction(FX, ct, "continue", core.shepherdSays("continue"))
         if acted == "continue" then core.chargeAutoContinue(autoContinueState, bk) end
         ledgerFor(ct, { type = "auto_continue",
                         attempt = (acted == "continue") and autoContinueState.attempts[bk] or nil,
@@ -18437,7 +18486,7 @@ function FX._refreshBody()
         dispatchSerialized(su, "summary", function()
           -- promote pending->fired on a landed paste (so the summary's own done is
           -- skipped), else clear pending so the next real done retries.
-          local landed = FX.pasteIntoWindow(winTarget(su), { text = core.summaryPrompt(su) })
+          local landed = FX.pasteIntoWindow(winTarget(su), { text = core.shepherdSays(core.summaryPrompt(su)) })
           core.promoteSummary(summaryState, su.key, landed and true or false)
           if landed and ledgerOn then ledgerFor(su, { type = "summary" }) end
         end)
@@ -18467,6 +18516,7 @@ function FX._refreshBody()
   -- tile leaves the error state); an errored tile that's pruned/closed before recovering
   -- leaks its entry forever -- reap it like the siblings above.
   core.reapUnbacked(autoContinueState.since, newPrev)
+  core.reapUnbacked(FX._turnLabel, newPrev)
   -- R2-23: watchdog/draining are tile-key keyed but cleared only inside the per-tile
   -- loop (watchdogShouldReset / drain-close), which only visits LIVE tiles. A
   -- working+non-stale tile (watchdog populated) or an armed-drain tile that vanishes

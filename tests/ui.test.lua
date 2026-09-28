@@ -850,9 +850,11 @@ do
   check("inject-pin: generic per-tile tail uses the chokepoint",
         src:find("dispatchSerialized(item, a, dispatch)", 1, true) ~= nil)
   -- Auto-Continue fires the SAME serialized continue keystroke the manual button uses.
+  -- 2026-09-28 requirement change: the send now carries Shepherd's mark (core.shepherdSays); still
+  -- the same serialized, delivery-gated call.
   check("inject-pin: auto-continue serialized through the chokepoint",
         src:find('dispatchSerialized(ct, "continue", function()', 1, true) ~= nil
-        and src:find('core.handleAction(FX, ct, "continue")', 1, true) ~= nil)
+        and src:find('core.handleAction(FX, ct, "continue", core.shepherdSays("continue"))', 1, true) ~= nil)
   check("inject-pin: auto-continue ledgers the resume",
         src:find('type = "auto_continue",', 1, true) ~= nil
         -- R2-22: the budget is charged on confirmed delivery via chargeAutoContinue
@@ -1170,8 +1172,9 @@ do
   check("l6-pin: fires via core.rulesForEdge", src:find("core.rulesForEdge(ruleSet, edgeKind, it)", 1, true) ~= nil)
   check("l6-pin: fired on a fresh status edge", src:find("runRules(ruleSet, it, it.status)", 1, true) ~= nil)
   check("l6-pin: log processor ledgers by:rule", src:find('type = "rule", rule = r.name', 1, true) ~= nil)
+  -- 2026-09-28 requirement change: the nudge now carries Shepherd's mark; same delivery-gated path.
   check("l6-pin: nudge processor uses delivery-gated path",
-        src:find('core.handleAction(FX, target, "nudge", p.text)', 1, true) ~= nil)
+        src:find('core.handleAction(FX, target, "nudge", core.shepherdSays(p.text))', 1, true) ~= nil)
   check("l6-pin: once-state reaped on vanish", src:find("if tk and not newPrev[tk] then ruleFired[k] = nil", 1, true) ~= nil)
   -- L6 Inc 3: automation result ledger — outcome field + the previously-silent blocked branch
   -- R1-22: outcome reflects the REAL launch (ok on a real spawn, dryrun on the no-op),
@@ -1189,6 +1192,25 @@ do
   check("l6-pin: manual continue gated ledger",
         src:find('type = "continue", outcome = (acted == "continue") and "ok" or "skipped"', 1, true) ~= nil)
   check("l6-pin: no eager continue ledger", src:find('ledgerFor(item, { type = "continue" })', 1, true) == nil)
+  -- 2026-09-28: Shepherd's own automated sends are marked [shepherd] (core.promptOrigin tells them
+  -- from Adam's); his own Continue click still types a plain "continue".
+  check("auto-continue types a [shepherd]-marked continue",
+        src:find('core.handleAction(FX, ct, "continue", core.shepherdSays("continue"))', 1, true) ~= nil)
+  check("a rule's continue is marked too",
+        src:find('core.handleAction(FX, target, "continue", core.shepherdSays("continue"))', 1, true) ~= nil)
+  check("a rule's nudge is marked too",
+        src:find('core.handleAction(FX, target, "nudge", core.shepherdSays(p.text))', 1, true) ~= nil)
+  check("the self-summary prompt is marked too",
+        src:find("{ text = core.shepherdSays(core.summaryPrompt(su)) }", 1, true) ~= nil)
+  -- 2026-09-28: a finished tile says how its last turn ended: read from the tail on the done edge,
+  -- ledgered once, reaped with the tile, shown after the status word on the card and its row.
+  check("each tick labels a finished tile's last turn", src:find("FX.stepTurnLabel(it, pv, ledgerOn)", 1, true) ~= nil)
+  check("the label is read from the transcript tail",
+        src:find("core.turnEvidence(FX.readTail(it.transcript_path, FX.TURN_TAIL_BYTES)", 1, true) ~= nil)
+  check("a fresh label is ledgered as turn_outcome", src:find('type = "turn_outcome", label = label', 1, true) ~= nil)
+  check("a vanished tile's label is reaped", src:find("core.reapUnbacked(FX._turnLabel, newPrev)", 1, true) ~= nil)
+  check("the card says how the turn ended", src:find("return (LABELS[st] || st) + turnTail(it);", 1, true) ~= nil)
+  check("...and so does its Instances row", src:find('(LABELS[im.status] || "Idle") + turnTail(im)', 1, true) ~= nil)
   -- L7: scheduled routines (cc-schedules.json, off by default) firing engine
   check("l7-pin: SCHEDULES_FILE + FX.readSchedules", src:find("local SCHEDULES_FILE", 1, true) ~= nil
         and src:find("function FX.readSchedules()", 1, true) ~= nil)
@@ -1296,8 +1318,9 @@ do
         src:find("core.queuePush(FX.readQueue(qk), tostring(p.text))", 1, true) ~= nil)
   check("l6proc-pin: feed key sanitized like the reader (review fix)",
         src:find("review%-caught silent data loss") ~= nil)
+  -- 2026-09-28 requirement change: the continue now carries Shepherd's mark; same delivery-gated path.
   check("l6proc-pin: continue processor delivery-gated",
-        src:find('core.handleAction(FX, target, "continue")', 1, true) ~= nil)
+        src:find('core.handleAction(FX, target, "continue", core.shepherdSays("continue"))', 1, true) ~= nil)
   -- L5 observability batch: Settings toggles (autoTitle/loop/banner) + hooks inspector
   check("l5b-pin: autoTitle toggle populated", src:find('cv(cfg,"autoTitle.enabled",false)', 1, true) ~= nil)
   check("l5b-pin: loop toggle populated", src:find('cv(cfg,"escalation.loop.enabled",false)', 1, true) ~= nil)
@@ -1467,9 +1490,10 @@ do
   check("l5sum-pin: self-summary fires on fresh done edge via core",
         src:find("core.stepSelfSummary(summaryState, it", 1, true) ~= nil
         and src:find('prevStatus = pv and pv.status or nil', 1, true) ~= nil)
+  -- 2026-09-28 requirement change: the summary prompt now carries Shepherd's mark; same chokepoint.
   check("l5sum-pin: summary typed via serialized chokepoint",
         src:find('dispatchSerialized(su, "summary"', 1, true) ~= nil
-        and src:find("FX.pasteIntoWindow(winTarget(su), { text = core.summaryPrompt(su) })", 1, true) ~= nil)
+        and src:find("FX.pasteIntoWindow(winTarget(su), { text = core.shepherdSays(core.summaryPrompt(su)) })", 1, true) ~= nil)
   -- review fix: the summary ledger is delivery-gated (only when the paste landed).
   check("l5sum-fix: summary ledger gated on delivery",
         src:find("if landed and ledgerOn then ledgerFor(su", 1, true) ~= nil)

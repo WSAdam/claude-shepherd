@@ -348,7 +348,9 @@ function M.handleAction(fx, item, action, text)
     -- Resume a session frozen on an API error (e.g. ECONNRESET): type the literal word
     -- "continue" + Enter, exactly as the user would, to restart the aborted turn. Gated
     -- on delivery (skip-on-no-match) so the caller can record an accurate outcome.
-    if not delivered(fx, fx.typeIntoWindow(tgt, "continue"),
+    -- 2026-09-28: an automated continue passes its [shepherd]-marked text (M.shepherdSays).
+    local word = (type(text) == "string" and text:find("%S")) and text or "continue"
+    if not delivered(fx, fx.typeIntoWindow(tgt, word),
         "continue keystroke not delivered for " .. tostring(item.name)) then
       return nil
     end
@@ -1846,6 +1848,7 @@ function M.instancesPayload(stackKey, members, hidden, worktrees, opts)
     rows[#rows + 1] = {
       key = it.key, folder = root and root:match("([^/]+)/?$") or it.name, label = it.label,
       sessTitle = it.sessTitle, status = it.status, hung = it.hung and true or nil,
+      turnLabel = (it.status == "done") and it.turnLabel or nil,   -- how its last turn ended (2026-09-28)
       stale = it.stale and true or nil, since = it.since, updated = it.updated,
       hidden = isHidden or nil, lead = it.stackLead and true or nil, rank = it.stackRank,
       wtRoot = it.wtRoot, branch = it.branch, detached = it.detached, isMainWt = it.isMainWt,
@@ -5073,31 +5076,259 @@ local function stripIdeContext(s)
   return s
 end
 
--- R3-04: is this transcript `user` line a genuine human-typed prompt (vs an IDE
--- file-open/diagnostics/selection injection, a meta line, or a tool-result-only user
--- line)? A real prompt carries non-empty text once IDE-context wrappers are stripped and
--- is not flagged isMeta. Pure helper.
-function M.userHasHumanText(obj)
-  if type(obj) ~= "table" then return false end
-  if obj.isMeta then return false end
-  local m = obj.message
-  if type(m) ~= "table" then return false end
-  local c = m.content
-  if type(c) == "string" then
-    return stripIdeContext(c):gsub("%s+", "") ~= ""
+-- Whose prompt is this transcript `user` record (2026-09-28)? "human" (Adam typed it), "shepherd"
+-- (Shepherd sent it: text starting M.SHEPHERD_TAG), "notification" (a background task's
+-- <task-notification>), "peer" (another session's message), "meta" (a compaction summary, an
+-- attached image line, anything else Claude Code writes as bookkeeping), or nil when it is no
+-- prompt at all: tool results only, a bare IDE file-open or slash command's wrapper, an interrupt
+-- marker. Claude Code stamps origin.kind (human | task-notification | peer) since 2.1.2x; a
+-- record without one falls back on its text, the way the builds before it wrote them. Pure.
+M.SHEPHERD_TAG = "[shepherd]"
+function M.shepherdSays(text)
+  text = tostring(text or "")
+  if text:sub(1, #M.SHEPHERD_TAG) == M.SHEPHERD_TAG then return text end
+  return M.SHEPHERD_TAG .. " " .. text
+end
+function M.promptOrigin(obj)
+  if type(obj) ~= "table" or obj.type ~= "user" or type(obj.message) ~= "table" then return nil end
+  local c, text = obj.message.content, nil
+  if type(c) == "string" then text = c
+  elseif type(c) == "table" then
+    local parts = {}
+    for _, part in ipairs(c) do   -- tool_result blocks are no prompt; only real text counts
+      if type(part) == "table" and part.type == "text" and type(part.text) == "string" then parts[#parts + 1] = part.text end
+    end
+    if #parts > 0 then text = table.concat(parts, "\n") end
   end
-  if type(c) == "table" then
-    for _, part in ipairs(c) do
-      if type(part) == "table" then
-        -- a tool_result block is not a human prompt; only real text (sans IDE context) counts
-        if part.type == "text" and type(part.text) == "string"
-           and stripIdeContext(part.text):gsub("%s+", "") ~= "" then
-          return true
+  if text == nil then return nil end
+  if obj.isCompactSummary or obj.isVisibleInTranscriptOnly then return "meta" end
+  local kind = type(obj.origin) == "table" and obj.origin.kind or nil
+  if kind == "peer" then return "peer" end
+  if kind == "task-notification" then return "notification" end
+  if obj.isMeta or (kind ~= nil and kind ~= "human") then return "meta" end
+  local body = stripIdeContext(text):match("^%s*(.-)%s*$")
+  if body == "" then return nil end
+  if body:sub(1, #M.INTERRUPT_MARKER) == M.INTERRUPT_MARKER then return nil end
+  if body:sub(1, #M.SHEPHERD_TAG) == M.SHEPHERD_TAG then return "shepherd" end
+  if kind == nil and body:sub(1, 19) == "<task-notification>" then return "notification" end
+  return "human"
+end
+
+-- R3-04: is this transcript `user` line a genuine prompt that starts a turn (vs an IDE
+-- file-open/diagnostics/selection injection, a meta line, or a tool-result-only user line)?
+-- 2026-09-28: only Adam's or Shepherd's (M.promptOrigin) -- it used to count every non-meta
+-- line with text, task notifications and compaction summaries included. Pure helper.
+function M.userHasHumanText(obj)
+  local o = M.promptOrigin(obj)
+  return o == "human" or o == "shepherd"
+end
+
+-- ---- How a turn ended (2026-09-28) -----------------------------------------------------------
+-- A finished turn's label, from what the transcript shows it did since the newest prompt Adam (or
+-- Shepherd) sent. First match wins: blocked (it stopped on a denial or an API error) -> needs
+-- follow-up (it asked, put up a plan, or ended on a question) -> done (a TODO line flipped to
+-- [x], or a commit) -> made progress (edits, commands that change things, test runs, other
+-- tools) -> only planned (it only looked, or explained at length) -> did nothing.
+
+-- Shell commands that only look. Anything else, or any output redirect, changes something.
+M.READONLY_CMDS = {}
+for w in ([[ls cat head tail less more grep egrep fgrep rg fd find wc stat file pwd which whoami date
+  echo printf jq tree du df ps sort uniq cut tr diff cmp basename dirname realpath readlink test
+  true false cd export uname id hostname sw_vers type sed awk column nl od xxd shasum md5 lsof pgrep
+  env printenv]]):gmatch("%S+") do M.READONLY_CMDS[w] = true end
+M.READONLY_GIT = {}
+for w in ([[status log show diff rev-parse ls-files ls-tree blame grep describe merge-base
+  for-each-ref cat-file shortlog reflog check-ignore name-rev branch stash worktree remote config
+  tag]]):gmatch("%S+") do M.READONLY_GIT[w] = true end
+-- ...of which these only look in their listing forms.
+M.READONLY_GIT_LIST = { branch = { "", "-a", "-v", "-vv", "-r", "--list", "--show-current" },
+  stash = { "list", "show" }, worktree = { "list" }, remote = { "", "-v", "show", "get-url" },
+  config = { "--get", "--list", "-l", "--get-all" }, tag = { "", "-l", "--list" } }
+M.TEST_RUNNERS = { "make test", "make check", "npm test", "npm run test", "yarn test", "pnpm test",
+  "bun test", "deno test", "deno task test", "go test", "cargo test", "isolate test" }
+M.READ_TOOLS = { Read = true, Grep = true, Glob = true, LS = true, WebFetch = true, WebSearch = true,
+  NotebookRead = true, TodoWrite = true, ToolSearch = true, TaskOutput = true, BashOutput = true,
+  ListMcpResourcesTool = true, ReadMcpResourceTool = true }
+M.EDIT_TOOLS = { Edit = true, MultiEdit = true, Write = true, NotebookEdit = true }
+
+-- One shell command line -> its parts (split on && || ; | and newlines), each as { cmd, words,
+-- at } with leading env assignments and sudo/time/nohup/command skipped. Good enough to tell a
+-- look from a change; quoting is not parsed. Pure.
+function M.shellParts(cmd)
+  local out = {}
+  local norm = tostring(cmd or ""):gsub("&&", "\n"):gsub("||", "\n"):gsub(";", "\n"):gsub("|", "\n")
+  for part in norm:gmatch("[^\n]+") do
+    local words = {}
+    for w in part:gmatch("%S+") do words[#words + 1] = w end
+    local i = 1
+    while words[i] and (words[i]:match("^[%w_]+=") or words[i] == "sudo" or words[i] == "time"
+          or words[i] == "nohup" or words[i] == "command" or words[i] == "(" or words[i] == "{") do
+      i = i + 1
+    end
+    if words[i] then
+      local w = words[i]:gsub("^[({]+", "")
+      out[#out + 1] = { cmd = w:match("([^/]+)$") or w, words = words, at = i, text = part }
+    end
+  end
+  return out
+end
+-- A git part's subcommand (after -C/-c and other options) and the word after it.
+function M.gitSubcommand(p)
+  local j = p.at + 1
+  while p.words[j] and p.words[j]:sub(1, 1) == "-" do
+    j = j + ((p.words[j] == "-C" or p.words[j] == "-c") and 2 or 1)
+  end
+  return p.words[j], p.words[j + 1]
+end
+function M.bashReadOnly(cmd)
+  local s = tostring(cmd or "")
+  if not s:find("%S") then return false end
+  local r = s:gsub("%d?>&%d", ""):gsub("%d?>>?%s*/dev/null", "")
+  if r:find(">", 1, true) then return false end   -- an output redirect writes a file
+  for _, p in ipairs(M.shellParts(s)) do
+    if p.cmd == "git" then
+      local sub, nxt = M.gitSubcommand(p)
+      if not (sub and M.READONLY_GIT[sub]) then return false end
+      local forms = M.READONLY_GIT_LIST[sub]
+      if forms then
+        local ok = false
+        for _, f in ipairs(forms) do if (nxt or "") == f then ok = true end end
+        if not ok then return false end
+      end
+    elseif p.cmd == "sed" then
+      if p.text:find("%s%-i") then return false end
+    elseif p.cmd == "find" then
+      if p.text:find("%-delete") or p.text:find("%-exec") then return false end
+    elseif not M.READONLY_CMDS[p.cmd] then
+      return false
+    end
+  end
+  return true
+end
+function M.bashIsTest(cmd)
+  local s = tostring(cmd or ""):lower()
+  for _, r in ipairs(M.TEST_RUNNERS) do if s:find(r, 1, true) then return true end end
+  for _, w in ipairs({ "pytest", "busted", "vitest", "jest" }) do
+    if s:find("%f[%w]" .. w .. "%f[%W]") then return true end
+  end
+  return s:find("[%w_%-]%.test%.%a") ~= nil or s:find("[%w%-]_test%.%a") ~= nil
+end
+function M.bashCommits(cmd)
+  for _, p in ipairs(M.shellParts(cmd)) do
+    if p.cmd == "git" and M.gitSubcommand(p) == "commit" then return true end
+  end
+  return false
+end
+
+-- What the newest turn in a transcript tail did: nil when the tail holds no prompt of Adam's or
+-- Shepherd's. `complete` is false until a reply follows it (read the tail again). Lines are walked
+-- with a plain find and the torn last line is dropped (a `*` pattern over a fixed-size read is
+-- quadratic on it); only user and assistant records are decoded. Pure.
+function M.turnEvidence(text)
+  if type(text) ~= "string" or text == "" then return nil end
+  local spans, pos = {}, 1
+  while true do
+    local nl = text:find("\n", pos, true)
+    if not nl then break end
+    if nl > pos then spans[#spans + 1] = { pos, nl - 1 } end
+    pos = nl + 1
+  end
+  local function decode(i, want)
+    local a, b = spans[i][1], spans[i][2]
+    if text:sub(a, a) ~= "{" then return nil end
+    local line = text:sub(a, b)
+    if not (line:find('"type":"user"', 1, true) or (want and line:find('"type":"assistant"', 1, true))) then return nil end
+    local okj, obj = pcall(function() return M.json.decode(line) end)
+    return okj and type(obj) == "table" and obj or nil
+  end
+  local start, origin
+  for i = #spans, 1, -1 do
+    local obj = decode(i, false)
+    local o = obj and M.promptOrigin(obj)
+    if o == "human" or o == "shepherd" then start, origin = i, o; break end
+  end
+  if not start then return nil end
+  local ev = { origin = origin, complete = false, edits = 0, mutating = 0, reads = 0, tests = 0,
+               other = 0, errors = 0, denials = 0, todoDone = 0, committed = false, asked = false,
+               planPut = false, apiError = false, endedDenied = false, textLen = 0 }
+  local commits, lastResult = {}, nil
+  for i = start + 1, #spans do
+    local obj = decode(i, true)
+    local c = obj and type(obj.message) == "table" and obj.message.content or nil
+    if obj and obj.type == "assistant" then
+      ev.complete = true
+      ev.apiError = obj.isApiErrorMessage == true
+      for _, p in ipairs(type(c) == "table" and c or {}) do
+        if type(p) == "table" and p.type == "text" and type(p.text) == "string" and p.text:find("%S") then
+          ev.lastText = p.text; ev.textLen = ev.textLen + #p.text
+        elseif type(p) == "table" and p.type == "tool_use" then
+          local name, input = tostring(p.name or ""), type(p.input) == "table" and p.input or {}
+          if M.EDIT_TOOLS[name] then
+            local path = tostring(input.file_path or input.notebook_path or "")
+            if not path:find("/.claude/cc-notes/", 1, true) then
+              ev.edits = ev.edits + 1
+              if path:match("TODO%.md$") then
+                local before, after = 0, 0
+                local pairs_ = (type(input.edits) == "table") and input.edits or { input }
+                for _, e in ipairs(pairs_) do
+                  if type(e) == "table" then
+                    for _ in tostring(e.old_string or ""):gmatch("%- %[[xX]%]") do before = before + 1 end
+                    for _ in tostring(e.new_string or ""):gmatch("%- %[[xX]%]") do after = after + 1 end
+                  end
+                end
+                if after > before then ev.todoDone = ev.todoDone + (after - before) end
+              end
+            end
+          elseif name == "Bash" then
+            local cmd = tostring(input.command or "")
+            if M.bashReadOnly(cmd) then ev.reads = ev.reads + 1
+            elseif M.bashIsTest(cmd) then ev.tests = ev.tests + 1
+            else ev.mutating = ev.mutating + 1 end
+            if M.bashCommits(cmd) and p.id then commits[p.id] = true end
+          elseif M.READ_TOOLS[name] then ev.reads = ev.reads + 1
+          elseif name == "AskUserQuestion" then ev.asked = true
+          elseif name == "ExitPlanMode" then ev.planPut = true
+          elseif name ~= "" then ev.other = ev.other + 1 end
+        end
+      end
+    elseif obj and obj.type == "user" then
+      for _, p in ipairs(type(c) == "table" and c or {}) do
+        if type(p) == "table" and p.type == "tool_result" then
+          if p.is_error == true then
+            ev.errors = ev.errors + 1
+            local body = p.content
+            if type(body) == "table" then
+              local t = {}
+              for _, q in ipairs(body) do if type(q) == "table" and type(q.text) == "string" then t[#t + 1] = q.text end end
+              body = table.concat(t, " ")
+            end
+            local low = tostring(body or ""):lower()
+            if low:find("denied", 1, true) or low:find("rejected", 1, true) or low:find("doesn't want to proceed", 1, true) then
+              ev.denials = ev.denials + 1; lastResult = "denied"
+            else
+              lastResult = "error"
+            end
+          else
+            lastResult = "ok"
+            if commits[p.tool_use_id] then ev.committed = true end
+          end
         end
       end
     end
   end
-  return false
+  ev.endedDenied = lastResult == "denied"
+  ev.endsWithQuestion = type(ev.lastText) == "string" and ev.lastText:match("%?[%s%*_\"')]*$") ~= nil
+  return ev
+end
+
+function M.turnOutcome(ev)
+  if type(ev) ~= "table" or not ev.complete then return nil end
+  if ev.apiError or ev.endedDenied then return "blocked" end
+  if ev.asked or ev.planPut or ev.endsWithQuestion then return "needs follow-up" end
+  if ev.todoDone > 0 or ev.committed then return "done" end
+  if ev.edits > 0 or ev.mutating > 0 or ev.tests > 0 or ev.other > 0 then return "made progress" end
+  if ev.reads > 0 or ev.textLen >= 300 then return "only planned" end
+  return "did nothing"
 end
 
 function M.transcriptError(text)
@@ -13271,6 +13502,9 @@ M.FEATURES = {
   { key = "notify", cat = "See what's happening", title = "Notifications & escalation",
     what = "Alerts — including phone push — when a session has been waiting on you too long.",
     why = "Don't leave a session blocked while you're away from the desk." },
+  { key = "turns", cat = "See what's happening", new = true, title = "How each turn ended",
+    what = "A finished card says how its last turn went, read from its transcript: done (a TODO line ticked or a commit), made progress (edits, commands, test runs), only planned, did nothing, blocked (it stopped on a denial) or needs follow-up (a question, or a plan waiting for you). Shepherd's own sends start with [shepherd], so a turn it started never reads as yours.",
+    why = "\"Ready for you\" alone doesn't say whether anything happened; now a glance tells you which finished cards to open first." },
 
   -- ---- Make it yours ----
   { key = "theme", cat = "Make it yours", new = true, title = "Visual theme editor",

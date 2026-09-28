@@ -48,6 +48,12 @@ thing in the file, and `core.transcriptError` read it as the session recovering.
 `--tail 65536 --end-at` the end of that record; the error words (`API Error: 529 Overloaded`) are
 the only ones kept from its text.
 
+**`tail-turn-made-progress.jsonl`** — the last 89,500 bytes of a real session up to the Stop of a
+turn that made two edits and ended on a statement (2026-09-28). `core.turnEvidence` has to find
+the turn's own prompt (`origin.kind: "human"`) among the scrubbed records, count both edits and
+label the turn *made progress*. Cut with `--tail 89500 --end-after system/stop_hook_summary:4`;
+a 90,000-byte cut split a kept key in the torn first line, so the window was moved.
+
 ## Regenerating
 
 `node scrub.js <transcript.jsonl> [--bytes N] > out.jsonl`, then

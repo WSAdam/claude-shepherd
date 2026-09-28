@@ -33,6 +33,9 @@ const parts = {
   fyi: slice("    function headsUp(it){", "}\n"),
   ring: slice("    function mergeRing(it){", "\n    }\n"),
   eff: slice("    function effStatus(it){", "}\n"),
+  // 2026-09-28: statusWords appends how a finished turn ended (turnTail), so the sandbox needs it
+  turnLabels: slice("    var TURN_LABELS = ", ";\n"),
+  turn: slice("    function turnTail(it){", "\n    }\n"),
   words: slice("    function statusWords(it){", "\n    }\n"),
 };
 for (const k of Object.keys(parts)) check("extracted " + k + " from the panel source", parts[k] !== null);
@@ -58,6 +61,11 @@ eq("waiting on Adam wins over background agents running", api.effStatus(busy), "
 const plain = { key: "p", status: "done" };
 eq("a plain finished session still reads Ready for you", api.statusWords(plain), "Ready for you");
 check("...and doesn't need Adam", !api.needsYouNow(plain));
+// 2026-09-28: a finished card says how its last turn ended; waiting on Adam still wins over it
+eq("a finished session with a turn label says how it went",
+   api.statusWords({ key: "t", status: "done", turnLabel: "made progress" }), "Ready for you · made progress");
+eq("...but a card waiting on Adam still reads Needs you",
+   api.statusWords({ key: "t2", status: "done", turnLabel: "made progress", merge: { phase: "requested", needsYou: true } }), "Needs you");
 const merging = { key: "m", status: "working", merge: { phase: "merging", needsYou: false } };
 eq("a merge already running doesn't need Adam", api.effStatus(merging), "working");
 

@@ -161,5 +161,22 @@ do
   eq("...carrying Claude Code's own error kind", err and err.kind, "server_error")
 end
 
+-- ---- tail-turn-made-progress: a real finished turn, labelled (2026-09-28) ---------------------
+-- 2026-09-28: when a tile turns done, its last turn's label (core.turnEvidence / turnOutcome) is
+-- read from the transcript tail. This window ends on the Stop of a real turn that made two edits:
+-- read the way the tick reads it, the walk has to find Adam's prompt among the scrubbed records
+-- and say so, with no torn line reaching the decoder.
+do
+  local TURN_TAIL = tonumber(dashboard:match("FX%.TURN_TAIL_BYTES = (%d+)"))
+  check("turn: the tick's turn read covers this whole window", (TURN_TAIL or 0) >= 89500)
+  failedDecodes = 0
+  local tail = readTail(FIXTURES .. "tail-turn-made-progress.jsonl", 89500)   -- the window it was cut for
+  local ev = core.turnEvidence(tail or "")
+  eq("a real turn that made two edits reads as made progress", core.turnOutcome(ev), "made progress")
+  eq("...started by Adam's own prompt", ev and ev.origin, "human")
+  eq("...counting both edits", ev and ev.edits, 2)
+  eq("turn: no torn line reaches the JSON decoder", failedDecodes, 0)
+end
+
 print(string.format("\n%d checks, %d failed", run, failed))
 os.exit(failed == 0 and 0 or 1)

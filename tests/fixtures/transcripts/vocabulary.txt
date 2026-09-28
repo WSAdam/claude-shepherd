@@ -165,6 +165,9 @@ high
 fable
 direct
 result
+max
+fable
+direct
 last
 prompt
 ai
@@ -173,6 +176,7 @@ atis
 latch
 bridge
 session
+result
 end
 turn
 hook
