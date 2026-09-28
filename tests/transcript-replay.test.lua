@@ -145,5 +145,21 @@ do
   check(string.format("past-the-tear: the f1252be mutant blows the same bound on this head (%.0fms)", slow), slow > 5)
 end
 
+-- ---- tail-ends-on-api-error: a turn that ended on a 529 (2026-09-28) -------------------------
+-- 2026-09-28: Claude Code writes a turn's final API failure as an `assistant` record carrying
+-- isApiErrorMessage:true, fires no Stop hook, and flushes that turn's retry records only later
+-- (here, when the next prompt arrived). transcriptError read the assistant record as the session
+-- recovering, so this card sat at Working for the 3 minutes until Adam typed "can you try again?".
+-- The window ends on that record, framed by the tick's own tail read.
+do
+  local tail = readTail(FIXTURES .. "tail-ends-on-api-error.jsonl", TICK_TAIL)
+  check("api-error: the tick's tail read returns the window", type(tail) == "string" and #tail > 0)
+  local err = core.transcriptError(tail or "")
+  check("a turn that ended on an API error reads as an error, not as recovered", err ~= nil)
+  eq("...showing the error Claude Code showed", err and err.message:sub(1, 26), "API Error: 529 Overloaded.")
+  eq("...an overloaded API is a transient model fault", err and err.reason, "model_error")
+  eq("...carrying Claude Code's own error kind", err and err.kind, "server_error")
+end
+
 print(string.format("\n%d checks, %d failed", run, failed))
 os.exit(failed == 0 and 0 or 1)

@@ -558,6 +558,85 @@ do
   eq("classify: budget beats timeout on multi-keyword", core.classifyError("request timed out: HTTP 429"), "budget_exceeded")
 end
 
+-- ---- A turn that ends on an API error reads as an error (2026-09-28) ------------------------
+-- 2026-09-28: Claude Code writes a turn's FINAL API failure as an `assistant` record carrying
+-- isApiErrorMessage:true (model "<synthetic>", `error` = its kind) and fires StopFailure, never
+-- Stop. transcriptError read that assistant record as the session recovering, so a stopped
+-- session sat at Working and never showed its error. The record shape is copied from real
+-- transcripts (tests/fixtures/transcripts/tail-ends-on-api-error.jsonl replays one); the limit
+-- wording is Claude Code's own template -- no rate-limited transcript exists here to cut one from.
+do
+  local function apiErr(kind, text)
+    return core.json.encode({ type = "assistant", isApiErrorMessage = true, error = kind,
+      timestamp = "2026-09-28T13:27:24.784Z",
+      message = { model = "<synthetic>", role = "assistant", type = "message", stop_reason = "stop_sequence",
+        content = { { type = "text", text = text } } } })
+  end
+  local prompt = core.json.encode({ type = "user", message = { role = "user",
+    content = { { type = "text", text = "add the two accounts" } } } })
+  local LIMIT = "You've hit your session limit · resets 3pm (America/New_York)"
+  local e = core.transcriptError(prompt .. "\n" .. apiErr("rate_limit", LIMIT) .. "\n")
+  check("a turn stopped by a rate limit reads as an error, not recovered", e ~= nil)
+  eq("...showing Claude Code's message, reset time included", e and e.message, LIMIT)
+  eq("...as a usage limit, which is Adam's to act on", e and e.reason, "budget_exceeded")
+  eq("...and keeps Claude Code's own error kind", e and e.kind, "rate_limit")
+  -- the newest conversational record still decides
+  eq("a prompt typed after the error is recovery",
+     core.transcriptError(apiErr("server_error", "API Error: Connection lost mid-response.") .. "\n" .. prompt), nil)
+  local carriedOn = core.json.encode({ type = "assistant", message = { role = "assistant",
+    content = { { type = "tool_use", name = "Bash", id = "toolu_1", input = {} } } } })
+  eq("Claude Code carrying on by itself after the error is recovery (an image error's retry)",
+     core.transcriptError(apiErr("invalid_request",
+       "API Error: an image in the conversation could not be processed and was removed.") .. "\n" .. carriedOn), nil)
+  local slept = core.transcriptError(apiErr("server_error", "API Error: Your computer went to sleep mid-response.")
+    .. "\n" .. core.json.encode({ type = "last-prompt", lastPrompt = "x" })
+    .. "\n" .. core.json.encode({ type = "queue-operation", operation = "enqueue" }))
+  check("bookkeeping written after the error doesn't hide it", slept ~= nil)
+  eq("...a response cut off mid-way is a transient runtime fault", slept and slept.reason, "runtime_error")
+  -- the reason: the message when it names a cause, else Claude Code's error kind
+  eq("an expired login needs Adam at once", core.errorReasonFor("authentication_failed",
+     "Failed to authenticate: OAuth session expired and could not be refreshed"), "unknown")
+  eq("the kind decides when the text names no cause", core.errorReasonFor("rate_limit", "Xxx'xx xxx xxxx limit"), "budget_exceeded")
+  eq("a billing error is a usage limit", core.errorReasonFor("billing_error", ""), "budget_exceeded")
+  eq("a too-long prompt is a model fault", core.errorReasonFor("invalid_request", "Prompt is too long"), "model_error")
+  eq("no kind and no text is unknown", core.errorReasonFor(nil, nil), "unknown")
+  -- every usage-limit message Claude Code writes starts "You've hit your"
+  for _, m in ipairs({ LIMIT, "You've hit your weekly limit · resets Oct 3, 9am", "You’ve hit your Opus limit",
+                       "You've hit your monthly spend limit · your team's resets Oct 1", "You've hit your fast limit" }) do
+    eq("classify: '" .. m:sub(1, 32) .. "' is a usage limit", core.classifyError(m), "budget_exceeded")
+  end
+
+  -- the StopFailure hook writes the error into the status file (cc-status.sh stopfailure)
+  local function one(fields)
+    local base = { name = "p", status = "error", updated = 100 }
+    for k, v in pairs(fields) do base[k] = v end
+    return core.parseStatusList({ { key = "k", content = core.json.encode(base) } }, 100)[1]
+  end
+  local it = one({ error_kind = "rate_limit", error_message = LIMIT })
+  eq("a StopFailure status file reads as a usage-limit error", it.error_reason, "budget_exceeded")
+  eq("...keeping Claude Code's message", it.error_message, LIMIT)
+  eq("a known reason in the file is kept", one({ error_reason = "timeout" }).error_reason, "timeout")
+  eq("an unknown reason in the file is derived again, never shown as-is",
+     one({ error_reason = "<img src=x>", error_kind = "server_error" }).error_reason, "runtime_error")
+  eq("a non-string message is dropped", one({ error_message = 42 }).error_message, nil)
+  eq("a tile that isn't in error carries no reason", one({ status = "working", error_kind = "rate_limit" }).error_reason, nil)
+
+  -- a usage limit is Adam's to act on: typing "continue" into it only fails again
+  local function gate(o)
+    local a = { status = "error", elapsed = 100, minSeconds = 60, attempts = 0, maxAttempts = 3 }
+    for k, v in pairs(o) do a[k] = v end
+    return core.shouldAutoContinue(a)
+  end
+  eq("auto-continue never types into a usage limit", gate({ reason = "budget_exceeded" }), false)
+  eq("...but still retries a transient fault", gate({ reason = "runtime_error" }), true)
+  local st = { since = {}, attempts = {} }
+  local function limited(now) return core.stepAutoContinue(st,
+    { key = "k9", projectKey = "p9", status = "error", error_reason = "budget_exceeded" },
+    { enabled = true, minSeconds = 60, maxAttempts = 3, now = now }) end
+  limited(1000)
+  eq("a rate-limited tile never auto-continues, however long it waits", limited(5000).fire, false)
+end
+
 -- ---- planFromTranscript: agent plan/TODO from the tail ---------------------
 do
   local function asst(blocks) return core.json.encode({ type = "assistant", message = { content = blocks } }) end

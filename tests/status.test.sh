@@ -56,6 +56,34 @@ ev stop "{\"session_id\":\"$SID\",\"cwd\":\"$CWD\"}"
 since2="$(jq -r '.since' "$F")"
 assert_eq "since stable while status unchanged" "$since1" "$since2"
 
+# 2026-09-28: a turn that ends on an API error fires StopFailure, never Stop, and nothing mapped
+# it, so the file stayed "working" for good -- a rate-limited session never showed its error.
+# stopfailure -> error, carrying Claude Code's own error kind and message; an idle notice after
+# it keeps the error; the next prompt (or a clean stop) clears it.
+LIMIT_MSG="You've hit your session limit · resets 3pm (America/New_York)"
+ev userpromptsubmit "{\"session_id\":\"$SID\",\"cwd\":\"$CWD\",\"prompt_text\":\"go on\"}"
+ev stopfailure "{\"session_id\":\"$SID\",\"cwd\":\"$CWD\",\"hook_event_name\":\"StopFailure\",\"error\":\"rate_limit\",\"last_assistant_message\":\"$LIMIT_MSG\"}"
+assert_json "a turn stopped by a rate limit -> error" "$F" '.status' "error"
+assert_json "...carrying Claude Code's error kind" "$F" '.error_kind' "rate_limit"
+assert_json "...and its message, reset time included" "$F" '.error_message' "$LIMIT_MSG"
+ev notification "{\"session_id\":\"$SID\",\"cwd\":\"$CWD\",\"notification_type\":\"idle_prompt\",\"message\":\"waiting\"}"
+assert_json "an idle notice after the error keeps it an error" "$F" '.status' "error"
+assert_json "...and keeps its message" "$F" '.error_message' "$LIMIT_MSG"
+ev userpromptsubmit "{\"session_id\":\"$SID\",\"cwd\":\"$CWD\",\"prompt_text\":\"continue\"}"
+assert_json "the next prompt clears the error" "$F" '.status' "working"
+assert_json "...drops its kind" "$F" '.error_kind // "absent"' "absent"
+assert_json "...and its message" "$F" '.error_message // "absent"' "absent"
+ev stopfailure "{\"session_id\":\"$SID\",\"cwd\":\"$CWD\",\"error\":\"server_error\",\"error_details\":\"529 Overloaded\"}"
+assert_json "no message -> the error details stand in" "$F" '.error_message' "529 Overloaded"
+ev stopfailure "{\"session_id\":\"$SID\",\"cwd\":\"$CWD\",\"error\":\"overloaded\"}"
+assert_json "no message or details -> named by its kind" "$F" '.error_message' "API error: overloaded"
+ev stopfailure "{\"session_id\":\"$SID\",\"cwd\":\"$CWD\",\"error\":\"rate limit; rm -rf\",\"last_assistant_message\":\"line one\\nline two\"}"
+assert_json "an error kind that isn't one plain word is stored as unknown" "$F" '.error_kind' "unknown"
+assert_json "a multi-line message is kept on one line" "$F" '.error_message' "line one line two"
+ev stop "{\"session_id\":\"$SID\",\"cwd\":\"$CWD\"}"
+assert_json "a clean stop after an error -> done" "$F" '.status' "done"
+assert_json "...and drops the error" "$F" '.error_kind // "absent"' "absent"
+
 # collision: same basename, different session_id -> two files
 ev sessionstart "{\"session_id\":\"t2\",\"cwd\":\"/other/my-project\"}"
 count="$(ls -1 "$TMP"/*.json | wc -l | tr -d ' ')"

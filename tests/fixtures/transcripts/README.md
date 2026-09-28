@@ -39,6 +39,15 @@ f1252be mutant 903ms, because the backtrack is quadratic in the length of the to
 The suite times both, so the fixture is known to be one the old code chokes on rather than merely
 assumed to be.
 
+**`tail-ends-on-api-error.jsonl`** — the tick's 64KB tail of a session at the moment a turn died
+on a 529 (2026-09-28). A prompt, its bookkeeping records, then the final failure: an `assistant`
+record with `isApiErrorMessage: true`, model `<synthetic>` and `error: "server_error"`. Claude
+Code fired StopFailure, not Stop, and flushed that turn's ten retry records only three minutes
+later, when the next prompt arrived — so for those three minutes this record was the newest
+thing in the file, and `core.transcriptError` read it as the session recovering. Cut with
+`--tail 65536 --end-at` the end of that record; the error words (`API Error: 529 Overloaded`) are
+the only ones kept from its text.
+
 ## Regenerating
 
 `node scrub.js <transcript.jsonl> [--bytes N] > out.jsonl`, then

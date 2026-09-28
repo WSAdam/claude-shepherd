@@ -6,7 +6,7 @@
 # Usage: cc-status.sh <event>
 #   event is the hook that fired, one of:
 #     sessionstart | userpromptsubmit | pretooluse | posttooluse |
-#     permissionrequest | notification | stop | sessionend
+#     permissionrequest | notification | stop | stopfailure | sessionend
 #
 # The hook event JSON arrives on stdin. We key each session by its session_id
 # (so two sessions in the same folder never collide), and merge only the fields
@@ -18,9 +18,11 @@
 #   pretooluse      -> working  (clears pending)
 #   posttooluse     -> working  (clears pending)
 #   permissionrequest -> approval (+ precise pending from tool_input)
-#   notification    -> approval | done | (unchanged)  depending on type
+#   notification    -> approval | done | (unchanged)  depending on type (an idle one keeps an error)
 #   stop            -> done      (clears pending)
+#   stopfailure     -> error     (+ error_kind, error_message: the turn ended on an API error)
 #   sessionend      -> file removed
+# Every status but error drops error_kind/error_message.
 #
 # Field names below (prompt text, notification type/message) are read with
 # tolerant fallbacks because they can vary slightly by Claude Code version;
@@ -78,6 +80,7 @@ if ! cc_have_jq; then
   case "$EVENT" in
     notification|permissionrequest) STATUS="approval" ;;
     stop) STATUS="done" ;;
+    stopfailure) STATUS="error" ;;
     sessionstart) STATUS="idle" ;;
     *) STATUS="working" ;;
   esac
@@ -194,6 +197,9 @@ case "$EVENT" in
         ;;
       *idle*)
         STATUS="done"
+        # 2026-09-28: the idle notice that follows a turn ended by an API error must not turn
+        # the error StopFailure recorded into "done" -- nothing else would bring it back.
+        [ "$(cc_current_status "$KEY")" = "error" ] && STATUS="error"
         ;;
       "")
         # Type unknown (older builds): a bare Notification usually means
@@ -212,10 +218,27 @@ case "$EVENT" in
   stop)
     STATUS="done"
     ;;
+  stopfailure)
+    # 2026-09-28: a turn that ends on an API error (a usage limit, an outage, an expired login)
+    # fires StopFailure INSTEAD of Stop; unmapped, the tile stayed "working" for good. Record
+    # Claude Code's own error kind and the message it showed -- the panel names the cause
+    # (core.errorReasonFor), so the taxonomy stays in one place.
+    STATUS="error"
+    ERR_KIND="$(cc_get "$INPUT" '.error')"
+    case "$ERR_KIND" in ''|*[!a-z_]*) ERR_KIND="unknown" ;; esac
+    [ "${#ERR_KIND}" -le 40 ] || ERR_KIND="unknown"
+    ERR_MSG="$(cc_get "$INPUT" '.last_assistant_message')"
+    [ -n "$ERR_MSG" ] || ERR_MSG="$(cc_get "$INPUT" '.error_details')"
+    [ -n "$ERR_MSG" ] || ERR_MSG="API error: $ERR_KIND"
+    ERR_MSG="$(printf '%s' "$ERR_MSG" | tr '\n' ' ' | cut -c1-300)"
+    ;;
   *)
     STATUS="working"
     ;;
 esac
+# Only an error keeps error_kind/error_message; any other status drops them in the merge below.
+CLEAR_ERROR=""
+[ "$STATUS" = "error" ] || CLEAR_ERROR="1"
 
 NOW="$(cc_now)"
 
@@ -263,6 +286,10 @@ fi
 if [ -n "$SET_PROMPT" ]; then
   TRIMMED="$(printf '%s' "$SET_PROMPT" | cut -c1-200)"
   PATCH="$(printf '%s' "$PATCH" | jq -c --arg lp "$TRIMMED" '. + {last_prompt:$lp}')"
+fi
+
+if [ "$EVENT" = "stopfailure" ]; then
+  PATCH="$(printf '%s' "$PATCH" | jq -c --arg k "$ERR_KIND" --arg m "$ERR_MSG" '. + {error_kind:$k, error_message:$m}')"
 fi
 
 # Record the transcript path (for the dashboard's live activity peek).
@@ -378,7 +405,7 @@ fi
 # never trips. `updated` still flows (tile stays fresh).
 GATE_GUARDED=""
 case "$EVENT" in
-  pretooluse|posttooluse|userpromptsubmit|stop|permissionrequest) GATE_GUARDED="1" ;;
+  pretooluse|posttooluse|userpromptsubmit|stop|stopfailure|permissionrequest) GATE_GUARDED="1" ;;
 esac
 
 # The NATIVE permission prompt (gate not armed -- the default install) needs the
@@ -447,14 +474,15 @@ esac
 MF="$(cc_file "$KEY")"
 MTMP="${MF}.tmp.$$"
 MERGE_JQ='
-   if ($gg != "" and .gate == "waiting")
+   (if ($gg != "" and .gate == "waiting")
       or ($ng != "" and .status == "approval" and (.pending | type) == "object") then
      # a live approval owns status/since/pending; only refresh the rest
      . * ($patch | del(.status, .since, .pending))
    else
      (if $setp != "" then del(.pending) else . end) * $patch
      | (if $clrp != "" then del(.pending) else . end)
-   end'
+   end)
+   | (if $clre != "" then del(.error_kind, .error_message) else . end)'
 APPLY_TRIES=0
 while :; do
   CUR="$(cat "$MF" 2>/dev/null)"
@@ -462,7 +490,7 @@ while :; do
   if printf '%s' "$CUR" | jq -c \
        --argjson patch "$PATCH" \
        --arg gg "$GATE_GUARDED" --arg ng "$NATIVE_GUARDED" \
-       --arg setp "$SET_PENDING" --arg clrp "$CLEAR_PENDING" \
+       --arg setp "$SET_PENDING" --arg clrp "$CLEAR_PENDING" --arg clre "$CLEAR_ERROR" \
        "$MERGE_JQ" > "$MTMP" 2>/dev/null; then
     :
   # Self-heal a corrupt status file, same as cc_merge (cc-lib.sh): invalid JSON on
@@ -476,7 +504,7 @@ while :; do
   elif printf '{}' | jq -c \
        --argjson patch "$PATCH" \
        --arg gg "$GATE_GUARDED" --arg ng "$NATIVE_GUARDED" \
-       --arg setp "$SET_PENDING" --arg clrp "$CLEAR_PENDING" \
+       --arg setp "$SET_PENDING" --arg clrp "$CLEAR_PENDING" --arg clre "$CLEAR_ERROR" \
        "$MERGE_JQ" > "$MTMP" 2>/dev/null; then
     :
   else

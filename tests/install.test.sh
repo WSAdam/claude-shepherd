@@ -35,6 +35,10 @@ exists "copies dashboard -> hs dir"         "$HSDIR/claude-dashboard.lua"
 exists "writes settings.json"               "$CDIR/settings.json"
 assert_json "settings has our Stop hook" "$CDIR/settings.json" \
   '.hooks.Stop[0].hooks[0].command | contains("cc-status.sh")' "true"
+# 2026-09-28: a turn that ends on an API error fires StopFailure instead of Stop -- unwired, the
+# tile stayed "working" for good.
+assert_json "a turn that ends on an API error reaches cc-status.sh (StopFailure)" "$CDIR/settings.json" \
+  '.hooks.StopFailure[0].hooks[0].command | endswith("cc-status.sh\" stopfailure")' "true"
 # The status update MUST be the FIRST command in the approval hooks, so the tile flips
 # to "Needs you" immediately -- not blocked behind a slower popup / desktop notification /
 # network push (which is exactly what left a session showing "Working" at a live prompt).

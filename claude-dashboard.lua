@@ -18039,7 +18039,10 @@ function FX._refreshBody()
     -- it), and the list is re-sorted after the loop so errors surface near approvals.
     if tail and it.status == "working" then
       local err = core.transcriptError(tail)
-      if err then it.status = "error"; it.error_message = err.message; it.error_reason = err.reason end
+      if err then
+        it.status = "error"; it.error_message = err.message; it.error_reason = err.reason
+        it.error_kind = err.kind   -- Claude Code's own kind (rate_limit, server_error...), when it wrote one
+      end
     end
     -- 2026-09-18: an INTERRUPTED turn fires no Stop hook, so its status file stays "working" for
     -- good (Voice-Agent's tab-less leftover read "2h Working"). Stamp when the interrupt happened,

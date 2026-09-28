@@ -1121,6 +1121,8 @@ do
   check("l5-pin: cause badge on the error tile", src:find("it.error_reason.replace(/_/g", 1, true) ~= nil)
   check("l5-pin: error cause ledgered on the fresh edge",
         src:find('type = "error", reason = it.error_reason', 1, true) ~= nil)
+  -- 2026-09-28: a transcript-derived error keeps Claude Code's own kind too (rate_limit, ...)
+  check("a transcript-derived error keeps Claude Code's error kind", src:find("it.error_kind = err.kind", 1, true) ~= nil)
   -- L5 Inc 2: plan/TODO on the detail panel, loaded on selection via core.planFromTranscript
   check("l5-pin: plan handler", src:find('a == "plan"') ~= nil)
   check("l5-pin: plan via cc-core", src:find("core.planFromTranscript(tail)", 1, true) ~= nil)

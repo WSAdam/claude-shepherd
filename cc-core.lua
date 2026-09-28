@@ -114,6 +114,19 @@ function M.parseStatusList(entries, now, staleSeconds)
       -- panel, so a hostile/compromised bridged host (parseMirrorList delegates here)
       -- could ship status='<img src=x onerror=...>' as stored XSS. Unknown -> "idle".
       if not M.STATUSES[data.status] then data.status = "idle" end
+      -- 2026-09-28: a turn that ends on an API error writes status "error" with Claude Code's
+      -- error kind and message (cc-status.sh stopfailure). The cause is named here, where the
+      -- taxonomy lives: a reason the file carries survives only when it is a known one, and a
+      -- tile that isn't in error carries none.
+      if type(data.error_message) ~= "string" then data.error_message = nil end
+      if type(data.error_kind) ~= "string" then data.error_kind = nil end
+      if data.status == "error" then
+        if not M.ERROR_REASON_SET[data.error_reason] then
+          data.error_reason = M.errorReasonFor(data.error_kind, data.error_message)
+        end
+      else
+        data.error_reason = nil
+      end
       -- Part C: surface which OPTIONAL permission modes (bypassPermissions/auto)
       -- are in this session's real Shift+Tab rotation -- persisted sticky in the
       -- status file as `mode_cycle` (the hook merge preserves it across events).
@@ -5097,7 +5110,24 @@ function M.transcriptError(text)
       local okj, obj = pcall(function() return M.json.decode(line) end)
       if okj and type(obj) == "table" then
         local t = obj.type
-        if t == "assistant" then
+        if t == "assistant" and obj.isApiErrorMessage == true then
+          -- 2026-09-28: Claude Code writes a turn's FINAL API failure as an assistant record
+          -- (model "<synthetic>", `error` = its kind) and fires StopFailure, never Stop -- the
+          -- turn is over. Its retry records (the system api_error below) may be flushed later.
+          local msg = ""
+          local c = type(obj.message) == "table" and obj.message.content or nil
+          if type(c) == "string" then msg = c
+          elseif type(c) == "table" then
+            for _, part in ipairs(c) do
+              if type(part) == "table" and part.type == "text" and type(part.text) == "string" then
+                msg = part.text; break
+              end
+            end
+          end
+          if msg == "" then msg = "API error" end
+          local kind = type(obj.error) == "string" and obj.error or nil
+          return { message = msg, reason = M.errorReasonFor(kind, msg), kind = kind }
+        elseif t == "assistant" then
           return nil  -- a model turn after the error -> recovered / no longer stuck
         elseif t == "user" then
           -- R3-04: symmetric with transcriptResumed -- the IDE injects spurious `user`
@@ -5277,9 +5307,11 @@ function M.classifyError(message)
     -- 402 payment are quota/billing walls; 504/408 are timeouts; 500/502/503 are
     -- transient infra; 529 (below) is Anthropic "Overloaded", NOT a generic 5xx.
     -- "insufficient" is billing-scoped (not bare, which mis-hit "insufficient permissions").
+    -- "hit your": every usage-limit message Claude Code writes is `You've hit your <limit> · resets
+    -- <time>` (session, weekly, Opus, spend, fast...), 2026-09-28.
     { "budget_exceeded", { "usage limit", "rate limit", "ratelimit", "quota", "insufficient quota",
                            "insufficient credit", "insufficient funds", "billing", "credit balance",
-                           "exceeded your", "payment", "429", "402" } },
+                           "exceeded your", "payment", "hit your", "429", "402" } },
     { "timeout",         { "timeout", "timed out", "etimedout", "deadline exceeded", "504", "408" } },
     -- "connection aborted"/econnaborted are network faults -> must win before user_cancelled's "abort".
     { "runtime_error",   { "econnreset", "econnrefused", "enotfound", "epipe", "socket hang",
@@ -5295,6 +5327,24 @@ function M.classifyError(message)
     end
   end
   return "unknown"
+end
+
+M.ERROR_REASON_SET = {}
+for _, r in ipairs(M.ERROR_REASONS) do M.ERROR_REASON_SET[r] = true end
+
+-- Claude Code's own error kind (the `error` of an isApiErrorMessage record, and StopFailure's
+-- `error`) -> a cause, for when the message names none: "Your computer went to sleep
+-- mid-response" is a server_error, and a scrubbed or reworded limit is still a rate_limit. Kinds
+-- left out (authentication_failed, account_on_hold, model_not_found, ...) need Adam: "unknown".
+M.API_ERROR_KIND_REASON = {
+  rate_limit = "budget_exceeded", billing_error = "budget_exceeded",
+  server_error = "runtime_error",
+  overloaded = "model_error", invalid_request = "model_error", max_output_tokens = "model_error",
+}
+function M.errorReasonFor(kind, message)
+  local r = M.classifyError(message)
+  if r ~= "unknown" then return r end
+  return M.API_ERROR_KIND_REASON[tostring(kind or "")] or "unknown"
 end
 
 -- L5: surface the agent's current plan / TODO from the transcript tail. Scans
@@ -6469,6 +6519,9 @@ end
 function M.shouldAutoContinue(args)
   args = args or {}
   if args.status ~= "error" then return false end                    -- only a frozen API error
+  -- 2026-09-28: a usage limit is Adam's to act on (wait for the reset, or switch): typing
+  -- "continue" into it only fails again and spends the budget.
+  if args.reason == "budget_exceeded" then return false end
   if (tonumber(args.elapsed) or 0) < (tonumber(args.minSeconds) or 0) then return false end
   local cap = tonumber(args.maxAttempts) or 0
   if cap <= 0 then return false end                                  -- 0/absent = disabled
@@ -6512,7 +6565,7 @@ function M.stepAutoContinue(state, item, opts)
   local elapsed = (tonumber(opts.now) or 0) - (tonumber(state.since[key]) or 0)
   local n = state.attempts[pk] or 0
   local fire = (opts.enabled == true) and M.shouldAutoContinue({
-    status = item.status, elapsed = elapsed,
+    status = item.status, reason = item.error_reason, elapsed = elapsed,
     minSeconds = opts.minSeconds, attempts = n, maxAttempts = opts.maxAttempts }) or false
   -- R2-22: restart the grace clock on a fired attempt (so a fired-but-undelivered
   -- tile re-spaces instead of re-firing every tick), but DO NOT charge the budget
