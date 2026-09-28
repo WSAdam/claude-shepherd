@@ -796,7 +796,43 @@ function FX.computeUsage()
     pcall(function() wv:evaluateJavaScript("window.ccUsage(" .. hs.json.encode(lastUsagePayload) .. ")") end)
   end
   pcall(FX.writeUsageSnapshots)   -- F7: durable cost history (gated + throttled; defined below, after ledgerEnabled)
+  if now - (FX._usageSavedAt or 0) >= FX.USAGE_SAVE_SECONDS then pcall(FX.saveUsageState) end
   return lastUsagePayload
+end
+-- 2026-09-28: usage totals survive a reload. usageState is saved to ~/.claude/cc-usage-state.json
+-- (temp file + mv) at most every 5 minutes from the pass above and on shutdown, and loaded once at
+-- startup, so a reload resumes each transcript at its saved offset instead of re-reading every one
+-- from byte 0. core.usageStateEncode/Decode are the pure half; an unreadable or other-version file
+-- is ignored (a fresh scan), and an entry whose file is gone or shrank below its offset is dropped.
+FX._usageStatePath = CLAUDE_DIR .. "/cc-usage-state.json"
+FX._usageSavedAt = 0
+FX.USAGE_SAVE_SECONDS = 300
+function FX.saveUsageState()
+  FX._usageSavedAt = os.time()
+  local ok, body = pcall(function() return hs.json.encode(core.usageStateEncode(usageState)) end)
+  if not ok or type(body) ~= "string" then
+    print("[cc-dashboard] ⚠️ usage state not saved (encode): " .. tostring(body))
+    return false
+  end
+  if not FX.writeFileAtomic(FX._usageStatePath, body) then
+    print("[cc-dashboard] ⚠️ usage state not saved (write): " .. FX._usageStatePath)
+    return false
+  end
+  return true
+end
+function FX.loadUsageState()
+  local raw = FX.readFile(FX._usageStatePath)
+  if not raw then return {} end
+  local ok, t = pcall(function() return hs.json.decode(raw) end)
+  local states = ok and core.usageStateDecode(t, FX.fileSize) or nil
+  if not states then
+    print("[cc-dashboard] ⚠️ usage state ignored (unreadable or another version): transcripts are read afresh")
+    return {}
+  end
+  local n = 0
+  for path, st in pairs(states) do usageState[path] = st; n = n + 1 end
+  print("[cc-dashboard] ✅ usage state loaded: " .. n .. " transcript(s) resume at their saved offsets")
+  return states
 end
 
 -- ---- Official plan-usage window (undocumented Anthropic OAuth endpoint) -------
@@ -19276,6 +19312,7 @@ end  -- close the action-handlers do-block
 sdStart()  -- begin Stream Deck discovery (no-op if none plugged in)
 bindHotkeys()
 refresh()
+pcall(FX.loadUsageState)                                   -- resume the usage totals a reload saved
 after(1.0, function() pcall(FX.computeUsage) end)          -- first local pass
 after(1.5, function() pcall(function() FX.fetchOfficialUsage(true) end) end)  -- first official pass
 after(2.0, function() pcall(FX.expireLedger) end)          -- first retention pass
@@ -19350,6 +19387,8 @@ do
       if M[k] then pcall(function() M[k]:stop() end) end
     end
     if priorShutdown then pcall(priorShutdown) end
+    -- 2026-09-28: after the prior instance's callback, so an in-VM re-dofile's newest state lands last
+    pcall(FX.saveUsageState)
   end
 end
 print("[cc-dashboard] loaded; watching " .. STATUS_DIR)

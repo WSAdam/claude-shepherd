@@ -41,6 +41,15 @@ aren't how the plan is metered; the gross figure is on hover. It is recomputed e
 its usage on every record it writes for that message), and a session's subagent transcripts count
 toward its total, so the figures match Claude Code's own cost records.
 
+The totals **survive a reload**. Shepherd saves where it stopped reading each transcript, with the
+totals so far, the last 7 days of turns (for the local window bars) and the message ids it has
+already counted, to `~/.claude/cc-usage-state.json`: at most every 5 minutes, and when Hammerspoon
+quits or reloads. On startup it resumes each transcript from its saved position, so it reads only
+what was written while it was down instead of re-reading every transcript from the start. A
+transcript that is gone or now shorter than its saved position is read again from the start. An
+unreadable file, or one from another version, is ignored and every transcript is read afresh.
+`uninstall.sh --purge` removes it.
+
 It also shows an **`~$X est.`** API-equivalent dollar figure from a per-model price table
 (`core.PRICING`, cache-aware, at Anthropic list prices). Your subscription is flat-rate, so this is
 an estimate. Gateway and local models have unknown prices and are left out.

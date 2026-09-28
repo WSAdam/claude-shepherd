@@ -11585,5 +11585,56 @@ do
   eq("usage: a pricing override can set the 1-hour rate", core.priceFor("claude-opus-5-5", { opus = { cacheWrite1h = 12 } }).cacheWrite1h, 12)
 end
 
+-- ---- Usage totals survive a reload (2026-09-28) ----
+-- 2026-09-28: the per-transcript usage state (offset, totals, 7-day events, seen message ids) lived
+-- only in memory, so every Hammerspoon reload re-read every transcript from byte 0. It is saved to
+-- ~/.claude/cc-usage-state.json; these pin the pure round trip and what a load refuses.
+do
+  local function cum(cr)
+    return { input = 1, output = 2, cacheRead = cr, cacheCreate = 4, cacheCreate1h = 4, total = 7 + cr, real = 7,
+             byModel = { ["claude-opus-5-5"] = { input = 1, output = 2, cacheRead = cr, cacheCreate = 4, cacheCreate1h = 4,
+                                                 total = 7 + cr, real = 7, byModel = {} } } }
+  end
+  local function state(offset, cr, ids)
+    local seen = core.usageSeen()
+    for _, id in ipairs(ids) do core.usageNew(seen, { msgId = id }) end
+    return { offset = offset, cum = cum(cr), seen = seen, lastContext = 900, lastModel = "claude-opus-5-5",
+             recent = { { ts = 1000, input = 1, output = 2, cacheRead = cr, cacheCreate = 4, anthropic = true } } }
+  end
+  local A, B, C = "/t/a.jsonl", "/t/b.jsonl", "/t/c.jsonl"
+  local saved = core.json.decode(core.json.encode(core.usageStateEncode({
+    [A] = state(120, 3, { "m1", "m2" }), [B] = state(80, 5, { "m3" }), [C] = state(40, 7, {}) })))
+  eq("usage state: the saved file carries its version", saved.version, core.USAGE_STATE_VERSION)
+  local sizes = { [A] = 200, [B] = 50 }   -- A grew, B shrank below its offset, C is gone
+  local back = core.usageStateDecode(saved, function(p) return sizes[p] end)
+  local a = back and back[A] or {}
+  eq("usage state: the offset round-trips", a.offset, 120)
+  eq("usage state: the cumulative totals round-trip", a.cum and a.cum.cacheRead, 3)
+  eq("usage state: the per-model totals round-trip", a.cum and a.cum.byModel["claude-opus-5-5"].cacheRead, 3)
+  eq("usage state: the 7-day events round-trip", a.recent and a.recent[1] and a.recent[1].ts, 1000)
+  eq("usage state: an event keeps its Anthropic flag", a.recent and a.recent[1] and a.recent[1].anthropic, true)
+  eq("usage state: the context fill round-trips", a.lastContext, 900)
+  eq("usage state: the live model round-trips", a.lastModel, "claude-opus-5-5")
+  check("usage state: a message id seen before the reload still counts once", a.seen and not core.usageNew(a.seen, { msgId = "m2" }))
+  check("usage state: ...and a new one still counts", a.seen and core.usageNew(a.seen, { msgId = "m9" }))
+  eq("usage state: a file now shorter than its saved offset is dropped (re-read from 0)", back and back[B], nil)
+  eq("usage state: a file that is gone is dropped", back and back[C], nil)
+  saved.version = core.USAGE_STATE_VERSION + 1
+  eq("usage state: another version is ignored", core.usageStateDecode(saved, function() return 999 end), nil)
+  eq("usage state: a file that isn't a table is ignored", core.usageStateDecode("{oops", function() return 999 end), nil)
+  local bad = { version = core.USAGE_STATE_VERSION, files = {
+    [A] = { offset = "x", cum = cum(1) }, [B] = { offset = 10, cum = "nope" },
+    [C] = core.usageStateEncode({ [C] = state(10, 7, {}) }).files[C] } }
+  local kept = core.usageStateDecode(bad, function() return 999 end) or {}
+  check("usage state: a malformed entry is dropped and the rest kept", kept[A] == nil and kept[B] == nil and kept[C] ~= nil)
+  -- the seen ids stay bounded as core.usageNew keeps them, newest kept
+  local ring = { version = core.USAGE_STATE_VERSION, files = { [A] = { offset = 10, cum = cum(1), cap = 4,
+    seen = { "m1", "m2", "m3", "m4", "m5", "m6" } } } }
+  local r = (core.usageStateDecode(ring, function() return 999 end) or {})[A] or {}
+  check("usage state: the loaded seen ids stay within their cap", r.seen and #r.seen.order == 4)
+  check("usage state: ...keeping the newest", r.seen and not core.usageNew(r.seen, { msgId = "m6" }) and core.usageNew(r.seen, { msgId = "m1" }))
+  check("usage state: an empty state still encodes", pcall(core.json.encode, core.usageStateEncode({})))
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

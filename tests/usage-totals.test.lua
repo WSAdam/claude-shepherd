@@ -174,6 +174,112 @@ s1 = (lastUsage().perSession or {}).s1 or {}
 eq("a pass with nothing new changes nothing", s1.cacheRead, 25792 + 47094 + 47394 + 10000)
 eq("the context bar reads the main thread's last message, not a subagent's", s1.context_tokens, 3 + 47394 + 900)
 
+-- ---- Usage totals survive a reload (2026-09-28) ----
+-- 2026-09-28: the per-transcript usage state lived only in memory, so every Hammerspoon reload
+-- re-read every transcript from byte 0. It is saved to ~/.claude/cc-usage-state.json (at most every
+-- 5 minutes from the usage pass, and on shutdown) and a boot resumes each transcript at its offset.
+local STATE_FILE = HOME .. "/.claude/cc-usage-state.json"
+local function fileSize(path)
+  local f = io.open(path, "rb"); if not f then return nil end
+  local n = f:seek("end"); f:close(); return n
+end
+local function readAll(path) local f = io.open(path, "r"); if not f then return nil end; local s = f:read("*a"); f:close(); return s end
+check("the first usage pass saves the state", exists(STATE_FILE))
+os.remove(STATE_FILE)
+FX.computeUsage()
+check("a pass within 5 minutes of the last save doesn't save again", not exists(STATE_FILE))
+local shutdown = hs.shutdownCallback
+check("a shutdown callback is set", type(shutdown) == "function")
+if type(shutdown) == "function" then pcall(shutdown) end
+check("the shutdown callback (a reload) saves the state", exists(STATE_FILE))
+local savedMain, savedSub = fileSize(TRANSCRIPT), fileSize(SUBAGENT)
+
+-- the session keeps working while Shepherd is down
+local uD = { input_tokens = 4, output_tokens = 90, cache_read_input_tokens = 48294, cache_creation_input_tokens = 700,
+             cache_creation = { ephemeral_1h_input_tokens = 700, ephemeral_5m_input_tokens = 0 } }
+writeFile(TRANSCRIPT, rec("msg_D", "thinking", uD) .. "\n" .. rec("msg_D", "text", uD) .. "\n", "a")
+
+-- a fresh dashboard instance, as a reload makes; every transcript read it makes is recorded
+local function boot()
+  jsCalls = {}
+  local okB, errB = pcall(dofile, ROOT .. "claude-dashboard.lua")
+  if not okB then print("       " .. tostring(errB)) end
+  local fx = _G.__ccDashboard.fx
+  local reads, realReadFrom = {}, fx.readFrom
+  fx.readFrom = function(path, offset) reads[#reads + 1] = { path = path, offset = offset }; return realReadFrom(path, offset) end
+  return okB, fx, reads
+end
+local function firstRead(reads, path)
+  for _, r in ipairs(reads) do if r.path == path then return r.offset end end
+end
+local function totals(payload)
+  local s = (payload and payload.perSession or {}).s1 or {}
+  local sonnet = (s.byModel or {})["claude-sonnet-5"] or {}
+  return { input = s.input, output = s.output, cacheRead = s.cacheRead, cacheCreate = s.cacheCreate,
+           cacheCreate1h = s.cacheCreate1h, context = s.context_tokens, sonnetRead = sonnet.cacheRead,
+           cost = payload and payload.fleet and payload.fleet.costUsd,
+           w5h = payload and payload.window and payload.window.w5h, w7d = payload and payload.window and payload.window.w7d }
+end
+
+local ok2, FX2, reads2 = boot()
+check("a second boot loads", ok2)
+FX2.computeUsage()
+local t2 = totals(lastUsage())
+eq("the second boot resumes the transcript at its saved offset, not byte 0", firstRead(reads2, TRANSCRIPT), savedMain)
+eq("...and the subagent's transcript at its own", firstRead(reads2, SUBAGENT), savedSub)
+eq("...and counts what was written while it was down", t2.cacheRead, 25792 + 47094 + 47394 + 48294 + 10000)
+
+-- the same transcripts with no saved state: read from byte 0, the totals must be identical
+os.remove(STATE_FILE)
+local ok3, FX3, reads3 = boot()
+check("a boot with no saved state loads", ok3)
+FX3.computeUsage()
+local t3 = totals(lastUsage())
+eq("a boot with no saved state reads from byte 0", firstRead(reads3, TRANSCRIPT), 0)
+for _, k in ipairs({ "input", "output", "cacheRead", "cacheCreate", "cacheCreate1h", "context", "sonnetRead", "w5h", "w7d" }) do
+  eq("resumed and full-read totals agree: " .. k, t2[k], t3[k])
+end
+check(string.format("resumed and full-read totals agree: $ (%s vs %s)", tostring(t2.cost), tostring(t3.cost)),
+      t2.cost and t3.cost and math.abs(t2.cost - t3.cost) < 1e-9)
+
+-- a transcript rewritten shorter than its saved offset is dropped on load and re-read from 0
+check("the full-read boot saved the state", exists(STATE_FILE))
+local uT = { input_tokens = 1, output_tokens = 9, cache_read_input_tokens = 123, cache_creation_input_tokens = 0 }
+writeFile(SUBAGENT, rec("msg_T", "text", uT, "claude-sonnet-5") .. "\n")
+check("(the rewritten subagent transcript is shorter than its saved offset)", fileSize(SUBAGENT) < savedSub)
+local ok4, FX4, reads4 = boot()
+check("a boot over a shrunk transcript loads", ok4)
+local loaded = FX4.loadUsageState and FX4.loadUsageState() or {}
+check("a file now shorter than its saved offset is dropped from the loaded state", loaded[SUBAGENT] == nil)
+check("...while an intact file keeps its state", loaded[TRANSCRIPT] ~= nil)
+FX4.computeUsage()
+local t4 = totals(lastUsage())
+eq("...the shrunk file is re-read from byte 0", firstRead(reads4, SUBAGENT), 0)
+eq("...and its totals are the new content's only", t4.sonnetRead, 123)
+eq("...while the intact transcript resumes at its offset", firstRead(reads4, TRANSCRIPT), fileSize(TRANSCRIPT))
+
+-- a corrupt state file is ignored: a fresh scan, never an error
+local full = t4.cacheRead
+writeFile(STATE_FILE, "{not json")
+local ok5, FX5, reads5 = boot()
+check("a corrupt state file doesn't break the boot", ok5)
+FX5.computeUsage()
+eq("...the pass reads from byte 0", firstRead(reads5, TRANSCRIPT), 0)
+eq("...with the right totals", totals(lastUsage()).cacheRead, full)
+local rewritten = readAll(STATE_FILE) or ""
+local okJ, saved = pcall(json.decode, rewritten)
+check("...and the corrupt file is replaced by a good save", okJ and type(saved) == "table" and type(saved.version) == "number")
+
+-- a state file from another version is ignored, even one whose entries look usable
+writeFile(STATE_FILE, json.encode({ version = 999, files = { [TRANSCRIPT] = { offset = fileSize(TRANSCRIPT), seen = {},
+  cum = { input = 1, output = 1, cacheRead = 9e9, cacheCreate = 1, cacheCreate1h = 1, total = 9e9, real = 3, byModel = {} },
+  recent = {} } } }))
+local ok6, FX6, reads6 = boot()
+check("an other-version state file doesn't break the boot", ok6)
+FX6.computeUsage()
+eq("...the pass reads from byte 0", firstRead(reads6, TRANSCRIPT), 0)
+eq("...with the right totals", totals(lastUsage()).cacheRead, full)
+
 os.execute("rm -rf '" .. HOME .. "'")
 print(string.format("-- usage-totals.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

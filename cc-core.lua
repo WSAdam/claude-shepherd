@@ -5947,6 +5947,96 @@ function M.usageNew(seen, e)
   return true
 end
 
+-- 2026-09-28: the usage pass's per-transcript state (offset, cumulative totals, 7-day events, seen
+-- message ids) is saved to ~/.claude/cc-usage-state.json, so a reload resumes each transcript at its
+-- offset instead of re-reading every one from byte 0. Encode/validate here; the IO is FX's.
+M.USAGE_STATE_VERSION = 1
+do
+  local FIELDS = { "input", "output", "cacheRead", "cacheCreate", "cacheCreate1h" }
+  local function count(v)
+    v = tonumber(v)
+    if not v or v ~= v or v < 0 or v == math.huge then return nil end
+    return math.tointeger(v) or v
+  end
+  -- A cumulative bucket (the dashboard's blankCum shape) from a decoded table, or nil when any
+  -- field -- or any per-model bucket -- is malformed: a half-trusted total is worse than a re-read.
+  local function cumFrom(c, perModel)
+    if type(c) ~= "table" then return nil end
+    local out = { byModel = {} }
+    for _, k in ipairs(FIELDS) do
+      local v = c[k]
+      if v == nil and k == "cacheCreate1h" then v = 0 end
+      out[k] = count(v)
+      if not out[k] then return nil end
+    end
+    out.total = out.input + out.output + out.cacheRead + out.cacheCreate
+    out.real = out.input + out.output + out.cacheCreate
+    if not perModel and c.byModel ~= nil then
+      if type(c.byModel) ~= "table" then return nil end
+      for m, mc in pairs(c.byModel) do
+        local b = type(m) == "string" and cumFrom(mc, true)
+        if not b then return nil end
+        out.byModel[m] = b
+      end
+    end
+    return out
+  end
+  local function eventFrom(e)
+    local ts = type(e) == "table" and count(e.ts)
+    if not ts then return nil end
+    return { ts = ts, input = count(e.input) or 0, output = count(e.output) or 0,
+             cacheRead = count(e.cacheRead) or 0, cacheCreate = count(e.cacheCreate) or 0,
+             anthropic = e.anthropic == true }
+  end
+  -- The seen ids rebuilt through usageNew, so the loaded set keeps its cap (newest ids kept).
+  local function seenFrom(order, cap)
+    cap = math.tointeger(tonumber(cap) or 0)
+    local seen = M.usageSeen((cap and cap >= 1) and cap or nil)
+    for _, id in ipairs(type(order) == "table" and order or {}) do
+      if type(id) == "string" then M.usageNew(seen, { msgId = id }) end
+    end
+    return seen
+  end
+
+  -- states: [path] = { offset, cum, recent, seen, lastContext, lastModel } -> the table to save.
+  function M.usageStateEncode(states)
+    local files = {}
+    for path, st in pairs(type(states) == "table" and states or {}) do
+      if type(path) == "string" and type(st) == "table" and type(st.cum) == "table" and tonumber(st.offset) then
+        local seen = type(st.seen) == "table" and st.seen or {}
+        files[path] = { offset = st.offset, cum = st.cum, recent = st.recent or {}, seen = seen.order or {},
+                        cap = seen.cap, lastContext = st.lastContext, lastModel = st.lastModel }
+      end
+    end
+    return { version = M.USAGE_STATE_VERSION, files = files }
+  end
+
+  -- A decoded save -> [path] = state, or nil when it isn't one (not a table, another version):
+  -- the caller then scans afresh. sizeOf(path) is the file's byte size now, nil when it is gone.
+  -- An entry whose file is gone, now shorter than its saved offset (replaced) or malformed is
+  -- dropped, so that transcript is re-read from 0.
+  function M.usageStateDecode(t, sizeOf)
+    if type(t) ~= "table" or t.version ~= M.USAGE_STATE_VERSION or type(t.files) ~= "table" then return nil end
+    local out = {}
+    for path, f in pairs(t.files) do
+      local offset = type(f) == "table" and math.tointeger(tonumber(f.offset) or -1)
+      local cum = offset and offset >= 0 and cumFrom(f.cum, false)
+      local size = cum and type(path) == "string" and type(sizeOf) == "function" and tonumber(sizeOf(path))
+      if size and size >= offset then
+        local recent = {}
+        for _, e in ipairs(type(f.recent) == "table" and f.recent or {}) do
+          local ev = eventFrom(e)
+          if ev then recent[#recent + 1] = ev end
+        end
+        out[path] = { offset = offset, cum = cum, recent = recent, seen = seenFrom(f.seen, f.cap),
+                      lastContext = count(f.lastContext),
+                      lastModel = type(f.lastModel) == "string" and f.lastModel or nil }
+      end
+    end
+    return out
+  end
+end
+
 -- Current context size from a usage event: the prompt side (input + both cache
 -- buckets). The LAST assistant turn's value ~= how full the context window is.
 function M.contextTokens(u)
