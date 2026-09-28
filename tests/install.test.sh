@@ -820,12 +820,18 @@ repo_out="$(cd "$ROOT" && bash tests/worktree-hygiene.test.sh 2>&1)"
 assert_eq "...but in a real checkout it still checks the index" "yes" \
   "$(printf '%s' "$repo_out" | grep -q 'is tracked, so a clone can install' && echo yes || echo no)"
 
-readme_up="$(sed -n '/^### Upgrading/,/^### Uninstall/p' "$ROOT/README.md")"
-assert_eq "the README has an Upgrading section" "yes" \
-  "$([ -n "$readme_up" ] && echo yes || echo no)"
+# 2026-09-28: requirement moved, not loosened -- the README became a short front page and the
+# Upgrading section moved to docs/install.md. The same three checks follow it there, and the
+# README's one-line Upgrade note is held to the same rule.
+docs_up="$(sed -n '/^## Upgrading/,/^## Uninstall/p' "$ROOT/docs/install.md")"
+assert_eq "docs/install.md has an Upgrading section" "yes" \
+  "$([ -n "$docs_up" ] && echo yes || echo no)"
 assert_eq "...telling you to run make setup" "yes" \
-  "$(printf '%s' "$readme_up" | grep -q 'make setup' && echo yes || echo no)"
+  "$(printf '%s' "$docs_up" | grep -q 'make setup' && echo yes || echo no)"
 assert_eq "...and warning that make install is not enough" "yes" \
-  "$(printf '%s' "$readme_up" | grep -q 'make install' && echo yes || echo no)"
+  "$(printf '%s' "$docs_up" | grep -q 'make install' && echo yes || echo no)"
+readme_up="$(grep '^\*\*Upgrade\*\*' "$ROOT/README.md")"
+assert_eq "the README's Upgrade line says make setup, not make install" "yes" \
+  "$(printf '%s' "$readme_up" | grep -q 'make setup' && printf '%s' "$readme_up" | grep -q 'not `make install`' && echo yes || echo no)"
 
 finish

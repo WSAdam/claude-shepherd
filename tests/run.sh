@@ -161,6 +161,9 @@ echo ""
 echo "== bash: worktree hygiene (.gitignore keeps git worktree remove unblocked) =="
 bash "$DIR/worktree-hygiene.test.sh" || fail=1
 echo ""
+echo "== bash: README front page -- links resolve, every in-app feature is in the tour =="
+bash "$DIR/readme.test.sh" || fail=1
+echo ""
 echo "== bash: the suite refuses a second concurrent run in one checkout =="
 bash "$DIR/run-lock.test.sh" || fail=1
 echo ""

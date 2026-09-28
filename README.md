@@ -1,1732 +1,284 @@
-# Claude Shepherd — Claude Code fleet console (Mac)
+# Claude Shepherd
 
-A floating, always-on-top panel with one tile per Claude Code session. Each tile
-shows the project name and a live status, and selecting it opens a control panel
-where you can **jump** to that VS Code window, **approve / deny** a pending
-permission, **nudge** the session with a quick message, or **stop** the current
-turn — all without losing your place. This is the on-screen version of a Stream
-Deck for a fleet of Claude agents.
+**A fleet console for Claude Code on macOS.** One floating panel shows every Claude Code session
+you have running, tells you which one needs you, and lets you approve, answer, steer and merge them
+without hunting for the right window.
 
-When you run several Claude sessions at once, the bottleneck is you: a session
-that finishes or hits a permission prompt sits idle until you notice it.
-Claude Shepherd tells you which agent needs a human *right now* and lets you handle it
-from one pane.
+![Shepherd's panel: six sessions, three of them waiting on you](docs/img/panel.png)
 
-## Statuses
+## Why
 
-| Status     | Color           | Fires from hook              | Meaning                                  |
-|------------|-----------------|------------------------------|------------------------------------------|
-| `idle`     | gray            | SessionStart                 | Session open, nothing happening yet      |
-| `working`  | amber           | UserPromptSubmit, Pre/PostToolUse | Claude is actively doing work       |
-| `approval` | red (pulsing)   | Notification (permission)    | Claude needs permission or your input    |
-| `done`     | green           | Stop, Notification (idle)    | Claude finished its turn, ready for you   |
+Running several Claude Code sessions at once makes you the bottleneck. A session that finishes, asks
+a question or hits a permission prompt sits idle until you notice. With parallel worktrees on top,
+you also have to keep track of which branch is done, which tests passed, and which tab to close.
 
-Sessions are keyed by their **session_id**, so two sessions in the same folder
-never collide into one tile. Tiles disappear when a session ends (SessionEnd) and
-**dim** if a session goes stale (no updates for ~90s, e.g. after a crash). Each
-tile shows time-in-state, the latest prompt, and — on an approval — the **exact
-command** being requested (e.g. `wants: npm test -- --watch`, via the
-`PermissionRequest` hook). Selecting a tile also shows a **live activity peek**:
-the latest assistant line from that session's transcript ("Doing: …").
+Shepherd puts all of that on one screen:
 
-Status is hook-driven, but a `done` tile **self-heals back to `working`** when the
-transcript shows the turn resumed — the model wrote a new line *or* you typed a fresh
-prompt — so in Auto mode or the VS Code extension (where a text-only reply, an
-auto-continued turn, or a freshly submitted prompt can land before the `working` hooks
-do) a tile no longer gets stuck on "Ready for you" while it's actually working. Spurious
-IDE file-open lines are ignored, so opening a file never false-flags it.
-(`status.resumeSlack`, default 2s.)
+- **Who needs you, right now.** Each project is a card. A card reads **Needs you** only when there
+  is something for you to press.
+- **Answer from the panel.** Approve or deny a tool, answer a question, or review and merge a unit
+  in the panel. You don't have to find the tab, and nothing is typed into a window.
+- **Parallel work that lands safely.** Units in their own worktrees ask to merge. Shepherd checks
+  the request with its own git, can run the tests itself, and closes the tab afterwards.
 
-### Session observability (L5)
+It runs inside [Hammerspoon](https://www.hammerspoon.org) and reads status files that Claude Code
+hooks write on your Mac. It has no server or account of its own; its one default network call reads
+your plan usage from api.anthropic.com with your existing Claude Code login.
 
-All derived locally from the transcript Shepherd already tails — no extra hooks:
+## Feature tour
 
-- **Error cause** — an errored tile (frozen on an API error) shows a coarse cause
-  badge: `[budget exceeded]`, `[timeout]`, `[runtime error]`, `[model error]`,
-  `[user cancelled]`. The cause is recorded in the audit log (errors-by-cause).
-- **Plan / TODO** — selecting a tile shows the agent's current plan and TODO list
-  (its latest `TodoWrite` / plan-mode plan), if any.
-- **Auto-title** (off by default, `autoTitle.enabled`) — names an unlabeled tile
-  from its first prompt (cached). A manual relabel always wins.
-- **Loop watchdog** (off by default, `escalation.loop.enabled`) — a ⟳ badge when a
-  working session keeps repeating the same tool call (e.g. re-running a failing
-  command); detection only.
-- **Desktop banners** (off by default, `notifications.banner.onApproval` /
-  `onDone` / `onAutoApproved`) — a native macOS notification on a rising edge into
-  "needs you" / "done", or when a session **auto-approves** a tool (the last needs the
-  audit ledger on and can lag ~30s); click it to jump to the session.
-- **Post-run self-summary** (off by default, `summary.enabled`) — when a session
-  finishes a turn, Shepherd types a brief "summarize what you just did" prompt into it
-  (for the log you're watching — it forbids further edits). Fires once per turn (the
-  summary's own completion is skipped so it can't loop); local sessions only.
-- **PR/MR status** (off by default, `prStatus.enabled`, needs the GitHub CLI `gh`) — a
-  clickable **"PR #N open / merged"** badge per repo, polled with `gh pr view`
-  (status only — Shepherd never opens or edits PRs). Self-gates when `gh` is absent or
-  the repo has no PR/remote.
-- **Host stats + fleet idle-since** (off by default, `insights.hostStats`) — a read-only
-  strip at the top of the 📊 Fleet insights overlay: CPU / memory / disk / uptime / load,
-  plus how long the whole fleet has been idle. A queue-starvation alert notes when the box
-  is CPU/disk-pressured. Pressure thresholds are hand-editable
-  (`insights.hostPressure.{cpu,mem,disk}`, default 90%).
-- **Session history browser** — a 🗂 **History** tab in the 📜 Audit overlay (see
-  "Audit log & insights") lists every recorded session with its activity, a fuzzy filter,
-  sort + pin, and a multi-select delete.
-- **Subagent fan-out (Agents tab)** — when a session spawns subagents or runs a Workflow,
-  the detail panel's **Agents** tab lists each one, **grouped under a per-Workflow header
-  with a running/total rollup** (`⚙ Workflow wf_… · N agents · M running`). Each row is
-  labeled by the agent's **actual task prompt** (e.g. "Review auth.ts"), not its auto-slug,
-  with a green running dot and its latest "Doing:" line; click a row to drill into that
-  agent's recent output. Read from the `subagents/` tree Claude Code writes beside the
-  transcript — no extra hooks. Self-gates when a session has no subagents.
-- **Background-work indicator** — while background work is running (delegated subagents or a
-  Workflow fleet), the tile shows a green **⚙ N** pill, **and a done/idle session reports
-  "Running N agents" instead of "Ready for you"** (with the working dot) so a session that's
-  busy behind the scenes isn't mistaken for one waiting on your reply. The underlying status
-  is unchanged — this is display-only. Tunable window: `subagents.activeWindow` (default 45s).
-- **Run score** — a **Score** button in the detail panel rates the selected session 0–100 from
-  the audit ledger (penalizes API errors, denied tools, loop episodes, and forced respawns),
-  shows a ⚠ when recent sessions trend down, and a mini sparkline of the trend. Needs the Audit
-  log on; weights are hand-tunable (`score.weights`).
+Every feature below has a reference page one click away. The panel lists the same features under
+**☰ → ✨ Features list**.
 
-### Event-callback rules (L6, off by default)
+### See
 
-Opt-in declarative rules (`~/.claude/cc-rules.json`, enable with `rules.enabled`) that react to a
-session edge with a safe effect — a lighter, per-session complement to the fleet automations.
-A rule is `{name, trigger:{kind, match?}, processor:{kind, …}, once?}`:
+- [**Fleet dashboard**](docs/fleet.md#statuses): every session is a live tile: working, needs you,
+  ready, or errored.
+- [**Project cards & instances**](docs/fleet.md#project-cards-and-instances): a repo and its
+  worktrees share one card that leads with the instance that needs you; its corner button lists
+  every instance.
+- [**Transcript peek**](docs/fleet.md#the-detail-panel): read a session's recent messages, and
+  search them, inside the panel.
+- [**Find in fleet**](docs/fleet.md#search-groups-and-bulk-actions): search every session's
+  transcript and the audit ledger for the session that touched a file or ran a command.
+- [**Groups & labels**](docs/fleet.md#search-groups-and-bulk-actions): rename tiles, sort them into
+  groups, and filter the grid to one group.
+- [**Worklist (My List)**](docs/fleet.md#my-list): a checklist beside the fleet that imports each
+  project's `TODO.md`, so you can verify what an automation says it finished.
+- [**User stories**](docs/fleet.md#user-stories-tab): view and edit a project's
+  `spec/product/user-stories.md` in a detail-panel tab.
+- [**Audit ledger & insights**](docs/usage-and-cost.md#the-audit-ledger): an optional local log of
+  everything that happens, with fleet insights, decision provenance and session history.
+- [**Cost & token analytics**](docs/usage-and-cost.md#cost-and-tokens): per-session and fleet token
+  use, estimated dollars, and a 14-day chart.
+- [**Plan usage meter**](docs/usage-and-cost.md#plan-window-bars): your real 5-hour and weekly plan
+  usage, with a warning at every point past 90%.
+- [**Commits today and this week**](docs/usage-and-cost.md#commits-today-and-this-week): your
+  commits and lines changed, per day and per project, straight from local git.
+- [**Shift report**](docs/usage-and-cost.md#shift-report): a summary of what the fleet did while you
+  were away.
 
-- **trigger.kind** — `done`, `error`, or `approval` (the fresh status edge).
-- **trigger.match** (optional) — wildcard-glob scope on `project` / `group` / `sessionKey` /
-  `provider` (absent = fleet-wide).
-- **processor.kind** — `log` (write an audit note), `relabel` (rename the tile), or `nudge`
-  (type text into the session, via the same delivery-gated path as a manual nudge).
-- **once** — fire at most once per session.
+### Steer
 
-Example: `{ "name":"flag-prod-errors", "trigger":{"kind":"error","match":{"group":"prod"}},
-"processor":{"kind":"relabel","label":"⚠ prod error"}, "once":true }`. Every rule firing is
-ledgered as `by:"rule"`. Automation events (`auto_respawn`, `auto_continue`) now also record an
-`outcome` (and a death that can't be auto-respawned is logged instead of failing silently).
+- [**Jump, nudge, stop, clear**](docs/controls.md#the-detail-panel): focus a session's tab, send it
+  a message, stop its turn, or clear or compact it, from its tile.
+- [**Answer questions from Shepherd**](docs/approvals-and-policies.md#answer-questions-from-shepherd):
+  a session's question shows up on its card as buttons, and your click goes straight to the session.
+- [**Spawn new sessions**](docs/controls.md#spawn-new-sessions): start a session in any project with
+  an editor, permission mode, provider and first task, or from a saved preset.
+- [**Rewind & checkpoints**](docs/fleet.md#the-detail-panel): see each turn's restore point and the
+  files it changed, then open Claude Code's rewind picker.
+- [**Global hotkeys**](docs/controls.md#global-hotkeys): approve, jump to whoever needs you, cycle,
+  spawn and show the panel from any app.
+- [**Stream Deck**](docs/controls.md#stream-deck): sessions and fleet actions on physical keys, with
+  local voice dictation.
+- [**Remote control**](docs/providers-and-integrations.md#remote-control-claudeai-and-mobile): new
+  sessions can be driven from claude.ai or the Claude app.
 
-### Scheduled routines (L7, off by default)
+### Automate
 
-Routines (`~/.claude/cc-schedules.json`, enable with `schedules.enabled`) fire the normal
-spawn/nudge effects on a schedule — they are NOT a second executor, and a scheduled spawn still
-respects `spawn.live` (dry-run by default). A routine is `{name, kind:"cron"|"oneShot",
-cron|at, folder, editor?, provider?, model?, permMode?, prompt?, action:"spawn"|"digest",
-enabled:false}`:
+The automatic behaviours here are off until you turn them on.
 
-- **cron** uses a standard 5-field expression (`min hour dom month dow`, with `*`, ranges,
-  lists, and `*/step`); **oneShot** uses an `at` epoch and self-deletes after it fires.
-- **action "spawn"** (default) launches a session in `folder` with the given options + `prompt`.
-- **action "digest"** pushes a fleet shift report (`fleetStandup`) over a window via `ntfy`
-  (`pushTopic` or the escalation push topic) — a daily/weekly summary; needs no folder.
-- `schedules.maxConcurrent` backpressure defers spawns when the fleet is at capacity.
+- [**Task queue & auto-feed**](docs/automation.md#task-queue): line up tasks per session, feed the
+  next when one finishes, and route a project's tasks to whichever session is free.
+- [**Prompt templates**](docs/automation.md#prompt-templates): reusable, versioned prompts with
+  variables filled in at send time.
+- [**Model auto-routing**](docs/automation.md#model-auto-routing): a queued task switches the
+  session to a cheaper or stronger model based on how hard it looks.
+- [**Auto-respawn & auto-continue**](docs/automation.md#auto-respawn-and-auto-continue): relaunch a
+  session that died mid-turn, or resume one frozen on an API error, within retry budgets.
+- [**Automation rules**](docs/automation.md#automation-rules): when a session finishes, errors or
+  stalls, log it, relabel it, nudge it or feed it.
+- [**Routines**](docs/automation.md#routines): spawn a session or push a digest on a cron schedule.
+- [**Notifications & escalation**](docs/automation.md#escalation-and-watchdogs): louder nags, macOS
+  banners and phone pushes when a session has waited on you too long or stalled.
+- [**A/B compare**](docs/automation.md#ab-compare): run one task as 2–4 variants in separate
+  worktrees, score them, and keep the winner.
 
-Example: `{ "name":"nightly-tests", "kind":"cron", "cron":"0 2 * * *", "folder":"/repo",
-"prompt":"run the full test suite and summarize failures", "enabled":true }`. Each firing is
-ledgered as `schedule_fire`. (Routines are hand-edited for now; the routine-board UI is a
-deferred follow-up.)
+### Merge safely
+
+- [**New worktree tab**](docs/merging-and-batches.md#new-worktree-tab): start a unit in a new
+  Claude tab with the prompt to enter its own worktree already typed in.
+- [**Ready to merge**](docs/merging-and-batches.md#ready-to-merge): a finished unit asks to merge,
+  and you review its commits, files, diff and tests before pressing **Merge**. Then it rebases,
+  tests and fast-forwards main, one merge per repo at a time.
+- [**Merge gates**](docs/merging-and-batches.md#merge-gates-shepherd-runs-the-tests-itself):
+  Shepherd runs the project's suite itself, before the merge and again on main after it.
+- [**Claude drives a batch**](docs/merging-and-batches.md#claude-drives-a-batch): a session proposes
+  several units, you approve once, and it opens their tabs and hands out the tasks.
+- [**Tab bridge**](docs/merging-and-batches.md#the-tab-bridge): a small VS Code extension that
+  closes or selects exactly one Claude tab, so finished units close their own tabs.
+
+### Stay safe
+
+- [**Headless approvals**](docs/approvals-and-policies.md#headless-approvals-the-gate): risky tools
+  wait for your Approve or Deny in the panel, with no window switching.
+- [**Policy bundles & autopilot**](docs/approvals-and-policies.md#policies): reusable allow and deny
+  rules per session or fleet, and a time-boxed autopilot.
+- [**Shared-window guard**](docs/controls.md#sessions-that-share-a-window): Shepherd won't type into
+  a window that hosts several sessions, because the keys could land in the wrong tab.
+- [**Keep awake & screen lock**](docs/controls.md#keep-this-mac-awake): keep the Mac awake for long
+  runs, and lock the screen without pausing the sessions.
+- [**Diagnostics**](docs/troubleshooting.md#start-with-diagnostics): a one-screen health check of the
+  hooks, the gate, the panel heartbeat, the tab bridge and the ledger, with fixes.
+
+### Make it yours
+
+- [**Visual theme editor**](docs/customizing.md#appearance): 50 themes, an editor for every colour
+  with live preview, and theme export and import.
+- [**Layout & density**](docs/customizing.md#layouts): cards, bar, contrast or dots, with scale,
+  tile width, font, density and reduced motion.
+- [**Faster rendering**](docs/customizing.md#faster-rendering): the grid is rebuilt only when a
+  card's content changed; otherwise only the ages update.
+
+### Connect
+
+- [**Providers & models**](docs/providers-and-integrations.md#providers-and-models): Claude models,
+  other companies' models through a gateway, or local models, with no API keys stored.
+- [**Agent profiles**](docs/providers-and-integrations.md#agent-profiles): saved agents with a role,
+  skills, MCP servers and knowledge folders, spawned in one click.
+- [**MCPs & Skills**](docs/providers-and-integrations.md#mcps-and-skills): what MCP servers, skills
+  and command-line tools your sessions can reach.
+- [**SSH status bridge**](docs/providers-and-integrations.md#ssh-status-bridge): sessions running on
+  another machine, mirrored as tiles.
+
+![A ready-to-merge review in the detail panel](docs/img/merge-review.png)
 
 ## How it works
 
-```
-Claude Code hooks ──► cc-status.sh ──► ~/.claude/cc-status/<session_id>.json ──► dashboard
-                  └─► cc-approve.sh ◄── <session_id>.decision ◄────────────────── (gate)
-```
-
-- [cc-status.sh](cc-status.sh) merges each hook event into the session's JSON file.
-- [cc-approve.sh](cc-approve.sh) is the optional PreToolUse approval gate (below).
-- [cc-lib.sh](cc-lib.sh) holds shared helpers for both.
-- [cc-core.lua](cc-core.lua) is the pure logic (parsing, sorting, action
-  selection, deck layout, spawn-command building) — no `hs.*` calls, fully
-  unit-tested. [claude-dashboard.lua](claude-dashboard.lua) is the Hammerspoon
-  bootstrap: it reads the JSON files, renders tiles, writes a heartbeat, and wires
-  the real effects (focus, keystrokes, Stream Deck) into cc-core.
-
-## Project cards & instances
-
-Built for the parallel-worktree workflow (one unit of work = one branch = one worktree = one
-Claude session — by default a Claude tab in the repo's window working in
-`.claude/worktrees/<slug>`, or a sibling worktree in its own window): the grid shows **one card
-per project**, not one per session.
-
-- **What folds together.** A session launched at a git worktree top-level joins its repo's
-  card — the main checkout and every linked worktree (`../repo-fix-y`, or `canna-fresh` for
-  `Canna-better` — the names don't have to match; identity comes from git, one cached
-  `git rev-parse` per launch folder). Two sessions in one plain folder share a card too. A
-  folder nested inside a repo that isn't its own repo (a scratch folder) keeps its own card,
-  and A/B fork-to-compare variants keep theirs so the comparison stays visible.
-- **Tabs that entered a worktree.** A tab that started in the main checkout and ran
-  `EnterWorktree` (into `.claude/worktrees/<slug>`, or into a sibling folder) stays on the
-  repo's card but shows the worktree **it is working in** — its branch, its folder in
-  Instances (never offered to Open while it's there) and its `TODO.md` in My List.
-- **＋ New worktree tab** (Instances header, or right-click a card → **New worktree tab…**):
-  pick a type (feat / fix / ui / docs), a name and, optionally, what it should do. Shepherd
-  checks the name against the repo's branches and worktrees, brings the repo's own window to
-  the front, and opens a **new Claude tab** there through the Claude extension's URI — with a
-  prompt already typed in: *EnterWorktree with that name, rename the branch to
-  `<type>/<name>`, then the task*. Nothing is sent: read or edit the prompt and press Return.
-  If the repo has no window open, its folder is opened first; if its window isn't in front
-  when the tab would open, nothing opens. **Open** on an idle `.claude/worktrees/` worktree
-  works the same way — a new tab in the repo's window whose prompt re-enters that worktree —
-  while a sibling worktree still opens in its own window. VS Code and Cursor only.
-- **What the card shows.** The instance that most needs you — blocked longest first
-  (approval or question, then error, then stalled), then one that's still **running** (a
-  batch's driver first), then the newest *finished* one you haven't jumped to yet, else the
-  most recently active — with its branch chip and an "also: 2 ready · 1 idle" line for the
-  rest. A project with anything still at work reads **Working**, never *Ready for you*; its
-  finished instances wait in the "also:" line. A stationary lead is held for 30s so two busy
-  instances don't swap the card every few seconds. The card is named after the main checkout
-  (its relabel, if any); **Relabel** on a card renames the whole repo.
-- **Double-click** a card to jump to that same instance. Once you've jumped to a finished
-  instance it stops outranking the others until it finishes again (remembered across reloads).
-- **The corner button** (top-right of every card) opens the **Instances view**: every
-  instance with its folder, branch, status, age and what it's waiting on — **Focus** or
-  **Details** (which opens that instance's detail panel) — plus hidden instances (**Unhide**)
-  and the repo's **worktrees with no session**, each with **Open** (its editor + Claude, via
-  the normal spawn path; only a worktree the repo itself lists can be opened). The button shows
-  the instance count, and a pulsing dot when *another* instance needs you. Right-click →
-  **Instances…** opens the same view.
-- **Clearing finished sessions.** Every Instances row has a checkbox. **Select finished** checks
-  the sessions whose merge landed and those finished longer than **Settings → Tile cleanup**
-  allows (`cleanup.idleHours`, default 12; 0 = merged ones only); **Select all** checks every row
-  that can be closed, to uncheck the ones to keep. **Close selected** asks first,
-  then closes those tabs through the tab bridge. Shepherd re-checks every one, so a session that
-  is working, holding a question, mid-merge or driving a batch is never closed. Unnamed
-  "Claude Code" tabs (a batch unit's) look identical, so they close only when **every** unnamed tab
-  in that window is selected. A card with two or more finished sessions shows **🧹 N finished**,
-  which opens Instances with them already checked. Nothing closes on its own.
-- The detail panel stays on the instance you selected even if the card starts showing a
-  different one (the card then gets a dashed outline), so a nudge never goes to the wrong
-  worktree. Search matches branches and chat titles too; bulk actions still act only on the
-  sessions the search matched. The lock screen draws one ring per project.
-- `stacks.enabled: false` in `~/.claude/cc-config.json` switches back to one card per session.
-  The Stream Deck stays one key per session.
-
-### Ready to merge
-
-A worktree tab that has finished its unit (suite green, everything committed) asks for a merge
-instead of merging on its own: it leaves its worktree (`ExitWorktree`), then from the main checkout
-runs `~/.claude/cc-merge.sh request --worktree <its path> --summary "…" --tests "…"` **in the
-background** and ends its turn, and Claude Code wakes it when you answer. (Asking from inside a
-tab's worktree works too where nothing fences it, but Claude Code's worktree guard can refuse to
-run the script there — so fenced tabs ask from outside and step back in to rebase.)
-
-- **The card** says *⇡ ready to merge fix/x → main* and reads **Needs you** with a red dot and a
-  pulsing red ring — like an approval, and like every card waiting on you (a batch to approve, a
-  question) — leads its project card, and you get one alert (plus an OS banner if approval banners
-  are on). **A card that says Needs you always has something to press** — and only then. A card
-  ranks as needing you when a live counterpart will actually receive your answer *and* the card
-  offers something that changes the outcome. Anything else — a merge request whose `cc-merge.sh`
-  has gone, a question whose session exited, a merge request whose test gate is still running
-  (nothing to press yet — it turns red on its own the moment the gate finishes), a merged unit
-  whose post-merge gate went red hours ago with its worktree already removed, a connection blip the session is still retrying — is a
-  **Heads-up** instead: on the card, dismissible, with one line saying why, but never red, never
-  pulsing and never ranked above a session that is working. A unit that came back **blocked**
-  stays Needs you: the affordance isn't the Dismiss button, it's the stalled tab and the branch,
-  and a blocked unit going quiet is how parallel work gets silently lost.
-  Shepherd checks the request with **its own git** first — the worktree is one of the repo's, on
-  the requested branch, clean and ahead of main — and says what's wrong otherwise.
-- **The review** (the detail panel, or **Review** in the Instances view): the session's summary,
-  the tests it reports, how far ahead of main it is and whether main moved on, the commits, the
-  changed files, and **Full diff**.
-- **Shepherd can run the tests itself.** Everything else in the review is checked with Shepherd's
-  own git; the test line was the session's word. List the project's suite under `merge.gates` and
-  Shepherd runs it — in the unit's worktree, through your login shell, one run per request per
-  commit (a new commit in the worktree re-runs it):
-
-  ```json
-  "merge": { "gates": [
-    { "match": { "project": "*my-repo*" }, "command": "make lint && make test", "timeoutSeconds": 900 }
-  ] }
-  ```
-
-  While it runs the card says *checking* and **Merge** is refused. A gate still waiting for its
-  repo's lane says it is *queued behind another run in this repo* instead — the card, its reason
-  and the review all name which of the two it is, and a queued gate holds the merge just the same.
-  A red or timed-out run blocks the merge — Adam's button **and** a batch unit's merge on your grant — and the review leads with
-  the **failing lines** of the suite's own output (`FAIL`, `not ok`, an `N run, M failed` summary),
-  names the full log's path, and keeps the last lines underneath as context. The session's test
-  line stays, relabelled *advisory*. **One gate runs per repo at a time**, pre- and post-merge
-  sharing the lane: a project's suite usually isn't safe to run twice in one checkout, and two
-  concurrent runs kill each other and both report a failure about a tree that is green. (Runs in
-  different worktrees don't share a checkout, so they don't collide.) A suite
-  that **couldn't run at all** (its own concurrency lock, a missing command, a worktree that has
-  gone) is told apart from one that failed: it still holds the merge — nothing was proven — but it
-  says so plainly, it never turns the card red, and it is retried a minute and a half later.
-  After the merge the **same suite runs once in the main checkout**, but only for a request whose
-  own pre-merge gate ran in this Shepherd session — turning `merge.gates` on never gates merges
-  that already happened. If main is red, the unit's tab stays open and the card says so. `match` works like
-  `policies.attachments` (project / group / key globs, first entry wins, an absent field is a
-  wildcard; `project` is the session's project key). With no `gates` listed nothing runs and the
-  flow is exactly as it was.
-- **The claim check — a hint, never a gate.** The gate proves the suite is green; it doesn't prove
-  what the session *wrote* is true. The review reads the summary and the tests line against the
-  changed files it already has (no extra git call): a summary that says tests or fixtures were
-  **added** should come with at least one test path among the added or changed files (a `tests/`,
-  `__tests__/`, `fixtures/`, `e2e/` or `isolate/` folder, or a `*.test.*` / `*_test.*` /
-  `test_*` / `*.spec.*` file; a rename counts by where it ends up, a deletion doesn't). It answers
-  one of three ways — *ok* with the paths, *flagged* with the sentence it read and the file count,
-  or *couldn't tell* when no such claim was made, the diff isn't in yet, or the file list was cut
-  at 200. It reads English with a small, conservative matcher (a verb of adding next to
-  "test"/"fixture"; any negated clause is skipped; "tests green" is the gate's business, not a
-  claim), so it **warns in the review and holds nothing**: Merge stays clickable and a batch
-  unit's delegated merge goes through with a flag up.
-- **Merge** tells the waiting session to go: rebase on main (conflicts settled by the tests —
-  both sides' tests must pass, or it stops and reports *blocked*), run the suite, `ExitWorktree`,
-  `git merge --ff-only` in the main checkout, run the suite on main, then
-  `cc-merge.sh done --result merged`, which confirms the branch is in main and removes the
-  worktree and the branch — never forced. Merges in one repo run **one at a time, in the order you
-  clicked**; the rest show *queued (next in line)* and start on their own. **Not yet** sends your
-  note back, and the unit stays in its worktree.
-- **A unit's own tab closes itself.** Once `done` reports the merge, Shepherd checks with its own git
-  that the merged commit is in main and the worktree is gone, waits for the session's last turn to
-  end, and — **only for a tab it opened for that job** (a batch unit's, or one started with **New
-  worktree tab** or resumed from Instances) — has the tab bridge close it: a batch unit's tab by the
-  tag the bridge gave it, any other by its name, on a single match. A main chat that did a unit
-  itself in a worktree stays open: its finished request is cleared and a toast says *✓ Merged … —
-  its chat stays open*. If it can't (no bridge in that
-  window, a tab name shared by two tabs, a terminal session) or git disagrees, the card says
-  *merged — close its tab yourself* and why, with **Dismiss** (clear it from the card), and
-  **Close tab** (try again now) only where a press could actually close it — never while a
-  post-merge gate runs or queues, while main is red, for a merge Shepherd couldn't verify, or
-  when the tab can never be identified again (a batch unit's tab after its window reloaded: the
-  bridge forgot its tag, and unit tabs never get a name). A *blocked* unit's card has Dismiss too.
-  `"merge": { "closeTab": false }` leaves every tab open.
-- No keystrokes: the request and your answer are files in `~/.claude/cc-merge/`, and the answer is
-  bound to the request it's for. `"merge": { "enabled": false }` makes Shepherd ignore requests.
-
-### Claude drives a batch
-
-Ask a Claude session to run several units in parallel and it can drive the whole loop — with
-**one approval from you per batch**:
-
-1. It writes the batch (title, units with type / name / task, and whether it asks to merge them
-   when green) and runs `~/.claude/cc-fleet.sh propose --file <batch.json>` in the background.
-2. Its card says *⇉ proposes 3 units in <repo>* (teal ring, one alert) and its detail panel shows
-   the batch: every unit and its task, and a **"Claude may merge these when green"** checkbox set to
-   what it asked for — untick it to keep merges for yourself. **Approve batch** or **Deny** (+ a note).
-3. On approval it runs `cc-fleet.sh tab --batch <id> --unit <name>` per unit: Shepherd opens an
-   empty Claude tab in the repo's window, works out which new session is that tab (one tab opening
-   per repo at a time), and hands back its name and the unit's message. First it tells that window's
-   tab bridge to tag the new tab as the unit's (the tab never gets a name, so the tag is how Shepherd
-   closes it after the merge); a window still running a bridge too old to tag it is refused up front
-   with *Developer: Reload Window there, then ask again*, and a tag the bridge refuses raises a toast
-   at once instead of surfacing at merge time. The driver sends it with
-   **SendMessage** — the tab starts working with no Enter pressed, under its own permissions — and
-   gets notified when the unit goes idle. While the batch runs, the driver's card reads **Driving N
-   units** in the working colour and stays ahead of its units (anything that needs you still leads).
-4. Each unit finishes with the ready-to-merge flow above. With merge permission, Shepherd approves
-   a unit's merge on the batch's grant **only** for that unit's own session on its own branch, once
-   its own git check passes — one merge per repo at a time; without it, units wait for your Merge.
-   Tabs close after their merges as usual.
-5. **Stop batch** (on the driver's card) — or `cc-fleet.sh stop` — ends it at once: no more tabs,
-   no more merges on its grant. A batch also **ends itself** once every unit has merged or
-   blocked (or its repo is gone): Shepherd records each unit's outcome from its merge request, says
-   *batch finished: … (2 merged)* once, and the panel leaves the driver's card.
-6. While it runs, the batch review groups the units **by outcome** — *✅ 2 merged — alpha, delta*,
-   *⛔ 1 blocked — beta*, *⏳ 1 working — gamma*, *· 1 not opened — eps* — and each unit's row leads
-   with its result. `cc-fleet.sh status --batch <id>` prints the same grouping as JSON: `counts`,
-   `outcomes` (the slugs in each bucket), a per-unit `units` list (branch, outcome, result, session)
-   and your `grant` as Shepherd recorded it. A unit with its session and no result is *working*;
-   one with no session yet is *unopened*; *merged-dirty* counts as merged.
-
-Your approval lives in Shepherd (`~/.claude/cc-fleet/<id>.state.json`), never in the proposal's own
-file. `"fleet": { "enabled": false }` makes Shepherd ignore proposals.
-
-**Is Shepherd running?** `~/.claude/cc-fleet.sh alive` answers it — exit 0 with the panel
-heartbeat's age, exit 6 with why not. It's the one subcommand that works outside a Claude session,
-because a session that can't run the others is exactly the one that needs to know. Shepherd has
-**no process of its own** — it's Lua running inside Hammerspoon, and `Shepherd.app` is only a
-launcher — so `pgrep`/`ps` for "shepherd" finds nothing whether it's up or not.
-
-### Try it: the worktree demo
-
-`deno task demo` (or `make demo`) sets up a fresh little Deno app and opens it in a new VS Code
-window; say **run the worktree demo** in a Claude tab there and watch two units work on the same
-file at once, land on main one after the other (the second through a merge conflict settled by the
-tests), and close their own tabs — with one approval and two Merge clicks from you. See
-[demo/GUIDE.md](demo/GUIDE.md) for the walkthrough and [demo/HOW-IT-WORKS.md](demo/HOW-IT-WORKS.md)
-for the mechanics.
-
-### Answer questions from Shepherd
-
-**On by default — switch it off in ⚙ Settings → Approvals → "Answer questions in Shepherd"** (or
-`"ask": { "enabled": false }` in `~/.claude/cc-config.json`). It was briefly opt-in on 2026-09-18,
-when answering on the card felt worse than answering in the tab: the options showed their
-descriptions only as hover tooltips, and the panel would freeze. The freeze turned out to be a
-quadratic transcript parse elsewhere in the panel, not this feature. With that fixed, the
-descriptions written out in full, and click-to-resume around 100ms, the default went back on —
-but the switch stays, so it can be turned off without editing JSON. With it off, questions go
-straight to the tab, exactly as Claude Code does on its own.
-
-When a session needs your decision it asks with Claude Code's question tool (AskUserQuestion).
-With the setting on and Shepherd running, the `cc-ask.sh` hook **holds that question for Shepherd**
-instead of showing it in the tab:
-
-- **The card pulses** and says *❓ asks you: …*, it leads its project card, and you get one alert
-  (plus an OS banner if approval banners are on). The hook wakes the panel itself, so the question
-  is on the card in a fraction of a second rather than on the next 1-second tick.
-- **The answers are buttons** in its detail panel and on its Instances row, **each with its
-  explanation written out under its label** — the same text the tab shows, wrapped in full, not a
-  hover tooltip. One click on a
-  single-choice question answers it. With several parts or multi-select, pick per part (or type your
-  own answer under **Other…**) and press **Send answers**. Either way the answer goes straight to
-  the session as the tool's own answer; no tab to find, no keystrokes. The hook looks for your
-  answer every 0.1s, so the session is moving again about a tenth of a second after the click.
-- **Answer in the tab instead** hands the question back to the tab's own picker and takes you
-  there. The tab's picker also takes over after `ask.waitSeconds` (default 900) and whenever
-  Shepherd isn't running, so nothing waits on a panel that's gone.
-- Approve / Deny (and Approve all) skip a held question: it's answered with its own buttons.
-
-Your answer is `~/.claude/cc-ask/<key>.answer`, bound to the question it's for. The hook is wired by
-`make setup`; unticking the setting (`"ask": { "enabled": false }`) sends every question straight to
-the tab again, from the next question on. A config that says nothing about `ask` leaves it on.
-
-### Messages
-
-Shepherd's messages — a session asking you something, a merge starting, an action it refused and
-why — appear as small toasts at the bottom of its own panel (up to three, fading after a few
-seconds; click one to dismiss it) and in the Hammerspoon console. Nothing pops up over your other
-windows; `"alerts": { "onScreen": true }` brings back the big centre-screen overlay.
-
-## Control actions
-
-The **header** has **New** (opens the new-session modal — see "Spawn"), a **☕
-keep-awake toggle** (see "Keep this Mac awake"), **📊 Fleet insights** and **📜 Audit
-ledger** overlays (see "Audit log & insights"), the **⚙ Settings** panel, and a theme switcher.
-
-**Single-click** a tile to select it (opens the detail panel). **Double-click** a
-tile to **jump** straight to its window — on a project card, to the instance that needs
-you most (see "Project cards & instances"). Both are decided the moment the button goes
-down, so they land even while a busy fleet is re-rendering the grid under the pointer.
-
-**Sessions that share a window.** Shepherd acts on a VS Code/Cursor session by focusing its
-*window* and typing — and when several Claude tabs run in one window, the keys land in
-whichever tab is in front. So a session whose window hosts other sessions gets **no keystroke
-action at all**: no nudge, queue feed, routed task, auto-continue, `/clear`, `/compact`,
-`/rc`, Rewind, model/effort/mode switch or key approval. **Close** is the exception: the
-Shepherd tab bridge (a small companion extension `make install` puts in VS Code) closes just that
-session's Claude tab — no keystroke — when exactly one Claude tab in the window carries the
-session's name (its chat title, as the tab shows it). A fresh tab still named "Claude Code", two
-tabs with the same name, or a window without the bridge keep Close refused, with the reason.
-Each refusal is logged and raises an alert (at most once a minute per session); the
-detail panel greys those controls and says how many sessions share the window. **Jump**,
-**hands-free approvals** (the gate's decision file), **ready-to-merge** answers (decision files
-too — the shared-window banner sits above the keystroke controls, not the merge review), Queue
-add, Gate and Policy still work, and kitty sessions are unaffected. A queued task simply waits. `keystrokes.refuseSharedWindow:
-false` in `~/.claude/cc-config.json` turns the guard off. **Jump** (and double-click, and Focus in
-Instances) brings the session's window forward and then asks that window's tab bridge to bring
-**the session's own tab** to the front — when one of its names (custom title, AI title, first
-prompt) picks out exactly one Claude tab there; otherwise you land on the window as before.
-(Revealing the tab through the Claude extension's URI was tried and dropped: for a session in the
-Claude sidebar it would start a second Claude process — see D-14; the tab bridge only switches
-tabs, see D-17 in `spec/product/spec.md`.)
-
-**Sessions with no tab.** Starting a new conversation in a Claude tab can leave the old
-session's `claude` process running with no tab of its own. Where the tab bridge runs and a window
-has **more Claude sessions than Claude tabs**, Shepherd compares every name each session's tab
-could show (custom title, AI title, first or last prompt) with the window's tabs; when the sessions
-that match no tab are exactly that surplus and have stayed so for 20 seconds, they're marked **⊘ no tab — a leftover process, or the Claude sidebar** on its card,
-in Instances and in the detail panel, with **End session**. End asks first, checks with `ps` that
-the pid is still a `claude` process of that window, stops it and drops the card; the chat stays in
-its transcript. It's never offered for a session that has a tab. Until it's ended, a tab-less
-session still counts toward "sharing its window" (it might really be in the sidebar) — so Shepherd
-**ends it by itself** once it has been tab-less and idle for `tabless.autoEndMinutes` (default 10;
-0 = off), with the same `ps` check, never for a session that's waiting on you or running agents,
-and says so in a toast. A leftover that reads **Working** is ended only on proof that its turn is
-over: the newest record in its transcript is Claude Code's own *Request interrupted by user* marker
-(an interrupted turn fires no Stop hook, so its status stays "working" for good), and that marker,
-the status file and the missing tab are all older than `tabless.autoEndMinutes`. Being quiet is
-never enough — hooks write a session's status only when something happens, so a session inside one
-long build is exactly as quiet as a leftover, and it is left alone. (Until 2026-09-18 a working
-session was never ended at all; that left the interrupted leftover on its card for good.) A
-tab-less session gone quiet at Working also stops leading its project's card: a session you're
-actually using ranks above it, and the "also:" line doesn't count it as working.
-
-**Right-click** a tile for a context menu:
-
-- **Jump to window** — focus that session's editor window (the same as a double-click,
-  offered here too).
-- **Instances…** — the project's Instances view (same as the card's corner button).
-- **Relabel…** — give the tile a custom display name (e.g. "auth refactor" instead
-  of the folder name). Display-only — jumps still target the real window — and
-  **persistent**: keyed by the session's **stable project identity** (its launch
-  folder, recorded in `~/.claude/cc-labels.json`), so the name sticks even as the
-  agent changes directories, and survives a Hammerspoon reload, a new instance, and
-  close/reopen in the same folder. Relabel back to the folder name (or blank) to clear it.
-- **⚖ A/B fork-to-compare…** — run the same task as 2+ variants (different model
-  and/or prompt) in **isolated git worktrees** of this project, then score them side by
-  side and keep the winner. Opens the A/B panel **pre-scoped to this tile's folder**
-  (the repo field stays editable, so you can retarget or A/B any repo). *This is a
-  per-project action — it used to be a global button in the header.*
-- **Clear conversation / Compact** — native confirm, then run `/clear` or `/compact`
-  in the session (same effect as the detail-panel buttons).
-- **Close instance** — confirm, then best-effort close the editor window (⌘⇧W) and
-  remove the tile (the project's saved label is kept for next time). *Note:* it finds
-  the window by **title**, so for two sessions sharing a name, prefer **Forget tile** to
-  clear a stale one, or **Hide tile** to shelve a live one (Close could match the live
-  twin's window).
-- **Hide tile (keep session running)** — takes a session **off the grid** without
-  touching it. It keeps running, and Shepherd keeps managing it exactly as before —
-  gate decisions, autofeed, escalation, policies and auto-respawn all still apply. Only
-  the drawing stops (panel **and** Stream Deck). Use it for a long background run you
-  don't want occupying screen space. The mark is keyed to that **one session**, so
-  reopening the project gives you a fresh, visible tile with no expiry to think about.
-  Restore any time from **☰ → 🙈 Hidden sessions**, which appears with a count whenever
-  something is hidden and shows each hidden session's live status — so one that later
-  needs approval is still findable.
-- **Forget tile (stale orphan only)** — just drops the dashboard tile (removes its status
-  file) with **no window keystroke**, so it can't close a live session that shares the name.
-  Use it for stale/orphan tiles (a session that ended without a clean `SessionEnd`).
-  The status file is a *projection* of a live session — the hooks rewrite it constantly —
-  so on a **running** session the tile reappears within seconds. That's expected: to make a
-  live session go away, use **Hide** above.
-  Note: a `/clear` (or restart) leaves a stale **duplicate** tile behind; the panel now
-  **auto-prunes** these once the fresh session is live by matching the old + new tile to
-  the same terminal/editor **window** (kitty window id, or the host pid for VS Code/
-  Cursor), so you rarely need Forget for `/clear` ghosts.
-- **Drain (finish turn, then close)** — *shown when `drain.enabled`*: wait for the
-  session to finish its in-flight turn, then close it (closes now if already idle/done).
-- **Respawn from cwd** — *shown when `respawn.enabled`*: relaunch a dead/stale session
-  from its last working dir + matched provider + editor.
-
-The detail panel has:
-
-- **Jump** — focus that session's VS Code/Cursor window (switches Spaces if needed).
-- **Approve / Deny** — answer a pending permission prompt.
-- **Stop** — interrupt the current turn.
-- **Continue** (error recovery) — when a session freezes on an API error (e.g. `Unable to
-  connect to API (ECONNRESET)`) that aborts the turn without a Stop, its tile turns a distinct
-  **magenta "Error"** and the Approve button becomes **Continue**; one click types `continue` +
-  Enter to resume the aborted turn. Detected from the transcript (no hooks); auto-respawn is
-  held off so you resume the *same* session rather than relaunching it. **Auto-Continue**
-  (⚙ Settings, off by default) does this for you: after a grace delay it types `continue`
-  automatically, capped per folder so a persistently dead connection can't loop.
-- **Autopilot** — time-box a session to auto-approve all its prompts (needs the gate + config).
-- **Clear / Compact** — pop a yes/no confirm, then run `/clear` or `/compact` in the session.
-- **Improve** — pull this repo's un-applied improvement insights from the AI Monsters
-  leaderboard and send them to the session as a **review-first** prompt (assess and
-  suggest where applicable — *not* wholesale edits), so you approve a plan before any
-  changes. Shows "No improvements found" when the latest push's insights are already
-  claimed. Needs `LB_URL` / `GRADE_PREVIEW_TOKEN` in your shell (`~/.zshrc`).
-The next six — Effort, Mode, Model, Gate, Policy and Auto-model — are **hidden unless you turn
-them on** in ⚙ Settings → Appearance → **"Model controls"** (off by default). They stay available
-for anyone who uses them, without every panel carrying six controls you never touch.
-
-⚙ Settings → Appearance → **"Hide the detail panel's controls"** (off by default) goes further
-and takes the whole bottom of the panel off screen: the button row, the model-control row, the
-nudge box and its chip, and the task-template menu. What it leaves behind is the part you can't
-reach any other way:
-
-- a session **waiting on the approval gate** brings back **Approve, Deny, the deny reason and
-  Stop** — and only those — then hides them again the moment you answer. Without that the
-  toggle would remove the only Deny there is: the ⌘⌥A hotkey approves the front-most waiting
-  session, and nothing is bound to Deny.
-- an **errored** session brings back the Approve button alone, which already reads **Continue**.
-- a **held question** (AskUserQuestion) and the **plan / TODO** box are content, not chrome, and
-  stay exactly as they are — questions keep their own answer buttons.
-
-Known consequence: the nudge box is hidden, not disabled, so ⌘V still pastes into it. The
-setting is a panel preference, not a look — exporting or importing a theme never carries it.
-
-- **Effort** dropdown — set the session's reasoning effort (Low/Medium/High/XHigh) live; sends
-  the `/effort <level>` slash command.
-- **Mode** dropdown — switch the permission mode (Default / Accept edits / Plan) live via
-  Shift+Tab; reliable on Kitty, best-effort in the VS Code extension (its switcher is mouse-only).
-  The detail also shows badges for the detected **editor**, current **permission mode**, and **effort**.
-- **Model** dropdown — shows the session's **current** model (read live from the transcript, so it
-  follows an in-session `/model`) and switches it within the backend (`/model <id>`). The switchable
-  list comes from the `providers[]` you define in `cc-config.json`; with none configured it shows
-  just the current model. Changing the *provider / base URL* needs a fresh session (by design).
-- **Gate** dropdown — per-session tool gating (Default / All / None / Custom): override the
-  fleet `gate.tools` for just this session. Only enforced while headless approvals are armed.
-- **Nudge box** — a multi-line input: **Enter** sends, **Shift+Enter** adds a newline
-  (mirrors the Claude chat), so a pasted multi-item list arrives intact. **Paste an
-  image** and it's attached as a chip; **Send** delivers text and/or image via the
-  clipboard (one ⌘V, newline-safe). **Queue** saves text for later (the tile shows
-  `+N queued`, **Feed next** sends the front one).
-
-The **Wants** (the exact command) and **Why** (the assistant's reasoning before a
-request) clamp to two lines — **click to expand**.
-
-The detail panel groups its views into a **tab strip** — **Activity** (the default: status,
-wants/why, plan/TODO, lineage), **Transcript** (recent turns + search), **Rewind**
-(checkpoints + this session's recorded activity), **Decisions** (the gate decision log),
-**Usage** (per-session token breakdown), **Changes** (see below), **User Stories** (gated —
-see below), **Agents** (subagent/Workflow fan-out), and **Queue**. The expensive tabs load
-only when opened. The **⋯** button hides
-tabs you don't want; your choice (and the last-open tab) is remembered per project. A **⤓
-Export** button (also on the tile right-click menu) archives the session — its transcript
-`.jsonl` plus a `meta.json` (label, provider/model, lineage, activity counts) — into
-`~/.claude/cc-exports/` and reveals it in Finder.
-
-#### Changes tab (per-session git status + diff)
-
-The **Changes** tab shows the session folder's working tree: a list of changed files with
-A/M/D/R/?? marks, and **click any file to expand its colorized diff** (rename-aware). Read-only,
-local sessions only, with a **↻ Refresh**. Nothing runs against the repo except `git status` /
-`git diff` from the repo root.
-
-#### User Stories tab (gated — view/edit `spec/product/user-stories.md`)
-
-Shown **only when** the session's project has `spec/product/user-stories.md` (it appears /
-disappears live if the file is created or deleted mid-session). It lists the file's stories
-grouped by capability area (the `##` headings), with **+ Add story** per area, **double-click**
-a story to edit it inline, **✕** to delete, and an explicit **Save** (staged edits, with an
-"● unsaved" indicator). A soft **⚠** flags any story missing the mandatory "so that". The file's
-non-story content — title, intro, headings, prose, fenced code — is preserved **verbatim**
-(an unedited file round-trips byte-for-byte), and saves are **hash-guarded** against an external
-edit and written atomically; an edit can't inject fake structure and `*`/CRLF are preserved.
-
-To **generate** these files for a project that doesn't have them yet — especially a **rune**
-project — see the playbook in
-[docs/reverse-engineering-user-stories.md](docs/reverse-engineering-user-stories.md). Shepherd's
-own [spec/product/spec.md](spec/product/spec.md) and
-[spec/product/user-stories.md](spec/product/user-stories.md) are a worked example.
-
-### AskUserQuestion in the panel
-When a session calls **AskUserQuestion**, the hook captures the question + options and the panel
-renders them as clickable buttons under the detail. Clicking an option: on a **terminal (Kitty)**
-session it drives the picker directly (auto-select); in the **VS Code extension** the picker is
-mouse-only, so clicking **jumps you to it** to pick by hand. **Multi-select** questions can't be
-driven by synthesized keys, so Shepherd jumps you to those regardless of editor. Either way you see
-*what's being asked* without leaving Shepherd.
-
-### Editor auto-detection
-Each session self-reports its host editor. [cc-status.sh](cc-status.sh) reads the env it inherits
-from `claude` (`CLAUDE_CODE_ENTRYPOINT`, `__CFBundleIdentifier`, `TERM`/`KITTY_WINDOW_ID`) plus the
-hook's `permission_mode`, and records `editor` (`vscode`/`cursor`/`kitty`/`terminal`),
-`permission_mode`, and `effort` into the session's status JSON. The panel routes actions per session
-on that: **Kitty sessions run effects headlessly via `kitty @` remote control** (focus/approve/deny/
-nudge/close/answer with no window focus), and **anything else uses the VS Code/Cursor path**, so a
-machine running both just works. Kitty remote control is auto-enabled in your `kitty.conf` when Kitty
-is in use (Shepherd backs the file up first; needs a kitty restart to take effect), and sessions
-Shepherd spawns get it via launch flags.
-
-### How control reaches the session — and its limits
-
-Two paths, and it matters which one your sessions use:
-
-1. **Headless approvals (hands-free, reliable everywhere).** Flip **Headless
-   approvals** in ⚙ Settings (one click: arms the gate + turns off every auto-policy).
-   [cc-approve.sh](cc-approve.sh) then routes each gated permission to the panel and
-   Approve/Deny write a decision file the hook honors — **no window focus, no
-   keystrokes** — while Claude still can't run a gated tool until you decide. Works
-   for terminal *and* VS Code-extension sessions. See "Headless approvals" below.
-   While a request is waiting, a **Why?** box sits beside Deny: whatever you type goes
-   back with the refusal (*"Denied from the Claude Shepherd panel: use trash, not rm"*),
-   so the session learns why and changes course instead of just failing. Optional, 500
-   characters, Enter denies with it. It travels in a sidecar file
-   (`<session_id>.decision.note`, bound to the same request nonce as the decision),
-   never in the decision line itself; the audit ledger records it as the decision's
-   `reason`. A remote (SSH bridge) tile has no such box — a remote deny carries no note.
-
-2. **Per-session effects.** Jump, Stop, Nudge/Feed, Clear/Compact, answer, mode-switch.
-   On **Kitty** these run headlessly via `kitty @` (no window focus). On **VS Code /
-   terminal** they focus the target window and type into it — reliable in a terminal,
-   **best-effort in the VS Code extension** (the chat input/picker isn't reliably the
-   focused element; there's no supported API to inject into a running session). Needs
-   Hammerspoon **Accessibility** permission.
-
-> For reliable approve/deny regardless of UI, use Headless approvals (or Kitty).
-> For delivering work, **Queue** stores it reliably; feeding/nudge into the VS Code
-> extension's chat input is the fragile part.
-
-## Fleet navigation & bulk actions
-
-For supervising many sessions at once (always on; nothing automatic):
-
-- **🔍 Search** — the magnifying-glass header button reveals a filter bar that scopes the
-  grid as you type (token-AND over each session's name, project, status, and group).
-- **Groups** — right-click → **Set group…** tags a session into a named cohort (kept by
-  the stable project identity, so it survives close/reopen, in `~/.claude/cc-groups.json`).
-  When groups exist, a chip row lets you scope the grid to one group (composes with search).
-- **Bulk actions** — a **Fleet** bar acts on whatever's currently visible (post
-  search/group) at once: **Approve all** waiting sessions or **Stop all** working ones
-  (confirm). Buttons show live counts and appear only when there's something to act on, and
-  the row scales its type down rather than wrapping when the panel is narrow. (There is no
-  bulk nudge — broadcasting one message to the fleet was noise, not a fix.)
-- **📜 Timeline** — the detail-panel **Timeline** button opens the audit overlay scoped to
-  that one session's chronological history (needs the ledger enabled).
-
-## Global hotkeys
-
-Act on the session that needs you without touching the panel. Defaults are ⌘⌥-based;
-**remap any of them in `cc-config.json` under `hotkeys`** (each `{ "mods": [...], "key": "x" }`):
-
-- **⌘⌥A** — approve the front approval (hands-free via the gate when it's waiting).
-- **⌘⌥J** — **jump to the session that most needs you, from any app.** Ranks hard
-  attention signals: a pending **approval** first, then a session frozen on an API
-  **error**, then one the watchdog flagged **stalled** — and focuses its window even
-  when the panel isn't open. (Falls back to the front session when nothing's wedged.)
-- **⌘⌥N** — cycle-jump to the next session.
-- **⌘⌥S** — spawn a new session (see below).
-- **⌘⌥B** — show/hide the panel — state-aware, so it **restores even after a native Dock-minimize**
-  (no more "wrong-way" toggle). The 🐑 **menu-bar icon → "Show panel"** is the always-reliable way
-  to bring it back; the Dock launcher app is an optional extra.
-
-Remapping notes: valid modifiers are `cmd`/`command`, `ctrl`/`control`, `alt`/`option`, `shift`.
-macOS can't bind a bare un-modified key globally **except function keys** (`f1`–`f20`, which take
-`"mods": []`). Single-modifier combos collide — `ctrl` alone breaks terminal readline (⌃A/⌃N/⌃S),
-`alt` alone hits app shortcuts — so ⌘⌥ (or ⌃⌥) stay the low-conflict picks. A malformed entry keeps
-its default; reload Hammerspoon (menu-bar 🐑 → **Reload config**) after editing.
-
-Forget the combos? The small **⌨ button** in the **bottom-right** of the panel pops
-up a legend of every shortcut and what it does (sourced from the live bindings, so
-it never drifts — including your remaps).
-
-## Keep this Mac awake (caffeinate)
-
-The **☕ toggle** in the header keeps your Mac awake while long agent runs work
-unattended — it runs `pmset -a disablesleep 1/0` (so it holds even with the lid
-closed). Because that needs root, macOS asks for your password each time you flip it
-(your choice over a passwordless sudoers entry). The button reads the real state via
-`pmset -g` (no password needed) and shows **☕ Awake** (amber) when on.
-
-## Lock the screen (keep agents running)
-
-The **🔒 button** (next to ☕ Awake) locks the Mac behind a full-screen overlay that
-blocks all keyboard/mouse input until you type your password — while **everything keeps
-running**: Claude sessions, the approval gate, and remote control. It is deliberately
-**not** the macOS login window (that would block Shepherd's keystroke control of your
-GUI sessions). First click sets a password (stored as a salted SHA-256 hash in
-`~/.claude/cc-lock.json` — never plaintext, and it's your own password, not a hash you
-type). Pair it with **Awake** to close the lid locked and leave the fleet working. It's a
-**soft lock** (deters casual access, not a security boundary): a `⌘⌥⌃⇧U` chord force-unlocks
-so a typo can't lock you out, and `killall Hammerspoon` / a reboot always releases it. For a
-true security boundary use the real macOS lock — but it stops keystroke-driven control.
-
-While it's up, the lock shows the clock and one ring per project that has something going
-on, so you can tell what's happening without unlocking. A working project's ring spins in its
-own colour. A project that needs you (a prompt, a held question, a batch proposal, a blocked
-merge) holds a full amber ring. One that's **ready to merge** holds a teal ring, the same teal
-as the card's merge outline. An error holds a red ring. The line under the rings counts
-sessions, e.g. `2 working  ·  1 needs you  ·  1 ready to merge`, and reads "All quiet" only
-when nothing is running or waiting. The lock decides "needs you" the same way the cards do, so
-something the card shows only as a heads-up (a merge whose test gate is still running, an
-error in its grace window) doesn't ring there either.
-
-## Spawn new sessions
-
-Click **New** (or **⌘⌥S**) to open the **New session** modal:
-
-- **Open existing / Start new project** — open a folder, or create a new folder and start in it.
-  A brand-new project is the fragile spawn (cold-start window on the Welcome tab, Workspace Trust
-  prompt), so new-project spawns get extra settle time, open VS Code with `--disable-workspace-trust`,
-  re-assert the chat-input focus, and **paste** the initial task — so the prompt reliably lands and the
-  session actually starts.
-- **Window placement** — a spawned VS Code/Cursor window inherits the frame of the editor
-  window you already have open, instead of the full-width frame macOS `open` hands it (which
-  lands underneath a right-docked Shepherd panel and has to be dragged back every time). With
-  no window to copy, it takes the larger free band beside the panel; with neither, it's left
-  alone. It applies whenever the spawn actually **creates** a window — including reopening a
-  project you just closed — and never when `open` **reuses** a window you already placed, so a
-  window is never moved out from under you. Off with `spawn.matchWindowSize: false`.
-- **Presets** — ▶ chips that spawn a saved folder+editor+mode+provider bundle in one click;
-  "Save as preset" in the footer captures the current form (`~/.claude/cc-presets.json`,
-  ✕ on a chip deletes). Picking a known folder also recalls the editor/mode/provider you
-  last used for that project.
-- **Fuzzy folder search** — just type a project name fragment into the path field: your
-  project roots (`spawn.searchRoots`, default `~/Programming`) are indexed once per open
-  (with [fd](https://github.com/sharkdp/fd) when installed — gitignore-aware, so
-  `node_modules` never appears; plain `find` otherwise) and ranked suggestions drop down
-  (arrows + Enter to pick).
-- **Folder browser** — drill into subfolders, breadcrumb back up, "Use this folder" fills the
-  path; the free-text path field stays editable too.
-- **Recent** — one-click chips for folders you've launched in (plus currently-active session
-  folders), persisted to `~/.claude/cc-recent-dirs.json`.
-- **Open in** — Terminal / Kitty / VS Code / Cursor (defaults to your `spawn.editor`). Kitty and
-  Terminal launch reliably; VS Code/Cursor open the window, then best-effort drive Claude Code
-  (no supported API — Kitty/Terminal are the reliable spawns). By default that means opening the
-  **Claude Code extension panel** (its ⌘Esc quick-launch; the resume/new-session UI), typing the
-  optional initial task into the Claude input; set `spawn.vscodeFlavor` to `terminal` (⚙ Settings →
-  Spawn) for the old behavior of typing a `claude` CLI line into a fresh integrated terminal. ssh
-  spawns and gateway providers always use the terminal flavor (the extension can't run a remote
-  claude or carry `ANTHROPIC_*` env). If the project's window **already has a live Claude tab**,
-  ⌘Esc would focus *that* tab, so the spawn opens a **new Claude tab** through the extension's URI
-  instead, with the task typed in — press Return to send it (see "New worktree tab").
-- **Permission mode** — Default / Plan / Accept edits / Automate (`claude --permission-mode <m>`).
-- **Provider** — which model/backend to launch this session against (see "Providers & models" below).
-- **Initial task** (optional).
-
-Spawning is **dry-run until you opt in** (the installer's default settings opt in; a hand-made
-config without `spawn.live` stays dry-run): leave it off to log the exact command to
-`~/.claude/cc-shepherd.log` without launching, or flip **"Actually launch"** in ⚙ Settings → Spawn
-(`spawn.live`; the `ORCH_DRY_RUN` code default stays as a safety net). The new session shows up as a
-tile automatically. (The ⌘⌥S hotkey falls back to two native prompts if the modal can't open.)
-
-### Agent profiles (spawn from a saved agent)
-
-Beyond presets (folder + editor + mode + provider), the modal has an **Agents** row — saved,
-reusable **agent profiles** you hand work off to: a name + persona (role/goal/backstory) +
-provider/model + permission mode + an optional seed task + attached **skills**, **MCP servers**,
-**knowledge** dirs, and **plugins**. Click an **✦ agent chip** to *spawn from that agent* in one
-click; **Save as agent** in the footer captures the current form (plus a role you're prompted for).
-Stored in `~/.claude/cc-agents.json` (operator data — **no secrets**; an MCP server's auth is an
-env-var NAME your shell expands, never a value).
-
-Spawning from an agent emits the right launch flags for native Claude Code: `--append-system-prompt`
-(persona + skills), `--mcp-config` (built from `~/.claude/cc-mcp.json`, secrets as `${VAR}` refs),
-`--add-dir` (knowledge), `--agent`, `--plugin-dir`. A read-only **Skills card** in the modal lists
-every skill in `~/.claude/skills` (its `/command` + description). Real spawning still honors
-`spawn.live` (dry-run by default).
-
-Today you attach skills/MCP/knowledge to a profile by editing the `cc-agents.json` / `cc-mcp.json`
-arrays by hand — a profile is `{name, folder?, provider?, model?, permMode?, seedPrompt?, role?,
-goal?, backstory?, skills[], mcpServers[], knowledge[], plugins[]}`; an in-panel editor with
-folders/favorites/fork is a planned follow-up.
-
-### Auto-enable Remote Control (claude.ai / mobile)
-
-Claude Code's own **Remote Control** lets you drive a *local* session from claude.ai or the
-Claude app. Shepherd can turn it on for you (⚙ Settings → *Claude Code Remote Control*; on by
-default — distinct from the Kitty `kitty @` control above, which is how Shepherd drives the
-window):
-
-- **On spawn** (`remoteControl.onSpawn`) — new Shepherd-spawned sessions launch with the
-  documented `--remote-control` flag, so they register Remote Control with no extra step. This
-  applies only to **local, native-Anthropic** sessions: Remote Control needs a claude.ai login
-  and rejects gateway/SSH providers, so the flag is skipped for those.
-- **On startup** (`remoteControl.sweepOnStartup`) — when Shepherd starts, it types `/rc` into
-  already-running idle/finished local **terminal** sessions (kitty / terminal), so after a computer
-  restart Remote Control is re-armed across them (it skips sessions mid-turn or waiting on a prompt;
-  `/rc` is harmless to repeat). It never types into a VS Code/Cursor tab: the extension has no
-  `/rc`, and its slash menu used to turn it into `/deep-research`.
-- **Sessions you start yourself in a terminal** aren't Shepherd-spawned, so to auto-register them
-  run `/config` inside Claude Code once and set **Enable Remote Control for all sessions** — there
-  is no settings.json key documented for that toggle, so Shepherd can't set it for you.
-
-> **⚠ Security — this is on by default.** A session with Remote Control can be driven from your
-> claude.ai account, so anyone with access to that account (or the Claude mobile app) can type
-> into a **local** shell session. That widens the trust boundary from "whoever is at this machine"
-> to "whoever can reach my claude.ai." Turn `remoteControl.onSpawn` / `sweepOnStartup` off (⚙
-> Settings) if that's broader than you want.
-
-## Providers & models (multi-model / other companies / local)
-
-Claude Shepherd supervises **Claude Code** sessions, and Claude Code is provider-flexible,
-so a "provider profile" is just a **named bundle of env vars + a model id** injected into
-the `claude` launch. Define profiles in **⚙ Settings → Providers**, pick one per session in
-the **New session** modal (or set a **Default provider**), and switch a running session's
-model live from the detail panel's **Model** dropdown (`/model`). The tile/detail shows a
-**model** badge for what's actually running (captured from the session's env by the hook).
-
-Two kinds:
-
-- **Claude** (`kind: "anthropic"`) — just sets `ANTHROPIC_MODEL` (e.g. `claude-opus-4-8`,
-  `claude-sonnet-4-6`, `claude-haiku-4-5`) against the normal endpoint.
-- **Gateway** (`kind: "gateway"`) — also sets `ANTHROPIC_BASE_URL` so Claude Code talks to an
-  **Anthropic-Messages-compatible endpoint**: a [LiteLLM](https://docs.litellm.ai/) proxy
-  (which translates to **Gemini, OpenAI**, and others), or a **local/remote REST server**
-  (Ollama/vLLM/LM Studio, optionally behind LiteLLM). Set `baseUrl`, the `model` id your
-  gateway expects, and optionally `smallFastModel` / `headers`.
-
-**No API keys are stored.** A profile names an **environment variable** in `authTokenEnv`
-(e.g. `MY_LITELLM_KEY`); the spawned **login shell** expands `$MY_LITELLM_KEY` at launch, so
-the key lives in your shell (`~/.zshrc` / a secrets manager), never in `cc-config.json` and
-never in Shepherd's process. Example `~/.claude/cc-config.json`:
-
-```json
-{
-  "spawn": { "provider": "anthropic-opus" },
-  "providers": [
-    { "id": "anthropic-opus", "label": "Claude Opus 4.8", "kind": "anthropic", "model": "claude-opus-4-8" },
-    { "id": "gemini", "label": "Gemini (LiteLLM)", "kind": "gateway",
-      "baseUrl": "http://localhost:4000", "model": "gemini-2.5-pro", "authTokenEnv": "MY_LITELLM_KEY" }
-  ]
-}
+```text
+Claude Code session ──hooks──► ~/.claude/cc-status/<session>.json ──► Shepherd panel (Hammerspoon)
+       ▲                                                                       │
+       └── gate hook waits for a decision file ◄────────── Approve / Deny ─────┤
+VS Code window ◄── tab bridge extension: close or select one Claude tab ◄──────┘
 ```
 
-**Limits (be honest):** every Shepherd control keeps working because the **harness is still
-Claude Code** — only the backend model swaps. A non-Claude backend may ignore Claude-specific
-behaviors (effort/thinking), but slash commands, hooks, and approvals are Claude Code client
-features and still function. A session's **base URL is fixed at launch**, so switching the
-*model* within a provider goes live via `/model`, but switching the *provider* (a different
-base URL) means starting a **new session**. Running a *different agent CLI* (aider, gemini-cli)
-is out of scope — those have no hook system, so the tiles/approvals couldn't work.
+- **Hooks write, the panel reads.** Claude Code hooks ([cc-status.sh](cc-status.sh) and friends)
+  write one small JSON file per session. The panel, Lua running inside Hammerspoon, reads them every
+  second and writes a heartbeat so the hooks know it's alive.
+- **Answers are files, not keystrokes.** The approval gate, held questions, merge requests and
+  batches wait for a decision file bound to their request. That works in any editor, even with many
+  tabs in one window.
+- **Keystrokes only where they're safe.** Nudges, feeds and slash commands type into the session's
+  window, so Shepherd refuses them for a window that hosts several sessions.
+- **The tab bridge** is a small VS Code extension that closes or selects exactly one Claude tab on
+  Shepherd's request.
 
-## Token usage
-
-Shepherd reads token usage straight from Claude Code's **local transcript files**
-(`~/.claude/projects/<proj>/<session>.jsonl`), which log every turn's `usage`. Three views:
-
-- **Context-fullness bar (per tile)** — the last turn's prompt size (input + cache) ÷ the model's
-  context window, with the **numeric `% shown on the bar`**. Tells you which session to `/compact`.
-  The window is **model-aware** (Opus 4.x / Sonnet 4.6 = 1M on Claude Code; others 200k), with a
-  per-provider `contextLimit` override and a self-healing guard so a session never reads a false
-  100%. To **match Claude Code's own "% until auto-compact"** (which measures against the window
-  minus an output reserve, so it reads higher than raw tokens/window), the bar divides by
-  `window × context.autoCompactFraction` (default `0.92` — hand-tunable in `cc-config.json`; the
-  exact threshold is undocumented, so this is a close approximation). The color steps through **7
-  bands** — calm below 50%, a new color every 10% (50/60/70/80/90), and a distinct **critical**
-  band for the last 5% (95–100%). Computed on the 60s usage pass (and live on the 1s loop for
-  active sessions), so it shows on **every** tile — including idle/finished ones. **Local only,
-  zero tokens, zero network.**
-- **Fleet total (footer under the grid)** — cumulative tokens across active sessions (headline
-  **excludes cache reads** — input + output + cache-creation — since cache reads dominate the gross
-  count but aren't how the plan is metered; gross is on hover). Per-model breakdown in the detail
-  panel. Recomputed on a **60s timer** (incremental reads — only new bytes) + an **Update now** button.
-  **Local only, zero tokens.** The footer also shows an **`~$X est.`** API-equivalent dollar figure
-  from a per-model price table (`core.PRICING`; Opus 4.x $5/$25, Sonnet 4.6 $3/$15, Haiku 4.5 $1/$5 per
-  Mtok, cache-aware) — an estimate (your subscription is flat-rate), hand-tunable via `pricing.<family>`;
-  gateway/local models have unknown pricing and are excluded.
-- **Plan window bars (footer)** — your real **session (5h)** and **weekly** utilization %, matching
-  `claude.ai/settings/usage` and Claude Code's `/usage`, with reset times. Below them, a
-  **per-model weekly line** for any model the endpoint meters separately — a **`Weekly · Sonnet`**
-  line, and a **`Weekly · Fable`** (Fable 5) line drawn from the structured `limits[]` surface.
-  Each per-model line appears **only when that model is actually being metered** (active, or with
-  nonzero weekly usage); a model you don't use — or that isn't provisioned — draws **no row**, so
-  the footer never shows an empty `0%` line. (Fable 5 local per-session tokens/cost already roll up
-  in the per-model breakdown and the `~$` estimate via `core.PRICING.fable`.)
-- **Commits today / this week (under the plan bars)** — `Today  4 commits · +312 −40` and
-  `This week  25 commits · +4.3k −174 · ↑8 vs last wk`, with a Mon–Sun bar per day (today outlined).
-  The pace compares this week with the same stretch of last week (its Monday up to exactly 7 days
-  ago). Click either line for the drawer: each project's today and week with its own day bars
-  (click a project for its commits) and the latest commits across all of them. Counted from
-  **local git** by `~/.claude/cc-commits.sh`, so unpushed work and worktree branches count, and a
-  commit is dated by when it was written (a rebased unit still lands on its real day). **Whose
-  commits:** each repo's `git config user.email` plus `commits.authorEmails` — nothing about the
-  user is hardcoded, so every install counts its own user. **Which repos:** every repo a Claude
-  session worked in during the last two weeks (from the transcripts in `~/.claude/projects`,
-  removed worktrees included). A commit counts once across clones and rebased copies; lockfiles
-  and minified/map files don't count toward lines. git runs in the background every 5 min, on
-  **Update now**, and when the drawer opens — never on the panel's tick. `commits.enabled: false`
-  hides it; the other `commits.*` keys are documented in `cc-config.example.json`.
-
-The window bars come from Anthropic's OAuth usage endpoint (`/api/oauth/usage`) using your existing
-Claude Code login token (macOS Keychain or `CLAUDE_CODE_OAUTH_TOKEN`). **This is a metadata call —
-it spends no model tokens**; it's polled at most every **180s**, sends the token only to
-`api.anthropic.com` over HTTPS, and never logs it. If the token is missing/expired or the endpoint
-is unreachable, the bars **fall back** to a labeled local approximation (rolling 5h/7d token sums
-from your Anthropic-session transcripts).
-
-### Plan-limit warnings (on by default)
-
-When any plan window crosses **90%**, Shepherd raises one macOS notification and records a
-`usage_limit` row in the audit ledger — so a long unattended run doesn't die on a cap with no
-warning. It covers the session (5h) bar, the weekly bar, and every per-model weekly line
-(`Weekly · Fable` and friends). Entirely passive: no keystrokes, no session actions, no model
-tokens.
-
-Alerts are **once per whole percentage point**. Crossing 90% warns, then 91%, then 92%, and so on
-up to 100% — so a bar climbing toward the cap keeps you posted as it gets worse, while a bar
-sitting still stays quiet (drift within a single point, 90.1% → 90.7%, is silent). A jump doesn't
-backfill: straight from 90% to 95% warns once, for 95%. The window re-arms when it resets.
-
-```jsonc
-"usage": {
-  "limitAlerts": {
-    "enabled": true,      // false turns the warnings off entirely
-    "thresholdPct": 90    // first warning at this %, then one per point above it
-  }
-}
-```
-
-Click any row in the ledger's 🔔 **Alerts** view to expand the full detail — which window, the
-exact percentage, the threshold that tripped it, and when that window resets.
-
-**Honest limits:** usage is shown in **tokens, not dollars** (subscription cost is flat; gateway/
-local model pricing is unknown). For **gateway** sessions (Gemini/OpenAI) cumulative usage still
-appears (whatever the gateway reports; cache tokens ~0) — set a per-provider `contextLimit` (e.g.
-Gemini → 1000000) so the fullness bar uses the right window. The plan window % reflects your
-**Anthropic** account only (gateway/local tokens don't count against it). Local servers that omit
-`usage` simply show no bar.
-
-### Task queue
-Each session has a queue (`Queue` button in the detail panel adds the input;
-`Feed next` sends the front task; the tile shows `+N queued`). Turn on
-`queue.autofeed` in the settings file (below) and Claude Shepherd feeds the next task
-automatically each time the session finishes — so a session works through a
-backlog unattended. Feeds are delivery-safe: a task is only popped off the queue when
-the paste actually reached the session's window (no window match → it stays queued, and
-the ledger records `task_feed_skipped`), and queues follow the **project**, so a
-respawned or `/clear`-ed session inherits its folder's pending tasks.
-
-Queue extras:
-- **Edit the queue in place** — click "Queue: N" to expand the task list and reorder
-  (▲▼) or remove (✕) entries. Edits are race-safe against the 1s autofeed loop: each
-  one carries the task text you clicked, and a mismatch (the queue changed underneath)
-  is refused and the list refreshed instead of moving the wrong task.
-- **Bulk paste** — paste a multi-line list into the input and hit Queue: it splits into
-  one task per line (bullets/numbering stripped, blanks dropped) after a confirm.
-- **Task templates (parameterized + versioned)** — "Tpl ▾" next to Queue saves the
-  current input as a named template and inserts saved ones back into the input (never
-  auto-sends). Stored in `~/.claude/cc-templates.json`.
-  - **Variables** — a template body can carry `{{name}}` (required) and `{{name?}}`
-    (optional) placeholders. Picking one opens an inline fill-in form (required vars gate
-    Insert), then it's rendered before it lands in the input. Built-in vars fill
-    automatically: `{{date}}`/`{{today}}`, `{{now}}`, and `{{prev_output}}` (the selected
-    session's latest output).
-  - **Render-before-spawn** — the New-Session modal has a **Templates** picker that seeds
-    the Initial-task field; any `{{vars}}` are filled in (required vars gate "Use") and
-    rendered so the spawn task is fully resolved before launch.
-  - **Render-before-feed** — queued tasks are rendered just before they're typed in
-    (manual / autofeed / router): `{{prev_output}}` (the turn that just finished) and the
-    date built-ins resolve; user `{{vars}}` that can't be auto-filled are left as-is, and a
-    task with no `{{ }}` is fed unchanged.
-  - **Versioning** — re-saving a template snapshots the previous body and bumps its
-    version (a `v2` chip marks edited templates); an identical save is a no-op.
-  - **Import a definitions folder** — "⤓ Import from prompts folder…" pulls `*.prompt` /
-    `*.md` files (a leading `--- name: … ---` front-matter block + the body) from a local
-    directory (`templates.sourceDir`, default `~/.claude/cc-prompts`) into the store.
-    Strictly local-disk — no network. Structured fields (`description`/`expected_output`)
-    and the version history are hand-editable in `cc-templates.json` for now (a richer
-    editor is the deferred follow-up).
-- **Project routing (4c-E)** — with `queue.routing.enabled` on AND a project armed via
-  the detail panel's **route** toggle, the project's queue feeds **whichever of its
-  sessions is free** (just finished a turn), not only the one that emptied its own
-  backlog — parallel sessions in one folder drain a shared backlog. One feed per project
-  per second, delivery-gated, ledgered as `by:"router"`; `starveMinutes` flags a project
-  whose tasks wait with no free session (⌛). Off by default at both levels.
-- **Declarative routing (L4)** — built on the router, all driven by queue-line syntax (the
-  prefix is stripped before the task is typed, so the session never sees it):
-  - **`@role:` conditional routing** — a task prefixed `@review: …` routes only to a free
-    session whose **group** is `review` (sessions are grouped via the tile's 🏷 tag).
-    Unlabeled tasks route to anyone free, as before.
-  - **`seq` (process mode)** — the detail panel's **seq** toggle (next to **route**) runs a
-    project's queue **one routed task at a time** (the next starts only after the current
-    finishes); off = distribute across free sessions in parallel.
-  - **`@all:` / `@any:` join barriers** — a task prefixed `@all: …` waits until **every**
-    session in the project has finished before it routes (`@any:` waits for one). Composes
-    with a role: `@all: @review: ship`.
-  - **Per-task timing** — each routed/queued task is timed from feed to completion; the 📋
-    Shift report shows tasks completed with average + total duration (ledger must be on).
-  - Deferred (needs a design call first): a visual routing topology view, role-addressed
-    delegation/handoff, and idle/auto-spawn routing targets.
-
-## Automation & policies (`~/.claude/cc-config.json`)
-
-All automatic behavior is governed by one settings file, and **everything is off
-until you turn it on**.
-
-**Easiest: the ⚙ Settings panel.** Click the **gear button in the header** for a
-form with every toggle — **Headless approvals** (one click: arm the gate + all
-policies off) and its editable gated-tools list, the editor-window pop toggles, the
-Spawn defaults, queue autofeed/dry-run/project-routing, escalation, the risk badge,
-collision warning, drain, respawn (manual + auto), insights cap, the SSH status
-bridge, and the advanced gate/policies — each with a one-line explanation. **Save**
-writes `~/.claude/cc-config.json` (creating it if missing) and arms/disarms the gate
-flag — no hand-editing. (A hand-added `risk.weights` tuning map and the
-`spawn.searchRoots`/`bridge.staleSlackSeconds`-style power keys survive Saves.)
-
-To edit by hand instead, copy [cc-config.example.json](cc-config.example.json) to
-`~/.claude/cc-config.json` and flip what you want. Both the panel and the gate
-read it (the panel live within ~1s; the gate on the next hook fire).
-
-```json
-{
-  "queue":      { "autofeed": false, "dryRun": false,
-                  "routing": { "enabled": false, "starveMinutes": 0 } },
-  "escalation": { "enabled": false, "minutes": 5, "sound": false, "push": false, "pushTopic": "" },
-  "focus":      { "popOnComplete": false, "popOnApproval": false },
-  "spawn":      { "editor": "terminal", "live": false, "kittyRemote": true, "kittyAutoRemote": true,
-                  "searchRoots": [], "searchDepth": 4 },
-  "gate":       { "tools": "Bash Write Edit MultiEdit NotebookEdit" },
-  "ledger":     { "enabled": false, "retentionDays": 30, "maxTotalMB": 0 },
-  "decisions":  { "limit": 5, "hours": 48 },
-  "notifications": { "days": 7 },
-  "search":     { "rgBin": "", "maxResults": 200 },
-  "bridge":     { "enabled": false, "intervalSeconds": 2, "staleSlackSeconds": 15 },
-  "risk":       { "enabled": false, "thresholds": { "med": 34, "high": 67, "staleSeconds": 300 } },
-  "collision":  { "enabled": false, "useGitRoot": false },
-  "drain":      { "enabled": false },
-  "respawn":    { "enabled": false, "auto": { "enabled": false, "maxRetries": 3, "staleSeconds": 600 } },
-  "insights":   { "maxBlockSeconds": 1800 },
-  "policies": {
-    "approveRepeats": false,
-    "autopilot": { "enabled": false, "minutes": 15 },
-    "patterns":  { "enabled": false, "autoAllow": [], "autoDeny": [] }
-  }
-}
-```
-
-- **queue.autofeed / dryRun** — auto-feed queued tasks on done (dryRun logs instead).
-- **queue.routing** — 4c-E project routing (see "Task queue" above): global switch +
-  per-project arm toggle; `starveMinutes` flags queued work with no free session.
-- **decisions / notifications / search / bridge** — the gate decision log window, the 🔔
-  history window, the 🔎 fleet-search caps, and the SSH status bridge (see their sections;
-  all read-only except the bridge, which is off by default).
-- **escalation** — when an approval waits longer than `minutes`, nag harder: a
-  stronger tile pulse always, plus an optional `sound` and an optional high-priority
-  `push` to your ntfy `pushTopic`. Both channels off by default.
-- **focus.popOnComplete / popOnApproval** — pop/focus the **detected** editor (VS Code /
-  Cursor; Kitty/terminal are left alone) when a session finishes / needs approval. Both off
-  by default; toggle from the ⚙ panel. The Stop/Notification/PermissionRequest hooks call
-  [cc-popup.sh](cc-popup.sh) with the event, which opens the window only when the matching
-  flag is on (legacy `focus.popEditor` still seeds both). Note: the Claude Code VS Code
-  extension may raise its own window on completion independently of this.
-- **spawn** — the New / New project launcher: `editor` (terminal/kitty/vscode/cursor),
-  `live` (false = dry-run, log only), `kittyRemote` (give spawned Kitty windows remote control),
-  `kittyAutoRemote` (auto-enable remote control in `kitty.conf` when Kitty is in use).
-- **gate.tools** — space/comma list of tools the approval gate holds for you (default
-  `Bash Write Edit MultiEdit NotebookEdit`); editable from ⚙ Settings. With the gate armed
-  and all policies off ("Headless approvals"), these wait for your panel Approve/Deny —
-  headless, no window pop — and fall back to Claude's native prompt if you don't answer.
-  Emptying `gate.tools` (to `""` or `[]`) does **not** mean "gate nothing" — it restores
-  the default 5 (and logs a warning), because a blank value can't be told apart from
-  unset. To gate nothing fleet-wide, disable the gate (`cc-gate.enabled`); to gate
-  nothing for one session, use the per-session **None** sentinel.
-- **policies.approveRepeats** — if you already approved the *exact* command in a
-  session, auto-approve it next time.
-- **policies.autopilot** — the **Autopilot** button time-boxes a session to
-  auto-approve *all* its prompts (badge `🛫 autopilot`), expiring after `minutes`.
-- **policies.patterns** — gate honors `autoDeny` (wins) and `autoAllow` globs,
-  written like `"Bash(npm test*)"` or `"Read"`.
-
-The gate's auto-decisions apply only to the gated tools (`gate.tools`, editable in
-Settings) and are logged to the Hammerspoon Console / hook stderr whenever they
-fire. Auto-deny always beats auto-allow.
-
-### Named policy bundles (per-session guardrails)
-
-`policies.patterns` is one fleet-wide allow/deny list. **Bundles** make those rules reusable and
-per-session: define named sets under `policies.bundles`, then attach one to a session — via the
-detail-panel **Policy** dropdown, or fleet-wide with `policies.attachments` (matched by
-project / group / provider / session key, each a glob):
-
-```json
-"policies": {
-  "patterns": { "enabled": false, "autoAllow": [], "autoDeny": [] },
-  "bundles": {
-    "read-only":  { "autoDeny": ["Bash", "Write", "Edit", "MultiEdit", "NotebookEdit"] },
-    "no-network": { "autoDeny": ["Bash(curl*)", "Bash(wget*)", "WebFetch"] }
-  },
-  "attachments": [ { "match": { "project": "secure-*" }, "bundle": "read-only" } ]
-}
-```
-
-When a bundle is attached, its rules apply **even if `patterns.enabled` is false** (attaching is the
-opt-in) — the bundle's lists union with the fleet patterns, or *replace* them if the bundle sets
-`"disableGlobal": true`. The panel resolves each session (precedence: per-session **Policy**
-dropdown > attachment > fleet), writes the result to `~/.claude/cc-policy/<key>`, and the gate reads
-it; removing an attachment tears its enforcement down within a tick. Starter bundles to copy:
-**read-only**, **no-bash**, **no-network**. (An in-panel bundle/attachment editor is a planned
-follow-up; today they're config.)
-
-### More fleet controls (all off by default)
-
-These extend the panel without changing any existing behavior when left off:
-
-- **Per-session tool gating** — the detail panel's **Gate** dropdown overrides
-  `gate.tools` for one session: *Default* (use the fleet list), *All* (gate
-  everything the fleet considers risky), *None* (trusted session — gate nothing), or
-  *Custom*. Stored per session in `~/.claude/cc-gate-tools/<key>`; the gate reads it
-  on every request. Lets a risky experiment lock down while a trusted session runs free.
-- **risk** — a per-session risk **indicator** computed from that session's ledger
-  history (deny rate, auto-deny hits, timeout-fallbacks, slow approvals, tool volume).
-  Med/high shows a small ⚠/▲ badge on the tile; low shows nothing. Indicator only —
-  it never blocks or quarantines. Needs the ledger on for data.
-- **collision** — flags tiles when 2+ **active** sessions share a working directory
-  (amber ring + "⚠ shared dir"), so two agents don't silently clobber each other's
-  edits. `useGitRoot` groups by repo root (cached `git rev-parse`) instead of the exact
-  folder. Detection only — it can't lock another process's writes.
-- **drain** — a right-click **Drain (finish turn, then close)** action: waits for the
-  current turn to finish, then closes (closes immediately if already idle/done).
-- **prune** — auto-delete tiles after they've been idle for `prune.hours` (0 = never,
-  default). Set in ⚙ Settings → Tile cleanup. Tiles persist indefinitely by default; a
-  stale tile with no `session_id` (an orphan from a botched hook) is always cleaned up.
-- **respawn** — a right-click **Respawn from cwd** action that relaunches a dead/stale
-  session from its last working dir + matched provider + editor. `respawn.auto.enabled`
-  adds **automatic** respawn: a session whose status file freezes **mid-turn** (status
-  `working` with no hook write for `respawn.auto.staleSeconds`, default 600 — well above
-  the longest tool call, so a 2-minute `npm test` never reads as a death) is relaunched,
-  capped by `respawn.auto.maxRetries` **per launch folder** (the budget resets only after
-  sustained healthy running, so a crash-looping folder can't thrash). Sessions waiting on
-  an **approval are never auto-respawned** — that's the escalation nag's job.
-- **autoContinue** — **automatic** API-error recovery (a sibling to auto-respawn, but it
-  resumes the *same* session instead of relaunching). When a tile shows the magenta `Error`
-  state, after `autoContinue.delaySeconds` (default 60) Shepherd types `continue`, capped by
-  `autoContinue.maxAttempts` **per launch folder** (default 3, fires spaced ~delay apart; the
-  budget resets on a clean turn completion, so a dead connection can't loop). Off by default;
-  emits an `auto_continue` ledger event.
-- **remoteControl** — auto-enable **Claude Code's Remote Control** (drive a local session from
-  claude.ai / mobile). `onSpawn` adds the `--remote-control` launch flag to new spawns (local
-  native-Anthropic only); `sweepOnStartup` types `/rc` into already-running local sessions on
-  startup. Both on by default. See "Auto-enable Remote Control" above. (Distinct from
-  `spawn.kittyRemote`, which is the Kitty `kitty @` control Shepherd uses to drive windows.)
-- **context.autoCompactFraction** — the per-tile context bar's denominator factor (default
-  0.92) so it matches Claude Code's "% until auto-compact"; see *Token usage* above. Hand-edit
-  in `cc-config.json` (preserved across Settings saves).
-- **escalation.hung** — a **stuck-session watchdog**: a session that stays `working` with
-  no transcript growth for `escalation.hung.minutes` gets a ⏳ + purple ring and nags once
-  per stall (reusing the escalation sound/push prefs). Complements the approval-wait
-  escalation — that covers a session waiting on *you*; this covers one wedged on its own.
-- **insights** — the 📊 toolbar button opens a read-only **Fleet insights** view that
-  aggregates the ledger (turns per session, approval/denial rates, decision provenance,
-  the total time the fleet spent blocked on you, and **24h hourly trend sparklines**).
-  Always available like the audit view; shows zeros until the ledger is enabled.
-
-Per-session gating, drain, and respawn use these state dirs / config keys:
-`~/.claude/cc-gate-tools/<key>`, and `risk` / `collision` / `drain` / `respawn`
-(incl. `respawn.auto`) / `escalation.hung` / `insights` blocks in `cc-config.json`
-(see [cc-config.example.json](cc-config.example.json)).
-
-## Audit log & insights
-
-Two header overlays read fleet activity. Both are **local and cost no model tokens**.
-
-- **📜 Audit ledger** — an opt-in, append-only JSONL record at
-  `~/.claude/cc-ledger/YYYY-MM-DD.jsonl` (one event per line): session start/end,
-  prompts, tool requests, gate **decisions** (with provenance — autoDeny / autoAllow /
-  autopilot / approveRepeats / human / timeout), mode/model/effort changes, nudges,
-  clears, compacts, spawns, relabels. **Off in code**, on in the installer's default settings — `ledger.enabled` (it's
-  the source of data for everything below). The overlay has **Rows** + **Timeline** tabs,
-  filters by session/type/date, and per-row **redact**, **export**, and **purge**.
-  Retention is GC'd ~hourly by `ledger.retentionDays` / `ledger.maxTotalMB`. A **Review
-  activity** button sends the current slice to the selected session as a read-only
-  governance prompt (assess risky/odd actions — never edits).
-- **📊 Fleet insights** — a read-only aggregate of the ledger: turns per session,
-  approval/denial rates, decision provenance, most-active sessions, and the total time
-  the fleet spent **blocked on you** (the gap from each request to its human/timeout
-  answer, capped by `insights.maxBlockSeconds` so an overnight idle isn't counted). A
-  **Trends — last 24h (hourly)** section adds four sparklines: time blocked on you, fleet
-  activity, active sessions, and denial rate. With `insights.hostStats` on, a **Host** strip
-  (CPU / memory / disk / uptime / load) and a **fleet idle-since** line sit at the top.
-  Always available; zeros until the ledger is on.
-
-More ledger-backed views (all read-only, local, zero model tokens):
-
-- **🔔 Notification history** — "what fired while you were away": escalations, stall
-  warnings, auto-respawns, and every **non-human** gate decision, in an **Alerts** tab of
-  the audit overlay. The header bell shows an unseen count; opening it marks everything
-  seen and highlights what's new since you last looked. (If you've set
-  `ledger.captureTypes`, include `escalation` and `hung`.)
-- **📋 Shift report** — a one-click narrative of **what the fleet did over a window** (a
-  **📋 Shift** tab in the audit overlay, also in the ☰ drawer). Pick **Since opened** (what
-  ran while you were away since you launched Shepherd), **Last 8h**, or **Last 24h**: it
-  rolls up sessions active, prompts, approvals (allow/deny and who decided), auto-actions
-  (respawns / continues / drained / routed feeds), escalations and stalls, time you were the
-  bottleneck, and a per-project breakdown — then **Copy** the report to the clipboard. It
-  reports *operations*, not outcomes: there's deliberately no "what shipped" line, because a
-  prompt is an instruction and Shepherd has no git/CI ground truth to claim a result. The
-  **📋 Shift** tab and drawer entry only appear while the ledger is enabled (it's pure ledger
-  aggregation — nothing to report otherwise), and they show/hide live with the setting.
-- **🗂 Session history browser** — a **History** tab in the audit overlay lists every session the
-  ledger has seen (derived on the fly — no parallel store), each with its turns / tool calls /
-  events and last activity. Filter by name or folder, sort **Recent / Oldest / Most active**, and
-  narrow to **this workspace** or **pinned only**; ★-pin the projects you care about (saved by
-  stable project id). Multi-select rows and **Delete selected** purges those sessions' recorded
-  history through the same confirmed, scoped purge the Purge button uses (it never deletes Claude
-  Code's own transcripts). Appears only while the ledger is enabled, like the Shift tab.
-- **Storage readout** — ⚙ Settings → **Measure storage** shows how much disk Shepherd's own state
-  uses (audit ledger / task queues / session status / `cc-*.json` state files — never Claude Code's
-  transcripts). Trim old ledger days with the retention setting; delete a session's recorded history
-  from the 🗂 History tab.
-- **Per-session gate decision log** — the detail panel shows the selected session's last
-  few gate decisions, grouped with counts and provenance ("⛔ deny Bash ×4 (autoDeny:
-  Bash(rm*)) · 2m ago"), so what the gate has been doing to a session is visible right
-  where you act on it. `decisions.limit` / `decisions.hours` tune it.
-- **♻️ Session lineage** — auto-respawns and `/clear`s mint a new session id for the same
-  project, and that churn is normally invisible. The detail panel now shows a one-liner
-  ("3rd session today · 2 auto-respawns · 1 clear") for the project since midnight, and a
-  tile gets a small **♻️N** badge once the churn adds up — so a crash-loop survivor is
-  obvious at a glance. Pure read of the ledger; nothing new is stored.
-- **🔎 Find in fleet** — search every session's **transcript** (live *and* dead sessions)
-  plus the ledger: "which session touched `auth.ts`?", "who ran that migration?". Click a
-  hit to select the live session (or open a dead one's audit timeline). Instant with
-  [ripgrep](https://github.com/BurntSushi/ripgrep) installed (`brew install ripgrep`);
-  falls back to grep — slower, never broken.
-
-### SSH status bridge (remote sessions as tiles)
-
-A provider can carry `ssh: {"host": "devbox", "user": "adam"}` — its sessions run
-`claude` on the remote box inside a local terminal. With **⚙ Settings → SSH status
-bridge** enabled, Shepherd also rsync-pulls each such host's remote `~/.claude/cc-status/`
-(every `bridge.intervalSeconds`, key-based auth required) so those remote sessions render
-as **⇄ tiles** with live status. Remote tiles are **headless-only**: Approve/Deny route
-back over ssh as nonce-bound decision files (the verb and nonce only — a deny's typed
-reason is local-only and is dropped for a remote tile); keystroke actions
-(nudge/stop/clear/…) are disabled. Remote staleness gets `bridge.staleSlackSeconds` of slack for sync lag, and a
-stalled sync shows "bridge offline" on the tile. The remote box needs this repo's
-`make install` run on it. Off by default, and not yet verified on real hardware.
-
-## MCPs & Skills viewer
-
-The **🔌 MCPs & Skills** item in the ☰ drawer opens a read-only catalog of what's actually
-installed for Claude Code — distinct from the agent-profile registry (`cc-mcp.json`), which is
-just the servers you attach to spawns.
-
-- **MCP servers** — read instantly from `~/.claude.json` (user-scope `mcpServers` + every
-  project's `mcpServers`, deduped; a server defined in both shows `user+project`). Each row shows
-  scope, transport, and the command/url — **env values are never surfaced** (only the var names
-  Claude itself prints). A **Re-check** button (footer) runs `claude mcp list` via your login shell
-  — only on demand, never on a timer — to add the claude.ai **connectors** (Drive/Calendar/Gmail)
-  and live **connected / failed / needs-auth** health, merged onto the config list and cached for
-  the next open.
-- **Skills** — your `~/.claude/skills` (SKILL.md) and `~/.claude/commands` (`/slash` files), plus
-  a pinned list of the CLI's **built-in** skills (which have no file to enumerate), each with its
-  `/command` and description.
-- **CLI tools** — the external binaries Shepherd shells out to, each with an **installed / missing**
-  chip and its resolved path. Detected via the same PATH/Homebrew lookup the app uses to actually
-  run them, so the status reflects the real binary it would pick: `jq` (the one **required** dep),
-  `ripgrep` and `fd` (the search/folder-scan accelerators — when missing, they show the POSIX tool
-  they fall back to: `grep` / `find`), `rsync` (the SSH status bridge), and `ffmpeg` + `whisper-cli`
-  (the optional Stream Deck voice key).
-
-Read-only — Shepherd never edits your MCP config, skills, or tools; it just shows the inventory.
-
-## Worklist (My List)
-
-A checklist built into the panel — no code hooks, just add → work → check. The
-**📋 My List** button on the right of the FLEET row swaps the session tiles for the worklist (click
-again to go back; the fleet bulk buttons still appear only when there's something to act on).
-
-- **Scopes** — a **MASTER** rollup, a **Generic** (global) list, plus one button per
-  project that **has a live session _or_ still owns a saved list**, labeled with that project's
-  relabel name. Lists are stored in `~/.claude/cc-worklist.json` keyed by the **stable
-  launch-folder identity** (same as relabels/groups). A project's tab and its items **persist
-  whether or not a window is open** — an idle or closed project keeps its button (labeled from its
-  saved relabel / auto-title) until you clear the list, so its to-dos never disappear on you.
-- **TODO.md import** — **⇪ Import TODO.md** pulls a project's `TODO.md` checkboxes into its tab as
-  verify-me items (the file's `[x]` shows as a **✓ auto** chip; the row checkbox stays yours), and
-  once imported the tab **re-syncs whenever the file changes**. **One tab per project across
-  worktrees:** a repo's main checkout and its linked worktrees share one tab, and its import reads
-  **every worktree's** `TODO.md` — a line present in several copies imports once, a line that exists
-  only on a branch carries a **⎇ branch** chip until it reaches main's copy, and a removed
-  worktree's items stay put (not flagged missing — the file simply left with the worktree).
-- **Filter** — the box under the tabs filters **whichever tab you're on**: a project tab that
-  project, **MASTER** the rollup (bucket headers follow the survivors), **🗄 Archive** every
-  archived row. Case-insensitive, and every word must match — `installer smoke` finds only rows
-  carrying both. It searches the subject, the **details** (so a term you only wrote in an item's
-  notes still finds it), the expected date (`2026-09` filters a month) and, on MASTER/Archive, the
-  project the row came from. The count beside it reads **N / M shown**; **Esc** clears it. Two
-  deliberate limits: **Done drawers are not filtered** (they're built only when you expand one, so
-  a filter would make the panel build every hidden row on every keystroke), and **✓ Mark all N
-  done** hides itself while a filter is on — its count is of the *whole* tab, so next to three
-  filtered rows it would both claim and do something the screen doesn't show. The query stays put
-  when you switch tabs — one box, filtering whatever tab you flick to.
-- **The item modal** — **＋ Add an item…** (or clicking any row) opens one editor with:
-  - **Subject** — the one line the list shows. Enter saves.
-  - **Details** — free-form notes/context, as long as you like.
-  - **Checklist** — sub-steps with their own checkboxes (**＋ Step**, Enter for the next one,
-    **✕** to drop one). Ticking a step **saves immediately**, so mid-work progress can't be lost;
-    the list row shows a `2/5` chip that turns green when every step is done.
-  - **Expected date** — a new item defaults to **today**; the native picker plus **◀ ▶** nudge
-    it a day at a time, **↻** resets to today, and **Clear** drops the date so the item can be
-    saved without one. With no date set, the first ◀/▶ lands on today.
-
-  Esc or a backdrop click discards; **Delete** (edit mode only) removes the item after a confirm.
-- **The list** — each row shows subject + date chip (dim normally, amber for **Today**/**Tomorrow**,
-  red once **overdue**), a 📝 when it has details, and its checklist progress. Checking a row moves
-  it to a collapsed **Done** area (ordered by due date), where each row shows **both** its expected
-  date and a **✓ completion date**; the **✕** deletes it; **Clear** empties Done for that scope.
-- **✓ Mark all N done** — ticks off everything still open on the tab you're looking at, in one
-  operation. It **asks first**, with the count in the question, and the button is labeled with that
-  count and hidden when there's nothing left to mark. On **MASTER** it marks every project's open
-  items — each in its own list — and says so in the question.
-- **🗄 Archive** — once a day, work you finished more than **10 days** ago moves out of the live
-  list into `~/.claude/cc-worklist-archive.json`, and the **Archive** tab shows it: newest first,
-  each row tagged with the project it came from, read-only. Nothing is deleted — the point is that
-  the list you work from stays small, since it's the one the panel re-reads on every check-off.
-  The archive is a separate file and is fetched **only when you open that tab**. Tune it in
-  `~/.claude/cc-config.json`: `worklist.archiveAfterDays` (default `10`) and `worklist.archive`
-  (`false` turns it off).
-- **MASTER** — a read-only, date-priority rollup of every **open** item across Generic *and* every
-  project, grouped **Overdue / Today / Next 7 days / Later / No date** and tagged with the list it
-  came from. Tick a row to mark it done in its own list, or click it to jump to that tab with the
-  item open. A collapsed **Recently completed** drawer reveals everything finished in the **last 7
-  days** across all lists, newest first, each stamped with its ✓ completion date. No adding from
-  MASTER — that's what Generic and the project tabs are for.
+More in [Development → How it fits together](docs/development.md#how-it-fits-together).
 
 ## Install
 
-Shepherd runs on **macOS** and supervises Claude Code sessions in **VS Code** (and terminals).
-
-### The easy way — double-click
-
-1. Download the repo (GitHub → **Code → Download ZIP**, then unzip) or `git clone` it.
-2. Double-click **`Install Shepherd.command`**. A downloaded copy is blocked the first time
-   ("unidentified developer" / "Apple could not verify"): right-click it → **Open** → **Open**, or on
-   newer macOS click **Open Anyway** in System Settings → Privacy & Security. A `git clone` isn't blocked.
-3. A Terminal window installs whatever this Mac is missing, skipping anything already there:
-   - the Xcode command-line tools (click **Install** in macOS's dialog, then wait),
-   - [Homebrew](https://brew.sh) (it asks for your Mac password),
-   - `jq`, `lua` and `node` (required), `ripgrep` and `fd` (faster search, optional),
-   - Hammerspoon and VS Code,
-   - Claude Code and its VS Code extension,
-   - then Shepherd itself (`install.sh`, below), and restarts Hammerspoon.
-4. Once, by hand: turn on **Hammerspoon** in System Settings → Privacy & Security →
-   **Accessibility** (the installer opens that pane), and sign in to Claude in VS Code's Claude
-   Code panel. The panel appears top-right.
-
-Re-running it is safe: finished steps are skipped. If a required piece won't install, it stops
-before touching your Claude or Hammerspoon settings and says what to fix.
-
-### What the install sets up
-
-- **Shepherd** — hook scripts + logic into `~/.claude` and `~/.hammerspoon`, its hooks **merged**
-  into `~/.claude/settings.json` (backed up first; your own hooks stay; a symlinked settings.json
-  stays a symlink), the `dofile(...)` line in `~/.hammerspoon/init.lua`, **Shepherd.app** (a Dock
-  launcher, below) and the **tab bridge** VS Code extension.
-- **Default settings** — Shepherd's settings as the author runs them daily
-  ([defaults/cc-config.json](defaults/cc-config.json)), written only if you have no
-  `~/.claude/cc-config.json`. Change anything later in ⚙ Settings. Notably on: **Actually launch**
-  (New really opens sessions), the audit ledger, Remote Control for spawned sessions, VS Code as
-  the editor.
-- **Claude Code settings the workflow relies on** ([defaults/claude-settings.json](defaults/claude-settings.json)):
-  worktrees branch from your current HEAD, Remote Control at startup, push notifications, effort
-  high — each added only where you haven't set it yourself. Plus **permission deny rules** that
-  enforce the methodology's secrets rules instead of just stating them: `git add -f` and
-  `git add --force` (both spellings), and writing `.env.example` / `.env.sample` / `.env.template`.
-  Reading `.env` is *not* denied — sessions legitimately need it. If you already keep a
-  `permissions.deny` list, yours is merged with ours: every entry you had stays, ours are appended
-  where missing, and re-installing adds no duplicates.
-- **The methodology** ([methodology/CLAUDE.md](methodology/CLAUDE.md)) — how Claude sessions work
-  with Shepherd: units in worktrees, ready-to-merge reviews, batches of parallel units, tests first
-  with regression fixtures. It goes into `~/.claude/CLAUDE.md` between two marker lines (your own
-  text stays; re-installing replaces just that block). Skipped if your CLAUDE.md already has a
-  `## Parallel Worktree Workflow` section.
-
-### By hand
-
-Prerequisites: [Claude Code](https://claude.com/claude-code) (run once), VS Code, and
-```
-brew install --cask hammerspoon
-brew install jq lua node        # required: jq for the tiles, lua + node run the test gate
-brew install ripgrep fd         # optional: faster fleet search and folder scan
-```
-Launch Hammerspoon once and grant it Accessibility (System Settings > Privacy & Security >
-Accessibility) — it needs that to focus windows and send keystrokes. Then:
-```
-make setup
-```
-It runs the **pre-flight test suite** first: if the suite is red (or `lua` / `node` is missing so it
-can't run), the install aborts having changed nothing. Bypass with `bash install.sh --skip-tests`
-(or `CC_INSTALL_SKIP_TESTS=1`). It ends with the **tooling check** (jq / lua / node / Hammerspoon /
-ripgrep / fd); run **`make doctor`** any time to see it again (a fleet search logs
-`[cc-search] engine=rg …`, a folder scan `[cc-spawn] folder scan: fd …` in the Hammerspoon
-console). Finally click the Hammerspoon menu-bar icon → **Reload Config**.
-
-### Upgrading — after a `git pull`
-
-```
-git pull
-make setup
-```
-
-**`make setup`, not `make install`.** `make install` only copies the scripts and the dashboard; it
-never touches `~/.claude/settings.json`, the default settings or the methodology block. A release
-that adds a *hook* (as the held-question hook was added) would land on disk and never run. `make
-setup` is the full installer — the same one a fresh install runs, safe to re-run, and a no-op where
-nothing changed. It re-runs the pre-flight suite, so it also tells you if the version you pulled is
-red on your machine before it changes anything.
-
-Then, once it finishes:
-
-1. **Hammerspoon** menu-bar icon → **Reload Config**. Hammerspoon runs the copies in
-   `~/.hammerspoon`, and it doesn't reload them on its own.
-2. In each **VS Code window that was already open**: ⌘⇧P → **Developer: Reload Window**. A window
-   holds the tab bridge extension it loaded at startup, so until it reloads it keeps running the
-   older one. ⚙ **Doctor** says so explicitly (*"An older tab bridge runs in N VS Code windows"*),
-   and also checks all four hooks are wired.
-
-Upgrading never overwrites a setting you made. Shepherd settings added since your install are filled
-in where you have no value of your own (your `false` stays `false`), your `~/.claude/CLAUDE.md` keeps
-everything outside the methodology block, and a backup is made before either file is rewritten.
-
-### Uninstall
-
-Double-click **`Uninstall Shepherd.command`**, or run `make uninstall`. It removes Shepherd's hooks
-from `~/.claude/settings.json` (backup made; your own hooks and settings stay), the scripts and
-dashboard it copied, its `init.lua` line, the methodology block in `~/.claude/CLAUDE.md`,
-Shepherd.app and the tab bridge. Shepherd's settings and history (`cc-config.json`, `cc-status/`,
-the ledger, …) stay: the double-click uninstaller asks first and deletes them only if you answer
-yes, while `make uninstall` always keeps them unless you ask for `make uninstall PURGE=1`.
-Hammerspoon, VS Code, Claude Code and the Homebrew packages stay installed. Reload Hammerspoon
-afterwards to close the panel.
-
-The **Claude Code settings** the install filled in — including the `permissions.deny` rules above —
-are left alone, the same as the other defaults: once they're in `~/.claude/settings.json` they're
-yours, and the uninstaller can't tell them from a rule you wrote. To drop the deny rules, edit
-`~/.claude/settings.json` and remove the entries from `permissions.deny`, or run:
-
-```bash
-jq '.permissions.deny -= ["Bash(git add -f:*)","Bash(git add --force:*)",
-      "Write(**/.env.example)","Write(**/.env.sample)","Write(**/.env.template)"]' \
-  ~/.claude/settings.json > /tmp/s.json && mv /tmp/s.json ~/.claude/settings.json
-```
-
-### The panel
-The panel appears top-right. Drag it by its title bar, resize it, and it floats
-above other windows and shows on every Space.
-
-### The Shepherd tab bridge — a companion VS Code extension
-`make setup` and `make install` also put a small extension, **Shepherd Bridge**
-(`vscode-bridge/`), into VS Code. Nothing is published: `make tab-bridge` zips it into a `.vsix`
-and hands that to VS Code's own command-line tool (`code --install-extension`), found on your
-PATH or inside the app bundle (so a VS Code run from Downloads works too; set `CC_CODE_CLI` to
-point elsewhere). It reinstalls only when its version changes — `FORCE=1 make tab-bridge` forces it —
-and a machine without VS Code just gets a warning. Open windows normally pick it up at once; one
-that doesn't needs **Developer: Reload Window** (Doctor lists those windows).
-
-It runs in every VS Code window and does one thing: close a Claude tab **by name**. Each
-window writes its Claude tabs' names to `~/.claude/cc-bridge/<pid>.json`; Shepherd drops a close
-command in `<pid>.in/` and reads the answer from `<pid>.out/`. It closes a tab only when exactly
-one Claude tab in that window carries the name, never touches other tabs, and has no network
-access. **Empty chats** are the one exception: never-used chats all read "Claude Code", so no name
-picks one — but they're interchangeable. A card whose window has any shows *🧹 2 empty chats in
-this window (never used)* with **Close them** (and each gets **Close** in the Instances view); the
-bridge (0.4.0) then closes any untagged "Claude Code" tab, and only while their number still equals
-the empty sessions Shepherd counted there, so a restored old chat (which also reads "Claude Code")
-is never closed by mistake. A batch unit's tab is tagged instead of named (0.3.0+; since 0.5.0 also
-when the tab opened a moment before the tag request arrived). `"tabBridge": { "enabled": false }` in `~/.claude/cc-config.json` stops Shepherd using
-it (it's not the SSH remote `"bridge"` section, which mirrors other machines' sessions).
-
-### Shepherd.app — a Dock launcher
-`make setup` (or `make app`) builds **`~/Applications/Shepherd.app`** with a sheep
-icon; drag it to your Dock and click it to show/hide the panel like any app. It
-toggles the panel via Hammerspoon's built-in `hammerspoon://` URL scheme (no extra
-deps). First open is unsigned, so right-click → **Open** once to clear Gatekeeper.
-
-To pin it to the Dock automatically, run **`make dock`** (builds the app if needed,
-then adds it to the Dock — idempotent; the Dock briefly restarts). Remove it any time
-by dragging the icon off the Dock.
-
-### Launch on startup
-Shepherd runs inside Hammerspoon, so "launch on startup" means **Hammerspoon opens at
-login** and the panel comes up with it. This is **on by default** the first time
-Shepherd runs. Toggle it any time from **⚙ Settings → General → "Launch Shepherd on
-startup"** — it sets Hammerspoon's real *Open at Login* item (`hs.autoLaunch`).
-
-### Kitty users
-For reliable click-to-answer / headless approve on Kitty, Shepherd auto-enables
-remote control in your `kitty.conf` (`allow_remote_control` + `listen_on`) when a
-Kitty session is detected — backing the file up first. **Restart Kitty** for it to
-take effect (sessions Shepherd spawns get it via launch flags, no restart needed).
-
-## Headless approvals (the gate)
-
-Want to approve/deny from the panel with **no window switch** and still keep Claude
-fully gated? Flip **Headless approvals** in ⚙ Settings — one click that arms the gate
-([cc-approve.sh](cc-approve.sh)) and turns off every auto-approve policy. A permission
-request for a *gated* tool (`gate.tools` — Bash/Write/Edit/MultiEdit/NotebookEdit by
-default, editable in Settings) then turns the tile red, and Approve/Deny answer it via
-a decision file — **headless, no focus, no keystrokes**. Claude can't run a gated tool
-until you decide. (Manual equivalent: `touch ~/.claude/cc-gate.enabled` to arm, `rm` to
-disarm.)
-
-It is built to be safe:
-
-- **Never freezes a session.** The gate only waits while the panel is running
-  (it checks the panel's heartbeat). Panel closed → the request falls straight
-  through to Claude Code's native prompt.
-- **Times out gracefully.** If you don't answer within `CC_GATE_TIMEOUT` seconds
-  (default 120), it falls back to the native prompt rather than denying. (The shipped
-  hook registration carries a 130s hook timeout so Claude Code doesn't kill the gate
-  mid-wait; the installer migrates existing installs.)
-- **Decisions are request-bound.** Each gated request publishes a one-time nonce and the
-  panel's Approve/Deny echoes it back, so a leftover or concurrent decision file can never
-  answer a *different* request — no stale silent-allows, even with several gated calls in
-  flight on one session.
-- **Reads stay fast.** Only the tools in `gate.tools` are gated; everything else runs normally.
-
-The advanced **policies** below (autopilot, approve-repeats, pattern auto-allow/deny)
-let some requests auto-decide; Headless approvals keeps them all off so *you* decide
-every gated tool. Hook-env tunables: `CC_GATE_TOOLS` (overrides `gate.tools`),
-`CC_GATE_TIMEOUT` (default 120), `CC_PANEL_MAX_AGE` (default 5).
-
-## Test it without Claude
-
-Each command writes one fake event; the panel should update within a second.
-The status scripts honor `CC_STATUS_DIR`, so you can rehearse in a throwaway dir:
-
-```
-export CC_STATUS_DIR=/tmp/cc-test
-printf '{"session_id":"demo1","cwd":"'"$PWD"'","prompt_text":"Refactor the parser"}' \
-  | bash ~/.claude/cc-status.sh userpromptsubmit
-printf '{"session_id":"demo1","cwd":"'"$PWD"'","notification_type":"permission_prompt","message":"Allow Bash command: npm test"}' \
-  | bash ~/.claude/cc-status.sh notification
-printf '{"session_id":"demo1","cwd":"'"$PWD"'"}' \
-  | bash ~/.claude/cc-status.sh stop
-printf '{"session_id":"demo1","cwd":"'"$PWD"'"}' \
-  | bash ~/.claude/cc-status.sh sessionend     # removes the tile
-```
-
-(Leave `CC_STATUS_DIR` unset to point at the real `~/.claude/cc-status` the panel
-watches.)
-
-## Confirm your hook payloads (recommended once)
-
-Field names like `prompt_text` and `notification_type` can vary slightly by
-Claude Code version. To capture exactly what your build sends, set
-`CC_STATUS_DEBUG=1` for the hooks (or just once by hand) and the scripts append
-raw stdin to `~/.claude/cc-status/.debug.log`. Run a real session, trigger a tool
-and an approval, then check that log and adjust the field paths in
-[cc-status.sh](cc-status.sh) if needed.
-
-## Stream Deck (physical, optional)
-
-Claude Shepherd can mirror the panel onto a physical Elgato Stream Deck and let you
-act on sessions from its keys — no extra software, because Hammerspoon drives the
-deck directly and reuses the same actions as the on-screen panel. It adapts to
-any size (Mini 6 / Standard 15 / XL 32) by asking the device for its key count at
-connect time.
-
-**Plug-and-play:**
-
-1. **Quit the official Elgato Stream Deck app.** Only one program can own the
-   device at a time, and Claude Shepherd takes it over.
-2. Plug in the Stream Deck (or it's already plugged in).
-
-That's it — Hammerspoon detects it and paints one session per key, colored by
-status (gray idle / amber working / green ready / **red blinking = needs you**),
-with sessions that need you sorted to the front.
-
-**Key actions:**
-
-- **Short press** → **Jump** to that session's window. If the session is waiting
-  on the hands-free gate, short press **Approves** it instead.
-- **Long press** (~0.7s) → **Deny** a gate-waiting session. For a normal session,
-  long-press does nothing unless you set `SD_LONG_PRESS_STOPS = true` (then it
-  **Stops** the turn) — off by default to avoid accidental interrupts.
-
-**Global action row** (the four **bottom-left** keys, on a deck with room to spare — e.g.
-the XL). These are reserved for fleet actions instead of sessions; sessions fill the rest:
-
-- **🎯 JUMP** — first tap jumps to the session that most needs you (approval › error ›
-  stalled); each further tap cycles to the next in order, through all of them. After a few
-  seconds idle a fresh tap restarts at the neediest (`SD_JUMP_RESET`).
-- **✓ APPROVE** — approve the front-most pending approval, hands-free via the gate.
-- **＋ SPAWN** — reveal the panel and open the New-session folder browser.
-- **🎙 VOICE** — local push-to-talk dictation. Tap to start recording (the key turns red
-  **REC**), talk, tap again → **whisper-cli transcribes on-device** and sends the text to the
-  **project window you have focused** (auto-submits by default). Needs `brew install
-  whisper-cpp ffmpeg`, a model at `voice.model` (e.g. `ggml-base.en.bin`), and Microphone
-  permission for Hammerspoon. Tune under `voice` in cc-config.json (`model` / `micDevice` /
-  `autoSend` / `maxSeconds` — a hard recording cap, default 120s, so a missed second-tap can't
-  record forever). Set `STREAMDECK_ACTIONS = false` to give those four keys back to sessions.
-
-The **bottom-right** corner key is **☕ CAFFEINE** — toggles keep-awake (the same `pmset`
-keep-awake as the panel's ☕ button, so it asks for your admin password); the key shows amber
-**AWAKE** vs dim **SLEEP OK**.
-
-Each **session key** also draws a thin **context-fill bar** along its bottom edge — how full
-that session's context window is (green < 60% < amber < 85% < red), so you can see at a glance
-which sessions are getting close to a compact.
-
-Tunables near the top of [claude-dashboard.lua](claude-dashboard.lua):
-`STREAMDECK_ENABLED`, `STREAMDECK_ACTIONS`, `SD_LONG_PRESS`, `SD_LONG_PRESS_STOPS`,
-`SD_JUMP_RESET`, `SD_BRIGHTNESS`, `SD_FALLBACK_KEYS`. If you'd rather keep your normal Elgato profiles running,
-Claude Shepherd would instead need a separate Stream Deck *plugin* (coexists with the
-Elgato app) — that path isn't built yet.
-
-## Themes
-
-A dropdown in the top-right switches themes instantly; your choice is saved.
-
-- **Cards** (default): two-line tiles with name, status, and time/pending.
-- **Bar**: compact rounded pills in a single flowing row.
-- **Contrast**: large, bold tiles with a thick colored border.
-- **Dots**: minimal vertical list, just a colored dot and the project name.
-
-To change the default for a fresh install, edit `DEFAULT_THEME` near the top of
-[claude-dashboard.lua](claude-dashboard.lua). To restyle a theme, edit its
-`.theme-NAME` CSS block (or open the webview developer tools to tweak it live).
-
-## Testing & development
-
-Claude Shepherd has a **side-effect-free** test suite. Run it with:
-
-```
-make test          # or: bash tests/run.sh
-```
-
-**CI.** `.github/workflows/ci.yml` runs `make lint` and `make test` on `ubuntu-latest`
-for every push and pull request, so the suite isn't only ever run on one laptop. The
-Playwright browser suites and the Deno demo suite self-skip there — CI installs neither.
-
-**Deploying changes.** Hammerspoon runs the **copies** in `~/.hammerspoon/`
-(`init.lua` does `dofile(... claude-dashboard.lua)`), so edits in this repo are
-**not live until copied**. After a change:
-
-```
-make install       # copy claude-dashboard.lua + cc-core.lua -> ~/.hammerspoon/
-make reload        # hs.reload() via the `hs` CLI (needs require('hs.ipc'))
-make deploy        # test + install + reload, in one shot
-```
-
-A plain `hs.reload()` without `make install` first just re-runs the *old* copy.
-
-It never touches your real `~/.claude/cc-status`, never fires a keystroke, never
-focuses a window, and never spawns a session. How that's possible:
-
-- **Pure logic in [cc-core.lua](cc-core.lua)** — status parsing, sorting, staleness,
-  action selection (+ the editor-aware target), deck layout, transcript snippet,
-  editor-aware spawn spec, `kitty @` argv + key tokens, permission-mode cycle steps,
-  window focus-candidate/title matching, folder-browser path helpers, recent-dirs,
-  new-project validation, persistent-relabel set/apply-by-cwd, pmset command/parse,
-  gated-tool list parsing (+ per-session `resolveGateTools` precedence), hook-merge,
-  panel geometry, image data-URL parsing, `/effort` + AskUserQuestion answer keys
-  (multi-select guarded), provider env-injection / `respawnSpec` / `providerByModel`,
-  ledger parse/filter/narrative, fleet-insights aggregation (`fleetStats` /
-  `blockedSeconds`), per-session `sessionRisk`, `collisions`, and `shouldDrainClose` —
-  has no `hs.*` calls and is unit-tested directly in plain `lua`
-  ([tests/core.test.lua](tests/core.test.lua) + [tests/ui.test.lua](tests/ui.test.lua)).
-- **All effects go through one `fx` table** (focus, keystrokes, paste, send-keys,
-  decision/file writes, Stream Deck, session spawn). Production wires it to
-  Hammerspoon; tests pass a **recorder** that captures intent — so a test asserts
-  *"would press Return on window X"* or *"would spawn in /path"* without doing it.
-- **The shell scripts** are driven against a throwaway `CC_STATUS_DIR`:
-  [tests/status.test.sh](tests/status.test.sh) (status writer),
-  [tests/editor.test.sh](tests/editor.test.sh) (editor/mode/effort detection),
-  [tests/ask.test.sh](tests/ask.test.sh) (AskUserQuestion + multi-select capture),
-  [tests/config.test.sh](tests/config.test.sh), [tests/gate.test.sh](tests/gate.test.sh)
-  (the config-driven gated-tool list + per-session overrides),
-  [tests/ledger.test.sh](tests/ledger.test.sh) (audit ledger append/retention),
-  [tests/install.test.sh](tests/install.test.sh) (the installer against a temp `$HOME`), and
-  [tests/escaping.test.sh](tests/escaping.test.sh) (the panel-webview XSS escaping tripwire).
-- **2,743 core + 762 ui + 368 bash checks (+ a load-and-refresh smoke test), all side-effect-free.**
-  Every new feature lands with its tests, and the critical guards are **mutation-checked** — reverting
-  the fix has to turn its own test red — so an assertion can't quietly go vacuous. Source-shape "pins"
-  (used where a Hammerspoon-only path can't be loaded in the harness) are called out as such.
-
-Spawning is additionally gated by `spawn.live` (default off → log-but-don't-launch),
-with the `ORCH_DRY_RUN` code constant as a fixed safety net, so the live app never
-launches until you opt in from Settings.
-
-Layout: [cc-core.lua](cc-core.lua) (logic) + [claude-dashboard.lua](claude-dashboard.lua)
-(Hammerspoon bootstrap) + `tests/` (`run.sh`, bash + lua suites, `support/`).
-
-## Notes and tweaks
-
-- **Different editor:** Cursor and VS Code Insiders are already in the
-  `EDITOR_BUNDLES` list in the `.lua` file; add or reorder as needed.
-- **Select vs jump:** single-click selects a tile (opens its controls);
-  **double-click** jumps to the window; **right-click** opens the relabel/close menu.
-  This keeps the grid clean and lets you act (especially hands-free gate approvals)
-  without switching windows.
-- **Window size is remembered:** resize/move the panel and it's saved (in
-  `hs.settings`); a reload restores it instead of snapping back to the default. If a
-  saved frame ends up off-screen or too small, it falls back to the top-right default.
-- **Tiles persist by default:** status files stick around indefinitely. A stale tile
-  with no `session_id` at all (a botched-hook orphan) is always auto-cleaned. To
-  auto-delete tiles after idle time, set `prune.hours` in ⚙ Settings → Tile cleanup
-  (0 = never, default).
-- **Window not focusing:** open the Hammerspoon Console and double-click a tile.
-  The log shows whether a title match was found. Focus matches the folder name in
-  the VS Code window title (the default title format).
-- **Logs:** the hook scripts log to stderr (`[cc-status]` / `[cc-approve]`). The
-  Lua side logs to the Hammerspoon Console **and** mirrors every line to
-  `~/.claude/cc-shepherd.log` — `tail -f ~/.claude/cc-shepherd.log`. Keep the HS
-  Console **closed**: an open console pops over your work whenever Hammerspoon
-  activates, so read the file instead.
-- **Relabel / Close / New session** use in-panel UI (inline bars / a modal), not
-  native dialogs, so they don't activate Hammerspoon and yank its console forward.
-  (⌘⌥S falls back to a native prompt only if the modal can't open.) Relabels persist
-  per project path in `~/.claude/cc-labels.json`.
-- **Known limit:** click-to-focus matches by window title, so two sessions in the
-  *same* window remain ambiguous to jump to (their tiles are still distinct).
-
-## Review tags (`R1-`/`R2-`/`R3-` in comments & tests)
-
-Many code comments and test names carry tags like `R1-26`, `R2-17`, or `R3-18`.
-These reference findings from the multi-agent bug-hunt review sweeps: `R<round>-<id>`
-is the `<id>`-th confirmed finding of review **round** `<round>` (round 1, 2, 3, …).
-The authoritative "why" for each tag is the code comment next to it — it records the
-non-obvious invariant (usually a concurrency or fail-closed rule) the fix protects, so
-a later edit doesn't "simplify" the guard back into the bug. To trace one across the
-tree: `git log --grep='R2-17'` or `grep -rn 'R2-17' .`.
-
-The 2026-07-02 sweep (see the CHANGELOG) tracks its 30 findings as `#1`–`#30`, with
-regression tests named `#<id>-pin`; the same rule applies — the comment beside each
-`#<id>` is the authoritative "why", and `grep -rn '#18-pin' tests/` finds its test.
+You need macOS. The installer gets the rest.
+
+1. Download the repo (**Code → Download ZIP**, then unzip) or `git clone` it.
+2. Double-click **`Install Shepherd.command`** (for a downloaded copy: right-click → **Open** the
+   first time). It installs what's missing (Xcode command-line tools, Homebrew, `jq`, `lua`, `node`,
+   Hammerspoon, VS Code, Claude Code and its extension), then Shepherd itself.
+3. Once, by hand: allow **Hammerspoon** in System Settings → Privacy & Security → **Accessibility**,
+   and sign in to Claude in VS Code. The panel appears top-right.
+
+`Install Shepherd.command` runs `bootstrap.sh` (the prerequisites), which runs `install.sh`
+(Shepherd). Already have the tools? Run `make setup`. Re-running either is safe.
+
+**Upgrade** after a `git pull` with `make setup` (not `make install`), then Hammerspoon → **Reload
+Config**, and **Developer: Reload Window** in VS Code windows that were already open.
+
+**Uninstall** with **`Uninstall Shepherd.command`** or `make uninstall`. Your settings and history
+stay unless you ask to remove them.
+
+Details, including what the installer changes in your Claude Code settings:
+[docs/install.md](docs/install.md).
+
+## The daily workflow
+
+Shepherd is built around one rule: **one unit of work = one branch = one worktree = one Claude
+session.**
+
+1. **Start a unit.** Right-click a card → **New worktree tab…** (or ask a session to do it). The new
+   tab enters its own worktree under `.claude/worktrees/` and works there.
+2. **Watch the cards.** Answer approvals and questions from the panel as they come up.
+3. **Merge.** When the unit is done and green, it asks to merge. Review it on its card and press
+   **Merge**; it rebases, tests and fast-forwards main, then its tab closes.
+4. **Or hand over a batch.** Ask one session to run several units in parallel. You approve the batch
+   once, and choose whether it may merge the units when they're green.
+
+The installer puts these working rules into `~/.claude/CLAUDE.md`, so every session follows them:
+[methodology/CLAUDE.md](methodology/CLAUDE.md). To see the whole loop, run the
+[worktree demo](docs/merging-and-batches.md#try-it-the-worktree-demo) (`make demo`).
+
+## Configuration
+
+- **⚙ Settings** in the panel covers nearly everything, with a one-line explanation per switch.
+- It writes `~/.claude/cc-config.json`. [cc-config.example.json](cc-config.example.json) documents
+  most keys. [defaults/cc-config.json](defaults/cc-config.json) is what a fresh install starts with,
+  and `make setup` adds any of its keys you haven't set.
+- The automations (queue, rules, routines, respawn, auto-continue, escalation, policies) are off
+  until you turn them on. A few conveniences are on by default: held questions, Remote Control for
+  spawned sessions, and ending leftover processes that have no tab.
+
+Reference: [docs/configuration.md](docs/configuration.md).
+
+## Safety model
+
+- **Nothing is gated until you arm the gate.** Turn on ⚙ Settings → Approvals → **Headless
+  approvals** and the tools in `gate.tools` (Bash, Write, Edit, MultiEdit, NotebookEdit by default)
+  wait for your Approve or Deny in the panel.
+- **What can approve without you**, only while the gate is armed and only if you turned it on: an
+  `autoAllow` pattern or an attached policy bundle, Autopilot (time-boxed, per session), and
+  "approve repeats" of the exact command you approved before. `autoDeny` always wins. Headless
+  approvals turns off approve-repeats, Autopilot and the fleet patterns; an attached bundle keeps
+  working until you detach it.
+- **When the gate can't answer, Claude Code decides.** When the gate is off, the tool isn't gated,
+  Shepherd wasn't running when the request came in, or 120 seconds pass without an answer, the gate
+  steps aside and Claude Code's own permission mode decides. In the default mode you get the normal
+  prompt in the tab. In Accept edits, Auto or Bypass permissions mode there may be no prompt at
+  all. The gate never approves on a timeout.
+- **Never automatic:** answering a session's question, merging without your **Merge** or a batch
+  grant you gave, and closing a session you didn't ask to close. (Exceptions: a finished unit's own
+  tab closes after its merge, and a leftover process with no tab is ended after it has sat idle.)
+- **Remote Control is on by default**: sessions Shepherd spawns get it, Shepherd re-arms it in
+  running terminal sessions at startup, and the installer turns on Claude Code's own
+  `remoteControlAtStartup` where you haven't set it. It widens who can type into a session to anyone
+  with your claude.ai account. Turn it off in ⚙ Settings → Spawn and in Claude Code's `/config` if
+  that's too broad.
+
+Full detail: [docs/approvals-and-policies.md](docs/approvals-and-policies.md#the-safety-model).
+
+## Troubleshooting
+
+- **☰ → 🩺 Diagnostics** checks the hooks, the gate, the panel heartbeat, the tab bridge and the
+  ledger, and says how to fix what's wrong. `make doctor` checks the command-line tools.
+- **Shepherd has no process of its own.** It runs inside Hammerspoon, so `pgrep shepherd` finds
+  nothing even when it's running. The panel heartbeat (`~/.claude/cc-status/.panel-alive`) is the
+  signal: `~/.claude/cc-fleet.sh alive` reads it.
+- **Changes didn't take effect?** Run `make setup`, reload Hammerspoon, and reload older VS Code
+  windows.
+- **Logs:** `tail -f ~/.claude/cc-shepherd.log`.
+
+More: [docs/troubleshooting.md](docs/troubleshooting.md).
+
+## Documentation
+
+| Page | What's in it |
+|------|--------------|
+| [Install](docs/install.md) | Install, upgrade, uninstall, what the installer changes, the tab bridge, the Dock launcher |
+| [Fleet](docs/fleet.md) | Statuses, project cards, Instances, the detail panel and its tabs, search, groups, My List |
+| [Controls](docs/controls.md) | Clicks and menus, detail-panel buttons, shared windows, spawning, hotkeys, Stream Deck, awake and lock |
+| [Approvals and policies](docs/approvals-and-policies.md) | The safety model, the gate, policies and bundles, answering questions |
+| [Merging and batches](docs/merging-and-batches.md) | Worktree tabs, ready to merge, merge gates, batches, the demo, the tab bridge |
+| [Automation](docs/automation.md) | Queue, templates, routing, auto-model, respawn, escalation, rules, routines, A/B compare |
+| [Usage and cost](docs/usage-and-cost.md) | Context bars, plan usage, cost, commits, the audit ledger and its views |
+| [Providers and integrations](docs/providers-and-integrations.md) | Providers and models, agent profiles, MCPs and skills, Remote Control, the SSH bridge |
+| [Make it yours](docs/customizing.md) | Layouts, themes, colours, sizing |
+| [Configuration](docs/configuration.md) | Settings tabs, `cc-config.json`, the files Shepherd keeps, environment variables |
+| [Troubleshooting](docs/troubleshooting.md) | Diagnostics, "is it running?", logs, common problems, known limits |
+| [Development](docs/development.md) | Architecture, tests, deploying, screenshots |
+| [Reverse-engineering user stories](docs/reverse-engineering-user-stories.md) | Writing `spec/product/` for an existing project |
+
+Also: [methodology/CLAUDE.md](methodology/CLAUDE.md) (the working rules sessions follow),
+[demo/GUIDE.md](demo/GUIDE.md) (the worktree demo), [CHANGELOG.md](CHANGELOG.md) (what changed),
+and [context.md](context.md) (orientation for working on Shepherd itself).
+
+## License
+
+[MIT](LICENSE).
