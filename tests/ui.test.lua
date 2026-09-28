@@ -3094,10 +3094,22 @@ do
   -- and FX.spawnSession injects it as spawn env for KITTY only (an env entry
   -- would force the VS Code spawn onto the typed-terminal flavor; cc-status.sh
   -- publishes it as budget_lineage, core.budgetKey prefers it -- core-pinned).
+  -- 2026-09-28 requirement change: the same table now also carries the dead tile's own key as
+  -- `except`, so the one-worktree check leaves out the session a respawn replaces; the lineage
+  -- still rides in it, which is what these two pin.
   check("#19-pin: auto-respawn passes the lineage",
-        src:find('rs.providerId or "", { lineage = core.budgetKey(it) }, false, rs.model)', 1, true) ~= nil)
+        src:find('rs.providerId or "", { lineage = core.budgetKey(it), except = it.key }, false, rs.model)', 1, true) ~= nil)
   check("#19-pin: manual respawn passes the lineage",
-        src:find("{ lineage = core.budgetKey(item) }, false, rs.model)", 1, true) ~= nil)
+        src:find("{ lineage = core.budgetKey(item), except = item.key }, false, rs.model)", 1, true) ~= nil)
+  -- 2026-09-28: one worktree, one agent. Every spawn refuses a linked worktree a live session is
+  -- already working in, and both respawns ask the same question up front: a refusal is a respawn
+  -- verdict (ledgered once by the would-fire branch), never a spawn retried every tick.
+  check("a spawn refuses a worktree another live session is working in",
+        src:find("local occupant = FX.worktreeOccupantOf(project, type(agentOpts) == \"table\" and agentOpts.except or nil)", 1, true) ~= nil)
+  check("auto-respawn asks up front whether its worktree was taken over",
+        src:find("core.respawnSpec(it, cfg, { occupant = it.stale and FX.worktreeOccupantOf(it.cwd, it.key) or nil })", 1, true) ~= nil)
+  check("manual respawn asks the same",
+        src:find("core.respawnSpec(item, loadConfig(), { occupant = FX.worktreeOccupantOf(item.cwd, item.key) })", 1, true) ~= nil)
   check("#19-pin: spawn env carries CC_SHEPHERD_LINEAGE",
         src:find('env[#env + 1] = { name = "CC_SHEPHERD_LINEAGE", value = lineage, secret = false }', 1, true) ~= nil)
   check("#19-pin: lineage env injection is kitty-gated",

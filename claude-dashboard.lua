@@ -5210,12 +5210,32 @@ local function claudeBinPath()
   return nil
 end
 
+-- One worktree, one agent (2026-09-28): the live session already working in the linked worktree
+-- `dir` belongs to, or nil (core.worktreeOccupant). The main checkout is shared. One cached git
+-- identity per folder (FX.repoIdentity); `except` = the dead tile a respawn replaces.
+function FX.worktreeOccupantOf(dir, except)
+  local ident = FX.repoIdentity(dir)
+  if type(ident) ~= "table" or type(ident.toplevel) ~= "string" then return nil end
+  return core.worktreeOccupant(lastRenderList or {}, ident.toplevel,
+    { except = except, mainRoot = core.repoMainRoot(ident.commonDir) })
+end
+
 -- Spawn a new Claude session, editor-aware (F3-F5). The editor comes from the
 -- caller (the modal's picker) or falls back to `spawn.editor` in config. Effective
 -- dry-run = the code default ORCH_DRY_RUN unless the user flips `spawn.live` on.
 function FX.spawnSession(editor, project, task, permissionMode, providerId, agentOpts, isNew, modelOverride)
   local cfg = loadConfig()
   editor = (editor and editor ~= "") and editor or core.config(cfg, "spawn.editor", "terminal")
+  -- 2026-09-28: one worktree, one agent -- a second live session in a linked worktree edits the
+  -- same files under the first one's feet. Refused before anything launches; a respawn leaves
+  -- out the dead tile it replaces (agentOpts.except). Returns false, like a dry run.
+  local occupant = FX.worktreeOccupantOf(project, type(agentOpts) == "table" and agentOpts.except or nil)
+  if occupant then
+    local why = core.occupantReason(occupant)
+    print("[cc-dashboard] ⚠️ spawn refused in " .. tostring(project) .. ": " .. why)
+    pcall(function() FX.alert("Can't start a session there: " .. why) end)
+    return false
+  end
   -- Resolve the provider profile. "" is an EXPLICIT "(none — bare claude)" pick;
   -- only nil (no pick at all) falls back to the spawn.provider default (pure
   -- resolution in cc-core). A missing/unknown profile leaves env/model nil ->
@@ -8310,7 +8330,7 @@ local function handleBridgeMsg(msg)
       if core.config(cfg0, "respawn.enabled", false) == true then
         menu[#menu + 1] = { title = "Respawn from cwd", menu = {
             { title = "Confirm: respawn " .. shown, fn = function()
-                local rs = core.respawnSpec(item, loadConfig())
+                local rs = core.respawnSpec(item, loadConfig(), { occupant = FX.worktreeOccupantOf(item.cwd, item.key) })
                 if not rs.canRespawn then
                   pcall(function() FX.alert("Claude Shepherd: can't respawn — " .. tostring(rs.reason)) end)
                   return
@@ -8322,7 +8342,7 @@ local function handleBridgeMsg(msg)
                 -- budget lineage like the auto-respawn path, so a manually respawned
                 -- kitty crash-looper keeps counting toward the same retry budget
                 -- (matches the non-kitty behavior, where projectKey carries naturally).
-                FX.spawnSession(rs.editor, rs.project, nil, rs.permissionMode, rs.providerId or "", { lineage = core.budgetKey(item) }, false, rs.model)
+                FX.spawnSession(rs.editor, rs.project, nil, rs.permissionMode, rs.providerId or "", { lineage = core.budgetKey(item), except = item.key }, false, rs.model)
                 ledgerFor(item, { type = "respawn", cwd = rs.project, editor = rs.editor, provider = rs.providerId })
               end },
             { title = "Cancel", fn = function() end },
@@ -18415,7 +18435,9 @@ function FX._refreshBody()
     -- write). Compute respawnSpec first so cc-core can charge the budget ONLY on a real
     -- relaunch (an un-respawnable death shouldn't burn a retry). respawnSpec is pure
     -- and cheap, and only computed while the feature is on.
-    local rs = (autoRespawnOn and not it.remote) and core.respawnSpec(it, cfg) or nil
+    -- 2026-09-28: a stale tile's worktree may have been taken over since it died (one worktree,
+    -- one agent) -- asked only for stale tiles, the only ones a respawn can fire for.
+    local rs = (autoRespawnOn and not it.remote) and core.respawnSpec(it, cfg, { occupant = it.stale and FX.worktreeOccupantOf(it.cwd, it.key) or nil }) or nil
     local step = core.stepAutoRespawn(respawnAttempts, it, {
       -- never auto-relaunch a session frozen on an API error: the user resumes it with
       -- Continue (same session/context), not a fresh respawn. Remote tiles are
@@ -18454,7 +18476,7 @@ function FX._refreshBody()
       -- and maxRetries actually binds across generations (env CC_SHEPHERD_LINEAGE
       -- -> cc-status.sh budget_lineage -> core.budgetKey preference).
       local launched = FX.spawnSession(rs.editor, rs.project, nil, rs.permissionMode,
-        rs.providerId or "", { lineage = core.budgetKey(it) }, false, rs.model)
+        rs.providerId or "", { lineage = core.budgetKey(it), except = it.key }, false, rs.model)
       ledgerFor(it, { type = "auto_respawn", outcome = launched and "ok" or "dryrun",
         cwd = rs.project, editor = rs.editor, provider = rs.providerId, attempt = step.attempts })
       if launched then

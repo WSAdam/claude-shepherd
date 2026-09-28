@@ -1832,6 +1832,33 @@ function M.openWorktreeVerdict(entries, path, liveRoots, opts)
   return true
 end
 
+-- One worktree, one agent (2026-09-28): the live session already working in the linked
+-- worktree at `path`, or nil. A second agent there edits the same files under the first one's
+-- feet. The main checkout is shared (opts.mainRoot, and any tile marked isMainWt); a session
+-- whose process is known gone (procAlive == false) holds nothing, one not probed yet counts as
+-- alive; a remote tile is on another machine; opts.except leaves out one tile (the dead
+-- session a respawn replaces). Pure.
+function M.worktreeOccupant(list, path, opts)
+  opts = opts or {}
+  path = M.normDir(tostring(path or ""))
+  if path == "" then return nil end
+  if type(opts.mainRoot) == "string" and M.normDir(opts.mainRoot) == path then return nil end
+  for _, it in ipairs(list or {}) do
+    if type(it) == "table" and not it.remote and it.key ~= opts.except and not it.isMainWt
+       and type(it.wtRoot) == "string" and M.normDir(it.wtRoot) == path and it.procAlive ~= false then
+      return it
+    end
+  end
+  return nil
+end
+
+-- Why a spawn into an occupied worktree is refused, naming the session as its card does.
+function M.occupantReason(it)
+  it = type(it) == "table" and it or {}
+  local shown = (type(it.label) == "string" and it.label ~= "" and it.label) or it.autoTitle or it.name
+  return tostring(shown or "another session") .. " is already working in that worktree"
+end
+
 -- The Instances view's payload. Rows never carry a prompt body -- only what identifies an
 -- instance and what it waits on. Members sort main checkout first, then by folder, so a
 -- live re-render never jumps a row under the pointer; the lead is marked, not moved.
@@ -7276,7 +7303,7 @@ end
 -- user hook whose basename ENDS in one of these (e.g. my-cc-status.sh) is a false
 -- positive, acceptable next to the old bare-"cc-" net. KEEP IN SYNC with install.sh's
 -- jq `any(test("cc-(status|approve|popup)\\.sh"))`.
-M.OUR_HOOK_SCRIPTS = { "cc-status.sh", "cc-approve.sh", "cc-popup.sh", "cc-ask.sh" }
+M.OUR_HOOK_SCRIPTS = { "cc-status.sh", "cc-approve.sh", "cc-popup.sh", "cc-ask.sh", "cc-worktree-guard.sh" }
 function M.mergeHooks(existing, template)
   existing = type(existing) == "table" and existing or {}
   local out = {}
@@ -7449,11 +7476,16 @@ end
 -- providerId=nil (faithful bare `claude`). A gateway session whose profile is no
 -- longer in `providers` can't be rebuilt (its auth env is unknown) -> canRespawn
 -- false with a reason the UI can surface. No initial task: it's a relaunch.
-function M.respawnSpec(item, cfg)
+-- opts.occupant (2026-09-28) = the live session that has taken over the dead one's worktree
+-- since (core.worktreeOccupant): one worktree, one agent, so that relaunch is refused.
+function M.respawnSpec(item, cfg, opts)
   if type(item) ~= "table" then return { canRespawn = false, reason = "no session" } end
   local project = item.cwd
   if not project or tostring(project) == "" then
     return { canRespawn = false, reason = "unknown working dir" }
+  end
+  if type(opts) == "table" and type(opts.occupant) == "table" then
+    return { canRespawn = false, reason = M.occupantReason(opts.occupant) }
   end
   local editor = item.editor
   if not editor or tostring(editor) == "" then editor = M.config(cfg, "spawn.editor", "terminal") end

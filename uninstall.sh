@@ -25,7 +25,7 @@ PURGE=0
 for arg in "$@"; do [ "$arg" = "--purge" ] && PURGE=1; done
 
 # KEEP IN SYNC with install.sh's CLAUDE_FILES / HS_FILES
-CLAUDE_FILES="cc-lib.sh cc-status.sh cc-approve.sh cc-popup.sh cc-merge.sh cc-fleet.sh cc-ask.sh cc-commits.sh cc-core.lua"
+CLAUDE_FILES="cc-lib.sh cc-status.sh cc-approve.sh cc-popup.sh cc-merge.sh cc-fleet.sh cc-ask.sh cc-commits.sh cc-worktree-guard.sh cc-core.lua"
 HS_FILES="claude-dashboard.lua cc-core.lua"
 # Shepherd's settings and state under ~/.claude (--purge only)
 STATE="cc-ab.json cc-agents.json cc-approved cc-ask cc-automodel cc-autopilot cc-autotitles.json cc-bridge
@@ -54,7 +54,7 @@ if [ -f "$SETTINGS" ]; then
     echo "⚠️  couldn't parse $SETTINGS -- remove the cc-*.sh hooks by hand"
   else
     cleaned="$(jq '
-      def ours: ((.command? // "") | type == "string") and ((.command? // "") | test("cc-(status|approve|popup|ask)\\.sh"));
+      def ours: ((.command? // "") | type == "string") and ((.command? // "") | test("cc-(status|approve|popup|ask|worktree-guard)\\.sh"));
       if (.hooks | type) != "object" then . else
         .hooks |= with_entries(
           if (.value | type) != "array" then . else

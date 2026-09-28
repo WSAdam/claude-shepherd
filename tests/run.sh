@@ -167,6 +167,9 @@ echo ""
 echo "== bash: worktree hygiene (.gitignore keeps git worktree remove unblocked) =="
 bash "$DIR/worktree-hygiene.test.sh" || fail=1
 echo ""
+echo "== bash: one worktree, one agent (EnterWorktree into a busy worktree is denied) =="
+bash "$DIR/worktree-guard.test.sh" || fail=1
+echo ""
 echo "== bash: README front page -- links resolve, every in-app feature is in the tour =="
 bash "$DIR/readme.test.sh" || fail=1
 echo ""

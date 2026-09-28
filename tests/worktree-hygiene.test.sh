@@ -61,7 +61,8 @@ done
 # settings and its test gate failed. Every file the installers read must be in a clone.
 for p in install.sh bootstrap.sh uninstall.sh "Install Shepherd.command" "Uninstall Shepherd.command" \
          settings-hooks.json defaults/cc-config.json defaults/claude-settings.json methodology/CLAUDE.md \
-         cc-lib.sh cc-status.sh cc-approve.sh cc-popup.sh cc-merge.sh cc-fleet.sh cc-ask.sh cc-commits.sh cc-core.lua \
+         cc-lib.sh cc-status.sh cc-approve.sh cc-popup.sh cc-merge.sh cc-fleet.sh cc-ask.sh cc-commits.sh \
+         cc-worktree-guard.sh cc-core.lua \
          claude-dashboard.lua app/build-app.sh vscode-bridge/package.json vscode-bridge/extension.js \
          vscode-bridge/lib.js vscode-bridge/build-vsix.sh vscode-bridge/install-vsix.sh Makefile tests/run.sh \
          .github/workflows/ci.yml; do

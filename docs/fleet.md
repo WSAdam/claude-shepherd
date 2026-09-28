@@ -93,6 +93,11 @@ workflow ([Merging and batches](merging-and-batches.md)).
   needs you. Right-click → **Instances…** opens the same view.
 - **＋ New worktree tab** starts a new unit from the Instances header
   ([Merging and batches → New worktree tab](merging-and-batches.md#new-worktree-tab)).
+- **One worktree, one agent.** A linked worktree another live session is working in gets no
+  second agent: a spawn, **Respawn from cwd** or auto-respawn (which ledgers why) and **Open** are
+  refused, and so is a session's own `EnterWorktree` into it (the `cc-worktree-guard.sh` hook
+  denies it, naming the session that's there). The main checkout is shared, and a session whose
+  process is gone holds nothing. An existing install wires the hook with `make setup`.
 - The detail panel stays on the instance you selected even if the card starts showing a different
   one (the card then gets a dashed outline), so a nudge never goes to the wrong worktree.
 - `stacks.enabled: false` in `~/.claude/cc-config.json` switches back to one card per session. The

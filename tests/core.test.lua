@@ -2658,10 +2658,11 @@ do
   for _, n in ipairs(core.OUR_HOOK_SCRIPTS) do got[#got + 1] = n end
   table.sort(got)
   -- 2026-09-11 requirement change: cc-ask.sh (the question hook) joined the set.
-  local wantScripts = { "cc-approve.sh", "cc-ask.sh", "cc-popup.sh", "cc-status.sh" }  -- sorted
+  -- 2026-09-28 requirement change: cc-worktree-guard.sh (one worktree, one agent) joined it.
+  local wantScripts = { "cc-approve.sh", "cc-ask.sh", "cc-popup.sh", "cc-status.sh", "cc-worktree-guard.sh" }  -- sorted
   local scriptsOk = (#got == #wantScripts)
   for i = 1, #wantScripts do if got[i] ~= wantScripts[i] then scriptsOk = false end end
-  check("mergeHooks: OUR_HOOK_SCRIPTS == {cc-approve, cc-ask, cc-popup, cc-status}.sh exactly", scriptsOk)
+  check("mergeHooks: OUR_HOOK_SCRIPTS == {cc-approve, cc-ask, cc-popup, cc-status, cc-worktree-guard}.sh exactly", scriptsOk)
 
   -- L5 hooks inspector: flatten settings.json hooks into per-hook rows
   local settings = { hooks = {
@@ -8944,6 +8945,37 @@ do
   local idle = {} for _, w in ipairs(p.worktrees) do idle[#idle + 1] = w.path end
   eq("instances: lists only worktrees with no session (not prunable)", table.concat(idle, ","), "/r/det")
   eq("instances: an emptied stack says so", core.instancesPayload("repo:/q", {}, {}, {}, {}).gone, true)
+end
+
+-- ---- One worktree, one agent (2026-09-28) ----------------------------------------------------
+-- 2026-09-28: nothing stopped Shepherd from starting a second live session in a linked worktree
+-- another session was already working in (a spawn, a respawn, a routine) -- two agents editing
+-- the same files under each other's feet. The main checkout is shared; a dead session holds
+-- nothing; a session not probed yet counts as alive.
+do
+  local fleet = {
+    { key = "a", name = "fix-a", label = "Fix A", wtRoot = "/r/main/.claude/worktrees/a", isMainWt = false },
+    { key = "m", name = "main", wtRoot = "/r/main", isMainWt = true },
+    { key = "d", name = "gone", wtRoot = "/r/main/.claude/worktrees/d", isMainWt = false, procAlive = false },
+    { key = "k", name = "kitty-unit", wtRoot = "/r/sib", isMainWt = false },
+    { key = "x", name = "far", wtRoot = "/r/main/.claude/worktrees/x", remote = { host = "h" } },
+  }
+  local function who(path, opts) local o = core.worktreeOccupant(fleet, path, opts); return o and o.key or nil end
+  eq("a linked worktree with a live session in it is occupied", who("/r/main/.claude/worktrees/a/"), "a")
+  eq("the main checkout is shared, never occupied", who("/r/main", { mainRoot = "/r/main" }), nil)
+  eq("a session whose process is gone holds nothing", who("/r/main/.claude/worktrees/d"), nil)
+  eq("a session not probed yet counts as alive", who("/r/sib"), "k")
+  eq("a remote session is on another machine", who("/r/main/.claude/worktrees/x"), nil)
+  eq("a respawn leaves out the dead tile it replaces", who("/r/sib", { except = "k" }), nil)
+  eq("a worktree nobody is in is free", who("/r/main/.claude/worktrees/free"), nil)
+  eq("no path, no occupant", who(nil), nil)
+  eq("the refusal names the session by its label", core.occupantReason(fleet[1]), "Fix A is already working in that worktree")
+  eq("...or its folder name", core.occupantReason(fleet[4]), "kitty-unit is already working in that worktree")
+  -- a dead session's worktree someone else has taken over since
+  local rs = core.respawnSpec({ cwd = "/r/sib", editor = "kitty" }, {}, { occupant = fleet[4] })
+  eq("a respawn into a worktree someone else took over is refused", rs.canRespawn, false)
+  eq("...and says who took it", rs.reason, "kitty-unit is already working in that worktree")
+  eq("a free worktree still respawns", core.respawnSpec({ cwd = "/r/sib", editor = "kitty" }, {}, {}).canRespawn, true)
 end
 
 -- ---- Project stacks: the rest of the fleet follows the stack (2026-09-10) ---

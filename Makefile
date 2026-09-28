@@ -41,7 +41,7 @@ install:
 # Each script is swapped in with a RENAME, never rewritten in place: bash reads a script
 # lazily from its open fd, so a hook running right now (a gate waiter, a merge request
 # waiting for Adam) would resume inside the new file's bytes. Same rule as install.sh.
-	@for f in cc-lib.sh cc-status.sh cc-approve.sh cc-popup.sh cc-merge.sh cc-fleet.sh cc-ask.sh cc-commits.sh cc-core.lua; do \
+	@for f in cc-lib.sh cc-status.sh cc-approve.sh cc-popup.sh cc-merge.sh cc-fleet.sh cc-ask.sh cc-commits.sh cc-worktree-guard.sh cc-core.lua; do \
 		cp "$$f" "$(CLAUDE_DIR)/.$$f.tmp.$$$$" && mv -f "$(CLAUDE_DIR)/.$$f.tmp.$$$$" "$(CLAUDE_DIR)/$$f" || exit 1; \
 	done
 	@chmod +x "$(CLAUDE_DIR)"/cc-*.sh

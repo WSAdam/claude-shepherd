@@ -156,7 +156,7 @@ install_file() {
   cp "$src" "$dstdir/.$base.tmp.$$" && mv -f "$dstdir/.$base.tmp.$$" "$dstdir/$base"
 }
 
-CLAUDE_FILES="cc-lib.sh cc-status.sh cc-approve.sh cc-popup.sh cc-merge.sh cc-fleet.sh cc-ask.sh cc-commits.sh cc-core.lua"
+CLAUDE_FILES="cc-lib.sh cc-status.sh cc-approve.sh cc-popup.sh cc-merge.sh cc-fleet.sh cc-ask.sh cc-commits.sh cc-worktree-guard.sh cc-core.lua"
 HS_FILES="claude-dashboard.lua cc-core.lua"
 
 # 0. Every file we ship must be in the checkout, or we'd wire a hook to a file that
@@ -258,15 +258,20 @@ if have_jq; then
                 end
             end)
       | .hooks |= migrate_timeout
-      # cc-ask.sh (2026-09-11) lives in its OWN PreToolUse group (matcher AskUserQuestion,
-      # a long timeout: it holds the question for Shepherd). The per-entry upgrade above
-      # would drop it into the matcher-"" group and run it for every tool, so an install
-      # that predates it gets the template group itself, once.
-      | if ([ (.hooks.PreToolUse // [])[]?.hooks[]?.command? // empty ] | any(contains("cc-ask.sh"))) then .
-        elif ((.hooks.PreToolUse // []) | type) != "array" then .
-        else .hooks.PreToolUse = ((.hooks.PreToolUse // [])
-               + [ $tmpl.hooks.PreToolUse[] | select(.matcher == "AskUserQuestion") ])
-        end
+      # A script that lives in its OWN PreToolUse group -- cc-ask.sh (2026-09-11, matcher
+      # AskUserQuestion, a long timeout: it holds the question for Shepherd), cc-worktree-guard.sh
+      # (2026-09-28, matcher EnterWorktree) -- is never picked up by the per-entry upgrade above,
+      # which would drop it into the matcher-"" group and run it for every tool. So an install
+      # that predates one gets that template group itself, once. Each group is checked on its
+      # own: the cc-ask-only check this replaced skipped the whole step whenever cc-ask.sh was
+      # wired, so no later group could ever have reached an existing install.
+      | reduce ($tmpl.hooks.PreToolUse[] | select((.matcher // "") != "")) as $g (.;
+          ([ $g.hooks[]?.command? // empty | capture("(?<n>cc-[a-z-]+\\.sh)").n ]) as $names
+          | if ($names | length) == 0 then .
+            elif ((.hooks.PreToolUse // []) | type) != "array" then .
+            elif ([ (.hooks.PreToolUse // [])[]?.hooks[]?.command? // empty ]
+                  | any(. as $c | $names | any(. as $n | $c | contains($n)))) then .
+            else .hooks.PreToolUse = ((.hooks.PreToolUse // []) + [ $g ]) end)
     ' "$SETTINGS" 2>"$merge_err")"
     if [ -z "$merged" ]; then
       echo "⚠️  hook merge failed on $SETTINGS — leaving it; merge $TEMPLATE by hand"

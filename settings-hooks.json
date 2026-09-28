@@ -13,6 +13,9 @@
       ] },
       { "matcher": "AskUserQuestion", "hooks": [
         { "type": "command", "command": "bash \"$HOME/.claude/cc-ask.sh\"", "timeout": 3630 }
+      ] },
+      { "matcher": "EnterWorktree", "hooks": [
+        { "type": "command", "command": "bash \"$HOME/.claude/cc-worktree-guard.sh\"" }
       ] }
     ],
     "PostToolUse": [

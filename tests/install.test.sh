@@ -58,6 +58,11 @@ assert_json "cc-ask.sh runs for AskUserQuestion only" "$CDIR/settings.json" \
 assert_json "cc-ask.sh carries a 3630s timeout" "$CDIR/settings.json" \
   '.hooks.PreToolUse[].hooks[] | select(.command | contains("cc-ask.sh")) | .timeout' "3630"
 exists "copies cc-ask.sh -> claude dir" "$CDIR/cc-ask.sh"
+# 2026-09-28: one worktree, one agent -- the EnterWorktree guard runs in its own group, for that
+# tool only, like cc-ask.sh.
+assert_json "cc-worktree-guard.sh runs for EnterWorktree only" "$CDIR/settings.json" \
+  '[.hooks.PreToolUse[] | select(.hooks[].command | contains("cc-worktree-guard.sh")) | .matcher] | join(",")' "EnterWorktree"
+exists "copies cc-worktree-guard.sh -> claude dir" "$CDIR/cc-worktree-guard.sh"
 exists "creates init.lua" "$HSDIR/init.lua"
 assert_eq "init.lua has the dofile" "1" "$(grep -c 'claude-dashboard.lua' "$HSDIR/init.lua")"
 
@@ -144,12 +149,36 @@ assert_json "migration: an older install gains cc-ask.sh in its own AskUserQuest
   '[.hooks.PreToolUse[] | select(.matcher == "AskUserQuestion") | .hooks[].command | contains("cc-ask.sh")] | length' "1"
 assert_json "migration: ...and never in the every-tool group" "$CDIR5/settings.json" \
   '[.hooks.PreToolUse[] | select(.matcher == "") | .hooks[].command | select(contains("cc-ask.sh"))] | length' "0"
+# 2026-09-28: ...and cc-worktree-guard.sh's own EnterWorktree group, the same way.
+assert_json "migration: an older install gains the worktree guard in its own EnterWorktree group" "$CDIR5/settings.json" \
+  '[.hooks.PreToolUse[] | select(.matcher == "EnterWorktree") | .hooks[].command | contains("cc-worktree-guard.sh")] | length' "1"
+assert_json "migration: ...the guard never lands in the every-tool group" "$CDIR5/settings.json" \
+  '[.hooks.PreToolUse[] | select(.matcher == "") | .hooks[].command | select(contains("cc-worktree-guard.sh"))] | length' "0"
 assert_json "migration: cc-status.sh entry untouched (no timeout)" "$CDIR5/settings.json" \
   '.hooks.PreToolUse[0].hooks[0] | has("timeout")' "false"
 before5="$(cat "$CDIR5/settings.json")"
 CC_INSTALL_CLAUDE_DIR="$CDIR5" CC_INSTALL_HS_DIR="$HSDIR5" CC_INSTALL_NO_APP=1 \
   bash "$ROOT/install.sh" >/dev/null 2>&1
 assert_eq "migration: re-run is a no-op" "$before5" "$(cat "$CDIR5/settings.json")"
+
+# 2026-09-28: every install since 2026-09-11 already has cc-ask.sh's own group -- the special case
+# that added it once skipped the WHOLE step when it was there, so a later per-tool group (the
+# worktree guard) would never have reached an existing install.
+CDIR5b="$TMP/claude5b"; HSDIR5b="$TMP/hs5b"; mkdir -p "$CDIR5b"
+cat > "$CDIR5b/settings.json" <<'JSON'
+{ "hooks": { "PreToolUse": [
+  { "matcher": "", "hooks": [
+    { "type": "command", "command": "bash \"$HOME/.claude/cc-status.sh\" pretooluse" },
+    { "type": "command", "command": "bash \"$HOME/.claude/cc-approve.sh\"", "timeout": 130 } ] },
+  { "matcher": "AskUserQuestion", "hooks": [
+    { "type": "command", "command": "bash \"$HOME/.claude/cc-ask.sh\"", "timeout": 3630 } ] } ] } }
+JSON
+CC_INSTALL_CLAUDE_DIR="$CDIR5b" CC_INSTALL_HS_DIR="$HSDIR5b" CC_INSTALL_NO_APP=1 \
+  bash "$ROOT/install.sh" >/dev/null 2>&1
+assert_json "upgrade: an install that has the question hook gains the worktree guard's group" "$CDIR5b/settings.json" \
+  '[.hooks.PreToolUse[] | select(.matcher == "EnterWorktree")] | length' "1"
+assert_json "upgrade: ...and the question hook's group isn't added twice" "$CDIR5b/settings.json" \
+  '[.hooks.PreToolUse[] | select(.matcher == "AskUserQuestion")] | length' "1"
 
 # --- the migration pass visits EVERY hooks event, so it must be SHAPE-PRESERVING
 # for events the installer doesn't own: a foreign event carrying a stray
@@ -474,6 +503,8 @@ exists "install.sh: ships cc-commits.sh too" "$CDIR/cc-commits.sh"
 assert_eq "make install: ships cc-commits.sh, executable" "yes" "$got"
 [ -x "$MCDIR/cc-ask.sh" ] && cmp -s "$ROOT/cc-ask.sh" "$MCDIR/cc-ask.sh" && got=yes || got=no
 assert_eq "make install: ships cc-ask.sh, executable" "yes" "$got"
+[ -x "$MCDIR/cc-worktree-guard.sh" ] && cmp -s "$ROOT/cc-worktree-guard.sh" "$MCDIR/cc-worktree-guard.sh" && got=yes || got=no
+assert_eq "make install: ships cc-worktree-guard.sh, executable" "yes" "$got"
 assert_eq "make install: the dashboard lands on a NEW inode too (rename, not truncate)" "changed" \
   "$([ -n "$mk_dash_ino" ] && [ "$(ino_of_mk "$MHDIR/claude-dashboard.lua")" != "$mk_dash_ino" ] && echo changed)"
 assert_eq "make install: ...and so does cc-core.lua" "changed" \
