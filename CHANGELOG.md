@@ -14,6 +14,7 @@ One line per unit as it merges; the section gets its date and full write-up when
 - Token totals count each API message once (Claude Code writes one record per content block), include subagent transcripts, and price 1-hour cache writes at their own rate.
 - The test suites no longer write fake events into the real audit ledger; `tools/ledger-quarantine.sh` moves the ones already there to `cc-ledger/quarantine/`, and fleet search skips that folder.
 - Parallel units' CHANGELOG lines and fixture vocabulary merge without conflicts (`.gitattributes` union), and a stray `deno.lock` is ignored.
+- A turn that ends on an API error or a usage limit reads as an error instead of Working (the transcript's `isApiErrorMessage` record, and a new StopFailure hook); a usage limit reads `[budget exceeded]` with its reset time, and auto-continue skips it.
 
 ## 2026-09-25 — Merged unit tabs close again, and Instances can clear the rest
 

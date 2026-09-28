@@ -15,7 +15,7 @@ search and groups, and My List.
 | `working`  | Working           | amber           | UserPromptSubmit, Pre/PostToolUse | Claude is doing work                |
 | `approval` | Needs you         | red (pulsing)   | PermissionRequest, Notification (permission), AskUserQuestion | Claude needs a permission or your answer |
 | `done`     | Ready for you     | green           | Stop, Notification (idle)    | Claude finished its turn                 |
-| `error`    | Needs you, or Retrying | red, or gray while retrying | the transcript (no hook fires) | The turn died on an API error |
+| `error`    | Needs you, or Retrying | red, or gray while retrying | StopFailure, and the transcript | The turn died on an API error or a usage limit |
 
 Instances rows and the Stream Deck show an errored session as **Error** in magenta.
 
@@ -41,7 +41,9 @@ Instances rows and the Stream Deck show an errored session as **Error** in magen
   coarse cause: `[budget exceeded]`, `[timeout]`, `[runtime error]`, `[model error]`,
   `[user cancelled]`. It reads **Needs you**, and its Approve button becomes **Continue**. A
   transient connection fault the session is still retrying reads **Retrying** (a heads-up) for up
-  to 75 seconds before it goes red.
+  to 75 seconds before it goes red. A usage limit reads `[budget exceeded]` with Claude Code's
+  message, which names the reset time (*You've hit your limit · resets 3pm*), and auto-continue
+  skips it: continuing only fails again until the limit resets.
 - Only a genuinely idle card **dims**, once its status file is more than 90 seconds old. A card
   waiting on you, a quiet "Ready for you" and a heads-up never dim.
 - Each tile shows time-in-state, a context-fullness bar
