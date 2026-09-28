@@ -7570,6 +7570,51 @@ do
   check("backgroundActivity: empty list -> inactive", core.backgroundActivity({}, now, {}).active == false)
 end
 
+-- ---- A background shell job keeps a finished session Running (2026-09-28) --------------------
+-- 2026-09-28: a session that ended its turn while a Bash job it started with run_in_background was
+-- still running read "Ready for you" -- Shepherd only saw subagents -- so Adam took a session in
+-- the middle of an 8-minute test run for one that had stopped, three times in one afternoon. The
+-- job's start, its completion notice and TaskStop are all in the transcript; shapes copied from
+-- a real one.
+do
+  local J = core.json.encode
+  local n = 0
+  local function start(jobId)
+    n = n + 1
+    local id = "toolu_bg" .. n
+    return J({ type = "assistant", message = { role = "assistant", content = {
+             { type = "tool_use", id = id, name = "Bash",
+               input = { command = "make test", description = "Run the suite", run_in_background = true } } } } })
+      .. "\n" .. J({ type = "user", message = { role = "user", content = {
+             { type = "tool_result", tool_use_id = id,
+               content = "Command running in background with ID: " .. jobId .. ". Output is being written to: /private/tmp/claude-503/p/s/tasks/" .. jobId .. ".output" } } } })
+  end
+  local function finished(jobId)   -- delivered as a prompt when the session was idle
+    return J({ type = "user", origin = { kind = "task-notification" }, message = { role = "user",
+      content = "<task-notification>\n<task-id>" .. jobId .. "</task-id>\n<tool-use-id>toolu_x</tool-use-id>\n<status>completed</status>\n</task-notification>" } })
+  end
+  local function queued(jobId)     -- delivered mid-turn, as an attachment
+    return J({ type = "attachment", attachment = { type = "queued_command", commandMode = "task-notification",
+      prompt = "<task-notification>\n<task-id>" .. jobId .. "</task-id>\n<status>completed</status>\n</task-notification>" } })
+  end
+  local function stopped(jobId)
+    return J({ type = "assistant", message = { role = "assistant", content = {
+      { type = "tool_use", id = "toolu_stop_" .. jobId, name = "TaskStop", input = { task_id = jobId } } } } })
+  end
+  local function said(t) return J({ type = "assistant", message = { role = "assistant", content = { { type = "text", text = t } } } }) end
+  local function tail(...) return table.concat({ ... }, "\n") .. "\n" end
+  eq("a job started in the background and not finished is running", core.backgroundJobs(tail(start("bg1"), said("Waiting on the suite."))), 1)
+  eq("its completion notice ends it", core.backgroundJobs(tail(start("bg1"), said("Waiting."), finished("bg1"), said("Green."))), 0)
+  eq("...so does one that lands mid-turn as a queued notice", core.backgroundJobs(tail(start("bg1"), queued("bg1"), said("Green."))), 0)
+  eq("...and stopping it", core.backgroundJobs(tail(start("bg1"), stopped("bg1"), said("Stopped it."))), 0)
+  eq("two jobs, one finished: one is still running", core.backgroundJobs(tail(start("bg1"), start("bg2"), finished("bg1"), said("One down."))), 1)
+  eq("a command run in the foreground is no job", core.backgroundJobs(tail(J({ type = "assistant", message = { role = "assistant",
+       content = { { type = "tool_use", id = "toolu_fg", name = "Bash", input = { command = "ls" } } } } }), said("Listed."))), 0)
+  eq("a torn last line is not read (the job still runs)",
+     core.backgroundJobs(tail(start("bg1")) .. '{"type":"user","message":{"role":"user","content":"<task-notification><task-id>bg1'), 1)
+  eq("an empty tail has none", core.backgroundJobs(""), 0)
+end
+
 -- ---- stale-"done" self-heal: transcript-resumed override ------------------
 do
   local function aline(ts)

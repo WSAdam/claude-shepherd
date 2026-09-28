@@ -2235,8 +2235,11 @@ do
         and src:find("function statusWords(it)", 1, true) ~= nil)
   check("bg-status: override only fires for done/idle (real status untouched)",
         src:find('it.bg_active && (it.status === "done" || it.status === "idle")', 1, true) ~= nil)
+  -- 2026-09-28 requirement change: the label is built from parts so it can name background shell
+  -- jobs beside the agents (needs-you.test.js runs it); the agents are still counted.
   check("bg-status: running label counts the background agents",
-        src:find('"Running " + n + " agent"', 1, true) ~= nil)
+        src:find('if(n || !j) parts.push(n + " agent"', 1, true) ~= nil
+        and src:find('return "Running " + parts.join(" · ");', 1, true) ~= nil)
   check("bg-status: tile dot + words route through the helpers",
         src:find("var est = effStatus(it)", 1, true) ~= nil
         and src:find("var label = esc(statusWords(it))", 1, true) ~= nil)
@@ -2909,6 +2912,16 @@ do
         src:find("if it.transcript_path and not it.remote then", 1, true) ~= nil)
   check("#5b-pin: the stale-gated variant is gone",
         src:find("if it.transcript_path and not it.remote and not it.stale then", 1, true) == nil)
+  -- 2026-09-28: a background shell job counts as background work too (core.backgroundJobs), read
+  -- again only when the transcript changes -- its completion notice changes it -- so a job that
+  -- outlives display staleness keeps the card Running.
+  check("a background shell job keeps the session running",
+        src:find("it.bg_jobs = FX.backgroundJobsFor(it)", 1, true) ~= nil
+        and src:find("it.bg_active = it.bg_active or it.bg_jobs > 0", 1, true) ~= nil)
+  check("...counted from the transcript, re-read only when it changes",
+        src:find("function FX.backgroundJobsFor(it)", 1, true) ~= nil
+        and src:find("core.backgroundJobs(FX.readTail(path, FX.JOBS_TAIL_BYTES)", 1, true) ~= nil)
+  check("the running pill counts jobs as well as agents", src:find("var n = (it.bg_count || 0) + (it.bg_jobs || 0);", 1, true) ~= nil)
 
   -- #6: a heal-carried 'working' is the heal's own ALIVE verdict on a raw-'done'
   -- file -- it must never feed stepAutoRespawn as frozen-at-working death

@@ -12562,6 +12562,71 @@ function M.subagentTree(files, now, opts)
   return out
 end
 
+-- 2026-09-28: how many background shell jobs a session still has running, from its transcript
+-- tail. A Bash call with run_in_background starts one -- its result says "Command running in
+-- background with ID: <id>", and only a result answering such a call counts, so a transcript that
+-- merely quotes the words starts nothing. A <task-notification> naming the id ends it (a prompt
+-- when the session was idle, a queued_command attachment mid-turn), and so does TaskStop. Lines
+-- are walked with a plain find (the torn last line is dropped); only candidate lines are decoded.
+function M.backgroundJobs(text)
+  if type(text) ~= "string" or text == "" then return 0 end
+  local calls, started, ended, order = {}, {}, {}, {}
+  local pos = 1
+  while true do
+    local nl = text:find("\n", pos, true)
+    if not nl then break end
+    local line = text:sub(pos, nl - 1)
+    pos = nl + 1
+    if line:sub(1, 1) == "{" and (line:find('"run_in_background":true', 1, true)
+        or line:find("Command running in background with ID:", 1, true)
+        or line:find("<task-notification>", 1, true) or line:find('"name":"TaskStop"', 1, true)) then
+      local okj, obj = pcall(function() return M.json.decode(line) end)
+      if okj and type(obj) == "table" then
+        local c = type(obj.message) == "table" and obj.message.content or nil
+        if obj.type == "assistant" and type(c) == "table" then
+          for _, p in ipairs(c) do
+            if type(p) == "table" and p.type == "tool_use" and type(p.input) == "table" then
+              if p.name == "Bash" and p.input.run_in_background == true and p.id then calls[p.id] = true end
+              if p.name == "TaskStop" then
+                local id = p.input.task_id or p.input.shell_id
+                if type(id) == "string" then ended[id] = true end
+              end
+            end
+          end
+        elseif obj.type == "user" and type(c) == "table" then
+          for _, p in ipairs(c) do
+            if type(p) == "table" and p.type == "tool_result" and calls[p.tool_use_id] then
+              local body = p.content
+              if type(body) == "table" then
+                local t = {}
+                for _, q in ipairs(body) do if type(q) == "table" and type(q.text) == "string" then t[#t + 1] = q.text end end
+                body = table.concat(t, " ")
+              end
+              local id = tostring(body or ""):match("Command running in background with ID: ([%w_%-]+)")
+              if id and not started[id] then started[id] = true; order[#order + 1] = id end
+            end
+          end
+        end
+        local notice = nil
+        if obj.type == "user" and type(c) == "string" then notice = c
+        elseif obj.type == "user" and type(c) == "table" then
+          local t = {}
+          for _, q in ipairs(c) do if type(q) == "table" and q.type == "text" and type(q.text) == "string" then t[#t + 1] = q.text end end
+          notice = table.concat(t, "\n")
+        elseif obj.type == "attachment" and type(obj.attachment) == "table" and obj.attachment.type == "queued_command" then
+          notice = obj.attachment.prompt
+        end
+        if type(notice) == "string" and notice:find("<task-notification>", 1, true) then
+          for id in notice:gmatch("<task%-id>([%w_%-]+)</task%-id>") do ended[id] = true end
+        end
+      end
+    end
+  end
+  local n = 0
+  for _, id in ipairs(order) do if not ended[id] then n = n + 1 end end
+  return n
+end
+
 -- DR2: cheap background-activity check for the hot tile loop. Any subagent file
 -- touched within the window => background work is running (a Workflow fleet or a
 -- delegated subagent). Independent of full-tree parsing so it can run every tick.

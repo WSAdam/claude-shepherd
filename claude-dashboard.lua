@@ -560,6 +560,27 @@ function FX.subagentScan(dir, withContent)
   return out
 end
 
+-- 2026-09-28: the background shell jobs a finished session is still running (core.backgroundJobs).
+-- A job's completion notice is written into the transcript, so the count is read again only when
+-- the transcript changes: one stat a tick per finished tile, and a job that outlives display
+-- staleness keeps its count. A session that isn't done or idle is working anyway: 0.
+FX.JOBS_TAIL_BYTES = 262144
+FX._bgJobs = {}   -- key -> { mt, n }
+function FX.backgroundJobsFor(it)
+  local key, path = it and it.key, it and it.transcript_path
+  if not key then return 0 end
+  if type(path) ~= "string" or it.remote or (it.status ~= "done" and it.status ~= "idle") then
+    FX._bgJobs[key] = nil
+    return 0
+  end
+  local mt = hs.fs.attributes(path, "modification")
+  local c = FX._bgJobs[key]
+  if c and c.mt == mt then return c.n end
+  local n = core.backgroundJobs(FX.readTail(path, FX.JOBS_TAIL_BYTES) or "")
+  FX._bgJobs[key] = { mt = mt, n = n }
+  return n
+end
+
 -- DR3 (Rewind tab): stream a transcript, returning ONLY its file-history-snapshot
 -- lines joined (those checkpoint lines are a small fraction -- ~hundreds of KB -- of a
 -- multi-MB transcript). On-demand (tab select), never the tick. nil on an unreadable path.
@@ -11232,7 +11253,14 @@ local HTML = [[
       // overloaded model): the card says so instead of a red Error nobody can act on.
       if(headsUp(it)) return it.needsYouSource === "error" ? LABELS.retrying : LABELS.fyi;
       if(isDriving(it)){ var nu = (it.fleet.units || []).length; return "Driving " + nu + " unit" + (nu === 1 ? "" : "s"); }
-      if(bgRunning(it)){ var n = (it && it.bg_count) || 0; return "Running " + n + " agent" + (n === 1 ? "" : "s"); }
+      if(bgRunning(it)){
+        // 2026-09-28: background shell jobs are named alongside agents (a job alone used to read
+        // "Running 0 agents" -- before that, "Ready for you")
+        var n = (it && it.bg_count) || 0, j = (it && it.bg_jobs) || 0, parts = [];
+        if(n || !j) parts.push(n + " agent" + (n === 1 ? "" : "s"));
+        if(j) parts.push(j + " job" + (j === 1 ? "" : "s"));
+        return "Running " + parts.join(" · ");
+      }
       // 2026-09-18: a working session that is waiting INSIDE a tool call says which one and
       // for how long, so a nine-minute Bash reads as work rather than as a card that has
       // stopped moving. Under a minute it is just "Working" -- no point counting seconds.
@@ -14821,7 +14849,7 @@ local HTML = [[
     function instList(v){ return Array.isArray(v) ? v : []; }     // hs.json encodes an empty list as {}
     function instStatusWord(im){
       var w = im.hung ? "Stalled"
-            : (im.bgActive && (im.status === "done" || im.status === "idle")) ? "Running agents"
+            : (im.bgActive && (im.status === "done" || im.status === "idle")) ? "Running in the background"
             : (LABELS[im.status] || "Idle") + turnTail(im);
       return (im.hidden ? "Hidden · " : "") + w + (im.stale ? " (quiet)" : "");
     }
@@ -17143,9 +17171,10 @@ local HTML = [[
     // fleet). Count from the server-side subagents/ mtime scan (it.bg_count).
     function bgBadge(it){
       if(!it.bg_active) return "";
-      var n = it.bg_count || 0;
-      return '<span class="bg-run" title="'+n+' background agent'+(n===1?'':'s')
-           + ' running (subagent / workflow)"><span class="spin">⚙</span> '+n+'</span>';
+      // 2026-09-28: and background shell jobs (it.bg_jobs, core.backgroundJobs)
+      var n = (it.bg_count || 0) + (it.bg_jobs || 0);
+      return '<span class="bg-run" title="'+n+' running in the background (subagents, workflows, shell jobs)">'
+           + '<span class="spin">⚙</span> '+n+'</span>';
     }
     // L5 PR/MR badge: server-computed text (it.pr.badge) + a click that opens the
     // PR url. NEITHER the url NOR the tile key is interpolated into the handler --
@@ -18127,6 +18156,9 @@ function FX._refreshBody()
         now, { activeWindow = tonumber(core.config(cfg, "subagents.activeWindow", 45)) or 45 })
       it.bg_active = bg.active
       it.bg_count = bg.count
+      -- 2026-09-28: a background shell job is background work too (it ran "Ready for you" before)
+      it.bg_jobs = FX.backgroundJobsFor(it)
+      it.bg_active = it.bg_active or it.bg_jobs > 0
     end
 
     -- User Stories tab gate: does this project carry spec/product/user-stories.md?
@@ -18517,6 +18549,7 @@ function FX._refreshBody()
   -- leaks its entry forever -- reap it like the siblings above.
   core.reapUnbacked(autoContinueState.since, newPrev)
   core.reapUnbacked(FX._turnLabel, newPrev)
+  core.reapUnbacked(FX._bgJobs, newPrev)
   -- R2-23: watchdog/draining are tile-key keyed but cleared only inside the per-tile
   -- loop (watchdogShouldReset / drain-close), which only visits LIVE tiles. A
   -- working+non-stale tile (watchdog populated) or an armed-drain tile that vanishes

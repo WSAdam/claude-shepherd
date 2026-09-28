@@ -80,6 +80,15 @@ eq("a driver whose batch ended reads Ready for you again",
 eq("a driving session that asks Adam something still reads Needs you",
    api.statusWords({ key: "d3", status: "approval", askHeld: true, fleet: { phase: "approved", units: [{}] } }), "Needs you");
 
+// 2026-09-28 live: a session running an 8-minute test suite as a background shell job ended its turn
+// and read a green "Ready for you" -- Adam took it for stopped, three times in one afternoon.
+const job = { key: "j", status: "done", bg_active: true, bg_count: 0, bg_jobs: 1 };
+eq("a finished turn with a background job running is working, not ready", api.effStatus(job), "working");
+eq("...and says what is running", api.statusWords(job), "Running 1 job");
+eq("jobs and agents together are both named",
+   api.statusWords({ key: "j2", status: "done", bg_active: true, bg_count: 2, bg_jobs: 1 }), "Running 2 agents · 1 job");
+eq("agents alone read as before", api.statusWords({ key: "j3", status: "idle", bg_active: true, bg_count: 3 }), "Running 3 agents");
+
 const tile = slice("    function tileHtml(it){", "\n    }\n") || "";
 check("the tile pulses whenever it needs Adam (class needs)", tile.indexOf('(needsYouNow(it) ? " needs" : "")') >= 0);
 check("the pulse is styled", /\.tile\.needs \{ animation:askglow/.test(src));
