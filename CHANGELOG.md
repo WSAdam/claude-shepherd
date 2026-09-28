@@ -20,6 +20,7 @@ One line per unit as it merges; the section gets its date and full write-up when
 - Usage totals survive a Hammerspoon reload: the per-transcript offsets, totals, 7-day events and seen message ids are saved to `~/.claude/cc-usage-state.json` (every 5 minutes and on shutdown), so a reload reads only new bytes instead of every transcript from byte 0.
 - Batch units and very long turns get their turn label too: with no prompt from you in the last 256KB, the turn starts at the newest message from another session, or covers the whole 256KB.
 - One worktree, one agent: Shepherd won't spawn or respawn a session into a linked worktree another live session is using, and a new `cc-worktree-guard.sh` hook denies EnterWorktree into one; `make setup` now adds every per-tool PreToolUse hook group an existing install lacks, not only the question hook's.
+- Always-ask commands: `git push`, `rm -rf`, `git reset --hard` / `clean -f` / `branch -D` / `worktree remove --force` / `checkout -- .`, any publish, `gh release create` and `gh pr merge` wait for your click on the card even with the gate unarmed; no autopilot, auto-allow, repeat approval or bundle passes them, and with Shepherd closed the hook answers "ask". Compound and wrapped forms count, quoted text doesn't (`cc_always_ask_match`); extras in Settings or a bundle's `alwaysAsk`.
 
 ## 2026-09-25 — Merged unit tabs close again, and Instances can clear the rest
 

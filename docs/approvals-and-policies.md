@@ -8,7 +8,9 @@ How a session's requests reach you, what can answer them without you, and what n
 
 - **The gate is opt-in.** Shepherd's approval gate ([cc-approve.sh](../cc-approve.sh)) is a
   Claude Code `PreToolUse` hook. It does nothing until it is armed (⚙ Settings → Approvals →
-  **Headless approvals**, or `touch ~/.claude/cc-gate.enabled`).
+  **Headless approvals**, or `touch ~/.claude/cc-gate.enabled`). The one exception is the
+  [always-ask commands](#always-ask-commands) (`git push`, `rm -rf`, history rewrites, publish):
+  those are held for your click whether the gate is armed or not.
 - **It only holds the tools in `gate.tools`** (default `Bash Write Edit MultiEdit NotebookEdit`).
   Every other tool goes through Claude Code's own permission flow, untouched. Policies apply only to
   gated tools too: an `autoDeny` rule for `WebFetch` fires only if `WebFetch` is in `gate.tools`.
@@ -18,7 +20,8 @@ How a session's requests reach you, what can answer them without you, and what n
   - a bundle with `autopilot: true`, or the time-boxed **Autopilot** button,
   - `policies.approveRepeats`: the exact same request was approved by you before in this session.
 
-  `autoDeny` is checked first and always wins. All of these are **off by default**.
+  `autoDeny` is checked first and always wins. All of these are **off by default**, and none of
+  them can approve an [always-ask command](#always-ask-commands).
   **Headless approvals** turns off approve-repeats, Autopilot and the fleet patterns, but an
   attached policy bundle keeps working until you detach it. Policies apply whether or not the panel
   is open.
@@ -28,7 +31,8 @@ How a session's requests reach you, what can answer them without you, and what n
   **Claude Code's own permission mode then decides.** In the default mode that is the usual prompt
   in the tab. In Accept edits, Auto or Bypass permissions mode, or for a tool your Claude Code
   settings already allow, there may be no prompt at all and the tool runs. The gate never approves
-  on a timeout.
+  on a timeout. An always-ask command doesn't step aside like that: it answers **ask**, so Claude
+  Code's own prompt shows whatever its mode.
 - **Questions are yours.** A question a session asks with AskUserQuestion is answered only by you,
   from the card or in the tab. Approve / Deny and Approve all skip it.
 - **Merges are yours.** A unit merges only when you press **Merge**, or on a batch's grant you gave,
@@ -87,6 +91,58 @@ the decision), never in the decision line itself. The audit ledger records it as
 
 Hook environment tunables: `CC_GATE_TOOLS` (overrides `gate.tools`), `CC_GATE_TIMEOUT`
 (default 120), `CC_PANEL_MAX_AGE` (default 5).
+
+## Always-ask commands
+
+Some commands can't be taken back. These Bash commands always wait for your click, **whatever the
+gate, `gate.tools`, a session's **None** gating, Autopilot, `autoAllow`, approve-repeats or a policy
+bundle says**:
+
+- `git push`
+- `rm` with both `-r` and `-f`, in any spelling (`-rf`, `-fr`, `-Rf`, `-r -f`, `--recursive --force`)
+- history rewrites: `git reset --hard`, `git clean -f`, `git branch -D`,
+  `git worktree remove --force`, `git checkout -- .`
+- any tool's `publish` (`npm`, `deno`, `cargo`, `yarn npm`, `npx jsr` …), `gh release create`,
+  `gh pr merge`
+
+What happens to one:
+
+- **Shepherd running:** the card holds it for **Approve / Deny**, exactly like a gated request,
+  even with the gate unarmed. The request's `pending.alwaysAsk` names the rule that held it.
+- **Shepherd not running, or no answer within 120 seconds:** the hook answers **ask**, so Claude
+  Code shows its own permission prompt, even in Accept edits, Auto or Bypass permissions mode.
+- **autoDeny still wins** while the gate is armed: a matching `autoDeny` pattern denies it.
+- **An Approve is never remembered.** Approve-repeats doesn't record it, so the next one asks again.
+- **The audit ledger** records the hand-off to Claude Code as `outcome: "fallback"`,
+  `by: "alwaysAsk"`, with the rule as its `pattern`. Your own answer stays `by: "human"`, with the
+  rule as its `pattern`.
+
+It reads the command the way the shell does, so what counts is what actually runs:
+
+- **Held:** `cd x && git push`, `make test; git push`, `git -C ../main push`,
+  `git -c k=v --git-dir=.git push`, `sh -c "git push"`, `bash -lc '…'`, `sudo`, `env A=1`, `time`,
+  `nohup`, `command`, `exec`, `xargs git push`, `find . -exec rm -rf {} \;`, `trap 'git push' EXIT`,
+  `echo $(git push)`, and a heredoc fed to a shell.
+- **Left alone:** `git status`, `rm -r dir`, `rm -f file`, `echo "git push"`,
+  `git commit -m "git push later"`, a comment, and a heredoc that is only text (`cat <<EOF`).
+- **Hidden commands are held too:** a held word behind `eval`, `$VAR`, `$(…)` or a heredoc that never
+  ends (`CMD="git push"; eval "$CMD"`, `$GIT push`, `git $(echo push)`) is held as *hidden command*.
+
+**Your own additions.** ⚙ Settings → Approvals → **Always ask** lists the built-ins (they can't be
+switched off) and takes more, one per line: a command name, then words it must contain in that
+order (`terraform apply`, `kubectl delete`, `docker push`; `*` and `?` work inside a word). They are
+saved as `policies.alwaysAsk.patterns`. A policy bundle can add its own with `"alwaysAsk": [...]`;
+a bundle only ever adds to the list, and `disableGlobal` doesn't drop the fleet's.
+
+```json
+"policies": {
+  "alwaysAsk": { "patterns": ["terraform apply", "kubectl delete"] },
+  "bundles": { "k8s": { "alwaysAsk": ["helm uninstall"] } }
+}
+```
+
+The hook runs for every tool call, so the check is cheap for the calls that can't match: one that
+isn't Bash, or a Bash command with none of the held words, is passed on without starting `jq`.
 
 ## Policies
 

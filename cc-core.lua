@@ -7297,7 +7297,8 @@ M.SETTINGS_KEEP_SUBKEYS = {
             "coldWindowWaitSeconds", "coldActivateSeconds", "matchWindowSize" },
   -- 2026-09-28: the form rebuilds `policies` from approveRepeats/autopilot/patterns only, so every
   -- Save and every Headless toggle deleted the bundles and attachments (edited in their own view).
-  policies = { "bundles", "attachments" },
+  -- alwaysAsk (2026-09-28): the form sends it, but a Save from a form that doesn't must keep it.
+  policies = { "bundles", "attachments", "alwaysAsk" },
   escalation = { "hung" },
   risk = { "weights" },
   bridge = { "staleSlackSeconds", "keystrokes" },
@@ -10806,6 +10807,11 @@ function M.resolvePolicy(cfg, session, override)
   end
   local fleetAllow = disableGlobal and {} or arr(M.config(cfg, "policies.patterns.autoAllow", nil))
   local fleetDeny  = disableGlobal and {} or arr(M.config(cfg, "policies.patterns.autoDeny", nil))
+  -- alwaysAsk (2026-09-28): the bundle's own extra always-ask commands. The gate adds them to
+  -- the built-ins and the fleet's policies.alwaysAsk.patterns (read from the config itself), so
+  -- a bundle can only add to the list -- disableGlobal never drops the fleet's. Left out when
+  -- empty: cc_always_ask_candidate reads the file's text for a non-empty list.
+  local aa = agStrList(arr(bundle.alwaysAsk))
   return {
     bundle = bundleName, source = source, disableGlobal = disableGlobal,
     autoAllow = union(arr(bundle.autoAllow), fleetAllow),
@@ -10814,8 +10820,26 @@ function M.resolvePolicy(cfg, session, override)
     autopilot = bundle.autopilot == true,
     lockedPermMode = bundle.lockedPermMode,
     toolLimits = type(bundle.toolLimits) == "table" and bundle.toolLimits or nil,
+    alwaysAsk = #aa > 0 and aa or nil,
   }
 end
+
+-- The always-ask commands built into cc_always_ask_match (cc-lib.sh), in Adam's order: the
+-- rule label the matcher reports, and a command it holds under that label. Settings lists the
+-- labels read-only; tests/gate.test.sh runs every example through the matcher, so the two
+-- lists can't drift. KEEP IN SYNC with _cc_aa_rules in cc-lib.sh.
+M.ALWAYS_ASK_BUILTINS = {
+  { rule = "git push", example = "git push" },
+  { rule = "rm -rf", example = "rm -fr build" },
+  { rule = "git reset --hard", example = "git reset --hard HEAD~1" },
+  { rule = "git clean -f", example = "git clean -fdx" },
+  { rule = "git branch -D", example = "git branch -D old" },
+  { rule = "git worktree remove --force", example = "git worktree remove --force wt" },
+  { rule = "git checkout -- .", example = "git checkout -- ." },
+  { rule = "publish", example = "npm publish" },
+  { rule = "gh release create", example = "gh release create v1.0" },
+  { rule = "gh pr merge", example = "gh pr merge 12" },
+}
 
 -- Starter bundles the UI offers (the operator copies one into policies.bundles).
 -- read-only = gate everything that mutates; mind the escalation semantics (these
@@ -10850,7 +10874,7 @@ end
 function M.validatePolicyBundle(rec)
   if type(rec) ~= "table" then return { ok = false, errors = { "not an object" } } end
   local errs = {}
-  for _, f in ipairs({ "autoAllow", "autoDeny" }) do
+  for _, f in ipairs({ "autoAllow", "autoDeny", "alwaysAsk" }) do
     if rec[f] ~= nil and type(rec[f]) ~= "table" then errs[#errs + 1] = f .. " must be a list" end
   end
   if rec.lockedPermMode ~= nil and tostring(rec.lockedPermMode) ~= "" then
@@ -10869,6 +10893,7 @@ function M.policyBundleNorm(rec)
   local out = {}
   if type(rec.autoAllow) == "table" then local l = agStrList(rec.autoAllow); if #l > 0 then out.autoAllow = l end end
   if type(rec.autoDeny) == "table" then local l = agStrList(rec.autoDeny); if #l > 0 then out.autoDeny = l end end
+  if type(rec.alwaysAsk) == "table" then local l = agStrList(rec.alwaysAsk); if #l > 0 then out.alwaysAsk = l end end
   -- gateTools is a normalized STRING (space-separated, like gate.tools) -- parseToolList
   -- dedupes + joins; drop it if it ends up empty.
   if rec.gateTools ~= nil and tostring(rec.gateTools) ~= "" then
@@ -13669,6 +13694,9 @@ M.FEATURES = {
   { key = "gate", cat = "Control", title = "Headless approvals",
     what = "When a session wants a risky tool it pauses, and you approve or deny right from the panel; unanswered, it safely falls back.",
     why = "You stay in control without editor windows popping up — and it never silently auto-runs." },
+  { key = "alwaysask", cat = "Control", new = true, title = "Always-ask commands",
+    what = "git push, rm -rf, history rewrites (reset --hard, clean -f, branch -D, worktree remove --force, checkout -- .), any publish, gh release create and gh pr merge wait for your click on the card, even with the gate off, and no autopilot, auto-allow, repeat approval or bundle can pass them. With Shepherd closed, Claude Code's own prompt asks instead. Add your own in Settings.",
+    why = "The commands you can't take back never run on autopilot -- even inside cd x && ..., sh -c or sudo." },
   { key = "actions", cat = "Control", title = "Jump, nudge, stop, clear",
     what = "Act on any session from its tile — focus its window, send it a message, stop it, or clear its context.",
     why = "Drive a session without switching to it." },

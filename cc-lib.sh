@@ -401,3 +401,542 @@ cc_ledger_append() {
     | trimLineToBytes(480)' 2>/dev/null)" || return 0
   [ -n "$line" ] && printf '%s\n' "$line" >> "$file" 2>/dev/null || true
 }
+
+# ---- Always-ask commands (build program unit 5, 2026-09-28) ---------------------------------
+# A fixed list of Bash commands is held for Adam's click whatever the gate flag, gate.tools,
+# autopilot, autoAllow, approveRepeats or a policy bundle says (cc-approve.sh's pre-gate
+# layer): git push; rm with both -r and -f; git reset --hard, clean -f, branch -D,
+# worktree remove --force, checkout -- .; any tool's publish; gh release create; gh pr merge.
+# The matcher judges PARSED words, never the raw text: `echo "git push"` and a commit message
+# that mentions rm -rf are left alone, while `cd x && git push`, `git -C dir push`,
+# `sh -c "..."`, the sudo/env/time/nohup/command/exec/xargs/find -exec/trap wrappers and
+# `rm -r -f` are held. A held word behind eval, $VAR, $(...) or a heredoc that never ends is
+# held as "hidden command". KEEP THE RULE LABELS IN SYNC with core.ALWAYS_ASK_BUILTINS
+# (Settings lists them; tests/gate.test.sh runs each example through here).
+# Runs under macOS /bin/bash 3.2 with set -u: every array expansion is guarded.
+CC_AA_WORDS='push|rm|reset|clean|branch|worktree|checkout|publish|release|merge'
+CC_AA_RULE=""
+_CC_AA_US=$'\037'    # between a command's words
+_CC_AA_DYN=$'\035'   # leads a word built from an expansion ($VAR, $(...), `...`)
+_CC_AA_ASSIGN_RE='^[A-Za-z_][A-Za-z0-9_]*\+?='
+_CC_SC_PLAIN=$'^[^\\\\\'"$`[:space:];&|<>()#]+'   # a run of characters with no shell meaning
+_CC_SC_DQPLAIN=$'^[^"\\\\$`]+'                     # ...inside double quotes
+_CC_SC_CMD=(); _CC_SC_IN=(); _CC_SC_BAD=""; _CC_SC_END=0; _CC_AA_W=(); _CC_AA_EXTRAS=()
+_CC_AA_KWRE=""; _CC_AA_ASSIGNS=""
+
+# The pure-bash first look (this hook runs for every tool call): 0 when the always-ask layer
+# must read the request. Only a Bash call qualifies, and only when its JSON carries a held
+# word or a config / session policy file may name extra patterns. $1 = the hook's JSON.
+cc_always_ask_candidate() {
+  local re='"tool_name"[[:space:]]*:[[:space:]]*"Bash"' sid
+  [[ $1 =~ $re ]] || return 1
+  re="(^|[^[:alnum:]_]|\\\\[nrt])($CC_AA_WORDS)([^[:alnum:]_]|\$)"   # \n \t: JSON escapes
+  [[ $1 =~ $re ]] && return 0
+  cc_always_ask_names_extras "$CC_CONFIG_FILE" && return 0
+  re='"session_id"[[:space:]]*:[[:space:]]*"([^"]*)"'
+  if [[ $1 =~ $re ]] && [ -n "${BASH_REMATCH[1]}" ]; then
+    sid="${BASH_REMATCH[1]}"
+    cc_always_ask_names_extras "$CC_POLICY_DIR/${sid//[^A-Za-z0-9._-]/_}" && return 0
+  fi
+  return 1
+}
+
+# 0 when file $1 may carry a non-empty always-ask list (policies.alwaysAsk.patterns, a
+# bundle's alwaysAsk). Settings writes an empty {"patterns": []}; any other shape counts.
+cc_always_ask_names_extras() {
+  local txt="" re
+  [ -f "$1" ] || return 1
+  IFS= read -r -d '' txt < "$1" 2>/dev/null
+  case "$txt" in *'"alwaysAsk"'*) ;; *) return 1 ;; esac
+  re='"alwaysAsk"[[:space:]]*:[[:space:]]*(\{[[:space:]]*("patterns"[[:space:]]*:[[:space:]]*(\[[[:space:]]*\]|\{[[:space:]]*\})[[:space:]]*)?\}|\[[[:space:]]*\])'
+  while [[ $txt =~ $re ]]; do txt="${txt/"${BASH_REMATCH[0]}"/}"; done
+  case "$txt" in *'"alwaysAsk"'*) return 0 ;; esac
+  return 1
+}
+
+# Is this Bash command held? $1 = the command, $2 = extra patterns, one per line: a command
+# name, then words it must contain in that order (`terraform apply`, `kubectl delete`;
+# * and ? work inside a word). 0 + CC_AA_RULE (the rule's label) when held.
+cc_always_ask_match() {
+  CC_AA_RULE=""
+  local cmd="$1" extras="${2:-}" x w lit words="$CC_AA_WORDS" loose="" all=0
+  local -a parts=()
+  _CC_AA_EXTRAS=()
+  if [ -n "$extras" ]; then
+    while IFS= read -r x; do
+      x="${x#"${x%%[![:space:]]*}"}"; x="${x%"${x##*[![:space:]]}"}"
+      [ -n "$x" ] || continue
+      _CC_AA_EXTRAS+=("$x")
+      read -r -a parts <<< "$x"
+      lit=0
+      for w in ${parts[@]+"${parts[@]}"}; do
+        case "$w" in
+          *[\*\?\[]*) w="${w//[^A-Za-z0-9_.-]/}"; [ -n "$w" ] && { loose="$loose|${w//./\\.}"; lit=1; } ;;
+          *) w="${w//[^A-Za-z0-9_.-]/}"; [ -n "$w" ] && { words="$words|${w//./\\.}"; lit=1; } ;;
+        esac
+      done
+      [ "$lit" = 1 ] || all=1
+    done <<< "$extras"
+  fi
+  # Held words: a text that carries none of them can't hold anything (the cheap exit), and
+  # a hidden command is held only when one shows in its own words or an assignment.
+  _CC_AA_KWRE="(^|[^[:alnum:]_])($words)([^[:alnum:]_]|\$)$loose"
+  [ "$all" = 1 ] && _CC_AA_KWRE='.'
+  [[ $cmd =~ $_CC_AA_KWRE ]] || return 1
+  _CC_AA_ASSIGNS=""
+  _cc_aa_text "$cmd" 0
+}
+
+# Split shell text into simple commands. $1 text, $2 mode, $3 start index. Appends each
+# command to _CC_SC_CMD (words joined by US; a word built from an expansion is led by DYN and
+# keeps the expansion's source text) and its heredoc / here-string to _CC_SC_IN. mode "sub"
+# is the inside of a $( and stops at its closing ")", leaving the next index in _CC_SC_END.
+# The inside of a $(...) or `...` runs too, so its commands are appended as it is met. A
+# heredoc that never ends leaves its text in _CC_SC_BAD.
+_cc_sh_scan() {
+  local LC_ALL=C
+  local s="$1" mode="$2" i="$3" n=${#1}
+  local c c2 j rest line word="" inw=0 wdyn=0 wq=0 redir=0 hd=0 hdstrip=0 hs=0 depth=0
+  local cur="" ncur=0 herestr=""
+  local -a hdd=() hds=() hdc=()
+  while [ "$i" -lt "$n" ]; do
+    if [[ ${s:i} =~ $_CC_SC_PLAIN ]]; then
+      word="$word${BASH_REMATCH[0]}"; inw=1; i=$((i + ${#BASH_REMATCH[0]})); continue
+    fi
+    c="${s:i:1}"
+    case "$c" in
+      ' '|$'\t') _cc_sc_word; i=$((i + 1)) ;;
+      $'\n') _cc_sc_cmd; i=$((i + 1)); [ ${#hdd[@]} -eq 0 ] || _cc_sc_heredocs ;;
+      \\) c2="${s:i+1:1}"
+          if [ "$c2" = $'\n' ]; then i=$((i + 2))
+          else word="$word$c2"; inw=1; wq=1; i=$((i + 2)); fi ;;
+      \') rest="${s:i+1}"; j="${rest%%\'*}"
+          word="$word$j"; inw=1; wq=1; i=$((i + 2 + ${#j})) ;;
+      \") _cc_sc_dquote ;;
+      \$) _cc_sc_dollar ;;
+      \`) _cc_sc_backtick ;;
+      \#) if [ "$inw" = 1 ]; then word="$word#"; i=$((i + 1))
+          else rest="${s:i}"; line="${rest%%$'\n'*}"; i=$((i + ${#line})); fi ;;
+      '&') if [ "${s:i+1:1}" = '>' ]; then           # &> and &>> redirect, not a separator
+             _cc_sc_word; redir=1; i=$((i + 2)); [ "${s:i:1}" = '>' ] && i=$((i + 1))
+           else _cc_sc_cmd; i=$((i + 1)); fi ;;
+      ';'|'|') _cc_sc_cmd; i=$((i + 1)) ;;
+      '<'|'>') _cc_sc_redirect ;;
+      '(') _cc_sc_cmd; depth=$((depth + 1)); i=$((i + 1)) ;;
+      ')') _cc_sc_cmd; i=$((i + 1))
+           if [ "$depth" -gt 0 ]; then depth=$((depth - 1))
+           elif [ "$mode" = sub ]; then _CC_SC_END=$i; return 0; fi ;;
+      *) word="$word$c"; inw=1; i=$((i + 1)) ;;
+    esac
+  done
+  _cc_sc_cmd
+  [ ${#hdd[@]} -eq 0 ] || _cc_sc_heredocs
+  _CC_SC_END=$n
+}
+
+# The scanner's helpers work on _cc_sh_scan's locals (bash scoping is dynamic).
+_cc_sc_word() {   # end the word being built
+  [ "$inw" = 1 ] || return 0
+  if [ "$redir" = 1 ]; then redir=0                  # a redirection's target, not an argument
+  elif [ "$hd" = 1 ]; then hdd+=("$word"); hds+=("$hdstrip"); hdc+=(-1); hd=0
+  elif [ "$hs" = 1 ]; then herestr="$herestr$word"; hs=0
+  else
+    [ "$wdyn" = 1 ] && word="$_CC_AA_DYN$word"
+    if [ "$ncur" = 0 ]; then cur="$word"; else cur="$cur$_CC_AA_US$word"; fi
+    ncur=$((ncur + 1))
+  fi
+  word=""; inw=0; wdyn=0; wq=0
+}
+
+_cc_sc_cmd() {    # end the simple command
+  local k idx
+  _cc_sc_word
+  if [ "$ncur" -gt 0 ]; then
+    _CC_SC_CMD+=("$cur"); _CC_SC_IN+=("$herestr")
+    idx=$(( ${#_CC_SC_CMD[@]} - 1 ))
+    for k in ${hdc[@]+"${!hdc[@]}"}; do [ "${hdc[k]}" = -1 ] && hdc[k]=$idx; done
+  fi
+  cur=""; ncur=0; herestr=""; redir=0; hd=0; hs=0
+}
+
+_cc_sc_heredocs() {   # at the start of a line: read the bodies of the heredocs opened above it
+  local k rest line cmp body found tab=$'\t'
+  for k in ${hdd[@]+"${!hdd[@]}"}; do
+    body=""; found=0
+    while [ "$i" -lt "$n" ]; do
+      rest="${s:i}"; line="${rest%%$'\n'*}"
+      i=$((i + ${#line} + 1))
+      cmp="$line"; [ "${hds[k]}" = 1 ] && cmp="${cmp#"${cmp%%[!$tab]*}"}"   # <<- strips tabs
+      if [ "$cmp" = "${hdd[k]}" ]; then found=1; break; fi
+      body="$body$line"$'\n'
+    done
+    [ "$i" -le "$n" ] || i=$n
+    [ "$found" = 1 ] || _CC_SC_BAD="$_CC_SC_BAD$body"
+    [ "${hdc[k]}" -ge 0 ] && _CC_SC_IN[${hdc[k]}]="${_CC_SC_IN[${hdc[k]}]}$body"
+  done
+  hdd=(); hds=(); hdc=()
+}
+
+_cc_sc_redirect() {   # at < or >: the next word is a target (or a heredoc's delimiter)
+  if [ "$inw" = 1 ] && [ "$wq" = 0 ] && [[ $word =~ ^[0-9]+$ ]]; then word=""; inw=0   # 2>&1
+  else _cc_sc_word; fi
+  if [ "${s:i:2}" = '<<' ]; then
+    if [ "${s:i+2:1}" = '<' ]; then hs=1; i=$((i + 3))
+    else hd=1; hdstrip=0; i=$((i + 2)); [ "${s:i:1}" = '-' ] && { hdstrip=1; i=$((i + 1)); }; fi
+  else
+    redir=1; i=$((i + 1))
+    case "${s:i:1}" in '>'|'&'|'|') i=$((i + 1)) ;; esac
+  fi
+}
+
+_cc_sc_dquote() {   # at an opening "
+  local ch nx
+  inw=1; wq=1; i=$((i + 1))
+  while [ "$i" -lt "$n" ]; do
+    if [[ ${s:i} =~ $_CC_SC_DQPLAIN ]]; then
+      word="$word${BASH_REMATCH[0]}"; i=$((i + ${#BASH_REMATCH[0]})); continue
+    fi
+    ch="${s:i:1}"
+    case "$ch" in
+      \") i=$((i + 1)); return 0 ;;
+      \\) nx="${s:i+1:1}"
+          case "$nx" in
+            \$|\`|\"|\\) word="$word$nx"; i=$((i + 2)) ;;
+            $'\n') i=$((i + 2)) ;;
+            *) word="$word\\"; i=$((i + 1)) ;;
+          esac ;;
+      \$) _cc_sc_dollar ;;
+      \`) _cc_sc_backtick ;;
+    esac
+  done
+}
+
+_cc_sc_dollar() {   # at a $, bare or inside "..."
+  local nx="${s:i+1:1}" j d rest inner off pre
+  inw=1
+  case "$nx" in
+    '(')
+      if [ "${s:i+2:1}" = '(' ]; then                  # $(( arithmetic )): only ever a number
+        j=$((i + 3)); d=2
+        while [ "$j" -lt "$n" ] && [ "$d" -gt 0 ]; do
+          case "${s:j:1}" in '(') d=$((d + 1)) ;; ')') d=$((d - 1)) ;; esac
+          j=$((j + 1))
+        done
+        word="${word}0"; i=$j
+      else                                             # $( ... ) runs its own commands
+        _cc_sh_scan "$s" sub $((i + 2))
+        word="$word${s:i:_CC_SC_END-i}"; i=$_CC_SC_END; wdyn=1
+      fi ;;
+    '{')
+      j=$((i + 2)); d=1
+      while [ "$j" -lt "$n" ] && [ "$d" -gt 0 ]; do
+        case "${s:j:1}" in '{') d=$((d + 1)) ;; '}') d=$((d - 1)) ;; esac
+        j=$((j + 1))
+      done
+      inner="${s:i+2:j-i-3}"; off=0
+      while :; do                                      # ${x:-$(cmd)} runs cmd
+        rest="${inner:off}"; pre="${rest%%\$\(*}"
+        [ "$pre" = "$rest" ] && break
+        _cc_sh_scan "$inner" sub $((off + ${#pre} + 2))
+        off=$_CC_SC_END
+      done
+      case "$inner" in *\`*) _CC_SC_BAD="$_CC_SC_BAD$inner" ;; esac
+      word="$word${s:i:j-i}"; i=$j; wdyn=1 ;;
+    \')                                                # $'...': escapes can spell anything
+      j=$((i + 2))
+      while [ "$j" -lt "$n" ]; do
+        case "${s:j:1}" in \\) j=$((j + 2)); continue ;; \') break ;; esac
+        j=$((j + 1))
+      done
+      inner="${s:i+2:j-i-2}"; word="$word$inner"
+      case "$inner" in *\\*) wdyn=1 ;; esac
+      i=$((j + 1)) ;;
+    \") i=$((i + 1)); _cc_sc_dquote ;;                 # $"...": a translated string
+    [A-Za-z_])
+      rest="${s:i+1}"; [[ $rest =~ ^[A-Za-z0-9_]+ ]]
+      word="$word\$${BASH_REMATCH[0]}"; i=$((i + 1 + ${#BASH_REMATCH[0]})); wdyn=1 ;;
+    [0-9@*#?\$!-]) word="$word\$$nx"; i=$((i + 2)); wdyn=1 ;;
+    *) word="$word\$"; i=$((i + 1)) ;;
+  esac
+}
+
+_cc_sc_backtick() {   # at an opening `: the inside runs as commands
+  local j=$((i + 1)) inner="" ch nx
+  while [ "$j" -lt "$n" ]; do
+    ch="${s:j:1}"
+    if [ "$ch" = '\' ]; then
+      nx="${s:j+1:1}"
+      case "$nx" in \$|\`|\\) inner="$inner$nx" ;; *) inner="$inner\\$nx" ;; esac
+      j=$((j + 2)); continue
+    fi
+    [ "$ch" = '`' ] && break
+    inner="$inner$ch"; j=$((j + 1))
+  done
+  _cc_sh_scan "$inner" top 0
+  word="$word${s:i:j+1-i}"; i=$((j + 1)); inw=1; wdyn=1
+}
+
+# Judge shell text: 0 + CC_AA_RULE when a command in it is held. $2 = nesting depth.
+_cc_aa_text() {
+  local depth="$2" k j bad
+  local -a cmds=() ins=() w=()
+  if [ "$depth" -gt 6 ]; then CC_AA_RULE="hidden command"; return 0; fi
+  _CC_SC_CMD=(); _CC_SC_IN=(); _CC_SC_BAD=""
+  _cc_sh_scan "$1" top 0
+  if [ ${#_CC_SC_CMD[@]} -gt 0 ]; then cmds=("${_CC_SC_CMD[@]}"); ins=("${_CC_SC_IN[@]}"); fi
+  bad="$_CC_SC_BAD"
+  # NAME=value words anywhere: an assignment can carry the held word a later $VAR or eval runs
+  for k in ${cmds[@]+"${!cmds[@]}"}; do
+    _cc_aa_words "${cmds[k]}"
+    for j in ${_CC_AA_W[@]+"${!_CC_AA_W[@]}"}; do
+      [[ ${_CC_AA_W[j]#"$_CC_AA_DYN"} =~ $_CC_AA_ASSIGN_RE ]] && _CC_AA_ASSIGNS="$_CC_AA_ASSIGNS ${_CC_AA_W[j]}"
+    done
+  done
+  for k in ${cmds[@]+"${!cmds[@]}"}; do
+    _cc_aa_words "${cmds[k]}"
+    w=("${_CC_AA_W[@]}")
+    _cc_aa_cmd "$depth" "${ins[k]}" "${w[@]}" && return 0
+  done
+  if [ -n "$bad" ] && [[ $bad =~ $_CC_AA_KWRE ]]; then CC_AA_RULE="hidden command"; return 0; fi
+  return 1
+}
+
+_cc_aa_words() {   # split one command back into _CC_AA_W
+  local rest="$1"
+  _CC_AA_W=()
+  while :; do
+    case "$rest" in
+      *"$_CC_AA_US"*) _CC_AA_W+=("${rest%%"$_CC_AA_US"*}"); rest="${rest#*"$_CC_AA_US"}" ;;
+      *) _CC_AA_W+=("$rest"); return 0 ;;
+    esac
+  done
+}
+
+# Judge one simple command. $1 depth, $2 its heredoc/here-string text, then its words.
+# Looks through keywords, NAME=value prefixes and wrappers to the command that really runs.
+_cc_aa_cmd() {
+  local depth="$1" stdin="$2" x k=0 n base txt j hasc hass any joined
+  local -a w=() d=() sw=()
+  shift 2
+  for x in "$@"; do
+    case "$x" in
+      "$_CC_AA_DYN"*) w+=("${x#"$_CC_AA_DYN"}"); d+=(1) ;;
+      *) w+=("$x"); d+=(0) ;;
+    esac
+  done
+  n=${#w[@]}
+  txt="$* $_CC_AA_ASSIGNS"   # where a held word behind $VAR / eval / $(...) would show
+  while :; do
+    while [ "$k" -lt "$n" ]; do
+      case "${w[k]}" in '!'|'{'|'}'|then|do|else|elif|if|while|until|fi|done|esac) k=$((k + 1)); continue ;; esac
+      [[ ${w[k]} =~ $_CC_AA_ASSIGN_RE ]] && { k=$((k + 1)); continue; }
+      break
+    done
+    [ "$k" -lt "$n" ] || return 1
+    if [ "${d[k]}" = 1 ]; then _cc_aa_hidden "$txt"; return $?; fi   # $GIT push
+    base="${w[k]##*/}"
+    _cc_aa_extras && return 0
+    case "$base" in
+      sudo|doas) k=$((k + 1)); _cc_aa_opts '-u -g -C -D -h -p -r -t -T -U' ;;
+      env)
+        k=$((k + 1))
+        while [ "$k" -lt "$n" ]; do
+          case "${w[k]}" in
+            -S|--split-string) _cc_aa_text "${w[k+1]:-}" $((depth + 1)); return $? ;;
+            -u|-C|-P|--unset|--chdir) k=$((k + 2)) ;;
+            --) k=$((k + 1)); break ;;
+            -*) k=$((k + 1)) ;;
+            *) break ;;
+          esac
+        done ;;
+      time) k=$((k + 1)); _cc_aa_opts '-f -o' ;;
+      nohup|builtin) k=$((k + 1)); [ "${w[k]:-}" = -- ] && k=$((k + 1)) ;;
+      nice) k=$((k + 1)); _cc_aa_opts '-n' ;;
+      caffeinate) k=$((k + 1)); _cc_aa_opts '-t -w' ;;
+      timeout) k=$((k + 1)); _cc_aa_opts '-s -k --signal --kill-after'; k=$((k + 1)) ;;
+      command)
+        k=$((k + 1))
+        while [ "$k" -lt "$n" ]; do
+          case "${w[k]}" in
+            --) k=$((k + 1)); break ;;
+            -*v*|-*V*) return 1 ;;                      # command -v: a lookup, nothing runs
+            -*) k=$((k + 1)) ;;
+            *) break ;;
+          esac
+        done ;;
+      exec) k=$((k + 1)); _cc_aa_opts '-a' ;;
+      xargs)
+        k=$((k + 1))
+        _cc_aa_opts '-I -L -n -P -s -E -d -a --max-args --max-procs --max-lines --delimiter --arg-file --replace --eof' ;;
+      sh|bash|zsh|dash|ksh)
+        k=$((k + 1)); hasc=0; hass=0
+        while [ "$k" -lt "$n" ]; do
+          case "${w[k]}" in
+            --) k=$((k + 1)); break ;;
+            --rcfile|--init-file) k=$((k + 2)) ;;
+            --*) k=$((k + 1)) ;;
+            -*c*) hasc=1; k=$((k + 1)) ;;
+            -*o|+*o|-O|+O) k=$((k + 2)) ;;                # -euo pipefail
+            -*s*) hass=1; k=$((k + 1)) ;;
+            -*|+*) k=$((k + 1)) ;;
+            *) break ;;
+          esac
+        done
+        if [ "$hasc" = 1 ]; then
+          [ "$k" -lt "$n" ] || return 1
+          if [ "${d[k]}" = 1 ]; then _cc_aa_hidden "$txt"; return $?; fi
+          _cc_aa_text "${w[k]}" $((depth + 1)); return $?
+        fi
+        [ "$hass" = 1 ] || [ "$k" -ge "$n" ] || return 1   # sh script.sh: a file we can't see
+        [ -n "$stdin" ] || return 1
+        _cc_aa_text "$stdin" $((depth + 1)); return $? ;;
+      eval)
+        k=$((k + 1)); any=0; joined=""; j=$k
+        while [ "$j" -lt "$n" ]; do
+          [ "${d[j]}" = 1 ] && any=1
+          joined="$joined ${w[j]}"; j=$((j + 1))
+        done
+        [ "$any" = 1 ] && _cc_aa_hidden "$txt" && return 0
+        _cc_aa_text "$joined" $((depth + 1)); return $? ;;
+      trap)
+        k=$((k + 1)); [ "${w[k]:-}" = -- ] && k=$((k + 1))
+        [ "$k" -lt "$n" ] || return 1
+        case "${w[k]}" in -*) return 1 ;; esac          # trap -p / -l / - SIG
+        if [ "${d[k]}" = 1 ]; then _cc_aa_hidden "$txt"; return $?; fi
+        _cc_aa_text "${w[k]}" $((depth + 1)); return $? ;;
+      find)
+        j=$((k + 1))
+        while [ "$j" -lt "$n" ]; do
+          case "${w[j]}" in
+            -exec|-execdir|-ok|-okdir)
+              j=$((j + 1)); sw=()
+              while [ "$j" -lt "$n" ]; do
+                case "${w[j]}" in ';'|'+') break ;; esac
+                if [ "${d[j]}" = 1 ]; then sw+=("$_CC_AA_DYN${w[j]}"); else sw+=("${w[j]}"); fi
+                j=$((j + 1))
+              done
+              _cc_aa_cmd "$depth" "" ${sw[@]+"${sw[@]}"} && return 0 ;;
+          esac
+          j=$((j + 1))
+        done
+        return 1 ;;
+      *) _cc_aa_rules; return $? ;;
+    esac
+  done
+}
+
+_cc_aa_hidden() {   # $1 = where a hidden held word would show
+  [[ $1 =~ $_CC_AA_KWRE ]] || return 1
+  CC_AA_RULE="hidden command"
+}
+
+_cc_aa_opts() {   # skip the options at w[k]; $1 = the ones that take a separate value
+  while [ "$k" -lt "$n" ]; do
+    case "${w[k]}" in
+      --) k=$((k + 1)); return 0 ;;
+      -?*) case " $1 " in *" ${w[k]} "*) k=$((k + 2)) ;; *) k=$((k + 1)) ;; esac ;;
+      *) return 0 ;;
+    esac
+  done
+}
+
+_cc_aa_flag() {   # is flag -$1 (in a short cluster) or long $2 among w[$3..] (up to --)?
+  local j="$3"
+  while [ "$j" -lt "$n" ]; do
+    case "${w[j]}" in
+      --) return 1 ;;
+      --*) [ -n "$2" ] && [ "${w[j]}" = "$2" ] && return 0 ;;
+      -*"$1"*) [ -n "$1" ] && return 0 ;;
+    esac
+    j=$((j + 1))
+  done
+  return 1
+}
+
+_cc_aa_extras() {   # an extra pattern: the command name, then words in that order
+  local e j m
+  local -a ew=()
+  for e in ${_CC_AA_EXTRAS[@]+"${_CC_AA_EXTRAS[@]}"}; do
+    read -r -a ew <<< "$e"
+    [ ${#ew[@]} -gt 0 ] || continue
+    # shellcheck disable=SC2053  # the extra's words are globs on purpose
+    [[ $base == ${ew[0]} ]] || [[ ${w[k]} == ${ew[0]} ]] || continue
+    j=$((k + 1)); m=1
+    while [ "$m" -lt ${#ew[@]} ] && [ "$j" -lt "$n" ]; do
+      # shellcheck disable=SC2053
+      [[ ${w[j]} == ${ew[m]} ]] && m=$((m + 1))
+      j=$((j + 1))
+    done
+    if [ "$m" -ge ${#ew[@]} ]; then CC_AA_RULE="$e"; return 0; fi
+  done
+  return 1
+}
+
+_cc_aa_rules() {   # the built-in list, on the command at w[k]
+  local j sub c=0
+  case "$base" in
+    git)
+      j=$((k + 1))
+      while [ "$j" -lt "$n" ]; do                      # git's own options come first
+        case "${w[j]}" in
+          -C|-c|--git-dir|--work-tree|--namespace|--config-env|--super-prefix) j=$((j + 2)) ;;
+          -*) j=$((j + 1)) ;;
+          *) break ;;
+        esac
+      done
+      [ "$j" -lt "$n" ] || return 1
+      if [ "${d[j]}" = 1 ]; then _cc_aa_hidden "$txt"; return $?; fi   # git $SUB
+      sub="${w[j]}"; j=$((j + 1))
+      case "$sub" in
+        push) CC_AA_RULE="git push"; return 0 ;;
+        reset) _cc_aa_flag '' --hard "$j" && { CC_AA_RULE="git reset --hard"; return 0; } ;;
+        clean) _cc_aa_flag f --force "$j" && { CC_AA_RULE="git clean -f"; return 0; } ;;
+        branch)
+          if _cc_aa_flag D '' "$j" || { _cc_aa_flag d --delete "$j" && _cc_aa_flag f --force "$j"; }; then
+            CC_AA_RULE="git branch -D"; return 0
+          fi ;;
+        worktree)
+          while [ "$j" -lt "$n" ]; do case "${w[j]}" in -*) j=$((j + 1)) ;; *) break ;; esac; done
+          [ "${w[j]:-}" = remove ] && _cc_aa_flag f --force $((j + 1)) \
+            && { CC_AA_RULE="git worktree remove --force"; return 0; } ;;
+        checkout)
+          while [ "$j" -lt "$n" ]; do
+            case "${w[j]}" in .|./|:/|'*') CC_AA_RULE="git checkout -- ."; return 0 ;; esac
+            j=$((j + 1))
+          done ;;
+      esac
+      return 1 ;;
+    gh)
+      j=$((k + 1)); sub=""
+      while [ "$j" -lt "$n" ] && [ "$c" -lt 2 ]; do
+        case "${w[j]}" in
+          -R|--repo) j=$((j + 1)) ;;
+          -*) ;;
+          *) sub="$sub ${w[j]}"; c=$((c + 1)) ;;
+        esac
+        j=$((j + 1))
+      done
+      case "$sub" in
+        ' release create') CC_AA_RULE="gh release create"; return 0 ;;
+        ' pr merge') CC_AA_RULE="gh pr merge"; return 0 ;;
+      esac
+      return 1 ;;
+    rm)
+      { _cc_aa_flag r --recursive $((k + 1)) || _cc_aa_flag R '' $((k + 1)); } \
+        && _cc_aa_flag f --force $((k + 1)) && { CC_AA_RULE="rm -rf"; return 0; }
+      return 1 ;;
+    # print or search text, move around: a `publish` among their words is just a word
+    echo|printf|cat|less|more|head|tail|grep|egrep|fgrep|rg|ag|ls|cd|pushd|mkdir|touch|wc|man|which|type|file|stat|test|'['|open|code|vi|vim|nvim|nano|emacs)
+      return 1 ;;
+  esac
+  j=$((k + 1))                                         # any tool's publish subcommand
+  while [ "$j" -lt "$n" ] && [ "$c" -lt 2 ]; do
+    case "${w[j]}" in
+      -*) ;;
+      publish) CC_AA_RULE="publish"; return 0 ;;
+      *) c=$((c + 1)) ;;
+    esac
+    j=$((j + 1))
+  done
+  return 1
+}

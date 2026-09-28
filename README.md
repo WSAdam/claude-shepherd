@@ -115,6 +115,9 @@ The automatic behaviours here are off until you turn them on.
 
 - [**Headless approvals**](docs/approvals-and-policies.md#headless-approvals-the-gate): risky tools
   wait for your Approve or Deny in the panel, with no window switching.
+- [**Always-ask commands**](docs/approvals-and-policies.md#always-ask-commands): `git push`,
+  `rm -rf`, history rewrites and publish always wait for your click, and no autopilot or rule can
+  pass them.
 - [**Policy bundles & autopilot**](docs/approvals-and-policies.md#policies): reusable allow and deny
   rules per session or fleet, and a time-boxed autopilot.
 - [**Shared-window guard**](docs/controls.md#sessions-that-share-a-window): Shepherd won't type into

@@ -8419,8 +8419,10 @@ do
   -- 2026-09-11: 11 -> 12 for answering questions from Shepherd ("answers", flagged new).
   -- 2026-09-25: 12 -> 13 for the commit stats under the fleet block ("commits", flagged new).
   -- 2026-09-28: 13 -> 14 for how each turn ended ("turns", flagged new).
-  eq("FEATURES: the 14 new features are flagged", newCount, 14)
+  -- 2026-09-28: 14 -> 15 for always-ask commands ("alwaysask", flagged new).
+  eq("FEATURES: the 15 new features are flagged", newCount, 15)
   check("FEATURES: lists how each turn ended", keys.turns == true)
+  check("FEATURES: lists always-ask commands", keys.alwaysask == true)
   check("FEATURES: lists answering questions from Shepherd", keys.answers == true)
   check("FEATURES: lists the commit stats", keys.commits == true)
 end
@@ -11634,6 +11636,48 @@ do
   check("usage state: the loaded seen ids stay within their cap", r.seen and #r.seen.order == 4)
   check("usage state: ...keeping the newest", r.seen and not core.usageNew(r.seen, { msgId = "m6" }) and core.usageNew(r.seen, { msgId = "m1" }))
   check("usage state: an empty state still encodes", pcall(core.json.encode, core.usageStateEncode({})))
+end
+
+-- ---- always-ask commands (2026-09-28) ----
+-- Build program unit 5: git push, rm -rf, history rewrites and publish are held for Adam's click
+-- whatever the gate or a policy says (cc-approve.sh + cc_always_ask_match). Lua carries the rule
+-- labels Settings lists, keeps policies.alwaysAsk through a Save, and passes a bundle's alwaysAsk
+-- to the gate in the resolved policy file.
+do
+  local labels = {}
+  for _, b in ipairs(core.ALWAYS_ASK_BUILTINS or {}) do labels[#labels + 1] = b.rule end
+  eq("always-ask: the ten built-in rules, in Adam's order", table.concat(labels, " | "),
+     "git push | rm -rf | git reset --hard | git clean -f | git branch -D | git worktree remove --force"
+     .. " | git checkout -- . | publish | gh release create | gh pr merge")
+  local exOk = true
+  for _, b in ipairs(core.ALWAYS_ASK_BUILTINS or {}) do
+    if type(b.example) ~= "string" or b.example == "" then exOk = false end
+  end
+  check("always-ask: every built-in rule carries an example command", exOk and #labels > 0)
+
+  -- Settings Save keeps a hand-edited policies.alwaysAsk the form didn't send
+  local keeps = false
+  for _, k in ipairs(core.SETTINGS_KEEP_SUBKEYS.policies or {}) do if k == "alwaysAsk" then keeps = true end end
+  check("always-ask: alwaysAsk is in SETTINGS_KEEP_SUBKEYS.policies", keeps)
+  local out = core.overlayConfig(
+    { policies = { alwaysAsk = { patterns = { "terraform apply" } } } },
+    { policies = { approveRepeats = false, patterns = { enabled = false, autoAllow = {}, autoDeny = {} } } })
+  eq("always-ask: a Save without the field keeps the extras", out.policies.alwaysAsk and out.policies.alwaysAsk.patterns[1], "terraform apply")
+  local out2 = core.overlayConfig(
+    { policies = { alwaysAsk = { patterns = { "terraform apply" } } } },
+    { policies = { alwaysAsk = { patterns = {} } } })
+  eq("always-ask: ...while the form's own (emptied) list replaces them", #out2.policies.alwaysAsk.patterns, 0)
+
+  -- a bundle's alwaysAsk reaches the resolved policy file; a bundle can only add to the list
+  local cfg = { policies = { bundles = {
+    k8s = { alwaysAsk = { "kubectl delete", "helm uninstall" } },
+    loose = { autopilot = true } } } }
+  local r = core.resolvePolicy(cfg, { project = "x" }, { bundle = "k8s" })
+  eq("always-ask: resolvePolicy carries the bundle's alwaysAsk", r.alwaysAsk and table.concat(r.alwaysAsk, ","), "kubectl delete,helm uninstall")
+  eq("always-ask: a bundle without one leaves it out of the file", core.resolvePolicy(cfg, {}, { bundle = "loose" }).alwaysAsk, nil)
+  eq("always-ask: the bundle editor keeps alwaysAsk", core.policyBundleNorm({ alwaysAsk = { " kubectl delete ", "" } }).alwaysAsk[1], "kubectl delete")
+  eq("always-ask: an empty alwaysAsk is dropped on normalize", core.policyBundleNorm({ alwaysAsk = {} }).alwaysAsk, nil)
+  eq("always-ask: a non-list alwaysAsk is refused", core.validatePolicyBundle({ alwaysAsk = "git push" }).ok, false)
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))

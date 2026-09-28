@@ -25,7 +25,8 @@ form-managed block is dropped on Save. Its tabs:
 - **Appearance**: the layout, themes, colours, font, sizing, and the detail-panel switches
   ([Make it yours](customizing.md)).
 - **Approvals**: **Headless approvals** and the gated tools, **Answer questions in Shepherd**, the
-  advanced gate settings, and the policies (approve repeats, Autopilot, allow/deny patterns)
+  advanced gate settings, the policies (approve repeats, Autopilot, allow/deny patterns), and the
+  **Always ask** commands with your own additions
   ([Approvals and policies](approvals-and-policies.md)).
 - **Automation**: the task queue, escalation, graceful drain, respawn, Auto-Continue
   ([Automation](automation.md)).
@@ -53,7 +54,7 @@ The panel re-reads the file within about a second (except `hotkeys`, which need 
 
 | Section | What it controls | Reference |
 |---------|------------------|-----------|
-| `gate`, `policies`, `ask` | Gated tools, auto-allow/deny, bundles, Autopilot, held questions | [Approvals and policies](approvals-and-policies.md) |
+| `gate`, `policies`, `ask` | Gated tools, auto-allow/deny, always-ask commands, bundles, Autopilot, held questions | [Approvals and policies](approvals-and-policies.md) |
 | `merge`, `fleet`, `tabBridge` | Ready to merge, merge gates, batches, the tab bridge | [Merging and batches](merging-and-batches.md) |
 | `queue`, `templates`, `automodel` | Task queue, routing, templates, model auto-routing | [Automation](automation.md) |
 | `respawn`, `autoContinue`, `drain`, `prune`, `cleanup`, `tabless` | Recovery and cleanup | [Automation](automation.md), [Controls](controls.md#sessions-with-no-tab) |
@@ -84,7 +85,8 @@ A starting point for the most common switches:
   "policies": {
     "approveRepeats": false,
     "autopilot": { "enabled": false, "minutes": 15 },
-    "patterns":  { "enabled": false, "autoAllow": [], "autoDeny": [] }
+    "patterns":  { "enabled": false, "autoAllow": [], "autoDeny": [] },
+    "alwaysAsk": { "patterns": [] }
   }
 }
 ```

@@ -51,7 +51,9 @@ export CC_POLICY_DIR="$TMP/policy"
 APP="$ROOT/cc-approve.sh"
 FLAG="$TMP/gate.enabled"
 HB="$TMP/.panel-alive"
-GATED='{"session_id":"g1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"rm -rf build"}}'
+# 2026-09-28: was `rm -rf build`, which is now an always-ask command (held even with the gate
+# off, "ask" with no panel) -- these cases pin the plain gate, so they use a plain command.
+GATED='{"session_id":"g1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"make build"}}'
 
 # Poll for the per-key status file the gate writes right before it begins waiting
 # for a decision, so we answer only once the hook is actually blocked — robust on
@@ -174,12 +176,14 @@ assert_eq "R2-04: empty autopilot file -> no integer-expression error" "" \
   "$(printf '%s' "$err" | grep -i 'integer expression' || true)"
 
 # B: approve-repeats (pre-seeded approved-set) -> allow
-mkdir -p "$CC_APPROVED_DIR"; printf 'Bash|git push\n' > "$CC_APPROVED_DIR/r1"
-out="$(runpol x '{"session_id":"r1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"git push"}}')"
+# 2026-09-28: git push / git reset --hard became always-ask commands (never auto-approved);
+# these two pin approveRepeats itself, so they use commands outside that list.
+mkdir -p "$CC_APPROVED_DIR"; printf 'Bash|git fetch\n' > "$CC_APPROVED_DIR/r1"
+out="$(runpol x '{"session_id":"r1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"git fetch"}}')"
 assert_eq "approveRepeats -> allow" "allow" "$(decision "$out")"
 
 # B: an unseen command is NOT auto-allowed (no panel -> no output)
-out="$(runpol x '{"session_id":"r1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"git reset --hard"}}')"
+out="$(runpol x '{"session_id":"r1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"git reset --soft HEAD~1"}}')"
 assert_eq "unseen command -> no decision" "" "$out"
 
 # ---- gate.tools: the gated-tool list is panel-editable via config ----
@@ -275,8 +279,9 @@ got="$(jq -r '.hookSpecificOutput.permissionDecision' "$TMP/out_ov1" 2>/dev/null
 assert_eq "per-session override: added tool is gated -> allow" "allow" "$got"
 
 # B) "-" override gates NOTHING: a normally-gated Bash falls straight through
+# (2026-09-28: `make build`, not `rm -rf build` -- an always-ask command is held regardless)
 printf -- '-\n' > "$CC_GATE_TOOLS_DIR/ov2"
-out="$(printf '%s' '{"session_id":"ov2","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"rm -rf build"}}' \
+out="$(printf '%s' '{"session_id":"ov2","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"make build"}}' \
     | CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 bash "$APP" 2>/dev/null)"
 assert_eq "per-session override: '-' gates nothing (Bash falls through)" "" "$out"
 
@@ -353,7 +358,8 @@ assert_eq "policy file: non-matching rule -> routes to panel" "deny" \
 # D) key isolation: pol1's deny file must NOT affect a different session (no file ->
 #    no auto-decision; with a dead panel it falls straight through to native).
 echo 0 > "$HB"   # stale heartbeat -> immediate native fallback, no wait
-out="$(printf '%s' '{"session_id":"polX","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"rm -rf build"}}' \
+# (2026-09-28: `rm -r build` still matches pol1's Bash(rm*), but isn't an always-ask command)
+out="$(printf '%s' '{"session_id":"polX","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"rm -r build"}}' \
     | CC_GATE_FLAG="$FLAG" bash "$APP" 2>/dev/null)"
 assert_eq "policy file: key isolation (other session not auto-denied)" "" "$out"
 
@@ -454,7 +460,8 @@ assert_eq "fresh pre-existing decision is consumed (no startup rm)" "allow" "$(d
 # accepted only on a STRICTLY newer mtime. Under the old `-ge` check this
 # leftover silently allowed a request the user never saw.
 date +%s > "$HB"
-( printf '%s' '{"session_id":"ss1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"rm -rf /important"}}' \
+# (2026-09-28: `rm -r`, not `rm -rf` -- an always-ask command answers "ask" on a timeout)
+( printf '%s' '{"session_id":"ss1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"rm -r /important"}}' \
     | CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=2 \
     bash "$APP" > "$TMP/out_ss1" 2>/dev/null ) &
 bg=$!; wait_block "$TMP/ss1.json"
@@ -472,7 +479,7 @@ assert_eq "bare leftover at the request-start second is NOT consumed" "" "$(cat 
 date +%s > "$HB"
 printf 'allow 99999.1111111111' > "$TMP/ss2.decision"
 touch -t 203001010000 "$TMP/ss2.decision"   # fresh mtime: would pass any time check
-out="$(printf '%s' '{"session_id":"ss2","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"rm -rf /important"}}' \
+out="$(printf '%s' '{"session_id":"ss2","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"rm -r /important"}}' \
   | CC_GATE_FLAG="$FLAG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=2 bash "$APP" 2>/dev/null)"
 assert_eq "wrong-nonce answer is never consumed (even with a fresh mtime)" "" "$out"
 assert_eq "wrong-nonce answer is restored intact for its owner" \
@@ -914,5 +921,273 @@ deny_with_note dn8 "wrong directory"
 wait $bg
 assert_eq "ledger: the human deny records Adam's reason" "wrong directory" \
   "$(cat "$TMP"/ledger/*.jsonl 2>/dev/null | jq -r 'select(.type=="decision" and .session_id=="dn8").reason')"
+
+# ---- always-ask commands (2026-09-28) ----------------------------------------
+# Build program unit 5. A fixed list of commands (git push, rm -rf, history rewrites, publish)
+# is held for Adam's click whatever the gate flag, autopilot, autoAllow, approveRepeats or a
+# bundle says; with no panel (or no answer) the hook answers "ask", so Claude Code's own
+# prompt shows even in auto mode. The parser judges parsed words, so quoted text never matches.
+
+# -- the parser (cc_always_ask_match in cc-lib.sh) --
+aa() { # $1 command, $2 extras (newline-separated) -> "held:<rule>" | "free"
+  ( set -u; . "$ROOT/cc-lib.sh"   # set -u, like cc-approve.sh: bash 3.2 trips on empty arrays
+    if cc_always_ask_match "$1" "${2:-}"; then printf 'held:%s' "$CC_AA_RULE"; else printf 'free'; fi ) 2>/dev/null
+}
+held() { assert_eq "always-ask holds: $1" "held:$2" "$(aa "$1" "${3:-}")"; }
+free() { assert_eq "always-ask leaves alone: $1" "free" "$(aa "$1" "${2:-}")"; }
+
+held 'git push' 'git push'
+held 'git push origin main --force' 'git push'
+held 'cd x && git push' 'git push'
+held 'git -C ../main push' 'git push'
+held 'git -c user.name=x --git-dir=.git --work-tree . push' 'git push'
+held 'git --no-pager push origin' 'git push'
+held 'make build; git push' 'git push'
+held 'make test || git push' 'git push'
+held "$(printf 'git add .\ngit push')" 'git push'
+held 'git push 2>&1 | tee push.log' 'git push'
+held 'nohup git push &' 'git push'
+held '(cd x && git push)' 'git push'
+held '{ git push; }' 'git push'
+held 'if true; then git push; fi' 'git push'
+held 'for r in a b; do git push "$r"; done' 'git push'
+held 'sh -c "git push"' 'git push'
+held "bash -lc 'cd x && git push'" 'git push'
+held 'zsh -c "git status; git push"' 'git push'
+held 'bash -euo pipefail -c "git push"' 'git push'
+held 'sudo -u me git push' 'git push'
+held 'env -i FOO=1 git push' 'git push'
+held 'GIT_SSH_COMMAND="ssh -v" git push' 'git push'
+held 'time git push' 'git push'
+held 'command git push' 'git push'
+held 'exec git push' 'git push'
+held 'echo main | xargs -n1 git push origin' 'git push'
+held "trap 'git push' EXIT" 'git push'
+held 'rm -rf build' 'rm -rf'
+held 'rm -fr build' 'rm -rf'
+held 'rm -r -f build' 'rm -rf'
+held 'rm -Rf build' 'rm -rf'
+held 'rm --recursive --force build' 'rm -rf'
+held 'rm build -rf' 'rm -rf'
+held '/bin/rm -rfv build' 'rm -rf'
+held '\rm -rf build' 'rm -rf'
+held "find . -name '*.tmp' -exec rm -rf {} \\;" 'rm -rf'
+held 'find . -type d -execdir rm -fr {} +' 'rm -rf'
+held 'git reset --hard' 'git reset --hard'
+held 'git reset HEAD~1 --hard' 'git reset --hard'
+held 'git clean -f' 'git clean -f'
+held 'git clean -fdx' 'git clean -f'
+held 'git clean --force' 'git clean -f'
+held 'git branch -D old' 'git branch -D'
+held 'git branch --delete --force old' 'git branch -D'
+held 'git worktree remove --force wt' 'git worktree remove --force'
+held 'git worktree remove -f wt' 'git worktree remove --force'
+held 'git checkout -- .' 'git checkout -- .'
+held 'git checkout .' 'git checkout -- .'
+held 'npm publish' 'publish'
+held 'deno publish --allow-dirty' 'publish'
+held 'cargo publish -p crate' 'publish'
+held 'yarn npm publish' 'publish'
+held 'npx jsr publish' 'publish'
+held 'pnpm -r publish' 'publish'
+held 'gh release create v1.0' 'gh release create'
+held 'gh pr merge 12 --squash' 'gh pr merge'
+# a command substitution, a backtick and a heredoc fed to a shell are commands too
+held 'echo $(git push)' 'git push'
+held 'echo `git push`' 'git push'
+held "$(printf 'bash <<EOF\ngit push\nEOF')" 'git push'
+held 'eval "git push"' 'git push'
+# escalation: a held word hidden behind eval, $VAR, $(...) or an unparseable heredoc
+held 'CMD="git push"; eval "$CMD"' 'hidden command'
+held 'GIT=git; $GIT push' 'hidden command'
+held 'git $(echo push)' 'hidden command'
+held 'CMD="git push"; bash -c "$CMD"' 'hidden command'
+held "$(printf 'cat <<EOF\ngit push')" 'hidden command'
+# extras (policies.alwaysAsk.patterns / a bundle's alwaysAsk): the command, then words it
+# contains in that order
+held 'terraform apply -auto-approve' 'terraform apply' 'terraform apply'
+held 'kubectl -n prod delete pod x' 'kubectl delete' "$(printf 'terraform apply\nkubectl delete')"
+
+free 'git status'
+free 'git log --oneline -5'
+free 'git commit -m "git push later"'
+free "git commit -m 'rm -rf build'"
+free 'echo "git push"'
+free 'echo git push'
+free "echo 'rm -rf /'"
+free 'ls # git push'
+free 'rm -r dir'
+free 'rm -f file.txt'
+free 'rm "$tmp"'
+free 'git reset HEAD~1'
+free 'git reset --soft HEAD~1'
+free 'git clean -n'
+free 'git branch -d old'
+free 'git worktree remove wt'
+free 'git checkout main'
+free 'git checkout -- src/a.lua'
+free 'git restore src/a.lua'
+free 'gh pr view 12'
+free 'gh release list'
+free 'npm run publish-docs'
+free 'grep -r publish .'
+free 'echo publish'
+free 'command -v git'
+free 'bash script.sh'
+free 'git push-hooks-lint'
+free "$(printf 'cat <<EOF > notes.md\ngit push\nrm -rf /\nEOF')"
+# Claude Code's own commit idiom: a heredoc inside $(...) inside "...", apostrophes and all
+free "$(printf 'git commit -m "$(cat <<'"'"'EOF'"'"'\nDon'"'"'t push: merge branch, then reset --hard later (rm -rf tmp)\nEOF\n)"')"
+free 'terraform plan' 'terraform apply'
+
+# the rules Settings lists (core.ALWAYS_ASK_BUILTINS) are the ones the matcher holds, by label
+lua - "$ROOT/cc-core.lua" > "$TMP/aa-builtins.txt" 2>/dev/null <<'LUA'
+local core = dofile(arg[1])
+for _, b in ipairs(core.ALWAYS_ASK_BUILTINS or {}) do print(b.rule .. "\t" .. b.example) end
+LUA
+assert_eq "always-ask: core.ALWAYS_ASK_BUILTINS was read" "10" "$(grep -c . "$TMP/aa-builtins.txt")"
+while IFS=$'\t' read -r rule ex; do
+  held "$ex" "$rule"
+done < "$TMP/aa-builtins.txt"
+
+# -- the hook (cc-approve.sh) --
+AA_NOFLAG="$TMP/aa-gate-off"          # never created: the gate stays unarmed
+aa_req() { printf '{"session_id":"%s","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"%s"}}' "$1" "$2"; }
+reason() { printf '%s' "$1" | jq -r '.hookSpecificOutput.permissionDecisionReason // empty' 2>/dev/null; }
+
+# held on the card with the gate unarmed, and Adam's click answers it
+date +%s > "$HB"
+( aa_req aa1 'cd x && git push' | CC_GATE_FLAG="$AA_NOFLAG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=5 \
+    bash "$APP" > "$TMP/out_aa1" 2>/dev/null ) &
+bg=$!; wait_block "$TMP/aa1.json"
+wait_nonce aa1 >/dev/null
+assert_eq "always-ask: held on the card with the gate unarmed" "waiting" "$(jq -r '.gate' "$TMP/aa1.json" 2>/dev/null)"
+assert_eq "always-ask: the card names the rule" "git push" "$(jq -r '.pending.alwaysAsk // empty' "$TMP/aa1.json" 2>/dev/null)"
+answer aa1 allow; wait $bg
+assert_eq "always-ask: Adam's Approve on the card lets it run" "allow" "$(decision "$(cat "$TMP/out_aa1")")"
+
+# panel down: "ask", so Claude Code's own prompt shows (even in auto mode)
+rm -f "$HB"
+out="$(aa_req aa2 'git push' | CC_GATE_FLAG="$AA_NOFLAG" bash "$APP" 2>/dev/null)"
+assert_eq "always-ask: panel down gives ask" "ask" "$(decision "$out")"
+assert_eq "always-ask: the ask says which rule held it" \
+  "Claude Shepherd always asks before git push." "$(reason "$out")"
+out="$(aa_req aa3 'git -C ../main push' | CC_GATE_FLAG="$FLAG" bash "$APP" 2>/dev/null)"
+assert_eq "always-ask: git -C form gives ask (gate armed, no panel)" "ask" "$(decision "$out")"
+out="$(aa_req aa4 'sh -c \"git push\"' | CC_GATE_FLAG="$FLAG" bash "$APP" 2>/dev/null)"
+assert_eq "always-ask: wrapped form gives ask" "ask" "$(decision "$out")"
+
+# nothing automatic passes it: autoAllow, autopilot, approveRepeats, bundle autopilot,
+# a None gate override, a gate.tools without Bash
+AAPOL="$TMP/aa-policy.json"
+cat > "$AAPOL" <<'JSON'
+{ "policies": {
+    "patterns": { "enabled": true, "autoAllow": ["Bash", "Bash(git*)"], "autoDeny": [] },
+    "autopilot": { "enabled": true, "minutes": 15 },
+    "approveRepeats": true } }
+JSON
+aapol() { aa_req "$1" "$2" | CC_GATE_FLAG="$FLAG" CC_CONFIG_FILE="$AAPOL" "${@:3}" bash "$APP" 2>/dev/null; }
+assert_eq "always-ask: autoAllow can't pass it" "ask" "$(decision "$(aapol aa5 'git push')")"
+echo 9999999999 > "$CC_AUTOPILOT_DIR/aa6"
+assert_eq "always-ask: autopilot can't pass it" "ask" "$(decision "$(aapol aa6 'git push')")"
+printf 'Bash|git push\n' > "$CC_APPROVED_DIR/aa7"
+assert_eq "always-ask: approveRepeats can't pass it" "ask" "$(decision "$(aapol aa7 'git push')")"
+printf '{"autopilot":true,"autoAllow":["Bash"],"bundle":"loose"}' > "$CC_POLICY_DIR/aa8"
+assert_eq "always-ask: bundle autopilot can't pass it" "ask" "$(decision "$(aapol aa8 'rm -rf build')")"
+printf -- '-\n' > "$CC_GATE_TOOLS_DIR/aa9"
+assert_eq "always-ask: a None gate override can't free it" "ask" "$(decision "$(aapol aa9 'git reset --hard')")"
+assert_eq "always-ask: a gate.tools without Bash can't free it" "ask" \
+  "$(decision "$(aapol aa10 'npm publish' env CC_GATE_TOOLS=Write)")"
+# ...while the same policies still pass an ordinary command
+assert_eq "always-ask: the policies still pass an ordinary command" "allow" "$(decision "$(aapol aa11 'git status')")"
+
+# an Approve is never remembered for approveRepeats
+rm -f "$CC_APPROVED_DIR/aa12"
+date +%s > "$HB"
+( aa_req aa12 'git push' | CC_GATE_FLAG="$FLAG" CC_CONFIG_FILE="$REPCFG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=5 \
+    bash "$APP" > "$TMP/out_aa12" 2>/dev/null ) &
+bg=$!; wait_block "$TMP/aa12.json"; answer aa12 allow; wait $bg
+assert_eq "always-ask: the held request resolves on the card" "allow" "$(decision "$(cat "$TMP/out_aa12")")"
+assert_eq "always-ask: an Approve is never remembered" "" "$(grep -F 'git push' "$CC_APPROVED_DIR/aa12" 2>/dev/null)"
+
+# no answer before the timeout: "ask", never a silent fall-through
+date +%s > "$HB"
+out="$(aa_req aa13 'git push' | CC_GATE_FLAG="$AA_NOFLAG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=1 bash "$APP" 2>/dev/null)"
+assert_eq "always-ask: a timeout gives ask" "ask" "$(decision "$out")"
+assert_eq "always-ask: a timeout clears the card's pending block" "null" "$(jq -r '.pending' "$TMP/aa13.json" 2>/dev/null)"
+
+# autoDeny still wins
+rm -f "$HB"
+DENYCFG="$TMP/aa-deny.json"
+echo '{"policies":{"patterns":{"enabled":true,"autoDeny":["Bash(git push*)"]}}}' > "$DENYCFG"
+out="$(aa_req aa14 'git push' | CC_GATE_FLAG="$FLAG" CC_CONFIG_FILE="$DENYCFG" bash "$APP" 2>/dev/null)"
+assert_eq "always-ask: autoDeny still wins" "deny" "$(decision "$out")"
+
+# ordinary commands are untouched with the gate unarmed, even with the panel up
+date +%s > "$HB"
+for c in 'git status' 'rm -r dir' 'git commit -m \"git push later\"'; do
+  out="$(aa_req aa15 "$c" | CC_GATE_FLAG="$AA_NOFLAG" CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=1 bash "$APP" 2>/dev/null)"
+  assert_eq "always-ask: untouched with the gate unarmed: $c" "" "$out"
+done
+
+# extras from policies.alwaysAsk.patterns, and a bundle's alwaysAsk (the resolved policy file)
+rm -f "$HB"
+EXCFG="$TMP/aa-extras.json"
+cat > "$EXCFG" <<'JSON'
+{ "policies": { "alwaysAsk": { "patterns": ["terraform apply"] },
+    "bundles": { "k8s": { "alwaysAsk": ["kubectl delete"] } } } }
+JSON
+out="$(aa_req aa16 'terraform apply -auto-approve' | CC_GATE_FLAG="$AA_NOFLAG" CC_CONFIG_FILE="$EXCFG" bash "$APP" 2>/dev/null)"
+assert_eq "always-ask: an extra from policies.alwaysAsk.patterns is held" "ask" "$(decision "$out")"
+printf '{"alwaysAsk":["kubectl delete"],"bundle":"k8s"}' > "$CC_POLICY_DIR/aa17"
+out="$(aa_req aa17 'kubectl -n prod delete pod x' | CC_GATE_FLAG="$AA_NOFLAG" CC_CONFIG_FILE="$EXCFG" bash "$APP" 2>/dev/null)"
+assert_eq "always-ask: a bundle's alwaysAsk is held" "ask" "$(decision "$out")"
+out="$(aa_req aa18 'kubectl -n prod delete pod x' | CC_GATE_FLAG="$AA_NOFLAG" CC_CONFIG_FILE="$EXCFG" bash "$APP" 2>/dev/null)"
+assert_eq "always-ask: a bundle's alwaysAsk binds only its own session" "" "$out"
+
+# the ledger: the fallback is by alwaysAsk; Adam's own click stays by human
+ALCFG="$TMP/aa-ledger.json"; echo '{ "ledger": { "enabled": true } }' > "$ALCFG"
+rm -f "$HB"
+aa_req aa19 'git push' | CC_GATE_FLAG="$AA_NOFLAG" CC_CONFIG_FILE="$ALCFG" CC_LEDGER_DIR="$TMP/aaledger" bash "$APP" >/dev/null 2>&1
+# outcome "fallback" (handed to Claude Code, rendered ⚠) -- an "ask" outcome read as ✅/approved
+assert_eq "always-ask ledger: the fallback is recorded by alwaysAsk with its rule" "fallback|alwaysAsk|git push" \
+  "$(cat "$TMP"/aaledger/*.jsonl 2>/dev/null | jq -r 'select(.type=="decision" and .session_id=="aa19") | "\(.outcome)|\(.by)|\(.pattern)"')"
+date +%s > "$HB"
+( aa_req aa20 'git push' | CC_GATE_FLAG="$AA_NOFLAG" CC_CONFIG_FILE="$ALCFG" CC_LEDGER_DIR="$TMP/aaledger" \
+    CC_PANEL_MAX_AGE=99999 CC_GATE_TIMEOUT=5 bash "$APP" >/dev/null 2>&1 ) &
+bg=$!; wait_block "$TMP/aa20.json"; answer aa20 deny; wait $bg
+assert_eq "always-ask ledger: Adam's deny stays by human, with the rule" "deny|human|git push" \
+  "$(cat "$TMP"/aaledger/*.jsonl 2>/dev/null | jq -r 'select(.type=="decision" and .session_id=="aa20") | "\(.outcome)|\(.by)|\(.pattern)"')"
+
+# the cheap check: a non-Bash tool, or a Bash command with no held word, spawns no jq
+# (this hook runs for every tool call)
+SPY="$TMP/jqspy"; mkdir -p "$SPY"; REALJQ="$(command -v jq)"
+printf '#!/bin/sh\necho jq >> "%s/calls"\nexec "%s" "$@"\n' "$SPY" "$REALJQ" > "$SPY/jq"; chmod +x "$SPY/jq"
+rm -f "$HB" "$SPY/calls"
+printf '%s' '{"session_id":"aa21","cwd":"/x/p","tool_name":"Read","tool_input":{"file_path":"/x/p/a"}}' \
+  | PATH="$SPY:$PATH" CC_GATE_FLAG="$AA_NOFLAG" CC_CONFIG_FILE="$TMP/none.json" bash "$APP" >/dev/null 2>&1
+printf '%s' '{"session_id":"aa21","cwd":"/x/p","tool_name":"Write","tool_input":{"file_path":"/x/p/a","content":"git push"}}' \
+  | PATH="$SPY:$PATH" CC_GATE_FLAG="$AA_NOFLAG" CC_CONFIG_FILE="$TMP/none.json" bash "$APP" >/dev/null 2>&1
+assert_eq "always-ask: a non-Bash tool spawns no jq" "0" "$(grep -c . "$SPY/calls" 2>/dev/null || echo 0)"
+rm -f "$SPY/calls"
+aa_req aa21 'ls -la' | PATH="$SPY:$PATH" CC_GATE_FLAG="$AA_NOFLAG" CC_CONFIG_FILE="$TMP/none.json" bash "$APP" >/dev/null 2>&1
+assert_eq "always-ask: a Bash command with no held word spawns no jq" "0" "$(grep -c . "$SPY/calls" 2>/dev/null || echo 0)"
+rm -f "$SPY/calls"
+aa_req aa21 'git push' | PATH="$SPY:$PATH" CC_GATE_FLAG="$AA_NOFLAG" CC_CONFIG_FILE="$TMP/none.json" bash "$APP" >/dev/null 2>&1
+assert_eq "always-ask: ...and the spy does see a held one (control)" "yes" \
+  "$([ "$(grep -c . "$SPY/calls" 2>/dev/null || echo 0)" -gt 0 ] && echo yes || echo no)"
+# the empty list a Settings Save writes costs nothing beyond what any config costs
+spycount() { # $1 config file -> jq calls for a Bash `ls -la` with the gate unarmed
+  rm -f "$SPY/calls"
+  aa_req aa21 'ls -la' | PATH="$SPY:$PATH" CC_GATE_FLAG="$AA_NOFLAG" CC_CONFIG_FILE="$1" bash "$APP" >/dev/null 2>&1
+  grep -c . "$SPY/calls" 2>/dev/null || echo 0
+}
+printf '{ "ledger": { "enabled": false } }' > "$TMP/aa-base.json"
+printf '{ "policies": { "alwaysAsk": { "patterns": [ ] } } }' > "$TMP/aa-emptyx.json"
+printf '{ "policies": { "alwaysAsk": { "patterns": [ "terraform apply" ] } } }' > "$TMP/aa-somex.json"
+base="$(spycount "$TMP/aa-base.json")"
+assert_eq "always-ask: an empty extras list spawns no extra jq" "$base" "$(spycount "$TMP/aa-emptyx.json")"
+assert_eq "always-ask: ...while a real one is read (control)" "yes" \
+  "$([ "$(spycount "$TMP/aa-somex.json")" -gt "$base" ] && echo yes || echo no)"
 
 finish

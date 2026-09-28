@@ -10706,6 +10706,14 @@ local HTML = [[
       <div class="s-lbl">Auto-deny (wins over allow)</div>
       <textarea id="s-pat-deny" class="s-area"></textarea>
       <div class="s-help">Same syntax, e.g. <code>Bash(rm -rf*)</code> or <code>WebFetch</code>. A request matching both lists is denied — deny always wins.</div>
+
+      <div class="s-sec">Always ask (held for your click, gate armed or not)</div>
+      <div class="s-help">These Bash commands wait for your click on the card whatever the gate, autopilot, auto-allow, repeat approvals or a bundle says. With Shepherd closed, or no answer in 120 s, Claude Code's own prompt asks instead, even in Auto mode. An auto-deny rule still wins. Wrapped and compound forms count (<code>cd x &amp;&amp; git push</code>, <code>git -C dir push</code>, <code>sh -c "…"</code>, <code>sudo</code>, <code>xargs</code>, <code>find -exec</code>); quoted text doesn't (<code>echo "git push"</code>).</div>
+      <div class="s-lbl">Built in (always on)</div>
+      <div id="s-aa-builtins" class="s-help"><code>git push</code> · <code>rm -rf</code> · <code>git reset --hard</code> · <code>git clean -f</code> · <code>git branch -D</code> · <code>git worktree remove --force</code> · <code>git checkout -- .</code> · <code>publish</code> (any tool's) · <code>gh release create</code> · <code>gh pr merge</code></div>
+      <div class="s-lbl">Also always ask (one per line)</div>
+      <textarea id="s-aa-extra" class="s-area"></textarea>
+      <div class="s-help">A command name, then words it contains in that order: <code>terraform apply</code>, <code>kubectl delete</code>, <code>docker push</code>. <code>*</code> and <code>?</code> work inside a word. A policy bundle can add its own with <code>alwaysAsk</code>.</div>
     </div>
     <div id="s-foot">
       <button id="s-save" onclick="saveSettings()">Save</button>
@@ -12906,7 +12914,7 @@ local HTML = [[
     var SETTINGS_TABS=[{id:"general",label:"General"},{id:"appearance",label:"Appearance"},{id:"approvals",label:"Approvals"},{id:"automation",label:"Automation"},{id:"observability",label:"Observability"},{id:"spawn",label:"Spawn"}];
     function settingsTabFor(t){ t=(t||"").trim(); function s(p){ return t.indexOf(p)===0; }
       if(s("Appearance")) return "appearance";
-      if(s("Headless approvals")||s("Questions")||s("Approval gate")||s("Policies")) return "approvals";
+      if(s("Headless approvals")||s("Questions")||s("Approval gate")||s("Policies")||s("Always ask")) return "approvals";
       if(s("Queue")||s("Escalation")||s("Graceful drain")||s("Respawn")||s("Auto-Continue")) return "automation";
       if(s("Risk score")||s("Same-folder")||s("Insights")||s("Observability")||s("Hooks")||s("Audit log")) return "observability";
       if(s("Editor window pop")||s("Spawn")||s("Claude Code Remote Control")||s("SSH status bridge")||s("Providers")) return "spawn";
@@ -12994,6 +13002,7 @@ local HTML = [[
       ck("s-pat-en", cv(cfg,"policies.patterns.enabled",false));
       val("s-pat-allow", (cv(cfg,"policies.patterns.autoAllow",[])||[]).join("\n"));
       val("s-pat-deny",  (cv(cfg,"policies.patterns.autoDeny",[])||[]).join("\n"));
+      val("s-aa-extra", (cv(cfg,"policies.alwaysAsk.patterns",[])||[]).join("\n"));
       val("s-gate-tools", cv(cfg,"gate.tools","Bash Write Edit MultiEdit NotebookEdit"));
       ck("s-ledger-en",   cv(cfg,"ledger.enabled",false));
       val("s-ledger-days", cv(cfg,"ledger.retentionDays",30));
@@ -13173,7 +13182,8 @@ local HTML = [[
         policies: {
           approveRepeats: ck("s-p-rep"),
           autopilot: { enabled: ck("s-ap-en"), minutes: num("s-ap-min",15) },
-          patterns: { enabled: ck("s-pat-en"), autoAllow: lines("s-pat-allow"), autoDeny: lines("s-pat-deny") }
+          patterns: { enabled: ck("s-pat-en"), autoAllow: lines("s-pat-allow"), autoDeny: lines("s-pat-deny") },
+          alwaysAsk: { patterns: lines("s-aa-extra") }
         },
         // Dark-config blocks. risk deliberately carries NO weights key:
         // overlayConfig's SETTINGS_KEEP_SUBKEYS preserves a hand-edited

@@ -15,6 +15,13 @@
 #   4. policies.approveRepeats      -> allow  (same request approved before)
 #   else -> panel; on a human "allow", remember it for approveRepeats.
 #
+# Always ask (2026-09-28): an always-ask Bash command (cc_always_ask_match in cc-lib.sh: git
+# push, rm -rf, history rewrites, publish, plus policies.alwaysAsk.patterns and a bundle's
+# alwaysAsk) skips 2-4 and goes to the panel whether or not the gate is armed or the tool is
+# gated; autoDeny (armed gate only) still wins. With no panel, or no answer in time, it
+# answers "ask" so Claude Code's own prompt shows, never nothing. An Approve is never
+# remembered.
+#
 # Only the decision JSON is ever written to stdout; logs go to stderr.
 
 set -u
@@ -54,6 +61,10 @@ emit_deny() { # $1 = reason. Built via jq so a reason with quotes/backslashes ca
   jq -nc --arg r "$1" \
     '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$r}}'
 }
+emit_ask() { # $1 = reason. Claude Code shows its own permission prompt, whatever its mode.
+  jq -nc --arg r "$1" \
+    '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"ask",permissionDecisionReason:$r}}'
+}
 
 # Match a request against a policy pattern. "Tool" matches by tool name;
 # "Tool(glob)" also requires the command/summary to match the shell glob.
@@ -74,20 +85,98 @@ pattern_match() { # $1 tool, $2 summary, $3 pattern  -> 0 if match
 
 INPUT="$(cat 2>/dev/null || true)"
 
-# Disabled -> normal flow.
-[ -f "$GATE_FLAG" ] || exit 0
+# Who is asking. A function (2026-09-28) because the always-ask layer below needs it before
+# the gate-flag exit, and the gate needs it after; KEY is set once it has run.
+KEY=""
+load_identity() {
+  TOOL="$(cc_get "$INPUT" '.tool_name')"
+
+  # Key derivation moves ABOVE the gated-tool check so the per-session override can be
+  # consulted (the override is keyed by session). The extra cost for a non-gated tool
+  # is one cc_key (a tr), negligible.
+  SESSION_ID="$(cc_get "$INPUT" '.session_id')"
+  CWD="$(cc_get "$INPUT" '.cwd')"
+  [ -n "$CWD" ] || CWD="$PWD"
+  NAME="$(basename "$CWD")"
+  KEY="$(cc_key "$SESSION_ID" "$CWD")"
+}
+
+# What is being approved (same reason as load_identity); SIG is set once it has run.
+SIG=""
+load_summary() {
+  # A short summary of what's being approved (Bash command, file path, notebook,
+  # URL...). KEEP IN SYNC with summarize_tool in cc-status.sh.
+  SUMMARY="$(cc_get "$INPUT" '.tool_input.command')"
+  [ -n "$SUMMARY" ] || SUMMARY="$(cc_get "$INPUT" '.tool_input.file_path')"
+  [ -n "$SUMMARY" ] || SUMMARY="$(cc_get "$INPUT" '.tool_input.notebook_path')"
+  [ -n "$SUMMARY" ] || SUMMARY="$(cc_get "$INPUT" '.tool_input.url')"
+  if [ -n "$SUMMARY" ]; then
+    # The memo file is one SIG per line (grep -Fxq), so newlines in the summary
+    # must be encoded -- but LOSSLESSLY. The old `tr '\n' ' '` collapsed them to
+    # spaces, so `docker compose restart api` and `docker compose restart\napi`
+    # (two SEPARATE shell commands) shared one SIG and a single approval of the
+    # one-line form auto-allowed any newline-resliced variant. Escape '\' first,
+    # then newline -> '\n', so the encoding is injective; single-line summaries
+    # without backslashes keep their old byte-identical SIG.
+    SIG_SUM="${SUMMARY//\\/\\\\}"
+    SIG_SUM="${SIG_SUM//$'\n'/\\n}"
+    SIG="$(printf '%s|%s' "$TOOL" "$SIG_SUM")"
+  else
+    # No recognized field: keep the SIG per-request with a digest of the whole
+    # tool_input (canonicalized by jq -S). A bare "Tool|Tool" SIG would let ONE
+    # approveRepeats approval blanket-approve every future call of the tool.
+    SIG="$(printf '%s|%s' "$TOOL" "$(printf '%s' "$INPUT" | jq -cS '.tool_input // {}' | cksum | tr ' ' '-')")"
+    SUMMARY="$TOOL"
+  fi
+
+  # transcript_path -> stable projectKey (mirrors cc-core), for ledger lines.
+  TRANSCRIPT="$(cc_get "$INPUT" '.transcript_path')"
+  PROJECT_KEY=""
+  case "$TRANSCRIPT" in
+    */projects/*/*.jsonl) PROJECT_KEY="${TRANSCRIPT##*/projects/}"; PROJECT_KEY="${PROJECT_KEY%%/*}" ;;
+  esac
+}
+
+# Append a `decision` event to the audit ledger. The gate branch IS the provenance.
+# $1=outcome (allow|deny|fallback)  $2=by  $3=pattern (optional)
+# $4=reason (optional): the note Adam typed beside Deny in the panel.
+ledger_decision() {
+  cc_ledger_enabled || return 0
+  cc_ledger_append "$(jq -nc \
+    --arg sid "$SESSION_ID" --arg key "$KEY" --arg name "$NAME" \
+    --arg pk "$PROJECT_KEY" --arg cwd "$CWD" --arg tool "$TOOL" --arg sum "$SUMMARY" \
+    --arg out "$1" --arg by "$2" --arg pat "${3:-}" --arg why "${4:-}" \
+    '{type:"decision", session_id:$sid, key:$key, name:$name, projectKey:$pk, cwd:$cwd,
+      tool:$tool, summary:$sum, outcome:$out, by:$by}
+     + (if $pat == "" then {} else {pattern:$pat} end)
+     + (if $why == "" then {} else {reason:$why} end)')"
+}
+
+# ---- Always ask (build program unit 5, 2026-09-28) ------------------------
+# Before the gate-flag exit: an always-ask command is held whether or not the gate is armed.
+# This hook runs for every tool call, so cc_always_ask_candidate looks first in pure bash:
+# only a Bash call whose JSON carries a held word (or with extras configured) reads further.
+# Extras: the fleet's policies.alwaysAsk.patterns plus the session's bundle alwaysAsk (the
+# resolved policy file). A bundle can add to the list, never take from it.
+ALWAYS_ASK=""
+if cc_always_ask_candidate "$INPUT" && cc_have_jq; then
+  load_identity
+  if [ "$TOOL" = "Bash" ]; then
+    load_summary
+    AA_EXTRAS="$(cc_config_array '.policies.alwaysAsk.patterns')"
+    [ -f "$POLICY_DIR/$KEY" ] \
+      && AA_EXTRAS="$AA_EXTRAS"$'\n'"$(jq -r '.alwaysAsk[]? // empty' "$POLICY_DIR/$KEY" 2>/dev/null)"
+    if cc_always_ask_match "$SUMMARY" "$AA_EXTRAS"; then
+      ALWAYS_ASK="$CC_AA_RULE"
+      echo "[cc-approve] ✋ always-ask ($ALWAYS_ASK): $TOOL ($KEY)" >&2
+    fi
+  fi
+fi
+
+# Disabled -> normal flow (an always-ask command goes on: it is held whatever the flag says).
+[ -n "$ALWAYS_ASK" ] || [ -f "$GATE_FLAG" ] || exit 0
 cc_have_jq || exit 0
-
-TOOL="$(cc_get "$INPUT" '.tool_name')"
-
-# Key derivation moves ABOVE the gated-tool check so the per-session override can be
-# consulted (the override is keyed by session). The extra cost for a non-gated tool
-# is one cc_key (a tr), negligible.
-SESSION_ID="$(cc_get "$INPUT" '.session_id')"
-CWD="$(cc_get "$INPUT" '.cwd')"
-[ -n "$CWD" ] || CWD="$PWD"
-NAME="$(basename "$CWD")"
-KEY="$(cc_key "$SESSION_ID" "$CWD")"
+[ -n "$KEY" ] || load_identity
 
 # Per-session gated-tools override (Feature D, least-privilege). A dedicated file
 # mirrors cc-autopilot/<key>: absent -> use the fleet GATE_TOOLS computed above;
@@ -113,58 +202,15 @@ POLICY_FILE="$POLICY_DIR/$KEY"
 POLICY_BUNDLE=""
 [ -f "$POLICY_FILE" ] && POLICY_BUNDLE="$(jq -r '.bundle // empty' "$POLICY_FILE" 2>/dev/null || true)"
 
-# Not a gated tool (for this session) -> normal flow (reads etc. stay fast).
-case " $GATE_TOOLS " in
-  *" $TOOL "*) ;;
-  *) exit 0 ;;
-esac
-
-# A short summary of what's being approved (Bash command, file path, notebook,
-# URL...). KEEP IN SYNC with summarize_tool in cc-status.sh.
-SUMMARY="$(cc_get "$INPUT" '.tool_input.command')"
-[ -n "$SUMMARY" ] || SUMMARY="$(cc_get "$INPUT" '.tool_input.file_path')"
-[ -n "$SUMMARY" ] || SUMMARY="$(cc_get "$INPUT" '.tool_input.notebook_path')"
-[ -n "$SUMMARY" ] || SUMMARY="$(cc_get "$INPUT" '.tool_input.url')"
-if [ -n "$SUMMARY" ]; then
-  # The memo file is one SIG per line (grep -Fxq), so newlines in the summary
-  # must be encoded -- but LOSSLESSLY. The old `tr '\n' ' '` collapsed them to
-  # spaces, so `docker compose restart api` and `docker compose restart\napi`
-  # (two SEPARATE shell commands) shared one SIG and a single approval of the
-  # one-line form auto-allowed any newline-resliced variant. Escape '\' first,
-  # then newline -> '\n', so the encoding is injective; single-line summaries
-  # without backslashes keep their old byte-identical SIG.
-  SIG_SUM="${SUMMARY//\\/\\\\}"
-  SIG_SUM="${SIG_SUM//$'\n'/\\n}"
-  SIG="$(printf '%s|%s' "$TOOL" "$SIG_SUM")"
-else
-  # No recognized field: keep the SIG per-request with a digest of the whole
-  # tool_input (canonicalized by jq -S). A bare "Tool|Tool" SIG would let ONE
-  # approveRepeats approval blanket-approve every future call of the tool.
-  SIG="$(printf '%s|%s' "$TOOL" "$(printf '%s' "$INPUT" | jq -cS '.tool_input // {}' | cksum | tr ' ' '-')")"
-  SUMMARY="$TOOL"
+# Not a gated tool (for this session) -> normal flow (reads etc. stay fast). An always-ask
+# command is held whatever gate.tools or the session's override says.
+if [ -z "$ALWAYS_ASK" ]; then
+  case " $GATE_TOOLS " in
+    *" $TOOL "*) ;;
+    *) exit 0 ;;
+  esac
 fi
-
-# transcript_path -> stable projectKey (mirrors cc-core), for ledger lines.
-TRANSCRIPT="$(cc_get "$INPUT" '.transcript_path')"
-PROJECT_KEY=""
-case "$TRANSCRIPT" in
-  */projects/*/*.jsonl) PROJECT_KEY="${TRANSCRIPT##*/projects/}"; PROJECT_KEY="${PROJECT_KEY%%/*}" ;;
-esac
-
-# Append a `decision` event to the audit ledger. The gate branch IS the provenance.
-# $1=outcome (allow|deny|fallback)  $2=by  $3=pattern (optional)
-# $4=reason (optional): the note Adam typed beside Deny in the panel.
-ledger_decision() {
-  cc_ledger_enabled || return 0
-  cc_ledger_append "$(jq -nc \
-    --arg sid "$SESSION_ID" --arg key "$KEY" --arg name "$NAME" \
-    --arg pk "$PROJECT_KEY" --arg cwd "$CWD" --arg tool "$TOOL" --arg sum "$SUMMARY" \
-    --arg out "$1" --arg by "$2" --arg pat "${3:-}" --arg why "${4:-}" \
-    '{type:"decision", session_id:$sid, key:$key, name:$name, projectKey:$pk, cwd:$cwd,
-      tool:$tool, summary:$sum, outcome:$out, by:$by}
-     + (if $pat == "" then {} else {pattern:$pat} end)
-     + (if $why == "" then {} else {reason:$why} end)')"
-}
+[ -n "$SIG" ] || load_summary
 
 # ---- Policy evaluation (Phase 4c) -----------------------------------------
 PAT_ENABLED="$(cc_config '.policies.patterns.enabled' 'false')"
@@ -204,14 +250,16 @@ match_patterns() {
   done <<< "$pats"
 }
 
-# 1. autoDeny (safety first)
-match_patterns autoDeny deny autoDeny
+# 1. autoDeny (safety first). It beats an always-ask hold too, but like every policy it
+# acts only while the gate is armed.
+[ -f "$GATE_FLAG" ] && match_patterns autoDeny deny autoDeny
 
+# 2-4 only ever allow, so an always-ask command skips them all.
 # 2a. bundle autopilot: an attached/per-session bundle set autopilot:true. This is
 # POLICY_FILE-authoritative (the resolved-policy file the panel writes), mirroring
 # how autoAllow/autoDeny already honor POLICY_FILE. Placed AFTER autoDeny so deny
 # still wins ("auto-approve everything not denied").
-if [ -f "$POLICY_FILE" ] && [ "$(jq -r '.autopilot // empty' "$POLICY_FILE" 2>/dev/null)" = "true" ]; then
+if [ -z "$ALWAYS_ASK" ] && [ -f "$POLICY_FILE" ] && [ "$(jq -r '.autopilot // empty' "$POLICY_FILE" 2>/dev/null)" = "true" ]; then
   echo "[cc-approve] 🛫 bundle autopilot auto-allow: $TOOL ($KEY)" >&2
   ledger_decision allow "bundle:${POLICY_BUNDLE:-?}"
   emit_allow
@@ -219,7 +267,7 @@ if [ -f "$POLICY_FILE" ] && [ "$(jq -r '.autopilot // empty' "$POLICY_FILE" 2>/d
 fi
 
 # 2b. autopilot: this session is trusted for a time-boxed window
-if [ "$(cc_config '.policies.autopilot.enabled' 'false')" = "true" ] && [ -f "$AUTOPILOT_DIR/$KEY" ]; then
+if [ -z "$ALWAYS_ASK" ] && [ "$(cc_config '.policies.autopilot.enabled' 'false')" = "true" ] && [ -f "$AUTOPILOT_DIR/$KEY" ]; then
   EXP="$(cat "$AUTOPILOT_DIR/$KEY" 2>/dev/null || echo 0)"
   case "$EXP" in ''|*[!0-9]*) EXP=0 ;; esac  # empty file: cat succeeds, so `|| echo 0` never runs
   if [ "$(cc_now)" -lt "$EXP" ]; then
@@ -235,10 +283,10 @@ fi
 # `Bash(ls*)` also auto-allows `ls; rm -rf /` or `ls && curl … | sh`. Keep
 # autoAllow patterns tight (prefer exact tools like `Read`, or anchored commands)
 # — autoDeny runs first and always wins, so deny dangerous shapes there.
-match_patterns autoAllow allow autoAllow
+[ -n "$ALWAYS_ASK" ] || match_patterns autoAllow allow autoAllow
 
 # 4. approveRepeats: identical request already approved this session
-if [ "$(cc_config '.policies.approveRepeats' 'false')" = "true" ]; then
+if [ -z "$ALWAYS_ASK" ] && [ "$(cc_config '.policies.approveRepeats' 'false')" = "true" ]; then
   if [ -f "$APPROVED_DIR/$KEY" ] && grep -Fxq "$SIG" "$APPROVED_DIR/$KEY" 2>/dev/null; then
     echo "[cc-approve] 🔁 auto-allow (approved before): $TOOL ($KEY)" >&2
     ledger_decision allow approveRepeats
@@ -248,13 +296,25 @@ if [ "$(cc_config '.policies.approveRepeats' 'false')" = "true" ]; then
 fi
 
 # ---- No policy decided: route to the panel --------------------------------
+# Step aside to Claude Code's own flow. An always-ask command can't just fall through
+# (Accept edits, Auto or Bypass mode, or an allow rule in settings, would run it), so it
+# answers "ask": Claude Code shows its own prompt whatever its mode.
+step_aside() { # $1 = why
+  if [ -n "$ALWAYS_ASK" ]; then
+    echo "[cc-approve] ✋ always-ask ($ALWAYS_ASK): $1 -- Claude Code's own prompt decides ($KEY)" >&2
+    ledger_decision fallback alwaysAsk "$ALWAYS_ASK"   # handed to Claude Code, like a timeout
+    emit_ask "Claude Shepherd always asks before $ALWAYS_ASK."
+  fi
+  exit 0
+}
+
 # Panel must be alive (fresh heartbeat) or we'd block on nothing -> normal flow.
 HB_FILE="$(cc_heartbeat_file)"
-[ -f "$HB_FILE" ] || exit 0
+[ -f "$HB_FILE" ] || step_aside "Shepherd isn't running"
 HB="$(cat "$HB_FILE" 2>/dev/null || echo 0)"
 case "$HB" in *[!0-9]*) HB=0 ;; esac
 AGE=$(( $(cc_now) - HB ))
-[ "$AGE" -le "$HEARTBEAT_MAX_AGE" ] || exit 0
+[ "$AGE" -le "$HEARTBEAT_MAX_AGE" ] || step_aside "Shepherd isn't running"
 
 DECISION_FILE="$(cc_decision_file "$KEY")"
 # Bind the answer to THIS request instead of clearing the file up front: a
@@ -287,10 +347,11 @@ NONCE="$$.$NOW"
 # cc_del_field-then-cc_merge leaves a window where a sibling's PermissionRequest
 # re-publishes an `ask` pending between the two writes and the merge leaks it
 # all over again.
+# pending.alwaysAsk (2026-09-28) names the always-ask rule that held the request, if one did.
 ARM_PATCH="$(jq -nc \
   --arg sid "$SESSION_ID" --arg name "$NAME" --arg cwd "$CWD" \
-  --argjson now "$NOW" --arg tool "$TOOL" --arg sum "$SUMMARY" --arg nonce "$NONCE" \
-  '{session_id:$sid, name:$name, cwd:$cwd, status:"approval", updated:$now, since:$now, gate:"waiting", gate_nonce:$nonce, pending:{tool:$tool, summary:$sum, message:$sum, nonce:$nonce}}')"
+  --argjson now "$NOW" --arg tool "$TOOL" --arg sum "$SUMMARY" --arg nonce "$NONCE" --arg aa "$ALWAYS_ASK" \
+  '{session_id:$sid, name:$name, cwd:$cwd, status:"approval", updated:$now, since:$now, gate:"waiting", gate_nonce:$nonce, pending:({tool:$tool, summary:$sum, message:$sum, nonce:$nonce} + (if $aa == "" then {} else {alwaysAsk:$aa} end))}')"
 ARM_FILE="$(cc_file "$KEY")"
 arm_gate() {
   local tmp cur
@@ -436,27 +497,30 @@ clear_own_pending() {
   cc_merge "$KEY" "$(jq -nc --argjson now "$(cc_now)" '{status:"working", updated:$now, since:$now}')"
 }
 
+# Adam's own answer stays by "human" (an always-ask hold carries its rule as the pattern):
+# the ledger reads any allow NOT by human as automatic (core.newestAutoApprove).
 if [ "$DECISION" = "deny" ]; then
   clear_own_pending
   if [ -n "$DENY_NOTE" ]; then
     echo "[cc-approve] ❌ denied $TOOL ($KEY) with a note" >&2
-    ledger_decision deny human "" "$DENY_NOTE"
+    ledger_decision deny human "$ALWAYS_ASK" "$DENY_NOTE"
     emit_deny "Denied from the Claude Shepherd panel: $DENY_NOTE"
     exit 0
   fi
   echo "[cc-approve] ❌ denied $TOOL ($KEY)" >&2
-  ledger_decision deny human
+  ledger_decision deny human "$ALWAYS_ASK"
   emit_deny "Denied from the Claude Shepherd panel."
   exit 0
 elif [ "$DECISION" = "allow" ]; then
   clear_own_pending
-  # Remember this approval so approveRepeats can auto-allow it next time.
-  if [ "$(cc_config '.policies.approveRepeats' 'false')" = "true" ]; then
+  # Remember this approval so approveRepeats can auto-allow it next time -- never an
+  # always-ask one: that is asked every time.
+  if [ -z "$ALWAYS_ASK" ] && [ "$(cc_config '.policies.approveRepeats' 'false')" = "true" ]; then
     mkdir -p "$APPROVED_DIR"
     grep -Fxq "$SIG" "$APPROVED_DIR/$KEY" 2>/dev/null || printf '%s\n' "$SIG" >> "$APPROVED_DIR/$KEY"
   fi
   echo "[cc-approve] ✅ allowed $TOOL ($KEY)" >&2
-  ledger_decision allow human
+  ledger_decision allow human "$ALWAYS_ASK"
   emit_allow
   exit 0
 fi
@@ -468,6 +532,7 @@ fi
 # the "never rm the decision file on timeout" invariant above. Ownership-checked:
 # a sibling's re-armed pending must survive our timeout (see clear_own_pending).
 clear_own_pending
+[ -z "$ALWAYS_ASK" ] || step_aside "no answer in ${GATE_TIMEOUT}s"
 echo "[cc-approve] ⚠️  timeout after ${GATE_TIMEOUT}s, falling back to native prompt ($KEY)" >&2
 ledger_decision fallback timeout-fallback
 exit 0

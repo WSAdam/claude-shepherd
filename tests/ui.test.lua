@@ -3715,5 +3715,35 @@ do
         src:find("Claude Code's own permission mode decides", 1, true) ~= nil)
 end
 
+-- ---- always-ask commands in Settings (2026-09-28) ----
+-- Build program unit 5: Settings > Approvals lists the built-in always-ask rules read-only and
+-- takes extra ones in a textarea saved as policies.alwaysAsk.patterns.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  local sec = src:match('<div class="s%-sec">Always ask(.-)<div class="s%-sec">')
+             or src:match('<div class="s%-sec">Always ask(.-)<div id="s%-foot">') or ""
+  check("always-ask settings: an Always ask section exists  (len=" .. #sec .. ")", #sec > 0)
+  local builtins = sec:match('id="s%-aa%-builtins"[^>]*>(.-)</div>') or ""
+  local missing = {}
+  for _, b in ipairs(core.ALWAYS_ASK_BUILTINS) do
+    if not builtins:find("<code>" .. b.rule .. "</code>", 1, true) then missing[#missing + 1] = b.rule end
+  end
+  check("always-ask settings: every built-in rule is listed  (missing: " .. table.concat(missing, ", ") .. ")",
+        #builtins > 0 and #missing == 0)
+  check("always-ask settings: the built-ins are read-only (no input among them)",
+        #builtins > 0 and not builtins:find("<input", 1, true) and not builtins:find("<textarea", 1, true))
+  check("always-ask settings: extras go in a textarea",
+        sec:find('<textarea id="s-aa-extra" class="s-area"></textarea>', 1, true) ~= nil)
+  check("always-ask settings: the form shows the saved extras",
+        src:find('val("s-aa-extra", (cv(cfg,"policies.alwaysAsk.patterns",[])||[]).join("\\n"));', 1, true) ~= nil)
+  check("always-ask settings: ...and Save writes them to policies.alwaysAsk.patterns",
+        src:find('alwaysAsk: { patterns: lines("s-aa-extra") }', 1, true) ~= nil)
+  check("always-ask settings: the section sits in the Approvals tab",
+        src:find('s("Always ask")', 1, true) ~= nil
+        and src:find('if(s("Headless approvals")||s("Questions")||s("Approval gate")||s("Policies")||s("Always ask")) return "approvals";', 1, true) ~= nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

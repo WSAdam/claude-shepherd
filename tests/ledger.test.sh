@@ -67,8 +67,9 @@ mkdir -p "$CC_AUTOPILOT_DIR"; echo 9999999999 > "$CC_AUTOPILOT_DIR/ap1"
 runpol '{"session_id":"ap1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"make deploy"}}'
 assert_eq "decision: autopilot -> by autopilot + allow" "1" "$(lcount '.by=="autopilot" and .outcome=="allow"')"
 
-mkdir -p "$CC_APPROVED_DIR"; printf 'Bash|git push\n' > "$CC_APPROVED_DIR/r1"
-runpol '{"session_id":"r1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"git push"}}'
+# 2026-09-28: `git fetch`, not `git push` -- git push is an always-ask command, never auto-approved.
+mkdir -p "$CC_APPROVED_DIR"; printf 'Bash|git fetch\n' > "$CC_APPROVED_DIR/r1"
+runpol '{"session_id":"r1","cwd":"/x/p","tool_name":"Bash","tool_input":{"command":"git fetch"}}'
 assert_eq "decision: approveRepeats -> by approveRepeats" "1" "$(lcount '.by=="approveRepeats" and .outcome=="allow"')"
 
 # ---- cc-status.sh lifecycle events -----------------------------------------
