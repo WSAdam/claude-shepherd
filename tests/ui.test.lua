@@ -3622,5 +3622,24 @@ do
         cv ~= nil and cvEnd ~= nil and src:sub(cv, cvEnd):find("core.localTzOffset(nowt)", 1, true) ~= nil)
 end
 
+-- ---- Sessions set to [1m] read a 1M context window (2026-09-28) ----
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("1m: the per-tick context bar passes the session's [1m] opt-in",
+        src:find("core.contextFractionFor(cfg, u.model or it.model, it.context_tokens, { oneM = FX.sessionOneM(it) })", 1, true) ~= nil)
+  local usagePass = src:find("cfrac = core.contextFractionFor(cfg, st.lastModel or it.model, ctoks, { oneM = oneM })", 1, true)
+  check("1m: the 60s usage pass passes it too", usagePass ~= nil)
+  local readOneM = src:find("local oneM = FX.sessionOneM(it)", 1, true)
+  local overwrite = src:find("if st.lastModel and st.lastModel ~= \"\" then it.model = st.lastModel", 1, true)
+  check("1m: ...reading it before the live model overwrites it.model",
+        readOneM ~= nil and overwrite ~= nil and readOneM < overwrite)
+  check("1m: the opt-in comes from the status file's own model and Claude Code's settings files",
+        src:find("function FX.sessionOneM(it)", 1, true) ~= nil
+        and src:find("core.configuredModelOneM(it.statusModel", 1, true) ~= nil
+        and src:find("/.claude/settings.local.json", 1, true) ~= nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

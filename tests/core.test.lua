@@ -11112,5 +11112,34 @@ do
   eq("commits: a junk lookback falls back", core.commitsLookbackDays({ commits = { lookbackDays = "x" } }), 14)
 end
 
+-- ---- Sessions set to [1m] read a 1M context window (2026-09-28) ----
+-- 2026-09-28: transcripts record the bare model id ("claude-opus-5-5"); the 1M window is Claude
+-- Code's "[1m]" opt-in on the model SETTING (Adam's settings.json: "opus[1m]"), so an Opus 5.5 1M
+-- session at 190k tokens read 100% of a 200k default window.
+do
+  local frac = core.contextFractionFor({}, "claude-opus-5-5", 190000, { oneM = true })
+  check("1m: Opus 5.5 set to [1m] at 190k tokens reads ~21%, not 100%  (got " .. tostring(frac) .. ")",
+        frac > 0.20 and frac < 0.22)
+  eq("1m: its window is 1M", core.contextLimitFor({}, "claude-opus-5-5", { oneM = true }), 1000000)
+  eq("1m: without the opt-in it stays 200k", core.contextLimitFor({}, "claude-opus-5-5"), 200000)
+  eq("1m: sonnet with the opt-in gets 1M", core.contextLimitFor({}, "claude-sonnet-5", { oneM = true }), 1000000)
+  eq("1m: haiku never gets 1M", core.contextLimitFor({}, "claude-haiku-4-5", { oneM = true }), 200000)
+  eq("1m: an unknown (empty) live model with the opt-in gets 1M", core.contextLimitFor({}, "", { oneM = true }), 1000000)
+  eq("1m: a provider contextLimit still wins",
+     core.contextLimitFor({ providers = { { model = "claude-opus-5-5", contextLimit = 500000 } } }, "claude-opus-5-5", { oneM = true }), 500000)
+  -- which configured model counts: the session's own (spawn env / Shepherd's model menu), then the
+  -- project's settings.local.json, the project's settings.json, the user's settings.json
+  eq("1m: the user's settings opus[1m]", core.configuredModelOneM(nil, nil, nil, "opus[1m]"), true)
+  eq("1m: a project setting without [1m] beats the user's", core.configuredModelOneM(nil, nil, "sonnet", "opus[1m]"), false)
+  eq("1m: project local beats project", core.configuredModelOneM(nil, "opus[1m]", "sonnet", nil), true)
+  eq("1m: the session's own model wins", core.configuredModelOneM("claude-opus-5-5[1m]", "sonnet", nil, nil), true)
+  eq("1m: case and trailing space are tolerated", core.configuredModelOneM(nil, nil, nil, "Opus[1M] "), true)
+  eq("1m: nothing configured", core.configuredModelOneM(nil, nil, nil, nil), false)
+  eq("1m: empty strings are skipped", core.configuredModelOneM("", "", "", "opus[1m]"), true)
+  -- the parse keeps the status file's own model apart from the live one the usage pass writes over it.model
+  local l = core.parseStatusList({ { key = "k", content = '{"name":"n","status":"working","model":"opus[1m]"}' } }, 0)
+  eq("1m: the status file's model is kept as statusModel", l[1] and l[1].statusModel, "opus[1m]")
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

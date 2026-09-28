@@ -615,6 +615,41 @@ local function addBuckets(dst, e)
   dst.total = dst.input + dst.output + dst.cacheRead + dst.cacheCreate
   dst.real = dst.input + dst.output + dst.cacheCreate  -- excl. cache reads (meaningful headline)
 end
+-- 2026-09-28: the `model` in one of Claude Code's settings files, cached by mtime (the 1s tick
+-- asks for every live session). nil when the file is missing, unreadable or sets no model.
+FX._settingsModel = {}
+function FX.settingsModel(path)
+  local mt = hs.fs.attributes(path, "modification")
+  if not mt then FX._settingsModel[path] = nil; return nil end
+  local c = FX._settingsModel[path]
+  if c and c.mt == mt then return c.model end
+  local model = nil
+  local raw = FX.readFile(path)
+  if raw then
+    local ok, t = pcall(function() return core.json.decode(raw) end)
+    if ok and type(t) == "table" and type(t.model) == "string" then model = t.model end
+  end
+  FX._settingsModel[path] = { mt = mt, model = model }
+  return model
+end
+-- Does this session run with Claude Code's 1M-context opt-in ("[1m]")? Transcripts never record
+-- it, so it comes from the configured model (core.configuredModelOneM's precedence), re-resolved
+-- at most every 30s per session. Read it.statusModel, never it.model: the usage pass overwrites
+-- it.model with the live transcript model, which has no suffix.
+FX._oneM = {}
+function FX.sessionOneM(it)
+  if type(it) ~= "table" or not it.key then return false end
+  local now = FX.now()
+  local c = FX._oneM[it.key]
+  if c and now - c.at < 30 then return c.v end
+  local root = it.cwd and (FX.gitRoot(it.cwd) or it.cwd) or nil
+  local v = core.configuredModelOneM(it.statusModel,
+    root and FX.settingsModel(root .. "/.claude/settings.local.json"),
+    root and FX.settingsModel(root .. "/.claude/settings.json"),
+    FX.settingsModel(CLAUDE_DIR .. "/settings.json"))
+  FX._oneM[it.key] = { at = now, v = v }
+  return v
+end
 function FX.computeUsage()
   local cfg = loadConfig()                 -- for per-provider contextLimit
   local now = os.time()
@@ -654,13 +689,14 @@ function FX.computeUsage()
       -- the detail panel's Model dropdown shows + preselects it. The status-file `model` is a
       -- spawn-time snapshot of $ANTHROPIC_MODEL that goes stale after an in-session /model switch;
       -- the transcript is always current. Only sync when known -- never clobber with nil/empty.
+      local oneM = FX.sessionOneM(it)   -- 2026-09-28: before the live model lands on it.model
       if st.lastModel and st.lastModel ~= "" then it.model = st.lastModel; it.live_model = st.lastModel end
 
       -- Context fullness for EVERY session (works for stale/done tiles, unlike the 1s peek).
       local cfrac, ctoks
       if st.lastContext then
         ctoks = st.lastContext
-        cfrac = core.contextFractionFor(cfg, st.lastModel or it.model, ctoks)
+        cfrac = core.contextFractionFor(cfg, st.lastModel or it.model, ctoks, { oneM = oneM })
       end
       perSession[key] = { total = st.cum.total, real = st.cum.real, input = st.cum.input,
         output = st.cum.output, cacheRead = st.cum.cacheRead, cacheCreate = st.cum.cacheCreate,
@@ -17873,7 +17909,7 @@ function FX._refreshBody()
       local u = core.lastUsage(tail)
       if u then
         it.context_tokens = core.contextTokens(u)
-        it.context_frac = core.contextFractionFor(cfg, u.model or it.model, it.context_tokens)
+        it.context_frac = core.contextFractionFor(cfg, u.model or it.model, it.context_tokens, { oneM = FX.sessionOneM(it) })
       end
     end
     -- Stale-"done" self-heal: a hook-driven "done" can be stale (Auto mode, or a missed

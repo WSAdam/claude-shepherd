@@ -18,9 +18,12 @@ divided by the model's context window, with the percentage on the bar. It tells 
 to `/compact`.
 
 - The window is **model-aware**: 1M for Opus 4.x and Sonnet 4.x model ids (their window on Claude
-  Code), 200k otherwise. A provider's `contextLimit` overrides it, and a prompt larger than the
-  assumed window rounds it up to the next tier (200k / 1M / 2M), so a session never reads a false
-  100%.
+  Code), and for any Opus or Sonnet session set to Claude Code's 1M-context option (a model ending
+  in `[1m]`, like `opus[1m]`). Transcripts only record the bare model id, so the option is read
+  where Claude Code reads it: the session's own model, then the project's
+  `.claude/settings.local.json` and `settings.json`, then `~/.claude/settings.json`. Otherwise
+  200k. A provider's `contextLimit` overrides it, and a prompt larger than the assumed window
+  rounds it up to the next tier (200k / 1M / 2M), so a session never reads a false 100%.
 - To match Claude Code's own "% until auto-compact", the bar divides by
   `window × context.autoCompactFraction` (default `0.92`; the exact threshold is undocumented, so
   this is a close approximation).

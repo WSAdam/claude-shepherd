@@ -97,6 +97,10 @@ function M.parseStatusList(entries, now, staleSeconds)
       if type(data.cwd) ~= "string" then data.cwd = nil end
       if type(data.transcript_path) ~= "string" then data.transcript_path = nil end
       data.projectKey = M.projectKey(data)
+      -- 2026-09-28: the status file's own model (a spawn's $ANTHROPIC_MODEL, or Shepherd's model
+      -- menu), kept apart from it.model, which the usage pass overwrites with the live model. It
+      -- is where a session's "[1m]" opt-in shows up (core.configuredModelOneM).
+      data.statusModel = type(data.model) == "string" and data.model or nil
       -- Coerce time fields to numbers at the parse chokepoint. A status file with a
       -- non-numeric `updated`/`since` (boolean, "soon", a date string -- all legal to
       -- hand-write or rsync-mirror) would otherwise reach the raw arithmetic in stale/
@@ -5690,7 +5694,7 @@ end
 -- (Opus 4.x and Sonnet 4.6 are 1M in Claude Code; older/Haiku 200k) -> the 200k default.
 -- Getting this right matters: a wrong (too-small) denominator makes a session look
 -- "full" when it isn't (the original bug: 437k context shown as 100% of a 200k default).
-function M.contextLimitFor(cfg, model)
+function M.contextLimitFor(cfg, model, opts)
   local list = M.config(cfg, "providers", nil)
   if type(list) == "table" and model then
     for _, p in ipairs(list) do
@@ -5702,7 +5706,27 @@ function M.contextLimitFor(cfg, model)
   local m = tostring(model or ""):lower()
   -- Opus 4.6/4.7/4.8 + Sonnet 4.6 have a 1M window on Claude Code paid plans.
   if m:find("opus%-4") or m:find("sonnet%-4") then return 1000000 end
+  -- 2026-09-28: the session's configured model opts into 1M with "[1m]" (opts.oneM, from
+  -- core.configuredModelOneM). Transcripts never carry the suffix, so it can't come from `model`.
+  -- Opus and Sonnet only; an unknown (empty) live model trusts the opt-in.
+  if type(opts) == "table" and opts.oneM and (m == "" or m:find("opus") or m:find("sonnet")) then
+    return 1000000
+  end
   return M.CONTEXT_LIMIT_DEFAULT
+end
+
+-- Does the session's CONFIGURED model opt into the 1M window ("opus[1m]", "claude-opus-5-5[1m]")?
+-- The first one that is set wins, in Claude Code's own precedence: the session's own model (a
+-- spawn's $ANTHROPIC_MODEL or Shepherd's model menu, it.statusModel), then the project's
+-- .claude/settings.local.json, the project's .claude/settings.json, the user's settings.json.
+-- A set model without the suffix means 200k even if a lower-precedence one says [1m]. Pure.
+function M.configuredModelOneM(session, projectLocal, project, user)
+  for _, m in ipairs({ session or false, projectLocal or false, project or false, user or false }) do
+    if type(m) == "string" and m:match("%S") then
+      return m:lower():match("%[1m%]%s*$") ~= nil
+    end
+  end
+  return false
 end
 
 -- Standard context-window tiers, used to self-heal an unknown/underestimated model:
@@ -5731,8 +5755,8 @@ end
 -- reserve so the bar matches Claude Code's "% until auto-compact" reading. The denominator
 -- is right for known models, can't be smaller than what the session actually holds, and
 -- accounts for the output reserve the editor measures against.
-function M.contextFractionFor(cfg, model, tokens)
-  local window = math.max(M.contextLimitFor(cfg, model), M.nextContextTier(tokens))
+function M.contextFractionFor(cfg, model, tokens, opts)
+  local window = math.max(M.contextLimitFor(cfg, model, opts), M.nextContextTier(tokens))
   local limit = window * M.autoCompactFraction(cfg)
   return M.contextFraction(tokens, limit), limit
 end
