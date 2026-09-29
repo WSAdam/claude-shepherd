@@ -4231,5 +4231,41 @@ do
         and src:find(".dm-redfirst.r-notRed { color:var(--danger)", 1, true) == nil)
 end
 
+-- ---- auto-compact with notes (2026-09-29, build program unit 16) ----
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  local tick = src:match("function FX%._refreshBody%(%)(.-)\nend\n") or ""
+  check("compact: the tick syncs settings.json's override, isolated in a pcall", tick:find("pcall(FX.syncCompactEnv, cfg)", 1, true) ~= nil)
+  check("compact: ...and steps each session's due-at and notes, isolated too", tick:find("pcall(FX.stepCompact, list, cfg)", 1, true) ~= nil)
+  local save = src:match('if a == "save%-config" then(.-)\n  end\n') or ""
+  check("compact: a Settings Save syncs the override right away (forced)", save:find("pcall(FX.syncCompactEnv, cfg, true)", 1, true) ~= nil)
+  check("compact: the Settings form sends the whole compact block",
+        src:find('compact: { enabled: ck("s-cmp-en"), atPct: num("s-cmp-at",85), notesLeadPct: num("s-cmp-lead",5) },', 1, true) ~= nil)
+  check("compact: ...and shows what's saved", src:find('ck("s-cmp-en",     cv(cfg,"compact.enabled",false));', 1, true) ~= nil)
+  check("compact: the card's badges include the 📝 chip", src:find("+ bgBadge(it) + notesBadge(it);", 1, true) ~= nil)
+  check("compact: the detail panel renders the Notes line", src:find("renderNotes(it);", 1, true) ~= nil
+        and src:find('<div id="d-notes"></div>', 1, true) ~= nil)
+  check("compact: Diagnostics gets the facts", src:find("pcall(FX.compactFacts, cfg)", 1, true) ~= nil)
+  check("compact: FX.NOTES_DIR reads CC_NOTES_DIR, as cc-lib.sh does",
+        src:find('FX.NOTES_DIR = os.getenv("CC_NOTES_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-notes")', 1, true) ~= nil)
+  local df = io.open(ROOT .. "defaults/cc-config.json", "r")
+  local dsrc = df and df:read("*a") or ""
+  if df then df:close() end
+  local okd, dcfg = pcall(core.json.decode, dsrc)
+  local dc = okd and type(dcfg) == "table" and dcfg.compact or {}
+  eq("compact: a fresh install compacts early with notes", dc.enabled, true)
+  eq("compact: ...at 85%", dc.atPct, 85)
+  eq("compact: ...notes 5 points before", dc.notesLeadPct, 5)
+  local hf = io.open(ROOT .. "settings-hooks.json", "r")
+  local hsrc = hf and hf:read("*a") or ""
+  if hf then hf:close() end
+  local okh, hooks = pcall(core.json.decode, hsrc)
+  local pre = okh and type(hooks) == "table" and type(hooks.hooks) == "table" and hooks.hooks.PreCompact or {}
+  eq("compact: PreCompact runs cc-status.sh precompact", type(pre[1]) == "table" and pre[1].hooks[1].command,
+     'bash "$HOME/.claude/cc-status.sh" precompact')
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

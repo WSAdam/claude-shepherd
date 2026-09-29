@@ -6,7 +6,7 @@
 # Usage: cc-status.sh <event>
 #   event is the hook that fired, one of:
 #     sessionstart | userpromptsubmit | pretooluse | posttooluse |
-#     permissionrequest | notification | stop | stopfailure | sessionend
+#     permissionrequest | notification | stop | stopfailure | precompact | sessionend
 #
 # The hook event JSON arrives on stdin. We key each session by its session_id
 # (so two sessions in the same folder never collide), and merge only the fields
@@ -19,8 +19,10 @@
 #   posttooluse     -> working  (clears pending)
 #   permissionrequest -> approval (+ precise pending from tool_input)
 #   notification    -> approval | done | (unchanged)  depending on type (an idle one keeps an error)
-#   stop            -> done      (clears pending; working when a mailbox message keeps the turn going)
+#   stop            -> done      (clears pending; working when a mailbox message or a notes request
+#                                 keeps the turn going)
 #   stopfailure     -> error     (+ error_kind, error_message: the turn ended on an API error)
+#   precompact      -> working   (the session is compacting; prints the notes line for the summary)
 #   sessionend      -> file removed
 # Every status but error drops error_kind/error_message.
 #
@@ -233,6 +235,17 @@ case "$EVENT" in
        && [ "$(cc_get "$INPUT" '.stop_hook_active')" != "true" ]; then
       STOP_MAIL="$(cc_mailbox_claim "$KEY" stop)" && STATUS="working"
     fi
+    # 2026-09-29: auto-compact with notes (unit 16). Past the due-at Shepherd left this session, the
+    # first turn end of a compaction cycle asks it to write its notes before Claude Code compacts
+    # it (cc_notes_request: never while stop_hook_active or in plan mode). Blocked, it stays working.
+    # (The file test first: with compaction off there is no due-at, and it costs nothing.)
+    if [ -f "$CC_NOTES_DIR/$KEY.due-at" ] && [ -z "${CC_SHEPHERD_INTERNAL:-}" ]; then
+      STOP_NOTES="$(cc_notes_request "$KEY" "$INPUT")" && STATUS="working"
+    fi
+    ;;
+  precompact)
+    # 2026-09-29: Claude Code is about to compact the session (auto or /compact): it is working.
+    STATUS="working"
     ;;
   stopfailure)
     # 2026-09-28: a turn that ends on an API error (a usage limit, an outage, an expired login)
@@ -564,6 +577,11 @@ if cc_ledger_enabled; then
     pretooluse)
       [ "$PENDING_TOOL" = "AskUserQuestion" ] && cc_ledger_append "$(printf '%s' "$LBASE" | jq -c \
         --arg t "$PENDING_TOOL" --arg s "$PENDING_MSG" '. + {type:"tool_request", tool:$t, summary:$s}')" ;;
+    precompact)
+      # 2026-09-29: each compaction, with what triggered it and whether notes were saved for it
+      NOTES_SAVED=false; [ -s "$CC_NOTES_DIR/$KEY.notes.md" ] && NOTES_SAVED=true
+      cc_ledger_append "$(printf '%s' "$LBASE" | jq -c --arg t "$(cc_get "$INPUT" '.trigger')" \
+        --argjson n "$NOTES_SAVED" '. + {type:"compaction", trigger:$t, notes:$n}')" ;;
   esac
 fi
 
@@ -576,10 +594,16 @@ if [ "$EVENT" = "sessionstart" ]; then
 fi
 
 # ---- What a finished turn is told (2026-09-29) ----
-# The Stop decision, printed once, last, through its one builder: a message from the mailbox keeps
-# the turn going. (Unit 16 adds its notes request here, as another reason.)
+# The Stop decision, printed once, last, through its one builder: a message from the mailbox, and
+# the auto-compact notes request, each keep the turn going.
 if [ "$EVENT" = "stop" ]; then
-  cc_stop_decision "${STOP_MAIL:-}"
+  cc_stop_decision "${STOP_MAIL:-}" "${STOP_NOTES:-}"
+fi
+
+# ---- What the compaction summary is told (2026-09-29) ----
+# Claude Code adds a PreCompact hook's stdout to the summary's instructions: saved notes come back.
+if [ "$EVENT" = "precompact" ] && [ -z "${CC_SHEPHERD_INTERNAL:-}" ]; then
+  cc_precompact_context "$KEY"
 fi
 
 echo "[cc-status] ✅ $EVENT -> $STATUS for '$NAME' ($KEY)" >&2

@@ -98,6 +98,8 @@ The automatic behaviours here are off until you turn them on, except handoff not
   that arrives at its next turn end or start, and types it only where typing is safe.
 - [**Resume at the limit reset**](docs/automation.md#resume-at-the-limit-reset): a session stopped
   by a usage limit carries on by itself at the reset, once per window, with Resume now and Cancel on its card.
+- [**Auto-compact with notes**](docs/automation.md#auto-compact-with-notes): sessions compact at 85%
+  of their window, write their notes just before, and get them back right after.
 - [**Automation rules**](docs/automation.md#automation-rules): when a session finishes, errors or
   stalls, log it, relabel it, nudge it or feed it.
 - [**Automation dry run & trace**](docs/automation.md#dry-run-and-the-automation-trace): see what

@@ -28,7 +28,7 @@ form-managed block is dropped on Save. Its tabs:
   advanced gate settings, the policies (approve repeats, Autopilot, allow/deny patterns), and the
   **Always ask** commands with your own additions
   ([Approvals and policies](approvals-and-policies.md)).
-- **Automation**: the task queue, escalation, graceful drain, respawn, Auto-Continue
+- **Automation**: the task queue, escalation, graceful drain, respawn, Auto-Continue, Auto-compact
   ([Automation](automation.md)).
 - **Observability**: risk score, same-folder collision, insights, auto-title, loop watchdog, macOS
   banners, post-run summary, PR status, the hooks inventory, the audit log and **Measure storage**
@@ -58,6 +58,7 @@ The panel re-reads the file within about a second (except `hotkeys`, which need 
 | `merge`, `verify`, `fleet`, `tabBridge` | Ready to merge, merge gates, the merge checker, batches, the tab bridge | [Merging and batches](merging-and-batches.md) |
 | `queue`, `templates`, `automodel` | Task queue, routing, templates, model auto-routing | [Automation](automation.md) |
 | `respawn`, `autoContinue`, `resume`, `drain`, `prune`, `cleanup`, `tabless` | Recovery, resuming at a usage limit's reset, and cleanup | [Automation](automation.md), [Controls](controls.md#sessions-with-no-tab) |
+| `compact` | Auto-compact at `atPct` with notes kept across it (sets `env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` in Claude Code's `settings.json`) | [Automation](automation.md#auto-compact-with-notes) |
 | `escalation`, `notifications`, `focus`, `summary`, `rules`, `schedules` | Nags, banners, focus pop, rules, routines | [Automation](automation.md) |
 | `automation` (and each feature's `dryRun`) | Dry run for all automation, or one feature at a time | [Automation](automation.md#dry-run-and-the-automation-trace) |
 | `autoTitle`, `prStatus`, `risk`, `collision`, `subagents`, `status` | Tile observability | [Fleet](fleet.md#session-observability) |
@@ -105,6 +106,7 @@ Everything lives under `~/.claude/`:
 | `cc-ask/` | Answers to held questions (the question itself is in the session's status file) |
 | `cc-inbox/` | The [session mailbox](automation.md#session-mailbox): messages waiting for each session |
 | `cc-resume/` | [Resumes waiting for a usage limit's reset](automation.md#resume-at-the-limit-reset): the hook's arm, Shepherd's plan, a Cancel |
+| `cc-notes/` | [Handoff notes](automation.md#handoff-notes), and [auto-compact](automation.md#auto-compact-with-notes)'s due-ats and each session's own notes |
 | `cc-bridge/` | The tab bridge's per-window tab lists and command folders |
 | `cc-policy/`, `cc-gate-tools/`, `cc-automodel/` | Per-session policy, gated-tool and auto-model settings |
 | `cc-ledger/` | The audit ledger (one JSONL file per day) |

@@ -72,6 +72,12 @@ assert_json "...async, with asyncRewake" "$CDIR/settings.json" \
 assert_json "...and every error still reaches cc-status.sh first" "$CDIR/settings.json" \
   '.hooks.StopFailure[0].hooks[0].command | endswith("cc-status.sh\" stopfailure")' "true"
 exists "copies cc-resume.sh -> claude dir" "$CDIR/cc-resume.sh"
+# 2026-09-29: auto-compact with notes -- every compaction (auto or /compact) reaches cc-status.sh
+# precompact, which tells the summary the session's notes come back afterwards.
+assert_json "a compaction reaches cc-status.sh (PreCompact, every trigger)" "$CDIR/settings.json" \
+  '[.hooks.PreCompact[] | select((.matcher // "") == "") | .hooks[] | select(.command | endswith("cc-status.sh\" precompact"))] | length' "1"
+assert_json "...once" "$CDIR/settings.json" \
+  '[.hooks.PreCompact[].hooks[] | select(.command | contains("cc-status.sh"))] | length' "1"
 exists "creates init.lua" "$HSDIR/init.lua"
 assert_eq "init.lua has the dofile" "1" "$(grep -c 'claude-dashboard.lua' "$HSDIR/init.lua")"
 
@@ -194,10 +200,13 @@ assert_json "upgrade: ...and the question hook's group isn't added twice" "$CDIR
 # non-object element + a foreign object entry, and an object-valued (hand-edited)
 # event group, must round-trip untouched. The old pass silently DROPPED the
 # stray element and reshaped object-valued groups into arrays. ---
+# 2026-09-29 requirement change: this fixture's foreign event was PreCompact until Shepherd began
+# wiring its own PreCompact hook (auto-compact, unit 16); PostCompact is still foreign, and the
+# owned-event case is pinned just below.
 CDIR7="$TMP/claude7"; HSDIR7="$TMP/hs7"; mkdir -p "$CDIR7"
 cat > "$CDIR7/settings.json" <<'JSON'
 { "hooks": {
-    "PreCompact": [ { "hooks": [ { "type": "command", "command": "echo hi" } ] },
+    "PostCompact": [ { "hooks": [ { "type": "command", "command": "echo hi" } ] },
                     "stray-note",
                     { "matcher": "x", "note": "foreign object, no hooks array" } ],
     "SubagentStop": { "matcher": "", "hooks": [ { "type": "command", "command": "echo obj" } ] }
@@ -205,12 +214,12 @@ cat > "$CDIR7/settings.json" <<'JSON'
 JSON
 CC_INSTALL_CLAUDE_DIR="$CDIR7" CC_INSTALL_HS_DIR="$HSDIR7" CC_INSTALL_NO_APP=1 \
   bash "$ROOT/install.sh" >/dev/null 2>&1
-assert_json "shape: PreCompact keeps all 3 elements" "$CDIR7/settings.json" \
-  '.hooks.PreCompact | length' "3"
+assert_json "shape: PostCompact keeps all 3 elements" "$CDIR7/settings.json" \
+  '.hooks.PostCompact | length' "3"
 assert_json "shape: stray non-object element survives" "$CDIR7/settings.json" \
-  '.hooks.PreCompact[1]' "stray-note"
+  '.hooks.PostCompact[1]' "stray-note"
 assert_json "shape: foreign object entry untouched" "$CDIR7/settings.json" \
-  '.hooks.PreCompact[2].note' "foreign object, no hooks array"
+  '.hooks.PostCompact[2].note' "foreign object, no hooks array"
 assert_json "shape: object-valued event group stays an object" "$CDIR7/settings.json" \
   '.hooks.SubagentStop | type' "object"
 assert_json "shape: object-valued group content intact" "$CDIR7/settings.json" \
@@ -218,6 +227,19 @@ assert_json "shape: object-valued group content intact" "$CDIR7/settings.json" \
 # ...while the normal merge still wired our hooks alongside the foreign events
 assert_json "shape: our hooks still merged next to foreign events" "$CDIR7/settings.json" \
   '[.hooks.PreToolUse[].hooks[]?.command? // empty] | any(test("cc-approve\\.sh"))' "true"
+# 2026-09-29: an event Shepherd now owns (PreCompact) that already holds the user's own group and
+# a stray element keeps both, in place, and gains ours after them.
+CDIR7b="$TMP/claude7b"; HSDIR7b="$TMP/hs7b"; mkdir -p "$CDIR7b"
+cat > "$CDIR7b/settings.json" <<'JSON'
+{ "hooks": { "PreCompact": [ { "hooks": [ { "type": "command", "command": "echo mine" } ] }, "stray-note" ] } }
+JSON
+CC_INSTALL_CLAUDE_DIR="$CDIR7b" CC_INSTALL_HS_DIR="$HSDIR7b" CC_INSTALL_NO_APP=1 \
+  bash "$ROOT/install.sh" >/dev/null 2>&1
+assert_json "shape: the user's own PreCompact hook stays first" "$CDIR7b/settings.json" \
+  '.hooks.PreCompact[0].hooks[0].command' "echo mine"
+assert_json "shape: ...their stray element too" "$CDIR7b/settings.json" '.hooks.PreCompact[1]' "stray-note"
+assert_json "shape: ...and ours is added after them" "$CDIR7b/settings.json" \
+  '[.hooks.PreCompact[2:][] | .hooks[]?.command? // empty] | any(endswith("cc-status.sh\" precompact"))' "true"
 
 # --- appending to a pre-existing init.lua WITHOUT a trailing newline must not glue
 # the dofile onto the user's last line (invalid Lua that breaks their whole config). ---

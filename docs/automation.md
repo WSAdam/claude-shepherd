@@ -201,12 +201,56 @@ A fresh or respawned session picks up where the last one left off.
   says so. The new session starts with the whole note, once. A note nobody takes within the hour is
   dropped, and a dry run leaves none.
 - **A resumed or compacted session** keeps its own context and gets no note (it is still shown the
-  [mailbox](#session-mailbox) messages waiting for it).
+  [mailbox](#session-mailbox) messages waiting for it). A compacted session gets back the working
+  notes it wrote itself instead ([auto-compact with notes](#auto-compact-with-notes)).
 - **Cleanup.** Notes older than 14 days are pruned at startup and then hourly.
 
 How it reaches the session: Claude Code adds a SessionStart hook's output to the new session's
 context. `cc-status.sh` prints `cc_session_context` (`cc-lib.sh`) there: each part is labelled
-`[Shepherd: <part>]` and the whole is capped at 8,000 characters.
+`[Shepherd: <part>]` and the whole is capped at 8,000 characters. After a compaction, the session's
+own notes have another 12 KB of their own on top.
+
+### Auto-compact with notes
+
+Claude Code compacts a session on its own near the end of its window, and the summary keeps only
+what it keeps. With `compact.enabled` (⚙ Settings → **Auto-compact**; on in a fresh install's
+defaults), sessions compact earlier, and write their own notes first.
+
+- **When it compacts.** Shepherd sets `env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` in
+  `~/.claude/settings.json` to `compact.atPct` (85 by default), so Claude Code compacts at that
+  percent. Claude Code measures it against its auto-compact window, the window less a 20k output
+  reserve: 85% is 153,000 tokens of a 200k window and 833,000 of a 1M one. It can only bring
+  compaction earlier, never later than Claude Code's own point. Sessions started afterwards pick it
+  up. The write (`FX.setClaudeSettingsEnv`) changes that one key and nothing else, atomically, and
+  follows a symlinked settings file to its target. A file it can't read as JSON is left as it is,
+  and 🩺 Diagnostics says the override is missing.
+- **The notes.** Each live session gets `~/.claude/cc-notes/<session>.due-at`,
+  `compact.notesLeadPct` points (5 by default) of the same window before compaction: 144,000
+  tokens of 200k, 784,000 of 1M (an `[1m]` model counts as 1M). At the first turn end past it, the
+  Stop hook asks the session, once per compaction cycle, to write its working notes to
+  `~/.claude/cc-notes/<session>.notes.md`: the task and its goal, what's done and in progress, the
+  exact next steps, the decisions and why, the files and commands involved. The card stays working
+  while it writes them. It isn't asked while `stop_hook_active` is set (a block already kept that
+  turn going), or in plan mode, where it can't write a file; the next turn end asks instead.
+- **The compaction.** Every compaction (automatic or `/compact`) runs `cc-status.sh precompact`.
+  Claude Code adds a PreCompact hook's output to the summary's instructions, so with notes saved the
+  summary is told they come back whole and needn't repeat them.
+- **Afterwards.** The compacted session starts with its notes, as `[Shepherd: notes]`, up to 12 KB;
+  longer notes are cut with the file named for the rest. A cycle ends when the context drops below
+  the due-at again, so a compaction that failed isn't asked for notes twice.
+- **On the card.** 📝 means the session has notes. The detail panel's Notes line says when they
+  were saved and when they're next due: *📝 Notes saved 5m ago (1.2 KB) · due at 144k tokens,
+  compaction at 153k*.
+- **Turning it off** takes Shepherd's own value back out of `settings.json` (a value you set
+  yourself stays) and removes every due-at, so no session is asked for notes. Uninstalling leaves
+  the override in `settings.json`; take it out of `env` by hand if you don't want it.
+- **Diagnostics** checks that settings.json carries the override and that every installed claude
+  still reads it: the CLI and the newest binary each editor extension bundles, grepped once per
+  version in the background. A claude that no longer mentions `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` is
+  a warning: it may compact at its own threshold, after the notes are due.
+- **Cleanup and the ledger.** A session's due-at goes when it ends or its card is forgotten; its
+  notes stay, like its handoff note, and are pruned after 14 days. The ledger records
+  `notes_requested` (with the tokens) and `compaction` (its trigger, and whether notes were saved).
 
 ## Session mailbox
 

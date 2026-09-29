@@ -8447,8 +8447,10 @@ do
   -- 2026-09-29: 21 -> 22 for resuming at the usage limit's reset ("resume", flagged new).
   -- 2026-09-29: 22 -> 23 for the automation dry run and trace ("trace", flagged new).
   -- 2026-09-29: 23 -> 24 for the red-first proof ("redfirst", flagged new).
-  eq("FEATURES: the 24 new features are flagged", newCount, 24)
+  -- 2026-09-29: 24 -> 25 for auto-compact with notes ("compact", flagged new).
+  eq("FEATURES: the 25 new features are flagged", newCount, 25)
   check("FEATURES: lists the red-first proof", keys.redfirst == true)
+  check("FEATURES: lists auto-compact with notes", keys.compact == true)
   check("FEATURES: lists what each session is working on", keys.workingon == true)
   check("FEATURES: lists the session mailbox", keys.mailbox == true)
   check("FEATURES: lists resume at the limit reset", keys.resume == true)

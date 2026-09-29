@@ -357,7 +357,8 @@ cc_remove() {
     "$CC_ASK_DIR/$1.answer" "$CC_ASK_DIR/$1.answer".claim.* \
     "$CC_ASK_DIR/$1.answer".tmp.* "$CC_TALK_DIR/$1" \
     "$CC_RESUME_DIR/$1.json" "$CC_RESUME_DIR/$1.json".tmp.* "$CC_RESUME_DIR/$1.plan.json" \
-    "$CC_RESUME_DIR/$1.plan.json".tmp.* "$CC_RESUME_DIR/$1.cancel" 2>/dev/null || true
+    "$CC_RESUME_DIR/$1.plan.json".tmp.* "$CC_RESUME_DIR/$1.cancel" \
+    "$CC_NOTES_DIR/$1.due-at" "$CC_NOTES_DIR/$1.due-at".tmp.* "$CC_NOTES_DIR/$1.notes-asked" 2>/dev/null || true
   # The mailbox is a folder (cc-inbox/<key>/): its messages, claims and temps, then the folder.
   # A key that could name anything outside it (nothing, . or ..) never gets that far.
   local inbox="$CC_INBOX_DIR/$1"
@@ -1376,21 +1377,25 @@ _cc_ro_gitconfig() {   # git config that reads: --get*, --list, get, list, or on
 # part "[Shepherd: <name>]" and caps the total at CC_CONTEXT_MAX characters; a part that would pass
 # the cap is cut, and the parts after it are left out. A new part goes in CC_CONTEXT_PARTS.
 CC_NOTES_DIR="${CC_NOTES_DIR:-${HOME}/.claude/cc-notes}"
-CC_CONTEXT_PARTS="handoff mailbox"
+# 2026-09-29: "notes" (auto-compact, unit 16) prints only after a compaction, and comes first there.
+CC_CONTEXT_PARTS="notes handoff mailbox"
 CC_CONTEXT_MAX=8000
 CC_PENDING_MAX_AGE=3600   # a respawn's note nobody took within the hour is stale
 
 cc_session_context() { # $1 source (startup|resume|clear|compact), $2 key, $3 cwd
   [ -z "${CC_SHEPHERD_INTERNAL:-}" ] || return 0   # Shepherd's own runs take nothing
-  local out="" name part block keep
-  local cut="[cut: Shepherd's session context is capped at $CC_CONTEXT_MAX characters]"
+  local out="" name part block keep max="$CC_CONTEXT_MAX"
+  # 2026-09-29: a compacted session's notes have their own 12KB (CC_NOTES_PART_MAX) on top of the
+  # cap every other part shares, so the notes never crowd the rest out -- or get cut at 8000.
+  [ "$1" != compact ] || max=$(( CC_CONTEXT_MAX + ${CC_NOTES_PART_MAX:-12288} + 512 ))
+  local cut="[cut: Shepherd's session context is capped at $max characters]"
   for name in $CC_CONTEXT_PARTS; do
     part="$("_cc_ctx_$name" "$1" "$2" "$3")"
     [ -n "$part" ] || continue
     block="[Shepherd: $name]"$'\n'"$part"
     [ -z "$out" ] || block=$'\n\n'"$block"
-    if [ $(( ${#out} + ${#block} + 1 )) -gt "$CC_CONTEXT_MAX" ]; then
-      keep=$(( CC_CONTEXT_MAX - ${#cut} - 2 ))
+    if [ $(( ${#out} + ${#block} + 1 )) -gt "$max" ]; then
+      keep=$(( max - ${#cut} - 2 ))
       [ "$keep" -ge 0 ] || keep=0
       out="$out$block"
       out="${out:0:$keep}"$'\n'"$cut"
@@ -1580,6 +1585,94 @@ cc_stop_decision() {
   [ -n "$reason" ] || return 0
   cc_have_jq || return 0
   jq -nc --arg r "$reason" '{decision:"block", reason:$r}'
+}
+
+# ---- Auto-compact with notes (build program unit 16, 2026-09-29) ---------------------------
+# With compact.enabled Shepherd leaves each live session CC_NOTES_DIR/<key>.due-at, one line
+# "<due> <compactAt> <window>" in tokens (core.compactDue): Claude Code compacts it at compactAt
+# (env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE), and a summary drops detail. At the first turn end past
+# due, cc-status.sh stop asks the session -- once per compaction cycle, through cc_stop_decision --
+# to write its notes to <key>.notes.md. A cycle ends when the context drops below due again (the
+# compaction happened), so a compaction that failed isn't asked twice. PreCompact tells the summary
+# the notes come back; SessionStart(compact) hands them back (the notes part below).
+CC_NOTES_PART_MAX=12288   # bytes of notes a compacted session gets back (core.COMPACT.notesMax)
+
+# The context of the transcript's last real assistant turn, in tokens (input + both cache
+# buckets, as core.contextTokens); nothing when there's none. Reads the last 256KB only; a torn
+# last line, a sidechain and a zero-usage synthetic error record are skipped.
+cc_transcript_context() { # $1 transcript path
+  [ -f "$1" ] || return 0
+  cc_have_jq || return 0
+  tail -c 262144 "$1" 2>/dev/null | grep -F '"usage"' | tail -n 40 \
+    | jq -R 'fromjson? | select(type == "object" and .type == "assistant" and .isSidechain != true)
+             | .message.usage | select(type == "object")
+             | ((.input_tokens // 0) + (.cache_read_input_tokens // 0) + (.cache_creation_input_tokens // 0))
+             | select(. > 0)' 2>/dev/null | tail -n 1
+}
+
+# The Stop hook's notes request for session $1: the reason on stdout and 0 when the session should
+# write its notes now; 1 (nothing printed) when it shouldn't. $2 = the hook's JSON. Never while
+# stop_hook_active (a block already kept this turn going) or in plan mode (it can't write a file);
+# the caller never asks in Shepherd's internal runs.
+cc_notes_request() { # $1 key, $2 hook input
+  local key="$1" in="$2" due cat win extra mode tokens asked path pct
+  case "$key" in ''|.|..|*/*) return 1 ;; esac
+  [ -f "$CC_NOTES_DIR/$key.due-at" ] || return 1
+  read -r due cat win extra < "$CC_NOTES_DIR/$key.due-at" 2>/dev/null
+  case "$due" in ''|*[!0-9]*) return 1 ;; esac
+  case "$cat" in ''|*[!0-9]*) cat="" ;; esac
+  case "$win" in ''|*[!0-9]*) win="" ;; esac
+  [ "$(cc_get "$in" '.stop_hook_active')" != "true" ] || return 1
+  mode="$(cc_get "$in" '.permission_mode')"
+  [ -n "$mode" ] || mode="$(cc_read_field "$key" '.permission_mode')"
+  [ "$mode" != "plan" ] || return 1
+  tokens="$(cc_transcript_context "$(cc_get "$in" '.transcript_path')")"
+  case "$tokens" in ''|*[!0-9]*) return 1 ;; esac
+  asked="$CC_NOTES_DIR/$key.notes-asked"
+  if [ "$tokens" -lt "$due" ]; then
+    rm -f "$asked" 2>/dev/null   # below due-at again: the compaction happened, a new cycle begins
+    return 1
+  fi
+  [ ! -e "$asked" ] || return 1  # asked already this cycle
+  printf '%s\n' "$tokens" > "$asked" 2>/dev/null || return 1
+  path="$CC_NOTES_DIR/$key.notes.md"
+  pct=""; [ -n "$win" ] && [ "$win" -gt 0 ] && pct=" ($(( tokens * 100 / win ))% of its ${win}-token window)"
+  if cc_ledger_enabled; then
+    cc_ledger_append "$(jq -nc --arg key "$key" --argjson t "$tokens" --argjson d "$due" \
+      '{type:"notes_requested", key:$key, tokens:$t, due:$d}')"
+  fi
+  echo "[cc-lib] 📝 asked session $key for its notes: $tokens tokens, due at $due" >&2
+  printf '%s' "[shepherd] This session's context is at $tokens tokens$pct, and Claude Code will compact it automatically${cat:+ at about $cat tokens}. A summary drops detail, so save your working notes first: write them to $path (overwrite it; it is yours), under 12 KB. Include the task and its goal, what's done, what's in progress, the exact next steps, the decisions made and why, the files and commands involved, and anything else you'd need to carry on without this conversation. They are handed back to you right after the compaction. Then carry on with the task."
+  return 0
+}
+
+# PreCompact: Claude Code adds a PreCompact hook's stdout to the summary's instructions. With
+# notes saved, the summary is told they come back whole. Prints nothing without notes.
+cc_precompact_context() { # $1 key
+  local key="$1" path
+  case "$key" in ''|.|..|*/*) return 0 ;; esac
+  path="$CC_NOTES_DIR/$key.notes.md"
+  [ -s "$path" ] || return 0
+  printf '%s\n' "Shepherd: this session saved its working notes in $path, and they are handed back in full right after this compaction. Keep the summary to the conversation's current state and point to that file for the notes rather than restating them."
+}
+
+# The notes part of cc_session_context: after a compaction, the notes the session saved, whole up
+# to CC_NOTES_PART_MAX bytes -- beyond that, cut, with the file named for the rest.
+_cc_ctx_notes() { # $1 source, $2 key
+  [ "$1" = compact ] || return 0
+  local key="$2" path size
+  case "$key" in ''|.|..|*/*) return 0 ;; esac
+  path="$CC_NOTES_DIR/$key.notes.md"
+  [ -s "$path" ] || return 0
+  size="$(wc -c < "$path" 2>/dev/null | tr -d ' ')"
+  case "$size" in ''|*[!0-9]*) size=0 ;; esac
+  printf 'Before this compaction you saved your working notes in %s. Here they are:\n\n' "$path"
+  if [ "$size" -gt "$CC_NOTES_PART_MAX" ]; then
+    head -c "$CC_NOTES_PART_MAX" "$path"
+    printf '\n\n[notes cut at 12 KB -- read %s for the rest]\n' "$path"
+  else
+    cat "$path"
+  fi
 }
 
 # ---- Worktree fence (build program unit 7, 2026-09-28) --------------------------------------

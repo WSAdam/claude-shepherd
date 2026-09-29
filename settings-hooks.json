@@ -45,6 +45,9 @@
         { "type": "command", "command": "bash \"$HOME/.claude/cc-resume.sh\"", "async": true, "asyncRewake": true, "timeout": 691200 }
       ] }
     ],
+    "PreCompact": [
+      { "hooks": [ { "type": "command", "command": "bash \"$HOME/.claude/cc-status.sh\" precompact" } ] }
+    ],
     "SessionEnd": [
       { "hooks": [ { "type": "command", "command": "bash \"$HOME/.claude/cc-status.sh\" sessionend" } ] }
     ]

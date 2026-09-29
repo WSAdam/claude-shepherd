@@ -358,6 +358,15 @@ echo ""
 echo "== bash: tests/run.sh runs just the files it is given (the red-first proof's runner) =="
 bash "$DIR/run-files.test.sh" || fail=1
 echo ""
+echo "== bash: auto-compact with notes -- asked once per cycle past the due-at, told at PreCompact, handed back after (cc-status.sh) =="
+bash "$DIR/compact.test.sh" || fail=1
+echo ""
+echo "== lua: auto-compact with notes -- the thresholds ([1m] too), the settings.json writer run for real, due-ats, Diagnostics (stubbed hs) =="
+HOME="$(mktemp -d)" lua "$DIR/compact.test.lua" || fail=1
+echo ""
+echo "== node: a card with saved notes shows 📝, and the detail panel when they're next due (behavioral, runs the shipped notesLine) =="
+node "$DIR/compact-notes.test.js" || fail=1
+echo ""
 
 if [ "$fail" -eq 0 ]; then
   echo "✅ ALL GREEN"

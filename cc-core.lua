@@ -7317,6 +7317,130 @@ function M.contextFractionFor(cfg, model, tokens, opts)
   return M.contextFraction(tokens, limit), limit
 end
 
+-- ---- Auto-compact with notes (build program unit 16, 2026-09-29) ----------------------------
+-- Claude Code compacts a session on its own near the end of its window, and the summary keeps
+-- only what it keeps. With compact.enabled Shepherd sets env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE in
+-- ~/.claude/settings.json to compact.atPct (FX.syncCompactEnv), and leaves each live session a
+-- due-at a few points earlier (~/.claude/cc-notes/<key>.due-at, FX.stepCompact): the Stop hook
+-- asks the session to write its notes once it passes it (cc_notes_request, cc-lib.sh), PreCompact
+-- tells the summary they'll be restored, and SessionStart(compact) hands them back.
+-- Claude Code's own trigger (2.1.x, read from its code): the window less an output reserve of
+-- min(max output, 20k) is the auto-compact window; it compacts at floor(that * pct / 100), never
+-- later than 13k tokens before its end. So 85% of a 200k window is 153,000 tokens, of 1M 833,000.
+M.COMPACT = {
+  envKey = "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE",
+  atPct = 85, leadPct = 5,
+  outputReserve = 20000, buffer = 13000,
+  notesMax = 12288,   -- what SessionStart(compact) hands back (cc-lib.sh CC_NOTES_PART_MAX)
+}
+
+-- compact.{enabled, atPct, notesLeadPct}, sanitized: atPct is a whole percent in [10, 100]
+-- (Claude Code takes 1-100; 10 is the lowest a live check needs), the lead at least 1 and small
+-- enough that the notes come at 1% or later.
+function M.compactConfig(cfg)
+  local C = M.COMPACT
+  local at = math.tointeger(tonumber(M.config(cfg, "compact.atPct", C.atPct)))
+  if not at or at < 10 or at > 100 then at = C.atPct end
+  local lead = math.tointeger(tonumber(M.config(cfg, "compact.notesLeadPct", C.leadPct)))
+  if not lead or lead < 1 then lead = C.leadPct end
+  if lead > at - 1 then lead = at - 1 end
+  return { enabled = M.config(cfg, "compact.enabled", false) == true, atPct = at, leadPct = lead }
+end
+
+-- The token count at which Claude Code compacts a `window`-token session at `pct` percent.
+function M.compactThreshold(window, pct)
+  local C = M.COMPACT
+  window = tonumber(window) or M.CONTEXT_LIMIT_DEFAULT
+  local eff = window - math.min(C.outputReserve, window)
+  local at = math.floor(eff * (tonumber(pct) or C.atPct) / 100)
+  return math.max(0, math.min(at, eff - C.buffer))
+end
+
+-- A session's due-at: { due, compactAt, window } in tokens, or nil with compaction off. The window
+-- is the one the context bar uses (the model's, [1m] aware, never smaller than what the session
+-- holds); the notes are due leadPct points of the auto-compact window before compaction, so they
+-- come first even where Claude Code's own cap moves compaction earlier. cc = M.compactConfig(cfg).
+function M.compactDue(cc, cfg, model, tokens, opts)
+  if type(cc) ~= "table" or not cc.enabled then return nil end
+  local window = math.max(M.contextLimitFor(cfg, model, opts), M.nextContextTier(tokens))
+  local at = M.compactThreshold(window, cc.atPct)
+  local eff = window - math.min(M.COMPACT.outputReserve, window)
+  local due = math.max(0, at - math.floor(eff * cc.leadPct / 100))
+  return { due = math.tointeger(due) or due, compactAt = math.tointeger(at) or at, window = math.tointeger(window) or window }
+end
+
+-- The due-at file's one line, read by the Stop hook: "<due> <compactAt> <window>".
+function M.dueAtLine(d)
+  if type(d) ~= "table" then return nil end
+  return string.format("%d %d %d\n", tonumber(d.due) or 0, tonumber(d.compactAt) or 0, tonumber(d.window) or 0)
+end
+
+-- What a sync does to settings.json's env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE. `synced` is the value
+-- Shepherd itself last wrote there (hs.settings), `current` what the file says now. On: the
+-- configured percent, whatever was there. Off: Shepherd takes out only its own value -- one
+-- someone else set is theirs. Returns { op = "set"|"remove"|"none", value, synced } where synced
+-- is what to remember as Shepherd's after it.
+function M.compactEnvPlan(cc, synced, current)
+  cc = type(cc) == "table" and cc or {}
+  if current ~= nil then current = tostring(current) end
+  if cc.enabled then
+    local want = tostring(cc.atPct or M.COMPACT.atPct)
+    if current == want then return { op = "none", synced = want } end
+    return { op = "set", value = want, synced = want }
+  end
+  if current ~= nil and synced ~= nil and current == tostring(synced) then
+    return { op = "remove" }
+  end
+  return { op = "none" }
+end
+
+do
+  local function sq(s) return "'" .. tostring(s):gsub("'", "'\\''") .. "'" end
+  -- The command that sets (value) or removes (value nil) env.<key> in the Claude Code settings
+  -- file at `path` and touches nothing else: jq keeps every other key, in its order. Symlink-aware
+  -- like install.sh's resolve_link (the link chain is followed, the target is written), atomic
+  -- (a copy of the target, keeping its mode, is filled beside it and renamed over it), and a file
+  -- that isn't a JSON object with an object env is left exactly as it is. Prints one @@ok / @@fail
+  -- line (M.settingsEnvResult). nil for a key that isn't an env var name: nothing reaches a shell.
+  function M.settingsEnvCmd(path, key, value)
+    if type(path) ~= "string" or path == "" or type(key) ~= "string" or not key:match("^[A-Za-z_][A-Za-z0-9_]*$") then
+      return nil
+    end
+    local set = value ~= nil
+    local filter = set and '.env = ((.env // {}) + {($k): $v})'
+                        or 'if (.env | type) == "object" then .env |= del(.[$k]) else . end'
+    -- Its own PATH for jq: the panel runs it without hs.execute's login shell, which pastes the
+    -- command into naive double quotes and would expand this script's $ and eat its quotes.
+    local script = table.concat({
+      'PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"; export PATH',
+      'p=' .. sq(path) .. '; n=0',
+      'while [ -L "$p" ] && [ "$n" -lt 40 ]; do t="$(readlink "$p")"; case "$t" in /*) p="$t" ;; *) p="$(dirname "$p")/$t" ;; esac; n=$((n + 1)); done',
+      'd="$(dirname "$p")"; tmp="$d/.settings.json.tmp.$$"',
+      'if [ ! -e "$p" ]; then',
+      set and ('  mkdir -p "$d" && jq -n --arg k ' .. sq(key) .. ' --arg v ' .. sq(value)
+                 .. " '{env: {($k): $v}}' > \"$tmp\" && mv -f \"$tmp\" \"$p\" && { echo '@@ok created'; exit 0; }"
+                 .. '\n  rm -f "$tmp"; echo "@@fail could not create $p"; exit 1')
+          or "  echo '@@ok nothing to remove'; exit 0",
+      'fi',
+      "jq -e 'type == \"object\" and ((.env // {}) | type == \"object\")' \"$p\" >/dev/null 2>&1"
+        .. ' || { echo "@@fail could not parse $p as a settings object -- left as it is"; exit 3; }',
+      'cp -p "$p" "$tmp" 2>/dev/null || { echo "@@fail could not copy $p"; exit 1; }',
+      'if jq --arg k ' .. sq(key) .. (set and (' --arg v ' .. sq(value)) or '') .. ' ' .. sq(filter)
+        .. ' "$p" > "$tmp" && [ -s "$tmp" ] && mv -f "$tmp" "$p"; then echo "@@ok written"; exit 0; fi',
+      'rm -f "$tmp"; echo "@@fail could not write $p"; exit 1',
+    }, "\n")
+    return "/bin/bash -c " .. sq(script)
+  end
+end
+
+-- The writer's printed result -> ok (bool), why (the @@ line's text).
+function M.settingsEnvResult(out)
+  out = tostring(out or "")
+  local okMsg = out:match("@@ok ?([^\n]*)")
+  if okMsg then return true, okMsg end
+  return false, out:match("@@fail ?([^\n]*)") or (out ~= "" and out:gsub("%s+$", "") or "no output")
+end
+
 -- Per-tile context bar color band. Calm below 50%, then a new band every 10% (50/60/70/80/90),
 -- with a distinct critical band for the last 5% (95-100%). b0..b6. TWIN: the same thresholds
 -- live in the embedded-JS `barLevel` function in claude-dashboard.lua (search "Mirror of
@@ -15878,6 +16002,40 @@ function M.doctorChecks(facts)
     end
   end
 
+  -- 2026-09-29: auto-compact (build program unit 16). { enabled, want, current, binaries = {
+  -- { label, path, knows = true|false|nil } } } from FX.compactFacts: is the override in
+  -- settings.json, and does every installed claude still read it (nil = still being checked)?
+  local cp = type(facts.compact) == "table" and facts.compact or nil
+  if cp then
+    local key = M.COMPACT.envKey
+    if not cp.enabled then
+      add("Auto-compact off", "info", "Claude Code compacts at its own threshold; turn it on in Settings to compact earlier with notes kept")
+    else
+      local lacking, checking = {}, 0
+      for _, b in ipairs(type(cp.binaries) == "table" and cp.binaries or {}) do
+        if b.knows == false then lacking[#lacking + 1] = tostring(b.label)
+        elseif b.knows == nil then checking = checking + 1 end
+      end
+      if cp.current == nil or tostring(cp.current) ~= tostring(cp.want) then
+        add("Auto-compact isn't set in settings.json", "warn",
+            "env." .. key .. " is " .. (cp.current and ('"' .. tostring(cp.current) .. '"') or "missing")
+            .. ", not \"" .. tostring(cp.want) .. "\" -- sessions compact at Claude Code's own threshold",
+            "Settings > Auto-compact: Save with it on")
+      end
+      if #lacking > 0 then
+        add("The installed " .. table.concat(lacking, " and ") .. " no longer mention" .. ((#lacking == 1) and "s" or "")
+            .. " " .. key, "warn",
+            "that claude may ignore the override and compact at its own threshold, after the notes' due-at",
+            "check Claude Code's changelog for the setting that replaced it, or turn Auto-compact off meanwhile")
+      elseif checking > 0 then
+        add("Auto-compact at " .. tostring(cp.want) .. "%", "info", "checking that the installed claude still reads " .. key .. "...")
+      elseif cp.current ~= nil and tostring(cp.current) == tostring(cp.want) then
+        add("Auto-compact at " .. tostring(cp.want) .. "%", "ok",
+            "the installed claude reads " .. key .. "; each session writes its notes first")
+      end
+    end
+  end
+
   local n = tonumber(facts.sessions) or 0
   add(n .. " live session" .. ((n == 1) and "" or "s"), "info", "tiles currently tracked")
   return rows
@@ -15980,6 +16138,9 @@ M.FEATURES = {
   { key = "trace", cat = "Automate", new = true, title = "Automation dry run & trace",
     what = "Every automatic action -- auto-continue, auto-feed and routing, rules, respawn, the self-summary, resume at the reset, ending a tab-less leftover, a mailbox message, the /rc sweep -- is recorded as acted, refused (with why) or, in a dry run, would. Settings turns dry run on for all automation or one feature at a time; ☰ → Automation trace (or ⚡ Trace in the detail panel for one session) lists the decisions newest first, repeats collapsed to ×N.",
     why = "See what automation would do before you let it, and what it did while you were away." },
+  { key = "compact", cat = "Automate", new = true, title = "Auto-compact with notes",
+    what = "Claude Code compacts each session at 85% of its window (changeable in Settings; Shepherd sets CLAUDE_AUTOCOMPACT_PCT_OVERRIDE in ~/.claude/settings.json). At the first turn end a few points before that, the session is asked once to write its working notes to ~/.claude/cc-notes; the summary is told they come back, and the session gets them back whole right after it compacts. A 📝 on the card means it has notes; the detail panel says when they're next due. Diagnostics warns if the installed claude stops reading the override.",
+    why = "A long session keeps its plan, decisions and next steps through a compaction instead of losing what the summary leaves out." },
   { key = "policies", cat = "Automate", title = "Policy bundles & autopilot",
     what = "Reusable auto-allow/deny rules per session or fleet, plus a timed autopilot that approves everything for a while.",
     why = "Pre-decide the routine calls so you only ever see the ones that matter." },

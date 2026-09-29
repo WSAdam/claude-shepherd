@@ -36,7 +36,10 @@ local TALK = T .. "/cc-talk"
 local INBOX = T .. "/cc-inbox"
 -- 2026-09-29: resume at the limit reset (build program unit 13): the hook's arm, Shepherd's plan, a cancel
 local RESUME = T .. "/cc-resume"
-os.execute(('mkdir -p "%s" "%s" "%s" "%s" "%s/repo" "%s/k90" "%s"'):format(STATUS, MERGE, ASK, TALK, T, INBOX, RESUME))
+-- 2026-09-29: auto-compact (build program unit 16): Shepherd's notes due-at and the hook's
+-- once-per-cycle marker are per live session; the notes the session wrote outlive it (14-day prune)
+local NOTES = T .. "/cc-notes"
+os.execute(('mkdir -p "%s" "%s" "%s" "%s" "%s/repo" "%s/k90" "%s" "%s"'):format(STATUS, MERGE, ASK, TALK, T, INBOX, RESUME, NOTES))
 local function write(path, s) local f = io.open(path, "w"); if f then f:write(s); f:close() end end
 local function exists(p) local h = io.open(p, "r"); if h then h:close(); return true end; return false end
 
@@ -75,6 +78,10 @@ local function plant()
   write(RESUME .. "/" .. KEY .. ".plan.json", '{"nonce":"ab12","verdict":"wait"}')
   write(RESUME .. "/" .. KEY .. ".plan.json.tmp.5150", '{"nonce":')
   write(RESUME .. "/" .. KEY .. ".cancel", "")
+  write(NOTES .. "/" .. KEY .. ".due-at", "144000 153000 200000\n")
+  write(NOTES .. "/" .. KEY .. ".due-at.tmp.5150", "1440")
+  write(NOTES .. "/" .. KEY .. ".notes-asked", "150000\n")
+  write(NOTES .. "/" .. KEY .. ".notes.md", "# Notes\n")
 end
 
 -- Every file above must be gone after a reap. Named for what it is, so a failure reads as
@@ -107,6 +114,9 @@ local TARGETS = {
   { "the resume plan",                 RESUME .. "/" .. KEY .. ".plan.json" },
   { "a torn resume plan",              RESUME .. "/" .. KEY .. ".plan.json.tmp.5150" },
   { "a resume cancel",                 RESUME .. "/" .. KEY .. ".cancel" },
+  { "the notes due-at",                NOTES .. "/" .. KEY .. ".due-at" },
+  { "a torn notes due-at",             NOTES .. "/" .. KEY .. ".due-at.tmp.5150" },
+  { "the notes-asked marker",          NOTES .. "/" .. KEY .. ".notes-asked" },
 }
 
 -- A second session's files must SURVIVE both reaps -- a prefix sweep must not eat the fleet.
@@ -115,6 +125,7 @@ local OTHER = {
   MERGE .. "/k90.checker.json",
   TALK .. "/k90", INBOX .. "/k90/1790000000-000001-ab12.msg",
   RESUME .. "/k90.json", RESUME .. "/k90.plan.json",
+  NOTES .. "/k90.due-at", NOTES .. "/k90.notes-asked",
 }
 local function plantOther() for _, p in ipairs(OTHER) do write(p, "{}") end end
 
@@ -126,13 +137,14 @@ os.execute(([[
   export CC_STATUS_DIR=%q CC_MERGE_DIR=%q CC_ASK_DIR=%q
   export CC_GATE_TOOLS_DIR=%q CC_APPROVED_DIR=%q CC_AUTOPILOT_DIR=%q
   export CC_POLICY_DIR=%q CC_POLICY_OVERRIDE_DIR=%q CC_AUTOMODEL_DIR=%q CC_TALK_DIR=%q CC_INBOX_DIR=%q
-  export CC_RESUME_DIR=%q
+  export CC_RESUME_DIR=%q CC_NOTES_DIR=%q
   . %q; cc_remove %s
 ]]):format(STATUS, MERGE, ASK, T .. "/gt", T .. "/ap", T .. "/au",
-           T .. "/po", T .. "/pov", T .. "/am", TALK, INBOX, RESUME, ROOT .. "cc-lib.sh", KEY) .. " >/dev/null 2>&1")
+           T .. "/po", T .. "/pov", T .. "/am", TALK, INBOX, RESUME, NOTES, ROOT .. "cc-lib.sh", KEY) .. " >/dev/null 2>&1")
 for _, t in ipairs(TARGETS) do
   check("cc_remove drops " .. t[1], not exists(t[2]))
 end
+check("cc_remove leaves the notes the session wrote (like its handoff note)", exists(NOTES .. "/" .. KEY .. ".notes.md"))
 for _, p in ipairs(OTHER) do
   check("cc_remove leaves another session's " .. p:match("[^/]+$") .. " alone", exists(p))
 end
@@ -197,7 +209,7 @@ local ENV = { CC_STATUS_DIR = STATUS, CC_MERGE_DIR = MERGE, CC_ASK_DIR = ASK,
               CC_GATE_TOOLS_DIR = T .. "/gt", CC_APPROVED_DIR = T .. "/ap",
               CC_AUTOPILOT_DIR = T .. "/au", CC_POLICY_DIR = T .. "/po",
               CC_POLICY_OVERRIDE_DIR = T .. "/pov", CC_AUTOMODEL_DIR = T .. "/am",
-              CC_TALK_DIR = TALK, CC_INBOX_DIR = INBOX, CC_RESUME_DIR = RESUME,
+              CC_TALK_DIR = TALK, CC_INBOX_DIR = INBOX, CC_RESUME_DIR = RESUME, CC_NOTES_DIR = NOTES,
               CC_WORKLIST_FILE = T .. "/worklist.json", CC_LABELS_FILE = T .. "/labels.json",
               HOME = T }
 os.getenv = function(k) if ENV[k] ~= nil then return ENV[k] end; return realGetenv(k) end
@@ -209,10 +221,14 @@ check("the dashboard loads", ok)
 if not ok then print("       " .. tostring(err)); finish() end
 local fx = rawget(_G, "__ccDashboard").fx
 
+-- 2026-09-29: planted again after the load -- its first tick runs with compaction off, and that
+-- sweeps every notes due-at (FX.sweepDueAt), which would hide what removeStatus does with them.
+plant(); plantOther()
 quiet(function() fx.removeStatus(KEY) end)
 for _, t in ipairs(TARGETS) do
   check("FX.removeStatus drops " .. t[1], not exists(t[2]))
 end
+check("FX.removeStatus leaves the notes the session wrote", exists(NOTES .. "/" .. KEY .. ".notes.md"))
 for _, p in ipairs(OTHER) do
   check("FX.removeStatus leaves another session's " .. p:match("[^/]+$") .. " alone", exists(p))
 end

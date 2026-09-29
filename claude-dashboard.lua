@@ -1403,6 +1403,207 @@ function FX.pruneNotes(now)
   end
 end
 
+-- ---- Auto-compact with notes (build program unit 16, 2026-09-29) -----------------------------
+-- compact.enabled sets env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE in Claude Code's settings.json to
+-- compact.atPct (FX.syncCompactEnv), and gives each live session a due-at, cc-notes/<key>.due-at
+-- (core.compactDue): past it, the session's Stop hook asks it once per compaction cycle to write
+-- cc-notes/<key>.notes.md (cc_notes_request, cc-lib.sh), and SessionStart(compact) hands them
+-- back. The card shows 📝 when a session has notes. Diagnostics checks the installed claude still
+-- reads the override (FX.compactFacts). Only the live panel runs this -- never a worktree.
+FX.CLAUDE_SETTINGS = CLAUDE_DIR .. "/settings.json"
+FX._dueAt = {}              -- key -> the due-at line last written for it
+FX._notesSeen = {}          -- key -> { at = when looked, notes = { at, bytes } | false }
+FX.NOTES_LOOK_SECONDS = 5   -- how often a session's notes file is looked at
+
+-- Set (value) or remove (value nil) env.<key> in Claude Code's settings.json and nothing else:
+-- atomic, through symlinks, an unreadable file left alone (core.settingsEnvCmd). true on success.
+function FX.setClaudeSettingsEnv(key, value)
+  local cmd = core.settingsEnvCmd(FX.CLAUDE_SETTINGS, key, value)
+  if not cmd then
+    print("[cc-dashboard] ❌ settings.json env: refused the key " .. tostring(key) .. " (not an env var name)")
+    return false, "not an env var name"
+  end
+  -- never hs.execute's login shell (cmd, true): it pastes the command into naive double quotes,
+  -- which would mangle the script; the script sets its own PATH for jq instead
+  local out = hs.execute(cmd)
+  local ok, why = core.settingsEnvResult(out)
+  if ok then
+    print("[cc-dashboard] ✅ " .. FX.CLAUDE_SETTINGS .. ": env." .. key
+      .. (value ~= nil and (" = " .. tostring(value)) or " removed") .. " (" .. tostring(why) .. ")")
+  else
+    print("[cc-dashboard] ❌ couldn't change env." .. key .. " in " .. FX.CLAUDE_SETTINGS .. ": " .. tostring(why))
+  end
+  return ok, why
+end
+
+-- env.<key> as Claude Code's settings.json says it now; nil when unset or unreadable.
+function FX.claudeSettingsEnv(key)
+  local raw = FX.readFile(FX.CLAUDE_SETTINGS)
+  if not raw then return nil end
+  local okj, t = pcall(function() return core.json.decode(raw) end)
+  if not okj or type(t) ~= "table" or type(t.env) ~= "table" or t.env[key] == nil then return nil end
+  return tostring(t.env[key])
+end
+
+-- Bring settings.json's override in line with compact.* (core.compactEnvPlan). Runs each tick but
+-- touches the file only when the setting changed since the last sync -- or on a Settings Save
+-- (force). What Shepherd wrote is remembered in hs.settings, so turning compaction off takes out
+-- only its own value. A failed write waits 5 minutes before the tick tries again.
+function FX.syncCompactEnv(cfg, force)
+  local cc = core.compactConfig(cfg)
+  local state = cc.enabled and tostring(cc.atPct) or "off"
+  if FX._compactEnvState == nil then FX._compactEnvState = hs.settings.get("ccCompactEnvApplied") or false end
+  if not force and FX._compactEnvState == state then return "same" end
+  if not force and FX._compactEnvFailedAt and FX.now() - FX._compactEnvFailedAt < 300 then return "waiting" end
+  local key = core.COMPACT.envKey
+  local p = core.compactEnvPlan(cc, hs.settings.get("ccCompactEnvOurs"), FX.claudeSettingsEnv(key))
+  if p.op == "set" or p.op == "remove" then
+    if not FX.setClaudeSettingsEnv(key, p.value) then
+      FX._compactEnvFailedAt = FX.now()
+      return "failed"
+    end
+  end
+  FX._compactEnvFailedAt = nil
+  hs.settings.set("ccCompactEnvOurs", p.synced)
+  hs.settings.set("ccCompactEnvApplied", state)
+  FX._compactEnvState = state
+  return p.op
+end
+
+-- Every due-at goes when compaction is off, so no hook asks for notes: once per switch-off, and
+-- once after a load with it off (a due-at an earlier run left).
+function FX.sweepDueAt()
+  FX._compactSwept = true
+  FX._dueAt = {}
+  for _, name in ipairs(FX.readDir(FX.NOTES_DIR)) do
+    if name:match("%.due%-at$") then
+      os.remove(FX.NOTES_DIR .. "/" .. name)
+      print("[cc-dashboard] 🔍 compaction is off: removed " .. name)
+    end
+  end
+end
+
+-- Per tick: each local session's notes (it.notes, for the 📝 chip and the detail line) and, with
+-- compaction on, its due-at (it.compact), written only when it changes. The window needs a known
+-- model -- the usage pass's live one, else the status file's: an unknown one would read as 200k
+-- and ask a 1M session for notes at 14%.
+function FX.stepCompact(list, cfg)
+  local cc = core.compactConfig(cfg)
+  if cc.enabled then FX._compactSwept = nil
+  elseif not FX._compactSwept then FX.sweepDueAt() end
+  local now, seen = FX.now(), {}
+  for _, it in ipairs(type(list) == "table" and list or {}) do
+    local key = it.key
+    if type(key) == "string" and not it.remote and core.mailboxKeyOk(key) then
+      seen[key] = true
+      local ns = FX._notesSeen[key]
+      if not ns or now - ns.at >= FX.NOTES_LOOK_SECONDS then
+        local a = hs.fs.attributes(FX.NOTES_DIR .. "/" .. key .. ".notes.md")
+        local has = type(a) == "table" and a.mode == "file" and (tonumber(a.size) or 0) > 0
+        ns = { at = now, notes = has and { at = tonumber(a.modification), bytes = tonumber(a.size) } or false }
+        FX._notesSeen[key] = ns
+      end
+      it.notes = ns.notes or nil
+      it.compact = nil
+      if cc.enabled and type(it.transcript_path) == "string" and it.transcript_path ~= "" then
+        local st = usageState[it.transcript_path]
+        local model = st and st.lastModel
+        -- an API error's record is model "<synthetic>": no window to read from it
+        if type(model) ~= "string" or model == "" or model:sub(1, 1) == "<" then model = it.live_model or it.model end
+        if type(model) == "string" and model ~= "" and model:sub(1, 1) ~= "<" then
+          local d = core.compactDue(cc, cfg, model, (st and st.lastContext) or it.context_tokens or 0,
+                                    { oneM = FX.sessionOneM(it) })
+          local line = core.dueAtLine(d)
+          if line and FX._dueAt[key] ~= line then
+            if FX.writeFileAtomic(FX.NOTES_DIR .. "/" .. key .. ".due-at", line) then
+              FX._dueAt[key] = line
+              print("[cc-dashboard] 🔍 " .. key .. ": notes due at " .. d.due .. " tokens, compaction at " .. d.compactAt)
+            else
+              print("[cc-dashboard] ⚠️ couldn't write the notes due-at for " .. key)
+            end
+          end
+          if d then it.compact = { due = d.due, at = d.compactAt, window = d.window, atPct = cc.atPct } end
+        end
+      end
+    end
+  end
+  for k in pairs(FX._notesSeen) do if not seen[k] then FX._notesSeen[k] = nil end end
+  for k in pairs(FX._dueAt) do if not seen[k] then FX._dueAt[k] = nil end end
+end
+
+-- Each installed claude a session may run: the CLI, and the newest binary each editor extension
+-- bundles (VS Code and Cursor sessions run that one). Symlinks resolved, each once. Kept 10
+-- minutes: finding the CLI asks a login shell, which is slow.
+function FX.compactBinaries()
+  local c = FX._compactBins
+  if c and FX.now() - c.at < 600 then return c.list end
+  local out, seen = {}, {}
+  local function add(label, p)
+    if type(p) ~= "string" or p == "" then return end
+    local real = hs.fs.pathToAbsolute(p) or p
+    if seen[real] then return end
+    seen[real] = true
+    out[#out + 1] = { label = label, path = real }
+  end
+  add("claude CLI", FX.claudeBinPath())
+  local home = os.getenv("HOME") or ""
+  for _, e in ipairs({ { "VS Code extension", home .. "/.vscode/extensions" },
+                       { "Cursor extension", home .. "/.cursor/extensions" } }) do
+    local newest = core.newestClaudeExtension(FX.readDir(e[2]))
+    local p = newest and (e[2] .. "/" .. newest .. "/resources/native-binary/claude")
+    if p and hs.fs.attributes(p) then add(e[1], p) end
+  end
+  FX._compactBins = { at = FX.now(), list = out }
+  return out
+end
+
+-- Diagnostics' facts (core.doctorChecks): the setting, settings.json's value, and whether each
+-- installed claude still mentions the override. A binary is grepped once per version (size and
+-- mtime), in the background -- ~1s of a 200MB file must never stall the panel; until then it
+-- reads as "checking".
+function FX.compactFacts(cfg)
+  local cc = core.compactConfig(cfg)
+  local facts = { enabled = cc.enabled, want = cc.enabled and tostring(cc.atPct) or nil,
+                  current = FX.claudeSettingsEnv(core.COMPACT.envKey), binaries = {} }
+  if not cc.enabled then return facts end
+  local cache = hs.settings.get("ccCompactCli") or {}
+  local queue = {}
+  for _, bin in ipairs(FX.compactBinaries()) do
+    local b = { label = bin.label, path = bin.path }   -- a fresh row: the list is cached
+    local a = hs.fs.attributes(b.path)
+    local sig = type(a) == "table" and (tostring(a.size) .. ":" .. tostring(a.modification)) or nil
+    local c = cache[b.path]
+    if sig and type(c) == "table" and c.sig == sig then b.knows = c.knows
+    elseif sig then queue[#queue + 1] = { path = b.path, sig = sig } end
+    facts.binaries[#facts.binaries + 1] = b
+  end
+  if #queue > 0 and not FX._compactCliTask then FX.compactCliCheck(queue) end
+  return facts
+end
+
+-- grep the queued binaries one at a time; the task is retained until it calls back.
+function FX.compactCliCheck(queue)
+  local job = table.remove(queue, 1)
+  if not job then FX._compactCliTask = nil; return end
+  FX._compactCliTask = hs.task.new("/usr/bin/grep", function(code, out)
+    local n = tonumber((tostring(out or ""):match("%d+")))
+    local knows
+    if code == 0 and n and n > 0 then knows = true elseif code == 1 then knows = false end
+    if knows ~= nil then
+      local cache = hs.settings.get("ccCompactCli") or {}
+      cache[job.path] = { sig = job.sig, knows = knows }
+      hs.settings.set("ccCompactCli", cache)
+      print("[cc-dashboard] " .. (knows and "✅ " or "⚠️ ") .. job.path
+        .. (knows and " reads " or " doesn't mention ") .. core.COMPACT.envKey)
+    else
+      print("[cc-dashboard] ❌ couldn't check " .. job.path .. " for " .. core.COMPACT.envKey .. " (grep exit " .. tostring(code) .. ")")
+    end
+    FX._compactCliTask = nil
+    FX.compactCliCheck(queue)
+  end, { "-a", "-c", "-m1", core.COMPACT.envKey, job.path })
+  if FX._compactCliTask then FX._compactCliTask:start() end
+end
+
 -- Read + parse + filter the ledger. opts = { session, sinceTs, untilTs, types,
 -- limit }. Caps the slice (newest-first) so a huge ledger can't bloat the webview
 -- payload; limit <= 0 disables the cap (the export/review full-data paths).
@@ -1481,6 +1682,8 @@ function FX.doctorStatus()
     ledgerBytes = ledgerBytes,
     sessions = sessions,
     mailbox = FX.mailboxFacts(),   -- 2026-09-29: messages waiting in the session mailbox
+    -- 2026-09-29: auto-compact -- the override in settings.json, and each installed claude reading it
+    compact = (function() local okc, f = pcall(FX.compactFacts, cfg); return okc and f or nil end)(),
   })
 end
 
@@ -3172,6 +3375,15 @@ function FX.removeStatus(key)
       if fn:sub(1, #jt) == jt then os.remove(FX.RESUME_DIR .. "/" .. fn) end
       if fn:sub(1, #pt) == pt then os.remove(FX.RESUME_DIR .. "/" .. fn) end
     end
+    -- auto-compact (2026-09-29): the notes due-at, a torn write of it, and the hook's once-per-cycle
+    -- marker (cc_remove too). The notes the session wrote stay, like its handoff note.
+    os.remove(FX.NOTES_DIR .. "/" .. key .. ".due-at")
+    os.remove(FX.NOTES_DIR .. "/" .. key .. ".notes-asked")
+    local dt = key .. ".due-at.tmp."
+    for _, fn in ipairs(FX.readDir(FX.NOTES_DIR)) do
+      if fn:sub(1, #dt) == dt then os.remove(FX.NOTES_DIR .. "/" .. fn) end
+    end
+    if FX._dueAt then FX._dueAt[key] = nil end
   end
 end
 
@@ -7702,6 +7914,12 @@ local function handleBridgeMsg(msg)
       -- their own (automation.dryRun, <feature>.dryRun); a Save without them keeps what's there.
       core.applyDryRunFlags(cfg, parsed.dryRun)
       FX.writeFile(CONFIG_FILE, hs.json.encode(cfg, true))  -- creates if missing
+      -- 2026-09-29: the Auto-compact switch sets (or takes out Shepherd's own) override in Claude
+      -- Code's settings.json right away, even when the value looks unchanged (it may have been lost)
+      if type(incoming.compact) == "table" then
+        local okc, errc = pcall(FX.syncCompactEnv, cfg, true)
+        if not okc then print("[cc-dashboard] ❌ auto-compact settings sync failed: " .. tostring(errc)) end
+      end
       if parsed.gate == true then FX.writeFile(GATE_FLAG, "")
       else os.remove(GATE_FLAG) end
       -- Launch-on-startup: the source of truth is Hammerspoon's real login item.
@@ -10343,6 +10561,8 @@ local HTML = [[
   /* 2026-09-28: talk mode (build program unit 6) -- the session reads and talks, changes nothing */
   .talk { font-size:10px; margin-left:6px; padding:1px 6px; border-radius:8px; font-weight:600;
     letter-spacing:.04em; color:var(--accent-text); border:1px solid var(--accent); background:var(--accent-bg); }
+  /* 2026-09-29: auto-compact -- the session saved notes for its next compaction */
+  .notes-b { font-size:10px; margin-left:6px; line-height:1; }
   @keyframes spin { to { transform:rotate(360deg); } }
   /* 2026-09-17: .srow (dot + status line) and .badges (risk / PR / background agents) are
      grouping wrappers the CARDS theme lays out. Every other theme places .dot / .label /
@@ -10826,6 +11046,8 @@ local HTML = [[
   #d-name { font-size:14px; font-weight:700; color:var(--text-strong); }
   #d-status { font-size:11px; color:var(--muted); margin-left:auto; }
   #d-working { display:none; font-size:12px; color:var(--text-2); margin:5px 0 0 18px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  /* 2026-09-29: auto-compact -- the session's notes and when they're next due (notesLine) */
+  #d-notes { display:none; font-size:12px; color:var(--text-2); margin:3px 0 0 18px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .wo-chip { display:inline-block; font-size:10px; line-height:14px; padding:0 5px; margin-left:5px; border-radius:7px;
              border:1px solid currentColor; vertical-align:1px; font-weight:400; }
   .wo-tool { color:var(--st-working); }
@@ -11626,6 +11848,7 @@ local HTML = [[
       <span id="d-status"></span>
     </div>
     <div id="d-working"></div>
+    <div id="d-notes"></div>
     <div id="d-empty"><span id="de-text"></span> <button id="b-closeempty" onclick="if(selectedKey) send('close-empty', selectedKey, 'all')" title="Close the never-used chats in this window (they're all named Claude Code)">Close them</button></div>
     <!-- Batch driving (2026-09-11): a batch this session proposes or drives; filled with textContent
          only; the note and the checkbox are never rebuilt by a re-render. -->
@@ -11946,6 +12169,9 @@ local HTML = [[
       <div class="s-lbl">Or just these</div>
       <div id="s-dry-list" class="s-dry-list"></div>
       <div class="s-help">A dry run still waits for a session that can take the text, so what it records is what would really have happened. Every decision (acted, would, or refused and why) is listed in ☰ → ⚡ Automation trace, newest first with repeats as ×N, and goes to the audit ledger when that's on (<code>would_continue</code>, <code>would_feed</code>, …).</div>
+      <div class="s-sec">Auto-compact (notes kept across compaction)</div>
+      <label class="s-row"><input type="checkbox" id="s-cmp-en"> Compact sessions earlier, after they save their notes</label>
+      <div class="s-help">Sets <code>CLAUDE_AUTOCOMPACT_PCT_OVERRIDE</code> in <code>~/.claude/settings.json</code>, so Claude Code compacts a session at <input type="number" id="s-cmp-at" class="s-num" min="10" max="100"> % of its window (measured the way Claude Code does, less its output reserve; sessions started from now on). At its first turn end <input type="number" id="s-cmp-lead" class="s-num" min="1"> points before that, a session is asked once to write its working notes to <code>~/.claude/cc-notes/</code>; the summary is told they come back, and the session gets them back right after it compacts. A 📝 on the card means it has notes. Off: Shepherd takes its own value back out of settings.json. Needs the hooks from <code>make setup</code>.</div>
 
       <div class="s-sec">Insights</div>
       <label class="s-row">Cap "time blocked on you" per approval at <input type="number" id="s-ins-block" class="s-num" min="0"> seconds</label>
@@ -14353,6 +14579,9 @@ local HTML = [[
       ck("s-cont-auto",  cv(cfg,"autoContinue.enabled",false));
       val("s-cont-delay",cv(cfg,"autoContinue.delaySeconds",60));
       val("s-cont-max",  cv(cfg,"autoContinue.maxAttempts",3));
+      ck("s-cmp-en",     cv(cfg,"compact.enabled",false));      // 2026-09-29: auto-compact
+      val("s-cmp-at",    cv(cfg,"compact.atPct",85));
+      val("s-cmp-lead",  cv(cfg,"compact.notesLeadPct",5));
       val("s-ins-block", cv(cfg,"insights.maxBlockSeconds",1800));
       ck("s-ins-host",   cv(cfg,"insights.hostStats",false));   // #6 host stats strip
       // L5 observability toggles (were config-only).
@@ -14581,6 +14810,9 @@ local HTML = [[
                            staleSeconds: num("s-resp-stale",600) } },
         autoContinue: { enabled: ck("s-cont-auto"), delaySeconds: num("s-cont-delay",60),
                         maxAttempts: num("s-cont-max",3) },
+        // 2026-09-29: auto-compact -- every key has an input, so the block is form-managed whole;
+        // the save handler syncs settings.json's CLAUDE_AUTOCOMPACT_PCT_OVERRIDE from it.
+        compact: { enabled: ck("s-cmp-en"), atPct: num("s-cmp-at",85), notesLeadPct: num("s-cmp-lead",5) },
         insights: { maxBlockSeconds: num("s-ins-block",1800), hostStats: ck("s-ins-host") },
         // bridge carries NO staleSlackSeconds/keystrokes keys: SETTINGS_KEEP_SUBKEYS
         // preserves the hand-edited ones across this wholesale block replace.
@@ -15825,6 +16057,13 @@ local HTML = [[
       if(el._woh !== h){ el._woh = h; el.innerHTML = h; }
       el.style.display = h ? "block" : "none";
     }
+    // 2026-09-29: the session's compaction notes, under what it's working on (textContent only)
+    function renderNotes(it){
+      var el = document.getElementById("d-notes"); if(!el) return;
+      var t = notesLine(it);
+      if(el.textContent !== t) el.textContent = t;
+      el.style.display = t ? "block" : "none";
+    }
     // Small badges: detected editor + live permission mode + effort + model.
     function renderMeta(it){
       var el = document.getElementById("d-meta"), bits = [];
@@ -16130,6 +16369,7 @@ local HTML = [[
         statusWords(it) + (it.since ? " - " + fmtAge(it.since) : "") + (it.stale && !bgRunning(it) ? " - stale" : "") + backoffTail(it);
       document.getElementById("d-status").textContent += resumeTail(it);   // 2026-09-29: "resumes at 3:00pm"
       renderWorking(it);
+      renderNotes(it);   // 2026-09-29: auto-compact's notes line
       var pend = document.getElementById("d-pending");
       if(it.pending && it.pending.summary){
         pend.textContent = "Wants: " + it.pending.summary + (it.gate === "waiting" ? "  (hands-free approve)" : "");
@@ -18808,8 +19048,29 @@ local HTML = [[
     // row of its own in the cards theme. One badges row now holds them -- emitted ONLY when at
     // least one badge exists, so a card without any gains no empty row.
     function badgesHtml(it){
-      var b = talkBadge(it) + riskBadge(it) + prBadgeHtml(it) + bgBadge(it);
+      var b = talkBadge(it) + riskBadge(it) + prBadgeHtml(it) + bgBadge(it) + notesBadge(it);
       return b ? '<span class="badges">'+b+'</span>' : "";
+    }
+    // 2026-09-29: auto-compact (build program unit 16) -- this session saved working notes, which it
+    // gets back after its next compaction (FX.stepCompact sets it.notes). Fixed markup only.
+    function notesBadge(it){
+      if(!it || !it.notes) return "";
+      return '<span class="notes-b" title="Working notes saved for its next compaction (~/.claude/cc-notes)">📝</span>';
+    }
+    // ...and the detail panel's line: when they were saved, and when they're due again and the
+    // session compacts (it.compact, while compaction is on). Plain text; only numbers reach it.
+    function notesLine(it){
+      if(!it) return "";
+      var n = it.notes, c = it.compact, parts = [];
+      function k(t){ return Math.round(t / 1000) + "k"; }
+      if(n && typeof n.at === "number"){
+        var size = typeof n.bytes === "number" ? (n.bytes < 1024 ? n.bytes + " B" : (n.bytes / 1024).toFixed(1) + " KB") : "";
+        parts.push("saved " + fmtAge(n.at) + " ago" + (size ? " (" + size + ")" : ""));
+      }
+      if(c && typeof c.due === "number" && typeof c.at === "number"){
+        parts.push("due at " + k(c.due) + " tokens, compaction at " + k(c.at));
+      }
+      return parts.length ? "📝 Notes " + parts.join(" · ") : "";
     }
     // 2026-09-28: talk mode (build program unit 6) -- this session can read and talk, not change.
     function talkBadge(it){
@@ -20604,6 +20865,14 @@ function FX._refreshBody()
   do
     local okr, errr = pcall(FX.stepResume, list)
     if not okr then print("[cc-dashboard] ❌ resume step failed: " .. tostring(errr)) end
+  end
+  -- auto-compact with notes (2026-09-29): settings.json's override follows compact.*, each session
+  -- gets its notes due-at, and the cards learn which sessions have notes
+  do
+    local oks, errs = pcall(FX.syncCompactEnv, cfg)
+    if not oks then print("[cc-dashboard] ❌ auto-compact settings sync failed: " .. tostring(errs)) end
+    local okc, errc = pcall(FX.stepCompact, list, cfg)
+    if not okc then print("[cc-dashboard] ❌ auto-compact step failed: " .. tostring(errc)) end
   end
   FX.annotateEmptyChats(list)       -- never-used "Claude Code" chats, closable from the card (2026-09-11)
   -- 2026-09-17: LAST of the annotations -- it needs every source at once. One predicate decides

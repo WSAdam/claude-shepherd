@@ -178,6 +178,13 @@
     "enabled": true
   },
 
+  "compact": {
+    "_comment": "Auto-compact with notes (OFF unless true; on in a fresh install's defaults). Shepherd sets env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE in ~/.claude/settings.json to atPct (only that key, atomically, through a symlink), so Claude Code compacts sessions started afterwards at atPct of its auto-compact window (the window less its 20k output reserve: 85 = 153k tokens of 200k, 833k of 1M). Each live session gets ~/.claude/cc-notes/<key>.due-at notesLeadPct points earlier; at the first turn end past it, cc-status.sh stop asks the session once per compaction cycle to write ~/.claude/cc-notes/<key>.notes.md (never while stop_hook_active or in plan mode). PreCompact tells the summary the notes come back; SessionStart(compact) hands them back, up to 12 KB. Turning it off takes Shepherd's own value back out of settings.json (a value you set yourself stays). Diagnostics warns if an installed claude stops reading the override.",
+    "enabled": false,
+    "atPct": 85,
+    "notesLeadPct": 5
+  },
+
   "fleet": {
     "_comment": "Batch driving (ON by default). A Claude session proposes a batch of worktree units with ~/.claude/cc-fleet.sh propose; its card and detail panel show it for ONE approval (with a 'Claude may merge these when green' box). Approved, the session has Shepherd open each unit's tab and hands the unit its task by SendMessage; merges on the grant go through only for a unit's own session and branch. Stop batch ends it. false = proposals are ignored.",
     "enabled": true
