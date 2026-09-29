@@ -29,6 +29,7 @@ mkdir -p "$C/cc-notes/pending"; printf '# Handoff\n' > "$C/cc-notes/abc.handoff.
 mkdir -p "$C/cc-inbox/abc"; printf '{"nonce":"ab"}' > "$C/cc-inbox/abc/1790000000-000001-ab.msg"
 mkdir -p "$C/cc-resume"; printf '{"key":"abc","nonce":"ab","state":"waiting"}' > "$C/cc-resume/abc.json"
 mkdir -p "$C/cc-pins"; printf '{"v":1,"root":"/r","pins":[]}' > "$C/cc-pins/-r.json"
+mkdir -p "$C/cc-lease/db"; printf '{"v":1,"main":"/r","leases":{}}' > "$C/cc-lease/-r.json"
 mkdir -p "$C/cc-bridge"; printf '0.5.0' > "$C/cc-bridge/.installed"
 FAKE="$TMP/code"
 printf '#!/bin/sh\necho "$*" >> "%s"\nexit 0\n' "$TMP/code.calls" > "$FAKE"; chmod +x "$FAKE"
@@ -87,6 +88,8 @@ assert_eq "--purge removes the session mailbox" "gone" "$([ -e "$C/cc-inbox" ] &
 assert_eq "--purge removes the resumes waiting for a limit reset" "gone" "$([ -e "$C/cc-resume" ] && echo there || echo gone)"
 # 2026-09-29: the pinned links (cc-pins/) are Shepherd's state too
 assert_eq "--purge removes the pinned links" "gone" "$([ -e "$C/cc-pins" ] && echo there || echo gone)"
+# 2026-09-29: the worktree leases (cc-lease/, with the default database folder inside it) too
+assert_eq "--purge removes the worktree leases" "gone" "$([ -e "$C/cc-lease" ] && echo there || echo gone)"
 assert_eq "--purge still keeps the user's own files" "there" "$([ -e "$C/cc-mine.sh" ] && echo there || echo gone)"
 
 # a CLAUDE.md that is only the block (a fresh machine) is removed, not left empty

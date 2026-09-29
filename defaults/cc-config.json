@@ -136,5 +136,11 @@
     "enabled": true,
     "atPct": 85,
     "notesLeadPct": 5
+  },
+  "lease": {
+    "enabled": true,
+    "portFrom": 4100,
+    "portTo": 4199,
+    "dbDir": "~/.claude/cc-lease/db"
   }
 }

@@ -66,6 +66,7 @@ The panel re-reads the file within about a second (except `hotkeys`, which need 
 | `usage`, `context`, `pricing`, `commits` | Plan bars, limit alerts, context bar, cost, commit counts | [Usage and cost](usage-and-cost.md) |
 | `spawn`, `providers`, `remoteControl`, `bridge` | Launching sessions, backends, Remote Control, remote tiles | [Controls](controls.md#spawn-new-sessions), [Providers and integrations](providers-and-integrations.md) |
 | `stacks`, `keystrokes`, `search`, `hotkeys`, `voice` | Project cards, the shared-window guard, search, shortcuts, Stream Deck voice | [Fleet](fleet.md), [Controls](controls.md) |
+| `lease` | Each worktree's own port (`portFrom`–`portTo`) and database folder (`dbDir`) | [Fleet](fleet.md#worktree-leases) |
 | `appearance`, `alerts`, `worklist` | Look, on-screen alerts, My List archive | [Make it yours](customizing.md), [Fleet](fleet.md#my-list) |
 
 A starting point for the most common switches:
@@ -108,6 +109,7 @@ Everything lives under `~/.claude/`:
 | `cc-resume/` | [Resumes waiting for a usage limit's reset](automation.md#resume-at-the-limit-reset): the hook's arm, Shepherd's plan, a Cancel |
 | `cc-notes/` | [Handoff notes](automation.md#handoff-notes), and [auto-compact](automation.md#auto-compact-with-notes)'s due-ats and each session's own notes |
 | `cc-bridge/` | The tab bridge's per-window tab lists and command folders |
+| `cc-lease/` | [Worktree leases](fleet.md#worktree-leases): each repo's leased ports and database paths, and (by default) the databases in `db/` |
 | `cc-policy/`, `cc-gate-tools/`, `cc-automodel/` | Per-session policy, gated-tool and auto-model settings |
 | `cc-ledger/` | The audit ledger (one JSONL file per day) |
 | `cc-labels.json`, `cc-groups.json` | Relabels and groups, by project |

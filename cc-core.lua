@@ -2010,20 +2010,26 @@ function M.newWorktreeTabRequest(spec, ctx)
 end
 
 -- The prompt a new worktree tab opens with (typed in, not sent). The task is trimmed and
--- capped; with none, the tab waits for instructions once it's in its worktree.
-function M.worktreeTabPrompt(req, task)
+-- capped; with none, the tab waits for instructions once it's in its worktree. A worktree lease
+-- (2026-09-29, M.leasePromptLine) goes between the two, outside the task's cap.
+function M.worktreeTabPrompt(req, task, lease)
   task = type(task) == "string" and task:gsub("^%s+", ""):gsub("%s+$", "") or ""
   if #task > 4000 then task = task:sub(1, 4000) end
+  local line = M.leasePromptLine(lease)
   return "Start unit " .. req.branch .. " in its own worktree: call EnterWorktree with name \"" .. req.slug
     .. "\", then rename its branch with `git branch -m " .. req.branch .. "`.\n\n"
+    .. (line ~= "" and (line .. "\n\n") or "")
     .. (task ~= "" and task or "Then wait for my instructions.")
 end
 
--- The prompt that picks an existing .claude/worktrees/ worktree back up in a new tab.
-function M.enterWorktreePrompt(path, branch)
+-- The prompt that picks an existing .claude/worktrees/ worktree back up in a new tab (with the
+-- worktree's lease, 2026-09-29, when it has one).
+function M.enterWorktreePrompt(path, branch, lease)
+  local line = M.leasePromptLine(lease)
   return "Resume work in the worktree at " .. tostring(path)
     .. ((type(branch) == "string" and branch ~= "") and (" (branch " .. branch .. ")") or "")
     .. ": call EnterWorktree with path \"" .. tostring(path) .. "\", then wait for my instructions."
+    .. (line ~= "" and ("\n\n" .. line) or "")
 end
 
 -- The sessions living in the editor window a spawn for `project` would reuse: local VS
@@ -4052,8 +4058,8 @@ function M.newTabSession(before, after, root)
 end
 
 -- What the driver sends a unit's tab: the New worktree tab prompt, the task, how to finish, and
--- who to report to.
-function M.fleetUnitMessage(batch, unit)
+-- who to report to. With the unit worktree's lease (2026-09-29), the prompt states it.
+function M.fleetUnitMessage(batch, unit, lease)
   local who = (batch.driver.name ~= "" and batch.driver.name) or "the session that sent this"
   -- 2026-09-29: what it comes after, what it covers and its packet, when the batch says so
   local extra = {}
@@ -4073,7 +4079,7 @@ function M.fleetUnitMessage(batch, unit)
     extra[#extra + 1] = "Its task packet: " .. unit.packet .. "."
   end
   -- after the task, outside worktreeTabPrompt's 4000-character cap, so a full task can't cut them
-  return M.worktreeTabPrompt({ branch = unit.branch, slug = unit.slug }, "Task: " .. unit.task)
+  return M.worktreeTabPrompt({ branch = unit.branch, slug = unit.slug }, "Task: " .. unit.task, lease)
     .. ((#extra > 0) and ("\n\n" .. table.concat(extra, "\n")) or "")
     .. "\n\nThis is unit " .. unit.branch .. " of the batch \"" .. batch.title .. "\" that Adam approved in Shepherd. "
     .. "When the unit is done (suite green, everything committed), finish it with the ready-to-merge "
@@ -9463,6 +9469,9 @@ M.SETTINGS_KEEP_SUBKEYS = {
   autoContinue = { "backoff", "dryRun" },
   -- 2026-09-29: the form doesn't send `merge` today; if it ever rebuilds it, repoGate (no input) stays.
   merge = { "repoGate" },
+  -- 2026-09-29: worktree leases have no inputs; if the form ever rebuilds `lease`, the hand-set
+  -- port range and database folder stay.
+  lease = { "portFrom", "portTo", "dbDir" },
   automation = { "dryRun" },
   queue = { "dryRun" },
   rules = { "dryRun" },
@@ -15142,6 +15151,173 @@ function M.pinOpenPlan(pins, i, root, real)
   return { kind = "file", path = rp }
 end
 
+-- ---- Worktree leases (build program unit 27, 2026-09-29) --------------------------------------
+-- Parallel units that each run a dev server or a database fought over one port and one file. Each
+-- worktree Shepherd starts a session for (New worktree tab, a batch unit, Instances Open) now gets
+-- its own PORT and DB path: ~/.claude/cc-lease/<M.leaseFileName(main)> maps each linked worktree
+-- of that main checkout to { port, db, at, seen }. Only Shepherd writes it (FX.mintLease,
+-- FX.sweepLeases); the SessionStart hook reads it (_cc_ctx_lease). A port is machine-wide, so a
+-- mint never hands out one that ANY repo's lease holds. A lease minted before its worktree exists
+-- (the tab hasn't run EnterWorktree yet) is `seen` once the folder appears; a seen lease whose
+-- worktree is gone is released, and one never seen after M.LEASE_PENDING_SECONDS.
+M.LEASE_PORT_FROM, M.LEASE_PORT_TO = 4100, 4199
+M.LEASE_DB_DIR = "~/.claude/cc-lease/db"
+M.LEASE_PENDING_SECONDS = 86400
+M.LEASE_ENV_FILE = "shepherd-lease.env"
+
+-- An absolute path with no control character (every path a lease names).
+function M.leasePathOk(p)
+  return type(p) == "string" and p:sub(1, 1) == "/" and not p:find("%c")
+end
+
+-- lease.* -> { enabled, from, to, dbDir }. A range that isn't two whole ports in 1024-65535, low
+-- to high, is the default; so is a dbDir that isn't absolute after ~/ (the home folder), or holds
+-- a quote or a control character.
+function M.leaseSettings(cfg, home)
+  local l = type(cfg) == "table" and type(cfg.lease) == "table" and cfg.lease or {}
+  local function port(v)
+    v = tonumber(v)
+    if v and v == math.floor(v) and v >= 1024 and v <= 65535 then return math.floor(v) end
+  end
+  local from, to = port(l.portFrom), port(l.portTo)
+  if not (from and to and from <= to) then from, to = M.LEASE_PORT_FROM, M.LEASE_PORT_TO end
+  local function dir(d)
+    if type(d) ~= "string" then return nil end
+    if d:sub(1, 2) == "~/" and type(home) == "string" and home:sub(1, 1) == "/" then d = M.normDir(home) .. d:sub(2) end
+    if not M.leasePathOk(d) or d:find("'", 1, true) then return nil end
+    return M.normDir(d)
+  end
+  return { enabled = l.enabled ~= false, from = from, to = to,
+           dbDir = dir(l.dbDir) or dir(M.LEASE_DB_DIR) or M.LEASE_DB_DIR }
+end
+
+-- The registry's name for a main checkout (M.pinFileName's encoding). Two checkouts can share a
+-- name, so the file names its main and every reader checks it.
+function M.leaseFileName(main) return M.pinFileName(M.normDir(main)) end
+
+-- A registry file -> { main, leases = { [worktree] = { port, db, at, seen } } }, or nil. With
+-- <main>, a file written for another checkout (a name both share) is nil. Only a well-formed lease
+-- is read: a whole-number port in 1-65535 and absolute paths with no control character.
+function M.parseLeases(raw, main)
+  if type(raw) ~= "string" or raw == "" then return nil end
+  local ok, t = pcall(function() return M.json.decode(raw) end)
+  if not ok or type(t) ~= "table" or not M.leasePathOk(t.main) then return nil end
+  if main ~= nil and M.normDir(t.main) ~= M.normDir(main) then return nil end
+  local out = { main = M.normDir(t.main), leases = {} }
+  for wt, l in pairs(type(t.leases) == "table" and t.leases or {}) do
+    local port = type(l) == "table" and type(l.port) == "number" and l.port or nil
+    if M.leasePathOk(wt) and port and port == math.floor(port) and port >= 1 and port <= 65535
+       and M.leasePathOk(l.db) then
+      out.leases[M.normDir(wt)] = { port = math.floor(port), db = l.db, at = tonumber(l.at), seen = l.seen == true or nil }
+    end
+  end
+  return out
+end
+
+function M.encodeLeases(reg)
+  return M.json.encode({ v = 1, main = reg.main, leases = reg.leases })
+end
+
+-- Every port a lease holds, across every repo's registry: { [port] = worktree }.
+function M.leaseHeldPorts(regs)
+  local held = {}
+  for _, reg in pairs(type(regs) == "table" and regs or {}) do
+    for wt, l in pairs(type(reg) == "table" and type(reg.leases) == "table" and reg.leases or {}) do
+      if type(l) == "table" and tonumber(l.port) then held[tonumber(l.port)] = wt end
+    end
+  end
+  return held
+end
+
+-- The lowest port in <from>..<to> no lease holds, or nil and why.
+function M.leaseFreePort(from, to, held)
+  held = type(held) == "table" and held or {}
+  for p = from, to do if not held[p] then return p end end
+  return nil, "every port in " .. from .. "-" .. to .. " is leased"
+end
+
+-- A lease's database path: <dbDir>/<repo>-<unit>-<port>.db (a sibling folder already named after
+-- the repo isn't named twice). Unique while its port is: no two live leases share one.
+function M.leaseDbPath(dbDir, main, wt, port)
+  local repo = M.normDir(main):match("([^/]+)$") or "repo"
+  local unit = M.normDir(wt):match("([^/]+)$") or "worktree"
+  local name = (unit:sub(1, #repo + 1) == repo .. "-") and unit or (repo .. "-" .. unit)
+  name = M.capChars(name:gsub("[^A-Za-z0-9._-]", "-"), 100)
+  return M.normDir(dbDir) .. "/" .. name .. "-" .. tostring(port) .. ".db"
+end
+
+-- The lease of worktree <wt> of <main>: the one it has, else a fresh one on the lowest free port
+-- of the range. regs = { [main] = parsed registry }, never changed. Returns lease, the main's
+-- registry with it, and whether it is fresh (to be written); or nil and why.
+function M.leaseMint(regs, main, wt, settings, now)
+  if not M.leasePathOk(main) then return nil, "no main checkout" end
+  if not M.leasePathOk(wt) then return nil, "not a worktree path" end
+  main, wt = M.normDir(main), M.normDir(wt)
+  if wt == main then return nil, "the main checkout gets no lease" end
+  if type(settings) ~= "table" or not settings.enabled then return nil, "leases are off (lease.enabled)" end
+  regs = type(regs) == "table" and regs or {}
+  local cur = type(regs[main]) == "table" and regs[main] or { main = main, leases = {} }
+  local reg = { main = main, leases = {} }
+  for k, v in pairs(cur.leases or {}) do reg.leases[k] = v end
+  if reg.leases[wt] then return reg.leases[wt], reg, false end
+  if not M.leasePathOk(settings.dbDir) then return nil, "no database folder (lease.dbDir)" end
+  local port, why = M.leaseFreePort(settings.from, settings.to, M.leaseHeldPorts(regs))
+  if not port then return nil, why end
+  local lease = { port = port, db = M.leaseDbPath(settings.dbDir, main, wt, port), at = now }
+  reg.leases[wt] = lease
+  return lease, reg, true
+end
+
+-- Is a lease due for release? Never while its worktree is there; at once when it was seen and is
+-- gone; a lease whose worktree never appeared after M.LEASE_PENDING_SECONDS (a tab never sent).
+function M.leaseReleaseDue(lease, exists, now)
+  if exists then return false end
+  if type(lease) ~= "table" then return true end
+  if lease.seen then return true end
+  return (tonumber(now) or 0) - (tonumber(lease.at) or 0) >= M.LEASE_PENDING_SECONDS
+end
+
+-- The env file Shepherd writes to <the worktree's git dir>/shepherd-lease.env. A value that isn't
+-- plain is single-quoted, so `set -a; . file` and dotenv readers get it exactly.
+function M.leaseEnvText(wt, lease)
+  local function q(v)
+    v = tostring(v)
+    if v:match("^[A-Za-z0-9_./:@%%+,=-]+$") then return v end
+    return "'" .. v:gsub("'", "'\\''") .. "'"
+  end
+  return "# Shepherd's lease for " .. tostring(wt) .. ": this worktree's own port and database path.\n"
+    .. "# A project can source it: set -a; . \"$(git rev-parse --git-dir)/" .. M.LEASE_ENV_FILE .. "\"; set +a\n"
+    .. "PORT=" .. tostring(lease.port) .. "\n"
+    .. "DB_PATH=" .. q(lease.db) .. "\n"
+end
+
+-- A linked worktree's .git file ("gitdir: <path>") -> its git dir (a relative one joined to <wt>).
+function M.gitdirFromDotGit(wt, content)
+  if type(content) ~= "string" then return nil end
+  local gd = content:match("^gitdir:%s*([^\r\n]-)%s*$") or content:match("^gitdir:%s*([^\r\n]-)%s*[\r\n]")
+  if not gd or gd == "" or gd:find("%c") then return nil end
+  if gd:sub(1, 1) == "/" then return gd end
+  return M.normDir(wt) .. "/" .. gd
+end
+
+-- The files a released lease's database may have left: the file Shepherd named and SQLite's
+-- sidecars -- only when it sits right in the database folder and is a name Shepherd gives.
+function M.leaseDbFiles(db, dbDir)
+  if not M.leasePathOk(db) or not M.leasePathOk(dbDir) then return {} end
+  local name = db:match("([^/]+)$")
+  if not name or db ~= M.normDir(dbDir) .. "/" .. name or not name:match("^[A-Za-z0-9._-]+%.db$") then return {} end
+  return { db, db .. "-wal", db .. "-shm", db .. "-journal" }
+end
+
+-- The paragraph a prompt carries (New worktree tab, a batch unit's message, Instances Open).
+function M.leasePromptLine(lease)
+  if type(lease) ~= "table" or not tonumber(lease.port) or type(lease.db) ~= "string" then return "" end
+  return "Shepherd leased this worktree its own port and database path: PORT=" .. tostring(lease.port)
+    .. ", DB_PATH=" .. lease.db .. ". Run any server it starts on that port and keep any database at "
+    .. "that path, so parallel units never collide. Once the worktree exists, both are also in "
+    .. "$(git rev-parse --git-dir)/" .. M.LEASE_ENV_FILE .. ", which a project can source."
+end
+
 -- ---- L5: gh PR-status poll planner (hung-task aware) ----------------------
 -- Pure decision for whether to (re)launch a gh PR-status poll for a repo root. cached =
 -- { ts, data=<pr|false|nil> } or nil; inflight = { ts } or nil (the in-flight task latch);
@@ -16949,6 +17125,9 @@ M.FEATURES = {
   { key = "coverage", cat = "Control", new = true, title = "Coverage index",
     what = "A batch built from an issue list carries it: each unit names the issues it covers, and the rest are triaged (dup, wontfix, later or covered elsewhere, each with a note). Until every issue is covered or triaged, cc-fleet.sh refuses the proposal and names the uncovered ones, and the batch review lists them with Approve disabled.",
     why = "Nothing on the list is dropped silently: every issue ends up in a unit or in a written decision you read before you approve." },
+  { key = "leases", cat = "Control", new = true, title = "Worktree leases",
+    what = "Each worktree Shepherd starts a session for -- a New worktree tab, a batch unit, Instances Open -- gets its own port and database path (lease.portFrom-portTo, lease.dbDir). The session is told them in its prompt and at every start, /clear or compaction, and they are in $(git rev-parse --git-dir)/shepherd-lease.env for a project to source. The card shows :PORT. Once the worktree is gone the lease is freed, and the database file Shepherd named goes with it.",
+    why = "Parallel units that run dev servers or databases never fight over one port or one file." },
   { key = "answers", cat = "Control", new = true, title = "Answer questions from Shepherd",
     what = "When a session asks you something, its card pulses with the question and you get one alert; its answers are buttons right there (and on its Instances row). Your click goes straight to the session -- no tab to find. Several parts or free text: pick per part, then Send answers. Answer in the tab instead hands it back to the tab.",
     why = "A session waiting on you shouldn't wait for you to find its tab -- and you always know when one is." },

@@ -391,6 +391,12 @@ echo ""
 echo "== node: the batch review lists uncovered issues as text and disables Approve until every issue is covered or triaged (behavioral, runs the shipped renderBatch) =="
 node "$DIR/coverage-view.test.js" || fail=1
 echo ""
+echo "== lua: worktree leases -- lowest free port of the range, reused after release, env file in the worktree's git dir, stamped by the tick, released by the sweep (behavioral, runs the shipped FX block on a real worktree) =="
+lua "$DIR/leases.test.lua" || fail=1
+echo ""
+echo "== node: a card shows its worktree's leased :PORT, the database path in the tooltip, both escaped (behavioral, runs the shipped leaseBadge) =="
+node "$DIR/lease-badge.test.js" || fail=1
+echo ""
 
 if [ "$fail" -eq 0 ]; then
   echo "✅ ALL GREEN"

@@ -306,5 +306,13 @@
     "maxSeconds": 120,
     "whisperBin": "",
     "ffmpegBin": ""
+  },
+
+  "lease": {
+    "_comment": "Worktree leases (ON by default). Each worktree Shepherd starts a session for (New worktree tab, a batch unit, Instances Open) gets its own port -- the lowest in portFrom..portTo no lease of any repo holds -- and a database path in dbDir (~/ is your home). The session is told them in its prompt and at SessionStart, and they are in $(git rev-parse --git-dir)/shepherd-lease.env (PORT=, DB_PATH=) for a project to source. The card shows :PORT. When the worktree is gone the lease is freed and the database file Shepherd named is deleted. false = no new leases, none shown.",
+    "enabled": true,
+    "portFrom": 4100,
+    "portTo": 4199,
+    "dbDir": "~/.claude/cc-lease/db"
   }
 }

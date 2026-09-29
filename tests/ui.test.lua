@@ -4339,5 +4339,46 @@ do
         src:find('local why = (verdict == "approve") and core.batchApproveProblem(b) or nil', 1, true) ~= nil)
 end
 
+-- ---- worktree leases (2026-09-29, build program unit 27) ----
+-- tests/leases.test.lua drives the FX block itself; this pins where it is wired: minted at the
+-- three places Shepherd starts a worktree's session and stated in each prompt, stamped by the tick,
+-- swept on the commits timer (never the tick), pruned by both removers, shown on the card.
+do
+  local function read(p) local h = io.open(ROOT .. p, "r"); local s = h and h:read("*a") or ""; if h then h:close() end; return s end
+  local src, lib = read("claude-dashboard.lua"), read("cc-lib.sh")
+  local tick = src:match("function FX%._refreshBody%(%)(.-)\nend\n") or ""
+  check("leases: the tick stamps each session's lease, isolated in a pcall", tick:find("pcall(FX.stepLeases, list, cfg)", 1, true) ~= nil)
+  check("leases: ...and never sweeps", tick:find("sweepLeases", 1, true) == nil)
+  check("leases: the commits timer sweeps them", src:find("pcall(FX.refreshCommits); pcall(FX.pushCommits); pcall(FX.sweepLeases) end)", 1, true) ~= nil)
+  local nw = src:match("function FX%.newWorktreeTab%(stackKey, specJson%)(.-)\nend\n") or ""
+  check("leases: New worktree tab mints one for the worktree it asks for",
+        nw:find("FX.mintLease(any.mainRoot, req.path, cfg)", 1, true) ~= nil)
+  check("leases: ...and its prompt states it", nw:find("core.worktreeTabPrompt(req, spec.task, lease)", 1, true) ~= nil)
+  local ow = src:match("function FX%.openWorktree%(stackKey, path%)(.-)\nend\n") or ""
+  check("leases: Instances Open mints one for the worktree it opens", ow:find("FX.mintLease(any.mainRoot, target, cfg)", 1, true) ~= nil)
+  check("leases: ...and a new tab's prompt states it", ow:find("core.enterWorktreePrompt(target, branch, lease)", 1, true) ~= nil)
+  local fp = src:match("function FX%.fleetTabPoll%(id, slug%)(.-)\nend\n") or ""
+  check("leases: a batch unit's worktree gets one when its tab is found",
+        fp:find('FX.mintLease(b.repo, core.normDir(b.repo) .. "/.claude/worktrees/" .. slug)', 1, true) ~= nil)
+  check("leases: ...and the unit's message states it", fp:find("core.fleetUnitMessage(b, unit, lease)", 1, true) ~= nil)
+  local rs = src:match("function FX%.removeStatus%(key%)(.-)\nend") or ""
+  check("leases: FX.removeStatus prunes the lease files nothing can use", rs:find("FX.pruneLeaseFiles", 1, true) ~= nil)
+  local rm = lib:match("\ncc_remove%(%)%s*{(.-)\n}") or ""
+  check("leases: ...and so does cc_remove", rm:find("cc_lease_prune", 1, true) ~= nil)
+  check("leases: SessionStart tells a session its lease", lib:find('CC_CONTEXT_PARTS="notes lease ', 1, true) ~= nil)
+  check("leases: FX.LEASE_DIR reads CC_LEASE_DIR, as cc-lib.sh does",
+        src:find('FX.LEASE_DIR = os.getenv("CC_LEASE_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-lease")', 1, true) ~= nil
+        and lib:find('CC_LEASE_DIR="${CC_LEASE_DIR:-${HOME}/.claude/cc-lease}"', 1, true) ~= nil)
+  check("leases: the card's badges row shows the port", src:find("b += leaseBadge(it);", 1, true) ~= nil)
+  check("leases: --purge takes cc-lease/ with Shepherd's other state", read("uninstall.sh"):find(" cc-lease ", 1, true) ~= nil)
+  local defaults = core.json.decode(read("defaults/cc-config.json"))
+  check("leases: defaults/ turns them on with a port range and a database folder",
+        type(defaults.lease) == "table" and defaults.lease.enabled == true and tonumber(defaults.lease.portFrom)
+        and tonumber(defaults.lease.portTo) and type(defaults.lease.dbDir) == "string")
+  local keep = {}
+  for _, k in ipairs(core.SETTINGS_KEEP_SUBKEYS.lease or {}) do keep[k] = true end
+  check("leases: SETTINGS_KEEP_SUBKEYS keeps the hand-set range and folder", keep.portFrom and keep.portTo and keep.dbDir)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

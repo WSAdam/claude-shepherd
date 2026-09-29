@@ -1639,6 +1639,185 @@ function FX.prunePins()
   end
 end
 
+-- ---- Worktree leases (build program unit 27, 2026-09-29) --------------------------------------
+-- Each worktree Shepherd starts a session for gets its own PORT and DB path (core.leaseMint): New
+-- worktree tab, a batch unit's tab (FX.fleetTabPoll) and Instances Open mint one and state it in the
+-- prompt. cc-lease/<core.leaseFileName(main)> holds a repo's leases; Shepherd is its ONLY writer
+-- (one thread, temp + rename), the SessionStart hook only reads it (_cc_ctx_lease). The tick stamps
+-- each session's lease on its card (it.lease) and writes <git dir>/shepherd-lease.env the first time
+-- it sees the worktree; the sweep, on the commits timer and never the tick, marks leases seen,
+-- rewrites a missing env file, and releases a lease whose worktree is gone -- deleting the database
+-- file it named (core.leaseDbFiles). Both removers drop what nothing can use (FX.pruneLeaseFiles;
+-- cc_lease_prune in cc-lib.sh). tests/leases.test.lua runs this block as shipped.
+FX.LEASE_DIR = os.getenv("CC_LEASE_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-lease")
+FX._leaseRegs = {}          -- main -> { at = when looked, raw = the file as read, reg = parsed }
+FX._leaseEnvOk = {}         -- worktree -> the env text in place (false: tried once, the sweep retries)
+FX.LEASE_LOOK_SECONDS = 2
+
+function FX.leaseSettings(cfg)
+  return core.leaseSettings(cfg or (type(loadConfig) == "function" and loadConfig()) or {}, os.getenv("HOME"))
+end
+
+-- Every repo's registry, by main checkout (a file not named for its own main is skipped).
+function FX.readLeases()
+  local regs = {}
+  for _, name in ipairs(FX.readDir(FX.LEASE_DIR)) do
+    if name:match("%.json$") then
+      local reg = core.parseLeases(FX.readFile(FX.LEASE_DIR .. "/" .. name))
+      if reg and core.leaseFileName(reg.main) == name then regs[reg.main] = reg end
+    end
+  end
+  return regs
+end
+
+-- Write a repo's registry (temp + rename); one with no lease left is removed. true on success.
+function FX.writeLeases(reg)
+  local name = core.leaseFileName(reg.main)
+  if not name then return false end
+  local path = FX.LEASE_DIR .. "/" .. name
+  FX._leaseRegs[reg.main] = nil
+  if next(reg.leases) == nil then os.remove(path); return true end
+  FX.mkdirP(FX.LEASE_DIR)
+  local tmp = path .. ".tmp." .. tostring(FX.now())
+  local f = io.open(tmp, "w")
+  if not f then return false end
+  f:write(core.encodeLeases(reg)); f:close()
+  if not os.rename(tmp, path) then os.remove(tmp); return false end
+  return true
+end
+
+-- $(git rev-parse --git-dir)/shepherd-lease.env of a worktree, read from its .git (no git run).
+function FX.leaseEnvPath(wt)
+  local mode = hs.fs.attributes(wt .. "/.git", "mode")
+  if mode == "directory" then return wt .. "/.git/" .. core.LEASE_ENV_FILE end
+  if mode ~= "file" then return nil end
+  local gd = core.gitdirFromDotGit(wt, FX.readFile(wt .. "/.git"))
+  return gd and (gd .. "/" .. core.LEASE_ENV_FILE) or nil
+end
+
+-- Put the lease's env file in place (temp + rename) unless it already says exactly that.
+function FX.ensureLeaseEnv(wt, lease)
+  local text = core.leaseEnvText(wt, lease)
+  local path = FX.leaseEnvPath(wt)
+  if not path then FX._leaseEnvOk[wt] = false; return false end
+  if FX.readFile(path) ~= text then
+    local tmp = path .. ".tmp." .. tostring(FX.now())
+    local f = io.open(tmp, "w")
+    if not f then FX._leaseEnvOk[wt] = false; return false end
+    f:write(text); f:close()
+    if not os.rename(tmp, path) then os.remove(tmp); FX._leaseEnvOk[wt] = false; return false end
+    print("[cc-dashboard] ✅ wrote " .. path .. " (PORT=" .. tostring(lease.port) .. ")")
+  end
+  FX._leaseEnvOk[wt] = text
+  return true
+end
+
+-- The lease of worktree <wt> of <main>, minted when it has none. nil and why when leases are off,
+-- the range is full or the registry can't be written -- the caller opens its tab without one.
+function FX.mintLease(main, wt, cfg)
+  local s = FX.leaseSettings(cfg)
+  if not s.enabled then return nil, "leases are off" end
+  main, wt = core.normDir(tostring(main or "")), core.normDir(tostring(wt or ""))
+  local name = core.leaseFileName(main)
+  local raw = name and FX.readFile(FX.LEASE_DIR .. "/" .. name)
+  local cur = raw and core.parseLeases(raw)
+  if cur and cur.main ~= main then
+    print("[cc-dashboard] ⚠️ no lease for " .. wt .. ": " .. name .. " belongs to " .. cur.main)
+    return nil, "another checkout's leases share its file name"
+  end
+  local lease, reg, fresh = core.leaseMint(FX.readLeases(), main, wt, s, FX.now())
+  if not lease then
+    print("[cc-dashboard] ⚠️ no lease for " .. wt .. ": " .. tostring(reg))
+    return nil, reg
+  end
+  if fresh then
+    if not FX.writeLeases(reg) then
+      print("[cc-dashboard] ❌ couldn't write the lease of " .. wt .. " to " .. FX.LEASE_DIR)
+      return nil, "the lease couldn't be written"
+    end
+    FX.mkdirP(s.dbDir)
+    print("[cc-dashboard] ✅ leased " .. wt .. ": PORT=" .. lease.port .. " DB_PATH=" .. lease.db)
+  end
+  if hs.fs.attributes(wt, "mode") == "directory" then pcall(FX.ensureLeaseEnv, wt, lease) end
+  return lease
+end
+
+-- Tick: each local session in a leased worktree carries its lease (it.lease, for the card). The
+-- registry is re-read every 2s; the env file goes in the first time a worktree shows up.
+function FX.stepLeases(list, cfg)
+  local s = FX.leaseSettings(cfg)
+  local now, seen = FX.now(), {}
+  for _, it in ipairs(type(list) == "table" and list or {}) do
+    it.lease = nil
+    if s.enabled and not it.remote and not it.isMainWt and type(it.mainRoot) == "string"
+       and type(it.wtRoot) == "string" then
+      local main, wt = core.normDir(it.mainRoot), core.normDir(it.wtRoot)
+      seen[main] = true
+      local c = FX._leaseRegs[main]
+      if not c or now - c.at >= FX.LEASE_LOOK_SECONDS then
+        local name = core.leaseFileName(main)
+        local raw = name and FX.readFile(FX.LEASE_DIR .. "/" .. name)
+        if not c or c.raw ~= raw then c = { raw = raw, reg = raw and core.parseLeases(raw, main) } end
+        c.at = now
+        FX._leaseRegs[main] = c
+      end
+      local lease = c.reg and c.reg.leases[wt]
+      if lease then
+        it.lease = { port = lease.port, db = lease.db }
+        if FX._leaseEnvOk[wt] == nil then pcall(FX.ensureLeaseEnv, wt, lease) end
+      end
+    end
+  end
+  for m in pairs(FX._leaseRegs) do if not seen[m] then FX._leaseRegs[m] = nil end end
+end
+
+-- Both removers: a lease file that names no main checkout (or isn't named for its own), and every
+-- torn write -- Shepherd is the only writer and renames at once, so any temp left is torn (the
+-- shell's cc_lease_prune waits a minute for that). KEEP IN SYNC with cc_lease_prune (cc-lib.sh).
+function FX.pruneLeaseFiles()
+  for _, name in ipairs(FX.readDir(FX.LEASE_DIR)) do
+    local path = FX.LEASE_DIR .. "/" .. name
+    if name:match("%.json%.tmp%.") then
+      os.remove(path)
+    elseif name:match("%.json$") then
+      local reg = core.parseLeases(FX.readFile(path))
+      if not (reg and core.leaseFileName(reg.main) == name) then
+        os.remove(path)
+        print("[cc-dashboard] 🔍 dropped " .. path .. " (it names no main checkout of its own)")
+      end
+    end
+  end
+end
+
+-- The sweep (commits timer): leases whose worktree is there are seen and get their env file; one
+-- whose worktree is gone is released (core.leaseReleaseDue) with the database file it named.
+function FX.sweepLeases(cfg)
+  local s = FX.leaseSettings(cfg)
+  local now = FX.now()
+  FX.pruneLeaseFiles()
+  for main, reg in pairs(FX.readLeases()) do
+    local changed = false
+    for wt, lease in pairs(reg.leases) do
+      if hs.fs.attributes(wt, "mode") == "directory" then
+        if not lease.seen then lease.seen = true; changed = true end
+        if FX._leaseEnvOk[wt] ~= core.leaseEnvText(wt, lease) then pcall(FX.ensureLeaseEnv, wt, lease) end
+      elseif core.leaseReleaseDue(lease, false, now) then
+        reg.leases[wt] = nil
+        FX._leaseEnvOk[wt] = nil
+        changed = true
+        for _, p in ipairs(core.leaseDbFiles(lease.db, s.dbDir)) do
+          if hs.fs.attributes(p, "mode") == "file" then os.remove(p) end
+        end
+        print("[cc-dashboard] 🔍 released " .. wt .. "'s lease (PORT=" .. tostring(lease.port) .. ", "
+          .. (lease.seen and "its worktree is gone" or "its worktree never appeared") .. ")")
+      end
+    end
+    if changed and not FX.writeLeases(reg) then
+      print("[cc-dashboard] ❌ couldn't update the leases of " .. tostring(main))
+    end
+  end
+end
+
 -- Each installed claude a session may run: the CLI, and the newest binary each editor extension
 -- bundles (VS Code and Cursor sessions run that one). Symlinks resolved, each once. Kept 10
 -- minutes: finding the CLI asks a login shell, which is slow.
@@ -3497,6 +3676,10 @@ function FX.removeStatus(key)
   -- the pins of a worktree that is gone go (cc_remove runs cc_pins_prune)
   local okp, errp = pcall(FX.prunePins)
   if not okp then print("[cc-dashboard] ❌ pinned links prune failed: " .. tostring(errp)) end
+  -- worktree leases (2026-09-29) are per main checkout, not this key: only the lease files nothing
+  -- can use go here (cc_remove runs cc_lease_prune); the sweep frees a gone worktree's lease
+  local okl, errl = pcall(FX.pruneLeaseFiles)
+  if not okl then print("[cc-dashboard] ❌ worktree lease prune failed: " .. tostring(errl)) end
 end
 
 -- ---- Companion extension: close an exact Claude tab (2026-09-11) -----------------
@@ -3948,8 +4131,11 @@ function FX.fleetTabPoll(id, slug)
     for _, u in ipairs(b.units) do if u.slug == slug then unit = u end end
     state.units[slug] = { session = { id = s.sessionId, name = s.name, pid = tostring(s.pid) } }
     print("[cc-dashboard] ✅ unit " .. slug .. " of batch " .. id .. " is session " .. tostring(s.name))
+    -- 2026-09-29: the worktree the unit will make gets its own PORT and DB path, stated in its message
+    local okl, lease = pcall(function() return FX.mintLease(b.repo, core.normDir(b.repo) .. "/.claude/worktrees/" .. slug) end)
+    if not okl then print("[cc-dashboard] ❌ lease for unit " .. slug .. " failed: " .. tostring(lease)); lease = nil end
     return finish({ nonce = t.nonce, ok = true, name = s.name, sessionId = s.sessionId, pid = tostring(s.pid),
-                    message = core.fleetUnitMessage(b, unit) })
+                    message = core.fleetUnitMessage(b, unit, lease) })
   end
   if (why and why:find("at once", 1, true)) or FX.now() - t.sent >= FX.FLEET_TAB_WAIT then
     return finish({ nonce = t.nonce, ok = false, reason = why and why:find("at once", 1, true) and why
@@ -7418,6 +7604,14 @@ function FX.openWorktree(stackKey, path)
   if editor ~= "vscode" and editor ~= "cursor" and editor ~= "kitty" and editor ~= "terminal" then
     editor = core.config(cfg, "spawn.editor", "vscode")
   end
+  -- 2026-09-29: a linked worktree gets its own PORT and DB path (the main checkout never does): a
+  -- new tab's prompt states it, and a session spawned into the folder reads it at SessionStart and
+  -- from the env file FX.mintLease writes into the worktree's git dir
+  local lease
+  if core.normDir(tostring(any.mainRoot or "")) ~= target then
+    local okl, l = pcall(function() return FX.mintLease(any.mainRoot, target, cfg) end)
+    if okl then lease = l else print("[cc-dashboard] ❌ lease for " .. target .. " failed: " .. tostring(l)) end
+  end
   -- A worktree a Claude tab made (.claude/worktrees/<slug>) lives INSIDE the main checkout:
   -- pick it back up as a new tab in the repo's window, never a window of its own.
   local tabEditor = FX.tabEditorFor(stackKey)
@@ -7426,7 +7620,7 @@ function FX.openWorktree(stackKey, path)
     for _, w in ipairs(wts) do if core.normDir(tostring(w.path or "")) == target then branch = w.branch end end
     print("[cc-dashboard] open-worktree: " .. target .. " as a new tab in " .. tostring(any.mainRoot))
     if FX.openClaudeTab({ root = any.mainRoot, editor = tabEditor, label = any.stackName,
-                          prompt = core.enterWorktreePrompt(target, branch) }) then
+                          prompt = core.enterWorktreePrompt(target, branch, lease) }) then
       FX._openingWt[target] = now
     end
     FX.pushInstances(true)
@@ -7553,8 +7747,13 @@ function FX.newWorktreeTab(stackKey, specJson)
     return
   end
   print("[cc-dashboard] new-worktree-tab: " .. req.branch .. " in " .. tostring(any.mainRoot))
+  -- 2026-09-29: the worktree it will make gets its own PORT and DB path, stated in the prompt
+  -- (none -- leases off, the range full -- and the tab opens without one)
+  local cfg = loadConfig()
+  local okl, lease = pcall(function() return FX.mintLease(any.mainRoot, req.path, cfg) end)
+  if not okl then print("[cc-dashboard] ❌ lease for " .. req.path .. " failed: " .. tostring(lease)); lease = nil end
   FX.openClaudeTab({ root = any.mainRoot, editor = editor, label = any.stackName,
-                     prompt = core.worktreeTabPrompt(req, spec.task) })
+                     prompt = core.worktreeTabPrompt(req, spec.task, lease) })
 end
 
 -- ---- DR7: A/B fork-to-compare (explicitly-invoked, operator-aware) ------------
@@ -10959,6 +11158,10 @@ local HTML = [[
   .theme-bar .pin-chip, .theme-dots .pin-chip { display:none; }   /* one-line themes: detail panel only */
   #d-pins { display:none; flex-wrap:wrap; gap:4px; margin:5px 0 0 18px; }
   #d-pins .pin-chip { margin-left:0; }
+  /* 2026-09-29: worktree leases -- the worktree's own port (FX.stepLeases) */
+  .lease-b { display:inline-block; font-size:10px; line-height:14px; margin-left:6px; padding:1px 5px;
+    border-radius:8px; border:1px solid var(--border); color:var(--accent-text);
+    font-variant-numeric:tabular-nums; white-space:nowrap; vertical-align:middle; }
   @keyframes spin { to { transform:rotate(360deg); } }
   /* 2026-09-17: .srow (dot + status line) and .badges (risk / PR / background agents) are
      grouping wrappers the CARDS theme lays out. Every other theme places .dot / .label /
@@ -19494,7 +19697,21 @@ local HTML = [[
     function badgesHtml(it){
       var b = talkBadge(it) + riskBadge(it) + prBadgeHtml(it) + bgBadge(it) + notesBadge(it);
       b += pinChipsHtml(it);   // 2026-09-29: pinned links (cc-pin.sh)
+      b += leaseBadge(it);     // 2026-09-29: worktree leases (the worktree's own port)
       return b ? '<span class="badges">'+b+'</span>' : "";
+    }
+    // 2026-09-29: worktree leases (build program unit 27) -- the port Shepherd leased this session's
+    // worktree (it.lease, FX.stepLeases), with its database path in the tooltip. They come from
+    // Shepherd's own registry, a file on disk all the same: both go through esc().
+    function leaseTitle(ls){
+      return "This worktree's own port (PORT=" + ls.port + ")"
+        + (ls.db ? " and database path (DB_PATH=" + ls.db + ")" : "")
+        + ", leased by Shepherd -- also in $(git rev-parse --git-dir)/shepherd-lease.env";
+    }
+    function leaseBadge(it){
+      var ls = it && it.lease;
+      if(!ls || typeof ls !== "object" || ls.port === undefined || ls.port === null) return "";
+      return '<span class="lease-b" title="'+esc(leaseTitle(ls))+'">:'+esc(String(ls.port))+'</span>';
     }
     // 2026-09-29: pinned links (build program unit 31) -- up to 8 links the session pinned with
     // cc-pin.sh (it.pins, FX.stepPins). A session wrote every label and link, so both go through
@@ -21357,6 +21574,12 @@ function FX._refreshBody()
     local okp, errp = pcall(FX.stepPins, list)
     if not okp then print("[cc-dashboard] ❌ pinned links step failed: " .. tostring(errp)) end
   end
+  -- worktree leases (2026-09-29): each session's leased port, for the card (after the stacks, which
+  -- give each session its main checkout and worktree root); the sweep runs on the commits timer
+  do
+    local okl, errl = pcall(FX.stepLeases, list, cfg)
+    if not okl then print("[cc-dashboard] ❌ worktree leases step failed: " .. tostring(errl)) end
+  end
   FX.annotateEmptyChats(list)       -- never-used "Claude Code" chats, closable from the card (2026-09-11)
   -- 2026-09-17: LAST of the annotations -- it needs every source at once. One predicate decides
   -- whether each card really needs Adam (a live counterpart AND an affordance that changes
@@ -21603,7 +21826,8 @@ end):start()
 M.usageTimer = hs.timer.doEvery(60, function() pcall(FX.computeUsage) end)
 -- Commit stats: re-bucket every 60s (midnight, the pace point) and re-run git once the last
 -- count is commits.refreshSeconds old. Both no-op when commits.enabled is false.
-M.commitsTimer = hs.timer.doEvery(60, function() pcall(FX.refreshCommits); pcall(FX.pushCommits) end)
+-- 2026-09-29: the worktree lease sweep rides the same cadence (never the tick).
+M.commitsTimer = hs.timer.doEvery(60, function() pcall(FX.refreshCommits); pcall(FX.pushCommits); pcall(FX.sweepLeases) end)
 -- Overlap radar (2026-09-29): each repo's scan is redone once it is radar.refreshSeconds old
 -- (FX.refreshRadar decides per repo); never on the tick.
 FX.radarTimer = hs.timer.doEvery(30, function() pcall(FX.refreshRadar) end)
@@ -21811,6 +22035,7 @@ after(2.5, function() pcall(FX.pruneScratch) end)          -- sweep scan/search 
 after(3, function() pcall(FX.pruneNotes, FX.now()) end)     -- handoff notes older than 14 days
 after(3.0, function() pcall(FX.refreshCommits) end)        -- first commit count (after the scratch sweep)
 after(4.0, function() pcall(FX.refreshRadar) end)          -- first overlap radar scan (after the first tick)
+after(4.5, function() pcall(FX.sweepLeases) end)           -- first worktree lease sweep (2026-09-29)
 
 -- Launch-on-startup defaults ON the first time Shepherd runs (so it comes back after
 -- a restart); the user's later choice in Settings is then respected (the real

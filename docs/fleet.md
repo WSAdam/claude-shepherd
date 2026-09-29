@@ -144,6 +144,36 @@ close only when **every** unnamed tab in that window is selected. A card with tw
 sessions shows **🧹 N finished**, which opens Instances with them already checked. Nothing closes
 on its own.
 
+### Worktree leases
+
+Parallel units that each run a dev server or a database would otherwise fight over one port and one
+file. So each worktree Shepherd starts a session for gets its own **port** and **database path**:
+
+- **When.** A **＋ New worktree tab**, a batch unit's tab ([Claude drives a
+  batch](merging-and-batches.md#claude-drives-a-batch)) and **Open** on an Instances worktree row
+  each lease the worktree they're for. The main checkout never gets one. A worktree that already
+  has a lease keeps it.
+- **Which.** The lowest port in `lease.portFrom`–`lease.portTo` (default 4100–4199) that no lease
+  of any repo holds, and `<lease.dbDir>/<repo>-<unit>-<port>.db` (default folder
+  `~/.claude/cc-lease/db`). Shepherd creates the folder; the project creates the file.
+- **How the session learns it.** Three ways:
+  - the prompt states it (`PORT=4101, DB_PATH=…`);
+  - at every start, `/clear` and compaction inside the worktree, a `[Shepherd: lease]` part of the
+    SessionStart context repeats it;
+  - `$(git rev-parse --git-dir)/shepherd-lease.env` holds `PORT=` and `DB_PATH=`. A project can
+    load it with `set -a; . "$(git rev-parse --git-dir)/shepherd-lease.env"; set +a`, or with a
+    dotenv reader. The file lives in git's own folder for the worktree, so it's never committed and
+    goes when the worktree does.
+- **On the card.** The session's card shows **:PORT**; its tooltip gives the database path.
+- **Release.** Shepherd checks the leases every minute (with the commit counts, never on the tick).
+  Once a worktree is gone its lease is freed, and the database file Shepherd named goes with it,
+  along with SQLite's `-wal`, `-shm` and `-journal` files. Only files directly in `lease.dbDir` are
+  deleted. A lease whose worktree never appeared (a New worktree tab prompt never sent) is freed
+  after a day.
+- **Where.** `~/.claude/cc-lease/<encoded main checkout>.json`, one file per repo. Only Shepherd
+  writes it; `uninstall.sh --purge` removes it. `lease.enabled: false` stops new leases, and the
+  cards and SessionStart stop showing the ones that exist.
+
 ## The detail panel
 
 **Single-click** a tile to select it and open the detail panel. Its buttons are described in

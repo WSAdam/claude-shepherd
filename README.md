@@ -132,6 +132,8 @@ The automatic behaviours here are off until you turn them on, except handoff not
   that touch the same files are flagged with which to merge first, and a batch unit can wait for others.
 - [**Coverage index**](docs/merging-and-batches.md#coverage-index-a-batch-says-what-it-covers): a batch
   built from an issue list can't be approved until every issue is covered by a unit or triaged.
+- [**Worktree leases**](docs/fleet.md#worktree-leases): each unit's worktree gets its own port and
+  database path, stated in its prompt and shown on its card, and freed when the worktree goes.
 - [**Tab bridge**](docs/merging-and-batches.md#the-tab-bridge): a small VS Code extension that
   closes or selects exactly one Claude tab, so finished units close their own tabs.
 

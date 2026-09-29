@@ -29,6 +29,9 @@ export CC_RESUME_DIR="${CC_RESUME_DIR:-$CC_TEST_ISOLATION/cc-resume}"
 # 2026-09-29: a SessionEnd (cc_remove) drops the pins of every worktree that is gone from
 # ~/.claude/cc-pins; a suite's fake session end must never prune the real ones.
 export CC_PINS_DIR="${CC_PINS_DIR:-$CC_TEST_ISOLATION/cc-pins}"
+# 2026-09-29: SessionStart reads the worktree leases in ~/.claude/cc-lease, and a SessionEnd
+# (cc_remove) prunes them; a suite's fake session must never read or prune the real ones.
+export CC_LEASE_DIR="${CC_LEASE_DIR:-$CC_TEST_ISOLATION/cc-lease}"
 
 # sysbin_without <outdir> <tool>... - mirror /usr/bin + /bin into <outdir> as symlinks,
 # leaving out the named tools, and echo <outdir>. Use it in place of a literal

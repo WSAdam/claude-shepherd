@@ -42,7 +42,11 @@ local NOTES = T .. "/cc-notes"
 -- 2026-09-29: pinned links (build program unit 31) belong to a WORKTREE, not a key, so they outlive
 -- /clear: both removers drop only the pins of a worktree that is gone (cc_pins_prune / FX.prunePins)
 local PINS = T .. "/cc-pins"
-os.execute(('mkdir -p "%s" "%s" "%s" "%s" "%s/repo" "%s/k90" "%s" "%s" "%s"'):format(STATUS, MERGE, ASK, TALK, T, INBOX, RESUME, NOTES, PINS))
+-- 2026-09-29: worktree leases (build program unit 27) are per main checkout and only Shepherd writes
+-- them; both removers drop only what nothing can use (a file naming no checkout, a torn write)
+local LEASE = T .. "/cc-lease"
+local LIVE_LEASES = LEASE .. "/" .. (T .. "/repo"):gsub("[^A-Za-z0-9]", "-") .. ".json"
+os.execute(('mkdir -p "%s" "%s" "%s" "%s" "%s/repo" "%s/k90" "%s" "%s" "%s" "%s"'):format(STATUS, MERGE, ASK, TALK, T, INBOX, RESUME, NOTES, PINS, LEASE))
 local function write(path, s) local f = io.open(path, "w"); if f then f:write(s); f:close() end end
 local function exists(p) local h = io.open(p, "r"); if h then h:close(); return true end; return false end
 
@@ -89,6 +93,11 @@ local function plant()
   write(PINS .. "/live.json", '{"v":1,"root":"' .. T .. '/repo","pins":[{"url":"https://live.example/","kind":"http","at":1}]}')
   write(PINS .. "/gone.json", '{"v":1,"root":"' .. T .. '/gone-wt","pins":[{"url":"https://gone.example/","kind":"http","at":1}]}')
   write(PINS .. "/gone.json.tmp.4242", '{"v":')
+  -- a live repo's leases, a lease file that names no checkout, and a torn write a minute old
+  write(LIVE_LEASES, '{"v":1,"main":"' .. T .. '/repo","leases":{"' .. T .. '/repo-x":{"port":4100,"db":"/d/x.db","at":1}}}')
+  write(LEASE .. "/nowhere.json", '{"v":1,"leases":{}}')
+  write(LEASE .. "/-r-main.json.tmp.4242", '{"v":')
+  os.execute('touch -t 202601010000 "' .. LEASE .. '/-r-main.json.tmp.4242"')
 end
 
 -- Every file above must be gone after a reap. Named for what it is, so a failure reads as
@@ -126,6 +135,8 @@ local TARGETS = {
   { "the notes-asked marker",          NOTES .. "/" .. KEY .. ".notes-asked" },
   { "the pins of a worktree that's gone", PINS .. "/gone.json" },
   { "a torn write of those pins",      PINS .. "/gone.json.tmp.4242" },
+  { "a lease file that names no checkout", LEASE .. "/nowhere.json" },
+  { "a torn write of a lease file",    LEASE .. "/-r-main.json.tmp.4242" },
 }
 
 -- A second session's files must SURVIVE both reaps -- a prefix sweep must not eat the fleet.
@@ -146,15 +157,16 @@ os.execute(([[
   export CC_STATUS_DIR=%q CC_MERGE_DIR=%q CC_ASK_DIR=%q
   export CC_GATE_TOOLS_DIR=%q CC_APPROVED_DIR=%q CC_AUTOPILOT_DIR=%q
   export CC_POLICY_DIR=%q CC_POLICY_OVERRIDE_DIR=%q CC_AUTOMODEL_DIR=%q CC_TALK_DIR=%q CC_INBOX_DIR=%q
-  export CC_RESUME_DIR=%q CC_NOTES_DIR=%q CC_PINS_DIR=%q
+  export CC_RESUME_DIR=%q CC_NOTES_DIR=%q CC_PINS_DIR=%q CC_LEASE_DIR=%q
   . %q; cc_remove %s
 ]]):format(STATUS, MERGE, ASK, T .. "/gt", T .. "/ap", T .. "/au",
-           T .. "/po", T .. "/pov", T .. "/am", TALK, INBOX, RESUME, NOTES, PINS, ROOT .. "cc-lib.sh", KEY) .. " >/dev/null 2>&1")
+           T .. "/po", T .. "/pov", T .. "/am", TALK, INBOX, RESUME, NOTES, PINS, LEASE, ROOT .. "cc-lib.sh", KEY) .. " >/dev/null 2>&1")
 for _, t in ipairs(TARGETS) do
   check("cc_remove drops " .. t[1], not exists(t[2]))
 end
 check("cc_remove leaves the notes the session wrote (like its handoff note)", exists(NOTES .. "/" .. KEY .. ".notes.md"))
 check("cc_remove leaves the pins of a worktree that's still there (they outlive /clear)", exists(PINS .. "/live.json"))
+check("cc_remove leaves a live repo's worktree leases", exists(LIVE_LEASES))
 for _, p in ipairs(OTHER) do
   check("cc_remove leaves another session's " .. p:match("[^/]+$") .. " alone", exists(p))
 end
@@ -220,7 +232,7 @@ local ENV = { CC_STATUS_DIR = STATUS, CC_MERGE_DIR = MERGE, CC_ASK_DIR = ASK,
               CC_AUTOPILOT_DIR = T .. "/au", CC_POLICY_DIR = T .. "/po",
               CC_POLICY_OVERRIDE_DIR = T .. "/pov", CC_AUTOMODEL_DIR = T .. "/am",
               CC_TALK_DIR = TALK, CC_INBOX_DIR = INBOX, CC_RESUME_DIR = RESUME, CC_NOTES_DIR = NOTES,
-              CC_PINS_DIR = PINS,
+              CC_PINS_DIR = PINS, CC_LEASE_DIR = LEASE,
               CC_WORKLIST_FILE = T .. "/worklist.json", CC_LABELS_FILE = T .. "/labels.json",
               HOME = T }
 os.getenv = function(k) if ENV[k] ~= nil then return ENV[k] end; return realGetenv(k) end
@@ -249,6 +261,7 @@ for _, t in ipairs(TARGETS) do
 end
 check("FX.removeStatus leaves the notes the session wrote", exists(NOTES .. "/" .. KEY .. ".notes.md"))
 check("FX.removeStatus leaves the pins of a worktree that's still there", exists(PINS .. "/live.json"))
+check("FX.removeStatus leaves a live repo's worktree leases", exists(LIVE_LEASES))
 for _, p in ipairs(OTHER) do
   check("FX.removeStatus leaves another session's " .. p:match("[^/]+$") .. " alone", exists(p))
 end

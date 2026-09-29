@@ -31,6 +31,10 @@ assert_eq "pin chip link is esc()'d"             "yes" "$(has 'esc(pn.url)')"
 assert_eq "an Instances row's overlap line is esc()'d"      "yes" "$(has 'esc(im.overlap)')"
 assert_eq "an idle worktree's overlap line is esc()'d"      "yes" "$(has 'esc(iw.overlap)')"
 assert_eq "the project's merge order is esc()'d"            "yes" "$(has 'esc(p.mergeOrder)')"
+# worktree leases (2026-09-29): the port and database path come from Shepherd's own registry,
+# which is a file on disk all the same
+assert_eq "a lease's port is esc()'d"                     "yes" "$(has 'esc(String(ls.port))')"
+assert_eq "a lease's tooltip (its database path) is esc()'d" "yes" "$(has "title=\"'+esc(leaseTitle(ls))+'\"")"
 
 # 2. esc() itself still entity-encodes the HTML metacharacters (not gutted to a no-op)
 assert_eq "esc() encodes &"  "yes" "$(has '.replace(/&/g,"&amp;")')"
@@ -61,7 +65,8 @@ assert_eq 'esc() encodes "'  "yes" "$(has '.replace(/"/g,"&quot;")')"
 # 2026-09-29 (pinned links): a pin's label and link were written by a session (cc-pin.sh) --
 # it.pins and pinChipsHtml's `pn.` never reach HTML raw.
 # 2026-09-29 (overlap radar): it.overlap carries branch and file names; so does p.mergeOrder.
-SINK_RE="'[[:space:]]*\+[[:space:]]*(it\.(group|label|name|cwd|projectKey|status|branch|stackName|stackKey|sessTitle|wtRoot|merge|askLine|askView|workingOn|pins|overlap)\b|p\.mergeOrder\b|\b(im|iw|mg|ak|wk|pn|tr)\.[A-Za-z]+\b|\bg\b)"
+# 2026-09-29 (worktree leases): it.lease and leaseBadge's `ls.` come from a file on disk.
+SINK_RE="'[[:space:]]*\+[[:space:]]*(it\.(group|label|name|cwd|projectKey|status|branch|stackName|stackKey|sessTitle|wtRoot|merge|askLine|askView|workingOn|pins|overlap|lease)\b|p\.mergeOrder\b|\b(im|iw|mg|ak|wk|pn|ls|tr)\.[A-Za-z]+\b|\bg\b)"
 raw_sinks="$(grep -nE "$SINK_RE" "$DASH" || true)"
 assert_eq "no user field concatenated RAW into panel HTML (must be esc()'d)" "" "$raw_sinks"
 
@@ -99,6 +104,9 @@ assert_eq "deny-list grep fires on a planted raw held-question sink" "1" "$plant
 tmp="$(mktemp)"; cp "$DASH" "$tmp"; printf '%s\n' "h += '<span>' + pn.label + '</span>';" >> "$tmp"
 planted="$(grep -cE "$SINK_RE" "$tmp")"; rm -f "$tmp"
 assert_eq "deny-list grep fires on a planted raw pin-chip sink" "1" "$planted"
+tmp="$(mktemp)"; cp "$DASH" "$tmp"; printf '%s\n' "h = '<span>:' + ls.port + '</span>';" >> "$tmp"
+planted="$(grep -cE "$SINK_RE" "$tmp")"; rm -f "$tmp"
+assert_eq "deny-list grep fires on a planted raw lease sink" "1" "$planted"
 
 # 2026-09-19 (audit ledger): the deny-list above is per-FIELD, so it could only ever see the
 # prefixes someone remembered to add -- it knew it./im./iw./mg./ak. and not `e.` (a ledger

@@ -354,6 +354,30 @@ cc_pins_prune() {
   return 0
 }
 
+# Worktree leases (build program unit 27, 2026-09-29): Shepherd leases each worktree it starts a
+# session for its own PORT and DB path, in CC_LEASE_DIR/<encoded main checkout>.json. Shepherd is
+# the ONLY writer -- its sweep frees a gone worktree's lease and deletes the database file it named
+# -- so the removers here drop only what nothing can use: a file that names no main checkout (or
+# isn't named for its own) and a torn write a minute old (Shepherd renames at once).
+# KEEP IN SYNC with FX.pruneLeaseFiles. Default MUST match FX.LEASE_DIR.
+CC_LEASE_DIR="${CC_LEASE_DIR:-${HOME}/.claude/cc-lease}"
+cc_lease_prune() {
+  [ -d "$CC_LEASE_DIR" ] || return 0
+  cc_have_jq || return 0
+  local f main
+  for f in "$CC_LEASE_DIR"/*.json; do
+    [ -f "$f" ] || continue
+    main="$(jq -r 'if (.main | type) == "string" then .main else empty end' "$f" 2>/dev/null)"
+    case "$main" in
+      /*) [ "${f##*/}" = "$(printf '%s' "${main%/}" | LC_ALL=C sed 's/[^A-Za-z0-9]/-/g').json" ] && continue ;;
+    esac
+    rm -f "$f" 2>/dev/null
+    cc_debug "cc_lease_prune: dropped $f (it names no main checkout of its own)"
+  done
+  find "$CC_LEASE_DIR" -maxdepth 1 -name '*.json.tmp.*' -mmin +1 -exec rm -f {} + 2>/dev/null
+  return 0
+}
+
 # Remove a session entirely (used by SessionEnd) plus any stray decision/claim
 # file and the per-session gated-tools override, approveRepeats memo, autopilot
 # expiry, L2 policy files, and the model auto-routing opt-in (a new session gets a
@@ -367,6 +391,7 @@ cc_pins_prune() {
 # cc-resume/<key>.json, .plan.json and .cancel (2026-09-29): a resume waiting for a usage limit's
 # reset -- its waiter sees the arm gone and stops.
 # cc-pins/ (2026-09-29) is keyed by worktree, not session: cc_pins_prune drops only a gone worktree's.
+# cc-lease/ (2026-09-29) is keyed by main checkout: cc_lease_prune drops only what nothing can use.
 # KEEP THE FILE SET IN SYNC with FX.removeStatus in claude-dashboard.lua.
 cc_remove() {
   rm -f "$(cc_file "$1")" "$(cc_file "$1")".tmp.* "$(cc_decision_file "$1")" \
@@ -391,6 +416,8 @@ cc_remove() {
   esac
   # Pinned links are per worktree, not per key: only those of a worktree that's gone (2026-09-29).
   cc_pins_prune
+  # Worktree leases are per main checkout: only the files nothing can use (2026-09-29).
+  cc_lease_prune
   return 0
 }
 
@@ -1415,7 +1442,9 @@ _cc_ro_gitconfig() {   # git config that reads: --get*, --list, get, list, or on
 # the cap is cut, and the parts after it are left out. A new part goes in CC_CONTEXT_PARTS.
 CC_NOTES_DIR="${CC_NOTES_DIR:-${HOME}/.claude/cc-notes}"
 # 2026-09-29: "notes" (auto-compact, unit 16) prints only after a compaction, and comes first there.
-CC_CONTEXT_PARTS="notes handoff mailbox"
+# 2026-09-29: "lease" (worktree leases, unit 27) is short and comes before the long parts, so a big
+# handoff note or mailbox never crowds out which port is the session's own.
+CC_CONTEXT_PARTS="notes lease handoff mailbox"
 CC_CONTEXT_MAX=8000
 CC_PENDING_MAX_AGE=3600   # a respawn's note nobody took within the hour is stale
 
@@ -1710,6 +1739,39 @@ _cc_ctx_notes() { # $1 source, $2 key
   else
     cat "$path"
   fi
+}
+
+# The lease part of cc_session_context (worktree leases, build program unit 27, 2026-09-29): when
+# the session's folder is a worktree Shepherd leased a port and database path to, or inside one,
+# say so -- at every start, /clear and compaction, so a fresh context never loses its own port.
+# Only a well-formed lease is shown (a whole-number port, absolute paths with no control character):
+# the text lands in the session's context. lease.enabled false says nothing. The deepest match wins.
+_cc_ctx_lease() { # $1 source, $2 key, $3 cwd
+  local cwd="${3%/}" f line wt port db best="" bport="" bdb=""
+  case "$cwd" in /*) ;; *) return 0 ;; esac
+  [ -d "$CC_LEASE_DIR" ] || return 0
+  cc_have_jq || return 0
+  [ "$(cc_config '.lease.enabled' 'true')" != false ] || return 0
+  for f in "$CC_LEASE_DIR"/*.json; do
+    [ -f "$f" ] || continue
+    while IFS=$'\t' read -r wt port db; do
+      [ -n "$wt" ] || continue
+      [ "${#wt}" -gt "${#best}" ] || continue
+      best="$wt" bport="$port" bdb="$db"
+    done < <(jq -r --arg cwd "$cwd" '
+      if (.leases | type) == "object" then .leases | to_entries[] else empty end
+      | select((.key | type) == "string" and (.key | startswith("/")) and (.key | test("[[:cntrl:]]") | not))
+      | select((.value | type) == "object")
+      | select((.value.port | type) == "number" and .value.port >= 1 and .value.port <= 65535
+               and .value.port == (.value.port | floor))
+      | select((.value.db | type) == "string" and (.value.db | startswith("/")) and (.value.db | test("[[:cntrl:]]") | not))
+      | (.key | rtrimstr("/")) as $wt
+      | select($cwd == $wt or ($cwd | startswith($wt + "/")))
+      | "\($wt)\t\(.value.port)\t\(.value.db)"' "$f" 2>/dev/null)
+  done
+  [ -n "$best" ] || return 0
+  printf 'Shepherd leased this worktree (%s) its own port and database path: PORT=%s, DB_PATH=%s. Run any server it starts on that port and keep any database at that path, so parallel units never collide. Both are also in $(git rev-parse --git-dir)/shepherd-lease.env, which a project can source.\n' \
+    "$best" "$bport" "$bdb"
 }
 
 # ---- Worktree fence (build program unit 7, 2026-09-28) --------------------------------------
