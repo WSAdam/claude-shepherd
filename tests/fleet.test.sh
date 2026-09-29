@@ -288,7 +288,9 @@ update_phase stopped
 fleet drv w14 wait --batch "$WB" --after 6
 assert_eq "wait: cc-fleet.sh stop's own phase counts as stopped too -> exit 5" "5" "$(cat "$TMP/w14.rc")"
 update_phase approved
-case "$(bash "$F" 2>&1)" in *"wait --batch"*) got=yes ;; *) got=no ;; esac
+# 2026-09-29: pinned with the session id set -- Shepherd's merge gate runs the suite with none, and
+# a bare `bash "$F"` there is refused before the usage line (green in a Claude tab, red in the gate).
+case "$(CLAUDE_CODE_SESSION_ID=drv bash "$F" 2>&1)" in *"wait --batch"*) got=yes ;; *) got=no ;; esac
 assert_eq "wait: the usage line names it" "yes" "$got"
 
 # ---- a stopped batch's files, events included, are pruned a week after its stop (2026-09-29) ----
