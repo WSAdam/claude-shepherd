@@ -4508,5 +4508,53 @@ do
         src:find("(type(it.decisions) == \"table\" and (tonumber(it.decisions.blocking) or 0) > 0)", 1, true) ~= nil)
 end
 
+-- ---- requirement ids and the merge receipt (2026-09-29, build program unit 22) ----
+-- A Requirements detail tab (id reqs), gated like User Stories -- here on the session being in a
+-- local git repo -- lists the repo's REQ-NNN ids and adds one. Shepherd is the only writer of
+-- ~/.claude/cc-reqs.json (core.reqsMint: temp + mv, re-read before the move). The merge review's
+-- receipt (v.receipt) is display only. tests/reqs.test.lua drives the core, receipt-view.test.js
+-- the shipped renderer, merge-request.test.lua the live card.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  local okCore, core = pcall(dofile, ROOT .. "cc-core.lua")
+  local hasTab = false
+  for _, t in ipairs(okCore and core.DETAIL_TABS or {}) do if t.id == "reqs" and t.label == "Requirements" then hasTab = true end end
+  check("reqs: a Requirements tab in core.DETAIL_TABS", hasTab)
+  check("reqs: its panel exists", src:find('<div class="d-panel" data-tab="reqs">', 1, true) ~= nil
+        and src:find('<div id="d-reqs"></div>', 1, true) ~= nil)
+  check("reqs: the tile flag, from the session's repo", src:find("it.has_reqs = core.reqsRepoOf(it) and true or nil", 1, true) ~= nil)
+  check("reqs: renderTabBar skips it without a repo",
+        src:find('if(t.id === "reqs" && !itemHasReqs(selectedKey)) return;  // gated: a git repo', 1, true) ~= nil)
+  check("reqs: renderTabMenu doesn't offer it without a repo",
+        src:find('if(t.id === "reqs" && !itemHasReqs(selectedKey)) return;  // gated tab: not offered outside a git repo', 1, true) ~= nil)
+  check("reqs: a restored tab falls back when the project has no repo",
+        src:find('if(detailTab === "reqs" && !itemHasReqs(key)) detailTab = "activity";', 1, true) ~= nil)
+  check("reqs: ccUpdate rebuilds the bar when the gate flips",
+        src:find("var hr = sel ? !!sel.has_reqs : false;", 1, true) ~= nil
+        and src:find('if(detailTab === "reqs" && !hr) detailTab = "activity";', 1, true) ~= nil)
+  check("reqs: lazy-loads on tab activation (not the 1Hz tick)", src:find('send("detail-reqs", selectedKey)', 1, true) ~= nil)
+  check("reqs: load + add handlers in the bridge",
+        src:find('if a == "detail-reqs" then', 1, true) ~= nil and src:find('if a == "reqs-add" then', 1, true) ~= nil)
+  check("reqs: the add goes through the hash guard, then Shepherd's one minting path",
+        src:find("core.reqsAddDecision(list, tostring(payload.hash or \"\"), payload)", 1, true) ~= nil
+        and src:find("FX.mintReq(repo, dec.fields)", 1, true) ~= nil)
+  check("reqs: FX.mintReq commits through core.reqsMint (temp + mv)",
+        (src:match("\nfunction FX%.mintReq%(repo, fields%)(.-)\nend\n") or ""):find("core.reqsMint(", 1, true) ~= nil)
+  check("reqs: every requirement field reaching innerHTML is esc()'d",
+        src:find("esc(rq.id)", 1, true) ~= nil and src:find("esc(rq.title)", 1, true) ~= nil
+        and src:find("esc(rq.source)", 1, true) ~= nil)
+  check("receipt: the review has its line", src:find('<div class="dm-receipt" id="dm-receipt"></div>', 1, true) ~= nil)
+  check("receipt: set with textContent, only while the review is asking",
+        src:find('document.getElementById("dm-receipt").textContent = asking ? receiptText(m.receipt) : "";', 1, true) ~= nil)
+  check("receipt: the tick hands mergeView the receipt's context",
+        src:find("receipt = (r.phase == \"requested\") and FX.receiptCtx(r, it) or nil", 1, true) ~= nil)
+  local ann = src:match("\nfunction FX%.annotateMerges%(list, cfg, bannerOn%)(.-)\nend\n") or ""
+  local rdAt = ann:find("rd = core.mergeReadiness(r, facts, it, gate, FX.fleetMergeWaits(r))", 1, true)
+  check("receipt: readiness is computed without it (display only)", rdAt ~= nil
+        and not (ann:sub(rdAt, (ann:find("\n", rdAt, true) or #ann))):find("receipt", 1, true))
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

@@ -8456,7 +8456,9 @@ do
   -- 2026-09-29: 30 -> 31 for task packets ("packets", flagged new).
   -- 2026-09-29: 31 -> 32 for the decisions inbox ("decisions", flagged new).
   -- 2026-09-29: 32 -> 33 for cc-send ("send", flagged new).
-  eq("FEATURES: the 33 new features are flagged", newCount, 33)
+  -- 2026-09-29: 33 -> 34 for requirement ids and merge receipts ("reqs", flagged new).
+  eq("FEATURES: the 34 new features are flagged", newCount, 34)
+  check("FEATURES: lists requirement ids and merge receipts", keys.reqs == true)
   check("FEATURES: lists task packets", keys.packets == true)
   check("FEATURES: lists the decisions inbox", keys.decisions == true)
   check("FEATURES: lists cc-send", keys.send == true)

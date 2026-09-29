@@ -261,6 +261,44 @@ The verdict shows under the buttons, and you get a toast when it's in.
 (default $1), and `timeoutSeconds` caps how long it may take (default 600). Verify works whatever
 `onMerge` says.
 
+### Requirement ids and the merge receipt
+
+**Requirement ids.** A session in a git repo has a **Requirements** tab in its detail panel. It
+lists the repo's requirements and adds one: a title (what must be true) and, optionally, a source
+(who asked, where). Shepherd mints the id: `REQ-001`, `REQ-002` and so on, counted per repo, so
+the main checkout and every worktree share one list. An id is never reused. The list lives in
+`~/.claude/cc-reqs.json`, keyed by the repo's main checkout, and Shepherd is its only writer:
+
+- it reads the file, writes the new list to a temp file, reads the file again, and moves the temp
+  file into place only if nothing changed in between (otherwise it mints again on top of the newer
+  file);
+- an add made on a list that has changed since the tab loaded it is refused, so a double click
+  never mints two ids;
+- a file that isn't valid JSON is never written over. The tab says so, and nothing is minted until
+  it's fixed.
+
+**The receipt.** Every merge review ends with a receipt: what was asked, and what proves it's done.
+
+| Line | What it shows |
+|---|---|
+| Source | The batch and unit, for a batch unit; the REQ ids the request names, each with its title (an id this repo never minted is marked so); else the session's first prompt |
+| Asked | The requester's words: the driver's brief for a batch unit, else the session's first prompt |
+| Tests changed | The unit's changed test files by layer: core (Lua suites), ui (`ui.test.lua`, real-browser tests), bash, node, fixtures, other. A deleted test isn't counted |
+| Evidence | The test gate, the [red-first proof](#the-red-first-proof-do-the-new-tests-fail-without-the-fix) and [the checker](#the-checker-a-read-only-review-of-every-merge-request), each in a word |
+| Known issues | What the unit says it knowingly leaves, or *none stated* |
+
+A REQ id is found wherever the request names it: its summary, its test claim, or the requester's
+words (`REQ-7` reads as `REQ-007`; `req-7` and `xREQ-7` don't count). Known issues come from an
+optional flag:
+
+```bash
+~/.claude/cc-merge.sh request --worktree <its path> --summary "Implements REQ-004 …" \
+  --tests "make test: green" --known-issues "The tab can't edit a requirement yet"
+```
+
+A request made before the flag existed still loads, and reads *none stated*. **The receipt is
+display only**: readiness, the card line, **Needs you** and a batch's delegated merge never read it.
+
 ### Merge, Not yet
 
 **Merge** tells the waiting session to go:

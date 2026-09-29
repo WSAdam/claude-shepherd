@@ -2,7 +2,7 @@
 # cc-merge.sh - a worktree tab's side of Shepherd's ready-to-merge flow.
 #
 #   cc-merge.sh request --summary "<what the unit does and why>" --tests "<command>: <result>"
-#                       [--base main] [--wait-max <seconds>]
+#                       [--known-issues "<what it knowingly leaves>"] [--base main] [--wait-max <seconds>]
 #   cc-merge.sh done --result merged|blocked [--note "<why>"]
 #
 # request: checks the unit can merge (its own worktree, on a branch, clean, ahead of the
@@ -75,11 +75,13 @@ stash_count() { # <git-dir>: the repo's stash entries (shared by every worktree)
 }
 
 cmd_request() {
-  local summary="" tests="" base="main" waitmax=0 wtArg=""
+  local summary="" tests="" known="" base="main" waitmax=0 wtArg=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --summary)  summary="${2:-}"; shift 2 ;;
       --tests)    tests="${2:-}"; shift 2 ;;
+      # 2026-09-29: optional, for the merge receipt -- what the unit knowingly leaves undone
+      --known-issues) known="${2:-}"; shift 2 ;;
       --base)     base="${2:-}"; shift 2 ;;
       --wait-max) waitmax="${2:-}"; shift 2 ;;
       --worktree) wtArg="${2:-}"; shift 2 ;;
@@ -156,10 +158,11 @@ cmd_request() {
        --arg wt "$wt" --arg branch "$branch" --arg base "$base" --arg common "$common" \
        --arg summary "${summary:0:1000}" --arg tests "${tests:0:300}" \
        --argjson ahead "$ahead" --argjson at "$now" --argjson waitpid "$$" \
-       --argjson stash "$(stash_count "$common")" \
+       --argjson stash "$(stash_count "$common")" --arg known "${known:0:1000}" \
        '{v: 1, key: $key, session_id: $sid, pid: $pid, nonce: $nonce, worktree: $wt, branch: $branch,
          base: $base, commonDir: $common, summary: $summary, tests: $tests, ahead: $ahead, at: $at,
-         wait_pid: $waitpid, stash_count: $stash, phase: "requested"}' > "$tmp" && mv "$tmp" "$REQ" || refuse "couldn't write the request in $MERGE_DIR"
+         wait_pid: $waitpid, stash_count: $stash, phase: "requested"}
+        + (if $known != "" then {known_issues: $known} else {} end)' > "$tmp" && mv "$tmp" "$REQ" || refuse "couldn't write the request in $MERGE_DIR"
   else
     # Re-asking on the SAME request (a foreground wait that ran out): the nonce is kept so an
     # answer given in between isn't lost, but the process waiting for it is a NEW one. Shepherd

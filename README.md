@@ -128,6 +128,8 @@ The automatic behaviours here are off until you turn them on, except handoff not
   merges only on a pass, and 🔎 Verify reviews any session.
 - [**Red-first proof**](docs/merging-and-batches.md#the-red-first-proof-do-the-new-tests-fail-without-the-fix):
   the unit's changed tests run on the merge-base without its fix, and the review says whether they fail.
+- [**Requirement ids and merge receipts**](docs/merging-and-batches.md#requirement-ids-and-the-merge-receipt):
+  Shepherd mints REQ ids per repo, and every review shows what was asked and what proves it's done.
 - [**Claude drives a batch**](docs/merging-and-batches.md#claude-drives-a-batch): a session proposes
   several units, you approve once, and it opens their tabs and hands out the tasks.
 - [**Overlap radar & unit order**](docs/merging-and-batches.md#overlap-radar-and-unit-order): worktrees

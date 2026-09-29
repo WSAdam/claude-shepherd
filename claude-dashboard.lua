@@ -5563,6 +5563,78 @@ function FX.sessionFirstPrompt(it)
   return core.firstPromptFromTranscript(head)
 end
 
+-- ---- Requirement ids and the merge receipt (2026-09-29, build program unit 22) ----------------
+-- ~/.claude/cc-reqs.json holds each repo's REQ-NNN ids; Shepherd is its only writer (FX.mintReq,
+-- through core.reqsMint's re-read + temp + mv). Reads are cached until Shepherd writes it again
+-- or its mtime moves. State on FX: the main chunk is at Lua's 200-local cap.
+FX.REQS_FILE = os.getenv("CC_REQS_FILE") or ((os.getenv("HOME") or "") .. "/.claude/cc-reqs.json")
+FX._receiptPrompt = {}   -- merge request nonce -> the session's first prompt (or false): read once
+
+-- The store (nil, why when the file isn't valid JSON -- nothing is written over it then).
+function FX.reqsStore()
+  local mt
+  pcall(function() mt = hs.fs.attributes(FX.REQS_FILE, "modification") end)
+  local c = FX._reqsCache
+  if c and c.mt == mt then return c.store, c.why end
+  local store, why = core.parseReqs(FX.readFile(FX.REQS_FILE))
+  if not store then print("[cc-dashboard] ⚠️ requirements: " .. tostring(why)) end
+  FX._reqsCache = { mt = mt, store = store, why = why }
+  return store, why
+end
+
+-- Mint the repo's next REQ id. -> req | nil, why.
+function FX.mintReq(repo, fields)
+  local dir = FX.REQS_FILE:match("^(.*)/[^/]+$")
+  if dir then pcall(function() hs.fs.mkdir(dir) end) end
+  local fio = {
+    read = function(p) return FX.readFile(p) end,
+    write = function(p, text)
+      local f = io.open(p, "w"); if not f then return false end
+      local ok = pcall(function() f:write(text) end); f:close()
+      return ok
+    end,
+    rename = function(from, to) return os.rename(from, to) and true or false end,
+    remove = function(p) os.remove(p) end,
+    token = function()
+      FX._reqsSeq = (FX._reqsSeq or 0) + 1
+      return tostring(hs.processInfo and hs.processInfo.processID or "p") .. "." .. tostring(FX.now()) .. "." .. FX._reqsSeq
+    end,
+  }
+  local req, why = core.reqsMint(fio, FX.REQS_FILE, repo, fields, FX.now())
+  FX._reqsCache = nil   -- the next read sees what was just written
+  if req then print("[cc-dashboard] ✅ minted " .. req.id .. " for " .. tostring(repo))
+  else print("[cc-dashboard] ❌ couldn't mint a requirement for " .. tostring(repo) .. ": " .. tostring(why)) end
+  return req, why
+end
+
+-- What the receipt needs beyond the request (core.mergeReceipt's ctx): a batch unit's brief (the
+-- driver's words), the session's first prompt (read once per request), and the repo's requirements.
+function FX.receiptCtx(r, it)
+  local batch
+  for id, b in pairs(FX._fleetBatches or {}) do
+    if not batch and b.commonDir == r.commonDir then
+      local slug = core.fleetUnitOfRequest(b, FX.fleetState(id), r)
+      for _, u in ipairs(slug and b.units or {}) do
+        if u.slug == slug then batch = { title = b.title, unit = u.branch, brief = u.task } end
+      end
+    end
+  end
+  local fp = FX._receiptPrompt[r.nonce]
+  if fp == nil then
+    fp = FX.sessionFirstPrompt(it) or false
+    FX._receiptPrompt[r.nonce] = fp
+  end
+  return { batch = batch, firstPrompt = fp or nil,
+           reqs = core.reqsFor(FX.reqsStore(), core.repoMainRoot(r.commonDir)) }
+end
+
+-- A request that's gone takes its cached first prompt with it.
+function FX.receiptPrune(reqs)
+  local live = {}
+  for _, r in pairs(reqs or {}) do live[r.nonce] = true end
+  for nonce in pairs(FX._receiptPrompt) do if not live[nonce] then FX._receiptPrompt[nonce] = nil end end
+end
+
 function FX.mergeAutoClose(r, it)
   if FX._mergeClosing[r.nonce] then return nil end
   local now = FX.now()
@@ -5677,6 +5749,7 @@ function FX.annotateMerges(list, cfg, bannerOn)
   FX._mergeReqs, FX._mergeItems, FX._mergeWaitPids = reqs, items, {}
   FX.mergeGatePrune(reqs)
   FX.redFirstPrune(reqs)
+  FX.receiptPrune(reqs)
   FX.mergeGatePump()   -- a gate queued behind another in its repo starts as soon as the lane frees
   -- 2026-09-29: the merge checker reviews every request (verify.onMerge); a delegated merge
   -- needs its pass. FX._checkerHolds says, per request, why one is waiting or held this tick.
@@ -5769,6 +5842,8 @@ function FX.annotateMerges(list, cfg, bannerOn)
                                                closeNote = closeNote, canCloseTab = canCloseTab,
                                                checkerHold = hold and hold.act == "hold" and hold.why or nil,
                                                checkerWait = hold and hold.act ~= "hold" and hold.why or nil,
+                                               -- 2026-09-29 (unit 22): the receipt's context -- display only
+                                               receipt = (r.phase == "requested") and FX.receiptCtx(r, it) or nil,
                                                -- 2026-09-29: the overlap radar's word on this worktree (a hint)
                                                overlap = (r.phase == "requested") and FX.radarReviewFor(r) or nil },
                               gate, core.checkerView(crec, cid), redFirst)
@@ -10713,6 +10788,45 @@ local function handleBridgeMsg(msg)
     reply({ ok = true, blocks = doc.blocks, areas = doc.areas, hash = core.cheapHash(dec.text) })
     return
   end
+  if a == "detail-reqs" then
+    -- Requirements tab (2026-09-29, unit 22): the repo's REQ ids from ~/.claude/cc-reqs.json. The
+    -- repo is the SESSION's main checkout (core.reqsRepoOf) -- no client-supplied path at all.
+    local key = tostring(payload.v or "")
+    local it = byKey[key]
+    local function reply(tbl)
+      pcall(function() wv:evaluateJavaScript("window.ccReqs("
+        .. jsString(key) .. ", " .. hs.json.encode(tbl) .. ")") end)
+    end
+    local repo = core.reqsRepoOf(it)
+    if not repo then reply({ noRepo = true }); return end
+    local store, why = FX.reqsStore()
+    local list = core.reqsFor(store, repo)
+    reply({ reqs = list, hash = core.reqsHash(list), repo = repo, broken = (store == nil) and why or nil })
+    return
+  end
+  if a == "reqs-add" then
+    -- Add one: refused when the list changed since the panel loaded it (core.reqsAddDecision, the
+    -- stories-save guard -- a double click never mints twice), then Shepherd's one minting path.
+    local key = tostring(payload.v or "")
+    local it = byKey[key]
+    local function reply(tbl)
+      pcall(function() wv:evaluateJavaScript("window.ccReqsAdded("
+        .. jsString(key) .. ", " .. hs.json.encode(tbl) .. ")") end)
+    end
+    local repo = core.reqsRepoOf(it)
+    if not repo then reply({ ok = false, error = "no-repo" }); return end
+    local list = core.reqsFor(FX.reqsStore(), repo)
+    local dec = core.reqsAddDecision(list, tostring(payload.hash or ""), payload)
+    if not dec.ok then reply({ ok = false, error = dec.error, reqs = list, hash = core.reqsHash(list) }); return end
+    local req, why = FX.mintReq(repo, dec.fields)
+    local fresh = core.reqsFor(FX.reqsStore(), repo)
+    if not req then
+      reply({ ok = false, error = "write-failed", why = why, reqs = fresh, hash = core.reqsHash(fresh) })
+      return
+    end
+    reply({ ok = true, id = req.id, reqs = fresh, hash = core.reqsHash(fresh) })
+    return
+  end
   if a == "detail-transcript" then
     -- F4 Transcript peek: the selected session's recent human-readable turns. Reads a
     -- bounded tail of its transcript JSONL; pure core.transcriptPeek extracts the user +
@@ -11910,6 +12024,10 @@ local HTML = [[
   #d-merge .dm-claims.c-flagged { color:var(--warn); opacity:1; }
   /* the red-first proof (2026-09-29) is a hint too: proved red reads ok, not red warns, never danger */
   #d-merge .dm-redfirst { margin-top:4px; white-space:pre-wrap; font-size:11px; opacity:.85; }
+  /* the receipt (2026-09-29, unit 22): what was asked and what proves it's done -- display only */
+  #d-merge .dm-receipt { margin-top:6px; padding-top:4px; border-top:1px solid var(--border-weak);
+                         white-space:pre-wrap; font-size:11px; color:var(--text-2); word-break:break-word; }
+  #d-merge .dm-receipt:empty { display:none; }
   #d-merge .dm-redfirst:empty { display:none; }
   #d-merge .dm-redfirst.r-red { color:var(--ok); opacity:1; }
   #d-merge .dm-redfirst.r-notRed, #d-merge .dm-redfirst.r-couldntRun { color:var(--warn); opacity:1; }
@@ -12441,6 +12559,18 @@ local HTML = [[
   #d-stories .us-add { margin:6px 0 2px; background:none; border:1px dashed var(--border); color:var(--text-3);
                        border-radius:7px; padding:3px 10px; font-size:12px; cursor:pointer; }
   #d-stories .us-add:hover { color:var(--accent-text); border-color:var(--accent); }
+  /* Requirements tab (2026-09-29, unit 22) */
+  #d-reqs .rq-head { color:var(--muted); font-size:11px; margin:2px 0 8px; word-break:break-all; }
+  #d-reqs .rq-flash { color:var(--text-2); font-size:11px; margin:0 0 8px; }
+  #d-reqs .rq-row { display:flex; align-items:baseline; gap:8px; padding:5px 4px; border-bottom:1px solid var(--border-weak); }
+  #d-reqs .rq-id { flex:0 0 auto; color:var(--accent-text); font-family:ui-monospace,monospace; font-size:12px; }
+  #d-reqs .rq-title { flex:1; color:var(--text); font-size:13px; line-height:1.45; word-break:break-word; }
+  #d-reqs .rq-src { color:var(--muted); font-size:11px; word-break:break-word; }
+  #d-reqs .rq-form { display:flex; flex-wrap:wrap; gap:6px; margin:10px 0 2px; }
+  #d-reqs .rq-form input { flex:1; min-width:120px; background:var(--surface-2); color:var(--text); border:1px solid var(--border);
+                           border-radius:6px; padding:3px 7px; font:inherit; font-size:12px; }
+  #d-reqs .rq-add { background:var(--surface); color:var(--accent-text); border:1px solid var(--accent); border-radius:7px;
+                    padding:3px 10px; font-size:12px; cursor:pointer; }
   #d-head { display:flex; align-items:center; gap:8px; }
   #d-dot  { width:10px; height:10px; border-radius:50%; background:var(--dc,var(--dim)); flex:0 0 auto; }
   #d-name { font-size:14px; font-weight:700; color:var(--text-strong); }
@@ -13333,6 +13463,7 @@ local HTML = [[
         <div class="dm-redfirst" id="dm-redfirst"></div>
         <div class="dm-gatefile" id="dm-gatefile"></div>
         <div class="dm-overlap" id="dm-overlap"></div>
+        <div class="dm-receipt" id="dm-receipt"></div>
         <div class="dm-problems" id="dm-problems"></div>
         <ul class="dm-commits" id="dm-commits"></ul>
         <ul class="dm-files" id="dm-files"></ul>
@@ -13396,6 +13527,10 @@ local HTML = [[
     </div>
     <div class="d-panel" data-tab="stories">
       <div id="d-stories"></div>
+    </div>
+    <!-- Requirements (2026-09-29, unit 22): the repo's REQ ids, minted by Shepherd -->
+    <div class="d-panel" data-tab="reqs">
+      <div id="d-reqs"></div>
     </div>
     <div class="d-panel" data-tab="subagents">
       <div id="d-subagents"></div>
@@ -15738,6 +15873,69 @@ local HTML = [[
       var add = (t.classList && t.classList.contains("us-add")) ? t : (t.closest ? t.closest(".us-add") : null);
       if(add && add.getAttribute){ storiesAdd(add.getAttribute("data-area") || ""); return; }
     });
+    // ---- Requirements tab (2026-09-29, unit 22): the repo's REQ ids, minted by Shepherd ----
+    // detail-reqs loads the list from ~/.claude/cc-reqs.json; an add posts reqs-add with the hash of
+    // the list it showed, and Shepherd refuses one made on a list that has changed since (a double
+    // click never mints twice). Every field reaches innerHTML through esc().
+    var REQS = { key:null, data:null, flash:null, clear:false };
+    function itemHasReqs(key){ var it = findItem(key); return !!(it && it.has_reqs); }
+    window.ccReqs = function(key, data){
+      if(key !== selectedKey) return;
+      REQS = { key:key, data:data || {}, flash:null, clear:false };
+      renderReqs();
+    };
+    window.ccReqsAdded = function(key, res){
+      if(key !== selectedKey || !res || REQS.key !== key) return;
+      var d = REQS.data || {};
+      if(Array.isArray(res.reqs)){ d.reqs = res.reqs; d.hash = res.hash; }
+      REQS.data = d;
+      if(res.ok){ REQS.flash = "Minted " + (res.id || "") + " ✓"; REQS.clear = true; }
+      else {
+        var er = res.error || "unknown";
+        REQS.flash = er === "changed" ? "⚠ The list changed since it loaded — here it is now; add yours again if it's still missing"
+          : er === "bad-title" ? "⚠ A requirement needs a title"
+          : er === "no-repo" ? "⚠ This session isn't in a git repo"
+          : "⚠ Couldn't save it: " + (res.why || er);
+      }
+      renderReqs();
+    };
+    function reqsAdd(){
+      var ti = document.getElementById("rq-title"), so = document.getElementById("rq-source");
+      if(!ti || !REQS.data || REQS.key !== selectedKey) return;
+      if(!ti.value.trim()){ REQS.flash = "⚠ A requirement needs a title"; renderReqs(); return; }
+      try { window.webkit.messageHandlers.cc.postMessage(JSON.stringify({ a:"reqs-add", v:selectedKey, hash:REQS.data.hash || "",
+                                                                          title:ti.value, source:so ? so.value : "" })); }
+      catch(e){ console.log("reqs-add error", e); }
+    }
+    function renderReqs(){
+      var box = document.getElementById("d-reqs"); if(!box) return;
+      if(REQS.key !== selectedKey){ box.innerHTML = ""; return; }
+      var d = REQS.data;
+      if(d === null){ box.innerHTML = '<div class="tl-empty">Loading requirements…</div>'; return; }
+      if(d.noRepo){ box.innerHTML = '<div class="tl-empty">This session isn\'t in a git repo.</div>'; return; }
+      // a re-render keeps what's typed in the form, unless an add just landed
+      var oldT = document.getElementById("rq-title"), oldS = document.getElementById("rq-source");
+      var keepT = (!REQS.clear && oldT) ? oldT.value : "", keepS = (!REQS.clear && oldS) ? oldS.value : "";
+      REQS.clear = false;
+      var list = Array.isArray(d.reqs) ? d.reqs : [];
+      var html = '<div class="rq-head">' + esc(String(list.length)) + ' requirement' + (list.length === 1 ? '' : 's')
+        + ' in ' + esc(d.repo || "this repo") + ' — Shepherd mints the ids and never reuses one</div>';
+      if(d.broken) html += '<div class="rq-flash">⚠ ' + esc(d.broken) + '</div>';
+      if(REQS.flash) html += '<div class="rq-flash">' + esc(REQS.flash) + '</div>';
+      if(!list.length) html += '<div class="tl-empty">No requirements yet. Add one below, then name its id (REQ-001) in a merge request: the review\'s receipt links it.</div>';
+      for(var i=0; i<list.length; i++){
+        var rq = list[i] || {};
+        html += '<div class="rq-row"><span class="rq-id">' + esc(rq.id) + '</span><span class="rq-title">' + esc(rq.title)
+          + (rq.source ? '<div class="rq-src">' + esc(rq.source) + '</div>' : '') + '</span></div>';
+      }
+      html += '<div class="rq-form"><input id="rq-title" maxlength="200" placeholder="New requirement: what must be true">'
+        + '<input id="rq-source" maxlength="300" placeholder="Source: who asked, where (optional)">'
+        + '<button class="rq-add" onclick="reqsAdd()">Add</button></div>';
+      box.innerHTML = html;
+      var nt = document.getElementById("rq-title"), ns = document.getElementById("rq-source");
+      if(nt){ nt.value = keepT; nt.onkeydown = function(e){ if(e.key === "Enter"){ e.preventDefault(); reqsAdd(); } }; }
+      if(ns){ ns.value = keepS; ns.onkeydown = function(e){ if(e.key === "Enter"){ e.preventDefault(); reqsAdd(); } }; }
+    }
     function toggleSearch(){
       var b = document.getElementById("searchbar");
       var show = !b.classList.contains("show");
@@ -16856,6 +17054,7 @@ local HTML = [[
         CHECKPOINTS = { key:null, data:null };      // DR3: rewind checkpoints are per-session, lazy
         CHANGES = { key:null, data:null }; CH_DIFFS = {}; CH_OPEN = {};  // git Changes: per-session
         STORIES = { key:null, data:null, blocks:null, hash:null, dirty:false, editing:null, flash:null };  // per-session
+        REQS = { key:null, data:null, flash:null, clear:false };   // requirements: per-session (2026-09-29)
         resetScoreReadout();   // DR4: clear the run-score readout on selection change
         closeTabMenu();
         loadTabState(key);          // restore this project's {selectedTab, unpinned}
@@ -16863,6 +17062,9 @@ local HTML = [[
         // "stories" but this project has none, fall back to the default view.
         if(detailTab === "stories" && !itemHasStories(key)) detailTab = "activity";
         lastSelectedHasStories = itemHasStories(key);   // seed the gated-tab tracker for ccUpdate
+        // The Requirements tab is gated on a git repo (2026-09-29): the same fallback and tracker.
+        if(detailTab === "reqs" && !itemHasReqs(key)) detailTab = "activity";
+        lastSelectedHasReqs = itemHasReqs(key);
       }
       selectedKey = key; renderDetail(); paintSelection();
       renderTabBar(); applyTabVisibility();  // built per-selection, NOT on the 1s tick
@@ -16920,6 +17122,7 @@ local HTML = [[
       DETAIL_TABS.forEach(function(t){
         if(detailUnpinned[t.id]) return;           // hidden for this project
         if(t.id === "stories" && !itemHasStories(selectedKey)) return;  // gated: file must exist
+        if(t.id === "reqs" && !itemHasReqs(selectedKey)) return;  // gated: a git repo
         var b = document.createElement("button");
         b.className = "d-tab" + (t.id === detailTab ? " active" : "");
         b.textContent = t.label; b.title = t.label;
@@ -16990,6 +17193,13 @@ local HTML = [[
           send("detail-stories", selectedKey);          // ccStories repaints
         }
         renderStories();
+      } else if(detailTab === "reqs"){
+        // loaded once per session (an add pushes the fresh list back itself)
+        if(REQS.key !== selectedKey){
+          REQS = { key: selectedKey, data: null, flash: null, clear: false };
+          send("detail-reqs", selectedKey);             // ccReqs repaints
+        }
+        renderReqs();
       } else if(detailTab === "subagents"){
         if(SUBAGENTS.key !== selectedKey){
           SUBAGENTS = { key: selectedKey, tree: null };  // pending (dedupes re-fetch)
@@ -17241,6 +17451,7 @@ local HTML = [[
       h.textContent = "Tabs for this project"; m.appendChild(h);
       DETAIL_TABS.forEach(function(t){
         if(t.id === "stories" && !itemHasStories(selectedKey)) return;  // gated tab: not offered when the file is absent
+        if(t.id === "reqs" && !itemHasReqs(selectedKey)) return;  // gated tab: not offered outside a git repo
         var locked = (t.id === "activity");
         var lab = document.createElement("label"); if(locked) lab.className = "locked";
         var cb = document.createElement("input"); cb.type = "checkbox";
@@ -17748,6 +17959,45 @@ local HTML = [[
       }
       return { cls: "dm-redfirst r-" + rf.state, text: t };
     }
+    // The merge receipt as text (2026-09-29, unit 22, core.mergeReceipt): what was asked and what
+    // proves it's done. Display only, always through textContent -- a session or a driver wrote
+    // every part of it; the Merge button never reads it.
+    function receiptText(rc){
+      if(!rc || !rc.source || !rc.tests) return "";
+      var src = rc.source, ak = rc.asked, parts = [];
+      if(src.batch) parts.push("batch \"" + (src.batch.title || "") + "\", unit " + (src.batch.unit || ""));
+      var rs = Array.isArray(src.reqs) ? src.reqs : [];
+      for(var i=0; i<rs.length; i++){
+        var q = rs[i] || {};
+        parts.push((q.id || "") + (q.unknown ? " (not minted for this repo)" : " " + (q.title || "")));
+      }
+      if(!parts.length) parts.push((ak && ak.by === "prompt") ? "the session's first prompt" : "not recorded");
+      var lines = ["Receipt — what was asked, and what proves it's done:", "Source: " + parts.join(" · ")];
+      lines.push((ak && ak.text) ? "Asked (" + (ak.by === "batch" ? "the driver's brief" : "the session's first prompt") + "): " + ak.text
+                                 : "Asked: not on record");
+      var t = rc.tests, n = t.count|0;
+      if(t.pending) lines.push("Tests changed: waiting for the diff");
+      else if(!n) lines.push("Tests changed: none — no test file in the diff");
+      else {
+        var ls = Array.isArray(t.layers) ? t.layers : [], gs = [];
+        for(var k=0; k<ls.length; k++){
+          var g = ls[k] || {}, fs = Array.isArray(g.files) ? g.files : [], more = (g.n|0) - fs.length;
+          gs.push((g.layer || "?") + ": " + fs.join(", ") + (more > 0 ? " (+" + more + " more)" : ""));
+        }
+        lines.push("Tests changed: " + n + (t.cut ? "+" : "") + " — " + gs.join(" · "));
+      }
+      var ev = rc.evidence || {};
+      var GATE = { off: "not configured", passed: "passed", failed: "failed", timedOut: "timed out",
+                   couldntRun: "couldn't run", running: "running", queued: "queued", reading: "reading" };
+      var RF = { off: "not run", red: "proved red", notRed: "not red", none: "had no changed test", couldntRun: "couldn't run",
+                 waiting: "waits for the gate", queued: "queued", running: "running" };
+      var CK = { off: "not run", pass: "pass", fail: "fail", couldntRun: "couldn't run", running: "running", queued: "queued" };
+      var gk = ev.gate || "off", rk = ev.redFirst || "off", ck = ev.checker || "off";
+      lines.push("Evidence: gate " + (GATE[gk] || gk) + (ev.gateCommand ? " (" + ev.gateCommand + ")" : "")
+        + " · red-first " + (RF[rk] || rk) + " · checker " + (CK[ck] || ck));
+      lines.push("Known issues: " + (rc.knownIssues || "none stated"));
+      return lines.join("\n");
+    }
     // A Verify verdict for a session whose merge review isn't showing it.
     function renderChecker(it){
       var el = document.getElementById("d-checker");
@@ -17815,6 +18065,9 @@ local HTML = [[
       var ovText = ovLines.length ? "Overlap radar (a hint, not a gate): ⚠ overlaps " + ovLines.join("\n⚠ overlaps ")
         + (ov.order ? "\n" + ov.order : "") : "";
       ovEl.textContent = ovText;
+      // 2026-09-29 (unit 22): the receipt (core.mergeReceipt) -- what was asked and what proves it's
+      // done. Display only: the Merge button below never reads it.
+      document.getElementById("dm-receipt").textContent = asking ? receiptText(m.receipt) : "";
       // 2026-09-18: the claim check (core.mergeClaimCheck) reads the session's summary against
       // the diff. It is a heuristic over English, so it WARNS here and gates nothing: the Merge
       // button below never looks at it.
@@ -20640,6 +20893,7 @@ local HTML = [[
     var PANEL_BUNDLES = [];   // L2 policy-bundle names (detail-panel Policy dropdown)
     var lastSelectedStatus = null;
     var lastSelectedHasStories = null;   // tracks the selected tile's user-stories-file presence (gated tab)
+    var lastSelectedHasReqs = null;      // ...and whether it's in a git repo (the Requirements tab, 2026-09-29)
     window.ccUpdate = function(items, providers, bundles){
       lastItems = items || [];
       if(providers !== undefined) PANEL_PROVIDERS = providers || [];
@@ -20671,6 +20925,13 @@ local HTML = [[
         renderTabBar(); applyTabVisibility(); maybeLoadActiveTab();
       }
       lastSelectedHasStories = sel ? hs : null;
+      // The Requirements tab is gated on a git repo: the same rebuild when that flips.
+      var hr = sel ? !!sel.has_reqs : false;
+      if(sel && lastSelectedHasReqs !== null && hr !== lastSelectedHasReqs){
+        if(detailTab === "reqs" && !hr) detailTab = "activity";
+        renderTabBar(); applyTabVisibility(); maybeLoadActiveTab();
+      }
+      lastSelectedHasReqs = sel ? hr : null;
     };
 
     // One tile's HTML. Extracted from ccUpdate so renderGrid can map the (filtered)
@@ -22667,6 +22928,9 @@ function FX._refreshBody()
   -- session that entered a sibling worktree finds its launch folder through its origin.
   FX.annotateOrigins(list)   -- the window each session lives in (see FX.annotateOrigins)
   FX.annotateStacks(list, labels, cfg)
+  -- 2026-09-29 (unit 22): the Requirements tab's gate -- a local session in a git repo (after the
+  -- stacks: it reads mainRoot). No stat, no git: the stacks already asked.
+  for _, it in ipairs(list) do it.has_reqs = core.reqsRepoOf(it) and true or nil end
   -- 2026-09-29: the overlap radar's line on each worktree tile -- after the stacks (it reads
   -- repoKey/wtRoot); a read of the cached scan, never a scan (FX.radarTimer runs those)
   do

@@ -79,6 +79,7 @@ local settingsStore, frame = {}, { x = 0, y = 0, w = 1920, h = 1080 }
 local EXISTS = {}   -- fake absolute paths hs.fs.attributes should report as real directories
 local DEAD = {}     -- pid (string) -> true: a process the fake ps must report as gone
 local REPOGATE, READS = {}, {}   -- 2026-09-29: git dir -> the base's .worktree-check read; every read made
+local IDENT, PANEL_CB = {}, nil  -- 2026-09-29: dir -> its `git rev-parse` identity; the panel's message callback
 local hs = {
   json = json,
   fs = {
@@ -110,6 +111,8 @@ local hs = {
       return table.concat(out, "\n") .. "\n"
     end
     if cmd:find("@@listed", 1, true) then return FACTS[cmd:match("%-C '([^']+)'") or ""] or "" end
+    -- 2026-09-29 (unit 22): a worktree's repo identity, for the few sessions a test names
+    if cmd:find("--show-toplevel --git-common-dir", 1, true) then return IDENT[cmd:match("%-C '([^']+)'") or ""] or "" end
     if cmd:find("merge-base --is-ancestor", 1, true) then return VERIFY_OUT end
     if cmd:find("diff --no-color", 1, true) then return "diff --git a/app.txt b/app.txt\n+<script>x</script>\n" end
     if cmd:find("ls-tree", 1, true) and cmd:find(".worktree-check", 1, true) then
@@ -134,7 +137,10 @@ hs.webview = setmetatable({
   windowMasks  = setmetatable({}, { __index = function() return 0 end }),
   windowLevels = setmetatable({}, { __index = function() return 0 end }),
   new = function() return webviewHandle() end,
-  usercontent = { new = function() return mkstub() end },
+  -- 2026-09-29 (unit 22): keep the panel's message callback, so a test can post what a click posts
+  usercontent = { new = function()
+    return setmetatable({ setCallback = function(_, fn) PANEL_CB = fn end }, { __index = function() return function() return mkstub() end end })
+  end },
 }, { __index = function() return function() return mkstub() end end })
 hs.drawing = setmetatable({
   windowLevels    = setmetatable({}, { __index = function() return 0 end }),
@@ -1038,6 +1044,76 @@ do
   if post[1] then quiet(function() post[1].cb(0, "", "") end) end
   tick()
   check("a finished request's scratch copies go with it", read(copy) == nil)
+end
+
+-- ---- requirement ids and the merge receipt (2026-09-29, build program unit 22) ----
+-- The Requirements tab mints REQ-NNN into ~/.claude/cc-reqs.json through the panel's own
+-- messages; the review of a request that names them carries the receipt. Display only: the
+-- card line and Merge are exactly what they'd be without it.
+do
+  REPOGATE["/r/Q/.git"] = "@@entry\n@@script\n"   -- repoGate is on from the section above: no gate declared here
+  local wt = newUnit("rq1", "/r/Q", "feat/rq1", "abc0rq1", 851, 1051)
+  IDENT[wt] = wt .. "\n/r/Q/.git\n/r/Q/.git/worktrees/rq1\n"
+  local r = json.decode(read(MD .. "/rq1.json"))
+  r.summary = "Adds the thing (REQ-001, REQ-002)"
+  r.known_issues = "the edit button is missing"
+  write(MD .. "/rq1.json", json.encode(r))
+  FACTS[wt] = FACTS[wt]:gsub("@@files\nM\tapp.lua\n", "@@files\nM\tapp.lua\nA\ttests/reqs.test.lua\nM\ttests/merge.test.sh\n")
+  tick()
+  local I = items()
+  check("a session in a git repo gets the Requirements tab", I.rq1 and I.rq1.has_reqs == true)
+  check("...a session outside one doesn't", I.h1 == nil or I.h1.has_reqs == nil)
+  local REQS = T .. "/.claude/cc-reqs.json"
+  local function post(tbl) js = {}; return quiet(function() PANEL_CB({ body = json.encode(tbl) }) end) end
+  local function reply(fn)
+    for i = #js, 1, -1 do
+      local body = tostring(js[i]):match("^window%." .. fn .. "%(\"[^\"]*\", (.*)%)$")
+      if body then return json.decode(body) end
+    end
+    return nil
+  end
+  check("the panel's message channel is wired", type(PANEL_CB) == "function")
+  post({ a = "detail-reqs", v = "rq1" })
+  local list = reply("ccReqs")
+  check("the tab loads the repo's (empty) list, with its hash", list and type(list.reqs) == "table" and #list.reqs == 0
+        and type(list.hash) == "string")
+  post({ a = "reqs-add", v = "rq1", title = "The <b>thing</b>", source = "Adam, chat", hash = list and list.hash })
+  local added = reply("ccReqsAdded")
+  check("adding one mints REQ-001  (" .. tostring(added and (added.id or added.error)) .. ")", added and added.ok == true and added.id == "REQ-001")
+  local store = read(REQS)
+  check("...into ~/.claude/cc-reqs.json, under the repo's main checkout",
+        store ~= nil and store:find("/r/Q", 1, true) ~= nil and store:find("REQ-001", 1, true) ~= nil)
+  check("...with no temp file left behind", (function()
+    local p = io.popen('ls -1 "' .. T .. '/.claude" 2>/dev/null'); local s = p:read("*a"); p:close()
+    return not s:find("cc-reqs.json.tmp", 1, true) end)())
+  post({ a = "reqs-add", v = "rq1", title = "A double click", source = "", hash = list and list.hash })
+  local stale = reply("ccReqsAdded")
+  check("the same click again, on the list it no longer shows, is refused  (" .. tostring(stale and stale.error) .. ")",
+        stale and stale.ok == false and stale.error == "changed")
+  check("...and minted nothing", not (read(REQS) or ""):find("REQ-002", 1, true))
+  check("...it hands the panel the fresh list", stale and type(stale.reqs) == "table" and #stale.reqs == 1)
+  post({ a = "reqs-add", v = "rq1", title = "   ", source = "", hash = added and added.hash })
+  local blank = reply("ccReqsAdded")
+  check("a blank title is refused", blank and blank.ok == false and blank.error == "bad-title")
+
+  tick()
+  I = items()
+  local m = I.rq1 and I.rq1.merge
+  local rc = m and m.receipt
+  check("the review carries a receipt", type(rc) == "table")
+  if type(rc) == "table" then
+    check("...its source: the REQ ids the request names, a minted one with its title",
+          rc.source.reqs[1] and rc.source.reqs[1].id == "REQ-001" and rc.source.reqs[1].title == "The <b>thing</b>")
+    check("...one this repo never minted marked unknown", rc.source.reqs[2] and rc.source.reqs[2].id == "REQ-002"
+          and rc.source.reqs[2].unknown == true)
+    check("...the requester's words: the session's first prompt", rc.asked and rc.asked.by == "prompt"
+          and rc.asked.text:find("Start unit feat/rq1", 1, true) == 1)
+    check("...the tests it changed, by layer", rc.tests.count == 2)
+    check("...and the known issues it declared", rc.knownIssues == "the edit button is missing")
+  end
+  check("the card line is the plain ready line  (" .. tostring(m and m.line) .. ")", m and m.line == "⇡ ready to merge feat/rq1 → main")
+  check("...and Merge is clickable exactly as before", m and m.ready == true)
+  os.remove(MD .. "/rq1.json"); os.remove(T .. "/status/rq1.json")
 end
 
 check("the whole flow never focused a window or pressed a key", taps == 0 and focusCalls == 0)

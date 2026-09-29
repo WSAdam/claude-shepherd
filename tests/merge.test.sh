@@ -456,4 +456,28 @@ g "$REPO" add .worktree-check && g "$REPO" commit -qm "a symlinked gate"
 lua_repogate > "$TMP/rg"
 assert_eq "repo gate: a symlinked .worktree-check on main is refused, never followed" "refused" "$(head -n 1 "$TMP/rg")"
 
+# ---- --known-issues: what the unit knowingly leaves, for the merge receipt (2026-09-29) ----
+# Optional: a request without it carries no field at all, and Shepherd still reads one that
+# was written before the flag existed. Display only -- the review's receipt shows it.
+alive
+unit kiss feat/kiss
+req "$REPO/.claude/worktrees/kiss" ki1 --wait-max 1 --known-issues "The tab can't edit a requirement yet"
+assert_json "--known-issues rides the request as known_issues" "$MD/ki1.json" .known_issues "The tab can't edit a requirement yet"
+assert_json "...beside the summary, unchanged" "$MD/ki1.json" .summary "Fix the demo"
+unit kiss2 feat/kiss2
+req "$REPO/.claude/worktrees/kiss2" ki2 --wait-max 1
+assert_json "a request without --known-issues has no known_issues field" "$MD/ki2.json" 'has("known_issues")' false
+unit kiss3 feat/kiss3
+req "$REPO/.claude/worktrees/kiss3" ki3 --wait-max 1 --known-issues "$(printf 'k%.0s' $(seq 1 1500))"
+assert_json "...and a long one is capped at 1000 characters" "$MD/ki3.json" '.known_issues | length' 1000
+lua_known() { lua - "$ROOT" "$1" <<'LUA'
+local core = dofile(arg[1] .. "/cc-core.lua"); core.json = dofile(arg[1] .. "/tests/support/json.lua")
+local fh = io.open(arg[2]); local r = core.parseMergeRequest(fh:read("a")); fh:close()
+io.write(r and (r.knownIssues or "(none)") or "(unparsed)")
+LUA
+}
+assert_eq "Shepherd reads known_issues back from the request" "The tab can't edit a requirement yet" "$(lua_known "$MD/ki1.json")"
+assert_eq "...and an older request without it still loads" "(none)" "$(lua_known "$MD/ki2.json")"
+rm -f "$MD/ki1.json" "$MD/ki2.json" "$MD/ki3.json"
+
 finish

@@ -104,6 +104,7 @@ Everything lives under `~/.claude/`:
 | `cc-config.json` | Your settings |
 | `cc-status/` | One status file per session, written by the hooks; `.panel-alive` is the panel heartbeat |
 | `cc-merge/`, `cc-fleet/` | Merge requests and batches, with their answers |
+| `cc-reqs.json` | [Requirement ids](merging-and-batches.md#requirement-ids-and-the-merge-receipt): each repo's `REQ-NNN` list (Shepherd is its only writer) |
 | `cc-ask/` | Answers to held questions (the question itself is in the session's status file) |
 | `cc-inbox/` | The [session mailbox](automation.md#session-mailbox): messages waiting for each session |
 | `cc-resume/` | [Resumes waiting for a usage limit's reset](automation.md#resume-at-the-limit-reset): the hook's arm, Shepherd's plan, a Cancel |

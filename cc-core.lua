@@ -2123,6 +2123,10 @@ function M.parseMergeRequest(raw)
     -- 2026-09-28 (merge hardening): the repo's stash count when the unit asked. Optional -- an
     -- older request has none, and the post-merge "no new stash entries" check is then skipped.
     stashCount = (tonumber(t.stash_count) or -1) >= 0 and math.tointeger(tonumber(t.stash_count)) or nil,
+    -- 2026-09-29 (unit 22): what the unit says it knowingly leaves (`--known-issues`), for the
+    -- merge receipt. Optional -- an older request has none; anything but text reads as none.
+    knownIssues = (type(t.known_issues) == "string" and t.known_issues:match("%S"))
+      and capChars(t.known_issues:match("^%s*(.-)%s*$"), 1000) or nil,
   }
 end
 
@@ -2768,6 +2772,8 @@ end
 -- as v.redFirst while the request waits. WARN ONLY: nothing below reads it.
 -- 2026-09-29: q.overlap (optional) is the overlap radar's word on this worktree (M.radarReview):
 -- the other worktrees it shares files or conflicts with, and the merge order. A hint only.
+-- 2026-09-29: q.receipt (optional) is the receipt's context (M.mergeReceipt's ctx); every review
+-- carries v.receipt. Display only, like the hints above.
 function M.mergeView(req, rd, facts, q, gate, checker, redFirst)
   q = q or {}
   local v = {
@@ -2818,6 +2824,11 @@ function M.mergeView(req, rd, facts, q, gate, checker, redFirst)
   if req.phase == "requested" then v.claims = M.mergeClaimCheck(req, facts) end
   if req.phase == "requested" and type(redFirst) == "table" then v.redFirst = redFirst end
   if req.phase == "requested" and type(q.overlap) == "table" then v.overlap = q.overlap end
+  -- 2026-09-29 (unit 22): the receipt -- what was asked and what proves it's done. DISPLAY ONLY:
+  -- built after everything above, and nothing below (the line, needsYou) reads it.
+  if req.phase == "requested" then
+    v.receipt = M.mergeReceipt(req, facts, q.receipt, { gate = v.gate, redFirst = redFirst, checker = checker })
+  end
   v.line = M.mergeLine(v)
   v.needsYou = M.mergeNeedsYou(v)
   return v
@@ -2975,6 +2986,269 @@ function M.mergeClaimCheck(req, facts)
   end
   return one(M.CLAIM_FLAGGED, "it says \"" .. quote .. "\", but no test or fixture path is among the "
     .. #facts.files .. " changed file" .. (#facts.files == 1 and "" or "s"))
+end
+
+-- ---- Requirement ids and the merge receipt (2026-09-29, build program unit 22) -------------
+-- Shepherd mints REQ-NNN per repo in ~/.claude/cc-reqs.json and is the file's ONLY writer
+-- (FX.mintReq, through M.reqsMint: re-read, temp file, re-read again, mv). A repo is its main
+-- checkout's root -- a tile's mainRoot, a merge request's commonDir without /.git -- so every
+-- worktree of a repo shares its ids:
+--   { "v": 1, "repos": { "<main root>": { "next": 4, "reqs": [ { id, title, source, at } ] } } }
+-- An id is never reused: the next one is above both `next` and the highest id on file.
+-- Every merge review carries v.receipt (M.mergeReceipt): where the work came from, the
+-- requester's words, the tests it changed by layer, the evidence Shepherd gathered and the known
+-- issues the unit declared. DISPLAY ONLY: readiness, the card line, "needs you" and a delegated
+-- batch merge never read it.
+M.REQS_VERSION = 1
+M.REQS_TITLE_CHARS = 200
+M.REQS_SOURCE_CHARS = 300
+M.REQS_COMMIT_TRIES = 5       -- a store that changed under us is re-read and re-minted this often
+M.RECEIPT_ASKED_CHARS = 1200  -- of the requester's words
+M.RECEIPT_LAYER_FILES = 8     -- files named per test layer
+M.RECEIPT_MAX_REQS = 10
+M.RECEIPT_LAYERS = { "core", "ui", "bash", "node", "fixtures", "other" }
+
+do
+  -- one line, trimmed and capped: a title or source is shown on one row
+  local function oneLine(s, n)
+    if type(s) ~= "string" then return "" end
+    return capChars(s:gsub("%c+", " "):gsub("%s+", " "):match("^%s*(.-)%s*$"), n)
+  end
+  local function reqNum(id)
+    local n = type(id) == "string" and id:match("^REQ%-(%d+)$")
+    return n and math.tointeger(tonumber(n)) or nil
+  end
+  local function formatId(n) return string.format("REQ-%03d", n) end
+  local function repoKey(repo)
+    if type(repo) ~= "string" or repo:sub(1, 1) ~= "/" then return nil end
+    return M.normDir(repo)
+  end
+
+  -- The repo a session's requirements belong to: its main checkout (nil off a git repo, remote).
+  function M.reqsRepoOf(it)
+    if type(it) ~= "table" or it.remote then return nil end
+    return repoKey(it.mainRoot)
+  end
+
+  -- cc-reqs.json -> the store. No file (or an empty one) is an empty store; a file that isn't
+  -- valid JSON is NOT (nil, why): minting over it would erase every id in it. Rows with a bad id
+  -- or no title are dropped; each repo's list comes back in id order.
+  function M.parseReqs(raw)
+    local store = { v = M.REQS_VERSION, repos = {} }
+    if raw == nil or (type(raw) == "string" and not raw:match("%S")) then return store end
+    if type(raw) ~= "string" then return nil, "the requirements file isn't text" end
+    local ok, t = pcall(M.json.decode, raw)
+    if not ok or type(t) ~= "table" then return nil, "~/.claude/cc-reqs.json isn't valid JSON -- fix or move it" end
+    for key, r in pairs(type(t.repos) == "table" and t.repos or {}) do
+      local k = repoKey(key)
+      if k and type(r) == "table" and not store.repos[k] then
+        local list, seen, maxN = {}, {}, 0
+        for _, q in ipairs(type(r.reqs) == "table" and r.reqs or {}) do
+          local n = type(q) == "table" and reqNum(q.id) or nil
+          if n and type(q.title) == "string" and q.title:match("%S") and not seen[n] then
+            seen[n] = true
+            if n > maxN then maxN = n end
+            list[#list + 1] = { id = formatId(n), title = oneLine(q.title, M.REQS_TITLE_CHARS),
+                                source = oneLine(q.source, M.REQS_SOURCE_CHARS), at = tonumber(q.at) or 0 }
+          end
+        end
+        table.sort(list, function(a, b) return reqNum(a.id) < reqNum(b.id) end)
+        local nxt = math.tointeger(tonumber(r.next) or 1) or 1
+        store.repos[k] = { next = math.max(nxt, maxN + 1), reqs = list }
+      end
+    end
+    return store
+  end
+
+  function M.encodeReqs(store)
+    local repos = {}
+    for k, r in pairs(type(store) == "table" and type(store.repos) == "table" and store.repos or {}) do
+      repos[k] = { next = r.next, reqs = r.reqs }
+    end
+    return M.json.encode({ v = M.REQS_VERSION, repos = repos })
+  end
+
+  -- A repo's requirements, in id order (a copy). A nil store (unreadable) has none.
+  function M.reqsFor(store, repo)
+    local k, out = repoKey(repo), {}
+    local r = k and type(store) == "table" and type(store.repos) == "table" and store.repos[k] or nil
+    for i, q in ipairs(r and r.reqs or {}) do out[i] = { id = q.id, title = q.title, source = q.source, at = q.at } end
+    return out
+  end
+
+  -- Pure allocation: a NEW store with the repo's next requirement, and that requirement.
+  -- (nil, nil, why) for a blank title or a repo that isn't an absolute path. The store given is
+  -- never changed.
+  function M.mintReq(store, repo, fields, now)
+    local k = repoKey(repo)
+    if not k then return nil, nil, "this session isn't in a git repo" end
+    if type(store) ~= "table" or type(store.repos) ~= "table" then return nil, nil, "no requirements store" end
+    fields = type(fields) == "table" and fields or {}
+    local title = oneLine(fields.title, M.REQS_TITLE_CHARS)
+    if title == "" then return nil, nil, "a requirement needs a title" end
+    local out = { v = M.REQS_VERSION, repos = {} }
+    for rk, r in pairs(store.repos) do
+      out.repos[rk] = { next = r.next, reqs = M.reqsFor(store, rk) }
+    end
+    local r = out.repos[k] or { next = 1, reqs = {} }
+    out.repos[k] = r
+    local maxN = 0
+    for _, q in ipairs(r.reqs) do local n = reqNum(q.id) or 0; if n > maxN then maxN = n end end
+    local n = math.max(math.tointeger(tonumber(r.next) or 1) or 1, maxN + 1)
+    local req = { id = formatId(n), title = title, source = oneLine(fields.source, M.REQS_SOURCE_CHARS), at = tonumber(now) or 0 }
+    r.reqs[#r.reqs + 1] = req
+    r.next = n + 1
+    return out, req
+  end
+
+  -- Commit one mint to the file through `io_` = { read(p), write(p, text) -> ok, rename(a, b) ->
+  -- ok, remove(p), token() -> a name part no other call gets }. Read, mint, write a temp file,
+  -- then read the store AGAIN: if another writer landed since the first read, drop the temp and
+  -- mint again on top of theirs (bounded), else mv the temp over the store. -> req | nil, why.
+  function M.reqsMint(io_, path, repo, fields, now)
+    for _ = 1, M.REQS_COMMIT_TRIES do
+      local raw = io_.read(path)
+      local store, bad = M.parseReqs(raw)
+      if not store then return nil, bad end
+      local nextStore, req, why = M.mintReq(store, repo, fields, now)
+      if not nextStore then return nil, why end
+      local tmp = path .. ".tmp." .. tostring(io_.token())
+      if not io_.write(tmp, M.encodeReqs(nextStore)) then
+        io_.remove(tmp)
+        return nil, "couldn't write " .. tmp
+      end
+      if io_.read(path) ~= raw then
+        io_.remove(tmp)   -- another writer landed after our read: mint again on top of theirs
+      elseif io_.rename(tmp, path) then
+        return req
+      else
+        io_.remove(tmp)
+        return nil, "couldn't move the new requirements file into place"
+      end
+    end
+    return nil, "the requirements file kept changing -- try again"
+  end
+
+  -- The list's fingerprint: the panel sends back the one it showed, and an add made on a list
+  -- that has changed since (a double click, another add) is refused (the stories-save guard).
+  function M.reqsHash(list)
+    local parts = {}
+    for i, q in ipairs(type(list) == "table" and list or {}) do
+      parts[i] = tostring(q.id) .. "\t" .. tostring(q.title) .. "\t" .. tostring(q.source)
+    end
+    return M.cheapHash(table.concat(parts, "\n"))
+  end
+
+  -- May the panel's add go ahead? { ok, fields } or { ok = false, error = "changed" | "bad-title" }.
+  function M.reqsAddDecision(list, hash, fields)
+    if hash ~= M.reqsHash(list) then return { ok = false, error = "changed" } end
+    fields = type(fields) == "table" and fields or {}
+    local title = oneLine(fields.title, M.REQS_TITLE_CHARS)
+    if title == "" then return { ok = false, error = "bad-title" } end
+    return { ok = true, fields = { title = title, source = oneLine(fields.source, M.REQS_SOURCE_CHARS) } }
+  end
+
+  -- The REQ ids a text names, each once, in order, as REQ-NNN. Upper case and whole words only:
+  -- "REQ-7" counts, "req-7", "xREQ-7" and "REQ-7x" don't.
+  function M.reqIdsIn(text)
+    local out, seen = {}, {}
+    if type(text) ~= "string" then return out end
+    for d in text:gmatch("%f[%w]REQ%-(%d+)%f[%W]") do
+      local n = math.tointeger(tonumber(d))   -- nil past an integer's range: not an id we minted
+      local id = n and formatId(n)
+      if id and not seen[id] then seen[id] = true; out[#out + 1] = id end
+    end
+    return out
+  end
+
+  -- Which layer a changed test file tests: the panel pins (ui.test.lua) and real-browser tests are
+  -- ui, any other Lua suite core, shell suites bash, JS node; a fixture's data file is fixtures.
+  -- nil for a path that isn't a test (M.isTestPath).
+  function M.testLayer(path)
+    if not M.isTestPath(path) then return nil end
+    local base = (path:match("([^/]+)$") or path):lower()
+    if base == "ui.test.lua" or base:find("%.browser%.test%.[cm]?[jt]s$") then return "ui" end
+    if base:find("%.test%.lua$") or base:find("_spec%.lua$") or base:find("_test%.lua$") then return "core" end
+    if base:find("%.test%.sh$") or base:find("%.bats$") then return "bash" end
+    if base:find("%.test%.[cm]?js$") then return "node" end
+    if ("/" .. path:lower()):find("/fixtures?/") then return "fixtures" end
+    return "other"
+  end
+
+  local function evidenceOf(ev)
+    ev = type(ev) == "table" and ev or {}
+    local g, rf, ck = ev.gate, ev.redFirst, ev.checker
+    local out = { gate = "off", redFirst = "off", checker = "off" }
+    if type(g) == "table" and type(g.state) == "string" then
+      out.gate = g.state
+      out.gateCommand = (type(g.command) == "string" and g.command ~= "") and capChars(g.command, 300) or nil
+    end
+    if type(rf) == "table" and type(rf.state) == "string" then out.redFirst = rf.state end
+    if type(ck) == "table" and type(ck.state) == "string" then
+      out.checker = (ck.state == "done" and type(ck.verdict) == "string") and ck.verdict or ck.state
+    end
+    return out
+  end
+
+  -- The receipt for one request. ctx (optional) = { batch = { title, unit, brief } for a batch
+  -- unit, firstPrompt = the session's first prompt, reqs = this repo's M.reqsFor list };
+  -- ev (optional) = { gate = mergeView's v.gate, redFirst = the verdict, checker = the view }.
+  function M.mergeReceipt(req, facts, ctx, ev)
+    req = type(req) == "table" and req or {}
+    ctx = type(ctx) == "table" and ctx or {}
+    local rc = { source = { reqs = {} } }
+    local b = type(ctx.batch) == "table" and ctx.batch or nil
+    if b then rc.source.batch = { title = capChars(tostring(b.title or ""), 120), unit = tostring(b.unit or "") } end
+    -- the requester's words: the driver's brief for a batch unit, else the session's first prompt
+    local words, by = nil, nil
+    if b and type(b.brief) == "string" and b.brief:match("%S") then words, by = b.brief, "batch"
+    elseif type(ctx.firstPrompt) == "string" and ctx.firstPrompt:match("%S") then words, by = ctx.firstPrompt, "prompt" end
+    if words then rc.asked = { by = by, text = capChars(words:match("^%s*(.-)%s*$"), M.RECEIPT_ASKED_CHARS) } end
+    -- the REQ ids named in the request, then in the requester's words; a minted one with its title
+    local known = {}
+    for _, q in ipairs(type(ctx.reqs) == "table" and ctx.reqs or {}) do
+      if type(q) == "table" and type(q.id) == "string" then known[q.id] = q end
+    end
+    local seen = {}
+    for _, text in ipairs({ req.summary, req.tests, words }) do
+      for _, id in ipairs(M.reqIdsIn(text)) do
+        if not seen[id] and #rc.source.reqs < M.RECEIPT_MAX_REQS then
+          seen[id] = true
+          local q = known[id]
+          rc.source.reqs[#rc.source.reqs + 1] = q and { id = id, title = q.title, source = q.source }
+                                                   or { id = id, unknown = true }
+        end
+      end
+    end
+    -- the tests the unit changed, by layer (a deleted test proves nothing)
+    local tests = { count = 0, layers = {} }
+    if type(facts) ~= "table" or type(facts.files) ~= "table" then
+      tests.pending = true
+    else
+      local byLayer = {}
+      for _, f in ipairs(facts.files) do
+        if type(f) == "table" and f.st ~= "D" then
+          local p = claimDestPath(f.path)
+          local layer = M.testLayer(p)
+          if layer then
+            local g = byLayer[layer] or { layer = layer, files = {}, n = 0 }
+            byLayer[layer] = g
+            g.n = g.n + 1
+            if #g.files < M.RECEIPT_LAYER_FILES then g.files[#g.files + 1] = capChars(p, 160) end
+            tests.count = tests.count + 1
+          end
+        end
+      end
+      for _, name in ipairs(M.RECEIPT_LAYERS) do
+        if byLayer[name] then tests.layers[#tests.layers + 1] = byLayer[name] end
+      end
+      if #facts.files >= M.MERGE_FACTS_MAX_FILES then tests.cut = true end
+    end
+    rc.tests = tests
+    rc.evidence = evidenceOf(ev)
+    rc.knownIssues = (type(req.knownIssues) == "string" and req.knownIssues ~= "") and req.knownIssues or nil
+    return rc
+  end
 end
 
 -- ---- The red-first proof (2026-09-29, build program unit 20) -------------------------------
@@ -15155,6 +15429,7 @@ M.DETAIL_TABS = {
   { id = "usage",      label = "Usage" },
   { id = "changes",    label = "Changes" },
   { id = "stories",    label = "User Stories" },  -- gated: shows only when spec/product/user-stories.md exists
+  { id = "reqs",       label = "Requirements" },  -- gated: shows only for a session in a git repo (2026-09-29)
   { id = "subagents",  label = "Agents" },
   { id = "queue",      label = "Queue" },
 }
@@ -17850,6 +18125,9 @@ M.FEATURES = {
   { key = "redfirst", cat = "Control", new = true, title = "Red-first proof",
     what = "With a redFirstCommand on the project's merge gate, Shepherd runs the unit's changed tests on a scratch worktree at the merge-base, without the fix, once the gate passes. The review says whether they fail there: proved red, not red (which files), or couldn't run, leaving out failures main already has. It's a hint; Merge never waits for it.",
     why = "A green suite proves the fix passes its tests; red-first shows the tests would have caught the bug without it." },
+  { key = "reqs", cat = "Control", new = true, title = "Requirement ids and merge receipts",
+    what = "A Requirements tab (for a session in a git repo) lists the repo's requirements and adds one with a title and a source; Shepherd mints its id -- REQ-001, REQ-002... per repo, never reused -- in ~/.claude/cc-reqs.json. Every merge review carries a receipt: the source (the batch, the REQ ids the request names, or the session's first prompt), the requester's words, the tests it changed by layer, the gate, red-first and checker evidence, and the known issues from cc-merge.sh request --known-issues. The receipt is display only.",
+    why = "Each merge answers what was asked and what proves it's done, in one place, against an id that outlives the chat." },
   { key = "fleet", cat = "Control", new = true, title = "Claude drives a batch",
     what = "A Claude session proposes a batch of worktree units; you approve it once on its card (and choose whether it may merge them when green). It then opens each unit's tab through Shepherd and hands it its task. Stop batch ends it.",
     why = "Parallel work without opening tabs, pressing Return or clicking every merge -- your one approval is the permission." },

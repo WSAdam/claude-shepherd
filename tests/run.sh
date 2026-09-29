@@ -424,6 +424,12 @@ echo ""
 echo "== bash: cc-send.sh -- arguments, Shepherd's answer, --wait following literal transcripts to the turn's end, the reply alone on stdout =="
 bash "$DIR/send.test.sh" || fail=1
 echo ""
+echo "== lua: requirement ids and the merge receipt -- REQ-NNN per repo, never reused, a racing writer never loses an id (temp + mv), the add guard, the receipt on literal request/facts fixtures, display only =="
+lua "$DIR/reqs.test.lua" || fail=1
+echo ""
+echo "== node: the merge receipt's text -- source, the requester's words, tests by layer, evidence, known issues (behavioral, runs the shipped receiptText) =="
+node "$DIR/receipt-view.test.js" || fail=1
+echo ""
 
 if [ "$fail" -eq 0 ]; then
   echo "✅ ALL GREEN"
