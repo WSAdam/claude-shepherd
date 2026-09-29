@@ -106,6 +106,20 @@ while IFS= read -r rel; do
 done <<< "$MD_EXISTING"
 assert_eq "every top-level docs/ page is linked from the README" "" "$unindexed"
 
+# ---- what's on out of the box ---------------------------------------------------------------
+# 2026-09-29: the Configuration section said the automations "are off until you turn them on",
+# while defaults/cc-config.json -- what a fresh install starts from -- had turned six of them on.
+# Every top-level block the defaults switch on (`enabled: true`) is named there by its key.
+awk '/^## Configuration/{on=1; next} on && /^## /{exit} on' "$ROOT/README.md" > "$TMP/config.md"
+unnamed=""
+for k in $(jq -r 'to_entries[] | select((.value|type)=="object" and .value.enabled==true) | .key' "$ROOT/defaults/cc-config.json"); do
+  grep -qF "\`$k\`" "$TMP/config.md" || unnamed="$unnamed [$k]"
+done
+assert_eq "the README's Configuration section names every block defaults/cc-config.json turns on" "" "$unnamed"
+if tr '\n' ' ' < "$TMP/config.md" | tr -s ' ' | grep -qi "off until you turn them on" && [ -n "$(jq -r 'to_entries[] | select((.value|type)=="object" and .value.enabled==true) | .key' "$ROOT/defaults/cc-config.json")" ]; then
+  got="claims every automation is off"; else got=accurate; fi
+assert_eq "...and doesn't claim the automations are all off" "accurate" "$got"
+
 # ---- it stays a front page ---------------------------------------------------------
 lines="$(wc -l < "$ROOT/README.md" | tr -d ' ')"
 if [ "$lines" -le 320 ]; then got=short; else got="$lines lines"; fi
