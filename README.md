@@ -115,6 +115,8 @@ The automatic behaviours here are off until you turn them on, except handoff not
 - [**Automation dry run & trace**](docs/automation.md#dry-run-and-the-automation-trace): see what
   automation would do before it does it, and what it did, refused and why, newest first.
 - [**Routines**](docs/automation.md#routines): spawn a session or push a digest on a cron schedule.
+- [**Coach**](docs/automation.md#the-coach): weekly or from a card, Sonnet reads a repo's last sessions and
+  suggests CLAUDE.md edits with evidence; Apply commits CLAUDE.md alone.
 - [**Notifications & escalation**](docs/automation.md#escalation-and-watchdogs): louder nags, macOS
   banners and phone pushes when a session has waited on you too long or stalled.
 - [**A/B compare**](docs/automation.md#ab-compare): run one task as 2–4 variants in separate

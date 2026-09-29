@@ -4694,5 +4694,45 @@ do
         and tickBody:find("skillOutcomes", 1, true) == nil)
 end
 
+-- ---- the coach (2026-09-29) ----
+-- Build program unit 32: weekly and from a card, a headless Sonnet reads a repo's last sessions and
+-- suggests CLAUDE.md edits; Adam applies (write + commit CLAUDE.md alone) or skips each in the Coach
+-- overlay. tests/coach.test.lua drives the core and the FX run on a real repo, coach-view.test.js
+-- the shipped overlay; here, only that the panel is wired to them.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("coach: a 🧭 Coach button on every session", src:find('<button id="b-coach" onclick="act(\'coach\')"', 1, true) ~= nil)
+  check("coach: ...handled by FX.coachRun", src:find('if a == "coach" then FX.coachRun(tostring(payload.v or "")); return end', 1, true) ~= nil)
+  local shared = src:match('var SHARED_IDS = %[(.-)%];') or ""
+  check("coach: ...which types nothing, so a shared window never locks it", shared ~= "" and not shared:find("b-coach", 1, true))
+  check("coach: ...and a remote session (no checkout here) does", src:find('"nudge","b-verify","b-coach"].forEach', 1, true) ~= nil)
+  check("coach: the overlay exists", src:find('<div id="coach">', 1, true) ~= nil and src:find('<div class="ov-body" id="co-body"></div>', 1, true) ~= nil)
+  check("coach: the overlay's buttons go through FX",
+        src:find('if a == "coach-apply" then FX.coachApply(', 1, true) ~= nil and src:find('if a == "coach-skip" then FX.coachSkip(', 1, true) ~= nil
+        and src:find('if a == "coach-dec-add" then FX.coachDecision(', 1, true) ~= nil and src:find('if a == "coach-open" then FX.coachOpen(', 1, true) ~= nil)
+  check("coach: the tick runs FX.stepCoach", src:find("pcall(FX.stepCoach, list, cfg)", 1, true) ~= nil)
+  local apply = src:match("\nfunction FX%.coachApply%(root, i%)(.-)\nend\n") or ""
+  check("coach: Apply decides through core.coachApplyDecision, then commits through core.coachCommitCmd",
+        apply:find("core.coachApplyDecision(current, rec.claudeHash, e, core.coachDirty(dirtyOut))", 1, true) ~= nil
+        and apply:find("core.coachCommitCmd(rec.root, subject, body, current == nil)", 1, true) ~= nil)
+  check("coach: ...its commit is a task with a retained timeout", apply:find("hs.task.new(", 1, true) ~= nil
+        and apply:find("job.timer = hs.timer.doAfter(", 1, true) ~= nil)
+  local start = src:match("\nfunction FX%.coachStart%(repo, trigger, cfg, retry%)(.-)\nend\n") or ""
+  check("coach: a run waits while the repo's merge checker is queued or running",
+        start:find("if FX.coachCheckerBusy(repo.commonDir) then", 1, true) ~= nil)
+  local scanned = src:match("\nfunction FX%.coachScanned%(repo, rec, scan, cfg%)(.-)\nend\n") or ""
+  check("coach: the model runs through FX.runHeadless, in the repo's lane, at coach.maxBudgetUsd",
+        scanned:find('FX.runHeadless({ id = "coach|" .. root, lane = repo.commonDir, dir = root,', 1, true) ~= nil
+        and scanned:find('core.config(cfg, "coach.maxBudgetUsd", core.COACH.budgetUsd)', 1, true) ~= nil)
+  check("coach: Adam's Not yet note, a blocked merge's note and the checker's verdict reach its log",
+        src:find('pcall(FX.coachNote, r.commonDir, { kind = "notyet"', 1, true) ~= nil
+        and src:find('pcall(FX.coachNote, r.commonDir, { kind = "blocked"', 1, true) ~= nil
+        and src:find('pcall(FX.coachNote, commonDir, { kind = "checker"', 1, true) ~= nil)
+  check("coach: the card's chip opens the overlay by the card's key", src:find('if(key) openCoachFor(key);', 1, true) ~= nil
+        and src:find('send("coach-open", key);', 1, true) ~= nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

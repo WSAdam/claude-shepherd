@@ -129,6 +129,12 @@
     "maxBudgetUsd": 1,
     "timeoutSeconds": 600
   },
+  "coach": {
+    "enabled": false,
+    "day": "mon",
+    "maxBudgetUsd": 1,
+    "timeoutSeconds": 600
+  },
   "resume": {
     "enabled": true
   },

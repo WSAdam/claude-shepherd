@@ -5614,6 +5614,11 @@ function FX.mergeHold(key, note)
   FX._mergeApproved[key] = nil
   local ok, r = FX.writeMergeDecision(key, "hold", core.capChars(tostring(note or ""), 500))
   if ok then FX.mergeAlert("✋ Not yet: " .. r.branch .. " stays in its worktree") else FX.mergeAlert("⚠️ That merge request is gone") end
+  -- 2026-09-29: Adam's Not yet note is a correction the coach should read (its log, not a transcript)
+  if ok and tostring(note or ""):match("%S") then
+    pcall(FX.coachNote, r.commonDir, { kind = "notyet", id = "notyet|" .. tostring(r.nonce) .. "|" .. FX.now(),
+                                       branch = r.branch, note = note })
+  end
   return ok
 end
 
@@ -5888,6 +5893,11 @@ function FX.annotateMerges(list, cfg, bannerOn)
     local r, it = reqs[key], items[key]
     local facts, rd, gate, crec, cid, redFirst
     FX.fleetRecordResult(r)   -- a batch unit's outcome (its batch ends itself once all are in)
+    -- 2026-09-29: a blocked merge's note goes to the coach's log, once per request
+    if r.phase == "blocked" and tostring(r.note or ""):match("%S") and not FX._coach.noted[r.nonce] then
+      FX._coach.noted[r.nonce] = true
+      pcall(FX.coachNote, r.commonDir, { kind = "blocked", id = "blocked|" .. tostring(r.nonce), branch = r.branch, note = r.note })
+    end
     if r.phase == "requested" then
       facts = FX.mergeFacts(r)
       gate = FX.mergeGate(r, facts, cfg)
@@ -6099,13 +6109,13 @@ function FX.checkerStart(key, target, id, trigger, attempts, cfg)
     onStart = function()
       if FX._checkers[key] == rec then rec.state = "running"; FX.checkerSave(rec) end
     end,
-    onDone = function(_, res) FX.checkerFinish(key, rec, res) end })
+    onDone = function(_, res) FX.checkerFinish(key, rec, res, target.commonDir) end })
   print("[cc-dashboard] 🔍 checker queued for " .. tostring(target.branch or key) .. " (" .. tostring(id) .. ", try "
     .. tostring(rec.attempts) .. ", " .. #rf.flags .. " red flag(s))")
   return rec
 end
 
-function FX.checkerFinish(key, rec, res)
+function FX.checkerFinish(key, rec, res, commonDir)
   if FX._checkers[key] ~= rec then return end   -- a newer review replaced this one
   local p = core.parseCheckerOutput(res and res.output, res and res.err)
   if res and res.timedOut then
@@ -6115,6 +6125,11 @@ function FX.checkerFinish(key, rec, res)
   rec.verdict, rec.summary, rec.findings, rec.why = p.verdict, p.summary, p.findings, p.why
   rec.costUsd, rec.turns = p.costUsd, p.turns
   FX.checkerSave(rec)
+  -- 2026-09-29: a fail, or a pass with findings, goes to the coach's log for this repo
+  if commonDir and (p.verdict == "fail" or (p.verdict == "pass" and #(p.findings or {}) > 0)) then
+    pcall(FX.coachNote, commonDir, { kind = "checker", id = "checker|" .. tostring(rec.id) .. "|" .. p.verdict,
+                                     branch = rec.branch, verdict = p.verdict, summary = p.summary, findings = p.findings })
+  end
   local name = tostring(rec.branch or key)
   print("[cc-dashboard] " .. (p.verdict == "pass" and "✅" or (p.verdict == "fail" and "❌" or "⚠️"))
     .. " checker " .. name .. " -> " .. tostring(p.verdict) .. " (" .. tostring(p.summary or p.why or "") .. ")")
@@ -6183,6 +6198,436 @@ function FX.annotateCheckers(list)
       if rec then it.checker = core.checkerView(rec) end
     end
   end
+end
+
+-- ---- The coach (2026-09-29, build program unit 32) ---------------------------------------------
+-- Weekly (coach.enabled, coach.day; catching up after sleep) and from a card's 🧭 Coach button,
+-- the coach reads a repo's last 10 sessions and proposes up to 5 CLAUDE.md edits with evidence.
+-- A run: list the repo's transcripts (FX.coachTranscripts), one /bin/sh task keeps their evidence
+-- lines (core.coachScanCmd), core.coachDigest folds them with Shepherd's log (FX.coachNote), and
+-- FX.runHeadless -- the checker's runner, in the repo's lane, at coach.maxBudgetUsd -- answers
+-- core.coachPrompt. It never starts while the repo's merge checker is queued or running. The
+-- record is Shepherd's own file, ~/.claude/cc-coach/<repo>.json; a run a reload killed reads lost
+-- and is retried later (core.coachDue). Apply writes and commits CLAUDE.md alone, through
+-- core.coachApplyDecision's refusals. State on FX: the main chunk is at Lua's 200-local cap.
+FX.COACH_DIR = os.getenv("CC_COACH_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-coach")
+FX.PROJECTS_DIR = os.getenv("CC_PROJECTS_DIR") or ((os.getenv("HOME") or "") .. "/.claude/projects")
+-- recs: root -> record or false; scans: root -> the transcript scan in flight; waiting: root ->
+-- { repo, trigger } held for the repo's checker; applying: the commit in flight; open: the root
+-- the overlay shows.
+-- noted: merge nonces whose blocked note is already in the coach's log.
+FX._coach = { recs = {}, scans = {}, waiting = {}, nextCheck = 0, applying = nil, open = nil, noted = {} }
+
+function FX.coachPath(root, ext)
+  local k = core.coachFileKey(root)
+  return k and (FX.COACH_DIR .. "/" .. k .. (ext or ".json")) or nil
+end
+
+-- A repo's record: memory first, else its file (read once, cached as false when there's none).
+function FX.coachRecord(root)
+  if type(root) ~= "string" then return nil end
+  local r = FX._coach.recs[root]
+  if r == nil then
+    local p = FX.coachPath(root)
+    r = p and core.parseCoachRecord(FX.readFile(p)) or false
+    if r and r.root ~= root then r = false end
+    FX._coach.recs[root] = r
+  end
+  return r or nil
+end
+
+function FX.coachSave(rec)
+  FX._coach.recs[rec.root] = rec
+  local p = FX.coachPath(rec.root)
+  if not (p and FX.writeFileAtomic(p, core.json.encode(rec))) then
+    print("[cc-dashboard] ❌ couldn't save the coach's record for " .. tostring(rec.root))
+  end
+end
+
+-- The repo a card belongs to: its git common dir, main checkout and name (local sessions in a repo).
+function FX.coachRepoOf(it)
+  if type(it) ~= "table" or it.remote or type(it.repoKey) ~= "string" or type(it.mainRoot) ~= "string"
+     or it.repoKey == "" or it.mainRoot == "" then return nil end
+  return { commonDir = it.repoKey, root = it.mainRoot, name = it.stackName or it.mainRoot:match("([^/]+)$") or it.mainRoot }
+end
+
+function FX.coachBusy(root)
+  return FX._coach.scans[root] ~= nil or FX._headless["coach|" .. tostring(root)] ~= nil
+end
+
+-- Is this repo's merge checker queued or running? The coach waits for it (same lane, and a merge
+-- matters more than a suggestion).
+function FX.coachCheckerBusy(commonDir)
+  for id, h in pairs(FX._headless or {}) do
+    if id:sub(1, 8) == "checker|" and h.lane == commonDir then return true end
+  end
+  return false
+end
+
+-- The repo's transcripts: every *.jsonl in its Claude project folders, with its mtime.
+function FX.coachTranscripts(root)
+  local out = {}
+  for _, d in ipairs(core.coachProjectDirs(FX.readDir(FX.PROJECTS_DIR), root)) do
+    local dir = FX.PROJECTS_DIR .. "/" .. d
+    for _, fn in ipairs(FX.readDir(dir)) do
+      local id = fn:match("^(.+)%.jsonl$")
+      if id then
+        local attrs = hs.fs.attributes(dir .. "/" .. fn)
+        local m = type(attrs) == "table" and tonumber(attrs.modification) or nil
+        if m then out[#out + 1] = { path = dir .. "/" .. fn, mtime = m, id = id } end
+      end
+    end
+  end
+  return out
+end
+function FX.coachNewest(root)
+  local newest = 0
+  for _, f in ipairs(FX.coachTranscripts(root)) do if f.mtime > newest then newest = f.mtime end end
+  return newest
+end
+
+-- Start a run for `repo` ({ commonDir, root, name }): "weekly" or "card"; `retry` = it retries a
+-- lost run (its attempts count on). Returns the record, or nil and why ("waiting" when it waits for
+-- the repo's merge checker).
+function FX.coachStart(repo, trigger, cfg, retry)
+  if type(repo) ~= "table" then return nil, "no repo" end
+  local root = repo.root
+  if FX.coachBusy(root) then return nil, "the coach is already reading this repo's sessions" end
+  if FX.coachCheckerBusy(repo.commonDir) then
+    FX._coach.waiting[root] = { repo = repo, trigger = trigger, retry = retry }
+    return nil, "waiting"
+  end
+  FX._coach.waiting[root] = nil
+  local files = core.coachPickTranscripts(FX.coachTranscripts(root), core.COACH.sessions)
+  if #files == 0 then return nil, "no sessions of this repo to read" end
+  local prev = FX.coachRecord(root)
+  local rec = { v = 1, repo = repo.commonDir, root = root, name = repo.name, state = "queued", trigger = trigger,
+                at = FX.now(), attempts = (retry and prev and prev.state == "lost") and ((prev.attempts or 1) + 1) or 1,
+                lastRunAt = prev and prev.lastRunAt or nil, edits = {}, decisions = {} }
+  FX.coachSave(rec)
+  local outBase = FX.scratchFile("coach-scan")
+  local paths = {}
+  for i, f in ipairs(files) do paths[i] = f.path end
+  local scan = { rec = rec, files = files, outBase = outBase }
+  local function cleanup() for i = 1, #files do pcall(os.remove, outBase .. "." .. i) end end
+  scan.cleanup = cleanup
+  FX._coach.scans[root] = scan
+  local ok = pcall(function()
+    local myTask   -- the exit callback checks it still owns the scan
+    myTask = hs.task.new("/bin/sh", function()
+      if FX._coach.scans[root] ~= scan or scan.task ~= myTask then cleanup(); return end
+      if scan.timer then pcall(function() scan.timer:stop() end); scan.timer = nil end
+      FX._coach.scans[root] = nil
+      local okd, e = pcall(FX.coachScanned, repo, rec, scan, cfg)
+      if not okd then
+        print("[cc-dashboard] ❌ coach: reading " .. tostring(root) .. "'s sessions failed: " .. tostring(e))
+        cleanup()
+        FX.coachFinish(root, rec, { code = -1, output = "", err = "Shepherd couldn't read the sessions" })
+      end
+    end, { "-c", core.coachScanCmd(paths, outBase) })
+    if not myTask then error("task create failed") end
+    scan.task = myTask
+    myTask:start()
+    -- Backstop: a wedged scan never holds the repo. RETAINED on the scan.
+    scan.timer = hs.timer.doAfter(core.COACH.scanSeconds, function()
+      if FX._coach.scans[root] ~= scan then return end
+      scan.timer = nil
+      FX._coach.scans[root] = nil
+      pcall(function() scan.task:terminate() end)
+      cleanup()
+      FX.coachFinish(root, rec, { code = -1, output = "", err = "reading the transcripts timed out" })
+    end)
+  end)
+  if not ok then
+    FX._coach.scans[root] = nil
+    cleanup()
+    FX.coachFinish(root, rec, { code = -1, output = "", err = "Shepherd couldn't start reading the transcripts" })
+    return rec
+  end
+  print("[cc-dashboard] 🔍 coach: reading " .. #files .. " session(s) of " .. tostring(repo.name) .. " (" .. tostring(trigger) .. ")")
+  return rec
+end
+
+-- The scan is done: fold the digest, read CLAUDE.md and DECISIONS.md (their hashes are what Apply
+-- checks), and hand the prompt to the headless runner in the repo's lane.
+function FX.coachScanned(repo, rec, scan, cfg)
+  local root = repo.root
+  local sessions = {}
+  for i, f in ipairs(scan.files) do
+    local text = FX.readFile(scan.outBase .. "." .. i) or ""
+    sessions[#sessions + 1] = { id = f.id, facts = core.coachSessionFacts(text) }
+  end
+  scan.cleanup()
+  if FX._coach.recs[root] ~= rec then return end   -- a newer run replaced this one
+  local digest = core.coachDigest(sessions, core.parseCoachLog(FX.readFile(FX.coachPath(root, ".log.json") or "")), {})
+  local claudeMd = FX.readFile(root .. "/" .. core.COACH_FILE)
+  local decisions = FX.readFile(root .. "/" .. core.DECISIONS_FILE)
+  rec.claudeHash, rec.decisionsHash = core.coachHash(claudeMd), core.coachHash(decisions)
+  rec.sessions, rec.digestBytes, rec.cut = digest.sessions, digest.bytes, digest.cut or nil
+  FX.coachSave(rec)
+  cfg = cfg or loadConfig()
+  FX.runHeadless({ id = "coach|" .. root, lane = repo.commonDir, dir = root,
+    prompt = core.coachPrompt(digest, claudeMd, decisions, { name = repo.name }),
+    timeoutSeconds = tonumber(core.config(cfg, "coach.timeoutSeconds", core.COACH.timeoutSeconds)) or core.COACH.timeoutSeconds,
+    maxBudgetUsd = core.config(cfg, "coach.maxBudgetUsd", core.COACH.budgetUsd),
+    onStart = function()
+      if FX._coach.recs[root] == rec then rec.state = "running"; FX.coachSave(rec) end
+    end,
+    onDone = function(_, res) FX.coachFinish(root, rec, res) end })
+end
+
+-- The run is over: its verdict is this week's (a lost run never reaches here -- its task died
+-- with Hammerspoon, and the record reads lost when it's read back).
+function FX.coachFinish(root, rec, res)
+  if FX._coach.recs[root] ~= rec then return end   -- a newer run replaced this one
+  local p = core.parseCoachOutput(res and res.output, res and res.err)
+  if res and res.timedOut then
+    p = { verdict = "couldntRun", edits = {}, decisions = {}, why = "timed out after " .. tostring(res.timeoutSeconds) .. "s" }
+  elseif res and res.code == -1 and (res.output or "") == "" then
+    p = { verdict = "couldntRun", edits = {}, decisions = {}, why = tostring(res.err or "it couldn't run") }
+  end
+  rec.state, rec.doneAt, rec.lastRunAt = "done", FX.now(), FX.now()
+  rec.verdict, rec.why, rec.summary = p.verdict, p.why, p.summary
+  rec.costUsd, rec.turns = p.costUsd, p.turns
+  rec.edits, rec.decisions = p.edits or {}, p.decisions or {}
+  for _, e in ipairs(rec.edits) do e.status = "pending" end
+  for _, d in ipairs(rec.decisions) do d.status = "pending" end
+  FX.coachSave(rec)
+  local name = tostring(rec.name or root)
+  local n = #rec.edits + #rec.decisions
+  print("[cc-dashboard] " .. (p.verdict == "couldntRun" and "⚠️" or "✅") .. " coach " .. name .. " -> " .. tostring(p.verdict)
+    .. " (" .. n .. " proposal(s)" .. (p.why and (": " .. p.why) or "") .. ")")
+  if p.verdict == "proposals" then
+    FX.alert("🧭 The coach has " .. n .. " suggestion" .. (n == 1 and "" or "s") .. " for " .. name .. "'s CLAUDE.md -- the 🧭 chip on its card", 5)
+  elseif p.verdict == "none" then
+    FX.alert("🧭 The coach read " .. name .. "'s last sessions: nothing to change in its CLAUDE.md", 4)
+  else
+    FX.alert("⚠️ The coach couldn't run for " .. name .. ": " .. tostring(p.why), 5)
+  end
+  if FX._coach.open == root then FX.pushCoach(root) end
+end
+
+-- Every tick: start what's due (at most every COACH.checkEverySeconds), then stamp each card with
+-- its repo's coach state (it.coach: the chip). Weekly runs need coach.enabled; a card's run doesn't.
+function FX.stepCoach(list, cfg)
+  local repos = {}
+  for _, it in ipairs(list or {}) do
+    local repo = FX.coachRepoOf(it)
+    if repo and not repos[repo.root] then repos[repo.root] = repo end
+  end
+  local now = FX.now()
+  if now >= (FX._coach.nextCheck or 0) then
+    FX._coach.nextCheck = now + core.COACH.checkEverySeconds
+    local enabled = core.config(cfg, "coach.enabled", false) == true
+    local day = core.config(cfg, "coach.day", "mon")
+    for root, repo in pairs(repos) do
+      local w = FX._coach.waiting[root]
+      if w then
+        FX.coachStart(w.repo, w.trigger, cfg, w.retry)
+      else
+        local rec = FX.coachRecord(root)
+        local due, why = core.coachDue(rec, { now = now, enabled = enabled, day = day, running = FX.coachBusy(root),
+                                              newest = function() return FX.coachNewest(root) end })
+        if due then
+          local retry = why == "retry"
+          FX.coachStart(repo, (retry and rec) and rec.trigger or "weekly", cfg, retry)
+        end
+      end
+    end
+  end
+  for _, it in ipairs(list or {}) do
+    local repo = FX.coachRepoOf(it)
+    it.coach = repo and core.coachTileInfo(FX.coachRecord(repo.root),
+      { busy = FX.coachBusy(repo.root), waiting = FX._coach.waiting[repo.root] ~= nil }) or nil
+  end
+end
+
+-- 🧭 Coach on a card: a run for its repo now, weekly switch or not.
+function FX.coachRun(key)
+  local it
+  for _, x in ipairs(FX.allItems()) do if x.key == key then it = x; break end end
+  if not it then FX.alert("⚠️ That session is gone"); return false end
+  local repo = FX.coachRepoOf(it)
+  if not repo then FX.alert("🧭 The coach needs a session on this Mac, in a git repo"); return false end
+  local rec, why = FX.coachStart(repo, "card", loadConfig())
+  if rec then
+    FX.alert("🧭 The coach is reading " .. repo.name .. "'s last sessions -- its suggestions land on the card", 4)
+    return true
+  elseif why == "waiting" then
+    FX.alert("🧭 The coach waits for " .. repo.name .. "'s merge checker, then reads its sessions", 4)
+    return true
+  end
+  FX.alert("⚠️ Coach: " .. tostring(why))
+  return false
+end
+
+-- The overlay: opened from a card's chip (its key), then everything is by the repo's root, which
+-- only ever looks up a record Shepherd wrote.
+function FX.pushCoach(root)
+  if not wv then return end
+  local rec = FX.coachRecord(root)
+  local live = { busy = FX.coachBusy(root), waiting = FX._coach.waiting[root] ~= nil }
+  local v = rec and core.coachView(rec, live)
+  if not v then   -- no run yet: say so, with Run (the repo comes from a card, like the chip)
+    local repo = FX.coachRepoForRoot(root)
+    v = { root = root, name = repo and repo.name or nil, state = live.waiting and "waiting" or (live.busy and "running" or "new"),
+          edits = {}, decisions = {} }
+  end
+  local js = "ccCoach(" .. core.json.encode(v) .. ")"
+  pcall(function() wv:evaluateJavaScript(js) end)
+end
+-- The repo behind a root the overlay sent: a card of that repo's, else the record Shepherd wrote.
+function FX.coachRepoForRoot(root)
+  for _, it in ipairs(FX.allItems()) do
+    local repo = FX.coachRepoOf(it)
+    if repo and repo.root == root then return repo end
+  end
+  local rec = FX.coachRecord(root)
+  if rec and rec.repo then return { commonDir = rec.repo, root = rec.root, name = rec.name or rec.root } end
+  return nil
+end
+function FX.coachOpen(key)
+  for _, it in ipairs(FX.allItems()) do
+    if it.key == key then
+      local repo = FX.coachRepoOf(it)
+      if repo then FX._coach.open = repo.root; FX.pushCoach(repo.root); return true end
+    end
+  end
+  pcall(function() wv:evaluateJavaScript("ccCoach(null)") end)
+  return false
+end
+
+-- The record behind an overlay action, and one of its numbered items.
+function FX.coachItem(root, i, what)
+  local rec = FX.coachRecord(root)
+  if not rec then FX.alert("⚠️ The coach has nothing for that repo any more"); return nil end
+  local n = tonumber(i)
+  local item = n and rec[what][math.floor(n)] or nil
+  if not item then FX.alert("⚠️ That suggestion isn't there any more"); return nil end
+  return rec, item
+end
+
+-- Apply: refused (core.coachApplyDecision) when CLAUDE.md changed since the coach read it or has
+-- uncommitted edits; otherwise CLAUDE.md is written and committed alone (core.coachCommitCmd, a
+-- task with a retained timeout). A refused commit puts the file back as it was.
+function FX.coachApply(root, i)
+  local rec, e = FX.coachItem(root, i, "edits")
+  if not rec then return false end
+  if e.status ~= "pending" then FX.alert("That suggestion is already " .. tostring(e.status)); return false end
+  if FX._coach.applying then FX.alert("⚠️ Another CLAUDE.md commit is still running -- try again in a moment"); return false end
+  local path = rec.root .. "/" .. core.COACH_FILE
+  local current = FX.readFile(path)
+  local dirtyOut = ""
+  pcall(function() dirtyOut = hs.execute(core.coachDirtyCmd(rec.root)) or "" end)
+  local dec = core.coachApplyDecision(current, rec.claudeHash, e, core.coachDirty(dirtyOut))
+  -- a CLAUDE.md that is a link (to AGENTS.md, say): the atomic write would replace the link itself
+  local mode
+  pcall(function() mode = hs.fs.symlinkAttributes(path, "mode") end)
+  if dec.ok and mode == "link" then dec = { ok = false, error = "link" } end
+  if not dec.ok then
+    e.error = core.coachRefusal(dec.error)
+    FX.coachSave(rec)
+    FX.alert("⚠️ Not applied: " .. e.error, 5)
+    print("[cc-dashboard] ⚠️ coach: apply refused for " .. tostring(rec.root) .. " (" .. tostring(dec.error) .. ")")
+    if FX._coach.open == root then FX.pushCoach(root) end
+    return false
+  end
+  if not FX.writeFileAtomic(path, dec.text) then
+    e.error = core.coachRefusal("write")
+    FX.coachSave(rec)
+    FX.alert("❌ " .. e.error)
+    return false
+  end
+  local subject, body = core.coachCommitMessage(e)
+  local job = { root = root, i = i }
+  FX._coach.applying = job
+  local function undo()
+    if FX.readFile(path) == dec.text then
+      if current then FX.writeFileAtomic(path, current) else os.remove(path) end
+    end
+  end
+  local function done(ok, out, err)
+    if FX._coach.applying ~= job then return end
+    FX._coach.applying = nil
+    if job.timer then pcall(function() job.timer:stop() end); job.timer = nil end
+    if ok then
+      e.status, e.error, e.at = "applied", nil, FX.now()
+      e.sha = tostring(out or ""):match("(%x+)%s*$")
+      rec.claudeHash = core.coachHash(dec.text)   -- Shepherd's own commit isn't "changed since"
+      FX.alert("🧭 Applied to CLAUDE.md and committed" .. (e.sha and (" " .. e.sha:sub(1, 7)) or ""), 4)
+      print("[cc-dashboard] ✅ coach: applied edit " .. tostring(i) .. " to " .. path .. " (" .. tostring(e.sha) .. ")")
+    else
+      undo()
+      local why = core.capChars(tostring((err ~= "" and err) or out or ""):gsub("%s+", " "), 200)
+      e.error = "the commit failed" .. (why ~= "" and (": " .. why) or "") .. " -- CLAUDE.md is back as it was"
+      FX.alert("❌ " .. e.error, 5)
+      print("[cc-dashboard] ❌ coach: commit failed in " .. tostring(rec.root) .. ": " .. why)
+    end
+    FX.coachSave(rec)
+    if FX._coach.open == root then FX.pushCoach(root) end
+  end
+  local ok = pcall(function()
+    local t = hs.task.new("/bin/sh", function(code, out, err) done(tonumber(code) == 0, out, err or "") end,
+      { "-c", core.coachCommitCmd(rec.root, subject, body, current == nil) })
+    if not t then error("task create failed") end
+    job.task = t
+    t:start()
+    job.timer = hs.timer.doAfter(core.COACH.commitSeconds, function()   -- RETAINED on the job
+      if FX._coach.applying ~= job then return end
+      pcall(function() job.task:terminate() end)
+      done(false, "", "it timed out")
+    end)
+  end)
+  if not ok then done(false, "", "Shepherd couldn't start git") end
+  return true
+end
+
+function FX.coachSkip(root, i)
+  local rec, e = FX.coachItem(root, i, "edits")
+  if not rec or e.status ~= "pending" then return false end
+  e.status, e.error = "skipped", nil
+  FX.coachSave(rec)
+  if FX._coach.open == root then FX.pushCoach(root) end
+  return true
+end
+
+-- A proposed DECISIONS.md entry: added through On purpose's own guard (the hash the coach read), or
+-- skipped. Added, not committed -- like an entry from the On purpose tab.
+function FX.coachDecision(root, i, act)
+  local rec, d = FX.coachItem(root, i, "decisions")
+  if not rec or d.status ~= "pending" then return false end
+  if act == "skip" then
+    d.status, d.error = "skipped", nil
+  else
+    local path = rec.root .. "/" .. core.DECISIONS_FILE
+    local current = FX.readFile(path)
+    local dec = core.decisionsSaveDecision(current, rec.decisionsHash or core.DECISIONS_ABSENT,
+                                           { what = d.what, why = d.why }, os.date("%Y-%m-%d", FX.now()))
+    if not dec.ok then
+      d.error = (dec.error == "changed") and "DECISIONS.md changed since the coach read it" or ("refused: " .. tostring(dec.error))
+      FX.alert("⚠️ Not added: " .. d.error)
+    elseif not FX.writeFileAtomic(path, dec.text) then
+      d.error = "Shepherd couldn't write DECISIONS.md"
+      FX.alert("❌ " .. d.error)
+    else
+      d.status, d.error = "added", nil
+      rec.decisionsHash = core.coachHash(dec.text)
+      FX.alert("🧭 Added to DECISIONS.md (not committed)", 4)
+    end
+  end
+  FX.coachSave(rec)
+  if FX._coach.open == root then FX.pushCoach(root) end
+  return d.status ~= "pending"
+end
+
+-- Shepherd's own log of what transcripts don't hold (Adam's Not yet notes, blocked merges' notes,
+-- checker verdicts): the next digest reads it.
+function FX.coachNote(commonDir, entry)
+  local root = core.repoMainRoot(commonDir)
+  local p = root and FX.coachPath(root, ".log.json")
+  if not p then return false end
+  local list = core.coachLogAdd(core.parseCoachLog(FX.readFile(p)), entry, FX.now())
+  return FX.writeFileAtomic(p, core.json.encode(list))
 end
 
 -- Merge fields into a session's status file (optimistic local patch -- e.g. the
@@ -10706,6 +11151,23 @@ local function handleBridgeMsg(msg)
   if a == "merge-dismiss" then FX.mergeDismiss(tostring(payload.v or "")); return end
   -- the merge checker (2026-09-29): a read-only headless review of this session's work, no keystrokes
   if a == "verify" then FX.verifySession(tostring(payload.v or "")); return end
+  -- the coach (2026-09-29): 🧭 Coach runs it for the session's repo; the overlay opens by a card's
+  -- key, and its buttons send the repo's root (a record lookup, nothing else) and an item number
+  if a == "coach" then FX.coachRun(tostring(payload.v or "")); return end
+  if a == "coach-open" then FX.coachOpen(tostring(payload.v or "")); return end
+  if a == "coach-close" then FX._coach.open = nil; return end
+  if a == "coach-apply" then FX.coachApply(tostring(payload.v or ""), tostring(payload.text or "")); return end
+  if a == "coach-skip" then FX.coachSkip(tostring(payload.v or ""), tostring(payload.text or "")); return end
+  if a == "coach-dec-add" then FX.coachDecision(tostring(payload.v or ""), tostring(payload.text or ""), "add"); return end
+  if a == "coach-dec-skip" then FX.coachDecision(tostring(payload.v or ""), tostring(payload.text or ""), "skip"); return end
+  if a == "coach-rerun" then
+    local repo = FX.coachRepoForRoot(tostring(payload.v or ""))
+    local started, why = nil, "that repo has no card here any more"
+    if repo then started, why = FX.coachStart(repo, "card", loadConfig()) end
+    if not started and why ~= "waiting" then FX.alert("⚠️ Coach: " .. tostring(why)) end
+    FX.pushCoach(tostring(payload.v or ""))
+    return
+  end
   if a == "end-session" then FX.endSession(tostring(payload.v or "")); return end   -- tab-less only (verdict in core)
   -- empty chats (2026-09-11): v = a session key in that window, text = "one" | "all"
   if a == "close-empty" then FX.closeEmptyChats(tostring(payload.v or ""), tostring(payload.text or "all")); return end
@@ -12614,6 +13076,11 @@ local HTML = [[
     border:1px solid var(--border); background:var(--surface-2); color:var(--text-2); cursor:pointer; vertical-align:middle; }
   .tk-tab:hover { border-color:var(--accent); color:var(--text-strong); }
   .theme-bar .tk-tab, .theme-dots .tk-tab { display:none; }   /* one-line themes: the badge and the board */
+  /* 2026-09-29: the coach -- CLAUDE.md suggestions waiting for this repo (FX.stepCoach) */
+  .coach-b { display:inline-block; font-size:10px; line-height:14px; margin-left:6px; padding:1px 5px; border-radius:8px;
+    border:1px solid var(--accent); color:var(--accent-text); cursor:pointer; white-space:nowrap; vertical-align:middle; }
+  .coach-b.quiet { border-color:var(--border); color:var(--dim); }
+  .coach-b:hover { border-color:var(--accent); color:var(--text-strong); }
   /* 2026-09-29: worktree leases -- the worktree's own port (FX.stepLeases) */
   .lease-b { display:inline-block; font-size:10px; line-height:14px; margin-left:6px; padding:1px 5px;
     border-radius:8px; border:1px solid var(--border); color:var(--accent-text);
@@ -13515,6 +13982,24 @@ local HTML = [[
 .tk-note{ color:var(--text); }
 #tm-tickets-badge{ display:none; background:var(--accent); color:var(--bg); border-radius:8px; font-size:9px;
   padding:0 4px; font-variant-numeric:tabular-nums; margin-left:auto; }
+/* 🧭 Coach (2026-09-29): a repo's suggested CLAUDE.md edits (the Inbox's row styles) */
+#coach{ position:fixed; inset:0; background:var(--bg-overlay); z-index:12; display:none; flex-direction:column; font-size:12px; }
+#coach.show{ display:flex; }
+#coach .ov-head{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding:12px 16px; border-bottom:1px solid var(--border); font-weight:600; color:var(--text); }
+#coach .ov-head span{ min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#coach .ov-body{ flex:1; overflow-y:auto; padding:14px 16px; }
+#coach .ov-foot{ padding:10px 16px; border-top:1px solid var(--border); color:var(--dim); font-size:11px; }
+.co-state{ color:var(--text-2); margin-bottom:12px; overflow-wrap:anywhere; }
+.co-row.done{ opacity:.7; }
+.co-why{ color:var(--text); margin:4px 0 6px; overflow-wrap:anywhere; }
+.co-old, .co-new{ margin:0 0 6px; padding:6px 8px; border-radius:6px; white-space:pre-wrap; overflow-wrap:anywhere;
+  font:11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; max-height:14em; overflow:auto; }
+.co-old{ background:var(--surface-2); color:var(--dim); text-decoration:line-through; }
+.co-new{ background:var(--accent-bg); color:var(--text); border:1px solid var(--accent); }
+.co-ev{ margin:0 0 8px 16px; padding:0; color:var(--text-2); }
+.co-ev li{ overflow-wrap:anywhere; }
+.co-err{ color:var(--st-error); margin-bottom:6px; overflow-wrap:anywhere; }
+.co-done{ color:var(--dim); }
 /* Where the time went (2026-09-29): above Instances (z 12), which it opens from */
 #timelost{ position:fixed; inset:0; background:var(--bg-overlay); z-index:13; display:none; flex-direction:column; font-size:12px; }
 #timelost.show{ display:flex; }
@@ -14168,6 +14653,7 @@ local HTML = [[
       <button id="b-improve" onclick="act('improve')" title="Pull this repo's un-applied leaderboard improvement insights and send them to this session as a review-first prompt (suggestions, not wholesale edits).">Improve</button>
       <button id="b-score" onclick="act('score')" title="Run-quality score (0-100) for this session from the audit ledger — penalizes errors, denied tools, loops, and forced respawns — plus a ⚠ when recent sessions trend down. Needs the Audit log on.">Score</button>
       <button id="b-verify" onclick="act('verify')" title="A read-only Sonnet review of this session's work, in the background: its merge request's commits, or its checkout against main (uncommitted work included). Shepherd scans the diff for red flags first. The verdict shows here and in the merge review.">🔎 Verify</button>
+      <button id="b-coach" onclick="act('coach')" title="The coach: a read-only Sonnet reads this repo's last 10 sessions -- your corrections, interrupts, tool errors, denials, merge notes, checker findings -- and suggests up to 5 CLAUDE.md edits with evidence, in the background. They wait behind the 🧭 chip on the card; nothing changes until you Apply one.">🧭 Coach</button>
       <button id="b-timeline" onclick="openSessionTimeline()" title="Show this session's recorded activity timeline (needs the ledger enabled).">📜 Timeline</button>
       <button id="b-trace" onclick="openTrace(selectedKey)" title="What automation did to this session, would do in a dry run, and was refused (and why) -- newest first, repeats as ×N.">⚡ Trace</button>
       <button id="b-time" onclick="openTimeLost('session', selectedKey)" title="Where this session's time went: waiting on you, at usage limits, stalled, in errors and API retries -- plus how its turns ended, its cache hit rate and what its subagents used.">⏱ Time</button>
@@ -14622,6 +15108,12 @@ local HTML = [[
     <div class="ov-head"><span>🎫 Tickets</span><button class="s-x" onclick="closeTickets()">✕</button></div>
     <div class="ov-body" id="tk-body"></div>
     <div class="ov-foot"><span>Work sessions filed for other repos with cc-ticket.sh. Shepherd offers each to a live session of its repo -- the least busy, never one waiting on you; one that nobody there can take waits here and on that repo's card.</span></div>
+  </div>
+
+  <div id="coach">
+    <div class="ov-head"><span id="co-title">🧭 Coach</span><button class="s-x" onclick="closeCoach()">✕</button></div>
+    <div class="ov-body" id="co-body"></div>
+    <div class="ov-foot"><span>CLAUDE.md edits the coach suggests from this repo's last sessions -- your corrections, interrupts, tool errors, denials, merge notes and checker findings. Nothing changes until you click: Apply writes CLAUDE.md and commits it alone, and is refused if CLAUDE.md changed since the coach read it or has uncommitted edits.</span></div>
   </div>
 
   <div id="features">
@@ -18953,9 +19445,9 @@ local HTML = [[
           if(el.hasAttribute("data-t0")){ el.title = el.getAttribute("data-t0"); el.removeAttribute("data-t0"); }
         }
       }
-      // b-verify: a remote session has no checkout here; it types nothing, so a shared window keeps it
+      // b-verify, b-coach: a remote session has no checkout here; they type nothing, so a shared window keeps them
       ["b-jump","b-stop","b-auto","b-talk","b-clear","b-compact","b-improve","b-nudge","b-feed","b-rewind",
-       "effort","mode","d-model","d-gate","d-policy","nudge","b-verify"].forEach(function(id){
+       "effort","mode","d-model","d-gate","d-policy","nudge","b-verify","b-coach"].forEach(function(id){
         var el = document.getElementById(id); if(!el) return;
         var why = (remote && id !== "b-rewind") ? REMOTE_T : ((shared && SHARED_IDS.indexOf(id) >= 0) ? SHARED_T : "");
         lockCtl(el, why);
@@ -21541,6 +22033,88 @@ local HTML = [[
       return true;
     }
     document.addEventListener("keydown", function(e){ if(e.key === "Escape") closeTickets(); });
+    // ---- 🧭 Coach (2026-09-29, build program unit 32) ------------------------
+    // One repo's run (core.coachView, pushed by FX.pushCoach when it opens and after every click):
+    // each suggested CLAUDE.md edit -- section, why, the text it replaces, the new text, evidence --
+    // with Apply and Skip, and each proposed DECISIONS.md entry with Add and Skip. A headless model
+    // wrote every string from transcripts, so each goes through esc(); a click sends only the root
+    // COACH.view came with and the item's number, never text read back out of the markup.
+    var COACH = { view: null, key: null, open: false };
+    function ccCoach(v){
+      COACH.view = (v && typeof v === "object") ? v : null;
+      if(COACH.open) renderCoach();
+    }
+    function coachRowsHtml(v){
+      if(!v) return '<div class="ib-empty">Loading…</div>';
+      var st = "", rerun = '<button class="ib-btn" data-act="rerun" onclick="coachAct(event)">Run the coach again</button>';
+      if(v.state === "running" || v.state === "queued") st = "The coach is reading this repo's last sessions…";
+      else if(v.state === "waiting") st = "The coach waits for this repo's merge checker, then reads its sessions.";
+      else if(v.state === "lost") st = "Shepherd reloaded while the coach ran; it tries again by itself.";
+      else if(v.state === "new") st = "The coach hasn't read this repo's sessions yet. " + rerun.replace("again", "now");
+      else if(v.verdict === "couldntRun") st = "The coach couldn't run: " + esc(v.why || "no answer") + " " + rerun;
+      else if(v.verdict === "none") st = "The coach read " + esc(v.sessions || 0) + " session(s): nothing to change in CLAUDE.md. " + rerun;
+      else st = (v.summary ? esc(v.summary) + " · " : "") + esc(v.sessions || 0) + " session(s) read"
+        + (v.doneAt ? " · " + esc(fmtAge(v.doneAt)) + " ago" : "") + (typeof v.costUsd === "number" ? " · $" + esc(v.costUsd.toFixed(2)) : "");
+      var h = '<div class="co-state">' + st + '</div>';
+      (v.edits || []).forEach(function(e, i){
+        var pend = e.status === "pending";
+        h += '<div class="ib-row co-row' + (pend ? '' : ' done') + '">'
+          + '<div class="ib-q">' + esc(e.section || "CLAUDE.md") + '</div>'
+          + '<div class="co-why">' + esc(e.why) + '</div>'
+          + (e.old ? '<pre class="co-old">' + esc(e.old) + '</pre>' : '<div class="ib-meta">Added at the end of this section</div>')
+          + '<pre class="co-new">' + esc(e["new"]) + '</pre>'
+          + '<ul class="co-ev">' + (e.evidence || []).map(function(x){ return '<li>' + esc(x) + '</li>'; }).join("") + '</ul>'
+          + (pend && e.error ? '<div class="co-err">' + esc(e.error) + '</div>' : '')
+          + (pend ? '<div class="ib-free"><button class="ib-btn" data-act="apply" data-i="' + i + '" onclick="coachAct(event)" title="Write this into CLAUDE.md and commit CLAUDE.md alone">Apply</button>'
+                  + '<button class="ib-btn" data-act="skip" data-i="' + i + '" onclick="coachAct(event)">Skip</button></div>'
+                : '<div class="co-done">' + (e.status === "applied" ? "✓ Applied" + (e.sha ? " · committed " + esc(String(e.sha).slice(0, 7)) : "") : "Skipped") + '</div>')
+          + '</div>';
+      });
+      (v.decisions || []).forEach(function(d, i){
+        var pend = d.status === "pending";
+        h += '<div class="ib-row co-row' + (pend ? '' : ' done') + '">'
+          + '<div class="ib-q">DECISIONS.md: ' + esc(d.what) + '</div>'
+          + '<div class="co-why">Why: ' + esc(d.why) + '</div>'
+          + (pend && d.error ? '<div class="co-err">' + esc(d.error) + '</div>' : '')
+          + (pend ? '<div class="ib-free"><button class="ib-btn" data-act="dec-add" data-i="' + i + '" onclick="coachAct(event)" title="Add this entry to DECISIONS.md (not committed)">Add to DECISIONS.md</button>'
+                  + '<button class="ib-btn" data-act="dec-skip" data-i="' + i + '" onclick="coachAct(event)">Skip</button></div>'
+                : '<div class="co-done">' + (d.status === "added" ? "✓ Added to DECISIONS.md" : "Skipped") + '</div>')
+          + '</div>';
+      });
+      return h;
+    }
+    function coachAct(ev){
+      if(ev && ev.stopPropagation) ev.stopPropagation();
+      var t = ev && ev.target && ev.target.closest ? ev.target.closest("[data-act]") : null;
+      var v = COACH.view;
+      if(!t || !v || !v.root) return;
+      var act = t.getAttribute("data-act");
+      if(act === "rerun"){ send("coach-rerun", v.root); return; }
+      var list = (act === "apply" || act === "skip") ? v.edits : ((act === "dec-add" || act === "dec-skip") ? v.decisions : null);
+      var i = parseInt(t.getAttribute("data-i"), 10);
+      if(!list || !(i >= 0) || !list[i]) return;
+      send("coach-" + act, v.root, String(i + 1));
+    }
+    function renderCoach(){
+      var body = document.getElementById("co-body"); if(!body) return;
+      body.innerHTML = coachRowsHtml(COACH.view);
+      var title = document.getElementById("co-title");
+      if(title) title.textContent = "🧭 Coach" + (COACH.view && COACH.view.name ? " · " + COACH.view.name : "");
+    }
+    function openCoachFor(key){
+      COACH.open = true; COACH.key = key; COACH.view = null;
+      document.getElementById("coach").classList.add("show");
+      renderCoach();
+      send("coach-open", key);
+    }
+    function closeCoach(){
+      var el = document.getElementById("coach");
+      if(!el || !el.classList.contains("show")) return false;
+      el.classList.remove("show"); COACH.open = false;
+      send("coach-close");
+      return true;
+    }
+    document.addEventListener("keydown", function(e){ if(e.key === "Escape") closeCoach(); });
     // The 📋 Shift report only exists when the audit ledger is on (it's pure
     // ledger aggregation -- nothing to show otherwise), so the refresh tick pokes
     // this on change to show/hide its tab + drawer row entirely. Live with the
@@ -21940,7 +22514,30 @@ local HTML = [[
       b += pinChipsHtml(it);   // 2026-09-29: pinned links (cc-pin.sh)
       b += leaseBadge(it);     // 2026-09-29: worktree leases (the worktree's own port)
       b += ticketBadge(it);    // 2026-09-29: cross-repo tickets no session here can take
+      b += coachBadge(it);     // 2026-09-29: the coach's CLAUDE.md suggestions for this repo
       return b ? '<span class="badges">'+b+'</span>' : "";
+    }
+    // 2026-09-29: the coach (build program unit 32) -- CLAUDE.md suggestions waiting for this card's
+    // repo (it.coach, FX.stepCoach): a count that opens the Coach overlay; a quiet chip while the
+    // coach reads or waits for the repo's merge checker, and one when its last run couldn't run.
+    // Numbers and fixed text only; a click sends only the card's key.
+    function coachBadge(it){
+      var c = it && it.coach;
+      if(!c || typeof c !== "object") return "";
+      var n = (typeof c.pending === "number" && c.pending > 0) ? Math.floor(c.pending) : 0;
+      var txt = "", tip = "", quiet = false;
+      if(n > 0){ txt = "🧭 " + n; tip = n + " CLAUDE.md suggestion" + (n === 1 ? "" : "s") + " from the coach -- click to review"; }
+      else if(c.state === "running" || c.state === "queued"){ txt = "🧭 …"; tip = "The coach is reading this repo's last sessions"; quiet = true; }
+      else if(c.state === "waiting"){ txt = "🧭 …"; tip = "The coach waits for this repo's merge checker"; quiet = true; }
+      else if(c.verdict === "couldntRun"){ txt = "🧭 ⚠"; tip = "The coach couldn't run -- click to see why"; quiet = true; }
+      else return "";
+      return '<span class="coach-b' + (quiet ? ' quiet' : '') + '" data-nodbl onclick="coachCard(event)" title="' + esc(tip) + '">' + txt + '</span>';
+    }
+    function coachCard(ev){
+      if(ev){ ev.stopPropagation(); }
+      var tile = ev && ev.target && ev.target.closest ? ev.target.closest(".tile") : null;
+      var key = tile ? tile.getAttribute("data-key") : selectedKey;
+      if(key) openCoachFor(key);
     }
     // 2026-09-29: cross-repo tickets (build program unit 29) -- tickets filed for this card's repo that
     // no session here can take (it.tickets, FX.stepTickets): a count, and "Open a tab for it", which
@@ -23920,6 +24517,11 @@ function FX._refreshBody()
   do
     local okt, errt = pcall(FX.stepTickets, list)
     if not okt then print("[cc-dashboard] ❌ tickets step failed: " .. tostring(errt)) end
+  end
+  -- 2026-09-29: the coach -- a weekly (or waiting) run started when due, and each card's 🧭 chip
+  do
+    local okc, errc = pcall(FX.stepCoach, list, cfg)
+    if not okc then print("[cc-dashboard] ❌ coach step failed: " .. tostring(errc)) end
   end
   -- 2026-09-29: where the time went -- each wait, stall and error ledgered once, when it ends.
   -- After the needs-you stamp: what counts as a wait on Adam is what it says.

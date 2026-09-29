@@ -548,6 +548,49 @@ run, with **Run** (now), **Pause / Resume**, **Edit** and **Delete**. New routin
   "prompt": "run the full test suite and summarize failures", "enabled": true }
 ```
 
+## The coach
+
+The coach turns the corrections you keep making into edits to the repo's `CLAUDE.md`, the
+instructions every session in it reads first. It suggests; nothing changes until you click.
+
+- **What it reads:** the repo's last 10 sessions (the main checkout's and every
+  `.claude/worktrees/<slug>`'s transcripts, newest first): your corrections (every prompt after a
+  session's first), your interrupts, tool errors, tool calls you denied with a note, and **Not
+  yet** notes. Shepherd adds what transcripts don't hold: your **Not yet** notes on merge requests,
+  blocked merges' notes, and merge-checker fails and findings, from its own log
+  (`~/.claude/cc-coach/<repo>.log.json`, three weeks, 40 entries). The digest is capped at about 30KB;
+  the repo's `CLAUDE.md` and `DECISIONS.md` go in on top.
+- **How it runs:** a headless, read-only Sonnet (the [merge checker](merging-and-batches.md#the-checker-a-read-only-review-of-every-merge-request)'s
+  runner: hooks off, no MCP, no tab) in the repo's main checkout, at `coach.maxBudgetUsd` (default
+  $1). It shares the checker's one-run-per-repo lane, and never starts while that repo's checker is
+  queued or running: it waits, and starts once the checker is done.
+- **What it suggests:** up to 5 `CLAUDE.md` edits, each with its section, why, the text it replaces
+  (or where an addition goes) and the evidence behind it, plus up to 3 `DECISIONS.md` entries for
+  choices sessions keep "fixing". It never proposes undoing a [DECISIONS.md](fleet.md#on-purpose-tab)
+  entry. An answer with no usable JSON is **couldn't run**; "nothing to change" is an answer too.
+- **When:** from any session's **🧭 Coach** button (the detail panel) for its repo, at any time;
+  and weekly for every repo with a card, when `coach.enabled` is on (default off). The weekly run
+  is due once `coach.day` (default `mon`) has passed since the last run, so a Mac that slept
+  through Monday catches up when it wakes, and only when a session ran since. A couldn't-run counts
+  as that week's run. A Hammerspoon reload kills a run in flight: it reads **lost**, never counts
+  as a verdict, and is retried 15 minutes later (up to 3 times).
+- **Reviewing:** suggestions wait behind a **🧭 N** chip on the project card; click it for the
+  Coach overlay. **Apply** writes the edit into `CLAUDE.md` and commits that file alone
+  (`git commit -- CLAUDE.md`, a plain message: `CLAUDE.md: <section>` and the why), leaving
+  anything else you have staged as it was. It's refused, and says why on the edit, when
+  `CLAUDE.md` changed since the coach read it (its hash) or has uncommitted edits, when the
+  edit's text isn't there exactly once, or when `CLAUDE.md` is a link (edit its target by hand). If a hook refuses the commit, `CLAUDE.md` goes back as it
+  was. Applying one edit doesn't block the next. **Skip** puts one aside. A `DECISIONS.md` entry is
+  added through the On purpose tab's own guard, not committed. A quiet chip shows while the coach
+  reads or waits, and **🧭 ⚠** when its last run couldn't run (the overlay says why, with **Run the
+  coach again**).
+
+```json
+{ "coach": { "enabled": true, "day": "mon", "maxBudgetUsd": 1, "timeoutSeconds": 600 } }
+```
+
+Its records live in `~/.claude/cc-coach/`, one per repo; `uninstall.sh --purge` removes them.
+
 ## A/B compare
 
 Run the same task as 2–4 variants and keep the best one. Right-click a tile → **⚖ A/B

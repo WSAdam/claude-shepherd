@@ -179,5 +179,15 @@ assert_eq "...its outcome summary included" "yes" "$got"
 assert_eq "an answer label reaches an Instances row through esc()" "yes" "$(has "'\">' + esc(lbl) + '</button>'")"
 assert_eq "the stack name reaches the card through esc()" "yes" "$(has 'esc(it.stackName)')"
 assert_eq "a branch reaches the card through esc()"       "yes" "$(has 'esc(it.branch)')"
+# the coach (2026-09-29): a headless model wrote every suggestion from transcripts anyone could have
+# typed into -- coachRowsHtml's `e.` and `d.` fields (tests/coach-view.test.js runs the real renderer)
+assert_eq "a coach edit's section is esc()'d"        "yes" "$(has "'<div class=\"ib-q\">' + esc(e.section || \"CLAUDE.md\")")"
+assert_eq "a coach edit's why is esc()'d"            "yes" "$(has "'<div class=\"co-why\">' + esc(e.why)")"
+assert_eq "a coach edit's old text is esc()'d"       "yes" "$(has "'<pre class=\"co-old\">' + esc(e.old)")"
+assert_eq "a coach edit's new text is esc()'d"       "yes" "$(has "'<pre class=\"co-new\">' + esc(e[\"new\"])")"
+assert_eq "a coach edit's evidence is esc()'d"       "yes" "$(has "return '<li>' + esc(x) + '</li>';")"
+assert_eq "a coach edit's refusal is esc()'d"        "yes" "$(has "'<div class=\"co-err\">' + esc(e.error)")"
+assert_eq "a proposed DECISIONS.md entry is esc()'d" "yes" "$(has "'<div class=\"ib-q\">DECISIONS.md: ' + esc(d.what)")"
+assert_eq "...and its why"                           "yes" "$(has "'<div class=\"co-why\">Why: ' + esc(d.why)")"
 
 finish

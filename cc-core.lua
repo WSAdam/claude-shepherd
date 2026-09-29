@@ -3756,12 +3756,14 @@ end
 -- or a pretty-printed or fenced block, never wins over its final line). Walking back from
 -- "verdict", every "{" whose object closes before it (a finding listed first) is passed over.
 -- 2026-09-29: 25 findings ahead of the verdict hid it behind a 6-brace limit; 64 is the bound.
-local function verdictObject(text)
+-- lastObjectWith(text, key) is that walk for any key (the coach's answer carries "edits").
+local function lastObjectWith(text, key, maxBytes)
   text = type(text) == "string" and text or ""
-  if #text > 40000 then text = text:sub(-40000) end
-  local at, from = {}, 1
+  maxBytes = maxBytes or 40000
+  if #text > maxBytes then text = text:sub(-maxBytes) end
+  local at, from, needle = {}, 1, '"' .. key .. '"'
   while true do
-    local s = text:find('"verdict"', from, true)
+    local s = text:find(needle, from, true)
     if not s then break end
     at[#at + 1] = s; from = s + 1
   end
@@ -3775,12 +3777,13 @@ local function verdictObject(text)
       local e = objectEnd(text, q)
       if e and e > p then
         local ok, t = pcall(M.json.decode, text:sub(q, e))
-        if ok and type(t) == "table" and t.verdict ~= nil then return t end
+        if ok and type(t) == "table" and t[key] ~= nil then return t end
       end
     end
   end
   return nil
 end
+local function verdictObject(text) return lastObjectWith(text, "verdict") end
 local function checkerFindings(list)
   local out = {}
   if type(list) ~= "table" then return out end
@@ -3797,10 +3800,9 @@ local function checkerFindings(list)
   return out
 end
 
--- claude -p --output-format json -> { verdict, summary, findings, costUsd, turns, why }. Anything
--- short of a pass/fail in the answer's final JSON is couldntRun, with why.
-function M.parseCheckerOutput(raw, errText)
-  local res = { verdict = "couldntRun", findings = {} }
+-- The `claude -p --output-format json` envelope a headless run printed: its result object, or nil
+-- with res.why set (no answer, or claude's own error). res gets costUsd and turns either way.
+local function headlessEnvelope(raw, errText, res)
   raw = type(raw) == "string" and raw or ""
   -- a login shell may print before claude does
   local at = raw:find('{"type":"result"', 1, true) or raw:find("{", 1, true)
@@ -3813,14 +3815,23 @@ function M.parseCheckerOutput(raw, errText)
     local err = tostring(errText or "") .. "\n"
     local e = checkerTrim(err:sub(1, err:find("\n", 1, true) - 1))
     res.why = (e ~= "") and ("claude gave no answer: " .. capChars(e, 200)) or "claude gave no answer"
-    return res
+    return nil
   end
   res.costUsd, res.turns = tonumber(t.total_cost_usd), tonumber(t.num_turns)
   if t.is_error == true or (t.subtype ~= nil and t.subtype ~= "success") then
     res.why = CHECKER_SUBTYPE_WHY[t.subtype]
       or ("claude reported an error: " .. capChars(tostring(t.result or t.subtype or "?"), 200))
-    return res
+    return nil
   end
+  return t
+end
+
+-- claude -p --output-format json -> { verdict, summary, findings, costUsd, turns, why }. Anything
+-- short of a pass/fail in the answer's final JSON is couldntRun, with why.
+function M.parseCheckerOutput(raw, errText)
+  local res = { verdict = "couldntRun", findings = {} }
+  local t = headlessEnvelope(raw, errText, res)
+  if not t then return res end
   local v = verdictObject(t.result)
   local verdict = v and tostring(v.verdict):lower() or nil
   if verdict == "passed" then verdict = "pass" elseif verdict == "failed" then verdict = "fail" end
@@ -10136,6 +10147,9 @@ M.SETTINGS_KEEP_SUBKEYS = {
   -- 2026-09-29: worktree leases have no inputs; if the form ever rebuilds `lease`, the hand-set
   -- port range and database folder stay.
   lease = { "portFrom", "portTo", "dbDir" },
+  -- 2026-09-29: the coach has no inputs (a card button runs it); if the form ever rebuilds `coach`,
+  -- the hand-set weekly switch, day, budget and timeout stay.
+  coach = { "enabled", "day", "maxBudgetUsd", "timeoutSeconds" },
   automation = { "dryRun" },
   queue = { "dryRun" },
   rules = { "dryRun" },
@@ -15207,6 +15221,695 @@ function M.cheapHash(s)
   return string.format("%08x", h)
 end
 
+-- ---- The coach (2026-09-29, build program unit 32) --------------------------------------------
+-- Weekly (catching up after sleep) and on demand from a card, the coach reads a repo's last 10
+-- sessions and proposes up to 5 edits to its CLAUDE.md, each with evidence; Adam applies or skips.
+--   1. FX lists the repo's transcripts (M.coachProjectDirs: the main checkout's Claude project
+--      folder and every .claude/worktrees/<slug>'s), takes the newest (M.coachPickTranscripts),
+--      and ONE shell task keeps only the lines that can carry evidence (M.coachScanCmd);
+--   2. M.coachSessionFacts reads each -- Adam's corrections, interrupts, tool errors, denials with
+--      a note, NOT YET merge notes -- and M.coachDigest folds them, with Shepherd's own log of
+--      merge notes and checker findings (M.coachLogAdd), into about 30KB;
+--   3. FX.runHeadless (the checker's runner and per-repo lane, a $ cap) answers M.coachPrompt,
+--      which adds CLAUDE.md and DECISIONS.md; M.parseCoachOutput reads the edits, and anything
+--      short of that JSON is couldn't-run;
+--   4. Apply (M.coachApplyDecision) refuses when CLAUDE.md changed since the coach read it (its
+--      hash) or has uncommitted edits, else writes the file and commits it alone (M.coachCommitCmd).
+-- A run a Hammerspoon reload killed reads "lost" (M.parseCoachRecord): retried later, never a
+-- verdict. The weekly clock is M.coachDue on the record's last-run stamp.
+M.COACH = {
+  sessions = 10,             -- transcripts read, newest first
+  digestBytes = 30000,       -- the evidence cap; CLAUDE.md and DECISIONS.md come on top of it
+  logBytes = 6000,           -- ...of which Shepherd's merge notes and checker findings
+  claudeMdBytes = 60000, decisionsBytes = 12000,
+  maxEdits = 5, maxDecisions = 3, editBytes = 6000,
+  budgetUsd = 1, timeoutSeconds = 600, scanSeconds = 60, commitSeconds = 60,
+  retryLostSeconds = 900,    -- a lost run is retried this long after it started
+  maxLost = 3,               -- ...this many times in a row, then it waits for the next week
+  scanTailBytes = 4000000,   -- of each transcript
+  scanLineBytes = 16000,     -- a longer line is a pasted blob or a big tool result, not evidence
+  scanLines = 300,           -- kept per transcript
+  promptChars = 400, errorChars = 300, noteChars = 400,
+  perSession = { corrections = 12, errors = 8, denials = 8, notes = 5 },
+  logMax = 40, logDays = 21,
+  activityDays = 7,          -- a first run needs a session this recent
+  checkEverySeconds = 60,
+}
+M.COACH_FILE = "CLAUDE.md"
+M.COACH_DAYS = { sun = 1, mon = 2, tue = 3, wed = 4, thu = 5, fri = 6, sat = 7 }
+M.COACH_LOG_KINDS = { notyet = true, blocked = true, checker = true }
+M.COACH_VERDICTS = { proposals = true, none = true, couldntRun = true }
+do
+  local C = M.COACH
+  local function sq(s) return "'" .. tostring(s):gsub("'", "'\\''") .. "'" end
+  -- One line of evidence: every whitespace run is one space, trimmed, capped (… when cut).
+  local function oneLine(s, n)
+    if type(s) ~= "string" then return "" end
+    s = checkerTrim(s:gsub("%s+", " "))
+    if n and utf8.len(s) and utf8.len(s) > n then s = capChars(s, n) .. "…" end
+    return s
+  end
+  local function stripSlash(p) return (type(p) == "string" and p ~= "/") and (p:gsub("/+$", "")) or p end
+  -- The whole text of a user record's content (a string, or its text parts).
+  local function contentText(c)
+    if type(c) == "string" then return c end
+    local parts = {}
+    for _, part in ipairs(type(c) == "table" and c or {}) do
+      if type(part) == "table" and part.type == "text" and type(part.text) == "string" then parts[#parts + 1] = part.text end
+    end
+    return table.concat(parts, "\n")
+  end
+  local function resultText(c)
+    if type(c) == "string" then return c end
+    local parts = {}
+    for _, q in ipairs(type(c) == "table" and c or {}) do
+      if type(q) == "table" and type(q.text) == "string" then parts[#parts + 1] = q.text end
+    end
+    return table.concat(parts, " ")
+  end
+
+  function M.coachHash(content) return M.decisionsHash(content) end
+
+  -- The name of the coach's files for a repo (its main checkout): Claude Code's own project-folder
+  -- encoding, so it is one path segment. nil when the root is unusable.
+  function M.coachFileKey(root)
+    root = stripSlash(root)
+    if type(root) ~= "string" or root:sub(1, 1) ~= "/" then return nil end
+    return M.encodeProjectPath(root)
+  end
+
+  -- Which of ~/.claude/projects' folders hold this repo's sessions: its main checkout's, and each
+  -- .claude/worktrees/<slug>'s (a tab that EnterWorktree'd keeps its launch folder's). Sorted.
+  function M.coachProjectDirs(names, root)
+    local base = M.coachFileKey(root)
+    local out = {}
+    if not base then return out end
+    local wt = base .. "--claude-worktrees-"
+    for _, n in ipairs(type(names) == "table" and names or {}) do
+      if type(n) == "string" and (n == base or (#n > #wt and n:sub(1, #wt) == wt)) then out[#out + 1] = n end
+    end
+    table.sort(out)
+    return out
+  end
+
+  -- The newest `n` transcripts ({ path, mtime, id }), newest first.
+  function M.coachPickTranscripts(files, n)
+    local out = {}
+    for _, f in ipairs(type(files) == "table" and files or {}) do
+      if type(f) == "table" and type(f.path) == "string" and tonumber(f.mtime) then out[#out + 1] = f end
+    end
+    table.sort(out, function(a, b)
+      if a.mtime ~= b.mtime then return a.mtime > b.mtime end
+      return a.path < b.path
+    end)
+    n = tonumber(n) or C.sessions
+    while #out > n do table.remove(out) end
+    return out
+  end
+
+  -- One shell command that reads the tail of each transcript and keeps only the lines that can
+  -- carry evidence: user records short enough to be typed, that are a prompt (no tool_result), a
+  -- failed tool call, or a tool result carrying a NOT YET merge note. Transcript i's lines land in
+  -- outBase.i. Plain tail/awk (never grep: Adam's shell aliases it to ugrep).
+  local SCAN_AWK = [==[length($0) <= %d && index($0, "\"type\":\"user\"") && (index($0, "\"is_error\":true") || !index($0, "\"tool_result\"") || index($0, "NOT YET: "))]==]
+  function M.coachScanCmd(paths, outBase)
+    if type(outBase) ~= "string" or outBase == "" then return nil end
+    local awk = sq(string.format(SCAN_AWK, C.scanLineBytes))
+    local cmds = {}
+    for i, p in ipairs(type(paths) == "table" and paths or {}) do
+      cmds[#cmds + 1] = "tail -c " .. C.scanTailBytes .. " " .. sq(p) .. " 2>/dev/null | awk " .. awk
+        .. " 2>/dev/null | tail -n " .. C.scanLines .. " > " .. sq(outBase .. "." .. i)
+    end
+    if #cmds == 0 then return nil end
+    return table.concat(cmds, "; ") .. "; exit 0"
+  end
+
+  -- What one transcript window says: { asked, corrections, interrupts, errors = { { text, n } },
+  -- denials (Adam's notes), bareDenials, notes (NOT YET), branch, at }. Only whole lines that start
+  -- a record are decoded (a `tail -c` tears the first, a live transcript the last), walked with a
+  -- plain find. The first prompt of Adam's in the window is what the session was asked; every
+  -- later one is a correction. Shepherd's own prompts, task notifications and meta lines aren't his.
+  function M.coachSessionFacts(text)
+    local f = { corrections = {}, interrupts = 0, errors = {}, denials = {}, bareDenials = 0, notes = {} }
+    local seenErr = {}
+    text = type(text) == "string" and text or ""
+    local pos = 1
+    while true do
+      local nl = text:find("\n", pos, true)
+      if not nl then break end
+      local line = text:sub(pos, nl - 1)
+      pos = nl + 1
+      if line:sub(1, 1) == "{" and line:find('"type":"user"', 1, true) then
+        local ok, obj = pcall(M.json.decode, line)
+        if ok and type(obj) == "table" and obj.type == "user" and type(obj.message) == "table" then
+          local ts = M.isoToEpoch(obj.timestamp)
+          if ts and (not f.at or ts > f.at) then f.at = ts end
+          if type(obj.gitBranch) == "string" and obj.gitBranch ~= "" and obj.gitBranch ~= "HEAD" then
+            f.branch = capChars(obj.gitBranch, 200)
+          end
+          local c = obj.message.content
+          local origin = M.promptOrigin(obj)
+          if origin == "human" then
+            local t = oneLine(stripIdeContext(contentText(c)), C.promptChars)
+            if t ~= "" then
+              if not f.asked then f.asked = t
+              else
+                f.corrections[#f.corrections + 1] = t
+                if #f.corrections > C.perSession.corrections then table.remove(f.corrections, 1) end
+              end
+            end
+          elseif origin == nil and not obj.isMeta then
+            local t = checkerTrim(contentText(c))
+            if t:sub(1, #M.INTERRUPT_MARKER) == M.INTERRUPT_MARKER then f.interrupts = f.interrupts + 1 end
+          end
+          for _, part in ipairs(type(c) == "table" and c or {}) do
+            if type(part) == "table" and part.type == "tool_result" then
+              local body = resultText(part.content)
+              if part.is_error == true then
+                if body:find("doesn't want to proceed", 1, true) or body:find("tool use was rejected", 1, true) then
+                  local at = body:find("reason for the rejection:", 1, true)
+                  local note = at and oneLine(body:sub(at + 25), C.noteChars) or ""
+                  if note ~= "" then
+                    f.denials[#f.denials + 1] = note
+                    if #f.denials > C.perSession.denials then table.remove(f.denials, 1) end
+                  else
+                    f.bareDenials = f.bareDenials + 1
+                  end
+                else
+                  local e = oneLine((body:gsub("</?tool_use_error>", "")), C.errorChars)
+                  if e ~= "" then
+                    if seenErr[e] then seenErr[e].n = seenErr[e].n + 1
+                    elseif #f.errors < C.perSession.errors then
+                      seenErr[e] = { text = e, n = 1 }
+                      f.errors[#f.errors + 1] = seenErr[e]
+                    end
+                  end
+                end
+              else
+                -- cc-merge.sh prints it at the start of a line; a file that merely holds the words
+                -- (a Read of cc-merge.sh itself) has them mid-line
+                local at = (body:sub(1, 9) == "NOT YET: ") and 1 or body:find("\nNOT YET: ", 1, true)
+                if at and at > 1 then at = at + 1 end
+                if at then
+                  local rest = body:sub(at + 9)
+                  local stop = rest:find("\n", 1, true)
+                  local note = oneLine(stop and rest:sub(1, stop - 1) or rest, C.noteChars)
+                  if note ~= "" and #f.notes < C.perSession.notes then f.notes[#f.notes + 1] = note end
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+    return f
+  end
+
+  local function when(at) return tonumber(at) and os.date("%Y-%m-%d %H:%M", tonumber(at)) or nil end
+
+  -- One session's block of the digest.
+  local function sessionBlock(i, n, s)
+    local f = type(s) == "table" and type(s.facts) == "table" and s.facts or M.coachSessionFacts("")
+    local head = { "### Session " .. i .. " of " .. n }
+    if when(f.at) then head[#head + 1] = when(f.at) end
+    if f.branch then head[#head + 1] = f.branch end
+    local out = { table.concat(head, " · ") }
+    if f.asked then out[#out + 1] = "Asked: " .. f.asked end
+    local any = false
+    if #(f.corrections or {}) > 0 then
+      any = true
+      out[#out + 1] = "Adam's corrections:"
+      for _, t in ipairs(f.corrections) do out[#out + 1] = "- " .. t end
+    end
+    if (f.interrupts or 0) > 0 then any = true; out[#out + 1] = "Interrupted by Adam: " .. f.interrupts .. "×" end
+    if #(f.errors or {}) > 0 then
+      any = true
+      out[#out + 1] = "Tool errors:"
+      for _, e in ipairs(f.errors) do out[#out + 1] = "- " .. e.text .. ((e.n or 1) > 1 and (" (×" .. e.n .. ")") or "") end
+    end
+    if #(f.denials or {}) > 0 then
+      any = true
+      out[#out + 1] = "Denied with a note:"
+      for _, t in ipairs(f.denials) do out[#out + 1] = "- " .. t end
+    end
+    if (f.bareDenials or 0) > 0 then any = true; out[#out + 1] = "Denied without a note: " .. f.bareDenials .. "×" end
+    if #(f.notes or {}) > 0 then
+      any = true
+      out[#out + 1] = "Merge notes (Not yet):"
+      for _, t in ipairs(f.notes) do out[#out + 1] = "- " .. t end
+    end
+    if not any then out[#out + 1] = "(no corrections, interrupts, errors or denials)" end
+    return table.concat(out, "\n") .. "\n"
+  end
+
+  -- Shepherd's log as the digest's first section, newest first, capped at `cap` bytes ("" if empty).
+  local function logSection(log, cap)
+    local rows = {}
+    for _, e in ipairs(type(log) == "table" and log or {}) do if type(e) == "table" then rows[#rows + 1] = e end end
+    if #rows == 0 then return "" end
+    table.sort(rows, function(a, b) return (tonumber(a.at) or 0) > (tonumber(b.at) or 0) end)
+    local out = "## Merge notes and checker findings (Shepherd's own records)\n"
+    for _, e in ipairs(rows) do
+      local day = tonumber(e.at) and os.date("%Y-%m-%d", tonumber(e.at)) or "?"
+      local who = day .. " " .. tostring(e.branch or "?") .. ": "
+      local lines
+      if e.kind == "notyet" then lines = { "- " .. who .. "Not yet — " .. tostring(e.note or "") }
+      elseif e.kind == "blocked" then lines = { "- " .. who .. "blocked — " .. tostring(e.note or "") }
+      else
+        lines = { "- " .. who .. "checker " .. tostring(e.verdict or "?") .. " — " .. tostring(e.summary or "") }
+        for _, fd in ipairs(type(e.findings) == "table" and e.findings or {}) do
+          lines[#lines + 1] = "  - " .. tostring(fd.severity or "") .. " " .. tostring(fd.file or "")
+            .. (fd.line and (":" .. fd.line) or "") .. " " .. tostring(fd.issue or "")
+        end
+      end
+      local chunk = table.concat(lines, "\n") .. "\n"
+      if #out + #chunk > cap then break end
+      out = out .. chunk
+    end
+    return out
+  end
+
+  -- The digest: { text, bytes, cut, sessions, empty }. `sessions` = { { id, facts } } newest first,
+  -- `log` = Shepherd's log entries. Shepherd's log leads (small and high-signal), then each session
+  -- whole while it fits; the one that doesn't is cut at a line and the digest says so.
+  function M.coachDigest(sessions, log, opts)
+    opts = type(opts) == "table" and opts or {}
+    local cap = tonumber(opts.maxBytes) or C.digestBytes
+    sessions = type(sessions) == "table" and sessions or {}
+    local n = #sessions
+    local logText = logSection(log, C.logBytes)
+    local CUT = "\n[… cut here: the digest stops at " .. cap .. " bytes]\n"
+    local buf = { "# The repo's last " .. n .. " session" .. (n == 1 and "" or "s") .. ", newest first\n" }
+    local size = #buf[1]
+    if logText ~= "" then buf[#buf + 1] = "\n" .. logText; size = size + 1 + #logText end
+    local cut, used = false, 0
+    for i, s in ipairs(sessions) do
+      local block = "\n" .. sessionBlock(i, n, s)
+      if size + #block <= cap - #CUT then
+        buf[#buf + 1] = block; size = size + #block; used = used + 1
+      else
+        local room, keep, p = cap - #CUT - size, 0, 1
+        while true do   -- the longest whole-line prefix that fits
+          local nl = block:find("\n", p, true)
+          if not nl or nl > room then break end
+          keep, p = nl, nl + 1
+        end
+        if keep > 1 then buf[#buf + 1] = block:sub(1, keep); size = size + keep; used = used + 1 end
+        cut = true
+        break
+      end
+    end
+    if cut then buf[#buf + 1] = CUT end
+    local text = table.concat(buf)
+    return { text = text, bytes = #text, cut = cut, sessions = used, empty = (n == 0 and logText == "") }
+  end
+
+  -- What the headless run is asked. The digest, the repo's CLAUDE.md and DECISIONS.md go in whole
+  -- up to their caps (past one, it reads the rest itself: it runs in the repo with Read).
+  function M.coachPrompt(digest, claudeMd, decisions, o)
+    o = type(o) == "table" and o or {}
+    local text = type(digest) == "table" and digest.text or tostring(digest or "")
+    local name = oneLine(o.name, 80)
+    local lines = {
+      "You are Shepherd's coach for the repo" .. (name ~= "" and (" \"" .. name .. "\"") or "") .. ". Below is what went wrong in its"
+        .. " recent Claude Code sessions: Adam's corrections, his interrupts, tool errors, tool calls he denied with a note,"
+        .. " merge notes and merge-checker findings. Propose at most " .. C.maxEdits .. " edits to the repo's CLAUDE.md -- the"
+        .. " instructions every session in this repo reads first -- that would have prevented them.",
+      "",
+      "Rules:",
+      "- Edit CLAUDE.md only. Each edit is {\"section\", \"old\", \"new\", \"why\", \"evidence\"}:",
+      "  - \"old\" is text copied exactly from the CLAUDE.md below, occurring there exactly once; \"new\" replaces it."
+        .. " To add without replacing, set \"old\" to \"\" and \"section\" to the heading it goes under (a missing heading is"
+        .. " created at the end).",
+      "  - \"why\": one or two sentences on what the edit prevents.",
+      "  - \"evidence\": 1 to 5 short quotes from the evidence below (a correction, an error, a denial note, a merge note,"
+        .. " a checker finding). An edit nothing below calls for is not an edit.",
+      "- Keep each edit small and in the file's own voice. Never restate a rule CLAUDE.md already has; sharpen it instead.",
+      "- DECISIONS.md lists what the project does on purpose. Never propose an edit that undoes, weakens or contradicts"
+        .. " one of its entries.",
+      "- If the evidence shows a deliberate choice that sessions keep \"fixing\", you may propose a DECISIONS.md entry"
+        .. " {\"what\", \"why\"} (at most " .. C.maxDecisions .. "), never one it already has.",
+      "- If nothing is worth changing, return empty lists. Don't change any file; you may read the repo to check a claim.",
+      "",
+      "End your answer with ONE JSON object on its last line, nothing after it:",
+      "{\"summary\": \"<one sentence>\", \"edits\": [{\"section\": \"...\", \"old\": \"...\", \"new\": \"...\", \"why\": \"...\","
+        .. " \"evidence\": [\"...\"]}], \"decisions\": [{\"what\": \"...\", \"why\": \"...\"}]}",
+      "",
+    }
+    if type(claudeMd) == "string" then
+      local body = claudeMd
+      if #body > C.claudeMdBytes then
+        body = body:sub(1, C.claudeMdBytes) .. "\n[… cut: CLAUDE.md is longer; Read it for the rest]"
+      end
+      lines[#lines + 1] = "<claude_md>\n" .. body .. "\n</claude_md>"
+    else
+      lines[#lines + 1] = "This repo has no CLAUDE.md yet: an edit with an empty \"old\" and a \"section\" creates it."
+    end
+    lines[#lines + 1] = ""
+    if type(decisions) == "string" and decisions:match("%S") then
+      local body = decisions
+      if #body > C.decisionsBytes then body = body:sub(1, C.decisionsBytes) .. "\n[… cut: Read DECISIONS.md for the rest]" end
+      lines[#lines + 1] = "<decisions_md>\n" .. body .. "\n</decisions_md>"
+    else
+      lines[#lines + 1] = "This repo has no DECISIONS.md yet."
+    end
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "<evidence>\n" .. text .. "</evidence>"
+    return table.concat(lines, "\n") .. "\n"
+  end
+
+  -- One proposed edit, checked; nil when it can't be applied or shown honestly. keep = a record
+  -- read back from disk (its status, commit and last refusal come too).
+  local EDIT_STATUS = { pending = true, applied = true, skipped = true }
+  local DEC_STATUS = { pending = true, added = true, skipped = true }
+  local function coachEdit(e, keep)
+    if type(e) ~= "table" then return nil end
+    local old = type(e.old) == "string" and e.old or ""
+    local new = type(e.new) == "string" and e.new or ""
+    if #old > C.editBytes or #new > C.editBytes or old == new then return nil end
+    if old == "" and not new:match("%S") then return nil end
+    local section = (oneLine(e.section, 120):gsub("^#+%s*", ""))
+    if old == "" and section == "" then return nil end   -- an add needs a place to go
+    local why = oneLine(e.why, 500)
+    if why == "" then return nil end
+    local ev = {}
+    for _, x in ipairs(type(e.evidence) == "table" and e.evidence or {}) do
+      local s = (type(x) == "string" or type(x) == "number") and oneLine(tostring(x), 300) or ""
+      if s ~= "" and #ev < 5 then ev[#ev + 1] = s end
+    end
+    if #ev == 0 then return nil end
+    local out = { section = section, old = old, new = new, why = why, evidence = ev }
+    if keep then
+      out.status = EDIT_STATUS[e.status] and e.status or "pending"
+      out.sha = (type(e.sha) == "string" and e.sha:match("^%x+$") and #e.sha <= 64) and e.sha or nil
+      out.error = (type(e.error) == "string" and e.error ~= "") and capChars(e.error, 300) or nil
+      out.at = tonumber(e.at)
+    end
+    return out
+  end
+  local function coachEntry(d, keep)
+    if type(d) ~= "table" then return nil end
+    local what, why = oneLine(d.what, M.DECISIONS_MAX.what), oneLine(d.why, M.DECISIONS_MAX.why)
+    if what == "" or why == "" then return nil end
+    local out = { what = what, why = why }
+    if keep then
+      out.status = DEC_STATUS[d.status] and d.status or "pending"
+      out.error = (type(d.error) == "string" and d.error ~= "") and capChars(d.error, 300) or nil
+    end
+    return out
+  end
+
+  -- claude -p --output-format json -> { verdict = proposals | none | couldntRun, edits, decisions,
+  -- summary, why, costUsd, turns }. The answer's last JSON object carrying "edits" is read; with
+  -- none, or edits that aren't a list, or only edits that fail the checks, it couldn't run.
+  function M.parseCoachOutput(raw, errText)
+    local res = { verdict = "couldntRun", edits = {}, decisions = {} }
+    local t = headlessEnvelope(raw, errText, res)
+    if not t then return res end
+    local v = lastObjectWith(t.result, "edits", 200000)
+    if not v then res.why = "its answer had no JSON with edits"; return res end
+    if type(v.edits) ~= "table" then res.why = "its answer's edits weren't a list"; return res end
+    for _, e in ipairs(v.edits) do
+      if #res.edits >= C.maxEdits then break end
+      res.edits[#res.edits + 1] = coachEdit(e)
+    end
+    for _, d in ipairs(type(v.decisions) == "table" and v.decisions or {}) do
+      if #res.decisions >= C.maxDecisions then break end
+      res.decisions[#res.decisions + 1] = coachEntry(d)
+    end
+    local summary = oneLine(v.summary, 300)
+    res.summary = summary ~= "" and summary or nil
+    if #res.edits + #res.decisions > 0 then
+      res.verdict = "proposals"
+    elseif #v.edits > 0 then
+      res.why = "none of its " .. #v.edits .. " edit(s) had evidence and a change to make"
+    else
+      res.verdict = "none"
+    end
+    return res
+  end
+
+  local function isListItem(s) return s:match("^%s*[%-%*%+]%s") ~= nil or s:match("^%s*%d+[%.%)]%s") ~= nil end
+
+  -- Decide whether an Apply may go ahead, given CLAUDE.md's CURRENT content (nil = missing), the
+  -- hash the coach read, the edit, and whether git shows the file with uncommitted edits. PURE --
+  -- FX reads the file and git, and writes and commits around it. Returns
+  --   { ok = false, error = "bad-edit"|"changed"|"dirty"|"not-found"|"ambiguous" } or
+  --   { ok = true, text = <the whole new file> }.
+  -- A replace needs its text exactly once. An add (old "") goes after the last line of its section
+  -- (the heading's level decides where the section ends: at the next heading as high or higher),
+  -- a list item straight under a list, anything else after a blank line; a section that isn't
+  -- there is made at the end, and a missing file is started.
+  function M.coachApplyDecision(current, readHash, edit, dirty)
+    if type(edit) ~= "table" or type(edit.old) ~= "string" or type(edit.new) ~= "string" then
+      return { ok = false, error = "bad-edit" }
+    end
+    if M.coachHash(current) ~= tostring(readHash or "") then return { ok = false, error = "changed" } end
+    if dirty then return { ok = false, error = "dirty" } end
+    local base = type(current) == "string" and current or ""
+    if edit.old ~= "" then
+      local s, e = base:find(edit.old, 1, true)
+      if not s then return { ok = false, error = "not-found" } end
+      if base:find(edit.old, s + 1, true) then return { ok = false, error = "ambiguous" } end
+      return { ok = true, text = base:sub(1, s - 1) .. edit.new .. base:sub(e + 1) }
+    end
+    local eol = base:find("\r\n", 1, true) and "\r\n" or "\n"
+    local body = edit.new:gsub("\r\n", "\n"):gsub("^\n+", "")
+    body = rtrimBytes(body)
+    if body == "" then return { ok = false, error = "bad-edit" } end
+    body = body:gsub("\n", eol)
+    local section = (oneLine(edit.section, 120):gsub("^#+%s*", ""))
+    if not base:match("%S") then
+      return { ok = true, text = "# CLAUDE.md" .. eol .. eol .. (section ~= "" and ("## " .. section .. eol .. eol) or "") .. body .. eol }
+    end
+    local lines, pos, fence = {}, 1, false
+    while pos <= #base do
+      local nl = base:find("\n", pos, true)
+      local stop = (nl or (#base + 1)) - 1
+      local t = base:sub(pos, stop)
+      if t:sub(-1) == "\r" then t = t:sub(1, -2); stop = stop - 1 end
+      local isFence = t:match("^%s*```") or t:match("^%s*~~~")
+      local hashes, title = nil, nil
+      if not fence and not isFence then hashes, title = t:match("^(#+)%s+(.-)%s*$") end
+      lines[#lines + 1] = { text = t, stop = stop, level = hashes and #hashes or nil, title = title }
+      if isFence then fence = not fence end
+      if not nl then break end
+      pos = nl + 1
+    end
+    local want, h = section:lower(), nil
+    for i, l in ipairs(lines) do
+      if l.level and want ~= "" and l.title:lower() == want then h = i; break end
+    end
+    if not h then
+      if base:sub(-1) ~= "\n" then base = base .. eol end
+      return { ok = true, text = base .. eol .. "## " .. section .. eol .. eol .. body .. eol }
+    end
+    local last = h
+    for i = h + 1, #lines do
+      local l = lines[i]
+      if l.level and l.level <= lines[h].level then break end
+      if l.text:match("%S") then last = i end
+    end
+    local firstBody = body:match("^[^\r\n]*")
+    local sep = (last ~= h and isListItem(lines[last].text) and isListItem(firstBody)) and eol or (eol .. eol)
+    local at = lines[last].stop
+    return { ok = true, text = base:sub(1, at) .. sep .. body .. base:sub(at + 1) }
+  end
+
+  local REFUSALS = {
+    ["bad-edit"] = "the edit is malformed",
+    changed = "CLAUDE.md changed since the coach read it -- run the coach again",
+    dirty = "CLAUDE.md has uncommitted edits -- commit or restore them first",
+    ["not-found"] = "its text isn't in CLAUDE.md any more",
+    ambiguous = "its text is in CLAUDE.md more than once",
+    write = "Shepherd couldn't write CLAUDE.md",
+    link = "CLAUDE.md is a link -- edit the file it points to by hand",
+  }
+  function M.coachRefusal(code) return REFUSALS[code] or ("refused: " .. tostring(code)) end
+
+  -- git status of CLAUDE.md alone: any output = uncommitted edits (untracked included).
+  function M.coachDirtyCmd(root) return "git -C " .. sq(root) .. " status --porcelain -- " .. M.COACH_FILE .. " 2>/dev/null" end
+  function M.coachDirty(out) return type(out) == "string" and out:match("%S") ~= nil end
+
+  -- The commit's message: plain, Adam's own -- the section and the why, nothing about who wrote it.
+  function M.coachCommitMessage(edit)
+    edit = type(edit) == "table" and edit or {}
+    local section = (oneLine(edit.section, 60):gsub("^#+%s*", ""))
+    return "CLAUDE.md: " .. (section ~= "" and section or "update"), oneLine(edit.why, 500)
+  end
+
+  -- Commit CLAUDE.md and nothing else: `git commit -- CLAUDE.md` commits that path alone and
+  -- leaves whatever else is staged staged. A new file has to be added first, and is unstaged again
+  -- if the commit is refused (a hook). Prints the new commit's sha.
+  function M.coachCommitCmd(root, subject, body, isNew)
+    local msg = "-m " .. sq(subject or "CLAUDE.md: update") .. ((type(body) == "string" and body ~= "") and (" -m " .. sq(body)) or "")
+    local cd = "cd " .. sq(root) .. " || exit 1; "
+    if isNew then
+      return cd .. "git add -- " .. M.COACH_FILE .. " && { git commit -q " .. msg .. " -- " .. M.COACH_FILE
+        .. " || { git rm -q --cached -- " .. M.COACH_FILE .. " >/dev/null 2>&1; exit 1; }; } && git rev-parse HEAD"
+    end
+    return cd .. "git commit -q " .. msg .. " -- " .. M.COACH_FILE .. " && git rev-parse HEAD"
+  end
+
+  -- coach.day -> os.date's wday (1 = Sunday): mon..sun or their full names, or cron's 0-7.
+  function M.coachDay(v)
+    if v == nil or v == "" then return M.COACH_DAYS.mon end
+    local n = tonumber(v)
+    if n then return (n >= 0 and n <= 7 and n == math.floor(n)) and ((n % 7) + 1) or nil end
+    return M.COACH_DAYS[tostring(v):lower():sub(1, 3)]
+  end
+
+  -- The weekly slot at or before `now`: the latest <day> at 00:00 local.
+  function M.coachSlot(now, day)
+    local wday = M.coachDay(day) or M.COACH_DAYS.mon
+    local t = os.date("*t", now)
+    local back = (t.wday - wday) % 7
+    return os.time({ year = t.year, month = t.month, day = t.day - back, hour = 0, min = 0, sec = 0 })
+  end
+
+  -- Is a run due? o = { now, enabled (coach.enabled), day (coach.day), running, newest = the newest
+  -- transcript's mtime, or a function giving it (only asked when the week says so) }. Returns due
+  -- and why ("retry" | "weekly" | "first" when due).
+  -- A lost run (Hammerspoon reloaded mid-run) is retried retryLostSeconds after it started, up to
+  -- maxLost times, whatever the week says -- even with the weekly run off, if a card started it;
+  -- then it waits for the next slot, which starts over.
+  -- Otherwise one run per week: due once the slot has passed since the last run -- after sleep
+  -- too, since the slot is in the past -- and only if a session ran since (a first run: this week).
+  -- A couldn't-run counts as the week's run: it cost money, and the card offers Run again.
+  function M.coachDue(rec, o)
+    o = type(o) == "table" and o or {}
+    local now = tonumber(o.now) or 0
+    if o.running then return false, "running" end
+    if type(rec) == "table" and rec.state == "lost" then
+      if (tonumber(rec.attempts) or 1) < C.maxLost then
+        if not (o.enabled or rec.trigger == "card") then return false, "off" end
+        if now - (tonumber(rec.at) or 0) >= C.retryLostSeconds then return true, "retry" end
+        return false, "retry later"
+      end
+      if (tonumber(rec.at) or 0) >= M.coachSlot(now, o.day) then return false, "lost " .. C.maxLost .. " times" end
+    end
+    if not o.enabled then return false, "off" end
+    local last = type(rec) == "table" and tonumber(rec.lastRunAt) or nil
+    if last and last >= M.coachSlot(now, o.day) then return false, "done this week" end
+    local newest = o.newest
+    if type(newest) == "function" then newest = newest() end
+    local since = last or (now - C.activityDays * 86400)
+    if not (tonumber(newest) and tonumber(newest) > since) then return false, "no new sessions" end
+    return true, last and "weekly" or "first"
+  end
+
+  -- A record read back from disk (Shepherd is its only writer). A run still queued or running when
+  -- Hammerspoon reloaded has no task any more: it reads "lost", with no verdict -- retried later.
+  function M.parseCoachRecord(raw)
+    if type(raw) ~= "string" then return nil end
+    local ok, t = pcall(M.json.decode, raw)
+    if not ok or type(t) ~= "table" or tonumber(t.v) ~= 1 then return nil end
+    if type(t.root) ~= "string" or t.root:sub(1, 1) ~= "/" then return nil end
+    local function str(v, n) return (type(v) == "string" and v ~= "") and capChars(v, n) or nil end
+    local r = { v = 1, repo = str(t.repo, 1000), root = t.root, name = str(t.name, 200), state = t.state,
+                trigger = (t.trigger == "card") and "card" or "weekly", at = tonumber(t.at), doneAt = tonumber(t.doneAt),
+                attempts = math.max(1, math.floor(tonumber(t.attempts) or 1)), lastRunAt = tonumber(t.lastRunAt),
+                verdict = M.COACH_VERDICTS[t.verdict] and t.verdict or nil, why = str(t.why, 300), summary = str(t.summary, 300),
+                claudeHash = str(t.claudeHash, 64), decisionsHash = str(t.decisionsHash, 64),
+                sessions = tonumber(t.sessions), digestBytes = tonumber(t.digestBytes), cut = t.cut == true or nil,
+                costUsd = tonumber(t.costUsd), turns = tonumber(t.turns), edits = {}, decisions = {} }
+    for _, e in ipairs(type(t.edits) == "table" and t.edits or {}) do
+      if #r.edits >= C.maxEdits then break end
+      r.edits[#r.edits + 1] = coachEdit(e, true)
+    end
+    for _, d in ipairs(type(t.decisions) == "table" and t.decisions or {}) do
+      if #r.decisions >= C.maxDecisions then break end
+      r.decisions[#r.decisions + 1] = coachEntry(d, true)
+    end
+    if r.state ~= "done" or not r.verdict then
+      r.state, r.verdict = "lost", nil
+      r.why = "Shepherd reloaded while it ran"
+    end
+    return r
+  end
+
+  local function pendingCount(rec)
+    local n = 0
+    for _, e in ipairs(type(rec) == "table" and rec.edits or {}) do if e.status == "pending" then n = n + 1 end end
+    for _, d in ipairs(type(rec) == "table" and rec.decisions or {}) do if d.status == "pending" then n = n + 1 end end
+    return n
+  end
+
+  -- What a card gets (it.coach): what waits for Adam, and whether the coach is at work. live =
+  -- { busy, waiting } from FX (a run in flight; one waiting for the repo's merge checker).
+  function M.coachTileInfo(rec, live)
+    live = type(live) == "table" and live or {}
+    if live.waiting then return { pending = pendingCount(rec), state = "waiting", waiting = true } end
+    if live.busy then return { pending = 0, state = "running" } end
+    if type(rec) ~= "table" then return nil end
+    return { pending = pendingCount(rec), state = rec.state, verdict = rec.verdict }
+  end
+
+  -- What the Coach overlay gets: the run, and every edit and entry numbered (1-based) for Apply/Skip.
+  function M.coachView(rec, live)
+    if type(rec) ~= "table" then return nil end
+    live = type(live) == "table" and live or {}
+    local v = { root = rec.root, name = rec.name, state = rec.state, verdict = rec.verdict, why = rec.why, summary = rec.summary,
+                trigger = rec.trigger, at = rec.at, doneAt = rec.doneAt, lastRunAt = rec.lastRunAt, costUsd = rec.costUsd,
+                sessions = rec.sessions, cut = rec.cut, pending = pendingCount(rec), edits = {}, decisions = {} }
+    if live.waiting then v.state = "waiting" elseif live.busy then v.state = "running" end
+    for i, e in ipairs(rec.edits or {}) do
+      v.edits[i] = { i = i, section = e.section, old = e.old, new = e.new, why = e.why, evidence = e.evidence,
+                     status = e.status or "pending", sha = e.sha, error = e.error }
+    end
+    for i, d in ipairs(rec.decisions or {}) do
+      v.decisions[i] = { i = i, what = d.what, why = d.why, status = d.status or "pending", error = d.error }
+    end
+    return v
+  end
+
+  -- Shepherd's own log of what a digest can't find in transcripts: Adam's Not yet notes, blocked
+  -- merges' notes, checker verdicts with findings. Deduped by id, aged out after logDays, capped at
+  -- logMax (newest kept). Returns the new list.
+  local function logEntry(e, now)
+    if type(e) ~= "table" or not M.COACH_LOG_KINDS[e.kind] or type(e.id) ~= "string" or e.id == "" then return nil end
+    local findings = {}
+    for _, fd in ipairs(type(e.findings) == "table" and e.findings or {}) do
+      if #findings >= 5 then break end
+      if type(fd) == "table" then
+        local line = tonumber(fd.line)
+        findings[#findings + 1] = { file = capChars(tostring(fd.file or ""), 200), line = (line and line > 0) and math.floor(line) or nil,
+                                    severity = capChars(tostring(fd.severity or ""), 10), issue = oneLine(tostring(fd.issue or ""), 300) }
+      end
+    end
+    local note, summary = oneLine(e.note, C.noteChars), oneLine(e.summary, 300)
+    return { kind = e.kind, id = capChars(e.id, 200), branch = capChars(tostring(e.branch or ""), 200),
+             note = note ~= "" and note or nil, verdict = (type(e.verdict) == "string") and capChars(e.verdict, 20) or nil,
+             summary = summary ~= "" and summary or nil, findings = (#findings > 0) and findings or nil,
+             at = tonumber(e.at) or tonumber(now) or 0 }
+  end
+  function M.coachLogAdd(list, entry, now)
+    now = tonumber(now) or 0
+    local cutoff, out = now - C.logDays * 86400, {}
+    for _, e in ipairs(type(list) == "table" and list or {}) do
+      if type(e) == "table" and (tonumber(e.at) or 0) >= cutoff then out[#out + 1] = e end
+    end
+    local n = logEntry(type(entry) == "table" and { kind = entry.kind, id = entry.id, branch = entry.branch, note = entry.note,
+      verdict = entry.verdict, summary = entry.summary, findings = entry.findings, at = now } or nil, now)
+    if not n then return out end
+    for _, e in ipairs(out) do if e.id == n.id then return out end end
+    out[#out + 1] = n
+    while #out > C.logMax do table.remove(out, 1) end
+    return out
+  end
+  function M.parseCoachLog(raw)
+    local out = {}
+    if type(raw) ~= "string" then return out end
+    local ok, t = pcall(M.json.decode, raw)
+    if not ok or type(t) ~= "table" then return out end
+    for _, e in ipairs(t) do
+      local n = logEntry(e, 0)
+      if n and tonumber(e.at) and #out < C.logMax then out[#out + 1] = n end
+    end
+    return out
+  end
+end
+
 -- ===========================================================================
 -- L2 — Named policy / guardrail bundles + attachments
 -- ===========================================================================
@@ -18790,6 +19493,9 @@ M.FEATURES = {
   { key = "routines", cat = "Automate", title = "Routines",
     what = "Scheduled actions that fire on a cron-like timetable.",
     why = "Standups, sweeps, or kickoffs happen on their own." },
+  { key = "coach", cat = "Automate", new = true, title = "Coach",
+    what = "Weekly (coach.enabled, catching up after sleep) or from a session's 🧭 Coach button, a read-only Sonnet reads the repo's last 10 sessions -- your corrections, interrupts, tool errors, denials with a note, merge notes and checker findings -- and suggests up to 5 CLAUDE.md edits, each with its evidence. They wait behind a 🧭 chip on the project card: Apply writes CLAUDE.md and commits it alone (refused if it changed since the coach read it or has uncommitted edits), Skip puts one aside. It never proposes undoing a DECISIONS.md entry, and can suggest new ones.",
+    why = "The corrections you keep repeating end up in the instructions every session reads first." },
 
   -- ---- See what's happening ----
   { key = "ledger", cat = "See what's happening", title = "Audit ledger & insights",

@@ -463,6 +463,12 @@ echo ""
 echo "== node: the 🔌 viewer's runs chip and list, labelled by a click, every session word escaped (behavioral, runs the shipped mkRunsHtml/mkRunRow) =="
 node "$DIR/skill-runs-view.test.js" || fail=1
 echo ""
+echo "== lua: the coach -- the digest on literal transcripts (sections, the 30KB cap), the scan, the proposal parser (bad JSON couldn't run), Apply's refusals (hash moved, dirty file), a commit of CLAUDE.md alone (temp repo), the weekly catch-up clock, a lost run retried (stubbed hs) =="
+HOME="$(mktemp -d)" lua "$DIR/coach.test.lua" || fail=1
+echo ""
+echo "== node: the Coach overlay and the card's chip, every suggested word escaped, a click sends only the root and a number (behavioral, runs the shipped coachRowsHtml) =="
+node "$DIR/coach-view.test.js" || fail=1
+echo ""
 
 if [ "$fail" -eq 0 ]; then
   echo "✅ ALL GREEN"
