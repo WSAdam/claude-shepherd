@@ -2659,10 +2659,11 @@ do
   table.sort(got)
   -- 2026-09-11 requirement change: cc-ask.sh (the question hook) joined the set.
   -- 2026-09-28 requirement change: cc-worktree-guard.sh (one worktree, one agent) joined it.
-  local wantScripts = { "cc-approve.sh", "cc-ask.sh", "cc-popup.sh", "cc-status.sh", "cc-worktree-guard.sh" }  -- sorted
+  -- 2026-09-29 requirement change: cc-resume.sh (resume at the usage limit's reset) joined it.
+  local wantScripts = { "cc-approve.sh", "cc-ask.sh", "cc-popup.sh", "cc-resume.sh", "cc-status.sh", "cc-worktree-guard.sh" }  -- sorted
   local scriptsOk = (#got == #wantScripts)
   for i = 1, #wantScripts do if got[i] ~= wantScripts[i] then scriptsOk = false end end
-  check("mergeHooks: OUR_HOOK_SCRIPTS == {cc-approve, cc-ask, cc-popup, cc-status, cc-worktree-guard}.sh exactly", scriptsOk)
+  check("mergeHooks: OUR_HOOK_SCRIPTS == {cc-approve, cc-ask, cc-popup, cc-resume, cc-status, cc-worktree-guard}.sh exactly", scriptsOk)
 
   -- 2026-09-28: SHIPPED is the one list of shipped files; its `hook` lines are what install.sh
   -- wires and uninstall.sh removes. OUR_HOOK_SCRIPTS (the panel's hook inventory and Diagnostics)
@@ -8443,9 +8444,11 @@ do
   -- 2026-09-29: 18 -> 19 for the session mailbox ("mailbox", flagged new).
   -- 2026-09-29: 19 -> 20 for the merge checker ("checker", flagged new).
   -- 2026-09-29: 20 -> 21 for what each session is working on ("workingon", flagged new).
-  eq("FEATURES: the 21 new features are flagged", newCount, 21)
+  -- 2026-09-29: 21 -> 22 for resuming at the usage limit's reset ("resume", flagged new).
+  eq("FEATURES: the 22 new features are flagged", newCount, 22)
   check("FEATURES: lists what each session is working on", keys.workingon == true)
   check("FEATURES: lists the session mailbox", keys.mailbox == true)
+  check("FEATURES: lists resume at the limit reset", keys.resume == true)
   check("FEATURES: lists the merge checker", keys.checker == true)
   check("FEATURES: lists handoff notes", keys.handoffs == true)
   check("FEATURES: lists the worktree fence", keys.fence ~= nil)

@@ -327,6 +327,10 @@ CC_TALK_DIR="${CC_TALK_DIR:-${HOME}/.claude/cc-talk}"
 # The session mailbox (build program unit 11a, 2026-09-29): a folder per session of the messages
 # Shepherd left it (FX.mailboxSend). Default MUST match the dashboard's FX.INBOX_DIR.
 CC_INBOX_DIR="${CC_INBOX_DIR:-${HOME}/.claude/cc-inbox}"
+# Resume at the usage limit's reset (build program unit 13, 2026-09-29): cc-resume.sh's arm
+# (<key>.json), Shepherd's plan (<key>.plan.json) and the card's Cancel (<key>.cancel), per
+# session key. A clean Stop clears them (cc-status.sh). Default MUST match the dashboard's FX.RESUME_DIR.
+CC_RESUME_DIR="${CC_RESUME_DIR:-${HOME}/.claude/cc-resume}"
 
 # Remove a session entirely (used by SessionEnd) plus any stray decision/claim
 # file and the per-session gated-tools override, approveRepeats memo, autopilot
@@ -338,6 +342,8 @@ CC_INBOX_DIR="${CC_INBOX_DIR:-${HOME}/.claude/cc-inbox}"
 # crash in between leaves <key>.json.tmp.<pid> and friends. Both used to outlive
 # the session that owned them -- keys are UUIDs, so nothing matched them again.
 # <key>.checker.json (2026-09-29) is the merge checker's verdict, which only Shepherd writes.
+# cc-resume/<key>.json, .plan.json and .cancel (2026-09-29): a resume waiting for a usage limit's
+# reset -- its waiter sees the arm gone and stops.
 # KEEP THE FILE SET IN SYNC with FX.removeStatus in claude-dashboard.lua.
 cc_remove() {
   rm -f "$(cc_file "$1")" "$(cc_file "$1")".tmp.* "$(cc_decision_file "$1")" \
@@ -349,7 +355,9 @@ cc_remove() {
     "$CC_MERGE_DIR/$1.decision".parked.* "$CC_MERGE_DIR/$1.decision".tmp.* \
     "$CC_MERGE_DIR/$1.checker.json" "$CC_MERGE_DIR/$1.checker.json".tmp.* \
     "$CC_ASK_DIR/$1.answer" "$CC_ASK_DIR/$1.answer".claim.* \
-    "$CC_ASK_DIR/$1.answer".tmp.* "$CC_TALK_DIR/$1" 2>/dev/null || true
+    "$CC_ASK_DIR/$1.answer".tmp.* "$CC_TALK_DIR/$1" \
+    "$CC_RESUME_DIR/$1.json" "$CC_RESUME_DIR/$1.json".tmp.* "$CC_RESUME_DIR/$1.plan.json" \
+    "$CC_RESUME_DIR/$1.plan.json".tmp.* "$CC_RESUME_DIR/$1.cancel" 2>/dev/null || true
   # The mailbox is a folder (cc-inbox/<key>/): its messages, claims and temps, then the folder.
   # A key that could name anything outside it (nothing, . or ..) never gets that far.
   local inbox="$CC_INBOX_DIR/$1"

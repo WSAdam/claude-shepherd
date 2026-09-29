@@ -96,6 +96,8 @@ The automatic behaviours here are off until you turn them on, except handoff not
   /clear the new session is told where it is, and a respawned session starts with it.
 - [**Session mailbox**](docs/automation.md#session-mailbox): Shepherd leaves a session a message
   that arrives at its next turn end or start, and types it only where typing is safe.
+- [**Resume at the limit reset**](docs/automation.md#resume-at-the-limit-reset): a session stopped
+  by a usage limit carries on by itself at the reset, once per window, with Resume now and Cancel on its card.
 - [**Automation rules**](docs/automation.md#automation-rules): when a session finishes, errors or
   stalls, log it, relabel it, nudge it or feed it.
 - [**Routines**](docs/automation.md#routines): spawn a session or push a digest on a cron schedule.

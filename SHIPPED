@@ -12,6 +12,7 @@ cc-fleet.sh           claude
 cc-ask.sh             claude hook
 cc-commits.sh         claude
 cc-worktree-guard.sh  claude hook
+cc-resume.sh          claude hook
 cc-scrub.js           claude
 cc-core.lua           claude hs
 claude-dashboard.lua  hs

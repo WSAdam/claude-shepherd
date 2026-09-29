@@ -209,6 +209,48 @@ hs -c '_G.__ccDashboard.fx.mailboxSend("<session key>", "Summarise what you just
   forgotten or pruned. 🩺 Diagnostics counts the messages waiting, per session. The ledger records
   `mailbox_sent` and `mailbox_delivered` (`via`: `stop`, `start` or `typed`).
 
+## Resume at the limit reset
+
+A session stopped by a usage limit (*You've hit your session limit · resets 3pm*) carries on by
+itself when the limit resets, once per window. Its card says **resumes at 3:00pm**, with
+**Resume now** and **Cancel**.
+
+- **The hook.** A turn stopped by a usage limit fires StopFailure with the error `rate_limit`.
+  `cc-resume.sh` runs in its own StopFailure group (matcher `rate_limit`) as a background hook
+  (`async` and `asyncRewake`, with an 8-day timeout). It writes `~/.claude/cc-resume/<session>.json`
+  and waits. When the reset comes it prints *[shepherd] The usage limit has reset: continue the
+  task.* and exits 2, which Claude Code hands to the model. It checks the session's claude process,
+  its arm and the card's Cancel every 15 seconds, and stops if any of them is gone. It fires 15 to
+  75 seconds after the reset, so a whole fleet doesn't wake in the same second.
+- **When it resets.** Shepherd plans each arm once and writes `<session>.plan.json`, bound to the
+  arm's nonce. It uses the plan meter's `resets_at` for the full window (the session or weekly
+  bar), else the time in the error (`core.parseResetTime`: *3pm*, *3:30pm*, *Oct 3, 9am*, read in
+  this Mac's own time zone, which is the one Claude Code printed).
+- **Once per window.** Each session is resumed at most once per window (the limit plus its reset
+  time). The attempts are kept in Hammerspoon's settings, so a reload doesn't forget them. A resumed
+  session that hits the limit again is not armed again until one of its turns ends cleanly: a
+  clean Stop clears the arm, and a limit ends a turn in StopFailure, never Stop. So it can't loop.
+- **Not resumed.** A per-model limit (*You've hit your Opus limit*) says **Opus limit — switch
+  model** instead, since the whole-plan reset doesn't lift it. A kitty or terminal session is left
+  to Claude Code's own `autoContinueAtUsageLimit`, which waits for the reset itself. Claude Code
+  treats that setting as on when it isn't set, so Shepherd resumes a terminal session only when
+  `~/.claude/settings.json` sets it to `false`. A reset more than 8 days out isn't waited for, and
+  `resume.enabled: false` turns the whole thing off.
+- **If the session doesn't wake.** Whether the hook's exit 2 wakes a session that is sitting
+  idle has not been verified, so Shepherd checks again 2 minutes after the reset. A session that
+  is working again is left alone. One still stopped gets the same line typed where typing is
+  allowed: a kitty window, or a VS Code window with just this one Claude tab, once the session is
+  ready ([when automation types](#when-automation-types)). In a VS Code window shared with other
+  Claude tabs nothing is typed: the card says **limit reset — continue it**, and your phone gets
+  a push on `escalation.pushTopic`. The plan records what was done, so nothing is typed or pushed
+  twice.
+- **Resume now and Cancel.** **Resume now** moves the reset to now: the hook fires at its next
+  check, and the typed fallback follows 30 seconds later if the session still sits. **Cancel**
+  leaves the hook a `<session>.cancel` file and it stops.
+- **Cleanup.** A clean Stop, the session's end, or its card being forgotten or pruned removes its
+  files. The ledger records `resume_planned` (with the verdict and why), `resume_typed`,
+  `resume_notified`, `resume_resumed`, `resume_now` and `resume_cancelled`.
+
 ## Escalation and watchdogs
 
 - **Escalation** (`escalation.enabled`): when an approval waits longer than `escalation.minutes`,

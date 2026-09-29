@@ -39,7 +39,7 @@ form-managed block is dropped on Save. Its tabs:
   [Providers and integrations](providers-and-integrations.md)).
 
 File-only switches include, among others: `rules.enabled`, `schedules.enabled` and
-`schedules.maxConcurrent`, `hotkeys`, `voice`, `automodel.*`, `pricing.*`, `merge.*`, `verify.*`, `fleet.enabled`,
+`schedules.maxConcurrent`, `hotkeys`, `voice`, `automodel.*`, `pricing.*`, `merge.*`, `verify.*`, `resume.enabled`, `fleet.enabled`,
 `commits.*`, `usage.limitAlerts.*`, `ask.waitSeconds`, `tabless.autoEndMinutes`,
 `escalation.hung`, `search.*`, `worklist.*`, `decisions.*`, `notifications.days`,
 `templates.sourceDir`, `context.autoCompactFraction`, and the `keystrokes`, `tabBridge`, `stacks`
@@ -57,7 +57,7 @@ The panel re-reads the file within about a second (except `hotkeys`, which need 
 | `gate`, `policies`, `ask` | Gated tools, the worktree fence, auto-allow/deny, always-ask commands, bundles, Autopilot, held questions | [Approvals and policies](approvals-and-policies.md) |
 | `merge`, `verify`, `fleet`, `tabBridge` | Ready to merge, merge gates, the merge checker, batches, the tab bridge | [Merging and batches](merging-and-batches.md) |
 | `queue`, `templates`, `automodel` | Task queue, routing, templates, model auto-routing | [Automation](automation.md) |
-| `respawn`, `autoContinue`, `drain`, `prune`, `cleanup`, `tabless` | Recovery and cleanup | [Automation](automation.md), [Controls](controls.md#sessions-with-no-tab) |
+| `respawn`, `autoContinue`, `resume`, `drain`, `prune`, `cleanup`, `tabless` | Recovery, resuming at a usage limit's reset, and cleanup | [Automation](automation.md), [Controls](controls.md#sessions-with-no-tab) |
 | `escalation`, `notifications`, `focus`, `summary`, `rules`, `schedules` | Nags, banners, focus pop, rules, routines | [Automation](automation.md) |
 | `autoTitle`, `prStatus`, `risk`, `collision`, `subagents`, `status` | Tile observability | [Fleet](fleet.md#session-observability) |
 | `ledger`, `decisions`, `insights` | The audit ledger and the views built on it | [Usage and cost](usage-and-cost.md) |
@@ -102,6 +102,7 @@ Everything lives under `~/.claude/`:
 | `cc-merge/`, `cc-fleet/` | Merge requests and batches, with their answers |
 | `cc-ask/` | Answers to held questions (the question itself is in the session's status file) |
 | `cc-inbox/` | The [session mailbox](automation.md#session-mailbox): messages waiting for each session |
+| `cc-resume/` | [Resumes waiting for a usage limit's reset](automation.md#resume-at-the-limit-reset): the hook's arm, Shepherd's plan, a Cancel |
 | `cc-bridge/` | The tab bridge's per-window tab lists and command folders |
 | `cc-policy/`, `cc-gate-tools/`, `cc-automodel/` | Per-session policy, gated-tool and auto-model settings |
 | `cc-ledger/` | The audit ledger (one JSONL file per day) |

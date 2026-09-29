@@ -63,6 +63,15 @@ exists "copies cc-ask.sh -> claude dir" "$CDIR/cc-ask.sh"
 assert_json "cc-worktree-guard.sh runs for EnterWorktree only" "$CDIR/settings.json" \
   '[.hooks.PreToolUse[] | select(.hooks[].command | contains("cc-worktree-guard.sh")) | .matcher] | join(",")' "EnterWorktree"
 exists "copies cc-worktree-guard.sh -> claude dir" "$CDIR/cc-worktree-guard.sh"
+# 2026-09-29: resume at the limit reset -- cc-resume.sh runs for a usage limit only (StopFailure,
+# matcher rate_limit), in the background, waking the model when it exits 2.
+assert_json "cc-resume.sh runs for a usage limit only (StopFailure rate_limit)" "$CDIR/settings.json" \
+  '[.hooks.StopFailure[] | select(.hooks[].command | contains("cc-resume.sh")) | .matcher] | join(",")' "rate_limit"
+assert_json "...async, with asyncRewake" "$CDIR/settings.json" \
+  '[.hooks.StopFailure[].hooks[] | select(.command | contains("cc-resume.sh")) | (.async and .asyncRewake)] | join(",")' "true"
+assert_json "...and every error still reaches cc-status.sh first" "$CDIR/settings.json" \
+  '.hooks.StopFailure[0].hooks[0].command | endswith("cc-status.sh\" stopfailure")' "true"
+exists "copies cc-resume.sh -> claude dir" "$CDIR/cc-resume.sh"
 exists "creates init.lua" "$HSDIR/init.lua"
 assert_eq "init.lua has the dofile" "1" "$(grep -c 'claude-dashboard.lua' "$HSDIR/init.lua")"
 

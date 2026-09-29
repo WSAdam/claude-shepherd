@@ -299,6 +299,15 @@ echo ""
 echo "== browser: the working-on line keeps its label on one line inside a default-width card (real Chromium, geometry) =="
 node "$DIR/working-on.browser.test.js" || fail=1
 echo ""
+echo "== bash: resume at the limit reset -- armed on a usage limit, fired once at the reset, cancelled or stood down (cc-resume.sh) =="
+bash "$DIR/resume.test.sh" || fail=1
+echo ""
+echo "== lua: resume at the limit reset -- the reset time, once per window, typed where allowed, else the card and a push (behavioral, stubbed hs + kitty) =="
+HOME="$(mktemp -d)" lua "$DIR/resume.test.lua" || fail=1
+echo ""
+echo "== node: a card stopped by a usage limit says when it resumes, with Cancel and Resume now (behavioral, runs the shipped resumeTail) =="
+node "$DIR/resume-card.test.js" || fail=1
+echo ""
 
 if [ "$fail" -eq 0 ]; then
   echo "✅ ALL GREEN"

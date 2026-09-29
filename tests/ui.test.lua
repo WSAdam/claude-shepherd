@@ -4058,5 +4058,37 @@ do
   check("workingOn: the escaping sweep knows it.workingOn", sinks:find("workingOn", 1, true) ~= nil)
 end
 
+-- ---- resume at the usage limit's reset (2026-09-29) ----
+-- Build program unit 13. tests/resume.test.lua drives FX.stepResume itself; this pins that the
+-- tick runs it (isolated, so a failure can't stop the tick), that its typed line goes through
+-- the readiness door, and that the card's two buttons reach it.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  local tick = src:match("function FX%._refreshBody%(%)(.-)\nend\n") or ""
+  check("resume: the tick steps the resumes, isolated in a pcall", tick:find("pcall(FX.stepResume, list)", 1, true) ~= nil)
+  local typer = src:match("function FX%.resumeType%(it, key%)(.-)\nend\n") or ""
+  check("resume: the typed line waits for readiness",
+        typer:find('FX.typeWhenReady(it, "resume", function()', 1, true) ~= nil)
+  check("resume: ...and records it typed on the plan, so it is never typed twice",
+        typer:find("plan.typedAt = FX.now()", 1, true) ~= nil)
+  check("resume: FX.RESUME_DIR reads CC_RESUME_DIR, as cc-lib.sh does",
+        src:find('FX.RESUME_DIR = os.getenv("CC_RESUME_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-resume")', 1, true) ~= nil)
+  check("resume: the card's buttons reach the panel's handler",
+        src:find('if a == "resume-now" or a == "resume-cancel" then', 1, true) ~= nil
+        and src:find("FX.resumeNow(key)", 1, true) ~= nil and src:find("FX.resumeCancel(key)", 1, true) ~= nil)
+  check("resume: the detail panel's status line says it too",
+        src:find('document.getElementById("d-status").textContent += resumeTail(it);', 1, true) ~= nil)
+  local lib = io.open(ROOT .. "cc-lib.sh"):read("*a")
+  check("resume: its files are in cc_remove", lib:find('"$CC_RESUME_DIR/$1.json"', 1, true) ~= nil
+        and lib:find('"$CC_RESUME_DIR/$1.plan.json"', 1, true) ~= nil and lib:find('"$CC_RESUME_DIR/$1.cancel"', 1, true) ~= nil)
+  local df = io.open(ROOT .. "defaults/cc-config.json", "r")
+  local dsrc = df and df:read("*a") or ""
+  if df then df:close() end
+  local okd, dcfg = pcall(core.json.decode, dsrc)
+  eq("resume: a fresh install resumes at the reset", okd and type(dcfg) == "table" and (dcfg.resume or {}).enabled, true)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

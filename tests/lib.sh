@@ -23,6 +23,9 @@ export CC_NOTES_DIR="${CC_NOTES_DIR:-$CC_TEST_ISOLATION/cc-notes}"
 # 2026-09-29: a Stop or SessionStart hands over (and removes) the messages Shepherd left in
 # ~/.claude/cc-inbox; a suite's fake session must never take a real one.
 export CC_INBOX_DIR="${CC_INBOX_DIR:-$CC_TEST_ISOLATION/cc-inbox}"
+# 2026-09-29: a clean Stop or a SessionEnd clears the resume Shepherd armed in ~/.claude/cc-resume
+# (cc-resume.sh); a suite's fake session must never clear a real one.
+export CC_RESUME_DIR="${CC_RESUME_DIR:-$CC_TEST_ISOLATION/cc-resume}"
 
 # sysbin_without <outdir> <tool>... - mirror /usr/bin + /bin into <outdir> as symlinks,
 # leaving out the named tools, and echo <outdir>. Use it in place of a literal

@@ -40,7 +40,10 @@
       ] }
     ],
     "StopFailure": [
-      { "hooks": [ { "type": "command", "command": "bash \"$HOME/.claude/cc-status.sh\" stopfailure" } ] }
+      { "hooks": [ { "type": "command", "command": "bash \"$HOME/.claude/cc-status.sh\" stopfailure" } ] },
+      { "matcher": "rate_limit", "hooks": [
+        { "type": "command", "command": "bash \"$HOME/.claude/cc-resume.sh\"", "async": true, "asyncRewake": true, "timeout": 691200 }
+      ] }
     ],
     "SessionEnd": [
       { "hooks": [ { "type": "command", "command": "bash \"$HOME/.claude/cc-status.sh\" sessionend" } ] }

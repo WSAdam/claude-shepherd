@@ -3159,6 +3159,15 @@ function FX.removeStatus(key)
       if fn ~= "." and fn ~= ".." then os.remove(inbox .. "/" .. fn) end
     end
     os.remove(inbox)
+    -- a resume waiting for a usage limit's reset (2026-09-29): the arm, the plan, a Cancel, their
+    -- temps (cc_remove too). Its waiter sees the arm gone and stops.
+    local rbase = FX.RESUME_DIR .. "/" .. key
+    os.remove(rbase .. ".json"); os.remove(rbase .. ".plan.json"); os.remove(rbase .. ".cancel")
+    local jt, pt = key .. ".json.tmp.", key .. ".plan.json.tmp."
+    for _, fn in ipairs(FX.readDir(FX.RESUME_DIR)) do
+      if fn:sub(1, #jt) == jt then os.remove(FX.RESUME_DIR .. "/" .. fn) end
+      if fn:sub(1, #pt) == pt then os.remove(FX.RESUME_DIR .. "/" .. fn) end
+    end
   end
 end
 
@@ -5371,6 +5380,153 @@ function FX.mailboxFacts()
     return tostring(a.name) < tostring(b.name)
   end)
   return { total = total, sessions = sessions }
+end
+
+-- ---- Resume at the usage limit's reset (2026-09-29) ----
+-- Build program unit 13. A turn stopped by a usage limit fires StopFailure (matcher rate_limit):
+-- cc-resume.sh arms ~/.claude/cc-resume/<key>.json and waits. Each tick FX.stepResume plans every
+-- new arm once (core.resumePlan: the plan meter's resets_at for the full window, else the error
+-- text's "resets 3pm"; once per window per session, the attempts kept in hs.settings so a reload
+-- can't re-arm one; never a per-model limit; standing down where Claude Code's own
+-- autoContinueAtUsageLimit resumes a terminal session) and writes <key>.plan.json, bound to the
+-- arm's nonce. The hook fires at the reset (exit 2, asyncRewake) -- but waking an IDLE session
+-- that way is unverified, so past the reset core.resumeRoute looks again: a session still
+-- stopped gets the same line typed where typing is allowed (FX.typeWhenReady), and a card in a
+-- VS Code window shared with other Claude tabs says "limit reset — continue it" with a phone push.
+-- The plan records what was done (typedAt / notifiedAt / doneAt), so nothing happens twice.
+FX.RESUME_DIR = os.getenv("CC_RESUME_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-resume")
+FX._resume = { inflight = {}, caps = nil }   -- inflight: key -> when its typing was scheduled
+FX.RESUME_INFLIGHT_SECONDS = 60
+-- The windows already tried, { ["<key>|<window>"] = when }, from hs.settings (pruned once a load).
+function FX.resumeCaps()
+  if type(FX._resume.caps) ~= "table" then
+    local c = hs.settings.get("ccResumeTried")
+    FX._resume.caps = type(c) == "table" and c or {}
+    if core.pruneResumeCaps(FX._resume.caps, FX.now()) > 0 then hs.settings.set("ccResumeTried", FX._resume.caps) end
+  end
+  return FX._resume.caps
+end
+function FX.resumeRead(key)
+  local base = FX.RESUME_DIR .. "/" .. key
+  return core.parseResumeArm(FX.readFile(base .. ".json")), core.parseResumePlan(FX.readFile(base .. ".plan.json"))
+end
+function FX.resumeWritePlan(key, plan)
+  local ok = FX.writeFileAtomic(FX.RESUME_DIR .. "/" .. key .. ".plan.json", hs.json.encode(plan))
+  if not ok then print("[cc-dashboard] ❌ resume: couldn't write " .. key .. "'s plan") end
+  return ok
+end
+-- Claude Code's own settings.json (read only when an arm is planned): autoContinueAtUsageLimit.
+function FX.ccSettings()
+  local ok, t = pcall(hs.json.decode, FX.readFile(CLAUDE_DIR .. "/settings.json") or "")
+  return (ok and type(t) == "table") and t or nil
+end
+-- Type the line into a session still stopped past the reset, once it is ready. Re-checked right
+-- before typing (a turn end, a Cancel or an earlier send may have settled it); recorded on the
+-- plan once it lands, so a later tick -- or a reload -- never types it again.
+function FX.resumeType(it, key)
+  local since = FX._resume.inflight[key]
+  if since and FX.now() - since < FX.RESUME_INFLIGHT_SECONDS then return end
+  local scheduled = FX.typeWhenReady(it, "resume", function()
+    FX._resume.inflight[key] = nil
+    local arm, plan = FX.resumeRead(key)
+    if core.resumeRoute(arm, plan, it, FX.now()) ~= "type" then return end
+    local acted = core.handleAction(FX, it, "nudge", core.RESUME.line)
+    if acted == "nudge" then
+      plan.typedAt = FX.now()
+      FX.resumeWritePlan(key, plan)
+      print("[cc-dashboard] ✅ resume: typed the reset line into " .. key)
+      ledgerFor(it, { type = "resume_typed", window = plan.window })
+    else
+      print("[cc-dashboard] ⚠️ resume: " .. key .. "'s line didn't land -- the next tick tries again")
+    end
+  end, { onRefused = function() FX._resume.inflight[key] = nil end })
+  if scheduled then FX._resume.inflight[key] = FX.now() end
+end
+function FX.resumeStepOne(key, it, now, cfg)
+  local arm, plan = FX.resumeRead(key)
+  if not arm then return end
+  if (not plan or plan.nonce ~= arm.nonce) and arm.state == "waiting" then
+    local editor = arm.editor or (it and it.editor)
+    local cc = (editor == "kitty" or editor == "terminal") and FX.ccSettings() or nil
+    local caps = FX.resumeCaps()
+    plan = core.resumePlan(arm, lastOfficialUsage, caps, { now = now, tz = core.localTzOffset,
+      enabled = core.config(cfg, "resume.enabled", true) ~= false, standDown = core.resumeStandDown(editor, cc) })
+    if not FX.resumeWritePlan(key, plan) then return end
+    if plan.verdict == "wait" then
+      caps[core.resumeCapKey(key, plan.window)] = now
+      hs.settings.set("ccResumeTried", caps)
+    end
+    print("[cc-dashboard] 🔍 resume: " .. key .. " -> " .. tostring(plan.verdict)
+      .. (plan.reason and (" (" .. plan.reason .. ")") or "")
+      .. (plan.resetAt and (" at " .. os.date("%H:%M", plan.resetAt)) or ""))
+    ledgerFor(it or { key = key }, { type = "resume_planned", verdict = plan.verdict, reason = plan.reason,
+      reset_at = plan.resetAt, window = plan.window, source = plan.source })
+  end
+  local route = core.resumeRoute(arm, plan, it, now)
+  if route == "type" then
+    FX.resumeType(it, key)
+  elseif route == "notify" then
+    plan.notifiedAt = now
+    if FX.resumeWritePlan(key, plan) then
+      local topic = tostring(core.config(cfg, "escalation.pushTopic", ""))
+      if topic ~= "" and not plan.now then
+        FX.push(topic, "Claude Shepherd", tostring(it.label or it.name or key)
+          .. ": the usage limit has reset -- continue it (its window has other Claude tabs, so nothing was typed)")
+      end
+      print("[cc-dashboard] ⚠️ resume: " .. key .. "'s limit has reset, but its window is shared -- the card says so")
+      ledgerFor(it, { type = "resume_notified", window = plan.window })
+    end
+  elseif route == "resumed" then
+    plan.doneAt = now
+    if FX.resumeWritePlan(key, plan) then
+      print("[cc-dashboard] ✅ resume: " .. key .. " is going again")
+      ledgerFor(it, { type = "resume_resumed", window = plan.window })
+    end
+  end
+  if it then it.resume = core.resumeCard(arm, plan, it, now, core.localTzOffset) end
+end
+-- Each tick: every arm in cc-resume/ (a handful at most; none, and it is one directory read).
+function FX.stepResume(list)
+  local names = FX.readDir(FX.RESUME_DIR)
+  if #names == 0 then return end
+  local byKey = {}
+  for _, it in ipairs(list or {}) do
+    if it.key and not it.remote then byKey[it.key] = it end
+  end
+  local now, cfg = FX.now(), loadConfig()
+  for _, name in ipairs(names) do
+    local key = name:match("^(.+)%.json$")
+    if key and not key:find("%.plan$") and core.mailboxKeyOk(key) then
+      FX.resumeStepOne(key, byKey[key], now, cfg)
+    end
+  end
+end
+-- The card's Cancel: the hook's cancel file (it stops at its next poll) and a cancelled plan.
+function FX.resumeCancel(key)
+  if not core.mailboxKeyOk(key) then return false end
+  local arm, plan = FX.resumeRead(key)
+  if not arm then return false end
+  if not plan or plan.nonce ~= arm.nonce then plan = { nonce = arm.nonce, plannedAt = FX.now() } end
+  plan.verdict = "cancelled"
+  FX.writeFileAtomic(FX.RESUME_DIR .. "/" .. key .. ".cancel", "")
+  FX.resumeWritePlan(key, plan)
+  FX._resume.inflight[key] = nil
+  print("[cc-dashboard] ✅ resume: cancelled " .. key)
+  ledgerFor(FX.liveStatusFor(key) or { key = key }, { type = "resume_cancelled", window = plan.window })
+  return true
+end
+-- The card's Resume now: the reset moves to now, so the hook fires at its next poll; the typed
+-- fallback follows core.RESUME.nowGrace later if the session still sits.
+function FX.resumeNow(key)
+  if not core.mailboxKeyOk(key) then return false end
+  local arm, plan = FX.resumeRead(key)
+  if not arm or not plan or plan.nonce ~= arm.nonce or plan.verdict ~= "wait"
+     or plan.typedAt or plan.notifiedAt or plan.doneAt then return false end
+  plan.resetAt, plan.now = FX.now(), true
+  if not FX.resumeWritePlan(key, plan) then return false end
+  print("[cc-dashboard] 🚀 resume: " .. key .. " resumes now")
+  ledgerFor(FX.liveStatusFor(key) or { key = key }, { type = "resume_now", window = plan.window })
+  return true
 end
 
 -- Focus a window, then send after a short delay, then restore prior focus.
@@ -8728,6 +8884,21 @@ local function handleBridgeMsg(msg)
     reply(FX.gitDiff(root, file, orig) or "")
     return
   end
+  if a == "resume-now" or a == "resume-cancel" then
+    -- 2026-09-29: a usage-limited card's Resume now / Cancel (resumeAct). The key comes from the
+    -- card; only a local session's resume is touched.
+    local key = tostring(payload.v or "")
+    local it = byKey[key]
+    if not it or it.remote then return end
+    local done
+    if a == "resume-now" then done = FX.resumeNow(key) else done = FX.resumeCancel(key) end
+    pcall(function()
+      FX.alert("Claude Shepherd: " .. tostring(it.label or it.name or key) .. (done
+        and ((a == "resume-now") and " resumes now" or " won't resume at the reset")
+        or " has no resume waiting"))
+    end)
+    return
+  end
   if a == "open-url" then
     -- L5 PR badge click: open the selected tile's PR url. The JS sends the tile
     -- KEY (not the url), and we open byKey[key].pr.url only if it's http(s) -- so a
@@ -10281,6 +10452,10 @@ local HTML = [[
   .stk-also { grid-column:1 / -1; font-size:11px; color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .stk-fin { font:inherit; font-size:10px; margin-right:6px; padding:0 6px; border-radius:6px; border:1px solid var(--border); background:var(--surface-2); color:var(--text-2); cursor:pointer; }
   .stk-fin:hover { border-color:var(--accent); color:var(--text-strong); }
+  /* 2026-09-29: a usage-limited card's Resume now / Cancel (resumeBtnsHtml) */
+  .rsm { display:flex; gap:6px; margin-top:4px; }
+  .rsm-btn { font:inherit; font-size:10px; padding:0 6px; border-radius:6px; border:1px solid var(--border); background:var(--surface-2); color:var(--text-2); cursor:pointer; }
+  .rsm-btn:hover { border-color:var(--accent); color:var(--text-strong); }
   .theme-contrast .stk-also { grid-column:2; }
   .theme-bar .stk-also, .theme-dots .stk-also { display:none; }
   #d-wt { margin-left:6px; font-size:11px; color:var(--text-3); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:12em; display:inline-block; vertical-align:bottom; }
@@ -12183,6 +12358,30 @@ local HTML = [[
       if(typeof n !== "number" || !(n > 0)) return "";
       n = Math.floor(n);
       return " · " + n + (n === 1 ? " message" : " messages") + " waiting";
+    }
+    // 2026-09-29: a card stopped by a usage limit says what happens at the reset (FX.stepResume
+    // sets it.resume from core.resumeCard): "resumes at 3:00pm", "limit reset — continue it",
+    // "Opus limit — switch model". Only a string line reaches the card.
+    function resumeTail(it){
+      var r = it && it.resume;
+      if(!r || typeof r.line !== "string" || !r.line) return "";
+      return " · " + r.line;
+    }
+    // ...and, while it waits, Resume now and Cancel. data-nodbl: a press never selects the card or
+    // pairs into a double-click; the session comes from the card's data-key, never the markup.
+    function resumeBtnsHtml(it){
+      var r = it && it.resume;
+      if(!r || !(r.cancel || r.now)) return "";
+      return '<span class="rsm">'
+        + (r.now ? '<button type="button" class="rsm-btn" data-nodbl title="Continue it now instead of at the reset" onclick="resumeAct(event,\'now\')">Resume now</button>' : '')
+        + (r.cancel ? '<button type="button" class="rsm-btn" data-nodbl title="Don’t resume it at the reset" onclick="resumeAct(event,\'cancel\')">Cancel</button>' : '')
+        + '</span>';
+    }
+    function resumeAct(ev, what){
+      if(ev){ ev.stopPropagation(); }
+      var tile = ev && ev.target && ev.target.closest ? ev.target.closest(".tile") : null;
+      var key = tile && tile.getAttribute("data-key");
+      if(key) send(what === "now" ? "resume-now" : "resume-cancel", key);
     }
     function statusWords(it){
       if(needsYouNow(it)) return LABELS.approval;
@@ -15555,6 +15754,7 @@ local HTML = [[
       }
       document.getElementById("d-status").textContent =
         statusWords(it) + (it.since ? " - " + fmtAge(it.since) : "") + (it.stale && !bgRunning(it) ? " - stale" : "") + backoffTail(it);
+      document.getElementById("d-status").textContent += resumeTail(it);   // 2026-09-29: "resumes at 3:00pm"
       renderWorking(it);
       var pend = document.getElementById("d-pending");
       if(it.pending && it.pending.summary){
@@ -18086,6 +18286,7 @@ local HTML = [[
       var label = esc(statusWords(it));
       label += esc(backoffTail(it));   // 2026-09-28: "backing off · 4m" while auto-continue waits
       label += esc(mailboxTail(it));   // 2026-09-29: "1 message waiting" in a shared window
+      label += esc(resumeTail(it));    // 2026-09-29: "resumes at 3:00pm" after a usage limit
       // The elapsed-in-status age (2s/13s/11h) rides the status line -- right of the dot,
       // before the status words -- instead of taking its own meta row.
       var age = it.since ? fmtAge(it.since) : "";
@@ -18139,6 +18340,7 @@ local HTML = [[
            + '<span class="label">'+(age ? '<span class="age">'+esc(age)+'</span> ' : '')+label+stackBranchChip(it)+'</span></span>'
            + badgesHtml(it)
            + ((meta || wo) ? '<span class="meta">'+(wo ? metaHtml(meta, wo) : esc(meta))+'</span>' : '')
+           + resumeBtnsHtml(it)
            + stackAlsoHtml(it)
            + ctxBarHtml(it)
            + stackBtnHtml(it)
@@ -19929,6 +20131,11 @@ function FX._refreshBody()
   do
     local okm, errm = pcall(FX.stepMailbox, list)
     if not okm then print("[cc-dashboard] ❌ mailbox step failed: " .. tostring(errm)) end
+  end
+  -- resume at the usage limit's reset (2026-09-29): plan new arms, type or flag the ones due
+  do
+    local okr, errr = pcall(FX.stepResume, list)
+    if not okr then print("[cc-dashboard] ❌ resume step failed: " .. tostring(errr)) end
   end
   FX.annotateEmptyChats(list)       -- never-used "Claude Code" chats, closable from the card (2026-09-11)
   -- 2026-09-17: LAST of the annotations -- it needs every source at once. One predicate decides

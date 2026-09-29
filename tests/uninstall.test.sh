@@ -27,6 +27,7 @@ printf '{"version":1,"files":{}}' > "$C/cc-usage-state.json"
 mkdir -p "$C/cc-talk"; printf '1' > "$C/cc-talk/abc"
 mkdir -p "$C/cc-notes/pending"; printf '# Handoff\n' > "$C/cc-notes/abc.handoff.md"
 mkdir -p "$C/cc-inbox/abc"; printf '{"nonce":"ab"}' > "$C/cc-inbox/abc/1790000000-000001-ab.msg"
+mkdir -p "$C/cc-resume"; printf '{"key":"abc","nonce":"ab","state":"waiting"}' > "$C/cc-resume/abc.json"
 mkdir -p "$C/cc-bridge"; printf '0.5.0' > "$C/cc-bridge/.installed"
 FAKE="$TMP/code"
 printf '#!/bin/sh\necho "$*" >> "%s"\nexit 0\n' "$TMP/code.calls" > "$FAKE"; chmod +x "$FAKE"
@@ -42,13 +43,14 @@ run_uninstall() {
 run_uninstall
 
 # 2026-09-28 requirement change: cc-worktree-guard.sh (one worktree, one agent) is a Shepherd hook too.
+# 2026-09-29 requirement change: and cc-resume.sh (resume at the usage limit's reset).
 assert_eq "no Shepherd hook is left in settings.json" "0" \
-  "$(jq '[.. | .command? // empty | select(test("cc-(status|approve|popup|ask|worktree-guard)\\.sh"))] | length' "$C/settings.json")"
+  "$(jq '[.. | .command? // empty | select(test("cc-(status|approve|popup|ask|worktree-guard|resume)\\.sh"))] | length' "$C/settings.json")"
 assert_json "the user's own Stop hook is kept" "$C/settings.json" '.hooks.Stop[0].hooks[0].command' "echo mine"
 assert_json "...as the only Stop group" "$C/settings.json" '.hooks.Stop | length' "1"
 assert_json "an event left with no hooks is dropped" "$C/settings.json" '.hooks | has("PreToolUse")' "false"
 assert_json "the user's other settings are kept" "$C/settings.json" '.model' "opus"
-for f in cc-lib.sh cc-status.sh cc-approve.sh cc-popup.sh cc-merge.sh cc-fleet.sh cc-ask.sh cc-commits.sh cc-worktree-guard.sh cc-core.lua; do
+for f in cc-lib.sh cc-status.sh cc-approve.sh cc-popup.sh cc-merge.sh cc-fleet.sh cc-ask.sh cc-commits.sh cc-worktree-guard.sh cc-resume.sh cc-core.lua; do
   assert_eq "removes $f from the claude dir" "gone" "$([ -e "$C/$f" ] && echo there || echo gone)"
 done
 assert_eq "a user's own cc-*.sh is kept" "there" "$([ -e "$C/cc-mine.sh" ] && echo there || echo gone)"
@@ -80,6 +82,8 @@ assert_eq "--purge removes the talk-mode flags" "gone" "$([ -e "$C/cc-talk" ] &&
 assert_eq "--purge removes the handoff notes" "gone" "$([ -e "$C/cc-notes" ] && echo there || echo gone)"
 # 2026-09-29: the session mailbox (cc-inbox/) is Shepherd's state too
 assert_eq "--purge removes the session mailbox" "gone" "$([ -e "$C/cc-inbox" ] && echo there || echo gone)"
+# 2026-09-29: the resumes waiting for a usage limit's reset (cc-resume/) are Shepherd's state too
+assert_eq "--purge removes the resumes waiting for a limit reset" "gone" "$([ -e "$C/cc-resume" ] && echo there || echo gone)"
 assert_eq "--purge still keeps the user's own files" "there" "$([ -e "$C/cc-mine.sh" ] && echo there || echo gone)"
 
 # a CLAUDE.md that is only the block (a fresh machine) is removed, not left empty

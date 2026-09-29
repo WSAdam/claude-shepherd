@@ -217,6 +217,13 @@ case "$EVENT" in
     ;;
   stop)
     STATUS="done"
+    # 2026-09-29: resume at the limit reset. A clean turn end clears the resume this session's
+    # usage limit armed (cc-resume.sh): its waiter stops, and only now may the next limit arm
+    # again -- a resume that hits the limit again ends in StopFailure, never here, so it can't loop.
+    # (The existence test first: most sessions have none, and it costs no process.)
+    if [ -e "$CC_RESUME_DIR/$KEY.json" ] || [ -e "$CC_RESUME_DIR/$KEY.cancel" ]; then
+      rm -f "$CC_RESUME_DIR/$KEY.json" "$CC_RESUME_DIR/$KEY.plan.json" "$CC_RESUME_DIR/$KEY.cancel" 2>/dev/null
+    fi
     # 2026-09-29: the session mailbox. A message Shepherd left this session is handed over now:
     # the stop is blocked with it (cc_stop_decision, at the end), so the session carries on with
     # it and stays working. Never while stop_hook_active -- that stop ends a turn a block already

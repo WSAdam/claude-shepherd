@@ -55,7 +55,9 @@ Instances rows and the Stream Deck show an errored session as **Error** in magen
   transient connection fault the session is still retrying reads **Retrying** (a heads-up) for up
   to 75 seconds before it goes red. A usage limit reads `[budget exceeded]` with Claude Code's
   message, which names the reset time (*You've hit your limit · resets 3pm*), and auto-continue
-  skips it: continuing only fails again until the limit resets.
+  skips it: continuing only fails again until the limit resets. Instead the session
+  [resumes at the reset](automation.md#resume-at-the-limit-reset): its card says
+  **resumes at 3:00pm**, with **Resume now** and **Cancel**.
 - Only a genuinely idle card **dims**, once its status file is more than 90 seconds old. A card
   waiting on you, a quiet "Ready for you" and a heads-up never dim.
 - Each tile shows time-in-state, a context-fullness bar
