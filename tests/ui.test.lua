@@ -3997,7 +3997,7 @@ do
   if lib then lib:close() end
   check("tickets: cc-lib.sh defaults CC_TICKETS_DIR to the same folder",
         ls:find('CC_TICKETS_DIR="${CC_TICKETS_DIR:-${HOME}/.claude/cc-tickets}"', 1, true) ~= nil)
-  check("tickets: SessionStart has a tickets part", ls:find('CC_CONTEXT_PARTS="notes lease decisions tickets handoff mailbox"', 1, true) ~= nil)
+  check("tickets: SessionStart has a tickets part", ls:find('CC_CONTEXT_PARTS="notes lease decisions tickets onpurpose handoff mailbox"', 1, true) ~= nil)
 end
 
 -- ---- Capture as scenario (2026-09-29) ----
@@ -4603,6 +4603,36 @@ do
   local rdAt = ann:find("rd = core.mergeReadiness(r, facts, it, gate, FX.fleetMergeWaits(r))", 1, true)
   check("receipt: readiness is computed without it (display only)", rdAt ~= nil
         and not (ann:sub(rdAt, (ann:find("\n", rdAt, true) or #ann))):find("receipt", 1, true))
+end
+
+-- ---- On purpose tab (2026-09-29) ----
+-- Build program unit 33: a detail tab (id onpurpose) shows the repo's DECISIONS.md and adds an
+-- entry through the hash-guarded save. Gated like User Stories -- but on the session being in a
+-- local git repo, not on the file, so the first entry can create it. The load and the save live in
+-- FX (tests/onpurpose.test.lua drives them on a real repo); here, only that the panel is wired.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("onpurpose: HTML panel exists",
+        src:find('data-tab="onpurpose"', 1, true) ~= nil and src:find('id="d-onpurpose"', 1, true) ~= nil)
+  check("onpurpose: the load and the save go through FX",
+        src:find('if a == "detail-onpurpose" then', 1, true) ~= nil and src:find("FX.onPurposeLoad(byKey[key])", 1, true) ~= nil
+        and src:find('if a == "onpurpose-save" then', 1, true) ~= nil and src:find("FX.onPurposeSave(byKey[key], payload)", 1, true) ~= nil)
+  check("onpurpose: the per-item flag comes from the tick",
+        src:find("it.onpurpose = FX.onPurposeOffered(it) or nil", 1, true) ~= nil)
+  local _, gates = src:gsub('if%(t%.id === "onpurpose" && !itemHasOnPurpose%(selectedKey%)%) return;', "")
+  eq("onpurpose: gated in the tab bar and the tab menu", gates, 2)
+  check("onpurpose: a restored tab falls back when the session isn't in a repo",
+        src:find('if(detailTab === "onpurpose" && !itemHasOnPurpose(key)) detailTab = "activity";', 1, true) ~= nil)
+  check("onpurpose: the tab appears/disappears mid-session when that flips",
+        src:find("lastSelectedHasOnPurpose", 1, true) ~= nil and src:find('if(detailTab === "onpurpose" && !hp) detailTab = "activity";', 1, true) ~= nil)
+  check("onpurpose: lazy-loads on tab activation (not the 1Hz tick)",
+        src:find('send("detail-onpurpose", selectedKey);', 1, true) ~= nil)
+  check("onpurpose: the add posts the hash it read",
+        src:find('a:"onpurpose-save", v:selectedKey, hash:', 1, true) ~= nil)
+  check("onpurpose: its state resets per selection",
+        src:find("ONPURPOSE = { key:null, data:null, flash:null, draft:null };  // per-session", 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

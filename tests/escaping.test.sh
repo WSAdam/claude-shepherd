@@ -59,6 +59,12 @@ assert_eq "a ticket's body is esc()'d"           "yes" "$(has "'<div class=\"tk-
 assert_eq "a ticket's last reply is esc()'d"     "yes" "$(has "esc(r.last.by) + ': ' + esc(r.last.text)")"
 assert_eq "a ticket's closing note is esc()'d"   "yes" "$(has "'<div class=\"tk-note\">Closing note: ' + esc(r.note)")"
 assert_eq "the card's ticket tooltip is esc()'d" "yes" "$(has "'<span class=\"tk-b\" title=\"' + esc(tip)")"
+# On purpose (2026-09-29): DECISIONS.md is anyone's text -- onPurposeHtml's `op.` (an entry) and
+# the form's draft never reach HTML raw (tests/onpurpose-view.test.js runs it)
+assert_eq "an On purpose entry's what is esc()'d"   "yes" "$(has 'esc(op.what)')"
+assert_eq "an On purpose entry's why is esc()'d"    "yes" "$(has 'esc(op.why)')"
+assert_eq "an On purpose entry's date is esc()'d"   "yes" "$(has 'esc(op.date)')"
+assert_eq "an On purpose entry's notes are esc()'d" "yes" "$(has 'esc(op.notes)')"
 
 # 2. esc() itself still entity-encodes the HTML metacharacters (not gutted to a no-op)
 assert_eq "esc() encodes &"  "yes" "$(has '.replace(/&/g,"&amp;")')"
@@ -91,7 +97,8 @@ assert_eq 'esc() encodes "'  "yes" "$(has '.replace(/"/g,"&quot;")')"
 # 2026-09-29 (overlap radar): it.overlap carries branch and file names; so does p.mergeOrder.
 # 2026-09-29 (worktree leases): it.lease and leaseBadge's `ls.` come from a file on disk.
 # 2026-09-29 (requirement ids): renderReqs' `rq.` -- a requirement's id, title and source.
-SINK_RE="'[[:space:]]*\+[[:space:]]*(it\.(group|label|name|cwd|projectKey|status|branch|stackName|stackKey|sessTitle|wtRoot|merge|askLine|askView|workingOn|pins|overlap|lease)\b|p\.mergeOrder\b|\b(im|iw|mg|ak|wk|pn|ls|rq|tr)\.[A-Za-z]+\b|\bg\b)"
+# 2026-09-29 (On purpose): onPurposeHtml's `op.` is an entry of a repo's DECISIONS.md.
+SINK_RE="'[[:space:]]*\+[[:space:]]*(it\.(group|label|name|cwd|projectKey|status|branch|stackName|stackKey|sessTitle|wtRoot|merge|askLine|askView|workingOn|pins|overlap|lease)\b|p\.mergeOrder\b|\b(im|iw|mg|ak|wk|pn|ls|rq|op|tr)\.[A-Za-z]+\b|\bg\b)"
 raw_sinks="$(grep -nE "$SINK_RE" "$DASH" || true)"
 assert_eq "no user field concatenated RAW into panel HTML (must be esc()'d)" "" "$raw_sinks"
 

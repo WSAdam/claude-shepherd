@@ -8458,9 +8458,11 @@ do
   -- 2026-09-29: 32 -> 33 for cc-send ("send", flagged new).
   -- 2026-09-29: 33 -> 34 for requirement ids and merge receipts ("reqs", flagged new).
   -- 2026-09-29: 34 -> 35 for cross-repo tickets ("tickets", flagged new).
-  eq("FEATURES: the 35 new features are flagged", newCount, 35)
+  -- 2026-09-29: 35 -> 36 for On purpose, a repo's DECISIONS.md ("onpurpose", flagged new).
+  eq("FEATURES: the 36 new features are flagged", newCount, 36)
   check("FEATURES: lists requirement ids and merge receipts", keys.reqs == true)
   check("FEATURES: lists cross-repo tickets", keys.tickets == true)
+  check("FEATURES: lists On purpose", keys.onpurpose == true)
   check("FEATURES: lists task packets", keys.packets == true)
   check("FEATURES: lists the decisions inbox", keys.decisions == true)
   check("FEATURES: lists cc-send", keys.send == true)

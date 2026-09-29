@@ -418,6 +418,12 @@ echo ""
 echo "== node: the Inbox lists open questions and held asks, every session word escaped, answered in place (behavioral, runs the shipped inboxRowsHtml) =="
 node "$DIR/inbox-view.test.js" || fail=1
 echo ""
+echo "== lua: On purpose -- a repo's DECISIONS.md parsed, an entry added through the hash-guarded save on a real repo, the checker and the handoff note reading it (behavioral, stubbed hs + git) =="
+HOME="$(mktemp -d)" lua "$DIR/onpurpose.test.lua" || fail=1
+echo ""
+echo "== node: the On purpose tab's entries and form, every word of DECISIONS.md escaped, a draft kept across a repaint (behavioral, runs the shipped onPurposeHtml) =="
+node "$DIR/onpurpose-view.test.js" || fail=1
+echo ""
 echo "== lua: cc-send -- the target (key, name, project; idle over busy; never one waiting on Adam or the caller; none; ambiguous), delivered once through the mailbox, answered and ledgered (stubbed hs) =="
 HOME="$(mktemp -d)" lua "$DIR/send.test.lua" || fail=1
 echo ""

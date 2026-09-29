@@ -126,6 +126,10 @@ parallel.
   your next start, or from `cc-ticket.sh wait <id>` run in the background). When a ticket reaches
   you, take it (`cc-ticket.sh take <id>`), reply as you go, and close it with `--note` saying what
   you did -- or why it isn't yours to do.
+- **What a project does on purpose.** When a repo has a `DECISIONS.md` at its root, read it
+  before changing anything it lists: each entry is a deliberate choice, not a bug to fix. To
+  change one, ask me first. A new one gets its own entry (`## <what>`, then `Why:` and `Date:`
+  lines), by hand or from Shepherd's **On purpose** tab.
 - **Subagents.** Worktree-isolated subagents (e.g. an implement fleet) start from
   the current HEAD (`worktree.baseRef: "head"` in settings), not from the working tree —
   commit before spawning them.

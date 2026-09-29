@@ -48,6 +48,8 @@ Every feature below has a reference page one click away. The panel lists the sam
   project's `TODO.md`, so you can verify what an automation says it finished.
 - [**User stories**](docs/fleet.md#user-stories-tab): view and edit a project's
   `spec/product/user-stories.md` in a detail-panel tab.
+- [**On purpose**](docs/fleet.md#on-purpose-tab): a repo's `DECISIONS.md` says what it does on
+  purpose; sessions and the merge checker read it, and a detail-panel tab adds to it.
 - [**Audit ledger & insights**](docs/usage-and-cost.md#the-audit-ledger): an optional local log of
   everything that happens, with fleet insights, decision provenance and session history.
 - [**Cost & token analytics**](docs/usage-and-cost.md#cost-and-tokens): per-session and fleet token

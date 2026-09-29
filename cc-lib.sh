@@ -1672,7 +1672,8 @@ CC_NOTES_DIR="${CC_NOTES_DIR:-${HOME}/.claude/cc-notes}"
 # handoff note or mailbox never crowds out which port is the session's own.
 # 2026-09-29: "decisions" (the decisions inbox, unit 28) -- Adam's late answers -- is short too.
 # 2026-09-29: "tickets" (cross-repo tickets, unit 29) -- news on tickets it filed or holds -- is short too.
-CC_CONTEXT_PARTS="notes lease decisions tickets handoff mailbox"
+# 2026-09-29: "onpurpose" (DECISIONS.md, unit 33) is one line, so it comes before the long parts.
+CC_CONTEXT_PARTS="notes lease decisions tickets onpurpose handoff mailbox"
 CC_CONTEXT_MAX=8000
 CC_PENDING_MAX_AGE=3600   # a respawn's note nobody took within the hour is stale
 
@@ -2000,6 +2001,22 @@ _cc_ctx_lease() { # $1 source, $2 key, $3 cwd
   [ -n "$best" ] || return 0
   printf 'Shepherd leased this worktree (%s) its own port and database path: PORT=%s, DB_PATH=%s. Run any server it starts on that port and keep any database at that path, so parallel units never collide. Both are also in $(git rev-parse --git-dir)/shepherd-lease.env, which a project can source.\n' \
     "$best" "$bport" "$bdb"
+}
+
+# The onpurpose part of cc_session_context (build program unit 33, 2026-09-29): when the session's
+# repo has a DECISIONS.md at its root -- what the project does on purpose -- one line pointing at
+# it, at every start, /clear and compaction, so a fresh context never "fixes" a deliberate choice.
+# A pointer, never the file's text; a root whose path holds a control character is never named
+# (the line lands in the session's context). Outside a repo, or without git, nothing.
+_cc_ctx_onpurpose() { # $1 source, $2 key, $3 cwd
+  local cwd="$3" root
+  case "$cwd" in /*) ;; *) return 0 ;; esac
+  [ -d "$cwd" ] || return 0
+  root="$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)" || return 0
+  case "$root" in /*) ;; *) return 0 ;; esac
+  case "$root" in *[[:cntrl:]]*) return 0 ;; esac
+  [ -f "$root/DECISIONS.md" ] || return 0
+  printf 'This repo lists what it does on purpose in %s/DECISIONS.md. Read it before changing anything it lists: those are deliberate choices, not bugs to fix.\n' "$root"
 }
 
 # The decisions part of cc_session_context (the decisions inbox, build program unit 28, 2026-09-29):

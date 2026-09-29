@@ -4013,6 +4013,10 @@ function M.checkerPrompt(t, flags)
   add("Look for: correctness bugs the change introduces; tests weakened, skipped or deleted to get green; conflict markers; "
     .. "stubs or placeholder code presented as finished; the summary claiming something the diff doesn't do. A test file "
     .. "that only gains tests is normal. Style, naming and nits never fail a change.")
+  -- 2026-09-29 (unit 33): the base branch's copy, so a change can't exempt itself by adding an entry
+  add("What the project does on purpose: if " .. tostring(t.base or "main") .. " has a DECISIONS.md, read it first "
+    .. "(git show " .. tostring(t.base or "main") .. ":DECISIONS.md). Never flag a choice it lists as a defect. "
+    .. "An entry this change adds or edits there is part of the change under review, not an exemption from it.")
   add("You are read-only: use Read, Grep, Glob and read-only git (diff, log, show, status, blame, ls-files, grep). "
     .. "Don't edit anything, build, or run tests -- Shepherd runs the suite itself.")
   add("")
@@ -7439,7 +7443,8 @@ function M.handoffMatch(it)
   return "pid-" .. pid .. "-" .. (host:match("^%d+$") and host or "0")
 end
 
--- The note itself, as Markdown. opts = { label, now, todos = { open TODO line texts } }. Pure.
+-- The note itself, as Markdown. opts = { label, now, todos = { open TODO line texts },
+-- decisions = the repo's DECISIONS.md path when it has one }. Pure.
 function M.handoffNote(it, ev, opts)
   it, ev, opts = type(it) == "table" and it or {}, type(ev) == "table" and ev or {}, type(opts) == "table" and opts or {}
   local H, L = M.HANDOFF, {}
@@ -7452,6 +7457,10 @@ function M.handoffNote(it, ev, opts)
   add("Last turn: " .. tostring(opts.label or "unknown") .. ", " .. os.date("%Y-%m-%d %H:%M", tonumber(opts.now) or os.time()))
   add((it.session_id and ("Session: " .. tostring(it.session_id) .. " · ") or "") .. "cwd: " .. cwd)
   if it.transcript_path then add("Transcript: " .. tostring(it.transcript_path)) end
+  -- 2026-09-29 (unit 33): the repo's list of deliberate choices, when it has one
+  if type(opts.decisions) == "string" and opts.decisions ~= "" then
+    add("On purpose: " .. opts.decisions .. " -- read it before changing anything it lists.")
+  end
   add("")
   add("## Last result")
   local last = tostring(ev.lastText or ""):gsub("^%s+", ""):gsub("%s+$", "")
@@ -14889,6 +14898,101 @@ function M.storiesSaveDecision(current, hash, blocks)
   return { ok = true, text = text }
 end
 
+-- ---- On purpose: a project's DECISIONS.md (build program unit 33, 2026-09-29) ----------
+-- Sessions and reviews kept "fixing" a project's deliberate choices, because nothing said they
+-- were deliberate. DECISIONS.md at the repo root lists them, one `## <what>` per entry with
+-- `Why:` and `Date:` lines. The "On purpose" detail tab shows it and appends an entry through
+-- the same guard as the User Stories save: the panel echoes the hash it read, and the save
+-- refuses if the file changed since (a missing file has its own hash, so a file created or
+-- deleted meanwhile is a change too). Sessions get a pointer at SessionStart (_cc_ctx_onpurpose
+-- in cc-lib.sh), the merge checker reads the base branch's copy, the handoff note names it.
+M.DECISIONS_FILE = "DECISIONS.md"
+M.DECISIONS_ABSENT = "absent"
+M.DECISIONS_MAX = { what = 200, why = 2000, preview = 4000 }
+M.DECISIONS_HEADER = "# Decisions\n\nWhat this project does on purpose. Read this before changing anything it lists: "
+  .. "each entry is a deliberate choice, not a bug to fix.\n"
+
+-- The hash the panel reads and echoes back: cheapHash of the content, or DECISIONS_ABSENT. Pure.
+function M.decisionsHash(content)
+  if type(content) ~= "string" then return M.DECISIONS_ABSENT end
+  return M.cheapHash(content)
+end
+
+-- A "Why:" / "- **Date:** ..." line's label and value, or nil. Pure.
+local function decisionsLabel(line)
+  local s = line:gsub("^%s*[%-%*]%s+", ""):gsub("%*%*", "")
+  local label, value = s:match("^%s*(%a+)%s*:%s*(.-)%s*$")
+  label = label and label:lower()
+  if label == "why" or label == "date" then return label, value end
+  return nil
+end
+
+-- parseDecisions(text) -> { entries = { { what, why, date, notes } } }. Every `## ` heading
+-- outside a code fence starts an entry; its Why:/Date: lines (bulleted or bold, any case) fill
+-- why/date, and its other non-blank lines are its notes. Text before the first heading is the
+-- file's own preamble. Pure.
+function M.parseDecisions(text)
+  local entries, cur, inFence = {}, nil, false
+  text = type(text) == "string" and text or ""
+  local function push(field, s)
+    if s == "" then return end
+    cur[field] = (cur[field] ~= "") and (cur[field] .. "\n" .. s) or s
+  end
+  local pos = 1
+  while pos <= #text do
+    local nl = text:find("\n", pos, true)
+    local line = text:sub(pos, (nl or #text + 1) - 1):gsub("\r$", "")
+    pos = (nl or #text) + 1
+    local fence = line:match("^%s*```") or line:match("^%s*~~~")
+    local what = (not inFence and not fence) and line:match("^##%s+(.-)%s*$") or nil
+    if what and what ~= "" then
+      cur = { what = what, why = "", date = "", notes = "" }
+      entries[#entries + 1] = cur
+    elseif cur then
+      local label, value = nil, nil
+      if not inFence and not fence then label, value = decisionsLabel(line) end
+      if label and cur[label] == "" then cur[label] = value
+      else push("notes", (line:gsub("^%s+", ""):gsub("%s+$", ""))) end
+    end
+    if fence then inFence = not inFence end
+  end
+  return { entries = entries }
+end
+
+-- One line of an entry's field: every line break (and the space around it) collapses to one
+-- space, so a what can't start a heading of its own and a why can't split. Pure.
+local function decisionsOneLine(s)
+  return ((type(s) == "string" and s or ""):gsub("%s*[\r\n]+%s*", " "):gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+-- Decide whether an On purpose add may go ahead, given the file's CURRENT content (nil =
+-- missing), the hash the panel read, the entry { what, why, date } and today's YYYY-MM-DD.
+-- PURE -- the dashboard does the read and the atomic write around it. Returns
+--   { ok = false, error = "changed"|"bad-payload"|"no-what"|"no-why"|"too-long" } or
+--   { ok = true, text = <the whole new file> }.
+-- The guard comes first: a panel that read the file before someone else edited it never
+-- writes. A missing (or blank) file starts with DECISIONS_HEADER; otherwise the entry goes at
+-- the end after one blank line, in the file's own line ending, everything before it untouched.
+function M.decisionsSaveDecision(current, hash, entry, today)
+  if M.decisionsHash(current) ~= tostring(hash or "") then return { ok = false, error = "changed" } end
+  if type(entry) ~= "table" then return { ok = false, error = "bad-payload" } end
+  local what, why = decisionsOneLine(entry.what), decisionsOneLine(entry.why)
+  if what == "" then return { ok = false, error = "no-what" } end
+  if why == "" then return { ok = false, error = "no-why" } end
+  if #what > M.DECISIONS_MAX.what or #why > M.DECISIONS_MAX.why then return { ok = false, error = "too-long" } end
+  local date = tostring(entry.date or "")
+  if not date:match("^%d%d%d%d%-%d%d%-%d%d$") then date = tostring(today or "") end
+  local base = type(current) == "string" and current or ""
+  local eol = base:find("\r\n", 1, true) and "\r\n" or "\n"
+  if base:match("^%s*$") then
+    base = M.DECISIONS_HEADER:gsub("\n", eol) .. eol
+  else
+    if base:sub(-1) ~= "\n" then base = base .. eol end
+    if base:sub(-2 * #eol) ~= eol .. eol then base = base .. eol end
+  end
+  return { ok = true, text = base .. "## " .. what .. eol .. eol .. "Why: " .. why .. eol .. "Date: " .. date .. eol }
+end
+
 -- Does a story line satisfy the team convention "As a <role>, I want <cap>, so that
 -- <benefit>" -- specifically the MANDATORY "so that"? Lenient + case-insensitive;
 -- used only for a soft UI hint, never to block a save. Empty -> false.
@@ -15717,6 +15821,7 @@ M.DETAIL_TABS = {
   { id = "usage",      label = "Usage" },
   { id = "changes",    label = "Changes" },
   { id = "stories",    label = "User Stories" },  -- gated: shows only when spec/product/user-stories.md exists
+  { id = "onpurpose",  label = "On purpose" },    -- gated: a local session in a git repo (adding creates DECISIONS.md)
   { id = "reqs",       label = "Requirements" },  -- gated: shows only for a session in a git repo (2026-09-29)
   { id = "subagents",  label = "Agents" },
   { id = "queue",      label = "Queue" },
@@ -18451,6 +18556,9 @@ M.FEATURES = {
   { key = "stories", cat = "Control", new = true, title = "User stories",
     what = "When a project has spec/product/user-stories.md, a gated tab shows its stories by capability area — add, edit, and save them in place.",
     why = "Curate the product's user stories next to the sessions building it, without leaving the panel." },
+  { key = "onpurpose", cat = "Control", new = true, title = "On purpose",
+    what = "A repo's DECISIONS.md lists what the project does on purpose: one ## entry per choice, with Why: and Date: lines. The On purpose tab in the detail panel shows it for any local session in a git repo and adds an entry (what, why, date); the first one creates the file, and an add is refused if the file changed since the tab read it. Sessions get a pointer to it at every start, /clear and compaction, the merge checker reads the base branch's copy and doesn't flag what it lists, and handoff notes name it.",
+    why = "Sessions and reviews stop \"fixing\" choices you made deliberately." },
   { key = "remote", cat = "Control", title = "Remote control",
     what = "New sessions can be driven from claude.ai or the Claude app, not just this Mac.",
     why = "Continue a local session from your phone or another machine." },

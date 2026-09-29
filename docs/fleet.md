@@ -198,6 +198,7 @@ file. So each worktree Shepherd starts a session for gets its own **port** and *
   to expand its colorized, rename-aware diff. Read-only, local sessions only, with **↻ Refresh**.
   Only read-only git runs against the repo (`rev-parse`, `status`, `diff`).
 - **User Stories**: shown only when the project has `spec/product/user-stories.md` (below).
+- **On purpose**: the repo's `DECISIONS.md`, what the project does on purpose (below).
 - **Agents**: the session's subagents and Workflows (below).
 - **Queue**: the session's task queue ([Automation → Task queue](automation.md#task-queue)).
 
@@ -238,6 +239,36 @@ To **generate** these files for a project that doesn't have them yet, see
 [Reverse-engineering user stories](reverse-engineering-user-stories.md). Shepherd's own
 [spec/product/spec.md](../spec/product/spec.md) and
 [spec/product/user-stories.md](../spec/product/user-stories.md) are a worked example.
+
+### On purpose tab
+
+Sessions and reviews tend to "fix" a project's deliberate choices, because nothing says they're
+deliberate. A `DECISIONS.md` at the repo root says so, one entry per choice:
+
+```md
+## Tests shell out to the real make
+
+Why: install.test.sh proves the Makefile itself, so a stub would test nothing.
+Date: 2026-09-29
+```
+
+The **On purpose** tab is shown for any local session in a git repo, even before the file exists.
+It lists each entry's what, why and date, and a form adds one (**What**, **Why**, **Date**,
+defaulting to today). The first entry creates `DECISIONS.md` with a short header. An add is appended
+at the end of the file, and the rest of the file is left as it was. Like the User Stories save, the add
+re-reads the file first and is **refused if it changed since the tab read it**. Your entry stays in
+the form, so **Reload** and **Add** again. The file is plain Markdown, so you can edit it by hand too.
+A file without `##` entries is shown as text.
+
+Who reads it:
+
+- **Sessions.** At every start, `/clear` and compaction, a session in a repo with `DECISIONS.md`
+  gets one line pointing at it (the `onpurpose` part of Shepherd's session context).
+  [methodology/CLAUDE.md](../methodology/CLAUDE.md) says to read it before changing anything it lists.
+- **The merge checker** reads the base branch's copy (`git show main:DECISIONS.md`) and doesn't flag
+  a choice it lists. An entry the change itself adds is reviewed as part of the change, so a unit
+  can't exempt its own code.
+- **Handoff notes** name the file, so a respawned session sees it too.
 
 ## Session observability
 
