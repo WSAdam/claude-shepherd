@@ -179,6 +179,8 @@ The automatic behaviours here are off until you turn them on, except handoff not
   other companies' models through a gateway, or local models, with no API keys stored.
 - [**Agent profiles**](docs/providers-and-integrations.md#agent-profiles): saved agents with a role,
   skills, MCP servers and knowledge folders, spawned in one click.
+- [**Find-only audit**](docs/providers-and-integrations.md#find-only-audit): an auditor that reads the
+  code and drives the app, can write only its findings, and fills My List with them.
 - [**MCPs & Skills**](docs/providers-and-integrations.md#mcps-and-skills): what MCP servers, skills
   and command-line tools your sessions can reach.
 - [**SSH status bridge**](docs/providers-and-integrations.md#ssh-status-bridge): sessions running on

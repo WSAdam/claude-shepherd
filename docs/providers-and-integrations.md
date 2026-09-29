@@ -69,6 +69,58 @@ Spawning from an agent emits the matching Claude Code launch flags: `--append-sy
 (persona and skills), `--mcp-config` (built from `cc-mcp.json`, secrets as `${VAR}` references),
 `--add-dir` (knowledge), `--agent` and `--plugin-dir`. Real spawning still honours `spawn.live`.
 
+## Find-only audit
+
+The **🔍 Audit (find-only)** chip in the New session dialog is a built-in preset: it spawns an
+auditor in the folder you picked that can **look** and **write down what it finds**, and nothing
+else. It reads the code (Read, Grep, Glob) and drives the running app in a headless Playwright
+browser (isolated profile, 1280×800 viewport). The only file it can write is its findings file,
+`~/.cc-audit/<project>/AUDIT-FINDINGS.md`, outside the repo, so the audited checkout never
+changes. An initial task, if you type one, becomes its focus; with none, it audits the whole
+project.
+
+It launches with `--permission-mode dontAsk` and
+`--allowedTools=Read Grep Glob mcp__playwright__* Edit(//<findings file>)`: anything not allowed is
+refused rather than asked. Claude Code applies `Edit(path)` rules to every file-writing tool, so
+that one rule is the auditor's one writable path (a `Write(path)` rule is ignored). Its launch files
+live in `~/.claude/cc-audit/<project>/` (`settings.json`, `mcp.json`, and `playwright/` for the
+files Playwright names itself), where the auditor can't rewrite them. Claude Code protects every
+`.claude` folder under `dontAsk`, which is also why the findings file lives in `~/.cc-audit/`
+instead.
+
+A PreToolUse hook that answers "allow" overrides `dontAsk`: Shepherd's gate, autopilot, an
+auto-allow pattern or your **Approve** on the card can do that. A deny rule wins over any hook, so
+`--settings` carries the rules that must hold whatever the gate says:
+
+- **deny** `Bash`, `NotebookEdit`, Playwright's `browser_run_code_unsafe` (it runs arbitrary code
+  in the MCP server), and `Edit(//<folder>/**)` for the audited folder and its repo root;
+- **a PreToolUse hook** that denies any Playwright call naming a `filename`. Claude Code hands MCP
+  servers its working folder as their root, so a snapshot or screenshot saved by name would land in
+  the repo. Without a name, the result comes back to the auditor and Playwright's own files go to
+  `playwright/`.
+
+Outside the repo, a write the gate or you approve can still go through; inside it, nothing can.
+MCP servers are strict (`--strict-mcp-config`): only Playwright, none of yours.
+
+**Findings format**: one line per finding, numbered in the order found, and a section for what
+works:
+
+```markdown
+# Audit findings — /Users/you/Code/shop
+- [ ] [HIGH] AUD-001 Checkout button does nothing on /cart (app.js:40): click it, nothing is posted
+- [ ] [LOW] AUD-002 Footer "Terms" link 404s
+## Already works
+- Login with a valid account
+```
+
+Severities are `CRITICAL`, `HIGH`, `MEDIUM` and `LOW`. The findings file imports into the project's
+**My List** tab with its `TODO.md` ([My List](fleet.md#my-list)): each finding becomes a verify-me
+item with a **🔍 severity** chip (the id in its tooltip), and re-syncs when the file changes. A
+finding is never marked done, even from an `[x]` in the file: an auditor fixes nothing, and the
+checkbox stays yours. Lines under **Already works**, and checkboxes that aren't `[SEV] AUD-NNN`
+findings, are left out. `uninstall.sh --purge` removes the launch files (`~/.claude/cc-audit/`) and
+leaves your findings in `~/.cc-audit/`.
+
 ## MCPs and Skills
 
 **🔌 MCPs & Skills** (☰ menu) is a read-only catalogue of what's installed for Claude Code, distinct

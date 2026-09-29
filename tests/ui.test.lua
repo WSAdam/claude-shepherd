@@ -4635,5 +4635,37 @@ do
         src:find("ONPURPOSE = { key:null, data:null, flash:null, draft:null };  // per-session", 1, true) ~= nil)
 end
 
+-- ---- find-only audit preset (2026-09-29) ----
+-- Build program unit 38: the 🔍 Audit (find-only) chip spawns core.auditSpawnPlan's session, and an
+-- audit's findings import into My List with TODO.md. tests/audit-preset.test.lua drives both for
+-- real under a stubbed hs; here, only that the panel is wired the one way.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("audit: the New session dialog offers the built-in chip",
+        src:find('<button class="n-chip" onclick="auditSpawn()"', 1, true) ~= nil)
+  check("audit: the spawn handler builds the plan in core, fencing the repo root too",
+        src:find('if tostring(payload.preset or "") == "audit" then', 1, true) ~= nil
+        and src:find('core.auditSpawnPlan(dir, os.getenv("HOME") or "", { roots = { FX.gitRoot(dir) } })', 1, true) ~= nil)
+  check("audit: ...writes the settings and MCP config it launches with",
+        src:find("FX.writeFileAtomic(plan.paths.settings, core.json.encode(plan.settings))", 1, true) ~= nil
+        and src:find("FX.writeFileAtomic(plan.paths.mcp, core.json.encode(plan.mcpConfig))", 1, true) ~= nil)
+  check("audit: ...forces the plan's mode over the dialog's", src:find("payload.permMode = plan.permMode", 1, true) ~= nil)
+  check("audit: spawnSession threads allowedTools and settings to spawnExtraFlags",
+        src:find("opts.allowedTools = agentOpts.allowedTools", 1, true) ~= nil
+        and src:find("opts.settings = agentOpts.settings", 1, true) ~= nil)
+  local _, reads = src:gsub("FX%.todoParsedAt%(", "")
+  check("audit: both import paths read TODO.md with the findings (" .. reads .. ")", reads >= 3)
+  check("audit: the old TODO.md-only read is gone from the import",
+        src:find("core.worklistImportTodos(st, key, core.parseTodoFile(content)", 1, true) == nil)
+  local _, gates = src:gsub("FX%.todoFileAt%(", "")
+  check("audit: the Import button shows for a findings file too (" .. gates .. ")", gates >= 4)
+  check("audit: the auto-sync watch covers the findings file",
+        src:find("for _, wp in ipairs(FX.todoWatchPaths(rt.root)) do paths[#paths + 1] = wp end", 1, true) ~= nil
+        and src:find("for _, wp in ipairs(FX.todoWatchPaths(meta.cwd)) do paths[#paths + 1] = wp end", 1, true) ~= nil)
+  check("audit: a My List row shows the finding chip", src:find("var h = wlAuditChip(it) + wlBranchChip(it);", 1, true) ~= nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

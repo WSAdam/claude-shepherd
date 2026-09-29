@@ -445,6 +445,15 @@ echo ""
 echo "== node: the Tickets board and the card's badge, every session word escaped, a click sends only the id or the card's key (behavioral, runs the shipped ticketRowsHtml) =="
 node "$DIR/tickets-view.test.js" || fail=1
 echo ""
+echo "== bash: the find-only audit's own hook -- a playwright call naming a file is denied, one without passes silently; the settings and MCP config are valid JSON =="
+bash "$DIR/audit-preset.test.sh" || fail=1
+echo ""
+echo "== lua: the find-only audit -- the chip's spawn (dontAsk, one writable file, settings + MCP config written under ~/.claude) and its findings imported into My List (behavioral, stubbed hs) =="
+HOME="$(mktemp -d)" lua "$DIR/audit-preset.test.lua" || fail=1
+echo ""
+echo "== node: the 🔍 Audit chip posts only the preset and folder; a finding's chip on My List, escaped (behavioral, runs the shipped auditSpawn / wlAuditChip) =="
+node "$DIR/audit-findings-view.test.js" || fail=1
+echo ""
 
 if [ "$fail" -eq 0 ]; then
   echo "✅ ALL GREEN"

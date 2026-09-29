@@ -13,6 +13,10 @@ DASH="$ROOT/claude-dashboard.lua"
 has() { grep -qF "$1" "$DASH" && echo yes || echo no; }
 
 # 1. every user-controlled string reaches innerHTML through esc()
+# the find-only audit (2026-09-29): a finding's severity and id come from a file a session wrote
+# (tests/audit-findings-view.test.js runs the real wlAuditChip)
+assert_eq "an audit finding's severity is esc()'d" "yes" "$(has "'\">🔍 ' + esc(sev) + '</span>'")"
+assert_eq "an audit finding's id is esc()'d"       "yes" "$(has 'esc(String(a.id || "")')"
 assert_eq "group filter chip label is esc()'d"  "yes" "$(has 'esc(g)')"
 assert_eq "per-tile group tag is esc()'d"        "yes" "$(has 'esc(it.group)')"
 assert_eq "tile display label/name is esc()'d"   "yes" "$(has 'esc(it.label')"

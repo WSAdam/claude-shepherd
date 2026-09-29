@@ -2708,6 +2708,35 @@ function FX.todoRoot(cwd)
   return FX.gitRoot(cwd) or cwd
 end
 
+-- Find-only audit (build program unit 38, 2026-09-29): a root's audit findings file lives in
+-- ~/.cc-audit/<project>/ (core.auditPaths), never in the repo, and imports with its TODO.md.
+function FX.auditFindingsPath(root)
+  local p = core.auditPaths(os.getenv("HOME") or "", root)
+  return p and p.findings or nil
+end
+-- The files whose change re-imports a root: its TODO.md, then its findings file.
+function FX.todoWatchPaths(root)
+  local fp = FX.auditFindingsPath(root)
+  return fp and { root .. "/TODO.md", fp } or { root .. "/TODO.md" }
+end
+-- A root's My List lines (TODO.md + findings, core.parseTodoAndFindings); nil when neither exists.
+function FX.todoParsedAt(root)
+  local fp = FX.auditFindingsPath(root)
+  return core.parseTodoAndFindings(FX.readFile(root .. "/TODO.md"), fp and FX.readFile(fp) or nil)
+end
+-- Does a root have anything to import (the Import button's gate)?
+function FX.todoFileAt(root)
+  for _, p in ipairs(FX.todoWatchPaths(root)) do if FX.fileExists(p) then return true end end
+  return false
+end
+-- Remember each of a root's files' modification time, so the auto-sync tick sees only new changes.
+function FX.todoNoteMtimes(root)
+  for _, p in ipairs(FX.todoWatchPaths(root)) do
+    local m = tonumber((hs.fs.attributes(p, "modification")))   -- parenthesised: a missing file answers nil + a message
+    if m then FX._todoMtime[p] = m end
+  end
+end
+
 -- Rebuild the tab -> TODO.md paths watch map from persisted todoMeta: one path for a
 -- plain folder (meta.cwd), one per worktree root for a repo tab (meta.roots). The
 -- in-memory mtimes (keyed by PATH) survive; the persisted ones only seed unknown
@@ -2727,13 +2756,13 @@ function FX.todoRebuildWatch(st)
       if type(meta.roots) == "table" and #meta.roots > 0 then
         for _, rt in ipairs(meta.roots) do
           local p = rt.root .. "/TODO.md"
-          paths[#paths + 1] = p
+          for _, wp in ipairs(FX.todoWatchPaths(rt.root)) do paths[#paths + 1] = wp end
           if FX._todoMtime[p] == nil and type(meta.mtimes) == "table" then FX._todoMtime[p] = tonumber(meta.mtimes[rt.root]) end
           claim(rt.root, k)
         end
       elseif type(meta.cwd) == "string" and meta.cwd ~= "" then
         local p = meta.cwd .. "/TODO.md"
-        paths[1] = p
+        for _, wp in ipairs(FX.todoWatchPaths(meta.cwd)) do paths[#paths + 1] = wp end
         if FX._todoMtime[p] == nil then FX._todoMtime[p] = tonumber(meta.mtime) end
         claim(meta.cwd, k)
       end
@@ -2797,10 +2826,9 @@ function FX.todoImportProjects(entries, stArg)
       local sources, mainRoot = {}, nil
       for _, rt in ipairs(e.roots) do
         if rt.isMain then mainRoot = rt.root end
-        local content = FX.readFile(rt.root .. "/TODO.md")
-        if content then
-          sources[#sources + 1] = { root = rt.root, branch = rt.branch, isMain = rt.isMain,
-                                    parsed = core.parseTodoFile(content) }
+        local parsed = FX.todoParsedAt(rt.root)   -- TODO.md + the root's audit findings
+        if parsed then
+          sources[#sources + 1] = { root = rt.root, branch = rt.branch, isMain = rt.isMain, parsed = parsed }
         end
       end
       if #sources == 0 then
@@ -2816,6 +2844,7 @@ function FX.todoImportProjects(entries, stArg)
           -- tonumber(nil, "<msg>") throws "bad argument #2" -- keep only the value)
           local m = tonumber((hs.fs.attributes(p, "modification")))
           if m then meta.mtimes[rt.root] = m; FX._todoMtime[p] = m end
+          FX.todoNoteMtimes(rt.root)
         end
         meta.cwd = mainRoot or meta.cwd          -- older builds read these two
         meta.mtime = (mainRoot and meta.mtimes[mainRoot]) or meta.mtime
@@ -2825,16 +2854,16 @@ function FX.todoImportProjects(entries, stArg)
     elseif type(key) == "string" and key ~= "" then
       local meta = (st.todoMeta or {})[key]
       local root = FX.todoRoot(e.cwd) or (type(meta) == "table" and meta.cwd or nil)
-      local content = root and FX.readFile(root .. "/TODO.md") or nil
-      if not content then
+      local parsed = root and FX.todoParsedAt(root) or nil   -- TODO.md + the root's audit findings
+      if not parsed then
         r.skipped = r.skipped + 1
       else
-        local c = core.worklistImportTodos(st, key, core.parseTodoFile(content),
-                                           FX.now(), FX.worklistNewId)
+        local c = core.worklistImportTodos(st, key, parsed, FX.now(), FX.worklistNewId)
         meta = st.todoMeta[key]                  -- core guaranteed the container
         meta.cwd = root
         meta.mtime = tonumber((hs.fs.attributes(root .. "/TODO.md", "modification"))) or meta.mtime
         FX._todoMtime[root .. "/TODO.md"] = meta.mtime
+        FX.todoNoteMtimes(root)
         r.projects = r.projects + 1
         r.added, r.updated, r.missing = r.added + c.added, r.updated + c.updated, r.missing + c.missing
       end
@@ -2909,8 +2938,9 @@ function FX.todoAutoSyncTick(list)
       local watched = {}
       for _, p in ipairs(paths) do watched[p] = true end
       for root in pairs(liveRoots[key]) do
-        local p = root .. "/TODO.md"
-        if not watched[p] and FX.fileExists(p) then due = true end
+        for _, p in ipairs(FX.todoWatchPaths(root)) do
+          if not watched[p] and FX.fileExists(p) then due = true end
+        end
       end
     end
     if due then
@@ -8207,6 +8237,8 @@ function FX.spawnSession(editor, project, task, permissionMode, providerId, agen
     opts.agentName = agentOpts.agentName
     opts.addDirs = agentOpts.addDirs
     opts.pluginDirs = agentOpts.pluginDirs
+    opts.allowedTools = agentOpts.allowedTools   -- the find-only audit preset (core.auditLaunchOpts)
+    opts.settings = agentOpts.settings
   end
   -- Auto-enable Remote Control via the --remote-control launch flag, but only for a LOCAL,
   -- native-Anthropic session: RC needs claude.ai auth and rejects third-party/gateway
@@ -9284,12 +9316,12 @@ function FX.worklistPayload()
       local roots = (it.mainRoot and not it.remote) and FX.stackRootsFor(k, st, {}) or nil
       if roots then
         for _, rt in ipairs(roots) do
-          if FX.fileExists(rt.root .. "/TODO.md") then hasTodo = true; break end
+          if FX.todoFileAt(rt.root) then hasTodo = true; break end   -- TODO.md or audit findings
         end
       else
         local root = (not it.remote) and FX.todoRoot(it.cwd) or nil
         if not root and type(tm) == "table" then root = tm.cwd end
-        hasTodo = (root and FX.fileExists(root .. "/TODO.md")) or nil
+        hasTodo = (root and FX.todoFileAt(root)) or nil
       end
       projects[#projects + 1] = {
         key = k,
@@ -9312,7 +9344,7 @@ function FX.worklistPayload()
         label = (labels[k] and labels[k] ~= "" and labels[k]) or autos[k] or core.projectKeyLabel(k),
         items = list,
         todoOn = (tm ~= nil) or nil,
-        hasTodo = (type(tm) == "table" and tm.cwd and FX.fileExists(tm.cwd .. "/TODO.md")) or nil,
+        hasTodo = (type(tm) == "table" and tm.cwd and FX.todoFileAt(tm.cwd)) or nil,
       }
     end
   end
@@ -10056,6 +10088,27 @@ local function handleBridgeMsg(msg)
       else
         print("[cc-orch] spawn-agent: no saved agent named '" .. agentName .. "'")
       end
+    end
+    -- Find-only audit (build program unit 38, 2026-09-29): the 🔍 chip's built-in preset. It reads
+    -- and drives the app, and writes only its findings file, ~/.cc-audit/<project>/AUDIT-FINDINGS.md;
+    -- core.auditSpawnPlan holds every rule, this only writes its two launch files (under
+    -- ~/.claude/cc-audit/<project>/) and forces dontAsk.
+    if tostring(payload.preset or "") == "audit" then
+      local plan, why = core.auditSpawnPlan(dir, os.getenv("HOME") or "", { roots = { FX.gitRoot(dir) } })
+      local wrote = plan and FX.mkdirP(plan.paths.output)
+        and FX.writeFileAtomic(plan.paths.settings, core.json.encode(plan.settings))
+        and FX.writeFileAtomic(plan.paths.mcp, core.json.encode(plan.mcpConfig))
+      if not wrote then
+        why = why or ("couldn't write " .. tostring(plan and plan.paths.dir))
+        print("[cc-orch] ❌ audit spawn refused: " .. why)
+        pcall(function() FX.alert("Claude Shepherd: no audit -- " .. why) end)
+        return
+      end
+      agentOpts = core.auditLaunchOpts(plan, plan.paths.settings, plan.paths.mcp)
+      payload.permMode = plan.permMode
+      if not task or task == "" then task = plan.seedPrompt end
+      print("[cc-orch] 🔍 find-only audit of " .. dir .. " -> " .. plan.paths.findings)
+      FX.appendLedger({ type = "spawn_agent", name = plan.name, cwd = dir, by = "audit" })
     end
     FX.spawnSession(editor, dir, task, payload.permMode and tostring(payload.permMode) or nil,
       payload.provider and tostring(payload.provider) or nil, agentOpts, mode == "new")
@@ -12650,6 +12703,11 @@ local HTML = [[
   .wl-br { flex:0 0 auto; font-size:clamp(9px,2.5cqw,11px); color:var(--text-3); background:var(--surface-2);
     border:1px solid var(--border-weak); border-radius:8px; padding:0 5px; white-space:nowrap;
     max-width:10em; overflow:hidden; text-overflow:ellipsis; }
+  /* A find-only audit's finding (build program unit 38): 🔍 + its severity, tinted by it. */
+  .wl-aud { flex:0 0 auto; font-size:clamp(9px,2.5cqw,11px); color:var(--text-3); background:var(--surface-2);
+    border:1px solid var(--border-weak); border-radius:8px; padding:0 5px; white-space:nowrap; }
+  .wl-aud.critical, .wl-aud.high { color:var(--danger); }
+  .wl-aud.medium { color:var(--warn); }
   /* MASTER: the cross-scope rollup tab, set apart from the real scopes. */
   .wl-master { font-weight:700; letter-spacing:.06em; font-size:clamp(9px,2.7cqw,11px); color:var(--purple); border-color:#3d3560; }
   .wl-master.on { background:#241f38; border-color:var(--purple); color:var(--purple); }
@@ -14350,6 +14408,9 @@ local HTML = [[
       <div class="s-lbl">Presets</div>
       <div id="n-presets" class="n-recent"></div>
       <div class="s-lbl">Agents <span class="n-dim">— saved profiles you hand work off to (persona · skills · MCP)</span></div>
+      <div id="n-builtin" class="n-recent">
+        <button class="n-chip" onclick="auditSpawn()" title="Spawn a find-only auditor in the folder below: it reads the code and drives the running app in a headless browser, and can write only its findings file (~/.cc-audit/). The initial task, if any, is its focus. Findings import into My List.">🔍 Audit (find-only)</button>
+      </div>
       <div id="n-agents" class="n-recent"></div>
       <div class="s-lbl">Project folder (type to fuzzy-search your project roots)</div>
       <input id="n-path" class="s-txt" placeholder="/Users/you/Programming/project" autocomplete="off"
@@ -15632,8 +15693,18 @@ local HTML = [[
       return '<span class="wl-br" title="' + esc("From TODO.md on " + b.join(", ")) + '">⎇ ' + esc(first)
            + (b.length > 1 ? " +" + (b.length - 1) : "") + '</span>';
     }
+    // 🔍 a find-only audit's finding (core.parseAuditFindings): its severity on the row, its id in
+    // the tooltip. A session wrote the file, so both go through esc(); the class takes only a
+    // known severity. Never a done claim: the row's checkbox stays Adam's own.
+    function wlAuditChip(it){
+      var a = it && it.audit; if(!a || typeof a !== "object") return "";
+      var sev = String(a.sev || ""), known = { CRITICAL:1, HIGH:1, MEDIUM:1, LOW:1 };
+      var cls = known[sev] ? sev.toLowerCase() : "";
+      return '<span class="wl-aud ' + cls + '" title="' + esc(String(a.id || "") + " · from a find-only audit — tick it once it's fixed and you've checked")
+           + '">🔍 ' + esc(sev) + '</span>';
+    }
     function wlFileBadges(it, isDone){
-      var h = wlBranchChip(it);
+      var h = wlAuditChip(it) + wlBranchChip(it);
       if(it && it.fileDone) h += '<span class="wl-fdone' + (isDone ? "" : " need")
         + '" title="Automation marked this done in TODO.md — tick the box once YOU have verified it">✓ auto</span>';
       if(it && it.fileMissing) h += '<span class="wl-fmiss" title="This line is no longer in TODO.md">⚠</span>';
@@ -17354,6 +17425,19 @@ local HTML = [[
         permMode:p.permMode||"", provider:p.provider||"", agent:p.name };
       try { window.webkit.messageHandlers.cc.postMessage(JSON.stringify(payload)); }
       catch(e){ console.log("spawn-agent send error", e); }
+      closeNew();
+    }
+    // 🔍 Audit (find-only), build program unit 38: a built-in preset. The message names the preset
+    // and the folder only -- Lua (core.auditSpawnPlan) builds every flag, the mode and the files.
+    function auditSpawn(){
+      var folder = (document.getElementById("n-path").value || "").trim();
+      if(!folder || folder.charAt(0) !== "/"){ alert("Pick an absolute project folder first, then click 🔍 Audit again."); return; }
+      var task = (document.getElementById("n-task").value || "").trim();
+      var payload = { a:"spawn", v:"", text:task, img:"", mode:"existing", dir:folder,
+        editor:document.getElementById("n-editor").value || "",
+        provider:document.getElementById("n-provider").value || "", preset:"audit" };
+      try { window.webkit.messageHandlers.cc.postMessage(JSON.stringify(payload)); }
+      catch(e){ console.log("audit spawn send error", e); }
       closeNew();
     }
     function saveAgent(){

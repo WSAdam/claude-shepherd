@@ -13846,7 +13846,11 @@ end
 -- Profile-derived launch flags (L1), appended after the base spawnFlags inside
 -- spawnSpec. All optional -> {} (a non-agent spawn is byte-identical). The shell
 -- sinks shArg-quote value-bearing flags; the kitty argv path keeps them raw.
--- opts: { appendSystemPrompt, mcpConfigPath, strictMcp, agentName, addDirs[], pluginDirs[] }
+-- opts: { appendSystemPrompt, mcpConfigPath, strictMcp, agentName, addDirs[], pluginDirs[],
+--         allowedTools (list or string), settings (a settings file path or a JSON string) }
+-- allowedTools is ONE element in the `--allowedTools=<tools>` form: the flag is variadic
+-- (<tools...>), so a separate value would also swallow the positional task that follows
+-- (claude 2.1.175, 2026-09-29). --settings takes one value, so it ends any variadic run.
 function M.spawnExtraFlags(opts)
   opts = opts or {}
   local f = {}
@@ -13866,7 +13870,131 @@ function M.spawnExtraFlags(opts)
   for _, p in ipairs(opts.pluginDirs or {}) do
     if agTrim(p) ~= "" then f[#f + 1] = "--plugin-dir"; f[#f + 1] = tostring(p) end
   end
+  local tools = {}
+  local at = opts.allowedTools
+  for _, t in ipairs(type(at) == "table" and at or { at }) do
+    if agTrim(t) ~= "" then tools[#tools + 1] = agTrim(t) end
+  end
+  if #tools > 0 then f[#f + 1] = "--allowedTools=" .. table.concat(tools, " ") end
+  if opts.settings and agTrim(opts.settings) ~= "" then
+    f[#f + 1] = "--settings"; f[#f + 1] = tostring(opts.settings)
+  end
   return f
+end
+
+-- ---- Find-only audit preset (build program unit 38, 2026-09-29) ----------------------------
+-- "Audit (find-only)" in the New session dialog spawns an auditor that can look (Read, Grep, Glob,
+-- and a headless Playwright browser) and write ONE file: its findings, kept in
+-- ~/.cc-audit/<project>/ so the audited repo is never touched (core.auditPaths says why not
+-- ~/.claude). What holds it there, each checked against claude 2.1.175 on 2026-09-29:
+--   * --permission-mode dontAsk + --allowedTools: anything not allowed is refused, not asked.
+--   * The one writable path is an Edit(//<findings>) rule: Claude Code applies Edit rules to every
+--     file-writing tool (Write included); a Write(path) rule is ignored.
+--   * A PreToolUse hook answering "allow" (Shepherd's gate, autopilot, an Approve on the card)
+--     overrides dontAsk, but not a deny rule -- so --settings denies Bash, NotebookEdit,
+--     Playwright's run-anything tool, and every edit under the audited folder and its repo root.
+--   * Claude Code hands MCP servers its cwd as their root, so a Playwright tool given an explicit
+--     filename writes into the audited repo. A --settings PreToolUse hook denies any Playwright
+--     call that names a file; files Playwright names itself go to --output-dir, in the audit folder.
+M.AUDIT_FINDINGS_FILE = "AUDIT-FINDINGS.md"
+M.AUDIT_PRESET = {
+  key = "audit",
+  name = "Audit (find-only)",
+  role = "a find-only auditor",
+  goal = "find what is broken, missing or risky in this project, and write each finding down. You never fix anything.",
+  viewport = "1280x800",
+}
+M.AUDIT_SEVERITIES = { "CRITICAL", "HIGH", "MEDIUM", "LOW" }
+M.AUDIT_FILENAME_DENY = '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny",'
+  .. '"permissionDecisionReason":"Find-only audit: a playwright tool may not save a file. '
+  .. 'Leave filename out and the result comes back to you."}}'
+-- The hook reads the call's JSON on stdin; a "filename" key anywhere in it denies (fail closed).
+M.AUDIT_FILENAME_HOOK = "grep -q '\"filename\"' && printf '%s\\n' '" .. M.AUDIT_FILENAME_DENY .. "'; exit 0"
+
+-- Where an audit of `root` keeps its files: { dir, findings, settings, mcp, output }. nil for a
+-- relative root or no home. The launch files (settings, MCP config, Playwright's output) live in
+-- ~/.claude/cc-audit/<project>/, which Claude Code protects: the auditor can't rewrite its own rules
+-- there, whatever a hook allows. That same protection refuses the auditor's own Write under dontAsk
+-- (an Edit allow rule doesn't open a .claude folder, checked 2026-09-29), so the findings file is
+-- ~/.cc-audit/<project>/AUDIT-FINDINGS.md: outside the repo, so the repo's deny fence stays whole.
+function M.auditPaths(home, root)
+  if type(home) ~= "string" or home == "" or type(root) ~= "string" or root:sub(1, 1) ~= "/" then return nil end
+  root, home = M.normDir(root), M.normDir(home)
+  local slug = M.encodeProjectPath(root) or (root:gsub("[^%w]", "-"):sub(-150))
+  local dir = home .. "/.claude/cc-audit/" .. slug
+  return { dir = dir, findings = home .. "/.cc-audit/" .. slug .. "/" .. M.AUDIT_FINDINGS_FILE,
+           settings = dir .. "/settings.json", mcp = dir .. "/mcp.json", output = dir .. "/playwright" }
+end
+
+-- The auditor's standing instructions (--append-system-prompt): they survive /clear, and a task
+-- typed in the dialog replaces only the seed prompt.
+function M.auditPersona(paths, root)
+  local lines = {
+    M.personaPrompt(M.AUDIT_PRESET),
+    "You can read the code (Read, Grep, Glob) and drive a running app in a headless browser (the playwright tools). "
+      .. "You cannot edit the code, run shell commands, or change any file but your findings file: those calls are refused, so don't try them.",
+    "Your findings file is " .. paths.findings .. " -- the only file you may write. Create it with Write, "
+      .. "and read it before you change it. Keep it in this shape:",
+    "# Audit findings — " .. tostring(root),
+    "- [ ] [HIGH] AUD-001 <what is wrong, where (file:line or page), and how to see it>",
+    "(one line per finding, numbered AUD-001, AUD-002, ... in the order you find them; the severity is one of "
+      .. table.concat(M.AUDIT_SEVERITIES, ", ") .. ")",
+    "## Already works",
+    "- <a behaviour you checked and found working>",
+    "Never mark a finding [x]: you fix nothing, so nothing you write is done.",
+    "Never give a playwright tool a filename: snapshots and screenshots come back to you, and Playwright keeps its own files in "
+      .. paths.output .. ".",
+  }
+  return table.concat(lines, "\n")
+end
+
+-- The whole spawn intent for an audit of `root`: { name, permMode, paths, appendSystemPrompt,
+-- seedPrompt, allowedTools[], settings (table), mcpConfig (table), strictMcp }. opts.roots = more
+-- folders to fence off (the repo root, when `root` is a subfolder or a worktree). nil + a reason when
+-- the folder isn't absolute, or the findings path has whitespace or parentheses (the CLI splits the
+-- tools list on spaces, and a rule's path sits inside parentheses).
+function M.auditSpawnPlan(root, home, opts)
+  opts = type(opts) == "table" and opts or {}
+  local paths = M.auditPaths(home, root)
+  if not paths then return nil, "an audit needs an absolute project folder" end
+  if paths.findings:find("[%s%(%)]") then
+    return nil, "the findings path has a space or a parenthesis: " .. paths.findings
+  end
+  root = M.normDir(root)
+  local deny = { "Bash", "NotebookEdit", "mcp__playwright__browser_run_code_unsafe" }
+  local fenced = {}
+  for _, r in ipairs({ root, table.unpack(type(opts.roots) == "table" and opts.roots or {}) }) do
+    if type(r) == "string" and r:sub(1, 1) == "/" and not fenced[M.normDir(r)] then
+      fenced[M.normDir(r)] = true
+      deny[#deny + 1] = "Edit(/" .. M.normDir(r) .. "/**)"
+    end
+  end
+  return {
+    name = M.AUDIT_PRESET.name,
+    permMode = "dontAsk",
+    paths = paths,
+    appendSystemPrompt = M.auditPersona(paths, root),
+    seedPrompt = "Audit this project: read the code, and if the app is running, drive it in the browser. "
+      .. "Write every finding to " .. paths.findings .. " in the shape your instructions give, "
+      .. "list what you checked and found working under Already works, then stop and summarise.",
+    allowedTools = { "Read", "Grep", "Glob", "mcp__playwright__*", "Edit(/" .. paths.findings .. ")" },
+    settings = {
+      permissions = { deny = deny },
+      hooks = { PreToolUse = { { matcher = "mcp__playwright__.*",
+        hooks = { { type = "command", command = M.AUDIT_FILENAME_HOOK } } } } },
+    },
+    mcpConfig = { mcpServers = { playwright = { command = "npx",
+      args = { "-y", "@playwright/mcp@latest", "--headless", "--isolated",
+               "--viewport-size", M.AUDIT_PRESET.viewport, "--output-dir", paths.output } } } },
+    strictMcp = true,
+  }
+end
+
+-- The spawnSession agentOpts for a plan whose settings and MCP config were written to these files.
+-- No --add-dir / --agent: nothing variadic may sit right before the task.
+function M.auditLaunchOpts(plan, settingsPath, mcpPath)
+  return { appendSystemPrompt = plan.appendSystemPrompt, mcpConfigPath = mcpPath, strictMcp = plan.strictMcp == true,
+           allowedTools = plan.allowedTools, settings = settingsPath }
 end
 
 -- Resolve a saved agent profile into a concrete spawn intent. ctx = { mcpState }
@@ -14560,6 +14688,50 @@ function M.parseTodoFile(content)
   return out
 end
 
+-- A find-only audit's findings file (core.auditPaths(...).findings): `- [ ] [SEV] AUD-NNN text`
+-- lines, plus an `## Already works` section of what the auditor checked and found working.
+-- Returns findings, alreadyWorks. A finding is { text, done = false, audit = { sev, id } }: the
+-- text is the whole line after the box (its identity in My List, like a TODO line), and done is
+-- ALWAYS false -- an auditor fixes nothing, so its [x] claims nothing. A checkbox line that isn't
+-- finding-shaped is left out; any heading other than Already works ends that section. Lines are
+-- walked with find (no *-quantified pattern over the file). Capped like parseTodoFile. Pure.
+function M.parseAuditFindings(content)
+  local out, works = {}, {}
+  if type(content) ~= "string" or content == "" then return out, works end
+  local seen, seenW, inWorks, pos = {}, {}, false, 1
+  while pos <= #content do
+    local nl = content:find("\n", pos, true)
+    local line = content:sub(pos, (nl or (#content + 1)) - 1):gsub("\r$", "")
+    pos = (nl or #content) + 1
+    local heading = line:match("^%s*#+%s+(.-)%s*$")
+    if heading then
+      inWorks = heading:lower():find("^already works") ~= nil
+    elseif inWorks then
+      local w = line:match("^%s*[%-%*%+]%s+%[[ xX]%]%s+(.+)$") or line:match("^%s*[%-%*%+]%s+(.+)$")
+      w = w and wlTrim(w):sub(1, 500) or ""
+      if w ~= "" and not seenW[w] and #works < 500 then seenW[w] = true; works[#works + 1] = w end
+    else
+      local text = line:match("^%s*[%-%*%+]%s+%[[ xX]%]%s+(.+)$")
+      text = text and wlTrim(text):sub(1, 500) or nil
+      local sev, id = (text or ""):match("^%[(%a+)%]%s+(AUD%-%d+)%s+%S")
+      if sev and not seen[text] and #out < 500 then
+        seen[text] = true
+        out[#out + 1] = { text = text, done = false, audit = { sev = sev:upper(), id = id } }
+      end
+    end
+  end
+  return out, works
+end
+
+-- A project root's My List lines: its TODO.md, then its audit findings. nil when neither file
+-- was read (nothing to import). Pure (the FX layer reads both files).
+function M.parseTodoAndFindings(todoContent, findingsContent)
+  if todoContent == nil and findingsContent == nil then return nil end
+  local out = M.parseTodoFile(todoContent or "")
+  for _, e in ipairs((M.parseAuditFindings(findingsContent or ""))) do out[#out + 1] = e end
+  return out
+end
+
 -- Merge parsed TODO.md lines into a project's worklist. Identity = the file
 -- line's text, stored as srcText at import so the user can reword an item's
 -- display text without breaking the link; only items marked src=="todo" ever
@@ -14614,6 +14786,8 @@ function M.worklistImportTodoRoots(state, key, sources, now, idgen)
             order[#order + 1] = e.text
           end
           u.done = u.done or e.done == true
+          -- a find-only audit's finding (core.parseAuditFindings) keeps its tag in My List
+          if type(e.audit) == "table" and not u.audit then u.audit = { sev = e.audit.sev, id = e.audit.id } end
           if not u.rootSet[root] then u.rootSet[root] = true; u.roots[#u.roots + 1] = root end
           if src.isMain then
             u.inMain = true
@@ -14643,6 +14817,7 @@ function M.worklistImportTodoRoots(state, key, sources, now, idgen)
         if it.fileDone ~= nfd or it.fileMissing then counts.updated = counts.updated + 1 end
         it.fileDone = nfd
         it.fileMissing = nil
+        if u.audit then it.audit = u.audit end
         tag(it, u)
         u.matched = true
         meta.seen[t] = true  -- self-heal a tombstone lost to an older file
@@ -14665,7 +14840,7 @@ function M.worklistImportTodoRoots(state, key, sources, now, idgen)
     if not u.matched and not meta.seen[t] then
       local it = { id = tostring(idgen and idgen() or ""), text = t, done = false,
                    ts = tonumber(now) or 0, details = "", due = "", steps = {},
-                   src = "todo", srcText = t, fileDone = u.done and true or nil }
+                   src = "todo", srcText = t, fileDone = u.done and true or nil, audit = u.audit }
       tag(it, u)
       list[#list + 1] = it
       u.matched = true
@@ -18645,6 +18820,9 @@ M.FEATURES = {
   { key = "agents", cat = "Connect & extend", title = "Agent profiles",
     what = "Save agent configs — role, skills, MCP servers, knowledge — and spawn with them.",
     why = "Launch a specialized agent in one click instead of re-typing flags." },
+  { key = "audit", cat = "Connect & extend", new = true, title = "Find-only audit",
+    what = "The 🔍 Audit (find-only) chip in the New session dialog spawns an auditor that reads the code and drives the running app in a headless browser, and can write only its findings file (~/.cc-audit/<project>/AUDIT-FINDINGS.md). Edits in the repo, shell commands and Playwright file saves are refused even if the gate would allow them. Its `- [ ] [SEV] AUD-NNN` lines import into the project's My List tagged as findings, never as done.",
+    why = "Get an honest bug list from a session that can't quietly fix, or break, what it's auditing." },
   { key = "mcp", cat = "Connect & extend", title = "MCPs & Skills",
     what = "See and manage the MCP servers and skills available to your sessions.",
     why = "Know exactly what tools your agents can reach." },

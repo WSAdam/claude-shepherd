@@ -8459,7 +8459,9 @@ do
   -- 2026-09-29: 33 -> 34 for requirement ids and merge receipts ("reqs", flagged new).
   -- 2026-09-29: 34 -> 35 for cross-repo tickets ("tickets", flagged new).
   -- 2026-09-29: 35 -> 36 for On purpose, a repo's DECISIONS.md ("onpurpose", flagged new).
-  eq("FEATURES: the 36 new features are flagged", newCount, 36)
+  -- 2026-09-29: 36 -> 37 for the find-only audit preset ("audit", flagged new).
+  eq("FEATURES: the 37 new features are flagged", newCount, 37)
+  check("FEATURES: lists the find-only audit preset", keys.audit == true)
   check("FEATURES: lists requirement ids and merge receipts", keys.reqs == true)
   check("FEATURES: lists cross-repo tickets", keys.tickets == true)
   check("FEATURES: lists On purpose", keys.onpurpose == true)
@@ -13590,6 +13592,174 @@ do
   eq("batchPruneDue: denied long ago -> pruned",
      core.batchPruneDue({ denied = true, at = 1000 }, nil, 1000 + 8 * DAY, 7 * DAY), true)
   eq("batchPruneDue: a proposal never answered -> kept", core.batchPruneDue(nil, nil, 1000 + 80 * DAY, 7 * DAY), false)
+end
+
+-- ---- find-only audit preset (2026-09-29) ----
+do
+  -- spawnExtraFlags gains allowedTools and settings
+  eq("spawnExtraFlags: no allowedTools / settings -> nothing added", #core.spawnExtraFlags({ allowedTools = {}, settings = "" }), 0)
+  eq("spawnExtraFlags: blank tool names are dropped", #core.spawnExtraFlags({ allowedTools = { "", "  " } }), 0)
+  local af = core.spawnExtraFlags({ allowedTools = { "Read", " Grep ", "", "Edit(//h/.claude/f.md)" } })
+  eq("spawnExtraFlags: allowedTools is ONE argv element, space-joined", #af, 1)
+  -- 2026-09-29: --allowedTools is variadic (<tools...>) in claude 2.1.175, so `--allowedTools X 'task'`
+  -- ate the task as a tool name ("Input must be provided ... when using --print"); the = form ends it.
+  eq("spawnExtraFlags: allowedTools rides the = form, so the positional task after it isn't eaten",
+     af[1], "--allowedTools=Read Grep Edit(//h/.claude/f.md)")
+  eq("spawnExtraFlags: allowedTools as a string passes through", core.spawnExtraFlags({ allowedTools = "Read Grep" })[1],
+     "--allowedTools=Read Grep")
+  local sf = core.spawnExtraFlags({ settings = '{"permissions":{"deny":["Bash"]}}' })
+  eq("spawnExtraFlags: settings -> --settings <value>", table.concat(sf, "|"), '--settings|{"permissions":{"deny":["Bash"]}}')
+  local xs = core.spawnExtraFlags({ appendSystemPrompt = "p", mcpConfigPath = "/m.json", strictMcp = true,
+    allowedTools = { "Read" }, settings = "/s.json" })
+  eq("spawnExtraFlags: allowedTools and settings come after the profile flags",
+     table.concat(xs, "|"), "--append-system-prompt|p|--mcp-config|/m.json|--strict-mcp-config|--allowedTools=Read|--settings|/s.json")
+  -- quoting: one shell word each on the typed line (a glob and a JSON string can't split or expand)
+  local inner = core.spawnInner("/p", "look around", { flags = core.spawnExtraFlags({
+    allowedTools = { "Read", "mcp__playwright__*", "Edit(//h/f.md)" }, settings = '{"a":"b c"}' }) })
+  check("spawnInner: the allowedTools element is single-quoted whole",
+        inner:find("'--allowedTools=Read mcp__playwright__* Edit(//h/f.md)'", 1, true) ~= nil)
+  check("spawnInner: the settings JSON is single-quoted whole", inner:find([['{"a":"b c"}']], 1, true) ~= nil)
+  check("spawnInner: ...and the task is still its own last word", inner:sub(-#"'look around'") == "'look around'")
+  local ks = core.spawnSpec("kitty", "/p", "look around", { kittyRemote = false, claudeBin = "/bin/claude",
+    allowedTools = { "Read", "mcp__playwright__*" }, settings = "/s.json" })
+  local ka = table.concat(ks.argv, "|")
+  check("spawnSpec kitty: argv keeps the flags raw, one element each",
+        ka:find("|--allowedTools=Read mcp__playwright__*|--settings|/s.json|look around", 1, true) ~= nil)
+  local vs = core.spawnSpec("vscode", "/p", nil, { allowedTools = { "Read" }, vscodeFlavor = "extension" })
+  eq("spawnSpec vscode: allowedTools forces the typed-terminal flavor (the extension drops launch flags)", vs.flavor, "terminal")
+
+  -- where an audit keeps its files: never in the audited repo
+  local ap = core.auditPaths("/Users/u", "/Users/u/Code/shop/")
+  eq("auditPaths: its launch files in a folder per project under ~/.claude/cc-audit", ap.dir, "/Users/u/.claude/cc-audit/-Users-u-Code-shop")
+  -- 2026-09-29: an Edit(//~/.claude/cc-audit/.../AUDIT-FINDINGS.md) allow rule still left the auditor's
+  -- Write refused -- Claude Code protects every .claude folder under dontAsk, a hook "allow" too.
+  eq("auditPaths: the findings file sits outside any .claude folder (~/.cc-audit)", ap.findings,
+     "/Users/u/.cc-audit/-Users-u-Code-shop/AUDIT-FINDINGS.md")
+  check("auditPaths: ...no .claude segment anywhere in it", not ap.findings:find("/.claude/", 1, true))
+  eq("auditPaths: the launch settings", ap.settings, ap.dir .. "/settings.json")
+  eq("auditPaths: the MCP config", ap.mcp, ap.dir .. "/mcp.json")
+  eq("auditPaths: Playwright's own files", ap.output, ap.dir .. "/playwright")
+  eq("auditPaths: a relative folder -> nil", core.auditPaths("/Users/u", "Code/shop"), nil)
+  eq("auditPaths: no home -> nil", core.auditPaths("", "/Users/u/Code/shop"), nil)
+
+  -- the preset: exactly these flags -- no Edit, no Write, no Bash, one writable path
+  local plan = core.auditSpawnPlan("/Users/u/Code/shop", "/Users/u", { roots = { "/Users/u/Code" } })
+  check("auditSpawnPlan: a plan for an absolute folder", type(plan) == "table")
+  eq("auditSpawnPlan: named for the spawn menu", plan.name, "Audit (find-only)")
+  eq("auditSpawnPlan: dontAsk refuses anything not allowed instead of asking", plan.permMode, "dontAsk")
+  local F = "/Users/u/.cc-audit/-Users-u-Code-shop/AUDIT-FINDINGS.md"
+  eq("auditSpawnPlan: the allowed tools, exactly",
+     table.concat(plan.allowedTools, " "), "Read Grep Glob mcp__playwright__* Edit(/" .. F .. ")")
+  local bare, scoped = {}, {}
+  for _, t in ipairs(plan.allowedTools) do
+    local tool, arg = t:match("^([%w_]+)%((.*)%)$")
+    if tool then scoped[#scoped + 1] = { tool, arg } else bare[t] = true end
+  end
+  check("auditSpawnPlan: no bare Edit, Write, MultiEdit, NotebookEdit or Bash",
+        not bare.Edit and not bare.Write and not bare.MultiEdit and not bare.NotebookEdit and not bare.Bash)
+  -- Claude Code applies Edit(path) rules to every file-writing tool, Write included (a Write(path)
+  -- rule is ignored: checked against claude 2.1.175 on 2026-09-29), so ONE Edit rule is the one path.
+  check("auditSpawnPlan: exactly one path-scoped rule, an Edit rule for the findings file (// = absolute)",
+        #scoped == 1 and scoped[1][1] == "Edit" and scoped[1][2] == "/" .. F)
+  local flags = core.spawnFlags(plan.permMode)
+  for _, f in ipairs(core.spawnExtraFlags(core.auditLaunchOpts(plan, "/S/settings.json", "/S/mcp.json"))) do flags[#flags + 1] = f end
+  eq("auditSpawnPlan: the launch flags, exactly",
+     table.concat(flags, "|"):gsub("%-%-append%-system%-prompt|[^|]*", "--append-system-prompt|<persona>"),
+     "--permission-mode|dontAsk|--append-system-prompt|<persona>|--mcp-config|/S/mcp.json|--strict-mcp-config|"
+       .. "--allowedTools=Read Grep Glob mcp__playwright__* Edit(/" .. F .. ")|--settings|/S/settings.json")
+  local deny = {}
+  for _, d in ipairs(plan.settings.permissions.deny) do deny[d] = true end
+  check("auditSpawnPlan: settings deny Bash, NotebookEdit and Playwright's run-anything tool",
+        deny.Bash and deny.NotebookEdit and deny["mcp__playwright__browser_run_code_unsafe"])
+  -- a deny rule beats a PreToolUse hook's "allow" (Shepherd's gate, autopilot, a card Approve); dontAsk
+  -- alone doesn't (checked 2026-09-29), so the audited folder and its repo are fenced by deny rules
+  check("auditSpawnPlan: settings deny every edit inside the audited folder and its repo root",
+        deny["Edit(//Users/u/Code/shop/**)"] and deny["Edit(//Users/u/Code/**)"])
+  local hk = plan.settings.hooks and plan.settings.hooks.PreToolUse and plan.settings.hooks.PreToolUse[1]
+  check("auditSpawnPlan: a PreToolUse hook on every playwright tool", hk and hk.matcher == "mcp__playwright__.*"
+        and hk.hooks[1].type == "command" and hk.hooks[1].command == core.AUDIT_FILENAME_HOOK)
+  local pw = plan.mcpConfig.mcpServers.playwright
+  check("auditSpawnPlan: one MCP server, playwright", pw ~= nil and next(plan.mcpConfig.mcpServers, next(plan.mcpConfig.mcpServers)) == nil)
+  eq("auditSpawnPlan: headless, isolated, a set viewport, its files in the audit folder",
+     table.concat(pw.args, " "), "-y @playwright/mcp@latest --headless --isolated --viewport-size 1280x800 --output-dir "
+       .. "/Users/u/.claude/cc-audit/-Users-u-Code-shop/playwright")
+  eq("auditSpawnPlan: strict MCP (only playwright, none of the user's servers)", plan.strictMcp, true)
+  check("auditSpawnPlan: the persona is find-only", plan.appendSystemPrompt:find("You are a find-only auditor.", 1, true) ~= nil)
+  check("auditSpawnPlan: ...names its one writable file", plan.appendSystemPrompt:find(F, 1, true) ~= nil)
+  check("auditSpawnPlan: ...and the findings format", plan.appendSystemPrompt:find("- [ ] [HIGH] AUD-001 ", 1, true) ~= nil
+        and plan.appendSystemPrompt:find("## Already works", 1, true) ~= nil)
+  check("auditSpawnPlan: ...and never to pass a playwright tool a filename", plan.appendSystemPrompt:find("filename", 1, true) ~= nil)
+  check("auditSpawnPlan: the seed prompt names the findings file", plan.seedPrompt:find(F, 1, true) ~= nil)
+  local o = core.auditLaunchOpts(plan, "/S/settings.json", "/S/mcp.json")
+  check("auditLaunchOpts: no --add-dir / --agent (variadic --add-dir would eat the task)",
+        o.addDirs == nil and o.agentName == nil and o.pluginDirs == nil)
+  local p2, why = core.auditSpawnPlan("shop", "/Users/u", {})
+  check("auditSpawnPlan: a relative folder is refused, with a reason", p2 == nil and type(why) == "string")
+  local p3, why3 = core.auditSpawnPlan("/Users/u/Code/shop", "/Users/some one", {})
+  check("auditSpawnPlan: a findings path with a space is refused (the tools list splits on spaces)",
+        p3 == nil and tostring(why3):find("space", 1, true) ~= nil)
+
+  -- the findings file: `- [ ] [SEV] AUD-NNN text` lines, plus an Already works section
+  local FIND = table.concat({
+    "# Audit findings — /Users/u/Code/shop",
+    "",
+    "- [ ] [HIGH] AUD-001 Checkout button does nothing on /cart (app.js:40)",
+    "- [x] [low] AUD-002 Footer link 404s",
+    "* [ ] [CRITICAL] AUD-003 Passwords logged in server.ts:12\r",
+    "- [ ] a checkbox that isn't a finding",
+    "- [ ] [HIGH] AUD-001 Checkout button does nothing on /cart (app.js:40)",
+    "- [ ] [HIGH] missing id",
+    "",
+    "## Already works",
+    "- Login with a valid account",
+    "- [x] Search returns results",
+    "",
+    "## Notes",
+    "- [ ] [MEDIUM] AUD-004 Slow first paint on /",
+  }, "\n")
+  local fs, works = core.parseAuditFindings(FIND)
+  eq("parseAuditFindings: only finding-shaped lines, deduped", #fs, 4)
+  eq("parseAuditFindings: the text is the whole line after the box", fs[1].text,
+     "[HIGH] AUD-001 Checkout button does nothing on /cart (app.js:40)")
+  check("parseAuditFindings: tagged as an audit finding with its severity and id",
+        fs[1].audit and fs[1].audit.sev == "HIGH" and fs[1].audit.id == "AUD-001")
+  eq("parseAuditFindings: a severity reads upper-case", fs[2].audit.sev, "LOW")
+  check("parseAuditFindings: never done, even from an [x] (an auditor fixes nothing)", fs[2].done == false)
+  eq("parseAuditFindings: CRLF and * bullets", fs[3].text, "[CRITICAL] AUD-003 Passwords logged in server.ts:12")
+  eq("parseAuditFindings: a heading after Already works ends it", fs[4].audit.id, "AUD-004")
+  eq("parseAuditFindings: the Already works lines, apart", table.concat(works, "|"), "Login with a valid account|Search returns results")
+  eq("parseAuditFindings: nothing from an empty file", #core.parseAuditFindings(""), 0)
+  eq("parseAuditFindings: nothing from nil", #core.parseAuditFindings(nil), 0)
+
+  -- TODO.md and the findings file read as one list for My List
+  eq("parseTodoAndFindings: neither file -> nil (nothing to import)", core.parseTodoAndFindings(nil, nil), nil)
+  local both = core.parseTodoAndFindings("- [ ] a todo line\n", "- [ ] [LOW] AUD-001 a finding\n")
+  eq("parseTodoAndFindings: TODO lines first, then findings", both[1].text .. "|" .. both[2].text,
+     "a todo line|[LOW] AUD-001 a finding")
+  eq("parseTodoAndFindings: only a findings file still imports", #core.parseTodoAndFindings(nil, "- [ ] [LOW] AUD-001 x\n"), 1)
+
+  -- the import: findings land in My List tagged, and never as done
+  local st = { byProject = {}, todoMeta = {} }
+  local n = 0
+  local function idgen() n = n + 1; return "id" .. n end
+  local c = core.worklistImportTodoRoots(st, "shop", { { root = "/r", isMain = true,
+    parsed = core.parseTodoAndFindings("- [x] todo done\n", FIND) } }, 100, idgen)
+  eq("import: every TODO line and finding is added", c.added, 5)
+  local byText = {}
+  for _, it in ipairs(st.byProject.shop) do byText[it.text] = it end
+  local f1 = byText["[HIGH] AUD-001 Checkout button does nothing on /cart (app.js:40)"]
+  check("import: a finding is tagged as one", f1 and f1.audit and f1.audit.sev == "HIGH" and f1.audit.id == "AUD-001")
+  check("import: a finding is never done, nor claimed done", f1 and f1.done == false and f1.fileDone == nil)
+  local f2 = byText["[low] AUD-002 Footer link 404s"]
+  check("import: an [x] finding still imports open, with no automation claim",
+        f2 and f2.done == false and f2.fileDone == nil and f2.audit.sev == "LOW")
+  check("import: a TODO line carries no audit tag", byText["todo done"] and byText["todo done"].audit == nil
+        and byText["todo done"].fileDone == true)
+  f1.audit = nil
+  core.worklistImportTodoRoots(st, "shop", { { root = "/r", isMain = true,
+    parsed = core.parseTodoAndFindings("- [x] todo done\n", FIND) } }, 200, idgen)
+  check("import: a re-import restores the audit tag", f1.audit and f1.audit.id == "AUD-001")
+  check("import: ...and Already works lines never become items", byText["Login with a valid account"] == nil)
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))

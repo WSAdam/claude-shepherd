@@ -235,6 +235,9 @@ without a folder falls back to the same prompts.)
   known folder also recalls the editor, mode and provider you last used there.
 - **Agents**: ✦ chips that spawn from a saved agent profile
   ([Providers and integrations](providers-and-integrations.md#agent-profiles)).
+- **🔍 Audit (find-only)**: a built-in chip that spawns an auditor in the folder you picked. It reads
+  the code and drives the running app in a headless browser, and can write only its findings file
+  ([Find-only audit](providers-and-integrations.md#find-only-audit)).
 - **Templates**: seed the initial task from a saved template, with its variables filled in first.
 - **Fuzzy folder search**: type a fragment of a project name. Your project roots
   (`spawn.searchRoots`, default `~/Programming`) are indexed once per open, with

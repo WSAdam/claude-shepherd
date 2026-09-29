@@ -110,7 +110,10 @@ assert_eq "JS sends todo-import with the scope"  "yes" "$(has 'send("todo-import
 assert_eq "JS sends todo-import-all"             "yes" "$(has 'send("todo-import-all")')"
 assert_eq "Lua bridge handles both imports"      "yes" "$(has 'a == "todo-import" or a == "todo-import-all"')"
 assert_eq "bridge delegates to FX.todoImportProjects" "yes" "$(has 'r = FX.todoImportProjects({ { key = scope, cwd = cwd } })')"
-assert_eq "FX import delegates to the pure core merge" "yes" "$(has 'core.worklistImportTodos(st, key, core.parseTodoFile(content),')"
+# 2026-09-29 (find-only audit): the import reads TODO.md with the root's audit findings, both parsed
+# in core (core.parseTodoAndFindings), then merges in core as before
+assert_eq "FX import delegates to the pure core merge" "yes" "$(has 'core.worklistImportTodos(st, key, parsed, FX.now(), FX.worklistNewId)')"
+assert_eq "...on lines core parsed from TODO.md and the findings" "yes" "$(has 'return core.parseTodoAndFindings(FX.readFile(root .. "/TODO.md"), fp and FX.readFile(fp) or nil)')"
 assert_eq "import pushes the toast payload"      "yes" "$(has 'window.ccTodoImported(')"
 assert_eq "toast handler exists"                 "yes" "$(has 'window.ccTodoImported = function(r)')"
 # Badges: the automation's [x] is a chip, amber until the user verifies.
@@ -145,7 +148,8 @@ assert_eq "a repo tab imports every worktree root through core" "yes" "$(has 'co
 assert_eq "the Import button derives a repo tab's roots in Lua" "yes" "$(has 'local roots = FX.stackRootsFor(scope, nil, { git = true })')"
 assert_eq "an offline repo tab re-reads its recorded roots" "yes" "$(has 'and { key = k, roots = meta.roots } or { key = k }')"
 assert_eq "auto-sync watches every root of a repo tab"     "yes" "$(has 'for _, path in ipairs(paths) do')"
-assert_eq "a line's branch shows as a chip beside the badges" "yes" "$(has 'var h = wlBranchChip(it);')"
+# 2026-09-29 (find-only audit): a finding's 🔍 chip leads the row's badges, the branch chip follows
+assert_eq "a line's branch shows as a chip beside the badges" "yes" "$(has 'var h = wlAuditChip(it) + wlBranchChip(it);')"
 assert_eq "the branch chip is escaped"                   "yes" "$(has "'\">⎇ ' + esc(first)")"
 # roots are NEVER taken from the webview: the import branch never reads payload.text
 todo_block="$(awk '/if a == "todo-import" or a == "todo-import-all" then/,/^  end$/' "$DASH")"

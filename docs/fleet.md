@@ -331,7 +331,8 @@ the FLEET row swaps the session tiles for the list (click again to go back).
   share one tab, and the import reads **every worktree's** `TODO.md`: a line in several copies
   imports once, a line that exists only on a branch carries a **⎇ branch** chip until it reaches
   main's copy, and a removed worktree's items stay. The file format is in
-  [methodology/CLAUDE.md](../methodology/CLAUDE.md).
+  [methodology/CLAUDE.md](../methodology/CLAUDE.md). A [find-only audit](providers-and-integrations.md#find-only-audit)'s
+  findings file imports with it: each finding carries a **🔍 severity** chip and is never marked done.
 - **Filter**: the box under the tabs filters **whichever tab you're on**: a project tab that
   project, **MASTER** the rollup, **🗄 Archive** every archived row. It is case-insensitive and
   every word must match. It searches the subject, the **details**, the expected date (`2026-09`
