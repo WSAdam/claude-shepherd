@@ -8452,9 +8452,11 @@ do
   -- 2026-09-29: 26 -> 27 for the overlap radar and a batch's unit order ("overlap", flagged new).
   -- 2026-09-29: 27 -> 28 for the coverage index ("coverage", flagged new).
   -- 2026-09-29: 28 -> 29 for worktree leases ("leases", flagged new).
-  eq("FEATURES: the 29 new features are flagged", newCount, 29)
+  -- 2026-09-29: 29 -> 30 for where the time went ("timelost", flagged new).
+  eq("FEATURES: the 30 new features are flagged", newCount, 30)
   check("FEATURES: lists the coverage index", keys.coverage == true)
   check("FEATURES: lists worktree leases", keys.leases == true)
+  check("FEATURES: lists where the time went", keys.timelost == true)
   check("FEATURES: lists pinned links", keys.pins == true)
   check("FEATURES: lists the overlap radar", keys.overlap == true)
   check("FEATURES: lists the red-first proof", keys.redfirst == true)

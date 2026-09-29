@@ -157,6 +157,44 @@ ledger records (a `usage_snapshot` at most every `ledger.usageSnapshotMinutes`, 
 The dollar figures use the same `core.PRICING` table as the footer, at Anthropic list prices.
 **Refresh** re-reads the ledger.
 
+## Where the time went
+
+**⏱ Time** opens it for one session (the detail panel's action row) or for a whole project (the
+header of a card's **Instances** view: every session on the card, over the last `timeLost.days`,
+default 7). It starts with plain sentences, most costly first, for example:
+
+- *38m waiting on you, 12m of it on one approval*
+- *30m stopped at a usage limit* · *20m stalled with no progress (2 stalls)*
+- *1m 30s in errors (runtime errors)* · *10s retrying the API (1 retry)* · *3m compacting (1 compaction)*
+- *2 turns took 11m; 1 was interrupted*
+- *77% of input came from the cache* · *Cache writes: 16.0k at 5 minutes, 20.0k at 1 hour (~$0.30)*
+- *Subagents used 44% of the tokens (1 subagent)* · *Sessions ended: 2 cleared, 1 exited*
+
+Then five totals (**lost**, **waiting on you**, **at usage limits**, **stalled**, **errors & retries**)
+and a table of the waits by kind. *Lost* is waiting on you + usage limits + stalls + the larger of
+error time and API retry time (the ledger and the transcript see the same outage from two sides,
+so they are never added).
+
+Two sources feed it:
+
+- **The audit ledger** (needs `ledger.enabled`). Shepherd writes one event per episode, when it
+  ends: `waited` with a `source` and `seconds` -- a wait on you is exactly what the card's *Needs
+  you* says (a permission prompt, a question, a merge review, a batch proposal), plus `limit` for
+  a usage limit -- `hung_end` when a stalled session moves again, and `error_end` with the error's
+  `reason` when it recovers. A session that ends mid-wait ends the wait there. `session_start`
+  now carries Claude Code's `source` (startup, resume, clear, compact) and `session_end` its
+  `reason` (clear, logout, prompt_input_exit, ...) and a `projectKey`.
+- **The transcripts**, read in the background (never on the panel's tick) every
+  `timeLost.refreshSeconds` (default 120) and when the view opens: each live session's transcript
+  and its subagents'. A pass reads only what changed -- a transcript whose size and mtime haven't
+  moved isn't read, one that grew is read from where the last pass stopped -- at most 2 MB per
+  transcript and 8 MB per pass, the rest in the passes after. From them: turns (prompt to Stop) and
+  how each ended (done, interrupted, an API error, never finished), API retry episodes, compaction
+  time, and tokens -- cache reads, 5-minute and 1-hour cache writes priced like the footer, the
+  main transcript against its subagents. Nothing is saved; after a reload the index is rebuilt.
+
+`timeLost.enabled: false` stops the background reads.
+
 ## The audit ledger
 
 An opt-in, append-only JSONL record at `~/.claude/cc-ledger/YYYY-MM-DD.jsonl`, one event per line:

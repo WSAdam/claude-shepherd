@@ -60,6 +60,7 @@ Every feature below has a reference page one click away. The panel lists the sam
 - [**Commits today and this week**](docs/usage-and-cost.md#commits-today-and-this-week): your
   commits and lines changed, per day and per project, straight from local git, each linked to the
   session that made it.
+- [**Where the time went**](docs/usage-and-cost.md#where-the-time-went): time lost to waits, limits, stalls and errors.
 - [**Shift report**](docs/usage-and-cost.md#shift-report): a summary of what the fleet did while you
   were away.
 

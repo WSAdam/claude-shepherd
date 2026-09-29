@@ -397,6 +397,15 @@ echo ""
 echo "== node: a card shows its worktree's leased :PORT, the database path in the tooltip, both escaped (behavioral, runs the shipped leaseBadge) =="
 node "$DIR/lease-badge.test.js" || fail=1
 echo ""
+echo "== lua: where the time went -- turns, retries, exits and tokens folded from literal and scrubbed transcripts, the index's plan, the tick's episodes as ledger events, the view's callouts =="
+lua "$DIR/time-lost.test.lua" || fail=1
+echo ""
+echo "== lua: the time index's wiring -- its own timer (never the tick), only what changed read in a background task, a hung pass reclaimed; waits ledgered when they end; the view's payload (stubbed hs) =="
+HOME="$(mktemp -d)" lua "$DIR/time-index.test.lua" || fail=1
+echo ""
+echo "== node: the Time view renders its callouts and cards, every session word escaped (behavioral, runs the shipped timeLostHtml) =="
+node "$DIR/time-view.test.js" || fail=1
+echo ""
 
 if [ "$fail" -eq 0 ]; then
   echo "✅ ALL GREEN"

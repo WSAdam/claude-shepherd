@@ -66,9 +66,21 @@ KEY="$(cc_key "$SESSION_ID" "$CWD")"
 
 # SessionEnd: drop the tile and any leftover decision file, then we're done.
 if [ "$EVENT" = "sessionend" ]; then
-  cc_ledger_enabled && cc_ledger_append "$(jq -nc \
-    --arg sid "$SESSION_ID" --arg key "$KEY" --arg name "$NAME" --arg cwd "$CWD" \
-    '{type:"session_end", session_id:$sid, key:$key, name:$name, cwd:$cwd}')"
+  # 2026-09-29: why it ended (Claude Code's `reason`: clear, logout, prompt_input_exit, ...) and
+  # its projectKey (from transcript_path, as below), for the Time view's per-project count.
+  if cc_ledger_enabled; then
+    END_PK="$(cc_get "$INPUT" '.transcript_path')"
+    case "$END_PK" in
+      */projects/*/*.jsonl) END_PK="${END_PK##*/projects/}"; END_PK="${END_PK%%/*}" ;;
+      *) END_PK="" ;;
+    esac
+    cc_ledger_append "$(jq -nc \
+      --arg sid "$SESSION_ID" --arg key "$KEY" --arg name "$NAME" --arg cwd "$CWD" \
+      --arg pk "$END_PK" --arg r "$(cc_get "$INPUT" '.reason')" \
+      '{type:"session_end", session_id:$sid, key:$key, name:$name, cwd:$cwd}
+       + (if $pk == "" then {} else {projectKey:$pk} end)
+       + (if $r == "" then {} else {reason:$r} end)')"
+  fi
   cc_remove "$KEY"
   echo "[cc-status] ✅ removed session '$NAME' ($KEY)" >&2
   exit 0
@@ -567,7 +579,9 @@ if cc_ledger_enabled; then
     '{session_id:$sid, key:$key, name:$name, projectKey:$pk, cwd:$cwd}')"
   case "$EVENT" in
     sessionstart)
-      cc_ledger_append "$(printf '%s' "$LBASE" | jq -c '. + {type:"session_start"}')" ;;
+      # 2026-09-29: and how it started (startup, resume, clear, compact), for the Time view
+      cc_ledger_append "$(printf '%s' "$LBASE" | jq -c --arg s "$(cc_get "$INPUT" '.source')" \
+        '. + {type:"session_start"} + (if $s == "" then {} else {source:$s} end)')" ;;
     userpromptsubmit)
       LP="$(printf '%s' "$SET_PROMPT" | cut -c1-200)"
       cc_ledger_append "$(printf '%s' "$LBASE" | jq -c --arg p "$LP" '. + {type:"prompt", prompt:$p}')" ;;

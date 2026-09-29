@@ -180,4 +180,23 @@ assert_eq "#23-nested: nested record still valid JSON" "0" \
 assert_eq "#23-nested: all three nested leaves survive (trimmed, not dropped)" "true" \
   "$(jq -r '(.payload.a and .payload.b and .payload.c) != null' "$LF" 2>/dev/null)"
 
+# ---- time lost (2026-09-29, unit 34): why each session started, and why it ended ----
+# The Time view counts how sessions ended per project, so session_end carries Claude Code's
+# `reason` and a projectKey (it had neither), and session_start its `source`.
+rm -f "$LF"
+echo '{ "ledger": { "enabled": true } }' > "$CC_CONFIG_FILE"
+printf '%s' '{"session_id":"T1","cwd":"/x/proj","transcript_path":"/h/.claude/projects/ENC/T1.jsonl","source":"resume"}' \
+  | bash "$STAT" sessionstart >/dev/null 2>&1
+assert_eq "time lost: session_start carries its source" "resume" \
+  "$(jq -r 'select(.session_id=="T1" and .type=="session_start").source' "$LF")"
+printf '%s' '{"session_id":"T1","cwd":"/x/proj","transcript_path":"/h/.claude/projects/ENC/T1.jsonl","reason":"clear"}' \
+  | bash "$STAT" sessionend >/dev/null 2>&1
+assert_eq "time lost: session_end carries its reason" "clear" \
+  "$(jq -r 'select(.session_id=="T1" and .type=="session_end").reason' "$LF")"
+assert_eq "time lost: ...and its projectKey, so a project's Time view counts it" "ENC" \
+  "$(jq -r 'select(.session_id=="T1" and .type=="session_end").projectKey' "$LF")"
+printf '%s' '{"session_id":"T2","cwd":"/x/proj"}' | bash "$STAT" sessionstart >/dev/null 2>&1
+assert_eq "time lost: no source given -> no source key" "false" \
+  "$(jq -r 'select(.session_id=="T2" and .type=="session_start") | has("source")' "$LF")"
+
 finish

@@ -17212,6 +17212,9 @@ M.FEATURES = {
   { key = "workingon", cat = "See what's happening", new = true, title = "What each session is working on",
     what = "Every card says what its session is working on -- your latest prompt to it, cut to one line -- with a chip for the tool running right now and one for the skill in use. Shepherd's own [shepherd] sends don't count, and a batch unit, which only ever gets its driver's messages, reads as its unit (unit feat/x). The detail panel shows the same line under the session's name.",
     why = "A row of cards all reading Working doesn't say which is which; now each one tells you what it's on without opening it." },
+  { key = "timelost", cat = "See what's happening", new = true, title = "Where the time went",
+    what = "⏱ Time in a session's detail panel, or in a card's Instances for the whole project, says in plain sentences where the time went: waiting on you (\"38m waiting on you, 12m of it on one approval\"), at usage limits, stalled, in errors and API retries -- plus how its turns ended, how much input came from the cache, what 5-minute and 1-hour cache writes cost, and what the subagents used. Waits, stalls and errors come from the audit ledger; the rest is read from the transcripts in the background.",
+    why = "See what actually held your sessions up -- you, a limit, an outage or a stall -- and whether the cache and subagents are paying their way." },
 
   -- ---- Make it yours ----
   { key = "theme", cat = "Make it yours", new = true, title = "Visual theme editor",
@@ -17313,6 +17316,523 @@ function M.spawnLadderKey(spec)
   local n = spec.name
   if n ~= nil and tostring(n) ~= "" then return tostring(n) end
   return "__default__"
+end
+
+-- ---- Where the time went (2026-09-29, build program unit 34) ------------------------------
+-- Time lost waiting on Adam, on usage limits, on errors and on stalls, plus cache efficiency and
+-- the subagent split, per session and per project. Two sources, joined by M.timeLostSummary:
+--   * the ledger. The tick turns each episode into ONE event when it ends (M.timeLostStep):
+--     waited{source, seconds} -- a wait on Adam (approval, question, merge, batch) or a usage
+--     limit -- plus hung_end{seconds} and error_end{reason, seconds};
+--   * a transcript index. FX's background indexer (the FX.refreshCommits pattern) reads only each
+--     transcript's NEW bytes (M.timeIndexPlan) and folds them (M.timeIndexFold): turn durations and
+--     how each turn ended, API retry time, compactions, and tokens -- cache reads, 5-minute and
+--     1-hour cache writes (unit 3's pricing), main transcript vs subagents.
+M.TIME_INDEX_FILE_BYTES = 2097152   -- per transcript per pass
+M.TIME_INDEX_PASS_BYTES = 8388608   -- per pass, over every transcript
+
+local function tlUsage()
+  return { input = 0, output = 0, cacheRead = 0, cacheCreate = 0, cacheCreate1h = 0 }
+end
+
+-- A transcript's index entry, before any byte of it is read. `sub` = a subagent's transcript:
+-- its tokens and span count, its records never start or end one of the session's turns.
+function M.timeIndexBlank(sub)
+  local u = tlUsage()
+  u.byModel = {}
+  return { v = 1, sub = sub and true or false, offset = 0, size = 0, mtime = 0, more = false,
+    turns = 0, turnSeconds = 0, longestTurn = 0, turnOpen = nil, turnLast = nil,
+    exits = { done = 0, interrupted = 0, error = 0, unfinished = 0 },
+    retries = 0, retryEpisodes = 0, retrySeconds = 0, retryOpen = nil,
+    compactions = 0, compactSeconds = 0, firstTs = nil, lastTs = nil,
+    usage = u, seen = M.usageSeen() }
+end
+
+local function tlCloseTurn(e, ts, exit)
+  local start = e.turnOpen
+  if not start then return end
+  local d = math.max(0, (tonumber(ts) or start) - start)
+  e.turns = e.turns + 1
+  e.turnSeconds = e.turnSeconds + d
+  if d > e.longestTurn then e.longestTurn = d end
+  e.exits[exit] = (e.exits[exit] or 0) + 1
+  e.turnOpen, e.turnLast, e.turnActive = nil, nil, nil
+end
+
+local function tlAddUsage(dst, u)
+  dst.input = dst.input + u.input
+  dst.output = dst.output + u.output
+  dst.cacheRead = dst.cacheRead + u.cacheRead
+  dst.cacheCreate = dst.cacheCreate + u.cacheCreate
+  dst.cacheCreate1h = dst.cacheCreate1h + (u.cacheCreate1h or 0)
+end
+
+-- One transcript record. Cheap plain `find`s decide what it is; only an assistant record with a
+-- usage block is decoded (M.parseUsageLine -- the count unit 3's totals use). The record's own
+-- timestamp is the first one AFTER its top-level type: Claude Code writes `message` before `type`,
+-- so a timestamp inside a tool input or a result's content never matches. Records land slightly
+-- out of order (a queue-operation can precede the Stop that ended the turn before it), so only
+-- user / assistant / system records are read at all.
+local function tlRecord(e, line)
+  if line:find('"type":"attachment"', 1, true) then return end
+  local kind = "assistant"
+  local at = line:find('"type":"assistant"', 1, true)
+  if not at then kind = "user"; at = line:find('"type":"user"', 1, true) end
+  if not at then kind = "system"; at = line:find('"type":"system"', 1, true) end
+  if not at then return end
+  local iso = line:match('"timestamp":"([^"]+)"', at)
+  local ts = iso and M.isoToEpoch(iso) or nil
+  if not ts then return end
+  if not e.firstTs or ts < e.firstTs then e.firstTs = ts end
+  if not e.lastTs or ts > e.lastTs then e.lastTs = ts end
+
+  -- an API retry episode: api_error records back to back, closed by the next record of any kind
+  if kind == "system" and line:find('"subtype":"api_error"', at, true) then
+    local r = e.retryOpen or { since = ts }
+    r.last = ts
+    r.wait = (tonumber(line:match('"retryInMs":(%d+)', at)) or 0) / 1000
+    e.retryOpen = r
+    e.retries = e.retries + 1
+    return
+  end
+  local retrySince = nil
+  if e.retryOpen then
+    retrySince = e.retryOpen.since
+    e.retrySeconds = e.retrySeconds + math.max(0, ts - retrySince)
+    e.retryEpisodes = e.retryEpisodes + 1
+    e.retryOpen = nil
+  end
+
+  if kind == "assistant" then
+    local u = line:find('"usage"', 1, true) and M.parseUsageLine(line) or nil
+    if u and M.usageNew(e.seen, u) then
+      tlAddUsage(e.usage, u)
+      local mk = u.model or "unknown"
+      e.usage.byModel[mk] = e.usage.byModel[mk] or tlUsage()
+      tlAddUsage(e.usage.byModel[mk], u)
+    end
+    if e.sub then return end
+    if line:find('"isApiErrorMessage":true', 1, true) then
+      -- the retries ran out: Claude Code fired StopFailure. With no turn open it is still a turn
+      -- that died, from its first retry.
+      if not e.turnOpen then e.turnOpen = retrySince or ts end
+      tlCloseTurn(e, ts, "error")
+      return
+    end
+    -- activity with no turn open: a Stop hook that blocked (a mailbox message) keeps it going
+    if not e.turnOpen then e.turnOpen = ts end
+    e.turnLast, e.turnActive = ts, true
+    return
+  end
+
+  if kind == "user" then
+    if e.sub then return end
+    if line:find('"tool_use_id"', 1, true) or line:find('"isCompactSummary":true', 1, true) then
+      if e.turnOpen then e.turnLast = ts end
+      return
+    end
+    if line:find("[Request interrupted by user", 1, true) then
+      tlCloseTurn(e, ts, "interrupted")
+      return
+    end
+    -- a prompt: Adam's, a batch driver's (origin peer) or a task notification. A meta record (a
+    -- skill's body, a command caveat) belongs to the turn it arrives in -- or, with none open, starts
+    -- one: a cross-session wake-up notice is written as one, with no prompt (2026-09-29).
+    if line:find('"origin":{"kind":"', 1, true) or not line:find('"isMeta":true', 1, true) then
+      -- a turn that did something and is still open (killed mid-turn, then resumed) ends at its
+      -- last record; one that did nothing yet (only a meta record) just starts again here
+      if e.turnOpen and e.turnActive then tlCloseTurn(e, e.turnLast or e.turnOpen, "unfinished") end
+      e.turnOpen, e.turnLast, e.turnActive = ts, ts, nil
+    elseif e.turnOpen then
+      e.turnLast = ts
+    else
+      e.turnOpen, e.turnLast = ts, ts
+    end
+    return
+  end
+
+  -- system
+  if line:find('"subtype":"compact_boundary"', at, true) then
+    e.compactions = e.compactions + 1
+    e.compactSeconds = e.compactSeconds + (tonumber(line:match('"durationMs":(%d+)', at)) or 0) / 1000
+    return
+  end
+  if not e.sub and line:find('"subtype":"stop_hook_summary"', at, true) then
+    tlCloseTurn(e, ts, "done")
+  end
+end
+
+-- Fold transcript bytes into an entry. Only complete lines are consumed: a line torn at the end
+-- of the bytes waits for the next read. Returns the entry and the bytes consumed. While
+-- e.skipping (a line longer than a whole read, see M.timeIndexApply) the bytes up to the next
+-- newline are dropped unread.
+function M.timeIndexFold(e, text)
+  e = type(e) == "table" and e or M.timeIndexBlank(false)
+  text = tostring(text or "")
+  local pos, consumed = 1, 0
+  if e.skipping then
+    local nl = text:find("\n", 1, true)
+    if not nl then return e, #text end
+    e.skipping = nil
+    pos, consumed = nl + 1, nl
+  end
+  while true do
+    local nl = text:find("\n", pos, true)
+    if not nl then break end
+    if nl > pos and text:byte(pos) == 123 then tlRecord(e, text:sub(pos, nl - 1)) end
+    consumed, pos = nl, nl + 1
+  end
+  return e, consumed
+end
+
+-- Which transcripts to read this pass, and from where. `entries` = path -> entry; `files` = the
+-- live transcripts, { path, size, mtime, sub }. A file whose size and mtime match its entry's is
+-- not read (unless a cap left it behind: entry.more); one that grew is read from its offset; one
+-- that shrank below its offset (rewritten) starts over. opts.fileBytes caps one file's read,
+-- opts.passBytes the whole pass. Pure.
+function M.timeIndexPlan(entries, files, opts)
+  opts = type(opts) == "table" and opts or {}
+  local fileCap = tonumber(opts.fileBytes) or M.TIME_INDEX_FILE_BYTES
+  local left = tonumber(opts.passBytes) or M.TIME_INDEX_PASS_BYTES
+  local out = {}
+  for _, f in ipairs(type(files) == "table" and files or {}) do
+    if left <= 0 then break end
+    local path, size, mtime = f.path, tonumber(f.size), tonumber(f.mtime) or 0
+    if type(path) == "string" and size then
+      local e = type(entries) == "table" and entries[path] or nil
+      local from, fresh
+      if type(e) ~= "table" or size < (tonumber(e.offset) or 0) then
+        from, fresh = 0, true
+      elseif not (size == e.size and mtime == e.mtime and not e.more) then
+        from = tonumber(e.offset) or 0
+      end
+      if from and size > from then
+        local len = math.min(size - from, fileCap, left)
+        left = left - len
+        out[#out + 1] = { path = path, from = from, len = len, size = size, mtime = mtime,
+                          fresh = fresh, sub = f.sub and true or nil, cap = fileCap }
+      end
+    end
+  end
+  return out
+end
+
+-- Land one read (a M.timeIndexPlan row and the bytes it got) in its entry: a fresh read starts
+-- the entry over; the offset moves by what was consumed; size and mtime are remembered so an
+-- unchanged file is skipped next pass; `more` = the read stopped before the file's end. A read as
+-- long as a whole per-file read with no newline in it is one giant line: it is skipped (bytes up
+-- to the next newline are dropped next time) instead of being re-read forever. Pure.
+function M.timeIndexApply(e, read, text)
+  read = type(read) == "table" and read or {}
+  text = tostring(text or "")
+  if read.fresh or type(e) ~= "table" then e = M.timeIndexBlank(read.sub) end
+  local consumed
+  e, consumed = M.timeIndexFold(e, text)
+  local from = tonumber(read.from) or e.offset
+  local size = tonumber(read.size) or 0
+  local capped = from + #text < size
+  if consumed == 0 and capped and #text >= (tonumber(read.cap) or M.TIME_INDEX_FILE_BYTES) then
+    e.skipping = true
+    consumed = #text
+  end
+  e.offset = from + consumed
+  e.size = size
+  e.mtime = tonumber(read.mtime) or 0
+  e.more = capped
+  return e
+end
+
+-- The pass's one shell command: each planned read's bytes into its own scratch file
+-- (<outBase>.<n>), every path single-quoted. `tail -c +N` counts from 1.
+function M.timeIndexScanCommand(reads, outBase)
+  local parts = {}
+  for i, r in ipairs(type(reads) == "table" and reads or {}) do
+    parts[#parts + 1] = "tail -c +" .. math.floor((tonumber(r.from) or 0) + 1) .. " " .. shquote(tostring(r.path))
+      .. " 2>/dev/null | head -c " .. math.floor(tonumber(r.len) or 0) .. " > " .. shquote(tostring(outBase) .. "." .. i)
+  end
+  return table.concat(parts, "; ")
+end
+
+-- ---- the tick's episodes -> ledger events ----
+-- What a card is waiting on, if it waits on Adam or on a usage limit. A wait on Adam is what
+-- Shepherd's one needs-you decision says it is (it.needsYou == "needs", core.needsYouKind), so this
+-- view and the card never disagree; a heads-up is not a wait, and a dead session waits on nobody.
+local TL_WAIT_SOURCE = { approval = "approval", ask = "question", merge = "merge", fleet = "batch" }
+function M.timeLostWaitSource(it)
+  if type(it) ~= "table" or it.procAlive == false then return nil end
+  if it.status == "error" and it.error_reason == "budget_exceeded" then return "limit" end
+  if it.needsYou ~= "needs" then return nil end
+  return TL_WAIT_SOURCE[tostring(it.needsYouSource or "")]
+end
+
+local function tlSecs(x) return math.max(0, math.floor((tonumber(x) or 0) + 0.5)) end
+
+-- One tick for one card. `rec` is last tick's record (nil on first sight, a reload included);
+-- hungSince = the watchdog's last-progress time. Returns the new record and the events of every
+-- episode that ENDED this tick -- an episode still running is never ledgered, so a reload can't
+-- ledger one twice. A new episode seen for the first time is dated from the status file's
+-- `updated` (the hook wrote it when the state began), never before the previous tick.
+function M.timeLostStep(rec, it, now, hungSince)
+  now = tonumber(now) or 0
+  local first = type(rec) ~= "table"
+  rec = first and {} or rec
+  it = type(it) == "table" and it or {}
+  local out = {}
+  local floor = (not first and tonumber(rec.at)) or nil
+  local function since(fromFile)
+    local u = fromFile and tonumber(it.updated) or nil
+    local s = (u and u <= now) and u or now
+    if floor and s < floor then s = floor end
+    return s
+  end
+  local src = M.timeLostWaitSource(it)
+  if rec.wait and rec.wait.source ~= src then
+    out[#out + 1] = { type = "waited", source = rec.wait.source, seconds = tlSecs(now - rec.wait.since) }
+    rec.wait = nil
+    floor = now   -- a wait that follows one that just ended starts now
+  end
+  if src and not rec.wait then
+    rec.wait = { source = src, since = since(src == "approval" or src == "question" or src == "limit") }
+  end
+  if it.hung then
+    if not rec.hung then rec.hung = { since = math.min(now, tonumber(hungSince) or now) } end
+  elseif rec.hung then
+    out[#out + 1] = { type = "hung_end", seconds = tlSecs(now - rec.hung.since) }
+    rec.hung = nil
+  end
+  local reason = nil
+  if it.status == "error" and it.procAlive ~= false and it.error_reason ~= "budget_exceeded" then
+    reason = tostring(it.error_reason or "unknown")
+  end
+  if rec.err and rec.err.reason ~= reason then
+    out[#out + 1] = { type = "error_end", reason = rec.err.reason, seconds = tlSecs(now - rec.err.since) }
+    rec.err = nil
+  end
+  if reason and not rec.err then rec.err = { reason = reason, since = since(true) } end
+  rec.at = now
+  return rec, out
+end
+
+-- A card that went away (session ended, pruned): each episode it still had open ends now.
+function M.timeLostFinish(rec, now)
+  local out = {}
+  if type(rec) ~= "table" then return out end
+  now = tonumber(now) or 0
+  if rec.wait then out[#out + 1] = { type = "waited", source = rec.wait.source, seconds = tlSecs(now - rec.wait.since) } end
+  if rec.hung then out[#out + 1] = { type = "hung_end", seconds = tlSecs(now - rec.hung.since) } end
+  if rec.err then out[#out + 1] = { type = "error_end", reason = rec.err.reason, seconds = tlSecs(now - rec.err.since) } end
+  return out
+end
+
+-- ---- the Time view ----
+M.TIME_LOST_EVENT_TYPES = { waited = true, hung_end = true, error_end = true, session_end = true, session_start = true }
+-- The ledger events the view reads, for one scope: scope.sessions (session ids), scope.keys (card
+-- keys) or scope.projects (projectKeys) -- any match counts -- and scope.sinceTs. Pure.
+function M.timeLostEventsFor(events, scope)
+  scope = type(scope) == "table" and scope or {}
+  local since = tonumber(scope.sinceTs)
+  local out = {}
+  for _, e in ipairs(type(events) == "table" and events or {}) do
+    if type(e) == "table" and M.TIME_LOST_EVENT_TYPES[e.type] and (not since or (tonumber(e.ts) or 0) >= since) then
+      if (scope.sessions and e.session_id and scope.sessions[e.session_id])
+         or (scope.keys and e.key and scope.keys[e.key])
+         or (scope.projects and e.projectKey and scope.projects[e.projectKey]) then
+        out[#out + 1] = e
+      end
+    end
+  end
+  return out
+end
+
+-- 16000 -> "16.0k", the panel's token style. Pure.
+function M.fmtTokenCount(n)
+  n = tonumber(n) or 0
+  if n >= 1e9 then return string.format("%.1fB", n / 1e9) end
+  if n >= 1e6 then return string.format("%.1fM", n / 1e6) end
+  if n >= 1e3 then return string.format("%.1fk", n / 1e3) end
+  return tostring(math.floor(n + 0.5))
+end
+
+local TL_SOURCE_WORD = { approval = "approval", question = "question", merge = "merge review", batch = "batch proposal" }
+local TL_REASON_WORD = { runtime_error = "runtime errors", timeout = "timeouts", model_error = "model errors",
+  user_cancelled = "cancelled requests", unknown = "unknown errors" }
+local TL_END_WORD = { clear = "cleared", logout = "logged out", prompt_input_exit = "exited",
+  bypass_permissions_disabled = "bypass mode turned off", other = "other" }
+local function tlPct(x) return math.floor(x * 100 + 0.5) end
+
+-- The plain sentences at the top of the Time view, most costly first. Pure.
+function M.timeLostCallouts(v)
+  local out, D = {}, M.fmtDuration
+  local you = v.you
+  if you.count > 0 and you.seconds > 0 and you.longest then
+    local w = TL_SOURCE_WORD[you.longest.source] or tostring(you.longest.source)
+    if you.count == 1 then
+      out[#out + 1] = D(you.seconds) .. " waiting on you, on one " .. w
+    else
+      out[#out + 1] = D(you.seconds) .. " waiting on you, " .. D(you.longest.seconds) .. " of it on one " .. w
+    end
+  end
+  if v.limit.seconds > 0 then
+    out[#out + 1] = D(v.limit.seconds) .. " stopped at a usage limit"
+      .. (v.limit.count > 1 and (" (" .. v.limit.count .. " times)") or "")
+  end
+  if v.stalls.seconds > 0 then
+    out[#out + 1] = D(v.stalls.seconds) .. " stalled with no progress"
+      .. (v.stalls.count > 1 and (" (" .. v.stalls.count .. " stalls)") or "")
+  end
+  if v.errors.seconds > 0 then
+    local reasons, top = {}, nil
+    for r, s in pairs(v.errors.byReason) do
+      reasons[#reasons + 1] = r
+      if not top or s > v.errors.byReason[top] or (s == v.errors.byReason[top] and r < top) then top = r end
+    end
+    local w = TL_REASON_WORD[top] or tostring(top):gsub("_", " ")
+    out[#out + 1] = D(v.errors.seconds) .. " in errors" .. (#reasons > 1 and (", most of it " .. w) or (" (" .. w .. ")"))
+  end
+  if v.retry.seconds > 0 then
+    local n = v.retry.retries
+    out[#out + 1] = D(v.retry.seconds) .. " retrying the API (" .. n .. (n == 1 and " retry)" or " retries)")
+  end
+  if v.compact.count > 0 then
+    local n = v.compact.count
+    out[#out + 1] = D(v.compact.seconds) .. " compacting (" .. n .. (n == 1 and " compaction)" or " compactions)")
+  end
+  local t = v.turns
+  if t.count > 0 then
+    local tail = {}
+    local ex = t.exits
+    if (ex.interrupted or 0) > 0 then tail[#tail + 1] = ex.interrupted .. (ex.interrupted == 1 and " was interrupted" or " were interrupted") end
+    if (ex.error or 0) > 0 then tail[#tail + 1] = ex.error .. " ended on an API error" end
+    if (ex.unfinished or 0) > 0 then tail[#tail + 1] = ex.unfinished .. " never finished" end
+    out[#out + 1] = t.count .. (t.count == 1 and " turn took " or " turns took ") .. D(t.seconds)
+      .. (#tail > 0 and ("; " .. table.concat(tail, " and ")) or "")
+  end
+  local c = v.cache
+  if c.hitRate then out[#out + 1] = tlPct(c.hitRate) .. "% of input came from the cache" end
+  if c.write5m + c.write1h > 0 then
+    out[#out + 1] = "Cache writes: " .. M.fmtTokenCount(c.write5m) .. " at 5 minutes, " .. M.fmtTokenCount(c.write1h)
+      .. " at 1 hour" .. (c.priced and string.format(" (~$%.2f)", c.write5mUsd + c.write1hUsd) or "")
+  end
+  local sp = v.split
+  if sp.subagents > 0 and sp.subShare then
+    out[#out + 1] = "Subagents used " .. tlPct(sp.subShare) .. "% of the tokens (" .. sp.subagents
+      .. (sp.subagents == 1 and " subagent)" or " subagents)")
+  end
+  local ends = {}
+  for r, n in pairs(v.ends) do ends[#ends + 1] = { r = r, n = n } end
+  table.sort(ends, function(a, b) if a.n ~= b.n then return a.n > b.n end return a.r < b.r end)
+  if #ends > 0 then
+    local parts = {}
+    for _, x in ipairs(ends) do parts[#parts + 1] = x.n .. " " .. (TL_END_WORD[x.r] or tostring(x.r)) end
+    out[#out + 1] = "Sessions ended: " .. table.concat(parts, ", ")
+  end
+  return out
+end
+
+-- The Time view for one scope: input.events (M.timeLostEventsFor's slice of the ledger),
+-- input.entries (the index entries of the scope's transcripts, subagents flagged), input.pricing
+-- (cc-config pricing), input.name. `lost` = waiting on you + usage limits + stalls + the larger of
+-- error time (the ledger) and API retry time (the transcripts) -- the two measure the same outage
+-- from each side, so they are never added. Pure.
+function M.timeLostSummary(input)
+  input = type(input) == "table" and input or {}
+  local v = {
+    name = input.name,
+    you = { seconds = 0, count = 0, longest = nil, bySource = {} },
+    limit = { seconds = 0, count = 0, longest = 0 },
+    stalls = { seconds = 0, count = 0, longest = 0 },
+    errors = { seconds = 0, count = 0, byReason = {} },
+    retry = { seconds = 0, retries = 0, episodes = 0 },
+    compact = { seconds = 0, count = 0 },
+    turns = { count = 0, seconds = 0, longest = 0, exits = { done = 0, interrupted = 0, error = 0, unfinished = 0 } },
+    cache = { input = 0, read = 0, write5m = 0, write1h = 0, hitRate = nil, write5mUsd = 0, write1hUsd = 0, priced = false },
+    split = { mainTokens = 0, subTokens = 0, subagents = 0, sessions = 0, subShare = nil },
+    ends = {}, starts = {},
+  }
+  for _, e in ipairs(type(input.events) == "table" and input.events or {}) do
+    local s = math.max(0, tonumber(type(e) == "table" and e.seconds or nil) or 0)
+    if type(e) ~= "table" then
+      s = 0
+    elseif e.type == "waited" and e.source == "limit" then
+      v.limit.seconds = v.limit.seconds + s
+      v.limit.count = v.limit.count + 1
+      if s > v.limit.longest then v.limit.longest = s end
+    elseif e.type == "waited" then
+      local src = tostring(e.source or "approval")
+      v.you.seconds = v.you.seconds + s
+      v.you.count = v.you.count + 1
+      local b = v.you.bySource[src] or { seconds = 0, count = 0 }
+      b.seconds, b.count = b.seconds + s, b.count + 1
+      v.you.bySource[src] = b
+      if not v.you.longest or s > v.you.longest.seconds then v.you.longest = { source = src, seconds = s } end
+    elseif e.type == "hung_end" then
+      v.stalls.seconds = v.stalls.seconds + s
+      v.stalls.count = v.stalls.count + 1
+      if s > v.stalls.longest then v.stalls.longest = s end
+    elseif e.type == "error_end" then
+      local r = tostring(e.reason or "unknown")
+      v.errors.seconds = v.errors.seconds + s
+      v.errors.count = v.errors.count + 1
+      v.errors.byReason[r] = (v.errors.byReason[r] or 0) + s
+    elseif e.type == "session_end" then
+      local r = tostring(e.reason or "other")
+      v.ends[r] = (v.ends[r] or 0) + 1
+    elseif e.type == "session_start" and e.source then
+      local r = tostring(e.source)
+      v.starts[r] = (v.starts[r] or 0) + 1
+    end
+  end
+  local pricing = input.pricing
+  for _, e in ipairs(type(input.entries) == "table" and input.entries or {}) do
+    if type(e) == "table" then
+      v.retry.seconds = v.retry.seconds + (tonumber(e.retrySeconds) or 0)
+      v.retry.retries = v.retry.retries + (tonumber(e.retries) or 0)
+      v.retry.episodes = v.retry.episodes + (tonumber(e.retryEpisodes) or 0)
+      local r = e.retryOpen
+      if type(r) == "table" and r.since then   -- still retrying: counts up to its next attempt
+        v.retry.seconds = v.retry.seconds + math.max(0, (tonumber(r.last) or r.since) + (tonumber(r.wait) or 0) - r.since)
+      end
+      v.compact.seconds = v.compact.seconds + (tonumber(e.compactSeconds) or 0)
+      v.compact.count = v.compact.count + (tonumber(e.compactions) or 0)
+      if e.sub then
+        v.split.subagents = v.split.subagents + 1
+      else
+        v.split.sessions = v.split.sessions + 1
+        v.turns.count = v.turns.count + (tonumber(e.turns) or 0)
+        v.turns.seconds = v.turns.seconds + (tonumber(e.turnSeconds) or 0)
+        if (tonumber(e.longestTurn) or 0) > v.turns.longest then v.turns.longest = e.longestTurn end
+        for k, n in pairs(type(e.exits) == "table" and e.exits or {}) do
+          v.turns.exits[k] = (v.turns.exits[k] or 0) + (tonumber(n) or 0)
+        end
+      end
+      local u = type(e.usage) == "table" and e.usage or {}
+      local cc, cc1h = tonumber(u.cacheCreate) or 0, tonumber(u.cacheCreate1h) or 0
+      v.cache.input = v.cache.input + (tonumber(u.input) or 0)
+      v.cache.read = v.cache.read + (tonumber(u.cacheRead) or 0)
+      v.cache.write1h = v.cache.write1h + math.min(cc, cc1h)
+      v.cache.write5m = v.cache.write5m + math.max(0, cc - cc1h)
+      local real = (tonumber(u.input) or 0) + (tonumber(u.output) or 0) + cc
+      if e.sub then v.split.subTokens = v.split.subTokens + real else v.split.mainTokens = v.split.mainTokens + real end
+      for model, mu in pairs(type(u.byModel) == "table" and u.byModel or {}) do
+        local p = type(mu) == "table" and M.priceFor(model, pricing) or nil
+        if p then
+          local mcc = tonumber(mu.cacheCreate) or 0
+          local m1h = math.min(mcc, tonumber(mu.cacheCreate1h) or 0)
+          v.cache.priced = true
+          v.cache.write5mUsd = v.cache.write5mUsd + (mcc - m1h) / 1e6 * p.cacheWrite
+          v.cache.write1hUsd = v.cache.write1hUsd + m1h / 1e6 * (p.cacheWrite1h or p.cacheWrite)
+        end
+      end
+    end
+  end
+  local denom = v.cache.input + v.cache.read + v.cache.write5m + v.cache.write1h
+  if denom > 0 then v.cache.hitRate = v.cache.read / denom end
+  local tok = v.split.mainTokens + v.split.subTokens
+  if tok > 0 then v.split.subShare = v.split.subTokens / tok end
+  v.lost = v.you.seconds + v.limit.seconds + v.stalls.seconds + math.max(v.errors.seconds, v.retry.seconds)
+  v.callouts = M.timeLostCallouts(v)
+  v.empty = #v.callouts == 0
+  return v
 end
 
 return M

@@ -4380,5 +4380,36 @@ do
   check("leases: SETTINGS_KEEP_SUBKEYS keeps the hand-set range and folder", keep.portFrom and keep.portTo and keep.dbDir)
 end
 
+-- ---- where the time went: the Time view (2026-09-29) ----
+-- Build program unit 34: ⏱ Time in the detail panel (one session) and in a card's Instances (the
+-- project), a view above Instances, the index on its own timer (never the tick), the tick's episode
+-- step after the needs-you stamp, and every session word through esc().
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("time: the detail panel opens the session's Time view",
+        src:find([[<button id="b-time" onclick="openTimeLost('session', selectedKey)"]], 1, true) ~= nil)
+  check("time: a card's Instances opens the project's",
+        src:find([[<button id="inst-time" class="in-btn" onclick="openTimeLost('project', INST.stackKey)"]], 1, true) ~= nil)
+  check("time: the view sits above Instances (z-index 13 > 12)",
+        src:find("#timelost{ position:fixed; inset:0; background:var(--bg-overlay); z-index:13;", 1, true) ~= nil
+        and src:find("#instances{ position:fixed; inset:0; background:rgba(0,0,0,.5); z-index:12;", 1, true) ~= nil)
+  check("time: Escape closes it before Instances", src:find("if(closeTimeLost()) return;", 1, true) ~= nil)
+  check("time: every callout goes through esc()",
+        src:find("cs.map(function(c){ return '<li>' + esc(c) + '</li>'; })", 1, true) ~= nil)
+  check("time: the title (a session's name) is set as text, never HTML",
+        src:find('document.getElementById("tlv-title").textContent = ', 1, true) ~= nil)
+  check("time: the handler only takes session:<key> or project:<stackKey>",
+        src:find('if (kind == "session" or kind == "project") and id then', 1, true) ~= nil)
+  local tickBody = src:match("\nfunction FX%._refreshBody%(%)(.-)\nend\n") or ""
+  check("time: the tick steps the episodes after the needs-you stamp and never reads a transcript for the index",
+        #tickBody > 1000 and tickBody:find("FX.stepTimeLost", 1, true) ~= nil
+        and tickBody:find("FX.annotateNeedsYou(list)", 1, true) < tickBody:find("FX.stepTimeLost", 1, true)
+        and tickBody:find("refreshTimeIndex", 1, true) == nil)
+  check("time: its own retained timer runs the index", src:find("FX.timeIndexTimer = hs.timer.doEvery(", 1, true) ~= nil)
+  check("time: a chained pass is retained too", src:find("FX._timeIndexChain = hs.timer.doAfter(", 1, true) ~= nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

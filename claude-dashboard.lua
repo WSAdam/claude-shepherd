@@ -1334,6 +1334,33 @@ function FX.stepTurnLabel(it, pv, ledgerOn)
   it.turnLabelPending = (st.label == nil and st.tries < 5) or nil
 end
 
+-- Where the time went (2026-09-29, build program unit 34): each card's waits on Adam or on a usage
+-- limit, its stalls and its errors, ledgered ONCE each when they end -- waited{source, seconds},
+-- hung_end{seconds}, error_end{reason, seconds} (core.timeLostStep). Runs after FX.annotateNeedsYou:
+-- a wait on Adam is exactly what the needs-you stamp says. A card that went away ends what it had
+-- open (core.timeLostFinish). Only while the ledger is on.
+FX._timeLost = {}   -- key -> core.timeLostStep's record, plus the identity to ledger it by
+function FX.stepTimeLost(list)
+  if not ledgerEnabled() then FX._timeLost = {}; return end
+  local now, live = FX.now(), {}
+  for _, it in ipairs(list or {}) do
+    if it.key then
+      live[it.key] = true
+      local w = watchdog[it.key]
+      local rec, evs = core.timeLostStep(FX._timeLost[it.key], it, now, w and w.ts)
+      rec.ident = { session_id = it.session_id, key = it.key, name = it.name, projectKey = it.projectKey, cwd = it.cwd }
+      FX._timeLost[it.key] = rec
+      for _, ev in ipairs(evs) do ledgerFor(it, ev) end
+    end
+  end
+  for k, rec in pairs(FX._timeLost) do
+    if not live[k] then
+      for _, ev in ipairs(core.timeLostFinish(rec, now)) do ledgerFor(rec.ident or { key = k }, ev) end
+      FX._timeLost[k] = nil
+    end
+  end
+end
+
 -- Handoff notes (2026-09-28): a fresh or respawned session started blank. On each done edge the
 -- turn's evidence becomes ~/.claude/cc-notes/<key>.handoff.md (core.handoffNote); a respawn copies
 -- it to cc-notes/pending/ for the session that replaces it (FX.writePendingHandoff, from
@@ -7537,6 +7564,155 @@ function FX.annotateRadar(list)
   end
 end
 
+-- ---- Where the time went: the transcript index (2026-09-29, build program unit 34) -------------
+-- Every live session's transcripts (its own and its subagents') folded into core.timeIndexFold
+-- entries: turns and how they ended, API retry time, compactions, tokens by cache TTL. On the
+-- FX.refreshCommits pattern: its own timer (FX.timeIndexTimer), never the tick; one pass at a time,
+-- a hung one reclaimed. A pass reads only what changed (core.timeIndexPlan: size and mtime, from each
+-- entry's offset) with `tail | head` into scratch files in an hs.task, and its callback folds those
+-- bytes only while its task still owns the slot. Byte caps bound each pass; one left behind chains
+-- the next straight away. Nothing is saved: after a reload the entries are rebuilt, a capped pass
+-- at a time. State on FX: the main chunk is at Lua's 200-local cap.
+FX._timeIndex = { entries = {}, bySession = {} }
+
+-- The live sessions' transcripts with their size and mtime, and which belong to which session.
+function FX.timeIndexFiles(list)
+  local files, bySession = {}, {}
+  for _, it in ipairs(list or {}) do
+    if it.key and not it.remote and type(it.transcript_path) == "string" and it.transcript_path ~= "" then
+      local mine = {}
+      local paths = { { it.transcript_path, false } }
+      for _, sp in ipairs(FX.subagentTranscripts(it.transcript_path)) do paths[#paths + 1] = { sp, true } end
+      for _, p in ipairs(paths) do
+        local a = hs.fs.attributes(p[1])
+        if type(a) == "table" and a.mode == "file" and tonumber(a.size) then
+          files[#files + 1] = { path = p[1], size = a.size, mtime = tonumber(a.modification) or 0, sub = p[2] }
+          mine[#mine + 1] = p[1]
+        end
+      end
+      bySession[it.key] = mine
+    end
+  end
+  return files, bySession
+end
+
+-- force: true = read what changed now (the Time view just opened). list: the cards (default: the
+-- last tick's).
+function FX.refreshTimeIndex(force, list)
+  local cfg = loadConfig()
+  local st = FX._timeIndex
+  if core.config(cfg, "timeLost.enabled", true) == false then
+    if st.inflight and st.inflight.task then pcall(function() st.inflight.task:terminate() end) end
+    FX._timeIndex = { entries = {}, bySession = {} }
+    return
+  end
+  local now = os.time()
+  local ttl = math.max(30, tonumber(core.config(cfg, "timeLost.refreshSeconds", 120)) or 120)
+  if force == true or st.behind then ttl = 0 end
+  local plan = core.prPollPlan(st.cache, st.inflight, now, { ttl = ttl, retryTtl = 30, deadline = 60 })
+  if plan.act ~= "start" then return end
+  if plan.killStale and st.inflight and st.inflight.task then
+    pcall(function() st.inflight.task:terminate() end)   -- a hung read: reclaim the slot
+    print("⚠️ [cc-dashboard] time index: the last read hung past 60s; starting over")
+  end
+  st.inflight = nil
+  local files, bySession = FX.timeIndexFiles(list or lastRenderList)
+  st.bySession = bySession
+  local want = {}
+  for _, f in ipairs(files) do want[f.path] = true end
+  core.reapUnbacked(st.entries, want)   -- a transcript no live session has any more
+  local reads = core.timeIndexPlan(st.entries, files)
+  st.cache = { ts = now, data = true }
+  st.behind = nil
+  if #reads == 0 then return end
+  local outBase = FX.scratchFile("time")
+  local cmd = core.timeIndexScanCommand(reads, outBase)
+  local started = hs.timer.secondsSinceEpoch()
+  local function cleanup() for i = 1, #reads do pcall(os.remove, outBase .. "." .. i) end end
+  print("🔍 [cc-dashboard] time index: reading " .. #reads .. " transcript(s)" .. (force == true and " (asked)" or ""))
+  local ok = pcall(function()
+    local t   -- forward-declared: the callback's ownership check needs THIS task as an upvalue
+    t = hs.task.new("/bin/sh", function(code)
+      if FX._timeIndex ~= st or not core.prCallbackOwns(st.inflight, t) then cleanup(); return end
+      st.inflight = nil
+      local bytes, behind = 0, false
+      if code == 0 then
+        for i, r in ipairs(reads) do
+          local text = FX.readFile(outBase .. "." .. i) or ""
+          bytes = bytes + #text
+          local e = core.timeIndexApply(st.entries[r.path], r, text)
+          st.entries[r.path] = e
+          behind = behind or e.more
+        end
+      end
+      cleanup()
+      local ms = math.floor((hs.timer.secondsSinceEpoch() - started) * 1000)
+      if code == 0 then
+        st.behind = behind or nil
+        print("✅ [cc-dashboard] time index: " .. #reads .. " transcript(s), " .. bytes .. " bytes in " .. ms .. "ms"
+          .. (behind and " -- more to read" or ""))
+      else
+        print("❌ [cc-dashboard] time index: the read exited " .. tostring(code) .. " after " .. ms .. "ms; keeping the last index")
+      end
+      if FX._timeView then pcall(FX.pushTimeLost) end
+      -- left behind by a byte cap: the next pass, soon (retained, or GC can eat it)
+      if st.behind then FX._timeIndexChain = hs.timer.doAfter(2, function() pcall(FX.refreshTimeIndex) end) end
+    end, { "-c", cmd })
+    if not t then error("task create failed") end
+    st.inflight = { task = t, ts = now }
+    t:start()
+  end)
+  if not ok then
+    st.inflight = nil; cleanup()
+    print("❌ [cc-dashboard] time index: couldn't start the read")
+  end
+end
+
+-- The open Time view (FX._timeView = { kind = "session"|"project", id = key|stackKey }): the
+-- scope's sessions, their index entries, and the ledger's last timeLost.days days for them
+-- (read once per open -- only the index moves while it is open), summarised by core.timeLostSummary.
+function FX.pushTimeLost(list)
+  local tv = FX._timeView
+  if type(tv) ~= "table" or not tv.id or tv.id == "" then return end
+  local cfg = loadConfig()
+  local members = {}
+  for _, it in ipairs(list or lastRenderList or {}) do
+    if (tv.kind == "session" and it.key == tv.id) or (tv.kind == "project" and it.stackKey == tv.id) then
+      members[#members + 1] = it
+    end
+  end
+  local days = math.max(1, tonumber(core.config(cfg, "timeLost.days", 7)) or 7)
+  local on = ledgerEnabled()
+  if tv.events == nil then
+    local scope = { sessions = {}, keys = {}, projects = {}, sinceTs = FX.now() - days * 86400 }
+    for _, it in ipairs(members) do
+      if it.session_id then scope.sessions[it.session_id] = true end
+      scope.keys[it.key] = true
+      if tv.kind == "project" and it.projectKey then scope.projects[it.projectKey] = true end
+    end
+    tv.events = {}
+    if on then
+      local types = {}
+      for t in pairs(core.TIME_LOST_EVENT_TYPES) do types[#types + 1] = t end
+      tv.events = core.timeLostEventsFor(FX.readLedger({ types = types, sinceTs = scope.sinceTs, limit = 0 }).events, scope)
+    end
+  end
+  local entries = {}
+  for _, it in ipairs(members) do
+    for _, p in ipairs(FX._timeIndex.bySession[it.key] or {}) do
+      local e = FX._timeIndex.entries[p]
+      if e then entries[#entries + 1] = e end
+    end
+  end
+  local lead = members[1]
+  local name = lead and ((tv.kind == "project" and lead.stackName) or lead.label or lead.autoTitle or lead.name) or tv.id
+  local view = core.timeLostSummary({ entries = entries, events = tv.events, pricing = core.config(cfg, "pricing", nil), name = name })
+  local st = FX._timeIndex
+  local payload = { kind = tv.kind, name = name, sessions = #members, days = days, ledger = on,
+    indexing = (st.inflight ~= nil or st.behind) and true or false, view = view }
+  pcall(function() wv:evaluateJavaScript("window.ccTimeLost(" .. hs.json.encode(payload) .. ")") end)
+end
+
 -- The open Instances view (FX._instancesView = {stackKey,...}): its members (visible and
 -- hidden) plus the repo's worktrees with no session, pushed only when the JSON changed.
 -- The tick calls this while the panel is visible; opening the view forces one push.
@@ -9424,6 +9600,23 @@ local function handleBridgeMsg(msg)
       series = core.costSeries(res.events, { days = 14, tzOffset = tzOff, now = nowt }),
     }
     pcall(function() wv:evaluateJavaScript("window.ccCost(" .. hs.json.encode(data) .. ")") end)
+    return
+  end
+  if a == "open-time-lost" then
+    -- 2026-09-29 (unit 34): the Time view, "session:<key>" from the detail panel or
+    -- "project:<stackKey>" from a card's Instances. Paints from the index as it is, then reads
+    -- what changed since the last pass (the callback repaints).
+    local kind, id = tostring(payload.v or ""):match("^(%a+):(.+)$")
+    if (kind == "session" or kind == "project") and id then
+      FX._timeView = { kind = kind, id = id }
+      print("[cc-dashboard] 🔍 time view: " .. kind .. " " .. id)
+      pcall(FX.pushTimeLost)
+      pcall(FX.refreshTimeIndex, true)
+    end
+    return
+  end
+  if a == "close-time-lost" then
+    FX._timeView = nil
     return
   end
   if a == "open-insights-view" then
@@ -11973,6 +12166,17 @@ local HTML = [[
 #trace .ov-foot span{ min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .tr-dry{ display:none; padding:8px 16px; border-bottom:1px solid var(--border); color:var(--st-approval); font-weight:600; }
 .tr-dry.on{ display:block; }
+/* Where the time went (2026-09-29): above Instances (z 12), which it opens from */
+#timelost{ position:fixed; inset:0; background:var(--bg-overlay); z-index:13; display:none; flex-direction:column; font-size:12px; }
+#timelost.show{ display:flex; }
+#timelost .ov-head{ display:flex; align-items:center; justify-content:space-between; gap:10px; padding:12px 16px; border-bottom:1px solid var(--border); font-weight:600; color:var(--text); }
+#timelost .ov-head span{ min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#timelost .ov-body{ flex:1; overflow-y:auto; padding:14px 16px; }
+#timelost .ov-foot{ padding:10px 16px; border-top:1px solid var(--border); display:flex; gap:12px; align-items:center; color:var(--dim); font-size:11px; }
+#timelost .ov-foot button{ background:var(--surface); color:var(--text-2); border:1px solid var(--border); border-radius:7px; padding:5px 12px; cursor:pointer; font-size:12px; }
+.tlv-note{ padding:8px 10px; margin-bottom:10px; border:1px solid var(--border); border-radius:8px; color:var(--muted); }
+.tlv-callouts{ margin:0 0 12px; padding-left:18px; color:var(--text); line-height:1.6; }
+.tlv-callouts li{ overflow-wrap:anywhere; }
 .tr-row{ display:flex; align-items:baseline; gap:8px; padding:5px 0; border-bottom:1px solid var(--border); }
 .tr-ts{ color:var(--dim); font-variant-numeric:tabular-nums; white-space:nowrap; }
 .tr-oc{ font-size:10px; text-transform:uppercase; letter-spacing:.04em; padding:1px 6px; border-radius:5px; border:1px solid var(--border); white-space:nowrap; }
@@ -12581,6 +12785,7 @@ local HTML = [[
       <button id="b-verify" onclick="act('verify')" title="A read-only Sonnet review of this session's work, in the background: its merge request's commits, or its checkout against main (uncommitted work included). Shepherd scans the diff for red flags first. The verdict shows here and in the merge review.">🔎 Verify</button>
       <button id="b-timeline" onclick="openSessionTimeline()" title="Show this session's recorded activity timeline (needs the ledger enabled).">📜 Timeline</button>
       <button id="b-trace" onclick="openTrace(selectedKey)" title="What automation did to this session, would do in a dry run, and was refused (and why) -- newest first, repeats as ×N.">⚡ Trace</button>
+      <button id="b-time" onclick="openTimeLost('session', selectedKey)" title="Where this session's time went: waiting on you, at usage limits, stalled, in errors and API retries -- plus how its turns ended, its cache hit rate and what its subagents used.">⏱ Time</button>
       <button id="b-export" onclick="exportSession()" title="Export this session: copy its transcript (.jsonl) + a meta.json (label, provider/model, lineage, activity counters) into ~/.claude/cc-exports and reveal it in Finder.">⤓ Export</button>
       <button id="b-scenario" onclick="captureScenario()" title="Capture as scenario: save a scrubbed window of this session's transcript (the 64KB Shepherd reads) to ~/.claude/cc-scenarios/ with a label to fill in -- what was really true at this moment -- so the detector corpus can measure it. Never written into a repo.">⌖ Capture as scenario</button>
     </div>
@@ -13038,7 +13243,7 @@ local HTML = [[
        with no session (Open). Filled by window.ccInstances; rows use data-inact. -->
   <div id="instances" onclick="instBackdrop(event)">
     <div id="inst-card" role="dialog" aria-label="Instances">
-      <div class="ov-head"><span id="inst-title">Instances</span><button id="inst-newtab" class="in-btn" onclick="openNewTabForm()" title="Open a new Claude tab in this repo's window that starts its own worktree (.claude/worktrees/). The prompt is typed in for you; nothing is sent until you press Return.">＋ New worktree tab</button><button class="s-x" onclick="closeInstances()" title="Close (Esc)">✕</button></div>
+      <div class="ov-head"><span id="inst-title">Instances</span><button id="inst-time" class="in-btn" onclick="openTimeLost('project', INST.stackKey)" title="Where this project's time went over the last days: waiting on you, at usage limits, stalled, in errors and API retries -- plus its sessions' turns, cache hit rate and subagents.">⏱ Time</button><button id="inst-newtab" class="in-btn" onclick="openNewTabForm()" title="Open a new Claude tab in this repo's window that starts its own worktree (.claude/worktrees/). The prompt is typed in for you; nothing is sent until you press Return.">＋ New worktree tab</button><button class="s-x" onclick="closeInstances()" title="Close (Esc)">✕</button></div>
       <div id="inst-clean"><button id="inst-selfin" class="in-btn" onclick="instSelectFinished()">Select finished</button><button id="inst-selall" class="in-btn" onclick="instSelectAll()" title="Check every session that can be closed -- then uncheck the ones to keep">Select all</button><button id="inst-selnone" class="in-btn" onclick="instSelectNone()">Clear</button><button id="inst-closesel" class="in-btn" onclick="instCloseSelected()" disabled>Close selected</button></div>
       <div class="ov-body" id="inst-body"></div>
       <div id="inst-new">
@@ -13057,6 +13262,13 @@ local HTML = [[
     <div class="ov-head"><span>💰 Cost &amp; tokens</span><button class="s-x" onclick="closeCost()">✕</button></div>
     <div class="ov-body" id="cost-body"></div>
     <div class="ov-foot"><button onclick="openCost()">Refresh</button><span>Estimated API-equivalent $ from the audit ledger's usage snapshots.</span></div>
+  </div>
+
+  <!-- Where the time went (2026-09-29): one session (detail panel) or one project card (Instances) -->
+  <div id="timelost" role="dialog" aria-label="Where the time went">
+    <div class="ov-head"><span id="tlv-title">⏱ Where the time went</span><button class="s-x" onclick="closeTimeLost()" title="Close (Esc)">✕</button></div>
+    <div class="ov-body" id="tlv-body"></div>
+    <div class="ov-foot"><button onclick="refreshTimeLost()">Refresh</button><span id="tlv-foot"></span></div>
   </div>
 
   <div id="mcpskills">
@@ -17504,6 +17716,7 @@ local HTML = [[
       });
       document.addEventListener("keydown", function(e){
         if(e.key !== "Escape") return;
+        if(closeTimeLost()) return;                            // the Time view sits above Instances
         var nf = document.getElementById("inst-new");          // an open form closes first
         if(nf && nf.classList.contains("show")){ closeNewTabForm(); return; }
         var ov = document.getElementById("instances");
@@ -17686,6 +17899,80 @@ local HTML = [[
         html += '</table>';
       }
       body.innerHTML = html;
+    };
+
+    // ---- Where the time went (2026-09-29, build program unit 34) ----
+    // Lua answers open-time-lost with window.ccTimeLost({ kind, name, sessions, days, ledger,
+    // indexing, view }) -- view is core.timeLostSummary: the callouts (plain sentences), and the
+    // seconds and tokens behind them. The name and every sentence carry session words: esc() each.
+    var TLV = { kind: "", id: "" };
+    function openTimeLost(kind, id){
+      if(!id) return;
+      TLV = { kind: kind, id: String(id) };
+      document.getElementById("tlv-body").innerHTML = '<div class="tl-empty">Reading…</div>';
+      document.getElementById("timelost").classList.add("show");
+      send("open-time-lost", kind + ":" + id);
+    }
+    function refreshTimeLost(){ if(TLV.id) send("open-time-lost", TLV.kind + ":" + TLV.id); }
+    function closeTimeLost(){
+      var ov = document.getElementById("timelost");
+      if(!ov || !ov.classList.contains("show")) return false;
+      ov.classList.remove("show");
+      send("close-time-lost");
+      return true;
+    }
+    function tlvDur(s){
+      s = Math.max(0, Math.floor(+s || 0));
+      if(s < 60) return s + "s";
+      var m = Math.floor(s / 60);
+      if(m < 60){ var rs = s % 60; return rs ? m + "m " + rs + "s" : m + "m"; }
+      var h = Math.floor(m / 60), rm = m % 60;
+      return rm ? h + "h " + rm + "m" : h + "h";
+    }
+    function tlvCard(v, k){ return '<div class="i-card"><div class="v">' + esc(v) + '</div><div class="k">' + esc(k) + '</div></div>'; }
+    function timeLostHtml(p){
+      p = p || {};
+      var v = p.view || {};
+      var sec = function(o){ return (o && +o.seconds) || 0; };
+      var html = "";
+      if(!p.ledger){
+        html += '<div class="tlv-note">The audit ledger is off, so waits, stalls and errors aren\'t recorded -- turn it on in Settings → Audit log. What the transcripts show still counts.</div>';
+      }
+      html += '<div class="i-cards">'
+        + tlvCard(tlvDur(v.lost), "lost")
+        + tlvCard(tlvDur(sec(v.you)), "waiting on you")
+        + tlvCard(tlvDur(sec(v.limit)), "at usage limits")
+        + tlvCard(tlvDur(sec(v.stalls)), "stalled")
+        + tlvCard(tlvDur(Math.max(sec(v.errors), sec(v.retry))), "errors & retries")
+        + '</div>';
+      var cs = Array.isArray(v.callouts) ? v.callouts : [];
+      if(cs.length){
+        html += '<ul class="tlv-callouts">' + cs.map(function(c){ return '<li>' + esc(c) + '</li>'; }).join("") + '</ul>';
+      } else {
+        html += '<div class="tl-empty">Nothing recorded yet' + (p.kind === "project" ? " for this project" : " for this session") + '. Waits and stalls are counted as they end; transcripts are read in the background.</div>';
+      }
+      var by = (v.you && v.you.bySource && typeof v.you.bySource === "object" && !Array.isArray(v.you.bySource)) ? v.you.bySource : {};
+      var names = { approval: "approvals", question: "questions", merge: "merge reviews", batch: "batch proposals" };
+      var rows = Object.keys(by).sort().map(function(k){
+        var b = by[k] || {};
+        return '<tr><td>' + esc(names[k] || k) + '</td><td class="n">' + esc(String(+b.count || 0)) + '</td><td class="n">' + esc(tlvDur(b.seconds)) + '</td></tr>';
+      });
+      if(rows.length){
+        html += '<div class="i-sec">Waiting on you, by kind</div><table class="i-tbl"><tr><th>kind</th><th class="n">waits</th><th class="n">time</th></tr>' + rows.join("") + '</table>';
+      }
+      return html;
+    }
+    window.ccTimeLost = function(p){
+      p = p || {};
+      var ov = document.getElementById("timelost");
+      if(!ov || !ov.classList.contains("show")) return;
+      document.getElementById("tlv-title").textContent = "⏱ Where the time went — " + (p.name || "");
+      document.getElementById("tlv-body").innerHTML = timeLostHtml(p);
+      var n = +p.sessions || 0;
+      document.getElementById("tlv-foot").textContent = (p.kind === "project"
+          ? n + " session" + (n === 1 ? "" : "s") + " on this card; the ledger's last " + (+p.days || 7) + " days"
+          : "The ledger's last " + (+p.days || 7) + " days")
+        + (p.indexing ? " · still reading transcripts…" : "");
     };
 
     // 🔌 MCPs & Skills viewer. Open renders instantly from config files (+ last
@@ -21585,6 +21872,12 @@ function FX._refreshBody()
   -- whether each card really needs Adam (a live counterpart AND an affordance that changes
   -- something) or is only a heads-up; the ranking and the panel both read what it stamps.
   FX.annotateNeedsYou(list)
+  -- 2026-09-29: where the time went -- each wait, stall and error ledgered once, when it ends.
+  -- After the needs-you stamp: what counts as a wait on Adam is what it says.
+  do
+    local okt, errt = pcall(FX.stepTimeLost, list)
+    if not okt then print("[cc-dashboard] ❌ time-lost step failed: " .. tostring(errt)) end
+  end
   -- 2026-09-29: the batch relay -- each batch unit's events, once each, for `cc-fleet.sh wait`.
   -- After the needs-you stamp, so every source (merge, checker, ask) is already on the tiles.
   do
@@ -21831,6 +22124,8 @@ M.commitsTimer = hs.timer.doEvery(60, function() pcall(FX.refreshCommits); pcall
 -- Overlap radar (2026-09-29): each repo's scan is redone once it is radar.refreshSeconds old
 -- (FX.refreshRadar decides per repo); never on the tick.
 FX.radarTimer = hs.timer.doEvery(30, function() pcall(FX.refreshRadar) end)
+-- 2026-09-29: the Time view's transcript index -- its own timer, never the tick (timeLost.refreshSeconds)
+FX.timeIndexTimer = hs.timer.doEvery(60, function() pcall(FX.refreshTimeIndex) end)
 -- Official plan-usage window (metadata call, no model tokens): refresh every 180s.
 M.officialUsageTimer = hs.timer.doEvery(OFFICIAL_TTL, function()
   pcall(FX.fetchOfficialUsage)

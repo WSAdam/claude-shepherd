@@ -267,6 +267,13 @@
     "lookbackDays": 14
   },
 
+  "timeLost": {
+    "_comment": "Where the time went (ON by default, read-only): ⏱ Time in a session's detail panel or a card's Instances. Waits on you, usage limits, stalls and errors come from the audit ledger (ledger.enabled); turns, API retries, compactions and cache/subagent tokens from each live session's transcripts, read in the background every refreshSeconds (min 30) and when the view opens -- only the bytes that changed. days = how far back a view reads the ledger. enabled=false stops the transcript reads.",
+    "enabled": true,
+    "refreshSeconds": 120,
+    "days": 7
+  },
+
   "insights": {
     "_comment": "Fleet insights view (Feature A) — the 📊 toolbar button. A read-only aggregate of the ledger (turns/session, approval & denial rates, decision provenance, time the fleet spent blocked on you). Always available like the audit view; shows zeros until the ledger is enabled. maxBlockSeconds caps a single request→approval gap when summing 'time blocked on you', so an overnight idle isn't counted.",
     "maxBlockSeconds": 1800
