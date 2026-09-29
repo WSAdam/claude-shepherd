@@ -4183,5 +4183,53 @@ do
      okd and type(dcfg) == "table" and (dcfg.automation or {}).dryRun, false)
 end
 
+-- ---- the red-first proof (2026-09-29, build program unit 20) ----
+-- After the pre-merge gate passes, the unit's changed tests run on a scratch worktree at the
+-- merge-base, in the gate lane. Source pins: it shares the lane, starts from the tick, a finished
+-- run's leftover worktree is removed, the startup sweep takes a crash's leftover, and the review
+-- shows it through textContent -- beside the gate, never read by readiness or the Merge button.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  local pump = src:match("\nfunction FX%.mergeGatePump%(.-\nend\n") or ""
+  check("red-first: its runs share the repo's one gate lane",
+        pump:find("FX._redFirstRuns, FX._redFirstBase", 1, true) ~= nil)
+  local launch = src:match("\nfunction FX%.mergeGateLaunch%(.-\n  return g\nend\n") or ""
+  check("red-first: a finished run's leftover scratch worktree is removed", launch:find("if g.scratch then FX.redFirstCleanup(g) end", 1, true) ~= nil)
+  local ann = src:match("\nfunction FX%.annotateMerges%(.-\nend\n") or ""
+  check("red-first: the tick computes it for a waiting request, after the gate",
+        ann:find("redFirst = FX.redFirst(r, facts, gate, cfg)", 1, true) ~= nil and ann:find("FX.redFirstPrune(reqs)", 1, true) ~= nil)
+  check("red-first: ...and hands it to the review", ann:find("core.checkerView(crec, cid), redFirst)", 1, true) ~= nil)
+  local sweep = src:match("\nfunction FX%.pruneScratch%(%)(.-)\nend\n") or ""
+  check("red-first: the startup sweep hands a leftover scratch worktree to git, not os.remove",
+        sweep:find("core.isRedFirstScratch(", 1, true) ~= nil and sweep:find("FX.redFirstCleanup(", 1, true) ~= nil)
+  local cleanup = src:match("\nfunction FX%.redFirstCleanup%(.-\nend\n") or ""
+  check("red-first: the cleanup runs in the background on a retained task",
+        cleanup:find("hs.task.new(", 1, true) ~= nil and cleanup:find("FX._redFirstCleanups[path] = t", 1, true) ~= nil
+        and cleanup:find("hs.execute", 1, true) == nil)
+  local readiness = ""
+  do
+    local cf = io.open(ROOT .. "cc-core.lua", "r")
+    local csrc = cf and cf:read("*a") or ""
+    if cf then cf:close() end
+    readiness = (csrc:match("\nfunction M%.mergeReadiness%(.-\nend\n") or "") .. (csrc:match("\nfunction M%.mergeNeedsYou%(.-\nend\n") or "")
+      .. (csrc:match("\nfunction M%.mergeLine%(.-\nend\n") or "")
+  end
+  check("red-first: readiness, needs-you and the card line never read it (warn only)",
+        #readiness > 0 and readiness:find("redFirst", 1, true) == nil)
+  check("red-first: the review has its line in the scrolling body, under the gate, claims and checker lines",
+        (src:match('<div class="dm%-body">.-</div>%s*<div class="dm%-acts"') or ""):find('id="dm%-checker"></div>%s*<div class="dm%-redfirst" id="dm%-redfirst">') ~= nil)
+  local review = src:match("\n    function renderMerge%(it%)%{.-\n    %}\n") or ""
+  check("red-first: ...filled from m.redFirst through textContent, never innerHTML",
+        review:find("redFirstText(m.redFirst, m.base)", 1, true) ~= nil and review:find("rfEl.textContent = rfv.text", 1, true) ~= nil
+        and review:find("innerHTML", 1, true) == nil)
+  check("red-first: ...and the Merge button's state never looks at it",
+        (review:match("var bm = document.getElementById%(\"dm%-merge\"%);(.-)var pre =") or "x"):find("redFirst", 1, true) == nil)
+  check("red-first: not red warns, never the danger colour",
+        (src:match("#d%-merge %.dm%-redfirst%.r%-notRed[^{]*{ ([^}]*)}") or ""):find("var(--warn)", 1, true) ~= nil
+        and src:find(".dm-redfirst.r-notRed { color:var(--danger)", 1, true) == nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

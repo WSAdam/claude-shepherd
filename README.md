@@ -120,6 +120,8 @@ The automatic behaviours here are off until you turn them on, except handoff not
 - [**Merge checker**](docs/merging-and-batches.md#the-checker-a-read-only-review-of-every-merge-request):
   every merge request gets red flags from the diff and a read-only Sonnet review; a batch unit
   merges only on a pass, and 🔎 Verify reviews any session.
+- [**Red-first proof**](docs/merging-and-batches.md#the-red-first-proof-do-the-new-tests-fail-without-the-fix):
+  the unit's changed tests run on the merge-base without its fix, and the review says whether they fail.
 - [**Claude drives a batch**](docs/merging-and-batches.md#claude-drives-a-batch): a session proposes
   several units, you approve once, and it opens their tabs and hands out the tasks.
 - [**Tab bridge**](docs/merging-and-batches.md#the-tab-bridge): a small VS Code extension that

@@ -467,7 +467,10 @@ end
 function FX.pruneScratch()
   for _, name in ipairs(FX.readDir(FX._scratchDir)) do
     if name ~= "." and name ~= ".." then
-      pcall(os.remove, FX._scratchDir .. "/" .. name)
+      -- 2026-09-29: a red-first scratch WORKTREE a crash left behind is git's to remove (the repo
+      -- still lists it), in the background; os.remove can't take a folder anyway
+      if core.isRedFirstScratch(FX._scratchDir .. "/" .. name) then FX.redFirstCleanup({ scratch = FX._scratchDir .. "/" .. name })
+      else pcall(os.remove, FX._scratchDir .. "/" .. name) end
     end
   end
 end
@@ -4186,6 +4189,11 @@ end
 -- State on FX, not new chunk-level locals: the main chunk is at Lua's 200-local cap.
 FX._mergeGates = {}       -- gate key -> record: the pre-merge run, in the worktree
 FX._mergeGatesPost = {}   -- gate key -> record: the post-merge run, in the main checkout
+-- 2026-09-29 (red-first proof, FX.redFirst): the unit's changed tests without its fix, same lane
+FX._redFirstPlans = {}    -- gate key -> { nonce, plan, baseKey }: what one request+commit runs
+FX._redFirstRuns = {}     -- gate key -> lane record: the changed tests on the merge-base
+FX._redFirstBase = {}     -- base key -> lane record: the same files on the base tip (cached per tip)
+FX._redFirstCleanups = {} -- scratch path -> the retained task removing a worktree a run left behind
 
 -- Claim (or return) the one run for this gate key. `slot` is the table it lives in, so the
 -- pre- and post-merge runs of the same commit can't collide (an ff-merge makes both shas equal).
@@ -4204,9 +4212,10 @@ function FX.mergeGateStart(slot, gkey, gate, dir, nonce, where, commonDir)
     if not core.mergeGateCmd(gate, dir, "/dev/null") then return nil end
     -- run/repo/script/refuse: a repo-declared gate's built line, its scratch copy, and why it
     -- was refused (FX.repoGateFor); a configured gate has none of them
+    -- scratch: a red-first run's scratch worktree, removed if the run leaves it (FX.redFirstCleanup)
     g = { state = "queued", command = gate.command, at = FX.now(), nonce = nonce, where = where,
           commonDir = commonDir, dir = dir, timeoutSeconds = gate.timeoutSeconds,
-          run = gate.run, repo = gate.repo, script = gate.script, refuse = gate.why }
+          run = gate.run, repo = gate.repo, script = gate.script, refuse = gate.why, scratch = gate.scratch }
     slot[gkey] = g
   end
   FX.mergeGatePump()
@@ -4218,7 +4227,9 @@ end
 -- tick, so a queued gate starts the moment the lane frees.
 function FX.mergeGatePump()
   local runs, byKey = {}, {}
-  for si, slot in ipairs({ FX._mergeGates, FX._mergeGatesPost }) do
+  -- 2026-09-29: the red-first runs (FX.redFirst) share the lane: a scratch worktree is cheap, a
+  -- second copy of the suite running beside the gate is not
+  for si, slot in ipairs({ FX._mergeGates, FX._mergeGatesPost, FX._redFirstRuns, FX._redFirstBase }) do
     for gkey, g in pairs(slot) do
       local rec = { key = si .. "|" .. gkey, state = g.state, commonDir = g.commonDir, at = g.at,
                     slot = slot, gkey = gkey, g = g }
@@ -4268,6 +4279,8 @@ function FX.mergeGateLaunch(slot, gkey, g)
       g.doneAt = FX.now()
       print("[cc-dashboard] merge gate (" .. tostring(where) .. ") " .. tostring(gate.command)
         .. " -> " .. tostring(g.state) .. " (exit " .. tostring(g.code) .. ")")
+      -- a red-first run removes its scratch worktree itself; a timed-out one can't
+      if g.scratch then FX.redFirstCleanup(g) end
     end, { "-l", "-c", cmd })
     if not myTask then error("task create failed") end
     myTask:setWorkingDirectory(dir)
@@ -4371,6 +4384,140 @@ function FX.mergeGatePrune(reqs)
       end
     end
   end
+end
+
+-- ---- The red-first proof (2026-09-29, build program unit 20) -------------------------------
+-- After a request's pre-merge gate PASSES, the gate entry's redFirstCommand runs the unit's
+-- changed test files on a detached scratch worktree at the merge-base (core.redFirstRunCmd, in
+-- Shepherd's scratch dir, never .claude/worktrees/), and the files that also exist on the base
+-- tip run there too, cached per tip, so failures main already has are split out. Both go through
+-- the gate lane (FX.mergeGatePump). WARN ONLY: core.redFirstVerdict rides on the review as
+-- v.redFirst; readiness, the card line and a delegated batch merge never read it.
+
+-- What one request+commit runs: the changed files (Shepherd's own git, uncapped) and which of
+-- them are on the base tip. Read once per gate key; two quick git calls.
+function FX.redFirstPlanFor(r, sha, cmd)
+  local out
+  pcall(function() out = hs.execute(core.redFirstPlanCmd(r, sha)) end)
+  local plan, why = core.redFirstPlan(out, cmd)
+  if not plan then
+    print("[cc-dashboard] ⚠️ red-first for " .. tostring(r.branch) .. " couldn't start: " .. tostring(why))
+    return { nonce = r.nonce, plan = { err = why, command = cmd, run = {} } }
+  end
+  local baseKey
+  if #plan.run > 0 then
+    local ab
+    pcall(function() ab = hs.execute(core.redFirstAtBaseCmd(r.commonDir, plan.baseTip, plan.run)) end)
+    local atBase = core.redFirstAtBase(ab, plan.run)
+    if atBase then plan.atBase = atBase else plan.baseUnknown = true end
+    if #plan.atBase > 0 then
+      plan.baseCmd = core.redFirstExpand(cmd, plan.atBase)
+      baseKey = tostring(r.commonDir) .. "|" .. plan.baseTip .. "|" .. plan.baseCmd
+    end
+  end
+  print("[cc-dashboard] 🔍 red-first for " .. tostring(r.branch) .. ": " .. #plan.run .. " changed test file(s), "
+    .. #plan.atBase .. " also on " .. tostring(r.base))
+  return { nonce = r.nonce, plan = plan, baseKey = baseKey }
+end
+
+-- One lane run: the existing record, unless it couldn't run and is due a retry -- then it starts
+-- over in a fresh scratch folder.
+function FX.redFirstStart(slot, key, r, dir, spec, nonce, where, timeoutSeconds)
+  local g = slot[key]
+  if g and not core.mergeGateRetryDue(g, FX.now()) then return g end
+  if g then
+    if g.logPath then pcall(os.remove, g.logPath) end
+    slot[key] = nil
+  end
+  spec.commonDir, spec.scratch = r.commonDir, FX.scratchFile(core.RED_FIRST_TAG)
+  local run = core.redFirstRunCmd(spec)
+  if not run then
+    slot[key] = { state = "couldntRun", why = "Shepherd couldn't build the red-first run", command = spec.command,
+                  commonDir = r.commonDir, nonce = nonce, at = FX.now(), doneAt = FX.now() }
+    return slot[key]
+  end
+  return FX.mergeGateStart(slot, key, { command = spec.command, run = run, scratch = spec.scratch,
+                                        timeoutSeconds = timeoutSeconds }, dir, nonce, where, r.commonDir)
+end
+
+-- The review's v.redFirst for a request, starting its runs once its gate passed. nil = no
+-- redFirstCommand for this project, or a gate that isn't green (the gate is the news then).
+function FX.redFirst(r, facts, gate, cfg)
+  local cg = core.mergeGateFor(cfg, FX._mergeItems[r.key])
+  local cmd = cg and cg.redFirstCommand
+  if not cmd or type(facts) ~= "table" or not facts.sha then return nil end
+  local gkey = core.mergeGateKey(r, facts.sha)
+  if not gkey then return nil end
+  -- an earlier commit's run still waiting for the lane is dropped: this commit is what merges
+  for key, g in pairs(FX._redFirstRuns) do
+    if key ~= gkey and g.nonce == r.nonce and g.state == "queued" then FX._redFirstRuns[key] = nil end
+  end
+  local p = FX._redFirstPlans[gkey]
+  if not p then
+    local due = core.redFirstDue(gate)
+    if due ~= "run" then return (due == "wait") and { state = "waiting", command = cmd } or nil end
+    p = FX.redFirstPlanFor(r, facts.sha, cmd)
+    FX._redFirstPlans[gkey] = p
+  end
+  local plan = p.plan
+  if not plan.err and #plan.run > 0 then
+    local dir = core.mergeMainRoot(r) or r.worktree   -- the lane's launch dir; the run cd's into its scratch
+    FX.redFirstStart(FX._redFirstRuns, gkey, r, dir, { at = plan.mergeBase, applyFrom = facts.sha,
+      apply = plan.apply, command = plan.branchCmd }, r.nonce, "red-first", cg.timeoutSeconds)
+    if p.baseKey then
+      FX.redFirstStart(FX._redFirstBase, p.baseKey, r, dir, { at = plan.baseTip, command = plan.baseCmd },
+        nil, "red-first on " .. tostring(r.base), cg.timeoutSeconds)
+    end
+  end
+  -- The verdict reads the whole runner log: read it again only when a run's state changed, never
+  -- on every 1 Hz tick.
+  local run, base = FX._redFirstRuns[gkey], p.baseKey and FX._redFirstBase[p.baseKey] or nil
+  local sig = tostring(run and run.state) .. "|" .. tostring(run and run.doneAt) .. "|"
+    .. tostring(base and base.state) .. "|" .. tostring(base and base.doneAt)
+  if p.sig ~= sig then p.sig, p.verdict = sig, core.redFirstVerdict(plan, run, base) end
+  return p.verdict
+end
+
+-- A scratch worktree a run left behind (a timeout, a crash): removed with the repo's git, in the
+-- background -- deleting a big checkout must never stall the panel. The usual run removed its
+-- own, so this is a no-op then.
+function FX.redFirstCleanup(g)
+  local path = type(g) == "table" and g.scratch or nil
+  if not core.isRedFirstScratch(path) or FX._redFirstCleanups[path] then return false end
+  local there = false
+  pcall(function() there = hs.fs.attributes(path) ~= nil end)
+  if not there then return false end
+  local cmd = core.redFirstCleanupCmd(g.commonDir, path)
+  local ok = pcall(function()
+    local t
+    t = hs.task.new("/bin/sh", function() FX._redFirstCleanups[path] = nil end, { "-c", cmd })
+    FX._redFirstCleanups[path] = t   -- retained until it exits, so GC can't eat it
+    t:start()
+  end)
+  if not ok then FX._redFirstCleanups[path] = nil end
+  print("[cc-dashboard] 🧹 removing the red-first scratch worktree " .. path .. (ok and "" or " (couldn't start)"))
+  return ok
+end
+
+-- Forget the plans and runs of requests that are no longer waiting (merged, dismissed, gone); a
+-- run still going finishes first. A base-tip run lives while a waiting request's plan uses it.
+function FX.redFirstPrune(reqs)
+  local live, keepBase = {}, {}
+  for _, r in pairs(reqs or {}) do if r.phase == "requested" then live[r.nonce] = true end end
+  for gkey, p in pairs(FX._redFirstPlans) do
+    if live[p.nonce] then
+      if p.baseKey then keepBase[p.baseKey] = true end
+    else
+      FX._redFirstPlans[gkey] = nil
+    end
+  end
+  local function drop(slot, key, g)
+    if g.task then return end
+    if g.logPath then pcall(os.remove, g.logPath) end
+    slot[key] = nil
+  end
+  for key, g in pairs(FX._redFirstRuns) do if not live[g.nonce] then drop(FX._redFirstRuns, key, g) end end
+  for key, g in pairs(FX._redFirstBase) do if not keepBase[key] then drop(FX._redFirstBase, key, g) end end
 end
 
 -- The answer, bound to the nonce ON DISK (never a remembered one). true + the request on success.
@@ -4575,6 +4722,7 @@ function FX.annotateMerges(list, cfg, bannerOn)
   end
   FX._mergeReqs, FX._mergeItems, FX._mergeWaitPids = reqs, items, {}
   FX.mergeGatePrune(reqs)
+  FX.redFirstPrune(reqs)
   FX.mergeGatePump()   -- a gate queued behind another in its repo starts as soon as the lane frees
   -- 2026-09-29: the merge checker reviews every request (verify.onMerge); a delegated merge
   -- needs its pass. FX._checkerHolds says, per request, why one is waiting or held this tick.
@@ -4626,12 +4774,14 @@ function FX.annotateMerges(list, cfg, bannerOn)
   q = core.mergeQueue(reqs, FX._mergeApproved, FX._mergeSent, FX.now())   -- after this tick's releases
   for _, key in ipairs(order) do
     local r, it = reqs[key], items[key]
-    local facts, rd, gate, crec, cid
+    local facts, rd, gate, crec, cid, redFirst
     FX.fleetRecordResult(r)   -- a batch unit's outcome (its batch ends itself once all are in)
     if r.phase == "requested" then
       facts = FX.mergeFacts(r)
       gate = FX.mergeGate(r, facts, cfg)
       rd = core.mergeReadiness(r, facts, it, gate)
+      -- 2026-09-29: the red-first proof, once the gate passed -- shown in the review, read by nothing else
+      redFirst = FX.redFirst(r, facts, gate, cfg)
       -- the checker's review of this commit (started here when verify.onMerge is on; a Verify
       -- press on the request's own commit counts too)
       if checkOn then crec, cid = FX.checkerForRequest(key, r, facts, cfg)
@@ -4665,7 +4815,7 @@ function FX.annotateMerges(list, cfg, bannerOn)
                                                closeNote = closeNote, canCloseTab = canCloseTab,
                                                checkerHold = hold and hold.act == "hold" and hold.why or nil,
                                                checkerWait = hold and hold.act ~= "hold" and hold.why or nil },
-                              gate, core.checkerView(crec, cid))
+                              gate, core.checkerView(crec, cid), redFirst)
     -- The process actually waiting for Adam's answer (2026-09-17). Kept OFF the tile -- it's a
     -- pid, and the whole tile is what the webview gets -- so FX.annotateNeedsYou reads it here.
     FX._mergeWaitPids[key] = (r.phase == "requested") and r.waitPid or nil
@@ -10154,6 +10304,11 @@ local HTML = [[
   /* the claim check (2026-09-18) is a hint: muted, warn at most -- never the gate's red */
   #d-merge .dm-claims { margin-top:4px; white-space:pre-wrap; font-size:11px; opacity:.8; }
   #d-merge .dm-claims.c-flagged { color:var(--warn); opacity:1; }
+  /* the red-first proof (2026-09-29) is a hint too: proved red reads ok, not red warns, never danger */
+  #d-merge .dm-redfirst { margin-top:4px; white-space:pre-wrap; font-size:11px; opacity:.85; }
+  #d-merge .dm-redfirst:empty { display:none; }
+  #d-merge .dm-redfirst.r-red { color:var(--ok); opacity:1; }
+  #d-merge .dm-redfirst.r-notRed, #d-merge .dm-redfirst.r-couldntRun { color:var(--warn); opacity:1; }
   #d-merge .dm-gatefile { margin-top:4px; white-space:pre-wrap; font-size:11px; color:var(--warn); }
   #d-merge .dm-gatefile:empty { display:none; }
   /* the merge checker (2026-09-29): a model's review -- fail is red, couldn't-run is warn */
@@ -11499,6 +11654,7 @@ local HTML = [[
         <div class="dm-gate" id="dm-gate"></div>
         <div class="dm-claims" id="dm-claims"></div>
         <div class="dm-checker" id="dm-checker"></div>
+        <div class="dm-redfirst" id="dm-redfirst"></div>
         <div class="dm-gatefile" id="dm-gatefile"></div>
         <div class="dm-problems" id="dm-problems"></div>
         <ul class="dm-commits" id="dm-commits"></ul>
@@ -15795,6 +15951,38 @@ local HTML = [[
       }
       return { cls: "dm-checker c-" + cls, text: lines.join("\n") };
     }
+    // The red-first proof as text (2026-09-29, core.redFirstVerdict): do the unit's changed tests
+    // fail without its fix? A hint beside the gate, always through textContent (the failing lines
+    // are the runner's words); the Merge button never reads it.
+    function redFirstText(rf, base){
+      if(!rf || !rf.state) return { cls: "dm-redfirst", text: "" };
+      var pre = "Red-first (a hint, not a gate): ", b = base || "main", n = rf.files|0, t;
+      var list = function(a, total){
+        var xs = Array.isArray(a) ? a : [];
+        var more = (total|0) - xs.length;
+        return xs.join(", ") + (more > 0 ? " (+" + more + " more)" : "");
+      };
+      if(rf.state === "waiting") t = pre + "waits for the test gate to pass…";
+      else if(rf.state === "queued") t = pre + (rf.checkingBase ? "the run on " + b + " is queued behind another run in this repo…" : "queued behind another run in this repo…");
+      else if(rf.state === "running") t = pre + (rf.checkingBase ? "checking which failures " + b + " already has…"
+        : "running " + n + " changed test file" + (n === 1 ? "" : "s") + " without the fix…");
+      else if(rf.state === "none") t = pre + "no changed test file to run — nothing was proven red";
+      else if(rf.state === "couldntRun") t = pre + "couldn't run (" + (rf.why || "no reason given") + ") — nothing was proven either way"
+        + (rf.log ? "\nfull log: " + rf.log : "");
+      else if(rf.state === "red") t = pre + "✓ proved red — " + (n === 1 ? "the changed test file fails" : "all " + n + " changed test files fail") + " without the fix";
+      else if(rf.state === "notRed") t = pre + "⚠ not red — no new failure without the fix in " + list(rf.notRed, rf.notRedN)
+        + ((Array.isArray(rf.red) && rf.red.length) ? "\nfails without it: " + list(rf.red, rf.redN) : "");
+      else return { cls: "dm-redfirst", text: "" };
+      if(rf.state === "red" || rf.state === "notRed"){
+        var old = rf.old|0;
+        if(old > 0) t += "\n" + old + " failing line" + (old === 1 ? " already fails" : "s already fail") + " on " + b + " — not counted";
+        if(rf.baseUnknown) t += "\ncouldn't check which failures " + b + " already has — every failure counted";
+        if((rf.loose|0) > 0) t += "\n" + (rf.loose|0) + " failing line" + ((rf.loose|0) === 1 ? "" : "s") + " named no changed test file";
+        if(rf.fails) t += "\n" + rf.fails;
+        if(rf.log) t += "\nfull log: " + rf.log;
+      }
+      return { cls: "dm-redfirst r-" + rf.state, text: t };
+    }
     // A Verify verdict for a session whose merge review isn't showing it.
     function renderChecker(it){
       var el = document.getElementById("d-checker");
@@ -15844,6 +16032,12 @@ local HTML = [[
           + (gt.log ? "\nfull log: " + gt.log : "")
           + (gt.tail ? "\n--- last lines ---\n" + gt.tail : "");
       }
+      // 2026-09-29: the red-first proof (core.redFirstVerdict) -- do the new tests fail without the
+      // fix? A hint: the Merge button below never reads it.
+      var rfEl = document.getElementById("dm-redfirst");
+      var rfv = asking ? redFirstText(m.redFirst, m.base) : { cls: "dm-redfirst", text: "" };
+      rfEl.className = rfv.cls || "dm-redfirst";
+      rfEl.textContent = rfv.text;
       // 2026-09-29: a diff that edits the repo's declared gate (core.repoGateTouchedNote) -- a
       // warning; the Merge button below never reads it
       var gfEl = document.getElementById("dm-gatefile");

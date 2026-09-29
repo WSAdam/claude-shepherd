@@ -35,6 +35,41 @@ trap 'rm -rf "$CC_TEST_LOCK"' EXIT
 # a CC_* override set in the calling shell must not reach the suites
 . "$DIR/hermetic-env.sh"
 
+# File mode (2026-09-29, the red-first proof): `bash tests/run.sh tests/a.test.lua tests/b.test.sh`
+# runs JUST those files (paths from the checkout root), each under a `== <path> ==` header, by its
+# extension: .lua with lua and a temp HOME (as the stubbed suites below run), .sh with bash, .js
+# with node, .ts with deno test. Shepherd's red-first proof runs a unit's changed tests this way
+# on the merge-base without the fix (merge.gates' redFirstCommand "bash tests/run.sh {files}") and
+# ties each FAIL line to the header above it. A file that exits non-zero without a FAIL line of
+# its own -- a crash at load: the function the fix adds isn't there yet -- gets one, naming it.
+if [ "$#" -gt 0 ]; then
+  cc_out="$(mktemp)"
+  for f in "$@"; do
+    echo "== $f =="
+    if [ ! -f "$f" ]; then echo "not found: $f"; fail=1; continue; fi
+    case "$f" in
+      *.lua) HOME="$(mktemp -d)" lua "$f" > "$cc_out" 2>&1 ;;
+      *.sh)  bash "$f" > "$cc_out" 2>&1 ;;
+      *.js)  node "$f" > "$cc_out" 2>&1 ;;
+      *.ts)  deno test -A --quiet "$f" > "$cc_out" 2>&1 ;;
+      *)     echo "skipped: no runner for $f"; fail=1; continue ;;
+    esac
+    rc=$?
+    cat "$cc_out"
+    if [ "$rc" -ne 0 ]; then
+      fail=1
+      if ! grep -qE '^[[:space:]]*(FAIL|not ok)' "$cc_out"; then
+        why="$(grep -m 1 -E '^lua: |Error|error:' "$cc_out")"
+        [ -n "$why" ] || why="$(grep -v '^[[:space:]]*$' "$cc_out" | tail -n 1)"
+        echo "FAIL - $f exited $rc before naming a failing test: $(printf '%s' "$why" | cut -c1-200)"
+      fi
+    fi
+  done
+  rm -f "$cc_out"
+  if [ "$fail" -eq 0 ]; then echo "✅ ALL GREEN"; else echo "❌ SOME TESTS FAILED"; fi
+  exit $fail
+fi
+
 echo "== bash: config =="
 bash "$DIR/config.test.sh" || fail=1
 echo ""
@@ -313,6 +348,15 @@ HOME="$(mktemp -d)" lua "$DIR/automation-trace.test.lua" || fail=1
 echo ""
 echo "== node: the Automation trace's rows -- acted / would / refused, ×N, every field escaped -- and Settings' dry-run switches (behavioral, runs the shipped JS) =="
 node "$DIR/trace-view.test.js" || fail=1
+echo ""
+echo "== lua: the red-first proof -- a unit's changed tests on the merge-base without its fix, in the gate lane, split from the base tip's own failures (behavioral, stubbed hs + a real git repo) =="
+HOME="$(mktemp -d)" lua "$DIR/redfirst.test.lua" || fail=1
+echo ""
+echo "== node: the red-first proof's line in the merge review (behavioral, runs the shipped redFirstText) =="
+node "$DIR/redfirst-view.test.js" || fail=1
+echo ""
+echo "== bash: tests/run.sh runs just the files it is given (the red-first proof's runner) =="
+bash "$DIR/run-files.test.sh" || fail=1
 echo ""
 
 if [ "$fail" -eq 0 ]; then

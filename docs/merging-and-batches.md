@@ -143,6 +143,51 @@ the same queue and lane as above. A matching `merge.gates` entry always wins.
 - A diff that edits `.worktree-check` gets a warning line in the review, whether or not the repo
   gate ran. It's a hint like the claim check below, and it blocks nothing.
 
+#### The red-first proof: do the new tests fail without the fix?
+
+A green gate proves the suite passes **with** the unit's change. It doesn't prove the unit's new
+tests would have caught the bug **without** it. Give a gate entry a `redFirstCommand` and Shepherd
+checks that too, once the pre-merge gate has passed:
+
+```json
+{ "match": { "project": "*my-repo*" }, "command": "make lint && make test",
+  "redFirstCommand": "bash tests/run.sh {files}" }
+```
+
+- Shepherd lists the unit's changed test files with its own git (`git diff --name-only
+  --diff-filter=AMR <base>...<branch>`, with no cap). It makes a **detached scratch worktree at the
+  merge-base** in `~/.claude/cc-scratch/`, never under `.claude/worktrees/`. It checks the changed
+  test paths out onto it from the unit's commit (fixtures and helpers too; the rest of the unit's
+  files stay behind), runs the command there, and removes the worktree.
+- `{files}` becomes the changed files that are tests themselves (`*.test.*`, `*_test.*`,
+  `test_*`, `*.spec.*` and the like, outside `fixtures/` and `support/` folders), shell-quoted.
+  Without `{files}` the command runs as written. With no `redFirstCommand`, nothing runs.
+- It runs in the repo's one gate lane, after the gate, so it never runs beside another suite, and
+  it uses the gate's `timeoutSeconds`.
+- **Proved red** means every changed test file printed a failing line of its own: `FAIL - name`,
+  `not ok`, jest's `FAIL <file>`, go's `--- FAIL:`, or deno's `... FAILED`. A failing line belongs
+  to the file it names; otherwise to the file named by the last header above it (`== <path> ==`,
+  jest's `PASS <file>`); otherwise, when only one file ran, to that file.
+- Failures that **already happen on the base branch** don't count. The changed files that also
+  exist there run on its tip too, once per base commit. A failing line that also fails there
+  (durations and line numbers aside) is counted as old. If that run couldn't run, every failure
+  counts and the review says so.
+- A run that **couldn't run** (the suite's lock, a missing command, a scratch worktree git wouldn't
+  make, a timeout) never counts as red.
+- The review shows it under the checker line: *proved red*, *not red* with the files that had no
+  new failure, or *couldn't run*, with the new failing lines and how many already fail on main.
+  It's a hint like the claim check: **Merge** and a batch unit's merge on your grant never wait for
+  it or read it.
+- A scratch worktree a timed-out run leaves behind is removed in the background, and one a crash
+  leaves behind is removed when Shepherd next starts. The Instances view never lists one.
+
+**This repo's own suites** take file arguments through `tests/run.sh`: `bash tests/run.sh
+tests/core.test.lua tests/merge.test.sh` runs just those files, each under a `== <path> ==` header,
+by extension (`.lua` with `lua` and a temp `HOME`, `.sh` with `bash`, `.js` with `node`, `.ts` with
+`deno test`). A file that crashes before it prints a `FAIL` line gets one naming it, so a test that
+calls a function the fix adds still reads as red. Its red-first command is
+`bash tests/run.sh {files}`.
+
 ### The claim check: a hint, never a gate
 
 The gate proves the suite is green; it doesn't prove what the session *wrote* is true. The review

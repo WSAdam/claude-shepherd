@@ -8446,7 +8446,9 @@ do
   -- 2026-09-29: 20 -> 21 for what each session is working on ("workingon", flagged new).
   -- 2026-09-29: 21 -> 22 for resuming at the usage limit's reset ("resume", flagged new).
   -- 2026-09-29: 22 -> 23 for the automation dry run and trace ("trace", flagged new).
-  eq("FEATURES: the 23 new features are flagged", newCount, 23)
+  -- 2026-09-29: 23 -> 24 for the red-first proof ("redfirst", flagged new).
+  eq("FEATURES: the 24 new features are flagged", newCount, 24)
+  check("FEATURES: lists the red-first proof", keys.redfirst == true)
   check("FEATURES: lists what each session is working on", keys.workingon == true)
   check("FEATURES: lists the session mailbox", keys.mailbox == true)
   check("FEATURES: lists resume at the limit reset", keys.resume == true)
@@ -13067,6 +13069,232 @@ do
   local fkeys = {}
   for _, f in ipairs(core.FEATURES) do fkeys[f.key] = f end
   check("trace: FEATURES lists the automation dry run and trace, flagged new", fkeys.trace ~= nil and fkeys.trace.new == true)
+end
+
+-- ---- red-first proof: a unit's new tests fail without its fix (2026-09-29) ----
+-- Build program unit 20. After the pre-merge gate passes, Shepherd applies the unit's changed
+-- test files onto a detached scratch worktree at the merge-base and runs the repo's
+-- redFirstCommand there. WARN ONLY: the review shows v.redFirst, nothing reads it to block.
+do
+  -- the config: an optional redFirstCommand on a merge.gates entry
+  local cfg = { merge = { gates = {
+    { match = { project = "/r/A*" }, command = "make test", redFirstCommand = "bash tests/run.sh {files}" },
+    { match = { project = "/r/B*" }, command = "make test", redFirstCommand = "" },
+    { match = { project = "/r/C*" }, command = "make test" },
+  } } }
+  eq("redFirst: a gate entry carries its redFirstCommand",
+     (core.mergeGateFor(cfg, { projectKey = "/r/A" }) or {}).redFirstCommand, "bash tests/run.sh {files}")
+  eq("redFirst: ...a blank one is no command", (core.mergeGateFor(cfg, { projectKey = "/r/B" }) or {}).redFirstCommand, nil)
+  eq("redFirst: ...no command = no red-first", (core.mergeGateFor(cfg, { projectKey = "/r/C" }) or {}).redFirstCommand, nil)
+  eq("redFirst: ...and the repo-declared gate has none",
+     (core.mergeGateFor({ merge = { repoGate = true } }, { projectKey = "/r/Z" }) or {}).redFirstCommand, nil)
+
+  -- when it runs: only after the pre-merge gate passed
+  eq("redFirstDue: a passed gate -> run", core.redFirstDue({ state = "passed" }), "run")
+  eq("redFirstDue: a running gate -> wait", core.redFirstDue({ state = "running" }), "wait")
+  eq("redFirstDue: a queued gate -> wait", core.redFirstDue({ state = "queued" }), "wait")
+  eq("redFirstDue: a gate still reading .worktree-check -> wait", core.redFirstDue({ state = "reading" }), "wait")
+  eq("redFirstDue: a red gate -> nothing (the gate is the news)", core.redFirstDue({ state = "failed" }), nil)
+  eq("redFirstDue: a gate that couldn't run -> nothing", core.redFirstDue({ state = "couldntRun" }), nil)
+  eq("redFirstDue: no gate -> nothing", core.redFirstDue(nil), nil)
+
+  -- which changed files run: test-shaped files, not fixtures, helpers or the runner itself
+  check("isRunnableTestPath: tests/a.test.lua", core.isRunnableTestPath("tests/a.test.lua"))
+  check("isRunnableTestPath: src/foo_test.go", core.isRunnableTestPath("src/foo_test.go"))
+  check("isRunnableTestPath: test_foo.py", core.isRunnableTestPath("pkg/test_foo.py"))
+  check("isRunnableTestPath: a jest spec", core.isRunnableTestPath("src/app.spec.ts"))
+  check("isRunnableTestPath: not a fixture, even test-shaped", not core.isRunnableTestPath("tests/fixtures/case.test.json"))
+  check("isRunnableTestPath: not a helper in tests/", not core.isRunnableTestPath("tests/lib.sh"))
+  check("isRunnableTestPath: not tests/support/", not core.isRunnableTestPath("tests/support/fx_recorder.lua"))
+  check("isRunnableTestPath: not app code", not core.isRunnableTestPath("cc-core.lua"))
+  check("isRunnableTestPath: not nil", not core.isRunnableTestPath(nil))
+
+  -- a failing-test line, in the shapes runners print; a pass whose NAME mentions failing isn't one
+  check("redFirstFailLine: FAIL - name", core.redFirstFailLine("FAIL - the new thing"))
+  check("redFirstFailLine: TAP not ok", core.redFirstFailLine("not ok 3 - the new thing"))
+  check("redFirstFailLine: go", core.redFirstFailLine("--- FAIL: TestNew (0.00s)"))
+  check("redFirstFailLine: deno", core.redFirstFailLine("the new thing ... FAILED (3ms)"))
+  check("redFirstFailLine: an ok line quoting a failure is a pass", not core.redFirstFailLine("ok   - reads 'x ... FAILED (3ms)' as old"))
+  check("redFirstFailLine: the ❌ banner names no test", not core.redFirstFailLine("❌ SOME TESTS FAILED"))
+  check("redFirstFailLine: a summary names no test", not core.redFirstFailLine("-- a.test.lua: 3 run, 1 failed --"))
+
+  -- the changed-test list: an UNCAPPED --diff-filter=AMR base...branch, Shepherd's own git
+  local req = { commonDir = "/r/A/.git", base = "main", branch = "feat/x", worktree = "/r/A/.claude/worktrees/x" }
+  local pc = core.redFirstPlanCmd(req, "abc1234") or ""
+  check("redFirstPlanCmd: names the changed files, AMR only, merge-base to the branch commit  (" .. pc .. ")",
+        pc:find("diff --name-only --diff-filter=AMR 'refs/heads/main'...abc1234", 1, true) ~= nil)
+  check("redFirstPlanCmd: ...uncapped (no head -n)", pc:find("head -n", 1, true) == nil)
+  check("redFirstPlanCmd: ...through the repo's own git dir", pc:find("--git-dir='/r/A/.git'", 1, true) ~= nil)
+  check("redFirstPlanCmd: ...with the merge-base and the base tip",
+        pc:find("merge-base 'refs/heads/main' abc1234", 1, true) ~= nil and pc:find("rev-parse --verify -q 'refs/heads/main^{commit}'", 1, true) ~= nil)
+  eq("redFirstPlanCmd: a non-hex sha is refused", core.redFirstPlanCmd(req, "HEAD; rm x"), nil)
+  eq("redFirstPlanCmd: no request", core.redFirstPlanCmd(nil, "abc1234"), nil)
+
+  local changed = {}
+  for i = 1, 250 do changed[#changed + 1] = "src/file" .. i .. ".lua" end
+  for _, p in ipairs({ "tests/a.test.lua", "tests/fixtures/f.json", "tests/support/helper.lua", "tests/run.sh",
+                       "src/foo_test.go", "docs/x.md" }) do changed[#changed + 1] = p end
+  local out = "@@mergebase\ncb00001\n@@basetip\nbb00002\n@@changed\n" .. table.concat(changed, "\n") .. "\n"
+  local plan = core.redFirstPlan(out, "bash tests/run.sh {files}")
+  check("redFirstPlan: parses the merge-base and the base tip", plan and plan.mergeBase == "cb00001" and plan.baseTip == "bb00002")
+  eq("redFirstPlan: applies every changed test path, fixtures and helpers too (past file 250: uncapped)",
+     plan and table.concat(plan.apply, ","), "tests/a.test.lua,tests/fixtures/f.json,tests/support/helper.lua,tests/run.sh,src/foo_test.go")
+  eq("redFirstPlan: ...and runs only the test files among them", plan and table.concat(plan.run, ","), "tests/a.test.lua,src/foo_test.go")
+  eq("redFirstPlan: the command runs just those files",
+     plan and plan.branchCmd, "bash tests/run.sh 'tests/a.test.lua' 'src/foo_test.go'")
+  local none = core.redFirstPlan("@@mergebase\ncb00001\n@@basetip\nbb00002\n@@changed\nsrc/a.lua\n", "RF {files}")
+  check("redFirstPlan: no changed test file -> an empty run list", none and #none.run == 0 and #none.apply == 0)
+  local bad, why = core.redFirstPlan("@@mergebase\n\n@@basetip\nbb00002\n@@changed\n", "RF {files}")
+  check("redFirstPlan: no merge-base -> nil and why  (" .. tostring(why) .. ")", bad == nil and type(why) == "string" and why ~= "")
+  check("redFirstPlan: git said nothing -> nil", core.redFirstPlan(nil, "RF {files}") == nil)
+
+  -- which of them already exist on the base tip (they get the cached base-tip run)
+  local ab = core.redFirstAtBaseCmd("/r/A/.git", "bb00002", { "tests/a.test.lua", "tests/b.test.sh" }) or ""
+  check("redFirstAtBaseCmd: ls-tree of those paths at the base tip  (" .. ab .. ")",
+        ab:find("ls-tree -r --name-only bb00002 -- 'tests/a.test.lua' 'tests/b.test.sh'", 1, true) ~= nil)
+  eq("redFirstAtBaseCmd: a non-hex tip is refused", core.redFirstAtBaseCmd("/r/A/.git", "main", { "a" }), nil)
+  eq("redFirstAtBase: the listed files git found, in run order",
+     table.concat(core.redFirstAtBase("tests/b.test.sh\n", { "tests/a.test.lua", "tests/b.test.sh" }) or { "nil" }, ","), "tests/b.test.sh")
+  eq("redFirstAtBase: git didn't answer -> nil (unknown, never 'none there')", core.redFirstAtBase(nil, { "a" }), nil)
+
+  -- the {files} placeholder, shell-quoted
+  eq("redFirstExpand: {files} becomes the quoted list",
+     core.redFirstExpand("bash tests/run.sh {files}", { "tests/a.test.lua", "tests/it's.test.sh" }),
+     "bash tests/run.sh 'tests/a.test.lua' 'tests/it'\\''s.test.sh'")
+  eq("redFirstExpand: a % in a path survives", core.redFirstExpand("RF {files}", { "t/100%.test.lua" }), "RF 't/100%.test.lua'")
+  eq("redFirstExpand: no placeholder -> the command as written", core.redFirstExpand("make test", { "a.test.lua" }), "make test")
+
+  -- the scratch worktree: outside .claude/worktrees/, and the only thing cleanup ever touches
+  check("isRedFirstScratch: Shepherd's scratch dir", core.isRedFirstScratch("/Users/a/.claude/cc-scratch/redfirst-100-3"))
+  check("isRedFirstScratch: never a worktree under .claude/worktrees/", not core.isRedFirstScratch("/r/A/.claude/worktrees/redfirst-1"))
+  check("isRedFirstScratch: never an arbitrary folder", not core.isRedFirstScratch("/Users/a/Programming/app"))
+  check("isRedFirstScratch: nil", not core.isRedFirstScratch(nil))
+
+  local spec = { commonDir = "/r/A/.git", scratch = "/s/redfirst-1-2", at = "cb00001", applyFrom = "abc1234",
+                 apply = { "tests/a.test.lua", "tests/fixtures/f.json" }, command = "RF 'tests/a.test.lua'" }
+  local rc = core.redFirstRunCmd(spec) or ""
+  check("redFirstRunCmd: a DETACHED worktree at the merge-base, in the scratch dir, repo hooks off  (" .. rc .. ")",
+        rc:find("--git-dir='/r/A/.git' worktree add --detach '/s/redfirst-1-2' cb00001", 1, true) ~= nil
+        and rc:find("core.hooksPath=/dev/null", 1, true) ~= nil)
+  check("redFirstRunCmd: ...the unit's test files checked out onto it from the branch commit",
+        rc:find("-C '/s/redfirst-1-2' checkout abc1234 -- 'tests/a.test.lua' 'tests/fixtures/f.json'", 1, true) ~= nil)
+  check("redFirstRunCmd: ...the command runs inside it", rc:find("cd '/s/redfirst-1-2' && RF 'tests/a.test.lua'", 1, true) ~= nil)
+  check("redFirstRunCmd: ...and the worktree is removed after", rc:find("worktree remove --force '/s/redfirst-1-2'", 1, true) ~= nil)
+  check("redFirstRunCmd: a scratch that can't be set up says couldn't-run, never red",
+        rc:find(core.GATE_NORUN_TOKEN, 1, true) ~= nil and rc:find("exit " .. core.TEST_LOCK_EXIT, 1, true) ~= nil)
+  local noApply = core.redFirstRunCmd({ commonDir = "/r/A/.git", scratch = "/s/redfirst-1-3", at = "bb00002", command = "RF x" }) or ""
+  check("redFirstRunCmd: the base-tip run checks nothing out", noApply ~= "" and noApply:find("checkout", 1, true) == nil)
+  eq("redFirstRunCmd: refuses a scratch inside .claude/worktrees/",
+     core.redFirstRunCmd({ commonDir = "/r/A/.git", scratch = "/r/A/.claude/worktrees/redfirst-1", at = "cb00001", command = "RF" }), nil)
+  eq("redFirstRunCmd: refuses a non-hex commit",
+     core.redFirstRunCmd({ commonDir = "/r/A/.git", scratch = "/s/redfirst-1-2", at = "main;x", command = "RF" }), nil)
+  local cc = core.redFirstCleanupCmd("/r/A/.git", "/s/redfirst-1-2") or ""
+  check("redFirstCleanupCmd: removes the scratch worktree with the repo's git  (" .. cc .. ")",
+        cc:find("git --git-dir='/r/A/.git' worktree remove --force '/s/redfirst-1-2'", 1, true) ~= nil)
+  local cc2 = core.redFirstCleanupCmd(nil, "/s/redfirst-1-2") or ""
+  check("redFirstCleanupCmd: a leftover with no known repo asks the worktree which repo it belongs to",
+        cc2:find("git -C '/s/redfirst-1-2' rev-parse", 1, true) ~= nil and cc2:find("worktree remove --force", 1, true) ~= nil)
+  eq("redFirstCleanupCmd: never anything but a red-first scratch", core.redFirstCleanupCmd("/r/A/.git", "/r/A"), nil)
+
+  -- the verdict from sample runner output (tests/run.sh's file mode)
+  local P = { command = "bash tests/run.sh {files}", run = { "tests/a.test.lua", "tests/b.test.sh" }, atBase = { "tests/b.test.sh" } }
+  local RUN = table.concat({
+    "== tests/a.test.lua ==", "ok   - old thing still works", "FAIL - redFirstVerdict: proves a file red",
+    "-- a.test.lua: 2 run, 1 failed --",
+    "== tests/b.test.sh ==", "FAIL - an old broken test (expected [1] got [2])", "ok   - fine",
+    "FAIL - the new b behaviour (12ms)", "-- b.test.sh: 3 run, 2 failed --", "❌ SOME TESTS FAILED", "" }, "\n")
+  local BASE = "== tests/b.test.sh ==\nFAIL - an old broken test (expected [1] got [2])\n-- b.test.sh: 1 run, 1 failed --\n"
+  local v = core.redFirstVerdict(P, { state = "failed", code = 1, output = RUN, logPath = "/s/log" },
+                                 { state = "failed", code = 1, output = BASE })
+  eq("redFirstVerdict: every changed test file has a NEW failure -> proved red", v and v.state, "red")
+  eq("redFirstVerdict: ...both files named", v and table.concat(v.red or {}, ","), "tests/a.test.lua,tests/b.test.sh")
+  eq("redFirstVerdict: ...the one already failing on the base tip is split out", v and v.old, 1)
+  check("redFirstVerdict: ...the new failing lines are shown, the old one isn't  (" .. tostring(v and v.fails):gsub("\n", " | ") .. ")",
+        v and v.fails and v.fails:find("proves a file red", 1, true) and v.fails:find("the new b behaviour", 1, true)
+        and not v.fails:find("an old broken test", 1, true))
+  check("redFirstVerdict: ...summaries and the ❌ banner name no test", v and v.fails and not v.fails:find("SOME TESTS", 1, true))
+  eq("redFirstVerdict: ...with the command and file count", v and (v.command .. "|" .. v.files), "bash tests/run.sh {files}|2")
+
+  -- the base-tip split: a file whose only failure already fails on main is NOT red
+  local RUN2 = "== tests/a.test.lua ==\nFAIL - new a\n== tests/b.test.sh ==\nFAIL - an old broken test (expected [1] got [2])\n"
+  v = core.redFirstVerdict(P, { state = "failed", code = 1, output = RUN2 }, { state = "failed", code = 1, output = BASE })
+  check("redFirstVerdict: a file whose only failure already fails on the base tip is not red  ("
+        .. tostring(v and v.state) .. " red=" .. table.concat(v and v.red or {}, ",") .. " notRed=" .. table.concat(v and v.notRed or {}, ",") .. ")",
+        v and v.state == "notRed" and table.concat(v.notRed, ",") == "tests/b.test.sh" and table.concat(v.red, ",") == "tests/a.test.lua")
+  -- a duration or a line number that moved is the same failure
+  v = core.redFirstVerdict({ command = "deno test {files}", run = { "t/x.test.ts" }, atBase = { "t/x.test.ts" } },
+    { state = "failed", code = 1, output = "old one ... FAILED (40ms)\n => ./t/x.test.ts:14:5\nnew one ... FAILED (3ms)\n" },
+    { state = "failed", code = 1, output = "old one ... FAILED (12ms)\n" })
+  check("redFirstVerdict: a failure that only took longer is still the old one",
+        v and v.state == "red" and v.old == 1 and v.fails:find("new one", 1, true) and not v.fails:find("old one", 1, true))
+  v = core.redFirstVerdict({ command = "RF {files}", run = { "t/y.test.ts" }, atBase = { "t/y.test.ts" } },
+    { state = "failed", output = "FAIL - y => ./t/y.test.ts:14:5\n" }, { state = "failed", output = "FAIL - y => ./t/y.test.ts:12:5\n" })
+  check("redFirstVerdict: ...and one whose line number moved", v and v.state == "notRed" and v.old == 1)
+
+  -- the base tip couldn't be checked: the branch run still counts, and the review says it
+  v = core.redFirstVerdict(P, { state = "failed", code = 1, output = RUN2 }, { state = "couldntRun", output = "CC_TEST_SUITE_LOCKED\n" })
+  check("redFirstVerdict: base tip couldn't run -> every failure counts, flagged unsplit",
+        v and v.state == "red" and v.baseUnknown == true and v.old == 0)
+  v = core.redFirstVerdict(P, { state = "failed", code = 1, output = RUN2 }, { state = "running" })
+  check("redFirstVerdict: base tip still running -> still checking", v and v.state == "running" and v.checkingBase == true)
+  v = core.redFirstVerdict({ command = "RF", run = { "t/a.test.lua" }, atBase = {} }, { state = "failed", output = "FAIL - a\n" }, nil)
+  check("redFirstVerdict: a new test file has no base-tip run to wait for", v and v.state == "red" and v.old == 0)
+  v = core.redFirstVerdict({ command = "RF", run = { "t/a.test.lua" }, baseUnknown = true, atBase = {} },
+    { state = "failed", output = "FAIL - a\n" }, nil)
+  check("redFirstVerdict: git couldn't say what's on the base tip -> flagged unsplit", v and v.state == "red" and v.baseUnknown == true)
+
+  -- not red: the tests pass without the fix
+  v = core.redFirstVerdict({ command = "RF", run = { "tests/a.test.lua" }, atBase = {} },
+    { state = "passed", code = 0, output = "== tests/a.test.lua ==\nok   - x\n" }, nil)
+  check("redFirstVerdict: tests that pass without the fix -> not red, naming the file",
+        v and v.state == "notRed" and table.concat(v.notRed, ",") == "tests/a.test.lua" and #v.red == 0)
+
+  -- couldn't run never counts as red
+  for _, c in ipairs({
+    { "the suite's own lock", { state = "couldntRun", why = "the suite refused to start", output = "CC_TEST_SUITE_LOCKED\nFAIL - x\n" } },
+    { "a timeout", { state = "timedOut", output = "FAIL - x\n" } },
+    { "a scratch that couldn't be set up", { state = "couldntRun", why = "Shepherd couldn't set up the scratch worktree", output = "CC_GATE_CANNOT_RUN: x\n" } },
+  }) do
+    v = core.redFirstVerdict(P, c[2], { state = "failed", output = "" })
+    check("redFirstVerdict: " .. c[1] .. " is couldn't-run, never red  (" .. tostring(v and v.state) .. ")",
+          v and v.state == "couldntRun" and v.red == nil and type(v.why) == "string" and v.why ~= "")
+  end
+  v = core.redFirstVerdict({ command = "RF", err = "git couldn't find the merge-base", run = {} }, nil, nil)
+  check("redFirstVerdict: no plan (git failed) -> couldn't run", v and v.state == "couldntRun" and v.why:find("merge-base", 1, true))
+  v = core.redFirstVerdict({ command = "RF", run = {}, atBase = {} }, nil, nil)
+  eq("redFirstVerdict: no changed test file -> none", v and v.state, "none")
+  v = core.redFirstVerdict(P, { state = "queued" }, nil)
+  eq("redFirstVerdict: waiting for the lane -> queued", v and v.state, "queued")
+  v = core.redFirstVerdict(P, { state = "running" }, nil)
+  eq("redFirstVerdict: running", v and v.state, "running")
+  eq("redFirstVerdict: no plan -> nil", core.redFirstVerdict(nil, nil, nil), nil)
+
+  -- other runners' shapes: a FAIL line naming its file, and one test file with no headers at all
+  v = core.redFirstVerdict({ command = "npx jest {files}", run = { "src/a.test.ts", "src/x.test.ts" }, atBase = {} },
+    { state = "failed", output = "PASS src/x.test.ts\nFAIL src/a.test.ts\n  ● a › does it\n" }, nil)
+  check("redFirstVerdict: a FAIL line that names its file is that file's (jest)",
+        v and v.state == "notRed" and table.concat(v.red, ",") == "src/a.test.ts" and table.concat(v.notRed, ",") == "src/x.test.ts")
+  v = core.redFirstVerdict({ command = "go test {files}", run = { "pkg/only_test.go" }, atBase = {} },
+    { state = "failed", output = "--- FAIL: TestNew (0.00s)\n" }, nil)
+  eq("redFirstVerdict: one file and no headers -> its failures are that file's", v and v.state, "red")
+  v = core.redFirstVerdict({ command = "RF {files}", run = { "a.test.lua", "b.test.lua" }, atBase = {} },
+    { state = "failed", output = "FAIL - who am I\n" }, nil)
+  check("redFirstVerdict: a failure no file can be tied to proves nothing", v and v.state == "notRed" and v.loose == 1)
+
+  -- the review: v.redFirst rides beside the gate and never touches readiness
+  local mreq = { phase = "requested", branch = "feat/x", base = "main", worktree = "/r/A/.claude/worktrees/x", at = 1 }
+  local mv = core.mergeView(mreq, { ready = true, checking = false, problems = {} }, nil, {}, { state = "passed", command = "make test" },
+                            nil, { state = "notRed", notRed = { "tests/a.test.lua" }, red = {} })
+  check("mergeView: v.redFirst is shown, and a not-red verdict blocks nothing",
+        mv.redFirst and mv.redFirst.state == "notRed" and mv.ready == true and mv.line == "⇡ ready to merge feat/x → main")
+  mreq.phase = "merged"
+  mv = core.mergeView(mreq, nil, nil, {}, nil, nil, { state = "red" })
+  eq("mergeView: ...only while the request is waiting", mv.redFirst, nil)
+
+  -- Instances never offers to open a scratch worktree that exists only while red-first runs
+  local ip = core.instancesPayload("k", {}, {}, { { path = "/r/A", branch = "main" },
+    { path = "/Users/a/.claude/cc-scratch/redfirst-100-3", detached = true } }, { mainRoot = "/r/A" })
+  eq("instancesPayload: a red-first scratch worktree is not an idle worktree", #ip.worktrees, 1)
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))

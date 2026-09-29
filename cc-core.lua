@@ -1916,7 +1916,10 @@ function M.instancesPayload(stackKey, members, hidden, worktrees, opts)
   if mainHosts then taken[opts.mainRoot] = true end
   local idle = {}
   for _, w in ipairs(worktrees or {}) do
-    if type(w) == "table" and w.path and not w.bare and not w.prunable and not taken[M.normDir(w.path)] then
+    -- 2026-09-29: a red-first scratch worktree (M.isRedFirstScratch) exists only while its run
+    -- does -- never a worktree to Open
+    if type(w) == "table" and w.path and not w.bare and not w.prunable and not taken[M.normDir(w.path)]
+       and not M.isRedFirstScratch(w.path) then
       idle[#idle + 1] = { path = w.path, folder = w.path:match("([^/]+)/?$"), branch = w.branch,
         detached = w.detached and true or nil, isMain = (opts.mainRoot ~= nil and w.path == opts.mainRoot) or nil,
         pending = type(opts.pending) == "table" and opts.pending[w.path] and true or nil }
@@ -2214,7 +2217,9 @@ function M.mergeGateFor(cfg, item)
       if type(g) == "table" and type(g.command) == "string" and g.command ~= "" then
         local m = type(g.match) == "table" and g.match or {}
         if M.globEq(m.project, project) and M.globEq(m.group, item.group) and M.globEq(m.key, item.key) then
-          return { command = g.command,
+          -- 2026-09-29: redFirstCommand (optional) runs the unit's changed tests without its fix
+          local rf = (type(g.redFirstCommand) == "string" and g.redFirstCommand:match("%S")) and g.redFirstCommand or nil
+          return { command = g.command, redFirstCommand = rf,
                    timeoutSeconds = tonumber(g.timeoutSeconds) or M.MERGE_GATE_TIMEOUT }
         end
       end
@@ -2717,7 +2722,9 @@ end
 -- the script and Shepherd's decision writer). `q` = { queued = n, sent = bool }.
 -- 2026-09-29: `checker` (optional) is the merge checker's view (M.checkerView), shown as
 -- v.checker; q.checkerWait / q.checkerHold say a delegated merge waits for it or is held by it.
-function M.mergeView(req, rd, facts, q, gate, checker)
+-- 2026-09-29: `redFirst` (optional) is the red-first proof's verdict (M.redFirstVerdict), shown
+-- as v.redFirst while the request waits. WARN ONLY: nothing below reads it.
+function M.mergeView(req, rd, facts, q, gate, checker, redFirst)
   q = q or {}
   local v = {
     phase = req.phase, branch = req.branch, base = req.base, folder = req.worktree:match("([^/]+)/?$"),
@@ -2765,6 +2772,7 @@ function M.mergeView(req, rd, facts, q, gate, checker)
   -- The claim check (2026-09-18): WARN ONLY. It rides beside the gate for the review to show
   -- and is read by nothing else -- not readiness, not the card line, not "needs you".
   if req.phase == "requested" then v.claims = M.mergeClaimCheck(req, facts) end
+  if req.phase == "requested" and type(redFirst) == "table" then v.redFirst = redFirst end
   v.line = M.mergeLine(v)
   v.needsYou = M.mergeNeedsYou(v)
   return v
@@ -2922,6 +2930,292 @@ function M.mergeClaimCheck(req, facts)
   end
   return one(M.CLAIM_FLAGGED, "it says \"" .. quote .. "\", but no test or fixture path is among the "
     .. #facts.files .. " changed file" .. (#facts.files == 1 and "" or "s"))
+end
+
+-- ---- The red-first proof (2026-09-29, build program unit 20) -------------------------------
+-- The gate proves the unit's suite is green WITH its fix; nothing proved its new tests would
+-- have caught the bug WITHOUT it. After the pre-merge gate passes, Shepherd takes the unit's
+-- changed test files (an uncapped `git diff --name-only --diff-filter=AMR base...branch`, read
+-- with its own git), applies them onto a DETACHED scratch worktree at the merge-base -- in its
+-- own scratch dir, never under .claude/worktrees/ -- and runs the gate entry's redFirstCommand
+-- there, `{files}` replaced by the changed test files, in the repo's one gate lane. Proved red =
+-- every changed test file has a failing line of its own that doesn't already fail on the base
+-- tip (the same files run there, cached per tip). Couldn't run never counts as red.
+-- WARN ONLY, like the claim check: the review shows v.redFirst; readiness, the card line, "needs
+-- you" and a delegated batch merge never read it.
+M.RED_FIRST_TAG = "redfirst"      -- the scratch worktree's folder prefix (FX.scratchFile's tag)
+M.RED_FIRST_FILES = "{files}"
+M.RED_FIRST_FAIL_LINES = 12       -- new failing lines the review shows
+M.RED_FIRST_LIST_MAX = 20         -- files named per list in the review
+
+do
+  local function sq(s) return "'" .. tostring(s):gsub("'", "'\\''") .. "'" end
+  local function hex(s) return type(s) == "string" and s:match("^%x+$") ~= nil end
+  -- a find-based line walk: the output is a whole suite's log (see the CLAUDE.md trap on
+  -- `*`-quantified line patterns)
+  local function eachLine(s, fn)
+    if type(s) ~= "string" or s == "" then return end
+    local i = 1
+    while i <= #s do
+      local j = s:find("\n", i, true)
+      fn(s:sub(i, (j or (#s + 1)) - 1))
+      if not j then break end
+      i = j + 1
+    end
+  end
+  -- a line a runner prints for ONE failing test: this repo's `FAIL - name`, TAP's `not ok`, jest's
+  -- `FAIL <file>`, go's `--- FAIL:`, deno's `name ... FAILED`. Not a ❌ banner or an
+  -- `N run, M failed` summary: those name no test. A line that starts `ok` is a pass, whatever
+  -- its test's name says.
+  local function failLine(line)
+    if line:find("^%s*ok[%s%-]") then return false end
+    return line:find("^%s*FAIL") ~= nil or line:find("FAIL %- ") ~= nil or line:find("^%s*not ok") ~= nil
+        or line:find("%-%-%- FAIL") ~= nil or line:find("%.%.%.%s*FAIL") ~= nil
+  end
+  -- the same failure on another run: a duration or a moved line number doesn't make it new
+  local function norm(line)
+    local s = line:gsub("%s*%(%d[%d%.]*%s*m?s%)", "")
+    s = s:gsub(":%d+", ":#")
+    s = s:gsub("%s+", " ")
+    return (s:match("^%s*(.-)%s*$"))
+  end
+  -- `name` appears in `line` as a whole path or file name, not inside a longer one
+  local function names(line, name)
+    local from = 1
+    while true do
+      local s, e = line:find(name, from, true)
+      if not s then return false end
+      local before, after = line:sub(s - 1, s - 1), line:sub(e + 1, e + 1)
+      if (before == "" or before:find("[%s/'\"%(%[:=]")) and (after == "" or not after:find("[%w_%-]")) then return true end
+      from = s + 1
+    end
+  end
+  local function capList(t)
+    local out = {}
+    for i = 1, math.min(#t, M.RED_FIRST_LIST_MAX) do out[i] = t[i] end
+    return out
+  end
+  local FIXTURE_DIRS = { fixture = true, fixtures = true, testdata = true, support = true, helpers = true }
+
+  -- A changed test path that RUNS: test-shaped by its own name (M.isTestPath on the basename alone
+  -- applies only the name rules), and not inside a fixtures/support folder. The rest of the test
+  -- paths (fixtures, helpers, tests/run.sh) are applied onto the scratch worktree but not run.
+  function M.isRunnableTestPath(path)
+    if type(path) ~= "string" or path == "" then return false end
+    local base = path:match("([^/]+)$") or path
+    if not M.isTestPath(base) then return false end
+    for seg in path:sub(1, #path - #base):lower():gmatch("([^/]+)/") do
+      if FIXTURE_DIRS[seg] then return false end
+    end
+    return true
+  end
+  M.redFirstFailLine = failLine
+
+  -- Only a passed pre-merge gate starts one ("run"); one still going makes the review say it waits
+  -- ("wait"). A red gate is the news on its own: no red-first.
+  function M.redFirstDue(gate)
+    local st = type(gate) == "table" and gate.state or nil
+    if st == "passed" then return "run" end
+    if st == "running" or st == "queued" or st == "reading" then return "wait" end
+    return nil
+  end
+
+  -- The plan read: the merge-base, the base tip, and every changed path (no cap: a test past
+  -- MERGE_FACTS_MAX_FILES still runs).
+  function M.redFirstPlanCmd(req, sha)
+    if type(req) ~= "table" or type(req.commonDir) ~= "string" or req.commonDir == "" then return nil end
+    if type(req.base) ~= "string" or req.base == "" or not hex(sha) then return nil end
+    local G, ref = "git --git-dir=" .. sq(req.commonDir), "refs/heads/" .. req.base
+    return table.concat({
+      "echo @@mergebase", G .. " merge-base " .. sq(ref) .. " " .. sha .. " 2>/dev/null",
+      "echo @@basetip", G .. " rev-parse --verify -q " .. sq(ref .. "^{commit}") .. " 2>/dev/null",
+      "echo @@changed", G .. " -c core.quotePath=false diff --name-only --diff-filter=AMR " .. sq(ref) .. "..." .. sha .. " 2>/dev/null",
+    }, "; ")
+  end
+
+  -- -> plan { mergeBase, baseTip, changed, apply (every test path), run (the runnable ones),
+  -- atBase (filled by FX from redFirstAtBase), command, branchCmd }, or nil + why.
+  function M.redFirstPlan(out, command)
+    if type(out) ~= "string" or out == "" then return nil, "git didn't answer" end
+    local sec = mergeSections(out)
+    local function first(name) return ((sec[name] or {})[1] or ""):match("^%s*(.-)%s*$") end
+    local mb, tip = first("mergebase"), first("basetip")
+    if not hex(mb) then return nil, "git couldn't find the merge-base" end
+    if not hex(tip) then return nil, "git couldn't find the base branch's tip" end
+    local p = { mergeBase = mb, baseTip = tip, changed = {}, apply = {}, run = {}, atBase = {},
+                command = tostring(command or "") }
+    for _, l in ipairs(sec.changed or {}) do
+      if l ~= "" then
+        p.changed[#p.changed + 1] = l
+        if M.isTestPath(l) then p.apply[#p.apply + 1] = l end
+        if M.isRunnableTestPath(l) then p.run[#p.run + 1] = l end
+      end
+    end
+    p.branchCmd = M.redFirstExpand(p.command, p.run)
+    return p
+  end
+
+  -- Which of the files exist on the base tip: those get the base-tip run the split needs.
+  function M.redFirstAtBaseCmd(commonDir, tip, files)
+    if type(commonDir) ~= "string" or commonDir == "" or not hex(tip) or type(files) ~= "table" or #files == 0 then return nil end
+    local q = {}
+    for i, f in ipairs(files) do q[i] = sq(f) end
+    return "git --git-dir=" .. sq(commonDir) .. " --literal-pathspecs -c core.quotePath=false ls-tree -r --name-only "
+      .. tip .. " -- " .. table.concat(q, " ") .. " 2>/dev/null"
+  end
+  function M.redFirstAtBase(out, files)
+    if type(out) ~= "string" then return nil end
+    local have = {}
+    eachLine(out, function(l) if l ~= "" then have[l] = true end end)
+    local r = {}
+    for _, f in ipairs(files or {}) do if have[f] then r[#r + 1] = f end end
+    return r
+  end
+
+  -- `{files}` -> the shell-quoted list. Without the placeholder the command runs as written.
+  function M.redFirstExpand(command, files)
+    local q = {}
+    for i, f in ipairs(files or {}) do q[i] = sq(f) end
+    local list = table.concat(q, " ")
+    return (tostring(command or ""):gsub(M.RED_FIRST_FILES, function() return list end))
+  end
+
+  -- Shepherd's own scratch worktree, and the only folder its cleanup ever touches: an absolute
+  -- path whose folder starts with `redfirst-`, never under .claude/worktrees/, no `..`.
+  function M.isRedFirstScratch(path)
+    if type(path) ~= "string" or path:sub(1, 1) ~= "/" then return false end
+    local base = path:match("([^/]+)/?$")
+    if not base or base:sub(1, #M.RED_FIRST_TAG + 1) ~= M.RED_FIRST_TAG .. "-" then return false end
+    if path:find("/.claude/worktrees/", 1, true) or path:find("/%.%./") or path:find("/%.%.$") then return false end
+    return true
+  end
+
+  -- Remove a scratch worktree with the repo's git (`git worktree remove --force`; if git won't,
+  -- the folder goes and git forgets it). A leftover from a crash has no known repo: it asks the
+  -- worktree itself which repo it belongs to.
+  function M.redFirstCleanupCmd(commonDir, scratch)
+    if not M.isRedFirstScratch(scratch) then return nil end
+    local S = sq(scratch)
+    if type(commonDir) == "string" and commonDir ~= "" then
+      local G = "git --git-dir=" .. sq(commonDir)
+      return G .. " worktree remove --force " .. S .. " >/dev/null 2>&1 || { rm -rf " .. S .. "; " .. G .. " worktree prune >/dev/null 2>&1; }"
+    end
+    return "c=$(git -C " .. S .. " rev-parse --path-format=absolute --git-common-dir 2>/dev/null); "
+      .. "if [ -n \"$c\" ]; then git --git-dir=\"$c\" worktree remove --force " .. S .. " >/dev/null 2>&1 || { rm -rf " .. S
+      .. "; git --git-dir=\"$c\" worktree prune >/dev/null 2>&1; }; else rm -rf " .. S .. "; fi"
+  end
+
+  -- The run itself, for the gate lane (M.mergeGateCmd wraps it in `cd <main> ... > log 2>&1`):
+  -- add the detached worktree at `at` (hooks off), check `apply` out onto it from `applyFrom`,
+  -- run the command inside it (a subshell, so its own `exit` can't skip the cleanup), remove the
+  -- worktree, exit with the command's code. A scratch that can't be set up is couldn't-run.
+  function M.redFirstRunCmd(spec)
+    if type(spec) ~= "table" or type(spec.commonDir) ~= "string" or spec.commonDir == "" then return nil end
+    if not M.isRedFirstScratch(spec.scratch) or not hex(spec.at) then return nil end
+    if type(spec.command) ~= "string" or spec.command == "" then return nil end
+    local G, S = "git -c core.hooksPath=/dev/null --git-dir=" .. sq(spec.commonDir), sq(spec.scratch)
+    local setup = G .. " worktree add --detach " .. S .. " " .. spec.at .. " >/dev/null"
+    local apply = type(spec.apply) == "table" and spec.apply or {}
+    if #apply > 0 then
+      if not hex(spec.applyFrom) then return nil end
+      local q = {}
+      for i, f in ipairs(apply) do q[i] = sq(f) end
+      setup = setup .. " && GIT_LITERAL_PATHSPECS=1 git -c core.hooksPath=/dev/null -C " .. S .. " checkout "
+        .. spec.applyFrom .. " -- " .. table.concat(q, " ") .. " >/dev/null"
+    end
+    local cleanup = M.redFirstCleanupCmd(spec.commonDir, spec.scratch)
+    return "if " .. setup .. "; then (cd " .. S .. " && " .. spec.command .. "); rc=$?; " .. cleanup .. "; exit $rc; fi; echo "
+      .. sq(M.GATE_NORUN_TOKEN .. ": Shepherd couldn't set up the scratch worktree at " .. spec.at) .. "; "
+      .. cleanup .. "; exit " .. M.TEST_LOCK_EXIT
+  end
+
+  -- Each changed test file's failing lines. A FAIL line that names a file is that file's; else it
+  -- belongs to the file the last header named (tests/run.sh's `== <path> ==`, jest's `PASS <file>`);
+  -- else, with one file, to that file. Anything else is loose: it proves nothing about any file.
+  function M.redFirstAttribute(output, files)
+    local list = type(files) == "table" and files or {}
+    local byFile, loose, nBase = {}, 0, {}
+    for _, f in ipairs(list) do
+      byFile[f] = {}
+      local b = f:match("([^/]+)$") or f
+      nBase[b] = (nBase[b] or 0) + 1
+    end
+    local function named(line, allowBase)
+      local best
+      for _, f in ipairs(list) do
+        if names(line, f) and (not best or #f > #best) then best = f end
+      end
+      if best or not allowBase then return best end
+      for _, f in ipairs(list) do
+        local b = f:match("([^/]+)$") or f
+        if nBase[b] == 1 and names(line, b) then return f end
+      end
+      return nil
+    end
+    local current
+    eachLine(output, function(line)
+      if failLine(line) then
+        local f = named(line, true) or current or ((#list == 1) and list[1] or nil)
+        if f then table.insert(byFile[f], line) else loose = loose + 1 end
+      else
+        local f = named(line, false)
+        if f then current = f end
+      end
+    end)
+    return byFile, loose
+  end
+
+  -- The review's v.redFirst. `run` / `base` are gate-lane records ({ state, output, why, logPath }):
+  -- the branch run at the merge-base, and the base-tip run (nil when no changed file is there).
+  -- state: queued | running | red | notRed | couldntRun | none.
+  function M.redFirstVerdict(plan, run, base)
+    if type(plan) ~= "table" then return nil end
+    local list = type(plan.run) == "table" and plan.run or {}
+    local v = { command = capChars(tostring(plan.command or ""), 300), files = #list }
+    if plan.err then v.state, v.why = "couldntRun", capChars(tostring(plan.err), 200); return v end
+    if #list == 0 then v.state = "none"; return v end
+    local function pending(g) return type(g) ~= "table" or g.state == "queued" or g.state == "running" end
+    local function waiting(g) return (type(g) == "table" and g.state == "running") and "running" or "queued" end
+    if pending(run) then v.state = waiting(run); return v end
+    if run.state ~= "passed" and run.state ~= "failed" then   -- couldntRun, timedOut: nothing proven
+      v.state = "couldntRun"
+      v.why = capChars(run.state == "timedOut" and "it timed out" or tostring(run.why or "it never started"), 200)
+      v.log = run.logPath
+      return v
+    end
+    local old = {}
+    local atBase = type(plan.atBase) == "table" and plan.atBase or {}
+    if plan.baseUnknown then v.baseUnknown = true
+    elseif #atBase > 0 then
+      if pending(base) then v.state, v.checkingBase = waiting(base), true; return v end
+      if base.state == "passed" or base.state == "failed" then
+        eachLine(base.output, function(l) if failLine(l) then old[norm(l)] = true end end)
+      else
+        v.baseUnknown = true   -- the base tip couldn't be checked: every failure counts, and it says so
+      end
+    end
+    local byFile, loose = M.redFirstAttribute(run.output, list)
+    local red, notRed, fails, oldN = {}, {}, {}, 0
+    for _, f in ipairs(list) do
+      local new = 0
+      for _, l in ipairs(byFile[f] or {}) do
+        if old[norm(l)] then oldN = oldN + 1
+        else
+          new = new + 1
+          if #fails < M.RED_FIRST_FAIL_LINES then fails[#fails + 1] = l end
+        end
+      end
+      if new > 0 then red[#red + 1] = f else notRed[#notRed + 1] = f end
+    end
+    v.state = (#notRed == 0) and "red" or "notRed"
+    v.redN, v.notRedN = #red, #notRed
+    v.red, v.notRed = capList(red), capList(notRed)
+    v.old = oldN
+    v.loose = (loose > 0) and loose or nil
+    v.fails = (#fails > 0) and capChars(table.concat(fails, "\n"), M.MERGE_GATE_TAIL_CHARS) or nil
+    v.log = (type(run.logPath) == "string" and run.logPath ~= "") and run.logPath or nil
+    return v
+  end
 end
 
 -- ---- The merge checker (2026-09-29, build program unit 17) --------------------------------
@@ -15640,6 +15934,9 @@ M.FEATURES = {
   { key = "checker", cat = "Control", new = true, title = "Merge checker",
     what = "Every merge request gets a background review: Shepherd first scans the diff for red flags (conflict markers, deleted or weakened tests, a new .skip/.only, stubs), then a read-only Sonnet run answers pass or fail, shown in the review. A batch unit merges on your grant only after a pass; your own Merge click still works. 🔎 Verify runs the same review on any session.",
     why = "The tests prove the suite is green; the checker reads the code, so a merge nobody looked at still gets a second pair of eyes." },
+  { key = "redfirst", cat = "Control", new = true, title = "Red-first proof",
+    what = "With a redFirstCommand on the project's merge gate, Shepherd runs the unit's changed tests on a scratch worktree at the merge-base, without the fix, once the gate passes. The review says whether they fail there: proved red, not red (which files), or couldn't run, leaving out failures main already has. It's a hint; Merge never waits for it.",
+    why = "A green suite proves the fix passes its tests; red-first shows the tests would have caught the bug without it." },
   { key = "fleet", cat = "Control", new = true, title = "Claude drives a batch",
     what = "A Claude session proposes a batch of worktree units; you approve it once on its card (and choose whether it may merge them when green). It then opens each unit's tab through Shepherd and hands it its task. Stop batch ends it.",
     why = "Parallel work without opening tabs, pressing Return or clicking every merge -- your one approval is the permission." },
