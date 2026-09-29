@@ -1,0 +1,38 @@
+# pin-links.tsv -- what a link pinned with cc-pin.sh is, by both of its checkers (2026-09-29, build
+# program unit 31): the CLI (cc-pin.sh, bash) and the panel (core.pinCheck, Lua). tests/pin.test.sh
+# and tests/core.test.lua both read this one table, so the two rules can't drift apart.
+# One case per line: <verdict><TAB><link>. verdict: http, file or refused. {ROOT} is the session's
+# git root; the file cases name files tests/pin.test.sh creates there (a.md, docs/b.md).
+http	https://github.com/org/repo/pull/12
+http	http://localhost:5173/
+http	HTTPS://Example.com/Path
+http	http://localhost:8000/isolate/card/empty?theme=dark#top
+http	https://example.com/~adam/a%20b
+http	http://127.0.0.1:4507
+refused	https://
+refused	https:///no-host
+refused	javascript:alert(1)
+refused	data:text/html,x
+refused	ftp://example.com/x
+refused	https://x.com/a;rm
+refused	https://x.com/a|b
+refused	https://x.com/?a=1&b=2
+refused	https://x.com/$(id)
+refused	https://x.com/`id`
+refused	https://x.com/a b
+refused	https://x.com/a<b>
+refused	https://x.com/a'b
+refused	https://x.com/a"b
+refused	https://x.com/a\b
+refused	https://x.com/(a)
+file	file://{ROOT}/a.md
+file	file://{ROOT}/docs/b.md
+file	file://{ROOT}/docs
+refused	file://{ROOT}/../outside.md
+refused	file://{ROOT}/docs/../a.md
+refused	file://{ROOT}/./a.md
+refused	file:///etc/passwd
+refused	file://localhost{ROOT}/a.md
+refused	file://{ROOT}/a%2emd
+refused	file://{ROOT}x/a.md
+refused	file://{ROOT}/a.md;id

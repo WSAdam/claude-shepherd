@@ -9,6 +9,7 @@ cc-approve.sh         claude hook
 cc-popup.sh           claude hook
 cc-merge.sh           claude
 cc-fleet.sh           claude
+cc-pin.sh             claude
 cc-ask.sh             claude hook
 cc-commits.sh         claude
 cc-worktree-guard.sh  claude hook

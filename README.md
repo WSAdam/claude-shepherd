@@ -67,6 +67,8 @@ Every feature below has a reference page one click away. The panel lists the sam
 
 - [**Jump, nudge, stop, clear**](docs/controls.md#the-detail-panel): focus a session's tab, send it
   a message, stop its turn, or clear or compact it, from its tile.
+- [**Pinned links**](docs/controls.md#pinned-links): a session pins up to 8 links (its preview, its
+  PR, a file in its worktree) with `cc-pin.sh`, and they show as chips on its card.
 - [**Answer questions from Shepherd**](docs/approvals-and-policies.md#answer-questions-from-shepherd):
   a session's question shows up on its card as buttons, and your click goes straight to the session.
 - [**Spawn new sessions**](docs/controls.md#spawn-new-sessions): start a session in any project with

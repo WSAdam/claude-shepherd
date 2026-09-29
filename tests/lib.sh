@@ -26,6 +26,9 @@ export CC_INBOX_DIR="${CC_INBOX_DIR:-$CC_TEST_ISOLATION/cc-inbox}"
 # 2026-09-29: a clean Stop or a SessionEnd clears the resume Shepherd armed in ~/.claude/cc-resume
 # (cc-resume.sh); a suite's fake session must never clear a real one.
 export CC_RESUME_DIR="${CC_RESUME_DIR:-$CC_TEST_ISOLATION/cc-resume}"
+# 2026-09-29: a SessionEnd (cc_remove) drops the pins of every worktree that is gone from
+# ~/.claude/cc-pins; a suite's fake session end must never prune the real ones.
+export CC_PINS_DIR="${CC_PINS_DIR:-$CC_TEST_ISOLATION/cc-pins}"
 
 # sysbin_without <outdir> <tool>... - mirror /usr/bin + /bin into <outdir> as symlinks,
 # leaving out the named tools, and echo <outdir>. Use it in place of a literal

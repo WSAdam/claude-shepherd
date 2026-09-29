@@ -332,6 +332,25 @@ CC_INBOX_DIR="${CC_INBOX_DIR:-${HOME}/.claude/cc-inbox}"
 # session key. A clean Stop clears them (cc-status.sh). Default MUST match the dashboard's FX.RESUME_DIR.
 CC_RESUME_DIR="${CC_RESUME_DIR:-${HOME}/.claude/cc-resume}"
 
+# Pinned links (build program unit 31, 2026-09-29): cc-pin.sh keeps a worktree's links in
+# CC_PINS_DIR/<encoded git root>.json. They belong to the WORKTREE, not a session key -- they
+# outlive /clear and a respawn -- so the removers can't drop them by key. Instead both drop the
+# pins of every worktree that is gone (its folder removed), their torn writes, and any pins file
+# that names no worktree. KEEP IN SYNC with FX.prunePins. Default MUST match FX.PINS_DIR.
+CC_PINS_DIR="${CC_PINS_DIR:-${HOME}/.claude/cc-pins}"
+cc_pins_prune() {
+  cc_have_jq || return 0
+  local f root
+  for f in "$CC_PINS_DIR"/*.json; do
+    [ -f "$f" ] || continue
+    root="$(jq -r 'if (.root | type) == "string" then .root else empty end' "$f" 2>/dev/null)"
+    case "$root" in /*) [ -d "$root" ] && continue ;; esac
+    rm -f "$f" "$f".tmp.* 2>/dev/null
+    cc_debug "cc_pins_prune: dropped $f (its worktree ${root:-?} is gone)"
+  done
+  return 0
+}
+
 # Remove a session entirely (used by SessionEnd) plus any stray decision/claim
 # file and the per-session gated-tools override, approveRepeats memo, autopilot
 # expiry, L2 policy files, and the model auto-routing opt-in (a new session gets a
@@ -344,6 +363,7 @@ CC_RESUME_DIR="${CC_RESUME_DIR:-${HOME}/.claude/cc-resume}"
 # <key>.checker.json (2026-09-29) is the merge checker's verdict, which only Shepherd writes.
 # cc-resume/<key>.json, .plan.json and .cancel (2026-09-29): a resume waiting for a usage limit's
 # reset -- its waiter sees the arm gone and stops.
+# cc-pins/ (2026-09-29) is keyed by worktree, not session: cc_pins_prune drops only a gone worktree's.
 # KEEP THE FILE SET IN SYNC with FX.removeStatus in claude-dashboard.lua.
 cc_remove() {
   rm -f "$(cc_file "$1")" "$(cc_file "$1")".tmp.* "$(cc_decision_file "$1")" \
@@ -366,6 +386,8 @@ cc_remove() {
     rm -f "$inbox"/* "$inbox"/.[!.]* 2>/dev/null
     rmdir "$inbox" 2>/dev/null ;;
   esac
+  # Pinned links are per worktree, not per key: only those of a worktree that's gone (2026-09-29).
+  cc_pins_prune
   return 0
 }
 

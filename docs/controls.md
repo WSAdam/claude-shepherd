@@ -116,6 +116,48 @@ Approve, Deny, the reason box and Stop (and hides them again once you answer), a
 session brings back the Continue button. A held question and the plan / TODO box stay as they are.
 The nudge box is hidden, not disabled, so ⌘V still pastes into it.
 
+## Pinned links
+
+A session can pin up to **8 links** to its card: the preview it's building, its PR, a report or
+spec in its worktree. They show as chips in the card's badge row (🔗 a link, 📄 a file) and under
+the session's name in the detail panel. Click a chip to open it: an http(s) link in your browser,
+a file with `/usr/bin/open` (so it opens in its default app, and a folder in Finder). The compact
+**bar** and **dots** layouts show the chips only in the detail panel.
+
+A session pins with `~/.claude/cc-pin.sh`, from inside its Claude Code session:
+
+```bash
+~/.claude/cc-pin.sh add http://localhost:5173/ --label "Preview"
+~/.claude/cc-pin.sh add https://github.com/org/repo/pull/12      # the chip reads "PR #12"
+~/.claude/cc-pin.sh add docs/report.md                            # a path, from the current folder
+~/.claude/cc-pin.sh list                                          # numbered
+~/.claude/cc-pin.sh rm 2                                          # or rm <link> / rm <path>
+```
+
+- **Per worktree, not per session.** Pins live in `~/.claude/cc-pins/<the git root, encoded>.json`,
+  so every session in that worktree shows them, and they survive `/clear` and a respawn. Adding a
+  link that's already pinned only changes its label. A chip without a label shows the PR number,
+  the file's name, or the host and first path segment.
+- **They go with the worktree.** Once Shepherd has verified a unit's merge
+  ([Ready to merge](merging-and-batches.md#ready-to-merge)), that worktree's pins are cleared. When a session
+  ends or a tile is removed, Shepherd also drops the pins of any worktree whose folder is gone.
+- **What it takes.** An http(s) URL with a host, or a file under the session's git root: a plain
+  path or `file:///absolute/path`, with its real path (symlinked folders followed) inside the
+  worktree. A symlink to a file isn't taken; pin the file it points to.
+- **What it refuses.** Any other scheme (`javascript:`, `data:`, `ftp:` ...), a `file://` link with
+  `%`-escapes or `.`/`..` segments, a link over 2,000 characters, a label over 80 bytes or with a
+  control character, and a 9th pin. It also refuses any link holding whitespace, a quote (`'` `"`),
+  a backslash, a control character or a shell metacharacter: `|` `&` `;` `(` `)` `<` `>` `` ` `` `$`.
+  That includes a query string with more than one parameter (`?a=1&b=2`); pin the page without
+  it. Nothing passes a link through a shell; the refusal is a second line of defence.
+- **Checked again at the click.** A pins file is a session's word, so Shepherd opens only what
+  passes the same checks against its own record of the session's git root. For a file it also
+  resolves the real path, so a symlink swapped in after the pin can't lead outside the worktree. It
+  runs `/usr/bin/open` with the path as its one argument, never a shell command line. A refused
+  click says why in a toast.
+- `cc-pin.sh` needs `CLAUDE_CODE_SESSION_ID` (it runs inside a Claude Code session) and a git
+  repository; it exits 2 with the reason when it refuses.
+
 ## How control reaches a session, and its limits
 
 Two paths, and it matters which one your sessions use:

@@ -1531,6 +1531,114 @@ function FX.stepCompact(list, cfg)
   for k in pairs(FX._dueAt) do if not seen[k] then FX._dueAt[k] = nil end end
 end
 
+-- ---- Pinned links (build program unit 31, 2026-09-29) -----------------------------------------
+-- cc-pin.sh keeps up to 8 links per WORKTREE in cc-pins/<core.pinFileName(root)>. Each tick stamps
+-- them on the local sessions in that worktree (it.pins, re-read every 2s, parsed only on a change);
+-- a chip's click comes back as open-pin (FX.openPin), which checks the link again against
+-- Shepherd's own git root -- a file's real path too -- before the browser or /usr/bin/open (an
+-- argv, never a shell string) gets it. A verified merge clears the unit's pins (FX.clearPins), and
+-- both removers drop the pins of a worktree that is gone (FX.prunePins; cc_pins_prune in
+-- cc-lib.sh). tests/pins.test.lua runs this block as shipped, FX.PINS_DIR through FX.prunePins.
+FX.PINS_DIR = os.getenv("CC_PINS_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-pins")
+FX._pins = {}               -- root -> { at = when looked, raw = the file as read, pins = parsed }
+FX._pinTasks = {}           -- a running /usr/bin/open, held until it ends (a task can be GC'd)
+FX.PINS_LOOK_SECONDS = 2
+
+-- The worktree a session's pins belong to: its stack root, else its git root (cached per cwd).
+function FX.pinsRootFor(it)
+  if type(it) ~= "table" or it.remote then return nil end
+  if type(it.wtRoot) == "string" and it.wtRoot ~= "" then return it.wtRoot end
+  return FX.gitRoot(it.cwd)
+end
+
+function FX.stepPins(list)
+  local now, seen = FX.now(), {}
+  for _, it in ipairs(type(list) == "table" and list or {}) do
+    it.pins = nil
+    local root = FX.pinsRootFor(it)
+    local name = root and core.pinFileName(root)
+    if name then
+      seen[root] = true
+      local c = FX._pins[root]
+      if not c or now - c.at >= FX.PINS_LOOK_SECONDS then
+        local raw = FX.readFile(FX.PINS_DIR .. "/" .. name)
+        if not c or c.raw ~= raw then
+          local parsed = raw and core.parsePins(raw, root)
+          c = { raw = raw, pins = parsed and parsed.pins or {} }
+        end
+        c.at = now
+        FX._pins[root] = c
+      end
+      if #c.pins > 0 then it.pins = c.pins end
+    end
+  end
+  for r in pairs(FX._pins) do if not seen[r] then FX._pins[r] = nil end end
+end
+
+-- A chip's click: pin <i> (1-based) of the session's card. true when something was opened.
+function FX.openPin(it, i)
+  if type(it) ~= "table" or it.remote then return false end
+  local who = tostring(it.label or it.name or it.key)
+  local plan, why = core.pinOpenPlan(it.pins, i, FX.pinsRootFor(it), function(p) return hs.fs.pathToAbsolute(p) end)
+  if not plan then
+    print("[cc-dashboard] ⚠️ pin " .. tostring(i) .. " of " .. who .. " not opened: " .. tostring(why))
+    FX.alert("Claude Shepherd: that pin can't be opened -- " .. tostring(why))
+    return false
+  end
+  if plan.kind == "http" then
+    local ok, err = pcall(function() hs.urlevent.openURL(plan.url) end)
+    print("[cc-dashboard] " .. (ok and "✅ opened " or "❌ couldn't open ") .. plan.url .. " (a pin of " .. who .. ")"
+      .. (ok and "" or (": " .. tostring(err))))
+    return ok
+  end
+  -- a file: /usr/bin/open with the path as its one argument -- never a shell string
+  local ok, err = pcall(function()
+    local task
+    task = hs.task.new("/usr/bin/open", function() FX._pinTasks[task] = nil end, { plan.path })
+    FX._pinTasks[task] = true
+    task:start()
+  end)
+  print("[cc-dashboard] " .. (ok and "✅ opened " or "❌ couldn't open ") .. plan.path .. " (a pin of " .. who .. ")"
+    .. (ok and "" or (": " .. tostring(err))))
+  return ok
+end
+
+-- A verified merge: the unit's worktree is gone, and its pins go with it. Only a file that names
+-- this root -- never another worktree's that shares its name. true when one was removed.
+function FX.clearPins(root, why)
+  local name = core.pinFileName(root)
+  if not name then return false end
+  local path = FX.PINS_DIR .. "/" .. name
+  local parsed = core.parsePins(FX.readFile(path), root)
+  if not parsed then return false end
+  os.remove(path)
+  FX._pins[root] = nil
+  print("[cc-dashboard] ✅ cleared " .. #parsed.pins .. " pin(s) of " .. tostring(root) .. " (" .. tostring(why) .. ")")
+  return true
+end
+
+-- Both removers: the pins of every worktree that is gone, their torn writes, and a pins file that
+-- names no worktree. Pins outlive a session (/clear, a respawn), so never by key. KEEP IN SYNC
+-- with cc_pins_prune (cc-lib.sh).
+function FX.prunePins()
+  local names = FX.readDir(FX.PINS_DIR)
+  for _, name in ipairs(names) do
+    if name:match("%.json$") then
+      local path = FX.PINS_DIR .. "/" .. name
+      local parsed = core.parsePins(FX.readFile(path))
+      local root = parsed and parsed.root
+      if not (root and hs.fs.attributes(root, "mode") == "directory") then
+        os.remove(path)
+        local torn = name .. ".tmp."
+        for _, fn in ipairs(names) do
+          if fn:sub(1, #torn) == torn then os.remove(FX.PINS_DIR .. "/" .. fn) end
+        end
+        print("[cc-dashboard] 🔍 dropped the pins of " .. tostring(root or name) .. " (its worktree is gone)")
+      end
+    end
+  end
+end
+
 -- Each installed claude a session may run: the CLI, and the newest binary each editor extension
 -- bundles (VS Code and Cursor sessions run that one). Symlinks resolved, each once. Kept 10
 -- minutes: finding the CLI asks a login shell, which is slow.
@@ -3385,6 +3493,10 @@ function FX.removeStatus(key)
     end
     if FX._dueAt then FX._dueAt[key] = nil end
   end
+  -- pinned links (2026-09-29) belong to a worktree, not this key -- they outlive /clear -- so only
+  -- the pins of a worktree that is gone go (cc_remove runs cc_pins_prune)
+  local okp, errp = pcall(FX.prunePins)
+  if not okp then print("[cc-dashboard] ❌ pinned links prune failed: " .. tostring(errp)) end
 end
 
 -- ---- Companion extension: close an exact Claude tab (2026-09-11) -----------------
@@ -4836,6 +4948,8 @@ function FX.mergeAutoClose(r, it)
     local ok, why = core.mergeVerified(r, out)
     v = { at = now, ok = ok, why = why }
     FX._mergeVerify[r.nonce] = v
+    -- pinned links (2026-09-29): the unit's worktree is merged and gone -- so are its pins (once)
+    if ok then pcall(FX.clearPins, r.worktree, "merged " .. tostring(r.branch)) end
   end
   -- a merge Shepherd could not verify is a GUARD, not a retry: closing the tab here would
   -- defeat the verification, and close was never even tried. No button (2026-09-22).
@@ -9398,6 +9512,12 @@ local function handleBridgeMsg(msg)
     end
     return
   end
+  if a == "open-pin" then
+    -- Pinned links (2026-09-29): a chip sends its card's key and its own number, never the link;
+    -- FX.openPin checks the link again against Shepherd's own git root before anything opens.
+    FX.openPin(byKey[tostring(payload.v or "")], payload.text)
+    return
+  end
   if a == "capture-scenario" then
     -- Capture as scenario (2026-09-29): a scrubbed window + a label to fill in, under cc-scenarios.
     local it = byKey[tostring(payload.v or "")]
@@ -10563,6 +10683,14 @@ local HTML = [[
     letter-spacing:.04em; color:var(--accent-text); border:1px solid var(--accent); background:var(--accent-bg); }
   /* 2026-09-29: auto-compact -- the session saved notes for its next compaction */
   .notes-b { font-size:10px; margin-left:6px; line-height:1; }
+  /* 2026-09-29: pinned links (cc-pin.sh) -- chips in the card's badges row and the detail panel */
+  .pin-chip { display:inline-block; font-size:10px; line-height:14px; margin-left:6px; padding:1px 6px;
+    border-radius:8px; border:1px solid var(--border); color:var(--accent-text); cursor:pointer;
+    max-width:14em; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; vertical-align:middle; }
+  .pin-chip:hover { border-color:var(--accent); color:var(--text-strong); }
+  .theme-bar .pin-chip, .theme-dots .pin-chip { display:none; }   /* one-line themes: detail panel only */
+  #d-pins { display:none; flex-wrap:wrap; gap:4px; margin:5px 0 0 18px; }
+  #d-pins .pin-chip { margin-left:0; }
   @keyframes spin { to { transform:rotate(360deg); } }
   /* 2026-09-17: .srow (dot + status line) and .badges (risk / PR / background agents) are
      grouping wrappers the CARDS theme lays out. Every other theme places .dot / .label /
@@ -11849,6 +11977,7 @@ local HTML = [[
     </div>
     <div id="d-working"></div>
     <div id="d-notes"></div>
+    <div id="d-pins"></div>
     <div id="d-empty"><span id="de-text"></span> <button id="b-closeempty" onclick="if(selectedKey) send('close-empty', selectedKey, 'all')" title="Close the never-used chats in this window (they're all named Claude Code)">Close them</button></div>
     <!-- Batch driving (2026-09-11): a batch this session proposes or drives; filled with textContent
          only; the note and the checkbox are never rebuilt by a re-render. -->
@@ -16064,6 +16193,13 @@ local HTML = [[
       if(el.textContent !== t) el.textContent = t;
       el.style.display = t ? "block" : "none";
     }
+    // 2026-09-29: the session's pinned links, as the card's chips (rebuilt only when they change)
+    function renderPins(it){
+      var el = document.getElementById("d-pins"); if(!el) return;
+      var h = pinChipsHtml(it);
+      if(el._pinh !== h){ el._pinh = h; el.innerHTML = h; }
+      el.style.display = h ? "flex" : "none";
+    }
     // Small badges: detected editor + live permission mode + effort + model.
     function renderMeta(it){
       var el = document.getElementById("d-meta"), bits = [];
@@ -16449,6 +16585,7 @@ local HTML = [[
           + (others === 1 ? "" : "s") + " — Shepherd won't type into it. Jump there and act in the tab." : "";
         dsh.style.display = shared ? "block" : "none";
       }
+      renderPins(it);    // 2026-09-29: the session's pinned links (cc-pin.sh), under its notes line
       var dem = document.getElementById("d-empty");
       if(dem){
         var ne = it.windowEmptyChats | 0;   // never-used "Claude Code" chats in this window (2026-09-11)
@@ -19049,7 +19186,34 @@ local HTML = [[
     // least one badge exists, so a card without any gains no empty row.
     function badgesHtml(it){
       var b = talkBadge(it) + riskBadge(it) + prBadgeHtml(it) + bgBadge(it) + notesBadge(it);
+      b += pinChipsHtml(it);   // 2026-09-29: pinned links (cc-pin.sh)
       return b ? '<span class="badges">'+b+'</span>' : "";
+    }
+    // 2026-09-29: pinned links (build program unit 31) -- up to 8 links the session pinned with
+    // cc-pin.sh (it.pins, FX.stepPins). A session wrote every label and link, so both go through
+    // esc(). A click sends only the card's key and the chip's number (openPin); Lua checks the link
+    // again before it opens anything. The same chips sit in the detail panel (renderPins).
+    function pinChipsHtml(it){
+      if(!it || !Array.isArray(it.pins)) return "";
+      var h = "", n = 0;
+      for(var i = 0; i < it.pins.length && n < 8; i++){
+        var pn = it.pins[i];
+        if(!pn || typeof pn.url !== "string") continue;
+        n++;
+        var ic = pn.kind === "file" ? "📄" : "🔗";
+        h += '<span class="pin-chip" data-nodbl data-pin="'+(i + 1)+'" title="'+esc(pn.url)+' — click to open"'
+           + ' onclick="openPin(event)">'+ic+' '+esc(pn.label || pn.url)+'</span>';
+      }
+      return h;
+    }
+    function openPin(ev){
+      if(ev){ ev.stopPropagation(); }
+      var chip = ev && ev.target && ev.target.closest ? ev.target.closest("[data-pin]") : null;
+      if(!chip) return;
+      var tile = chip.closest(".tile");
+      var key = tile ? tile.getAttribute("data-key") : selectedKey;
+      var n = chip.getAttribute("data-pin");
+      if(key && n) send("open-pin", key, n);
     }
     // 2026-09-29: auto-compact (build program unit 16) -- this session saved working notes, which it
     // gets back after its next compaction (FX.stepCompact sets it.notes). Fixed markup only.
@@ -20873,6 +21037,12 @@ function FX._refreshBody()
     if not oks then print("[cc-dashboard] ❌ auto-compact settings sync failed: " .. tostring(errs)) end
     local okc, errc = pcall(FX.stepCompact, list, cfg)
     if not okc then print("[cc-dashboard] ❌ auto-compact step failed: " .. tostring(errc)) end
+  end
+  -- pinned links (2026-09-29): each local session's worktree pins, for the chips (after the stacks,
+  -- which give each session its worktree root)
+  do
+    local okp, errp = pcall(FX.stepPins, list)
+    if not okp then print("[cc-dashboard] ❌ pinned links step failed: " .. tostring(errp)) end
   end
   FX.annotateEmptyChats(list)       -- never-used "Claude Code" chats, closable from the card (2026-09-11)
   -- 2026-09-17: LAST of the annotations -- it needs every source at once. One predicate decides

@@ -367,6 +367,18 @@ echo ""
 echo "== node: a card with saved notes shows 📝, and the detail panel when they're next due (behavioral, runs the shipped notesLine) =="
 node "$DIR/compact-notes.test.js" || fail=1
 echo ""
+echo "== bash: pinned links -- up to 8 per worktree, http(s) or a file under the git root, no shell metacharacters (cc-pin.sh) =="
+bash "$DIR/pin.test.sh" || fail=1
+echo ""
+echo "== lua: pinned links -- stamped on each card, opened by browser or /usr/bin/open argv after a second check, cleared on a verified merge (behavioral, runs the shipped FX block) =="
+lua "$DIR/pins.test.lua" || fail=1
+echo ""
+echo "== node: pinned links' chips on the card and in the detail panel, every label and link escaped (behavioral, runs the shipped pinChipsHtml) =="
+node "$DIR/pins-view.test.js" || fail=1
+echo ""
+echo "== browser: 8 pinned links stay inside their card, a click opens the right one, the detail panel shows them (real Chromium, geometry) =="
+node "$DIR/pins-layout.browser.test.js" || fail=1
+echo ""
 
 if [ "$fail" -eq 0 ]; then
   echo "✅ ALL GREEN"

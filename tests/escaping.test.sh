@@ -24,6 +24,9 @@ assert_eq "user-story area heading is esc()'d"   "yes" "$(has 'esc(g.area)')"
 # commit stats (2026-09-25): commit subjects are anyone's text, and project names are relabels
 assert_eq "commit subject is esc()'d"            "yes" "$(has 'esc(c.subject')"
 assert_eq "commit project name is esc()'d"       "yes" "$(has 'esc(r.name')"
+# pinned links (2026-09-29): a session wrote each chip's label and link (cc-pin.sh)
+assert_eq "pin chip label is esc()'d"            "yes" "$(has 'esc(pn.label')"
+assert_eq "pin chip link is esc()'d"             "yes" "$(has 'esc(pn.url)')"
 
 # 2. esc() itself still entity-encodes the HTML metacharacters (not gutted to a no-op)
 assert_eq "esc() encodes &"  "yes" "$(has '.replace(/&/g,"&amp;")')"
@@ -51,7 +54,9 @@ assert_eq 'esc() encodes "'  "yes" "$(has '.replace(/"/g,"&quot;")')"
 # it.workingOn and workingOnHtml's `wk.` never reach HTML raw.
 # 2026-09-29 (automation trace): a Trace row's session name, summary and reason come from a
 # session or its queue -- traceRowHtml's `tr.` never reaches HTML raw.
-SINK_RE="'[[:space:]]*\+[[:space:]]*(it\.(group|label|name|cwd|projectKey|status|branch|stackName|stackKey|sessTitle|wtRoot|merge|askLine|askView|workingOn)\b|\b(im|iw|mg|ak|wk|tr)\.[A-Za-z]+\b|\bg\b)"
+# 2026-09-29 (pinned links): a pin's label and link were written by a session (cc-pin.sh) --
+# it.pins and pinChipsHtml's `pn.` never reach HTML raw.
+SINK_RE="'[[:space:]]*\+[[:space:]]*(it\.(group|label|name|cwd|projectKey|status|branch|stackName|stackKey|sessTitle|wtRoot|merge|askLine|askView|workingOn|pins)\b|\b(im|iw|mg|ak|wk|pn|tr)\.[A-Za-z]+\b|\bg\b)"
 raw_sinks="$(grep -nE "$SINK_RE" "$DASH" || true)"
 assert_eq "no user field concatenated RAW into panel HTML (must be esc()'d)" "" "$raw_sinks"
 
@@ -86,6 +91,9 @@ assert_eq "the merge review fills itself with textContent only (never innerHTML)
 tmp="$(mktemp)"; cp "$DASH" "$tmp"; printf '%s\n' "html += '<b>' + ak.question + '</b>';" >> "$tmp"
 planted="$(grep -cE "$SINK_RE" "$tmp")"; rm -f "$tmp"
 assert_eq "deny-list grep fires on a planted raw held-question sink" "1" "$planted"
+tmp="$(mktemp)"; cp "$DASH" "$tmp"; printf '%s\n' "h += '<span>' + pn.label + '</span>';" >> "$tmp"
+planted="$(grep -cE "$SINK_RE" "$tmp")"; rm -f "$tmp"
+assert_eq "deny-list grep fires on a planted raw pin-chip sink" "1" "$planted"
 
 # 2026-09-19 (audit ledger): the deny-list above is per-FIELD, so it could only ever see the
 # prefixes someone remembered to add -- it knew it./im./iw./mg./ak. and not `e.` (a ledger

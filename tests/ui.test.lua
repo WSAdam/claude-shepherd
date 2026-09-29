@@ -4267,5 +4267,36 @@ do
      'bash "$HOME/.claude/cc-status.sh" precompact')
 end
 
+-- ---- pinned links (2026-09-29, build program unit 31) ----
+do
+  local function read(p) local h = io.open(ROOT .. p, "r"); local s = h and h:read("*a") or ""; if h then h:close() end; return s end
+  local src, lib, shipped = read("claude-dashboard.lua"), read("cc-lib.sh"), read("SHIPPED")
+  local tick = src:match("function FX%._refreshBody%(%)(.-)\nend\n") or ""
+  check("pins: the tick stamps each session's pins, isolated in a pcall", tick:find("pcall(FX.stepPins, list)", 1, true) ~= nil)
+  local open = src:match('if a == "open%-pin" then(.-)\n    return\n  end') or ""
+  check("pins: a chip's click reaches FX.openPin with the card's key and the pin's number",
+        open:find("FX.openPin(byKey[tostring(payload.v or \"\")], payload.text)", 1, true) ~= nil)
+  local op = src:match("function FX%.openPin%(it, i%)(.-)\nend\n") or ""
+  check("pins: a file opens with /usr/bin/open given an argv", op:find('hs.task.new("/usr/bin/open"', 1, true) ~= nil)
+  check("pins: ...never through a shell", op ~= "" and op:find("hs.execute", 1, true) == nil and op:find("os.execute", 1, true) == nil)
+  check("pins: ...and every link is checked again first (core.pinOpenPlan)", op:find("core.pinOpenPlan(", 1, true) ~= nil)
+  local rs = src:match("function FX%.removeStatus%(key%)(.-)\nend") or ""
+  check("pins: FX.removeStatus drops the pins of a worktree that's gone", rs:find("FX.prunePins", 1, true) ~= nil)
+  local rm = lib:match("\ncc_remove%(%)%s*{(.-)\n}") or ""
+  check("pins: ...and so does cc_remove", rm:find("cc_pins_prune", 1, true) ~= nil)
+  local ac = src:match("function FX%.mergeAutoClose%(r, it%)(.-)\nend\n") or ""
+  check("pins: a verified merge clears the unit's pins", ac:find("if ok then pcall(FX.clearPins, r.worktree,", 1, true) ~= nil)
+  check("pins: the card's badges row carries the chips", src:find("b += pinChipsHtml(it);", 1, true) ~= nil)
+  check("pins: the detail panel renders them", src:find("renderPins(it);", 1, true) ~= nil
+        and src:find('<div id="d-pins"></div>', 1, true) ~= nil)
+  check("pins: FX.PINS_DIR reads CC_PINS_DIR, as cc-lib.sh does",
+        src:find('FX.PINS_DIR = os.getenv("CC_PINS_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-pins")', 1, true) ~= nil
+        and lib:find('CC_PINS_DIR="${CC_PINS_DIR:-${HOME}/.claude/cc-pins}"', 1, true) ~= nil)
+  local line = shipped:match("\n(cc%-pin%.sh[^\n]*)")
+  check("pins: SHIPPED ships cc-pin.sh to ~/.claude", line ~= nil and line:find("claude", 1, true) ~= nil)
+  check("pins: ...as a command, not a hook", line ~= nil and line:find("hook", 1, true) == nil)
+  check("pins: --purge takes cc-pins/ with Shepherd's other state", read("uninstall.sh"):find(" cc-pins ", 1, true) ~= nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

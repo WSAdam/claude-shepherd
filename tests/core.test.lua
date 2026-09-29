@@ -8448,7 +8448,9 @@ do
   -- 2026-09-29: 22 -> 23 for the automation dry run and trace ("trace", flagged new).
   -- 2026-09-29: 23 -> 24 for the red-first proof ("redfirst", flagged new).
   -- 2026-09-29: 24 -> 25 for auto-compact with notes ("compact", flagged new).
-  eq("FEATURES: the 25 new features are flagged", newCount, 25)
+  -- 2026-09-29: 25 -> 26 for pinned links ("pins", flagged new).
+  eq("FEATURES: the 26 new features are flagged", newCount, 26)
+  check("FEATURES: lists pinned links", keys.pins == true)
   check("FEATURES: lists the red-first proof", keys.redfirst == true)
   check("FEATURES: lists auto-compact with notes", keys.compact == true)
   check("FEATURES: lists what each session is working on", keys.workingon == true)
@@ -13297,6 +13299,101 @@ do
   local ip = core.instancesPayload("k", {}, {}, { { path = "/r/A", branch = "main" },
     { path = "/Users/a/.claude/cc-scratch/redfirst-100-3", detached = true } }, { mainRoot = "/r/A" })
   eq("instancesPayload: a red-first scratch worktree is not an idle worktree", #ip.worktrees, 1)
+end
+
+-- ---- pinned links: a session pins up to 8 links to its card (2026-09-29) ----
+do
+  -- the file's name: every byte that isn't [A-Za-z0-9] is "-" (cc-pin.sh's LC_ALL=C sed)
+  eq("pinFileName: a worktree root -> its pins file", core.pinFileName("/r/repo/.claude/worktrees/x"), "-r-repo--claude-worktrees-x.json")
+  eq("pinFileName: byte by byte, like the shell's C-locale sed", core.pinFileName("/Users/a b/é.x"), "-Users-a-b----x.json")
+  eq("pinFileName: a relative root has none", core.pinFileName("r/repo"), nil)
+  eq("pinFileName: a root with a control character has none", core.pinFileName("/r/a\nb"), nil)
+  eq("pinFileName: a name past 255 bytes has none", core.pinFileName("/" .. string.rep("a", 250)), nil)
+  eq("pinFileName: nil", core.pinFileName(nil), nil)
+  eq("PINS_MAX is 8", core.PINS_MAX, 8)
+
+  -- the shared table: cc-pin.sh (tests/pin.test.sh) is held to the very same verdicts
+  local ROOTP = "/r/repo"
+  local n = 0
+  local fh = io.open(HERE .. "fixtures/pin-links.tsv", "r")
+  check("pinCheck: tests/fixtures/pin-links.tsv is there", fh ~= nil)
+  for line in (fh and fh:read("*a") or ""):gmatch("[^\n]+") do
+    local want, link = line:match("^(%a+)\t(.*)$")
+    if want and line:sub(1, 1) ~= "#" then
+      n = n + 1
+      link = link:gsub("{ROOT}", ROOTP)
+      local c = core.pinCheck(link, ROOTP)
+      eq("pin-links.tsv: " .. want .. "  " .. link, c and c.kind or "refused", want)
+    end
+  end
+  if fh then fh:close() end
+  check("pinCheck: ...the table was read (30+ cases)", n >= 30)
+
+  local c, why = core.pinCheck("file:///r/repo/a.md", ROOTP)
+  check("pinCheck: a file link carries its path", c and c.path == "/r/repo/a.md" and c.url == "file:///r/repo/a.md")
+  c, why = core.pinCheck("file:///r/repo/a.md", nil)
+  check("pinCheck: a file link with no worktree to check it against is refused", c == nil and type(why) == "string")
+  c, why = core.pinCheck("https://x.com/a;b", ROOTP)
+  check("pinCheck: a refusal says why", c == nil and why:find("metacharacter", 1, true) ~= nil)
+  c = core.pinCheck("https://x.example/" .. string.rep("a", 2001), ROOTP)
+  eq("pinCheck: a link over 2000 characters is refused", c, nil)
+  check("pinHasRefusedChar: DEL is a control character", core.pinHasRefusedChar("a\127b"))
+  check("pinHasRefusedChar: ? = # ~ % stay (URL syntax)", not core.pinHasRefusedChar("http://x/?a=1#t~%20"))
+
+  check("pathUnder: the root itself", core.pathUnder("/r/repo", "/r/repo"))
+  check("pathUnder: inside", core.pathUnder("/r/repo/a/b.md", "/r/repo/"))
+  check("pathUnder: a sibling that shares the prefix is not inside", not core.pathUnder("/r/repox/a.md", "/r/repo"))
+  check("pathUnder: everything is under /", core.pathUnder("/etc/x", "/"))
+
+  -- what a chip says with no label
+  eq("pinDefaultLabel: a GitHub PR", core.pinDefaultLabel({ kind = "http", url = "https://github.com/o/r/pull/12" }), "PR #12")
+  eq("pinDefaultLabel: a GitLab MR", core.pinDefaultLabel({ kind = "http", url = "https://gitlab.com/o/r/-/merge_requests/7" }), "PR #7")
+  eq("pinDefaultLabel: a file's name", core.pinDefaultLabel({ kind = "file", url = "file:///r/repo/docs/b.md", path = "/r/repo/docs/b.md" }), "b.md")
+  eq("pinDefaultLabel: a preview: host and first segment", core.pinDefaultLabel({ kind = "http", url = "http://localhost:5173/isolate/card?x=1" }), "localhost:5173/isolate")
+  eq("pinDefaultLabel: a bare host", core.pinDefaultLabel({ kind = "http", url = "https://example.com" }), "example.com")
+
+  -- a pins file is a session's word: parsed again, checked again
+  local function pinsJson(root, pins) return core.json.encode({ v = 1, root = root, pins = pins }) end
+  local ps = core.parsePins(pinsJson(ROOTP, {
+    { url = "https://github.com/o/r/pull/3", kind = "http", at = 1 },
+    { url = "file:///r/repo/docs/b.md", kind = "file", label = "Spec", at = 2 },
+    { url = "javascript:alert(1)", kind = "http", label = "evil", at = 3 },
+    { url = "file:///etc/passwd", kind = "file", at = 4 },
+    { url = "https://x.example/", label = "two\nlines", at = 5 },
+    { url = "https://y.example/", label = string.rep("é", 100), at = 6 },
+  }), ROOTP)
+  check("parsePins: a pins file parses", ps ~= nil and ps.root == ROOTP)
+  eq("parsePins: links that fail the check again are dropped", ps and #ps.pins, 4)
+  check("parsePins: a pin without a label gets one", ps and ps.pins[1].label == "PR #3" and ps.pins[1].kind == "http")
+  check("parsePins: a pin's own label is kept", ps and ps.pins[2].label == "Spec" and ps.pins[2].kind == "file")
+  eq("parsePins: a label with a control character reads as the default", ps and ps.pins[3].label, "x.example")
+  eq("parsePins: a label is cut to 80 characters", ps and utf8.len(ps.pins[4].label), 80)
+  check("parsePins: only url, kind and label go to the panel", ps and ps.pins[2].path == nil and ps.pins[2].at == nil)
+  eq("parsePins: another worktree's file (a name both share) is nil", core.parsePins(pinsJson("/r/repo-x", {}), ROOTP), nil)
+  check("parsePins: with no root to hold it to, the file's own root", (core.parsePins(pinsJson("/r/other", {}), nil) or {}).root == "/r/other")
+  eq("parsePins: not JSON", core.parsePins("{", ROOTP), nil)
+  eq("parsePins: no root", core.parsePins(core.json.encode({ v = 1, pins = {} }), ROOTP), nil)
+  local many = {}
+  for i = 1, 12 do many[i] = { url = "http://localhost:" .. (8000 + i) .. "/" } end
+  eq("parsePins: at most 8 reach the card", #core.parsePins(pinsJson(ROOTP, many), ROOTP).pins, 8)
+
+  -- a click: pin i of the card, checked again against Shepherd's own root and the file's real path
+  local cardPins = ps and ps.pins or {}
+  local plan = core.pinOpenPlan(cardPins, 1, ROOTP)
+  check("pinOpenPlan: an http pin opens its url", plan and plan.kind == "http" and plan.url == "https://github.com/o/r/pull/3")
+  plan = core.pinOpenPlan(cardPins, "2", ROOTP, function(p) return p end)
+  check("pinOpenPlan: a file pin opens its path", plan and plan.kind == "file" and plan.path == "/r/repo/docs/b.md")
+  local why2
+  plan, why2 = core.pinOpenPlan(cardPins, 2, ROOTP, function(p) if p == ROOTP then return p end; return "/private/elsewhere/b.md" end)
+  check("pinOpenPlan: a file whose real path leads outside the worktree is refused", plan == nil and type(why2) == "string")
+  plan = core.pinOpenPlan(cardPins, 2, ROOTP, function() return nil end)
+  eq("pinOpenPlan: a file that's gone is refused", plan, nil)
+  eq("pinOpenPlan: a pin number past the list", core.pinOpenPlan(cardPins, 9, ROOTP), nil)
+  eq("pinOpenPlan: not a number", core.pinOpenPlan(cardPins, "x", ROOTP), nil)
+  eq("pinOpenPlan: no pins", core.pinOpenPlan(nil, 1, ROOTP), nil)
+  eq("pinOpenPlan: a file pin checked against another worktree", core.pinOpenPlan(cardPins, 2, "/r/other"), nil)
+  eq("pinOpenPlan: a pin tampered with on its way back is checked again",
+     core.pinOpenPlan({ { url = "file:///etc/passwd", kind = "file" } }, 1, ROOTP), nil)
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
