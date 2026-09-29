@@ -287,13 +287,8 @@ defaults), sessions compact earlier, and write their own notes first.
 
 Shepherd can leave a session a message instead of typing it into its window, so automation can
 reach a session that is mid-turn, or one in a VS Code window it shares with other Claude tabs. The
-entry point is `FX.mailboxSend(key, text, meta)`; nothing in the panel sends mail yet (the
-automation built on it comes later). To try it from a terminal, with the session's key (its status
-file's name in `~/.claude/cc-status/`):
-
-```bash
-hs -c '_G.__ccDashboard.fx.mailboxSend("<session key>", "Summarise what you just did.")'
-```
+entry point is `FX.mailboxSend(key, text, meta)`; [cc-send](#send-a-prompt-from-a-shell) is built
+on it, and is the way to try it from a terminal.
 
 - **Where it waits.** `~/.claude/cc-inbox/<session>/`, one file per message, named
   `<time>-<order>-<nonce>.msg` and written whole. Its first line is marked `[shepherd]`. A slash
@@ -317,6 +312,49 @@ hs -c '_G.__ccDashboard.fx.mailboxSend("<session key>", "Summarise what you just
 - **Cleanup and Diagnostics.** A session's inbox goes when the session ends, or when its card is
   forgotten or pruned. 🩺 Diagnostics counts the messages waiting, per session. The ledger records
   `mailbox_sent` and `mailbox_delivered` (`via`: `stop`, `start` or `typed`).
+
+## Send a prompt from a shell
+
+`~/.claude/cc-send.sh` hands a live session a prompt from any shell -- a script, a cron job, a
+terminal or another Claude session -- through the [session mailbox](#session-mailbox), and with
+`--wait` prints its reply.
+
+```bash
+~/.claude/cc-send.sh claude-instance-manager "Run make test and tell me the count." --wait
+reply="$(~/.claude/cc-send.sh ~/Programming/wgsUltra "Summarise what you changed today." --wait)"
+```
+
+- **The target.** A session: its key (the session id, its status file's name in
+  `~/.claude/cc-status/`) or its name -- the one Claude Code gives it, which other sessions message
+  it by, or its card's name. A project: its repo's root, a worktree's root, a folder inside one
+  (`.` works), or its name. A project gets its best live session: an idle one before a busy one
+  (then the most recently active), never one waiting on you (a question, a permission prompt, a
+  merge, a batch proposal or an error on its card), never one that has ended or lost its tab, and
+  never the session running the command (known by `CLAUDE_CODE_SESSION_ID`, or by its process
+  after a `/clear`). A name that fits two sessions or two projects is refused with the choices
+  listed: give a key or the repo root. A named session that can't take it is refused, saying why.
+- **How it arrives.** Through the mailbox, as `[shepherd] Message from <sender> via cc-send #<id>`
+  and then the prompt. A busy session gets it when its current turn ends and carries on with it; an
+  idle session in a kitty window or a VS Code window of its own gets it typed once it's ready; an
+  idle session in a VS Code window shared with other Claude tabs keeps it in its mailbox until its
+  next turn end or start. cc-send says which, on stderr. Slash commands are refused, and a prompt
+  is at most 3,500 bytes.
+- **`--wait`.** Follows the session's transcript from the moment the prompt was sent until the turn
+  that takes it ends, then prints that turn's last assistant text on stdout. Progress and errors go
+  to stderr, so `$(…)` captures just the reply. `--timeout <seconds>` (default 1800) bounds the
+  wait. A prompt handed over at a session's start is answered in that session's next turn.
+- **Exit codes.** 0 sent (with `--wait`: answered) · 2 refused (the arguments, an empty prompt, a
+  slash command, too long, no such folder) · 3 no session to send it to (none, ambiguous, waiting
+  on you, ended, or yourself) · 4 `--wait` ran out · 5 no reply to print (the turn was interrupted
+  or died on an API error, or there is no transcript to follow) · 6 Shepherd isn't running, or
+  didn't take the request within 30 seconds (it is then withdrawn, so it can't arrive later).
+- **Under the hood.** cc-send leaves a request in `~/.claude/cc-send/`; each tick Shepherd claims
+  it, picks the session (`core.sendTarget`), hands it the prompt (`FX.deliverTo`) and answers with
+  where it went and where to read the reply. A request goes with the session that made it, and
+  anything left over is pruned after 10 minutes. The ledger records `send_delivered` (the session,
+  the request id, the sender and the route) and `send_refused`, besides the mailbox's own
+  `mailbox_sent`. With [dry run](#dry-run-and-the-automation-trace) on for the mailbox, nothing is
+  delivered and cc-send says so.
 
 ## Resume at the limit reset
 

@@ -11495,6 +11495,219 @@ function M.inboxRows(decisions, items, now)
 end
 end
 
+-- ---- cc-send: a prompt for a live session, from any shell (2026-09-29) ----
+-- Build program unit 30. `cc-send.sh <project|session> "prompt" [--wait]` leaves a request in
+-- ~/.claude/cc-send/<caller key or "shell">.<epoch>-<n>.json; each tick Shepherd claims it (renames
+-- it: the CLI can no longer withdraw it, and nothing takes it twice), picks the target here, leaves
+-- the prompt in that session's mailbox (FX.deliverTo) and answers <...>.answer, bound to the
+-- request's nonce. This half is pure: which session a target means, and what it is handed. The
+-- "find a live session" part (sendBlocked, sendCandidates, sendTarget) is shared with unit 29's
+-- tickets. (One do-block: its helpers take none of the main chunk's 200 locals.)
+do
+M.SEND = {
+  textMax = 3500,        -- bytes of a prompt: the header fits under MAILBOX_MAX, so nothing is ever cut
+  targetMax = 300,
+  requestMaxAge = 90,    -- a request older than this is dropped undelivered: its CLI has given up
+  keepSeconds = 600,     -- any file in cc-send/ older than this goes (a CLI killed mid-request)
+}
+local function trim(s) return (tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", "")) end
+local function low(s) return type(s) == "string" and s ~= "" and s:lower() or nil end
+local function normPath(p)
+  if type(p) ~= "string" or p:sub(1, 1) ~= "/" then return nil end
+  p = p:gsub("/+$", "")
+  return p ~= "" and p or "/"
+end
+local function baseName(p) return type(p) == "string" and p:match("([^/]+)/*$") or nil end
+-- A request's own files: <owner>.<epoch>-<n>.<rest> -> owner, epoch. The owner is the caller's
+-- session key (or "shell"), so a session's requests go when it does.
+function M.sendFileOf(fn)
+  if type(fn) ~= "string" then return nil end
+  local owner, epoch = fn:match("^(.+)%.(%d+)%-%d+%.")
+  if not owner or not M.mailboxKeyOk(owner) then return nil end
+  return owner, tonumber(epoch)
+end
+-- A request file (not its answer, a temp or a claim) -> owner, id ("<epoch>-<n>").
+function M.sendRequestName(fn)
+  if type(fn) ~= "string" then return nil end
+  local owner, id = fn:match("^(.+)%.(%d+%-%d+)%.json$")
+  if not owner or not M.mailboxKeyOk(owner) then return nil end
+  return owner, id
+end
+-- A request read back: { id, nonce, target, path, text, wait, from = { key, pid }, at }, or
+-- nil + why (+ the nonce when there is one, so the refusal can still be answered). `id` is the
+-- file name's; a body that names another is refused. KEEP IN SYNC with cc-send.sh's own checks.
+function M.parseSendRequest(raw, id, now)
+  if type(raw) ~= "string" then return nil, "unreadable" end
+  local ok, t = pcall(function() return M.json.decode(raw) end)
+  if not ok or type(t) ~= "table" then return nil, "unreadable" end
+  local nonce = type(t.nonce) == "string" and #t.nonce <= 80 and t.nonce:match("^[%w.]+$") and t.nonce or nil
+  if not nonce then return nil, "no nonce" end
+  if t.id ~= id then return nil, "its id isn't its file's", nonce end
+  local at = tonumber(t.at)
+  if not at then return nil, "no time", nonce end
+  if (tonumber(now) or os.time()) - at > M.SEND.requestMaxAge then return nil, "expired", nonce end
+  local target = trim(t.target)
+  if target == "" or #target > M.SEND.targetMax or target:find("%c") then
+    return nil, "give a session (its key or name) or a project (its repo root or name)", nonce
+  end
+  local text = type(t.text) == "string" and trim(t.text) or ""
+  if text == "" then return nil, "empty", nonce end
+  if M.mailboxSlash(text) then return nil, "slash command", nonce end
+  if #text > M.SEND.textMax then
+    return nil, "too long (" .. #text .. " bytes; at most " .. M.SEND.textMax .. ")", nonce
+  end
+  local from = type(t.from) == "table" and t.from or {}
+  local path = type(t.path) == "string" and not t.path:find("%c") and normPath(t.path) or nil
+  return { id = id, nonce = nonce, target = target, path = path, text = text, wait = t.wait == true, at = at,
+           from = { key = M.mailboxKeyOk(from.key) and from.key or nil,
+                    pid = tostring(from.pid or ""):match("^%d+$") } }
+end
+-- What a delivered prompt carries so --wait can find it in the transcript: "cc-send #<id>".
+function M.sendMarker(id) return "cc-send #" .. tostring(id) end
+-- The text handed over: [shepherd]-marked, naming the sender (a Claude session's name -- the one
+-- SendMessage reaches it by -- or "a shell") and the marker, then the prompt as given.
+function M.sendText(req, fromName)
+  local who = type(fromName) == "string" and trim(fromName:gsub("%c", " ")) or ""
+  if who == "" then who = "a shell" end
+  local head = M.SHEPHERD_TAG .. " Message from " .. who .. " via " .. M.sendMarker(req.id)
+  if req.wait then head = head .. ", who is waiting for your reply" end
+  return head .. ":\n\n" .. tostring(req.text)
+end
+
+local NEEDS_WORDS = { ask = "a question", merge = "a merge", fleet = "a batch proposal",
+                      approval = "a permission prompt", error = "an error" }
+-- Why session `it` can't take a prompt from this caller, or nil when it can. opts = { callerKey,
+-- callerPid }: the caller's own session is never a target, known by its key or, after a /clear
+-- (a new key, the same process), its pid. A session waiting on Adam is never one either -- it
+-- would carry on with the prompt instead of with his answer. Busy is fine: its turn end takes it.
+function M.sendBlocked(it, opts, now)
+  opts = type(opts) == "table" and opts or {}
+  if type(it) ~= "table" then return "is no session" end
+  if it.remote then return "runs on another machine -- cc-send reaches only this Mac's sessions" end
+  if not M.mailboxKeyOk(it.key) then return "has no key Shepherd can deliver to" end
+  local pid = tostring(it.session_pid or "")
+  if (opts.callerKey and it.key == opts.callerKey)
+     or (opts.callerPid and opts.callerPid ~= "" and pid == tostring(opts.callerPid)) then
+    return "is you"
+  end
+  if it.procAlive == false then return "has ended" end
+  if it.tabless then return "has no tab any more" end
+  if it.needsYou == "needs" or M.askHeld(it, now) or it.status == "approval" then
+    local what = NEEDS_WORDS[it.needsYouSource] or (it.status == "approval" and NEEDS_WORDS.approval) or "its card"
+    return "is waiting on you (" .. what .. ")"
+  end
+  return nil
+end
+-- Idle before busy; then the most recently active (the freshest context); then by key.
+local function busy(it) return it.status == "working" end
+function M.sendRank(a, b)
+  local ba, bb = busy(a), busy(b)
+  if ba ~= bb then return not ba end
+  local ua, ub = tonumber(a.updated) or 0, tonumber(b.updated) or 0
+  if ua ~= ub then return ua > ub end
+  return tostring(a.key) < tostring(b.key)
+end
+-- The live sessions that can take a prompt, best first; keep(it) narrows them (a repo, a folder).
+function M.sendCandidates(list, opts, keep, now)
+  local out = {}
+  for _, it in ipairs(list or {}) do
+    if type(it) == "table" and (not keep or keep(it)) and not M.sendBlocked(it, opts, now) then out[#out + 1] = it end
+  end
+  table.sort(out, M.sendRank)
+  return out
+end
+local function nameOf(it) return it.peerName or it.label or it.name or it.key end
+local function projectOf(it) return it.mainRoot or it.stackKey or it.projectKey or it.cwd or it.key end
+local function describe(it)
+  local proj = it.stackName or baseName(it.mainRoot) or baseName(it.cwd)
+  return tostring(it.key) .. " (" .. tostring(nameOf(it)) .. ")" .. (proj and (" in " .. proj) or "")
+end
+local function one(it, opts, now)
+  local why = M.sendBlocked(it, opts, now)
+  if why then return nil, tostring(nameOf(it)) .. " " .. why, "unavailable" end
+  return it, "session"
+end
+local function best(group, opts, what, now)
+  local cands = M.sendCandidates(group, opts, nil, now)
+  if cands[1] then return cands[1], "project" end
+  local whys, onlyMe = {}, true
+  for _, it in ipairs(group) do
+    local why = M.sendBlocked(it, opts, now) or "?"
+    if why ~= "is you" then onlyMe = false end
+    whys[#whys + 1] = tostring(nameOf(it)) .. " " .. why
+  end
+  if onlyMe then return nil, "the only session in " .. what .. " is you", "none" end
+  return nil, "no session in " .. what .. " can take it: " .. table.concat(whys, "; "), "none"
+end
+-- Which session a target means: it, "session" | "project" -- or nil, why, code, choices. code is
+-- "usage" (no target), "none" (nothing live), "ambiguous" (choices lists what it could mean) or
+-- "unavailable" (a named session that can't take it: why says why). A target is, in order:
+--   a session key;
+--   a path (opts.path, which cc-send.sh resolves, or a target starting with /): a repo's root
+--     means every session of that repo, a worktree's or folder's root the sessions open there;
+--   a name, case-insensitive: a session's (its Claude Code name, its card label, its name) or a
+--     project's (its card name, its repo's folder). A name that fits one project -- and no session
+--     outside it -- means that project; one that fits two projects or two sessions is ambiguous.
+-- A project gets its best live session (sendCandidates); a named session is refused, saying why,
+-- when it can't take it.
+function M.sendTarget(list, target, opts, now)
+  opts = type(opts) == "table" and opts or {}
+  target = trim(target)
+  if target == "" and not opts.path then
+    return nil, "give a session (its key or name) or a project (its repo root or name)", "usage"
+  end
+  local tiles = {}
+  for _, it in ipairs(list or {}) do if type(it) == "table" and it.key then tiles[#tiles + 1] = it end end
+  for _, it in ipairs(tiles) do
+    if it.key == target or it.session_id == target then return one(it, opts, now) end
+  end
+  local path = normPath(opts.path) or normPath(target)
+  if path then
+    local group = {}
+    for _, it in ipairs(tiles) do
+      if normPath(it.mainRoot) == path or normPath(it.wtRoot) == path or normPath(it.cwd) == path then
+        group[#group + 1] = it
+      end
+    end
+    if #group == 0 then return nil, "no session is open in " .. path, "none" end
+    return best(group, opts, path, now)
+  end
+  local t = target:lower()
+  local named, projects, order = {}, {}, {}
+  for _, it in ipairs(tiles) do
+    if low(it.peerName) == t or low(it.label) == t or low(it.name) == t then named[#named + 1] = it end
+    if low(it.stackName) == t or low(baseName(it.mainRoot)) == t then
+      local p = projectOf(it)
+      if not projects[p] then projects[p] = true; order[#order + 1] = p end
+    end
+  end
+  if #order > 1 then
+    table.sort(order)
+    return nil, "'" .. target .. "' names " .. #order .. " projects -- give the repo root instead", "ambiguous", order
+  end
+  if #order == 1 then
+    local p = order[1]
+    for _, it in ipairs(named) do
+      if projectOf(it) ~= p then
+        return nil, "'" .. target .. "' names a project and a session outside it -- give a key or the repo root",
+               "ambiguous", { p, describe(it) }
+      end
+    end
+    local group = {}
+    for _, it in ipairs(tiles) do if projectOf(it) == p then group[#group + 1] = it end end
+    return best(group, opts, target, now)
+  end
+  if #named == 1 then return one(named[1], opts, now) end
+  if #named > 1 then
+    local choices = {}
+    for _, it in ipairs(named) do choices[#choices + 1] = describe(it) end
+    table.sort(choices)
+    return nil, "'" .. target .. "' names " .. #named .. " sessions -- give one's key", "ambiguous", choices
+  end
+  return nil, "no live session or project is called '" .. target .. "'", "none"
+end
+end
+
 -- ---- Resume at the usage limit's reset (2026-09-29) ----
 -- Build program unit 13. A turn stopped by a usage limit fires StopFailure (error "rate_limit"):
 -- cc-resume.sh arms ~/.claude/cc-resume/<key>.json and waits. Shepherd plans it here -- when the
@@ -17622,6 +17835,9 @@ M.FEATURES = {
   { key = "pins", cat = "Control", new = true, title = "Pinned links",
     what = "A session pins up to 8 links -- a preview URL, a PR, a file in its worktree -- with ~/.claude/cc-pin.sh add <link> [--label L], and they show as chips on its card and in the detail panel; a click opens one. Pins belong to the worktree, so they survive /clear, and go when its merge is verified. Only http(s) links and files under the session's git root are taken, never one holding a shell metacharacter, and each is checked again before it opens.",
     why = "The page to look at, the PR to review or the report to read is one click from the card, not somewhere in the transcript." },
+  { key = "send", cat = "Control", new = true, title = "cc-send",
+    what = "~/.claude/cc-send.sh <session|project> \"prompt\" [--wait] hands a live session a prompt from any shell. A session is named by its key or name; a project by its repo root or name, and gets its best live session -- an idle one before a busy one, never one waiting on you, never the caller. It goes through the session mailbox, marked [shepherd] and ledgered: a busy session gets it at its turn end, an idle one typed where typing is safe, else it waits. --wait prints the reply on stdout and everything else on stderr; slash commands are refused.",
+    why = "A script, a cron job or another session can hand work to a live session and use its answer, without anyone switching tabs." },
   { key = "sharedwin", cat = "Control", new = true, title = "Shared-window guard",
     what = "When several Claude sessions run as tabs in one VS Code window, Shepherd won't type into any of them — no nudge, queue feed or /clear — and says why. Close goes through the Shepherd tab bridge, which closes just that session's tab. Jump and hands-free approvals still work. keystrokes.refuseSharedWindow switches it off.",
     why = "Shepherd types into a window, not a tab, so a message meant for one tab could land in another." },

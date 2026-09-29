@@ -32,6 +32,7 @@ mkdir -p "$C/cc-resume"; printf '{"key":"abc","nonce":"ab","state":"waiting"}' >
 mkdir -p "$C/cc-pins"; printf '{"v":1,"root":"/r","pins":[]}' > "$C/cc-pins/-r.json"
 mkdir -p "$C/cc-lease/db"; printf '{"v":1,"main":"/r","leases":{}}' > "$C/cc-lease/-r.json"
 mkdir -p "$C/cc-bridge"; printf '0.5.0' > "$C/cc-bridge/.installed"
+mkdir -p "$C/cc-send"; printf '{"nonce":"ab"}' > "$C/cc-send/shell.1790000000-1.answer"
 FAKE="$TMP/code"
 printf '#!/bin/sh\necho "$*" >> "%s"\nexit 0\n' "$TMP/code.calls" > "$FAKE"; chmod +x "$FAKE"
 
@@ -53,7 +54,8 @@ assert_json "the user's own Stop hook is kept" "$C/settings.json" '.hooks.Stop[0
 assert_json "...as the only Stop group" "$C/settings.json" '.hooks.Stop | length' "1"
 assert_json "an event left with no hooks is dropped" "$C/settings.json" '.hooks | has("PreToolUse")' "false"
 assert_json "the user's other settings are kept" "$C/settings.json" '.model' "opus"
-for f in cc-lib.sh cc-status.sh cc-approve.sh cc-popup.sh cc-merge.sh cc-fleet.sh cc-ask.sh cc-commits.sh cc-worktree-guard.sh cc-resume.sh cc-core.lua; do
+# 2026-09-29: cc-send.sh (a prompt for a live session, from any shell) is shipped too.
+for f in cc-lib.sh cc-status.sh cc-approve.sh cc-popup.sh cc-merge.sh cc-fleet.sh cc-ask.sh cc-commits.sh cc-worktree-guard.sh cc-resume.sh cc-send.sh cc-core.lua; do
   assert_eq "removes $f from the claude dir" "gone" "$([ -e "$C/$f" ] && echo there || echo gone)"
 done
 assert_eq "a user's own cc-*.sh is kept" "there" "$([ -e "$C/cc-mine.sh" ] && echo there || echo gone)"
@@ -93,6 +95,8 @@ assert_eq "--purge removes the resumes waiting for a limit reset" "gone" "$([ -e
 assert_eq "--purge removes the pinned links" "gone" "$([ -e "$C/cc-pins" ] && echo there || echo gone)"
 # 2026-09-29: the worktree leases (cc-lease/, with the default database folder inside it) too
 assert_eq "--purge removes the worktree leases" "gone" "$([ -e "$C/cc-lease" ] && echo there || echo gone)"
+# 2026-09-29: cc-send's requests and answers (cc-send/) too
+assert_eq "--purge removes cc-send's requests" "gone" "$([ -e "$C/cc-send" ] && echo there || echo gone)"
 assert_eq "--purge still keeps the user's own files" "there" "$([ -e "$C/cc-mine.sh" ] && echo there || echo gone)"
 
 # a CLAUDE.md that is only the block (a fresh machine) is removed, not left empty

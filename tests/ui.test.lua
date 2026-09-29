@@ -3932,6 +3932,25 @@ do
         src:find('FX.INBOX_DIR = os.getenv("CC_INBOX_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-inbox")', 1, true) ~= nil)
 end
 
+-- ---- cc-send requests are stepped every tick (2026-09-29) ----
+-- Build program unit 30. tests/send.test.lua drives FX.stepSend itself; this pins that the tick runs
+-- it, isolated in a pcall, AFTER the needs-you stamp it reads (a session waiting on Adam is never
+-- picked), and that the delivery goes through the mailbox, never straight to a window.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  local tick = src:match("function FX%._refreshBody%(%)(.-)\nend\n") or ""
+  local stamp, step = tick:find("FX.annotateNeedsYou(list)", 1, true), tick:find("pcall(FX.stepSend, list)", 1, true)
+  check("send: the tick steps cc-send requests, isolated in a pcall", step ~= nil)
+  check("send: ...after the needs-you stamp", stamp ~= nil and step ~= nil and step > stamp)
+  local deliver = src:match("function FX%.deliverTo%(it, text, meta%)(.-)\nend\n") or ""
+  check("send: a delivery goes through the mailbox (marked, ledgered, through the automation door)",
+        deliver:find("FX.mailboxSend(it.key, text, meta)", 1, true) ~= nil and not deliver:find("pasteIntoWindow", 1, true))
+  check("send: FX.SEND_DIR reads CC_SEND_DIR, as cc-lib.sh does",
+        src:find('FX.SEND_DIR = os.getenv("CC_SEND_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-send")', 1, true) ~= nil)
+end
+
 -- ---- Capture as scenario (2026-09-29) ----
 -- A card's transcript window, scrubbed by the installed cc-scrub.js, saved to ~/.claude/cc-scenarios/
 -- with a label to fill in -- a case for tests/scenario-replay.test.lua. tests/scenario-capture.test.lua

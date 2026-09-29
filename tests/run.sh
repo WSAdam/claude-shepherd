@@ -418,6 +418,12 @@ echo ""
 echo "== node: the Inbox lists open questions and held asks, every session word escaped, answered in place (behavioral, runs the shipped inboxRowsHtml) =="
 node "$DIR/inbox-view.test.js" || fail=1
 echo ""
+echo "== lua: cc-send -- the target (key, name, project; idle over busy; never one waiting on Adam or the caller; none; ambiguous), delivered once through the mailbox, answered and ledgered (stubbed hs) =="
+HOME="$(mktemp -d)" lua "$DIR/send.test.lua" || fail=1
+echo ""
+echo "== bash: cc-send.sh -- arguments, Shepherd's answer, --wait following literal transcripts to the turn's end, the reply alone on stdout =="
+bash "$DIR/send.test.sh" || fail=1
+echo ""
 
 if [ "$fail" -eq 0 ]; then
   echo "✅ ALL GREEN"

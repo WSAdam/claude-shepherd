@@ -36,6 +36,9 @@ export CC_LEASE_DIR="${CC_LEASE_DIR:-$CC_TEST_ISOLATION/cc-lease}"
 # a SessionEnd (cc_remove) drops a session's open questions there; a suite's fake session must never
 # take or drop a real one.
 export CC_DECIDE_DIR="${CC_DECIDE_DIR:-$CC_TEST_ISOLATION/cc-decide}"
+# 2026-09-29: a SessionEnd (cc_remove) drops the session's cc-send requests and prunes stale ones in
+# ~/.claude/cc-send; a suite's fake session end must never touch the real ones.
+export CC_SEND_DIR="${CC_SEND_DIR:-$CC_TEST_ISOLATION/cc-send}"
 
 # sysbin_without <outdir> <tool>... - mirror /usr/bin + /bin into <outdir> as symlinks,
 # leaving out the named tools, and echo <outdir>. Use it in place of a literal

@@ -66,6 +66,8 @@ Every feature below has a reference page one click away. The panel lists the sam
   a message, stop its turn, or clear or compact it, from its tile.
 - [**Pinned links**](docs/controls.md#pinned-links): a session pins up to 8 links (its preview, its
   PR, a file in its worktree) with `cc-pin.sh`, and they show as chips on its card.
+- [**cc-send**](docs/automation.md#send-a-prompt-from-a-shell): `cc-send.sh <project|session> "prompt"
+  --wait` hands a live session a prompt from any shell and prints its reply.
 - [**Answer questions from Shepherd**](docs/approvals-and-policies.md#answer-questions-from-shepherd):
   a session's question shows up on its card as buttons, and your click goes straight to the session.
 - [**Decisions inbox**](docs/approvals-and-policies.md#decisions-inbox): a question with a sensible

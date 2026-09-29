@@ -3941,6 +3941,12 @@ function FX.removeStatus(key)
       if fn:sub(1, #dt) == dt then os.remove(FX.NOTES_DIR .. "/" .. fn) end
     end
     if FX._dueAt then FX._dueAt[key] = nil end
+    -- cc-send (2026-09-29): the requests this session made and their answers, temps and claims
+    -- (cc_remove too: cc_send_prune). A request still waiting goes undelivered: nobody is left to
+    -- read the reply. Files older than core.SEND.keepSeconds go on FX.stepSend's own prune.
+    for _, fn in ipairs(FX.readDir(FX.SEND_DIR)) do
+      if core.sendFileOf(fn) == key then os.remove(FX.SEND_DIR .. "/" .. fn) end
+    end
   end
   -- pinned links (2026-09-29) belong to a worktree, not this key -- they outlive /clear -- so only
   -- the pins of a worktree that is gone go (cc_remove runs cc_pins_prune)
@@ -6707,6 +6713,135 @@ function FX.decidePrune()
     end
   end
 end
+
+-- ---- cc-send: a prompt for a live session, from any shell (2026-09-29) ----
+-- Build program unit 30. `cc-send.sh <project|session> "prompt" [--wait]` leaves a request in
+-- FX.SEND_DIR, named <caller key or "shell">.<epoch>-<n>.json. Each tick FX.stepSend claims every
+-- request by renaming it (so the CLI can no longer withdraw it and nothing takes it twice), picks
+-- the target (core.sendTarget: never the caller, never a session waiting on Adam), hands it the
+-- prompt through FX.deliverTo and answers <...>.answer, bound to the request's nonce: where it
+-- went, how it arrives, and the transcript and offset --wait follows the reply from. Runs after the
+-- needs-you stamp, which the choice reads.
+FX.SEND_DIR = os.getenv("CC_SEND_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-send")
+FX._send = { answered = {} }   -- request id -> true: a request seen again (a stray copy) isn't delivered twice
+-- THE "deliver to a live session" helper (cc-send here, unit 29's tickets next): leave `text` in the
+-- session's mailbox (FX.mailboxSend: [shepherd]-marked, never a slash command, ledgered, through the
+-- automation door), handed over at its turn end or next start, or typed by FX.stepMailbox once it is
+-- idle and ready where typing is allowed. Returns { key, route, transcript, offset, path } -- route
+-- is core.mailboxRoute's "turn-end", "type" or "waiting", offset the transcript's size just before
+-- the send -- or nil + why (core.AUTOMATION_DRY in a dry run).
+function FX.deliverTo(it, text, meta)
+  if type(it) ~= "table" or it.remote or not core.mailboxKeyOk(it.key) then return nil, "no session" end
+  local tp = type(it.transcript_path) == "string" and it.transcript_path ~= "" and it.transcript_path or nil
+  local offset = tp and FX.fileSize(tp) or nil
+  local path, why = FX.mailboxSend(it.key, text, meta)
+  if not path then return nil, why end
+  return { key = it.key, route = core.mailboxRoute(it, 1) or "turn-end", transcript = tp, offset = offset, path = path }
+end
+-- The tiles as core.sendTarget reads them: each with the name Claude Code knows it by (the one
+-- SendMessage addresses, from ~/.claude/sessions/<pid>.json) and whether its process is alive
+-- (one batched ps, only when a request is waiting). Also returns the registry, for the caller's name.
+function FX.sendViews(list)
+  local reg = FX.readSessions()
+  local pids = {}
+  for _, it in ipairs(list or {}) do
+    local p = not it.remote and tostring(it.session_pid or ""):match("^%d+$")
+    if p then pids[p] = true end
+  end
+  local alive = FX.probeAlive(pids)
+  local views = {}
+  for _, it in ipairs(list or {}) do
+    local p = tostring(it.session_pid or ""):match("^%d+$")
+    local e = p and reg[p]
+    local procAlive = it.procAlive
+    if procAlive == nil and p then procAlive = alive[p] end
+    views[#views + 1] = setmetatable({ peerName = type(e) == "table" and type(e.name) == "string" and e.name or nil,
+                                       procAlive = procAlive }, { __index = it })
+  end
+  return views, reg
+end
+-- Who sent it, as the target is told: the calling session's Claude Code name, else its card name;
+-- a plain shell is nil ("a shell").
+function FX.sendCallerName(req, views, reg)
+  local e = req.from.pid and reg[req.from.pid]
+  if type(e) == "table" and type(e.name) == "string" and e.name ~= "" then return e.name end
+  for _, v in ipairs(views) do
+    if req.from.key and v.key == req.from.key then return v.peerName or v.label or v.name end
+  end
+  return req.from.key and "a Claude session" or nil
+end
+function FX.sendAnswer(owner, id, body)
+  if not FX.writeFileAtomic(FX.SEND_DIR .. "/" .. owner .. "." .. id .. ".answer", core.json.encode(body)) then
+    print("[cc-dashboard] ❌ cc-send: couldn't write the answer to request " .. id)
+  end
+end
+-- One claimed request: parse it, pick the target, deliver, answer. Every outcome is ledgered.
+function FX.sendHandle(owner, id, raw, views, reg, now)
+  local req, why, nonce = core.parseSendRequest(raw, id, now)
+  nonce = req and req.nonce or nonce   -- a refused request keeps its nonce, so it can still be answered
+  local function refuse(code, reason, extra)
+    print("[cc-dashboard] ⚠️ cc-send: request " .. id .. " not delivered (" .. code .. "): " .. tostring(reason))
+    FX.appendLedger({ type = "send_refused", id = id, code = code, reason = tostring(reason):sub(1, 200),
+                      target = req and req.target or nil })
+    if nonce then
+      local body = { nonce = nonce, ok = false, code = code, reason = reason }
+      for k, v in pairs(extra or {}) do body[k] = v end
+      FX.sendAnswer(owner, id, body)
+    end
+  end
+  if not req then return refuse((why == "expired") and "expired" or "refused", why) end
+  local it, why2, code, choices = core.sendTarget(views, req.target,
+    { callerKey = req.from.key, callerPid = req.from.pid, path = req.path }, now)
+  if not it then return refuse(code or "none", why2, { choices = choices }) end
+  local from = FX.sendCallerName(req, views, reg)
+  local d, why3 = FX.deliverTo(it, core.sendText(req, from), { kind = "send", from = "cc-send" })
+  if not d then
+    return refuse((why3 == core.AUTOMATION_DRY) and "dry-run" or "refused",
+                  (why3 == core.AUTOMATION_DRY) and "automation dry run is on: nothing was delivered" or why3)
+  end
+  local name = it.peerName or it.label or it.name or it.key
+  print("[cc-dashboard] ✅ cc-send: request " .. id .. " -> '" .. tostring(name) .. "' (" .. d.route .. ")")
+  ledgerFor(it, { type = "send_delivered", id = req.id, by = from or "a shell", route = d.route, target = req.target,
+                  wait = req.wait or nil })
+  FX.sendAnswer(owner, id, { nonce = nonce, ok = true, key = it.key, name = name, project = it.stackName,
+    route = d.route, transcript = d.transcript, offset = d.offset, marker = core.sendMarker(req.id), mailbox = d.path })
+end
+-- Each tick: every request waiting, once; then every file past core.SEND.keepSeconds goes (a CLI
+-- killed mid-request leaves its answer). One directory read when there's nothing to do.
+function FX.stepSend(list)
+  local names = FX.readDir(FX.SEND_DIR)
+  if #names == 0 then return end
+  local now = FX.now()
+  local views, reg
+  for _, fn in ipairs(names) do
+    local owner, id = core.sendRequestName(fn)
+    if owner then
+      local path = FX.SEND_DIR .. "/" .. fn
+      local claim = path .. ".claim.shepherd"
+      if os.rename(path, claim) then
+        local raw = FX.readFile(claim)
+        os.remove(claim)
+        if FX._send.answered[id] then
+          print("[cc-dashboard] ⚠️ cc-send: request " .. id .. " was already handled -- dropped")
+        else
+          FX._send.answered[id] = true
+          if not views then views, reg = FX.sendViews(list) end
+          local ok, err = pcall(FX.sendHandle, owner, id, raw, views, reg, now)
+          if not ok then print("[cc-dashboard] ❌ cc-send: request " .. id .. " failed: " .. tostring(err)) end
+        end
+      end
+    end
+  end
+  for _, fn in ipairs(names) do
+    local _, epoch = core.sendFileOf(fn)
+    if epoch and now - epoch > core.SEND.keepSeconds then os.remove(FX.SEND_DIR .. "/" .. fn) end
+  end
+  for id in pairs(FX._send.answered) do
+    local epoch = tonumber(id:match("^(%d+)%-"))
+    if not epoch or now - epoch > core.SEND.keepSeconds then FX._send.answered[id] = nil end
+  end
+end
+-- (A session's own requests go with it: FX.removeStatus, and cc_remove's cc_send_prune.)
 
 -- ---- Resume at the usage limit's reset (2026-09-29) ----
 -- Build program unit 13. A turn stopped by a usage limit fires StopFailure (matcher rate_limit):
@@ -22586,6 +22721,12 @@ function FX._refreshBody()
   -- whether each card really needs Adam (a live counterpart AND an affordance that changes
   -- something) or is only a heads-up; the ranking and the panel both read what it stamps.
   FX.annotateNeedsYou(list)
+  -- 2026-09-29: cc-send -- each request taken once, its target picked and handed the prompt through
+  -- the mailbox. After the needs-you stamp: a session waiting on Adam is never picked.
+  do
+    local okq, errq = pcall(FX.stepSend, list)
+    if not okq then print("[cc-dashboard] ❌ cc-send step failed: " .. tostring(errq)) end
+  end
   -- 2026-09-29: where the time went -- each wait, stall and error ledgered once, when it ends.
   -- After the needs-you stamp: what counts as a wait on Adam is what it says.
   do

@@ -44,7 +44,7 @@ fi
 STATE="cc-ab.json cc-agents.json cc-approved cc-ask cc-automodel cc-autopilot cc-autotitles.json cc-bridge
   cc-config.json cc-decide cc-exports cc-fleet cc-gate-tools cc-gate.enabled cc-groups.json cc-hidden.json cc-inbox cc-labels.json
   cc-lease cc-ledger cc-lock.json cc-mcp-configs cc-mcp.json cc-merge cc-notes cc-pins cc-policy cc-policy-override cc-presets.json
-  cc-prompts cc-queue cc-recent-dirs.json cc-resume cc-rules.json cc-schedules.json cc-scratch cc-shepherd.log
+  cc-prompts cc-queue cc-recent-dirs.json cc-resume cc-rules.json cc-schedules.json cc-scratch cc-send cc-shepherd.log
   cc-status cc-status-mirror cc-talk cc-templates.json cc-usage-state.json cc-worklist.json"
 
 echo "🚀 uninstalling Claude Shepherd"

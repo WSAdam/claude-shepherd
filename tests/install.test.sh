@@ -72,6 +72,9 @@ assert_json "...async, with asyncRewake" "$CDIR/settings.json" \
 assert_json "...and every error still reaches cc-status.sh first" "$CDIR/settings.json" \
   '.hooks.StopFailure[0].hooks[0].command | endswith("cc-status.sh\" stopfailure")' "true"
 exists "copies cc-resume.sh -> claude dir" "$CDIR/cc-resume.sh"
+# 2026-09-29: cc-send.sh -- a prompt for a live session, from any shell (a command, not a hook)
+exists "copies cc-send.sh -> claude dir" "$CDIR/cc-send.sh"
+assert_eq "...and wires it to no hook" "0" "$(grep -c 'cc-send.sh' "$CDIR/settings.json")"
 # 2026-09-29: auto-compact with notes -- every compaction (auto or /compact) reaches cc-status.sh
 # precompact, which tells the summary the session's notes come back afterwards.
 assert_json "a compaction reaches cc-status.sh (PreCompact, every trigger)" "$CDIR/settings.json" \

@@ -335,6 +335,27 @@ CC_DECIDE_DIR="${CC_DECIDE_DIR:-${HOME}/.claude/cc-decide}"
 # (<key>.json), Shepherd's plan (<key>.plan.json) and the card's Cancel (<key>.cancel), per
 # session key. A clean Stop clears them (cc-status.sh). Default MUST match the dashboard's FX.RESUME_DIR.
 CC_RESUME_DIR="${CC_RESUME_DIR:-${HOME}/.claude/cc-resume}"
+# cc-send (build program unit 30, 2026-09-29): a request cc-send.sh leaves for Shepherd, named
+# <caller key or "shell">.<epoch>-<n>.json, and Shepherd's <...>.answer. Default MUST match the
+# dashboard's FX.SEND_DIR.
+CC_SEND_DIR="${CC_SEND_DIR:-${HOME}/.claude/cc-send}"
+CC_SEND_KEEP_SECONDS=600   # core.SEND.keepSeconds: older files are a killed CLI's leftovers
+# Drop the requests session $1 made (and their answers, temps, claims), plus any file past
+# CC_SEND_KEEP_SECONDS by the epoch in its name. KEEP IN SYNC with FX.removeStatus and
+# FX.stepSend's prune (core.sendFileOf reads the same names).
+cc_send_prune() {
+  [ -d "$CC_SEND_DIR" ] || return 0
+  local f b now; now="$(date +%s)"
+  for f in "$CC_SEND_DIR"/*; do
+    [ -f "$f" ] || continue
+    b="${f##*/}"
+    [[ "$b" =~ ^(.+)\.([0-9]+)-[0-9]+\. ]] || continue
+    if { [ -n "$1" ] && [ "${BASH_REMATCH[1]}" = "$1" ]; } || [ $((now - BASH_REMATCH[2])) -gt "$CC_SEND_KEEP_SECONDS" ]; then
+      rm -f "$f"
+    fi
+  done
+  return 0
+}
 # Batch driving (cc-fleet.sh): every file of a batch is named <id>.<...> in this one folder.
 # Default MUST match cc-fleet.sh's FLEET_DIR and the dashboard's FX.FLEET_DIR.
 CC_FLEET_DIR="${CC_FLEET_DIR:-${HOME}/.claude/cc-fleet}"
@@ -454,6 +475,8 @@ cc_decide_prune() {
 # cc-pins/ (2026-09-29) is keyed by worktree, not session: cc_pins_prune drops only a gone worktree's.
 # cc-lease/ (2026-09-29) is keyed by main checkout: cc_lease_prune drops only what nothing can use.
 # cc-decide/ (2026-09-29): the session's open questions go; an answered one waits for its next start.
+# cc-send/ (2026-09-29) is keyed by request, each named for the session that made it: cc_send_prune
+# drops that session's, and any past CC_SEND_KEEP_SECONDS.
 # KEEP THE FILE SET IN SYNC with FX.removeStatus in claude-dashboard.lua.
 cc_remove() {
   rm -f "$(cc_file "$1")" "$(cc_file "$1")".tmp.* "$(cc_decision_file "$1")" \
@@ -474,7 +497,9 @@ cc_remove() {
   local inbox="$CC_INBOX_DIR/$1"
   case "$1" in ''|.|..|*/*) ;; *)
     rm -f "$inbox"/* "$inbox"/.[!.]* 2>/dev/null
-    rmdir "$inbox" 2>/dev/null ;;
+    rmdir "$inbox" 2>/dev/null
+    # cc-send (2026-09-29): the requests this session made go with it, undelivered; stale ones too
+    cc_send_prune "$1" ;;
   esac
   # Pinned links are per worktree, not per key: only those of a worktree that's gone (2026-09-29).
   cc_pins_prune
