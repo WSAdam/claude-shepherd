@@ -385,6 +385,12 @@ echo ""
 echo "== lua: the overlap radar's wiring -- one background scan per repo on its own timer (never the tick), cached, reclaimed when hung, stamped on worktree tiles (stubbed hs) =="
 HOME="$(mktemp -d)" lua "$DIR/radar-refresh.test.lua" || fail=1
 echo ""
+echo "== lua: coverage index -- a batch's issue list, covers and triage (all covered, uncovered, triaged, a bad id, old files) =="
+lua "$DIR/coverage.test.lua" || fail=1
+echo ""
+echo "== node: the batch review lists uncovered issues as text and disables Approve until every issue is covered or triaged (behavioral, runs the shipped renderBatch) =="
+node "$DIR/coverage-view.test.js" || fail=1
+echo ""
 
 if [ "$fail" -eq 0 ]; then
   echo "✅ ALL GREEN"

@@ -317,8 +317,9 @@ Ask a Claude session to run several units in parallel and it can drive the whole
 approval from you per batch**:
 
 1. It writes the batch (a `title`, `units` each with a `type` / `slug` / `task` and optionally
-   [`blockedBy`](#a-batch-unit-that-waits-blockedby), and `mergeWhenGreen` if it asks to merge
-   them when green) and runs
+   [`blockedBy`](#a-batch-unit-that-waits-blockedby), `mergeWhenGreen` if it asks to merge
+   them when green, and the [issue list](#coverage-index-a-batch-says-what-it-covers) it was built
+   from, if any) and runs
    `~/.claude/cc-fleet.sh propose --file <batch.json>` in the background.
 2. Its card says *⇉ proposes 3 units in <repo>* and reads **Needs you** (red dot, pulsing ring, one
    alert). Its detail panel shows the
@@ -359,6 +360,42 @@ Your approval lives in Shepherd (`~/.claude/cc-fleet/<id>.state.json`), never in
 own file. `"fleet": { "enabled": false }` makes Shepherd ignore proposals. A batch stopped (or
 denied) more than a week ago is pruned, every file of it: Shepherd does it in its tick, and
 `cc-fleet.sh propose` does it before writing a new proposal.
+
+### Coverage index: a batch says what it covers
+
+A batch built from an issue list (a bug sweep, a review's findings, a backlog) carries that list,
+so nothing on it is dropped without a word. Each unit names the issues it covers, and the batch
+triages the ones it won't build:
+
+```json
+{ "title": "Bug sweep", "mergeWhenGreen": true,
+  "issues": [ { "id": "BUG-1", "title": "Paste drops the last line" },
+              { "id": "BUG-2", "title": "The toast covers Approve" },
+              { "id": "REQ-3", "title": "Export the ledger as CSV" } ],
+  "triage": [ { "id": "REQ-3", "as": "later", "note": "Needs Adam's call on the columns" } ],
+  "units": [ { "type": "fix", "slug": "paste", "task": "...", "covers": ["BUG-1"] },
+             { "type": "fix", "slug": "toast", "task": "...", "covers": ["BUG-2"] } ] }
+```
+
+- `issues`: 1–200 entries, each an `id` (letters, digits and `# . _ : / -`, up to 60) and a
+  `title`. Ids are unique.
+- `triage`: one entry per issue it won't build, `as` one of `dup`, `wontfix`, `later` or
+  `covered-elsewhere`, and a `note` saying why (required).
+- A unit's `covers` must name issues on the list, and so must every triage entry;
+  `cc-fleet.sh propose` refuses the batch otherwise, naming the id.
+- **Every issue covered by a unit or triaged.** A batch that leaves one uncovered is refused
+  before you see it: `propose` prints each uncovered id and title, and the driver fixes the file
+  and proposes again. A covered batch goes out with its list, and `propose` says what accounts
+  for it (*📋 Coverage: 3 issues: 2 covered by units, 1 triaged.*).
+- **In the batch review** a line says the same (*✓ all 3 issues accounted for: 2 covered by
+  units, 1 triaged*). If a proposal ever reaches you with an issue uncovered (its file edited by
+  hand), the review lists those issues, the card reads *⇉ proposes 2 units in repo · 1 issue
+  uncovered*, and **Approve batch** is disabled. Deny still works.
+- **Approve re-checks the file on disk**, never what the panel drew: an issue left uncovered
+  there refuses the click with a toast naming it, and nothing is granted.
+
+All of it is optional. A batch with no issue list works as before, and its `covers` stay
+free-form.
 
 ### The batch relay: what the driver hears
 
@@ -453,7 +490,8 @@ A batch unit can name the units it waits for:
   *blocked by a blocked unit (api-schema)*, so the batch can still finish.
 
 Two more optional unit fields travel with the batch: `covers` (the issue ids the unit covers, up to
-50) and `packet` (the id of its task packet). The unit's message states them, with what it comes
+50; with an issue list, see [the coverage index](#coverage-index-a-batch-says-what-it-covers)) and
+`packet` (the id of its task packet). The unit's message states them, with what it comes
 after. A batch file without any of the three works as before.
 
 ## Try it: the worktree demo

@@ -8450,7 +8450,9 @@ do
   -- 2026-09-29: 24 -> 25 for auto-compact with notes ("compact", flagged new).
   -- 2026-09-29: 25 -> 26 for pinned links ("pins", flagged new).
   -- 2026-09-29: 26 -> 27 for the overlap radar and a batch's unit order ("overlap", flagged new).
-  eq("FEATURES: the 27 new features are flagged", newCount, 27)
+  -- 2026-09-29: 27 -> 28 for the coverage index ("coverage", flagged new).
+  eq("FEATURES: the 28 new features are flagged", newCount, 28)
+  check("FEATURES: lists the coverage index", keys.coverage == true)
   check("FEATURES: lists pinned links", keys.pins == true)
   check("FEATURES: lists the overlap radar", keys.overlap == true)
   check("FEATURES: lists the red-first proof", keys.redfirst == true)

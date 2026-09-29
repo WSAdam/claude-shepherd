@@ -3804,6 +3804,126 @@ function M.batchOrderProblem(units)
   return "blockedBy goes in a circle: " .. table.concat(circle, ", ") .. " -- none of them could ever start"
 end
 
+-- ---- The coverage index (2026-09-29, build program unit 25) ----
+-- A batch built from an issue list carries it: issues[{id,title}], plus triage[{id,as,note}] for
+-- the issues it decided not to build (as = dup | wontfix | later | covered-elsewhere, a note
+-- required). Each unit's covers[] names the issues it covers. Until every issue is covered by a
+-- unit or triaged the batch can't be approved: batchView lists the uncovered ones and marks the
+-- proposal not approvable, and FX.batchApprove re-checks the file on disk. All optional: a batch
+-- with no issue list parses as before, and its covers stay free-form (as unit 24 shipped them).
+M.BATCH_MAX_ISSUES = 200
+M.BATCH_ISSUE_TITLE_CHARS = 200
+M.BATCH_TRIAGE_NOTE_CHARS = 300
+M.BATCH_TRIAGE_AS = { dup = true, wontfix = true, later = true, ["covered-elsewhere"] = true }
+
+-- The issue list and the triage as parseBatch keeps them: (issues, triage), each nil when the
+-- batch has none; false when either is malformed (the batch is refused). An issue list has 1-200
+-- entries with unique ids; triage up to 200, one entry per id, each with a known `as` and a note.
+function M.parseBatchIssues(rawIssues, rawTriage)
+  local function entries(t, min)
+    if type(t) ~= "table" then return nil end
+    local n = 0
+    for _ in pairs(t) do n = n + 1 end
+    if n ~= #t or #t < min or #t > M.BATCH_MAX_ISSUES then return nil end
+    return t
+  end
+  local issues, triage
+  if rawIssues ~= nil then
+    local l = entries(rawIssues, 1)
+    if not l then return false end
+    issues = {}
+    local seen = {}
+    for _, x in ipairs(l) do
+      if type(x) ~= "table" or not batchCoverOk(x.id) or seen[x.id] then return false end
+      if type(x.title) ~= "string" or x.title == "" then return false end
+      seen[x.id] = true
+      issues[#issues + 1] = { id = x.id, title = capChars(x.title, M.BATCH_ISSUE_TITLE_CHARS) }
+    end
+  end
+  if rawTriage ~= nil then
+    local l = entries(rawTriage, 0)
+    if not l then return false end
+    triage = {}
+    local seen = {}
+    for _, x in ipairs(l) do
+      if type(x) ~= "table" or not batchCoverOk(x.id) or seen[x.id] or not M.BATCH_TRIAGE_AS[x.as] then return false end
+      if type(x.note) ~= "string" or x.note == "" then return false end
+      seen[x.id] = true
+      triage[#triage + 1] = { id = x.id, as = x.as, note = capChars(x.note, M.BATCH_TRIAGE_NOTE_CHARS) }
+    end
+  end
+  return issues, triage
+end
+
+-- Does every covers and triage id name one of the batch's issues? nil when it does, else the first
+-- that doesn't. With no issue list covers are free-form, and any triage is wrong: nothing to triage.
+function M.batchCoverageProblem(issues, triage, units)
+  local known = {}
+  for _, x in ipairs(issues or {}) do known[x.id] = true end
+  if issues then
+    for _, u in ipairs(units or {}) do
+      for _, c in ipairs(u.covers or {}) do
+        if not known[c] then
+          return "unit " .. tostring(u.slug) .. " covers '" .. tostring(c) .. "', which isn't one of the batch's issues"
+        end
+      end
+    end
+  end
+  for _, t in ipairs(triage or {}) do
+    if not known[t.id] then return "triage names '" .. tostring(t.id) .. "', which isn't one of the batch's issues" end
+  end
+  return nil
+end
+
+-- A batch's coverage, each list in issue order: nil when it has no issue list, else
+-- { total, covered = {{id,title,by}}, triaged = {{id,title,as,note}}, uncovered = {{id,title}} }.
+-- `by` = the slugs of the units that cover it. An issue a unit covers counts as covered even when
+-- it is triaged too.
+function M.batchCoverage(batch)
+  if type(batch) ~= "table" or type(batch.issues) ~= "table" then return nil end
+  local by, tri = {}, {}
+  for _, u in ipairs(batch.units or {}) do
+    for _, c in ipairs(u.covers or {}) do
+      by[c] = by[c] or {}
+      by[c][#by[c] + 1] = u.slug
+    end
+  end
+  for _, t in ipairs(batch.triage or {}) do tri[t.id] = t end
+  local c = { total = #batch.issues, covered = {}, triaged = {}, uncovered = {} }
+  for _, x in ipairs(batch.issues) do
+    if by[x.id] then c.covered[#c.covered + 1] = { id = x.id, title = x.title, by = by[x.id] }
+    elseif tri[x.id] then c.triaged[#c.triaged + 1] = { id = x.id, title = x.title, as = tri[x.id].as, note = tri[x.id].note }
+    else c.uncovered[#c.uncovered + 1] = { id = x.id, title = x.title } end
+  end
+  return c
+end
+
+-- What keeps Adam from approving this batch: nil, or which issues no unit covers and nothing
+-- triaged (the first 10 named). FX.batchApprove asks it of the file it just read from disk.
+function M.batchApproveProblem(batch)
+  local c = M.batchCoverage(batch)
+  if not c or #c.uncovered == 0 then return nil end
+  local n, names = #c.uncovered, {}
+  for i = 1, math.min(n, 10) do names[#names + 1] = c.uncovered[i].id end
+  return n .. (n == 1 and " issue isn't" or " issues aren't") .. " covered by a unit or triaged: "
+    .. table.concat(names, ", ") .. ((n > 10) and (" (+" .. (n - 10) .. " more)") or "")
+end
+
+-- The coverage as one line, for the review and for cc-fleet.sh's echo of it: what accounts for
+-- the issues, or how many are left and that Approve waits for them.
+function M.batchCoverageLine(c)
+  if type(c) ~= "table" then return nil end
+  local u = #c.uncovered
+  if u > 0 then
+    return "⚠ " .. u .. " of " .. c.total .. " issues " .. (u == 1 and "isn't" or "aren't")
+      .. " covered by a unit or triaged — Approve waits until " .. (u == 1 and "it is" or "they are")
+  end
+  local parts = {}
+  if #c.covered > 0 then parts[#parts + 1] = #c.covered .. " covered by " .. (#c.covered == 1 and "a unit" or "units") end
+  if #c.triaged > 0 then parts[#parts + 1] = #c.triaged .. " triaged" end
+  return "✓ " .. (c.total == 1 and "its 1 issue is" or ("all " .. c.total .. " issues")) .. " accounted for: " .. table.concat(parts, ", ")
+end
+
 function M.parseBatch(raw)
   if type(raw) ~= "string" then return nil end
   local ok, t = pcall(function() return M.json.decode(raw) end)
@@ -3817,6 +3937,9 @@ function M.parseBatch(raw)
   local repo = M.normDir(t.repo)
   if type(t.commonDir) ~= "string" or M.normDir(t.commonDir) ~= repo .. "/.git" then return nil end
   if type(t.units) ~= "table" or #t.units < 1 or #t.units > 8 then return nil end
+  -- 2026-09-29 (unit 25): the optional issue list and triage -- malformed refuses the batch
+  local issues, triage = M.parseBatchIssues(t.issues, t.triage)
+  if issues == false then return nil end
   local units, seen = {}, {}
   for _, u in ipairs(t.units) do
     if type(u) ~= "table" or not M.BATCH_TYPES[u.type] or not batchSlugOk(u.slug) or seen[u.slug] then return nil end
@@ -3839,10 +3962,11 @@ function M.parseBatch(raw)
                           blockedBy = blockedBy, covers = covers, packet = u.packet }
   end
   if M.batchOrderProblem(units) then return nil end
+  if M.batchCoverageProblem(issues, triage, units) then return nil end
   return { id = t.id, nonce = t.nonce, phase = t.phase, repo = repo, commonDir = repo .. "/.git",
            driver = { session_id = d.session_id, pid = tostring(d.pid or ""), name = type(d.name) == "string" and d.name or "" },
            title = capChars(t.title, 120), mergeWhenGreen = t.mergeWhenGreen == true, units = units,
-           at = tonumber(t.at) or 0 }
+           at = tonumber(t.at) or 0, issues = issues, triage = triage }
 end
 
 local function batchUnit(batch, slug)
@@ -4071,7 +4195,18 @@ function M.batchView(batch, grant, state)
               outcomes = M.batchOutcomes(batch, state) }
   -- Grouped by outcome once the batch has run at all; before that every unit is unopened.
   if grant.approved then v.summary = M.batchOutcomeLines(v.outcomes) end
-  if phase == "proposed" then v.line = "⇉ proposes " .. n .. " unit" .. ((n == 1) and "" or "s") .. " in " .. folder
+  -- 2026-09-29 (unit 25): the coverage index. While an issue is neither covered nor triaged the
+  -- proposal isn't approvable (the review disables Approve; FX.batchApprove re-checks the file).
+  local cov = M.batchCoverage(batch)
+  local uncovered = cov and #cov.uncovered or 0
+  v.approvable = uncovered == 0
+  if cov then
+    v.coverage = { total = cov.total, covered = #cov.covered, triaged = #cov.triaged, uncovered = cov.uncovered,
+                   line = M.batchCoverageLine(cov) }
+  end
+  if phase == "proposed" then
+    v.line = "⇉ proposes " .. n .. " unit" .. ((n == 1) and "" or "s") .. " in " .. folder
+      .. ((uncovered > 0) and (" · " .. uncovered .. " issue" .. ((uncovered == 1) and "" or "s") .. " uncovered") or "")
   elseif phase == "approved" then
     v.line = "⇉ driving " .. n .. " unit" .. ((n == 1) and "" or "s") .. " in " .. folder .. (grant.grantMerge and " · merges delegated" or "")
   elseif phase == "stopped" and grant.finished then v.line = "⇉ batch finished: " .. batch.title .. " (" .. tostring(grant.finished) .. ")"
@@ -16811,6 +16946,9 @@ M.FEATURES = {
   { key = "overlap", cat = "Control", new = true, title = "Overlap radar & unit order",
     what = "Shepherd scans each repo's worktrees in the background: when two touch the same files (committed, uncommitted or new) or git merge-tree says they would conflict, both cards, Instances and the merge review say so, with which to merge first. A batch unit can name the units it waits for (blockedBy): its tab opens, and its merge goes through, only once they have merged.",
     why = "Collisions between parallel units show up before the second merge runs into them, and a batch runs its units in the order they need." },
+  { key = "coverage", cat = "Control", new = true, title = "Coverage index",
+    what = "A batch built from an issue list carries it: each unit names the issues it covers, and the rest are triaged (dup, wontfix, later or covered elsewhere, each with a note). Until every issue is covered or triaged, cc-fleet.sh refuses the proposal and names the uncovered ones, and the batch review lists them with Approve disabled.",
+    why = "Nothing on the list is dropped silently: every issue ends up in a unit or in a written decision you read before you approve." },
   { key = "answers", cat = "Control", new = true, title = "Answer questions from Shepherd",
     what = "When a session asks you something, its card pulses with the question and you get one alert; its answers are buttons right there (and on its Instances row). Your click goes straight to the session -- no tab to find. Several parts or free text: pick per part, then Send answers. Answer in the tab instead hands it back to the tab.",
     why = "A session waiting on you shouldn't wait for you to find its tab -- and you always know when one is." },

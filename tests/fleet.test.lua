@@ -463,5 +463,49 @@ do
   os.remove(MD .. "/u2.json"); os.remove(MD .. "/u2.decision")
   quiet(function() fx.batchStop("drv", "b7") end)
 end
+
+-- ---- coverage index: Approve re-checks coverage from the file on disk (2026-09-29) ----
+-- Build program unit 25: a batch built from an issue list can't be approved until every issue is
+-- covered by a unit or triaged. The review disables Approve, but the click's handler must not
+-- trust what was rendered: it reads the proposal from disk again, so a file rewritten after the
+-- panel drew it (or a stale view) can't slip an uncovered issue past Adam.
+do
+  local core = rawget(_G, "__ccDashboard").core
+  local function b8(triage)
+    return json.encode({ v = 1, id = "b8", nonce = "n-b8", driver = { session_id = "drv", pid = "4242", name = "A-drv" },
+      repo = "/r/A", commonDir = "/r/A/.git", title = "Issue sweep", mergeWhenGreen = true, at = os.time(), phase = "proposed",
+      issues = { { id = "BUG-1", title = "Paste drops the last line" }, { id = "BUG-2", title = "Toast covers Approve" } },
+      triage = triage,
+      units = { { type = "fix", slug = "paste", task = "Fix paste.", branch = "fix/paste", covers = { "BUG-1" } } } })
+  end
+  -- the panel's copy says every issue is accounted for; the file on disk no longer does
+  fx._fleetBatches = fx._fleetBatches or {}
+  fx._fleetBatches.b8 = core.parseBatch(b8({ { id = "BUG-2", as = "later", note = "after the release" } }))
+  write(FD .. "/b8.json", b8(nil))
+  fx._fleetState.b8 = nil
+  local before = #alerts
+  local okA = select(2, quiet(function() return fx.batchApprove("drv", '{"id":"b8","grantMerge":true}') end))
+  check("Approve on a batch with an uncovered issue is refused", okA == false)
+  check("...no decision is written for cc-fleet.sh to claim", read(FD .. "/b8.decision") == nil)
+  local s8 = decoded(FD .. "/b8.state.json")
+  check("...and Shepherd records no grant", not (s8 and s8.grant) and not (fx._fleetState.b8 and fx._fleetState.b8.grant))
+  local said = table.concat(alerts, "\n", before + 1)
+  check("...and says which issue holds it  (" .. said .. ")", said:find("BUG-2", 1, true) ~= nil and said:find("uncovered", 1, true) ~= nil)
+
+  -- the driver triages BUG-2: the same click now goes through
+  write(FD .. "/b8.json", b8({ { id = "BUG-2", as = "later", note = "after the release" } }))
+  okA = select(2, quiet(function() return fx.batchApprove("drv", '{"id":"b8","grantMerge":true}') end))
+  local d8 = decoded(FD .. "/b8.decision")
+  check("once every issue is covered or triaged, Approve writes its decision", okA == true and d8 and d8.verdict == "approve" and d8.nonce == "n-b8")
+  os.remove(FD .. "/b8.decision")
+
+  -- Deny never waits for coverage: Adam can always say no
+  write(FD .. "/b9.json", (b8(nil):gsub('"b8"', '"b9"'):gsub('"n%-b8"', '"n-b9"')))
+  fx._fleetState.b9 = nil
+  local okD = select(2, quiet(function() return fx.batchDeny("drv", '{"id":"b9","note":"not this one"}') end))
+  local d9 = decoded(FD .. "/b9.decision")
+  check("Deny on an uncovered batch still goes through", okD == true and d9 and d9.verdict == "deny")
+  quiet(function() fx.batchStop("drv", "b8"); fx.batchStop("drv", "b9") end)
+end
 check("no keystroke anywhere", taps == 0)
 finish()

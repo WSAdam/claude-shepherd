@@ -130,6 +130,8 @@ The automatic behaviours here are off until you turn them on, except handoff not
   several units, you approve once, and it opens their tabs and hands out the tasks.
 - [**Overlap radar & unit order**](docs/merging-and-batches.md#overlap-radar-and-unit-order): worktrees
   that touch the same files are flagged with which to merge first, and a batch unit can wait for others.
+- [**Coverage index**](docs/merging-and-batches.md#coverage-index-a-batch-says-what-it-covers): a batch
+  built from an issue list can't be approved until every issue is covered by a unit or triaged.
 - [**Tab bridge**](docs/merging-and-batches.md#the-tab-bridge): a small VS Code extension that
   closes or selects exactly one Claude tab, so finished units close their own tabs.
 

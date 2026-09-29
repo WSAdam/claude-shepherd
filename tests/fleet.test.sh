@@ -388,4 +388,61 @@ assert_eq "status: ...and say for what" "waits for one" "$(jq -r '.units[1].note
 assert_eq "status: ...a unit with nothing to wait for has no note" "null" "$(jq -r '.units[0].note' "$TMP/so2.out")"
 fleet drv sto stop --batch "$IO"
 
+# ---- coverage index (2026-09-29, build program unit 25) ----
+# A batch built from an issue list carries it (issues[{id,title}]), with triage[{id,as,note}] for
+# what it won't build. propose refuses a covers or triage id that isn't in the list, and a batch
+# that leaves an issue uncovered: it prints the uncovered ids so the driver fixes the file before
+# Adam ever sees it. A covered one goes out with its issues and triage in the proposal.
+ISS='"issues":[{"id":"BUG-1","title":"Paste drops the last line"},{"id":"BUG-2","title":"Toast covers Approve"},{"id":"REQ-3","title":"Export the ledger as CSV"}]'
+cv() { # <top-level extra> <unit one extra> <unit two extra> -> a two-unit batch with the issue list
+  printf '{"title":"Sweep","mergeWhenGreen":true%s,"units":[{"type":"fix","slug":"paste","task":"t"%s},{"type":"fix","slug":"toast","task":"t"%s}]}' "$1" "$2" "$3"
+}
+i=0
+for bad in "$(cv ",$ISS" ',"covers":["BUG-1","BUG-9"]' ',"covers":["BUG-2","REQ-3"]')" \
+           "$(cv ",$ISS"',"triage":[{"id":"BUG-9","as":"dup","note":"n"}]' ',"covers":["BUG-1"]' ',"covers":["BUG-2","REQ-3"]')" \
+           "$(cv ',"triage":[{"id":"BUG-1","as":"dup","note":"n"}]' '' '')" \
+           "$(cv ",$ISS"',"triage":[{"id":"REQ-3","as":"maybe","note":"n"}]' ',"covers":["BUG-1"]' ',"covers":["BUG-2"]')" \
+           "$(cv ",$ISS"',"triage":[{"id":"REQ-3","as":"later"}]' ',"covers":["BUG-1"]' ',"covers":["BUG-2"]')" \
+           "$(cv ",$ISS"',"triage":[{"id":"REQ-3","as":"later","note":""}]' ',"covers":["BUG-1"]' ',"covers":["BUG-2"]')" \
+           "$(cv ',"issues":[{"id":"BUG-1","title":"a"},{"id":"BUG-1","title":"b"}]' ',"covers":["BUG-1"]' '')" \
+           "$(cv ',"issues":[{"id":"X; rm","title":"a"}]' '' '')" \
+           "$(cv ',"issues":[{"id":"BUG-1"}]' ',"covers":["BUG-1"]' '')" \
+           "$(cv ',"issues":{"id":"BUG-1","title":"a"}' '' '')" \
+           "$(cv ',"issues":[]' '' '')"; do
+  i=$((i + 1))
+  batch "$bad"; fleet drv cb$i propose --file "$TMP/batch.json" --wait-max 1   # (a let-through waits: exit 4)
+  assert_eq "coverage: a bad issue list / covers / triage is refused ($i): $(printf '%s' "$bad" | cut -c40-150)" "2" "$(cat "$TMP/cb$i.rc")"
+done
+grep -q "BUG-9" "$TMP/cb1.out" && grep -q "paste" "$TMP/cb1.out" && got=yes || got=no
+assert_eq "coverage: a unit covering an id that isn't in the list is named, with the id" "yes" "$got"
+grep -q "triage names 'BUG-9'" "$TMP/cb2.out" && got=yes || got=no
+assert_eq "coverage: a triage id that isn't in the list is named" "yes" "$got"
+
+# REQ-3 is neither covered nor triaged: refused, and every uncovered id is printed with its title
+batch "$(cv ",$ISS" ',"covers":["BUG-1"]' '')"
+fleet drv cu propose --file "$TMP/batch.json" --wait-max 1
+assert_eq "coverage: a batch that leaves issues uncovered is refused before Adam sees it" "2" "$(cat "$TMP/cu.rc")"
+grep -q "2 issues" "$TMP/cu.out" && grep -q "BUG-2.*Toast covers Approve" "$TMP/cu.out" && grep -q "REQ-3.*Export the ledger as CSV" "$TMP/cu.out" && got=yes || got=no
+assert_eq "coverage: ...printing each uncovered id and its title" "yes" "$got"
+grep -q "BUG-1.*Paste" "$TMP/cu.out" && got=listed || got=not
+assert_eq "coverage: ...never a covered one" "not" "$got"
+grep -q "triage" "$TMP/cu.out" && grep -q "covers" "$TMP/cu.out" && got=yes || got=no
+assert_eq "coverage: ...and saying how to fix it (covers, or triage)" "yes" "$got"
+[ -z "$(ls "$FD"/b*.json 2>/dev/null | xargs -n1 jq -r 'select(.title == "Sweep") | .id' 2>/dev/null)" ] && got=none || got=some
+assert_eq "coverage: no refused batch left a proposal behind" "none" "$got"
+
+# every issue covered or triaged: it goes out, carrying the list and the triage
+batch "$(cv ",$ISS"',"triage":[{"id":"REQ-3","as":"later","note":"Needs Adam on the columns"}]' ',"covers":["BUG-1"]' ',"covers":["BUG-2","BUG-1"]')"
+fleet drv cok propose --file "$TMP/batch.json" --wait-max 30 & bg=$!   # bounded: a red run must not hang
+for i in $(seq 1 60); do BC="$(newest_batch)"; [ -n "$BC" ] && [ "$(jq -r .title "$BC")" = "Sweep" ] && break; sleep 0.1; done
+assert_json "coverage: the proposal carries the issue list" "$BC" '[.issues[].id] | join(",")' "BUG-1,BUG-2,REQ-3"
+assert_json "coverage: ...with titles" "$BC" '.issues[1].title' "Toast covers Approve"
+assert_json "coverage: ...and the triage" "$BC" '.triage[0] | "\(.id) \(.as) \(.note)"' "REQ-3 later Needs Adam on the columns"
+decide "$BC" approve true
+wait $bg
+assert_eq "coverage: a covered batch is approved as usual" "0" "$(cat "$TMP/cok.rc")"
+grep -q "3 issues: 2 covered by units, 1 triaged" "$TMP/cok.out" && got=yes || got=no
+assert_eq "coverage: ...and propose says what it covers" "yes" "$got"
+fleet drv cst stop --batch "$(jq -r .id "$BC")"
+
 finish

@@ -4330,6 +4330,13 @@ do
   check("blockedBy: every merge readiness check hears the batch's order",
         select(2, src:gsub("core%.mergeReadiness%(", "")) == 4
         and select(2, src:gsub("FX%.fleetMergeWaits%(r%)%)", "")) == 4)
+  -- 2026-09-29 (build program unit 25): the coverage index
+  check("coverage: the batch review has a coverage line and an uncovered list",
+        src:find('<div class="dm-sub" id="db-cover"></div>\n      <ul id="db-uncovered"></ul>', 1, true) ~= nil)
+  check("coverage: Approve is disabled while a proposal leaves an issue uncovered",
+        src:find('approveBtn.disabled = proposed && b.approvable === false;', 1, true) ~= nil)
+  check("coverage: the click re-checks coverage from the file on disk (FX.writeBatchDecision), not the view",
+        src:find('local why = (verdict == "approve") and core.batchApproveProblem(b) or nil', 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

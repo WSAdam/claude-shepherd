@@ -3730,6 +3730,10 @@ end
 function FX.writeBatchDecision(id, verdict, grantMerge, note)
   local b = core.parseBatch(FX.readFile(FX.FLEET_DIR .. "/" .. id .. ".json"))
   if not b or b.phase ~= "proposed" then return false end
+  -- 2026-09-29 (unit 25): an approval re-checks coverage from THIS read of the file, never from
+  -- the rendered view -- an issue neither covered nor triaged holds it. Deny never waits.
+  local why = (verdict == "approve") and core.batchApproveProblem(b) or nil
+  if why then return false, b, why end
   local body = core.json.encode({ nonce = b.nonce, verdict = verdict, grantMerge = grantMerge and true or false, note = note or "" })
   return FX.writeFileAtomic(FX.FLEET_DIR .. "/" .. id .. ".decision", body), b
 end
@@ -3745,7 +3749,8 @@ function FX.batchApprove(driverKey, text)
   if not p then return false end
   local state = FX.fleetState(p.id)
   if state.grant then FX.mergeAlert("⚠️ That batch was already answered"); return false end
-  local ok, b = FX.writeBatchDecision(p.id, "approve", p.grantMerge == true, "")
+  local ok, b, why = FX.writeBatchDecision(p.id, "approve", p.grantMerge == true, "")
+  if not ok and why then FX.mergeAlert("⚠️ Batch not approved -- issues uncovered: " .. why); return false end
   if not ok then FX.mergeAlert("⚠️ That batch proposal is gone"); return false end
   state.grant = { approved = true, grantMerge = p.grantMerge == true, at = FX.now() }
   FX.saveFleetState(p.id)
@@ -10880,6 +10885,9 @@ local HTML = [[
   #d-batch .dm-sub { opacity:.85; margin-top:3px; white-space:pre-wrap; }
   #d-batch #db-summary { display:none; opacity:1; margin-top:6px; padding:2px 8px; border-left:2px solid #14b8a6; font-variant-numeric:tabular-nums; }
   #d-batch ul { margin:4px 0 0 16px; padding:0; max-height:140px; overflow:auto; }
+  #d-batch #db-cover { display:none; opacity:1; margin-top:6px; }
+  #d-batch #db-uncovered { color:#f59e0b; }
+  #d-batch button:disabled { opacity:.45; cursor:not-allowed; }
   #d-batch label { display:block; margin-top:6px; }
   #d-batch .dm-acts { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; align-items:center; }
   #d-batch .dm-acts input { flex:1; min-width:120px; }
@@ -12249,6 +12257,8 @@ local HTML = [[
       <div class="dm-sub" id="db-sub"></div>
       <div class="dm-sub" id="db-summary"></div>
       <ul id="db-units"></ul>
+      <div class="dm-sub" id="db-cover"></div>
+      <ul id="db-uncovered"></ul>
       <label id="db-mergewrap"><input type="checkbox" id="db-merge"> Claude may merge these when green (each still passes Shepherd's own git check, one per repo at a time)</label>
       <div class="dm-acts" id="db-acts">
         <button id="db-approve" onclick="batchAct('batch-approve')" title="Let Claude open these units' tabs and hand them their tasks">Approve batch</button>
@@ -16528,6 +16538,19 @@ local HTML = [[
           + (u.note ? "  (" + u.note + ")" : "") + " — " + (u.task || "");
       });
       var proposed = b.phase === "proposed";
+      // 2026-09-29 (unit 25): the coverage index. The driver wrote the ids and titles: textContent
+      // only. While an issue is neither covered nor triaged Approve is disabled; the click's
+      // handler (FX.batchApprove) re-checks the file on disk regardless.
+      var cov = b.coverage || null;
+      var covEl = document.getElementById("db-cover");
+      covEl.textContent = (cov && cov.line) || "";
+      covEl.style.display = (cov && cov.line) ? "" : "none";
+      var unc = (cov && Array.isArray(cov.uncovered)) ? cov.uncovered : [];
+      mergeFillList(document.getElementById("db-uncovered"), unc, function(x){ return (x.id || "") + " — " + (x.title || ""); });
+      var approveBtn = document.getElementById("db-approve");
+      approveBtn.disabled = proposed && b.approvable === false;
+      approveBtn.title = approveBtn.disabled ? "Every issue must be covered by a unit or triaged before this batch can be approved"
+        : "Let Claude open these units' tabs and hand them their tasks";
       document.getElementById("db-mergewrap").style.display = proposed ? "" : "none";
       document.getElementById("db-acts").style.display = proposed ? "flex" : "none";
       document.getElementById("db-live").style.display = b.phase === "approved" ? "flex" : "none";

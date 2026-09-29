@@ -8,6 +8,11 @@
 #       Optional per unit (2026-09-29): "blockedBy": ["<slug>", ...] -- the units it waits for
 #       (its tab opens, and its merge is ready, only once they have merged; an unknown slug or a
 #       circle is refused), "covers": ["<issue id>", ...] and "packet": "<packet id>".
+#       Optional per batch (2026-09-29, the coverage index): "issues": [{"id", "title"}, ...] -- the
+#       issue list it was built from -- and "triage": [{"id", "as": "dup|wontfix|later|covered-elsewhere",
+#       "note"}, ...] for the issues it won't build. With an issue list, every covers and triage id
+#       must be one of its issues, and a batch that leaves an issue neither covered nor triaged is
+#       refused, printing the uncovered ids, so it never reaches Adam unapprovable.
 #       Run it from inside the repo, in the BACKGROUND, and end the turn: Claude Code wakes the
 #       session when Adam answers. Exit 0 BATCH APPROVED, 3 DENIED (+ note), 4 still waiting
 #       (--wait-max), 5 withdrawn, 6 Shepherd isn't running, 2 refused (the reason is printed).
@@ -104,6 +109,11 @@ cmd_propose() {
     # 2026-09-29: the optional unit fields (core.parseBatch checks the same)
     def coverok: type == "string" and test("^[A-Za-z0-9#][A-Za-z0-9._:#/-]{0,59}$");
     def packetok: type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$");
+    # 2026-09-29 (unit 25): the optional issue list and triage (core.parseBatchIssues checks the same)
+    def issueok: type == "object" and (.id | coverok) and (.title | type) == "string"
+                 and (.title | length) >= 1 and (.title | length) <= 200;
+    def triageok: type == "object" and (.id | coverok) and (.as | IN("dup", "wontfix", "later", "covered-elsewhere"))
+                  and (.note | type) == "string" and (.note | length) >= 1 and (.note | length) <= 300;
     # The blockers that go in a circle, peeled like core.batchOrderProblem: units whose blockers
     # are all gone, then units nothing left waits for; what remains is the circle.
     def circle:
@@ -131,6 +141,26 @@ cmd_propose() {
             (if has("packet") and (.packet | packetok | not)
              then "unit \(.slug // "?"): packet must be a packet id (letters, digits and . _ -, at most 40)" else empty end)),
         (if ((.units // []) | type) == "array" and ((.units | map(.slug) | unique | length) != (.units | length)) then "slugs must be unique" else empty end),
+        # 2026-09-29 (unit 25): the issue list and triage are well formed, and every covers and
+        # triage id names one of the issues (with no issue list, covers are free-form)
+        (if has("issues") and ((.issues | type) != "array" or (.issues | length) < 1 or (.issues | length) > 200 or (.issues | all(issueok) | not))
+         then "issues must be a list of 1-200 {\"id\", \"title\"} (an id: letters, digits and # . _ : / -; a title of 1-200 characters)" else empty end),
+        (if (.issues | type) == "array" and (.issues | all(issueok)) and (([ .issues[].id ] | unique | length) != (.issues | length))
+         then "issue ids must be unique" else empty end),
+        (if has("triage") and ((.triage | type) != "array" or (.triage | length) > 200 or (.triage | all(triageok) | not))
+         then "triage must be a list of up to 200 {\"id\", \"as\": dup|wontfix|later|covered-elsewhere, \"note\"} (a note is required, up to 300 characters)" else empty end),
+        (if (.triage | type) == "array" and (.triage | all(triageok)) and (([ .triage[].id ] | unique | length) != (.triage | length))
+         then "an issue is triaged twice" else empty end),
+        ([ .issues // [] | if type == "array" then .[] else empty end | objects | .id ] as $ids
+         | (if (.issues | type) == "array" then
+              (.units // [] | if type == "array" then .[] else empty end | . as $u
+               | (if (.covers | type) == "array" then .covers[] else empty end)
+               | select(. as $c | $ids | any(. == $c) | not)
+               | "unit \($u.slug) covers '"'"'\(.)'"'"', which isn'"'"'t one of the batch'"'"'s issues")
+            else empty end),
+           (.triage // [] | if type == "array" then .[] else empty end | objects | .id
+            | select(. as $c | $ids | any(. == $c) | not)
+            | "triage names '"'"'\(.)'"'"', which isn'"'"'t one of the batch'"'"'s issues")),
         # 2026-09-29: blockedBy names units of THIS batch, never itself, and never goes in a circle
         (if ((.units // []) | type) == "array" then
            (.units | map(.slug)) as $known
@@ -146,6 +176,25 @@ cmd_propose() {
          else empty end)
       ] | .[] end' "$file" 2>&1)" || problems="the batch file isn't valid JSON"
   [ -z "$problems" ] || { echo "❌ cc-fleet: the batch was refused:"; printf '  %s\n' "$problems"; exit 2; }
+
+  # 2026-09-29 (unit 25): every issue covered by a unit or triaged -- or Adam can't approve the
+  # batch (core.batchApproveProblem), so it never reaches him. The ids and titles, one per line.
+  local uncovered
+  uncovered="$(jq -r '
+    if (.issues | type) == "array" then
+      ([ .units[] | (.covers // [])[] ] + [ (.triage // [])[] | .id ]) as $done
+      | .issues[] | select(.id as $i | $done | any(. == $i) | not)
+      | "  \(.id)  \(.title | gsub("[[:cntrl:]]+"; " "))"
+    else empty end' "$file")"
+  if [ -n "$uncovered" ]; then
+    local nun; nun="$(printf '%s\n' "$uncovered" | grep -c .)"
+    [ "$nun" = "1" ] && nun="1 issue" || nun="$nun issues"
+    echo "❌ cc-fleet: the batch leaves $nun uncovered -- Adam can't approve it until every issue is covered by a unit or triaged:"
+    printf '%s\n' "$uncovered"
+    echo "Add each to a unit's \"covers\", or triage it in the batch's \"triage\": [{\"id\": \"<id>\", \"as\": \"dup|wontfix|later|covered-elsewhere\", \"note\": \"<why>\"}]."
+    echo "Nothing was proposed: fix the file and propose again."
+    exit 2
+  fi
 
   local common main
   common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || refuse "run it from inside the repo the units belong to"
@@ -172,9 +221,21 @@ cmd_propose() {
       units: [ .units[] | { type, slug, task, branch: (.type + "/" + .slug) }
                + (if has("blockedBy") then { blockedBy: (.blockedBy | reduce .[] as $b ([]; if index([$b]) then . else . + [$b] end)) } else {} end)
                + (if has("covers") then { covers } else {} end)
-               + (if has("packet") then { packet } else {} end) ], at: $at, phase: "proposed" }' \
+               + (if has("packet") then { packet } else {} end) ], at: $at, phase: "proposed" }
+    # 2026-09-29 (unit 25): the issue list and triage, when the batch has them
+    + (if has("issues") then { issues: [ .issues[] | { id, title } ] } else {} end)
+    + (if has("triage") then { triage: [ .triage[] | { id, as, note } ] } else {} end)' \
      "$file" > "$tmp" && mv "$tmp" "$bf" || refuse "couldn't write the proposal in $FLEET_DIR"
   echo "⏳ Proposed batch $id ($(jq -r '.units | length' "$bf") units) to Adam in Shepherd. Waiting for his answer..."
+  # 2026-09-29 (unit 25): what accounts for its issue list (core.batchCoverageLine's counts)
+  jq -r 'if (.issues | type) == "array" then
+      ([ .units[] | (.covers // [])[] ]) as $cv | ([ (.triage // [])[] | .id ]) as $tr
+      | [ .issues[].id | . as $i | if ($cv | any(. == $i)) then "c" elif ($tr | any(. == $i)) then "t" else "u" end ] as $k
+      | ([ $k[] | select(. == "c") ] | length) as $c | ([ $k[] | select(. == "t") ] | length) as $t
+      | "📋 Coverage: \(.issues | length) issue\(if (.issues | length) == 1 then "" else "s" end): "
+        + ([ (if $c > 0 then "\($c) covered by \(if $c == 1 then "a unit" else "units" end)" else empty end),
+             (if $t > 0 then "\($t) triaged" else empty end) ] | join(", ")) + "."
+    else empty end' "$bf"
 
   local ans rc
   ans="$(wait_answer "$FLEET_DIR/$id.decision" "$nonce" "$bf" "$waitmax")"; rc=$?
