@@ -152,7 +152,9 @@ approval. The detail panel greys those controls and says how many sessions share
 refusal is logged and raises a toast (at most once a minute per session).
 
 Everything that isn't a keystroke still works: **Jump**, gate approvals, held questions,
-ready-to-merge answers, Queue add, Gate and Policy. A queued task simply waits. **Close** goes
+ready-to-merge answers, Queue add, Gate and Policy. A queued task simply waits, and a message in
+the [session mailbox](automation.md#session-mailbox) arrives at the session's next turn end or
+start, with **1 message waiting** on its card until then. **Close** goes
 through the tab bridge, which closes just that session's Claude tab: a batch unit's by the tag the
 bridge gave it, any other when exactly one Claude tab in the window carries the session's name. A
 fresh tab still named "Claude Code", two tabs with the same name, or a window without the bridge

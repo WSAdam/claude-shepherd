@@ -101,6 +101,7 @@ Everything lives under `~/.claude/`:
 | `cc-status/` | One status file per session, written by the hooks; `.panel-alive` is the panel heartbeat |
 | `cc-merge/`, `cc-fleet/` | Merge requests and batches, with their answers |
 | `cc-ask/` | Answers to held questions (the question itself is in the session's status file) |
+| `cc-inbox/` | The [session mailbox](automation.md#session-mailbox): messages waiting for each session |
 | `cc-bridge/` | The tab bridge's per-window tab lists and command folders |
 | `cc-policy/`, `cc-gate-tools/`, `cc-automodel/` | Per-session policy, gated-tool and auto-model settings |
 | `cc-ledger/` | The audit ledger (one JSONL file per day) |

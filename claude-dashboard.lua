@@ -1444,6 +1444,7 @@ function FX.doctorStatus()
     ledgerEnabled = core.config(cfg, "ledger.enabled", false) == true,
     ledgerBytes = ledgerBytes,
     sessions = sessions,
+    mailbox = FX.mailboxFacts(),   -- 2026-09-29: messages waiting in the session mailbox
   })
 end
 
@@ -3059,6 +3060,15 @@ function FX.removeStatus(key)
   for _, fn in ipairs(FX.readDir(FX.ASK_DIR)) do
     if fn:sub(1, #aclaim) == aclaim then os.remove(FX.ASK_DIR .. "/" .. fn) end
     if fn:sub(1, #atmp) == atmp then os.remove(FX.ASK_DIR .. "/" .. fn) end
+  end
+  -- the session mailbox, a folder of messages: every file in it, then the folder (cc_remove too).
+  -- A key that could name anything outside it never gets that far.
+  if core.mailboxKeyOk(key) then
+    local inbox = FX.INBOX_DIR .. "/" .. key
+    for _, fn in ipairs(FX.readDir(inbox)) do
+      if fn ~= "." and fn ~= ".." then os.remove(inbox .. "/" .. fn) end
+    end
+    os.remove(inbox)
   end
 end
 
@@ -4814,6 +4824,149 @@ function FX.typeWhenReady(it, typist, fn, opts)
     end, opts.extraStagger)
   end)
   return true
+end
+
+-- ---- The session mailbox (2026-09-29) ----
+-- Build program unit 11a. Shepherd hands a session a message without typing into its window:
+-- FX.mailboxSend leaves it in ~/.claude/cc-inbox/<key>/ (core.mailboxMessage names and marks it)
+-- and the session's own hooks hand it over -- cc-status.sh stop blocks the stop with it, and
+-- SessionStart shows what still waits (cc_session_context, cc-lib.sh). Each tick FX.stepMailbox
+-- looks at what waits (core.mailboxRoute): an idle session Shepherd may type into (kitty, a VS
+-- Code window of its own) gets the message typed once it is ready (FX.typeWhenReady), as one line,
+-- claimed right before typing so its turn end can't hand it over again; one in a shared VS Code
+-- window gets nothing typed and its card says the message is waiting (it.mailboxWaiting); one
+-- mid-turn is left to its turn end. A remote session is never reached: its hooks read another
+-- machine's inbox.
+FX.INBOX_DIR = os.getenv("CC_INBOX_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-inbox")
+FX._mailbox = { seq = 0, inflight = {}, pending = {} }   -- inflight: key -> when its typing was scheduled
+FX.MAILBOX_INFLIGHT_SECONDS = 60   -- a scheduled nudge that never reported back stops blocking the next
+-- A fresh nonce: 8 random bytes as hex (/dev/urandom; the clock if that can't be read).
+function FX.mailboxNonce()
+  local f = io.open("/dev/urandom", "rb")
+  local b = f and f:read(8)
+  if f then f:close() end
+  if type(b) == "string" and #b == 8 then
+    return (b:gsub(".", function(c) return string.format("%02x", c:byte()) end))
+  end
+  return string.format("%x%04x", FX.now(), math.random(0, 65535))
+end
+-- Leave session `key` a message; meta = { kind, from }, both optional. Written whole (temp, then
+-- renamed into place). Returns its path, or nil + why ("no session", "empty", "slash command",
+-- "write failed"). Types nothing: FX.stepMailbox decides that on the next tick.
+function FX.mailboxSend(key, text, meta)
+  if not core.mailboxKeyOk(key) then return nil, "no session" end
+  FX._mailbox.seq = FX._mailbox.seq + 1
+  local m, why = core.mailboxMessage(text, meta, FX.mailboxNonce(), FX.now(), FX._mailbox.seq)
+  if not m then
+    print("[cc-dashboard] ⚠️ mailbox: nothing sent to " .. tostring(key) .. ": " .. tostring(why))
+    return nil, why
+  end
+  pcall(function() hs.fs.mkdir(FX.INBOX_DIR) end)
+  local path = FX.INBOX_DIR .. "/" .. key .. "/" .. m.name
+  if not FX.writeFileAtomic(path, m.body) then
+    print("[cc-dashboard] ❌ mailbox: couldn't write " .. path)
+    return nil, "write failed"
+  end
+  print("[cc-dashboard] ✅ mailbox: left " .. key .. " a message (" .. m.name .. ")")
+  ledgerFor(FX.liveStatusFor(key) or { key = key }, { type = "mailbox_sent", nonce = m.nonce,
+    kind = type(meta) == "table" and type(meta.kind) == "string" and meta.kind or nil })
+  return path
+end
+-- Messages waiting, per session: { [key] = count }. One directory read, plus one per session
+-- that has an inbox; no process spawned.
+function FX.mailboxPending()
+  local out = {}
+  for _, key in ipairs(FX.readDir(FX.INBOX_DIR)) do
+    if core.mailboxKeyOk(key) then
+      local n = 0
+      for _, fn in ipairs(FX.readDir(FX.INBOX_DIR .. "/" .. key)) do
+        if core.parseMailboxName(fn) then n = n + 1 end
+      end
+      if n > 0 then out[key] = n end
+    end
+  end
+  return out
+end
+-- Claim the oldest message waiting for `key` the way the hooks do (cc_mailbox_claim): renamed
+-- aside, then read; one whose body's nonce isn't its name's, or a slash command, goes back as it
+-- was. Returns { text, nonce, path, claim }, or nil. The caller removes the claim once the message
+-- is delivered, or puts it back (FX.mailboxRestore).
+function FX.mailboxClaim(key)
+  if not core.mailboxKeyOk(key) then return nil end
+  local dir = FX.INBOX_DIR .. "/" .. key
+  local names = {}
+  for _, fn in ipairs(FX.readDir(dir)) do if core.parseMailboxName(fn) then names[#names + 1] = fn end end
+  table.sort(names)   -- oldest first: the names lead with a fixed-width time and send order
+  for _, fn in ipairs(names) do
+    local path = dir .. "/" .. fn
+    local claim = path .. ".claim.shepherd"
+    if os.rename(path, claim) then
+      local msg, why = core.parseMailbox(fn, FX.readFile(claim))
+      if msg then return { text = msg.text, nonce = msg.nonce, path = path, claim = claim } end
+      os.rename(claim, path)
+      print("[cc-dashboard] ⚠️ mailbox: left " .. fn .. " alone: " .. tostring(why))
+    end
+  end
+  return nil
+end
+function FX.mailboxRestore(c)
+  if type(c) == "table" and c.claim and c.path then os.rename(c.claim, c.path) end
+end
+-- Type the oldest waiting message into an idle session where typing is allowed, once it is ready
+-- (FX.typeWhenReady: settled, nothing in flight, kitty's composer empty). One at a time per
+-- session. A paste that doesn't land puts the message back for the next try or the turn end.
+function FX.mailboxNudge(it)
+  local key = it.key
+  local scheduled = FX.typeWhenReady(it, "mailbox", function()
+    FX._mailbox.inflight[key] = nil
+    local c = FX.mailboxClaim(key)
+    if not c then return end   -- its turn end or start took it first
+    local acted = core.handleAction(FX, it, "nudge", core.mailboxNudge(c.text))
+    if acted == "nudge" then
+      os.remove(c.claim)
+      print("[cc-dashboard] ✅ mailbox: typed " .. key .. "'s message into its window")
+      ledgerFor(it, { type = "mailbox_delivered", via = "typed", nonce = c.nonce })
+    else
+      FX.mailboxRestore(c)
+      print("[cc-dashboard] ⚠️ mailbox: " .. key .. "'s message didn't land -- it waits for its turn end")
+    end
+  end, { onRefused = function() FX._mailbox.inflight[key] = nil end })
+  if scheduled then FX._mailbox.inflight[key] = FX.now() end
+  return scheduled
+end
+-- Each tick: what waits for whom (kept for Diagnostics), the cards whose message has to wait
+-- because nothing may be typed into their window (it.mailboxWaiting), and a typed nudge for each
+-- idle session that can take one.
+function FX.stepMailbox(list)
+  local pending = FX.mailboxPending()
+  FX._mailbox.pending = pending
+  local now = FX.now()
+  for _, it in ipairs(list or {}) do
+    local n = (not it.remote) and pending[it.key] or 0
+    local route = core.mailboxRoute(it, n)
+    it.mailboxWaiting = (route == "waiting") and n or nil
+    local since = FX._mailbox.inflight[it.key]
+    if route == "type" and not (since and now - since < FX.MAILBOX_INFLIGHT_SECONDS) then
+      FX.mailboxNudge(it)
+    end
+  end
+end
+-- Diagnostics: { total, sessions = { { name, count } } }, the most waiting first.
+function FX.mailboxFacts()
+  local names = {}
+  for _, src in ipairs({ FX._shownItems or {}, FX._hiddenItems or {} }) do
+    for _, it in ipairs(src) do if it.key then names[it.key] = it.label or it.name end end
+  end
+  local sessions, total = {}, 0
+  for key, n in pairs(FX.mailboxPending()) do
+    total = total + n
+    sessions[#sessions + 1] = { name = names[key] or key, count = n }
+  end
+  table.sort(sessions, function(a, b)
+    if a.count ~= b.count then return a.count > b.count end
+    return tostring(a.name) < tostring(b.name)
+  end)
+  return { total = total, sessions = sessions }
 end
 
 -- Focus a window, then send after a short delay, then restore prior focus.
@@ -11579,6 +11732,14 @@ local HTML = [[
       if(typeof s !== "number" || !(s > 0)) return "";
       return " · backing off · " + Math.ceil(s / 60) + "m";
     }
+    // 2026-09-29: an idle card in a shared VS Code window whose Shepherd message can't be typed
+    // says it waits (FX.stepMailbox sets it.mailboxWaiting); its next turn end or start takes it.
+    function mailboxTail(it){
+      var n = it && it.mailboxWaiting;
+      if(typeof n !== "number" || !(n > 0)) return "";
+      n = Math.floor(n);
+      return " · " + n + (n === 1 ? " message" : " messages") + " waiting";
+    }
     function statusWords(it){
       if(needsYouNow(it)) return LABELS.approval;
       // A transient API error the session is retrying (a connection blip, a timeout, an
@@ -17412,6 +17573,7 @@ local HTML = [[
       var stCls = /^[a-z]+$/.test(est) ? est : "idle";
       var label = esc(statusWords(it));
       label += esc(backoffTail(it));   // 2026-09-28: "backing off · 4m" while auto-continue waits
+      label += esc(mailboxTail(it));   // 2026-09-29: "1 message waiting" in a shared window
       // The elapsed-in-status age (2s/13s/11h) rides the status line -- right of the dot,
       // before the status words -- instead of taking its own meta row.
       var age = it.since ? fmtAge(it.since) : "";
@@ -19220,6 +19382,11 @@ function FX._refreshBody()
   FX.annotateMerges(list, cfg, bannerOn)
   FX.annotateTabless(list, cfg)   -- a claude process with no tab in its window (2026-09-11)
   FX.annotateAsks(list, bannerOn)   -- a question held for Adam by cc-ask.sh (2026-09-11)
+  -- the session mailbox (2026-09-29): cards whose message waits, and a typed nudge where allowed
+  do
+    local okm, errm = pcall(FX.stepMailbox, list)
+    if not okm then print("[cc-dashboard] ❌ mailbox step failed: " .. tostring(errm)) end
+  end
   FX.annotateEmptyChats(list)       -- never-used "Claude Code" chats, closable from the card (2026-09-11)
   -- 2026-09-17: LAST of the annotations -- it needs every source at once. One predicate decides
   -- whether each card really needs Adam (a live counterpart AND an affordance that changes

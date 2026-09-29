@@ -26,6 +26,7 @@ printf '{}' > "$C/cc-status/abc.json"
 printf '{"version":1,"files":{}}' > "$C/cc-usage-state.json"
 mkdir -p "$C/cc-talk"; printf '1' > "$C/cc-talk/abc"
 mkdir -p "$C/cc-notes/pending"; printf '# Handoff\n' > "$C/cc-notes/abc.handoff.md"
+mkdir -p "$C/cc-inbox/abc"; printf '{"nonce":"ab"}' > "$C/cc-inbox/abc/1790000000-000001-ab.msg"
 mkdir -p "$C/cc-bridge"; printf '0.5.0' > "$C/cc-bridge/.installed"
 FAKE="$TMP/code"
 printf '#!/bin/sh\necho "$*" >> "%s"\nexit 0\n' "$TMP/code.calls" > "$FAKE"; chmod +x "$FAKE"
@@ -77,6 +78,8 @@ assert_eq "--purge removes the saved usage totals" "gone" "$([ -e "$C/cc-usage-s
 assert_eq "--purge removes the talk-mode flags" "gone" "$([ -e "$C/cc-talk" ] && echo there || echo gone)"
 # 2026-09-28: the handoff notes (cc-notes/) are Shepherd's state too
 assert_eq "--purge removes the handoff notes" "gone" "$([ -e "$C/cc-notes" ] && echo there || echo gone)"
+# 2026-09-29: the session mailbox (cc-inbox/) is Shepherd's state too
+assert_eq "--purge removes the session mailbox" "gone" "$([ -e "$C/cc-inbox" ] && echo there || echo gone)"
 assert_eq "--purge still keeps the user's own files" "there" "$([ -e "$C/cc-mine.sh" ] && echo there || echo gone)"
 
 # a CLAUDE.md that is only the block (a fresh machine) is removed, not left empty

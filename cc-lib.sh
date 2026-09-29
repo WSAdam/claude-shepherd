@@ -324,6 +324,9 @@ CC_ASK_DIR="${CC_ASK_DIR:-${HOME}/.claude/cc-ask}"
 # Talk mode's per-session flag (build program unit 6, 2026-09-28): presence = on, written by the
 # panel's toggle, read by cc-approve.sh. Default MUST match the dashboard's FX.TALK_DIR.
 CC_TALK_DIR="${CC_TALK_DIR:-${HOME}/.claude/cc-talk}"
+# The session mailbox (build program unit 11a, 2026-09-29): a folder per session of the messages
+# Shepherd left it (FX.mailboxSend). Default MUST match the dashboard's FX.INBOX_DIR.
+CC_INBOX_DIR="${CC_INBOX_DIR:-${HOME}/.claude/cc-inbox}"
 
 # Remove a session entirely (used by SessionEnd) plus any stray decision/claim
 # file and the per-session gated-tools override, approveRepeats memo, autopilot
@@ -345,6 +348,14 @@ cc_remove() {
     "$CC_MERGE_DIR/$1.decision".parked.* "$CC_MERGE_DIR/$1.decision".tmp.* \
     "$CC_ASK_DIR/$1.answer" "$CC_ASK_DIR/$1.answer".claim.* \
     "$CC_ASK_DIR/$1.answer".tmp.* "$CC_TALK_DIR/$1" 2>/dev/null || true
+  # The mailbox is a folder (cc-inbox/<key>/): its messages, claims and temps, then the folder.
+  # A key that could name anything outside it (nothing, . or ..) never gets that far.
+  local inbox="$CC_INBOX_DIR/$1"
+  case "$1" in ''|.|..|*/*) ;; *)
+    rm -f "$inbox"/* "$inbox"/.[!.]* 2>/dev/null
+    rmdir "$inbox" 2>/dev/null ;;
+  esac
+  return 0
 }
 
 # ---- Audit/event ledger ----------------------------------------------------
@@ -1355,7 +1366,7 @@ _cc_ro_gitconfig() {   # git config that reads: --get*, --list, get, list, or on
 # part "[Shepherd: <name>]" and caps the total at CC_CONTEXT_MAX characters; a part that would pass
 # the cap is cut, and the parts after it are left out. A new part goes in CC_CONTEXT_PARTS.
 CC_NOTES_DIR="${CC_NOTES_DIR:-${HOME}/.claude/cc-notes}"
-CC_CONTEXT_PARTS="handoff"
+CC_CONTEXT_PARTS="handoff mailbox"
 CC_CONTEXT_MAX=8000
 CC_PENDING_MAX_AGE=3600   # a respawn's note nobody took within the hour is stale
 
@@ -1462,6 +1473,103 @@ _cc_handoff_pending() { # $1 key, $2 cwd
     rm -f "$claim"
     echo "[cc-lib] ⚠️ dropped a stale handoff note ($id): nobody took it within the hour" >&2
   done
+}
+
+# ---- The session mailbox (build program unit 11a, 2026-09-29) -------------------------------
+# Shepherd hands a session a message without typing into its window: FX.mailboxSend leaves it in
+# CC_INBOX_DIR/<key>/ as <epoch>-<seq>-<nonce>.msg, a JSON body {"nonce","text",...} written
+# temp-then-rename, so the names sort oldest first and a half-written one never matches *.msg.
+# The session takes it at its next turn end (cc-status.sh stop blocks the stop with it, through
+# cc_stop_decision) or its next start (the mailbox part below). A message is claimed with mv, so
+# it is handed over once, whoever races for it; a body whose nonce isn't its name's, or whose text
+# is a slash command, is put back and left alone. KEEP THE RULES IN SYNC with core.parseMailbox.
+CC_MAILBOX_PART_MAX=2000   # what a session's start may show; the rest waits, whole, for its turn end
+
+_cc_mailbox_slash() { # is $1 a slash command, marked [shepherd] or not? (core.mailboxSlash)
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"
+  case "$s" in "[shepherd]"*) s="${s:10}"; s="${s#"${s%%[![:space:]]*}"}" ;; esac
+  case "$s" in /*) return 0 ;; esac
+  return 1
+}
+
+# Hand over one message file: its text on stdout, the file gone. 1 when it is no message to hand
+# over (another reader took it first, a wrong nonce, a slash command) -- those are left as they were.
+# $2 = how it goes (stop | start), for the ledger; $3 = the session key.
+_cc_mailbox_take() { # $1 file, $2 via, $3 key
+  local f="$1" base nonce claim text
+  base="${f##*/}"; base="${base%.msg}"; nonce="${base##*-}"
+  case "$base" in [0-9]*-[0-9]*-*) ;; *) return 1 ;; esac
+  case "$nonce" in ''|*[!A-Za-z0-9]*) return 1 ;; esac
+  claim="$f.claim.$$"
+  mv "$f" "$claim" 2>/dev/null || return 1   # another hook (or the panel) took it first
+  text="$(jq -r --arg n "$nonce" 'select(.nonce == $n) | .text // empty' "$claim" 2>/dev/null)"
+  if [ -z "$text" ] || _cc_mailbox_slash "$text"; then
+    mv "$claim" "$f" 2>/dev/null
+    echo "[cc-lib] ⚠️ left a mailbox message alone (${f##*/}): $([ -n "$text" ] && echo "a slash command" || echo "its nonce doesn't match its name")" >&2
+    return 1
+  fi
+  rm -f "$claim"
+  if cc_ledger_enabled; then
+    cc_ledger_append "$(jq -nc --arg key "$3" --arg via "$2" --arg n "$nonce" \
+      '{type:"mailbox_delivered", key:$key, via:$via, nonce:$n}')"
+  fi
+  echo "[cc-lib] ✅ handed session $3 its mailbox message ${f##*/} ($2)" >&2
+  printf '%s' "$text"
+}
+
+# The oldest message waiting for session $1, handed over: its text on stdout. 1 when none waits.
+cc_mailbox_claim() { # $1 key, $2 via (stop | start)
+  local key="$1" f
+  case "$key" in ''|.|..|*/*) return 1 ;; esac
+  [ -d "$CC_INBOX_DIR/$key" ] || return 1
+  cc_have_jq || return 1
+  for f in "$CC_INBOX_DIR/$key"/*.msg; do
+    [ -f "$f" ] || continue
+    _cc_mailbox_take "$f" "${2:-stop}" "$key" && return 0
+  done
+  return 1
+}
+
+# The mailbox part of cc_session_context: every message still waiting, oldest first, handed over
+# now -- as many as fit in CC_MAILBOX_PART_MAX. The first that doesn't fit, and every one after it,
+# stays for the turn end: it is looked at before it is claimed, so it is never shown cut.
+_cc_ctx_mailbox() { # $1 source, $2 key
+  local key="$2" f text out="" n=0
+  case "$key" in ''|.|..|*/*) return 0 ;; esac
+  [ -d "$CC_INBOX_DIR/$key" ] || return 0
+  cc_have_jq || return 0
+  for f in "$CC_INBOX_DIR/$key"/*.msg; do
+    [ -f "$f" ] || continue
+    text="$(jq -r '.text // empty' "$f" 2>/dev/null)"
+    [ $(( ${#out} + ${#text} + 2 )) -le "$CC_MAILBOX_PART_MAX" ] || break
+    text="$(_cc_mailbox_take "$f" start "$key")" || continue
+    [ -z "$out" ] || out="$out"$'\n\n'
+    out="$out$text"
+    n=$((n + 1))
+  done
+  [ -n "$out" ] || return 0
+  if [ "$n" -eq 1 ]; then printf 'Shepherd left this session a message:\n\n%s\n' "$out"
+  else printf 'Shepherd left this session %s messages, oldest first:\n\n%s\n' "$n" "$out"; fi
+}
+
+# ---- What a finished turn is told (2026-09-29) --------------------------------------------
+# A Stop hook that prints {"decision":"block","reason":...} keeps the session going, with the
+# reason as what to do next. cc-status.sh decides its reasons as it runs and prints them here,
+# once, at the end of the script: each non-empty argument is one reason, joined by a blank line;
+# nothing to say prints nothing. The caller never blocks a stop that stop_hook_active marks (it is
+# the end of a turn a block already kept going), so a block can't loop. The mailbox is the first
+# reason; unit 16 adds its notes request as another argument.
+cc_stop_decision() {
+  local reason="" r
+  for r in "$@"; do
+    [ -n "$r" ] || continue
+    [ -z "$reason" ] || reason="$reason"$'\n\n'
+    reason="$reason$r"
+  done
+  [ -n "$reason" ] || return 0
+  cc_have_jq || return 0
+  jq -nc --arg r "$reason" '{decision:"block", reason:$r}'
 }
 
 # ---- Worktree fence (build program unit 7, 2026-09-28) --------------------------------------

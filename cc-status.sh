@@ -19,7 +19,7 @@
 #   posttooluse     -> working  (clears pending)
 #   permissionrequest -> approval (+ precise pending from tool_input)
 #   notification    -> approval | done | (unchanged)  depending on type (an idle one keeps an error)
-#   stop            -> done      (clears pending)
+#   stop            -> done      (clears pending; working when a mailbox message keeps the turn going)
 #   stopfailure     -> error     (+ error_kind, error_message: the turn ended on an API error)
 #   sessionend      -> file removed
 # Every status but error drops error_kind/error_message.
@@ -217,6 +217,15 @@ case "$EVENT" in
     ;;
   stop)
     STATUS="done"
+    # 2026-09-29: the session mailbox. A message Shepherd left this session is handed over now:
+    # the stop is blocked with it (cc_stop_decision, at the end), so the session carries on with
+    # it and stays working. Never while stop_hook_active -- that stop ends a turn a block already
+    # kept going, and blocking it again could loop -- and never in Shepherd's own internal runs.
+    # (The folder test first: most sessions have no inbox, and it costs no jq.)
+    if [ -d "$CC_INBOX_DIR/$KEY" ] && [ -z "${CC_SHEPHERD_INTERNAL:-}" ] \
+       && [ "$(cc_get "$INPUT" '.stop_hook_active')" != "true" ]; then
+      STOP_MAIL="$(cc_mailbox_claim "$KEY" stop)" && STATUS="working"
+    fi
     ;;
   stopfailure)
     # 2026-09-28: a turn that ends on an API error (a usage limit, an outage, an expired login)
@@ -557,6 +566,13 @@ fi
 # identity (claude pid, kitty lineage) from it.
 if [ "$EVENT" = "sessionstart" ]; then
   cc_session_context "$(cc_get "$INPUT" '.source')" "$KEY" "$CWD"
+fi
+
+# ---- What a finished turn is told (2026-09-29) ----
+# The Stop decision, printed once, last, through its one builder: a message from the mailbox keeps
+# the turn going. (Unit 16 adds its notes request here, as another reason.)
+if [ "$EVENT" = "stop" ]; then
+  cc_stop_decision "${STOP_MAIL:-}"
 fi
 
 echo "[cc-status] ✅ $EVENT -> $STATUS for '$NAME' ($KEY)" >&2

@@ -8868,6 +8868,85 @@ function M.typingHeld(held, it)
   return type(h) == "table" and h.episode == M.typingEpisode(it)
 end
 
+-- ---- Session mailbox (2026-09-29) ----
+-- Build program unit 11a. Shepherd hands a session a message without typing into its window: it
+-- leaves the message in ~/.claude/cc-inbox/<key>/ (FX.mailboxSend), and the session's own hooks
+-- hand it over -- cc-status.sh stop blocks the stop with it, so the session carries on with it,
+-- and SessionStart shows what still waits (cc_session_context). One file per message,
+-- <epoch>-<seq>-<nonce>.msg, so the names sort oldest first; its JSON body carries the same
+-- nonce, and a body whose nonce isn't its name's is left alone. A reader claims a message by
+-- renaming it, so it is handed over once, whoever races for it. The text is [shepherd]-marked and
+-- never a slash command (every reader checks again). KEEP THE RULES IN SYNC with
+-- cc_mailbox_claim in cc-lib.sh.
+M.MAILBOX_MAX = 4000   -- bytes of one message's text; a longer one is cut on a character boundary
+function M.mailboxKeyOk(key)   -- a session key that names a folder inside the inbox, never outside it
+  return type(key) == "string" and key ~= "." and key ~= ".." and key:match("^[%w%._%-]+$") ~= nil
+end
+-- Is this text a slash command, marked [shepherd] or not?
+function M.mailboxSlash(text)
+  local s = tostring(text or ""):gsub("^%s+", "")
+  if s:sub(1, #M.SHEPHERD_TAG) == M.SHEPHERD_TAG then s = s:sub(#M.SHEPHERD_TAG + 1):gsub("^%s+", "") end
+  return s:sub(1, 1) == "/"
+end
+-- The file FX.mailboxSend writes: { name, body, text, nonce }, or nil + why ("empty", "bad nonce",
+-- "slash command"). seq orders the sends made within one second. Needs M.json (injected).
+function M.mailboxMessage(text, meta, nonce, now, seq)
+  if type(text) ~= "string" or not text:find("%S") then return nil, "empty" end
+  if type(nonce) ~= "string" or not nonce:match("^%w+$") then return nil, "bad nonce" end
+  text = text:gsub("^%s+", ""):gsub("%s+$", "")
+  if M.mailboxSlash(text) then return nil, "slash command" end
+  text = M.shepherdSays(text)
+  if #text > M.MAILBOX_MAX then
+    local cut = M.MAILBOX_MAX
+    while cut > 0 and (text:byte(cut + 1) or 0) >= 0x80 and (text:byte(cut + 1) or 0) < 0xC0 do cut = cut - 1 end
+    text = text:sub(1, cut) .. " [cut]"
+  end
+  meta = type(meta) == "table" and meta or {}
+  now = math.floor(tonumber(now) or os.time())
+  seq = math.floor(tonumber(seq) or 0) % 1000000
+  local body = M.json.encode({ nonce = nonce, text = text, at = now,
+    from = type(meta.from) == "string" and meta.from or "shepherd",
+    kind = type(meta.kind) == "string" and meta.kind or nil })
+  return { name = string.format("%010d-%06d-%s.msg", now, seq, nonce), body = body, text = text, nonce = nonce }
+end
+-- A file name that is a message -> at, seq, nonce; nil for anything else (a temp, a claim).
+function M.parseMailboxName(name)
+  if type(name) ~= "string" then return nil end
+  local at, seq, nonce = name:match("^(%d+)%-(%d+)%-(%w+)%.msg$")
+  if not at then return nil end
+  return tonumber(at), tonumber(seq), nonce
+end
+-- A message read back: { nonce, text, at, from, kind }, or nil + why. Its body must carry its
+-- name's nonce and its text must be no slash command; anything else is left alone.
+function M.parseMailbox(name, raw)
+  local at, _, nonce = M.parseMailboxName(name)
+  if not at then return nil, "not a message" end
+  if type(raw) ~= "string" then return nil, "unreadable" end
+  local ok, t = pcall(function() return M.json.decode(raw) end)
+  if not ok or type(t) ~= "table" then return nil, "unreadable" end
+  if t.nonce ~= nonce then return nil, "wrong nonce" end
+  if type(t.text) ~= "string" or not t.text:find("%S") then return nil, "empty" end
+  if M.mailboxSlash(t.text) then return nil, "slash command" end
+  return { nonce = nonce, text = t.text, at = tonumber(t.at) or at, from = t.from, kind = t.kind }
+end
+-- What an idle session gets typed: the message as ONE line. kitty sends a newline as Return,
+-- which would submit the first line on its own.
+function M.mailboxNudge(text)
+  local s = tostring(text or ""):gsub("[ \t]*[\r\n]+[ \t\r\n]*", " "):gsub("^%s+", ""):gsub("%s+$", "")
+  return s
+end
+-- Who hands over the n messages waiting for a session: nil (none wait, or a remote session the
+-- local inbox can't reach), "turn-end" (mid-turn: its Stop hook will), "waiting" (idle in a VS
+-- Code window shared with other Claude tabs, where nothing may be typed: it waits for the
+-- session's next turn end or start, and the card says so), or "type" (idle where Shepherd may
+-- type: FX.typeWhenReady types it once the session is ready).
+function M.mailboxRoute(it, n)
+  if type(it) ~= "table" or (tonumber(n) or 0) <= 0 or it.remote then return nil end
+  if it.status == "working" or it.status == "approval" or it.gate == "waiting" then return "turn-end" end
+  if M.keystrokeBlocked(it) then return "waiting" end
+  return "type"
+end
+
 -- ---- Window focus matching (extracted from focusProject; review #4) --------
 -- Generic path components that must never be used as a focus candidate (too
 -- ambiguous -- they'd grab the wrong window).
@@ -14288,6 +14367,23 @@ function M.doctorChecks(facts)
     add("Audit ledger off", "info", "enable it in Settings for history + cost trends")
   end
 
+  -- 2026-09-29: the session mailbox -- Shepherd's messages still waiting to be handed over, per
+  -- session ({ total, sessions = { { name, count } } }, from FX.mailboxFacts)
+  local mb = type(facts.mailbox) == "table" and facts.mailbox or nil
+  if mb then
+    local total = tonumber(mb.total) or 0
+    if total <= 0 then
+      add("Mailbox empty", "ok", "no Shepherd message is waiting for a session")
+    else
+      local parts = {}
+      for _, s in ipairs(type(mb.sessions) == "table" and mb.sessions or {}) do
+        parts[#parts + 1] = tostring(s.name) .. ": " .. tostring(s.count)
+      end
+      add(total .. " message" .. ((total == 1) and "" or "s") .. " waiting in the mailbox", "info",
+          table.concat(parts, " · ") .. " -- each is handed over at its session's next turn end or start")
+    end
+  end
+
   local n = tonumber(facts.sessions) or 0
   add(n .. " live session" .. ((n == 1) and "" or "s"), "info", "tiles currently tracked")
   return rows
@@ -14375,6 +14471,9 @@ M.FEATURES = {
   { key = "handoffs", cat = "Automate", new = true, title = "Handoff notes",
     what = "Each time a session finishes a turn, Shepherd writes a handoff note: the last result, the files it touched, its errors, the worktree's open TODO lines and the transcript. After /clear the fresh session is told where the note is; a respawned session starts with the whole note. Notes are kept 14 days in ~/.claude/cc-notes.",
     why = "A new session picks up where the last one left off instead of starting blank." },
+  { key = "mailbox", cat = "Automate", new = true, title = "Session mailbox",
+    what = "Shepherd can leave a session a message instead of typing it. The message waits in ~/.claude/cc-inbox and arrives when the session's current turn ends -- it carries on with it -- or at its next start. An idle session in a kitty window or a VS Code window of its own gets it typed, as one line, once it's ready; in a VS Code window shared with other Claude tabs nothing is typed and the card says the message is waiting. Diagnostics counts what's waiting.",
+    why = "Automation can reach a session in a shared window, or mid-turn, without keystrokes landing in the wrong tab." },
   { key = "policies", cat = "Automate", title = "Policy bundles & autopilot",
     what = "Reusable auto-allow/deny rules per session or fleet, plus a timed autopilot that approves everything for a while.",
     why = "Pre-decide the routine calls so you only ever see the ones that matter." },

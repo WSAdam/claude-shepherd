@@ -266,6 +266,15 @@ echo ""
 echo "== lua: handoff notes -- written on the done edge, left for a respawn, pruned after 14 days (behavioral, stubbed hs + git) =="
 HOME="$(mktemp -d)" lua "$DIR/handoff.test.lua" || fail=1
 echo ""
+echo "== bash: the session mailbox -- a message handed over at the turn end or the next start, once (cc-status.sh) =="
+bash "$DIR/mailbox.test.sh" || fail=1
+echo ""
+echo "== lua: the session mailbox -- sent whole, typed only where typing is allowed, else waiting (behavioral, stubbed hs + kitty) =="
+HOME="$(mktemp -d)" lua "$DIR/mailbox.test.lua" || fail=1
+echo ""
+echo "== node: a card whose Shepherd message is waiting says so (behavioral, runs the shipped mailboxTail) =="
+node "$DIR/mailbox-hint.test.js" || fail=1
+echo ""
 
 if [ "$fail" -eq 0 ]; then
   echo "✅ ALL GREEN"

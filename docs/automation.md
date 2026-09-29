@@ -12,8 +12,8 @@ recorded in the audit ledger.
 ## When automation types
 
 Auto-feed, project routing, a rule's `nudge` or `continue`, auto-continue, the post-run
-self-summary and the startup `/rc` sweep all type into a session without you. Each one waits until
-the session can take it:
+self-summary, the startup `/rc` sweep and a waiting [mailbox](#session-mailbox) message all type
+into a session without you. Each one waits until the session can take it:
 
 - **Never mid-turn**: not while the session is working, waiting on an approval or on a question
   Shepherd holds, or running a tool.
@@ -166,12 +166,48 @@ A fresh or respawned session picks up where the last one left off.
   `~/.claude/cc-notes/pending/`, built fresh from its transcript, so a session that died mid-turn
   says so. The new session starts with the whole note, once. A note nobody takes within the hour is
   dropped, and a dry run leaves none.
-- **A resumed or compacted session** keeps its own context and is told nothing.
+- **A resumed or compacted session** keeps its own context and gets no note (it is still shown the
+  [mailbox](#session-mailbox) messages waiting for it).
 - **Cleanup.** Notes older than 14 days are pruned at startup and then hourly.
 
 How it reaches the session: Claude Code adds a SessionStart hook's output to the new session's
 context. `cc-status.sh` prints `cc_session_context` (`cc-lib.sh`) there: each part is labelled
 `[Shepherd: <part>]` and the whole is capped at 8,000 characters.
+
+## Session mailbox
+
+Shepherd can leave a session a message instead of typing it into its window, so automation can
+reach a session that is mid-turn, or one in a VS Code window it shares with other Claude tabs. The
+entry point is `FX.mailboxSend(key, text, meta)`; nothing in the panel sends mail yet (the
+automation built on it comes later). To try it from a terminal, with the session's key (its status
+file's name in `~/.claude/cc-status/`):
+
+```bash
+hs -c '_G.__ccDashboard.fx.mailboxSend("<session key>", "Summarise what you just did.")'
+```
+
+- **Where it waits.** `~/.claude/cc-inbox/<session>/`, one file per message, named
+  `<time>-<order>-<nonce>.msg` and written whole. Its first line is marked `[shepherd]`. A slash
+  command is never sent, and never handed over.
+- **At the next turn end.** When the session finishes a turn, its Stop hook hands over the oldest
+  waiting message: it blocks the stop with the message as the reason, so the session carries on
+  with it and its card stays working. One message per turn end. The turn that message started ends
+  normally: Claude Code marks that stop `stop_hook_active`, and Shepherd never blocks one of those,
+  so a message can't loop.
+- **At the next start.** A resumed or compacted session is shown every message still waiting,
+  oldest first, as `[Shepherd: mailbox]` in its context, up to 2,000 characters. A message that
+  doesn't fit waits, whole, for the turn end.
+- **An idle session.** A session sitting at its prompt gets the message typed, as one line, where
+  typing is allowed: a kitty window, or a VS Code window with just this one Claude tab, once the
+  session is ready ([when automation types](#when-automation-types)). In a VS Code window shared
+  with other Claude tabs nothing is typed: the card says **1 message waiting** until the session's
+  next turn end or start takes it. A paste that doesn't land puts the message back.
+- **Delivered once.** Whoever hands a message over first (the Stop hook, the SessionStart hook or
+  the typed nudge) claims it by renaming its file. A file whose body doesn't carry the nonce in its
+  name is left alone.
+- **Cleanup and Diagnostics.** A session's inbox goes when the session ends, or when its card is
+  forgotten or pruned. 🩺 Diagnostics counts the messages waiting, per session. The ledger records
+  `mailbox_sent` and `mailbox_delivered` (`via`: `stop`, `start` or `typed`).
 
 ## Escalation and watchdogs
 

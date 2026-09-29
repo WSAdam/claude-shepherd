@@ -8440,7 +8440,9 @@ do
   -- 2026-09-28: 15 -> 16 for talk mode ("talk", flagged new).
   -- 2026-09-28: 16 -> 17 for handoff notes ("handoffs", flagged new).
   -- 2026-09-28: 17 -> 18 for the worktree fence ("fence", flagged new).
-  eq("FEATURES: the 18 new features are flagged", newCount, 18)
+  -- 2026-09-29: 18 -> 19 for the session mailbox ("mailbox", flagged new).
+  eq("FEATURES: the 19 new features are flagged", newCount, 19)
+  check("FEATURES: lists the session mailbox", keys.mailbox == true)
   check("FEATURES: lists handoff notes", keys.handoffs == true)
   check("FEATURES: lists the worktree fence", keys.fence ~= nil)
   check("FEATURES: lists talk mode", keys.talk == true)

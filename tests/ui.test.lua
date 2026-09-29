@@ -3909,5 +3909,24 @@ do
   eq("backoff: ...up to 30", (ac.backoff or {}).maxSeconds, 1800)
 end
 
+-- ---- the session mailbox is stepped every tick (2026-09-29) ----
+-- Build program unit 11a. tests/mailbox.test.lua drives FX.stepMailbox itself; this pins that the
+-- tick runs it (after the annotations it reads, isolated so a failure can't stop the tick) and
+-- that its typed nudge goes through the readiness door, never straight to the window.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  local tick = src:match("function FX%._refreshBody%(%)(.-)\nend\n") or ""
+  check("mailbox: the tick steps the mailbox, isolated in a pcall", tick:find("pcall(FX.stepMailbox, list)", 1, true) ~= nil)
+  local nudge = src:match("function FX%.mailboxNudge%(it%)(.-)\nend\n") or ""
+  check("mailbox: an idle session's nudge waits for readiness",
+        nudge:find('FX.typeWhenReady(it, "mailbox", function()', 1, true) ~= nil)
+  check("mailbox: ...and is typed as one line, claimed first",
+        nudge:find("FX.mailboxClaim(key)", 1, true) ~= nil and nudge:find("core.mailboxNudge(c.text)", 1, true) ~= nil)
+  check("mailbox: FX.INBOX_DIR reads CC_INBOX_DIR, as cc-lib.sh does",
+        src:find('FX.INBOX_DIR = os.getenv("CC_INBOX_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-inbox")', 1, true) ~= nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)
