@@ -146,4 +146,15 @@ assert_eq "wait_for: returns 1 when the path never appears within its tries" "1"
 wait_for "$TMP/already-there" && got=0 || got=$?
 assert_eq "wait_for: a path already there returns at once with the default tries" "0" "$got"
 
+# ---- the session remover leaves Adam's skill-run labels alone (2026-09-29, unit 35) ----
+# cc-skill-labels.json is Adam's hand labels on skill runs, not a session's state. A fresh process
+# with a temp HOME and nothing else, so every default dir cc_remove prunes is under it.
+RH="$TMP/remove-home"
+mkdir -p "$RH/.claude/cc-status"
+printf '{}' > "$RH/.claude/cc-status/s1.json"
+printf '{"v":1,"labels":{"toolu_a":{"verdict":"ok"}}}' > "$RH/.claude/cc-skill-labels.json"
+env -i HOME="$RH" PATH="$PATH" bash -c '. "$1/cc-lib.sh"; cc_remove s1' _ "$ROOT"
+assert_eq "cc_remove removed the session's own status file (it ran)" "gone" "$([ -e "$RH/.claude/cc-status/s1.json" ] && echo there || echo gone)"
+assert_eq "cc_remove leaves cc-skill-labels.json" '{"v":1,"labels":{"toolu_a":{"verdict":"ok"}}}' "$(cat "$RH/.claude/cc-skill-labels.json" 2>/dev/null)"
+
 finish

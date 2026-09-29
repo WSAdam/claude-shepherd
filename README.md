@@ -59,6 +59,7 @@ Every feature below has a reference page one click away. The panel lists the sam
 - [**Commits today and this week**](docs/usage-and-cost.md#commits-today-and-this-week): your
   commits and lines changed per day and project, from local git, each linked to its session.
 - [**Where the time went**](docs/usage-and-cost.md#where-the-time-went): time lost to waits, limits, stalls and errors.
+- [**How often each skill works**](docs/providers-and-integrations.md#how-often-each-skill-works): runs and ok-rate per skill, hand-labelled.
 - [**Shift report**](docs/usage-and-cost.md#shift-report): a summary of what the fleet did while you
   were away.
 

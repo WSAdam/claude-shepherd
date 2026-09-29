@@ -7324,88 +7324,101 @@ function M.turnEvidence(text)
   if not start then
     if peerAt then start, origin = peerAt, "peer" else start = 0 end
   end
+  local ev, st = M.turnEvidenceNew(origin)
+  for i = start + 1, #spans do M.turnEvidenceAdd(ev, st, decode(i, true)) end
+  return M.turnEvidenceEnd(ev, st)
+end
+
+-- A turn's evidence in three parts (2026-09-29, build program unit 35): a fresh record (and the
+-- walk's own state), one decoded user or assistant record folded in, and the closing fields.
+-- core.turnEvidence walks a tail with them; the time index folds a skill run's records with the
+-- same three (core.timeIndexFold), so a run's outcome is exactly the turn label's. Pure.
+function M.turnEvidenceNew(origin)
   -- files/filesMore/errorTexts (2026-09-28) feed the handoff note (M.handoffNote): each edited
   -- path once, in order, and the newest few errors, one line each.
   local ev = { origin = origin, complete = false, edits = 0, mutating = 0, reads = 0, tests = 0,
                other = 0, errors = 0, denials = 0, todoDone = 0, committed = false, asked = false,
                planPut = false, apiError = false, endedDenied = false, textLen = 0,
                files = {}, filesMore = 0, errorTexts = {} }
-  local commits, lastResult, seenFile = {}, nil, {}
-  for i = start + 1, #spans do
-    local obj = decode(i, true)
-    local c = obj and type(obj.message) == "table" and obj.message.content or nil
-    if obj and obj.type == "assistant" then
-      ev.complete = true
-      ev.apiError = obj.isApiErrorMessage == true
-      for _, p in ipairs(type(c) == "table" and c or {}) do
-        if type(p) == "table" and p.type == "text" and type(p.text) == "string" and p.text:find("%S") then
-          ev.lastText = p.text; ev.textLen = ev.textLen + #p.text
-        elseif type(p) == "table" and p.type == "tool_use" then
-          local name, input = tostring(p.name or ""), type(p.input) == "table" and p.input or {}
-          if M.EDIT_TOOLS[name] then
-            local path = tostring(input.file_path or input.notebook_path or "")
-            if not path:find("/.claude/cc-notes/", 1, true) then
-              ev.edits = ev.edits + 1
-              if path ~= "" and not seenFile[path] then
-                seenFile[path] = true
-                if #ev.files < M.HANDOFF.files then ev.files[#ev.files + 1] = path
-                else ev.filesMore = ev.filesMore + 1 end
-              end
-              if path:match("TODO%.md$") then
-                local before, after = 0, 0
-                local pairs_ = (type(input.edits) == "table") and input.edits or { input }
-                for _, e in ipairs(pairs_) do
-                  if type(e) == "table" then
-                    for _ in tostring(e.old_string or ""):gmatch("%- %[[xX]%]") do before = before + 1 end
-                    for _ in tostring(e.new_string or ""):gmatch("%- %[[xX]%]") do after = after + 1 end
-                  end
+  return ev, { commits = {}, lastResult = nil, seenFile = {} }
+end
+function M.turnEvidenceAdd(ev, st, obj)
+  if type(ev) ~= "table" or type(st) ~= "table" or type(obj) ~= "table" then return end
+  local commits, seenFile = st.commits, st.seenFile
+  local c = type(obj.message) == "table" and obj.message.content or nil
+  if obj.type == "assistant" then
+    ev.complete = true
+    ev.apiError = obj.isApiErrorMessage == true
+    for _, p in ipairs(type(c) == "table" and c or {}) do
+      if type(p) == "table" and p.type == "text" and type(p.text) == "string" and p.text:find("%S") then
+        ev.lastText = p.text; ev.textLen = ev.textLen + #p.text
+      elseif type(p) == "table" and p.type == "tool_use" then
+        local name, input = tostring(p.name or ""), type(p.input) == "table" and p.input or {}
+        if M.EDIT_TOOLS[name] then
+          local path = tostring(input.file_path or input.notebook_path or "")
+          if not path:find("/.claude/cc-notes/", 1, true) then
+            ev.edits = ev.edits + 1
+            if path ~= "" and not seenFile[path] then
+              seenFile[path] = true
+              if #ev.files < M.HANDOFF.files then ev.files[#ev.files + 1] = path
+              else ev.filesMore = ev.filesMore + 1 end
+            end
+            if path:match("TODO%.md$") then
+              local before, after = 0, 0
+              local pairs_ = (type(input.edits) == "table") and input.edits or { input }
+              for _, e in ipairs(pairs_) do
+                if type(e) == "table" then
+                  for _ in tostring(e.old_string or ""):gmatch("%- %[[xX]%]") do before = before + 1 end
+                  for _ in tostring(e.new_string or ""):gmatch("%- %[[xX]%]") do after = after + 1 end
                 end
-                if after > before then ev.todoDone = ev.todoDone + (after - before) end
               end
+              if after > before then ev.todoDone = ev.todoDone + (after - before) end
             end
-          elseif name == "Bash" then
-            local cmd = tostring(input.command or "")
-            if M.bashReadOnly(cmd) then ev.reads = ev.reads + 1
-            elseif M.bashIsTest(cmd) then ev.tests = ev.tests + 1
-            else ev.mutating = ev.mutating + 1 end
-            if M.bashCommits(cmd) and p.id then commits[p.id] = true end
-          elseif M.READ_TOOLS[name] then ev.reads = ev.reads + 1
-          elseif name == "AskUserQuestion" then ev.asked = true
-          elseif name == "ExitPlanMode" then ev.planPut = true
-          elseif name ~= "" then ev.other = ev.other + 1 end
-        end
-      end
-    elseif obj and obj.type == "user" then
-      for _, p in ipairs(type(c) == "table" and c or {}) do
-        if type(p) == "table" and p.type == "tool_result" then
-          if p.is_error == true then
-            ev.errors = ev.errors + 1
-            local body = p.content
-            if type(body) == "table" then
-              local t = {}
-              for _, q in ipairs(body) do if type(q) == "table" and type(q.text) == "string" then t[#t + 1] = q.text end end
-              body = table.concat(t, " ")
-            end
-            local low = tostring(body or ""):lower()
-            local said = tostring(body or ""):gsub("%s+", " "):gsub("^ ", ""):gsub(" $", "")
-            if said ~= "" then
-              ev.errorTexts[#ev.errorTexts + 1] = said:sub(1, M.HANDOFF.errorChars)
-              if #ev.errorTexts > M.HANDOFF.errors then table.remove(ev.errorTexts, 1) end
-            end
-            if low:find("denied", 1, true) or low:find("rejected", 1, true) or low:find("doesn't want to proceed", 1, true) then
-              ev.denials = ev.denials + 1; lastResult = "denied"
-            else
-              lastResult = "error"
-            end
-          else
-            lastResult = "ok"
-            if commits[p.tool_use_id] then ev.committed = true end
           end
+        elseif name == "Bash" then
+          local cmd = tostring(input.command or "")
+          if M.bashReadOnly(cmd) then ev.reads = ev.reads + 1
+          elseif M.bashIsTest(cmd) then ev.tests = ev.tests + 1
+          else ev.mutating = ev.mutating + 1 end
+          if M.bashCommits(cmd) and p.id then commits[p.id] = true end
+        elseif M.READ_TOOLS[name] then ev.reads = ev.reads + 1
+        elseif name == "AskUserQuestion" then ev.asked = true
+        elseif name == "ExitPlanMode" then ev.planPut = true
+        elseif name ~= "" then ev.other = ev.other + 1 end
+      end
+    end
+  elseif obj.type == "user" then
+    for _, p in ipairs(type(c) == "table" and c or {}) do
+      if type(p) == "table" and p.type == "tool_result" then
+        if p.is_error == true then
+          ev.errors = ev.errors + 1
+          local body = p.content
+          if type(body) == "table" then
+            local t = {}
+            for _, q in ipairs(body) do if type(q) == "table" and type(q.text) == "string" then t[#t + 1] = q.text end end
+            body = table.concat(t, " ")
+          end
+          local low = tostring(body or ""):lower()
+          local said = tostring(body or ""):gsub("%s+", " "):gsub("^ ", ""):gsub(" $", "")
+          if said ~= "" then
+            ev.errorTexts[#ev.errorTexts + 1] = said:sub(1, M.HANDOFF.errorChars)
+            if #ev.errorTexts > M.HANDOFF.errors then table.remove(ev.errorTexts, 1) end
+          end
+          if low:find("denied", 1, true) or low:find("rejected", 1, true) or low:find("doesn't want to proceed", 1, true) then
+            ev.denials = ev.denials + 1; st.lastResult = "denied"
+          else
+            st.lastResult = "error"
+          end
+        else
+          st.lastResult = "ok"
+          if commits[p.tool_use_id] then ev.committed = true end
         end
       end
     end
   end
-  ev.endedDenied = lastResult == "denied"
+end
+function M.turnEvidenceEnd(ev, st)
+  ev.endedDenied = type(st) == "table" and st.lastResult == "denied"
   ev.endsWithQuestion = type(ev.lastText) == "string" and ev.lastText:match("%?[%s%*_\"')]*$") ~= nil
   return ev
 end
@@ -9878,9 +9891,11 @@ end
 
 -- The card's words for a prompt: nil for Shepherd's own sends, a bare slash command, or wrapper
 -- text that is no prompt (a task notification); another session's message reads as its body, and
--- the prompt that starts a batch unit's tab names the unit ("unit feat/x"). Cut like an auto-title.
-function M.workingOnText(text)
+-- the prompt that starts a batch unit's tab names the unit ("unit feat/x"). Cut like an auto-title,
+-- at maxLen (default 48; a skill run's goal takes more, 2026-09-29).
+function M.workingOnText(text, maxLen)
   if type(text) ~= "string" then return nil end
+  maxLen = tonumber(maxLen) or 48
   local s = text:gsub("^%s+", "")
   if s:sub(1, #M.SHEPHERD_TAG) == M.SHEPHERD_TAG then return nil end
   s = s:gsub("^Another Claude session sent a message:%s*", "")
@@ -9892,11 +9907,11 @@ function M.workingOnText(text)
     s = s:gsub("^%s+", "")
   end
   local unit = s:match("^Start unit (%S+) in its own worktree: call EnterWorktree with name ")
-  if unit then return M.deriveAutoTitle("unit " .. unit, 48) end
+  if unit then return M.deriveAutoTitle("unit " .. unit, maxLen) end
   local wt = s:match("^Resume work in the worktree at (.-): call EnterWorktree with path ")
-  if wt then return M.deriveAutoTitle("resume " .. (wt:gsub("/+$", ""):match("([^/]+)$") or wt), 48) end
+  if wt then return M.deriveAutoTitle("resume " .. (wt:gsub("/+$", ""):match("([^/]+)$") or wt), maxLen) end
   if s:sub(1, 1) == "<" or s:match("^/[%w%-_:]+%s*$") then return nil end
-  return M.deriveAutoTitle(s, 48)
+  return M.deriveAutoTitle(s, maxLen)
 end
 
 -- The newest typed prompt in a transcript tail, as the card's words (core.workingOnText), or nil.
@@ -18807,6 +18822,9 @@ M.FEATURES = {
   { key = "timelost", cat = "See what's happening", new = true, title = "Where the time went",
     what = "⏱ Time in a session's detail panel, or in a card's Instances for the whole project, says in plain sentences where the time went: waiting on you (\"38m waiting on you, 12m of it on one approval\"), at usage limits, stalled, in errors and API retries -- plus how its turns ended, how much input came from the cache, what 5-minute and 1-hour cache writes cost, and what the subagents used. Waits, stalls and errors come from the audit ledger; the rest is read from the transcripts in the background.",
     why = "See what actually held your sessions up -- you, a limit, an outage or a stall -- and whether the cache and subagents are paying their way." },
+  { key = "skillruns", cat = "See what's happening", new = true, title = "How often each skill works",
+    what = "🔌 MCPs & Skills shows \"N runs · x% ok\" under each skill that ran in your sessions: every Skill call or /skill, with the prompt that started it and how its turn ended (done or made progress is ok; blocked, did nothing or interrupted isn't). Open the list to see each run and mark it ok or not ok yourself -- your label wins, and it's kept in ~/.claude/cc-skill-labels.json.",
+    why = "Know which skills actually get the job done before you reach for one again." },
 
   -- ---- Make it yours ----
   { key = "theme", cat = "Make it yours", new = true, title = "Visual theme editor",
@@ -18940,10 +18958,14 @@ function M.timeIndexBlank(sub)
     exits = { done = 0, interrupted = 0, error = 0, unfinished = 0 },
     retries = 0, retryEpisodes = 0, retrySeconds = 0, retryOpen = nil,
     compactions = 0, compactSeconds = 0, firstTs = nil, lastTs = nil,
-    usage = u, seen = M.usageSeen() }
+    usage = u, seen = M.usageSeen(),
+    -- 2026-09-29 (unit 35): its skill runs, newest last (core.skillStart), and those whose turn is
+    -- still going (skillOpen); the prompt that started the turn, decoded only when a run needs it
+    episodes = {}, skillOpen = nil, goal = nil, goalLine = nil }
 end
 
 local function tlCloseTurn(e, ts, exit)
+  if e.skillOpen then M.skillSettle(e, exit) end   -- 2026-09-29: the turn's skill runs get its label
   local start = e.turnOpen
   if not start then return end
   local d = math.max(0, (tonumber(ts) or start) - start)
@@ -19006,6 +19028,7 @@ local function tlRecord(e, line)
       e.usage.byModel[mk] = e.usage.byModel[mk] or tlUsage()
       tlAddUsage(e.usage.byModel[mk], u)
     end
+    M.skillAssistant(e, line, ts)   -- 2026-09-29 (unit 35): skill runs
     if e.sub then return end
     if line:find('"isApiErrorMessage":true', 1, true) then
       -- the retries ran out: Claude Code fired StopFailure. With no turn open it is still a turn
@@ -19021,6 +19044,7 @@ local function tlRecord(e, line)
   end
 
   if kind == "user" then
+    M.skillUser(e, line)   -- 2026-09-29 (unit 35): skill runs
     if e.sub then return end
     if line:find('"tool_use_id"', 1, true) or line:find('"isCompactSummary":true', 1, true) then
       if e.turnOpen then e.turnLast = ts end
@@ -19038,6 +19062,7 @@ local function tlRecord(e, line)
       -- last record; one that did nothing yet (only a meta record) just starts again here
       if e.turnOpen and e.turnActive then tlCloseTurn(e, e.turnLast or e.turnOpen, "unfinished") end
       e.turnOpen, e.turnLast, e.turnActive = ts, ts, nil
+      M.skillPrompt(e, line, ts)
     elseif e.turnOpen then
       e.turnLast = ts
     else
@@ -19428,6 +19453,259 @@ function M.timeLostSummary(input)
   v.callouts = M.timeLostCallouts(v)
   v.empty = #v.callouts == 0
   return v
+end
+
+-- ---- How often each skill works (2026-09-29, build program unit 35) ------------------------
+-- The time index (unit 34, M.timeIndexFold) turns every skill run it reads into an EPISODE: one
+-- per Skill tool_use, or per slash-skill prompt (Claude Code writes <command-message> first for a
+-- skill and <command-name> first for a built-in command like /compact). An episode is
+--   { id, skill, via = "tool"|"slash", goal, ts, lastTs, records, outcome, exit, sub }:
+--   * id     -- the tool_use's id, or the prompt record's uuid: stable across reads, so a hand label
+--               (Adam's, in ~/.claude/cc-skill-labels.json) finds its run again;
+--   * goal   -- the words of the prompt that started the turn (a slash-skill: what was typed after it);
+--   * span   -- ts (the invocation) to lastTs, over `records` assistant records carrying that
+--               attributionSkill (Claude Code stamps it on every record the skill produced);
+--   * outcome-- unit 9's turn label (M.turnOutcome) over what the turn did FROM the invocation on,
+--               set when the turn ends (exit = how: done / interrupted / error / unfinished); nil
+--               while it runs.
+-- A subagent's records inherit its parent's attributionSkill, so they never start a run; a skill a
+-- subagent invokes itself is one (sub = true), labelled at the subagent's final answer. Everything
+-- lives on the index entry, so it is folded incrementally with it; nothing is saved.
+M.SKILL_EPISODES_PER_FILE = 200   -- a transcript keeps its newest runs
+M.SKILL_GOAL_CHARS = 160
+M.SKILL_PROMPT_MAX = 262144       -- a prompt record longer than this is never decoded for its goal
+M.SKILL_RUNS_SHOWN = 30           -- rows in a skill's runs list (every run is still counted)
+M.SKILL_LABELS_FILE = "cc-skill-labels.json"
+M.SKILL_VERDICTS = { ok = true, ["not ok"] = true }
+-- The derived verdict per turn label. "needs follow-up" (it asked, or put up a plan) and "only
+-- planned" (it only looked) aren't judged either way; an interrupted run is not ok whatever it did.
+M.SKILL_OUTCOME_VERDICT = { done = "ok", ["made progress"] = "ok", blocked = "not ok", ["did nothing"] = "not ok" }
+
+do
+  local function decodeLine(line)
+    local ok, obj = pcall(function() return M.json.decode(line) end)
+    return (ok and type(obj) == "table") and obj or nil
+  end
+  local function promptText(obj)
+    local c = type(obj) == "table" and type(obj.message) == "table" and obj.message.content or nil
+    if type(c) == "string" then return c end
+    local parts = {}
+    for _, p in ipairs(type(c) == "table" and c or {}) do
+      if type(p) == "table" and p.type == "text" and type(p.text) == "string" then parts[#parts + 1] = p.text end
+    end
+    return #parts > 0 and table.concat(parts, "\n") or nil
+  end
+
+  -- A run's goal from its prompt's text: the card's words for it (M.workingOnText), longer, with
+  -- Shepherd's own [shepherd] tag dropped (a fed task is a goal too). nil for a task notification.
+  function M.skillGoalOf(text)
+    if type(text) ~= "string" then return nil end
+    local s = text:gsub("^%s+", "")
+    if s:sub(1, #M.SHEPHERD_TAG) == M.SHEPHERD_TAG then s = s:sub(#M.SHEPHERD_TAG + 1) end
+    return M.workingOnText(s, M.SKILL_GOAL_CHARS)
+  end
+
+  -- The goal of the turn in progress, decoded from its prompt only once a run asks for it.
+  local function goalNow(e)
+    if e.goalLine then
+      e.goal = M.skillGoalOf(promptText(decodeLine(e.goalLine)))
+      e.goalLine = nil
+    end
+    return e.goal
+  end
+
+  -- A run starts. It folds what the turn does from here on (M.turnEvidenceAdd) until the turn ends.
+  function M.skillStart(e, ep)
+    ep.lastTs, ep.records, ep.sub = ep.ts, 0, e.sub or nil
+    if ep.goal == nil then ep.goal = goalNow(e) end
+    ep.ev, ep.evSt = M.turnEvidenceNew(nil)
+    e.episodes = type(e.episodes) == "table" and e.episodes or {}
+    e.episodes[#e.episodes + 1] = ep
+    while #e.episodes > M.SKILL_EPISODES_PER_FILE do table.remove(e.episodes, 1) end
+    e.skillOpen = e.skillOpen or {}
+    e.skillOpen[#e.skillOpen + 1] = ep
+    return ep
+  end
+
+  -- The turn ended (M.timeIndexFold's tlCloseTurn): each run in it gets the label of what it did.
+  local function label(ep, exit)
+    ep.outcome = M.turnOutcome(M.turnEvidenceEnd(ep.ev, ep.evSt)) or "did nothing"
+    ep.exit = exit
+  end
+  function M.skillSettle(e, exit)
+    for _, ep in ipairs(e.skillOpen or {}) do
+      if ep.ev then label(ep, exit) end
+      ep.ev, ep.evSt = nil, nil
+    end
+    e.skillOpen = nil
+  end
+
+  -- One assistant record: what the open runs did (the record that invokes a run is not that run's),
+  -- a Skill tool_use starting one, the span of the skill it carries, a subagent's final answer.
+  -- Decoded only when a run is open or the record names the Skill tool.
+  function M.skillAssistant(e, line, ts)
+    local obj
+    if e.skillOpen then
+      obj = decodeLine(line) or false
+      if obj then
+        for _, ep in ipairs(e.skillOpen) do if ep.evSt then M.turnEvidenceAdd(ep.ev, ep.evSt, obj) end end
+      end
+    end
+    if line:find('"name":"Skill"', 1, true) then
+      if obj == nil then obj = decodeLine(line) or false end
+      local c = obj and type(obj.message) == "table" and obj.message.content or nil
+      for k, p in ipairs(type(c) == "table" and c or {}) do
+        if type(p) == "table" and p.type == "tool_use" and p.name == "Skill" and type(p.input) == "table" then
+          local name = type(p.input.skill) == "string" and p.input.skill:match("^%s*/?(.-)%s*$") or ""
+          if name ~= "" then
+            local id = type(p.id) == "string" and p.id or (tostring(obj.uuid or ts) .. "#" .. k)
+            M.skillStart(e, { id = id, skill = name, via = "tool", ts = ts })
+          end
+        end
+      end
+    end
+    local at = type(e.episodes) == "table" and #e.episodes > 0 and line:find('"attributionSkill":"', 1, true)
+    local skill = at and line:match('^"attributionSkill":"([^"\\]+)"', at)
+    if skill then
+      for i = #e.episodes, 1, -1 do
+        local ep = e.episodes[i]
+        if ep.skill == skill then
+          ep.records = ep.records + 1
+          if ts > ep.lastTs then ep.lastTs = ts end
+          break
+        end
+      end
+    end
+    -- a subagent has no Stop hook: its final answer labels its runs (again, if it is sent more work)
+    if e.sub and e.skillOpen and line:find('"stop_reason":"end_turn"', 1, true) then
+      for _, ep in ipairs(e.skillOpen) do label(ep, "done") end
+    end
+  end
+
+  -- One user record: a tool's result for the open runs; in a subagent, its task (the goal).
+  function M.skillUser(e, line)
+    if e.skillOpen and line:find('"tool_result"', 1, true) then
+      local obj = decodeLine(line)
+      if obj then
+        for _, ep in ipairs(e.skillOpen) do if ep.evSt then M.turnEvidenceAdd(ep.ev, ep.evSt, obj) end end
+      end
+    end
+    if e.sub and not line:find('"tool_use_id"', 1, true) and not line:find('"isMeta":true', 1, true) then
+      e.goal, e.goalLine = nil, (#line <= M.SKILL_PROMPT_MAX) and line or nil
+    end
+  end
+
+  -- A prompt that starts a turn: remember it for the goal; a slash-skill starts a run here. Runs
+  -- still open from a turn that never got going (no reply, no interrupt marker) end unfinished.
+  function M.skillPrompt(e, line, ts)
+    if e.skillOpen then M.skillSettle(e, "unfinished") end
+    e.goal, e.goalLine = nil, (#line <= M.SKILL_PROMPT_MAX) and line or nil
+    if not e.goalLine or not line:find("<command-message>", 1, true) then return end
+    local obj = decodeLine(line)
+    local text = promptText(obj)
+    local name = text and text:match("^%s*<command%-message>") and text:match("<command%-name>/([^<%s]+)</command%-name>")
+    if not name then return end
+    local args = (text:match("<command%-args>(.-)</command%-args>") or ""):gsub("^%s+", ""):gsub("%s+$", "")
+    e.goal = args ~= "" and M.deriveAutoTitle(args, M.SKILL_GOAL_CHARS) or ("/" .. name)
+    e.goalLine = nil
+    M.skillStart(e, { id = type(obj.uuid) == "string" and obj.uuid or ("slash#" .. tostring(ts)), skill = name, via = "slash", ts = ts })
+  end
+end
+
+-- The derived verdict of one run: "ok", "not ok", or nil (still running, or a label that is
+-- neither). Pure.
+function M.skillVerdict(ep)
+  if type(ep) ~= "table" or ep.outcome == nil then return nil end
+  if ep.exit == "interrupted" then return "not ok" end
+  return M.SKILL_OUTCOME_VERDICT[ep.outcome]
+end
+
+-- Per skill, over every run the sources hold: runs, ok, not ok, open (running or not judged),
+-- the ok-rate over the judged runs, the viewer's words, and the newest runs as rows. A hand label
+-- (labels[id].verdict) overrides the derived verdict; a run copied into two transcripts (a resumed
+-- session re-writes its history) counts once. sources = { { key, session, episodes } }. Pure.
+function M.skillOutcomes(sources, labels)
+  labels = type(labels) == "table" and labels or {}
+  local by, seen = {}, {}
+  for _, src in ipairs(type(sources) == "table" and sources or {}) do
+    local eps = type(src) == "table" and type(src.episodes) == "table" and src.episodes or {}
+    for _, ep in ipairs(eps) do
+      if type(ep) == "table" and type(ep.skill) == "string" and ep.skill ~= "" and not (ep.id and seen[ep.id]) then
+        if ep.id then seen[ep.id] = true end
+        local s = by[ep.skill]
+        if not s then
+          s = { skill = ep.skill, runs = 0, ok = 0, notOk = 0, open = 0, running = 0, labelled = 0, rows = {} }
+          by[ep.skill] = s
+        end
+        local derived = M.skillVerdict(ep)
+        local lab = ep.id and labels[ep.id]
+        local hand = type(lab) == "table" and M.SKILL_VERDICTS[lab.verdict] and lab.verdict or nil
+        local verdict = hand or derived
+        s.runs = s.runs + 1
+        if hand then s.labelled = s.labelled + 1 end
+        if verdict == "ok" then s.ok = s.ok + 1
+        elseif verdict == "not ok" then s.notOk = s.notOk + 1
+        else s.open = s.open + 1 end
+        if ep.outcome == nil then s.running = s.running + 1 end
+        local ts = tonumber(ep.ts) or 0
+        s.rows[#s.rows + 1] = { id = ep.id, skill = ep.skill, via = ep.via, goal = ep.goal, ts = ts,
+          seconds = math.max(0, (tonumber(ep.lastTs) or ts) - ts), records = tonumber(ep.records) or 0,
+          outcome = ep.outcome, exit = ep.exit, derived = derived, label = hand, verdict = verdict,
+          sub = ep.sub and true or nil, session = src.session, key = src.key }
+      end
+    end
+  end
+  local order = {}
+  for name, s in pairs(by) do
+    local judged = s.ok + s.notOk
+    s.rate = judged > 0 and math.floor(s.ok * 100 / judged + 0.5) or nil
+    local n = s.runs .. (s.runs == 1 and " run" or " runs")
+    if s.rate then s.text = n .. " · " .. s.rate .. "% ok"
+    elseif s.running == s.runs then s.text = n .. " · running"
+    else s.text = n .. " · not judged" end
+    table.sort(s.rows, function(a, b)
+      if a.ts ~= b.ts then return a.ts > b.ts end
+      return tostring(a.id) > tostring(b.id)
+    end)
+    while #s.rows > M.SKILL_RUNS_SHOWN do table.remove(s.rows) end
+    order[#order + 1] = name
+  end
+  table.sort(order, function(a, b)
+    if by[a].runs ~= by[b].runs then return by[a].runs > by[b].runs end
+    return a < b
+  end)
+  return { bySkill = by, order = order }
+end
+
+-- ~/.claude/cc-skill-labels.json -- Adam's hand labels: { v = 1, labels = { [run id] = { verdict =
+-- "ok"|"not ok", skill, ts } } }. It is his data: no session remover touches it, and uninstall
+-- removes it only with --purge. A run id is a tool_use id or a record uuid.
+function M.skillLabelIdOk(id)
+  return type(id) == "string" and #id >= 1 and #id <= 128 and id:match("^[%w_%-:.#]+$") ~= nil
+    and not id:find("..", 1, true)
+end
+function M.skillLabelsParse(text)
+  local st = { v = 1, labels = {} }
+  if type(text) ~= "string" or text == "" then return st end
+  local ok, t = pcall(function() return M.json.decode(text) end)
+  if not ok or type(t) ~= "table" or type(t.labels) ~= "table" then return st end
+  for id, l in pairs(t.labels) do
+    if M.skillLabelIdOk(id) and type(l) == "table" and M.SKILL_VERDICTS[l.verdict] then
+      st.labels[id] = { verdict = l.verdict, skill = type(l.skill) == "string" and l.skill or nil, ts = tonumber(l.ts) }
+    end
+  end
+  return st
+end
+-- Set (verdict "ok" / "not ok") or clear ("clear") one run's label. Returns true, or false and why.
+function M.skillLabelSet(st, id, verdict, skill, now)
+  if type(st) ~= "table" then return false, "state" end
+  if not M.skillLabelIdOk(id) then return false, "id" end
+  st.labels = type(st.labels) == "table" and st.labels or {}
+  if verdict == "clear" then st.labels[id] = nil; return true end
+  if not M.SKILL_VERDICTS[verdict] then return false, "verdict" end
+  st.labels[id] = { verdict = verdict, skill = (type(skill) == "string" and skill ~= "") and skill:sub(1, 128) or nil,
+                    ts = tonumber(now) }
+  return true
 end
 
 return M

@@ -4667,5 +4667,32 @@ do
   check("audit: a My List row shows the finding chip", src:find("var h = wlAuditChip(it) + wlBranchChip(it);", 1, true) ~= nil)
 end
 
+-- ---- how often each skill works (2026-09-29) ----
+-- Build program unit 35: the 🔌 viewer's skill runs come from the time index's background pass
+-- (never the tick), are re-pushed only while the viewer is open, and Adam's labels go through one
+-- handler that writes them atomically. Every run field through esc().
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("skills: the viewer's payload carries the runs", src:find("runs = FX.skillRunsPayload(),", 1, true) ~= nil)
+  check("skills: opening the viewer marks it open and asks the index for a pass",
+        src:find("FX._skillsView = true\n    pcall(FX.refreshTimeIndex, true)", 1, true) ~= nil)
+  check("skills: closing it tells Lua", src:find('send("close-mcpskills-view"); }', 1, true) ~= nil
+        and src:find('if a == "close-mcpskills-view" then FX._skillsView = nil; return end', 1, true) ~= nil)
+  check("skills: an index pass re-pushes the runs only while the viewer is open",
+        src:find("if FX._skillsView then pcall(FX.pushSkillRuns) end", 1, true) ~= nil)
+  check("skills: a label click goes through FX.labelSkillRun, then re-pushes",
+        src:find('if FX.labelSkillRun(tostring(payload.v or ""), tostring(payload.text or "")) then pcall(FX.pushSkillRuns) end', 1, true) ~= nil)
+  check("skills: the labels file is written atomically",
+        src:find("FX.writeFileAtomic(FX.SKILL_LABELS_PATH, hs.json.encode(st))", 1, true) ~= nil)
+  check("skills: a run's goal and meta go through esc()",
+        src:find([[esc(x.goal || "(no prompt)")]], 1, true) ~= nil and src:find([[esc(meta.join(" · "))]], 1, true) ~= nil)
+  check("skills: a label button carries the run's id escaped", src:find([['" data-id="' + esc(x.id) + '"]], 1, true) ~= nil)
+  local tickBody = src:match("\nfunction FX%._refreshBody%(%)(.-)\nend\n") or ""
+  check("skills: the tick never reads skill runs", #tickBody > 1000 and tickBody:find("skillRuns", 1, true) == nil
+        and tickBody:find("skillOutcomes", 1, true) == nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

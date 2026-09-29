@@ -454,6 +454,15 @@ echo ""
 echo "== node: the 🔍 Audit chip posts only the preset and folder; a finding's chip on My List, escaped (behavioral, runs the shipped auditSpawn / wlAuditChip) =="
 node "$DIR/audit-findings-view.test.js" || fail=1
 echo ""
+echo "== lua: how often each skill works -- skill runs folded by the time index from literal transcripts (Skill tool_use, slash-skill, nested, subagent, still running), incrementally; the ok-rate with and without hand labels; the labels file =="
+lua "$DIR/skill-outcomes.test.lua" || fail=1
+echo ""
+echo "== lua: skill runs wired -- the index's background pass, the 🔌 payload, re-pushed only while the viewer is open, a label written atomically, the session remover leaving the labels (stubbed hs) =="
+HOME="$(mktemp -d)" lua "$DIR/skill-runs.test.lua" || fail=1
+echo ""
+echo "== node: the 🔌 viewer's runs chip and list, labelled by a click, every session word escaped (behavioral, runs the shipped mkRunsHtml/mkRunRow) =="
+node "$DIR/skill-runs-view.test.js" || fail=1
+echo ""
 
 if [ "$fail" -eq 0 ]; then
   echo "✅ ALL GREEN"

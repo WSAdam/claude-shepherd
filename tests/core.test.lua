@@ -8460,8 +8460,10 @@ do
   -- 2026-09-29: 34 -> 35 for cross-repo tickets ("tickets", flagged new).
   -- 2026-09-29: 35 -> 36 for On purpose, a repo's DECISIONS.md ("onpurpose", flagged new).
   -- 2026-09-29: 36 -> 37 for the find-only audit preset ("audit", flagged new).
-  eq("FEATURES: the 37 new features are flagged", newCount, 37)
+  -- 2026-09-29: 37 -> 38 for how often each skill works ("skillruns", flagged new).
+  eq("FEATURES: the 38 new features are flagged", newCount, 38)
   check("FEATURES: lists the find-only audit preset", keys.audit == true)
+  check("FEATURES: lists how often each skill works", keys.skillruns == true)
   check("FEATURES: lists requirement ids and merge receipts", keys.reqs == true)
   check("FEATURES: lists cross-repo tickets", keys.tickets == true)
   check("FEATURES: lists On purpose", keys.onpurpose == true)

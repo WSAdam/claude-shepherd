@@ -36,6 +36,7 @@ mkdir -p "$C/cc-send"; printf '{"nonce":"ab"}' > "$C/cc-send/shell.1790000000-1.
 printf '{"v":1,"repos":{}}' > "$C/cc-reqs.json"
 mkdir -p "$C/cc-tickets"; printf '{"v":1,"id":"t1790000000-1"}' > "$C/cc-tickets/t1790000000-1.json"
 mkdir -p "$C/cc-audit/-r"; printf -- '- [ ] [LOW] AUD-001 x\n' > "$C/cc-audit/-r/AUDIT-FINDINGS.md"
+printf '{"v":1,"labels":{"toolu_a":{"verdict":"ok"}}}' > "$C/cc-skill-labels.json"
 FAKE="$TMP/code"
 printf '#!/bin/sh\necho "$*" >> "%s"\nexit 0\n' "$TMP/code.calls" > "$FAKE"; chmod +x "$FAKE"
 
@@ -75,6 +76,8 @@ assert_eq "uninstalls the VS Code tab bridge" "1" \
   "$(grep -c -- '--uninstall-extension local.shepherd-bridge' "$TMP/code.calls" 2>/dev/null || true)"
 assert_eq "without --purge, Shepherd's settings are kept" "there" "$([ -e "$C/cc-config.json" ] && echo there || echo gone)"
 assert_eq "without --purge, Shepherd's state is kept" "there" "$([ -e "$C/cc-status/abc.json" ] && echo there || echo gone)"
+# 2026-09-29: Adam's skill-run labels (cc-skill-labels.json) are his data: only --purge takes them
+assert_eq "without --purge, your skill-run labels are kept" "there" "$([ -e "$C/cc-skill-labels.json" ] && echo there || echo gone)"
 
 before="$(cat "$C/settings.json" "$C/CLAUDE.md" "$H/init.lua")"
 run_uninstall
@@ -107,6 +110,8 @@ assert_eq "--purge removes the minted requirement ids" "gone" "$([ -e "$C/cc-req
 assert_eq "--purge removes the cross-repo tickets" "gone" "$([ -e "$C/cc-tickets" ] && echo there || echo gone)"
 # 2026-09-29: the find-only audits' findings, settings and MCP configs (cc-audit/) too
 assert_eq "--purge removes the find-only audits" "gone" "$([ -e "$C/cc-audit" ] && echo there || echo gone)"
+# 2026-09-29: and the skill-run labels (cc-skill-labels.json)
+assert_eq "--purge removes the skill-run labels" "gone" "$([ -e "$C/cc-skill-labels.json" ] && echo there || echo gone)"
 assert_eq "--purge still keeps the user's own files" "there" "$([ -e "$C/cc-mine.sh" ] && echo there || echo gone)"
 
 # a CLAUDE.md that is only the block (a fresh machine) is removed, not left empty

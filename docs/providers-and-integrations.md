@@ -140,6 +140,32 @@ from the agent-profile registry above:
 
 It is read-only: Shepherd never edits your MCP config, skills or tools.
 
+### How often each skill works
+
+Under each skill that has run, the viewer shows **N runs · x% ok**. A run is one Skill tool call or
+one `/skill` typed as a prompt (built-in commands like `/compact` or `/model` are not runs). They are
+read from the transcripts of the sessions on the panel, their subagents included, by the same
+background pass as [Where the time went](usage-and-cost.md#where-the-time-went): never on the refresh
+tick, and nothing at all while `timeLost.enabled` is off.
+
+For each run Shepherd keeps:
+
+- **the goal**: the prompt that started the turn (for a `/skill`, what you typed after it);
+- **the span**: from the call to the last record Claude Code stamped with that skill;
+- **the outcome**: [how the turn ended](fleet.md#statuses), counting only what it did from
+  the call on. A run still going has no outcome yet.
+
+**done** and **made progress** count as ok; **blocked**, **did nothing** and an interrupted turn
+count as not ok. **needs follow-up**, **only planned** and a run still going aren't counted either
+way, so the rate is over the runs that were judged. A skill a subagent calls itself is a run, labelled
+when the subagent answers; a subagent's work under its parent's skill belongs to the parent's run.
+
+Click the chip to list a skill's newest 30 runs: when each ran, what it did, how long it took and in
+which session. **ok** and **not ok** label a run yourself (click your label again to clear it). Your
+label always wins over the derived one. Labels are kept in `~/.claude/cc-skill-labels.json`: your data,
+which no session clean-up touches and `uninstall.sh` removes only with `--purge`. Skills that ran but
+have no card here (a plugin's) are listed under **Skills · other runs**.
+
 ## Remote Control (claude.ai and mobile)
 
 Claude Code's own **Remote Control** lets you drive a *local* session from claude.ai or the Claude

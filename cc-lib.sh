@@ -610,6 +610,8 @@ cc_decide_prune() {
 # drops that session's, and any past CC_SEND_KEEP_SECONDS.
 # cc-tickets/ (2026-09-29) is keyed by ticket: cc_ticket_release frees the ones this session held
 # (the ones it filed stay for its next start), cc_ticket_prune drops old and stale files.
+# cc-skill-labels.json (2026-09-29) is Adam's hand labels on skill runs, not a session's state:
+# neither remover touches it (tests/lib.test.sh, tests/skill-runs.test.lua).
 # KEEP THE FILE SET IN SYNC with FX.removeStatus in claude-dashboard.lua.
 cc_remove() {
   rm -f "$(cc_file "$1")" "$(cc_file "$1")".tmp.* "$(cc_decision_file "$1")" \

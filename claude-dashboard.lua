@@ -3945,6 +3945,8 @@ end
 -- never fires for, so deleting only <key>.json strands the per-key siblings forever
 -- (keys are unique UUIDs; nothing ever matches them again, and the dirs grow without
 -- bound across /clear churn). KEEP the file set IN SYNC with cc_remove.
+-- Never ~/.claude/cc-skill-labels.json: Adam's hand labels on skill runs (2026-09-29) outlive every
+-- session (cc_remove leaves it too).
 function FX.removeStatus(key)
   local home = os.getenv("HOME") or ""
   os.remove(STATUS_DIR .. "/" .. key .. ".json")
@@ -8691,6 +8693,7 @@ function FX.refreshTimeIndex(force, list)
         print("❌ [cc-dashboard] time index: the read exited " .. tostring(code) .. " after " .. ms .. "ms; keeping the last index")
       end
       if FX._timeView then pcall(FX.pushTimeLost) end
+      if FX._skillsView then pcall(FX.pushSkillRuns) end   -- 2026-09-29: the 🔌 viewer's skill runs
       -- left behind by a byte cap: the next pass, soon (retained, or GC can eat it)
       if st.behind then FX._timeIndexChain = hs.timer.doAfter(2, function() pcall(FX.refreshTimeIndex) end) end
     end, { "-c", cmd })
@@ -8747,6 +8750,68 @@ function FX.pushTimeLost(list)
   local payload = { kind = tv.kind, name = name, sessions = #members, days = days, ledger = on,
     indexing = (st.inflight ~= nil or st.behind) and true or false, view = view }
   pcall(function() wv:evaluateJavaScript("window.ccTimeLost(" .. hs.json.encode(payload) .. ")") end)
+end
+
+-- ---- How often each skill works (2026-09-29, build program unit 35) ----------------------------
+-- The index's entries carry each transcript's skill runs (core.skillStart and friends, folded in the
+-- same background pass -- never the tick); core.skillOutcomes counts them per skill, Adam's hand
+-- labels (~/.claude/cc-skill-labels.json) overriding. The 🔌 viewer gets them in its payload, and
+-- again (window.ccSkillRuns) when a label changes or a pass lands while it is open (FX._skillsView).
+-- The labels file is Adam's data: no session remover touches it; uninstall removes it only with
+-- --purge. State on FX: the main chunk is at Lua's 200-local cap.
+FX.SKILL_LABELS_PATH = CLAUDE_DIR .. "/" .. core.SKILL_LABELS_FILE
+function FX.readSkillLabels() return core.skillLabelsParse(FX.readFile(FX.SKILL_LABELS_PATH)) end
+
+-- Every skill's runs in the live sessions' transcripts, each named for its session. list: the
+-- cards (default: the last tick's).
+function FX.skillRunsPayload(list)
+  local names = {}
+  for _, it in ipairs(list or lastRenderList or {}) do
+    if it.key then names[it.key] = it.label or it.autoTitle or it.name end
+  end
+  local st = FX._timeIndex
+  local sources = {}
+  for key, paths in pairs(st.bySession or {}) do
+    for _, path in ipairs(paths) do
+      local e = st.entries[path]
+      if e and type(e.episodes) == "table" and #e.episodes > 0 then
+        sources[#sources + 1] = { key = key, session = names[key] or key, episodes = e.episodes }
+      end
+    end
+  end
+  -- a run copied into a resumed session's transcript counts once: always under the same session
+  table.sort(sources, function(a, b) return tostring(a.key) < tostring(b.key) end)
+  local out = core.skillOutcomes(sources, FX.readSkillLabels().labels)
+  out.enabled = core.config(loadConfig(), "timeLost.enabled", true) ~= false
+  out.indexing = (st.inflight ~= nil or st.behind) and true or false
+  return out
+end
+function FX.pushSkillRuns()
+  local p = FX.skillRunsPayload()
+  pcall(function() wv:evaluateJavaScript("window.ccSkillRuns(" .. hs.json.encode(p) .. ")") end)
+end
+
+-- Adam's label on one run: "ok", "not ok" or "clear". Re-read, set (core.skillLabelSet refuses a
+-- bad id or verdict), written atomically. true when written.
+function FX.labelSkillRun(id, verdict)
+  local st = FX.readSkillLabels()
+  local skill   -- kept with the label: it outlives the transcript the run came from
+  for _, e in pairs(FX._timeIndex.entries) do
+    for _, ep in ipairs(type(e.episodes) == "table" and e.episodes or {}) do
+      if ep.id == id then skill = ep.skill end
+    end
+  end
+  local ok, why = core.skillLabelSet(st, id, verdict, skill, FX.now())
+  if not ok then
+    print("⚠️ [cc-dashboard] skill label refused (" .. tostring(why) .. ")")
+    return false
+  end
+  if not FX.writeFileAtomic(FX.SKILL_LABELS_PATH, hs.json.encode(st)) then
+    print("❌ [cc-dashboard] skill label: couldn't write " .. FX.SKILL_LABELS_PATH)
+    return false
+  end
+  print("✅ [cc-dashboard] skill run " .. id .. (verdict == "clear" and " unlabelled" or (" labelled " .. verdict)))
+  return true
 end
 
 -- The open Instances view (FX._instancesView = {stackKey,...}): its members (visible and
@@ -9285,6 +9350,7 @@ function FX.mcpSkillsPayload()
     mcp = core.mergeMcpStatus(FX.readInstalledMcp(), FX.mcpView.live),
     skills = { user = user, builtin = core.builtinSkillCards() },
     tools = FX.cliToolStatus(),
+    runs = FX.skillRunsPayload(),   -- 2026-09-29: how often each skill works
     builtinVersion = core.BUILTIN_SKILLS_VERSION,
     live = (FX.mcpView.live ~= nil),
   }
@@ -10778,6 +10844,15 @@ local function handleBridgeMsg(msg)
     pcall(function()
       wv:evaluateJavaScript("window.ccMcpSkills(" .. hs.json.encode(FX.mcpSkillsPayload()) .. ")")
     end)
+    -- 2026-09-29: skill runs -- read what changed now; the pass re-pushes them while the viewer is open
+    FX._skillsView = true
+    pcall(FX.refreshTimeIndex, true)
+    return
+  end
+  if a == "close-mcpskills-view" then FX._skillsView = nil; return end
+  -- Adam labels a skill run ok / not ok, or clears it (v = the run's id, text = the verdict)
+  if a == "skill-label" then
+    if FX.labelSkillRun(tostring(payload.v or ""), tostring(payload.text or "")) then pcall(FX.pushSkillRuns) end
     return
   end
   if a == "recheck-mcpskills" then
@@ -13596,6 +13671,22 @@ local HTML = [[
 .mk-st.needs-auth, .mk-st.pending{ background:#3a2f12; color:var(--warn); }
 .mk-st.unknown{ background:var(--border-weak); color:var(--muted); }
 .mk-empty{ color:var(--dim); padding:6px 8px; }
+/* 2026-09-29 (unit 35): a skill's runs -- the "N runs · x% ok" toggle and its runs list */
+.mk-runs{ margin-top:4px; }
+.mk-runs-chip{ font-size:10px; padding:1px 7px; border-radius:10px; border:1px solid var(--border-weak); background:transparent; color:var(--accent-text); cursor:pointer; }
+.mk-runs-chip.open{ background:var(--border-weak); }
+.mk-runlist{ margin-top:4px; border-left:2px solid var(--border-weak); padding-left:6px; }
+.mk-run{ display:flex; align-items:flex-start; gap:6px; padding:3px 0; }
+.mk-run-v{ width:12px; flex-shrink:0; text-align:center; color:var(--dim); }
+.mk-run.ok .mk-run-v{ color:var(--ok); }
+.mk-run.bad .mk-run-v{ color:var(--danger); }
+.mk-run-main{ min-width:0; flex:1; }
+.mk-run-goal{ color:var(--text-2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.mk-run-meta{ color:var(--muted); font-size:10px; }
+.mk-run-acts{ display:flex; gap:3px; flex-shrink:0; }
+.mk-lbl{ font-size:10px; padding:0 6px; border-radius:8px; border:1px solid var(--border-weak); background:transparent; color:var(--text-3); cursor:pointer; }
+.mk-lbl.on{ background:var(--border-weak); color:var(--text); font-weight:600; }
+.mk-run-more{ color:var(--dim); font-size:10px; padding:2px 0; }
 /* L7 routine board overlay (modeled on #audit). Edits cc-schedules.json. */
 #routines{ position:fixed; inset:0; background:var(--bg-overlay); z-index:11; display:none; flex-direction:column; font-size:12px; }
 #routines.show{ display:flex; }
@@ -19556,18 +19647,81 @@ local HTML = [[
 
     // 🔌 MCPs & Skills viewer. Open renders instantly from config files (+ last
     // live status); Re-check runs `claude mcp list` for connectors + health.
+    // 2026-09-29 (unit 35): MK_LAST is the last payload, re-rendered when window.ccSkillRuns
+    // brings new skill runs; MK_OPEN = the skills whose runs list is open.
+    var MK_LAST = null; var MK_OPEN = {};
     function openMcpSkills(){ send("open-mcpskills-view"); }
-    function closeMcpSkills(){ document.getElementById("mcpskills").classList.remove("show"); }
+    function closeMcpSkills(){ document.getElementById("mcpskills").classList.remove("show"); send("close-mcpskills-view"); }
     function recheckMcps(){
       var info = document.getElementById("mk-info");
       if(info) info.textContent = "Checking servers… (claude mcp list)";
       send("recheck-mcpskills");
     }
+    // How often each skill works (2026-09-29, build program unit 35): core.skillOutcomes' summary
+    // for one skill, or null. Skill names are a session's words: never looked up on the prototype.
+    function mkRunsOf(name){
+      var r = MK_LAST && MK_LAST.runs;
+      var by = r && r.bySkill;
+      if(!by || typeof by !== "object" || !name || !Object.prototype.hasOwnProperty.call(by, name)) return null;
+      return by[name] || null;
+    }
+    // One run: its verdict mark, its goal, when / what it did / how long / where, and Adam's
+    // ok / not ok -- a click on the label already set clears it. Every field through esc().
+    function mkRunRow(x, now){
+      x = x || {};
+      var v = x.verdict === "ok" ? "ok" : (x.verdict === "not ok" ? "bad" : "open");
+      var mark = v === "ok" ? "✓" : (v === "bad" ? "✗" : (x.outcome ? "–" : "…"));
+      var what = x.outcome ? String(x.outcome) : "running";
+      if(x.exit === "interrupted") what += ", interrupted";
+      var meta = [commitAgo(x.ts, now), what];
+      if(+x.seconds > 0) meta.push(tlvDur(x.seconds));
+      if(x.session) meta.push(String(x.session));
+      if(x.sub) meta.push("in a subagent");
+      function btn(val){
+        var on = x.label === val;
+        return '<button class="mk-lbl' + (on ? ' on' : '') + '" data-id="' + esc(x.id) + '" data-v="' + (on ? 'clear' : val)
+          + '" title="' + (on ? 'Clear your label' : 'Label this run ' + val) + '" onclick="mkLabel(this)">' + val + '</button>';
+      }
+      return '<div class="mk-run ' + v + '"><span class="mk-run-v">' + mark + '</span>'
+        + '<div class="mk-run-main"><div class="mk-run-goal">' + esc(x.goal || "(no prompt)") + '</div>'
+        + '<div class="mk-run-meta">' + esc(meta.join(" · ")) + (x.label ? ' · your label' : '') + '</div></div>'
+        + '<span class="mk-run-acts">' + btn("ok") + btn("not ok") + '</span></div>';
+    }
+    // A skill's "N runs · x% ok" as a toggle, and while open its newest runs.
+    function mkRunsHtml(name){
+      var r = mkRunsOf(name);
+      if(!r) return "";
+      var open = MK_OPEN[name] === true;
+      var h = '<div class="mk-runs"><button class="mk-runs-chip' + (open ? ' open' : '') + '" data-skill="' + esc(name)
+        + '" onclick="mkToggleRuns(this)">' + (open ? "▾ " : "▸ ") + esc(r.text || "")
+        + ((+r.labelled > 0) ? ' · ' + (+r.labelled) + ' labelled' : '') + '</button>';
+      if(open){
+        var rows = Array.isArray(r.rows) ? r.rows : [];
+        var now = Date.now() / 1000;
+        h += '<div class="mk-runlist">';
+        rows.forEach(function(x){ h += mkRunRow(x, now); });
+        var more = (+r.runs || 0) - rows.length;
+        if(more > 0) h += '<div class="mk-run-more">and ' + more + ' older run' + (more === 1 ? '' : 's') + '</div>';
+        h += '</div>';
+      }
+      return h + '</div>';
+    }
+    function mkToggleRuns(b){
+      var n = b && b.getAttribute("data-skill");
+      if(!n) return;
+      MK_OPEN[n] = MK_OPEN[n] !== true;
+      mkRender();
+    }
+    function mkLabel(b){
+      var id = b && b.getAttribute("data-id"), v = b && b.getAttribute("data-v");
+      if(!id || !v) return;
+      send("skill-label", id, v);
+    }
     function mkSkillRow(s){
       var cmd = s.command ? '<span class="mk-cmd">'+esc(s.command)+'</span>' : "";
       var nm = esc(s.display_title || s.name || "?");
       var desc = s.description ? '<div class="mk-desc">'+esc(s.description)+'</div>' : "";
-      return '<div class="mk-row"><div class="mk-main"><div class="mk-name">'+nm+cmd+'</div>'+desc+'</div></div>';
+      return '<div class="mk-row"><div class="mk-main"><div class="mk-name">'+nm+cmd+'</div>'+desc+mkRunsHtml(s.name)+'</div></div>';
     }
     // A CLI-tool row: installed -> green chip + resolved path; missing -> grey chip
     // (red for the one required tool) + the POSIX fallback it degrades to. esc() on
@@ -19593,8 +19747,10 @@ local HTML = [[
         + '<span class="mk-st '+st+'">'+stLabel+'</span>'
         + '</div></div>';
     }
-    window.ccMcpSkills = function(d){
-      d = d || {};
+    // The viewer's body from the last payload (MK_LAST): re-run by a new skill-runs push and by
+    // opening or closing a skill's runs list.
+    function mkRender(){
+      var d = MK_LAST || {};
       var mcp = Array.isArray(d.mcp) ? d.mcp : [];
       var sk = d.skills || {};
       var userSk = Array.isArray(sk.user) ? sk.user : [];
@@ -19621,12 +19777,31 @@ local HTML = [[
       else { userSk.forEach(function(s){ html += mkSkillRow(s); }); }
       html += '<div class="mk-sec">Skills · built-in <span class="mk-count">'+builtinSk.length+'</span></div>';
       builtinSk.forEach(function(s){ html += mkSkillRow(s); });
+      // 2026-09-29 (unit 35): skills that ran with no card here (a plugin's), and where runs come from
+      var runs = d.runs || {};
+      var carded = {};
+      userSk.concat(builtinSk).forEach(function(s){ if(s && s.name) carded[s.name] = true; });
+      var other = (Array.isArray(runs.order) ? runs.order : []).filter(function(n){
+        return !Object.prototype.hasOwnProperty.call(carded, n) && mkRunsOf(n) !== null;
+      });
+      if(other.length){
+        html += '<div class="mk-sec">Skills · other runs <span class="mk-count">'+other.length+'</span></div>';
+        other.forEach(function(n){ html += mkSkillRow({ name: n }); });
+      }
+      if(runs.enabled === false){
+        html += '<div class="mk-empty">Skill runs are read from the sessions\' transcripts by the time index, which is off (timeLost.enabled).</div>';
+      }
       var tools = Array.isArray(d.tools) ? d.tools : [];
       if(tools.length){
         html += '<div class="mk-sec">CLI tools <span class="mk-count">'+tools.length+'</span></div>';
         tools.forEach(function(t){ html += mkToolRow(t); });
       }
       document.getElementById("mk-body").innerHTML = html;
+    }
+    window.ccMcpSkills = function(d){
+      d = d || {};
+      MK_LAST = d;
+      mkRender();
 
       var info = document.getElementById("mk-info");
       if(info){
@@ -19635,9 +19810,17 @@ local HTML = [[
         else if(d.live){ msg = "live health checked"; }
         else { msg = "from config — click Re-check for live status + connectors"; }
         if(d.builtinVersion) msg += " · built-ins @ " + d.builtinVersion;
+        if(d.runs && d.runs.indexing) msg += " · still reading transcripts for skill runs…";
         info.textContent = msg;
       }
       document.getElementById("mcpskills").classList.add("show");
+    };
+    // New skill runs (a label changed, or an index pass landed) while the viewer is open.
+    window.ccSkillRuns = function(r){
+      var ov = document.getElementById("mcpskills");
+      if(!MK_LAST || !ov || !ov.classList.contains("show")) return;
+      MK_LAST.runs = r || {};
+      mkRender();
     };
 
     // ---- L7 routine board (⏰): edit cc-schedules.json without hand-editing ----
