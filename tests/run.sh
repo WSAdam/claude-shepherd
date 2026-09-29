@@ -308,6 +308,12 @@ echo ""
 echo "== node: a card stopped by a usage limit says when it resumes, with Cancel and Resume now (behavioral, runs the shipped resumeTail) =="
 node "$DIR/resume-card.test.js" || fail=1
 echo ""
+echo "== lua: automation dry run and trace -- every automatic effect through one door, a dry run acts on nothing (behavioral, stubbed hs + FX recorder) =="
+HOME="$(mktemp -d)" lua "$DIR/automation-trace.test.lua" || fail=1
+echo ""
+echo "== node: the Automation trace's rows -- acted / would / refused, ×N, every field escaped -- and Settings' dry-run switches (behavioral, runs the shipped JS) =="
+node "$DIR/trace-view.test.js" || fail=1
+echo ""
 
 if [ "$fail" -eq 0 ]; then
   echo "✅ ALL GREEN"

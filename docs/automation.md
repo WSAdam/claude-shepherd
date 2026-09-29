@@ -43,12 +43,46 @@ always refused.
 
 Your own clicks (Nudge, Feed next, Continue and the rest) aren't gated: when you act, it types.
 
+## Dry run and the automation trace
+
+Every automatic action goes through one door, so you can see what automation would do before you
+let it, and what it did while you were away. Your own clicks never go through it.
+
+- **What counts.** Auto-continue, auto-feed, project routing, a rule firing (log, relabel, feed,
+  nudge, continue), auto-respawn, the post-run self-summary, resuming at the limit reset (arming the
+  hook, its typed line, its phone push), ending a tab-less leftover, a mailbox message (leaving it,
+  and typing it into an idle session), and the startup `/rc` sweep.
+- **Dry run.** ⚙ Settings → Automation → **Dry run** switches it on for all automation
+  (`automation.dryRun`) or for one feature at a time (`autoContinue.dryRun`, `queue.dryRun` for
+  auto-feed and routing, `rules.dryRun`, `respawn.dryRun`, `summary.dryRun`, `resume.dryRun`,
+  `tabless.dryRun`, `mailbox.dryRun`, `remoteControl.dryRun`). In a dry run Shepherd records what it
+  would have done and does nothing: nothing typed, no task taken off a queue, nothing launched or
+  ended, no message left, and a resume is planned as *skip* so the hook stops without waking the
+  session. A typed action still waits until the session [can take it](#when-automation-types)
+  first, so what's recorded is what would really have been typed; a refusal is still a refusal.
+  A Settings Save keeps these switches; a fresh install has them off.
+- **The trace.** ☰ → **⚡ Automation trace** lists every decision fleet-wide, newest first; the
+  detail panel's **⚡ Trace** opens it for that session (the menu at the bottom switches sessions).
+  Each row says when, **acted**, **would** (a dry run) or **refused** with why (`working`, `tool`,
+  `no window match`, `not delivered`…), which automation, which session and what it does. The
+  same decision repeated by the same automation on the same session collapses into one row with
+  **×N** and the time it started; a different decision in between starts a new row. The trace keeps
+  the last 500 distinct decisions since Hammerspoon loaded.
+- **Ledger.** With the audit ledger on, each new row is also written once: `would_<kind>`
+  (`would_continue`, `would_feed`, `would_route`, `would_rule`, `would_respawn`, `would_summary`,
+  `would_resume`, `would_tabless_end`, `would_mailbox`, `would_rc`) for a dry run, `automation`
+  with `outcome` `acted` or `refused` (and `reason`) otherwise. Repeats bump the trace's count and
+  aren't written again.
+
+Outside a dry run nothing changes: each action does exactly what it did before, with the same
+readiness and shared-window refusals.
+
 ## Task queue
 
 Each session has a queue. **Queue** in the detail panel adds the input; **Feed next** sends the
 front task; the tile shows `+N queued`. Turn on `queue.autofeed` and Shepherd feeds the next task
 each time the session finishes, so a session works through a backlog unattended
-(`queue.dryRun` logs instead of sending).
+(`queue.dryRun` records what it [would feed](#dry-run-and-the-automation-trace) instead of sending).
 
 - **Delivery-safe**: a task leaves the queue only when the paste actually reached the session's
   window. No window match and it stays queued, and the ledger records `task_feed_skipped`.

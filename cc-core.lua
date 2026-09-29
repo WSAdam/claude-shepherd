@@ -4371,6 +4371,18 @@ local NARRATE = {
   rewind_open   = { "↶", "opened the rewind picker" },
   mode_skipped  = { "🎚", "mode NOT changed (no window)" },
   usage_limit   = { "🪫", "approaching plan limit" },
+  -- 2026-09-29: FX.automationAct's trace (acted / refused), and what a dry run held back
+  automation    = { "🤖", "automation" },
+  would_continue = { "🧪", "would auto-continue" },
+  would_feed    = { "🧪", "would feed a task" },
+  would_route   = { "🧪", "would route a task" },
+  would_rule    = { "🧪", "would fire a rule" },
+  would_respawn = { "🧪", "would respawn" },
+  would_summary = { "🧪", "would ask for a summary" },
+  would_resume  = { "🧪", "would resume at the reset" },
+  would_tabless_end = { "🧪", "would end a tab-less leftover" },
+  would_mailbox = { "🧪", "would leave a message" },
+  would_rc      = { "🧪", "would type /rc" },
 }
 -- R3-10: expose NARRATE so the dashboard can inject it as data (__NARRATE__) and the JS
 -- evDesc twin derives BOTH its emoji and verb label from this single source -- otherwise
@@ -8302,9 +8314,20 @@ M.SETTINGS_KEEP_SUBKEYS = {
   ask = { "waitSeconds", "_comment" },
   -- 2026-09-28: the form rebuilds autoContinue from enabled/delaySeconds/maxAttempts; the
   -- back-off (startSeconds/maxSeconds) has no input.
-  autoContinue = { "backoff" },
+  -- dryRun (2026-09-29): Settings sends the dry-run switches apart (core.applyDryRunFlags), so every
+  -- block the form rebuilds keeps its own; the rest are listed in case the form ever sends them.
+  autoContinue = { "backoff", "dryRun" },
   -- 2026-09-29: the form doesn't send `merge` today; if it ever rebuilds it, repoGate (no input) stays.
   merge = { "repoGate" },
+  automation = { "dryRun" },
+  queue = { "dryRun" },
+  rules = { "dryRun" },
+  respawn = { "dryRun" },
+  summary = { "dryRun" },
+  resume = { "dryRun" },
+  tabless = { "dryRun" },
+  mailbox = { "dryRun" },
+  remoteControl = { "dryRun" },
 }
 function M.overlayConfig(cfg, incoming)
   cfg = type(cfg) == "table" and cfg or {}
@@ -9562,6 +9585,164 @@ function M.typingHeld(held, it)
   if type(held) ~= "table" or type(it) ~= "table" or it.key == nil then return false end
   local h = held[it.key]
   return type(h) == "table" and h.episode == M.typingEpisode(it)
+end
+
+-- ---- Automation dry run and trace (2026-09-29) ----
+-- Build program unit 14. FX.automationAct is the one door every automatic effect goes through: the
+-- typed ones in FX.typeWhenReady's slot, the rest at their call sites. automation.dryRun puts every
+-- kind in dry run and <feature>.dryRun puts one feature's kinds in it: a dry run records
+-- would_<kind> and acts on nothing. Every decision -- acted, would, refused with why -- goes to the
+-- Trace ring (M.traceAdd: the same decision again bumps a count) and, once per new row, the ledger.
+-- These are the pure halves; the dashboard does the I/O.
+M.AUTOMATION_DRY = "dry run"   -- the `why` FX.automationAct returns when a dry run held the effect
+-- The Settings switches, in the order Settings shows them: the config block whose .dryRun holds it.
+M.DRY_RUN_FEATURES = {
+  { feature = "autoContinue",  label = "Auto-continue" },
+  { feature = "queue",         label = "Auto-feed and project routing" },
+  { feature = "rules",         label = "Automation rules" },
+  { feature = "respawn",       label = "Auto-respawn" },
+  { feature = "summary",       label = "Post-run self-summary" },
+  { feature = "resume",        label = "Resume at the limit reset" },
+  { feature = "tabless",       label = "Ending tab-less leftovers" },
+  { feature = "mailbox",       label = "Mailbox messages" },
+  { feature = "remoteControl", label = "The /rc startup sweep" },
+}
+-- Every kind of automatic action, the feature that switches it, and its name in the Trace.
+M.AUTOMATION_KINDS = {
+  { kind = "continue",    feature = "autoContinue",  label = "Auto-continue" },
+  { kind = "feed",        feature = "queue",         label = "Auto-feed" },
+  { kind = "route",       feature = "queue",         label = "Project routing" },
+  { kind = "rule",        feature = "rules",         label = "Rule" },
+  { kind = "respawn",     feature = "respawn",       label = "Auto-respawn" },
+  { kind = "summary",     feature = "summary",       label = "Self-summary" },
+  { kind = "resume",      feature = "resume",        label = "Resume at the reset" },
+  { kind = "tabless_end", feature = "tabless",       label = "End tab-less leftover" },
+  { kind = "mailbox",     feature = "mailbox",       label = "Mailbox" },
+  { kind = "rc",          feature = "remoteControl", label = "/rc sweep" },
+}
+-- FX.typeWhenReady's senders -> their kind.
+M.AUTOMATION_TYPISTS = {
+  autofeed = "feed", router = "route", ["rule-nudge"] = "rule", ["rule-continue"] = "rule",
+  ["auto-continue"] = "continue", summary = "summary", mailbox = "mailbox", resume = "resume", ["rc-sweep"] = "rc",
+}
+local AUTOMATION_FEATURE_OF = {}
+for _, k in ipairs(M.AUTOMATION_KINDS) do AUTOMATION_FEATURE_OF[k.kind] = k.feature end
+
+-- Is `kind` in dry run under cfg? Returns true plus what switched it ("all" or the feature), or
+-- false. Only a real boolean true switches it.
+function M.automationDryRun(cfg, kind)
+  if type(cfg) ~= "table" then return false end
+  local all = cfg.automation
+  if type(all) == "table" and all.dryRun == true then return true, "all" end
+  local feature = AUTOMATION_FEATURE_OF[kind]
+  local block = feature and cfg[feature]
+  if type(block) == "table" and block.dryRun == true then return true, feature end
+  return false
+end
+
+-- What's in dry run, for the Trace's banner: { all, on, features = { feature, ... } } (Settings order).
+function M.dryRunState(cfg)
+  cfg = type(cfg) == "table" and cfg or {}
+  local all = type(cfg.automation) == "table" and cfg.automation.dryRun == true
+  local features = {}
+  for _, f in ipairs(M.DRY_RUN_FEATURES) do
+    local b = cfg[f.feature]
+    if type(b) == "table" and b.dryRun == true then features[#features + 1] = f.feature end
+  end
+  return { all = all, on = all or #features > 0, features = features }
+end
+
+-- Settings sends the switches as { automation = bool, <feature> = bool, ... }: each lands as its
+-- block's dryRun, the block made if it wasn't there, nothing else in it touched. Unknown names and
+-- non-booleans are ignored. Mutates + returns cfg.
+function M.applyDryRunFlags(cfg, flags)
+  cfg = type(cfg) == "table" and cfg or {}
+  if type(flags) ~= "table" then return cfg end
+  local known = { automation = true }
+  for _, f in ipairs(M.DRY_RUN_FEATURES) do known[f.feature] = true end
+  for name, v in pairs(flags) do
+    if known[name] and type(v) == "boolean" then
+      if type(cfg[name]) ~= "table" then cfg[name] = {} end
+      cfg[name].dryRun = v
+    end
+  end
+  return cfg
+end
+
+-- One decision's identity: the same kind, session, outcome, reason and summary is a repeat.
+function M.traceSig(e)
+  return table.concat({ tostring(e.kind), tostring(e.key), tostring(e.outcome), tostring(e.reason or ""),
+                        tostring(e.summary or "") }, "\1")
+end
+
+-- Record decision `e` = { at, kind, key, name, outcome, reason?, summary?, by? } in `ring` (oldest
+-- first). The same decision the same (kind, session) made last time bumps that row's count and time
+-- (its `first` stays) and returns false: nothing new to ledger. Anything else is a new row (true);
+-- the ring keeps the newest `cap`. Mutates ring.
+function M.traceAdd(ring, e, cap)
+  if type(ring) ~= "table" or type(e) ~= "table" then return false end
+  for i = #ring, 1, -1 do
+    local r = ring[i]
+    if r.kind == e.kind and r.key == e.key then
+      if M.traceSig(r) == M.traceSig(e) then
+        r.count = (r.count or 1) + 1
+        r.at = e.at
+        return false
+      end
+      break
+    end
+  end
+  local row = {}
+  for k, v in pairs(e) do row[k] = v end
+  row.first = row.first or row.at
+  row.count = row.count or 1
+  ring[#ring + 1] = row
+  cap = tonumber(cap) or 500
+  while #ring > cap do table.remove(ring, 1) end
+  return true
+end
+
+-- The Trace's rows: newest first, a run of the same decision by one (kind, session) collapsed into
+-- one row with count = N (the run's counts added up), `first` its earliest time and `at` its latest.
+-- A different decision by that (kind, session) ends its run; other sessions in between don't.
+-- opts = { key = one session only, limit = at most this many rows }. Doesn't change `entries`.
+function M.collapseTrace(entries, opts)
+  opts = type(opts) == "table" and opts or {}
+  local list = {}
+  for _, e in ipairs(type(entries) == "table" and entries or {}) do
+    if type(e) == "table" and (opts.key == nil or opts.key == "" or e.key == opts.key) then list[#list + 1] = e end
+  end
+  local function t0(e) return tonumber(e.first or e.at) or 0 end
+  for i, e in ipairs(list) do list[i] = { e = e, i = i } end
+  table.sort(list, function(a, b)
+    if t0(a.e) ~= t0(b.e) then return t0(a.e) < t0(b.e) end
+    return a.i < b.i
+  end)
+  local groups, open = {}, {}
+  for _, w in ipairs(list) do
+    local e = w.e
+    local pair = tostring(e.kind) .. "\1" .. tostring(e.key)
+    local g = open[pair]
+    local n = tonumber(e.count) or 1
+    if g and g.sig == M.traceSig(e) then
+      g.row.count = g.row.count + n
+      if (tonumber(e.at) or 0) > (tonumber(g.row.at) or 0) then g.row.at = e.at end
+    else
+      local row = {}
+      for k, v in pairs(e) do row[k] = v end
+      row.count = n
+      row.first = t0(e)
+      g = { sig = M.traceSig(e), row = row }
+      open[pair] = g
+      groups[#groups + 1] = row
+    end
+  end
+  table.sort(groups, function(a, b) return (tonumber(a.at) or 0) > (tonumber(b.at) or 0) end)
+  local limit = tonumber(opts.limit)
+  if limit and #groups > limit then
+    for i = #groups, limit + 1, -1 do groups[i] = nil end
+  end
+  return groups
 end
 
 -- ---- Session mailbox (2026-09-29) ----
@@ -15499,6 +15680,9 @@ M.FEATURES = {
   { key = "resume", cat = "Automate", new = true, title = "Resume at the limit reset",
     what = "A session stopped by a usage limit carries on by itself when the limit resets, once per window. Its card says \"resumes at 3:00pm\", with Cancel and Resume now. The reset comes from the plan meter, or from the error's own \"resets 3pm\". A per-model limit says \"switch model\" instead. In a VS Code window shared with other Claude tabs, where Shepherd may not type, the card says \"limit reset — continue it\" and your phone gets a push.",
     why = "A fleet that hits the 5-hour limit overnight picks up at the reset instead of waiting for you to notice." },
+  { key = "trace", cat = "Automate", new = true, title = "Automation dry run & trace",
+    what = "Every automatic action -- auto-continue, auto-feed and routing, rules, respawn, the self-summary, resume at the reset, ending a tab-less leftover, a mailbox message, the /rc sweep -- is recorded as acted, refused (with why) or, in a dry run, would. Settings turns dry run on for all automation or one feature at a time; ☰ → Automation trace (or ⚡ Trace in the detail panel for one session) lists the decisions newest first, repeats collapsed to ×N.",
+    why = "See what automation would do before you let it, and what it did while you were away." },
   { key = "policies", cat = "Automate", title = "Policy bundles & autopilot",
     what = "Reusable auto-allow/deny rules per session or fleet, plus a timed autopilot that approves everything for a while.",
     why = "Pre-decide the routine calls so you only ever see the ones that matter." },

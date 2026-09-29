@@ -1,4 +1,7 @@
 {
+  "automation": {
+    "dryRun": false
+  },
   "autoContinue": {
     "enabled": true,
     "delaySeconds": 60,

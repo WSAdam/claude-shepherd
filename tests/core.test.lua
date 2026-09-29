@@ -8445,7 +8445,8 @@ do
   -- 2026-09-29: 19 -> 20 for the merge checker ("checker", flagged new).
   -- 2026-09-29: 20 -> 21 for what each session is working on ("workingon", flagged new).
   -- 2026-09-29: 21 -> 22 for resuming at the usage limit's reset ("resume", flagged new).
-  eq("FEATURES: the 22 new features are flagged", newCount, 22)
+  -- 2026-09-29: 22 -> 23 for the automation dry run and trace ("trace", flagged new).
+  eq("FEATURES: the 23 new features are flagged", newCount, 23)
   check("FEATURES: lists what each session is working on", keys.workingon == true)
   check("FEATURES: lists the session mailbox", keys.mailbox == true)
   check("FEATURES: lists resume at the limit reset", keys.resume == true)
@@ -12923,6 +12924,149 @@ do
   check("workingOnView: a tool with no label still makes a view", v and v.label == nil and v.tool == "Read")
   eq("workingOnView: nothing at all -> nil", core.workingOnView({ status = "idle" }, now, {}), nil)
   eq("workingOnView: no item -> nil", core.workingOnView(nil, now, {}), nil)
+end
+
+-- ---- automation dry run and trace (2026-09-29) ----
+-- Build program unit 14. FX.automationAct is the one door every automatic effect goes through
+-- (tests/automation-trace.test.lua drives it; tests/ui.test.lua pins the call sites). These are its
+-- pure halves: which switch puts a kind in dry run, the trace ring, and the view's ×N collapse.
+do
+  -- every kind names the config block whose .dryRun switches it alone
+  local byKind = {}
+  for _, k in ipairs(core.AUTOMATION_KINDS or {}) do byKind[k.kind] = k end
+  for _, want in ipairs({ { "continue", "autoContinue" }, { "feed", "queue" }, { "route", "queue" }, { "rule", "rules" },
+                          { "respawn", "respawn" }, { "summary", "summary" }, { "resume", "resume" },
+                          { "tabless_end", "tabless" }, { "mailbox", "mailbox" }, { "rc", "remoteControl" } }) do
+    eq("dry run: " .. want[1] .. " is switched by " .. want[2] .. ".dryRun", byKind[want[1]] and byKind[want[1]].feature, want[2])
+  end
+  local labelled = true
+  for _, k in ipairs(core.AUTOMATION_KINDS or {}) do if type(k.label) ~= "string" or k.label == "" then labelled = false end end
+  check("dry run: every kind has a label for the Trace", labelled and #(core.AUTOMATION_KINDS or {}) == 10)
+  -- every automated typist maps to its kind
+  for typist, kind in pairs({ autofeed = "feed", router = "route", ["rule-nudge"] = "rule", ["rule-continue"] = "rule",
+                              ["auto-continue"] = "continue", summary = "summary", mailbox = "mailbox",
+                              resume = "resume", ["rc-sweep"] = "rc" }) do
+    eq("dry run: typist " .. typist .. " is kind " .. kind, (core.AUTOMATION_TYPISTS or {})[typist], kind)
+  end
+
+  local dry = core.automationDryRun
+  eq("dry run: no config -> live", dry and dry(nil, "continue"), false)
+  eq("dry run: an empty config -> live", dry and dry({}, "feed"), false)
+  local all = { automation = { dryRun = true } }
+  local d1, s1 = dry(all, "respawn")
+  check("dry run: automation.dryRun puts every kind in dry run  (" .. tostring(s1) .. ")", d1 == true and s1 == "all")
+  eq("dry run: ...an unknown kind too", dry(all, "something-new"), true)
+  local one = { autoContinue = { dryRun = true } }
+  local d2, s2 = dry(one, "continue")
+  check("dry run: autoContinue.dryRun -> auto-continue alone  (" .. tostring(s2) .. ")", d2 == true and s2 == "autoContinue")
+  eq("dry run: ...the queue stays live", dry(one, "feed"), false)
+  local q = { queue = { dryRun = true } }
+  check("dry run: queue.dryRun covers auto-feed and routing", dry(q, "feed") == true and dry(q, "route") == true)
+  eq("dry run: ...not a rule", dry(q, "rule"), false)
+  eq("dry run: only true switches it (a string \"true\" is not)", dry({ automation = { dryRun = "true" } }, "feed"), false)
+  eq("dry run: a feature block that isn't a table", dry({ queue = true }, "feed"), false)
+  local st = core.dryRunState({ automation = { dryRun = false }, rules = { dryRun = true }, mailbox = { dryRun = true } })
+  check("dry run: the state lists the features switched on, in Settings order",
+        st and st.all == false and st.on == true and #st.features == 2 and st.features[1] == "rules" and st.features[2] == "mailbox")
+  st = core.dryRunState({})
+  check("dry run: ...nothing switched on", st and st.all == false and st.on == false and #st.features == 0)
+  check("dry run: ...all of it", core.dryRunState(all).all == true and core.dryRunState(all).on == true)
+
+  -- Settings sends the switches as a map; they land in their own blocks and nothing else moves
+  local cfg = { queue = { autofeed = true }, rules = { enabled = true }, automation = { dryRun = true } }
+  core.applyDryRunFlags(cfg, { automation = false, rules = true, queue = true, tabless = false, bogus = true })
+  eq("dry run flags: automation.dryRun off", cfg.automation.dryRun, false)
+  eq("dry run flags: rules.dryRun on", cfg.rules.dryRun, true)
+  eq("dry run flags: ...rules.enabled untouched", cfg.rules.enabled, true)
+  eq("dry run flags: queue.dryRun on, autofeed untouched", cfg.queue.dryRun == true and cfg.queue.autofeed, true)
+  eq("dry run flags: a block that wasn't there is made", type(cfg.tabless) == "table" and cfg.tabless.dryRun, false)
+  eq("dry run flags: an unknown feature is ignored", cfg.bogus, nil)
+  local same = { queue = { dryRun = true } }
+  core.applyDryRunFlags(same, nil)
+  eq("dry run flags: no map leaves the config alone", same.queue.dryRun, true)
+  core.applyDryRunFlags(same, { queue = "yes" })
+  eq("dry run flags: a non-boolean is ignored", same.queue.dryRun, true)
+
+  -- Settings Save keeps each switch (a form that doesn't send one never drops it)
+  local keeps = function(block)
+    for _, k in ipairs(core.SETTINGS_KEEP_SUBKEYS[block] or {}) do if k == "dryRun" then return true end end
+    return false
+  end
+  for _, block in ipairs({ "automation", "queue", "autoContinue", "rules", "respawn", "summary", "resume",
+                           "tabless", "mailbox", "remoteControl" }) do
+    check("dry run: " .. block .. ".dryRun is in SETTINGS_KEEP_SUBKEYS", keeps(block))
+  end
+  local saved = core.overlayConfig({ summary = { enabled = true, dryRun = true }, respawn = { dryRun = true } },
+                                   { summary = { enabled = false }, respawn = { enabled = true, auto = { enabled = false } } })
+  check("dry run: a Settings Save keeps summary.dryRun and respawn.dryRun",
+        saved.summary.dryRun == true and saved.summary.enabled == false and saved.respawn.dryRun == true)
+
+  -- the ring: a decision the same (kind, session) just made again bumps its count instead of a row
+  local ring = {}
+  local e1 = { at = 100, kind = "continue", key = "s1", name = "api", outcome = "would", summary = "continue" }
+  eq("trace: a first decision is new", core.traceAdd(ring, e1, 50), true)
+  eq("trace: ...the same decision again is a repeat", core.traceAdd(ring, { at = 160, kind = "continue", key = "s1",
+     name = "api", outcome = "would", summary = "continue" }, 50), false)
+  check("trace: ...counted on the first row, which keeps both times",
+        #ring == 1 and ring[1].count == 2 and ring[1].first == 100 and ring[1].at == 160)
+  eq("trace: another session's same decision is its own row",
+     core.traceAdd(ring, { at = 170, kind = "continue", key = "s2", outcome = "would", summary = "continue" }, 50), true)
+  eq("trace: s1 again after s2 still repeats s1's row",
+     core.traceAdd(ring, { at = 180, kind = "continue", key = "s1", outcome = "would", summary = "continue" }, 50), false)
+  eq("trace: ...(3 now)", ring[1].count, 3)
+  eq("trace: a different outcome for s1 is new",
+     core.traceAdd(ring, { at = 190, kind = "continue", key = "s1", outcome = "refused", reason = "working", summary = "continue" }, 50), true)
+  eq("trace: ...and s1's next would is new again (the run was broken)",
+     core.traceAdd(ring, { at = 200, kind = "continue", key = "s1", outcome = "would", summary = "continue" }, 50), true)
+  eq("trace: a different kind for s1 is new", core.traceAdd(ring, { at = 210, kind = "feed", key = "s1", outcome = "would", summary = "feed 'x'" }, 50), true)
+  eq("trace: a different reason is new", core.traceAdd(ring, { at = 220, kind = "continue", key = "s1", outcome = "refused", reason = "tool", summary = "continue" }, 50), true)
+  local capped = {}
+  for i = 1, 12 do core.traceAdd(capped, { at = i, kind = "feed", key = "k" .. i, outcome = "acted" }, 10) end
+  check("trace: the ring keeps the newest `cap` rows", #capped == 10 and capped[1].key == "k3" and capped[10].key == "k12")
+  eq("trace: not an entry", core.traceAdd(capped, nil, 10), false)
+
+  -- the view: newest first, repeats of one (kind, session) run collapsed to ×N
+  local raw = {
+    { at = 10, kind = "continue", key = "a", name = "A", outcome = "would", summary = "continue" },
+    { at = 11, kind = "feed", key = "b", name = "B", outcome = "acted", summary = "feed 'x'" },
+    { at = 20, kind = "continue", key = "a", name = "A", outcome = "would", summary = "continue" },
+    { at = 30, kind = "continue", key = "a", name = "A", outcome = "would", summary = "continue", count = 3 },
+    { at = 40, kind = "continue", key = "a", name = "A", outcome = "refused", reason = "working", summary = "continue" },
+    { at = 50, kind = "continue", key = "a", name = "A", outcome = "would", summary = "continue" },
+  }
+  local v = core.collapseTrace(raw)
+  eq("collapseTrace: 6 decisions -> 4 rows", #v, 4)
+  check("collapseTrace: newest first", v[1].at == 50 and v[2].at == 40 and v[3].at == 30 and v[4].at == 11)
+  check("collapseTrace: a run's counts add up (1 + 1 + 3 = x5), from its first to its last time",
+        v[3].count == 5 and v[3].first == 10 and v[3].at == 30)
+  check("collapseTrace: another session in between doesn't break a run", v[3].key == "a" and v[4].key == "b")
+  eq("collapseTrace: a different decision breaks it (the would after the refusal stands alone)", v[1].count, 1)
+  eq("collapseTrace: the input is not changed", raw[3].count, nil)
+  local only = core.collapseTrace(raw, { key = "b" })
+  check("collapseTrace: one session's trace", #only == 1 and only[1].key == "b")
+  local unsorted = core.collapseTrace({ { at = 5, kind = "rule", key = "c", outcome = "acted" },
+                                        { at = 3, kind = "rule", key = "c", outcome = "acted" } })
+  check("collapseTrace: out-of-order input is ordered by time first", #unsorted == 1 and unsorted[1].count == 2
+        and unsorted[1].first == 3 and unsorted[1].at == 5)
+  eq("collapseTrace: limit", #core.collapseTrace(raw, { limit = 2 }), 2)
+  eq("collapseTrace: nothing", #core.collapseTrace(nil), 0)
+  eq("collapseTrace: junk rows are skipped", #core.collapseTrace({ "x", 7, { at = 1, kind = "feed", key = "k", outcome = "acted" } }), 1)
+
+  -- the ledger narrates what the trace ledgers
+  check("narrate: every kind's would_<kind> has a verb", (function()
+    for _, k in ipairs(core.AUTOMATION_KINDS or {}) do
+      local n = core.NARRATE["would_" .. k.kind]
+      if not (n and n[2] and n[2]:find("would", 1, true)) then return false end
+    end
+    return true
+  end)())
+  check("narrate: an automation event has a verb", core.NARRATE.automation ~= nil)
+  check("narrate: a would event reads its summary",
+        core.narrateEvent({ type = "would_continue", summary = "continue" }):find("continue", 1, true) ~= nil)
+
+  local fkeys = {}
+  for _, f in ipairs(core.FEATURES) do fkeys[f.key] = f end
+  check("trace: FEATURES lists the automation dry run and trace, flagged new", fkeys.trace ~= nil and fkeys.trace.new == true)
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))

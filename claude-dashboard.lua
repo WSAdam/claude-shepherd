@@ -1140,6 +1140,7 @@ end
 function FX.feedGuard(fn)
   if FX._queueFeedBusy then
     print("[cc-queue] feed already in flight (nested dispatch during delivery) -- skipped, task kept queued")
+    FX.automationRefuse("a feed already in flight")   -- 2026-09-29: an automatic feed's Trace row says so
     return false
   end
   FX._queueFeedBusy = true
@@ -4000,7 +4001,12 @@ function FX.annotateTabless(list, cfg)
     if it.tabless and not FX._tablessAutoTried[it.key]
        and core.tablessAutoEndDue(it, FX._tablessSince[it.key], now, grace) then
       FX._tablessAutoTried[it.key] = true
-      FX.endSession(it.key, { auto = true, minutes = math.floor(grace / 60), item = it })
+      -- 2026-09-29: through FX.automationAct -- tabless.dryRun / automation.dryRun records
+      -- would_tabless_end and signals nothing (one decision per session, like a real try).
+      FX.automationAct("tabless_end", it, { summary = "end the leftover claude process (pid "
+          .. tostring(it.session_pid or "?") .. "), no tab for " .. math.floor(grace / 60) .. " min", by = "tabless" }, function()
+        return FX.endSession(it.key, { auto = true, minutes = math.floor(grace / 60), item = it })
+      end)
     end
   end
 end
@@ -4016,7 +4022,7 @@ function FX.endSession(key, opts)
     for _, x in ipairs(FX._shownItems or {}) do if x.key == key then it = x end end
     for _, x in ipairs(FX._hiddenItems or {}) do if x.key == key then it = x end end
   end
-  if not it then return false end
+  if not it then return false, "no such session" end
   local name = tostring(it.label or it.name or "?")
   local psOut
   if tostring(it.session_pid or ""):match("^%d+$") then
@@ -4027,7 +4033,7 @@ function FX.endSession(key, opts)
     print("[cc-dashboard] ⚠️ End session refused for '" .. name .. "': " .. tostring(why))
     if gone then FX.removeStatus(key); return true end
     if not opts.auto then pcall(function() FX.alert("Won't end " .. name .. ": " .. tostring(why)) end) end
-    return false
+    return false, why
   end
   pcall(function() hs.execute("kill -TERM " .. tostring(it.session_pid)) end)
   print("[cc-dashboard] ✅ ended the tab-less session '" .. name .. "' (pid " .. tostring(it.session_pid) .. ")"
@@ -5178,6 +5184,65 @@ function FX.nudgeSafeNow(it)
   return not (fresh and fresh.status == "approval")
 end
 
+-- ---- Automation dry run and trace (2026-09-29) ----
+-- Build program unit 14. Every AUTOMATIC effect goes through FX.automationAct: the typed ones in
+-- FX.typeWhenReady's slot (auto-feed, the router, a rule's nudge or continue, auto-continue, the
+-- self-summary, a mailbox or resume line, the /rc sweep), the rest at their call sites (auto-respawn,
+-- ending a tab-less leftover, a rule's log/relabel/feed, a mailbox send, arming a resume and its
+-- push). With automation.dryRun or the kind's own <feature>.dryRun on (core.automationDryRun) it
+-- records would_<kind> and acts on nothing. Otherwise it runs the effect exactly as before: fn's
+-- `false, why` -- or FX.automationRefuse(why) inside it -- records a refusal, anything else acted.
+-- Every decision goes to the Trace ring (core.traceAdd: a repeat bumps a count) and, once per new
+-- row, the ledger. Manual clicks never come here.
+FX.AUTOMATION_TRACE_CAP = 500
+FX._automation = { trace = {}, current = nil }
+-- detail: { summary = what it does, by = the sender }, or a summary string.
+function FX.automationNote(kind, it, outcome, reason, detail)
+  it = type(it) == "table" and it or {}
+  if type(detail) ~= "table" then detail = { summary = detail } end
+  local e = { at = FX.now(), kind = kind, key = it.key, name = it.label or it.name or it.key, outcome = outcome,
+              reason = reason ~= nil and tostring(reason):sub(1, 160) or nil,
+              summary = detail.summary ~= nil and tostring(detail.summary):sub(1, 200) or nil, by = detail.by }
+  if not core.traceAdd(FX._automation.trace, e, FX.AUTOMATION_TRACE_CAP) then return end
+  if outcome == "would" then
+    ledgerFor(it, { type = "would_" .. tostring(kind), by = e.by or kind, summary = e.summary })
+  else
+    ledgerFor(it, { type = "automation", kind = kind, outcome = outcome, reason = e.reason, by = e.by, summary = e.summary })
+  end
+end
+-- Inside an effect FX.automationAct is running: it didn't happen, and why.
+function FX.automationRefuse(why)
+  local cur = FX._automation.current
+  if cur then cur.refused = tostring(why or "not done") end
+end
+function FX.automationAct(kind, it, detail, fn)
+  local dry, scope = core.automationDryRun(loadConfig(), kind)
+  local name = tostring(type(it) == "table" and (it.label or it.name or it.key) or "?")
+  if dry then
+    print("[cc-dashboard] 🔍 dry run (" .. tostring(scope) .. "): " .. tostring(kind) .. " would act on '" .. name .. "'"
+      .. ((type(detail) == "table" and detail.summary) and (": " .. tostring(detail.summary)) or ""))
+    FX.automationNote(kind, it, "would", nil, detail)
+    return false, core.AUTOMATION_DRY
+  end
+  local cur, outer = {}, FX._automation.current
+  FX._automation.current = cur
+  local res = table.pack(pcall(fn))
+  FX._automation.current = outer
+  if not res[1] then
+    print("[cc-dashboard] ❌ " .. tostring(kind) .. " failed on '" .. name .. "': " .. tostring(res[2]))
+    FX.automationNote(kind, it, "refused", "error: " .. tostring(res[2]), detail)
+    error(res[2], 0)   -- the effect still fails the way it did before it had a door
+  end
+  local why = cur.refused or ((res[2] == false) and tostring(res[3] or "not done") or nil)
+  if why then
+    print("[cc-dashboard] ⚠️ " .. tostring(kind) .. " didn't act on '" .. name .. "': " .. why)
+    FX.automationNote(kind, it, "refused", why, detail)
+  else
+    FX.automationNote(kind, it, "acted", nil, detail)
+  end
+  return table.unpack(res, 2, res.n)
+end
+
 -- ---- Readiness before typing (2026-09-28) ----
 -- Build program unit 11. Every AUTOMATED send -- auto-feed, the router, a rule's nudge or
 -- continue, auto-continue, the self-summary, the /rc sweep -- comes here instead of straight to
@@ -5200,12 +5265,18 @@ end
 -- when the send was refused now or the session is held; opts.onRefused(why) runs on every
 -- refusal, now or at send time, so a caller can release what it reserved. opts.extraStagger
 -- passes through to dispatchSerialized.
+-- 2026-09-29 (unit 14): fn runs through FX.automationAct, as the typist's kind
+-- (core.AUTOMATION_TYPISTS): in a dry run it records would_<kind>, types nothing and calls
+-- opts.onDry(). opts.summary says what the send is, for the Trace; fn's `false, why` (or
+-- FX.automationRefuse) marks a send that didn't land.
 function FX.typeWhenReady(it, typist, fn, opts)
   opts = opts or {}
   local key = type(it) == "table" and it.key or nil
+  local kind = core.AUTOMATION_TYPISTS[typist] or tostring(typist)
+  local detail = { summary = opts.summary, by = typist }
   local function refused(why)
     if opts.onRefused then pcall(opts.onRefused, why) end
-    return false
+    return false, why
   end
   if not key then return refused("no session") end
   if core.typingHeld(FX._typing.held, it) then return refused("held") end
@@ -5214,6 +5285,7 @@ function FX.typeWhenReady(it, typist, fn, opts)
   local ok, why, wait = core.readyToType(view, nil, FX.now())
   if not ok and why ~= "settling" then
     FX.typingRefused(it, typist, why)
+    FX.automationNote(kind, it, "refused", why, detail)
     return refused(why)
   end
   q[key] = (q[key] or 0) + 1
@@ -5230,10 +5302,12 @@ function FX.typeWhenReady(it, typist, fn, opts)
       local ready, why2 = core.readyToType(fireView, screen, FX.now())
       if not ready then
         FX.typingRefused(it, typist, why2, live)
+        FX.automationNote(kind, it, "refused", why2, detail)
         refused(why2)
         return
       end
-      fn()
+      local _, why3 = FX.automationAct(kind, it, detail, fn)
+      if why3 == core.AUTOMATION_DRY and opts.onDry then pcall(opts.onDry) end
     end, opts.extraStagger)
   end)
   return true
@@ -5265,25 +5339,34 @@ function FX.mailboxNonce()
 end
 -- Leave session `key` a message; meta = { kind, from }, both optional. Written whole (temp, then
 -- renamed into place). Returns its path, or nil + why ("no session", "empty", "slash command",
--- "write failed"). Types nothing: FX.stepMailbox decides that on the next tick.
+-- "write failed"), or false + core.AUTOMATION_DRY when mailbox.dryRun / automation.dryRun held it
+-- (2026-09-29: every send goes through FX.automationAct). Types nothing: FX.stepMailbox decides
+-- that on the next tick.
 function FX.mailboxSend(key, text, meta)
   if not core.mailboxKeyOk(key) then return nil, "no session" end
+  local it = FX.liveStatusFor(key) or { key = key }
+  if it.key == nil then it.key = key end
+  return FX.automationAct("mailbox", it, { summary = "leave a message: " .. tostring(text or ""):sub(1, 120),
+      by = type(meta) == "table" and type(meta.from) == "string" and meta.from or "mailbox" }, function()
   FX._mailbox.seq = FX._mailbox.seq + 1
   local m, why = core.mailboxMessage(text, meta, FX.mailboxNonce(), FX.now(), FX._mailbox.seq)
   if not m then
     print("[cc-dashboard] ⚠️ mailbox: nothing sent to " .. tostring(key) .. ": " .. tostring(why))
+    FX.automationRefuse(why)
     return nil, why
   end
   pcall(function() hs.fs.mkdir(FX.INBOX_DIR) end)
   local path = FX.INBOX_DIR .. "/" .. key .. "/" .. m.name
   if not FX.writeFileAtomic(path, m.body) then
     print("[cc-dashboard] ❌ mailbox: couldn't write " .. path)
+    FX.automationRefuse("write failed")
     return nil, "write failed"
   end
   print("[cc-dashboard] ✅ mailbox: left " .. key .. " a message (" .. m.name .. ")")
-  ledgerFor(FX.liveStatusFor(key) or { key = key }, { type = "mailbox_sent", nonce = m.nonce,
+  ledgerFor(it, { type = "mailbox_sent", nonce = m.nonce,
     kind = type(meta) == "table" and type(meta.kind) == "string" and meta.kind or nil })
   return path
+  end)
 end
 -- Messages waiting, per session: { [key] = count }. One directory read, plus one per session
 -- that has an inbox; no process spawned.
@@ -5333,7 +5416,7 @@ function FX.mailboxNudge(it)
   local scheduled = FX.typeWhenReady(it, "mailbox", function()
     FX._mailbox.inflight[key] = nil
     local c = FX.mailboxClaim(key)
-    if not c then return end   -- its turn end or start took it first
+    if not c then return false, "already handed over" end   -- its turn end or start took it first
     local acted = core.handleAction(FX, it, "nudge", core.mailboxNudge(c.text))
     if acted == "nudge" then
       os.remove(c.claim)
@@ -5342,8 +5425,10 @@ function FX.mailboxNudge(it)
     else
       FX.mailboxRestore(c)
       print("[cc-dashboard] ⚠️ mailbox: " .. key .. "'s message didn't land -- it waits for its turn end")
+      return false, "not delivered"
     end
-  end, { onRefused = function() FX._mailbox.inflight[key] = nil end })
+  end, { summary = "type the waiting message",
+         onRefused = function() FX._mailbox.inflight[key] = nil end })
   if scheduled then FX._mailbox.inflight[key] = FX.now() end
   return scheduled
 end
@@ -5429,7 +5514,7 @@ function FX.resumeType(it, key)
   local scheduled = FX.typeWhenReady(it, "resume", function()
     FX._resume.inflight[key] = nil
     local arm, plan = FX.resumeRead(key)
-    if core.resumeRoute(arm, plan, it, FX.now()) ~= "type" then return end
+    if core.resumeRoute(arm, plan, it, FX.now()) ~= "type" then return false, "no longer due" end
     local acted = core.handleAction(FX, it, "nudge", core.RESUME.line)
     if acted == "nudge" then
       plan.typedAt = FX.now()
@@ -5438,8 +5523,10 @@ function FX.resumeType(it, key)
       ledgerFor(it, { type = "resume_typed", window = plan.window })
     else
       print("[cc-dashboard] ⚠️ resume: " .. key .. "'s line didn't land -- the next tick tries again")
+      return false, "not delivered"
     end
-  end, { onRefused = function() FX._resume.inflight[key] = nil end })
+  end, { summary = "type the reset line (the hook didn't wake it)",
+         onRefused = function() FX._resume.inflight[key] = nil end })
   if scheduled then FX._resume.inflight[key] = FX.now() end
 end
 function FX.resumeStepOne(key, it, now, cfg)
@@ -5451,11 +5538,26 @@ function FX.resumeStepOne(key, it, now, cfg)
     local caps = FX.resumeCaps()
     plan = core.resumePlan(arm, lastOfficialUsage, caps, { now = now, tz = core.localTzOffset,
       enabled = core.config(cfg, "resume.enabled", true) ~= false, standDown = core.resumeStandDown(editor, cc) })
-    if not FX.resumeWritePlan(key, plan) then return end
+    -- 2026-09-29: a "wait" plan is what lets the hook wake the session -- the automatic effect, so
+    -- it goes through FX.automationAct. In a dry run (resume.dryRun / automation.dryRun) the plan
+    -- says skip instead: the hook stops, nothing wakes, and the window's one attempt isn't spent.
+    local written
     if plan.verdict == "wait" then
-      caps[core.resumeCapKey(key, plan.window)] = now
-      hs.settings.set("ccResumeTried", caps)
+      local _, why = FX.automationAct("resume", it or { key = key }, { by = "resume",
+          summary = "resume at " .. (plan.resetAt and os.date("%H:%M", plan.resetAt) or "the reset") }, function()
+        if not FX.resumeWritePlan(key, plan) then return false, "couldn't write the plan" end
+        written = true
+        caps[core.resumeCapKey(key, plan.window)] = now
+        hs.settings.set("ccResumeTried", caps)
+      end)
+      if why == core.AUTOMATION_DRY then
+        plan.verdict, plan.reason = "skip", "dry run"
+        written = FX.resumeWritePlan(key, plan)
+      end
+    else
+      written = FX.resumeWritePlan(key, plan)
     end
+    if not written then return end
     print("[cc-dashboard] 🔍 resume: " .. key .. " -> " .. tostring(plan.verdict)
       .. (plan.reason and (" (" .. plan.reason .. ")") or "")
       .. (plan.resetAt and (" at " .. os.date("%H:%M", plan.resetAt)) or ""))
@@ -5466,8 +5568,11 @@ function FX.resumeStepOne(key, it, now, cfg)
   if route == "type" then
     FX.resumeType(it, key)
   elseif route == "notify" then
+    -- 2026-09-29: the push goes through FX.automationAct (a dry run pushes nothing; the plan isn't
+    -- marked, so the repeat only bumps the Trace row's count).
+    FX.automationAct("resume", it, { summary = "push: the limit has reset -- continue it", by = "resume" }, function()
     plan.notifiedAt = now
-    if FX.resumeWritePlan(key, plan) then
+    if not FX.resumeWritePlan(key, plan) then return false, "couldn't write the plan" end
       local topic = tostring(core.config(cfg, "escalation.pushTopic", ""))
       if topic ~= "" and not plan.now then
         FX.push(topic, "Claude Shepherd", tostring(it.label or it.name or key)
@@ -5475,7 +5580,7 @@ function FX.resumeStepOne(key, it, now, cfg)
       end
       print("[cc-dashboard] ⚠️ resume: " .. key .. "'s limit has reset, but its window is shared -- the card says so")
       ledgerFor(it, { type = "resume_notified", window = plan.window })
-    end
+    end)
   elseif route == "resumed" then
     plan.doneAt = now
     if FX.resumeWritePlan(key, plan) then
@@ -7443,6 +7548,9 @@ local function handleBridgeMsg(msg)
       -- including the UI-unmanaged subkeys inside rebuilt blocks (spawn.kittyBin/
       -- kittySocket, escalation.hung), carried forward by core.overlayConfig.
       local cfg = core.overlayConfig(loadConfig(), incoming)
+      -- 2026-09-29: the automation dry-run switches arrive apart from the form's blocks and land in
+      -- their own (automation.dryRun, <feature>.dryRun); a Save without them keeps what's there.
+      core.applyDryRunFlags(cfg, parsed.dryRun)
       FX.writeFile(CONFIG_FILE, hs.json.encode(cfg, true))  -- creates if missing
       if parsed.gate == true then FX.writeFile(GATE_FLAG, "")
       else os.remove(GATE_FLAG) end
@@ -8340,6 +8448,18 @@ local function handleBridgeMsg(msg)
     print("[cc-dashboard] restored all hidden tiles")
     refresh()
     pcall(function() wv:evaluateJavaScript("send('open-hidden-view')") end)
+    return
+  end
+  if a == "open-trace" then
+    -- 2026-09-29: the Automation trace -- fleet-wide from the menu, one session from the detail
+    -- panel (payload.v). Newest first, repeats collapsed to ×N (core.collapseTrace).
+    local out = { entries = core.collapseTrace(FX._automation.trace, { limit = 400 }),
+                  dry = core.dryRunState(loadConfig()), kinds = {}, features = {}, focus = tostring(payload.v or "") }
+    for _, k in ipairs(core.AUTOMATION_KINDS) do out.kinds[k.kind] = k.label end
+    for _, f in ipairs(core.DRY_RUN_FEATURES) do out.features[f.feature] = f.label end
+    print("[cc-dashboard] 🔍 automation trace: " .. #out.entries .. " row(s)"
+      .. (out.focus ~= "" and (" (opened for " .. out.focus .. ")") or ""))
+    pcall(function() wv:evaluateJavaScript("window.ccTrace(" .. hs.json.encode(out) .. ")") end)
     return
   end
   if a == "open-features-view" then
@@ -10867,11 +10987,27 @@ local HTML = [[
 #insights{ position:fixed; inset:0; background:var(--bg-overlay); z-index:11; display:none; flex-direction:column; font-size:12px; }
 #insights.show{ display:flex; }
 /* F6 Diagnostics + F9 Features + F7 Cost: shared simple overlay shell */
-#doctor, #features, #cost, #hiddenview{ position:fixed; inset:0; background:var(--bg-overlay); z-index:12; display:none; flex-direction:column; font-size:12px; }
-#doctor.show, #features.show, #cost.show, #hiddenview.show{ display:flex; }
-#doctor .ov-head, #features .ov-head, #cost .ov-head, #hiddenview .ov-head{ display:flex; align-items:center; justify-content:space-between; padding:12px 16px; border-bottom:1px solid var(--border); font-weight:600; color:var(--text); }
-#doctor .ov-body, #features .ov-body, #cost .ov-body, #hiddenview .ov-body{ flex:1; overflow-y:auto; padding:14px 16px; }
-#doctor .ov-foot, #features .ov-foot, #cost .ov-foot, #hiddenview .ov-foot{ padding:10px 16px; border-top:1px solid var(--border); display:flex; gap:12px; align-items:center; color:var(--dim); font-size:11px; }
+#doctor, #features, #cost, #hiddenview, #trace{ position:fixed; inset:0; background:var(--bg-overlay); z-index:12; display:none; flex-direction:column; font-size:12px; }
+#doctor.show, #features.show, #cost.show, #hiddenview.show, #trace.show{ display:flex; }
+#doctor .ov-head, #features .ov-head, #cost .ov-head, #hiddenview .ov-head, #trace .ov-head{ display:flex; align-items:center; justify-content:space-between; padding:12px 16px; border-bottom:1px solid var(--border); font-weight:600; color:var(--text); }
+#doctor .ov-body, #features .ov-body, #cost .ov-body, #hiddenview .ov-body, #trace .ov-body{ flex:1; overflow-y:auto; padding:14px 16px; }
+#doctor .ov-foot, #features .ov-foot, #cost .ov-foot, #hiddenview .ov-foot, #trace .ov-foot{ padding:10px 16px; border-top:1px solid var(--border); display:flex; gap:12px; align-items:center; color:var(--dim); font-size:11px; }
+/* Automation trace (2026-09-29): acted / would (dry run) / refused, newest first */
+#trace .ov-foot select, #trace .ov-foot button{ background:var(--surface); color:var(--text-2); border:1px solid var(--border); border-radius:7px; padding:4px 8px; font-size:12px; }
+#trace .ov-foot span{ min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.tr-dry{ display:none; padding:8px 16px; border-bottom:1px solid var(--border); color:var(--st-approval); font-weight:600; }
+.tr-dry.on{ display:block; }
+.tr-row{ display:flex; align-items:baseline; gap:8px; padding:5px 0; border-bottom:1px solid var(--border); }
+.tr-ts{ color:var(--dim); font-variant-numeric:tabular-nums; white-space:nowrap; }
+.tr-oc{ font-size:10px; text-transform:uppercase; letter-spacing:.04em; padding:1px 6px; border-radius:5px; border:1px solid var(--border); white-space:nowrap; }
+.tr-acted .tr-oc{ color:var(--st-done); }
+.tr-would .tr-oc{ color:var(--st-approval); border-style:dashed; }
+.tr-refused .tr-oc{ color:var(--st-error); }
+.tr-kind{ color:var(--text-2); white-space:nowrap; }
+.tr-who{ color:var(--accent-text); white-space:nowrap; max-width:150px; overflow:hidden; text-overflow:ellipsis; }
+.tr-sum{ color:var(--text-2); flex:1; min-width:0; word-break:break-word; }
+.tr-why{ color:var(--dim); }
+.tr-n{ color:var(--text); font-weight:600; white-space:nowrap; }
 /* Project stacks: the Instances view -- a card over a backdrop (click outside or Esc
    closes it), compact enough for the 580x320 panel. Its own classes throughout: the
    themes style .s-* / .dot unscoped, which would pulse whole rows. */
@@ -11202,6 +11338,7 @@ local HTML = [[
           <button class="tm-item" onclick="menuPick('mcpskills')"><span class="tm-ic">🔌</span> MCPs &amp; Skills</button>
           <button class="tm-item" onclick="menuPick('policies')"><span class="tm-ic">🛡</span> Policy bundles</button>
           <button class="tm-item" onclick="menuPick('rules')"><span class="tm-ic">⚙️</span> Automation rules</button>
+          <button class="tm-item" onclick="menuPick('trace')"><span class="tm-ic">⚡</span> Automation trace</button>
           <button class="tm-item" onclick="menuPick('cost')"><span class="tm-ic">💰</span> Cost &amp; tokens</button>
           <button class="tm-item" onclick="menuPick('doctor')"><span class="tm-ic">🩺</span> Diagnostics</button>
           <button class="tm-item" onclick="menuPick('features')"><span class="tm-ic">✨</span> Features list</button>
@@ -11458,6 +11595,7 @@ local HTML = [[
       <button id="b-score" onclick="act('score')" title="Run-quality score (0-100) for this session from the audit ledger — penalizes errors, denied tools, loops, and forced respawns — plus a ⚠ when recent sessions trend down. Needs the Audit log on.">Score</button>
       <button id="b-verify" onclick="act('verify')" title="A read-only Sonnet review of this session's work, in the background: its merge request's commits, or its checkout against main (uncommitted work included). Shepherd scans the diff for red flags first. The verdict shows here and in the merge review.">🔎 Verify</button>
       <button id="b-timeline" onclick="openSessionTimeline()" title="Show this session's recorded activity timeline (needs the ledger enabled).">📜 Timeline</button>
+      <button id="b-trace" onclick="openTrace(selectedKey)" title="What automation did to this session, would do in a dry run, and was refused (and why) -- newest first, repeats as ×N.">⚡ Trace</button>
       <button id="b-export" onclick="exportSession()" title="Export this session: copy its transcript (.jsonl) + a meta.json (label, provider/model, lineage, activity counters) into ~/.claude/cc-exports and reveal it in Finder.">⤓ Export</button>
       <button id="b-scenario" onclick="captureScenario()" title="Capture as scenario: save a scrubbed window of this session's transcript (the 64KB Shepherd reads) to ~/.claude/cc-scenarios/ with a label to fill in -- what was really true at this moment -- so the detector corpus can measure it. Never written into a repo.">⌖ Capture as scenario</button>
     </div>
@@ -11614,7 +11752,6 @@ local HTML = [[
       <div class="s-help">The mechanism behind Headless approvals. Leave the policies below OFF for "approve everything by hand, headlessly." Turn a policy on only to let some requests auto-decide without you.</div>
       <div class="s-sec">Queue</div>
       <label class="s-row"><input type="checkbox" id="s-q-auto"> Auto-feed the next queued task when a session finishes</label>
-      <label class="s-row"><input type="checkbox" id="s-q-dry"> Dry-run (log what it would feed, don't send)</label>
       <label class="s-row"><input type="checkbox" id="s-q-route"> Project routing (4c-E): feed a project's queue to <i>any</i> free session of that project</label>
       <div class="s-help">Double opt-in: this global switch AND the per-project "route" toggle in the detail panel. Targets only sessions that just finished a turn (never one you're typing into); one feed per project per second; every routed feed is ledgered as by:"router". Flag a starving project after <input type="number" id="s-q-starve" class="s-num" min="0"> minutes with queued work but no free session (0 = off).</div>
       <div class="s-sec">Escalation (a waiting approval nags harder)</div>
@@ -11647,6 +11784,12 @@ local HTML = [[
       <div class="s-sec">Auto-Continue (API-error recovery)</div>
       <label class="s-row"><input type="checkbox" id="s-cont-auto"> Auto-resume a session frozen on an API error (types "continue")</label>
       <div class="s-help">⚠ Sends a keystroke without you. When a tile shows the magenta <code>Error</code> state (e.g. ECONNRESET, no Stop hook), wait <input type="number" id="s-cont-delay" class="s-num" min="5"> s then type <code>continue</code> to resume the same session. Capped at <input type="number" id="s-cont-max" class="s-num" min="1"> attempts per folder (a clean turn completion resets the budget) so a persistently dead connection can't loop.</div>
+
+      <div class="s-sec">Dry run (see what automation would do, without doing it)</div>
+      <label class="s-row"><input type="checkbox" id="s-dry-all"> All automation: record what it would do, act on nothing</label>
+      <div class="s-lbl">Or just these</div>
+      <div id="s-dry-list" class="s-dry-list"></div>
+      <div class="s-help">A dry run still waits for a session that can take the text, so what it records is what would really have happened. Every decision (acted, would, or refused and why) is listed in ☰ → ⚡ Automation trace, newest first with repeats as ×N, and goes to the audit ledger when that's on (<code>would_continue</code>, <code>would_feed</code>, …).</div>
 
       <div class="s-sec">Insights</div>
       <label class="s-row">Cap "time blocked on you" per approval at <input type="number" id="s-ins-block" class="s-num" min="0"> seconds</label>
@@ -11875,6 +12018,17 @@ local HTML = [[
     <div class="ov-head"><span>🩺 Diagnostics</span><button class="s-x" onclick="closeDoctor()">✕</button></div>
     <div class="ov-body" id="doc-body"></div>
     <div class="ov-foot"><button onclick="openDoctor()">Re-check</button><span>Health of hooks, the gate, jq, panel heartbeat &amp; ledger.</span></div>
+  </div>
+
+  <div id="trace">
+    <div class="ov-head"><span>⚡ Automation trace</span><button class="s-x" onclick="closeTrace()">✕</button></div>
+    <div id="tr-dry" class="tr-dry"></div>
+    <div class="ov-body" id="tr-body"></div>
+    <div class="ov-foot">
+      <select id="tr-session" onchange="renderTrace()"></select>
+      <button onclick="openTrace(document.getElementById('tr-session').value)">Refresh</button>
+      <span>What automation did, would do in a dry run, and was refused -- since Shepherd loaded.</span>
+    </div>
   </div>
 
   <div id="features">
@@ -13984,7 +14138,7 @@ local HTML = [[
     function settingsTabFor(t){ t=(t||"").trim(); function s(p){ return t.indexOf(p)===0; }
       if(s("Appearance")) return "appearance";
       if(s("Headless approvals")||s("Questions")||s("Approval gate")||s("Policies")||s("Always ask")) return "approvals";
-      if(s("Queue")||s("Escalation")||s("Graceful drain")||s("Respawn")||s("Auto-Continue")) return "automation";
+      if(s("Queue")||s("Escalation")||s("Graceful drain")||s("Respawn")||s("Auto-Continue")||s("Dry run")) return "automation";
       if(s("Risk score")||s("Same-folder")||s("Insights")||s("Observability")||s("Hooks")||s("Audit log")) return "observability";
       if(s("Editor window pop")||s("Spawn")||s("Claude Code Remote Control")||s("SSH status bridge")||s("Providers")) return "spawn";
       return "general"; }
@@ -14015,7 +14169,7 @@ local HTML = [[
       ck("s-autolaunch", autoOn);
       ck("s-gate", gateOn);
       ck("s-q-auto", cv(cfg,"queue.autofeed",false));
-      ck("s-q-dry",  cv(cfg,"queue.dryRun",false));
+      fillDryRunForm(cfg);   // 2026-09-29: automation.dryRun + one switch per feature (queue.dryRun among them)
       ck("s-q-route", cv(cfg,"queue.routing.enabled",false));
       val("s-q-starve", cv(cfg,"queue.routing.starveMinutes",0));
       ck("s-br-en",  cv(cfg,"bridge.enabled",false));
@@ -14223,7 +14377,7 @@ local HTML = [[
       function num(id,d){ var n=parseInt(document.getElementById(id).value,10); return isNaN(n)?d:n; }
       function txt(id){ return document.getElementById(id).value||""; }
       var config = {
-        queue: { autofeed: ck("s-q-auto"), dryRun: ck("s-q-dry"),
+        queue: { autofeed: ck("s-q-auto"),
                  routing: { enabled: ck("s-q-route"), starveMinutes: num("s-q-starve",0) } },
         escalation: { enabled: ck("s-e-en"), minutes: num("s-e-min",5), sound: ck("s-e-snd"),
                       push: ck("s-e-push"), pushTopic: txt("s-e-topic"),
@@ -14279,7 +14433,33 @@ local HTML = [[
         // wholesale; resolveAppearance tolerates any missing piece on read.
         appearance: readApForm()
       };
-      send("save-config", "", JSON.stringify({ config: config, gate: ck("s-gate"), autoLaunch: ck("s-autolaunch") }));
+      // dryRun: the automation dry-run switches, written into their own blocks (core.applyDryRunFlags)
+      send("save-config", "", JSON.stringify({ config: config, gate: ck("s-gate"), autoLaunch: ck("s-autolaunch"),
+                                               dryRun: readDryRunForm() }));
+    }
+    // ---- automation dry run (2026-09-29): one switch for all, one per core.DRY_RUN_FEATURES entry ----
+    var DRY_FEATURES = __DRY_FEATURES__;
+    function ensureDryRunForm(){
+      var box = document.getElementById("s-dry-list"); if(!box || box.children.length) return;
+      box.innerHTML = (DRY_FEATURES || []).map(function(f){
+        return '<label class="s-row"><input type="checkbox" id="s-dry-' + esc(f.feature) + '"> ' + esc(f.label) + '</label>';
+      }).join("");
+    }
+    function fillDryRunForm(cfg){
+      ensureDryRunForm();
+      document.getElementById("s-dry-all").checked = cv(cfg,"automation.dryRun",false) === true;
+      (DRY_FEATURES || []).forEach(function(f){
+        var el = document.getElementById("s-dry-" + f.feature);
+        if(el) el.checked = cv(cfg, f.feature + ".dryRun", false) === true;
+      });
+    }
+    function readDryRunForm(){
+      var out = { automation: !!document.getElementById("s-dry-all").checked };
+      (DRY_FEATURES || []).forEach(function(f){
+        var el = document.getElementById("s-dry-" + f.feature);
+        if(el) out[f.feature] = !!el.checked;
+      });
+      return out;
     }
     function saveSettings(){ persistSettings(); apSaved = readApForm(); closeSettings(); }
     // One-click: arm the gate + force all auto-policies OFF (or disarm when off),
@@ -16303,6 +16483,69 @@ local HTML = [[
       send("new-worktree-tab", INST.stackKey, m.text);
       closeNewTabForm();
     }
+    // ---- Automation trace (2026-09-29): what automation did, would do (dry run), was refused ----
+    // Lua answers open-trace with window.ccTrace({ entries (core.collapseTrace: newest first, ×N),
+    // dry (core.dryRunState), kinds, features, focus }). Every field -- session names, summaries,
+    // reasons -- came from a session or its queue, so each goes through esc().
+    var TRACE = { entries: [], dry: null, kinds: {}, features: {}, focus: "" };
+    function openTrace(key){ send("open-trace", key || ""); }
+    function closeTrace(){ document.getElementById("trace").classList.remove("show"); }
+    function traceClock(at){
+      var d = new Date((+at || 0) * 1000);
+      function p(n){ return (n < 10 ? "0" : "") + n; }
+      return p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+    }
+    function traceRowHtml(tr, kinds){
+      if(!tr || typeof tr !== "object") return "";
+      var oc = (tr.outcome === "would" || tr.outcome === "refused") ? tr.outcome : "acted";
+      var kind = (kinds && kinds[tr.kind]) || tr.kind || "?";
+      var n = Math.max(1, Math.floor(+tr.count || 1));
+      var when = traceClock(tr.at) + ((n > 1 && tr.first && +tr.first !== +tr.at) ? (" (since " + traceClock(tr.first) + ")") : "");
+      return '<div class="tr-row tr-' + oc + '">'
+        + '<span class="tr-ts">' + esc(when) + '</span>'
+        + '<span class="tr-oc">' + esc(oc) + '</span>'
+        + '<span class="tr-kind">' + esc(kind) + '</span>'
+        + '<span class="tr-who">' + esc(tr.name || tr.key || "") + '</span>'
+        + '<span class="tr-sum">' + esc(tr.summary || "")
+        + (tr.reason ? ' <i class="tr-why">— ' + esc(tr.reason) + '</i>' : '') + '</span>'
+        + (n > 1 ? '<span class="tr-n">×' + n + '</span>' : '')
+        + '</div>';
+    }
+    function traceDryLine(dry, features){
+      if(!dry || !dry.on) return "";
+      if(dry.all) return "Dry run is on for all automation: nothing below marked would was done.";
+      var names = (Array.isArray(dry.features) ? dry.features : []).map(function(f){ return (features && features[f]) || f; });
+      return "Dry run is on for: " + names.join(", ") + ".";
+    }
+    function renderTrace(){
+      var sel = document.getElementById("tr-session"), want = sel ? sel.value : "";
+      var list = Array.isArray(TRACE.entries) ? TRACE.entries : [];
+      var rows = list.filter(function(tr){ return tr && (!want || tr.key === want); });
+      var dryEl = document.getElementById("tr-dry");
+      var line = traceDryLine(TRACE.dry, TRACE.features);
+      dryEl.textContent = line;
+      dryEl.classList.toggle("on", line !== "");
+      document.getElementById("tr-body").innerHTML = rows.length
+        ? rows.map(function(tr){ return traceRowHtml(tr, TRACE.kinds); }).join("")
+        : '<div class="tl-empty">No automatic actions ' + (want ? "for this session " : "") + 'since Shepherd loaded.</div>';
+    }
+    window.ccTrace = function(payload){
+      TRACE = payload || {};
+      var sel = document.getElementById("tr-session");
+      var seen = {}, opts = '<option value="">All sessions</option>';
+      (Array.isArray(TRACE.entries) ? TRACE.entries : []).forEach(function(tr){
+        if(tr && tr.key && !seen[tr.key]){ seen[tr.key] = 1;
+          opts += '<option value="' + esc(tr.key) + '">' + esc(tr.name || tr.key) + '</option>'; }
+      });
+      if(TRACE.focus && !seen[TRACE.focus]){
+        var fit = findItem(TRACE.focus);
+        opts += '<option value="' + esc(TRACE.focus) + '">' + esc((fit && (fit.label || fit.name)) || TRACE.focus) + '</option>';
+      }
+      sel.innerHTML = opts;
+      sel.value = TRACE.focus || "";
+      document.getElementById("trace").classList.add("show");
+      renderTrace();
+    };
     // ---- F9: Features list overlay (plain-language what + why per feature) ----
     function openFeatures(){ send("open-features-view"); document.getElementById("features").classList.add("show"); }
     function closeFeatures(){ document.getElementById("features").classList.remove("show"); }
@@ -17865,6 +18108,7 @@ local HTML = [[
       else if(which === "mcpskills") openMcpSkills();
       else if(which === "policies") openPolicyEd();
       else if(which === "rules") openRuleEd();
+      else if(which === "trace") openTrace("");
       else if(which === "cost") openCost();
       else if(which === "doctor") openDoctor();
       else if(which === "features") openFeatures();
@@ -18664,6 +18908,8 @@ HTML = HTML:gsub("__DETAIL_TABS__", (hs.json.encode(core.DETAIL_TABS):gsub("%%",
 -- twin derives its emoji + label from ONE source -- no hand-maintained EV_VERB/EV_EMOJI
 -- partial maps to drift out of sync with cc-core.lua NARRATE.
 HTML = HTML:gsub("__NARRATE__", (hs.json.encode(core.NARRATE):gsub("%%", "%%%%")))
+-- 2026-09-29: the automation dry-run switches Settings shows, one per core.DRY_RUN_FEATURES entry.
+HTML = HTML:gsub("__DRY_FEATURES__", (hs.json.encode(core.DRY_RUN_FEATURES):gsub("%%", "%%%%")))
 -- Inject the ⌨ hotkey legend, sourced from the real HOTKEY_* bindings (so the
 -- displayed combos can't drift from what's actually bound) via core.hotkeyLegend.
 local legendGlobals = {
@@ -19078,16 +19324,37 @@ local function runRules(ruleSet, it, edgeKind)
     if not (r.once and ruleFired[mark]) then
       if r.once then ruleFired[mark] = true end
       local p = r.processor or {}
-      if p.kind == "log" then
-        ledgerFor(it, { type = "rule", rule = r.name, kind = edgeKind, by = "rule",
-                        processor = "log", note = p.text })
-      elseif p.kind == "relabel" and p.label and p.label ~= "" then
-        local lkey = it.projectKey or it.cwd
-        if lkey then
-          labels = core.setLabel(labels, lkey, p.label, it.name); FX.saveLabels(labels); it.label = p.label
-        end
-        ledgerFor(it, { type = "rule", rule = r.name, kind = edgeKind, by = "rule",
-                        processor = "relabel", to = p.label })
+      -- 2026-09-29: a log, relabel or feed acts here, through FX.automationAct (a dry run records
+      -- would_rule and changes nothing); a nudge or continue goes through FX.typeWhenReady's door.
+      local ruleSays = tostring(r.name) .. " on " .. tostring(edgeKind) .. ": " .. tostring(p.kind)
+      if p.kind == "log" or (p.kind == "relabel" and p.label and p.label ~= "")
+         or (p.kind == "feed" and p.text and p.text ~= "") then
+        FX.automationAct("rule", it, { summary = ruleSays .. ((p.kind == "relabel") and (" -> " .. tostring(p.label))
+          or (p.kind == "feed") and (" '" .. tostring(p.text):sub(1, 120) .. "'") or ""), by = "rule" }, function()
+          if p.kind == "log" then
+            ledgerFor(it, { type = "rule", rule = r.name, kind = edgeKind, by = "rule",
+                            processor = "log", note = p.text })
+          elseif p.kind == "relabel" then
+            local lkey = it.projectKey or it.cwd
+            if lkey then
+              labels = core.setLabel(labels, lkey, p.label, it.name); FX.saveLabels(labels); it.label = p.label
+            end
+            ledgerFor(it, { type = "rule", rule = r.name, kind = edgeKind, by = "rule",
+                            processor = "relabel", to = p.label })
+            if not lkey then return false, "no project to label" end
+          else
+            -- Enqueue a task onto the tile's queue; the existing auto-feed delivers it
+            -- when the session next reaches done/idle (no direct keystroke). Resolve the
+            -- key EXACTLY as the reader does -- FX.queueKeyFor -> core.queueKey SANITIZES
+            -- it (a raw projectKey/cwd has slashes, which both break the write path and
+            -- diverge from the key auto-feed/router read; review-caught silent data loss).
+            local qk = FX.queueKeyFor(it)
+            if not qk then return false, "no queue for this session" end
+            FX.writeQueue(qk, core.queuePush(FX.readQueue(qk), tostring(p.text)))
+            ledgerFor(it, { type = "rule", rule = r.name, kind = edgeKind, by = "rule",
+                            processor = "feed", text = tostring(p.text):sub(1, 200) })
+          end
+        end)
       elseif p.kind == "nudge" and p.text and p.text ~= "" then
         -- R2-08: never nudge a session sitting at its approval prompt. handleAction's
         -- nudge PASTES text AND submits, so broadcasting into a y/n approval prompt
@@ -19111,29 +19378,19 @@ local function runRules(ruleSet, it, edgeKind)
             ledgerFor(target, { type = "rule", rule = r.name, kind = edgeKind, by = "rule",
                                 processor = "nudge_skipped", reason = "approval",
                                 text = tostring(p.text):sub(1, 200) })
-            return
+            return false, "approval"
           end
           local acted = core.handleAction(FX, target, "nudge", core.shepherdSays(p.text))
           ledgerFor(target, { type = "rule", rule = r.name, kind = edgeKind, by = "rule",
                               processor = (acted == "nudge") and "nudge" or "nudge_skipped",
                               text = tostring(p.text):sub(1, 200) })
-        end, { onRefused = function(why)
+          if acted ~= "nudge" then return false, "not delivered" end
+        end, { summary = ruleSays .. " '" .. tostring(p.text):sub(1, 120) .. "'",
+               onRefused = function(why)
           ledgerFor(target, { type = "rule", rule = r.name, kind = edgeKind, by = "rule",
                               processor = "nudge_skipped", reason = why,
                               text = tostring(p.text):sub(1, 200) })
         end })
-        end
-      elseif p.kind == "feed" and p.text and p.text ~= "" then
-        -- Enqueue a task onto the tile's queue; the existing auto-feed delivers it
-        -- when the session next reaches done/idle (no direct keystroke). Resolve the
-        -- key EXACTLY as the reader does -- FX.queueKeyFor -> core.queueKey SANITIZES
-        -- it (a raw projectKey/cwd has slashes, which both break the write path and
-        -- diverge from the key auto-feed/router read; review-caught silent data loss).
-        local qk = FX.queueKeyFor(it)
-        if qk then
-          FX.writeQueue(qk, core.queuePush(FX.readQueue(qk), tostring(p.text)))
-          ledgerFor(it, { type = "rule", rule = r.name, kind = edgeKind, by = "rule",
-                          processor = "feed", text = tostring(p.text):sub(1, 200) })
         end
       elseif p.kind == "continue" then
         -- Resume an errored/stuck session by typing "continue" (delivery-gated,
@@ -19171,7 +19428,6 @@ function FX._refreshBody()
   -- bulk actions, and L2 attachment matching — all later in the tick.)
   core.applyGroups(list, groups)
   local autofeed   = core.config(cfg, "queue.autofeed", false) == true
-  local queueDry   = core.config(cfg, "queue.dryRun", false) == true
   local routingOn  = core.config(cfg, "queue.routing.enabled", false) == true  -- 4c-E
   local autoTitleOn = core.config(cfg, "autoTitle.enabled", false) == true  -- L5 derived tile titles
   local loopOn      = core.config(cfg, "escalation.loop.enabled", false) == true  -- L5 loop watchdog
@@ -19596,10 +19852,9 @@ function FX._refreshBody()
     if not drained and not it.stale and not it.remote and not routedHere
        and not core.keystrokeBlocked(it)
        and core.shouldFeed(pv and pv.status, it.status, q, autofeed) then
-      if queueDry then
-        local task = core.queuePop(q)
-        print("[cc-queue] DRY-RUN would feed '" .. tostring(task) .. "' to " .. it.name)
-      else
+      do
+        -- 2026-09-29: queue.dryRun (and automation.dryRun) are judged by FX.automationAct in the
+        -- typist's slot, like every other automatic send: a dry run records would_feed, pops nothing.
         -- Serialized on the shared injection tail (R3 #2): the paste is a
         -- multi-second keystroke ladder, and refresh() firing it mid-chain
         -- would land the task text in whichever session holds focus. The pop
@@ -19625,10 +19880,12 @@ function FX._refreshBody()
             if pre then ledgerFor(it, { type = "model_change", from = pre.from, to = pre.model, by = "auto", reason = pre.reason }); it.model = pre.model; FX.patchStatus(it.key, { model = pre.model }) end
           else
             print("[cc-queue] feed skipped (no window match) -- task kept queued")
+            FX.automationRefuse("no window match")
           end
           ledgerFor(it, { type = commit.event, task = tostring(task):sub(1, 200), by = "autofeed" })
           end)
-        end, { extraStagger = it.auto_model and 0.8 or 0 })   -- DR6: reserve extra stagger for the /model preface ladder
+        end, { extraStagger = it.auto_model and 0.8 or 0,   -- DR6: reserve extra stagger for the /model preface ladder
+               summary = "feed '" .. tostring(core.queuePeek(q) or ""):sub(1, 120) .. "'" })
       end
     end
 
@@ -19724,10 +19981,15 @@ function FX._refreshBody()
       -- successor (new socket + window id) keeps charging the SAME budget entry
       -- and maxRetries actually binds across generations (env CC_SHEPHERD_LINEAGE
       -- -> cc-status.sh budget_lineage -> core.budgetKey preference).
+      -- 2026-09-29: through FX.automationAct -- respawn.dryRun / automation.dryRun records
+      -- would_respawn and launches nothing (the dead tile stays, like spawn.live's own dry run).
+      FX.automationAct("respawn", it, { summary = "relaunch in " .. tostring(rs.project) .. " (" .. tostring(rs.editor)
+          .. ", attempt " .. tostring(step.attempts) .. "/" .. tostring(autoRespawnMax) .. ")", by = "auto-respawn" }, function()
       local launched = FX.spawnSession(rs.editor, rs.project, nil, rs.permissionMode,
         rs.providerId or "", { lineage = core.budgetKey(it), except = it.key }, false, rs.model)
       ledgerFor(it, { type = "auto_respawn", outcome = launched and "ok" or "dryrun",
         cwd = rs.project, editor = rs.editor, provider = rs.providerId, attempt = step.attempts })
+      if not launched then return false, "not launched (spawn.live off, or no launch command)" end
       if launched then
         FX.removeStatus(it.key)  -- drop the dead tile; the relaunch makes a fresh one
         -- The freshly-charged attempts[budgetKey] now backs NO tile until the relaunch's
@@ -19740,6 +20002,7 @@ function FX._refreshBody()
         -- (nothing left for the budget to gate).
         FX._respawnHold[core.budgetKey(it)] = now + autoRespawnStale
       end
+      end)
     elseif step.wouldFire and rs and not rs.canRespawn then
       -- L6: a death that WOULD auto-respawn but can't -- previously a silent print.
       -- Ledger it once (the edge is debounced by stepAutoRespawn) so "failed
@@ -19774,7 +20037,9 @@ function FX._refreshBody()
         local acted = core.handleAction(FX, target, "continue", core.shepherdSays("continue"))
         ledgerFor(target, { type = "rule", rule = rname, kind = redge, by = "rule",
                             processor = (acted == "continue") and "continue" or "continue_skipped" })
-      end, { onRefused = function(why)
+        if acted ~= "continue" then return false, "not delivered" end
+      end, { summary = tostring(rname) .. " on " .. tostring(redge) .. ": continue",
+             onRefused = function(why)
         ledgerFor(target, { type = "rule", rule = rname, kind = redge, by = "rule",
                             processor = "continue_skipped", reason = why })
       end })
@@ -19796,7 +20061,9 @@ function FX._refreshBody()
         ledgerFor(ct, { type = "auto_continue",
                         attempt = (acted == "continue") and autoContinueState.attempts[bk] or nil,
                         outcome = (acted == "continue") and "ok" or "skipped" })
-      end)
+        if acted ~= "continue" then return false, "not delivered" end
+      end, { summary = "continue after " .. tostring(it.error_reason or "an error")
+               .. " (attempt " .. tostring((cstep.attempts or 0) + 1) .. "/" .. tostring(autoContinueMax) .. ")" })
     end
 
     -- L5 post-run self-summary (opt-in): on a fresh done edge, type a brief
@@ -19817,7 +20084,11 @@ function FX._refreshBody()
           local landed = FX.pasteIntoWindow(winTarget(su), { text = core.shepherdSays(core.summaryPrompt(su)) })
           core.promoteSummary(summaryState, su.key, landed and true or false)
           if landed and ledgerOn then ledgerFor(su, { type = "summary" }) end
-        end, { onRefused = function() core.promoteSummary(summaryState, su.key, false) end })
+          if not landed then return false, "not delivered" end
+        end, { summary = "ask for a summary of the turn",
+               onRefused = function() core.promoteSummary(summaryState, su.key, false) end,
+               -- 2026-09-29: a dry run typed nothing, so the next real done is no summary's own
+               onDry = function() core.promoteSummary(summaryState, su.key, false) end })
       end
     else
       -- Feature toggled OFF: clear any guard left armed mid-episode so re-enabling
@@ -19966,10 +20237,9 @@ function FX._refreshBody()
         local item
         for _, m in ipairs(members) do if m.key == pick.key then item = m; break end end
         if item then
-          if queueDry then
-            local task = core.queuePop(q)
-            print("[cc-route] DRY-RUN would feed '" .. tostring(task) .. "' to " .. tostring(item.name))
-          else
+          do
+            -- 2026-09-29: queue.dryRun is judged in the router's slot by FX.automationAct (would_route,
+            -- nothing popped); the pending marker holds the member until its status moves or it expires.
             routePending[item.key] = now
             -- #34: FX.feedGuard -- a kitty delivery pumps the run loop mid-slot, so
             -- a nested tick/bridge feed would double-pop the same head. A skipped
@@ -19986,6 +20256,7 @@ function FX._refreshBody()
               -- let the next tick re-peek + re-pick against the reordered head.
               if not core.routeFeedMatches(item, core.queuePeek(freshQ), members) then
                 print("[cc-route] head changed under the router slot -- refusing mismatched feed, task kept queued")
+                FX.automationRefuse("the queue's head changed")
                 routePending[item.key] = nil; return
               end
               -- R2-20: re-check the chosen member is STILL free at dispatch time. The
@@ -19996,10 +20267,11 @@ function FX._refreshBody()
               local fresh = FX.liveStatusFor(item.key)
               if fresh and not core.sessionFree(fresh, { now = now, pendingTimeout = core.ROUTE_PENDING_TIMEOUT }) then
                 print("[cc-route] member busy under the router slot -- task kept queued")
+                FX.automationRefuse("busy")
                 routePending[item.key] = nil; return
               end
               local task, q2 = core.queuePop(freshQ)
-              if not task then routePending[item.key] = nil; return end
+              if not task then FX.automationRefuse("queue empty"); routePending[item.key] = nil; return end
               print("[cc-route] feeding '" .. tostring(task) .. "' to " .. tostring(item.name))
               local pre = FX.autoModelPreface(item, task)   -- DR6 (nil unless opted-in + a different tier)
               local commit = core.queueFeedCommit(FX.feedTask(winTarget(item), renderFeed(task, item), pre and pre.cmd))
@@ -20009,11 +20281,13 @@ function FX._refreshBody()
                 if pre then ledgerFor(item, { type = "model_change", from = pre.from, to = pre.model, by = "auto", reason = pre.reason }); item.model = pre.model; FX.patchStatus(item.key, { model = pre.model }) end
               else
                 print("[cc-route] feed skipped (no window match) -- task kept queued")
+                FX.automationRefuse("no window match")
                 routePending[item.key] = nil  -- session stays eligible
               end
               ledgerFor(item, { type = commit.event, task = tostring(task):sub(1, 200), by = "router" })
               end) then routePending[item.key] = nil end
             end, { extraStagger = item.auto_model and 0.8 or 0,   -- DR6: reserve extra stagger for the /model preface ladder
+                   summary = "feed '" .. tostring(core.queuePeek(q) or ""):sub(1, 120) .. "'",
                    onRefused = function() routePending[item.key] = nil end })
           end
         end

@@ -4090,5 +4090,98 @@ do
   eq("resume: a fresh install resumes at the reset", okd and type(dcfg) == "table" and (dcfg.resume or {}).enabled, true)
 end
 
+-- ---- automation dry run and trace (2026-09-29) ----
+-- Build program unit 14. tests/automation-trace.test.lua drives FX.automationAct and the Trace;
+-- this pins that EVERY automatic effect goes through it: the typed ones inside FX.typeWhenReady's
+-- slot, the rest at their call sites -- and that each of those effects has no second, unwrapped
+-- copy elsewhere in the file.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  local act = src:match("\nfunction FX%.automationAct%(kind, it, detail, fn%)(.-)\nend\n") or ""
+  check("trace: FX.automationAct exists", act ~= "")
+  local dryAt = act:find("core.automationDryRun(loadConfig(), kind)", 1, true)
+  local fnAt = act:find("pcall(fn)", 1, true)
+  check("trace: it asks the dry-run switches before it runs the effect",
+        dryAt ~= nil and fnAt ~= nil and dryAt < fnAt)
+  check("trace: a dry run returns without the effect", act:find("return false, core.AUTOMATION_DRY", 1, true) ~= nil
+        and act:find("return false, core.AUTOMATION_DRY", 1, true) < fnAt)
+  local twr = src:match("\nfunction FX%.typeWhenReady%(it, typist, fn, opts%)(.-)\nend\n") or ""
+  check("trace: FX.typeWhenReady types only through FX.automationAct",
+        twr:find("FX.automationAct(kind, it, detail, fn)", 1, true) ~= nil
+        and twr:find("core.AUTOMATION_TYPISTS[typist]", 1, true) ~= nil
+        and not twr:find("\n      fn()", 1, true))
+  -- every automated typist has a kind, so its dry-run switch and its Trace rows are the right ones
+  local typists, unknown = 0, {}
+  for typist in src:gmatch('FX%.typeWhenReady%([%w_%.]+,%s*"([^"]+)"') do
+    typists = typists + 1
+    if not core.AUTOMATION_TYPISTS[typist] then unknown[#unknown + 1] = typist end
+  end
+  check("trace: every FX.typeWhenReady sender has a kind  (" .. typists .. " senders; unknown: "
+        .. table.concat(unknown, ",") .. ")", typists >= 9 and #unknown == 0)
+  -- the direct effects: each sits inside FX.automationAct(<kind>, ...) and appears once
+  local function wrapped(kind, needle)
+    local count, pos = 0, 0
+    while true do
+      local s = src:find(needle, pos + 1, true)
+      if not s then break end
+      count, pos = count + 1, s
+    end
+    local ok, from = false, 0
+    while true do
+      local a = src:find('FX.automationAct("' .. kind .. '"', from + 1, true)
+      if not a then break end
+      local b = src:find(needle, a, true)
+      if b and b - a < 3000 then
+        local between = src:sub(a, b)
+        if not between:find("\nfunction ", 1, true) and not between:find("\nlocal function ", 1, true) then ok = true end
+      end
+      from = a
+    end
+    check("trace: " .. kind .. " -- `" .. needle .. "` runs inside FX.automationAct and nowhere else  (copies=" .. count .. ")",
+          ok and count == 1)
+  end
+  wrapped("tabless_end", "FX.endSession(it.key, { auto = true")
+  wrapped("respawn", "local launched = FX.spawnSession(rs.editor, rs.project, nil, rs.permissionMode,")
+  wrapped("rule", 'processor = "log", note = p.text')
+  wrapped("rule", 'processor = "relabel", to = p.label')
+  wrapped("rule", 'processor = "feed", text = tostring(p.text):sub(1, 200)')
+  wrapped("mailbox", "FX.writeFileAtomic(path, m.body)")
+  wrapped("resume", "caps[core.resumeCapKey(key, plan.window)] = now")
+  wrapped("resume", 'FX.push(topic, "Claude Shepherd", tostring(it.label or it.name or key)')
+  check("trace: queue.dryRun has no side door of its own (it goes through the one door now)",
+        src:find("queueDry", 1, true) == nil)
+  -- a refusal the readiness door makes lands in the Trace too, now and at send time
+  check("trace: a readiness refusal is a refused row, now and at send time",
+        twr:find('FX.automationNote(kind, it, "refused", why, detail)', 1, true) ~= nil
+        and twr:find('FX.automationNote(kind, it, "refused", why2, detail)', 1, true) ~= nil)
+  check("trace: an effect can say it didn't happen (FX.automationRefuse)",
+        src:find("\nfunction FX.automationRefuse(why)", 1, true) ~= nil
+        and src:find('FX.automationRefuse("no window match")', 1, true) ~= nil)
+  -- Settings: one switch for all, one per feature, saved into their own blocks
+  check("trace: Settings has the all-automation switch", src:find('id="s-dry-all"', 1, true) ~= nil)
+  check("trace: ...and one per feature, from core.DRY_RUN_FEATURES", src:find("var DRY_FEATURES = __DRY_FEATURES__;", 1, true) ~= nil
+        and src:find('HTML:gsub("__DRY_FEATURES__"', 1, true) ~= nil)
+  check("trace: the queue's old dry-run box moved into that section", src:find('id="s-q-dry"', 1, true) == nil)
+  check("trace: Save sends the switches", src:find("dryRun: readDryRunForm()", 1, true) ~= nil)
+  check("trace: ...and the handler writes them after the overlay", src:find("core.applyDryRunFlags(cfg, parsed.dryRun)", 1, true) ~= nil)
+  check("trace: the section sits on the Automation tab", src:find('s("Dry run")', 1, true) ~= nil)
+  -- the Trace: fleet-wide from the menu, per session from the detail panel
+  check("trace: the menu opens it", src:find("menuPick('trace')", 1, true) ~= nil and src:find('which === "trace"', 1, true) ~= nil)
+  check("trace: the detail panel opens it for the selected session", src:find('onclick="openTrace(selectedKey)"', 1, true) ~= nil)
+  check("trace: its overlay exists", src:find('<div id="trace">', 1, true) ~= nil)
+  check("trace: the handler serves the collapsed trace", src:find('if a == "open-trace" then', 1, true) ~= nil
+        and src:find("core.collapseTrace(FX._automation.trace", 1, true) ~= nil)
+  local sinks = io.open(ROOT .. "tests/escaping.test.sh"):read("*a")
+  check("trace: the escaping sweep knows the trace rows (tr.)", sinks:find("|tr)", 1, true) ~= nil)
+  local df = io.open(ROOT .. "defaults/cc-config.json", "r")
+  local dsrc = df and df:read("*a") or ""
+  if df then df:close() end
+  local okd, dcfg = pcall(core.json.decode, dsrc)
+  eq("trace: a fresh install acts for real (automation.dryRun off)",
+     okd and type(dcfg) == "table" and (dcfg.automation or {}).dryRun, false)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

@@ -59,6 +59,7 @@ The panel re-reads the file within about a second (except `hotkeys`, which need 
 | `queue`, `templates`, `automodel` | Task queue, routing, templates, model auto-routing | [Automation](automation.md) |
 | `respawn`, `autoContinue`, `resume`, `drain`, `prune`, `cleanup`, `tabless` | Recovery, resuming at a usage limit's reset, and cleanup | [Automation](automation.md), [Controls](controls.md#sessions-with-no-tab) |
 | `escalation`, `notifications`, `focus`, `summary`, `rules`, `schedules` | Nags, banners, focus pop, rules, routines | [Automation](automation.md) |
+| `automation` (and each feature's `dryRun`) | Dry run for all automation, or one feature at a time | [Automation](automation.md#dry-run-and-the-automation-trace) |
 | `autoTitle`, `prStatus`, `risk`, `collision`, `subagents`, `status` | Tile observability | [Fleet](fleet.md#session-observability) |
 | `ledger`, `decisions`, `insights` | The audit ledger and the views built on it | [Usage and cost](usage-and-cost.md) |
 | `usage`, `context`, `pricing`, `commits` | Plan bars, limit alerts, context bar, cost, commit counts | [Usage and cost](usage-and-cost.md) |
@@ -70,6 +71,7 @@ A starting point for the most common switches:
 
 ```json
 {
+  "automation": { "dryRun": false },
   "queue":      { "autofeed": false, "dryRun": false,
                   "routing": { "enabled": false, "starveMinutes": 0 } },
   "escalation": { "enabled": false, "minutes": 5, "sound": false, "push": false, "pushTopic": "" },

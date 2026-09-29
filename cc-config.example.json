@@ -7,6 +7,11 @@
     "archiveAfterDays": 10
   },
 
+  "automation": {
+    "_comment": "Dry run for ALL automation (auto-continue, auto-feed, routing, rules, respawn, the self-summary, resume at the reset, ending tab-less leftovers, mailbox messages, the /rc sweep): each records what it would do -- ☰ → Automation trace, and would_<kind> in the ledger -- and acts on nothing. Each feature also has its own dryRun (queue.dryRun below, autoContinue.dryRun, rules.dryRun, ...). Settings → Automation → Dry run switches them; a Save keeps them.",
+    "dryRun": false
+  },
+
   "queue": {
     "autofeed": false,
     "dryRun": false,
