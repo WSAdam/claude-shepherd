@@ -8442,7 +8442,9 @@ do
   -- 2026-09-28: 17 -> 18 for the worktree fence ("fence", flagged new).
   -- 2026-09-29: 18 -> 19 for the session mailbox ("mailbox", flagged new).
   -- 2026-09-29: 19 -> 20 for the merge checker ("checker", flagged new).
-  eq("FEATURES: the 20 new features are flagged", newCount, 20)
+  -- 2026-09-29: 20 -> 21 for what each session is working on ("workingon", flagged new).
+  eq("FEATURES: the 21 new features are flagged", newCount, 21)
+  check("FEATURES: lists what each session is working on", keys.workingon == true)
   check("FEATURES: lists the session mailbox", keys.mailbox == true)
   check("FEATURES: lists the merge checker", keys.checker == true)
   check("FEATURES: lists handoff notes", keys.handoffs == true)
@@ -12832,6 +12834,92 @@ do
   check("repo gate: a Save that doesn't send merge keeps merge.repoGate", kept.merge and kept.merge.repoGate == true)
   kept = core.overlayConfig({ merge = { repoGate = true, closeTab = false } }, { merge = { closeTab = false } })
   check("repo gate: a Save that rebuilds merge keeps merge.repoGate", kept.merge and kept.merge.repoGate == true)
+end
+
+-- ---- what each session is working on (2026-09-29) ----
+-- Build program unit 10: the card says what the session is working on, from the newest
+-- `last-prompt` record in the tail the tick reads (it holds Adam's latest typed prompt), plus the
+-- tool running now and the skill in use.
+do
+  local function L(t) return core.json.encode(t) .. "\n" end
+  local function lp(text) return L({ type = "last-prompt", lastPrompt = text, leafUuid = "u", sessionId = "s" }) end
+  local function user(text) return L({ type = "user", message = { role = "user", content = text } }) end
+  local function asst(text, skill)
+    return L({ type = "assistant", attributionSkill = skill, message = { role = "assistant", content = { { type = "text", text = text } } } })
+  end
+
+  local tail = user("an older prompt") .. lp("an older typed prompt") .. asst("ok")
+    .. lp("Fix the tile layout so the badges wrap\nand the second line is ignored") .. asst("on it")
+  eq("workingOnLabel: the newest last-prompt record wins", core.workingOnLabel(tail), "Fix the tile layout so the badges wrap")
+  eq("workingOnLabel: ...over the user records around it", core.workingOnLabel(user("typed") .. lp("the typed one")), "the typed one")
+  local long = string.rep("word ", 20)
+  local got = core.workingOnLabel(lp(long))
+  check("workingOnLabel: cut to 48 bytes like an auto-title  (" .. tostring(got) .. ")",
+        got ~= nil and #got <= 48 and got:sub(-3) == "\226\128\166")
+  eq("workingOnLabel: Shepherd's own [shepherd] sends are skipped for the typed one before",
+     core.workingOnLabel(lp("Refactor the merge queue") .. asst("x") .. lp("[shepherd] continue")), "Refactor the merge queue")
+  eq("workingOnLabel: only [shepherd] sends -> nothing", core.workingOnLabel(lp("[shepherd] continue")), nil)
+  eq("workingOnLabel: a bare slash command is skipped too",
+     core.workingOnLabel(lp("Wire the chips") .. lp("/compact")), "Wire the chips")
+  eq("workingOnLabel: a last-prompt with no lastPrompt (a session never typed to) is nothing",
+     core.workingOnLabel(L({ type = "last-prompt", leafUuid = "u" }) .. asst("x")), nil)
+  eq("workingOnLabel: a last-prompt quoted inside a tool result is not one",
+     core.workingOnLabel(L({ type = "user", message = { role = "user", content = { { type = "tool_result",
+       content = '{"type":"last-prompt","lastPrompt":"quoted"}' } } } })), nil)
+  -- a fixed-size read can end mid-record: the torn last line is never decoded or used
+  eq("workingOnLabel: a torn last line is ignored for the whole one before it",
+     core.workingOnLabel(lp("the whole one") .. '{"type":"last-prompt","lastPrompt":"half a rec'), "the whole one")
+  eq("workingOnLabel: a tail that is only a torn line is nothing", core.workingOnLabel('{"type":"last-prompt","lastPrompt":"half'), nil)
+  eq("workingOnLabel: nil / empty", core.workingOnLabel(nil), nil)
+  eq("workingOnLabel: empty string", core.workingOnLabel(""), nil)
+
+  eq("workingOnSkill: the newest assistant record's attributionSkill",
+     core.workingOnSkill(asst("a", "deep-research") .. asst("b", "dataviz") .. lp("x")), "dataviz")
+  eq("workingOnSkill: the newest assistant record has none -> no skill in use",
+     core.workingOnSkill(asst("a", "dataviz") .. asst("b")), nil)
+  eq("workingOnSkill: a torn assistant line is ignored",
+     core.workingOnSkill(asst("a", "dataviz") .. '{"type":"assistant","attributionSkill":"torn'), "dataviz")
+  eq("workingOnSkill: nil", core.workingOnSkill(nil), nil)
+
+  -- the fallbacks' text: a batch unit is never typed to, and its first prompt names the unit
+  local start = 'Start unit feat/x in its own worktree: call EnterWorktree with name "x", then rename its branch.\n\nTask: ...'
+  eq("workingOnText: a unit's start prompt -> the unit", core.workingOnText(start), "unit feat/x")
+  eq("workingOnText: ...also inside the driver's cross-session message",
+     core.workingOnText('Another Claude session sent a message:\n<cross-session-message from="uds:/tmp/a.sock" from-name="drv">\n'
+       .. start .. '\n</cross-session-message>'), "unit feat/x")
+  eq("workingOnText: ...and as the status file records it (no preamble)",
+     core.workingOnText('<cross-session-message from="uds:/tmp/a.sock">\n' .. start), "unit feat/x")
+  eq("workingOnText: a resumed unit -> its worktree",
+     core.workingOnText("Resume work in the worktree at /r/app/.claude/worktrees/fix-y: call EnterWorktree with path /r/app/.claude/worktrees/fix-y"),
+     "resume fix-y")
+  eq("workingOnText: another session's message reads as its text",
+     core.workingOnText('<cross-session-message from="uds:/tmp/a.sock">\nRebase on main and rerun the suite\n</cross-session-message>'),
+     "Rebase on main and rerun the suite")
+  eq("workingOnText: [shepherd] is Shepherd's, not the work", core.workingOnText("[shepherd] continue"), nil)
+  eq("workingOnText: a task notification is no prompt", core.workingOnText("<task-notification>done</task-notification>"), nil)
+  eq("workingOnText: blank", core.workingOnText("  \n "), nil)
+  eq("workingOnText: nil", core.workingOnText(nil), nil)
+
+  -- the card's view: label with its fallbacks, the tool while working, the skill
+  local now = 1000
+  local v = core.workingOnView({ status = "working", last_prompt = "status-file prompt", tool_name = "Bash", tool_started_at = 988 },
+                               now, { label = "from the tail", skill = "dataviz", first = "first prompt" })
+  check("workingOnView: the tail's label, the tool in flight and the skill",
+        v and v.label == "from the tail" and v.tool == "Bash" and v.toolSecs == 12 and v.skill == "dataviz")
+  v = core.workingOnView({ status = "done", last_prompt = "Ship the docs page" }, now, { first = "first prompt" })
+  eq("workingOnView: no typed prompt in the tail -> the status file's last_prompt", v and v.label, "Ship the docs page")
+  v = core.workingOnView({ status = "done", last_prompt = "[shepherd] continue" }, now, { first = start })
+  eq("workingOnView: ...a [shepherd] one falls through to the first prompt (a batch unit)", v and v.label, "unit feat/x")
+  v = core.workingOnView({ status = "idle" }, now, { first = start })
+  eq("workingOnView: nothing else -> the first prompt", v and v.label, "unit feat/x")
+  v = core.workingOnView({ status = "done", tool_name = "Bash", tool_started_at = 900 }, now, { label = "x" })
+  eq("workingOnView: a tool stamp on a finished session is no tool in flight", v and v.tool, nil)
+  v = core.workingOnView({ status = "working", tool_name = "Bash", tool_started_at = 900, interruptedAt = 950 }, now, { label = "x" })
+  eq("workingOnView: ...nor on an interrupted turn (no PostToolUse ever cleared it)", v and v.tool, nil)
+  v = core.workingOnView({ status = "working", tool_name = "Read", tool_started_at = 999 }, now, {})
+  check("workingOnView: a tool with no label still makes a view", v and v.label == nil and v.tool == "Read")
+  eq("workingOnView: nothing at all -> nil", core.workingOnView({ status = "idle" }, now, {}), nil)
+  eq("workingOnView: no item -> nil", core.workingOnView(nil, now, {}), nil)
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))

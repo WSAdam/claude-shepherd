@@ -584,6 +584,38 @@ function FX.backgroundJobsFor(it, now, maxAge)
   return core.liveBackgroundJobs(c.list, now, maxAge)
 end
 
+-- 2026-09-29: what each session is working on (build program unit 10; core.workingOnView). The
+-- label and skill are read again only when the transcript's mtime moves -- one stat a tick -- from
+-- the tail the tick already read; a session the tick read no tail for (idle, or stale) reads its
+-- own, once per change. The first prompt, the fallback for a session never typed to (a batch
+-- unit), is read once per transcript: it never changes. The tool in flight is the status file's.
+FX._workingOn = {}   -- key -> { path, mt, label, skill, first (false = none) }
+function FX.workingOnFor(it, tail, now)
+  local key, path = it and it.key, it and it.transcript_path
+  if not key then return nil end
+  if type(path) ~= "string" or path == "" or it.remote then
+    FX._workingOn[key] = nil
+    return core.workingOnView(it, now, {})
+  end
+  local mt = hs.fs.attributes(path, "modification")
+  local c = FX._workingOn[key]
+  if not (c and c.path == path and c.mt == mt) then
+    local text = tail or FX.readTail(path, ACTIVITY_BYTES) or ""
+    c = { path = path, mt = mt, label = core.workingOnLabel(text), skill = core.workingOnSkill(text),
+          first = (c and c.path == path) and c.first or nil }
+    FX._workingOn[key] = c
+  end
+  if not c.label and not core.workingOnText(it.last_prompt) and c.first == nil then
+    c.first = FX.sessionFirstPrompt(it) or false
+  end
+  return core.workingOnView(it, now, { label = c.label, skill = c.skill, first = c.first or nil })
+end
+function FX.reapWorkingOn(list)
+  local live = {}
+  for _, it in ipairs(list or {}) do if it.key then live[it.key] = true end end
+  core.reapUnbacked(FX._workingOn, live)
+end
+
 -- DR3 (Rewind tab): stream a transcript, returning ONLY its file-history-snapshot
 -- lines joined (those checkpoint lines are a small fraction -- ~hundreds of KB -- of a
 -- multi-MB transcript). On-demand (tab select), never the tick. nil on an unreadable path.
@@ -10343,6 +10375,11 @@ local HTML = [[
   #d-dot  { width:10px; height:10px; border-radius:50%; background:var(--dc,var(--dim)); flex:0 0 auto; }
   #d-name { font-size:14px; font-weight:700; color:var(--text-strong); }
   #d-status { font-size:11px; color:var(--muted); margin-left:auto; }
+  #d-working { display:none; font-size:12px; color:var(--text-2); margin:5px 0 0 18px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .wo-chip { display:inline-block; font-size:10px; line-height:14px; padding:0 5px; margin-left:5px; border-radius:7px;
+             border:1px solid currentColor; vertical-align:1px; font-weight:400; }
+  .wo-tool { color:var(--st-working); }
+  .wo-skill { color:var(--accent-text); }
   #d-shared { display:none; font-size:11px; color:var(--warn); margin:6px 0 0; line-height:1.35; }
   #d-empty { display:none; font-size:11px; color:var(--muted); margin:6px 0 0; line-height:1.35; }
   #d-empty button { font-size:11px; font-family:inherit; margin-left:6px; }
@@ -11121,6 +11158,7 @@ local HTML = [[
       <span id="d-wt"></span>
       <span id="d-status"></span>
     </div>
+    <div id="d-working"></div>
     <div id="d-empty"><span id="de-text"></span> <button id="b-closeempty" onclick="if(selectedKey) send('close-empty', selectedKey, 'all')" title="Close the never-used chats in this window (they're all named Claude Code)">Close them</button></div>
     <!-- Batch driving (2026-09-11): a batch this session proposes or drives; filled with textContent
          only; the note and the checkbox are never rebuilt by a re-render. -->
@@ -15245,6 +15283,13 @@ local HTML = [[
       el.style.display = "block";
     }
     function answerAsk(qi, oi){ if(selectedKey) send("answer", selectedKey, String(oi)); }
+    // 2026-09-29: what it's working on, under the name row (rebuilt only when it changes)
+    function renderWorking(it){
+      var el = document.getElementById("d-working"); if(!el) return;
+      var h = workingOnHtml(it);
+      if(el._woh !== h){ el._woh = h; el.innerHTML = h; }
+      el.style.display = h ? "block" : "none";
+    }
     // Small badges: detected editor + live permission mode + effort + model.
     function renderMeta(it){
       var el = document.getElementById("d-meta"), bits = [];
@@ -15510,6 +15555,7 @@ local HTML = [[
       }
       document.getElementById("d-status").textContent =
         statusWords(it) + (it.since ? " - " + fmtAge(it.since) : "") + (it.stale && !bgRunning(it) ? " - stale" : "") + backoffTail(it);
+      renderWorking(it);
       var pend = document.getElementById("d-pending");
       if(it.pending && it.pending.summary){
         pend.textContent = "Wants: " + it.pending.summary + (it.gate === "waiting" ? "  (hands-free approve)" : "");
@@ -18048,6 +18094,9 @@ local HTML = [[
       // A SPEECH glyph, not an arrow: an arrow here read as "this session is
       // running something", which is what the green bg-run pill means.
       var meta = it.sessTitle ? ("\ud83d\udcac " + it.sessTitle) : "";
+      // 2026-09-29: what it's working on (label + chips) takes the line only when nothing below
+      // claims it, and leads it (metaHtml): it is the part that differs from card to card.
+      var wo = "";
       if(it.askHeld && it.askLine){
         meta = it.askLine;   // a question held for Adam: answered on the card (cc-ask.sh, 2026-09-11)
       } else if(st === "approval" && it.pending && it.pending.summary){
@@ -18061,6 +18110,8 @@ local HTML = [[
         meta = it.fleet.line;   // a batch this session proposes or drives (core.batchView)
       } else if(it.tabless){
         meta = TABLESS_T;   // a claude process with no tab in its window (2026-09-11)
+      } else {
+        wo = workingOnHtml(it);
       }
       // 2026-09-17: a heads-up says WHY it isn't his to act on, so the card explains itself
       // instead of leaving a quiet ring he has to interpret.
@@ -18087,11 +18138,31 @@ local HTML = [[
            + '<span class="srow"><span class="dot"></span>'
            + '<span class="label">'+(age ? '<span class="age">'+esc(age)+'</span> ' : '')+label+stackBranchChip(it)+'</span></span>'
            + badgesHtml(it)
-           + (meta ? '<span class="meta">'+esc(meta)+'</span>' : '')
+           + ((meta || wo) ? '<span class="meta">'+(wo ? metaHtml(meta, wo) : esc(meta))+'</span>' : '')
            + stackAlsoHtml(it)
            + ctxBarHtml(it)
            + stackBtnHtml(it)
            + '</div>';
+    }
+    // 2026-09-29: what the session is working on (it.workingOn, core.workingOnView): the label,
+    // then the tool running now and the skill in use as chips. The label leads: a default-width
+    // card has room for about 25 characters, and chips first clipped it away. A session or its
+    // transcript wrote every field, so each one goes through esc().
+    function workingOnHtml(it){
+      var wk = it && it.workingOn;
+      if(!wk || typeof wk !== "object") return "";
+      var h = "";
+      if(wk.label) h += '<span class="wo-label" title="Its latest prompt">'+esc(wk.label)+'</span>';
+      if(wk.tool) h += '<span class="wo-chip wo-tool" title="The tool running now">▶ '+esc(wk.tool)+'</span>';
+      if(wk.skill) h += '<span class="wo-chip wo-skill" title="The skill in use">✦ '+esc(wk.skill)+'</span>';
+      return h;
+    }
+    // The card's meta line as HTML: the working-on HTML (wo) first, then the line's text escaped
+    // (the chat title of a doubled-up project, then the extras). On a narrow card the ellipsis
+    // clips the end; a chat title leading clipped the working-on line away whole.
+    function metaHtml(meta, wo){
+      if(!wo) return esc(meta);
+      return wo + (meta ? " · " + esc(meta) : "");
     }
     // 2026-09-17: risk / PR / background-agents used to be loose siblings, each taking a tile
     // row of its own in the cards theme. One badges row now holds them -- emitted ONLY when at
@@ -19117,6 +19188,9 @@ function FX._refreshBody()
     -- nothing is ended on it (the safe side). Same tail as above: no extra read.
     -- Always assigned, so a value in the status file itself can never stand in for the transcript.
     it.interruptedAt = (tail and it.status == "working") and core.transcriptInterrupted(tail) or nil
+    -- 2026-09-29: what the session is working on, the tool running and the skill in use (build
+    -- program unit 10). After the interrupt stamp: an interrupted tool is no tool in flight.
+    it.workingOn = FX.workingOnFor(it, tail, now)
 
     -- L5 loop watchdog (off by default): flag a working session repeating the SAME
     -- tool call (e.g. re-running a failing command). Reuses the tail already read; a
@@ -19774,6 +19848,8 @@ function FX._refreshBody()
     core.reapUnbacked(starvedSince, liveQk)
     core.reapUnbacked(starvedAlerted, liveQk)
   end
+
+  FX.reapWorkingOn(list)   -- 2026-09-29: ended sessions leave the working-on cache
 
   -- Errored tiles were detected mid-loop (status overridden to "error"); re-sort so they
   -- surface near approvals -- parseStatusList sorted before we'd read any transcript.

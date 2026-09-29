@@ -4033,5 +4033,30 @@ do
         and (src:match("#d%-merge %.dm%-gatefile { ([^}]*)}") or ""):find("var(--warn)", 1, true) ~= nil)
 end
 
+-- ---- what each session is working on (2026-09-29) ----
+-- Build program unit 10. tests/core.test.lua drives core.workingOnLabel / workingOnView and
+-- tests/working-on.test.js renders the card; this pins the tick's wiring: the label comes from the
+-- tail the tick already read, and the transcript is read again only when its mtime moves.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("workingOn: the tick stamps it.workingOn from the tail it already read",
+        src:find("it.workingOn = FX.workingOnFor(it, tail, now)", 1, true) ~= nil)
+  local fn = src:match("\nfunction FX%.workingOnFor%(it, tail, now%)(.-)\nend\n") or ""
+  check("workingOn: FX.workingOnFor exists", fn ~= "")
+  check("workingOn: cached by the transcript's mtime", fn:find('hs.fs.attributes(path, "modification")', 1, true) ~= nil
+        and fn:find("c.mt == mt", 1, true) ~= nil)
+  check("workingOn: the tick's own tail first -- a read of its own only when the tick had none",
+        fn:find("tail or FX.readTail(path, ACTIVITY_BYTES)", 1, true) ~= nil)
+  check("workingOn: the first prompt is read once per transcript (a batch unit's only prompt)",
+        fn:find("FX.sessionFirstPrompt(it)", 1, true) ~= nil and fn:find("c.first == nil", 1, true) ~= nil)
+  check("workingOn: remote tiles never read a local file", fn:find("it.remote", 1, true) ~= nil)
+  check("workingOn: the view is core's", fn:find("core.workingOnView(it, now,", 1, true) ~= nil)
+  check("workingOn: ended sessions are reaped from the cache", src:find("FX.reapWorkingOn(list)", 1, true) ~= nil)
+  local sinks = io.open(ROOT .. "tests/escaping.test.sh"):read("*a")
+  check("workingOn: the escaping sweep knows it.workingOn", sinks:find("workingOn", 1, true) ~= nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

@@ -62,6 +62,33 @@ Instances rows and the Stream Deck show an errored session as **Error** in magen
   ([Usage and cost](usage-and-cost.md#context-fullness-bar)), and on an approval the **exact
   command** being requested (for example `wants: npm test -- --watch`).
 
+### What each session is working on
+
+Each card's meta line says what its session is working on, so a row of cards that all read
+**Working** can be told apart without opening them:
+
+- **The label** is your latest prompt to the session, cut to its first line and 48 characters.
+  Claude Code keeps it in the transcript's `last-prompt` records, so it survives long turns: the
+  prompt itself can be far back, and the label still reads it from the last 64 KB that Shepherd
+  already reads each second. Shepherd's own sends (`[shepherd] …`) and bare slash commands
+  (`/compact`) don't count; the prompt before them does.
+- A session nobody has typed to reads the last prompt its status file recorded, and then its first
+  prompt. A batch unit, which only ever gets its driver's messages, reads as its unit
+  (*unit feat/working-on-label*), and a resumed one as *resume &lt;worktree&gt;*. Another
+  session's message reads as its text.
+- **▶ Bash** is the tool running right now, while the turn is working. It goes when the
+  tool returns, and an interrupted turn shows none.
+- **✦ dataviz** is the skill in use: Claude Code stamps it on every assistant message a
+  skill produced, and the newest message decides, so it goes when the session moves on.
+
+The label leads the line and the chips follow it, then the 💬 chat title of a project with two
+sessions. A default-width card has room for about 25 characters, so it shows the label and clips
+the rest; a wider panel shows the chips too. Anything more urgent takes the line: a held question,
+an approval's `wants:`, an error, a merge, a batch, or a missing tab. The detail panel shows the
+whole line, chips included, under the session's name, whatever the card shows. The transcript is
+parsed again only when it changes; a remote (bridged) session shows its status file's prompt and
+tool only.
+
 ## Project cards and Instances
 
 The grid shows **one card per project**, not one per session. It's built for the parallel-worktree

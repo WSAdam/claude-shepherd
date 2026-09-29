@@ -8048,6 +8048,97 @@ function M.toolInFlight(item, now)
   return { name = tostring(item.tool_name or "a tool"), seconds = (tonumber(now) or 0) - started }
 end
 
+-- ---- What each session is working on (2026-09-29, build program unit 10) ----
+-- Claude Code appends a `last-prompt` record ({type:"last-prompt", lastPrompt}) to the transcript
+-- as the session goes, and lastPrompt always holds the newest prompt TYPED into it -- Adam's, or
+-- Shepherd's own [shepherd] sends, which are skipped for the one before. A session only ever
+-- messaged by another session has last-prompt records with no lastPrompt at all. Whole lines only,
+-- walked with a plain find (a `*` pattern over a torn last line goes quadratic), newest first.
+local function wholeLines(text)
+  local lines, pos = {}, 1
+  while true do
+    local nl = text:find("\n", pos, true)
+    if not nl then break end   -- what's left is a torn line
+    lines[#lines + 1] = text:sub(pos, nl - 1)
+    pos = nl + 1
+  end
+  return lines
+end
+
+-- The card's words for a prompt: nil for Shepherd's own sends, a bare slash command, or wrapper
+-- text that is no prompt (a task notification); another session's message reads as its body, and
+-- the prompt that starts a batch unit's tab names the unit ("unit feat/x"). Cut like an auto-title.
+function M.workingOnText(text)
+  if type(text) ~= "string" then return nil end
+  local s = text:gsub("^%s+", "")
+  if s:sub(1, #M.SHEPHERD_TAG) == M.SHEPHERD_TAG then return nil end
+  s = s:gsub("^Another Claude session sent a message:%s*", "")
+  if s:sub(1, 23) == "<cross-session-message " or s:sub(1, 23) == "<cross-session-message>" then
+    local close = s:find(">", 1, true)
+    s = s:sub(close + 1)
+    local stop = s:find("</cross-session-message>", 1, true)
+    if stop then s = s:sub(1, stop - 1) end
+    s = s:gsub("^%s+", "")
+  end
+  local unit = s:match("^Start unit (%S+) in its own worktree: call EnterWorktree with name ")
+  if unit then return M.deriveAutoTitle("unit " .. unit, 48) end
+  local wt = s:match("^Resume work in the worktree at (.-): call EnterWorktree with path ")
+  if wt then return M.deriveAutoTitle("resume " .. (wt:gsub("/+$", ""):match("([^/]+)$") or wt), 48) end
+  if s:sub(1, 1) == "<" or s:match("^/[%w%-_:]+%s*$") then return nil end
+  return M.deriveAutoTitle(s, 48)
+end
+
+-- The newest typed prompt in a transcript tail, as the card's words (core.workingOnText), or nil.
+function M.workingOnLabel(tail)
+  if type(tail) ~= "string" or tail == "" then return nil end
+  local lines = wholeLines(tail)
+  for i = #lines, 1, -1 do
+    local line = lines[i]
+    if line:sub(1, 1) == "{" and line:find('"type":"last-prompt"', 1, true) and line:find('"lastPrompt":', 1, true) then
+      local ok, e = pcall(function() return M.json.decode(line) end)
+      if ok and type(e) == "table" and e.type == "last-prompt" then
+        local label = M.workingOnText(e.lastPrompt)
+        if label then return label end
+      end
+    end
+  end
+  return nil
+end
+
+-- The skill in use: the newest assistant record's attributionSkill (Claude Code stamps it on
+-- every record a skill produced). The newest one without it means no skill is in use now.
+function M.workingOnSkill(tail)
+  if type(tail) ~= "string" or tail == "" then return nil end
+  local lines = wholeLines(tail)
+  for i = #lines, 1, -1 do
+    local line = lines[i]
+    if line:sub(1, 1) == "{" and line:find('"type":"assistant"', 1, true) then
+      local ok, e = pcall(function() return M.json.decode(line) end)
+      if ok and type(e) == "table" and e.type == "assistant" and not e.isSidechain then
+        local s = type(e.attributionSkill) == "string" and e.attributionSkill:match("^%s*(.-)%s*$") or ""
+        return s ~= "" and s or nil
+      end
+    end
+  end
+  return nil
+end
+
+-- The card's working-on view: { label, tool, toolSecs, skill }, or nil when there is nothing to
+-- say. parts = { label (core.workingOnLabel of the tail), skill, first (the session's first
+-- prompt) }. The label falls back on the status file's last_prompt, then on the first prompt --
+-- a batch unit is never typed to, and its first prompt names the unit. The tool is the one in
+-- flight (core.toolInFlight), only while the turn is working and wasn't interrupted: an
+-- interrupted tool never gets the PostToolUse that clears its stamp.
+function M.workingOnView(it, now, parts)
+  if type(it) ~= "table" then return nil end
+  parts = type(parts) == "table" and parts or {}
+  local label = parts.label or M.workingOnText(it.last_prompt) or M.workingOnText(parts.first)
+  local tool = (it.status == "working" and not it.interruptedAt) and M.toolInFlight(it, now) or nil
+  local skill = type(parts.skill) == "string" and parts.skill ~= "" and parts.skill or nil
+  if not (label or tool or skill) then return nil end
+  return { label = label, tool = tool and tool.name or nil, toolSecs = tool and math.max(0, tool.seconds) or nil, skill = skill }
+end
+
 -- toolCapSec (optional) is what makes the watchdog honest: the transcript does not grow until a
 -- tool RETURNS, so a nine-minute Bash was indistinguishable from a wedged session and read as
 -- hung. A tool in flight explains the silence -- until the tool has itself run past the cap, at
@@ -15176,6 +15267,9 @@ M.FEATURES = {
   { key = "turns", cat = "See what's happening", new = true, title = "How each turn ended",
     what = "A finished card says how its last turn went, read from its transcript: done (a TODO line ticked or a commit), made progress (edits, commands, test runs), only planned, did nothing, blocked (it stopped on a denial) or needs follow-up (a question, or a plan waiting for you). Shepherd's own sends start with [shepherd], so a turn it started never reads as yours.",
     why = "\"Ready for you\" alone doesn't say whether anything happened; now a glance tells you which finished cards to open first." },
+  { key = "workingon", cat = "See what's happening", new = true, title = "What each session is working on",
+    what = "Every card says what its session is working on -- your latest prompt to it, cut to one line -- with a chip for the tool running right now and one for the skill in use. Shepherd's own [shepherd] sends don't count, and a batch unit, which only ever gets its driver's messages, reads as its unit (unit feat/x). The detail panel shows the same line under the session's name.",
+    why = "A row of cards all reading Working doesn't say which is which; now each one tells you what it's on without opening it." },
 
   -- ---- Make it yours ----
   { key = "theme", cat = "Make it yours", new = true, title = "Visual theme editor",

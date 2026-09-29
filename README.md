@@ -36,6 +36,8 @@ Every feature below has a reference page one click away. The panel lists the sam
   ready, or errored.
 - [**How each turn ended**](docs/fleet.md#statuses): a finished card says whether its last turn got
   done, made progress, only planned, did nothing, got blocked, or needs follow-up.
+- [**What each session is working on**](docs/fleet.md#what-each-session-is-working-on): every card
+  says what its session is on, from your latest prompt, with the tool running now and the skill in use.
 - [**Project cards & instances**](docs/fleet.md#project-cards-and-instances): a repo and its
   worktrees share one card that leads with the instance that needs you; its corner button lists
   every instance.

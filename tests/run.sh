@@ -290,6 +290,15 @@ echo ""
 echo "== node: the merge checker's line in the review (behavioral, runs the shipped checkerText) =="
 node "$DIR/checker-view.test.js" || fail=1
 echo ""
+echo "== node: each card says what its session is working on, the tool running and the skill in use (behavioral, runs the shipped workingOnHtml) =="
+node "$DIR/working-on.test.js" || fail=1
+echo ""
+echo "== lua: the working-on label is read from the tick's own tail, again only when the transcript changes (behavioral, runs the shipped FX.workingOnFor) =="
+lua "$DIR/working-on.test.lua" || fail=1
+echo ""
+echo "== browser: the working-on line keeps its label on one line inside a default-width card (real Chromium, geometry) =="
+node "$DIR/working-on.browser.test.js" || fail=1
+echo ""
 
 if [ "$fail" -eq 0 ]; then
   echo "✅ ALL GREEN"

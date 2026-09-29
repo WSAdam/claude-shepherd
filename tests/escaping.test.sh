@@ -47,7 +47,9 @@ assert_eq 'esc() encodes "'  "yes" "$(has '.replace(/"/g,"&quot;")')"
 # written by a session -- it.merge.* and an Instances row's `mg.` never reach HTML raw.
 # 2026-09-11 (Shepherd answers): a held question and its answers were written by a session --
 # it.askLine / it.askView and an Instances row's `ak.` never reach HTML raw either.
-SINK_RE="'[[:space:]]*\+[[:space:]]*(it\.(group|label|name|cwd|projectKey|status|branch|stackName|stackKey|sessTitle|wtRoot|merge|askLine|askView)\b|\b(im|iw|mg|ak)\.[A-Za-z]+\b|\bg\b)"
+# 2026-09-29 (working-on label): the label, tool and skill come from a transcript --
+# it.workingOn and workingOnHtml's `wk.` never reach HTML raw.
+SINK_RE="'[[:space:]]*\+[[:space:]]*(it\.(group|label|name|cwd|projectKey|status|branch|stackName|stackKey|sessTitle|wtRoot|merge|askLine|askView|workingOn)\b|\b(im|iw|mg|ak|wk)\.[A-Za-z]+\b|\bg\b)"
 raw_sinks="$(grep -nE "$SINK_RE" "$DASH" || true)"
 assert_eq "no user field concatenated RAW into panel HTML (must be esc()'d)" "" "$raw_sinks"
 
