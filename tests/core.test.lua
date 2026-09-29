@@ -10829,6 +10829,21 @@ do
        .. "\n" .. core.TEST_LOCK_TOKEN .. "\n"), "couldntRun")
   eq("...and directly, without make in between",
      core.mergeGateOutcome(core.TEST_LOCK_EXIT, core.TEST_LOCK_TOKEN), "couldntRun")
+  -- 2026-09-29: this repo's suite prints "command not found" while it RUNS (install.test.sh
+  -- proves a node-less machine), so every red gate here read couldn't-run and retried forever.
+  eq("a red suite that ran reads red even when its log mentions 'command not found'",
+     core.mergeGateOutcome(2, table.concat({
+       "== tests/install.test.sh ==",
+       "./bootstrap.sh: line 41: node: command not found",
+       "ok   - make setup names a missing node in the tooling check",
+       "-- install.test.sh: 212 run, 0 failed --",
+       "== tests/core.test.lua ==",
+       "FAIL - a queued gate keeps the request in 'checking', not ready",
+       "-- core.test.lua: 4012 run, 1 failed --",
+       "❌ SOME TESTS FAILED",
+     }, "\n")), "failed")
+  eq("...and a log with no test output at all still couldn't run",
+     core.mergeGateOutcome(2, "make: lua: command not found\nmake: *** [lint] Error 127\n"), "couldntRun")
   -- ...and it is RETRIED: the usual reason is Adam's own hand-run of the same suite holding the
   -- lock, which clears in minutes. A verdict that never retried would wedge the request until
   -- the unit pushed a new commit -- turning a passing branch into a permanent "not ready".

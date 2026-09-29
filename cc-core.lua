@@ -2391,9 +2391,19 @@ function M.mergeGateOutcome(code, output)
   if code == 0 then return "passed" end
   local s = tostring(output or "")
   if s:find(M.TEST_LOCK_TOKEN, 1, true) or s:find(M.GATE_NORUN_TOKEN, 1, true) then return "couldntRun" end
-  if s:lower():find("command not found", 1, true) then return "couldntRun" end
+  -- "command not found" only means the gate couldn't START when no test ran: a suite that ran
+  -- can print it from a test that proves a missing tool (install.test.sh does).
+  if s:lower():find("command not found", 1, true) and not M.gateLogRanTests(s) then return "couldntRun" end
   if code and M.GATE_NORUN_CODES[code] then return "couldntRun" end
   return "failed"
+end
+
+-- Did any test runner report in this gate log? Our runners' lines: "ok   - …", "FAIL - …",
+-- "not ok …" (TAP), and the per-file "-- f: N run, M failed --" summary.
+function M.gateLogRanTests(s)
+  s = "\n" .. tostring(s or "")
+  return s:find("\nok +%- ") ~= nil or s:find("\nFAIL %- ") ~= nil or s:find("\nnot ok ") ~= nil
+    or s:find("%d+ run, %d+ failed") ~= nil
 end
 
 -- A gate that COULDN'T run is retried; a verdict is not. The usual reason for couldn't-run is
