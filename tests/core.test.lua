@@ -12711,5 +12711,128 @@ do
   check("overlayConfig: a Save keeps verify.*", kept.verify and kept.verify.onMerge == true and kept.verify.maxBudgetUsd == 2)
 end
 
+-- ---- repo-declared merge gate (2026-09-29, build program unit 19) ----
+-- A repo can name its own merge gate in a `.worktree-check` at its root (Voice-Agent's does:
+-- `cd "$(dirname "$0")"`, then its type check and suite). With merge.repoGate on, a request that no
+-- merge.gates entry matches runs the BASE branch's copy -- read with git from refs/heads/<base>,
+-- never from the worktree, so a unit can't rewrite its own gate -- with the worktree as cwd.
+do
+  local shep = { projectKey = "repo:/Users/adam/Programming/claude-instance-manager/.git" }
+  local cfgBoth = { merge = { repoGate = true, gates = {
+    { match = { project = "repo:*claude-instance-manager*" }, command = "make lint && make test", timeoutSeconds = 1800 } } } }
+  local g = core.mergeGateFor(cfgBoth, shep)
+  check("repo gate: a configured merge.gates entry wins over the repo's own gate",
+        g and g.command == "make lint && make test" and not g.repo)
+  g = core.mergeGateFor({ merge = { repoGate = true, gates = {
+    { match = { project = "repo:/r/Other/.git" }, command = "make test" } } } }, shep)
+  check("repo gate: no entry matches + merge.repoGate on -> the repo-declared gate",
+        g and g.repo == true and g.timeoutSeconds == core.MERGE_GATE_TIMEOUT)
+  g = core.mergeGateFor({ merge = { repoGate = true } }, shep)
+  check("repo gate: ...also with no merge.gates at all", g and g.repo == true)
+  check("repo gate: merge.repoGate off -> no gate, exactly as before",
+        core.mergeGateFor({ merge = { repoGate = false } }, shep) == nil
+        and core.mergeGateFor({ merge = {} }, shep) == nil and core.mergeGateFor({}, shep) == nil)
+  check("repo gate: only a literal true opts in", core.mergeGateFor({ merge = { repoGate = "yes" } }, shep) == nil)
+
+  -- the read: the BASE branch's blob, by the repo's common dir -- the worktree is never named
+  local rc = core.repoGateReadCmd("/r/A/.git", "main")
+  check("repo gate: read from refs/heads/<base> through the repo's git dir  (" .. tostring(rc) .. ")",
+        rc and rc:find("git --git-dir='/r/A/.git'", 1, true) ~= nil
+        and rc:find("'refs/heads/main:.worktree-check'", 1, true) ~= nil
+        and rc:find("ls-tree 'refs/heads/main' -- '.worktree-check'", 1, true) ~= nil)
+  check("repo gate: ...never from a working tree (no -C, no plain path read)",
+        rc:find("git -C", 1, true) == nil and rc:find("cat ", 1, true) == nil)
+  check("repo gate: ...and the blob is cut at a cap, so a huge file can't flood the panel",
+        rc:find("head -c " .. (core.REPO_GATE_MAX_BYTES + 1), 1, true) ~= nil)
+  check("repo gate: no git dir or no base -> no command", core.repoGateReadCmd("", "main") == nil and core.repoGateReadCmd("/r/A/.git", "") == nil)
+
+  local script = '#!/bin/sh\nset -eu\ncd "$(dirname "$0")"\n@@none\nexec make test\n'
+  local out = "@@entry\n100755 blob 0123abcd\t.worktree-check\n@@script\n" .. script
+  local rg = core.repoGate(out, "main", "/r/A/.claude/worktrees/it's", "/s/repogate-1")
+  check("repo gate: base has a .worktree-check -> a gate to run", rg.kind == "script")
+  eq("repo gate: ...its content is the base's blob, byte for byte (an @@ line in it is just text)", rg.content, script)
+  eq("repo gate: ...named for where it came from", rg.command, "main's .worktree-check")
+  eq("repo gate: ...labelled as the repo's own", rg.label, "repo-declared gate")
+  -- the run line starts with a guard: a scratch copy that has gone must never run as an empty
+  -- script (`sh -c ""` exits 0, a vacuous pass) -- it reads as couldn't-run instead
+  local function guard(p)
+    return "[ -r '" .. p .. "' ] || { echo " .. core.GATE_NORUN_TOKEN .. ": the scratch copy of the gate is gone; exit "
+      .. core.TEST_LOCK_EXIT .. "; }; "
+  end
+  eq("repo gate: a shell gate runs the scratch copy's text with $0 = the checkout's own .worktree-check",
+     rg.run, guard("/s/repogate-1") .. "'/bin/sh' -c \"$(cat '/s/repogate-1')\" '/r/A/.claude/worktrees/it'\\''s/.worktree-check'")
+  eq("repo gate: ...and the file it came from is where FX writes the copy", rg.script, "/s/repogate-1")
+  eq("repo gate: base has no .worktree-check -> no gate, as today",
+     core.repoGate("@@entry\n@@script\n", "main", "/r/A/wt", "/s/x").kind, "none")
+  eq("repo gate: a directory called .worktree-check is not a gate",
+     core.repoGate("@@entry\n040000 tree 0123abcd\t.worktree-check\n@@script\n", "main", "/r/A/wt", "/s/x").kind, "none")
+  for _, bad in ipairs({ "@@nobase\n", "", "garbage", false }) do
+    eq("repo gate: git didn't answer (" .. tostring(bad) .. ") -> unknown, never 'no gate'",
+       core.repoGate(bad or nil, "main", "/r/A/wt", "/s/x").kind, "unknown")
+  end
+  local link = core.repoGate("@@entry\n120000 blob 0123abcd\t.worktree-check\n@@script\nscripts/gate.sh",
+                             "main", "/r/A/wt", "/s/x")
+  check("repo gate: a symlink is refused (its target would be the worktree's own file)  (" .. tostring(link.why) .. ")",
+        link.kind == "refused" and (link.why or ""):find("symlink", 1, true) ~= nil)
+  check("repo gate: ...and a refusal reads as couldn't-run, never as a red suite",
+        link.run:find(core.GATE_NORUN_TOKEN, 1, true) ~= nil
+        and core.mergeGateOutcome(core.TEST_LOCK_EXIT, core.GATE_NORUN_TOKEN .. ": " .. link.why) == "couldntRun")
+  local big = core.repoGate("@@entry\n100755 blob 0123abcd\t.worktree-check\n@@script\n"
+                            .. string.rep("x", core.REPO_GATE_MAX_BYTES + 1), "main", "/r/A/wt", "/s/x")
+  check("repo gate: a file past the cap is refused, never run cut short", big.kind == "refused")
+
+  -- the interpreter: a shell reads the text with $0 set; anything else runs the scratch copy
+  eq("repo gate: #!/usr/bin/env bash", core.repoGateRun("#!/usr/bin/env bash\necho hi\n", "/s/g", "/r/A"),
+     guard("/s/g") .. "'/usr/bin/env' 'bash' -c \"$(cat '/s/g')\" '/r/A/.worktree-check'")
+  eq("repo gate: shebang flags are kept", core.repoGateRun("#!/bin/bash -eu\r\necho hi\n", "/s/g", "/r/A/"),
+     guard("/s/g") .. "'/bin/bash' '-eu' -c \"$(cat '/s/g')\" '/r/A/.worktree-check'")
+  eq("repo gate: no shebang runs under sh", core.repoGateRun("make test\n", "/s/g", "/r/A"),
+     guard("/s/g") .. "'/bin/sh' -c \"$(cat '/s/g')\" '/r/A/.worktree-check'")
+  eq("repo gate: another interpreter runs the scratch copy by path",
+     core.repoGateRun("#!/usr/bin/env -S deno run -A\nconsole.log(1)\n", "/s/g", "/r/A"),
+     guard("/s/g") .. "'/usr/bin/env' '-S' 'deno' 'run' '-A' '/s/g'")
+  eq("repo gate: ...python too", core.repoGateRun("#!/usr/bin/python3\nprint(1)\n", "/s/g", "/r/A"),
+     guard("/s/g") .. "'/usr/bin/python3' '/s/g'")
+
+  -- the gate's shell line runs `run`, while `command` stays the name the review shows
+  local gcmd = core.mergeGateCmd({ command = "main's .worktree-check", run = "'/bin/sh' -c \"$(cat '/s/g')\" '/r/A/.worktree-check'" },
+                                 "/r/A/wt", "/tmp/cc/g.log")
+  check("repo gate: mergeGateCmd runs the built line, not the review's name for it  (" .. tostring(gcmd) .. ")",
+        gcmd and gcmd:find("cd '/r/A/wt'", 1, true) ~= nil and gcmd:find("-c \"$(cat '/s/g')\"", 1, true) ~= nil
+        and gcmd:find("main's .worktree-check", 1, true) == nil)
+
+  -- the flag: a diff that touches .worktree-check (its own uncapped facts section)
+  local req = { commonDir = "/r/A/.git", worktree = "/r/A/.claude/worktrees/x", branch = "feat/x", base = "main",
+                nonce = "n-x", phase = "requested", summary = "s", tests = "t", at = 1 }
+  check("repo gate: the facts ask git whether the diff touches .worktree-check",
+        core.mergeFactsCmd(req):find("diff --name-only main...feat/x -- '.worktree-check'", 1, true) ~= nil)
+  local factsOut = "@@listed\n@@head\nfeat/x\n@@sha\nabc123\n@@status\n@@ahead\n1\n@@behind\n0\n@@commits\n@@stat\n@@files\nM\tapp.lua\n@@markers\n"
+  check("repo gate: a diff that leaves it alone isn't flagged", not core.parseMergeFacts(factsOut .. "@@gatefile\n", req).gateFile)
+  local touched = core.parseMergeFacts(factsOut .. "@@gatefile\n.worktree-check\n", req)
+  check("repo gate: a diff that edits it is", touched.gateFile == true)
+  local v = core.mergeView(req, { ready = false, checking = true, problems = {} }, touched, {},
+                           { state = "running", command = "main's .worktree-check", repo = true, label = "repo-declared gate" })
+  eq("repo gate: the review labels the gate", v.gate and v.gate.label, "repo-declared gate")
+  check("repo gate: ...and flags the edit, saying the run used the base's copy  (" .. tostring(v.gateFile) .. ")",
+        type(v.gateFile) == "string" and v.gateFile:find(".worktree-check", 1, true) ~= nil
+        and v.gateFile:find("main's copy", 1, true) ~= nil)
+  local vc = core.mergeView(req, { ready = true, problems = {} }, touched, {}, { state = "passed", command = "make test" })
+  check("repo gate: a configured gate carries no repo label", vc.gate and vc.gate.label == nil)
+  check("repo gate: ...but the edit is still flagged", type(vc.gateFile) == "string")
+  check("repo gate: no flag when the diff leaves it alone",
+        core.mergeView(req, { ready = true, problems = {} }, core.parseMergeFacts(factsOut, req), {}, nil).gateFile == nil)
+  eq("repo gate: 'reading' the base's copy is still checking, never ready",
+     core.mergeReadiness(req, core.parseMergeFacts(factsOut, req), nil, { state = "reading", command = "main's .worktree-check" }).checking, true)
+  local sel = core.cleanupVerdict({ key = "k", status = "done", editor = "vscode", host_window = "85500", since = 1790339400,
+                                    merge = { phase = "merged", gate = { state = "reading" } } }, 1790343000, 12)
+  check("repo gate: a merged session still reading its base's gate isn't offered to Close selected", sel == false)
+
+  -- merge.repoGate is file-only: a Save keeps it, even if the form ever rebuilds `merge`
+  local kept = core.overlayConfig({ merge = { repoGate = true } }, { gate = { tools = "Bash" } })
+  check("repo gate: a Save that doesn't send merge keeps merge.repoGate", kept.merge and kept.merge.repoGate == true)
+  kept = core.overlayConfig({ merge = { repoGate = true, closeTab = false } }, { merge = { closeTab = false } })
+  check("repo gate: a Save that rebuilds merge keeps merge.repoGate", kept.merge and kept.merge.repoGate == true)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

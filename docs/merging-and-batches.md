@@ -123,6 +123,26 @@ through your login shell, once per request per commit (a new commit in the workt
   absent field is a wildcard; `project` is the session's project key). With no `gates` listed,
   nothing runs.
 
+#### A repo can declare its own gate
+
+A repo can name its merge gate in an executable `.worktree-check` at its root: the script that
+must be green before anything merges. Turn on `"merge": { "repoGate": true }` (it is off by
+default) and a request that no `merge.gates` entry matches runs that script as its gate, through
+the same queue and lane as above. A matching `merge.gates` entry always wins.
+
+- Shepherd runs the **base branch's** copy. It reads `refs/heads/<base>:.worktree-check` with its
+  own git, never the worktree's file, so a unit can't rewrite its own gate. The copy runs from a
+  scratch file with the unit's worktree as the working directory (the main checkout for the
+  post-merge run, which reads the base again: after the merge the unit's version is main's gate).
+- A shell script (`#!/bin/sh`, `bash`, `zsh`, or none) sees `$0` as the checkout's own
+  `.worktree-check`, so `cd "$(dirname "$0")"` lands in the checkout. Another interpreter
+  (`#!/usr/bin/env -S deno run -A`) runs the scratch copy by path.
+- No `.worktree-check` on the base means no gate, as before. A symlinked one, or one over 64KB,
+  counts as a gate that couldn't run: it holds the merge and the review says why.
+- The review labels it **repo-declared gate** and names the copy it ran (*main's .worktree-check*).
+- A diff that edits `.worktree-check` gets a warning line in the review, whether or not the repo
+  gate ran. It's a hint like the claim check below, and it blocks nothing.
+
 ### The claim check: a hint, never a gate
 
 The gate proves the suite is green; it doesn't prove what the session *wrote* is true. The review

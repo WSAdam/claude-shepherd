@@ -3995,5 +3995,43 @@ do
   eq("checker: a fresh install checks every merge request", okd and type(dcfg) == "table" and (dcfg.verify or {}).onMerge, true)
 end
 
+-- ---- repo-declared merge gate (2026-09-29, build program unit 19) ----
+-- merge.repoGate: a request no merge.gates entry matches runs the BASE branch's .worktree-check,
+-- read with Shepherd's git (never the worktree), through the same gate runs. Source pins: both
+-- gates resolve it, the launch runs the built line, a pruned record takes its scratch copy, a
+-- post-merge gate still reading the base holds the tab, and the review labels it and flags an
+-- edit to the file -- through textContent.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  local resolve = src:match("\nfunction FX%.repoGateFor%(.-\nend\n") or ""
+  check("repo gate: FX.repoGateFor reads the base's copy by the repo's git dir, never the worktree",
+        #resolve > 0 and resolve:find("core.repoGateReadCmd(r.commonDir, r.base)", 1, true) ~= nil
+        and resolve:find("r.worktree", 1, true) == nil)
+  local pre = src:match("\nfunction FX%.mergeGate%(.-\nend\n") or ""
+  local post = src:match("\nfunction FX%.mergeGatePost%(.-\nend\n") or ""
+  check("repo gate: the pre-merge gate resolves it", pre:find("FX.repoGateFor(FX._mergeGates, gkey, gate, r, r.worktree)", 1, true) ~= nil)
+  check("repo gate: ...and so does the post-merge gate, in the main checkout",
+        post:find("FX.repoGateFor(FX._mergeGatesPost, gkey, gate, r, root)", 1, true) ~= nil)
+  local launch = src:match("\nfunction FX%.mergeGateLaunch%(.-\n  return g\nend\n") or ""
+  check("repo gate: the launch runs the built line while the review keeps the gate's name",
+        launch:find("core.mergeGateCmd({ command = g.command, run = g.run }, g.dir, outFile)", 1, true) ~= nil)
+  local prune = src:match("\nfunction FX%.mergeGatePrune%(.-\nend\n") or ""
+  check("repo gate: a pruned gate record takes its scratch copy with it", prune:find("pcall(os.remove, g.script)", 1, true) ~= nil)
+  check("repo gate: a post-merge gate still reading the base holds the tab",
+        src:find('elseif gate and gate.state == "reading" then', 1, true) ~= nil)
+  local review = src:match("\n    function renderMerge%(it%)%{.-\n    %}\n") or ""
+  check("repo gate: the review names the gate by its label", review:find("gt.label", 1, true) ~= nil)
+  check("repo gate: ...and says so while it reads the base's copy", review:find('gt.state === "reading"', 1, true) ~= nil)
+  check("repo gate: a warn line for a diff that edits .worktree-check sits in the review's scrolling body",
+        (src:match('<div class="dm%-body">.-</div>%s*<div class="dm%-acts"') or ""):find('id="dm%-gatefile"') ~= nil)
+  check("repo gate: ...filled through textContent, never innerHTML",
+        review:find('getElementById("dm-gatefile")', 1, true) ~= nil and review:find("gfEl.textContent", 1, true) ~= nil
+        and review:find("innerHTML", 1, true) == nil)
+  check("repo gate: ...warn-coloured", src:find("#d-merge .dm-gatefile { ", 1, true) ~= nil
+        and (src:match("#d%-merge %.dm%-gatefile { ([^}]*)}") or ""):find("var(--warn)", 1, true) ~= nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

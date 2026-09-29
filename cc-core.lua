@@ -963,7 +963,7 @@ function M.cleanupVerdict(it, now, idleHours)
   local phase = mg and mg.phase
   if phase == "requested" or phase == "approved" then return false, false, "its merge is still in flight" end
   local gs = mg and type(mg.gate) == "table" and mg.gate.state
-  if gs == "running" or gs == "queued" then return false, false, "its merge's test gate is still running" end
+  if gs == "running" or gs == "queued" or gs == "reading" then return false, false, "its merge's test gate is still running" end
   local finished = false
   if it.needsYou ~= "needs" then
     if phase == "merged" or phase == "merged-dirty" then
@@ -2159,6 +2159,9 @@ function M.mergeFactsCmd(req)
     "echo @@files", G .. " diff --name-status " .. dots .. " 2>/dev/null | head -n " .. M.MERGE_FACTS_MAX_FILES,
     -- 2026-09-28: the conflict-marker lines the unit's own changes add, per file
     "echo @@markers", markerCmd(G, dots),
+    -- 2026-09-29: does the unit's diff touch the repo's declared gate? Its own uncapped question,
+    -- so the edit can't hide past MERGE_FACTS_MAX_FILES in the file list.
+    "echo @@gatefile", G .. " diff --name-only " .. dots .. " -- " .. sq(M.REPO_GATE_FILE) .. " 2>/dev/null",
   }, "; ")
 end
 
@@ -2186,6 +2189,7 @@ function M.parseMergeFacts(out, req)
     if st then f.files[#f.files + 1] = { st = st:sub(1, 1), path = (p:gsub("\t", " → ")) } end
   end
   f.markers, f.markerFiles = parseMarkerLines(sec.markers)
+  for _, l in ipairs(sec.gatefile or {}) do if l:match("%S") then f.gateFile = true end end
   return f
 end
 
@@ -2203,19 +2207,111 @@ M.MERGE_GATE_TAIL_CHARS = 4000
 
 function M.mergeGateFor(cfg, item)
   local gates = M.config(cfg, "merge.gates", nil)
-  if type(gates) ~= "table" then return nil end
   item = item or {}
-  local project = item.projectKey or item.project
-  for _, g in ipairs(gates) do
-    if type(g) == "table" and type(g.command) == "string" and g.command ~= "" then
-      local m = type(g.match) == "table" and g.match or {}
-      if M.globEq(m.project, project) and M.globEq(m.group, item.group) and M.globEq(m.key, item.key) then
-        return { command = g.command,
-                 timeoutSeconds = tonumber(g.timeoutSeconds) or M.MERGE_GATE_TIMEOUT }
+  if type(gates) == "table" then
+    local project = item.projectKey or item.project
+    for _, g in ipairs(gates) do
+      if type(g) == "table" and type(g.command) == "string" and g.command ~= "" then
+        local m = type(g.match) == "table" and g.match or {}
+        if M.globEq(m.project, project) and M.globEq(m.group, item.group) and M.globEq(m.key, item.key) then
+          return { command = g.command,
+                   timeoutSeconds = tonumber(g.timeoutSeconds) or M.MERGE_GATE_TIMEOUT }
+        end
       end
     end
   end
+  -- 2026-09-29: no configured gate matches -- the repo's own .worktree-check, if Adam opted in.
+  -- FX resolves it (M.repoGate): a base branch without one means no gate, exactly as before.
+  if M.config(cfg, "merge.repoGate", false) == true then
+    return { repo = true, command = "./" .. M.REPO_GATE_FILE, timeoutSeconds = M.MERGE_GATE_TIMEOUT }
+  end
   return nil
+end
+
+-- ---- The repo-declared gate (2026-09-29, build program unit 19) ----------------------------
+-- A repo can name its own merge gate: a `.worktree-check` at its root (Voice-Agent's runs its
+-- type check and suite after `cd "$(dirname "$0")"`). With merge.repoGate on, a request that no
+-- merge.gates entry matches runs the BASE branch's copy -- read with Shepherd's own git from
+-- refs/heads/<base>, never from the worktree, so a unit can't rewrite its own gate -- from a
+-- scratch copy, with the checkout as cwd, through the same queued one-lane-per-repo runs.
+M.REPO_GATE_FILE = ".worktree-check"
+M.REPO_GATE_LABEL = "repo-declared gate"
+M.REPO_GATE_MAX_BYTES = 65536
+M.REPO_GATE_SHELLS = { sh = true, bash = true, zsh = true, dash = true, ksh = true }
+
+-- The read: `@@entry` + the base's ls-tree line for the file (none when it isn't there), then
+-- `@@script` + its blob, cut one byte past the cap. `@@nobase` when git can't find the base.
+function M.repoGateReadCmd(commonDir, base)
+  if type(commonDir) ~= "string" or commonDir == "" or type(base) ~= "string" or base == "" then return nil end
+  local function sq(s) return "'" .. tostring(s):gsub("'", "'\\''") .. "'" end
+  local G, ref = "git --git-dir=" .. sq(commonDir), "refs/heads/" .. base
+  return "if " .. G .. " rev-parse --verify -q " .. sq(ref .. "^{commit}") .. " >/dev/null 2>&1; then echo @@entry; "
+    .. G .. " ls-tree " .. sq(ref) .. " -- " .. sq(M.REPO_GATE_FILE) .. " 2>/dev/null; echo @@script; "
+    .. G .. " cat-file blob " .. sq(ref .. ":" .. M.REPO_GATE_FILE) .. " 2>/dev/null | head -c " .. (M.REPO_GATE_MAX_BYTES + 1)
+    .. "; else echo @@nobase; fi"
+end
+
+-- The shell line that runs a scratch copy of the gate with `dir` as the checkout. A shell script
+-- reads the copy's text with $0 = <dir>/.worktree-check, so `cd "$(dirname "$0")"` lands in the
+-- checkout, not the scratch dir; any other interpreter runs the copy by path, as the kernel would.
+-- A copy that has gone reads as couldn't-run: `sh -c ""` would exit 0, a vacuous pass.
+function M.repoGateRun(content, scriptPath, dir)
+  if type(scriptPath) ~= "string" or scriptPath == "" or type(dir) ~= "string" or dir == "" then return nil end
+  local function sq(s) return "'" .. tostring(s):gsub("'", "'\\''") .. "'" end
+  local words = {}
+  for w in ((type(content) == "string" and content:match("^#!([^\n]*)")) or ""):gmatch("%S+") do words[#words + 1] = w end
+  if #words == 0 then words = { "/bin/sh" } end
+  local i = 1
+  if words[1]:match("([^/]+)$") == "env" then   -- #!/usr/bin/env [-S] <interpreter>
+    i = 2
+    while words[i] and words[i]:sub(1, 1) == "-" do i = i + 1 end
+  end
+  local q = {}
+  for k, w in ipairs(words) do q[k] = sq(w) end
+  local guard = "[ -r " .. sq(scriptPath) .. " ] || { echo " .. M.GATE_NORUN_TOKEN
+    .. ": the scratch copy of the gate is gone; exit " .. M.TEST_LOCK_EXIT .. "; }; "
+  if M.REPO_GATE_SHELLS[(words[i] or ""):match("([^/]+)$") or ""] then
+    return guard .. table.concat(q, " ") .. " -c \"$(cat " .. sq(scriptPath) .. ")\" "
+      .. sq((dir:gsub("/+$", "")) .. "/" .. M.REPO_GATE_FILE)
+  end
+  return guard .. table.concat(q, " ") .. " " .. sq(scriptPath)
+end
+
+-- The read's output -> what to run. kind: "script" (run it), "none" (the base has no such file:
+-- no gate), "unknown" (git didn't answer: keep checking, never call it ungated), "refused" (a
+-- symlink -- its target would be the worktree's own file -- or past the cap: couldn't-run).
+function M.repoGate(out, base, dir, scriptPath)
+  local rg = { command = tostring(base or "?") .. "'s " .. M.REPO_GATE_FILE, label = M.REPO_GATE_LABEL }
+  local function kind(k) rg.kind = k; return rg end
+  local function refuse(why)
+    rg.why = why
+    rg.run = "echo '" .. (M.GATE_NORUN_TOKEN .. ": " .. why):gsub("'", "'\\''") .. "'; exit " .. M.TEST_LOCK_EXIT
+    return kind("refused")
+  end
+  if type(out) ~= "string" or out:sub(1, 8) ~= "@@entry\n" then return kind("unknown") end
+  local at = out:find("\n@@script\n", 8, true)
+  if not at then return kind("unknown") end
+  local mode, typ = out:sub(9, at - 1):match("^(%d+) (%a+) ")
+  if not mode or typ ~= "blob" then return kind("none") end
+  local content = out:sub(at + 10)
+  if mode == "120000" then return refuse(rg.command .. " is a symlink; Shepherd runs only a regular file from the base branch") end
+  if #content > M.REPO_GATE_MAX_BYTES then
+    return refuse(rg.command .. " is over " .. (M.REPO_GATE_MAX_BYTES // 1024) .. "KB")
+  end
+  rg.run = M.repoGateRun(content, scriptPath, dir)
+  if not rg.run then return refuse("Shepherd had nowhere to put its copy of " .. rg.command) end
+  rg.content, rg.script = content, scriptPath
+  return kind("script")
+end
+
+-- The review's warning for a diff that edits the gate file (WARN ONLY, like the claim check).
+function M.repoGateTouchedNote(gate, base)
+  local b = tostring(base or "main")
+  if type(gate) == "table" and gate.repo then
+    return "this diff changes " .. M.REPO_GATE_FILE .. ", the repo's declared merge gate -- the gate above ran "
+      .. b .. "'s copy; the change becomes " .. b .. "'s gate once it merges"
+  end
+  return "this diff changes " .. M.REPO_GATE_FILE .. ", the repo's declared merge gate -- Shepherd didn't run it for this request"
 end
 
 -- Only a request whose OWN pre-merge gate ran in THIS Shepherd lifecycle may be post-merge
@@ -2337,13 +2433,17 @@ end
 -- 2026-09-17: a folder that has gone (a removed worktree) says the TOKEN and exits with the
 -- couldn't-run code, so it reads as COULDN'T RUN rather than as a red suite -- a `cd` failure
 -- used to be exit 1, indistinguishable from a real test failure.
+-- 2026-09-29: a repo-declared gate carries `run`, the line M.repoGate built; `command` stays the
+-- name the review shows ("main's .worktree-check").
 function M.mergeGateCmd(gate, dir, outFile)
-  if type(gate) ~= "table" or type(gate.command) ~= "string" or gate.command == "" then return nil end
+  if type(gate) ~= "table" then return nil end
+  local run = (type(gate.run) == "string" and gate.run ~= "") and gate.run or gate.command
+  if type(run) ~= "string" or run == "" then return nil end
   if type(dir) ~= "string" or dir == "" then return nil end
   if type(outFile) ~= "string" or outFile == "" then return nil end
   local function sq(s) return "'" .. tostring(s):gsub("'", "'\\''") .. "'" end
   return "{ cd " .. sq(dir) .. " || { echo " .. M.GATE_NORUN_TOKEN .. ": cannot enter " .. sq(dir)
-    .. "; exit " .. M.TEST_LOCK_EXIT .. "; }; " .. gate.command .. " ; } > " .. sq(outFile) .. " 2>&1"
+    .. "; exit " .. M.TEST_LOCK_EXIT .. "; }; " .. run .. " ; } > " .. sq(outFile) .. " 2>&1"
 end
 
 -- The main checkout a merge lands in: the request's common dir without its .git.
@@ -2391,7 +2491,9 @@ function M.mergeReadiness(req, facts, item, gate)
     -- 2026-09-22: and it says WHICH checking state it is. Collapsing the two here was the whole
     -- bug: the card claimed the gate was running when it had not started, while the review
     -- (which reads gate.state itself) said "queued behind another run in this repo".
-    if st == "running" or st == "queued" then
+    -- 2026-09-29: "reading" = Shepherd couldn't read the base's .worktree-check yet (M.repoGate's
+    -- unknown): still checking, never "no gate", which would call the request ready ungated.
+    if st == "running" or st == "queued" or st == "reading" then
       out.checking = true
       if st == "queued" then
         out.gateQueued = true
@@ -2653,7 +2755,12 @@ function M.mergeView(req, rd, facts, q, gate, checker)
                tail = capChars(M.lastLines(log, M.MERGE_GATE_TAIL_LINES), M.MERGE_GATE_TAIL_CHARS),
                fails = (fails ~= "") and fails or nil,
                log = (type(gate.logPath) == "string" and gate.logPath ~= "") and gate.logPath or nil,
-               why = (type(gate.why) == "string" and gate.why ~= "") and capChars(gate.why, 200) or nil }
+               why = (type(gate.why) == "string" and gate.why ~= "") and capChars(gate.why, 200) or nil,
+               label = gate.repo and M.REPO_GATE_LABEL or nil }
+  end
+  -- 2026-09-29: a diff that edits the repo's declared gate -- WARN ONLY, like the claim check.
+  if req.phase == "requested" and type(facts) == "table" and facts.gateFile then
+    v.gateFile = M.repoGateTouchedNote(gate, req.base)
   end
   -- The claim check (2026-09-18): WARN ONLY. It rides beside the gate for the review to show
   -- and is read by nothing else -- not readiness, not the card line, not "needs you".
@@ -8105,6 +8212,8 @@ M.SETTINGS_KEEP_SUBKEYS = {
   -- 2026-09-28: the form rebuilds autoContinue from enabled/delaySeconds/maxAttempts; the
   -- back-off (startSeconds/maxSeconds) has no input.
   autoContinue = { "backoff" },
+  -- 2026-09-29: the form doesn't send `merge` today; if it ever rebuilds it, repoGate (no input) stays.
+  merge = { "repoGate" },
 }
 function M.overlayConfig(cfg, incoming)
   cfg = type(cfg) == "table" and cfg or {}

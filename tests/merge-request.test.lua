@@ -78,6 +78,7 @@ end
 local settingsStore, frame = {}, { x = 0, y = 0, w = 1920, h = 1080 }
 local EXISTS = {}   -- fake absolute paths hs.fs.attributes should report as real directories
 local DEAD = {}     -- pid (string) -> true: a process the fake ps must report as gone
+local REPOGATE, READS = {}, {}   -- 2026-09-29: git dir -> the base's .worktree-check read; every read made
 local hs = {
   json = json,
   fs = {
@@ -111,6 +112,10 @@ local hs = {
     if cmd:find("@@listed", 1, true) then return FACTS[cmd:match("%-C '([^']+)'") or ""] or "" end
     if cmd:find("merge-base --is-ancestor", 1, true) then return VERIFY_OUT end
     if cmd:find("diff --no-color", 1, true) then return "diff --git a/app.txt b/app.txt\n+<script>x</script>\n" end
+    if cmd:find("ls-tree", 1, true) and cmd:find(".worktree-check", 1, true) then
+      READS[#READS + 1] = cmd
+      return REPOGATE[cmd:match("git %-%-git%-dir='([^']+)'") or ""] or ""
+    end
     return ""
   end,
   hotkey = { bind = function() return mkstub() end },
@@ -931,6 +936,108 @@ do
   fx.now, VERIFY_OUT = realNow, savedVerify
   for _, k in ipairs({ "q1", "q2" }) do os.remove(MD .. "/" .. k .. ".json"); os.remove(T .. "/status/" .. k .. ".json") end
   tick()
+end
+
+-- ---- repo-declared merge gate (2026-09-29, build program unit 19) ----
+-- With merge.repoGate on, a request no merge.gates entry matches runs the BASE branch's
+-- .worktree-check: read with Shepherd's git (never the worktree's copy), from a scratch copy,
+-- with the checkout as cwd, through the same queued one-lane-per-repo gate runs.
+do
+  local function readsFor(gitDir)
+    local n = 0
+    for _, c in ipairs(READS) do if c:find("--git-dir='" .. gitDir .. "'", 1, true) then n = n + 1 end end
+    return n
+  end
+  local function shq(s) return "'" .. tostring(s):gsub("'", "'\\''") .. "'" end
+  local RR = T .. "/rR"
+  local rWt = RR .. "/.claude/worktrees/rg1"
+  os.execute('mkdir -p "' .. rWt .. '" "' .. T .. '/.claude/cc-scratch"')
+  local SCRIPT = '#!/bin/sh\nset -eu\ncd "$(dirname "$0")"\necho "gate-dir=$(pwd -P)"\necho "gate-args=$#"\n'
+  REPOGATE[RR .. "/.git"] = "@@entry\n100755 blob 0123abcd\t.worktree-check\n@@script\n" .. SCRIPT
+  newUnit("rg1", RR, "feat/rg1", "abc001", 840, 1040)
+  tick()
+  I = items()
+  check("repo gate off: the base's .worktree-check is never even read", #READS == 0)
+  check("...and the request is ready, ungated, exactly as before", I.rg1.merge.ready == true and I.rg1.merge.gate == nil)
+
+  local cfg = json.decode(read(T .. "/.claude/cc-config.json"))
+  cfg.merge.repoGate = true
+  write(T .. "/.claude/cc-config.json", json.encode(cfg))
+  tick()
+  local rRead = ""
+  for _, c in ipairs(READS) do if c:find("--git-dir='" .. RR .. "/.git'", 1, true) then rRead = c end end
+  check("repo gate on: the base's copy is read through the repo's git dir, at refs/heads/main",
+        readsFor(RR .. "/.git") == 1 and rRead:find("'refs/heads/main:.worktree-check'", 1, true) ~= nil)
+  check("...never from the unit's worktree", rRead:find(rWt, 1, true) == nil)
+  local rt = gateTasks(rWt .. "/.worktree-check")[1]
+  check("...and runs as the unit's gate, in its worktree  (" .. tostring(rt and rt.args[3]) .. ")", rt ~= nil and rt.dir == rWt)
+  if not rt then finish() end
+  local copy = rt.args[3]:match("%$%(cat '([^']+)'%)")
+  check("...from a scratch copy holding the base's text byte for byte", copy ~= nil and read(copy) == SCRIPT
+        and copy:find(T .. "/.claude/cc-scratch/", 1, true) == 1)
+  I = items()
+  check("the review labels it the repo-declared gate  (" .. tostring(I.rg1.merge.gate and I.rg1.merge.gate.command) .. ")",
+        I.rg1.merge.gate and I.rg1.merge.gate.label == "repo-declared gate"
+        and I.rg1.merge.gate.command == "main's .worktree-check" and I.rg1.merge.gate.state == "running")
+  check("...and the request waits for it", I.rg1.merge.ready == false and I.rg1.merge.checking == true)
+  tick(); tick()
+  check("one read and one run per gate key, not one per tick",
+        readsFor(RR .. "/.git") == 1 and #gateTasks(rWt .. "/.worktree-check") == 1)
+
+  -- the real shell line: `cd "$(dirname "$0")"` in the gate lands in the worktree, not the scratch dir
+  os.execute("/bin/sh -c " .. shq(rt.args[3]))
+  local log = read(gateLog(rt)) or ""
+  local p = io.popen("cd " .. shq(rWt) .. " && pwd -P"); local real = p and p:read("*l"); if p then p:close() end
+  check("run for real, the gate's $0 is the worktree's .worktree-check  (" .. log:gsub("\n", " | ") .. ")",
+        log:find("gate-dir=" .. tostring(real) .. "\n", 1, true) ~= nil and log:find("gate-args=0", 1, true) ~= nil)
+  quiet(function() rt.cb(0, "", "") end)
+  tick()
+  I = items()
+  check("a green repo gate lets the request through  (" .. tostring(I.rg1.merge.line) .. ")",
+        I.rg1.merge.ready == true and I.rg1.merge.gate.state == "passed")
+
+  -- a diff that edits .worktree-check is flagged in the review
+  check("no flag while the diff leaves .worktree-check alone", I.rg1.merge.gateFile == nil)
+  FACTS[rWt] = FACTS[rWt] .. "@@gatefile\n.worktree-check\n"
+  quiet(function() fx.mergeFacts(fx._mergeReqs.rg1, true) end)
+  tick()
+  I = items()
+  check("a diff that edits .worktree-check is flagged  (" .. tostring(I.rg1.merge.gateFile) .. ")",
+        type(I.rg1.merge.gateFile) == "string" and I.rg1.merge.gateFile:find("main's copy", 1, true) ~= nil)
+
+  -- no .worktree-check on the base: no gate, as today (and no re-read every tick)
+  local R2 = T .. "/rR2"
+  REPOGATE[R2 .. "/.git"] = "@@entry\n@@script\n"
+  newUnit("rg2", R2, "feat/rg2", "abc002", 841, 1041)
+  tick(); tick()
+  I = items()
+  check("a base with no .worktree-check: no gate, ready as before", I.rg2.merge.ready == true and I.rg2.merge.gate == nil)
+  check("...its absence is re-read at most every " .. fx.MERGE_FACTS_TTL .. "s, not every tick", readsFor(R2 .. "/.git") == 1)
+
+  -- git didn't answer: never "no gate" -- the request keeps checking until it can read the base
+  local R3 = T .. "/rR3"
+  newUnit("rg3", R3, "feat/rg3", "abc003", 842, 1042)
+  tick()
+  I = items()
+  check("git unanswered: the request is checking, never ready ungated  (" .. tostring(I.rg3.merge.line) .. ")",
+        I.rg3.merge.ready == false and I.rg3.merge.checking == true
+        and I.rg3.merge.gate and I.rg3.merge.gate.state == "reading")
+  check("...and nothing was launched for it", #gateTasks(R3 .. "/") == 0)
+
+  -- a configured merge.gates entry wins: /r/G's requests never read a .worktree-check
+  check("a repo with a configured gate never reads its .worktree-check", readsFor("/r/G/.git") == 0)
+
+  -- after the merge the post-merge gate reads the base again and runs in the main checkout
+  setPhase("rg1", "merged", { sha = "abc001" })
+  tick()
+  local post = gateTasks(RR .. "/.worktree-check")
+  check("post-merge: the repo gate runs again in the main checkout, with $0 there  (" .. #post .. ")",
+        #post == 1 and post[1].dir == RR and readsFor(RR .. "/.git") == 2)
+  -- a merged unit's run leaves its scratch copy with the record, never on disk forever
+  os.remove(MD .. "/rg1.json"); os.remove(T .. "/status/rg1.json")
+  if post[1] then quiet(function() post[1].cb(0, "", "") end) end
+  tick()
+  check("a finished request's scratch copies go with it", read(copy) == nil)
 end
 
 check("the whole flow never focused a window or pressed a key", taps == 0 and focusCalls == 0)

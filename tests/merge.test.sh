@@ -416,4 +416,44 @@ lua_core verify "$MD/h2.json" > "$TMP/lc"
 assert_eq "...and Shepherd verifies it" "verified: " "$(cat "$TMP/lc")"
 rm -f "$REPO/scratch.txt"
 
+# ---- repo-declared merge gate (2026-09-29, build program unit 19) ----
+# With merge.repoGate on, Shepherd runs the BASE branch's .worktree-check. Its read
+# (core.repoGateReadCmd + core.repoGate) and the review's flag (the facts' @@gatefile) against
+# this real repo: main's copy wins over the unit's edit, no file is no gate, a symlink is refused.
+lua_repogate() { lua - "$ROOT" "$COMMON" <<'LUA'
+local core = dofile(arg[1] .. "/cc-core.lua")
+local p = io.popen(core.repoGateReadCmd(arg[2], "main")); local out = p:read("a"); p:close()
+local rg = core.repoGate(out, "main", "/r/wt", "/nowhere/copy")
+io.write(rg.kind, "\n", rg.content or rg.why or "")
+LUA
+}
+lua_gatefile() { lua - "$ROOT" "$1" <<'LUA'
+local core = dofile(arg[1] .. "/cc-core.lua"); core.json = dofile(arg[1] .. "/tests/support/json.lua")
+local fh = io.open(arg[2]); local req = core.parseMergeRequest(fh:read("a")); fh:close()
+local p = io.popen(core.mergeFactsCmd(req)); local out = p:read("a"); p:close()
+print(core.parseMergeFacts(out, req).gateFile and "flagged" or "not flagged")
+LUA
+}
+lua_repogate > "$TMP/rg"
+assert_eq "repo gate: main without a .worktree-check -> no gate" "none" "$(head -n 1 "$TMP/rg")"
+printf '#!/bin/sh\necho main-gate\n' > "$REPO/.worktree-check"
+chmod +x "$REPO/.worktree-check"
+g "$REPO" add .worktree-check && g "$REPO" commit -qm "declare the gate"
+unit rgate feat/rgate
+printf '#!/bin/sh\nexit 0\n' > "$REPO/.claude/worktrees/rgate/.worktree-check"
+g "$REPO/.claude/worktrees/rgate" commit -qam "the unit rewrites its own gate"
+lua_repogate > "$TMP/rg"
+assert_eq "repo gate: main's .worktree-check is a gate to run" "script" "$(head -n 1 "$TMP/rg")"
+assert_eq "...read from main, byte for byte -- never the unit's rewrite" \
+  "$(printf '#!/bin/sh\necho main-gate')" "$(tail -n +2 "$TMP/rg")"
+reqfile "$TMP/rgate.json" rgate feat/rgate
+assert_eq "repo gate: a unit whose diff edits .worktree-check is flagged" "flagged" "$(lua_gatefile "$TMP/rgate.json")"
+reqfile "$TMP/tidy2.json" tidy fix/tidy
+assert_eq "...and one that leaves it alone isn't" "not flagged" "$(lua_gatefile "$TMP/tidy2.json")"
+git -C "$REPO" rm -q .worktree-check
+ln -s app.txt "$REPO/.worktree-check"
+g "$REPO" add .worktree-check && g "$REPO" commit -qm "a symlinked gate"
+lua_repogate > "$TMP/rg"
+assert_eq "repo gate: a symlinked .worktree-check on main is refused, never followed" "refused" "$(head -n 1 "$TMP/rg")"
+
 finish

@@ -4155,8 +4155,11 @@ function FX.mergeGateStart(slot, gkey, gate, dir, nonce, where, commonDir)
   end
   if not g then
     if not core.mergeGateCmd(gate, dir, "/dev/null") then return nil end
+    -- run/repo/script/refuse: a repo-declared gate's built line, its scratch copy, and why it
+    -- was refused (FX.repoGateFor); a configured gate has none of them
     g = { state = "queued", command = gate.command, at = FX.now(), nonce = nonce, where = where,
-          commonDir = commonDir, dir = dir, timeoutSeconds = gate.timeoutSeconds }
+          commonDir = commonDir, dir = dir, timeoutSeconds = gate.timeoutSeconds,
+          run = gate.run, repo = gate.repo, script = gate.script, refuse = gate.why }
     slot[gkey] = g
   end
   FX.mergeGatePump()
@@ -4191,7 +4194,7 @@ end
 function FX.mergeGateLaunch(slot, gkey, g)
   if g.state ~= "queued" then return g end
   local outFile = FX.scratchFile("mergegate")
-  local cmd = core.mergeGateCmd({ command = g.command }, g.dir, outFile)
+  local cmd = core.mergeGateCmd({ command = g.command, run = g.run }, g.dir, outFile)
   if not cmd then g.state, g.why = "couldntRun", "no command"; return g end
   local gate, dir, where = { command = g.command, timeoutSeconds = g.timeoutSeconds }, g.dir, g.where
   g.state = "running"
@@ -4211,7 +4214,7 @@ function FX.mergeGateLaunch(slot, gkey, g)
         -- 2026-09-17: a suite that REFUSED TO START (the run.sh lock, a missing command) says
         -- nothing about the code. Calling that red is what teaches Adam to dismiss reds.
         g.state = core.mergeGateOutcome(g.code, g.output)
-        if g.state == "couldntRun" then g.why = "the suite refused to start" end
+        if g.state == "couldntRun" then g.why = g.refuse or "the suite refused to start" end
       end
       -- A green run's log is noise; anything else keeps its log so the card can name it.
       if g.state == "passed" then pcall(os.remove, outFile) else g.logPath = outFile end
@@ -4247,12 +4250,48 @@ function FX.mergeGateLaunch(slot, gkey, g)
   return g
 end
 
+-- ---- The repo-declared gate (2026-09-29, build program unit 19) ----------------------------
+-- merge.repoGate: a request no merge.gates entry matches runs the BASE branch's .worktree-check.
+-- Read with Shepherd's own git from refs/heads/<base> (core.repoGateReadCmd) -- never from the
+-- worktree, so a unit can't rewrite its own gate -- into a scratch copy that runs with the
+-- checkout as cwd. Read once per gate key (the run's record is the cache); a base without the
+-- file, or a git that didn't answer, is asked again at most every FX.MERGE_FACTS_TTL seconds.
+FX._repoGateReads = {}   -- commonDir|base -> { at, rg }: the last read that started no gate
+
+-- The gate to start for this key: `gate` itself unless it is the repo's own and no run exists
+-- yet; nil when the base has no .worktree-check; a transient { state = "reading" } (never stored)
+-- while git hasn't answered, so the request keeps checking instead of reading as ungated.
+function FX.repoGateFor(slot, gkey, gate, r, dir)
+  if not gate.repo or slot[gkey] then return gate end
+  local ck = tostring(r.commonDir) .. "|" .. tostring(r.base)
+  local c, rg = FX._repoGateReads[ck], nil
+  if c and FX.now() - c.at < FX.MERGE_FACTS_TTL then
+    rg = c.rg
+  else
+    local out
+    pcall(function() out = hs.execute(core.repoGateReadCmd(r.commonDir, r.base)) end)
+    rg = core.repoGate(out, r.base, dir, FX.scratchFile("repogate"))
+    if rg.kind == "script" then FX.writeFile(rg.script, rg.content) end
+    FX._repoGateReads[ck] = (rg.kind == "none" or rg.kind == "unknown") and { at = FX.now(), rg = rg } or nil
+  end
+  if rg.kind == "none" then return nil end
+  if rg.kind == "unknown" then
+    return { state = "reading", repo = true, command = rg.command }
+  end
+  print("[cc-dashboard] 🔍 repo-declared gate for " .. tostring(r.branch) .. ": " .. rg.command
+    .. (rg.why and (" (refused: " .. rg.why .. ")") or ""))
+  return { repo = true, command = rg.command, run = rg.run, script = rg.script, why = rg.why,
+           timeoutSeconds = gate.timeoutSeconds }
+end
+
 -- The pre-merge gate for a request: the project's own suite, in the unit's worktree.
 function FX.mergeGate(r, facts, cfg)
   local gate = core.mergeGateFor(cfg, FX._mergeItems[r.key])
   if not gate then return nil end
   local gkey = core.mergeGateKey(r, facts and facts.sha)
   if not gkey then return nil end
+  gate = FX.repoGateFor(FX._mergeGates, gkey, gate, r, r.worktree)
+  if not gate or gate.state then return gate end   -- no .worktree-check on the base / still reading it
   return FX.mergeGateStart(FX._mergeGates, gkey, gate, r.worktree, r.nonce, "worktree", r.commonDir)
 end
 
@@ -4266,6 +4305,9 @@ function FX.mergeGatePost(r, cfg)
   if not core.postMergeGateDue(r, FX._mergeGates) then return nil end
   local root, gkey = core.mergeMainRoot(r), core.mergeGateKey(r, r.sha)
   if not root or not gkey then return nil end
+  -- a repo-declared gate reads the base again: after the merge, that is main's own gate
+  gate = FX.repoGateFor(FX._mergeGatesPost, gkey, gate, r, root)
+  if not gate or gate.state then return gate end
   return FX.mergeGateStart(FX._mergeGatesPost, gkey, gate, root, r.nonce, "main", r.commonDir)
 end
 
@@ -4277,6 +4319,7 @@ function FX.mergeGatePrune(reqs)
     for gkey, g in pairs(slot) do
       if not live[g.nonce] and not g.task then
         if g.logPath then pcall(os.remove, g.logPath) end   -- a red gate's kept log goes with it
+        if g.script then pcall(os.remove, g.script) end     -- ...and a repo gate's scratch copy
         slot[gkey] = nil
       end
     end
@@ -4559,6 +4602,9 @@ function FX.annotateMerges(list, cfg, bannerOn)
       elseif gate and gate.state == "queued" then
         closeNote = tostring(gate.command) .. " on " .. tostring(r.base)
           .. " is queued behind another run in this repo"
+      -- 2026-09-29: git hasn't said yet whether the base declares a gate -- hold the tab till it does
+      elseif gate and gate.state == "reading" then
+        closeNote = "reading " .. tostring(gate.command) .. " first"
       elseif gate and (gate.state == "failed" or gate.state == "timedOut") then
         closeNote = tostring(r.base) .. " is red after the merge: " .. tostring(gate.command)
           .. ((gate.state == "timedOut") and " timed out" or (" exited " .. tostring(gate.code)))
@@ -9785,6 +9831,8 @@ local HTML = [[
   /* the claim check (2026-09-18) is a hint: muted, warn at most -- never the gate's red */
   #d-merge .dm-claims { margin-top:4px; white-space:pre-wrap; font-size:11px; opacity:.8; }
   #d-merge .dm-claims.c-flagged { color:var(--warn); opacity:1; }
+  #d-merge .dm-gatefile { margin-top:4px; white-space:pre-wrap; font-size:11px; color:var(--warn); }
+  #d-merge .dm-gatefile:empty { display:none; }
   /* the merge checker (2026-09-29): a model's review -- fail is red, couldn't-run is warn */
   #d-merge .dm-checker, #d-checker { margin-top:4px; white-space:pre-wrap; font-size:11px; }
   #d-checker { display:none; margin:6px 0; padding:6px 10px; border:1px dashed var(--muted, #888); border-radius:8px; }
@@ -11101,6 +11149,7 @@ local HTML = [[
         <div class="dm-gate" id="dm-gate"></div>
         <div class="dm-claims" id="dm-claims"></div>
         <div class="dm-checker" id="dm-checker"></div>
+        <div class="dm-gatefile" id="dm-gatefile"></div>
         <div class="dm-problems" id="dm-problems"></div>
         <ul class="dm-commits" id="dm-commits"></ul>
         <ul class="dm-files" id="dm-files"></ul>
@@ -15347,15 +15396,18 @@ local HTML = [[
       document.getElementById("dm-tests").textContent = m.tests ? "Tests, as the session reports them (advisory): " + m.tests : "";
       var gEl = document.getElementById("dm-gate");
       var gt = m.gate;
+      // 2026-09-29: a repo-declared gate (its base branch's .worktree-check) says so by its label
+      var gName = "Test gate" + (gt && gt.label ? " (" + gt.label + ")" : "") + ": ";
       gEl.className = "dm-gate" + (gt ? " g-" + String(gt.state).replace(/[^a-zA-Z]/g, "") : "");
       if(!gt){ gEl.textContent = ""; }
-      else if(gt.state === "running"){ gEl.textContent = "Test gate: Shepherd is running " + (gt.command || "") + "…"; }
-      else if(gt.state === "queued"){ gEl.textContent = "Test gate: " + (gt.command || "") + " is queued behind another run in this repo…"; }
-      else if(gt.state === "passed"){ gEl.textContent = "Test gate: " + (gt.command || "") + " passed (Shepherd ran it)"; }
+      else if(gt.state === "running"){ gEl.textContent = gName + "Shepherd is running " + (gt.command || "") + "…"; }
+      else if(gt.state === "queued"){ gEl.textContent = gName + (gt.command || "") + " is queued behind another run in this repo…"; }
+      else if(gt.state === "reading"){ gEl.textContent = gName + "reading " + (gt.command || "") + "…"; }
+      else if(gt.state === "passed"){ gEl.textContent = gName + (gt.command || "") + " passed (Shepherd ran it)"; }
       // 2026-09-17: a suite that never started says nothing about the code -- say that, plainly,
       // instead of "the tests failed".
       else if(gt.state === "couldntRun"){
-        gEl.textContent = "Test gate: " + (gt.command || "") + " couldn't run ("
+        gEl.textContent = gName + (gt.command || "") + " couldn't run ("
           + (gt.why || "see its log") + ") — nothing was proven either way"
           + (gt.log ? "\nfull log: " + gt.log : "");
       }
@@ -15363,11 +15415,15 @@ local HTML = [[
         var head = gt.state === "timedOut" ? " timed out" : " exited " + (gt.code === undefined ? "?" : gt.code);
         // The FAILING lines lead: the tail alone was whatever ran after the failure, so a red
         // gate said nothing Adam could act on. The tail stays underneath as context.
-        gEl.textContent = "Test gate: " + (gt.command || "") + head
+        gEl.textContent = gName + (gt.command || "") + head
           + (gt.fails ? "\n" + gt.fails : "")
           + (gt.log ? "\nfull log: " + gt.log : "")
           + (gt.tail ? "\n--- last lines ---\n" + gt.tail : "");
       }
+      // 2026-09-29: a diff that edits the repo's declared gate (core.repoGateTouchedNote) -- a
+      // warning; the Merge button below never reads it
+      var gfEl = document.getElementById("dm-gatefile");
+      gfEl.textContent = (asking && m.gateFile) ? "⚠ " + m.gateFile : "";
       // 2026-09-18: the claim check (core.mergeClaimCheck) reads the session's summary against
       // the diff. It is a heuristic over English, so it WARNS here and gates nothing: the Merge
       // button below never looks at it.
