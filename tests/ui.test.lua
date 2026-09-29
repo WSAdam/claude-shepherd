@@ -1082,8 +1082,11 @@ do
   check("l3-pin: renderFeed uses keepMissing", src:find("keepMissing = true", 1, true) ~= nil)
   check("l3-pin: renderFeed prevOutput from item.activity", src:find("item.activity", 1, true) ~= nil)
   -- every feed site renders before typing; none feeds the raw task verbatim
+  -- 2026-09-29 (unit 26): renderFeed can refuse a task packet, so each site renders into `typed`
+  -- first (keeping the task on nil) and types exactly that -- same requirement, new shape
   check("l3-pin: all 3 feed sites render",
-        select(2, src:gsub("FX%.feedTask%(winTarget%([a-z]+%), renderFeed%(task,", "")) == 3)
+        select(2, src:gsub("local typed, notFed = renderFeed%(task, %a+%)", "")) == 3
+        and select(2, src:gsub("FX%.feedTask%(winTarget%([a-z]+%), typed, pre and pre%.cmd%)", "")) == 3)
   check("l3-pin: no feed site bypasses render",
         src:find("FX.feedTask(winTarget(item), task)", 1, true) == nil
         and src:find("FX.feedTask(winTarget(it), task)", 1, true) == nil)
@@ -3292,7 +3295,8 @@ do
           jKitty and jRefuse and jFocus and jKitty < jRefuse and jRefuse < jFocus or false)
   end
   check("sharedwin-pin: auto-feed, auto-continue and self-summary skip a shared window up front",
-        src:find("and not core.keystrokeBlocked(it)\n       and core.shouldFeed(", 1, true) ~= nil
+        -- 2026-09-29 (unit 26): the done edge now goes through core.packetAutofeed, still behind the guard
+        src:find("and not core.keystrokeBlocked(it) then\n      feedNow, holdPacket = core.packetAutofeed(core.shouldFeed(", 1, true) ~= nil
         and src:find("enabled = autoContinueOn and not it.remote and not core.keystrokeBlocked(it)", 1, true) ~= nil
         and src:find("{ enabled = not core.keystrokeBlocked(it), prevStatus = pv and pv.status or nil }", 1, true) ~= nil)
   local d = body("function renderDetail(){", 6000)
@@ -4360,7 +4364,8 @@ do
   local fp = src:match("function FX%.fleetTabPoll%(id, slug%)(.-)\nend\n") or ""
   check("leases: a batch unit's worktree gets one when its tab is found",
         fp:find('FX.mintLease(b.repo, core.normDir(b.repo) .. "/.claude/worktrees/" .. slug)', 1, true) ~= nil)
-  check("leases: ...and the unit's message states it", fp:find("core.fleetUnitMessage(b, unit, lease)", 1, true) ~= nil)
+  -- 2026-09-29 (unit 26): the message also takes the unit's task packet, after the lease
+  check("leases: ...and the unit's message states it", fp:find("core.fleetUnitMessage(b, unit, lease, ", 1, true) ~= nil)
   local rs = src:match("function FX%.removeStatus%(key%)(.-)\nend") or ""
   check("leases: FX.removeStatus prunes the lease files nothing can use", rs:find("FX.pruneLeaseFiles", 1, true) ~= nil)
   local rm = lib:match("\ncc_remove%(%)%s*{(.-)\n}") or ""
@@ -4409,6 +4414,50 @@ do
         and tickBody:find("refreshTimeIndex", 1, true) == nil)
   check("time: its own retained timer runs the index", src:find("FX.timeIndexTimer = hs.timer.doEvery(", 1, true) ~= nil)
   check("time: a chained pass is retained too", src:find("FX._timeIndexChain = hs.timer.doAfter(", 1, true) ~= nil)
+end
+
+-- ---- task packets (2026-09-29, build program unit 26) ----
+-- A packet at a queue's head is gated at feed time against the target's HEAD (FX.packetGate,
+-- async); the card flags a moved one, every feed site keeps the task when renderFeed refuses,
+-- and the queue editor saves packets through FX.packetCapture.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  local tickBody = src:match("\nfunction FX%._refreshBody%(%)(.-)\nend\n") or ""
+  local gateAt = tickBody:find("FX.packetGate(it, qk, core.queuePeek(q), true)", 1, true)
+  local holdAt = tickBody:find("core.packetAutofeed(", 1, true)
+  check("packets: the tick gates the packet at a queue's head before the autofeed decides",
+        gateAt ~= nil and holdAt ~= nil and gateAt < holdAt)
+  check("packets: the card carries a moved packet's line", tickBody:find("it.packetMoved = ", 1, true) ~= nil)
+  check("packets: a moved packet is ledgered once per episode, from the tick",
+        tickBody:find('ledgerFor(it, { type = "packet_moved"', 1, true) ~= nil)
+  check("packets: the router gates the head against the session it picked",
+        tickBody:find("FX.packetGate(item, qk, core.queuePeek(q))", 1, true) ~= nil)
+  check("packets: renderFeed hands a packet to FX.packetFeedText (no template expansion of code)",
+        src:find("if core.packetRef(bare) then return FX.packetFeedText(bare, item) end", 1, true) ~= nil)
+  local sites = 0
+  for _ in src:gmatch("local typed, notFed = renderFeed%(task, %a+%)\n%s+if not typed then") do sites = sites + 1 end
+  eq("packets: all three feed sites keep the task when renderFeed refuses", sites, 3)
+  local feedHandler = src:match('\n  if a == "queue%-feed" then(.-)\n  if a == "queue%-list"') or ""
+  check("packets: Feed next checks the head first, and feeds once the check lands",
+        feedHandler:find("FX.packetGate(item, qk, head)", 1, true) ~= nil and feedHandler:find("FX.packetCheckThen(", 1, true) ~= nil)
+  check("packets: the queue editor has a packet form",
+        src:find('id="packet-form"', 1, true) ~= nil and src:find('send("queue-packet-add", selectedKey', 1, true) ~= nil)
+  check("packets: the bridge saves it through FX.packetCapture",
+        src:find('if a == "queue-packet-add" then', 1, true) ~= nil and src:find("FX.packetCapture(item, qk, fields,", 1, true) ~= nil)
+  check("packets: removing a packet's token from the queue drops the packet",
+        src:find("FX.dropPacket(qk, core.packetRef(removed))", 1, true) ~= nil)
+  check("packets: a fed packet leaves the store (three feed sites, besides its definition)",
+        select(2, src:gsub("FX%.dropPacketFed%(qk, task%)", "")) == 4 and src:find("function FX.dropPacketFed(qk, task)", 1, true) ~= nil)
+  check("packets: the card's meta carries the flag (meta is esc()'d)",
+        src:find('if(it.packetMoved){ meta = (meta ? meta + " · " : "") + "📦 " + it.packetMoved; }', 1, true) ~= nil)
+  check("packets: the form's result is set as text, never HTML",
+        src:find('document.getElementById("pk-msg").textContent = ', 1, true) ~= nil)
+  check("packets: the unit's message carries its packet",
+        src:find("message = core.fleetUnitMessage(b, unit, lease, FX.fleetPacketFor(b, unit)) })", 1, true) ~= nil)
+  check("packets: FX.fleetOpenTab checks the packet before anything opens",
+        (src:match("\nfunction FX%.fleetOpenTab%(b, slug, req%)(.-)\nend\n") or ""):find("FX.fleetPacketGate(b, slug)", 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

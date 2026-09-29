@@ -8453,7 +8453,9 @@ do
   -- 2026-09-29: 27 -> 28 for the coverage index ("coverage", flagged new).
   -- 2026-09-29: 28 -> 29 for worktree leases ("leases", flagged new).
   -- 2026-09-29: 29 -> 30 for where the time went ("timelost", flagged new).
-  eq("FEATURES: the 30 new features are flagged", newCount, 30)
+  -- 2026-09-29: 30 -> 31 for task packets ("packets", flagged new).
+  eq("FEATURES: the 31 new features are flagged", newCount, 31)
+  check("FEATURES: lists task packets", keys.packets == true)
   check("FEATURES: lists the coverage index", keys.coverage == true)
   check("FEATURES: lists worktree leases", keys.leases == true)
   check("FEATURES: lists where the time went", keys.timelost == true)

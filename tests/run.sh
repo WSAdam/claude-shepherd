@@ -406,6 +406,9 @@ echo ""
 echo "== node: the Time view renders its callouts and cards, every session word escaped (behavioral, runs the shipped timeLostHtml) =="
 node "$DIR/time-view.test.js" || fail=1
 echo ""
+echo "== lua: task packets -- cites, the queue token, drift on literal before/after files, the async check at the target worktree's HEAD, renderFeed refusing a moved packet, the fleet refusal (behavioral, runs the shipped FX block on a real repo) =="
+lua "$DIR/packets.test.lua" || fail=1
+echo ""
 
 if [ "$fail" -eq 0 ]; then
   echo "✅ ALL GREEN"

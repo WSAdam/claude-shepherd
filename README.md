@@ -85,6 +85,8 @@ The automatic behaviours here are off until you turn them on, except handoff not
 
 - [**Task queue & auto-feed**](docs/automation.md#task-queue): line up tasks per session, feed the
   next when one finishes, and route a project's tasks to whichever session is free.
+- [**Task packets**](docs/automation.md#task-packets): a queued task carries the code it cites,
+  repro and done-when, and isn't fed while that code has moved.
 - [**Prompt templates**](docs/automation.md#prompt-templates): reusable, versioned prompts with
   variables filled in at send time.
 - [**Model auto-routing**](docs/automation.md#model-auto-routing): a queued task switches the

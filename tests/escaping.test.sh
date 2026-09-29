@@ -35,6 +35,10 @@ assert_eq "the project's merge order is esc()'d"            "yes" "$(has 'esc(p.
 # which is a file on disk all the same
 assert_eq "a lease's port is esc()'d"                     "yes" "$(has 'esc(String(ls.port))')"
 assert_eq "a lease's tooltip (its database path) is esc()'d" "yes" "$(has "title=\"'+esc(leaseTitle(ls))+'\"")"
+# task packets (2026-09-29): a moved packet's line names cited paths, which anyone can type; it
+# rides meta (esc()'d), and the packet form's result is set as text
+assert_eq "a moved packet's line rides the esc()'d meta"   "yes" "$(has 'if(it.packetMoved){ meta = (meta ? meta + " · " : "") + "📦 " + it.packetMoved; }')"
+assert_eq "the packet form's result is text, never HTML"   "yes" "$(has 'document.getElementById("pk-msg").textContent = ')"
 
 # 2. esc() itself still entity-encodes the HTML metacharacters (not gutted to a no-op)
 assert_eq "esc() encodes &"  "yes" "$(has '.replace(/&/g,"&amp;")')"
