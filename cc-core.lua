@@ -12273,6 +12273,63 @@ function M.sessionExportBasename(item, now)
   return "session-" .. exportSlug(label) .. "-" .. stamp
 end
 
+-- ---- Scenario corpus (2026-09-29) --------------------------------------------------------------
+-- Shepherd reads a card's state out of its transcript tail through six detectors. The corpus
+-- (tests/scenario-replay.test.lua) replays labelled windows of real transcripts through them and
+-- reports each one's accuracy; "Capture as scenario" (FX.captureScenario) saves a live card's
+-- window, scrubbed by ~/.claude/cc-scrub.js, to ~/.claude/cc-scenarios/ with a label to fill in.
+M.SCENARIO_DETECTORS = { "turn", "resumed", "awaiting", "interrupted", "error", "looping" }
+M.SCENARIO_WINDOW = 65536          -- the tick's own tail read (ACTIVITY_BYTES)
+M.SCENARIO_LOOP_REPEATS = 3        -- escalation.loop.repeats' default
+
+-- Every detector's verdict on one tail, as the tick would read it: turn = the label or "none",
+-- resumed = only when opts.since (when the card last read done, epoch) is given, the rest
+-- true/false. Pure.
+function M.scenarioVerdicts(tail, opts)
+  tail = type(tail) == "string" and tail or ""
+  opts = type(opts) == "table" and opts or {}
+  local repeats = tonumber(opts.loopRepeats) or M.SCENARIO_LOOP_REPEATS
+  local since, resumed = tonumber(opts.since), nil
+  if since then resumed = M.transcriptResumed(tail, since, opts.slack) == true end
+  return {
+    turn = M.turnOutcome(M.turnEvidence(tail)) or "none",
+    resumed = resumed,
+    awaiting = M.transcriptAwaitingTool(tail) == true,
+    interrupted = M.transcriptInterrupted(tail) ~= nil,
+    error = M.transcriptError(tail) ~= nil,
+    looping = M.isLooping(M.transcriptToolSigs(tail, repeats + 2), repeats) == true,
+  }
+end
+
+-- Where a capture goes and the scrubber's command line: { name, out, label, args } or nil, why.
+-- opts = { dir, scrubber (the installed cc-scrub.js), said (scenarioVerdicts on the raw tail),
+-- exists = fn(path) -> bool }. A done card passes when it read done, so the label can ask
+-- "resumed?". Pure.
+function M.scenarioCapturePlan(it, now, opts)
+  opts = type(opts) == "table" and opts or {}
+  if type(it) ~= "table" then return nil, "no session" end
+  if it.remote then return nil, "a remote session's transcript is on another machine" end
+  local tp = it.transcript_path
+  if type(tp) ~= "string" or tp == "" then return nil, "this session has no transcript yet" end
+  local dir = tostring(opts.dir or ""):gsub("/+$", "")
+  local base = os.date("%Y%m%d-%H%M%S", tonumber(now) or os.time()) .. "-"
+    .. exportSlug(it.label or it.name or it.key) .. "-" .. exportSlug(it.status or "unknown")
+  local name = M.uniquifyName(base, type(opts.exists) == "function"
+    and function(c) return opts.exists(dir .. "/" .. c .. ".jsonl") end or nil)
+  local out, label = dir .. "/" .. name .. ".jsonl", dir .. "/" .. name .. ".label.json"
+  local args = { tostring(opts.scrubber or ""), "--src", tp, "--out", out, "--tail", tostring(M.SCENARIO_WINDOW),
+                 "--label", label, "--status", tostring(it.status or "unknown"),
+                 "--detectors", table.concat(M.SCENARIO_DETECTORS, ",") }
+  if it.status == "done" and tonumber(it.updated) then
+    args[#args + 1] = "--since"; args[#args + 1] = tostring(math.floor(tonumber(it.updated)))
+  end
+  if type(opts.said) == "table" and M.json then
+    local ok, s = pcall(M.json.encode, opts.said)
+    if ok and type(s) == "string" then args[#args + 1] = "--said"; args[#args + 1] = s end
+  end
+  return { name = name, out = out, label = label, args = args }
+end
+
 -- Per-session activity tally from this session's ledger events (pure).
 function M.sessionExportCounters(events)
   local c = { prompts = 0, toolRequests = 0, approvals = 0, denials = 0,

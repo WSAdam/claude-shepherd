@@ -2840,6 +2840,59 @@ function FX.exportSession(item, basename, meta)
   return { ok = ok, dir = dir, name = name, transcript = copied }
 end
 
+-- Capture as scenario (2026-09-29): save a scrubbed window of a card's transcript -- the 64KB the
+-- tick reads -- to ~/.claude/cc-scenarios/, with a label to fill in (what was true at that
+-- moment, per detector), so a moment a detector got wrong becomes a corpus case
+-- (tests/scenario-replay.test.lua --captures replays them; the README says how to promote one).
+-- Never written into a repo. The scrub is the installed ~/.claude/cc-scrub.js -- the same rules the
+-- repo's fixtures are cut with -- run as a retained task so the panel's thread never waits on it.
+-- Returns the plan, or nil when there is nothing to capture (said in a toast either way).
+FX.SCENARIO_DIR = os.getenv("CC_SCENARIO_DIR") or (CLAUDE_DIR .. "/cc-scenarios")
+FX.SCRUBBER = CLAUDE_DIR .. "/cc-scrub.js"
+FX._scenarioTasks = {}
+function FX.captureScenario(it)
+  if type(it) ~= "table" then return nil end
+  local function say(msg) pcall(function() FX.alert("Claude Shepherd: " .. msg) end) end
+  if it.remote then say("can't capture a remote session — its transcript is on another machine"); return nil end
+  local tp = it.transcript_path
+  if type(tp) ~= "string" or tp == "" or hs.fs.attributes(tp, "mode") ~= "file" then
+    say("nothing to capture — this session's transcript isn't on disk"); return nil
+  end
+  if not hs.fs.attributes(FX.SCRUBBER) then
+    say("can't capture — " .. FX.SCRUBBER .. " isn't installed (run make install from the Shepherd checkout)")
+    return nil
+  end
+  hs.fs.mkdir(FX.SCENARIO_DIR)   -- false when it exists already: expected
+  local said = core.scenarioVerdicts(FX.readTail(tp, core.SCENARIO_WINDOW),
+    { since = it.status == "done" and tonumber(it.updated) or nil })
+  local plan, why = core.scenarioCapturePlan(it, os.time(), { dir = FX.SCENARIO_DIR, scrubber = FX.SCRUBBER, said = said,
+    exists = function(p) return hs.fs.attributes(p) ~= nil end })
+  if not plan then say("nothing to capture — " .. tostring(why)); return nil end
+  print("[cc-dashboard] 🚀 capture as scenario: " .. plan.out)
+  -- resolveBin asks a login shell (a synchronous hs.execute): once, then only an absolute path is kept
+  local node = FX._nodeBin or resolveBin("node")
+  if node:sub(1, 1) == "/" then FX._nodeBin = node end
+  local okTask, t = pcall(hs.task.new, node, function(code, _, stderr)
+    FX._scenarioTasks[plan.name] = nil
+    if code == 0 then
+      print("[cc-dashboard] ✅ scenario captured: " .. plan.out)
+      say("captured a scenario → " .. plan.out .. " · fill in its label: " .. plan.label)
+    else
+      local first = tostring(stderr or ""):match("([^\n]*%S[^\n]*)") or ("exit " .. tostring(code))
+      print("[cc-dashboard] ❌ scenario capture failed: " .. first)
+      say("scenario capture failed — " .. first)
+    end
+  end, plan.args)
+  if not okTask or not t then
+    print("[cc-dashboard] ❌ scenario capture: couldn't start " .. tostring(node))
+    say("scenario capture failed — couldn't start node (" .. tostring(node) .. ")")
+    return nil
+  end
+  FX._scenarioTasks[plan.name] = t
+  t:start()
+  return plan
+end
+
 -- Escalation channels (Phase 4c-A), both off unless enabled in cc-config.json.
 function FX.playSound()
   local s = hs.sound.getByName("Submarine") or hs.sound.getByName("Ping")
@@ -8330,6 +8383,16 @@ local function handleBridgeMsg(msg)
     end
     return
   end
+  if a == "capture-scenario" then
+    -- Capture as scenario (2026-09-29): a scrubbed window + a label to fill in, under cc-scenarios.
+    local it = byKey[tostring(payload.v or "")]
+    if not it then
+      pcall(function() FX.alert("Claude Shepherd: no such session to capture") end)
+      return
+    end
+    FX.captureScenario(it)
+    return
+  end
   if a == "export-session" then
     -- L5 Export session archive: transcript .jsonl + meta.json under cc-exports.
     -- Explicit operator action; honors the ledger redaction posture by exporting
@@ -8659,6 +8722,10 @@ local function handleBridgeMsg(msg)
         -- Round-trips through the same 'export-session' handler the detail button uses.
         { title = "Export session…", fn = function()
             pcall(function() wv:evaluateJavaScript("send('export-session', " .. keyJson .. ")") end)
+          end },
+        -- 2026-09-29: a scrubbed window + a label to fill in, for the detector corpus.
+        { title = "Capture as scenario…", fn = function()
+            pcall(function() wv:evaluateJavaScript("send('capture-scenario', " .. keyJson .. ")") end)
           end },
         -- A/B fork-to-compare, scoped to THIS project's folder (opens the modal with the
         -- repo pre-filled; still editable). Was a global header button -- it's a
@@ -10841,6 +10908,7 @@ local HTML = [[
       <button id="b-score" onclick="act('score')" title="Run-quality score (0-100) for this session from the audit ledger — penalizes errors, denied tools, loops, and forced respawns — plus a ⚠ when recent sessions trend down. Needs the Audit log on.">Score</button>
       <button id="b-timeline" onclick="openSessionTimeline()" title="Show this session's recorded activity timeline (needs the ledger enabled).">📜 Timeline</button>
       <button id="b-export" onclick="exportSession()" title="Export this session: copy its transcript (.jsonl) + a meta.json (label, provider/model, lineage, activity counters) into ~/.claude/cc-exports and reveal it in Finder.">⤓ Export</button>
+      <button id="b-scenario" onclick="captureScenario()" title="Capture as scenario: save a scrubbed window of this session's transcript (the 64KB Shepherd reads) to ~/.claude/cc-scenarios/ with a label to fill in -- what was really true at this moment -- so the detector corpus can measure it. Never written into a repo.">⌖ Capture as scenario</button>
     </div>
     <div id="d-controls">
       <label class="ctl">Effort
@@ -15230,6 +15298,8 @@ local HTML = [[
     }
     // L5 Export session archive: transcript + meta.json into ~/.claude/cc-exports.
     function exportSession(){ if(selectedKey) send("export-session", selectedKey); }
+    // Capture as scenario (2026-09-29): a scrubbed transcript window + a label, into ~/.claude/cc-scenarios.
+    function captureScenario(){ if(selectedKey) send("capture-scenario", selectedKey); }
 
     // ---- Fleet insights view (Feature A) ------------------------------------
     function openInsights(){ send("open-insights-view"); }

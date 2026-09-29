@@ -593,7 +593,7 @@ assert_json "...and the file it points to gains the hooks" "$F/dotfiles/settings
 # cc-ask.sh printed "copied" and "install complete", exit 0, with the hook wired to a missing file.
 PR="$F/partial-repo"; mkdir -p "$PR"
 # 2026-09-28: the checkout copy carries SHIPPED too, so the install stops on cc-ask.sh itself.
-cp "$ROOT"/install.sh "$ROOT"/settings-hooks.json "$ROOT"/SHIPPED "$ROOT"/cc-*.sh "$ROOT"/cc-core.lua "$ROOT"/claude-dashboard.lua "$PR/"
+cp "$ROOT"/install.sh "$ROOT"/settings-hooks.json "$ROOT"/SHIPPED "$ROOT"/cc-*.sh "$ROOT"/cc-core.lua "$ROOT"/cc-scrub.js "$ROOT"/claude-dashboard.lua "$PR/"
 rm "$PR/cc-ask.sh"
 CC_INSTALL_CLAUDE_DIR="$F/partial-claude" CC_INSTALL_HS_DIR="$F/partial-hs" CC_INSTALL_NO_APP=1 \
   bash "$PR/install.sh" </dev/null >"$F/partial.out" 2>&1

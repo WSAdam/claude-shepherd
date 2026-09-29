@@ -12313,5 +12313,99 @@ do
   check("not verified: the first problem is the one reported  (" .. tostring(why) .. ")", why:find("fix/demo", 1, true) ~= nil)
 end
 
+-- ---- scenario corpus: every detector's verdict on one window, and capturing one (2026-09-29) ----
+-- tests/scenario-replay.test.lua replays labelled windows of real transcripts through the six
+-- transcript detectors; "Capture as scenario" saves one from a live card. Both read the verdicts
+-- through core.scenarioVerdicts, so the corpus and the capture judge a window the same way.
+do
+  eq("the corpus measures six detectors", table.concat(core.SCENARIO_DETECTORS, ","),
+     "turn,resumed,awaiting,interrupted,error,looping")
+  local function rec(t) return core.json.encode(t) .. "\n" end
+  local function ts(s) return "2026-01-01T00:0" .. s .. ".000Z" end
+  local prompt = rec({ type = "user", origin = { kind = "human" }, timestamp = ts("0:00"),
+    message = { role = "user", content = { { type = "text", text = "tidy the parser" } } } })
+  local function bash(id, cmd, at)
+    return rec({ type = "assistant", timestamp = ts(at), message = { role = "assistant",
+      content = { { type = "tool_use", id = id, name = "Bash", input = { command = cmd } } } } })
+  end
+  local function result(id, at, text, isErr)
+    return rec({ type = "user", timestamp = ts(at), message = { role = "user",
+      content = { { type = "tool_result", tool_use_id = id, content = text or "ok", is_error = isErr or nil } } } })
+  end
+  local reply = rec({ type = "assistant", timestamp = ts("2:00"), message = { role = "assistant",
+    content = { { type = "text", text = "Tidied it." } } } })
+
+  local v = core.scenarioVerdicts(prompt .. bash("t1", "make build", "1:00") .. result("t1", "1:10") .. reply, {})
+  eq("verdicts: a finished turn that ran a command made progress", v.turn, "made progress")
+  eq("verdicts: resumed isn't asked without the time the card read done", v.resumed, nil)
+  eq("verdicts: ...nor is anything awaited", v.awaiting, false)
+  eq("verdicts: ...or interrupted", v.interrupted, false)
+  eq("verdicts: ...or an error", v.error, false)
+  eq("verdicts: ...or a loop", v.looping, false)
+  v = core.scenarioVerdicts(prompt .. bash("t1", "make build", "1:00") .. result("t1", "1:10") .. reply,
+    { since = core.isoToEpoch(ts("0:30")) })
+  eq("verdicts: output newer than the card's done reads resumed", v.resumed, true)
+  v = core.scenarioVerdicts(prompt .. bash("t1", "make build", "1:00") .. result("t1", "1:10") .. reply,
+    { since = core.isoToEpoch(ts("2:00")) })
+  eq("verdicts: ...and nothing newer doesn't", v.resumed, false)
+  v = core.scenarioVerdicts(prompt .. bash("t1", "make build", "1:00"), {})
+  eq("verdicts: a tool_use with no result yet is awaited", v.awaiting, true)
+  v = core.scenarioVerdicts(prompt .. bash("t1", "make build", "1:00") .. result("t1", "1:05")
+    .. rec({ type = "user", timestamp = ts("1:06"), message = { role = "user",
+         content = { { type = "text", text = "[Request interrupted by user]" } } } }), {})
+  eq("verdicts: an interrupt marker as the newest record is interrupted", v.interrupted, true)
+  v = core.scenarioVerdicts(prompt .. rec({ type = "assistant", timestamp = ts("1:00"), isApiErrorMessage = true,
+    error = "server_error", message = { role = "assistant", content = { { type = "text", text = "API Error: 529" } } } }), {})
+  eq("verdicts: a turn that died on an API error is an error", v.error, true)
+  eq("verdicts: ...and its turn reads blocked", v.turn, "blocked")
+  local loop = prompt
+  for i = 1, 3 do loop = loop .. bash("r" .. i, "make test", "1:0" .. i) .. result("r" .. i, "1:0" .. i, "FAIL", true) end
+  v = core.scenarioVerdicts(loop, {})
+  eq("verdicts: the same command three times running is a loop", v.looping, true)
+  v = core.scenarioVerdicts(prompt, {})
+  eq("verdicts: a prompt with no reply has no turn label yet", v.turn, "none")
+  v = core.scenarioVerdicts(nil, {})
+  eq("verdicts: no tail at all reads as nothing", v.turn .. tostring(v.awaiting) .. tostring(v.error), "nonefalsefalse")
+
+  -- the capture plan: where the window goes, what it is called, and the scrubber's command line
+  local it = { key = "k1", name = "My Proj!", status = "done", updated = 1790000000,
+               transcript_path = "/t/sid.jsonl" }
+  local now = os.time({ year = 2026, month = 9, day = 29, hour = 14, min = 5, sec = 9 })
+  local taken = {}
+  local plan = core.scenarioCapturePlan(it, now, { dir = "/h/.claude/cc-scenarios", scrubber = "/h/.claude/cc-scrub.js",
+    said = { turn = "made progress" }, exists = function(p) return taken[p] == true end })
+  check("capture plan: a card with a transcript gets a plan", type(plan) == "table")
+  plan = plan or {}
+  eq("capture plan: named for when, the project and how the card read", plan.name,
+     os.date("%Y%m%d-%H%M%S", now) .. "-My-Proj-done")
+  eq("capture plan: the window goes into the scenarios folder", plan.out, "/h/.claude/cc-scenarios/" .. plan.name .. ".jsonl")
+  eq("capture plan: ...its label beside it", plan.label, "/h/.claude/cc-scenarios/" .. plan.name .. ".label.json")
+  local args = table.concat(plan.args or {}, " ")
+  check("capture plan: runs the installed scrubber on the transcript  (" .. args .. ")",
+        args:find("^/h/%.claude/cc%-scrub%.js %-%-src /t/sid%.jsonl %-%-out ") ~= nil)
+  check("capture plan: ...cut the size the tick reads", args:find("--tail " .. core.SCENARIO_WINDOW, 1, true) ~= nil)
+  eq("capture plan: ...which is the tick's own 64KB", core.SCENARIO_WINDOW, 65536)
+  check("capture plan: ...writing the label", args:find("--label " .. plan.label, 1, true) ~= nil)
+  check("capture plan: ...with when a done card last read done", args:find("--since 1790000000", 1, true) ~= nil)
+  check("capture plan: ...how the card read", args:find("--status done", 1, true) ~= nil)
+  local saidAt
+  for i, a in ipairs(plan.args or {}) do if a == "--said" then saidAt = i + 1 end end
+  eq("capture plan: ...and what Shepherd's detectors said, as JSON",
+     saidAt and core.json.decode(plan.args[saidAt]).turn, "made progress")
+  taken["/h/.claude/cc-scenarios/" .. plan.name .. ".jsonl"] = true
+  local plan2 = core.scenarioCapturePlan(it, now, { dir = "/h/d", scrubber = "/s.js",
+    exists = function(p) return p == "/h/d/" .. plan.name .. ".jsonl" end })
+  eq("capture plan: a second capture in the same second never overwrites the first", plan2 and plan2.name, plan.name .. "-2")
+  local working = core.scenarioCapturePlan({ name = "p", status = "working", updated = 5, transcript_path = "/t" }, now,
+    { dir = "/d", scrubber = "/s.js" })
+  check("capture plan: a working card has no done time to pass", not table.concat(working.args, " "):find("--since", 1, true))
+  local none, why = core.scenarioCapturePlan({ name = "p", status = "done" }, now, { dir = "/d", scrubber = "/s.js" })
+  check("capture plan: no transcript, no plan  (" .. tostring(why) .. ")", none == nil and tostring(why):find("transcript", 1, true) ~= nil)
+  none, why = core.scenarioCapturePlan({ name = "p", status = "done", remote = true, transcript_path = "/t" }, now,
+    { dir = "/d", scrubber = "/s.js" })
+  check("capture plan: a remote session's transcript isn't on this Mac  (" .. tostring(why) .. ")",
+        none == nil and tostring(why):find("remote", 1, true) ~= nil)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

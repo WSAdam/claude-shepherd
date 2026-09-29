@@ -93,7 +93,7 @@ newhook_repo() {
   local d="$1"
   mkdir -p "$d"
   cp "$ROOT"/install.sh "$ROOT"/uninstall.sh "$ROOT"/Makefile "$ROOT"/cc-*.sh "$ROOT"/cc-core.lua \
-     "$ROOT"/claude-dashboard.lua "$d/"
+     "$ROOT"/cc-scrub.js "$ROOT"/claude-dashboard.lua "$d/"
   [ -r "$ROOT/SHIPPED" ] && cp "$ROOT/SHIPPED" "$d/"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$d/cc-newhook.sh"
   printf 'cc-newhook.sh         claude hook\n' >> "$d/SHIPPED"

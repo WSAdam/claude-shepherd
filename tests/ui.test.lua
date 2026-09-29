@@ -3928,5 +3928,31 @@ do
         src:find('FX.INBOX_DIR = os.getenv("CC_INBOX_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-inbox")', 1, true) ~= nil)
 end
 
+-- ---- Capture as scenario (2026-09-29) ----
+-- A card's transcript window, scrubbed by the installed cc-scrub.js, saved to ~/.claude/cc-scenarios/
+-- with a label to fill in -- a case for tests/scenario-replay.test.lua. tests/scenario-capture.test.lua
+-- drives FX.captureScenario itself; these pin the two ways in and where it writes.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("scenario: the detail panel has a Capture as scenario button",
+        src:find('id="b-scenario" onclick="captureScenario()"', 1, true) ~= nil)
+  check("scenario: ...which sends the selected card",
+        src:find('function captureScenario(){ if(selectedKey) send("capture-scenario", selectedKey); }', 1, true) ~= nil)
+  check("scenario: the panel's handler captures that card",
+        src:find('if a == "capture-scenario" then', 1, true) ~= nil and src:find("FX.captureScenario(it)", 1, true) ~= nil)
+  check("scenario: the card's menu has it too",
+        src:find('title = "Capture as scenario…"', 1, true) ~= nil
+        and src:find([[send('capture-scenario', ]], 1, true) ~= nil)
+  check("scenario: captures go to ~/.claude/cc-scenarios, never into a repo",
+        src:find('FX.SCENARIO_DIR = os.getenv("CC_SCENARIO_DIR") or (CLAUDE_DIR .. "/cc-scenarios")', 1, true) ~= nil)
+  check("scenario: the plan is core's, the verdicts core's",
+        src:find("core.scenarioCapturePlan(it, os.time()", 1, true) ~= nil
+        and src:find("core.scenarioVerdicts(", 1, true) ~= nil)
+  check("scenario: the scrubber runs as a retained task, never on the panel's thread",
+        src:find("FX._scenarioTasks[plan.name] = t", 1, true) ~= nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

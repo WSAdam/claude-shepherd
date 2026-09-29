@@ -188,6 +188,15 @@ echo ""
 echo "== lua: transcript parsers replayed over scrubbed windows of real transcripts (tests/fixtures/transcripts/) =="
 HOME="$(mktemp -d)" lua "$DIR/transcript-replay.test.lua" || fail=1
 echo ""
+echo "== lua: scenario corpus -- each transcript detector's accuracy over labelled real windows =="
+HOME="$(mktemp -d)" lua "$DIR/scenario-replay.test.lua" || fail=1
+echo ""
+echo "== node: the transcript scrubber (cc-scrub.js) and the fixture cutter that wraps it =="
+node "$DIR/scrub.test.js" || fail=1
+echo ""
+echo "== lua: Capture as scenario -- a scrubbed window into ~/.claude/cc-scenarios, never the repo (behavioral, stubbed hs + node) =="
+HOME="$(mktemp -d)" lua "$DIR/scenario-capture.test.lua" || fail=1
+echo ""
 echo "== lua: panel UX =="
 lua "$DIR/ui.test.lua" || fail=1
 echo ""

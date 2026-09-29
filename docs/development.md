@@ -87,6 +87,49 @@ without running it, and only `spawn.live` turns real launching on.
 `ubuntu-latest` for every push and pull request. The Playwright browser suites and the Deno demo
 suite skip there; CI installs neither.
 
+### The scenario corpus: how accurate is each detector?
+
+Shepherd reads a card's state out of its transcript tail through six detectors: the turn's label,
+*resumed* (a card that read done has started a new turn), *awaiting a tool*, *interrupted*,
+*error* and *looping* (`core.scenarioVerdicts` runs them all). Unit tests feed them a few
+hand-written lines; the corpus feeds them real moments.
+[tests/scenario-replay.test.lua](../tests/scenario-replay.test.lua) is a table of scrubbed windows
+cut from real transcripts ([tests/fixtures/transcripts/](../tests/fixtures/transcripts/README.md)),
+each labelled with what was really true at that moment, judged from the raw transcript. It prints
+every detector's accuracy and goes red when any verdict differs from the table. A detector that is
+known to get a row wrong carries a `miss` entry saying what it answers instead: that counts against
+its accuracy without failing the suite, and a detector that starts answering differently (fixed,
+or wrong another way) goes red until the table is updated.
+
+```text
+Detector accuracy over 12 labelled moment(s) of real transcripts:
+  turn          88%  7/8 right, 1 wrong, 4 n/a
+  resumed      100%  7/7 right, 5 n/a
+  ...
+  looping       92%  11/12 right, 1 wrong
+```
+
+The suite also insists every tail fixture has a row, and that every detector is seen answering
+both ways. The fixtures README says how to cut a new window (`scrub.js`, which refuses any word
+outside `vocabulary.txt`).
+
+### Capturing a scenario
+
+When a card reads wrong (Working for a session that stopped, a loop that isn't one), press
+**⌖ Capture as scenario** in its detail panel, or pick it from the card's menu. Shepherd runs the
+installed scrubber (`~/.claude/cc-scrub.js`, the same rules the fixtures are cut with) on the 64KB
+of transcript the tick reads and writes two files to `~/.claude/cc-scenarios/`, never into a
+repo:
+
+- `<when>-<project>-<status>.jsonl`: the scrubbed window.
+- `<...>.label.json`: the tail to read it back with, when the card last read done (moved onto the
+  window's clock), what Shepherd's detectors said, and one `null` verdict per detector.
+
+Fill in what was really true (a label, `true`/`false`, or `"n/a"`), then run
+`lua tests/scenario-replay.test.lua --captures` to replay your labelled captures and see their
+accuracy; there a disagreement is reported, not failed. To add one to the corpus, follow the
+fixtures README's "From a capture to a fixture".
+
 ## Deploying changes
 
 Hammerspoon runs the **copies** in `~/.hammerspoon/` (`init.lua` does
