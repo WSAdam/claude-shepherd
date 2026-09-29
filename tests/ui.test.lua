@@ -4460,5 +4460,34 @@ do
         (src:match("\nfunction FX%.fleetOpenTab%(b, slug, req%)(.-)\nend\n") or ""):find("FX.fleetPacketGate(b, slug)", 1, true) ~= nil)
 end
 
+-- ---- the decisions inbox (2026-09-29, build program unit 28) ----
+-- ☰ → Inbox, a fleet-wide view (id inbox -- the detail panel's gate-decision "Decisions" tab is a
+-- different thing and keeps its id): every open cc-decide.sh question and every held
+-- AskUserQuestion, answerable in place. The tick reads the questions before the needs-you stamp
+-- (an open one is a heads-up there, a blocking one needs Adam) and pushes the rows to the panel.
+-- tests/decide.test.lua drives the wiring, tests/inbox-view.test.js the shipped renderer.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("inbox: ☰ has an Inbox item with its own badge",
+        src:find([[<button class="tm-item" onclick="menuPick('inbox')"><span class="tm-ic">📥</span> Inbox<span id="tm-inbox-badge"></span></button>]], 1, true) ~= nil)
+  check("inbox: its view is id inbox", src:find('<div id="inbox">', 1, true) ~= nil)
+  check("inbox: menuPick opens it", src:find('else if(which === "inbox") openInbox();', 1, true) ~= nil)
+  check("inbox: the detail panel's Decisions tab keeps its own id",
+        src:find('<div id="inbox">', 1, true) ~= nil and src:find('id="decisions"', 1, true) == nil)
+  check("inbox: an answer goes to FX.answerDecision, never typed",
+        src:find('if a == "decide-answer" then FX.answerDecision(tostring(payload.v or ""), tostring(payload.text or "")); return end', 1, true) ~= nil)
+  check("inbox: a row's markup goes through esc()",
+        src:find("esc(r.question)", 1, true) ~= nil and src:find("esc(r.session)", 1, true) ~= nil)
+  local tickBody = src:match("\nfunction FX%._refreshBody%(%)(.-)\nend\n") or ""
+  local at, stamp = tickBody:find("pcall(FX.stepDecisions, list)", 1, true), tickBody:find("FX.annotateNeedsYou(list)", 1, true)
+  check("inbox: the tick reads the questions, isolated in a pcall, before the needs-you stamp",
+        at ~= nil and stamp ~= nil and at < stamp)
+  check("inbox: the tick pushes the rows to a visible panel", tickBody:find("pcall(FX.pushInbox)", 1, true) ~= nil)
+  check("inbox: a blocking question's session is probed for liveness",
+        src:find("(type(it.decisions) == \"table\" and (tonumber(it.decisions.blocking) or 0) > 0)", 1, true) ~= nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

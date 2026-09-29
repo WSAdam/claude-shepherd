@@ -327,6 +327,10 @@ CC_TALK_DIR="${CC_TALK_DIR:-${HOME}/.claude/cc-talk}"
 # The session mailbox (build program unit 11a, 2026-09-29): a folder per session of the messages
 # Shepherd left it (FX.mailboxSend). Default MUST match the dashboard's FX.INBOX_DIR.
 CC_INBOX_DIR="${CC_INBOX_DIR:-${HOME}/.claude/cc-inbox}"
+# The decisions inbox (build program unit 28, 2026-09-29): cc-decide.sh's questions,
+# <key>.<epoch>-<pid>.json, and Adam's answers, <id>.answer. Default MUST match cc-decide.sh's
+# (it sources this file) and the dashboard's FX.DECIDE_DIR.
+CC_DECIDE_DIR="${CC_DECIDE_DIR:-${HOME}/.claude/cc-decide}"
 # Resume at the usage limit's reset (build program unit 13, 2026-09-29): cc-resume.sh's arm
 # (<key>.json), Shepherd's plan (<key>.plan.json) and the card's Cancel (<key>.cancel), per
 # session key. A clean Stop clears them (cc-status.sh). Default MUST match the dashboard's FX.RESUME_DIR.
@@ -378,6 +382,63 @@ cc_lease_prune() {
   return 0
 }
 
+# A decisions-inbox file's name -> "<key> <id> <kind>" on stdout (kind: json | answer | part, a part
+# being a torn write or a claim); 1 for anything else. The id is <key>.<epoch>-<pid>, the key
+# everything before its last dot, so "k9.1.<id>" belongs to the key k9.1, never to k9.
+# KEEP IN SYNC with core.decisionFileOf.
+_cc_decide_name() { # $1 file name
+  local n="$1" stem kind tail="x" id key
+  case "$n" in
+    *.json)          stem="${n%.json}"; kind=json ;;
+    *.answer)        stem="${n%.answer}"; kind=answer ;;
+    *.json.tmp.*)    stem="${n%.json.tmp.*}"; tail="${n##*.json.tmp.}"; kind=part ;;
+    *.answer.tmp.*)  stem="${n%.answer.tmp.*}"; tail="${n##*.answer.tmp.}"; kind=part ;;
+    *.answer.claim.*) stem="${n%.answer.claim.*}"; tail="${n##*.answer.claim.}"; kind=part ;;
+    *) return 1 ;;
+  esac
+  case "$tail" in ''|*[!A-Za-z0-9]*) return 1 ;; esac
+  id="${stem##*.}"; key="${stem%.*}"
+  [ "$key" != "$stem" ] && [ -n "$key" ] || return 1
+  case "$id" in *[!0-9-]*|-*|*-|*-*-*) return 1 ;; *-*) ;; *) return 1 ;; esac
+  printf '%s %s %s' "$key" "$key.$id" "$kind"
+}
+
+# SessionEnd's share of the decisions inbox: the session's OPEN questions go, with their torn writes
+# and claims. An ANSWERED one stays -- the session's next start (a resume) takes it -- until the
+# prune below. KEEP IN SYNC with FX.decideRemove.
+cc_decide_remove() { # $1 key
+  local key="$1" f parsed k id kind
+  case "$key" in ''|.|..|*/*) return 0 ;; esac
+  [ -d "$CC_DECIDE_DIR" ] || return 0
+  for f in "$CC_DECIDE_DIR/$key".*; do
+    [ -e "$f" ] || continue
+    parsed="$(_cc_decide_name "${f##*/}")" || continue
+    read -r k id kind <<EOF
+$parsed
+EOF
+    [ "$k" = "$key" ] || continue   # another session's (k9.1's files start "k9." too)
+    case "$kind" in
+      json) [ -f "$CC_DECIDE_DIR/$id.answer" ] || rm -f "$f" 2>/dev/null ;;
+      part) rm -f "$f" 2>/dev/null ;;
+    esac
+  done
+  return 0
+}
+
+# Every session's: a question or answer over a week old, an answer whose question is gone, and a
+# torn write or claim a minute old (every writer renames at once). KEEP IN SYNC with FX.decidePrune.
+cc_decide_prune() {
+  [ -d "$CC_DECIDE_DIR" ] || return 0
+  local f
+  find "$CC_DECIDE_DIR" -maxdepth 1 -type f \( -name '*.json' -o -name '*.answer' \) -mtime +7 -exec rm -f {} + 2>/dev/null
+  find "$CC_DECIDE_DIR" -maxdepth 1 -type f \( -name '*.tmp.*' -o -name '*.claim.*' \) -mmin +1 -exec rm -f {} + 2>/dev/null
+  for f in "$CC_DECIDE_DIR"/*.answer; do
+    [ -f "$f" ] || continue
+    [ -f "${f%.answer}.json" ] || rm -f "$f" 2>/dev/null
+  done
+  return 0
+}
+
 # Remove a session entirely (used by SessionEnd) plus any stray decision/claim
 # file and the per-session gated-tools override, approveRepeats memo, autopilot
 # expiry, L2 policy files, and the model auto-routing opt-in (a new session gets a
@@ -392,6 +453,7 @@ cc_lease_prune() {
 # reset -- its waiter sees the arm gone and stops.
 # cc-pins/ (2026-09-29) is keyed by worktree, not session: cc_pins_prune drops only a gone worktree's.
 # cc-lease/ (2026-09-29) is keyed by main checkout: cc_lease_prune drops only what nothing can use.
+# cc-decide/ (2026-09-29): the session's open questions go; an answered one waits for its next start.
 # KEEP THE FILE SET IN SYNC with FX.removeStatus in claude-dashboard.lua.
 cc_remove() {
   rm -f "$(cc_file "$1")" "$(cc_file "$1")".tmp.* "$(cc_decision_file "$1")" \
@@ -418,6 +480,9 @@ cc_remove() {
   cc_pins_prune
   # Worktree leases are per main checkout: only the files nothing can use (2026-09-29).
   cc_lease_prune
+  # The decisions inbox: the session's open questions, then every session's stale files (2026-09-29).
+  cc_decide_remove "$1"
+  cc_decide_prune
   return 0
 }
 
@@ -1444,7 +1509,8 @@ CC_NOTES_DIR="${CC_NOTES_DIR:-${HOME}/.claude/cc-notes}"
 # 2026-09-29: "notes" (auto-compact, unit 16) prints only after a compaction, and comes first there.
 # 2026-09-29: "lease" (worktree leases, unit 27) is short and comes before the long parts, so a big
 # handoff note or mailbox never crowds out which port is the session's own.
-CC_CONTEXT_PARTS="notes lease handoff mailbox"
+# 2026-09-29: "decisions" (the decisions inbox, unit 28) -- Adam's late answers -- is short too.
+CC_CONTEXT_PARTS="notes lease decisions handoff mailbox"
 CC_CONTEXT_MAX=8000
 CC_PENDING_MAX_AGE=3600   # a respawn's note nobody took within the hour is stale
 
@@ -1772,6 +1838,55 @@ _cc_ctx_lease() { # $1 source, $2 key, $3 cwd
   [ -n "$best" ] || return 0
   printf 'Shepherd leased this worktree (%s) its own port and database path: PORT=%s, DB_PATH=%s. Run any server it starts on that port and keep any database at that path, so parallel units never collide. Both are also in $(git rev-parse --git-dir)/shepherd-lease.env, which a project can source.\n' \
     "$best" "$bport" "$bdb"
+}
+
+# The decisions part of cc_session_context (the decisions inbox, build program unit 28, 2026-09-29):
+# Adam's answers to questions this session asked with cc-decide.sh and went ahead on with their
+# defaults, when they came after it stopped running (a live session gets them through its mailbox,
+# FX.stepDecisions). Each answer is claimed with mv and shown only when its nonce is its question's;
+# one that isn't is put back and never shown. An answer that IS the default closes the question and
+# says nothing. As many as fit in CC_DECIDE_PART_MAX; the rest wait for the next start.
+CC_DECIDE_PART_MAX=2000
+_cc_ctx_decisions() { # $1 source, $2 key
+  local key="$2" f parsed k id kind rec claim fields q d nonce a line out="" n=0 us=$'\x1f'
+  case "$key" in ''|.|..|*/*) return 0 ;; esac
+  [ -d "$CC_DECIDE_DIR" ] || return 0
+  cc_have_jq || return 0
+  for f in "$CC_DECIDE_DIR/$key".*.answer; do
+    [ -f "$f" ] || continue
+    parsed="$(_cc_decide_name "${f##*/}")" || continue
+    read -r k id kind <<EOF
+$parsed
+EOF
+    [ "$k" = "$key" ] && [ "$kind" = answer ] || continue
+    rec="$CC_DECIDE_DIR/$id.json"
+    [ -f "$rec" ] || continue
+    # one line: a question may span several, and each answer is one line of the part
+    fields="$(jq -r --arg us "$us" '[.nonce, .question, .default] | map(. // "" | tostring | gsub("[\\r\\n]+"; " ")) | join($us)' "$rec" 2>/dev/null)"
+    IFS="$us" read -r nonce q d <<EOF
+$fields
+EOF
+    [ -n "$nonce" ] || continue
+    a="$(jq -r --arg n "$nonce" 'select(.nonce == $n) | .answer | select(type == "string") | gsub("^\\s+|\\s+$"; "") | gsub("[\\r\\n]+"; " ")' "$f" 2>/dev/null)"
+    [ -n "$a" ] || continue   # another nonce, or empty: never shown (Shepherd throws it away)
+    line="- You asked: \"$q\" -- you went ahead with \"$d\"; Adam's answer: \"$a\""
+    [ "$a" = "$d" ] || [ $(( ${#out} + ${#line} + 1 )) -le "$CC_DECIDE_PART_MAX" ] || break
+    claim="$f.claim.$$"
+    mv "$f" "$claim" 2>/dev/null || continue   # another start (or Shepherd) took it first
+    rm -f "$claim" "$rec" 2>/dev/null
+    if cc_ledger_enabled; then
+      cc_ledger_append "$(jq -nc --arg key "$key" --arg id "$id" '{type:"decision_answered", key:$key, id:$id, via:"start"}')"
+    fi
+    echo "[cc-lib] ✅ handed session $key Adam's answer to $id" >&2
+    [ "$a" != "$d" ] || continue   # the default: nothing to change
+    out="$out$line"$'\n'
+    n=$((n + 1))
+  done
+  [ -n "$out" ] || return 0
+  if [ "$n" -eq 1 ]; then printf 'Adam answered a question this session asked with cc-decide.sh and went ahead on with its default:\n'
+  else printf 'Adam answered %s questions this session asked with cc-decide.sh and went ahead on with their defaults:\n' "$n"; fi
+  printf '%s' "$out"
+  printf 'If an answer changes something you did, adjust it; otherwise carry on.\n'
 }
 
 # ---- Worktree fence (build program unit 7, 2026-09-28) --------------------------------------

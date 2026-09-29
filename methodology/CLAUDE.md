@@ -113,6 +113,12 @@ parallel.
   nothing. Don't pre-check at all: run the command you actually want (`cc-fleet.sh propose`,
   `cc-merge.sh request`) and let its exit 6 tell you. If you must ask outright,
   `~/.claude/cc-fleet.sh alive` answers it (exit 0 up, 6 down, with the heartbeat's age).
+- **Questions with a sensible default don't stop the session.** When you'd ask me something you
+  already have a sensible default for, run `~/.claude/cc-decide.sh ask --question "…" --default
+  "…" [--options "a|b|c"]` and carry on with what it prints: the question lands in Shepherd's
+  Inbox, and if my answer differs it reaches you later (at a turn end, or your next start). Add
+  `--blocking`, run in the background, only when going ahead on the default would be costly to
+  undo. A decision with no safe default is still asked with AskUserQuestion.
 - **Subagents.** Worktree-isolated subagents (e.g. an implement fleet) start from
   the current HEAD (`worktree.baseRef: "head"` in settings), not from the working tree —
   commit before spawning them.

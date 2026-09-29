@@ -39,6 +39,13 @@ assert_eq "a lease's tooltip (its database path) is esc()'d" "yes" "$(has "title
 # rides meta (esc()'d), and the packet form's result is set as text
 assert_eq "a moved packet's line rides the esc()'d meta"   "yes" "$(has 'if(it.packetMoved){ meta = (meta ? meta + " · " : "") + "📦 " + it.packetMoved; }')"
 assert_eq "the packet form's result is text, never HTML"   "yes" "$(has 'document.getElementById("pk-msg").textContent = ')"
+# the decisions inbox (2026-09-29): a question, its default and its options were written by a
+# session (cc-decide.sh), and the row names its session (a relabel) -- inboxRowsHtml's `r.`
+assert_eq "an Inbox question is esc()'d"            "yes" "$(has 'esc(r.question)')"
+assert_eq "an Inbox row's session name is esc()'d"  "yes" "$(has 'esc(r.session)')"
+assert_eq "an Inbox row's project is esc()'d"       "yes" "$(has 'esc(r.project)')"
+assert_eq "an Inbox question's default is esc()'d"  "yes" "$(has 'esc(r["default"])')"
+assert_eq "an Inbox question's options are esc()'d" "yes" "$(has "inboxAct(event)\">' + esc(o) + '</button>'")"
 
 # 2. esc() itself still entity-encodes the HTML metacharacters (not gutted to a no-op)
 assert_eq "esc() encodes &"  "yes" "$(has '.replace(/&/g,"&amp;")')"

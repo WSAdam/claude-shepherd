@@ -201,6 +201,11 @@
     "waitSeconds": 900
   },
 
+  "decide": {
+    "_comment": "The decisions inbox (2026-09-29): cc-decide.sh ask --blocking waits this long for your answer in ☰ > Inbox before printing the default (max 7200; --wait overrides it). A non-blocking question never waits.",
+    "waitSeconds": 1800
+  },
+
   "tabless": {
     "_comment": "Leftover claude processes with no tab (a new conversation was started in their tab). Shepherd marks them '⊘ no tab' with End session, and ends one by itself once it has been tab-less AND idle for autoEndMinutes (default 10) -- after a ps check that it's still that window's claude process, never one that's waiting on you or running agents, and one that reads Working only when its transcript ends in the 'Request interrupted by user' marker (quiet alone never counts: a long build is just as quiet) -- with a toast saying so. Its chat stays saved. 0 = never end them automatically.",
     "autoEndMinutes": 10

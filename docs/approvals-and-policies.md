@@ -341,6 +341,56 @@ directly. In the **VS Code extension** the picker is mouse-only, so a click **ju
 pick by hand. **Multi-select** questions, and asks with several questions, can't be driven by
 synthesized keys, so Shepherd jumps you to those regardless of editor.
 
+## Decisions inbox
+
+A question the session has a sensible default for shouldn't stop it until you come back. The
+session asks with `~/.claude/cc-decide.sh` instead and goes ahead:
+
+```bash
+port=$(~/.claude/cc-decide.sh ask --question "Which port should the dev server use?" \
+         --default 4100 --options "4100|4200|5000")
+```
+
+- **Non-blocking** (the default): the default is printed at once and the session carries on with
+  it. The question goes to Shepherd's **☰ → Inbox**.
+- **`--blocking`**: meant to run in the background (Claude Code wakes the session when it exits). It
+  prints your answer, or the default when `--wait` runs out (`decide.waitSeconds`, default 1800
+  seconds, at most 7200). A question that timed out stays in the Inbox like a non-blocking one. With
+  Shepherd not running nobody could answer, so it prints the default at once.
+- `--options` is a `|`-separated list; the default must be one of them. You can always answer in
+  your own words. Only the value to go with goes to stdout; what happened goes to stderr. The script
+  refuses (exit 2) outside a Claude Code session.
+
+**The Inbox** (☰ → 📥 Inbox, with a count on ☰) lists every open question across the fleet, the
+ones holding a session first: `--blocking` questions, then the AskUserQuestions `cc-ask.sh` is
+holding for you, then the rest, oldest first. Each row names its session and says whether it went
+ahead with its default. Click an option, type your own answer and press **Send**, or press **Keep
+"…"** to close it with the default. A held AskUserQuestion is answered from here the same way its
+card answers it; one with several parts or multi-select has **Open its card** instead.
+
+**Where the answer goes.** Your answer is `~/.claude/cc-decide/<id>.answer`, bound to the nonce on
+the question's own record (`<key>.<epoch>-<pid>.json`), written whole and claimed with `mv` by
+whoever hands it over:
+
+- a `--blocking` question's waiter takes it and prints it;
+- a question the session went ahead on reaches it through its
+  [mailbox](automation.md#session-mailbox) while it runs: mid-turn, at its next turn end; idle in
+  a kitty window or a VS Code window of its own, typed as one line once it's ready; idle in a VS
+  Code window shared with other Claude tabs, where Shepherd never types, it waits for the session's
+  next turn end or start, and the card says a message is waiting;
+- a session that has stopped gets it at its next start (a resume), as the **decisions** part of
+  what Shepherd tells a starting session;
+- an answer that *is* the default only closes the question: the session is told nothing.
+
+**On the card.** An open `--blocking` question says **Needs you**. An open non-blocking question is
+a heads-up once the session has stopped ("it went ahead with the default"); a session still
+working keeps reading Working. Both come from the one needs-you rule, so a question never outranks
+something you actually have to press.
+
+**Clean-up.** When a session ends, its open questions go with it; an answered one waits for its next
+start. Questions and answers over a week old are dropped, and `uninstall.sh --purge` removes
+`~/.claude/cc-decide`.
+
 ## Approving from anywhere
 
 - **⌘⌥A** approves the front-most waiting approval, hands-free through the gate when it's waiting.

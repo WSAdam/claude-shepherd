@@ -3950,6 +3950,22 @@ function FX.removeStatus(key)
   -- can use go here (cc_remove runs cc_lease_prune); the sweep frees a gone worktree's lease
   local okl, errl = pcall(FX.pruneLeaseFiles)
   if not okl then print("[cc-dashboard] ❌ worktree lease prune failed: " .. tostring(errl)) end
+  -- the decisions inbox (2026-09-29): the session's open questions go, with their torn writes and
+  -- claims; an answered one waits for its next start. Then every session's stale files.
+  -- (cc_remove runs cc_decide_remove + cc_decide_prune.) "k9.1.<id>" is k9.1's, never k9's.
+  do
+    local dnames = {}
+    for _, fn in ipairs(FX.readDir(FX.DECIDE_DIR)) do dnames[fn] = true end
+    for fn in pairs(dnames) do
+      local f = core.decisionFileOf(fn)
+      if f and f.key == key and (f.kind == "part" or (f.kind == "json" and not dnames[f.id .. ".answer"])) then
+        os.remove(FX.DECIDE_DIR .. "/" .. fn)
+        FX._decideSent[f.id], FX._decideHeld[f.id] = nil, nil
+      end
+    end
+    local okd, errd = pcall(FX.decidePrune)
+    if not okd then print("[cc-dashboard] ❌ decisions prune failed: " .. tostring(errd)) end
+  end
 end
 
 -- ---- Companion extension: close an exact Claude tab (2026-09-11) -----------------
@@ -4665,7 +4681,8 @@ function FX.annotateNeedsYou(list)
     if type(it.merge) == "table" then it.merge.waiterAlive = nil end
     if not it.remote then
       if it.askHeld or it.status == "approval" or it.status == "error"
-         or (type(it.fleet) == "table" and it.fleet.needsYou) then
+         or (type(it.fleet) == "table" and it.fleet.needsYou)
+         or (type(it.decisions) == "table" and (tonumber(it.decisions.blocking) or 0) > 0) then
         local p = tostring(it.session_pid or ""):match("^%d+$")
         if p then want[p] = true end
       end
@@ -6548,6 +6565,147 @@ function FX.mailboxFacts()
     return tostring(a.name) < tostring(b.name)
   end)
   return { total = total, sessions = sessions }
+end
+
+-- ---- The decisions inbox (2026-09-29) ----
+-- Build program unit 28. A session asks with cc-decide.sh when it has a sensible default, and goes
+-- on: ~/.claude/cc-decide/<key>.<epoch>-<pid>.json, bound to a nonce (a --blocking one keeps a
+-- waiter until `until`). Each tick FX.stepDecisions reads the folder: the open questions stamp their
+-- cards (it.decisions: a blocking one needs Adam, an open one is a heads-up -- core.needsYouKind) and
+-- fill the ☰ Inbox with the held AskUserQuestions (FX.pushInbox); an answered one is handed over --
+-- a blocking one's waiter takes it itself, a live session gets it through its mailbox, and one that
+-- isn't live gets it at its next start (_cc_ctx_decisions, cc-lib.sh). Adam's answer
+-- (FX.answerDecision) is <id>.answer, bound to the nonce READ FROM DISK. An answer that IS the
+-- default closes the question and tells the session nothing.
+FX.DECIDE_DIR = os.getenv("CC_DECIDE_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-decide")
+FX._decisions = {}      -- the open questions, as the last tick read them (the Inbox's)
+FX._decideSent = {}     -- id -> true: answered from here, off the Inbox before the file shows it
+FX._decideHeld = {}     -- id -> when a delivery was last held (a dry run): tried again a minute later
+FX.DECIDE_RETRY_SECONDS = 60
+-- Every question in the folder: the open ones, the answered ones, and the folder's names.
+function FX.readDecisions()
+  local open, answered, names = {}, {}, {}
+  for _, fn in ipairs(FX.readDir(FX.DECIDE_DIR)) do names[fn] = true end
+  for fn in pairs(names) do
+    local f = core.decisionFileOf(fn)
+    if f and f.kind == "json" then
+      local d = core.parseDecision(fn, FX.readFile(FX.DECIDE_DIR .. "/" .. fn))
+      if d then
+        if names[d.id .. ".answer"] then answered[#answered + 1] = d else open[#open + 1] = d end
+      end
+    end
+  end
+  return open, answered, names
+end
+-- Hand one answered question over. `it` is its session's card when it is live. Returns what
+-- happened: "waiter" (a blocking question's waiter takes it), "start" (not live: its next start
+-- takes it), "mailbox", "confirmed" (the default: closed, nothing said), "dropped" (another nonce:
+-- thrown away), "held" (a dry run or a failed send: tried again later) or nil (its start took it).
+function FX.deliverDecision(d, it, now)
+  if core.decisionBlocking(d, now) then return "waiter" end
+  local path = FX.DECIDE_DIR .. "/" .. d.id .. ".answer"
+  local answer, why = core.parseDecisionAnswer(d, FX.readFile(path))
+  if not answer then
+    os.remove(path)
+    print("[cc-dashboard] ⚠️ decisions: threw away an answer to " .. d.id .. " (" .. tostring(why) .. ")")
+    return "dropped"
+  end
+  local msg = core.decisionMessage(d, answer)
+  if msg and not it then return "start" end
+  local held = FX._decideHeld[d.id]
+  if msg and held and now - held < FX.DECIDE_RETRY_SECONDS then return "held" end
+  local claim = path .. ".claim.shepherd"
+  if not os.rename(path, claim) then return nil end   -- its next start took it first
+  if msg then
+    local sent = FX.mailboxSend(d.key, msg, { kind = "decision", from = "decisions" })
+    if not sent then
+      os.rename(claim, path)
+      FX._decideHeld[d.id] = now
+      return "held"
+    end
+  end
+  os.remove(claim)
+  os.remove(FX.DECIDE_DIR .. "/" .. d.id .. ".json")
+  FX._decideHeld[d.id], FX._decideSent[d.id] = nil, nil
+  local via = msg and "mailbox" or "confirmed"
+  print("[cc-dashboard] ✅ decisions: " .. d.id .. " answered (" .. via .. ")")
+  ledgerFor(it or { key = d.key, session_id = d.session_id, cwd = d.cwd },
+    { type = "decision_answered", id = d.id, via = via })
+  return via
+end
+-- Each tick: hand the answered questions over, stamp every card with its open ones.
+function FX.stepDecisions(list)
+  local now = FX.now()
+  local open, answered = FX.readDecisions()
+  local live = {}
+  for _, it in ipairs(list or {}) do if it.key and not it.remote then live[it.key] = it end end
+  for _, d in ipairs(answered) do FX.deliverDecision(d, live[d.key], now) end
+  local shown = {}
+  for _, d in ipairs(open) do if not FX._decideSent[d.id] then shown[#shown + 1] = d end end
+  FX._decisions = shown
+  local tiles = core.decisionTiles(shown, now)
+  for _, it in ipairs(list or {}) do it.decisions = (not it.remote) and tiles[it.key] or nil end
+end
+-- Every card on the panel, hidden ones included.
+function FX.allItems()
+  local out = {}
+  for _, src in ipairs({ FX._shownItems or {}, FX._hiddenItems or {} }) do
+    for _, it in ipairs(src) do out[#out + 1] = it end
+  end
+  return out
+end
+-- Adam's answer from the Inbox: <id>.answer, bound to the nonce on disk, written whole. Refused for
+-- a question that isn't open (gone, or answered already) and for an empty or too-long answer.
+function FX.answerDecision(id, text)
+  if not core.decisionKeyOf(id) then return false end
+  local d = core.parseDecision(id .. ".json", FX.readFile(FX.DECIDE_DIR .. "/" .. id .. ".json"))
+  if not d then FX.alert("⚠️ That question isn't open any more"); return false end
+  local path = FX.DECIDE_DIR .. "/" .. id .. ".answer"
+  if FX._decideSent[id] or FX.readFile(path) then FX.alert("⚠️ That question is answered already"); return false end
+  local payload, why = core.decisionAnswerPayload(d, text, FX.now())
+  if not payload then FX.alert("⚠️ " .. tostring(why)); return false end
+  if not FX.writeFileAtomic(path, core.json.encode(payload)) then
+    FX.alert("❌ Couldn't send the answer")
+    return false
+  end
+  FX._decideSent[id] = true
+  print("[cc-dashboard] ✅ decisions: answered " .. id .. ": " .. core.capChars(payload.answer, 80))
+  ledgerFor(byKey[d.key] or { key = d.key, session_id = d.session_id, cwd = d.cwd },
+    { type = "decision_answer", id = id, blocking = core.decisionBlocking(d, FX.now()) })
+  pcall(FX.stepDecisions, FX.allItems())   -- a live session's mailbox gets it now, not next tick
+  FX.askRepaint()
+  return true
+end
+-- The Inbox's rows: the open questions and the held asks, fleet-wide (core.inboxRows).
+function FX.inboxRows()
+  return core.inboxRows(FX._decisions or {}, FX.allItems(), FX.now())
+end
+-- ...to the panel (ccInbox), which renders them when the Inbox is open and badges ☰.
+function FX.pushInbox()
+  if not wv then return end
+  local rows = FX.inboxRows()
+  local js = "ccInbox(" .. ((#rows == 0) and "[]" or core.json.encode(rows)) .. ")"
+  pcall(function() wv:evaluateJavaScript(js) end)
+end
+-- The removers' share (FX.removeStatus drops the session's own; KEEP IN SYNC with cc_decide_prune in
+-- cc-lib.sh): every session's stale files -- a question or answer over a week old, an answer whose
+-- question is gone, a torn write or claim a minute old.
+function FX.decidePrune()
+  local now = FX.now()
+  local names = {}
+  for _, fn in ipairs(FX.readDir(FX.DECIDE_DIR)) do names[fn] = true end
+  for fn in pairs(names) do
+    local f = core.decisionFileOf(fn)
+    local path = FX.DECIDE_DIR .. "/" .. fn
+    local mt
+    -- one result only: a missing file is nil + a message, and tonumber would take that as a base
+    pcall(function() mt = tonumber((hs.fs.attributes(path, "modification"))) end)
+    local age = mt and (now - mt) or 0
+    if f and (f.kind == "json" or f.kind == "answer") and age > core.DECIDE.maxAge then os.remove(path)
+    elseif f and f.kind == "part" and age > 60 then os.remove(path)
+    elseif f and f.kind == "answer" and not names[f.id .. ".json"] then os.remove(path)
+    end
+  end
 end
 
 -- ---- Resume at the usage limit's reset (2026-09-29) ----
@@ -9844,6 +10002,9 @@ local function handleBridgeMsg(msg)
   if a == "close-sessions" then FX.closeSessions(tostring(payload.text or "")); return end
   -- Shepherd answers (2026-09-11): v = session key, text = JSON picks (checked in core)
   if a == "answer-ask" then FX.answerAskFromPanel(tostring(payload.v or ""), tostring(payload.text or "")); return end
+  -- 2026-09-29: the Inbox answers a cc-decide.sh question (its id, the answer's text); never typed
+  if a == "decide-answer" then FX.answerDecision(tostring(payload.v or ""), tostring(payload.text or "")); return end
+  if a == "inbox-open" then pcall(FX.pushInbox); return end
   if a == "release-ask" then FX.releaseAsk(tostring(payload.v or "")); return end
   -- Batch driving (2026-09-11): v = the driver's key, text = JSON {id, grantMerge, note}
   if a == "batch-approve" then FX.batchApprove(tostring(payload.v or ""), tostring(payload.text or "")); return end
@@ -12491,6 +12652,28 @@ local HTML = [[
 #trace .ov-foot span{ min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .tr-dry{ display:none; padding:8px 16px; border-bottom:1px solid var(--border); color:var(--st-approval); font-weight:600; }
 .tr-dry.on{ display:block; }
+/* 📥 Inbox (2026-09-29): open cc-decide.sh questions + held AskUserQuestions, fleet-wide */
+#inbox{ position:fixed; inset:0; background:var(--bg-overlay); z-index:12; display:none; flex-direction:column; font-size:12px; }
+#inbox.show{ display:flex; }
+#inbox .ov-head{ display:flex; align-items:center; justify-content:space-between; padding:12px 16px; border-bottom:1px solid var(--border); font-weight:600; color:var(--text); }
+#inbox .ov-body{ flex:1; overflow-y:auto; padding:14px 16px; }
+#inbox .ov-foot{ padding:10px 16px; border-top:1px solid var(--border); color:var(--dim); font-size:11px; }
+.ib-empty{ color:var(--dim); padding:20px 0; text-align:center; }
+.ib-row{ border:1px solid var(--border); border-radius:9px; padding:10px 12px; margin-bottom:10px; background:var(--surface); }
+.ib-row.blocking, .ib-row.ask{ border-color:var(--st-approval); }
+.ib-q{ color:var(--text); font-size:13px; font-weight:600; white-space:pre-wrap; overflow-wrap:anywhere; }
+.ib-meta{ color:var(--dim); font-size:11px; margin:3px 0 8px; overflow-wrap:anywhere; }
+.ib-opts{ display:flex; flex-wrap:wrap; gap:6px; margin-bottom:6px; }
+.ib-opt, .ib-btn{ background:var(--surface-2); color:var(--text-2); border:1px solid var(--border); border-radius:7px;
+  padding:4px 10px; font-size:12px; cursor:pointer; max-width:100%; overflow-wrap:anywhere; text-align:left; }
+.ib-opt:hover, .ib-btn:hover{ background:var(--surface-hover); color:var(--text); }
+.ib-opt.def{ border-color:var(--accent); }
+.ib-free{ display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
+.ib-text{ flex:1; min-width:140px; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:7px; padding:4px 8px; font-size:12px; }
+#tm-inbox-badge, #inbox-badge{ display:none; background:var(--accent); color:var(--bg); border-radius:8px; font-size:9px;
+  padding:0 4px; font-variant-numeric:tabular-nums; }
+#tm-inbox-badge{ margin-left:auto; }
+#inbox-badge{ margin-left:3px; vertical-align:top; }
 /* Where the time went (2026-09-29): above Instances (z 12), which it opens from */
 #timelost{ position:fixed; inset:0; background:var(--bg-overlay); z-index:13; display:none; flex-direction:column; font-size:12px; }
 #timelost.show{ display:flex; }
@@ -12834,8 +13017,9 @@ local HTML = [[
       <button id="caffeine" onclick="toggleCaffeine()" title="Keep this Mac awake — pmset disablesleep (asks for your password)">☕ Sleep ok</button>
       <button id="lock" onclick="lockMac()" title="Lock — block input until your password, while Claude sessions + remote control keep running (pair with Awake to close the lid locked)">🔒</button>
       <span id="menu-wrap">
-        <button id="menu-btn" onclick="toggleMenu(event)" title="Views — search, insights, audit, notifications">☰<span id="notify-badge"></span></button>
+        <button id="menu-btn" onclick="toggleMenu(event)" title="Views — inbox, search, insights, audit, notifications">☰<span id="notify-badge"></span><span id="inbox-badge" title="Questions in the Inbox"></span></button>
         <div id="toolmenu">
+          <button class="tm-item" onclick="menuPick('inbox')"><span class="tm-ic">📥</span> Inbox<span id="tm-inbox-badge"></span></button>
           <button class="tm-item" onclick="menuPick('search')"><span class="tm-ic">🔍</span> Filter sessions</button>
           <button class="tm-item" onclick="menuPick('fsearch')"><span class="tm-ic">🔎</span> Find in fleet</button>
           <button class="tm-item" onclick="menuPick('insights')"><span class="tm-ic">📊</span> Fleet insights</button>
@@ -13557,6 +13741,12 @@ local HTML = [[
       <button onclick="openTrace(document.getElementById('tr-session').value)">Refresh</button>
       <span>What automation did, would do in a dry run, and was refused -- since Shepherd loaded.</span>
     </div>
+  </div>
+
+  <div id="inbox">
+    <div class="ov-head"><span>📥 Inbox</span><button class="s-x" onclick="closeInbox()">✕</button></div>
+    <div class="ov-body" id="ib-body"></div>
+    <div class="ov-foot"><span>Questions sessions asked with cc-decide.sh -- they went ahead on the default unless one waits for you -- and questions Shepherd is holding for you. Answer here; the session gets it.</span></div>
   </div>
 
   <div id="features">
@@ -19825,6 +20015,7 @@ local HTML = [[
     function menuPick(which){
       closeMenu();
       if(which === "search") toggleSearch();
+      else if(which === "inbox") openInbox();
       else if(which === "fsearch") openFleetSearch();
       else if(which === "insights") openInsights();
       else if(which === "audit") openAudit();
@@ -19966,6 +20157,109 @@ local HTML = [[
         b.style.display = (n > 0) ? "inline-block" : "none";
       });
     }
+    // ---- 📥 Inbox (2026-09-29, build program unit 28) ------------------------
+    // Every open cc-decide.sh question and every AskUserQuestion cc-ask.sh is holding, fleet-wide
+    // (core.inboxRows, pushed each tick by FX.pushInbox). Every word in a row is a session's, so it
+    // goes through esc(); a click sends only what INBOX.rows holds -- the question's id or the held
+    // ask's key, and the option's own text -- never text read back out of the markup.
+    var INBOX = { rows: [], latest: [], sig: "", open: false };
+    function ccInbox(rows){
+      rows = Array.isArray(rows) ? rows : [];
+      var txt = rows.length ? String(rows.length > 99 ? "99+" : rows.length) : "";
+      ["inbox-badge", "tm-inbox-badge"].forEach(function(id){
+        var b = document.getElementById(id); if(!b) return;
+        b.textContent = txt;
+        b.style.display = rows.length ? "inline-block" : "none";
+      });
+      var sig = JSON.stringify(rows);
+      if(sig === INBOX.sig) return;
+      INBOX.sig = sig; INBOX.latest = rows;
+      if(INBOX.open) renderInbox(rows);
+    }
+    function inboxRowsHtml(rows){
+      if(!rows || !rows.length) return '<div class="ib-empty">Nothing is waiting on you — no open questions.</div>';
+      return rows.map(function(r, i){
+        var dec = r.kind === "decide";
+        var cls = "ib-row " + (dec ? "decide" : "ask") + (dec && r.blocking ? " blocking" : "");
+        var meta = esc(r.session) + (r.project && r.project !== r.session ? " · " + esc(r.project) : "")
+          + (r.asked ? " · " + esc(fmtAge(r.asked)) + " ago" : "")
+          + (dec ? (r.blocking ? " · <b>waiting for your answer</b>" : " · went ahead with “" + esc(r["default"]) + "”")
+                 : " · asking you (held by Shepherd)");
+        var head = '<div class="ib-q">' + esc(r.question) + '</div><div class="ib-meta">' + meta + '</div>';
+        if(!dec && !r.simple){
+          return '<div class="' + cls + '" data-row="' + i + '">' + head
+            + '<div class="ib-free"><button class="ib-btn" data-i="' + i + '" data-act="open" onclick="inboxAct(event)">'
+            + (r.count > 1 ? 'Open its card to answer its ' + esc(r.count) + ' parts' : 'Open its card to answer') + '</button></div></div>';
+        }
+        var opts = (r.options || []).map(function(o, oi){
+          var def = dec && o === r["default"];
+          return '<button class="ib-opt' + (def ? ' def' : '') + '" data-i="' + i + '" data-o="' + oi + '"'
+            + (def ? ' title="The default it went ahead with"' : '') + ' onclick="inboxAct(event)">' + esc(o) + '</button>';
+        }).join("");
+        return '<div class="' + cls + '" data-row="' + i + '">' + head
+          + (opts ? '<div class="ib-opts">' + opts + '</div>' : '')
+          + '<div class="ib-free"><input class="ib-text" id="ib-text-' + i + '" data-i="' + i + '" data-act="send" maxlength="500"'
+          + ' placeholder="Your own answer…" onkeydown="if(event.key===\'Enter\') inboxAct(event)">'
+          + '<button class="ib-btn" data-i="' + i + '" data-act="send" onclick="inboxAct(event)">Send</button>'
+          + (dec ? '<button class="ib-btn" data-i="' + i + '" data-act="keep" onclick="inboxAct(event)" title="Close it: the default stands, and the session is told nothing">Keep “' + esc(r["default"]) + '”</button>' : '')
+          + '</div></div>';
+      }).join("");
+    }
+    function inboxAct(ev){
+      if(ev && ev.stopPropagation) ev.stopPropagation();
+      var t = ev && ev.target && ev.target.closest ? ev.target.closest("[data-i]") : null;
+      if(!t) return;
+      var i = parseInt(t.getAttribute("data-i"), 10);
+      var r = INBOX.rows[i];
+      if(!r) return;
+      var act = t.getAttribute("data-act") || "opt", answer = "";
+      if(act === "open"){ closeInbox(); selectTile(r.key); return; }
+      if(act === "opt"){
+        var opts = r.options || [];
+        answer = opts[parseInt(t.getAttribute("data-o"), 10)];
+      } else if(act === "keep"){
+        answer = r["default"];
+      } else if(act === "send"){
+        var inp = document.getElementById("ib-text-" + i);
+        answer = inp ? String(inp.value || "").trim() : "";
+      }
+      if(typeof answer !== "string" || !answer) return;
+      if(r.kind === "decide") send("decide-answer", r.id, answer);
+      else if(r.kind === "ask") send("answer-ask", r.key, JSON.stringify([act === "send" ? { labels: [], other: answer } : { labels: [answer], other: "" }]));
+    }
+    // Rebuilt only when the rows change; half-typed answers (and the focus) follow their row.
+    function renderInbox(rows){
+      var body = document.getElementById("ib-body"); if(!body) return;
+      var typed = {}, focusId = null, act = document.activeElement;
+      INBOX.rows.forEach(function(r, i){
+        var inp = document.getElementById("ib-text-" + i);
+        var id = r.kind + ":" + r.id;
+        if(inp && inp.value) typed[id] = inp.value;
+        if(inp && inp === act) focusId = id;
+      });
+      INBOX.rows = rows;
+      body.innerHTML = inboxRowsHtml(rows);
+      rows.forEach(function(r, i){
+        var inp = document.getElementById("ib-text-" + i);
+        var id = r.kind + ":" + r.id;
+        if(!inp) return;
+        if(typed[id]) inp.value = typed[id];
+        if(focusId === id) inp.focus();
+      });
+    }
+    function openInbox(){
+      INBOX.open = true;
+      document.getElementById("inbox").classList.add("show");
+      renderInbox(INBOX.latest);
+      send("inbox-open");
+    }
+    function closeInbox(){
+      var el = document.getElementById("inbox");
+      if(!el || !el.classList.contains("show")) return false;
+      el.classList.remove("show"); INBOX.open = false;
+      return true;
+    }
+    document.addEventListener("keydown", function(e){ if(e.key === "Escape") closeInbox(); });
     // The 📋 Shift report only exists when the audit ledger is on (it's pure
     // ledger aggregation -- nothing to show otherwise), so the refresh tick pokes
     // this on change to show/hide its tab + drawer row entirely. Live with the
@@ -22282,6 +22576,12 @@ function FX._refreshBody()
     if not okl then print("[cc-dashboard] ❌ worktree leases step failed: " .. tostring(errl)) end
   end
   FX.annotateEmptyChats(list)       -- never-used "Claude Code" chats, closable from the card (2026-09-11)
+  -- the decisions inbox (2026-09-29): each card's open cc-decide.sh questions, before the needs-you
+  -- stamp (a blocking one needs Adam, an open one is a heads-up), and late answers handed over
+  do
+    local okd, errd = pcall(FX.stepDecisions, list)
+    if not okd then print("[cc-dashboard] ❌ decisions step failed: " .. tostring(errd)) end
+  end
   -- 2026-09-17: LAST of the annotations -- it needs every source at once. One predicate decides
   -- whether each card really needs Adam (a live counterpart AND an affordance that changes
   -- something) or is only a heads-up; the ranking and the panel both read what it stamps.
@@ -22442,6 +22742,7 @@ function FX._refreshBody()
     -- safety valve for hiding one that later blocks on approval: it stays hidden
     -- as asked, but the fleet never silently loses a session you can't find.
     pcall(function() wv:evaluateJavaScript("setHiddenCount(" .. tostring(#hiddenList) .. ")") end)
+    pcall(FX.pushInbox)   -- 2026-09-29: the Inbox's rows and ☰'s badge (open questions + held asks)
   end
 
   -- Paint the Stream Deck from the SAME fully-decorated list the panel just got --

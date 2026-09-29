@@ -68,6 +68,8 @@ Every feature below has a reference page one click away. The panel lists the sam
   PR, a file in its worktree) with `cc-pin.sh`, and they show as chips on its card.
 - [**Answer questions from Shepherd**](docs/approvals-and-policies.md#answer-questions-from-shepherd):
   a session's question shows up on its card as buttons, and your click goes straight to the session.
+- [**Decisions inbox**](docs/approvals-and-policies.md#decisions-inbox): a question with a sensible
+  default doesn't stop the session (`cc-decide.sh`); answer it later in ☰ → Inbox.
 - [**Spawn new sessions**](docs/controls.md#spawn-new-sessions): start a session in any project with
   an editor, permission mode, provider and first task, or from a saved preset.
 - [**Rewind & checkpoints**](docs/fleet.md#the-detail-panel): see each turn's restore point and the

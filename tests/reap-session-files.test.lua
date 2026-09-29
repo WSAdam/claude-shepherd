@@ -46,7 +46,10 @@ local PINS = T .. "/cc-pins"
 -- them; both removers drop only what nothing can use (a file naming no checkout, a torn write)
 local LEASE = T .. "/cc-lease"
 local LIVE_LEASES = LEASE .. "/" .. (T .. "/repo"):gsub("[^A-Za-z0-9]", "-") .. ".json"
-os.execute(('mkdir -p "%s" "%s" "%s" "%s" "%s/repo" "%s/k90" "%s" "%s" "%s" "%s"'):format(STATUS, MERGE, ASK, TALK, T, INBOX, RESUME, NOTES, PINS, LEASE))
+-- 2026-09-29: the decisions inbox (build program unit 28): a session's open cc-decide.sh questions
+-- are named <key>.<epoch>-<pid>.json; an ANSWERED one outlives the session for its next start
+local DECIDE = T .. "/cc-decide"
+os.execute(('mkdir -p "%s" "%s" "%s" "%s" "%s/repo" "%s/k90" "%s" "%s" "%s" "%s" "%s"'):format(STATUS, MERGE, ASK, TALK, T, INBOX, RESUME, NOTES, PINS, LEASE, DECIDE))
 local function write(path, s) local f = io.open(path, "w"); if f then f:write(s); f:close() end end
 local function exists(p) local h = io.open(p, "r"); if h then h:close(); return true end; return false end
 
@@ -98,6 +101,12 @@ local function plant()
   write(LEASE .. "/nowhere.json", '{"v":1,"leases":{}}')
   write(LEASE .. "/-r-main.json.tmp.4242", '{"v":')
   os.execute('touch -t 202601010000 "' .. LEASE .. '/-r-main.json.tmp.4242"')
+  write(DECIDE .. "/" .. KEY .. ".1790000000-11.json", '{"id":"k9.1790000000-11","key":"k9","nonce":"ab12"}')
+  write(DECIDE .. "/" .. KEY .. ".1790000000-11.json.tmp.4242", '{"id":')
+  write(DECIDE .. "/" .. KEY .. ".1790000000-11.answer.claim.4242", '{"nonce":"ab12","answer":"x"}')
+  write(DECIDE .. "/" .. KEY .. ".1790000000-11.answer.tmp.5150", '{"nonce":')
+  write(DECIDE .. "/" .. KEY .. ".1790000001-12.json", '{"id":"k9.1790000001-12","key":"k9","nonce":"cd34"}')
+  write(DECIDE .. "/" .. KEY .. ".1790000001-12.answer", '{"nonce":"cd34","answer":"y"}')
 end
 
 -- Every file above must be gone after a reap. Named for what it is, so a failure reads as
@@ -137,6 +146,15 @@ local TARGETS = {
   { "a torn write of those pins",      PINS .. "/gone.json.tmp.4242" },
   { "a lease file that names no checkout", LEASE .. "/nowhere.json" },
   { "a torn write of a lease file",    LEASE .. "/-r-main.json.tmp.4242" },
+  { "an open decision",                DECIDE .. "/" .. KEY .. ".1790000000-11.json" },
+  { "a torn write of it",              DECIDE .. "/" .. KEY .. ".1790000000-11.json.tmp.4242" },
+  { "a claimed answer to it",          DECIDE .. "/" .. KEY .. ".1790000000-11.answer.claim.4242" },
+  { "a torn answer to it",             DECIDE .. "/" .. KEY .. ".1790000000-11.answer.tmp.5150" },
+}
+-- An answered decision waits for the session's next start (a resume): both removers keep it.
+local KEPT = {
+  { "an answered decision (its next start takes it)", DECIDE .. "/" .. KEY .. ".1790000001-12.json" },
+  { "...and its answer",                              DECIDE .. "/" .. KEY .. ".1790000001-12.answer" },
 }
 
 -- A second session's files must SURVIVE both reaps -- a prefix sweep must not eat the fleet.
@@ -146,6 +164,7 @@ local OTHER = {
   TALK .. "/k90", INBOX .. "/k90/1790000000-000001-ab12.msg",
   RESUME .. "/k90.json", RESUME .. "/k90.plan.json",
   NOTES .. "/k90.due-at", NOTES .. "/k90.notes-asked",
+  DECIDE .. "/k90.1790000000-11.json", DECIDE .. "/k9.1.1790000000-11.json",
 }
 local function plantOther() for _, p in ipairs(OTHER) do write(p, "{}") end end
 
@@ -157,12 +176,15 @@ os.execute(([[
   export CC_STATUS_DIR=%q CC_MERGE_DIR=%q CC_ASK_DIR=%q
   export CC_GATE_TOOLS_DIR=%q CC_APPROVED_DIR=%q CC_AUTOPILOT_DIR=%q
   export CC_POLICY_DIR=%q CC_POLICY_OVERRIDE_DIR=%q CC_AUTOMODEL_DIR=%q CC_TALK_DIR=%q CC_INBOX_DIR=%q
-  export CC_RESUME_DIR=%q CC_NOTES_DIR=%q CC_PINS_DIR=%q CC_LEASE_DIR=%q
+  export CC_RESUME_DIR=%q CC_NOTES_DIR=%q CC_PINS_DIR=%q CC_LEASE_DIR=%q CC_DECIDE_DIR=%q
   . %q; cc_remove %s
 ]]):format(STATUS, MERGE, ASK, T .. "/gt", T .. "/ap", T .. "/au",
-           T .. "/po", T .. "/pov", T .. "/am", TALK, INBOX, RESUME, NOTES, PINS, LEASE, ROOT .. "cc-lib.sh", KEY) .. " >/dev/null 2>&1")
+           T .. "/po", T .. "/pov", T .. "/am", TALK, INBOX, RESUME, NOTES, PINS, LEASE, DECIDE, ROOT .. "cc-lib.sh", KEY) .. " >/dev/null 2>&1")
 for _, t in ipairs(TARGETS) do
   check("cc_remove drops " .. t[1], not exists(t[2]))
+end
+for _, t in ipairs(KEPT) do
+  check("cc_remove keeps " .. t[1], exists(t[2]))
 end
 check("cc_remove leaves the notes the session wrote (like its handoff note)", exists(NOTES .. "/" .. KEY .. ".notes.md"))
 check("cc_remove leaves the pins of a worktree that's still there (they outlive /clear)", exists(PINS .. "/live.json"))
@@ -232,7 +254,7 @@ local ENV = { CC_STATUS_DIR = STATUS, CC_MERGE_DIR = MERGE, CC_ASK_DIR = ASK,
               CC_AUTOPILOT_DIR = T .. "/au", CC_POLICY_DIR = T .. "/po",
               CC_POLICY_OVERRIDE_DIR = T .. "/pov", CC_AUTOMODEL_DIR = T .. "/am",
               CC_TALK_DIR = TALK, CC_INBOX_DIR = INBOX, CC_RESUME_DIR = RESUME, CC_NOTES_DIR = NOTES,
-              CC_PINS_DIR = PINS, CC_LEASE_DIR = LEASE,
+              CC_PINS_DIR = PINS, CC_LEASE_DIR = LEASE, CC_DECIDE_DIR = DECIDE,
               CC_WORKLIST_FILE = T .. "/worklist.json", CC_LABELS_FILE = T .. "/labels.json",
               HOME = T }
 os.getenv = function(k) if ENV[k] ~= nil then return ENV[k] end; return realGetenv(k) end
@@ -258,6 +280,9 @@ end
 quiet(function() fx.removeStatus(KEY) end)
 for _, t in ipairs(TARGETS) do
   check("FX.removeStatus drops " .. t[1], not exists(t[2]))
+end
+for _, t in ipairs(KEPT) do
+  check("FX.removeStatus keeps " .. t[1], exists(t[2]))
 end
 check("FX.removeStatus leaves the notes the session wrote", exists(NOTES .. "/" .. KEY .. ".notes.md"))
 check("FX.removeStatus leaves the pins of a worktree that's still there", exists(PINS .. "/live.json"))

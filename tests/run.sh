@@ -409,6 +409,15 @@ echo ""
 echo "== lua: task packets -- cites, the queue token, drift on literal before/after files, the async check at the target worktree's HEAD, renderFeed refusing a moved packet, the fleet refusal (behavioral, runs the shipped FX block on a real repo) =="
 lua "$DIR/packets.test.lua" || fail=1
 echo ""
+echo "== bash: the decisions inbox -- the default at once, a blocking answer bound to its nonce, the default at the timeout, a late answer at the next start (cc-decide.sh) =="
+bash "$DIR/decide.test.sh" || fail=1
+echo ""
+echo "== lua: the decisions inbox -- records, answers read from disk, a late answer through the mailbox, needs-you as one predicate, the Inbox rows (behavioral, stubbed hs) =="
+HOME="$(mktemp -d)" lua "$DIR/decide.test.lua" || fail=1
+echo ""
+echo "== node: the Inbox lists open questions and held asks, every session word escaped, answered in place (behavioral, runs the shipped inboxRowsHtml) =="
+node "$DIR/inbox-view.test.js" || fail=1
+echo ""
 
 if [ "$fail" -eq 0 ]; then
   echo "✅ ALL GREEN"

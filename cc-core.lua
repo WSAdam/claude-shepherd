@@ -1541,6 +1541,15 @@ function M.needsYouKind(it, now)
     return "needs", "ask"
   end
 
+  -- 1b. (2026-09-29, the decisions inbox) a --blocking cc-decide.sh question: its waiter holds the
+  -- session until Adam answers in the Inbox or the timeout gives it the default. A non-blocking one
+  -- is only a heads-up, at the end of this predicate.
+  local dc = type(it.decisions) == "table" and it.decisions or nil
+  if dc and (tonumber(dc.blocking) or 0) > 0 then
+    if not alive then return "fyi", "decide", "the session that asked has gone" end
+    return "needs", "decide"
+  end
+
   -- 2. a merge. A REQUEST is answerable only while its cc-merge.sh still waits for the answer.
   -- A BLOCKED unit stays his: its card carries the note the unit gave when it gave up, and the
   -- affordance isn't the Dismiss button -- it's the stalled tab and the branch sitting there,
@@ -1616,6 +1625,13 @@ function M.needsYouKind(it, now)
     if (tonumber(ep.count) or 1) >= M.ERROR_FLAPS then return "needs", "error" end
     if now - (tonumber(ep.since) or now) >= M.ERROR_GRACE then return "needs", "error" end
     return "fyi", "error", "a connection fault -- it should clear itself"
+  end
+
+  -- 6. (2026-09-29) an open non-blocking question: the session went ahead on its default, so nothing
+  -- waits on Adam -- a heads-up, and only once the session has stopped: a session still at work (or
+  -- driving a batch) keeps reading Working / Driving.
+  if dc and (tonumber(dc.open) or 0) > 0 and it.status ~= "working" and not it.bg_active and not M.isDriving(it) then
+    return "fyi", "decide", "it went ahead with the default -- answer in ☰ → Inbox if you'd choose otherwise"
   end
   return nil
 end
@@ -11327,6 +11343,158 @@ function M.mailboxRoute(it, n)
   return "type"
 end
 
+-- ---- The decisions inbox (2026-09-29) ----
+-- Build program unit 28. A session asks Adam something it has a sensible default for with
+-- cc-decide.sh and goes on: the record is ~/.claude/cc-decide/<key>.<epoch>-<pid>.json, bound to a
+-- nonce; --blocking keeps a waiter until `until`. Adam answers in the Inbox: <id>.answer, bound to
+-- the nonce read from the record on disk (FX.answerDecision). A blocking question's waiter takes it;
+-- any other answer reaches the session through its mailbox while it is live (FX.stepDecisions), else
+-- at its next start (the decisions part of cc_session_context). An answer that IS the default only
+-- closes the question. KEEP THE FIELDS IN SYNC with cc-decide.sh and _cc_ctx_decisions (cc-lib.sh).
+M.DECIDE = { questionMax = 500, defaultMax = 200, optionMax = 100, optionsMax = 8, answerMax = 500,
+             maxAge = 7 * 86400 }
+do   -- (its helpers take none of the main chunk's 200 locals)
+local function decideTrim(s)
+  return (tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", ""))
+end
+-- The session key of an id <key>.<epoch>-<pid> -- everything before its last dot -- or nil.
+function M.decisionKeyOf(id)
+  if type(id) ~= "string" then return nil end
+  local key = id:match("^(.+)%.%d+%-%d+$")
+  if not key or not M.mailboxKeyOk(key) then return nil end
+  return key
+end
+-- A file in the decisions folder -> { key, id, kind = "json" | "answer" | "part" } (a part is a torn
+-- write or a claim), or nil. KEEP IN SYNC with _cc_decide_name in cc-lib.sh.
+function M.decisionFileOf(name)
+  if type(name) ~= "string" then return nil end
+  local stem, kind = name:match("^(.+)%.json$"), "json"
+  if not stem then stem, kind = name:match("^(.+)%.answer$"), "answer" end
+  if not stem then
+    for _, suffix in ipairs({ "%.json%.tmp%.%w+$", "%.answer%.tmp%.%w+$", "%.answer%.claim%.%w+$" }) do
+      stem = name:match("^(.+)" .. suffix)
+      if stem then kind = "part"; break end
+    end
+  end
+  local key = stem and M.decisionKeyOf(stem)
+  if not key then return nil end
+  return { key = key, id = stem, kind = kind }
+end
+-- A question read back: its record, checked field by field, or nil + why. Its body must name its
+-- own file (id and key) and carry a nonce; the texts are capped for the Inbox. Needs M.json.
+function M.parseDecision(name, raw)
+  local f = M.decisionFileOf(name)
+  if not f or f.kind ~= "json" then return nil, "not a question" end
+  if type(raw) ~= "string" then return nil, "unreadable" end
+  local ok, t = pcall(M.json.decode, raw)
+  if not ok or type(t) ~= "table" then return nil, "unreadable" end
+  if t.id ~= f.id or t.key ~= f.key then return nil, "not its own name" end
+  if type(t.nonce) ~= "string" or not t.nonce:match("^%w+$") then return nil, "no nonce" end
+  local q = type(t.question) == "string" and decideTrim(t.question) or ""
+  local d = type(t.default) == "string" and decideTrim(t.default) or ""
+  if q == "" then return nil, "no question" end
+  if d == "" then return nil, "no default" end
+  local opts = {}
+  for _, o in ipairs(type(t.options) == "table" and t.options or {}) do
+    if type(o) == "string" and o:find("%S") and #opts < M.DECIDE.optionsMax then
+      opts[#opts + 1] = M.capChars(decideTrim(o), M.DECIDE.optionMax)
+    end
+  end
+  return { id = f.id, key = f.key, session_id = type(t.session_id) == "string" and t.session_id or f.key,
+           cwd = type(t.cwd) == "string" and t.cwd or nil,
+           question = M.capChars(q, M.DECIDE.questionMax), default = M.capChars(d, M.DECIDE.defaultMax),
+           options = opts, blocking = t.blocking == true, nonce = t.nonce, asked = tonumber(t.asked) or 0,
+           ["until"] = tonumber(t["until"]), pid = tonumber(t.pid), timed_out = t.timed_out == true }
+end
+-- Is its waiter still waiting? Only a blocking question before its timeout.
+function M.decisionBlocking(d, now)
+  if type(d) ~= "table" or d.blocking ~= true then return false end
+  local u = tonumber(d["until"])
+  return u ~= nil and (tonumber(now) or os.time()) < u
+end
+-- Adam's answer -> the <id>.answer body, bound to the record's nonce; nil + why.
+function M.decisionAnswerPayload(d, answer, now)
+  if type(d) ~= "table" or type(d.nonce) ~= "string" or d.nonce == "" then return nil, "no question" end
+  local a = decideTrim(answer)
+  if a == "" then return nil, "an empty answer" end
+  if #a > M.DECIDE.answerMax then return nil, "the answer is longer than " .. M.DECIDE.answerMax .. " characters" end
+  return { nonce = d.nonce, answer = a, at = math.floor(tonumber(now) or os.time()) }
+end
+-- An <id>.answer read back: the answer when its nonce is the record's, else nil + why.
+function M.parseDecisionAnswer(d, raw)
+  if type(d) ~= "table" or type(raw) ~= "string" then return nil, "unreadable" end
+  local ok, t = pcall(M.json.decode, raw)
+  if not ok or type(t) ~= "table" then return nil, "unreadable" end
+  if t.nonce ~= d.nonce then return nil, "wrong nonce" end
+  local a = type(t.answer) == "string" and decideTrim(t.answer) or ""
+  if a == "" then return nil, "empty" end
+  return a
+end
+-- What a session that went ahead on the default is told of Adam's answer (FX.mailboxSend marks it
+-- [shepherd]). nil when the answer IS the default: nothing to change, so nothing is said.
+function M.decisionMessage(d, answer)
+  local a = decideTrim(answer)
+  if type(d) ~= "table" or a == "" or a == d.default then return nil end
+  return string.format("Adam answered a question you asked with cc-decide.sh and went ahead on with its default. "
+    .. "You asked: \"%s\" -- you went ahead with \"%s\"; his answer: \"%s\". "
+    .. "If that changes something you did, adjust it; otherwise carry on.", d.question, d.default, a)
+end
+local function decisionOrder(a, b)
+  if (a.asked or 0) ~= (b.asked or 0) then return (a.asked or 0) < (b.asked or 0) end
+  return tostring(a.id) < tostring(b.id)
+end
+-- The open questions per session, for the cards: { [key] = { open, blocking, question } }, the
+-- question being the oldest one's. `decisions` holds the OPEN (unanswered) ones.
+function M.decisionTiles(decisions, now)
+  local sorted, out = {}, {}
+  for _, d in ipairs(decisions or {}) do if type(d) == "table" and d.key then sorted[#sorted + 1] = d end end
+  table.sort(sorted, decisionOrder)
+  for _, d in ipairs(sorted) do
+    local t = out[d.key]
+    if not t then t = { open = 0, blocking = 0, question = d.question }; out[d.key] = t end
+    t.open = t.open + 1
+    if M.decisionBlocking(d, now) then t.blocking = t.blocking + 1 end
+  end
+  return out
+end
+-- The Inbox: every open question and every held AskUserQuestion, fleet-wide. The ones holding a
+-- session come first -- blocking questions, then held asks -- then the rest, oldest first. Each row
+-- is named for its session's card (its folder when it has none on the panel).
+function M.inboxRows(decisions, items, now)
+  local byKey, rows = {}, {}
+  for _, it in ipairs(items or {}) do if type(it) == "table" and it.key then byKey[it.key] = it end end
+  local function names(key, cwd)
+    local it = byKey[key]
+    local base = type(cwd) == "string" and cwd:match("([^/]+)/*$") or nil
+    if it then return tostring(it.label or it.name or base or key), tostring(it.name or base or "") end
+    return tostring(base or key), tostring(base or "")
+  end
+  for _, d in ipairs(decisions or {}) do
+    if type(d) == "table" and d.id then
+      local session, project = names(d.key, d.cwd)
+      local blocking = M.decisionBlocking(d, now)
+      rows[#rows + 1] = { kind = "decide", rank = blocking and 1 or 3, id = d.id, key = d.key,
+        session = session, project = project, question = d.question, default = d.default,
+        options = d.options or {}, blocking = blocking, asked = d.asked, ["until"] = blocking and d["until"] or nil }
+    end
+  end
+  for _, it in ipairs(items or {}) do
+    if type(it) == "table" and it.askHeld and type(it.askView) == "table" and not it.remote then
+      local session, project = names(it.key, it.cwd)
+      local v = it.askView
+      rows[#rows + 1] = { kind = "ask", rank = 2, key = it.key, id = it.key, session = session, project = project,
+        question = tostring(v.question or ""), options = type(v.options) == "table" and v.options or {},
+        simple = v.simple == true, count = tonumber(v.count) or 1, asked = tonumber(it.since) or 0 }
+    end
+  end
+  table.sort(rows, function(a, b)
+    if a.rank ~= b.rank then return a.rank < b.rank end
+    return decisionOrder(a, b)
+  end)
+  return rows
+end
+end
+
 -- ---- Resume at the usage limit's reset (2026-09-29) ----
 -- Build program unit 13. A turn stopped by a usage limit fires StopFailure (error "rate_limit"):
 -- cc-resume.sh arms ~/.claude/cc-resume/<key>.json and waits. Shepherd plans it here -- when the
@@ -17481,6 +17649,9 @@ M.FEATURES = {
   { key = "answers", cat = "Control", new = true, title = "Answer questions from Shepherd",
     what = "When a session asks you something, its card pulses with the question and you get one alert; its answers are buttons right there (and on its Instances row). Your click goes straight to the session -- no tab to find. Several parts or free text: pick per part, then Send answers. Answer in the tab instead hands it back to the tab.",
     why = "A session waiting on you shouldn't wait for you to find its tab -- and you always know when one is." },
+  { key = "decisions", cat = "Control", new = true, title = "Decisions inbox",
+    what = "A session with a question it has a sensible default for asks with ~/.claude/cc-decide.sh and goes ahead on the default instead of stopping. ☰ → Inbox lists every open question -- and every question Shepherd is holding for you -- across the fleet; answer in place. A different answer reaches the session through its mailbox, or at its next start if it has stopped; keeping the default just closes it. A --blocking question waits for you (up to its timeout, then the default) and its card says Needs you; an open one is a heads-up.",
+    why = "A question you'd have answered with the obvious choice no longer parks a session until you come back." },
   { key = "transcript", cat = "Control", new = true, title = "Transcript peek",
     what = "Read a session's recent back-and-forth, with a search box, right inside the panel.",
     why = "Triage what a session is actually doing in a glance instead of switching windows." },

@@ -32,6 +32,10 @@ export CC_PINS_DIR="${CC_PINS_DIR:-$CC_TEST_ISOLATION/cc-pins}"
 # 2026-09-29: SessionStart reads the worktree leases in ~/.claude/cc-lease, and a SessionEnd
 # (cc_remove) prunes them; a suite's fake session must never read or prune the real ones.
 export CC_LEASE_DIR="${CC_LEASE_DIR:-$CC_TEST_ISOLATION/cc-lease}"
+# 2026-09-29: SessionStart hands over (and removes) Adam's late answers in ~/.claude/cc-decide, and
+# a SessionEnd (cc_remove) drops a session's open questions there; a suite's fake session must never
+# take or drop a real one.
+export CC_DECIDE_DIR="${CC_DECIDE_DIR:-$CC_TEST_ISOLATION/cc-decide}"
 
 # sysbin_without <outdir> <tool>... - mirror /usr/bin + /bin into <outdir> as symlinks,
 # leaving out the named tools, and echo <outdir>. Use it in place of a literal
