@@ -2728,6 +2728,15 @@ do
     if shf then shf:close() end
     local rmBody = shSrc:match("\ncc_remove%(%)%s*{(.-)\n}")
     local shellTargets = rmBody and select(2, rmBody:gsub("%$1", "")) or 0
+    -- 2026-09-29: realigned per the NB above. cc_ticket_release "$1" (cross-repo tickets) puts the
+    -- ended session's tickets back and removes no file -- its twin, FX.removeStatus's
+    -- pcall(FX.ticketRelease, key), has no os.remove( either -- so it is no per-key target on either
+    -- side. Both removers are pinned to release them here:
+    local releases = rmBody and select(2, rmBody:gsub('cc_ticket_release "%$1"', "")) or 0
+    check("#13-drift: cc_remove puts back the ended session's tickets (cc_ticket_release)", releases == 1)
+    check("#13-drift: ...and so does FX.removeStatus (FX.ticketRelease)",
+          rsBody ~= nil and rsBody:find("pcall(FX.ticketRelease, key)", 1, true) ~= nil)
+    shellTargets = shellTargets - releases
     check("#13-drift: FX.removeStatus target count parses (>=9)", luaTargets >= 9)
     check("#13-drift: cc_remove target count parses (>=9)", shellTargets >= 9)
     check("#13-drift: FX.removeStatus (" .. tostring(luaTargets) .. ") and cc_remove ("
@@ -3949,6 +3958,46 @@ do
         deliver:find("FX.mailboxSend(it.key, text, meta)", 1, true) ~= nil and not deliver:find("pasteIntoWindow", 1, true))
   check("send: FX.SEND_DIR reads CC_SEND_DIR, as cc-lib.sh does",
         src:find('FX.SEND_DIR = os.getenv("CC_SEND_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-send")', 1, true) ~= nil)
+end
+
+-- ---- Cross-repo tickets are stepped every tick (2026-09-29) ----
+-- Build program unit 29. tests/ticket.test.lua drives FX.stepTickets itself; this pins that the tick
+-- runs it, isolated in a pcall, AFTER the needs-you stamp it reads (a session waiting on Adam is never
+-- offered a ticket), that every handover goes through unit 30's FX.deliverTo -- never a second
+-- delivery path, never straight to a window -- that the board is pushed each tick, and that the
+-- ended session's tickets go back in FX.removeStatus.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  local tick = src:match("function FX%._refreshBody%(%)(.-)\nend\n") or ""
+  local stamp, step = tick:find("FX.annotateNeedsYou(list)", 1, true), tick:find("pcall(FX.stepTickets, list)", 1, true)
+  check("tickets: the tick steps them, isolated in a pcall", step ~= nil)
+  check("tickets: ...after the needs-you stamp", stamp ~= nil and step ~= nil and step > stamp)
+  check("tickets: the tick pushes the board's rows", tick:find("pcall(FX.pushTickets)", 1, true) ~= nil)
+  local offer = src:match("function FX%.ticketOffer%(t, views, held, now%)(.-)\nend\n") or ""
+  local tell = src:match("function FX%.ticketTell%(t, role, tileOf, now%)(.-)\nend\n") or ""
+  check("tickets: an offer goes through FX.deliverTo, claimed first (FX.ticketUpdate)",
+        offer:find("FX.deliverTo(it, core.ticketOfferText(", 1, true) ~= nil
+        and offer:find("FX.ticketUpdate(t.id", 1, true) ~= nil
+        and offer:find("FX.ticketUpdate(t.id", 1, true) < offer:find("FX.deliverTo(", 1, true))
+  check("tickets: news goes through FX.deliverTo too", tell:find("FX.deliverTo(it, core.ticketNewsText(", 1, true) ~= nil)
+  check("tickets: nothing is typed or pasted straight into a window",
+        not offer:find("pasteIntoWindow", 1, true) and not tell:find("pasteIntoWindow", 1, true)
+        and not offer:find("mailboxSend", 1, true) and not tell:find("mailboxSend", 1, true))
+  local rs = src:match("function FX%.removeStatus%(key%)(.-)\nend\n") or ""
+  check("tickets: FX.removeStatus puts back the tickets the ended session held", rs:find("pcall(FX.ticketRelease, key)", 1, true) ~= nil)
+  check("tickets: FX.TICKETS_DIR reads CC_TICKETS_DIR, as cc-lib.sh does",
+        src:find('FX.TICKETS_DIR = os.getenv("CC_TICKETS_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-tickets")', 1, true) ~= nil)
+  check("tickets: the bridge takes Open a tab for it from the board (an id) and a card (a key)",
+        src:find('if a == "ticket-tab" then FX.openTicketTab(tostring(payload.v or "")); return end', 1, true) ~= nil
+        and src:find('if a == "ticket-tab-card" then FX.openTicketTabFor(tostring(payload.v or "")); return end', 1, true) ~= nil)
+  local lib = io.open(ROOT .. "cc-lib.sh", "r")
+  local ls = lib and lib:read("*a") or ""
+  if lib then lib:close() end
+  check("tickets: cc-lib.sh defaults CC_TICKETS_DIR to the same folder",
+        ls:find('CC_TICKETS_DIR="${CC_TICKETS_DIR:-${HOME}/.claude/cc-tickets}"', 1, true) ~= nil)
+  check("tickets: SessionStart has a tickets part", ls:find('CC_CONTEXT_PARTS="notes lease decisions tickets handoff mailbox"', 1, true) ~= nil)
 end
 
 -- ---- Capture as scenario (2026-09-29) ----

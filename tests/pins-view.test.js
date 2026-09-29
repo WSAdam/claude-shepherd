@@ -46,6 +46,7 @@ const lib = new Function("sent", "stubs",
   "function send(a, v, text){ sent.push([a, v, text]); }\n" +
   "function talkBadge(){ return ''; } function riskBadge(){ return ''; } function prBadgeHtml(){ return ''; }\n" +
   "function bgBadge(){ return ''; } function notesBadge(){ return ''; } function leaseBadge(){ return ''; }\n" +
+  "function ticketBadge(){ return ''; }\n" +
   escSrc + "\n" + chipsSrc + "\n" + openSrc + "\n" + badgesSrc +
   "\nreturn { pinChipsHtml, openPin, badgesHtml, setSel: function(k){ selectedKey = k; } };")(sent, { selectedKey: null });
 

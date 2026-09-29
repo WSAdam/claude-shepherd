@@ -68,6 +68,8 @@ Every feature below has a reference page one click away. The panel lists the sam
   PR, a file in its worktree) with `cc-pin.sh`, and they show as chips on its card.
 - [**cc-send**](docs/automation.md#send-a-prompt-from-a-shell): `cc-send.sh <project|session> "prompt"
   --wait` hands a live session a prompt from any shell and prints its reply.
+- [**Cross-repo tickets**](docs/automation.md#cross-repo-tickets): `cc-ticket.sh file --repo <repo>` hands
+  another repo's sessions work, and their replies and closing note come back to you.
 - [**Answer questions from Shepherd**](docs/approvals-and-policies.md#answer-questions-from-shepherd):
   a session's question shows up on its card as buttons, and your click goes straight to the session.
 - [**Decisions inbox**](docs/approvals-and-policies.md#decisions-inbox): a question with a sensible

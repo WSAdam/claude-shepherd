@@ -75,6 +75,9 @@ exists "copies cc-resume.sh -> claude dir" "$CDIR/cc-resume.sh"
 # 2026-09-29: cc-send.sh -- a prompt for a live session, from any shell (a command, not a hook)
 exists "copies cc-send.sh -> claude dir" "$CDIR/cc-send.sh"
 assert_eq "...and wires it to no hook" "0" "$(grep -c 'cc-send.sh' "$CDIR/settings.json")"
+# 2026-09-29: cc-ticket.sh -- cross-repo tickets (a command, not a hook)
+exists "copies cc-ticket.sh -> claude dir" "$CDIR/cc-ticket.sh"
+assert_eq "...and wires it to no hook" "0" "$(grep -c 'cc-ticket.sh' "$CDIR/settings.json")"
 # 2026-09-29: auto-compact with notes -- every compaction (auto or /compact) reaches cc-status.sh
 # precompact, which tells the summary the session's notes come back afterwards.
 assert_json "a compaction reaches cc-status.sh (PreCompact, every trigger)" "$CDIR/settings.json" \

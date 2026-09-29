@@ -34,6 +34,7 @@ mkdir -p "$C/cc-lease/db"; printf '{"v":1,"main":"/r","leases":{}}' > "$C/cc-lea
 mkdir -p "$C/cc-bridge"; printf '0.5.0' > "$C/cc-bridge/.installed"
 mkdir -p "$C/cc-send"; printf '{"nonce":"ab"}' > "$C/cc-send/shell.1790000000-1.answer"
 printf '{"v":1,"repos":{}}' > "$C/cc-reqs.json"
+mkdir -p "$C/cc-tickets"; printf '{"v":1,"id":"t1790000000-1"}' > "$C/cc-tickets/t1790000000-1.json"
 FAKE="$TMP/code"
 printf '#!/bin/sh\necho "$*" >> "%s"\nexit 0\n' "$TMP/code.calls" > "$FAKE"; chmod +x "$FAKE"
 
@@ -56,7 +57,8 @@ assert_json "...as the only Stop group" "$C/settings.json" '.hooks.Stop | length
 assert_json "an event left with no hooks is dropped" "$C/settings.json" '.hooks | has("PreToolUse")' "false"
 assert_json "the user's other settings are kept" "$C/settings.json" '.model' "opus"
 # 2026-09-29: cc-send.sh (a prompt for a live session, from any shell) is shipped too.
-for f in cc-lib.sh cc-status.sh cc-approve.sh cc-popup.sh cc-merge.sh cc-fleet.sh cc-ask.sh cc-commits.sh cc-worktree-guard.sh cc-resume.sh cc-send.sh cc-core.lua; do
+# 2026-09-29: cc-ticket.sh (cross-repo tickets) is shipped too.
+for f in cc-lib.sh cc-status.sh cc-approve.sh cc-popup.sh cc-merge.sh cc-fleet.sh cc-ask.sh cc-commits.sh cc-worktree-guard.sh cc-resume.sh cc-send.sh cc-ticket.sh cc-core.lua; do
   assert_eq "removes $f from the claude dir" "gone" "$([ -e "$C/$f" ] && echo there || echo gone)"
 done
 assert_eq "a user's own cc-*.sh is kept" "there" "$([ -e "$C/cc-mine.sh" ] && echo there || echo gone)"
@@ -100,6 +102,8 @@ assert_eq "--purge removes the worktree leases" "gone" "$([ -e "$C/cc-lease" ] &
 assert_eq "--purge removes cc-send's requests" "gone" "$([ -e "$C/cc-send" ] && echo there || echo gone)"
 # 2026-09-29: the requirement ids Shepherd minted (cc-reqs.json) too
 assert_eq "--purge removes the minted requirement ids" "gone" "$([ -e "$C/cc-reqs.json" ] && echo there || echo gone)"
+# 2026-09-29: the cross-repo tickets (cc-tickets/) too
+assert_eq "--purge removes the cross-repo tickets" "gone" "$([ -e "$C/cc-tickets" ] && echo there || echo gone)"
 assert_eq "--purge still keeps the user's own files" "there" "$([ -e "$C/cc-mine.sh" ] && echo there || echo gone)"
 
 # a CLAUDE.md that is only the block (a fresh machine) is removed, not left empty

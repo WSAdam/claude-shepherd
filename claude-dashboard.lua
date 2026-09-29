@@ -3947,6 +3947,13 @@ function FX.removeStatus(key)
     for _, fn in ipairs(FX.readDir(FX.SEND_DIR)) do
       if core.sendFileOf(fn) == key then os.remove(FX.SEND_DIR .. "/" .. fn) end
     end
+    -- cross-repo tickets (2026-09-29): the tickets this session had on its plate go back (never
+    -- offered to it again); the ones it filed stay for its next start. Then every stale file.
+    -- (cc_remove too: cc_ticket_release + cc_ticket_prune.)
+    local okt, errt = pcall(FX.ticketRelease, key)
+    if not okt then print("[cc-dashboard] ❌ tickets release failed: " .. tostring(errt)) end
+    okt, errt = pcall(FX.ticketPrune)
+    if not okt then print("[cc-dashboard] ❌ tickets prune failed: " .. tostring(errt)) end
   end
   -- pinned links (2026-09-29) belong to a worktree, not this key -- they outlive /clear -- so only
   -- the pins of a worktree that is gone go (cc_remove runs cc_pins_prune)
@@ -6917,6 +6924,335 @@ function FX.stepSend(list)
   end
 end
 -- (A session's own requests go with it: FX.removeStatus, and cc_remove's cc_send_prune.)
+
+-- ---- Cross-repo tickets (2026-09-29) ----
+-- Build program unit 29. A session files work for ANOTHER repo with cc-ticket.sh: one file per
+-- ticket in FX.TICKETS_DIR, <id>.json. Each tick FX.stepTickets reads them all (one directory read
+-- when there are none) and, in order: reclaims an offer nobody took in 45 minutes and a ticket whose
+-- holder's session is gone (core.ticketReclaim); offers every open ticket to the target repo's
+-- least-busy live session (core.ticketCandidates) -- the offer is written into the ticket first
+-- (claimed with a rename, like every writer's change: FX.ticketUpdate), then handed over through
+-- FX.deliverTo, unit 30's "deliver to a live session" helper, and undone if that fails; hands each
+-- side what it hasn't been told (the holder's replies and close to the filer, the filer's to the
+-- holder) the same way, unless that side has a `cc-ticket.sh wait` running (it takes them itself) or
+-- isn't live (its next start takes them: _cc_ctx_tickets); and stamps each repo's cards with the
+-- tickets no session there can take (it.tickets: the badge and "Open a tab for it"). Runs after the
+-- needs-you stamp: a session waiting on Adam is never offered a ticket.
+FX.TICKETS_DIR = os.getenv("CC_TICKETS_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-tickets")
+-- list/waiting: the last tick's tickets and the ids nobody could take (the board's and the cards');
+-- nextRoute: when tickets nobody could take are looked at again; retry: "<id>:<role>" -> when a
+-- held-back handover (a dry run) is tried again; nextPrune: the hourly prune.
+FX._tickets = { list = {}, waiting = {}, nextRoute = 0, retry = {}, nextPrune = 0 }
+-- Every ticket in the folder, oldest first. A ticket another writer has claimed this instant is read
+-- from its claim and marked _busy (never changed this tick).
+function FX.readTickets()
+  local names, out, seen = {}, {}, {}
+  for _, fn in ipairs(FX.readDir(FX.TICKETS_DIR)) do names[fn] = true end
+  for fn in pairs(names) do
+    local f = core.ticketFileOf(fn)
+    if f and not seen[f.id] and (f.kind == "json" or (f.kind == "claim" and not names[f.id .. ".json"])) then
+      local t = core.parseTicket(FX.readFile(FX.TICKETS_DIR .. "/" .. fn), f.id)
+      if t then
+        seen[f.id] = true
+        if f.kind == "claim" then t._busy = true end
+        out[#out + 1] = t
+      end
+    end
+  end
+  table.sort(out, function(a, b) if a.filed ~= b.filed then return a.filed < b.filed end return a.id < b.id end)
+  return out
+end
+-- Change ticket `id` the way every writer does (cc_ticket_update in cc-lib.sh): claim its file by
+-- renaming it (one writer wins), let fn change the ticket read from the claim -- it returns the
+-- ticket, or nil to leave it as it was -- write it whole into place, drop the claim. Returns the
+-- ticket as written, or nil + why ("busy": another writer has it, try next tick).
+function FX.ticketUpdate(id, fn)
+  if not core.ticketIdOk(id) then return nil, "bad id" end
+  local path = FX.TICKETS_DIR .. "/" .. id .. ".json"
+  local claim = path .. ".claim.shepherd"
+  if not os.rename(path, claim) then return nil, "busy" end
+  local t = core.parseTicket(FX.readFile(claim), id)
+  if not t then os.rename(claim, path); return nil, "unreadable" end
+  local okf, nt = pcall(fn, t)
+  if not okf then print("[cc-dashboard] ❌ tickets: changing " .. id .. " failed: " .. tostring(nt)) end
+  if not okf or type(nt) ~= "table" then os.rename(claim, path); return nil, "unchanged" end
+  nt._busy = nil
+  if not FX.writeFileAtomic(path, core.json.encode(nt)) then
+    os.rename(claim, path)
+    print("[cc-dashboard] ❌ tickets: couldn't write " .. id)
+    return nil, "write failed"
+  end
+  os.remove(claim)
+  return nt
+end
+-- A session's name, as the other side is told it: its Claude Code name (the one SendMessage
+-- addresses), else its card's.
+function FX.ticketSessionName(it)
+  return type(it) == "table" and (it.peerName or it.label or it.name or it.key) or nil
+end
+-- Offer open ticket t to the least-busy live session of its repo. Returns the ticket as written
+-- (offered), or nil when nobody can take it now (wait = true: it waits for a session).
+function FX.ticketOffer(t, views, held, now)
+  local it = core.ticketCandidates(views, t, held, now)[1]
+  if not it then return nil, true end
+  local key = "offer:" .. t.id
+  if (FX._tickets.retry[key] or 0) > now then return nil end
+  local route = core.mailboxRoute(it, 1) or "turn-end"
+  local pid = tostring(it.session_pid or ""):match("^%d+$")
+  local offered = FX.ticketUpdate(t.id, function(x)
+    local ph = core.ticketPhase(x, now)
+    if ph ~= "open" and ph ~= "lapsed" then return nil end
+    if ph == "lapsed" then core.ticketRelease(x) end
+    x.holder = { key = it.key, pid = pid, name = FX.ticketSessionName(it), at = now, taken = false, route = route }
+    -- the offer points at every follow-up the filer sent so far
+    for _, e in ipairs(x.thread) do if type(e) == "table" and e.by == "filer" and not e.told then e.told = "offer" end end
+    return x
+  end)
+  if not offered then return nil end
+  local fromTile
+  for _, v in ipairs(views) do
+    if v.key == t.from.key or (t.from.pid and tostring(v.session_pid or "") == tostring(t.from.pid)) then fromTile = v; break end
+  end
+  local d, why = FX.deliverTo(it, core.ticketOfferText(offered, FX.ticketSessionName(fromTile) or t.from.name),
+                              { kind = "ticket", from = "cc-ticket" })
+  if not d then
+    FX.ticketUpdate(t.id, function(x)
+      if not (x.holder and x.holder.key == it.key and not x.holder.taken) then return nil end
+      x.holder = nil
+      return x
+    end)
+    FX._tickets.retry[key] = now + 60
+    print("[cc-dashboard] ⚠️ tickets: " .. t.id .. " not offered to " .. tostring(it.key) .. ": " .. tostring(why))
+    return nil
+  end
+  held[it.key] = (held[it.key] or 0) + 1
+  print("[cc-dashboard] ✅ tickets: offered " .. t.id .. " to '" .. tostring(FX.ticketSessionName(it)) .. "' (" .. d.route .. ")")
+  ledgerFor(it, { type = "ticket_offered", ticket = t.id, route = d.route, repo = t.to.root })
+  return offered
+end
+-- Hand `role` ("filer" | "holder") of ticket t what it hasn't been told, when its session is live
+-- and no `cc-ticket.sh wait` of its own is running. Marked told first (claimed), then delivered;
+-- a failed delivery unmarks exactly what it marked. Returns the ticket as written, or nil.
+function FX.ticketTell(t, role, tileOf, now)
+  if not core.ticketNews(t, role) then return nil end
+  local key, pid
+  if role == "filer" then key, pid = t.from.key, t.from.pid
+  elseif t.holder then key, pid = t.holder.key, t.holder.pid
+  else return nil end
+  local it = tileOf(key, pid)
+  if not it or it.procAlive == false or it.tabless then return nil end   -- not live: its next start takes it
+  local w = type(t.waiting) == "table" and type(t.waiting[role]) == "table" and t.waiting[role] or nil
+  local wpid = w and tostring(w.pid or ""):match("^%d+$")
+  if wpid and now - (tonumber(w.at) or 0) < core.TICKET.waiterMaxAge and FX.probeAlive({ [wpid] = true })[wpid] ~= false then
+    return nil                                                            -- its waiter takes it
+  end
+  local rkey = t.id .. ":" .. role
+  if (FX._tickets.retry[rkey] or 0) > now then return nil end
+  local route = core.mailboxRoute(it, 1) or "turn-end"
+  local fresh
+  local told = FX.ticketUpdate(t.id, function(x)
+    fresh = core.ticketNews(x, role)
+    if not fresh then return nil end
+    core.ticketTell(x, role, route)
+    return x
+  end)
+  if not told then return nil end
+  local otherName
+  if role == "filer" then otherName = (told.holder and (told.holder.name or told.holder.key)) or "the session holding it"
+  else
+    local ft = tileOf(t.from.key, t.from.pid)
+    otherName = FX.ticketSessionName(ft) or t.from.name
+  end
+  local d, why = FX.deliverTo(it, core.ticketNewsText(told, fresh, role, otherName), { kind = "ticket", from = "cc-ticket" })
+  if not d then
+    FX.ticketUpdate(t.id, function(x)
+      for _, i in ipairs(fresh.idx) do if type(x.thread[i]) == "table" and x.thread[i].told == route then x.thread[i].told = false end end
+      if fresh.close and x.closed and x.closed.told == route then x.closed.told = false end
+      return x
+    end)
+    FX._tickets.retry[rkey] = now + 60
+    print("[cc-dashboard] ⚠️ tickets: news on " .. t.id .. " not handed to the " .. role .. ": " .. tostring(why))
+    return nil
+  end
+  print("[cc-dashboard] ✅ tickets: news on " .. t.id .. " -> the " .. role .. " (" .. d.route .. ")")
+  ledgerFor(it, { type = "ticket_news", ticket = t.id, role = role, route = d.route,
+                  replies = #fresh.entries, closed = fresh.close and true or nil })
+  return told
+end
+function FX.stepTickets(list)
+  local now = FX.now()
+  local any = false
+  for _, fn in ipairs(FX.readDir(FX.TICKETS_DIR)) do if core.ticketFileOf(fn) then any = true; break end end
+  if not any then
+    FX._tickets.list, FX._tickets.waiting = {}, {}
+    for _, it in ipairs(list or {}) do it.tickets = nil end
+    return
+  end
+  local tickets = FX.readTickets()
+  local byKeyT, byPid = {}, {}
+  for _, it in ipairs(list or {}) do
+    if type(it) == "table" and it.key and not it.remote then
+      byKeyT[it.key] = it
+      local p = tostring(it.session_pid or "")
+      if p ~= "" then byPid[p] = it end
+    end
+  end
+  local function tileOf(key, pid)
+    return (key and byKeyT[key]) or (pid and pid ~= "" and byPid[tostring(pid)]) or nil
+  end
+  local function live(key, pid) local it = tileOf(key, pid); return it ~= nil and it.procAlive ~= false end
+  -- 1. reclaim: an offer nobody took in time, a ticket whose holder's session is gone
+  for i, t in ipairs(tickets) do
+    local why = not t._busy and core.ticketReclaim(t, now, live)
+    if why then
+      local was = t.holder.key
+      local nt = FX.ticketUpdate(t.id, function(x) if core.ticketReclaim(x, now, live) then return core.ticketRelease(x) end end)
+      if nt then
+        tickets[i] = nt
+        print("[cc-dashboard] ⚠️ tickets: " .. t.id .. " reclaimed from " .. tostring(was) .. " (" .. why .. ")")
+        ledgerFor(tileOf(was) or { key = was }, { type = "ticket_reclaimed", ticket = t.id, why = why })
+      end
+    end
+  end
+  -- 2. offer the open ones; the ones nobody can take are looked at again every routeEverySeconds
+  local waiting, views = {}, nil
+  local routeNow = now >= (FX._tickets.nextRoute or 0)
+  local held = core.ticketHeldCounts(tickets, now)
+  for i, t in ipairs(tickets) do
+    local ph = core.ticketPhase(t, now)
+    if ph == "open" or ph == "lapsed" then
+      local tabbing = tonumber(t.tabAt) and now - tonumber(t.tabAt) < core.TICKET.tabGraceSeconds
+      if tabbing or t._busy or not (routeNow or not FX._tickets.waiting[t.id]) then
+        waiting[t.id] = FX._tickets.waiting[t.id] or tabbing or nil
+      else
+        if not views then views = FX.sendViews(list) end
+        local nt, none = FX.ticketOffer(t, views, held, now)
+        if nt then tickets[i] = nt elseif none then waiting[t.id] = true end
+      end
+    end
+  end
+  if next(waiting) and routeNow then FX._tickets.nextRoute = now + core.TICKET.routeEverySeconds end
+  -- 3. news for each side
+  for i, t in ipairs(tickets) do
+    if not t._busy then
+      for _, role in ipairs({ "filer", "holder" }) do
+        local nt = FX.ticketTell(tickets[i], role, tileOf, now)
+        if nt then tickets[i] = nt end
+      end
+    end
+  end
+  for k, at in pairs(FX._tickets.retry) do if at <= now then FX._tickets.retry[k] = nil end end
+  -- 4. each repo's cards carry the tickets nobody there can take; the board reads the rest
+  local info = core.ticketCardInfo(tickets, waiting)
+  for _, it in ipairs(list or {}) do
+    local root = core.ticketRootOf(it)
+    it.tickets = root and info[root] or nil
+  end
+  FX._tickets.list, FX._tickets.waiting = tickets, waiting
+  if now >= (FX._tickets.nextPrune or 0) then
+    FX._tickets.nextPrune = now + 3600
+    local okp, errp = pcall(FX.ticketPrune)
+    if not okp then print("[cc-dashboard] ❌ tickets prune failed: " .. tostring(errp)) end
+  end
+end
+-- The board's rows (core.ticketRows), each session named as its card names it.
+function FX.ticketRows()
+  local byK2, byP2 = {}, {}
+  for _, it in ipairs(FX.allItems()) do
+    if it.key then byK2[it.key] = it end
+    local p = tostring(it.session_pid or "")
+    if p ~= "" then byP2[p] = it end
+  end
+  return core.ticketRows(FX._tickets.list or {}, FX.now(), FX._tickets.waiting or {}, function(key, pid)
+    local it = (key and byK2[key]) or (pid and byP2[tostring(pid)])
+    return it and FX.ticketSessionName(it) or nil
+  end)
+end
+-- ...to the panel (ccTickets), which renders them when the board is open and counts the waiting.
+function FX.pushTickets()
+  if not wv then return end
+  local rows = FX.ticketRows()
+  local js = "ccTickets(" .. ((#rows == 0) and "[]" or core.json.encode(rows)) .. ")"
+  pcall(function() wv:evaluateJavaScript(js) end)
+end
+-- "Open a tab for it" (the board, or a card's badge): a new Claude tab in the ticket's repo, its
+-- prompt taking the ticket -- typed, never sent (FX.openClaudeTab). The ticket records it, so the
+-- router leaves it to that tab for core.TICKET.tabGraceSeconds. Only for a ticket nobody holds.
+function FX.openTicketTab(id)
+  if not core.ticketIdOk(id) then return false end
+  local t = core.parseTicket(FX.readFile(FX.TICKETS_DIR .. "/" .. id .. ".json"), id)
+  if not t then FX.alert("⚠️ Ticket " .. id .. " isn't there any more"); return false end
+  local ph = core.ticketPhase(t, FX.now())
+  if ph ~= "open" and ph ~= "lapsed" then
+    FX.alert("⚠️ Ticket " .. id .. (ph == "closed" and " is closed" or " is with a session already") .. " -- no tab needed")
+    return false
+  end
+  local stackKey
+  for _, it in ipairs(FX.allItems()) do
+    if core.ticketInRepo(it, t.to.root) then stackKey = it.stackKey; break end
+  end
+  local editor = FX.tabEditorFor(stackKey)
+  if not editor then
+    FX.alert("Open a tab for it needs VS Code or Cursor (the Claude extension opens the tab)")
+    return false
+  end
+  if not FX.ticketUpdate(id, function(x) x.tabAt = FX.now(); return x end) then
+    FX.alert("⚠️ Ticket " .. id .. " is being changed right now -- try again")
+    return false
+  end
+  print("[cc-dashboard] 🚀 tickets: opening a tab in " .. t.to.root .. " for " .. id)
+  FX.appendLedger({ type = "ticket_tab", ticket = id, cwd = t.to.root })
+  return FX.openClaudeTab({ root = t.to.root, editor = editor, label = t.to.name, prompt = core.ticketTabPrompt(t) })
+end
+-- ...from a card: the oldest ticket waiting for its repo (it.tickets, stamped by FX.stepTickets).
+function FX.openTicketTabFor(key)
+  for _, it in ipairs(FX.allItems()) do
+    if it.key == key and type(it.tickets) == "table" and it.tickets.id then return FX.openTicketTab(it.tickets.id) end
+  end
+  return false
+end
+-- The removers' share (KEEP IN SYNC with cc_ticket_release in cc-lib.sh): the tickets session `key`
+-- had on its plate go back -- never offered to it again -- while the ones it FILED stay, their news
+-- waiting for its next start.
+function FX.ticketRelease(key)
+  if not core.mailboxKeyOk(key) then return end
+  for _, t in ipairs(FX.readTickets()) do
+    local ph = core.ticketPhase(t, FX.now())
+    if t.holder and t.holder.key == key and ph ~= "closed" then
+      if FX.ticketUpdate(t.id, function(x)
+        if x.holder and x.holder.key == key and not x.closed then return core.ticketRelease(x) end
+      end) then
+        print("[cc-dashboard] ⚠️ tickets: " .. t.id .. " went back -- its holder " .. key .. " ended")
+      end
+    end
+  end
+end
+-- (KEEP IN SYNC with cc_ticket_prune): a ticket closed over closedKeepSeconds ago or filed over
+-- maxAge ago; a writer's claim or temp over partSeconds old -- a claim goes back into place when
+-- its ticket isn't there, else it goes.
+function FX.ticketPrune()
+  local now = FX.now()
+  local names = {}
+  for _, fn in ipairs(FX.readDir(FX.TICKETS_DIR)) do names[fn] = true end
+  for fn in pairs(names) do
+    local f = core.ticketFileOf(fn)
+    local path = FX.TICKETS_DIR .. "/" .. fn
+    if f and f.kind == "json" then
+      local t = core.parseTicket(FX.readFile(path), f.id)
+      if t and ((t.closed and now - (tonumber(t.closed.at) or now) > core.TICKET.closedKeepSeconds)
+                or (t.filed > 0 and now - t.filed > core.TICKET.maxAge)) then
+        os.remove(path)
+      end
+    elseif f then
+      local mt
+      pcall(function() mt = tonumber((hs.fs.attributes(path, "modification"))) end)
+      if mt and now - mt > core.TICKET.partSeconds then
+        if f.kind == "claim" and not names[f.id .. ".json"] then os.rename(path, FX.TICKETS_DIR .. "/" .. f.id .. ".json")
+        else os.remove(path) end
+      end
+    end
+  end
+end
 
 -- ---- Resume at the usage limit's reset (2026-09-29) ----
 -- Build program unit 13. A turn stopped by a usage limit fires StopFailure (matcher rate_limit):
@@ -10215,6 +10551,11 @@ local function handleBridgeMsg(msg)
   -- 2026-09-29: the Inbox answers a cc-decide.sh question (its id, the answer's text); never typed
   if a == "decide-answer" then FX.answerDecision(tostring(payload.v or ""), tostring(payload.text or "")); return end
   if a == "inbox-open" then pcall(FX.pushInbox); return end
+  -- 2026-09-29: cross-repo tickets -- "Open a tab for it" from the board (the ticket's id) or from a
+  -- card's badge (the card's key: Lua reads the ticket from the card); the board asks for its rows
+  if a == "ticket-tab" then FX.openTicketTab(tostring(payload.v or "")); return end
+  if a == "ticket-tab-card" then FX.openTicketTabFor(tostring(payload.v or "")); return end
+  if a == "tickets-open" then pcall(FX.pushTickets); return end
   if a == "release-ask" then FX.releaseAsk(tostring(payload.v or "")); return end
   -- Batch driving (2026-09-11): v = the driver's key, text = JSON {id, grantMerge, note}
   if a == "batch-approve" then FX.batchApprove(tostring(payload.v or ""), tostring(payload.text or "")); return end
@@ -12077,6 +12418,13 @@ local HTML = [[
   .theme-bar .pin-chip, .theme-dots .pin-chip { display:none; }   /* one-line themes: detail panel only */
   #d-pins { display:none; flex-wrap:wrap; gap:4px; margin:5px 0 0 18px; }
   #d-pins .pin-chip { margin-left:0; }
+  /* 2026-09-29: cross-repo tickets -- tickets no session of this repo can take (FX.stepTickets) */
+  .tk-b { display:inline-block; font-size:10px; line-height:14px; margin-left:6px; padding:1px 5px;
+    border-radius:8px; border:1px solid var(--accent); color:var(--accent-text); white-space:nowrap; vertical-align:middle; }
+  .tk-tab { font:inherit; font-size:10px; line-height:14px; margin-left:4px; padding:0 6px; border-radius:6px;
+    border:1px solid var(--border); background:var(--surface-2); color:var(--text-2); cursor:pointer; vertical-align:middle; }
+  .tk-tab:hover { border-color:var(--accent); color:var(--text-strong); }
+  .theme-bar .tk-tab, .theme-dots .tk-tab { display:none; }   /* one-line themes: the badge and the board */
   /* 2026-09-29: worktree leases -- the worktree's own port (FX.stepLeases) */
   .lease-b { display:inline-block; font-size:10px; line-height:14px; margin-left:6px; padding:1px 5px;
     border-radius:8px; border:1px solid var(--border); color:var(--accent-text);
@@ -12939,6 +13287,19 @@ local HTML = [[
   padding:0 4px; font-variant-numeric:tabular-nums; }
 #tm-inbox-badge{ margin-left:auto; }
 #inbox-badge{ margin-left:3px; vertical-align:top; }
+/* 🎫 Tickets (2026-09-29): cross-repo tickets, fleet-wide (the Inbox's row styles) */
+#tickets{ position:fixed; inset:0; background:var(--bg-overlay); z-index:12; display:none; flex-direction:column; font-size:12px; }
+#tickets.show{ display:flex; }
+#tickets .ov-head{ display:flex; align-items:center; justify-content:space-between; padding:12px 16px; border-bottom:1px solid var(--border); font-weight:600; color:var(--text); }
+#tickets .ov-body{ flex:1; overflow-y:auto; padding:14px 16px; }
+#tickets .ov-foot{ padding:10px 16px; border-top:1px solid var(--border); color:var(--dim); font-size:11px; }
+.ib-row.tk-waiting{ border-color:var(--st-approval); }
+.ib-row.tk-closed{ opacity:.75; }
+.tk-body, .tk-last, .tk-note{ color:var(--text-2); white-space:pre-wrap; overflow-wrap:anywhere; margin-bottom:6px; }
+.tk-body{ max-height:6em; overflow:hidden; }
+.tk-note{ color:var(--text); }
+#tm-tickets-badge{ display:none; background:var(--accent); color:var(--bg); border-radius:8px; font-size:9px;
+  padding:0 4px; font-variant-numeric:tabular-nums; margin-left:auto; }
 /* Where the time went (2026-09-29): above Instances (z 12), which it opens from */
 #timelost{ position:fixed; inset:0; background:var(--bg-overlay); z-index:13; display:none; flex-direction:column; font-size:12px; }
 #timelost.show{ display:flex; }
@@ -13285,6 +13646,7 @@ local HTML = [[
         <button id="menu-btn" onclick="toggleMenu(event)" title="Views — inbox, search, insights, audit, notifications">☰<span id="notify-badge"></span><span id="inbox-badge" title="Questions in the Inbox"></span></button>
         <div id="toolmenu">
           <button class="tm-item" onclick="menuPick('inbox')"><span class="tm-ic">📥</span> Inbox<span id="tm-inbox-badge"></span></button>
+          <button class="tm-item" onclick="menuPick('tickets')" title="Work sessions filed for other repos (cc-ticket.sh)"><span class="tm-ic">🎫</span> Tickets<span id="tm-tickets-badge" title="Tickets no session can take"></span></button>
           <button class="tm-item" onclick="menuPick('search')"><span class="tm-ic">🔍</span> Filter sessions</button>
           <button class="tm-item" onclick="menuPick('fsearch')"><span class="tm-ic">🔎</span> Find in fleet</button>
           <button class="tm-item" onclick="menuPick('insights')"><span class="tm-ic">📊</span> Fleet insights</button>
@@ -14017,6 +14379,12 @@ local HTML = [[
     <div class="ov-head"><span>📥 Inbox</span><button class="s-x" onclick="closeInbox()">✕</button></div>
     <div class="ov-body" id="ib-body"></div>
     <div class="ov-foot"><span>Questions sessions asked with cc-decide.sh -- they went ahead on the default unless one waits for you -- and questions Shepherd is holding for you. Answer here; the session gets it.</span></div>
+  </div>
+
+  <div id="tickets">
+    <div class="ov-head"><span>🎫 Tickets</span><button class="s-x" onclick="closeTickets()">✕</button></div>
+    <div class="ov-body" id="tk-body"></div>
+    <div class="ov-foot"><span>Work sessions filed for other repos with cc-ticket.sh. Shepherd offers each to a live session of its repo -- the least busy, never one waiting on you; one that nobody there can take waits here and on that repo's card.</span></div>
   </div>
 
   <div id="features">
@@ -20404,6 +20772,7 @@ local HTML = [[
       closeMenu();
       if(which === "search") toggleSearch();
       else if(which === "inbox") openInbox();
+      else if(which === "tickets") openTickets();
       else if(which === "fsearch") openFleetSearch();
       else if(which === "insights") openInsights();
       else if(which === "audit") openAudit();
@@ -20648,6 +21017,75 @@ local HTML = [[
       return true;
     }
     document.addEventListener("keydown", function(e){ if(e.key === "Escape") closeInbox(); });
+    // ---- 🎫 Tickets (2026-09-29, build program unit 29) ------------------------
+    // Every cross-repo ticket (core.ticketRows, pushed each tick by FX.pushTickets): the ones no
+    // session can take first, with "Open a tab for it". Titles, bodies, replies, notes, names and ids
+    // come from sessions, so each goes through esc(); a click sends only the id TICKETS.rows holds --
+    // never text read back out of the markup.
+    var TICKETS = { rows: [], latest: [], sig: "", open: false };
+    function ccTickets(rows){
+      rows = Array.isArray(rows) ? rows : [];
+      var waiting = rows.filter(function(r){ return r && r.phase === "waiting"; }).length;
+      var b = document.getElementById("tm-tickets-badge");
+      if(b){ b.textContent = waiting ? String(waiting > 99 ? "99+" : waiting) : ""; b.style.display = waiting ? "inline-block" : "none"; }
+      var sig = JSON.stringify(rows);
+      if(sig === TICKETS.sig) return;
+      TICKETS.sig = sig; TICKETS.latest = rows;
+      if(TICKETS.open) renderTickets(rows);
+    }
+    var TK_PHASES = { waiting: 1, open: 1, offered: 1, held: 1, closed: 1 };
+    function ticketRowsHtml(rows){
+      if(!rows || !rows.length) return '<div class="ib-empty">No tickets — sessions file work for other repos with cc-ticket.sh.</div>';
+      return rows.map(function(r, i){
+        var ph = TK_PHASES.hasOwnProperty(r.phase) ? r.phase : "open";
+        var state = ph === "waiting" ? "<b>no session there can take it</b>"
+          : ph === "offered" ? "offered to " + esc(r.holder) + (r.route === "waiting" ? " — waiting in its mailbox (its window is shared)" : ", not taken yet")
+          : ph === "held" ? "held by " + esc(r.holder)
+          : ph === "closed" ? "closed" + (r.holder ? " by " + esc(r.holder) : "")
+          : "open";
+        var meta = esc(r.id) + " · " + esc(r.from) + " in " + esc(r.fromRepo) + " → " + esc(r.to)
+          + (r.filed ? " · " + esc(fmtAge(r.filed)) + " ago" : "") + " · " + state
+          + (r.tabbing ? " · a tab is opening for it" : "");
+        var h = '<div class="ib-row tk-' + ph + '" data-row="' + i + '"><div class="ib-q">' + esc(r.title) + '</div>'
+          + '<div class="ib-meta">' + meta + '</div>';
+        if(r.body) h += '<div class="tk-body">' + esc(r.body) + '</div>';
+        if(r.last && typeof r.last === "object"){
+          h += '<div class="tk-last">' + (r.replies > 1 ? esc(String(r.replies)) + ' replies · the last, ' : '')
+            + esc(r.last.by) + ': ' + esc(r.last.text) + '</div>';
+        }
+        if(r.note) h += '<div class="tk-note">Closing note: ' + esc(r.note) + '</div>';
+        if(r.canTab){
+          h += '<div class="ib-free"><button class="ib-btn" data-i="' + i + '" onclick="ticketAct(event)"'
+            + ' title="A new Claude tab in ' + esc(r.to) + ', its prompt taking this ticket: check it and press Return">Open a tab for it</button></div>';
+        }
+        return h + '</div>';
+      }).join("");
+    }
+    function ticketAct(ev){
+      if(ev && ev.stopPropagation) ev.stopPropagation();
+      var t = ev && ev.target && ev.target.closest ? ev.target.closest("[data-i]") : null;
+      if(!t) return;
+      var r = TICKETS.rows[parseInt(t.getAttribute("data-i"), 10)];
+      if(r && typeof r.id === "string") send("ticket-tab", r.id);
+    }
+    function renderTickets(rows){
+      var body = document.getElementById("tk-body"); if(!body) return;
+      TICKETS.rows = rows;
+      body.innerHTML = ticketRowsHtml(rows);
+    }
+    function openTickets(){
+      TICKETS.open = true;
+      document.getElementById("tickets").classList.add("show");
+      renderTickets(TICKETS.latest);
+      send("tickets-open");
+    }
+    function closeTickets(){
+      var el = document.getElementById("tickets");
+      if(!el || !el.classList.contains("show")) return false;
+      el.classList.remove("show"); TICKETS.open = false;
+      return true;
+    }
+    document.addEventListener("keydown", function(e){ if(e.key === "Escape") closeTickets(); });
     // The 📋 Shift report only exists when the audit ledger is on (it's pure
     // ledger aggregation -- nothing to show otherwise), so the refresh tick pokes
     // this on change to show/hide its tab + drawer row entirely. Live with the
@@ -21039,7 +21477,28 @@ local HTML = [[
       var b = talkBadge(it) + riskBadge(it) + prBadgeHtml(it) + bgBadge(it) + notesBadge(it);
       b += pinChipsHtml(it);   // 2026-09-29: pinned links (cc-pin.sh)
       b += leaseBadge(it);     // 2026-09-29: worktree leases (the worktree's own port)
+      b += ticketBadge(it);    // 2026-09-29: cross-repo tickets no session here can take
       return b ? '<span class="badges">'+b+'</span>' : "";
+    }
+    // 2026-09-29: cross-repo tickets (build program unit 29) -- tickets filed for this card's repo that
+    // no session here can take (it.tickets, FX.stepTickets): a count, and "Open a tab for it", which
+    // opens a Claude tab in the repo with the oldest one's `take` typed in. The title is a session's
+    // words: esc(). A click sends only the card's key; Lua reads the ticket from the card.
+    function ticketBadge(it){
+      var tk = it && it.tickets;
+      if(!tk || typeof tk.waiting !== "number" || !(tk.waiting > 0)) return "";
+      var n = Math.floor(tk.waiting);
+      var tip = (n === 1 ? "A ticket" : n + " tickets") + " filed for this repo that no session here can take"
+        + (typeof tk.title === "string" && tk.title ? " — the oldest: " + tk.title : "") + " (☰ → Tickets)";
+      return '<span class="tk-b" title="' + esc(tip) + '">🎫 ' + n + '</span>'
+        + '<button type="button" class="tk-tab" data-nodbl onclick="ticketTabCard(event)"'
+        + ' title="Open a Claude tab in this repo with the ticket&#39;s take typed in">Open a tab for it</button>';
+    }
+    function ticketTabCard(ev){
+      if(ev){ ev.stopPropagation(); }
+      var tile = ev && ev.target && ev.target.closest ? ev.target.closest(".tile") : null;
+      var key = tile ? tile.getAttribute("data-key") : selectedKey;
+      if(key) send("ticket-tab-card", key);
     }
     // 2026-09-29: worktree leases (build program unit 27) -- the port Shepherd leased this session's
     // worktree (it.lease, FX.stepLeases), with its database path in the tooltip. They come from
@@ -22991,6 +23450,12 @@ function FX._refreshBody()
     local okq, errq = pcall(FX.stepSend, list)
     if not okq then print("[cc-dashboard] ❌ cc-send step failed: " .. tostring(errq)) end
   end
+  -- 2026-09-29: cross-repo tickets -- reclaim, offer each open one to its repo's least-busy live
+  -- session, hand each side its news, stamp the cards. After the needs-you stamp, like cc-send.
+  do
+    local okt, errt = pcall(FX.stepTickets, list)
+    if not okt then print("[cc-dashboard] ❌ tickets step failed: " .. tostring(errt)) end
+  end
   -- 2026-09-29: where the time went -- each wait, stall and error ledgered once, when it ends.
   -- After the needs-you stamp: what counts as a wait on Adam is what it says.
   do
@@ -23148,6 +23613,7 @@ function FX._refreshBody()
     -- as asked, but the fleet never silently loses a session you can't find.
     pcall(function() wv:evaluateJavaScript("setHiddenCount(" .. tostring(#hiddenList) .. ")") end)
     pcall(FX.pushInbox)   -- 2026-09-29: the Inbox's rows and ☰'s badge (open questions + held asks)
+    pcall(FX.pushTickets) -- 2026-09-29: the Tickets board's rows (cross-repo tickets)
   end
 
   -- Paint the Stream Deck from the SAME fully-decorated list the panel just got --

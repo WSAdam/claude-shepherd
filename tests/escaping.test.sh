@@ -51,6 +51,14 @@ assert_eq "an Inbox question's options are esc()'d" "yes" "$(has "inboxAct(event
 assert_eq "a requirement's id is esc()'d"          "yes" "$(has 'esc(rq.id)')"
 assert_eq "a requirement's title is esc()'d"       "yes" "$(has 'esc(rq.title)')"
 assert_eq "a requirement's source is esc()'d"      "yes" "$(has 'esc(rq.source)')"
+# cross-repo tickets (2026-09-29): a ticket's title, body, replies, closing note and every name on the
+# board were written by sessions (cc-ticket.sh) -- ticketRowsHtml's `r.` fields; the card badge's
+# tooltip carries the oldest title (tests/tickets-view.test.js runs the real renderer)
+assert_eq "a ticket's title is esc()'d"          "yes" "$(has "<div class=\"ib-q\">' + esc(r.title)")"
+assert_eq "a ticket's body is esc()'d"           "yes" "$(has "'<div class=\"tk-body\">' + esc(r.body)")"
+assert_eq "a ticket's last reply is esc()'d"     "yes" "$(has "esc(r.last.by) + ': ' + esc(r.last.text)")"
+assert_eq "a ticket's closing note is esc()'d"   "yes" "$(has "'<div class=\"tk-note\">Closing note: ' + esc(r.note)")"
+assert_eq "the card's ticket tooltip is esc()'d" "yes" "$(has "'<span class=\"tk-b\" title=\"' + esc(tip)")"
 
 # 2. esc() itself still entity-encodes the HTML metacharacters (not gutted to a no-op)
 assert_eq "esc() encodes &"  "yes" "$(has '.replace(/&/g,"&amp;")')"

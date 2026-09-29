@@ -11982,6 +11982,294 @@ function M.sendTarget(list, target, opts, now)
 end
 end
 
+-- ---- Cross-repo tickets (2026-09-29) ----
+-- Build program unit 29. A session files work for ANOTHER repo's sessions with cc-ticket.sh: one
+-- file per ticket, ~/.claude/cc-tickets/<id>.json (id t<epoch>-<n>). Every writer -- the CLI, the
+-- removers, the SessionStart part and Shepherd -- changes a ticket the same way: it claims the file
+-- by renaming it to <id>.json.claim.<tag> (one rename wins, the others wait their turn), writes the
+-- changed ticket whole into place and drops its claim. Each tick Shepherd offers every open ticket
+-- to the target repo's least-busy live session (ticketCandidates, on unit 30's sendCandidates) and
+-- hands it over through FX.deliverTo; the session takes it with take, reply or close. An offer
+-- nobody took in M.TICKET.lapseSeconds, or a ticket whose holder's session is gone, is reclaimed.
+-- Replies and the close reach the other side the same way, at its next start (_cc_ctx_tickets in
+-- cc-lib.sh), or through a `cc-ticket.sh wait` running in the background. This half is pure.
+-- KEEP THE RULES IN SYNC with cc-ticket.sh's jq (phase, take) and cc-lib.sh's ticket helpers.
+-- (One do-block: its helpers take none of the main chunk's 200 locals.)
+do
+M.TICKET = {
+  lapseSeconds = 45 * 60,        -- an offer nobody took goes back after this
+  tabGraceSeconds = 600,         -- after "Open a tab for it", routing leaves the ticket to that tab
+  routeEverySeconds = 10,        -- how often tickets nobody could take are looked at again
+  titleMax = 200, bodyMax = 2500, replyMax = 2000, noteMax = 1000,
+  closedKeepSeconds = 7 * 86400, -- a closed ticket stays on the board this long
+  maxAge = 30 * 86400,           -- any ticket older than this goes
+  partSeconds = 60,              -- a claim or temp this old is a dead writer's
+  waiterMaxAge = 2 * 3600,       -- a `cc-ticket.sh wait` registered longer ago than this is ignored
+  newsBudget = 3600,             -- bytes of replies one news message carries (it fits the mailbox)
+}
+local function trim(s) return (tostring(s or ""):gsub("^%s+", ""):gsub("%s+$", "")) end
+local function oneLine(s) return trim(tostring(s or ""):gsub("%c+", " ")) end
+local function normPath(p)
+  if type(p) ~= "string" or p:sub(1, 1) ~= "/" or p:find("%c") then return nil end
+  p = p:gsub("/+$", "")
+  return p ~= "" and p or "/"
+end
+local function baseName(p) return type(p) == "string" and p:match("([^/]+)/*$") or nil end
+local function untold(e) return type(e) == "table" and not e.told end
+
+function M.ticketIdOk(id) return type(id) == "string" and id:match("^t%d+%-%d+$") ~= nil end
+-- A file in the tickets folder -> { id, kind = "json" | "claim" | "tmp" }, or nil. KEEP IN SYNC with
+-- cc_ticket_prune in cc-lib.sh.
+function M.ticketFileOf(name)
+  if type(name) ~= "string" then return nil end
+  local id = name:match("^(t%d+%-%d+)%.json$")
+  if id then return { id = id, kind = "json" } end
+  id = name:match("^(t%d+%-%d+)%.json%.claim%.%w+$")
+  if id then return { id = id, kind = "claim" } end
+  id = name:match("^(t%d+%-%d+)%.json%.tmp%.%w+$")
+  if id then return { id = id, kind = "tmp" } end
+  return nil
+end
+-- A ticket read back, or nil + why. Its body must name its own file, a filer and a target root.
+-- Everything optional is normalized: an empty list may have been written as {} or left out.
+function M.parseTicket(raw, id)
+  if not M.ticketIdOk(id) then return nil, "bad id" end
+  if type(raw) ~= "string" then return nil, "unreadable" end
+  local ok, t = pcall(M.json.decode, raw)
+  if not ok or type(t) ~= "table" then return nil, "unreadable" end
+  if t.id ~= id then return nil, "not its own name" end
+  if type(t.title) ~= "string" or not t.title:find("%S") then return nil, "no title" end
+  if type(t.from) ~= "table" or not M.mailboxKeyOk(t.from.key) then return nil, "no filer" end
+  if type(t.to) ~= "table" or not normPath(t.to.root) then return nil, "no target" end
+  t.to.root, t.from.root = normPath(t.to.root), normPath(t.from.root)
+  if type(t.body) ~= "string" then t.body = "" end
+  if type(t.thread) ~= "table" then t.thread = {} end
+  if type(t.passed) ~= "table" then t.passed = {} end
+  if type(t.holder) ~= "table" or not M.mailboxKeyOk(t.holder.key) then t.holder = nil end
+  if type(t.closed) ~= "table" then t.closed = nil end
+  if type(t.waiting) ~= "table" then t.waiting = nil end
+  t.filed = tonumber(t.filed) or 0
+  return t
+end
+-- Where a ticket stands: "closed"; "open" (nobody has it); "offered" (Shepherd handed it to a
+-- session that hasn't taken it yet); "lapsed" (offered, and not taken within lapseSeconds -- as
+-- good as open); "held" (taken, however long ago -- only its holder going frees it).
+function M.ticketPhase(t, now)
+  if type(t) ~= "table" then return nil end
+  if type(t.closed) == "table" then return "closed" end
+  local h = t.holder
+  if type(h) ~= "table" then return "open" end
+  if h.taken == true then return "held" end
+  if (tonumber(now) or os.time()) - (tonumber(h.at) or 0) >= M.TICKET.lapseSeconds then return "lapsed" end
+  return "offered"
+end
+-- The repo a session is in: its main checkout's root, or -- not a git repo -- its folder.
+function M.ticketRootOf(it)
+  if type(it) ~= "table" or it.remote then return nil end
+  return normPath(it.mainRoot) or normPath(it.cwd)
+end
+function M.ticketInRepo(it, root)
+  root = normPath(root)
+  return root ~= nil and M.ticketRootOf(it) == root
+end
+-- How many tickets each session has on its plate now (offered or held): { [key] = n }.
+function M.ticketHeldCounts(tickets, now)
+  local out = {}
+  for _, t in ipairs(tickets or {}) do
+    local ph = M.ticketPhase(t, now)
+    if ph == "offered" or ph == "held" then out[t.holder.key] = (out[t.holder.key] or 0) + 1 end
+  end
+  return out
+end
+-- The sessions ticket t can go to, best first: the target repo's live sessions that can take a
+-- prompt (sendCandidates: never the filer, never one waiting on Adam, ended, tab-less or remote),
+-- never one that let this ticket lapse; the least busy first -- the fewest tickets on its plate
+-- (held) -- then sendRank's order (idle before busy, the most recent first).
+function M.ticketCandidates(list, t, held, now)
+  if type(t) ~= "table" or type(t.to) ~= "table" then return {} end
+  local root = normPath(t.to.root)
+  if not root then return {} end
+  local passed = {}
+  for _, k in ipairs(type(t.passed) == "table" and t.passed or {}) do passed[tostring(k)] = true end
+  local from = type(t.from) == "table" and t.from or {}
+  local cands = M.sendCandidates(list, { callerKey = from.key, callerPid = from.pid },
+    function(it) return not passed[tostring(it.key)] and M.ticketInRepo(it, root) end, now)
+  local order = {}
+  for i, it in ipairs(cands) do order[it] = i end
+  held = type(held) == "table" and held or {}
+  table.sort(cands, function(a, b)
+    local ha, hb = tonumber(held[a.key]) or 0, tonumber(held[b.key]) or 0
+    if ha ~= hb then return ha < hb end
+    return order[a] < order[b]
+  end)
+  return cands
+end
+-- Should ticket t go back? "lapsed" (offered, never taken in time), "gone" (live(key, pid) finds
+-- no session for its holder -- by key, or by pid after a /clear), or nil.
+function M.ticketReclaim(t, now, live)
+  local ph = M.ticketPhase(t, now)
+  if ph == "lapsed" then return "lapsed" end
+  if (ph == "offered" or ph == "held") and type(live) == "function" and not live(t.holder.key, t.holder.pid) then
+    return "gone"
+  end
+  return nil
+end
+-- Put ticket t back, in place: nobody holds it, and its last holder is never offered it again.
+function M.ticketRelease(t)
+  if type(t) ~= "table" or type(t.holder) ~= "table" then return t end
+  local k, seen = tostring(t.holder.key), false
+  t.passed = type(t.passed) == "table" and t.passed or {}
+  for _, p in ipairs(t.passed) do if p == k then seen = true end end
+  if not seen then t.passed[#t.passed + 1] = k end
+  t.holder = nil
+  return t
+end
+local function repoName(side) return type(side) == "table" and (side.name or baseName(side.root)) or "?" end
+local function filerFollowUps(t)
+  local n = 0
+  for _, e in ipairs(t.thread or {}) do if type(e) == "table" and e.by == "filer" then n = n + 1 end end
+  return n
+end
+-- What the session a ticket is offered to is handed: [shepherd]-marked, one message that always
+-- fits the mailbox (the title, body and names are capped).
+function M.ticketOfferText(t, fromName)
+  local who = oneLine(fromName)
+  if who == "" then who = "a session" end
+  who = M.capChars(who, 80)
+  local id, cmd = tostring(t.id), "~/.claude/cc-ticket.sh"
+  local out = M.SHEPHERD_TAG .. " Ticket " .. id .. " from " .. who .. " in " .. M.capChars(repoName(t.from), 80)
+    .. " -- work filed for this repo:\n\n" .. M.capChars(oneLine(t.title), M.TICKET.titleMax)
+  local body = M.capChars(trim(t.body), M.TICKET.bodyMax)
+  if body ~= "" then out = out .. "\n\n" .. body end
+  local n = filerFollowUps(t)
+  if n > 0 then
+    out = out .. "\n\n(" .. n .. (n == 1 and " follow-up" or " follow-ups") .. " from the filer: " .. cmd .. " show " .. id .. ")"
+  end
+  return out .. "\n\nIt is offered to you: take it with " .. cmd .. " take " .. id
+    .. " within 45 minutes, or it goes to another session. Reply as you go with " .. cmd .. " reply " .. id
+    .. ' "..." and close it with ' .. cmd .. " close " .. id .. ' --note "what you did" -- the filer gets both.'
+    .. " If it isn't this repo's to do, close it saying why."
+end
+-- What `role` ("filer" | "holder") hasn't been told yet: the other side's replies and its close.
+-- { entries = { {e, i}... as the thread's own tables }, idx = { thread index... }, close } or nil.
+function M.ticketNews(t, role)
+  if type(t) ~= "table" or (role ~= "filer" and role ~= "holder") then return nil end
+  local other = (role == "filer") and "holder" or "filer"
+  local entries, idx = {}, {}
+  for i, e in ipairs(t.thread or {}) do
+    if untold(e) and e.by == other then entries[#entries + 1] = e; idx[#idx + 1] = i end
+  end
+  local close = (type(t.closed) == "table" and t.closed.by == other and untold(t.closed)) and t.closed or nil
+  if #entries == 0 and not close then return nil end
+  return { entries = entries, idx = idx, close = close }
+end
+-- Mark role's news told, in place, by how it went ("turn-end", "type", "waiting", "start", "wait").
+function M.ticketTell(t, role, how)
+  local news = M.ticketNews(t, role)
+  if not news then return t end
+  for _, e in ipairs(news.entries) do e.told = how or true end
+  if news.close then news.close.told = how or true end
+  return t
+end
+-- The news message: [shepherd]-marked, naming the ticket, as many replies as fit newsBudget (the
+-- rest are pointed at), and the close.
+function M.ticketNewsText(t, news, role, otherName)
+  local id, cmd = tostring(t.id), "~/.claude/cc-ticket.sh"
+  local other = M.capChars(oneLine(otherName), 80)
+  local title = M.capChars(oneLine(t.title), 120)
+  local head
+  if role == "filer" then
+    if other == "" then other = "the session holding it" end
+    head = M.SHEPHERD_TAG .. " News on ticket " .. id .. ' ("' .. title .. '"), which you filed for '
+      .. M.capChars(repoName(t.to), 80) .. ":"
+  else
+    if other == "" then other = "the filer" end
+    head = M.SHEPHERD_TAG .. " News on ticket " .. id .. ' ("' .. title .. '"), which you hold, from its filer:'
+  end
+  local lines, used, left = {}, #head, 0
+  for _, e in ipairs(news and news.entries or {}) do
+    local line = "- " .. other .. " replied: " .. M.capChars(trim(e.text), M.TICKET.replyMax)
+    if used + #line + 1 <= M.TICKET.newsBudget then lines[#lines + 1] = line; used = used + #line + 1
+    else left = left + 1 end
+  end
+  if left > 0 then lines[#lines + 1] = "- (" .. left .. " more: " .. cmd .. " show " .. id .. ")" end
+  local tail
+  if news and news.close then
+    lines[#lines + 1] = "- " .. other .. " closed it: " .. M.capChars(trim(news.close.note), M.TICKET.noteMax)
+    if role == "holder" then tail = "Stop work on it." end
+  else
+    tail = "Reply with " .. cmd .. " reply " .. id .. ' "..." if you need more.'
+  end
+  return head .. "\n" .. table.concat(lines, "\n") .. (tail and ("\n" .. tail) or "")
+end
+-- The prompt a tab opened for a ticket gets (typed, never sent: Adam presses Return). One line.
+function M.ticketTabPrompt(t)
+  local id, cmd = tostring(t.id), "~/.claude/cc-ticket.sh"
+  return "Take ticket " .. id .. ' ("' .. M.capChars(oneLine(t.title), 120) .. '", filed from '
+    .. M.capChars(repoName(t.from), 80) .. "): run " .. cmd .. " take " .. id
+    .. ", do the work it describes, reply as you go with " .. cmd .. " reply " .. id
+    .. ' "...", and close it with ' .. cmd .. " close " .. id .. ' --note "what you did" when you are done.'
+end
+-- Per repo root, the tickets waiting for a session there (waiting: id -> true): { waiting = n,
+-- id = the oldest's, title } -- the card's badge and its "Open a tab for it".
+function M.ticketCardInfo(tickets, waiting)
+  local out = {}
+  for _, t in ipairs(tickets or {}) do
+    if type(waiting) == "table" and waiting[t.id] and t.to and t.to.root then
+      local c = out[t.to.root]
+      if not c then c = { waiting = 0 }; out[t.to.root] = c end
+      c.waiting = c.waiting + 1
+      if not c.id or t.filed < c.filed then c.id, c.title, c.filed = t.id, M.capChars(oneLine(t.title), 120), t.filed end
+    end
+  end
+  return out
+end
+-- The board's rows: waiting (no session can take it) first, then open, offered and held -- the
+-- oldest first -- then closed, the most recently closed first. nameOf(key, pid) -> a session's
+-- name, or nil. Every string is a session's words: the panel escapes each one.
+local PHASE_RANK = { waiting = 1, open = 2, offered = 3, held = 4, closed = 5 }
+function M.ticketRows(tickets, now, waiting, nameOf)
+  now = tonumber(now) or os.time()
+  local function who(key, pid, fallback)
+    local n = type(nameOf) == "function" and nameOf(key, pid) or nil
+    return M.capChars(oneLine(n or fallback or key or "?"), 80)
+  end
+  local rows = {}
+  for _, t in ipairs(tickets or {}) do
+    local ph = M.ticketPhase(t, now)
+    local phase = ph
+    if ph == "open" or ph == "lapsed" then phase = (type(waiting) == "table" and waiting[t.id]) and "waiting" or "open" end
+    local tabbing = tonumber(t.tabAt) and now - tonumber(t.tabAt) < M.TICKET.tabGraceSeconds or false
+    local h, last = t.holder, nil
+    local e = t.thread[#t.thread]
+    if type(e) == "table" then
+      last = { by = (e.by == "filer") and who(t.from.key, t.from.pid, t.from.name)
+                                     or who(e.key, nil, h and h.name),
+               text = M.capChars(oneLine(e.text), 200) }
+    end
+    rows[#rows + 1] = {
+      id = t.id, title = M.capChars(oneLine(t.title), M.TICKET.titleMax), body = M.capChars(trim(t.body), 400),
+      from = who(t.from.key, t.from.pid, t.from.name), fromRepo = M.capChars(repoName(t.from), 80),
+      to = M.capChars(repoName(t.to), 80), toRoot = t.to.root, phase = phase, filed = t.filed,
+      holder = (phase == "offered" or phase == "held" or phase == "closed") and h and who(h.key, h.pid, h.name) or nil,
+      route = (phase == "offered") and h and type(h.route) == "string" and h.route or nil,
+      replies = #t.thread, last = last, tabbing = tabbing or nil,
+      note = t.closed and M.capChars(trim(t.closed.note), 300) or nil,
+      closedAt = t.closed and tonumber(t.closed.at) or nil,
+      canTab = (phase == "waiting" or phase == "open") and not tabbing,
+    }
+  end
+  table.sort(rows, function(a, b)
+    local ra, rb = PHASE_RANK[a.phase] or 9, PHASE_RANK[b.phase] or 9
+    if ra ~= rb then return ra < rb end
+    if a.phase == "closed" and (a.closedAt or 0) ~= (b.closedAt or 0) then return (a.closedAt or 0) > (b.closedAt or 0) end
+    if a.filed ~= b.filed then return a.filed < b.filed end
+    return a.id < b.id
+  end)
+  return rows
+end
+end
+
 -- ---- Resume at the usage limit's reset (2026-09-29) ----
 -- Build program unit 13. A turn stopped by a usage limit fires StopFailure (error "rate_limit"):
 -- cc-resume.sh arms ~/.claude/cc-resume/<key>.json and waits. Shepherd plans it here -- when the
@@ -18113,6 +18401,9 @@ M.FEATURES = {
   { key = "send", cat = "Control", new = true, title = "cc-send",
     what = "~/.claude/cc-send.sh <session|project> \"prompt\" [--wait] hands a live session a prompt from any shell. A session is named by its key or name; a project by its repo root or name, and gets its best live session -- an idle one before a busy one, never one waiting on you, never the caller. It goes through the session mailbox, marked [shepherd] and ledgered: a busy session gets it at its turn end, an idle one typed where typing is safe, else it waits. --wait prints the reply on stdout and everything else on stderr; slash commands are refused.",
     why = "A script, a cron job or another session can hand work to a live session and use its answer, without anyone switching tabs." },
+  { key = "tickets", cat = "Control", new = true, title = "Cross-repo tickets",
+    what = "A session files work for another repo's sessions with ~/.claude/cc-ticket.sh file --repo <root|name> --title T --body B. Shepherd offers it to that repo's least-busy live session (never one waiting on you) through its mailbox; the session takes it within 45 minutes or it goes to another, and a ticket whose session ends goes back too. Replies and the closing note -- closing always needs one -- come back to the filer the same way, at its next start, or from cc-ticket.sh wait in the background. A ticket no session can take waits on that repo's card and on ☰ → Tickets, with Open a tab for it.",
+    why = "One session can ask another repo's sessions for work it needs and get the answer back, without you carrying the message between tabs." },
   { key = "sharedwin", cat = "Control", new = true, title = "Shared-window guard",
     what = "When several Claude sessions run as tabs in one VS Code window, Shepherd won't type into any of them — no nudge, queue feed or /clear — and says why. Close goes through the Shepherd tab bridge, which closes just that session's tab. Jump and hands-free approvals still work. keystrokes.refuseSharedWindow switches it off.",
     why = "Shepherd types into a window, not a tab, so a message meant for one tab could land in another." },

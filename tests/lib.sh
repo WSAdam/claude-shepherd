@@ -39,6 +39,10 @@ export CC_DECIDE_DIR="${CC_DECIDE_DIR:-$CC_TEST_ISOLATION/cc-decide}"
 # 2026-09-29: a SessionEnd (cc_remove) drops the session's cc-send requests and prunes stale ones in
 # ~/.claude/cc-send; a suite's fake session end must never touch the real ones.
 export CC_SEND_DIR="${CC_SEND_DIR:-$CC_TEST_ISOLATION/cc-send}"
+# 2026-09-29: SessionStart hands over (and marks told) the news on tickets in ~/.claude/cc-tickets, and
+# a SessionEnd (cc_remove) puts back the tickets a session held; a suite's fake session must never
+# touch the real ones.
+export CC_TICKETS_DIR="${CC_TICKETS_DIR:-$CC_TEST_ISOLATION/cc-tickets}"
 
 # sysbin_without <outdir> <tool>... - mirror /usr/bin + /bin into <outdir> as symlinks,
 # leaving out the named tools, and echo <outdir>. Use it in place of a literal

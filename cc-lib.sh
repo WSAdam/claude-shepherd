@@ -356,6 +356,137 @@ cc_send_prune() {
   done
   return 0
 }
+# Cross-repo tickets (build program unit 29, 2026-09-29): cc-ticket.sh files work for ANOTHER repo's
+# sessions, one file per ticket, <id>.json (id t<epoch>-<n>), changed only through cc_ticket_update.
+# Default MUST match cc-ticket.sh's (it sources this file) and the dashboard's FX.TICKETS_DIR.
+CC_TICKETS_DIR="${CC_TICKETS_DIR:-${HOME}/.claude/cc-tickets}"
+CC_TICKET_LAPSE=2700          # core.TICKET.lapseSeconds: an offer nobody took goes back after 45 minutes
+CC_TICKET_KEEP=604800         # core.TICKET.closedKeepSeconds: a closed ticket stays a week
+CC_TICKET_MAX_AGE=2592000     # core.TICKET.maxAge: any ticket goes after 30 days
+# The rules every shell reader shares, as jq definitions. KEEP IN SYNC with core.ticketPhase,
+# core.ticketRelease, core.ticketNews and core.ticketTell (cc-core.lua).
+#   norm      an empty list may have been written as {} or left out
+#   phase     closed | open | offered | lapsed (offered, not taken in time: as good as open) | held
+#   release   nobody holds it, and its last holder is never offered it again
+#   news/tell what $role (filer | holder) hasn't been told: the other side's replies and its close
+CC_TICKET_JQ='
+def norm: .thread = (if (.thread | type) == "array" then .thread else [] end)
+  | .passed = (if (.passed | type) == "array" then .passed else [] end)
+  | .holder = (if (.holder | type) == "object" then .holder else null end)
+  | .closed = (if (.closed | type) == "object" then .closed else null end);
+def phase($now): if .closed != null then "closed" elif .holder == null then "open"
+  elif .holder.taken == true then "held"
+  elif ($now - (.holder.at // 0)) >= '"$CC_TICKET_LAPSE"' then "lapsed" else "offered" end;
+def release: if .holder == null then . else .holder.key as $k
+  | .passed |= (if any(.[]; . == $k) then . else . + [$k] end) | .holder = null end;
+def untold: (.told // false) == false;
+def other($role): if $role == "filer" then "holder" else "filer" end;
+def news($role): other($role) as $o
+  | { entries: [ .thread[] | select(.by == $o and untold) ],
+      close: (if .closed != null and .closed.by == $o and (.closed | untold) then .closed else null end) };
+def hasnews($role): news($role) | (.entries | length) > 0 or .close != null;
+def tell($role; $how): other($role) as $o
+  | .thread |= map(if .by == $o and untold then .told = $how else . end)
+  | if .closed != null and .closed.by == $o and (.closed | untold) then .closed.told = $how else . end;
+def oneline: tostring | gsub("[[:cntrl:]]+"; " ");
+def newstext($role): news($role) as $n
+  | (if $role == "filer" then (.holder.name // .holder.key // "the session holding it") else "the filer" end) as $who
+  | [ (if $role == "filer"
+       then "Ticket \(.id) (\"\(.title | oneline)\"), which you filed for \(.to.name // (.to.root | split("/") | last)):"
+       else "Ticket \(.id) (\"\(.title | oneline)\"), which you hold -- from its filer:" end) ]
+    + [ $n.entries[] | "- \($who) replied: \(.text | oneline)" ]
+    + (if $n.close != null then [ "- \($who) closed it: \($n.close.note | oneline)" ] else [] end)
+  | join("\n");
+'
+
+# Change ticket $1 the way every writer does (FX.ticketUpdate in the dashboard): claim its file by
+# renaming it to <id>.json.claim.<pid> -- one writer wins; the others wait their turn, up to ~5s --
+# run the jq filter $2 on it (after CC_TICKET_JQ's definitions and norm; any further arguments go to
+# jq, e.g. --arg me k), write what it gives back whole into place, and drop the claim. The filter
+# gives an object {ticket: <the changed ticket, or null to leave it as it was>, ...}, printed on
+# stdout. Returns 0 written, 1 left as it was, 2 no such ticket, 3 couldn't claim it in time.
+cc_ticket_update() { # $1 id, $2 jq filter, [jq args...]
+  local id="$1" filter="$2" n=0 out f claim tmp
+  shift 2
+  [[ "$id" =~ ^t[0-9]+-[0-9]+$ ]] || return 2
+  cc_have_jq || return 3
+  f="$CC_TICKETS_DIR/$id.json" claim="$CC_TICKETS_DIR/$id.json.claim.$$" tmp="$CC_TICKETS_DIR/$id.json.tmp.$$"
+  while ! mv "$f" "$claim" 2>/dev/null; do
+    [ -e "$f" ] || compgen -G "$CC_TICKETS_DIR/$id.json.claim.*" > /dev/null || return 2
+    n=$((n + 1))
+    [ "$n" -le 100 ] || return 3
+    sleep 0.05
+  done
+  out="$(jq -c "$@" "$CC_TICKET_JQ norm | ($filter)" "$claim" 2>/dev/null)"
+  if [ -n "$out" ] && [ "$(printf '%s' "$out" | jq -r '.ticket != null' 2>/dev/null)" = true ] \
+     && printf '%s' "$out" | jq -c '.ticket' > "$tmp" 2>/dev/null && [ -s "$tmp" ] && mv "$tmp" "$f"; then
+    rm -f "$claim"
+    printf '%s\n' "$out"
+    return 0
+  fi
+  rm -f "$tmp" 2>/dev/null
+  mv "$claim" "$f"
+  [ -z "$out" ] || printf '%s\n' "$out"
+  return 1
+}
+
+# SessionEnd's share (KEEP IN SYNC with FX.ticketRelease): the tickets session $1 had on its plate --
+# offered to it or taken -- go back, and it is never offered them again. The tickets it FILED stay:
+# their news waits for its next start.
+cc_ticket_release() { # $1 key
+  local key="$1" f id files
+  case "$key" in ''|.|..|*/*) return 0 ;; esac
+  [ -d "$CC_TICKETS_DIR" ] && cc_have_jq || return 0
+  # only the files that name the key are read (a SessionEnd shouldn't jq every ticket)
+  files="$(grep -lF -- "\"$key\"" "$CC_TICKETS_DIR"/t*.json 2>/dev/null)"
+  while IFS= read -r f; do
+    [ -f "$f" ] || continue
+    [ "$(jq -r --arg k "$key" "$CC_TICKET_JQ"' norm | .holder != null and .holder.key == $k and .closed == null' "$f" 2>/dev/null)" = true ] || continue
+    id="${f##*/}"; id="${id%.json}"
+    if cc_ticket_update "$id" 'if .holder != null and .holder.key == $k and .closed == null then {ticket: release} else {ticket: null} end' \
+         --arg k "$key" > /dev/null; then
+      echo "[cc-lib] ⚠️ ticket $id went back -- its holder $key ended" >&2
+    fi
+  done <<EOF
+$files
+EOF
+  return 0
+}
+
+# Every session's (KEEP IN SYNC with FX.ticketPrune): a ticket closed over a week ago or filed over
+# 30 days ago; a writer's claim or temp over a minute old -- a claim goes back into place when its
+# ticket isn't there (the writer died holding it), else it goes. (No process substitution anywhere
+# in this file: the tests source it with sh, where it is a syntax error that ends the file.)
+cc_ticket_prune() {
+  [ -d "$CC_TICKETS_DIR" ] && cc_have_jq || return 0
+  local now f b id files
+  now="$(cc_now)"
+  # Only a file untouched for a week can be due: a ticket's file is written when it is closed.
+  files="$(find "$CC_TICKETS_DIR" -maxdepth 1 -type f -name 't*.json' -mtime +7 2>/dev/null)"
+  while IFS= read -r f; do
+    [ -f "$f" ] || continue
+    [ "$(jq -r --argjson now "$now" --argjson keep "$CC_TICKET_KEEP" --argjson max "$CC_TICKET_MAX_AGE" \
+        '((.closed | type) == "object" and ($now - (.closed.at // $now)) > $keep)
+         or (((.filed // 0) | type) == "number" and (.filed // 0) > 0 and ($now - .filed) > $max)' "$f" 2>/dev/null)" = true ] \
+      && rm -f "$f"
+  done <<EOF
+$files
+EOF
+  files="$(find "$CC_TICKETS_DIR" -maxdepth 1 -type f \( -name 't*.json.claim.*' -o -name 't*.json.tmp.*' \) -mmin +1 2>/dev/null)"
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    b="${f##*/}"
+    case "$b" in
+      t*.json.claim.*)
+        id="${b%%.json.claim.*}"
+        if [ -e "$CC_TICKETS_DIR/$id.json" ]; then rm -f "$f"; else mv "$f" "$CC_TICKETS_DIR/$id.json"; fi ;;
+      *) rm -f "$f" ;;
+    esac
+  done <<EOF
+$files
+EOF
+  return 0
+}
 # Batch driving (cc-fleet.sh): every file of a batch is named <id>.<...> in this one folder.
 # Default MUST match cc-fleet.sh's FLEET_DIR and the dashboard's FX.FLEET_DIR.
 CC_FLEET_DIR="${CC_FLEET_DIR:-${HOME}/.claude/cc-fleet}"
@@ -477,6 +608,8 @@ cc_decide_prune() {
 # cc-decide/ (2026-09-29): the session's open questions go; an answered one waits for its next start.
 # cc-send/ (2026-09-29) is keyed by request, each named for the session that made it: cc_send_prune
 # drops that session's, and any past CC_SEND_KEEP_SECONDS.
+# cc-tickets/ (2026-09-29) is keyed by ticket: cc_ticket_release frees the ones this session held
+# (the ones it filed stay for its next start), cc_ticket_prune drops old and stale files.
 # KEEP THE FILE SET IN SYNC with FX.removeStatus in claude-dashboard.lua.
 cc_remove() {
   rm -f "$(cc_file "$1")" "$(cc_file "$1")".tmp.* "$(cc_decision_file "$1")" \
@@ -508,6 +641,9 @@ cc_remove() {
   # The decisions inbox: the session's open questions, then every session's stale files (2026-09-29).
   cc_decide_remove "$1"
   cc_decide_prune
+  # Cross-repo tickets: the ones the session had on its plate go back, then every stale file (2026-09-29).
+  cc_ticket_release "$1"
+  cc_ticket_prune
   return 0
 }
 
@@ -1535,7 +1671,8 @@ CC_NOTES_DIR="${CC_NOTES_DIR:-${HOME}/.claude/cc-notes}"
 # 2026-09-29: "lease" (worktree leases, unit 27) is short and comes before the long parts, so a big
 # handoff note or mailbox never crowds out which port is the session's own.
 # 2026-09-29: "decisions" (the decisions inbox, unit 28) -- Adam's late answers -- is short too.
-CC_CONTEXT_PARTS="notes lease decisions handoff mailbox"
+# 2026-09-29: "tickets" (cross-repo tickets, unit 29) -- news on tickets it filed or holds -- is short too.
+CC_CONTEXT_PARTS="notes lease decisions tickets handoff mailbox"
 CC_CONTEXT_MAX=8000
 CC_PENDING_MAX_AGE=3600   # a respawn's note nobody took within the hour is stale
 
@@ -1912,6 +2049,49 @@ EOF
   else printf 'Adam answered %s questions this session asked with cc-decide.sh and went ahead on with their defaults:\n' "$n"; fi
   printf '%s' "$out"
   printf 'If an answer changes something you did, adjust it; otherwise carry on.\n'
+}
+
+# The tickets part of cc_session_context (cross-repo tickets, build program unit 29, 2026-09-29):
+# what this session hasn't been told about the tickets it filed (the holder's replies and close) or
+# holds (the filer's), when it wasn't live to be handed them -- a live session gets them through its
+# mailbox (FX.stepTickets). Each ticket's news is marked told under the ticket's claim
+# (cc_ticket_update), so it is shown once, whoever races for it. As many as fit in
+# CC_TICKET_PART_MAX -- measured before anything is claimed; the rest wait for the next start.
+CC_TICKET_PART_MAX=3000
+_cc_ctx_tickets() { # $1 source, $2 key
+  local key="$2" f id role text res out="" n=0 files
+  case "$key" in ''|.|..|*/*) return 0 ;; esac
+  [ -d "$CC_TICKETS_DIR" ] && cc_have_jq || return 0
+  # only the files that name the key are read (a SessionStart shouldn't jq every ticket)
+  files="$(grep -lF -- "\"$key\"" "$CC_TICKETS_DIR"/t*.json 2>/dev/null | sort)"
+  while IFS= read -r f; do
+    [ -f "$f" ] || continue
+    role="$(jq -r --arg k "$key" "$CC_TICKET_JQ"' norm
+      | if .from.key == $k then "filer" elif .holder != null and .holder.key == $k then "holder" else empty end' "$f" 2>/dev/null)"
+    [ -n "$role" ] || continue
+    text="$(jq -r --arg r "$role" "$CC_TICKET_JQ"' norm | if hasnews($r) then newstext($r) else empty end' "$f" 2>/dev/null)"
+    [ -n "$text" ] || continue
+    [ $(( ${#out} + ${#text} + 2 )) -le "$CC_TICKET_PART_MAX" ] || break
+    id="${f##*/}"; id="${id%.json}"
+    res="$(cc_ticket_update "$id" 'if hasnews($r) then {ticket: tell($r; "start"), text: newstext($r)} else {ticket: null} end' \
+      --arg r "$role")" || continue   # another start (or Shepherd) handed it over first
+    text="$(printf '%s' "$res" | jq -r '.text // empty' 2>/dev/null)"
+    [ -n "$text" ] || continue
+    if cc_ledger_enabled; then
+      cc_ledger_append "$(jq -nc --arg key "$key" --arg id "$id" --arg r "$role" '{type:"ticket_news", key:$key, ticket:$id, role:$r, route:"start"}')"
+    fi
+    echo "[cc-lib] ✅ handed session $key the news on ticket $id" >&2
+    [ -z "$out" ] || out="$out"$'\n\n'
+    out="$out$text"
+    n=$((n + 1))
+  done <<EOF
+$files
+EOF
+  [ -n "$out" ] || return 0
+  if [ "$n" -eq 1 ]; then printf 'News on a cross-repo ticket (cc-ticket.sh) came while this session was away:\n\n'
+  else printf 'News on %s cross-repo tickets (cc-ticket.sh) came while this session was away:\n\n' "$n"; fi
+  printf '%s\n\n' "$out"
+  printf 'Answer with ~/.claude/cc-ticket.sh reply <id> "..." (close one you hold with --note); ~/.claude/cc-ticket.sh show <id> prints a whole ticket.\n'
 }
 
 # ---- Worktree fence (build program unit 7, 2026-09-28) --------------------------------------

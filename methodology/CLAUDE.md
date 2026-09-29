@@ -119,6 +119,13 @@ parallel.
   Inbox, and if my answer differs it reaches you later (at a turn end, or your next start). Add
   `--blocking`, run in the background, only when going ahead on the default would be costly to
   undo. A decision with no safe default is still asked with AskUserQuestion.
+- **Work for another repo goes in a ticket.** When you need something done in ANOTHER repo (a fix,
+  a release, an answer only its sessions can give), file it with `~/.claude/cc-ticket.sh file
+  --repo <its root or name> --title "…" --body "…"` instead of asking me to relay it: Shepherd hands
+  it to a live session there, and the replies and the closing note come back to you (at a turn end,
+  your next start, or from `cc-ticket.sh wait <id>` run in the background). When a ticket reaches
+  you, take it (`cc-ticket.sh take <id>`), reply as you go, and close it with `--note` saying what
+  you did -- or why it isn't yours to do.
 - **Subagents.** Worktree-isolated subagents (e.g. an implement fleet) start from
   the current HEAD (`worktree.baseRef: "head"` in settings), not from the working tree —
   commit before spawning them.

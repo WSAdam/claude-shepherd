@@ -430,6 +430,15 @@ echo ""
 echo "== node: the merge receipt's text -- source, the requester's words, tests by layer, evidence, known issues (behavioral, runs the shipped receiptText) =="
 node "$DIR/receipt-view.test.js" || fail=1
 echo ""
+echo "== lua: cross-repo tickets -- offered to the target repo's least-busy live session through the mailbox, reclaimed after 45 min or when its holder is gone, news to each side, the card and the board (stubbed hs) =="
+HOME="$(mktemp -d)" lua "$DIR/ticket.test.lua" || fail=1
+echo ""
+echo "== bash: cc-ticket.sh -- file/take/reply/close/wait, the claim race, the 45-minute reclaim (injected clock), SessionEnd and SessionStart =="
+bash "$DIR/ticket.test.sh" || fail=1
+echo ""
+echo "== node: the Tickets board and the card's badge, every session word escaped, a click sends only the id or the card's key (behavioral, runs the shipped ticketRowsHtml) =="
+node "$DIR/tickets-view.test.js" || fail=1
+echo ""
 
 if [ "$fail" -eq 0 ]; then
   echo "✅ ALL GREEN"

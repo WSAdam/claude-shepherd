@@ -42,6 +42,7 @@ if (!(escSrc && titleSrc && badgeSrc && badgesSrc)) {
 const lib = new Function(
   "function talkBadge(){ return ''; } function riskBadge(){ return ''; } function prBadgeHtml(){ return ''; }\n" +
   "function bgBadge(){ return ''; } function notesBadge(){ return ''; } function pinChipsHtml(){ return ''; }\n" +
+  "function ticketBadge(){ return ''; }\n" +
   escSrc + "\n" + titleSrc + "\n" + badgeSrc + "\n" + badgesSrc +
   "\nreturn { leaseBadge, badgesHtml };")();
 
