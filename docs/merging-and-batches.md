@@ -63,6 +63,8 @@ session that is working. Heads-ups include:
 - a question whose session exited,
 - a merge request whose test gate is still running (nothing to press yet; it turns red on its own
   the moment the gate finishes),
+- a batch unit's merge while [the checker](#the-checker-a-read-only-review-of-every-merge-request)
+  reviews it (it merges on your grant on a pass, and turns red on a fail),
 - a merged unit whose post-merge gate went red (main is red, and its worktree is already gone),
 - a connection blip the session is still retrying.
 
@@ -136,6 +138,63 @@ cut at 200. It reads English with a small, conservative matcher (a verb of addin
 "test"/"fixture"; a negated clause is skipped; "tests green" is the gate's business, not a claim).
 So it **warns in the review and holds nothing**: Merge stays clickable, and a batch unit's
 delegated merge goes through with a flag up.
+
+### The checker: a read-only review of every merge request
+
+The gate proves the suite is green, and the claim check reads the summary. The checker reads the
+**code**. With `verify.onMerge` on, every merge request gets a background review in two steps:
+
+1. **Red flags, no model.** Shepherd scans the diff itself and lists what it finds:
+   - conflict markers the diff adds;
+   - a test file the diff deletes, or lines it removes from a test that stays (a test file that
+     only gains lines is normal);
+   - a new `.only`, `.skip`, `xit`, `@Disabled`, `ignore: true` and the like in a test;
+   - stubs in code: `not implemented`, `todo!()`, a `TODO`/`FIXME` comment (never in Markdown).
+
+   The flags show in the review straight away, and still show if the model never answers.
+2. **A read-only review.** A headless `claude -p` runs in the unit's worktree with the flags in
+   hand. It uses Sonnet with no hooks, no MCP servers and no saved session, and it can only read:
+   Read, Grep, Glob and read-only git (`diff`, `log`, `show`, `blame` and so on). Anything else is
+   refused, not asked. It answers **pass** or **fail** with a one-line summary and its findings
+   (file, line, severity). The session's own summary goes into its prompt as data it is told not to
+   follow.
+
+What happens next depends on the verdict:
+
+- **Pass:** a batch unit's merge goes through on your grant, as before.
+- **Fail:** a batch unit's merge **waits for your click**. The card says *the checker failed it, so
+  it waits for your click*, it reads **Needs you**, and you get one alert.
+- **Couldn't run** (no answer, a timeout, the turn or budget cap, a Hammerspoon reload mid-run):
+  nothing was proven either way, so the checker tries once more a minute later. If it fails to run
+  a second time, the merge waits for your click.
+- **Your own Merge click never looks at it.** A unit the checker failed still merges when you say
+  so.
+
+While the review runs, a batch unit's card says *the checker is reviewing it before it merges on
+your grant*. That's a heads-up, not **Needs you**: nothing is waiting on you yet.
+
+There's one review per request per commit: a new commit in the worktree gets a new review, and the
+verdict is kept in `~/.claude/cc-merge/<key>.checker.json`, so a reload doesn't run it again.
+**Only one review runs per repo at a time**, first asked, first reviewed. Reviews in different
+repos run side by side, and they never share a lane with the test gate.
+
+**🔎 Verify** in the detail panel runs the same review for any session, whenever you like:
+
+- A session with a merge request is reviewed on its request's commit, so a pass counts for that
+  merge.
+- Any other session is reviewed on its checkout against where it left `main` (or `master`),
+  uncommitted work included. Untracked files are listed for the model to read, since `git diff`
+  doesn't show them.
+
+The verdict shows under the buttons, and you get a toast when it's in.
+
+```json
+"verify": { "onMerge": true, "maxBudgetUsd": 1, "timeoutSeconds": 600 }
+```
+
+`onMerge` is off unless set; a fresh install ships it on. `maxBudgetUsd` caps each run's spend
+(default $1), and `timeoutSeconds` caps how long it may take (default 600). Verify works whatever
+`onMerge` says.
 
 ### Merge, Not yet
 
@@ -213,7 +272,9 @@ approval from you per batch**:
    still leads).
 4. Each unit finishes with the ready-to-merge flow above. With merge permission, Shepherd approves a
    unit's merge on the batch's grant **only** for that unit's own session on its own branch, once
-   its own git check passes, one merge per repo at a time. Without it, units wait for your Merge.
+   its own git check passes (and, with `verify.onMerge` on, once
+   [the checker](#the-checker-a-read-only-review-of-every-merge-request) passes it), one merge per
+   repo at a time. Without it, units wait for your Merge.
    Tabs close after their merges as usual.
 5. **Stop batch** (on the driver's card) or `cc-fleet.sh stop --batch <id>` ends it at once: no more tabs, no
    more merges on its grant. A batch also **ends itself** once every unit has merged or blocked (or

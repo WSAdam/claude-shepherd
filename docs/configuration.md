@@ -39,7 +39,7 @@ form-managed block is dropped on Save. Its tabs:
   [Providers and integrations](providers-and-integrations.md)).
 
 File-only switches include, among others: `rules.enabled`, `schedules.enabled` and
-`schedules.maxConcurrent`, `hotkeys`, `voice`, `automodel.*`, `pricing.*`, `merge.*`, `fleet.enabled`,
+`schedules.maxConcurrent`, `hotkeys`, `voice`, `automodel.*`, `pricing.*`, `merge.*`, `verify.*`, `fleet.enabled`,
 `commits.*`, `usage.limitAlerts.*`, `ask.waitSeconds`, `tabless.autoEndMinutes`,
 `escalation.hung`, `search.*`, `worklist.*`, `decisions.*`, `notifications.days`,
 `templates.sourceDir`, `context.autoCompactFraction`, and the `keystrokes`, `tabBridge`, `stacks`
@@ -55,7 +55,7 @@ The panel re-reads the file within about a second (except `hotkeys`, which need 
 | Section | What it controls | Reference |
 |---------|------------------|-----------|
 | `gate`, `policies`, `ask` | Gated tools, the worktree fence, auto-allow/deny, always-ask commands, bundles, Autopilot, held questions | [Approvals and policies](approvals-and-policies.md) |
-| `merge`, `fleet`, `tabBridge` | Ready to merge, merge gates, batches, the tab bridge | [Merging and batches](merging-and-batches.md) |
+| `merge`, `verify`, `fleet`, `tabBridge` | Ready to merge, merge gates, the merge checker, batches, the tab bridge | [Merging and batches](merging-and-batches.md) |
 | `queue`, `templates`, `automodel` | Task queue, routing, templates, model auto-routing | [Automation](automation.md) |
 | `respawn`, `autoContinue`, `drain`, `prune`, `cleanup`, `tabless` | Recovery and cleanup | [Automation](automation.md), [Controls](controls.md#sessions-with-no-tab) |
 | `escalation`, `notifications`, `focus`, `summary`, `rules`, `schedules` | Nags, banners, focus pop, rules, routines | [Automation](automation.md) |

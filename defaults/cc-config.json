@@ -120,5 +120,10 @@
       "autoDeny": []
     },
     "approveRepeats": false
+  },
+  "verify": {
+    "onMerge": true,
+    "maxBudgetUsd": 1,
+    "timeoutSeconds": 600
   }
 }

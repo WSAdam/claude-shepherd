@@ -57,6 +57,9 @@ local function plant()
   -- the one that started this: cc-merge.sh parks a foreign answer under its OWN shape
   write(MERGE .. "/" .. KEY .. ".decision.parked.4242", '{"verdict":"merge","nonce":"other"}')
   write(MERGE .. "/" .. KEY .. ".decision.tmp.5150", '{"verdict":')
+  -- 2026-09-29: the merge checker's verdict (build program unit 17), and its torn atomic write
+  write(MERGE .. "/" .. KEY .. ".checker.json", '{"v":1,"verdict":"pass"}')
+  write(MERGE .. "/" .. KEY .. ".checker.json.tmp.5150", '{"v":')
   write(ASK .. "/" .. KEY .. ".answer", '{"answers":{}}')
   write(ASK .. "/" .. KEY .. ".answer.claim.4242", '{"answers":{}}')
   write(ASK .. "/" .. KEY .. ".answer.tmp.5150", '{"answers"')
@@ -82,6 +85,8 @@ local TARGETS = {
   { "a claimed merge answer",          MERGE .. "/" .. KEY .. ".decision.claim.4242" },
   { "a PARKED merge answer",           MERGE .. "/" .. KEY .. ".decision.parked.4242" },
   { "a torn merge answer",             MERGE .. "/" .. KEY .. ".decision.tmp.5150" },
+  { "the checker's verdict",           MERGE .. "/" .. KEY .. ".checker.json" },
+  { "a torn checker verdict",          MERGE .. "/" .. KEY .. ".checker.json.tmp.5150" },
   { "the answer to a held question",   ASK .. "/" .. KEY .. ".answer" },
   { "a claimed answer",                ASK .. "/" .. KEY .. ".answer.claim.4242" },
   { "a torn answer",                   ASK .. "/" .. KEY .. ".answer.tmp.5150" },
@@ -95,6 +100,7 @@ local TARGETS = {
 -- A second session's files must SURVIVE both reaps -- a prefix sweep must not eat the fleet.
 local OTHER = {
   STATUS .. "/k90.json", MERGE .. "/k90.decision.parked.4242", ASK .. "/k90.answer.tmp.5150",
+  MERGE .. "/k90.checker.json",
   TALK .. "/k90", INBOX .. "/k90/1790000000-000001-ab12.msg",
 }
 local function plantOther() for _, p in ipairs(OTHER) do write(p, "{}") end end

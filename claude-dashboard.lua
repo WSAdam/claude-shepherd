@@ -3102,10 +3102,15 @@ function FX.removeStatus(key)
   -- shape, outside .decision.claim.*, so it used to survive the session it belonged to
   -- (2026-09-19). .decision.tmp.* is FX.writeFileAtomic's temp, leaked by a crash mid-rename.
   local mparked, mtmp = key .. ".decision.parked.", key .. ".decision.tmp."
+  -- 2026-09-29: the merge checker's verdict (FX.checkerSave) and a torn write of it
+  os.remove(mergeDir .. "/" .. key .. ".checker.json")
+  local ctmp = key .. ".checker.json.tmp."
+  if FX._checkers then FX._checkers[key] = nil end
   for _, fn in ipairs(FX.readDir(mergeDir)) do
     if fn:sub(1, #mclaim) == mclaim then os.remove(mergeDir .. "/" .. fn) end
     if fn:sub(1, #mparked) == mparked then os.remove(mergeDir .. "/" .. fn) end
     if fn:sub(1, #mtmp) == mtmp then os.remove(mergeDir .. "/" .. fn) end
+    if fn:sub(1, #ctmp) == ctmp then os.remove(mergeDir .. "/" .. fn) end
   end
   -- Adam's answer to a held question (cc_remove drops the same files)
   os.remove(FX.ASK_DIR .. "/" .. key .. ".answer")
@@ -4453,6 +4458,7 @@ function FX.mergeDismiss(key)
   end
   os.remove(FX.MERGE_DIR .. "/" .. key .. ".json")
   os.remove(FX.MERGE_DIR .. "/" .. key .. ".decision")
+  os.remove(FX.checkerFile(key)); FX._checkers[key] = nil   -- its checker verdict goes with it
   print("[cc-dashboard] 🧹 dismissed the finished merge of " .. tostring(r.branch) .. " (" .. tostring(r.phase) .. ")")
   return true
 end
@@ -4480,16 +4486,37 @@ function FX.annotateMerges(list, cfg, bannerOn)
   FX._mergeReqs, FX._mergeItems, FX._mergeWaitPids = reqs, items, {}
   FX.mergeGatePrune(reqs)
   FX.mergeGatePump()   -- a gate queued behind another in its repo starts as soon as the lane frees
+  -- 2026-09-29: the merge checker reviews every request (verify.onMerge); a delegated merge
+  -- needs its pass. FX._checkerHolds says, per request, why one is waiting or held this tick.
+  local checkOn = core.config(cfg, "verify.onMerge", false) == true
+  FX._checkerHolds = {}
+  -- The order the requests were made in (then by key), so a repo's reviews queue first-asked,
+  -- first-reviewed rather than in hash order.
+  local order = {}
+  for key in pairs(reqs) do order[#order + 1] = key end
+  table.sort(order, function(x, y)
+    local ax, ay = tonumber(reqs[x].at) or 0, tonumber(reqs[y].at) or 0
+    if ax ~= ay then return ax < ay end
+    return x < y
+  end)
   -- Batch driving (2026-09-11): a unit's OWN ready request is approved on its batch's grant
   -- (only when Adam granted merges); anything else waits for his click as usual.
-  for key, r in pairs(reqs) do
+  for _, key in ipairs(order) do
+    local r = reqs[key]
     if r.phase == "requested" and not FX._mergeApproved[key] and not FX._mergeSent[key] then
       local b = FX.fleetDelegates(r)
       -- the test gate gates a delegated merge exactly as it gates Adam's Merge button
       local f = b and FX.mergeFacts(r) or nil
       if b and core.mergeReadiness(r, f, items[key], FX.mergeGate(r, f, cfg)).ready then
-        FX._mergeApproved[key] = { nonce = r.nonce, at = FX.now(), delegated = true }
-        FX.mergeAlert("⇡ merging " .. r.branch .. " on your batch grant (\"" .. b.title .. "\")")
+        local crec, cid
+        if checkOn then crec, cid = FX.checkerForRequest(key, r, f, cfg) end
+        local okc, act, why = core.checkerDelegatedVerdict(crec, cid, checkOn)
+        if okc then
+          FX._mergeApproved[key] = { nonce = r.nonce, at = FX.now(), delegated = true }
+          FX.mergeAlert("⇡ merging " .. r.branch .. " on your batch grant (\"" .. b.title .. "\")")
+        else
+          FX._checkerHolds[key] = { act = act, why = why }
+        end
       end
     end
   end
@@ -4507,14 +4534,18 @@ function FX.annotateMerges(list, cfg, bannerOn)
   end
   if next(reqs) == nil then return end
   q = core.mergeQueue(reqs, FX._mergeApproved, FX._mergeSent, FX.now())   -- after this tick's releases
-  for key, r in pairs(reqs) do
-    local it = items[key]
-    local facts, rd, gate
+  for _, key in ipairs(order) do
+    local r, it = reqs[key], items[key]
+    local facts, rd, gate, crec, cid
     FX.fleetRecordResult(r)   -- a batch unit's outcome (its batch ends itself once all are in)
     if r.phase == "requested" then
       facts = FX.mergeFacts(r)
       gate = FX.mergeGate(r, facts, cfg)
       rd = core.mergeReadiness(r, facts, it, gate)
+      -- the checker's review of this commit (started here when verify.onMerge is on; a Verify
+      -- press on the request's own commit counts too)
+      if checkOn then crec, cid = FX.checkerForRequest(key, r, facts, cfg)
+      else crec, cid = FX.checkerRecord(key), core.mergeGateKey(r, facts and facts.sha) end
     end
     local closeNote, canCloseTab
     if r.phase == "merged" then
@@ -4536,8 +4567,12 @@ function FX.annotateMerges(list, cfg, bannerOn)
         closeNote, canCloseTab = FX.mergeAutoClose(r, it)
       end
     end
+    local hold = FX._checkerHolds[key]
     it.merge = core.mergeView(r, rd, facts, { queued = q.queued[key], sent = FX._mergeSent[key] ~= nil,
-                                               closeNote = closeNote, canCloseTab = canCloseTab }, gate)
+                                               closeNote = closeNote, canCloseTab = canCloseTab,
+                                               checkerHold = hold and hold.act == "hold" and hold.why or nil,
+                                               checkerWait = hold and hold.act ~= "hold" and hold.why or nil },
+                              gate, core.checkerView(crec, cid))
     -- The process actually waiting for Adam's answer (2026-09-17). Kept OFF the tile -- it's a
     -- pid, and the whole tile is what the webview gets -- so FX.annotateNeedsYou reads it here.
     FX._mergeWaitPids[key] = (r.phase == "requested") and r.waitPid or nil
@@ -4549,6 +4584,244 @@ function FX.annotateMerges(list, cfg, bannerOn)
         FX.mergeAlert(it.merge.line .. "  (" .. name .. ")")
         if bannerOn then FX.notify("Shepherd · " .. name, it.merge.line, { key = it.key }) end
       end
+    end
+  end
+end
+
+-- ---- The merge checker (2026-09-29, build program unit 17) ---------------------------------
+-- Every merge request (verify.onMerge) and every 🔎 Verify press gets a background review:
+-- core.diffRedFlags first (no model, shown at once), then a headless read-only `claude -p`
+-- (core.headlessCmd) run by FX.runHeadless in the unit's worktree. The verdict is Shepherd's
+-- own file, ~/.claude/cc-merge/<key>.checker.json, bound to the request's nonce|sha; a batch
+-- unit's delegated merge needs its pass (core.checkerDelegatedVerdict, in FX.annotateMerges).
+-- State on FX, not new chunk-level locals: the main chunk is at Lua's 200-local cap.
+FX._headless = {}       -- run id -> one headless claude run (queued / running)
+FX._checkers = {}       -- session key -> its checker record, or false (none on disk)
+FX._checkerHolds = {}   -- session key -> { act, why }: a delegated merge the checker holds this tick
+
+-- One headless `claude -p` run, modelled on FX.mergeGateLaunch: through the login shell (so it
+-- finds Adam's PATH and login), output to scratch files (a pipe deadlocks past 64KB), an owner
+-- check first in the exit callback, and a retained timeout timer. ONE run per repo at a time
+-- (`lane` = the repo's common dir), queued like the gates (core.mergeGateReleases decides).
+-- spec = { id, lane, dir, prompt, timeoutSeconds, maxBudgetUsd, onStart(h), onDone(h, res) },
+-- res = { code, output, err, timedOut }. A new run under the same id supersedes the old one.
+function FX.runHeadless(spec)
+  if type(spec) ~= "table" or type(spec.id) ~= "string" or type(spec.dir) ~= "string" or spec.dir == "" then return nil end
+  local old = FX._headless[spec.id]
+  if old then
+    if old.timer then pcall(function() old.timer:stop() end); old.timer = nil end
+    if old.task then pcall(function() old.task:terminate() end) end   -- its callback sees it's no longer the owner
+  end
+  local h = { id = spec.id, lane = spec.lane or spec.dir, dir = spec.dir, prompt = spec.prompt or "",
+              timeoutSeconds = tonumber(spec.timeoutSeconds) or core.CHECKER_TIMEOUT, maxBudgetUsd = spec.maxBudgetUsd,
+              onStart = spec.onStart, onDone = spec.onDone, state = "queued", at = FX.now() }
+  FX._headless[spec.id] = h
+  FX.headlessPump()
+  return h
+end
+
+-- Start whatever the lanes allow. Called on every new run and whenever one finishes.
+function FX.headlessPump()
+  local runs, byId = {}, {}
+  for id, h in pairs(FX._headless) do
+    runs[#runs + 1] = { key = id, state = h.state, commonDir = h.lane, at = h.at }
+    byId[id] = h
+  end
+  local release, waiting = core.mergeGateReleases(runs)
+  for id, h in pairs(byId) do h.lanePos = waiting[id] end
+  for _, id in ipairs(release) do FX.headlessLaunch(byId[id]) end
+end
+
+function FX.headlessLaunch(h)
+  if not h or h.state ~= "queued" then return h end
+  local promptFile, outFile, errFile = FX.scratchFile("headless-prompt"), FX.scratchFile("headless-out"), FX.scratchFile("headless-err")
+  local function cleanup() for _, p in ipairs({ promptFile, outFile, errFile }) do pcall(os.remove, p) end end
+  local function finish(res)
+    if FX._headless[h.id] == h then FX._headless[h.id] = nil end
+    h.state, h.doneAt = "done", FX.now()
+    cleanup()
+    if h.onDone then
+      local ok, e = pcall(h.onDone, h, res)
+      if not ok then print("[cc-dashboard] ❌ headless run " .. tostring(h.id) .. ": " .. tostring(e)) end
+    end
+    FX.headlessPump()   -- its repo's lane is free
+  end
+  local wrote = false
+  pcall(function()
+    local f = io.open(promptFile, "w")
+    if f then f:write(h.prompt); f:close(); wrote = true end
+  end)
+  if not FX._headlessBin then FX._headlessBin = FX.claudeBinPath() end   -- nil keeps the bare word
+  local cmd = wrote and core.headlessCmd(FX._headlessBin, { dir = h.dir, promptFile = promptFile, outFile = outFile,
+                                                            errFile = errFile, maxBudgetUsd = h.maxBudgetUsd }) or nil
+  if not cmd then
+    finish({ code = -1, output = "", err = "Shepherd couldn't write the prompt" })
+    return h
+  end
+  h.state = "running"
+  if h.onStart then pcall(h.onStart, h) end
+  local shell = os.getenv("SHELL")
+  if not shell or shell == "" then shell = "/bin/zsh" end
+  local ok = pcall(function()
+    local myTask   -- captured below; the exit callback checks it still owns the run
+    myTask = hs.task.new(shell, function(code)
+      -- Ownership FIRST: the exit callback fires on terminate() too, so a superseded run must
+      -- never report over the one that replaced it.
+      if FX._headless[h.id] ~= h or h.task ~= myTask then cleanup(); return end
+      if h.timer then pcall(function() h.timer:stop() end); h.timer = nil end
+      h.task = nil
+      finish({ code = tonumber(code) or 1, output = FX.readFile(outFile) or "", err = FX.readFile(errFile) or "",
+               timedOut = h.timedOut, timeoutSeconds = h.timeoutSeconds })
+    end, { "-l", "-c", cmd })
+    if not myTask then error("task create failed") end
+    myTask:setWorkingDirectory(h.dir)
+    h.task = myTask
+    myTask:start()
+    -- Backstop: a wedged run must never hold its repo's lane. RETAINED on the record.
+    h.timer = hs.timer.doAfter(h.timeoutSeconds, function()
+      if FX._headless[h.id] ~= h then return end
+      h.timer = nil
+      if h.task then
+        h.timedOut = true
+        pcall(function() h.task:terminate() end)
+        print("[cc-dashboard] ⚠️ headless run " .. tostring(h.id) .. " timed out after " .. tostring(h.timeoutSeconds) .. "s")
+      end
+    end)
+    print("[cc-dashboard] 🚀 headless run " .. tostring(h.id) .. " in " .. tostring(h.dir))
+  end)
+  if not ok then
+    h.task = nil
+    finish({ code = -1, output = "", err = "Shepherd couldn't launch claude" })
+  end
+  return h
+end
+
+function FX.checkerFile(key) return FX.MERGE_DIR .. "/" .. key .. ".checker.json" end
+
+-- The checker's record for a session: memory first, else its file (read once, cached as false
+-- when there is none). Shepherd is the file's only writer.
+function FX.checkerRecord(key)
+  local r = FX._checkers[key]
+  if r == nil then
+    r = core.parseCheckerRecord(FX.readFile(FX.checkerFile(key))) or false
+    FX._checkers[key] = r
+  end
+  return r or nil
+end
+
+function FX.checkerSave(rec)
+  FX._checkers[rec.key] = rec
+  if not FX.writeFileAtomic(FX.checkerFile(rec.key), core.json.encode(rec)) then
+    print("[cc-dashboard] ❌ couldn't write the checker's verdict for " .. tostring(rec.key))
+  end
+end
+
+-- Start (or restart) the review of one target. `id` = nonce|sha for a merge request, verify|sha
+-- for Verify on a session with no request. The red flags are computed and saved BEFORE the model
+-- runs, so the review shows them at once, and still shows them if the model never answers.
+function FX.checkerStart(key, target, id, trigger, attempts, cfg)
+  local diff = ""
+  local dcmd = core.checkerDiffCmd(target)
+  if dcmd then pcall(function() diff = hs.execute(dcmd) or "" end) end
+  local rf = core.diffRedFlags(diff)
+  local rec = { v = 1, id = id, key = key, trigger = trigger, state = "queued", attempts = attempts or 1,
+                at = FX.now(), flags = rf.flags, cut = rf.cut or nil, branch = target.branch, base = target.base }
+  if diff == "" then   -- nothing to read (or git couldn't say): nothing is proven either way
+    rec.state, rec.verdict, rec.doneAt = "done", "couldntRun", FX.now()
+    rec.why = "nothing to review: git showed no changes against " .. tostring(target.base or "main")
+    FX.checkerSave(rec)
+    return rec
+  end
+  FX.checkerSave(rec)
+  local timeout = tonumber(core.config(cfg, "verify.timeoutSeconds", core.CHECKER_TIMEOUT)) or core.CHECKER_TIMEOUT
+  FX.runHeadless({ id = "checker|" .. key, lane = target.commonDir, dir = target.dir,
+    prompt = core.checkerPrompt(target, rf.flags), timeoutSeconds = timeout,
+    maxBudgetUsd = core.config(cfg, "verify.maxBudgetUsd", core.CHECKER_BUDGET_USD),
+    onStart = function()
+      if FX._checkers[key] == rec then rec.state = "running"; FX.checkerSave(rec) end
+    end,
+    onDone = function(_, res) FX.checkerFinish(key, rec, res) end })
+  print("[cc-dashboard] 🔍 checker queued for " .. tostring(target.branch or key) .. " (" .. tostring(id) .. ", try "
+    .. tostring(rec.attempts) .. ", " .. #rf.flags .. " red flag(s))")
+  return rec
+end
+
+function FX.checkerFinish(key, rec, res)
+  if FX._checkers[key] ~= rec then return end   -- a newer review replaced this one
+  local p = core.parseCheckerOutput(res and res.output, res and res.err)
+  if res and res.timedOut then
+    p = { verdict = "couldntRun", findings = {}, why = "timed out after " .. tostring(res.timeoutSeconds) .. "s" }
+  end
+  rec.state, rec.doneAt = "done", FX.now()
+  rec.verdict, rec.summary, rec.findings, rec.why = p.verdict, p.summary, p.findings, p.why
+  rec.costUsd, rec.turns = p.costUsd, p.turns
+  FX.checkerSave(rec)
+  local name = tostring(rec.branch or key)
+  print("[cc-dashboard] " .. (p.verdict == "pass" and "✅" or (p.verdict == "fail" and "❌" or "⚠️"))
+    .. " checker " .. name .. " -> " .. tostring(p.verdict) .. " (" .. tostring(p.summary or p.why or "") .. ")")
+  if p.verdict == "fail" then
+    FX.mergeAlert("🔎 The checker failed " .. name .. ": " .. core.capChars(tostring(p.summary or ""), 160))
+  elseif p.verdict == "couldntRun" and (rec.trigger == "verify" or (tonumber(rec.attempts) or 1) >= core.CHECKER_MAX_ATTEMPTS) then
+    FX.mergeAlert("⚠️ The checker couldn't run for " .. name .. ": " .. tostring(p.why))
+  elseif p.verdict == "pass" and rec.trigger == "verify" then
+    FX.mergeAlert("🔎 The checker passed " .. name .. ": " .. core.capChars(tostring(p.summary or ""), 160))
+  end
+end
+
+-- A merge request's review: started once per nonce|sha, and a couldn't-run retried once.
+function FX.checkerForRequest(key, r, facts, cfg)
+  local target = core.checkerTargetForRequest(r, facts)
+  if not target then return FX.checkerRecord(key), core.mergeGateKey(r, facts and facts.sha) end
+  local id = core.mergeGateKey(r, target.sha)
+  local rec = FX.checkerRecord(key)
+  if not rec or rec.id ~= id then
+    rec = FX.checkerStart(key, target, id, "merge", 1, cfg)
+  elseif core.checkerRetryDue(rec, FX.now()) then
+    print("[cc-dashboard] ↻ retrying the checker that couldn't run: " .. tostring(r.branch))
+    rec = FX.checkerStart(key, target, id, rec.trigger or "merge", (tonumber(rec.attempts) or 1) + 1, cfg)
+  end
+  return rec, id
+end
+
+-- 🔎 Verify: the same review for any session. A session with a merge request is reviewed on its
+-- request's commit (so a pass counts for its merge); any other on its checkout against main.
+function FX.verifySession(key)
+  local it = byKey[key]
+  if not it then FX.mergeAlert("⚠️ That session is gone"); return false end
+  local name = tostring(it.label or it.name or key)
+  if it.remote then FX.mergeAlert("⚠️ Verify needs a session on this Mac: " .. name .. " is remote"); return false end
+  local cfg = loadConfig()
+  local r = FX._mergeReqs[key]
+  local target, id
+  if r and r.phase == "requested" then
+    local f = FX.mergeFacts(r, true)
+    target = core.checkerTargetForRequest(r, f)
+    id = target and core.mergeGateKey(r, target.sha) or nil
+  end
+  if not target then
+    local out
+    pcall(function() out = hs.execute(core.verifyTargetCmd(it.cwd)) end)
+    local t, why = core.parseVerifyTarget(out, it.cwd)
+    if not t then FX.mergeAlert("⚠️ Can't verify " .. name .. ": " .. tostring(why)); return false end
+    target, id = t, "verify|" .. t.sha
+  end
+  local rec = FX.checkerStart(key, target, id, "verify", 1, cfg)
+  if rec.state ~= "done" then
+    FX.mergeAlert("🔎 Checking " .. name .. " -- a read-only review runs in the background")
+  else
+    FX.mergeAlert("⚠️ " .. name .. ": " .. tostring(rec.why))
+  end
+  return true
+end
+
+-- Every tick: each session's latest checker verdict, for the detail panel (#d-checker) when it
+-- has no merge review showing it.
+function FX.annotateCheckers(list)
+  for _, it in ipairs(list or {}) do
+    it.checker = nil
+    if it.key and not it.remote then
+      local rec = FX.checkerRecord(it.key)
+      if rec then it.checker = core.checkerView(rec) end
     end
   end
 end
@@ -5684,6 +5957,9 @@ local function claudeBinPath()
   end
   return nil
 end
+-- 2026-09-29: the merge checker's headless run (FX.runHeadless, defined earlier in this file)
+-- resolves the same binary. On FX, not a new chunk-level local: the main chunk is at the cap.
+FX.claudeBinPath = claudeBinPath
 
 -- One worktree, one agent (2026-09-28): the live session already working in the linked worktree
 -- `dir` belongs to, or nil (core.worktreeOccupant). The main checkout is shared. One cached git
@@ -7785,6 +8061,8 @@ local function handleBridgeMsg(msg)
   if a == "merge-diff" then FX.mergeDiff(tostring(payload.v or "")); return end
   if a == "merge-close-tab" then FX.mergeCloseTab(tostring(payload.v or "")); return end
   if a == "merge-dismiss" then FX.mergeDismiss(tostring(payload.v or "")); return end
+  -- the merge checker (2026-09-29): a read-only headless review of this session's work, no keystrokes
+  if a == "verify" then FX.verifySession(tostring(payload.v or "")); return end
   if a == "end-session" then FX.endSession(tostring(payload.v or "")); return end   -- tab-less only (verdict in core)
   -- empty chats (2026-09-11): v = a session key in that window, text = "one" | "all"
   if a == "close-empty" then FX.closeEmptyChats(tostring(payload.v or ""), tostring(payload.text or "all")); return end
@@ -9507,6 +9785,13 @@ local HTML = [[
   /* the claim check (2026-09-18) is a hint: muted, warn at most -- never the gate's red */
   #d-merge .dm-claims { margin-top:4px; white-space:pre-wrap; font-size:11px; opacity:.8; }
   #d-merge .dm-claims.c-flagged { color:var(--warn); opacity:1; }
+  /* the merge checker (2026-09-29): a model's review -- fail is red, couldn't-run is warn */
+  #d-merge .dm-checker, #d-checker { margin-top:4px; white-space:pre-wrap; font-size:11px; }
+  #d-checker { display:none; margin:6px 0; padding:6px 10px; border:1px dashed var(--muted, #888); border-radius:8px; }
+  .dm-checker.c-pass { color:var(--ok); }
+  .dm-checker.c-fail { color:var(--danger); }
+  .dm-checker.c-couldntRun { color:var(--warn); }
+  .dm-checker.c-running { opacity:.8; }
   #d-merge .dm-problems { color:var(--warn); margin-top:4px; }
   #d-merge ul { margin:4px 0 0 16px; padding:0; max-height:120px; overflow:auto; }
   #d-merge .dm-files li { font-family:ui-monospace,Menlo,monospace; font-size:11px; }
@@ -10815,6 +11100,7 @@ local HTML = [[
         <div class="dm-tests" id="dm-tests"></div>
         <div class="dm-gate" id="dm-gate"></div>
         <div class="dm-claims" id="dm-claims"></div>
+        <div class="dm-checker" id="dm-checker"></div>
         <div class="dm-problems" id="dm-problems"></div>
         <ul class="dm-commits" id="dm-commits"></ul>
         <ul class="dm-files" id="dm-files"></ul>
@@ -10832,6 +11118,8 @@ local HTML = [[
         <button id="dm-dismiss" onclick="mergeAct('merge-dismiss')" title="Clear this finished merge from the card">Dismiss</button>
       </div>
     </div>
+    <!-- the merge checker's verdict for a session with no merge review showing it (Verify, 2026-09-29) -->
+    <div id="d-checker"></div>
     <!-- L5 tab strip: groups the views Shepherd already renders. The bar is
          built in JS from __DETAIL_TABS__ (single source w/ core.DETAIL_TABS);
          only the active panel shows. Renderers keep writing into the same div
@@ -10906,6 +11194,7 @@ local HTML = [[
       <button id="b-compact" onclick="act('compact')">Compact</button>
       <button id="b-improve" onclick="act('improve')" title="Pull this repo's un-applied leaderboard improvement insights and send them to this session as a review-first prompt (suggestions, not wholesale edits).">Improve</button>
       <button id="b-score" onclick="act('score')" title="Run-quality score (0-100) for this session from the audit ledger — penalizes errors, denied tools, loops, and forced respawns — plus a ⚠ when recent sessions trend down. Needs the Audit log on.">Score</button>
+      <button id="b-verify" onclick="act('verify')" title="A read-only Sonnet review of this session's work, in the background: its merge request's commits, or its checkout against main (uncommitted work included). Shepherd scans the diff for red flags first. The verdict shows here and in the merge review.">🔎 Verify</button>
       <button id="b-timeline" onclick="openSessionTimeline()" title="Show this session's recorded activity timeline (needs the ledger enabled).">📜 Timeline</button>
       <button id="b-export" onclick="exportSession()" title="Export this session: copy its transcript (.jsonl) + a meta.json (label, provider/model, lineage, activity counters) into ~/.claude/cc-exports and reveal it in Finder.">⤓ Export</button>
       <button id="b-scenario" onclick="captureScenario()" title="Capture as scenario: save a scrubbed window of this session's transcript (the 64KB Shepherd reads) to ~/.claude/cc-scenarios/ with a label to fill in -- what was really true at this moment -- so the detector corpus can measure it. Never written into a repo.">⌖ Capture as scenario</button>
@@ -15001,6 +15290,49 @@ local HTML = [[
       }
       el.style.display = rows.length ? "" : "none";
     }
+    // The merge checker's verdict as text (2026-09-29): the review's line and #d-checker both use
+    // it, always through textContent -- the summary and findings are a model's words.
+    function checkerText(c){
+      if(!c || !c.state) return { cls: "dm-checker", text: "" };
+      var pre = c.stale ? "Checker (an earlier commit): " : "Checker: ";
+      var head, cls;
+      if(c.state === "queued"){ head = pre + "queued behind another review in this repo…"; cls = "running"; }
+      else if(c.state === "running"){ head = pre + "a read-only Sonnet review is running…"; cls = "running"; }
+      else if(c.verdict === "pass" || c.verdict === "fail"){
+        head = pre + (c.verdict === "pass" ? "✓ pass" : "✗ fail")
+          + (typeof c.costUsd === "number" ? " · $" + c.costUsd.toFixed(2) : "")
+          + (c.summary ? " — " + c.summary : "");
+        cls = c.verdict;
+      } else {
+        head = pre + "couldn't run (" + (c.why || "no reason given")
+          + ((c.attempts|0) > 1 ? ", " + (c.attempts|0) + " tries" : "") + ") — nothing was proven either way";
+        cls = "couldntRun";
+      }
+      var lines = [head];
+      var fs = Array.isArray(c.findings) ? c.findings : [];
+      for(var i=0; i<fs.length; i++){
+        var f = fs[i] || {};
+        lines.push("• " + (f.file || "?") + (f.line ? ":" + f.line : "") + " — " + (f.issue || "")
+          + (f.severity ? " (" + f.severity + ")" : ""));
+      }
+      var fl = Array.isArray(c.flags) ? c.flags : [];
+      if(fl.length){
+        lines.push("Red flags (found without a model):");
+        for(var k=0; k<fl.length; k++) lines.push("• " + fl[k]);
+      }
+      return { cls: "dm-checker c-" + cls, text: lines.join("\n") };
+    }
+    // A Verify verdict for a session whose merge review isn't showing it.
+    function renderChecker(it){
+      var el = document.getElementById("d-checker");
+      if(!el) return;
+      var m = it && it.merge;
+      var inReview = !!(m && m.phase === "requested" && !m.sent);
+      var ck = inReview ? { cls: "", text: "" } : checkerText(it && it.checker);
+      el.className = ck.text ? ck.cls : "";
+      el.textContent = ck.text;
+      el.style.display = ck.text ? "block" : "none";
+    }
     function renderMerge(it){
       var box = document.getElementById("d-merge");
       if(!box) return;
@@ -15050,6 +15382,12 @@ local HTML = [[
       }
       cEl.className = "dm-claims" + (cFlag ? " c-flagged" : "");
       cEl.textContent = cLines.join("\n");
+      // 2026-09-29: the merge checker -- red flags found with no model, then a read-only review's
+      // verdict. A fail holds a batch's automatic merge; the Merge button below never reads it.
+      var ckEl = document.getElementById("dm-checker");
+      var ckv = asking ? checkerText(m.checker) : { cls: "dm-checker", text: "" };
+      ckEl.className = ckv.cls || "dm-checker";
+      ckEl.textContent = ckv.text;
       var probs = Array.isArray(m.problems) ? m.problems : [];
       document.getElementById("dm-problems").textContent = (asking && probs.length) ? "Not ready: " + probs.join("; ") : "";
       var commits = Array.isArray(m.commits) ? m.commits : [];
@@ -15181,8 +15519,9 @@ local HTML = [[
           if(el.hasAttribute("data-t0")){ el.title = el.getAttribute("data-t0"); el.removeAttribute("data-t0"); }
         }
       }
+      // b-verify: a remote session has no checkout here; it types nothing, so a shared window keeps it
       ["b-jump","b-stop","b-auto","b-talk","b-clear","b-compact","b-improve","b-nudge","b-feed","b-rewind",
-       "effort","mode","d-model","d-gate","d-policy","nudge"].forEach(function(id){
+       "effort","mode","d-model","d-gate","d-policy","nudge","b-verify"].forEach(function(id){
         var el = document.getElementById(id); if(!el) return;
         var why = (remote && id !== "b-rewind") ? REMOTE_T : ((shared && SHARED_IDS.indexOf(id) >= 0) ? SHARED_T : "");
         lockCtl(el, why);
@@ -15202,6 +15541,7 @@ local HTML = [[
         dem.style.display = ne ? "block" : "none";
       }
       renderMerge(it);
+      renderChecker(it);
       renderBatch(it);
       var dtl = document.getElementById("d-tabless");
       if(dtl){
@@ -19450,6 +19790,7 @@ function FX._refreshBody()
   -- worktree) and before the stack ranking (a request waiting for Adam leads its card).
   FX.annotateFleet(list, cfg, bannerOn)    -- batch driving (2026-09-11): before merges (delegation)
   FX.annotateMerges(list, cfg, bannerOn)
+  FX.annotateCheckers(list)       -- each session's latest merge-checker verdict (2026-09-29)
   FX.annotateTabless(list, cfg)   -- a claude process with no tab in its window (2026-09-11)
   FX.annotateAsks(list, bannerOn)   -- a question held for Adam by cc-ask.sh (2026-09-11)
   -- the session mailbox (2026-09-29): cards whose message waits, and a typed nudge where allowed

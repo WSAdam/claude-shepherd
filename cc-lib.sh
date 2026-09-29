@@ -337,6 +337,7 @@ CC_INBOX_DIR="${CC_INBOX_DIR:-${HOME}/.claude/cc-inbox}"
 # <key>.decision.parked.<pid>, and every writer here goes temp-then-rename, so a
 # crash in between leaves <key>.json.tmp.<pid> and friends. Both used to outlive
 # the session that owned them -- keys are UUIDs, so nothing matched them again.
+# <key>.checker.json (2026-09-29) is the merge checker's verdict, which only Shepherd writes.
 # KEEP THE FILE SET IN SYNC with FX.removeStatus in claude-dashboard.lua.
 cc_remove() {
   rm -f "$(cc_file "$1")" "$(cc_file "$1")".tmp.* "$(cc_decision_file "$1")" \
@@ -346,6 +347,7 @@ cc_remove() {
     "$CC_POLICY_DIR/$1" "$CC_POLICY_OVERRIDE_DIR/$1" "$CC_AUTOMODEL_DIR/$1" \
     "$CC_MERGE_DIR/$1.json" "$CC_MERGE_DIR/$1.decision" "$CC_MERGE_DIR/$1.decision".claim.* \
     "$CC_MERGE_DIR/$1.decision".parked.* "$CC_MERGE_DIR/$1.decision".tmp.* \
+    "$CC_MERGE_DIR/$1.checker.json" "$CC_MERGE_DIR/$1.checker.json".tmp.* \
     "$CC_ASK_DIR/$1.answer" "$CC_ASK_DIR/$1.answer".claim.* \
     "$CC_ASK_DIR/$1.answer".tmp.* "$CC_TALK_DIR/$1" 2>/dev/null || true
   # The mailbox is a folder (cc-inbox/<key>/): its messages, claims and temps, then the folder.

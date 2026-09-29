@@ -284,6 +284,12 @@ echo ""
 echo "== node: a card whose Shepherd message is waiting says so (behavioral, runs the shipped mailboxTail) =="
 node "$DIR/mailbox-hint.test.js" || fail=1
 echo ""
+echo "== lua: the merge checker -- a headless review per request, one per repo, a pass before a delegated merge (behavioral, stubbed hs + git) =="
+HOME="$(mktemp -d)" lua "$DIR/checker.test.lua" || fail=1
+echo ""
+echo "== node: the merge checker's line in the review (behavioral, runs the shipped checkerText) =="
+node "$DIR/checker-view.test.js" || fail=1
+echo ""
 
 if [ "$fail" -eq 0 ]; then
   echo "✅ ALL GREEN"

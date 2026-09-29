@@ -160,6 +160,13 @@
     ]
   },
 
+  "verify": {
+    "_comment": "The merge checker (OFF unless onMerge is true; a fresh install turns it on). Every merge request gets a background review: Shepherd scans the diff itself first (conflict markers, deleted tests, lines removed from a test, a new .skip/.only, stubs), then a headless read-only claude -p (Sonnet, hooks off, no MCP servers, Read/Grep/Glob and read-only git only) reads the diff and answers pass or fail. One review per repo at a time, once per request per commit, in the unit's worktree. The review shows the verdict and the red flags. A batch unit merges on your grant only after a pass; a review that couldn't run is retried once, then waits for your click. Your own Merge click never looks at it. The 🔎 Verify button runs the same review on any session. maxBudgetUsd caps each run's spend (default 1), timeoutSeconds its time (default 600).",
+    "onMerge": true,
+    "maxBudgetUsd": 1,
+    "timeoutSeconds": 600
+  },
+
   "fleet": {
     "_comment": "Batch driving (ON by default). A Claude session proposes a batch of worktree units with ~/.claude/cc-fleet.sh propose; its card and detail panel show it for ONE approval (with a 'Claude may merge these when green' box). Approved, the session has Shepherd open each unit's tab and hands the unit its task by SendMessage; merges on the grant go through only for a unit's own session and branch. Stop batch ends it. false = proposals are ignored.",
     "enabled": true

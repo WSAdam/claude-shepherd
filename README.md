@@ -111,6 +111,9 @@ The automatic behaviours here are off until you turn them on, except handoff not
   tests and fast-forwards main, one merge per repo at a time.
 - [**Merge gates**](docs/merging-and-batches.md#merge-gates-shepherd-runs-the-tests-itself):
   Shepherd runs the project's suite itself, before the merge and again on main after it.
+- [**Merge checker**](docs/merging-and-batches.md#the-checker-a-read-only-review-of-every-merge-request):
+  every merge request gets red flags from the diff and a read-only Sonnet review; a batch unit
+  merges only on a pass, and 🔎 Verify reviews any session.
 - [**Claude drives a batch**](docs/merging-and-batches.md#claude-drives-a-batch): a session proposes
   several units, you approve once, and it opens their tabs and hands out the tasks.
 - [**Tab bridge**](docs/merging-and-batches.md#the-tab-bridge): a small VS Code extension that

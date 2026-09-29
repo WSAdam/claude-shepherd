@@ -3954,5 +3954,46 @@ do
         src:find("FX._scenarioTasks[plan.name] = t", 1, true) ~= nil)
 end
 
+-- ---- the merge checker: its review line, the Verify button, the headless run (2026-09-29) ----
+-- Build program unit 17. The behaviour is in tests/checker.test.lua (stubbed hs); these pin the
+-- wiring that test can't see: the panel markup, textContent only, the button's handler, and
+-- that FX.runHeadless keeps FX.mergeGateLaunch's safety shape.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("checker: the review has a line for it, inside the scrolling body, under the gate and the claim check",
+        (src:match('<div class="dm%-body">.-</div>%s*<div class="dm%-acts"') or ""):find('id="dm%-claims"></div>%s*<div class="dm%-checker" id="dm%-checker">') ~= nil)
+  local review = src:match("\n    function renderMerge%(it%)%{.-\n    %}\n") or ""
+  check("checker: renderMerge fills it from m.checker, with textContent (the summary is a model's words)",
+        review:find('getElementById("dm-checker")', 1, true) ~= nil and review:find("checkerText(m.checker)", 1, true) ~= nil
+        and review:find("innerHTML", 1, true) == nil)
+  check("checker: a session with no merge request shows its Verify verdict in #d-checker",
+        src:find('<div id="d-checker"></div>', 1, true) ~= nil and src:find("function renderChecker(it){", 1, true) ~= nil)
+  check("checker: a Verify button on every session", src:find('<button id="b-verify" onclick="act(\'verify\')"', 1, true) ~= nil)
+  check("checker: ...handled by FX.verifySession", src:find('if a == "verify" then FX.verifySession(tostring(payload.v or "")); return end', 1, true) ~= nil)
+  local shared = src:match('var SHARED_IDS = %[(.-)%];') or ""
+  check("checker: ...which types nothing, so a shared window never locks it", shared ~= "" and not shared:find("b-verify", 1, true))
+  local run = src:match("\nfunction FX%.runHeadless%(.-\nend\n") or ""
+  local launch = src:match("\nfunction FX%.headlessLaunch%(.-\nend\n") or ""
+  check("checker: FX.runHeadless queues one run per repo (core.mergeGateReleases decides)",
+        #run > 0 and src:find("core.mergeGateReleases(runs)", 1, true) ~= nil and src:find("function FX.headlessPump()", 1, true) ~= nil)
+  check("checker: the launch goes through the login shell, output to scratch files",
+        #launch > 0 and launch:find('"-l", "-c", cmd', 1, true) ~= nil and launch:find("FX.scratchFile(", 1, true) ~= nil)
+  check("checker: ...an owner check first in the exit callback",
+        launch:find("if FX._headless[h.id] ~= h or h.task ~= myTask then", 1, true) ~= nil)
+  check("checker: ...and a retained timeout timer, never bare", launch:find("h.timer = hs.timer.doAfter(", 1, true) ~= nil)
+  check("checker: the binary is claudeBinPath's", src:find("FX.claudeBinPath = claudeBinPath", 1, true) ~= nil
+        and launch:find("FX.claudeBinPath()", 1, true) ~= nil)
+  check("checker: the delegated merge asks core.checkerDelegatedVerdict",
+        src:find("core.checkerDelegatedVerdict(", 1, true) ~= nil)
+  check("checker: its verdict file is in cc_remove", (io.open(ROOT .. "cc-lib.sh"):read("*a")):find('"$CC_MERGE_DIR/$1.checker.json"', 1, true) ~= nil)
+  local df = io.open(ROOT .. "defaults/cc-config.json", "r")
+  local dsrc = df and df:read("*a") or ""
+  if df then df:close() end
+  local okd, dcfg = pcall(core.json.decode, dsrc)
+  eq("checker: a fresh install checks every merge request", okd and type(dcfg) == "table" and (dcfg.verify or {}).onMerge, true)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)
