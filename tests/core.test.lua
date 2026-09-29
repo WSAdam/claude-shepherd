@@ -13396,5 +13396,166 @@ do
      core.pinOpenPlan({ { url = "file:///etc/passwd", kind = "file" } }, 1, ROOTP), nil)
 end
 
+-- ---- batch relay: the driver hears what its units do (2026-09-29) ----
+-- Build program unit 23. The driver used to stitch idle notices, unit messages and status polls
+-- together to learn what a unit did. Shepherd now turns each unit's live state into events,
+-- once each, appended to cc-fleet/<id>.events.jsonl for `cc-fleet.sh wait` to relay.
+do
+  local us = { session = { id = "ua", name = "A-a1", pid = "5001" } }
+  local function tile(extra)
+    local t = { key = "ua", session_id = "ua", session_pid = "5001", status = "working", since = 100 }
+    for k, v in pairs(extra or {}) do t[k] = v end
+    return t
+  end
+  local function names(evs)
+    local out = {}
+    for _, e in ipairs(evs or {}) do out[#out + 1] = e.event end
+    return table.concat(out, ",")
+  end
+
+  -- a unit links to its session by id, falling back to the process (a /clear keeps the pid)
+  local tiles = { { key = "zz", session_id = "zz", session_pid = "9" }, tile() }
+  eq("unitTile: the unit's session by id", (core.unitTile(us, tiles) or {}).key, "ua")
+  local cleared = { { key = "ub", session_id = "ub", session_pid = "5001" } }
+  eq("unitTile: ...else the tile whose session_pid is the unit's process", (core.unitTile(us, cleared) or {}).key, "ub")
+  eq("unitTile: no link -> nil", core.unitTile(us, { { key = "zz", session_id = "zz", session_pid = "9" } }), nil)
+  eq("unitTile: a unit with no session links nothing", core.unitTile({}, tiles), nil)
+  eq("unitTile: a remote tile is never the unit's", core.unitTile(us, { tile({ remote = true }) }), nil)
+
+  -- tab opened: once, the first time the unit has its session
+  local evs, seen = core.unitEvent(nil, us, tile(), false)
+  eq("unitEvent: a unit that has its session -> tab_opened", names(evs), "tab_opened")
+  check("unitEvent: ...naming the session", evs[1] and evs[1].text:find("A-a1", 1, true) ~= nil)
+  local evs2, seen2 = core.unitEvent(seen, us, tile(), false)
+  eq("unitEvent: the same state again -> nothing (steady state)", #evs2, 0)
+  check("unitEvent: ...and the memo is unchanged", seen2 == seen)
+  eq("unitEvent: no session yet -> nothing", #core.unitEvent(nil, {}, nil, false), 0)
+
+  -- turn finished: once per turn end (status done, keyed by since)
+  evs, seen = core.unitEvent(seen, us, tile({ status = "done", since = 200, turnLabel = "finished" }), false)
+  eq("unitEvent: a turn ends -> turn_finished", names(evs), "turn_finished")
+  eq("unitEvent: ...once", #core.unitEvent(seen, us, tile({ status = "done", since = 200 }), false), 0)
+  eq("unitEvent: working again -> nothing", #core.unitEvent(seen, us, tile({ status = "working", since = 210 }), false), 0)
+  evs, seen = core.unitEvent(seen, us, tile({ status = "done", since = 300 }), false)
+  eq("unitEvent: the next turn's end is its own event", names(evs), "turn_finished")
+
+  -- asked a question: the question is in the event's text, newlines flattened
+  local ask = tile({ status = "approval", since = 400, ask_nonce = "q1",
+                     pending = { ask = { { question = "Keep the old\nname?", header = "Name" } } } })
+  evs, seen = core.unitEvent(seen, us, ask, false)
+  eq("unitEvent: a question -> asked", names(evs), "asked")
+  check("unitEvent: ...with the question, on one line  (" .. tostring(evs[1] and evs[1].text) .. ")",
+        evs[1] and evs[1].text:find("Keep the old name?", 1, true) ~= nil and not evs[1].text:find("\n", 1, true))
+  ask.ask_nonce = nil   -- cc-ask.sh's hold lapsed to the tab's picker: the same question
+  eq("unitEvent: the same question after its hold lapsed -> nothing", #core.unitEvent(seen, us, ask, false), 0)
+  eq("unitEvent: a permission prompt is not a question", #core.unitEvent(seen, us, tile({ status = "approval", since = 450 }), false), 0)
+
+  -- merge requested, gate red, checker fail
+  local m = { phase = "requested", branch = "feat/alpha", base = "main", at = 500, sha = "abc1234" }
+  evs, seen = core.unitEvent(seen, us, tile({ merge = m }), false)
+  eq("unitEvent: a merge request -> merge_requested", names(evs), "merge_requested")
+  check("unitEvent: ...naming the branch and commit", evs[1] and evs[1].text:find("feat/alpha", 1, true) and evs[1].text:find("abc1234", 1, true))
+  m.gate = { state = "running", command = "make test" }
+  eq("unitEvent: a gate still running -> nothing", #core.unitEvent(seen, us, tile({ merge = m }), false), 0)
+  m.gate = { state = "failed", command = "make test", code = 2, fails = "FAIL - alpha works\nFAIL - beta" }
+  evs, seen = core.unitEvent(seen, us, tile({ merge = m }), false)
+  eq("unitEvent: a red gate -> gate_red", names(evs), "gate_red")
+  check("unitEvent: ...with the command, its exit and the first failing line  (" .. tostring(evs[1] and evs[1].text) .. ")",
+        evs[1] and evs[1].text:find("make test", 1, true) and evs[1].text:find("2", 1, true) and evs[1].text:find("FAIL - alpha works", 1, true))
+  eq("unitEvent: ...once", #core.unitEvent(seen, us, tile({ merge = m }), false), 0)
+  local m2 = { phase = "requested", branch = "feat/alpha", base = "main", at = 600, sha = "def5678",
+               gate = { state = "timedOut", command = "make test" } }
+  evs, seen = core.unitEvent(seen, us, tile({ merge = m2 }), false)
+  eq("unitEvent: the unit asks again (a new commit) and that gate times out -> both, in order",
+     names(evs), "merge_requested,gate_red")
+  local chk = { state = "done", verdict = "fail", summary = "deletes a test", at = 610, doneAt = 620 }
+  evs, seen = core.unitEvent(seen, us, tile({ merge = m2, checker = chk }), false)
+  eq("unitEvent: the checker fails it -> checker_fail", names(evs), "checker_fail")
+  check("unitEvent: ...with its summary", evs[1] and evs[1].text:find("deletes a test", 1, true))
+  eq("unitEvent: ...once", #core.unitEvent(seen, us, tile({ merge = m2, checker = chk }), false), 0)
+  eq("unitEvent: a passing checker -> nothing",
+     #core.unitEvent(seen, us, tile({ checker = { state = "done", verdict = "pass", doneAt = 700 } }), false), 0)
+  eq("unitEvent: a checker still reviewing -> nothing",
+     #core.unitEvent(seen, us, tile({ checker = { state = "running", at = 710 } }), false), 0)
+
+  -- merged, blocked, session ended
+  local done = { session = us.session, result = "merged" }
+  evs, seen = core.unitEvent(seen, done, tile({ merge = { phase = "merged", branch = "feat/alpha", at = 600, sha = "def5678" } }), false)
+  eq("unitEvent: Shepherd records the merge -> merged", names(evs), "merged")
+  eq("unitEvent: ...once", #core.unitEvent(seen, done, tile(), false), 0)
+  local red = { phase = "merged", branch = "feat/alpha", base = "main", at = 600, sha = "def5678",
+                gate = { state = "failed", command = "make test", code = 1 } }
+  evs, seen = core.unitEvent(seen, done, tile({ merge = red }), false)
+  eq("unitEvent: main red after the merge -> gate_red of its own", names(evs), "gate_red")
+  check("unitEvent: ...saying it's the base that is red", evs[1] and evs[1].text:find("main", 1, true))
+  evs, seen = core.unitEvent(seen, done, nil, true)
+  eq("unitEvent: the unit's session is gone -> session_ended", names(evs), "session_ended")
+  eq("unitEvent: ...once", #core.unitEvent(seen, done, nil, true), 0)
+  eq("unitEvent: no tile but not known to be gone -> nothing",
+     #core.unitEvent({ ["tab:x"] = true }, { session = { id = "x" } }, nil, false), 0)
+
+  local blk = { session = { id = "ub", name = "A-b1", pid = "5002" }, result = "blocked" }
+  evs = core.unitEvent(nil, blk, { key = "ub", session_id = "ub", status = "done", since = 5,
+    merge = { phase = "blocked", branch = "fix/beta", at = 1, note = "tests disagree about X" } }, false)
+  eq("unitEvent: everything a fresh memo sees comes out once, in lifecycle order",
+     names(evs), "tab_opened,turn_finished,blocked")
+  check("unitEvent: blocked carries the unit's note", evs[3] and evs[3].text:find("tests disagree about X", 1, true))
+  evs = core.unitEvent(nil, { session = us.session, result = "merged-dirty" }, nil, false)
+  eq("unitEvent: merged-dirty is merged", names(evs), "tab_opened,merged")
+
+  -- every event name is one the relay documents
+  local known = {}
+  for _, n in ipairs(core.UNIT_EVENTS or {}) do known[n] = true end
+  eq("UNIT_EVENTS: nine events", #(core.UNIT_EVENTS or {}), 9)
+  check("UNIT_EVENTS: the ones the driver is told about",
+        known.tab_opened and known.asked and known.turn_finished and known.merge_requested and known.gate_red
+        and known.checker_fail and known.merged and known.blocked and known.session_ended)
+
+  -- the memo comes back from the events file after a reload, so nothing is told twice
+  local raw = '{"v":1,"seq":1,"unit":"alpha","event":"tab_opened","key":"tab:ua"}\n'
+    .. 'not json\n'
+    .. '{"v":1,"seq":2,"unit":"alpha","event":"turn_finished","key":"turn:200"}\n'
+    .. '{"v":1,"seq":3,"unit":"beta","event":"tab_opened","key":"tab:ub"}\n'
+    .. '{"v":1,"seq":4,"unit":"al'
+  local memo = core.parseUnitEvents(raw)
+  eq("parseUnitEvents: the last whole event's number", memo.seq, 3)
+  check("parseUnitEvents: each unit's told keys", memo.seen.alpha and memo.seen.alpha["tab:ua"] and memo.seen.alpha["turn:200"]
+        and memo.seen.beta and memo.seen.beta["tab:ub"] and not memo.seen.beta["turn:200"])
+  eq("parseUnitEvents: no file -> nothing told yet", core.parseUnitEvents(nil).seq, 0)
+  eq("parseUnitEvents: ...and no memo", next(core.parseUnitEvents(nil).seen), nil)
+  eq("unitEvent: a key the file already holds is not told again",
+     #core.unitEvent(memo.seen.alpha, us, tile({ status = "done", since = 200 }), false), 0)
+
+  -- one line of the events file: JSON, numbered, one physical line
+  local line = core.unitEventLine("b1", 7, "alpha", "A-a1", { event = "asked", key = "ask:400", text = "asked: x" }, 1000)
+  local rec = core.json.decode(line)
+  check("unitEventLine: one JSON line with its number, unit, event and text",
+        rec.v == 1 and rec.seq == 7 and rec.batch == "b1" and rec.unit == "alpha" and rec.event == "asked"
+        and rec.key == "ask:400" and rec.session == "A-a1" and rec.text == "asked: x" and rec.at == 1000
+        and not line:find("\n", 1, true))
+
+  -- a batch's files, and when a stopped batch is pruned (with its events)
+  local files = core.batchFiles({ "b1.json", "b1.state.json", "b1.stop", "b1.events.jsonl", "b1.tab-alpha.json",
+    "b1.decision", "b1.state.json.tmp.42", "b12.json", "b12.events.jsonl", "b1", "xb1.json" }, "b1")
+  table.sort(files)
+  eq("batchFiles: every file of the batch, the events too, and none of b12's",
+     table.concat(files, " "), "b1.decision b1.events.jsonl b1.json b1.state.json b1.state.json.tmp.42 b1.stop b1.tab-alpha.json")
+  eq("batchFiles: a bad id selects nothing", #core.batchFiles({ "b1.json" }, "../b1"), 0)
+  local DAY = 86400
+  eq("batchPruneDue: stopped a week and a day ago -> pruned",
+     core.batchPruneDue({ approved = true, stopped = true, stoppedAt = 1000 }, nil, 1000 + 8 * DAY, 7 * DAY), true)
+  eq("batchPruneDue: stopped yesterday -> kept",
+     core.batchPruneDue({ approved = true, stopped = true, stoppedAt = 1000 }, nil, 1000 + DAY, 7 * DAY), false)
+  eq("batchPruneDue: no recorded stop time -> the stop marker's age",
+     core.batchPruneDue({ approved = true, stopped = true }, 1000, 1000 + 8 * DAY, 7 * DAY), true)
+  eq("batchPruneDue: stopped with no time at all -> kept (never guessed)",
+     core.batchPruneDue({ approved = true, stopped = true }, nil, 1000 + 80 * DAY, 7 * DAY), false)
+  eq("batchPruneDue: a running batch is never pruned",
+     core.batchPruneDue({ approved = true, at = 1 }, 1, 1000 + 80 * DAY, 7 * DAY), false)
+  eq("batchPruneDue: denied long ago -> pruned",
+     core.batchPruneDue({ denied = true, at = 1000 }, nil, 1000 + 8 * DAY, 7 * DAY), true)
+  eq("batchPruneDue: a proposal never answered -> kept", core.batchPruneDue(nil, nil, 1000 + 80 * DAY, 7 * DAY), false)
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

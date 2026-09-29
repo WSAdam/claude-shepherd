@@ -12,6 +12,12 @@
 #       Shepherd opens an empty Claude tab in the repo's window and answers with the new
 #       session's name and the message to send it (SendMessage). Driver only; approved batches only.
 #   cc-fleet.sh status --batch <id>     Shepherd's view of the units, grouped by outcome (JSON)
+#   cc-fleet.sh wait --batch <id> [--after N] [--wait-max S]
+#       The units' events Shepherd relayed after #N (tab opened, asked a question, turn finished,
+#       merge requested, gate red, checker fail, merged, blocked, session ended), one line each,
+#       then how to wait for the next ones. Driver only. Run it in the BACKGROUND and end the
+#       turn; it wakes the driver. Exit 0 events printed, 4 none within --wait-max, 5 the batch
+#       stopped (after printing any left), 6 Shepherd isn't running, 2 refused.
 #   cc-fleet.sh stop --batch <id>       ends the batch; its permissions go with it
 #
 # The approval lives in Shepherd (its own <id>.state.json), never in this file's word: a
@@ -115,6 +121,7 @@ cmd_propose() {
   [ -z "$taken" ] || refuse "already exists:$taken"
   shepherd_alive || { echo "⚠️ Shepherd isn't running, so Adam can't approve a batch there. Ask him in chat, and run the units by hand."; exit 6; }
 
+  prune_batches
   mkdir -p "$FLEET_DIR" && chmod 700 "$FLEET_DIR" 2>/dev/null
   local now id nonce dname bf tmp
   now="$(date +%s)"; id="b${now}${RANDOM}"; nonce="$$.$now.$RANDOM"
@@ -151,7 +158,8 @@ cmd_propose() {
   fi
   echo "For each unit, open its tab, then SendMessage the printed session the printed message (notify_when_idle: true):"
   jq -r --arg id "$id" '.units[] | "  ~/.claude/cc-fleet.sh tab --batch \($id) --unit \(.slug)"' "$bf"
-  echo "Follow them with the idle notices and ~/.claude/cc-fleet.sh status --batch $id (never poll ListAgents)."
+  echo "Follow them with ~/.claude/cc-fleet.sh wait --batch $id in the background; it wakes you with each unit's events."
+  echo "After each wake, run it again with the --after it prints (never poll ListAgents)."
   echo "When every unit has merged or blocked: ~/.claude/cc-fleet.sh stop --batch $id, then summarise for Adam."
   exit 0
 }
@@ -224,6 +232,80 @@ cmd_status() {
   exit 0
 }
 
+# The relayed events after #<after> as lines, oldest first; sets RELAY_LAST to the last number.
+# Returns 1 when there are none. A torn last line (Shepherd mid-write) isn't an event yet.
+RELAY_LAST=""
+relay_events() { # <events file> <after>
+  [ -f "$1" ] || return 1
+  local rows
+  rows="$(jq -R -n -c --argjson n "$2" '
+    [ inputs | fromjson? | select(type == "object" and (.seq | type) == "number" and .seq > $n) ] | sort_by(.seq)' "$1" 2>/dev/null)" || return 1
+  [ "$(printf '%s' "$rows" | jq 'length' 2>/dev/null)" -gt 0 ] 2>/dev/null || return 1
+  printf '%s' "$rows" | jq -r '.[] | "#\(.seq) \(.unit) \(.event): \((.text // "") | gsub("[\\r\\n]"; " "))"'
+  RELAY_LAST="$(printf '%s' "$rows" | jq '.[-1].seq')"
+  return 0
+}
+
+batch_stopped() { # <id> <batch file>
+  [ -e "$FLEET_DIR/$1.stop" ] || [ ! -f "$2" ] || [ "$(jq -r '.phase // empty' "$2" 2>/dev/null)" = "stopped" ]
+}
+
+# 2026-09-29 (build program unit 23): the driver used to stitch idle notices, unit messages and
+# status polls together to learn what a unit had done. Shepherd now relays each unit's events,
+# numbered, into <id>.events.jsonl (FX.relayFleet); this prints the ones after --after and exits,
+# so a driver running it in the background is woken by exactly the news.
+cmd_wait() {
+  local id="" after=0 waitmax=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --batch) id="${2:-}"; shift 2 ;;
+      --after) after="${2:-}"; shift 2 ;;
+      --wait-max) waitmax="${2:-}"; shift 2 ;;
+      *) refuse "unknown option: $1" ;;
+    esac
+  done
+  case "$after" in ''|*[!0-9]*) refuse "--after takes the number of the last event you saw" ;; esac
+  case "$waitmax" in ''|*[!0-9]*) refuse "--wait-max takes whole seconds" ;; esac
+  local bf; bf="$(batch_file "$id")"
+  [ -f "$bf" ] || refuse "no batch $id"
+  [ "$(jq -r .driver.session_id "$bf")" = "$SID" ] || refuse "only the session that proposed batch $id can wait on its units"
+  local ev="$FLEET_DIR/$id.events.jsonl" start
+  start="$(date +%s)"
+  while :; do
+    if relay_events "$ev" "$after"; then
+      echo "Next: ~/.claude/cc-fleet.sh wait --batch $id --after $RELAY_LAST   (in the background again)"
+      exit 0
+    fi
+    if batch_stopped "$id" "$bf"; then
+      # Shepherd writes a batch's last events before it stops it; read once more for a race
+      if relay_events "$ev" "$after"; then
+        echo "Next: ~/.claude/cc-fleet.sh wait --batch $id --after $RELAY_LAST   (in the background again)"
+        exit 0
+      fi
+      echo "⏹ Batch $id has stopped: no more events will come after #$after."
+      echo "Summarise it for Adam (~/.claude/cc-fleet.sh status --batch $id groups the units by outcome)."
+      exit 5
+    fi
+    shepherd_alive || { echo "⚠️ Shepherd isn't running, so nothing relays the units' events (see ~/.claude/cc-fleet.sh alive)."; exit 6; }
+    if [ "$waitmax" -gt 0 ] && [ $(( $(date +%s) - start )) -ge "$waitmax" ]; then
+      echo "⏳ No new events from batch $id in ${waitmax}s (still after #$after)."
+      exit 4
+    fi
+    sleep "$POLL"
+  done
+}
+
+# A batch stopped over a week ago goes, every file of it, its relayed events included (2026-09-29):
+# nothing ever removed a batch's files. Shepherd prunes the same batches in its tick
+# (FX.removeBatch); this covers a driver proposing the next one. -mtime +6 = 7+ whole days old.
+prune_batches() {
+  local stop
+  [ -d "$FLEET_DIR" ] || return 0
+  find "$FLEET_DIR" -maxdepth 1 -type f -name 'b*.stop' -mtime +6 2>/dev/null | while IFS= read -r stop; do
+    CC_FLEET_DIR="$FLEET_DIR" cc_fleet_remove_batch "$(basename "$stop" .stop)"
+  done
+}
+
 cmd_stop() {
   local id=""
   while [ $# -gt 0 ]; do case "$1" in --batch) id="${2:-}"; shift 2 ;; *) refuse "unknown option: $1" ;; esac; done
@@ -267,8 +349,9 @@ case "${1:-}" in
   propose) shift; cmd_propose "$@" ;;
   tab)     shift; cmd_tab "$@" ;;
   status)  shift; cmd_status "$@" ;;
+  wait)    shift; cmd_wait "$@" ;;
   stop)    shift; cmd_stop "$@" ;;
   alive)   shift; cmd_alive "$@" ;;
-  *) echo "usage: cc-fleet.sh propose --file <batch.json> | tab --batch <id> --unit <slug> | status --batch <id> | stop --batch <id> | alive"
+  *) echo "usage: cc-fleet.sh propose --file <batch.json> | tab --batch <id> --unit <slug> | status --batch <id> | wait --batch <id> [--after N] [--wait-max S] | stop --batch <id> | alive"
      exit 2 ;;
 esac

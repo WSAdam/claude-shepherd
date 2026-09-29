@@ -331,6 +331,9 @@ CC_INBOX_DIR="${CC_INBOX_DIR:-${HOME}/.claude/cc-inbox}"
 # (<key>.json), Shepherd's plan (<key>.plan.json) and the card's Cancel (<key>.cancel), per
 # session key. A clean Stop clears them (cc-status.sh). Default MUST match the dashboard's FX.RESUME_DIR.
 CC_RESUME_DIR="${CC_RESUME_DIR:-${HOME}/.claude/cc-resume}"
+# Batch driving (cc-fleet.sh): every file of a batch is named <id>.<...> in this one folder.
+# Default MUST match cc-fleet.sh's FLEET_DIR and the dashboard's FX.FLEET_DIR.
+CC_FLEET_DIR="${CC_FLEET_DIR:-${HOME}/.claude/cc-fleet}"
 
 # Pinned links (build program unit 31, 2026-09-29): cc-pin.sh keeps a worktree's links in
 # CC_PINS_DIR/<encoded git root>.json. They belong to the WORKTREE, not a session key -- they
@@ -388,6 +391,18 @@ cc_remove() {
   esac
   # Pinned links are per worktree, not per key: only those of a worktree that's gone (2026-09-29).
   cc_pins_prune
+  return 0
+}
+
+# Remove every file of one batch (2026-09-29): the proposal, Shepherd's state, the stop marker,
+# decisions, tab requests and answers, the relayed events (<id>.events.jsonl) and their temps --
+# everything named "<id>.<...>", never another batch's ("b1." is not a prefix of "b12.json").
+# An id that isn't b + letters/digits (cc-fleet.sh's own ids) removes nothing.
+# KEEP THE FILE SET IN SYNC with FX.removeBatch (core.batchFiles) in claude-dashboard.lua.
+cc_fleet_remove_batch() {
+  case "$1" in b[A-Za-z0-9]*) ;; *) return 0 ;; esac
+  case "$1" in *[!A-Za-z0-9]*) return 0 ;; esac
+  rm -f "$CC_FLEET_DIR/$1".* 2>/dev/null
   return 0
 }
 

@@ -52,9 +52,12 @@ parallel.
   3. `BATCH APPROVED` → for each unit run `~/.claude/cc-fleet.sh tab --batch <id> --unit <slug>`,
      then SendMessage the session it prints the message it prints (`notify_when_idle: true`).
      `DENIED: <note>` → act on the note; nothing was opened.
-  4. Follow the units through the idle notices, their messages and `cc-fleet.sh status --batch
-     <id>` — never poll `ListAgents`. Answer their questions; never ask a unit to do something
-     its own permissions would refuse, and never approve its merges yourself.
+  4. Follow the units with `~/.claude/cc-fleet.sh wait --batch <id>` **in the background**: it
+     wakes you with each unit's events (tab opened, asked, turn finished, merge requested, gate
+     red, checker fail, merged, blocked, session ended). After each wake, act on them and run it
+     again with the `--after` it printed. Exit 5 = the batch stopped; 6 = Shepherd is down. Never
+     poll `ListAgents`. Answer their questions; never ask a unit to do something its own
+     permissions would refuse, and never approve its merges yourself.
   5. When every unit has merged or blocked: `~/.claude/cc-fleet.sh stop --batch <id>`, then
      summarise what landed and what didn't.
 - **Finish — ask Shepherd, then merge.** When the unit is done (full suite green, everything

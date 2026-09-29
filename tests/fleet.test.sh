@@ -208,4 +208,112 @@ printf 'not-a-number' > "$CC_STATUS_DIR/.panel-alive"
 assert_eq "alive: a garbled heartbeat exits 6" "6" "$(cat "$TMP/al4.rc")"
 alive
 
+# ---- `wait`: the driver hears what its units do from one stream (2026-09-29) ----
+# Build program unit 23. The driver stitched idle notices, unit messages and status polls
+# together to learn what a unit had done. Shepherd now appends each unit's events to
+# <id>.events.jsonl, numbered; `wait` prints the ones after --after and exits, so the driver runs
+# it in the background and is woken by it. The Shepherd side is played here by writing that file.
+WB="bwait1"
+jq -n --arg repo "$REPOP" '{v:1, id:"bwait1", nonce:"n-w", driver:{session_id:"drv", pid:"4242", name:"repo-drv"},
+  repo:$repo, commonDir:($repo + "/.git"), title:"Relay", mergeWhenGreen:true, at:1, phase:"approved",
+  units:[{type:"feat", slug:"alpha", task:"t", branch:"feat/alpha"}, {type:"fix", slug:"beta", task:"t", branch:"fix/beta"}]}' > "$FD/$WB.json"
+EV="$FD/$WB.events.jsonl"
+ev() { # <seq> <unit> <event> <text>
+  jq -nc --argjson s "$1" --arg u "$2" --arg e "$3" --arg t "$4" \
+    '{v:1, seq:$s, at:1, batch:"bwait1", unit:$u, event:$e, key:($e + ":" + ($s | tostring)), session:"repo-a1", text:$t}' >> "$EV"
+}
+alive
+(cd "$REPO" && env -u CLAUDE_CODE_SESSION_ID bash "$F" wait --batch "$WB" > "$TMP/w0.out" 2>&1; echo $? > "$TMP/w0.rc")
+assert_eq "wait: outside a Claude Code session -> refused" "2" "$(cat "$TMP/w0.rc")"
+fleet other w1 wait --batch "$WB" --wait-max 1
+assert_eq "wait: only the driving session may wait on its units" "2" "$(cat "$TMP/w1.rc")"
+fleet drv w2 wait --batch "$WB" --after x
+assert_eq "wait: --after takes a number" "2" "$(cat "$TMP/w2.rc")"
+fleet drv w3 wait --batch nosuch --wait-max 1
+assert_eq "wait: an unknown batch is refused" "2" "$(cat "$TMP/w3.rc")"
+
+fleet drv w4 wait --batch "$WB" --wait-max 1
+assert_eq "wait: nothing relayed yet, wait-max runs out -> exit 4" "4" "$(cat "$TMP/w4.rc")"
+
+ev 1 alpha tab_opened "its tab is open: session repo-a1"
+ev 2 alpha turn_finished "finished its turn"
+ev 3 beta asked "Keep the old name?"
+fleet drv w5 wait --batch "$WB"
+assert_eq "wait: events waiting -> exit 0 at once" "0" "$(cat "$TMP/w5.rc")"
+assert_eq "wait: ...one line per event, numbered, with its unit and event" "3" \
+  "$(grep -c -E '^#[0-9]+ (alpha|beta) [a-z_]+: ' "$TMP/w5.out")"
+grep -q '^#3 beta asked: Keep the old name?$' "$TMP/w5.out" && got=yes || got=no
+assert_eq "wait: ...the event's text as Shepherd wrote it" "yes" "$got"
+grep -q -- "--after 3" "$TMP/w5.out" && got=yes || got=no
+assert_eq "wait: ...and how to wait for the next ones (--after the last number)" "yes" "$got"
+
+fleet drv w6 wait --batch "$WB" --after 2
+assert_eq "wait: --after N prints only the events after N" "#3" "$(grep -o -E '^#[0-9]+' "$TMP/w6.out" | tr '\n' ' ' | sed 's/ $//')"
+
+fleet drv w7 wait --batch "$WB" --after 3 --wait-max 1
+assert_eq "wait: none after N -> waits, and wait-max runs out -> exit 4" "4" "$(cat "$TMP/w7.rc")"
+
+fleet drv w8 wait --batch "$WB" --after 3 & bg=$!
+sleep 0.4
+[ -e "$TMP/w8.rc" ] && got=exited || got=waiting
+assert_eq "wait: in the background it waits for the next event" "waiting" "$got"
+ev 4 alpha merge_requested "asked to merge feat/alpha at abc1234"
+wait $bg
+assert_eq "wait: ...and wakes the driver when one lands (exit 0)" "0" "$(cat "$TMP/w8.rc")"
+assert_eq "wait: ...printing just that one" "#4" "$(grep -o -E '^#[0-9]+' "$TMP/w8.out" | tr '\n' ' ' | sed 's/ $//')"
+
+printf '{"v":1,"seq":5,"unit":"al' >> "$EV"
+fleet drv w9 wait --batch "$WB" --after 4 --wait-max 1
+assert_eq "wait: a torn last line (Shepherd mid-write) is not an event yet" "4" "$(cat "$TMP/w9.rc")"
+printf '\n' >> "$EV"
+
+printf '%s' "$(( $(date +%s) - 600 ))" > "$CC_STATUS_DIR/.panel-alive"
+fleet drv w10 wait --batch "$WB" --after 4
+assert_eq "wait: Shepherd stopped (stale heartbeat) -> exit 6" "6" "$(cat "$TMP/w10.rc")"
+fleet drv w11 wait --batch "$WB" --after 3
+assert_eq "wait: ...but events already relayed are still printed first (exit 0)" "0" "$(cat "$TMP/w11.rc")"
+alive
+
+ev 6 alpha merged "merged into main"
+: > "$FD/$WB.stop"
+fleet drv w12 wait --batch "$WB" --after 4
+assert_eq "wait: the batch stopped with events still unread -> they come first (exit 0)" "0" "$(cat "$TMP/w12.rc")"
+grep -q '^#6 alpha merged' "$TMP/w12.out" && got=yes || got=no
+assert_eq "wait: ...the last unit's merge included" "yes" "$got"
+fleet drv w13 wait --batch "$WB" --after 6
+assert_eq "wait: the batch stopped and nothing left -> exit 5" "5" "$(cat "$TMP/w13.rc")"
+rm -f "$FD/$WB.stop"
+update_phase() { jq --arg p "$1" '.phase = $p' "$FD/$WB.json" > "$FD/$WB.json.tmp" && mv "$FD/$WB.json.tmp" "$FD/$WB.json"; }
+update_phase stopped
+fleet drv w14 wait --batch "$WB" --after 6
+assert_eq "wait: cc-fleet.sh stop's own phase counts as stopped too -> exit 5" "5" "$(cat "$TMP/w14.rc")"
+update_phase approved
+case "$(bash "$F" 2>&1)" in *"wait --batch"*) got=yes ;; *) got=no ;; esac
+assert_eq "wait: the usage line names it" "yes" "$got"
+
+# ---- a stopped batch's files, events included, are pruned a week after its stop (2026-09-29) ----
+# The events file is one more file per batch; nothing ever removed a batch's files. cc-fleet.sh
+# prunes the batches whose stop marker is over a week old when it proposes a new one (Shepherd's
+# FX.removeBatch does the same in its tick) -- every file of the batch, and no other batch's.
+OLD_TS="$(date -v-8d +%Y%m%d%H%M 2>/dev/null || date -d '8 days ago' +%Y%m%d%H%M)"
+for f in bold1.json bold1.state.json bold1.events.jsonl bold1.tab-alpha.answer bold1.stop \
+         bold12.json bold12.events.jsonl brecent.json brecent.events.jsonl brecent.stop; do
+  printf '{}' > "$FD/$f"
+done
+touch -t "$OLD_TS" "$FD/bold1.stop"
+batch '{"title":"Later","units":[{"type":"docs","slug":"prune-probe","task":"t"}]}'
+fleet drv pr propose --file "$TMP/batch.json" --wait-max 1
+assert_eq "prune: a proposal still goes out (exit 4 at wait-max)" "4" "$(cat "$TMP/pr.rc")"
+left="$(cd "$FD" && ls bold1.* 2>/dev/null | tr '\n' ' ')"
+assert_eq "prune: every file of a batch stopped over a week ago is gone, its events too" "" "$left"
+assert_eq "prune: ...never another batch's that shares its prefix" "bold12.events.jsonl bold12.json" \
+  "$(cd "$FD" && ls bold12.* | tr '\n' ' ' | sed 's/ $//')"
+assert_eq "prune: ...nor a batch stopped since" "brecent.events.jsonl brecent.json brecent.stop" \
+  "$(cd "$FD" && ls brecent.* | tr '\n' ' ' | sed 's/ $//')"
+# the same file set is cc-lib.sh's cc_fleet_remove_batch, the bash twin of FX.removeBatch
+( export CC_FLEET_DIR="$FD"; . "$ROOT/cc-lib.sh"; cc_fleet_remove_batch brecent; cc_fleet_remove_batch '../x'; cc_fleet_remove_batch '' )
+assert_eq "cc_fleet_remove_batch: removes the batch's files" "" "$(cd "$FD" && ls brecent.* 2>/dev/null | tr '\n' ' ')"
+assert_eq "cc_fleet_remove_batch: ...a bad id removes nothing" "bold12.events.jsonl bold12.json" \
+  "$(cd "$FD" && ls bold12.* | tr '\n' ' ' | sed 's/ $//')"
+
 finish

@@ -351,9 +351,49 @@ approval from you per batch**:
    `outcomes` (the slugs in each bucket), a per-unit `units` list (branch, outcome, result,
    session) and your `grant` as Shepherd recorded it. A unit with its session and no result is
    *working*; one with no session yet is *unopened*; *merged-dirty* counts as merged.
+7. The driver follows its units with **`cc-fleet.sh wait --batch <id>`**, run in the background, and
+   re-runs it after each wake (see [The batch relay](#the-batch-relay-what-the-driver-hears)).
 
 Your approval lives in Shepherd (`~/.claude/cc-fleet/<id>.state.json`), never in the proposal's
-own file. `"fleet": { "enabled": false }` makes Shepherd ignore proposals.
+own file. `"fleet": { "enabled": false }` makes Shepherd ignore proposals. A batch stopped (or
+denied) more than a week ago is pruned, every file of it: Shepherd does it in its tick, and
+`cc-fleet.sh propose` does it before writing a new proposal.
+
+### The batch relay: what the driver hears
+
+A driver used to piece together what its units had done from idle notices, the units' messages and
+`cc-fleet.sh status` polls. Shepherd now tells it, from one stream. Every tick, after it has decided
+which cards need you, it turns each unit's live state into **events**, each told once:
+
+| Event | When |
+|---|---|
+| `tab_opened` | the unit's tab is open and Shepherd knows its session |
+| `asked` | the unit asked a question (held on its card, or in its tab's picker) |
+| `turn_finished` | one of the unit's turns ended |
+| `merge_requested` | it asked to merge (again, for a new commit) |
+| `gate_red` | its test gate failed or timed out, or the base is red after its merge |
+| `checker_fail` | [the checker](#the-checker-a-read-only-review-of-every-merge-request) failed it |
+| `merged` / `blocked` | Shepherd recorded its outcome (a blocked unit's note comes with it) |
+| `session_ended` | its session is gone: no card, and its process has exited |
+
+They're appended, numbered, to `~/.claude/cc-fleet/<id>.events.jsonl`. A unit is followed by its
+session id, or by its process when a `/clear` gave it a new one. The file is Shepherd's memory, so a
+reload never tells an event twice. A stopped batch keeps relaying for 10 minutes, long enough for the
+last merge to land.
+
+`cc-fleet.sh wait --batch <id> [--after N] [--wait-max S]` prints the events after number `N`
+(all of them without `--after`), one line each, and the command to wait for the next ones:
+
+```
+#4 alpha merge_requested: asked to merge feat/alpha at abc1234
+#5 beta asked: Keep the old name?
+Next: ~/.claude/cc-fleet.sh wait --batch b17592… --after 5   (in the background again)
+```
+
+It exits **0** with events, **4** when `--wait-max` seconds pass with none (no limit by default),
+**5** once the batch has stopped and nothing is left, and **6** when Shepherd isn't running. Events
+already relayed are printed before a 5 or a 6. Only the session that proposed the batch can wait on
+it. Run in the background, it wakes the driver with exactly the news.
 
 `~/.claude/cc-fleet.sh alive` tells a session whether Shepherd is running (see
 [Troubleshooting](troubleshooting.md#is-shepherd-running)).

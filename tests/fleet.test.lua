@@ -336,5 +336,78 @@ local bsum = I.drv.fleet and type(I.drv.fleet.summary) == "table" and table.conc
 check("the driver's review groups the batch's units by outcome  (" .. bsum .. ")",
       bsum:find("alpha", 1, true) ~= nil and bsum:find("beta", 1, true) ~= nil
       and type(I.drv.fleet.outcomes) == "table" and I.drv.fleet.units[1].outcome ~= nil)
+
+-- ---- the batch relay: each unit's events, once each, for cc-fleet.sh wait (2026-09-29) ----
+-- Build program unit 23. The driver learned what a unit did by stitching idle notices, unit
+-- messages and status polls together. The tick now turns each unit's live state into events
+-- (core.unitEvent) and appends them, numbered, to <id>.events.jsonl -- which `wait` relays.
+do
+  local function events(id)
+    local out, raw = {}, read(FD .. "/" .. id .. ".events.jsonl") or ""
+    for line in raw:gmatch("[^\n]+") do
+      local okd, e = pcall(json.decode, line)
+      if okd and type(e) == "table" then out[#out + 1] = e end
+    end
+    return out
+  end
+  local function said(list)
+    local t = {}
+    for _, e in ipairs(list) do t[#t + 1] = tostring(e.seq) .. ":" .. tostring(e.unit) .. ":" .. tostring(e.event) end
+    return table.concat(t, " ")
+  end
+  write(FD .. "/b4.json", json.encode({ v = 1, id = "b4", nonce = "n-b4", driver = { session_id = "drv", pid = "4242", name = "A-drv" },
+    repo = "/r/A", commonDir = "/r/A/.git", title = "Relay", mergeWhenGreen = false, at = now, phase = "approved",
+    units = { { type = "feat", slug = "eps", task = "Add eps.", branch = "feat/eps" },
+              { type = "fix", slug = "zeta", task = "Fix zeta.", branch = "fix/zeta" } } }))
+  write(FD .. "/b4.state.json", json.encode({ grant = { approved = true, grantMerge = false, at = now },
+    units = { eps = { session = { id = "ue", name = "A-e", pid = "5010" } },
+              zeta = { session = { id = "uz-old", name = "A-z", pid = "5011" } } } }))
+  status("ue", "/r/A/.claude/worktrees/eps", "5010", { status = "working", since = now - 30 })
+  -- zeta ran /clear: a new session id in the same process, and its turn has ended
+  status("uz-new", "/r/A/.claude/worktrees/zeta", "5011", { status = "done", since = now - 20 })
+  fx._fleetState.b4 = nil
+  tick()
+  local e1 = events("b4")
+  check("the tick relays each unit's events, numbered  (" .. said(e1) .. ")",
+        said(e1) == "1:eps:tab_opened 2:zeta:tab_opened 3:zeta:turn_finished")
+  check("...a unit whose session changed id links by its process (session_pid)", e1[3] and e1[3].session == "A-z")
+  check("...every line says its batch and a line of text", e1[1] and e1[1].batch == "b4" and type(e1[1].text) == "string" and e1[1].text ~= "")
+  tick()
+  check("a steady state relays nothing more", #events("b4") == 3)
+  status("ue", "/r/A/.claude/worktrees/eps", "5010", { status = "done", since = now - 5 })
+  tick(); tick()
+  check("eps's turn ends: one event, the next number  (" .. said(events("b4")) .. ")",
+        said(events("b4")) == "1:eps:tab_opened 2:zeta:tab_opened 3:zeta:turn_finished 4:eps:turn_finished")
+  -- a reload forgets everything in memory; the file is the memory
+  fx._fleetRelay = {}
+  tick()
+  check("after a reload nothing is told twice", #events("b4") == 4)
+  -- eps's session ends: no tile, and its process is gone
+  os.remove(T .. "/status/ue.json")
+  local realProbe = fx.probeAlive
+  fx.probeAlive = function(pids) local o = {} for p in pairs(pids or {}) do o[p] = (p ~= "5010") end return o end
+  tick()
+  fx.probeAlive = realProbe
+  local e5 = events("b4")
+  check("a unit whose session is gone -> session_ended  (" .. said(e5) .. ")", e5[5] and e5[5].unit == "eps" and e5[5].event == "session_ended" and e5[5].seq == 5)
+  tick()
+  check("...once", #events("b4") == 5)
+  -- a running batch is never pruned; one stopped over a week ago goes, its events with it
+  write(FD .. "/b5.json", json.encode({ v = 1, id = "b5", nonce = "n-b5", driver = { session_id = "drv", pid = "4242", name = "A-drv" },
+    repo = "/r/A", commonDir = "/r/A/.git", title = "Old", mergeWhenGreen = false, at = now - 30 * 86400, phase = "stopped",
+    units = { { type = "feat", slug = "eta", task = "t", branch = "feat/eta" } } }))
+  write(FD .. "/b5.state.json", json.encode({ grant = { approved = true, stopped = true, stoppedAt = now - 8 * 86400, at = now - 30 * 86400 }, units = {} }))
+  write(FD .. "/b5.events.jsonl", '{"v":1,"seq":1,"unit":"eta","event":"merged","key":"result:merged"}\n')
+  write(FD .. "/b5.stop", "")
+  fx._fleetState.b5 = nil
+  tick()
+  check("a batch stopped over a week ago is pruned, its events file too",
+        read(FD .. "/b5.json") == nil and read(FD .. "/b5.state.json") == nil and read(FD .. "/b5.events.jsonl") == nil and read(FD .. "/b5.stop") == nil)
+  check("...while a batch stopped just now keeps its files", read(FD .. "/b1.json") ~= nil and read(FD .. "/b1.state.json") ~= nil)
+  check("...and a running one keeps its events", #events("b4") == 5)
+  local s1 = decoded(FD .. "/b1.state.json")
+  check("Stop records when the batch stopped (the prune's clock)", s1 and s1.grant and tonumber(s1.grant.stoppedAt) ~= nil)
+end
+
 check("no keystroke anywhere", taps == 0)
 finish()

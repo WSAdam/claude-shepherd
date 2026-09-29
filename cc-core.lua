@@ -3890,6 +3890,170 @@ function M.batchView(batch, grant, state)
   return v
 end
 
+-- ---- The batch relay (2026-09-29, build program unit 23) ----------------------------------
+-- The driver used to learn what its units did by stitching idle notices, unit messages and
+-- `cc-fleet.sh status` polls together. The tick now turns each unit's live state into events,
+-- appended (numbered) to cc-fleet/<id>.events.jsonl, and `cc-fleet.sh wait` relays them. Each
+-- event is told ONCE: its key (the event plus what makes it this occurrence -- the turn's
+-- `since`, the request's at|sha) goes into the unit's memo, and the memo is rebuilt from the
+-- file itself after a reload (M.parseUnitEvents), so a restart never re-tells anything.
+M.UNIT_EVENTS = { "tab_opened", "asked", "turn_finished", "merge_requested", "gate_red",
+                  "checker_fail", "merged", "blocked", "session_ended" }
+M.UNIT_EVENT_TEXT_CHARS = 300
+
+-- One line of text: control characters (newlines included) become spaces, then capped.
+local function relayLine(s, n)
+  s = tostring(s or ""):gsub("%c+", " ")
+  return capChars(s, n or M.UNIT_EVENT_TEXT_CHARS)
+end
+
+-- The first line of a block of text, found with a plain find (never a *-quantified pattern).
+local function relayFirstLine(s)
+  if type(s) ~= "string" or s == "" then return nil end
+  local nl = s:find("\n", 1, true)
+  local first = nl and s:sub(1, nl - 1) or s
+  return first ~= "" and first or nil
+end
+
+-- The tile that is this unit's session: by session id (the tile's session_id or key), else by
+-- its process -- a /clear starts a new session id in the same claude process, and session_pid
+-- survives it. A remote tile is never a unit's.
+function M.unitTile(us, tiles)
+  local s = type(us) == "table" and type(us.session) == "table" and us.session or nil
+  if not s then return nil end
+  local id = (type(s.id) == "string" and s.id ~= "") and s.id or nil
+  local pid = tostring(s.pid or ""):match("^%d+$")
+  local byPid
+  for _, it in ipairs(type(tiles) == "table" and tiles or {}) do
+    if type(it) == "table" and not it.remote then
+      if id and (it.session_id == id or it.key == id) then return it end
+      if pid and not byPid and tostring(it.session_pid or "") == pid then byPid = it end
+    end
+  end
+  return byPid
+end
+
+-- A unit's new events this tick, in lifecycle order, and its memo with their keys added.
+--   seen = the keys already told for this unit (nil = none); us = Shepherd's state for the unit;
+--   it = its linked tile (nil when none links); gone = its session is known to have ended.
+-- Returns events ({ event, key, text }) and the memo -- the SAME table when nothing is new, so a
+-- steady state costs nothing and writes nothing.
+function M.unitEvent(seen, us, it, gone)
+  seen = type(seen) == "table" and seen or {}
+  us = type(us) == "table" and us or {}
+  local out = {}
+  local s = type(us.session) == "table" and us.session or nil
+  if not s then return out, seen end
+  local sid = tostring(s.id or s.pid or "")
+  local name = (type(s.name) == "string" and s.name ~= "") and s.name or sid
+  local function emit(event, key, text)
+    if not seen[key] then out[#out + 1] = { event = event, key = key, text = relayLine(text) } end
+  end
+  emit("tab_opened", "tab:" .. sid, "its tab is open: session " .. name)
+  local m = type(it) == "table" and type(it.merge) == "table" and it.merge or nil
+  if type(it) == "table" then
+    local since = tostring(tonumber(it.since) or "")
+    -- a question (cc-ask.sh's hold or the tab's own picker): keyed by when it was asked, so a
+    -- hold that lapses back to the picker is the same question, not a second one
+    local p = type(it.pending) == "table" and it.pending or nil
+    local q = p and type(p.ask) == "table" and p.ask[1] or nil
+    if it.status == "approval" and type(q) == "table" then
+      emit("asked", "ask:" .. since, tostring(q.question or q.header or "a question"))
+    end
+    if it.status == "done" then
+      local label = (type(it.turnLabel) == "string" and it.turnLabel ~= "") and it.turnLabel or nil
+      emit("turn_finished", "turn:" .. since, "finished its turn" .. (label and (" (" .. label .. ")") or ""))
+    end
+    if m then
+      local mk = tostring(m.at or "") .. "|" .. tostring(m.sha or "")
+      local branch = tostring(m.branch or "its branch")
+      if m.phase == "requested" then
+        emit("merge_requested", "merge:" .. mk, "asked to merge " .. branch .. (m.sha and (" at " .. tostring(m.sha)) or ""))
+      end
+      local g = type(m.gate) == "table" and m.gate or nil
+      if g and (g.state == "failed" or g.state == "timedOut") then
+        local how = (g.state == "timedOut") and "timed out" or ("exited " .. tostring(g.code or "?"))
+        local first = relayFirstLine(g.fails)
+        local where = (m.phase == "merged") and (tostring(m.base or "the base") .. " is red after the merge of " .. branch .. ": ")
+          or ("the test gate is red for " .. branch .. ": ")
+        emit("gate_red", "gate:" .. tostring(m.phase) .. ":" .. mk,
+             where .. tostring(g.command or "the gate") .. " " .. how .. (first and (" -- " .. first) or ""))
+      end
+    end
+    local c = type(it.checker) == "table" and it.checker or nil
+    if c and c.state == "done" and c.verdict == "fail" then
+      emit("checker_fail", "checker:" .. tostring(c.doneAt or c.at or ""),
+           "the checker failed it: " .. tostring(c.summary or "no summary"))
+    end
+  end
+  if us.result == "merged" or us.result == "merged-dirty" then
+    emit("merged", "result:merged", (us.result == "merged-dirty") and "merged, with leftovers in its worktree" or "merged")
+  elseif us.result == "blocked" then
+    local note = m and m.phase == "blocked" and type(m.note) == "string" and m.note ~= "" and m.note or nil
+    emit("blocked", "result:blocked", "blocked" .. (note and (": " .. note) or ""))
+  end
+  if gone then emit("session_ended", "ended:" .. sid, "its session " .. name .. " has ended") end
+  if #out == 0 then return out, seen end
+  local nxt = {}
+  for k in pairs(seen) do nxt[k] = true end
+  for _, e in ipairs(out) do nxt[e.key] = true end
+  return out, nxt
+end
+
+-- The events file read back: the last whole event's number and each unit's told keys. A torn
+-- last line (Shepherd was mid-write when it stopped) is not an event; `torn` says the next write
+-- must start a fresh line. Lines are walked with find (see the whole-lines trap in CLAUDE.md).
+function M.parseUnitEvents(raw)
+  local memo = { seq = 0, seen = {} }
+  if type(raw) ~= "string" or raw == "" then return memo end
+  local pos, n = 1, #raw
+  while pos <= n do
+    local nl = raw:find("\n", pos, true)
+    if not nl then memo.torn = true; break end
+    local line = raw:sub(pos, nl - 1)
+    pos = nl + 1
+    local ok, e = pcall(M.json.decode, line)
+    if ok and type(e) == "table" and type(e.unit) == "string" and type(e.key) == "string" then
+      local seq = tonumber(e.seq)
+      if seq and seq > memo.seq then memo.seq = math.floor(seq) end
+      memo.seen[e.unit] = memo.seen[e.unit] or {}
+      memo.seen[e.unit][e.key] = true
+    end
+  end
+  return memo
+end
+
+-- One line of the events file (no newline of its own; the writer adds it).
+function M.unitEventLine(id, seq, unit, session, e, at)
+  return M.json.encode({ v = 1, seq = seq, at = at, batch = id, unit = unit, event = e.event, key = e.key,
+                         session = session, text = e.text })
+end
+
+-- Every file in cc-fleet/ that belongs to batch `id`: "<id>." and anything after it -- the
+-- proposal, Shepherd's state, the stop marker, decisions, tab requests and answers, the relayed
+-- events and their temps. Never another batch's ("b1." is not a prefix of "b12.json").
+function M.batchFiles(names, id)
+  local out = {}
+  if type(id) ~= "string" or not id:match("^b%w+$") then return out end
+  local prefix = id .. "."
+  for _, n in ipairs(type(names) == "table" and names or {}) do
+    if type(n) == "string" and n:sub(1, #prefix) == prefix then out[#out + 1] = n end
+  end
+  return out
+end
+
+-- Is this batch old enough to prune? A stopped batch `keep` seconds after its stop (Shepherd's
+-- grant.stoppedAt, else the stop marker's time -- never a guess), a denied one after its answer.
+-- A running batch, or a proposal nobody answered, is kept.
+function M.batchPruneDue(grant, stopMarkerAt, now, keep)
+  if type(grant) ~= "table" then return false end
+  now, keep = tonumber(now) or 0, tonumber(keep) or 0
+  local at
+  if grant.stopped then at = tonumber(grant.stoppedAt) or tonumber(stopMarkerAt)
+  elseif grant.denied then at = tonumber(grant.at) end
+  return at ~= nil and now - at > keep
+end
+
 -- ---- Lockscreen board (what the lock overlay draws) -------------------------
 -- The lock is up for hours while the fleet keeps working, so the overlay answers
 -- one question at a glance: is anything running, and does anything want me? Both

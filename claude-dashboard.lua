@@ -3773,6 +3773,7 @@ function FX.batchStop(driverKey, id)
   local state = FX.fleetState(id)
   state.grant = state.grant or {}
   state.grant.stopped = true
+  state.grant.stoppedAt = state.grant.stoppedAt or FX.now()   -- the relay's grace and the prune's clock
   FX.saveFleetState(id)
   FX.mergeAlert("⏹ Batch stopped -- no more tabs, and no merges on its grant")
   return true
@@ -3802,6 +3803,7 @@ end
 function FX.fleetFinish(id, b, why)
   local state = FX.fleetState(id)
   state.grant.stopped = true
+  state.grant.stoppedAt = state.grant.stoppedAt or FX.now()
   state.grant.finished = why
   FX.saveFleetState(id)
   FX.writeFile(FX.FLEET_DIR .. "/" .. id .. ".stop", "")
@@ -3942,6 +3944,20 @@ function FX.annotateFleet(list, cfg, bannerOn)
   if core.config(cfg, "fleet.enabled", true) == false then FX._fleetBatches = {}; return end
   local batches = FX.readFleet()
   FX._fleetBatches = batches
+  -- 2026-09-29: a batch stopped (or denied) over FLEET_KEEP_STOPPED ago goes, every file of it --
+  -- its relayed events too. A batch stopped before stoppedAt was recorded takes its stop marker's
+  -- time once (unknown: already past the relay's grace), so the clock is never a guess.
+  for id in pairs(batches) do
+    local g = FX.fleetState(id).grant
+    if type(g) == "table" and g.stopped and not tonumber(g.stoppedAt) then
+      g.stoppedAt = FX.fleetStopMarkerAt(id) or (FX.now() - FX.FLEET_RELAY_GRACE)
+      FX.saveFleetState(id)
+    end
+    if core.batchPruneDue(g, nil, FX.now(), FX.FLEET_KEEP_STOPPED) then
+      FX.removeBatch(id)
+      batches[id] = nil
+    end
+  end
   if next(batches) == nil then return end
   local byKey, byPid, opening = {}, {}, {}
   for _, it in ipairs(list or {}) do
@@ -3957,6 +3973,7 @@ function FX.annotateFleet(list, cfg, bannerOn)
     if FX.readFile(FX.FLEET_DIR .. "/" .. id .. ".stop") and not (state.grant and state.grant.stopped) then
       state.grant = state.grant or {}
       state.grant.stopped = true
+      state.grant.stoppedAt = state.grant.stoppedAt or FX.now()
       FX.saveFleetState(id)
     end
     local finished, fwhy = core.batchFinished(b, state.grant, state, FX.fleetRepoGone(b))
@@ -3995,6 +4012,106 @@ function FX.annotateFleet(list, cfg, bannerOn)
         FX.mergeAlert(view.line .. "  (" .. name .. ") -- review it on its card")
         if bannerOn then FX.notify("Shepherd · " .. name, view.line, { key = it.key }) end
       end
+    end
+  end
+end
+
+-- ---- The batch relay (2026-09-29, build program unit 23) ----------------------------------
+-- Each approved batch's units, turned into events once each (core.unitEvent) and appended,
+-- numbered, to <FLEET_DIR>/<id>.events.jsonl for `cc-fleet.sh wait` to relay to the driver.
+-- Runs after FX.annotateNeedsYou, so every annotation (merge, checker, ask) is on the tiles.
+-- The file is the memory: after a reload the memo is rebuilt from it (core.parseUnitEvents).
+FX.FLEET_RELAY_GRACE = 600          -- seconds a stopped batch still relays (its last merge landing)
+FX.FLEET_KEEP_STOPPED = 7 * 86400   -- a stopped (or denied) batch's files are pruned this long after
+FX._fleetRelay = {}                 -- id -> { seq, seen = { slug -> { key -> true } }, torn }
+
+function FX.fleetEventsPath(id) return FX.FLEET_DIR .. "/" .. id .. ".events.jsonl" end
+
+function FX.fleetStopMarkerAt(id)
+  local at
+  pcall(function() at = hs.fs.attributes(FX.FLEET_DIR .. "/" .. id .. ".stop", "modification") end)
+  return tonumber(at)
+end
+
+-- Every file of one batch (core.batchFiles), its events included, and what Shepherd holds for it.
+-- cc-lib.sh's cc_fleet_remove_batch removes the same set: KEEP THE TWO IN SYNC.
+function FX.removeBatch(id)
+  local files = core.batchFiles(FX.readDir(FX.FLEET_DIR), id)
+  for _, n in ipairs(files) do os.remove(FX.FLEET_DIR .. "/" .. n) end
+  FX._fleetState[id], FX._fleetRelay[id] = nil, nil
+  print("[cc-dashboard] 🧹 pruned batch " .. tostring(id) .. " (" .. #files .. " files)")
+end
+
+function FX.fleetRelayMemo(id)
+  local m = FX._fleetRelay[id]
+  if not m then
+    m = core.parseUnitEvents(FX.readFile(FX.fleetEventsPath(id)))
+    FX._fleetRelay[id] = m
+  end
+  return m
+end
+
+-- The lines go out in ONE write; Shepherd is the file's only writer and `wait` reads whole lines
+-- only. A torn last line left by a crash is closed off first, so it can't swallow the next event.
+function FX.appendFleetEvents(id, lines)
+  local m = FX.fleetRelayMemo(id)
+  local f = io.open(FX.fleetEventsPath(id), "a")
+  if not f then return false end
+  local ok = pcall(function() f:write((m.torn and "\n" or "") .. table.concat(lines, "\n") .. "\n") end)
+  f:close()
+  if ok then m.torn = nil end
+  return ok
+end
+
+function FX.relayFleet(list)
+  local batches = FX._fleetBatches
+  if type(batches) ~= "table" or next(batches) == nil then return end
+  local now = FX.now()
+  -- each unit that has its session, linked to its tile; the ones with no tile get ONE ps between them
+  local work, want = {}, {}
+  for id, b in pairs(batches) do
+    local state = FX.fleetState(id)
+    local g = state.grant
+    if type(g) == "table" and g.approved
+       and (not g.stopped or now - (tonumber(g.stoppedAt) or 0) < FX.FLEET_RELAY_GRACE) then
+      for _, u in ipairs(b.units) do
+        local us = state.units[u.slug]
+        if type(us) == "table" and type(us.session) == "table" then
+          local it = core.unitTile(us, list)
+          local pid = (not it) and tostring(us.session.pid or ""):match("^%d+$") or nil
+          if pid then want[pid] = true end
+          work[#work + 1] = { id = id, slug = u.slug, us = us, it = it, pid = pid }
+        end
+      end
+    end
+  end
+  if #work == 0 then return end
+  local alive = (next(want) ~= nil) and FX.probeAlive(want) or {}
+  local pending, ids = {}, {}
+  for _, w in ipairs(work) do
+    local memo = FX.fleetRelayMemo(w.id)
+    -- gone = no tile links AND ps says its process is gone (unknown is never gone)
+    local evs, seen = core.unitEvent(memo.seen[w.slug], w.us, w.it, w.pid ~= nil and alive[w.pid] == false)
+    if #evs > 0 then
+      local p = pending[w.id]
+      if not p then p = { lines = {}, seq = memo.seq, seen = {} }; pending[w.id] = p; ids[#ids + 1] = w.id end
+      p.seen[w.slug] = seen
+      for _, e in ipairs(evs) do
+        p.seq = p.seq + 1
+        p.lines[#p.lines + 1] = core.unitEventLine(w.id, p.seq, w.slug, w.us.session.name, e, now)
+        print("[cc-dashboard] ⇉ batch " .. w.id .. " unit " .. w.slug .. " #" .. p.seq .. ": " .. e.event)
+      end
+    end
+  end
+  -- the memo moves only once its lines are on disk: a failed write is retried next tick
+  for _, id in ipairs(ids) do
+    local p = pending[id]
+    if FX.appendFleetEvents(id, p.lines) then
+      local memo = FX._fleetRelay[id]
+      memo.seq = p.seq
+      for slug, seen in pairs(p.seen) do memo.seen[slug] = seen end
+    else
+      print("[cc-dashboard] ❌ couldn't append batch " .. id .. "'s events to " .. FX.fleetEventsPath(id))
     end
   end
 end
@@ -21049,6 +21166,12 @@ function FX._refreshBody()
   -- whether each card really needs Adam (a live counterpart AND an affordance that changes
   -- something) or is only a heads-up; the ranking and the panel both read what it stamps.
   FX.annotateNeedsYou(list)
+  -- 2026-09-29: the batch relay -- each batch unit's events, once each, for `cc-fleet.sh wait`.
+  -- After the needs-you stamp, so every source (merge, checker, ask) is already on the tiles.
+  do
+    local okf, errf = pcall(FX.relayFleet, list)
+    if not okf then print("[cc-dashboard] ❌ batch relay failed: " .. tostring(errf)) end
+  end
   -- Two sessions in ONE project used to render as IDENTICAL cards: the name (and
   -- any relabel) is per-projectKey, so nothing on either tile said which chat it
   -- was. Give each of those tiles its own chat title -- and only those, so a
