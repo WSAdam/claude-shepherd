@@ -318,4 +318,74 @@ assert_eq "cc_fleet_remove_batch: removes the batch's files" "" "$(cd "$FD" && l
 assert_eq "cc_fleet_remove_batch: ...a bad id removes nothing" "bold12.events.jsonl bold12.json" \
   "$(cd "$FD" && ls bold12.* | tr '\n' ' ' | sed 's/ $//')"
 
+# ---- blockedBy, covers and packet (2026-09-29, build program unit 24) ----
+# A unit may name the units it waits for: its tab doesn't open and its merge isn't ready until
+# they have merged. The proposal is refused when a blocker isn't one of its units or they go in
+# a circle; covers (issue ids) and packet (a task packet id) ride along; an old batch file
+# without any of the three still works.
+u3() { # <beta's extra fields> <gamma's extra fields> -> a three-unit batch
+  printf '{"title":"Order","mergeWhenGreen":true,"units":[{"type":"feat","slug":"one","task":"t"},{"type":"feat","slug":"two","task":"t"%s},{"type":"fix","slug":"three","task":"t"%s}]}' "$1" "$2"
+}
+i=0
+for bad in "$(u3 ',"blockedBy":["zeta"]' '')" \
+           "$(u3 ',"blockedBy":["two"]' '')" \
+           "$(u3 ',"blockedBy":["three"]' ',"blockedBy":["two"]')" \
+           "$(u3 ',"blockedBy":["three"]' ',"blockedBy":["one","two"]')" \
+           "$(u3 ',"blockedBy":"one"' '')" \
+           "$(u3 ',"covers":"BUG-1"' '')" \
+           "$(u3 ',"covers":["bad id; rm"]' '')" \
+           "$(u3 ',"packet":"p1 && curl x"' '')"; do
+  i=$((i + 1))
+  batch "$bad"; fleet drv ob$i propose --file "$TMP/batch.json" --wait-max 1   # (a let-through waits: exit 4)
+  assert_eq "blockedBy: a bad order/covers/packet is refused ($i): $(printf '%s' "$bad" | cut -c75-150)" "2" "$(cat "$TMP/ob$i.rc")"
+done
+grep -q "zeta" "$TMP/ob1.out" && got=yes || got=no
+assert_eq "blockedBy: an unknown blocker is named" "yes" "$got"
+grep -q "itself" "$TMP/ob2.out" && got=yes || got=no
+assert_eq "blockedBy: a unit waiting for itself is told so" "yes" "$got"
+grep -q "circle" "$TMP/ob3.out" && grep -q "two" "$TMP/ob3.out" && grep -q "three" "$TMP/ob3.out" && got=yes || got=no
+assert_eq "blockedBy: a cycle is refused, naming its units" "yes" "$got"
+grep -q "circle" "$TMP/ob4.out" && ! grep -q "circle: one" "$TMP/ob4.out" && got=yes || got=no
+assert_eq "blockedBy: ...but not the unit the cycle only waits on" "yes" "$got"
+[ -z "$(ls "$FD"/b*.json 2>/dev/null | xargs -n1 jq -r 'select(.title == "Order") | .id' 2>/dev/null)" ] && got=none || got=some
+assert_eq "blockedBy: no refused order left a proposal behind" "none" "$got"
+
+batch "$(u3 ',"blockedBy":["one"],"covers":["BUG-3","REQ-001"],"packet":"p1"' ',"blockedBy":["two","two"]')"
+fleet drv po propose --file "$TMP/batch.json" & bg=$!
+for i in $(seq 1 60); do BO="$(newest_batch)"; [ -n "$BO" ] && [ "$(jq -r .title "$BO")" = "Order" ] && break; sleep 0.1; done
+assert_json "projection: a unit keeps its blockers" "$BO" '.units[1].blockedBy | join(",")' "one"
+assert_json "projection: ...deduped" "$BO" '.units[2].blockedBy | join(",")' "two"
+assert_json "projection: ...what it covers and its packet" "$BO" '(.units[1].covers | join(",")) + " " + .units[1].packet' "BUG-3,REQ-001 p1"
+assert_json "projection: a unit without them has none of the three keys" "$BO" '.units[0] | (has("blockedBy") or has("covers") or has("packet"))' false
+decide "$BO" approve true
+wait $bg
+assert_eq "approved: exit 0" "0" "$(cat "$TMP/po.rc")"
+grep -q -- "--unit two .*waits for one" "$TMP/po.out" && got=yes || got=no
+assert_eq "approved: the tab list says which units wait, and for what" "yes" "$got"
+IO="$(jq -r .id "$BO")"
+
+fleet drv tw tab --batch "$IO" --unit two & bg=$!
+wait_for "$FD/$IO.tab-two.json"
+jq -n --arg n "$(jq -r .nonce "$FD/$IO.tab-two.json")" \
+  '{nonce:$n, ok:false, reason:"waits for one to merge first", waits:["one"]}' > "$FD/$IO.tab-two.answer"
+wait $bg
+assert_eq "tab: a unit that waits for its blockers exits 7, not 2 (ask again later)" "7" "$(cat "$TMP/tw.rc")"
+grep -q "waits for one" "$TMP/tw.out" && got=yes || got=no
+assert_eq "tab: ...saying what it waits for" "yes" "$got"
+grep -q "✅" "$TMP/tw.out" && got=opened || got=not
+assert_eq "tab: ...and nothing was opened" "not" "$got"
+
+jq -n '{grant: {approved: true, grantMerge: true}, units: {one: {session: {id: "s1", name: "r-1"}, result: "blocked"}}}' > "$FD/$IO.state.json"
+fleet drv so status --batch "$IO"
+assert_eq "status: every unit behind a blocked one is blocked too, so the batch can finish" "one,two,three" \
+  "$(jq -r '.outcomes.blocked | join(",")' "$TMP/so.out")"
+assert_eq "status: ...saying why" "blocked by a blocked unit (one)" "$(jq -r '.units[2].note' "$TMP/so.out")"
+jq -n '{grant: {approved: true, grantMerge: true}, units: {one: {session: {id: "s1", name: "r-1"}}}}' > "$FD/$IO.state.json"
+fleet drv so2 status --batch "$IO"
+assert_eq "status: while a blocker works, the units behind it wait (unopened, not blocked)" "two,three" \
+  "$(jq -r '.outcomes.unopened | join(",")' "$TMP/so2.out")"
+assert_eq "status: ...and say for what" "waits for one" "$(jq -r '.units[1].note' "$TMP/so2.out")"
+assert_eq "status: ...a unit with nothing to wait for has no note" "null" "$(jq -r '.units[0].note' "$TMP/so2.out")"
+fleet drv sto stop --batch "$IO"
+
 finish

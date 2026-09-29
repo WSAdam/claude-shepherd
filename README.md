@@ -128,6 +128,8 @@ The automatic behaviours here are off until you turn them on, except handoff not
   the unit's changed tests run on the merge-base without its fix, and the review says whether they fail.
 - [**Claude drives a batch**](docs/merging-and-batches.md#claude-drives-a-batch): a session proposes
   several units, you approve once, and it opens their tabs and hands out the tasks.
+- [**Overlap radar & unit order**](docs/merging-and-batches.md#overlap-radar-and-unit-order): worktrees
+  that touch the same files are flagged with which to merge first, and a batch unit can wait for others.
 - [**Tab bridge**](docs/merging-and-batches.md#the-tab-bridge): a small VS Code extension that
   closes or selects exactly one Claude tab, so finished units close their own tabs.
 

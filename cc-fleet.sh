@@ -5,12 +5,16 @@
 #   cc-fleet.sh propose --file <batch.json> [--wait-max <seconds>]
 #       batch.json = {"title": "...", "mergeWhenGreen": true|false,
 #                     "units": [{"type": "feat|fix|ui|docs", "slug": "...", "task": "..."}]}   (1-8 units)
+#       Optional per unit (2026-09-29): "blockedBy": ["<slug>", ...] -- the units it waits for
+#       (its tab opens, and its merge is ready, only once they have merged; an unknown slug or a
+#       circle is refused), "covers": ["<issue id>", ...] and "packet": "<packet id>".
 #       Run it from inside the repo, in the BACKGROUND, and end the turn: Claude Code wakes the
 #       session when Adam answers. Exit 0 BATCH APPROVED, 3 DENIED (+ note), 4 still waiting
 #       (--wait-max), 5 withdrawn, 6 Shepherd isn't running, 2 refused (the reason is printed).
 #   cc-fleet.sh tab --batch <id> --unit <slug> [--wait-max 120]
 #       Shepherd opens an empty Claude tab in the repo's window and answers with the new
 #       session's name and the message to send it (SendMessage). Driver only; approved batches only.
+#       Exit 7 = the unit waits for its blockedBy units to merge: nothing opened, ask again later.
 #   cc-fleet.sh status --batch <id>     Shepherd's view of the units, grouped by outcome (JSON)
 #   cc-fleet.sh wait --batch <id> [--after N] [--wait-max S]
 #       The units' events Shepherd relayed after #N (tab opened, asked a question, turn finished,
@@ -97,6 +101,21 @@ cmd_propose() {
   problems="$(jq -r '
     def slugok: type == "string" and test("^[a-z0-9][a-z0-9._-]{0,39}$") and (test("\\.\\.") | not)
                 and (test("\\.$") | not) and (test("\\.lock$") | not);
+    # 2026-09-29: the optional unit fields (core.parseBatch checks the same)
+    def coverok: type == "string" and test("^[A-Za-z0-9#][A-Za-z0-9._:#/-]{0,59}$");
+    def packetok: type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$");
+    # The blockers that go in a circle, peeled like core.batchOrderProblem: units whose blockers
+    # are all gone, then units nothing left waits for; what remains is the circle.
+    def circle:
+      { left: . }
+      | until(.stop or (.left | length) == 0;
+          .left as $l
+          | [ $l | to_entries[]
+              | select((.value | all(. as $b | $l | has($b) | not))
+                       or (.key as $k | [ $l[][] ] | any(. == $k) | not))
+              | .key ] as $peel
+          | if ($peel | length) == 0 then .stop = true else .left = ($l | delpaths([ $peel[] | [.] ])) end)
+      | .left | keys;
     if type != "object" then "not a JSON object" else
       [ (if (.title | type) != "string" or (.title | length) < 1 or (.title | length) > 120 then "title must be 1-120 characters" else empty end),
         (if has("mergeWhenGreen") and (.mergeWhenGreen | type) != "boolean" then "mergeWhenGreen must be true or false" else empty end),
@@ -104,8 +123,27 @@ cmd_propose() {
         ((.units // []) | if type == "array" then .[] else empty end
           | (if (.type | IN("feat", "fix", "ui", "docs")) | not then "unit \(.slug // "?"): type must be feat, fix, ui or docs" else empty end),
             (if (.slug | slugok) | not then "unit \(.slug // "?"): slug must be lower-case letters, digits, . _ - (max 40)" else empty end),
-            (if (.task | type) != "string" or (.task | length) < 1 or (.task | length) > 4000 then "unit \(.slug // "?"): task must be 1-4000 characters" else empty end)),
-        (if ((.units // []) | type) == "array" and ((.units | map(.slug) | unique | length) != (.units | length)) then "slugs must be unique" else empty end)
+            (if (.task | type) != "string" or (.task | length) < 1 or (.task | length) > 4000 then "unit \(.slug // "?"): task must be 1-4000 characters" else empty end),
+            (if has("blockedBy") and ((.blockedBy | type) != "array" or (.blockedBy | length) > 8 or (.blockedBy | all(slugok) | not))
+             then "unit \(.slug // "?"): blockedBy must be a list of up to 8 unit slugs" else empty end),
+            (if has("covers") and ((.covers | type) != "array" or (.covers | length) > 50 or (.covers | all(coverok) | not))
+             then "unit \(.slug // "?"): covers must be a list of up to 50 issue ids (letters, digits and # . _ : / -)" else empty end),
+            (if has("packet") and (.packet | packetok | not)
+             then "unit \(.slug // "?"): packet must be a packet id (letters, digits and . _ -, at most 40)" else empty end)),
+        (if ((.units // []) | type) == "array" and ((.units | map(.slug) | unique | length) != (.units | length)) then "slugs must be unique" else empty end),
+        # 2026-09-29: blockedBy names units of THIS batch, never itself, and never goes in a circle
+        (if ((.units // []) | type) == "array" then
+           (.units | map(.slug)) as $known
+           | ( (.units[] | . as $u | (if (.blockedBy | type) == "array" then .blockedBy[] else empty end)
+                | if . == $u.slug then "unit \($u.slug) can'"'"'t wait for itself"
+                  elif (. as $b | $known | any(. == $b)) | not then "unit \($u.slug) waits for '"'"'\(.)'"'"', which isn'"'"'t one of the batch'"'"'s units"
+                  else empty end),
+               ( ([ .units[] | { key: (.slug | tostring), value: (if (.blockedBy | type) == "array" then [ .blockedBy[] | strings ] else [] end) } ]
+                  | from_entries | circle) as $left
+                 | if ($left | length) > 0
+                   then "blockedBy goes in a circle: \([ .units[].slug | select(. as $s | $left | any(. == $s)) ] | join(", ")) -- none of them could ever start"
+                   else empty end ) )
+         else empty end)
       ] | .[] end' "$file" 2>&1)" || problems="the batch file isn't valid JSON"
   [ -z "$problems" ] || { echo "❌ cc-fleet: the batch was refused:"; printf '  %s\n' "$problems"; exit 2; }
 
@@ -131,7 +169,10 @@ cmd_propose() {
      --arg repo "$main" --arg common "$common" --argjson at "$now" '
     { v: 1, id: $id, nonce: $nonce, driver: { session_id: $sid, pid: $pid, name: $dname },
       repo: $repo, commonDir: $common, title: .title, mergeWhenGreen: (.mergeWhenGreen // false),
-      units: [ .units[] | { type, slug, task, branch: (.type + "/" + .slug) } ], at: $at, phase: "proposed" }' \
+      units: [ .units[] | { type, slug, task, branch: (.type + "/" + .slug) }
+               + (if has("blockedBy") then { blockedBy: (.blockedBy | reduce .[] as $b ([]; if index([$b]) then . else . + [$b] end)) } else {} end)
+               + (if has("covers") then { covers } else {} end)
+               + (if has("packet") then { packet } else {} end) ], at: $at, phase: "proposed" }' \
      "$file" > "$tmp" && mv "$tmp" "$bf" || refuse "couldn't write the proposal in $FLEET_DIR"
   echo "⏳ Proposed batch $id ($(jq -r '.units | length' "$bf") units) to Adam in Shepherd. Waiting for his answer..."
 
@@ -157,7 +198,11 @@ cmd_propose() {
     echo "Merges are NOT delegated: each unit stops at 'ready to merge' for Adam's click."
   fi
   echo "For each unit, open its tab, then SendMessage the printed session the printed message (notify_when_idle: true):"
-  jq -r --arg id "$id" '.units[] | "  ~/.claude/cc-fleet.sh tab --batch \($id) --unit \(.slug)"' "$bf"
+  jq -r --arg id "$id" '.units[] | "  ~/.claude/cc-fleet.sh tab --batch \($id) --unit \(.slug)"
+    + (if ((.blockedBy // []) | length) > 0 then "   (waits for \(.blockedBy | join(", ")) to merge first)" else "" end)' "$bf"
+  if jq -e '.units | any((.blockedBy // []) | length > 0)' "$bf" >/dev/null 2>&1; then
+    echo "A unit that waits isn't opened until its blockers have merged: its tab command exits 7 until then -- open the others first."
+  fi
   echo "Follow them with ~/.claude/cc-fleet.sh wait --batch $id in the background; it wakes you with each unit's events."
   echo "After each wake, run it again with the --after it prints (never poll ListAgents)."
   echo "When every unit has merged or blocked: ~/.claude/cc-fleet.sh stop --batch $id, then summarise for Adam."
@@ -193,6 +238,12 @@ cmd_tab() {
   ans="$(wait_answer "$FLEET_DIR/$id.tab-$slug.answer" "$nonce" "$req" "$waitmax")"; rc=$?
   rm -f "$req"
   [ "$rc" -eq 0 ] || refuse "Shepherd didn't open the tab within ${waitmax}s"
+  # 2026-09-29: blockedBy -- a unit whose blockers haven't all merged waits (exit 7), apart from a refusal
+  if [ "$(printf '%s' "$ans" | jq -r '.ok != true and ((.waits // []) | length) > 0')" = "true" ]; then
+    echo "⏸ cc-fleet: unit $slug $(printf '%s' "$ans" | jq -r '.reason // "waits for its blockers to merge first"') -- nothing was opened."
+    echo "Ask again once they have merged (~/.claude/cc-fleet.sh status --batch $id shows each unit's outcome)."
+    exit 7
+  fi
   if [ "$(printf '%s' "$ans" | jq -r '.ok == true')" != "true" ]; then
     refuse "Shepherd couldn't open unit $slug's tab: $(printf '%s' "$ans" | jq -r '.reason // "no reason given"')"
   fi
@@ -222,9 +273,24 @@ cmd_status() {
       elif (($us.session | type) == "object") then "working"
       else "unopened" end;
     ($s.units | if type == "object" then . else {} end) as $su
-    | [ $b[0].units[] | . as $u | ($su[$u.slug] | if type == "object" then . else {} end) as $us
-        | { slug: $u.slug, branch: $u.branch, outcome: outcome($us),
-            result: ($us.result // null), session: ($us.session.name? // null) } ] as $units
+    # 2026-09-29: blockedBy, the way core.batchUnitOutcomeIn reads it -- a unit with no tab behind
+    # a blocked one (directly or down a chain) is blocked too, so the batch can finish; one
+    # behind a unit that has not merged yet waits.
+    | ($b[0].units | map({ key: .slug, value: (.blockedBy // []) }) | from_entries) as $g
+    | def raw($x): outcome(($su[$x] | if type == "object" then . else {} end));
+      def via($x; $seen):
+        if ($seen | any(. == $x)) then null
+        else (first(($g[$x] // [])[] as $bl | raw($bl) as $o
+                    | if $o == "blocked" then $bl elif $o != "merged" then (via($bl; $seen + [$x]) // empty) else empty end)
+              // null) end;
+    [ $b[0].units[] | . as $u | ($su[$u.slug] | if type == "object" then . else {} end) as $us
+        | outcome($us) as $o
+        | (if $o == "unopened" then via($u.slug; []) else null end) as $v
+        | [ ($u.blockedBy // [])[] | select(raw(.) != "merged") ] as $w
+        | { slug: $u.slug, branch: $u.branch, outcome: (if $v then "blocked" else $o end),
+            result: ($us.result // null), session: ($us.session.name? // null),
+            note: (if $o != "unopened" then null elif $v then "blocked by a blocked unit (\($v))"
+                   elif ($w | length) > 0 then "waits for \($w | join(", "))" else null end) } ] as $units
     | ([ "merged", "blocked", "working", "unopened" ]
        | map(. as $k | { key: $k, value: [ $units[] | select(.outcome == $k) | .slug ] }) | from_entries) as $o
     | { batch: $b[0].id, title: $b[0].title, phase: $b[0].phase, repo: $b[0].repo,

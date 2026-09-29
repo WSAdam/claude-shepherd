@@ -1893,6 +1893,8 @@ function M.instancesPayload(stackKey, members, hidden, worktrees, opts)
       -- ready to merge: just what the row shows (the review lives in the detail panel)
       merge = (type(it.merge) == "table") and { phase = it.merge.phase, line = it.merge.line,
         needsYou = it.merge.needsYou, ready = it.merge.ready, queued = it.merge.queued, sent = it.merge.sent } or nil,
+      -- 2026-09-29: the overlap radar's line for its worktree (FX.annotateRadar)
+      overlap = (type(it.overlap) == "table" and type(it.overlap.line) == "string") and it.overlap.line or nil,
     }
   end
   for _, it in ipairs(members or {}) do row(it, false) end
@@ -1914,22 +1916,27 @@ function M.instancesPayload(stackKey, members, hidden, worktrees, opts)
     if opts.mainRoot and type(it.originDir) == "string" and M.normDir(it.originDir) == opts.mainRoot then mainHosts = true end
   end
   if mainHosts then taken[opts.mainRoot] = true end
+  -- 2026-09-29: opts.radar = the repo's overlap radar (M.radarView), for the idle rows and the order
+  local radar = (type(opts.radar) == "table" and type(opts.radar.byPath) == "table") and opts.radar or nil
   local idle = {}
   for _, w in ipairs(worktrees or {}) do
     -- 2026-09-29: a red-first scratch worktree (M.isRedFirstScratch) exists only while its run
     -- does -- never a worktree to Open
     if type(w) == "table" and w.path and not w.bare and not w.prunable and not taken[M.normDir(w.path)]
        and not M.isRedFirstScratch(w.path) then
+      local ov = radar and radar.byPath[M.normDir(w.path)] or nil
       idle[#idle + 1] = { path = w.path, folder = w.path:match("([^/]+)/?$"), branch = w.branch,
         detached = w.detached and true or nil, isMain = (opts.mainRoot ~= nil and w.path == opts.mainRoot) or nil,
-        pending = type(opts.pending) == "table" and opts.pending[w.path] and true or nil }
+        pending = type(opts.pending) == "table" and opts.pending[w.path] and true or nil,
+        overlap = ov and ov.line or nil }
     end
   end
   local finishedN = 0
   for _, r in ipairs(rows) do if r.selectable and r.finished then finishedN = finishedN + 1 end end
   return { stackKey = stackKey, stackName = opts.stackName, repoKey = opts.repoKey, mainRoot = opts.mainRoot,
            gone = (#rows == 0), members = rows, worktrees = idle, listError = opts.listError,
-           canNewTab = opts.canNewTab and true or nil, finishedN = finishedN }
+           canNewTab = opts.canNewTab and true or nil, finishedN = finishedN,
+           mergeOrder = radar and radar.orderLine or nil }
 end
 
 -- ---- New worktree tab (2026-09-10) ------------------------------------------------
@@ -2472,10 +2479,13 @@ end
 -- Is the request mergeable right now, by Shepherd's own reading of git? `item` is the
 -- session's tile (its current worktree). Main having moved on is fine: the session rebases.
 -- `gate` (optional) is this request's test-gate record: { state, code, command }.
-function M.mergeReadiness(req, facts, item, gate)
+-- `order` (optional, 2026-09-29) is what the unit's batch says about it (M.fleetMergeWaits): a
+-- unit whose blockers haven't all merged isn't ready, on Adam's click or on the batch's grant.
+function M.mergeReadiness(req, facts, item, gate, order)
   local out = { ready = false, checking = false, problems = {} }
   if type(facts) ~= "table" then out.checking = true; return out end
   local p = out.problems
+  if type(order) == "string" and order ~= "" then p[#p + 1] = order end
   if not facts.listed then p[#p + 1] = "the worktree isn't one of this repo's worktrees any more" end
   if facts.head ~= req.branch then
     p[#p + 1] = "the worktree is on " .. (facts.head or "a detached HEAD") .. ", not " .. req.branch
@@ -2724,6 +2734,8 @@ end
 -- v.checker; q.checkerWait / q.checkerHold say a delegated merge waits for it or is held by it.
 -- 2026-09-29: `redFirst` (optional) is the red-first proof's verdict (M.redFirstVerdict), shown
 -- as v.redFirst while the request waits. WARN ONLY: nothing below reads it.
+-- 2026-09-29: q.overlap (optional) is the overlap radar's word on this worktree (M.radarReview):
+-- the other worktrees it shares files or conflicts with, and the merge order. A hint only.
 function M.mergeView(req, rd, facts, q, gate, checker, redFirst)
   q = q or {}
   local v = {
@@ -2773,6 +2785,7 @@ function M.mergeView(req, rd, facts, q, gate, checker, redFirst)
   -- and is read by nothing else -- not readiness, not the card line, not "needs you".
   if req.phase == "requested" then v.claims = M.mergeClaimCheck(req, facts) end
   if req.phase == "requested" and type(redFirst) == "table" then v.redFirst = redFirst end
+  if req.phase == "requested" and type(q.overlap) == "table" then v.overlap = q.overlap end
   v.line = M.mergeLine(v)
   v.needsYou = M.mergeNeedsYou(v)
   return v
@@ -3717,6 +3730,70 @@ local function batchSlugOk(s)
      and not s:find("..", 1, true) and not s:match("%.$") and not s:match("%.lock$")
 end
 
+-- ---- blockedBy, covers and packet (2026-09-29, build program unit 24) ----
+-- Three OPTIONAL unit fields, threaded through cc-fleet.sh's check and projection, parseBatch,
+-- batchView and fleetUnitMessage. blockedBy = the slugs of the units this one waits for: its tab
+-- opens, and its merge is ready, only once every one of them has merged. covers = the issue ids
+-- the unit covers (unit 25 reads them); packet = the id of its task packet (unit 26). A batch
+-- file written before them has none of the three and parses exactly as it did.
+M.BATCH_MAX_BLOCKERS = 8
+M.BATCH_MAX_COVERS = 50
+
+local function batchCoverOk(s)
+  return type(s) == "string" and #s <= 60 and s:match("^[%w#][%w._:#/-]*$") ~= nil
+end
+local function batchPacketOk(s)
+  return type(s) == "string" and #s <= 40 and s:match("^[%w][%w._-]*$") ~= nil
+end
+-- A JSON list of strings that each pass `ok`, deduped in order; nil when it isn't one.
+local function batchStringList(t, ok, max)
+  if type(t) ~= "table" then return nil end
+  local n = 0
+  for _ in pairs(t) do n = n + 1 end
+  if n ~= #t or #t > max then return nil end
+  local out, seen = {}, {}
+  for _, s in ipairs(t) do
+    if not ok(s) then return nil end
+    if not seen[s] then seen[s] = true; out[#out + 1] = s end
+  end
+  return out
+end
+
+-- Is the batch's order sound? nil when it is, else the problem: a blocker that isn't one of the
+-- batch's units (a unit waiting for itself included), or blockers that go in a circle -- then
+-- nothing in the circle could ever start. The circle is found by peeling: units whose blockers
+-- are all gone go first, then units nothing left waits for; whatever remains IS the circle
+-- (a unit that only waits on it is peeled off the other end, so it isn't named).
+function M.batchOrderProblem(units)
+  local known = {}
+  for _, u in ipairs(units or {}) do known[u.slug] = true end
+  for _, u in ipairs(units or {}) do
+    for _, b in ipairs(u.blockedBy or {}) do
+      if b == u.slug then return "unit " .. u.slug .. " can't wait for itself" end
+      if not known[b] then return "unit " .. u.slug .. " waits for '" .. tostring(b) .. "', which isn't one of the batch's units" end
+    end
+  end
+  local left, n = {}, 0
+  for _, u in ipairs(units or {}) do left[u.slug] = u.blockedBy or {}; n = n + 1 end
+  local changed = true
+  while changed and n > 0 do
+    changed = false
+    for s, bs in pairs(left) do
+      local free = true
+      for _, b in ipairs(bs) do if left[b] then free = false; break end end
+      local waitedOn = false
+      for _, obs in pairs(left) do
+        for _, b in ipairs(obs) do if b == s then waitedOn = true end end
+      end
+      if free or not waitedOn then left[s] = nil; n = n - 1; changed = true end
+    end
+  end
+  if n == 0 then return nil end
+  local circle = {}
+  for _, u in ipairs(units) do if left[u.slug] then circle[#circle + 1] = u.slug end end
+  return "blockedBy goes in a circle: " .. table.concat(circle, ", ") .. " -- none of them could ever start"
+end
+
 function M.parseBatch(raw)
   if type(raw) ~= "string" then return nil end
   local ok, t = pcall(function() return M.json.decode(raw) end)
@@ -3735,8 +3812,23 @@ function M.parseBatch(raw)
     if type(u) ~= "table" or not M.BATCH_TYPES[u.type] or not batchSlugOk(u.slug) or seen[u.slug] then return nil end
     if u.branch ~= u.type .. "/" .. u.slug or type(u.task) ~= "string" or u.task == "" then return nil end
     seen[u.slug] = true
-    units[#units + 1] = { type = u.type, slug = u.slug, branch = u.branch, task = capChars(u.task, 4000) }
+    -- 2026-09-29: the optional fields -- absent is fine, malformed refuses the batch (cc-fleet.sh
+    -- refused it already, so a malformed one was never written by it)
+    local blockedBy = {}
+    if u.blockedBy ~= nil then
+      blockedBy = batchStringList(u.blockedBy, batchSlugOk, M.BATCH_MAX_BLOCKERS)
+      if not blockedBy then return nil end
+    end
+    local covers
+    if u.covers ~= nil then
+      covers = batchStringList(u.covers, batchCoverOk, M.BATCH_MAX_COVERS)
+      if not covers then return nil end
+    end
+    if u.packet ~= nil and not batchPacketOk(u.packet) then return nil end
+    units[#units + 1] = { type = u.type, slug = u.slug, branch = u.branch, task = capChars(u.task, 4000),
+                          blockedBy = blockedBy, covers = covers, packet = u.packet }
   end
+  if M.batchOrderProblem(units) then return nil end
   return { id = t.id, nonce = t.nonce, phase = t.phase, repo = repo, commonDir = repo .. "/.git",
            driver = { session_id = d.session_id, pid = tostring(d.pid or ""), name = type(d.name) == "string" and d.name or "" },
            title = capChars(t.title, 120), mergeWhenGreen = t.mergeWhenGreen == true, units = units,
@@ -3757,7 +3849,58 @@ function M.fleetTabVerdict(batch, grant, state, req)
   if not batchUnit(batch, req.slug) then return false, "the batch has no unit '" .. tostring(req.slug) .. "'" end
   local us = type(state) == "table" and type(state.units) == "table" and state.units[req.slug] or nil
   if type(us) == "table" and us.session then return false, "that unit already has its tab" end
+  -- 2026-09-29: blockedBy -- not until every blocker has merged. The third value lists them, so
+  -- cc-fleet.sh can say "waits" (ask again later) apart from a refusal.
+  local waits, via = M.batchUnitWaits(batch, state, req.slug)
+  if via then return false, "blocked by a blocked unit: " .. via .. " is blocked, so " .. req.slug .. " can't start" end
+  if #waits > 0 then return false, "waits for " .. table.concat(waits, ", ") .. " to merge first", waits end
   return true
+end
+
+-- Where one unit stands against its blockers (2026-09-29): the blockers that haven't merged yet,
+-- in blockedBy order, and -- when one of them, or one of theirs, ended blocked -- that unit. It
+-- will never merge, so this one can never start: "blocked by a blocked unit".
+function M.batchUnitWaits(batch, state, slug)
+  local by = {}
+  for _, u in ipairs(type(batch) == "table" and type(batch.units) == "table" and batch.units or {}) do by[u.slug] = u end
+  local function outcome(s)
+    return M.batchUnitOutcome(type(state) == "table" and type(state.units) == "table" and state.units[s] or nil)
+  end
+  local waits = {}
+  for _, b in ipairs(by[slug] and by[slug].blockedBy or {}) do
+    if outcome(b) ~= "merged" then waits[#waits + 1] = b end
+  end
+  local seen = {}
+  local function via(s)
+    if seen[s] then return nil end
+    seen[s] = true
+    for _, b in ipairs(by[s] and by[s].blockedBy or {}) do
+      local o = outcome(b)
+      if o == "blocked" then return b end
+      if o ~= "merged" then
+        local deeper = via(b)
+        if deeper then return deeper end
+      end
+    end
+    return nil
+  end
+  return waits, via(slug)
+end
+
+-- May this merge request go ahead as far as its batch's order goes? The problem that holds it
+-- (nil when nothing does), matched by BRANCH -- whichever session asks, a unit merges only after
+-- the units it waits for. Only while the batch runs: once Adam stops it, the merges are his.
+function M.fleetMergeWaits(batch, grant, state, req)
+  if type(batch) ~= "table" or type(req) ~= "table" or type(grant) ~= "table" then return nil end
+  if not grant.approved or grant.stopped then return nil end
+  for _, u in ipairs(batch.units or {}) do
+    if u.branch == req.branch then
+      local waits, via = M.batchUnitWaits(batch, state, u.slug)
+      if via then return "blocked by a blocked unit: " .. via .. " is blocked, so " .. u.slug .. " can't merge" end
+      if #waits > 0 then return "waits for " .. table.concat(waits, ", ") .. " to merge first (the batch's blockedBy)" end
+    end
+  end
+  return nil
 end
 
 -- Which session is the tab Shepherd just opened? The one ~/.claude/sessions entry that wasn't
@@ -3778,7 +3921,26 @@ end
 -- who to report to.
 function M.fleetUnitMessage(batch, unit)
   local who = (batch.driver.name ~= "" and batch.driver.name) or "the session that sent this"
+  -- 2026-09-29: what it comes after, what it covers and its packet, when the batch says so
+  local extra = {}
+  if type(unit.blockedBy) == "table" and #unit.blockedBy > 0 then
+    local after = {}
+    for _, s in ipairs(unit.blockedBy) do
+      local b = batchUnit(batch, s)
+      after[#after + 1] = b and b.branch or s
+    end
+    extra[#extra + 1] = "This unit comes after " .. table.concat(after, ", ")
+      .. " (the batch's blockedBy): they have merged, so their changes are on main already."
+  end
+  if type(unit.covers) == "table" and #unit.covers > 0 then
+    extra[#extra + 1] = "It covers: " .. table.concat(unit.covers, ", ") .. "."
+  end
+  if type(unit.packet) == "string" and unit.packet ~= "" then
+    extra[#extra + 1] = "Its task packet: " .. unit.packet .. "."
+  end
+  -- after the task, outside worktreeTabPrompt's 4000-character cap, so a full task can't cut them
   return M.worktreeTabPrompt({ branch = unit.branch, slug = unit.slug }, "Task: " .. unit.task)
+    .. ((#extra > 0) and ("\n\n" .. table.concat(extra, "\n")) or "")
     .. "\n\nThis is unit " .. unit.branch .. " of the batch \"" .. batch.title .. "\" that Adam approved in Shepherd. "
     .. "When the unit is done (suite green, everything committed), finish it with the ready-to-merge "
     .. "protocol in the global CLAUDE.md: ExitWorktree (keep) first, then from the main checkout run "
@@ -3825,11 +3987,23 @@ function M.batchUnitOutcome(us)
 end
 
 -- A batch's units grouped by outcome: four slug lists, each in the batch's own unit order.
+-- 2026-09-29: ...within its batch. A unit with no tab whose blocker (or one of theirs) ended
+-- blocked is blocked too -- "blocked by a blocked unit" -- or the batch could never finish. The
+-- second value is the card's note: that, or which blockers an unopened unit still waits for.
+function M.batchUnitOutcomeIn(batch, state, slug)
+  local us = type(state) == "table" and type(state.units) == "table" and state.units[slug] or nil
+  local o = M.batchUnitOutcome(us)
+  if o ~= "unopened" then return o, nil end
+  local waits, via = M.batchUnitWaits(batch, state, slug)
+  if via then return "blocked", "blocked by a blocked unit (" .. via .. ")" end
+  if #waits > 0 then return o, "waits for " .. table.concat(waits, ", ") end
+  return o, nil
+end
+
 function M.batchOutcomes(batch, state)
   local o = { merged = {}, blocked = {}, working = {}, unopened = {} }
   for _, u in ipairs(type(batch) == "table" and type(batch.units) == "table" and batch.units or {}) do
-    local us = type(state) == "table" and type(state.units) == "table" and state.units[u.slug] or nil
-    local bucket = o[M.batchUnitOutcome(us)]
+    local bucket = o[(M.batchUnitOutcomeIn(batch, state, u.slug))]
     bucket[#bucket + 1] = u.slug
   end
   return o
@@ -3857,6 +4031,9 @@ function M.batchFinished(batch, grant, state, repoGone)
   local o = M.batchOutcomes(batch, state)
   local merged, blocked = #o.merged, #o.blocked
   if #o.working + #o.unopened > 0 or merged + blocked == 0 then return false end
+  -- 2026-09-29: a batch that merged nothing (its first unit blocked, the rest behind it) says so
+  -- without a "0 merged" in front
+  if merged == 0 then return true, blocked .. " blocked" end
   return true, merged .. " merged" .. (blocked > 0 and (", " .. blocked .. " blocked") or "")
 end
 
@@ -3869,11 +4046,15 @@ function M.batchView(batch, grant, state)
   local units = {}
   for _, u in ipairs(batch.units) do
     local us = type(state) == "table" and type(state.units) == "table" and state.units[u.slug] or {}
+    local outcome, note = M.batchUnitOutcomeIn(batch, state, u.slug)
     units[#units + 1] = { type = u.type, slug = u.slug, branch = u.branch, task = capChars(u.task, 300),
                           session = type(us.session) == "table" and us.session.name or nil,
                           opening = us.opening and true or nil,
                           result = type(us.result) == "string" and capChars(us.result, 40) or nil,
-                          outcome = M.batchUnitOutcome(us) }
+                          outcome = outcome, note = note,
+                          -- 2026-09-29: the batch's own word on order, coverage and packet
+                          blockedBy = (type(u.blockedBy) == "table" and #u.blockedBy > 0) and u.blockedBy or nil,
+                          covers = u.covers, packet = u.packet }
   end
   local v = { id = batch.id, title = batch.title, repo = folder, phase = phase, units = units,
               mergeWhenGreen = batch.mergeWhenGreen, grantMerge = grant.grantMerge and true or nil,
@@ -4052,6 +4233,242 @@ function M.batchPruneDue(grant, stopMarkerAt, now, keep)
   if grant.stopped then at = tonumber(grant.stoppedAt) or tonumber(stopMarkerAt)
   elseif grant.denied then at = tonumber(grant.at) end
   return at ~= nil and now - at > keep
+end
+
+-- ---- Overlap radar (2026-09-29, build program unit 24) -----------------------------------
+-- Parallel worktrees of one repo that touch the same files collide at merge time: whichever
+-- merges second rebases into a conflict nobody saw coming. Shepherd scans each repo in the
+-- background (FX.refreshRadar, on the FX.refreshCommits pattern -- never the tick): every linked
+-- worktree's changed files (its branch diff from the main checkout's HEAD, plus its dirty and
+-- untracked files) and, for each pair, `git merge-tree --write-tree --name-only` (git 2.38+),
+-- whose conflicts are the rebase's real ones. The tiles, Instances and the merge review show the
+-- overlapping pairs and which to merge first. A hint only: nothing here holds a merge.
+M.RADAR_MAX_WORKTREES = 10   -- linked worktrees scanned per repo (45 pairs)
+M.RADAR_MAX_FILES = 500      -- paths read per list, per worktree
+M.RADAR_SHOW_FILES = 3       -- names a detail line lists before "and N more"
+
+-- The scan, as one /bin/sh program. $1 = the repo's main checkout, $2 = the most linked worktrees
+-- to scan, $3 = the most paths per list. The main checkout is `worktree list`'s first entry; a
+-- red-first scratch worktree (M.isRedFirstScratch) exists for one run and is skipped. Fewer than
+-- two linked worktrees print only @@base: there is nothing to pair.
+M.RADAR_SH = [=[
+cd "$1" 2>/dev/null || exit 3
+bh=$(git rev-parse -q --verify HEAD 2>/dev/null) || exit 4
+printf '@@base\t%s\t%s\n' "$(git symbolic-ref -q --short HEAD 2>/dev/null)" "$bh"
+list=$(git worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p' | sed 1d | grep -v '/redfirst-[^/]*$' | head -n "$2" |
+  while IFS= read -r w; do h=$(git -C "$w" rev-parse -q --verify HEAD 2>/dev/null) && printf '%s\t%s\n' "$h" "$w"; done)
+[ "$(printf '%s\n' "$list" | grep -c .)" -ge 2 ] || exit 0
+T=$(printf '\t')
+printf '%s\n' "$list" | while IFS="$T" read -r h w; do
+  printf '@@wt\t%s\t%s\t%s\n' "$w" "$(git -C "$w" symbolic-ref -q --short HEAD 2>/dev/null)" "$h"
+  echo @@committed; git -C "$w" -c core.quotepath=off diff --name-only "$bh...$h" 2>/dev/null | head -n "$3"
+  echo @@dirty; git -C "$w" -c core.quotepath=off diff --name-only HEAD 2>/dev/null | head -n "$3"
+  echo @@untracked; git -C "$w" -c core.quotepath=off ls-files --others --exclude-standard 2>/dev/null | head -n "$3"
+done
+i=0
+printf '%s\n' "$list" | while IFS="$T" read -r ha a; do
+  i=$((i+1)); j=0
+  printf '%s\n' "$list" | while IFS="$T" read -r hb b; do
+    j=$((j+1)); [ "$j" -gt "$i" ] || continue
+    printf '@@pair\t%s\t%s\n' "$a" "$b"
+    git -c core.quotepath=off merge-tree --write-tree --name-only --no-messages "$ha" "$hb" 2>/dev/null
+    printf '@@rc\t%s\n' "$?"
+  done
+done
+]=]
+
+-- The argv the scan runs as (core.folderScanShellCommand quotes it and sends stdout to a file).
+function M.radarScanArgv(mainRoot, max)
+  return { "/bin/sh", "-c", M.RADAR_SH, "cc-radar", tostring(mainRoot), tostring(tonumber(max) or M.RADAR_MAX_WORKTREES),
+           tostring(M.RADAR_MAX_FILES) }
+end
+
+-- Every line of `s`, the last one too when it has no newline. A plain find walk: the output can
+-- end mid-line, and a *-quantified whole-lines pattern backtracks quadratically on that line.
+local function radarLines(s, fn)
+  local i, n = 1, #s
+  while i <= n do
+    local j = s:find("\n", i, true)
+    local line = s:sub(i, (j or (n + 1)) - 1)
+    if line:sub(-1) == "\r" then line = line:sub(1, -2) end
+    fn(line)
+    if not j then break end
+    i = j + 1
+  end
+end
+
+-- The scan's output -> { base = { branch, sha }, worktrees = { { path, branch, sha, committed,
+-- dirty, untracked } }, pairs = { { a, b, rc, conflicts, unknown } } }. merge-tree's output is its
+-- merged tree's OID, then one conflicted path per line (with messages on, a blank line and prose
+-- follow: never paths). Exit 0 = clean, 1 = conflicts; anything else (an old git without
+-- --write-tree) is unknown, never clean. A red-first scratch worktree never counts.
+function M.parseRadarScan(out)
+  local scan = { worktrees = {}, pairs = {} }
+  if type(out) ~= "string" then return scan end
+  local wt, sec, pair
+  local skip = {}
+  radarLines(out, function(line)
+    local b, s = line:match("^@@base\t([^\t]*)\t(%x*)$")
+    if b then scan.base = { branch = (b ~= "") and b or nil, sha = s }; wt, sec, pair = nil, nil, nil; return end
+    local p, br, sha = line:match("^@@wt\t([^\t]+)\t([^\t]*)\t(%x+)$")
+    if p then
+      p = M.normDir(p)
+      wt, sec, pair = nil, nil, nil
+      if M.isRedFirstScratch(p) then skip[p] = true; return end
+      wt = { path = p, branch = (br ~= "") and br or nil, sha = sha, committed = {}, dirty = {}, untracked = {} }
+      scan.worktrees[#scan.worktrees + 1] = wt
+      return
+    end
+    local name = line:match("^@@(%a+)$")
+    if name == "committed" or name == "dirty" or name == "untracked" then sec = name; pair = nil; return end
+    local a, bb = line:match("^@@pair\t([^\t]+)\t([^\t]+)$")
+    if a then
+      a, bb = M.normDir(a), M.normDir(bb)
+      wt, sec = nil, nil
+      pair = { a = a, b = bb, conflicts = {}, n = 0 }
+      if not (skip[a] or skip[bb] or M.isRedFirstScratch(a) or M.isRedFirstScratch(bb)) then
+        scan.pairs[#scan.pairs + 1] = pair
+      end
+      return
+    end
+    local rc = line:match("^@@rc\t(%d+)$")
+    if rc then
+      if pair then
+        pair.rc = tonumber(rc)
+        if pair.rc ~= 0 and pair.rc ~= 1 then pair.unknown = true; pair.conflicts = {} end
+        pair.n, pair.done = nil, nil
+      end
+      pair = nil
+      return
+    end
+    if pair then
+      pair.n = pair.n + 1
+      if pair.n == 1 and line:match("^%x+$") then return end   -- the merged tree's OID
+      if line == "" then pair.done = true
+      elseif not pair.done then pair.conflicts[#pair.conflicts + 1] = line end
+    elseif wt and sec and line ~= "" then
+      local list = wt[sec]
+      list[#list + 1] = line
+    end
+  end)
+  return scan
+end
+
+local function radarCount(n, one, many) return n .. " " .. ((n == 1) and one or many) end
+local function radarFiles(list)
+  local shown = {}
+  for i = 1, math.min(#list, M.RADAR_SHOW_FILES) do shown[i] = list[i] end
+  return table.concat(shown, ", ") .. ((#list > M.RADAR_SHOW_FILES) and (" and " .. (#list - M.RADAR_SHOW_FILES) .. " more") or "")
+end
+
+-- A parsed scan -> what the panel shows. opts.first = { [worktree path] = true } for worktrees
+-- that already asked to merge: they go first. Otherwise the smaller change goes first (fewer
+-- changed files: less to review, and the bigger one rebases once over it), then by name.
+-- Returns { pairs = { { a, b, aName, bName, shared, conflicts, unknown, first, second, hint } },
+--   byPath = { [path] = { line, lines, n } }, order = { names }, orderLine } -- line for a tile,
+-- lines for the review. Only pairs that share a file or conflict are listed.
+function M.radarView(scan, opts)
+  opts = type(opts) == "table" and opts or {}
+  local first = type(opts.first) == "table" and opts.first or {}
+  local v = { pairs = {}, byPath = {}, order = {} }
+  if type(scan) ~= "table" then return v end
+  v.base = type(scan.base) == "table" and scan.base.branch or nil
+  local files, size, names = {}, {}, {}
+  for _, w in ipairs(scan.worktrees or {}) do
+    local set, n = {}, 0
+    for _, k in ipairs({ "committed", "dirty", "untracked" }) do
+      for _, f in ipairs(w[k] or {}) do if not set[f] then set[f] = true; n = n + 1 end end
+    end
+    files[w.path], size[w.path] = set, n
+    names[w.path] = w.branch or w.path:match("([^/]+)/?$") or w.path
+  end
+  local function before(a, b)
+    local fa, fb = first[a] and 0 or 1, first[b] and 0 or 1
+    if fa ~= fb then return fa < fb end
+    if size[a] ~= size[b] then return size[a] < size[b] end
+    if names[a] ~= names[b] then return names[a] < names[b] end
+    return a < b
+  end
+  local involved, inOrder = {}, {}
+  for _, p in ipairs(scan.pairs or {}) do
+    local a, b = p.a, p.b
+    if files[a] and files[b] then
+      local shared, conflicts = {}, {}
+      for f in pairs(files[a]) do if files[b][f] then shared[#shared + 1] = f end end
+      table.sort(shared)
+      for _, f in ipairs(p.conflicts or {}) do conflicts[#conflicts + 1] = f end
+      table.sort(conflicts)
+      if #shared > 0 or #conflicts > 0 then
+        local x, y = a, b
+        if before(b, a) then x, y = b, a end
+        local why = ""
+        if first[x] and not first[y] then why = " (it asked to merge)"
+        elseif size[x] ~= size[y] then why = " (" .. size[x] .. " files vs " .. size[y] .. ")" end
+        v.pairs[#v.pairs + 1] = { a = a, b = b, aName = names[a], bName = names[b], shared = shared,
+          conflicts = conflicts, unknown = p.unknown or nil, first = names[x], second = names[y],
+          hint = "merge " .. names[x] .. " first" .. why .. ", then rebase " .. names[y] }
+        for _, w in ipairs({ a, b }) do
+          if not involved[w] then involved[w] = true; inOrder[#inOrder + 1] = w end
+        end
+      end
+    end
+  end
+  for _, path in ipairs(inOrder) do
+    local mine = {}
+    for _, pr in ipairs(v.pairs) do
+      if pr.a == path or pr.b == path then mine[#mine + 1] = { pr = pr, other = (pr.a == path) and pr.bName or pr.aName } end
+    end
+    table.sort(mine, function(m1, m2) return m1.other < m2.other end)
+    local lines = {}
+    for _, m in ipairs(mine) do
+      local parts = {}
+      if #m.pr.shared > 0 then parts[#parts + 1] = radarCount(#m.pr.shared, "shared file", "shared files") .. " (" .. radarFiles(m.pr.shared) .. ")" end
+      if #m.pr.conflicts > 0 then parts[#parts + 1] = radarCount(#m.pr.conflicts, "conflict", "conflicts") .. " (" .. radarFiles(m.pr.conflicts) .. ")" end
+      if m.pr.unknown then parts[#parts + 1] = "couldn't check for conflicts (git merge-tree needs git 2.38)" end
+      lines[#lines + 1] = m.other .. ": " .. table.concat(parts, "; ") .. " -- " .. m.pr.hint
+    end
+    local line
+    if #mine == 1 then
+      local pr, counts = mine[1].pr, {}
+      if #pr.shared > 0 then counts[#counts + 1] = radarCount(#pr.shared, "shared file", "shared files") end
+      if #pr.conflicts > 0 then counts[#counts + 1] = radarCount(#pr.conflicts, "conflict", "conflicts") end
+      line = "⚠ overlaps " .. mine[1].other .. ": " .. table.concat(counts, ", ") .. " · merge " .. pr.first .. " first"
+    else
+      local named = {}
+      for i = 1, math.min(#mine, 3) do
+        local pr = mine[i].pr
+        named[i] = mine[i].other .. " (" .. ((#pr.conflicts > 0) and radarCount(#pr.conflicts, "conflict", "conflicts")
+          or radarCount(#pr.shared, "file", "files")) .. ")"
+      end
+      line = "⚠ overlaps " .. #mine .. " worktrees: " .. table.concat(named, ", ")
+        .. ((#mine > 3) and (" and " .. (#mine - 3) .. " more") or "")
+    end
+    v.byPath[path] = { line = line, lines = lines, n = #mine }
+  end
+  table.sort(inOrder, before)
+  for i, path in ipairs(inOrder) do v.order[i] = names[path] end
+  if #v.order >= 2 then v.orderLine = "merge order: " .. table.concat(v.order, " → ") end
+  return v
+end
+
+-- What the merge review shows for one worktree: its overlap lines and the repo's merge order.
+function M.radarReview(view, path)
+  if type(view) ~= "table" or type(view.byPath) ~= "table" or type(path) ~= "string" then return nil end
+  local w = view.byPath[M.normDir(path)]
+  if not w then return nil end
+  return { lines = w.lines, order = view.orderLine }
+end
+
+-- Which repos to scan: every local repo a tile is in, once (its git dir -> its main checkout).
+function M.radarRepos(list)
+  local out = {}
+  for _, it in ipairs(list or {}) do
+    if type(it) == "table" and not it.remote and type(it.repoKey) == "string" and type(it.mainRoot) == "string"
+       and it.mainRoot ~= "" then
+      out[it.repoKey] = it.mainRoot
+    end
+  end
+  return out
 end
 
 -- ---- Lockscreen board (what the lock overlay draws) -------------------------
@@ -16381,6 +16798,9 @@ M.FEATURES = {
   { key = "fleet", cat = "Control", new = true, title = "Claude drives a batch",
     what = "A Claude session proposes a batch of worktree units; you approve it once on its card (and choose whether it may merge them when green). It then opens each unit's tab through Shepherd and hands it its task. Stop batch ends it.",
     why = "Parallel work without opening tabs, pressing Return or clicking every merge -- your one approval is the permission." },
+  { key = "overlap", cat = "Control", new = true, title = "Overlap radar & unit order",
+    what = "Shepherd scans each repo's worktrees in the background: when two touch the same files (committed, uncommitted or new) or git merge-tree says they would conflict, both cards, Instances and the merge review say so, with which to merge first. A batch unit can name the units it waits for (blockedBy): its tab opens, and its merge goes through, only once they have merged.",
+    why = "Collisions between parallel units show up before the second merge runs into them, and a batch runs its units in the order they need." },
   { key = "answers", cat = "Control", new = true, title = "Answer questions from Shepherd",
     what = "When a session asks you something, its card pulses with the question and you get one alert; its answers are buttons right there (and on its Instances row). Your click goes straight to the session -- no tab to find. Several parts or free text: pick per part, then Send answers. Answer in the tab instead hands it back to the tab.",
     why = "A session waiting on you shouldn't wait for you to find its tab -- and you always know when one is." },

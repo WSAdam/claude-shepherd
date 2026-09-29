@@ -3826,6 +3826,20 @@ function FX.fleetUnitTagOf(it)
   return nil
 end
 
+-- 2026-09-29: what a running batch's blockedBy says about this merge request (core.fleetMergeWaits):
+-- the problem that keeps it from being ready, or nil. Every readiness check passes it along.
+function FX.fleetMergeWaits(r)
+  if type(r) ~= "table" then return nil end
+  for id, b in pairs(FX._fleetBatches or {}) do
+    if b.commonDir == r.commonDir then
+      local state = FX.fleetState(id)
+      local why = core.fleetMergeWaits(b, state.grant, state, r)
+      if why then return why end
+    end
+  end
+  return nil
+end
+
 -- The batch (if any) whose grant lets this merge request through on its own.
 function FX.fleetDelegates(r)
   for id, b in pairs(FX._fleetBatches or {}) do
@@ -3984,9 +3998,11 @@ function FX.annotateFleet(list, cfg, bannerOn)
       if raw and not FX._fleetTabs[id .. "|" .. u.slug] then
         local ok, req = pcall(function() return core.json.decode(raw) end)
         if ok and type(req) == "table" and type(req.nonce) == "string" and not FX._fleetAnswered[req.nonce] then
-          local fine, why = core.fleetTabVerdict(b, state.grant, state, { session_id = req.session_id, slug = u.slug })
+          -- 2026-09-29: `waits` = the blockedBy units it still waits for (cc-fleet.sh then exits 7)
+          local fine, why, waits = core.fleetTabVerdict(b, state.grant, state, { session_id = req.session_id, slug = u.slug })
           if not fine then
-            FX.fleetAnswer(id, u.slug, { nonce = req.nonce, ok = false, reason = why })
+            if waits then print("[cc-dashboard] ⏸ unit " .. u.slug .. " of batch " .. id .. " " .. tostring(why)) end
+            FX.fleetAnswer(id, u.slug, { nonce = req.nonce, ok = false, reason = why, waits = waits })
           elseif not opening[b.repo] then
             opening[b.repo] = true
             FX.fleetOpenTab(b, u.slug, req)
@@ -4979,7 +4995,7 @@ function FX.releaseMerge(key)
   local r, it = FX._mergeReqs[key], FX._mergeItems[key]
   if not r then FX._mergeApproved[key] = nil; return false end
   local f = FX.mergeFacts(r, true)
-  local rd = core.mergeReadiness(r, f, it, FX.mergeGate(r, f, loadConfig()))
+  local rd = core.mergeReadiness(r, f, it, FX.mergeGate(r, f, loadConfig()), FX.fleetMergeWaits(r))
   if not rd.ready then
     FX._mergeApproved[key] = nil
     FX.mergeAlert("⚠️ " .. r.branch .. " is no longer ready to merge (" .. tostring(rd.problems[1]) .. ") -- it's waiting for you again")
@@ -5002,7 +5018,7 @@ function FX.mergeApprove(key)
   local r = FX._mergeReqs[key]
   if not r or r.phase ~= "requested" then FX.mergeAlert("⚠️ That merge request is gone"); return false end
   local f = FX.mergeFacts(r, true)
-  local rd = core.mergeReadiness(r, f, FX._mergeItems[key], FX.mergeGate(r, f, loadConfig()))
+  local rd = core.mergeReadiness(r, f, FX._mergeItems[key], FX.mergeGate(r, f, loadConfig()), FX.fleetMergeWaits(r))
   if not rd.ready then
     FX.mergeAlert("⚠️ Can't merge " .. r.branch .. " yet: " .. tostring(rd.problems[1] or "still checking"))
     return false
@@ -5188,7 +5204,7 @@ function FX.annotateMerges(list, cfg, bannerOn)
       local b = FX.fleetDelegates(r)
       -- the test gate gates a delegated merge exactly as it gates Adam's Merge button
       local f = b and FX.mergeFacts(r) or nil
-      if b and core.mergeReadiness(r, f, items[key], FX.mergeGate(r, f, cfg)).ready then
+      if b and core.mergeReadiness(r, f, items[key], FX.mergeGate(r, f, cfg), FX.fleetMergeWaits(r)).ready then
         local crec, cid
         if checkOn then crec, cid = FX.checkerForRequest(key, r, f, cfg) end
         local okc, act, why = core.checkerDelegatedVerdict(crec, cid, checkOn)
@@ -5222,7 +5238,7 @@ function FX.annotateMerges(list, cfg, bannerOn)
     if r.phase == "requested" then
       facts = FX.mergeFacts(r)
       gate = FX.mergeGate(r, facts, cfg)
-      rd = core.mergeReadiness(r, facts, it, gate)
+      rd = core.mergeReadiness(r, facts, it, gate, FX.fleetMergeWaits(r))   -- 2026-09-29: + blockedBy
       -- 2026-09-29: the red-first proof, once the gate passed -- shown in the review, read by nothing else
       redFirst = FX.redFirst(r, facts, gate, cfg)
       -- the checker's review of this commit (started here when verify.onMerge is on; a Verify
@@ -5257,7 +5273,9 @@ function FX.annotateMerges(list, cfg, bannerOn)
     it.merge = core.mergeView(r, rd, facts, { queued = q.queued[key], sent = FX._mergeSent[key] ~= nil,
                                                closeNote = closeNote, canCloseTab = canCloseTab,
                                                checkerHold = hold and hold.act == "hold" and hold.why or nil,
-                                               checkerWait = hold and hold.act ~= "hold" and hold.why or nil },
+                                               checkerWait = hold and hold.act ~= "hold" and hold.why or nil,
+                                               -- 2026-09-29: the overlap radar's word on this worktree (a hint)
+                                               overlap = (r.phase == "requested") and FX.radarReviewFor(r) or nil },
                               gate, core.checkerView(crec, cid), redFirst)
     -- The process actually waiting for Adam's answer (2026-09-17). Kept OFF the tile -- it's a
     -- pid, and the whole tile is what the webview gets -- so FX.annotateNeedsYou reads it here.
@@ -7206,6 +7224,128 @@ function FX.repoWorktrees(commonDir)
   return out or {}, err
 end
 
+-- ---- Overlap radar (2026-09-29, build program unit 24) ----------------------------------
+-- Which of a repo's linked worktrees touch the same files or would conflict, and the order to
+-- merge them in (core.radarView). The scan (core.RADAR_SH: branch diffs, dirty and untracked
+-- files, `git merge-tree` per pair) runs per repo in an hs.task with stdout in a scratch file, on
+-- the FX.refreshCommits pattern: its own timer (FX.radarTimer), one scan per repo at a time, a
+-- hung one reclaimed. The tick only READS the cached scan (FX.annotateRadar). State on FX: the
+-- main chunk is at Lua's 200-local cap.
+FX._radar = {}   -- git common dir -> { root, cache = { ts, data = scan }, inflight = { task, ts } }
+
+function FX.refreshRadar(list, force)
+  local cfg = loadConfig()
+  if core.config(cfg, "radar.enabled", true) == false then
+    for _, st in pairs(FX._radar) do
+      if st.inflight and st.inflight.task then pcall(function() st.inflight.task:terminate() end) end
+    end
+    FX._radar = {}
+    return
+  end
+  local ttl = math.max(30, tonumber(core.config(cfg, "radar.refreshSeconds", 120)) or 120)
+  if force == true then ttl = 0 end
+  local repos = core.radarRepos(list or lastRenderList or {})
+  for cd, st in pairs(FX._radar) do   -- a repo no tile is in any more: drop it (and a scan it runs)
+    if not repos[cd] then
+      if st.inflight and st.inflight.task then pcall(function() st.inflight.task:terminate() end) end
+      FX._radar[cd] = nil
+    end
+  end
+  local now = os.time()
+  for cd, root in pairs(repos) do
+    local st = FX._radar[cd] or {}
+    FX._radar[cd] = st
+    st.root = root
+    local plan = core.prPollPlan(st.cache, st.inflight, now, { ttl = ttl, retryTtl = 30, deadline = 60 })
+    if plan.act == "start" then
+      if plan.killStale and st.inflight and st.inflight.task then
+        pcall(function() st.inflight.task:terminate() end)   -- a hung scan: reclaim the slot
+        print("⚠️ [cc-dashboard] radar: the last scan of " .. root .. " hung past 60s; starting over")
+      end
+      st.inflight = nil
+      FX.radarScan(cd, st, now)
+    end
+  end
+end
+
+function FX.radarScan(cd, st, now)
+  local outFile = FX.scratchFile("radar")
+  local cmd = core.folderScanShellCommand(core.radarScanArgv(st.root, core.RADAR_MAX_WORKTREES), outFile)
+  -- mark the attempt now (debounce) but keep the last good scan until this one lands
+  st.cache = { ts = now, data = st.cache and st.cache.data or nil }
+  local started = hs.timer.secondsSinceEpoch()
+  print("🔍 [cc-dashboard] radar: scanning " .. tostring(st.root))
+  local ok = pcall(function()
+    local t   -- forward-declared: the callback's ownership check needs THIS task as an upvalue
+    t = hs.task.new("/bin/sh", function(code)
+      if FX._radar[cd] ~= st or not core.prCallbackOwns(st.inflight, t) then pcall(os.remove, outFile); return end
+      st.inflight = nil
+      local out = FX.readFile(outFile) or ""
+      pcall(os.remove, outFile)
+      local ms = math.floor((hs.timer.secondsSinceEpoch() - started) * 1000)
+      if code == 0 then
+        local scan = core.parseRadarScan(out)
+        st.cache = { ts = os.time(), data = scan }
+        print("✅ [cc-dashboard] radar: " .. tostring(st.root) .. " -- " .. #scan.worktrees .. " worktree(s), "
+          .. #scan.pairs .. " pair(s) in " .. ms .. "ms")
+        pcall(FX.pushInstances)
+      else
+        print("❌ [cc-dashboard] radar: the scan of " .. tostring(st.root) .. " exited " .. tostring(code)
+          .. " after " .. ms .. "ms; keeping the last one")
+      end
+    end, { "-c", cmd })
+    if not t then error("task create failed") end
+    st.inflight = { task = t, ts = now }
+    t:start()
+  end)
+  if not ok then
+    st.inflight = nil; pcall(os.remove, outFile)
+    print("❌ [cc-dashboard] radar: couldn't start the scan of " .. tostring(st.root))
+  end
+end
+
+-- The repo's radar as the panel shows it, from the cached scan: a worktree whose merge request is
+-- waiting goes first in the order (core.radarView). nil = no scan yet, or the radar is off. The
+-- tick reads it every second for every repo, so it is built once per scan and set of requests.
+function FX.radarViewFor(commonDir)
+  local st = FX._radar[commonDir]
+  local scan = st and st.cache and st.cache.data
+  if not scan then return nil end
+  local first, keys = {}, {}
+  for _, r in pairs(FX._mergeReqs or {}) do
+    if r.commonDir == commonDir and r.phase == "requested" and type(r.worktree) == "string" then
+      local p = core.normDir(r.worktree)
+      if not first[p] then first[p] = true; keys[#keys + 1] = p end
+    end
+  end
+  table.sort(keys)
+  local k = table.concat(keys, "\n")
+  if st.view and st.viewScan == scan and st.viewKey == k then return st.view end
+  st.view, st.viewScan, st.viewKey = core.radarView(scan, { first = first }), scan, k
+  return st.view
+end
+
+-- The merge review's overlap for one request (core.radarReview), or nil.
+function FX.radarReviewFor(r)
+  if type(r) ~= "table" then return nil end
+  return core.radarReview(FX.radarViewFor(r.commonDir), r.worktree)
+end
+
+-- Tick: stamp it.overlap = { line, n } on each tile in a linked worktree that overlaps another.
+-- Reads the cache only -- the scan never runs here.
+function FX.annotateRadar(list)
+  local views = {}
+  for _, it in ipairs(list or {}) do
+    it.overlap = nil
+    local cd = it.repoKey
+    if type(cd) == "string" and type(it.wtRoot) == "string" and not it.isMainWt and not it.remote then
+      if views[cd] == nil then views[cd] = FX.radarViewFor(cd) or false end
+      local w = views[cd] and views[cd].byPath[core.normDir(it.wtRoot)]
+      if w then it.overlap = { line = w.line, n = w.n } end
+    end
+  end
+end
+
 -- The open Instances view (FX._instancesView = {stackKey,...}): its members (visible and
 -- hidden) plus the repo's worktrees with no session, pushed only when the JSON changed.
 -- The tick calls this while the panel is visible; opening the view forces one push.
@@ -7229,6 +7369,7 @@ function FX.pushInstances(force)
   local p = core.instancesPayload(v.stackKey, shown, hidden, v.wt or {}, {
     stackName = v.stackName, repoKey = v.repoKey, mainRoot = v.mainRoot,
     pending = FX._openingWt, listError = v.listError,
+    radar = v.repoKey and FX.radarViewFor(v.repoKey) or nil,   -- 2026-09-29: overlap lines + merge order
     canNewTab = (v.mainRoot ~= nil and FX.tabEditorFor(v.stackKey) ~= nil) })
   local js = hs.json.encode(p)
   if force or js ~= v.json then
@@ -10766,6 +10907,8 @@ local HTML = [[
   #d-merge .dm-redfirst.r-notRed, #d-merge .dm-redfirst.r-couldntRun { color:var(--warn); opacity:1; }
   #d-merge .dm-gatefile { margin-top:4px; white-space:pre-wrap; font-size:11px; color:var(--warn); }
   #d-merge .dm-gatefile:empty { display:none; }
+  #d-merge .dm-overlap { margin-top:4px; white-space:pre-wrap; font-size:11px; color:var(--warn); }
+  #d-merge .dm-overlap:empty { display:none; }
   /* the merge checker (2026-09-29): a model's review -- fail is red, couldn't-run is warn */
   #d-merge .dm-checker, #d-checker { margin-top:4px; white-space:pre-wrap; font-size:11px; }
   #d-checker { display:none; margin:6px 0; padding:6px 10px; border:1px dashed var(--muted, #888); border-radius:8px; }
@@ -11662,6 +11805,9 @@ local HTML = [[
 .in-btn:hover{ border-color:var(--accent); color:var(--text-strong); }
 .in-btn:disabled{ opacity:.5; cursor:default; }
 .in-empty{ padding:12px 6px; color:var(--dim); }
+/* overlap radar (2026-09-29): a worktree's overlap line, and the project's merge order */
+.in-ovl{ font-size:11px; color:var(--warn); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.in-order{ padding:4px 6px 6px; font-size:11px; color:var(--warn); }
 /* Close selected (2026-09-25): a checkbox per row, a bar above the rows */
 .in-ck{ flex:0 0 auto; margin:0; cursor:pointer; accent-color:var(--accent); }
 .in-ck:disabled{ cursor:default; opacity:.3; }
@@ -12125,6 +12271,7 @@ local HTML = [[
         <div class="dm-checker" id="dm-checker"></div>
         <div class="dm-redfirst" id="dm-redfirst"></div>
         <div class="dm-gatefile" id="dm-gatefile"></div>
+        <div class="dm-overlap" id="dm-overlap"></div>
         <div class="dm-problems" id="dm-problems"></div>
         <ul class="dm-commits" id="dm-commits"></ul>
         <ul class="dm-files" id="dm-files"></ul>
@@ -16376,7 +16523,9 @@ local HTML = [[
       sumEl.style.display = sum.length ? "" : "none";
       var units = Array.isArray(b.units) ? b.units : [];
       mergeFillList(document.getElementById("db-units"), units, function(u){
-        return (u.result ? "[" + u.result + "] " : "") + (u.branch || "") + (u.session ? "  ⇢ " + u.session : (u.opening ? "  (opening its tab…)" : "")) + " — " + (u.task || "");
+        // 2026-09-29: u.note = "waits for X" / "blocked by a blocked unit (X)" (core.batchView); textContent
+        return (u.result ? "[" + u.result + "] " : "") + (u.branch || "") + (u.session ? "  ⇢ " + u.session : (u.opening ? "  (opening its tab…)" : ""))
+          + (u.note ? "  (" + u.note + ")" : "") + " — " + (u.task || "");
       });
       var proposed = b.phase === "proposed";
       document.getElementById("db-mergewrap").style.display = proposed ? "" : "none";
@@ -16534,6 +16683,14 @@ local HTML = [[
       // warning; the Merge button below never reads it
       var gfEl = document.getElementById("dm-gatefile");
       gfEl.textContent = (asking && m.gateFile) ? "⚠ " + m.gateFile : "";
+      // 2026-09-29: the overlap radar (core.radarReview) -- other worktrees of this repo that touch
+      // the same files or would conflict, and the order to merge them in. A hint: Merge never reads it.
+      var ovEl = document.getElementById("dm-overlap");
+      var ov = (asking && m.overlap) ? m.overlap : null;
+      var ovLines = (ov && Array.isArray(ov.lines)) ? ov.lines : [];
+      var ovText = ovLines.length ? "Overlap radar (a hint, not a gate): ⚠ overlaps " + ovLines.join("\n⚠ overlaps ")
+        + (ov.order ? "\n" + ov.order : "") : "";
+      ovEl.textContent = ovText;
       // 2026-09-18: the claim check (core.mergeClaimCheck) reads the session's summary against
       // the diff. It is a heuristic over English, so it WARNS here and gates nothing: the Merge
       // button below never looks at it.
@@ -16962,6 +17119,10 @@ local HTML = [[
       if(p.gone || members.length === 0){
         html += '<div class="in-empty">No sessions are running in this project any more.</div>';
       }
+      // 2026-09-29: worktrees that overlap, in the order to merge them (core.radarView)
+      if(p.mergeOrder){
+        html += '<div class="in-order">' + esc(p.mergeOrder) + '</div>';
+      }
       for(var i=0;i<members.length;i++){
         var im = members[i];
         var st = /^[a-z]+$/.test(im.status || "") ? im.status : "idle";
@@ -16997,6 +17158,8 @@ local HTML = [[
              +     '<div class="in-sub">' + esc(instStatusWord(im))
              +       (im.since ? ' · <span class="in-age" data-since="' + esc(im.since) + '">' + esc(fmtAge(im.since)) + '</span>' : '')
              +       (sub ? ' · ' + esc(sub) : '') + '</div>'
+             // 2026-09-29: the overlap radar's line for this worktree (core.instancesPayload)
+             +     (im.overlap ? '<div class="in-ovl">' + esc(im.overlap) + '</div>' : '')
              +     askRow
              +   '</div>'
              +   '<div class="in-acts">'
@@ -17023,6 +17186,7 @@ local HTML = [[
                +       (iw.isMain ? '<span class="in-tag">main</span>' : '')
                +     '</div>'
                +     '<div class="in-sub">' + esc(iw.path) + '</div>'
+               +     (iw.overlap ? '<div class="in-ovl">' + esc(iw.overlap) + '</div>' : '')
                +   '</div>'
                +   '<div class="in-acts"><button class="in-btn" data-inact="open" data-k="' + esc(iw.path) + '"'
                +     (busy ? ' disabled' : '') + '>' + (busy ? 'Opening…' : 'Open') + '</button></div>'
@@ -19257,6 +19421,9 @@ local HTML = [[
       if(it.autopilot){ meta = (meta ? meta + " · " : "") + "🛫 autopilot"; }
       if(it.draining){ meta = (meta ? meta + " · " : "") + "⛔ draining"; }
       if(it.collide){ meta = (meta ? meta + " · " : "") + "⚠ shared dir"; }
+      // 2026-09-29: the overlap radar (FX.annotateRadar) -- another worktree of this repo touches the
+      // same files, and which of them to merge first. Branch names: it rides meta, which is esc()'d.
+      if(it.overlap && it.overlap.line){ meta = (meta ? meta + " · " : "") + it.overlap.line; }
       if(it.hung){ meta = (meta ? meta + " · " : "") + "⏳ stalled"; }
       if(it.looping){ meta = (meta ? meta + " · " : "") + "⟳ looping"; }   // L5 loop watchdog
       if(it.churn){ meta = (meta ? meta + " · " : "") + "♻️" + it.churn; }   // respawn/clear churn today
@@ -21130,6 +21297,12 @@ function FX._refreshBody()
   -- session that entered a sibling worktree finds its launch folder through its origin.
   FX.annotateOrigins(list)   -- the window each session lives in (see FX.annotateOrigins)
   FX.annotateStacks(list, labels, cfg)
+  -- 2026-09-29: the overlap radar's line on each worktree tile -- after the stacks (it reads
+  -- repoKey/wtRoot); a read of the cached scan, never a scan (FX.radarTimer runs those)
+  do
+    local okr, errr = pcall(FX.annotateRadar, list)
+    if not okr then print("[cc-dashboard] ❌ overlap radar stamp failed: " .. tostring(errr)) end
+  end
   -- Ready to merge (2026-09-11): after the stacks (readiness compares the session's current
   -- worktree) and before the stack ranking (a request waiting for Adam leads its card).
   FX.annotateFleet(list, cfg, bannerOn)    -- batch driving (2026-09-11): before merges (delegation)
@@ -21408,6 +21581,9 @@ M.usageTimer = hs.timer.doEvery(60, function() pcall(FX.computeUsage) end)
 -- Commit stats: re-bucket every 60s (midnight, the pace point) and re-run git once the last
 -- count is commits.refreshSeconds old. Both no-op when commits.enabled is false.
 M.commitsTimer = hs.timer.doEvery(60, function() pcall(FX.refreshCommits); pcall(FX.pushCommits) end)
+-- Overlap radar (2026-09-29): each repo's scan is redone once it is radar.refreshSeconds old
+-- (FX.refreshRadar decides per repo); never on the tick.
+FX.radarTimer = hs.timer.doEvery(30, function() pcall(FX.refreshRadar) end)
 -- Official plan-usage window (metadata call, no model tokens): refresh every 180s.
 M.officialUsageTimer = hs.timer.doEvery(OFFICIAL_TTL, function()
   pcall(FX.fetchOfficialUsage)
@@ -21611,6 +21787,7 @@ after(2.0, function() pcall(FX.expireLedger) end)          -- first retention pa
 after(2.5, function() pcall(FX.pruneScratch) end)          -- sweep scan/search orphans from a dead process
 after(3, function() pcall(FX.pruneNotes, FX.now()) end)     -- handoff notes older than 14 days
 after(3.0, function() pcall(FX.refreshCommits) end)        -- first commit count (after the scratch sweep)
+after(4.0, function() pcall(FX.refreshRadar) end)          -- first overlap radar scan (after the first tick)
 
 -- Launch-on-startup defaults ON the first time Shepherd runs (so it comes back after
 -- a restart); the user's later choice in Settings is then respected (the real

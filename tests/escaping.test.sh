@@ -27,6 +27,10 @@ assert_eq "commit project name is esc()'d"       "yes" "$(has 'esc(r.name')"
 # pinned links (2026-09-29): a session wrote each chip's label and link (cc-pin.sh)
 assert_eq "pin chip label is esc()'d"            "yes" "$(has 'esc(pn.label')"
 assert_eq "pin chip link is esc()'d"             "yes" "$(has 'esc(pn.url)')"
+# overlap radar (2026-09-29): its lines carry branch and file names, which anyone can pick
+assert_eq "an Instances row's overlap line is esc()'d"      "yes" "$(has 'esc(im.overlap)')"
+assert_eq "an idle worktree's overlap line is esc()'d"      "yes" "$(has 'esc(iw.overlap)')"
+assert_eq "the project's merge order is esc()'d"            "yes" "$(has 'esc(p.mergeOrder)')"
 
 # 2. esc() itself still entity-encodes the HTML metacharacters (not gutted to a no-op)
 assert_eq "esc() encodes &"  "yes" "$(has '.replace(/&/g,"&amp;")')"
@@ -56,7 +60,8 @@ assert_eq 'esc() encodes "'  "yes" "$(has '.replace(/"/g,"&quot;")')"
 # session or its queue -- traceRowHtml's `tr.` never reaches HTML raw.
 # 2026-09-29 (pinned links): a pin's label and link were written by a session (cc-pin.sh) --
 # it.pins and pinChipsHtml's `pn.` never reach HTML raw.
-SINK_RE="'[[:space:]]*\+[[:space:]]*(it\.(group|label|name|cwd|projectKey|status|branch|stackName|stackKey|sessTitle|wtRoot|merge|askLine|askView|workingOn|pins)\b|\b(im|iw|mg|ak|wk|pn|tr)\.[A-Za-z]+\b|\bg\b)"
+# 2026-09-29 (overlap radar): it.overlap carries branch and file names; so does p.mergeOrder.
+SINK_RE="'[[:space:]]*\+[[:space:]]*(it\.(group|label|name|cwd|projectKey|status|branch|stackName|stackKey|sessTitle|wtRoot|merge|askLine|askView|workingOn|pins|overlap)\b|p\.mergeOrder\b|\b(im|iw|mg|ak|wk|pn|tr)\.[A-Za-z]+\b|\bg\b)"
 raw_sinks="$(grep -nE "$SINK_RE" "$DASH" || true)"
 assert_eq "no user field concatenated RAW into panel HTML (must be esc()'d)" "" "$raw_sinks"
 

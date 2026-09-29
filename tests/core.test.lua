@@ -8449,8 +8449,10 @@ do
   -- 2026-09-29: 23 -> 24 for the red-first proof ("redfirst", flagged new).
   -- 2026-09-29: 24 -> 25 for auto-compact with notes ("compact", flagged new).
   -- 2026-09-29: 25 -> 26 for pinned links ("pins", flagged new).
-  eq("FEATURES: the 26 new features are flagged", newCount, 26)
+  -- 2026-09-29: 26 -> 27 for the overlap radar and a batch's unit order ("overlap", flagged new).
+  eq("FEATURES: the 27 new features are flagged", newCount, 27)
   check("FEATURES: lists pinned links", keys.pins == true)
+  check("FEATURES: lists the overlap radar", keys.overlap == true)
   check("FEATURES: lists the red-first proof", keys.redfirst == true)
   check("FEATURES: lists auto-compact with notes", keys.compact == true)
   check("FEATURES: lists what each session is working on", keys.workingon == true)

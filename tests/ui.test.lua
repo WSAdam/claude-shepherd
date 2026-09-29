@@ -4298,5 +4298,39 @@ do
   check("pins: --purge takes cc-pins/ with Shepherd's other state", read("uninstall.sh"):find(" cc-pins ", 1, true) ~= nil)
 end
 
+-- ---- overlap radar and blockedBy on the panel (2026-09-29) ----
+-- Build program unit 24: the radar's lines reach the tile, the Instances rows and the merge
+-- review; a batch unit's "waits for X" / "blocked by a blocked unit" note reaches the batch
+-- review. Branch and file names are anyone's text: esc() into innerHTML, else textContent. The
+-- scan runs on its own timer -- the tick only stamps the cached result.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("radar: the tile's meta line carries the overlap (and meta reaches HTML through esc)",
+        src:find('if(it.overlap && it.overlap.line){ meta = (meta ? meta + " · " : "") + it.overlap.line; }', 1, true) ~= nil
+        and src:find("(wo ? metaHtml(meta, wo) : esc(meta))", 1, true) ~= nil)
+  check("radar: an Instances member row shows its overlap, escaped",
+        src:find("(im.overlap ? '<div class=\"in-ovl\">' + esc(im.overlap) + '</div>' : '')", 1, true) ~= nil)
+  check("radar: ...so does a worktree with no session",
+        src:find("(iw.overlap ? '<div class=\"in-ovl\">' + esc(iw.overlap) + '</div>' : '')", 1, true) ~= nil)
+  check("radar: Instances shows the project's merge order, escaped",
+        src:find("html += '<div class=\"in-order\">' + esc(p.mergeOrder) + '</div>';", 1, true) ~= nil)
+  check("radar: the merge review has an overlap block, filled through textContent",
+        src:find('<div class="dm-overlap" id="dm-overlap"></div>', 1, true) ~= nil
+        and src:find('ovEl.textContent = ovText;', 1, true) ~= nil)
+  local tickBody = src:match("\nfunction FX%._refreshBody%(%)(.-)\nend\n") or src:match("FX%._refreshBody = function%(%)(.-)\nend\n") or ""
+  check("radar: the tick stamps the cached radar and never scans",
+        #tickBody > 1000 and tickBody:find("FX.annotateRadar", 1, true) ~= nil and tickBody:find("refreshRadar", 1, true) == nil)
+  check("radar: its own retained timer runs the scans", src:find("FX.radarTimer = hs.timer.doEvery(", 1, true) ~= nil)
+  check("radar: the merge review is handed the request's overlap",
+        src:find("overlap = (r.phase == \"requested\") and FX.radarReviewFor(r) or nil },", 1, true) ~= nil)
+  check("blockedBy: a batch unit's row carries its note",
+        src:find('(u.note ? "  (" + u.note + ")" : "")', 1, true) ~= nil)
+  check("blockedBy: every merge readiness check hears the batch's order",
+        select(2, src:gsub("core%.mergeReadiness%(", "")) == 4
+        and select(2, src:gsub("FX%.fleetMergeWaits%(r%)%)", "")) == 4)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

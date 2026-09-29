@@ -379,6 +379,12 @@ echo ""
 echo "== browser: 8 pinned links stay inside their card, a click opens the right one, the detail panel shows them (real Chromium, geometry) =="
 node "$DIR/pins-layout.browser.test.js" || fail=1
 echo ""
+echo "== lua: overlap radar + blockedBy -- a batch's order (unknown slug, cycle, old files), waits at the tab and the merge, the radar's parser on literal merge-tree output and a real repo =="
+lua "$DIR/overlap.test.lua" || fail=1
+echo ""
+echo "== lua: the overlap radar's wiring -- one background scan per repo on its own timer (never the tick), cached, reclaimed when hung, stamped on worktree tiles (stubbed hs) =="
+HOME="$(mktemp -d)" lua "$DIR/radar-refresh.test.lua" || fail=1
+echo ""
 
 if [ "$fail" -eq 0 ]; then
   echo "✅ ALL GREEN"

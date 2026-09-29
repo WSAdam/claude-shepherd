@@ -316,8 +316,9 @@ request it's for. `"merge": { "enabled": false }` makes Shepherd ignore requests
 Ask a Claude session to run several units in parallel and it can drive the whole loop, with **one
 approval from you per batch**:
 
-1. It writes the batch (a `title`, `units` each with a `type` / `slug` / `task`, and
-   `mergeWhenGreen` if it asks to merge them when green) and runs
+1. It writes the batch (a `title`, `units` each with a `type` / `slug` / `task` and optionally
+   [`blockedBy`](#a-batch-unit-that-waits-blockedby), and `mergeWhenGreen` if it asks to merge
+   them when green) and runs
    `~/.claude/cc-fleet.sh propose --file <batch.json>` in the background.
 2. Its card says *⇉ proposes 3 units in <repo>* and reads **Needs you** (red dot, pulsing ring, one
    alert). Its detail panel shows the
@@ -397,6 +398,63 @@ it. Run in the background, it wakes the driver with exactly the news.
 
 `~/.claude/cc-fleet.sh alive` tells a session whether Shepherd is running (see
 [Troubleshooting](troubleshooting.md#is-shepherd-running)).
+
+## Overlap radar and unit order
+
+Parallel worktrees of one repo that edit the same files collide at merge time: whichever merges
+second rebases into a conflict nobody saw coming. Shepherd looks for that before it happens, and a
+batch can say which units have to wait for others.
+
+### The overlap radar
+
+Every couple of minutes, in the background, Shepherd scans each repo a card is in. For every linked
+worktree it collects the files it changes: its branch's diff from the main checkout's HEAD, plus
+its uncommitted and untracked files. For every pair of worktrees it runs
+`git merge-tree --write-tree --name-only`, which reports the files a merge of the two would
+actually conflict in (git 2.38 or later; an older git says it couldn't check). A pair that shares
+a file, or would conflict, shows:
+
+- **on each card**: *⚠ overlaps feat/b: 2 shared files, 1 conflict · merge feat/a first* (with
+  several: *⚠ overlaps 2 worktrees: feat/b (1 conflict), fix/c (1 file)*);
+- **in Instances**: the same line under each worktree row, sessions or not, and the project's
+  *merge order: feat/a → feat/b → fix/c* above them;
+- **in the merge review**: which worktrees it overlaps, the shared and conflicting files, and the
+  merge order.
+
+The order puts a worktree that has already asked to merge first, then the smaller change (fewer
+changed files), so the bigger one rebases once over it. It is a hint: Merge never waits for it.
+
+The scan runs on its own timer, never on the panel's tick, one scan per repo at a time; a scan
+that hangs past a minute is restarted. Settings in `~/.claude/cc-config.json`:
+
+- `radar.enabled` (default `true`): `false` stops the scans and clears the lines.
+- `radar.refreshSeconds` (default `120`, at least `30`): how old a repo's scan gets before it runs again.
+
+Up to 10 linked worktrees per repo are scanned; Shepherd's own red-first scratch worktrees never count.
+
+### A batch unit that waits: blockedBy
+
+A batch unit can name the units it waits for:
+
+```json
+{ "type": "feat", "slug": "api-client", "task": "...", "blockedBy": ["api-schema"] }
+```
+
+- `cc-fleet.sh propose` refuses a batch whose `blockedBy` names a slug that isn't one of its units,
+  a unit waiting for itself, or units that wait for each other in a circle (none of them could
+  ever start). Its approval output marks the units that wait.
+- `cc-fleet.sh tab` for a waiting unit opens nothing: it prints *waits for api-schema to merge
+  first* and **exits 7**. Ask again once the blockers have merged; `cc-fleet.sh status` shows each
+  unit's `note` (*waits for api-schema*).
+- A merge request on a waiting unit's branch isn't ready (*waits for api-schema to merge first*),
+  on the batch's grant or on your Merge click, while the batch runs. Once you stop the batch, the
+  merges are yours.
+- When a blocker ends **blocked**, every unit waiting on it, directly or down a chain, counts as
+  *blocked by a blocked unit (api-schema)*, so the batch can still finish.
+
+Two more optional unit fields travel with the batch: `covers` (the issue ids the unit covers, up to
+50) and `packet` (the id of its task packet). The unit's message states them, with what it comes
+after. A batch file without any of the three works as before.
 
 ## Try it: the worktree demo
 

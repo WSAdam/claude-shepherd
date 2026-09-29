@@ -409,5 +409,59 @@ do
   check("Stop records when the batch stopped (the prune's clock)", s1 and s1.grant and tonumber(s1.grant.stoppedAt) ~= nil)
 end
 
+-- ---- blockedBy: a unit waits for its blockers, at its tab and at its merge (2026-09-29) ----
+-- Build program unit 24: unit "two" names "one" in blockedBy. Its tab isn't opened -- the driver
+-- is told it waits (cc-fleet.sh exits 7) -- and a merge request on its branch isn't ready, so
+-- the batch's grant never merges it ahead of "one".
+do
+  -- the repo's earlier requests are done with: one merge per repo, so they'd queue unit two behind them
+  for _, f in ipairs({ "ua.json", "ua.decision", "zz.json", "zz.decision" }) do os.remove(MD .. "/" .. f) end
+  fx._mergeSent, fx._mergeApproved = {}, {}
+  write(BR .. "/701.json", json.encode({ v = 1, pid = 701, version = "0.4.0", folders = { "/r/A" }, tabs = {}, at = os.time() }))
+  write(FD .. "/b7.json", json.encode({ v = 1, id = "b7", nonce = "n-b7", driver = { session_id = "drv", pid = "4242", name = "A-drv" },
+    repo = "/r/A", commonDir = "/r/A/.git", title = "In order", mergeWhenGreen = true, at = os.time(), phase = "approved",
+    units = { { type = "feat", slug = "one", task = "First.", branch = "feat/one" },
+              { type = "feat", slug = "two", task = "Second.", branch = "feat/two", blockedBy = { "one" } } } }))
+  write(FD .. "/b7.state.json", json.encode({ grant = { approved = true, grantMerge = true, at = os.time() },
+    units = { one = { session = { id = "u1", name = "A-1", pid = "5101" } } } }))
+  fx._fleetState.b7 = nil
+  local before = #opened
+  write(FD .. "/b7.tab-two.json", json.encode({ v = 1, batch = "b7", slug = "two", session_id = "drv", nonce = "t-two", at = os.time() }))
+  tick()
+  local aw = decoded(FD .. "/b7.tab-two.answer")
+  check("a unit whose blocker hasn't merged: its tab isn't opened  (" .. tostring(aw and aw.reason) .. ")",
+        aw and aw.ok == false and aw.nonce == "t-two" and aw.reason == "waits for one to merge first" and #opened == before)
+  check("...and the answer says what it waits for, so cc-fleet.sh can say 'waits'",
+        aw and type(aw.waits) == "table" and aw.waits[1] == "one")
+  os.remove(FD .. "/b7.tab-two.answer"); os.remove(FD .. "/b7.tab-two.json")
+
+  -- unit two's session exists anyway (the driver opened it by hand) and asks to merge first
+  write(FD .. "/b7.state.json", json.encode({ grant = { approved = true, grantMerge = true, at = os.time() },
+    units = { one = { session = { id = "u1", name = "A-1", pid = "5101" } }, two = { session = { id = "u2", name = "A-2", pid = "5102" } } } }))
+  fx._fleetState.b7 = nil
+  status("u2", "/r/A/.claude/worktrees/two", "5102")
+  facts("/r/A/.claude/worktrees/two", "feat/two")
+  write(MD .. "/u2.json", json.encode({ v = 1, key = "u2", session_id = "u2", pid = "5102", nonce = "m-u2",
+    worktree = "/r/A/.claude/worktrees/two", branch = "feat/two", base = "main", commonDir = "/r/A/.git",
+    summary = "two", tests = "green", ahead = 1, at = os.time(), phase = "requested" }))
+  tick(); tick()
+  check("its merge is not approved on the batch's grant while its blocker hasn't merged", read(MD .. "/u2.decision") == nil)
+  local u2 = items().u2
+  check("...and its card says why  (" .. tostring(u2 and u2.merge and u2.merge.line) .. ")",
+        u2 and u2.merge and tostring(u2.merge.line):find("waits for one", 1, true) ~= nil)
+  local okA = select(2, quiet(function() return fx.mergeApprove("u2") end))
+  check("...nor on Adam's click", okA == false and read(MD .. "/u2.decision") == nil)
+
+  -- unit one merges: two is free
+  write(FD .. "/b7.state.json", json.encode({ grant = { approved = true, grantMerge = true, at = os.time() },
+    units = { one = { session = { id = "u1", name = "A-1", pid = "5101" }, result = "merged" },
+              two = { session = { id = "u2", name = "A-2", pid = "5102" } } } }))
+  fx._fleetState.b7 = nil
+  tick(); tick()
+  local dm = decoded(MD .. "/u2.decision")
+  check("once its blocker has merged, it merges on the grant", dm and dm.verdict == "merge" and dm.nonce == "m-u2")
+  os.remove(MD .. "/u2.json"); os.remove(MD .. "/u2.decision")
+  quiet(function() fx.batchStop("drv", "b7") end)
+end
 check("no keystroke anywhere", taps == 0)
 finish()
