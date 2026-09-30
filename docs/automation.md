@@ -600,9 +600,15 @@ instructions every session in it reads first. It suggests; nothing changes until
   text the edit replaces isn't in the file exactly once (line wrapping and spacing don't count: a
   paragraph the coach quoted on one line is found in its wrapped lines, and the file's own lines
   are left as they are), or when `CLAUDE.md` is a link (edit its target by hand). If a hook refuses the commit, `CLAUDE.md` goes back as it
-  was. An edit refused because `CLAUDE.md` changed gets **Run the coach again** next to Skip: a
-  fresh run reads the file as it is now and replaces the suggestions (the same for a `DECISIONS.md`
-  entry whose file changed). No other refusal offers it. Applying one edit doesn't block the next. **Skip** puts one aside. A `DECISIONS.md` entry is
+  was. An edit refused because `CLAUDE.md` changed, or because its quote isn't in the file exactly
+  once, gets **Run the coach again** next to Skip: a fresh run reads the file as it is now, quotes
+  it again and replaces the suggestions (the same for a `DECISIONS.md` entry whose file changed).
+  Other refusals don't offer it. An edit that only adds text (its new text is the quote plus more
+  before or after it) and whose quote can't be placed also gets **Add to the section anyway**: only
+  the new part is written, at the end of the edit's section (a section that isn't there is made at
+  the end of the file), and committed like any Apply; the edit and its history entry then show what
+  was written. It's refused when that part is already in `CLAUDE.md`. A rewrite never gets it: it
+  needs the text it replaces. Applying one edit doesn't block the next. **Skip** puts one aside. A `DECISIONS.md` entry is
   added through the On purpose tab's own guard, not committed. While it runs, the overlay counts how long it has been reading and says when it gives up
   (`coach.timeoutSeconds`, default 10 minutes). A quiet chip shows while the coach
   reads or waits, and **🧭 ⚠** when its last run couldn't run (the overlay says why, with **Run the

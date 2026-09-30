@@ -32,6 +32,12 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
   The page was left scrolled 491px with nothing to scroll, so it was drawn in place but clicks
   landed 491px off. The panel now puts a page that is scrolled past its content back, on every
   refresh, on a resize and when it comes back into view.
+- Coach overlay: a suggestion that only adds text but whose quote isn't in `CLAUDE.md` (the coach
+  paraphrased it) gets **Add to the section anyway**: only the new part goes in, at the end of its
+  section, committed like any Apply, and recorded (history, Undo) as what was written. Rewrites
+  don't get it. Such a suggestion, and any whose quote isn't in the file exactly once, now also
+  offers **Run the coach again**, with a tooltip that says the quote doesn't match rather than that
+  the file changed.
 
 ## 2026-09-30 — The build program
 

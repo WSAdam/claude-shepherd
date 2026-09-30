@@ -299,6 +299,76 @@ check("rewrap: ...a refusal with words of its own keeps them", tostring(lv.edits
 check("prompt: the quoted text is to be copied with its line breaks", P:lower():find("line breaks", 1, true) ~= nil)
 end
 
+-- ---- a suggestion that can't be placed can still be added (2026-09-30) ----
+-- 2026-09-30: an addition whose quoted anchor isn't in CLAUDE.md (the coach paraphrased it) could
+-- only be skipped. Add to the section anyway writes only its new part, at the end of its section --
+-- additions only (Adam's call): a rewrite needs its anchor, so it gets "Run the coach again".
+do
+local SEC = "# P\n\n## Git\n\n- commit often\n\n## Tests\n\n- run make test\n"
+local SH = core.coachHash(SEC)
+local PARA = "- commit little and often"
+local function any(old, new, section, file, dirty)
+  file = file or SEC
+  return core.coachApplyDecision(file, core.coachHash(file), { section = section or "Git", old = old, new = new }, dirty or false, true)
+end
+check("addBody: the rest of an edit that continues its quote", core.coachAddBody and core.coachAddBody({ section = "Git", old = "a b", new = "a b\nc d" }) == "c d")
+check("addBody: ...or the head of one that ends with it", core.coachAddBody and core.coachAddBody({ section = "Git", old = "a b", new = "z y\n\na b" }) == "z y")
+check("addBody: a rewrite has none", core.coachAddBody and core.coachAddBody({ section = "Git", old = "a b", new = "a c" }) == nil)
+check("addBody: a quote continued mid-word is a rewrite, not an addition", core.coachAddBody and core.coachAddBody({ section = "Git", old = "a b", new = "a bc d" }) == nil)
+check("addBody: no section, nowhere to add it", core.coachAddBody and core.coachAddBody({ section = "", old = "a b", new = "a b c" }) == nil)
+check("addBody: a plain add needs no anyway", core.coachAddBody and core.coachAddBody({ section = "Git", old = "", new = "c" }) == nil)
+check("anyway: without it the paraphrased anchor is still refused",
+      core.coachApplyDecision(SEC, SH, { section = "Git", old = PARA, new = PARA .. "\n- never git push" }, false).error == "not-found")
+local a1 = any(PARA, PARA .. "\n- never git push from a unit")
+check("anyway: only the new part goes in, at the end of its section",
+      a1.ok == true and a1.text == "# P\n\n## Git\n\n- commit often\n- never git push from a unit\n\n## Tests\n\n- run make test\n")
+check("anyway: ...and it says what it wrote, in an existing section", a1.added == "- never git push from a unit" and not a1.newSection)
+local a2 = any(PARA, "Before anything else, pull.\n\n" .. PARA)
+check("anyway: a head addition goes in as a paragraph at the end of its section",
+      a2.ok == true and a2.text == "# P\n\n## Git\n\n- commit often\n\nBefore anything else, pull.\n\n## Tests\n\n- run make test\n")
+local a3 = any("- commit often", "- commit often\n- never git push")
+check("anyway: when the quote IS there, the edit applies in place as usual",
+      a3.ok == true and a3.added == nil and a3.text == "# P\n\n## Git\n\n- commit often\n- never git push\n\n## Tests\n\n- run make test\n")
+check("anyway: the file's hash still guards it",
+      core.coachApplyDecision(SEC .. "- more\n", SH, { section = "Git", old = PARA, new = PARA .. "\n- x y" }, false, true).error == "changed")
+check("anyway: ...and uncommitted edits", any(PARA, PARA .. "\n- x y", nil, nil, true).error == "dirty")
+check("anyway: a rewrite is never added", any(PARA, "- commit rarely").error == "not-found")
+check("anyway: no section, not added", any(PARA, PARA .. "\n- x y", "").error == "not-found")
+check("anyway: a new part already in CLAUDE.md is refused, with words", any(PARA, PARA .. "\n- run make test").error == "already-there"
+      and not core.coachRefusal("already-there"):find("refused:", 1, true))
+local a5 = any("- deploy from the main branch", "- deploy from the main branch\n- then reload", "Deploying")
+check("anyway: a section that isn't there is made at the end", a5.ok == true and a5.newSection == true
+      and a5.text == SEC .. "\n## Deploying\n\n- then reload\n")
+local TW = "## Git\n\n- x\n- x\n"
+local a6 = any("- x", "- x\n- y", "Git", TW)
+check("anyway: a quote that is there twice gets its new part at the end of the section", a6.ok == true and a6.text == "## Git\n\n- x\n- x\n- y\n")
+local CRF = SEC:gsub("\n", "\r\n")
+local a7 = any(PARA, PARA .. "\n- one\n- two", "Git", CRF)
+check("anyway: the new part takes the file's line ending", a7.ok == true and a7.text == (("# P\n\n## Git\n\n- commit often\n- one\n- two\n\n## Tests\n\n- run make test\n"):gsub("\n", "\r\n")))
+-- the overlay's buttons come from the view
+local function ed(old, new, code) return { section = "Git", old = old, new = new, why = "w", evidence = { "e" }, status = "pending",
+  error = code and core.coachRefusal(code) or nil, errorCode = code } end
+local function viewOf(edits)   -- a record keeps at most C.maxEdits (5) edits, so the rows come in two records
+  return core.coachView(core.parseCoachRecord(json.encode({ v = 1, repo = "/r/repo/.git", root = "/r/repo", state = "done", verdict = "proposals",
+    at = 100, doneAt = 200, lastRunAt = 200, claudeHash = SH, edits = edits, decisions = {} }))) or { edits = {} }
+end
+local av1 = viewOf({ ed(PARA, PARA .. "\n- x y", "not-found"), ed(PARA, PARA .. "\n- x y", "ambiguous"), ed(PARA, "- commit rarely", "not-found"),
+                     ed(PARA, PARA .. "\n- x y", "changed") })
+local av2 = viewOf({ ed(PARA, PARA .. "\n- x y", "dirty"), ed(PARA, PARA .. "\n- run make test", "already-there"), ed(PARA, PARA .. "\n- x y") })
+local function flags(i)
+  local x = (i <= 4 and av1.edits[i] or av2.edits[i - 4])
+  if not x then return "missing" end
+  return (x.addAnyway and "A" or "-") .. (x.rerun and "R" or "-") .. tostring(x.code)
+end
+check("view: an addition not found offers Add anyway and a fresh run  (" .. flags(1) .. ")", flags(1) == "ARnot-found")
+check("view: ...so does one quoted twice  (" .. flags(2) .. ")", flags(2) == "ARambiguous")
+check("view: a rewrite not found offers only a fresh run  (" .. flags(3) .. ")", flags(3) == "-Rnot-found")
+check("view: a file that changed offers only a fresh run  (" .. flags(4) .. ")", flags(4) == "-Rchanged")
+check("view: uncommitted edits offer neither  (" .. flags(5) .. ")", flags(5) == "--dirty")
+check("view: a new part already there offers neither  (" .. flags(6) .. ")", flags(6) == "--already-there")
+check("view: an edit never refused offers neither  (" .. flags(7) .. ")", flags(7) == "--nil")
+end
+
 -- the commit touches only CLAUDE.md (run for real in a temp repo)
 local R = T .. "/crepo"
 sh("git init -q " .. q(R) .. " && git -C " .. q(R) .. " config user.email t@example.com && git -C " .. q(R)
@@ -922,5 +992,41 @@ oldRun()
 quiet(function() fx.coachStart(fx.coachRepoForRoot(REPO) or { root = REPO, commonDir = REPO .. "/.git", name = "repo" }, "card", CFG) end)
 check("a new run saves the old record's applied edits before it replaces the record",
       #core.parseCoachHistory(read(HFILE)) == 1 and core.parseCoachHistory(read(HFILE))[1].sha == "abc1234abc")
+
+-- 2026-09-30: Add to the section anyway on a real repo -- refused, then added, committed alone, kept
+-- in the history as what was written, and undone.
+do
+local CURF = read(REPO .. "/CLAUDE.md")
+fx._coach.recs[REPO] = { v = 1, repo = REPO .. "/.git", root = REPO, name = "repo", state = "done", verdict = "proposals",
+  trigger = "card", at = 100, doneAt = 200, lastRunAt = 200, claudeHash = core.coachHash(CURF),
+  edits = { { section = "Git", old = "- commit little and often", new = "- commit little and often\n- never git push from a unit",
+              why = "Units pushed on their own.", evidence = { "e" }, status = "pending" } }, decisions = {} }
+local arec = fx._coach.recs[REPO]
+local nA = #commitTasks()
+quiet(function() okA = fx.coachApply(REPO, 1) end)
+check("add anyway (repo): a plain Apply is refused, and the view offers Add anyway and a fresh run",
+      okA == false and arec.edits[1].errorCode == "not-found" and (core.coachView(arec).edits[1] or {}).addAnyway == true
+      and (core.coachView(arec).edits[1] or {}).rerun == true)
+alerts = {}
+quiet(function() okA = fx.coachApply(REPO, 1, true) end)
+check("add anyway (repo): starts one commit  (" .. (#commitTasks() - nA) .. ")", okA == true and #commitTasks() == nA + 1)
+if commitTasks()[nA + 1] then runFor(commitTasks()[nA + 1]) end
+local ADDED = CURF:gsub("%- commit often\n", "- commit often\n- never git push from a unit\n")
+check("add anyway (repo): only the new part is written, at the end of its section", read(REPO .. "/CLAUDE.md") == ADDED)
+check("add anyway (repo): ...in a commit of CLAUDE.md alone", (sh("git -C " .. q(REPO) .. " show --name-only --format= HEAD")):gsub("%s+$", "") == "CLAUDE.md")
+check("add anyway (repo): the edit reads as what was written", arec.edits[1].status == "applied" and arec.edits[1].old == ""
+      and arec.edits[1].new == "- never git push from a unit" and arec.edits[1].error == nil)
+local said = false
+for _, m in ipairs(alerts) do if m:find("end of its section", 1, true) then said = true end end
+check("add anyway (repo): the toast says where it went", said)
+local ah = core.parseCoachHistory(read(HFILE))
+local last = ah[#ah] or {}
+check("add anyway (repo): the history keeps what was written, with its commit", last.old == "" and last.new == "- never git push from a unit"
+      and last.sha ~= nil and last.sha == arec.edits[1].sha)
+nA = #commitTasks()
+quiet(function() okU = fx.coachUndo(REPO, #ah) end)
+if commitTasks()[nA + 1] then runFor(commitTasks()[nA + 1]) end
+check("add anyway (repo): Undo takes it back out", okU == true and read(REPO .. "/CLAUDE.md") == CURF)
+end
 
 finish()

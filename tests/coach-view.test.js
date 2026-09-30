@@ -121,6 +121,27 @@ eq("...an edit refused for another reason does not", /data-act="rerun"/.test(sta
 eq("...nor an edit with no refusal", /data-act="rerun"/.test(staleRows[2]), false);
 eq("a stale DECISIONS.md entry offers it too, after its Skip",
   /data-act="dec-skip" data-i="0"[^>]*>Skip<\/button><button class="ib-btn" data-act="rerun"/.test(staleRows[3]) && !/data-act="rerun"/.test(staleRows[4]), true);
+// 2026-09-30: an addition whose quote isn't in CLAUDE.md could only be skipped. The view marks one
+// `addAnyway`; its row offers "Add to the section anyway" after Skip, and the rerun's tooltip says
+// what is actually wrong (a quote that doesn't match is not a file that changed).
+const addV = lib.coachRowsHtml({ root: "/r/repo", state: "done", verdict: "proposals", decisions: [],
+  edits: [
+    { i: 1, section: "Git", old: "a", new: "a b", why: "w", evidence: ["e"], status: "pending", error: "not quoted", code: "not-found", addAnyway: true, rerun: true },
+    { i: 2, section: "Git", old: "a", new: "c", why: "w", evidence: ["e"], status: "pending", error: "not quoted", code: "not-found", rerun: true },
+    { i: 3, section: "Git", old: "a", new: "a b", why: "w", evidence: ["e"], status: "pending", error: "changed", code: "changed", rerun: true },
+    { i: 4, section: "Git", old: "a", new: "a b", why: "w", evidence: ["e"], status: "pending" },
+  ] });
+const addRows = addV.split('<div class="ib-row co-row').slice(1);
+eq("an addition that can't be placed offers Add to the section anyway, right after Skip",
+  /data-act="skip" data-i="0"[^>]*>Skip<\/button><button class="ib-btn" data-act="add" data-i="0"[^>]*>Add to the section anyway<\/button>/.test(addRows[0]), true);
+eq("...then Run the coach again", /Add to the section anyway<\/button><button class="ib-btn" data-act="rerun"/.test(addRows[0]), true);
+eq("...its tooltip says only the new part goes in", /data-act="add"[^>]*title="[^"]*new part/.test(addRows[0]), true);
+eq("a rewrite that can't be placed offers no Add anyway", /data-act="add"/.test(addRows[1]), false);
+eq("...its rerun doesn't claim the file changed", /data-act="rerun"[^>]*title="[^"]*changed since/.test(addRows[1]), false);
+eq("...it says the quote doesn't match", /data-act="rerun"[^>]*title="[^"]*quote/.test(addRows[1]), true);
+eq("a stale edit's rerun still says the file changed", /data-act="rerun"[^>]*title="[^"]*changed since/.test(addRows[2]), true);
+eq("...and offers no Add anyway", /data-act="add"/.test(addRows[2]), false);
+eq("an edit never refused offers neither", /data-act="(add|rerun)"/.test(addRows[3]), false);
 const nv = lib.coachRowsHtml({ root: "/r", state: "new", edits: [], decisions: [] });
 eq("a repo the coach never read offers to run it", /hasn't read/.test(nv) && /data-act="rerun"/.test(nv), true);
 
@@ -214,6 +235,8 @@ lib.coachAct(btn({ "data-act": "skip", "data-i": 0 }));
 eq("Skip likewise", JSON.stringify(sent.pop()), JSON.stringify(["coach-skip", "/r/repo", "1"]));
 lib.coachAct(btn({ "data-act": "dec-add", "data-i": 0 }));
 eq("Add sends the entry's number", JSON.stringify(sent.pop()), JSON.stringify(["coach-dec-add", "/r/repo", "1"]));
+lib.coachAct(btn({ "data-act": "add", "data-i": 0 }));
+eq("Add anyway sends the view's root and the edit's number", JSON.stringify(sent.pop()), JSON.stringify(["coach-add", "/r/repo", "1"]));
 lib.coachAct(btn({ "data-act": "rerun" }));
 eq("Run again sends the root", JSON.stringify(sent.pop()), JSON.stringify(["coach-rerun", "/r/repo", undefined]));
 lib.coachAct(btn({ "data-act": "apply", "data-i": 9 }));

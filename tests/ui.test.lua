@@ -4751,9 +4751,12 @@ do
         src:find('if a == "coach-apply" then FX.coachApply(', 1, true) ~= nil and src:find('if a == "coach-skip" then FX.coachSkip(', 1, true) ~= nil
         and src:find('if a == "coach-dec-add" then FX.coachDecision(', 1, true) ~= nil and src:find('if a == "coach-open" then FX.coachOpen(', 1, true) ~= nil)
   check("coach: the tick runs FX.stepCoach", src:find("pcall(FX.stepCoach, list, cfg)", 1, true) ~= nil)
-  local apply = src:match("\nfunction FX%.coachApply%(root, i%)(.-)\nend\n") or ""
+  check("coach: Add to the section anyway is Apply with anyway set, by the edit's number",
+        src:find('if a == "coach-add" then FX.coachApply(tostring(payload.v or ""), tostring(payload.text or ""), true); return end', 1, true) ~= nil)
+  -- 2026-09-30: Apply takes `anyway` (Add to the section anyway) and hands it to the decision
+  local apply = src:match("\nfunction FX%.coachApply%(root, i, anyway%)(.-)\nend\n") or ""
   check("coach: Apply decides through core.coachApplyDecision, then commits through core.coachCommitCmd",
-        apply:find("core.coachApplyDecision(current, rec.claudeHash, e, core.coachDirty(dirtyOut))", 1, true) ~= nil
+        apply:find("core.coachApplyDecision(current, rec.claudeHash, e, core.coachDirty(dirtyOut), anyway)", 1, true) ~= nil
         and apply:find("core.coachCommitCmd(rec.root, subject, body, current == nil)", 1, true) ~= nil)
   check("coach: ...its commit is a task with a retained timeout", apply:find("hs.task.new(", 1, true) ~= nil
         and apply:find("job.timer = hs.timer.doAfter(", 1, true) ~= nil)

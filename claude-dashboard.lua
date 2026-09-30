@@ -6776,7 +6776,9 @@ end
 -- Apply: refused (core.coachApplyDecision) when CLAUDE.md changed since the coach read it or has
 -- uncommitted edits; otherwise CLAUDE.md is written and committed alone (core.coachCommitCmd, a
 -- task with a retained timeout). A refused commit puts the file back as it was.
-function FX.coachApply(root, i)
+-- `anyway` (Add to the section anyway, 2026-09-30): an addition whose quote can't be placed has only
+-- its new part added at the end of its section; the edit and its history entry then read as that add.
+function FX.coachApply(root, i, anyway)
   local rec, e = FX.coachItem(root, i, "edits")
   if not rec then return false end
   if e.status ~= "pending" then FX.alert("That suggestion is already " .. tostring(e.status)); return false end
@@ -6785,7 +6787,7 @@ function FX.coachApply(root, i)
   local current = FX.readFile(path)
   local dirtyOut = ""
   pcall(function() dirtyOut = hs.execute(core.coachDirtyCmd(rec.root)) or "" end)
-  local dec = core.coachApplyDecision(current, rec.claudeHash, e, core.coachDirty(dirtyOut))
+  local dec = core.coachApplyDecision(current, rec.claudeHash, e, core.coachDirty(dirtyOut), anyway)
   -- a CLAUDE.md that is a link (to AGENTS.md, say): the atomic write would replace the link itself
   local mode
   pcall(function() mode = hs.fs.symlinkAttributes(path, "mode") end)
@@ -6820,10 +6822,13 @@ function FX.coachApply(root, i)
     if ok then
       e.status, e.error, e.errorCode, e.at = "applied", nil, nil, FX.now()
       e.sha = tostring(out or ""):match("(%x+)%s*$")
+      if dec.added then e.old, e.new = "", dec.added end   -- added anyway: the edit is what was written
       rec.claudeHash = core.coachHash(dec.text)   -- Shepherd's own commit isn't "changed since"
       if e.sha then FX.coachHistorySave(root, core.coachHistoryAdd(FX.coachHistory(root), e)) end   -- kept past the next run, for Undo
-      FX.alert("🧭 Applied to CLAUDE.md and committed" .. (e.sha and (" " .. e.sha:sub(1, 7)) or ""), 4)
-      print("[cc-dashboard] ✅ coach: applied edit " .. tostring(i) .. " to " .. path .. " (" .. tostring(e.sha) .. ")")
+      local where = not dec.added and "Applied to CLAUDE.md"
+        or (dec.newSection and ("Added under a new section, " .. tostring(e.section) .. ",") or "Added at the end of its section")
+      FX.alert("🧭 " .. where .. " and committed" .. (e.sha and (" " .. e.sha:sub(1, 7)) or ""), 4)
+      print("[cc-dashboard] ✅ coach: " .. (dec.added and "added" or "applied") .. " edit " .. tostring(i) .. " to " .. path .. " (" .. tostring(e.sha) .. ")")
     else
       undo()
       local why = core.capChars(tostring((err ~= "" and err) or out or ""):gsub("%s+", " "), 200)
@@ -12045,6 +12050,7 @@ local function handleBridgeMsg(msg)
   if a == "coach-open" then FX.coachOpen(tostring(payload.v or "")); return end
   if a == "coach-close" then FX._coach.open = nil; return end
   if a == "coach-apply" then FX.coachApply(tostring(payload.v or ""), tostring(payload.text or "")); return end
+  if a == "coach-add" then FX.coachApply(tostring(payload.v or ""), tostring(payload.text or ""), true); return end
   if a == "coach-skip" then FX.coachSkip(tostring(payload.v or ""), tostring(payload.text or "")); return end
   if a == "coach-undo" then FX.coachUndo(tostring(payload.v or ""), tostring(payload.text or "")); return end
   if a == "coach-dec-add" then FX.coachDecision(tostring(payload.v or ""), tostring(payload.text or ""), "add"); return end
@@ -23162,6 +23168,9 @@ local HTML = [[
       // 2026-09-30: a suggestion whose file changed since the coach read it (e.rerun, core.coachView)
       // can only be fixed by a fresh run, so that row offers one next to Skip -- and no other row.
       var stale = rerun.replace('data-act="rerun"', 'data-act="rerun" title="The file changed since the coach read it: a fresh run reads it as it is now, and replaces these suggestions"');
+      // ...and one whose quote doesn't match CLAUDE.md (e.code not-found / ambiguous) gets the same
+      // button with words that say so -- the file did not change under it
+      var misquoted = rerun.replace('data-act="rerun"', 'data-act="rerun" title="The coach quoted text that does not match CLAUDE.md: a fresh run reads the file as it is now and quotes it again, and replaces these suggestions"');
       var ran = (v.state === "running" || v.state === "queued") ? coachElapsedText(v.at, coachNow()) : "";
       if(v.state === "running" || v.state === "queued") st = "The coach is reading this repo's last sessions…"
         + (ran ? ' <span id="co-elapsed">' + esc(ran) + '</span> so far'
@@ -23191,7 +23200,11 @@ local HTML = [[
           + '<ul class="co-ev">' + (e.evidence || []).map(function(x){ return '<li>' + esc(x) + '</li>'; }).join("") + '</ul>'
           + (pend && e.error ? '<div class="co-err">' + esc(e.error) + '</div>' : '')
           + (pend ? '<div class="ib-free"><button class="ib-btn" data-act="apply" data-i="' + i + '" onclick="coachAct(event)" title="Write this into CLAUDE.md and commit CLAUDE.md alone">Apply</button>'
-                  + '<button class="ib-btn" data-act="skip" data-i="' + i + '" onclick="coachAct(event)">Skip</button>' + (e.rerun ? stale : '') + '</div>'
+                  + '<button class="ib-btn" data-act="skip" data-i="' + i + '" onclick="coachAct(event)">Skip</button>'
+                  // 2026-09-30: an addition whose quote can't be placed (core.coachView's addAnyway)
+                  + (e.addAnyway ? '<button class="ib-btn" data-act="add" data-i="' + i + '" onclick="coachAct(event)" title="Its quote is not in CLAUDE.md as written: add only its new part at the end of '
+                                   + esc(e.section || "its section") + ', and commit CLAUDE.md alone">Add to the section anyway</button>' : '')
+                  + (e.rerun ? ((e.code === "not-found" || e.code === "ambiguous") ? misquoted : stale) : '') + '</div>'
                 : '<div class="co-done">' + (e.status === "applied" ? "✓ Applied" + (e.sha ? " · committed " + esc(String(e.sha).slice(0, 7)) : "") : "Skipped") + '</div>')
           + '</div>';
       });
@@ -23240,7 +23253,7 @@ local HTML = [[
         if(hx && hx.i) send("coach-undo", v.root, String(hx.i));
         return;
       }
-      var list = (act === "apply" || act === "skip") ? v.edits : ((act === "dec-add" || act === "dec-skip") ? v.decisions : null);
+      var list = (act === "apply" || act === "skip" || act === "add") ? v.edits : ((act === "dec-add" || act === "dec-skip") ? v.decisions : null);
       var i = parseInt(t.getAttribute("data-i"), 10);
       if(!list || !(i >= 0) || !list[i]) return;
       send("coach-" + act, v.root, String(i + 1));

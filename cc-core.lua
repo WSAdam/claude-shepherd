@@ -16859,37 +16859,38 @@ do
     return { ok = true, text = text, tolerant = true }
   end
 
-  -- Decide whether an Apply may go ahead, given CLAUDE.md's CURRENT content (nil = missing), the
-  -- hash the coach read, the edit, and whether git shows the file with uncommitted edits. PURE --
-  -- FX reads the file and git, and writes and commits around it. Returns
-  --   { ok = false, error = "bad-edit"|"changed"|"dirty"|"not-found"|"ambiguous" } or
-  --   { ok = true, text = <the whole new file> }.
-  -- A replace needs its text exactly once: byte for byte, or failing that with its blanks squeezed
-  -- (tolerantReplace above; it can also refuse "no-change"). An add (old "") goes after the last line of its section
-  -- (the heading's level decides where the section ends: at the next heading as high or higher),
-  -- a list item straight under a list, anything else after a blank line; a section that isn't
-  -- there is made at the end, and a missing file is started.
-  function M.coachApplyDecision(current, readHash, edit, dirty)
-    if type(edit) ~= "table" or type(edit.old) ~= "string" or type(edit.new) ~= "string" then
-      return { ok = false, error = "bad-edit" }
+  -- A replace whose quote isn't in the file, not even re-wrapped, can still be an ADDITION: its new
+  -- text starts with the quote (the rest is new) or ends with it (the head is new), at a word
+  -- boundary. That new part, for Add to the section anyway (2026-09-30); nil for a rewrite, a plain
+  -- add, or an edit with no section to put it in.
+  function M.coachAddBody(edit)
+    if type(edit) ~= "table" or type(edit.old) ~= "string" or type(edit.new) ~= "string" or edit.old == "" then return nil end
+    if (oneLine(edit.section, 120):gsub("^#+%s*", "")) == "" then return nil end
+    local sqOld = squeeze(edit.old)
+    local sqNew, nat, nsq = squeeze(edit.new)
+    if sqOld == "" or #sqNew <= #sqOld + 1 then return nil end
+    local body
+    if sqNew:sub(1, #sqOld) == sqOld and sqNew:sub(#sqOld + 1, #sqOld + 1) == " " then
+      body = edit.new:sub(unsq(nat, nsq, #sqOld) + 1)
+    elseif sqNew:sub(-#sqOld) == sqOld and sqNew:sub(-#sqOld - 1, -#sqOld - 1) == " " then
+      body = edit.new:sub(1, unsq(nat, nsq, #sqNew - #sqOld + 1) - 1)
+    else
+      return nil
     end
-    if M.coachHash(current) ~= tostring(readHash or "") then return { ok = false, error = "changed" } end
-    if dirty then return { ok = false, error = "dirty" } end
-    local base = type(current) == "string" and current or ""
-    if edit.old ~= "" then
-      local s, e = base:find(edit.old, 1, true)
-      if not s then return tolerantReplace(base, edit) end   -- the same words in another wrapping
-      if base:find(edit.old, s + 1, true) then return { ok = false, error = "ambiguous" } end
-      return { ok = true, text = base:sub(1, s - 1) .. edit.new .. base:sub(e + 1) }
-    end
+    body = rtrimBytes(body):gsub("^[ \t\r\n]+", "")
+    return body ~= "" and body or nil
+  end
+
+  -- Put `new` after the last line of `section` in `base` (the add branch of coachApplyDecision).
+  local function addToSection(base, new, sectionRaw)
     local eol = base:find("\r\n", 1, true) and "\r\n" or "\n"
-    local body = edit.new:gsub("\r\n", "\n"):gsub("^\n+", "")
+    local body = new:gsub("\r\n", "\n"):gsub("^\n+", "")
     body = rtrimBytes(body)
     if body == "" then return { ok = false, error = "bad-edit" } end
     body = body:gsub("\n", eol)
-    local section = (oneLine(edit.section, 120):gsub("^#+%s*", ""))
+    local section = (oneLine(sectionRaw, 120):gsub("^#+%s*", ""))
     if not base:match("%S") then
-      return { ok = true, text = "# CLAUDE.md" .. eol .. eol .. (section ~= "" and ("## " .. section .. eol .. eol) or "") .. body .. eol }
+      return { ok = true, newSection = section ~= "", text = "# CLAUDE.md" .. eol .. eol .. (section ~= "" and ("## " .. section .. eol .. eol) or "") .. body .. eol }
     end
     local lines, pos, fence = {}, 1, false
     while pos <= #base do
@@ -16911,7 +16912,7 @@ do
     end
     if not h then
       if base:sub(-1) ~= "\n" then base = base .. eol end
-      return { ok = true, text = base .. eol .. "## " .. section .. eol .. eol .. body .. eol }
+      return { ok = true, newSection = true, text = base .. eol .. "## " .. section .. eol .. eol .. body .. eol }
     end
     local last = h
     for i = h + 1, #lines do
@@ -16925,6 +16926,45 @@ do
     return { ok = true, text = base:sub(1, at) .. sep .. body .. base:sub(at + 1) }
   end
 
+  -- Decide whether an Apply may go ahead, given CLAUDE.md's CURRENT content (nil = missing), the
+  -- hash the coach read, the edit, and whether git shows the file with uncommitted edits. PURE --
+  -- FX reads the file and git, and writes and commits around it. Returns
+  --   { ok = false, error = "bad-edit"|"changed"|"dirty"|"not-found"|"ambiguous"|"no-change"|"already-there" } or
+  --   { ok = true, text = <the whole new file>, added = <what was added anyway>, newSection = <a heading was made> }.
+  -- A replace needs its text exactly once: byte for byte, or failing that with its blanks squeezed
+  -- (tolerantReplace above; it can also refuse "no-change"). An add (old "") goes after the last line of its section
+  -- (the heading's level decides where the section ends: at the next heading as high or higher),
+  -- a list item straight under a list, anything else after a blank line; a section that isn't
+  -- there is made at the end, and a missing file is started.
+  -- `anyway` (Add to the section anyway, 2026-09-30): a replace that is still not-found or ambiguous,
+  -- and is an addition (M.coachAddBody), has only its new part added to its section like an add --
+  -- refused "already-there" when that part is in the file already. The guards above come first.
+  function M.coachApplyDecision(current, readHash, edit, dirty, anyway)
+    if type(edit) ~= "table" or type(edit.old) ~= "string" or type(edit.new) ~= "string" then
+      return { ok = false, error = "bad-edit" }
+    end
+    if M.coachHash(current) ~= tostring(readHash or "") then return { ok = false, error = "changed" } end
+    if dirty then return { ok = false, error = "dirty" } end
+    local base = type(current) == "string" and current or ""
+    if edit.old == "" then return addToSection(base, edit.new, edit.section) end
+    local r
+    local s, e = base:find(edit.old, 1, true)
+    if not s then
+      r = tolerantReplace(base, edit)   -- the same words in another wrapping
+    elseif base:find(edit.old, s + 1, true) then
+      r = { ok = false, error = "ambiguous" }
+    else
+      return { ok = true, text = base:sub(1, s - 1) .. edit.new .. base:sub(e + 1) }
+    end
+    if r.ok or not anyway or (r.error ~= "not-found" and r.error ~= "ambiguous") then return r end
+    local body = M.coachAddBody(edit)
+    if not body then return r end
+    if squeeze(base):find(squeeze(body), 1, true) then return { ok = false, error = "already-there" } end
+    local added = addToSection(base, body, edit.section)
+    if added.ok then added.added = body end
+    return added
+  end
+
   local REFUSALS = {
     ["bad-edit"] = "the edit is malformed",
     changed = "CLAUDE.md changed since the coach read it -- run the coach again",
@@ -16932,6 +16972,7 @@ do
     ["not-found"] = "the text it replaces isn't in CLAUDE.md as the coach quoted it",
     ["no-change"] = "it would change nothing but line wrapping or spacing",
     ambiguous = "its text is in CLAUDE.md more than once",
+    ["already-there"] = "its new part is already in CLAUDE.md",
     write = "Shepherd couldn't write CLAUDE.md",
     link = "CLAUDE.md is a link -- edit the file it points to by hand",
     ["undo-conflict"] = "its text is no longer in CLAUDE.md exactly once -- undo it by hand (git revert its commit)",
@@ -16939,12 +16980,14 @@ do
   }
   function M.coachRefusal(code) return REFUSALS[code] or ("refused: " .. tostring(code)) end
   M.COACH_DECISIONS_CHANGED = "DECISIONS.md changed since the coach read it"
-  -- Would running the coach again clear this refusal? Only a file that moved under a suggestion
-  -- (its hash): a fresh run reads the file as it is now. `words` recognises a record saved before
-  -- the code was kept.
-  local function coachStale(item, words)
+  -- Would running the coach again clear this refusal? A file that moved under a suggestion (its
+  -- hash), or -- for an edit -- a quote that doesn't match the file (not-found, ambiguous;
+  -- 2026-09-30): a fresh run reads the file as it is now and quotes it again. `words` recognises a
+  -- record saved before the code was kept.
+  local RERUN_EDIT = { changed = true, ["not-found"] = true, ambiguous = true }
+  local function coachStale(item, words, codes)
     if type(item) ~= "table" or item.status ~= "pending" or not item.error then return nil end
-    if item.errorCode then return item.errorCode == "changed" or nil end
+    if item.errorCode then return (codes and codes[item.errorCode] or item.errorCode == "changed") or nil end
     return item.error == words or nil
   end
 
@@ -17195,7 +17238,11 @@ do
     for i, e in ipairs(rec.edits or {}) do
       v.edits[i] = { i = i, section = e.section, old = e.old, new = e.new, why = e.why, evidence = e.evidence,
                      before = e.before, after = e.after,
-                     status = e.status or "pending", sha = e.sha, rerun = coachStale(e, REFUSALS.changed),
+                     status = e.status or "pending", sha = e.sha, rerun = coachStale(e, REFUSALS.changed, RERUN_EDIT),
+                     code = (e.status or "pending") == "pending" and e.error and e.errorCode or nil,
+                     -- an addition whose quote can't be placed may still go in (Add to the section anyway)
+                     addAnyway = ((e.status or "pending") == "pending" and (e.errorCode == "not-found" or e.errorCode == "ambiguous")
+                                  and M.coachAddBody(e) ~= nil) or nil,
                      -- the words come from the code when it has some: a refusal saved under old wording reads as today's
                      error = (e.error and e.errorCode and REFUSALS[e.errorCode]) or e.error }
     end
