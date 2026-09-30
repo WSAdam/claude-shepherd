@@ -8462,7 +8462,9 @@ do
   -- 2026-09-29: 36 -> 37 for the find-only audit preset ("audit", flagged new).
   -- 2026-09-29: 37 -> 38 for how often each skill works ("skillruns", flagged new).
   -- 2026-09-29: 38 -> 39 for the coach ("coach", flagged new).
-  eq("FEATURES: the 39 new features are flagged", newCount, 39)
+  -- 2026-09-29: 39 -> 40 for TODO lines that need a live run ("liverun", flagged new).
+  eq("FEATURES: the 40 new features are flagged", newCount, 40)
+  check("FEATURES: lists TODO lines that need a live run", keys.liverun == true)
   check("FEATURES: lists the find-only audit preset", keys.audit == true)
   check("FEATURES: lists how often each skill works", keys.skillruns == true)
   check("FEATURES: lists the coach", keys.coach == true)
@@ -13764,6 +13766,100 @@ do
     parsed = core.parseTodoAndFindings("- [x] todo done\n", FIND) } }, 200, idgen)
   check("import: a re-import restores the audit tag", f1.audit and f1.audit.id == "AUD-001")
   check("import: ...and Already works lines never become items", byText["Login with a valid account"] == nil)
+end
+
+-- ---- needs live run: TODO lines only a live run can check (2026-09-29) ----
+-- Build program unit 37. Some TODO items can only be checked by a live run (deploy, then look at
+-- the panel), and My List showed them as ordinary open items. `- [~] text` is a new state, and a
+-- `(needs live run)` / `(live check)` marker works on `- [ ]` and `- [x]`: the parsed item carries
+-- liveRun = true. `[~]` is never done. The text stays the item's identity, marker included, so
+-- flipping only the checkbox token keeps one item.
+do
+  local p = core.parseTodoFile("- [~] open the panel and look at the chip\n")
+  eq("live run: a [~] line parses", #p, 1)
+  eq("live run: ...its text is the text after the box", (p[1] or {}).text, "open the panel and look at the chip")
+  check("live run: ...it needs a live run", (p[1] or {}).liveRun == true)
+  check("live run: ...and a [~] line is NEVER done", (p[1] or {}).done == false)
+  p = core.parseTodoFile("* [~] star bullet\n  + [~] indented plus\n")
+  eq("live run: [~] takes every bullet and indent a [ ] does", #p, 2)
+
+  p = core.parseTodoFile("- [ ] deploy, then click Sync (needs live run)\n- [ ] probe the VM (live check)\n")
+  eq("live run: both markers parse on a [ ] line", #p, 2)
+  check("live run: '(needs live run)' marks it", (p[1] or {}).liveRun == true and p[1].done == false)
+  check("live run: '(live check)' marks it", (p[2] or {}).liveRun == true and p[2].done == false)
+  eq("live run: the marker stays in the text (the text is the identity)", (p[1] or {}).text,
+     "deploy, then click Sync (needs live run)")
+  p = core.parseTodoFile("- [ ] mixed case (Needs Live Run)\n- [ ] (live check) at the front\n")
+  check("live run: the marker matches in any case, anywhere in the line",
+        (p[1] or {}).liveRun == true and (p[2] or {}).liveRun == true)
+
+  p = core.parseTodoFile("- [x] shipped the badge (needs live run)\n- [X] shipped the probe (live check)\n")
+  check("live run: a marked [x] line keeps its done claim", (p[1] or {}).done == true and (p[2] or {}).done == true)
+  check("live run: ...and gains the live-run flag", (p[1] or {}).liveRun == true and (p[2] or {}).liveRun == true)
+
+  p = core.parseTodoFile("- [ ] plain open\n- [x] plain done\n- [ ] needs live wiring\n- [ ] (needs live) run\n")
+  check("live run: a line without the form carries no flag",
+        (p[1] or {}).liveRun == nil and (p[2] or {}).liveRun == nil
+        and (p[3] or {}).liveRun == nil and (p[4] or {}).liveRun == nil)
+
+  p = core.parseTodoFile("- [-] dash\n- [?] what\n- [~~] double\n- [ ~] space tilde\n- [] empty\n- [y] weird\n"
+                         .. "-[~] nospace\n- [~]\n- [~]    \n- [~]nospace after\n")
+  eq("live run: unknown bracket tokens still don't parse", #p, 0)
+
+  p = core.parseTodoFile("- [~] dup\n- [ ] dup\n")
+  check("live run: a duplicate keeps the flag from any copy, and a [~] copy claims nothing",
+        #p == 1 and p[1].liveRun == true and p[1].done == false)
+  p = core.parseTodoFile("- [ ] dup\n- [~] dup\n")
+  check("live run: ...in either order", #p == 1 and p[1].liveRun == true and p[1].done == false)
+  p = core.parseTodoFile("- [~] dup\n- [x] dup\n")
+  check("live run: ...while an [x] copy's done claim still counts", #p == 1 and p[1].done == true and p[1].liveRun == true)
+
+  -- the import: [ ] -> [~] -> [x] on the same line keeps ONE item; the flag follows the file
+  local st = { byProject = {}, todoMeta = {} }
+  local n = 0
+  local function idgen() n = n + 1; return "lr" .. n end
+  local function import(content, now)
+    return core.worklistImportTodoRoots(st, "shop", { { root = "/r", isMain = true,
+      parsed = core.parseTodoFile(content) } }, now, idgen)
+  end
+  local c = import("- [ ] check the chip in the panel\n", 100)
+  local L = st.byProject.shop
+  eq("live run import: a [ ] line imports", #L, 1)
+  eq("live run import: ...with no live-run flag", L[1].liveRun, nil)
+  local item = L[1]
+  c = import("- [~] check the chip in the panel\n", 200)
+  eq("live run import: [ ] -> [~] keeps one item", #L, 1)
+  check("live run import: ...the same item", L[1] == item and L[1].id == "lr1")
+  check("live run import: ...now flagged for a live run", L[1].liveRun == true)
+  check("live run import: ...never done, nor claimed done", L[1].done == false and L[1].fileDone == nil)
+  eq("live run import: ...and the flip counts as an update", c.updated, 1)
+  c = import("- [x] check the chip in the panel\n", 300)
+  eq("live run import: [~] -> [x] keeps one item", #L, 1)
+  check("live run import: ...the same item, now claimed done by the automation", L[1] == item and L[1].fileDone == true)
+  eq("live run import: ...the flag follows the file (plain [x] carries none)", L[1].liveRun, nil)
+  check("live run import: HARD RULE -- no state ever sets the user's checkmark", L[1].done == false and L[1].doneTs == nil)
+  eq("live run import: ...that flip is an update too", c.updated, 1)
+  c = import("- [x] check the chip in the panel\n", 400)
+  eq("live run import: a re-import with nothing new changes nothing", c.updated, 0)
+
+  c = import("- [x] check the chip in the panel\n- [x] shipped the probe (needs live run)\n", 500)
+  local marked = L[2] or {}
+  check("live run import: a marked [x] line arrives claimed done AND flagged",
+        marked.fileDone == true and marked.liveRun == true and marked.done == false)
+  c = import("- [x] check the chip in the panel\n- [~] new live-only line\n", 600)
+  local fresh = L[3] or {}
+  check("live run import: a new [~] line arrives flagged and open",
+        fresh.liveRun == true and fresh.fileDone == nil and fresh.done == false and fresh.src == "todo")
+  check("live run import: a line that vanished keeps its flag while it's flagged missing",
+        marked.fileMissing == true and marked.liveRun == true)
+
+  -- across worktrees: any copy's [~] flags it, like any copy's [x] claims it
+  local s2 = { byProject = {}, todoMeta = {} }
+  core.worklistImportTodoRoots(s2, "shop", {
+    { root = "/r", isMain = true, parsed = core.parseTodoFile("- [ ] shared line\n") },
+    { root = "/r-wt", branch = "feat/x", parsed = core.parseTodoFile("- [~] shared line\n") } }, 100, idgen)
+  local sh = (s2.byProject.shop or {})[1] or {}
+  check("live run import: a worktree's [~] flags the shared line", sh.liveRun == true and sh.done == false)
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))

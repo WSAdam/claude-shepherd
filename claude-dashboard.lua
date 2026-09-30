@@ -13237,6 +13237,15 @@ local HTML = [[
   #wl-search::placeholder { color:var(--muted); }
   #wl-search:focus { outline:none; border-color:var(--accent); }
   #wl-search-count { flex:0 0 auto; font-size:clamp(9px,2.6cqw,11px); color:var(--muted); white-space:nowrap; }
+  /* ▶ live run (build program unit 37): the toggle that keeps only the lines a live run has to
+     check, and the chip on each such row. Neither is a done claim. */
+  #wl-liveonly { flex:0 0 auto; background:var(--surface); color:var(--text-2); border:1px solid var(--border);
+    border-radius:14px; padding:2px clamp(7px,2.4cqw,12px); font-size:clamp(10px,2.8cqw,12px);
+    cursor:pointer; white-space:nowrap; }
+  #wl-liveonly:hover { background:var(--surface-hover); border-color:var(--accent); color:var(--accent-text); }
+  #wl-liveonly.on { background:var(--accent-bg); border-color:var(--accent); color:var(--accent-text); font-weight:600; }
+  .wl-live { flex:0 0 auto; font-size:clamp(9px,2.5cqw,11px); color:var(--accent-text); background:var(--surface-2);
+    border:1px solid var(--border-weak); border-radius:8px; padding:0 5px; white-space:nowrap; }
   /* TODO.md import row + badges. .wl-fdone is the AUTOMATION's [x] claim from the
      file -- deliberately a chip, never the checkbox (that stays the user's
      verification alone). Amber while unverified, quiet once the box is ticked. */
@@ -14437,6 +14446,7 @@ local HTML = [[
     <div id="wl-searchrow">
       <input type="text" id="wl-search" placeholder="Filter this list…" oninput="renderWorklist()" onkeydown="wlSearchKey(event)">
       <span id="wl-search-count"></span>
+      <button id="wl-liveonly" onclick="wlLiveToggle()" style="display:none" title="Show only the lines a live run has to check: TODO.md's [~] lines and lines marked (needs live run) or (live check)">▶ live run</button>
     </div>
     <div id="wl-todorow">
       <button id="wl-todobtn" onclick="todoImportScope()" title="Import this project's TODO.md checkboxes as list items">⇪ Import TODO.md</button>
@@ -16215,6 +16225,31 @@ local HTML = [[
       for(var i=0;i<toks.length;i++){ if(hay.indexOf(toks[i]) < 0) return false; }
       return true;
     }
+    // ---- ▶ live run (build program unit 37, 2026-09-29) --------------------
+    // A TODO line only a live run can check: `- [~]`, or a `(needs live run)` / `(live check)`
+    // marker (core.parseTodoFile sets liveRun). The toggle beside the filter box keeps only those
+    // lines on a project tab or MASTER, and carries across a tab switch like the query does. The
+    // Archive's rows carry no flag, so it never applies there. Only a real `true` counts.
+    var worklistLiveOnly = false;
+    function wlIsLiveRun(it){
+      return !!it && it.liveRun === true;
+    }
+    function wlLiveApplies(){ return worklistLiveOnly && worklistScope !== "archive"; }
+    function wlLiveToggle(){ worklistLiveOnly = !worklistLiveOnly; renderWorklist(); }
+    // Open live-run lines on a tab (every list on MASTER): what the toggle offers.
+    function wlLiveOpenCount(scope){
+      var n = 0;
+      var count = function(list){
+        (Array.isArray(list) ? list : []).forEach(function(it){ if(it && !it.done && wlIsLiveRun(it)) n++; });
+      };
+      if(scope === "master"){
+        count(worklistData && worklistData.generic);
+        ((worklistData && worklistData.projects) || []).forEach(function(p){ count(p.items); });
+      } else {
+        count(wlScopeItems(scope));
+      }
+      return n;
+    }
     function wlSearchKey(e){
       if(e.key === "Escape"){
         e.preventDefault();
@@ -16227,7 +16262,7 @@ local HTML = [[
     function wlSearchCount(shown, total){
       var el = document.getElementById("wl-search-count"); if(!el) return;
       var box = document.getElementById("wl-search");
-      el.textContent = (((box && box.value) || "").trim() && total) ? (shown + " / " + total + " shown") : "";
+      el.textContent = ((((box && box.value) || "").trim() || wlLiveApplies()) && total) ? (shown + " / " + total + " shown") : "";
     }
     // Tick the item in the copy we already hold, so the list moves on the click itself
     // (2026-09-21). It used to sit there until Lua read the store, mutated it, wrote it and
@@ -16295,8 +16330,15 @@ local HTML = [[
       return '<span class="wl-aud ' + cls + '" title="' + esc(String(a.id || "") + " · from a find-only audit — tick it once it's fixed and you've checked")
            + '">🔍 ' + esc(sev) + '</span>';
     }
+    // ▶ live run: a line only a live run can check. A fixed string -- no field of the item reaches
+    // it -- and never a done claim: a [~] line is never done, and the checkbox stays Adam's own.
+    function wlLiveRunChip(it){
+      if(!wlIsLiveRun(it)) return "";
+      return '<span class="wl-live" title="Only a live run can check this: run it, look, then tick the box yourself">▶ live run</span>';
+    }
     function wlFileBadges(it, isDone){
       var h = wlAuditChip(it) + wlBranchChip(it);
+      h += wlLiveRunChip(it);
       if(it && it.fileDone) h += '<span class="wl-fdone' + (isDone ? "" : " need")
         + '" title="Automation marked this done in TODO.md — tick the box once YOU have verified it">✓ auto</span>';
       if(it && it.fileMissing) h += '<span class="wl-fmiss" title="This line is no longer in TODO.md">⚠</span>';
@@ -16360,6 +16402,7 @@ local HTML = [[
       // Filtered BEFORE the bucket-header loop below, so a header only appears where a
       // row survived -- otherwise "Overdue" would sit alone over nothing.
       rows = rows.filter(function(r){ return wlMatches(toks, r.it.text, r.it.details, r.it.due, r.label); });
+      if(wlLiveApplies()) rows = rows.filter(function(r){ return wlIsLiveRun(r.it); });
       wlSearchCount(rows.length, total);
       if(!rows.length){
         box.innerHTML = '<div class="wl-empty">' + (total ? "Nothing matches the filter." : "Nothing open across your lists.") + '</div>';
@@ -16419,7 +16462,17 @@ local HTML = [[
       if(mb){
         var openN = wlOpenCount(worklistScope);
         mb.style.display = (openN && !wlSearchToks().length) ? "" : "none";
+        if(wlLiveApplies()) mb.style.display = "none";   // ...and while ▶ live run is on, for the same reason
         mb.textContent = "✓ Mark all " + openN + " done";
+      }
+      // ▶ live run: offered where a line needs a live run, and while it's on (so it can be turned
+      // off from a tab with none); never on the Archive. The count is text, never HTML.
+      var lb = document.getElementById("wl-liveonly");
+      if(lb){
+        var liveN = wlLiveOpenCount(worklistScope);
+        lb.style.display = (worklistScope !== "archive" && (liveN || worklistLiveOnly)) ? "" : "none";
+        lb.classList.toggle("on", worklistLiveOnly);
+        lb.textContent = "▶ live run" + (liveN ? " " + liveN : "");
       }
       // The Archive is read-only too, and its rows come from their own file: ask for them
       // the first time it is opened, render what we have meanwhile (2026-09-21).
@@ -16452,6 +16505,7 @@ local HTML = [[
       if(toks.length){
         active = active.filter(function(it){ return wlMatches(toks, it.text, it.details, it.due, ""); });
       }
+      if(wlLiveApplies()) active = active.filter(wlIsLiveRun);
       wlSearchCount(active.length, activeTotal);
       // Done is the record of what you just verified, so it reads newest-TICKED
       // first. doneTs is stamped by worklistToggle; items finished before stamps

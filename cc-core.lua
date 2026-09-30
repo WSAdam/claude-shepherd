@@ -14692,22 +14692,31 @@ end
 -- indent, [X], CRLF). Non-checkbox lines are ignored. Exact-duplicate texts
 -- collapse to the first occurrence with their done flags OR'd (any [x] copy
 -- counts as the claim). Text capped at 500 chars, list at 500 entries. Pure.
+-- Needs live run (build program unit 37, 2026-09-29): `- [~] text` is a third state -- only a
+-- live run can check it, so it is NEVER done -- and a `(needs live run)` / `(live check)` marker
+-- (any case) flags a `[ ]` or `[x]` line the same way. Either sets liveRun = true, OR'd across
+-- duplicates like done. The text keeps the marker: it is the item's identity, so flipping only
+-- the checkbox token keeps one item.
 function M.parseTodoFile(content)
   local out = {}
   if type(content) ~= "string" or content == "" then return out end
   local byText = {}
   for rawLine in (content .. "\n"):gmatch("([^\n]*)\n") do
     local line = rawLine:gsub("\r$", "")
-    local mark, text = line:match("^%s*[%-%*%+]%s+%[([ xX])%]%s+(.+)$")
+    local mark, text = line:match("^%s*[%-%*%+]%s+%[([ xX~])%]%s+(.+)$")
     if mark then
       text = wlTrim(text):sub(1, 500)
       if text ~= "" then
-        local done = mark ~= " "
+        local done = mark ~= " " and mark ~= "~"
+        local lower = text:lower()
+        local live = mark == "~" or lower:find("(needs live run)", 1, true) ~= nil
+          or lower:find("(live check)", 1, true) ~= nil
         local e = byText[text]
         if e then
           e.done = e.done or done
+          if live then e.liveRun = true end
         elseif #out < 500 then
-          e = { text = text, done = done }
+          e = { text = text, done = done, liveRun = live or nil }
           out[#out + 1] = e
           byText[text] = e
         end
@@ -14815,6 +14824,8 @@ function M.worklistImportTodoRoots(state, key, sources, now, idgen)
             order[#order + 1] = e.text
           end
           u.done = u.done or e.done == true
+          -- needs live run (unit 37): any copy's [~] or marker flags it, as any [x] claims it
+          u.liveRun = u.liveRun or e.liveRun == true
           -- a find-only audit's finding (core.parseAuditFindings) keeps its tag in My List
           if type(e.audit) == "table" and not u.audit then u.audit = { sev = e.audit.sev, id = e.audit.id } end
           if not u.rootSet[root] then u.rootSet[root] = true; u.roots[#u.roots + 1] = root end
@@ -14843,8 +14854,10 @@ function M.worklistImportTodoRoots(state, key, sources, now, idgen)
       local u = union[t]
       if u then
         local nfd = u.done and true or nil
-        if it.fileDone ~= nfd or it.fileMissing then counts.updated = counts.updated + 1 end
+        local nlr = u.liveRun and true or nil   -- a file fact like fileDone: it follows the file
+        if it.fileDone ~= nfd or it.liveRun ~= nlr or it.fileMissing then counts.updated = counts.updated + 1 end
         it.fileDone = nfd
+        it.liveRun = nlr
         it.fileMissing = nil
         if u.audit then it.audit = u.audit end
         tag(it, u)
@@ -14869,7 +14882,8 @@ function M.worklistImportTodoRoots(state, key, sources, now, idgen)
     if not u.matched and not meta.seen[t] then
       local it = { id = tostring(idgen and idgen() or ""), text = t, done = false,
                    ts = tonumber(now) or 0, details = "", due = "", steps = {},
-                   src = "todo", srcText = t, fileDone = u.done and true or nil, audit = u.audit }
+                   src = "todo", srcText = t, fileDone = u.done and true or nil, audit = u.audit,
+                   liveRun = u.liveRun and true or nil }
       tag(it, u)
       list[#list + 1] = it
       u.matched = true
@@ -19446,6 +19460,9 @@ M.FEATURES = {
         .. "TODO.md checkboxes as verify-me items and keeps them synced as automations tick them off.",
     why = "Keep your own to-dos right next to the fleet that does them -- and click-verify "
         .. "what an automation claims it finished." },
+  { key = "liverun", cat = "Control", new = true, title = "Needs a live run",
+    what = "A TODO.md line written `- [~] text`, or carrying `(needs live run)` / `(live check)`, is one only a live run can check. My List marks it with a ▶ live run chip, and the ▶ live run toggle beside the filter box shows only those lines, on a project tab or on MASTER. A `[~]` line is never done; a marked `[x]` keeps its ✓ auto badge.",
+    why = "The checks that need you to deploy and look don't hide among the ones a test already proved." },
   { key = "stories", cat = "Control", new = true, title = "User stories",
     what = "When a project has spec/product/user-stories.md, a gated tab shows its stories by capability area — add, edit, and save them in place.",
     why = "Curate the product's user stories next to the sessions building it, without leaving the panel." },

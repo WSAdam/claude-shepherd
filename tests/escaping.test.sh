@@ -17,6 +17,13 @@ has() { grep -qF "$1" "$DASH" && echo yes || echo no; }
 # (tests/audit-findings-view.test.js runs the real wlAuditChip)
 assert_eq "an audit finding's severity is esc()'d" "yes" "$(has "'\">🔍 ' + esc(sev) + '</span>'")"
 assert_eq "an audit finding's id is esc()'d"       "yes" "$(has 'esc(String(a.id || "")')"
+# needs live run (2026-09-29): the ▶ live run chip is a fixed string -- no field of the item reaches
+# it, only a real `true` shows it (tests/live-run-view.test.js runs the real wlLiveRunChip)
+live_chip="$(awk '/    function wlLiveRunChip\(it\)\{/,/^    \}$/' "$DASH")"
+assert_eq "the live-run chip was extracted (no vacuous pass below)" "yes" \
+  "$(printf '%s' "$live_chip" | grep -qF '▶ live run' && echo yes || echo no)"
+assert_eq "the live-run chip renders no item text" "no" \
+  "$(printf '%s' "$live_chip" | grep -qE 'it\.(text|details|srcText|due)' && echo yes || echo no)"
 assert_eq "group filter chip label is esc()'d"  "yes" "$(has 'esc(g)')"
 assert_eq "per-tile group tag is esc()'d"        "yes" "$(has 'esc(it.group)')"
 assert_eq "tile display label/name is esc()'d"   "yes" "$(has 'esc(it.label')"

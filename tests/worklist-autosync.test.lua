@@ -35,6 +35,10 @@ write(T .. "/labels.json", json.encode({ [PROJ] = "Renamed Project" }))
 write(T .. "/worklist.json", json.encode({ generic = {}, byProject = {},
   todoMeta = { [PROJ] = { cwd = PROJ, mtime = 1, seen = {} } } }))
 write(PROJ .. "/TODO.md", "- [ ] first item from the file\n")
+-- 2026-09-29 (needs live run, build program unit 37): the same file also carries a [~] line and a
+-- marked [x] line, so the push below proves the flag survives file -> import -> payload.
+write(PROJ .. "/TODO.md", "- [ ] first item from the file\n- [~] open the panel and look\n"
+  .. "- [x] shipped the probe (needs live run)\n")
 
 local realGetenv = os.getenv
 local ENV = { CC_STATUS_DIR = T .. "/status", CC_LABELS_FILE = T .. "/labels.json",
@@ -122,4 +126,16 @@ for _, p in ipairs(payload.projects or {}) do if p.key == PROJ then tab = p end 
 check("the pushed tabs include the relabelled project", tab ~= nil)
 check("auto-sync push shows the tab's rename, not the folder name  (got="
       .. tostring(tab and tab.label) .. " want=Renamed Project)", tab ~= nil and tab.label == "Renamed Project")
+
+-- ---- needs live run: the round trip (2026-09-29) ----
+local byText = {}
+for _, item in ipairs((tab and tab.items) or {}) do byText[item.text] = item end
+local plain, tilde, marked = byText["first item from the file"], byText["open the panel and look"],
+  byText["shipped the probe (needs live run)"]
+check("live run: every line of the file reached My List", plain ~= nil and tilde ~= nil and marked ~= nil)
+check("live run: the [~] line arrives flagged, open and unclaimed",
+      tilde ~= nil and tilde.liveRun == true and tilde.done == false and tilde.fileDone == nil)
+check("live run: the marked [x] line arrives flagged and claimed done, never ticked",
+      marked ~= nil and marked.liveRun == true and marked.fileDone == true and marked.done == false)
+check("live run: a plain line carries no flag", plain ~= nil and plain.liveRun == nil)
 finish()

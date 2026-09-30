@@ -333,6 +333,14 @@ the FLEET row swaps the session tiles for the list (click again to go back).
   main's copy, and a removed worktree's items stay. The file format is in
   [methodology/CLAUDE.md](../methodology/CLAUDE.md). A [find-only audit](providers-and-integrations.md#find-only-audit)'s
   findings file imports with it: each finding carries a **🔍 severity** chip and is never marked done.
+- **▶ live run**: some lines can only be checked by a live run (deploy, then look). A `TODO.md` line
+  written `- [~] text`, or carrying `(needs live run)` / `(live check)` on a `[ ]` or `[x]` line, shows
+  a **▶ live run** chip. A `[~]` line is never done; a marked `[x]` keeps its **✓ auto** chip too.
+  Flipping only the checkbox (`[ ]` → `[~]` → `[x]`) keeps the same item. The **▶ live run N**
+  toggle beside the filter box keeps only those lines on a project tab or **MASTER**, together with
+  any filter text. It stays on across tab switches. It only appears where such a line is open, or
+  while it's on. The Done drawer and the Archive are never filtered, and **✓ Mark all N done** hides
+  itself while the toggle is on.
 - **Filter**: the box under the tabs filters **whichever tab you're on**: a project tab that
   project, **MASTER** the rollup, **🗄 Archive** every archived row. It is case-insensitive and
   every word must match. It searches the subject, the **details**, the expected date (`2026-09`

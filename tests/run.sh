@@ -469,6 +469,12 @@ echo ""
 echo "== node: the Coach overlay and the card's chip, every suggested word escaped, a click sends only the root and a number (behavioral, runs the shipped coachRowsHtml) =="
 node "$DIR/coach-view.test.js" || fail=1
 echo ""
+echo "== node: the ▶ live run chip on My List -- only a real flag shows it, no item text reaches it, never a done claim (behavioral, runs the shipped wlLiveRunChip) =="
+node "$DIR/live-run-view.test.js" || fail=1
+echo ""
+echo "== node: My List -- the ▶ live run toggle keeps only the lines a live run has to check, on a tab and on MASTER (real browser) =="
+node "$DIR/worklist-liverun.browser.test.js" || fail=1
+echo ""
 
 if [ "$fail" -eq 0 ]; then
   echo "✅ ALL GREEN"

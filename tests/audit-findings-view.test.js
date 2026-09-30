@@ -35,6 +35,9 @@ const spawnSrc = slice("    function auditSpawn(){", "\n    }\n");
 const chipSrc = slice("    function wlAuditChip(it){", "\n    }\n");
 const branchSrc = slice("    function wlBranchChip(it){", "\n    }\n");
 const badgesSrc = slice("    function wlFileBadges(it, isDone){", "\n    }\n");
+// 2026-09-29: wlFileBadges also calls the ▶ live run chip (unit 37); it rides along when shipped
+const liveSrc = (slice("    function wlIsLiveRun(it){", "\n    }\n") || "") + "\n"
+  + (slice("    function wlLiveRunChip(it){", "\n    }\n") || "");
 check("the panel ships auditSpawn", spawnSrc !== null);
 check("the panel ships wlAuditChip", chipSrc !== null);
 check("the dialog has the 🔍 Audit (find-only) chip", src.indexOf('onclick="auditSpawn()"') >= 0
@@ -73,7 +76,7 @@ const none = harness("relative/shop", "");
 eq("no absolute folder: nothing is posted", none.posted.length, 0);
 eq("...and it says why", none.alerts.length, 1);
 
-const lib = new Function(escSrc + "\n" + chipSrc + "\n" + branchSrc + "\n" + badgesSrc +
+const lib = new Function(escSrc + "\n" + chipSrc + "\n" + branchSrc + "\n" + liveSrc + "\n" + badgesSrc +
   "\nreturn { wlAuditChip, wlFileBadges };")();
 eq("a TODO line: no audit chip", lib.wlAuditChip({ text: "x" }), "");
 eq("a null row: nothing", lib.wlAuditChip(null), "");

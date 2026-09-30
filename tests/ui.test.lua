@@ -4734,5 +4734,31 @@ do
         and src:find('send("coach-open", key);', 1, true) ~= nil)
 end
 
+-- ---- needs live run: My List's chip and filter (2026-09-29) ----
+-- Build program unit 37. core.parseTodoFile flags `- [~]` / `(needs live run)` / `(live check)`
+-- lines (liveRun); My List shows a ▶ live run chip on them and a toggle that keeps only them.
+-- Behaviour: tests/live-run-view.test.js (the chip) and tests/worklist-liverun.browser.test.js
+-- (the filter, in a real browser). These pin the wiring those can't see.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("live run: the chip rides with the row's other file badges",
+        src:find("function wlLiveRunChip(it){", 1, true) ~= nil and src:find("h += wlLiveRunChip(it);", 1, true) ~= nil)
+  check("live run: the toggle sits in the filter row, outside every node the render rewrites",
+        src:find('<button id="wl-liveonly" onclick="wlLiveToggle()"', 1, true) ~= nil
+        and (src:find('<div id="wl-searchrow">', 1, true) or 0) < (src:find('id="wl-liveonly"', 1, true) or 0)
+        and (src:find('id="wl-liveonly"', 1, true) or 0) < (src:find('<div id="wl-todorow">', 1, true) or 0))
+  check("live run: a project tab and MASTER both filter by it",
+        src:find("if(wlLiveApplies()) active = active.filter(wlIsLiveRun);", 1, true) ~= nil
+        and src:find("if(wlLiveApplies()) rows = rows.filter(function(r){ return wlIsLiveRun(r.it); });", 1, true) ~= nil)
+  check("live run: Mark all steps aside while it's on (wlOpenCount counts the unfiltered list)",
+        src:find('if(wlLiveApplies()) mb.style.display = "none";', 1, true) ~= nil)
+  check("live run: the toggle's label is set as text, never HTML",
+        src:find("lb.textContent = ", 1, true) ~= nil and src:find("lb.innerHTML", 1, true) == nil)
+  check("live run: the Done drawer is still never filtered",
+        src:find("done = done.filter", 1, true) == nil and src:find("done.filter(function", 1, true) == nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

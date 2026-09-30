@@ -1,7 +1,8 @@
 # Claude Shepherd methodology
 
 How Claude sessions work alongside Shepherd: units of work in worktrees, merges through Shepherd's
-ready-to-merge review, batches of parallel units, and tests first with regression fixtures.
+ready-to-merge review, batches of parallel units, tests first with regression fixtures, and the
+`TODO.md` lists that My List imports.
 The installer copies this file into `~/.claude/CLAUDE.md` between two marker lines; re-running the
 installer replaces that block, so change it here, not there. "I"/"me" is you, the person at Shepherd.
 
@@ -158,3 +159,61 @@ parallel.
 - DOM/visual → assert the measurement (geometry, computed style, overflow, contrast ratio), not the screenshot.
 - Whole-file corruption (encoding, escaping, malformed markup) → a check that parses or greps the built artifact.
 - Genuinely un-automatable → commit the reproduction steps as an explicitly skipped test naming the reason. That is the one sanctioned skip; it is not the same as skipping to go green.
+
+## Shepherd TODO Files (persistent work lists)
+
+Shepherd imports `TODO.md` from a project's root into that project's My List in the
+dashboard. That list is my verification pass: I click each item off myself after
+inspecting the work. Follow this contract in every project:
+
+- **Persist the plan before you work it.** Whenever the work has more than one
+  deliverable — a feature build, a refactor, or a bug-fix session/sweep — write every
+  item to `TODO.md` at the project root *before* starting the first one. In-session
+  todo/plan state dies with a `/clear`; this file is what survives. Append
+  newly-discovered work items as you go.
+- **Format:** one item per line, `- [ ] <text>`. Write each item so it's verifiable on
+  its own by someone with no session context — name the behaviour and the place
+  (`- [ ] Plan-limit alert fires once per whole percentage point (alerts.lua)`),
+  not `- [ ] fix alerts`. One PHYSICAL line — never hard-wrap or indent-continue an
+  item: Shepherd imports only the first line, so a wrapped item ships truncated
+  mid-sentence. Long detail belongs in prose or the project's notes, not in the item.
+- **Only checkbox lines exist to Shepherd.** Headings, prose, journal/"Cleared"
+  narratives, and `- **bold**` bullets are all invisible to My List. A project may
+  keep whatever notes it likes in TODO.md, but a bug or feature recorded only in
+  prose was never recorded — it must also have its own `- [ ]`/`- [x]` line.
+- **Bug fixes are items too, not just features.** Every bug fixed — a one-off or part
+  of a sweep — gets its own `- [ ]` line the moment it's identified, worded for the
+  broken behaviour like its regression fixture (ideally the same wording, so the list
+  item, the fixture, and the fix correlate). Flip it to `[x]` only when the fix is in
+  AND its fixture is green.
+- **Append-only text.** Add new items at the end. Never reword, reorder, merge, or
+  delete an existing item — the text is the item's identity in Shepherd, and editing
+  it orphans my verification state. If an item was wrong, leave it and add a
+  corrected one. The checkbox token is the only edit ever made to an existing line.
+  Moving a finished item into a "Cleared"/changelog section, or striking it through,
+  IS deleting it — Shepherd flags it as missing instead of done. The line keeps its
+  place forever; only its checkbox token ever changes.
+- **`- [x]` means "the automation finished this" — nothing more.** Flip `[ ]` → `[x]`
+  only when you have actually completed and self-checked the item (code written,
+  tests green). It surfaces in Shepherd as a "done" badge. It does NOT check the item
+  off my list — my checkmark is set only by my own click, and no automation, hook, or
+  file edit ever sets it. Never present `[x]` as final sign-off.
+- **`- [~]` means "only a live run can check this".** Some items no test can prove —
+  deploy and look at the panel, click through the running app, probe the live
+  process. Write `(needs live run)` (or `(live check)`) in such an item's text when you
+  add the line: My List shows it with a ▶ live run chip for its whole life, `[x]`
+  included, and can filter to those lines. When the work is in but the live run that
+  proves it hasn't happened (a worktree can't deploy, say), flip `[ ]` → `[~]`, and
+  `[~]` → `[x]` once that run has passed. `[~]` is never done. Only the checkbox token
+  changes: never add the marker to an existing line later, because that rewords it.
+- **Never clear the list.** Don't delete `TODO.md` or strip completed items when the
+  run ends — the done-but-unverified items are exactly what I walk through afterwards.
+  I clear items after verifying them.
+- **Worktrees.** A worktree session writes its items to TODO.md at *its own* root — that
+  is the project root for that session. If the repo commits TODO.md, commit it with the
+  branch and make sure `.gitattributes` has `TODO.md merge=union`, so appends from
+  parallel branches merge without conflicts; if it doesn't, gitignore TODO.md so an
+  untracked copy can't block `git worktree remove`. Shepherd's My List folds every
+  worktree's TODO.md into the project's one tab — a line in several copies imports once,
+  a branch-only line shows its branch until it reaches main — and a removed worktree's
+  items stay there to be verified.
