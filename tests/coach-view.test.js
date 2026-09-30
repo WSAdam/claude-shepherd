@@ -142,6 +142,20 @@ eq("...it says the quote doesn't match", /data-act="rerun"[^>]*title="[^"]*quote
 eq("a stale edit's rerun still says the file changed", /data-act="rerun"[^>]*title="[^"]*changed since/.test(addRows[2]), true);
 eq("...and offers no Add anyway", /data-act="add"/.test(addRows[2]), false);
 eq("an edit never refused offers neither", /data-act="(add|rerun)"/.test(addRows[3]), false);
+// 2026-09-30: Skip was final. A skipped row now offers Bring back, and only a skipped one.
+const bb = lib.coachRowsHtml({ root: "/r/repo", state: "done", verdict: "proposals",
+  edits: [
+    { i: 1, section: "Git", old: "a", new: "b", why: "w", evidence: ["e"], status: "skipped" },
+    { i: 2, section: "Git", old: "c", new: "d", why: "w", evidence: ["e"], status: "applied", sha: "abc1234" },
+    { i: 3, section: "Git", old: "e", new: "f", why: "w", evidence: ["e"], status: "pending" },
+  ],
+  decisions: [{ i: 1, what: "Keep bash", why: "portable", status: "skipped" }, { i: 2, what: "Tabs", why: "w", status: "added" }] });
+const bbRows = bb.split('<div class="ib-row co-row').slice(1);
+eq("a skipped edit offers Bring back", /Skipped/.test(bbRows[0]) && /<button class="ib-btn" data-act="unskip" data-i="0"[^>]*>Bring back<\/button>/.test(bbRows[0]), true);
+eq("...an applied edit does not", /data-act="unskip"/.test(bbRows[1]), false);
+eq("...nor a pending one", /data-act="unskip"/.test(bbRows[2]), false);
+eq("a skipped DECISIONS.md entry offers it too", /<button class="ib-btn" data-act="dec-unskip" data-i="0"[^>]*>Bring back<\/button>/.test(bbRows[3]), true);
+eq("...an added entry does not", /unskip/.test(bbRows[4]), false);
 const nv = lib.coachRowsHtml({ root: "/r", state: "new", edits: [], decisions: [] });
 eq("a repo the coach never read offers to run it", /hasn't read/.test(nv) && /data-act="rerun"/.test(nv), true);
 
@@ -237,6 +251,10 @@ lib.coachAct(btn({ "data-act": "dec-add", "data-i": 0 }));
 eq("Add sends the entry's number", JSON.stringify(sent.pop()), JSON.stringify(["coach-dec-add", "/r/repo", "1"]));
 lib.coachAct(btn({ "data-act": "add", "data-i": 0 }));
 eq("Add anyway sends the view's root and the edit's number", JSON.stringify(sent.pop()), JSON.stringify(["coach-add", "/r/repo", "1"]));
+lib.coachAct(btn({ "data-act": "unskip", "data-i": 2 }));
+eq("Bring back sends the edit's number", JSON.stringify(sent.pop()), JSON.stringify(["coach-unskip", "/r/repo", "3"]));
+lib.coachAct(btn({ "data-act": "dec-unskip", "data-i": 0 }));
+eq("...and an entry's", JSON.stringify(sent.pop()), JSON.stringify(["coach-dec-unskip", "/r/repo", "1"]));
 lib.coachAct(btn({ "data-act": "rerun" }));
 eq("Run again sends the root", JSON.stringify(sent.pop()), JSON.stringify(["coach-rerun", "/r/repo", undefined]));
 lib.coachAct(btn({ "data-act": "apply", "data-i": 9 }));

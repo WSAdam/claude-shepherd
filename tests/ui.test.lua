@@ -4751,6 +4751,9 @@ do
         src:find('if a == "coach-apply" then FX.coachApply(', 1, true) ~= nil and src:find('if a == "coach-skip" then FX.coachSkip(', 1, true) ~= nil
         and src:find('if a == "coach-dec-add" then FX.coachDecision(', 1, true) ~= nil and src:find('if a == "coach-open" then FX.coachOpen(', 1, true) ~= nil)
   check("coach: the tick runs FX.stepCoach", src:find("pcall(FX.stepCoach, list, cfg)", 1, true) ~= nil)
+  check("coach: Bring back goes through FX.coachUnskip, for an edit or a DECISIONS.md entry",
+        src:find('if a == "coach-unskip" then FX.coachUnskip(tostring(payload.v or ""), tostring(payload.text or ""), "edits"); return end', 1, true) ~= nil
+        and src:find('if a == "coach-dec-unskip" then FX.coachUnskip(tostring(payload.v or ""), tostring(payload.text or ""), "decisions"); return end', 1, true) ~= nil)
   check("coach: Add to the section anyway is Apply with anyway set, by the edit's number",
         src:find('if a == "coach-add" then FX.coachApply(tostring(payload.v or ""), tostring(payload.text or ""), true); return end', 1, true) ~= nil)
   -- 2026-09-30: Apply takes `anyway` (Add to the section anyway) and hands it to the decision

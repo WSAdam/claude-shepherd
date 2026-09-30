@@ -38,6 +38,8 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
   don't get it. Such a suggestion, and any whose quote isn't in the file exactly once, now also
   offers **Run the coach again**, with a tooltip that says the quote doesn't match rather than that
   the file changed.
+- Coach overlay: a skipped suggestion (or `DECISIONS.md` entry) has **Bring back**, which puts it
+  back with the ones waiting. Skip was final before.
 
 ## 2026-09-30 — The build program
 

@@ -608,7 +608,8 @@ instructions every session in it reads first. It suggests; nothing changes until
   the new part is written, at the end of the edit's section (a section that isn't there is made at
   the end of the file), and committed like any Apply; the edit and its history entry then show what
   was written. It's refused when that part is already in `CLAUDE.md`. A rewrite never gets it: it
-  needs the text it replaces. Applying one edit doesn't block the next. **Skip** puts one aside. A `DECISIONS.md` entry is
+  needs the text it replaces. Applying one edit doesn't block the next. **Skip** puts one aside, and **Bring back** on a skipped
+  one puts it back with the ones waiting (a skipped `DECISIONS.md` entry too). A `DECISIONS.md` entry is
   added through the On purpose tab's own guard, not committed. While it runs, the overlay counts how long it has been reading and says when it gives up
   (`coach.timeoutSeconds`, default 10 minutes). A quiet chip shows while the coach
   reads or waits, and **🧭 ⚠** when its last run couldn't run (the overlay says why, with **Run the

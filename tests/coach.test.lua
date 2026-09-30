@@ -1029,4 +1029,32 @@ if commitTasks()[nA + 1] then runFor(commitTasks()[nA + 1]) end
 check("add anyway (repo): Undo takes it back out", okU == true and read(REPO .. "/CLAUDE.md") == CURF)
 end
 
+-- 2026-09-30: a skipped suggestion couldn't be brought back -- Skip was final, and Shepherd's own
+-- "Deploying" edit was skipped only because of a refusal that has since been fixed.
+do
+fx._coach.recs[REPO] = { v = 1, repo = REPO .. "/.git", root = REPO, name = "repo", state = "done", verdict = "proposals",
+  trigger = "card", at = 100, doneAt = 200, lastRunAt = 200, claudeHash = core.coachHash(read(REPO .. "/CLAUDE.md")),
+  edits = { { section = "Git", old = "a", new = "b", why = "w", evidence = { "e" }, status = "skipped" },
+            { section = "Git", old = "c", new = "d", why = "w", evidence = { "e" }, status = "applied", sha = "abc1234abc" } },
+  decisions = { { what = "Keep bash", why = "portable", status = "skipped" }, { what = "Tabs", why = "w", status = "added" } } }
+local brec = fx._coach.recs[REPO]
+local p0 = core.coachView(brec).pending
+local okB
+quiet(function() okB = type(fx.coachUnskip) == "function" and fx.coachUnskip(REPO, 1, "edits") end)
+check("bring back: a skipped edit is pending again, and counts on the chip  (" .. tostring(p0) .. "->" .. tostring(core.coachView(brec).pending) .. ")",
+      okB == true and brec.edits[1].status == "pending" and brec.edits[1].error == nil and core.coachView(brec).pending == p0 + 1)
+local saved = json.decode(read(CDIR .. "/" .. core.coachFileKey(REPO) .. ".json") or "{}") or {}
+check("bring back: ...and that is saved", saved.edits and saved.edits[1] and saved.edits[1].status == "pending")
+quiet(function() okB = type(fx.coachUnskip) == "function" and fx.coachUnskip(REPO, 2, "edits") end)
+check("bring back: an applied edit is not brought back (Undo is for that)", okB == false and brec.edits[2].status == "applied")
+quiet(function() okB = type(fx.coachUnskip) == "function" and fx.coachUnskip(REPO, 1, "edits") end)
+check("bring back: a pending edit is left as it is", okB == false and brec.edits[1].status == "pending")
+quiet(function() okB = type(fx.coachUnskip) == "function" and fx.coachUnskip(REPO, 1, "decisions") end)
+check("bring back: a skipped DECISIONS.md entry is pending again", okB == true and brec.decisions[1].status == "pending")
+quiet(function() okB = type(fx.coachUnskip) == "function" and fx.coachUnskip(REPO, 2, "decisions") end)
+check("bring back: an added entry is not", okB == false and brec.decisions[2].status == "added")
+quiet(function() okB = type(fx.coachUnskip) == "function" and fx.coachUnskip(REPO, 1, "history") end)
+check("bring back: only edits and entries", okB == false)
+end
+
 finish()

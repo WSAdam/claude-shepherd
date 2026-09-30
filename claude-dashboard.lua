@@ -6941,6 +6941,20 @@ function FX.coachSkip(root, i)
   return true
 end
 
+-- Bring back (2026-09-30): a skipped edit or DECISIONS.md entry is pending again, with no refusal on
+-- it -- Skip was final, though a skip is often only "not now". Applied and added ones are not (Undo
+-- takes an applied edit back out).
+function FX.coachUnskip(root, i, what)
+  if what ~= "edits" and what ~= "decisions" then return false end
+  local rec, item = FX.coachItem(root, i, what)
+  if not rec or item.status ~= "skipped" then return false end
+  item.status, item.error, item.errorCode = "pending", nil, nil
+  FX.coachSave(rec)
+  print("[cc-dashboard] 🔍 coach: brought back " .. what .. " " .. tostring(i) .. " for " .. tostring(rec.root))
+  if FX._coach.open == root then FX.pushCoach(root) end
+  return true
+end
+
 -- A proposed DECISIONS.md entry: added through On purpose's own guard (the hash the coach read), or
 -- skipped. Added, not committed -- like an entry from the On purpose tab.
 function FX.coachDecision(root, i, act)
@@ -12052,6 +12066,8 @@ local function handleBridgeMsg(msg)
   if a == "coach-apply" then FX.coachApply(tostring(payload.v or ""), tostring(payload.text or "")); return end
   if a == "coach-add" then FX.coachApply(tostring(payload.v or ""), tostring(payload.text or ""), true); return end
   if a == "coach-skip" then FX.coachSkip(tostring(payload.v or ""), tostring(payload.text or "")); return end
+  if a == "coach-unskip" then FX.coachUnskip(tostring(payload.v or ""), tostring(payload.text or ""), "edits"); return end
+  if a == "coach-dec-unskip" then FX.coachUnskip(tostring(payload.v or ""), tostring(payload.text or ""), "decisions"); return end
   if a == "coach-undo" then FX.coachUndo(tostring(payload.v or ""), tostring(payload.text or "")); return end
   if a == "coach-dec-add" then FX.coachDecision(tostring(payload.v or ""), tostring(payload.text or ""), "add"); return end
   if a == "coach-dec-skip" then FX.coachDecision(tostring(payload.v or ""), tostring(payload.text or ""), "skip"); return end
@@ -23205,7 +23221,8 @@ local HTML = [[
                   + (e.addAnyway ? '<button class="ib-btn" data-act="add" data-i="' + i + '" onclick="coachAct(event)" title="Its quote is not in CLAUDE.md as written: add only its new part at the end of '
                                    + esc(e.section || "its section") + ', and commit CLAUDE.md alone">Add to the section anyway</button>' : '')
                   + (e.rerun ? ((e.code === "not-found" || e.code === "ambiguous") ? misquoted : stale) : '') + '</div>'
-                : '<div class="co-done">' + (e.status === "applied" ? "✓ Applied" + (e.sha ? " · committed " + esc(String(e.sha).slice(0, 7)) : "") : "Skipped") + '</div>')
+                : '<div class="co-done">' + (e.status === "applied" ? "✓ Applied" + (e.sha ? " · committed " + esc(String(e.sha).slice(0, 7)) : "")
+                    : "Skipped " + '<button class="ib-btn" data-act="unskip" data-i="' + i + '" onclick="coachAct(event)" title="Put this suggestion back with the ones waiting">Bring back</button>') + '</div>')
           + '</div>';
       });
       (v.decisions || []).forEach(function(d, i){
@@ -23216,7 +23233,8 @@ local HTML = [[
           + (pend && d.error ? '<div class="co-err">' + esc(d.error) + '</div>' : '')
           + (pend ? '<div class="ib-free"><button class="ib-btn" data-act="dec-add" data-i="' + i + '" onclick="coachAct(event)" title="Add this entry to DECISIONS.md (not committed)">Add to DECISIONS.md</button>'
                   + '<button class="ib-btn" data-act="dec-skip" data-i="' + i + '" onclick="coachAct(event)">Skip</button>' + (d.rerun ? stale : '') + '</div>'
-                : '<div class="co-done">' + (d.status === "added" ? "✓ Added to DECISIONS.md" : "Skipped") + '</div>')
+                : '<div class="co-done">' + (d.status === "added" ? "✓ Added to DECISIONS.md"
+                    : "Skipped " + '<button class="ib-btn" data-act="dec-unskip" data-i="' + i + '" onclick="coachAct(event)" title="Put this entry back with the ones waiting">Bring back</button>') + '</div>')
           + '</div>';
       });
       // 2026-09-30: what was applied before (v.history, newest first). It outlives the run that
@@ -23253,7 +23271,8 @@ local HTML = [[
         if(hx && hx.i) send("coach-undo", v.root, String(hx.i));
         return;
       }
-      var list = (act === "apply" || act === "skip" || act === "add") ? v.edits : ((act === "dec-add" || act === "dec-skip") ? v.decisions : null);
+      var list = (act === "apply" || act === "skip" || act === "add" || act === "unskip") ? v.edits
+        : ((act === "dec-add" || act === "dec-skip" || act === "dec-unskip") ? v.decisions : null);
       var i = parseInt(t.getAttribute("data-i"), 10);
       if(!list || !(i >= 0) || !list[i]) return;
       send("coach-" + act, v.root, String(i + 1));
