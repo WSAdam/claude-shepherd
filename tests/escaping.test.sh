@@ -196,5 +196,9 @@ assert_eq "a coach edit's evidence is esc()'d"       "yes" "$(has "return '<li>'
 assert_eq "a coach edit's refusal is esc()'d"        "yes" "$(has "'<div class=\"co-err\">' + esc(e.error)")"
 assert_eq "a proposed DECISIONS.md entry is esc()'d" "yes" "$(has "'<div class=\"ib-q\">DECISIONS.md: ' + esc(d.what)")"
 assert_eq "...and its why"                           "yes" "$(has "'<div class=\"co-why\">Why: ' + esc(d.why)")"
+# the scheduled-tasks lock badge (2026-09-29): its label and tooltip carry folder paths and card
+# names (tests/schedlock-badge.test.js runs the real schedLockBadge)
+assert_eq "a lock badge's label is esc()'d"          "yes" "$(has "'\">'+esc(sl.label)+'</span>'")"
+assert_eq "...and its tooltip (the fix)"             "yes" "$(has "title=\"'+esc(sl.tip || \"\")+'\"")"
 
 finish

@@ -38,6 +38,7 @@ Every feature below has a reference page one click away. The panel lists the sam
   says what its session is on, from your latest prompt, with the tool running now and the skill in use.
 - [**Project cards & instances**](docs/fleet.md#project-cards-and-instances): a repo and its
   worktrees share one card, led by the instance that needs you, with every instance a click away.
+- [**Scheduled-tasks lock check**](docs/troubleshooting.md#a-card-flags-a-scheduled-tasks-lock): 🔒 on a card whose lock is dead, committed or held elsewhere, with the fix.
 - [**Transcript peek**](docs/fleet.md#the-detail-panel): read a session's recent messages, and
   search them, inside the panel.
 - [**Find in fleet**](docs/fleet.md#search-groups-and-bulk-actions): search every session's

@@ -4760,5 +4760,32 @@ do
         src:find("done = done.filter", 1, true) == nil and src:find("done.filter(function", 1, true) == nil)
 end
 
+-- ---- a bad scheduled-tasks lock on the card (2026-09-29) ----
+-- Build program unit 39: the card flags a dead, committed or foreign
+-- <launch dir>/.claude/scheduled_tasks.lock with the fix in its tooltip. The probe (ps + git)
+-- runs on its own timer as an hs.task -- the tick only stamps the cached answer -- and Shepherd
+-- never runs the fix itself.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("schedlock: the card's badges row shows it", src:find("b += schedLockBadge(it);", 1, true) ~= nil)
+  check("schedlock: the label and the tooltip reach HTML through esc()",
+        src:find("'<span class=\"slock-b\" title=\"'+esc(sl.tip || \"\")+'\">'+esc(sl.label)+'</span>'", 1, true) ~= nil)
+  local tickBody = src:match("\nfunction FX%._refreshBody%(%)(.-)\nend\n") or src:match("FX%._refreshBody = function%(%)(.-)\nend\n") or ""
+  check("schedlock: the tick stamps the cached answer and never probes",
+        #tickBody > 1000 and tickBody:find("pcall(FX.annotateSchedLocks, list, cfg)", 1, true) ~= nil
+        and tickBody:find("refreshSchedLocks", 1, true) == nil)
+  check("schedlock: its own retained timer runs the probe", src:find("FX.schedLockTimer = hs.timer.doEvery(", 1, true) ~= nil)
+  local refresh = src:match("\nfunction FX%.refreshSchedLocks%(list, force%)(.-)\nend\n") or ""
+  local probe = src:match("\nfunction FX%.schedLockProbe%(st, entries, gitDirs, heads, me, now%)(.-)\nend\n") or ""
+  check("schedlock: the probe is an hs.task with stdout in a scratch file, never hs.execute",
+        #refresh > 0 and #probe > 0 and probe:find("hs.task.new(\"/bin/sh\"", 1, true) ~= nil
+        and probe:find("FX.scratchFile(\"schedlock\")", 1, true) ~= nil
+        and (refresh .. probe):find("hs.execute", 1, true) == nil)
+  check("schedlock: Shepherd never runs the fix (no git rm, no remove of the lock)",
+        src:find("rm --cached", 1, true) == nil and src:find("os.remove(dir .. \"/\" .. core.SCHED_LOCK_REL", 1, true) == nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

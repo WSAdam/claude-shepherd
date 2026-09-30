@@ -475,6 +475,15 @@ echo ""
 echo "== node: My List -- the ▶ live run toggle keeps only the lines a live run has to check, on a tab and on MASTER (real browser) =="
 node "$DIR/worklist-liverun.browser.test.js" || fail=1
 echo ""
+echo "== lua: the scheduled-tasks lock verdict -- literal locks plus ps and git output: live, dead pid, reused pid (another start time), committed, held by another card, malformed JSON, the per-HEAD cache, the fix text =="
+lua "$DIR/schedlock.test.lua" || fail=1
+echo ""
+echo "== lua: the scheduled-tasks lock probe -- one background ps + git per refresh on real folders, never the tick, stamped on every tile of the card, git asked again only when HEAD moves, hung/failed/disabled (stubbed hs) =="
+HOME="$(mktemp -d)" lua "$DIR/schedlock-refresh.test.lua" || fail=1
+echo ""
+echo "== node: a card's lock badge shows what's wrong with the fix in its tooltip, both escaped (behavioral, runs the shipped schedLockBadge) =="
+node "$DIR/schedlock-badge.test.js" || fail=1
+echo ""
 
 if [ "$fail" -eq 0 ]; then
   echo "✅ ALL GREEN"

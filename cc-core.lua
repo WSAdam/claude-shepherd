@@ -4929,6 +4929,224 @@ function M.radarRepos(list)
   return out
 end
 
+-- ---- Scheduled-tasks lock (2026-09-29, build program unit 39) ----------------------------
+-- Claude Code runs one scheduler (its CronCreate tasks, /loop) per folder and claims it with
+-- <launch dir>/.claude/scheduled_tasks.lock, JSON {sessionId, pid, procStart, acquiredAt}. Its rule
+-- (2.1.175): a lock whose pid is alive -- and, when procStart is set, whose `LC_ALL=C TZ=UTC ps -o
+-- lstart=` still reads procStart -- is held; anything else is stale and taken over. Three states
+-- hurt, and a project card flags them: dead (the pid is gone, or reused by a process that started
+-- at another time), committed (git tracks it: every clone and worktree checks out that copy, and
+-- Claude Code's rewrite dirties the tree), and held by another card (a live session of a different
+-- card holds this folder's lock, so this card's scheduled tasks never fire). The card suggests the
+-- fix; Shepherd never runs it. The probe (one ps, plus `git ls-tree` per folder whose HEAD it hasn't
+-- read) runs in the background (FX.refreshSchedLocks, the FX.refreshCommits pattern), never the tick.
+M.SCHED_LOCK_REL = ".claude/scheduled_tasks.lock"
+M.SCHED_LOCK_RETRY = 300   -- seconds before git is asked again about a folder whose HEAD can't be read
+
+-- The lock file -> { sessionId, pid (digits), procStart (or nil), acquiredAt } or nil. Claude Code's
+-- own schema: sessionId a string, pid a number, procStart an optional string, acquiredAt a number.
+-- Anything else -- torn JSON, an empty file caught between Claude Code's create and its write -- is
+-- no lock (Claude Code treats it as stale and replaces it itself).
+function M.parseSchedLock(raw)
+  if type(raw) ~= "string" or raw == "" or not M.json then return nil end
+  local ok, t = pcall(M.json.decode, raw)
+  if not ok or type(t) ~= "table" then return nil end
+  local pid = t.pid
+  if type(t.sessionId) ~= "string" or t.sessionId == "" or type(pid) ~= "number"
+     or pid < 1 or pid ~= math.floor(pid) or type(t.acquiredAt) ~= "number" then
+    return nil
+  end
+  if t.procStart ~= nil and type(t.procStart) ~= "string" then return nil end
+  return { sessionId = t.sessionId, pid = string.format("%d", pid),
+           procStart = (t.procStart ~= "" and t.procStart) or nil, acquiredAt = t.acquiredAt }
+end
+
+-- The probe, as one /bin/sh program. $1 = the pids to ask ps about (digits and commas; "" = none),
+-- $2.. = the folders to ask git whether HEAD's tree holds the lock. ps runs in Claude Code's own zone
+-- and locale: procStart was written that way, and any other reads every live lock as a reused pid.
+-- A folder's section is numbered, so a path never has to survive the output.
+M.SCHED_LOCK_SH = [=[
+if [ -n "$1" ]; then echo @@ps; LC_ALL=C TZ=UTC ps -o pid=,lstart= -p "$1" 2>/dev/null; fi
+shift
+i=0
+for d in "$@"; do
+  i=$((i+1))
+  printf '@@git\t%s\n' "$i"
+  git -C "$d" -c core.quotepath=off ls-tree --name-only HEAD -- .claude/scheduled_tasks.lock 2>/dev/null
+  printf '@@rc\t%s\n' "$?"
+done
+]=]
+
+-- The argv the probe runs as (core.folderScanShellCommand quotes it and sends stdout to a file).
+-- pids = a set of pids; only digits reach the command line.
+function M.schedLockScanArgv(pids, dirs)
+  local list, seen = {}, {}
+  for p in pairs(pids or {}) do
+    local d = tostring(p):match("^%d+$")
+    if d and not seen[d] then seen[d] = true; list[#list + 1] = d end
+  end
+  table.sort(list)
+  local argv = { "/bin/sh", "-c", M.SCHED_LOCK_SH, "cc-schedlock", table.concat(list, ",") }
+  for _, d in ipairs(dirs or {}) do argv[#argv + 1] = tostring(d) end
+  return argv
+end
+
+-- The probe's output -> { lstart = { [pid] = start } (nil when ps never ran), tracked = { [dir] =
+-- true | false }, answered = { [dir] = true } }. A folder whose section got its exit code is
+-- answered; git's exit 0 with the path is committed, 0 with nothing is not, anything else (no repo,
+-- no commit yet) says nothing. ps pads the pid and lstart pads a one-digit day ("Sep  1"): the
+-- inner spacing is kept, since Claude Code compares the string exactly.
+function M.parseSchedLockScan(out, dirs)
+  local res = { lstart = nil, tracked = {}, answered = {} }
+  local section, idx, hit = nil, nil, false
+  radarLines(tostring(out or ""), function(line)
+    if line == "@@ps" then section = "ps"; res.lstart = res.lstart or {}; return end
+    local n = line:match("^@@git\t(%d+)$")
+    if n then section, idx, hit = "git", tonumber(n), false; return end
+    local rc = line:match("^@@rc\t(%d+)$")
+    if rc and section == "git" then
+      local dir = type(dirs) == "table" and dirs[idx] or nil
+      if dir then
+        res.answered[dir] = true
+        if rc == "0" then res.tracked[dir] = hit else res.tracked[dir] = nil end
+      end
+      section = nil
+      return
+    end
+    if section == "ps" then
+      local pid, start = line:match("^%s*(%d+)%s+(%S.-)%s*$")
+      -- a whole lstart ends in its year; a line torn mid-time is no answer
+      if pid and start:match("%d%d%d%d$") then res.lstart[tostring(tonumber(pid))] = start end
+    elseif section == "git" and line ~= "" then
+      hit = true
+    end
+  end)
+  return res
+end
+
+-- Is git due to be asked whether this folder's HEAD holds the lock? entry = the cached answer
+-- { sha, at, tracked } (nil = never asked); sha = the folder's HEAD now (nil = unreadable: not a
+-- repo root, or no repo). Committed-ness only changes with HEAD, so an answer at this HEAD holds for
+-- good; a folder with no readable HEAD is asked again after SCHED_LOCK_RETRY.
+function M.schedLockTrackDue(entry, sha, now)
+  if type(entry) ~= "table" then return true end
+  if sha ~= nil then return entry.sha ~= sha end
+  if entry.sha ~= nil then return true end
+  return (tonumber(now) or 0) - (tonumber(entry.at) or 0) >= M.SCHED_LOCK_RETRY
+end
+
+-- One launch folder's lock, as seen from one card -> nil (missing, healthy, or not known yet) or
+-- { dir, dead = "gone" | "reused" | nil, pid, lstart, procStart, committed = true | nil,
+--   other = { name, card } | nil }.
+-- e = { dir, present, lock (core.parseSchedLock), probed (ps showed Shepherd's own pid), lstart
+-- (pid -> start), tracked }. sessions = { { key, session_id, session_pid, card, dir, name } }.
+-- A probe that couldn't see Shepherd's own pid proves nothing, so nothing is ever "dead" on a broken
+-- ps. The holder is found by session id, else by pid (a /clear changes the id, not the process);
+-- it is "another card" only when it is on a different card AND wasn't launched in this folder (with
+-- stacks off every session is its own card, and the one launched here is the lock's rightful owner).
+function M.schedLockVerdict(e, cardKey, sessions)
+  if type(e) ~= "table" or not e.present then return nil end
+  local v = { dir = e.dir }
+  if e.tracked == true then v.committed = true end
+  local lk = e.lock
+  if type(lk) == "table" and e.probed and type(e.lstart) == "table" then
+    local ls = e.lstart[lk.pid]
+    v.pid, v.procStart = lk.pid, lk.procStart
+    if ls == nil then
+      v.dead = "gone"
+    elseif lk.procStart and ls ~= "" and ls ~= lk.procStart then
+      v.dead, v.lstart = "reused", ls
+    else
+      local holder
+      for _, s in ipairs(sessions or {}) do
+        if type(s) == "table" and s.session_id == lk.sessionId then holder = s; break end
+      end
+      if not holder then
+        for _, s in ipairs(sessions or {}) do
+          if type(s) == "table" and tostring(s.session_pid or "") == lk.pid then holder = s; break end
+        end
+      end
+      if holder and holder.card ~= cardKey and holder.dir ~= e.dir then
+        v.other = { name = holder.name or holder.card, card = holder.card }
+      end
+    end
+  end
+  if v.dead or v.committed or v.other then return v end
+  return nil
+end
+
+-- A card's verdicts (one per launch folder with a problem) -> nil or { label, tip, kinds }. The label
+-- is the chip on the card; the tip says, per folder, what's wrong and the commands that fix it, run
+-- from that folder -- Shepherd never runs them.
+function M.schedLockView(verdicts)
+  local list = {}
+  for _, v in ipairs(verdicts or {}) do if type(v) == "table" then list[#list + 1] = v end end
+  if #list == 0 then return nil end
+  table.sort(list, function(a, b) return tostring(a.dir) < tostring(b.dir) end)
+  local any = {}
+  local blocks = {}
+  local rel = M.SCHED_LOCK_REL
+  for _, v in ipairs(list) do
+    local lines = { "Scheduled-tasks lock: " .. tostring(v.dir) .. "/" .. rel }
+    if v.dead == "gone" then
+      any.dead = true
+      lines[#lines + 1] = "• Dead: pid " .. tostring(v.pid) .. " is gone. Claude Code takes a dead lock over, but a stale copy lingers."
+    elseif v.dead == "reused" then
+      any.dead = true
+      lines[#lines + 1] = "• Dead: pid " .. tostring(v.pid) .. " is another process now (it started " .. tostring(v.lstart)
+        .. "; the lock's started " .. tostring(v.procStart) .. ")."
+    end
+    if v.other then
+      any.other = true
+      lines[#lines + 1] = "• Held by another card's session (" .. tostring(v.other.name) .. ", pid " .. tostring(v.pid)
+        .. "): this card's scheduled tasks don't fire while it runs. It frees when that session ends."
+    end
+    if v.committed then
+      any.committed = true
+      lines[#lines + 1] = "• Committed to git: every clone and worktree checks out this copy, and Claude Code's rewrite dirties the tree."
+    end
+    if v.committed or v.dead then
+      lines[#lines + 1] = "Fix it yourself (Shepherd never runs these), in " .. tostring(v.dir) .. ":"
+      if v.committed then
+        lines[#lines + 1] = "  git rm --cached " .. rel
+        lines[#lines + 1] = "  echo '" .. rel .. "' >> .gitignore   (then commit both)"
+      end
+      if v.dead then lines[#lines + 1] = "  rm " .. rel end
+    end
+    blocks[#blocks + 1] = table.concat(lines, "\n")
+  end
+  local kinds, words = {}, {}
+  if any.dead then kinds[#kinds + 1] = "dead"; words[#words + 1] = "dead" end
+  if any.other then kinds[#kinds + 1] = "other"; words[#words + 1] = "held elsewhere" end
+  if any.committed then kinds[#kinds + 1] = "committed"; words[#words + 1] = "in git" end
+  return { label = "🔒 lock " .. table.concat(words, " · "), tip = table.concat(blocks, "\n\n"), kinds = kinds }
+end
+
+-- Every card's view. rows = the tick's local sessions { key, session_id, session_pid, card, dir, name }
+-- (dir = its launch folder); entries = the probe's answer per folder. Each card looks at the lock in
+-- every folder one of its sessions was launched in -> { [card] = view }.
+function M.schedLockCards(rows, entries)
+  local out = {}
+  if type(entries) ~= "table" or next(entries) == nil then return out end
+  local dirsOf, order = {}, {}
+  for _, r in ipairs(rows or {}) do
+    if type(r) == "table" and type(r.dir) == "string" and r.dir ~= "" and r.card ~= nil and entries[r.dir] then
+      local d = dirsOf[r.card]
+      if not d then d = {}; dirsOf[r.card] = d; order[#order + 1] = r.card end
+      d[r.dir] = true
+    end
+  end
+  for _, card in ipairs(order) do
+    local verdicts = {}
+    for dir in pairs(dirsOf[card]) do
+      local v = M.schedLockVerdict(entries[dir], card, rows)
+      if v then verdicts[#verdicts + 1] = v end
+    end
+    out[card] = M.schedLockView(verdicts)
+  end
+  return out
+end
+
 -- ---- Lockscreen board (what the lock overlay draws) -------------------------
 -- The lock is up for hours while the fleet keeps working, so the overlay answers
 -- one question at a glance: is anything running, and does anything want me? Both
@@ -19548,6 +19766,9 @@ M.FEATURES = {
   { key = "skillruns", cat = "See what's happening", new = true, title = "How often each skill works",
     what = "🔌 MCPs & Skills shows \"N runs · x% ok\" under each skill that ran in your sessions: every Skill call or /skill, with the prompt that started it and how its turn ended (done or made progress is ok; blocked, did nothing or interrupted isn't). Open the list to see each run and mark it ok or not ok yourself -- your label wins, and it's kept in ~/.claude/cc-skill-labels.json.",
     why = "Know which skills actually get the job done before you reach for one again." },
+  { key = "schedlock", cat = "See what's happening", new = true, title = "Scheduled-tasks lock check",
+    what = "A project card shows 🔒 when the .claude/scheduled_tasks.lock in its launch folder is dead (its process is gone, or its pid now belongs to another process), committed to git, or held by a session on another card. Hover it for why and the fix: git rm --cached plus a .gitignore line for a committed lock, deleting the file for a dead one. Shepherd checks in the background and never runs the fix itself.",
+    why = "A bad lock quietly stops Claude Code's scheduled tasks and /loop from firing, or dirties every checkout; now you see it on the card." },
 
   -- ---- Make it yours ----
   { key = "theme", cat = "Make it yours", new = true, title = "Visual theme editor",

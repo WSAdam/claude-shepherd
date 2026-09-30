@@ -85,6 +85,39 @@ also for a policy that allowed it: the Decisions tab and the audit ledger record
 - **A tile never appears.** Check that the hooks are wired (Diagnostics), then capture what your
   Claude Code version sends ([Development → Confirm your hook payloads](development.md#confirm-your-hook-payloads)).
 
+## A card flags a scheduled-tasks lock
+
+Claude Code runs one scheduler per folder, for scheduled tasks and `/loop`. A session claims it by
+writing `.claude/scheduled_tasks.lock` in its launch folder. The file holds the session's id, its pid
+and when that process started. A project card shows **🔒** when that file is in one of three bad
+states. Hover the chip to see which folder, why, and the fix. **Shepherd never runs the fix itself.**
+
+- **🔒 lock dead.** The pid is gone, or it now belongs to another process that started at a
+  different time (a reused pid). Claude Code takes a dead lock over the next time it schedules
+  something, so this is usually harmless. A stale copy is still worth deleting. In that folder:
+  `rm .claude/scheduled_tasks.lock`.
+- **🔒 lock in git.** The lock is committed. Every clone and worktree checks out that copy, and each
+  time Claude Code rewrites it the tree turns dirty. In that folder:
+  `git rm --cached .claude/scheduled_tasks.lock`, then
+  `echo '.claude/scheduled_tasks.lock' >> .gitignore`, then commit both.
+- **🔒 lock held elsewhere.** A live session on another card holds this folder's lock. That happens
+  when a committed lock was cloned from a repo where the session is still running. This card's
+  scheduled tasks don't fire until that session ends. There's nothing to delete.
+
+A lock whose session is on this card is healthy and shows nothing. So does a folder with no lock.
+A file that doesn't parse (for example, caught mid-write) is left alone; Claude Code replaces it
+itself.
+
+How Shepherd checks:
+
+- Every `schedLock.refreshSeconds` (default `60`, at least `30`), on its own timer and never on the
+  panel's tick, Shepherd reads each launch folder's lock.
+- One background `ps` (with `LC_ALL=C TZ=UTC`, as Claude Code writes the start time) checks the pids.
+  Shepherd's own pid goes in as a control: if `ps` can't see Shepherd, no lock is called dead.
+- `git ls-tree HEAD` checks whether the lock is committed. The answer is cached per HEAD commit, so
+  git is asked again only after a new commit.
+- `schedLock.enabled: false` turns the check off and clears the chips.
+
 ## Insights or History list sessions that never ran
 
 Before 2026-09-28, running Shepherd's own test suite (`make test`, which `make setup` and the

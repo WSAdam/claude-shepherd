@@ -8837,19 +8837,10 @@ function FX.annotateStacks(list, labels, cfg)
     for _, it in ipairs(list or {}) do it.stackKey = nil; it.stackName = nil end
     return
   end
-  FX._launchDir = FX._launchDir or {}
-  FX._launchDirN = FX._launchDirN or 0
-  if FX._launchDirN > 500 then FX._launchDir, FX._launchDirN = {}, 0 end  -- bounded: cwd drift adds keys
   for _, it in ipairs(list or {}) do
     local launch, ident, head, cur
     if not it.remote then
-      local lk = tostring(it.projectKey or "") .. "|" .. tostring(it.cwd or "") .. "|" .. tostring(it.originDir or "")
-      launch = FX._launchDir[lk]
-      if launch == nil then
-        launch = core.launchDirFor(it.projectKey, it.cwd, it.originDir) or false
-        FX._launchDir[lk] = launch
-        FX._launchDirN = FX._launchDirN + 1
-      end
+      launch = FX.launchDirOf(it)   -- cached (bounded), shared with the scheduled-tasks lock check
       if launch then
         ident = FX.repoIdentity(launch)
         if ident and ident.toplevel == launch then
@@ -9053,6 +9044,152 @@ function FX.annotateRadar(list)
       local w = views[cd] and views[cd].byPath[core.normDir(it.wtRoot)]
       if w then it.overlap = { line = w.line, n = w.n } end
     end
+  end
+end
+
+-- ---- Scheduled-tasks lock (2026-09-29, build program unit 39) ----------------------------
+-- A project card flags a dead, committed or foreign <launch dir>/.claude/scheduled_tasks.lock and
+-- says how to fix it (core.schedLockVerdict / schedLockView); Shepherd never fixes it. On the
+-- FX.refreshCommits pattern: its own timer (FX.schedLockTimer), never the tick. A refresh reads each
+-- launch folder's lock (a small file read), then ONE hs.task (core.SCHED_LOCK_SH, stdout in a scratch
+-- file) asks ps about every lock's pid plus Shepherd's own (the control, as in FX.probeAlive) and git
+-- about the folders whose HEAD it hasn't answered for (FX.gitHead, from files; cached per HEAD sha).
+-- The tick only stamps the last answer (FX.annotateSchedLocks). State on FX: the main chunk is at
+-- Lua's 200-local cap.
+FX._schedLock = { entries = {}, tracked = {}, cache = nil, inflight = nil }
+
+-- A session's launch folder (core.launchDirFor), cached as FX.annotateStacks caches it.
+function FX.launchDirOf(it)
+  if type(it) ~= "table" or it.remote then return nil end
+  FX._launchDir = FX._launchDir or {}
+  FX._launchDirN = FX._launchDirN or 0
+  if FX._launchDirN > 500 then FX._launchDir, FX._launchDirN = {}, 0 end  -- bounded: cwd drift adds keys
+  local lk = tostring(it.projectKey or "") .. "|" .. tostring(it.cwd or "") .. "|" .. tostring(it.originDir or "")
+  local launch = FX._launchDir[lk]
+  if launch == nil then
+    launch = core.launchDirFor(it.projectKey, it.cwd, it.originDir) or false
+    FX._launchDir[lk] = launch
+    FX._launchDirN = FX._launchDirN + 1
+  end
+  return launch or nil
+end
+
+function FX.refreshSchedLocks(list, force)
+  local st, cfg = FX._schedLock, loadConfig()
+  if core.config(cfg, "schedLock.enabled", true) == false then
+    if st.inflight and st.inflight.task then pcall(function() st.inflight.task:terminate() end) end
+    st.inflight, st.cache, st.entries, st.tracked = nil, nil, {}, {}
+    return
+  end
+  local ttl = math.max(30, tonumber(core.config(cfg, "schedLock.refreshSeconds", 60)) or 60)
+  if force == true then ttl = 0 end
+  local now = os.time()
+  local plan = core.prPollPlan(st.cache, st.inflight, now, { ttl = ttl, retryTtl = ttl, deadline = 60 })
+  if plan.act ~= "start" then return end
+  if plan.killStale and st.inflight and st.inflight.task then
+    pcall(function() st.inflight.task:terminate() end)   -- a hung probe: reclaim the slot
+    print("⚠️ [cc-dashboard] schedlock: the last probe hung past 60s; starting over")
+  end
+  st.inflight = nil
+  -- every local launch folder, once; its lock read here (a few hundred bytes), never in the tick
+  local entries, gitDirs, heads, seen = {}, {}, {}, {}
+  for _, it in ipairs(list or lastRenderList or {}) do
+    local dir = FX.launchDirOf(it)
+    if dir and not seen[dir] then
+      seen[dir] = true
+      local raw
+      pcall(function()
+        local f = io.open(dir .. "/" .. core.SCHED_LOCK_REL, "r")
+        if f then raw = f:read(4096) or ""; f:close() end
+      end)
+      if raw then
+        local e = { dir = dir, present = true, lock = core.parseSchedLock(raw) }
+        entries[dir] = e
+        local sha = FX.gitHead(dir)
+        heads[dir] = sha
+        local c = st.tracked[dir]
+        if core.schedLockTrackDue(c, sha, now) then gitDirs[#gitDirs + 1] = dir end
+        e.tracked = c and c.tracked or nil   -- the last answer until a new one lands
+      end
+    end
+  end
+  for d in pairs(st.tracked) do if not entries[d] then st.tracked[d] = nil end end
+  if next(entries) == nil then
+    st.entries, st.cache = {}, { ts = now, data = true }   -- no lock anywhere: nothing to ask
+    return
+  end
+  -- Shepherd's own pid rides along as the control: a ps that can't see it proves nothing
+  local me = tostring(type(rawget(hs, "processInfo")) == "table" and hs.processInfo.processID or ""):match("^%d+$")
+  FX.schedLockProbe(st, entries, gitDirs, heads, me, now)
+end
+
+function FX.schedLockProbe(st, entries, gitDirs, heads, me, now)
+  local pids = {}
+  for _, e in pairs(entries) do if e.lock then pids[e.lock.pid] = true end end
+  if me then pids[me] = true end
+  local outFile = FX.scratchFile("schedlock")
+  local cmd = core.folderScanShellCommand(core.schedLockScanArgv(pids, gitDirs), outFile)
+  -- mark the attempt now (debounce) but keep the last answer until this one lands
+  st.cache = { ts = now, data = st.cache and st.cache.data or nil }
+  local ok = pcall(function()
+    local t   -- forward-declared: the callback's ownership check needs THIS task as an upvalue
+    t = hs.task.new("/bin/sh", function(code)
+      if FX._schedLock ~= st or not core.prCallbackOwns(st.inflight, t) then pcall(os.remove, outFile); return end
+      st.inflight = nil
+      local out = FX.readFile(outFile) or ""
+      pcall(os.remove, outFile)
+      if code ~= 0 then
+        print("❌ [cc-dashboard] schedlock: the probe exited " .. tostring(code) .. "; keeping the last answer")
+        return
+      end
+      local scan = core.parseSchedLockScan(out, gitDirs)
+      local at = os.time()
+      for _, dir in ipairs(gitDirs) do
+        if scan.answered[dir] then st.tracked[dir] = { sha = heads[dir], at = at, tracked = scan.tracked[dir] } end
+      end
+      local probed = scan.lstart ~= nil and me ~= nil and scan.lstart[me] ~= nil
+      if scan.lstart ~= nil and not probed then
+        print("⚠️ [cc-dashboard] schedlock: ps didn't report Shepherd's own pid -- no lock is called dead this time")
+      end
+      local bad = 0
+      for dir, e in pairs(entries) do
+        e.probed, e.lstart = probed, scan.lstart or {}
+        local c = st.tracked[dir]
+        if c then e.tracked = c.tracked end
+        if core.schedLockVerdict(e, nil, {}) then bad = bad + 1 end
+      end
+      st.entries = entries
+      st.cache = { ts = at, data = true }
+      if bad > 0 then print("🔍 [cc-dashboard] schedlock: " .. bad .. " folder(s) with a dead or committed scheduled-tasks lock") end
+    end, { "-c", cmd })
+    if not t then error("task create failed") end
+    st.inflight = { task = t, ts = now }
+    t:start()
+  end)
+  if not ok then
+    st.inflight = nil; pcall(os.remove, outFile)
+    print("❌ [cc-dashboard] schedlock: couldn't start the probe")
+  end
+end
+
+-- Tick: stamp it.schedLock = { label, tip } on every tile of a card with a bad lock. Reads the last
+-- answer only -- the probe never runs here.
+function FX.annotateSchedLocks(list, cfg)
+  local st = FX._schedLock
+  local on = core.config(cfg or loadConfig(), "schedLock.enabled", true) ~= false
+  local rows = {}
+  for _, it in ipairs(list or {}) do
+    it.schedLock = nil
+    if on and not it.remote and it.key then
+      rows[#rows + 1] = { key = it.key, session_id = it.session_id, session_pid = it.session_pid,
+        card = it.stackKey or ("k:" .. it.key), dir = FX.launchDirOf(it),
+        name = it.stackName or it.label or it.name }
+    end
+  end
+  if not on or next(st.entries) == nil then return end
+  local views = core.schedLockCards(rows, st.entries)
+  for _, it in ipairs(list or {}) do
+    if on and not it.remote and it.key then it.schedLock = views[it.stackKey or ("k:" .. it.key)] end
   end
 end
 
@@ -13094,6 +13231,10 @@ local HTML = [[
   .lease-b { display:inline-block; font-size:10px; line-height:14px; margin-left:6px; padding:1px 5px;
     border-radius:8px; border:1px solid var(--border); color:var(--accent-text);
     font-variant-numeric:tabular-nums; white-space:nowrap; vertical-align:middle; }
+  /* 2026-09-29: a bad scheduled-tasks lock on the card -- a warning, with the fix in its tooltip */
+  .slock-b { display:inline-block; font-size:10px; line-height:14px; margin-left:6px; padding:1px 5px;
+    border-radius:8px; border:1px solid var(--warn); color:var(--warn); cursor:help;
+    white-space:nowrap; vertical-align:middle; }
   @keyframes spin { to { transform:rotate(360deg); } }
   /* 2026-09-17: .srow (dot + status line) and .badges (risk / PR / background agents) are
      grouping wrappers the CARDS theme lays out. Every other theme places .dot / .label /
@@ -22578,6 +22719,7 @@ local HTML = [[
       b += leaseBadge(it);     // 2026-09-29: worktree leases (the worktree's own port)
       b += ticketBadge(it);    // 2026-09-29: cross-repo tickets no session here can take
       b += coachBadge(it);     // 2026-09-29: the coach's CLAUDE.md suggestions for this repo
+      b += schedLockBadge(it); // 2026-09-29: a dead, committed or foreign scheduled-tasks lock
       return b ? '<span class="badges">'+b+'</span>' : "";
     }
     // 2026-09-29: the coach (build program unit 32) -- CLAUDE.md suggestions waiting for this card's
@@ -22634,6 +22776,15 @@ local HTML = [[
       var ls = it && it.lease;
       if(!ls || typeof ls !== "object" || ls.port === undefined || ls.port === null) return "";
       return '<span class="lease-b" title="'+esc(leaseTitle(ls))+'">:'+esc(String(ls.port))+'</span>';
+    }
+    // 2026-09-29: a bad scheduled-tasks lock (build program unit 39) -- the card's launch folder holds
+    // a .claude/scheduled_tasks.lock that is dead, committed to git or held by another card
+    // (it.schedLock, FX.annotateSchedLocks / core.schedLockView). The chip says what's wrong; the
+    // tooltip says why and the fix, which Shepherd never runs. Paths and card names: esc().
+    function schedLockBadge(it){
+      var sl = it && it.schedLock;
+      if(!sl || typeof sl !== "object" || !sl.label) return "";
+      return '<span class="slock-b" title="'+esc(sl.tip || "")+'">'+esc(sl.label)+'</span>';
     }
     // 2026-09-29: pinned links (build program unit 31) -- up to 8 links the session pinned with
     // cc-pin.sh (it.pins, FX.stepPins). A session wrote every label and link, so both go through
@@ -24521,6 +24672,12 @@ function FX._refreshBody()
     local okr, errr = pcall(FX.annotateRadar, list)
     if not okr then print("[cc-dashboard] ❌ overlap radar stamp failed: " .. tostring(errr)) end
   end
+  -- 2026-09-29: a card's bad scheduled-tasks lock -- after the stacks (it reads stackKey/stackName);
+  -- a read of the last probe, never a probe (FX.schedLockTimer runs those)
+  do
+    local oks, errs = pcall(FX.annotateSchedLocks, list, cfg)
+    if not oks then print("[cc-dashboard] ❌ scheduled-tasks lock stamp failed: " .. tostring(errs)) end
+  end
   -- Ready to merge (2026-09-11): after the stacks (readiness compares the session's current
   -- worktree) and before the stack ranking (a request waiting for Adam leads its card).
   FX.annotateFleet(list, cfg, bannerOn)    -- batch driving (2026-09-11): before merges (delegation)
@@ -24840,6 +24997,9 @@ M.commitsTimer = hs.timer.doEvery(60, function() pcall(FX.refreshCommits); pcall
 -- Overlap radar (2026-09-29): each repo's scan is redone once it is radar.refreshSeconds old
 -- (FX.refreshRadar decides per repo); never on the tick.
 FX.radarTimer = hs.timer.doEvery(30, function() pcall(FX.refreshRadar) end)
+-- Scheduled-tasks locks (2026-09-29): one background probe once the last is schedLock.refreshSeconds
+-- old (FX.refreshSchedLocks decides); never on the tick.
+FX.schedLockTimer = hs.timer.doEvery(30, function() pcall(FX.refreshSchedLocks) end)
 -- 2026-09-29: the Time view's transcript index -- its own timer, never the tick (timeLost.refreshSeconds)
 FX.timeIndexTimer = hs.timer.doEvery(60, function() pcall(FX.refreshTimeIndex) end)
 -- Official plan-usage window (metadata call, no model tokens): refresh every 180s.
