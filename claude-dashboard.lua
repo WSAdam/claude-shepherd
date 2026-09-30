@@ -14815,6 +14815,8 @@ local HTML = [[
 .co-state{ color:var(--text-2); margin-bottom:12px; overflow-wrap:anywhere; }
 .co-row.done{ opacity:.7; }
 .co-why{ color:var(--text); margin:4px 0 6px; overflow-wrap:anywhere; }
+.co-expect{ margin:0 0 8px; padding:6px 8px; border-left:2px solid var(--accent); color:var(--text); overflow-wrap:anywhere; }
+.co-expect b{ color:var(--text-2); font-weight:600; }
 .co-old, .co-new{ margin:0 0 6px; padding:6px 8px; border-radius:6px; white-space:pre-wrap; overflow-wrap:anywhere;
   font:11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; max-height:14em; overflow:auto; }
 .co-old{ background:var(--surface-2); color:var(--dim); text-decoration:line-through; }
@@ -23065,6 +23067,10 @@ local HTML = [[
         h += '<div class="ib-row co-row' + (pend ? '' : ' done') + '">'
           + '<div class="ib-q">' + esc(e.section || "CLAUDE.md") + '</div>'
           + '<div class="co-why">' + esc(e.why) + '</div>'
+          // 2026-09-30: what the edit is expected to change, so it can be judged later
+          + ((e.before || e.after) ? '<div class="co-expect">'
+              + (e.before ? '<div><b>Today:</b> ' + esc(e.before) + '</div>' : '')
+              + (e.after ? '<div><b>Expected after:</b> ' + esc(e.after) + '</div>' : '') + '</div>' : '')
           + (e.old ? '<pre class="co-old">' + esc(e.old) + '</pre>' : '<div class="ib-meta">Added at the end of this section</div>')
           + '<pre class="co-new">' + esc(e["new"]) + '</pre>'
           + '<ul class="co-ev">' + (e.evidence || []).map(function(x){ return '<li>' + esc(x) + '</li>'; }).join("") + '</ul>'

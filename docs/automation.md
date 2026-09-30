@@ -580,8 +580,10 @@ instructions every session in it reads first. It suggests; nothing changes until
   runner: hooks off, no MCP, no tab) in the repo's main checkout, at `coach.maxBudgetUsd` (default
   $1). It shares the checker's one-run-per-repo lane, and never starts while that repo's checker is
   queued or running: it waits, and starts once the checker is done.
-- **What it suggests:** up to 5 `CLAUDE.md` edits, each with its section, why, the text it replaces
-  (or where an addition goes) and the evidence behind it, plus up to 3 `DECISIONS.md` entries for
+- **What it suggests:** up to 5 `CLAUDE.md` edits, each with its section, why, what sessions do
+  today and what they are expected to do once it is applied (**Today** / **Expected after**, so you
+  can judge later whether it worked), the text it replaces (or where an addition goes) and the
+  evidence behind it, plus up to 3 `DECISIONS.md` entries for
   choices sessions keep "fixing". It never proposes undoing a [DECISIONS.md](fleet.md#on-purpose-tab)
   entry. An answer with no usable JSON is **couldn't run**; "nothing to change" is an answer too.
 - **When:** from any session's **🧭 Coach** button (the detail panel) for its repo, at any time;

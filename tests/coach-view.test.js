@@ -124,6 +124,24 @@ eq("a stale DECISIONS.md entry offers it too, after its Skip",
 const nv = lib.coachRowsHtml({ root: "/r", state: "new", edits: [], decisions: [] });
 eq("a repo the coach never read offers to run it", /hasn't read/.test(nv) && /data-act="rerun"/.test(nv), true);
 
+// ---- what a suggestion is expected to change (2026-09-30) ----
+// 2026-09-30: a row showed the text and the evidence, not the behaviour it should change. Each edit
+// now carries what sessions do today and what is expected once it is applied.
+const exp = lib.coachRowsHtml({ root: "/r/repo", state: "done", verdict: "proposals", decisions: [],
+  edits: [
+    { i: 1, section: "Git", old: "a", new: "b", why: "w", evidence: ["e"], status: "pending",
+      before: "A session ran git push when green" + EVIL, after: "A session asks before it pushes" + EVIL },
+    { i: 2, section: "Git", old: "c", new: "d", why: "w", evidence: ["e"], status: "pending" },
+    { i: 3, section: "Git", old: "e", new: "f", why: "w", evidence: ["e"], status: "applied", sha: "abc1234", after: "only an after" },
+  ] });
+const expRows = exp.split('<div class="ib-row co-row').slice(1);
+eq("a suggestion says what sessions do today", /class="co-expect"[\s\S]*Today[\s\S]*A session ran git push when green/.test(expRows[0]), true);
+eq("...and what is expected once it is applied", /Expected[\s\S]*A session asks before it pushes/.test(expRows[0]), true);
+eq("...escaped like every other field", expRows[0].indexOf("<img") < 0, true);
+eq("...above the text it changes", expRows[0].indexOf('class="co-expect"') < expRows[0].indexOf('class="co-new"'), true);
+eq("a suggestion from before the coach said so shows no empty block", /co-expect/.test(expRows[1]), false);
+eq("an applied suggestion keeps its expectation on show", /Expected[\s\S]*only an after/.test(expRows[2]) && !/Today/.test(expRows[2]), true);
+
 // ---- a running coach shows how long it has been at it (2026-09-30) ----
 // 2026-09-30: Adam ran the coach again and the overlay read "The coach is reading this repo's last
 // sessions…" for minutes with nothing moving: no way to tell a slow run from a dead one.

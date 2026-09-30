@@ -16653,11 +16653,14 @@ do
         .. " instructions every session in this repo reads first -- that would have prevented them.",
       "",
       "Rules:",
-      "- Edit CLAUDE.md only. Each edit is {\"section\", \"old\", \"new\", \"why\", \"evidence\"}:",
+      "- Edit CLAUDE.md only. Each edit is {\"section\", \"old\", \"new\", \"why\", \"before\", \"after\", \"evidence\"}:",
       "  - \"old\" is text copied exactly from the CLAUDE.md below, occurring there exactly once; \"new\" replaces it."
         .. " To add without replacing, set \"old\" to \"\" and \"section\" to the heading it goes under (a missing heading is"
         .. " created at the end).",
       "  - \"why\": one or two sentences on what the edit prevents.",
+      "  - \"before\": one sentence on what sessions in this repo do today that the evidence shows going wrong."
+        .. " \"after\": one sentence on what a session is expected to do instead once the edit is in CLAUDE.md --"
+        .. " concrete enough that Adam could look at a later session and tell whether the edit worked.",
       "  - \"evidence\": 1 to 5 short quotes from the evidence below (a correction, an error, a denial note, a merge note,"
         .. " a checker finding). An edit nothing below calls for is not an edit.",
       "- Keep each edit small and in the file's own voice. Never restate a rule CLAUDE.md already has; sharpen it instead.",
@@ -16669,7 +16672,7 @@ do
       "",
       "End your answer with ONE JSON object on its last line, nothing after it:",
       "{\"summary\": \"<one sentence>\", \"edits\": [{\"section\": \"...\", \"old\": \"...\", \"new\": \"...\", \"why\": \"...\","
-        .. " \"evidence\": [\"...\"]}], \"decisions\": [{\"what\": \"...\", \"why\": \"...\"}]}",
+        .. " \"before\": \"...\", \"after\": \"...\", \"evidence\": [\"...\"]}], \"decisions\": [{\"what\": \"...\", \"why\": \"...\"}]}",
       "",
     }
     if type(claudeMd) == "string" then
@@ -16719,6 +16722,11 @@ do
     end
     if #ev == 0 then return nil end
     local out = { section = section, old = old, new = new, why = why, evidence = ev }
+    -- what sessions do today, and what they are expected to do once this is applied (optional:
+    -- a suggestion from before 2026-09-30 has neither)
+    local before = type(e.before) == "string" and oneLine(e.before, 300) or ""
+    local after = type(e.after) == "string" and oneLine(e.after, 300) or ""
+    out.before, out.after = (before ~= "") and before or nil, (after ~= "") and after or nil
     if keep then
       out.status = EDIT_STATUS[e.status] and e.status or "pending"
       out.sha = (type(e.sha) == "string" and e.sha:match("^%x+$") and #e.sha <= 64) and e.sha or nil
@@ -16866,7 +16874,15 @@ do
   function M.coachCommitMessage(edit)
     edit = type(edit) == "table" and edit or {}
     local section = (oneLine(edit.section, 60):gsub("^#+%s*", ""))
-    return "CLAUDE.md: " .. (section ~= "" and section or "update"), oneLine(edit.why, 500)
+    local body = oneLine(edit.why, 500)
+    -- what was happening and what is expected now: `git log -- CLAUDE.md` then reads as a record
+    -- of what each change was for
+    local before = type(edit.before) == "string" and oneLine(edit.before, 300) or ""
+    local after = type(edit.after) == "string" and oneLine(edit.after, 300) or ""
+    if before ~= "" or after ~= "" then
+      body = body .. "\n" .. (before ~= "" and ("\nBefore: " .. before) or "") .. (after ~= "" and ("\nAfter: " .. after) or "")
+    end
+    return "CLAUDE.md: " .. (section ~= "" and section or "update"), body
   end
 
   -- Commit CLAUDE.md and nothing else: `git commit -- CLAUDE.md` commits that path alone and
@@ -16987,6 +17003,7 @@ do
     v.timeoutSeconds = tonumber(live.timeoutSeconds)   -- the overlay's timer says when a run gives up
     for i, e in ipairs(rec.edits or {}) do
       v.edits[i] = { i = i, section = e.section, old = e.old, new = e.new, why = e.why, evidence = e.evidence,
+                     before = e.before, after = e.after,
                      status = e.status or "pending", sha = e.sha, error = e.error, rerun = coachStale(e, REFUSALS.changed) }
     end
     for i, d in ipairs(rec.decisions or {}) do

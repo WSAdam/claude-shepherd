@@ -186,6 +186,20 @@ check("parse: an edit's fields", p.edits[1].section == "Git" and p.edits[1].new 
       and p.edits[1].evidence[1] == "Adam said 1")
 check("parse: DECISIONS.md entries, a blank one dropped", #p.decisions == 1 and p.decisions[1].what == "Keep bash for hooks")
 check("parse: cost and turns", p.costUsd == 0.21 and p.turns == 3)
+-- 2026-09-30: a suggestion showed the text and the evidence but not what it should change. Adam:
+-- "I'd want to be able to know what we expect out of the change." Each edit now says what sessions
+-- do today ("before") and what they are expected to do once it is applied ("after").
+check("prompt: asks each edit for what sessions do today and what is expected after",
+      P:find('"before"', 1, true) ~= nil and P:find('"after"', 1, true) ~= nil)
+local pba = core.parseCoachOutput(envelope(json.encode({ summary = "s", decisions = {},
+  edits = { edit(1, { before = "Sessions piped awk one-liners\nand the fence refused them.", after = "A session uses Read, Grep or Write inside a worktree." }),
+            edit(2, { before = ("x"):rep(900), after = 7 }), edit(3) } })), "")
+check("parse: an edit keeps its before and after, each on one line",
+      pba.edits[1] and pba.edits[1].before == "Sessions piped awk one-liners and the fence refused them."
+      and pba.edits[1].after == "A session uses Read, Grep or Write inside a worktree.")
+check("parse: ...capped at 300 characters plus its ellipsis, and a non-string is dropped",
+      pba.edits[2] and utf8.len(pba.edits[2].before) == 301 and pba.edits[2].before:sub(-3) == "…" and pba.edits[2].after == nil)
+check("parse: an edit without them is still an edit", pba.edits[3] and pba.edits[3].before == nil and pba.edits[3].after == nil)
 local bad = core.parseCoachOutput("{not json at all", "")
 check("parse: bad JSON is couldn't-run  (" .. tostring(bad.why) .. ")", bad.verdict == "couldntRun" and type(bad.why) == "string")
 local nojson = core.parseCoachOutput(envelope("I looked around and have thoughts but no JSON."), "")
@@ -230,6 +244,10 @@ write(R .. "/CLAUDE.md", ok1.text)
 local subject, body = core.coachCommitMessage({ section = "Git", why = "Sessions pushed on their own." })
 check("commit message: plain, no attribution", subject == "CLAUDE.md: Git" and body == "Sessions pushed on their own."
       and not (subject .. body):find("Co%-Authored") and not (subject .. body):lower():find("claude code", 1, true))
+local _, bodyBA = core.coachCommitMessage({ section = "Git", why = "Sessions pushed on their own.",
+  before = "A session ran git push when its work was green.", after = "A session asks before it pushes." })
+check("commit message: says what was happening and what is expected after",
+      bodyBA == "Sessions pushed on their own.\n\nBefore: A session ran git push when its work was green.\nAfter: A session asks before it pushes.")
 local ccmd = core.coachCommitCmd(R, subject, body, false)
 local cout, ccode = sh(ccmd)
 check("commit: it succeeds and prints the sha  (" .. cout:gsub("\n", " ") .. ")", ccode == 0 and cout:match("%x%x%x%x%x%x%x") ~= nil)
@@ -330,6 +348,14 @@ local tile = core.coachTileInfo(drec)
 check("tile: counts what waits for Adam (an edit and an entry)", tile and tile.pending == 2)
 local view = core.coachView(drec)
 check("view: every edit and entry, numbered", view and #view.edits == 2 and view.edits[2].i == 2 and #view.decisions == 1 and view.root == "/r/repo")
+
+local barec = core.parseCoachRecord(json.encode({ v = 1, repo = "/r/repo/.git", root = "/r/repo", state = "done", verdict = "proposals",
+  at = 100, doneAt = 200, lastRunAt = 200, claudeHash = H,
+  edits = { { section = "Git", old = "a", new = "b", why = "w", evidence = { "e" }, status = "pending", before = "did x", after = "does y" } },
+  decisions = {} }))
+local bav = core.coachView(barec) or { edits = {} }
+check("record and view: an edit's before and after survive a reload and reach the overlay",
+      barec and barec.edits[1].before == "did x" and bav.edits[1] and bav.edits[1].before == "did x" and bav.edits[1].after == "does y")
 
 -- 2026-09-30: the overlay of a running coach showed one still line for minutes. The view now says
 -- when the run started and when it gives up, so the panel can count.

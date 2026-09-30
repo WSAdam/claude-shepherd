@@ -11,6 +11,9 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
   reason too). No other refusal shows it: a fresh run only fixes a file that moved.
 - Coach overlay: while the coach runs, its line shows how long it has been reading, ticking every
   second, and when it gives up (`coach.timeoutSeconds`), so a slow run doesn't look like a dead one.
+- Coach: each suggestion now says what sessions do today and what they are expected to do once it
+  is applied (**Today** / **Expected after** in the overlay), and an applied edit's commit message
+  carries both, so `git log -- CLAUDE.md` reads as a record of what each change was for.
 
 ## 2026-09-30 — The build program
 
