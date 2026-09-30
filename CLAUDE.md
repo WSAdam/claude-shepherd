@@ -182,6 +182,7 @@ and the README's "Testing & development" section.
 - Behaviour-named tests under a dated `-- ---- <topic> (YYYY-MM-DD) ----` banner; a bug
   fixture carries one comment line with the date and the actual cause.
 - Log lines keep the file's `[cc-dashboard]` prefix.
+- When a new record key, command word, or tool type first appears in a transcript fixture, add the word to `tests/fixtures/transcripts/vocabulary.txt` before running `make test`; `cc-scrub.js` rejects scrubbed fixtures containing unregistered words.
 
 ## Shipping
 
