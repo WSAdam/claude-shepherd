@@ -6503,9 +6503,11 @@ do
     strictMcp = true, agentName = "reviewer", addDirs = { "/k" }, pluginDirs = { "/p" } })
   local joined = table.concat(xf, " ")
   check("spawnExtraFlags: append-system-prompt", joined:find("--append-system-prompt you are bob", 1, true) ~= nil)
-  check("spawnExtraFlags: mcp-config + strict", joined:find("--mcp-config /tmp/m.json --strict-mcp-config", 1, true) ~= nil)
+  -- 2026-09-30 requirement change: both flags are variadic, so their value rides the = form
+  -- (it was "--mcp-config /tmp/m.json" and "--add-dir /k", which swallowed a seed prompt after them)
+  check("spawnExtraFlags: mcp-config + strict", joined:find("--mcp-config=/tmp/m.json --strict-mcp-config", 1, true) ~= nil)
   check("spawnExtraFlags: --agent", joined:find("--agent reviewer", 1, true) ~= nil)
-  check("spawnExtraFlags: --add-dir", joined:find("--add-dir /k", 1, true) ~= nil)
+  check("spawnExtraFlags: --add-dir", joined:find("--add-dir=/k", 1, true) ~= nil)
   check("spawnExtraFlags: --plugin-dir", joined:find("--plugin-dir /p", 1, true) ~= nil)
 
   -- resolveAgent dereferences MCP names; reports a missing one
@@ -13622,7 +13624,7 @@ do
   local xs = core.spawnExtraFlags({ appendSystemPrompt = "p", mcpConfigPath = "/m.json", strictMcp = true,
     allowedTools = { "Read" }, settings = "/s.json" })
   eq("spawnExtraFlags: allowedTools and settings come after the profile flags",
-     table.concat(xs, "|"), "--append-system-prompt|p|--mcp-config|/m.json|--strict-mcp-config|--allowedTools=Read|--settings|/s.json")
+     table.concat(xs, "|"), "--append-system-prompt|p|--mcp-config=/m.json|--strict-mcp-config|--allowedTools=Read|--settings|/s.json")
   -- quoting: one shell word each on the typed line (a glob and a JSON string can't split or expand)
   local inner = core.spawnInner("/p", "look around", { flags = core.spawnExtraFlags({
     allowedTools = { "Read", "mcp__playwright__*", "Edit(//h/f.md)" }, settings = '{"a":"b c"}' }) })
@@ -13675,7 +13677,7 @@ do
   for _, f in ipairs(core.spawnExtraFlags(core.auditLaunchOpts(plan, "/S/settings.json", "/S/mcp.json"))) do flags[#flags + 1] = f end
   eq("auditSpawnPlan: the launch flags, exactly",
      table.concat(flags, "|"):gsub("%-%-append%-system%-prompt|[^|]*", "--append-system-prompt|<persona>"),
-     "--permission-mode|dontAsk|--append-system-prompt|<persona>|--mcp-config|/S/mcp.json|--strict-mcp-config|"
+     "--permission-mode|dontAsk|--append-system-prompt|<persona>|--mcp-config=/S/mcp.json|--strict-mcp-config|"
        .. "--allowedTools=Read Grep Glob mcp__playwright__* Edit(/" .. F .. ")|--settings|/S/settings.json")
   local deny = {}
   for _, d in ipairs(plan.settings.permissions.deny) do deny[d] = true end
@@ -13865,6 +13867,247 @@ do
   local sh = (s2.byProject.shop or {})[1] or {}
   check("live run import: a worktree's [~] flags the shared line", sh.liveRun == true and sh.done == false)
 end
+
+-- ---- fleet, merge and spawn sweep (2026-09-30, build program unit 46) ----
+-- One block per bug. Their shell and stubbed-panel halves are in fleet.test.sh, ticket.test.sh,
+-- fleet.test.lua, checker.test.lua, handoff.test.lua and usage-totals.test.lua.
+-- Each block runs under pcall: without its fix a block calls a function that isn't there yet, and
+-- that must read as THAT bug's failure, not end the file before the other bugs' blocks ran.
+local function bug(name, fn)
+  local ok, err = pcall(fn)
+  if not ok then check(name .. " -- its fixture stopped: " .. tostring(err), false) end
+end
+
+-- An automation rule's provider match never matches
+bug("rule provider match", function()
+  -- 2026-09-30: the rule matcher read item.providerId, but no tile ever carried one -- only the
+  -- policy resolver worked a session's provider out, into a local of its own.
+  local cfg = { providers = { { id = "glm", kind = "gateway", model = "glm-4.6", baseUrl = "https://gw.example/v1" },
+                              { id = "opus", kind = "anthropic", model = "opus[1m]" } } }
+  local tiles = { { key = "g1", statusModel = "glm-4.6", model = "glm-4.6", base_url = "https://gw.example/v1" },
+                  -- the usage pass has overwritten .model with the live one; the spawn's is in statusModel
+                  { key = "o1", statusModel = "opus[1m]", model = "claude-opus-5-5" },
+                  { key = "x1", model = "claude-haiku-4-5" },
+                  { key = "g2", statusModel = "glm-4.6", model = "glm-4.6" } }   -- same model, no gateway URL
+  core.stampProviders(tiles, cfg)
+  eq("a session on a gateway profile carries its provider id", tiles[1].providerId, "glm")
+  eq("...one on a native profile too, by the model it was spawned with", tiles[2].providerId, "opus")
+  eq("...a session on no profile carries none", tiles[3].providerId, nil)
+  eq("...and a gateway profile never matches a session without its base URL", tiles[4].providerId, nil)
+  local rule = core.ruleList({ rules = { { name = "glm-done", trigger = { kind = "done", match = { provider = "glm" } },
+                                           processor = { kind = "log", text = "glm finished" } } } })[1]
+  eq("a rule scoped to a provider fires for a session on it", core.ruleFires(rule, "done", tiles[1]), true)
+  eq("...not for a session on another provider", core.ruleFires(rule, "done", tiles[2]), false)
+  eq("...nor for one on none", core.ruleFires(rule, "done", tiles[3]), false)
+  eq("...and rulesForEdge finds it", #core.rulesForEdge({ rule }, "done", tiles[1]), 1)
+  -- a tile whose profile went away loses its id on the next tick
+  tiles[1].base_url = nil
+  core.stampProviders(tiles, cfg)
+  eq("a stale provider id is cleared when the session no longer matches", tiles[1].providerId, nil)
+  check("stampProviders tolerates no list and no config", pcall(core.stampProviders, nil, nil))
+end)
+
+-- score.weights in cc-config.json is ignored
+bug("score.weights", function()
+  -- 2026-09-30: the Score button and the A/B compare called core.runScore(events, sid) with no
+  -- opts, so the hand-tuned weights were read by nothing.
+  local function ev(sid, type_, extra) local e = { session_id = sid, type = type_, ts = 1 }; for k, v in pairs(extra or {}) do e[k] = v end; return e end
+  local events = { ev("s1", "error"), ev("s1", "decision", { outcome = "deny" }) }
+  eq("with no score.weights the defaults apply (100-18-6)", core.runScore(events, "s1", core.scoreOpts({})).score, 76)
+  local cfg = { score = { weights = { error = 40, deny = 10 } } }
+  eq("score.weights reaches the score (100-40-10)", core.runScore(events, "s1", core.scoreOpts(cfg)).score, 50)
+  eq("...a weight left out keeps its default", core.runScore({ ev("s1", "loop") }, "s1", core.scoreOpts(cfg)).score, 88)
+  eq("...and the trend scores with them too", core.scoreTrend(events, core.scoreOpts(cfg)).series[1].score, 50)
+  eq("weights that aren't a table are ignored", core.runScore(events, "s1", core.scoreOpts({ score = { weights = "heavy" } })).score, 76)
+  check("scoreOpts tolerates no config", core.scoreOpts(nil).weights == nil)
+end)
+
+-- cc-fleet.sh tab gives up before Shepherd does
+bug("tab wait", function()
+  -- 2026-09-30: the script waited 120s; Shepherd gives a tab 135s to open and its session 90s
+  -- more. The two limits are core's now (tests/fleet.test.sh holds the script above them).
+  eq("Shepherd's longest tab open: 90 + 45 to open, 90 for the session", core.fleetTabMaxSeconds(), 225)
+  eq("...from its own constants", core.fleetTabMaxSeconds(), 2 * core.FLEET_TAB_WAIT + core.FLEET_TAB_OPEN_GRACE)
+end)
+
+-- Fleet search returns audit exports as duplicate ledger hits
+bug("search exports", function()
+  -- 2026-09-30: Audit export writes cc-ledger/exports/audit-<stamp>.jsonl, copies of ledger lines
+  -- inside the folder the search recurses into; only quarantine/ was skipped.
+  local rs = table.concat(core.searchArgv("rg", "auth.ts", { "/h/.claude/projects", "/h/.claude/cc-ledger" },
+                                          { excludeDirs = core.SEARCH_EXCLUDE_DIRS }), " ")
+  eq("fleet search (rg) skips the ledger's exports/ folder", rs:find("-g !exports/", 1, true) ~= nil, true)
+  eq("...and still its quarantine/", rs:find("-g !quarantine/", 1, true) ~= nil, true)
+  local gs = table.concat(core.searchArgv("grep", "auth.ts", { "/h/.claude/cc-ledger" }, { excludeDirs = core.SEARCH_EXCLUDE_DIRS }), " ")
+  eq("fleet search (grep) skips exports/ too", gs:find("--exclude-dir=exports", 1, true) ~= nil and gs:find("--exclude-dir=quarantine", 1, true) ~= nil, true)
+end)
+
+-- A mid-session /model switch to or from [1m] isn't reflected in the ctx window
+bug("/model switch", function()
+  -- 2026-09-30: the [1m] opt-in came from the spawn-time model and the settings files only. The
+  -- transcript records a switch as the command's own output, in a user record of its own.
+  local J = core.json.encode
+  local function stdout(s) return J({ type = "user", message = { role = "user", content = "<local-command-stdout>" .. s .. "</local-command-stdout>" } }) end
+  eq("a /model switch names the model it set", core.modelSwitchOf(stdout("Set model to `claude-opus-5[1m]`")), "claude-opus-5[1m]")
+  eq("...an older build's line, without backticks", core.modelSwitchOf(stdout("Set model to claude-fable-5")), "claude-fable-5")
+  eq("...the picker's line, with its display name", core.modelSwitchOf(stdout("Set model to `Opus 4.8` for this session only")), "Opus 4.8")
+  eq("another command's output is no switch", core.modelSwitchOf(stdout("Compacted the conversation")), nil)
+  eq("an assistant line that says it is no switch",
+     core.modelSwitchOf(J({ type = "assistant", message = { role = "assistant", content = "<local-command-stdout>Set model to x</local-command-stdout>" } })), nil)
+  -- 2026-09-30: this very sweep grepped transcripts for the marker; the tool result quotes it
+  eq("a tool result that quotes one is no switch",
+     core.modelSwitchOf(J({ type = "user", message = { role = "user", content = { { type = "tool_result", tool_use_id = "t1",
+       content = "a.jsonl:<local-command-stdout>Set model to `claude-opus-5[1m]`</local-command-stdout>" } } } })), nil)
+  eq("a subagent's record is no switch of the session's",
+     core.modelSwitchOf((stdout("Set model to x"):gsub('^{', '{"isSidechain":true,'))), nil)
+  eq("junk is no switch", core.modelSwitchOf("<local-command-stdout>Set model to x</local-command-stdout>"), nil)
+  eq("the newest switch wins over the spawn-time model", core.sessionModelChoice("claude-opus-5", "opus[1m]"), "claude-opus-5")
+  eq("...no switch: the spawn-time model", core.sessionModelChoice(nil, "opus[1m]"), "opus[1m]")
+  eq("...a switch back to Default names no model", core.sessionModelChoice("Default (recommended)", "opus[1m]"), "opus[1m]")
+  eq("a switch to [1m] opens the 1M window though the project setting says sonnet",
+     core.configuredModelOneM(core.sessionModelChoice("claude-opus-5[1m]", nil), nil, "sonnet", nil), true)
+  eq("a switch away from [1m] closes it though the user's setting says opus[1m]",
+     core.configuredModelOneM(core.sessionModelChoice("claude-opus-5", "opus[1m]"), nil, nil, "opus[1m]"), false)
+  eq("the picker's display name for a 1M model counts", core.configuredModelOneM("Opus 5.5 (1M context)", nil, nil, nil), true)
+  eq("...one without it doesn't", core.configuredModelOneM("Opus 4.8", nil, nil, "opus[1m]"), false)
+  -- the switch is part of the saved usage state, so a reload (which resumes past it) keeps it
+  local P = "/h/.claude/projects/-p/s.jsonl"
+  local cum = { input = 1, output = 1, cacheRead = 1, cacheCreate = 1, cacheCreate1h = 0, byModel = {} }
+  local saved = core.json.decode(core.json.encode(core.usageStateEncode({
+    [P] = { offset = 10, cum = cum, recent = {}, seen = core.usageSeen(), modelSwitch = "claude-opus-5[1m]" } })))
+  local back = core.usageStateDecode(saved, function() return 10 end)
+  eq("the saved usage state carries the newest /model switch", back and back[P] and back[P].modelSwitch, "claude-opus-5[1m]")
+  saved.version = 1
+  eq("a state saved before switches were read is re-read from the start", core.usageStateDecode(saved, function() return 10 end), nil)
+end)
+
+-- A Hammerspoon reload mid-run spends one of the merge checker's two attempts
+bug("checker reload", function()
+  -- 2026-09-30: a record left "running" by a reload read back as an ordinary couldn't-run with its
+  -- attempt counted, so the re-run was try 2 of 2 and one real failure put the unit on Adam.
+  local id = "n1|abc123"
+  local cut = core.parseCheckerRecord(core.json.encode({ v = 1, id = id, key = "k1", state = "running", attempts = 1, at = 5 }))
+  check("a run cut by a reload is marked interrupted", cut and cut.interrupted == true and cut.verdict == "couldntRun")
+  check("...and is due again at once, not a minute later", core.checkerRetryDue(cut, 6))
+  eq("...as the SAME attempt", core.checkerNextAttempt(cut), 1)
+  local cut2 = core.parseCheckerRecord(core.json.encode({ v = 1, id = id, key = "k1", state = "queued", attempts = 2, at = 5 }))
+  check("a retry cut by a reload is due again too", cut2 and cut2.interrupted == true and core.checkerRetryDue(cut2, 6))
+  eq("...still as attempt 2", core.checkerNextAttempt(cut2), 2)
+  local ok, act, why = core.checkerDelegatedVerdict(cut2, id, true)
+  check("...and never reads 'couldn't run twice'  (" .. tostring(why) .. ")",
+        ok == false and act == "retry" and not tostring(why):find("twice", 1, true) and tostring(why):find("reloaded", 1, true) ~= nil)
+  local real = core.parseCheckerRecord(core.json.encode({ v = 1, id = id, key = "k1", state = "done", verdict = "couldntRun",
+    why = "claude gave no answer", attempts = 1, at = 5, doneAt = 9 }))
+  check("a run that really couldn't run is not interrupted", real and real.interrupted == nil)
+  eq("...and its retry is the next attempt", core.checkerNextAttempt(real), 2)
+  check("...a minute later, as before", not core.checkerRetryDue(real, 10) and core.checkerRetryDue(real, 9 + core.CHECKER_RETRY_AFTER))
+  eq("a finished verdict is never interrupted",
+     core.parseCheckerRecord(core.json.encode({ v = 1, id = id, key = "k1", state = "done", verdict = "pass", attempts = 1 })).interrupted, nil)
+end)
+
+-- A checker that "gave no answer" logs neither claude's exit code nor keeps its output
+bug("checker no answer", function()
+  -- 2026-09-30: "claude gave no answer" was all a run left: no exit code, and its scratch files
+  -- were deleted before anyone could read them.
+  local r = core.parseCheckerOutput("", "", 143)
+  eq("no answer says the exit code", r.why, "claude gave no answer (exit 143)")
+  r = core.parseCheckerOutput("", "zsh: command not found: claude\nmore\n", 127)
+  eq("...and still the error's first line", r.why, "claude gave no answer (exit 127): zsh: command not found: claude")
+  eq("...with no code known, as before", core.parseCheckerOutput("", "boom\n").why, "claude gave no answer: boom")
+  local long = string.rep("x", 5000) .. "THE END"
+  local kept = core.checkerKept({ code = 1, output = "partial {\"type\":", err = long })
+  eq("a run with no verdict keeps its exit code", kept.code, 1)
+  eq("...what it printed", kept.out, 'partial {"type":')
+  check("...and the END of a long stderr, capped", #kept.err <= core.CHECKER_KEEP_BYTES + 8 and kept.err:sub(-7) == "THE END"
+        and kept.err:sub(1, 5) == "[...]")
+  eq("...bytes that aren't plain text are replaced", core.checkerKept({ code = 0, output = "a\0b\200c", err = "" }).out, "a?b?c")
+  local line = core.checkerNoAnswerLine("feat/x", { code = 143, output = "", err = "Terminated\n" }, r.why)
+  check("the log line names the branch, the exit code and how much it printed  (" .. line .. ")",
+        line:find("feat/x", 1, true) ~= nil and line:find("exit 143", 1, true) ~= nil and line:find("stderr 11 bytes", 1, true) ~= nil)
+  local rec = core.parseCheckerRecord(core.json.encode({ v = 1, id = "n|a", key = "k", state = "done", verdict = "couldntRun",
+    why = "claude gave no answer (exit 143)", attempts = 1, kept = { code = 143, out = "", err = "Terminated\n" } }))
+  check("the record on disk keeps them across a reload", rec and rec.kept and rec.kept.code == 143 and rec.kept.err == "Terminated\n")
+end)
+
+-- A saved agent with MCP servers or knowledge folders loses its seed prompt
+bug("agent seed prompt", function()
+  -- 2026-09-30: --mcp-config <configs...> and --add-dir <directories...> are variadic (claude
+  -- 2.1.175 --help). As separate elements the last one also took the positional task after it.
+  local VARIADIC = { ["--mcp-config"] = true, ["--add-dir"] = true, ["--allowedTools"] = true }
+  local function bareVariadic(argv)   -- a variadic flag standing alone would take what follows it
+    for _, a in ipairs(argv) do if VARIADIC[a] then return a end end
+  end
+  local mcp = core.spawnExtraFlags({ mcpConfigPath = "/h/.claude/cc-agents/reviewer.mcp.json" })
+  eq("an MCP profile: --mcp-config is ONE element", table.concat(mcp, "|"), "--mcp-config=/h/.claude/cc-agents/reviewer.mcp.json")
+  local dirs = core.spawnExtraFlags({ addDirs = { "/k/one", "/k/t w o" } })
+  eq("knowledge folders: one --add-dir=<dir> element each", table.concat(dirs, "|"), "--add-dir=/k/one|--add-dir=/k/t w o")
+  local ks = core.spawnSpec("kitty", "/p", "review the diff", { kittyRemote = false, claudeBin = "/bin/claude",
+    mcpConfigPath = "/m.json", addDirs = { "/k" } })
+  eq("kitty argv: the seed prompt is the last element", ks.argv[#ks.argv], "review the diff")
+  eq("...and no variadic flag stands alone before it", bareVariadic(ks.argv), nil)
+  eq("...the element before the prompt is a complete flag", ks.argv[#ks.argv - 1], "--add-dir=/k")
+  local inner = core.spawnInner("/p", "review the diff", { flags = core.spawnExtraFlags({ mcpConfigPath = "/a b/m.json", addDirs = { "/k" } }) })
+  check("typed line: a path with a space is quoted with its flag, one word  (" .. inner .. ")",
+        inner:find("'--mcp-config=/a b/m.json' --add-dir=/k 'review the diff'", 1, true) ~= nil)
+  local vs = core.spawnSpec("vscode", "/p", "review the diff", { mcpConfigPath = "/m.json" })
+  check("vscode terminal line: the prompt follows the = form  (" .. tostring(vs.postType) .. ")",
+        vs.flavor == "terminal" and tostring(vs.postType):find("--mcp-config=/m.json 'review the diff'", 1, true) ~= nil)
+end)
+
+-- A handoff note from the main checkout lists main's whole TODO.md under Next
+bug("handoff Next", function()
+  -- 2026-09-30: Next was the first open lines of the TODO.md at the session's root. In the main
+  -- checkout that file is the project's whole verification list, none of it that session's items.
+  local J = core.json.encode
+  local n = 0
+  local function prompt(t) return J({ type = "user", origin = { kind = "human" }, message = { role = "user", content = { { type = "text", text = t } } } }) end
+  local function said(t) return J({ type = "assistant", message = { role = "assistant", content = { { type = "text", text = t } } } }) end
+  local function call(name, input)
+    n = n + 1
+    return J({ type = "assistant", message = { role = "assistant", content = { { type = "tool_use", id = "tu_s" .. n, name = name, input = input } } } })
+      .. "\n" .. J({ type = "user", message = { role = "user", content = { { type = "tool_result", tool_use_id = "tu_s" .. n, content = "ok" } } } })
+  end
+  local function turn(...) return table.concat({ ... }, "\n") .. "\n" end
+  local open = { "Old verification line one", "Old verification line two", "Tile shows the lease badge (leases.lua)", "Badge hides when the lease ends" }
+  -- an earlier turn added two lines; this turn ticked one of them and wrote a note elsewhere
+  local ev = core.turnEvidence(turn(
+    prompt("add the badge"),
+    call("Edit", { file_path = "/r/TODO.md", old_string = "\n", new_string = "\n- [ ] Tile shows the lease badge (leases.lua)\n- [ ] Badge hides when the lease ends\n" }),
+    said("Listed."),
+    prompt("go on"),
+    call("Edit", { file_path = "/r/TODO.md", old_string = "- [ ] Badge hides when the lease ends", new_string = "- [x] Badge hides when the lease ends" }),
+    call("Write", { file_path = "/r/notes/TODO-ideas.txt", content = "- [ ] not a TODO.md line" }),
+    said("Done.")))
+  check("the evidence names the TODO lines the session wrote, earlier turns included",
+        ev.todoLines["Tile shows the lease badge (leases.lua)"] == true and ev.todoLines["Badge hides when the lease ends"] == true)
+  check("...never a line written to some other file", ev.todoLines["not a TODO.md line"] == nil)
+  eq("...and the turn's own count is unchanged (one tick)", ev.todoDone, 1)
+  eq("in the main checkout, Next is the session's own open lines",
+     table.concat(core.handoffTodos(open, ev, false), " | "), "Tile shows the lease badge (leases.lua) | Badge hides when the lease ends")
+  local none = core.turnEvidence(turn(prompt("look around"), said("Looked.")))
+  eq("...and nothing when it wrote none: never the list's first lines", #core.handoffTodos(open, none, false), 0)
+  eq("in a linked worktree with none written, every open line is the unit's", #core.handoffTodos(open, none, true), 4)
+  eq("...and its own lines alone once it wrote some", #core.handoffTodos(open, ev, true), 2)
+  check("handoffTodos tolerates no list and no evidence", #core.handoffTodos(nil, nil, false) == 0 and #core.handoffTodos(nil, nil, true) == 0)
+  local w = core.todoLinesWritten({}, "MultiEdit", { file_path = "/r/TODO.md", edits = { { old_string = "a", new_string = "- [ ] first" },
+    { old_string = "b", new_string = "- [~] second (needs live run)" } } })
+  check("a MultiEdit's lines count, each edit", w["first"] == true and w["second (needs live run)"] == true)
+  check("a Write's content counts", core.todoLinesWritten({}, "Write", { file_path = "/r/TODO.md", content = "- [ ] written" })["written"] == true)
+  check("a Read of TODO.md wrote nothing", next(core.todoLinesWritten({}, "Read", { file_path = "/r/TODO.md" })) == nil)
+end)
+
+-- A batch opens its unit tabs in a window whose tab bridge is older than 0.6.0 without a word
+bug("old tab bridge", function()
+  -- 2026-09-30: bridges 0.3.0-0.5.x tag a unit's tab ("expect") but lose the tag when VS Code
+  -- rebuilds its tab objects (the first tab switch); only 0.6.0 carries it over. Nothing said so.
+  check("keeping a unit's tag is a 0.6.0 ability", core.tabBridgeSupports("0.6.0", "keepTags") and core.tabBridgeSupports("0.7.1", "keepTags")
+        and not core.tabBridgeSupports("0.5.9", "keepTags") and not core.tabBridgeSupports("0.3.0", "keepTags"))
+  local w = core.fleetBridgeWarning("0.4.0", "/r/A")
+  check("an older bridge gets a warning that names the window, the build and the fix  (" .. tostring(w) .. ")",
+        type(w) == "string" and w:find("/r/A", 1, true) ~= nil and w:find("0.4.0", 1, true) ~= nil and w:find("Reload Window", 1, true) ~= nil)
+  eq("a 0.6.0 bridge gets none", core.fleetBridgeWarning("0.6.0", "/r/A"), nil)
+  eq("no bridge version known: nothing to say here (the expect check refuses it)", core.fleetBridgeWarning(nil, "/r/A"), nil)
+end)
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

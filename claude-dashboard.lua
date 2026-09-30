@@ -705,18 +705,27 @@ end
 -- it, so it comes from the configured model (core.configuredModelOneM's precedence), re-resolved
 -- at most every 30s per session. Read it.statusModel, never it.model: the usage pass overwrites
 -- it.model with the live transcript model, which has no suffix.
+-- 2026-09-30: a /model switch mid-session wins over all of them (core.modelSwitchOf, read from the
+-- transcript by the usage pass into its state's modelSwitch), and a new one is seen at once.
 FX._oneM = {}
 function FX.sessionOneM(it)
   if type(it) ~= "table" or not it.key then return false end
   local now = FX.now()
+  local st = it.transcript_path and usageState[it.transcript_path] or nil
+  local switched = st and st.modelSwitch or nil
   local c = FX._oneM[it.key]
-  if c and now - c.at < 30 then return c.v end
+  if c and now - c.at < 30 and c.switched == switched then return c.v end
   local root = it.cwd and (FX.gitRoot(it.cwd) or it.cwd) or nil
-  local v = core.configuredModelOneM(it.statusModel,
-    root and FX.settingsModel(root .. "/.claude/settings.local.json"),
-    root and FX.settingsModel(root .. "/.claude/settings.json"),
-    FX.settingsModel(CLAUDE_DIR .. "/settings.json"))
-  FX._oneM[it.key] = { at = now, v = v }
+  local v
+  if core.sessionModelChoice(switched, nil) then
+    v = core.configuredModelOneM(switched)   -- the model it switched to decides alone
+  else
+    v = core.configuredModelOneM(it.statusModel,
+      root and FX.settingsModel(root .. "/.claude/settings.local.json"),
+      root and FX.settingsModel(root .. "/.claude/settings.json"),
+      FX.settingsModel(CLAUDE_DIR .. "/settings.json"))
+  end
+  FX._oneM[it.key] = { at = now, v = v, switched = switched }
   return v
 end
 -- 2026-09-28: read one transcript file's new bytes into its usage state `st` and return st.
@@ -731,6 +740,7 @@ function FX.scanUsageFile(path, st, baseUrl, main)
   local text, newSize = FX.readFrom(path, st.offset)
   if newSize and newSize < st.offset then   -- file replaced: start over
     st.offset, st.cum, st.recent, st.seen = 0, blankCum(), {}, core.usageSeen()
+    st.modelSwitch = nil
     text, newSize = FX.readFrom(path, 0)
   end
   if not text or #text == 0 then return st end
@@ -738,7 +748,10 @@ function FX.scanUsageFile(path, st, baseUrl, main)
   while true do
     local nl = text:find("\n", pos, true)
     if not nl then break end
-    local e = core.parseUsageLine(text:sub(pos, nl - 1))
+    local line = text:sub(pos, nl - 1)
+    local e = core.parseUsageLine(line)
+    -- 2026-09-30: the newest /model switch the session made (it decides the [1m] window)
+    if main and not e then st.modelSwitch = core.modelSwitchOf(line) or st.modelSwitch end
     if e then
       if main then st.lastContext = core.contextTokens(e); st.lastModel = e.model end
       if core.usageNew(st.seen, e) then
@@ -1629,10 +1642,19 @@ function FX.openTodos(cwd)
   end
   return out
 end
+-- 2026-09-30: what a note lists under Next (core.handoffTodos): the session's own items -- the
+-- TODO lines it wrote itself; in a linked worktree (.git is a file there) every open line when it
+-- wrote none. Never the first lines of the main checkout's whole list.
+function FX.handoffTodos(cwd, ev)
+  if type(cwd) ~= "string" or cwd == "" then return {} end
+  local linked = false
+  pcall(function() linked = hs.fs.attributes((FX.gitRoot(cwd) or cwd) .. "/.git", "mode") == "file" end)
+  return core.handoffTodos(FX.openTodos(cwd), ev, linked)
+end
 function FX.writeHandoff(it, ev, label)
   if type(it) ~= "table" or type(it.key) ~= "string" or type(ev) ~= "table" then return nil end
   local path = FX.NOTES_DIR .. "/" .. it.key .. ".handoff.md"
-  local note = core.handoffNote(it, ev, { label = label, now = FX.now(), todos = FX.openTodos(it.cwd),
+  local note = core.handoffNote(it, ev, { label = label, now = FX.now(), todos = FX.handoffTodos(it.cwd, ev),
                                           decisions = FX.decisionsFile(it.cwd) })
   if not FX.writeFileAtomic(path, note) then
     print("[cc-dashboard] ⚠️ couldn't write the handoff note " .. path)
@@ -1653,7 +1675,7 @@ function FX.writePendingHandoff(deadKey, editor, lineage, project)
     if ev then
       local label = core.turnOutcome(ev) or "no reply yet"
       if item.status ~= "done" then label = "cut off mid-turn, " .. label end
-      note = core.handoffNote(item, ev, { label = label, now = FX.now(), todos = FX.openTodos(item.cwd or project),
+      note = core.handoffNote(item, ev, { label = label, now = FX.now(), todos = FX.handoffTodos(item.cwd or project, ev),
                                           decisions = FX.decisionsFile(item.cwd or project) })
     end
   end
@@ -4357,9 +4379,12 @@ end
 -- go through on the grant only for a unit's own session and branch. No keystrokes.
 FX.FLEET_DIR = os.getenv("CC_FLEET_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-fleet")
 FX.SESSIONS_DIR = os.getenv("CC_SESSIONS_DIR") or ((os.getenv("HOME") or "") .. "/.claude/sessions")
-FX.FLEET_TAB_WAIT = 90
+FX.FLEET_TAB_WAIT = core.FLEET_TAB_WAIT   -- core.fleetTabMaxSeconds: what cc-fleet.sh tab must outwait
 FX._fleetState = {}     -- id -> { grant = {approved, grantMerge, denied, stopped, at}, units = {slug -> {session, opening}} }
 FX._fleetBatches = {}   -- id -> parsed proposal (last tick)
+FX._fleetFiles = {}     -- "<id>.json" -> { sig, batch }: a proposal is parsed again only when its file changed
+FX._fleetNames = {}     -- every file name in FLEET_DIR this tick (one listing answers "is there a request / a stop?")
+FX._fleetBridgeWarned = {}   -- "<host>|<version>" -> true: the old-bridge toast, once per window
 FX._fleetTabs = {}      -- "<id>|<slug>" -> { before, at, nonce, repo }: a tab being opened
 FX._fleetAnswered = {}  -- request nonce -> true
 FX._fleetAlerted = {}   -- proposal nonce -> true
@@ -4384,15 +4409,36 @@ function FX.saveFleetState(id)
   FX.writeFileAtomic(FX.FLEET_DIR .. "/" .. id .. ".state.json", core.json.encode(FX.fleetState(id)))
 end
 
+-- 2026-09-30: every proposal in the folder was read and parsed again on every tick, finished
+-- batches included (a stopped one stays a week) -- and each of its units cost a failed open for a
+-- tab request that wasn't there. One listing now says which files exist (FX._fleetNames), and a
+-- proposal is read again only when its size or mtime moved (core.ledgerCachePlan's sig). A file
+-- Shepherd can't stat has no sig and is read every time, as before.
 function FX.readFleet()
-  local out = {}
+  local out, files, names = {}, {}, {}
   for _, name in ipairs(FX.readDir(FX.FLEET_DIR)) do
+    names[name] = true
     local id = name:match("^(b%w+)%.json$")
     if id then
-      local b = core.parseBatch(FX.readFile(FX.FLEET_DIR .. "/" .. name))
-      if b and b.id == id then out[id] = b end
+      local a
+      pcall(function() a = hs.fs.attributes(FX.FLEET_DIR .. "/" .. name) end)
+      local sig = type(a) == "table" and a.size and a.modification
+        and (tostring(a.size) .. ":" .. tostring(a.modification)) or nil
+      files[#files + 1] = { name = name, id = id, sig = sig }
     end
   end
+  FX._fleetNames = names
+  local plan = core.ledgerCachePlan(FX._fleetFiles, files)
+  local kept = {}
+  for _, f in ipairs(files) do
+    local c = (f.sig and not plan.reparse[f.name]) and FX._fleetFiles[f.name] or nil
+    if not c then
+      c = { sig = f.sig, batch = core.parseBatch(FX.readFile(FX.FLEET_DIR .. "/" .. f.name)) or false }
+    end
+    kept[f.name] = c
+    if c.batch and c.batch.id == f.id then out[f.id] = c.batch end
+  end
+  FX._fleetFiles = kept
   return out
 end
 
@@ -4586,9 +4632,26 @@ function FX.fleetOpenTab(b, slug, req)
       return
     end
   end
+  -- 2026-09-30: a bridge that tags the tab but is older than 0.6.0 loses the tag at the first tab
+  -- switch. The tab still opens; the driver is told in its answer (cc-fleet.sh tab prints it) and
+  -- Adam by a toast, once per window and bridge build.
+  local bridgeWarn
+  do
+    local host = FX.fleetRepoHost(b.repo)
+    local reg = host and FX.tabBridgeRegistry(host)
+    bridgeWarn = type(reg) == "table" and core.fleetBridgeWarning(reg.version, b.repo) or nil
+    if bridgeWarn then
+      print("[cc-dashboard] ⚠️ unit " .. slug .. "'s tab: " .. bridgeWarn)
+      local wk = tostring(host) .. "|" .. tostring(reg.version)
+      if not FX._fleetBridgeWarned[wk] then
+        FX._fleetBridgeWarned[wk] = true
+        pcall(function() FX.alert("⚠️ " .. bridgeWarn, 8) end)
+      end
+    end
+  end
   local state = FX.fleetState(b.id)
   local key = b.id .. "|" .. slug
-  local t = { at = FX.now(), nonce = req.nonce, repo = b.repo }
+  local t = { at = FX.now(), nonce = req.nonce, repo = b.repo, warn = bridgeWarn }
   FX._fleetTabs[key] = t
   state.units[slug] = state.units[slug] or {}
   state.units[slug].opening = FX.now()
@@ -4637,6 +4700,7 @@ function FX.fleetTabPoll(id, slug)
   local state = FX.fleetState(id)
   local function finish(body)
     FX._fleetTabs[key] = nil
+    if body.ok then body.warn = t.warn end   -- 2026-09-30: its window's tab bridge is older than 0.6.0
     if state.units[slug] then state.units[slug].opening = nil end
     FX.saveFleetState(id)
     FX.fleetAnswer(id, slug, body)
@@ -4645,7 +4709,7 @@ function FX.fleetTabPoll(id, slug)
   if t.failed then return finish({ nonce = t.nonce, ok = false, reason = "the unit's tab didn't open: " .. t.failed }) end
   if not t.sent then
     -- still opening (the window may be starting): the tab isn't there, so no session is its yet
-    if FX.now() - t.at >= FX.FLEET_TAB_WAIT + 45 then
+    if FX.now() - t.at >= FX.FLEET_TAB_WAIT + core.FLEET_TAB_OPEN_GRACE then
       return finish({ nonce = t.nonce, ok = false, reason = "the unit's tab never opened (is the repo's VS Code window open?)" })
     end
     return
@@ -4705,7 +4769,7 @@ function FX.annotateFleet(list, cfg, bannerOn)
   local now = FX.now()
   for id, b in pairs(batches) do
     local state = FX.fleetState(id)
-    if FX.readFile(FX.FLEET_DIR .. "/" .. id .. ".stop") and not (state.grant and state.grant.stopped) then
+    if FX._fleetNames[id .. ".stop"] and not (state.grant and state.grant.stopped) then
       state.grant = state.grant or {}
       state.grant.stopped = true
       state.grant.stoppedAt = state.grant.stoppedAt or FX.now()
@@ -4714,8 +4778,8 @@ function FX.annotateFleet(list, cfg, bannerOn)
     local finished, fwhy = core.batchFinished(b, state.grant, state, FX.fleetRepoGone(b))
     if finished then FX.fleetFinish(id, b, fwhy) end
     for _, u in ipairs(b.units) do
-      local reqFile = FX.FLEET_DIR .. "/" .. id .. ".tab-" .. u.slug .. ".json"
-      local raw = FX.readFile(reqFile)
+      local reqName = id .. ".tab-" .. u.slug .. ".json"
+      local raw = FX._fleetNames[reqName] and FX.readFile(FX.FLEET_DIR .. "/" .. reqName) or nil
       if raw and not FX._fleetTabs[id .. "|" .. u.slug] then
         local ok, req = pcall(function() return core.json.decode(raw) end)
         if ok and type(req) == "table" and type(req.nonce) == "string" and not FX._fleetAnswered[req.nonce] then
@@ -6259,13 +6323,21 @@ end
 
 function FX.checkerFinish(key, rec, res, commonDir)
   if FX._checkers[key] ~= rec then return end   -- a newer review replaced this one
-  local p = core.parseCheckerOutput(res and res.output, res and res.err)
+  local p = core.parseCheckerOutput(res and res.output, res and res.err, res and res.code)
   if res and res.timedOut then
     p = { verdict = "couldntRun", findings = {}, why = "timed out after " .. tostring(res.timeoutSeconds) .. "s" }
   end
   rec.state, rec.doneAt = "done", FX.now()
   rec.verdict, rec.summary, rec.findings, rec.why = p.verdict, p.summary, p.findings, p.why
   rec.costUsd, rec.turns = p.costUsd, p.turns
+  -- 2026-09-30: a run with no verdict keeps claude's exit code and the end of what it printed (the
+  -- scratch files are gone by now), and its log line says them -- "gave no answer" alone couldn't
+  -- be diagnosed afterwards.
+  rec.kept = nil
+  if p.verdict == "couldntRun" and res then
+    rec.kept = core.checkerKept(res)
+    print("[cc-dashboard] ⚠️ " .. core.checkerNoAnswerLine(rec.branch or key, res, p.why))
+  end
   FX.checkerSave(rec)
   -- 2026-09-29: a fail, or a pass with findings, goes to the coach's log for this repo
   if commonDir and (p.verdict == "fail" or (p.verdict == "pass" and #(p.findings or {}) > 0)) then
@@ -6293,8 +6365,10 @@ function FX.checkerForRequest(key, r, facts, cfg)
   if not rec or rec.id ~= id then
     rec = FX.checkerStart(key, target, id, "merge", 1, cfg)
   elseif core.checkerRetryDue(rec, FX.now()) then
-    print("[cc-dashboard] ↻ retrying the checker that couldn't run: " .. tostring(r.branch))
-    rec = FX.checkerStart(key, target, id, rec.trigger or "merge", (tonumber(rec.attempts) or 1) + 1, cfg)
+    -- 2026-09-30: a run a reload cut is run again as the same attempt (core.checkerNextAttempt)
+    print("[cc-dashboard] ↻ " .. (rec.interrupted and "running the checker a reload cut again: " or "retrying the checker that couldn't run: ")
+      .. tostring(r.branch))
+    rec = FX.checkerStart(key, target, id, rec.trigger or "merge", core.checkerNextAttempt(rec), cfg)
   end
   return rec, id
 end
@@ -9840,6 +9914,7 @@ end
 function FX.abData()
   local reg = FX.readAbCohorts()
   local led = ledgerEnabled() and FX.readLedger({}) or nil
+  local scoreOpts = core.scoreOpts(loadConfig())   -- 2026-09-30: score.weights reaches the compare
   local out = {}
   for cohort, c in pairs(reg.cohorts or {}) do
     local variants, scores = {}, {}
@@ -9848,7 +9923,7 @@ function FX.abData()
       local sid = tile and tile.session_id
       local score, hadData
       if led and sid and tostring(sid) ~= "" then
-        local r = core.runScore(led.events, sid); score, hadData = r.score, r.hadData
+        local r = core.runScore(led.events, sid, scoreOpts); score, hadData = r.score, r.hadData
         scores[v.label] = { score = score, hadData = hadData }
       end
       variants[#variants + 1] = { label = v.label, model = v.model, provider = v.provider,
@@ -11765,7 +11840,7 @@ local function handleBridgeMsg(msg)
       .. (kind ~= "rg" and "  (install ripgrep for faster fleet search)" or ""))
     local paths = { (os.getenv("HOME") or "") .. "/.claude/projects" }
     if hs.fs.attributes(LEDGER_DIR) then paths[#paths + 1] = LEDGER_DIR end
-    local args = core.searchArgv(kind, q, paths, { excludeDirs = { "quarantine" } })
+    local args = core.searchArgv(kind, q, paths, { excludeDirs = core.SEARCH_EXCLUDE_DIRS })
     if not args then return end  -- too-short query: JS already cleared the view
     local maxResults = tonumber(core.config(cfg, "search.maxResults", 200)) or 200
     -- Run via /bin/sh with stdout REDIRECTED to a temp file (the folder-scan fix,
@@ -12339,8 +12414,9 @@ local function handleBridgeMsg(msg)
     local target = byKey[tostring(payload.v or "")]
     if not target then return end
     local res = FX.readLedger({})
-    local r = core.runScore(res.events, target.session_id)
-    local trend = core.scoreTrend(res.events, {})
+    local scoreOpts = core.scoreOpts(loadConfig())   -- 2026-09-30: score.weights reaches the Score button
+    local r = core.runScore(res.events, target.session_id, scoreOpts)
+    local trend = core.scoreTrend(res.events, scoreOpts)
     if r.hadData then
       ledgerFor(target, { type = "run_score", score = r.score, regression = trend.regression and true or false })
     end
@@ -23785,6 +23861,7 @@ function FX._refreshBody()
   -- holds references to these same tiles. (Also feeds the filter chips, group-scoped
   -- bulk actions, and L2 attachment matching — all later in the tick.)
   core.applyGroups(list, groups)
+  core.stampProviders(list, cfg)   -- 2026-09-30: it.providerId, before any rule matches a provider
   local autofeed   = core.config(cfg, "queue.autofeed", false) == true
   local routingOn  = core.config(cfg, "queue.routing.enabled", false) == true  -- 4c-E
   local autoTitleOn = core.config(cfg, "autoTitle.enabled", false) == true  -- L5 derived tile titles

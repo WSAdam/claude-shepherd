@@ -280,6 +280,39 @@ FX6.computeUsage()
 eq("...the pass reads from byte 0", firstRead(reads6, TRANSCRIPT), 0)
 eq("...with the right totals", totals(lastUsage()).cacheRead, full)
 
+-- ---- a /model switch to or from [1m] moves the context window (2026-09-30) ----
+-- 2026-09-30: the [1m] opt-in came from the spawn-time model and the settings files only, so a
+-- session switched to opus[1m] mid-way kept a 200k bar (full at a fifth of its real window) and
+-- one switched away kept a 1M bar. The transcript records the switch as the command's own
+-- output; the usage pass reads it, and the saved state carries it across a reload.
+do
+  local function frac() return ((lastUsage().perSession or {}).s1 or {}).context_frac end
+  local function switchTo(model)
+    writeFile(TRANSCRIPT, json.encode({ type = "user", message = { role = "user",
+      content = "<local-command-stdout>Set model to `" .. model .. "`</local-command-stdout>" } }) .. "\n", "a")
+  end
+  local okS, FXs = boot()
+  check("a boot before any switch loads", okS)
+  FXs.computeUsage()
+  local base = frac()
+  check("before any switch the bar is measured against 200k  (" .. tostring(base) .. ")", type(base) == "number" and base > 0.2)
+  switchTo("claude-opus-5-5[1m]")
+  FXs.computeUsage()
+  local wide = frac()
+  check("a /model switch to [1m] widens the window five-fold, on the very next pass  (" .. tostring(wide) .. ")",
+        type(wide) == "number" and math.abs(wide - base / 5) < 1e-9)
+  -- a reload resumes the transcript past the switch: it must come back from the saved state
+  if type(hs.shutdownCallback) == "function" then pcall(hs.shutdownCallback) end
+  local okR, FXr, readsR = boot()
+  check("a boot after the switch loads", okR)
+  FXr.computeUsage()
+  eq("after a reload the transcript resumes past the switch", firstRead(readsR, TRANSCRIPT), fileSize(TRANSCRIPT))
+  check("...and the window is still the 1M one  (" .. tostring(frac()) .. ")", type(frac()) == "number" and math.abs(frac() - base / 5) < 1e-9)
+  switchTo("claude-opus-5-5")
+  FXr.computeUsage()
+  check("a /model switch away from [1m] narrows it again  (" .. tostring(frac()) .. ")", type(frac()) == "number" and math.abs(frac() - base) < 1e-9)
+end
+
 os.execute("rm -rf '" .. HOME .. "'")
 print(string.format("-- usage-totals.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

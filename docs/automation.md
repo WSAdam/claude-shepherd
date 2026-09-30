@@ -222,8 +222,12 @@ A fresh or respawned session picks up where the last one left off.
 
 - **The note.** Each time a session finishes a turn, Shepherd writes
   `~/.claude/cc-notes/<session>.handoff.md` from the transcript: how the turn ended, the last
-  result, the files it touched, its errors, the worktree's open `TODO.md` lines (under **Next**) and
-  the transcript's path. It's the same read that labels a finished card.
+  result, the files it touched, its errors, its open `TODO.md` lines (under **Next**) and the
+  transcript's path. It's the same read that labels a finished card. **Next** lists the session's
+  own items: the open lines it wrote to `TODO.md` itself (added or ticked, as far back as the read
+  reaches). In a linked worktree, whose `TODO.md` is its unit's own list, every open line counts
+  when it wrote none. In the main checkout, where `TODO.md` is the whole project's list, a session
+  that wrote none gets no **Next**.
 - **After `/clear`.** The fresh session is told, in one line, where the note of the conversation
   before it is. The note is found by the claude process (its pid and window; a kitty window for
   kitty), so another tab in the same window never gets it.
@@ -507,9 +511,9 @@ automations above. Create and edit them in **⚙️ Automation rules** (☰ menu
   `hung`, `loop` and `starved` fire only while their detectors are on (`escalation.hung.enabled`,
   `escalation.loop.enabled`, and routing with `starveMinutes` above 0).
 - **trigger.match** (optional): globs on `project` (the encoded project key, as in
-  [policy attachments](approvals-and-policies.md#named-policy-bundles)), `group` and `sessionKey`;
-  absent means fleet-wide. (A `provider` match doesn't work yet: sessions don't carry the field it
-  compares.)
+  [policy attachments](approvals-and-policies.md#named-policy-bundles)), `group`, `sessionKey` and
+  `provider` (a provider profile's `id`: the profile the session's model, and for a gateway its
+  base URL, belong to); absent means fleet-wide.
 - **processor.kind**: `log` (write an audit note), `relabel` (rename the tile to `label`), `nudge`
   (type `text` into the session through the same delivery-gated path as a manual nudge, once it
   [can take it](#when-automation-types)), `feed` (add `text` to the session's project queue, for

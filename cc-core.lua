@@ -860,7 +860,9 @@ end
 
 -- 2026-09-17: which bridge build first knew each op. A window keeps the bridge it loaded until
 -- Developer: Reload Window, and an older one refuses a newer op as "unknown op".
-M.TAB_BRIDGE_OP_SINCE = { close = "0.1.0", select = "0.2.0", expect = "0.3.0" }
+-- keepTags (2026-09-30) isn't an op the bridge is sent: it is the build (0.6.0) from which a unit's
+-- tag survives VS Code rebuilding its tab objects (lib.carryTags) -- see core.fleetBridgeWarning.
+M.TAB_BRIDGE_OP_SINCE = { close = "0.1.0", select = "0.2.0", expect = "0.3.0", keepTags = "0.6.0" }
 function M.tabBridgeSupports(version, op)
   local since = M.TAB_BRIDGE_OP_SINCE[op]
   if not since or type(version) ~= "string" or not version:match("^%d+%.%d+") then return false end
@@ -3802,7 +3804,9 @@ end
 
 -- The `claude -p --output-format json` envelope a headless run printed: its result object, or nil
 -- with res.why set (no answer, or claude's own error). res gets costUsd and turns either way.
-local function headlessEnvelope(raw, errText, res)
+-- `code` (2026-09-30) is the run's exit code: a run that printed nothing said only "claude gave no
+-- answer", which can't tell a killed run (143) from a missing binary (127) or a login that failed.
+local function headlessEnvelope(raw, errText, res, code)
   raw = type(raw) == "string" and raw or ""
   -- a login shell may print before claude does
   local at = raw:find('{"type":"result"', 1, true) or raw:find("{", 1, true)
@@ -3814,7 +3818,8 @@ local function headlessEnvelope(raw, errText, res)
   if not t then
     local err = tostring(errText or "") .. "\n"
     local e = checkerTrim(err:sub(1, err:find("\n", 1, true) - 1))
-    res.why = (e ~= "") and ("claude gave no answer: " .. capChars(e, 200)) or "claude gave no answer"
+    local exit = tonumber(code) and (" (exit " .. string.format("%d", tonumber(code)) .. ")") or ""
+    res.why = "claude gave no answer" .. exit .. ((e ~= "") and (": " .. capChars(e, 200)) or "")
     return nil
   end
   res.costUsd, res.turns = tonumber(t.total_cost_usd), tonumber(t.num_turns)
@@ -3828,9 +3833,9 @@ end
 
 -- claude -p --output-format json -> { verdict, summary, findings, costUsd, turns, why }. Anything
 -- short of a pass/fail in the answer's final JSON is couldntRun, with why.
-function M.parseCheckerOutput(raw, errText)
+function M.parseCheckerOutput(raw, errText, code)
   local res = { verdict = "couldntRun", findings = {} }
-  local t = headlessEnvelope(raw, errText, res)
+  local t = headlessEnvelope(raw, errText, res, code)
   if not t then return res end
   local v = verdictObject(t.result)
   local verdict = v and tostring(v.verdict):lower() or nil
@@ -3854,17 +3859,56 @@ function M.checkerDelegatedVerdict(rec, id, required)
   if rec.state ~= "done" then return false, "wait", "the checker is reviewing it before it merges on your grant" end
   if rec.verdict == "pass" then return true, "merge" end
   if rec.verdict == "fail" then return false, "hold", "the checker failed it, so it waits for your click" end
+  -- 2026-09-30: a run a Hammerspoon reload cut never answered, so it isn't one of the two attempts
+  if rec.interrupted then
+    return false, "retry", "Shepherd reloaded while the checker ran; it runs again before it merges on your grant"
+  end
   if (tonumber(rec.attempts) or 1) < M.CHECKER_MAX_ATTEMPTS then
     return false, "retry", "the checker couldn't run; it tries once more before it merges on your grant"
   end
   return false, "hold", "the checker couldn't run twice, so it waits for your click"
 end
 
--- A couldn't-run from a merge request's checker gets its one retry a minute later.
+-- A couldn't-run from a merge request's checker gets its one retry a minute later. A run cut by
+-- a reload (rec.interrupted, 2026-09-30) is run again at once, whichever attempt it was: a deploy
+-- at 15:50 cut feat/ask-send's first run, it counted as "couldn't run", and the one real failure
+-- after it left the unit waiting for Adam's click.
 function M.checkerRetryDue(rec, now)
   if type(rec) ~= "table" or rec.state ~= "done" or rec.verdict ~= "couldntRun" then return false end
+  if rec.interrupted then return true end
   if (tonumber(rec.attempts) or 1) >= M.CHECKER_MAX_ATTEMPTS then return false end
   return (tonumber(now) or 0) - (tonumber(rec.doneAt) or 0) >= M.CHECKER_RETRY_AFTER
+end
+
+-- The attempt number the re-run of `rec` gets: the next one, or the same one again when a reload
+-- cut it (that run spent nothing).
+function M.checkerNextAttempt(rec)
+  local n = math.max(1, math.floor(type(rec) == "table" and tonumber(rec.attempts) or 1))
+  if type(rec) == "table" and rec.interrupted then return n end
+  return n + 1
+end
+
+-- What a run that couldn't give a verdict leaves on its record (2026-09-30): claude's exit code
+-- and the end of what it printed, so "gave no answer" can be diagnosed afterwards. Plain ASCII,
+-- CHECKER_KEEP_BYTES of each stream at most.
+M.CHECKER_KEEP_BYTES = 2000
+local function checkerKeepText(s)
+  s = type(s) == "string" and s or ""
+  local cut = #s > M.CHECKER_KEEP_BYTES
+  if cut then s = s:sub(-M.CHECKER_KEEP_BYTES) end
+  s = s:gsub("[^\n\t\32-\126]", "?")
+  return (cut and "[...] " or "") .. s
+end
+function M.checkerKept(res)
+  res = type(res) == "table" and res or {}
+  return { code = tonumber(res.code), out = checkerKeepText(res.output), err = checkerKeepText(res.err) }
+end
+-- The one log line for such a run.
+function M.checkerNoAnswerLine(name, res, why)
+  res = type(res) == "table" and res or {}
+  return "checker " .. tostring(name) .. " couldn't run: " .. tostring(why or "no reason given")
+    .. " [exit " .. tostring(tonumber(res.code) or "?") .. ", stdout " .. #tostring(res.output or "")
+    .. " bytes, stderr " .. #tostring(res.err or "") .. " bytes" .. (res.timedOut and ", timed out" or "") .. "]"
 end
 
 -- What the review (v.checker) and a tile (it.checker) get. `id` (optional) is the commit the
@@ -3911,9 +3955,13 @@ function M.parseCheckerRecord(raw)
               base = type(t.base) == "string" and capChars(t.base, 200) or nil }
   if r.summary == "" then r.summary = nil end
   if r.why == "" then r.why = nil end
+  if type(t.kept) == "table" then   -- 2026-09-30: what a run with no verdict left (core.checkerKept)
+    r.kept = { code = tonumber(t.kept.code), out = checkerKeepText(t.kept.out), err = checkerKeepText(t.kept.err) }
+  end
   if r.state ~= "done" or not r.verdict then
     r.state, r.verdict, r.why = "done", "couldntRun", "Shepherd reloaded while it ran"
     r.doneAt = r.doneAt or r.at
+    r.interrupted = true   -- 2026-09-30: never an attempt (core.checkerRetryDue, core.checkerNextAttempt)
   end
   return r
 end
@@ -4283,6 +4331,26 @@ end
 local function batchUnit(batch, slug)
   for _, u in ipairs(batch and batch.units or {}) do if u.slug == slug then return u end end
   return nil
+end
+
+-- How long Shepherd takes, at most, to answer one tab request: FLEET_TAB_WAIT plus
+-- FLEET_TAB_OPEN_GRACE for the tab to open (the repo's window may have to start first), then
+-- FLEET_TAB_WAIT for its session to appear. 2026-09-30: cc-fleet.sh tab gave up at 120s while
+-- this ran to 225s, so the tab opened behind the driver's back and its retry was refused as
+-- "already has its tab". The script's default wait must stay above this (tests/fleet.test.sh).
+M.FLEET_TAB_WAIT = 90
+M.FLEET_TAB_OPEN_GRACE = 45
+function M.fleetTabMaxSeconds() return 2 * M.FLEET_TAB_WAIT + M.FLEET_TAB_OPEN_GRACE end
+
+-- 2026-09-30: a unit's tab opened without a word in a window whose tab bridge is older than
+-- 0.6.0. Such a bridge tags the tab ("expect") but loses the tag at the first tab switch, so
+-- Focus does nothing on the unit and its tab never closes after the merge. The warning for the
+-- driver (cc-fleet.sh tab prints it) and for Adam (a toast), or nil when the bridge keeps tags.
+function M.fleetBridgeWarning(version, repo)
+  if type(version) ~= "string" or M.tabBridgeSupports(version, "keepTags") then return nil end
+  return tostring(repo or "the repo") .. "'s VS Code window runs tab bridge " .. version
+    .. ", which forgets a unit's tab at the first tab switch: Focus won't find it and it won't close after its merge"
+    .. " -- Developer: Reload Window there (before opening more units)"
 end
 
 -- May Shepherd open this unit's tab? `grant` is Shepherd's own record of Adam's answer.
@@ -6125,6 +6193,10 @@ end
 
 M.SEARCH_MIN_QUERY = 3
 M.SEARCH_CTX = 60  -- chars of context captured around the match
+-- Folders under the ledger dir the fleet search never reads: quarantine/ (the suites' synthetic
+-- events) and, from 2026-09-30, exports/ -- an audit export is a copy of ledger lines as
+-- audit-<stamp>.jsonl, so every exported event came back a second time as its own hit.
+M.SEARCH_EXCLUDE_DIRS = { "quarantine", "exports" }
 
 -- Build the ARGUMENT list for one fleet search (binary EXCLUDED -- hs.task.new
 -- takes the resolved path separately). kind = "rg"|"grep".
@@ -7554,8 +7626,58 @@ function M.turnEvidence(text)
     if peerAt then start, origin = peerAt, "peer" else start = 0 end
   end
   local ev, st = M.turnEvidenceNew(origin)
+  -- 2026-09-30: the TODO lines the session wrote in EARLIER turns of this tail are its own items
+  -- too (ev.todoLines, for the handoff note's Next). Only lines that name TODO.md are decoded,
+  -- found in ONE pass over the text (a find per line would rescan the tail for each).
+  local at, si = 1, 1
+  while si <= start do
+    at = text:find("TODO.md", at, true)
+    if not at then break end
+    while si <= start and spans[si][2] < at do si = si + 1 end
+    if si > start then break end
+    if spans[si][1] <= at then
+      local obj = decode(si, true)
+      local c = obj and obj.type == "assistant" and type(obj.message) == "table" and obj.message.content or nil
+      for _, p in ipairs(type(c) == "table" and c or {}) do
+        if type(p) == "table" and p.type == "tool_use" then M.todoLinesWritten(ev.todoLines, p.name, p.input) end
+      end
+      at = spans[si][2] + 1
+      si = si + 1
+    else
+      at = at + 1
+    end
+  end
   for i = start + 1, #spans do M.turnEvidenceAdd(ev, st, decode(i, true)) end
   return M.turnEvidenceEnd(ev, st)
+end
+
+-- The TODO.md checkbox lines one Edit/MultiEdit/Write call wrote, added to the set `into`
+-- (line text -> true): what it put in (new_string, content), added or ticked.
+function M.todoLinesWritten(into, name, input)
+  if type(into) ~= "table" or not M.EDIT_TOOLS[tostring(name or "")] or type(input) ~= "table" then return into end
+  if not tostring(input.file_path or ""):match("TODO%.md$") then return into end
+  local parts = (type(input.edits) == "table") and input.edits or { input }
+  for _, e in ipairs(parts) do
+    if type(e) == "table" then
+      for _, l in ipairs(M.parseTodoFile(tostring(e.new_string or e.content or ""))) do into[l.text] = true end
+    end
+  end
+  return into
+end
+
+-- The open TODO lines a handoff note lists under Next (2026-09-30). `open` = the open lines of
+-- the TODO.md at the session's root, in file order; `linked` = that root is a linked worktree.
+-- A note from the main checkout listed the first open lines of main's whole TODO.md -- the
+-- project's verification list, none of it that session's work. The session's own items are the
+-- lines it wrote itself (ev.todoLines); a linked worktree's TODO.md is its unit's own list, so
+-- with none written there every open line still counts. In the main checkout, only its own.
+function M.handoffTodos(open, ev, linked)
+  open = type(open) == "table" and open or {}
+  local wrote = type(ev) == "table" and type(ev.todoLines) == "table" and ev.todoLines or {}
+  local own = {}
+  for _, t in ipairs(open) do if wrote[t] then own[#own + 1] = t end end
+  if #own > 0 or not linked then return own end
+  return open
 end
 
 -- A turn's evidence in three parts (2026-09-29, build program unit 35): a fresh record (and the
@@ -7568,7 +7690,7 @@ function M.turnEvidenceNew(origin)
   local ev = { origin = origin, complete = false, edits = 0, mutating = 0, reads = 0, tests = 0,
                other = 0, errors = 0, denials = 0, todoDone = 0, committed = false, asked = false,
                planPut = false, apiError = false, endedDenied = false, textLen = 0,
-               files = {}, filesMore = 0, errorTexts = {} }
+               files = {}, filesMore = 0, errorTexts = {}, todoLines = {} }
   return ev, { commits = {}, lastResult = nil, seenFile = {} }
 end
 function M.turnEvidenceAdd(ev, st, obj)
@@ -7593,6 +7715,7 @@ function M.turnEvidenceAdd(ev, st, obj)
               else ev.filesMore = ev.filesMore + 1 end
             end
             if path:match("TODO%.md$") then
+              M.todoLinesWritten(ev.todoLines, name, input)
               local before, after = 0, 0
               local pairs_ = (type(input.edits) == "table") and input.edits or { input }
               for _, e in ipairs(pairs_) do
@@ -8335,7 +8458,9 @@ end
 -- 2026-09-28: the usage pass's per-transcript state (offset, cumulative totals, 7-day events, seen
 -- message ids) is saved to ~/.claude/cc-usage-state.json, so a reload resumes each transcript at its
 -- offset instead of re-reading every one from byte 0. Encode/validate here; the IO is FX's.
-M.USAGE_STATE_VERSION = 1
+-- 2 (2026-09-30): a state carries the transcript's newest /model switch (modelSwitch). A version-1
+-- save has offsets past switches it never looked for, so it is re-read once, from byte 0.
+M.USAGE_STATE_VERSION = 2
 do
   local FIELDS = { "input", "output", "cacheRead", "cacheCreate", "cacheCreate1h" }
   local function count(v)
@@ -8390,7 +8515,8 @@ do
       if type(path) == "string" and type(st) == "table" and type(st.cum) == "table" and tonumber(st.offset) then
         local seen = type(st.seen) == "table" and st.seen or {}
         files[path] = { offset = st.offset, cum = st.cum, recent = st.recent or {}, seen = seen.order or {},
-                        cap = seen.cap, lastContext = st.lastContext, lastModel = st.lastModel }
+                        cap = seen.cap, lastContext = st.lastContext, lastModel = st.lastModel,
+                        modelSwitch = st.modelSwitch }   -- 2026-09-30: the newest /model switch read so far
       end
     end
     return { version = M.USAGE_STATE_VERSION, files = files }
@@ -8415,7 +8541,8 @@ do
         end
         out[path] = { offset = offset, cum = cum, recent = recent, seen = seenFrom(f.seen, f.cap),
                       lastContext = count(f.lastContext),
-                      lastModel = type(f.lastModel) == "string" and f.lastModel or nil }
+                      lastModel = type(f.lastModel) == "string" and f.lastModel or nil,
+                      modelSwitch = type(f.modelSwitch) == "string" and f.modelSwitch or nil }
       end
     end
     return out
@@ -8554,10 +8681,41 @@ end
 function M.configuredModelOneM(session, projectLocal, project, user)
   for _, m in ipairs({ session or false, projectLocal or false, project or false, user or false }) do
     if type(m) == "string" and m:match("%S") then
-      return m:lower():match("%[1m%]%s*$") ~= nil
+      -- "opus[1m]", or the picker's display name ("Opus 5.5 (1M context)")
+      return m:lower():match("%[1m%]%s*$") ~= nil or m:lower():find("1m context", 1, true) ~= nil
     end
   end
   return false
+end
+
+-- 2026-09-30: a /model switch mid-session wasn't reflected in the ctx window -- the opt-in came
+-- from the spawn-time model and the settings files only, so switching to opus[1m] kept a 200k bar
+-- (full at 20%) and switching away kept a 1M one. The transcript records the switch as a user
+-- record whose content is the command's own output, "<local-command-stdout>Set model to
+-- `claude-opus-5[1m]`</local-command-stdout>" (older builds without the backticks; the picker adds
+-- " for this session only"). The model that line names, or nil for any other line. The content
+-- must BE that string: a tool result that merely quotes one (a grep over transcripts) is a list.
+function M.modelSwitchOf(line)
+  if type(line) ~= "string" or not line:find("<local-command-stdout>Set model to ", 1, true) then return nil end
+  local ok, obj = pcall(M.json.decode, line)
+  if not ok or type(obj) ~= "table" or obj.type ~= "user" or obj.isSidechain == true then return nil end
+  local c = type(obj.message) == "table" and obj.message.content or nil
+  if type(c) ~= "string" then return nil end
+  local name = c:match("^%s*<local%-command%-stdout>Set model to (.-)</local%-command%-stdout>%s*$")
+  if not name then return nil end
+  name = name:gsub("%s+for this session only%s*$", ""):gsub("`", ""):gsub("^%s+", ""):gsub("%s+$", "")
+  if name == "" then return nil end
+  return name:sub(1, 120)
+end
+
+-- The session's own model for core.configuredModelOneM: its newest /model switch, else what it
+-- was spawned with. A switch back to "Default ..." names no model, so the spawn's and then the
+-- settings files' decide again.
+function M.sessionModelChoice(switched, statusModel)
+  if type(switched) == "string" and switched:match("%S") and not switched:lower():match("^%s*default") then
+    return switched
+  end
+  return statusModel
 end
 
 -- Standard context-window tiers, used to self-heal an unknown/underestimated model:
@@ -14098,6 +14256,10 @@ end
 -- allowedTools is ONE element in the `--allowedTools=<tools>` form: the flag is variadic
 -- (<tools...>), so a separate value would also swallow the positional task that follows
 -- (claude 2.1.175, 2026-09-29). --settings takes one value, so it ends any variadic run.
+-- 2026-09-30: --mcp-config <configs...> and --add-dir <directories...> are variadic too, and a
+-- saved agent with MCP servers or knowledge folders puts one of them last, right before its seed
+-- prompt -- which claude then read as one more config file or folder, so the session started
+-- with no prompt. Both ride the `--flag=value` form now, one element each.
 function M.spawnExtraFlags(opts)
   opts = opts or {}
   local f = {}
@@ -14105,14 +14267,14 @@ function M.spawnExtraFlags(opts)
     f[#f + 1] = "--append-system-prompt"; f[#f + 1] = tostring(opts.appendSystemPrompt)
   end
   if opts.mcpConfigPath and agTrim(opts.mcpConfigPath) ~= "" then
-    f[#f + 1] = "--mcp-config"; f[#f + 1] = tostring(opts.mcpConfigPath)
+    f[#f + 1] = "--mcp-config=" .. tostring(opts.mcpConfigPath)
     if opts.strictMcp then f[#f + 1] = "--strict-mcp-config" end
   end
   if opts.agentName and agTrim(opts.agentName) ~= "" then
     f[#f + 1] = "--agent"; f[#f + 1] = tostring(opts.agentName)
   end
   for _, d in ipairs(opts.addDirs or {}) do
-    if agTrim(d) ~= "" then f[#f + 1] = "--add-dir"; f[#f + 1] = tostring(d) end
+    if agTrim(d) ~= "" then f[#f + 1] = "--add-dir=" .. tostring(d) end
   end
   for _, p in ipairs(opts.pluginDirs or {}) do
     if agTrim(p) ~= "" then f[#f + 1] = "--plugin-dir"; f[#f + 1] = tostring(p) end
@@ -16503,6 +16665,20 @@ end
 
 function M.ruleList(state) return M.ruleLoad(state).valid end
 
+-- 2026-09-30: a rule's provider match read it.providerId, which no tile carried -- only the
+-- policy resolver worked a session's provider out, into a local. Every tile gets it here, once a
+-- tick and before the rules run: the profile its spawn-time model names (the status file's
+-- $ANTHROPIC_MODEL, what a profile sets), else the one its live model does. nil = no profile.
+function M.stampProviders(list, cfg)
+  for _, it in ipairs(type(list) == "table" and list or {}) do
+    if type(it) == "table" then
+      local p = M.providerByModel(cfg, it.statusModel, it.base_url) or M.providerByModel(cfg, it.model, it.base_url)
+      it.providerId = p and p.id or nil
+    end
+  end
+  return list
+end
+
 -- Does a rule's scope match this tile? match fields (project/group/sessionKey/
 -- provider) are wildcard-globbed; an absent/"" field matches anything; nil match =
 -- fleet-wide. Reuses the L2 globEq.
@@ -17938,6 +18114,13 @@ function M.runScore(events, sid, opts)
   local score = 100 - n.error * W.error - n.deny * W.deny - n.loop * W.loop - n.respawn * W.respawn
   if score < 0 then score = 0 elseif score > 100 then score = 100 end
   return { score = score, factors = n, hadData = n.events > 0 }
+end
+
+-- 2026-09-30: the Score button and the A/B compare called runScore with no opts, so a hand-tuned
+-- `score.weights` in cc-config.json changed nothing. Every caller builds its opts here.
+function M.scoreOpts(cfg)
+  local w = M.config(cfg, "score.weights", nil)
+  return { weights = type(w) == "table" and w or nil }
 end
 
 -- Per-session run scores oldest->newest (by each session's latest event ts) + a

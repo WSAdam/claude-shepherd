@@ -445,4 +445,62 @@ grep -q "3 issues: 2 covered by units, 1 triaged" "$TMP/cok.out" && got=yes || g
 assert_eq "coverage: ...and propose says what it covers" "yes" "$got"
 fleet drv cst stop --batch "$(jq -r .id "$BC")"
 
+# ---- tab: the wait outlasts Shepherd, and a late answer isn't lost (2026-09-30) ----
+# 2026-09-30: `tab` gave up after 120s while Shepherd keeps opening a tab for up to 225s (135s for
+# the tab, 90s for its session). The driver was told "didn't open the tab", Shepherd opened it
+# anyway, and the retry was refused as "already has its tab" -- the driver never got the message
+# to send the unit. The default wait is now above Shepherd's own limit (core.fleetTabMaxSeconds),
+# and a retry prints the answer an earlier wait missed.
+TAB_MAX="$(lua -e 'local c = dofile("'"$ROOT"'/cc-core.lua") io.write(tostring(c.fleetTabMaxSeconds()))' 2>/dev/null)"
+TAB_DEFAULT="$(sed -n 's/^TAB_WAIT_MAX=\([0-9][0-9]*\)$/\1/p' "$F")"
+[ -n "$TAB_MAX" ] && [ -n "$TAB_DEFAULT" ] && [ "$TAB_DEFAULT" -gt "$TAB_MAX" ] && got=yes || got="no: the script waits ${TAB_DEFAULT:-?}s, Shepherd up to ${TAB_MAX:-?}s"
+assert_eq "tab: the default wait outlasts Shepherd's longest tab open" "yes" "$got"
+grep -q 'local id="" slug="" waitmax="\$TAB_WAIT_MAX"' "$F" && got=yes || got=no
+assert_eq "tab: ...and is what tab waits when --wait-max isn't given" "yes" "$got"
+
+alive
+batch '{"title":"Late","mergeWhenGreen":false,"units":[{"type":"feat","slug":"late","task":"Add late."},{"type":"feat","slug":"warned","task":"Add warned."}]}'
+fleet drv pl propose --file "$TMP/batch.json" --wait-max 30 & bg=$!   # bounded: a red run must not hang
+for i in $(seq 1 60); do BL="$(newest_batch)"; [ -n "$BL" ] && [ "$(jq -r .title "$BL")" = "Late" ] && break; sleep 0.1; done
+decide "$BL" approve false
+wait $bg
+IDL="$(jq -r .id "$BL")"
+fleet drv tl1 tab --batch "$IDL" --unit late --wait-max 1
+assert_eq "tab: a wait that runs out is refused (exit 2)" "2" "$(cat "$TMP/tl1.rc")"
+grep -q "run the same command again" "$TMP/tl1.out" && got=yes || got=no
+assert_eq "tab: ...saying the tab may still open, and to run it again" "yes" "$got"
+# Shepherd opens it after all: its answer (bound to the request that gave up) and its own record
+WARN="/r/A's VS Code window runs tab bridge 0.4.0, which forgets a unit's tab at the first tab switch -- Developer: Reload Window there"
+jq -n --arg w "$WARN" '{nonce:"the-request-that-gave-up", ok:true, name:"repo-l1", sessionId:"s-l1", message:"Start unit feat/late in its own worktree", warn:$w}' > "$FD/$IDL.tab-late.answer"
+printf '{"grant":{"approved":true},"units":{"late":{"session":{"id":"s-other","name":"repo-x","pid":"8"}}}}' > "$FD/$IDL.state.json"
+fleet drv tl0 tab --batch "$IDL" --unit late
+assert_eq "tab: an answer for a session Shepherd didn't record as the unit's is never handed over" "2" "$(cat "$TMP/tl0.rc")"
+[ -f "$FD/$IDL.tab-late.answer" ] && got=kept || got=gone
+assert_eq "tab: ...and stays where it is" "kept" "$got"
+printf '{"grant":{"approved":true},"units":{"late":{"session":{"id":"s-l1","name":"repo-l1","pid":"9"}}}}' > "$FD/$IDL.state.json"
+fleet drv tl2 tab --batch "$IDL" --unit late
+assert_eq "tab: a retry after the tab opened late gets the answer it missed (exit 0)" "0" "$(cat "$TMP/tl2.rc")"
+grep -q "repo-l1" "$TMP/tl2.out" && grep -q "Start unit feat/late" "$TMP/tl2.out" && got=yes || got=no
+assert_eq "tab: ...the session's name and the message to send it" "yes" "$got"
+assert_absent "tab: ...and the answer is used up" "$FD/$IDL.tab-late.answer"
+fleet drv tl3 tab --batch "$IDL" --unit late
+assert_eq "tab: with no answer left, a unit that has its tab is refused as before" "2" "$(cat "$TMP/tl3.rc")"
+
+# ---- tab: Shepherd's warning about an old tab bridge reaches the driver (2026-09-30) ----
+# 2026-09-30: a window whose tab bridge is older than 0.6.0 forgets a unit's tag at the first tab
+# switch, and a batch opened its tabs there without a word. Shepherd's answer now carries `warn`.
+grep -q "⚠️ .*tab bridge 0.4.0.*Reload Window" "$TMP/tl2.out" && got=yes || got=no
+assert_eq "tab: the late answer's warning is printed" "yes" "$got"
+fleet drv tw1 tab --batch "$IDL" --unit warned & bg=$!
+wait_for "$FD/$IDL.tab-warned.json"
+jq -n --arg n "$(jq -r .nonce "$FD/$IDL.tab-warned.json")" --arg w "$WARN" \
+  '{nonce:$n, ok:true, name:"repo-w1", sessionId:"s-w1", message:"Start unit feat/warned in its own worktree", warn:$w}' > "$FD/$IDL.tab-warned.answer"
+wait $bg
+assert_eq "tab: an answer that carries a warning still succeeds" "0" "$(cat "$TMP/tw1.rc")"
+grep -q "⚠️ .*tab bridge 0.4.0.*Reload Window" "$TMP/tw1.out" && got=yes || got=no
+assert_eq "tab: ...and prints the warning with the session's name" "yes" "$got"
+[ "$(grep -c "⚠️" "$TMP/t2.out")" = "0" ] && got=none || got=some
+assert_eq "tab: an answer with no warning prints none" "none" "$got"
+fleet drv lst stop --batch "$IDL"
+
 finish

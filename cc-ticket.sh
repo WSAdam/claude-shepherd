@@ -110,13 +110,19 @@ ticket_id() {
   [ -n "$ID" ] || usage_error "give the ticket's id"
   [[ "$ID" =~ ^t[0-9]+-[0-9]+$ ]] || refuse "'$ID' isn't a ticket id (they look like t1790000000-4242)"
   F="$CC_TICKETS_DIR/$ID.json"
-  if [ ! -e "$F" ] && ! compgen -G "$F.claim.*" > /dev/null; then say "❌ cc-ticket: no ticket $ID"; exit 5; fi
+  # cc_ticket_there, not one look at the file and one at its claims: a writer can put the file
+  # back between the two (2026-09-30, the six-way take).
+  if ! cc_ticket_there "$ID"; then say "❌ cc-ticket: no ticket $ID"; exit 5; fi
 }
-# The ticket as it stands (from its claim when a writer has it this instant).
+# The ticket as it stands (from its claim when a writer has it this instant). A writer can put the
+# file back between the two reads, so they are tried again before giving up (as cc_ticket_there).
 snapshot() {
-  local c
-  cat "$F" 2>/dev/null && return 0
-  for c in "$F".claim.*; do [ -f "$c" ] && cat "$c" 2>/dev/null && return 0; done
+  local c n
+  for n in 1 2 3; do
+    cat "$F" 2>/dev/null && return 0
+    for c in "$F".claim.*; do [ -f "$c" ] && cat "$c" 2>/dev/null && return 0; done
+    [ "$n" = 3 ] || sleep 0.05
+  done
   return 1
 }
 # Say what an update that changed nothing came back with, and exit with its code.

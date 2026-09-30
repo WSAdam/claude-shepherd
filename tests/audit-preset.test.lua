@@ -172,7 +172,8 @@ check("allowed: Read Grep Glob, playwright, and one Edit rule -- the findings fi
       has("--allowedTools=Read Grep Glob mcp__playwright__* Edit(/" .. FINDINGS .. ")"))
 local ST, MC = ADIR .. "/settings.json", ADIR .. "/mcp.json"
 check("--settings names the settings file it wrote", after("--settings") == ST)
-check("--mcp-config names the MCP config it wrote, strict", after("--mcp-config") == MC and has("--strict-mcp-config"))
+-- 2026-09-30 requirement change: --mcp-config is variadic, so its value rides the = form (one element)
+check("--mcp-config names the MCP config it wrote, strict", has("\n--mcp-config=" .. MC .. "\n") and has("--strict-mcp-config"))
 check("no --add-dir (a variadic flag before the task would eat it)", not has("--add-dir"))
 check("the seed prompt is the last argument and names the findings file",
       tostring(argv[#argv]):find("Audit this project", 1, true) == 1 and tostring(argv[#argv]):find(FINDINGS, 1, true) ~= nil)

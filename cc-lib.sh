@@ -399,6 +399,22 @@ def newstext($role): news($role) as $n
   | join("\n");
 '
 
+# Is ticket $1 there -- its file, or a writer's claim on it? A writer moves the file to its claim
+# and back, so one look at each can miss both: the file is away at the first look and back, its
+# claim gone, by the second. 2026-09-30: that is how one of six sessions taking a ticket at once
+# was told "no ticket" (exit 5) instead of "held" -- 1 run in 60, more under load. The file is
+# looked at again after the claims, and the three looks are repeated before the answer is no.
+cc_ticket_there() { # $1 id
+  local f="$CC_TICKETS_DIR/$1.json" n
+  for n in 1 2 3; do
+    [ -e "$f" ] && return 0
+    compgen -G "$f.claim.*" > /dev/null && return 0
+    [ -e "$f" ] && return 0
+    [ "$n" = 3 ] || sleep 0.05
+  done
+  return 1
+}
+
 # Change ticket $1 the way every writer does (FX.ticketUpdate in the dashboard): claim its file by
 # renaming it to <id>.json.claim.<pid> -- one writer wins; the others wait their turn, up to ~5s --
 # run the jq filter $2 on it (after CC_TICKET_JQ's definitions and norm; any further arguments go to
@@ -412,7 +428,7 @@ cc_ticket_update() { # $1 id, $2 jq filter, [jq args...]
   cc_have_jq || return 3
   f="$CC_TICKETS_DIR/$id.json" claim="$CC_TICKETS_DIR/$id.json.claim.$$" tmp="$CC_TICKETS_DIR/$id.json.tmp.$$"
   while ! mv "$f" "$claim" 2>/dev/null; do
-    [ -e "$f" ] || compgen -G "$CC_TICKETS_DIR/$id.json.claim.*" > /dev/null || return 2
+    cc_ticket_there "$id" || return 2
     n=$((n + 1))
     [ "$n" -le 100 ] || return 3
     sleep 0.05

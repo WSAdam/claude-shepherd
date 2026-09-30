@@ -16,10 +16,12 @@
 #       Run it from inside the repo, in the BACKGROUND, and end the turn: Claude Code wakes the
 #       session when Adam answers. Exit 0 BATCH APPROVED, 3 DENIED (+ note), 4 still waiting
 #       (--wait-max), 5 withdrawn, 6 Shepherd isn't running, 2 refused (the reason is printed).
-#   cc-fleet.sh tab --batch <id> --unit <slug> [--wait-max 120]
+#   cc-fleet.sh tab --batch <id> --unit <slug> [--wait-max 240]
 #       Shepherd opens an empty Claude tab in the repo's window and answers with the new
 #       session's name and the message to send it (SendMessage). Driver only; approved batches only.
 #       Exit 7 = the unit waits for its blockedBy units to merge: nothing opened, ask again later.
+#       A unit whose tab opened after an earlier `tab` had given up: run it again, it prints the
+#       answer that one missed.
 #   cc-fleet.sh status --batch <id>     Shepherd's view of the units, grouped by outcome (JSON)
 #   cc-fleet.sh wait --batch <id> [--after N] [--wait-max S]
 #       The units' events Shepherd relayed after #N (tab opened, asked a question, turn finished,
@@ -270,8 +272,28 @@ cmd_propose() {
   exit 0
 }
 
+# What a tab answer says to the driver: the session's name, a warning if Shepherd sent one, and
+# the message to send.
+print_tab_answer() { # <slug> <answer json>
+  local slug="$1" ans="$2" warn
+  echo "✅ Unit $slug's tab is open. Its session: $(printf '%s' "$ans" | jq -r .name)"
+  # 2026-09-30: the unit's window runs a tab bridge older than 0.6.0 (core.fleetBridgeWarning)
+  warn="$(printf '%s' "$ans" | jq -r '.warn // empty' | tr -d '[:cntrl:]')"
+  [ -z "$warn" ] || echo "⚠️ $warn"
+  echo "Send it this message with SendMessage (to: \"$(printf '%s' "$ans" | jq -r .name)\", notify_when_idle: true):"
+  echo "-----"
+  printf '%s\n' "$ans" | jq -r .message
+  echo "-----"
+}
+
+# How long `tab` waits for Shepherd by default. Shepherd itself gives a tab up to 225s
+# (core.fleetTabMaxSeconds: 135s to open, 90s for its session). 2026-09-30: this was 120, so the
+# driver was told "didn't open the tab" while Shepherd went on to open it, and the retry was
+# refused as "already has its tab". tests/fleet.test.sh holds it above Shepherd's own limit.
+TAB_WAIT_MAX=240
+
 cmd_tab() {
-  local id="" slug="" waitmax=120
+  local id="" slug="" waitmax="$TAB_WAIT_MAX"
   while [ $# -gt 0 ]; do
     case "$1" in
       --batch) id="${2:-}"; shift 2 ;;
@@ -280,6 +302,7 @@ cmd_tab() {
       *) refuse "unknown option: $1" ;;
     esac
   done
+  case "$waitmax" in ''|*[!0-9]*) refuse "--wait-max takes whole seconds" ;; esac
   local bf; bf="$(batch_file "$id")"
   [ -f "$bf" ] || refuse "no batch $id"
   [ "$(jq -r .driver.session_id "$bf")" = "$SID" ] || refuse "only the session that proposed batch $id can open its tabs"
@@ -287,6 +310,19 @@ cmd_tab() {
   [ -e "$FLEET_DIR/$id.stop" ] && refuse "batch $id was stopped"
   jq -e --arg s "$slug" '.units | any(.slug == $s)' "$bf" >/dev/null || refuse "batch $id has no unit '$slug'"
   if jq -e --arg s "$slug" '.units[$s].session != null' "$FLEET_DIR/$id.state.json" >/dev/null 2>&1; then
+    # 2026-09-30: the tab may have opened after an earlier `tab` gave up waiting. Shepherd's answer
+    # is still there, unread: when it is for the very session Shepherd recorded as this unit's,
+    # it is printed now instead of refusing the driver the message it never got.
+    local late="$FLEET_DIR/$id.tab-$slug.answer" have
+    have="$(jq -r --arg s "$slug" '.units[$s].session.id // empty' "$FLEET_DIR/$id.state.json" 2>/dev/null)"
+    if [ -n "$have" ] && [ "$(jq -r '(.ok == true) and ((.message | type) == "string")' "$late" 2>/dev/null)" = "true" ] \
+       && [ "$(jq -r '.sessionId // empty' "$late" 2>/dev/null)" = "$have" ]; then
+      local ans; ans="$(cat "$late")"
+      rm -f "$late"
+      echo "↩︎ Unit $slug's tab opened after an earlier wait gave up; this is the answer it missed."
+      print_tab_answer "$slug" "$ans"
+      exit 0
+    fi
     refuse "unit $slug already has its tab ($(jq -r --arg s "$slug" '.units[$s].session.name' "$FLEET_DIR/$id.state.json"))"
   fi
   shepherd_alive || { echo "⚠️ Shepherd isn't running, so it can't open the tab."; exit 6; }
@@ -298,7 +334,7 @@ cmd_tab() {
   local ans rc
   ans="$(wait_answer "$FLEET_DIR/$id.tab-$slug.answer" "$nonce" "$req" "$waitmax")"; rc=$?
   rm -f "$req"
-  [ "$rc" -eq 0 ] || refuse "Shepherd didn't open the tab within ${waitmax}s"
+  [ "$rc" -eq 0 ] || refuse "Shepherd didn't open the tab within ${waitmax}s -- it may still be opening it: run the same command again in a minute (it prints the answer if the tab did open)"
   # 2026-09-29: blockedBy -- a unit whose blockers haven't all merged waits (exit 7), apart from a refusal
   if [ "$(printf '%s' "$ans" | jq -r '.ok != true and ((.waits // []) | length) > 0')" = "true" ]; then
     echo "⏸ cc-fleet: unit $slug $(printf '%s' "$ans" | jq -r '.reason // "waits for its blockers to merge first"') -- nothing was opened."
@@ -308,11 +344,7 @@ cmd_tab() {
   if [ "$(printf '%s' "$ans" | jq -r '.ok == true')" != "true" ]; then
     refuse "Shepherd couldn't open unit $slug's tab: $(printf '%s' "$ans" | jq -r '.reason // "no reason given"')"
   fi
-  echo "✅ Unit $slug's tab is open. Its session: $(printf '%s' "$ans" | jq -r .name)"
-  echo "Send it this message with SendMessage (to: \"$(printf '%s' "$ans" | jq -r .name)\", notify_when_idle: true):"
-  echo "-----"
-  printf '%s\n' "$ans" | jq -r .message
-  echo "-----"
+  print_tab_answer "$slug" "$ans"
   exit 0
 }
 

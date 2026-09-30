@@ -229,9 +229,13 @@ What happens next depends on the verdict:
 - **Pass:** a batch unit's merge goes through on your grant, as before.
 - **Fail:** a batch unit's merge **waits for your click**. The card says *the checker failed it, so
   it waits for your click*, it reads **Needs you**, and you get one alert.
-- **Couldn't run** (no answer, a timeout, the turn or budget cap, a Hammerspoon reload mid-run):
-  nothing was proven either way, so the checker tries once more a minute later. If it fails to run
-  a second time, the merge waits for your click.
+- **Couldn't run** (no answer, a timeout, the turn or budget cap): nothing was proven either way,
+  so the checker tries once more a minute later. If it fails to run a second time, the merge waits
+  for your click. The reason names claude's exit code (*claude gave no answer (exit 143)*), and
+  the record in `~/.claude/cc-merge/<session>.checker.json` keeps the code and the last 2000 bytes
+  of what the run printed (`kept`), so a run that said nothing can still be diagnosed.
+- **A Hammerspoon reload mid-run** is not one of those two tries: the run it cut starts again at
+  once, as the same attempt.
 - **Your own Merge click never looks at it.** A unit the checker failed still merges when you say
   so.
 
@@ -370,7 +374,12 @@ approval from you per batch**:
    window's tab bridge to tag the new tab as the unit's; the tab never gets a name, so the tag is
    how Shepherd closes it after the merge. A window still running a bridge too old to tag it is
    refused up front with *Developer: Reload Window there, then ask again*, and a tag the bridge
-   refuses raises a toast at once instead of surfacing at merge time. The driver sends the message
+   refuses raises a toast at once instead of surfacing at merge time. A bridge that can tag but is
+   older than 0.6.0 forgets the tag at the first tab switch: the tab still opens, but `tab` prints
+   a ⚠️ line for the driver and you get one toast, both saying to reload that window. `tab` waits
+   up to 240 seconds, longer than Shepherd's own limit for opening a tab and finding its session
+   (225); if a wait does run out and the tab opens after all, running the same command again
+   prints the answer it missed. The driver sends the message
    with **SendMessage**: the tab starts working with no Enter pressed, under its own permissions,
    and the driver is notified when the unit goes idle. While the batch runs, the driver's card reads
    **Driving N units** in the working colour and stays ahead of its units (anything that needs you

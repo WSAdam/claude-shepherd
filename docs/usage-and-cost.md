@@ -21,8 +21,10 @@ to `/compact`.
   Code), and for any Opus or Sonnet session set to Claude Code's 1M-context option (a model ending
   in `[1m]`, like `opus[1m]`). Transcripts only record the bare model id, so the option is read
   where Claude Code reads it: the session's own model, then the project's
-  `.claude/settings.local.json` and `settings.json`, then `~/.claude/settings.json`. Otherwise
-  200k. A provider's `contextLimit` overrides it, and a prompt larger than the assumed window
+  `.claude/settings.local.json` and `settings.json`, then `~/.claude/settings.json`. A `/model`
+  switch mid-session wins over all of them: the transcript records the switch ("Set model to
+  …"), and the bar follows the newest one, to `[1m]` or away from it, on the next usage pass.
+  Otherwise 200k. A provider's `contextLimit` overrides it, and a prompt larger than the assumed window
   rounds it up to the next tier (200k / 1M / 2M), so a session never reads a false 100%.
 - To match Claude Code's own "% until auto-compact", the bar divides by
   `window × context.autoCompactFraction` (default `0.92`; the exact threshold is undocumented, so
@@ -254,8 +256,10 @@ confirmed purge the Purge button uses. It never deletes Claude Code's own transc
 
 The detail panel's **Score** button rates the selected session 0–100 from the ledger: it starts at
 100 and subtracts 18 per API error, 6 per denied tool, 12 per loop episode and 14 per forced respawn.
-It shows a ⚠ when recent sessions trend down, and a small sparkline of the trend. (A `score.weights`
-setting is mentioned in the code but not read yet, so the weights are fixed.)
+It shows a ⚠ when recent sessions trend down, and a small sparkline of the trend. Those weights are
+the defaults: `"score": { "weights": { "error": 18, "deny": 6, "loop": 12, "respawn": 14 } }` in
+`~/.claude/cc-config.json` (hand-edit only) changes any of them, for the Score button, its trend
+and the A/B compare's scores alike.
 
 ### Storage
 

@@ -2043,7 +2043,7 @@ do
         and src:find("core.gitWorktreeRemoveCmd(c.repoRoot, v.worktreePath)", 1, true) ~= nil
         and src:find('hs.dialog.blockAlert("Keep \\"" .. tostring(req.winner)', 1, true) ~= nil)
   check("dr7-pin: compare uses DR4 runScore + core.abCompare for the winner",
-        src:find("core.runScore(led.events, sid)", 1, true) ~= nil
+        src:find("core.runScore(led.events, sid, scoreOpts)", 1, true) ~= nil   -- 2026-09-30: with score.weights
         and src:find("core.abCompare(c.variants, scores)", 1, true) ~= nil)
   check("dr7-pin: optional LLM-judge pastes core.abJudgePrompt, delivery-gated",
         src:find("function FX.abJudge(cohort)", 1, true) ~= nil
@@ -2753,8 +2753,11 @@ do
         src:find('local out = FX.readFile(outFile) or ""', 1, true) ~= nil)
   -- 2026-09-28: tools/ledger-quarantine.sh parks the suites' synthetic events in
   -- cc-ledger/quarantine/, which the recursive fleet search would still return.
+  -- 2026-09-30: and cc-ledger/exports/, whose audit exports are copies of ledger lines -- the call
+  -- names core's list (quarantine and exports) instead of the one folder.
   check("fleet search skips the ledger's quarantine/ folder",
-        src:find('core.searchArgv(kind, q, paths, { excludeDirs = { "quarantine" } })', 1, true) ~= nil)
+        src:find('core.searchArgv(kind, q, paths, { excludeDirs = core.SEARCH_EXCLUDE_DIRS })', 1, true) ~= nil
+        and core.SEARCH_EXCLUDE_DIRS[1] == "quarantine")
 
   -- #15/#29: the search exit callback checks OWNERSHIP first -- a superseded
   -- query's terminate-triggered callback must not nil the NEWER task's latch
@@ -4812,6 +4815,46 @@ do
   check("compat: a failure goes through FX.alert and FX.push, once (core.compatAlertText)",
         scanned:find("local msg = core.compatAlertText(st)", 1, true) ~= nil and scanned:find("FX.alert(msg, 8)", 1, true) ~= nil
         and scanned:find("FX.push(topic,", 1, true) ~= nil and not scanned:find("hs.alert", 1, true))
+end
+
+-- ---- fleet, merge and spawn sweep: the panel is wired to each fix (2026-09-30, build program unit 46) ----
+-- The logic is pinned in core.test.lua and the stubbed-panel suites; these hold the call sites.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  -- 2026-09-30: no tile carried providerId, so a rule's provider match never matched
+  local stamp, rules = src:find("core.stampProviders(list, cfg)", 1, true), src:find("local ruleSet     = rulesOn and", 1, true)
+  check("rule provider: the tick stamps every tile's provider id before the rules are loaded and run",
+        stamp ~= nil and rules ~= nil and stamp < rules)
+  -- 2026-09-30: both callers scored with no opts, so score.weights was read by nothing
+  check("score weights: the Score button scores and trends with score.weights",
+        src:find("local r = core.runScore(res.events, target.session_id, scoreOpts)", 1, true) ~= nil
+        and src:find("local trend = core.scoreTrend(res.events, scoreOpts)", 1, true) ~= nil)
+  check("score weights: the A/B compare scores with them too",
+        src:find("local scoreOpts = core.scoreOpts(loadConfig())   -- 2026-09-30: score.weights reaches the compare", 1, true) ~= nil)
+  check("score weights: no caller is left scoring without them",
+        not src:find("core.runScore(led.events, sid)", 1, true) and not src:find("core.runScore(res.events, target.session_id)", 1, true))
+  -- 2026-09-30: Shepherd's two tab limits are core's, which cc-fleet.sh's default is held above
+  check("tab wait: Shepherd opens a tab within core's limits",
+        src:find("FX.FLEET_TAB_WAIT = core.FLEET_TAB_WAIT", 1, true) ~= nil
+        and src:find("FX.now() - t.at >= FX.FLEET_TAB_WAIT + core.FLEET_TAB_OPEN_GRACE", 1, true) ~= nil)
+  -- 2026-09-30: the usage pass reads the session's /model switches; the window follows the newest
+  check("model switch: the usage pass keeps the main transcript's newest /model switch",
+        src:find("if main and not e then st.modelSwitch = core.modelSwitchOf(line) or st.modelSwitch end", 1, true) ~= nil)
+  check("model switch: the [1m] window asks the switch first, and a new one isn't held back by the 30s cache",
+        src:find("if core.sessionModelChoice(switched, nil) then\n    v = core.configuredModelOneM(switched)", 1, true) ~= nil
+        and src:find("if c and now - c.at < 30 and c.switched == switched then return c.v end", 1, true) ~= nil)
+  -- 2026-09-30: a checker run with no verdict said nothing of its exit code and kept no output
+  check("checker: the run's exit code reaches the parse",
+        src:find("core.parseCheckerOutput(res and res.output, res and res.err, res and res.code)", 1, true) ~= nil)
+  check("checker: a re-run takes core's attempt number (a reload-cut run isn't counted)",
+        src:find('rec = FX.checkerStart(key, target, id, rec.trigger or "merge", core.checkerNextAttempt(rec), cfg)', 1, true) ~= nil)
+  -- 2026-09-30: both handoff writers listed the root TODO.md's first open lines
+  check("handoff: both note writers take their Next lines from FX.handoffTodos",
+        src:find("todos = FX.handoffTodos(it.cwd, ev),", 1, true) ~= nil
+        and src:find("todos = FX.handoffTodos(item.cwd or project, ev),", 1, true) ~= nil
+        and not src:find("todos = FX.openTodos(", 1, true))
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

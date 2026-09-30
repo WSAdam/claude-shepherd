@@ -507,5 +507,105 @@ do
   check("Deny on an uncovered batch still goes through", okD == true and d9 and d9.verdict == "deny")
   quiet(function() fx.batchStop("drv", "b8"); fx.batchStop("drv", "b9") end)
 end
+
+-- ---- a unit's tab in a window whose tab bridge forgets its tag (2026-09-30) ----
+-- 2026-09-30: a bridge from 0.3.0 to 0.5.x tags a unit's tab but loses the tag at the first tab
+-- switch (VS Code rebuilds its tab objects; only 0.6.0 carries tags over). A batch opened its
+-- units there without a word: Focus then did nothing on a unit and no merged unit's tab closed.
+-- The tab still opens, and the driver's answer and one toast say to reload the window.
+do
+  write(FD .. "/b10.json", json.encode({ v = 1, id = "b10", nonce = "n-b10", driver = { session_id = "drv", pid = "4242", name = "A-drv" },
+    repo = "/r/A", commonDir = "/r/A/.git", title = "Old bridge", mergeWhenGreen = false, at = os.time(), phase = "approved",
+    units = { { type = "feat", slug = "iota", task = "Add iota.", branch = "feat/iota" },
+              { type = "feat", slug = "kappa", task = "Add kappa.", branch = "feat/kappa" },
+              { type = "feat", slug = "lam", task = "Add lam.", branch = "feat/lam" } } }))
+  write(FD .. "/b10.state.json", json.encode({ grant = { approved = true, grantMerge = false, at = os.time() }, units = {} }))
+  fx._fleetState.b10 = nil
+  local pid = 5200
+  -- ask for one unit's tab and play VS Code's part; returns the answer Shepherd wrote
+  local function openUnit(slug)
+    local before = #opened
+    write(FD .. "/b10.tab-" .. slug .. ".json", json.encode({ v = 1, batch = "b10", slug = slug, session_id = "drv", nonce = "t-" .. slug, at = os.time() }))
+    tick()
+    if #opened ~= before + 1 then return nil end
+    quiet(function() opened[#opened].beforeOpen(); opened[#opened].onDone(true) end)
+    pid = pid + 1
+    write(SD .. "/" .. pid .. ".json", json.encode({ pid = pid, sessionId = "u-" .. slug, name = "A-" .. slug, cwd = "/r/A" }))
+    quiet(function() fx.fleetTabPoll("b10", slug) end)
+    local a = decoded(FD .. "/b10.tab-" .. slug .. ".answer")
+    os.remove(FD .. "/b10.tab-" .. slug .. ".answer"); os.remove(FD .. "/b10.tab-" .. slug .. ".json")
+    os.execute('rm -f "' .. BR .. '/701.in/"*')
+    return a
+  end
+  write(BR .. "/701.json", json.encode({ v = 1, pid = 701, version = "0.4.0", folders = { "/r/A" }, tabs = {}, at = os.time() }))
+  alerts = {}
+  fx._fleetBridgeWarned = {}   -- the units opened above ran in this window too: as after a reload
+  local a1 = openUnit("iota")
+  check("a unit's tab still opens in a window whose bridge is older than 0.6.0", a1 and a1.ok == true and a1.name == "A-iota")
+  check("...and the driver's answer says the window needs a reload  (" .. tostring(a1 and a1.warn) .. ")",
+        a1 and type(a1.warn) == "string" and a1.warn:find("0.4.0", 1, true) ~= nil and a1.warn:find("Reload Window", 1, true) ~= nil)
+  check("...and Adam is told in a toast", alerted("tab bridge 0.4.0") == 1)
+  local a2 = openUnit("kappa")
+  check("the next unit's answer warns too", a2 and a2.ok == true and type(a2.warn) == "string")
+  check("...but the toast isn't repeated for the same window", alerted("tab bridge 0.4.0") == 1)
+  write(BR .. "/701.json", json.encode({ v = 1, pid = 701, version = "0.6.0", folders = { "/r/A" }, tabs = {}, at = os.time() }))
+  local a3 = openUnit("lam")
+  check("a window on bridge 0.6.0 opens the tab with no warning", a3 and a3.ok == true and a3.warn == nil and alerted("tab bridge 0.6.0") == 0)
+  quiet(function() fx.batchStop("drv", "b10") end)
+  alerts = {}
+end
+
+-- ---- a batch's files are read when they change, not on every tick (2026-09-30) ----
+-- 2026-09-30: FX.readFleet read and parsed every proposal in the folder each tick -- finished
+-- batches too, which stay a week -- and every unit of every batch cost a failed open for a tab
+-- request that wasn't there, plus one per batch for its stop marker.
+do
+  local mtime = {}
+  local realAttr = hs.fs.attributes
+  hs.fs.attributes = function(path, k)
+    path = tostring(path)
+    if path:sub(1, #FD + 1) ~= FD .. "/" then return realAttr(path, k) end
+    local s = read(path)
+    if not s then return nil end
+    local a = { mode = "file", size = #s, modification = mtime[path] or 1 }
+    if k then return a[k] end
+    return a
+  end
+  -- cc-fleet.sh removes its request once answered; the ones this file wrote by hand are still there
+  os.execute('rm -f "' .. FD .. '"/*.tab-*.json "' .. FD .. '"/*.tab-*.answer')
+  local reads, realRead = {}, fx.readFile
+  fx.readFile = function(p) reads[#reads + 1] = tostring(p); return realRead(p) end
+  local function readsOf(pat) local n = 0 for _, p in ipairs(reads) do if p:find(pat) then n = n + 1 end end return n end
+  tick()                       -- the first tick that can see a size and mtime reads each once
+  reads = {}
+  tick(); tick(); tick()
+  check("a proposal that hasn't changed isn't read again  (reads=" .. readsOf("/b%w+%.json$") .. ")", readsOf("/b%w+%.json$") == 0)
+  check("...no tab request is probed for a unit that has none  (reads=" .. readsOf("%.tab%-") .. ")", readsOf("%.tab%-") == 0)
+  check("...nor a stop marker read", readsOf("%.stop$") == 0)
+  check("...and the batches are still known", fx._fleetBatches.b1 ~= nil and fx._fleetBatches.b4 ~= nil)
+  -- a proposal that changes is read again, once
+  local b4 = decoded(FD .. "/b4.json")
+  b4.title = "Relay, renamed"
+  write(FD .. "/b4.json", json.encode(b4))
+  tick(); tick()
+  check("a proposal that changed is read again, once  (reads=" .. readsOf("/b4%.json$") .. ")", readsOf("/b4%.json$") == 1)
+  check("...and its change is seen", fx._fleetBatches.b4 and fx._fleetBatches.b4.title == "Relay, renamed")
+  -- a same-size rewrite is caught by its mtime
+  b4.title = "Relay, renamEd"
+  write(FD .. "/b4.json", json.encode(b4))
+  mtime[FD .. "/b4.json"] = 2
+  tick()
+  check("...a same-size rewrite too, by its mtime", fx._fleetBatches.b4 and fx._fleetBatches.b4.title == "Relay, renamEd")
+  -- a tab request that appears is read and answered as before
+  reads = {}
+  write(FD .. "/b1.tab-beta.json", json.encode({ v = 1, batch = "b1", slug = "beta", session_id = "drv", nonce = "t-beta-late", at = os.time() }))
+  tick()
+  local late = decoded(FD .. "/b1.tab-beta.answer")
+  check("a tab request that appears is still read and answered", readsOf("/b1%.tab%-beta%.json$") == 1
+        and late and late.nonce == "t-beta-late" and late.ok == false)
+  os.remove(FD .. "/b1.tab-beta.answer"); os.remove(FD .. "/b1.tab-beta.json")
+  fx.readFile = realRead
+  hs.fs.attributes = realAttr
+end
 check("no keystroke anywhere", taps == 0)
 finish()

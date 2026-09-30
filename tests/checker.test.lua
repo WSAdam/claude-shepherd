@@ -322,6 +322,55 @@ I = items()
 check("after a reload the verdict comes back from disk", I.ua.merge.checker and I.ua.merge.checker.verdict == "fail")
 check("...and isn't run again", #TASKS == before)
 
+-- ---- a reload mid-run is not one of the checker's two attempts (2026-09-30) ----
+-- 2026-09-30: a deploy at 15:50 cut feat/ask-send's first run. Its record, left
+-- "running", read back as an ordinary couldn't-run with attempt 1 spent, so the re-run was try 2
+-- of 2 and its one real failure put the unit on Adam's click. And that failure said only "claude
+-- gave no answer": no exit code, and its scratch files were already deleted.
+do
+  DIFFS["main...abc999"] = DIFFS["main...bbb222"]
+  request("rl", "/r/R", "rho", "fix/rho", "abc999", "5006")
+  tick()
+  local R = runsIn("/r/R/.claude/worktrees/rho")
+  check("rho's checker starts", #R == 1 and (decoded(MD .. "/rl.checker.json") or {}).state == "running")
+  -- the reload: memory is gone (the task with it); the file still says "running"
+  fx._checkers, fx._headless = {}, {}
+  tick()
+  R = runsIn("/r/R/.claude/worktrees/rho")
+  check("a run a reload cut is run again at once", #R == 2)
+  local vr = decoded(MD .. "/rl.checker.json") or {}
+  check("...as the same attempt, not the second  (attempts=" .. tostring(vr.attempts) .. ")", vr.attempts == 1 and vr.state == "running")
+  -- that run really fails: killed, nothing on stdout
+  local logged = {}
+  local rerun = R[2] or R[1]   -- (without the fix there is no second run: the first plays its part)
+  do
+    local _, _, errFile = files(rerun)
+    write(errFile, "Terminated: 15\n")
+    rerun.running = false
+    print = function(...) local p = {} for _, v in ipairs({ ... }) do p[#p + 1] = tostring(v) end logged[#logged + 1] = table.concat(p, " ") end
+    pcall(function() rerun.cb(143, "", "") end)
+    print = realPrint
+  end
+  vr = decoded(MD .. "/rl.checker.json") or {}
+  check("a run that gave no answer says claude's exit code  (" .. tostring(vr.why) .. ")",
+        vr.verdict == "couldntRun" and tostring(vr.why):find("exit 143", 1, true) ~= nil)
+  check("...and keeps what it printed on its record", type(vr.kept) == "table" and vr.kept.code == 143
+        and tostring(vr.kept.err):find("Terminated: 15", 1, true) ~= nil)
+  local line
+  for _, l in ipairs(logged) do if l:find("couldn't run", 1, true) and l:find("fix/rho", 1, true) then line = l end end
+  check("...and logs both  (" .. tostring(line) .. ")", line ~= nil and line:find("[cc-dashboard]", 1, true) ~= nil
+        and line:find("exit 143", 1, true) ~= nil and line:find("stderr 15 bytes", 1, true) ~= nil)
+  OFFSET = OFFSET + 61
+  tick()
+  R = runsIn("/r/R/.claude/worktrees/rho")
+  check("its one real retry still happens (the reload didn't spend it)", #R == 3
+        and (decoded(MD .. "/rl.checker.json") or {}).attempts == 2)
+  if R[3] then answer(R[3], "pass", "Adds rho.") end
+  vr = decoded(MD .. "/rl.checker.json") or {}
+  check("...and its verdict counts", vr.verdict == "pass" and vr.kept == nil)
+  os.remove(MD .. "/rl.json"); os.remove(MD .. "/rl.checker.json"); os.remove(T .. "/status/rl.json")
+end
+
 -- Verify on a session with no merge request
 quiet(function() fx.verifySession("v1") end)
 local V = runsIn("/r/V")

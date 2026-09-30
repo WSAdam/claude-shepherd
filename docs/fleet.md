@@ -304,7 +304,9 @@ All derived locally from the transcript Shepherd already reads, with no extra ho
   audit ledger: "which session touched `auth.ts`?", "who ran that migration?". Click a hit to select
   the live session (or open an ended one's audit timeline). Instant with
   [ripgrep](https://github.com/BurntSushi/ripgrep) installed; it falls back to grep otherwise.
-  `search.maxResults` caps the hits.
+  `search.maxResults` caps the hits. Two folders inside the ledger are never searched:
+  `quarantine/` and `exports/` (an audit export is a copy of ledger lines, so its events would
+  show twice).
 - **Groups**: right-click → **Set group…** tags a session into a named cohort, kept by the stable
   project identity so it survives close and reopen (`~/.claude/cc-groups.json`). When groups exist,
   a chip row scopes the grid to one group (it composes with the filter).

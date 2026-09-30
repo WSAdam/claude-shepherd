@@ -192,6 +192,39 @@ wait
 assert_eq "a reply that meets a claimed file retries until it's back: exit 0" "0" "$CODE"
 assert_eq "...and lands" "Any news?" "$(tf "$T3" '.thread[-1].text')"
 
+# ---- a writer puts the ticket back between another's two looks (2026-09-30) ----
+# 2026-09-30: the six-way race above sometimes told only 4 of its 5 losers "held": the fifth got
+# "no ticket" (exit 5; 1 run in 60 on a quiet machine). One claim had won -- the odd one out never
+# reached the claim. "Is the ticket there?" was one look at the file and then one at its claims,
+# and a writer moves the file to its claim and back: a look that finds the file claimed, followed
+# by a look after it was put back, sees neither. Replayed here exactly -- compgen (the claims
+# look) is wrapped so the other writer's put-back lands right before it.
+putback_between_looks() { # <ticket id>: claim it as another writer, who puts it back mid-look
+  mv "$CC_TICKETS_DIR/$1.json" "$CC_TICKETS_DIR/$1.json.claim.99999"
+  export CC_PUTBACK="$CC_TICKETS_DIR/$1.json.claim.99999"
+  compgen() {
+    [ -e "$CC_PUTBACK" ] && mv "$CC_PUTBACK" "${CC_PUTBACK%.claim.99999}"
+    builtin compgen "$@"
+  }
+  export -f compgen
+}
+tk f1 "$A" file --repo "$B" --title "Between two looks"
+T5="$OUT"
+putback_between_looks "$T5"
+tk w1 "$B" take "$T5"
+assert_eq "a take whose two looks straddle another writer's put-back still finds the ticket: exit 0" "0" "$CODE"
+assert_eq "...and never says there is no such ticket" "yes" "$(lacks "$ERR" "no ticket")"
+assert_eq "...it holds the ticket" "w1 true" "$(tf "$T5" '"\(.holder.key) \(.holder.taken)"')"
+# the same straddle inside the claim loop (cc_ticket_update): it waits its turn, not "no such ticket"
+putback_between_looks "$T5"
+( . "$ROOT/cc-lib.sh"; cc_ticket_update "$T5" '{ticket: (.title = "Looked twice")}' > /dev/null; echo $? > "$TMP/straddle.rc" )
+unset -f compgen; unset CC_PUTBACK
+assert_eq "an update that meets the same straddle claims the ticket once it's back: written (0)" "0" "$(cat "$TMP/straddle.rc")"
+assert_eq "...and its change lands" "Looked twice" "$(tf "$T5" '.title')"
+assert_eq "...with no claim or temp left behind" "0" "$(leftovers)"
+tk w1 "$B" take t1-1
+assert_eq "a ticket that really isn't there is still exit 5" "5" "$CODE"
+
 # ---- reclaim: an offer nobody took goes back after 45 minutes (injected clock) ----
 NOW=1790000000
 fixture() { # <id> <holder json>: a ticket filed by f1 for beta, as Shepherd left it

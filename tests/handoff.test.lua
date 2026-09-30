@@ -45,7 +45,16 @@ writeFile(TRANSCRIPT, readAll(HERE .. "fixtures/transcripts/tail-turn-made-progr
   .. rec({ type = "user", message = { role = "user", content = { { type = "tool_result", tool_use_id = "tu_b", is_error = true,
        content = "FAIL - login keeps the session" } } } })
   .. rec({ type = "assistant", message = { role = "assistant", content = { { type = "text", text = "Fixed the session check in auth.ts." } } } }))
-writeFile(PROJ .. "/TODO.md", "# notes\n- [x] Already finished item\n- [ ] Login keeps the session after a refresh (auth.ts)\n- [ ] Second open item\n")
+local TODO_TEXT = "# notes\n- [x] Already finished item\n- [ ] Login keeps the session after a refresh (auth.ts)\n- [ ] Second open item\n"
+writeFile(PROJ .. "/TODO.md", TODO_TEXT)
+-- 2026-09-30 requirement change: only a LINKED worktree's TODO.md is wholly its session's own list
+-- (the main checkout's is the project's verification list), so the unit the first note below is
+-- written for lives in one. It has the same TODO.md; the main checkout keeps its copy for the
+-- main-checkout case further down.
+local WT = HOME .. "/proj-wt"
+sh("git -C '" .. PROJ .. "' -c user.email=t@example.invalid -c user.name=t commit -q --allow-empty -m init 2>/dev/null")
+sh("git -C '" .. PROJ .. "' worktree add -q '" .. WT .. "' -b unit 2>/dev/null")
+writeFile(WT .. "/TODO.md", TODO_TEXT)
 
 local realGetenv = os.getenv
 os.getenv = function(k)
@@ -129,7 +138,8 @@ local core = _G.__ccDashboard.core
 eq("notes live in ~/.claude/cc-notes", FX.NOTES_DIR, NOTES)
 
 -- ---- the done edge writes the note --------------------------------------------------------
-local it = { key = "k1", name = "proj", session_id = "sid-1", status = "done", cwd = PROJ, editor = "vscode",
+check("(the fixture's linked worktree exists)", exists(WT .. "/.git") and attributes(WT .. "/.git", "mode") == "file")
+local it = { key = "k1", name = "proj", session_id = "sid-1", status = "done", cwd = WT, editor = "vscode",
              session_pid = "4242", host_window = "99", transcript_path = TRANSCRIPT }
 FX._turnReads = 0
 FX.stepTurnLabel(it, { status = "working" }, false)
@@ -147,6 +157,53 @@ check("the note's next step is the worktree's first open TODO line",
       note:find("## Next\n- [ ] Login keeps the session after a refresh (auth.ts)\n- [ ] Second open item", 1, true) ~= nil)
 check("...never a finished one", not note:find("Already finished item", 1, true))
 check("the note leaves no temp file behind", sh("ls -a '" .. NOTES .. "' | grep -c tmp"):match("^0") ~= nil)
+
+-- ---- a note from the main checkout lists the session's own items, never the whole list (2026-09-30) ----
+-- 2026-09-30: Next was the first open lines of the TODO.md at the session's git root. For a session
+-- in the main checkout that is the project's whole verification list -- hundreds of lines of other
+-- units' work -- so its note told the next session to start on items that were never its own.
+do
+  local im = { key = "km", name = "proj", session_id = "sid-m", status = "done", cwd = PROJ, editor = "vscode",
+               session_pid = "4250", host_window = "99", transcript_path = TRANSCRIPT }
+  FX._turnReads = 0
+  FX.stepTurnLabel(im, { status = "working" }, false)
+  local nm = readAll(NOTES .. "/km.handoff.md")
+  check("a session in the main checkout gets its note", nm ~= nil)
+  nm = nm or ""
+  check("...which doesn't list the main TODO.md's open lines as its next steps",
+        not nm:find("Login keeps the session after a refresh", 1, true) and not nm:find("Second open item", 1, true))
+  check("...and has no Next at all when the session wrote no TODO line", not nm:find("## Next", 1, true))
+  -- a session that added a line of its own to the main checkout's TODO.md, in an EARLIER turn
+  local OWN = HOME .. "/sid-own.jsonl"
+  writeFile(OWN, rec({ type = "user", origin = { kind = "human" }, message = { role = "user", content = { { type = "text", text = "list it" } } } })
+    .. rec({ type = "assistant", message = { role = "assistant", content = { { type = "tool_use", id = "tu_t", name = "Edit",
+         input = { file_path = PROJ .. "/TODO.md", old_string = "\n", new_string = "\n- [ ] Second open item\n" } } } } })
+    .. rec({ type = "user", message = { role = "user", content = { { type = "tool_result", tool_use_id = "tu_t", content = "ok" } } } })
+    .. rec({ type = "assistant", message = { role = "assistant", content = { { type = "text", text = "Listed." } } } })
+    .. rec({ type = "user", origin = { kind = "human" }, message = { role = "user", content = { { type = "text", text = "now build it" } } } })
+    .. rec({ type = "assistant", message = { role = "assistant", content = { { type = "tool_use", id = "tu_u", name = "Edit",
+         input = { file_path = PROJ .. "/auth.ts", old_string = "a", new_string = "b" } } } } })
+    .. rec({ type = "user", message = { role = "user", content = { { type = "tool_result", tool_use_id = "tu_u", content = "ok" } } } })
+    .. rec({ type = "assistant", message = { role = "assistant", content = { { type = "text", text = "Built the first half." } } } }))
+  local io2 = { key = "ko", name = "proj", session_id = "sid-own", status = "done", cwd = PROJ, editor = "vscode",
+                session_pid = "4251", host_window = "99", transcript_path = OWN }
+  FX._turnReads = 0
+  FX.stepTurnLabel(io2, { status = "working" }, false)
+  local no = readAll(NOTES .. "/ko.handoff.md") or ""
+  check("a main-checkout session that wrote its own TODO line gets that line as its next step",
+        no:find("## Next\n- [ ] Second open item\n", 1, true) ~= nil)
+  check("...and only that one", not no:find("Login keeps the session after a refresh", 1, true))
+  -- the respawn path builds its note the same way
+  writeFile(HOME .. "/status/deadm.json", json.encode({ session_id = "deadm", name = "proj", status = "working", cwd = PROJ,
+    editor = "vscode", transcript_path = TRANSCRIPT, updated = os.time() - 900, since = os.time() - 900 }))
+  local pm = FX.writePendingHandoff("deadm", "vscode", nil, PROJ)
+  local pn = pm and readAll(pm) or ""
+  check("a respawn's pending note from the main checkout leaves the whole list out too",
+        pn ~= "" and not pn:find("Login keeps the session after a refresh", 1, true))
+  if pm then os.remove(pm) end
+  os.remove(HOME .. "/status/deadm.json")
+  os.remove(NOTES .. "/km.handoff.md"); os.remove(NOTES .. "/ko.handoff.md")
+end
 
 -- not an edge: a done tile first seen after a reload is labelled, but writes nothing
 os.remove(NOTES .. "/k1.handoff.md")

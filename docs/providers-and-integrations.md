@@ -68,6 +68,8 @@ hand-edit only (the editor keeps them).
 Spawning from an agent emits the matching Claude Code launch flags: `--append-system-prompt`
 (persona and skills), `--mcp-config` (built from `cc-mcp.json`, secrets as `${VAR}` references),
 `--add-dir` (knowledge), `--agent` and `--plugin-dir`. Real spawning still honours `spawn.live`.
+`--mcp-config` and `--add-dir` take any number of values in Claude Code, so each goes out as one
+`--flag=value` word; written apart, the last one also took the agent's seed prompt as a value.
 
 ## Find-only audit
 
