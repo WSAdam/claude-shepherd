@@ -832,4 +832,25 @@ local limitSent = false
 for _, js in ipairs(jsCalls) do if js:find("ccCoach(", 1, true) and js:find('"timeoutSeconds":', 1, true) then limitSent = true end end
 check("...with the coach's time limit (coach.timeoutSeconds), for the overlay's timer", limitSent)
 
+-- 2026-09-30: Adam's first applied edit (35c1a59) predated the history. It was seeded from the run's
+-- record in memory only, so the next coach run -- which replaces that record -- lost it: the
+-- overlay's Applied edits was empty right after the feature shipped.
+local function oldRun()   -- a run from before the history: one edit applied, no history file
+  os.remove(HFILE)
+  fx._coach.history = {}
+  fx._coach.recs[REPO] = { v = 1, repo = REPO .. "/.git", root = REPO, name = "repo", state = "done", verdict = "proposals",
+    trigger = "card", at = 100, doneAt = 200, lastRunAt = 200, claudeHash = "h",
+    edits = { { section = "Git", old = "a", new = "b", why = "w", evidence = { "e" }, status = "applied", sha = "abc1234abc" },
+              { section = "Git", old = "c", new = "d", why = "w", evidence = { "e" }, status = "pending" } },
+    decisions = {} }
+end
+oldRun()
+local seeded = fx.coachHistory(REPO)
+check("an edit applied before the history existed is seeded from the run's record  (" .. #seeded .. ")", #seeded == 1 and seeded[1].sha == "abc1234abc")
+check("...and written to the history file at once, not only kept in memory", #core.parseCoachHistory(read(HFILE)) == 1)
+oldRun()
+quiet(function() fx.coachStart(fx.coachRepoForRoot(REPO) or { root = REPO, commonDir = REPO .. "/.git", name = "repo" }, "card", CFG) end)
+check("a new run saves the old record's applied edits before it replaces the record",
+      #core.parseCoachHistory(read(HFILE)) == 1 and core.parseCoachHistory(read(HFILE))[1].sha == "abc1234abc")
+
 finish()

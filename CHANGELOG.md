@@ -17,6 +17,9 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
 - Coach: every applied edit is kept in a per-repo history that outlives the next run (**Applied
   edits** in the overlay: its commit, the text before and after, what it was expected to change),
   and **Undo** takes one back out of `CLAUDE.md` in a commit of its own. Nothing is rewritten.
+- Fixed: an edit applied before the coach kept a history was seeded into it in memory only, so the
+  next coach run (which replaces the run's record) lost it. The seeded history is now written to
+  its file, and a run seeds it before replacing the record.
 
 ## 2026-09-30 — The build program
 

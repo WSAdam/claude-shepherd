@@ -6485,12 +6485,15 @@ function FX.coachHistory(root)
   if h == nil then
     local p = FX.coachPath(root, ".applied.json")
     h = core.parseCoachHistory(p and FX.readFile(p) or nil)
-    -- a run's edits applied before the history existed (2026-09-30): they are in its record
-    local rec = (#h == 0) and FX.coachRecord(root) or nil
+    FX._coach.history[root] = h
+    -- A run's edits applied before the history existed (2026-09-30) are only in its record, and the
+    -- next run replaces that record: seed them, and WRITE the file -- kept in memory alone, Adam's
+    -- first applied edit was gone after one reload and one new run.
+    local rec, n = FX.coachRecord(root), #h
     for _, e in ipairs(rec and rec.edits or {}) do
       if e.status == "applied" and e.sha then h = core.coachHistoryAdd(h, e) end
     end
-    FX._coach.history[root] = h
+    if #h > n then FX.coachHistorySave(root, h) end
   end
   return h
 end
@@ -6551,6 +6554,7 @@ end
 function FX.coachStart(repo, trigger, cfg, retry)
   if type(repo) ~= "table" then return nil, "no repo" end
   local root = repo.root
+  pcall(FX.coachHistory, root)   -- the record is about to be replaced: its applied edits go to the history first
   if FX.coachBusy(root) then return nil, "the coach is already reading this repo's sessions" end
   if FX.coachCheckerBusy(repo.commonDir) then
     FX._coach.waiting[root] = { repo = repo, trigger = trigger, retry = retry }
