@@ -19470,6 +19470,521 @@ local function fmtBytesShort(n)
   return tostring(math.floor(n)) .. " B"
 end
 
+-- ---- Claude Code compatibility (2026-09-29, build program unit 40) ----
+-- Shepherd leans on things Claude Code never promised to keep: the hook events it wires, the env
+-- vars it sets (and the ones it reads from Claude Code), the transcript's message.usage, origin.kind,
+-- last-prompt records and interrupt marker, and the fields of ~/.claude/sessions/<pid>.json. An
+-- update that drops one breaks a card silently. Once per new version -- the newest `version` any
+-- session file carries, so learning it spawns nothing -- the panel checks each of them in the
+-- background (one /bin/sh task: a grep of that version's binary for each name, and the tails of that
+-- version's transcripts), and this evaluates what it found: a Diagnostics section, and one alert per
+-- version when something failed. A name the binary still mentions is only a mention -- it can't
+-- prove the name is still honoured, and the rows say so. What a transcript can't show yet (no
+-- interrupted turn so far) is looked for again every rescanSeconds for settleSeconds.
+M.CC_COMPAT = {
+  section = "Claude Code compatibility",
+  checkEverySeconds = 60,     -- how often the tick reads the session files for a new version
+  rescanSeconds = 1800,       -- a transcript fact still unknown is looked for again this often...
+  settleSeconds = 86400,      -- ...for a day after the version was first checked
+  transcripts = 8,            -- the newest sessions of that version whose transcripts are read
+  tailBytes = 262144,         -- the tail of each
+  lineBytes = 65536,          -- longer records are left out (no prompt is that long)
+  taskSeconds = 240,          -- the background check's backstop
+  -- ~/.claude/sessions/<pid>.json: what Shepherd reads, and what for (`version` is the trigger itself)
+  sessionFields = {
+    { name = "pid", why = "which process a batch unit's tab is" },
+    { name = "sessionId", why = "a batch unit's session id" },
+    { name = "cwd", why = "which folder a new tab opened in" },
+    { name = "name", why = "the name SendMessage and cc-send address a session by" },
+  },
+  -- set by Shepherd for Claude Code to read, or set by Claude Code for Shepherd's hooks to read
+  envVars = {
+    { name = "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", why = "auto-compact at compact.atPct (settings.json env)" },
+    { name = "ANTHROPIC_MODEL", why = "a spawn's model" },
+    { name = "ANTHROPIC_BASE_URL", why = "a provider profile's gateway" },
+    { name = "ANTHROPIC_AUTH_TOKEN", why = "a gateway's token" },
+    { name = "ANTHROPIC_CUSTOM_HEADERS", why = "a gateway's headers" },
+    { name = "ANTHROPIC_SMALL_FAST_MODEL", why = "a provider profile's small model" },
+    { name = "CLAUDE_PROJECT_DIR", why = "the folder cc-popup.sh's hooks name" },
+    { name = "CLAUDE_CODE_ENTRYPOINT", why = "which editor a session runs in (cc-lib.sh)" },
+    { name = "CLAUDE_CODE_SESSION_ID", why = "which session runs cc-fleet.sh, cc-merge.sh and cc-send.sh" },
+    { name = "CLAUDE_PID", why = "the driver's session file (cc-fleet.sh)" },
+  },
+}
+do
+  local C = M.CC_COMPAT
+
+  -- "a.b.c" or nil: anything else is not a version
+  function M.compatVersion(v)
+    if type(v) ~= "string" then return nil end
+    local a, b, c = v:match("^%s*(%d+)%.(%d+)%.(%d+)")
+    if not a then return nil end
+    return tonumber(a) .. "." .. tonumber(b) .. "." .. tonumber(c)
+  end
+  local function newer(a, b)   -- is version a newer than b?
+    local x, y = {}, {}
+    for n in a:gmatch("%d+") do x[#x + 1] = tonumber(n) end
+    for n in b:gmatch("%d+") do y[#y + 1] = tonumber(n) end
+    for i = 1, 3 do
+      if (x[i] or 0) ~= (y[i] or 0) then return (x[i] or 0) > (y[i] or 0) end
+    end
+    return false
+  end
+
+  -- The newest version any session file carries, or nil when none carries a readable one.
+  function M.compatNewestVersion(registry)
+    local best
+    for _, e in pairs(type(registry) == "table" and registry or {}) do
+      local v = type(e) == "table" and M.compatVersion(e.version) or nil
+      if v and (not best or newer(v, best)) then best = v end
+    end
+    return best
+  end
+
+  -- Session files exist, but none says which version runs: the check can never fire.
+  function M.compatUnreadable(registry)
+    if type(registry) ~= "table" or next(registry) == nil then return false end
+    return M.compatNewestVersion(registry) == nil
+  end
+
+  -- Every transcript fact known (true or false)?
+  function M.compatSettled(facts)
+    local t = type(facts) == "table" and type(facts.transcript) == "table" and facts.transcript or {}
+    return t.usage ~= nil and t.origin ~= nil and t.lastPrompt ~= nil and t.interrupt ~= nil
+  end
+
+  -- What to check now: { version, kind = "new" } for a version newer than the last one checked (or
+  -- the first ever), { version, kind = "rescan" } for the checked version while a transcript fact is
+  -- still unknown (a live session still runs it, it was checked under a day ago, rescanSeconds
+  -- since the last look), else nil. Only newer versions trigger: a downgrade, or the newest session
+  -- ending, never re-checks an older one.
+  function M.compatDue(registry, state, now)
+    local newest = M.compatNewestVersion(registry)
+    if not newest then return nil end
+    local st = type(state) == "table" and state or {}
+    local last = M.compatVersion(st.version)
+    if not last or newer(newest, last) then return { version = newest, kind = "new" } end
+    now = tonumber(now) or 0
+    if M.compatSettled(st.facts) then return nil end
+    if now - (tonumber(st.firstAt) or 0) > C.settleSeconds then return nil end
+    if now - (tonumber(st.scannedAt) or 0) < C.rescanSeconds then return nil end
+    for _, e in pairs(registry) do
+      if type(e) == "table" and M.compatVersion(e.version) == last then return { version = last, kind = "rescan" } end
+    end
+    return nil
+  end
+
+  -- The fields Shepherd reads that no session file of that version carries.
+  function M.compatSessionFacts(registry, version)
+    local entries, have = 0, {}
+    for _, e in pairs(type(registry) == "table" and registry or {}) do
+      if type(e) == "table" and M.compatVersion(e.version) == version then
+        entries = entries + 1
+        for _, f in ipairs(C.sessionFields) do
+          if e[f.name] ~= nil and e[f.name] ~= "" then have[f.name] = true end
+        end
+      end
+    end
+    local missing = {}
+    if entries > 0 then
+      for _, f in ipairs(C.sessionFields) do if not have[f.name] then missing[#missing + 1] = f.name end end
+    end
+    return { entries = entries, missing = missing }
+  end
+
+  -- The ids of that version's sessions, newest first (updatedAt), at most C.transcripts.
+  function M.compatSessionIds(registry, version)
+    local list = {}
+    for _, e in pairs(type(registry) == "table" and registry or {}) do
+      if type(e) == "table" and M.compatVersion(e.version) == version and type(e.sessionId) == "string" then
+        list[#list + 1] = e
+      end
+    end
+    table.sort(list, function(a, b)
+      local x, y = tonumber(a.updatedAt) or 0, tonumber(b.updatedAt) or 0
+      if x ~= y then return x > y end
+      return a.sessionId < b.sessionId
+    end)
+    local out = {}
+    for i = 1, math.min(#list, C.transcripts) do out[i] = list[i].sessionId end
+    return out
+  end
+
+  -- The events in settings.json that run one of Shepherd's scripts, sorted.
+  function M.compatHookEvents(settings)
+    local seen, out = {}, {}
+    for _, r in ipairs(M.parseHookInventory(settings)) do
+      if r.isOurs and not seen[r.event] then seen[r.event] = true; out[#out + 1] = r.event end
+    end
+    table.sort(out)
+    return out
+  end
+
+  -- What the binary is grepped for: each event quoted (the JS bundle names them as string
+  -- literals; a bare "Stop" is everywhere), then each env var's name.
+  function M.compatNeedles(events)
+    local out = {}
+    for _, ev in ipairs(type(events) == "table" and events or {}) do
+      out[#out + 1] = { kind = "event", name = ev, needle = '"' .. ev .. '"' }
+    end
+    for _, e in ipairs(C.envVars) do out[#out + 1] = { kind = "env", name = e.name, needle = e.name } end
+    return out
+  end
+
+  -- The binaries that run exactly that version: the native installer's, then each editor
+  -- extension's of that version. The caller keeps the first that exists.
+  function M.compatBinaryCandidates(version, home, extLists)
+    local out = {}
+    version = M.compatVersion(version)
+    if not version then return out end
+    if type(home) == "string" and home ~= "" then
+      out[#out + 1] = { label = "claude CLI", path = home .. "/.local/share/claude/versions/" .. version }
+    end
+    for _, e in ipairs(type(extLists) == "table" and extLists or {}) do
+      for _, n in ipairs(type(e.names) == "table" and e.names or {}) do
+        local v = tostring(n):match("^anthropic%.claude%-code%-(%d+%.%d+%.%d+)%f[^%d]")
+        if v and M.compatVersion(v) == version then
+          out[#out + 1] = { label = e.label, path = e.root .. "/" .. n .. "/resources/native-binary/claude" }
+        end
+      end
+    end
+    return out
+  end
+
+  -- The background check, one shell command: `@@GREP <i> <rc>` per needle (grep -q: 0 mentioned,
+  -- 1 not, anything else unreadable), then per transcript found `@@FILE` and the tail's records
+  -- that can carry evidence -- assistant records, last-prompt records, and user records that aren't
+  -- tool results, each at most lineBytes. Transcripts are found by session id in whichever project
+  -- folder holds them. Plain tail/awk, /usr/bin/grep by path (Adam's shell aliases grep to ugrep).
+  local SCAN_AWK = [==[length($0) <= %d && (index($0, "\"type\":\"assistant\"") || index($0, "\"type\":\"last-prompt\"") || (index($0, "\"type\":\"user\"") && !index($0, "\"tool_result\"")))]==]
+  local function sq(s) return "'" .. tostring(s):gsub("'", "'\\''") .. "'" end
+  function M.compatCheckCmd(job)
+    job = type(job) == "table" and job or {}
+    local parts = {}
+    if type(job.binary) == "string" and job.binary ~= "" then
+      for i, n in ipairs(type(job.needles) == "table" and job.needles or {}) do
+        parts[#parts + 1] = "/usr/bin/grep -a -q -F -e " .. sq(n.needle) .. " " .. sq(job.binary)
+          .. " >/dev/null 2>&1; echo \"@@GREP " .. i .. " $?\""
+      end
+    end
+    if type(job.projectsDir) == "string" and job.projectsDir ~= "" then
+      local awk = sq(string.format(SCAN_AWK, C.lineBytes))
+      for _, sid in ipairs(type(job.sids) == "table" and job.sids or {}) do
+        if type(sid) == "string" and sid:match("^[%w%-]+$") then
+          parts[#parts + 1] = "for f in " .. sq(job.projectsDir) .. "/*/" .. sid .. ".jsonl; do [ -f \"$f\" ] || continue; "
+            .. "echo @@FILE; tail -c " .. C.tailBytes .. " \"$f\" 2>/dev/null | awk " .. awk .. " 2>/dev/null; done"
+        end
+      end
+    end
+    if #parts == 0 then return nil end
+    return table.concat(parts, "; ") .. "; exit 0"
+  end
+
+  -- Lines of text, walked with a plain find (never a `*` pattern over a torn line); the last one
+  -- is kept even without its newline -- a torn record just fails to decode.
+  local function eachLine(text, fn)
+    local pos = 1
+    while pos <= #text do
+      local nl = text:find("\n", pos, true)
+      fn(text:sub(pos, (nl or (#text + 1)) - 1))
+      if not nl then break end
+      pos = nl + 1
+    end
+  end
+
+  -- { grep = { [i] = rc }, files = { text, ... } } from the command's output.
+  function M.compatParseOutput(out)
+    local r, cur = { grep = {}, files = {} }, nil
+    local function close() if cur then r.files[#r.files + 1] = table.concat(cur, "\n") .. "\n" end end
+    eachLine(type(out) == "string" and out or "", function(line)
+      if line == "@@FILE" then close(); cur = {}
+      elseif line:sub(1, 7) == "@@GREP " then
+        local i, rc = line:match("^@@GREP (%d+) (%d+)$")
+        if i then r.grep[tonumber(i)] = tonumber(rc) end
+      elseif cur and line ~= "" then cur[#cur + 1] = line end
+    end)
+    close()
+    return r
+  end
+
+  -- Each needle's verdict: true (mentioned), false (not), nil (the binary couldn't be read).
+  function M.compatGrepFacts(needles, grep)
+    local out = { events = {}, env = {} }
+    grep = type(grep) == "table" and grep or {}
+    for i, n in ipairs(type(needles) == "table" and needles or {}) do
+      local rc, v = grep[i], nil
+      if rc == 0 then v = true elseif rc == 1 then v = false end
+      if n.kind == "event" then out.events[n.name] = v else out.env[n.name] = v end
+    end
+    return out
+  end
+
+  -- A user record's text, or nil when it's no text at all (tool results only).
+  local function userText(obj)
+    local c = obj.message.content
+    if type(c) == "string" then return c end
+    if type(c) ~= "table" then return nil end
+    local parts = {}
+    for _, p in ipairs(c) do
+      if type(p) == "table" then
+        if p.type == "tool_result" then return nil end
+        if p.type == "text" and type(p.text) == "string" then parts[#parts + 1] = p.text end
+      end
+    end
+    return #parts > 0 and table.concat(parts, "\n") or nil
+  end
+
+  -- What the transcripts written by `version` show. Each fact is true (seen), false (had the chance
+  -- and it wasn't there) or nil (no chance yet):
+  --   usage      -- an assistant record carries message.usage (token totals, the context bar, cost)
+  --   origin     -- a prompt carries origin.kind (whose prompt it was); false when typed prompts do
+  --                 but none carries it
+  --   lastPrompt -- a last-prompt record (the card's "working on"); false when a prompt got two
+  --                 replies and none was written (a first reply can land before the first record)
+  --   interrupt  -- an interrupted turn wrote M.INTERRUPT_MARKER; false when it wrote some other
+  --                 bracketed "interrupt" line (interruptText) -- a stopped session would stay Working
+  -- A transcript counts when its newest versioned record is that version; in it, only records of
+  -- that version (a resumed session keeps its old ones above).
+  function M.compatTranscriptFacts(texts, version)
+    local f = { files = 0 }
+    local replies, sawUsage, prompts, withOrigin, lastPrompt, intrOk, intrOther = 0, false, 0, 0, false, false, nil
+    for _, text in ipairs(type(texts) == "table" and texts or {}) do
+      local recs, fileVersion = {}, nil
+      eachLine(type(text) == "string" and text or "", function(line)
+        if line:sub(1, 1) ~= "{" then return end
+        local ok, obj = pcall(function() return M.json.decode(line) end)
+        if not ok or type(obj) ~= "table" then return end
+        recs[#recs + 1] = obj
+        if (obj.type == "user" or obj.type == "assistant") and M.compatVersion(obj.version) then
+          fileVersion = M.compatVersion(obj.version)
+        end
+      end)
+      if fileVersion == version then
+        f.files = f.files + 1
+        for _, obj in ipairs(recs) do
+          if obj.type == "last-prompt" then
+            lastPrompt = true
+          elseif M.compatVersion(obj.version) == version and type(obj.message) == "table" then
+            if obj.type == "assistant" then
+              replies = replies + 1
+              if type(obj.message.usage) == "table" then sawUsage = true end
+            elseif obj.type == "user" then
+              local text = userText(obj)
+              local body = text and text:match("^%s*(.-)%s*$") or nil
+              if body and body:sub(1, #M.INTERRUPT_MARKER) == M.INTERRUPT_MARKER then
+                intrOk = true
+              elseif body and #body <= 200 and body:match("^%[[^%]]*[Ii]nterrupt[^%]]*%]$") then
+                intrOther = body
+              elseif body and type(obj.origin) == "table" and type(obj.origin.kind) == "string" then
+                prompts = prompts + 1; withOrigin = withOrigin + 1
+              elseif body and body ~= "" and not obj.isMeta and not obj.isCompactSummary and not obj.isVisibleInTranscriptOnly then
+                prompts = prompts + 1
+              end
+            end
+          end
+        end
+      end
+    end
+    if sawUsage then f.usage = true elseif replies > 0 then f.usage = false end
+    if withOrigin > 0 then f.origin = true elseif prompts > 0 then f.origin = false end
+    if lastPrompt then f.lastPrompt = true elseif prompts > 0 and replies >= 2 then f.lastPrompt = false end
+    if intrOk then f.interrupt = true elseif intrOther then f.interrupt = false; f.interruptText = intrOther end
+    return f
+  end
+
+  -- A rescan adds to what an earlier scan knew: a fact once known stays known, and seen present
+  -- (true) beats a scan that missed it (false) -- presence is proof, absence only a window's view.
+  function M.compatMergeTranscript(old, new)
+    old = type(old) == "table" and old or {}
+    new = type(new) == "table" and new or {}
+    local out = { files = math.max(tonumber(old.files) or 0, tonumber(new.files) or 0) }
+    for _, k in ipairs({ "usage", "origin", "lastPrompt", "interrupt" }) do
+      if old[k] == true or new[k] == true then out[k] = true
+      elseif old[k] == false or new[k] == false then out[k] = false end
+    end
+    if out.interrupt == false then out.interruptText = old.interruptText or new.interruptText end
+    return out
+  end
+
+  local TRANSCRIPT = {
+    { key = "usage", name = "message.usage", ok = "message.usage",
+      bad = "Replies written by %s carry no message.usage",
+      why = "token totals, the context bar and cost all read it -- they'd stop counting",
+      unknown = "no reply written by %s read yet" },
+    { key = "origin", name = "origin.kind", ok = "origin.kind",
+      bad = "Prompts written by %s carry no origin.kind",
+      why = "Shepherd falls back on a prompt's text to tell yours from its own, a peer's and task notifications",
+      unknown = "no prompt written by %s read yet" },
+    { key = "lastPrompt", name = "last-prompt", ok = "last-prompt records",
+      bad = "Transcripts from %s have no last-prompt records",
+      why = "the card's \"working on\" line reads them -- it would go blank",
+      unknown = "no prompt with a reply written by %s read yet" },
+    { key = "interrupt", name = "the interrupt marker", ok = "the interrupt marker",
+      bad = "The interrupt marker changed in %s",
+      unknown = "no interrupted turn written by %s read yet" },
+  }
+
+  -- What failed, in short words (the alert names them).
+  function M.compatFailures(facts)
+    local out = {}
+    facts = type(facts) == "table" and facts or {}
+    local b = type(facts.binary) == "table" and facts.binary or {}
+    for _, ev in ipairs(type(facts.hooks) == "table" and facts.hooks or {}) do
+      if type(b.events) == "table" and b.events[ev] == false then out[#out + 1] = "hook event " .. ev end
+    end
+    for _, e in ipairs(C.envVars) do
+      if type(b.env) == "table" and b.env[e.name] == false then out[#out + 1] = "env var " .. e.name end
+    end
+    local s = type(facts.session) == "table" and facts.session or {}
+    for _, name in ipairs(type(s.missing) == "table" and s.missing or {}) do out[#out + 1] = "session file field " .. name end
+    local t = type(facts.transcript) == "table" and facts.transcript or {}
+    for _, x in ipairs(TRANSCRIPT) do if t[x.key] == false then out[#out + 1] = x.name end end
+    return out
+  end
+
+  -- The toast and push for a checked version, or nil: nothing failed, or it was alerted already.
+  function M.compatAlertText(state)
+    if type(state) ~= "table" or type(state.facts) ~= "table" then return nil end
+    local v = M.compatVersion(state.version)
+    if not v or state.alerted == v then return nil end
+    local fails = M.compatFailures(state.facts)
+    if #fails == 0 then return nil end
+    return "⚠️ Claude Code " .. v .. " changed what Shepherd relies on: " .. table.concat(fails, ", ")
+      .. " -- ☰ → Diagnostics"
+  end
+
+  -- The Diagnostics rows, each in the section. cc = { state = the saved check, checking = the
+  -- version being checked now, unreadable = session files with no readable version }.
+  function M.compatChecks(cc)
+    cc = type(cc) == "table" and cc or {}
+    local rows = {}
+    local function add(label, status, detail, fix)
+      rows[#rows + 1] = { label = label, status = status, detail = detail, fix = fix, section = C.section }
+    end
+    if cc.unreadable then
+      add("Can't tell which Claude Code version runs", "warn",
+          "no ~/.claude/sessions/<pid>.json carries a readable version -- Shepherd can't tell when Claude Code updates, so it can't check what changed",
+          "check Claude Code's changelog for the session file's new shape")
+    end
+    if cc.checking then
+      add("Checking Claude Code " .. tostring(cc.checking) .. "…", "info",
+          "hook events, env vars, the session files and the newest transcripts, in the background")
+    end
+    local st = type(cc.state) == "table" and cc.state or nil
+    local facts = st and type(st.facts) == "table" and st.facts or nil
+    local v = st and M.compatVersion(st.version)
+    if not facts or not v then
+      if not cc.checking then
+        add("Not checked yet", "info",
+            "Shepherd checks each new Claude Code version once, when a session running it appears -- hook events, env vars, session files, transcripts")
+      end
+      return rows
+    end
+    local fails = M.compatFailures(facts)
+    if #fails > 0 then
+      add("Claude Code " .. v .. " changed what Shepherd relies on", "warn",
+          #fails .. " check" .. ((#fails == 1) and "" or "s") .. " below failed; you were alerted once for this version")
+    else
+      add("Claude Code " .. v .. ": nothing Shepherd relies on is missing", "ok",
+          "what couldn't be verified is listed below")
+    end
+
+    -- hook events
+    local b = type(facts.binary) == "table" and facts.binary or {}
+    local hooks = type(facts.hooks) == "table" and facts.hooks or nil
+    if b.none then
+      add("Hook events and env vars: can't verify", "info",
+          "no claude binary of " .. v .. " found on this Mac"
+          .. ((type(b.looked) == "table" and #b.looked > 0) and (" (looked at " .. table.concat(b.looked, ", ") .. ")") or ""))
+    elseif hooks and type(b.events) == "table" then
+      if #hooks == 0 then
+        add("Hook events: nothing to check", "info", "no Shepherd hook is wired in settings.json", "run: make setup")
+      else
+        local gone, known, unknown = {}, 0, {}
+        for _, ev in ipairs(hooks) do
+          local x = b.events[ev]
+          if x == false then gone[#gone + 1] = ev elseif x == true then known = known + 1 else unknown[#unknown + 1] = ev end
+        end
+        if #gone > 0 then
+          add("Hook event" .. ((#gone == 1) and "" or "s") .. " unknown to Claude Code " .. v .. ": " .. table.concat(gone, ", "), "crit",
+              "Shepherd wires " .. ((#gone == 1) and "it" or "them") .. " in settings.json, but " .. tostring(b.label or "the claude binary")
+              .. " no longer mentions " .. ((#gone == 1) and "it" or "them") .. " -- it may never fire, and cards stop following what it reported",
+              "check Claude Code's changelog for the new event name; settings-hooks.json then make setup rewires it")
+        end
+        if known > 0 and #gone == 0 and #unknown == 0 then
+          add("The " .. known .. " hook events Shepherd wires are known to " .. v, "ok", table.concat(hooks, ", "))
+        end
+        if #unknown > 0 then
+          add("Hook events: can't verify " .. table.concat(unknown, ", "), "info",
+              "the grep of " .. tostring(b.path or "the binary") .. " couldn't read it")
+        end
+      end
+    end
+    -- env vars
+    if not b.none and type(b.env) == "table" then
+      local gone, known, unknown = {}, {}, 0
+      for _, e in ipairs(C.envVars) do
+        local x = b.env[e.name]
+        if x == false then gone[#gone + 1] = e elseif x == true then known[#known + 1] = e.name else unknown = unknown + 1 end
+      end
+      for _, e in ipairs(gone) do
+        add("Claude Code " .. v .. " no longer mentions " .. e.name, "warn",
+            "Shepherd relies on it for " .. e.why .. " -- it may be ignored now",
+            "check Claude Code's changelog for the variable that replaced it")
+      end
+      if #known > 0 then
+        add(#known .. " env var" .. ((#known == 1) and "" or "s") .. " still mentioned by " .. v, "ok",
+            "can't verify each is still honoured -- only that the binary still names it: " .. table.concat(known, ", "))
+      end
+      if unknown > 0 then
+        add("Env vars: can't verify " .. unknown, "info", "the grep of " .. tostring(b.path or "the binary") .. " couldn't read it")
+      end
+    end
+    -- session files
+    local s = type(facts.session) == "table" and facts.session or nil
+    if s then
+      local missing = type(s.missing) == "table" and s.missing or {}
+      if (tonumber(s.entries) or 0) == 0 then
+        add("Session files: can't verify", "info", "no ~/.claude/sessions file of " .. v .. " was read")
+      elseif #missing > 0 then
+        local whys = {}
+        for _, name in ipairs(missing) do
+          for _, fd in ipairs(C.sessionFields) do if fd.name == name then whys[#whys + 1] = name .. ": " .. fd.why end end
+        end
+        add("Session file field" .. ((#missing == 1) and "" or "s") .. " gone in " .. v .. ": " .. table.concat(missing, ", "), "warn",
+            "~/.claude/sessions/<pid>.json no longer carries " .. table.concat(whys, "; "),
+            "check Claude Code's changelog for the renamed field")
+      else
+        add("Session files still carry what Shepherd reads", "ok", "pid, sessionId, cwd, name")
+      end
+    end
+    -- transcripts
+    local t = type(facts.transcript) == "table" and facts.transcript or nil
+    if t then
+      local oks, unknowns = {}, {}
+      for _, x in ipairs(TRANSCRIPT) do
+        if t[x.key] == false then
+          local why = x.why
+          if x.key == "interrupt" then
+            why = "an interrupted turn now reads \"" .. tostring(t.interruptText or "?") .. "\", not \""
+              .. M.INTERRUPT_MARKER .. "…]\" -- a stopped session would stay Working"
+          end
+          add(string.format(x.bad, v), "warn", why, "check Claude Code's changelog; the transcript readers in cc-core.lua need the new shape")
+        elseif t[x.key] == true then oks[#oks + 1] = x.ok
+        else unknowns[#unknowns + 1] = x.name .. " (" .. string.format(x.unknown, v) .. ")" end
+      end
+      if #oks > 0 then add("Transcripts from " .. v .. " still carry " .. table.concat(oks, ", "), "ok", nil) end
+      if #unknowns > 0 then
+        local settleH = math.floor(C.settleSeconds / 3600)
+        add("Transcripts: can't verify " .. #unknowns .. " yet", "info",
+            table.concat(unknowns, "; ") .. " -- looked for again every " .. math.floor(C.rescanSeconds / 60)
+            .. " minutes for " .. settleH .. " hours")
+      end
+    end
+    return rows
+  end
+end
+
 function M.doctorChecks(facts)
   facts = (type(facts) == "table") and facts or {}
   local rows = {}
@@ -19580,6 +20095,12 @@ function M.doctorChecks(facts)
 
   local n = tonumber(facts.sessions) or 0
   add(n .. " live session" .. ((n == 1) and "" or "s"), "info", "tiles currently tracked")
+
+  -- 2026-09-29: Claude Code compatibility (build program unit 40) -- its own section, last, so its
+  -- header groups the rows below it ({ state, checking, unreadable } from FX.compatDoctorFacts)
+  if type(facts.ccCompat) == "table" then
+    for _, r in ipairs(M.compatChecks(facts.ccCompat)) do rows[#rows + 1] = r end
+  end
   return rows
 end
 
@@ -19751,6 +20272,9 @@ M.FEATURES = {
   { key = "doctor", cat = "See what's happening", new = true, title = "Diagnostics",
     what = "A one-screen health check — hooks, gate, jq, panel heartbeat, ledger size — with fix hints.",
     why = "Turns a silent setup problem into a glance." },
+  { key = "compat", cat = "See what's happening", new = true, title = "Claude Code compatibility alarms",
+    what = "When a session starts on a new Claude Code version (read from its session file -- nothing is run to learn it), Shepherd checks once, in the background, that the version still has what Shepherd reads: the hook events it wires, the env vars it sets and reads, message.usage, origin.kind, last-prompt records and the interrupt marker in its transcripts, and the session file's fields. Diagnostics shows the result in its own section and marks what it can't verify; a failure raises a toast and a phone push, once per version.",
+    why = "An update that drops something Shepherd relies on breaks a card silently; now you hear about it the day the version lands, and which piece changed." },
   { key = "notify", cat = "See what's happening", title = "Notifications & escalation",
     what = "Alerts — including phone push — when a session has been waiting on you too long.",
     why = "Don't leave a session blocked while you're away from the desk." },

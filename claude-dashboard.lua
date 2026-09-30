@@ -2194,6 +2194,137 @@ function FX.readLedger(opts)
   return { events = filtered, files = files, truncated = truncated, ts = FX.now() }
 end
 
+-- ---- Claude Code compatibility (2026-09-29, build program unit 40) ----------------------------
+-- Once per new Claude Code version (the newest `version` in ~/.claude/sessions/<pid>.json: read,
+-- never a process), one background /bin/sh task greps that version's binary for the hook events
+-- Shepherd wires and the env vars it uses, and reads the tails of that version's transcripts
+-- (core.compatCheckCmd); core evaluates the rest. The check lives in hs.settings (ccCompat): the
+-- version, what was found, and whether Adam was alerted for it -- a failure raises a toast and a
+-- phone push once per version, a pass is quiet. What the transcripts can't show yet is looked for
+-- again (core.compatDue). State on FX: the main chunk is at Lua's 200-local cap.
+FX.COMPAT_SETTINGS_KEY = "ccCompat"
+FX._compat = { nextCheck = 0, job = nil }
+
+function FX.compatState()
+  local st = hs.settings.get(FX.COMPAT_SETTINGS_KEY)
+  return type(st) == "table" and st or nil
+end
+function FX.compatSave(st) hs.settings.set(FX.COMPAT_SETTINGS_KEY, st) end
+
+-- The first binary of exactly that version on this Mac, else { none = true, looked = { ... } }.
+function FX.compatBinaryFor(version)
+  local home = os.getenv("HOME") or ""
+  local exts = {}
+  for _, e in ipairs({ { "VS Code extension", home .. "/.vscode/extensions" },
+                       { "Cursor extension", home .. "/.cursor/extensions" } }) do
+    exts[#exts + 1] = { label = e[1], root = e[2], names = FX.readDir(e[2]) }
+  end
+  local looked = {}
+  for _, c in ipairs(core.compatBinaryCandidates(version, home, exts)) do
+    local a = hs.fs.attributes(c.path)
+    if type(a) == "table" and a.mode == "file" then return { label = c.label, path = c.path } end
+    looked[#looked + 1] = c.path
+  end
+  return { none = true, looked = looked }
+end
+
+-- Tick: at most every checkEverySeconds, read the session files; start a check when one is due.
+function FX.stepCompat(cfg)
+  local now = FX.now()
+  if now < (FX._compat.nextCheck or 0) then return end
+  FX._compat.nextCheck = now + core.CC_COMPAT.checkEverySeconds
+  if FX._compat.job then return end
+  local reg = FX.readSessions()
+  local due = core.compatDue(reg, FX.compatState(), now)
+  if due then FX.compatStart(due, reg, cfg) end
+end
+
+function FX.compatStart(due, reg, cfg)
+  local st = FX.compatState()
+  local facts
+  if due.kind == "new" or not st then
+    -- a new version: the cheap facts now -- its session files, the events settings.json wires
+    local settings
+    local raw = FX.readFile(FX.CLAUDE_SETTINGS)
+    if raw then pcall(function() settings = core.json.decode(raw) end) end
+    facts = { version = due.version, session = core.compatSessionFacts(reg, due.version),
+              hooks = core.compatHookEvents(settings), binary = FX.compatBinaryFor(due.version) }
+    st = { v = 1, version = due.version, firstAt = FX.now(), facts = facts }
+  else
+    -- a rescan; a saved check with no facts table (hand-edited, an older shape) starts one
+    if type(st.facts) ~= "table" then st.facts = { version = due.version } end
+    facts = st.facts
+  end
+  local needles = (due.kind == "new" and facts.binary and facts.binary.path) and core.compatNeedles(facts.hooks) or {}
+  local cmd = core.compatCheckCmd({ binary = #needles > 0 and facts.binary.path or nil, needles = needles,
+                                    projectsDir = FX.PROJECTS_DIR, sids = core.compatSessionIds(reg, due.version) })
+  local job = { version = due.version, kind = due.kind, st = st, needles = needles, cfg = cfg }
+  if not cmd then return FX.compatScanned(job, "") end
+  FX._compat.job = job
+  local ok = pcall(function()
+    local myTask   -- the exit callback checks it still owns the job
+    myTask = hs.task.new("/bin/sh", function(_, out)
+      if FX._compat.job ~= job or job.task ~= myTask then return end
+      if job.timer then pcall(function() job.timer:stop() end); job.timer = nil end
+      FX._compat.job = nil
+      local okd, e = pcall(FX.compatScanned, job, out)
+      if not okd then print("[cc-dashboard] ❌ Claude Code " .. job.version .. " compatibility check failed: " .. tostring(e)) end
+    end, { "-c", cmd })
+    if not myTask then error("task create failed") end
+    job.task = myTask
+    myTask:start()
+    -- Backstop: a wedged grep never holds the check. RETAINED on the job.
+    job.timer = hs.timer.doAfter(core.CC_COMPAT.taskSeconds, function()
+      if FX._compat.job ~= job then return end
+      job.timer = nil
+      FX._compat.job = nil
+      pcall(function() job.task:terminate() end)
+      -- a slow disk must not re-grep a 200MB binary every minute
+      FX._compat.nextCheck = FX.now() + core.CC_COMPAT.rescanSeconds
+      print("[cc-dashboard] ⚠️ Claude Code " .. job.version .. " compatibility check timed out; it tries again in "
+        .. math.floor(core.CC_COMPAT.rescanSeconds / 60) .. " minutes")
+    end)
+  end)
+  if not ok then
+    FX._compat.job = nil
+    print("[cc-dashboard] ❌ couldn't start the Claude Code " .. due.version .. " compatibility check")
+    return
+  end
+  print("[cc-dashboard] 🔍 checking Claude Code " .. due.version .. " (" .. due.kind .. ") against what Shepherd relies on")
+end
+
+-- The task is done: fold what it found into the saved check, then alert once per version.
+function FX.compatScanned(job, out)
+  local st, facts = job.st, job.st.facts
+  local parsed = core.compatParseOutput(out)
+  if job.kind == "new" and #job.needles > 0 then
+    local g = core.compatGrepFacts(job.needles, parsed.grep)
+    facts.binary.events, facts.binary.env = g.events, g.env
+  end
+  facts.transcript = core.compatMergeTranscript(facts.transcript, core.compatTranscriptFacts(parsed.files, job.version))
+  st.scannedAt = FX.now()
+  local msg = core.compatAlertText(st)
+  if msg then st.alerted = st.version end
+  FX.compatSave(st)
+  if msg then
+    FX.alert(msg, 8)
+    local topic = tostring(core.config(job.cfg or loadConfig(), "escalation.pushTopic", ""))
+    if topic ~= "" then FX.push(topic, "Claude Shepherd: Claude Code " .. st.version, msg) end
+  elseif #core.compatFailures(facts) > 0 then
+    print("[cc-dashboard] ⚠️ Claude Code " .. st.version .. " still fails: " .. table.concat(core.compatFailures(facts), ", ")
+      .. " (alerted once already)")
+  else
+    print("[cc-dashboard] ✅ Claude Code " .. st.version .. " compatibility checked"
+      .. (core.compatSettled(facts) and "" or " (some transcript facts can't be verified yet)"))
+  end
+end
+
+-- Diagnostics' facts: the saved check, the version being checked now, unreadable session files.
+function FX.compatDoctorFacts()
+  return { state = FX.compatState(), checking = FX._compat.job and FX._compat.job.version or nil,
+           unreadable = core.compatUnreadable(FX.readSessions()) }
+end
+
 -- F6 (self-diagnostics): gather the live environment FACTS the doctor overlay reports,
 -- then classify them via the pure core.doctorChecks. Best-effort: every probe degrades to
 -- a safe default (nil/false) so a missing file or tool never throws.
@@ -2252,6 +2383,8 @@ function FX.doctorStatus()
     mailbox = FX.mailboxFacts(),   -- 2026-09-29: messages waiting in the session mailbox
     -- 2026-09-29: auto-compact -- the override in settings.json, and each installed claude reading it
     compact = (function() local okc, f = pcall(FX.compactFacts, cfg); return okc and f or nil end)(),
+    -- 2026-09-29: Claude Code compatibility -- the last check of a new version, its own section
+    ccCompat = (function() local okc, f = pcall(FX.compatDoctorFacts); return okc and f or nil end)(),
   })
 end
 
@@ -14263,6 +14396,7 @@ local HTML = [[
 .doc-fix{ color:var(--accent-text); font-size:11px; margin-top:2px; font-family:ui-monospace,Menlo,monospace; }
 .doc-ok .doc-ic{ color:var(--ok); } .doc-warn .doc-ic{ color:var(--warn); }
 .doc-crit .doc-ic{ color:var(--danger); } .doc-info .doc-ic{ color:var(--muted); }
+.doc-sec{ color:var(--accent); font-weight:700; font-size:11px; text-transform:uppercase; letter-spacing:.06em; margin:16px 0 2px; }
 /* F9 Features list */
 .feat-cat{ color:var(--accent); font-weight:700; font-size:11px; text-transform:uppercase; letter-spacing:.06em;
            margin:16px 0 4px; padding-bottom:4px; border-bottom:1px solid var(--border); }
@@ -15244,7 +15378,7 @@ local HTML = [[
   <div id="doctor">
     <div class="ov-head"><span>🩺 Diagnostics</span><button class="s-x" onclick="closeDoctor()">✕</button></div>
     <div class="ov-body" id="doc-body"></div>
-    <div class="ov-foot"><button onclick="openDoctor()">Re-check</button><span>Health of hooks, the gate, jq, panel heartbeat &amp; ledger.</span></div>
+    <div class="ov-foot"><button onclick="openDoctor()">Re-check</button><span>Health of hooks, the gate, jq, panel heartbeat &amp; ledger, and what each new Claude Code version still offers Shepherd.</span></div>
   </div>
 
   <div id="trace">
@@ -19778,13 +19912,17 @@ local HTML = [[
     // ---- F6: Diagnostics ("doctor") overlay ----
     function openDoctor(){ send("open-doctor-view"); document.getElementById("doctor").classList.add("show"); }
     function closeDoctor(){ document.getElementById("doctor").classList.remove("show"); }
-    window.ccDoctor = function(rows){
+    // 2026-09-29: a row's section (Claude Code compatibility) gets a header where it starts
+    function doctorRowsHtml(rows){
       rows = rows || [];
       var ICON = { ok:"✓", warn:"⚠", crit:"✕", info:"•" };
-      var body = document.getElementById("doc-body"); if(!body) return;
-      var html = "";
+      var html = "", sec = "";
       for(var i=0;i<rows.length;i++){
-        var r = rows[i], st = r.status || "info";
+        var r = rows[i] || {}, st = r.status || "info";
+        if((r.section || "") !== sec){
+          sec = r.section || "";
+          if(sec) html += '<div class="doc-sec">'+esc(sec)+'</div>';
+        }
         html += '<div class="doc-row doc-'+esc(st)+'">'
               + '<span class="doc-ic">'+(ICON[st]||"•")+'</span>'
               + '<span class="doc-main"><span class="doc-label">'+esc(r.label||"")+'</span>'
@@ -19792,7 +19930,11 @@ local HTML = [[
               + (r.fix ? '<div class="doc-fix">'+esc(r.fix)+'</div>' : '')
               + '</span></div>';
       }
-      body.innerHTML = html || '<div class="tl-empty">No checks.</div>';
+      return html;
+    }
+    window.ccDoctor = function(rows){
+      var body = document.getElementById("doc-body"); if(!body) return;
+      body.innerHTML = doctorRowsHtml(rows) || '<div class="tl-empty">No checks.</div>';
     };
     // ---- Hidden sessions overlay: restore anything hidden off the grid -------
     // A hidden session is still running and still managed; this is the way back.
@@ -24742,6 +24884,12 @@ function FX._refreshBody()
   do
     local okc, errc = pcall(FX.stepCoach, list, cfg)
     if not okc then print("[cc-dashboard] ❌ coach step failed: " .. tostring(errc)) end
+  end
+  -- 2026-09-29: Claude Code compatibility -- a new version in the session files starts one
+  -- background check (at most a registry read a minute here; the check itself is an hs.task)
+  do
+    local okv, errv = pcall(FX.stepCompat, cfg)
+    if not okv then print("[cc-dashboard] ❌ Claude Code compatibility step failed: " .. tostring(errv)) end
   end
   -- 2026-09-29: where the time went -- each wait, stall and error ledgered once, when it ends.
   -- After the needs-you stamp: what counts as a wait on Adam is what it says.

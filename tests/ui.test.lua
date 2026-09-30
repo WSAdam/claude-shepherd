@@ -4787,5 +4787,32 @@ do
         src:find("rm --cached", 1, true) == nil and src:find("os.remove(dir .. \"/\" .. core.SCHED_LOCK_REL", 1, true) == nil)
 end
 
+-- ---- Claude Code compatibility in Diagnostics (2026-09-29, build program unit 40) ----
+-- Each new Claude Code version is checked once, in the background, against what Shepherd relies on;
+-- tests/compat.test.lua drives the core and the FX check, diagnostics-sections.test.js the shipped
+-- overlay; here, only that the panel is wired to them.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("compat: Diagnostics gathers the check (FX.compatDoctorFacts -> doctorChecks' ccCompat)",
+        src:find("ccCompat = (function() local okc, f = pcall(FX.compatDoctorFacts); return okc and f or nil end)(),", 1, true) ~= nil)
+  check("compat: the overlay renders each row's section as a header, escaped",
+        src:find("if(sec) html += '<div class=\"doc-sec\">'+esc(sec)+'</div>';", 1, true) ~= nil
+        and src:find("body.innerHTML = doctorRowsHtml(rows) ||", 1, true) ~= nil)
+  check("compat: the section header is styled", src:find(".doc-sec{", 1, true) ~= nil)
+  check("compat: the tick runs FX.stepCompat", src:find("pcall(FX.stepCompat, cfg)", 1, true) ~= nil)
+  local start = src:match("\nfunction FX%.compatStart%(due, reg, cfg%)(.-)\nend\n") or ""
+  check("compat: the check runs as a /bin/sh task, never in the tick", start:find('hs.task.new("/bin/sh"', 1, true) ~= nil)
+  check("compat: ...with a retained backstop timer", start:find("job.timer = hs.timer.doAfter(core.CC_COMPAT.taskSeconds", 1, true) ~= nil)
+  local step = src:match("\nfunction FX%.stepCompat%(cfg%)(.-)\nend\n") or ""
+  check("compat: the trigger reads the session files, no process (no hs.execute / hs.task in it)",
+        step:find("FX.readSessions()", 1, true) ~= nil and not step:find("hs.execute", 1, true) and not step:find("hs.task", 1, true))
+  local scanned = src:match("\nfunction FX%.compatScanned%(job, out%)(.-)\nend\n") or ""
+  check("compat: a failure goes through FX.alert and FX.push, once (core.compatAlertText)",
+        scanned:find("local msg = core.compatAlertText(st)", 1, true) ~= nil and scanned:find("FX.alert(msg, 8)", 1, true) ~= nil
+        and scanned:find("FX.push(topic,", 1, true) ~= nil and not scanned:find("hs.alert", 1, true))
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

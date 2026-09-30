@@ -169,6 +169,8 @@ The automatic behaviours here are off until you turn them on, except handoff not
   runs, and lock the screen without pausing the sessions.
 - [**Diagnostics**](docs/troubleshooting.md#start-with-diagnostics): a one-screen health check of the
   hooks, the gate, the panel heartbeat, the tab bridge and the ledger, with fixes.
+- [**Claude Code compatibility alarms**](docs/troubleshooting.md#claude-code-compatibility): each new
+  Claude Code version is checked once against what Shepherd reads; a break alerts you, once.
 
 ### Make it yours
 

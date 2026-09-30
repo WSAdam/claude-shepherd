@@ -484,6 +484,12 @@ echo ""
 echo "== node: a card's lock badge shows what's wrong with the fix in its tooltip, both escaped (behavioral, runs the shipped schedLockBadge) =="
 node "$DIR/schedlock-badge.test.js" || fail=1
 echo ""
+echo "== lua: Claude Code compatibility -- the version trigger (new, same, unreadable), each check on literal and real fixtures (no message.usage, a missing session field, an unknown hook event), the check's shell command run for real, the once-per-version alert, Diagnostics (stubbed hs) =="
+HOME="$(mktemp -d)" lua "$DIR/compat.test.lua" || fail=1
+echo ""
+echo "== node: Diagnostics' section header -- where the compatibility rows start, escaped (behavioral, runs the shipped doctorRowsHtml) =="
+node "$DIR/diagnostics-sections.test.js" || fail=1
+echo ""
 
 if [ "$fail" -eq 0 ]; then
   echo "✅ ALL GREEN"

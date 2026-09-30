@@ -17,12 +17,46 @@ info •, and some carry a fix. **Re-check** runs it again.
 | Tab bridge in every VS Code window | Each window hosting a session runs the bridge, at the current version | **Developer: Reload Window** there, or `make tab-bridge` (shown) |
 | Audit ledger | On or off, its size, and a warning over 50 MB | Lower `ledger.retentionDays` (shown) |
 | Live sessions | How many tiles are tracked (info) | |
+| Claude Code compatibility | Its own section: whether the newest Claude Code version still has what Shepherd reads ([below](#claude-code-compatibility)) | Check Claude Code's changelog (shown) |
 
 "(shown)" marks the fixes Diagnostics prints itself; the others are advice.
 
 `make doctor` is a different check, run from the terminal: it reports the tools Shepherd needs (jq,
 lua, node, Hammerspoon) and the optional accelerators (ripgrep, fd). It prints the install command
 for each missing tool, and offers to install Hammerspoon, ripgrep and fd when run in a terminal.
+
+## Claude Code compatibility
+
+Shepherd reads things Claude Code never promised to keep, so an update can break a card without an
+error anywhere. Once per new version it checks them, in the background, and shows the result in
+Diagnostics' **Claude Code compatibility** section.
+
+- **When:** the first time a session file (`~/.claude/sessions/<pid>.json`) carries a newer
+  `version` than the last one checked. Shepherd reads the files; it runs nothing to learn the
+  version. Only newer versions trigger a check, so a downgrade isn't checked again.
+- **What:**
+
+  | Check | How | Fails when |
+  |---|---|---|
+  | Hook events | Greps that version's binary for each event `settings.json` wires to a Shepherd script (`"PreToolUse"`, `"Stop"`, …) | The binary no longer names one: critical, the event may never fire |
+  | Env vars | Greps the binary for each variable Shepherd sets (`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, `ANTHROPIC_MODEL`, …) or reads (`CLAUDE_PROJECT_DIR`, `CLAUDE_CODE_SESSION_ID`, …) | The binary no longer names one |
+  | Session files | The fields Shepherd reads: `pid`, `sessionId`, `cwd`, `name` | No session file of that version carries one |
+  | Transcripts | The newest transcripts of that version: `message.usage`, `origin.kind`, `last-prompt` records, the `[Request interrupted by user` marker | A reply without `message.usage`, typed prompts without `origin.kind`, a prompt answered twice with no `last-prompt` record, or an interrupt written some other way |
+
+- **Can't verify:** the binary is the one of exactly that version: the native install
+  (`~/.local/share/claude/versions/<version>`) or the VS Code or Cursor extension of that version.
+  With neither on this Mac, the hook and env rows read *can't verify*. A name the binary still
+  mentions only proves it's mentioned, not that it's honoured, and the env row says so. A transcript
+  fact with no evidence yet (no interrupted turn so far) reads *can't verify yet*, and is looked for
+  again every 30 minutes for a day.
+- **Alerts:** a failure raises a toast and a phone push (to `escalation.pushTopic`), once per
+  version. A pass is quiet; so is a check that could only say *can't verify*.
+- **Unreadable version:** if session files exist but none carries a readable `version`, the section
+  warns *Can't tell which Claude Code version runs*: the check can't fire until that's fixed.
+
+What to do about a failure: read Claude Code's changelog for what replaced it. A renamed hook event
+goes in `settings-hooks.json`, then `make setup`. The check's last result lives in Hammerspoon's
+settings (`ccCompat`); the console logs each run with a 🔍, ✅ or ⚠️ line.
 
 ## Is Shepherd running?
 

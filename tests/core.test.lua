@@ -8464,9 +8464,11 @@ do
   -- 2026-09-29: 38 -> 39 for the coach ("coach", flagged new).
   -- 2026-09-29: 39 -> 40 for TODO lines that need a live run ("liverun", flagged new).
   -- 2026-09-29: 40 -> 41 for the scheduled-tasks lock check ("schedlock", flagged new).
-  eq("FEATURES: the 41 new features are flagged", newCount, 41)
+  -- 2026-09-29: 41 -> 42 for Claude Code compatibility alarms ("compat", flagged new).
+  eq("FEATURES: the 42 new features are flagged", newCount, 42)
   check("FEATURES: lists TODO lines that need a live run", keys.liverun == true)
   check("FEATURES: lists the scheduled-tasks lock check", keys.schedlock == true)
+  check("FEATURES: lists Claude Code compatibility alarms", keys.compat == true)
   check("FEATURES: lists the find-only audit preset", keys.audit == true)
   check("FEATURES: lists how often each skill works", keys.skillruns == true)
   check("FEATURES: lists the coach", keys.coach == true)
