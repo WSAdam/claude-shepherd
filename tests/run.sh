@@ -136,6 +136,9 @@ echo ""
 echo "== node: Done-drawer ordering (behavioral, runs the shipped comparator) =="
 node "$DIR/done-order.test.js" || fail=1
 echo ""
+echo "== node: a page left scrolled past its content is put back, so clicks land where things are drawn (behavioral, runs the shipped function) =="
+node "$DIR/stray-scroll.test.js" || fail=1
+echo ""
 echo "== node: commit stats -- the Today / This week lines and their drawer (behavioral, runs the shipped block) =="
 node "$DIR/commits-render.test.js" || fail=1
 echo ""

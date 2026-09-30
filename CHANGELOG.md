@@ -28,6 +28,10 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
   was there, only hard-wrapped differently from how the coach quoted it. Apply now finds a quote
   that differs only in line wrapping or spacing (exactly once, never inside a code fence), leaves
   the file's own lines as they are, and the alert no longer claims the text was removed.
+- Fixed: the panel could stop answering clicks altogether (after a screen unlock on 2026-09-30).
+  The page was left scrolled 491px with nothing to scroll, so it was drawn in place but clicks
+  landed 491px off. The panel now puts a page that is scrolled past its content back, on every
+  refresh, on a resize and when it comes back into view.
 
 ## 2026-09-30 — The build program
 

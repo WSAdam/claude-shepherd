@@ -23510,6 +23510,19 @@ local HTML = [[
       du.innerHTML = rows; du.style.display="block";
     }
 
+    // 2026-09-30: the panel went dead to every click. The page read scrollY 491 while its content
+    // fit the view (nothing to scroll), so it was drawn unscrolled but hit-tested 491px higher:
+    // the webview keeps a stale offset when Shepherd resizes the window around it. Put the page
+    // back inside its content -- every tick's render, a resize and coming back into view check it.
+    function clampStrayScroll(){
+      var page = document.scrollingElement || document.documentElement;
+      var furthest = Math.max(0, (page ? page.scrollHeight : 0) - window.innerHeight);
+      if(window.scrollY > furthest + 1){ window.scrollTo(window.scrollX || 0, furthest); return true; }
+      return false;
+    }
+    window.addEventListener("resize", clampStrayScroll);
+    document.addEventListener("visibilitychange", clampStrayScroll);
+
     var PANEL_PROVIDERS = [];
     var PANEL_BUNDLES = [];   // L2 policy-bundle names (detail-panel Policy dropdown)
     var lastSelectedStatus = null;
@@ -23522,6 +23535,7 @@ local HTML = [[
       if(bundles !== undefined) PANEL_BUNDLES = bundles || [];
       renderGrid();
       renderDetail();
+      clampStrayScroll();
       // Refresh the gate decision log exactly when the selected tile changes
       // status (a decision likely just landed) -- one cached-snapshot read per
       // transition, zero per tick.
