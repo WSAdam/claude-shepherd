@@ -165,7 +165,10 @@ eq("captures live in ~/.claude/cc-scenarios", FX.SCENARIO_DIR, SCEN)
 eq("the scrubber is the one make install ships to ~/.claude", FX.SCRUBBER, HOME .. "/.claude/cc-scrub.js")
 
 -- ---- not installed yet: nothing runs, and the toast says what to do -------------------------
-local it = { key = "k1", name = "zebra-proj", status = "done", updated = os.time(), cwd = HOME, transcript_path = TRANSCRIPT }
+-- 2026-09-30: `updated` was os.time(), so from the day after it was written the card's "done"
+-- landed a day past its 2026-09-29 transcript and the scrubbed `since` read 2026-01-02. The card
+-- read done a minute after its transcript's last record.
+local it = { key = "k1", name = "zebra-proj", status = "done", updated = core.isoToEpoch("2026-09-29T09:01:05.000Z"), cwd = HOME, transcript_path = TRANSCRIPT }
 toasts = {}
 check("without the installed scrubber there is no capture", FX.captureScenario(it) == nil)
 eq("...and no task", #tasks, 0)
