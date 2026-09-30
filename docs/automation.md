@@ -596,7 +596,9 @@ instructions every session in it reads first. It suggests; nothing changes until
   anything else you have staged as it was. It's refused, and says why on the edit, when
   `CLAUDE.md` changed since the coach read it (its hash) or has uncommitted edits, when the
   edit's text isn't there exactly once, or when `CLAUDE.md` is a link (edit its target by hand). If a hook refuses the commit, `CLAUDE.md` goes back as it
-  was. Applying one edit doesn't block the next. **Skip** puts one aside. A `DECISIONS.md` entry is
+  was. An edit refused because `CLAUDE.md` changed gets **Run the coach again** next to Skip: a
+  fresh run reads the file as it is now and replaces the suggestions (the same for a `DECISIONS.md`
+  entry whose file changed). No other refusal offers it. Applying one edit doesn't block the next. **Skip** puts one aside. A `DECISIONS.md` entry is
   added through the On purpose tab's own guard, not committed. A quiet chip shows while the coach
   reads or waits, and **🧭 ⚠** when its last run couldn't run (the overlay says why, with **Run the
   coach again**).

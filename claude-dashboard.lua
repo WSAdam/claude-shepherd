@@ -6758,7 +6758,8 @@ function FX.coachApply(root, i)
   pcall(function() mode = hs.fs.symlinkAttributes(path, "mode") end)
   if dec.ok and mode == "link" then dec = { ok = false, error = "link" } end
   if not dec.ok then
-    e.error = core.coachRefusal(dec.error)
+    -- the code goes with the words: core.coachView offers "Run the coach again" on a "changed" one
+    e.error, e.errorCode = core.coachRefusal(dec.error), dec.error
     FX.coachSave(rec)
     FX.alert("⚠️ Not applied: " .. e.error, 5)
     print("[cc-dashboard] ⚠️ coach: apply refused for " .. tostring(rec.root) .. " (" .. tostring(dec.error) .. ")")
@@ -6766,7 +6767,7 @@ function FX.coachApply(root, i)
     return false
   end
   if not FX.writeFileAtomic(path, dec.text) then
-    e.error = core.coachRefusal("write")
+    e.error, e.errorCode = core.coachRefusal("write"), "write"
     FX.coachSave(rec)
     FX.alert("❌ " .. e.error)
     return false
@@ -6784,7 +6785,7 @@ function FX.coachApply(root, i)
     FX._coach.applying = nil
     if job.timer then pcall(function() job.timer:stop() end); job.timer = nil end
     if ok then
-      e.status, e.error, e.at = "applied", nil, FX.now()
+      e.status, e.error, e.errorCode, e.at = "applied", nil, nil, FX.now()
       e.sha = tostring(out or ""):match("(%x+)%s*$")
       rec.claudeHash = core.coachHash(dec.text)   -- Shepherd's own commit isn't "changed since"
       FX.alert("🧭 Applied to CLAUDE.md and committed" .. (e.sha and (" " .. e.sha:sub(1, 7)) or ""), 4)
@@ -6792,7 +6793,7 @@ function FX.coachApply(root, i)
     else
       undo()
       local why = core.capChars(tostring((err ~= "" and err) or out or ""):gsub("%s+", " "), 200)
-      e.error = "the commit failed" .. (why ~= "" and (": " .. why) or "") .. " -- CLAUDE.md is back as it was"
+      e.error, e.errorCode = "the commit failed" .. (why ~= "" and (": " .. why) or "") .. " -- CLAUDE.md is back as it was", "commit"
       FX.alert("❌ " .. e.error, 5)
       print("[cc-dashboard] ❌ coach: commit failed in " .. tostring(rec.root) .. ": " .. why)
     end
@@ -6837,13 +6838,14 @@ function FX.coachDecision(root, i, act)
     local dec = core.decisionsSaveDecision(current, rec.decisionsHash or core.DECISIONS_ABSENT,
                                            { what = d.what, why = d.why }, os.date("%Y-%m-%d", FX.now()))
     if not dec.ok then
-      d.error = (dec.error == "changed") and "DECISIONS.md changed since the coach read it" or ("refused: " .. tostring(dec.error))
+      d.error = (dec.error == "changed") and core.COACH_DECISIONS_CHANGED or ("refused: " .. tostring(dec.error))
+      d.errorCode = tostring(dec.error)
       FX.alert("⚠️ Not added: " .. d.error)
     elseif not FX.writeFileAtomic(path, dec.text) then
-      d.error = "Shepherd couldn't write DECISIONS.md"
+      d.error, d.errorCode = "Shepherd couldn't write DECISIONS.md", "write"
       FX.alert("❌ " .. d.error)
     else
-      d.status, d.error = "added", nil
+      d.status, d.error, d.errorCode = "added", nil, nil
       rec.decisionsHash = core.coachHash(dec.text)
       FX.alert("🧭 Added to DECISIONS.md (not committed)", 4)
     end
@@ -23024,6 +23026,9 @@ local HTML = [[
     function coachRowsHtml(v){
       if(!v) return '<div class="ib-empty">Loading…</div>';
       var st = "", rerun = '<button class="ib-btn" data-act="rerun" onclick="coachAct(event)">Run the coach again</button>';
+      // 2026-09-30: a suggestion whose file changed since the coach read it (e.rerun, core.coachView)
+      // can only be fixed by a fresh run, so that row offers one next to Skip -- and no other row.
+      var stale = rerun.replace('data-act="rerun"', 'data-act="rerun" title="The file changed since the coach read it: a fresh run reads it as it is now, and replaces these suggestions"');
       if(v.state === "running" || v.state === "queued") st = "The coach is reading this repo's last sessions…";
       else if(v.state === "waiting") st = "The coach waits for this repo's merge checker, then reads its sessions.";
       else if(v.state === "lost") st = "Shepherd reloaded while the coach ran; it tries again by itself.";
@@ -23043,7 +23048,7 @@ local HTML = [[
           + '<ul class="co-ev">' + (e.evidence || []).map(function(x){ return '<li>' + esc(x) + '</li>'; }).join("") + '</ul>'
           + (pend && e.error ? '<div class="co-err">' + esc(e.error) + '</div>' : '')
           + (pend ? '<div class="ib-free"><button class="ib-btn" data-act="apply" data-i="' + i + '" onclick="coachAct(event)" title="Write this into CLAUDE.md and commit CLAUDE.md alone">Apply</button>'
-                  + '<button class="ib-btn" data-act="skip" data-i="' + i + '" onclick="coachAct(event)">Skip</button></div>'
+                  + '<button class="ib-btn" data-act="skip" data-i="' + i + '" onclick="coachAct(event)">Skip</button>' + (e.rerun ? stale : '') + '</div>'
                 : '<div class="co-done">' + (e.status === "applied" ? "✓ Applied" + (e.sha ? " · committed " + esc(String(e.sha).slice(0, 7)) : "") : "Skipped") + '</div>')
           + '</div>';
       });
@@ -23054,7 +23059,7 @@ local HTML = [[
           + '<div class="co-why">Why: ' + esc(d.why) + '</div>'
           + (pend && d.error ? '<div class="co-err">' + esc(d.error) + '</div>' : '')
           + (pend ? '<div class="ib-free"><button class="ib-btn" data-act="dec-add" data-i="' + i + '" onclick="coachAct(event)" title="Add this entry to DECISIONS.md (not committed)">Add to DECISIONS.md</button>'
-                  + '<button class="ib-btn" data-act="dec-skip" data-i="' + i + '" onclick="coachAct(event)">Skip</button></div>'
+                  + '<button class="ib-btn" data-act="dec-skip" data-i="' + i + '" onclick="coachAct(event)">Skip</button>' + (d.rerun ? stale : '') + '</div>'
                 : '<div class="co-done">' + (d.status === "added" ? "✓ Added to DECISIONS.md" : "Skipped") + '</div>')
           + '</div>';
       });

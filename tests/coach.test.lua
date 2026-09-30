@@ -331,6 +331,27 @@ check("tile: counts what waits for Adam (an edit and an entry)", tile and tile.p
 local view = core.coachView(drec)
 check("view: every edit and entry, numbered", view and #view.edits == 2 and view.edits[2].i == 2 and #view.decisions == 1 and view.root == "/r/repo")
 
+-- ---- a stale suggestion offers the rerun, and only a stale one (2026-09-30) ----
+-- 2026-09-30: the refusal told Adam to run the coach again, but the edit had no button for it.
+local CHG, DEC_CHG = core.coachRefusal("changed"), "DECISIONS.md changed since the coach read it"
+local srec = core.parseCoachRecord(json.encode({ v = 1, repo = "/r/repo/.git", root = "/r/repo", state = "done", verdict = "proposals",
+  at = 100, doneAt = 200, lastRunAt = 200, claudeHash = H,
+  edits = { { section = "Git", old = "a", new = "b", why = "w", evidence = { "e" }, status = "pending", error = CHG, errorCode = "changed" },
+            { section = "Git", old = "c", new = "d", why = "w", evidence = { "e" }, status = "pending", error = CHG },
+            { section = "Git", old = "e", new = "f", why = "w", evidence = { "e" }, status = "pending", error = core.coachRefusal("dirty"), errorCode = "dirty" },
+            { section = "Git", old = "g", new = "h", why = "w", evidence = { "e" }, status = "pending" },
+            { section = "Git", old = "i", new = "j", why = "w", evidence = { "e" }, status = "skipped", error = CHG, errorCode = "changed" } },
+  decisions = { { what = "Keep bash", why = "portable", status = "pending", error = DEC_CHG, errorCode = "changed" },
+                { what = "Tabs", why = "w", status = "pending" } } }))
+local sv = core.coachView(srec) or { edits = {}, decisions = {} }
+check("view: an edit refused because CLAUDE.md changed offers to run the coach again", sv.edits[1] and sv.edits[1].rerun == true)
+check("view: ...also from a record saved before the code was kept (its exact words)", sv.edits[2] and sv.edits[2].rerun == true)
+check("view: a refusal a rerun can't fix offers none", sv.edits[3] and sv.edits[3].rerun ~= true)
+check("view: an edit with no refusal offers none", sv.edits[4] and sv.edits[4].rerun ~= true)
+check("view: an edit already skipped offers none", sv.edits[5] and sv.edits[5].rerun ~= true)
+check("view: a DECISIONS.md entry refused because that file changed offers it too",
+      sv.decisions[1] and sv.decisions[1].rerun == true and sv.decisions[2] and sv.decisions[2].rerun ~= true)
+
 -- Shepherd's log of merge notes and checker findings: deduped, aged out, capped
 local lg = {}
 lg = core.coachLogAdd(lg, { kind = "notyet", id = "a", branch = "b", note = "n" }, 1790000000)
@@ -569,6 +590,7 @@ quiet(function() okA = fx.coachApply(REPO, 1) end)
 check("Apply refuses while CLAUDE.md has uncommitted edits", okA == false and read(REPO .. "/CLAUDE.md") == DIRTY
       and (sh("git -C " .. q(REPO) .. " rev-parse HEAD")):gsub("%s+$", "") == head0)
 check("...and says why on the edit", rootRec.edits[1].status == "pending" and tostring(rootRec.edits[1].error):find("uncommitted", 1, true) ~= nil)
+check("...a refusal a rerun can't fix offers no rerun (uncommitted edits)", core.coachView(rootRec).edits[1].rerun ~= true)
 -- Apply: refused when CLAUDE.md moved since the coach read it (committed meanwhile)
 local MOVED = ORIG .. "- someone else's line\n"
 write(REPO .. "/CLAUDE.md", MOVED); sh("git -C " .. q(REPO) .. " commit -q -am moved")
@@ -578,6 +600,10 @@ quiet(function() okA = fx.coachApply(REPO, 1) end)
 check("Apply refuses when CLAUDE.md changed since the coach read it", okA == false and read(REPO .. "/CLAUDE.md") == MOVED
       and (sh("git -C " .. q(REPO) .. " rev-parse HEAD")):gsub("%s+$", "") == head1)
 check("...no commit task was started", #tasksWhere(function(t) return tostring(t.args[2] or ""):find("git commit", 1, true) end) == 0)
+-- 2026-09-30: Adam's Apply was refused ("CLAUDE.md changed since the coach read it -- run the coach
+-- again") and the edit offered only Apply and Skip: nothing on it ran the coach again.
+check("...the refusal's code is on the edit, and its view offers to run the coach again",
+      rootRec.edits[1].errorCode == "changed" and core.coachView(rootRec).edits[1].rerun == true)
 -- 2026-09-29: a committed CLAUDE.md that is a link (to AGENTS.md): writing it would replace the link
 -- with a plain file, so Apply refuses and leaves the link alone
 write(REPO .. "/AGENTS.md", ORIG)

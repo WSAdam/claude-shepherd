@@ -16698,6 +16698,10 @@ do
   -- read back from disk (its status, commit and last refusal come too).
   local EDIT_STATUS = { pending = true, applied = true, skipped = true }
   local DEC_STATUS = { pending = true, added = true, skipped = true }
+  -- A refusal's code (core.coachApplyDecision's error: "changed", "dirty", ...), kept beside its words.
+  local function coachErrorCode(c)
+    return (type(c) == "string" and #c <= 20 and c:match("^[%w%-]+$")) and c or nil
+  end
   local function coachEdit(e, keep)
     if type(e) ~= "table" then return nil end
     local old = type(e.old) == "string" and e.old or ""
@@ -16719,6 +16723,7 @@ do
       out.status = EDIT_STATUS[e.status] and e.status or "pending"
       out.sha = (type(e.sha) == "string" and e.sha:match("^%x+$") and #e.sha <= 64) and e.sha or nil
       out.error = (type(e.error) == "string" and e.error ~= "") and capChars(e.error, 300) or nil
+      out.errorCode = out.error and coachErrorCode(e.errorCode) or nil
       out.at = tonumber(e.at)
     end
     return out
@@ -16731,6 +16736,7 @@ do
     if keep then
       out.status = DEC_STATUS[d.status] and d.status or "pending"
       out.error = (type(d.error) == "string" and d.error ~= "") and capChars(d.error, 300) or nil
+      out.errorCode = out.error and coachErrorCode(d.errorCode) or nil
     end
     return out
   end
@@ -16842,6 +16848,15 @@ do
     link = "CLAUDE.md is a link -- edit the file it points to by hand",
   }
   function M.coachRefusal(code) return REFUSALS[code] or ("refused: " .. tostring(code)) end
+  M.COACH_DECISIONS_CHANGED = "DECISIONS.md changed since the coach read it"
+  -- Would running the coach again clear this refusal? Only a file that moved under a suggestion
+  -- (its hash): a fresh run reads the file as it is now. `words` recognises a record saved before
+  -- the code was kept.
+  local function coachStale(item, words)
+    if type(item) ~= "table" or item.status ~= "pending" or not item.error then return nil end
+    if item.errorCode then return item.errorCode == "changed" or nil end
+    return item.error == words or nil
+  end
 
   -- git status of CLAUDE.md alone: any output = uncommitted edits (untracked included).
   function M.coachDirtyCmd(root) return "git -C " .. sq(root) .. " status --porcelain -- " .. M.COACH_FILE .. " 2>/dev/null" end
@@ -16971,10 +16986,11 @@ do
     if live.waiting then v.state = "waiting" elseif live.busy then v.state = "running" end
     for i, e in ipairs(rec.edits or {}) do
       v.edits[i] = { i = i, section = e.section, old = e.old, new = e.new, why = e.why, evidence = e.evidence,
-                     status = e.status or "pending", sha = e.sha, error = e.error }
+                     status = e.status or "pending", sha = e.sha, error = e.error, rerun = coachStale(e, REFUSALS.changed) }
     end
     for i, d in ipairs(rec.decisions or {}) do
-      v.decisions[i] = { i = i, what = d.what, why = d.why, status = d.status or "pending", error = d.error }
+      v.decisions[i] = { i = i, what = d.what, why = d.why, status = d.status or "pending", error = d.error,
+                         rerun = coachStale(d, M.COACH_DECISIONS_CHANGED) }
     end
     return v
   end

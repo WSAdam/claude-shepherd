@@ -4,6 +4,12 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-09-30 — The coach offers a fresh run on a stale suggestion
+
+- Coach overlay: a suggestion whose Apply is refused because `CLAUDE.md` changed since the coach
+  read it now has **Run the coach again** next to Skip (a `DECISIONS.md` entry refused for the same
+  reason too). No other refusal shows it: a fresh run only fixes a file that moved.
+
 ## 2026-09-30 — The build program
 
 Everything the build program landed, one line per unit, grouped by area. The README's

@@ -85,6 +85,25 @@ eq("a couldn't-run says why, escaped", cr.indexOf("it hit its budget") >= 0 && c
 eq("...and offers to run it again", /data-act="rerun"/.test(cr), true);
 eq("a running coach says so", /reading/i.test(lib.coachRowsHtml({ root: "/r", state: "running", edits: [], decisions: [] })), true);
 eq("no view yet: a placeholder", typeof lib.coachRowsHtml(null) === "string", true);
+// 2026-09-30: the refusal "CLAUDE.md changed since the coach read it -- run the coach again" showed
+// on an edit with only Apply and Skip under it. The view marks such an edit `rerun`; the row then
+// offers the button next to Skip, and no other row does.
+eq("a plain refusal has no Run again button on its row", (h.match(/data-act="rerun"/g) || []).length, 0);
+const stale = lib.coachRowsHtml({ root: "/r/repo", state: "done", verdict: "proposals",
+  edits: [
+    { i: 1, section: "Git", old: "a", new: "b", why: "w", evidence: ["e"], status: "pending", error: "CLAUDE.md changed since the coach read it -- run the coach again", rerun: true },
+    { i: 2, section: "Git", old: "c", new: "d", why: "w", evidence: ["e"], status: "pending", error: "CLAUDE.md has uncommitted edits" },
+    { i: 3, section: "Git", old: "e", new: "f", why: "w", evidence: ["e"], status: "pending" },
+  ],
+  decisions: [{ i: 1, what: "Keep bash", why: "portable", status: "pending", error: "DECISIONS.md changed since the coach read it", rerun: true },
+              { i: 2, what: "Tabs", why: "w", status: "pending" }] });
+const staleRows = stale.split('<div class="ib-row co-row').slice(1);
+eq("a stale edit offers Run the coach again, after its Skip",
+  /data-act="skip" data-i="0"[^>]*>Skip<\/button><button class="ib-btn" data-act="rerun"[^>]*>Run the coach again<\/button>/.test(staleRows[0]), true);
+eq("...an edit refused for another reason does not", /data-act="rerun"/.test(staleRows[1]), false);
+eq("...nor an edit with no refusal", /data-act="rerun"/.test(staleRows[2]), false);
+eq("a stale DECISIONS.md entry offers it too, after its Skip",
+  /data-act="dec-skip" data-i="0"[^>]*>Skip<\/button><button class="ib-btn" data-act="rerun"/.test(staleRows[3]) && !/data-act="rerun"/.test(staleRows[4]), true);
 const nv = lib.coachRowsHtml({ root: "/r", state: "new", edits: [], decisions: [] });
 eq("a repo the coach never read offers to run it", /hasn't read/.test(nv) && /data-act="rerun"/.test(nv), true);
 
