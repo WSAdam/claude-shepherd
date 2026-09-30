@@ -171,7 +171,7 @@ and the README's "Testing & development" section.
   heartbeat every second, so a watcher on it delivered in 12-1443ms; a quiet directory
   delivers in ~11ms. Signal through a quiet dir (`cc-ask/.poke`), not a busy one.
 
-- The worktree isolation guard refuses commands it cannot statically verify stay inside the worktree: interpreter calls (`sed`, `node`, `lua`) with runtime-computed arguments (quote the value and place it after `--`, or write it to a temp file first), `HOME=...` environment prefixes on git commands (use explicit paths instead), and bash subshells or heredocs that mention git. Keep git invocations simple and single-purpose.
+- The worktree isolation guard refuses commands it cannot statically verify stay inside the worktree: interpreter calls (`sed`, `node`, `lua`, `python`) with runtime-computed arguments (write the value to a temp file and reference that file — or use the `Edit` tool for in-place substitutions, which bypasses the fence entirely; `sed` has no `--` separator for its script), `HOME=...` environment prefixes on git commands (use `git -C /absolute/path` instead), and bash subshells or heredocs that mention git. Keep git invocations simple and single-purpose.
 
 ## Tests
 
