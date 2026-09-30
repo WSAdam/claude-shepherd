@@ -2278,17 +2278,23 @@ function FX.compatStart(due, reg, cfg)
     facts = st.facts
   end
   local needles = (due.kind == "new" and facts.binary and facts.binary.path) and core.compatNeedles(facts.hooks) or {}
+  -- the output goes to a scratch file, never the task's pipe: hs.task reads stdout only at exit, and
+  -- past ~64KB of transcript tails the child blocked (2026-09-29, the first live check)
+  local outFile = FX.scratchFile("compat")
   local cmd = core.compatCheckCmd({ binary = #needles > 0 and facts.binary.path or nil, needles = needles,
-                                    projectsDir = FX.PROJECTS_DIR, sids = core.compatSessionIds(reg, due.version) })
+                                    projectsDir = FX.PROJECTS_DIR, sids = core.compatSessionIds(reg, due.version),
+                                    outFile = outFile })
   local job = { version = due.version, kind = due.kind, st = st, needles = needles, cfg = cfg }
   if not cmd then return FX.compatScanned(job, "") end
   FX._compat.job = job
   local ok = pcall(function()
     local myTask   -- the exit callback checks it still owns the job
-    myTask = hs.task.new("/bin/sh", function(_, out)
-      if FX._compat.job ~= job or job.task ~= myTask then return end
+    myTask = hs.task.new("/bin/sh", function()
+      if FX._compat.job ~= job or job.task ~= myTask then pcall(os.remove, outFile); return end
       if job.timer then pcall(function() job.timer:stop() end); job.timer = nil end
       FX._compat.job = nil
+      local out = FX.readFile(outFile) or ""
+      pcall(os.remove, outFile)
       local okd, e = pcall(FX.compatScanned, job, out)
       if not okd then print("[cc-dashboard] ❌ Claude Code " .. job.version .. " compatibility check failed: " .. tostring(e)) end
     end, { "-c", cmd })
@@ -2301,6 +2307,7 @@ function FX.compatStart(due, reg, cfg)
       job.timer = nil
       FX._compat.job = nil
       pcall(function() job.task:terminate() end)
+      pcall(os.remove, outFile)
       -- a slow disk must not re-grep a 200MB binary every minute
       FX._compat.nextCheck = FX.now() + core.CC_COMPAT.rescanSeconds
       print("[cc-dashboard] ⚠️ Claude Code " .. job.version .. " compatibility check timed out; it tries again in "
@@ -2309,6 +2316,7 @@ function FX.compatStart(due, reg, cfg)
   end)
   if not ok then
     FX._compat.job = nil
+    pcall(os.remove, outFile)
     print("[cc-dashboard] ❌ couldn't start the Claude Code " .. due.version .. " compatibility check")
     return
   end

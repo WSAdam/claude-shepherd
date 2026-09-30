@@ -298,12 +298,16 @@ writeFile(HOME .. "/projects/-p-one/sid-a.jsonl",
   .. '{"type":"user","message":{"role":"user","content":"' .. big .. '"},"version":"' .. V .. '"}\n'
   .. '{"type":"attachment","attachment":{"type":"hook"},"version":"' .. V .. '"}\n')
 writeFile(HOME .. "/projects/-p-two/sid-b.jsonl", L(P_HUMAN) .. L(INTR))
+local OUT = HOME .. "/check out's.txt"
 local job = { binary = BIN, needles = core.compatNeedles({ "Stop", "PreCompact" }), projectsDir = HOME .. "/projects",
-              sids = { "sid-a", "sid-b", "sid-none", "bad sid; rm -rf /" } }
+              sids = { "sid-a", "sid-b", "sid-none", "bad sid; rm -rf /" }, outFile = OUT }
 local cmd = core.compatCheckCmd(job)
 check("the check is one shell command", type(cmd) == "string")
 check("...an id that isn't one never reaches it", cmd and not cmd:find("rm -rf", 1, true))
-local parsed = core.compatParseOutput(sh("/bin/sh -c " .. q(cmd or "exit 1")))
+-- 2026-09-29: the live check never finished -- its transcript tails went through hs.task's stdout
+-- pipe, which Hammerspoon reads only at exit, so past ~64KB the child blocked (the folder-scan trap)
+eq("the command prints nothing itself: everything goes to the scratch file", sh("/bin/sh -c " .. q(cmd or "exit 1")), "")
+local parsed = core.compatParseOutput(readAll(OUT))
 local gf = core.compatGrepFacts(job.needles, parsed.grep)
 eq("run for real: the binary mentions \"Stop\"", gf.events.Stop, true)
 eq("...not \"PreCompact\"", gf.events.PreCompact, false)
@@ -315,9 +319,13 @@ check("...tool results, attachments and over-long lines are left out", parsed.fi
 tf = core.compatTranscriptFacts(parsed.files, V)
 check("...and what's kept is enough for every fact", tf.usage == true and tf.origin == true and tf.lastPrompt == true and tf.interrupt == true)
 job.binary = HOME .. "/bin/missing"
-parsed = core.compatParseOutput(sh("/bin/sh -c " .. q(core.compatCheckCmd(job))))
+sh("/bin/sh -c " .. q(core.compatCheckCmd(job)))
+parsed = core.compatParseOutput(readAll(OUT))
 eq("an unreadable binary: unknown, never 'no longer mentions'", core.compatGrepFacts(job.needles, parsed.grep).events.Stop, nil)
-eq("nothing to do: no command", core.compatCheckCmd({}), nil)
+eq("...and a rerun replaces the file, never appends to it", #parsed.files, 2)
+eq("nothing to do: no command", core.compatCheckCmd({ outFile = OUT }), nil)
+job.outFile = nil
+eq("no scratch file: no command (its output must never ride the task's pipe)", core.compatCheckCmd(job), nil)
 
 -- ---- the real FX functions under a stubbed Hammerspoon -------------------------------------------
 local realGetenv = os.getenv
@@ -361,7 +369,7 @@ local function attributes(p, k)
   if k then return a[k] end
   return a
 end
-local settingsStore, frame, executed, tasks = {}, { x = 0, y = 0, w = 1920, h = 1080 }, {}, {}
+local settingsStore, frame, executed, tasks, deadlocked = {}, { x = 0, y = 0, w = 1920, h = 1080 }, {}, {}, {}
 local hs = {
   json = json,
   fs = {
@@ -399,7 +407,11 @@ local function runTasks()
     for _, a in ipairs(t.args or {}) do c = c .. " " .. q(a) end
     local o = sh(c .. "; echo \"@@rc:$?\"")
     local rc = tonumber(o:match("@@rc:(%d+)%s*$")) or 1
-    if t.cb then t.cb(rc, (o:gsub("@@rc:%d+%s*$", "")), "") end
+    local out = o:gsub("@@rc:%d+%s*$", "")
+    -- as the real one: hs.task reads a child's stdout only once it exits, so past the pipe buffer
+    -- (~64KB) the child blocks writing and the task never calls back
+    if #out > 65536 then deadlocked[#deadlocked + 1] = t
+    elseif t.cb then t.cb(rc, out, "") end
   end
 end
 hs.timer = setmetatable({
@@ -500,6 +512,23 @@ st = FX.compatState()
 check("...and gets its transcript facts back", st and type(st.facts) == "table" and type(st.facts.transcript) == "table")
 eq("...quietly", #toasts, 1)
 
+-- 2026-09-29: the live check never finished -- 2.1.284's transcript tails passed 64KB of task stdout
+local bigPrompt = P_HUMAN:gsub("fix the bug", string.rep("y", 1200))
+local bigT = {}
+for _ = 1, 80 do bigT[#bigT + 1] = L(bigPrompt, "2.1.302") end
+writeFile(HOME .. "/projects/-p-two/sid-big.jsonl", table.concat(bigT) .. L(LAST) .. L(A_USAGE, "2.1.302") .. L(A_USAGE, "2.1.302"))
+writeFile(HOME .. "/sessions/115.json", json.encode(entry(115, "2.1.302", { sessionId = "sid-big" })))
+clock = clock + 120
+step()
+eq("a version whose transcripts pass 64KB starts its check", #tasks, 1)
+runTasks()
+eq("...and the check finishes (a real hs.task's pipe would have blocked past 64KB)", #deadlocked, 0)
+st = FX.compatState()
+eq("...remembered", st and st.version, "2.1.302")
+eq("...with what the big transcript shows", st and st.facts and st.facts.transcript and st.facts.transcript.usage, true)
+eq("...and its scratch file is removed", sh("ls " .. q(HOME .. "/.claude/cc-scratch") .. " | grep -c compat"):gsub("%s+$", ""), "0")
+sh("rm " .. q(HOME .. "/sessions/115.json"))
+
 -- unreadable session files: nothing happens
 sh("rm " .. q(HOME .. "/sessions/111.json") .. " " .. q(HOME .. "/sessions/112.json"))
 writeFile(HOME .. "/sessions/113.json", "{not json")
@@ -515,7 +544,7 @@ local drows = FX.doctorStatus()
 local sect = 0
 for _, row in ipairs(drows) do if row.section == "Claude Code compatibility" then sect = sect + 1 end end
 check("Diagnostics shows the Claude Code compatibility section", sect > 0)
-check("...with the version it checked", rowsText(drows):find("2.1.301", 1, true) ~= nil)
+check("...with the version it checked", st and rowsText(drows):find(st.version, 1, true) ~= nil)
 check("...and says the session files have no readable version now", findRow(drows, "Can't tell which Claude Code version runs") ~= nil)
 
 sh("rm -r " .. q(HOME))

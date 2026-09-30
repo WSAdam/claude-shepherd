@@ -19839,10 +19839,14 @@ do
   -- that can carry evidence -- assistant records, last-prompt records, and user records that aren't
   -- tool results, each at most lineBytes. Transcripts are found by session id in whichever project
   -- folder holds them. Plain tail/awk, /usr/bin/grep by path (Adam's shell aliases grep to ugrep).
+  -- Everything goes to job.outFile, never stdout (no outFile, no command): hs.task reads a child's
+  -- stdout only once it exits, so past the ~64KB pipe buffer the child blocks and the check never
+  -- finishes -- 2026-09-29, the first live check hung that way on 2.1.284's transcripts.
   local SCAN_AWK = [==[length($0) <= %d && (index($0, "\"type\":\"assistant\"") || index($0, "\"type\":\"last-prompt\"") || (index($0, "\"type\":\"user\"") && !index($0, "\"tool_result\"")))]==]
   local function sq(s) return "'" .. tostring(s):gsub("'", "'\\''") .. "'" end
   function M.compatCheckCmd(job)
     job = type(job) == "table" and job or {}
+    if type(job.outFile) ~= "string" or job.outFile == "" then return nil end
     local parts = {}
     if type(job.binary) == "string" and job.binary ~= "" then
       for i, n in ipairs(type(job.needles) == "table" and job.needles or {}) do
@@ -19860,7 +19864,7 @@ do
       end
     end
     if #parts == 0 then return nil end
-    return table.concat(parts, "; ") .. "; exit 0"
+    return "{ " .. table.concat(parts, "; ") .. "; } > " .. sq(job.outFile) .. " 2>/dev/null; exit 0"
   end
 
   -- Lines of text, walked with a plain find (never a `*` pattern over a torn line); the last one

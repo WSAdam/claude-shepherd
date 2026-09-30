@@ -4807,6 +4807,10 @@ do
   check("compat: the tick runs FX.stepCompat", src:find("pcall(FX.stepCompat, cfg)", 1, true) ~= nil)
   local start = src:match("\nfunction FX%.compatStart%(due, reg, cfg%)(.-)\nend\n") or ""
   check("compat: the check runs as a /bin/sh task, never in the tick", start:find('hs.task.new("/bin/sh"', 1, true) ~= nil)
+  -- 2026-09-29: the first live check hung -- its transcript tails rode the task's pipe past ~64KB
+  check("compat: ...its output goes to a scratch file, read and removed in the callback",
+        start:find('local outFile = FX.scratchFile("compat")', 1, true) ~= nil and start:find("outFile = outFile })", 1, true) ~= nil
+        and start:find("local out = FX.readFile(outFile)", 1, true) ~= nil and start:find('hs.task.new("/bin/sh", function()', 1, true) ~= nil)
   check("compat: ...with a retained backstop timer", start:find("job.timer = hs.timer.doAfter(core.CC_COMPAT.taskSeconds", 1, true) ~= nil)
   local step = src:match("\nfunction FX%.stepCompat%(cfg%)(.-)\nend\n") or ""
   check("compat: the trigger reads the session files, no process (no hs.execute / hs.task in it)",
