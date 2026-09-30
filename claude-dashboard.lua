@@ -453,7 +453,12 @@ function FX.scratchFile(tag)
     FX._scratchReady = true
   end
   FX._scratchSeq = FX._scratchSeq + 1
-  return FX._scratchDir .. "/" .. tostring(tag or "scan") .. "-" .. tostring(FX.now()) .. "-" .. FX._scratchSeq
+  local path = FX._scratchDir .. "/" .. tostring(tag or "scan") .. "-" .. tostring(FX.now()) .. "-" .. FX._scratchSeq
+  -- Remembered so the startup sweep (FX.pruneScratch) never takes a path this load handed out:
+  -- a checker launched in a reload's first seconds was losing its answer to it.
+  FX._scratchMine = FX._scratchMine or {}
+  FX._scratchMine[path] = true
+  return path
 end
 
 -- Orphan sweep for the scratch dir. Every normal path os.remove()s its own file
@@ -465,11 +470,15 @@ end
 -- (the previous config's tasks/callbacks died with it), so everything present is a
 -- dead process's leftover. A missing dir self-gates (FX.readDir -> {}).
 function FX.pruneScratch()
+  local mine = FX._scratchMine or {}
   for _, name in ipairs(FX.readDir(FX._scratchDir)) do
-    if name ~= "." and name ~= ".." then
+    local path = FX._scratchDir .. "/" .. name
+    -- 2026-09-29: the sweep runs 2.5s after load, and a merge checker or red-first run started in
+    -- those seconds already owns a path here -- only a dead process's leftovers go
+    if name ~= "." and name ~= ".." and not mine[path] then
       -- 2026-09-29: a red-first scratch WORKTREE a crash left behind is git's to remove (the repo
       -- still lists it), in the background; os.remove can't take a folder anyway
-      if core.isRedFirstScratch(FX._scratchDir .. "/" .. name) then FX.redFirstCleanup({ scratch = FX._scratchDir .. "/" .. name })
+      if core.isRedFirstScratch(path) then FX.redFirstCleanup({ scratch = path })
       else pcall(os.remove, FX._scratchDir .. "/" .. name) end
     end
   end

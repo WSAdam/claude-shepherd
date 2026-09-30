@@ -386,6 +386,25 @@ for i = before + 1, #TASKS do if cmdOf(TASKS[i]):find("worktree remove --force '
 check("startup removes a red-first scratch worktree a crash left behind, asking it which repo it belongs to",
       sw ~= nil and cmdOf(sw):find("git -C '" .. stray .. "' rev-parse", 1, true) ~= nil)
 
+-- ---- the startup sweep spares what THIS load already started (2026-09-29) -------------------
+-- 2026-09-29: the sweep runs 2.5s after load, but a merge checker's retry launched in a reload's
+-- first seconds writes its answer under the scratch dir; the sweep unlinked it mid-run, claude
+-- wrote into the deleted file, and the checker read nothing -- "claude gave no answer" for
+-- feat/ask-send (15:50:31) and feat/coach (19:23:34), each left to Adam's manual click.
+local mineOut = fx.scratchFile("headless-out")
+write(mineOut, "")
+local mineWt = fx.scratchFile(core.RED_FIRST_TAG)
+os.execute('mkdir -p "' .. mineWt .. '/tests"')
+local deadOut = SCR .. "/headless-out-1-1"
+write(deadOut, "a dead run's output")
+before = #TASKS
+quiet(function() fx.pruneScratch() end)
+check("the startup sweep keeps a scratch file this load made (a running checker's answer)", exists(mineOut))
+local swMine
+for i = before + 1, #TASKS do if cmdOf(TASKS[i]):find(mineWt, 1, true) then swMine = TASKS[i] end end
+check("...and leaves a red-first scratch worktree this load started", swMine == nil and exists(mineWt))
+check("...and still removes a dead process's leftover", not exists(deadOut))
+
 -- ---- the real shell lines, against a real repo ----------------------------------------------
 -- A main with app.sh and a passing test; a branch that adds wave() and a test for it. The run at
 -- the merge-base gets the new test, not the fix, so it fails -- and the scratch worktree is gone.
