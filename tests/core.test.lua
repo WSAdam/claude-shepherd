@@ -8467,7 +8467,9 @@ do
   -- 2026-09-29: 39 -> 40 for TODO lines that need a live run ("liverun", flagged new).
   -- 2026-09-29: 40 -> 41 for the scheduled-tasks lock check ("schedlock", flagged new).
   -- 2026-09-29: 41 -> 42 for Claude Code compatibility alarms ("compat", flagged new).
-  eq("FEATURES: the 42 new features are flagged", newCount, 42)
+  -- 2026-09-30: 42 -> 43 for restarting the fleet in place ("restart", flagged new).
+  eq("FEATURES: the 43 new features are flagged", newCount, 43)
+  check("FEATURES: lists restarting the fleet in place", keys.restart == true)
   check("FEATURES: lists TODO lines that need a live run", keys.liverun == true)
   check("FEATURES: lists the scheduled-tasks lock check", keys.schedlock == true)
   check("FEATURES: lists Claude Code compatibility alarms", keys.compat == true)
@@ -12991,16 +12993,19 @@ do
   for _, k in ipairs(core.AUTOMATION_KINDS or {}) do byKind[k.kind] = k end
   for _, want in ipairs({ { "continue", "autoContinue" }, { "feed", "queue" }, { "route", "queue" }, { "rule", "rules" },
                           { "respawn", "respawn" }, { "summary", "summary" }, { "resume", "resume" },
-                          { "tabless_end", "tabless" }, { "mailbox", "mailbox" }, { "rc", "remoteControl" } }) do
+                          { "tabless_end", "tabless" }, { "mailbox", "mailbox" }, { "rc", "remoteControl" },
+                          -- 2026-09-30: restart in place -- each reopen and its Continue are a kind of their own
+                          { "restart", "restart" } }) do
     eq("dry run: " .. want[1] .. " is switched by " .. want[2] .. ".dryRun", byKind[want[1]] and byKind[want[1]].feature, want[2])
   end
   local labelled = true
   for _, k in ipairs(core.AUTOMATION_KINDS or {}) do if type(k.label) ~= "string" or k.label == "" then labelled = false end end
-  check("dry run: every kind has a label for the Trace", labelled and #(core.AUTOMATION_KINDS or {}) == 10)
+  -- 2026-09-30: 10 -> 11 kinds, for "restart" (the requirement grew by one kind; nothing was removed)
+  check("dry run: every kind has a label for the Trace", labelled and #(core.AUTOMATION_KINDS or {}) == 11)
   -- every automated typist maps to its kind
   for typist, kind in pairs({ autofeed = "feed", router = "route", ["rule-nudge"] = "rule", ["rule-continue"] = "rule",
                               ["auto-continue"] = "continue", summary = "summary", mailbox = "mailbox",
-                              resume = "resume", ["rc-sweep"] = "rc" }) do
+                              resume = "resume", ["rc-sweep"] = "rc", restart = "restart" }) do
     eq("dry run: typist " .. typist .. " is kind " .. kind, (core.AUTOMATION_TYPISTS or {})[typist], kind)
   end
 

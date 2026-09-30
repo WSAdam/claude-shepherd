@@ -82,6 +82,8 @@ Every feature below has a reference page one click away. The panel lists the sam
   default doesn't stop the session (`cc-decide.sh`); answer it later in ☰ → Inbox.
 - [**Spawn new sessions**](docs/controls.md#spawn-new-sessions): start a session in any project with
   an editor, permission mode, provider and first task, or from a saved preset.
+- [**Restart the fleet in place**](docs/fleet.md#restart-the-fleet-in-place): after an update or a
+  reboot, reopen every session that went down with its conversation: a preview first, never twice.
 - [**Rewind & checkpoints**](docs/fleet.md#the-detail-panel): see each turn's restore point and the
   files it changed, then open Claude Code's rewind picker.
 - [**Global hotkeys**](docs/controls.md#global-hotkeys): approve, jump to whoever needs you, cycle,

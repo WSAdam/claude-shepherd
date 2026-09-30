@@ -38,6 +38,7 @@ mkdir -p "$C/cc-tickets"; printf '{"v":1,"id":"t1790000000-1"}' > "$C/cc-tickets
 mkdir -p "$C/cc-audit/-r"; printf -- '- [ ] [LOW] AUD-001 x\n' > "$C/cc-audit/-r/AUDIT-FINDINGS.md"
 printf '{"v":1,"labels":{"toolu_a":{"verdict":"ok"}}}' > "$C/cc-skill-labels.json"
 mkdir -p "$C/cc-coach"; printf '{"v":1,"root":"/r","state":"done"}' > "$C/cc-coach/-r.json"
+printf '{"version":1,"written":1790000000,"sessions":[]}' > "$C/cc-restart.json"
 FAKE="$TMP/code"
 printf '#!/bin/sh\necho "$*" >> "%s"\nexit 0\n' "$TMP/code.calls" > "$FAKE"; chmod +x "$FAKE"
 
@@ -115,6 +116,8 @@ assert_eq "--purge removes the find-only audits" "gone" "$([ -e "$C/cc-audit" ] 
 assert_eq "--purge removes the skill-run labels" "gone" "$([ -e "$C/cc-skill-labels.json" ] && echo there || echo gone)"
 # 2026-09-29: the coach's records and its log of merge notes (cc-coach/) too
 assert_eq "--purge removes the coach's records" "gone" "$([ -e "$C/cc-coach" ] && echo there || echo gone)"
+# 2026-09-30: and the restart snapshot (cc-restart.json): the fleet Shepherd would reopen
+assert_eq "--purge removes the restart snapshot" "gone" "$([ -e "$C/cc-restart.json" ] && echo there || echo gone)"
 assert_eq "--purge still keeps the user's own files" "there" "$([ -e "$C/cc-mine.sh" ] && echo there || echo gone)"
 
 # a CLAUDE.md that is only the block (a fresh machine) is removed, not left empty

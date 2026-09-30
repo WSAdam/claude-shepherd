@@ -200,5 +200,15 @@ assert_eq "...and its why"                           "yes" "$(has "'<div class=\
 # names (tests/schedlock-badge.test.js runs the real schedLockBadge)
 assert_eq "a lock badge's label is esc()'d"          "yes" "$(has "'\">'+esc(sl.label)+'</span>'")"
 assert_eq "...and its tooltip (the fix)"             "yes" "$(has "title=\"'+esc(sl.tip || \"\")+'\"")"
+# restart in place (2026-09-30): a preview row's words came from a status file or the snapshot on
+# disk -- a relabel, a folder, a reason -- and its checkbox's value is the session id that Reopen
+# sends (tests/restart-view.test.js runs the real restartRowHtml)
+assert_eq "a restart row's session id is esc()'d"   "yes" "$(has "class=\"rs-pick\" value=\"' + esc(r.id) + '\"'")"
+assert_eq "a restart row's name is esc()'d"         "yes" "$(has "'<span class=\"rs-name\">' + esc(r.name || r.id || \"\")")"
+assert_eq "a restart row's editor is esc()'d"       "yes" "$(has "'<span class=\"rs-ed\">' + esc(r.editor || \"?\")")"
+assert_eq "a restart row's where is esc()'d"        "yes" "$(has 'esc(r.where || "")')"
+assert_eq "a restart row's command is esc()'d"      "yes" "$(has "<code>' + esc(r.command || \"\") + '</code>'")"
+assert_eq "a restart row's reason is esc()'d"       "yes" "$(has 'esc(r.why || "")')"
+assert_eq "...and its mode, model and age"          "yes" "$(has "esc(bits.join(\" · \"))")"
 
 finish

@@ -12,8 +12,9 @@ recorded in the audit ledger.
 ## When automation types
 
 Auto-feed, project routing, a rule's `nudge` or `continue`, auto-continue, the post-run
-self-summary, the startup `/rc` sweep and a waiting [mailbox](#session-mailbox) message all type
-into a session without you. Each one waits until the session can take it:
+self-summary, the startup `/rc` sweep, a waiting [mailbox](#session-mailbox) message and the
+`Continue` after a [fleet restart](fleet.md#restart-the-fleet-in-place) all type into a session
+without you. Each one waits until the session can take it:
 
 - **Never mid-turn**: not while the session is working, waiting on an approval or on a question
   Shepherd holds, or running a tool.
@@ -51,11 +52,12 @@ let it, and what it did while you were away. Your own clicks never go through it
 - **What counts.** Auto-continue, auto-feed, project routing, a rule firing (log, relabel, feed,
   nudge, continue), auto-respawn, the post-run self-summary, resuming at the limit reset (arming the
   hook, its typed line, its phone push), ending a tab-less leftover, a mailbox message (leaving it,
-  and typing it into an idle session), and the startup `/rc` sweep.
+  and typing it into an idle session), the startup `/rc` sweep, and each session a
+  [fleet restart](fleet.md#restart-the-fleet-in-place) reopens (with the `Continue` after it).
 - **Dry run.** ⚙ Settings → Automation → **Dry run** switches it on for all automation
   (`automation.dryRun`) or for one feature at a time (`autoContinue.dryRun`, `queue.dryRun` for
   auto-feed and routing, `rules.dryRun`, `respawn.dryRun`, `summary.dryRun`, `resume.dryRun`,
-  `tabless.dryRun`, `mailbox.dryRun`, `remoteControl.dryRun`). In a dry run Shepherd records what it
+  `tabless.dryRun`, `mailbox.dryRun`, `remoteControl.dryRun`, `restart.dryRun`). In a dry run Shepherd records what it
   would have done and does nothing: nothing typed, no task taken off a queue, nothing launched or
   ended, no message left, and a resume is planned as *skip* so the hook stops without waking the
   session. A typed action still waits until the session [can take it](#when-automation-types)
@@ -70,7 +72,7 @@ let it, and what it did while you were away. Your own clicks never go through it
   the last 500 distinct decisions since Hammerspoon loaded.
 - **Ledger.** With the audit ledger on, each new row is also written once: `would_<kind>`
   (`would_continue`, `would_feed`, `would_route`, `would_rule`, `would_respawn`, `would_summary`,
-  `would_resume`, `would_tabless_end`, `would_mailbox`, `would_rc`) for a dry run, `automation`
+  `would_resume`, `would_tabless_end`, `would_mailbox`, `would_rc`, `would_restart`) for a dry run, `automation`
   with `outcome` `acted` or `refused` (and `reason`) otherwise. Repeats bump the trace's count and
   aren't written again.
 

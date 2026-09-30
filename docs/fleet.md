@@ -174,6 +174,59 @@ file. So each worktree Shepherd starts a session for gets its own **port** and *
   writes it; `uninstall.sh --purge` removes it. `lease.enabled: false` stops new leases, and the
   cards and SessionStart stop showing the ones that exist.
 
+### Restart the fleet in place
+
+A Claude Code update or a reboot takes every session down at once. **☰ → ♻️ Restart fleet** brings
+them back, each with its conversation.
+
+- **The snapshot.** Shepherd keeps `~/.claude/cc-restart.json` in step with the fleet. It is
+  rewritten (whole, then renamed into place) whenever something changes. For each session it holds
+  the id, folders, editor, window, permission mode, model, and whether a turn was in progress. The
+  hooks delete a session's status file the moment it ends, so an ended session stays in the
+  snapshot for `restart.keepHours` (default 72). A session Shepherd drops itself leaves it at once:
+  one you closed from the panel, a pruned tile, the id a `/clear` retired, a respawned one.
+- **The preview comes first.** The menu entry only shows what a restart would do. It opens
+  nothing. Every session is in one of three groups:
+  - **Would reopen** (ticked): the sessions that went down together. That is everything that ended
+    within `restart.waveMinutes` (default 30) of the newest ending, plus any whose status file is
+    still there, since a crash or a reboot ends a session without telling the hooks.
+  - **Closed earlier** (not ticked): dead sessions from before that. Tick one to include it.
+  - **Left alone**, each with its reason: it is running, it was already reopened, its folder is
+    gone, or Shepherd can't verify that it is dead.
+- **Only a verified-dead session is reopened.** Reopening a live conversation would fork it, so
+  Shepherd needs proof: no session file of Claude Code's (`~/.claude/sessions/`) names the session
+  under a process `ps` still shows, and the session's own recorded process is gone, or that pid
+  now belongs to a process that started at another time. That recorded process must be one a
+  session file named while the session was alive, so a session Shepherd first saw already dead,
+  or one on a Claude Code too old to write session files, is never called dead. The same `ps` must
+  also show Shepherd's own pid, or nothing counts as dead. The check runs for the preview, again
+  when **Reopen** starts on a session, and once more right before a tab's link goes out.
+- **Reopen** asks once, then works through the ticked sessions one at a time:
+
+  | Editor | How it comes back |
+  |--------|-------------------|
+  | VS Code, Cursor | Its tab, in the window of the folder it started in, through the Claude extension's link for that session. The window must be in front, or nothing opens. Nothing is typed. |
+  | kitty | `claude -r <id>` typed into its own window when that is still there at a shell prompt; otherwise a new kitty window in its folder runs it. |
+  | Terminal | `claude -r <id>` in its own tab when the shell that ran it is still there and idle; otherwise a new window. |
+
+  A kitty or Terminal session keeps its permission mode, the model its status file named, and its
+  provider profile. A new window follows **Settings → Spawn → Actually launch** (`spawn.live`).
+- **Continue.** Where a turn was in progress, a kitty or Terminal session gets `Continue` typed,
+  once, after it is back and [can take it](automation.md#when-automation-types). If it hasn't come
+  back within 5 minutes the Continue is dropped. A VS Code or Cursor tab never gets anything typed;
+  its row says a turn was in progress, so you know which tabs to continue yourself.
+- **Never twice.** A session is marked as reopened in the snapshot before anything launches, and a
+  second **Reopen** leaves it alone ("already reopened"). The mark is taken back only when Shepherd
+  knows nothing opened (the window wasn't in front, the launch was refused). It clears when the
+  session's hooks write again, which makes it an ordinary live session.
+- **Dry run.** With `restart.dryRun` (⚙ Settings → Automation → **Dry run**) or `automation.dryRun`
+  on, **Reopen** opens nothing and records what it would have done in the
+  [⚡ Automation trace](automation.md#dry-run-and-the-automation-trace).
+
+Shepherd never ends a session to restart it. To move live sessions to a new Claude Code version,
+close them (or reload the editor window) first, then use **Restart fleet**. A remote (bridged)
+session is never in the snapshot.
+
 ## The detail panel
 
 **Single-click** a tile to select it and open the detail panel. Its buttons are described in

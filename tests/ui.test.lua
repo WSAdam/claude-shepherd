@@ -3369,8 +3369,43 @@ do
   local cf = io.open(ROOT .. "cc-core.lua", "r")
   local csrc = cf and cf:read("*a") or ""
   if cf then cf:close() end
-  check("d14-pin: nothing sends the extension's ?session= URI (it can fork a live session)",
-        #csrc > 0 and src:find("?session=", 1, true) == nil and csrc:find("?session=", 1, true) == nil)
+  -- 2026-09-30 (build program unit 41): D-14 narrowly revised. Restart in place may reopen a
+  -- VERIFIED-DEAD session's tab by id -- with no live process there is nothing to fork. The
+  -- literal is written once, in core.restartTabUri; that has one caller, FX.openClaudeTab, which
+  -- verifies the session dead right before the URI goes out; and only the restart path
+  -- (FX.restartOne) hands it a session. Every other use -- Jump above all -- stays banned.
+  local function count(hay, needle)
+    local n, i = 0, 1
+    while true do
+      local s, e = hay:find(needle, i, true)
+      if not s then break end
+      n, i = n + 1, e + 1
+    end
+    return n
+  end
+  check("d14-pin: the dashboard never writes the ?session= URI itself", #src > 0 and src:find("?session=", 1, true) == nil)
+  local rt = csrc:match("\nfunction M%.restartTabUri%(bundleId, sessionId, editor%)(.-)\nend\n") or ""
+  check("d14-pin: core writes it in ONE place, core.restartTabUri",
+        #csrc > 0 and count(csrc, "?session=") == 1 and rt:find("?session=", 1, true) ~= nil)
+  check("d14-pin: ...and only for a real session id", rt:find("if not M.restartIdOk(sessionId) then return nil end", 1, true) ~= nil)
+  check("d14-pin: the New-tab URI builder never takes a session",
+        (csrc:match("\nfunction M%.claudeTabUri%(bundleId, prompt, editor%)(.-)\nend\n") or "session"):find("session", 1, true) == nil)
+  check("d14-pin: core.restartTabUri has one caller, FX.openClaudeTab",
+        count(src, "core.restartTabUri(") == 1 and open:find("core.restartTabUri(", 1, true) ~= nil)
+  local iDead = open:find("local dead, whyNot = FX.restartVerifyDead(opts.restartSession)", 1, true)
+  local iUri, iOut = open:find("uri = dead and core.restartTabUri(", 1, true), open:find("hs.urlevent.openURL(uri)", 1, true)
+  check("d14-pin: ...which verifies the session dead right before the URI goes out",
+        iDead and iUri and iOut and iDead < iUri and iUri < iOut or false)
+  local iNone = open:find("if not uri then", 1, true)
+  check("d14-pin: ...and opens nothing for a session it can't verify dead",
+        iNone and iUri and iOut and iUri < iNone and iNone < iOut
+        and open:find("return done(false, whyNot or \"not a session id\")", 1, true) ~= nil or false)
+  local one = src:match("\nfunction FX%.restartOne%(row, finish%)(.-)\nend\n") or ""
+  check("d14-pin: only the restart path hands FX.openClaudeTab a session (FX.restartOne)",
+        count(src, "restartSession = ") == 1 and one:find("restartSession = row.id", 1, true) ~= nil)
+  local focus = src:match("\nfunction FX%.focusWindow%(target%)(.-)\nend\n") or ""
+  check("d14-pin: Jump never reaches the restart path (it selects the tab through the tab bridge)",
+        #focus > 0 and not focus:find("restart", 1, true) and not focus:find("openClaudeTab", 1, true))
 end
 
 -- ---- The tab bridge's switch is its own key (2026-09-11) ----------------------------
@@ -4859,6 +4894,82 @@ do
         src:find("todos = FX.handoffTodos(it.cwd, ev),", 1, true) ~= nil
         and src:find("todos = FX.handoffTodos(item.cwd or project, ev),", 1, true) ~= nil
         and not src:find("todos = FX.openTodos(", 1, true))
+end
+
+-- ---- Restart the fleet in place: the preview first, the run only from its Reopen (2026-09-30) ----
+-- Build program unit 41. tests/restart.test.lua drives the core and the real FX run under stubs,
+-- restart-view.test.js the shipped preview rows; here, that the panel is wired so nothing reopens
+-- except through the preview's own button. (The ?session= rule is the d14-pin block above.)
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  local function count(needle)
+    local n, i = 0, 1
+    while true do
+      local s, e = src:find(needle, i, true)
+      if not s then break end
+      n, i = n + 1, e + 1
+    end
+    return n
+  end
+  local function fn(sig) return src:match("\nfunction " .. sig:gsub("[%.%(%)%-]", "%%%0") .. "(.-)\nend\n") or "" end
+  check("restart: ☰ has a Restart fleet entry that opens the preview",
+        src:find("onclick=\"menuPick('restart')\"", 1, true) ~= nil
+        and src:find('else if(which === "restart") openRestart();', 1, true) ~= nil
+        and src:find('function openRestart(){ send("open-restart"); }', 1, true) ~= nil)
+  local openH = src:match('\n  if a == "open%-restart" then(.-)\n  end\n') or ""
+  check("restart: opening it only asks for the plan (FX.restartPushPreview)",
+        openH:find("FX.restartPushPreview()", 1, true) ~= nil and not openH:find("restartFleet", 1, true))
+  local preview = fn("FX.restartPreview()") .. fn("FX.restartPlanNow()") .. fn("FX.restartPushPreview(onlyIfOpen)")
+  check("restart: the preview opens nothing, launches nothing and writes nothing",
+        preview:find("core.restartPlan(", 1, true) ~= nil
+        and not preview:find("openClaudeTab", 1, true) and not preview:find("spawnSession", 1, true)
+        and not preview:find("restartMark", 1, true) and not preview:find("restartWrite", 1, true)
+        and not preview:find("restartFleet", 1, true) and not preview:find("restartLaunch", 1, true)
+        and not preview:find("hs.urlevent", 1, true) and not preview:find("hs.osascript", 1, true))
+  check("restart: the overlay lists the rows through the shipped renderer, into #rs-body",
+        src:find('document.getElementById("rs-body").innerHTML = restartRowsHtml(RESTART)', 1, true) ~= nil
+        and src:find('<div class="ov-body" id="rs-body"></div>', 1, true) ~= nil)
+  check("restart: Reopen asks first and sends only the ticked session ids",
+        src:find('<button id="rs-go" onclick="restartGo()" disabled>Reopen</button>', 1, true) ~= nil
+        and src:find('send("restart-fleet", "", JSON.stringify(ids));', 1, true) ~= nil
+        and src:find('if(!confirm("Reopen " + ids.length', 1, true) ~= nil)
+  local goH = src:match('\n  if a == "restart%-fleet" then(.-)\n  end\n') or ""
+  check("restart: the run starts from that message alone, with the ids it carries",
+        goH:find("if okd and type(ids) == \"table\" and #ids > 0 then FX.restartFleet(ids) end", 1, true) ~= nil
+        and count("FX.restartFleet(") == 2)   -- its definition and this one call
+  local fleet = fn("FX.restartFleet(ids)")
+  check("restart: ...never without a list, one run at a time, re-planned from fresh facts",
+        fleet:find('if next(want) == nil then return false, "no sessions picked" end', 1, true) ~= nil
+        and fleet:find("if st.run then", 1, true) ~= nil and fleet:find("local plan = FX.restartPlanNow()", 1, true) ~= nil)
+  local one = fn("FX.restartOne(row, finish)")
+  local iVerify, iMark = one:find("FX.restartVerifyDead(row.id)", 1, true), one:find("FX.restartMark(row.id, FX.now())", 1, true)
+  local iTab, iLaunch = one:find("FX.openClaudeTab({", 1, true), one:find("FX.restartLaunch(row)", 1, true)
+  check("restart: each session is verified dead, then stamped, before anything launches",
+        iVerify and iMark and iTab and iLaunch and iVerify < iMark and iMark < iTab and iMark < iLaunch or false)
+  check("restart: ...through FX.automationAct (restart.dryRun / automation.dryRun opens nothing)",
+        one:find('FX.automationAct("restart", it, detail, function()', 1, true) ~= nil)
+  check("restart: a tab's prompt is empty and nothing is typed after it (FX.openClaudeTab presses no key)",
+        one:find('prompt = "", label = row.name', 1, true) ~= nil and not one:find("hs.eventtap", 1, true))
+  local launch = fn("FX.restartLaunch(row)")
+  check("restart: a kitty or Terminal relaunch passes resume to the spawn (claude -r <id>)",
+        launch:find("{ resume = row.id, except = row.id }", 1, true) ~= nil
+        and src:find("opts.resume = agentOpts.resume", 1, true) ~= nil)
+  check("restart: ...and types into its own kitty window only while that is idle at a shell",
+        launch:find('row.how == "kitty-window" and FX.restartKittyState(e) == "idle"', 1, true) ~= nil)
+  local cont = fn("FX.stepRestartContinue(list)")
+  check("restart: Continue is typed through the readiness check, at most once",
+        cont:find('FX.typeWhenReady(it, "restart", function()', 1, true) ~= nil
+        and cont:find("st.pending[id] = nil   -- once, whether or not it lands", 1, true) ~= nil)
+  check("restart: the tick keeps the snapshot and types the pending Continues",
+        src:find("pcall(FX.stepRestartSnapshot, list)", 1, true) ~= nil and src:find("pcall(FX.stepRestartContinue, list)", 1, true) ~= nil)
+  local snapStep = fn("FX.stepRestartSnapshot(list)")
+  check("restart: the snapshot is written whole (FX.writeFileAtomic), only on a change",
+        fn("FX.restartWrite(snap)"):find("FX.writeFileAtomic(FX.RESTART_FILE,", 1, true) ~= nil
+        and snapStep:find("if changed or st.dirty then", 1, true) ~= nil)
+  check("restart: a session Shepherd drops itself leaves the snapshot (FX.removeStatus)",
+        fn("FX.removeStatus(key)"):find('if type(FX._restart) == "table" then FX._restart.forget[tostring(key)] = true end', 1, true) ~= nil)
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

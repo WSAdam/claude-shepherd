@@ -1982,6 +1982,18 @@ function M.claudeTabUri(bundleId, prompt, editor)
   return scheme .. "://anthropic.claude-code/open" .. q
 end
 
+-- 2026-09-30 (build program unit 41): the same URI with a session id reopens THAT session's tab.
+-- D-14 banned it for Jump, because the extension resumes a session that is live anywhere but an
+-- editor tab of the window it reaches in a second claude process. Restart in place is the one
+-- exception: only for a session verified dead (M.restartLiveness), so there is no live process to
+-- fork. Built here and nowhere else; FX.openClaudeTab is its only caller, right after
+-- FX.restartVerifyDead. nil for anything that isn't a session id.
+function M.restartTabUri(bundleId, sessionId, editor)
+  if not M.restartIdOk(sessionId) then return nil end
+  local scheme = CLAUDE_URI_SCHEMES[tostring(bundleId or "")] or ((editor == "cursor") and "cursor" or "vscode")
+  return scheme .. "://anthropic.claude-code/open?session=" .. M.urlEncode(sessionId)
+end
+
 -- `git for-each-ref --format=%(refname:short) refs/heads` -> { [branch] = true }.
 function M.parseBranchList(out)
   local set = {}
@@ -6002,6 +6014,12 @@ local NARRATE = {
   would_tabless_end = { "🧪", "would end a tab-less leftover" },
   would_mailbox = { "🧪", "would leave a message" },
   would_rc      = { "🧪", "would type /rc" },
+  -- 2026-09-30: restart in place (FX.restartFleet): the run, each session, its Continue
+  would_restart = { "🧪", "would reopen a session" },
+  restart_fleet = { "♻️", "restart in place started" },
+  restart_session = { "♻️", "restart in place" },
+  restart_fleet_done = { "♻️", "restart in place finished" },
+  restart_continue = { "▶️", "continued after a restart" },
 }
 -- R3-10: expose NARRATE so the dashboard can inject it as data (__NARRATE__) and the JS
 -- evDesc twin derives BOTH its emoji and verb label from this single source -- otherwise
@@ -10535,6 +10553,9 @@ M.SETTINGS_KEEP_SUBKEYS = {
   tabless = { "dryRun" },
   mailbox = { "dryRun" },
   remoteControl = { "dryRun" },
+  -- 2026-09-30: restart in place has no inputs (a menu entry runs it); if the form ever rebuilds
+  -- `restart`, its dry-run switch and the hand-set wave and keep times stay.
+  restart = { "dryRun", "waveMinutes", "keepHours" },
 }
 function M.overlayConfig(cfg, incoming)
   cfg = type(cfg) == "table" and cfg or {}
@@ -11813,6 +11834,7 @@ M.DRY_RUN_FEATURES = {
   { feature = "tabless",       label = "Ending tab-less leftovers" },
   { feature = "mailbox",       label = "Mailbox messages" },
   { feature = "remoteControl", label = "The /rc startup sweep" },
+  { feature = "restart",       label = "Restart the fleet in place" },
 }
 -- Every kind of automatic action, the feature that switches it, and its name in the Trace.
 M.AUTOMATION_KINDS = {
@@ -11826,11 +11848,14 @@ M.AUTOMATION_KINDS = {
   { kind = "tabless_end", feature = "tabless",       label = "End tab-less leftover" },
   { kind = "mailbox",     feature = "mailbox",       label = "Mailbox" },
   { kind = "rc",          feature = "remoteControl", label = "/rc sweep" },
+  -- 2026-09-30: restart in place -- each session reopened, and the Continue typed after it
+  { kind = "restart",     feature = "restart",       label = "Restart in place" },
 }
 -- FX.typeWhenReady's senders -> their kind.
 M.AUTOMATION_TYPISTS = {
   autofeed = "feed", router = "route", ["rule-nudge"] = "rule", ["rule-continue"] = "rule",
   ["auto-continue"] = "continue", summary = "summary", mailbox = "mailbox", resume = "resume", ["rc-sweep"] = "rc",
+  restart = "restart",
 }
 local AUTOMATION_FEATURE_OF = {}
 for _, k in ipairs(M.AUTOMATION_KINDS) do AUTOMATION_FEATURE_OF[k.kind] = k.feature end
@@ -14260,9 +14285,14 @@ end
 -- saved agent with MCP servers or knowledge folders puts one of them last, right before its seed
 -- prompt -- which claude then read as one more config file or folder, so the session started
 -- with no prompt. Both ride the `--flag=value` form now, one element each.
+-- resume (2026-09-30, restart in place): `-r <session id>` reopens that conversation. It goes
+-- first, and only a real session id ever reaches the command line (M.restartIdOk).
 function M.spawnExtraFlags(opts)
   opts = opts or {}
   local f = {}
+  if M.restartIdOk(opts.resume) then
+    f[#f + 1] = "-r"; f[#f + 1] = opts.resume
+  end
   if opts.appendSystemPrompt and agTrim(opts.appendSystemPrompt) ~= "" then
     f[#f + 1] = "--append-system-prompt"; f[#f + 1] = tostring(opts.appendSystemPrompt)
   end
@@ -14289,6 +14319,540 @@ function M.spawnExtraFlags(opts)
     f[#f + 1] = "--settings"; f[#f + 1] = tostring(opts.settings)
   end
   return f
+end
+
+-- ---- Restart the fleet in place (2026-09-30, build program unit 41) -------------------------
+-- A Claude Code update or a reboot takes every session down at once, and SessionEnd deletes the
+-- status files, so by the time anyone looks there is nothing left to reopen from. Shepherd keeps
+-- its own snapshot, ~/.claude/cc-restart.json, rewritten whenever the fleet changes: per session
+-- its id, folders, editor, window, permission mode, model and whether a turn was in progress. A
+-- session whose status file goes away stays in it, stamped `ended`; one Shepherd itself dropped
+-- (closed from the panel, pruned, respawned) leaves it.
+-- Restart (☰ → Restart fleet) plans from that file and shows the plan first -- the dry run -- and
+-- nothing reopens without Adam's click. A session is reopened only when it is VERIFIED DEAD: no
+-- session file of Claude Code's names it under a process ps still shows, and its own recorded
+-- process is gone (or that pid is another process now). Anything Shepherd can't verify is left
+-- alone. How it comes back:
+--   VS Code / Cursor   its tab, through the extension's session link (M.restartTabUri), one at a time
+--   kitty              `claude -r <id>` in its own window when that is still there at a shell
+--                      prompt, else in a new kitty window
+--   Terminal           `claude -r <id>` in its own tab when the shell that ran it is still there
+--                      and idle, else in a new window
+-- and `Continue` is typed (kitty and Terminal, once the session is ready: M.readyToType) only
+-- where a turn was in progress. An entry is reopened at most once: it is stamped `restarted`
+-- before anything launches, and the stamp goes only when a hook of that session writes again.
+-- These are the pure halves; the dashboard does the I/O (FX.stepRestartSnapshot, FX.restartPreview,
+-- FX.restartFleet).
+M.RESTART = {
+  version = 1,
+  waveSeconds = 30 * 60,     -- sessions that ended within this of the newest ending went down together
+  keepSeconds = 72 * 3600,   -- an ended session leaves the snapshot after this
+  continueLine = "Continue",
+  continueSeconds = 300,     -- how long a reopened session is waited for before its Continue is dropped
+  gapSeconds = 3,            -- between two sessions of a run (a tab has to open before the next one)
+  registryRetry = 60,        -- seconds before a session file that wasn't there is looked for again
+}
+M.RESTART_EDITORS = { vscode = "VS Code", cursor = "Cursor", kitty = "kitty", terminal = "Terminal" }
+-- What a terminal window runs when nothing else does (kitty's foreground process at a prompt).
+M.RESTART_SHELLS = { zsh = true, bash = true, fish = true, sh = true, dash = true, ksh = true,
+                     tcsh = true, csh = true, nu = true, xonsh = true, elvish = true }
+
+-- A session id that may reach a command line or a URI: letters, digits and dashes (a UUID).
+function M.restartIdOk(id)
+  return type(id) == "string" and #id <= 64 and id:match("^%w[%w%-]*$") ~= nil
+end
+
+do
+  local function rsPid(v)
+    local d = (type(v) == "number" and string.format("%d", v) or tostring(v or "")):match("^%d+$")
+    return d and tostring(tonumber(d)) or nil
+  end
+  local function rsStr(v) return (type(v) == "string" and v ~= "") and v or nil end
+  local function rsDir(v) return (type(v) == "string" and v:sub(1, 1) == "/") and M.normDir(v) or nil end
+  local function rsBase(p) return tostring(p or ""):match("([^/]+)/?$") or tostring(p or "") end
+  local function rsAgo(sec)
+    sec = math.max(0, math.floor(tonumber(sec) or 0))
+    if sec < 90 then return sec .. "s" end
+    if sec < 90 * 60 then return math.floor(sec / 60) .. "m" end
+    if sec < 48 * 3600 then return math.floor(sec / 3600) .. "h" end
+    return math.floor(sec / 86400) .. "d"
+  end
+  -- What Claude Code's session files and ps said about a session's process: kept across ticks (the
+  -- status file never carries it, and the session file goes when the process does).
+  local STICKY = { "pid", "procStart", "confirmed", "tty", "shell", "shellStart" }
+
+  -- One status item (the tick's, after the labels and origins are stamped) -> its snapshot entry.
+  -- launchDir = the folder whose Claude project folder holds its transcript (core.launchDirFor):
+  -- `claude -r` finds the conversation from there. root = the folder it started in, whose window a
+  -- VS Code session lives in. nil for a remote tile, or one with no session id or no folder.
+  function M.restartEntry(it, launchDir)
+    if type(it) ~= "table" or it.remote then return nil end
+    local id = it.session_id
+    local cwd = rsDir(it.cwd)
+    if not M.restartIdOk(id) or not cwd then return nil end
+    local launch = rsDir(launchDir)
+    local editor = M.RESTART_EDITORS[it.editor] and it.editor or nil
+    local w = { host = rsPid(it.host_window), pid = rsPid(it.session_pid) }
+    if editor == "kitty" then
+      w.kittyListenOn = rsStr(it.kitty_listen_on)
+      w.kittyWindowId = (it.kitty_window_id ~= nil and tostring(it.kitty_window_id) ~= "") and tostring(it.kitty_window_id) or nil
+    end
+    return {
+      id = id, name = tostring(it.label or it.name or id), cwd = cwd,
+      dir = launch or cwd, root = rsDir(it.originDir) or launch or cwd,
+      editor = editor, mode = rsStr(it.permission_mode), model = rsStr(it.statusModel), baseUrl = rsStr(it.base_url),
+      turn = (it.status == "working" or it.status == "approval") or nil,
+      transcript = rsStr(it.transcript_path), window = w,
+    }
+  end
+
+  -- An entry read back from the file, every field typed again (the file is on disk: anyone's).
+  local function cleanEntry(e)
+    if type(e) ~= "table" or not M.restartIdOk(e.id) then return nil end
+    local cwd = rsDir(e.cwd)
+    if not cwd then return nil end
+    local w = type(e.window) == "table" and e.window or {}
+    local tty = rsStr(w.tty)
+    return {
+      id = e.id, name = tostring(rsStr(e.name) or e.id), cwd = cwd,
+      dir = rsDir(e.dir) or cwd, root = rsDir(e.root) or rsDir(e.dir) or cwd,
+      editor = M.RESTART_EDITORS[e.editor] and e.editor or nil,
+      mode = rsStr(e.mode), model = rsStr(e.model), baseUrl = rsStr(e.baseUrl),
+      turn = (e.turn == true) or nil, transcript = rsStr(e.transcript), kind = rsStr(e.kind),
+      ended = tonumber(e.ended), restarted = tonumber(e.restarted),
+      window = { host = rsPid(w.host), pid = rsPid(w.pid), procStart = rsStr(w.procStart),
+                 confirmed = (w.confirmed == true) or nil,
+                 kittyListenOn = rsStr(w.kittyListenOn), kittyWindowId = rsStr(w.kittyWindowId),
+                 tty = (tty and tty:match("^/dev/ttys?%d+$")) and tty or nil,
+                 shell = rsPid(w.shell), shellStart = rsStr(w.shellStart) },
+    }
+  end
+
+  -- The file -> { version, written, sessions = { [id] = entry } }; always a table (nothing readable
+  -- = no sessions). `sessions` is a list as written, or a map by id; an id that appears twice is
+  -- ONE session: the copy still open, else the one that ended last.
+  function M.parseRestartSnapshot(text)
+    local snap = { version = M.RESTART.version, sessions = {} }
+    if type(text) ~= "string" or text == "" or not M.json then return snap end
+    local ok, t = pcall(M.json.decode, text)
+    if not ok or type(t) ~= "table" or type(t.sessions) ~= "table" then return snap end
+    snap.written = tonumber(t.written)
+    for k, raw in pairs(t.sessions) do
+      if type(raw) == "table" and raw.id == nil and type(k) == "string" then raw.id = k end
+      local e = cleanEntry(raw)
+      if e then
+        local prev = snap.sessions[e.id]
+        if prev == nil or (prev.ended ~= nil and (e.ended == nil or e.ended > prev.ended)) then
+          snap.sessions[e.id] = e
+        end
+      end
+    end
+    return snap
+  end
+
+  -- The file's text: the sessions as a list, in id order.
+  function M.restartSnapshotJson(snap, now)
+    local ids, list = {}, {}
+    local sessions = (type(snap) == "table" and type(snap.sessions) == "table") and snap.sessions or {}
+    for id in pairs(sessions) do ids[#ids + 1] = id end
+    table.sort(ids)
+    for _, id in ipairs(ids) do list[#list + 1] = sessions[id] end
+    return M.json.encode({ version = M.RESTART.version, written = tonumber(now) or 0, sessions = list })
+  end
+
+  -- An ended session whose process (a /clear keeps it) or kitty window now hosts another session
+  -- was replaced, not lost: it is never reopened.
+  local function superseded(o, sessions)
+    local ow = type(o.window) == "table" and o.window or {}
+    for id, l in pairs(sessions) do
+      if id ~= o.id and l.ended == nil then
+        local lw = type(l.window) == "table" and l.window or {}
+        if ow.pid and lw.pid == ow.pid
+           and (ow.procStart == nil or lw.procStart == nil or ow.procStart == lw.procStart) then return true end
+        if ow.kittyWindowId and lw.kittyWindowId == ow.kittyWindowId and lw.kittyListenOn == ow.kittyListenOn then
+          return true
+        end
+      end
+    end
+    return false
+  end
+
+  -- The snapshot after this tick. entries = M.restartEntry of every local session whose status
+  -- file exists. opts = { forget = { [id] = true } (sessions Shepherd dropped itself), updated =
+  -- { [id] = its status file's last hook write }, keepSeconds }. Returns the next snapshot and
+  -- whether it differs from prev (only then is the file written).
+  function M.restartSnapshotStep(prev, entries, now, opts)
+    opts = type(opts) == "table" and opts or {}
+    now = tonumber(now) or os.time()
+    local forget = type(opts.forget) == "table" and opts.forget or {}
+    local updated = type(opts.updated) == "table" and opts.updated or {}
+    local keep = tonumber(opts.keepSeconds) or M.RESTART.keepSeconds
+    local old = (type(prev) == "table" and type(prev.sessions) == "table") and prev.sessions or {}
+    local nxt = { version = M.RESTART.version, written = type(prev) == "table" and prev.written or nil, sessions = {} }
+    for _, e in ipairs(entries or {}) do
+      if type(e) == "table" and M.restartIdOk(e.id) and nxt.sessions[e.id] == nil then
+        e.window = type(e.window) == "table" and e.window or {}
+        local o = old[e.id]
+        if type(o) == "table" then
+          local ow = type(o.window) == "table" and o.window or {}
+          -- a process Claude Code's own session file named stands against the status file's pid:
+          -- a status file that outlived its process (no SessionEnd) keeps the dead one's pid even
+          -- after the session is resumed under another
+          if ow.confirmed then e.window.pid = ow.pid end
+          if e.window.pid == nil or ow.pid == nil or e.window.pid == ow.pid then
+            for _, k in ipairs(STICKY) do if e.window[k] == nil then e.window[k] = ow[k] end end
+          end
+          if e.kind == nil then e.kind = o.kind end
+          -- reopened by Shepherd: the stamp stays until a hook of that session writes again
+          local r = tonumber(o.restarted)
+          if r and (tonumber(updated[e.id]) or 0) <= r then e.restarted = r end
+        end
+        nxt.sessions[e.id] = e
+      end
+    end
+    for id, o in pairs(old) do
+      if nxt.sessions[id] == nil and not forget[id] and type(o) == "table" then
+        local ended = tonumber(o.ended) or now
+        if now - math.max(ended, tonumber(o.restarted) or 0) <= keep and not superseded(o, nxt.sessions) then
+          local c = {}
+          for k, v in pairs(o) do c[k] = v end
+          c.ended = ended
+          nxt.sessions[id] = c
+        end
+      end
+    end
+    return nxt, M.tileSignature(nxt.sessions) ~= M.tileSignature(old)
+  end
+
+  -- Claude Code's own session files (~/.claude/sessions/<pid>.json, by pid) name each session's
+  -- process and when it started: the pid a kitty or Terminal session's status file never carries,
+  -- and the start time that tells a live process from a reused pid. A process they named is
+  -- `confirmed`: only such a session can ever be verified dead (M.restartLiveness). The file of
+  -- the process already on record wins, else the newest; with no file for the session (it goes
+  -- when the process does) the entry keeps what it has. True when the entry changed.
+  function M.restartApplyRegistry(entry, registry)
+    if type(entry) ~= "table" or type(registry) ~= "table" then return false end
+    entry.window = type(entry.window) == "table" and entry.window or {}
+    local w, best, bestAt = entry.window, nil, nil
+    for pid, r in pairs(registry) do
+      if type(r) == "table" and r.sessionId == entry.id then
+        local d = rsPid(r.pid) or rsPid(pid)
+        local at = (d == w.pid) and math.huge or (tonumber(r.startedAt) or 0)
+        if d and (bestAt == nil or at > bestAt) then
+          best, bestAt = { pid = d, procStart = rsStr(r.procStart), kind = rsStr(r.kind) }, at
+        end
+      end
+    end
+    if not best or (w.confirmed and w.pid == best.pid and w.procStart == best.procStart and entry.kind == best.kind) then
+      return false
+    end
+    if w.pid ~= best.pid then w.tty, w.shell, w.shellStart = nil, nil, nil end
+    w.pid, w.procStart, w.confirmed = best.pid, best.procStart, true
+    entry.kind = best.kind   -- "interactive", or a headless run's kind: that one is never reopened
+    return true
+  end
+
+  -- A Terminal session's tab is found again through the shell that ran it: claude's parent, that
+  -- shell's start time, and the tty they share. One command, run once when the session is first
+  -- seen; only digits reach it.
+  function M.restartShellProbeCmd(pid)
+    local d = rsPid(pid)
+    if not d then return nil end
+    return "p=" .. d .. '; pp=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d " "); '
+      .. 'LC_ALL=C TZ=UTC ps -o pid=,ppid=,tty=,lstart= -p "$p" 2>/dev/null; '
+      .. '[ -n "$pp" ] && LC_ALL=C TZ=UTC ps -o pid=,ppid=,tty=,lstart= -p "$pp" 2>/dev/null; true'
+  end
+  function M.restartApplyShell(entry, out)
+    if type(entry) ~= "table" or type(entry.window) ~= "table" or not entry.window.pid then return false end
+    local rows = {}
+    radarLines(tostring(out or ""), function(line)
+      local pid, ppid, tty, start = line:match("^%s*(%d+)%s+(%d+)%s+(%S+)%s+(%S.-)%s*$")
+      if pid and start:match("%d%d%d%d$") then rows[tostring(tonumber(pid))] = { ppid = tostring(tonumber(ppid)), tty = tty, start = start } end
+    end)
+    local me = rows[entry.window.pid]
+    local sh = me and rows[me.ppid] or nil
+    if not me or not sh or not me.tty:match("^ttys?%d+$") or sh.tty ~= me.tty then return false end
+    entry.window.tty, entry.window.shell, entry.window.shellStart = "/dev/" .. me.tty, me.ppid, sh.start
+    return true
+  end
+
+  -- The liveness probe: one ps for every process the plan hangs on, in Claude Code's own zone and
+  -- locale (procStart was written that way; any other reads every live process as a reused pid).
+  function M.restartProbePids(snap, registry)
+    local pids = {}
+    local sessions = (type(snap) == "table" and type(snap.sessions) == "table") and snap.sessions or {}
+    for _, e in pairs(sessions) do
+      local w = type(e) == "table" and type(e.window) == "table" and e.window or {}
+      if rsPid(w.pid) then pids[rsPid(w.pid)] = true end
+      if rsPid(w.shell) then pids[rsPid(w.shell)] = true end
+    end
+    for pid, r in pairs(type(registry) == "table" and registry or {}) do
+      if type(r) == "table" and type(r.sessionId) == "string" and sessions[r.sessionId] then
+        local d = rsPid(r.pid) or rsPid(pid)
+        if d then pids[d] = true end
+      end
+    end
+    return pids
+  end
+  function M.restartPsCmd(pids)
+    local list, seen = {}, {}
+    for p in pairs(pids or {}) do
+      local d = rsPid(p)
+      if d and not seen[d] then seen[d] = true; list[#list + 1] = d end
+    end
+    if #list == 0 then return nil end
+    table.sort(list)
+    return "LC_ALL=C TZ=UTC ps -o pid=,lstart= -p " .. table.concat(list, ",") .. " 2>/dev/null"
+  end
+  -- ps's answer -> { [pid] = its start time }. A pid it didn't list is gone.
+  function M.parsePsLstart(out)
+    local res = {}
+    radarLines(tostring(out or ""), function(line)
+      local pid, start = line:match("^%s*(%d+)%s+(%S.-)%s*$")
+      -- a whole lstart ends in its year; a line torn mid-time is no answer
+      if pid and start:match("%d%d%d%d$") then res[tostring(tonumber(pid))] = start end
+    end)
+    return res
+  end
+
+  -- Is this session verified dead? facts = { probed (ps showed Shepherd's own pid), asked = the
+  -- pids ps was asked about, lstart = M.parsePsLstart, registry = FX.readSessions() }.
+  -- "dead": no session file names it under a process that still runs, and its own recorded process
+  -- -- one a session file named while it lived -- is gone or is another process now. "alive" + why.
+  -- "unknown" + why: anything that can't be shown either way -- a probe that failed, a pid ps was
+  -- never asked about, no pid on record, a pid no session file ever confirmed.
+  -- Only "dead" is ever reopened.
+  function M.restartLiveness(e, facts)
+    facts = type(facts) == "table" and facts or {}
+    if type(e) ~= "table" then return "unknown", "no session" end
+    if not facts.probed or type(facts.lstart) ~= "table" or type(facts.asked) ~= "table" then
+      return "unknown", "ps gave no answer"
+    end
+    local function state(pid, procStart)
+      if not facts.asked[pid] then return "unknown" end
+      local ls = facts.lstart[pid]
+      if ls == nil then return "dead" end
+      if procStart and ls ~= "" and ls ~= procStart then return "dead" end   -- that pid is another process now
+      return "alive"
+    end
+    for pid, r in pairs(type(facts.registry) == "table" and facts.registry or {}) do
+      if type(r) == "table" and r.sessionId == e.id then
+        local d = rsPid(r.pid) or rsPid(pid)
+        local st = d and state(d, rsStr(r.procStart)) or "unknown"
+        if st == "alive" then return "alive", "it is running (pid " .. d .. ")" end
+        if st ~= "dead" then return "unknown", "its session file's process wasn't checked" end
+      end
+    end
+    local w = type(e.window) == "table" and e.window or {}
+    if not w.pid then return "unknown", "no process id on record" end
+    -- a pid only the status file named may be stale, and with no session files at all (an older
+    -- Claude Code) "no file names it" proves nothing: such a session is never called dead
+    if not w.confirmed then return "unknown", "Claude Code's session files never named its process" end
+    local st = state(w.pid, w.procStart)
+    if st == "alive" then return "alive", "its process is still running (pid " .. w.pid .. ")" end
+    if st ~= "dead" then return "unknown", "its process wasn't checked" end
+    return "dead"
+  end
+
+  -- What `kitty @ ls --match id:<n>` says about a session's old window: "gone" (no such window),
+  -- "idle" (one window, at a shell prompt: a line typed there runs) or "busy" (anything else --
+  -- something is running in it, or kitty didn't say).
+  function M.kittyWindowIdle(lsOutput)
+    local ok, data = pcall(function() return M.json.decode(tostring(lsOutput or "")) end)
+    if not ok or type(data) ~= "table" then return "gone" end
+    local wins = {}
+    for _, osw in ipairs(data) do
+      for _, tab in ipairs(type(osw) == "table" and type(osw.tabs) == "table" and osw.tabs or {}) do
+        for _, win in ipairs(type(tab) == "table" and type(tab.windows) == "table" and tab.windows or {}) do
+          if type(win) == "table" then wins[#wins + 1] = win end
+        end
+      end
+    end
+    if #wins == 0 then return "gone" end
+    local fp = wins[1].foreground_processes
+    if #wins ~= 1 or type(fp) ~= "table" or #fp == 0 then return "busy" end
+    for _, p in ipairs(fp) do
+      local cmd = type(p) == "table" and type(p.cmdline) == "table" and p.cmdline[1] or nil
+      local base = (type(cmd) == "string" and cmd:match("([^/]+)$") or ""):gsub("^%-", "")
+      if not M.RESTART_SHELLS[base] then return "busy" end
+    end
+    return "idle"
+  end
+
+  -- The line that reopens a session from a shell: cd <its folder> && claude [--permission-mode m] -r <id>.
+  -- opts = { permissionMode, env (M.providerEnv), claudeBin }. nil for anything that isn't a session id.
+  function M.restartShellLine(dir, id, opts)
+    opts = type(opts) == "table" and opts or {}
+    if not M.restartIdOk(id) or not rsDir(dir) then return nil end
+    local flags = M.spawnFlags(opts.permissionMode, nil, false)
+    for _, f in ipairs(M.spawnExtraFlags({ resume = id })) do flags[#flags + 1] = f end
+    return M.spawnInner(rsDir(dir), nil, { env = opts.env, flags = flags, claudeBin = opts.claudeBin })
+  end
+
+  -- Terminal: run `line` in the tab on `tty`, only while that tab is idle at its prompt. The
+  -- script answers "tab" when it did, "none" when no idle tab has that tty (the caller then opens
+  -- a new window). nil for a tty that isn't one.
+  function M.restartTerminalScript(term, tty, line)
+    if type(tty) ~= "string" or not tty:match("^/dev/ttys?%d+$") or type(line) ~= "string" or line == "" then return nil end
+    return table.concat({
+      "tell application " .. asquote(term or "Terminal"),
+      "  repeat with w in windows",
+      "    repeat with t in tabs of w",
+      "      if (tty of t) is " .. asquote(tty) .. " and (busy of t) is false then",
+      "        do script " .. asquote(line) .. " in t",
+      '        return "tab"',
+      "      end if",
+      "    end repeat",
+      "  end repeat",
+      "end tell",
+      'return "none"',
+    }, "\n")
+  end
+
+  -- The plan: what a restart would reopen, where and how -- and what it leaves alone, and why.
+  -- facts = M.restartLiveness's, plus now, exists(dir) and kittyState(entry) ("idle" | "busy" |
+  -- "gone", asked only for a dead kitty session). opts = { waveSeconds, cfg (for a gateway
+  -- session's provider) }. Each session id is one row. Returns { rows, reopen, older, skipped }:
+  --   row = { id, name, editor, dir, root, mode, model, turn, ended, verdict = "reopen" | "skip",
+  --           how = "tab" | "kitty-window" | "kitty-new" | "terminal-tab" | "terminal-new", where,
+  --           command, continue (a Continue follows), older (it ended before the last wave: listed,
+  --           not ticked), reason + why (a skip) }
+  function M.restartPlan(snap, facts, opts)
+    opts = type(opts) == "table" and opts or {}
+    facts = type(facts) == "table" and facts or {}
+    local now = tonumber(facts.now) or os.time()
+    local wave = tonumber(opts.waveSeconds) or M.RESTART.waveSeconds
+    local src = (type(snap) == "table" and type(snap.sessions) == "table") and snap.sessions or {}
+    local byId, ids = {}, {}
+    for k, e in pairs(src) do
+      local id = type(e) == "table" and (e.id or (type(k) == "string" and k)) or nil
+      -- a headless run (claude -p: its session file says a kind other than "interactive") was
+      -- never a window to reopen: it is not part of the plan at all
+      local headless = type(e) == "table" and type(e.kind) == "string" and e.kind ~= "interactive"
+      if M.restartIdOk(id) and byId[id] == nil and not headless then byId[id] = e; ids[#ids + 1] = id end
+    end
+    table.sort(ids)
+    local rows, leftover, newest = {}, false, 0
+    for _, id in ipairs(ids) do
+      local e = byId[id]
+      local w = type(e.window) == "table" and e.window or {}
+      local dir = rsDir(e.dir) or rsDir(e.cwd)
+      local row = { id = id, name = tostring(e.name or id), editor = e.editor, dir = dir,
+                    root = rsDir(e.root) or dir, mode = e.mode, model = e.model,
+                    turn = e.turn == true, ended = tonumber(e.ended) }
+      local function skip(reason, why) row.verdict, row.reason, row.why = "skip", reason, why end
+      local live, why = M.restartLiveness(e, facts)
+      if tonumber(e.restarted) then
+        skip("reopened", "already reopened " .. rsAgo(now - tonumber(e.restarted)) .. " ago")
+      elseif live == "alive" then
+        skip("alive", why)
+      elseif live ~= "dead" then
+        skip("unverified", "can't tell that it is dead: " .. tostring(why))
+      elseif not M.RESTART_EDITORS[e.editor] then
+        skip("editor", "its editor isn't one Shepherd can reopen it in")
+      elseif not dir then
+        skip("gone", "no folder on record")
+      elseif type(facts.exists) == "function" and not facts.exists(dir) then
+        skip("gone", "its folder is gone: " .. dir)
+      elseif e.editor == "vscode" or e.editor == "cursor" then
+        row.verdict, row.how = "reopen", "tab"
+        row.where = "its tab in " .. rsBase(row.root) .. "'s " .. M.RESTART_EDITORS[e.editor] .. " window"
+        row.command = "the Claude extension's link for session " .. id
+      else
+        local rs = M.respawnSpec({ cwd = dir, editor = e.editor, permission_mode = e.mode, model = e.model,
+                                   base_url = e.baseUrl }, opts.cfg)
+        if not rs.canRespawn then
+          skip("provider", tostring(rs.reason))
+        else
+          row.verdict, row.command, row.continue = "reopen", "claude -r " .. id, (e.turn == true) or nil
+          if e.editor == "kitty" then
+            local st = (w.kittyWindowId and type(facts.kittyState) == "function") and facts.kittyState(e) or "gone"
+            row.how = (st == "idle") and "kitty-window" or "kitty-new"
+            row.where = (st == "idle") and "its kitty window" or "a new kitty window"
+          else
+            local same = w.tty and w.shell and w.shellStart and facts.asked[w.shell]
+              and facts.lstart[w.shell] == w.shellStart
+            row.how = same and "terminal-tab" or "terminal-new"
+            row.where = same and "its Terminal tab" or "a new Terminal window"
+          end
+        end
+      end
+      if row.verdict == "reopen" then
+        if row.ended == nil then leftover = true else newest = math.max(newest, row.ended) end
+      end
+      rows[#rows + 1] = row
+    end
+    -- The last wave: what went down with the newest ending -- or is down right now, its status file
+    -- still there (a crash or a reboot fires no SessionEnd). A session closed long before that is
+    -- listed, but not ticked.
+    local anchor = leftover and now or newest
+    local plan = { rows = rows, reopen = 0, older = 0, skipped = 0 }
+    for _, row in ipairs(rows) do
+      if row.verdict == "reopen" then
+        if row.ended ~= nil and anchor - row.ended > wave then row.older = true; plan.older = plan.older + 1
+        else plan.reopen = plan.reopen + 1 end
+      else
+        plan.skipped = plan.skipped + 1
+      end
+    end
+    local function rank(r) return (r.verdict ~= "reopen") and 3 or (r.older and 2 or 1) end
+    table.sort(rows, function(a, b)
+      if rank(a) ~= rank(b) then return rank(a) < rank(b) end
+      if tostring(a.root) ~= tostring(b.root) then return tostring(a.root) < tostring(b.root) end
+      if a.name ~= b.name then return a.name < b.name end
+      return a.id < b.id
+    end)
+    return plan
+  end
+
+  -- The plan as text: the panel's preview, line for line (`hs -c` shows it without a panel).
+  function M.restartPlanText(plan, now)
+    plan = type(plan) == "table" and plan or { rows = {} }
+    now = tonumber(now) or os.time()
+    local lines = { "Restart in place (dry run): " .. tostring(plan.reopen or 0) .. " would reopen, "
+      .. tostring(plan.older or 0) .. " closed earlier (not ticked), " .. tostring(plan.skipped or 0) .. " left alone" }
+    for _, r in ipairs(plan.rows or {}) do
+      local head = ((r.verdict == "reopen") and (r.older and "older   " or "reopen  ") or "skip    ")
+        .. tostring(r.name) .. " [" .. tostring(r.editor or "?") .. "] " .. tostring(r.id)
+      if r.verdict == "reopen" then
+        local bits = { tostring(r.where) .. ": " .. tostring(r.command) .. (r.continue and ", then Continue" or "") }
+        if r.turn and not r.continue then bits[#bits + 1] = "a turn was in progress" end
+        if r.mode then bits[#bits + 1] = r.mode end
+        if r.model then bits[#bits + 1] = r.model end
+        if r.ended then bits[#bits + 1] = "ended " .. rsAgo(now - r.ended) .. " ago" end
+        lines[#lines + 1] = head .. " -- " .. table.concat(bits, " · ")
+      else
+        lines[#lines + 1] = head .. " -- " .. tostring(r.why)
+      end
+    end
+    return table.concat(lines, "\n")
+  end
+
+  -- A reopened kitty or Terminal session whose turn was in progress gets `Continue` once it is
+  -- back. p = { id, at (when it was relaunched), kittyListenOn, kittyWindowId }. Its tile: the one
+  -- with its session id, else (a relaunch in its own kitty window) the one in that window.
+  function M.restartContinueTile(p, list)
+    if type(p) ~= "table" then return nil end
+    local byWindow
+    for _, it in ipairs(list or {}) do
+      if type(it) == "table" and not it.remote then
+        if it.session_id == p.id then return it end
+        if p.kittyWindowId and tostring(it.kitty_window_id or "") == p.kittyWindowId
+           and it.kitty_listen_on == p.kittyListenOn then byWindow = it end
+      end
+    end
+    return byWindow
+  end
+  -- "type" once a hook of the session has written since the relaunch (it is back; FX.typeWhenReady
+  -- then waits for it to be ready), "wait" before that, "drop" after continueSeconds.
+  function M.restartContinueDue(p, it, now)
+    if type(p) ~= "table" then return "drop" end
+    now = tonumber(now) or os.time()
+    local at = tonumber(p.at) or 0
+    if now - at > M.RESTART.continueSeconds then return "drop" end
+    if type(it) ~= "table" or (tonumber(it.updated) or 0) < at then return "wait" end
+    return "type"
+  end
 end
 
 -- ---- Find-only audit preset (build program unit 38, 2026-09-29) ----------------------------
@@ -20333,6 +20897,9 @@ M.FEATURES = {
   { key = "actions", cat = "Control", title = "Jump, nudge, stop, clear",
     what = "Act on any session from its tile — focus its window, send it a message, stop it, or clear its context.",
     why = "Drive a session without switching to it." },
+  { key = "restart", cat = "Control", new = true, title = "Restart the fleet in place",
+    what = "After a Claude Code update or a reboot, ☰ → Restart fleet lists every session that went down and how each would come back, and one click reopens them with their conversations: VS Code and Cursor tabs one at a time, kitty and Terminal sessions with claude -r, plus Continue where a turn was in progress. Only a session Shepherd can verify is dead is reopened, and never twice.",
+    why = "An update or a reboot no longer costs you the afternoon of finding and resuming every conversation by hand." },
   { key = "pins", cat = "Control", new = true, title = "Pinned links",
     what = "A session pins up to 8 links -- a preview URL, a PR, a file in its worktree -- with ~/.claude/cc-pin.sh add <link> [--label L], and they show as chips on its card and in the detail panel; a click opens one. Pins belong to the worktree, so they survive /clear, and go when its merge is verified. Only http(s) links and files under the session's git root are taken, never one holding a shell metacharacter, and each is checked again before it opens.",
     why = "The page to look at, the PR to review or the report to read is one click from the card, not somewhere in the transcript." },

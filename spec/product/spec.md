@@ -136,6 +136,17 @@ surface). Shepherd can't tell a sidebar session from an editor tab, so a Jump wo
 live session; instead you pick the tab (its title is the chat title). Revisit if the extension ever
 refuses to resume a session live elsewhere. **[DECISION D-14]**
 
+D-14 has **one exception** (2026-09-30): **restart in place**. After a Claude Code update or a
+reboot the sessions are gone, and a session with no process anywhere cannot be forked — so
+`?session=<id>` may reopen the tab of a session that is **verified dead**: no session file of
+Claude Code's (`~/.claude/sessions/`) names it under a process `ps` still shows, and its own
+recorded process is gone or is another process now (start times compared, Shepherd's own pid as the
+control; anything unverifiable counts as alive). The URI is written in one place
+(`core.restartTabUri`), sent by one function (`FX.openClaudeTab`, which verifies again right before
+it goes out) and requested by one path (`FX.restartOne`, one session at a time, each stamped so it
+is never reopened twice). Every other use stays banned: Jump, Open and New worktree tab never pass
+a session id. **[DECISION D-14, revised]**
+
 Closing **one** tab needs something inside VS Code: nothing outside can target a tab (⌘W hits
 the front one; the Claude extension's URI has no close; VS Code's Accessibility tree is off). So a
 tiny local companion extension, the **tab bridge** (`vscode-bridge/`), runs in every window's

@@ -178,6 +178,13 @@
     "enabled": true
   },
 
+  "restart": {
+    "_comment": "Restart the fleet in place (☰ → Restart fleet; nothing here turns it on or off -- it only runs on your click). Shepherd keeps ~/.claude/cc-restart.json in step with the fleet and, after a Claude Code update or a reboot, reopens the sessions that went down, each with its conversation: VS Code/Cursor tabs one at a time through the Claude extension's link for that session, kitty/Terminal sessions with claude -r <id> (in their own window when it is still there and idle, else a new one), plus Continue where a turn was in progress. The preview lists exactly what would reopen first. Only a session verified dead (no live process in ~/.claude/sessions or ps) is reopened, each at most once. waveMinutes: sessions that ended within this of the newest ending are ticked in the preview (older ones are listed unticked). keepHours: how long an ended session stays in the snapshot. dryRun: Reopen opens nothing and records what it would do in the Automation trace.",
+    "waveMinutes": 30,
+    "keepHours": 72,
+    "dryRun": false
+  },
+
   "compact": {
     "_comment": "Auto-compact with notes (OFF unless true; on in a fresh install's defaults). Shepherd sets env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE in ~/.claude/settings.json to atPct (only that key, atomically, through a symlink), so Claude Code compacts sessions started afterwards at atPct of its auto-compact window (the window less its 20k output reserve: 85 = 153k tokens of 200k, 833k of 1M). Each live session gets ~/.claude/cc-notes/<key>.due-at notesLeadPct points earlier; at the first turn end past it, cc-status.sh stop asks the session once per compaction cycle to write ~/.claude/cc-notes/<key>.notes.md (never while stop_hook_active or in plan mode). PreCompact tells the summary the notes come back; SessionStart(compact) hands them back, up to 12 KB. Turning it off takes Shepherd's own value back out of settings.json (a value you set yourself stays). Diagnostics warns if an installed claude stops reading the override.",
     "enabled": false,

@@ -490,6 +490,12 @@ echo ""
 echo "== node: Diagnostics' section header -- where the compatibility rows start, escaped (behavioral, runs the shipped doctorRowsHtml) =="
 node "$DIR/diagnostics-sections.test.js" || fail=1
 echo ""
+echo "== lua: restart the fleet in place -- the snapshot on literal status files (ended, forgotten, superseded), the plan (alive vs verified dead, each id once, per editor, the last wave), resume argv, the session link, then the preview (does nothing) and a whole run with stubbed windows: one at a time, never an alive session, never twice (stubbed hs) =="
+HOME="$(mktemp -d)" lua "$DIR/restart.test.lua" || fail=1
+echo ""
+echo "== node: the Restart fleet preview's rows -- what would reopen is ticked, what closed earlier isn't, what is left alone can't be picked, every word escaped (behavioral, runs the shipped restartRowsHtml) =="
+node "$DIR/restart-view.test.js" || fail=1
+echo ""
 
 if [ "$fail" -eq 0 ]; then
   echo "✅ ALL GREEN"

@@ -39,7 +39,7 @@ form-managed block is dropped on Save. Its tabs:
   [Providers and integrations](providers-and-integrations.md)).
 
 File-only switches include, among others: `rules.enabled`, `schedules.enabled` and
-`schedules.maxConcurrent`, `hotkeys`, `voice`, `automodel.*`, `pricing.*`, `merge.*`, `verify.*`, `resume.enabled`, `fleet.enabled`,
+`schedules.maxConcurrent`, `hotkeys`, `voice`, `automodel.*`, `pricing.*`, `merge.*`, `verify.*`, `resume.enabled`, `restart.*`, `fleet.enabled`,
 `commits.*`, `usage.limitAlerts.*`, `ask.waitSeconds`, `tabless.autoEndMinutes`,
 `escalation.hung`, `search.*`, `worklist.*`, `decisions.*`, `notifications.days`,
 `templates.sourceDir`, `context.autoCompactFraction`, and the `keystrokes`, `tabBridge`, `stacks`
@@ -67,6 +67,7 @@ The panel re-reads the file within about a second (except `hotkeys`, which need 
 | `spawn`, `providers`, `remoteControl`, `bridge` | Launching sessions, backends, Remote Control, remote tiles | [Controls](controls.md#spawn-new-sessions), [Providers and integrations](providers-and-integrations.md) |
 | `stacks`, `keystrokes`, `search`, `hotkeys`, `voice` | Project cards, the shared-window guard, search, shortcuts, Stream Deck voice | [Fleet](fleet.md), [Controls](controls.md) |
 | `lease` | Each worktree's own port (`portFrom`–`portTo`) and database folder (`dbDir`) | [Fleet](fleet.md#worktree-leases) |
+| `restart` | Restart in place: which ended sessions count as the last wave (`waveMinutes`, default 30), how long an ended session stays in the snapshot (`keepHours`, default 72), and its `dryRun` | [Fleet](fleet.md#restart-the-fleet-in-place) |
 | `appearance`, `alerts`, `worklist` | Look, on-screen alerts, My List archive | [Make it yours](customizing.md), [Fleet](fleet.md#my-list) |
 
 A starting point for the most common switches:
@@ -111,6 +112,7 @@ Everything lives under `~/.claude/`:
 | `cc-notes/` | [Handoff notes](automation.md#handoff-notes), and [auto-compact](automation.md#auto-compact-with-notes)'s due-ats and each session's own notes |
 | `cc-bridge/` | The tab bridge's per-window tab lists and command folders |
 | `cc-lease/` | [Worktree leases](fleet.md#worktree-leases): each repo's leased ports and database paths, and (by default) the databases in `db/` |
+| `cc-restart.json` | The [restart snapshot](fleet.md#restart-the-fleet-in-place): every session Shepherd could reopen, and the ones it already did (Shepherd is its only writer) |
 | `cc-policy/`, `cc-gate-tools/`, `cc-automodel/` | Per-session policy, gated-tool and auto-model settings |
 | `cc-ledger/` | The audit ledger (one JSONL file per day) |
 | `cc-labels.json`, `cc-groups.json` | Relabels and groups, by project |
