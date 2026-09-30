@@ -16984,6 +16984,7 @@ do
                 trigger = rec.trigger, at = rec.at, doneAt = rec.doneAt, lastRunAt = rec.lastRunAt, costUsd = rec.costUsd,
                 sessions = rec.sessions, cut = rec.cut, pending = pendingCount(rec), edits = {}, decisions = {} }
     if live.waiting then v.state = "waiting" elseif live.busy then v.state = "running" end
+    v.timeoutSeconds = tonumber(live.timeoutSeconds)   -- the overlay's timer says when a run gives up
     for i, e in ipairs(rec.edits or {}) do
       v.edits[i] = { i = i, section = e.section, old = e.old, new = e.new, why = e.why, evidence = e.evidence,
                      status = e.status or "pending", sha = e.sha, error = e.error, rerun = coachStale(e, REFUSALS.changed) }

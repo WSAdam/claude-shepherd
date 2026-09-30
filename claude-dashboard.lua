@@ -6699,7 +6699,8 @@ end
 function FX.pushCoach(root)
   if not wv then return end
   local rec = FX.coachRecord(root)
-  local live = { busy = FX.coachBusy(root), waiting = FX._coach.waiting[root] ~= nil }
+  local live = { busy = FX.coachBusy(root), waiting = FX._coach.waiting[root] ~= nil,
+                 timeoutSeconds = tonumber(core.config(loadConfig(), "coach.timeoutSeconds", core.COACH.timeoutSeconds)) or core.COACH.timeoutSeconds }
   local v = rec and core.coachView(rec, live)
   if not v then   -- no run yet: say so, with Run (the repo comes from a card, like the chip)
     local repo = FX.coachRepoForRoot(root)
@@ -23018,7 +23019,25 @@ local HTML = [[
     // with Apply and Skip, and each proposed DECISIONS.md entry with Add and Skip. A headless model
     // wrote every string from transcripts, so each goes through esc(); a click sends only the root
     // COACH.view came with and the item's number, never text read back out of the markup.
-    var COACH = { view: null, key: null, open: false };
+    var COACH = { view: null, key: null, open: false, timer: null };
+    // 2026-09-30: a running coach showed one still line for minutes. Its row now carries how long
+    // it has been reading (from the view's `at`) and ticks by itself every second -- the view only
+    // arrives when Lua pushes one -- so a slow run doesn't look like a dead one.
+    function coachNow(){ return Date.now() / 1000; }
+    function coachElapsedText(at, now){
+      at = Number(at); now = Number(now);
+      if(!(at > 0) || !(now >= at)) return "";
+      var s = Math.floor(now - at), m = Math.floor(s / 60), r = s % 60;
+      return m > 0 ? (m + "m " + (r < 10 ? "0" : "") + r + "s") : (r + "s");
+    }
+    function coachTick(){
+      var v = COACH.view, el = document.getElementById("co-elapsed");
+      if(!COACH.open || !v || !(v.state === "running" || v.state === "queued") || !el){ coachTickStop(); return; }
+      el.textContent = coachElapsedText(v.at, coachNow());
+    }
+    function coachTickStop(){
+      if(COACH.timer){ clearInterval(COACH.timer); COACH.timer = null; }
+    }
     function ccCoach(v){
       COACH.view = (v && typeof v === "object") ? v : null;
       if(COACH.open) renderCoach();
@@ -23029,7 +23048,10 @@ local HTML = [[
       // 2026-09-30: a suggestion whose file changed since the coach read it (e.rerun, core.coachView)
       // can only be fixed by a fresh run, so that row offers one next to Skip -- and no other row.
       var stale = rerun.replace('data-act="rerun"', 'data-act="rerun" title="The file changed since the coach read it: a fresh run reads it as it is now, and replaces these suggestions"');
-      if(v.state === "running" || v.state === "queued") st = "The coach is reading this repo's last sessions…";
+      var ran = (v.state === "running" || v.state === "queued") ? coachElapsedText(v.at, coachNow()) : "";
+      if(v.state === "running" || v.state === "queued") st = "The coach is reading this repo's last sessions…"
+        + (ran ? ' <span id="co-elapsed">' + esc(ran) + '</span> so far'
+               + (v.timeoutSeconds > 0 ? ' (it gives up at ' + esc(Math.round(v.timeoutSeconds / 60)) + 'm)' : '') : '');
       else if(v.state === "waiting") st = "The coach waits for this repo's merge checker, then reads its sessions.";
       else if(v.state === "lost") st = "Shepherd reloaded while the coach ran; it tries again by itself.";
       else if(v.state === "new") st = "The coach hasn't read this repo's sessions yet. " + rerun.replace("again", "now");
@@ -23082,6 +23104,9 @@ local HTML = [[
       body.innerHTML = coachRowsHtml(COACH.view);
       var title = document.getElementById("co-title");
       if(title) title.textContent = "🧭 Coach" + (COACH.view && COACH.view.name ? " · " + COACH.view.name : "");
+      coachTickStop();   // one ticker at most, and only while a run is in flight
+      var v = COACH.view;
+      if(v && (v.state === "running" || v.state === "queued") && v.at) COACH.timer = setInterval(coachTick, 1000);
     }
     function openCoachFor(key){
       COACH.open = true; COACH.key = key; COACH.view = null;
@@ -23093,6 +23118,7 @@ local HTML = [[
       var el = document.getElementById("coach");
       if(!el || !el.classList.contains("show")) return false;
       el.classList.remove("show"); COACH.open = false;
+      coachTickStop();
       send("coach-close");
       return true;
     }

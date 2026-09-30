@@ -599,7 +599,8 @@ instructions every session in it reads first. It suggests; nothing changes until
   was. An edit refused because `CLAUDE.md` changed gets **Run the coach again** next to Skip: a
   fresh run reads the file as it is now and replaces the suggestions (the same for a `DECISIONS.md`
   entry whose file changed). No other refusal offers it. Applying one edit doesn't block the next. **Skip** puts one aside. A `DECISIONS.md` entry is
-  added through the On purpose tab's own guard, not committed. A quiet chip shows while the coach
+  added through the On purpose tab's own guard, not committed. While it runs, the overlay counts how long it has been reading and says when it gives up
+  (`coach.timeoutSeconds`, default 10 minutes). A quiet chip shows while the coach
   reads or waits, and **🧭 ⚠** when its last run couldn't run (the overlay says why, with **Run the
   coach again**).
 

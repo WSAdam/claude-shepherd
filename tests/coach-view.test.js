@@ -34,6 +34,12 @@ const escSrc = slice("    function esc(s){", "\n    }\n");
 const rowsSrc = slice("    function coachRowsHtml(v){", "\n    }\n");
 const actSrc = slice("    function coachAct(ev){", "\n    }\n");
 const badgeSrc = slice("    function coachBadge(it){", "\n    }\n");
+const elapsedSrc = slice("    function coachElapsedText(at, now){", "\n    }\n");
+const tickSrc = slice("    function coachTick(){", "\n    }\n");
+const tickStopSrc = slice("    function coachTickStop(){", "\n    }\n");
+const renderSrc = slice("    function renderCoach(){", "\n    }\n");
+check("the panel ships coachElapsedText, coachTick and coachTickStop", elapsedSrc !== null && tickSrc !== null && tickStopSrc !== null);
+check("the panel reads the clock in one place (coachNow)", src.indexOf("    function coachNow(){ return Date.now() / 1000; }") >= 0);
 check("the panel ships coachRowsHtml", rowsSrc !== null);
 check("the panel ships coachAct", actSrc !== null);
 check("the panel ships coachBadge", badgeSrc !== null);
@@ -44,12 +50,23 @@ if (!(escSrc && rowsSrc && actSrc && badgeSrc)) {
   process.exit(1);
 }
 const sent = [];
-const lib = new Function("sent",
-  "var COACH = { view: null };\n" +
+// The clock, the document and the timers are the test's: NOW is "now" in seconds, EL the elements
+// by id, TIMERS what setInterval / clearInterval were asked for.
+const clock = { now: 1000 };
+const EL = {};
+const TIMERS = { set: [], cleared: [], next: 1 };
+const lib = new Function("sent", "clock", "EL", "TIMERS",
+  "var COACH = { view: null, key: null, open: false, timer: null };\n" +
   "function send(a, v, text){ sent.push([a, v, text]); }\n" +
   "function fmtAge(){ return '3m'; }\n" +
-  escSrc + "\n" + rowsSrc + "\n" + actSrc + "\n" + badgeSrc +
-  "\nreturn { coachRowsHtml, coachAct, coachBadge, setView: function(v){ COACH.view = v; } };")(sent);
+  "function coachNow(){ return clock.now; }\n" +
+  "var document = { getElementById: function(id){ return EL[id] || null; } };\n" +
+  "function setInterval(fn, ms){ var id = TIMERS.next++; TIMERS.set.push({ id: id, fn: fn, ms: ms }); return id; }\n" +
+  "function clearInterval(id){ TIMERS.cleared.push(id); }\n" +
+  escSrc + "\n" + (elapsedSrc || "") + "\n" + rowsSrc + "\n" + actSrc + "\n" + badgeSrc + "\n" + (tickSrc || "") + "\n" + (tickStopSrc || "") + "\n" + (renderSrc || "") +
+  "\nreturn { coachRowsHtml, coachAct, coachBadge, setView: function(v){ COACH.view = v; }, COACH: COACH," +
+  " coachElapsedText: typeof coachElapsedText === 'function' ? coachElapsedText : null," +
+  " coachTick: typeof coachTick === 'function' ? coachTick : null, renderCoach: renderCoach };")(sent, clock, EL, TIMERS);
 
 // ---- the rows ----
 const EVIL = '<img src=x onerror="alert(1)">';
@@ -106,6 +123,40 @@ eq("a stale DECISIONS.md entry offers it too, after its Skip",
   /data-act="dec-skip" data-i="0"[^>]*>Skip<\/button><button class="ib-btn" data-act="rerun"/.test(staleRows[3]) && !/data-act="rerun"/.test(staleRows[4]), true);
 const nv = lib.coachRowsHtml({ root: "/r", state: "new", edits: [], decisions: [] });
 eq("a repo the coach never read offers to run it", /hasn't read/.test(nv) && /data-act="rerun"/.test(nv), true);
+
+// ---- a running coach shows how long it has been at it (2026-09-30) ----
+// 2026-09-30: Adam ran the coach again and the overlay read "The coach is reading this repo's last
+// sessions…" for minutes with nothing moving: no way to tell a slow run from a dead one.
+const et = lib.coachElapsedText || function(){ return null; };
+eq("elapsed: seconds", et(100, 100), "0s");
+eq("elapsed: minutes and padded seconds", et(100, 165), "1m 05s");
+eq("elapsed: long runs stay in minutes", et(100, 100 + 3599), "59m 59s");
+eq("elapsed: no start, or a clock behind it, says nothing", et(undefined, 100) + "|" + et(0, 100) + "|" + et(200, 100), "||");
+clock.now = 1000 + 188;
+const runView = { root: "/r/repo", name: "repo", state: "running", at: 1000, timeoutSeconds: 600, edits: [], decisions: [] };
+const rh = lib.coachRowsHtml(runView);
+eq("a running coach shows its elapsed time in its own element", /<span id="co-elapsed">3m 08s<\/span>/.test(rh), true);
+eq("...and when it gives up", /gives up (at|after) 10m/.test(rh), true);
+eq("a queued coach counts too", /id="co-elapsed"/.test(lib.coachRowsHtml({ root: "/r", state: "queued", at: 1000, edits: [], decisions: [] })), true);
+eq("a run with no start time shows no timer", /co-elapsed/.test(lib.coachRowsHtml({ root: "/r", state: "running", edits: [], decisions: [] })), false);
+eq("a finished coach has no timer", /co-elapsed/.test(h), false);
+// the overlay re-renders only when Lua pushes a view, so the element ticks by itself
+EL["co-body"] = { innerHTML: "" }; EL["co-title"] = { textContent: "" }; EL["co-elapsed"] = { textContent: "" };
+lib.COACH.open = true; lib.COACH.view = runView;
+if (lib.renderCoach) lib.renderCoach();
+eq("rendering a running coach starts one 1-second ticker", TIMERS.set.length + ":" + (TIMERS.set[0] && TIMERS.set[0].ms), "1:1000");
+clock.now = 1000 + 189;
+if (lib.coachTick) lib.coachTick();
+eq("each tick rewrites the elapsed time", EL["co-elapsed"].textContent, "3m 09s");
+if (lib.renderCoach) lib.renderCoach();
+eq("a re-render replaces the ticker, never stacks a second one", TIMERS.set.length + ":" + TIMERS.cleared.length, "2:1");
+lib.COACH.view = view;
+if (lib.renderCoach) lib.renderCoach();
+eq("rendering a finished run stops the ticker and starts none", TIMERS.set.length + ":" + TIMERS.cleared.length + ":" + lib.COACH.timer, "2:2:null");
+lib.COACH.view = runView; lib.COACH.timer = 99; lib.COACH.open = false;
+if (lib.coachTick) lib.coachTick();
+eq("a tick with the overlay closed stops the ticker", TIMERS.cleared[TIMERS.cleared.length - 1] + ":" + lib.COACH.timer, "99:null");
+lib.COACH.view = null; lib.COACH.open = false;
 
 // ---- the clicks: the repo comes from the view Lua pushed, the edit is a number ----
 lib.setView(view);

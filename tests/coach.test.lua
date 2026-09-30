@@ -331,6 +331,12 @@ check("tile: counts what waits for Adam (an edit and an entry)", tile and tile.p
 local view = core.coachView(drec)
 check("view: every edit and entry, numbered", view and #view.edits == 2 and view.edits[2].i == 2 and #view.decisions == 1 and view.root == "/r/repo")
 
+-- 2026-09-30: the overlay of a running coach showed one still line for minutes. The view now says
+-- when the run started and when it gives up, so the panel can count.
+local rv = core.coachView({ root = "/r/repo", state = "running", at = 100, edits = {}, decisions = {} }, { busy = true, timeoutSeconds = 600 })
+check("view: a running coach carries its start and its time limit", rv and rv.state == "running" and rv.at == 100 and rv.timeoutSeconds == 600)
+check("view: ...no limit known, none claimed", core.coachView({ root = "/r/repo", state = "running", at = 100, edits = {}, decisions = {} }, { busy = true }).timeoutSeconds == nil)
+
 -- ---- a stale suggestion offers the rerun, and only a stale one (2026-09-30) ----
 -- 2026-09-30: the refusal told Adam to run the coach again, but the edit had no button for it.
 local CHG, DEC_CHG = core.coachRefusal("changed"), "DECISIONS.md changed since the coach read it"
@@ -689,5 +695,8 @@ quiet(function() fx.pushCoach(REPO) end)
 local pushed = false
 for _, js in ipairs(jsCalls) do if js:find("ccCoach(", 1, true) then pushed = true end end
 check("FX.pushCoach sends the view to the panel (ccCoach)", pushed)
+local limitSent = false
+for _, js in ipairs(jsCalls) do if js:find("ccCoach(", 1, true) and js:find('"timeoutSeconds":', 1, true) then limitSent = true end end
+check("...with the coach's time limit (coach.timeoutSeconds), for the overlay's timer", limitSent)
 
 finish()
