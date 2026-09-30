@@ -14,10 +14,16 @@ and the limits of acting on a window you're not looking at.
 - **Right-click** a tile for the context menu (below).
 
 The **header** has **New** (the new-session dialog), **☕** (keep awake), **🔒** (lock the screen),
-the **☰** menu (filter, Find in fleet, Fleet insights, Audit ledger, Routines, Templates, Agents,
-MCPs & Skills, Policy bundles, Automation rules, Cost & tokens, Diagnostics, Features list, Shift
-report, Hidden sessions, Notifications), **⚙** Settings, and the layout switcher. The small
-**⌨** button in the bottom-right corner shows every shortcut, read from the live bindings.
+the **☰** menu, **⚙** Settings, and the layout switcher. The small **⌨** button in the bottom-right
+corner shows every shortcut, read from the live bindings.
+
+The **☰** menu, top to bottom: Inbox ([the decisions inbox](approvals-and-policies.md#decisions-inbox)),
+Tickets ([cross-repo tickets](automation.md#cross-repo-tickets)), Filter sessions, Find in fleet,
+Fleet insights, Audit ledger, Routines, Templates, Agents, MCPs & Skills, Policy bundles, Automation
+rules, Automation trace ([what automation did and would do](automation.md#dry-run-and-the-automation-trace)),
+Restart fleet ([reopen what went down](fleet.md#restart-the-fleet-in-place)), Cost & tokens,
+Diagnostics, Features list, Shift report (while the ledger is on), Hidden sessions (while any are
+hidden) and Notifications.
 
 ## The context menu
 
@@ -36,6 +42,8 @@ In order (a remote SSH-bridge tile offers only Relabel and Set group):
 - **Set group…**: tag the session into a cohort ([Fleet](fleet.md#search-groups-and-bulk-actions)).
 - **Export session…**: archive the session (its transcript `.jsonl` plus a `meta.json` with label,
   provider/model, lineage and activity counts) into `~/.claude/cc-exports/` and reveal it in Finder.
+- **Capture as scenario…**: save a scrubbed window of the session's transcript for the detector
+  corpus, when a card reads wrong ([Development](development.md#capturing-a-scenario)).
 - **⚖ A/B fork-to-compare…**: run the same task as 2+ variants in isolated git worktrees of this
   project, then compare them and keep the winner ([Automation](automation.md#ab-compare)).
 - **Talk mode (discussion only)**: checked while on. The session can read and talk but not change
@@ -81,8 +89,17 @@ In order (a remote SSH-bridge tile offers only Relabel and Set group):
 - **Clear / Compact**: confirm, then run `/clear` or `/compact` in the session.
 - **Score**: rate the session 0–100 from the audit ledger
   ([Usage and cost](usage-and-cost.md#run-score)).
+- **🔎 Verify**: a read-only review of the session's work, the same one every merge request gets
+  ([Merging and batches](merging-and-batches.md#the-checker-a-read-only-review-of-every-merge-request)).
+- **🧭 Coach**: read the repo's last sessions and suggest `CLAUDE.md` edits
+  ([Automation](automation.md#the-coach)).
 - **📜 Timeline**: the audit ledger scoped to this session.
+- **⚡ Trace**: what automation did to this session, would do in a dry run, or was refused
+  ([Automation](automation.md#dry-run-and-the-automation-trace)).
+- **⏱ Time**: where the session's time went
+  ([Usage and cost](usage-and-cost.md#where-the-time-went)).
 - **⤓ Export**: the same export as the context menu's **Export session…**.
+- **⌖ Capture as scenario**: the same capture as the context menu's.
 - **Improve**: pull this repo's un-applied improvement insights from an AI Monsters leaderboard and
   send them to the session as a **review-first** prompt (assess and suggest, not wholesale edits),
   so you approve a plan before any changes. It shows "No improvements found" when the latest push's

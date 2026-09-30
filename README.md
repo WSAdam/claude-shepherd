@@ -62,7 +62,7 @@ Every feature below has a reference page one click away. The panel lists the sam
 - [**Commits today and this week**](docs/usage-and-cost.md#commits-today-and-this-week): your
   commits and lines changed per day and project, from local git, each linked to its session.
 - [**Where the time went**](docs/usage-and-cost.md#where-the-time-went): time lost to waits, limits, stalls and errors.
-- [**How often each skill works**](docs/providers-and-integrations.md#how-often-each-skill-works): runs and ok-rate per skill, hand-labelled.
+- [**How often each skill works**](docs/providers-and-integrations.md#how-often-each-skill-works): runs and ok-rate per skill, from how each run's turn ended; your own label wins.
 - [**Shift report**](docs/usage-and-cost.md#shift-report): a summary of what the fleet did while you
   were away.
 
@@ -95,7 +95,8 @@ Every feature below has a reference page one click away. The panel lists the sam
 
 ### Automate
 
-The automatic behaviours here are off until you turn them on, except handoff notes.
+A fresh install turns on auto-continue, handoff notes, resume at the limit reset and auto-compact;
+every other automatic behaviour here waits for its switch.
 
 - [**Task queue & auto-feed**](docs/automation.md#task-queue): line up tasks per session, feed the
   next when one finishes, and route a project's tasks to whichever session is free.
@@ -116,12 +117,12 @@ The automatic behaviours here are off until you turn them on, except handoff not
 - [**Auto-compact with notes**](docs/automation.md#auto-compact-with-notes): sessions compact at 85%
   of their window, write their notes just before, and get them back right after.
 - [**Automation rules**](docs/automation.md#automation-rules): when a session finishes, errors or
-  stalls, log it, relabel it, nudge it or feed it.
+  stalls, log it, relabel it, nudge it, continue it or feed its queue.
 - [**Automation dry run & trace**](docs/automation.md#dry-run-and-the-automation-trace): see what
   automation would do before it does it, and what it did, refused and why, newest first.
 - [**Routines**](docs/automation.md#routines): spawn a session or push a digest on a cron schedule.
-- [**Coach**](docs/automation.md#the-coach): weekly or from a card, Sonnet reads a repo's last sessions and
-  suggests CLAUDE.md edits with evidence; Apply commits CLAUDE.md alone.
+- [**Coach**](docs/automation.md#the-coach): weekly or on demand, a read-only Sonnet reads a repo's last
+  10 sessions and suggests `CLAUDE.md` edits with evidence; Apply commits that file alone.
 - [**Notifications & escalation**](docs/automation.md#escalation-and-watchdogs): louder nags, macOS
   banners and phone pushes when a session has waited on you too long or stalled.
 - [**A/B compare**](docs/automation.md#ab-compare): run one task as 2–4 variants in separate
@@ -168,9 +169,9 @@ The automatic behaviours here are off until you turn them on, except handoff not
 - [**Shared-window guard**](docs/controls.md#sessions-that-share-a-window): Shepherd won't type into
   a window that hosts several sessions, because the keys could land in the wrong tab.
 - [**Keep awake & screen lock**](docs/controls.md#keep-this-mac-awake): keep the Mac awake for long
-  runs, and lock the screen without pausing the sessions.
+  runs, and [lock the screen](docs/controls.md#lock-the-screen-keep-the-agents-running) without pausing the sessions.
 - [**Diagnostics**](docs/troubleshooting.md#start-with-diagnostics): a one-screen health check of the
-  hooks, the gate, the panel heartbeat, the tab bridge and the ledger, with fixes.
+  hooks, the gate, the panel heartbeat, the tab bridge, the mailbox, auto-compact and the ledger, with fixes.
 - [**Claude Code compatibility alarms**](docs/troubleshooting.md#claude-code-compatibility): each new
   Claude Code version is checked once against what Shepherd reads; a break alerts you, once.
 
@@ -178,8 +179,8 @@ The automatic behaviours here are off until you turn them on, except handoff not
 
 - [**Visual theme editor**](docs/customizing.md#appearance): 50 themes, an editor for every colour
   with live preview, and theme export and import.
-- [**Layout & density**](docs/customizing.md#layouts): cards, bar, contrast or dots, with scale,
-  tile width, font, density and reduced motion.
+- [**Layout & density**](docs/customizing.md#layouts): cards, bar, contrast or dots, with
+  [scale, tile width, font, density and reduced motion](docs/customizing.md#appearance).
 - [**Faster rendering**](docs/customizing.md#faster-rendering): the grid is rebuilt only when a
   card's content changed; otherwise only the ages update.
 
@@ -255,9 +256,9 @@ any key you haven't set).
 
 **On out of the box:** auto-continue (`autoContinue`), respawn (`respawn`), resume at the limit
 reset (`resume`), auto-compact (`compact`), worktree leases (`lease`) and the audit ledger
-(`ledger`), plus held questions, Remote Control for spawned sessions and ending leftover processes
-that have no tab. The queue, rules, routines and escalation start off. Reference:
-[docs/configuration.md](docs/configuration.md).
+(`ledger`), plus the merge checker, the worktree fence, held questions, Remote Control for spawned
+sessions and ending leftover processes that have no tab. Auto-feed, rules, routines, escalation and
+the weekly coach start off. Reference: [docs/configuration.md](docs/configuration.md).
 
 ## Safety model
 
@@ -292,16 +293,16 @@ Full detail: [docs/approvals-and-policies.md](docs/approvals-and-policies.md#the
 | Page | What's in it |
 |------|--------------|
 | [Install](docs/install.md) | Install, upgrade, uninstall, what the installer changes, the tab bridge, the Dock launcher |
-| [Fleet](docs/fleet.md) | Statuses, project cards, Instances, the detail panel and its tabs, search, groups, My List |
-| [Controls](docs/controls.md) | Clicks and menus, detail-panel buttons, shared windows, spawning, hotkeys, Stream Deck, awake and lock |
-| [Approvals and policies](docs/approvals-and-policies.md) | The safety model, the gate, policies and bundles, answering questions |
-| [Merging and batches](docs/merging-and-batches.md) | Worktree tabs, ready to merge, merge gates, batches, the demo, the tab bridge |
-| [Automation](docs/automation.md) | Queue, templates, routing, auto-model, respawn, escalation, rules, routines, A/B compare |
-| [Usage and cost](docs/usage-and-cost.md) | Context bars, plan usage, cost, commits, the audit ledger and its views |
-| [Providers and integrations](docs/providers-and-integrations.md) | Providers and models, agent profiles, MCPs and skills, Remote Control, the SSH bridge |
+| [Fleet](docs/fleet.md) | Statuses, project cards, Instances, leases, restart in place, the detail panel and its tabs, search, groups, My List |
+| [Controls](docs/controls.md) | Clicks and menus, detail-panel buttons, pinned links, shared windows, spawning, hotkeys, Stream Deck, awake and lock |
+| [Approvals and policies](docs/approvals-and-policies.md) | The safety model, the gate, always-ask commands, talk mode, the worktree fence, policies, questions, the Inbox |
+| [Merging and batches](docs/merging-and-batches.md) | Worktree tabs, ready to merge, gates, the checker, red-first, receipts, batches, the overlap radar, the demo, the tab bridge |
+| [Automation](docs/automation.md) | When automation types, dry run, queue and packets, templates, respawn, notes, the mailbox, cc-send, tickets, resume, rules, routines, the coach, A/B compare |
+| [Usage and cost](docs/usage-and-cost.md) | Context bars, plan usage, cost, commits, where the time went, the audit ledger and its views |
+| [Providers and integrations](docs/providers-and-integrations.md) | Providers and models, agent profiles, the find-only audit, MCPs and skills, Remote Control, the SSH bridge |
 | [Make it yours](docs/customizing.md) | Layouts, themes, colours, sizing |
-| [Configuration](docs/configuration.md) | Settings tabs, `cc-config.json`, the files Shepherd keeps, environment variables |
-| [Troubleshooting](docs/troubleshooting.md) | Diagnostics, "is it running?", logs, common problems, known limits |
+| [Configuration](docs/configuration.md) | Settings tabs, `cc-config.json` block by block, what's on by default, the files Shepherd keeps, environment variables |
+| [Troubleshooting](docs/troubleshooting.md) | Diagnostics, Claude Code compatibility, "is it running?", the scheduled-tasks lock, logs, known limits |
 | [Development](docs/development.md) | Architecture, tests, deploying, screenshots |
 | [Reverse-engineering user stories](docs/reverse-engineering-user-stories.md) | Writing `spec/product/` for an existing project |
 

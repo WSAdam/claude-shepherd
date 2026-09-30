@@ -32,14 +32,17 @@ const update = fs.readFileSync(path.join(cap, "update.js"), "utf8");
 const now = Math.floor(Date.now() / 1000);
 const base = { editor: "vscode", updated: now };
 // One card per state a reader should recognise: needs you, a held question, ready to merge,
-// working (a project with worktrees), errored and finished.
+// working (a project with worktrees, its leased port and what it is working on), working with a
+// pinned link, and finished with how its last turn ended.
 const FLEET = [
   Object.assign({}, base, { key: "f1", session_id: "f1", name: "checkout-api", status: "approval", since: now - 42,
     pending: { tool: "Bash", summary: "npm test -- --watch" }, needsYou: "needs", needsYouSource: "approval",
     context_frac: 0.38 }),
   Object.assign({}, base, { key: "f2", session_id: "f2", name: "web-app", status: "working", since: now - 610,
     branch: "feat/search-filters", isMainWt: false, stackSize: 3, stackKey: "web-app", stackRank: 1,
-    stackAlso: [{ b: "done", n: 1 }, { b: "working", n: 1 }], bg_active: true, bg_count: 2, context_frac: 0.57 }),
+    stackAlso: [{ b: "done", n: 1 }, { b: "working", n: 1 }], bg_active: true, bg_count: 2, context_frac: 0.57,
+    workingOn: { label: "add the price filter", tool: "Bash" },
+    lease: { port: 4101, db: "~/.claude/cc-lease/db/web-app-search-filters-4101.db" } }),
   Object.assign({}, base, { key: "f3", session_id: "f3", name: "docs-site", status: "done", since: now - 95,
     branch: "docs/getting-started", isMainWt: false, stackSize: 2, stackKey: "docs-site", stackRank: 1,
     merge: { phase: "requested", ready: true, line: "⇡ ready to merge docs/getting-started → main" },
@@ -48,9 +51,10 @@ const FLEET = [
     askHeld: true, askLine: "❓ asks you: Which date format should the export use?", needsYou: "needs",
     needsYouSource: "ask", context_frac: 0.44 }),
   Object.assign({}, base, { key: "f5", session_id: "f5", name: "data-jobs", status: "working", since: now - 1500,
-    sessTitle: "nightly import retries", queue: 2, context_frac: 0.83 }),
+    queue: 2, context_frac: 0.83, workingOn: { label: "retry the nightly import", tool: "Edit" },
+    pins: [{ url: "https://github.com/example/data-jobs/pull/12", label: "PR #12", kind: "link" }] }),
   Object.assign({}, base, { key: "f6", session_id: "f6", name: "infra", status: "done", since: now - 3600,
-    context_frac: 0.12 }),
+    context_frac: 0.12, turnLabel: "done" }),
 ];
 
 // The footer: plan windows, the fleet's tokens and the commit lines, all made up.
@@ -79,6 +83,14 @@ const REVIEW = { key: "f3", merge: {
   files: files, problems: [],
   gate: { state: "passed", code: 0, command: "make test", tail: "ok   - every relative link resolves\n-- 214 run, 0 failed --" },
   claims: [{ claim: "tests were added", verdict: "ok", evidence: "tests/docs-links.test.sh" }],
+  // The merge checker, the red-first proof and the receipt (the build program's review lines).
+  checker: { state: "done", verdict: "pass", costUsd: 0.21,
+    summary: "The guide matches the code it describes, and the link check covers every page.", findings: [], flags: [] },
+  redFirst: { state: "red", files: 1 },
+  receipt: { source: { reqs: [{ id: "REQ-004", title: "A new user can get started from the README" }] },
+    asked: { by: "prompt", text: "Write a getting-started guide and keep its links from rotting." },
+    tests: { count: 1, layers: [{ layer: "bash", files: ["tests/docs-links.test.sh"], n: 1 }] },
+    evidence: { gate: "passed", gateCommand: "make test", redFirst: "red", checker: "pass" }, knownIssues: "" },
 } };
 
 (async () => {
@@ -102,10 +114,12 @@ const REVIEW = { key: "f3", merge: {
     clip: { x: 0, y: 0, width: 560, height: Math.min(640, foot + 12) } });
   console.log("✅ wrote " + path.relative(ROOT, path.join(OUT, "panel.png")));
 
-  await page.setViewportSize({ width: 560, height: 900 });
+  await page.setViewportSize({ width: 560, height: 1200 });
   await page.evaluate((r) => {
     Object.assign(findItem(r.key), r);
     selectedKey = r.key; renderGrid(); renderDetail();
+    // In the panel the review's body scrolls inside a 220px box; the README shows it whole.
+    document.querySelector("#d-merge .dm-body").style.maxHeight = "none";
   }, REVIEW);
   await page.waitForTimeout(300);
   // The review box and the detail header row above it (name, branch, status).

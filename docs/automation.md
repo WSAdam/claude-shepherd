@@ -2,12 +2,18 @@
 
 [← README](../README.md) · [Configuration](configuration.md) · [Controls](controls.md)
 
-Every **automatic** behaviour on this page is **off until you turn it on**, in ⚙ Settings →
-Automation or in `~/.claude/cc-config.json`; the manual tools (Queue, Feed next, templates, A/B
-compare, a routine's **Run**) work without a switch. Automatic actions that type into a session are delivery-gated (a task
-leaves the queue only once it reached the session's window), skip sessions whose window hosts other
-sessions, wait until the session can take the text ([below](#when-automation-types)), and are
-recorded in the audit ledger.
+Each **automatic** behaviour on this page has a switch, in ⚙ Settings → Automation or in
+`~/.claude/cc-config.json`. A fresh install turns four on: auto-continue, the **Respawn from cwd**
+action, [resume at the limit reset](#resume-at-the-limit-reset) and
+[auto-compact with notes](#auto-compact-with-notes). [Handoff notes](#handoff-notes) and the
+[session mailbox](#session-mailbox) have no switch. Auto-feed, routing, auto-respawn, model
+auto-routing, the self-summary, escalation, rules, routines and the weekly coach start off; their
+keys are in [Configuration](configuration.md#editing-the-file-by-hand). The manual tools (Queue,
+Feed next, templates, A/B compare, a routine's **Run**) work without a switch.
+
+Automatic actions that type into a session are delivery-gated (a task leaves the queue only once
+it reached the session's window), skip sessions whose window hosts other sessions, wait until the
+session can take the text ([below](#when-automation-types)), and are recorded in the audit ledger.
 
 ## When automation types
 

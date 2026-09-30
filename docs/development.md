@@ -25,7 +25,14 @@ panel ──► ~/.claude/cc-bridge/<pid>.in/ ──► tab bridge (VS Code exte
   approval, if you turned that on.
 - [cc-merge.sh](../cc-merge.sh) and [cc-fleet.sh](../cc-fleet.sh) are the ready-to-merge and
   batch-driving channels ([Merging and batches](merging-and-batches.md)).
-- [cc-commits.sh](../cc-commits.sh) counts commits for the footer.
+- [cc-worktree-guard.sh](../cc-worktree-guard.sh) denies an `EnterWorktree` into a worktree another
+  live session is using, and [cc-resume.sh](../cc-resume.sh) waits out a usage limit
+  ([Automation](automation.md#resume-at-the-limit-reset)).
+- [cc-pin.sh](../cc-pin.sh), [cc-send.sh](../cc-send.sh), [cc-ticket.sh](../cc-ticket.sh) and
+  [cc-decide.sh](../cc-decide.sh) are the commands a session runs itself: pin a link, hand another
+  session a prompt, file a ticket for another repo, ask a question with a default.
+- [cc-commits.sh](../cc-commits.sh) counts commits for the footer, and
+  [cc-scrub.js](../cc-scrub.js) scrubs a transcript window for a captured scenario.
 - [cc-lib.sh](../cc-lib.sh) holds the helpers the hooks share.
 - [cc-core.lua](../cc-core.lua) is the pure logic: parsing, sorting, staleness, action selection,
   spawn specs, the ledger, insights, policies, merge and batch decisions. It has **no `hs.*`
@@ -69,7 +76,10 @@ and never spawns a session. How that's possible:
   runner's copy, or `CC_PLAYWRIGHT=<module path>`) and skip, saying so, without it.
 - **The docs** are checked too: [tests/readme.test.sh](../tests/readme.test.sh) fails if a relative
   link in the README or `docs/` is broken, or if an in-app feature (`core.FEATURES`) is missing from
-  the README's feature tour.
+  the README's feature tour. It also reads four lists from the code and fails when a reference
+  page lacks an entry: the config blocks and the files `--purge` removes
+  ([Configuration](configuration.md)), the detail panel's tabs ([Fleet](fleet.md#the-detail-panel))
+  and buttons, and the ☰ menu ([Controls](controls.md)).
 
 [tests/run.sh](../tests/run.sh) is the index of every suite. The critical guards are
 **mutation-checked**: reverting the fix has to turn its own test red, so an assertion can't
@@ -204,7 +214,9 @@ node tests/support/readme-screenshots.js      # writes docs/img/panel.png and do
 It loads the shipped panel through `capture-panel.lua`, replays it in headless Chromium and feeds it
 made-up sessions through the panel's own `window.ccUpdate`. Edit the fixtures in
 [tests/support/readme-screenshots.js](../tests/support/readme-screenshots.js); keep every name in
-them fictional, because the repo is public.
+them fictional, because the repo is public. The merge review's body scrolls inside a fixed box in
+the panel; the screenshot lifts that cap so the whole review shows. Look at both images after
+regenerating them: nothing checks a picture.
 
 ## Themes and layouts in code
 

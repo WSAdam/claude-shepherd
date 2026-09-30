@@ -255,6 +255,8 @@ session is never in the snapshot.
   Only read-only git runs against the repo (`rev-parse`, `status`, `diff`).
 - **User Stories**: shown only when the project has `spec/product/user-stories.md` (below).
 - **On purpose**: the repo's `DECISIONS.md`, what the project does on purpose (below).
+- **Requirements**: shown for a session in a git repo. It lists the repo's `REQ-NNN` ids and adds
+  one ([Merging and batches → Requirement ids](merging-and-batches.md#requirement-ids-and-the-merge-receipt)).
 - **Agents**: the session's subagents and Workflows (below).
 - **Queue**: the session's task queue ([Automation → Task queue](automation.md#task-queue)).
 

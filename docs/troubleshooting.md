@@ -16,6 +16,8 @@ info •, and some carry a fix. **Re-check** runs it again.
 | Headless approvals | ok when the gate is armed, info when it's off | ⚙ Settings → Approvals |
 | Tab bridge in every VS Code window | Each window hosting a session runs the bridge, at the current version | **Developer: Reload Window** there, or `make tab-bridge` (shown) |
 | Audit ledger | On or off, its size, and a warning over 50 MB | Lower `ledger.retentionDays` (shown) |
+| Mailbox | How many [mailbox](automation.md#session-mailbox) messages wait, per session | They arrive at each session's next turn end or start |
+| Auto-compact | `settings.json` carries the override, and every installed claude still reads it ([Auto-compact with notes](automation.md#auto-compact-with-notes)) | ⚙ Settings → Auto-compact: Save with it on, or check Claude Code's changelog (shown) |
 | Live sessions | How many tiles are tracked (info) | |
 | Claude Code compatibility | Its own section: whether the newest Claude Code version still has what Shepherd reads ([below](#claude-code-compatibility)) | Check Claude Code's changelog (shown) |
 

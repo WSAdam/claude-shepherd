@@ -199,7 +199,7 @@ Two sources feed it:
 
 ## The audit ledger
 
-An opt-in, append-only JSONL record at `~/.claude/cc-ledger/YYYY-MM-DD.jsonl`, one event per line:
+An optional, append-only JSONL record at `~/.claude/cc-ledger/YYYY-MM-DD.jsonl`, one event per line:
 session start and end, prompts, tool requests, gate **decisions** with who decided (`autoDeny`,
 `autoAllow`, `autopilot`, `approveRepeats`, `bundle:<name>`, `human`, or `timeout-fallback`), mode,
 model and effort changes, nudges, clears, compacts, spawns, relabels and automatic actions. It is

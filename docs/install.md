@@ -40,7 +40,9 @@ before it touches your Claude or Hammerspoon settings and says what to fix.
   `~/.claude/cc-config.json`; otherwise only the settings you haven't set are added. Change
   anything later in ⚙ Settings. Notably on: **Actually launch**
   (New really opens sessions), the audit ledger, Remote Control for spawned sessions, VS Code as
-  the editor.
+  the editor, auto-continue, respawn, resume at a usage limit's reset, auto-compact with notes,
+  worktree leases, the worktree fence and the merge checker
+  ([Configuration](configuration.md#newer-blocks-and-their-defaults)).
 - **Claude Code settings the workflow relies on**
   ([defaults/claude-settings.json](../defaults/claude-settings.json)): worktrees branch from your
   current HEAD, Remote Control at startup, push notifications, effort high. Each is added only
