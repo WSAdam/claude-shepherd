@@ -172,6 +172,7 @@ and the README's "Testing & development" section.
   delivers in ~11ms. Signal through a quiet dir (`cc-ask/.poke`), not a busy one.
 
 - The worktree isolation guard refuses commands it cannot statically verify stay inside the worktree: interpreter calls (`sed`, `node`, `lua`, `python`) with runtime-computed arguments (write the value to a temp file and reference that file — or use the `Edit` tool for in-place substitutions, which bypasses the fence entirely; `sed` has no `--` separator for its script), `HOME=...` environment prefixes on git commands (use `git -C /absolute/path` instead), and bash subshells or heredocs that mention git. Keep git invocations simple and single-purpose.
+- Lua's `a and b or c` ternary silently loses a known `false`: `false or c` evaluates to `c`, not `false`. Use explicit `if/then/else` whenever the middle value can legitimately be `false` — `c and c.tracked or nil` returns `nil` for a `tracked = false` entry, making "clean" indistinguishable from "unknown".
 
 ## Tests
 
