@@ -118,6 +118,91 @@ const readme = fs.readFileSync(path.join(ROOT, "tests/fixtures/transcripts/READM
 check("README: 'Regenerating' shows the cutter's real flags, not the old --bytes",
   readme.includes("node tests/fixtures/transcripts/scrub.js --src") && !readme.includes("[--bytes N]"));
 
+// ---- a unit's merge turn still reads "done" once scrubbed (2026-09-30) -------------------------
+// 2026-09-30: the turn label came to count a `sed -i` tick of TODO.md and `cc-merge.sh done
+// --result merged`, but the scrubber kept only `git commit` of a Bash command, so a scrubbed merge
+// turn (the corpus window tail-turn-prompt-out-of-reach.jsonl, and any capture of one) still read
+// "made progress". Each turn below is scrubbed and labelled by the real core.turnEvidence.
+const LABEL_LUA = path.join(TMP, "label.lua");
+fs.writeFileSync(LABEL_LUA, [
+  "local core = dofile(arg[1] .. '/cc-core.lua')",
+  "core.json = dofile(arg[1] .. '/tests/support/json.lua')",
+  "local f = assert(io.open(arg[2], 'r')); local s = f:read('a'); f:close()",
+  "local ev = core.turnEvidence(s)",
+  "if arg[3] == 'looping' then io.write(tostring(core.scenarioVerdicts(s).looping)); return end",
+  "io.write(tostring(core.turnOutcome(ev)), '|', tostring(ev and ev.todoDone), '|', tostring(ev and ev.merged))",
+].join("\n"));
+function labelOf(file, what) {
+  const r = spawnSync("lua", [LABEL_LUA, ROOT, file].concat(what ? [what] : []), { encoding: "utf8" });
+  return r.status === 0 ? r.stdout : "lua failed: " + (r.stderr || "").trim();
+}
+function turnOf(name, command, result) {
+  const raw = path.join(TMP, name + ".raw.jsonl"), scrubbed = path.join(TMP, name + ".jsonl");
+  const recs = [
+    { type: "user", origin: { kind: "human" }, timestamp: "2026-09-30T09:00:00.000Z",
+      message: { role: "user", content: [{ type: "text", text: "finish the zebra unit" }] } },
+    { type: "assistant", timestamp: "2026-09-30T09:00:05.000Z", message: { role: "assistant", model: "claude-opus-5-5", content: [
+      { type: "tool_use", id: "toolu_01MnOpQr", name: "Bash", input: { command, description: "Finish the zebra unit" } }] } },
+    { type: "user", timestamp: "2026-09-30T09:00:06.000Z",
+      message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_01MnOpQr", content: result }] } },
+    { type: "assistant", timestamp: "2026-09-30T09:00:08.000Z", message: { role: "assistant", model: "claude-opus-5-5", content: [
+      { type: "text", text: "The zebra unit is finished." }] } },
+  ];
+  fs.writeFileSync(raw, recs.map((r) => JSON.stringify(r)).join("\n") + "\n");
+  const r = spawnSync("node", [SCRUB, "--src", raw, "--out", scrubbed, "--tail", "65536"], { encoding: "utf8" });
+  const text = r.status === 0 ? fs.readFileSync(scrubbed, "utf8") : "";
+  const cmdOut = text ? JSON.parse(text.split("\n")[1]).message.content[0].input.command : "";
+  return { raw: labelOf(raw), scrubbed: text ? labelOf(scrubbed) : "the scrubber failed", command: cmdOut, text };
+}
+const ticked = turnOf("ticked",
+  "sed -i '' -e '418s/^- \\[ \\] Zebra counts its stripes/- [x] Zebra counts its stripes/' " +
+  "-e '419s/^- \\[ \\] Quokka smiles/- [x] Quokka smiles/' /Users/someone/zebra/TODO.md && sed -n '418p;419p' /Users/someone/zebra/TODO.md",
+  "- [x] Zebra counts its stripes\n- [x] Quokka smiles");
+eq("merge turn: TODO lines ticked with sed -i read done on the raw transcript", ticked.raw, "done|2|false");
+eq("merge turn: ...and still do once scrubbed", ticked.scrubbed, "done|2|false");
+eq("merge turn: ...the sed keeps its name, its -i and TODO.md, and nothing else",
+  ticked.command, "sed -i '' -x '000x/^- \\[ \\] xxxxx xxxxxx xxx xxxxxxx/- [x] xxxxx xxxxxx xxx xxxxxxx/' " +
+  "-x '000x/^- \\[ \\] xxxxxx xxxxxx/- [x] xxxxxx xxxxxx/' /xxxxx/xxxxxxx/xxxxx/TODO.md && sed -x '000x;000x' /xxxxx/xxxxxxx/xxxxx/TODO.md");
+const merged = turnOf("merged", "~/.claude/cc-merge.sh done --result merged 2>&1 | tail -20", "merged fix/zebra into main");
+eq("merge turn: cc-merge.sh done --result merged reads done on the raw transcript", merged.raw, "done|0|true");
+eq("merge turn: ...and still does once scrubbed", merged.scrubbed, "done|0|true");
+eq("merge turn: ...the command keeps those words alone", merged.command, "~/.xxxxxx/cc-merge.sh done --result merged 0>&0 | xxxx -00");
+const asked = turnOf("asked", "~/.claude/cc-merge.sh request --worktree /Users/someone/zebra --summary 'zebra is done' --tests 'make test: green'", "asked");
+eq("merge turn: asking for the merge is not done, scrubbed or not", asked.raw + " " + asked.scrubbed, "made progress|0|false made progress|0|false");
+check("merge turn: none of the session's own words survive",
+  !/zebra|quokka|stripes|smiles|someone|Users|finish/i.test(ticked.text + merged.text + asked.text));
+const vocabulary = new Set(fs.readFileSync(path.join(ROOT, "tests/fixtures/transcripts/vocabulary.txt"), "utf8").split(/\s+/));
+eq("merge turn: every word the scrubber keeps of those commands is in vocabulary.txt",
+  ["sed", "i", "TODO", "md", "cc", "merge", "sh", "done", "result", "merged"].filter((w) => !vocabulary.has(w)).join(" "), "");
+
+// ---- a file read in three chunks is still three reads once scrubbed (2026-09-30) ---------------
+// 2026-09-30: the loop detector came to sign a Read by its file AND its chunk (offset, limit,
+// pages), but those keys were masked like any other input key, so a scrubbed window of one file
+// read in three chunks still read as one call made three times.
+function readsOf(name, chunks) {
+  const raw = path.join(TMP, name + ".raw.jsonl"), scrubbed = path.join(TMP, name + ".jsonl");
+  const recs = [];
+  chunks.forEach((chunk, n) => {
+    recs.push({ type: "assistant", timestamp: "2026-09-30T09:10:0" + n + ".000Z", message: { role: "assistant", model: "claude-opus-5-5", content: [
+      { type: "tool_use", id: "toolu_0" + n + "StUvWx", name: "Read", input: Object.assign({ file_path: "/Users/someone/zebra/stripes.lua" }, chunk) }] } });
+    recs.push({ type: "user", timestamp: "2026-09-30T09:10:0" + n + ".500Z",
+      message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_0" + n + "StUvWx", content: "local zebra = " + n }] } });
+  });
+  fs.writeFileSync(raw, recs.map((r) => JSON.stringify(r)).join("\n") + "\n");
+  const r = spawnSync("node", [SCRUB, "--src", raw, "--out", scrubbed, "--tail", "65536"], { encoding: "utf8" });
+  const text = r.status === 0 ? fs.readFileSync(scrubbed, "utf8") : "";
+  return { raw: labelOf(raw, "looping"), scrubbed: text ? labelOf(scrubbed, "looping") : "the scrubber failed", text };
+}
+const chunked = readsOf("chunked", [{ offset: 180, limit: 140 }, { offset: 316, limit: 215 }, { offset: 124, limit: 58 }]);
+eq("chunked read: three chunks of one file are not a loop on the raw transcript", chunked.raw, "false");
+eq("chunked read: ...nor once scrubbed", chunked.scrubbed, "false");
+check("chunked read: ...a Read's offset and limit keep their names and numbers, its path masked",
+  chunked.text.includes('"input":{"file_path":"/xxxxx/xxxxxxx/xxxxx/xxxxxxx.xxx","offset":180,"limit":140}'));
+const reread = readsOf("reread", [{ offset: 180, limit: 140 }, { offset: 180, limit: 140 }, { offset: 180, limit: 140 }]);
+eq("chunked read: the same chunk read three times is a loop, scrubbed or not", reread.raw + " " + reread.scrubbed, "true true");
+const paged = readsOf("paged", [{ pages: "1-5" }, { pages: "6-10" }, { pages: "11-15" }]);
+eq("chunked read: three page ranges of one PDF are not a loop, scrubbed or not", paged.raw + " " + paged.scrubbed, "false false");
+
 try { execFileSync("rm", ["-r", TMP]); } catch (_) { /* a temp dir */ }
 console.log("-- scrub.test.js: " + run + " run, " + failed + " failed --");
 process.exit(failed === 0 ? 0 : 1);

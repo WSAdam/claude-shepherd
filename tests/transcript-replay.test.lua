@@ -200,7 +200,13 @@ do
   failedDecodes = 0
   local tail = readTail(FIXTURES .. "tail-turn-prompt-out-of-reach.jsonl", 90000)   -- the window it was cut for
   local ev = core.turnEvidence(tail or "")
-  eq("a turn whose prompt is out of reach is read from the whole window", core.turnOutcome(ev), "made progress")
+  -- 2026-09-30 (unit 47), a requirement change, not a loosened test: this read "made progress"
+  -- while the scrubber masked the two commands that make the turn "done" (its three TODO lines
+  -- ticked with sed -i, and cc-merge.sh done --result merged). cc-scrub.js keeps their words now
+  -- and the window was cut again from its raw transcript, so it reads what the real turn reads.
+  eq("a turn whose prompt is out of reach is read from the whole window", core.turnOutcome(ev), "done")
+  eq("...its three TODO lines ticked with sed counted", ev and ev.todoDone, 3)
+  eq("...and its merge seen landing", ev and ev.merged, true)
   eq("...with no prompt to name its origin", ev and ev.origin, nil)
   eq("...counting the commands that changed things", ev and ev.mutating, 8)
   eq("turn out of reach: no torn line reaches the JSON decoder", failedDecodes, 0)

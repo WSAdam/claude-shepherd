@@ -607,5 +607,61 @@ do
   fx.readFile = realRead
   hs.fs.attributes = realAttr
 end
+
+-- ---- one held question reaches the driver once (2026-09-30) ----
+-- 2026-09-30: the relay keyed "asked" by the status file's `since`, which cc-status.sh moves each
+-- time one question is published again (the hold's PreToolUse, then at its 900s timeout the tab's
+-- PermissionRequest, then its Notification). Unit 45's one question woke its driver three times.
+do
+  local function asked()
+    local n, raw = 0, read(FD .. "/b8.events.jsonl") or ""
+    for line in raw:gmatch("[^\n]+") do
+      local okd, e = pcall(json.decode, line)
+      if okd and type(e) == "table" and e.event == "asked" then n = n + 1 end
+    end
+    return n
+  end
+  local t0 = os.time()
+  local Q = "auto mode denied four commands in its worktree. How should it go on?"
+  local function pending(extra)
+    local p = { tool = "AskUserQuestion", summary = Q, message = Q,
+                ask = { { question = Q, header = "Denied", options = { { label = "Retry" }, { label = "Stop" } } } } }
+    for k, v in pairs(extra or {}) do p[k] = v end
+    return p
+  end
+  write(FD .. "/b8.json", json.encode({ v = 1, id = "b8", nonce = "n-b8", driver = { session_id = "drv", pid = "4242", name = "A-drv" },
+    repo = "/r/A", commonDir = "/r/A/.git", title = "One question", mergeWhenGreen = false, at = t0, phase = "approved",
+    units = { { type = "fix", slug = "theta", task = "Fix theta.", branch = "fix/theta" } } }))
+  write(FD .. "/b8.state.json", json.encode({ grant = { approved = true, grantMerge = false, at = t0 },
+    units = { theta = { session = { id = "ut", name = "A-t", pid = "5020" } } } }))
+  fx._fleetState.b8 = nil
+  -- cc-ask.sh holds the question (PreToolUse)
+  status("ut", "/r/A/.claude/worktrees/theta", "5020", { status = "approval", since = t0 - 906, updated = t0 - 906,
+    pending = pending(), ask_nonce = "812." .. (t0 - 906), ask_until = t0 - 6 })
+  tick()
+  check("a unit's held question is relayed  (asked=" .. asked() .. ")", asked() == 1)
+  -- the hold timed out: the tab's picker publishes the same question (PermissionRequest), `since` moves
+  status("ut", "/r/A/.claude/worktrees/theta", "5020", { status = "approval", since = t0 - 6, updated = t0 - 6, pending = pending() })
+  tick()
+  check("...once: its hold timing out to the tab's picker is the same question  (asked=" .. asked() .. ")", asked() == 1)
+  -- ...and its notification moves `since` again
+  status("ut", "/r/A/.claude/worktrees/theta", "5020", { status = "approval", since = t0, updated = t0, pending = pending({ prompt = true }) })
+  tick()
+  check("...and so is its notification six seconds later  (asked=" .. asked() .. ")", asked() == 1)
+  -- a reload forgets everything in memory; the file remembers the question
+  fx._fleetRelay = {}
+  status("ut", "/r/A/.claude/worktrees/theta", "5020", { status = "approval", since = t0 + 1, updated = t0 + 1, pending = pending({ prompt = true }) })
+  tick()
+  check("...and after a reload it is still not told again  (asked=" .. asked() .. ")", asked() == 1)
+  -- answered; later the unit asks the very same thing again
+  status("ut", "/r/A/.claude/worktrees/theta", "5020", { status = "working", since = t0 + 2, updated = t0 + 2 })
+  tick()
+  check("answering it relays nothing", asked() == 1)
+  status("ut", "/r/A/.claude/worktrees/theta", "5020", { status = "approval", since = t0 + 3, updated = t0 + 3, pending = pending() })
+  tick()
+  check("the same question asked again after its answer is a new event  (asked=" .. asked() .. ")", asked() == 2)
+  quiet(function() fx.batchStop("drv", "b8") end)
+  os.remove(T .. "/status/ut.json")
+end
 check("no keystroke anywhere", taps == 0)
 finish()

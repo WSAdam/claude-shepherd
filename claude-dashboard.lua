@@ -4913,6 +4913,9 @@ function FX.relayFleet(list)
         p.lines[#p.lines + 1] = core.unitEventLine(w.id, p.seq, w.slug, w.us.session.name, e, now)
         print("[cc-dashboard] ⇉ batch " .. w.id .. " unit " .. w.slug .. " #" .. p.seq .. ": " .. e.event)
       end
+    elseif seen ~= memo.seen[w.slug] then
+      -- 2026-09-30: a told question was answered (core.unitEvent forgot its key): nothing to write
+      memo.seen[w.slug] = seen
     end
   end
   -- the memo moves only once its lines are on disk: a failed write is retried next tick

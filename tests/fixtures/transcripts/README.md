@@ -22,10 +22,15 @@ anything here.
 What the scrubber keeps is what the detectors read and nothing else: record and block types,
 roles, models, built-in tool names, the interrupt marker, Claude Code's own tags, generic API-error
 words, a prompt's `origin.kind`, an assistant record's `attributionSkill`, the key names (never the
-values) of the tool inputs the loop and file detectors read (`file_path`, `command`, `path`, ...),
+values) of the tool inputs the loop and file detectors read (`file_path`, `command`, `path`, ...,
+and since 2026-09-30 a Read's `offset`, `limit` and `pages`, whose numbers are never masked),
 and a small outcome vocabulary: the words a denied tool result is known by (`denied`, `rejected`,
-`doesn't want to proceed`) and `git commit` in a Bash command, so a turn that ended on a denial
-reads *blocked* and one that committed reads *done*.
+`doesn't want to proceed`) and, in a Bash command, the three ways a turn says it finished
+something: `git commit`, an in-place `sed` of `TODO.md` (a line ticked) and `cc-merge.sh done
+--result merged`. So a turn that ended on a denial reads *blocked*, and one that committed, ticked
+its TODO lines or landed its merge reads *done*. Those words (`sed`, `i`, `TODO`, `md`, `cc`,
+`merge`, `sh`, `done`, `result`, `merged`, with `gsed`, `perl` and `pi`) are kept wherever they
+stand in a Bash command; none of them names anything.
 
 `check-scrubbed.js` proves it: every word in a fixture must be either a mask or listed in
 `vocabulary.txt` (Claude Code's own record keys, types and tags — short enough to read by eye). A
@@ -85,6 +90,13 @@ transcript reads *done*; this window still reads *made progress*, because the sc
 commands' words (it keeps `git commit` alone). The miss stays pinned until the scrubber keeps them
 and the window is cut again from the raw transcript.
 
+Cut again on 2026-09-30 (build program unit 47), once the scrubber kept those words: the same
+bytes of the same transcript (`--tail 90000 --end-at 703921`; the session had written 923 bytes
+more since the first cut). Four lines differ from the first cut, all of them Bash commands: the
+`sed -i ... TODO.md` and the `cc-merge.sh done --result merged` the label reads, and two `git`
+commands whose `merge` is now kept. The window reads *done*, as the real turn does, and the
+corpus no longer pins a miss.
+
 `scrub.js` keeps a prompt's `origin.kind` (`human`, `peer`, `task-notification`) since these two
 were cut; the fixtures above them were cut before that, so their `origin` is masked.
 
@@ -109,6 +121,11 @@ with none. Each is labelled in `tests/scenario-replay.test.lua`, which says what
   calls, so it reads as one edit attempted three times. Once different edits stopped reading as a
   loop the corpus had no window where the loop detector says yes; this is the one that holds it to
   a true repeat. Only those two inputs differ from its source (the two lines' lengths with them).
+- **`tail-one-file-read-in-three-chunks.jsonl`** — cut 2026-09-30 (build program unit 47): three
+  Reads of one long file in a row, each a different `offset` and `limit`. Not a loop, but
+  `core.toolCallSig` signed a Read by its path alone, so the loop detector said it was. A Read is
+  signed by its chunk too now, and the scrubber keeps the keys `offset` and `limit` (their numbers
+  were never masked) so the window shows three different reads. `--tail 20480 --end-at 15173247`.
 - **`tail-connection-dropped-retrying.jsonl`** / **`tail-connection-dropped-recovered.jsonl`** — a
   dropped connection (`ECONNRESET`) while Claude Code retried, and the same session seven seconds
   later, answering again: *error*, then not. `--tail 16400` (at 16384 the torn first line split a

@@ -73,7 +73,9 @@ local CORPUS = {
     -- merged` (tests/core.test.lua), so the raw transcript reads "done". This window still reads
     -- "made progress": the scrubber masks both commands' words (it keeps only `git commit`), and
     -- the window can only be cut again from the raw transcript. Still a miss HERE, not live.
-    miss = { turn = "made progress" } },
+    -- 2026-09-30 (unit 47): cc-scrub.js keeps those commands' words and the window was cut again
+    -- from its raw transcript (same bytes, same offsets), so it reads "done": the miss entry is gone.
+  },
 
   -- ---- cut for the corpus (2026-09-29): a detector with no case, and the labels with none ----
   { name = "Voice-Agent's '2h Working' card: Adam stopped a TaskOutput wait",
@@ -97,6 +99,12 @@ local CORPUS = {
     -- stopped reading as a loop, no real window had one; this holds the detector to a true repeat.
     fixture = "tail-one-edit-repeated-three-times.jsonl", window = 16384,
     expect = { turn = NA, resumed = NA, awaiting = false, interrupted = false, error = false, looping = true } },
+  { name = "one file read in three chunks in a row, each a different part of it",
+    -- 2026-09-30 (unit 47): core.toolCallSig signed a Read by its file_path alone, so a long file
+    -- read in three chunks (offset/limit) read as the same call three times. A Read is signed by
+    -- its chunk too now, and cc-scrub.js keeps the keys `offset` and `limit` so the window shows it.
+    fixture = "tail-one-file-read-in-three-chunks.jsonl", window = 20480,
+    expect = { turn = NA, resumed = NA, awaiting = false, interrupted = false, error = false, looping = false } },
   { name = "a connection dropped mid-turn, Claude Code retrying",
     fixture = "tail-connection-dropped-retrying.jsonl", window = 16400,
     expect = { turn = NA, resumed = NA, awaiting = false, interrupted = false, error = true, looping = false } },

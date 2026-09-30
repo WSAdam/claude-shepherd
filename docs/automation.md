@@ -476,8 +476,9 @@ sits, when its process is gone, or when nothing is scheduled (the cases under *N
   nags once per stall with the same sound and push settings. A single tool call that is still
   running gets up to `escalation.hung.toolMinutes` (default 30) before it counts.
 - **Loop watchdog** (`escalation.loop.enabled`): a ⟳ badge when a working session keeps repeating
-  the same tool call. A command is the same by its command line, a read by its file, and an edit
-  only when it writes the same thing to the same file. Detection only.
+  the same tool call. A command is the same by its command line, a read by its file and the chunk
+  of it that was asked for (a long file read in three chunks is three reads), and an edit only
+  when it writes the same thing to the same file. Detection only.
 - **Desktop banners** (`notifications.banner.onApproval` / `onDone` / `onAutoApproved`): a macOS
   notification when a session starts needing you, finishes, or **auto-approves** a tool (that last
   one needs the audit ledger and can lag a second or two). Click it to jump to the session.

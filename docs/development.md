@@ -102,11 +102,11 @@ its accuracy without failing the suite, and a detector that starts answering dif
 or wrong another way) goes red until the table is updated.
 
 ```text
-Detector accuracy over 13 labelled moment(s) of real transcripts:
-  turn          88%  7/8 right, 1 wrong, 5 n/a
-  resumed      100%  7/7 right, 6 n/a
+Detector accuracy over 14 labelled moment(s) of real transcripts:
+  turn         100%  8/8 right, 6 n/a
+  resumed      100%  7/7 right, 7 n/a
   ...
-  looping      100%  13/13 right
+  looping      100%  14/14 right
 ```
 
 The suite also insists every tail fixture has a row, and that every detector is seen answering
@@ -129,6 +129,9 @@ Fill in what was really true (a label, `true`/`false`, or `"n/a"`), then run
 `lua tests/scenario-replay.test.lua --captures` to replay your labelled captures and see their
 accuracy; there a disagreement is reported, not failed. To add one to the corpus, follow the
 fixtures README's "From a capture to a fixture".
+
+Your captures stay through an uninstall; `uninstall.sh --purge` (`make uninstall PURGE=1`) removes
+the folder with the rest of Shepherd's state.
 
 ## Deploying changes
 

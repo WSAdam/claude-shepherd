@@ -4626,8 +4626,9 @@ end
 -- `cc-fleet.sh status` polls together. The tick now turns each unit's live state into events,
 -- appended (numbered) to cc-fleet/<id>.events.jsonl, and `cc-fleet.sh wait` relays them. Each
 -- event is told ONCE: its key (the event plus what makes it this occurrence -- the turn's
--- `since`, the request's at|sha) goes into the unit's memo, and the memo is rebuilt from the
--- file itself after a reload (M.parseUnitEvents), so a restart never re-tells anything.
+-- `since`, the request's at|sha, a question's own words) goes into the unit's memo, and the
+-- memo is rebuilt from the file itself after a reload (M.parseUnitEvents), so a restart never
+-- re-tells anything.
 M.UNIT_EVENTS = { "tab_opened", "asked", "turn_finished", "merge_requested", "gate_red",
                   "checker_fail", "merged", "blocked", "session_ended" }
 M.UNIT_EVENT_TEXT_CHARS = 300
@@ -4664,11 +4665,32 @@ function M.unitTile(us, tiles)
   return byPid
 end
 
+-- The question a tile is showing, as a relay key: every question's words, hashed -- never when
+-- it was published. Also returns the first question. nil when the tile shows none.
+-- 2026-09-30: "asked" was keyed by the tile's `since`, which cc-status.sh moves each time ONE
+-- question is published again: at PreToolUse (cc-ask.sh takes its hold), at the hold's timeout
+-- (the tab's own PermissionRequest) and at its Notification. Unit 45's one question reached its
+-- driver three times in 15 minutes, waking it each time.
+M.UNIT_ASK_KEY = "askq:"
+function M.unitAskKey(it)
+  local p = type(it) == "table" and type(it.pending) == "table" and it.pending or nil
+  local ask = p and type(p.ask) == "table" and p.ask or nil
+  if not ask or type(ask[1]) ~= "table" then return nil end
+  local words = {}
+  for _, q in ipairs(ask) do
+    if type(q) == "table" then words[#words + 1] = tostring(q.question or q.header or "") end
+  end
+  return M.UNIT_ASK_KEY .. M.cheapHash(table.concat(words, "\n")), ask[1]
+end
+
 -- A unit's new events this tick, in lifecycle order, and its memo with their keys added.
 --   seen = the keys already told for this unit (nil = none); us = Shepherd's state for the unit;
 --   it = its linked tile (nil when none links); gone = its session is known to have ended.
--- Returns events ({ event, key, text }) and the memo -- the SAME table when nothing is new, so a
--- steady state costs nothing and writes nothing.
+-- Returns events ({ event, key, text }) and the memo -- the SAME table when nothing changed, so
+-- a steady state costs nothing and writes nothing. The memo also changes, with no event, when a
+-- told question leaves its tile (answered): its key is forgotten, so the same words asked again
+-- later are a new question. While the tile still shows it -- a renewed hold, a reload (the key
+-- comes back from the events file) -- it stays told.
 function M.unitEvent(seen, us, it, gone)
   seen = type(seen) == "table" and seen or {}
   us = type(us) == "table" and us or {}
@@ -4682,14 +4704,22 @@ function M.unitEvent(seen, us, it, gone)
   end
   emit("tab_opened", "tab:" .. sid, "its tab is open: session " .. name)
   local m = type(it) == "table" and type(it.merge) == "table" and it.merge or nil
+  local answered
   if type(it) == "table" then
     local since = tostring(tonumber(it.since) or "")
-    -- a question (cc-ask.sh's hold or the tab's own picker): keyed by when it was asked, so a
-    -- hold that lapses back to the picker is the same question, not a second one
-    local p = type(it.pending) == "table" and it.pending or nil
-    local q = p and type(p.ask) == "table" and p.ask[1] or nil
-    if it.status == "approval" and type(q) == "table" then
-      emit("asked", "ask:" .. since, tostring(q.question or q.header or "a question"))
+    -- a question (cc-ask.sh's hold or the tab's own picker): keyed by the question itself, so a
+    -- hold that lapses back to the picker is the same question, not a second one. ("ask:<since>"
+    -- is the key an older build wrote: a question it told is not told again after an upgrade.)
+    local askKey, q = M.unitAskKey(it)
+    if it.status == "approval" and askKey and not seen["ask:" .. since] then
+      emit("asked", askKey, tostring(q.question or q.header or "a question"))
+    end
+    -- a told question the tile no longer shows has been answered: forget it
+    for k in pairs(seen) do
+      if k ~= askKey and type(k) == "string" and k:sub(1, #M.UNIT_ASK_KEY) == M.UNIT_ASK_KEY then
+        answered = answered or {}
+        answered[k] = true
+      end
     end
     if it.status == "done" then
       local label = (type(it.turnLabel) == "string" and it.turnLabel ~= "") and it.turnLabel or nil
@@ -4724,9 +4754,11 @@ function M.unitEvent(seen, us, it, gone)
     emit("blocked", "result:blocked", "blocked" .. (note and (": " .. note) or ""))
   end
   if gone then emit("session_ended", "ended:" .. sid, "its session " .. name .. " has ended") end
-  if #out == 0 then return out, seen end
+  if #out == 0 and not answered then return out, seen end
   local nxt = {}
-  for k in pairs(seen) do nxt[k] = true end
+  for k in pairs(seen) do
+    if not (answered and answered[k]) then nxt[k] = true end
+  end
   for _, e in ipairs(out) do nxt[e.key] = true end
   return out, nxt
 end
@@ -8418,7 +8450,11 @@ end
 -- 2026-09-30: an edit (M.EDIT_TOOLS) is signed by its WHOLE input. Its primary argument is only
 -- the file, so three different edits of one file read as one call made three times -- ordinary
 -- work, and the commonest "loop" in Adam's transcripts. Only the same edit attempted again repeats.
+-- 2026-09-30: a Read is signed by its file AND the chunk it asked for (offset, limit, pages). Its
+-- primary argument is only the file, so one long file read in three chunks read as one call made
+-- three times. A whole-file Read carries none of them and is signed by its file alone, as before.
 local LOOP_PRIMARY = { "command", "file_path", "path", "pattern", "url", "query", "prompt" }
+M.LOOP_READ_CHUNK = { "offset", "limit", "pages" }
 -- A tool input as one string that is the same whenever the input is: keys in sorted order, a
 -- list in its own.
 function M.inputSig(v)
@@ -8442,6 +8478,11 @@ function M.toolCallSig(name, input)
     else
       for _, f in ipairs(LOOP_PRIMARY) do
         if type(input[f]) == "string" and input[f] ~= "" then arg = input[f]; break end
+      end
+      if arg ~= "" and name == "Read" then
+        for _, f in ipairs(M.LOOP_READ_CHUNK) do
+          if input[f] ~= nil then arg = arg .. "\2" .. f .. "=" .. M.inputSig(input[f]) end
+        end
       end
     end
   end

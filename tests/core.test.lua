@@ -14312,5 +14312,108 @@ bug("retrying only when something retries", function()
   eq("...nor an error that needs him", retrying({ key = "e", status = "error", error_reason = "unknown" }), nil)
 end)
 
+-- ---- leftover sweep (2026-09-30, build program unit 47) ----
+-- Four logged bugs no earlier unit covered. The relay's stubbed-panel half is in fleet.test.lua,
+-- the scrubber's in scrub.test.js, the re-cut window's verdict in scenario-replay.test.lua, and
+-- the purge of ~/.claude/cc-scenarios in uninstall.test.sh.
+
+-- The batch relay repeats one held question as a new "asked" event
+bug("relay: one held question is told once", function()
+  -- 2026-09-30: core.unitEvent keyed "asked" by the tile's `since`, and cc-status.sh moves `since`
+  -- every time the same question is published again: at PreToolUse (cc-ask.sh takes its hold), at
+  -- the hold's 900s timeout (the tab's own PermissionRequest) and 6s later (its Notification).
+  -- Unit 45's one question woke its driver three times; the three tiles below are those moments.
+  local us = { session = { id = "a2", name = "claude-instance-manager-a2", pid = "5001" } }
+  local Q = "Unit 45 (fix/sweep-panel-text): auto mode denied four commands in its worktree as "
+    .. "\"Irreversible Local Destruction\". Three were read-only. Nothing is edited yet. How should it go on?"
+  local function asking(since, extra, question)
+    local t = { key = "a2", session_id = "a2", session_pid = "5001", status = "approval", since = since,
+                pending = { tool = "AskUserQuestion", summary = question or Q, message = question or Q,
+                            ask = { { question = question or Q, header = "Denied", options = { { label = "Retry" }, { label = "Stop" } } } } } }
+    for k, v in pairs(extra or {}) do t[k] = v end
+    return t
+  end
+  local function working(since) return { key = "a2", session_id = "a2", session_pid = "5001", status = "working", since = since } end
+  local function names(evs)
+    local out = {}
+    for _, e in ipairs(evs or {}) do out[#out + 1] = e.event end
+    return table.concat(out, ",")
+  end
+  local file = {}   -- the events file, as FX.relayFleet appends it
+  local function tell(seen, it)
+    local evs, nxt = core.unitEvent(seen, us, it, false)
+    for _, e in ipairs(evs) do file[#file + 1] = core.unitEventLine("b1", #file + 1, "sweep-panel-text", us.session.name, e, 0) end
+    return evs, nxt
+  end
+  local evs, seen = tell(nil, asking(1790761266, { ask_nonce = "812.1790761266", ask_until = 1790762166 }))
+  eq("a held question is told", names(evs), "tab_opened,asked")
+  evs, seen = tell(seen, asking(1790762166))
+  eq("the hold times out and the tab's picker publishes it again: the same question, not told again", names(evs), "")
+  local prompted = asking(1790762172)
+  prompted.pending.prompt = true
+  evs, seen = tell(seen, prompted)
+  eq("...nor when its notification moves `since` once more", names(evs), "")
+  local steady, same = core.unitEvent(seen, us, asking(1790762172), false)
+  check("a question that stays up is a steady state: the same memo back", #steady == 0 and same == seen)
+  -- a reload: the memo is rebuilt from the file, and the question is published under a new hold
+  local memo = core.parseUnitEvents(table.concat(file, "\n") .. "\n")
+  evs = core.unitEvent(memo.seen["sweep-panel-text"], us, asking(1790763000, { ask_nonce = "990.1790763000", ask_until = 1790763900 }), false)
+  eq("after a reload the file remembers the question, whatever its `since` is now", names(evs), "")
+  -- an events file written before this fix holds the old key; its question is not told again
+  local old = core.parseUnitEvents('{"v":1,"seq":1,"unit":"u","event":"tab_opened","key":"tab:a2"}\n'
+    .. '{"v":1,"seq":2,"unit":"u","event":"asked","key":"ask:1790761266"}\n')
+  eq("a question an older build already told (keyed by its since) is not told again by this one",
+     names(core.unitEvent(old.seen.u, us, asking(1790761266), false)), "")
+  -- answered, then the unit asks again
+  evs, seen = tell(seen, working(1790763100))
+  eq("the question is answered: nothing to tell", names(evs), "")
+  evs, seen = tell(seen, asking(1790763200, nil, "Merge it now?"))
+  eq("a different question is its own event", names(evs), "asked")
+  evs, seen = tell(seen, working(1790763300))
+  evs, seen = tell(seen, asking(1790763400))
+  eq("the first question asked again, after it was answered, is told again", names(evs), "asked")
+  evs, seen = tell(seen, asking(1790763400, { status = "working" }))
+  evs, seen = tell(seen, asking(1790763460))
+  eq("a card that read working for a tick with the question still up did not close it", names(evs), "")
+  local noTile, afterNoTile = core.unitEvent(seen, us, nil, false)
+  eq("no tile for a tick is no answer either", names(noTile), "")
+  eq("...the question still up afterwards is not told again",
+     names((core.unitEvent(afterNoTile, us, asking(1790763500), false))), "")
+  local two = asking(1790763600)
+  two.pending.ask[2] = { question = "And deploy?", header = "Deploy" }
+  eq("the same first question with a second one beside it is another ask", names((tell(seen, two))), "asked")
+end)
+
+-- One file read in three chunks reads as a loop
+bug("loop signature of a read", function()
+  -- 2026-09-30: core.toolCallSig signed a Read by its file_path alone, so a long file read in
+  -- three chunks (offset/limit) was "the same call three times". The inputs below are three Reads
+  -- of cc-status.sh from the session that fixed this.
+  local function tu(name, input) return core.json.encode({ type = "assistant",
+    message = { content = { { type = "tool_use", name = name, input = input } } } }) end
+  local function looping(...) return core.isLooping(core.transcriptToolSigs(table.concat({ ... }, "\n"), 5), 3) end
+  local P = "/r/cc-status.sh"
+  eq("one file read in three chunks is not a loop",
+     looping(tu("Read", { file_path = P, offset = 180, limit = 140 }),
+             tu("Read", { file_path = P, offset = 316, limit = 215 }),
+             tu("Read", { file_path = P, offset = 124, limit = 58 })), false)
+  eq("the same chunk read three times is one",
+     looping(tu("Read", { file_path = P, offset = 180, limit = 140 }),
+             tu("Read", { file_path = P, offset = 180, limit = 140 }),
+             tu("Read", { file_path = P, offset = 180, limit = 140 })), true)
+  eq("...and so is the whole file read three times",
+     looping(tu("Read", { file_path = P }), tu("Read", { file_path = P }), tu("Read", { file_path = P })), true)
+  eq("a chunk after two whole reads is not", looping(tu("Read", { file_path = P }), tu("Read", { file_path = P }),
+                                                     tu("Read", { file_path = P, offset = 2000 })), false)
+  eq("the same offset with another limit is another read",
+     core.toolCallSig("Read", { file_path = P, offset = 1, limit = 100 }) == core.toolCallSig("Read", { file_path = P, offset = 1, limit = 200 }), false)
+  eq("three page ranges of one PDF are not a loop",
+     looping(tu("Read", { file_path = "/r/a.pdf", pages = "1-5" }), tu("Read", { file_path = "/r/a.pdf", pages = "6-10" }),
+             tu("Read", { file_path = "/r/a.pdf", pages = "11-15" })), false)
+  eq("a whole-file Read is still signed by its file alone", core.toolCallSig("Read", { file_path = "/a/b.lua" }), "Read\1/a/b.lua")
+  eq("...whichever order its offset and limit were written in",
+     core.toolCallSig("Read", { limit = 140, file_path = P, offset = 180 }), core.toolCallSig("Read", { offset = 180, limit = 140, file_path = P }))
+end)
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

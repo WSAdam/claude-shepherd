@@ -34,8 +34,9 @@
 // models, built-in tool names, the interrupt marker, Claude Code's own <command-*>/<ide_*> tags,
 // generic API-error words, a prompt's origin kind (human, peer, task-notification), an assistant
 // record's attributionSkill, the key names of the tool inputs the loop and file detectors read,
-// and a small outcome vocabulary: the words a denied tool result is known by, and `git commit` in
-// a Bash command (a turn that committed reads "done").
+// and a small outcome vocabulary: the words a denied tool result is known by, and in a Bash command
+// the three ways a turn says it finished something (it reads "done"): `git commit`, an in-place
+// sed of TODO.md (a line ticked), and `cc-merge.sh done --result merged`.
 "use strict";
 const fs = require("fs");
 const path = require("path");
@@ -55,9 +56,12 @@ const KNOWN_KEYS = new Set(`type subtype sessionId version content timestamp cwd
   hookInfos hookErrors preventedContinuation stopReason hasOutput retryInMs retryAttempt
   maxRetries rateLimits isNetworkDown connection isSSLError code cause status headers source
   media_type data summary origin kind attributionSkill
-  file_path notebook_path path pattern url query prompt`.split(/\s+/).filter(Boolean));
+  file_path notebook_path path pattern url query prompt offset limit pages`.split(/\s+/).filter(Boolean));
 // (the last line: tool-input keys core.toolCallSig and core.turnEvidence read -- the keys, never
-// their values, which stay masked to the same shape, so a path repeated reads as repeated)
+// their values, which stay masked to the same shape, so a path repeated reads as repeated.
+// 2026-09-30: offset, limit and pages joined them -- a Read is signed by its chunk too, and with
+// those keys masked one file read in three chunks still read as a loop once scrubbed. A number
+// is never masked, so a chunk's offset and limit stay what they were.)
 
 // Below these keys nothing is structural: tool inputs/results, attachments, snapshots.
 const FREE_FORM = new Set(["input", "toolUseResult", "attachment", "snapshot", "data", "hookInfos", "diagnostics"]);
@@ -88,8 +92,15 @@ const ERROR_CODES = new Set(["400", "401", "402", "403", "408", "413", "429", "5
 // core.turnEvidence tells a denial by ("denied", "rejected", "doesn't want to proceed"), so a turn
 // that ended on one reads "blocked" rather than as a plain failure; a Bash command keeps `git` and
 // `commit` (core.bashCommits), so a turn that committed reads "done". Nothing else of either.
+// 2026-09-30: core.turnEvidence came to read two more commands as "done" -- TODO lines ticked by
+// an in-place sed (core.bashTodoTicks: the command's name, its -i, TODO.md; the "- [x]" it writes
+// is punctuation and a mask's own x) and `cc-merge.sh done --result merged` (core.bashMerged) --
+// but their words were masked, so a scrubbed merge turn still read "made progress". Kept exactly
+// as written, wherever they stand in a Bash command: none of them names anything.
 const DENIAL_WORDS = new Set(`denied rejected doesn t want to proceed`.split(/\s+/).filter(Boolean));
-const COMMAND_WORDS = new Set(["git", "commit"]);
+const COMMAND_WORDS = new Set(`git commit
+  sed gsed perl i pi TODO md
+  cc merge sh done result merged`.split(/\s+/).filter(Boolean));
 const NONE = new Set();
 
 const DETECTORS = ["turn", "resumed", "awaiting", "interrupted", "error", "looping"];   // core.SCENARIO_DETECTORS

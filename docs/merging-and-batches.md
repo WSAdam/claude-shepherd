@@ -469,6 +469,11 @@ session id, or by its process when a `/clear` gave it a new one. The file is She
 reload never tells an event twice. A stopped batch keeps relaying for 10 minutes, long enough for the
 last merge to land.
 
+One question is one `asked` event, however often its card publishes it: a question is known by its
+own words, so a hold that times out to the tab's picker (after `ask.waitSeconds`) is the same
+question, before and after a reload. Once it has been answered, the same words asked again are a
+new question.
+
 `cc-fleet.sh wait --batch <id> [--after N] [--wait-max S]` prints the events after number `N`
 (all of them without `--after`), one line each, and the command to wait for the next ones:
 
