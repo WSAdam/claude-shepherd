@@ -17,6 +17,8 @@
 # shell -- the refusals are defense in depth -- and Shepherd checks every link again before it
 # opens it: http(s) in the browser, a file with /usr/bin/open given an argv. core.pinCheck
 # (cc-core.lua) holds the same rules; tests/fixtures/pin-links.tsv holds both to one table.
+# 2026-09-30: an http(s) link may hold & -- it separates query parameters (?a=1&b=2), and refusing
+# it kept every such link off the card. A file's path, and its file:// form, still can't.
 # Exit codes: 0 done, 2 refused (the reason is printed).
 set -u
 
@@ -27,6 +29,7 @@ PINS_MAX=8
 URL_MAX=2000
 LABEL_MAX=80
 META_RE='[[:space:][:cntrl:]|&;()<>`$\"'"'"']'
+HTTP_META_RE='[[:space:][:cntrl:]|;()<>`$\"'"'"']'    # an http(s) link: the same, without &
 HTTP_RE='^[Hh][Tt][Tt][Pp][Ss]?://[^[:space:]/]'
 
 refuse() { echo "❌ cc-pin: $*"; exit 2; }
@@ -34,6 +37,7 @@ command -v jq >/dev/null 2>&1 || refuse "jq is required"
 [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] || refuse "not inside a Claude Code session (CLAUDE_CODE_SESSION_ID is unset)"
 
 has_meta() { local LC_ALL=C; [[ "$1" =~ $META_RE ]]; }
+has_http_meta() { local LC_ALL=C; [[ "$1" =~ $HTTP_META_RE ]]; }
 has_ctl() { local LC_ALL=C; [[ "$1" =~ [[:cntrl:]] ]]; }
 bytes() { local LC_ALL=C; printf '%s' "${#1}"; }
 
@@ -78,10 +82,15 @@ resolve_link() { # <arg>
   local a="$1" p real dir base
   [ -n "$a" ] || refuse "give a link: an http(s) URL, a file:// URL or a path"
   [ "$(bytes "$a")" -le "$URL_MAX" ] || refuse "the link is longer than $URL_MAX characters"
+  if [[ "$a" =~ $HTTP_RE ]]; then
+    if has_http_meta "$a"; then
+      refuse "the link holds whitespace, a quote, a backslash, a control character or a shell metacharacter (| ; ( ) < > \` \$) -- pin it without that part"
+    fi
+    LINK_KIND=http; LINK_URL="$a"; return 0
+  fi
   if has_meta "$a"; then
     refuse "the link holds whitespace, a quote, a backslash, a control character or a shell metacharacter (| & ; ( ) < > \` \$) -- pin it without that part"
   fi
-  if [[ "$a" =~ $HTTP_RE ]]; then LINK_KIND=http; LINK_URL="$a"; return 0; fi
   if [[ "$a" =~ ^[Ff][Ii][Ll][Ee]:// ]]; then
     p="${a#*://}"
     case "$p" in /*) ;; *) refuse "a file:// link names an absolute path (file:///path)" ;; esac

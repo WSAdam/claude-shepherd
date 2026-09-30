@@ -69,6 +69,10 @@ local CORPUS = {
     -- 2026-09-29: the unit flipped three TODO lines to [x] with `sed -i` (the merge protocol's last
     -- step); turnEvidence counts a flip only through an Edit/Write of TODO.md, so the turn reads
     -- "made progress" -- in the raw transcript too, not only in the scrubbed one.
+    -- 2026-09-30: turnEvidence now counts a `sed -i` tick of TODO.md and `cc-merge.sh done --result
+    -- merged` (tests/core.test.lua), so the raw transcript reads "done". This window still reads
+    -- "made progress": the scrubber masks both commands' words (it keeps only `git commit`), and
+    -- the window can only be cut again from the raw transcript. Still a miss HERE, not live.
     miss = { turn = "made progress" } },
 
   -- ---- cut for the corpus (2026-09-29): a detector with no case, and the labels with none ----
@@ -82,11 +86,17 @@ local CORPUS = {
     expect = { turn = NA, resumed = NA, awaiting = true, interrupted = false, error = false, looping = false } },
   { name = "one file edited in three places in a row, each edit different and each landing",
     fixture = "tail-one-file-edited-three-times.jsonl", window = 16384,
-    expect = { turn = NA, resumed = NA, awaiting = false, interrupted = false, error = false, looping = false },
-    -- 2026-09-29: core.toolCallSig signs an Edit by its file_path alone, so three different edits of
-    -- one file read as the same call three times. The commonest "loop" in Adam's transcripts
-    -- (the loop watchdog is off by default, so no card has flagged it yet).
-    miss = { looping = true } },
+    -- 2026-09-29: core.toolCallSig signed an Edit by its file_path alone, so three different edits
+    -- of one file read as the same call three times: the commonest "loop" in Adam's transcripts
+    -- (the loop watchdog is off by default, so no card had flagged it), pinned here as a known miss.
+    -- 2026-09-30: fixed -- an edit is signed by its whole input -- so the miss entry is gone.
+    expect = { turn = NA, resumed = NA, awaiting = false, interrupted = false, error = false, looping = false } },
+  { name = "...and the same edit attempted three times in a row",
+    -- 2026-09-30: DERIVED from the window above (the fixtures README says how): the same records,
+    -- the first edit's input repeated in the second and third calls. Once three different edits
+    -- stopped reading as a loop, no real window had one; this holds the detector to a true repeat.
+    fixture = "tail-one-edit-repeated-three-times.jsonl", window = 16384,
+    expect = { turn = NA, resumed = NA, awaiting = false, interrupted = false, error = false, looping = true } },
   { name = "a connection dropped mid-turn, Claude Code retrying",
     fixture = "tail-connection-dropped-retrying.jsonl", window = 16400,
     expect = { turn = NA, resumed = NA, awaiting = false, interrupted = false, error = true, looping = false } },

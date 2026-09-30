@@ -14114,5 +14114,203 @@ bug("old tab bridge", function()
   eq("no bridge version known: nothing to say here (the expect check refuses it)", core.fleetBridgeWarning(nil, "/r/A"), nil)
 end)
 
+-- ---- panel text and card detector sweep (2026-09-30, build program unit 45) ----
+-- One block per bug. The panel's halves are in ui.test.lua and needs-you.test.js, the shell ones in
+-- pin.test.sh and uninstall.test.sh, and the corpus rows in scenario-replay.test.lua.
+
+-- The Features list's theme editor entry says "14 themes" while Appearance offers 50
+bug("features theme count", function()
+  -- 2026-09-30: the count was typed into the entry when there were 14 and never followed the list.
+  local offered = 0
+  for _ in pairs(core.APPEARANCE_THEMES) do offered = offered + 1 end
+  local what = ""
+  for _, f in ipairs(core.FEATURES) do if f.key == "theme" then what = tostring(f.what) end end
+  eq("the theme editor entry counts the themes Appearance offers", tonumber(what:match("(%d+) themes")), offered)
+  check("...which are more than the 14 it said  (" .. offered .. ")", offered > 14)
+end)
+
+-- The Features list's Faster rendering entry says only changed tiles re-render
+bug("features render claim", function()
+  -- 2026-09-30: the grid never patched single tiles. It keeps a signature of what every card shows,
+  -- skips the rebuild on a tick where nothing changed, and otherwise rebuilds whole.
+  local what = ""
+  for _, f in ipairs(core.FEATURES) do if f.key == "render" then what = tostring(f.what):lower() end end
+  check("the Faster rendering entry doesn't claim a per-tile update", what ~= "" and not what:find("only the tiles", 1, true))
+  check("...it says the grid is rebuilt only when a card changed", what:find("rebuilt only when", 1, true) ~= nil)
+end)
+
+-- cc-config.example.json's policy attachment example never matches a real project
+bug("attachment example", function()
+  -- 2026-09-30: the example matched project "secure-*", but a session's project is its launch
+  -- folder's path encoded with dashes (-Users-me-code-secure-api), which never starts with "secure-".
+  local fh = io.open(ROOT .. "cc-config.example.json", "r")
+  local ex = core.json.decode(fh and fh:read("*a") or "{}")
+  if fh then fh:close() end
+  local comment = type(ex.policies) == "table" and tostring(ex.policies._attachments_comment or "") or ""
+  local example = comment:match("e%.g%. (%b[])")
+  check("the example config shows an attachment  (" .. tostring(example) .. ")", example ~= nil)
+  local cfg = { policies = { attachments = core.json.decode(example or "[]") } }
+  eq("the example attaches its bundle to a project in a folder named secure-api",
+     core.matchAttachment(cfg, { project = core.encodeProjectPath("/Users/me/code/secure-api") }), "read-only")
+  eq("...and not to a project named otherwise",
+     core.matchAttachment(cfg, { project = core.encodeProjectPath("/Users/me/code/website") }), nil)
+end)
+
+-- A turn that ticks its TODO lines with sed, or ends with cc-merge.sh done, reads "made progress"
+bug("turn label: sed ticks and a finished merge", function()
+  -- 2026-09-30: core.turnEvidence counted a tick only through an Edit of TODO.md and "done" only
+  -- through git commit. A unit's merge turn does neither: it runs cc-merge.sh done --result merged
+  -- and flips its lines with sed -i (the commands below have the shape of that turn's in the corpus
+  -- window tail-turn-prompt-out-of-reach.jsonl, whose own words are scrubbed).
+  local J = core.json.encode
+  local n = 0
+  local function prompt(t) return J({ type = "user", origin = { kind = "human" }, message = { role = "user", content = { { type = "text", text = t } } } }) end
+  local function said(t) return J({ type = "assistant", message = { role = "assistant", content = { { type = "text", text = t } } } }) end
+  local function call(name, input, content, isErr)
+    n = n + 1
+    return J({ type = "assistant", message = { role = "assistant", content = { { type = "tool_use", id = "tu_p" .. n, name = name, input = input } } } })
+      .. "\n" .. J({ type = "user", message = { role = "user", content = { { type = "tool_result", tool_use_id = "tu_p" .. n, content = content or "ok", is_error = isErr or nil } } } })
+  end
+  local function turn(...) return table.concat({ ... }, "\n") .. "\n" end
+  local function ev(...) return core.turnEvidence(turn(prompt("finish the unit"), ...)) end
+  local SED = "sed -i '' -e '418s/^- \\[ \\] A finished turn is labelled/- [x] A finished turn is labelled/' "
+    .. "-e '419s/^- \\[ \\] A card says what it waits on/- [x] A card says what it waits on/' "
+    .. "-e '420s/^- \\[ \\] Hands-free approvals skip a held question/- [x] Hands-free approvals skip a held question/' TODO.md "
+    .. "&& sed -n '418p;419p;420p' TODO.md"
+  local e = ev(call("Bash", { command = SED }), said("Flipped the three lines."))
+  eq("TODO lines ticked with sed -i count as ticks", e.todoDone, 3)
+  eq("...so the turn reads done", core.turnOutcome(e), "done")
+  eq("one sed script ticking two lines, split by a semicolon, still counts both",
+     ev(call("Bash", { command = "sed -i '' '3s/- \\[ \\] a/- [x] a/;4s/- \\[ \\] b/- [x] b/' /r/wt/TODO.md" }), said("Ticked.")).todoDone, 2)
+  eq("GNU sed's -i counts too", ev(call("Bash", { command = "sed -i 's/^- \\[ \\] a$/- [x] a/' TODO.md" }), said("Ticked.")).todoDone, 1)
+  eq("a sed that failed ticked nothing",
+     core.turnOutcome(ev(call("Bash", { command = "sed -i '' 's/- \\[ \\] a/- [x] a/' TODO.md" }, "sed: TODO.md: No such file or directory", true), said("It isn't there."))),
+     "made progress")
+  eq("a sed that only prints the ticked lines is a look", ev(call("Bash", { command = "sed -n '/- \\[x\\]/p' TODO.md" }), said("Listed.")).todoDone, 0)
+  eq("a sed that un-ticks a line is no tick", ev(call("Bash", { command = "sed -i '' 's/- \\[x\\] a/- [ ] a/' TODO.md" }), said("Reopened.")).todoDone, 0)
+  eq("a sed ticking boxes in some other file is no TODO tick",
+     ev(call("Bash", { command = "sed -i '' 's/- \\[ \\] a/- [x] a/' notes/ideas.md" }), said("Ticked.")).todoDone, 0)
+  eq("...nor one beside a command that only counts TODO.md's ticked lines",
+     ev(call("Bash", { command = "sed -i '' 's/a/b/' notes/ideas.md && grep -c -- '- [x]' TODO.md > /tmp/n" }), said("Counted.")).todoDone, 0)
+  eq("perl -pi ticks too", ev(call("Bash", { command = "perl -pi -e 's/^- \\[ \\] a$/- [x] a/' TODO.md" }), said("Ticked.")).todoDone, 1)
+  eq("shellSegments splits a command line outside its quotes only",
+     table.concat(core.shellSegments("sed -i '' 's/a;b|c/d/' f && echo \"x; y\" | tail -1; ls"), "#"),
+     "sed -i '' 's/a;b|c/d/' f # echo \"x; y\" # tail -1# ls")
+  e = ev(call("Bash", { command = "~/.claude/cc-merge.sh done --result merged 2>&1 | tail -20" }, "✅ merged"), said("Merged and deployed."))
+  eq("a turn that ends with cc-merge.sh done --result merged reads done", core.turnOutcome(e), "done")
+  eq("...a unit that gave up (--result blocked) isn't done",
+     core.turnOutcome(ev(call("Bash", { command = "~/.claude/cc-merge.sh done --result blocked --note 'the tests disagree'" }), said("Blocked."))), "made progress")
+  eq("...asking for the merge isn't done either",
+     core.turnOutcome(ev(call("Bash", { command = "~/.claude/cc-merge.sh request --worktree /r/wt --summary 'done --result merged' --tests 'make test: green'" }), said("Asked."))), "made progress")
+  eq("...even when its summary quotes the words, after a semicolon",
+     core.turnOutcome(ev(call("Bash", { command = "~/.claude/cc-merge.sh request --summary \"fixes the label; cc-merge.sh done --result merged now reads done\"" }), said("Asked."))), "made progress")
+  eq("...run through bash it still counts",
+     core.turnOutcome(ev(call("Bash", { command = "bash ~/.claude/cc-merge.sh done --result=merged" }), said("Merged."))), "done")
+  eq("...nor a cc-merge.sh done that was refused",
+     core.turnOutcome(ev(call("Bash", { command = "~/.claude/cc-merge.sh done --result merged" }, "❌ cc-merge: main's tracked files aren't clean", true), said("It refused."))), "made progress")
+  -- the time index folds a skill run with the same three functions, from a state an older build saved
+  local oldEv, oldSt = core.turnEvidenceNew(nil)
+  oldSt.ticks, oldSt.merges = nil, nil
+  local okOld = pcall(function()
+    for line in turn(call("Bash", { command = "sed -i '' 's/- \\[ \\] a/- [x] a/' TODO.md" })):gmatch("[^\n]+") do
+      core.turnEvidenceAdd(oldEv, oldSt, core.json.decode(line))
+    end
+  end)
+  check("a walk state saved before this fix still folds (and counts the tick)", okOld and oldEv.todoDone == 1)
+end)
+
+-- Three different Edits to one file read as a loop
+bug("loop signature of an edit", function()
+  -- 2026-09-30: core.toolCallSig signed every call by its primary argument alone, which for an
+  -- Edit is the file_path: three different edits of one file were "the same call three times",
+  -- the commonest false loop in Adam's transcripts (tail-one-file-edited-three-times.jsonl).
+  local function tu(name, input) return core.json.encode({ type = "assistant",
+    message = { content = { { type = "tool_use", name = name, input = input } } } }) end
+  local function looping(...) return core.isLooping(core.transcriptToolSigs(table.concat({ ... }, "\n"), 5), 3) end
+  local P = "/r/claude-dashboard.lua"
+  eq("three different edits of one file are not a loop",
+     looping(tu("Edit", { file_path = P, old_string = "a", new_string = "b" }),
+             tu("Edit", { file_path = P, old_string = "c", new_string = "d" }),
+             tu("Edit", { file_path = P, old_string = "e", new_string = "f" })), false)
+  eq("the same edit attempted three times is one",
+     looping(tu("Edit", { file_path = P, old_string = "a", new_string = "b" }),
+             tu("Edit", { file_path = P, old_string = "a", new_string = "b" }),
+             tu("Edit", { file_path = P, old_string = "a", new_string = "b" })), true)
+  eq("...whatever order its input's keys were written in",
+     core.toolCallSig("Edit", { new_string = "b", file_path = P, old_string = "a", replace_all = false }),
+     core.toolCallSig("Edit", { replace_all = false, file_path = P, old_string = "a", new_string = "b" }))
+  eq("three different Writes of one file are not a loop",
+     looping(tu("Write", { file_path = P, content = "one" }), tu("Write", { file_path = P, content = "two" }),
+             tu("Write", { file_path = P, content = "three" })), false)
+  eq("the same Write three times is one",
+     looping(tu("Write", { file_path = P, content = "one" }), tu("Write", { file_path = P, content = "one" }),
+             tu("Write", { file_path = P, content = "one" })), true)
+  eq("a MultiEdit is signed by every edit in it, in order",
+     core.toolCallSig("MultiEdit", { file_path = P, edits = { { old_string = "a", new_string = "b" }, { old_string = "c", new_string = "d" } } })
+       == core.toolCallSig("MultiEdit", { file_path = P, edits = { { old_string = "c", new_string = "d" }, { old_string = "a", new_string = "b" } } }), false)
+  eq("a NotebookEdit repeated is a loop too (it has no file_path)",
+     looping(tu("NotebookEdit", { notebook_path = "/r/n.ipynb", new_source = "x" }), tu("NotebookEdit", { notebook_path = "/r/n.ipynb", new_source = "x" }),
+             tu("NotebookEdit", { notebook_path = "/r/n.ipynb", new_source = "x" })), true)
+  eq("a command is still signed by the command alone", core.toolCallSig("Bash", { command = "make test", description = "Run it again" }), "Bash\1make test")
+  eq("...and a Read by its file", core.toolCallSig("Read", { file_path = "/a/b.lua" }), "Read\1/a/b.lua")
+end)
+
+-- A usage-limited card with a resume scheduled at the reset still ranks red "Needs you"
+bug("usage limit with a resume scheduled", function()
+  -- 2026-09-30: core.needsYouKind kept every usage limit red ("he waits, or switches"), written
+  -- before resume at the reset existed (unit 13). With a resume scheduled Shepherd does the waiting.
+  local NOW = 1000000
+  local function limited(extra)
+    local it = { key = "l", status = "error", error_reason = "budget_exceeded", errorEpisode = { since = NOW - 600, count = 1 } }
+    for k, v in pairs(extra or {}) do it[k] = v end
+    return it
+  end
+  local arm = { nonce = "n1", state = "waiting" }
+  local plan = { nonce = "n1", verdict = "wait", resetAt = NOW + 3600 }
+  local waiting = limited()
+  waiting.resume = core.resumeCard(arm, plan, waiting, NOW, 0)
+  eq("the fixture's card says when it resumes", waiting.resume and waiting.resume.phase, "waiting")
+  local kind, source, why = core.needsYouKind(waiting, NOW)
+  eq("a usage limit with a resume scheduled at the reset is a heads-up", kind, "fyi")
+  eq("...still from the error", source, "error")
+  check("...and says it resumes by itself  (" .. tostring(why) .. ")", type(why) == "string" and why:find("resume", 1, true) ~= nil)
+  eq("...so it ranks below a working session", core.instanceTier(waiting, {}, NOW), core.TIER_FYI)
+  local due = limited()
+  due.resume = core.resumeCard(arm, plan, due, NOW + 3601, 0)
+  eq("once the reset has passed it needs Adam again until it is going", (core.needsYouKind(due, NOW + 3601)), "needs")
+  local shared = limited()
+  shared.resume = core.resumeCard(arm, { nonce = "n1", verdict = "wait", resetAt = NOW - 300, notifiedAt = NOW - 100 }, shared, NOW, 0)
+  eq("a reset Shepherd couldn't type into a shared window is his to continue", (core.needsYouKind(shared, NOW)), "needs")
+  local model = limited()
+  model.resume = core.resumeCard(arm, { nonce = "n1", verdict = "skip", reason = "model", model = "Opus" }, model, NOW, 0)
+  eq("a per-model limit (nothing scheduled: switch model) still needs him", (core.needsYouKind(model, NOW)), "needs")
+  eq("a usage limit with no resume scheduled still needs him", (core.needsYouKind(limited(), NOW)), "needs")
+  local gone = limited({ procAlive = false })
+  gone.resume = { phase = "waiting", line = "resumes at 3:00pm", cancel = true, now = true }
+  eq("a resume scheduled for a session whose process has gone can't happen: it needs him", (core.needsYouKind(gone, NOW)), "needs")
+end)
+
+-- An error you stopped yourself, or one on an exited session, reads "Retrying" on its card
+bug("retrying only when something retries", function()
+  -- 2026-09-30: the card said "Retrying" for every heads-up whose source was an error. Only a
+  -- transient fault on a live session is being retried; core.needsYouKind now says which (its
+  -- fourth value), FX.annotateNeedsYou stamps it as it.retrying and statusWords reads that.
+  local NOW = 1000000
+  local function retrying(it) local _, _, _, r = core.needsYouKind(it, NOW); return r end
+  eq("a fresh connection blip on a live session is being retried",
+     retrying({ key = "e", status = "error", error_reason = "runtime_error", errorEpisode = { since = NOW - 5, count = 1 } }), true)
+  eq("an error Adam cancelled himself is not",
+     retrying({ key = "e", status = "error", error_reason = "user_cancelled", errorEpisode = { since = NOW - 1, count = 1 } }), nil)
+  eq("...nor a stale error on a session that has exited",
+     retrying({ key = "e", status = "error", error_reason = "runtime_error", procAlive = false, stale = true,
+                errorEpisode = { since = NOW - 400, count = 1 } }), nil)
+  eq("...nor a usage limit waiting for its reset",
+     retrying({ key = "e", status = "error", error_reason = "budget_exceeded",
+                resume = { phase = "waiting", line = "resumes at 3:00pm", cancel = true, now = true } }), nil)
+  eq("...nor a heads-up that isn't an error at all",
+     retrying({ key = "m", status = "done", merge = { phase = "merged", needsYou = true } }), nil)
+  eq("...nor an error that needs him", retrying({ key = "e", status = "error", error_reason = "unknown" }), nil)
+end)
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

@@ -139,6 +139,24 @@ pin meta "$REPO" add 'https://x.example/$(touch '"$TMP"'/pwned)'
 assert_eq "a link carrying a command substitution is refused, and never run" "2 no" \
   "$(cat "$TMP/meta.rc") $([ -e "$TMP/pwned" ] && echo yes || echo no)"
 
+# ---- a query with more than one parameter (2026-09-30) ----
+# 2026-09-30: & was refused everywhere as a shell metacharacter, so no link with two query
+# parameters (a filtered PR list, a preview with ?a=1&b=2) could be pinned -- though a link is only
+# ever opened by argv, never through a shell. In an http(s) link & is URL syntax; a file's path
+# still can't hold one, and the other metacharacters are refused as before.
+pin amp "$REPO" add 'https://github.com/org/repo/pulls?q=is%3Aopen&sort=updated&page=2' --label "Open PRs"
+assert_eq "a link with a multi-parameter query is pinned" "0" "$(cat "$TMP/amp.rc")"
+assert_json "...whole, every parameter kept" "$PFILE" '.pins[0].url' 'https://github.com/org/repo/pulls?q=is%3Aopen&sort=updated&page=2'
+pin amprm "$REPO" rm 'https://github.com/org/repo/pulls?q=is%3Aopen&sort=updated&page=2'
+assert_eq "...and unpinned by the same link" "0 gone" "$(cat "$TMP/amprm.rc") $([ -e "$PFILE" ] && echo there || echo gone)"
+printf 'x\n' > "$REPO/a&b.md"
+pin ampfile "$REPO" add 'a&b.md'
+assert_eq "a file whose name holds an & is still refused" "2 gone" "$(cat "$TMP/ampfile.rc") $([ -e "$PFILE" ] && echo there || echo gone)"
+pin ampmeta "$REPO" add 'https://x.example/?a=1&b=$(touch '"$TMP"'/pwned2)'
+assert_eq "a multi-parameter link carrying a command substitution is still refused, and never run" "2 no" \
+  "$(cat "$TMP/ampmeta.rc") $([ -e "$TMP/pwned2" ] && echo yes || echo no)"
+rm -f "$REPO/a&b.md"
+
 # Another worktree whose root encodes to the same name (/a/b-c vs /a/b/c): its file is left alone.
 rm -rf "$CC_PINS_DIR"; mkdir -p "$CC_PINS_DIR"
 jq -n --arg r "/some/other-root" '{v:1, root:$r, pins:[{url:"https://keep.example/", kind:"http", at:1}]}' > "$PFILE"

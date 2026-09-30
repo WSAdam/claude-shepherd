@@ -39,6 +39,8 @@ mkdir -p "$C/cc-audit/-r"; printf -- '- [ ] [LOW] AUD-001 x\n' > "$C/cc-audit/-r
 printf '{"v":1,"labels":{"toolu_a":{"verdict":"ok"}}}' > "$C/cc-skill-labels.json"
 mkdir -p "$C/cc-coach"; printf '{"v":1,"root":"/r","state":"done"}' > "$C/cc-coach/-r.json"
 printf '{"version":1,"written":1790000000,"sessions":[]}' > "$C/cc-restart.json"
+printf '{"version":1,"items":[]}' > "$C/cc-worklist.json"
+printf '{"version":1,"items":[{"id":"a","text":"an old done item","done":true}]}' > "$C/cc-worklist-archive.json"
 FAKE="$TMP/code"
 printf '#!/bin/sh\necho "$*" >> "%s"\nexit 0\n' "$TMP/code.calls" > "$FAKE"; chmod +x "$FAKE"
 
@@ -80,6 +82,7 @@ assert_eq "without --purge, Shepherd's settings are kept" "there" "$([ -e "$C/cc
 assert_eq "without --purge, Shepherd's state is kept" "there" "$([ -e "$C/cc-status/abc.json" ] && echo there || echo gone)"
 # 2026-09-29: Adam's skill-run labels (cc-skill-labels.json) are his data: only --purge takes them
 assert_eq "without --purge, your skill-run labels are kept" "there" "$([ -e "$C/cc-skill-labels.json" ] && echo there || echo gone)"
+assert_eq "without --purge, My List's archive is kept" "there" "$([ -e "$C/cc-worklist-archive.json" ] && echo there || echo gone)"
 
 before="$(cat "$C/settings.json" "$C/CLAUDE.md" "$H/init.lua")"
 run_uninstall
@@ -118,6 +121,10 @@ assert_eq "--purge removes the skill-run labels" "gone" "$([ -e "$C/cc-skill-lab
 assert_eq "--purge removes the coach's records" "gone" "$([ -e "$C/cc-coach" ] && echo there || echo gone)"
 # 2026-09-30: and the restart snapshot (cc-restart.json): the fleet Shepherd would reopen
 assert_eq "--purge removes the restart snapshot" "gone" "$([ -e "$C/cc-restart.json" ] && echo there || echo gone)"
+# 2026-09-30: My List's archive (cc-worklist-archive.json) was never added to the purge list, so
+# PURGE=1 took cc-worklist.json and left the done items it had moved out of it
+assert_eq "--purge removes My List" "gone" "$([ -e "$C/cc-worklist.json" ] && echo there || echo gone)"
+assert_eq "--purge removes My List's archive too" "gone" "$([ -e "$C/cc-worklist-archive.json" ] && echo there || echo gone)"
 assert_eq "--purge still keeps the user's own files" "there" "$([ -e "$C/cc-mine.sh" ] && echo there || echo gone)"
 
 # a CLAUDE.md that is only the block (a fresh machine) is removed, not left empty

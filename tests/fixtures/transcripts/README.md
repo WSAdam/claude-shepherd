@@ -79,7 +79,11 @@ the Stop of its merge-and-deploy turn (2026-09-28). The message that started the
 back, so the window holds no prompt at all: the whole window is inside one turn, which ran eight
 commands that change things and reads *made progress*. Cut with `--tail 90000`. The corpus labels
 it *done*: one of those commands is a `sed -i` flipping the unit's TODO lines to `[x]`, which the
-turn label only counts through an Edit of TODO.md -- a known miss, pinned as one.
+turn label only counts through an Edit of TODO.md -- a known miss, pinned as one. Since 2026-09-30
+the turn label does count a `sed -i` tick and `cc-merge.sh done --result merged`, so the raw
+transcript reads *done*; this window still reads *made progress*, because the scrubber masks those
+commands' words (it keeps `git commit` alone). The miss stays pinned until the scrubber keeps them
+and the window is cut again from the raw transcript.
 
 `scrub.js` keeps a prompt's `origin.kind` (`human`, `peer`, `task-notification`) since these two
 were cut; the fixtures above them were cut before that, so their `origin` is masked.
@@ -94,9 +98,17 @@ with none. Each is labelled in `tests/scenario-replay.test.lua`, which says what
 - **`tail-awaiting-a-question.jsonl`** — the same session four minutes earlier, an
   `AskUserQuestion` unanswered: *awaiting a tool*. `--tail 16384 --end-at 461666`.
 - **`tail-one-file-edited-three-times.jsonl`** — three different edits of one file in a row, each
-  landing. Not a loop, but `core.toolCallSig` signs an Edit by its path alone, so the loop detector
-  says it is -- the commonest "loop" in Adam's transcripts, pinned as a known miss.
+  landing. Not a loop, but `core.toolCallSig` signed an Edit by its path alone, so the loop detector
+  said it was -- the commonest "loop" in Adam's transcripts, pinned as a known miss until
+  2026-09-30, when an edit came to be signed by its whole input. The scrub masks each edit's
+  strings to their own shape (and the keys `old_string` / `new_string` to one name, of which a
+  JSON reader keeps the last), so three different edits still read as three.
   `--tail 16384 --end-at 526900`.
+- **`tail-one-edit-repeated-three-times.jsonl`** — **derived** from the window above, not cut
+  (2026-09-30): the same records, with the first Edit's input repeated in the second and third
+  calls, so it reads as one edit attempted three times. Once different edits stopped reading as a
+  loop the corpus had no window where the loop detector says yes; this is the one that holds it to
+  a true repeat. Only those two inputs differ from its source (the two lines' lengths with them).
 - **`tail-connection-dropped-retrying.jsonl`** / **`tail-connection-dropped-recovered.jsonl`** — a
   dropped connection (`ECONNRESET`) while Claude Code retried, and the same session seven seconds
   later, answering again: *error*, then not. `--tail 16400` (at 16384 the torn first line split a

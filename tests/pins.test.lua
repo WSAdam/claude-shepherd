@@ -144,6 +144,12 @@ eq("openPin: a remote session's pin is refused", FX.openPin(C, 1), false)
 A.pins[1] = { url = "javascript:alert(1)", kind = "http", label = "x" }
 eq("openPin: a pin that doesn't pass the check again is refused", FX.openPin(A, 1), false)
 eq("...no browser", #calls.openURL, 1)
+-- 2026-09-30: & was refused as a shell metacharacter, so a link with two query parameters never
+-- reached the card. It opens by argv like every other link: the browser gets it whole.
+A.pins[1] = { url = "https://github.com/o/r/pulls?q=is%3Aopen&sort=updated&page=2", kind = "http", label = "Open PRs" }
+check("openPin: a link with a multi-parameter query opens whole",
+      FX.openPin(A, 1) == true and calls.openURL[2] == "https://github.com/o/r/pulls?q=is%3Aopen&sort=updated&page=2")
+eq("...in the browser, never through a shell", calls.execute, 0)
 
 -- ---- a verified merge clears the unit's pins ----
 local R2FILE = PINS .. "/" .. core.pinFileName(R2)

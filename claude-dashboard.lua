@@ -4984,7 +4984,7 @@ function FX.annotateNeedsYou(list)
   -- Only the pids a decision actually depends on -- a few per tick at most.
   local want, waiters = {}, {}
   for _, it in ipairs(list or {}) do
-    it.needsYou, it.needsYouSource, it.needsYouWhy = nil, nil, nil
+    it.needsYou, it.needsYouSource, it.needsYouWhy, it.retrying = nil, nil, nil, nil
     it.procAlive, it.errorEpisode = nil, nil
     if type(it.merge) == "table" then it.merge.waiterAlive = nil end
     if not it.remote then
@@ -5014,8 +5014,11 @@ function FX.annotateNeedsYou(list)
     local ep = core.errorEpisodeStep(it, FX._errorEpisodes[it.key], now)
     FX._errorEpisodes[it.key] = ep
     it.errorEpisode = ep
-    local kind, source, why = core.needsYouKind(it, now)
+    local kind, source, why, retrying = core.needsYouKind(it, now)
     it.needsYou, it.needsYouSource, it.needsYouWhy = kind or "no", source, why
+    -- 2026-09-30: which error heads-up the session itself is retrying -- the only one whose card
+    -- may say "Retrying" (it said so for an error Adam had stopped, and one on an exited session)
+    it.retrying = retrying or nil
   end
   for k in pairs(FX._errorEpisodes) do if not live[k] then FX._errorEpisodes[k] = nil end end
 end
@@ -15686,7 +15689,7 @@ local HTML = [[
       <label class="s-row"><input type="checkbox" id="s-banner-approval"> macOS banner when a session needs you</label>
       <label class="s-row"><input type="checkbox" id="s-banner-done"> macOS banner when a session finishes a turn</label>
       <label class="s-row"><input type="checkbox" id="s-banner-auto"> macOS banner when a session auto-approves a tool</label>
-      <div class="s-help">Native notification banners (click to jump to the session). Off by default; fire on the rising edge so you're not spammed. Auto-approve banners need the audit ledger on (the decision is read from it) and can lag up to ~30s.</div>
+      <div class="s-help">Native notification banners (click to jump to the session). Off by default; fire on the rising edge so you're not spammed. Auto-approve banners need the audit ledger on (the decision is read from it).</div>
 
       <label class="s-row"><input type="checkbox" id="s-summary-en"> Post-run self-summary — type a review prompt when a session finishes</label>
       <div class="s-help">When a session reaches “ready”, Shepherd types a brief “summarize what you just did” prompt into it (for the log you’re watching — it forbids further edits). Off by default; fires once per turn (the summary’s own completion is skipped so it can’t loop). Local sessions only.</div>
@@ -16461,7 +16464,10 @@ local HTML = [[
       if(needsYouNow(it)) return LABELS.approval;
       // A transient API error the session is retrying (a connection blip, a timeout, an
       // overloaded model): the card says so instead of a red Error nobody can act on.
-      if(headsUp(it)) return it.needsYouSource === "error" ? LABELS.retrying : LABELS.fyi;
+      // 2026-09-30: only that one. Every heads-up whose source was an error read "Retrying" --
+      // one Adam had stopped himself, one on a session that had exited -- so Lua says which
+      // (it.retrying, core.needsYouKind's fourth value) and this reads it.
+      if(headsUp(it)) return it.retrying ? LABELS.retrying : LABELS.fyi;
       if(isDriving(it)){ var nu = (it.fleet.units || []).length; return "Driving " + nu + " unit" + (nu === 1 ? "" : "s"); }
       if(bgRunning(it)){
         // 2026-09-28: background shell jobs are named alongside agents (a job alone used to read
@@ -21310,7 +21316,8 @@ local HTML = [[
     }
     function renderRoutines(){
       var warn = document.getElementById("r-warn"); var notes = [];
-      if(!SCHED_ON) notes.push("Scheduling is OFF (schedules.enabled in ⚙ Settings) — routines won't auto-fire. “Run” still works.");
+      // 2026-09-30: this pointed at ⚙ Settings, which has no control for it: a file-only switch
+      if(!SCHED_ON) notes.push("Scheduling is OFF — routines won't auto-fire. Turn it on with schedules.enabled in ~/.claude/cc-config.json (it has no ⚙ switch). “Run” still works.");
       if(!SPAWN_LIVE) notes.push("spawn.live is OFF — spawn routines are DRY-RUN (no real session).");
       warn.textContent = notes.join("   "); warn.classList.toggle("show", notes.length > 0);
       var body = document.getElementById("r-body"); body.innerHTML = "";
@@ -24228,8 +24235,8 @@ end
 -- Ledger snapshot, cached across refreshes: refresh() runs at 1 Hz
 -- (timer + pathwatcher), and re-reading + re-JSON-parsing the whole ledger
 -- directory every tick burns the Hammerspoon main thread. Re-read only when a
--- daily file's size/mtime changes (cheap hs.fs.attributes scan; hooks append
--- out-of-process) or the 30s TTL backstop expires (core.ledgerCacheStale).
+-- daily file's size/mtime changes (cheap hs.fs.attributes scan on every call; hooks
+-- append out-of-process). There is no TTL: a change shows on the next call.
 -- Shared by risk scoring, the gate decision log, and the notification badge.
 -- Returns events, changed -- `changed` is true when this call re-read the files
 -- OR (for a consume=true caller) when any call since the last consume did, so
@@ -24682,8 +24689,8 @@ function FX._refreshBody()
       if nb then FX.notify(nb.title, nb.text, { key = it.key }) end
     end
     -- L5 onAutoApproved banner: fire when the newest AUTOMATED allow decision for
-    -- this session advances (read from the cached ledger snapshot, so up to ~30s
-    -- lag; needs the ledger on). The FIRST sighting per tile is observed, not
+    -- this session advances (read from the ledger snapshot, which re-reads a file the
+    -- tick its size or mtime moves; needs the ledger on). The FIRST sighting per tile is observed, not
     -- alarmed -- consistent with "autonomous actions never fire from a missing prev".
     if autoApprovedBannerOn and ledgerOn and pv ~= nil and not it.remote and not it.stale
        and it.session_id and tostring(it.session_id) ~= "" then

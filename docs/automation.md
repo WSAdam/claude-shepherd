@@ -426,7 +426,9 @@ id=$(~/.claude/cc-ticket.sh file --repo ~/Programming/parser --title "Bump to 2.
 
 A session stopped by a usage limit (*You've hit your session limit · resets 3pm*) carries on by
 itself when the limit resets, once per window. Its card says **resumes at 3:00pm**, with
-**Resume now** and **Cancel**.
+**Resume now** and **Cancel**. While it waits the card is a **Heads-up**, not a red Needs you:
+Shepherd does the waiting. It needs you again once the reset has passed and the session still
+sits, when its process is gone, or when nothing is scheduled (the cases under *Not resumed*).
 
 - **The hook.** A turn stopped by a usage limit fires StopFailure with the error `rate_limit`.
   `cc-resume.sh` runs in its own StopFailure group (matcher `rate_limit`) as a background hook
@@ -474,7 +476,8 @@ itself when the limit resets, once per window. Its card says **resumes at 3:00pm
   nags once per stall with the same sound and push settings. A single tool call that is still
   running gets up to `escalation.hung.toolMinutes` (default 30) before it counts.
 - **Loop watchdog** (`escalation.loop.enabled`): a ⟳ badge when a working session keeps repeating
-  the same tool call. Detection only.
+  the same tool call. A command is the same by its command line, a read by its file, and an edit
+  only when it writes the same thing to the same file. Detection only.
 - **Desktop banners** (`notifications.banner.onApproval` / `onDone` / `onAutoApproved`): a macOS
   notification when a session starts needing you, finishes, or **auto-approves** a tool (that last
   one needs the audit ledger and can lag a second or two). Click it to jump to the session.

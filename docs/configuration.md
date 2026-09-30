@@ -127,7 +127,7 @@ Everything lives under `~/.claude/`:
 
 The layout choice and the panel's size and position live in Hammerspoon's own settings. The
 uninstaller keeps all of these unless you ask it to purge them ([Install](install.md#uninstall)); a
-purge leaves Hammerspoon's settings and, for now, `cc-worklist-archive.json`.
+purge leaves Hammerspoon's settings.
 
 ## Hook environment variables
 

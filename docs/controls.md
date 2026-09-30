@@ -147,9 +147,10 @@ A session pins with `~/.claude/cc-pin.sh`, from inside its Claude Code session:
 - **What it refuses.** Any other scheme (`javascript:`, `data:`, `ftp:` ...), a `file://` link with
   `%`-escapes or `.`/`..` segments, a link over 2,000 characters, a label over 80 bytes or with a
   control character, and a 9th pin. It also refuses any link holding whitespace, a quote (`'` `"`),
-  a backslash, a control character or a shell metacharacter: `|` `&` `;` `(` `)` `<` `>` `` ` `` `$`.
-  That includes a query string with more than one parameter (`?a=1&b=2`); pin the page without
-  it. Nothing passes a link through a shell; the refusal is a second line of defence.
+  a backslash, a control character or a shell metacharacter: `|` `;` `(` `)` `<` `>` `` ` `` `$`,
+  and `&` in a file's path. An http(s) link may hold `&`, so a query string with several
+  parameters (`?a=1&b=2`) is pinned whole. Nothing passes a link through a shell; the refusal is a
+  second line of defence.
 - **Checked again at the click.** A pins file is a session's word, so Shepherd opens only what
   passes the same checks against its own record of the session's git root. For a file it also
   resolves the real path, so a symlink swapped in after the pin can't lead outside the worktree. It

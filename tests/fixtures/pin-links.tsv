@@ -16,7 +16,16 @@ refused	data:text/html,x
 refused	ftp://example.com/x
 refused	https://x.com/a;rm
 refused	https://x.com/a|b
-refused	https://x.com/?a=1&b=2
+# 2026-09-30 requirement change: the next line read "refused". & is URL syntax in an http(s) link
+# and nothing passes a link through a shell, so a query with several parameters is pinned whole;
+# every other metacharacter, and an & in a file's path, is refused as before.
+http	https://x.com/?a=1&b=2
+http	https://github.com/org/repo/pulls?q=is%3Aopen&sort=updated&page=2#list
+refused	https://x.com/?a=1&b=$(id)
+refused	https://x.com/?a=1&b=2;id
+refused	https://x.com/?a=1&b=2|id
+refused	ftp://example.com/?a=1&b=2
+refused	file://{ROOT}/a.md&id
 refused	https://x.com/$(id)
 refused	https://x.com/`id`
 refused	https://x.com/a b

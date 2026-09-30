@@ -102,11 +102,11 @@ its accuracy without failing the suite, and a detector that starts answering dif
 or wrong another way) goes red until the table is updated.
 
 ```text
-Detector accuracy over 12 labelled moment(s) of real transcripts:
-  turn          88%  7/8 right, 1 wrong, 4 n/a
-  resumed      100%  7/7 right, 5 n/a
+Detector accuracy over 13 labelled moment(s) of real transcripts:
+  turn          88%  7/8 right, 1 wrong, 5 n/a
+  resumed      100%  7/7 right, 6 n/a
   ...
-  looping       92%  11/12 right, 1 wrong
+  looping      100%  13/13 right
 ```
 
 The suite also insists every tail fixture has a row, and that every detector is seen answering

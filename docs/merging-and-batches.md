@@ -66,7 +66,10 @@ session that is working. Heads-ups include:
 - a batch unit's merge while [the checker](#the-checker-a-read-only-review-of-every-merge-request)
   reviews it (it merges on your grant on a pass, and turns red on a fail),
 - a merged unit whose post-merge gate went red (main is red, and its worktree is already gone),
-- a connection blip the session is still retrying.
+- a connection blip the session is still retrying (the only one that reads **Retrying**),
+- an error you stopped yourself, or one on a session that has exited,
+- a session stopped by a usage limit while its
+  [resume at the reset](automation.md#resume-at-the-limit-reset) is scheduled.
 
 A unit that came back **blocked** stays Needs you. The affordance isn't the Dismiss button, it's
 the stalled tab and the branch, and a blocked unit going quiet is how parallel work gets silently

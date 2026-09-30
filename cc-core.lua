@@ -1502,7 +1502,8 @@ M.FYI_WORD = "Heads-up"
 -- (2026-09-17 live: Adam started a VPN, a card went red with "[runtime error] Connectio..."
 -- and outranked every working session; the fault healed itself and the session was back to
 -- "working" 40s later, with nothing that was ever his to do.) budget_exceeded is deliberately
--- NOT here -- a usage limit is something he acts on: wait, or switch.
+-- NOT here -- a usage limit is something he acts on: wait, or switch. (2026-09-30: unless a resume
+-- is already scheduled at its reset; needsYouKind's error arm says when.)
 M.ERROR_TRANSIENT = { runtime_error = true, timeout = true, model_error = true }
 -- 75s: past a retry round-trip and past the 40s the VPN blip took to heal, while still well
 -- inside the time it takes him to walk back to the screen. Still failing after 75s is an
@@ -1531,7 +1532,8 @@ end
 
 -- THE one predicate behind every source that can make a card say "Needs you" -- a held
 -- question, a merge, a batch proposal, a permission prompt, an error. Returns
--- "needs" | "fyi" | nil, plus the source and (for a heads-up) a short why for the card.
+-- "needs" | "fyi" | nil, plus the source and (for a heads-up) a short why for the card, and
+-- true as a fourth value for the one heads-up the session itself is retrying.
 function M.needsYouKind(it, now)
   if type(it) ~= "table" then return nil end
   now = tonumber(now) or os.time()
@@ -1621,12 +1623,22 @@ function M.needsYouKind(it, now)
     if not alive and it.stale then return "fyi", "error", "that session has exited" end
     local reason = tostring(it.error_reason or "unknown")
     if reason == "user_cancelled" then return "fyi", "error", "you stopped it yourself" end
+    -- 2026-09-30: a usage limit with a resume already scheduled at the reset (it.resume, from
+    -- core.resumeCard via FX.stepResume) has nothing of his to do until then: Shepherd does the
+    -- waiting, and Resume now / Cancel stay on the card. Only while the reset is still ahead and the
+    -- session is alive to be woken -- past it, or once Shepherd couldn't type it, it is his again.
+    local rs = type(it.resume) == "table" and it.resume or nil
+    if reason == "budget_exceeded" and alive and rs and rs.phase == "waiting" then
+      return "fyi", "error", "the usage limit resets by itself -- it resumes then"
+    end
     if not M.ERROR_TRANSIENT[reason] then return "needs", "error" end
     if not alive or it.hung then return "needs", "error" end   -- nothing is left to retry it
     local ep = type(it.errorEpisode) == "table" and it.errorEpisode or {}
     if (tonumber(ep.count) or 1) >= M.ERROR_FLAPS then return "needs", "error" end
     if now - (tonumber(ep.since) or now) >= M.ERROR_GRACE then return "needs", "error" end
-    return "fyi", "error", "a connection fault -- it should clear itself"
+    -- 2026-09-30: the fourth value marks the ONE error heads-up the session is retrying; the card
+    -- said "Retrying" for all of them (FX.annotateNeedsYou stamps it as it.retrying).
+    return "fyi", "error", "a connection fault -- it should clear itself", true
   end
 
   -- 6. (2026-09-29) an open non-blocking question: the session went ahead on its default, so nothing
@@ -7606,6 +7618,79 @@ function M.bashCommits(cmd)
   end
   return false
 end
+-- 2026-09-30: the two other ways a turn says it finished something. A unit's merge turn flips its
+-- TODO lines with `sed -i` and ends on `cc-merge.sh done --result merged`: neither is an Edit of
+-- TODO.md or a git commit, so that turn read "made progress".
+-- Both read one command at a time, and a sed script or a --summary text holds ; and | of its own,
+-- which shellParts splits on: M.shellSegments splits only outside quotes. (One do-block: its
+-- helper takes none of the main chunk's 200 locals.)
+do
+function M.shellSegments(cmd)
+  local s = tostring(cmd or "")
+  local out, buf, quote, i, n = {}, {}, nil, 1, #s
+  while i <= n do
+    local c = s:sub(i, i)
+    if quote then
+      if c == quote then
+        quote = nil
+      elseif c == "\\" and quote == '"' then
+        buf[#buf + 1] = c; i = i + 1; c = s:sub(i, i)
+      end
+      buf[#buf + 1] = c
+    elseif c == "'" or c == '"' then
+      quote = c; buf[#buf + 1] = c
+    elseif c == "\\" then
+      buf[#buf + 1] = c; i = i + 1; buf[#buf + 1] = s:sub(i, i)
+    elseif c == ";" or c == "\n" or c == "|" or (c == "&" and s:sub(i + 1, i + 1) == "&") then
+      out[#out + 1] = table.concat(buf); buf = {}
+      if c ~= ";" and c ~= "\n" and s:sub(i + 1, i + 1) == c then i = i + 1 end   -- || and &&
+    else
+      buf[#buf + 1] = c
+    end
+    i = i + 1
+  end
+  out[#out + 1] = table.concat(buf)
+  return out
+end
+-- One segment's command (as shellParts names it) and the segment with its quoted strings taken
+-- out, which leaves its options and file names.
+local function segmentCommand(seg)
+  local p = M.shellParts(seg)[1]
+  return p, (seg:gsub("'[^']*'", " "):gsub('"[^"]*"', " "))
+end
+-- How many TODO lines a command ticks: an in-place sed (or perl -i) of TODO.md, by the "- [x]" it
+-- writes. An un-tick's pattern is "- \[x\]", which isn't one; a sed of some other file, or one that
+-- only prints, ticks nothing.
+function M.bashTodoTicks(cmd)
+  local s = tostring(cmd or "")
+  if not s:find("TODO.md", 1, true) then return 0 end
+  local n = 0
+  for _, seg in ipairs(M.shellSegments(s)) do
+    local p, bare = segmentCommand(seg)
+    if p and (p.cmd == "sed" or p.cmd == "gsed" or p.cmd == "perl") and seg:find("TODO.md", 1, true)
+       and (bare:find("%s%-%a*i") or bare:find("--in-place", 1, true)) then
+      for _ in seg:gmatch("%- %[[xX]%]") do n = n + 1 end
+    end
+  end
+  return n
+end
+-- A unit saying its merge landed: `cc-merge.sh done --result merged` (never request, or blocked).
+function M.bashMerged(cmd)
+  local s = tostring(cmd or "")
+  if not s:find("cc-merge.sh", 1, true) then return false end
+  for _, seg in ipairs(M.shellSegments(s)) do
+    local p, bare = segmentCommand(seg)
+    if p then
+      local i = p.at + ((p.cmd == "bash" or p.cmd == "sh") and 1 or 0)
+      if tostring(p.words[i] or ""):match("cc%-merge%.sh$") and p.words[i + 1] == "done"
+         and bare:find("%-%-result[%s=]+merged%f[%W]") then
+        return true
+      end
+    end
+  end
+  return false
+end
+end
 
 -- What the newest turn in a transcript tail did: nil when the tail holds no prompt of Adam's or
 -- Shepherd's. `complete` is false until a reply follows it (read the tail again). Lines are walked
@@ -7706,7 +7791,7 @@ function M.turnEvidenceNew(origin)
   -- files/filesMore/errorTexts (2026-09-28) feed the handoff note (M.handoffNote): each edited
   -- path once, in order, and the newest few errors, one line each.
   local ev = { origin = origin, complete = false, edits = 0, mutating = 0, reads = 0, tests = 0,
-               other = 0, errors = 0, denials = 0, todoDone = 0, committed = false, asked = false,
+               other = 0, errors = 0, denials = 0, todoDone = 0, committed = false, merged = false, asked = false,
                planPut = false, apiError = false, endedDenied = false, textLen = 0,
                files = {}, filesMore = 0, errorTexts = {}, todoLines = {} }
   return ev, { commits = {}, lastResult = nil, seenFile = {} }
@@ -7751,6 +7836,13 @@ function M.turnEvidenceAdd(ev, st, obj)
           elseif M.bashIsTest(cmd) then ev.tests = ev.tests + 1
           else ev.mutating = ev.mutating + 1 end
           if M.bashCommits(cmd) and p.id then commits[p.id] = true end
+          -- 2026-09-30: TODO ticks by sed and a finished merge count once their command succeeds.
+          -- (st.ticks / st.merges are made here: a walk state an older build saved has neither.)
+          if p.id then
+            local ticks = M.bashTodoTicks(cmd)
+            if ticks > 0 then st.ticks = st.ticks or {}; st.ticks[p.id] = ticks end
+            if M.bashMerged(cmd) then st.merges = st.merges or {}; st.merges[p.id] = true end
+          end
         elseif M.READ_TOOLS[name] then ev.reads = ev.reads + 1
         elseif name == "AskUserQuestion" then ev.asked = true
         elseif name == "ExitPlanMode" then ev.planPut = true
@@ -7782,6 +7874,9 @@ function M.turnEvidenceAdd(ev, st, obj)
         else
           st.lastResult = "ok"
           if commits[p.tool_use_id] then ev.committed = true end
+          local ticks = st.ticks and p.tool_use_id and st.ticks[p.tool_use_id]
+          if ticks then ev.todoDone = (tonumber(ev.todoDone) or 0) + ticks; st.ticks[p.tool_use_id] = nil end
+          if st.merges and p.tool_use_id and st.merges[p.tool_use_id] then ev.merged = true end
         end
       end
     end
@@ -7797,7 +7892,7 @@ function M.turnOutcome(ev)
   if type(ev) ~= "table" or not ev.complete then return nil end
   if ev.apiError or ev.endedDenied then return "blocked" end
   if ev.asked or ev.planPut or ev.endsWithQuestion then return "needs follow-up" end
-  if ev.todoDone > 0 or ev.committed then return "done" end
+  if ev.todoDone > 0 or ev.committed or ev.merged then return "done" end
   if ev.edits > 0 or ev.mutating > 0 or ev.tests > 0 or ev.other > 0 then return "made progress" end
   if ev.reads > 0 or ev.textLen >= 300 then return "only planned" end
   return "did nothing"
@@ -8320,12 +8415,34 @@ end
 -- argument (the field that identifies WHAT it's doing), so re-running the same Bash
 -- command / re-Reading the same file produces an equal signature. Deterministic
 -- (no json re-encode, whose key order isn't stable). Pure.
+-- 2026-09-30: an edit (M.EDIT_TOOLS) is signed by its WHOLE input. Its primary argument is only
+-- the file, so three different edits of one file read as one call made three times -- ordinary
+-- work, and the commonest "loop" in Adam's transcripts. Only the same edit attempted again repeats.
 local LOOP_PRIMARY = { "command", "file_path", "path", "pattern", "url", "query", "prompt" }
+-- A tool input as one string that is the same whenever the input is: keys in sorted order, a
+-- list in its own.
+function M.inputSig(v)
+  if type(v) ~= "table" then return tostring(v) end
+  local parts = {}
+  if #v > 0 then
+    for _, x in ipairs(v) do parts[#parts + 1] = M.inputSig(x) end
+  else
+    local keys = {}
+    for k in pairs(v) do keys[#keys + 1] = k end
+    table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+    for _, k in ipairs(keys) do parts[#parts + 1] = tostring(k) .. "=" .. M.inputSig(v[k]) end
+  end
+  return "{" .. table.concat(parts, "\2") .. "}"
+end
 function M.toolCallSig(name, input)
   local arg = ""
   if type(input) == "table" then
-    for _, f in ipairs(LOOP_PRIMARY) do
-      if type(input[f]) == "string" and input[f] ~= "" then arg = input[f]; break end
+    if M.EDIT_TOOLS[tostring(name or "")] then
+      if next(input) ~= nil then arg = M.inputSig(input) end
+    else
+      for _, f in ipairs(LOOP_PRIMARY) do
+        if type(input[f]) == "string" and input[f] ~= "" then arg = input[f]; break end
+      end
     end
   end
   return tostring(name or "") .. "\1" .. arg
@@ -18311,7 +18428,10 @@ M.PIN_LABEL_MAX = 80
 -- POSIX's shell metacharacters (| & ; ( ) < > and whitespace), the expansion and quoting characters
 -- (` $ \ " ') and every control character. Nothing passes a link through a shell; this is defense
 -- in depth. ? = # ~ % stay: they are URL syntax, and harmless to a shell.
+-- 2026-09-30: so is & in an http(s) link -- it separates query parameters, and refusing it meant
+-- no link with two of them (?a=1&b=2) could be pinned. A file's path still can't hold one.
 M.PIN_REFUSED_CHARS = "[%c%s|&;()<>`$\\\"']"
+M.PIN_REFUSED_HTTP_CHARS = "[%c%s|;()<>`$\\\"']"
 
 -- The pins file's name for a worktree root: every byte that isn't [A-Za-z0-9] becomes "-" (cc-pin.sh's
 -- `LC_ALL=C sed 's/[^A-Za-z0-9]/-/g'`). Two roots can share a name (/a/b-c and /a/b/c), so the file
@@ -18343,10 +18463,11 @@ end
 function M.pinCheck(url, root)
   if type(url) ~= "string" or url == "" then return nil, "no link" end
   if #url > M.PIN_URL_MAX then return nil, "the link is longer than " .. M.PIN_URL_MAX .. " characters" end
-  if M.pinHasRefusedChar(url) then
+  local http = M.isOpenableUrl(url)
+  if url:find(http and M.PIN_REFUSED_HTTP_CHARS or M.PIN_REFUSED_CHARS) then
     return nil, "the link holds whitespace, a quote, a backslash, a control character or a shell metacharacter"
   end
-  if M.isOpenableUrl(url) then return { kind = "http", url = url } end
+  if http then return { kind = "http", url = url } end
   local p = url:match("^[Ff][Ii][Ll][Ee]://(.*)$")
   if not p then return nil, "only http(s) and file:// links can be pinned" end
   if p:sub(1, 1) ~= "/" then return nil, "a file:// link names an absolute path (file:///path)" end
@@ -20863,6 +20984,13 @@ end
 -- order, so keep each category's entries contiguous). `new = true` flags this batch's
 -- additions for the chip. A self-documenting tour of what the app can do.
 M.FEATURE_CATEGORIES = { "Core", "Control", "Automate", "See what's happening", "Make it yours", "Connect & extend", "Power tools" }
+-- How many themes Appearance offers. 2026-09-30: the theme entry below said "14 themes" long after
+-- the list had grown to 50; it counts the list now, so it can't go stale again.
+function M.appearanceThemeCount()
+  local n = 0
+  for _ in pairs(M.APPEARANCE_THEMES) do n = n + 1 end
+  return n
+end
 M.FEATURES = {
   -- ---- Core ----
   { key = "fleet", cat = "Core", title = "Fleet dashboard",
@@ -21050,7 +21178,7 @@ M.FEATURES = {
 
   -- ---- Make it yours ----
   { key = "theme", cat = "Make it yours", new = true, title = "Visual theme editor",
-    what = "14 themes, an editor for every color with live preview, plus theme export and import.",
+    what = M.appearanceThemeCount() .. " themes, an editor for every color with live preview, plus theme export and import.",
     why = "The look is yours — and you can save or share a palette as a file." },
   { key = "layout", cat = "Make it yours", title = "Layout & density",
     what = "Choose how tiles are arranged, their size, density, font, and reduced motion.",
@@ -21090,7 +21218,8 @@ M.FEATURES = {
     what = "Keep the Mac from sleeping while sessions run, and lock the screen without pausing them.",
     why = "Long jobs finish overnight, safely." },
   { key = "render", cat = "Power tools", new = true, title = "Faster rendering",
-    what = "The grid updates only the tiles that actually changed each second.",
+    -- 2026-09-30: this said only the changed tiles update. The grid is never patched tile by tile.
+    what = "The grid is rebuilt only when a card's content changed; on a second where nothing did, the rebuild is skipped and only the ages update.",
     why = "Less CPU and battery, especially with a big fleet." },
 }
 

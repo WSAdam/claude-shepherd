@@ -4972,5 +4972,35 @@ do
         fn("FX.removeStatus(key)"):find('if type(FX._restart) == "table" then FX._restart.forget[tostring(key)] = true end', 1, true) ~= nil)
 end
 
+-- ---- panel text sweep: what the panel says is what it does (2026-09-30, build program unit 45) ----
+-- The card detectors' logic is pinned in core.test.lua and needs-you.test.js; these hold the texts.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  -- 2026-09-30: the Routines banner sent Adam to ⚙ Settings for schedules.enabled, which has no
+  -- control there (it is a file-only switch, docs/configuration.md)
+  local banner = src:match('if%(!SCHED_ON%) notes%.push%("([^"\n]*)"%);') or ""
+  check("routines banner: says scheduling is off", banner:find("Scheduling is OFF", 1, true) ~= nil)
+  check("routines banner: names the switch and the file it is in",
+        banner:find("schedules.enabled", 1, true) ~= nil and banner:find("cc-config.json", 1, true) ~= nil)
+  check("routines banner: doesn't point at a Settings control that doesn't exist  (" .. banner .. ")",
+        banner ~= "" and (not banner:find("Settings", 1, true) or src:find('id="s-schedules', 1, true) ~= nil))
+  -- 2026-09-30: the help under the auto-approve banner switch still said it can lag ~30s, from
+  -- when the ledger cache had a 30s backstop. The snapshot is checked against the files' size and
+  -- mtime on every call, so the banner follows the decision by a tick.
+  local help = src:match('id="s%-banner%-auto">.-<div class="s%-help">(.-)</div>') or ""
+  check("observability help: the auto-approve banner's help is there", help:find("Auto-approve banners", 1, true) ~= nil)
+  check("observability help: it still says they need the audit ledger", help:find("audit ledger on", 1, true) ~= nil)
+  check("observability help: it no longer claims a ~30s lag  (" .. help .. ")",
+        help ~= "" and not help:find("30s", 1, true) and not help:lower():find("lag", 1, true))
+  check("...nor do the comments on the banner and the ledger snapshot",
+        not src:find("so up to ~30s", 1, true) and not src:find("or the 30s TTL backstop expires", 1, true))
+  -- 2026-09-30: statusWords read every error heads-up as a retry
+  check("status words: Retrying is said only for the tile Lua stamped as a retry",
+        src:find("if(headsUp(it)) return it.retrying ? LABELS.retrying : LABELS.fyi;", 1, true) ~= nil
+        and not src:find('it.needsYouSource === "error" ? LABELS.retrying', 1, true))
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

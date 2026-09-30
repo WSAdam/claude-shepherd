@@ -143,7 +143,9 @@ const noStamp = { key: "n", status: "done", needsYou: "no", merge: { phase: "mer
 check("a tile stamped 'no' needs nothing, whatever its sources say", !api.needsYouNow(noStamp) && !api.headsUp(noStamp));
 
 // the VPN blip: a transient API error reads as retrying, not as a red Error
-const blip = { key: "e", status: "error", needsYou: "fyi", needsYouSource: "error",
+// 2026-09-30: the tile's shape changed, the requirement didn't. Lua now stamps which error
+// heads-up is a retry (it.retrying, from core.needsYouKind), so the blip carries it as a live one does.
+const blip = { key: "e", status: "error", needsYou: "fyi", needsYouSource: "error", retrying: true,
                error_reason: "runtime_error", error_message: "Connection error." };
 check("a transient connection error doesn't need Adam", !api.needsYouNow(blip));
 eq("...its dot is not the red error one", api.effStatus(blip), "idle");
@@ -152,6 +154,23 @@ const outage = { key: "e2", status: "error", needsYou: "needs", needsYouSource: 
                  error_reason: "runtime_error" };
 eq("a connection error that persisted still reads Needs you", api.statusWords(outage), "Needs you");
 eq("...with the red approval dot", api.effStatus(outage), "approval");
+// 2026-09-30: statusWords said "Retrying" for EVERY heads-up whose source was an error, so an
+// error Adam had stopped himself and one on a session that had exited read "Retrying" with nothing
+// retrying. Only the tile cc-core stamps as a retry says so; the rest are plain heads-ups.
+const stopped = { key: "c", status: "error", needsYou: "fyi", needsYouSource: "error",
+                  needsYouWhy: "you stopped it yourself", error_reason: "user_cancelled" };
+eq("an error Adam stopped himself reads Heads-up, not Retrying", api.statusWords(stopped), "Heads-up");
+const exited = { key: "x", status: "error", needsYou: "fyi", needsYouSource: "error", stale: true, procAlive: false,
+                 needsYouWhy: "that session has exited", error_reason: "runtime_error" };
+eq("...and so does an error on a session that has exited", api.statusWords(exited), "Heads-up");
+const limited = { key: "l", status: "error", needsYou: "fyi", needsYouSource: "error", error_reason: "budget_exceeded",
+                  resume: { phase: "waiting", line: "resumes at 3:00pm", cancel: true, now: true } };
+eq("...and a usage limit waiting for its reset", api.statusWords(limited), "Heads-up");
+eq("...each with the neutral dot, like any heads-up", [stopped, exited, limited].map(api.effStatus).join(","), "idle,idle,idle");
+check("the tick stamps which error heads-up is a retry, and clears last tick's",
+      src.indexOf("local kind, source, why, retrying = core.needsYouKind(it, now)") >= 0
+      && src.indexOf("it.retrying = retrying or nil") >= 0
+      && src.indexOf("it.needsYou, it.needsYouSource, it.needsYouWhy, it.retrying = nil, nil, nil, nil") >= 0);
 
 // the ring and the pulse: red only for "needs", a quiet one for a heads-up
 check("only a card that needs Adam pulses", tile.indexOf('(needsYouNow(it) ? " needs" : "")') >= 0);

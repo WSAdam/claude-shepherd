@@ -15,7 +15,7 @@ search and groups, and My List.
 | `working`  | Working           | amber           | UserPromptSubmit, Pre/PostToolUse | Claude is doing work                |
 | `approval` | Needs you         | red (pulsing)   | PermissionRequest, Notification (permission), AskUserQuestion | Claude needs a permission or your answer |
 | `done`     | Ready for you     | green           | Stop, Notification (idle)    | Claude finished its turn                 |
-| `error`    | Needs you, or Retrying | red, or gray while retrying | StopFailure, and the transcript | The turn died on an API error or a usage limit |
+| `error`    | Needs you, Retrying, or Heads-up | red, or gray for a heads-up | StopFailure, and the transcript | The turn died on an API error or a usage limit |
 
 Instances rows and the Stream Deck show an errored session as **Error** in magenta.
 
@@ -34,7 +34,8 @@ Instances rows and the Stream Deck show an errored session as **Error** in magen
   a batch driver whose units are working reads **Driving N units**. The underlying status is unchanged;
   this is display only.
 - A **Ready for you** card says how its last turn went, read from the transcript since the newest
-  prompt: **done** (a `TODO.md` line ticked to `[x]`, or a commit), **made progress** (edits,
+  prompt: **done** (a `TODO.md` line ticked to `[x]` by an edit or a `sed -i`, a commit, or a merge
+  finished with `cc-merge.sh done --result merged`), **made progress** (edits,
   commands that change things, test runs), **only planned** (it only read, or explained at
   length), **did nothing**, **blocked** (it stopped on a denial or an API error) or **needs
   follow-up** (it asked you, put up a plan, or ended on a question). Its Instances row says the
@@ -53,11 +54,13 @@ Instances rows and the Stream Deck show an errored session as **Error** in magen
   coarse cause: `[budget exceeded]`, `[timeout]`, `[runtime error]`, `[model error]`,
   `[user cancelled]`. It reads **Needs you**, and its Approve button becomes **Continue**. A
   transient connection fault the session is still retrying reads **Retrying** (a heads-up) for up
-  to 75 seconds before it goes red. A usage limit reads `[budget exceeded]` with Claude Code's
-  message, which names the reset time (*You've hit your limit · resets 3pm*), and auto-continue
-  skips it: continuing only fails again until the limit resets. Instead the session
+  to 75 seconds before it goes red. An error you stopped yourself, and one on a session that has
+  exited, read **Heads-up**: nothing is retrying them. A usage limit reads `[budget exceeded]` with
+  Claude Code's message, which names the reset time (*You've hit your limit · resets 3pm*), and
+  auto-continue skips it: continuing only fails again until the limit resets. Instead the session
   [resumes at the reset](automation.md#resume-at-the-limit-reset): its card says
-  **resumes at 3:00pm**, with **Resume now** and **Cancel**.
+  **resumes at 3:00pm**, with **Resume now** and **Cancel**, and is a **Heads-up** rather than a
+  red Needs you until the reset comes.
 - Only a genuinely idle card **dims**, once its status file is more than 90 seconds old. A card
   waiting on you, a quiet "Ready for you" and a heads-up never dim.
 - Each tile shows time-in-state, a context-fullness bar
@@ -330,7 +333,8 @@ All derived locally from the transcript Shepherd already reads, with no extra ho
 - **Auto-title** (off by default, `autoTitle.enabled`): names an unlabeled tile from its first
   prompt. A manual relabel always wins.
 - **Loop watchdog** (off by default, `escalation.loop.enabled`): a ⟳ badge when a working session
-  keeps repeating the same tool call (for example re-running a failing command). Detection only.
+  keeps repeating the same tool call (for example re-running a failing command). Different edits
+  of one file are different calls; the same edit attempted again is a repeat. Detection only.
 - **Stuck-session watchdog** (off by default, `escalation.hung.enabled`): a session that stays `working` with no transcript
   growth for `escalation.hung.minutes` gets ⏳ and a purple ring
   ([Automation → Escalation](automation.md#escalation-and-watchdogs)).
