@@ -6477,6 +6477,32 @@ function FX.coachSave(rec)
   end
 end
 
+-- The repo's applied edits (<repo>.applied.json): memory first, else its file. Shepherd is its only
+-- writer; it outlives the run that proposed each edit.
+function FX.coachHistory(root)
+  FX._coach.history = FX._coach.history or {}
+  local h = FX._coach.history[root]
+  if h == nil then
+    local p = FX.coachPath(root, ".applied.json")
+    h = core.parseCoachHistory(p and FX.readFile(p) or nil)
+    -- a run's edits applied before the history existed (2026-09-30): they are in its record
+    local rec = (#h == 0) and FX.coachRecord(root) or nil
+    for _, e in ipairs(rec and rec.edits or {}) do
+      if e.status == "applied" and e.sha then h = core.coachHistoryAdd(h, e) end
+    end
+    FX._coach.history[root] = h
+  end
+  return h
+end
+function FX.coachHistorySave(root, list)
+  FX._coach.history = FX._coach.history or {}
+  FX._coach.history[root] = list
+  local p = FX.coachPath(root, ".applied.json")
+  if not (p and FX.writeFileAtomic(p, core.json.encode(list))) then
+    print("[cc-dashboard] ❌ couldn't save the coach's history for " .. tostring(root))
+  end
+end
+
 -- The repo a card belongs to: its git common dir, main checkout and name (local sessions in a repo).
 function FX.coachRepoOf(it)
   if type(it) ~= "table" or it.remote or type(it.repoKey) ~= "string" or type(it.mainRoot) ~= "string"
@@ -6707,6 +6733,8 @@ function FX.pushCoach(root)
     v = { root = root, name = repo and repo.name or nil, state = live.waiting and "waiting" or (live.busy and "running" or "new"),
           edits = {}, decisions = {} }
   end
+  local hist = core.coachHistoryView(FX.coachHistory(root))
+  v.history = (#hist > 0) and hist or nil   -- what was applied before, newest first, each with Undo
   local js = "ccCoach(" .. core.json.encode(v) .. ")"
   pcall(function() wv:evaluateJavaScript(js) end)
 end
@@ -6789,6 +6817,7 @@ function FX.coachApply(root, i)
       e.status, e.error, e.errorCode, e.at = "applied", nil, nil, FX.now()
       e.sha = tostring(out or ""):match("(%x+)%s*$")
       rec.claudeHash = core.coachHash(dec.text)   -- Shepherd's own commit isn't "changed since"
+      if e.sha then FX.coachHistorySave(root, core.coachHistoryAdd(FX.coachHistory(root), e)) end   -- kept past the next run, for Undo
       FX.alert("🧭 Applied to CLAUDE.md and committed" .. (e.sha and (" " .. e.sha:sub(1, 7)) or ""), 4)
       print("[cc-dashboard] ✅ coach: applied edit " .. tostring(i) .. " to " .. path .. " (" .. tostring(e.sha) .. ")")
     else
@@ -6814,6 +6843,83 @@ function FX.coachApply(root, i)
     end)
   end)
   if not ok then done(false, "", "Shepherd couldn't start git") end
+  return true
+end
+
+-- Undo one applied edit (2026-09-30): CLAUDE.md before and after its commit come from git, the whole
+-- lines it added are taken back out of the file as it is now (core.coachUndoDecision: refused unless
+-- they are there exactly once), and CLAUDE.md is committed alone, like Apply. One more commit;
+-- nothing is rewritten. A refused commit puts the file back as it was.
+function FX.coachUndo(root, i)
+  local list = FX.coachHistory(root)
+  local h = list[math.tointeger(tonumber(i) or 0) or 0]
+  if not h then return false end
+  if h.undone then FX.alert("That edit is already undone"); return false end
+  if FX._coach.applying then FX.alert("⚠️ Another CLAUDE.md commit is still running -- try again in a moment"); return false end
+  local path = root .. "/" .. core.COACH_FILE
+  local function refuse(code)
+    h.error = core.coachRefusal(code)
+    FX.coachHistorySave(root, list)
+    FX.alert("⚠️ Not undone: " .. h.error, 5)
+    print("[cc-dashboard] ⚠️ coach: undo refused for " .. tostring(root) .. " (" .. tostring(code) .. ")")
+    if FX._coach.open == root then FX.pushCoach(root) end
+    return false
+  end
+  local dirtyOut = ""
+  pcall(function() dirtyOut = hs.execute(core.coachDirtyCmd(root)) or "" end)
+  if core.coachDirty(dirtyOut) then return refuse("dirty") end
+  local mode
+  pcall(function() mode = hs.fs.symlinkAttributes(path, "mode") end)
+  if mode == "link" then return refuse("link") end
+  local function show(parent)   -- nil when git can't read it (the commit is gone, or the file wasn't there yet)
+    local out, ok
+    pcall(function() out, ok = hs.execute(core.coachShowCmd(root, h.sha, parent) .. " 2>/dev/null") end)
+    return ok and out or nil
+  end
+  local after = show(false)
+  if after == nil then return refuse("undo-gone") end
+  local current = FX.readFile(path)
+  local dec = core.coachUndoDecision(current, core.coachChange(show(true), after))
+  if not dec.ok then return refuse(dec.error) end
+  local wrote
+  if dec.delete then wrote = os.remove(path) and true or false else wrote = FX.writeFileAtomic(path, dec.text) end
+  if not wrote then return refuse("write") end
+  local subject, body = core.coachUndoMessage(h)
+  local job = { root = root, undo = i }
+  FX._coach.applying = job
+  local function done(ok, out, err)
+    if FX._coach.applying ~= job then return end
+    FX._coach.applying = nil
+    if job.timer then pcall(function() job.timer:stop() end); job.timer = nil end
+    if ok then
+      h.undone, h.error = { sha = tostring(out or ""):match("(%x+)%s*$") or "0000000", at = FX.now() }, nil
+      local rec = FX.coachRecord(root)
+      if rec then rec.claudeHash = core.coachHash(FX.readFile(path)); FX.coachSave(rec) end   -- Shepherd's own commit isn't "changed since"
+      FX.alert("🧭 Undone: CLAUDE.md is back as it was before that edit (committed " .. h.undone.sha:sub(1, 7) .. ")", 4)
+      print("[cc-dashboard] ✅ coach: undid " .. tostring(h.sha) .. " in " .. path .. " (" .. tostring(h.undone.sha) .. ")")
+    else
+      if current then FX.writeFileAtomic(path, current) end
+      local why = core.capChars(tostring((err ~= "" and err) or out or ""):gsub("%s+", " "), 200)
+      h.error = "the undo's commit failed" .. (why ~= "" and (": " .. why) or "") .. " -- CLAUDE.md is back as it was"
+      FX.alert("❌ " .. h.error, 5)
+      print("[cc-dashboard] ❌ coach: undo commit failed in " .. tostring(root) .. ": " .. why)
+    end
+    FX.coachHistorySave(root, list)
+    if FX._coach.open == root then FX.pushCoach(root) end
+  end
+  local started = pcall(function()
+    local t = hs.task.new("/bin/sh", function(code, out, err) done(tonumber(code) == 0, out, err or "") end,
+      { "-c", core.coachCommitCmd(root, subject, body, false) })
+    if not t then error("task create failed") end
+    job.task = t
+    t:start()
+    job.timer = hs.timer.doAfter(core.COACH.commitSeconds, function()   -- RETAINED on the job
+      if FX._coach.applying ~= job then return end
+      pcall(function() job.task:terminate() end)
+      done(false, "", "it timed out")
+    end)
+  end)
+  if not started then done(false, "", "Shepherd couldn't start git") end
   return true
 end
 
@@ -11936,6 +12042,7 @@ local function handleBridgeMsg(msg)
   if a == "coach-close" then FX._coach.open = nil; return end
   if a == "coach-apply" then FX.coachApply(tostring(payload.v or ""), tostring(payload.text or "")); return end
   if a == "coach-skip" then FX.coachSkip(tostring(payload.v or ""), tostring(payload.text or "")); return end
+  if a == "coach-undo" then FX.coachUndo(tostring(payload.v or ""), tostring(payload.text or "")); return end
   if a == "coach-dec-add" then FX.coachDecision(tostring(payload.v or ""), tostring(payload.text or ""), "add"); return end
   if a == "coach-dec-skip" then FX.coachDecision(tostring(payload.v or ""), tostring(payload.text or ""), "skip"); return end
   if a == "coach-rerun" then
@@ -14817,6 +14924,7 @@ local HTML = [[
 .co-why{ color:var(--text); margin:4px 0 6px; overflow-wrap:anywhere; }
 .co-expect{ margin:0 0 8px; padding:6px 8px; border-left:2px solid var(--accent); color:var(--text); overflow-wrap:anywhere; }
 .co-expect b{ color:var(--text-2); font-weight:600; }
+.co-hist-h{ margin:16px 0 8px; color:var(--text-2); font-weight:600; }
 .co-old, .co-new{ margin:0 0 6px; padding:6px 8px; border-radius:6px; white-space:pre-wrap; overflow-wrap:anywhere;
   font:11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; max-height:14em; overflow:auto; }
 .co-old{ background:var(--surface-2); color:var(--dim); text-decoration:line-through; }
@@ -23062,15 +23170,18 @@ local HTML = [[
       else st = (v.summary ? esc(v.summary) + " · " : "") + esc(v.sessions || 0) + " session(s) read"
         + (v.doneAt ? " · " + esc(fmtAge(v.doneAt)) + " ago" : "") + (typeof v.costUsd === "number" ? " · $" + esc(v.costUsd.toFixed(2)) : "");
       var h = '<div class="co-state">' + st + '</div>';
+      // 2026-09-30: what an edit is expected to change, so it can be judged later
+      function expectHtml(o){
+        if(!o.before && !o.after) return '';
+        return '<div class="co-expect">' + (o.before ? '<div><b>Today:</b> ' + esc(o.before) + '</div>' : '')
+          + (o.after ? '<div><b>Expected after:</b> ' + esc(o.after) + '</div>' : '') + '</div>';
+      }
       (v.edits || []).forEach(function(e, i){
         var pend = e.status === "pending";
         h += '<div class="ib-row co-row' + (pend ? '' : ' done') + '">'
           + '<div class="ib-q">' + esc(e.section || "CLAUDE.md") + '</div>'
           + '<div class="co-why">' + esc(e.why) + '</div>'
-          // 2026-09-30: what the edit is expected to change, so it can be judged later
-          + ((e.before || e.after) ? '<div class="co-expect">'
-              + (e.before ? '<div><b>Today:</b> ' + esc(e.before) + '</div>' : '')
-              + (e.after ? '<div><b>Expected after:</b> ' + esc(e.after) + '</div>' : '') + '</div>' : '')
+          + expectHtml(e)
           + (e.old ? '<pre class="co-old">' + esc(e.old) + '</pre>' : '<div class="ib-meta">Added at the end of this section</div>')
           + '<pre class="co-new">' + esc(e["new"]) + '</pre>'
           + '<ul class="co-ev">' + (e.evidence || []).map(function(x){ return '<li>' + esc(x) + '</li>'; }).join("") + '</ul>'
@@ -23091,6 +23202,26 @@ local HTML = [[
                 : '<div class="co-done">' + (d.status === "added" ? "✓ Added to DECISIONS.md" : "Skipped") + '</div>')
           + '</div>';
       });
+      // 2026-09-30: what was applied before (v.history, newest first). It outlives the run that
+      // proposed it: each entry shows its commit, both texts and what it was expected to change,
+      // with Undo -- which sends only the entry's number, like every other click here.
+      var hist = v.history || [];
+      if(hist.length){
+        h += '<div class="co-hist-h">Applied edits · ' + esc(hist.length) + '</div>';
+        hist.forEach(function(x, i){
+          h += '<div class="ib-row co-row co-hist' + (x.undone ? ' done' : '') + '">'
+            + '<div class="ib-q">' + esc(x.section || "CLAUDE.md") + '</div>'
+            + '<div class="ib-meta">' + (x.at ? esc(fmtAge(x.at)) + ' ago · ' : '') + 'committed ' + esc(String(x.sha || "").slice(0, 7)) + '</div>'
+            + '<div class="co-why">' + esc(x.why) + '</div>'
+            + expectHtml(x)
+            + (x.old ? '<pre class="co-old">' + esc(x.old) + '</pre>' : '')
+            + '<pre class="co-new">' + esc(x["new"]) + '</pre>'
+            + (!x.undone && x.error ? '<div class="co-err">' + esc(x.error) + '</div>' : '')
+            + (x.undone ? '<div class="co-done">↩ Undone' + (x.undoSha ? ' · committed ' + esc(String(x.undoSha).slice(0, 7)) : '') + '</div>'
+                        : '<div class="ib-free"><button class="ib-btn" data-act="undo" data-i="' + i + '" onclick="coachAct(event)" title="Take this edit back out of CLAUDE.md and commit CLAUDE.md alone (one more commit; nothing is rewritten)">Undo</button></div>')
+            + '</div>';
+        });
+      }
       return h;
     }
     function coachAct(ev){
@@ -23100,6 +23231,11 @@ local HTML = [[
       if(!t || !v || !v.root) return;
       var act = t.getAttribute("data-act");
       if(act === "rerun"){ send("coach-rerun", v.root); return; }
+      if(act === "undo"){   // the history is shown newest first; Lua wants the entry's own number
+        var hist = v.history || [], hx = hist[parseInt(t.getAttribute("data-i"), 10)];
+        if(hx && hx.i) send("coach-undo", v.root, String(hx.i));
+        return;
+      }
       var list = (act === "apply" || act === "skip") ? v.edits : ((act === "dec-add" || act === "dec-skip") ? v.decisions : null);
       var i = parseInt(t.getAttribute("data-i"), 10);
       if(!list || !(i >= 0) || !list[i]) return;

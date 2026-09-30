@@ -285,6 +285,75 @@ local _, rcode = sh(core.coachCommitCmd(R3, "CLAUDE.md: Deploy", "why", true))
 check("commit: a refused new CLAUDE.md is unstaged again", rcode ~= 0
       and (sh("git -C " .. q(R3) .. " diff --cached --name-only")):gsub("%s+$", "") == "")
 
+-- ---- the history of applied edits, and Undo (2026-09-30) ----
+-- 2026-09-30: Adam asked to "track the changes we accept so we know the state before and after and
+-- if I ever see something go bad we can restore back". An Apply was already its own commit, but the
+-- next coach run replaced the list, so Shepherd kept no record of it and had no way back.
+local hist = {}
+hist = core.coachHistoryAdd(hist, { sha = "aaa1111", at = 100, section = "Git", why = "w1", before = "b1", after = "a1", old = "- x", new = "- y" })
+hist = core.coachHistoryAdd(hist, { sha = "bbb2222", at = 200, section = "Tests", why = "w2", old = "", new = "- lint first" })
+hist = core.coachHistoryAdd(hist, { sha = "aaa1111", at = 300, section = "Git", why = "again", old = "- x", new = "- y" })
+check("history: one entry per commit, in the order they were applied", #hist == 2 and hist[1].sha == "aaa1111" and hist[1].why == "w1" and hist[2].sha == "bbb2222")
+check("history: an entry without a commit is not history", #core.coachHistoryAdd(hist, { at = 1, section = "Git", why = "w", old = "a", new = "b" }) == 2
+      and #core.coachHistoryAdd(hist, { sha = "not-a-sha", at = 1, section = "Git", why = "w", old = "a", new = "b" }) == 2)
+local many = {}
+for i = 1, core.COACH.historyMax + 3 do many = core.coachHistoryAdd(many, { sha = string.format("%07x", i), at = i, section = "S", why = "w", old = "a", new = "b" .. i }) end
+check("history: capped at COACH.historyMax, newest kept", #many == core.COACH.historyMax and many[#many].sha == string.format("%07x", core.COACH.historyMax + 3))
+check("history: round-trips through its file, and torn JSON is an empty history",
+      #core.parseCoachHistory(json.encode(hist)) == 2 and core.parseCoachHistory(json.encode(hist))[1].before == "b1"
+      and #core.parseCoachHistory("{") == 0 and #core.parseCoachHistory(json.encode({ { sha = "zz", why = "w" } })) == 0)
+local hv = core.coachHistoryView(hist)
+check("history view: newest first, each with its place in the list, its commit and what it changed",
+      #hv == 2 and hv[1].sha == "bbb2222" and hv[1].i == 2 and hv[2].i == 1 and hv[2].old == "- x" and hv[2].new == "- y"
+      and hv[2].before == "b1" and hv[2].after == "a1" and hv[2].undone ~= true)
+hist[1].undone = { sha = "ccc3333", at = 400 }
+check("history view: an undone entry says so, with the commit that undid it", core.coachHistoryView(hist)[2].undone == true
+      and core.coachHistoryView(hist)[2].undoSha == "ccc3333")
+local usub, ubody = core.coachUndoMessage({ sha = "aaa1111aaa", section = "Git", why = "Sessions pushed on their own." })
+check("undo message: plain, names the commit it undoes, no attribution", usub == "CLAUDE.md: undo Git"
+      and ubody == "Undoes aaa1111: Sessions pushed on their own." and not (usub .. ubody):find("Co%-Authored"))
+-- the change a commit made, as one block of whole lines, and its exact inverse
+local BEFORE = "# Repo\n\n## Git\n\n- commit often\n\n## Traps\n\n- trap one\n\n## Deploy\n\n- from main\n"
+local A1 = BEFORE:gsub("%- trap one\n", "- trap one\n- trap two\n")            -- the edit: a bullet added to a section
+local ch = core.coachChange(BEFORE, A1)
+check("change: an added bullet is its whole line, nothing removed", ch.removed == "" and ch.added == "- trap two\n")
+local A2 = A1:gsub("%- trap two\n", "- trap two\n- trap three\n")              -- later: another bullet right after it
+local u1 = core.coachUndoDecision(A2, ch)
+check("undo: takes the bullet out even with a later one added right after it",
+      u1.ok == true and u1.text == BEFORE:gsub("%- trap one\n", "- trap one\n- trap three\n"))
+local R1 = BEFORE:gsub("%- commit often", "- commit often; never git push")     -- the edit: a line reworded
+local chR = core.coachChange(BEFORE, R1)
+check("change: a reworded line is the whole old line and the whole new one",
+      chR.removed == "- commit often\n" and chR.added == "- commit often; never git push\n")
+check("undo: puts the old line back, keeping a later change elsewhere",
+      core.coachUndoDecision(R1:gsub("%- from main", "- from main, after the suite"), chR).text == BEFORE:gsub("%- from main", "- from main, after the suite"))
+check("undo: refused when its text is no longer in CLAUDE.md", core.coachUndoDecision(BEFORE, ch).ok == false and core.coachUndoDecision(BEFORE, ch).error == "undo-conflict")
+check("undo: refused when its text is there twice", core.coachUndoDecision(A1 .. "- trap two\n", ch).error == "undo-conflict")
+check("undo: text inside a longer line is not its line", core.coachUndoDecision(BEFORE .. "x- trap two\n", ch).error == "undo-conflict")
+local D1 = BEFORE:gsub("%- trap one\n", "")                                     -- the edit: a line deleted
+local chD = core.coachChange(BEFORE, D1)
+check("change: a deleted line is located by the lines around it", chD.added ~= "" and chD.removed:find("- trap one\n", 1, true) ~= nil)
+check("undo: puts a deleted line back", core.coachUndoDecision(D1, chD).text == BEFORE)
+local chN = core.coachChange(nil, "# Repo\n\n- first rule\n")                  -- the edit created CLAUDE.md
+check("undo: a CLAUDE.md the edit created is removed again", core.coachUndoDecision("# Repo\n\n- first rule\n", chN).delete == true)
+check("undo: ...but only what the edit wrote is taken out once more has been added",
+      core.coachUndoDecision("# Repo\n\n- first rule\n- later rule\n", chN).error == "undo-conflict")
+check("undo: no change to undo is refused", core.coachUndoDecision(BEFORE, core.coachChange(BEFORE, BEFORE)).error == "undo-conflict")
+check("undo: every refusal has words", core.coachRefusal("undo-conflict"):find("git revert", 1, true) ~= nil
+      and core.coachRefusal("undo-gone"):find("refused:", 1, true) == nil)
+-- reading a commit's two versions of CLAUDE.md from git
+local U = T .. "/urepo"
+sh("git init -q " .. q(U) .. " && git -C " .. q(U) .. " config user.email t@example.com && git -C " .. q(U)
+   .. " config user.name Tester && git -C " .. q(U) .. " config commit.gpgsign false")
+write(U .. "/CLAUDE.md", BEFORE)
+sh("git -C " .. q(U) .. " add -A && git -C " .. q(U) .. " commit -q -m init")
+write(U .. "/CLAUDE.md", A1)
+local usha = (sh(core.coachCommitCmd(U, "CLAUDE.md: Traps", "why", false))):match("(%x+)%s*$")
+check("git: a commit's CLAUDE.md before and after it are read back exactly",
+      sh(core.coachShowCmd(U, usha, true)) == BEFORE and sh(core.coachShowCmd(U, usha, false)) == A1)
+local _, goneCode = sh(core.coachShowCmd(U, "0123456789abcdef0123456789abcdef01234567", false))
+check("git: a commit that isn't in the repo any more fails the read", goneCode ~= 0)
+
 -- the weekly clock: the most recent <day> 00:00, and catching up after sleep
 check("day: mon/Monday/2 cron-style/sun/0/7, default Monday",
       core.coachDay("mon") == 2 and core.coachDay("Monday") == 2 and core.coachDay(1) == 2 and core.coachDay("sun") == 1
@@ -477,8 +546,9 @@ local hs = {
   screen = { mainScreen = function() return { frame = function() return frame end, fullFrame = function() return frame end } end },
   execute = function(cmd)
     cmd = tostring(cmd or "")
-    if cmd:match("^git ") or cmd:match("^cd ") then return (sh(cmd)) end
-    return ""
+    -- like the real hs.execute: output, then whether it exited 0, then "exit" and the code
+    if cmd:match("^git ") or cmd:match("^cd ") then local out, code = sh(cmd); return out, code == 0, "exit", code end
+    return "", true, "exit", 0
   end,
   hotkey = { bind = function() return mkstub() end },
   pathwatcher = { new = function() return mkstub() end },
@@ -677,6 +747,43 @@ step()
 check("nothing waits any more: the card's chip goes", not (c1.coach and (c1.coach.pending or 0) > 0))
 local savedRec = json.decode(read(CDIR .. "/" .. core.coachFileKey(REPO) .. ".json") or "{}") or {}
 check("each outcome is saved", savedRec.edits and savedRec.edits[1].status == "applied" and savedRec.edits[3].status == "skipped")
+
+-- 2026-09-30: every applied edit goes into the repo's history file, and Undo restores CLAUDE.md
+local HFILE = CDIR .. "/" .. core.coachFileKey(REPO) .. ".applied.json"
+local savedHist = core.parseCoachHistory and core.parseCoachHistory(read(HFILE)) or {}
+check("an applied edit is written to the repo's history, with its commit and both texts  (" .. #savedHist .. ")",
+      #savedHist == 2 and savedHist[1].sha == rootRec.edits[1].sha and savedHist[1].old == "- commit often"
+      and savedHist[1].new == "- commit often; never git push")
+jsCalls = {}
+quiet(function() fx.pushCoach(REPO) end)
+local histSent = false
+for _, js in ipairs(jsCalls) do if js:find("ccCoach(", 1, true) and js:find('"history":', 1, true) then histSent = true end end
+check("...and the overlay is sent the history", histSent)
+local beforeUndo = read(REPO .. "/CLAUDE.md")
+local function commitTasks() return tasksWhere(function(t) return tostring(t.args[2] or ""):find("git commit", 1, true) end) end
+local nCommits = #commitTasks()
+local okU
+quiet(function() okU = type(fx.coachUndo) == "function" and fx.coachUndo(REPO, 1) end)
+check("Undo starts one commit  (" .. (#commitTasks() - nCommits) .. ")", okU == true and #commitTasks() == nCommits + 1)
+if commitTasks()[nCommits + 1] then runFor(commitTasks()[nCommits + 1]) end
+check("...with a plain message that names the commit it undoes",
+      (sh("git -C " .. q(REPO) .. " log -1 --format=%s")):find("CLAUDE.md: undo", 1, true) ~= nil
+      and not (sh("git -C " .. q(REPO) .. " log -1 --format=%B")):find("Co-Authored", 1, true))
+local afterHist = core.parseCoachHistory and core.parseCoachHistory(read(HFILE)) or {}
+check("Undo puts the first edit's text back, leaving the second edit in",
+      (read(REPO .. "/CLAUDE.md") or ""):find("- commit often\n", 1, true) ~= nil and not (read(REPO .. "/CLAUDE.md") or ""):find("never git push", 1, true)
+      and (read(REPO .. "/CLAUDE.md") or ""):find("- run make lint first", 1, true) ~= nil and read(REPO .. "/CLAUDE.md") ~= beforeUndo)
+check("...in a commit of CLAUDE.md alone, recorded on the history entry",
+      (sh("git -C " .. q(REPO) .. " show --name-only --format= HEAD")):gsub("%s+$", "") == "CLAUDE.md"
+      and afterHist[1] and type(afterHist[1].undone) == "table" and type(afterHist[1].undone.sha) == "string")
+check("...Shepherd's own undo isn't \"changed since the coach read it\"", rootRec.claudeHash == core.coachHash(read(REPO .. "/CLAUDE.md")))
+quiet(function() okU = type(fx.coachUndo) == "function" and fx.coachUndo(REPO, 1) end)
+check("an entry already undone is not undone twice", okU == false and #commitTasks() == nCommits + 1)
+write(REPO .. "/CLAUDE.md", read(REPO .. "/CLAUDE.md") .. "- wip\n")
+quiet(function() okU = type(fx.coachUndo) == "function" and fx.coachUndo(REPO, 2) end)
+check("Undo refuses while CLAUDE.md has uncommitted edits, and says why on the entry", okU == false
+      and tostring((core.parseCoachHistory and core.parseCoachHistory(read(HFILE)) or {})[2].error):find("uncommitted", 1, true) ~= nil)
+sh("git -C " .. q(REPO) .. " checkout -q -- CLAUDE.md")
 
 -- Shepherd's log: a Not yet note lands in the repo's log and the next digest
 quiet(function() fx.coachNote(COMMON, { kind = "notyet", id = "notyet|n9|1", branch = "feat/q", note = "split the docs out" }) end)

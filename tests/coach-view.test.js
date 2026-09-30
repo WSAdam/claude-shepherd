@@ -142,6 +142,31 @@ eq("...above the text it changes", expRows[0].indexOf('class="co-expect"') < exp
 eq("a suggestion from before the coach said so shows no empty block", /co-expect/.test(expRows[1]), false);
 eq("an applied suggestion keeps its expectation on show", /Expected[\s\S]*only an after/.test(expRows[2]) && !/Today/.test(expRows[2]), true);
 
+// ---- the history of applied edits, with Undo (2026-09-30) ----
+// 2026-09-30: an applied edit vanished from the overlay at the next run, and nothing could undo it.
+const histView = { root: "/r/repo", state: "done", verdict: "none", edits: [], decisions: [],
+  history: [
+    { i: 2, sha: "bbb2222bbb", at: 1000, section: "Tests" + EVIL, why: "Late lint" + EVIL, before: "lint ran last" + EVIL, after: "lint runs first" + EVIL, old: "", new: "- lint first" + EVIL },
+    { i: 1, sha: "aaa1111aaa", at: 900, section: "Git", why: "Pushed alone", old: "- commit often", new: "- never push", undone: true, undoSha: "ccc3333ccc" },
+    { i: 3, sha: "ddd4444ddd", at: 800, section: "Docs", why: "w", old: "- x", new: "- y", error: "CLAUDE.md has uncommitted edits" + EVIL },
+  ] };
+const hh = lib.coachRowsHtml(histView);
+eq("the overlay lists what was applied before, under its own heading with the count", /Applied edits · 3/.test(hh), true);
+const hrows = hh.split('class="ib-row co-row co-hist').slice(1);
+eq("one row per applied edit", hrows.length, 3);
+eq("an applied edit shows its commit, what it replaced and what it added", hrows[1].indexOf("aaa1111") >= 0 && hrows[1].indexOf("- commit often") >= 0 && hrows[1].indexOf("- never push") >= 0, true);
+eq("...and what it was expected to change", /Expected[\s\S]*lint runs first/.test(hrows[0]) && /Today[\s\S]*lint ran last/.test(hrows[0]), true);
+eq("...every field escaped", hh.indexOf("<img") < 0, true);
+eq("an applied edit offers Undo, carrying only its number", /data-act="undo" data-i="0"/.test(hrows[0]) && !/data-sha=|data-old=|data-new=/.test(hh), true);
+eq("an undone edit says so, with the commit that undid it, and offers no Undo", /Undone/.test(hrows[1]) && hrows[1].indexOf("ccc3333") >= 0 && !/data-act="undo"/.test(hrows[1]), true);
+eq("a refused Undo says why on its row, and can be tried again", hrows[2].indexOf("uncommitted edits") >= 0 && /data-act="undo" data-i="2"/.test(hrows[2]), true);
+eq("no history: no heading", /Applied edits/.test(h), false);
+lib.setView(histView);
+sent.length = 0;
+lib.coachAct({ target: { closest: function(){ return { getAttribute: function(k){ return { "data-act": "undo", "data-i": "0" }[k]; } }; } }, stopPropagation: function(){} });
+eq("Undo sends the repo's root and the entry's own number, never text", JSON.stringify(sent.pop()), JSON.stringify(["coach-undo", "/r/repo", "2"]));
+lib.setView(null);
+
 // ---- a running coach shows how long it has been at it (2026-09-30) ----
 // 2026-09-30: Adam ran the coach again and the overlay read "The coach is reading this repo's last
 // sessions…" for minutes with nothing moving: no way to tell a slow run from a dead one.

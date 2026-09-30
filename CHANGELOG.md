@@ -14,6 +14,9 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
 - Coach: each suggestion now says what sessions do today and what they are expected to do once it
   is applied (**Today** / **Expected after** in the overlay), and an applied edit's commit message
   carries both, so `git log -- CLAUDE.md` reads as a record of what each change was for.
+- Coach: every applied edit is kept in a per-repo history that outlives the next run (**Applied
+  edits** in the overlay: its commit, the text before and after, what it was expected to change),
+  and **Undo** takes one back out of `CLAUDE.md` in a commit of its own. Nothing is rewritten.
 
 ## 2026-09-30 — The build program
 

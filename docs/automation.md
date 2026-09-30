@@ -606,6 +606,16 @@ instructions every session in it reads first. It suggests; nothing changes until
   reads or waits, and **🧭 ⚠** when its last run couldn't run (the overlay says why, with **Run the
   coach again**).
 
+- **History and Undo:** every applied edit is also kept in the repo's history
+  (`~/.claude/cc-coach/<repo>.applied.json`, the newest 100), which the next coach run doesn't
+  replace. The overlay lists them under **Applied edits**, newest first: when, its commit, what it
+  was expected to change, and the text before and after. **Undo** reads `CLAUDE.md` before and
+  after that commit from git, takes the lines it added back out of the file as it is now (and puts
+  back the lines it removed), and commits `CLAUDE.md` alone as `CLAUDE.md: undo <section>`. It is
+  one more commit; nothing is rewritten, and later edits stay. It's refused, and says why on the
+  entry, when `CLAUDE.md` has uncommitted edits, when those lines aren't in the file exactly once
+  any more (undo it by hand with `git revert`), or when the commit is no longer in the repo.
+
 ```json
 { "coach": { "enabled": true, "day": "mon", "maxBudgetUsd": 1, "timeoutSeconds": 600 } }
 ```

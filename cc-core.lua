@@ -16368,6 +16368,7 @@ M.COACH = {
   promptChars = 400, errorChars = 300, noteChars = 400,
   perSession = { corrections = 12, errors = 8, denials = 8, notes = 5 },
   logMax = 40, logDays = 21,
+  historyMax = 100,          -- applied edits kept per repo (newest), for the overlay's history and Undo
   activityDays = 7,          -- a first run needs a session this recent
   checkEverySeconds = 60,
 }
@@ -16854,6 +16855,8 @@ do
     ambiguous = "its text is in CLAUDE.md more than once",
     write = "Shepherd couldn't write CLAUDE.md",
     link = "CLAUDE.md is a link -- edit the file it points to by hand",
+    ["undo-conflict"] = "its text is no longer in CLAUDE.md exactly once -- undo it by hand (git revert its commit)",
+    ["undo-gone"] = "its commit isn't in this repo any more",
   }
   function M.coachRefusal(code) return REFUSALS[code] or ("refused: " .. tostring(code)) end
   M.COACH_DECISIONS_CHANGED = "DECISIONS.md changed since the coach read it"
@@ -16864,6 +16867,115 @@ do
     if type(item) ~= "table" or item.status ~= "pending" or not item.error then return nil end
     if item.errorCode then return item.errorCode == "changed" or nil end
     return item.error == words or nil
+  end
+
+  -- ---- the history of applied edits, and Undo (2026-09-30) -------------------------------------
+  -- Every Apply is its own commit of CLAUDE.md; Shepherd keeps the list (<repo>.applied.json) so it
+  -- outlives the next coach run, shows each edit's two texts and what it was expected to change, and
+  -- can take one back out. Undo reads the file before and after that commit from git, works out the
+  -- whole lines it added and removed (M.coachChange), and replaces them in the file as it is now
+  -- (M.coachUndoDecision) -- refused unless those lines are there exactly once -- then commits
+  -- CLAUDE.md alone, like Apply. Nothing is rewritten: an undo is one more commit.
+  local function histSha(v) return (type(v) == "string" and #v >= 7 and #v <= 64 and v:match("^%x+$")) and v or nil end
+  local function histEntry(e)
+    if type(e) ~= "table" then return nil end
+    local sha = histSha(e.sha)
+    if not sha then return nil end
+    local old = type(e.old) == "string" and e.old or ""
+    local new = type(e.new) == "string" and e.new or ""
+    if #old > C.editBytes or #new > C.editBytes then return nil end
+    local before = type(e.before) == "string" and oneLine(e.before, 300) or ""
+    local after = type(e.after) == "string" and oneLine(e.after, 300) or ""
+    local out = { sha = sha, at = tonumber(e.at) or 0, section = (oneLine(e.section, 120):gsub("^#+%s*", "")), why = oneLine(e.why, 500),
+                  before = (before ~= "") and before or nil, after = (after ~= "") and after or nil, old = old, new = new,
+                  error = (type(e.error) == "string" and e.error ~= "") and capChars(e.error, 300) or nil }
+    if type(e.undone) == "table" and histSha(e.undone.sha) then out.undone = { sha = e.undone.sha, at = tonumber(e.undone.at) or 0 } end
+    return out
+  end
+  -- A new list with `entry` at its end: one entry per commit, newest kept past historyMax.
+  function M.coachHistoryAdd(list, entry)
+    local out = {}
+    for _, e in ipairs(type(list) == "table" and list or {}) do out[#out + 1] = e end
+    local n = histEntry(entry)
+    if not n then return out end
+    for _, e in ipairs(out) do if e.sha == n.sha then return out end end
+    out[#out + 1] = n
+    while #out > C.historyMax do table.remove(out, 1) end
+    return out
+  end
+  function M.parseCoachHistory(raw)
+    local out = {}
+    if type(raw) ~= "string" then return out end
+    local ok, t = pcall(M.json.decode, raw)
+    if not ok or type(t) ~= "table" then return out end
+    for _, e in ipairs(t) do
+      local n = histEntry(e)
+      if n and #out < C.historyMax then out[#out + 1] = n end
+    end
+    return out
+  end
+  -- For the overlay: newest first, each with its place in the list (what an Undo click sends back).
+  function M.coachHistoryView(list)
+    local out = {}
+    list = type(list) == "table" and list or {}
+    for i = #list, 1, -1 do
+      local e = list[i]
+      out[#out + 1] = { i = i, sha = e.sha, at = e.at, section = e.section, why = e.why, before = e.before, after = e.after,
+                        old = e.old, new = e.new, error = e.error, undone = e.undone and true or nil,
+                        undoSha = e.undone and e.undone.sha or nil, undoAt = e.undone and e.undone.at or nil }
+    end
+    return out
+  end
+  function M.coachUndoMessage(entry)
+    entry = type(entry) == "table" and entry or {}
+    local section = (oneLine(entry.section, 60):gsub("^#+%s*", ""))
+    return "CLAUDE.md: undo " .. (section ~= "" and section or "an edit"),
+           "Undoes " .. tostring(entry.sha or ""):sub(1, 7) .. ": " .. oneLine(entry.why, 500)
+  end
+  -- CLAUDE.md as it was right before a commit (parent = true) or in it. Fails when the commit, or
+  -- the file at that point, isn't there.
+  function M.coachShowCmd(root, sha, parent)
+    return "git -C " .. sq(root) .. " show " .. sq((histSha(sha) or "0000000") .. (parent and "^" or "") .. ":" .. M.COACH_FILE)
+  end
+  local function splitLines(text)
+    local lines = {}
+    for line in (text or ""):gmatch("[^\n]*\n?") do if line ~= "" then lines[#lines + 1] = line end end
+    return lines
+  end
+  -- What a commit changed in CLAUDE.md, as one block of whole lines: { removed, added }. When it
+  -- only deleted lines, the block is widened until it holds a line with text, so there is something
+  -- to find later. `before` nil = the commit created the file.
+  function M.coachChange(before, after)
+    local a, b = splitLines(before), splitLines(after)
+    local p, s = 0, 0
+    while p < #a and p < #b and a[p + 1] == b[p + 1] do p = p + 1 end
+    while s < #a - p and s < #b - p and a[#a - s] == b[#b - s] do s = s + 1 end
+    local function hasText() for i = p + 1, #b - s do if b[i]:match("%S") then return true end end return false end
+    while (#a - s - p) > 0 and not hasText() and (p > 0 or s > 0) do
+      if p > 0 then p = p - 1 end
+      if s > 0 and not hasText() then s = s - 1 end
+    end
+    return { removed = table.concat(a, "", p + 1, #a - s), added = table.concat(b, "", p + 1, #b - s), created = (before == nil) or nil }
+  end
+  -- The file as it is now with that change taken back out: { ok, text } (or delete = true for a
+  -- file the edit created and nothing has touched since), else { ok = false, error = "undo-conflict" }
+  -- when the added lines aren't there exactly once, starting a line.
+  function M.coachUndoDecision(current, change)
+    if type(current) ~= "string" or type(change) ~= "table" or type(change.added) ~= "string" or change.added == ""
+       or change.added == change.removed then return { ok = false, error = "undo-conflict" } end
+    if change.created then
+      if current == change.added then return { ok = true, delete = true } end
+      return { ok = false, error = "undo-conflict" }
+    end
+    local at, from, n = nil, 1, 0
+    while true do
+      local i = current:find(change.added, from, true)
+      if not i then break end
+      if i == 1 or current:sub(i - 1, i - 1) == "\n" then n = n + 1; at = i end
+      from = i + 1
+    end
+    if n ~= 1 then return { ok = false, error = "undo-conflict" } end
+    return { ok = true, text = current:sub(1, at - 1) .. (change.removed or "") .. current:sub(at + #change.added) }
   end
 
   -- git status of CLAUDE.md alone: any output = uncommitted edits (untracked included).
