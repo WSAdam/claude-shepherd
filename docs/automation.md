@@ -597,7 +597,9 @@ instructions every session in it reads first. It suggests; nothing changes until
   (`git commit -- CLAUDE.md`, a plain message: `CLAUDE.md: <section>` and the why), leaving
   anything else you have staged as it was. It's refused, and says why on the edit, when
   `CLAUDE.md` changed since the coach read it (its hash) or has uncommitted edits, when the
-  edit's text isn't there exactly once, or when `CLAUDE.md` is a link (edit its target by hand). If a hook refuses the commit, `CLAUDE.md` goes back as it
+  text the edit replaces isn't in the file exactly once (line wrapping and spacing don't count: a
+  paragraph the coach quoted on one line is found in its wrapped lines, and the file's own lines
+  are left as they are), or when `CLAUDE.md` is a link (edit its target by hand). If a hook refuses the commit, `CLAUDE.md` goes back as it
   was. An edit refused because `CLAUDE.md` changed gets **Run the coach again** next to Skip: a
   fresh run reads the file as it is now and replaces the suggestions (the same for a `DECISIONS.md`
   entry whose file changed). No other refusal offers it. Applying one edit doesn't block the next. **Skip** puts one aside. A `DECISIONS.md` entry is

@@ -16655,7 +16655,9 @@ do
       "",
       "Rules:",
       "- Edit CLAUDE.md only. Each edit is {\"section\", \"old\", \"new\", \"why\", \"before\", \"after\", \"evidence\"}:",
-      "  - \"old\" is text copied exactly from the CLAUDE.md below, occurring there exactly once; \"new\" replaces it."
+      "  - \"old\" is text copied character for character from the CLAUDE.md below -- its line breaks and"
+        .. " indentation included, never joined onto one line or re-wrapped; prefer whole lines -- occurring there"
+        .. " exactly once; \"new\" replaces it, and \"section\" is the heading that text sits under."
         .. " To add without replacing, set \"old\" to \"\" and \"section\" to the heading it goes under (a missing heading is"
         .. " created at the end).",
       "  - \"why\": one or two sentences on what the edit prevents.",
@@ -16782,12 +16784,88 @@ do
 
   local function isListItem(s) return s:match("^%s*[%-%*%+]%s") ~= nil or s:match("^%s*%d+[%.%)]%s") ~= nil end
 
+  -- ---- a quote that only differs in line wrapping (2026-09-30) ----------------------------------
+  -- The coach copies a hard-wrapped paragraph as one long line, so an exact find misses text that is
+  -- there. squeeze() is the text with every run of blanks (space, tab, CR, LF -- an explicit set:
+  -- a no-break space is text) as ONE space, plus, per word, where it starts in the original and in
+  -- the squeezed text; unsq() turns a squeezed offset that sits on a word byte back into the
+  -- original byte. Never a pattern built from the quote: Lua gives up past ~200 words.
+  local function squeeze(s)
+    local parts, at, sq, n, pos, len = {}, {}, {}, 0, 1, 0
+    while true do
+      local a, b = s:find("[^ \t\r\n]+", pos)
+      if not a then break end
+      n = n + 1
+      if n > 1 then len = len + 1 end
+      parts[n], at[n], sq[n] = s:sub(a, b), a, len + 1
+      len = len + (b - a + 1)
+      pos = b + 1
+    end
+    return table.concat(parts, " "), at, sq
+  end
+  local function unsq(at, sq, i)
+    local lo, hi = 1, #sq
+    while lo < hi do
+      local mid = (lo + hi + 1) // 2
+      if sq[mid] <= i then lo = mid else hi = mid - 1 end
+    end
+    return at[lo] + (i - sq[lo])
+  end
+  -- Does any line from byte s to byte e sit in (or open or close) a ``` / ~~~ fence? There the
+  -- spacing IS the content, so a loose match is never trusted.
+  local function fencedSpan(base, s, e)
+    local pos, fence = 1, false
+    while pos <= #base do
+      local nl = base:find("\n", pos, true)
+      local stop = nl or #base
+      local line = base:sub(pos, stop)
+      local isFence = line:match("^%s*```") or line:match("^%s*~~~")
+      if pos <= e and stop >= s and (fence or isFence) then return true end
+      if isFence then fence = not fence end
+      if pos > e then return false end
+      pos = stop + 1
+    end
+    return false
+  end
+  -- A replace whose quote isn't in the file byte for byte: find it once with blanks squeezed, then
+  --   the new text continues the quote -> the file's own lines stay; only the rest goes in after it,
+  --   the new text ends with the quote  -> only the head goes in before it,
+  --   anything else (a rewrite)         -> the span is replaced with the new text.
+  local function tolerantReplace(base, edit)
+    local sqOld = squeeze(edit.old)
+    if sqOld == "" then return { ok = false, error = "not-found" } end
+    local sqBase, at, sq = squeeze(base)
+    local a, b = sqBase:find(sqOld, 1, true)
+    if not a then return { ok = false, error = "not-found" } end
+    if sqBase:find(sqOld, a + 1, true) then return { ok = false, error = "ambiguous" } end
+    local s, e = unsq(at, sq, a), unsq(at, sq, b)
+    if fencedSpan(base, s, e) then return { ok = false, error = "not-found" } end
+    local sqNew, nat, nsq = squeeze(edit.new)
+    if sqNew == sqOld then return { ok = false, error = "no-change" } end
+    local eol = base:find("\r\n", 1, true) and "\r\n" or "\n"
+    local function fileEol(t) return (t:gsub("\r\n", "\n"):gsub("\n", eol)) end
+    local text
+    if sqNew:sub(1, #sqOld) == sqOld then
+      local rest = rtrimBytes(edit.new:sub(unsq(nat, nsq, #sqOld) + 1))
+      text = base:sub(1, e) .. fileEol(rest) .. base:sub(e + 1)
+    elseif sqNew:sub(-#sqOld) == sqOld then
+      local head = edit.new:sub(1, unsq(nat, nsq, #sqNew - #sqOld + 1) - 1):gsub("^[ \t\r\n]+", "")
+      text = base:sub(1, s - 1) .. fileEol(head) .. base:sub(s)
+    else
+      local body = rtrimBytes(edit.new):gsub("^[ \t\r\n]+", "")
+      text = base:sub(1, s - 1) .. fileEol(body) .. base:sub(e + 1)
+    end
+    if text == base then return { ok = false, error = "no-change" } end
+    return { ok = true, text = text, tolerant = true }
+  end
+
   -- Decide whether an Apply may go ahead, given CLAUDE.md's CURRENT content (nil = missing), the
   -- hash the coach read, the edit, and whether git shows the file with uncommitted edits. PURE --
   -- FX reads the file and git, and writes and commits around it. Returns
   --   { ok = false, error = "bad-edit"|"changed"|"dirty"|"not-found"|"ambiguous" } or
   --   { ok = true, text = <the whole new file> }.
-  -- A replace needs its text exactly once. An add (old "") goes after the last line of its section
+  -- A replace needs its text exactly once: byte for byte, or failing that with its blanks squeezed
+  -- (tolerantReplace above; it can also refuse "no-change"). An add (old "") goes after the last line of its section
   -- (the heading's level decides where the section ends: at the next heading as high or higher),
   -- a list item straight under a list, anything else after a blank line; a section that isn't
   -- there is made at the end, and a missing file is started.
@@ -16800,7 +16878,7 @@ do
     local base = type(current) == "string" and current or ""
     if edit.old ~= "" then
       local s, e = base:find(edit.old, 1, true)
-      if not s then return { ok = false, error = "not-found" } end
+      if not s then return tolerantReplace(base, edit) end   -- the same words in another wrapping
       if base:find(edit.old, s + 1, true) then return { ok = false, error = "ambiguous" } end
       return { ok = true, text = base:sub(1, s - 1) .. edit.new .. base:sub(e + 1) }
     end
@@ -16851,7 +16929,8 @@ do
     ["bad-edit"] = "the edit is malformed",
     changed = "CLAUDE.md changed since the coach read it -- run the coach again",
     dirty = "CLAUDE.md has uncommitted edits -- commit or restore them first",
-    ["not-found"] = "its text isn't in CLAUDE.md any more",
+    ["not-found"] = "the text it replaces isn't in CLAUDE.md as the coach quoted it",
+    ["no-change"] = "it would change nothing but line wrapping or spacing",
     ambiguous = "its text is in CLAUDE.md more than once",
     write = "Shepherd couldn't write CLAUDE.md",
     link = "CLAUDE.md is a link -- edit the file it points to by hand",
@@ -17116,7 +17195,9 @@ do
     for i, e in ipairs(rec.edits or {}) do
       v.edits[i] = { i = i, section = e.section, old = e.old, new = e.new, why = e.why, evidence = e.evidence,
                      before = e.before, after = e.after,
-                     status = e.status or "pending", sha = e.sha, error = e.error, rerun = coachStale(e, REFUSALS.changed) }
+                     status = e.status or "pending", sha = e.sha, rerun = coachStale(e, REFUSALS.changed),
+                     -- the words come from the code when it has some: a refusal saved under old wording reads as today's
+                     error = (e.error and e.errorCode and REFUSALS[e.errorCode]) or e.error }
     end
     for i, d in ipairs(rec.decisions or {}) do
       v.decisions[i] = { i = i, what = d.what, why = d.why, status = d.status or "pending", error = d.error,

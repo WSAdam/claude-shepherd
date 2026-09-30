@@ -232,6 +232,73 @@ check("apply: a repo with no CLAUDE.md gets one", fresh.ok and fresh.text:find("
 check("apply: a malformed edit is refused", core.coachApplyDecision(CUR, H, nil, false).error == "bad-edit")
 check("apply: every refusal has words", type(core.coachRefusal("changed")) == "string" and core.coachRefusal("dirty"):find("uncommitted", 1, true) ~= nil)
 
+-- ---- a quote that only differs in line wrapping still applies (2026-09-30) ----
+-- 2026-09-30: the coach quoted a ChargebackSentinel paragraph as one line; CLAUDE.md has it
+-- hard-wrapped over 4 lines, so the exact find missed text that was there, in a file that had not
+-- changed, and Apply was refused with "its text isn't in CLAUDE.md any more". The same happened to
+-- a wrapped list item in this repo.
+do   -- (its own block: the chunk is at Lua's 200-local limit)
+local WPARA = "So: restart `deno task dev` before the red run AND before the green run that\n"
+  .. "follows it. A browser test you never watched fail, against the code you think\n"
+  .. "you changed, has proved nothing - and here it would have shipped a fix that did\n"
+  .. "not work.\n"
+local WRAPPED = "## Restart the dev server\n\ndev server produced the expected red.\n\n" .. WPARA .. "\n## A branch is not an environment\n\n- one\n"
+local QUOTE = "So: restart `deno task dev` before the red run AND before the green run that follows it. A browser test you never"
+  .. " watched fail, against the code you think you changed, has proved nothing - and here it would have shipped a fix that did not work."
+local WH = core.coachHash(WRAPPED)
+local function wdec(file, old, new) return core.coachApplyDecision(file, core.coachHash(file), { section = "Restart the dev server", old = old, new = new }, false) end
+local w1 = wdec(WRAPPED, QUOTE, QUOTE .. "\n\nBefore any browser test, check the server first.")
+check("rewrap: a paragraph quoted on one line is found in its wrapped lines  (" .. tostring(w1.error) .. ")", w1.ok == true)
+check("rewrap: ...the new paragraph lands right after it, and the file's own line breaks stay",
+      w1.text == "## Restart the dev server\n\ndev server produced the expected red.\n\n" .. WPARA
+        .. "\nBefore any browser test, check the server first.\n\n## A branch is not an environment\n\n- one\n")
+local LIST = "## Deploying\n\n- **Finishing a unit here** follows the global protocol, with one extra step:\n"
+  .. "  after the ff-merge run `make deploy` from main, then flip the unit's\n  TODO lines.\n- next item\n"
+local LQ = "- **Finishing a unit here** follows the global protocol, with one extra step: after the ff-merge run `make deploy` from main, then flip the unit's TODO lines."
+local w2 = wdec(LIST, LQ, LQ .. " Never merge before cc-merge.sh approves.")
+check("rewrap: a list item with indented continuation lines is found, and added to in place",
+      w2.ok == true and w2.text == LIST:gsub("  TODO lines%.\n", "  TODO lines. Never merge before cc-merge.sh approves.\n"))
+local w3 = wdec(WRAPPED, QUOTE, "Heads-up first.\n\n" .. QUOTE)
+check("rewrap: new text that goes before the quoted text is put before it",
+      w3.ok == true and w3.text == WRAPPED:gsub("So: restart", "Heads-up first.\n\nSo: restart"))
+local w4 = wdec(WRAPPED, QUOTE, "So: always restart the dev server first.")
+check("rewrap: a rewrite replaces exactly the wrapped lines",
+      w4.ok == true and w4.text == "## Restart the dev server\n\ndev server produced the expected red.\n\nSo: always restart the dev server first.\n\n## A branch is not an environment\n\n- one\n")
+check("rewrap: wrapped text that is there twice is ambiguous", wdec(WRAPPED .. "\n" .. WPARA, QUOTE, QUOTE .. " More.").error == "ambiguous")
+local w6 = wdec(WRAPPED .. "\n" .. QUOTE .. "\n", QUOTE, QUOTE .. " More.")
+check("rewrap: an exact match wins over a re-wrapped twin", w6.ok == true and w6.text == WRAPPED .. "\n" .. QUOTE .. " More.\n")
+check("rewrap: text that is there in no wrapping is still not found", wdec(WRAPPED, "So: never restart anything at all.", "x").error == "not-found")
+local CR = WRAPPED:gsub("\n", "\r\n")
+local w8 = wdec(CR, QUOTE, QUOTE .. "\n\nCheck the server first.")
+check("rewrap: a CRLF file is matched by a quote with plain newlines, and gets no bare newline",
+      w8.ok == true and w8.text:find("not work.\r\n\r\nCheck the server first.\r\n\r\n## A branch", 1, true) ~= nil and not (w8.text:gsub("\r\n", "")):find("\n", 1, true))
+check("rewrap: blanks around the quote that the file doesn't have don't matter", wdec(WRAPPED, "  " .. QUOTE .. " \n", QUOTE .. " More.").ok == true)
+check("rewrap: a quote of nothing but blanks is not found", wdec(WRAPPED, "  \n\t ", "x").error == "not-found")
+local MB = "## S\n\nCafé — naïve text\nthat wraps here\nend\n"
+local w11 = wdec(MB, "Café — naïve text that wraps here", "Café — naïve text that wraps here Done.")
+check("rewrap: characters of several bytes next to the span survive byte for byte", w11.ok == true and w11.text == "## S\n\nCafé — naïve text\nthat wraps here Done.\nend\n")
+check("rewrap: a no-break space is text, not a blank", wdec("## S\n\na\u{00A0}b c\n", "a b c", "a b c d").error == "not-found")
+local FENCE = "## S\n\n```\nfoo   bar\nbaz\n```\n\nafter\n"
+check("rewrap: text inside a code fence is never matched loosely (its spacing is the code)",
+      wdec(FENCE, "foo bar baz", "qux").error == "not-found" and wdec(FENCE, "foo bar baz", "foo bar baz quux").error == "not-found")
+check("rewrap: an edit that would only re-wrap or re-space the text is refused", wdec(WRAPPED, QUOTE, (QUOTE:gsub("AND before", "AND\nbefore"))).error == "no-change")
+check("rewrap: a quoted block's markers are text, so a half-match is not found", wdec("## S\n\n> line one\n> line two\n", "line one line two", "x").error == "not-found")
+check("rewrap: the file's hash still guards it", core.coachApplyDecision(WRAPPED .. "- more\n", WH, { section = "S", old = QUOTE, new = QUOTE .. " x" }, false).error == "changed")
+check("rewrap: the refusal no longer says the text was removed, and the new one has words",
+      not core.coachRefusal("not-found"):find("any more", 1, true) and core.coachRefusal("not-found"):find("quoted", 1, true) ~= nil
+      and not core.coachRefusal("no-change"):find("refused:", 1, true))
+local lrec = core.parseCoachRecord(json.encode({ v = 1, repo = "/r/repo/.git", root = "/r/repo", state = "done", verdict = "proposals",
+  at = 100, doneAt = 200, lastRunAt = 200, claudeHash = H,
+  edits = { { section = "Git", old = "a", new = "b", why = "w", evidence = { "e" }, status = "pending",
+              error = "its text isn't in CLAUDE.md any more", errorCode = "not-found" },
+            { section = "Git", old = "c", new = "d", why = "w", evidence = { "e" }, status = "pending",
+              error = "the commit failed: a hook said no -- CLAUDE.md is back as it was", errorCode = "commit" } }, decisions = {} }))
+local lv = core.coachView(lrec) or { edits = { {}, {} } }
+check("rewrap: a refusal saved with the old words is shown with today's", lv.edits[1].error == core.coachRefusal("not-found"))
+check("rewrap: ...a refusal with words of its own keeps them", tostring(lv.edits[2].error):find("a hook said no", 1, true) ~= nil)
+check("prompt: the quoted text is to be copied with its line breaks", P:lower():find("line breaks", 1, true) ~= nil)
+end
+
 -- the commit touches only CLAUDE.md (run for real in a temp repo)
 local R = T .. "/crepo"
 sh("git init -q " .. q(R) .. " && git -C " .. q(R) .. " config user.email t@example.com && git -C " .. q(R)
