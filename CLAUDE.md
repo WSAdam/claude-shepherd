@@ -70,7 +70,9 @@ and the README's "Testing & development" section.
   for Instances' Close selected: unnamed sessions close by that same count only when EVERY unnamed
   session in the window is selected (`core.unnamedTabsVerdict`, cap 99 from bridge 0.6.0). Nothing
   closes a finished session on its own: Close selected suggests, Adam confirms. Never add another op, and never use the
-  Claude URI to reveal a tab (D-14). Bump its `package.json` version with every change, or
+  Claude URI to reveal a tab (D-14). The one exception (2026-09-30) is restart in place: `?session=`
+  may reopen a session that is VERIFIED DEAD, written only by `core.restartTabUri` and sent only by
+  `FX.openClaudeTab` (`tests/ui.test.lua` pins both). Bump its `package.json` version with every change, or
   `make install` won't reinstall it; running windows pick it up after a reload. A window keeps
   the bridge it loaded, so before relying on an op check `core.tabBridgeSupports(reg.version, op)`
   and read every command's answer (`FX.tabBridgeTrack`) -- on 2026-09-15 every expect went to a
