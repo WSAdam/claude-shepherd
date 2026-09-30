@@ -523,20 +523,23 @@ local hs = {
       if p then for line in p:lines() do names[#names + 1] = line end; p:close() end
       local i = 0; return function() i = i + 1; return names[i] end
     end,
+    -- 2026-09-30: GNU stat first, then BSD. These asked BSD `stat -f` alone, so on ubuntu (CI) every
+    -- file read as missing, the coach found no transcripts and never ran, and this test crashed.
     attributes = function(path, what)
-      local p = io.popen("stat -f '%m %HT' " .. q(path) .. " 2>/dev/null")
+      local p = io.popen("stat -c '%Y %F' " .. q(path) .. " 2>/dev/null || stat -f '%m %HT' " .. q(path) .. " 2>/dev/null")
       local l = p and p:read("*l"); if p then p:close() end
       if not l then return nil, "no such file" end
       local m, ty = l:match("^(%d+) (.*)$")
-      local t = { modification = tonumber(m), mode = (ty == "Directory") and "directory" or "file" }
+      local t = { modification = tonumber(m), mode = (tostring(ty):lower() == "directory") and "directory" or "file" }
       if what then return t[what] end
       return t
     end,
     symlinkAttributes = function(path, what)   -- lstat: a link reports itself
-      local p = io.popen("stat -f '%HT' " .. q(path) .. " 2>/dev/null")
+      local p = io.popen("stat -c '%F' " .. q(path) .. " 2>/dev/null || stat -f '%HT' " .. q(path) .. " 2>/dev/null")
       local l = p and p:read("*l"); if p then p:close() end
       if not l then return nil end
-      local t = { mode = (l == "Symbolic Link") and "link" or ((l == "Directory") and "directory" or "file") }
+      l = l:lower()
+      local t = { mode = (l == "symbolic link") and "link" or ((l == "directory") and "directory" or "file") }
       if what then return t[what] end
       return t
     end,
@@ -712,7 +715,7 @@ write(REPO .. "/AGENTS.md", ORIG)
 sh("rm " .. q(REPO .. "/CLAUDE.md") .. " && ln -s AGENTS.md " .. q(REPO .. "/CLAUDE.md"))
 sh("git -C " .. q(REPO) .. " add -A && git -C " .. q(REPO) .. " commit -q -m link")
 quiet(function() okA = fx.coachApply(REPO, 1) end)
-check("Apply refuses when CLAUDE.md is a link", okA == false and (sh("stat -f '%HT' " .. q(REPO .. "/CLAUDE.md"))):find("Symbolic Link", 1, true) ~= nil
+check("Apply refuses when CLAUDE.md is a link", okA == false and (sh("test -L " .. q(REPO .. "/CLAUDE.md") .. " && echo still-a-link")):find("still-a-link", 1, true) ~= nil
       and read(REPO .. "/AGENTS.md") == ORIG and tostring(rootRec.edits[1].error):find("link", 1, true) ~= nil)
 sh("rm " .. q(REPO .. "/CLAUDE.md") .. " " .. q(REPO .. "/AGENTS.md"))
 -- back to what the coach read, with someone's staged work beside it

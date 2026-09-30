@@ -208,6 +208,9 @@ echo ""
 echo "== bash: README front page -- links resolve, every in-app feature is in the tour =="
 bash "$DIR/readme.test.sh" || fail=1
 echo ""
+echo "== bash: the suite runs on Linux too -- no BSD-only stat in a test, and bash libraries are run with bash =="
+bash "$DIR/portability.test.sh" || fail=1
+echo ""
 echo "== bash: the suite refuses a second concurrent run in one checkout =="
 bash "$DIR/run-lock.test.sh" || fail=1
 echo ""

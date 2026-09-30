@@ -20,6 +20,10 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
 - Fixed: an edit applied before the coach kept a history was seeded into it in memory only, so the
   next coach run (which replaces the run's record) lost it. The seeded history is now written to
   its file, and a run seeds it before replacing the record.
+- Fixed: CI (ubuntu) was red from the build program's first push. The coach test stood in for
+  Hammerspoon's file API with BSD `stat -f`, and the `cc_remove` reap test ran the bash library
+  `cc-lib.sh` through plain `sh` (dash on ubuntu). Both now work on Linux, and
+  `tests/portability.test.sh` catches either mistake on a Mac.
 
 ## 2026-09-30 — The build program
 

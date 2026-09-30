@@ -172,14 +172,19 @@ local function plantOther() for _, p in ipairs(OTHER) do write(p, "{}") end end
 plant(); plantOther()
 check("(fixture: the parked merge answer exists before the reap)",
       exists(MERGE .. "/" .. KEY .. ".decision.parked.4242"))
-os.execute(([[
+-- 2026-09-30: cc-lib.sh is a bash library (every hook that sources it is `#!/usr/bin/env bash`), so
+-- it is run with bash here. os.execute alone hands the script to plain `sh` -- bash on a Mac, dash
+-- on ubuntu, where CI stopped at the first bash-only line and every check below went red.
+local REAP_SH = T .. "/reap.sh"
+write(REAP_SH, ([[
   export CC_STATUS_DIR=%q CC_MERGE_DIR=%q CC_ASK_DIR=%q
   export CC_GATE_TOOLS_DIR=%q CC_APPROVED_DIR=%q CC_AUTOPILOT_DIR=%q
   export CC_POLICY_DIR=%q CC_POLICY_OVERRIDE_DIR=%q CC_AUTOMODEL_DIR=%q CC_TALK_DIR=%q CC_INBOX_DIR=%q
   export CC_RESUME_DIR=%q CC_NOTES_DIR=%q CC_PINS_DIR=%q CC_LEASE_DIR=%q CC_DECIDE_DIR=%q
   . %q; cc_remove %s
 ]]):format(STATUS, MERGE, ASK, T .. "/gt", T .. "/ap", T .. "/au",
-           T .. "/po", T .. "/pov", T .. "/am", TALK, INBOX, RESUME, NOTES, PINS, LEASE, DECIDE, ROOT .. "cc-lib.sh", KEY) .. " >/dev/null 2>&1")
+           T .. "/po", T .. "/pov", T .. "/am", TALK, INBOX, RESUME, NOTES, PINS, LEASE, DECIDE, ROOT .. "cc-lib.sh", KEY))
+os.execute(("bash %q >/dev/null 2>&1"):format(REAP_SH))
 for _, t in ipairs(TARGETS) do
   check("cc_remove drops " .. t[1], not exists(t[2]))
 end
