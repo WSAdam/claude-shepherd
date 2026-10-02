@@ -4,6 +4,11 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## Unreleased — mining round 2
+
+The second feature-mining round (Maestro, Gas Town, ECC, oh-my-claudecode, OpenRig), built as
+parallel units. Each unit adds its line here.
+
 ## 2026-10-02 — A failed tool no longer stays "in flight"
 
 - Fixed: Claude Code fires `PostToolUseFailure` instead of `PostToolUse` when a tool fails (a Bash
