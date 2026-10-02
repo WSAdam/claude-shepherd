@@ -12,7 +12,7 @@ search and groups, and My List.
 | Status     | Card says         | Colour          | Set by                       | Meaning                                  |
 |------------|-------------------|-----------------|------------------------------|------------------------------------------|
 | `idle`     | Idle              | gray            | SessionStart                 | Session open, nothing happening yet      |
-| `working`  | Working           | amber           | UserPromptSubmit, Pre/PostToolUse | Claude is doing work                |
+| `working`  | Working           | amber           | UserPromptSubmit, Pre/PostToolUse, PostToolUseFailure | Claude is doing work                |
 | `approval` | Needs you         | red (pulsing)   | PermissionRequest, Notification (permission), AskUserQuestion | Claude needs a permission or your answer |
 | `done`     | Ready for you     | green           | Stop, Notification (idle)    | Claude finished its turn                 |
 | `error`    | Needs you, Retrying, or Heads-up | red, or gray for a heads-up | StopFailure, and the transcript | The turn died on an API error or a usage limit |

@@ -401,6 +401,29 @@ got="$(jq -r '.tool_started_at // "cleared"' "$TF" 2>/dev/null)"
 assert_eq "the matching posttooluse clears the in-flight tool" "cleared" "$got"
 assert_json "...and the session is still working" "$TF" '.status' "working"
 
+# ---- a failed tool clears its in-flight mark (2026-10-02) ----
+# 2026-10-02: Claude Code fires PostToolUseFailure, not PostToolUse, when a tool fails (a Bash command
+# exiting non-zero throws ShellError; an interrupted tool too), and no hook was wired for it: the failed
+# tool stayed "in flight" past the turn's end, so core.readyToType refused every automated send ("tool").
+tf pretooluse "{\"session_id\":\"$TSID\",\"cwd\":\"$CWD\",\"tool_name\":\"Bash\",\"tool_use_id\":\"tu_2\",\"tool_input\":{\"command\":\"make test\"}}"
+tf posttoolusefailure "{\"session_id\":\"$TSID\",\"cwd\":\"$CWD\",\"tool_name\":\"Read\",\"tool_use_id\":\"tu_other\",\"error\":\"File does not exist\",\"is_interrupt\":false}"
+assert_json "a subagent's failed tool leaves another tool in flight alone" "$TF" '.tool_use_id' "tu_2"
+tf posttoolusefailure "{\"session_id\":\"$TSID\",\"cwd\":\"$CWD\",\"tool_name\":\"Bash\",\"tool_use_id\":\"tu_2\",\"error\":\"Exit code 2\",\"is_interrupt\":false,\"duration_ms\":4100}"
+got="$(jq -r '.tool_started_at // "cleared"' "$TF" 2>/dev/null)"
+assert_eq "a Bash command that exits non-zero clears its in-flight mark (posttoolusefailure)" "cleared" "$got"
+assert_json "...and the session is still working" "$TF" '.status' "working"
+tf pretooluse "{\"session_id\":\"$TSID\",\"cwd\":\"$CWD\",\"tool_name\":\"Bash\",\"tool_use_id\":\"tu_3\",\"tool_input\":{\"command\":\"sleep 600\"}}"
+tf posttoolusefailure "{\"session_id\":\"$TSID\",\"cwd\":\"$CWD\",\"tool_name\":\"Bash\",\"tool_use_id\":\"tu_3\",\"error\":\"Interrupted by user\",\"is_interrupt\":true}"
+got="$(jq -r '.tool_started_at // "cleared"' "$TF" 2>/dev/null)"
+assert_eq "an interrupted tool clears its in-flight mark too" "cleared" "$got"
+# A question that fails (cancelled) must not leave the card asking for an answer.
+QSID="asker-fail"; QF="$CC_STATUS_DIR/$QSID.json"
+tf pretooluse "{\"session_id\":\"$QSID\",\"cwd\":\"$CWD\",\"tool_name\":\"AskUserQuestion\",\"tool_use_id\":\"tu_q\",\"tool_input\":{\"questions\":[{\"question\":\"Pick one\",\"header\":\"Q\"}]}}"
+assert_json "an AskUserQuestion puts the card on its question" "$QF" '.pending.tool' "AskUserQuestion"
+tf posttoolusefailure "{\"session_id\":\"$QSID\",\"cwd\":\"$CWD\",\"tool_name\":\"AskUserQuestion\",\"tool_use_id\":\"tu_q\",\"error\":\"cancelled\",\"is_interrupt\":true}"
+assert_json "...and a failed AskUserQuestion takes it off again" "$QF" '.pending' "null"
+assert_json "...leaving the session working" "$QF" '.status' "working"
+
 # ---- what a new session is told at SessionStart: handoff notes (2026-09-28) ----
 # A fresh or respawned session started blank. Claude Code adds a SessionStart hook's stdout to the
 # session's context, so cc-status.sh prints cc_session_context there, once, at the end. ev() above

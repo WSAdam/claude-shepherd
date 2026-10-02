@@ -5,7 +5,7 @@
 #
 # Usage: cc-status.sh <event>
 #   event is the hook that fired, one of:
-#     sessionstart | userpromptsubmit | pretooluse | posttooluse |
+#     sessionstart | userpromptsubmit | pretooluse | posttooluse | posttoolusefailure |
 #     permissionrequest | notification | stop | stopfailure | precompact | sessionend
 #
 # The hook event JSON arrives on stdin. We key each session by its session_id
@@ -17,6 +17,8 @@
 #   userpromptsubmit-> working  (+ last_prompt, clears pending)
 #   pretooluse      -> working  (clears pending)
 #   posttooluse     -> working  (clears pending)
+#   posttoolusefailure -> working (the same as posttooluse: Claude Code fires it INSTEAD when a tool
+#                     fails -- a Bash command exiting non-zero, an interrupt -- 2026-10-02)
 #   permissionrequest -> approval (+ precise pending from tool_input)
 #   notification    -> approval | done | (unchanged)  depending on type (an idle one keeps an error)
 #   stop            -> done      (clears pending; working when a mailbox message or a notes request
@@ -154,7 +156,7 @@ case "$EVENT" in
     SET_PROMPT="$(cc_get "$INPUT" '.prompt_text')"
     [ -n "$SET_PROMPT" ] || SET_PROMPT="$(cc_get "$INPUT" '.prompt')"
     ;;
-  pretooluse|posttooluse)
+  pretooluse|posttooluse|posttoolusefailure)
     STATUS="working"
     # 2026-09-18: what the session is waiting ON. The transcript does not grow until a tool
     # RETURNS, so a nine-minute Bash used to look exactly like a wedged session to the hung
@@ -446,7 +448,7 @@ fi
 # never trips. `updated` still flows (tile stays fresh).
 GATE_GUARDED=""
 case "$EVENT" in
-  pretooluse|posttooluse|userpromptsubmit|stop|stopfailure|permissionrequest) GATE_GUARDED="1" ;;
+  pretooluse|posttooluse|posttoolusefailure|userpromptsubmit|stop|stopfailure|permissionrequest) GATE_GUARDED="1" ;;
 esac
 
 # The NATIVE permission prompt (gate not armed -- the default install) needs the
@@ -461,10 +463,10 @@ esac
 # event (a fresh PermissionRequest/AskUserQuestion) still replaces: newest wins.
 NATIVE_GUARDED=""
 case "$EVENT" in
-  pretooluse|posttooluse)
+  pretooluse|posttooluse|posttoolusefailure)
     if [ -z "$SET_PENDING" ]; then
       NATIVE_GUARDED="1"
-      if [ "$EVENT" = "posttooluse" ]; then
+      if [ "$EVENT" != "pretooluse" ]; then   # a tool's own end, successful or failed
         P_TOOL="$(cc_read_field "$KEY" '.pending.tool')"
         if [ -n "$P_TOOL" ] && [ "$P_TOOL" = "$(cc_get "$INPUT" '.tool_name')" ]; then
           if [ "$P_TOOL" = "AskUserQuestion" ]; then

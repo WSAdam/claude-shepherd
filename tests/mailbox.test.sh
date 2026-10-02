@@ -96,7 +96,7 @@ assert_eq "...and leaves it" "1" "$(ls "$CC_INBOX_DIR/i1" | grep -c '\.msg$')"
 
 # other events never touch the inbox
 drop o1 1790000600 1 ab34 "[shepherd] for the turn end"
-for e in userpromptsubmit pretooluse posttooluse notification stopfailure; do
+for e in userpromptsubmit pretooluse posttooluse posttoolusefailure notification stopfailure; do
   got="$(evout "$e" '{"session_id":"o1","cwd":"'"$CWD"'","tool_name":"Bash","notification_type":"idle_prompt"}')"
   assert_eq "$e prints nothing and takes no mail" "" "$got"
 done

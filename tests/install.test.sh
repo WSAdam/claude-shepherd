@@ -39,6 +39,18 @@ assert_json "settings has our Stop hook" "$CDIR/settings.json" \
 # tile stayed "working" for good.
 assert_json "a turn that ends on an API error reaches cc-status.sh (StopFailure)" "$CDIR/settings.json" \
   '.hooks.StopFailure[0].hooks[0].command | endswith("cc-status.sh\" stopfailure")' "true"
+# 2026-10-02: a failed tool fires PostToolUseFailure instead of PostToolUse -- unwired, the failed tool
+# stayed "in flight" for good and automated sends to the session were refused ("tool").
+assert_json "a failed tool reaches cc-status.sh (PostToolUseFailure)" "$CDIR/settings.json" \
+  '[.hooks.PostToolUseFailure[].hooks[].command | select(endswith("cc-status.sh\" posttoolusefailure"))] | length' "1"
+# ...and an install from before it gains it on make setup, once, and a re-run changes nothing.
+jq 'del(.hooks.PostToolUseFailure)' "$CDIR/settings.json" > "$CDIR/settings.json.old" && mv "$CDIR/settings.json.old" "$CDIR/settings.json"
+CC_INSTALL_CLAUDE_DIR="$CDIR" CC_INSTALL_HS_DIR="$HSDIR" CC_INSTALL_NO_APP=1 bash "$ROOT/install.sh" >/dev/null 2>&1
+assert_json "an older install gains the PostToolUseFailure hook on make setup" "$CDIR/settings.json" \
+  '[.hooks.PostToolUseFailure[].hooks[].command | select(endswith("cc-status.sh\" posttoolusefailure"))] | length' "1"
+ptf_once="$(cat "$CDIR/settings.json")"
+CC_INSTALL_CLAUDE_DIR="$CDIR" CC_INSTALL_HS_DIR="$HSDIR" CC_INSTALL_NO_APP=1 bash "$ROOT/install.sh" >/dev/null 2>&1
+assert_eq "...and a re-run leaves settings.json as it was" "$ptf_once" "$(cat "$CDIR/settings.json")"
 # The status update MUST be the FIRST command in the approval hooks, so the tile flips
 # to "Needs you" immediately -- not blocked behind a slower popup / desktop notification /
 # network push (which is exactly what left a session showing "Working" at a live prompt).

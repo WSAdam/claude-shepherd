@@ -4,6 +4,15 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## 2026-10-02 — A failed tool no longer stays "in flight"
+
+- Fixed: Claude Code fires `PostToolUseFailure` instead of `PostToolUse` when a tool fails (a Bash
+  command that exits non-zero, an interrupted tool), and Shepherd wired no hook for it. The failed
+  tool stayed marked as running, even after the turn ended, so every automated send to that session
+  (auto-feed, the router, rules, auto-continue, the self-summary) was refused with "tool" until it
+  ran another tool. `cc-status.sh posttoolusefailure` now clears it like a successful tool's end,
+  and a cancelled AskUserQuestion takes its question off the card. Needs `make setup`.
+
 ## 2026-09-30 — The coach offers a fresh run on a stale suggestion
 
 - Coach overlay: a suggestion whose Apply is refused because `CLAUDE.md` changed since the coach
