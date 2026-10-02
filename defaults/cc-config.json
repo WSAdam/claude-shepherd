@@ -148,5 +148,8 @@
     "portFrom": 4100,
     "portTo": 4199,
     "dbDir": "~/.claude/cc-lease/db"
+  },
+  "stopGuards": {
+    "question": true
   }
 }

@@ -36,7 +36,8 @@
 // record's attributionSkill, the key names of the tool inputs the loop and file detectors read,
 // and a small outcome vocabulary: the words a denied tool result is known by, and in a Bash command
 // the three ways a turn says it finished something (it reads "done"): `git commit`, an in-place
-// sed of TODO.md (a line ticked), and `cc-merge.sh done --result merged`.
+// sed of TODO.md (a line ticked), and `cc-merge.sh done --result merged`. In an assistant's own
+// text, the six words the question guard reads (want should shall I you your, 2026-10-02).
 "use strict";
 const fs = require("fs");
 const path = require("path");
@@ -101,6 +102,12 @@ const DENIAL_WORDS = new Set(`denied rejected doesn t want to proceed`.split(/\s
 const COMMAND_WORDS = new Set(`git commit
   sed gsed perl i pi TODO md
   cc merge sh done result merged`.split(/\s+/).filter(Boolean));
+// 2026-10-02: the question guard (stopGuards.question, cc_question_asked in cc-lib.sh) reads a turn's
+// last assistant text for a question to the reader: a "?" sentence that starts "Want", "Should I"
+// or "Shall I", or says "you". Masked, "Should I push? It stays local." read as no question, so a
+// scrubbed corpus held only the questions that end a message. Kept in an assistant's own text only;
+// a prompt, a tool input or a tool result keeps none of them.
+const ASK_WORDS = new Set(`want should shall i you your`.split(/\s+/).filter(Boolean));
 const NONE = new Set();
 
 const DETECTORS = ["turn", "resumed", "awaiting", "interrupted", "error", "looping"];   // core.SCENARIO_DETECTORS
@@ -167,6 +174,7 @@ function scrubString(s, key, ctx, st) {
     if (INTERRUPTS.has(s)) return s;
     if (ctx.apiError) return maskKeepingWords(s, ERROR_WORDS, ERROR_CODES);
     if (ctx.errorResult) return maskKeepingWords(s, DENIAL_WORDS, NONE);
+    if (ctx.assistant && ctx.block === "text" && key === "text") return maskKeepingWords(s, ASK_WORDS, NONE);
     return maskKeepingOwnTags(s);
   }
   if (key === "command" && ctx.tool === "Bash") return maskKeepingWords(s, COMMAND_WORDS, NONE, true);
@@ -193,7 +201,8 @@ function scrubLine(line, st) {
   let rec;
   try { rec = JSON.parse(line); } catch (_) { return mask(line); }   // a torn line: nothing structural to keep
   const apiError = rec && (rec.subtype === "api_error" || rec.isApiErrorMessage === true);
-  const out = ser(rec, "", { free: false, apiError, block: null, tool: null, errorResult: false }, st);
+  const assistant = !!rec && rec.type === "assistant";
+  const out = ser(rec, "", { free: false, apiError, assistant, block: null, tool: null, errorResult: false }, st);
   if (Buffer.byteLength(out) !== Buffer.byteLength(line)) {
     throw new Error("a scrubbed line changed size (" + Buffer.byteLength(line) + " -> " + Buffer.byteLength(out) +
       " bytes); the window would tear somewhere else. Record type: " + String(rec && rec.type));

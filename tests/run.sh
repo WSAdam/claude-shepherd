@@ -319,6 +319,9 @@ echo ""
 echo "== bash: the session mailbox -- a message handed over at the turn end or the next start, once (cc-status.sh) =="
 bash "$DIR/mailbox.test.sh" || fail=1
 echo ""
+echo "== bash: Stop guards -- a turn that ends asking Adam in prose is sent back once, to ask with AskUserQuestion (cc-status.sh) =="
+bash "$DIR/stop-guards.test.sh" || fail=1
+echo ""
 echo "== lua: the session mailbox -- sent whole, typed only where typing is allowed, else waiting (behavioral, stubbed hs + kitty) =="
 HOME="$(mktemp -d)" lua "$DIR/mailbox.test.lua" || fail=1
 echo ""

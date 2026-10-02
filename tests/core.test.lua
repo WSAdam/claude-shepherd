@@ -8468,7 +8468,9 @@ do
   -- 2026-09-29: 40 -> 41 for the scheduled-tasks lock check ("schedlock", flagged new).
   -- 2026-09-29: 41 -> 42 for Claude Code compatibility alarms ("compat", flagged new).
   -- 2026-09-30: 42 -> 43 for restarting the fleet in place ("restart", flagged new).
-  eq("FEATURES: the 43 new features are flagged", newCount, 43)
+  -- 2026-10-02: 43 -> 44 for the Stop guards' question guard ("stopguards", flagged new).
+  eq("FEATURES: the 44 new features are flagged", newCount, 44)
+  check("FEATURES: lists the Stop guards", keys.stopguards == true)
   check("FEATURES: lists restarting the fleet in place", keys.restart == true)
   check("FEATURES: lists TODO lines that need a live run", keys.liverun == true)
   check("FEATURES: lists the scheduled-tasks lock check", keys.schedlock == true)
@@ -14414,6 +14416,21 @@ bug("loop signature of a read", function()
   eq("...whichever order its offset and limit were written in",
      core.toolCallSig("Read", { limit = 140, file_path = P, offset = 180 }), core.toolCallSig("Read", { offset = 180, limit = 140, file_path = P }))
 end)
+
+-- ---- Stop guards: the question guard (2026-10-02) ----
+do
+  -- stopGuards.question has no input in Settings (it lives in the config); a Save from a form that
+  -- ever rebuilds `stopGuards` must keep it, and A2/A3's switches beside it.
+  local keeps = false
+  for _, k in ipairs(core.SETTINGS_KEEP_SUBKEYS.stopGuards or {}) do if k == "question" then keeps = true end end
+  check("stop guards: stopGuards.question is in SETTINGS_KEEP_SUBKEYS", keeps)
+  local cfg = core.overlayConfig({ stopGuards = { question = true } }, { stopGuards = {} })
+  eq("stop guards: a Save that rebuilds stopGuards keeps the question switch", cfg.stopGuards.question, true)
+  local feat
+  for _, f in ipairs(core.FEATURES) do if f.key == "stopguards" then feat = f end end
+  check("stop guards: FEATURES lists them, flagged new", feat ~= nil and feat.new == true)
+  check("stop guards: ...and the entry names the switch", feat ~= nil and tostring(feat.what):find("stopGuards.question", 1, true) ~= nil)
+end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

@@ -203,6 +203,37 @@ eq("chunked read: the same chunk read three times is a loop, scrubbed or not", r
 const paged = readsOf("paged", [{ pages: "1-5" }, { pages: "6-10" }, { pages: "11-15" }]);
 eq("chunked read: three page ranges of one PDF are not a loop, scrubbed or not", paged.raw + " " + paged.scrubbed, "false false");
 
+// ---- the words the question guard reads (2026-10-02) ----------------------------------------
+// stopGuards.question (cc_question_asked, cc-lib.sh) reads a turn's last assistant text for a
+// question to the reader: a sentence ending in "?" that starts "Want" / "Should I" / "Shall I" or
+// says "you". Masked, "Should I push? It stays local." read as no question at all, so a scrubbed
+// corpus could only ever hold the questions that end a message. Those words are kept in an
+// assistant's own text, and only there: a prompt, a tool input and a tool result stay masked.
+{
+  const raw = path.join(TMP, "ask.jsonl"), scrubbed = path.join(TMP, "ask.out.jsonl");
+  const recs = [
+    { type: "user", origin: { kind: "human" }, timestamp: "2026-10-02T09:00:00.000Z",
+      message: { role: "user", content: [{ type: "text", text: "Should you want the zebra pushed, I will say so" }] } },
+    { type: "assistant", timestamp: "2026-10-02T09:00:04.000Z", message: { role: "assistant", model: "claude-opus-5-5", content: [
+      { type: "tool_use", id: "toolu_09AskAsk", name: "Bash", input: { command: "echo want you should", description: "Should I echo your words" } }] } },
+    { type: "user", timestamp: "2026-10-02T09:00:05.000Z",
+      message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_09AskAsk", content: "want you should" }] } },
+    { type: "assistant", timestamp: "2026-10-02T09:00:08.000Z", message: { role: "assistant", model: "claude-opus-5-5", content: [
+      { type: "text", text: "Should I push the zebra fix? It stays local. Want me to, or do you want your quokka first? Shall I wait?" }] } },
+  ];
+  fs.writeFileSync(raw, recs.map((r) => JSON.stringify(r)).join("\n") + "\n");
+  const r = spawnSync("node", [SCRUB, "--src", raw, "--out", scrubbed, "--tail", "65536"], { encoding: "utf8" });
+  eq("ask words: the scrubber exits 0", r.status, 0);
+  const got = r.status === 0 ? fs.readFileSync(scrubbed, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [];
+  eq("ask words: an assistant's own text keeps Want, Should, Shall, I, you and your, masking the rest",
+    got[3] && got[3].message.content[0].text,
+    "Should I xxxx xxx xxxxx xxx? xx xxxxx xxxxx. Want xx xx, xx xx you want your xxxxxx xxxxx? Shall I xxxx?");
+  eq("ask words: ...never a prompt's", got[0] && got[0].message.content[0].text, "xxxxxx xxx xxxx xxx xxxxx xxxxxx, x xxxx xxx xx");
+  eq("ask words: ...a tool input's", got[1] && Object.values(got[1].message.content[0].input).join(" | "),
+    "xxxx xxxx xxx xxxxxx | xxxxxx x xxxx xxxx xxxxx");
+  eq("ask words: ...or a tool result's", got[2] && got[2].message.content[0].content, "xxxx xxx xxxxxx");
+}
+
 try { execFileSync("rm", ["-r", TMP]); } catch (_) { /* a temp dir */ }
 console.log("-- scrub.test.js: " + run + " run, " + failed + " failed --");
 process.exit(failed === 0 ? 0 : 1);

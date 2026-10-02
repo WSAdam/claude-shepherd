@@ -63,7 +63,7 @@ The panel re-reads the file within about a second (except `hotkeys`, which need 
 
 | Section | What it controls | Reference |
 |---------|------------------|-----------|
-| `gate`, `policies`, `ask`, `decide` | Gated tools, the worktree fence, auto-allow/deny, always-ask commands, bundles, Autopilot, held questions, the decisions inbox | [Approvals and policies](approvals-and-policies.md) |
+| `gate`, `policies`, `ask`, `decide`, `stopGuards` | Gated tools, the worktree fence, auto-allow/deny, always-ask commands, bundles, Autopilot, held questions, the decisions inbox, questions asked in prose | [Approvals and policies](approvals-and-policies.md) |
 | `merge`, `verify`, `fleet`, `radar`, `tabBridge` | Ready to merge, merge gates, the merge checker, batches, the overlap radar, the tab bridge | [Merging and batches](merging-and-batches.md) |
 | `queue`, `templates`, `automodel`, `coach` | Task queue, routing, templates, model auto-routing, the coach | [Automation](automation.md) |
 | `respawn`, `autoContinue`, `resume`, `drain`, `prune`, `cleanup`, `tabless` | Recovery, resuming at a usage limit's reset, and cleanup | [Automation](automation.md), [Controls](controls.md#sessions-with-no-tab) |
@@ -101,6 +101,7 @@ install's [defaults](../defaults/cc-config.json) differ.
 | `gate.fence` | `false` | `true` | [Worktree fence](approvals-and-policies.md#worktree-fence) |
 | `policies.alwaysAsk.patterns` | `[]` (the built-ins always apply) | | [Always-ask commands](approvals-and-policies.md#always-ask-commands) |
 | `decide.waitSeconds` | `1800` (at most 7200) | | [Decisions inbox](approvals-and-policies.md#decisions-inbox) |
+| `stopGuards.question` | `false` | `true` | [Questions asked in prose come back](approvals-and-policies.md#questions-asked-in-prose-come-back) |
 | `verify.onMerge` | `false` (🔎 Verify works either way) | `true` | [The checker](merging-and-batches.md#the-checker-a-read-only-review-of-every-merge-request) |
 | `verify.maxBudgetUsd` / `timeoutSeconds` | `1` / `600` | | [The checker](merging-and-batches.md#the-checker-a-read-only-review-of-every-merge-request) |
 | `merge.repoGate` | `false` | | [A repo can declare its own gate](merging-and-batches.md#a-repo-can-declare-its-own-gate) |
@@ -151,6 +152,7 @@ Everything lives under `~/.claude/`:
 | `cc-scratch/` | The [red-first proof](merging-and-batches.md#the-red-first-proof-do-the-new-tests-fail-without-the-fix)'s scratch worktrees, removed after each run |
 | `cc-reqs.json` | [Requirement ids](merging-and-batches.md#requirement-ids-and-the-merge-receipt): each repo's `REQ-NNN` list (Shepherd is its only writer) |
 | `cc-ask/` | Answers to held questions (the question itself is in the session's status file) |
+| `cc-guard/` | The Stop guards' once-markers: a turn [sent back for asking in prose](approvals-and-policies.md#questions-asked-in-prose-come-back) is marked here, so it is sent back once |
 | `cc-decide/` | The [decisions inbox](approvals-and-policies.md#decisions-inbox): open `cc-decide.sh` questions and their answers |
 | `cc-inbox/` | The [session mailbox](automation.md#session-mailbox): messages waiting for each session |
 | `cc-send/` | [cc-send](automation.md#send-a-prompt-from-a-shell) requests waiting for Shepherd, and its answers |

@@ -78,6 +78,8 @@ Every feature below has a reference page one click away. The panel lists the sam
   another repo's sessions work, and their replies and closing note come back to you.
 - [**Answer questions from Shepherd**](docs/approvals-and-policies.md#answer-questions-from-shepherd):
   a session's question shows up on its card as buttons, and your click goes straight to the session.
+- [**Questions asked in prose come back**](docs/approvals-and-policies.md#questions-asked-in-prose-come-back):
+  a turn that ends "Want me to push?" in prose is sent back once to ask it on the card instead.
 - [**Decisions inbox**](docs/approvals-and-policies.md#decisions-inbox): a question with a sensible
   default doesn't stop the session (`cc-decide.sh`); answer it later in ☰ → Inbox.
 - [**Spawn new sessions**](docs/controls.md#spawn-new-sessions): start a session in any project with

@@ -335,6 +335,9 @@ CC_DECIDE_DIR="${CC_DECIDE_DIR:-${HOME}/.claude/cc-decide}"
 # (<key>.json), Shepherd's plan (<key>.plan.json) and the card's Cancel (<key>.cancel), per
 # session key. A clean Stop clears them (cc-status.sh). Default MUST match the dashboard's FX.RESUME_DIR.
 CC_RESUME_DIR="${CC_RESUME_DIR:-${HOME}/.claude/cc-resume}"
+# The Stop guards (mining round 2, 2026-10-02): a guard that blocks a stop leaves a once-marker,
+# <key>.<guard>, holding what it blocked (a turn's id). Default MUST match the dashboard's FX.GUARD_DIR.
+CC_GUARD_DIR="${CC_GUARD_DIR:-${HOME}/.claude/cc-guard}"
 # cc-send (build program unit 30, 2026-09-29): a request cc-send.sh leaves for Shepherd, named
 # <caller key or "shell">.<epoch>-<n>.json, and Shepherd's <...>.answer. Default MUST match the
 # dashboard's FX.SEND_DIR.
@@ -628,6 +631,7 @@ cc_decide_prune() {
 # (the ones it filed stay for its next start), cc_ticket_prune drops old and stale files.
 # cc-skill-labels.json (2026-09-29) is Adam's hand labels on skill runs, not a session's state:
 # neither remover touches it (tests/lib.test.sh, tests/skill-runs.test.lua).
+# cc-guard/<key>.<guard> (2026-10-02): the Stop guards' once-markers, every guard's.
 # KEEP THE FILE SET IN SYNC with FX.removeStatus in claude-dashboard.lua.
 cc_remove() {
   rm -f "$(cc_file "$1")" "$(cc_file "$1")".tmp.* "$(cc_decision_file "$1")" \
@@ -649,6 +653,8 @@ cc_remove() {
   case "$1" in ''|.|..|*/*) ;; *)
     rm -f "$inbox"/* "$inbox"/.[!.]* 2>/dev/null
     rmdir "$inbox" 2>/dev/null
+    # the Stop guards' once-markers (2026-10-02): "<key>." never matches another key's ("k9." vs "k90.")
+    rm -f "$CC_GUARD_DIR/$1".* 2>/dev/null
     # cc-send (2026-09-29): the requests this session made go with it, undelivered; stale ones too
     cc_send_prune "$1" ;;
   esac
@@ -2127,6 +2133,148 @@ EOF
   else printf 'News on %s cross-repo tickets (cc-ticket.sh) came while this session was away:\n\n' "$n"; fi
   printf '%s\n\n' "$out"
   printf 'Answer with ~/.claude/cc-ticket.sh reply <id> "..." (close one you hold with --note); ~/.claude/cc-ticket.sh show <id> prints a whole ticket.\n'
+}
+
+# ---- Stop guards (mining round 2, A1, 2026-10-02) -------------------------------------------
+# A guard looks at how a turn ended and, when it shouldn't have ended that way, blocks the stop ONCE
+# with a reason, so the session carries on: cc-status.sh stop prints it through cc_stop_decision and
+# the card stays working. Precedence, highest first: a mailbox message, the notes request, then the
+# guards in CC_STOP_GUARDS order -- question here; fakeDone (A3) and unfinished (A2) go after it. A
+# mailbox message stands every guard down (it is new input, maybe the very answer); the notes request
+# joins them (cc_stop_decision puts it first). Among the guards the first that fires is the only one.
+# Each is switched on by stopGuards.<name> (off when the config says nothing; on in defaults/). None
+# runs while stop_hook_active (that stop ends a turn a block already kept going, so a guard can't
+# loop), in plan mode, in Shepherd's own internal runs, or where Shepherd's panel isn't running (a
+# remote host: the card it would send the session to isn't there). A guard blocks once per session
+# and token -- the turn, for the question guard -- through its marker CC_GUARD_DIR/<key>.<guard>,
+# and each block is one ledger event, stop_guard.
+CC_STOP_GUARDS="question"
+CC_GUARD_PANEL_MAX_AGE="${CC_GUARD_PANEL_MAX_AGE:-30}"   # seconds, as cc-fleet.sh's shepherd_alive
+
+# Is Shepherd's panel running on this machine? Its heartbeat, at most $1 seconds old.
+cc_panel_alive() { # [$1 max age]
+  local hb
+  hb="$(tr -dc '0-9' < "$(cc_heartbeat_file)" 2>/dev/null)"
+  [ -n "$hb" ] && [ $(( $(cc_now) - hb )) -le "${1:-$CC_GUARD_PANEL_MAX_AGE}" ]
+}
+
+# The text of the current turn's last assistant message in a transcript: the newest main-chain
+# assistant text after the turn's own prompt (a user record with text -- a tool result is not one,
+# an interrupt is), or nothing. Reads the last 256KB only; a torn first line is skipped.
+cc_transcript_last_text() { # $1 transcript path
+  [ -f "$1" ] || return 0
+  cc_have_jq || return 0
+  tail -c 262144 "$1" 2>/dev/null | jq -Rrs '
+    reduce (split("\n")[] | fromjson? | select(type == "object" and .isSidechain != true)) as $r (null;
+      if $r.type == "user" and ((($r.message.content | type) == "string")
+           or ([$r.message.content[]? | select(type == "object" and .type == "text")] | length > 0))
+      then null
+      elif $r.type == "assistant"
+      then ([$r.message.content[]? | select(type == "object" and .type == "text") | .text // empty] | join("\n")) as $t
+           | if $t == "" then . else $t end
+      else . end)
+    // empty' 2>/dev/null
+}
+
+# The text a turn ended on: the Stop input's last_assistant_message (Claude Code 2.1.175 sends it),
+# else the transcript's.
+cc_stop_text() { # $1 hook input
+  local t
+  t="$(cc_get "$1" '.last_assistant_message')"
+  [ -n "$t" ] || t="$(cc_transcript_last_text "$(cc_get "$1" '.transcript_path')")"
+  printf '%s' "$t"
+}
+
+# Does text $1 end by asking the reader a question? The question on stdout (at most 200 characters)
+# and 0 when it does; 1 otherwise. Code (fenced or inline), quotes and blockquote lines are masked
+# first. Then the last paragraph -- with the one before it, when the last is only a list of options --
+# asks when it ends in "?" (core.turnEvidence's endsWithQuestion, the same rule), or when one of its
+# "?" sentences is put to the reader: it starts "Want", "Should I" or "Shall I", or says "you". So
+# "Want me to fix it now? It's small." asks; "Questions? None." and a rhetorical "Why? Because ..."
+# don't, and neither does a question a paragraph before the end. cc-scrub.js keeps exactly these
+# words in an assistant's text (ASK_WORDS), so a scrubbed corpus reads as the real messages do.
+CC_QUESTION_JQ='
+  def lead: sub("^[\\s*_#>(-]*([0-9]+[.)])?[\\s*_]*"; "");
+  gsub("```[\\s\\S]*?(```|\\z)"; "\n\n")
+  | gsub("~~~[\\s\\S]*?(~~~|\\z)"; "\n\n")
+  | gsub("`[^`\\n]*`"; "code")
+  | gsub("\"[^\"\\n]*\""; "quote")
+  | gsub("“[^”\\n]*”"; "quote")
+  | [split("\n")[] | select(test("^[ \\t]*>") | not)] | join("\n")
+  | [splits("\\n[ \\t]*\\n") | sub("^\\s+"; "") | sub("\\s+$"; "") | select(length > 0)]
+  | select(length > 0)
+  | (if length > 1 and (.[-1] | split("\n") | all(test("^\\s*([-*+]|[0-9]+[.)])\\s")))
+     then .[-2] + "\n" + .[-1] else .[-1] end) as $block
+  | [$block | scan("[^.!?\\n]*\\?") | lead | select(length > 0)] as $qs
+  | if ($block | test("\\?[\\s*_\"\u0027’”)\\]]*$")) then ($qs | last // "?")
+    else ($qs | map(select(test("^(want|should i|shall i)\\b"; "i") or test("\\byour?\\b"; "i"))) | last // empty)
+    end
+  | .[0:200]'
+cc_question_asked() { # $1 text
+  local q
+  [ -n "$1" ] || return 1
+  cc_have_jq || return 1
+  q="$(printf '%s' "$1" | jq -Rrs "$CC_QUESTION_JQ" 2>/dev/null)"
+  [ -n "$q" ] || return 1
+  printf '%s\n' "$q"
+}
+
+# The question guard (stopGuards.question): the turn ended by asking Adam a question in prose, which
+# reaches no card -- AskUserQuestion does (cc-ask.sh holds it for Shepherd). Sets CC_GUARD_TOKEN (the
+# turn: cc-status.sh stamps turn_id at each prompt), CC_GUARD_DETAIL (the question) and
+# CC_GUARD_REASON, and returns 0 when it fires. Never while a question is already held on the card
+# (pending.ask, or an ask_until still ahead).
+_cc_guard_question() { # $1 key, $2 hook input
+  local key="$1" q held
+  q="$(cc_question_asked "$(cc_stop_text "$2")")" || return 1
+  held="$(jq -r --argjson now "$(cc_now)" \
+    'if (.pending.ask // null) != null or ((.ask_until // 0) | tonumber? // 0) > $now then "held" else empty end' \
+    "$(cc_file "$key")" 2>/dev/null)"
+  [ -z "$held" ] || return 1
+  CC_GUARD_TOKEN="$(cc_read_field "$key" '.turn_id')"
+  CC_GUARD_DETAIL="$q"
+  CC_GUARD_REASON="[shepherd] You ended by asking Adam in prose. Ask it with the AskUserQuestion tool so it reaches his Shepherd card."
+  return 0
+}
+
+# Has guard $2 blocked session $1 for token $3 already? 1 when it has; otherwise it is recorded, 0.
+_cc_stop_guard_once() { # $1 key, $2 guard, $3 token
+  local marker="$CC_GUARD_DIR/$1.$2"
+  [ "$(cat "$marker" 2>/dev/null)" != "$3" ] || return 1
+  mkdir -p "$CC_GUARD_DIR" 2>/dev/null
+  printf '%s\n' "$3" > "$marker" 2>/dev/null || return 1
+}
+
+# The Stop guards for session $1 ($2 = the hook's JSON): the first guard's reason on stdout and 0
+# when one blocks; 1 (nothing printed) when none does. The caller skips it when the mailbox handed a
+# message over.
+cc_stop_guard() { # $1 key, $2 hook input
+  local key="$1" in="$2" g mode on=""
+  case "$key" in ''|.|..|*/*) return 1 ;; esac
+  [ -z "${CC_SHEPHERD_INTERNAL:-}" ] || return 1
+  for g in $CC_STOP_GUARDS; do
+    [ "$(cc_config ".stopGuards.$g" 'false')" = "true" ] && on="$on $g"
+  done
+  [ -n "$on" ] || return 1
+  cc_have_jq || return 1
+  [ "$(cc_get "$in" '.stop_hook_active')" != "true" ] || return 1
+  mode="$(cc_get "$in" '.permission_mode')"
+  [ -n "$mode" ] || mode="$(cc_read_field "$key" '.permission_mode')"
+  [ "$mode" != "plan" ] || return 1
+  cc_panel_alive || return 1
+  for g in $on; do
+    CC_GUARD_TOKEN=""; CC_GUARD_DETAIL=""; CC_GUARD_REASON=""
+    "_cc_guard_$g" "$key" "$in" || continue
+    _cc_stop_guard_once "$key" "$g" "${CC_GUARD_TOKEN:-none}" || continue
+    if cc_ledger_enabled; then
+      cc_ledger_append "$(jq -nc --arg key "$key" --arg g "$g" --arg d "$CC_GUARD_DETAIL" \
+        '{type:"stop_guard", key:$key, guard:$g, detail:$d}')"
+    fi
+    echo "[cc-lib] ❓ sent session $key back ($g guard): $CC_GUARD_DETAIL" >&2
+    printf '%s' "$CC_GUARD_REASON"
+    return 0
+  done
+  return 1
 }
 
 # ---- Worktree fence (build program unit 7, 2026-09-28) --------------------------------------

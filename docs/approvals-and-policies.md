@@ -333,6 +333,34 @@ their descriptions only as hover tooltips and the panel froze. The freeze turned
 transcript parse elsewhere in the panel; with that fixed and the descriptions written out, the
 default went back on.)
 
+### Questions asked in prose come back
+
+A session that ends its turn with a question in plain text ("Want me to push?", "A or B?") never
+reaches the card: to Shepherd it looks like a finished session. So with `stopGuards.question` on,
+the Stop hook sends that turn back **once**, telling the session: *You ended by asking Adam in
+prose. Ask it with the AskUserQuestion tool so it reaches his Shepherd card.* The session asks
+again with the question tool, the card pulses with the buttons, and its card stays working while it
+does.
+
+- **What counts as a question.** The last paragraph ends in "?", or one of its "?" sentences is put
+  to you: it starts "Want", "Should I" or "Shall I", or says "you" ("Want me to fix it now? It's
+  small."). When that paragraph is only a list of options, the paragraph before it counts too.
+  Code (fenced or inline), quoted text and blockquotes are ignored, and so is a question answered
+  in the same breath ("Questions? None.") or one a paragraph before the end. An imperative with no
+  question mark ("Say go and I'll build it") isn't caught.
+- **Once per turn.** A turn is sent back at most once: Claude Code marks the stop that ends it
+  `stop_hook_active`, and Shepherd keeps a marker per session (`~/.claude/cc-guard/<key>.question`,
+  removed with the session). The next prompt starts a new turn.
+- **When it stays out of the way.** In plan mode, in Shepherd's own runs, while a question is
+  already held on the card, when a mailbox message arrives at that turn end (it may be the answer),
+  and where Shepherd isn't running: on a machine with no panel heartbeat, such as a remote host
+  behind the SSH bridge, there is no card to send the question to.
+- **The text.** Claude Code hands the hook the turn's last message (`last_assistant_message`); an
+  older one that doesn't is read from the transcript instead.
+- **Switch.** `"stopGuards": { "question": true }` in `~/.claude/cc-config.json`. A fresh install,
+  and `make setup` on an older one, turns it on; a config that says nothing leaves it off. The
+  ledger records each send-back as `stop_guard` (`guard`, and the question as `detail`).
+
 ### Questions in the tab
 
 With the setting off (or after **Answer in the tab instead**), the panel still shows the question

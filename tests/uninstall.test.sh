@@ -38,6 +38,7 @@ mkdir -p "$C/cc-tickets"; printf '{"v":1,"id":"t1790000000-1"}' > "$C/cc-tickets
 mkdir -p "$C/cc-audit/-r"; printf -- '- [ ] [LOW] AUD-001 x\n' > "$C/cc-audit/-r/AUDIT-FINDINGS.md"
 printf '{"v":1,"labels":{"toolu_a":{"verdict":"ok"}}}' > "$C/cc-skill-labels.json"
 mkdir -p "$C/cc-coach"; printf '{"v":1,"root":"/r","state":"done"}' > "$C/cc-coach/-r.json"
+mkdir -p "$C/cc-guard"; printf '1790000000.42\n' > "$C/cc-guard/abc.question"
 printf '{"version":1,"written":1790000000,"sessions":[]}' > "$C/cc-restart.json"
 printf '{"version":1,"items":[]}' > "$C/cc-worklist.json"
 printf '{"version":1,"items":[{"id":"a","text":"an old done item","done":true}]}' > "$C/cc-worklist-archive.json"
@@ -133,6 +134,8 @@ assert_eq "--purge removes My List's archive too" "gone" "$([ -e "$C/cc-worklist
 # 2026-09-30: the scenarios a card's "Capture as scenario" writes (cc-scenarios/, 2026-09-29) were
 # never added to the purge list, so PURGE=1 left every captured window and its label behind
 assert_eq "--purge removes the captured scenarios" "gone" "$([ -e "$C/cc-scenarios" ] && echo there || echo gone)"
+# 2026-10-02: the Stop guards' once-markers (cc-guard/) are Shepherd's state too
+assert_eq "--purge removes the Stop guards' once-markers" "gone" "$([ -e "$C/cc-guard" ] && echo there || echo gone)"
 assert_eq "--purge still keeps the user's own files" "there" "$([ -e "$C/cc-mine.sh" ] && echo there || echo gone)"
 
 # a CLAUDE.md that is only the block (a fresh machine) is removed, not left empty

@@ -4194,6 +4194,11 @@ function FX.removeStatus(key)
       if fn:sub(1, #dt) == dt then os.remove(FX.NOTES_DIR .. "/" .. fn) end
     end
     if FX._dueAt then FX._dueAt[key] = nil end
+    -- the Stop guards' once-markers (2026-10-02): every guard's "<key>." file (cc_remove too)
+    local gp = key .. "."
+    for _, fn in ipairs(FX.readDir(FX.GUARD_DIR)) do
+      if fn:sub(1, #gp) == gp then os.remove(FX.GUARD_DIR .. "/" .. fn) end
+    end
     -- cc-send (2026-09-29): the requests this session made and their answers, temps and claims
     -- (cc_remove too: cc_send_prune). A request still waiting goes undelivered: nobody is left to
     -- read the reply. Files older than core.SEND.keepSeconds go on FX.stepSend's own prune.
@@ -7457,6 +7462,10 @@ end
 -- mid-turn is left to its turn end. A remote session is never reached: its hooks read another
 -- machine's inbox.
 FX.INBOX_DIR = os.getenv("CC_INBOX_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-inbox")
+-- The Stop guards (mining round 2, 2026-10-02): cc-status.sh's Stop hook sends a turn that ended the
+-- wrong way back once (cc_stop_guard, cc-lib.sh), and marks it in <key>.<guard> here. The panel only
+-- reaps them with the session (FX.removeStatus). Default MUST match cc-lib.sh's CC_GUARD_DIR.
+FX.GUARD_DIR = os.getenv("CC_GUARD_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-guard")
 FX._mailbox = { seq = 0, inflight = {}, pending = {} }   -- inflight: key -> when its typing was scheduled
 FX.MAILBOX_INFLIGHT_SECONDS = 60   -- a scheduled nudge that never reported back stops blocking the next
 -- A fresh nonce: 8 random bytes as hex (/dev/urandom; the clock if that can't be read).

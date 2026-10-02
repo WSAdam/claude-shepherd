@@ -14,15 +14,16 @@
 #
 # Status derived per event:
 #   sessionstart    -> idle
-#   userpromptsubmit-> working  (+ last_prompt, clears pending)
+#   userpromptsubmit-> working  (+ last_prompt, + turn_id <epoch>.<pid> -- one per prompt, so a
+#                     Stop guard blocks once a turn -- clears pending)
 #   pretooluse      -> working  (clears pending)
 #   posttooluse     -> working  (clears pending)
 #   posttoolusefailure -> working (the same as posttooluse: Claude Code fires it INSTEAD when a tool
 #                     fails -- a Bash command exiting non-zero, an interrupt -- 2026-10-02)
 #   permissionrequest -> approval (+ precise pending from tool_input)
 #   notification    -> approval | done | (unchanged)  depending on type (an idle one keeps an error)
-#   stop            -> done      (clears pending; working when a mailbox message or a notes request
-#                                 keeps the turn going)
+#   stop           -> done      (clears pending; working when a mailbox message, a notes request
+#                                 or a Stop guard keeps the turn going)
 #   stopfailure     -> error     (+ error_kind, error_message: the turn ended on an API error)
 #   precompact      -> working   (the session is compacting; prints the notes line for the summary)
 #   sessionend      -> file removed
@@ -256,6 +257,13 @@ case "$EVENT" in
     if [ -f "$CC_NOTES_DIR/$KEY.due-at" ] && [ -z "${CC_SHEPHERD_INTERNAL:-}" ]; then
       STOP_NOTES="$(cc_notes_request "$KEY" "$INPUT")" && STATUS="working"
     fi
+    # 2026-10-02: the Stop guards (mining round 2). A turn that ended the wrong way -- asking Adam a
+    # question in prose (stopGuards.question) -- is sent back once with a reason, through
+    # cc_stop_decision, and stays working. A mailbox message stands them down: it is new input, maybe
+    # the very answer. (cc_stop_guard reads the config first: with every switch off it costs one jq.)
+    if [ -z "${STOP_MAIL:-}" ] && [ -z "${CC_SHEPHERD_INTERNAL:-}" ]; then
+      STOP_GUARD="$(cc_stop_guard "$KEY" "$INPUT")" && STATUS="working"
+    fi
     ;;
   precompact)
     # 2026-09-29: Claude Code is about to compact the session (auto or /compact): it is working.
@@ -307,6 +315,10 @@ else
 fi
 
 # Build the merge patch.
+# 2026-10-02: each prompt starts a turn, named turn_id (<epoch>.<pid>: two prompts in one second are
+# still two turns). A Stop guard blocks once per turn by it (cc_stop_guard, cc-lib.sh).
+TURN_ID=""
+[ "$EVENT" = "userpromptsubmit" ] && TURN_ID="$NOW.$$"
 PATCH="$(jq -nc \
   --arg sid "$SESSION_ID" \
   --arg name "$NAME" \
@@ -314,7 +326,9 @@ PATCH="$(jq -nc \
   --arg status "$STATUS" \
   --argjson updated "$NOW" \
   --argjson since "$SINCE" \
-  '{session_id:$sid, name:$name, cwd:$cwd, status:$status, updated:$updated, since:$since}')"
+  --arg turn "$TURN_ID" \
+  '{session_id:$sid, name:$name, cwd:$cwd, status:$status, updated:$updated, since:$since}
+   + (if $turn == "" then {} else {turn_id:$turn} end)')"
 
 # The in-flight tool rides on the patch (no extra jq spawn beyond this one): set on
 # PreToolUse, nulled on the matching PostToolUse. Null rather than deleted because the patch is
@@ -610,10 +624,11 @@ if [ "$EVENT" = "sessionstart" ]; then
 fi
 
 # ---- What a finished turn is told (2026-09-29) ----
-# The Stop decision, printed once, last, through its one builder: a message from the mailbox, and
-# the auto-compact notes request, each keep the turn going.
+# The Stop decision, printed once, last, through its one builder: a message from the mailbox, the
+# auto-compact notes request and a Stop guard's reason (2026-10-02) each keep the turn going, in
+# that order.
 if [ "$EVENT" = "stop" ]; then
-  cc_stop_decision "${STOP_MAIL:-}" "${STOP_NOTES:-}"
+  cc_stop_decision "${STOP_MAIL:-}" "${STOP_NOTES:-}" "${STOP_GUARD:-}"
 fi
 
 # ---- What the compaction summary is told (2026-09-29) ----

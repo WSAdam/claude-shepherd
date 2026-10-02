@@ -5008,5 +5008,16 @@ do
         and not src:find('it.needsYouSource === "error" ? LABELS.retrying', 1, true))
 end
 
+-- ---- the Stop guards' once-markers go with the session (2026-10-02) ----
+-- Mining round 2, A1. tests/reap-session-files.test.lua drives FX.removeStatus over a temp tree;
+-- this pins that the panel reads the same folder the hook writes.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("stop guards: FX.GUARD_DIR reads CC_GUARD_DIR, as cc-lib.sh does",
+        src:find('FX.GUARD_DIR = os.getenv("CC_GUARD_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-guard")', 1, true) ~= nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

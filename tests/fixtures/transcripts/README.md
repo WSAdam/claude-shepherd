@@ -30,7 +30,11 @@ something: `git commit`, an in-place `sed` of `TODO.md` (a line ticked) and `cc-
 --result merged`. So a turn that ended on a denial reads *blocked*, and one that committed, ticked
 its TODO lines or landed its merge reads *done*. Those words (`sed`, `i`, `TODO`, `md`, `cc`,
 `merge`, `sh`, `done`, `result`, `merged`, with `gsed`, `perl` and `pi`) are kept wherever they
-stand in a Bash command; none of them names anything.
+stand in a Bash command; none of them names anything. Since 2026-10-02 an assistant's own text also
+keeps the six words the question guard reads (`want`, `should`, `shall`, `I`, `you`, `your`, in
+whatever case they were written), so "Should I commit this? It stays local." scrubs to "Should I
+xxxxxx xxxx? xx xxxxx xxxxx." and still reads as a question; a prompt, a tool input and a tool
+result keep none of them.
 
 `check-scrubbed.js` proves it: every word in a fixture must be either a mask or listed in
 `vocabulary.txt` (Claude Code's own record keys, types and tags — short enough to read by eye). A
@@ -134,6 +138,29 @@ with none. Each is labelled in `tests/scenario-replay.test.lua`, which says what
   *needs follow-up*. `--tail 20480 --end-at` its Stop.
 - **`tail-turn-committed.jsonl`** — "commit and push": a turn that committed reads *done* through
   the kept `git commit`. `--tail 16420` (16384 and 16400 split a word in the torn first line).
+
+**The question guard's corpus (2026-10-02)** — ten real turn-final messages, one window each,
+replayed by `tests/stop-guards.test.sh`. Each is cut with `--tail 8192 --end-at` the end of the
+turn's final assistant record (`stop_reason: end_turn`), so the window's last line is the message
+the Stop hook sees. The test reads it both ways: as `last_assistant_message`, and from the
+transcript alone. Picked from a survey of 2,356 turn-final messages in Adam's transcripts, 113 of
+which end on a question (every one a real ask).
+
+- Sent back: **`stop-asks-want-me-to-push.jsonl`** (a report ending "Want me to push ...?"),
+  **`stop-asks-a-or-b.jsonl`** ("Which do you want: A, or B?"), **`stop-asks-then-explains.jsonl`**
+  ("Should I commit ...? It stays local ...": the ask, then a reason) and **`stop-asks-go.jsonl`**
+  (a plan ending "Go?").
+- Ending normally: **`stop-question-in-code-fence.jsonl`** (a tool result quoted in a fence, its
+  questions inside), **`stop-quoted-question.jsonl`** (a report quoting the question it relayed),
+  **`stop-rhetorical-question-mid-text.jsonl`** (a question posed mid-text, a statement last) and
+  **`stop-plain-report.jsonl`**.
+- The two boundaries, pinned: **`stop-asks-earlier-paragraph.jsonl`** ("Want me to push?" a
+  paragraph before the end) and **`stop-say-go-imperative.jsonl`** ("Say go and I'll build it", no
+  question mark). Both are real asks the guard lets through, because it reads only the last
+  paragraph for a "?".
+
+`stop-asks-then-explains` and `stop-plain-report` were cut at `--tail 8300` and `--tail 8250`: at
+8192 the torn first line split a kept key.
 
 ## Regenerating
 

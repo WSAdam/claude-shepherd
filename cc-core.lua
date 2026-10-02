@@ -10714,6 +10714,9 @@ M.SETTINGS_KEEP_SUBKEYS = {
   -- 2026-09-30: restart in place has no inputs (a menu entry runs it); if the form ever rebuilds
   -- `restart`, its dry-run switch and the hand-set wave and keep times stay.
   restart = { "dryRun", "waveMinutes", "keepHours" },
+  -- 2026-10-02: the Stop guards have no inputs (the config switches them); if the form ever rebuilds
+  -- `stopGuards`, the question guard's switch stays (A2/A3 add theirs beside it).
+  stopGuards = { "question" },
 }
 function M.overlayConfig(cfg, incoming)
   cfg = type(cfg) == "table" and cfg or {}
@@ -21630,6 +21633,9 @@ M.FEATURES = {
   { key = "answers", cat = "Control", new = true, title = "Answer questions from Shepherd",
     what = "When a session asks you something, its card pulses with the question and you get one alert; its answers are buttons right there (and on its Instances row). Your click goes straight to the session -- no tab to find. Several parts or free text: pick per part, then Send answers. Answer in the tab instead hands it back to the tab.",
     why = "A session waiting on you shouldn't wait for you to find its tab -- and you always know when one is." },
+  { key = "stopguards", cat = "Control", new = true, title = "Questions asked in prose come back",
+    what = "A turn that ends by asking you something in prose (\"Want me to push?\", \"A or B?\") is sent back once, to ask it with the question tool instead, so it lands on the card as buttons. Code, quotes and a question answered in the same breath don't count. Off in plan mode, in Shepherd's own runs and where Shepherd isn't running. stopGuards.question in ~/.claude/cc-config.json, on by default.",
+    why = "A question buried at the end of a long report looks like a finished session; on the card it can't be missed." },
   { key = "decisions", cat = "Control", new = true, title = "Decisions inbox",
     what = "A session with a question it has a sensible default for asks with ~/.claude/cc-decide.sh and goes ahead on the default instead of stopping. ☰ → Inbox lists every open question -- and every question Shepherd is holding for you -- across the fleet; answer in place. A different answer reaches the session through its mailbox, or at its next start if it has stopped; keeping the default just closes it. A --blocking question waits for you (up to its timeout, then the default) and its card says Needs you; an open one is a heads-up.",
     why = "A question you'd have answered with the obvious choice no longer parks a session until you come back." },
