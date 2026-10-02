@@ -625,6 +625,19 @@ instructions every session in it reads first. It suggests; nothing changes until
   entry, when `CLAUDE.md` has uncommitted edits, when those lines aren't in the file exactly once
   any more (undo it by hand with `git revert`), or when the commit is no longer in the repo.
 
+- **Lessons:** what you did with each suggestion is kept in the repo's lessons ledger
+  (`~/.claude/cc-coach/<repo>.lessons.json`, the newest 200): applied, skipped or undone, with
+  when, its section, its text and why. Each pending suggestion has a **Why skip? (optional)** box
+  next to **Skip**: one line, sent with the Skip (Return in the box skips too), and shown on the
+  skipped row. An Apply or an Undo goes into the ledger at once; a skip goes in when the next run
+  starts, so **Bring back** before then takes it out again. Edits applied before the ledger
+  existed are added from the history. Every run's prompt carries the ledger, newest first and
+  capped at about 6KB, with these rules: an applied suggestion is in `CLAUDE.md` already and is
+  never proposed again; a skipped or undone one comes back only with new evidence, and the coach
+  says what is new. When a suggestion repeats a lesson, reworded or not, the coach names that
+  lesson (the model judges the match, not Shepherd), and its row says **seen in N runs**, what
+  you did with it before and your reason, and **New since then:** in the coach's words.
+
 ```json
 { "coach": { "enabled": true, "day": "mon", "maxBudgetUsd": 1, "timeoutSeconds": 600 } }
 ```

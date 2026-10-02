@@ -9,6 +9,12 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
 The second feature-mining round (Maestro, Gas Town, ECC, oh-my-claudecode, OpenRig), built as
 parallel units. Each unit adds its line here.
 
+- Coach lessons ledger: every Apply, Skip (with an optional one-line reason typed next to Skip)
+  and Undo is kept per repo (`~/.claude/cc-coach/<repo>.lessons.json`), and the next run's prompt
+  carries it, so an applied suggestion isn't proposed again and a skipped or undone one comes back
+  only with new evidence, saying what is new; a repeat's row says "seen in N runs". Skips used to be
+  lost when the next run replaced the record.
+
 ## 2026-10-02 — A failed tool no longer stays "in flight"
 
 - Fixed: Claude Code fires `PostToolUseFailure` instead of `PostToolUse` when a tool fails (a Bash

@@ -159,6 +159,31 @@ eq("...an added entry does not", /unskip/.test(bbRows[4]), false);
 const nv = lib.coachRowsHtml({ root: "/r", state: "new", edits: [], decisions: [] });
 eq("a repo the coach never read offers to run it", /hasn't read/.test(nv) && /data-act="rerun"/.test(nv), true);
 
+// ---- the lessons ledger (2026-10-02, mining round 2 unit B1) ----
+// 2026-10-02: a skip was lost at the next run, so the coach could propose the same edit again with
+// nothing on the row saying it had been seen before, or what was new. The row now says how many runs
+// proposed it, what Adam did with it last time and why, and what the coach says is new; and a pending
+// row takes an optional one-line reason for its Skip.
+const les = lib.coachRowsHtml({ root: "/r/repo", state: "done", verdict: "proposals", decisions: [],
+  edits: [
+    { i: 1, section: "Git", old: "", new: "- never force-push", why: "w", evidence: ["e"], status: "pending",
+      lesson: "L0a1b2c", seen: 3, was: "skipped", reason: "too broad" + EVIL, whatsNew: "two more force-pushes" + EVIL },
+    { i: 2, section: "Git", old: "", new: "- y", why: "w", evidence: ["e"], status: "pending", lesson: "L0d0e0f", seen: 2, was: "undone" },
+    { i: 3, section: "Git", old: "", new: "- z", why: "w", evidence: ["e"], status: "pending" },
+    { i: 4, section: "Git", old: "", new: "- s", why: "w", evidence: ["e"], status: "skipped", reason: "not now" + EVIL },
+  ] });
+const lesRows = les.split('<div class="ib-row co-row').slice(1);
+eq("a suggestion that repeats a lesson says how many runs proposed it", /seen in 3 runs/.test(lesRows[0]), true);
+eq("...what Adam did with it before, and his reason", /[Ss]kipped before/.test(lesRows[0]) && lesRows[0].indexOf("too broad") >= 0, true);
+eq("...and what the coach says is new", /new[\s\S]*two more force-pushes/i.test(lesRows[0]), true);
+eq("...every field escaped", les.indexOf("<img") < 0, true);
+eq("an undone lesson says so", /[Uu]ndone before/.test(lesRows[1]) && /seen in 2 runs/.test(lesRows[1]), true);
+eq("a suggestion with no lesson says nothing of the kind", /seen in|before ·|before:/.test(lesRows[2]), false);
+eq("a pending row has a one-line reason box for its Skip, before the Skip button",
+  /<input class="co-skip-why"[^>]*maxlength="200"[^>]*>/.test(lesRows[2]) && lesRows[2].indexOf('class="co-skip-why"') < lesRows[2].indexOf('data-act="skip"'), true);
+eq("...an applied or skipped row has none", /co-skip-why/.test(lesRows[3]), false);
+eq("a skipped row shows the reason it was skipped for, escaped", lesRows[3].indexOf("not now") >= 0 && lesRows[3].indexOf("<img") < 0, true);
+
 // ---- what a suggestion is expected to change (2026-09-30) ----
 // 2026-09-30: a row showed the text and the evidence, not the behaviour it should change. Each edit
 // now carries what sessions do today and what is expected once it is applied.
@@ -247,6 +272,19 @@ lib.coachAct(btn({ "data-act": "apply", "data-i": 0 }));
 eq("Apply sends the view's root and the edit's number", JSON.stringify(sent.pop()), JSON.stringify(["coach-apply", "/r/repo", "1"]));
 lib.coachAct(btn({ "data-act": "skip", "data-i": 0 }));
 eq("Skip likewise", JSON.stringify(sent.pop()), JSON.stringify(["coach-skip", "/r/repo", "1"]));
+// 2026-10-02: the reason typed in the row's box goes after the number, on one line
+function skipWith(value) {
+  const b = { getAttribute: (k) => ({ "data-act": "skip", "data-i": "0" })[k] || null };
+  const row = { querySelector: (sel) => (sel === "input.co-skip-why" ? { value: value } : null) };
+  b.closest = (sel) => (sel === "[data-act]" ? b : (sel === ".co-row" ? row : null));
+  return { target: b, stopPropagation() {} };
+}
+lib.coachAct(skipWith("  too\n broad  "));
+eq("Skip sends the reason typed in its row, on one line, after the number", JSON.stringify(sent.pop()), JSON.stringify(["coach-skip", "/r/repo", "1\ntoo broad"]));
+lib.coachAct(skipWith("   "));
+eq("...a blank reason sends the number alone", JSON.stringify(sent.pop()), JSON.stringify(["coach-skip", "/r/repo", "1"]));
+lib.coachAct(skipWith("x".repeat(500)));
+eq("...a long reason is capped at 200 characters", (sent.pop()[2] || "").length, 2 + 200);
 lib.coachAct(btn({ "data-act": "dec-add", "data-i": 0 }));
 eq("Add sends the entry's number", JSON.stringify(sent.pop()), JSON.stringify(["coach-dec-add", "/r/repo", "1"]));
 lib.coachAct(btn({ "data-act": "add", "data-i": 0 }));

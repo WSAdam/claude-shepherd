@@ -6506,6 +6506,38 @@ function FX.coachHistorySave(root, list)
   end
 end
 
+-- The repo's lessons ledger (<repo>.lessons.json, 2026-10-02): what Adam did with each suggestion --
+-- applied, skipped with his reason, undone -- which the next run's prompt carries. Memory first,
+-- else its file; Shepherd is its only writer.
+function FX.coachLessons(root)
+  FX._coach.lessons = FX._coach.lessons or {}
+  local l = FX._coach.lessons[root]
+  if l == nil then
+    local p = FX.coachPath(root, ".lessons.json")
+    l = core.parseCoachLessons(p and FX.readFile(p) or nil)
+    FX._coach.lessons[root] = l
+  end
+  return l
+end
+function FX.coachLessonsSave(root, list)
+  FX._coach.lessons = FX._coach.lessons or {}
+  FX._coach.lessons[root] = list
+  local p = FX.coachPath(root, ".lessons.json")
+  if not (p and FX.writeFileAtomic(p, core.json.encode(list))) then
+    print("[cc-dashboard] ❌ couldn't save the coach's lessons for " .. tostring(root))
+  end
+end
+-- A run is about to replace the record: its skips (lost before 2026-10-02) and anything applied
+-- before the ledger existed go into it first (core.coachLessonFold, idempotent).
+function FX.coachLessonsFold(root)
+  local list, changed = core.coachLessonFold(FX.coachLessons(root), FX.coachRecord(root), FX.coachHistory(root))
+  if changed then
+    FX.coachLessonsSave(root, list)
+    print("[cc-dashboard] 🔍 coach: lessons ledger for " .. tostring(root) .. " now holds " .. #list .. " lesson(s)")
+  end
+  return list
+end
+
 -- The repo a card belongs to: its git common dir, main checkout and name (local sessions in a repo).
 function FX.coachRepoOf(it)
   if type(it) ~= "table" or it.remote or type(it.repoKey) ~= "string" or type(it.mainRoot) ~= "string"
@@ -6555,6 +6587,8 @@ function FX.coachStart(repo, trigger, cfg, retry)
   if type(repo) ~= "table" then return nil, "no repo" end
   local root = repo.root
   pcall(FX.coachHistory, root)   -- the record is about to be replaced: its applied edits go to the history first
+  local okL, errL = pcall(FX.coachLessonsFold, root)   -- ...and its skips to the lessons ledger (2026-10-02)
+  if not okL then print("[cc-dashboard] ❌ coach: folding " .. tostring(root) .. "'s lessons failed: " .. tostring(errL)) end
   if FX.coachBusy(root) then return nil, "the coach is already reading this repo's sessions" end
   if FX.coachCheckerBusy(repo.commonDir) then
     FX._coach.waiting[root] = { repo = repo, trigger = trigger, retry = retry }
@@ -6630,7 +6664,7 @@ function FX.coachScanned(repo, rec, scan, cfg)
   FX.coachSave(rec)
   cfg = cfg or loadConfig()
   FX.runHeadless({ id = "coach|" .. root, lane = repo.commonDir, dir = root,
-    prompt = core.coachPrompt(digest, claudeMd, decisions, { name = repo.name }),
+    prompt = core.coachPrompt(digest, claudeMd, decisions, { name = repo.name, lessons = FX.coachLessons(root) }),
     timeoutSeconds = tonumber(core.config(cfg, "coach.timeoutSeconds", core.COACH.timeoutSeconds)) or core.COACH.timeoutSeconds,
     maxBudgetUsd = core.config(cfg, "coach.maxBudgetUsd", core.COACH.budgetUsd),
     onStart = function()
@@ -6655,6 +6689,12 @@ function FX.coachFinish(root, rec, res)
   rec.edits, rec.decisions = p.edits or {}, p.decisions or {}
   for _, e in ipairs(rec.edits) do e.status = "pending" end
   for _, d in ipairs(rec.decisions) do d.status = "pending" end
+  -- 2026-10-02: a proposal citing a lesson counts this run on it ("seen in N runs"); a made-up id is dropped
+  local okL, errL = pcall(function()
+    local list, changed = core.coachLessonsSeen(FX.coachLessons(root), rec.edits, rec.at)
+    if changed then FX.coachLessonsSave(root, list) end
+  end)
+  if not okL then print("[cc-dashboard] ❌ coach: counting " .. tostring(root) .. "'s repeated lessons failed: " .. tostring(errL)) end
   FX.coachSave(rec)
   local name = tostring(rec.name or root)
   local n = #rec.edits + #rec.decisions
@@ -6731,7 +6771,7 @@ function FX.pushCoach(root)
   local rec = FX.coachRecord(root)
   local live = { busy = FX.coachBusy(root), waiting = FX._coach.waiting[root] ~= nil,
                  timeoutSeconds = tonumber(core.config(loadConfig(), "coach.timeoutSeconds", core.COACH.timeoutSeconds)) or core.COACH.timeoutSeconds }
-  local v = rec and core.coachView(rec, live)
+  local v = rec and core.coachView(rec, live, FX.coachLessons(root))
   if not v then   -- no run yet: say so, with Run (the repo comes from a card, like the chip)
     local repo = FX.coachRepoForRoot(root)
     v = { root = root, name = repo and repo.name or nil, state = live.waiting and "waiting" or (live.busy and "running" or "new"),
@@ -6824,6 +6864,12 @@ function FX.coachApply(root, i, anyway)
       e.sha = tostring(out or ""):match("(%x+)%s*$")
       if dec.added then e.old, e.new = "", dec.added end   -- added anyway: the edit is what was written
       rec.claudeHash = core.coachHash(dec.text)   -- Shepherd's own commit isn't "changed since"
+      -- 2026-10-02: its lesson, at once (before the history, which keeps the lesson's id for Undo)
+      local okL, errL = pcall(function()
+        local list, id = core.coachLessonRecord(FX.coachLessons(root), e, "applied", { at = e.at, run = rec.at })
+        if id then e.lesson = id; FX.coachLessonsSave(root, list) end
+      end)
+      if not okL then print("[cc-dashboard] ❌ coach: recording the applied lesson failed: " .. tostring(errL)) end
       if e.sha then FX.coachHistorySave(root, core.coachHistoryAdd(FX.coachHistory(root), e)) end   -- kept past the next run, for Undo
       local where = not dec.added and "Applied to CLAUDE.md"
         or (dec.newSection and ("Added under a new section, " .. tostring(e.section) .. ",") or "Added at the end of its section")
@@ -6902,6 +6948,12 @@ function FX.coachUndo(root, i)
     if job.timer then pcall(function() job.timer:stop() end); job.timer = nil end
     if ok then
       h.undone, h.error = { sha = tostring(out or ""):match("(%x+)%s*$") or "0000000", at = FX.now() }, nil
+      -- 2026-10-02: its lesson reads undone, so the coach proposes it again only with new evidence
+      local okL, errL = pcall(function()
+        local list, id = core.coachLessonRecord(FX.coachLessons(root), h, "undone", { at = h.undone.at })
+        if id then h.lesson = id; FX.coachLessonsSave(root, list) end
+      end)
+      if not okL then print("[cc-dashboard] ❌ coach: recording the undone lesson failed: " .. tostring(errL)) end
       local rec = FX.coachRecord(root)
       if rec then rec.claudeHash = core.coachHash(FX.readFile(path)); FX.coachSave(rec) end   -- Shepherd's own commit isn't "changed since"
       FX.alert("🧭 Undone: CLAUDE.md is back as it was before that edit (committed " .. h.undone.sha:sub(1, 7) .. ")", 4)
@@ -6932,10 +6984,14 @@ function FX.coachUndo(root, i)
   return true
 end
 
-function FX.coachSkip(root, i)
+-- Skip, with Adam's optional one-line reason (2026-10-02): kept on the edit, and folded into the
+-- lessons ledger when the next run replaces the record (FX.coachLessonsFold) -- Bring back before
+-- then takes it out of that fold.
+function FX.coachSkip(root, i, why)
   local rec, e = FX.coachItem(root, i, "edits")
   if not rec or e.status ~= "pending" then return false end
-  e.status, e.error = "skipped", nil
+  e.status, e.error, e.reason, e.at = "skipped", nil, core.coachReason(why), FX.now()
+  print("[cc-dashboard] 🔍 coach: skipped edit " .. tostring(i) .. " for " .. tostring(rec.root) .. (e.reason and " (with a reason)" or ""))
   FX.coachSave(rec)
   if FX._coach.open == root then FX.pushCoach(root) end
   return true
@@ -6948,7 +7004,7 @@ function FX.coachUnskip(root, i, what)
   if what ~= "edits" and what ~= "decisions" then return false end
   local rec, item = FX.coachItem(root, i, what)
   if not rec or item.status ~= "skipped" then return false end
-  item.status, item.error, item.errorCode = "pending", nil, nil
+  item.status, item.error, item.errorCode, item.reason = "pending", nil, nil, nil   -- the reason was the skip's
   FX.coachSave(rec)
   print("[cc-dashboard] 🔍 coach: brought back " .. what .. " " .. tostring(i) .. " for " .. tostring(rec.root))
   if FX._coach.open == root then FX.pushCoach(root) end
@@ -12065,7 +12121,8 @@ local function handleBridgeMsg(msg)
   if a == "coach-close" then FX._coach.open = nil; return end
   if a == "coach-apply" then FX.coachApply(tostring(payload.v or ""), tostring(payload.text or "")); return end
   if a == "coach-add" then FX.coachApply(tostring(payload.v or ""), tostring(payload.text or ""), true); return end
-  if a == "coach-skip" then FX.coachSkip(tostring(payload.v or ""), tostring(payload.text or "")); return end
+  -- the edit's number, then Adam's optional reason (2026-10-02): coachSkipArgs's two results are FX.coachSkip's last two
+  if a == "coach-skip" then FX.coachSkip(tostring(payload.v or ""), core.coachSkipArgs(tostring(payload.text or ""))); return end
   if a == "coach-unskip" then FX.coachUnskip(tostring(payload.v or ""), tostring(payload.text or ""), "edits"); return end
   if a == "coach-dec-unskip" then FX.coachUnskip(tostring(payload.v or ""), tostring(payload.text or ""), "decisions"); return end
   if a == "coach-undo" then FX.coachUndo(tostring(payload.v or ""), tostring(payload.text or "")); return end
@@ -14959,6 +15016,12 @@ local HTML = [[
 .co-ev li{ overflow-wrap:anywhere; }
 .co-err{ color:var(--st-error); margin-bottom:6px; overflow-wrap:anywhere; }
 .co-done{ color:var(--dim); }
+/* the lessons ledger (2026-10-02): a repeat's "seen in N runs", the coach's "new since then", Skip's reason box */
+.co-seen{ color:var(--warn); margin:2px 0 0; }
+.co-whatsnew{ margin:0 0 6px; color:var(--text); overflow-wrap:anywhere; }
+.co-whatsnew b{ color:var(--text-2); font-weight:600; }
+.co-skip-why{ flex:1 1 140px; min-width:120px; background:var(--surface); color:var(--text);
+  border:1px solid var(--border); border-radius:8px; font-size:12px; padding:4px 8px; }
 /* Where the time went (2026-09-29): above Instances (z 12), which it opens from */
 #timelost{ position:fixed; inset:0; background:var(--bg-overlay); z-index:13; display:none; flex-direction:column; font-size:12px; }
 #timelost.show{ display:flex; }
@@ -23205,24 +23268,36 @@ local HTML = [[
         return '<div class="co-expect">' + (o.before ? '<div><b>Today:</b> ' + esc(o.before) + '</div>' : '')
           + (o.after ? '<div><b>Expected after:</b> ' + esc(o.after) + '</div>' : '') + '</div>';
       }
+      // 2026-10-02: a suggestion that repeats a lesson (core.coachView: e.seen / e.was / e.reason) says
+      // how many runs proposed it and what Adam did with it last, and the coach's word on what is new
+      function lessonHtml(e, pend){
+        var n = Number(e.seen) || 0, was = { skipped: "skipped", undone: "undone", applied: "applied" }[e.was];
+        if(!(n > 0)) return '';
+        return '<div class="ib-meta co-seen">seen in ' + esc(n) + ' run' + (n === 1 ? '' : 's')
+          + (pend && was ? ' · ' + was + ' before' + (e.reason ? ': ' + esc(e.reason) : '') : '') + '</div>';
+      }
       (v.edits || []).forEach(function(e, i){
         var pend = e.status === "pending";
         h += '<div class="ib-row co-row' + (pend ? '' : ' done') + '">'
           + '<div class="ib-q">' + esc(e.section || "CLAUDE.md") + '</div>'
+          + lessonHtml(e, pend)
           + '<div class="co-why">' + esc(e.why) + '</div>'
+          + (e.whatsNew ? '<div class="co-whatsnew"><b>New since then:</b> ' + esc(e.whatsNew) + '</div>' : '')
           + expectHtml(e)
           + (e.old ? '<pre class="co-old">' + esc(e.old) + '</pre>' : '<div class="ib-meta">Added at the end of this section</div>')
           + '<pre class="co-new">' + esc(e["new"]) + '</pre>'
           + '<ul class="co-ev">' + (e.evidence || []).map(function(x){ return '<li>' + esc(x) + '</li>'; }).join("") + '</ul>'
           + (pend && e.error ? '<div class="co-err">' + esc(e.error) + '</div>' : '')
           + (pend ? '<div class="ib-free"><button class="ib-btn" data-act="apply" data-i="' + i + '" onclick="coachAct(event)" title="Write this into CLAUDE.md and commit CLAUDE.md alone">Apply</button>'
+                  // 2026-10-02: Skip's optional reason, one line; the coach reads it next run (the lessons ledger)
+                  + '<input class="co-skip-why" type="text" maxlength="200" data-i="' + i + '" placeholder="Why skip? (optional)" onkeydown="coachSkipKey(event)" title="One line the coach reads next time: it brings a skipped suggestion back only with new evidence">'
                   + '<button class="ib-btn" data-act="skip" data-i="' + i + '" onclick="coachAct(event)">Skip</button>'
                   // 2026-09-30: an addition whose quote can't be placed (core.coachView's addAnyway)
                   + (e.addAnyway ? '<button class="ib-btn" data-act="add" data-i="' + i + '" onclick="coachAct(event)" title="Its quote is not in CLAUDE.md as written: add only its new part at the end of '
                                    + esc(e.section || "its section") + ', and commit CLAUDE.md alone">Add to the section anyway</button>' : '')
                   + (e.rerun ? ((e.code === "not-found" || e.code === "ambiguous") ? misquoted : stale) : '') + '</div>'
                 : '<div class="co-done">' + (e.status === "applied" ? "✓ Applied" + (e.sha ? " · committed " + esc(String(e.sha).slice(0, 7)) : "")
-                    : "Skipped " + '<button class="ib-btn" data-act="unskip" data-i="' + i + '" onclick="coachAct(event)" title="Put this suggestion back with the ones waiting">Bring back</button>') + '</div>')
+                    : "Skipped " + (e.reason ? '· ' + esc(e.reason) + ' ' : '') + '<button class="ib-btn" data-act="unskip" data-i="' + i + '" onclick="coachAct(event)" title="Put this suggestion back with the ones waiting">Bring back</button>') + '</div>')
           + '</div>';
       });
       (v.decisions || []).forEach(function(d, i){
@@ -23275,11 +23350,32 @@ local HTML = [[
         : ((act === "dec-add" || act === "dec-skip" || act === "dec-unskip") ? v.decisions : null);
       var i = parseInt(t.getAttribute("data-i"), 10);
       if(!list || !(i >= 0) || !list[i]) return;
+      if(act === "skip"){   // 2026-10-02: the reason typed in its row goes after the number, on one line
+        var row = t.closest ? t.closest(".co-row") : null;
+        var box = row && row.querySelector ? row.querySelector("input.co-skip-why") : null;
+        var why = box ? String(box.value || "").replace(/\s+/g, " ").trim().slice(0, 200) : "";
+        send("coach-skip", v.root, String(i + 1) + (why ? "\n" + why : ""));
+        return;
+      }
       send("coach-" + act, v.root, String(i + 1));
+    }
+    // Return in a Skip reason box skips that row, like its button.
+    function coachSkipKey(ev){
+      if(!ev || ev.key !== "Enter") return;
+      ev.preventDefault();
+      var row = ev.target && ev.target.closest ? ev.target.closest(".co-row") : null;
+      var b = row && row.querySelector ? row.querySelector('button[data-act="skip"]') : null;
+      if(b) coachAct({ target: b, stopPropagation: function(){} });
     }
     function renderCoach(){
       var body = document.getElementById("co-body"); if(!body) return;
+      // 2026-10-02: a push (another row's click) re-renders every row; a Skip reason typed but not
+      // yet sent stays in its box
+      var typed = {}, boxes = body.querySelectorAll ? body.querySelectorAll("input.co-skip-why") : [];
+      for(var bi = 0; bi < boxes.length; bi++){ var bx = boxes[bi], bk = bx.getAttribute("data-i"); if(bx.value) typed[bk] = bx.value; }
       body.innerHTML = coachRowsHtml(COACH.view);
+      var fresh = body.querySelectorAll ? body.querySelectorAll("input.co-skip-why") : [];
+      for(var fi = 0; fi < fresh.length; fi++){ var fb = fresh[fi], fk = fb.getAttribute("data-i"); if(typed[fk]) fb.value = typed[fk]; }
       var title = document.getElementById("co-title");
       if(title) title.textContent = "🧭 Coach" + (COACH.view && COACH.view.name ? " · " + COACH.view.name : "");
       coachTickStop();   // one ticker at most, and only while a run is in flight

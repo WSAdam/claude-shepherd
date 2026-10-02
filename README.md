@@ -122,7 +122,9 @@ every other automatic behaviour here waits for its switch.
   automation would do before it does it, and what it did, refused and why, newest first.
 - [**Routines**](docs/automation.md#routines): spawn a session or push a digest on a cron schedule.
 - [**Coach**](docs/automation.md#the-coach): weekly or on demand, a read-only Sonnet reads a repo's last
-  10 sessions and suggests `CLAUDE.md` edits with evidence; Apply commits that file alone.
+  10 sessions and suggests `CLAUDE.md` edits with evidence; Apply commits that file alone. A
+  lessons ledger remembers what you applied, skipped (and why) or undid, so a skipped suggestion
+  doesn't come back without new evidence.
 - [**Notifications & escalation**](docs/automation.md#escalation-and-watchdogs): louder nags, macOS
   banners and phone pushes when a session has waited on you too long or stalled.
 - [**A/B compare**](docs/automation.md#ab-compare): run one task as 2–4 variants in separate

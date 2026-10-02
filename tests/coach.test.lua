@@ -612,6 +612,147 @@ local keep = {}
 for _, k in ipairs(core.SETTINGS_KEEP_SUBKEYS.coach or {}) do keep[k] = true end
 check("config: SETTINGS_KEEP_SUBKEYS keeps coach.day and coach.maxBudgetUsd", keep.day and keep.maxBudgetUsd and keep.enabled)
 
+-- ---- the lessons ledger (2026-10-02, mining round 2 unit B1) ----
+-- 2026-10-02: a skipped suggestion was gone at the next run -- FX.coachStart rebuilt the record and
+-- kept only applied edits (the history) -- so nothing told the coach Adam had already said no, and
+-- it could propose the same edit again, with no word on what had changed.
+do
+  local fns = { "coachLessonHash", "coachLessonRecord", "coachLessonsSeen", "coachLessonFold", "parseCoachLessons", "coachSkipArgs" }
+  local have = true
+  for _, n in ipairs(fns) do if type(core[n]) ~= "function" then have = false; print("       missing core." .. n) end end
+  check("core has the lessons ledger's functions", have)
+  if have then
+    local E1 = { section = "## Git", old = "- commit often", new = "- commit often; never git push", why = "Units pushed on their own.", evidence = { "e" } }
+    local L, id = core.coachLessonRecord({}, E1, "applied", { at = 100, run = 90 })
+    check("ledger: an Apply records one lesson: an id, its section, a text hash, the verdict, why, when and the run",
+          #L == 1 and type(id) == "string" and id:match("^L%x+") ~= nil and L[1].id == id and L[1].section == "Git"
+          and L[1].textHash == core.coachLessonHash(E1) and L[1].verdict == "applied" and L[1].why == "Units pushed on their own."
+          and L[1].at == 100 and type(L[1].runs) == "table" and #L[1].runs == 1 and L[1].runs[1] == 90)
+    check("ledger: ...and what the edit says, on one line, so the coach can recognise it", tostring(L[1].text):find("never git push", 1, true) ~= nil)
+    local L2, id2 = core.coachLessonRecord(L, E1, "undone", { at = 200, run = 90 })
+    check("ledger: an Undo of that edit updates its lesson, never a second one",
+          #L2 == 1 and id2 == id and L2[1].verdict == "undone" and L2[1].at == 200 and #L2[1].runs == 1)
+    check("ledger: ...leaving the list it was given as it was", L[1].verdict == "applied" and L[1].at == 100)
+    local E2 = { section = "Tests", old = "", new = "- run make lint first", why = "Lint failed late.", evidence = { "e" } }
+    local L3, id3 = core.coachLessonRecord(L2, E2, "skipped", { at = 300, run = 250, reason = "  not\n  now  " })
+    check("ledger: a Skip records Adam's reason, on one line", #L3 == 2 and id3 ~= id and L3[2].id == id3
+          and L3[2].verdict == "skipped" and L3[2].reason == "not now")
+    check("ledger: a bad verdict records nothing", #core.coachLessonRecord(L3, E2, "maybe", { at = 1 }) == 2)
+    -- a reworded proposal that cites the lesson updates that lesson, adding its run
+    local E2b = { section = "Tests", old = "", new = "- lint before the suite", why = "Lint still fails late.", evidence = { "e" }, lesson = id3 }
+    local L4, id4 = core.coachLessonRecord(L3, E2b, "applied", { at = 400, run = 380 })
+    check("ledger: an edit citing a lesson updates it, reworded or not, adding its run",
+          #L4 == 2 and id4 == id3 and L4[2].verdict == "applied" and #L4[2].runs == 2 and L4[2].why == "Lint still fails late.")
+    check("ledger: ...an Apply carries no skip reason", L4[2].reason == nil)
+    -- a run's proposals: a cited lesson gains the run; a made-up id is dropped
+    local edits = { { section = "Git", old = "a", new = "b", why = "w", evidence = { "e" }, lesson = id },
+                    { section = "Git", old = "c", new = "d", why = "w", evidence = { "e" }, lesson = "Lfffffe" },
+                    { section = "Git", old = "e", new = "f", why = "w", evidence = { "e" } } }
+    local L5 = core.coachLessonsSeen(L4, edits, 500)
+    local l5 = {}
+    for _, x in ipairs(L5) do l5[x.id] = x end
+    check("seen: a proposal citing a lesson adds this run to it  (" .. #(l5[id] and l5[id].runs or {}) .. ")",
+          l5[id] and #l5[id].runs == 2 and l5[id].runs[2] == 500)
+    check("seen: a citation of a lesson the ledger doesn't have is dropped", edits[2].lesson == nil and edits[1].lesson == id)
+    local L6 = core.coachLessonsSeen(L5, edits, 500)
+    local l6 = {}
+    for _, x in ipairs(L6) do l6[x.id] = x end
+    check("seen: one run counts once", l6[id] and #l6[id].runs == 2)
+    -- the fold FX.coachStart runs before it replaces the record
+    local orec = { at = 600, doneAt = 650, edits = {
+      { section = "Docs", old = "- x", new = "- y", why = "wx", evidence = { "e" }, status = "skipped", at = 640, reason = "wrong section" },
+      { section = "Docs", old = "- p", new = "- q", why = "wp", evidence = { "e" }, status = "pending" },
+      { section = "Docs", old = "- m", new = "- n", why = "wm", evidence = { "e" }, status = "applied", sha = "abc1234", at = 645 } } }
+    local F1, ch1 = core.coachLessonFold(L6, orec, {})
+    local byWhy = {}
+    for _, x in ipairs(F1) do byWhy[x.why] = x end
+    check("fold: a skipped edit goes into the ledger, with Adam's reason and its run",
+          byWhy.wx and byWhy.wx.verdict == "skipped" and byWhy.wx.reason == "wrong section" and byWhy.wx.at == 640
+          and byWhy.wx.runs[1] == 600 and ch1 == true)
+    check("fold: a pending edit does not", byWhy.wp == nil)
+    check("fold: an applied edit the ledger lacks goes in too", byWhy.wm and byWhy.wm.verdict == "applied")
+    local F2, ch2 = core.coachLessonFold(F1, orec, {})
+    check("fold: folding the same record again changes nothing", #F2 == #F1 and ch2 == false)
+    -- a lesson cited in the record, then skipped there: the newer skip wins
+    local crec = { at = 700, edits = { { section = "Tests", old = "", new = "- lint now", why = "again", evidence = { "e" }, status = "skipped",
+                                         at = 710, lesson = id3, reason = "still not now" } } }
+    local F3 = core.coachLessonFold(F2, crec, {})
+    local f3 = {}
+    for _, x in ipairs(F3) do f3[x.id] = x end
+    check("fold: a skip of a cited lesson, newer than its verdict, updates it",
+          #F3 == #F2 and f3[id3] and f3[id3].verdict == "skipped" and f3[id3].reason == "still not now" and #f3[id3].runs == 3)
+    -- edits applied before the ledger existed: seeded from the history, an undone one as undone
+    local hist0 = { { sha = "aaa1111", at = 50, section = "Old", why = "old why", old = "", new = "- old rule" },
+                    { sha = "bbb2222", at = 60, section = "Old", why = "gone why", old = "", new = "- gone rule", undone = { sha = "ccc3333", at = 70 } } }
+    local S = core.coachLessonFold({}, nil, hist0)
+    local sw = {}
+    for _, x in ipairs(S) do sw[x.why] = x end
+    check("fold: an applied edit from before the ledger is seeded from the history", sw["old why"] and sw["old why"].verdict == "applied" and sw["old why"].at == 50)
+    check("fold: ...and an undone one reads undone", sw["gone why"] and sw["gone why"].verdict == "undone" and sw["gone why"].at == 70)
+    -- capped, newest kept; round-trips through its file
+    local many = {}
+    for i = 1, core.COACH.lessonsMax + 4 do
+      many = core.coachLessonRecord(many, { section = "S", old = "", new = "- rule " .. i, why = "w" .. i, evidence = { "e" } }, "skipped", { at = i, run = i })
+    end
+    check("ledger: capped at COACH.lessonsMax, the newest kept", #many == core.COACH.lessonsMax and many[#many].why == "w" .. (core.COACH.lessonsMax + 4))
+    local back = core.parseCoachLessons(json.encode(F3))
+    check("ledger: round-trips through its file", #back == #F3 and back[1].id == F3[1].id and back[1].textHash == F3[1].textHash)
+    check("ledger: torn JSON, and an entry with a bad id or verdict, are dropped",
+          #core.parseCoachLessons("{") == 0
+          and #core.parseCoachLessons(json.encode({ { id = "rm -rf", verdict = "applied", section = "S", textHash = "00000000", why = "w", at = 1, runs = {} },
+                                                    { id = "L0a0b0c", verdict = "meh", section = "S", textHash = "00000000", why = "w", at = 1, runs = {} } })) == 0)
+    -- the history keeps the lesson an applied edit was, so Undo finds it
+    local hh = core.coachHistoryAdd({}, { sha = "ddd4444", at = 1, section = "S", why = "w", old = "a", new = "b", lesson = id })
+    check("history: an entry keeps its lesson id, through its file", hh[1] and hh[1].lesson == id and core.parseCoachHistory(json.encode(hh))[1].lesson == id)
+    -- the model's answer: an edit may cite a lesson and say what is new
+    local po = core.parseCoachOutput(envelope(json.encode({ summary = "s", decisions = {}, edits = {
+      edit(1, { lesson = id3, whatsNew = "two more\nlate-lint failures this week" }), edit(2, { lesson = "rm -rf /" }) } })), "")
+    check("output: an edit keeps the lesson it cites and what is new, on one line",
+          po.edits[1] and po.edits[1].lesson == id3 and po.edits[1].whatsNew == "two more late-lint failures this week")
+    check("output: a lesson id that isn't one is dropped", po.edits[2] and po.edits[2].lesson == nil)
+    local rr = core.parseCoachRecord(json.encode({ v = 1, repo = "/r/repo/.git", root = "/r/repo", state = "done", verdict = "proposals",
+      at = 100, doneAt = 200, lastRunAt = 200, decisions = {},
+      edits = { { section = "Git", old = "a", new = "b", why = "w", evidence = { "e" }, status = "skipped", lesson = id3, whatsNew = "new",
+                  reason = "not now", at = 150 } } }))
+    check("record: an edit's lesson, what is new and Adam's skip reason survive a reload",
+          rr and rr.edits[1] and rr.edits[1].lesson == id3 and rr.edits[1].whatsNew == "new" and rr.edits[1].reason == "not now" and rr.edits[1].at == 150)
+    -- the prompt
+    local PL = core.coachPrompt("digest", "# Repo\n", nil, { name = "repo", lessons = F3 })
+    local lb = PL:match("<lessons>\n(.-)\n</lessons>") or ""   -- the block itself, not the rule that names it
+    check("prompt: carries a <lessons> block with each lesson's id and verdict", lb:find(id, 1, true) ~= nil and lb:find(id3, 1, true) ~= nil
+          and lb:find("applied", 1, true) ~= nil and lb:find("skipped", 1, true) ~= nil)
+    check("prompt: ...and Adam's reason for a skip", lb:find("still not now", 1, true) ~= nil)
+    check("prompt: an applied lesson is never proposed again", PL:lower():find("applied", 1, true) ~= nil and PL:find("never propose it again", 1, true) ~= nil)
+    check("prompt: a skipped or undone one only with new evidence, saying what is new", PL:find("new evidence", 1, true) ~= nil and PL:find('"whatsNew"', 1, true) ~= nil)
+    check("prompt: an edit that repeats a lesson cites its id", PL:find('"lesson"', 1, true) ~= nil)
+    local big = {}
+    for i = 1, core.COACH.lessonsMax do
+      big = core.coachLessonRecord(big, { section = "S", old = "", new = "- rule " .. i .. (" pad"):rep(30), why = ("why " .. i .. " "):rep(20), evidence = { "e" } },
+                                   "skipped", { at = i, run = i, reason = ("r" .. i .. " "):rep(20) })
+    end
+    local PB = core.coachPrompt("digest", "# Repo\n", nil, { lessons = big })
+    local bb = PB:match("<lessons>\n(.-)\n</lessons>") or ""
+    check("prompt: <lessons> is capped at COACH.lessonsBytes  (" .. #bb .. ")", #bb > 0 and #bb <= core.COACH.lessonsBytes + 200)
+    check("prompt: ...newest first", bb:find("why " .. core.COACH.lessonsMax .. " ", 1, true) ~= nil and bb:find("why 1 ", 1, true) == nil)
+    check("prompt: no lessons, no block", not core.coachPrompt("digest", "# Repo\n", nil, {}):find("<lessons>", 1, true))
+    -- the overlay's view of an edit that repeats a lesson
+    local vrec = { root = "/r", state = "done", verdict = "proposals", decisions = {},
+      edits = { { section = "Tests", old = "", new = "- x", why = "w", evidence = { "e" }, status = "pending", lesson = id3, whatsNew = "two more" },
+                { section = "Tests", old = "", new = "- y", why = "w", evidence = { "e" }, status = "pending" } } }
+    local vv = core.coachView(vrec, {}, F3)
+    check("view: an edit repeating a lesson carries how many runs proposed it, the lesson's verdict and Adam's reason",
+          vv and vv.edits[1].seen == 3 and vv.edits[1].was == "skipped" and vv.edits[1].reason == "still not now" and vv.edits[1].whatsNew == "two more")
+    check("view: an edit with no lesson carries none", vv and vv.edits[2].seen == nil and vv.edits[2].was == nil)
+    check("view: ...nor one whose lesson isn't in the ledger", core.coachView(vrec, {}, {}).edits[1].seen == nil)
+    -- Skip's click: the edit's number, then an optional one-line reason
+    local sn, sw2 = core.coachSkipArgs("3\n  too   broad \n")
+    check("skip args: the number and a one-line reason", sn == "3" and sw2 == "too broad")
+    local sn2, sw3 = core.coachSkipArgs("2")
+    check("skip args: no reason is none", sn2 == "2" and sw3 == nil)
+    check("skip args: a reason is capped", utf8.len((select(2, core.coachSkipArgs("1\n" .. ("x"):rep(900))))) <= 201)
+  end
+end
+
 -- ---- the panel half: the real claude-dashboard.lua under a stubbed hs ----
 local REPO = T .. "/repo"
 local COMMON = REPO .. "/.git"
@@ -1056,5 +1197,75 @@ check("bring back: an added entry is not", okB == false and brec.decisions[2].st
 quiet(function() okB = type(fx.coachUnskip) == "function" and fx.coachUnskip(REPO, 1, "history") end)
 check("bring back: only edits and entries", okB == false)
 end
+
+-- 2026-10-02: the lessons ledger on a real repo. A skip was lost when the next run replaced the
+-- record, so the coach never heard that Adam had said no (or why), and proposed it again.
+-- (a function, not a do block: a do block's locals still count against the chunk's 200)
+;(function()
+local LFILE = CDIR .. "/" .. core.coachFileKey(REPO) .. ".lessons.json"
+os.remove(LFILE)
+fx._coach.lessons = nil
+fx._coach.scans = {}
+fx._headless["coach|" .. REPO] = nil
+local CURL = read(REPO .. "/CLAUDE.md")
+fx._coach.recs[REPO] = { v = 1, repo = COMMON, root = REPO, name = "repo", state = "done", verdict = "proposals",
+  trigger = "card", at = 1000, doneAt = 1100, lastRunAt = 1100, claudeHash = core.coachHash(CURL),
+  edits = { { section = "Git", old = "", new = "- never force-push", why = "A unit force-pushed.", evidence = { "e" }, status = "pending" },
+            { section = "Tests", old = "", new = "- lint before the suite", why = "Lint failed late.", evidence = { "e" }, status = "pending" } },
+  decisions = {} }
+local lrec = fx._coach.recs[REPO]
+local okS
+quiet(function() okS = fx.coachSkip(REPO, 1, "  not now,\n too broad ") end)
+check("lessons (repo): Skip keeps Adam's one-line reason on the edit, and when",
+      okS == true and lrec.edits[1].status == "skipped" and lrec.edits[1].reason == "not now, too broad" and tonumber(lrec.edits[1].at) ~= nil)
+local svd = json.decode(read(CDIR .. "/" .. core.coachFileKey(REPO) .. ".json") or "{}") or {}
+check("lessons (repo): ...saved with the record", svd.edits and svd.edits[1] and svd.edits[1].reason == "not now, too broad")
+local DSRC = read(ROOT .. "claude-dashboard.lua") or ""
+check("lessons (repo): the overlay's Skip click reaches FX.coachSkip with its reason (core.coachSkipArgs)",
+      DSRC:find('if a == "coach-skip" then FX.coachSkip(tostring(payload.v or ""), core.coachSkipArgs(tostring(payload.text or ""))); return end', 1, true) ~= nil)
+local nC = #commitTasks()
+quiet(function() okA = fx.coachApply(REPO, 2) end)
+if commitTasks()[nC + 1] then runFor(commitTasks()[nC + 1]) end
+local LL = core.parseCoachLessons and core.parseCoachLessons(read(LFILE)) or {}
+check("lessons (repo): an Apply writes its lesson to <repo>.lessons.json at once  (" .. #LL .. ")",
+      okA == true and #LL == 1 and LL[1].verdict == "applied" and LL[1].why == "Lint failed late." and lrec.edits[2].lesson == LL[1].id)
+local HL = core.parseCoachHistory(read(HFILE))
+check("lessons (repo): ...and its history entry names that lesson", HL[#HL] and LL[1] and HL[#HL].lesson == LL[1].id)
+nC = #commitTasks()
+quiet(function() okU = fx.coachUndo(REPO, #HL) end)
+if commitTasks()[nC + 1] then runFor(commitTasks()[nC + 1]) end
+LL = core.parseCoachLessons and core.parseCoachLessons(read(LFILE)) or {}
+check("lessons (repo): Undo marks its lesson undone", okU == true and #LL == 1 and LL[1].verdict == "undone")
+-- a new run replaces the record: the skip is folded into the ledger first
+local nScans = #scans()
+quiet(function() fx.coachStart(fx.coachRepoForRoot(REPO), "card", CFG) end)
+LL = core.parseCoachLessons and core.parseCoachLessons(read(LFILE)) or {}
+local skipL
+for _, x in ipairs(LL) do if x.verdict == "skipped" then skipL = x end end
+check("lessons (repo): a new run folds the skipped edit into the ledger before it replaces the record",
+      skipL ~= nil and skipL.reason == "not now, too broad" and skipL.why == "A unit force-pushed." and #scans() == nScans + 1)
+skipL = skipL or { id = "Lnone", runs = {} }
+if scans()[nScans + 1] then runFor(scans()[nScans + 1]) end
+local CC = claudes()
+local ctl = CC[#CC] or { args = {}, cb = function() end }
+local pf = tostring(ctl.args[3] or ""):match("< '([^']+)' >")
+local ptext = pf and read(pf) or ""
+check("lessons (repo): ...and that run's prompt carries the ledger, with Adam's reason",
+      ptext:find("<lessons>", 1, true) ~= nil and ptext:find("not now, too broad", 1, true) ~= nil and ptext:find(skipL.id, 1, true) ~= nil)
+answerClaude(ctl, { summary = "Again.", decisions = {},
+  edits = { { section = "Git", old = "", new = "- never force-push, even your own branch", why = "Force-pushed again.", evidence = { "e" },
+              lesson = skipL.id, whatsNew = "two more force-pushes this week" } } })
+LL = core.parseCoachLessons and core.parseCoachLessons(read(LFILE)) or {}
+local cited
+for _, x in ipairs(LL) do if x.id == skipL.id then cited = x end end
+check("lessons (repo): a proposal citing a lesson adds its run to it  (" .. #(cited and cited.runs or {}) .. ")", cited and #cited.runs == 2)
+jsCalls = {}
+quiet(function() fx.pushCoach(REPO) end)
+local seenSent = false
+for _, js in ipairs(jsCalls) do
+  if js:find("ccCoach(", 1, true) and js:find('"seen":2', 1, true) and js:find("two more force-pushes this week", 1, true) then seenSent = true end
+end
+check("lessons (repo): ...and the overlay is told it was seen in 2 runs, with what is new", seenSent)
+end)()
 
 finish()

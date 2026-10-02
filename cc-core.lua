@@ -16369,6 +16369,10 @@ M.COACH = {
   perSession = { corrections = 12, errors = 8, denials = 8, notes = 5 },
   logMax = 40, logDays = 21,
   historyMax = 100,          -- applied edits kept per repo (newest), for the overlay's history and Undo
+  lessonsMax = 200,          -- lessons kept per repo (the newest verdicts), see the lessons ledger
+  lessonsBytes = 6000,       -- ...of which the prompt's <lessons> block carries, newest first
+  lessonRuns = 20,           -- runs remembered per lesson ("seen in N runs")
+  lessonTextChars = 160, reasonChars = 200,
   activityDays = 7,          -- a first run needs a session this recent
   checkEverySeconds = 60,
 }
@@ -16641,8 +16645,49 @@ do
     return { text = text, bytes = #text, cut = cut, sessions = used, empty = (n == 0 and logText == "") }
   end
 
+  -- A lesson's id (the lessons ledger, below): "L" and its text hash's hex, "-<n>" when two collide.
+  local function lessonId(v)
+    if type(v) ~= "string" or #v < 7 or #v > 16 then return nil end
+    return (v:match("^L%x+$") or v:match("^L%x+%-%d+$")) and v or nil
+  end
+  -- Adam's one-line reason for a Skip (the overlay's box): whitespace runs as one space, capped; nil if blank.
+  function M.coachReason(s)
+    local r = type(s) == "string" and oneLine(s, C.reasonChars) or ""
+    return r ~= "" and r or nil
+  end
+  -- The prompt's <lessons> lines, newest verdict first, cut at a whole line past `cap` bytes; nil
+  -- when there are none.
+  local function lessonsBlock(list, cap)
+    local rows = {}
+    for _, e in ipairs(type(list) == "table" and list or {}) do
+      if type(e) == "table" and lessonId(e.id) and type(e.verdict) == "string" then rows[#rows + 1] = e end
+    end
+    if #rows == 0 then return nil end
+    table.sort(rows, function(a, b)
+      if (tonumber(a.at) or 0) ~= (tonumber(b.at) or 0) then return (tonumber(a.at) or 0) > (tonumber(b.at) or 0) end
+      return a.id < b.id
+    end)
+    local CUT = "[… older lessons cut]"
+    local out, size = {}, 0
+    for _, e in ipairs(rows) do
+      local at = tonumber(e.at) or 0
+      local n = #(type(e.runs) == "table" and e.runs or {})
+      local line = "- " .. e.id .. " · " .. e.verdict .. " " .. (at > 0 and os.date("%Y-%m-%d", at) or "?") .. " · "
+        .. ((type(e.section) == "string" and e.section ~= "") and e.section or "CLAUDE.md")
+        .. (type(e.text) == "string" and (" · \"" .. e.text .. "\"") or "")
+        .. (type(e.why) == "string" and (" -- " .. e.why) or "")
+        .. (type(e.reason) == "string" and (" · Adam's reason: " .. e.reason) or "")
+        .. ((n > 1) and (" · proposed in " .. n .. " runs") or "")
+      if size + #line + 1 > cap - #CUT then out[#out + 1] = CUT; break end
+      out[#out + 1] = line
+      size = size + #line + 1
+    end
+    return table.concat(out, "\n")
+  end
+
   -- What the headless run is asked. The digest, the repo's CLAUDE.md and DECISIONS.md go in whole
-  -- up to their caps (past one, it reads the rest itself: it runs in the repo with Read).
+  -- up to their caps (past one, it reads the rest itself: it runs in the repo with Read). o.lessons
+  -- is the repo's lessons ledger (2026-10-02): what Adam did with earlier suggestions.
   function M.coachPrompt(digest, claudeMd, decisions, o)
     o = type(o) == "table" and o or {}
     local text = type(digest) == "table" and digest.text or tostring(digest or "")
@@ -16672,12 +16717,23 @@ do
       "- If the evidence shows a deliberate choice that sessions keep \"fixing\", you may propose a DECISIONS.md entry"
         .. " {\"what\", \"why\"} (at most " .. C.maxDecisions .. "), never one it already has.",
       "- If nothing is worth changing, return empty lists. Don't change any file; you may read the repo to check a claim.",
-      "",
-      "End your answer with ONE JSON object on its last line, nothing after it:",
-      "{\"summary\": \"<one sentence>\", \"edits\": [{\"section\": \"...\", \"old\": \"...\", \"new\": \"...\", \"why\": \"...\","
-        .. " \"before\": \"...\", \"after\": \"...\", \"evidence\": [\"...\"]}], \"decisions\": [{\"what\": \"...\", \"why\": \"...\"}]}",
-      "",
     }
+    local lessons = lessonsBlock(o.lessons, C.lessonsBytes)
+    if lessons then
+      lines[#lines + 1] = "- <lessons> lists what Adam did with this coach's earlier suggestions, newest first. An applied one is"
+        .. " in CLAUDE.md already: never propose it again. A skipped or undone one: propose it again only with new evidence"
+        .. " below -- something that happened since it was set aside -- and say in \"whatsNew\" what that is."
+      lines[#lines + 1] = "- When an edit repeats a lesson, reworded or not, set \"lesson\" to that lesson's id."
+    end
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "End your answer with ONE JSON object on its last line, nothing after it:"
+    lines[#lines + 1] = "{\"summary\": \"<one sentence>\", \"edits\": [{\"section\": \"...\", \"old\": \"...\", \"new\": \"...\", \"why\": \"...\","
+      .. " \"before\": \"...\", \"after\": \"...\", \"evidence\": [\"...\"]}], \"decisions\": [{\"what\": \"...\", \"why\": \"...\"}]}"
+    if lessons then
+      lines[#lines + 1] = "An edit that repeats a lesson also carries \"lesson\": \"<its id>\", and \"whatsNew\": \"<one sentence>\" when"
+        .. " that lesson was skipped or undone."
+    end
+    lines[#lines + 1] = ""
     if type(claudeMd) == "string" then
       local body = claudeMd
       if #body > C.claudeMdBytes then
@@ -16696,6 +16752,10 @@ do
       lines[#lines + 1] = "This repo has no DECISIONS.md yet."
     end
     lines[#lines + 1] = ""
+    if lessons then
+      lines[#lines + 1] = "<lessons>\n" .. lessons .. "\n</lessons>"
+      lines[#lines + 1] = ""
+    end
     lines[#lines + 1] = "<evidence>\n" .. text .. "</evidence>"
     return table.concat(lines, "\n") .. "\n"
   end
@@ -16730,7 +16790,13 @@ do
     local before = type(e.before) == "string" and oneLine(e.before, 300) or ""
     local after = type(e.after) == "string" and oneLine(e.after, 300) or ""
     out.before, out.after = (before ~= "") and before or nil, (after ~= "") and after or nil
+    -- the lesson it repeats (an id from the prompt's <lessons>), and what the coach says is new since
+    -- (2026-10-02; optional, and a made-up id is dropped once the ledger is checked: core.coachLessonsSeen)
+    out.lesson = lessonId(e.lesson)
+    local wn = type(e.whatsNew) == "string" and oneLine(e.whatsNew, 300) or ""
+    out.whatsNew = (wn ~= "") and wn or nil
     if keep then
+      out.reason = M.coachReason(e.reason)   -- Adam's reason, typed with Skip
       out.status = EDIT_STATUS[e.status] and e.status or "pending"
       out.sha = (type(e.sha) == "string" and e.sha:match("^%x+$") and #e.sha <= 64) and e.sha or nil
       out.error = (type(e.error) == "string" and e.error ~= "") and capChars(e.error, 300) or nil
@@ -17010,7 +17076,8 @@ do
     local after = type(e.after) == "string" and oneLine(e.after, 300) or ""
     local out = { sha = sha, at = tonumber(e.at) or 0, section = (oneLine(e.section, 120):gsub("^#+%s*", "")), why = oneLine(e.why, 500),
                   before = (before ~= "") and before or nil, after = (after ~= "") and after or nil, old = old, new = new,
-                  error = (type(e.error) == "string" and e.error ~= "") and capChars(e.error, 300) or nil }
+                  error = (type(e.error) == "string" and e.error ~= "") and capChars(e.error, 300) or nil,
+                  lesson = lessonId(e.lesson) }   -- the lessons ledger's entry for it (2026-10-02), so Undo finds it
     if type(e.undone) == "table" and histSha(e.undone.sha) then out.undone = { sha = e.undone.sha, at = tonumber(e.undone.at) or 0 } end
     return out
   end
@@ -17098,6 +17165,176 @@ do
     end
     if n ~= 1 then return { ok = false, error = "undo-conflict" } end
     return { ok = true, text = current:sub(1, at - 1) .. (change.removed or "") .. current:sub(at + #change.added) }
+  end
+
+  -- ---- the lessons ledger (2026-10-02, mining round 2 unit B1) ---------------------------------
+  -- What Adam did with each suggestion -- applied, skipped (with his optional one-line reason) or
+  -- undone -- kept per repo in Shepherd's own file (<repo>.lessons.json), so it outlives the run that
+  -- proposed it. A Skip used to be lost: the next run replaced the record and kept only the applied
+  -- edits (the history), so the coach could propose the same edit again with nothing said. Now the
+  -- next run's prompt carries the ledger (<lessons>): an applied lesson isn't proposed again, and a
+  -- skipped or undone one comes back only with new evidence, saying what is new ("whatsNew").
+  -- Recurrence is the model's call, not Lua's: a proposal that repeats a lesson cites its id
+  -- ("lesson"), and that lesson counts the run (runs) -- the row's "seen in N runs".
+  -- One lesson per suggestion: { id, section, textHash, verdict, why, text, reason, at, runs }. An
+  -- Apply or Undo records at once (M.coachLessonRecord); skips, and anything from before the ledger,
+  -- are folded in when a run starts, before the record is replaced (M.coachLessonFold).
+  local LESSON_VERDICTS = { applied = true, skipped = true, undone = true }
+  local function lessonSection(s) return (oneLine(s, 120):gsub("^#+%s*", "")) end
+  -- What identifies a suggestion's text: its section, the text it replaces and the new text.
+  function M.coachLessonHash(item)
+    item = type(item) == "table" and item or {}
+    return M.cheapHash(lessonSection(item.section) .. "\n" .. tostring(item.old or "") .. "\n" .. tostring(item.new or ""))
+  end
+  local function lessonRuns(list)
+    local out, seen = {}, {}
+    for _, r in ipairs(type(list) == "table" and list or {}) do
+      local n = tonumber(r)
+      if n and not seen[n] then seen[n] = true; out[#out + 1] = n end
+    end
+    table.sort(out)
+    while #out > C.lessonRuns do table.remove(out, 1) end
+    return out
+  end
+  local function lessonEntry(e)
+    if type(e) ~= "table" or not lessonId(e.id) or not LESSON_VERDICTS[e.verdict] then return nil end
+    local th = (type(e.textHash) == "string" and #e.textHash <= 16 and e.textHash:match("^%x+$")) and e.textHash or nil
+    if not th then return nil end
+    local why, text = oneLine(e.why, 500), oneLine(e.text, C.lessonTextChars)
+    return { id = e.id, section = lessonSection(e.section), textHash = th, verdict = e.verdict,
+             why = (why ~= "") and why or nil, text = (text ~= "") and text or nil,
+             reason = (e.verdict == "skipped") and M.coachReason(e.reason) or nil,   -- a reason is a skip's
+             at = tonumber(e.at) or 0, runs = lessonRuns(e.runs) }
+  end
+  local function hasRun(e, run)
+    for _, r in ipairs(type(e) == "table" and e.runs or {}) do if r == run then return true end end
+    return false
+  end
+  local function withRun(e, run)
+    local c = {}
+    for k, v in pairs(e) do c[k] = v end
+    local runs = {}
+    for _, r in ipairs(e.runs or {}) do runs[#runs + 1] = r end
+    runs[#runs + 1] = run
+    c.runs = lessonRuns(runs)
+    return c
+  end
+  -- An edit's lesson: the one it cites, else the one with its text. Its index, or nil.
+  local function lessonFind(list, item)
+    local id = lessonId(item.lesson)
+    if id then for i, e in ipairs(list) do if e.id == id then return i end end end
+    local th = M.coachLessonHash(item)
+    for i, e in ipairs(list) do if e.textHash == th then return i end end
+    return nil
+  end
+  local function lessonNewId(list, th)
+    local used = {}
+    for _, e in ipairs(list) do used[e.id] = true end
+    if not used["L" .. th:sub(1, 6)] then return "L" .. th:sub(1, 6) end
+    if not used["L" .. th] then return "L" .. th end
+    local n = 2
+    while used["L" .. th .. "-" .. n] do n = n + 1 end
+    return "L" .. th .. "-" .. n
+  end
+  -- Past lessonsMax, the oldest verdict goes.
+  local function lessonCap(out)
+    while #out > C.lessonsMax do
+      local min = 1
+      for i = 2, #out do if (out[i].at or 0) < (out[min].at or 0) then min = i end end
+      table.remove(out, min)
+    end
+    return out
+  end
+  -- A new list with `item` (an edit, or a history entry) recorded as `verdict`: its lesson updated in
+  -- place -- section, text and why as this edit words them, `o.run` added -- or a new one. o = { at,
+  -- run (the stamp of the run that proposed it), reason }. Returns the list and the lesson's id.
+  function M.coachLessonRecord(list, item, verdict, o)
+    o = type(o) == "table" and o or {}
+    local out = {}
+    for _, e in ipairs(type(list) == "table" and list or {}) do out[#out + 1] = e end
+    if type(item) ~= "table" or not LESSON_VERDICTS[verdict] then return out, nil end
+    local th = M.coachLessonHash(item)
+    local i = lessonFind(out, item)
+    local prev = i and out[i] or nil
+    local runs = {}
+    for _, r in ipairs(prev and prev.runs or {}) do runs[#runs + 1] = r end
+    if tonumber(o.run) then runs[#runs + 1] = tonumber(o.run) end
+    local new = type(item.new) == "string" and item.new or ""
+    local n = lessonEntry({ id = prev and prev.id or lessonNewId(out, th), section = item.section, textHash = th, verdict = verdict,
+                            why = item.why, text = (new ~= "") and new or item.old, reason = o.reason,
+                            at = tonumber(o.at) or 0, runs = runs })
+    if not n then return out, nil end
+    if i then out[i] = n else out[#out + 1] = n end
+    return lessonCap(out), n.id
+  end
+  -- A finished run's proposals against the ledger: each one citing a lesson adds `run` to it (once);
+  -- a citation of an id the ledger doesn't have is dropped from the edit (in place). Returns the new
+  -- list and whether it changed.
+  function M.coachLessonsSeen(list, edits, run)
+    local out, idx, changed = {}, {}, false
+    for _, e in ipairs(type(list) == "table" and list or {}) do
+      if type(e) == "table" and e.id then out[#out + 1] = e; idx[e.id] = #out end
+    end
+    run = tonumber(run)
+    for _, e in ipairs(type(edits) == "table" and edits or {}) do
+      if type(e) == "table" and e.lesson ~= nil then
+        local i = idx[e.lesson]
+        if not i then e.lesson = nil
+        elseif run and not hasRun(out[i], run) then out[i] = withRun(out[i], run); changed = true end
+      end
+    end
+    return out, changed
+  end
+  -- Before a run replaces the record: its skipped and applied edits go into the ledger -- a lesson
+  -- the ledger lacks is added, one whose verdict is older than the edit's is updated, and the run is
+  -- counted -- and so does every history entry the ledger lacks (edits applied before the ledger
+  -- existed: applied, or undone). Idempotent. Returns the new list and whether it changed.
+  function M.coachLessonFold(list, rec, history)
+    local out, changed = {}, false
+    for _, e in ipairs(type(list) == "table" and list or {}) do out[#out + 1] = e end
+    local runAt = type(rec) == "table" and tonumber(rec.at) or nil
+    for _, e in ipairs((type(rec) == "table" and type(rec.edits) == "table") and rec.edits or {}) do
+      if type(e) == "table" and (e.status == "skipped" or e.status == "applied") then
+        local i = lessonFind(out, e)
+        local prev = i and out[i] or nil
+        local at = tonumber(e.at) or tonumber(rec.doneAt) or runAt or 0
+        if not prev or at > (prev.at or 0) then
+          out = M.coachLessonRecord(out, e, e.status, { at = at, run = runAt, reason = e.reason })
+          changed = true
+        elseif runAt and not hasRun(prev, runAt) then
+          out[i] = withRun(prev, runAt)
+          changed = true
+        end
+      end
+    end
+    for _, h in ipairs(type(history) == "table" and history or {}) do
+      if type(h) == "table" and not lessonFind(out, h) then
+        local undone = type(h.undone) == "table"
+        out = M.coachLessonRecord(out, h, undone and "undone" or "applied",
+                                  { at = undone and tonumber(h.undone.at) or tonumber(h.at), run = tonumber(h.at) })
+        changed = true
+      end
+    end
+    return out, changed
+  end
+  function M.parseCoachLessons(raw)
+    local out = {}
+    if type(raw) ~= "string" then return out end
+    local ok, t = pcall(M.json.decode, raw)
+    if not ok or type(t) ~= "table" then return out end
+    local ids = {}
+    for _, e in ipairs(t) do
+      local n = lessonEntry(e)
+      if n and not ids[n.id] then ids[n.id] = true; out[#out + 1] = n end
+    end
+    return lessonCap(out)
+  end
+  -- The overlay's Skip click: "<n>" or "<n>\n<reason>" -> the edit's number, and the reason (nil if blank).
+  function M.coachSkipArgs(text)
+    text = tostring(text or "")
+    local n, rest = text:match("^(%d+)\n(.*)$")
+    if not n then n = text:match("^(%d+)$") end
+    return n, M.coachReason(rest)
   end
 
   -- git status of CLAUDE.md alone: any output = uncommitted edits (untracked included).
@@ -17227,9 +17464,14 @@ do
   end
 
   -- What the Coach overlay gets: the run, and every edit and entry numbered (1-based) for Apply/Skip.
-  function M.coachView(rec, live)
+  -- `lessons` (the repo's ledger, 2026-10-02): an edit that cites one of its lessons carries how many
+  -- runs proposed it (seen), what Adam did with it last (was) and his reason -- an edit skipped
+  -- itself carries its own reason instead.
+  function M.coachView(rec, live, lessons)
     if type(rec) ~= "table" then return nil end
     live = type(live) == "table" and live or {}
+    local byId = {}
+    for _, l in ipairs(type(lessons) == "table" and lessons or {}) do if type(l) == "table" and l.id then byId[l.id] = l end end
     local v = { root = rec.root, name = rec.name, state = rec.state, verdict = rec.verdict, why = rec.why, summary = rec.summary,
                 trigger = rec.trigger, at = rec.at, doneAt = rec.doneAt, lastRunAt = rec.lastRunAt, costUsd = rec.costUsd,
                 sessions = rec.sessions, cut = rec.cut, pending = pendingCount(rec), edits = {}, decisions = {} }
@@ -17245,6 +17487,12 @@ do
                                   and M.coachAddBody(e) ~= nil) or nil,
                      -- the words come from the code when it has some: a refusal saved under old wording reads as today's
                      error = (e.error and e.errorCode and REFUSALS[e.errorCode]) or e.error }
+      local l = e.lesson and byId[e.lesson] or nil
+      local ve = v.edits[i]
+      ve.lesson, ve.whatsNew = l and l.id or nil, e.whatsNew
+      ve.seen = l and #(l.runs or {}) or nil
+      ve.was = l and l.verdict or nil
+      if e.status == "skipped" then ve.reason = e.reason else ve.reason = l and l.reason or nil end
     end
     for i, d in ipairs(rec.decisions or {}) do
       v.decisions[i] = { i = i, what = d.what, why = d.why, status = d.status or "pending", error = d.error,
@@ -21447,7 +21695,7 @@ M.FEATURES = {
     what = "Scheduled actions that fire on a cron-like timetable.",
     why = "Standups, sweeps, or kickoffs happen on their own." },
   { key = "coach", cat = "Automate", new = true, title = "Coach",
-    what = "Weekly (coach.enabled, catching up after sleep) or from a session's 🧭 Coach button, a read-only Sonnet reads the repo's last 10 sessions -- your corrections, interrupts, tool errors, denials with a note, merge notes and checker findings -- and suggests up to 5 CLAUDE.md edits, each with its evidence. They wait behind a 🧭 chip on the project card: Apply writes CLAUDE.md and commits it alone (refused if it changed since the coach read it or has uncommitted edits), Skip puts one aside. It never proposes undoing a DECISIONS.md entry, and can suggest new ones.",
+    what = "Weekly (coach.enabled, catching up after sleep) or from a session's 🧭 Coach button, a read-only Sonnet reads the repo's last 10 sessions -- your corrections, interrupts, tool errors, denials with a note, merge notes and checker findings -- and suggests up to 5 CLAUDE.md edits, each with its evidence. They wait behind a 🧭 chip on the project card: Apply writes CLAUDE.md and commits it alone (refused if it changed since the coach read it or has uncommitted edits), Skip puts one aside. It never proposes undoing a DECISIONS.md entry, and can suggest new ones. A lessons ledger keeps every Apply, Skip (with an optional one-line reason) and Undo for the next run: an applied suggestion isn't proposed again, a skipped or undone one comes back only with new evidence, and a repeat says \"seen in N runs\".",
     why = "The corrections you keep repeating end up in the instructions every session reads first." },
 
   -- ---- See what's happening ----
