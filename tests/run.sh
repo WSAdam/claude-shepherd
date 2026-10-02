@@ -333,6 +333,12 @@ HOME="$(mktemp -d)" lua "$DIR/checker.test.lua" || fail=1
 echo ""
 echo "== node: the merge checker's line in the review (behavioral, runs the shipped checkerText) =="
 node "$DIR/checker-view.test.js" || fail=1
+
+echo "== lua: Seance -- ask any session a question through a forked headless resume, in its own lane (behavioral, stubbed hs) =="
+HOME="$(mktemp -d)" lua "$DIR/seance.test.lua" || fail=1
+
+echo "== node: Seance's box -- the answer in place, every word through esc() (behavioral, runs the shipped seanceText) =="
+node "$DIR/seance-view.test.js" || fail=1
 echo ""
 echo "== node: each card says what its session is working on, the tool running and the skill in use (behavioral, runs the shipped workingOnHtml) =="
 node "$DIR/working-on.test.js" || fail=1

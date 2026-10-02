@@ -104,6 +104,7 @@ install's [defaults](../defaults/cc-config.json) differ.
 | `stopGuards.question` | `false` | `true` | [Questions asked in prose come back](approvals-and-policies.md#questions-asked-in-prose-come-back) |
 | `verify.onMerge` | `false` (🔎 Verify works either way) | `true` | [The checker](merging-and-batches.md#the-checker-a-read-only-review-of-every-merge-request) |
 | `verify.maxBudgetUsd` / `timeoutSeconds` | `1` / `600` | | [The checker](merging-and-batches.md#the-checker-a-read-only-review-of-every-merge-request) |
+| `seance.maxBudgetUsd` / `timeoutSeconds` | `20` (the cap; each run's budget is sized from its context, at most `50`) / `300` | | [Ask a session](controls.md#ask-a-session-seance) |
 | `merge.repoGate` | `false` | | [A repo can declare its own gate](merging-and-batches.md#a-repo-can-declare-its-own-gate) |
 | `merge.gates[].redFirstCommand` | none | | [The red-first proof](merging-and-batches.md#the-red-first-proof-do-the-new-tests-fail-without-the-fix) |
 | `radar.enabled` / `refreshSeconds` | `true` / `120` (at least 30) | | [The overlap radar](merging-and-batches.md#the-overlap-radar) |

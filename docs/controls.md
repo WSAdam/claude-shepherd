@@ -93,6 +93,8 @@ In order (a remote SSH-bridge tile offers only Relabel and Set group):
   ([Merging and batches](merging-and-batches.md#the-checker-a-read-only-review-of-every-merge-request)).
 - **🧭 Coach**: read the repo's last sessions and suggest `CLAUDE.md` edits
   ([Automation](automation.md#the-coach)).
+- **🔮 Ask this session**: a question box under the buttons. A read-only fork of the session's own
+  conversation answers it, and the answer shows under the box ([Ask a session](#ask-a-session-seance)).
 - **📜 Timeline**: the audit ledger scoped to this session.
 - **⚡ Trace**: what automation did to this session, would do in a dry run, or was refused
   ([Automation](automation.md#dry-run-and-the-automation-trace)).
@@ -175,6 +177,49 @@ A session pins with `~/.claude/cc-pin.sh`, from inside its Claude Code session:
   click says why in a toast.
 - `cc-pin.sh` needs `CLAUDE_CODE_SESSION_ID` (it runs inside a Claude Code session) and a git
   repository; it exits 2 with the reason when it refuses.
+
+## Ask a session (Seance)
+
+Ask any session a question, read-only: what it changed, why it chose something, where it left off.
+It can be a live one or one that finished days ago. The session itself never sees the question,
+and nothing is typed into its tab.
+
+**Where.** The **🔮 Ask this session** box in the detail panel. **🔮 Ask** on a
+[Find in fleet](fleet.md#search-groups-and-bulk-actions) hit (a hit in a subagent's file asks its
+parent session), and on a row of the audit ledger's
+[🗂 History](usage-and-cost.md#session-history) tab. Type the question and press **Enter** or **Ask**.
+The question shows above the box, then the answer, with what it cost, how long it took and the model.
+A new question to the same session replaces one that is still running.
+
+**How it answers.** Shepherd forks the session's own conversation with a headless
+`claude -p --resume <its transcript> --fork-session --no-session-persistence`. The fork remembers
+everything the session did and answers from that. It saves nothing: the fork leaves no transcript,
+and the session's own transcript is only read. It runs with the [checker's](merging-and-batches.md#the-checker-a-read-only-review-of-every-merge-request)
+read-only setup: Read, Grep, Glob and read-only git only, hooks off (it never shows up as a card),
+no MCP servers, and at most 12 turns.
+
+- **Its own model.** The question runs in the session's model: its latest `/model` switch, else
+  the model it was spawned with, else the one its transcript last answered in. The fork loads the
+  whole conversation, so past about 180k tokens of context an Opus or Sonnet model gets its 1M
+  window (`[1m]`), and a Haiku session moves to Sonnet's. With no model known, it uses Sonnet.
+- **A budget sized from its context.** Writing a big conversation to the cache is the expensive
+  part, so the `--max-budget-usd` cap scales with the context: about $0.50 for a small session,
+  about $8.50 for 500k tokens of Opus. It stops at `seance.maxBudgetUsd` (default `20`, at most
+  `50`), and a run that hits it says "it hit its budget".
+- **Its own folder.** It runs in the session's launch folder, so it sees the same `CLAUDE.md` and
+  files. If that folder is gone, it runs in the transcript's last folder. If both are gone, it runs
+  from Shepherd's own `~/.claude/cc-scratch/seance` (Claude Code then leaves an empty
+  `~/.claude/projects/<that folder>/` behind). The transcript is resumed by its path, which works
+  from any folder; resuming by session id only works from the launch folder.
+- **Its own lane.** Each session's question runs on its own. A repo's merge checker or coach run
+  never holds a question up, and a question never holds them up.
+- **What it reads.** Only a transcript under `~/.claude/projects/`, named for the session's id.
+  Shepherd refuses any other path the panel sends, any id that isn't a session id, a remote
+  session, and an empty question, each with a toast that says why.
+
+If it couldn't answer, the box says why: claude's own error (`No conversation found`,
+`Prompt is too long`), the budget, or `seance.timeoutSeconds` (default `300`). Answers live in
+memory until Hammerspoon reloads.
 
 ## How control reaches a session, and its limits
 

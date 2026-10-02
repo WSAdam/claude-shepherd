@@ -3731,6 +3731,26 @@ M.HEADLESS_ALLOWED = { "Read", "Grep", "Glob", "Bash(git diff:*)", "Bash(git log
   "Bash(git status:*)", "Bash(git blame:*)", "Bash(git ls-files:*)", "Bash(git grep:*)",
   "Bash(git rev-parse:*)", "Bash(git merge-base:*)" }
 M.HEADLESS_DENIED = { "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Task" }
+-- A model name `claude --model` takes: an alias or an id, optionally with the "[1m]" opt-in. A
+-- picker's display name ("Opus 5.5 (1M context)") or the "<synthetic>" placeholder isn't one.
+local function cliModelOk(m)
+  return type(m) == "string" and #m <= 80
+    and (m:match("^%w[%w%.%-_]*$") ~= nil or m:match("^%w[%w%.%-_]*%[1m%]$") ~= nil)
+end
+M.cliModelOk = cliModelOk
+-- Is `path` session `id`'s own transcript: an absolute path ending in /<id>.jsonl, no "..", one line?
+function M.seanceTranscriptOk(path, id)
+  if type(path) ~= "string" or type(id) ~= "string" or id == "" or path:sub(1, 1) ~= "/" then return false end
+  if path:find("/../", 1, true) or path:find("[%c]") then return false end
+  local tailName = "/" .. id .. ".jsonl"
+  return #path > #tailName and path:sub(-#tailName) == tailName
+end
+-- Seance (2026-10-02) adds four options, all absent for the checker and the coach, whose command
+-- is unchanged: o.resume (a session id -- M.restartIdOk; anything else is no command at all) forks
+-- that conversation (--resume ... --fork-session; --no-session-persistence keeps the fork off disk),
+-- by o.transcript when that is the session's own .jsonl (a path resumes from any folder, an id only
+-- from the session's launch folder: probed on claude 2.1.175); o.model (a CLI model name, else
+-- sonnet); o.maxTurns (else CHECKER_MAX_TURNS).
 function M.headlessCmd(bin, o)
   o = type(o) == "table" and o or {}
   for _, k in ipairs({ "dir", "promptFile", "outFile", "errFile" }) do
@@ -3740,14 +3760,24 @@ function M.headlessCmd(bin, o)
   local budget = tonumber(o.maxBudgetUsd)
   if not budget or budget <= 0 or budget > 50 then budget = M.CHECKER_BUDGET_USD end
   local budgetText = (budget == math.floor(budget)) and string.format("%d", budget) or string.format("%g", budget)
+  local resume = ""
+  if o.resume ~= nil then
+    if not M.restartIdOk(o.resume) then return nil end
+    local target = M.seanceTranscriptOk(o.transcript, o.resume) and o.transcript or o.resume
+    resume = " --resume " .. sq(target) .. " --fork-session"
+  end
+  local model = cliModelOk(o.model) and sq(o.model) or "sonnet"
+  local turns = tonumber(o.maxTurns)
+  turns = (turns and turns >= 1 and turns <= 100) and math.floor(turns) or M.CHECKER_MAX_TURNS
   local allowed, denied = {}, {}
   for i, t in ipairs(M.HEADLESS_ALLOWED) do allowed[i] = sq(t) end
   for i, t in ipairs(M.HEADLESS_DENIED) do denied[i] = sq(t) end
   local b = (type(bin) == "string" and bin ~= "") and sq(bin) or "claude"
   return "cd " .. sq(o.dir) .. " || { echo " .. M.GATE_NORUN_TOKEN .. ": cannot enter " .. sq(o.dir)
     .. " >&2; exit " .. M.TEST_LOCK_EXIT .. "; }; "
-    .. "CC_SHEPHERD_INTERNAL=1 " .. b .. " -p --model sonnet --output-format json --no-session-persistence"
-    .. " --settings '{\"disableAllHooks\":true}' --max-turns " .. M.CHECKER_MAX_TURNS
+    .. "CC_SHEPHERD_INTERNAL=1 " .. b .. " -p --model " .. model .. " --output-format json --no-session-persistence"
+    .. resume
+    .. " --settings '{\"disableAllHooks\":true}' --max-turns " .. turns
     .. " --max-budget-usd " .. budgetText
     .. " --strict-mcp-config --mcp-config '{\"mcpServers\":{}}' --tools " .. sq(M.HEADLESS_TOOLS)
     .. " --permission-mode dontAsk --allowedTools " .. table.concat(allowed, " ")
@@ -3869,6 +3899,167 @@ function M.parseCheckerOutput(raw, errText, code)
   res.summary = capChars(tostring(v.summary or ""), 500)
   res.findings = checkerFindings(v.findings)
   return res
+end
+
+-- ---- Seance: ask any session a question, read-only (2026-10-02, mining round 2 unit D1) ----
+-- A headless fork of the session's own conversation answers it: `claude -p --resume <its
+-- transcript> --fork-session --no-session-persistence` (M.headlessCmd) with the checker's
+-- read-only tools, hooks off and no MCP. Nothing is saved and the original transcript is never
+-- written. Probed live on 2026-10-02 (claude 2.1.175): a history holding Write/Edit tool calls
+-- resumes fine under the read-only tool set; `--resume <id>` finds a conversation only from its
+-- launch folder ("No conversation found", exit 1), `--resume <path>` from any folder -- so a dead
+-- session whose folder is gone is still asked, from Shepherd's own. Its own lane (FX.seanceAsk),
+-- never queued behind a repo's checker or coach. These are the pure halves.
+M.SEANCE = {
+  maxTurns = 12,            -- reading a file or two to answer is fine; a review is the checker's job
+  timeoutSeconds = 300,
+  budgetMinUsd = 0.5,
+  budgetMaxUsd = 20,        -- seance.maxBudgetUsd raises it (50 at most: headlessCmd's own bound)
+  oneMAt = 180000,          -- context past this needs the model's 1M window ("[1m]")
+  questionMax = 2000,
+  answerMax = 8000,
+}
+
+-- The session's own model, as `claude --model` takes it: its newest /model switch, else what it was
+-- spawned with (it.statusModel), else the model its transcript last answered in. nil when none of
+-- them is a model name (a "Default (recommended)" switch, a picker display name, "<synthetic>").
+function M.seanceModelChoice(switched, statusModel, transcriptModel)
+  for _, m in ipairs({ switched or false, statusModel or false, transcriptModel or false }) do
+    if cliModelOk(m) then return m end
+  end
+  return nil
+end
+
+-- The model the question runs in. The fork loads the whole conversation, so past SEANCE.oneMAt
+-- an Opus or Sonnet model needs its 1M window, and a Haiku one (200k at most) moves to Sonnet's.
+-- Fable and Mythos have 1M without the suffix. Nothing usable -> sonnet.
+function M.seanceModel(model, contextTokens)
+  local m = cliModelOk(model) and model or nil
+  local big = (tonumber(contextTokens) or 0) > M.SEANCE.oneMAt
+  if not m then return big and "sonnet[1m]" or "sonnet" end
+  local l = m:lower()
+  if not big or l:find("%[1m%]$") then return m end
+  if l:find("haiku", 1, true) then return "sonnet[1m]" end
+  if l:find("opus", 1, true) or l:find("sonnet", 1, true) then return m .. "[1m]" end
+  return m
+end
+
+-- $ per million input tokens, by family, rounded up across its versions (Opus 5.5 is $4 and Opus
+-- 4.x $5; Sonnet 5.5 $2, 4.6 $3). Unknown is priced like the dearest.
+local function seanceInputRate(model)
+  local l = tostring(model or ""):lower()
+  if l:find("fable", 1, true) or l:find("mythos", 1, true) then return 10 end
+  if l:find("opus", 1, true) then return 5 end
+  if l:find("sonnet", 1, true) then return 3 end
+  if l:find("haiku", 1, true) then return 1 end
+  return 10
+end
+
+-- The run's --max-budget-usd, sized from the context it loads: the whole conversation is written to
+-- the cache once (Claude Code's 1h cache: 2x input), each later turn reads it back (0.1x), plus a
+-- little output. Rounded up to 50 cents, at least SEANCE.budgetMinUsd, at most `cap` (config
+-- seance.maxBudgetUsd, else SEANCE.budgetMaxUsd; never past 50).
+function M.seanceBudget(contextTokens, model, cap)
+  local c = tonumber(cap)
+  if not c or c <= 0 then c = M.SEANCE.budgetMaxUsd end
+  if c > 50 then c = 50 end
+  local ctx = math.max(0, tonumber(contextTokens) or 0)
+  local est = ctx / 1e6 * seanceInputRate(model) * (2 + 0.1 * M.SEANCE.maxTurns) + 0.25
+  local b = math.ceil(est * 2) / 2
+  if b < M.SEANCE.budgetMinUsd then b = M.SEANCE.budgetMinUsd end
+  if b > c then b = c end
+  return b
+end
+
+-- What a transcript says about itself, for a session Shepherd has no tile for: where it started
+-- (head), where it was last, the model its last real reply came from and that reply's context
+-- (tail), and its newest /model switch in the tail. Walks lines with find: the tail is a fixed-size
+-- read that can end mid-line.
+function M.seanceTranscriptFacts(head, tail)
+  local f = { origin = M.transcriptOriginCwd(head), contextTokens = 0 }
+  tail = type(tail) == "string" and tail or ""
+  local lines, i = {}, 1
+  while i <= #tail do
+    local j = tail:find("\n", i, true)
+    lines[#lines + 1] = tail:sub(i, (j or (#tail + 1)) - 1)
+    if not j then break end
+    i = j + 1
+  end
+  for k = #lines, 1, -1 do
+    local line = lines[k]
+    if not f.cwd then f.cwd = M.transcriptOriginCwd(line) end
+    if not f.switched then f.switched = M.modelSwitchOf(line) end
+    if not f.model then
+      local u = M.parseUsageLine(line)
+      if u and type(u.model) == "string" and u.model ~= "<synthetic>" and M.contextTokens(u) > 0 then
+        f.model, f.contextTokens = u.model, M.contextTokens(u)
+      end
+    end
+    if f.cwd and f.switched and f.model then break end
+  end
+  return f
+end
+
+-- Where and how to ask. t = { sessionId, transcript, projectKey, cwd, origin, model, contextTokens,
+-- fallbackDir, maxBudgetUsd }; isDir(path) says whether a folder exists. The folder is the session's
+-- launch folder (M.launchDirFor), else the transcript's cwd, else where it started, else Shepherd's
+-- own (fallbackDir): the transcript is resumed by its path, which works from any of them, but its
+-- own folder gives the fork the same CLAUDE.md and files the session had. -> plan, or nil and why.
+function M.seancePlan(t, isDir)
+  t = type(t) == "table" and t or {}
+  if not M.restartIdOk(t.sessionId) then return nil, "that isn't a session id" end
+  if not M.seanceTranscriptOk(t.transcript, t.sessionId) then return nil, "Shepherd can't find this session's transcript" end
+  local function usable(d)
+    return type(d) == "string" and d:sub(1, 1) == "/" and type(isDir) == "function" and isDir(d) == true
+  end
+  local dir
+  for _, d in ipairs({ M.launchDirFor(t.projectKey, t.cwd, t.origin) or false,
+                       type(t.cwd) == "string" and t.cwd:sub(1, 1) == "/" and M.normDir(t.cwd) or false,
+                       type(t.origin) == "string" and t.origin:sub(1, 1) == "/" and M.normDir(t.origin) or false }) do
+    if usable(d) then dir = d; break end
+  end
+  dir = dir or ((type(t.fallbackDir) == "string" and t.fallbackDir:sub(1, 1) == "/") and t.fallbackDir or nil)
+  if not dir then return nil, "there's no folder to ask it from" end
+  local model = M.seanceModel(t.model, t.contextTokens)
+  return { id = t.sessionId, transcript = t.transcript, dir = dir, model = model,
+           budget = M.seanceBudget(t.contextTokens, model, t.maxBudgetUsd), maxTurns = M.SEANCE.maxTurns }
+end
+
+-- The prompt: Adam's question, framed so the fork knows where it is and what it can't do.
+function M.seancePrompt(question)
+  return table.concat({
+    "Shepherd (the panel that watches this fleet of Claude Code sessions) is asking you a question on Adam's behalf.",
+    "This is a read-only side conversation: a fork of your session that is not saved, so nothing here reaches your",
+    "real session. You can read files and run read-only git commands; you can't edit anything.",
+    "Answer from what you remember of this conversation first, and read only when the question needs it.",
+    "Be brief and specific: a few sentences or a short list.",
+    "",
+    "Adam's question:",
+    capChars(checkerTrim(question), M.SEANCE.questionMax),
+  }, "\n")
+end
+
+-- claude -p --output-format json -> { outcome = answered | couldntRun, answer, why, costUsd, turns }.
+-- The answer is claude's result text as it is (trimmed, capped); no answer is couldntRun, with why.
+function M.parseSeanceOutput(raw, errText, code)
+  local res = { outcome = "couldntRun" }
+  local t = headlessEnvelope(raw, errText, res, code)
+  if not t then return res end
+  local a = checkerTrim(type(t.result) == "string" and t.result or "")
+  if a == "" then res.why = "its answer was empty"; return res end
+  local capped = capChars(a, M.SEANCE.answerMax)
+  if capped ~= a then a = capped .. "…" end
+  res.outcome, res.answer = "answered", a
+  return res
+end
+
+-- What the panel gets for one record (window.ccSeance), and nothing else.
+function M.seanceView(rec)
+  if type(rec) ~= "table" then return nil end
+  local at, doneAt = tonumber(rec.at), tonumber(rec.doneAt)
+  return { sid = rec.sid, key = rec.key, name = rec.name, state = rec.state, outcome = rec.outcome,
+           question = rec.question, answer = rec.answer, why = rec.why, costUsd = rec.costUsd, model = rec.model,
+           at = at, doneAt = doneAt, secs = (at and doneAt) and math.max(0, doneAt - at) or nil }
 end
 
 -- May a batch unit's merge go through on the grant, as far as the checker goes? `rec` is the
@@ -10717,6 +10908,9 @@ M.SETTINGS_KEEP_SUBKEYS = {
   -- 2026-10-02: the Stop guards have no inputs (the config switches them); if the form ever rebuilds
   -- `stopGuards`, the question guard's switch stays (A2/A3 add theirs beside it).
   stopGuards = { "question" },
+  -- 2026-10-02: Seance has no inputs (its box asks); if the form ever rebuilds `seance`, the
+  -- hand-set budget cap and timeout stay.
+  seance = { "maxBudgetUsd", "timeoutSeconds" },
 }
 function M.overlayConfig(cfg, incoming)
   cfg = type(cfg) == "table" and cfg or {}
@@ -21594,6 +21788,9 @@ M.FEATURES = {
   { key = "restart", cat = "Control", new = true, title = "Restart the fleet in place",
     what = "After a Claude Code update or a reboot, ☰ → Restart fleet lists every session that went down and how each would come back, and one click reopens them with their conversations: VS Code and Cursor tabs one at a time, kitty and Terminal sessions with claude -r, plus Continue where a turn was in progress. Only a session Shepherd can verify is dead is reopened, and never twice.",
     why = "An update or a reboot no longer costs you the afternoon of finding and resuming every conversation by hand." },
+  { key = "seance", cat = "Control", new = true, title = "Seance: ask a session",
+    what = "Ask any session a question — live, or long finished — from its detail panel, a fleet-search hit or a History row. A read-only fork of its own conversation answers (claude -p --resume … --fork-session, nothing saved, its transcript untouched), in the session's model with a budget sized from its context, and the answer shows right under the box.",
+    why = "Find out what a session did or why, without interrupting it, typing into its tab, or reviving a finished one." },
   { key = "pins", cat = "Control", new = true, title = "Pinned links",
     what = "A session pins up to 8 links -- a preview URL, a PR, a file in its worktree -- with ~/.claude/cc-pin.sh add <link> [--label L], and they show as chips on its card and in the detail panel; a click opens one. Pins belong to the worktree, so they survive /clear, and go when its merge is verified. Only http(s) links and files under the session's git root are taken, never one holding a shell metacharacter, and each is checked again before it opens.",
     why = "The page to look at, the PR to review or the report to read is one click from the card, not somewhere in the transcript." },

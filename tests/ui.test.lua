@@ -5019,5 +5019,33 @@ do
         src:find('FX.GUARD_DIR = os.getenv("CC_GUARD_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-guard")', 1, true) ~= nil)
 end
 
+-- ---- Seance: ask any session a question, read-only (2026-10-02, mining round 2 unit D1) ----
+-- tests/seance.test.lua drives FX.seanceAsk and the headless fork under stubs, seance-view.test.js
+-- the shipped box; here, that the panel offers the box in all three places and Lua takes it.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("seance: the detail panel has the Ask box, built once per session",
+        src:find('<div id="d-seance"></div>', 1, true) ~= nil and src:find("renderSeanceDetail(it);", 1, true) ~= nil
+        and src:find('if(wrap.getAttribute("data-for") === sid) return;', 1, true) ~= nil)
+  check("seance: a fleet-search hit on a transcript offers Ask",
+        src:find('<button class="fs-ask" onclick="seanceToggle(event, this)"', 1, true) ~= nil)
+  check("seance: so does a History row", src:find('<button class="h-ask" onclick="seanceToggle(event, this)"', 1, true) ~= nil)
+  check("seance: the question goes to FX.seanceAsk, its answer comes back through window.ccSeance",
+        src:find('if a == "seance-ask" then FX.seanceAsk(tostring(payload.text or "")); return end', 1, true) ~= nil
+        and src:find('wv:evaluateJavaScript("window.ccSeance(" .. hs.json.encode(v) .. ")")', 1, true) ~= nil
+        and src:find("window.ccSeance = function(r){", 1, true) ~= nil)
+  check("seance: a box opened later asks for the session's last answer",
+        src:find('if a == "seance-state" then FX.seanceSend(tostring(payload.v or "")); return end', 1, true) ~= nil)
+  check("seance: its own lane, never a repo's (the checker and the coach share those)",
+        src:find('lane = "seance|" .. sid', 1, true) ~= nil)
+  local body = src:match("function FX%.seanceAsk%(text%)(.-)\nend\n") or ""
+  check("seance: FX.seanceAsk types nothing into any tab", body ~= "" and not body:find("keyStroke", 1, true)
+        and not body:find("dispatchSerialized", 1, true) and not body:find("pasteboard", 1, true))
+  check("seance: ...and writes no transcript", body ~= "" and not body:find('io.open(tp, "w', 1, true)
+        and not body:find("writeFile", 1, true))
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

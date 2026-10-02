@@ -15,6 +15,11 @@ parallel units. Each unit adds its line here.
   only with new evidence, saying what is new; a repeat's row says "seen in N runs". Skips used to be
   lost when the next run replaced the record.
 - Questions asked in prose come back (`stopGuards.question`, on in `defaults/`): a turn whose last paragraph asks Adam a question in plain text is sent back once by the Stop hook, to ask it with AskUserQuestion so it lands on the card. Code, quotes and a question answered in the same breath don't count; never in plan mode, in internal runs, while a question is held, after a mailbox message or where the panel isn't running. Builds the Stop-guard base A2/A3 extend (`cc_stop_guard` in `cc-lib.sh`: precedence mailbox > notes > guards, a once-marker per session and turn in `~/.claude/cc-guard/`, `turn_id` stamped at each prompt, one `stop_guard` ledger event per block), with a corpus of ten real turn-final messages, scrubbed; the scrubber now keeps the words the guard reads in an assistant's own text.
+- Added: **Seance**. Ask any session a question, live or long finished, from its detail panel, a
+  Find-in-fleet hit or a History row. A read-only headless fork of its own conversation
+  (`claude -p --resume <transcript> --fork-session --no-session-persistence`) answers in place, in
+  the session's model with a budget sized from its context. It runs in its own lane, never behind a
+  repo's checker. Nothing is saved, and the session's transcript is only read.
 
 ## 2026-10-02 — A failed tool no longer stays "in flight"
 

@@ -6202,6 +6202,7 @@ FX._checkerHolds = {}   -- session key -> { act, why }: a delegated merge the ch
 -- (`lane` = the repo's common dir), queued like the gates (core.mergeGateReleases decides).
 -- spec = { id, lane, dir, prompt, timeoutSeconds, maxBudgetUsd, onStart(h), onDone(h, res) },
 -- res = { code, output, err, timedOut }. A new run under the same id supersedes the old one.
+-- Seance (2026-10-02) adds resume, transcript, model and maxTurns, passed to core.headlessCmd as they are.
 function FX.runHeadless(spec)
   if type(spec) ~= "table" or type(spec.id) ~= "string" or type(spec.dir) ~= "string" or spec.dir == "" then return nil end
   local old = FX._headless[spec.id]
@@ -6211,6 +6212,7 @@ function FX.runHeadless(spec)
   end
   local h = { id = spec.id, lane = spec.lane or spec.dir, dir = spec.dir, prompt = spec.prompt or "",
               timeoutSeconds = tonumber(spec.timeoutSeconds) or core.CHECKER_TIMEOUT, maxBudgetUsd = spec.maxBudgetUsd,
+              resume = spec.resume, transcript = spec.transcript, model = spec.model, maxTurns = spec.maxTurns,
               onStart = spec.onStart, onDone = spec.onDone, state = "queued", at = FX.now() }
   FX._headless[spec.id] = h
   FX.headlessPump()
@@ -6250,7 +6252,9 @@ function FX.headlessLaunch(h)
   end)
   if not FX._headlessBin then FX._headlessBin = FX.claudeBinPath() end   -- nil keeps the bare word
   local cmd = wrote and core.headlessCmd(FX._headlessBin, { dir = h.dir, promptFile = promptFile, outFile = outFile,
-                                                            errFile = errFile, maxBudgetUsd = h.maxBudgetUsd }) or nil
+                                                            errFile = errFile, maxBudgetUsd = h.maxBudgetUsd,
+                                                            resume = h.resume, transcript = h.transcript,
+                                                            model = h.model, maxTurns = h.maxTurns }) or nil
   if not cmd then
     finish({ code = -1, output = "", err = "Shepherd couldn't write the prompt" })
     return h
@@ -6436,6 +6440,125 @@ function FX.annotateCheckers(list)
       if rec then it.checker = core.checkerView(rec) end
     end
   end
+end
+
+-- ---- Seance: ask any session a question, read-only (2026-10-02, mining round 2 unit D1) --------
+-- From the detail panel (a live card's key), a fleet-search hit (the session id and the file the
+-- hit was in) or a History row (the session id and its project key): find the session's
+-- transcript, plan where and how to ask (core.seancePlan), and run the fork through
+-- FX.runHeadless in its OWN lane ("seance|<id>"), so a repo's checker or coach never holds a
+-- question up and a question never holds them up. One question per session at a time: a new one
+-- replaces one still running. Records live in memory only (FX._seance, the newest per session);
+-- every change is pushed to the panel (window.ccSeance), which paints whichever box shows that
+-- session. Nothing types into a tab, and the session's own transcript is only ever read.
+FX._seance = {}   -- session id -> its newest Seance record
+function FX.seanceDir() return FX._scratchDir .. "/seance" end
+function FX.seanceIsDir(p)
+  local mode
+  pcall(function() mode = hs.fs.attributes(p, "mode") end)
+  return mode == "directory"
+end
+function FX.seancePush(rec)
+  local v = core.seanceView(rec)
+  if not v or not wv then return end
+  pcall(function() wv:evaluateJavaScript("window.ccSeance(" .. hs.json.encode(v) .. ")") end)
+end
+-- The panel asks for a session's last record again (a box opened after a panel reload).
+function FX.seanceSend(sid)
+  local rec = FX._seance[tostring(sid or "")]
+  if rec then FX.seancePush(rec) end
+end
+
+function FX.seanceAsk(text)
+  local okj, req = pcall(hs.json.decode, tostring(text or ""))
+  if not okj or type(req) ~= "table" then return false end
+  local projects = CLAUDE_DIR .. "/projects/"
+  local function refuse(msg) FX.alert("⚠️ Seance: " .. msg, 4); return false end
+  local question = type(req.question) == "string" and req.question or ""
+  if not question:match("%S") then return refuse("type a question for the session first") end
+  -- a file the panel names (a fleet-search hit) must be a transcript in Claude's own projects
+  -- folder, whatever else the request says; a subagent's file asks its parent session
+  local file
+  if type(req.file) == "string" and req.file ~= "" then
+    local parent = req.file:match("^(.*)/subagents/[^/]+%.jsonl$")
+    file = parent and (parent .. ".jsonl") or req.file
+    if file:sub(1, #projects) ~= projects or file:find("/../", 1, true) or not file:match("%.jsonl$") then
+      return refuse("it only reads transcripts in ~/.claude/projects")
+    end
+  end
+  local it = (type(req.key) == "string" and req.key ~= "") and byKey[req.key] or nil
+  local sid = it and it.session_id or req.sessionId
+  if not it and core.restartIdOk(sid) then   -- the live card for this session, when there is one
+    for _, x in pairs(byKey) do
+      if x.session_id == sid and not x.remote then it = x; break end
+    end
+  end
+  local name = it and tostring(it.label or it.name or sid) or (core.restartIdOk(sid) and sid:sub(1, 8) or "?")
+  if it and it.remote then return refuse(name .. " is remote; it needs a session on this Mac") end
+  if not core.restartIdOk(sid) then return refuse("that isn't a session Shepherd can ask") end
+  local tp = file
+  if not tp and it and type(it.transcript_path) == "string" then tp = it.transcript_path end
+  if not tp and type(req.projectKey) == "string" and req.projectKey:match("^[%w%-]+$") then
+    tp = projects .. req.projectKey .. "/" .. sid .. ".jsonl"
+  end
+  local head
+  if type(tp) == "string" then
+    pcall(function()
+      local f = io.open(tp, "rb")
+      if f then head = f:read(16384); f:close() end
+    end)
+  end
+  if not head then return refuse("there's no transcript for " .. name .. " to ask") end
+  local facts = core.seanceTranscriptFacts(head, FX.readTail(tp, 262144))
+  local st = usageState[tp]
+  local ctx = (facts.contextTokens > 0) and facts.contextTokens
+    or (st and tonumber(st.lastContext)) or (it and tonumber(it.context_tokens)) or 0
+  local model = core.seanceModelChoice(facts.switched or (st and st.modelSwitch), it and it.statusModel,
+    facts.model or (st and st.lastModel) or (it and it.model))
+  local cfg = loadConfig()
+  local plan, why = core.seancePlan({ sessionId = sid, transcript = tp,
+    projectKey = (it and it.projectKey) or tp:match("/projects/([^/]+)/[^/]+%.jsonl$"),
+    cwd = (it and it.cwd) or facts.cwd, origin = (it and it.originDir) or facts.origin,
+    model = model, contextTokens = ctx, fallbackDir = FX.seanceDir(),
+    maxBudgetUsd = core.config(cfg, "seance.maxBudgetUsd", nil) }, FX.seanceIsDir)
+  if not plan then return refuse("can't ask " .. name .. ": " .. tostring(why)) end
+  if plan.dir == FX.seanceDir() then
+    pcall(hs.fs.mkdir, FX._scratchDir)
+    pcall(hs.fs.mkdir, plan.dir)
+  end
+  local rec = { sid = sid, key = it and it.key or nil, name = name, state = "queued", model = plan.model,
+                question = core.capChars((question:gsub("^%s+", ""):gsub("%s+$", "")), core.SEANCE.questionMax),
+                budget = plan.budget, dir = plan.dir, at = FX.now() }
+  FX._seance[sid] = rec
+  FX.seancePush(rec)
+  local timeout = tonumber(core.config(cfg, "seance.timeoutSeconds", core.SEANCE.timeoutSeconds)) or core.SEANCE.timeoutSeconds
+  FX.runHeadless({ id = "seance|" .. sid, lane = "seance|" .. sid, dir = plan.dir, prompt = core.seancePrompt(question),
+    timeoutSeconds = timeout, maxBudgetUsd = plan.budget, resume = sid, transcript = plan.transcript,
+    model = plan.model, maxTurns = plan.maxTurns,
+    onStart = function()
+      if FX._seance[sid] == rec then rec.state = "running"; FX.seancePush(rec) end
+    end,
+    onDone = function(_, res) FX.seanceFinish(sid, rec, res) end })
+  print("[cc-dashboard] 🔮 seance: asking " .. name .. " (" .. sid .. ") in " .. tostring(plan.model) .. " from "
+    .. tostring(plan.dir) .. ", up to $" .. tostring(plan.budget))
+  return true
+end
+
+function FX.seanceFinish(sid, rec, res)
+  if FX._seance[sid] ~= rec then return end   -- a newer question replaced this one
+  local p = core.parseSeanceOutput(res and res.output, res and res.err, res and res.code)
+  if res and res.timedOut then
+    p = { outcome = "couldntRun", why = "timed out after " .. tostring(res.timeoutSeconds) .. "s" }
+  end
+  rec.state, rec.doneAt = "done", FX.now()
+  rec.outcome, rec.answer, rec.why, rec.costUsd, rec.turns = p.outcome, p.answer, p.why, p.costUsd, p.turns
+  if p.outcome == "answered" then
+    print("[cc-dashboard] ✅ seance: " .. tostring(rec.name) .. " answered ($" .. tostring(p.costUsd or "?") .. ")")
+  else
+    print("[cc-dashboard] ⚠️ seance: " .. tostring(rec.name) .. " couldn't answer: " .. tostring(p.why)
+      .. " [exit " .. tostring(res and res.code or "?") .. "]")
+  end
+  FX.seancePush(rec)
 end
 
 -- ---- The coach (2026-09-29, build program unit 32) ---------------------------------------------
@@ -12123,6 +12246,10 @@ local function handleBridgeMsg(msg)
   if a == "merge-dismiss" then FX.mergeDismiss(tostring(payload.v or "")); return end
   -- the merge checker (2026-09-29): a read-only headless review of this session's work, no keystrokes
   if a == "verify" then FX.verifySession(tostring(payload.v or "")); return end
+  -- Seance (2026-10-02): text = JSON { key | sessionId + file | sessionId + projectKey, question },
+  -- every part checked in Lua; seance-state re-sends a session's last answer (v = its session id)
+  if a == "seance-ask" then FX.seanceAsk(tostring(payload.text or "")); return end
+  if a == "seance-state" then FX.seanceSend(tostring(payload.v or "")); return end
   -- the coach (2026-09-29): 🧭 Coach runs it for the session's repo; the overlay opens by a card's
   -- key, and its buttons send the repo's root (a record lookup, nothing else) and an item number
   if a == "coach" then FX.coachRun(tostring(payload.v or "")); return end
@@ -14935,6 +15062,22 @@ local HTML = [[
 .fs-file{ color:var(--dim); white-space:nowrap; font-variant-numeric:tabular-nums; }
 .fs-text{ color:var(--text-2); flex:1; word-break:break-all; font-family:ui-monospace,Menlo,monospace; font-size:11px; }
 .fs-jump{ background:none; border:1px solid var(--border); color:var(--text-3); border-radius:5px; padding:0 6px; cursor:pointer; font-size:11px; }
+/* Seance (2026-10-02): ask a session a question -- the detail panel's box, and one opened under a
+   fleet-search hit or a History row. The answer keeps its line breaks. */
+.fs-ask, .h-ask{ background:none; border:1px solid var(--border); color:var(--text-3); border-radius:5px; padding:0 6px; cursor:pointer; font-size:11px; white-space:nowrap; }
+.fs-ask:hover, .h-ask:hover{ color:var(--text); border-color:var(--accent); }
+.seance-box{ margin:6px 0; padding:6px 10px; border:1px dashed var(--border); border-radius:8px; font-size:12px; }
+#fs-body .seance-box, #a-body .seance-box{ margin:2px 0 8px 18px; }
+.sn-row{ display:flex; gap:6px; align-items:center; }
+.sn-in{ flex:1; min-width:120px; background:var(--surface-2); color:var(--text); border:1px solid var(--border); border-radius:6px; font-size:12px; padding:4px 8px; }
+.sn-go{ background:none; border:1px solid var(--accent); color:var(--accent-text); border-radius:6px; padding:3px 8px; cursor:pointer; font-size:12px; white-space:nowrap; }
+.sn-out:empty{ display:none; }
+.sn-out{ margin-top:6px; }
+.sn-q{ color:var(--dim); font-size:11px; margin-bottom:3px; white-space:pre-wrap; word-break:break-word; }
+.sn-a{ color:var(--text); white-space:pre-wrap; word-break:break-word; max-height:320px; overflow:auto; }
+.sn-meta{ color:var(--dim); font-size:11px; margin-top:3px; }
+.sn-wait{ color:var(--text-3); opacity:.85; }
+.sn-err{ color:var(--warn); white-space:pre-wrap; word-break:break-word; }
 /* Fleet insights overlay (Feature A; modeled on #audit). Pure read of the ledger. */
 #insights{ position:fixed; inset:0; background:var(--bg-overlay); z-index:11; display:none; flex-direction:column; font-size:12px; }
 #insights.show{ display:flex; }
@@ -15595,6 +15738,9 @@ local HTML = [[
     </div>
     <!-- the merge checker's verdict for a session with no merge review showing it (Verify, 2026-09-29) -->
     <div id="d-checker"></div>
+    <!-- Seance (2026-10-02): ask this session a question; renderSeanceDetail builds the box once per
+         session, so a half-typed question survives the 1s re-render -->
+    <div id="d-seance"></div>
     <!-- L5 tab strip: groups the views Shepherd already renders. The bar is
          built in JS from __DETAIL_TABS__ (single source w/ core.DETAIL_TABS);
          only the active panel shows. Renderers keep writing into the same div
@@ -20561,6 +20707,7 @@ local HTML = [[
       }
       renderMerge(it);
       renderChecker(it);
+      renderSeanceDetail(it);   // 2026-10-02: Ask this session
       renderBatch(it);
       var dtl = document.getElementById("d-tabless");
       if(dtl){
@@ -22813,6 +22960,8 @@ local HTML = [[
         + '<span class="h-sub">' + sub + '</span>'
         + '<span class="h-stat">' + (r.prompts||0) + ' turns · ' + (r.toolRequests||0) + ' tools · ' + (r.events||0) + ' events</span>'
         + '<span class="h-when">' + esc(fmtTs(r.lastTs)) + '</span>'
+        // Seance (2026-10-02): ask this session a question, live or long finished
+        + (r.session_id ? '<button class="h-ask" onclick="seanceToggle(event, this)" title="Ask this session a question: a read-only fork of its conversation answers">🔮 Ask</button>' : '')
         + '</div>';
     }
     function historyPinClick(ev){
@@ -22834,6 +22983,95 @@ local HTML = [[
         if(ck && ck.checked){ var sid = row.getAttribute("data-sid"); if(sid) sessions.push(sid); }
       });
       if(sessions.length) send("history-delete", "", JSON.stringify({ sessions: sessions }));  // Lua confirms + refreshes
+    }
+    // ---- Seance (2026-10-02): ask any session a question, read-only ---------
+    // One box shape everywhere: the detail panel's (#d-seance), and one opened under a fleet-search
+    // hit or a History row. The session's id, card key, file and project key ride in data-
+    // attributes, read back with getAttribute (never inside a handler); Lua checks every one.
+    // Records come from window.ccSeance (core.seanceView), kept per session id; every word in them
+    // -- Adam's question, the model's answer, claude's error -- goes in through esc().
+    var SEANCE = {};
+    function seanceText(r){
+      if(!r || !r.state) return "";
+      var q = r.question ? '<div class="sn-q">Asked: ' + esc(r.question) + '</div>' : "";
+      if(r.state !== "done"){
+        return q + '<div class="sn-wait">🔮 Asking' + (r.model ? " (" + esc(r.model) + ")" : "")
+          + " — a read-only fork of its conversation…</div>";
+      }
+      if(r.outcome === "answered"){
+        var meta = [];
+        if(r.costUsd != null) meta.push("$" + Number(r.costUsd).toFixed(2));
+        if(r.secs != null) meta.push(esc(r.secs) + "s");
+        if(r.model) meta.push(esc(r.model));
+        return q + '<div class="sn-a">' + esc(r.answer || "") + '</div>'
+          + (meta.length ? '<div class="sn-meta">' + meta.join(" · ") + '</div>' : "");
+      }
+      return q + '<div class="sn-err">' + "Couldn't ask: " + esc(r.why || "no reason given") + '</div>';
+    }
+    function seanceBoxHtml(o){
+      o = o || {};
+      return '<div class="seance-box" data-sid="' + esc(o.sid || "") + '" data-key="' + esc(o.key || "")
+        + '" data-file="' + esc(o.file || "") + '" data-pk="' + esc(o.pk || "") + '">'
+        + '<div class="sn-row"><input class="sn-in" maxlength="2000" placeholder="Ask this session… (read-only: nothing is saved into it)"'
+        + ' onkeydown="if(event.key===\'Enter\'){event.preventDefault();seanceAsk(this);}">'
+        + '<button class="sn-go" onclick="seanceAsk(this)" title="A read-only fork of its conversation answers in its own model; the session itself never sees the question">🔮 Ask</button></div>'
+        + '<div class="sn-out"></div></div>';
+    }
+    function paintSeance(sid){
+      var r = SEANCE[sid];
+      document.querySelectorAll(".seance-box").forEach(function(b){
+        if(b.getAttribute("data-sid") !== sid) return;
+        var out = b.querySelector(".sn-out");
+        var h = seanceText(r);
+        if(out && out._sn !== h){ out.innerHTML = h; out._sn = h; }
+        // the question went: it shows above the answer now, so the input is free for the next one
+        var inp = b.querySelector(".sn-in");
+        if(r && r.state === "queued" && inp && inp.value.trim() === r.question) inp.value = "";
+      });
+    }
+    window.ccSeance = function(r){
+      if(!r || !r.sid) return;
+      SEANCE[r.sid] = r;
+      paintSeance(r.sid);
+    };
+    function seanceAsk(el){
+      var box = el && el.closest ? el.closest(".seance-box") : null;
+      if(!box) return;
+      var inp = box.querySelector(".sn-in");
+      var q = ((inp && inp.value) || "").trim();
+      if(!q){ if(inp) inp.focus(); return; }
+      send("seance-ask", "", JSON.stringify({ key: box.getAttribute("data-key") || "",
+        sessionId: box.getAttribute("data-sid") || "", file: box.getAttribute("data-file") || "",
+        projectKey: box.getAttribute("data-pk") || "", question: q }));
+    }
+    // Open (or close) a box under a fleet-search hit or a History row, from the row's data- attributes.
+    function seanceToggle(ev, btn){
+      if(ev) ev.stopPropagation();
+      var row = btn && btn.closest ? btn.closest(".fs-row, .h-row") : null;
+      if(!row) return;
+      var nx = row.nextElementSibling;
+      if(nx && nx.classList.contains("seance-box")){ nx.remove(); return; }
+      var sid = row.getAttribute("data-sid") || "";
+      row.insertAdjacentHTML("afterend", seanceBoxHtml({ sid: sid, key: row.getAttribute("data-key") || "",
+        file: row.getAttribute("data-file") || "", pk: row.getAttribute("data-pk") || "" }));
+      if(SEANCE[sid]) paintSeance(sid); else if(sid) send("seance-state", sid);
+      var box = row.nextElementSibling;
+      var inp = box && box.querySelector(".sn-in");
+      if(inp) inp.focus();
+    }
+    // The detail panel's box: built once per session (renderDetail runs every second, and a rebuild
+    // would drop a half-typed question), hidden for a remote session (no transcript here).
+    function renderSeanceDetail(it){
+      var wrap = document.getElementById("d-seance");
+      if(!wrap) return;
+      var sid = (it && it.session_id) || "";
+      if(!sid || it.remote){ wrap.style.display = "none"; return; }
+      wrap.style.display = "";
+      if(wrap.getAttribute("data-for") === sid) return;
+      wrap.setAttribute("data-for", sid);
+      // the project key finds its transcript even after the card is gone (Lua checks its shape)
+      wrap.innerHTML = seanceBoxHtml({ sid: sid, key: it.key || "", pk: it.projectKey || "" });
+      if(SEANCE[sid]) paintSeance(sid); else send("seance-state", sid);
     }
     // ---- Fleet-wide search (roadmap #3) -------------------------------------
     // 300ms debounce, min 3 chars; Lua runs rg/grep async and replies ccSearch.
@@ -22873,10 +23111,14 @@ local HTML = [[
         var base = (h.file || "").split("/").pop();
         var click = h.key ? ' onclick="fsOpen(' + i + ')"' : (h.sessionId ? ' onclick="fsTimelineFor(' + i + ')"' : '');
         var cls = "fs-row" + ((h.key || h.sessionId) ? "" : " dead");
-        return '<div class="' + cls + '"' + click + ' title="' + esc(h.file || "") + '">'
+        // Seance (2026-10-02): the session rides in data- attributes for the Ask box under the row
+        var seance = (h.kind === "transcript" && h.sessionId);
+        return '<div class="' + cls + '"' + click + ' title="' + esc(h.file || "") + '"'
+          + (seance ? ' data-sid="' + esc(h.sessionId) + '" data-key="' + esc(h.key || "") + '" data-file="' + esc(h.file || "") + '"' : '') + '>'
           + '<span class="fs-who">' + (h.key ? "● " : "") + esc(who) + '</span>'
           + '<span class="fs-file">' + esc(base) + ':' + (h.line || "?") + '</span>'
           + '<span class="fs-text">' + esc(h.text || "") + '</span>'
+          + (seance ? '<button class="fs-ask" onclick="seanceToggle(event, this)" title="Ask this session a question: a read-only fork of its conversation answers">🔮 Ask</button>' : '')
           + (h.key ? '<button class="fs-jump" onclick="event.stopPropagation();send(\'focus\',\'' + esc(h.key) + '\')" title="Jump to this session\'s window">Jump</button>' : '')
           + '</div>';
       }).join("");

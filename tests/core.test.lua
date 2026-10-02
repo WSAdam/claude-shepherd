@@ -8469,7 +8469,8 @@ do
   -- 2026-09-29: 41 -> 42 for Claude Code compatibility alarms ("compat", flagged new).
   -- 2026-09-30: 42 -> 43 for restarting the fleet in place ("restart", flagged new).
   -- 2026-10-02: 43 -> 44 for the Stop guards' question guard ("stopguards", flagged new).
-  eq("FEATURES: the 44 new features are flagged", newCount, 44)
+  -- 2026-10-02: 44 -> 45 for asking a session a question ("seance", flagged new).
+  eq("FEATURES: the 45 new features are flagged", newCount, 45)
   check("FEATURES: lists the Stop guards", keys.stopguards == true)
   check("FEATURES: lists restarting the fleet in place", keys.restart == true)
   check("FEATURES: lists TODO lines that need a live run", keys.liverun == true)
@@ -14430,6 +14431,162 @@ do
   for _, f in ipairs(core.FEATURES) do if f.key == "stopguards" then feat = f end end
   check("stop guards: FEATURES lists them, flagged new", feat ~= nil and feat.new == true)
   check("stop guards: ...and the entry names the switch", feat ~= nil and tostring(feat.what):find("stopGuards.question", 1, true) ~= nil)
+end
+
+-- ---- Seance: ask any session a question, read-only (2026-10-02, mining round 2 unit D1) ----
+-- A forked headless resume: `claude -p --resume <transcript> --fork-session --no-session-persistence`
+-- answers from the session's own conversation, saves nothing, and leaves the original untouched.
+-- Probed live on 2026-10-02 (claude 2.1.175): a history holding Write/Edit tool calls resumes fine
+-- under a read-only tool set; `--resume <id>` finds the conversation only from its launch folder
+-- ("No conversation found", exit 1), while `--resume <path to the .jsonl>` works from any folder.
+do
+  local SID = "d65185de-58d2-4508-831f-71da6c45c840"
+  local TP = "/Users/x/.claude/projects/-r-A/" .. SID .. ".jsonl"
+  local base = { dir = "/r/A", promptFile = "/s/p", outFile = "/s/o", errFile = "/s/e" }
+  local function with(extra) local o = {} for k, v in pairs(base) do o[k] = v end for k, v in pairs(extra) do o[k] = v end return o end
+  local cmd = core.headlessCmd("c", with({ resume = SID, transcript = TP, model = "claude-opus-5-5[1m]", maxTurns = 12, maxBudgetUsd = 8 }))
+  local function has(s) return type(cmd) == "string" and cmd:find(s, 1, true) ~= nil end
+  check("headlessCmd: a Seance resumes the transcript by its path, forked  (" .. tostring(cmd) .. ")",
+        has("--resume '" .. TP .. "' --fork-session"))
+  check("headlessCmd: ...and still saves nothing", has("--no-session-persistence"))
+  check("headlessCmd: ...in the session's own model", has("--model 'claude-opus-5-5[1m]'"))
+  check("headlessCmd: ...with its own turn cap", has("--max-turns 12") and not has("--max-turns 30"))
+  check("headlessCmd: ...and its budget", has("--max-budget-usd 8"))
+  check("headlessCmd: ...read-only tools, hooks off, no MCP", has("--tools 'Read,Grep,Glob,Bash'") and has("--permission-mode dontAsk")
+        and has("disableAllHooks") and has("--strict-mcp-config") and has("--disallowedTools 'Edit' 'Write'"))
+  local byId = core.headlessCmd("c", with({ resume = SID }))
+  check("headlessCmd: no transcript path resumes by id", byId and byId:find("--resume '" .. SID .. "' --fork-session", 1, true) ~= nil)
+  local other = core.headlessCmd("c", with({ resume = SID, transcript = "/Users/x/.claude/projects/-r-A/other.jsonl" }))
+  check("headlessCmd: a path that isn't that session's transcript is not used",
+        other and other:find("--resume '" .. SID .. "'", 1, true) ~= nil and not other:find("other.jsonl", 1, true))
+  check("headlessCmd: a relative path is not used",
+        not core.headlessCmd("c", with({ resume = SID, transcript = "projects/" .. SID .. ".jsonl" })):find("projects/", 1, true))
+  eq("headlessCmd: a resume that isn't a session id is no command at all",
+     core.headlessCmd("c", with({ resume = "x'; rm -r ~; '" })), nil)
+  eq("headlessCmd: ...nor an empty one", core.headlessCmd("c", with({ resume = "" })), nil)
+  check("headlessCmd: a model that isn't a CLI model name falls back to sonnet",
+        core.headlessCmd("c", with({ resume = SID, model = "Opus 5.5 (1M context)" })):find("--model sonnet ", 1, true) ~= nil)
+  check("headlessCmd: ...and so does one with shell in it",
+        core.headlessCmd("c", with({ resume = SID, model = "opus;id" })):find("--model sonnet ", 1, true) ~= nil)
+  local checker = core.headlessCmd("c", base)
+  check("headlessCmd: the checker's command is unchanged (no resume, sonnet, 30 turns)",
+        not checker:find("--resume", 1, true) and not checker:find("--fork-session", 1, true)
+        and checker:find("--model sonnet ", 1, true) ~= nil and checker:find("--max-turns 30 ", 1, true) ~= nil)
+
+  -- which model the question runs in: the session's own, past ~180k of context its 1M window
+  eq("seanceModel: the session's model", core.seanceModel("claude-opus-5-5", 120000), "claude-opus-5-5")
+  eq("seanceModel: past 180k it needs the 1M window", core.seanceModel("claude-opus-5-5", 250000), "claude-opus-5-5[1m]")
+  eq("seanceModel: ...an alias too", core.seanceModel("sonnet", 400000), "sonnet[1m]")
+  eq("seanceModel: an opt-in it already has stays", core.seanceModel("opus[1m]", 50000), "opus[1m]")
+  eq("seanceModel: a haiku session past 200k-ish moves to sonnet's 1M window", core.seanceModel("claude-haiku-4-5-20251001", 190000), "sonnet[1m]")
+  eq("seanceModel: a haiku session below that stays haiku", core.seanceModel("claude-haiku-4-5-20251001", 90000), "claude-haiku-4-5-20251001")
+  eq("seanceModel: Fable has its 1M window without the suffix", core.seanceModel("claude-fable-5-1", 600000), "claude-fable-5-1")
+  eq("seanceModel: unknown -> sonnet", core.seanceModel(nil, 1000), "sonnet")
+  eq("seanceModel: unknown and big -> sonnet's 1M window", core.seanceModel(nil, 300000), "sonnet[1m]")
+  eq("seanceModel: an API-error placeholder is no model", core.seanceModel("<synthetic>", 1000), "sonnet")
+  eq("seanceModelChoice: a /model switch wins", core.seanceModelChoice("claude-opus-5[1m]", "sonnet", "claude-sonnet-5-5"), "claude-opus-5[1m]")
+  eq("seanceModelChoice: then what it was spawned with", core.seanceModelChoice(nil, "opus", "claude-opus-5-5"), "opus")
+  eq("seanceModelChoice: a switch back to Default names no model",
+     core.seanceModelChoice("Default (recommended)", nil, "claude-sonnet-5-5"), "claude-sonnet-5-5")
+  eq("seanceModelChoice: a picker display name is skipped", core.seanceModelChoice(nil, "Opus 5.5 (1M context)", "claude-opus-5-5"),
+     "claude-opus-5-5")
+  eq("seanceModelChoice: nothing usable", core.seanceModelChoice(nil, nil, "<synthetic>"), nil)
+
+  -- the budget: the whole context is written to the cache once (2x input, 1h TTL), plus room to read
+  eq("seanceBudget: a small session gets the floor", core.seanceBudget(20000, "claude-sonnet-5-5"), 0.5)
+  eq("seanceBudget: half a million of Opus context", core.seanceBudget(500000, "claude-opus-5-5"), 8.5)
+  eq("seanceBudget: Fable is dearer, up to the cap", core.seanceBudget(800000, "claude-fable-5-1"), 20)
+  eq("seanceBudget: the cap comes from config", core.seanceBudget(800000, "claude-fable-5-1", 30), 26)
+  eq("seanceBudget: a cap past 50 is 50", core.seanceBudget(5000000, "claude-fable-5-1", 500), 50)
+  eq("seanceBudget: a nonsense cap is the default", core.seanceBudget(800000, "claude-fable-5-1", "lots"), 20)
+  eq("seanceBudget: an unknown model is priced like the dearest", core.seanceBudget(500000, nil), 16.5)
+
+  -- what a transcript says about itself: where it started, where it was last, its model and context
+  local function rec(t) return core.json.encode(t) end
+  local function asst(model, input, read, create) return rec({ type = "assistant", cwd = "/r/A/.claude/worktrees/x",
+    message = { model = model, usage = { input_tokens = input, cache_read_input_tokens = read, cache_creation_input_tokens = create,
+    output_tokens = 10 } } }) end
+  local head = rec({ type = "user", cwd = "/r/A", sessionId = SID, message = { role = "user", content = "hi" } }) .. "\n"
+  local tail = table.concat({
+    asst("claude-opus-5-5", 5, 200000, 1000),
+    rec({ type = "user", cwd = "/r/A/.claude/worktrees/x", message = { role = "user",
+      content = "<local-command-stdout>Set model to `claude-opus-5-5[1m]`</local-command-stdout>" } }),
+    asst("claude-opus-5-5", 3, 240000, 2000),
+    asst("<synthetic>", 0, 0, 0),
+    '{"type":"assistant","cwd":"/r/A/torn', }, "\n")
+  local f = core.seanceTranscriptFacts(head, tail)
+  eq("seanceTranscriptFacts: where it started", f.origin, "/r/A")
+  eq("seanceTranscriptFacts: where it was last", f.cwd, "/r/A/.claude/worktrees/x")
+  eq("seanceTranscriptFacts: its model (an API-error placeholder skipped)", f.model, "claude-opus-5-5")
+  eq("seanceTranscriptFacts: its context, from the last real reply", f.contextTokens, 242003)
+  eq("seanceTranscriptFacts: its /model switch", f.switched, "claude-opus-5-5[1m]")
+  local none = core.seanceTranscriptFacts(nil, nil)
+  check("seanceTranscriptFacts: nothing to read is no facts, not an error", none.origin == nil and none.contextTokens == 0)
+
+  -- the plan: which folder, which transcript, which model and budget
+  local dirs = { ["/r/A"] = true, ["/r/B"] = true, ["/s/seance"] = true }
+  local function isDir(p) return dirs[p] == true end
+  local plan = core.seancePlan({ sessionId = SID, transcript = TP, projectKey = "-r-A", cwd = "/r/A/sub", origin = "/r/A",
+                                 model = "claude-opus-5-5", contextTokens = 250000, fallbackDir = "/s/seance" }, isDir)
+  eq("seancePlan: runs in the session's launch folder", plan and plan.dir, "/r/A")
+  eq("seancePlan: ...resuming its transcript", plan and plan.transcript, TP)
+  eq("seancePlan: ...in its model, with the 1M window it needs", plan and plan.model, "claude-opus-5-5[1m]")
+  eq("seancePlan: ...a budget sized from its context", plan and plan.budget, core.seanceBudget(250000, "claude-opus-5-5"))
+  eq("seancePlan: ...and the Seance turn cap", plan and plan.maxTurns, core.SEANCE.maxTurns)
+  local gone = core.seancePlan({ sessionId = SID, transcript = TP, projectKey = "-r-gone", cwd = "/r/B", origin = "/r/gone",
+                                 fallbackDir = "/s/seance" }, isDir)
+  eq("seancePlan: a launch folder that's gone -> the transcript's cwd", gone and gone.dir, "/r/B")
+  local nowhere = core.seancePlan({ sessionId = SID, transcript = TP, projectKey = "-r-gone", cwd = "/r/gone/x",
+                                    fallbackDir = "/s/seance" }, isDir)
+  eq("seancePlan: ...and neither there -> Shepherd's own folder (the path resume works from anywhere)",
+     nowhere and nowhere.dir, "/s/seance")
+  local p2, why = core.seancePlan({ sessionId = "../x", transcript = TP, fallbackDir = "/s/seance" }, isDir)
+  check("seancePlan: not a session id -> no plan, and why  (" .. tostring(why) .. ")", p2 == nil and type(why) == "string")
+  p2, why = core.seancePlan({ sessionId = SID, transcript = "/Users/x/.claude/projects/-r-A/other.jsonl", fallbackDir = "/s/seance" }, isDir)
+  check("seancePlan: a transcript that isn't this session's -> no plan  (" .. tostring(why) .. ")", p2 == nil and type(why) == "string")
+  p2, why = core.seancePlan({ sessionId = SID, fallbackDir = "/s/seance" }, isDir)
+  check("seancePlan: no transcript -> no plan  (" .. tostring(why) .. ")", p2 == nil and type(why) == "string")
+  eq("seancePlan: the budget cap from config", core.seancePlan({ sessionId = SID, transcript = TP, projectKey = "-r-A",
+     cwd = "/r/A", model = "claude-fable-5-1", contextTokens = 800000, fallbackDir = "/s/seance", maxBudgetUsd = 30 }, isDir).budget, 26)
+
+  -- the prompt frames the question; the answer is claude's result text
+  local pr = core.seancePrompt("What did you change in <cc-core.lua>?")
+  check("seancePrompt: carries the question as written", pr:find("What did you change in <cc-core.lua>?", 1, true) ~= nil)
+  check("seancePrompt: says it's read-only and not saved", pr:lower():find("read-only", 1, true) ~= nil
+        and pr:lower():find("not saved", 1, true) ~= nil)
+  local function env(t) local e = { type = "result", subtype = "success", is_error = false, num_turns = 1, total_cost_usd = 0.03 }
+    for k, v in pairs(t) do e[k] = v end; return core.json.encode(e) end
+  local a = core.parseSeanceOutput("zsh noise\n" .. env({ result = "  The word was PINEAPPLE.\n" }), "", 0)
+  eq("parseSeanceOutput: the answer", a.outcome, "answered")
+  eq("parseSeanceOutput: ...its text, trimmed", a.answer, "The word was PINEAPPLE.")
+  eq("parseSeanceOutput: ...what it cost", a.costUsd, 0.03)
+  local long = core.parseSeanceOutput(env({ result = string.rep("x", core.SEANCE.answerMax + 500) }), "", 0)
+  check("parseSeanceOutput: a long answer is capped", #long.answer <= core.SEANCE.answerMax + 3)
+  local miss = core.parseSeanceOutput("", "No conversation found with session ID: " .. SID .. "\n", 1)
+  eq("parseSeanceOutput: no answer couldn't run", miss.outcome, "couldntRun")
+  check("parseSeanceOutput: ...and says claude's own reason  (" .. tostring(miss.why) .. ")",
+        tostring(miss.why):find("No conversation found", 1, true) ~= nil and tostring(miss.why):find("exit 1", 1, true) ~= nil)
+  local big = core.parseSeanceOutput(env({ is_error = true, subtype = "success", result = "Prompt is too long" }), "", 1)
+  check("parseSeanceOutput: claude's own error says what it was  (" .. tostring(big.why) .. ")",
+        big.outcome == "couldntRun" and tostring(big.why):find("Prompt is too long", 1, true) ~= nil)
+  local budget = core.parseSeanceOutput(env({ subtype = "error_max_budget_usd", is_error = true }), "", 1)
+  eq("parseSeanceOutput: out of budget says so", budget.why, "it hit its budget")
+  local blank = core.parseSeanceOutput(env({ result = "   " }), "", 0)
+  check("parseSeanceOutput: an empty answer couldn't run", blank.outcome == "couldntRun" and blank.why ~= nil)
+
+  -- the record the panel gets
+  local v = core.seanceView({ sid = SID, key = "k1", name = "A-x", state = "done", question = "q?", answer = "a.",
+                              costUsd = 0.03, model = "opus", at = 100, doneAt = 112, secret = "never" })
+  check("seanceView: what the box shows", v.sid == SID and v.state == "done" and v.question == "q?" and v.answer == "a."
+        and v.costUsd == 0.03 and v.model == "opus" and v.name == "A-x" and v.secs == 12)
+  eq("seanceView: nothing else rides along", v.secret, nil)
+  eq("seanceView: no record, no view", core.seanceView(nil), nil)
+
+  local fkeys = {}; for _, ft in ipairs(core.FEATURES) do fkeys[ft.key] = ft end
+  check("seance: FEATURES lists Seance, flagged new", fkeys.seance ~= nil and fkeys.seance.new == true)
+  local kept = core.overlayConfig({ seance = { maxBudgetUsd = 35, timeoutSeconds = 600 } }, { seance = {} })
+  check("seance: a Settings save keeps a hand-set budget cap and timeout",
+        kept.seance and kept.seance.maxBudgetUsd == 35 and kept.seance.timeoutSeconds == 600)
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))

@@ -248,7 +248,8 @@ because a prompt is an instruction and the ledger has no CI ground truth.
 
 The ledger's **🗂 History** tab lists every session the ledger has seen, with its turns, tool calls,
 events and last activity. Filter by name or folder, sort **Recent / Oldest / Most active**, and
-narrow to **this workspace** or **pinned only**; ★-pin the projects you care about.
+narrow to **this workspace** or **pinned only**; ★-pin the projects you care about. **🔮 Ask** on a
+row asks that session a question, however long ago it ended ([Ask a session](controls.md#ask-a-session-seance)).
 Multi-select rows and **Delete selected** purges those sessions' recorded history through the same
 confirmed purge the Purge button uses. It never deletes Claude Code's own transcripts.
 

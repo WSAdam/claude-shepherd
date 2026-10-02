@@ -362,7 +362,8 @@ All derived locally from the transcript Shepherd already reads, with no extra ho
   (`approval`, `working`, `done`, …), group, branch or chat title.
 - **🔎 Find in fleet** (☰ menu) searches every session's **transcript**, live *and* ended, plus the
   audit ledger: "which session touched `auth.ts`?", "who ran that migration?". Click a hit to select
-  the live session (or open an ended one's audit timeline). Instant with
+  the live session (or open an ended one's audit timeline); **🔮 Ask** on a transcript hit asks that
+  session a question ([Ask a session](controls.md#ask-a-session-seance)). Instant with
   [ripgrep](https://github.com/BurntSushi/ripgrep) installed; it falls back to grep otherwise.
   `search.maxResults` caps the hits. Two folders inside the ledger are never searched:
   `quarantine/` and `exports/` (an audit export is a copy of ledger lines, so its events would
