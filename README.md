@@ -152,8 +152,8 @@ every other automatic behaviour here waits for its switch.
   several units, you approve once, and it opens their tabs and hands out the tasks.
 - [**Overlap radar & unit order**](docs/merging-and-batches.md#overlap-radar-and-unit-order): worktrees
   that touch the same files are flagged with which to merge first, and a batch unit can wait for others.
-- [**Coverage index**](docs/merging-and-batches.md#coverage-index-a-batch-says-what-it-covers): a batch
-  built from an issue list can't be approved until every issue is covered by a unit or triaged.
+- [**Coverage index**](docs/merging-and-batches.md#coverage-index-a-batch-says-what-it-covers): a batch built from an issue list can't be approved until every issue is covered or triaged.
+- [**Brief pre-flight**](docs/merging-and-batches.md#brief-pre-flight-risky-asks-flagged-before-you-approve): risky asks in a batch's full briefs (force push, rm -rf, secrets…) are flagged before you approve.
 - [**Worktree leases**](docs/fleet.md#worktree-leases): each unit's worktree gets its own port and
   database path, stated in its prompt and shown on its card, and freed when the worktree goes.
 - [**Tab bridge**](docs/merging-and-batches.md#the-tab-bridge): a small VS Code extension that

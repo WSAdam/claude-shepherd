@@ -406,6 +406,12 @@ echo ""
 echo "== node: the batch review lists uncovered issues as text and disables Approve until every issue is covered or triaged (behavioral, runs the shipped renderBatch) =="
 node "$DIR/coverage-view.test.js" || fail=1
 echo ""
+echo "== lua: brief pre-flight -- risky asks in a batch's full briefs (force push, push to main, deleting or skipping tests, rm -rf, secrets, CI/deploy), negation-aware, on the table cc-fleet.sh's jq is held to; two units citing one file, two hook-wiring units; advisory in the review =="
+lua "$DIR/brief-flags.test.lua" || fail=1
+echo ""
+echo "== node: the batch review shows the pre-flight's line and rows as text while proposed, and never disables Approve (behavioral, runs the shipped renderBatch) =="
+node "$DIR/brief-flags-view.test.js" || fail=1
+echo ""
 echo "== lua: worktree leases -- lowest free port of the range, reused after release, env file in the worktree's git dir, stamped by the tick, released by the sweep (behavioral, runs the shipped FX block on a real worktree) =="
 lua "$DIR/leases.test.lua" || fail=1
 echo ""

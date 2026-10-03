@@ -1,0 +1,80 @@
+# brief-flags.tsv -- what the brief pre-flight flags in one unit's brief, by both of its scanners
+# (2026-10-03, mining round 2 unit E3): the panel (core.briefFlags, Lua) and cc-fleet.sh's propose
+# line (its jq mirror, run by `cc-fleet.sh preflight --json`). tests/brief-flags.test.lua and
+# tests/fleet.test.sh both read this one table, so the two rule sets can't drift apart.
+# One case per line: <flags><TAB><brief>. flags: the flag ids in this order, comma-joined --
+# force-push, push-main, tests, rm-rf, secrets, ci-deploy -- or - for none. A literal \n in the
+# brief is a newline.
+#
+# ---- force push ----
+force-push	Rebase on main, then git push --force origin feat/x.
+force-push	Force-push the branch when the rebase is done.
+force-push	Run git push -f to update the remote.
+force-push	Use git push --force-with-lease after rebasing.
+force-push,push-main	git push origin +main
+-	Never force push.
+-	Don't force-push the branch.
+-	Don’t force push.
+-	Do not run git push --force; ask Adam instead.
+-	git push --force is never OK here.
+-	Run git worktree remove --force on it.
+force-push	Never touch main, then force push the branch.
+force-push	Never edit main. Force push the branch.
+# ---- push to main ----
+push-main	When it's green, git push origin main.
+push-main	Push main and deploy when Adam says ship.
+push-main	Push your commits to master.
+push-main	git push origin HEAD:main
+-	Never git push.
+-	Do not push to main.
+-	Push the branch, then merge into main.
+-	Push it to the main checkout.
+-	git push origin feat/brief-preflight
+# ---- deleting or skipping tests ----
+tests	Delete the failing test so the suite goes green.
+tests	Skip the flaky tests for now.
+tests	Mark it with it.skip( until the fix lands.
+tests	Use describe.only to focus the run.
+tests	Change it( to xit( in the slow file.
+tests	Comment out the broken assertion.
+tests	The old fixtures were removed.
+-	Never delete, skip, or loosen a test to get green.
+-	Don't skip tests.
+-	No .skip or .only in the diff.
+-	Write the test that removes the temp file.
+-	Drop the fixture into tests/fixtures/.
+-	Run the tests; the suite must stay green.
+# ---- rm -rf ----
+rm-rf	Clean up with rm -rf build/ first.
+rm-rf	rm -fr node_modules
+rm-rf	rm -r -f dist
+-	Use rm -r, never rm -rf.
+-	NEVER: git push, rm -rf, reset --hard, clean -f, branch -D.
+-	Run make perform -rf checks.
+# ---- secrets ----
+secrets	Copy the .env from the main checkout.
+secrets	Load the key from server.pem.
+secrets	Read credentials.json for the token.
+secrets	Commit the service-account.json with the change.
+secrets	Add .env.local to the worktree.
+-	Never commit .env or *.pem files.
+-	Read it from process.env.PORT.
+-	Add a .envrc for direnv.
+-	Don't touch the private key.
+# ---- CI and deploy files ----
+ci-deploy	Add a job to .github/workflows/ci.yml.
+ci-deploy	Update deploy.sh to copy the new file.
+ci-deploy	Edit the deploy script so it reloads.
+ci-deploy	Change the GitHub Actions matrix.
+-	Run make deploy from main after the merge.
+-	Never edit .github/workflows.
+-	NEVER: make install/deploy/setup from the worktree.
+# ---- several at once ----
+force-push,rm-rf	rm -rf .claude/worktrees/x and git push --force.
+# ---- a negated heading carries into the list under it, and only that list ----
+-	NEVER:\n- git push --force\n- rm -rf the worktree
+-	**Never:**\n1. git push --force\n2. rm -rf build
+force-push	Never:\n- edit live config\n\ngit push --force
+rm-rf	**Never:** run make install.\nrm -rf build
+# ---- a real brief's never-list (mining round 2, batch 2) ----
+-	NEVER: `make install/deploy/setup` from the worktree; edit live ~/.claude/* (only defaults/); git push, rm -rf, reset --hard, clean -f, branch -D, worktree remove --force, checkout -- . (use git restore, branch -d, rm -r).

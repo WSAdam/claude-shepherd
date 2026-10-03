@@ -523,4 +523,71 @@ assert_eq "tab: ...and prints the warning with the session's name" "yes" "$got"
 assert_eq "tab: an answer with no warning prints none" "none" "$got"
 fleet drv lst stop --batch "$IDL"
 
+# ---- brief pre-flight (2026-10-03, mining round 2 unit E3) ----
+# propose prints one line saying what the briefs ask for that Adam should look at twice (force
+# push, push to main, deleting or skipping tests, rm -rf, secrets, CI or deploy files; two units
+# citing one file; two units changing hook wiring). Advisory: it never refuses or holds a batch.
+# Its jq mirrors core.briefFlags: `cc-fleet.sh preflight --json` is run against the same table
+# tests/brief-flags.test.lua holds the Lua to, so the two can't drift apart.
+PF_ROWS="$TMP/pf-rows.json"
+grep -v '^#' "$ROOT/tests/fixtures/brief-flags.tsv" | grep -v '^$' \
+  | jq -R -s '[ split("\n")[] | select(length > 0) | split("\t") | { want: .[0], task: (.[1:] | join("\t") | gsub("\\\\n"; "\n")) } ]' > "$PF_ROWS"
+jq '{ title: "Table", units: [ to_entries[] | { type: "feat", slug: "r\(.key)", task: .value.task } ] }' "$PF_ROWS" > "$TMP/pf-table.json"
+rm -f "$CC_STATUS_DIR/.panel-alive"   # preflight needs no Shepherd
+(cd "$REPO" && CLAUDE_CODE_SESSION_ID=drv bash "$F" preflight --file "$TMP/pf-table.json" --json > "$TMP/pf-table.out" 2>&1; echo $? > "$TMP/pf-table.rc")
+assert_eq "preflight: --json answers for a batch file, with Shepherd down" "0" "$(cat "$TMP/pf-table.rc")"
+n="$(jq 'length' "$PF_ROWS")"
+[ "$n" -ge 40 ] && got=yes || got="only $n"
+assert_eq "preflight: tests/fixtures/brief-flags.tsv holds a real number of cases" "yes" "$got"
+i=0
+while [ "$i" -lt "$n" ]; do
+  want="$(jq -r --argjson i "$i" '.[$i].want' "$PF_ROWS")"
+  got="$(jq -r --arg s "r$i" '(.units[] | select(.slug == $s) | .flags | if length == 0 then "-" else join(",") end) // "missing"' "$TMP/pf-table.out" 2>/dev/null)"
+  assert_eq "brief-flags.tsv (jq): $want  $(jq -r --argjson i "$i" '.[$i].task | gsub("\n"; "\\n")' "$PF_ROWS")" "$want" "$got"
+  i=$((i + 1))
+done
+[ -z "$(ls "$FD"/b*.json 2>/dev/null | xargs -n1 jq -r 'select(.title == "Table") | .id' 2>/dev/null)" ] && got=none || got=some
+assert_eq "preflight: proposes nothing" "none" "$got"
+
+# what only the whole batch shows -- the same three units tests/brief-flags.test.lua reads
+PF3='{"title":"Three","units":[
+ {"type":"feat","slug":"alpha","task":"Add the hook in settings-hooks.json and cc-core.lua:2933. Extend tests/fleet.test.sh. Read ~/.claude/plans/p.md first."},
+ {"type":"feat","slug":"beta","task":"Wire install.sh; extend cc-core.lua and tests/core.test.lua. Update TODO.md and CHANGELOG.md, and fleet.test.sh. Read ~/.claude/plans/p.md first."},
+ {"type":"docs","slug":"gamma","task":"Docs only: docs/fleet.md. Don'"'"'t touch cc-core.lua. Follow the tests/*.test.lua pattern."}]}'
+batch "$PF3"
+(cd "$REPO" && CLAUDE_CODE_SESSION_ID=drv bash "$F" preflight --file "$TMP/batch.json" --json > "$TMP/pf3.out" 2>&1)
+assert_json "preflight: two units citing cc-core.lua (gamma says not to touch it)" "$TMP/pf3.out" \
+  '[.batch[] | select(.id == "same-file" and .file == "cc-core.lua") | .units | join(",")] | join(" ")' "alpha,beta"
+assert_json "preflight: fleet.test.sh and tests/fleet.test.sh are one file, named the longer way" "$TMP/pf3.out" \
+  '[.batch[] | select(.id == "same-file" and .file == "tests/fleet.test.sh") | .units | join(",")] | join(" ")' "alpha,beta"
+assert_json "preflight: TODO.md, CHANGELOG.md, the plan, a glob and a one-unit file aren't flagged" "$TMP/pf3.out" \
+  '[.batch[] | select(.id == "same-file") | .file] | sort | join(",")' "cc-core.lua,tests/fleet.test.sh"
+assert_json "preflight: two units changing hook wiring" "$TMP/pf3.out" \
+  '[.batch[] | select(.id == "hook-wiring") | .units | join(",")] | join(" ")' "alpha,beta"
+
+# propose: one line, beside the coverage line; the batch still goes to Adam as usual
+alive
+batch '{"title":"Risky","mergeWhenGreen":false,"units":[{"type":"feat","slug":"pfa","task":"Build it, then git push --force and rm -rf build/."},{"type":"fix","slug":"pfb","task":"Fix it. Never force push, never rm -rf."}]}'
+fleet drv pfp propose --file "$TMP/batch.json" --wait-max 30 & bg=$!   # bounded: a red run must not hang
+for i in $(seq 1 60); do BP="$(newest_batch)"; [ -n "$BP" ] && [ "$(jq -r .title "$BP")" = "Risky" ] && break; sleep 0.1; done
+assert_json "pre-flight: a batch with risky briefs is proposed all the same" "$BP" .phase proposed
+decide "$BP" approve false
+wait $bg
+assert_eq "pre-flight: ...and approved as usual" "0" "$(cat "$TMP/pfp.rc")"
+[ "$(grep -c "Pre-flight" "$TMP/pfp.out")" = "1" ] && got=one || got="$(grep -c "Pre-flight" "$TMP/pfp.out")"
+assert_eq "pre-flight: propose prints one pre-flight line" "one" "$got"
+grep -q "🔍 Pre-flight.*pfa: force push, rm -rf" "$TMP/pfp.out" && got=yes || got=no
+assert_eq "pre-flight: ...naming the unit and what its brief asks for" "yes" "$got"
+grep "Pre-flight" "$TMP/pfp.out" | grep -q "pfb" && got=listed || got=not
+assert_eq "pre-flight: ...never a unit whose brief only says not to" "not" "$got"
+fleet drv pfs stop --batch "$(jq -r .id "$BP")"
+batch '{"title":"Calm","mergeWhenGreen":false,"units":[{"type":"feat","slug":"calm","task":"Add a toggle, with tests."}]}'
+fleet drv pfc propose --file "$TMP/batch.json" --wait-max 30 & bg=$!
+for i in $(seq 1 60); do BP="$(newest_batch)"; [ -n "$BP" ] && [ "$(jq -r .title "$BP")" = "Calm" ] && break; sleep 0.1; done
+decide "$BP" approve false
+wait $bg
+grep -q "🔍 Pre-flight: no risky phrasing in the briefs" "$TMP/pfc.out" && got=yes || got=no
+assert_eq "pre-flight: a clean batch's line says nothing risky was found" "yes" "$got"
+fleet drv pfcs stop --batch "$(jq -r .id "$BP")"
+
 finish

@@ -4498,6 +4498,265 @@ function M.batchCoverageLine(c)
   return "✓ " .. (c.total == 1 and "its 1 issue is" or ("all " .. c.total .. " issues")) .. " accounted for: " .. table.concat(parts, ", ")
 end
 
+-- ---- Brief pre-flight (2026-10-03, mining round 2 unit E3) ----------------------------------
+-- A batch's briefs are scanned for asks Adam should look at twice before he approves: force push,
+-- push to main, deleting or skipping tests, rm -rf, secrets, CI and deploy files. Advisory only:
+-- nothing here holds Approve. The scan reads the FULL brief (parseBatch keeps 4000 characters;
+-- the review shows 300) and runs once per proposal file, in parseBatch -- never every tick.
+-- Negation-aware like the claim check (CLAIM_NEG): a negation word turns the rest of its sentence
+-- off ("NEVER: git push, rm -rf, ...") until but/then/instead/however/except/otherwise turns it
+-- back on, and one later in the risky word's own clause turns it off too ("rm -rf is never OK").
+-- A line ending in a negated "Never:" carries into the list lines right under it.
+-- KEEP IN SYNC with cc-fleet.sh's jq (its propose line and `preflight`): tests/brief-flags.test.lua
+-- and tests/fleet.test.sh hold both to tests/fixtures/brief-flags.tsv.
+M.BRIEF_FLAGS = {
+  { id = "force-push", label = "force push" },
+  { id = "push-main",  label = "push to main" },
+  { id = "tests",      label = "deletes or skips tests" },
+  { id = "rm-rf",      label = "rm -rf" },
+  { id = "secrets",    label = "touches secrets" },
+  { id = "ci-deploy",  label = "CI or deploy files" },
+}
+-- Files every unit touches by convention (their merges union or keep every side), so two units
+-- citing one is no news; and the files that are hook wiring (a batch takes at most one such unit).
+M.BRIEF_SHARED_FILES = { ["todo.md"] = true, ["changelog.md"] = true, ["readme.md"] = true, ["claude.md"] = true,
+                         ["decisions.md"] = true, ["run.sh"] = true, ["vocabulary.txt"] = true }
+M.BRIEF_HOOK_FILES = { ["settings-hooks.json"] = true, ["install.sh"] = true, ["uninstall.sh"] = true }
+M.BRIEF_QUOTE_CHARS = 120
+do
+  local NEG_MORE = { avoid = true, avoids = true, forbidden = true, prohibited = true, dont = true }
+  local RESET = { but = true, ["then"] = true, instead = true, however = true, except = true, otherwise = true }
+  local function isNeg(w) return CLAIM_NEG[w] or NEG_MORE[w] or w:sub(-3) == "n't" end
+  -- Lua patterns over the lowercased sentence. The jq twins use (?<![a-z0-9]) for %f[%w] and
+  -- (?![a-z0-9]) for %f[^%w]; matches are taken non-overlapping, as jq's "g" takes them.
+  local RX = {
+    ["force-push"] = { "force[%s%-]?push", "%f[%w]push%f[^%w][^,;]-%-%-force", "%f[%w]push%f[^%w][^,;]-%s%-f%f[^%w%-]",
+                       "%f[%w]push%f[^%w][^,;]-%s%+[%w_]" },
+    tests = { "%.skip%f[^%w]", "%.only%f[^%w]", "%f[%w]xit%(", "%f[%w]xdescribe%f[^%w]", "%f[%w]xtest%(", "@skip",
+              "mark%.skip", "#%[ignore%]" },
+    ["rm-rf"] = { "%f[%w]rm%s+%-%a*r%a*f", "%f[%w]rm%s+%-%a*f%a*r", "%f[%w]rm%s+%-r%s+%-f", "%f[%w]rm%s+%-f%s+%-r" },
+    secrets = { "%f[%.%w_]%.env%f[^%w]", "%.pem%f[^%w]", "%.p12%f[^%w]", "%f[%w]id_rsa", "%f[%w]id_ed25519",
+                "%f[%w]credentials?%f[^%w]", "private[%s_%-]key", "service[%s_%-]account[%w_%-]*%.json" },
+    ["ci-deploy"] = { "%.github/workflows", "%.gitlab%-ci", "%f[%w]jenkinsfile", "%.circleci", "%.travis%.yml",
+                      "%f[%w]deploy[%w_%-]*%.sh%f[^%w]", "%f[%w]deploy[%w_%-]*%.ya?ml", "%f[%w]fly%.toml",
+                      "%f[%w]netlify%.toml", "%f[%w]vercel%.json", "%f[%w]wrangler%.toml", "deploy%s+scripts?",
+                      "github%s+actions?", "%f[%w]ci%s+config", "%f[%w]ci%s+workflows?", "%f[%w]ci%s+pipelines?" },
+  }
+  local PUSH = { push = true, pushes = true, pushed = true, pushing = true }
+  local NOT_MAIN = { checkout = true, worktree = true, session = true, chat = true, conversation = true, tab = true,
+                     window = true, thread = true }
+  local TEST_NOUN = { test = true, tests = true, fixture = true, fixtures = true, assertion = true, assertions = true,
+                      suite = true, suites = true }
+  local TEST_VERB, TEST_DONE, COMMENT = {}, {}, { comment = true, comments = true, commented = true }
+  for w in ("delete deletes deleted deleting remove removes removed removing skip skips skipped skipping disable disables "
+         .. "disabled disabling loosen loosens loosened loosening weaken weakens weakened weakening"):gmatch("%a+") do
+    TEST_VERB[w] = true
+  end
+  for w in ("deleted removed skipped disabled loosened weakened"):gmatch("%a+") do TEST_DONE[w] = true end
+  local FILE_EXT = {}
+  for e in ("lua sh bash zsh js mjs cjs ts tsx jsx json jsonl md yml yaml toml py rb go rs css scss html htm txt tsv "
+         .. "csv sql env pem conf cfg ini xml plist swift kt java c h cc cpp hpp lock rune"):gmatch("%w+") do
+    FILE_EXT[e] = true
+  end
+  local FILE_NAMES = { Makefile = true, SHIPPED = true, Dockerfile = true, Jenkinsfile = true }
+  local NOT_FILES = { ["node.js"] = true, ["next.js"] = true, ["vue.js"] = true, ["nuxt.js"] = true, ["d3.js"] = true,
+                      ["chart.js"] = true, ["three.js"] = true }
+
+  -- A window of the sentence around byte p, whitespace collapsed, for the review to quote.
+  local function quoteAt(sent, p)
+    local a = math.max(1, p - 40)
+    while a > 1 and a < p and (sent:byte(a) or 0) >= 0x80 and (sent:byte(a) or 0) < 0xC0 do a = a + 1 end
+    local q = capChars(sent:sub(a), M.BRIEF_QUOTE_CHARS)
+    local cut = #q < #sent - a + 1
+    q = q:gsub("%s+", " "):match("^%s*(.-)%s*$")
+    return (a > 1 and "…" or "") .. q .. (cut and "…" or "")
+  end
+
+  -- One sentence: the flags it raises (id -> quote), the files it cites, and its negation state at
+  -- the end. carry = the state it starts in (a list line under a negated "Never:").
+  local function scanSentence(sent, carry, found, cites)
+    local low = sent:lower()
+    local ws = {}
+    for o, w in low:gmatch("()([%a']+)") do ws[#ws + 1] = { o = o, w = w } end
+    local function negated(p)
+      local st = carry
+      for _, x in ipairs(ws) do
+        if x.o >= p then break end
+        if isNeg(x.w) then st = true elseif RESET[x.w] then st = false end
+      end
+      if st then return true end
+      local stop = low:find("[,;:()]", p) or (#low + 1)
+      for _, x in ipairs(ws) do
+        if x.o > p and x.o < stop and isNeg(x.w) then return true end
+      end
+      return false
+    end
+    local function hit(id, p)
+      if not found[id] and not negated(p) then found[id] = quoteAt(sent, p) end
+    end
+    for id, pats in pairs(RX) do
+      for _, pat in ipairs(pats) do
+        local init = 1
+        while not found[id] do
+          local s, e = low:find(pat, init)
+          if not s then break end
+          hit(id, s)
+          init = e + 1
+        end
+      end
+    end
+    -- push to main: the first main/master within 4 words of a push, in the same clause, that
+    -- isn't "the main checkout" (or worktree, session...)
+    for i, x in ipairs(ws) do
+      if PUSH[x.w] then
+        for k = i + 1, math.min(i + 4, #ws) do
+          local y = ws[k]
+          if y.w == "main" or y.w == "master" then
+            local nxt = ws[k + 1] and (ws[k + 1].w:gsub("'s$", "")) or ""
+            if not NOT_MAIN[nxt] and not low:sub(x.o, y.o):find("[,;]") then hit("push-main", x.o) end
+            break
+          end
+        end
+      end
+    end
+    -- deleting or skipping tests, in words: a verb up to 3 words before the noun ("delete the
+    -- failing test", "comment out the assertion"), or a done-verb up to 2 after it ("fixtures were removed")
+    for j, x in ipairs(ws) do
+      if TEST_NOUN[x.w] then
+        for i = math.max(1, j - 3), j - 1 do
+          local v = ws[i].w
+          if TEST_VERB[v] then hit("tests", ws[i].o)
+          elseif v == "out" and i > 1 and COMMENT[ws[i - 1].w] then hit("tests", ws[i - 1].o) end
+        end
+        for i = j + 1, math.min(#ws, j + 2) do
+          if TEST_DONE[ws[i].w] then hit("tests", x.o) end
+        end
+      end
+    end
+    -- the files it cites: a path whose last part has a known extension (or is a Makefile...),
+    -- inside the repo (not ~ / $), not a glob, not negated ("don't touch cc-core.lua")
+    for o, tok in sent:gmatch("()([%w%._%-/~%$%*]+)") do
+      if not tok:find("*", 1, true) then
+        local path = tok:gsub("%.+$", ""):gsub("^%./", "")
+        local first = path:sub(1, 1)
+        local base = path:match("([^/]*)$") or ""
+        local stem, ext = base:match("^(.+)%.(%w+)$")
+        local isFile = FILE_NAMES[base] or (stem and stem:find("%a") and FILE_EXT[ext:lower()])
+        if isFile and first ~= "~" and first ~= "/" and first ~= "$" and not NOT_FILES[base:lower()] and not negated(o) then
+          cites[#cites + 1] = { base = base:lower(), path = path }
+        end
+      end
+    end
+    local st = carry
+    for _, x in ipairs(ws) do
+      if isNeg(x.w) then st = true elseif RESET[x.w] then st = false end
+    end
+    return st
+  end
+
+  -- One brief -> { flags = { {id, label, quote}... in M.BRIEF_FLAGS order }, cites = { {base, path}... } }.
+  function M.briefScan(task)
+    local found, cites = {}, {}
+    if type(task) == "string" and task ~= "" then
+      local text = task:gsub("\226\128\153", "'"):gsub("\r", "")
+      local carry, pos, n = false, 1, #text
+      while pos <= n do
+        local nl = text:find("\n", pos, true) or (n + 1)
+        local line = text:sub(pos, nl - 1)
+        pos = nl + 1
+        local isList = line:find("^%s*[%-%*%+]%s") or line:find("^%s*%d+[%.%)]%s") or line:find("^%s*\226\128\162%s")
+        if not line:find("%S") then
+          carry = false
+        else
+          local start = isList and carry or false
+          local last, from = start, 1
+          while true do
+            local s, e = line:find("[%.!?]%s+", from)
+            local sent = line:sub(from, s or #line)
+            last = scanSentence(sent, start, found, cites)
+            if not s then break end
+            from = e + 1
+          end
+          if not isList then carry = last and (line:gsub("[%s%*_]+$", "")):sub(-1) == ":" end
+        end
+      end
+    end
+    local flags = {}
+    for _, f in ipairs(M.BRIEF_FLAGS) do
+      if found[f.id] then flags[#flags + 1] = { id = f.id, label = f.label, quote = found[f.id] } end
+    end
+    return { flags = flags, cites = cites }
+  end
+end
+
+-- The flags one brief raises: { {id, label, quote}... }, empty for none.
+function M.briefFlags(task) return M.briefScan(task).flags end
+
+-- What only the whole batch shows. units = { {slug, task} or {slug, cites}... } in batch order.
+-- Two units citing one file (by its name; the longest spelling shown), the shared-by-convention
+-- and hook files aside, alphabetically by file; then more than one unit changing hook wiring.
+-- Each flag: { id = "same-file"|"hook-wiring", units = {slugs}, file?, line }.
+function M.batchBriefFlags(units)
+  local byBase, hooks, out = {}, {}, {}
+  for _, u in ipairs(type(units) == "table" and units or {}) do
+    local cites = type(u.cites) == "table" and u.cites or M.briefScan(u.task).cites
+    local seen, hookFiles = {}, {}
+    for _, c in ipairs(cites) do
+      if M.BRIEF_HOOK_FILES[c.base] then
+        if not seen[c.base] then hookFiles[#hookFiles + 1] = c.base end
+      elseif not M.BRIEF_SHARED_FILES[c.base] then
+        local b = byBase[c.base]
+        if not b then b = { units = {}, path = c.path }; byBase[c.base] = b end
+        if #c.path > #b.path or (#c.path == #b.path and c.path < b.path) then b.path = c.path end
+        if not seen[c.base] then b.units[#b.units + 1] = u.slug end
+      end
+      seen[c.base] = true
+    end
+    if #hookFiles > 0 then hooks[#hooks + 1] = { slug = u.slug, files = hookFiles } end
+  end
+  local bases = {}
+  for base, b in pairs(byBase) do if #b.units >= 2 then bases[#bases + 1] = base end end
+  table.sort(bases)
+  for _, base in ipairs(bases) do
+    local b = byBase[base]
+    out[#out + 1] = { id = "same-file", file = b.path, units = b.units,
+                      line = b.path .. " is cited by " .. table.concat(b.units, ", ") }
+  end
+  if #hooks >= 2 then
+    local slugs, parts = {}, {}
+    for _, h in ipairs(hooks) do
+      slugs[#slugs + 1] = h.slug
+      parts[#parts + 1] = h.slug .. " (" .. table.concat(h.files, ", ") .. ")"
+    end
+    out[#out + 1] = { id = "hook-wiring", units = slugs,
+                      line = #hooks .. " units change hook wiring — a batch takes at most one: " .. table.concat(parts, ", ") }
+  end
+  return out
+end
+
+-- The review's pre-flight: { count, line, rows }. rows = "<slug>: <label> — “<quote>”" per flag
+-- of a brief, then "batch: <line>" per batch flag.
+function M.batchPreflightView(batch)
+  local rows, inBriefs, flagged = {}, 0, {}
+  for _, u in ipairs(type(batch) == "table" and batch.units or {}) do
+    for _, f in ipairs(u.flags or {}) do
+      rows[#rows + 1] = u.slug .. ": " .. f.label .. " — “" .. f.quote .. "”"
+      inBriefs = inBriefs + 1
+      if flagged[#flagged] ~= u.slug then flagged[#flagged + 1] = u.slug end
+    end
+  end
+  local across = type(batch) == "table" and type(batch.briefFlags) == "table" and batch.briefFlags or {}
+  for _, f in ipairs(across) do rows[#rows + 1] = "batch: " .. f.line end
+  local n = inBriefs + #across
+  if n == 0 then return { count = 0, line = "✓ Pre-flight: no risky phrasing in the briefs.", rows = rows } end
+  local parts = {}
+  if inBriefs > 0 then parts[#parts + 1] = inBriefs .. " in " .. (#flagged == 1 and "the brief of " or "the briefs of ") .. table.concat(flagged, ", ") end
+  if #across > 0 then parts[#parts + 1] = #across .. " across the batch" end
+  return { count = n, rows = rows,
+           line = "⚑ Pre-flight: " .. n .. " flag" .. (n == 1 and "" or "s") .. " — " .. table.concat(parts, ", ")
+             .. " (advisory: Approve isn't held)" }
+end
+
 function M.parseBatch(raw)
   if type(raw) ~= "string" then return nil end
   local ok, t = pcall(function() return M.json.decode(raw) end)
@@ -4532,15 +4791,21 @@ function M.parseBatch(raw)
       if not covers then return nil end
     end
     if u.packet ~= nil and not batchPacketOk(u.packet) then return nil end
-    units[#units + 1] = { type = u.type, slug = u.slug, branch = u.branch, task = capChars(u.task, 4000),
-                          blockedBy = blockedBy, covers = covers, packet = u.packet }
+    -- 2026-10-03 (mining round 2, E3): the brief pre-flight reads the whole brief, once per file
+    local task = capChars(u.task, 4000)
+    local scan = M.briefScan(task)
+    units[#units + 1] = { type = u.type, slug = u.slug, branch = u.branch, task = task,
+                          blockedBy = blockedBy, covers = covers, packet = u.packet,
+                          flags = scan.flags, cites = scan.cites }
   end
   if M.batchOrderProblem(units) then return nil end
   if M.batchCoverageProblem(issues, triage, units) then return nil end
+  local briefFlags = M.batchBriefFlags(units)
+  for _, u in ipairs(units) do u.cites = nil end
   return { id = t.id, nonce = t.nonce, phase = t.phase, repo = repo, commonDir = repo .. "/.git",
            driver = { session_id = d.session_id, pid = tostring(d.pid or ""), name = type(d.name) == "string" and d.name or "" },
            title = capChars(t.title, 120), mergeWhenGreen = t.mergeWhenGreen == true, units = units,
-           at = tonumber(t.at) or 0, issues = issues, triage = triage }
+           at = tonumber(t.at) or 0, issues = issues, triage = triage, briefFlags = briefFlags }
 end
 
 local function batchUnit(batch, slug)
@@ -4801,8 +5066,13 @@ function M.batchView(batch, grant, state)
                    line = M.batchCoverageLine(cov) }
   end
   if phase == "proposed" then
+    -- 2026-10-03 (mining round 2, E3): the brief pre-flight, while Adam decides. Advisory only:
+    -- it never touches v.approvable.
+    v.preflight = M.batchPreflightView(batch)
+    local nf = v.preflight.count
     v.line = "⇉ proposes " .. n .. " unit" .. ((n == 1) and "" or "s") .. " in " .. folder
       .. ((uncovered > 0) and (" · " .. uncovered .. " issue" .. ((uncovered == 1) and "" or "s") .. " uncovered") or "")
+      .. ((nf > 0) and (" · ⚑ " .. nf .. " pre-flight flag" .. ((nf == 1) and "" or "s")) or "")
   elseif phase == "approved" then
     v.line = "⇉ driving " .. n .. " unit" .. ((n == 1) and "" or "s") .. " in " .. folder .. (grant.grantMerge and " · merges delegated" or "")
   elseif phase == "stopped" and grant.finished then v.line = "⇉ batch finished: " .. batch.title .. " (" .. tostring(grant.finished) .. ")"
@@ -22042,6 +22312,9 @@ M.FEATURES = {
   { key = "coverage", cat = "Control", new = true, title = "Coverage index",
     what = "A batch built from an issue list carries it: each unit names the issues it covers, and the rest are triaged (dup, wontfix, later or covered elsewhere, each with a note). Until every issue is covered or triaged, cc-fleet.sh refuses the proposal and names the uncovered ones, and the batch review lists them with Approve disabled.",
     why = "Nothing on the list is dropped silently: every issue ends up in a unit or in a written decision you read before you approve." },
+  { key = "preflight", cat = "Control", new = true, title = "Brief pre-flight",
+    what = "Before you approve a batch, its full briefs are scanned for force push, push to main, deleting or skipping tests, rm -rf, secrets and CI or deploy files — \"never git push\" doesn't count — and for two units citing one file or changing hook wiring. The review lists each flag with the words that raised it; cc-fleet.sh propose prints the same in one line.",
+    why = "A risky line buried past the review's 300-character cut gets your eyes before the units run. Advisory only: Approve is never held." },
   { key = "leases", cat = "Control", new = true, title = "Worktree leases",
     what = "Each worktree Shepherd starts a session for -- a New worktree tab, a batch unit, Instances Open -- gets its own port and database path (lease.portFrom-portTo, lease.dbDir). The session is told them in its prompt and at every start, /clear or compaction, and they are in $(git rev-parse --git-dir)/shepherd-lease.env for a project to source. The card shows :PORT. Once the worktree is gone the lease is freed, and the database file Shepherd named goes with it.",
     why = "Parallel units that run dev servers or databases never fight over one port or one file." },

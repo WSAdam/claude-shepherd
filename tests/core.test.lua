@@ -8471,8 +8471,10 @@ do
   -- 2026-10-02: 43 -> 44 for the Stop guards' question guard ("stopguards", flagged new).
   -- 2026-10-02: 44 -> 45 for asking a session a question ("seance", flagged new).
   -- 2026-10-03: 45 -> 46 for the unfinished-unit reminder ("unfinished", flagged new).
-  eq("FEATURES: the 46 new features are flagged", newCount, 46)
+  -- 2026-10-03: 46 -> 47 for the brief pre-flight ("preflight", flagged new).
+  eq("FEATURES: the 47 new features are flagged", newCount, 47)
   check("FEATURES: lists the unfinished-unit reminder", keys.unfinished == true)
+  check("FEATURES: lists the brief pre-flight", keys.preflight == true)
   check("FEATURES: lists the Stop guards", keys.stopguards == true)
   check("FEATURES: lists restarting the fleet in place", keys.restart == true)
   check("FEATURES: lists TODO lines that need a live run", keys.liverun == true)

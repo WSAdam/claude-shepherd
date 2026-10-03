@@ -450,6 +450,46 @@ triages the ones it won't build:
 All of it is optional. A batch with no issue list works as before, and its `covers` stay
 free-form.
 
+### Brief pre-flight: risky asks flagged before you approve
+
+The batch review shows each brief cut to 300 characters, and a brief can run to 4000. So before
+you approve, Shepherd scans every unit's **whole** brief for asks worth a second look:
+
+| Flag | Raised by, for example |
+|---|---|
+| force push | `git push --force` / `-f` / `--force-with-lease`, "force-push the branch" |
+| push to main | `git push origin main`, "push to master", `HEAD:main` (not "the main checkout") |
+| deletes or skips tests | `.skip(`, `.only`, `xit(`, `@skip`, "delete the failing test", "comment out the assertion" |
+| rm -rf | `rm -rf`, `rm -fr`, `rm -r -f` (not plain `rm -r`) |
+| touches secrets | `.env` (not `process.env`), `*.pem`, `credentials.json`, `id_rsa`, a private key |
+| CI or deploy files | `.github/workflows`, `.gitlab-ci.yml`, `deploy.sh`, "the deploy script", GitHub Actions |
+
+It reads negation the way the [claim check](#the-claim-check-a-hint-never-a-gate) does. A word
+like *never*, *don't*, *no* or *avoid* turns the rest of its sentence off, so *NEVER: git push,
+rm -rf, reset --hard* raises nothing, until *but*, *then*, *instead* or *except* turns it back on
+(*Never touch main, then force push* is flagged). A negation later in the same clause counts too
+(*rm -rf is never OK*), and a line ending in a negated *Never:* covers the list right under it.
+
+Two more flags need the whole batch:
+
+- **Two units citing one file** (*cc-core.lua is cited by alpha, beta*): a likely conflict. Files
+  every unit touches by convention don't count (`TODO.md`, `CHANGELOG.md`, `README.md`,
+  `CLAUDE.md`, `DECISIONS.md`, `tests/run.sh`, the transcript vocabulary), and neither do paths
+  outside the repo (`~/…`), globs, or a file a brief says not to touch.
+- **More than one unit changing hook wiring** (`settings-hooks.json`, `install.sh`,
+  `uninstall.sh`): a batch takes at most one.
+
+While the batch is proposed, the review shows one line (*⚑ Pre-flight: 3 flags — 1 in the brief
+of alpha, 2 across the batch (advisory: Approve isn't held)*, or *✓ Pre-flight: no risky phrasing
+in the briefs.*) and a row per flag that quotes the words that raised it. The card adds
+*· ⚑ 3 pre-flight flags*. `cc-fleet.sh propose` prints the same in one line beside the coverage
+line, and `cc-fleet.sh preflight --file <batch.json> [--json]` checks a batch file without
+proposing it.
+
+**Advisory only.** No flag refuses a proposal or disables **Approve batch**: it's a keyword scan,
+and the call is yours. The panel's scan (`core.briefScan`) and the script's jq are held to one
+table of cases, `tests/fixtures/brief-flags.tsv`.
+
 ### The batch relay: what the driver hears
 
 A driver used to piece together what its units had done from idle notices, the units' messages and

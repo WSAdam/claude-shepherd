@@ -14173,6 +14173,8 @@ local HTML = [[
   #d-batch ul { margin:4px 0 0 16px; padding:0; max-height:140px; overflow:auto; }
   #d-batch #db-cover { display:none; opacity:1; margin-top:6px; }
   #d-batch #db-uncovered { color:#f59e0b; }
+  #d-batch #db-preflight { display:none; opacity:1; margin-top:6px; }
+  #d-batch #db-flags { color:#f59e0b; }
   #d-batch button:disabled { opacity:.45; cursor:not-allowed; }
   #d-batch label { display:block; margin-top:6px; }
   #d-batch .dm-acts { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; align-items:center; }
@@ -15763,6 +15765,8 @@ local HTML = [[
       <ul id="db-units"></ul>
       <div class="dm-sub" id="db-cover"></div>
       <ul id="db-uncovered"></ul>
+      <div class="dm-sub" id="db-preflight"></div>
+      <ul id="db-flags"></ul>
       <label id="db-mergewrap"><input type="checkbox" id="db-merge"> Claude may merge these when green (each still passes Shepherd's own git check, one per repo at a time)</label>
       <div class="dm-acts" id="db-acts">
         <button id="db-approve" onclick="batchAct('batch-approve')" title="Let Claude open these units' tabs and hand them their tasks">Approve batch</button>
@@ -20388,6 +20392,13 @@ local HTML = [[
       covEl.style.display = (cov && cov.line) ? "" : "none";
       var unc = (cov && Array.isArray(cov.uncovered)) ? cov.uncovered : [];
       mergeFillList(document.getElementById("db-uncovered"), unc, function(x){ return (x.id || "") + " — " + (x.title || ""); });
+      // 2026-10-03 (mining round 2, E3): the brief pre-flight, while proposed. Its rows quote the
+      // driver's briefs: textContent only. Advisory: it never touches Approve.
+      var pf = proposed ? (b.preflight || null) : null;
+      var pfEl = document.getElementById("db-preflight");
+      pfEl.textContent = (pf && pf.line) || "";
+      pfEl.style.display = (pf && pf.line) ? "" : "none";
+      mergeFillList(document.getElementById("db-flags"), (pf && Array.isArray(pf.rows)) ? pf.rows : [], function(r){ return String(r); });
       var approveBtn = document.getElementById("db-approve");
       approveBtn.disabled = proposed && b.approvable === false;
       approveBtn.title = approveBtn.disabled ? "Every issue must be covered by a unit or triaged before this batch can be approved"

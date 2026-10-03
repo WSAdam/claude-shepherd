@@ -16,6 +16,12 @@
 #       Run it from inside the repo, in the BACKGROUND, and end the turn: Claude Code wakes the
 #       session when Adam answers. Exit 0 BATCH APPROVED, 3 DENIED (+ note), 4 still waiting
 #       (--wait-max), 5 withdrawn, 6 Shepherd isn't running, 2 refused (the reason is printed).
+#       It prints one pre-flight line (2026-10-03): what the briefs ask for that Adam should look
+#       at twice (force push, push to main, skipped tests, rm -rf, secrets, CI/deploy files, two
+#       units citing one file, two hook-wiring units). Advisory: it never refuses a batch.
+#   cc-fleet.sh preflight --file <batch.json> [--json]
+#       That pre-flight for a batch file, without proposing it (--json: each unit's flag ids and
+#       the batch's own flags). Needs no Shepherd.
 #   cc-fleet.sh tab --batch <id> --unit <slug> [--wait-max 240]
 #       Shepherd opens an empty Claude tab in the repo's window and answers with the new
 #       session's name and the message to send it (SendMessage). Driver only; approved batches only.
@@ -70,6 +76,120 @@ update_batch() { # <file> <jq filter> [jq args...]
   local tmp="$f.tmp.$$"
   if jq "$@" "$filter" "$f" > "$tmp" 2>/dev/null; then mv "$tmp" "$f"; else rm -f "$tmp"; return 1; fi
 }
+
+# The brief pre-flight (2026-10-03, mining round 2 unit E3): what a batch's briefs ask for that
+# Adam should look at twice -- force push, push to main, deleting or skipping tests, rm -rf,
+# secrets, CI or deploy files; two units citing one file; more than one unit changing hook wiring.
+# Negation-aware: "never git push" and "don't skip tests" aren't asks. Advisory only: it never
+# refuses or holds a batch. A jq mirror of core.briefScan / core.batchBriefFlags (cc-core.lua):
+# KEEP IN SYNC -- tests/fleet.test.sh runs `preflight --json` over tests/fixtures/brief-flags.tsv,
+# the table tests/brief-flags.test.lua holds the Lua to. Prepend it to a filter that ends in
+# bf_preflight (JSON) or bf_line (propose's one line); the input is the batch JSON.
+BRIEF_PREFLIGHT_JQ='
+def bf_isneg: IN("no", "not", "none", "without", "never", "zero", "nor", "cannot", "avoid", "avoids", "forbidden",
+                 "prohibited", "dont") or endswith("n\u0027t");
+def bf_isreset: IN("but", "then", "instead", "however", "except", "otherwise");
+def bf_order: ["force-push", "push-main", "tests", "rm-rf", "secrets", "ci-deploy"];
+def bf_label: {"force-push": "force push", "push-main": "push to main", "tests": "deletes or skips tests",
+               "rm-rf": "rm -rf", "secrets": "touches secrets", "ci-deploy": "CI or deploy files"}[.];
+def bf_rx: {
+  "force-push": ["force[\\s-]?push", "(?<![a-z0-9])push(?![a-z0-9])[^,;]*?--force",
+                 "(?<![a-z0-9])push(?![a-z0-9])[^,;]*?\\s-f(?![a-z0-9-])", "(?<![a-z0-9])push(?![a-z0-9])[^,;]*?\\s\\+[a-z0-9_]"],
+  "tests": ["\\.skip(?![a-z0-9])", "\\.only(?![a-z0-9])", "(?<![a-z0-9])xit\\(", "(?<![a-z0-9])xdescribe(?![a-z0-9])",
+            "(?<![a-z0-9])xtest\\(", "@skip", "mark\\.skip", "#\\[ignore\\]"],
+  "rm-rf": ["(?<![a-z0-9])rm\\s+-[a-z]*r[a-z]*f", "(?<![a-z0-9])rm\\s+-[a-z]*f[a-z]*r", "(?<![a-z0-9])rm\\s+-r\\s+-f",
+            "(?<![a-z0-9])rm\\s+-f\\s+-r"],
+  "secrets": ["(?<![.a-z0-9_])\\.env(?![a-z0-9])", "\\.pem(?![a-z0-9])", "\\.p12(?![a-z0-9])", "(?<![a-z0-9])id_rsa",
+              "(?<![a-z0-9])id_ed25519", "(?<![a-z0-9])credentials?(?![a-z0-9])", "private[\\s_-]key",
+              "service[\\s_-]account[a-z0-9_-]*\\.json"],
+  "ci-deploy": ["\\.github/workflows", "\\.gitlab-ci", "(?<![a-z0-9])jenkinsfile", "\\.circleci", "\\.travis\\.yml",
+                "(?<![a-z0-9])deploy[a-z0-9_-]*\\.sh(?![a-z0-9])", "(?<![a-z0-9])deploy[a-z0-9_-]*\\.ya?ml",
+                "(?<![a-z0-9])fly\\.toml", "(?<![a-z0-9])netlify\\.toml", "(?<![a-z0-9])vercel\\.json",
+                "(?<![a-z0-9])wrangler\\.toml", "deploy\\s+scripts?", "github\\s+actions?", "(?<![a-z0-9])ci\\s+config",
+                "(?<![a-z0-9])ci\\s+workflows?", "(?<![a-z0-9])ci\\s+pipelines?"]
+};
+def bf_fold($c): reduce .[] as $x ($c; if ($x.w | bf_isneg) then true elif ($x.w | bf_isreset) then false else . end);
+def bf_isfile:
+  IN("Makefile", "SHIPPED", "Dockerfile", "Jenkinsfile")
+  or ([ capture("^(?<stem>.+)\\.(?<ext>[A-Za-z0-9]+)$") ][0] as $m
+      | $m != null and ($m.stem | test("[A-Za-z]"))
+        and ($m.ext | ascii_downcase | IN("lua", "sh", "bash", "zsh", "js", "mjs", "cjs", "ts", "tsx", "jsx", "json", "jsonl",
+             "md", "yml", "yaml", "toml", "py", "rb", "go", "rs", "css", "scss", "html", "htm", "txt", "tsv", "csv", "sql",
+             "env", "pem", "conf", "cfg", "ini", "xml", "plist", "swift", "kt", "java", "c", "h", "cc", "cpp", "hpp",
+             "lock", "rune")));
+# One sentence, starting in negation state $c: { flags, cites, state } (core.briefScan scanSentence)
+def bf_sentence($c):
+  . as $t | ascii_downcase as $s
+  | [ $s | match("[a-z\u0027]+"; "g") | { o: .offset, w: .string } ] as $ws
+  | ($ws | length) as $n
+  | [ $s | match("[,;:()]"; "g") | .offset ] as $cl
+  | [ $s | match("[,;]"; "g") | .offset ] as $cm
+  | def neg($p):
+      ([ $ws[] | select(.o < $p) ] | bf_fold($c))
+      or ((first($cl[] | select(. >= $p)) // 1e9) as $end | any($ws[]; .o > $p and .o < $end and (.w | bf_isneg)));
+    (bf_rx | with_entries(.value = [ .value[] as $r | $s | match($r; "g") | .offset ])) as $rx
+  | [ range(0; $n) as $i | select($ws[$i].w | IN("push", "pushes", "pushed", "pushing"))
+      | ([ range($i + 1; [$i + 5, $n] | min) | select($ws[.].w | IN("main", "master")) ][0]) as $k
+      | select($k != null)
+      | select((($ws[$k + 1].w // "") | sub("\u0027s$"; "")
+                | IN("checkout", "worktree", "session", "chat", "conversation", "tab", "window", "thread")) | not)
+      | select(all($cm[]; . <= $ws[$i].o or . >= $ws[$k].o))
+      | $ws[$i].o ] as $pm
+  | [ range(0; $n) as $j | select($ws[$j].w | IN("test", "tests", "fixture", "fixtures", "assertion", "assertions", "suite", "suites"))
+      | ( (range([$j - 3, 0] | max; $j) as $i
+           | if ($ws[$i].w | IN("delete", "deletes", "deleted", "deleting", "remove", "removes", "removed", "removing",
+                                 "skip", "skips", "skipped", "skipping", "disable", "disables", "disabled", "disabling",
+                                 "loosen", "loosens", "loosened", "loosening", "weaken", "weakens", "weakened", "weakening"))
+             then $ws[$i].o
+             elif $ws[$i].w == "out" and $i > 0 and ($ws[$i - 1].w | IN("comment", "comments", "commented")) then $ws[$i - 1].o
+             else empty end),
+          (range($j + 1; [$j + 3, $n] | min) as $i
+           | select($ws[$i].w | IN("deleted", "removed", "skipped", "disabled", "loosened", "weakened")) | $ws[$j].o) ) ] as $tw
+  | ($rx + { "push-main": $pm, tests: ($rx.tests + $tw) }) as $hits
+  | { flags: [ bf_order[] as $id | select(any($hits[$id][]; neg(.) | not)) | $id ],
+      cites: [ $t | match("[A-Za-z0-9._/~$*-]+"; "g") | select(neg(.offset) | not) | .string
+               | select(contains("*") | not) | sub("\\.+$"; "") | sub("^\\./"; "")
+               | select(test("^[~/$]") | not)
+               | ((split("/") | last) // "") as $b
+               | select($b | bf_isfile)
+               | select($b | ascii_downcase | IN("node.js", "next.js", "vue.js", "nuxt.js", "d3.js", "chart.js", "three.js") | not)
+               | { base: ($b | ascii_downcase), path: . } ],
+      state: ($ws | bf_fold($c)) };
+# One brief: { flags (in bf_order), cites }. A list line under a negated "Never:" starts negated.
+def bf_scan:
+  gsub("\u2019"; "\u0027") | gsub("\r"; "") | split("\n")
+  | reduce .[] as $line ({ carry: false, flags: [], cites: [] };
+      ($line | test("^\\s*([-*+\u2022]|[0-9]+[.)])\\s")) as $list
+      | if ($line | test("\\S") | not) then .carry = false
+        else (if $list then .carry else false end) as $start
+          | reduce ($line | splits("(?<=[.!?])\\s+")) as $t (.last = $start;
+              ($t | bf_sentence($start)) as $r | .flags += $r.flags | .cites += $r.cites | .last = $r.state)
+          | if $list then . else .carry = (.last and ($line | sub("[\\s*_]+$"; "") | endswith(":"))) end
+        end)
+  | .flags as $f | { flags: [ bf_order[] | select(. as $i | any($f[]; . == $i)) ], cites };
+def bf_shared: IN("todo.md", "changelog.md", "readme.md", "claude.md", "decisions.md", "run.sh", "vocabulary.txt");
+def bf_hook: IN("settings-hooks.json", "install.sh", "uninstall.sh");
+# The batch: { units: [{slug, flags}], batch: [{id: same-file, file, units} | {id: hook-wiring, units}] }
+def bf_preflight:
+  [ (.units // [])[] | { slug: ((.slug // "?") | tostring), scan: ((.task // "") | tostring | bf_scan) } ] as $u
+  | { units: [ $u[] | { slug, flags: .scan.flags } ],
+      batch: ( ([ $u | to_entries[] | .key as $ix | .value.slug as $s | .value.scan.cites[]
+                  | select(.base | (bf_shared or bf_hook) | not) | . + { ix: $ix, slug: $s } ]
+                | group_by(.base)
+                | map(select((map(.ix) | unique | length) >= 2)
+                      | { id: "same-file", file: (sort_by([-(.path | length), .path]) | .[0].path),
+                          units: (sort_by(.ix) | reduce .[].slug as $x ([]; if any(.[]; . == $x) then . else . + [$x] end)) }))
+             + ([ $u[] | select(any(.scan.cites[]; .base | bf_hook)) | .slug ] as $h
+                | if ($h | length) >= 2 then [ { id: "hook-wiring", units: $h } ] else [] end) ) };
+# propose'"'"'s one line
+def bf_line:
+  bf_preflight as $p
+  | ([ $p.units[] | select(.flags | length > 0) | "\(.slug): \([ .flags[] | bf_label ] | join(", "))" ]
+     + [ $p.batch[] | if .id == "same-file" then "\(.file) is cited by \(.units | join(", "))"
+                      else "\(.units | length) units change hook wiring (\(.units | join(", "))) -- a batch takes at most one" end ]) as $parts
+  | if ($parts | length) == 0 then "🔍 Pre-flight: no risky phrasing in the briefs."
+    else "🔍 Pre-flight (advisory; Adam sees it in the review): " + ($parts | join("; ")) + "." end;
+'
 
 # Wait for <decision> bound to <nonce>; claim with mv, put a stranger's answer back. Prints
 # the claimed JSON on stdout. Returns 0 claimed, 4 wait-max ran out, 5 <watched> gone.
@@ -287,6 +407,9 @@ cmd_propose() {
         + ([ (if $c > 0 then "\($c) covered by \(if $c == 1 then "a unit" else "units" end)" else empty end),
              (if $t > 0 then "\($t) triaged" else empty end) ] | join(", ")) + "."
     else empty end' "$bf"
+  # 2026-10-03 (mining round 2, E3): the brief pre-flight, one line (core.batchPreflightView's twin).
+  # Advisory: a jq failure here prints nothing and the proposal goes on.
+  jq -r "$BRIEF_PREFLIGHT_JQ bf_line" "$bf" 2>/dev/null
 
   collect_answer "$id" "$bf" "$nonce" "$waitmax" "$main"
 }
@@ -523,13 +646,31 @@ cmd_alive() {
   exit 6
 }
 
+# What a batch file's briefs ask for that Adam should look at twice -- the line propose prints, or
+# with --json each unit's flag ids and the batch's own flags. Proposes nothing; needs no Shepherd.
+cmd_preflight() {
+  local file="" json=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --file) file="${2:-}"; shift 2 ;;
+      --json) json=1; shift ;;
+      *) refuse "unknown option: $1" ;;
+    esac
+  done
+  [ -f "$file" ] || refuse "--file must name the batch JSON"
+  jq -e '(.units | type) == "array"' "$file" >/dev/null 2>&1 || refuse "the batch file has no units list"
+  if [ -n "$json" ]; then jq -c "$BRIEF_PREFLIGHT_JQ bf_preflight" "$file"
+  else jq -r "$BRIEF_PREFLIGHT_JQ bf_line" "$file"; fi
+}
+
 case "${1:-}" in
   propose) shift; cmd_propose "$@" ;;
+  preflight) shift; cmd_preflight "$@" ;;
   tab)     shift; cmd_tab "$@" ;;
   status)  shift; cmd_status "$@" ;;
   wait)    shift; cmd_wait "$@" ;;
   stop)    shift; cmd_stop "$@" ;;
   alive)   shift; cmd_alive "$@" ;;
-  *) echo "usage: cc-fleet.sh propose --file <batch.json> | propose --resume <id> | tab --batch <id> --unit <slug> | status --batch <id> | wait --batch <id> [--after N] [--wait-max S] | stop --batch <id> | alive"
+  *) echo "usage: cc-fleet.sh propose --file <batch.json> | propose --resume <id> | preflight --file <batch.json> [--json] | tab --batch <id> --unit <slug> | status --batch <id> | wait --batch <id> [--after N] [--wait-max S] | stop --batch <id> | alive"
      exit 2 ;;
 esac

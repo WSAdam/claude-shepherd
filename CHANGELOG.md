@@ -32,6 +32,7 @@ parallel units. Each unit adds its line here.
   (`claude -p --resume <transcript> --fork-session --no-session-persistence`) answers in place, in
   the session's model with a budget sized from its context. It runs in its own lane, never behind a
   repo's checker. Nothing is saved, and the session's transcript is only read.
+- Added: **Brief pre-flight**. A proposed batch's full briefs (not the review's 300-character cut) are scanned for force push, push to main, deleting or skipping tests, `rm -rf`, secrets and CI or deploy files, negation-aware ("never git push" doesn't count), plus two units citing one file and more than one hook-wiring unit; the review lists each flag with the words that raised it, the card counts them, and `cc-fleet.sh propose` prints one line (`cc-fleet.sh preflight` checks a file without proposing). Advisory only: Approve is never held. The panel's Lua and the script's jq answer to one table, `tests/fixtures/brief-flags.tsv`.
 
 ## 2026-10-02 — A failed tool no longer stays "in flight"
 
