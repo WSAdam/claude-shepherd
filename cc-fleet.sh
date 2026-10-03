@@ -93,16 +93,65 @@ wait_answer() { # <decision file> <nonce> <watched file> <wait-max>
   done
 }
 
+# Wait for Adam's answer to proposal <id> and act on it: what `propose` does once the batch is
+# written, and all `propose --resume` does (2026-10-02: a late answer to a proposal whose waiting
+# propose is gone -- killed at a background limit -- was never collected, and its batch read
+# "proposed" for good).
+collect_answer() { # <id> <batch file> <nonce> <wait-max> <main checkout>
+  local id="$1" bf="$2" nonce="$3" waitmax="$4" main="$5"
+  local ans rc
+  ans="$(wait_answer "$FLEET_DIR/$id.decision" "$nonce" "$bf" "$waitmax")"; rc=$?
+  if [ "$rc" -eq 5 ]; then echo "↩︎ The proposal was withdrawn."; exit 5; fi
+  if [ "$rc" -eq 4 ]; then echo "⏳ Still waiting for Adam after ${waitmax}s -- batch $id stays proposed. Collect his answer later with: ~/.claude/cc-fleet.sh propose --resume $id"; exit 4; fi
+  local verdict grant note
+  verdict="$(printf '%s' "$ans" | jq -r '.verdict // empty')"
+  grant="$(printf '%s' "$ans" | jq -r '.grantMerge == true')"
+  note="$(printf '%s' "$ans" | jq -r '.note // empty' | head -c 500)"
+  if [ "$verdict" != "approve" ]; then
+    update_batch "$bf" '.phase = "denied" | .note = $n' --arg n "$note"
+    echo "DENIED: ${note:-(no note)}"
+    echo "Adam didn't approve batch $id. Nothing was opened."
+    exit 3
+  fi
+  update_batch "$bf" '.phase = "approved" | .approvedAt = $t' --argjson t "$(date +%s)"
+  echo "BATCH APPROVED -- $(jq -r .title "$bf"): $(jq -r '.units | length' "$bf") units in $main."
+  if [ "$grant" = "true" ]; then
+    echo "Merges are delegated: Shepherd merges each unit once its own git check finds it ready (one per repo at a time)."
+  else
+    echo "Merges are NOT delegated: each unit stops at 'ready to merge' for Adam's click."
+  fi
+  echo "For each unit, open its tab, then SendMessage the printed session the printed message (notify_when_idle: true):"
+  jq -r --arg id "$id" '.units[] | "  ~/.claude/cc-fleet.sh tab --batch \($id) --unit \(.slug)"
+    + (if ((.blockedBy // []) | length) > 0 then "   (waits for \(.blockedBy | join(", ")) to merge first)" else "" end)' "$bf"
+  if jq -e '.units | any((.blockedBy // []) | length > 0)' "$bf" >/dev/null 2>&1; then
+    echo "A unit that waits isn't opened until its blockers have merged: its tab command exits 7 until then -- open the others first."
+  fi
+  echo "Follow them with ~/.claude/cc-fleet.sh wait --batch $id in the background; it wakes you with each unit's events."
+  echo "After each wake, run it again with the --after it prints (never poll ListAgents)."
+  echo "When every unit has merged or blocked: ~/.claude/cc-fleet.sh stop --batch $id, then summarise for Adam."
+  exit 0
+}
+
 cmd_propose() {
-  local file="" waitmax=0
+  local file="" waitmax=0 resume=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --file) file="${2:-}"; shift 2 ;;
       --wait-max) waitmax="${2:-}"; shift 2 ;;
+      --resume) resume="${2:-}"; shift 2 ;;
       *) refuse "unknown option: $1" ;;
     esac
   done
   case "$waitmax" in ''|*[!0-9]*) refuse "--wait-max takes whole seconds" ;; esac
+  if [ -n "$resume" ]; then
+    local rbf; rbf="$(batch_file "$resume")"
+    [ -f "$rbf" ] || refuse "no batch $resume"
+    [ "$(jq -r .driver.session_id "$rbf")" = "$SID" ] || refuse "only the session that proposed batch $resume can collect Adam's answer"
+    [ "$(jq -r '.phase // empty' "$rbf")" = "proposed" ] \
+      || refuse "batch $resume isn't waiting for an answer (it's $(jq -r '.phase // "unknown"' "$rbf"))"
+    echo "⏳ Waiting for Adam's answer to batch $resume..."
+    collect_answer "$resume" "$rbf" "$(jq -r .nonce "$rbf")" "$waitmax" "$(jq -r '.repo // empty' "$rbf")"
+  fi
   [ -f "$file" ] || refuse "--file must name the batch JSON"
   local problems
   problems="$(jq -r '
@@ -239,37 +288,7 @@ cmd_propose() {
              (if $t > 0 then "\($t) triaged" else empty end) ] | join(", ")) + "."
     else empty end' "$bf"
 
-  local ans rc
-  ans="$(wait_answer "$FLEET_DIR/$id.decision" "$nonce" "$bf" "$waitmax")"; rc=$?
-  if [ "$rc" -eq 5 ]; then echo "↩︎ The proposal was withdrawn."; exit 5; fi
-  if [ "$rc" -eq 4 ]; then echo "⏳ Still waiting for Adam after ${waitmax}s -- batch $id stays proposed."; exit 4; fi
-  local verdict grant note
-  verdict="$(printf '%s' "$ans" | jq -r '.verdict // empty')"
-  grant="$(printf '%s' "$ans" | jq -r '.grantMerge == true')"
-  note="$(printf '%s' "$ans" | jq -r '.note // empty' | head -c 500)"
-  if [ "$verdict" != "approve" ]; then
-    update_batch "$bf" '.phase = "denied" | .note = $n' --arg n "$note"
-    echo "DENIED: ${note:-(no note)}"
-    echo "Adam didn't approve batch $id. Nothing was opened."
-    exit 3
-  fi
-  update_batch "$bf" '.phase = "approved" | .approvedAt = $t' --argjson t "$(date +%s)"
-  echo "BATCH APPROVED -- $(jq -r .title "$bf"): $(jq -r '.units | length' "$bf") units in $main."
-  if [ "$grant" = "true" ]; then
-    echo "Merges are delegated: Shepherd merges each unit once its own git check finds it ready (one per repo at a time)."
-  else
-    echo "Merges are NOT delegated: each unit stops at 'ready to merge' for Adam's click."
-  fi
-  echo "For each unit, open its tab, then SendMessage the printed session the printed message (notify_when_idle: true):"
-  jq -r --arg id "$id" '.units[] | "  ~/.claude/cc-fleet.sh tab --batch \($id) --unit \(.slug)"
-    + (if ((.blockedBy // []) | length) > 0 then "   (waits for \(.blockedBy | join(", ")) to merge first)" else "" end)' "$bf"
-  if jq -e '.units | any((.blockedBy // []) | length > 0)' "$bf" >/dev/null 2>&1; then
-    echo "A unit that waits isn't opened until its blockers have merged: its tab command exits 7 until then -- open the others first."
-  fi
-  echo "Follow them with ~/.claude/cc-fleet.sh wait --batch $id in the background; it wakes you with each unit's events."
-  echo "After each wake, run it again with the --after it prints (never poll ListAgents)."
-  echo "When every unit has merged or blocked: ~/.claude/cc-fleet.sh stop --batch $id, then summarise for Adam."
-  exit 0
+  collect_answer "$id" "$bf" "$nonce" "$waitmax" "$main"
 }
 
 # What a tab answer says to the driver: the session's name, a warning if Shepherd sent one, and
@@ -511,6 +530,6 @@ case "${1:-}" in
   wait)    shift; cmd_wait "$@" ;;
   stop)    shift; cmd_stop "$@" ;;
   alive)   shift; cmd_alive "$@" ;;
-  *) echo "usage: cc-fleet.sh propose --file <batch.json> | tab --batch <id> --unit <slug> | status --batch <id> | wait --batch <id> [--after N] [--wait-max S] | stop --batch <id> | alive"
+  *) echo "usage: cc-fleet.sh propose --file <batch.json> | propose --resume <id> | tab --batch <id> --unit <slug> | status --batch <id> | wait --batch <id> [--after N] [--wait-max S] | stop --batch <id> | alive"
      exit 2 ;;
 esac

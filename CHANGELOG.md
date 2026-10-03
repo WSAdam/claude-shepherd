@@ -9,6 +9,11 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
 The second feature-mining round (Maestro, Gas Town, ECC, oh-my-claudecode, OpenRig), built as
 parallel units. Each unit adds its line here.
 
+- Fixed: a batch Adam approved after the driver's `cc-fleet.sh propose` had stopped waiting (killed at
+  a 10-minute background limit) was stranded: nothing could collect the answer, the batch read
+  "proposed" for good, and it had to be proposed and approved again. `cc-fleet.sh propose --resume <id>`
+  now collects a late answer, for the session that proposed it only.
+
 - Coach lessons ledger: every Apply, Skip (with an optional one-line reason typed next to Skip)
   and Undo is kept per repo (`~/.claude/cc-coach/<repo>.lessons.json`), and the next run's prompt
   carries it, so an applied suggestion isn't proposed again and a skipped or undone one comes back

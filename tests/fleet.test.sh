@@ -172,6 +172,26 @@ batch '{"title":"Slow","units":[{"type":"docs","slug":"delta","task":"t"}]}'
 fleet drv p3 propose --file "$TMP/batch.json" --wait-max 1
 assert_eq "--wait-max: still waiting -> exit 4" "4" "$(cat "$TMP/p3.rc")"
 
+# ---- a late answer is picked up with --resume (2026-10-02) ----
+# 2026-10-02: the driver's propose ran in the background and was killed at its 10-minute limit; Adam
+# approved 54 minutes later, and nothing could ever claim that answer: the batch read "proposed" for
+# good, tab refused it, and the only way on was a fresh proposal for Adam to approve twice.
+B3="$(newest_batch)"; B3ID="$(jq -r .id "$B3")"
+fleet drv r0 propose --resume "$B3ID" --wait-max 1
+assert_eq "--resume: no answer yet -> still waiting, exit 4" "4" "$(cat "$TMP/r0.rc")"
+fleet other r1 propose --resume "$B3ID" --wait-max 1
+assert_eq "--resume: another session can't collect the driver's answer" "2" "$(cat "$TMP/r1.rc")"
+decide "$B3" approve true
+fleet drv r2 propose --resume "$B3ID" --wait-max 5
+assert_eq "--resume: Adam's late approval is collected -> exit 0" "0" "$(cat "$TMP/r2.rc")"
+grep -q "BATCH APPROVED" "$TMP/r2.out" && got=yes || got=no
+assert_eq "...and says so, like a propose that waited" "yes" "$got"
+assert_json "...and the batch is approved, so its tabs can open" "$B3" .phase approved
+fleet drv r3 propose --resume "$B3ID" --wait-max 1
+assert_eq "--resume on a batch already answered refuses" "2" "$(cat "$TMP/r3.rc")"
+fleet drv r4 propose --resume "b000nope" --wait-max 1
+assert_eq "--resume on a batch that isn't there refuses" "2" "$(cat "$TMP/r4.rc")"
+
 # ---- `alive`: the one honest way to ask whether Shepherd is up (2026-09-22) ----
 # 2026-09-22: a session checked with `pgrep -fl -i shepherd`, found nothing, and told Adam
 # "Shepherd isn't running" -- while he was looking at its question ON the card. There is no

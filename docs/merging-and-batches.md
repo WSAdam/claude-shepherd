@@ -365,7 +365,9 @@ approval from you per batch**:
    [`blockedBy`](#a-batch-unit-that-waits-blockedby), `mergeWhenGreen` if it asks to merge
    them when green, and the [issue list](#coverage-index-a-batch-says-what-it-covers) it was built
    from, if any) and runs
-   `~/.claude/cc-fleet.sh propose --file <batch.json>` in the background.
+   `~/.claude/cc-fleet.sh propose --file <batch.json>` in the background. If that command stops
+   before you answer (a background time limit kills it), the answer isn't lost: the driver collects
+   it later with `cc-fleet.sh propose --resume <id>`.
 2. Its card says *⇉ proposes 3 units in <repo>* and reads **Needs you** (red dot, pulsing ring, one
    alert). Its detail panel shows the
    batch: every unit and its task, and a **"Claude may merge these when green"** checkbox set to
