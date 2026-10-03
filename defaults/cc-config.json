@@ -158,5 +158,9 @@
     "question": true,
     "fakeDone": true,
     "unfinished": true
+  },
+  "alerts": {
+    "idleMinutes": 15,
+    "voice": false
   }
 }

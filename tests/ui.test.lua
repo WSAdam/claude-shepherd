@@ -5079,5 +5079,49 @@ do
   check("lessons: no FSEvents watcher on the folder", not src:find("pathwatcher.new(FX.LESSON_DIR", 1, true))
 end
 
+-- ---- The fleet-idle alert speaks through hs.speech, never a shell `say` (2026-10-03) ----
+-- Mining round 2 unit D4a. tests/fleet-idle.test.lua drives the alert on a real tick; this pins the
+-- wiring: the tick runs it isolated, AFTER the needs-you stamp (it speaks needs-you edges), and no
+-- line in the panel or core runs `say` through hs.execute / hs.task / os.execute -- Hammerspoon is
+-- single-threaded, so a synchronous `say` would freeze the whole panel for as long as it talks.
+do
+  local function slurp(name) local f = io.open(ROOT .. name, "r"); local s = f and f:read("*a") or ""; if f then f:close() end; return s end
+  local src = slurp("claude-dashboard.lua")
+  local tick = src:match("function FX%._refreshBody%(%)(.-)\nend\n") or ""
+  local needs, idle = tick:find("FX.annotateNeedsYou(list)", 1, true), tick:find("pcall(FX.stepFleetIdle, list, cfg)", 1, true)
+  check("fleet idle: the tick steps the alert, isolated in a pcall", idle ~= nil)
+  check("fleet idle: ...after the needs-you stamp", needs ~= nil and idle ~= nil and needs < idle)
+  local speak = src:match("function FX%.speak%(text%)(.-)\nend\n") or ""
+  check("fleet idle: FX.speak talks through hs.speech", speak:find("hs.speech.new(", 1, true) ~= nil)
+  check("fleet idle: ...and keeps its synthesizer (an unretained one can be collected mid-sentence)",
+        speak:find("FX._speaker = FX._speaker or hs.speech.new(", 1, true) ~= nil)
+  local shelled = {}
+  for _, name in ipairs({ "claude-dashboard.lua", "cc-core.lua" }) do
+    local n, pos, s = 0, 1, slurp(name)
+    while pos <= #s do
+      local nl = s:find("\n", pos, true) or (#s + 1)
+      local line = s:sub(pos, nl - 1)
+      n, pos = n + 1, nl + 1
+      if (line:find("execute(", 1, true) or line:find("task.new(", 1, true)) and line:find("%f[%w]say%f[%W]") then
+        shelled[#shelled + 1] = name .. ":" .. n
+      end
+    end
+  end
+  check("fleet idle: nothing runs `say` through a shell (" .. table.concat(shelled, " ") .. ")", #shelled == 0)
+  check("fleet idle: Settings has the idle-minutes row", src:find('id="s-al-idle"', 1, true) ~= nil)
+  check("fleet idle: ...and the spoken-alerts row", src:find('id="s-al-voice"', 1, true) ~= nil)
+  -- a section lands in a Settings tab by its header's first words; unmatched ones fall to General
+  local autoTab = src:match('\n([^\n]*)return "automation";') or ""
+  check("fleet idle: its section sits in the Automation tab, next to Escalation",
+        src:find('<div class="s-sec">Fleet idle alert</div>', 1, true) ~= nil and autoTab:find('s("Fleet idle")', 1, true) ~= nil)
+  check("fleet idle: the form fills both from alerts.*",
+        src:find('val("s-al-idle", cv(cfg,"alerts.idleMinutes",15));', 1, true) ~= nil
+        and src:find('ck("s-al-voice", cv(cfg,"alerts.voice",false));', 1, true) ~= nil)
+  check("fleet idle: ...and a Save sends them",
+        src:find('alerts: { idleMinutes: num("s-al-idle",15), voice: ck("s-al-voice") },', 1, true) ~= nil)
+  check("fleet idle: the Lua default matches the form's (15)",
+        src:find('core.config(cfg, "alerts.idleMinutes", 15)', 1, true) ~= nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

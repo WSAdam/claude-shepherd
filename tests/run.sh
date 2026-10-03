@@ -520,6 +520,9 @@ echo ""
 echo "== node: the Restart fleet preview's rows -- what would reopen is ticked, what closed earlier isn't, what is left alone can't be picked, every word escaped (behavioral, runs the shipped restartRowsHtml) =="
 node "$DIR/restart-view.test.js" || fail=1
 echo ""
+echo "== lua: the fleet-idle alert -- one banner (plus an ntfy push) once every local session has been idle for alerts.idleMinutes, re-armed only when one works again, an interrupted turn idle and a quiet one not, spoken through hs.speech when alerts.voice is on (pure + behavioral, stubbed hs) =="
+HOME="$(mktemp -d)" lua "$DIR/fleet-idle.test.lua" || fail=1
+echo ""
 
 if [ "$fail" -eq 0 ]; then
   echo "✅ ALL GREEN"

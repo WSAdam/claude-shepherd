@@ -128,8 +128,8 @@ every other automatic behaviour here waits for its switch.
   suggests `CLAUDE.md` edits with evidence; Apply commits that file alone. It runs weekly, from a card,
   or once enough new evidence arrives (`cc-lesson.sh` files a lesson for it); remembers what you applied,
   skipped (and why) or undid; judges each applied edit on the sessions since; and Sharpen rewords one.
-- [**Notifications & escalation**](docs/automation.md#escalation-and-watchdogs): louder nags, macOS
-  banners and phone pushes when a session has waited on you too long or stalled.
+- [**Notifications & escalation**](docs/automation.md#escalation-and-watchdogs): nags, banners and pushes when a session waits
+  too long or stalls; a [**Fleet idle alert**](docs/automation.md#fleet-idle-alert) once nothing has worked for 15 min.
 - [**A/B compare**](docs/automation.md#ab-compare): run one task as 2–4 variants in separate
   worktrees, score them, and keep the winner.
 

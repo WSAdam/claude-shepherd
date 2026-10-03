@@ -8473,7 +8473,8 @@ do
   -- 2026-10-03: 45 -> 46 for the unfinished-unit reminder ("unfinished", flagged new).
   -- 2026-10-03: 46 -> 47 for the brief pre-flight ("preflight", flagged new).
   -- 2026-10-03: 47 -> 48 for checking "done" against the diff ("fakedone", flagged new).
-  eq("FEATURES: the 48 new features are flagged", newCount, 48)
+  -- 2026-10-03: 48 -> 49 for the fleet-idle alert ("fleetidle", flagged new).
+  eq("FEATURES: the 49 new features are flagged", newCount, 49)
   check("FEATURES: lists checking \"done\" against the diff", keys.fakedone == true)
   check("FEATURES: lists the unfinished-unit reminder", keys.unfinished == true)
   check("FEATURES: lists the brief pre-flight", keys.preflight == true)

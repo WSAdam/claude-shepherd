@@ -34,8 +34,9 @@ form-managed block is dropped on Save. Its tabs:
   advanced gate settings, the policies (approve repeats, Autopilot, allow/deny patterns), and the
   **Always ask** commands with your own additions
   ([Approvals and policies](approvals-and-policies.md)).
-- **Automation**: the task queue, escalation, graceful drain, respawn, Auto-Continue, **Dry run**
-  (all automation, or one feature at a time) and Auto-compact ([Automation](automation.md)).
+- **Automation**: the task queue, escalation, the fleet idle alert, graceful drain, respawn,
+  Auto-Continue, **Dry run** (all automation, or one feature at a time) and Auto-compact
+  ([Automation](automation.md)).
 - **Observability**: risk score, same-folder collision, insights, auto-title, loop watchdog, macOS
   banners, post-run summary, PR status, the hooks inventory, the audit log and **Measure storage**
   ([Usage and cost](usage-and-cost.md)).

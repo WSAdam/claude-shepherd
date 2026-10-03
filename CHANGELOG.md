@@ -9,6 +9,12 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
 The second feature-mining round (Maestro, Gas Town, ECC, oh-my-claudecode, OpenRig), built as
 parallel units. Each unit adds its line here.
 
+- Fleet idle alert: once every local session has been idle or done for `alerts.idleMinutes` (on, 15),
+  Shepherd sends one macOS banner, plus an ntfy push when escalation push is on, and arms again only
+  when a session works again (`core.fleetIdleAlertDue`). An interrupted turn counts as idle on its
+  transcript marker, never a quiet one. `alerts.voice` (off) speaks it through `hs.speech`, and
+  `alerts.voiceEvents: ["needsYou"]` also says when a session starts needing you.
+
 - Restart outcomes: a Restart fleet row no longer ends at "opened" (a link went out, a line was typed).
   Each reopened session ends as **resumed** (its hooks wrote again, or a session file names it under a
   new process), **came back fresh** (a new session in its folder, named only while no other reopened

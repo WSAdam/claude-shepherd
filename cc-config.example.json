@@ -199,7 +199,11 @@
 
   "alerts": {
     "_comment": "Where Shepherd's messages go. By default they are small toasts at the bottom of Shepherd's own panel (and the Hammerspoon console), so nothing covers your other windows. true = the old big centre-screen overlay instead.",
-    "onScreen": false
+    "onScreen": false,
+    "_idle_comment": "The fleet-idle alert (Settings > Automation > Fleet idle alert): ONE macOS banner, plus an ntfy push when escalation.push is on with a pushTopic, once every local session has been idle or done for idleMinutes (0 = off; absent = 15). It arms again only when a session works again. A working card counts as idle only when its transcript ends on the interrupt marker, never because it went quiet. voice (default false) speaks the alert through macOS speech; voiceEvents lists other moments to speak -- \"needsYou\" says a session's name when it starts needing you.",
+    "idleMinutes": 15,
+    "voice": false,
+    "voiceEvents": []
   },
 
   "ask": {

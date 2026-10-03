@@ -3905,6 +3905,17 @@ function FX.push(topic, title, msg)
       { Title = title or "Claude Shepherd", Priority = "high" }, function() end)
   end)
 end
+-- Spoken alerts (2026-10-03, unit D4a): hs.speech talks asynchronously, so the panel never waits
+-- on it -- never the `say` command through a shell, which would freeze single-threaded Hammerspoon
+-- for as long as it talks. The synthesizer is kept on FX: an unretained one can be collected mid-sentence.
+function FX.speak(text)
+  text = tostring(text or "")
+  if text == "" then return end
+  pcall(function()
+    FX._speaker = FX._speaker or hs.speech.new()
+    if FX._speaker then FX._speaker:speak(text) end
+  end)
+end
 -- Forward-declared; defined next to the injection tail below. FX.notify's click
 -- callback and FX.runImprove's async HTTP callback both dispatch through it, and
 -- every window-keystroke dispatch must reserve a slot on the SHARED injection
@@ -5046,6 +5057,40 @@ function FX.annotateNeedsYou(list)
     it.retrying = retrying or nil
   end
   for k in pairs(FX._errorEpisodes) do if not live[k] then FX._errorEpisodes[k] = nil end end
+end
+
+-- The fleet-idle alert (2026-10-03, mining round 2 unit D4a). core.fleetIdleAlertDue decides; this
+-- sends its ONE alert as a banner, an ntfy push when escalation push is set up, and speech when
+-- alerts.voice is on. Then the spoken needs-you edges (alerts.voiceEvents), one utterance per tick
+-- so a second sentence can't cut off the first. Runs after FX.annotateNeedsYou (it reads it.needsYou).
+FX._fleetIdle = nil   -- { armed } from the last tick; nil until the first sight
+FX._voiceNeeds = {}   -- key -> last tick's it.needsYou
+function FX.stepFleetIdle(list, cfg)
+  local alert, state = core.fleetIdleAlertDue(list, FX.now(), FX._fleetIdle,
+    core.config(cfg, "alerts.idleMinutes", 15))
+  FX._fleetIdle = state
+  local say = {}
+  if alert then
+    print("[cc-dashboard] 💤 " .. alert.text)
+    FX.notify(alert.title, alert.text)
+    local topic = tostring(core.config(cfg, "escalation.pushTopic", ""))
+    if core.config(cfg, "escalation.push", false) == true and topic ~= "" then
+      FX.push(topic, "Claude Shepherd: " .. alert.title, alert.text)
+    end
+    if core.voiceWants(cfg, "fleetIdle") then say[#say + 1] = alert.speech end
+  end
+  local speakNeeds, seen = core.voiceWants(cfg, "needsYou"), {}
+  for _, it in ipairs(list or {}) do
+    if it.key then
+      seen[it.key] = true
+      if speakNeeds and core.needsYouRose(FX._voiceNeeds[it.key], it) then
+        say[#say + 1] = tostring(it.label or it.name or "A session") .. " needs you."
+      end
+      FX._voiceNeeds[it.key] = it.needsYou or "no"
+    end
+  end
+  for k in pairs(FX._voiceNeeds) do if not seen[k] then FX._voiceNeeds[k] = nil end end
+  if #say > 0 then FX.speak(table.concat(say, " ")) end
 end
 
 -- ---- Tab-less sessions (2026-09-11) -----------------------------------------------
@@ -16299,6 +16344,10 @@ local HTML = [[
       <label class="s-row">After <input type="number" id="s-e-min" class="s-num" min="1"> minutes</label>
       <label class="s-row"><input type="checkbox" id="s-e-snd"> Play a sound</label>
       <label class="s-row"><input type="checkbox" id="s-e-push"> Push to ntfy topic <input type="text" id="s-e-topic" class="s-txt" placeholder="my-topic"></label>
+      <div class="s-sec">Fleet idle alert</div>
+      <label class="s-row">Alert once when every session has been idle for <input type="number" id="s-al-idle" class="s-num" min="0"> minutes (0 = off)</label>
+      <label class="s-row"><input type="checkbox" id="s-al-voice"> Speak alerts aloud</label>
+      <div class="s-help">One macOS banner, plus a push to the ntfy topic above when its push is on, once no local session has worked for that long; it arms again when one works again. A turn you interrupted counts as idle; a session that has only gone quiet doesn't. Speak alerts reads the alert out loud; add <code>"voiceEvents": ["needsYou"]</code> to <code>alerts</code> in cc-config.json to also hear when a session starts needing you.</div>
 
       <div class="s-sec">Risk score (per-session indicator on tiles)</div>
       <label class="s-row"><input type="checkbox" id="s-risk-en"> Show a med/high risk badge from ledger history</label>
@@ -18956,7 +19005,7 @@ local HTML = [[
     function settingsTabFor(t){ t=(t||"").trim(); function s(p){ return t.indexOf(p)===0; }
       if(s("Appearance")) return "appearance";
       if(s("Headless approvals")||s("Questions")||s("Approval gate")||s("Policies")||s("Always ask")) return "approvals";
-      if(s("Queue")||s("Escalation")||s("Graceful drain")||s("Respawn")||s("Auto-Continue")||s("Dry run")) return "automation";
+      if(s("Queue")||s("Escalation")||s("Fleet idle")||s("Graceful drain")||s("Respawn")||s("Auto-Continue")||s("Dry run")) return "automation";
       if(s("Risk score")||s("Same-folder")||s("Insights")||s("Observability")||s("Hooks")||s("Audit log")) return "observability";
       if(s("Editor window pop")||s("Spawn")||s("Claude Code Remote Control")||s("SSH status bridge")||s("Providers")) return "spawn";
       return "general"; }
@@ -18997,6 +19046,8 @@ local HTML = [[
       ck("s-e-snd",  cv(cfg,"escalation.sound",false));
       ck("s-e-push", cv(cfg,"escalation.push",false));
       val("s-e-topic", cv(cfg,"escalation.pushTopic",""));
+      val("s-al-idle", cv(cfg,"alerts.idleMinutes",15));
+      ck("s-al-voice", cv(cfg,"alerts.voice",false));
       // Dark-config blocks (defaults must match the Lua read sites in refresh()).
       ck("s-risk-en",    cv(cfg,"risk.enabled",false));
       val("s-risk-med",  cv(cfg,"risk.thresholds.med",34));
@@ -19203,6 +19254,8 @@ local HTML = [[
         escalation: { enabled: ck("s-e-en"), minutes: num("s-e-min",5), sound: ck("s-e-snd"),
                       push: ck("s-e-push"), pushTopic: txt("s-e-topic"),
                       loop: { enabled: ck("s-loop-en"), repeats: num("s-loop-rep",3) } },
+        // alerts carries NO onScreen/voiceEvents keys: SETTINGS_KEEP_SUBKEYS keeps the hand-set ones.
+        alerts: { idleMinutes: num("s-al-idle",15), voice: ck("s-al-voice") },
         autoTitle: { enabled: ck("s-autotitle") },
         // summary is fully form-managed (only `enabled`), written wholesale on Save.
         // If a hand-edited summary.* subkey is added later, add it to SETTINGS_KEEP_SUBKEYS.
@@ -26415,6 +26468,11 @@ function FX._refreshBody()
   -- whether each card really needs Adam (a live counterpart AND an affordance that changes
   -- something) or is only a heads-up; the ranking and the panel both read what it stamps.
   FX.annotateNeedsYou(list)
+  -- 2026-10-03: the fleet-idle alert and spoken needs-you edges. After the needs-you stamp.
+  do
+    local oki, erri = pcall(FX.stepFleetIdle, list, cfg)
+    if not oki then print("[cc-dashboard] ❌ fleet-idle step failed: " .. tostring(erri)) end
+  end
   -- 2026-09-29: cc-send -- each request taken once, its target picked and handed the prompt through
   -- the mailbox. After the needs-you stamp: a session waiting on Adam is never picked.
   do

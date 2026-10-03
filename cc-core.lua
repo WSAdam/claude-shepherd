@@ -6998,6 +6998,68 @@ function M.fleetIdleSince(tiles, now)
            seconds = latest and math.max(0, now - latest) or nil }
 end
 
+-- The fleet-idle alert (2026-10-03, mining round 2 unit D4a): ONE alert once every LOCAL session
+-- has been idle or done for `idleMinutes`, armed again only when a session works again. Reads the
+-- fleet through M.fleetIdleSince, with two changes to what it is handed:
+--   * a "working" card whose transcript ends on the interrupt marker (it.interruptedAt, stamped
+--     from M.transcriptInterrupted) is idle since that marker -- an interrupted turn fires no Stop
+--     hook, so its status file says "working" for good. Quiet alone is never idle: a status file
+--     is written on hook events only, so one long build is as quiet as an orphan.
+--   * a finished session still running background agents or jobs (it.bg_active) is working.
+-- Remote (bridge) tiles don't count. `state` is { armed } from the last tick, nil before the first
+-- sight: a fleet already overdue at first sight (a reload) starts unarmed, so it can't fire for an
+-- idle that began before Shepherd was watching. Returns alert|nil, newState; the alert has the
+-- {kind, title, text} shape of M.notifyDecision plus `speech`. idleMinutes <= 0 is off (nil state).
+function M.fleetIdleAlertDue(tiles, now, state, idleMinutes)
+  local minutes = tonumber(idleMinutes) or 0
+  if minutes <= 0 then return nil, nil end
+  now = tonumber(now) or 0
+  local mine = {}
+  for _, it in ipairs(tiles or {}) do
+    if type(it) == "table" and not it.remote then
+      local at = tonumber(it.interruptedAt)
+      if it.status == "working" and at then
+        mine[#mine + 1] = { status = "idle", since = at }
+      elseif it.bg_active then
+        mine[#mine + 1] = { status = "working" }
+      else
+        mine[#mine + 1] = it
+      end
+    end
+  end
+  local fleet = M.fleetIdleSince(mine, now)
+  if fleet.active then return nil, { armed = true } end
+  if not fleet.idle then return nil, state end   -- no local sessions: nothing to learn
+  local overdue = fleet.seconds ~= nil and fleet.seconds >= minutes * 60
+  if type(state) ~= "table" then return nil, { armed = not overdue } end
+  if not (overdue and state.armed) then return nil, { armed = state.armed == true } end
+  local n, mins = #mine, math.floor(fleet.seconds / 60)
+  return { kind = "fleetIdle", title = "Fleet idle",
+           text = (n == 1 and "Your 1 session has" or ("All " .. n .. " sessions have"))
+             .. " been idle for " .. mins .. " min",
+           speech = "Your Claude fleet has been idle for " .. mins .. " minutes." },
+         { armed = false }
+end
+
+-- Spoken alerts (2026-10-03, unit D4a): alerts.voice (off by default) speaks the fleet-idle alert;
+-- any other event is spoken only when alerts.voiceEvents also lists it ("needsYou"). Pure.
+function M.voiceWants(cfg, event)
+  if M.config(cfg, "alerts.voice", false) ~= true then return false end
+  if event == "fleetIdle" then return true end
+  local list = M.config(cfg, "alerts.voiceEvents", nil)
+  if type(list) ~= "table" then return false end
+  for _, e in ipairs(list) do if e == event then return true end end
+  return false
+end
+
+-- A fresh rising edge into "needs you" (it.needsYou, stamped by FX.annotateNeedsYou from
+-- M.needsYouKind): last tick's kind was something else, and there WAS a last tick -- a reload
+-- must not announce every card already waiting. A heads-up ("fyi") never counts. Pure.
+function M.needsYouRose(prevKind, it)
+  if prevKind == nil or type(it) ~= "table" or it.remote then return false end
+  return it.needsYou == "needs" and prevKind ~= "needs"
+end
+
 -- The off-by-default gate for the #6 insights host strip, expressed as a PURE decision so
 -- the "off -> omit the strip" guarantee is behavior-testable (not just source-pinned).
 -- Returns the keys to merge into the insights payload: {} when insights.hostStats is off,
@@ -11210,6 +11272,9 @@ M.SETTINGS_KEEP_SUBKEYS = {
   -- 2026-10-02: Seance has no inputs (its box asks); if the form ever rebuilds `seance`, the
   -- hand-set budget cap and timeout stay.
   seance = { "maxBudgetUsd", "timeoutSeconds" },
+  -- 2026-10-03: the form now sends `alerts` (idleMinutes, voice); the overlay switch and the
+  -- spoken-event list have no inputs, so a Save keeps them.
+  alerts = { "onScreen", "voiceEvents" },
 }
 function M.overlayConfig(cfg, incoming)
   cfg = type(cfg) == "table" and cfg or {}
@@ -22672,6 +22737,9 @@ M.FEATURES = {
   { key = "notify", cat = "See what's happening", title = "Notifications & escalation",
     what = "Alerts — including phone push — when a session has been waiting on you too long.",
     why = "Don't leave a session blocked while you're away from the desk." },
+  { key = "fleetidle", cat = "See what's happening", new = true, title = "Fleet idle alert",
+    what = "One macOS banner (and a phone push when escalation push is on) once every local session has been idle for 15 minutes (alerts.idleMinutes), armed again only when one works again. A turn you interrupted counts as idle; a session that has merely gone quiet doesn't. Speak alerts reads it out loud, and the moments a session starts needing you too when alerts.voiceEvents lists needsYou.",
+    why = "A fleet that ran out of work while you were away sits there silently; now it tells you once, so you can hand it the next thing." },
   { key = "turns", cat = "See what's happening", new = true, title = "How each turn ended",
     what = "A finished card says how its last turn went, read from its transcript: done (a TODO line ticked or a commit), made progress (edits, commands, test runs), only planned, did nothing, blocked (it stopped on a denial) or needs follow-up (a question, or a plan waiting for you). Shepherd's own sends start with [shepherd], so a turn it started never reads as yours.",
     why = "\"Ready for you\" alone doesn't say whether anything happened; now a glance tells you which finished cards to open first." },

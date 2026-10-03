@@ -494,6 +494,24 @@ sits, when its process is gone, or when nothing is scheduled (the cases under *N
   still seeds both). The Claude Code extension may raise its own window on completion
   independently of this.
 
+## Fleet idle alert
+
+On by default (`alerts.idleMinutes`, 15; 0 turns it off; Settings → Automation → **Fleet idle
+alert**). Once every local session has been idle or done for that long, Shepherd sends **one**
+alert: a macOS banner, plus a push to your ntfy `escalation.pushTopic` when `escalation.push` is on.
+It arms again only after a session works again, so a fleet that sits idle all night alerts once.
+
+- **What counts as working:** a session working, waiting on an approval or in an error, and a
+  finished session still running background agents or jobs. Sessions on the SSH bridge don't count.
+- **An interrupted turn is idle.** An interrupt fires no Stop hook, so the card keeps saying
+  Working. Shepherd counts it as idle from the moment of the interrupt, but only on the
+  transcript's interrupt marker. A session that has merely gone quiet stays working: one long
+  build is just as quiet.
+- **After a reload** a fleet that was already idle past the limit doesn't alert; the next stretch does.
+- **Spoken alerts** (`alerts.voice`, off by default; **Speak alerts aloud** in Settings): macOS
+  speech reads the alert out. `alerts.voiceEvents` (file only) adds other moments to speak:
+  `["needsYou"]` says a session's name when it starts needing you. Speech never blocks the panel.
+
 ## Drain and tile cleanup
 
 - **Drain** (`drain.enabled`): a right-click **Drain (finish turn, then close)** action that waits
