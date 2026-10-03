@@ -129,6 +129,10 @@ parallel.
   your next start, or from `cc-ticket.sh wait <id>` run in the background). When a ticket reaches
   you, take it (`cc-ticket.sh take <id>`), reply as you go, and close it with `--note` saying what
   you did -- or why it isn't yours to do.
+- **A lesson for the next sessions goes to the coach.** When you learn something about a repo that
+  later sessions should know (a trap, a correction I had to make twice), file it with
+  `~/.claude/cc-lesson.sh "<one line>"`: Shepherd's coach weighs it in its next CLAUDE.md suggestions,
+  which I apply or skip.
 - **What a project does on purpose.** When a repo has a `DECISIONS.md` at its root, read it
   before changing anything it lists: each entry is a deliberate choice, not a bug to fix. To
   change one, ask me first. A new one gets its own entry (`## <what>`, then `Why:` and `Date:`
