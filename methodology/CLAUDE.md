@@ -202,8 +202,10 @@ inspecting the work. Follow this contract in every project:
 - **`- [x]` means "the automation finished this" — nothing more.** Flip `[ ]` → `[x]`
   only when you have actually completed and self-checked the item (code written,
   tests green). It surfaces in Shepherd as a "done" badge. It does NOT check the item
-  off my list — my checkmark is set only by my own click, and no automation, hook, or
-  file edit ever sets it. Never present `[x]` as final sign-off.
+  off my list — my checkmark is set only by my own click, or by a checklist run I started
+  from My List (**▶ Run selected**), which marks the items it finished (shown as ✓ by run;
+  I can uncheck them). No other automation, hook, or file edit ever sets it. Never present
+  `[x]` as final sign-off.
 - **`- [~]` means "only a live run can check this".** Some items no test can prove —
   deploy and look at the panel, click through the running app, probe the live
   process. Write `(needs live run)` (or `(live check)`) in such an item's text when you
