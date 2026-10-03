@@ -17062,6 +17062,10 @@ M.COACH = {
   -- evidence runs (2026-10-03): on with coach.evidence.minItems >= 1; these are the other two's
   -- defaults, and how often a repo's transcripts are counted again while the log alone isn't enough
   evidence = { cooldownHours = 24, dailyUsd = 3, recountSeconds = 900 },
+  -- the auto-memory review (2026-10-03): the prompt carries this much of the repo's auto-memory (whole files,
+  -- MEMORY.md first); a file longer than memoryFileBytes is only named, and a rewrite is capped at it
+  memoryBytes = 16000, memoryFileBytes = 8000,
+  maxMemory = 8,             -- memory changes kept per run (a promote counts, as the CLAUDE.md edit it becomes)
 }
 M.COACH_FILE = "CLAUDE.md"
 M.COACH_DAYS = { sun = 1, mon = 2, tue = 3, wed = 4, thu = 5, fri = 6, sat = 7 }
@@ -17070,6 +17074,8 @@ M.COACH_LOG_KINDS = { notyet = true, blocked = true, checker = true, learned = t
 M.COACH_TRIGGERS = { weekly = true, card = true, evidence = true }
 M.COACH_VERDICTS = { proposals = true, none = true, couldntRun = true }
 M.COACH_CHECK_VERDICTS = { working = true, ["still-seen"] = true, ["no-data"] = true }
+M.COACH_MEMORY_ACTIONS = { keep = true, delete = true, rewrite = true, promote = true }
+M.COACH_MEMORY_INDEX = "MEMORY.md"
 do
   local C = M.COACH
   local function sq(s) return "'" .. tostring(s):gsub("'", "'\\''") .. "'" end
@@ -17546,11 +17552,67 @@ do
     return table.concat(l, "\n")
   end
 
+  -- ---- the auto-memory review (2026-10-03, mining round 2 unit B3) ----------------------------
+  -- Claude Code's auto-memory -- ~/.claude/projects/<the MAIN checkout's folder>/memory/*.md, indexed
+  -- by MEMORY.md (a worktree's project folder has none) -- is loaded into every session beside
+  -- CLAUDE.md, and nothing reviewed it. The coach now reads it (M.coachMemoryBlock: whole files,
+  -- MEMORY.md first, capped by memoryBytes; a file past the cap is only named, so nothing is proposed
+  -- for it) and may answer memory:[{file, action = keep|delete|rewrite|promote, new, rename, section,
+  -- why, evidence}] in the same object as its edits. A promote becomes a CLAUDE.md edit (fromMemory),
+  -- applied like any other. Apply (M.coachMemoryDecision) checks the file's hash first -- live
+  -- sessions write memory too -- and FX backs it up in Shepherd's own <repo>.memory-backup/ before it
+  -- writes or deletes; MEMORY.md's index lines follow a delete or a rename. Undo
+  -- (M.coachMemoryUndoDecision) restores from that backup, only over what Shepherd wrote.
+  function M.coachMemoryDir(projectsDir, root)
+    local k = M.coachFileKey(root)
+    if not k or type(projectsDir) ~= "string" or projectsDir == "" then return nil end
+    return stripSlash(projectsDir) .. "/" .. k .. "/memory"
+  end
+  -- A memory file's name: one plain *.md path segment (letters, digits, . _ -; no leading dot), so
+  -- joined to the folder it can never leave it. nil otherwise -- the path check every write goes through.
+  function M.coachMemoryName(n)
+    if type(n) ~= "string" or #n > 120 or not n:match("^[%w][%w%._%-]*%.md$") then return nil end
+    return n
+  end
+  -- The prompt's <memory> block: { text, hashes (name -> the hash Apply checks), shown (name -> text),
+  -- omitted (names past the cap) }, or nil when the folder has no memory files.
+  function M.coachMemoryBlock(files, cap, dir)
+    local list = {}
+    for _, f in ipairs(type(files) == "table" and files or {}) do
+      if type(f) == "table" and M.coachMemoryName(f.name) and type(f.text) == "string" then list[#list + 1] = f end
+    end
+    if #list == 0 then return nil end
+    table.sort(list, function(a, b)
+      local ia, ib = a.name == M.COACH_MEMORY_INDEX, b.name == M.COACH_MEMORY_INDEX
+      if ia ~= ib then return ia end
+      return a.name < b.name
+    end)
+    cap = tonumber(cap) or C.memoryBytes
+    local parts, hashes, shown, omitted, size = {}, {}, {}, {}, 0
+    for _, f in ipairs(list) do
+      local piece = "--- " .. f.name .. " ---\n" .. f.text .. ((f.text:sub(-1) == "\n") and "" or "\n")
+      if #f.text <= C.memoryFileBytes and size + #piece <= cap then
+        parts[#parts + 1] = piece
+        size = size + #piece
+        hashes[f.name], shown[f.name] = M.coachHash(f.text), f.text
+      else
+        omitted[#omitted + 1] = f.name
+      end
+    end
+    if #omitted > 0 then
+      parts[#parts + 1] = "[… not shown, past the cap: " .. table.concat(omitted, ", ") .. " -- propose nothing for these"
+        .. (type(dir) == "string" and (" (they are in " .. dir .. ")") or "") .. "]\n"
+    end
+    return { text = table.concat(parts), hashes = hashes, shown = shown, omitted = omitted }
+  end
+
   -- What the headless run is asked. The digest, the repo's CLAUDE.md and DECISIONS.md go in whole
   -- up to their caps (past one, it reads the rest itself: it runs in the repo with Read). o.lessons
   -- is the repo's lessons ledger (2026-10-02): what Adam did with earlier suggestions. o.history is
   -- its applied edits (2026-10-03): the ones enough of the digest's sessions postdate are judged.
   -- o.sharpen, one of those entries: the run proposes a better wording of that edit alone.
+  -- o.memory (2026-10-03) is M.coachMemoryBlock's result: the repo's auto-memory, to review (never
+  -- in a Sharpen run).
   function M.coachPrompt(digest, claudeMd, decisions, o)
     o = type(o) == "table" and o or {}
     local text = type(digest) == "table" and digest.text or tostring(digest or "")
@@ -17572,7 +17634,7 @@ do
     }
     local decisionsRule = "- DECISIONS.md lists what the project does on purpose. Never propose an edit that undoes, weakens or contradicts"
       .. " one of its entries."
-    local lines, lessons, applied
+    local lines, lessons, applied, memory
     if sharpen then
       -- Sharpen (2026-10-03): one applied edit, a better wording of it, nothing else
       lines = {
@@ -17615,6 +17677,7 @@ do
       lines[#lines + 1] = "- If nothing is worth changing, return empty lists. Don't change any file; you may read the repo to check a claim."
       lessons = lessonsBlock(o.lessons, C.lessonsBytes)
       applied = appliedBlock(o.history, type(digest) == "table" and digest.ats or nil)
+      memory = (type(o.memory) == "table" and type(o.memory.text) == "string" and o.memory.text ~= "") and o.memory or nil
     end
     if lessons then
       lines[#lines + 1] = "- <lessons> lists what Adam did with this coach's earlier suggestions, newest first. An applied one is"
@@ -17627,6 +17690,24 @@ do
         .. " what they were expected to do after (Expected after). Judge each one ONLY on the sessions below dated after it"
         .. " was applied: \"working\" -- they do what was expected, or the problem it targets has stopped; \"still-seen\" --"
         .. " the problem still shows (quote it); \"no-data\" -- none of those sessions came near it."
+    end
+    if memory then
+      lines[#lines + 1] = "- <memory> is Claude Code's auto-memory for this repo: notes earlier sessions saved for later ones, loaded"
+        .. " into every session beside CLAUDE.md; MEMORY.md is its index (one line per file). Review it against the evidence,"
+        .. " CLAUDE.md and the repo, and propose at most " .. C.maxMemory .. " changes to it in \"memory\", each {\"file\", \"action\","
+        .. " \"why\", \"evidence\"}, the action one of:"
+      lines[#lines + 1] = "  - \"delete\": wrong, stale (the repo moved on), already said by CLAUDE.md, or one session's trivia;"
+      lines[#lines + 1] = "  - \"rewrite\": partly wrong or unclear -- \"new\" is the whole new file, its frontmatter included;"
+        .. " \"rename\" (optional) is a new file name for it;"
+      lines[#lines + 1] = "  - \"promote\": every session in this repo should know it -- \"section\" and \"new\" are the text to add to"
+        .. " CLAUDE.md under that heading (an edit with an empty \"old\"; \"before\" and \"after\" as for an edit);"
+      lines[#lines + 1] = "  - \"keep\": still true and useful -- list a keep only when the evidence bears on that file."
+      lines[#lines + 1] = "  Only a file shown in <memory>, by its name there. MEMORY.md may be rewritten, never deleted, renamed or"
+        .. " promoted. Every change but a keep needs 1 to 5 evidence quotes (from the evidence, CLAUDE.md, the memory or the repo)."
+      if lessons then
+        lines[#lines + 1] = "  A lesson whose section starts with memory/ is a memory change Adam already decided: the same rules as"
+          .. " for edits, and \"lesson\" on a memory change that repeats one."
+      end
     end
     if not sharpen then
       lines[#lines + 1] = ""
@@ -17642,6 +17723,11 @@ do
       lines[#lines + 1] = "That same object also carries \"checks\": [{\"sha\": \"<its commit, as <applied> names it>\", \"verdict\":"
         .. " \"working\" | \"still-seen\" | \"no-data\", \"evidence\": [\"<1 to 5 short quotes from those sessions; still-seen needs"
         .. " at least one>\"]}], one per edit in <applied>."
+    end
+    if memory then
+      lines[#lines + 1] = "That same object also carries \"memory\": [{\"file\": \"<a name from <memory>>\", \"action\": \"keep\" |"
+        .. " \"delete\" | \"rewrite\" | \"promote\", \"new\": \"...\", \"rename\": \"...\", \"section\": \"...\", \"why\": \"...\","
+        .. " \"evidence\": [\"...\"]}] -- an empty list when nothing in it needs a change."
     end
     lines[#lines + 1] = ""
     if type(claudeMd) == "string" then
@@ -17668,6 +17754,10 @@ do
     end
     if applied then
       lines[#lines + 1] = "<applied>\n" .. applied .. "\n</applied>"
+      lines[#lines + 1] = ""
+    end
+    if memory then
+      lines[#lines + 1] = "<memory>\n" .. memory.text .. "</memory>"
       lines[#lines + 1] = ""
     end
     lines[#lines + 1] = "<evidence>\n" .. text .. "</evidence>"
@@ -17706,6 +17796,7 @@ do
     local wn = type(e.whatsNew) == "string" and oneLine(e.whatsNew, 300) or ""
     out.whatsNew = (wn ~= "") and wn or nil
     if keep then
+      out.fromMemory = M.coachMemoryName(e.fromMemory)   -- a promoted auto-memory file's edit (2026-10-03)
       out.reason = M.coachReason(e.reason)   -- Adam's reason, typed with Skip
       out.status = EDIT_STATUS[e.status] and e.status or "pending"
       out.sha = (type(e.sha) == "string" and e.sha:match("^%x+$") and #e.sha <= 64) and e.sha or nil
@@ -17728,14 +17819,68 @@ do
     return out
   end
 
+  -- One proposed auto-memory change (2026-10-03), checked; nil when it can't be applied or shown
+  -- honestly. `known` = the names the coach was shown (M.coachMemoryBlock's hashes): it never proposes
+  -- a file it wasn't shown. keep = a record read back from disk: its status, refusal, the text it read
+  -- (old), and what Undo needs (backup, afterHash, renamedTo, indexRenamed, removed index lines) come too.
+  local MEMORY_STATUS = { pending = true, applied = true, skipped = true, undone = true }
+  local function coachMemory(m, known, keep)
+    if type(m) ~= "table" or not M.COACH_MEMORY_ACTIONS[m.action] or m.action == "promote" then return nil end
+    local file = M.coachMemoryName(m.file)
+    if not file or (not keep and (type(known) ~= "table" or known[file] == nil)) then return nil end
+    local isIdx = file == M.COACH_MEMORY_INDEX
+    if m.action == "delete" and isIdx then return nil end
+    local why = oneLine(m.why, 500)
+    local ev = quotes(m.evidence)
+    if why == "" or (m.action ~= "keep" and #ev == 0) then return nil end
+    local out = { file = file, action = m.action, why = why, evidence = ev, lesson = lessonId(m.lesson) }
+    local wn = type(m.whatsNew) == "string" and oneLine(m.whatsNew, 300) or ""
+    out.whatsNew = (wn ~= "") and wn or nil
+    if m.action == "rewrite" then
+      local new = type(m.new) == "string" and m.new or ""
+      if not new:match("%S") or #new > C.memoryFileBytes then return nil end
+      out.new = new
+      if type(m.rename) == "string" and m.rename ~= "" and m.rename ~= file then
+        local to = M.coachMemoryName(m.rename)
+        if not to or isIdx or to == M.COACH_MEMORY_INDEX then return nil end
+        out.rename = to
+      end
+    end
+    if keep then
+      out.status = (m.action == "keep") and "keep" or (MEMORY_STATUS[m.status] and m.status or "pending")
+      out.reason = M.coachReason(m.reason)
+      out.error = (type(m.error) == "string" and m.error ~= "") and capChars(m.error, 300) or nil
+      out.errorCode = out.error and coachErrorCode(m.errorCode) or nil
+      out.at, out.undoneAt = tonumber(m.at), tonumber(m.undoneAt)
+      out.old = (type(m.old) == "string" and #m.old <= C.memoryFileBytes) and m.old or nil
+      out.backup = M.coachMemoryBackupName(m.backup)
+      out.afterHash = (type(m.afterHash) == "string" and #m.afterHash <= 64) and m.afterHash or nil
+      out.renamedTo = M.coachMemoryName(m.renamedTo)
+      out.indexRenamed = (m.indexRenamed == true) or nil
+      local removed = {}
+      for _, l in ipairs(type(m.removed) == "table" and m.removed or {}) do
+        if type(l) == "string" and #l <= 600 and not l:find("\n", 1, true) and #removed < 20 then removed[#removed + 1] = l end
+      end
+      out.removed = (#removed > 0) and removed or nil
+    end
+    return out
+  end
+  -- A backup's name in <repo>.memory-backup/: "<epoch>-<n>-<the memory file's name>".
+  function M.coachMemoryBackupName(b)
+    local rest = type(b) == "string" and b:match("^%d+%-%d+%-(.+)$") or nil
+    return (rest and M.coachMemoryName(rest)) and b or nil
+  end
+
   -- claude -p --output-format json -> { verdict = proposals | none | couldntRun, edits, decisions,
   -- checks, summary, why, costUsd, turns }. The answer's last JSON object carrying "edits" is read;
   -- with none, or edits that aren't a list, or only edits that fail the checks, it couldn't run.
   -- checks (2026-10-03): its verdicts on applied edits, from that same object (modelCheck). o.sharpen
-  -- = a Sharpen run's answer: one edit, and no DECISIONS.md entries or checks.
+  -- = a Sharpen run's answer: one edit, and no DECISIONS.md entries or checks. memory (2026-10-03):
+  -- its auto-memory changes, from that same object, when o.memory (the names it was shown, with their
+  -- hashes) says it read some -- a promote is appended to the edits, as a CLAUDE.md edit from that file.
   function M.parseCoachOutput(raw, errText, o)
     o = type(o) == "table" and o or {}
-    local res = { verdict = "couldntRun", edits = {}, decisions = {}, checks = {} }
+    local res = { verdict = "couldntRun", edits = {}, decisions = {}, checks = {}, memory = {} }
     local t = headlessEnvelope(raw, errText, res)
     if not t then return res end
     local v = lastObjectWith(t.result, "edits", 200000)
@@ -17756,9 +17901,32 @@ do
         res.checks[#res.checks + 1] = modelCheck(c)
       end
     end
+    local changes = 0   -- memory rows that change something (a keep doesn't)
+    if not o.sharpen and type(o.memory) == "table" then
+      local n = 0
+      for _, m in ipairs(type(v.memory) == "table" and v.memory or {}) do
+        if n >= C.maxMemory then break end
+        local e
+        if type(m) == "table" and m.action == "promote" then
+          local file = M.coachMemoryName(m.file)
+          if file and file ~= M.COACH_MEMORY_INDEX and o.memory[file] ~= nil then
+            e = coachEdit({ section = m.section, old = "", new = m.new, why = m.why, evidence = m.evidence, before = m.before,
+                            after = m.after, lesson = m.lesson, whatsNew = m.whatsNew })
+            if e then e.fromMemory = file; res.edits[#res.edits + 1] = e end
+          end
+        else
+          e = coachMemory(m, o.memory)
+          if e then
+            res.memory[#res.memory + 1] = e
+            if e.action ~= "keep" then changes = changes + 1 end
+          end
+        end
+        if e then n = n + 1 end
+      end
+    end
     local summary = oneLine(v.summary, 300)
     res.summary = summary ~= "" and summary or nil
-    if #res.edits + #res.decisions > 0 then
+    if #res.edits + #res.decisions + changes > 0 then
       res.verdict = "proposals"
     elseif #v.edits > 0 then
       res.why = "none of its " .. #v.edits .. " edit(s) had evidence and a change to make"
@@ -18096,6 +18264,147 @@ do
     return { ok = true, text = current:sub(1, at - 1) .. (change.removed or "") .. current:sub(at + #change.added) }
   end
 
+  -- ---- the auto-memory review: Apply and Undo (2026-10-03, mining round 2 unit B3) -------------
+  -- MEMORY.md's index lines are "- [Title](file.md) — hook": a line belongs to a file when it links
+  -- to it ("](file.md)" or "](./file.md)"). Plain finds, a find-based line walk: nothing here is a
+  -- pattern built from a name.
+  local function memLinks(s, file) return s:find("](" .. file .. ")", 1, true) ~= nil or s:find("](./" .. file .. ")", 1, true) ~= nil end
+  -- The index without the lines that link to `file`, and those lines (without their line break).
+  local function memIndexDrop(index, file)
+    local out, removed, pos = {}, {}, 1
+    while pos <= #index do
+      local nl = index:find("\n", pos, true)
+      local stop = nl or #index
+      local line = index:sub(pos, stop)
+      local bare = line:gsub("\r?\n$", "")
+      if memLinks(bare, file) then removed[#removed + 1] = bare else out[#out + 1] = line end
+      pos = stop + 1
+    end
+    return table.concat(out), removed
+  end
+  -- The index with every link to `from` pointing at `to`, and how many moved.
+  local function memIndexRename(index, from, to)
+    local n, text = 0, index
+    for _, pre in ipairs({ "](", "](./" }) do
+      local out, pos, needle = {}, 1, pre .. from .. ")"
+      while true do
+        local a, b = text:find(needle, pos, true)
+        if not a then break end
+        out[#out + 1] = text:sub(pos, a - 1) .. pre .. to .. ")"
+        pos, n = b + 1, n + 1
+      end
+      out[#out + 1] = text:sub(pos)
+      text = table.concat(out)
+    end
+    return text, n
+  end
+
+  -- Decide whether a memory change (a delete or a rewrite) may go ahead. PURE: FX reads the file, the
+  -- index and the links, then backs up, writes and deletes around it. o = { current (the file now; nil
+  -- = gone), readHash (what the coach read), link (the file or the rename's target is a link),
+  -- targetExists (the rename's name is taken), index (MEMORY.md now, or nil) }. Returns
+  --   { ok = false, error = "outside"|"bad-memory"|"link"|"changed"|"exists"|"no-change" } or
+  --   { ok = true, delete = true, index, removed } / { ok = true, write, renameTo, afterHash, index, indexRenamed }
+  -- (index = the new MEMORY.md, only when it changes).
+  function M.coachMemoryDecision(m, o)
+    o = type(o) == "table" and o or {}
+    if type(m) ~= "table" then return { ok = false, error = "bad-memory" } end
+    local file = M.coachMemoryName(m.file)
+    if not file then return { ok = false, error = "outside" } end
+    local isIdx = file == M.COACH_MEMORY_INDEX
+    if (m.action ~= "delete" and m.action ~= "rewrite") or (m.action == "delete" and isIdx) then return { ok = false, error = "bad-memory" } end
+    if o.link then return { ok = false, error = "link" } end
+    if M.coachHash(o.current) ~= tostring(o.readHash or "") then return { ok = false, error = "changed" } end
+    if m.action == "delete" then
+      local r = { ok = true, delete = true }
+      if type(o.index) == "string" then
+        local text, removed = memIndexDrop(o.index, file)
+        if #removed > 0 then r.index, r.removed = text, removed end
+      end
+      return r
+    end
+    local new = type(m.new) == "string" and m.new or ""
+    if not new:match("%S") then return { ok = false, error = "bad-memory" } end
+    if new:sub(-1) ~= "\n" then new = new .. "\n" end
+    local to
+    if type(m.rename) == "string" and m.rename ~= "" and m.rename ~= file then
+      to = M.coachMemoryName(m.rename)
+      if not to then return { ok = false, error = "outside" } end
+      if isIdx or to == M.COACH_MEMORY_INDEX then return { ok = false, error = "bad-memory" } end
+      if o.targetExists then return { ok = false, error = "exists" } end
+    end
+    if not to and new == o.current then return { ok = false, error = "no-change" } end
+    local r = { ok = true, write = new, renameTo = to, afterHash = M.coachHash(new) }
+    if to and type(o.index) == "string" then
+      local text, n = memIndexRename(o.index, file, to)
+      if n > 0 then r.index, r.indexRenamed = text, true end
+    end
+    return r
+  end
+
+  -- Undo an applied memory change from its backup, only over what Shepherd wrote. o = { backup (its
+  -- text; nil = gone), current (the file now where Shepherd left it: the rename's name for a rename),
+  -- original (the old name now, for a rename), link, index (MEMORY.md now) }. Returns
+  --   { ok = false, error = "bad-memory"|"undo-gone"|"link"|"undo-conflict" } or
+  --   { ok = true, file, text (write it there), remove (a name to delete), index (the new MEMORY.md) }.
+  -- A delete's index lines come back at the end, unless a line links to the file again.
+  function M.coachMemoryUndoDecision(m, o)
+    o = type(o) == "table" and o or {}
+    if type(m) ~= "table" or m.status ~= "applied" or not M.coachMemoryName(m.file) then return { ok = false, error = "bad-memory" } end
+    if type(o.backup) ~= "string" then return { ok = false, error = "undo-gone" } end
+    if o.link then return { ok = false, error = "link" } end
+    if m.action == "delete" then
+      if o.current ~= nil then return { ok = false, error = "undo-conflict" } end
+      local r = { ok = true, file = m.file, text = o.backup }
+      local base = type(o.index) == "string" and o.index or ""
+      if type(m.removed) == "table" and #m.removed > 0 and not memLinks(base, m.file) then
+        if base ~= "" and base:sub(-1) ~= "\n" then base = base .. "\n" end
+        r.index = base .. table.concat(m.removed, "\n") .. "\n"
+      end
+      return r
+    end
+    if m.action ~= "rewrite" then return { ok = false, error = "bad-memory" } end
+    if M.coachHash(o.current) ~= tostring(m.afterHash or "") then return { ok = false, error = "undo-conflict" } end
+    local r = { ok = true, file = m.file, text = o.backup }
+    local to = M.coachMemoryName(m.renamedTo)
+    if to then
+      if o.original ~= nil then return { ok = false, error = "undo-conflict" } end
+      r.remove = to
+      if m.indexRenamed and type(o.index) == "string" then
+        local text, n = memIndexRename(o.index, to, m.file)
+        if n > 0 then r.index = text end
+      end
+    end
+    return r
+  end
+
+  local MEMORY_REFUSALS = {
+    ["bad-memory"] = "the proposal is malformed",
+    outside = "that file isn't in this repo's memory folder",
+    link = "%s is a link -- Shepherd never writes through one",
+    changed = "%s changed since the coach read it -- run the coach again",
+    exists = "a memory file by that name is already there",
+    ["no-change"] = "it would change nothing",
+    backup = "Shepherd couldn't back %s up first, so nothing was changed",
+    write = "Shepherd couldn't write to the memory folder",
+    ["undo-conflict"] = "%s changed since -- restore it by hand from Shepherd's backup",
+    ["undo-gone"] = "its backup is gone",
+  }
+  M.COACH_MEMORY_RERUN = { changed = true }
+  function M.coachMemoryRefusal(code, file)
+    local w = MEMORY_REFUSALS[code]
+    if not w then return "refused: " .. tostring(code) end
+    local name = M.coachMemoryName(file) or "the memory file"
+    return (w:gsub("%%s", function() return name end))
+  end
+  -- A memory change as the lessons ledger keeps it: its section is "memory/<file>", its text the
+  -- rewrite's new text or else the action, so a lesson line reads "memory/x.md · "delete" -- why".
+  function M.coachMemoryLessonItem(m)
+    m = type(m) == "table" and m or {}
+    local new = (m.action == "rewrite" and type(m.new) == "string") and m.new or ""
+    return { section = "memory/" .. tostring(m.file or "?"), old = tostring(m.action or ""), new = new, why = m.why, lesson = m.lesson }
+  end
+
   -- ---- the lessons ledger (2026-10-02, mining round 2 unit B1) ---------------------------------
   -- What Adam did with each suggestion -- applied, skipped (with his optional one-line reason) or
   -- undone -- kept per repo in Shepherd's own file (<repo>.lessons.json), so it outlives the run that
@@ -18222,7 +18531,17 @@ do
     local out, changed = {}, false
     for _, e in ipairs(type(list) == "table" and list or {}) do out[#out + 1] = e end
     local runAt = type(rec) == "table" and tonumber(rec.at) or nil
-    for _, e in ipairs((type(rec) == "table" and type(rec.edits) == "table") and rec.edits or {}) do
+    -- its memory changes too (2026-10-03), as the ledger keeps them (M.coachMemoryLessonItem)
+    local items = {}
+    for _, e in ipairs((type(rec) == "table" and type(rec.edits) == "table") and rec.edits or {}) do items[#items + 1] = e end
+    for _, m in ipairs((type(rec) == "table" and type(rec.memory) == "table") and rec.memory or {}) do
+      if type(m) == "table" then
+        local e = M.coachMemoryLessonItem(m)
+        e.status, e.at, e.reason = m.status, m.at, m.reason
+        items[#items + 1] = e
+      end
+    end
+    for _, e in ipairs(items) do
       if type(e) == "table" and (e.status == "skipped" or e.status == "applied") then
         local i = lessonFind(out, e)
         local prev = i and out[i] or nil
@@ -18383,8 +18702,20 @@ do
                 costUsd = tonumber(t.costUsd), turns = tonumber(t.turns), edits = {}, decisions = {},
                 sharpen = histSha(t.sharpen) }   -- a Sharpen run: the applied edit's commit (2026-10-03)
     for _, e in ipairs(type(t.edits) == "table" and t.edits or {}) do
-      if #r.edits >= C.maxEdits then break end
+      if #r.edits >= C.maxEdits + C.maxMemory then break end   -- promoted memory files' edits come after the coach's own
       r.edits[#r.edits + 1] = coachEdit(e, true)
+    end
+    -- the auto-memory review (2026-10-03): its changes, and the hash of each file it read
+    r.memory = {}
+    for _, m in ipairs(type(t.memory) == "table" and t.memory or {}) do
+      if #r.memory >= C.maxMemory then break end
+      r.memory[#r.memory + 1] = coachMemory(m, nil, true)
+    end
+    if type(t.memoryHashes) == "table" then
+      r.memoryHashes = {}
+      for k, h in pairs(t.memoryHashes) do
+        if M.coachMemoryName(k) and type(h) == "string" and #h <= 64 then r.memoryHashes[k] = h end
+      end
     end
     for _, d in ipairs(type(t.decisions) == "table" and t.decisions or {}) do
       if #r.decisions >= C.maxDecisions then break end
@@ -18401,6 +18732,7 @@ do
     local n = 0
     for _, e in ipairs(type(rec) == "table" and rec.edits or {}) do if e.status == "pending" then n = n + 1 end end
     for _, d in ipairs(type(rec) == "table" and rec.decisions or {}) do if d.status == "pending" then n = n + 1 end end
+    for _, m in ipairs(type(rec) == "table" and rec.memory or {}) do if m.status == "pending" then n = n + 1 end end
     return n
   end
 
@@ -18441,6 +18773,7 @@ do
                      error = (e.error and e.errorCode and REFUSALS[e.errorCode]) or e.error }
       local l = e.lesson and byId[e.lesson] or nil
       local ve = v.edits[i]
+      ve.fromMemory = e.fromMemory   -- a promoted auto-memory file (2026-10-03)
       ve.lesson, ve.whatsNew = l and l.id or nil, e.whatsNew
       ve.seen = l and #(l.runs or {}) or nil
       ve.was = l and l.verdict or nil
@@ -18449,6 +18782,18 @@ do
     for i, d in ipairs(rec.decisions or {}) do
       v.decisions[i] = { i = i, what = d.what, why = d.why, status = d.status or "pending", error = d.error,
                          rerun = coachStale(d, M.COACH_DECISIONS_CHANGED) }
+    end
+    -- the auto-memory review (2026-10-03): each change numbered for Apply / Skip / Undo; a keep is only shown
+    v.memory = {}
+    for i, m in ipairs(rec.memory or {}) do
+      local st = m.status or "pending"
+      local l = m.lesson and byId[m.lesson] or nil
+      v.memory[i] = { i = i, file = m.file, action = m.action, new = m.new, rename = m.rename, renamedTo = m.renamedTo,
+                      why = m.why, evidence = m.evidence, old = m.old, status = st, whatsNew = m.whatsNew,
+                      rerun = coachStale(m, nil, M.COACH_MEMORY_RERUN), code = (st == "pending") and m.error and m.errorCode or nil,
+                      error = (m.error and m.errorCode and M.coachMemoryRefusal(m.errorCode, m.file)) or m.error,
+                      lesson = l and l.id or nil, seen = l and #(l.runs or {}) or nil, was = l and l.verdict or nil,
+                      reason = (st == "skipped") and m.reason or (l and l.reason) or nil }
     end
     return v
   end
@@ -22709,7 +23054,7 @@ M.FEATURES = {
     what = "Scheduled actions that fire on a cron-like timetable.",
     why = "Standups, sweeps, or kickoffs happen on their own." },
   { key = "coach", cat = "Automate", new = true, title = "Coach",
-    what = "Weekly (coach.enabled, catching up after sleep), once enough new evidence has come in since its last run (coach.evidence: a 24h cooldown and a daily cap across repos), or from a session's 🧭 Coach button, a read-only Sonnet reads the repo's last 10 sessions -- your corrections, interrupts, tool errors, denials with a note, merge notes, checker findings and lessons sessions filed with cc-lesson.sh -- and suggests up to 5 CLAUDE.md edits, each with its evidence. They wait behind a 🧭 chip on the project card: Apply writes CLAUDE.md and commits it alone (refused if it changed since the coach read it or has uncommitted edits), Skip puts one aside. It never proposes undoing a DECISIONS.md entry, and can suggest new ones. A lessons ledger keeps every Apply, Skip (with an optional one-line reason) and Undo for the next run: an applied suggestion isn't proposed again, a skipped or undone one comes back only with new evidence, and a repeat says \"seen in N runs\". Each run also judges the applied edits at least 3 later sessions postdate -- working, still seen (with quotes) or no data yet -- on their history rows, where Sharpen asks the coach for a better wording of one edit alone.",
+    what = "Weekly (coach.enabled, catching up after sleep), once enough new evidence has come in since its last run (coach.evidence: a 24h cooldown and a daily cap across repos), or from a session's 🧭 Coach button, a read-only Sonnet reads the repo's last 10 sessions -- your corrections, interrupts, tool errors, denials with a note, merge notes, checker findings and lessons sessions filed with cc-lesson.sh -- and suggests up to 5 CLAUDE.md edits, each with its evidence. They wait behind a 🧭 chip on the project card: Apply writes CLAUDE.md and commits it alone (refused if it changed since the coach read it or has uncommitted edits), Skip puts one aside. It never proposes undoing a DECISIONS.md entry, and can suggest new ones. A lessons ledger keeps every Apply, Skip (with an optional one-line reason) and Undo for the next run: an applied suggestion isn't proposed again, a skipped or undone one comes back only with new evidence, and a repeat says \"seen in N runs\". Each run also judges the applied edits at least 3 later sessions postdate -- working, still seen (with quotes) or no data yet -- on their history rows, where Sharpen asks the coach for a better wording of one edit alone. It also reviews the repo's Claude Code auto-memory (~/.claude/projects/<repo>/memory/): delete, rewrite or keep a note, or promote one into CLAUDE.md as an edit row -- Apply only while the file is as the coach read it, backed up in Shepherd's own folder first, MEMORY.md's index kept in step, and Undo puts it back.",
     why = "The corrections you keep repeating end up in the instructions every session reads first." },
 
   -- ---- See what's happening ----

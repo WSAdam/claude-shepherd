@@ -6942,25 +6942,31 @@ function FX.coachScanned(repo, rec, scan, cfg)
     print("[cc-dashboard] ⚠️ coach: the edit to sharpen (" .. tostring(rec.sharpen) .. ") isn't in " .. tostring(root) .. "'s history -- an ordinary run")
     rec.sharpen = nil
   end
+  -- 2026-10-03: the repo's auto-memory goes in too (never in a Sharpen run); the hash of each file it
+  -- shows is what a memory change's Apply checks
+  local memory = (not sharpen) and core.coachMemoryBlock(FX.coachMemoryFiles(root), core.COACH.memoryBytes, FX.coachMemoryDir(root)) or nil
+  rec.memoryHashes = memory and memory.hashes or nil
   FX.coachSave(rec)
   cfg = cfg or loadConfig()
   FX.runHeadless({ id = "coach|" .. root, lane = repo.commonDir, dir = root,
     prompt = core.coachPrompt(digest, claudeMd, decisions, { name = repo.name, lessons = FX.coachLessons(root),
-                                                             history = history, sharpen = sharpen }),
+                                                             history = history, sharpen = sharpen, memory = memory }),
     timeoutSeconds = tonumber(core.config(cfg, "coach.timeoutSeconds", core.COACH.timeoutSeconds)) or core.COACH.timeoutSeconds,
     maxBudgetUsd = core.config(cfg, "coach.maxBudgetUsd", core.COACH.budgetUsd),
     onStart = function()
       if FX._coach.recs[root] == rec then rec.state = "running"; FX.coachSave(rec) end
     end,
-    onDone = function(_, res) FX.coachFinish(root, rec, res, { ats = digest.ats }) end })
+    onDone = function(_, res) FX.coachFinish(root, rec, res, { ats = digest.ats, memory = memory and memory.shown or nil }) end })
 end
 
 -- The run is over: its verdict is this week's (a lost run never reaches here -- its task died
 -- with Hammerspoon, and the record reads lost when it's read back). `judge` = { ats }, when the
 -- digest's sessions last ran: the applied edits enough of them postdate get this run's verdicts.
+-- judge.memory (2026-10-03) = the auto-memory files the prompt showed, name -> text: each memory row
+-- keeps the text it was proposed against, for the overlay.
 function FX.coachFinish(root, rec, res, judge)
   if FX._coach.recs[root] ~= rec then return end   -- a newer run replaced this one
-  local p = core.parseCoachOutput(res and res.output, res and res.err, { sharpen = rec.sharpen ~= nil })
+  local p = core.parseCoachOutput(res and res.output, res and res.err, { sharpen = rec.sharpen ~= nil, memory = rec.memoryHashes })
   if res and res.timedOut then
     p = { verdict = "couldntRun", edits = {}, decisions = {}, why = "timed out after " .. tostring(res.timeoutSeconds) .. "s" }
   elseif res and res.code == -1 and (res.output or "") == "" then
@@ -6975,13 +6981,19 @@ function FX.coachFinish(root, rec, res, judge)
     if not usd and res and res.timedOut then usd = tonumber(core.config(loadConfig(), "coach.maxBudgetUsd", core.COACH.budgetUsd)) end
     if usd and usd > 0 then pcall(FX.coachSpendAdd, usd) end
   end
-  rec.edits, rec.decisions = p.edits or {}, p.decisions or {}
+  rec.edits, rec.decisions, rec.memory = p.edits or {}, p.decisions or {}, p.memory or {}
   for _, e in ipairs(rec.edits) do e.status = "pending" end
   for _, d in ipairs(rec.decisions) do d.status = "pending" end
+  local shown = type(judge) == "table" and type(judge.memory) == "table" and judge.memory or {}
+  for _, m in ipairs(rec.memory) do
+    m.status = (m.action == "keep") and "keep" or "pending"
+    m.old = shown[m.file]
+  end
   -- 2026-10-02: a proposal citing a lesson counts this run on it ("seen in N runs"); a made-up id is dropped
   local okL, errL = pcall(function()
     local list, changed = core.coachLessonsSeen(FX.coachLessons(root), rec.edits, rec.at)
-    if changed then FX.coachLessonsSave(root, list) end
+    local list2, changed2 = core.coachLessonsSeen(list, rec.memory, rec.at)   -- memory changes cite lessons too (2026-10-03)
+    if changed or changed2 then FX.coachLessonsSave(root, list2) end
   end)
   if not okL then print("[cc-dashboard] ❌ coach: counting " .. tostring(root) .. "'s repeated lessons failed: " .. tostring(errL)) end
   -- 2026-10-03: did each applied edit work? Only from a real answer, and never in a Sharpen run;
@@ -6998,15 +7010,18 @@ function FX.coachFinish(root, rec, res, judge)
   end
   FX.coachSave(rec)
   local name = tostring(rec.name or root)
-  local n = #rec.edits + #rec.decisions
+  local nMem = 0   -- memory changes (2026-10-03); a keep changes nothing
+  for _, m in ipairs(rec.memory) do if m.status == "pending" then nMem = nMem + 1 end end
+  local n = #rec.edits + #rec.decisions + nMem
   print("[cc-dashboard] " .. (p.verdict == "couldntRun" and "⚠️" or "✅") .. " coach " .. name .. " -> " .. tostring(p.verdict)
-    .. " (" .. n .. " proposal(s)" .. (p.why and (": " .. p.why) or "") .. ")")
+    .. " (" .. n .. " proposal(s)" .. (nMem > 0 and (", " .. nMem .. " of them to its auto-memory") or "") .. (p.why and (": " .. p.why) or "") .. ")")
   if p.verdict == "proposals" and rec.sharpen then
     FX.alert("🧭 The coach has a better wording for " .. name .. "'s edit " .. tostring(rec.sharpen):sub(1, 7) .. " -- the 🧭 chip on its card", 5)
   elseif p.verdict == "none" and rec.sharpen then
     FX.alert("🧭 The coach found no clearer wording for " .. name .. "'s edit " .. tostring(rec.sharpen):sub(1, 7), 4)
   elseif p.verdict == "proposals" then
-    FX.alert("🧭 The coach has " .. n .. " suggestion" .. (n == 1 and "" or "s") .. " for " .. name .. "'s CLAUDE.md -- the 🧭 chip on its card", 5)
+    FX.alert("🧭 The coach has " .. n .. " suggestion" .. (n == 1 and "" or "s") .. " for " .. name .. "'s CLAUDE.md"
+      .. (nMem > 0 and " and auto-memory" or "") .. " -- the 🧭 chip on its card", 5)
   elseif p.verdict == "none" then
     FX.alert("🧭 The coach read " .. name .. "'s last sessions: nothing to change in its CLAUDE.md", 4)
   else
@@ -7134,7 +7149,7 @@ function FX.coachItem(root, i, what)
   local rec = FX.coachRecord(root)
   if not rec then FX.alert("⚠️ The coach has nothing for that repo any more"); return nil end
   local n = tonumber(i)
-  local item = n and rec[what][math.floor(n)] or nil
+  local item = n and (rec[what] or {})[math.floor(n)] or nil   -- a record from before 2026-10-03 has no memory list
   if not item then FX.alert("⚠️ That suggestion isn't there any more"); return nil end
   return rec, item
 end
@@ -7355,7 +7370,7 @@ end
 -- it -- Skip was final, though a skip is often only "not now". Applied and added ones are not (Undo
 -- takes an applied edit back out).
 function FX.coachUnskip(root, i, what)
-  if what ~= "edits" and what ~= "decisions" then return false end
+  if what ~= "edits" and what ~= "decisions" and what ~= "memory" then return false end   -- memory: 2026-10-03
   local rec, item = FX.coachItem(root, i, what)
   if not rec or item.status ~= "skipped" then return false end
   item.status, item.error, item.errorCode, item.reason = "pending", nil, nil, nil   -- the reason was the skip's
@@ -7393,6 +7408,171 @@ function FX.coachDecision(root, i, act)
   FX.coachSave(rec)
   if FX._coach.open == root then FX.pushCoach(root) end
   return d.status ~= "pending"
+end
+
+-- ---- The auto-memory review (2026-10-03, mining round 2 unit B3) ----
+-- The coach reads the repo's auto-memory -- ~/.claude/projects/<the main checkout's folder>/memory/,
+-- every plain *.md (never a link) -- and may propose deleting or rewriting a file (Apply / Skip / Undo
+-- here), keeping one (shown only), or promoting one into CLAUDE.md (an edit row, FX.coachApply). Every
+-- path is the record's root's memory folder plus a name core.coachMemoryName passed, so nothing here
+-- reaches outside that folder, and a link -- the folder, the file, or MEMORY.md -- is never written
+-- through. Apply refuses unless the file is as the coach read it (core.coachMemoryDecision: live
+-- sessions write memory too), and backs the file up in Shepherd's own <repo>.memory-backup/ first --
+-- no backup, no change. Memory isn't in git: nothing is committed.
+function FX.coachMemoryDir(root) return core.coachMemoryDir(FX.PROJECTS_DIR, root) end
+function FX.coachIsLink(path)
+  local mode
+  pcall(function() mode = hs.fs.symlinkAttributes(path, "mode") end)
+  return mode == "link"
+end
+-- The folder's memory files, { { name, text } }: plain files with a memory file's name; nothing when
+-- the folder itself is a link.
+function FX.coachMemoryFiles(root)
+  local dir = FX.coachMemoryDir(root)
+  local out = {}
+  if not dir or FX.coachIsLink(dir) then return out end
+  for _, fn in ipairs(FX.readDir(dir)) do
+    if core.coachMemoryName(fn) then
+      local mode
+      pcall(function() mode = hs.fs.symlinkAttributes(dir .. "/" .. fn, "mode") end)
+      local text = (mode == "file") and FX.readFile(dir .. "/" .. fn) or nil
+      if text then out[#out + 1] = { name = fn, text = text } end
+    end
+  end
+  return out
+end
+-- A memory file's path in root's folder, or nil: the path check every read and write here goes through.
+function FX.coachMemoryPath(root, name)
+  local dir, n = FX.coachMemoryDir(root), core.coachMemoryName(name)
+  if not (dir and n) or FX.coachIsLink(dir) then return nil end
+  return dir .. "/" .. n
+end
+FX._coach.memorySeq = 0
+-- A refusal on a memory row: its code and words on the row, a toast, a log line.
+function FX.coachMemoryRefuse(rec, m, code, what)
+  m.error, m.errorCode = core.coachMemoryRefusal(code, (code == "exists") and m.rename or m.file), code
+  FX.coachSave(rec)
+  FX.alert("⚠️ Not " .. what .. ": " .. m.error, 5)
+  print("[cc-dashboard] ⚠️ coach: memory " .. tostring(m.action) .. " of " .. tostring(m.file) .. " refused for " .. tostring(rec.root) .. " (" .. tostring(code) .. ")")
+  if FX._coach.open == rec.root then FX.pushCoach(rec.root) end
+  return false
+end
+
+function FX.coachMemoryApply(root, i)
+  local rec, m = FX.coachItem(root, i, "memory")
+  if not rec then return false end
+  if m.status ~= "pending" then FX.alert("That memory change is " .. (m.status == "keep" and "a keep -- nothing to apply" or ("already " .. tostring(m.status)))); return false end
+  local path = FX.coachMemoryPath(rec.root, m.file)
+  if not path then return FX.coachMemoryRefuse(rec, m, "outside", "applied") end
+  local to = nil
+  if m.action == "rewrite" and m.rename then
+    to = FX.coachMemoryPath(rec.root, m.rename)
+    if not to then return FX.coachMemoryRefuse(rec, m, "outside", "applied") end
+  end
+  local idxPath = FX.coachMemoryPath(rec.root, core.COACH_MEMORY_INDEX)
+  local index = (m.file ~= core.COACH_MEMORY_INDEX and idxPath and not FX.coachIsLink(idxPath)) and FX.readFile(idxPath) or nil
+  local current = FX.readFile(path)
+  local dec = core.coachMemoryDecision(m, { current = current, readHash = (rec.memoryHashes or {})[m.file], index = index,
+    link = FX.coachIsLink(path) or (to ~= nil and FX.coachIsLink(to)), targetExists = to ~= nil and (FX.readFile(to) ~= nil or FX.coachIsLink(to)) })
+  if not dec.ok then return FX.coachMemoryRefuse(rec, m, dec.error, "applied") end
+  -- the backup first: no backup, no change
+  FX._coach.memorySeq = FX._coach.memorySeq + 1
+  local stamp = tostring(math.floor(FX.now())) .. "-" .. FX._coach.memorySeq
+  local bdir = FX.coachPath(rec.root, ".memory-backup")
+  local bname = stamp .. "-" .. m.file
+  if not (bdir and current and FX.writeFileAtomic(bdir .. "/" .. bname, current)) then return FX.coachMemoryRefuse(rec, m, "backup", "applied") end
+  if dec.index and not FX.writeFileAtomic(bdir .. "/" .. stamp .. "-" .. core.COACH_MEMORY_INDEX, index) then
+    return FX.coachMemoryRefuse(rec, m, "backup", "applied")
+  end
+  local ok
+  if dec.delete then
+    ok = os.remove(path) and true or false
+  elseif dec.renameTo then
+    ok = FX.writeFileAtomic(to, dec.write)
+    if ok and not os.remove(path) then
+      os.remove(to)   -- the old name stays: back to as it was
+      ok = false
+    end
+  else
+    ok = FX.writeFileAtomic(path, dec.write)
+  end
+  if not ok then return FX.coachMemoryRefuse(rec, m, "write", "applied") end
+  local hashes = rec.memoryHashes or {}
+  rec.memoryHashes = hashes
+  if dec.index then
+    local wasRead = hashes[core.COACH_MEMORY_INDEX] ~= nil and hashes[core.COACH_MEMORY_INDEX] == core.coachHash(index)
+    if FX.writeFileAtomic(idxPath, dec.index) then
+      -- Shepherd's own write isn't "changed since" -- unless a session had changed MEMORY.md already
+      if wasRead then hashes[core.COACH_MEMORY_INDEX] = core.coachHash(dec.index) end
+    else
+      print("[cc-dashboard] ❌ coach: " .. tostring(m.file) .. " changed, but MEMORY.md's index couldn't be updated in " .. tostring(rec.root))
+    end
+  end
+  hashes[m.file] = (not dec.delete and not dec.renameTo) and dec.afterHash or nil
+  if dec.renameTo then hashes[dec.renameTo] = dec.afterHash end
+  m.status, m.error, m.errorCode, m.at, m.backup = "applied", nil, nil, FX.now(), bname
+  m.afterHash, m.renamedTo, m.indexRenamed, m.removed = dec.afterHash, dec.renameTo, dec.indexRenamed, dec.removed
+  local okL, errL = pcall(function()
+    local list, id = core.coachLessonRecord(FX.coachLessons(root), core.coachMemoryLessonItem(m), "applied", { at = m.at, run = rec.at })
+    if id then m.lesson = id; FX.coachLessonsSave(root, list) end
+  end)
+  if not okL then print("[cc-dashboard] ❌ coach: recording the applied memory lesson failed: " .. tostring(errL)) end
+  FX.coachSave(rec)
+  local what = dec.delete and "Deleted" or (dec.renameTo and ("Rewrote it as " .. dec.renameTo .. ":") or "Rewrote")
+  FX.alert("🧭 " .. what .. " memory " .. m.file .. " -- backed up, Undo puts it back", 4)
+  print("[cc-dashboard] ✅ coach: memory " .. tostring(m.action) .. " of " .. tostring(m.file) .. " in " .. tostring(rec.root) .. " (backup " .. bname .. ")")
+  if FX._coach.open == root then FX.pushCoach(root) end
+  return true
+end
+
+-- Undo an applied memory change: the file comes back from its backup, only while it is as Shepherd
+-- left it (core.coachMemoryUndoDecision), and MEMORY.md's line comes back or moves back with it.
+function FX.coachMemoryUndo(root, i)
+  local rec, m = FX.coachItem(root, i, "memory")
+  if not rec then return false end
+  if m.status ~= "applied" then FX.alert("That memory change isn't applied"); return false end
+  local path = FX.coachMemoryPath(rec.root, m.file)
+  local at = m.renamedTo and FX.coachMemoryPath(rec.root, m.renamedTo) or path
+  local bdir = FX.coachPath(rec.root, ".memory-backup")
+  local bname = core.coachMemoryBackupName(m.backup)
+  if not (path and at) then return FX.coachMemoryRefuse(rec, m, "outside", "undone") end
+  local idxPath = FX.coachMemoryPath(rec.root, core.COACH_MEMORY_INDEX)
+  local index = (idxPath and not FX.coachIsLink(idxPath)) and FX.readFile(idxPath) or nil
+  local dec = core.coachMemoryUndoDecision(m, { backup = (bdir and bname) and FX.readFile(bdir .. "/" .. bname) or nil,
+    current = FX.readFile(at), original = m.renamedTo and FX.readFile(path) or nil, index = index,
+    link = FX.coachIsLink(path) or FX.coachIsLink(at) })
+  if not dec.ok then return FX.coachMemoryRefuse(rec, m, dec.error, "undone") end
+  if not FX.writeFileAtomic(path, dec.text) then return FX.coachMemoryRefuse(rec, m, "write", "undone") end
+  if dec.remove then os.remove(at) end
+  if dec.index and idxPath and not FX.writeFileAtomic(idxPath, dec.index) then
+    print("[cc-dashboard] ❌ coach: " .. tostring(m.file) .. " is back, but MEMORY.md's index couldn't be updated in " .. tostring(rec.root))
+  end
+  local hashes = rec.memoryHashes or {}
+  rec.memoryHashes = hashes
+  hashes[m.file] = core.coachHash(dec.text)
+  if m.renamedTo then hashes[m.renamedTo] = nil end
+  m.status, m.error, m.errorCode, m.undoneAt = "undone", nil, nil, FX.now()
+  local okL, errL = pcall(function()
+    local list, id = core.coachLessonRecord(FX.coachLessons(root), core.coachMemoryLessonItem(m), "undone", { at = m.undoneAt })
+    if id then m.lesson = id; FX.coachLessonsSave(root, list) end
+  end)
+  if not okL then print("[cc-dashboard] ❌ coach: recording the undone memory lesson failed: " .. tostring(errL)) end
+  FX.coachSave(rec)
+  FX.alert("🧭 Undone: memory " .. m.file .. " is back as it was", 4)
+  print("[cc-dashboard] ✅ coach: undid the memory " .. tostring(m.action) .. " of " .. tostring(m.file) .. " in " .. tostring(rec.root))
+  if FX._coach.open == root then FX.pushCoach(root) end
+  return true
+end
+
+-- Skip a memory change: folded into the lessons ledger when the next run starts, like an edit's.
+function FX.coachMemorySkip(root, i)
+  local rec, m = FX.coachItem(root, i, "memory")
+  if not rec or m.status ~= "pending" then return false end
+  m.status, m.error, m.errorCode, m.at = "skipped", nil, nil, FX.now()
+  print("[cc-dashboard] 🔍 coach: skipped the memory " .. tostring(m.action) .. " of " .. tostring(m.file) .. " for " .. tostring(rec.root))
+  FX.coachSave(rec)
+  if FX._coach.open == root then FX.pushCoach(root) end
+  return true
 end
 
 -- Shepherd's own log of what transcripts don't hold (Adam's Not yet notes, blocked merges' notes,
@@ -12593,6 +12773,11 @@ local function handleBridgeMsg(msg)
   if a == "coach-undo" then FX.coachUndo(tostring(payload.v or ""), tostring(payload.text or "")); return end
   -- 2026-10-03: a run on one applied edit alone; text = the history entry's own number, like Undo
   if a == "coach-sharpen" then FX.coachSharpen(tostring(payload.v or ""), tostring(payload.text or "")); return end
+  -- 2026-10-03: the auto-memory review's rows; text = the memory row's number
+  if a == "coach-mem-apply" then FX.coachMemoryApply(tostring(payload.v or ""), tostring(payload.text or "")); return end
+  if a == "coach-mem-skip" then FX.coachMemorySkip(tostring(payload.v or ""), tostring(payload.text or "")); return end
+  if a == "coach-mem-unskip" then FX.coachUnskip(tostring(payload.v or ""), tostring(payload.text or ""), "memory"); return end
+  if a == "coach-mem-undo" then FX.coachMemoryUndo(tostring(payload.v or ""), tostring(payload.text or "")); return end
   if a == "coach-dec-add" then FX.coachDecision(tostring(payload.v or ""), tostring(payload.text or ""), "add"); return end
   if a == "coach-dec-skip" then FX.coachDecision(tostring(payload.v or ""), tostring(payload.text or ""), "skip"); return end
   if a == "coach-rerun" then
@@ -23906,6 +24091,8 @@ local HTML = [[
         var pend = e.status === "pending";
         h += '<div class="ib-row co-row' + (pend ? '' : ' done') + '">'
           + '<div class="ib-q">' + esc(e.section || "CLAUDE.md") + '</div>'
+          // 2026-10-03: a promoted auto-memory file (e.fromMemory): an edit like any other, applied the same way
+          + (e.fromMemory ? '<div class="ib-meta co-from">From auto-memory: ' + esc(e.fromMemory) + ' -- Apply adds it to CLAUDE.md; the memory file stays</div>' : '')
           + lessonHtml(e, pend)
           + '<div class="co-why">' + esc(e.why) + '</div>'
           + (e.whatsNew ? '<div class="co-whatsnew"><b>New since then:</b> ' + esc(e.whatsNew) + '</div>' : '')
@@ -23938,6 +24125,38 @@ local HTML = [[
                     : "Skipped " + '<button class="ib-btn" data-act="dec-unskip" data-i="' + i + '" onclick="coachAct(event)" title="Put this entry back with the ones waiting">Bring back</button>') + '</div>')
           + '</div>';
       });
+      // 2026-10-03: the auto-memory review (v.memory, core.coachView): each change the coach proposes to
+      // the repo's auto-memory, with the text it read. Apply / Skip / Undo / Bring back send only the
+      // row's number, like every other click here. A keep is shown with nothing to click; a promote is
+      // an edit row above (e.fromMemory).
+      var mem = v.memory || [];
+      if(mem.length){
+        var memStale = rerun.replace('data-act="rerun"', 'data-act="rerun" title="The memory file changed since the coach read it (a session wrote to it): a fresh run reads it as it is now, and replaces these suggestions"');
+        h += '<div class="co-hist-h">Auto-memory · ' + esc(mem.length) + '</div>';
+        mem.forEach(function(m, i){
+          var pend = m.status === "pending", del = m.action === "delete", rw = m.action === "rewrite";
+          var done = m.status === "keep" ? "✓ Keep · nothing to change"
+            : (m.status === "applied" ? (del ? "✓ Deleted" : "✓ Rewritten" + (m.renamedTo ? " as " + esc(m.renamedTo) : "")) + " · backed up "
+                + '<button class="ib-btn" data-act="mem-undo" data-i="' + i + '" onclick="coachAct(event)" title="Put the file back as it was, from Shepherd\'s backup">Undo</button>'
+            : (m.status === "undone" ? "↩ Undone · the file is back as it was"
+            : "Skipped " + (m.reason ? '· ' + esc(m.reason) + ' ' : '') + '<button class="ib-btn" data-act="mem-unskip" data-i="' + i + '" onclick="coachAct(event)" title="Put this change back with the ones waiting">Bring back</button>'));
+          h += '<div class="ib-row co-row co-mem' + (pend ? '' : ' done') + '">'
+            + '<div class="ib-q">' + (del ? "Delete " : (rw ? "Rewrite " : "Keep ")) + 'memory/' + esc(m.file) + (m.rename ? ' → ' + esc(m.rename) : '') + '</div>'
+            + lessonHtml(m, pend)
+            + '<div class="co-why">' + esc(m.why) + '</div>'
+            + (m.whatsNew ? '<div class="co-whatsnew"><b>New since then:</b> ' + esc(m.whatsNew) + '</div>' : '')
+            + ((del || rw) && m.old ? '<pre class="co-old">' + esc(m.old) + '</pre>' : '')
+            + (rw ? '<pre class="co-new">' + esc(m["new"]) + '</pre>' : '')
+            + ((m.evidence || []).length ? '<ul class="co-ev">' + m.evidence.map(function(x){ return '<li>' + esc(x) + '</li>'; }).join("") + '</ul>' : '')
+            + (pend && m.error ? '<div class="co-err">' + esc(m.error) + '</div>' : '')
+            + (pend ? '<div class="ib-free"><button class="ib-btn" data-act="mem-apply" data-i="' + i + '" onclick="coachAct(event)" title="'
+                    + (del ? 'Delete this memory file and its MEMORY.md line' : 'Write this text into the memory file') + ' -- backed up first, and refused if a session changed it since the coach read it">'
+                    + (del ? 'Delete it' : 'Rewrite it') + '</button>'
+                    + '<button class="ib-btn" data-act="mem-skip" data-i="' + i + '" onclick="coachAct(event)">Skip</button>' + (m.rerun ? memStale : '') + '</div>'
+                : '<div class="co-done">' + done + '</div>')
+            + '</div>';
+        });
+      }
       // 2026-10-03: did it work? The coach's last verdict on the sessions since it was applied
       // (x.check, core.coachApplyChecks): working or still seen with its quotes, or no data -- "yet"
       // while fewer sessions than a verdict needs postdate it. An undone edit has none to show.
@@ -23990,6 +24209,11 @@ local HTML = [[
       if(!t || !v || !v.root) return;
       var act = t.getAttribute("data-act");
       if(act === "rerun"){ send("coach-rerun", v.root); return; }
+      if(act === "mem-apply" || act === "mem-skip" || act === "mem-undo" || act === "mem-unskip"){   // 2026-10-03: a memory row's number
+        var mi = parseInt(t.getAttribute("data-i"), 10), ml = v.memory || [];
+        if(mi >= 0 && ml[mi]) send("coach-" + act, v.root, String(mi + 1));
+        return;
+      }
       if(act === "undo" || act === "sharpen"){   // the history is shown newest first; Lua wants the entry's own number
         var hist = v.history || [], hx = hist[parseInt(t.getAttribute("data-i"), 10)];
         if(hx && hx.i) send("coach-" + act, v.root, String(hx.i));

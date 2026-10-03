@@ -1028,6 +1028,186 @@ do
   check("config: SETTINGS_KEEP_SUBKEYS keeps coach.evidence", keep2.evidence == true)
 end
 
+-- ---- the coach reviews the repo's auto-memory (2026-10-03, mining round 2 unit B3) ----
+-- Claude Code's auto-memory (~/.claude/projects/<main root>/memory/*.md, indexed by MEMORY.md) is
+-- loaded into every session beside CLAUDE.md, and nothing ever reviewed it: a stale or wrong note
+-- kept steering sessions. Now the coach reads it and may propose keep / delete / rewrite / promote;
+-- Apply checks each file's hash first (live sessions write memory too), backs it up in Shepherd's
+-- own folder, keeps MEMORY.md's index lines consistent, and Undo restores from the backup.
+do
+  check("memory: core.coachMemoryDir exists", type(core.coachMemoryDir) == "function")
+  local MROOT = "/Users/me/Programming/repo"
+  local MDIR = "/h/.claude/projects/" .. core.encodeProjectPath(MROOT) .. "/memory"
+  check("memory: the folder is the MAIN checkout's project folder's memory/",
+        type(core.coachMemoryDir) == "function" and core.coachMemoryDir("/h/.claude/projects", MROOT) == MDIR)
+  check("memory: ...nil for a root that isn't absolute", type(core.coachMemoryDir) == "function" and core.coachMemoryDir("/h", "repo") == nil)
+  local nameOk = type(core.coachMemoryName) == "function"
+  check("memory: a plain .md name is a memory file's name", nameOk and core.coachMemoryName("shepherd-project.md") == "shepherd-project.md"
+        and core.coachMemoryName("MEMORY.md") == "MEMORY.md")
+  check("memory: a name that could leave the folder is none (.., a slash, a dot file, not .md, empty)", nameOk
+        and core.coachMemoryName("../x.md") == nil and core.coachMemoryName("a/b.md") == nil and core.coachMemoryName(".x.md") == nil
+        and core.coachMemoryName("..md") == nil and core.coachMemoryName("x.txt") == nil and core.coachMemoryName("") == nil
+        and core.coachMemoryName("/etc/x.md") == nil and core.coachMemoryName(nil) == nil and core.coachMemoryName("a\nb.md") == nil)
+
+  -- what the prompt carries: MEMORY.md first, then each file by name, whole -- one past the cap is only named
+  local IDX = "# Memory Index\n\n- [Stale](stale.md) — an old fact\n- [Good](good.md) — still true\n- [Big](big.md) — long\n"
+  local STALE = "---\nname: stale\ndescription: an old fact\n---\n\nThe panel uses hs.alert.show for messages.\n"
+  local MB = tonumber(core.COACH.memoryBytes) or 16000
+  local GOOD = "---\nname: good\ndescription: still true\n---\n\nmake deploy = lint + test + install + reload.\n"
+  local files = { { name = "stale.md", text = STALE }, { name = "MEMORY.md", text = IDX }, { name = "good.md", text = GOOD },
+                  { name = "big.md", text = string.rep("x", MB + 10) } }
+  local B = type(core.coachMemoryBlock) == "function" and core.coachMemoryBlock(files, MB, MDIR) or nil
+  check("memory: core.coachMemoryBlock builds the prompt's block", type(B) == "table" and type(B.text) == "string")
+  B = B or { text = "", hashes = {}, shown = {}, omitted = {} }
+  local iIdx, iGood, iStale = B.text:find("MEMORY.md", 1, true), B.text:find("good.md", 1, true), B.text:find("stale.md ---", 1, true)
+  check("memory: ...MEMORY.md first, then the files by name", iIdx and iGood and iStale and iIdx < iGood and iGood < iStale and true or false)
+  check("memory: ...each file whole", B.text:find("The panel uses hs.alert.show for messages.", 1, true) ~= nil
+        and B.text:find("make deploy = lint + test + install + reload.", 1, true) ~= nil)
+  check("memory: ...one past the cap is named, never cut  (" .. #B.text .. " bytes)", #B.text <= MB + 400
+        and not B.text:find("xxxxxxxxxx", 1, true) and B.omitted[1] == "big.md" and B.text:find("big.md", 1, true) ~= nil)
+  check("memory: ...with each shown file's hash, and only theirs (what Apply checks)",
+        B.hashes["stale.md"] == core.coachHash(STALE) and B.hashes["MEMORY.md"] == core.coachHash(IDX) and B.hashes["big.md"] == nil)
+  check("memory: no memory files: no block", type(core.coachMemoryBlock) == "function" and core.coachMemoryBlock({}, 1000, MDIR) == nil)
+
+  local MD = { text = "evidence here\n", ats = {} }
+  local PM = core.coachPrompt(MD, "# R\n", nil, { name = "repo", memory = B })
+  check("memory: the prompt carries the memory block", PM:find("<memory>", 1, true) ~= nil and PM:find("The panel uses hs.alert.show", 1, true) ~= nil)
+  check("memory: ...asks for keep / delete / rewrite / promote in the same object as the edits",
+        PM:find('"memory"', 1, true) ~= nil and PM:find('"keep"', 1, true) ~= nil and PM:find('"delete"', 1, true) ~= nil
+        and PM:find('"rewrite"', 1, true) ~= nil and PM:find('"promote"', 1, true) ~= nil)
+  check("memory: ...and says MEMORY.md is never deleted, and only a shown file is proposed",
+        PM:find("MEMORY.md may be rewritten", 1, true) ~= nil and PM:lower():find("only a file shown", 1, true) ~= nil)
+  check("memory: no memory: no block and no memory rules", not core.coachPrompt(MD, "# R\n", nil, { name = "repo" }):find("<memory>", 1, true)
+        and not core.coachPrompt(MD, "# R\n", nil, { name = "repo" }):find('"memory"', 1, true))
+  local PS = core.coachPrompt(MD, "# R\n- a\n", nil, { name = "repo", memory = B,
+    sharpen = { sha = "abc1234abc", at = 1, section = "Git", why = "w", old = "", new = "- a" } })
+  check("memory: a Sharpen run carries no memory", not PS:find("<memory>", 1, true))
+
+  -- the answer: memory rows, each checked; a promote is a CLAUDE.md edit row
+  local function mem(over)
+    local m = { file = "stale.md", action = "delete", why = "hs.alert.show is banned now", evidence = { "Messages go through FX.alert" } }
+    for k, v in pairs(over or {}) do m[k] = v end
+    return m
+  end
+  local ans = { summary = "Memory tidy.", edits = {}, decisions = {}, memory = {
+    mem(),
+    mem({ file = "good.md", action = "rewrite", new = "---\nname: good\n---\n\nmake deploy runs the gate first.\n", rename = "deploy.md" }),
+    mem({ file = "MEMORY.md", action = "keep", evidence = {} }),
+    mem({ file = "good.md", action = "promote", section = "Deploying", new = "- make deploy = lint + test + install + reload" }),
+    mem({ file = "nope.md" }),                                   -- not shown: dropped
+    mem({ file = "../../.zshrc.md" }),                           -- leaves the folder: dropped
+    mem({ file = "big.md" }),                                    -- named, not shown: dropped
+    mem({ file = "MEMORY.md", action = "delete" }),              -- the index is never deleted
+    mem({ file = "stale.md", action = "rewrite" }),              -- a rewrite needs its new text
+    mem({ file = "stale.md", evidence = {} }),                   -- a delete needs evidence
+    mem({ file = "stale.md", action = "purge" }),                -- not an action
+    mem({ file = "good.md", action = "rewrite", new = "x\n", rename = "../out.md" }),   -- a rename out of the folder
+    mem({ file = "MEMORY.md", action = "rewrite", new = "# I\n", rename = "INDEX.md" }), -- the index keeps its name
+    mem({ file = "MEMORY.md", action = "promote", section = "S", new = "- x" }),       -- nor is it promoted
+  } }
+  local MP = core.parseCoachOutput(envelope("Done.\n" .. json.encode(ans)), "", { memory = B.hashes })
+  local rows = MP.memory or {}
+  check("memory: the parser keeps the three good memory rows, in order  (" .. #rows .. ")",
+        #rows == 3 and rows[1].file == "stale.md" and rows[1].action == "delete" and rows[2].action == "rewrite"
+        and rows[2].rename == "deploy.md" and rows[2].new:find("gate first", 1, true) ~= nil and rows[3].action == "keep")
+  check("memory: ...a promote becomes a CLAUDE.md edit row, from that memory file",
+        #MP.edits == 1 and MP.edits[1].fromMemory == "good.md" and MP.edits[1].old == "" and MP.edits[1].section == "Deploying"
+        and MP.edits[1].new == "- make deploy = lint + test + install + reload")
+  check("memory: ...and the answer is proposals", MP.verdict == "proposals")
+  local KP = core.parseCoachOutput(envelope(json.encode({ summary = "fine", edits = {}, decisions = {},
+    memory = { mem({ file = "good.md", action = "keep", evidence = {} }) } })), "", { memory = B.hashes })
+  check("memory: keeps alone are nothing to change -- the rows still come back",
+        KP.verdict == "none" and #(KP.memory or {}) == 1 and KP.memory[1].action == "keep")
+  local NP = core.parseCoachOutput(envelope(json.encode(ans)), "", {})
+  check("memory: with no memory read, no memory row is kept", #(NP.memory or {}) == 0 and #NP.edits == 0)
+  local SP = core.parseCoachOutput(envelope(json.encode(ans)), "", { memory = B.hashes, sharpen = true })
+  check("memory: ...nor in a Sharpen run", #(SP.memory or {}) == 0)
+
+  -- the record keeps them across a reload, with what Apply and Undo need
+  local recM = { v = 1, root = MROOT, state = "done", verdict = "proposals", edits = {}, decisions = {}, memoryHashes = B.hashes, memory = {
+    { file = "stale.md", action = "delete", why = "w", evidence = { "e" }, status = "applied", backup = "1790000000-1-stale.md",
+      removed = { "- [Stale](stale.md) — an old fact" }, old = STALE, at = 5 },
+    { file = "good.md", action = "rewrite", new = "n\n", why = "w", evidence = { "e" }, status = "pending", error = "x", errorCode = "changed" },
+    { file = "../evil.md", action = "delete", why = "w", evidence = { "e" }, status = "pending" } } }
+  for i = 1, core.COACH.maxEdits + 1 do recM.edits[i] = { section = "S", old = "", new = "- n" .. i, why = "w", evidence = { "e" }, status = "pending" } end
+  recM.edits[#recM.edits].fromMemory = "good.md"
+  local RR = core.parseCoachRecord(json.encode(recM)) or { memory = {}, edits = {} }
+  check("memory: a record read back keeps its memory rows -- one that leaves the folder is dropped  (" .. #(RR.memory or {}) .. ")",
+        #(RR.memory or {}) == 2 and RR.memory[1].status == "applied" and RR.memory[1].backup == "1790000000-1-stale.md"
+        and RR.memory[1].removed and RR.memory[1].removed[1] == "- [Stale](stale.md) — an old fact" and RR.memory[2].errorCode == "changed")
+  check("memory: ...the hashes the coach read", type(RR.memoryHashes) == "table" and RR.memoryHashes["stale.md"] == core.coachHash(STALE))
+  check("memory: ...and a promoted edit past the edits cap, still from its file",
+        #RR.edits == core.COACH.maxEdits + 1 and RR.edits[#RR.edits].fromMemory == "good.md")
+  local VM = core.coachView(RR) or { memory = {} }
+  check("memory: the overlay gets each memory row numbered, a changed one offering the rerun",
+        VM.memory and #VM.memory == 2 and VM.memory[2].i == 2 and VM.memory[2].rerun == true and VM.memory[1].rerun == nil)
+  check("memory: ...a pending memory row counts on the chip", VM.pending == core.COACH.maxEdits + 1 + 1)
+
+  -- Apply: the file's hash first; delete drops its index lines, a rename moves its link
+  local decide = core.coachMemoryDecision or function() return {} end
+  local del = decide({ file = "stale.md", action = "delete" }, { current = STALE, readHash = core.coachHash(STALE), index = IDX })
+  check("memory apply: a delete goes ahead, taking its index line out of MEMORY.md",
+        del.ok == true and del.delete == true and del.index == "# Memory Index\n\n- [Good](good.md) — still true\n- [Big](big.md) — long\n"
+        and del.removed and del.removed[1] == "- [Stale](stale.md) — an old fact")
+  check("memory apply: ...refused when a session changed the file since the coach read it",
+        decide({ file = "stale.md", action = "delete" }, { current = STALE .. "more\n", readHash = core.coachHash(STALE), index = IDX }).error == "changed")
+  check("memory apply: ...or deleted it", decide({ file = "stale.md", action = "delete" }, { current = nil, readHash = core.coachHash(STALE) }).error == "changed")
+  check("memory apply: ...or when it is a link", decide({ file = "stale.md", action = "delete" },
+        { current = STALE, readHash = core.coachHash(STALE), link = true }).error == "link")
+  check("memory apply: ...or when it leaves the folder", decide({ file = "../stale.md", action = "delete" },
+        { current = STALE, readHash = core.coachHash(STALE) }).error == "outside")
+  local NEWG = "---\nname: good\n---\n\nmake deploy runs the gate first."
+  local rw = decide({ file = "good.md", action = "rewrite", new = NEWG }, { current = GOOD, readHash = core.coachHash(GOOD), index = IDX })
+  check("memory apply: a rewrite writes the whole new file (ending in a newline), MEMORY.md left alone",
+        rw.ok == true and rw.write == NEWG .. "\n" and rw.index == nil and rw.afterHash == core.coachHash(NEWG .. "\n"))
+  check("memory apply: ...refused when it would change nothing",
+        decide({ file = "good.md", action = "rewrite", new = GOOD }, { current = GOOD, readHash = core.coachHash(GOOD) }).error == "no-change")
+  local rn = decide({ file = "good.md", action = "rewrite", new = NEWG, rename = "deploy.md" }, { current = GOOD, readHash = core.coachHash(GOOD), index = IDX })
+  check("memory apply: a rename writes the new name and moves the index line's link to it",
+        rn.ok == true and rn.renameTo == "deploy.md" and rn.index == IDX:gsub("%(good%.md%)", "(deploy.md)") and rn.indexRenamed == true)
+  check("memory apply: ...refused when that name is taken", decide({ file = "good.md", action = "rewrite", new = NEWG, rename = "deploy.md" },
+        { current = GOOD, readHash = core.coachHash(GOOD), targetExists = true }).error == "exists")
+  check("memory apply: MEMORY.md is never deleted", decide({ file = "MEMORY.md", action = "delete" },
+        { current = IDX, readHash = core.coachHash(IDX) }).error == "bad-memory")
+  check("memory apply: a keep or a promote is nothing to apply here", decide({ file = "good.md", action = "keep" },
+        { current = GOOD, readHash = core.coachHash(GOOD) }).error == "bad-memory")
+
+  -- Undo: from the backup, and only over what Shepherd wrote
+  local undo = core.coachMemoryUndoDecision or function() return {} end
+  local applied = { file = "stale.md", action = "delete", status = "applied", backup = "1-1-stale.md", removed = del.removed }
+  local IDX2 = "# Memory Index\n\n- [Good](good.md) — still true\n- [New](new.md) — a session's\n"
+  local ud = undo(applied, { backup = STALE, current = nil, index = IDX2 })
+  check("memory undo: a delete comes back from its backup, its index line too (after what sessions added since)",
+        ud.ok == true and ud.file == "stale.md" and ud.text == STALE and ud.index == IDX2 .. "- [Stale](stale.md) — an old fact\n")
+  check("memory undo: ...the line isn't added twice", undo(applied, { backup = STALE, current = nil, index = IDX }).index == nil)
+  check("memory undo: ...refused when the file is back meanwhile", undo(applied, { backup = STALE, current = "x", index = IDX2 }).error == "undo-conflict")
+  check("memory undo: ...or its backup is gone", undo(applied, { backup = nil, current = nil }).error == "undo-gone")
+  local rwA = { file = "good.md", action = "rewrite", status = "applied", backup = "1-2-good.md", afterHash = core.coachHash(NEWG .. "\n") }
+  local ur = undo(rwA, { backup = GOOD, current = NEWG .. "\n" })
+  check("memory undo: a rewrite goes back to the file it replaced", ur.ok == true and ur.file == "good.md" and ur.text == GOOD and ur.remove == nil)
+  check("memory undo: ...refused when a session changed it since", undo(rwA, { backup = GOOD, current = NEWG .. "more\n" }).error == "undo-conflict")
+  local rnA = { file = "good.md", action = "rewrite", status = "applied", backup = "1-3-good.md", afterHash = core.coachHash(NEWG .. "\n"),
+                renamedTo = "deploy.md", indexRenamed = true }
+  local un = undo(rnA, { backup = GOOD, current = NEWG .. "\n", original = nil, index = rn.index })
+  check("memory undo: a rename puts the old file back, drops the new name and moves the link back",
+        un.ok == true and un.file == "good.md" and un.text == GOOD and un.remove == "deploy.md" and un.index == IDX)
+  check("memory undo: ...refused when the old name was taken meanwhile", undo(rnA, { backup = GOOD, current = NEWG .. "\n", original = "x" }).error == "undo-conflict")
+  check("memory undo: nothing applied, nothing to undo", undo({ file = "good.md", action = "rewrite", status = "pending" }, { backup = GOOD }).ok ~= true)
+
+  -- the lessons ledger records memory decisions too
+  local item = type(core.coachMemoryLessonItem) == "function" and core.coachMemoryLessonItem({ file = "stale.md", action = "delete", why = "banned now" }) or {}
+  local L1, lid = core.coachLessonRecord({}, item, "applied", { at = 10, run = 9 })
+  check("memory lessons: an applied memory delete is a lesson, its section naming the file",
+        lid ~= nil and L1[1] and L1[1].section == "memory/stale.md" and L1[1].verdict == "applied" and L1[1].text == "delete")
+  local LF = core.coachLessonFold({}, { at = 20, edits = {}, memory = {
+    { file = "good.md", action = "rewrite", new = "n\n", why = "w", evidence = { "e" }, status = "skipped", reason = "still true", at = 21 },
+    { file = "MEMORY.md", action = "keep", why = "w", evidence = {}, status = "keep" } } }, {})
+  check("memory lessons: a skipped memory row is folded in when the next run starts (a keep is not)",
+        #LF == 1 and LF[1].section == "memory/good.md" and LF[1].verdict == "skipped" and LF[1].reason == "still true")
+  local PL = core.coachPrompt(MD, "# R\n", nil, { name = "repo", memory = B, lessons = L1 })
+  check("memory lessons: the prompt shows them with the rest", (PL:match("<lessons>\n(.-)\n</lessons>") or ""):find("memory/stale.md", 1, true) ~= nil)
+end
+
 -- ---- the panel half: the real claude-dashboard.lua under a stubbed hs ----
 local REPO = T .. "/repo"
 local COMMON = REPO .. "/.git"
@@ -1733,6 +1913,128 @@ os.remove(SPF)
 estep()
 check("evidence (repo): under the cap it runs, on the log alone -- no transcript count needed",
       #runScans() == nR + 1 and (fx.coachRecord(REPO) or {}).trigger == "evidence" and #evScans() == nE)
+end)()
+
+-- 2026-10-03 (mining round 2 unit B3): the coach reviews the repo's auto-memory, on a real folder. The
+-- run reads the main checkout's memory (never through a link); Apply deletes or rewrites a file only
+-- while it is as the coach read it, after backing it up in Shepherd's own folder, and keeps MEMORY.md's
+-- lines in step; Undo restores from the backup; a promote is a CLAUDE.md edit; nothing outside the
+-- folder is ever touched.
+;(function()
+if type(core.coachMemoryDir) ~= "function" or type(fx.coachMemoryApply) ~= "function" then
+  check("memory (repo): core.coachMemoryDir and FX.coachMemoryApply exist", false); return
+end
+local MDIR = core.coachMemoryDir(PROJ, REPO)
+os.execute("mkdir -p " .. q(MDIR))
+local IDX = "# Memory Index\n\n- [Stale](stale.md) — an old fact\n- [Good](good.md) — still true\n- [Keep](keep.md) — fine\n"
+local STALE = "---\nname: stale\n---\n\nThe panel uses hs.alert.show for messages.\n"
+local GOOD = "---\nname: good\n---\n\nmake deploy = lint + test + install + reload.\n"
+local KEEP = "---\nname: keep\n---\n\nTODO.md is gitignored.\n"
+write(MDIR .. "/MEMORY.md", IDX); write(MDIR .. "/stale.md", STALE); write(MDIR .. "/good.md", GOOD); write(MDIR .. "/keep.md", KEEP)
+local OUTSIDE = T .. "/outside.md"
+local SECRET = "SECRET outside the memory folder\n"
+write(OUTSIDE, SECRET)
+sh("ln -s " .. q(OUTSIDE) .. " " .. q(MDIR .. "/linked.md"))
+if sh("git -C " .. q(REPO) .. " status --porcelain -- CLAUDE.md"):match("%S") then sh("git -C " .. q(REPO) .. " commit -q -m wip -- CLAUDE.md") end
+fx._coach.recs[REPO] = nil
+fx._coach.scans, fx._coach.waiting, fx._coach.applying = {}, {}, nil
+fx._headless["coach|" .. REPO] = nil
+local nScans = #scans()
+quiet(function() fx.coachStart(fx.coachRepoForRoot(REPO), "card", CFG) end)
+if scans()[nScans + 1] then runFor(scans()[nScans + 1]) end
+local CC = claudes()
+local ct = CC[#CC] or { args = {}, cb = function() end }
+local pf = tostring(ct.args[3] or ""):match("< '([^']+)' >")
+local ptext = pf and read(pf) or ""
+local mb = ptext:match("<memory>\n(.-)</memory>") or ""
+check("memory (repo): the run's prompt carries the repo's auto-memory, MEMORY.md first",
+      mb:find("--- MEMORY.md ---", 1, true) == 1 and mb:find("The panel uses hs.alert.show", 1, true) ~= nil and mb:find("TODO.md is gitignored.", 1, true) ~= nil)
+check("memory (repo): ...never a link's target", not ptext:find("SECRET outside", 1, true) and not mb:find("linked.md", 1, true))
+answerClaude(ct, { summary = "Memory.", edits = {}, decisions = {}, memory = {
+  { file = "stale.md", action = "delete", why = "hs.alert.show is banned", evidence = { "Messages go through FX.alert" } },
+  { file = "good.md", action = "rewrite", new = "---\nname: good\n---\n\nmake deploy = lint + test + install + reload, from main.\n",
+    why = "From main only", evidence = { "deploy from main" } },
+  { file = "keep.md", action = "keep", why = "still true", evidence = {} },
+  { file = "keep.md", action = "promote", section = "Git", new = "- TODO.md is gitignored", why = "Every session needs it",
+    evidence = { "TODO.md blocked worktree remove" } },
+  { file = "linked.md", action = "delete", why = "w", evidence = { "e" } },
+  { file = "../outside.md", action = "delete", why = "w", evidence = { "e" } } } })
+local mrec = fx.coachRecord(REPO) or { memory = {}, edits = {} }
+mrec.memory = mrec.memory or {}
+check("memory (repo): the answer's memory rows land on the record -- none for a link or outside the folder  (" .. #mrec.memory .. ")",
+      mrec.verdict == "proposals" and #mrec.memory == 3 and mrec.memory[1].status == "pending" and mrec.memory[3].status == "keep")
+check("memory (repo): ...each with the text it read", mrec.memory[1].old == STALE)
+check("memory (repo): ...a promote is a CLAUDE.md edit row, from its file", #mrec.edits == 1 and mrec.edits[1].fromMemory == "keep.md")
+check("memory (repo): ...and the card counts the two changes and the edit", (core.coachTileInfo(mrec) or {}).pending == 3)
+
+-- Apply a delete
+local BDIR = CDIR .. "/" .. core.coachFileKey(REPO) .. ".memory-backup"
+local nC = #commitTasks()
+local okM
+quiet(function() okM = fx.coachMemoryApply(REPO, 1) end)
+check("memory apply (repo): a delete removes the file", okM == true and read(MDIR .. "/stale.md") == nil and mrec.memory[1].status == "applied")
+check("memory apply (repo): ...backed up first, in Shepherd's own folder",
+      type(mrec.memory[1].backup) == "string" and read(BDIR .. "/" .. tostring(mrec.memory[1].backup)) == STALE)
+check("memory apply (repo): ...its MEMORY.md line goes, the others stay",
+      read(MDIR .. "/MEMORY.md") == "# Memory Index\n\n- [Good](good.md) — still true\n- [Keep](keep.md) — fine\n")
+check("memory apply (repo): ...and nothing is committed (memory isn't in git)", #commitTasks() == nC)
+-- a rewrite, while a session has changed the file: refused
+write(MDIR .. "/good.md", GOOD .. "A session's new line.\n")
+quiet(function() okM = fx.coachMemoryApply(REPO, 2) end)
+check("memory apply (repo): a rewrite is refused when a session changed the file since the coach read it",
+      okM == false and read(MDIR .. "/good.md") == GOOD .. "A session's new line.\n" and mrec.memory[2].status == "pending"
+      and mrec.memory[2].errorCode == "changed" and (core.coachView(mrec).memory[2] or {}).rerun == true)
+write(MDIR .. "/good.md", GOOD)
+quiet(function() okM = fx.coachMemoryApply(REPO, 2) end)
+check("memory apply (repo): ...as the coach read it, the new text is written",
+      okM == true and (read(MDIR .. "/good.md") or ""):find("from main.", 1, true) ~= nil and mrec.memory[2].status == "applied")
+quiet(function() okM = fx.coachMemoryApply(REPO, 3) end)
+check("memory apply (repo): a keep has nothing to apply", okM == false and read(MDIR .. "/keep.md") == KEEP)
+-- Undo: the rewrite, then the delete (after a session added an index line)
+quiet(function() okM = fx.coachMemoryUndo(REPO, 2) end)
+check("memory undo (repo): Undo puts a rewritten file back from its backup",
+      okM == true and read(MDIR .. "/good.md") == GOOD and mrec.memory[2].status == "undone")
+write(MDIR .. "/MEMORY.md", read(MDIR .. "/MEMORY.md") .. "- [New](new.md) — a session's\n")
+quiet(function() okM = fx.coachMemoryUndo(REPO, 1) end)
+check("memory undo (repo): an undone delete brings the file back, its index line after the session's",
+      okM == true and read(MDIR .. "/stale.md") == STALE and read(MDIR .. "/MEMORY.md")
+      == "# Memory Index\n\n- [Good](good.md) — still true\n- [Keep](keep.md) — fine\n- [New](new.md) — a session's\n- [Stale](stale.md) — an old fact\n")
+local LL = core.parseCoachLessons(read(CDIR .. "/" .. core.coachFileKey(REPO) .. ".lessons.json"))
+local byS = {}
+for _, l in ipairs(LL) do byS[l.section] = l end
+check("memory lessons (repo): the ledger records the memory decisions",
+      byS["memory/stale.md"] ~= nil and byS["memory/stale.md"].verdict == "undone" and byS["memory/good.md"] ~= nil)
+-- the path check: a record changed behind Shepherd's back never reaches outside the folder, nor through a link
+mrec.memory[4] = { file = "../outside.md", action = "delete", why = "w", evidence = { "e" }, status = "pending" }
+quiet(function() okM = fx.coachMemoryApply(REPO, 4) end)
+check("memory apply (repo): a file outside the memory folder is never touched", okM == false and read(OUTSIDE) == SECRET)
+mrec.memoryHashes["linked.md"] = core.coachHash(SECRET)
+mrec.memory[5] = { file = "linked.md", action = "rewrite", new = "pwned\n", why = "w", evidence = { "e" }, status = "pending" }
+quiet(function() okM = fx.coachMemoryApply(REPO, 5) end)
+check("memory apply (repo): ...nor a link's target", okM == false and read(OUTSIDE) == SECRET and mrec.memory[5].errorCode == "link")
+-- Skip and Bring back
+quiet(function() fx.coachMemorySkip(REPO, 5) end)
+check("memory skip (repo): Skip puts a memory change aside", mrec.memory[5].status == "skipped")
+quiet(function() fx.coachUnskip(REPO, 5, "memory") end)
+check("memory skip (repo): ...Bring back puts it back", mrec.memory[5].status == "pending")
+-- the promote: applied like any edit
+local ok2
+quiet(function() ok2 = fx.coachApply(REPO, 1) end)
+if commitTasks()[nC + 1] then runFor(commitTasks()[nC + 1]) end
+check("memory promote (repo): the promoted edit is applied to CLAUDE.md and committed",
+      ok2 == true and mrec.edits[1].status == "applied" and (read(REPO .. "/CLAUDE.md") or ""):find("- TODO.md is gitignored", 1, true) ~= nil)
+-- the overlay, and the clicks that reach the memory rows
+jsCalls = {}
+quiet(function() fx.pushCoach(REPO) end)
+local sentM = false
+for _, js in ipairs(jsCalls) do if js:find("ccCoach(", 1, true) and js:find('"memory"', 1, true) and js:find("stale.md", 1, true) then sentM = true end end
+check("memory (repo): the overlay is sent the memory rows", sentM)
+local DSRC = read(ROOT .. "claude-dashboard.lua") or ""
+check("memory (repo): the overlay's memory clicks reach FX with the row's number",
+      DSRC:find('if a == "coach-mem-apply" then FX.coachMemoryApply(tostring(payload.v or ""), tostring(payload.text or "")); return end', 1, true) ~= nil
+      and DSRC:find('if a == "coach-mem-skip" then FX.coachMemorySkip(tostring(payload.v or ""), tostring(payload.text or "")); return end', 1, true) ~= nil
+      and DSRC:find('if a == "coach-mem-unskip" then FX.coachUnskip(tostring(payload.v or ""), tostring(payload.text or ""), "memory"); return end', 1, true) ~= nil
+      and DSRC:find('if a == "coach-mem-undo" then FX.coachMemoryUndo(tostring(payload.v or ""), tostring(payload.text or "")); return end', 1, true) ~= nil)
 end)()
 
 finish()

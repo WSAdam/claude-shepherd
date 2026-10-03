@@ -31,6 +31,11 @@ parallel units. Each unit adds its line here.
   data; fewer sessions read "no data yet", decided by Shepherd, not the model. The verdict shows on
   the edit's row under Applied edits, next to a new **Sharpen**, which runs the coach on that edit
   alone for a better wording of it.
+- Coach memory review: each run also reads the repo's Claude Code auto-memory (`MEMORY.md` and its
+  notes) and may propose deleting, rewriting or keeping a note, or promoting one into `CLAUDE.md` as an
+  ordinary edit row. **Delete it** / **Rewrite it** refuse when a session changed the file since the
+  coach read it, back it up in `~/.claude/cc-coach/<repo>.memory-backup/` first, keep `MEMORY.md`'s
+  index lines in step, and **Undo** restores it; nothing outside the repo's memory folder is touched.
 
 - Fixed: a batch Adam approved after the driver's `cc-fleet.sh propose` had stopped waiting (killed at
   a 10-minute background limit) was stranded: nothing could collect the answer, the batch read

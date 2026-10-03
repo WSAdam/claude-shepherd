@@ -125,9 +125,9 @@ every other automatic behaviour here waits for its switch.
   automation would do before it does it, and what it did, refused and why, newest first.
 - [**Routines**](docs/automation.md#routines): spawn a session or push a digest on a cron schedule.
 - [**Coach**](docs/automation.md#the-coach): a read-only Sonnet reads a repo's last 10 sessions and
-  suggests `CLAUDE.md` edits with evidence; Apply commits that file alone. It runs weekly, from a card,
-  or once enough new evidence arrives (`cc-lesson.sh` files a lesson for it); remembers what you applied,
-  skipped (and why) or undid; judges each applied edit on the sessions since; and Sharpen rewords one.
+  suggests `CLAUDE.md` edits with evidence, and changes to its auto-memory (backed up, with Undo). It runs
+  weekly, from a card, or on enough new evidence (`cc-lesson.sh` files a lesson); remembers what you
+  applied, skipped (and why) or undid; judges each applied edit on the sessions since; Sharpen rewords one.
 - [**Notifications & escalation**](docs/automation.md#escalation-and-watchdogs): nags, banners and pushes when a session waits
   too long or stalls; a [**Fleet idle alert**](docs/automation.md#fleet-idle-alert) once nothing has worked for 15 min.
 - [**A/B compare**](docs/automation.md#ab-compare): run one task as 2–4 variants in separate

@@ -373,5 +373,51 @@ eq("a weekly run says nothing of the kind", /new evidence/i.test(lib.coachRowsHt
 eq("the count is escaped like every field", lib.coachRowsHtml({ root: "/r", state: "done", verdict: "none", trigger: "evidence", evidence: "<b>x</b>",
   sessions: 4, edits: [], decisions: [] }).indexOf("<b>x</b>") < 0, true);
 
+// ---- the auto-memory review (2026-10-03, mining round 2 unit B3) ----
+// The coach now reviews the repo's auto-memory: each change is a row -- a delete with the text it would
+// remove, a rewrite with the text it read and its new text (and new name), a keep shown only -- with
+// Apply, Skip, Bring back and Undo sending only the row's number. A promote is an edit row that says
+// which memory file it came from. Every string came from the model or a memory file: all escaped.
+const memV = { root: "/r/repo", state: "done", verdict: "proposals", summary: "s", sessions: 2, decisions: [],
+  edits: [{ i: 1, section: "Git", old: "", new: "- TODO.md is gitignored", why: "w", evidence: ["e"], status: "pending", fromMemory: "keep" + EVIL + ".md" }],
+  memory: [
+    { i: 1, file: "stale" + EVIL + ".md", action: "delete", why: "banned" + EVIL, evidence: ["FX.alert" + EVIL], old: "old text" + EVIL, status: "pending" },
+    { i: 2, file: "good.md", action: "rewrite", new: "new text" + EVIL, old: "was text", rename: "deploy" + EVIL + ".md", why: "w", evidence: ["e"],
+      status: "pending", error: "good.md changed since the coach read it" + EVIL, code: "changed", rerun: true },
+    { i: 3, file: "keep.md", action: "keep", why: "still true", evidence: [], status: "keep" },
+    { i: 4, file: "a.md", action: "delete", why: "w", evidence: ["e"], status: "applied" },
+    { i: 5, file: "b.md", action: "rewrite", new: "n", why: "w", evidence: ["e"], status: "skipped" },
+    { i: 6, file: "c.md", action: "delete", why: "w", evidence: ["e"], status: "undone" },
+  ] };
+const mh = lib.coachRowsHtml(memV);
+const memRows = mh.split('<div class="ib-row co-row co-mem').slice(1);
+eq("memory: one row per memory change", memRows.length, 6);
+eq("memory: every field is escaped", mh.indexOf("<img") < 0 && mh.indexOf("&lt;img") >= 0, true);
+eq("memory: a pending delete names its file and offers Apply and Skip",
+  /stale/.test(memRows[0] || "") && /data-act="mem-apply" data-i="0"/.test(memRows[0] || "") && /data-act="mem-skip" data-i="0"/.test(memRows[0] || ""), true);
+eq("memory: ...and shows the text it would delete", (memRows[0] || "").indexOf("old text") >= 0, true);
+eq("memory: a rewrite shows the text it read, its new text and its new name",
+  /was text/.test(memRows[1] || "") && /new text/.test(memRows[1] || "") && /deploy/.test(memRows[1] || ""), true);
+eq("memory: ...a changed one says why, with Run the coach again", /changed since/.test(memRows[1] || "") && /data-act="rerun"/.test(memRows[1] || ""), true);
+eq("memory: a keep is shown, with nothing to click", /keep\.md/.test(memRows[2] || "") && !/data-act=/.test(memRows[2] || ""), true);
+eq("memory: an applied one offers Undo", /data-act="mem-undo" data-i="3"/.test(memRows[3] || "") && !/data-act="mem-apply"/.test(memRows[3] || ""), true);
+eq("memory: a skipped one offers Bring back", /data-act="mem-unskip" data-i="4"/.test(memRows[4] || ""), true);
+eq("memory: an undone one says so, with nothing to click", /Undone/.test(memRows[5] || "") && !/data-act=/.test(memRows[5] || ""), true);
+const promoRow = mh.split('<div class="ib-row co-row').slice(1)[0] || "";
+eq("memory: a promoted edit says which memory file it came from", /auto-memory/i.test(promoRow) && /keep/.test(promoRow) && promoRow.indexOf("<img") < 0, true);
+eq("memory: no memory, no memory section", /co-mem/.test(lib.coachRowsHtml({ root: "/r", state: "done", verdict: "none", sessions: 1, edits: [], decisions: [] })), false);
+lib.setView(memV);
+lib.coachAct(btn({ "data-act": "mem-apply", "data-i": 0 }));
+eq("memory: Apply sends the view's root and the row's number", JSON.stringify(sent.pop()), JSON.stringify(["coach-mem-apply", "/r/repo", "1"]));
+lib.coachAct(btn({ "data-act": "mem-skip", "data-i": 1 }));
+eq("memory: Skip likewise", JSON.stringify(sent.pop()), JSON.stringify(["coach-mem-skip", "/r/repo", "2"]));
+lib.coachAct(btn({ "data-act": "mem-undo", "data-i": 3 }));
+eq("memory: Undo likewise", JSON.stringify(sent.pop()), JSON.stringify(["coach-mem-undo", "/r/repo", "4"]));
+lib.coachAct(btn({ "data-act": "mem-unskip", "data-i": 4 }));
+eq("memory: Bring back likewise", JSON.stringify(sent.pop()), JSON.stringify(["coach-mem-unskip", "/r/repo", "5"]));
+lib.coachAct(btn({ "data-act": "mem-apply", "data-i": 9 }));
+eq("memory: a row that isn't there sends nothing", sent.length, 0);
+lib.setView(null);
+
 console.log("\n-- coach-view.test.js: " + run + " run, " + failed + " failed --");
 process.exit(failed === 0 ? 0 : 1);

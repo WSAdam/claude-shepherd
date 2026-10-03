@@ -690,14 +690,33 @@ instructions every session in it reads first. It suggests; nothing changes until
   Like **Run the coach again**, it replaces the suggestions waiting now. Its suggestion is applied
   like any other; once it is, the old entry reads **Sharpened** with the new commit, offers neither
   button, and isn't judged again.
+- **Auto-memory:** every run (not Sharpen) also reads the repo's Claude Code auto-memory: the notes
+  sessions saved in `~/.claude/projects/<the main checkout's folder>/memory/` (`MEMORY.md`, the
+  index, first, then each `*.md` by name; a worktree's project folder has no memory of its own). Whole
+  files only, about 16KB in all: a file past that is only named, and nothing is proposed for it. A
+  link (the folder, a file) is never read. The coach may propose up to 8 changes, each with why and
+  evidence: **delete** a note that is wrong, stale or already in `CLAUDE.md`; **rewrite** one (its
+  whole new text, optionally under a new file name); **keep** one (shown, nothing to click); or
+  **promote** one into `CLAUDE.md`, which arrives as an ordinary edit row marked **From auto-memory**
+  and is applied like any edit (the memory file stays; a later run can propose deleting it). They
+  are listed under **Auto-memory** in the overlay. **Delete it** / **Rewrite it** first checks the
+  file is exactly as the coach read it (sessions write memory too): if not, it's refused and offers
+  **Run the coach again**. It then copies the file into Shepherd's own
+  `~/.claude/cc-coach/<repo>.memory-backup/` (no backup, no change), makes the change, and keeps
+  `MEMORY.md` in step: a delete takes out the index lines that link to the file, a rename points them
+  at the new name. Memory isn't in git, so nothing is committed. **Undo** puts the file back from
+  that backup (and its index line, at the end, unless one links to it again), refused if a session
+  changed the file since. **Skip** and **Bring back** work as for edits. Nothing outside the repo's
+  memory folder is ever touched: every name is one plain `*.md`, and a link is never written
+  through. The lessons ledger records these decisions too, as `memory/<file>`, with the same rules.
 
 ```json
 { "coach": { "enabled": true, "day": "mon", "maxBudgetUsd": 1, "timeoutSeconds": 600,
              "evidence": { "minItems": 10, "cooldownHours": 24, "dailyUsd": 3 } } }
 ```
 
-Its records live in `~/.claude/cc-coach/`, one per repo, and lessons not yet taken in
-`~/.claude/cc-lesson/`; `uninstall.sh --purge` removes both.
+Its records live in `~/.claude/cc-coach/`, one per repo (with each repo's memory backups), and
+lessons not yet taken in `~/.claude/cc-lesson/`; `uninstall.sh --purge` removes both.
 
 ## A/B compare
 
