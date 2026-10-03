@@ -3595,9 +3595,13 @@ local function checkerTrim(s)
 end
 
 local CHECKER_DOC_EXT = { md = true, markdown = true, txt = true, rst = true, adoc = true }
--- A test that stops running: focused (.only) or switched off (.skip, xit, @Disabled, ignore: true).
+-- A test that stops running: focused (.only, fdescribe) or switched off (.skip, xit, @Disabled,
+-- ignore: true). 2026-10-03 (A3): fdescribe joins (Jasmine/Jest's focus); `fit` stays out, since
+-- %f[%w_] would also take a call like model.fit(. KEEP IN SYNC with CC_RED_FLAGS_AWK in cc-lib.sh,
+-- the Stop hook's port (tests/stop-guards.test.sh runs both over tests/fixtures/red-flags/).
 local CHECKER_SKIP_PATTERNS = {
   "%.only%s*%(", "%.skip%s*%(", "%f[%w_]xit%s*%(", "%f[%w_]xdescribe%s*%(", "%f[%w_]xtest%s*%(",
+  "%f[%w_]fdescribe%s*%(",
   "@pytest%.mark%.skip", "@unittest%.skip", "%f[%w_]t%.Skip%(", "#%[ignore%]", "@Disabled", "ignore:%s*true",
 }
 -- A stub: "not implemented" in any spelling, Rust's placeholders, or a TODO/FIXME comment.
@@ -11200,7 +11204,8 @@ M.SETTINGS_KEEP_SUBKEYS = {
   -- 2026-10-02: the Stop guards have no inputs (the config switches them); if the form ever rebuilds
   -- `stopGuards`, the question guard's switch stays (A2/A3 add theirs beside it).
   -- 2026-10-03: and the unfinished-unit reminder's (A2).
-  stopGuards = { "question", "unfinished" },
+  -- 2026-10-03: and the fake-completion check's (A3).
+  stopGuards = { "question", "unfinished", "fakeDone" },
   -- 2026-10-02: Seance has no inputs (its box asks); if the form ever rebuilds `seance`, the
   -- hand-set budget cap and timeout stay.
   seance = { "maxBudgetUsd", "timeoutSeconds" },
@@ -22470,6 +22475,9 @@ M.FEATURES = {
   { key = "unfinished", cat = "Control", new = true, title = "Finished units get a merge reminder",
     what = "A session in a .claude/worktrees/ worktree that ends its turn saying the work is done -- with commits ahead of main and no merge request for that worktree -- is sent back once per commit: ExitWorktree, then cc-merge.sh request from the main checkout. Not while background work is running, and never for a commit you answered Not yet. After a compaction, a unit's session is told the finish steps again. stopGuards.unfinished in ~/.claude/cc-config.json, on by default.",
     why = "A unit that says \"done\" but never asks to merge sits finished in its worktree until you notice; now it asks." },
+  { key = "fakedone", cat = "Control", new = true, title = "\"Done\" is checked against the diff",
+    what = "A turn that says the work is done while its changes since main -- committed or not -- add a .only, .skip, xit or fdescribe to a test, delete a test, or leave a stub (\"not implemented\", a TODO comment) is sent back once per commit with those lines: fix them, or say why they're meant to be there. The merge checker's own rules, run at the turn end. stopGuards.fakeDone in ~/.claude/cc-config.json, on by default.",
+    why = "A suite can be green because the failing test stopped running; this catches it before the merge request, not after." },
   { key = "decisions", cat = "Control", new = true, title = "Decisions inbox",
     what = "A session with a question it has a sensible default for asks with ~/.claude/cc-decide.sh and goes ahead on the default instead of stopping. ☰ → Inbox lists every open question -- and every question Shepherd is holding for you -- across the fleet; answer in place. A different answer reaches the session through its mailbox, or at its next start if it has stopped; keeping the default just closes it. A --blocking question waits for you (up to its timeout, then the default) and its card says Needs you; an open one is a heads-up.",
     why = "A question you'd have answered with the obvious choice no longer parks a session until you come back." },

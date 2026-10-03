@@ -398,6 +398,52 @@ actually finished, the reminder tells it to carry on.
   fresh install and after `make setup`; off when the config says nothing. The ledger records each
   reminder as `stop_guard` with `guard: "unfinished"`.
 
+### "Done" is checked against the diff
+
+A session can say "Done, all green" over a diff that focuses a test with `.only`, switches one off
+with `.skip`, deletes one, or leaves a `not implemented` stub. The suite really is green, but only
+because the test stopped running. The [merge checker](merging-and-batches.md#the-checker-a-read-only-review-of-every-merge-request)
+flags those lines after the merge request. With `stopGuards.fakeDone` on, the Stop hook flags them
+at the turn end, while the session can still fix them. It sends the turn back **once per commit**
+with the lines, for example:
+
+```
+[shepherd] You said the work is done, but your changes since main (committed and not) look unfinished:
+- test deleted: tests/old.test.sh (2 line(s))
+- new skip/only in tests/cart.test.js: test.only("adds", () => {});
+- stub in src/pay.js: export const pay = () => { throw new Error("not implemented"); };
+```
+
+The session either fixes them or, when a line is meant to be there, says why in one line and
+carries on.
+
+- **When it fires.** The last message claims the work is done, read as for the
+  [merge reminder](#finished-units-get-a-merge-reminder) (that cheap check comes first). Then
+  Shepherd diffs the checkout from where it left `main` (or `master`) to the working tree, so
+  committed and uncommitted changes both count; a file git doesn't track yet doesn't. In a unit's
+  worktree that is the whole branch; in the main checkout, its uncommitted work.
+- **What it flags.** The merge checker's own rules, ported to the hook: a test file the diff
+  deletes; a new `.only`, `.skip`, `xit`, `xdescribe`, `xtest`, `fdescribe`, `@Disabled`,
+  `@pytest.mark.skip`, `t.Skip(`, `#[ignore]` or `ignore: true` in a test file; and a stub in code
+  (`not implemented`, `NotImplementedError`, `todo!()`, `unimplemented!`, a `TODO`/`FIXME`
+  comment), never in docs or tests. Up to 8 lines are listed, then a count of the rest. A test
+  suite checks that the hook and the checker read the same diffs alike
+  (`tests/fixtures/red-flags/`).
+- **Bounded.** The hook reads at most the first 200,000 bytes of the diff (changed lines only), so
+  a huge diff can't hold up a turn end. A flag past that point isn't seen here; the merge checker
+  still reads it.
+- **Once per commit.** The marker (`~/.claude/cc-guard/<key>.fakeDone`) holds the head sha. A new
+  commit that's claimed done is checked again, even for the same lines.
+- **Order.** The question guard goes first, then this check, then the merge reminder: a unit with
+  flagged lines and no merge request hears about the lines first, and about the merge at its next
+  claim.
+- **When it stays out of the way.** Everything the question guard skips (`stop_hook_active`, plan
+  mode, Shepherd's own runs, machines where the panel isn't running), a folder that isn't a git
+  checkout, and a repo with neither `main` nor `master`.
+- **Switch.** `"stopGuards": { "fakeDone": true }` in `~/.claude/cc-config.json`. It is on in a
+  fresh install and after `make setup`; off when the config says nothing. The ledger records each
+  send-back as `stop_guard` with `guard: "fakeDone"` and the flag count and first line as `detail`.
+
 ### Questions in the tab
 
 With the setting off (or after **Answer in the tab instead**), the panel still shows the question

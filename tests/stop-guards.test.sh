@@ -374,4 +374,190 @@ assert_absent "...and its Not yet record" "$CC_MERGE_DIR/u1.notyet"
 assert_eq "defaults/cc-config.json ships stopGuards.unfinished on" "true" \
   "$(jq -r '.stopGuards.unfinished' "$ROOT/defaults/cc-config.json" 2>/dev/null)"
 
+# ---- the fake-completion check, stopGuards.fakeDone (A3, 2026-10-03) ----
+# A turn that claims done (cc_claims_done) while its diff since main -- committed and uncommitted --
+# switches a test off or focuses it (.skip / .only / xit / fdescribe ...), deletes a test, or adds a
+# stub is sent back ONCE per head sha, with the lines. The scan is a bash port of core.diffRedFlags'
+# skipOnly, stub and testDeleted rules (cc_diff_red_flags), so first: both read the same diffs alike.
+RFX="$ROOT/tests/fixtures/red-flags"
+US=$'\037'
+# lua_flags / sh_flags <diff file>: kind US file US count US sample1 US sample2 US sample3, a line each
+lua_flags() { lua - "$ROOT/cc-core.lua" "$1" <<'LUA'
+local core = dofile(arg[1])
+local fh = io.open(arg[2], "rb"); local diff = fh:read("a"); fh:close()
+local keep = { testDeleted = true, skipOnly = true, stub = true }
+for _, f in ipairs(core.diffRedFlags(diff).flags) do
+  if keep[f.kind] then
+    io.write(f.kind, "\31", f.file, "\31", tostring(f.count))
+    for i = 1, 3 do io.write("\31", f.samples[i] or "") end
+    io.write("\n")
+  end
+end
+LUA
+}
+lua_lines() { lua - "$ROOT/cc-core.lua" "$1" <<'LUA'
+local core = dofile(arg[1])
+local fh = io.open(arg[2], "rb"); local diff = fh:read("a"); fh:close()
+local keep = { testDeleted = true, skipOnly = true, stub = true }
+for _, f in ipairs(core.diffRedFlags(diff).flags) do
+  if keep[f.kind] then io.write(core.redFlagLine(f), "\n") end
+end
+LUA
+}
+sh_flags() { ( . "$ROOT/cc-lib.sh"; cc_diff_red_flags < "$1" ) 2>/dev/null; }
+sh_lines() { ( . "$ROOT/cc-lib.sh"; cc_diff_red_flags < "$1" | cc_red_flag_lines ) 2>/dev/null; }
+kinds() { sh_flags "$1" | awk -F "$US" '{ print $1 " " $2 " " $3 }'; }
+mkdir -p "$TMP/crlf"
+nfx=0
+for f in "$RFX"/*.diff; do
+  [ -f "$f" ] || continue
+  nfx=$((nfx + 1))
+  b="$(basename "$f")"
+  assert_eq "red flags: the bash port reads $b as core.diffRedFlags does" "$(lua_flags "$f")" "$(sh_flags "$f")"
+  assert_eq "...and words its lines as core.redFlagLine ($b)" "$(lua_lines "$f")" "$(sh_lines "$f")"
+  awk '{ printf "%s\r\n", $0 }' "$f" > "$TMP/crlf/$b"
+  assert_eq "...and reads a CRLF copy of it the same way ($b)" "$(lua_flags "$TMP/crlf/$b")" "$(sh_flags "$TMP/crlf/$b")"
+done
+assert_eq "red flags: the fixtures are there (tests/fixtures/red-flags/*.diff)" "yes" "$([ "$nfx" -ge 6 ] && echo yes || echo "no: $nfx")"
+# ...and what they find, pinned (parity alone would pass with both finding nothing)
+assert_eq "red flags: a new .only / .skip / xit / fdescribe / @Disabled / t.Skip / #[ignore] / ignore: true in a test counts; a .skip( outside one doesn't" \
+  "$(printf '%s\n' "skipOnly pkg/store_test.go 1" "skipOnly server/cart_test.ts 1" "skipOnly src/test/java/StoreTest.java 2" \
+     "skipOnly tests/cart.test.js 5" "skipOnly tests/integration.rs 2" "skipOnly tests/test_api.py 2")" \
+  "$(kinds "$RFX/skip-only.diff")"
+assert_eq "red flags: \"not implemented\", todo!(), a TODO/FIXME comment in code count; docs, tests, \"todos\" and a removed TODO don't" \
+  "$(printf '%s\n' "stub app/models.py 1" "stub src/lib.rs 2" "stub src/pay.ts 4")" "$(kinds "$RFX/stubs.diff")"
+assert_eq "red flags: a deleted test or fixture counts (a binary one too); a deleted source file or a trimmed test doesn't" \
+  "$(printf '%s\n' "testDeleted fixtures/a b/c.bin 0" "testDeleted fixtures/payload.bin 0" "testDeleted tests/old.test.sh 4")" \
+  "$(kinds "$RFX/tests-deleted.diff")"
+assert_eq "red flags: paths with spaces and renames; conflict markers and hunk headers aren't skip lines" \
+  "$(printf '%s\n' "skipOnly Tests/CartTests.cs 1" "skipOnly e2e/flow.spec.ts 1" "skipOnly tests/a b/c.test.js 2" \
+     "skipOnly tests/b.test.js 1" "skipOnly tests/my cart.test.js 2" "stub src/attestation.go 1")" \
+  "$(kinds "$RFX/paths-and-markers.diff")"
+assert_eq "red flags: an ordinary change has none" "" "$(kinds "$RFX/clean.diff")"
+assert_eq "red flags: a diff cut mid-line is still read to its torn end" "skipOnly tests/zeta.test.js 1" "$(kinds "$RFX/torn.diff")"
+assert_eq "red flags: samples are trimmed" 'xit("tabbed")' \
+  "$(sh_flags "$RFX/paths-and-markers.diff" | awk -F "$US" '$2 == "tests/my cart.test.js" { print $5 }')"
+
+# ---- through the real Stop hook: a real repo and unit worktree ----
+FON="$TMP/fakedone-on.json"
+printf '{"stopGuards":{"fakeDone":true}}' > "$FON"
+fev() { CC_CONFIG_FILE="$FON" evout "$@"; }
+FAKE_HEAD="[shepherd] You said the work is done, but your changes since main (committed and not) look unfinished:"
+R3="$TMP/repo3"
+git init -q -b main "$R3"
+mkdir -p "$R3/tests" "$R3/src"
+printf '.claude/worktrees/\n' > "$R3/.gitignore"
+printf 'test("adds", () => {});\n' > "$R3/tests/cart.test.js"
+printf 'assert_eq "x" 1 1\nfinish\n' > "$R3/tests/old.test.sh"
+printf 'export const pay = () => 1;\n' > "$R3/src/pay.js"
+gg "$R3" add -A; gg "$R3" commit -qm init
+git -C "$R3" worktree add -q "$R3/.claude/worktrees/f1" -b feat/f1
+W3="$(git -C "$R3/.claude/worktrees/f1" rev-parse --show-toplevel)"
+printf 'test.only("adds", () => {});\n' > "$W3/tests/cart.test.js"
+gg "$W3" commit -qam "focus the test"
+
+got="$(fev stop "$(ustop f1 "$W3" "$DONE_MSG")")"
+assert_eq "a turn that claims done while its diff focuses a test (.only) is sent back" "block" "$(decision "$got")"
+r="$(reason "$got")"
+assert_eq "...marked as Shepherd's, saying why" "$FAKE_HEAD" "$(printf '%s\n' "$r" | head -1)"
+assert_eq "...listing the line" "yes" "$(has "$r" '- new skip/only in tests/cart.test.js: test.only("adds", () => {});')"
+assert_eq "...and what to do about it" "yes" "$(has "$r" "If a line is meant to be there, say why in one line and carry on.")"
+assert_eq "...printed once, as one JSON object" "1" "$(printf '%s\n' "$got" | grep -c .)"
+assert_json "...and the session stays working" "$CC_STATUS_DIR/f1.json" '.status' "working"
+assert_eq "...its once-marker holds the head sha" "$(git -C "$W3" rev-parse HEAD)" "$(cat "$CC_GUARD_DIR/f1.fakeDone" 2>/dev/null)"
+got="$(fev stop "$(ustop f1 "$W3" "$DONE_MSG" '{"stop_hook_active":true}')")"
+assert_eq "never while stop_hook_active (the stop that ends the sent-back turn)" "" "$got"
+prompt f1
+got="$(fev stop "$(ustop f1 "$W3" "$DONE_MSG")")"
+assert_eq "once per head sha: the same commit isn't sent back again, even in a new turn" "" "$got"
+got="$(fev stop "$(ustop f2 "$W3" "Wrote the failing test; next I implement the guard.")")"
+assert_eq "a turn that doesn't claim done isn't checked" "" "$got"
+got="$(CC_CONFIG_FILE="$ON" evout stop "$(ustop f3 "$W3" "$DONE_MSG")")"
+assert_eq "off unless stopGuards.fakeDone is on" "" "$got"
+
+# uncommitted work counts: the diff runs to the working tree
+printf 'test.only("adds", () => {});\ntest.skip("totals", () => {});\n' > "$W3/tests/cart.test.js"
+got="$(fev stop "$(ustop f4 "$W3" "All green.")")"
+assert_eq "an uncommitted .skip counts (the diff runs to the working tree)" "yes" \
+  "$(has "$(reason "$got")" '- new skip/only in tests/cart.test.js: test.only("adds", () => {});')"
+git -C "$W3" restore tests/cart.test.js
+# a deleted test, a stub: a new commit, sent back again
+gg "$W3" rm -q tests/old.test.sh
+printf 'export const pay = () => { throw new Error("not implemented"); };\n' > "$W3/src/pay.js"
+gg "$W3" commit -qam "drop the old test, stub pay"
+prompt f1
+got="$(fev stop "$(ustop f1 "$W3" "Ready to merge.")")"
+assert_eq "...a new commit that's claimed done is checked again" "block" "$(decision "$got")"
+r="$(reason "$got")"
+assert_eq "...a deleted test is listed with its lines" "yes" "$(has "$r" "- test deleted: tests/old.test.sh (2 line(s))")"
+assert_eq "...and a stub" "yes" "$(has "$r" '- stub in src/pay.js: export const pay = () => { throw new Error("not implemented"); };')"
+assert_eq "...the deleted test first (core.diffRedFlags' order: deleted, skip/only, stub)" "- test deleted: tests/old.test.sh (2 line(s))" \
+  "$(printf '%s\n' "$r" | sed -n 2p)"
+
+# a clean unit, the main checkout, and folders it can't diff
+git -C "$R3" worktree add -q "$R3/.claude/worktrees/f2" -b feat/f2
+W4="$(git -C "$R3/.claude/worktrees/f2" rev-parse --show-toplevel)"
+printf 'test("totals", () => {});\n' >> "$W4/tests/cart.test.js"
+gg "$W4" commit -qam "a real test"
+got="$(fev stop "$(ustop c1 "$W4" "$DONE_MSG")")"
+assert_eq "a unit whose diff has no red flags ends normally" "" "$got"
+printf 'test.only("adds", () => {});\n' > "$R3/tests/cart.test.js"
+got="$(fev stop "$(ustop c2 "$R3" "$DONE_MSG")")"
+assert_eq "the main checkout is checked too: its uncommitted .only is sent back" "block" "$(decision "$got")"
+git -C "$R3" restore tests/cart.test.js
+got="$(fev stop "$(ustop c3 "$R3" "$DONE_MSG")")"
+assert_eq "...and with nothing uncommitted it ends normally" "" "$got"
+got="$(fev stop "$(ustop c4 "$TMP/tr" "$DONE_MSG")")"
+assert_eq "a folder that isn't a git checkout ends normally" "" "$got"
+R5="$TMP/repo5"
+git init -q -b trunk "$R5"
+printf 'test.only("x", fn);\n' > "$R5/a.test.js"
+gg "$R5" add -A; gg "$R5" commit -qm init
+printf 'test.only("y", fn);\n' >> "$R5/a.test.js"
+got="$(fev stop "$(ustop c5 "$R5" "$DONE_MSG")")"
+assert_eq "...and so does a repo with neither main nor master (nothing to diff against)" "" "$got"
+
+# many flags: the reason lists a few and counts the rest
+git -C "$R3" worktree add -q "$R3/.claude/worktrees/f3" -b feat/f3
+W5="$(git -C "$R3/.claude/worktrees/f3" rev-parse --show-toplevel)"
+for i in 01 02 03 04 05 06 07 08 09 10 11; do printf 'it.only("case %s", fn);\n' "$i" > "$W5/tests/t$i.test.js"; done
+gg "$W5" add -A; gg "$W5" commit -qm "eleven focused tests"
+r="$(reason "$(fev stop "$(ustop m5 "$W5" "$DONE_MSG")")")"
+assert_eq "many flags: at most 8 are listed" "8" "$(printf '%s\n' "$r" | grep -c '^- new skip/only in tests/t')"
+assert_eq "...and the rest are counted" "yes" "$(has "$r" "- ...and 3 more")"
+# the diff is read up to a fixed size, never whole
+git -C "$R3" worktree add -q "$R3/.claude/worktrees/f4" -b feat/f4
+W6="$(git -C "$R3/.claude/worktrees/f4" rev-parse --show-toplevel)"
+yes 'an ordinary line of generated text, nothing to see' | head -n 6000 > "$W6/a-big.txt"
+printf 'test.only("past the cut", fn);\n' > "$W6/tests/z.test.js"
+gg "$W6" add -A; gg "$W6" commit -qm "big file, then a focused test"
+got="$(fev stop "$(ustop m6 "$W6" "$DONE_MSG")")"
+assert_eq "the scan reads the first 200000 bytes of diff only (a flag past the cut isn't seen)" "" "$got"
+
+# precedence: question > fakeDone > unfinished
+AON="$TMP/all-guards-on.json"
+printf '{"stopGuards":{"question":true,"fakeDone":true,"unfinished":true}}' > "$AON"
+got="$(CC_CONFIG_FILE="$AON" evout stop "$(ustop p3 "$W5" "Done, all green. Want me to push?")")"
+assert_eq "the question guard goes first: a turn that asks and claims done is sent back for the question only" \
+  "$REASON_TEXT" "$(reason "$got")"
+got="$(CC_CONFIG_FILE="$AON" evout stop "$(ustop p4 "$W5" "$DONE_MSG")")"
+assert_eq "the fake-completion check goes before the unfinished-unit reminder" "$FAKE_HEAD" "$(reason "$got" | head -1)"
+prompt p4
+got="$(CC_CONFIG_FILE="$AON" evout stop "$(ustop p4 "$W5" "$DONE_MSG")")"
+assert_eq "...and once it has spoken for this commit, the reminder comes next" "yes" \
+  "$(has "$(reason "$got")" "nobody has asked Shepherd to merge it")"
+
+LED3="$TMP/ledger3"
+printf '{"ledger":{"enabled":true},"stopGuards":{"fakeDone":true}}' > "$TMP/ledger-fakedone.json"
+printf '%s' "$(ustop l3 "$W5" "$DONE_MSG")" \
+  | CC_CONFIG_FILE="$TMP/ledger-fakedone.json" CC_LEDGER_DIR="$LED3" bash "$CC" stop >/dev/null 2>&1
+assert_eq "the ledger records the send-back as stop_guard, guard fakeDone, with how many flags and the first" \
+  "l3 fakeDone 11 red flags: new skip/only in tests/t01.test.js: it.only(\"case 01\", fn);" \
+  "$(cat "$LED3"/*.jsonl 2>/dev/null | jq -r 'select(.type == "stop_guard") | "\(.key) \(.guard) \(.detail)"')"
+
+evout sessionend "$(jq -nc --arg c "$W3" '{session_id:"f1", cwd:$c}')" >/dev/null
+assert_absent "SessionEnd removes the session's fake-completion marker" "$CC_GUARD_DIR/f1.fakeDone"
+assert_eq "defaults/cc-config.json ships stopGuards.fakeDone on" "true" \
+  "$(jq -r '.stopGuards.fakeDone' "$ROOT/defaults/cc-config.json" 2>/dev/null)"
+
 finish

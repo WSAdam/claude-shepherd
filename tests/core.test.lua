@@ -8472,7 +8472,9 @@ do
   -- 2026-10-02: 44 -> 45 for asking a session a question ("seance", flagged new).
   -- 2026-10-03: 45 -> 46 for the unfinished-unit reminder ("unfinished", flagged new).
   -- 2026-10-03: 46 -> 47 for the brief pre-flight ("preflight", flagged new).
-  eq("FEATURES: the 47 new features are flagged", newCount, 47)
+  -- 2026-10-03: 47 -> 48 for checking "done" against the diff ("fakedone", flagged new).
+  eq("FEATURES: the 48 new features are flagged", newCount, 48)
+  check("FEATURES: lists checking \"done\" against the diff", keys.fakedone == true)
   check("FEATURES: lists the unfinished-unit reminder", keys.unfinished == true)
   check("FEATURES: lists the brief pre-flight", keys.preflight == true)
   check("FEATURES: lists the Stop guards", keys.stopguards == true)
@@ -14452,6 +14454,28 @@ do
   check("unfinished reminder: FEATURES lists it, flagged new", feat ~= nil and feat.new == true)
   check("unfinished reminder: ...and the entry names the switch",
         feat ~= nil and tostring(feat.what):find("stopGuards.unfinished", 1, true) ~= nil)
+end
+
+-- ---- Stop guards: "done" checked against the diff (2026-10-03) ----
+do
+  -- stopGuards.fakeDone has no input in Settings either; a Save that rebuilds `stopGuards` keeps it
+  -- beside the other guards' switches.
+  local keeps = {}
+  for _, k in ipairs(core.SETTINGS_KEEP_SUBKEYS.stopGuards or {}) do keeps[k] = true end
+  check("fake-completion check: stopGuards.fakeDone is in SETTINGS_KEEP_SUBKEYS", keeps.fakeDone == true)
+  check("fake-completion check: ...beside the other guards'", keeps.question == true and keeps.unfinished == true)
+  local cfg = core.overlayConfig({ stopGuards = { question = true, fakeDone = true, unfinished = true } }, { stopGuards = {} })
+  eq("fake-completion check: a Save that rebuilds stopGuards keeps the switch", cfg.stopGuards.fakeDone, true)
+  local feat
+  for _, f in ipairs(core.FEATURES) do if f.key == "fakedone" then feat = f end end
+  check("fake-completion check: FEATURES lists it, flagged new", feat ~= nil and feat.new == true)
+  check("fake-completion check: ...and the entry names the switch",
+        feat ~= nil and tostring(feat.what):find("stopGuards.fakeDone", 1, true) ~= nil)
+  -- the merge checker's own scan gained fdescribe, so the Stop hook's port and it still agree
+  local flags = core.diffRedFlags("diff --git a/a.test.js b/a.test.js\n--- a/a.test.js\n+++ b/a.test.js\n@@ -0,0 +1 @@\n+fdescribe(\"x\", fn);\n").flags
+  eq("fake-completion check: the merge checker flags a new fdescribe( in a test", flags[1] and flags[1].kind, "skipOnly")
+  flags = core.diffRedFlags("diff --git a/a.test.py b/a.test.py\n--- a/a.test.py\n+++ b/a.test.py\n@@ -0,0 +1 @@\n+model.fit(x, y)\n").flags
+  eq("fake-completion check: ...but not a model.fit( call (fit stays out)", #flags, 0)
 end
 
 -- ---- Seance: ask any session a question, read-only (2026-10-02, mining round 2 unit D1) ----

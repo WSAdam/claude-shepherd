@@ -1,0 +1,38 @@
+diff --git a/tests/old.test.sh b/tests/old.test.sh
+deleted file mode 100644
+index 3333333..0000000
+--- a/tests/old.test.sh
++++ /dev/null
+@@ -1,4 +0,0 @@
+-#!/usr/bin/env bash
+-assert_eq "x" 1 1
+-assert_eq "y" 2 2
+-finish
+diff --git a/src/gone.js b/src/gone.js
+deleted file mode 100644
+index 3333333..0000000
+--- a/src/gone.js
++++ /dev/null
+@@ -1 +0,0 @@
+-module.exports = 1;
+diff --git a/tests/kept.test.js b/tests/kept.test.js
+index 1111111..2222222 100644
+--- a/tests/kept.test.js
++++ b/tests/kept.test.js
+@@ -2 +1,0 @@
+-test("b", () => {});
+diff --git a/fixtures/payload.bin b/fixtures/payload.bin
+deleted file mode 100644
+index 4444444..0000000
+Binary files a/fixtures/payload.bin and /dev/null differ
+diff --git a/fixtures/a b/c.bin b/fixtures/a b/c.bin
+deleted file mode 100644
+index 4444444..0000000
+Binary files a/fixtures/a b/c.bin and /dev/null differ
+diff --git a/tests/new_case.test.js b/tests/new_case.test.js
+new file mode 100644
+index 0000000..5555555
+--- /dev/null
++++ b/tests/new_case.test.js
+@@ -0,0 +1 @@
++test("new", () => {});

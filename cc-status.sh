@@ -258,8 +258,9 @@ case "$EVENT" in
       STOP_NOTES="$(cc_notes_request "$KEY" "$INPUT")" && STATUS="working"
     fi
     # 2026-10-02: the Stop guards (mining round 2). A turn that ended the wrong way -- asking Adam a
-    # question in prose (stopGuards.question), or a unit saying it's done without asking to merge
-    # (stopGuards.unfinished, 2026-10-03) -- is sent back once with a reason, through
+    # question in prose (stopGuards.question), saying it's done over a diff that skips, focuses or
+    # deletes tests or leaves a stub (stopGuards.fakeDone, 2026-10-03), or a unit saying it's done
+    # without asking to merge (stopGuards.unfinished, 2026-10-03) -- is sent back once with a reason, through
     # cc_stop_decision, and stays working. A mailbox message stands them down: it is new input, maybe
     # the very answer. (cc_stop_guard reads the config first: with every switch off it costs one jq.)
     if [ -z "${STOP_MAIL:-}" ] && [ -z "${CC_SHEPHERD_INTERNAL:-}" ]; then

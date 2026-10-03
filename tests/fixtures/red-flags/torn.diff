@@ -1,0 +1,7 @@
+diff --git a/tests/zeta.test.js b/tests/zeta.test.js
+index 1111111..2222222 100644
+--- a/tests/zeta.test.js
++++ b/tests/zeta.test.js
+@@ -1,0 +2,2 @@
++  it("fine", () => {});
++  it.only("cut her

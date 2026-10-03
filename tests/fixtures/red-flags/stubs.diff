@@ -1,0 +1,43 @@
+diff --git a/src/pay.ts b/src/pay.ts
+index 1111111..2222222 100644
+--- a/src/pay.ts
++++ b/src/pay.ts
+@@ -1,0 +2,6 @@ export function pay() {
++  throw new Error("Not Implemented");
++  // TODO: wire the gateway
++  /* FIXME later */
++  const mastodon = 1; // todos live in the tracker
++  const todoList = [];
++  #todo
+diff --git a/src/lib.rs b/src/lib.rs
+index 1111111..2222222 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,0 +2,2 @@
++    todo!()
++    unimplemented!("x")
+diff --git a/app/models.py b/app/models.py
+index 1111111..2222222 100644
+--- a/app/models.py
++++ b/app/models.py
+@@ -1,0 +2 @@
++        raise NotImplementedError
+diff --git a/README.md b/README.md
+index 1111111..2222222 100644
+--- a/README.md
++++ b/README.md
+@@ -1,0 +2 @@
++- TODO: write the docs (not implemented yet)
+diff --git a/tests/pay.test.ts b/tests/pay.test.ts
+index 1111111..2222222 100644
+--- a/tests/pay.test.ts
++++ b/tests/pay.test.ts
+@@ -1,0 +2 @@
++  // TODO: more cases, not implemented
+diff --git a/src/clean.ts b/src/clean.ts
+index 1111111..2222222 100644
+--- a/src/clean.ts
++++ b/src/clean.ts
+@@ -1 +1 @@
+-  // TODO: remove this
++  const done = true;

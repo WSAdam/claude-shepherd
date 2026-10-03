@@ -2144,17 +2144,17 @@ EOF
 # A guard looks at how a turn ended and, when it shouldn't have ended that way, blocks the stop ONCE
 # with a reason, so the session carries on: cc-status.sh stop prints it through cc_stop_decision and
 # the card stays working. Precedence, highest first: a mailbox message, the notes request, then the
-# guards in CC_STOP_GUARDS order -- question, then unfinished (A2, 2026-10-03); fakeDone (A3) goes
-# between them. A mailbox message stands every guard down (it is new input, maybe the very answer);
+# guards in CC_STOP_GUARDS order -- question, then fakeDone (A3, 2026-10-03), then unfinished (A2,
+# 2026-10-03). A mailbox message stands every guard down (it is new input, maybe the very answer);
 # the notes request joins them (cc_stop_decision puts it first). Among the guards the first that
 # fires is the only one.
 # Each is switched on by stopGuards.<name> (off when the config says nothing; on in defaults/). None
 # runs while stop_hook_active (that stop ends a turn a block already kept going, so a guard can't
 # loop), in plan mode, in Shepherd's own internal runs, or where Shepherd's panel isn't running (a
 # remote host: the card it would send the session to isn't there). A guard blocks once per session
-# and token -- the turn for the question guard, the head sha for unfinished -- through its marker
-# CC_GUARD_DIR/<key>.<guard>, and each block is one ledger event, stop_guard.
-CC_STOP_GUARDS="question unfinished"
+# and token -- the turn for the question guard, the head sha for fakeDone and unfinished -- through
+# its marker CC_GUARD_DIR/<key>.<guard>, and each block is one ledger event, stop_guard.
+CC_STOP_GUARDS="question fakeDone unfinished"
 CC_GUARD_PANEL_MAX_AGE="${CC_GUARD_PANEL_MAX_AGE:-30}"   # seconds, as cc-fleet.sh's shepherd_alive
 
 # Is Shepherd's panel running on this machine? Its heartbeat, at most $1 seconds old.
@@ -2374,6 +2374,198 @@ _cc_ctx_finish() { # $1 source, $2 key, $3 cwd
   fi
   printf 'This session works in the worktree %s (branch %s). When the unit is done (full suite green, everything committed), never merge it yourself: ExitWorktree (action "keep"), then from the main checkout run ~/.claude/cc-merge.sh request --worktree %s --summary "<what the unit does and why>" --tests "<the command you ran>: <result>" in the background and end the turn. MERGE APPROVED: follow the steps it prints. NOT YET: EnterWorktree with that path, act on the note, then leave and ask again.\n' \
     "$CC_UNIT_TOP" "${CC_UNIT_BRANCH:-detached}" "$CC_UNIT_TOP"
+}
+
+# ---- The fake-completion check (stopGuards.fakeDone, A3, 2026-10-03) --------------------------
+# A bash port of core.diffRedFlags' skipOnly, stub and testDeleted rules (cc-core.lua, the merge
+# checker's scan), so the Stop hook reads a diff the way the checker does. KEEP IN SYNC:
+# tests/stop-guards.test.sh runs both over tests/fixtures/red-flags/*.diff. Reads a unified diff on
+# stdin; prints one flag a line, deleted tests first, then skip/only, then stubs, each by path:
+#   kind US file US count US sample1 US sample2 US sample3      (US = \037; a missing sample is "")
+#   testDeleted  a test path the diff deletes (count and samples: its removed lines)
+#   skipOnly     a new .only / .skip / xit / fdescribe / @Disabled ... in a test path
+#   stub         "not implemented", todo!(), a TODO/FIXME comment -- in code, never docs or tests
+# Byte-wise (LC_ALL=C), as Lua's string functions are; a sample is trimmed and capped at 160
+# characters as core.capChars does (UTF-8 aware, bytes when it isn't valid UTF-8). One line at a
+# time, so a diff cut at a fixed size reads to its torn last line.
+CC_RED_FLAGS_AWK='
+function git_path(line,   rest, n, plen, at, pos, k) {
+  rest = substr(line, 12); n = length(rest)
+  if (n > 5 && (n - 5) % 2 == 0) {
+    plen = (n - 5) / 2
+    if (substr(rest, 1, 2) == "a/" && substr(rest, 3 + plen, 3) == " b/" \
+        && substr(rest, 3, plen) == substr(rest, n - plen + 1)) return substr(rest, n - plen + 1)
+  }
+  at = 0; pos = 0
+  while ((k = index(substr(rest, pos + 1), " b/")) > 0) { at = pos + k; pos = at }
+  return at ? substr(rest, at + 3) : rest
+}
+function is_test(path,   base, dirs, n, segs, i, lb) {
+  if (path == "") return 0
+  base = path; sub(/.*\//, "", base); if (base == "") base = path
+  dirs = tolower(substr(path, 1, length(path) - length(base)))
+  n = split(dirs, segs, "/")
+  for (i = 1; i <= n; i++) if (segs[i] in TESTDIR) return 1
+  lb = tolower(base)
+  if (index(lb, ".test.") || index(lb, ".spec.") || index(lb, "_test.") || index(lb, "_spec.") \
+      || index(lb, "-test.") || substr(lb, 1, 5) == "test_") return 1
+  return base ~ /[a-z]Tests?\.[A-Za-z0-9]+$/
+}
+function classify(   ext) {
+  istest = is_test(path)
+  ext = ""; if (match(path, /\.[A-Za-z0-9]+$/)) ext = tolower(substr(path, RSTART + 1))
+  isdoc = (ext in DOC); classified = 1
+}
+function trim(s) {
+  while (s != "" && ORD[substr(s, 1, 1)] <= 32) s = substr(s, 2)
+  while (s != "" && ORD[substr(s, length(s), 1)] <= 32) s = substr(s, 1, length(s) - 1)
+  return s
+}
+function cap(s, n,   len, i, b, b2, need, k, chars, cut) {
+  len = length(s); i = 1; chars = 0; cut = 0
+  while (i <= len) {
+    b = ORD[substr(s, i, 1)]
+    if (b < 128) need = 0
+    else if (b >= 194 && b <= 223) need = 1
+    else if (b >= 224 && b <= 239) need = 2
+    else if (b >= 240 && b <= 244) need = 3
+    else return substr(s, 1, n)
+    if (i + need > len) return substr(s, 1, n)
+    for (k = 1; k <= need; k++) { b2 = ORD[substr(s, i + k, 1)]; if (b2 < 128 || b2 > 191) return substr(s, 1, n) }
+    if (need >= 2) {
+      b2 = ORD[substr(s, i + 1, 1)]
+      if ((b == 224 && b2 < 160) || (b == 237 && b2 > 159) || (b == 240 && b2 < 144) || (b == 244 && b2 > 143)) return substr(s, 1, n)
+    }
+    chars++
+    if (chars == n + 1) cut = i
+    i += need + 1
+  }
+  return (chars <= n) ? s : substr(s, 1, cut - 1)
+}
+function bump(bucket, sample) {
+  cnt[bucket]++
+  if (cnt[bucket] <= 3) smp[bucket, cnt[bucket]] = cap(trim(sample), 160)
+}
+function skip_line(s,   i) {
+  for (i = 1; i <= NSKIP; i++) if (s ~ SKIP[i]) return 1
+  return 0
+}
+function stub_line(s,   l) {
+  l = tolower(s)
+  if (index(l, "not implemented") || index(l, "notimplemented") || index(l, "unimplemented!") || index(l, "todo!(")) return 1
+  return l ~ STUB_TODO || l ~ STUB_FIXME
+}
+function emit(kind, bucket,   r) {
+  r = kind US path US cnt[bucket]
+  r = r US smp[bucket, 1] US smp[bucket, 2] US smp[bucket, 3]
+  nf++; rec[nf] = r; rkey[nf] = ORDER[kind] US path
+}
+function close_file(   b, k) {
+  if (!cur) return
+  if (!classified) classify()
+  if (istest && deleted) emit("testDeleted", "removed")
+  if (cnt["skip"] > 0) emit("skipOnly", "skip")
+  if (cnt["stub"] > 0) emit("stub", "stub")
+  split("removed skip stub", b, " ")
+  for (k = 1; k <= 3; k++) { cnt[b[k]] = 0; delete smp[b[k], 1]; delete smp[b[k], 2]; delete smp[b[k], 3] }
+  cur = 0
+}
+BEGIN {
+  US = "\037"
+  for (i = 1; i < 256; i++) ORD[sprintf("%c", i)] = i
+  TESTDIR["test"]; TESTDIR["tests"]; TESTDIR["__tests__"]; TESTDIR["fixture"]; TESTDIR["fixtures"]
+  TESTDIR["testdata"]; TESTDIR["e2e"]; TESTDIR["isolate"]
+  DOC["md"]; DOC["markdown"]; DOC["txt"]; DOC["rst"]; DOC["adoc"]
+  ORDER["testDeleted"] = 2; ORDER["skipOnly"] = 4; ORDER["stub"] = 5
+  # CHECKER_SKIP_PATTERNS, in order: %f[%w_] is W, %s* is S
+  W = "(^|[^A-Za-z0-9_])"; S = "[[:space:]]*"
+  SKIP[1] = "\\.only" S "\\("; SKIP[2] = "\\.skip" S "\\("; SKIP[3] = W "xit" S "\\("
+  SKIP[4] = W "xdescribe" S "\\("; SKIP[5] = W "xtest" S "\\("; SKIP[6] = W "fdescribe" S "\\("
+  SKIP[7] = "@pytest\\.mark\\.skip"; SKIP[8] = "@unittest\\.skip"; SKIP[9] = W "t\\.Skip\\("
+  SKIP[10] = "#\\[ignore\\]"; SKIP[11] = "@Disabled"; SKIP[12] = "ignore:" S "true"; NSKIP = 12
+  STUB_TODO = "[-/#*]" S "todo([^A-Za-z0-9_]|$)"; STUB_FIXME = "[-/#*]" S "fixme([^A-Za-z0-9_]|$)"
+  cur = 0; header = 0; nf = 0
+}
+{
+  line = $0
+  if (substr(line, length(line), 1) == "\r") line = substr(line, 1, length(line) - 1)
+  if (substr(line, 1, 11) == "diff --git ") {
+    close_file()
+    cur = 1; header = 1; path = git_path(line); deleted = 0; classified = 0
+  } else if (cur && header) {
+    if (substr(line, 1, 17) == "deleted file mode") deleted = 1
+    else if (substr(line, 1, 6) == "+++ b/") path = substr(line, 7)
+    else if (substr(line, 1, 2) == "@@") { header = 0; classify() }
+  } else if (cur && substr(line, 1, 2) != "@@") {
+    c = substr(line, 1, 1); content = substr(line, 2)
+    if (c == "+") {
+      if (substr(content, 1, 8) == "<<<<<<< " || substr(content, 1, 8) == ">>>>>>> " || content == "=======") {
+        # a conflict marker: the checker flags those itself, never as skip/only or a stub
+      } else if (istest) { if (skip_line(content)) bump("skip", content) }
+      else if (!isdoc && stub_line(content)) bump("stub", content)
+    } else if (c == "-" && istest) bump("removed", content)
+  }
+}
+END {
+  close_file()
+  for (i = 2; i <= nf; i++) {
+    r = rec[i]; k = rkey[i]
+    for (j = i - 1; j >= 1 && rkey[j] > k; j--) { rec[j + 1] = rec[j]; rkey[j + 1] = rkey[j] }
+    rec[j + 1] = r; rkey[j + 1] = k
+  }
+  for (i = 1; i <= nf && i <= 30; i++) print rec[i]
+}'
+cc_diff_red_flags() { LC_ALL=C awk "$CC_RED_FLAGS_AWK" 2>/dev/null; }
+
+# cc_diff_red_flags' lines as people read them -- core.redFlagLine's words, so the Stop hook and the
+# merge review name a flag alike. Flags on stdin, a line each on stdout.
+cc_red_flag_lines() {
+  LC_ALL=C awk '
+    BEGIN { FS = "\037" }
+    $1 == "testDeleted" { print "test deleted: " $2 (($3 > 0) ? " (" $3 " line(s))" : ""); next }
+    $1 == "skipOnly"    { print "new skip/only in " $2 (($4 != "") ? ": " $4 : ""); next }
+    $1 == "stub"        { print "stub in " $2 (($4 != "") ? ": " $4 : ""); next }'
+}
+
+CC_FAKE_DONE_DIFF_MAX="${CC_FAKE_DONE_DIFF_MAX:-200000}"   # bytes of diff the check reads
+CC_FAKE_DONE_SHOW=8                                        # flags its reason lists
+
+# The fake-completion check (stopGuards.fakeDone): a turn that says the work is done while its changes
+# since main -- committed and not: the diff runs from the merge-base to the working tree -- switch a
+# test off or focus it, delete one, or leave a stub. The merge checker would flag the same lines after
+# the merge request; this catches them while the session can still fix them. Blocks once per head sha
+# (CC_GUARD_TOKEN), listing the lines. Cheap first: the claim, then git; the diff is cut at
+# CC_FAKE_DONE_DIFF_MAX bytes (-U0, so that is all changed lines), never read whole. Any checkout with
+# a main (or master) branch: a unit's worktree diffs its branch; the main checkout, its uncommitted
+# work. GIT_OPTIONAL_LOCKS=0: the hook never takes the index lock from under the session's own git.
+_cc_guard_fakeDone() { # $1 key, $2 hook input
+  local in="$2" cwd top base sha mb flags lines n listed shown more first
+  cc_claims_done "$(cc_stop_text "$in")" >/dev/null || return 1
+  cwd="$(cc_get "$in" '.cwd')"
+  [ -n "$cwd" ] && [ -d "$cwd" ] || return 1
+  top="$(GIT_OPTIONAL_LOCKS=0 git -C "$cwd" rev-parse --show-toplevel 2>/dev/null)"
+  [ -n "$top" ] || return 1
+  base="$(_cc_unit_base "$top")" || return 1
+  sha="$(git -C "$top" rev-parse --verify --quiet HEAD 2>/dev/null)"
+  [ -n "$sha" ] || return 1
+  mb="$(git -C "$top" merge-base "refs/heads/$base" HEAD 2>/dev/null)"
+  [ -n "$mb" ] || return 1
+  flags="$(GIT_OPTIONAL_LOCKS=0 git -C "$top" -c core.quotepath=false diff --no-color --no-ext-diff \
+    --no-textconv --no-relative -U0 --src-prefix=a/ --dst-prefix=b/ "$mb" -- 2>/dev/null \
+    | head -c "$CC_FAKE_DONE_DIFF_MAX" | cc_diff_red_flags)"
+  [ -n "$flags" ] || return 1
+  lines="$(printf '%s\n' "$flags" | cc_red_flag_lines)"
+  n="$(printf '%s\n' "$lines" | grep -c .)"
+  listed="$(printf '%s\n' "$lines" | head -n "$CC_FAKE_DONE_SHOW" | sed 's/^/- /')"
+  shown="$(printf '%s\n' "$listed" | grep -c .)"
+  more=""; [ "$n" -le "$shown" ] || more=$'\n'"- ...and $((n - shown)) more"
+  first="$(printf '%s\n' "$lines" | head -n 1)"
+  CC_GUARD_TOKEN="$sha"
+  CC_GUARD_DETAIL="$n red flag$([ "$n" = 1 ] || echo s): $first"
+  CC_GUARD_REASON="[shepherd] You said the work is done, but your changes since $base (committed and not) look unfinished:
+$listed$more
+A test switched off, focused or deleted, or a stub left in, means it isn't done yet: finish it or put the test back, run the suite again, then end the turn. If a line is meant to be there, say why in one line and carry on."
+  return 0
 }
 
 # Has guard $2 blocked session $1 for token $3 already? 1 when it has; otherwise it is recorded, 0.

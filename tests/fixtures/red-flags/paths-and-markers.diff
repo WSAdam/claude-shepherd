@@ -1,0 +1,45 @@
+diff --git a/tests/my cart.test.js b/tests/my cart.test.js
+index 1111111..2222222 100644
+--- a/tests/my cart.test.js
++++ b/tests/my cart.test.js
+@@ -1,0 +2,5 @@ it.only("in a hunk header is not an added line", () => {
++<<<<<<< HEAD
++  it.only("ours", () => {});
++=======
++>>>>>>> feat/x
++	  xit("tabbed")
+diff --git a/tests/a.test.js b/tests/b.test.js
+similarity index 90%
+rename from tests/a.test.js
+rename to tests/b.test.js
+index 1111111..2222222 100644
+--- a/tests/a.test.js
++++ b/tests/b.test.js
+@@ -1,0 +2 @@
++  it.skip("crlf", fn);
+diff --git a/tests/a b/c.test.js b/tests/a b/c.test.js
+index 1111111..2222222 100644
+--- a/tests/a b/c.test.js
++++ b/tests/a b/c.test.js
+@@ -1,0 +2,2 @@
++  it.only("a long one", () => { expect(cart.total(items.filter((i) => i.qty > 0).map((i) => ({ ...i, price: i.price * 1.2 })))).toBe(4242); expect(cart.count()).toBe(7); });
++  it.only("ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé ✓✓✓✓✓✓✓✓", fn);
+\ No newline at end of file
+diff --git a/Tests/CartTests.cs b/Tests/CartTests.cs
+index 1111111..2222222 100644
+--- a/Tests/CartTests.cs
++++ b/Tests/CartTests.cs
+@@ -1,0 +2 @@
++    [Fact(Skip = "x")] public void It() { foo.skip(); }
+diff --git a/src/attestation.go b/src/attestation.go
+index 1111111..2222222 100644
+--- a/src/attestation.go
++++ b/src/attestation.go
+@@ -1,0 +2 @@
++	t.Skip("not a test file, but a stub word: not implemented")
+diff --git a/e2e/flow.spec.ts b/e2e/flow.spec.ts
+index 1111111..2222222 100644
+--- a/e2e/flow.spec.ts
++++ b/e2e/flow.spec.ts
+@@ -1,0 +2 @@
++test.only("checkout", async () => {

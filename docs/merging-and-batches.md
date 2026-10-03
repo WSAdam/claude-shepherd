@@ -217,10 +217,12 @@ The gate proves the suite is green, and the claim check reads the summary. The c
    - conflict markers the diff adds;
    - a test file the diff deletes, or lines it removes from a test that stays (a test file that
      only gains lines is normal);
-   - a new `.only`, `.skip`, `xit`, `@Disabled`, `ignore: true` and the like in a test;
+   - a new `.only`, `.skip`, `xit`, `fdescribe`, `@Disabled`, `ignore: true` and the like in a test;
    - stubs in code: `not implemented`, `todo!()`, a `TODO`/`FIXME` comment (never in Markdown).
 
-   The flags show in the review straight away, and still show if the model never answers.
+   The flags show in the review straight away, and still show if the model never answers. The
+   same scan, minus the markers and trimmed tests, runs earlier too: a turn that claims done over
+   such a diff is [sent back before it asks to merge](approvals-and-policies.md#done-is-checked-against-the-diff).
 2. **A read-only review.** A headless `claude -p` runs in the unit's worktree with the flags in
    hand. It uses Sonnet with no hooks, no MCP servers and no saved session, and it can only read:
    Read, Grep, Glob and read-only git (`diff`, `log`, `show`, `blame` and so on). Anything else is

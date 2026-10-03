@@ -151,6 +151,7 @@
   },
   "stopGuards": {
     "question": true,
+    "fakeDone": true,
     "unfinished": true
   }
 }
