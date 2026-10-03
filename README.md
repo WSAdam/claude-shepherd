@@ -125,9 +125,9 @@ every other automatic behaviour here waits for its switch.
   automation would do, did, or refused and why. [**Hands-off hold**](docs/automation.md#hands-off-hold): stop it for a session, or ❄ freeze the fleet.
 - [**Routines**](docs/automation.md#routines): spawn a session or push a digest on a cron schedule.
 - [**Coach**](docs/automation.md#the-coach): a read-only Sonnet reads a repo's last 10 sessions and
-  suggests `CLAUDE.md` edits with evidence, and changes to its auto-memory (backed up, with Undo). It runs
-  weekly, from a card, or on enough new evidence (`cc-lesson.sh` files a lesson); remembers what you
-  applied, skipped (and why) or undid; judges each applied edit on the sessions since; Sharpen rewords one.
+  suggests `CLAUDE.md` edits with evidence, and auto-memory changes (backed up, with Undo). It runs weekly,
+  from a card, or on new evidence (`cc-lesson.sh` files a lesson); remembers what you applied, skipped or
+  undid; judges applied edits; Sharpen rewords one. [**Coach across repos**](docs/automation.md#across-repos): a lesson 2+ repos learned is proposed for `~/.claude/CLAUDE.md`.
 - [**Notifications & escalation**](docs/automation.md#escalation-and-watchdogs): nags, banners and pushes when a session waits
   too long or stalls; a [**Fleet idle alert**](docs/automation.md#fleet-idle-alert) once nothing has worked for 15 min.
 - [**A/B compare**](docs/automation.md#ab-compare): run one task as 2–4 variants in separate

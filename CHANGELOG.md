@@ -15,6 +15,13 @@ parallel units. Each unit adds its line here.
   name, and a per-tick watch keeps their ✓ auto and ▶ live run chips in step with the file. Importing
   never ticks a row. **Remove playbook** stops the import and keeps its items to verify. The sources
   list is `playbooks` in `cc-worklist.json`.
+- Coach across repos: with `coach.enabled`, at most once a day, when 2+ repos have applied coach lessons it
+  hasn't compared yet, one headless Sonnet run in its own lane (`coach|global`, $1) groups the same lesson
+  across repos (the model's call, never fuzzy Lua) and proposes each group as one rule for a marked,
+  4KB-capped block in `~/.claude/CLAUDE.md`. Apply is a click under **Across repos** in the Coach overlay:
+  refused once the file changed since the run read it, written through a link to its target, backed up
+  first in `~/.claude/cc-coach/global.claude-backup/`; Undo restores that backup. Never mirrored into
+  `methodology/CLAUDE.md`.
 
 - Fleet idle alert: once every local session has been idle or done for `alerts.idleMinutes` (on, 15),
   Shepherd sends one macOS banner, plus an ntfy push when escalation push is on, and arms again only

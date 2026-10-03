@@ -8476,7 +8476,9 @@ do
   -- 2026-10-03: 48 -> 49 for the fleet-idle alert ("fleetidle", flagged new).
   -- 2026-10-03: 49 -> 50 for the hands-off hold and fleet freeze ("hold", flagged new).
   -- 2026-10-03: 50 -> 51 for playbooks as My List sources ("playbooks", flagged new).
-  eq("FEATURES: the 51 new features are flagged", newCount, 51)
+  -- 2026-10-03: 51 -> 52 for lessons learned in 2+ repos going to the global CLAUDE.md ("coachglobal", flagged new).
+  eq("FEATURES: the 52 new features are flagged", newCount, 52)
+  check("FEATURES: lists the coach across repos", keys.coachglobal == true)
   check("FEATURES: lists checking \"done\" against the diff", keys.fakedone == true)
   check("FEATURES: lists the unfinished-unit reminder", keys.unfinished == true)
   check("FEATURES: lists the brief pre-flight", keys.preflight == true)

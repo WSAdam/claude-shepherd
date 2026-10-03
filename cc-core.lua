@@ -18967,12 +18967,15 @@ do
 
   -- What a card gets (it.coach): what waits for Adam, and whether the coach is at work. live =
   -- { busy, waiting } from FX (a run in flight; one waiting for the repo's merge checker).
+  -- live.global (2026-10-03): the lessons-across-repos proposals waiting that cite one of this repo's
+  -- lessons (core.coachGlobalPendingFor) -- they count on its chip too, run or no run.
   function M.coachTileInfo(rec, live)
     live = type(live) == "table" and live or {}
-    if live.waiting then return { pending = pendingCount(rec), state = "waiting", waiting = true } end
+    local g = math.max(0, tonumber(live.global) or 0)
+    if live.waiting then return { pending = pendingCount(rec) + g, state = "waiting", waiting = true } end
     if live.busy then return { pending = 0, state = "running" } end
-    if type(rec) ~= "table" then return nil end
-    return { pending = pendingCount(rec), state = rec.state, verdict = rec.verdict }
+    if type(rec) ~= "table" then return (g > 0) and { pending = g } or nil end
+    return { pending = pendingCount(rec) + g, state = rec.state, verdict = rec.verdict }
   end
 
   -- What the Coach overlay gets: the run, and every edit and entry numbered (1-based) for Apply/Skip.
@@ -19118,6 +19121,487 @@ do
     local branch = (type(t.branch) == "string" and t.branch ~= "") and capChars(t.branch, 200) or nil
     return { id = f.id, commonDir = M.normDir(t.commonDir), branch = branch, text = text, at = tonumber(t.at),
              session_id = type(t.session_id) == "string" and capChars(t.session_id, 200) or nil }
+  end
+
+  -- ---- lessons applied in 2+ repos -> the global CLAUDE.md (2026-10-03, mining round 2 unit B5) ----
+  -- Each repo's coach learns alone, so a lesson Adam applied in three repos' CLAUDE.md never reached
+  -- the global ~/.claude/CLAUDE.md every session reads. One headless run (FX: its own lane, at most
+  -- daily, only when 2+ repos have applied lessons no run has considered yet) is shown every repo's
+  -- applied lessons (M.coachGlobalLessons: each ledger, with the applied history's whole text) and
+  -- groups the SAME lesson across repos -- the model's call, never fuzzy Lua: Lua only checks that a
+  -- group cites real lessons from 2+ repos (M.parseCoachGlobalOutput). Each group is one rule for a
+  -- marked, size-capped block in ~/.claude/CLAUDE.md (M.coachGlobalApplyDecision: created at the end
+  -- when absent), applied only on Adam's click and refused once the file changed since the run read it.
+  -- FX backs the file up in Shepherd's own cc-coach/global.claude-backup/ first (~/.claude isn't a repo)
+  -- and writes through a link to its target; Undo (M.coachGlobalUndoDecision) restores that backup, only
+  -- over what Shepherd wrote. The block is Adam's own: methodology/CLAUDE.md never carries it.
+  M.COACH_GLOBAL = {
+    lane = "coach|global",
+    everySeconds = 86400,    -- at most one run a day, counted from its start (a lost one too)
+    checkSeconds = 900,      -- how often the repos' ledgers are read again while none is due
+    inputBytes = 30000,      -- the prompt's <lessons>, newest first
+    lessonChars = 600,       -- one lesson's text in it
+    ruleChars = 600,         -- one proposed rule (one line)
+    blockBytes = 4000,       -- what the marked block may hold
+    maxProposals = 5,
+    keep = 40,               -- decided proposals kept: an applied one for Undo, each for the prompt's <decided>
+    consideredMax = 3000,    -- lessons remembered as compared
+    globalMdBytes = 60000,
+  }
+  M.COACH_GLOBAL_START = "<!-- shepherd-coach:start (Shepherd's coach writes this block when you apply a lesson learned in 2+ repos; Undo is in its overlay) -->"
+  M.COACH_GLOBAL_END = "<!-- shepherd-coach:end -->"
+  M.COACH_GLOBAL_HEADING = "## Lessons learned across repos"
+  M.COACH_GLOBAL_STATUS = { pending = true, applied = true, skipped = true, undone = true }
+  do
+    local G = M.COACH_GLOBAL
+    local START_PREFIX = "<!-- shepherd-coach:start"
+    local DECIDED = { applied = true, skipped = true, undone = true }
+
+    -- A proposed rule: one line, without a leading bullet, within ruleChars; nil otherwise.
+    local function globalRule(s)
+      if type(s) ~= "string" then return nil end
+      local r = (oneLine(s):gsub("^[%-%*%+]%s+", ""))
+      if r == "" or (utf8.len(r) or #r) > G.ruleChars then return nil end
+      return r
+    end
+
+    -- Every repo's applied CLAUDE.md lessons. repos = { { key (its coach file key), name, lessons (its
+    -- parsed ledger), history (its parsed applied edits) } }; considered = the `seen` keys earlier runs
+    -- were shown. Returns { list = { { ref, tag, key, name, id, section, text, why, at, seen, new } },
+    -- repos (with applied lessons), newRepos (with one not considered yet) }. A repo's tag (r1, r2, ...)
+    -- follows its key's order; a lesson's ref (r1/L0a1b2c) is what the model cites. An auto-memory
+    -- change (section memory/...) is no CLAUDE.md lesson; a skipped or undone one isn't applied.
+    function M.coachGlobalLessons(repos, considered)
+      local seen = {}
+      for _, s in ipairs(type(considered) == "table" and considered or {}) do if type(s) == "string" then seen[s] = true end end
+      local list = {}
+      for _, r in ipairs(type(repos) == "table" and repos or {}) do
+        if type(r) == "table" and type(r.key) == "string" and r.key ~= "" then list[#list + 1] = r end
+      end
+      table.sort(list, function(a, b) return a.key < b.key end)
+      local out, nRepos, newRepos = {}, 0, 0
+      for _, r in ipairs(list) do
+        local full, mine = {}, {}
+        for _, h in ipairs(type(r.history) == "table" and r.history or {}) do
+          if type(h) == "table" and h.lesson and not h.undone and type(h.new) == "string" and h.new ~= "" then full[h.lesson] = h.new end
+        end
+        for _, l in ipairs(type(r.lessons) == "table" and r.lessons or {}) do
+          if type(l) == "table" and l.verdict == "applied" and lessonId(l.id) and type(l.section) == "string"
+             and l.section:sub(1, 7) ~= "memory/" then
+            mine[#mine + 1] = l
+          end
+        end
+        if #mine > 0 then
+          nRepos = nRepos + 1
+          local tag, anyNew = "r" .. nRepos, false
+          local name = oneLine(r.name, 80)
+          if name == "" then name = r.key end
+          for _, l in ipairs(mine) do
+            local key = r.key .. "|" .. l.id .. "|" .. tostring(l.textHash or "")
+            local isNew = not seen[key]
+            if isNew then anyNew = true end
+            out[#out + 1] = { ref = tag .. "/" .. l.id, tag = tag, key = r.key, name = name, id = l.id, section = l.section,
+                              text = oneLine(full[l.id] or l.text, G.lessonChars), why = oneLine(l.why, 300),
+                              at = tonumber(l.at) or 0, seen = key, new = isNew }
+          end
+          if anyNew then newRepos = newRepos + 1 end
+        end
+      end
+      return { list = out, repos = nRepos, newRepos = newRepos }
+    end
+
+    -- Is a grouping run due? o = { now, enabled (coach.enabled), running, input = M.coachGlobalLessons'
+    -- result, or a function giving it (only asked once the day says so) }. At most one run a day,
+    -- counted from the last one's start (a lost one included: it waits a day too), and only when 2+
+    -- repos have an applied lesson no run was shown yet. Returns due and why.
+    function M.coachGlobalDue(rec, o)
+      o = type(o) == "table" and o or {}
+      if not o.enabled then return false, "off" end
+      if o.running then return false, "running" end
+      local now = tonumber(o.now) or 0
+      local at = type(rec) == "table" and tonumber(rec.at) or nil
+      if at and now - at < G.everySeconds then return false, "today" end
+      local input = o.input
+      if type(input) == "function" then input = input() end
+      if type(input) ~= "table" then return false, "reading" end
+      if (tonumber(input.newRepos) or 0) < 2 then return false, "nothing new in 2+ repos" end
+      return true, "due"
+    end
+
+    -- What the grouping run is asked: every applied lesson by repo (newest first, capped at inputBytes),
+    -- each marked (new) when no run was shown it, Adam's global CLAUDE.md, and o.decided -- the earlier
+    -- proposals he applied, skipped or undid.
+    function M.coachGlobalPrompt(input, globalMd, o)
+      o = type(o) == "table" and o or {}
+      local all = (type(input) == "table" and type(input.list) == "table") and input.list or {}
+      local lines = {
+        "You are Shepherd's coach, looking across repos. Each of Adam's repos has its own coach, which proposes edits to"
+          .. " that repo's CLAUDE.md from its sessions; <lessons> below lists every edit he applied, by repo. Find the lessons"
+          .. " that are the SAME lesson -- the same rule, reworded or not -- in two or more different repos, and propose each"
+          .. " such group as ONE rule for his global ~/.claude/CLAUDE.md, which every session in every repo reads first.",
+        "",
+        "Rules:",
+        "- A group cites, in \"lessons\", the refs (like \"r1/L0a1b2c\") of its lessons: at least two, from two or more"
+          .. " different repos. Lessons of one repo alone are no group.",
+        "- Propose only groups with at least one lesson marked (new); the others were compared before.",
+        "- \"rule\": one line, at most " .. G.ruleChars .. " characters, true in any repo -- no repo's own file names or"
+          .. " commands unless every repo in the group has them -- in the voice of a CLAUDE.md bullet, without the leading \"- \".",
+        "- \"why\": one or two sentences on what it prevents, naming the repos that learned it.",
+        "- Never propose a rule the global CLAUDE.md below already says, nor one <decided> lists as applied. One it lists as"
+          .. " skipped or undone: only when a new lesson joins its group, saying in \"whatsNew\" what that is.",
+        "- At most " .. G.maxProposals .. " groups. If none, return an empty list. Don't change any file.",
+        "",
+        "End your answer with ONE JSON object on its last line, nothing after it:",
+        "{\"summary\": \"<one sentence>\", \"groups\": [{\"lessons\": [\"r1/L...\", \"r2/L...\"], \"rule\": \"...\", \"why\": \"...\","
+          .. " \"whatsNew\": \"...\"}]}",
+        "",
+      }
+      if type(globalMd) == "string" and globalMd:match("%S") then
+        local body = globalMd
+        if #body > G.globalMdBytes then body = body:sub(1, G.globalMdBytes) .. "\n[… cut: the global CLAUDE.md is longer]" end
+        lines[#lines + 1] = "<global_claude_md>\n" .. body .. "\n</global_claude_md>"
+      else
+        lines[#lines + 1] = "Adam has no global CLAUDE.md yet."
+      end
+      lines[#lines + 1] = ""
+      local dec = {}
+      for _, p in ipairs(type(o.decided) == "table" and o.decided or {}) do
+        local rule = type(p) == "table" and DECIDED[p.status] and globalRule(p.rule) or nil
+        if rule then dec[#dec + 1] = "- " .. p.status .. ": " .. rule end
+      end
+      if #dec > 0 then
+        lines[#lines + 1] = "<decided>\n" .. table.concat(dec, "\n") .. "\n</decided>"
+        lines[#lines + 1] = ""
+      end
+      -- the newest lessons that fit, then shown by repo
+      local order = {}
+      for i, l in ipairs(all) do order[i] = l end
+      table.sort(order, function(a, b)
+        if (a.at or 0) ~= (b.at or 0) then return (a.at or 0) > (b.at or 0) end
+        return tostring(a.ref) < tostring(b.ref)
+      end)
+      local shown, size, cut = {}, 0, 0
+      local function line(l)
+        return "- " .. l.ref .. (l.new and " (new)" or "") .. " [" .. tostring(l.section or "") .. "] " .. tostring(l.text or "")
+          .. ((l.why and l.why ~= "") and (" -- why: " .. l.why) or "")
+      end
+      for _, l in ipairs(order) do
+        local s = line(l)
+        if size + #s + 1 <= G.inputBytes then shown[l.ref] = s; size = size + #s + 1 else cut = cut + 1 end
+      end
+      local body, tag = {}, nil
+      for _, l in ipairs(all) do
+        if shown[l.ref] then
+          if l.tag ~= tag then
+            tag = l.tag
+            body[#body + 1] = "## " .. l.tag .. " · " .. tostring(l.name)
+          end
+          body[#body + 1] = shown[l.ref]
+        end
+      end
+      if cut > 0 then body[#body + 1] = "[… " .. cut .. " older lesson(s) not shown, past the cap]" end
+      lines[#lines + 1] = "<lessons>\n" .. table.concat(body, "\n") .. "\n</lessons>"
+      return table.concat(lines, "\n") .. "\n"
+    end
+
+    -- A lesson as a proposal keeps it: what the overlay shows, the chip counts, and the next run un-considers.
+    local function globalLessonOf(l)
+      return { key = l.key, name = l.name, id = l.id, section = l.section, text = oneLine(l.text, 300), seen = l.seen }
+    end
+    -- One group from the answer: a rule, a why, and lessons the input really has from 2+ repos; nil otherwise.
+    local function globalProposal(gx, byRef)
+      if type(gx) ~= "table" or type(gx.lessons) ~= "table" then return nil end
+      local rule, why = globalRule(gx.rule), oneLine(gx.why, 500)
+      if not rule or why == "" then return nil end
+      local lessons, got, repos, nRepos = {}, {}, {}, 0
+      for _, ref in ipairs(gx.lessons) do
+        local l = type(ref) == "string" and byRef[ref] or nil
+        if l and not got[ref] and #lessons < 20 then
+          got[ref] = true
+          lessons[#lessons + 1] = globalLessonOf(l)
+          if not repos[l.key] then repos[l.key] = true; nRepos = nRepos + 1 end
+        end
+      end
+      if nRepos < 2 then return nil end
+      local wn = oneLine(gx.whatsNew, 300)
+      return { rule = rule, why = why, whatsNew = (wn ~= "") and wn or nil, lessons = lessons, status = "pending" }
+    end
+
+    -- claude -p --output-format json -> { verdict = proposals | none | couldntRun, proposals, summary, why,
+    -- costUsd, turns }. The answer's last JSON object carrying "groups" is read; a group citing a ref
+    -- `input` doesn't have loses it, and one left with lessons from fewer than 2 repos is dropped.
+    function M.parseCoachGlobalOutput(raw, errText, input)
+      local res = { verdict = "couldntRun", proposals = {} }
+      local t = headlessEnvelope(raw, errText, res)
+      if not t then return res end
+      local v = lastObjectWith(t.result, "groups", 200000)
+      if not v then res.why = "its answer had no JSON with groups"; return res end
+      if type(v.groups) ~= "table" then res.why = "its answer's groups weren't a list"; return res end
+      local byRef = {}
+      for _, l in ipairs((type(input) == "table" and type(input.list) == "table") and input.list or {}) do byRef[l.ref] = l end
+      for _, gx in ipairs(v.groups) do
+        if #res.proposals >= G.maxProposals then break end
+        res.proposals[#res.proposals + 1] = globalProposal(gx, byRef)
+      end
+      local summary = oneLine(v.summary, 300)
+      res.summary = (summary ~= "") and summary or nil
+      if #res.proposals > 0 then
+        res.verdict = "proposals"
+      elseif #v.groups > 0 then
+        res.why = "none of its " .. #v.groups .. " group(s) had a rule and lessons from 2+ repos"
+      else
+        res.verdict = "none"
+      end
+      return res
+    end
+
+    -- A text's lines (a last newline adds no empty line).
+    local function globalLines(text)
+      local out, from = {}, 1
+      while true do
+        local nl = text:find("\n", from, true)
+        if not nl then
+          if from <= #text then out[#out + 1] = text:sub(from) end
+          return out
+        end
+        out[#out + 1] = text:sub(from, nl - 1)
+        from = nl + 1
+      end
+    end
+    -- The marked block's start and end line numbers, nil when there is none, or false when it can't be
+    -- trusted: a start with no end, an end first, or two blocks. Never guessed at.
+    local function globalBlock(lines)
+      local s, e
+      for i, l in ipairs(lines) do
+        local t = l:match("^%s*(.-)%s*$")
+        if t:sub(1, #START_PREFIX) == START_PREFIX then
+          if s then return false end
+          s = i
+        elseif t == M.COACH_GLOBAL_END then
+          if not s or e then return false end
+          e = i
+        end
+      end
+      if s and not e then return false end
+      return s and { s = s, e = e } or nil
+    end
+
+    -- Apply one proposal to ~/.claude/CLAUDE.md as it is now. PURE: FX reads the file (through a link),
+    -- backs it up and writes. readHash = the file's hash when the run read it (or after Shepherd's own
+    -- last write). Returns { ok = false, error = "changed"|"exists"|"full"|"bad-block"|"bad" } or
+    -- { ok = true, text, afterHash, created (a new block, at the end), newFile (there was no file) }.
+    -- The rule goes in as one bullet just before the block's end marker; nothing outside the block moves.
+    function M.coachGlobalApplyDecision(current, readHash, p)
+      local rule = type(p) == "table" and globalRule(p.rule) or nil
+      if not rule then return { ok = false, error = "bad" } end
+      if M.coachHash(current) ~= tostring(readHash or "") then return { ok = false, error = "changed" } end
+      local bullet = "- " .. rule
+      local text = type(current) == "string" and current or ""
+      local lines = globalLines(text)
+      local b = globalBlock(lines)
+      if b == false then return { ok = false, error = "bad-block" } end
+      if b then
+        local size = #bullet
+        for i = b.s + 1, b.e - 1 do
+          if lines[i]:match("^%s*(.-)%s*$") == bullet then return { ok = false, error = "exists" } end
+          size = size + #lines[i] + 1
+        end
+        if size > G.blockBytes then return { ok = false, error = "full" } end
+        local cr = (lines[b.e]:sub(-1) == "\r") and "\r" or ""   -- a CRLF file keeps its line ends
+        local new = {}
+        for i = 1, b.e - 1 do new[#new + 1] = lines[i] end
+        new[#new + 1] = bullet .. cr
+        for i = b.e, #lines do new[#new + 1] = lines[i] end
+        local out = table.concat(new, "\n") .. ((text:sub(-1) == "\n") and "\n" or "")
+        return { ok = true, text = out, afterHash = M.coachHash(out) }
+      end
+      local body = M.COACH_GLOBAL_HEADING .. "\n\n" .. bullet
+      if #body > G.blockBytes then return { ok = false, error = "full" } end
+      local block = M.COACH_GLOBAL_START .. "\n" .. body .. "\n" .. M.COACH_GLOBAL_END .. "\n"
+      local out = (text == "") and block or (text .. ((text:sub(-1) == "\n") and "" or "\n") .. "\n" .. block)
+      return { ok = true, text = out, afterHash = M.coachHash(out), created = true, newFile = (current == nil) or nil }
+    end
+
+    -- Undo an applied proposal: the file goes back to its backup, only while it is exactly what Shepherd
+    -- wrote (its afterHash) -- a later Apply, or a hand edit, refuses it. A file the Apply created is
+    -- removed again. o = { backup (its text, nil when gone), current }. Returns { ok = false, error =
+    -- "bad"|"undo-conflict"|"undo-gone" } or { ok = true, text } / { ok = true, delete = true }.
+    function M.coachGlobalUndoDecision(p, o)
+      o = type(o) == "table" and o or {}
+      if type(p) ~= "table" or p.status ~= "applied" then return { ok = false, error = "bad" } end
+      if M.coachHash(o.current) ~= tostring(p.afterHash or "") then return { ok = false, error = "undo-conflict" } end
+      if p.newFile then return { ok = true, delete = true } end
+      if type(o.backup) ~= "string" then return { ok = false, error = "undo-gone" } end
+      return { ok = true, text = o.backup }
+    end
+
+    local GLOBAL_REFUSALS = {
+      changed = "~/.claude/CLAUDE.md changed since the coach read it -- run it again",
+      exists = "that rule is in the coach's block already",
+      full = "the coach's block in ~/.claude/CLAUDE.md is full (" .. G.blockBytes .. " bytes) -- make room in it by hand first",
+      ["bad-block"] = "the coach's block in ~/.claude/CLAUDE.md is broken (a start marker with no end, or two blocks) -- fix it by hand",
+      bad = "the proposal is malformed",
+      link = "~/.claude/CLAUDE.md is a link Shepherd can't follow",
+      backup = "Shepherd couldn't back ~/.claude/CLAUDE.md up first, so nothing was changed",
+      write = "Shepherd couldn't write ~/.claude/CLAUDE.md",
+      ["undo-conflict"] = "~/.claude/CLAUDE.md changed since -- undo a later rule first, or restore it by hand from Shepherd's backup",
+      ["undo-gone"] = "its backup is gone",
+    }
+    function M.coachGlobalRefusal(code) return GLOBAL_REFUSALS[code] or ("refused: " .. tostring(code)) end
+
+    -- A run starts: the last run's pending proposals don't outlive it, and their lessons are un-considered
+    -- (they come back as new, so a rule refused because the file changed can be proposed again); the
+    -- decided ones stay (an applied one for Undo, each for <decided>), the oldest past `keep` going first
+    -- among the skipped and undone. Returns the new record.
+    function M.coachGlobalStart(prev, now, trigger)
+      prev = type(prev) == "table" and prev or {}
+      local drop, kept = {}, {}
+      for _, p in ipairs(type(prev.proposals) == "table" and prev.proposals or {}) do
+        if type(p) == "table" and DECIDED[p.status] then
+          kept[#kept + 1] = p
+        elseif type(p) == "table" then
+          for _, l in ipairs(type(p.lessons) == "table" and p.lessons or {}) do
+            if type(l) == "table" and l.seen then drop[l.seen] = true end
+          end
+        end
+      end
+      while #kept > G.keep do
+        local idx = 1
+        for i, p in ipairs(kept) do if p.status ~= "applied" then idx = i; break end end
+        table.remove(kept, idx)
+      end
+      local considered = {}
+      for _, s in ipairs(type(prev.considered) == "table" and prev.considered or {}) do
+        if type(s) == "string" and not drop[s] then considered[#considered + 1] = s end
+      end
+      return { v = 1, state = "queued", at = tonumber(now) or 0, trigger = (trigger == "click") and "click" or "auto",
+               lastRunAt = tonumber(prev.lastRunAt), considered = considered, proposals = kept }
+    end
+
+    -- The run is over: its verdict, its proposals pending (a rule already applied isn't added again),
+    -- and -- from a real answer -- every lesson it was shown is considered from now on.
+    function M.coachGlobalFinish(rec, parsed, input, now)
+      rec = type(rec) == "table" and rec or M.coachGlobalStart(nil, now, "auto")
+      parsed = type(parsed) == "table" and parsed or { verdict = "couldntRun" }
+      now = tonumber(now) or 0
+      rec.state, rec.doneAt, rec.lastRunAt = "done", now, now
+      rec.verdict = M.COACH_VERDICTS[parsed.verdict] and parsed.verdict or "couldntRun"
+      rec.why, rec.summary, rec.costUsd, rec.turns = parsed.why, parsed.summary, parsed.costUsd, parsed.turns
+      rec.proposals = type(rec.proposals) == "table" and rec.proposals or {}
+      if rec.verdict == "couldntRun" then return rec end
+      local have, added = {}, 0
+      for _, p in ipairs(rec.proposals) do if p.status == "applied" then have[p.rule] = true end end
+      for _, p in ipairs(type(parsed.proposals) == "table" and parsed.proposals or {}) do
+        if type(p) == "table" and type(p.rule) == "string" and not have[p.rule] then
+          have[p.rule] = true
+          p.status = "pending"
+          rec.proposals[#rec.proposals + 1] = p
+          added = added + 1
+        end
+      end
+      if added == 0 and rec.verdict == "proposals" then rec.verdict = "none" end
+      local set, list = {}, {}
+      for _, s in ipairs(type(rec.considered) == "table" and rec.considered or {}) do
+        if type(s) == "string" and not set[s] then set[s] = true; list[#list + 1] = s end
+      end
+      for _, l in ipairs((type(input) == "table" and type(input.list) == "table") and input.list or {}) do
+        if type(l.seen) == "string" and not set[l.seen] then set[l.seen] = true; list[#list + 1] = l.seen end
+      end
+      while #list > G.consideredMax do table.remove(list, 1) end
+      rec.considered = list
+      rec.repos = (type(input) == "table") and tonumber(input.repos) or rec.repos
+      return rec
+    end
+
+    -- ~/.claude/cc-coach/global.json read back (Shepherd is its only writer). A run still queued or
+    -- running when Hammerspoon reloaded reads lost, never a verdict.
+    local function globalStoredLesson(l)
+      if type(l) ~= "table" or not lessonId(l.id) or type(l.key) ~= "string" or l.key == "" or #l.key > 400 then return nil end
+      return { key = l.key, name = oneLine(l.name, 80), id = l.id, section = oneLine(l.section, 120), text = oneLine(l.text, 300),
+               seen = (type(l.seen) == "string" and #l.seen <= 500) and l.seen or nil }
+    end
+    function M.coachGlobalBackupName(b)
+      return (type(b) == "string" and b:match("^%d+%-%d+%-CLAUDE%.md$")) and b or nil
+    end
+    local function globalStoredProposal(p)
+      if type(p) ~= "table" then return nil end
+      local rule, why = globalRule(p.rule), oneLine(p.why, 500)
+      if not rule or why == "" then return nil end
+      local lessons = {}
+      for _, l in ipairs(type(p.lessons) == "table" and p.lessons or {}) do
+        if #lessons >= 20 then break end
+        lessons[#lessons + 1] = globalStoredLesson(l)
+      end
+      local wn = oneLine(p.whatsNew, 300)
+      local err = (type(p.error) == "string" and p.error ~= "") and capChars(p.error, 300) or nil
+      return { rule = rule, why = why, whatsNew = (wn ~= "") and wn or nil, lessons = lessons,
+               status = M.COACH_GLOBAL_STATUS[p.status] and p.status or "pending",
+               error = err, errorCode = err and coachErrorCode(p.errorCode) or nil,
+               at = tonumber(p.at), undoneAt = tonumber(p.undoneAt), backup = M.coachGlobalBackupName(p.backup),
+               afterHash = (type(p.afterHash) == "string" and #p.afterHash <= 64) and p.afterHash or nil,
+               newFile = (p.newFile == true) or nil }
+    end
+    function M.parseCoachGlobalRecord(raw)
+      if type(raw) ~= "string" then return nil end
+      local ok, t = pcall(M.json.decode, raw)
+      if not ok or type(t) ~= "table" or tonumber(t.v) ~= 1 then return nil end
+      local function str(v, n) return (type(v) == "string" and v ~= "") and capChars(v, n) or nil end
+      local r = { v = 1, state = t.state, at = tonumber(t.at), doneAt = tonumber(t.doneAt), lastRunAt = tonumber(t.lastRunAt),
+                  trigger = (t.trigger == "click") and "click" or "auto",
+                  verdict = M.COACH_VERDICTS[t.verdict] and t.verdict or nil, why = str(t.why, 300), summary = str(t.summary, 300),
+                  claudeHash = str(t.claudeHash, 64), costUsd = tonumber(t.costUsd), turns = tonumber(t.turns),
+                  repos = tonumber(t.repos), proposals = {}, considered = {} }
+      for _, p in ipairs(type(t.proposals) == "table" and t.proposals or {}) do
+        if #r.proposals >= G.keep + G.maxProposals then break end
+        r.proposals[#r.proposals + 1] = globalStoredProposal(p)
+      end
+      for _, s in ipairs(type(t.considered) == "table" and t.considered or {}) do
+        if #r.considered >= G.consideredMax then break end
+        if type(s) == "string" and #s <= 500 then r.considered[#r.considered + 1] = s end
+      end
+      if r.state ~= "done" or not r.verdict then
+        r.state, r.verdict = "lost", nil
+        r.why = "Shepherd reloaded while it ran"
+      end
+      return r
+    end
+
+    -- What the Coach overlay's Across repos section gets (live = { busy }): the run, and every proposal
+    -- numbered (1-based) for Apply / Skip / Undo, with the repos that learned it. A pending one refused
+    -- because the file changed offers Run again.
+    function M.coachGlobalView(rec, live)
+      live = type(live) == "table" and live or {}
+      if type(rec) ~= "table" then return live.busy and { state = "running", proposals = {}, pending = 0 } or nil end
+      local v = { state = live.busy and "running" or rec.state, verdict = rec.verdict, why = rec.why, summary = rec.summary,
+                  at = rec.at, doneAt = rec.doneAt, costUsd = rec.costUsd, repos = rec.repos, trigger = rec.trigger,
+                  proposals = {}, pending = 0 }
+      for i, p in ipairs(rec.proposals or {}) do
+        local st = p.status or "pending"
+        if st == "pending" then v.pending = v.pending + 1 end
+        local ls = {}
+        for j, l in ipairs(p.lessons or {}) do ls[j] = { name = l.name, section = l.section, text = l.text } end
+        local err = (st == "pending" or st == "applied") and ((p.errorCode and GLOBAL_REFUSALS[p.errorCode]) or p.error) or nil
+        v.proposals[i] = { i = i, rule = p.rule, why = p.why, whatsNew = p.whatsNew, lessons = ls, status = st, error = err,
+                           code = (st == "pending") and p.errorCode or nil,
+                           rerun = (st == "pending" and p.errorCode == "changed") or nil }
+      end
+      return v
+    end
+
+    -- Pending proposals per repo (its coach file key -> how many cite one of its lessons): each card of
+    -- those repos counts them on its 🧭 chip.
+    function M.coachGlobalPendingFor(rec)
+      local out = {}
+      for _, p in ipairs(type(rec) == "table" and rec.proposals or {}) do
+        if type(p) == "table" and (p.status or "pending") == "pending" then
+          local once = {}
+          for _, l in ipairs(type(p.lessons) == "table" and p.lessons or {}) do
+            if type(l) == "table" and l.key and not once[l.key] then once[l.key] = true; out[l.key] = (out[l.key] or 0) + 1 end
+          end
+        end
+      end
+      return out
+    end
   end
 end
 
@@ -23291,6 +23775,9 @@ M.FEATURES = {
   { key = "coach", cat = "Automate", new = true, title = "Coach",
     what = "Weekly (coach.enabled, catching up after sleep), once enough new evidence has come in since its last run (coach.evidence: a 24h cooldown and a daily cap across repos), or from a session's 🧭 Coach button, a read-only Sonnet reads the repo's last 10 sessions -- your corrections, interrupts, tool errors, denials with a note, merge notes, checker findings and lessons sessions filed with cc-lesson.sh -- and suggests up to 5 CLAUDE.md edits, each with its evidence. They wait behind a 🧭 chip on the project card: Apply writes CLAUDE.md and commits it alone (refused if it changed since the coach read it or has uncommitted edits), Skip puts one aside. It never proposes undoing a DECISIONS.md entry, and can suggest new ones. A lessons ledger keeps every Apply, Skip (with an optional one-line reason) and Undo for the next run: an applied suggestion isn't proposed again, a skipped or undone one comes back only with new evidence, and a repeat says \"seen in N runs\". Each run also judges the applied edits at least 3 later sessions postdate -- working, still seen (with quotes) or no data yet -- on their history rows, where Sharpen asks the coach for a better wording of one edit alone. It also reviews the repo's Claude Code auto-memory (~/.claude/projects/<repo>/memory/): delete, rewrite or keep a note, or promote one into CLAUDE.md as an edit row -- Apply only while the file is as the coach read it, backed up in Shepherd's own folder first, MEMORY.md's index kept in step, and Undo puts it back.",
     why = "The corrections you keep repeating end up in the instructions every session reads first." },
+  { key = "coachglobal", cat = "Automate", new = true, title = "Coach across repos",
+    what = "At most once a day (coach.enabled), when 2+ repos have coach lessons you applied that it hasn't compared yet, one read-only Sonnet run in its own lane groups the same lesson across repos -- the model judges the match, not Shepherd -- and proposes each as one rule for a marked block (<!-- shepherd-coach:start/end -->, 4KB) in your global ~/.claude/CLAUDE.md. They wait under Across repos in every Coach overlay and count on the 🧭 chips of the repos that learned them. Apply is your click alone: refused if the file changed since the run read it, written through a link to its target, backed up first in ~/.claude/cc-coach/global.claude-backup/; Undo puts the file back from that backup. Run again compares now.",
+    why = "A lesson three repos learned separately becomes one rule every session in every repo reads." },
 
   -- ---- See what's happening ----
   { key = "ledger", cat = "See what's happening", title = "Audit ledger & insights",

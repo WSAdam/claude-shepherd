@@ -7195,11 +7195,18 @@ function FX.stepCoach(list, cfg)
         end
       end
     end
+    -- 2026-10-03: the day's run on the lessons learned in 2+ repos, in its own lane
+    local okG, errG = pcall(FX.coachGlobalStep, cfg)
+    if not okG then print("[cc-dashboard] ❌ coach across repos step failed: " .. tostring(errG)) end
   end
+  -- ...and its proposals waiting count on the chips of the repos that learned them
+  local okP, globalPending = pcall(function() return core.coachGlobalPendingFor(FX.coachGlobalRecord()) end)
+  if not okP then globalPending = {} end
   for _, it in ipairs(list or {}) do
     local repo = FX.coachRepoOf(it)
     it.coach = repo and core.coachTileInfo(FX.coachRecord(repo.root),
-      { busy = FX.coachBusy(repo.root), waiting = FX._coach.waiting[repo.root] ~= nil }) or nil
+      { busy = FX.coachBusy(repo.root), waiting = FX._coach.waiting[repo.root] ~= nil,
+        global = globalPending[core.coachFileKey(repo.root) or ""] }) or nil
   end
 end
 
@@ -7237,6 +7244,9 @@ function FX.pushCoach(root)
   end
   local hist = core.coachHistoryView(FX.coachHistory(root))
   v.history = (#hist > 0) and hist or nil   -- what was applied before, newest first, each with Undo
+  -- 2026-10-03: lessons learned in 2+ repos, for the global CLAUDE.md -- the same on every repo's overlay
+  local okG, g = pcall(function() return core.coachGlobalView(FX.coachGlobalRecord(), { busy = FX.coachGlobalBusy() }) end)
+  v.global = okG and g or nil
   local js = "ccCoach(" .. core.json.encode(v) .. ")"
   pcall(function() wv:evaluateJavaScript(js) end)
 end
@@ -7733,6 +7743,222 @@ function FX.stepLessons()
       if mt and now - mt > 60 then os.remove(path) end
     end
   end
+end
+
+-- ---- Lessons applied in 2+ repos -> the global CLAUDE.md (2026-10-03, mining round 2 unit B5) ----
+-- At most once a day (coach.enabled), when 2+ repos have applied lessons no run has considered yet
+-- (core.coachGlobalDue), ONE headless run in its own lane ("coach|global", never a repo's, so no
+-- repo's checker or coach waits for it) is shown every repo's applied lessons -- each
+-- <repo>.lessons.json in FX.COACH_DIR, with its <repo>.applied.json's whole text -- and groups the same
+-- lesson across repos (core.coachGlobalPrompt: the model judges the match, never Lua). Each group waits
+-- under Across repos in every Coach overlay, counted on the chips of the repos that learned it. Apply
+-- (Adam's click, nothing else) writes one bullet into the marked block in ~/.claude/CLAUDE.md -- through
+-- a link, to its target -- refused once the file changed since the run read it, after backing the file
+-- up in FX.COACH_DIR/global.claude-backup/ (~/.claude isn't a repo; no backup, no change). Undo
+-- restores that backup, only over what Shepherd wrote. Nothing here touches methodology/CLAUDE.md.
+FX.GLOBAL_CLAUDE_MD = os.getenv("CC_GLOBAL_CLAUDE_MD") or ((os.getenv("HOME") or "") .. "/.claude/CLAUDE.md")
+FX._coach.globalNext, FX._coach.globalSeq = 0, 0   -- global: the record (nil = not read, false = none)
+function FX.coachGlobalPath() return FX.COACH_DIR .. "/global.json" end
+function FX.coachGlobalBackupDir() return FX.COACH_DIR .. "/global.claude-backup" end
+function FX.coachGlobalRecord()
+  local r = FX._coach.global
+  if r == nil then
+    r = core.parseCoachGlobalRecord(FX.readFile(FX.coachGlobalPath())) or false
+    FX._coach.global = r
+  end
+  return r or nil
+end
+function FX.coachGlobalSave(rec)
+  FX._coach.global = rec
+  if not FX.writeFileAtomic(FX.coachGlobalPath(), core.json.encode(rec)) then
+    print("[cc-dashboard] ❌ coach: couldn't save the across-repos record")
+  end
+end
+function FX.coachGlobalBusy() return FX._headless[core.COACH_GLOBAL.lane] ~= nil end
+
+-- Every repo the coach keeps a lessons ledger for: { key, name (from its record), lessons, history }.
+function FX.coachGlobalRepos()
+  local out = {}
+  for _, fn in ipairs(FX.readDir(FX.COACH_DIR)) do
+    local key = fn:match("^(.+)%.lessons%.json$")
+    if key then
+      local base = FX.COACH_DIR .. "/" .. key
+      local rec = core.parseCoachRecord(FX.readFile(base .. ".json"))
+      out[#out + 1] = { key = key, name = rec and (rec.name or rec.root:match("([^/]+)$")) or nil,
+                        lessons = core.parseCoachLessons(FX.readFile(base .. ".lessons.json")),
+                        history = core.parseCoachHistory(FX.readFile(base .. ".applied.json")) }
+    end
+  end
+  return out
+end
+
+-- Where ~/.claude/CLAUDE.md really is: a link's target, else the path itself. nil and "link" when a
+-- link can't be resolved (it dangles): Shepherd never writes over a link itself.
+function FX.coachGlobalTarget()
+  local path = FX.GLOBAL_CLAUDE_MD
+  if not FX.coachIsLink(path) then return path end
+  local real
+  pcall(function() real = hs.fs.pathToAbsolute(path) end)
+  if type(real) ~= "string" or real == "" or FX.coachIsLink(real) then return nil, "link" end
+  return real
+end
+
+-- Every tick's check (from FX.stepCoach): start the day's run when it is due. The ledgers are read
+-- only once the day says so, and then at most every COACH_GLOBAL.checkSeconds.
+function FX.coachGlobalStep(cfg)
+  local now = FX.now()
+  if now < (FX._coach.globalNext or 0) then return false, "later" end
+  local rec = FX.coachGlobalRecord()
+  local repos
+  local due, why = core.coachGlobalDue(rec, { now = now, enabled = core.config(cfg, "coach.enabled", false) == true,
+    running = FX.coachGlobalBusy(), input = function()
+      repos = FX.coachGlobalRepos()
+      return core.coachGlobalLessons(repos, rec and rec.considered or {})
+    end })
+  if repos then FX._coach.globalNext = now + core.COACH_GLOBAL.checkSeconds end
+  if due then
+    local started, err = FX.coachGlobalStart("auto", cfg, repos)
+    if not started then print("[cc-dashboard] ⚠️ coach: the across-repos run didn't start: " .. tostring(err)) end
+  end
+  return due, why
+end
+
+-- Start a run: "auto" (the day's), or "click" (Run again, whatever the clock says). Returns the
+-- record, or nil and why.
+function FX.coachGlobalStart(trigger, cfg, repos)
+  if FX.coachGlobalBusy() then return nil, "the coach is already comparing the repos' lessons" end
+  repos = repos or FX.coachGlobalRepos()
+  local target, terr = FX.coachGlobalTarget()
+  if not target then return nil, core.coachGlobalRefusal(terr) end
+  local rec = core.coachGlobalStart(FX.coachGlobalRecord(), FX.now(), trigger)
+  -- the lessons the last run's pending proposals cited are new again (core.coachGlobalStart)
+  local input = core.coachGlobalLessons(repos, rec.considered)
+  if (input.repos or 0) < 2 then return nil, "fewer than 2 repos have applied coach lessons yet" end
+  local globalMd = FX.readFile(target)
+  rec.claudeHash, rec.repos = core.coachHash(globalMd), input.repos   -- the hash Apply checks
+  FX.coachGlobalSave(rec)
+  cfg = cfg or loadConfig()
+  FX.runHeadless({ id = core.COACH_GLOBAL.lane, lane = core.COACH_GLOBAL.lane, dir = FX.COACH_DIR,
+    prompt = core.coachGlobalPrompt(input, globalMd, { decided = rec.proposals }),
+    timeoutSeconds = tonumber(core.config(cfg, "coach.timeoutSeconds", core.COACH.timeoutSeconds)) or core.COACH.timeoutSeconds,
+    maxBudgetUsd = core.config(cfg, "coach.maxBudgetUsd", core.COACH.budgetUsd),
+    onStart = function()
+      if FX._coach.global == rec then rec.state = "running"; FX.coachGlobalSave(rec) end
+    end,
+    onDone = function(_, res) FX.coachGlobalFinish(rec, res, input) end })
+  print("[cc-dashboard] 🔍 coach: comparing " .. tostring(input.repos) .. " repos' applied lessons (" .. tostring(trigger) .. ")")
+  if FX._coach.open then FX.pushCoach(FX._coach.open) end
+  return rec
+end
+
+function FX.coachGlobalFinish(rec, res, input)
+  if FX._coach.global ~= rec then return end   -- a newer run replaced this one
+  local p = core.parseCoachGlobalOutput(res and res.output, res and res.err, input)
+  if res and res.timedOut then
+    p = { verdict = "couldntRun", proposals = {}, why = "timed out after " .. tostring(res.timeoutSeconds) .. "s" }
+  elseif res and res.code == -1 and (res.output or "") == "" then
+    p = { verdict = "couldntRun", proposals = {}, why = tostring(res.err or "it couldn't run") }
+  end
+  core.coachGlobalFinish(rec, p, input, FX.now())
+  FX.coachGlobalSave(rec)
+  local n = core.coachGlobalView(rec, {}).pending
+  print("[cc-dashboard] " .. (rec.verdict == "couldntRun" and "⚠️" or "✅") .. " coach across repos -> " .. tostring(rec.verdict)
+    .. " (" .. n .. " pending" .. (rec.why and (": " .. rec.why) or "") .. ")")
+  if rec.verdict == "proposals" then
+    FX.alert("🧭 The coach found " .. n .. " lesson" .. (n == 1 and "" or "s") .. " learned in 2+ repos for your global CLAUDE.md"
+      .. " -- the 🧭 chip on their cards, under Across repos", 5)
+  elseif rec.verdict == "couldntRun" then
+    FX.alert("⚠️ The coach couldn't compare your repos' lessons: " .. tostring(rec.why), 5)
+  elseif rec.trigger == "click" then
+    FX.alert("🧭 The coach compared your repos' lessons: nothing new learned in 2+ repos", 4)
+  end
+  if FX._coach.open then FX.pushCoach(FX._coach.open) end
+end
+
+-- The proposal behind an overlay click (its number in the record).
+function FX.coachGlobalItem(i)
+  local rec = FX.coachGlobalRecord()
+  local p = rec and rec.proposals[math.tointeger(tonumber(i) or 0) or 0] or nil
+  if not p then FX.alert("⚠️ That suggestion isn't there any more"); return nil end
+  return rec, p
+end
+function FX.coachGlobalRefuse(rec, p, code, what)
+  p.error, p.errorCode = core.coachGlobalRefusal(code), code
+  FX.coachGlobalSave(rec)
+  FX.alert("⚠️ Not " .. what .. ": " .. p.error, 5)
+  print("[cc-dashboard] ⚠️ coach: across-repos rule " .. what .. " refused (" .. tostring(code) .. ")")
+  if FX._coach.open then FX.pushCoach(FX._coach.open) end
+  return false
+end
+
+-- Apply: the backup first, then one bullet into the block (core.coachGlobalApplyDecision's refusals).
+function FX.coachGlobalApply(i)
+  local rec, p = FX.coachGlobalItem(i)
+  if not rec then return false end
+  if p.status ~= "pending" then FX.alert("That suggestion is already " .. tostring(p.status)); return false end
+  local path, lerr = FX.coachGlobalTarget()
+  if not path then return FX.coachGlobalRefuse(rec, p, lerr or "link", "applied") end
+  local current = FX.readFile(path)
+  local dec = core.coachGlobalApplyDecision(current, rec.claudeHash, p)
+  if not dec.ok then return FX.coachGlobalRefuse(rec, p, dec.error, "applied") end
+  FX._coach.globalSeq = FX._coach.globalSeq + 1
+  local bname = tostring(math.floor(FX.now())) .. "-" .. FX._coach.globalSeq .. "-CLAUDE.md"
+  if current ~= nil and not FX.writeFileAtomic(FX.coachGlobalBackupDir() .. "/" .. bname, current) then
+    return FX.coachGlobalRefuse(rec, p, "backup", "applied")
+  end
+  if not FX.writeFileAtomic(path, dec.text) then return FX.coachGlobalRefuse(rec, p, "write", "applied") end
+  p.status, p.error, p.errorCode, p.at = "applied", nil, nil, FX.now()
+  p.backup, p.afterHash, p.newFile = (current ~= nil) and bname or nil, dec.afterHash, dec.newFile
+  rec.claudeHash = dec.afterHash   -- Shepherd's own write isn't "changed since"
+  FX.coachGlobalSave(rec)
+  FX.alert("🧭 Added to your global CLAUDE.md" .. (dec.created and " (in a new block at its end)" or "") .. " -- backed up, Undo puts it back", 4)
+  print("[cc-dashboard] ✅ coach: applied an across-repos rule to " .. path .. (p.backup and (" (backup " .. p.backup .. ")") or ""))
+  if FX._coach.open then FX.pushCoach(FX._coach.open) end
+  return true
+end
+
+-- Undo: the file back from that backup, only while it is what Shepherd wrote (core.coachGlobalUndoDecision).
+function FX.coachGlobalUndo(i)
+  local rec, p = FX.coachGlobalItem(i)
+  if not rec then return false end
+  if p.status ~= "applied" then FX.alert("That suggestion isn't applied"); return false end
+  local path, lerr = FX.coachGlobalTarget()
+  if not path then return FX.coachGlobalRefuse(rec, p, lerr or "link", "undone") end
+  local bname = core.coachGlobalBackupName(p.backup)
+  local dec = core.coachGlobalUndoDecision(p, { current = FX.readFile(path),
+    backup = bname and FX.readFile(FX.coachGlobalBackupDir() .. "/" .. bname) or nil })
+  if not dec.ok then return FX.coachGlobalRefuse(rec, p, dec.error, "undone") end
+  local ok
+  if dec.delete then ok = os.remove(path) and true or false else ok = FX.writeFileAtomic(path, dec.text) end
+  if not ok then return FX.coachGlobalRefuse(rec, p, "write", "undone") end
+  p.status, p.error, p.errorCode, p.undoneAt = "undone", nil, nil, FX.now()
+  rec.claudeHash = core.coachHash(dec.text)   -- back as it was: the pending ones apply again
+  FX.coachGlobalSave(rec)
+  FX.alert("🧭 Undone: your global CLAUDE.md is back as it was", 4)
+  print("[cc-dashboard] ✅ coach: undid an across-repos rule in " .. path)
+  if FX._coach.open then FX.pushCoach(FX._coach.open) end
+  return true
+end
+
+function FX.coachGlobalSkip(i)
+  local rec, p = FX.coachGlobalItem(i)
+  if not rec or p.status ~= "pending" then return false end
+  p.status, p.error, p.errorCode, p.at = "skipped", nil, nil, FX.now()
+  FX.coachGlobalSave(rec)
+  print("[cc-dashboard] 🔍 coach: skipped an across-repos rule (" .. tostring(i) .. ")")
+  if FX._coach.open then FX.pushCoach(FX._coach.open) end
+  return true
+end
+
+-- Run again (the overlay): a run now, whatever the clock says.
+function FX.coachGlobalRun()
+  local rec, why = FX.coachGlobalStart("click", loadConfig())
+  if rec then
+    FX.alert("🧭 The coach is comparing the lessons your repos learned -- its suggestions land under Across repos", 4)
+    return true
+  end
+  FX.alert("⚠️ Coach: " .. tostring(why))
+  return false
 end
 
 -- Merge fields into a session's status file (optimistic local patch -- e.g. the
@@ -13074,6 +13300,11 @@ local function handleBridgeMsg(msg)
   if a == "coach-mem-skip" then FX.coachMemorySkip(tostring(payload.v or ""), tostring(payload.text or "")); return end
   if a == "coach-mem-unskip" then FX.coachUnskip(tostring(payload.v or ""), tostring(payload.text or ""), "memory"); return end
   if a == "coach-mem-undo" then FX.coachMemoryUndo(tostring(payload.v or ""), tostring(payload.text or "")); return end
+  -- lessons learned in 2+ repos (2026-10-03): the proposal's number in the one global record; Run again takes nothing
+  if a == "coach-global-apply" then FX.coachGlobalApply(tostring(payload.text or "")); return end
+  if a == "coach-global-skip" then FX.coachGlobalSkip(tostring(payload.text or "")); return end
+  if a == "coach-global-undo" then FX.coachGlobalUndo(tostring(payload.text or "")); return end
+  if a == "coach-global-run" then FX.coachGlobalRun(); return end
   if a == "coach-dec-add" then FX.coachDecision(tostring(payload.v or ""), tostring(payload.text or ""), "add"); return end
   if a == "coach-dec-skip" then FX.coachDecision(tostring(payload.v or ""), tostring(payload.text or ""), "skip"); return end
   if a == "coach-rerun" then
@@ -24635,6 +24866,38 @@ local HTML = [[
             + '</div>';
         });
       }
+      // 2026-10-03 (mining round 2 unit B5): lessons learned in 2+ repos (v.global, core.coachGlobalView),
+      // proposed for the global ~/.claude/CLAUDE.md -- the same section on every repo's overlay. Each one:
+      // its rule, why, and which repos learned it, with Apply / Skip, Undo once applied, and Run again when
+      // the file changed under it. A click sends only the proposal's own number, like every other here.
+      var g = v.global;
+      if(g && (g.state === "running" || g.state === "queued" || g.state === "lost" || g.verdict === "couldntRun" || (g.proposals || []).length)){
+        var grun = '<button class="ib-btn" data-act="glob-run" onclick="coachAct(event)" title="Compare every repo\'s applied lessons again now, reading ~/.claude/CLAUDE.md as it is (the suggestions waiting here are replaced)">Run again</button>';
+        var gs = (g.state === "running" || g.state === "queued") ? "The coach is comparing the lessons your repos learned…"
+          : (g.state === "lost" ? "Shepherd reloaded while the coach compared your repos' lessons; it tries again tomorrow. " + grun
+          : (g.verdict === "couldntRun" ? "The coach couldn't compare your repos' lessons: " + esc(g.why || "no answer") + " " + grun
+          : (g.summary ? esc(g.summary) + " · " : "") + esc(g.repos || 0) + " repos compared" + (g.doneAt ? " · " + esc(fmtAge(g.doneAt)) + " ago" : "")
+            + (typeof g.costUsd === "number" ? " · $" + esc(g.costUsd.toFixed(2)) : "")));
+        h += '<div class="co-hist-h">Across repos · lessons learned in 2+ repos, for ~/.claude/CLAUDE.md</div>'
+          + '<div class="co-state">' + gs + '</div>';
+        (g.proposals || []).forEach(function(p, i){
+          var pend = p.status === "pending";
+          var from = (p.lessons || []).map(function(l){ return '<li><b>' + esc(l.name) + '</b> · ' + esc(l.section) + ' — ' + esc(l.text) + '</li>'; }).join("");
+          var done = p.status === "applied" ? "✓ In your global CLAUDE.md · backed up "
+              + '<button class="ib-btn" data-act="glob-undo" data-i="' + i + '" onclick="coachAct(event)" title="Put ~/.claude/CLAUDE.md back as it was before this rule, from Shepherd\'s backup">Undo</button>'
+            : (p.status === "undone" ? "↩ Undone · ~/.claude/CLAUDE.md is back as it was" : "Skipped");
+          h += '<div class="ib-row co-row co-glob' + (pend ? '' : ' done') + '">'
+            + '<div class="ib-q">' + esc(p.rule) + '</div>'
+            + '<div class="co-why">' + esc(p.why) + '</div>'
+            + (p.whatsNew ? '<div class="co-whatsnew"><b>New since then:</b> ' + esc(p.whatsNew) + '</div>' : '')
+            + (from ? '<div class="ib-meta">Learned in:</div><ul class="co-ev">' + from + '</ul>' : '')
+            + (p.error ? '<div class="co-err">' + esc(p.error) + '</div>' : '')
+            + (pend ? '<div class="ib-free"><button class="ib-btn" data-act="glob-apply" data-i="' + i + '" onclick="coachAct(event)" title="Add this rule to the coach\'s block in ~/.claude/CLAUDE.md -- backed up first, and refused if the file changed since the coach read it">Apply</button>'
+                    + '<button class="ib-btn" data-act="glob-skip" data-i="' + i + '" onclick="coachAct(event)">Skip</button>' + (p.rerun ? grun : '') + '</div>'
+                : '<div class="co-done">' + done + '</div>')
+            + '</div>';
+        });
+      }
       // 2026-10-03: did it work? The coach's last verdict on the sessions since it was applied
       // (x.check, core.coachApplyChecks): working or still seen with its quotes, or no data -- "yet"
       // while fewer sessions than a verdict needs postdate it. An undone edit has none to show.
@@ -24687,6 +24950,12 @@ local HTML = [[
       if(!t || !v || !v.root) return;
       var act = t.getAttribute("data-act");
       if(act === "rerun"){ send("coach-rerun", v.root); return; }
+      if(act === "glob-run"){ send("coach-global-run", v.root); return; }   // 2026-10-03: Run again across repos
+      if(act === "glob-apply" || act === "glob-skip" || act === "glob-undo"){   // ...and a proposal's own number
+        var gl = (v.global && v.global.proposals) || [], gp = gl[parseInt(t.getAttribute("data-i"), 10)];
+        if(gp && gp.i) send("coach-global-" + act.slice(5), v.root, String(gp.i));
+        return;
+      }
       if(act === "mem-apply" || act === "mem-skip" || act === "mem-undo" || act === "mem-unskip"){   // 2026-10-03: a memory row's number
         var mi = parseInt(t.getAttribute("data-i"), 10), ml = v.memory || [];
         if(mi >= 0 && ml[mi]) send("coach-" + act, v.root, String(mi + 1));

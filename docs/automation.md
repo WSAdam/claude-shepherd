@@ -759,6 +759,50 @@ instructions every session in it reads first. It suggests; nothing changes until
 Its records live in `~/.claude/cc-coach/`, one per repo (with each repo's memory backups), and
 lessons not yet taken in `~/.claude/cc-lesson/`; `uninstall.sh --purge` removes both.
 
+### Across repos
+
+Each repo's coach learns on its own, so a lesson you applied in three repos' `CLAUDE.md` never
+reached your global `~/.claude/CLAUDE.md`, the one every session in every repo reads. The coach now
+compares them.
+
+- **When:** with `coach.enabled` on, at most once a day (counted from the last run's start, a run a
+  reload killed included), and only when 2 or more repos have an applied lesson no run has compared
+  yet. The repos' ledgers are read once the day allows it, then at most every 15 minutes.
+  **Run again** in the overlay compares now, whatever the clock says.
+- **What it reads:** every repo's lessons ledger (`<repo>.lessons.json`): the lessons you applied,
+  with each one's whole text from its applied history (`<repo>.applied.json`). Skipped and undone
+  lessons, and auto-memory changes, aren't included. Each lesson is marked new or not, newest first, about
+  30KB in all. It also reads your global `CLAUDE.md` (so it doesn't propose what that already says)
+  and what you decided about its earlier proposals.
+- **How it runs:** one headless, read-only Sonnet (the coach's runner, at `coach.maxBudgetUsd`,
+  default $1) in its own lane, so no repo's checker or coach waits for it. The model decides which
+  lessons are the same lesson, reworded or not; Shepherd never matches text itself. Shepherd only
+  checks the answer: each group must cite real lessons (by their refs) from 2 or more different repos,
+  and has one rule (one line) and why. It proposes at most 5 groups. A rule you already applied isn't proposed
+  again.
+- **Reviewing:** the proposals wait under **Across repos** in every repo's Coach overlay, and count
+  on the **🧭** chip of each card whose repo learned one. Each shows its rule, why, and the repos
+  and lessons it came from. Nothing changes until you click. **Apply** adds the rule as one bullet
+  to the coach's block in `~/.claude/CLAUDE.md`, between `<!-- shepherd-coach:start … -->` and
+  `<!-- shepherd-coach:end -->`, under `## Lessons learned across repos`. The block is created at the
+  end of the file the first time, and the rest of the file isn't touched. When
+  `~/.claude/CLAUDE.md` is a link, the write goes to its target and the link stays. First, though,
+  the file is copied into `~/.claude/cc-coach/global.claude-backup/` (`~/.claude` isn't a git
+  repo): no backup, no change. Apply is refused, and says why on the row, when:
+  - the file changed since the run read it (Shepherd's own Apply and Undo don't count): it offers **Run again**;
+  - the rule is in the block already;
+  - the block would pass 4KB;
+  - the block's markers are broken (a start with no end, or two blocks);
+  - the link can't be followed.
+
+  **Skip** puts one aside. A pending proposal doesn't outlive the next run, and its lessons count as new again.
+- **Undo:** on an applied rule, puts `~/.claude/CLAUDE.md` back from its backup, but only while
+  the file is exactly what Shepherd wrote. A later Apply or a hand edit refuses it: undo the later
+  rule first, or restore by hand from the backup.
+- **Yours, not shipped:** the block is your own. It is never copied into Shepherd's
+  `methodology/CLAUDE.md`, the copy of the workflow a fresh install gets, and `uninstall.sh` leaves
+  it in place. Its record is `~/.claude/cc-coach/global.json`.
+
 ## A/B compare
 
 Run the same task as 2–4 variants and keep the best one. Right-click a tile → **⚖ A/B

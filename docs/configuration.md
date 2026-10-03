@@ -171,7 +171,7 @@ Everything lives under `~/.claude/`:
 | `cc-bridge/` | The tab bridge's per-window tab lists and command folders |
 | `cc-lease/` | [Worktree leases](fleet.md#worktree-leases): each repo's leased ports and database paths, and (by default) the databases in `db/` |
 | `cc-restart.json` | The [restart snapshot](fleet.md#restart-the-fleet-in-place): every session Shepherd could reopen, and the ones it already did (Shepherd is its only writer) |
-| `cc-coach/` | [The coach](automation.md#the-coach)'s suggestions and its log of merge notes, checker findings and filed lessons, per repo, and `evidence-spend.json` (today's evidence-run spend) |
+| `cc-coach/` | [The coach](automation.md#the-coach)'s suggestions and its log of merge notes, checker findings and filed lessons, per repo, and `evidence-spend.json` (today's evidence-run spend); `global.json` and `global.claude-backup/` for [lessons learned across repos](automation.md#across-repos) |
 | `cc-lesson/` | Lessons filed with `cc-lesson.sh`, until Shepherd moves them into the coach's log |
 | `cc-policy/`, `cc-policy-override/`, `cc-gate-tools/`, `cc-automodel/` | Per-session policy (the resolved rules, and the **Policy** dropdown's choice), gated-tool and auto-model settings |
 | `cc-approved/`, `cc-autopilot/` | What approve-repeats remembers per session, and each session's Autopilot window |

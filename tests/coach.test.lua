@@ -1208,6 +1208,247 @@ do
   check("memory lessons: the prompt shows them with the rest", (PL:match("<lessons>\n(.-)\n</lessons>") or ""):find("memory/stale.md", 1, true) ~= nil)
 end
 
+-- ---- lessons applied in 2+ repos go to the global CLAUDE.md (2026-10-03, mining round 2 unit B5) ----
+-- Each repo's coach learned alone: a lesson Adam applied in three repos' CLAUDE.md never reached the
+-- global ~/.claude/CLAUDE.md every session reads. Now one headless run (its own lane, at most daily,
+-- only when 2+ repos have applied lessons it hasn't considered) groups "the same lesson" across repos
+-- -- the model's call, never fuzzy Lua -- and each group is one rule for a marked, size-capped block in
+-- ~/.claude/CLAUDE.md, applied only on Adam's click, refused if the file changed, with Undo from a backup.
+do
+  check("global: core.coachGlobalLessons exists", type(core.coachGlobalLessons) == "function")
+  local ok = type(core.coachGlobalLessons) == "function" and type(core.coachGlobalDue) == "function"
+    and type(core.coachGlobalPrompt) == "function" and type(core.parseCoachGlobalOutput) == "function"
+    and type(core.coachGlobalApplyDecision) == "function" and type(core.coachGlobalUndoDecision) == "function"
+    and type(core.coachGlobalStart) == "function" and type(core.coachGlobalFinish) == "function"
+    and type(core.parseCoachGlobalRecord) == "function" and type(core.coachGlobalView) == "function"
+    and type(core.coachGlobalPendingFor) == "function"
+  check("global: the pure halves exist (lessons, due, prompt, parser, apply, undo, start, finish, record, view)", ok)
+  if ok then
+  local KA, KB, KC = core.coachFileKey("/r/alpha"), core.coachFileKey("/r/beta"), core.coachFileKey("/r/gamma")
+  local function les(id, verdict, section, text, at, over)
+    local l = { id = id, section = section, textHash = "a1b2c3", verdict = verdict, why = "why " .. id, text = text, at = at, runs = { at } }
+    for k, v in pairs(over or {}) do l[k] = v end
+    return l
+  end
+  local NEVER = "- never run make install from a worktree; it puts unmerged code live"
+  local repos = {
+    { key = KB, name = "beta", lessons = {
+        les("Lb00001", "applied", "Deploying", "- never make install in a worktree", 200),
+        les("Lb00002", "skipped", "Git", "- squash before merge", 210),
+        les("Lb00003", "undone", "Git", "- push after every commit", 220) },
+      history = {} },
+    { key = KA, name = "alpha", lessons = {
+        les("La00001", "applied", "Worktrees", "- never run make install from a w…", 100),
+        les("La00002", "applied", "memory/stale.md", "delete", 110),
+        les("La00003", "applied", "Tests", "- run the whole suite before a merge", 120) },
+      -- the history keeps an applied edit's whole text; the ledger only its first 160 characters
+      history = { { sha = "abc1234", at = 100, section = "Worktrees", old = "", new = NEVER, why = "w", lesson = "La00001" } } },
+    { key = KC, name = "gamma", lessons = { les("Lc00001", "skipped", "Git", "- squash", 300) }, history = {} },
+  }
+  local G = core.coachGlobalLessons(repos, {})
+  local byId = {}
+  for _, l in ipairs(G.list or {}) do byId[l.id] = l end
+  check("global lessons: only the applied CLAUDE.md lessons, from every repo  (" .. #(G.list or {}) .. ")",
+        #(G.list or {}) == 3 and byId.La00001 and byId.La00003 and byId.Lb00001 and true or false)
+  check("global lessons: ...never a skipped or undone one, nor an auto-memory change",
+        not byId.Lb00002 and not byId.Lb00003 and not byId.La00002 and not byId.Lc00001)
+  check("global lessons: an applied edit's whole text comes from the history", byId.La00001 and byId.La00001.text == NEVER)
+  check("global lessons: ...else the ledger's", byId.Lb00001 and byId.Lb00001.text == "- never make install in a worktree")
+  check("global lessons: each repo gets a tag by its key (r1, r2), each lesson a ref the model cites",
+        byId.La00001 and byId.Lb00001 and byId.La00001.ref:match("^r%d/La00001$") ~= nil and byId.Lb00001.ref:match("^r%d/Lb00001$") ~= nil
+        and byId.La00001.ref:sub(1, 2) ~= byId.Lb00001.ref:sub(1, 2) and byId.La00001.name == "alpha" and byId.La00001.key == KA)
+  check("global lessons: 2 repos have applied lessons, both new at first  (" .. tostring(G.repos) .. ", " .. tostring(G.newRepos) .. ")",
+        G.repos == 2 and G.newRepos == 2 and byId.La00001 and byId.La00001.new == true)
+  local seenA = {}
+  for _, l in ipairs(G.list or {}) do if l.key == KA then seenA[#seenA + 1] = l.seen end end
+  local G2 = core.coachGlobalLessons(repos, seenA)
+  check("global lessons: a considered lesson isn't new; only beta has new ones  (" .. tostring(G2.newRepos) .. ")",
+        G2.newRepos == 1 and G2.repos == 2)
+  local repos3 = { repos[1], repos[2], { key = KC, name = "gamma", lessons = { les("Lc00009", "applied", "Git", "- squash", 300) }, history = {} } }
+  check("global lessons: a lesson applied again with new text is new again",
+        core.coachGlobalLessons({ { key = KA, name = "alpha", lessons = { les("La00003", "applied", "Tests", "x", 1, { textHash = "ffff01" }) }, history = {} } },
+          seenA).newRepos == 1)
+
+  -- due: at most daily, only when 2+ repos have applied lessons not yet considered; enabled like the coach
+  local due = core.coachGlobalDue
+  local NOW = 1800000000
+  local asked = 0
+  local function lazy(g) return function() asked = asked + 1; return g end end
+  check("global due: off without coach.enabled", not due(nil, { now = NOW, enabled = false, input = G }))
+  check("global due: not while one runs", not due(nil, { now = NOW, enabled = true, running = true, input = G }))
+  local d1, w1 = due(nil, { now = NOW, enabled = true, input = lazy(G) })
+  check("global due: a first run, with 2 repos' lessons new  (" .. tostring(w1) .. ")", d1 == true)
+  asked = 0
+  local d2, w2 = due({ at = NOW - 3600, state = "done", verdict = "none" }, { now = NOW, enabled = true, input = lazy(G) })
+  check("global due: not twice in a day  (" .. tostring(w2) .. ")", d2 == false)
+  check("global due: ...and the repos' ledgers aren't even read then", asked == 0)
+  check("global due: a day later, again", due({ at = NOW - 86401, state = "done", verdict = "none" }, { now = NOW, enabled = true, input = G }) == true)
+  check("global due: a lost run waits a day from its start too", due({ at = NOW - 60, state = "lost" }, { now = NOW, enabled = true, input = G }) == false)
+  local d3, w3 = due({ at = NOW - 86401 }, { now = NOW, enabled = true, input = G2 })
+  check("global due: not when only one repo has new lessons  (" .. tostring(w3) .. ")", d3 == false)
+
+  -- the prompt: every applied lesson by repo, marked new or not, the global CLAUDE.md, the rules
+  local GMD = "# Global\n\n## Git\n\n- commit often\n"
+  local P = core.coachGlobalPrompt(G, GMD, {})
+  check("global prompt: each lesson by its ref, repo, section and text",
+        P:find(byId.La00001.ref, 1, true) ~= nil and P:find(NEVER, 1, true) ~= nil and P:find("alpha", 1, true) ~= nil
+        and P:find("Worktrees", 1, true) ~= nil and P:find("- never make install in a worktree", 1, true) ~= nil)
+  check("global prompt: marks the lessons not considered before", P:find("(new)", 1, true) ~= nil)
+  check("global prompt: carries the global CLAUDE.md", P:find("<global_claude_md>\n" .. GMD, 1, true) ~= nil)
+  check("global prompt: asks for groups of lessons from 2+ different repos, as JSON",
+        P:find('"groups"', 1, true) ~= nil and P:find('"lessons"', 1, true) ~= nil and P:find('"rule"', 1, true) ~= nil
+        and P:lower():find("two or more different repos", 1, true) ~= nil)
+  check("global prompt: the model judges the match (reworded or not)", P:lower():find("reworded or not", 1, true) ~= nil)
+  local PD = core.coachGlobalPrompt(G, GMD, { decided = { { rule = "Run the whole suite before a merge", status = "skipped", reason = nil },
+                                                          { rule = "Never git push", status = "applied" } } })
+  check("global prompt: <decided> lists what Adam applied or skipped before",
+        (PD:match("<decided>\n(.-)\n</decided>") or ""):find("Never git push", 1, true) ~= nil
+        and (PD:match("<decided>\n(.-)\n</decided>") or ""):find("skipped", 1, true) ~= nil)
+  local big = {}
+  for i = 1, 400 do big[i] = les(string.format("L%06x", i), "applied", "S", string.rep("x", 500) .. i, i) end
+  local GB = core.coachGlobalLessons({ { key = KA, name = "alpha", lessons = big, history = {} }, repos[1] }, {})
+  local PB = core.coachGlobalPrompt(GB, GMD, {})
+  check("global prompt: the lessons are capped  (" .. #PB .. " bytes)", #PB < core.COACH_GLOBAL.inputBytes + 8000)
+
+  -- the parser: a group needs real lessons from 2+ repos; Lua checks the citations, the model the match
+  local refA, refA3, refB = byId.La00001.ref, byId.La00003.ref, byId.Lb00001.ref
+  local function grp(lessons, over)
+    local gx = { lessons = lessons, rule = "Never run make install from a worktree", why = "It deployed unmerged code in two repos." }
+    for k, v in pairs(over or {}) do gx[k] = v end
+    return gx
+  end
+  local ans = { summary = "One lesson twice.", groups = {
+    grp({ refA, refB }, { rule = "- Never run make install from a worktree" }),   -- a leading "- " goes
+    grp({ refA, refA3 }),                                                         -- one repo only
+    grp({ refA, "r9/L999999" }),                                                  -- a made-up ref
+    grp({ refA, refB }, { rule = "" }),                                           -- no rule
+    grp({ refA, refB }, { why = "" }),                                            -- no why
+    grp({ refA, refB }, { rule = string.rep("y", core.COACH_GLOBAL.ruleChars + 1) }),   -- too long
+    grp({ refA, refB, refB }, { rule = "Never make install outside main", whatsNew = "beta learned it too" }),
+  } }
+  local GP = core.parseCoachGlobalOutput(envelope("Compared.\n" .. json.encode(ans)), "", G)
+  check("global parser: two good groups, in order  (" .. #(GP.proposals or {}) .. ")",
+        GP.verdict == "proposals" and #(GP.proposals or {}) == 2)
+  local p1 = (GP.proposals or {})[1] or {}
+  check("global parser: ...its rule without the leading dash", p1.rule == "Never run make install from a worktree")
+  check("global parser: ...each lesson resolved from the input, never the model's words",
+        type(p1.lessons) == "table" and #p1.lessons == 2 and p1.lessons[1].key ~= nil and p1.lessons[1].name ~= nil
+        and (p1.lessons[1].text == NEVER or p1.lessons[2].text == NEVER))
+  check("global parser: ...a lesson cited twice counts once", #(((GP.proposals or {})[2] or {}).lessons or {}) == 2
+        and ((GP.proposals or {})[2] or {}).whatsNew == "beta learned it too")
+  check("global parser: ...pending, with the cost", p1.status == "pending" and math.abs((GP.costUsd or 0) - 0.21) < 1e-9)
+  local NP = core.parseCoachGlobalOutput(envelope(json.encode({ summary = "none", groups = {} })), "", G)
+  check("global parser: no groups is an answer: none", NP.verdict == "none" and #NP.proposals == 0)
+  local BP = core.parseCoachGlobalOutput(envelope(json.encode({ summary = "s", groups = { grp({ refA, refA3 }) } })), "", G)
+  check("global parser: only groups from one repo: couldn't run, saying why", BP.verdict == "couldntRun" and type(BP.why) == "string")
+  check("global parser: no JSON: couldn't run", core.parseCoachGlobalOutput(envelope("I looked."), "", G).verdict == "couldntRun")
+  local MP = { summary = "many", groups = {} }
+  for i = 1, core.COACH_GLOBAL.maxProposals + 3 do MP.groups[i] = grp({ refA, refB }, { rule = "rule " .. i }) end
+  check("global parser: at most maxProposals", #core.parseCoachGlobalOutput(envelope(json.encode(MP)), "", G).proposals == core.COACH_GLOBAL.maxProposals)
+
+  -- Apply: a marked block at the end of ~/.claude/CLAUDE.md, created when absent; the rest untouched
+  local apply = core.coachGlobalApplyDecision
+  local A1 = apply(GMD, core.coachHash(GMD), p1)
+  local S, E = core.COACH_GLOBAL_START, core.COACH_GLOBAL_END
+  check("global apply: the markers are Shepherd's coach's own, never the installer's",
+        type(S) == "string" and S:find("shepherd-coach:start", 1, true) ~= nil and E == "<!-- shepherd-coach:end -->"
+        and not S:find("methodology", 1, true))
+  check("global apply: no block yet: one is created at the end, the file before it byte for byte",
+        A1.ok == true and A1.created == true and A1.text:sub(1, #GMD) == GMD and A1.text:sub(#GMD + 1, #GMD + 1) == "\n"
+        and A1.text:find(S, 1, true) ~= nil and A1.text:find("\n- Never run make install from a worktree\n" .. E .. "\n", 1, true) ~= nil
+        and A1.text:sub(-#E - 1) == E .. "\n")
+  check("global apply: ...with its hash for Undo", A1.afterHash == core.coachHash(A1.text))
+  local A2 = apply(A1.text, A1.afterHash, (GP.proposals or {})[2] or {})
+  check("global apply: a second rule goes at the end of the block, the first kept",
+        A2.ok == true and not A2.created and A2.text:find("- Never run make install from a worktree\n- Never make install outside main\n" .. E, 1, true) ~= nil
+        and select(2, A2.text:gsub("shepherd%-coach:start", "")) == 1)
+  check("global apply: refused when the file changed since the run read it",
+        apply(GMD .. "- a hand edit\n", core.coachHash(GMD), p1).error == "changed")
+  check("global apply: refused when the rule is in the block already", apply(A1.text, A1.afterHash, p1).error == "exists")
+  local fat = { rule = string.rep("z", core.COACH_GLOBAL.ruleChars - 10) }
+  local cur, okFull = A1.text, nil
+  for _ = 1, 20 do
+    local r = apply(cur, core.coachHash(cur), { rule = fat.rule .. tostring(math.random(1e9)) })
+    if not r.ok then okFull = r.error; break end
+    cur = r.text
+  end
+  check("global apply: the block is size-capped  (" .. tostring(okFull) .. ")", okFull == "full")
+  local noNl = "# Global"
+  local A3 = apply(noNl, core.coachHash(noNl), p1)
+  check("global apply: a file without a last newline gets one before the block", A3.ok == true and A3.text:sub(1, #noNl + 2) == noNl .. "\n\n")
+  local A4 = apply(nil, core.coachHash(nil), p1)
+  check("global apply: no file yet: the block is the file", A4.ok == true and A4.created == true and A4.newFile == true and A4.text:sub(1, #S) == S)
+  check("global apply: ...a file that was there is no new file", A1.newFile == nil)
+  check("global apply: a start marker with no end is never guessed at",
+        apply(GMD .. S .. "\n- x\n", core.coachHash(GMD .. S .. "\n- x\n"), p1).error == "bad-block")
+  local two = A1.text .. S .. "\n" .. E .. "\n"
+  check("global apply: ...nor two blocks", apply(two, core.coachHash(two), p1).error == "bad-block")
+  local mid = "# G\n\n" .. S .. "\n## Lessons learned across repos\n\n- old rule\n" .. E .. "\n\n## After\n\n- kept\n"
+  local A5 = apply(mid, core.coachHash(mid), p1)
+  check("global apply: a block that isn't last is edited where it is, the text after it kept",
+        A5.ok == true and A5.text == "# G\n\n" .. S .. "\n## Lessons learned across repos\n\n- old rule\n- Never run make install from a worktree\n" .. E .. "\n\n## After\n\n- kept\n")
+
+  -- Undo: from the backup, only over what Shepherd wrote
+  local undo = core.coachGlobalUndoDecision
+  local applied = { status = "applied", afterHash = A1.afterHash, backup = "1-1-CLAUDE.md" }
+  local U1 = undo(applied, { backup = GMD, current = A1.text })
+  check("global undo: the file goes back to its backup", U1.ok == true and U1.text == GMD)
+  check("global undo: refused when the file changed since Shepherd wrote it", undo(applied, { backup = GMD, current = A1.text .. "x\n" }).error == "undo-conflict")
+  check("global undo: refused without its backup", undo(applied, { backup = nil, current = A1.text }).error == "undo-gone")
+  check("global undo: a file the Apply created is removed again", (function()
+    local r = undo({ status = "applied", afterHash = A4.afterHash, newFile = true }, { current = A4.text })
+    return r.ok == true and r.delete == true end)())
+  check("global undo: nothing applied, nothing to undo", undo({ status = "pending" }, { backup = GMD, current = GMD }).ok ~= true)
+
+  -- start and finish: pending proposals don't outlive the next run, and their lessons come back as new
+  local R0 = core.coachGlobalStart(nil, NOW, "auto")
+  check("global start: a first run is queued, stamped now", R0.state == "queued" and R0.at == NOW and R0.trigger == "auto" and #R0.proposals == 0)
+  local R1 = core.coachGlobalFinish(R0, GP, G, NOW + 60)
+  check("global finish: the proposals land pending, the run done",
+        R1.state == "done" and R1.verdict == "proposals" and #R1.proposals == 2 and R1.proposals[1].status == "pending" and R1.lastRunAt == NOW + 60)
+  check("global finish: every lesson it was shown is considered now  (" .. #(R1.considered or {}) .. ")", #(R1.considered or {}) == #G.list)
+  check("global finish: so the same lessons aren't new any more", core.coachGlobalLessons(repos, R1.considered).newRepos == 0)
+  R1.proposals[1].status = "applied"
+  local R2 = core.coachGlobalStart(R1, NOW + 86500, "click")
+  check("global start: the next run drops the pending proposal, keeps the applied one",
+        #R2.proposals == 1 and R2.proposals[1].status == "applied" and R2.trigger == "click")
+  local G3 = core.coachGlobalLessons(repos, R2.considered)
+  check("global start: ...and the dropped one's lessons are new again  (" .. tostring(G3.newRepos) .. ")", G3.newRepos == 2)
+  local R3 = core.coachGlobalFinish(core.coachGlobalStart(R2, NOW + 90000, "auto"),
+    { verdict = "proposals", proposals = { { rule = R1.proposals[1].rule, why = "w", lessons = p1.lessons, status = "pending" } } }, G, NOW + 90060)
+  check("global finish: a rule already applied isn't proposed again", #R3.proposals == 1 and R3.verdict == "none")
+  local RC = core.coachGlobalFinish(core.coachGlobalStart(R2, NOW, "auto"), { verdict = "couldntRun", why = "no answer", proposals = {} }, G, NOW)
+  check("global finish: a run that couldn't run considers nothing", #(RC.considered or {}) == #(R2.considered or {}) and RC.verdict == "couldntRun")
+
+  -- the record, read back (Shepherd is its only writer); a run a reload killed reads lost
+  local back = core.parseCoachGlobalRecord(json.encode(R1))
+  check("global record: read back with its proposals and what it considered",
+        back and back.verdict == "proposals" and #back.proposals == 2 and #back.considered == #R1.considered
+        and back.proposals[1].lessons[1].key ~= nil)
+  local lost = core.parseCoachGlobalRecord(json.encode({ v = 1, state = "running", at = NOW, proposals = {}, considered = {} }))
+  check("global record: a run Shepherd lost reads lost, never a verdict", lost and lost.state == "lost" and lost.verdict == nil)
+  check("global record: junk reads nil", core.parseCoachGlobalRecord("{") == nil and core.parseCoachGlobalRecord(nil) == nil)
+
+  -- the overlay, and the chip on the cards whose repos learned it
+  local V = core.coachGlobalView(R1, {})
+  check("global view: each proposal numbered, with its rule, why, repos and status",
+        V and #V.proposals == 2 and V.proposals[2].i == 2 and V.proposals[1].rule ~= nil and V.proposals[1].lessons[1].name ~= nil
+        and V.pending == 1)
+  R1.proposals[2].error, R1.proposals[2].errorCode = "x", "changed"
+  check("global view: a proposal the file changed under offers the rerun", core.coachGlobalView(R1, {}).proposals[2].rerun == true)
+  check("global view: a run in flight reads running", core.coachGlobalView(R1, { busy = true }).state == "running")
+  local PF = core.coachGlobalPendingFor(R1)
+  check("global chip: the pending proposal counts on alpha's and beta's cards, not gamma's",
+        PF[KA] == 1 and PF[KB] == 1 and PF[KC] == nil)
+  check("global chip: a card's chip counts it", (core.coachTileInfo(nil, { global = 1 }) or {}).pending == 1
+        and (core.coachTileInfo({ edits = {}, decisions = {} }, { global = 2 }) or {}).pending == 2
+        and core.coachTileInfo(nil, {}) == nil)
+  end
+
+  -- never mirrored: the block is Adam's, in his own file; methodology/CLAUDE.md ships to coworkers
+  check("global: methodology/CLAUDE.md never carries the coach's block", not (read(ROOT .. "methodology/CLAUDE.md") or ""):find("shepherd-coach", 1, true))
+end
+
 -- ---- the panel half: the real claude-dashboard.lua under a stubbed hs ----
 local REPO = T .. "/repo"
 local COMMON = REPO .. "/.git"
@@ -1277,6 +1518,12 @@ local hs = {
       return t
     end,
     mkdir = function(path) os.execute("mkdir -p " .. q(path) .. " 2>/dev/null"); return true end,
+    -- 2026-10-03: like the real one, links resolved; nil when the path isn't there
+    pathToAbsolute = function(path)
+      local p = io.popen("realpath " .. q(path) .. " 2>/dev/null")
+      local l = p and p:read("*l"); if p then p:close() end
+      return (l and l ~= "") and l or nil
+    end,
   },
   settings = { get = function(k) return settingsStore[k] end, set = function(k, v) settingsStore[k] = v end },
   screen = { mainScreen = function() return { frame = function() return frame end, fullFrame = function() return frame end } end },
@@ -2035,6 +2282,151 @@ check("memory (repo): the overlay's memory clicks reach FX with the row's number
       and DSRC:find('if a == "coach-mem-skip" then FX.coachMemorySkip(tostring(payload.v or ""), tostring(payload.text or "")); return end', 1, true) ~= nil
       and DSRC:find('if a == "coach-mem-unskip" then FX.coachUnskip(tostring(payload.v or ""), tostring(payload.text or ""), "memory"); return end', 1, true) ~= nil
       and DSRC:find('if a == "coach-mem-undo" then FX.coachMemoryUndo(tostring(payload.v or ""), tostring(payload.text or "")); return end', 1, true) ~= nil)
+end)()
+
+-- 2026-10-03 (mining round 2 unit B5): lessons applied in 2+ repos, on real files under a temp HOME.
+-- ~/.claude/CLAUDE.md is a link here (to a dotfiles copy, as many people keep it): the write goes to its
+-- target and the link stays. One grouping run in its own lane, at most daily; Apply only on a click,
+-- refused once the file changed, backed up first outside any repo; Undo from that backup.
+;(function()
+if type(fx.coachGlobalStep) ~= "function" or type(fx.coachGlobalApply) ~= "function" then
+  check("global (panel): FX.coachGlobalStep and FX.coachGlobalApply exist", false); return
+end
+local GDIR = T .. "/dotfiles"
+os.execute("mkdir -p " .. q(GDIR))
+local GTEXT = "# Global\n\n## Git\n\n- commit often\n"
+write(GDIR .. "/CLAUDE.md", GTEXT)
+os.remove(T .. "/.claude/CLAUDE.md")
+sh("ln -s " .. q(GDIR .. "/CLAUDE.md") .. " " .. q(T .. "/.claude/CLAUDE.md"))
+check("global (panel): the global CLAUDE.md is HOME's", fx.GLOBAL_CLAUDE_MD == T .. "/.claude/CLAUDE.md")
+-- three repos the coach knows (their records name them): alpha, beta and this one, each with an
+-- applied lesson; gamma has only a skipped one
+local function L(id, text, at, th)
+  return { id = id, section = "Worktrees", textHash = th or "a1b2c3", verdict = "applied", why = "w", text = text, at = at, runs = { at } }
+end
+local function seedRepo(root, name, lessons)
+  local k = core.coachFileKey(root)
+  write(CDIR .. "/" .. k .. ".json", json.encode({ v = 1, root = root, name = name, repo = root .. "/.git", state = "done", verdict = "none",
+                                                   at = 1, edits = {}, decisions = {} }))
+  write(CDIR .. "/" .. k .. ".lessons.json", json.encode(lessons))
+end
+local LA = { L("La1a1a1", "- never run make install from a worktree (alpha)", RNOW - 500) }
+local LB = { L("Lb1b1b1", "- make install only from main (beta)", RNOW - 400), L("Lb2b2b2", "- run make lint before make test (beta)", RNOW - 300) }
+seedRepo(T .. "/alpha", "alpha", LA)
+seedRepo(T .. "/beta", "beta", LB)
+seedRepo(T .. "/gamma", "gamma", { { id = "Lc1c1c1", section = "Git", textHash = "c1c1c1", verdict = "skipped", why = "w", text = "- skip me", at = 1, runs = {} } })
+write(CDIR .. "/" .. core.coachFileKey(REPO) .. ".lessons.json", json.encode({ L("Ld1d1d1", "- never make install off main (repo)", RNOW - 450) }))
+local function gruns() return tasksWhere(function(t) return tostring(t.args[3] or ""):find("cd '" .. CDIR .. "' ", 1, true) end) end
+local function gstep(cfg) fx._coach.globalNext = 0; return quiet(function() fx.coachGlobalStep(cfg or CFG) end) end
+fx._coach.global = nil
+fx._headless["coach|global"] = nil
+gstep({ coach = { enabled = false } })
+check("global (panel): no run with the coach off", #gruns() == 0)
+gstep()
+local GR = gruns()
+check("global (panel): with 2+ repos' applied lessons new, one grouping run starts  (" .. #GR .. ")", #GR == 1)
+local gh = fx._headless["coach|global"]
+check("global (panel): ...in its own lane, never a repo's", gh ~= nil and gh.lane == "coach|global")
+local gcmd = tostring((GR[1] or { args = {} }).args[3] or "")
+check("global (panel): ...a read-only Sonnet at a $1 cap",
+      gcmd:find("claude -p --model sonnet", 1, true) ~= nil and gcmd:find("--max-budget-usd 1 ", 1, true) ~= nil)
+local gpf = gcmd:match("< '([^']+)' >")
+local gprompt = gpf and read(gpf) or ""
+check("global (panel): its prompt carries every repo's applied lessons and the global CLAUDE.md, read through its link",
+      gprompt:find("never run make install from a worktree (alpha)", 1, true) ~= nil and gprompt:find("make install only from main (beta)", 1, true) ~= nil
+      and gprompt:find("never make install off main (repo)", 1, true) ~= nil and gprompt:find("- commit often", 1, true) ~= nil
+      and not gprompt:find("skip me", 1, true))
+gstep()
+check("global (panel): not a second one while it runs", #gruns() == 1)
+local rA, rR = gprompt:match("(r%d+/La1a1a1)"), gprompt:match("(r%d+/Ld1d1d1)")
+local rB1, rB2 = gprompt:match("(r%d+/Lb1b1b1)"), gprompt:match("(r%d+/Lb2b2b2)")
+answerClaude(GR[1] or { args = {}, cb = function() end }, { summary = "Two lessons learned twice.", groups = {
+  { lessons = { rA, rB1, rR }, rule = "Never run make install from a worktree", why = "Three repos deployed unmerged code." },
+  { lessons = { rB2, rA }, rule = "Run make lint before make test", why = "Lint failed late." },
+  { lessons = { rB1, rB2 }, rule = "beta only", why = "one repo" } } })
+local grec = fx.coachGlobalRecord() or { proposals = {} }
+check("global (panel): the answer lands: two proposals, pending -- a group from one repo is dropped  (" .. #(grec.proposals or {}) .. ")",
+      grec.verdict == "proposals" and #(grec.proposals or {}) == 2 and grec.proposals[1].status == "pending")
+check("global (panel): ...on disk, in Shepherd's own folder", (core.parseCoachGlobalRecord(read(CDIR .. "/global.json")) or {}).verdict == "proposals")
+-- the chip on a card whose repo's lesson is in one
+fx._coach.scans, fx._coach.waiting = {}, {}
+fx._headless["coach|" .. REPO] = nil
+local base = (core.coachTileInfo(fx.coachRecord(REPO)) or { pending = 0 }).pending
+stamp()
+quiet(function() fx.stepCoach(list, { coach = { enabled = false } }) end)
+check("global chip (panel): the card of a repo whose lesson is in a proposal counts it  (" .. tostring(c1.coach and c1.coach.pending) .. ")",
+      c1.coach ~= nil and c1.coach.pending == base + 1)
+
+-- Apply
+local okG
+quiet(function() okG = fx.coachGlobalApply("1") end)
+local after1 = read(GDIR .. "/CLAUDE.md") or ""
+check("global apply (panel): Apply writes the rule into a marked block at the end of the global CLAUDE.md",
+      okG == true and after1:sub(1, #GTEXT) == GTEXT and after1:find(core.COACH_GLOBAL_START, 1, true) ~= nil
+      and after1:find("- Never run make install from a worktree\n" .. core.COACH_GLOBAL_END, 1, true) ~= nil
+      and grec.proposals[1].status == "applied")
+check("global apply (panel): ...through the link: the link is still a link", hs.fs.symlinkAttributes(T .. "/.claude/CLAUDE.md", "mode") == "link")
+local BK = CDIR .. "/global.claude-backup"
+local bname = grec.proposals[1].backup
+check("global apply (panel): ...backed up first, in Shepherd's own folder", type(bname) == "string" and read(BK .. "/" .. tostring(bname)) == GTEXT)
+check("global apply (panel): ...and never mirrored into methodology/CLAUDE.md", not (read(ROOT .. "methodology/CLAUDE.md") or ""):find("shepherd-coach", 1, true))
+-- a hand edit since: the second is refused, the file untouched
+write(GDIR .. "/CLAUDE.md", after1 .. "- a hand edit\n")
+quiet(function() okG = fx.coachGlobalApply("2") end)
+check("global apply (panel): refused once the file changed since the run read it",
+      okG == false and read(GDIR .. "/CLAUDE.md") == after1 .. "- a hand edit\n" and grec.proposals[2].errorCode == "changed"
+      and grec.proposals[2].status == "pending" and core.coachGlobalView(grec, {}).proposals[2].rerun == true)
+-- Undo: refused over the hand edit, then from the backup
+quiet(function() okG = fx.coachGlobalUndo("1") end)
+check("global undo (panel): refused while the file isn't what Shepherd wrote",
+      okG == false and grec.proposals[1].status == "applied" and read(GDIR .. "/CLAUDE.md") == after1 .. "- a hand edit\n")
+write(GDIR .. "/CLAUDE.md", after1)
+quiet(function() okG = fx.coachGlobalUndo("1") end)
+check("global undo (panel): Undo puts the file back from its backup", okG == true and read(GDIR .. "/CLAUDE.md") == GTEXT and grec.proposals[1].status == "undone")
+check("global undo (panel): ...still through the link", hs.fs.symlinkAttributes(T .. "/.claude/CLAUDE.md", "mode") == "link")
+quiet(function() okG = fx.coachGlobalSkip("2") end)
+check("global skip (panel): Skip puts one aside", okG == true and grec.proposals[2].status == "skipped")
+
+-- the daily clock, and new lessons
+local nG = #gruns()
+gstep()
+check("global (panel): no new run the same day", #gruns() == nG)
+OFFSET = OFFSET + 25 * 3600
+gstep()
+check("global (panel): a day later, with nothing new in 2+ repos: no run", #gruns() == nG)
+LA[#LA + 1] = L("La3a3a3", "- a new alpha lesson", RNOW)
+seedRepo(T .. "/alpha", "alpha", LA)
+gstep()
+check("global (panel): ...one repo's new lesson isn't enough", #gruns() == nG)
+LB[#LB + 1] = L("Lb3b3b3", "- a new beta lesson", RNOW)
+seedRepo(T .. "/beta", "beta", LB)
+gstep()
+check("global (panel): two repos' new lessons start the next run", #gruns() == nG + 1)
+local p2t = gruns()[nG + 1] or { args = {}, cb = function() end }
+local p2 = read(tostring(p2t.args[3] or ""):match("< '([^']+)' >") or "") or ""
+check("global (panel): ...its prompt says what Adam decided before",
+      (p2:match("<decided>\n(.-)\n</decided>") or ""):find("Never run make install from a worktree", 1, true) ~= nil)
+answerClaude(p2t, { summary = "Nothing new across repos.", groups = {} })
+check("global (panel): ...and nothing to group is an answer", (fx.coachGlobalRecord() or {}).verdict == "none")
+nG = #gruns()
+quiet(function() fx.coachGlobalRun() end)
+check("global (panel): Run again starts one now, whatever the clock says", #gruns() == nG + 1)
+answerClaude(gruns()[nG + 1] or { args = {}, cb = function() end }, { summary = "Still nothing.", groups = {} })
+
+-- the overlay, and the clicks that reach it
+jsCalls = {}
+quiet(function() fx.pushCoach(REPO) end)
+local sentG = false
+for _, js in ipairs(jsCalls) do
+  if js:find("ccCoach(", 1, true) and js:find('"global"', 1, true) and js:find("Run make lint before make test", 1, true) then sentG = true end
+end
+check("global (panel): the overlay is sent the Across repos section", sentG)
+local DSRC = read(ROOT .. "claude-dashboard.lua") or ""
+check("global (panel): the overlay's clicks reach FX with the proposal's number",
+      DSRC:find('if a == "coach-global-apply" then FX.coachGlobalApply(tostring(payload.text or "")); return end', 1, true) ~= nil
+      and DSRC:find('if a == "coach-global-skip" then FX.coachGlobalSkip(tostring(payload.text or "")); return end', 1, true) ~= nil
+      and DSRC:find('if a == "coach-global-undo" then FX.coachGlobalUndo(tostring(payload.text or "")); return end', 1, true) ~= nil
+      and DSRC:find('if a == "coach-global-run" then FX.coachGlobalRun(); return end', 1, true) ~= nil)
 end)()
 
 finish()

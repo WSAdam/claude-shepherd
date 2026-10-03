@@ -419,5 +419,53 @@ lib.coachAct(btn({ "data-act": "mem-apply", "data-i": 9 }));
 eq("memory: a row that isn't there sends nothing", sent.length, 0);
 lib.setView(null);
 
+// ---- lessons applied in 2+ repos (2026-10-03, mining round 2 unit B5) ----
+// One run groups the same lesson across repos and proposes each group as one rule for a marked block in
+// the global ~/.claude/CLAUDE.md. The overlay shows them under "Across repos" on every repo's view: the
+// rule, why, which repos learned it, with Apply / Skip, Undo once applied, and Run again. The model wrote
+// the rule and the lessons' texts came from transcripts: all escaped. A click sends only the proposal's
+// own number (core.coachGlobalView's i) -- never text read out of the markup.
+const globV = { root: "/r/repo", state: "done", verdict: "none", sessions: 1, edits: [], decisions: [],
+  global: { state: "done", verdict: "proposals", summary: "Two lessons" + EVIL, doneAt: 900, costUsd: 0.4, pending: 1,
+    proposals: [
+      { i: 1, rule: "Never make install from a worktree" + EVIL, why: "deployed unmerged" + EVIL, status: "pending",
+        whatsNew: "beta too" + EVIL,
+        lessons: [{ name: "alpha" + EVIL, section: "Worktrees", text: "- no install" + EVIL }, { name: "beta", section: "Deploy", text: "- main only" }] },
+      { i: 2, rule: "Lint first", why: "w", status: "pending", error: "~/.claude/CLAUDE.md changed" + EVIL, code: "changed", rerun: true,
+        lessons: [{ name: "alpha", section: "Tests", text: "x" }, { name: "beta", section: "Tests", text: "y" }] },
+      { i: 3, rule: "Applied rule", why: "w", status: "applied", lessons: [{ name: "a", section: "s", text: "t" }, { name: "b", section: "s", text: "t" }] },
+      { i: 4, rule: "Skipped rule", why: "w", status: "skipped", lessons: [] },
+      { i: 5, rule: "Undone rule", why: "w", status: "undone", lessons: [] },
+    ] } };
+const gh = lib.coachRowsHtml(globV);
+const globRows = gh.split('<div class="ib-row co-row co-glob').slice(1);
+eq("global: an Across repos section", /Across repos/.test(gh), true);
+eq("global: one row per proposal", globRows.length, 5);
+eq("global: every field is escaped", gh.indexOf("<img") < 0 && gh.indexOf("&lt;img") >= 0, true);
+eq("global: a pending one shows its rule, why, the repos that learned it, and Apply and Skip",
+  /Never make install from a worktree/.test(globRows[0] || "") && /deployed unmerged/.test(globRows[0] || "") && /alpha/.test(globRows[0] || "")
+  && /beta/.test(globRows[0] || "") && /data-act="glob-apply" data-i="0"/.test(globRows[0] || "") && /data-act="glob-skip" data-i="0"/.test(globRows[0] || ""), true);
+eq("global: ...says it goes into the global CLAUDE.md", /~\/\.claude\/CLAUDE\.md/.test(globRows[0] || ""), true);
+eq("global: ...and what's new", /beta too/.test(globRows[0] || ""), true);
+eq("global: a refused one says why, with Run again", /changed/.test(globRows[1] || "") && /data-act="glob-run"/.test(globRows[1] || ""), true);
+eq("global: an applied one offers Undo, not Apply", /data-act="glob-undo" data-i="2"/.test(globRows[2] || "") && !/glob-apply/.test(globRows[2] || ""), true);
+eq("global: a skipped one says so, with nothing to apply", /Skipped/.test(globRows[3] || "") && !/glob-apply/.test(globRows[3] || ""), true);
+eq("global: an undone one says so, with nothing to click", /Undone/.test(globRows[4] || "") && !/data-act=/.test(globRows[4] || ""), true);
+eq("global: no global view, no section", /Across repos/.test(lib.coachRowsHtml({ root: "/r", state: "done", verdict: "none", sessions: 1, edits: [], decisions: [] })), false);
+eq("global: a run in flight says so", /comparing/i.test(lib.coachRowsHtml({ root: "/r", state: "done", verdict: "none", sessions: 1, edits: [], decisions: [],
+  global: { state: "running", proposals: [] } })), true);
+lib.setView(globV);
+lib.coachAct(btn({ "data-act": "glob-apply", "data-i": 0 }));
+eq("global: Apply sends the proposal's own number", JSON.stringify(sent.pop()), JSON.stringify(["coach-global-apply", "/r/repo", "1"]));
+lib.coachAct(btn({ "data-act": "glob-skip", "data-i": 1 }));
+eq("global: Skip likewise", JSON.stringify(sent.pop()), JSON.stringify(["coach-global-skip", "/r/repo", "2"]));
+lib.coachAct(btn({ "data-act": "glob-undo", "data-i": 2 }));
+eq("global: Undo likewise", JSON.stringify(sent.pop()), JSON.stringify(["coach-global-undo", "/r/repo", "3"]));
+lib.coachAct(btn({ "data-act": "glob-run" }));
+eq("global: Run again sends no text at all", JSON.stringify(sent.pop()), JSON.stringify(["coach-global-run", "/r/repo", undefined]));
+lib.coachAct(btn({ "data-act": "glob-apply", "data-i": 9 }));
+eq("global: a row that isn't there sends nothing", sent.length, 0);
+lib.setView(null);
+
 console.log("\n-- coach-view.test.js: " + run + " run, " + failed + " failed --");
 process.exit(failed === 0 ? 0 : 1);
