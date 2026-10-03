@@ -7864,16 +7864,21 @@ function FX.coachGlobalBusy() return FX._headless[core.COACH_GLOBAL.lane] ~= nil
 
 -- Every repo the coach keeps a lessons ledger for: { key, name (from its record), lessons, history }.
 function FX.coachGlobalRepos()
-  local out = {}
+  -- 2026-10-03: a repo with a lessons ledger OR an applied history. Edits applied before the ledger
+  -- existed live only in <key>.applied.json; they are folded into its lessons here, in memory
+  -- (core.coachLessonFold, idempotent), so the repo counts at once -- its ledger file is untouched.
+  local out, keys, order = {}, {}, {}
   for _, fn in ipairs(FX.readDir(FX.COACH_DIR)) do
-    local key = fn:match("^(.+)%.lessons%.json$")
-    if key then
-      local base = FX.COACH_DIR .. "/" .. key
-      local rec = core.parseCoachRecord(FX.readFile(base .. ".json"))
-      out[#out + 1] = { key = key, name = rec and (rec.name or rec.root:match("([^/]+)$")) or nil,
-                        lessons = core.parseCoachLessons(FX.readFile(base .. ".lessons.json")),
-                        history = core.parseCoachHistory(FX.readFile(base .. ".applied.json")) }
-    end
+    local key = fn:match("^(.+)%.lessons%.json$") or fn:match("^(.+)%.applied%.json$")
+    if key and not keys[key] then keys[key] = true; order[#order + 1] = key end
+  end
+  for _, key in ipairs(order) do
+    local base = FX.COACH_DIR .. "/" .. key
+    local rec = core.parseCoachRecord(FX.readFile(base .. ".json"))
+    local history = core.parseCoachHistory(FX.readFile(base .. ".applied.json"))
+    local lessons = core.coachLessonFold(core.parseCoachLessons(FX.readFile(base .. ".lessons.json")), nil, history)
+    out[#out + 1] = { key = key, name = rec and (rec.name or rec.root:match("([^/]+)$")) or nil,
+                      lessons = lessons, history = history }
   end
   return out
 end

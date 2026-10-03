@@ -2429,4 +2429,34 @@ check("global (panel): the overlay's clicks reach FX with the proposal's number"
       and DSRC:find('if a == "coach-global-run" then FX.coachGlobalRun(); return end', 1, true) ~= nil)
 end)()
 
+-- ---- across repos: a repo whose applied edits predate its lessons ledger still counts (2026-10-03) ----
+-- 2026-10-03: FX.coachGlobalRepos listed only repos with a <key>.lessons.json. Edits applied before the
+-- ledger existed live only in <key>.applied.json, so Adam's three repos with applied edits counted as
+-- none, and no grouping run could start until each repo's own coach ran again.
+;(function()
+if type(fx.coachGlobalRepos) ~= "function" then check("global: FX.coachGlobalRepos exists", false); return end
+local function seedHist(root, name, hist)
+  local k = core.coachFileKey(root)
+  write(CDIR .. "/" .. k .. ".json", json.encode({ v = 1, root = root, name = name, repo = root .. "/.git", state = "done", verdict = "none",
+                                                   at = 1, edits = {}, decisions = {} }))
+  write(CDIR .. "/" .. k .. ".applied.json", json.encode(hist))
+  os.remove(CDIR .. "/" .. k .. ".lessons.json")
+  return k
+end
+local kd = seedHist(T .. "/delta", "delta", { { sha = "abc1234def", at = RNOW - 900, section = "Git", why = "Units pushed.",
+                                              old = "", new = "- never push from a unit (delta)" } })
+local ke = seedHist(T .. "/epsilon", "epsilon", { { sha = "def5678abc", at = RNOW - 800, section = "Git", why = "Units pushed.",
+                                                  old = "", new = "- never push from a unit (epsilon)" } })
+local byKey = {}
+for _, r in ipairs(fx.coachGlobalRepos()) do byKey[r.key] = r end
+check("global: a repo with applied edits but no lessons ledger yet is listed", byKey[kd] ~= nil and byKey[ke] ~= nil)
+local function applied(r) local n = 0 for _, l in ipairs(r and r.lessons or {}) do if l.verdict == "applied" then n = n + 1 end end return n end
+check("global: ...its applied edits count as applied lessons  (" .. applied(byKey[kd]) .. "," .. applied(byKey[ke]) .. ")",
+      applied(byKey[kd]) == 1 and applied(byKey[ke]) == 1)
+local input = core.coachGlobalLessons({ byKey[kd], byKey[ke] }, {})
+check("global: ...so two such repos are enough for a grouping run  (" .. tostring(input.repos) .. ")", (input.repos or 0) >= 2)
+check("global: ...and nothing was written to their ledgers by listing them",
+      read(CDIR .. "/" .. kd .. ".lessons.json") == nil and read(CDIR .. "/" .. ke .. ".lessons.json") == nil)
+end)()
+
 finish()

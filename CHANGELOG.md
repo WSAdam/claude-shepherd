@@ -64,6 +64,9 @@ parallel units. Each unit adds its line here.
 - Fixed: nothing told the driver when its approval was stranded, so an approved batch sat until Adam
   asked what was going on. An answer still uncollected 30 seconds after Adam gives it now mails the
   driving session (once) the `cc-fleet.sh propose --resume <id>` command that acts on it.
+- Fixed: the coach's across-repos run counted only repos with a lessons ledger, so repos whose edits
+  were applied before the ledger existed (they live only in `<repo>.applied.json`) were left out, and no
+  grouping run could start until each repo's own coach ran again. Their applied history now counts at once.
 
 - Coach lessons ledger: every Apply, Skip (with an optional one-line reason typed next to Skip)
   and Undo is kept per repo (`~/.claude/cc-coach/<repo>.lessons.json`), and the next run's prompt
