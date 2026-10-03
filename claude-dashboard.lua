@@ -6222,6 +6222,9 @@ function FX.mergeAutoClose(r, it)
     FX._mergeVerify[r.nonce] = v
     -- pinned links (2026-09-29): the unit's worktree is merged and gone -- so are its pins (once)
     if ok then pcall(FX.clearPins, r.worktree, "merged " .. tostring(r.branch)) end
+    -- 2026-10-03 (E2): the repo's other worktrees that share its files hear that main moved (once,
+    -- on disk: this edge fires again after a reload, for a request still on disk)
+    if ok then pcall(FX.mainMovedQueue, r, out) end
   end
   -- a merge Shepherd could not verify is a GUARD, not a retry: closing the tab here would
   -- defeat the verification, and close was never even tried. No button (2026-09-22).
@@ -8663,24 +8666,39 @@ function FX.mailboxSend(key, text, meta)
   end)
 end
 -- Messages waiting, per session: { [key] = count }. One directory read, plus one per session
--- that has an inbox; no process spawned.
+-- that has an inbox; no process spawned. 2026-10-03 (E2): also { [key] = how many may be typed } --
+-- a turn-end-only message (the main-moved notice) may not. Its body is read once per message name
+-- (names are unique: they carry the nonce) and remembered in FX._mailbox.turnEndOnly.
 function FX.mailboxPending()
-  local out = {}
+  local out, typeable, known = {}, {}, {}
+  local cache = FX._mailbox.turnEndOnly or {}
   for _, key in ipairs(FX.readDir(FX.INBOX_DIR)) do
     if core.mailboxKeyOk(key) then
-      local n = 0
+      local n, t = 0, 0
       for _, fn in ipairs(FX.readDir(FX.INBOX_DIR .. "/" .. key)) do
-        if core.parseMailboxName(fn) then n = n + 1 end
+        if core.parseMailboxName(fn) then
+          n = n + 1
+          local id = key .. "/" .. fn
+          local teo = cache[id]
+          if teo == nil then
+            local msg = core.parseMailbox(fn, FX.readFile(FX.INBOX_DIR .. "/" .. id))
+            teo = (msg ~= nil and msg.turnEndOnly == true)
+          end
+          known[id] = teo
+          if not teo then t = t + 1 end
+        end
       end
-      if n > 0 then out[key] = n end
+      if n > 0 then out[key], typeable[key] = n, t end
     end
   end
-  return out
+  FX._mailbox.turnEndOnly = known   -- only the names still there: a handed-over message is forgotten
+  return out, typeable
 end
 -- Claim the oldest message waiting for `key` the way the hooks do (cc_mailbox_claim): renamed
 -- aside, then read; one whose body's nonce isn't its name's, or a slash command, goes back as it
 -- was. Returns { text, nonce, path, claim }, or nil. The caller removes the claim once the message
--- is delivered, or puts it back (FX.mailboxRestore).
+-- is delivered, or puts it back (FX.mailboxRestore). Typing is its only caller: 2026-10-03 (E2) a
+-- turn-end-only message is passed over without being claimed -- only the hooks hand it over.
 function FX.mailboxClaim(key)
   if not core.mailboxKeyOk(key) then return nil end
   local dir = FX.INBOX_DIR .. "/" .. key
@@ -8690,7 +8708,8 @@ function FX.mailboxClaim(key)
   for _, fn in ipairs(names) do
     local path = dir .. "/" .. fn
     local claim = path .. ".claim.shepherd"
-    if os.rename(path, claim) then
+    local peek = core.parseMailbox(fn, FX.readFile(path))
+    if not (peek and peek.turnEndOnly) and os.rename(path, claim) then
       local msg, why = core.parseMailbox(fn, FX.readFile(claim))
       if msg then return { text = msg.text, nonce = msg.nonce, path = path, claim = claim } end
       os.rename(claim, path)
@@ -8733,14 +8752,15 @@ end
 -- because nothing may be typed into their window (it.mailboxWaiting), and a typed nudge for each
 -- idle session that can take one.
 function FX.stepMailbox(list)
-  local pending = FX.mailboxPending()
+  local pending, typeable = FX.mailboxPending()
   FX._mailbox.pending = pending
   local now = FX.now()
   for _, it in ipairs(list or {}) do
     local n = (not it.remote) and pending[it.key] or 0
     -- 2026-10-03 (D2): on hold, its message waits -- untyped, and its turn end hands nothing over
     -- (cc_held) -- until the hold is lifted; the card says so
-    local route = core.mailboxRoute(it, n, FX.holdOf(it) ~= nil)
+    -- 2026-10-03 (E2): an idle session whose messages are all turn-end-only gets nothing typed
+    local route = core.mailboxRoute(it, n, FX.holdOf(it) ~= nil, typeable[it.key] or 0)
     it.mailboxWaiting = (route == "waiting" or route == "held") and n or nil
     it.mailboxHeld = (route == "held") or nil
     local since = FX._mailbox.inflight[it.key]
@@ -8930,7 +8950,10 @@ function FX.deliverTo(it, text, meta)
   local offset = tp and FX.fileSize(tp) or nil
   local path, why = FX.mailboxSend(it.key, text, meta)
   if not path then return nil, why end
-  return { key = it.key, route = core.mailboxRoute(it, 1) or "turn-end", transcript = tp, offset = offset, path = path }
+  -- 2026-10-03 (E2): meta.turnEndOnly -- never typed, so an idle session's route is "waiting"
+  local typeable = (type(meta) == "table" and meta.turnEndOnly == true) and 0 or nil
+  return { key = it.key, route = core.mailboxRoute(it, 1, nil, typeable) or "turn-end", transcript = tp, offset = offset,
+           path = path }
 end
 -- The tiles as core.sendTarget reads them: each with the name Claude Code knows it by (the one
 -- SendMessage addresses, from ~/.claude/sessions/<pid>.json) and whether its process is alive
@@ -10641,6 +10664,91 @@ function FX.annotateRadar(list)
       if w then it.overlap = { line = w.line, n = w.n } end
     end
   end
+end
+
+-- ---- Main moved (2026-10-03, mining round 2 unit E2) --------------------------------------
+-- At the verified-merge edge (FX.mergeAutoClose) the merge is queued with its files (the verify's
+-- @@files). FX.stepMainMoved waits for the repo's radar scan (the siblings' files), then leaves each
+-- sibling worktree session whose own files overlap the merge ONE mailbox note through FX.deliverTo,
+-- turn-end only: never typed, handed over at its turn end or next start (and, on hold, only once the
+-- hold lifts). "Sent" is marked on disk per repo + merged sha (FX.MAIN_MOVED_FILE), because Shepherd
+-- forgets FX._mergeVerify on a reload and the edge fires again for a request still on disk. State on
+-- FX: the main chunk is at Lua's 200-local cap.
+FX.MAIN_MOVED_FILE = os.getenv("CC_MAIN_MOVED_FILE") or (FX.MERGE_DIR .. "/main-moved.seen")
+FX.MAIN_MOVED_WAIT = 600   -- seconds a queued notice waits for the repo's scan before it is dropped
+FX._mainMoved = { pending = {} }   -- core.mainMovedKey -> { key, r, files, at }
+function FX.mainMovedSent()
+  local raw = FX.readFile(FX.MAIN_MOVED_FILE)
+  if not raw or raw == "" then return {} end
+  local ok, t = pcall(function() return core.json.decode(raw) end)
+  return (ok and type(t) == "table") and t or {}
+end
+function FX.mainMovedMark(key)
+  local store = core.mainMovedPrune(FX.mainMovedSent(), FX.now())
+  store[key] = FX.now()
+  pcall(function() hs.fs.mkdir(FX.MERGE_DIR) end)
+  if not FX.writeFileAtomic(FX.MAIN_MOVED_FILE, core.json.encode(store)) then
+    print("[cc-dashboard] ❌ main moved: couldn't write " .. FX.MAIN_MOVED_FILE .. " -- a reload may tell its siblings again")
+  end
+end
+-- The verified edge: queue the merge (unless merge.mainMovedNotice is off, or it was told already).
+function FX.mainMovedQueue(r, out)
+  if core.config(loadConfig(), "merge.mainMovedNotice", true) == false then return end
+  local key = core.mainMovedKey(r)
+  if not key or FX._mainMoved.pending[key] then return end
+  if FX.mainMovedSent()[key] then
+    print("[cc-dashboard] 🔍 main moved: " .. tostring(r.branch) .. " (" .. tostring(r.sha):sub(1, 7)
+      .. ") was already announced to its siblings; once is enough")
+    return
+  end
+  local files = core.mergeVerifyFiles(out)
+  FX._mainMoved.pending[key] = { key = key, r = r, files = files, at = FX.now() }
+  print("🚀 [cc-dashboard] main moved: " .. tostring(r.branch) .. " landed on " .. tostring(r.base) .. " ("
+    .. #files .. " file(s)); its sibling worktrees hear about it once the radar has scanned the repo")
+end
+-- Each tick: a queued merge whose repo has a radar scan (or the radar is off, or it waited
+-- FX.MAIN_MOVED_WAIT) is sent and marked. Nothing queued: nothing read.
+function FX.stepMainMoved(list)
+  if next(FX._mainMoved.pending) == nil then return end
+  local radarOff = core.config(loadConfig(), "radar.enabled", true) == false
+  local now = FX.now()
+  for key, p in pairs(FX._mainMoved.pending) do
+    local cd = core.normDir(p.r.commonDir)
+    local st = FX._radar[p.r.commonDir]
+    if not st then
+      for k, v in pairs(FX._radar) do if core.normDir(k) == cd then st = v end end
+    end
+    local scan = st and st.cache and st.cache.data
+    if scan or radarOff or now - p.at >= FX.MAIN_MOVED_WAIT then
+      FX._mainMoved.pending[key] = nil
+      FX.mainMovedSend(p, (not radarOff) and scan or nil, list)
+    end
+  end
+end
+function FX.mainMovedSend(p, scan, list)
+  local r = p.r
+  if not scan then
+    print("⚠️ [cc-dashboard] main moved: no radar scan of " .. tostring(core.repoMainRoot(r.commonDir) or r.commonDir)
+      .. " (radar off, or none in " .. FX.MAIN_MOVED_WAIT .. "s) -- nobody told that " .. tostring(r.branch) .. " landed")
+    FX.mainMovedMark(p.key)
+    return
+  end
+  local told = 0
+  for _, t in ipairs(core.mainMovedTargets(list, r, p.files, scan)) do
+    local it = t.it
+    local name = tostring(it.label or it.name or it.key)
+    local d, why = FX.deliverTo(it, core.mainMovedMessage(r, t.files), { kind = "main-moved", from = "shepherd", turnEndOnly = true })
+    if d then
+      told = told + 1
+      print("✅ [cc-dashboard] main moved: told '" .. name .. "' that " .. tostring(r.branch) .. " touched "
+        .. #t.files .. " of its files (" .. tostring(d.route) .. ")")
+      ledgerFor(it, { type = "main_moved_sent", sha = r.sha, branch = r.branch, files = #t.files, route = d.route })
+    else
+      print("⚠️ [cc-dashboard] main moved: couldn't tell '" .. name .. "': " .. tostring(why))
+    end
+  end
+  FX.mainMovedMark(p.key)
+  print("✅ [cc-dashboard] main moved: " .. tostring(r.branch) .. " -> " .. told .. " sibling session(s) told")
 end
 
 -- ---- Scheduled-tasks lock (2026-09-29, build program unit 39) ----------------------------
@@ -27594,6 +27702,11 @@ function FX._refreshBody()
   -- worktree) and before the stack ranking (a request waiting for Adam leads its card).
   FX.annotateFleet(list, cfg, bannerOn)    -- batch driving (2026-09-11): before merges (delegation)
   FX.annotateMerges(list, cfg, bannerOn)
+  -- 2026-10-03 (E2): a verified merge's main-moved notices, once the repo's radar scan is in
+  do
+    local okmm, errmm = pcall(FX.stepMainMoved, list)
+    if not okmm then print("[cc-dashboard] ❌ main-moved step failed: " .. tostring(errmm)) end
+  end
   FX.annotateCheckers(list)       -- each session's latest merge-checker verdict (2026-09-29)
   FX.annotateTabless(list, cfg)   -- a claude process with no tab in its window (2026-09-11)
   FX.annotateAsks(list, bannerOn)   -- a question held for Adam by cc-ask.sh (2026-09-11)

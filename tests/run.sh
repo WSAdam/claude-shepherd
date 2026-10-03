@@ -530,6 +530,9 @@ echo ""
 echo "== lua: My List playbooks -- the native chooser (never a webview path) adds a markdown source, its lines import like TODO.md's, the per-tick watch follows the file, Remove keeps the items (behavioral, stubbed hs) =="
 HOME="$(mktemp -d)" lua "$DIR/worklist-playbooks.test.lua" || fail=1
 echo ""
+echo "== lua: the main moved notice -- who hears (live sibling worktrees whose files overlap the merge), the message, the verify's @@files and the radar's one-worktree scan on real repos, then the verified edge to the sibling's inbox: turn-end only (never typed), once per merged sha on disk across a reload (pure + behavioral, stubbed hs) =="
+HOME="$(mktemp -d)" lua "$DIR/main-moved.test.lua" || fail=1
+echo ""
 echo "== node: My List playbooks -- Add on project tabs only, sources listed with Remove, rows grouped under the file's name, escaped (real browser) =="
 node "$DIR/worklist-playbooks.browser.test.js" || fail=1
 echo ""

@@ -599,6 +599,33 @@ that hangs past a minute is restarted. Settings in `~/.claude/cc-config.json`:
 
 Up to 10 linked worktrees per repo are scanned; Shepherd's own red-first scratch worktrees never count.
 
+### Main moved: sibling worktrees hear about a merge
+
+When Shepherd verifies a merge (the same check that clears the unit's pins and closes its tab), it
+tells the repo's other worktree sessions whose work the merge touched. A session hears about it
+when the radar's files for its worktree (committed, uncommitted or new) overlap the files the merge
+brought into main, from main's tip just before the merge to the merged commit. It gets one note in
+its [mailbox](automation.md#session-mailbox):
+
+> [shepherd] main moved to 3f2a91c (feat/api-client), touching app.lua, cc-core.lua: rebase onto
+> main before you ask to merge
+
+- **Who:** live local sessions in a linked worktree of the same repo. The main checkout, the
+  merged session itself, remote sessions and worktrees that share no file with the merge get
+  nothing. At most three files are named, then *and N more*.
+- **When:** the note waits until the repo has a radar scan, at most 10 minutes; with no scan, or
+  with `radar.enabled` off, nobody is told.
+- **How it arrives:** at the session's next turn end, or at its next start. It is never typed
+  into an idle session, even one Shepherd could type into: the card shows *1 message waiting*
+  until then. A [held](automation.md#hands-off-hold) session gets it once the hold is lifted.
+- **Once:** each merge (repo + merged commit) is announced once, recorded in
+  `~/.claude/cc-merge/main-moved.seen`. A reload forgets that the merge was verified, but this
+  record survives it.
+
+`merge.mainMovedNotice` (default `true`) in `~/.claude/cc-config.json` turns it off. The radar now
+lists a worktree's files even when it is the repo's only linked worktree, so the last unit left
+after the others merge still hears about them.
+
 ### A batch unit that waits: blockedBy
 
 A batch unit can name the units it waits for:

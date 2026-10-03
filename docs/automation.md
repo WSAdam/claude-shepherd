@@ -359,6 +359,11 @@ on it, and is the way to try it from a terminal.
   session is ready ([when automation types](#when-automation-types)). In a VS Code window shared
   with other Claude tabs nothing is typed: the card says **1 message waiting** until the session's
   next turn end or start takes it. A paste that doesn't land puts the message back.
+- **Turn-end only.** A message sent with `meta.turnEndOnly` (the
+  [main moved](merging-and-batches.md#main-moved-sibling-worktrees-hear-about-a-merge) note) is
+  never typed, even where typing is allowed: it waits for the next turn end or start, and the
+  card says **1 message waiting** until then. An ordinary message to the same session is still
+  typed.
 - **Delivered once.** Whoever hands a message over first (the Stop hook, the SessionStart hook or
   the typed nudge) claims it by renaming its file. A file whose body doesn't carry the nonce in its
   name is left alone.

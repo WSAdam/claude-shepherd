@@ -112,6 +112,7 @@ install's [defaults](../defaults/cc-config.json) differ.
 | `merge.repoGate` | `false` | | [A repo can declare its own gate](merging-and-batches.md#a-repo-can-declare-its-own-gate) |
 | `merge.gates[].redFirstCommand` | none | | [The red-first proof](merging-and-batches.md#the-red-first-proof-do-the-new-tests-fail-without-the-fix) |
 | `radar.enabled` / `refreshSeconds` | `true` / `120` (at least 30) | | [The overlap radar](merging-and-batches.md#the-overlap-radar) |
+| `merge.mainMovedNotice` | `true` | | [Main moved](merging-and-batches.md#main-moved-sibling-worktrees-hear-about-a-merge) |
 | `schedLock.enabled` / `refreshSeconds` | `true` / `60` (at least 30) | | [Scheduled-tasks lock](troubleshooting.md#a-card-flags-a-scheduled-tasks-lock) |
 | `timeLost.enabled` / `refreshSeconds` / `days` | `true` / `120` / `7` | | [Where the time went](usage-and-cost.md#where-the-time-went) |
 | `score.weights` | `{ "error": 18, "deny": 6, "loop": 12, "respawn": 14 }` | | [Run score](usage-and-cost.md#run-score) |
@@ -153,7 +154,7 @@ Everything lives under `~/.claude/`:
 | `cc-gate.enabled` | The gate's on/off switch (a flag file) |
 | `cc-status/` | One status file per session, written by the hooks; `.panel-alive` is the panel heartbeat |
 | `cc-status-mirror/` | Remote sessions' status files, pulled by the [SSH status bridge](providers-and-integrations.md#ssh-status-bridge) |
-| `cc-merge/`, `cc-fleet/` | Merge requests and batches, with their answers, the checker's verdicts, a batch's events and the commit each **Not yet** answered (`<key>.notyet`) |
+| `cc-merge/`, `cc-fleet/` | Merge requests and batches, with their answers, the checker's verdicts, a batch's events and the commit each **Not yet** answered (`<key>.notyet`), and the merges already announced to their [sibling worktrees](merging-and-batches.md#main-moved-sibling-worktrees-hear-about-a-merge) (`main-moved.seen`) |
 | `cc-scratch/` | The [red-first proof](merging-and-batches.md#the-red-first-proof-do-the-new-tests-fail-without-the-fix)'s and [gate blame](merging-and-batches.md#gate-blame-which-failures-were-already-on-main)'s scratch worktrees, removed after each run |
 | `cc-reqs.json` | [Requirement ids](merging-and-batches.md#requirement-ids-and-the-merge-receipt): each repo's `REQ-NNN` list (Shepherd is its only writer) |
 | `cc-ask/` | Answers to held questions (the question itself is in the session's status file) |

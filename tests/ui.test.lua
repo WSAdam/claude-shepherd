@@ -5180,7 +5180,7 @@ do
   -- the mailbox is never held; its delivery waits
   local sm = src:match("\nfunction FX%.stepMailbox%(list%)(.-)\nend\n") or ""
   check("hold: a held session's mail waits -- FX.stepMailbox routes it by the hold",
-        sm:find("core.mailboxRoute(it, n, FX.holdOf(it) ~= nil)", 1, true) ~= nil)
+        sm:find("core.mailboxRoute(it, n, FX.holdOf(it) ~= nil, typeable[it.key] or 0)", 1, true) ~= nil)
   local nudge = src:match("\nfunction FX%.mailboxNudge%(it%)(.-)\nend\n") or ""
   local nHeld = nudge:find("if FX.holdOf(it) then return false, core.AUTOMATION_HELD end", 1, true)
   local nClaim = nudge:find("FX.mailboxClaim(key)", 1, true)

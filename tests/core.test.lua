@@ -8478,7 +8478,9 @@ do
   -- 2026-10-03: 50 -> 51 for playbooks as My List sources ("playbooks", flagged new).
   -- 2026-10-03: 51 -> 52 for lessons learned in 2+ repos going to the global CLAUDE.md ("coachglobal", flagged new).
   -- 2026-10-03: 52 -> 53 for gate blame ("gateblame", flagged new).
-  eq("FEATURES: the 53 new features are flagged", newCount, 53)
+  -- 2026-10-03: 53 -> 54 for the main moved notice ("mainmoved", flagged new).
+  eq("FEATURES: the 54 new features are flagged", newCount, 54)
+  check("FEATURES: lists the main moved notice", keys.mainmoved == true)
   check("FEATURES: lists the coach across repos", keys.coachglobal == true)
   check("FEATURES: lists checking \"done\" against the diff", keys.fakedone == true)
   check("FEATURES: lists the unfinished-unit reminder", keys.unfinished == true)

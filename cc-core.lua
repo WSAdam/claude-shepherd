@@ -2686,6 +2686,11 @@ function M.mergeVerifyCmd(req)
   parts[#parts + 1] = "[ -n \"$from\" ] || from=$(" .. G .. " reflog show --format=%H refs/heads/" .. base
     .. " -n 500 2>/dev/null | awk -v s=" .. sha .. " 'f{print $1;exit} index($1,s)==1{f=1}')"
   parts[#parts + 1] = "if [ -n \"$from\" ]; then " .. markerCmd(G, "\"$from\" " .. sha) .. "; else echo '?'; fi"
+  -- 2026-10-03 (E2): the files the merge brought in, over the same range -- read only by the
+  -- main-moved notice (M.mergeVerifyFiles), never by the verdict
+  parts[#parts + 1] = "echo @@files"
+  parts[#parts + 1] = "if [ -n \"$from\" ]; then " .. G .. " -c core.quotepath=off diff --name-only \"$from\" " .. sha
+    .. " 2>/dev/null | head -n " .. M.MERGE_FACTS_MAX_FILES .. "; fi"
   parts[#parts + 1] = "echo @@stash"
   parts[#parts + 1] = "{ " .. G .. " rev-list --walk-reflogs --count refs/stash 2>/dev/null || echo 0; }"
   parts[#parts + 1] = "echo @@list"
@@ -5447,15 +5452,17 @@ M.RADAR_SHOW_FILES = 3       -- names a detail line lists before "and N more"
 
 -- The scan, as one /bin/sh program. $1 = the repo's main checkout, $2 = the most linked worktrees
 -- to scan, $3 = the most paths per list. The main checkout is `worktree list`'s first entry; a
--- red-first scratch worktree (M.isRedFirstScratch) exists for one run and is skipped. Fewer than
--- two linked worktrees print only @@base: there is nothing to pair.
+-- red-first scratch worktree (M.isRedFirstScratch) exists for one run and is skipped. No linked
+-- worktree prints only @@base. 2026-10-03 (E2): ONE linked worktree still has its files listed (with
+-- no pairs) -- the main-moved notice reads them, and the last sibling left once a unit merges and
+-- its worktree goes would otherwise never hear that main moved.
 M.RADAR_SH = [=[
 cd "$1" 2>/dev/null || exit 3
 bh=$(git rev-parse -q --verify HEAD 2>/dev/null) || exit 4
 printf '@@base\t%s\t%s\n' "$(git symbolic-ref -q --short HEAD 2>/dev/null)" "$bh"
 list=$(git worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p' | sed 1d | grep -v '/redfirst-[^/]*$' | head -n "$2" |
   while IFS= read -r w; do h=$(git -C "$w" rev-parse -q --verify HEAD 2>/dev/null) && printf '%s\t%s\n' "$h" "$w"; done)
-[ "$(printf '%s\n' "$list" | grep -c .)" -ge 2 ] || exit 0
+[ "$(printf '%s\n' "$list" | grep -c .)" -ge 1 ] || exit 0
 T=$(printf '\t')
 printf '%s\n' "$list" | while IFS="$T" read -r h w; do
   printf '@@wt\t%s\t%s\t%s\n' "$w" "$(git -C "$w" symbolic-ref -q --short HEAD 2>/dev/null)" "$h"
@@ -5667,6 +5674,111 @@ function M.radarRepos(list)
     end
   end
   return out
+end
+
+-- ---- Main moved (2026-10-03, mining round 2 unit E2) --------------------------------------
+-- After a verified merge, the repo's OTHER worktree sessions whose own changes touch the files the
+-- merge brought in hear about it once, through their mailbox at their turn end (never typed), so
+-- they rebase before they ask to merge instead of finding out in the gate. The merge's files are
+-- the verify command's @@files (M.mergeVerifyCmd: main's tip before the merge, to the merged
+-- commit); each sibling's are the overlap radar's (committed, dirty and untracked). "Sent" is kept
+-- on disk per repo + merged sha (M.mainMovedKey): Shepherd forgets FX._mergeVerify on a reload.
+M.MAIN_MOVED_SHOW_FILES = 3      -- files a message names before "and N more"
+M.MAIN_MOVED_KEEP = 30 * 86400   -- seconds a "sent" mark is kept
+M.MAIN_MOVED_MAX = 500           -- marks kept at most (the newest)
+
+-- The verify output's @@files -> the merge's files, once each (none from an older command).
+function M.mergeVerifyFiles(out)
+  local files, seen = {}, {}
+  if type(out) ~= "string" then return files end
+  for _, l in ipairs(mergeSections(out).files or {}) do
+    if l:match("%S") and not seen[l] then seen[l] = true; files[#files + 1] = l end
+  end
+  return files
+end
+
+-- The on-disk mark of one merge: the repo's git dir + the merged sha, or nil.
+function M.mainMovedKey(r)
+  if type(r) ~= "table" or type(r.commonDir) ~= "string" or type(r.sha) ~= "string"
+     or not r.sha:match("^%x+$") then return nil end
+  return M.normDir(r.commonDir) .. "|" .. r.sha
+end
+
+-- The marks worth keeping: numbers no older than M.MAIN_MOVED_KEEP, at most M.MAIN_MOVED_MAX (the
+-- newest). A new table; anything else in the file is dropped.
+function M.mainMovedPrune(store, now)
+  now = tonumber(now) or 0
+  local rows = {}
+  for k, at in pairs(type(store) == "table" and store or {}) do
+    if type(k) == "string" and type(at) == "number" and now - at <= M.MAIN_MOVED_KEEP then rows[#rows + 1] = { k = k, at = at } end
+  end
+  table.sort(rows, function(a, b) if a.at ~= b.at then return a.at > b.at end return a.k < b.k end)
+  local out = {}
+  for i = 1, math.min(#rows, M.MAIN_MOVED_MAX) do out[rows[i].k] = rows[i].at end
+  return out
+end
+
+-- Who hears that main moved: { { key, it, files } } sorted by key -- each live local session in
+-- ANOTHER linked worktree of the merged request's repo (not the main checkout, not the merged
+-- session or worktree, not remote, its process not known dead) whose scanned files overlap
+-- mergedFiles. With no merged files, the scan's entry for the merged worktree stands in; a
+-- worktree the scan doesn't cover can't be told about.
+function M.mainMovedTargets(list, r, mergedFiles, scan)
+  local out = {}
+  if type(r) ~= "table" or type(r.commonDir) ~= "string" or type(scan) ~= "table" then return out end
+  local cd, mergedWt = M.normDir(r.commonDir), M.normDir(r.worktree)
+  local byPath = {}
+  for _, w in ipairs(scan.worktrees or {}) do
+    if type(w) == "table" and type(w.path) == "string" then byPath[M.normDir(w.path)] = w end
+  end
+  local function filesOf(w)
+    local set = {}
+    for _, k in ipairs({ "committed", "dirty", "untracked" }) do
+      for _, f in ipairs(w[k] or {}) do if type(f) == "string" and f ~= "" then set[f] = true end end
+    end
+    return set
+  end
+  local merged = {}
+  for _, f in ipairs(type(mergedFiles) == "table" and mergedFiles or {}) do
+    if type(f) == "string" and f ~= "" then merged[f] = true end
+  end
+  if next(merged) == nil and byPath[mergedWt] then merged = filesOf(byPath[mergedWt]) end
+  if next(merged) == nil then return out end
+  local seen = {}
+  for _, it in ipairs(list or {}) do
+    if type(it) == "table" and type(it.key) == "string" and not seen[it.key] and not it.remote and not it.isMainWt
+       and it.procAlive ~= false and type(it.repoKey) == "string" and M.normDir(it.repoKey) == cd
+       and it.key ~= r.key and (r.session_id == nil or it.session_id ~= r.session_id)
+       and type(it.wtRoot) == "string" and M.normDir(it.wtRoot) ~= mergedWt then
+      local w = byPath[M.normDir(it.wtRoot)]
+      if w then
+        local files = {}
+        for f in pairs(filesOf(w)) do if merged[f] then files[#files + 1] = f end end
+        if #files > 0 then
+          table.sort(files)
+          seen[it.key] = true
+          out[#out + 1] = { key = it.key, it = it, files = files }
+        end
+      end
+    end
+  end
+  table.sort(out, function(a, b) return a.key < b.key end)
+  return out
+end
+
+-- The note one sibling gets (FX.mailboxSend marks it [shepherd]): the new tip, the unit, the files
+-- it shares with the merge (capped), and what to do. One line, whatever the file names hold.
+function M.mainMovedMessage(r, files)
+  r = type(r) == "table" and r or {}
+  local function clean(s) return (tostring(s or ""):gsub("%c", "?")) end
+  local list = {}
+  for _, f in ipairs(type(files) == "table" and files or {}) do list[#list + 1] = clean(f) end
+  local shown = {}
+  for i = 1, math.min(#list, M.MAIN_MOVED_SHOW_FILES) do shown[i] = list[i] end
+  local more = (#list > M.MAIN_MOVED_SHOW_FILES) and (" and " .. (#list - M.MAIN_MOVED_SHOW_FILES) .. " more") or ""
+  local base = clean(r.base or "main")
+  return base .. " moved to " .. clean(r.sha):sub(1, 7) .. " (" .. clean(r.branch or "a merge") .. "), touching "
+    .. table.concat(shown, ", ") .. more .. ": rebase onto " .. base .. " before you ask to merge"
 end
 
 -- ---- Scheduled-tasks lock (2026-09-29, build program unit 39) ----------------------------
@@ -12958,7 +13070,9 @@ function M.mailboxMessage(text, meta, nonce, now, seq)
   seq = math.floor(tonumber(seq) or 0) % 1000000
   local body = M.json.encode({ nonce = nonce, text = text, at = now,
     from = type(meta.from) == "string" and meta.from or "shepherd",
-    kind = type(meta.kind) == "string" and meta.kind or nil })
+    kind = type(meta.kind) == "string" and meta.kind or nil,
+    -- 2026-10-03 (E2): handed over only at a turn end or start, never typed (M.mailboxRoute)
+    turnEndOnly = (meta.turnEndOnly == true) or nil })
   return { name = string.format("%010d-%06d-%s.msg", now, seq, nonce), body = body, text = text, nonce = nonce }
 end
 -- A file name that is a message -> at, seq, nonce; nil for anything else (a temp, a claim).
@@ -12979,7 +13093,8 @@ function M.parseMailbox(name, raw)
   if t.nonce ~= nonce then return nil, "wrong nonce" end
   if type(t.text) ~= "string" or not t.text:find("%S") then return nil, "empty" end
   if M.mailboxSlash(t.text) then return nil, "slash command" end
-  return { nonce = nonce, text = t.text, at = tonumber(t.at) or at, from = t.from, kind = t.kind }
+  return { nonce = nonce, text = t.text, at = tonumber(t.at) or at, from = t.from, kind = t.kind,
+           turnEndOnly = (t.turnEndOnly == true) or nil }
 end
 -- What an idle session gets typed: the message as ONE line. kitty sends a newline as Return,
 -- which would submit the first line on its own.
@@ -12994,10 +13109,13 @@ end
 -- type: FX.typeWhenReady types it once the session is ready).
 -- 2026-10-03 (D2): `held` (the session is on hold, or the fleet frozen) -> "held": nothing is typed,
 -- and its turn end and start hand nothing over (cc_held) -- the message waits for the hold to lift.
-function M.mailboxRoute(it, n, held)
+-- 2026-10-03 (E2): `typeable` (optional) is how many of the n may be typed; a turn-end-only message
+-- (the main-moved notice) may not, so an idle session holding only those is "waiting" too.
+function M.mailboxRoute(it, n, held, typeable)
   if type(it) ~= "table" or (tonumber(n) or 0) <= 0 or it.remote then return nil end
   if held then return "held" end
   if it.status == "working" or it.status == "approval" or it.gate == "waiting" then return "turn-end" end
+  if typeable ~= nil and (tonumber(typeable) or 0) <= 0 then return "waiting" end
   if M.keystrokeBlocked(it) then return "waiting" end
   return "type"
 end
@@ -23818,6 +23936,9 @@ M.FEATURES = {
   { key = "overlap", cat = "Control", new = true, title = "Overlap radar & unit order",
     what = "Shepherd scans each repo's worktrees in the background: when two touch the same files (committed, uncommitted or new) or git merge-tree says they would conflict, both cards, Instances and the merge review say so, with which to merge first. A batch unit can name the units it waits for (blockedBy): its tab opens, and its merge goes through, only once they have merged.",
     why = "Collisions between parallel units show up before the second merge runs into them, and a batch runs its units in the order they need." },
+  { key = "mainmoved", cat = "Control", new = true, title = "Main moved notice",
+    what = "When Shepherd verifies a merge, each other worktree session of that repo whose own changes (committed, uncommitted or new, as the overlap radar scanned them) touch the merge's files gets one note in its mailbox: main moved to <sha> (<unit>), touching <files>: rebase onto main before you ask to merge. The note is never typed into an idle session; it is handed over at the session's next turn end or start. A reload never sends it twice. merge.mainMovedNotice turns it off.",
+    why = "A unit learns that main moved under its files before it asks to merge, not from a red gate or a rebase conflict." },
   { key = "coverage", cat = "Control", new = true, title = "Coverage index",
     what = "A batch built from an issue list carries it: each unit names the issues it covers, and the rest are triaged (dup, wontfix, later or covered elsewhere, each with a note). Until every issue is covered or triaged, cc-fleet.sh refuses the proposal and names the uncovered ones, and the batch review lists them with Approve disabled.",
     why = "Nothing on the list is dropped silently: every issue ends up in a unit or in a written decision you read before you approve." },
