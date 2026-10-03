@@ -64,6 +64,11 @@ check("an acted row is marked acted and has no why", acted.indexOf("tr-acted") >
 check("an unknown outcome reads as acted (its class can't be smuggled)",
       lib.traceRowHtml({ at: at, kind: "feed", outcome: '"><b>x', summary: "" }, kinds).indexOf("tr-acted") >= 0);
 check("an unknown kind shows its raw name", lib.traceRowHtml({ at: at, kind: "respawn", outcome: "acted" }, kinds).indexOf(">respawn<") >= 0);
+// 2026-10-03 (D2): a hold (or the fleet freeze) stood it down
+const held = lib.traceRowHtml({ at: at, kind: "continue", key: "s1", name: "api", outcome: "held",
+                                reason: "this session is on hold", summary: "continue" }, kinds);
+check("a held row is marked held, with why", held.indexOf('class="tr-row tr-held"') >= 0 && held.indexOf(">held<") >= 0
+      && held.indexOf("this session is on hold") >= 0);
 
 // ---- repeats ----
 const rep = lib.traceRowHtml({ at: at, first: at - 120, kind: "continue", key: "s1", name: "api", outcome: "would", summary: "continue", count: 7 }, kinds);

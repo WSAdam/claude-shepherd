@@ -40,6 +40,7 @@ mkdir -p "$C/cc-audit/-r"; printf -- '- [ ] [LOW] AUD-001 x\n' > "$C/cc-audit/-r
 printf '{"v":1,"labels":{"toolu_a":{"verdict":"ok"}}}' > "$C/cc-skill-labels.json"
 mkdir -p "$C/cc-coach"; printf '{"v":1,"root":"/r","state":"done"}' > "$C/cc-coach/-r.json"
 mkdir -p "$C/cc-guard"; printf '1790000000.42\n' > "$C/cc-guard/abc.question"
+mkdir -p "$C/cc-hold"; printf '{"at":1790000000}' > "$C/cc-hold/4242"; printf '{"at":1790000000}' > "$C/cc-hold/.fleet"
 printf '{"version":1,"written":1790000000,"sessions":[]}' > "$C/cc-restart.json"
 printf '{"version":1,"items":[]}' > "$C/cc-worklist.json"
 printf '{"version":1,"items":[{"id":"a","text":"an old done item","done":true}]}' > "$C/cc-worklist-archive.json"
@@ -139,6 +140,8 @@ assert_eq "--purge removes My List's archive too" "gone" "$([ -e "$C/cc-worklist
 assert_eq "--purge removes the captured scenarios" "gone" "$([ -e "$C/cc-scenarios" ] && echo there || echo gone)"
 # 2026-10-02: the Stop guards' once-markers (cc-guard/) are Shepherd's state too
 assert_eq "--purge removes the Stop guards' once-markers" "gone" "$([ -e "$C/cc-guard" ] && echo there || echo gone)"
+# 2026-10-03: the hands-off holds and the fleet freeze (cc-hold/) are Shepherd's state too
+assert_eq "--purge removes the hands-off holds and the fleet freeze" "gone" "$([ -e "$C/cc-hold" ] && echo there || echo gone)"
 assert_eq "--purge still keeps the user's own files" "there" "$([ -e "$C/cc-mine.sh" ] && echo there || echo gone)"
 
 # a CLAUDE.md that is only the block (a fresh machine) is removed, not left empty

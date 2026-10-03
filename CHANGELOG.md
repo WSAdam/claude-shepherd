@@ -15,6 +15,12 @@ parallel units. Each unit adds its line here.
   transcript marker, never a quiet one. `alerts.voice` (off) speaks it through `hs.speech`, and
   `alerts.voiceEvents: ["needsYou"]` also says when a session starts needing you.
 
+- Hands-off hold: **Hold** (tile menu, detail panel) puts one session on hold and **❄ Freeze** in the
+  toolbar holds the fleet, with a HOLD / FROZEN badge. Every automatic send stands down: the
+  automation door (a **held** row in the Trace), the drain close, scheduled spawns, merges on a batch
+  grant (they wait for your click), and in the hooks the Stop guards, the notes request and the resume
+  wake. Each skipped send is listed in the detail panel and never replayed. Mail waits and goes out
+  once the hold is lifted. Flags are `~/.claude/cc-hold/<pid>` (survives `/clear`), `key-<key>` and `.fleet`.
 - Restart outcomes: a Restart fleet row no longer ends at "opened" (a link went out, a line was typed).
   Each reopened session ends as **resumed** (its hooks wrote again, or a session file names it under a
   new process), **came back fresh** (a new session in its folder, named only while no other reopened

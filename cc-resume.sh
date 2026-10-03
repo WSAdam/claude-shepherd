@@ -153,6 +153,13 @@ EOF
   DUE="$P_RESET"
   [ "${P_NOW:-}" = "true" ] || DUE=$((P_RESET + JITTER))
   [ "$NOW" -ge "$DUE" ] || continue
+  # 2026-10-03: hands-off hold (mining round 2 D2). Adam held the session (or froze the fleet) while it
+  # waited: nothing wakes it. Skipped -- Shepherd lists it on the session -- and never replayed.
+  if cc_held "$KEY"; then
+    set_state skipped '{"reason":"on hold"}'
+    cc_debug "resume: ⏸ $KEY is on hold -- not waking it"
+    exit 0
+  fi
   set_state fired "{\"firedAt\":$NOW}"
   cc_debug "resume: ✅ $KEY's limit has reset -- waking it"
   printf '%s\n' "$LINE" >&2

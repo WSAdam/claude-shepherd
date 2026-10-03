@@ -22,6 +22,7 @@ local T
 do local p = io.popen("mktemp -d 2>/dev/null"); T = p and p:read("*l"); if p then p:close() end end
 if not T or T == "" then check("mktemp a fixture dir", false); finish() end
 os.execute('mkdir -p "' .. T .. '/status" "' .. T .. '/.claude" "' .. T .. '/vs" "' .. T .. '/kt"')
+os.execute('mkdir -p "' .. T .. '/.claude/cc-hold"')   -- (2026-10-03) the stubbed hs.fs.mkdir makes nothing
 local NOW = os.time()
 local function write(path, s) local f = io.open(path, "w"); f:write(s); f:close() end
 local function readFile(path) local f = io.open(path, "rb"); if not f then return nil end local s = f:read("*a"); f:close(); return s end
@@ -34,6 +35,8 @@ local function status(key, over)
 end
 status("idle1"); status("busy1", { status = "working" }); status("fresh1", { updated = NOW - 1 })
 status("twice1"); status("moved1")
+-- 2026-10-03 (D2): sessions the hands-off hold covers -- one held by its claude process, one free
+status("hold1", { session_pid = "4242" }); status("hold2", { session_pid = "5150" })
 status("kit1", { editor = "kitty", cwd = T .. "/kt", kitty_window_id = "7", kitty_listen_on = "unix:" .. T .. "/k.sock" })
 
 local realGetenv = os.getenv
@@ -84,7 +87,8 @@ local hs = {
   json = json,
   fs = {
     dir = function(path)
-      local files, p = {}, io.popen('ls -1 "' .. tostring(path) .. '" 2>/dev/null')
+      -- -A: dotfiles too, as the real hs.fs.dir lists them (2026-10-03: the fleet freeze is cc-hold/.fleet)
+      local files, p = {}, io.popen('ls -1A "' .. tostring(path) .. '" 2>/dev/null')
       if p then for line in p:lines() do files[#files + 1] = line end; p:close() end
       local i = 0; return function() i = i + 1; return files[i] end
     end,
@@ -152,7 +156,8 @@ local function refusals(key)
 end
 local byK = {}
 for _, it in ipairs(fx._shownItems or {}) do byK[it.key] = it end
-check("every fixture session is on the panel", byK.idle1 and byK.busy1 and byK.fresh1 and byK.kit1 and byK.twice1 and byK.moved1)
+check("every fixture session is on the panel", byK.idle1 and byK.busy1 and byK.fresh1 and byK.kit1 and byK.twice1 and byK.moved1
+      and byK.hold1 and byK.hold2)
 if not (byK.idle1 and byK.busy1 and byK.fresh1 and byK.kit1) then finish() end
 local function quietly(fn) logs = {}; print = capture; local r = { pcall(fn) }; print = realPrint; return table.unpack(r) end
 
@@ -213,6 +218,46 @@ quietly(beats)
 local rm = refusals("moved1")
 check("a session that started a turn before its send fired is not typed into",
       m1 == true and not typed.moved1 and #rm == 1 and rm[1].reason == "working" and refusedWhy == "working")
+
+-- ---- hands-off hold (2026-10-03, mining round 2 D2) ----
+-- A session on hold gets nothing typed: the send is refused up front as "on hold" (the sender hears
+-- it, so it releases what it reserved), listed for the session, and never replayed. It is not a
+-- readiness refusal -- no typing_refused event, no hold until its status changes -- so the moment the
+-- hold is lifted the next send types. A hold set after a send was scheduled stops it at send time.
+check("hold: FX.setHold exists", type(fx.setHold) == "function")
+if type(fx.setHold) == "function" then
+  quietly(function() fx.setHold(byK.hold1, true) end)
+  local heldWhy
+  local _, h1 = quietly(function() return fx.typeWhenReady(byK.hold1, "autofeed", function() typed.hold1 = true end,
+    { summary = "feed 'fix it'", onRefused = function(why) heldWhy = why end }) end)
+  quietly(beats)
+  check("hold: a held session is not typed into", h1 == false and not typed.hold1)
+  check("hold: ...the sender hears it was the hold  (" .. tostring(heldWhy) .. ")", heldWhy == core.AUTOMATION_HELD)
+  check("hold: ...no typing_refused event (it isn't a readiness refusal)", #refusals("hold1") == 0)
+  check("hold: ...and no readiness hold that would outlast the hold", not core.typingHeld(fx._typing.held, byK.hold1))
+  check("hold: ...nothing was scheduled for it", (fx._typing.queued["hold1"] or 0) == 0)
+  -- a hold that lands between scheduling and typing
+  local lateWhy
+  local _, h2 = quietly(function() return fx.typeWhenReady(byK.hold2, "router", function() typed.hold2 = true end,
+    { summary = "feed 'y'", onRefused = function(why) lateWhy = why end }) end)
+  quietly(function() fx.setHold(byK.hold2, true) end)
+  quietly(beats)
+  check("hold: a send scheduled before the hold is stopped at send time", h2 == true and not typed.hold2)
+  check("hold: ...the sender hears it  (" .. tostring(lateWhy) .. ")", lateWhy == core.AUTOMATION_HELD)
+  -- lifted: types again, and nothing held is replayed
+  quietly(function() fx.setHold(byK.hold1, false); fx.setHold(byK.hold2, false) end)
+  quietly(beats)
+  check("hold: lifting it replays nothing", not typed.hold1 and not typed.hold2)
+  local _, h3 = quietly(function() return fx.typeWhenReady(byK.hold1, "autofeed", function() typed.hold1 = true end) end)
+  quietly(beats)
+  check("hold: once lifted, the next send types", h3 == true and typed.hold1 == true)
+  -- the fleet freeze holds every session the same way
+  quietly(function() fx.setFreeze(true) end)
+  local _, f1 = quietly(function() return fx.typeWhenReady(byK.idle1, "auto-continue", function() typed.frozen = true end) end)
+  quietly(beats)
+  check("freeze: a frozen fleet types into no session", f1 == false and not typed.frozen and #refusals("idle1") == 0)
+  quietly(function() fx.setFreeze(false) end)
+end
 
 -- kitty: the screen is read right before typing
 local function fixture(name) return readFile(HERE .. "fixtures/kitty-screens/" .. name .. ".ansi") or "" end

@@ -4153,6 +4153,9 @@ function FX.removeStatus(key)
   os.remove(POLICY_OVERRIDE_DIR .. "/" .. key)
   os.remove((os.getenv("CC_AUTOMODEL_DIR") or (home .. "/.claude/cc-automodel")) .. "/" .. key)
   os.remove(FX.TALK_DIR .. "/" .. key)   -- talk mode's flag
+  -- 2026-10-03 (D2): its hands-off hold -- a key hold goes with it; a process hold only once its claude
+  -- process is gone (a /clear ghost's process lives on in the next session). cc_remove too.
+  pcall(FX.holdPrune, key)
   -- ready-to-merge request + Shepherd's answer (cc_remove drops the same files)
   local mergeDir = os.getenv("CC_MERGE_DIR") or (home .. "/.claude/cc-merge")
   os.remove(mergeDir .. "/" .. key .. ".json")
@@ -6156,6 +6159,12 @@ function FX.annotateMerges(list, cfg, bannerOn)
         local crec, cid
         if checkOn then crec, cid = FX.checkerForRequest(key, r, f, cfg) end
         local okc, act, why = core.checkerDelegatedVerdict(crec, cid, checkOn)
+        -- 2026-10-03 (D2): a frozen fleet, or the unit's session on hold, merges nothing on the grant:
+        -- the request waits for Adam's own click, and its card says why
+        if okc and FX.holdStops("merge", items[key], { summary = "merge " .. tostring(r.branch) .. " on the batch grant", by = "fleet" }) then
+          okc, act, why = false, "hold", ((FX.holdOf(items[key]) == "fleet") and "the fleet is frozen" or "this session is on hold")
+            .. ": it waits for your Merge"
+        end
         if okc then
           FX._mergeApproved[key] = { nonce = r.nonce, at = FX.now(), delegated = true }
           FX.mergeAlert("⇡ merging " .. r.branch .. " on your batch grant (\"" .. b.title .. "\")")
@@ -7915,6 +7924,8 @@ function FX.automationRefuse(why)
   if cur then cur.refused = tostring(why or "not done") end
 end
 function FX.automationAct(kind, it, detail, fn)
+  -- 2026-10-03 (D2): a hold first -- a held session (or a frozen fleet) gets nothing, not even a would
+  if FX.holdStops(kind, it, detail) then return false, core.AUTOMATION_HELD end
   local dry, scope = core.automationDryRun(loadConfig(), kind)
   local name = tostring(type(it) == "table" and (it.label or it.name or it.key) or "?")
   if dry then
@@ -7940,6 +7951,155 @@ function FX.automationAct(kind, it, detail, fn)
     FX.automationNote(kind, it, "acted", nil, detail)
   end
   return table.unpack(res, 2, res.n)
+end
+
+-- ---- Hands-off hold (2026-10-03, mining round 2 D2) ----
+-- Adam holds one session (its tile menu, the detail panel's Hold) or freezes the fleet (the toolbar's
+-- ❄ Freeze): every automatic send stands down. The flags live in ~/.claude/cc-hold/ (core.holdId names
+-- them: the claude process, so a /clear keeps the hold), read once a tick (FX.readHolds: a quiet
+-- folder, no watcher) and at once after the panel's own toggles. FX.automationAct asks first (a
+-- "held" Trace row), and so does every sender outside that door (FX.holdStops). A held send is listed
+-- on its session -- FX._hold.skipped, by hold id, so a /clear keeps the list -- and never replayed.
+-- The mailbox is never held: its message waits (FX.stepMailbox, cc_held at the turn end and start).
+-- The shell reads the same flags (cc_held). Default MUST match cc-lib.sh's CC_HOLD_DIR.
+FX.HOLD_DIR = os.getenv("CC_HOLD_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-hold")
+FX._hold = { holds = { fleet = false, ids = {} }, skipped = {} }   -- skipped: hold id -> listed sends
+function FX.readHolds()
+  FX._hold.holds = core.holdsFrom(FX.readDir(FX.HOLD_DIR))
+  return FX._hold.holds
+end
+function FX.holdOf(it) return core.holdOf(FX._hold.holds, it) end
+-- The sends skipped while this session was held, oldest first ({} when none).
+function FX.holdSkipped(it)
+  return FX._hold.skipped[core.holdId(it) or ""] or {}
+end
+-- A sender a hold stood down: listed on its session (a sessionless one, a routine's spawn, on the
+-- fleet's list) and a "held" row in the Trace. Repeats are counted, not listed again.
+function FX.holdSkip(kind, it, detail, scope)
+  it = type(it) == "table" and it or {}
+  if type(detail) ~= "table" then detail = { summary = detail } end
+  local id = core.holdId(it) or core.HOLD_FLEET
+  local list = FX._hold.skipped[id] or {}
+  FX._hold.skipped[id] = list
+  local row = { at = FX.now(), kind = kind, label = core.automationKindLabel(kind),
+                summary = detail.summary ~= nil and tostring(detail.summary):sub(1, 200) or nil, by = detail.by }
+  if core.holdSkipAdd(list, row, core.HOLD_SKIPPED_CAP) then
+    print("[cc-dashboard] ⏸ " .. tostring(kind) .. " held for '" .. tostring(it.label or it.name or it.key or "?") .. "'"
+      .. (row.summary and (": " .. row.summary) or "") .. " (" .. tostring(scope) .. ")")
+  end
+  FX.automationNote(kind, it, "held", (scope == "fleet") and "the fleet is frozen" or "this session is on hold", detail)
+end
+-- Every sender outside FX.automationAct asks here: true -- and listed -- when a hold stands it down.
+function FX.holdStops(kind, it, detail)
+  local held, scope = core.automationHeld(FX._hold.holds, it, kind)
+  if held then FX.holdSkip(kind, it, detail, scope) end
+  return held
+end
+-- Put a session on hold, or lift it. A fresh hold starts a fresh list. true when the flag changed.
+function FX.setHold(it, on)
+  local id = (type(it) == "table" and not it.remote) and core.holdId(it) or nil
+  if not id then return false end
+  local path = FX.HOLD_DIR .. "/" .. id
+  if on then
+    if not FX.writeFileAtomic(path, hs.json.encode({ at = FX.now(), key = it.key, name = it.label or it.name })) then
+      print("[cc-dashboard] ❌ hold: couldn't write " .. path)
+      return false
+    end
+    FX._hold.skipped[id] = {}
+  else
+    os.remove(path)
+  end
+  FX.readHolds()
+  return true
+end
+function FX.setFreeze(on)
+  local path = FX.HOLD_DIR .. "/" .. core.HOLD_FLEET
+  if on then
+    if not FX.writeFileAtomic(path, hs.json.encode({ at = FX.now() })) then
+      print("[cc-dashboard] ❌ freeze: couldn't write " .. path)
+      return false
+    end
+    FX._hold.skipped[core.HOLD_FLEET] = {}
+  else
+    os.remove(path)
+  end
+  FX.readHolds()
+  return true
+end
+-- The tile menu's Hold and the detail panel's both land here. A remote tile's hooks read ITS host's
+-- cc-hold/, so a flag written here would be a dead control.
+function FX.toggleHold(it)
+  if type(it) ~= "table" or not it.key or it.remote then return end
+  local id = core.holdId(it)
+  local on = not (id ~= nil and FX._hold.holds.ids[id] == true)
+  if not FX.setHold(it, on) then return end
+  local name = tostring(it.label or it.name or it.key)
+  local n = on and 0 or #FX.holdSkipped(it)
+  ledgerFor(it, { type = "hold_toggle", on = on, text = on and "on" or "off", skipped = (not on) and n or nil })
+  print("[cc-dashboard] " .. (on and "⏸ on hold: " or "▶ hold lifted: ") .. name)
+  pcall(function() FX.alert("Claude Shepherd: " .. (on and "on hold: " or "hold lifted: ") .. name
+    .. ((n > 0) and (" -- " .. n .. " automatic send" .. (n == 1 and "" or "s") .. " skipped (listed in its panel)") or "")) end)
+  refresh()
+end
+-- The toolbar's ❄ Freeze: the whole fleet.
+function FX.toggleFreeze()
+  local on = not FX._hold.holds.fleet
+  if not FX.setFreeze(on) then return end
+  ledgerFor({ name = "fleet" }, { type = "fleet_freeze", on = on, text = on and "on" or "off" })
+  print("[cc-dashboard] " .. (on and "❄ the fleet is frozen" or "▶ the fleet is thawed"))
+  pcall(function() FX.alert(on and "Claude Shepherd: the fleet is frozen -- no automatic sends until you thaw it"
+    or "Claude Shepherd: the fleet is thawed -- automation is back, and waiting mail goes out") end)
+  refresh()
+end
+-- The detail panel's Clear: the list of a session no longer on hold.
+function FX.holdClear(it)
+  local id = core.holdId(it)
+  if id and not FX.holdOf(it) then FX._hold.skipped[id] = nil end
+  refresh()
+end
+-- Each tick: it.hold = { scope, skipped } on a held tile, or one with skipped sends still to read.
+function FX.annotateHolds(list)
+  for _, it in ipairs(list or {}) do
+    local scope = FX.holdOf(it)
+    local skipped = (not it.remote) and FX._hold.skipped[core.holdId(it) or ""] or nil
+    if scope or (skipped and #skipped > 0) then
+      it.hold = { scope = scope, skipped = skipped or {} }
+    else
+      it.hold = nil
+    end
+  end
+end
+-- The reapers (FX.removeStatus; cc_hold_prune in the shell): a key hold goes with its session; a
+-- process hold outlives a /clear and goes once its claude process is gone (FX.probeAlive -- an
+-- unknown answer keeps it). The fleet freeze is nobody's to reap.
+function FX.holdPrune(key)
+  if core.mailboxKeyOk(key) then
+    local kp = "key-" .. key
+    os.remove(FX.HOLD_DIR .. "/" .. kp)
+    FX._hold.skipped[kp] = nil
+    local tp = kp .. ".tmp."
+    for _, fn in ipairs(FX.readDir(FX.HOLD_DIR)) do
+      if fn:sub(1, #tp) == tp then os.remove(FX.HOLD_DIR .. "/" .. fn) end
+    end
+  end
+  local pids = {}
+  for _, fn in ipairs(FX.readDir(FX.HOLD_DIR)) do
+    if core.holdFileOf(fn) == "pid" then pids[fn] = true end
+  end
+  for id in pairs(FX._hold.skipped) do
+    if core.holdFileOf(id) == "pid" then pids[id] = true end
+  end
+  if next(pids) ~= nil then
+    local alive = FX.probeAlive(pids)
+    for p in pairs(pids) do
+      if alive[p] == false then
+        os.remove(FX.HOLD_DIR .. "/" .. p)
+        FX._hold.skipped[p] = nil
+        print("[cc-dashboard] 🧹 dropped the hold of claude process " .. p .. " (it is gone)")
+      end
+    end
+  end
+  FX.readHolds()
 end
 
 -- ---- Readiness before typing (2026-09-28) ----
@@ -7978,6 +8138,10 @@ function FX.typeWhenReady(it, typist, fn, opts)
     return false, why
   end
   if not key then return refused("no session") end
+  -- 2026-10-03 (D2): a session on hold (or a frozen fleet) gets nothing typed: skipped and listed
+  -- (FX.holdStops), never scheduled, never replayed -- and not a readiness refusal, so nothing holds it
+  -- past the moment Adam lifts the hold
+  if FX.holdStops(kind, it, detail) then return refused(core.AUTOMATION_HELD) end
   if core.typingHeld(FX._typing.held, it) then return refused("held") end
   local q = FX._typing.queued
   local view = setmetatable({ typing_queued = (q[key] or 0) + 1 }, { __index = it })
@@ -8007,6 +8171,8 @@ function FX.typeWhenReady(it, typist, fn, opts)
       end
       local _, why3 = FX.automationAct(kind, it, detail, fn)
       if why3 == core.AUTOMATION_DRY and opts.onDry then pcall(opts.onDry) end
+      -- a hold that landed after the send was scheduled: the sender releases what it reserved
+      if why3 == core.AUTOMATION_HELD then refused(why3) end
     end, opts.extraStagger)
   end)
   return true
@@ -8118,6 +8284,9 @@ function FX.mailboxNudge(it)
   local key = it.key
   local scheduled = FX.typeWhenReady(it, "mailbox", function()
     FX._mailbox.inflight[key] = nil
+    -- 2026-10-03 (D2): a hold that landed after this was scheduled -- the message stays, unclaimed (the
+    -- door lets the mailbox through: a message must still be written while the session is held)
+    if FX.holdOf(it) then return false, core.AUTOMATION_HELD end
     local c = FX.mailboxClaim(key)
     if not c then return false, "already handed over" end   -- its turn end or start took it first
     local acted = core.handleAction(FX, it, "nudge", core.mailboxNudge(c.text))
@@ -8144,8 +8313,11 @@ function FX.stepMailbox(list)
   local now = FX.now()
   for _, it in ipairs(list or {}) do
     local n = (not it.remote) and pending[it.key] or 0
-    local route = core.mailboxRoute(it, n)
-    it.mailboxWaiting = (route == "waiting") and n or nil
+    -- 2026-10-03 (D2): on hold, its message waits -- untyped, and its turn end hands nothing over
+    -- (cc_held) -- until the hold is lifted; the card says so
+    local route = core.mailboxRoute(it, n, FX.holdOf(it) ~= nil)
+    it.mailboxWaiting = (route == "waiting" or route == "held") and n or nil
+    it.mailboxHeld = (route == "held") or nil
     local since = FX._mailbox.inflight[it.key]
     if route == "type" and not (since and now - since < FX.MAILBOX_INFLIGHT_SECONDS) then
       FX.mailboxNudge(it)
@@ -8855,6 +9027,10 @@ function FX.resumeStepOne(key, it, now, cfg)
       if why == core.AUTOMATION_DRY then
         plan.verdict, plan.reason = "skip", "dry run"
         written = FX.resumeWritePlan(key, plan)
+      -- 2026-10-03 (D2): on hold the same -- the hook stops and nothing wakes it (skipped and listed)
+      elseif why == core.AUTOMATION_HELD then
+        plan.verdict, plan.reason = "skip", core.AUTOMATION_HELD
+        written = FX.resumeWritePlan(key, plan)
       end
     else
       written = FX.resumeWritePlan(key, plan)
@@ -8865,6 +9041,16 @@ function FX.resumeStepOne(key, it, now, cfg)
       .. (plan.resetAt and (" at " .. os.date("%H:%M", plan.resetAt)) or ""))
     ledgerFor(it or { key = key }, { type = "resume_planned", verdict = plan.verdict, reason = plan.reason,
       reset_at = plan.resetAt, window = plan.window, source = plan.source })
+  end
+  -- 2026-10-03 (D2): the hook found the session on hold at the reset and didn't wake it (cc-resume.sh:
+  -- skipped, reason "on hold") -- listed on the session once, never replayed
+  if arm.state == "skipped" and arm.reason == core.AUTOMATION_HELD and type(plan) == "table"
+     and plan.nonce == arm.nonce and not plan.heldListed then
+    plan.heldListed = now
+    if FX.resumeWritePlan(key, plan) then
+      FX.holdSkip("resume", it or { key = key }, { summary = "wake it at the limit reset (cc-resume.sh)", by = "resume" },
+        FX.holdOf(it or { key = key }) or "session")
+    end
   end
   local route = core.resumeRoute(arm, plan, it, now)
   if route == "type" then
@@ -12841,12 +13027,19 @@ local function handleBridgeMsg(msg)
     pcall(function() wv:evaluateJavaScript("send('open-hidden-view')") end)
     return
   end
+  -- 2026-10-03 (D2): the toolbar's ❄ Freeze -- the whole fleet on hold, or thawed
+  if a == "freeze" then
+    FX.toggleFreeze()
+    return
+  end
   if a == "open-trace" then
     -- 2026-09-29: the Automation trace -- fleet-wide from the menu, one session from the detail
     -- panel (payload.v). Newest first, repeats collapsed to ×N (core.collapseTrace).
     local out = { entries = core.collapseTrace(FX._automation.trace, { limit = 400 }),
                   dry = core.dryRunState(loadConfig()), kinds = {}, features = {}, focus = tostring(payload.v or "") }
     for _, k in ipairs(core.AUTOMATION_KINDS) do out.kinds[k.kind] = k.label end
+    -- 2026-10-03 (D2): the senders outside the door a hold stands down have rows too
+    for _, k in ipairs(core.HOLD_KINDS) do out.kinds[k.kind] = k.label end
     for _, f in ipairs(core.DRY_RUN_FEATURES) do out.features[f.feature] = f.label end
     print("[cc-dashboard] 🔍 automation trace: " .. #out.entries .. " row(s)"
       .. (out.focus ~= "" and (" (opened for " .. out.focus .. ")") or ""))
@@ -13810,6 +14003,16 @@ local function handleBridgeMsg(msg)
     FX.toggleTalk(item)
     return
   end
+  -- 2026-10-03 (D2): the detail panel's Hold (the tile menu calls FX.toggleHold itself), and Clear
+  -- for the list of sends skipped while it was held. A remote tile was refused just above.
+  if a == "hold" then
+    FX.toggleHold(item)
+    return
+  end
+  if a == "hold-clear" then
+    FX.holdClear(item)
+    return
+  end
   if a == "ctx-menu" then
     -- Right-click: show a real macOS popup menu at the cursor. Its items kick off
     -- IN-WEBVIEW interactions (no native dialog -> no console pop).
@@ -13874,6 +14077,10 @@ local function handleBridgeMsg(msg)
         -- a keystroke, so it works in a shared window too.
         { title = "Talk mode (discussion only)", checked = FX.talkOn(item.key),
           fn = function() FX.toggleTalk(item) end },
+        -- 2026-10-03 (D2): hands-off hold -- Shepherd sends this session nothing automatic. A flag
+        -- file, not a keystroke, so it works in a shared window too.
+        { title = "Hold (no automatic sends)", checked = FX.holdOf(item) == "session",
+          fn = function() FX.toggleHold(item) end },
         -- Clear / Compact: same effect as the detail-panel buttons (type the slash
         -- command into the session; headless on Kitty, best-effort in VS Code). A
         -- native confirm-submenu keeps the destructive /clear behind one more click,
@@ -14477,6 +14684,11 @@ local HTML = [[
   #lock { background:var(--surface); color:var(--text-2); border:1px solid var(--border); border-radius:8px;
           font-size:12px; padding:3px 8px; cursor:pointer; white-space:nowrap; }
   #lock:hover { background:#2a2330; color:var(--purple); border-color:#4a3f7a; }
+  /* 2026-10-03 (D2): the fleet freeze -- every automatic send stands down while it's on */
+  #freeze { background:var(--surface); color:var(--text-2); border:1px solid var(--border); border-radius:8px;
+            font-size:12px; padding:3px 8px; cursor:pointer; white-space:nowrap; }
+  #freeze:hover { background:var(--surface-hover); }
+  #freeze.active { background:#16303a; color:#8fd0f0; border-color:#2a7fa8; }
   /* Set-lock-password modal */
   #lockset { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:30; align-items:center; justify-content:center; }
   #lockset.show { display:flex; }
@@ -14693,6 +14905,9 @@ local HTML = [[
   /* 2026-09-28: talk mode (build program unit 6) -- the session reads and talks, changes nothing */
   .talk { font-size:10px; margin-left:6px; padding:1px 6px; border-radius:8px; font-weight:600;
     letter-spacing:.04em; color:var(--accent-text); border:1px solid var(--accent); background:var(--accent-bg); }
+  /* 2026-10-03 (D2): hands-off hold -- Shepherd sends this session nothing automatic */
+  .hold { font-size:10px; margin-left:6px; padding:1px 6px; border-radius:8px; font-weight:600;
+    letter-spacing:.04em; color:#8fd0f0; border:1px solid #2a7fa8; background:#16303a; }
   /* 2026-09-29: auto-compact -- the session saved notes for its next compaction */
   .notes-b { font-size:10px; margin-left:6px; line-height:1; }
   /* 2026-09-29: pinned links (cc-pin.sh) -- chips in the card's badges row and the detail panel */
@@ -15260,6 +15475,12 @@ local HTML = [[
   .wo-tool { color:var(--st-working); }
   .wo-skill { color:var(--accent-text); }
   #d-shared { display:none; font-size:11px; color:var(--warn); margin:6px 0 0; line-height:1.35; }
+  /* 2026-10-03 (D2): on hold -- what Shepherd skipped (never replayed) */
+  #d-hold { display:none; font-size:11px; color:var(--text-2); margin:6px 0 0; line-height:1.35; }
+  #d-hold .hd-head { color:#8fd0f0; }
+  #d-hold ul { margin:4px 0 0; padding-left:16px; max-height:120px; overflow:auto; }
+  #d-hold .hd-n { color:var(--muted); margin-left:4px; }
+  #d-hold button { font-size:11px; font-family:inherit; margin-left:6px; }
   #d-empty { display:none; font-size:11px; color:var(--muted); margin:6px 0 0; line-height:1.35; }
   #d-empty button { font-size:11px; font-family:inherit; margin-left:6px; }
   #d-prompt { font-size:12px; color:var(--text-3); margin:8px 0 0; max-height:48px; overflow:hidden; }
@@ -15718,6 +15939,7 @@ local HTML = [[
 .tr-acted .tr-oc{ color:var(--st-done); }
 .tr-would .tr-oc{ color:var(--st-approval); border-style:dashed; }
 .tr-refused .tr-oc{ color:var(--st-error); }
+.tr-held .tr-oc{ color:#8fd0f0; border-color:#2a7fa8; }
 .tr-kind{ color:var(--text-2); white-space:nowrap; }
 .tr-who{ color:var(--accent-text); white-space:nowrap; max-width:150px; overflow:hidden; text-overflow:ellipsis; }
 .tr-sum{ color:var(--text-2); flex:1; min-width:0; word-break:break-word; }
@@ -16060,6 +16282,7 @@ local HTML = [[
       <button id="spawn" onclick="openNew()" title="Spawn a new Claude session">New</button>
       <button id="caffeine" onclick="toggleCaffeine()" title="Keep this Mac awake — pmset disablesleep (asks for your password)">☕ Sleep ok</button>
       <button id="lock" onclick="lockMac()" title="Lock — block input until your password, while Claude sessions + remote control keep running (pair with Awake to close the lid locked)">🔒</button>
+      <button id="freeze" onclick="toggleFreeze()" title="Freeze the fleet: Shepherd sends no session anything automatic -- no auto-feed, rules, auto-continue, respawn, resume, Stop guards, scheduled routines or merges on a batch grant -- until you thaw it. Skipped sends are listed, never replayed; mail waits and goes out on the thaw.">❄</button>
       <span id="menu-wrap">
         <button id="menu-btn" onclick="toggleMenu(event)" title="Views — inbox, search, insights, audit, notifications">☰<span id="notify-badge"></span><span id="inbox-badge" title="Questions in the Inbox"></span></button>
         <div id="toolmenu">
@@ -16348,6 +16571,8 @@ local HTML = [[
          sit under #d-head, above the merge review -- which is decided by files, works in a shared
          window, and made Adam ask "why are you asking for a merge I cannot do here". -->
     <div id="d-shared"></div>
+    <!-- 2026-10-03 (D2): on hold, and what Shepherd skipped meanwhile (never replayed) -->
+    <div id="d-hold"></div>
     <div id="d-actions">
       <button id="b-jump"    onclick="act('focus')">Jump</button>
       <button id="b-approve" onclick="act('approve')">Approve</button>
@@ -16356,6 +16581,7 @@ local HTML = [[
       <button id="b-stop"    onclick="act('stop')">Stop</button>
       <button id="b-auto"    onclick="act('autopilot')">Autopilot</button>
       <button id="b-talk"    onclick="act('talk')" title="Talk mode: this session can read and talk but not change anything. Edits outside ~/.claude/ and its scratchpad, and shell commands that aren't read-only, are denied. Click again to turn it off.">Talk mode</button>
+      <button id="b-hold"    onclick="act('hold')" title="Hold: Shepherd sends this session nothing automatic -- no auto-feed, rules, auto-continue, resume, drain close, Stop guard or notes request, no merge on a batch grant -- until you lift it. Skipped sends are listed below, never replayed; its mail waits. Survives /clear.">Hold</button>
       <span class="sep"></span>
       <button id="b-clear"   onclick="act('clear')">Clear</button>
       <button id="b-compact" onclick="act('compact')">Compact</button>
@@ -17327,7 +17553,8 @@ local HTML = [[
       var n = it && it.mailboxWaiting;
       if(typeof n !== "number" || !(n > 0)) return "";
       n = Math.floor(n);
-      return " · " + n + (n === 1 ? " message" : " messages") + " waiting";
+      // 2026-10-03 (D2): a session on hold keeps its mail until the hold is lifted
+      return " · " + n + (n === 1 ? " message" : " messages") + " waiting" + (it.mailboxHeld === true ? " (on hold)" : "");
     }
     // 2026-09-29: a card stopped by a usage limit says what happens at the reset (FX.stepResume
     // sets it.resume from core.resumeCard): "resumes at 3:00pm", "limit reset — continue it",
@@ -17772,6 +17999,17 @@ local HTML = [[
       b.textContent = caffeineOn ? "☕ Awake" : "☕ Sleep ok";
     }
     function toggleCaffeine(){ send("caffeinate", (!caffeineOn).toString()); }
+    // 2026-10-03 (D2): the fleet freeze. Lua pushes the real state every tick (setFreeze); the
+    // button never flips on its own click.
+    var freezeOn = false;
+    function setFreeze(on){
+      freezeOn = !!on;
+      var b = document.getElementById("freeze");
+      if(!b) return;
+      b.classList.toggle("active", freezeOn);
+      b.textContent = freezeOn ? "❄ Frozen" : "❄";
+    }
+    function toggleFreeze(){ send("freeze"); }
     function lockMac(){ send("lock"); }   // Lua locks if a password is set, else calls openLockSet()
     function openLockSet(){
       document.getElementById("lockpw1").value = "";
@@ -21228,7 +21466,7 @@ local HTML = [[
         }
       }
       // b-verify, b-coach: a remote session has no checkout here; they type nothing, so a shared window keeps them
-      ["b-jump","b-stop","b-auto","b-talk","b-clear","b-compact","b-improve","b-nudge","b-feed","b-rewind",
+      ["b-jump","b-stop","b-auto","b-talk","b-hold","b-clear","b-compact","b-improve","b-nudge","b-feed","b-rewind",
        "effort","mode","d-model","d-gate","d-policy","nudge","b-verify","b-coach"].forEach(function(id){
         var el = document.getElementById(id); if(!el) return;
         var why = (remote && id !== "b-rewind") ? REMOTE_T : ((shared && SHARED_IDS.indexOf(id) >= 0) ? SHARED_T : "");
@@ -21242,6 +21480,7 @@ local HTML = [[
         dsh.style.display = shared ? "block" : "none";
       }
       renderPins(it);    // 2026-09-29: the session's pinned links (cc-pin.sh), under its notes line
+      renderHold(it);    // 2026-10-03: the Hold button, and what was skipped while it was held
       var dem = document.getElementById("d-empty");
       if(dem){
         var ne = it.windowEmptyChats | 0;   // never-used "Claude Code" chats in this window (2026-09-11)
@@ -21741,7 +21980,8 @@ local HTML = [[
     }
     function traceRowHtml(tr, kinds){
       if(!tr || typeof tr !== "object") return "";
-      var oc = (tr.outcome === "would" || tr.outcome === "refused") ? tr.outcome : "acted";
+      // 2026-10-03 (D2): held -- a hold (or the fleet freeze) stood it down
+      var oc = (tr.outcome === "would" || tr.outcome === "refused" || tr.outcome === "held") ? tr.outcome : "acted";
       var kind = (kinds && kinds[tr.kind]) || tr.kind || "?";
       var n = Math.max(1, Math.floor(+tr.count || 1));
       var when = traceClock(tr.at) + ((n > 1 && tr.first && +tr.first !== +tr.at) ? (" (since " + traceClock(tr.first) + ")") : "");
@@ -24679,7 +24919,7 @@ local HTML = [[
     // row of its own in the cards theme. One badges row now holds them -- emitted ONLY when at
     // least one badge exists, so a card without any gains no empty row.
     function badgesHtml(it){
-      var b = talkBadge(it) + riskBadge(it) + prBadgeHtml(it) + bgBadge(it) + notesBadge(it);
+      var b = talkBadge(it) + riskBadge(it) + holdBadge(it) + prBadgeHtml(it) + bgBadge(it) + notesBadge(it);
       b += pinChipsHtml(it);   // 2026-09-29: pinned links (cc-pin.sh)
       b += leaseBadge(it);     // 2026-09-29: worktree leases (the worktree's own port)
       b += ticketBadge(it);    // 2026-09-29: cross-repo tickets no session here can take
@@ -24802,6 +25042,50 @@ local HTML = [[
     function talkBadge(it){
       if(!it.talk) return "";
       return '<span class="talk" title="Talk mode: discussion only. Edits and commands that change things are denied.">'+esc("TALK")+'</span>';
+    }
+    // 2026-10-03 (D2): hands-off hold -- this session on hold, or the whole fleet frozen. Only a known
+    // scope shows; its words are fixed strings, never a field of the tile.
+    function holdBadge(it){
+      var s = it && it.hold && it.hold.scope;
+      if(s !== "session" && s !== "fleet") return "";
+      var tip = s === "fleet" ? "The fleet is frozen: Shepherd sends no session anything automatic until you thaw it (❄ in the toolbar)."
+        : "On hold: Shepherd sends this session nothing automatic until you lift it (its menu or detail panel).";
+      return '<span class="hold" title="'+esc(tip)+'">'+esc(s === "fleet" ? "FROZEN" : "HOLD")+'</span>';
+    }
+    // The detail panel: the Hold button shows this session's own hold (a frozen fleet holds it too,
+    // and the block below says so), then the block itself. A remote session greys it (renderDetail's
+    // list): its hooks read its own host's cc-hold/. A flag file, so a shared window keeps it.
+    function renderHold(it){
+      var bh = document.getElementById("b-hold");
+      var held = !!(it && it.hold && it.hold.scope === "session");
+      if(bh){ bh.textContent = held ? "Hold: ON" : "Hold"; bh.style.color = held ? "#8fd0f0" : "#e8e9ee"; }
+      var dh = document.getElementById("d-hold");
+      if(!dh) return;
+      var hh = holdPanelHtml(it && it.hold);
+      dh.innerHTML = hh;
+      dh.style.display = hh ? "block" : "none";
+    }
+    // The detail panel's block: on hold (or frozen), and the sends Shepherd skipped meanwhile -- each
+    // listed once with ×N, never replayed. Every field came from a session or its queue: esc().
+    // Clear empties the list once the session is no longer held.
+    function holdPanelHtml(h){
+      if(!h || typeof h !== "object") return "";
+      var list = Array.isArray(h.skipped) ? h.skipped : [];
+      var head = h.scope === "fleet" ? "❄ The fleet is frozen: Shepherd sends this session nothing automatic. Its mail waits for the thaw."
+        : (h.scope === "session" ? "⏸ On hold: Shepherd sends this session nothing automatic. Its mail waits until you lift it."
+        : (list.length ? "While it was on hold, Shepherd skipped:" : ""));
+      if(!head) return "";
+      var out = '<div class="hd-head">' + esc(head) + (!h.scope && list.length ? '<button onclick="act(\'hold-clear\')">Clear</button>' : '') + '</div>';
+      if(list.length){
+        if(h.scope) out += '<div>Skipped so far (never replayed):</div>';
+        out += '<ul>' + list.slice().reverse().map(function(hd){
+          if(!hd || typeof hd !== "object") return "";
+          var n = Math.max(1, Math.floor(+hd.count || 1));
+          return '<li>' + esc(traceClock(hd.at)) + ' · ' + esc(hd.label || hd.kind || "?")
+            + (hd.summary ? ': ' + esc(hd.summary) : '') + (n > 1 ? '<span class="hd-n">×' + n + '</span>' : '') + '</li>';
+        }).join("") + '</ul>';
+      }
+      return out;
     }
     // ---- Project stacks: the card's extras ----------------------------------------
     // Branch chip only where it tells instances apart (a multi-instance card, or a lone
@@ -25603,6 +25887,8 @@ function FX._refreshBody()
   reconcileBridge(cfg)  -- SSH bridge timers track config (cheap diff per tick)
   pcall(function() FX.pollHostStats(false, cfg) end)  -- #6 host stats: self-gating (off by default) + throttled (HOST_TTL)
   local list = refreshList()
+  -- 2026-10-03 (D2): the hands-off holds, read once a tick before any sender asks (a quiet folder, no watcher)
+  pcall(FX.readHolds)
   -- Cohort tag (.group) MUST be applied before the routing dispatcher below: L4
   -- @role: routing matches a task's role against a member's GROUP, and routeGroups
   -- holds references to these same tiles. (Also feeds the filter chips, group-scoped
@@ -25997,12 +26283,16 @@ function FX._refreshBody()
     local drained = false
     if drainOn and core.shouldDrainClose(draining[it.key], pv and pv.status, it.status) then
       draining[it.key] = nil
+      -- 2026-10-03 (D2): a session on hold (or a frozen fleet) isn't closed: skipped and listed, and
+      -- the drain is spent -- never replayed once the hold is lifted
+      if not FX.holdStops("drain", it, { summary = "close it after its turn (drain)", by = "drain" }) then
       print("[cc-drain] " .. it.name .. " finished its turn -> closing")
       ledgerFor(it, { type = "drain_close" })
       -- Serialized (R3 #2): two drains firing in the same refresh tick would
       -- otherwise both schedule ⌘⇧W chords against the LAST-focused window.
       dispatchSerialized(it, "close", function() core.handleAction(FX, it, "close") end)
       drained = true
+      end
     end
     -- Drain badge: surface the armed in-memory intent on the tile. Set AFTER the
     -- shouldDrainClose block (which clears the flag when it fires) so a tile whose
@@ -26413,6 +26703,11 @@ function FX._refreshBody()
           sstate = core.scheduleMarkFired(sstate, r.name, os.time())
         elseif core.scheduleBackpressure(liveCount, cap) then
           print("[cc-sched] backpressure (" .. liveCount .. "/" .. cap .. "): deferring '" .. tostring(r.name) .. "'")
+        -- 2026-10-03 (D2): a frozen fleet spawns nothing: skipped and listed, and marked fired so the
+        -- thaw doesn't replay it (a one-shot is spent)
+        elseif FX.holdStops("schedule", { name = r.name, cwd = r.folder },
+            { summary = "spawn routine '" .. tostring(r.name) .. "' in " .. tostring(r.folder), by = "schedule" }) then
+          sstate = core.scheduleMarkFired(sstate, r.name, os.time())
         else
           print("[cc-sched] firing routine '" .. tostring(r.name) .. "' (" .. tostring(r.kind) .. ")")
           FX.spawnSession(r.editor or core.config(cfg, "spawn.editor", "terminal"),
@@ -26656,6 +26951,11 @@ function FX._refreshBody()
     local okm, errm = pcall(FX.stepMailbox, list)
     if not okm then print("[cc-dashboard] ❌ mailbox step failed: " .. tostring(errm)) end
   end
+  -- 2026-10-03 (D2): which cards are on hold (the HOLD badge, the menu, the detail panel's list)
+  do
+    local okh, errh = pcall(FX.annotateHolds, list)
+    if not okh then print("[cc-dashboard] ❌ hold stamp failed: " .. tostring(errh)) end
+  end
   -- resume at the usage limit's reset (2026-09-29): plan new arms, type or flag the ones due
   do
     local okr, errr = pcall(FX.stepResume, list)
@@ -26890,6 +27190,8 @@ function FX._refreshBody()
     -- safety valve for hiding one that later blocks on approval: it stays hidden
     -- as asked, but the fleet never silently loses a session you can't find.
     pcall(function() wv:evaluateJavaScript("setHiddenCount(" .. tostring(#hiddenList) .. ")") end)
+    -- 2026-10-03 (D2): the toolbar's ❄ Freeze says whether the fleet is frozen
+    pcall(function() wv:evaluateJavaScript("setFreeze(" .. tostring(FX._hold.holds.fleet == true) .. ")") end)
     pcall(FX.pushInbox)   -- 2026-09-29: the Inbox's rows and ☰'s badge (open questions + held asks)
     pcall(FX.pushTickets) -- 2026-09-29: the Tickets board's rows (cross-repo tickets)
   end

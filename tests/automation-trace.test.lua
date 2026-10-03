@@ -41,6 +41,8 @@ local function status(key, over)
 end
 for _, k in ipairs({ "idle1", "idle2", "idle3", "idle4" }) do status(k) end
 status("busy1", { status = "working" })
+-- 2026-10-03 (D2): a session the hands-off hold covers, held by its claude process
+status("held1", { session_pid = "4242" })
 
 local realGetenv = os.getenv
 local ENV = { CC_STATUS_DIR = T .. "/status", CC_WORKLIST_FILE = T .. "/worklist.json",
@@ -72,7 +74,8 @@ local hs = {
   json = json,
   fs = {
     dir = function(path)
-      local files, p = {}, io.popen('ls -1 "' .. tostring(path) .. '" 2>/dev/null')
+      -- -A: dotfiles too, as the real hs.fs.dir lists them (2026-10-03: the fleet freeze is cc-hold/.fleet)
+      local files, p = {}, io.popen('ls -1A "' .. tostring(path) .. '" 2>/dev/null')
       if p then for line in p:lines() do files[#files + 1] = line end; p:close() end
       local i = 0; return function() i = i + 1; return files[i] end
     end,
@@ -256,6 +259,141 @@ local re = rows("idle4", "rule")
 check("refused: an effect that errors still errors (the tick behaves as before)", okErr == false)
 check("refused: ...and the Trace records it", #re == 1 and re[1].outcome == "refused" and tostring(re[1].reason):find("boom", 1, true) ~= nil)
 
+-- ---- hands-off hold (2026-10-03, mining round 2 D2) ----
+-- A session on hold (cc-hold/<session_pid>, or key-<key> where no process is known) or a frozen fleet
+-- (cc-hold/.fleet): FX.automationAct stands every effect down -- a "held" row in the Trace, the send
+-- listed for the session, never replayed -- except a mailbox message, which is written and waits, and
+-- is handed over once the hold is lifted.
+config({})
+local HOLD = T .. "/.claude/cc-hold"
+-- stamp the fixture's own tiles (a panel action's refresh() builds new ones)
+local function stampHolds() local l = {}; for _, it in pairs(byK) do l[#l + 1] = it end; fx.annotateHolds(l) end
+check("hold: FX.setHold and FX.setFreeze exist", type(fx.setHold) == "function" and type(fx.setFreeze) == "function")
+if type(fx.setHold) ~= "function" or type(fx.setFreeze) ~= "function" then finish() end
+check("(fixture: the held session is on the panel)", byK.held1 ~= nil)
+quietly(function() fx.setHold(byK.held1, true) end)
+check("hold: Hold writes cc-hold/<session_pid>", readFile(HOLD .. "/4242") ~= nil)
+local ranH = false
+local _, hA, hB = quietly(function()
+  return fx.automationAct("continue", byK.held1, { summary = "continue", by = "auto-continue" }, function() ranH = true; return true end)
+end)
+check("hold: a held session's automatic effect doesn't run, and says why  (" .. tostring(hA) .. ", " .. tostring(hB) .. ")",
+      ranH == false and hA == false and hB == core.AUTOMATION_HELD)
+local rh = rows("held1", "continue")
+check("hold: ...the Trace row says held, and why  (" .. tostring(rh[1] and rh[1].reason) .. ")",
+      #rh == 1 and rh[1].outcome == "held" and rh[1].reason == "this session is on hold" and rh[1].summary == "continue")
+check("hold: ...ledgered once as automation/held", (function()
+  local n = 0
+  for _, ev in ipairs(events("automation", "held1")) do if ev.outcome == "held" and ev.kind == "continue" then n = n + 1 end end
+  return n == 1
+end)())
+-- a hold wins over a dry run: a held session gets nothing, not even a would
+config({ automation = { dryRun = true } })
+quietly(function() fx.automationAct("feed", byK.held1, { summary = "feed 'x'" }, function() ranH = true end) end)
+local rhf = rows("held1", "feed")
+check("hold: a hold wins over a dry run (held, not would)", ranH == false and #rhf == 1 and rhf[1].outcome == "held"
+      and #events("would_feed", "held1") == 0)
+config({})
+-- typed sends: refused at the readiness door, never typed
+quietly(function() fx.typeWhenReady(byK.held1, "autofeed", function() typed.held1 = true end, { summary = "feed 'y'" }) end)
+quietly(beats)
+check("hold: an automated send is not typed into a held session", typed.held1 == nil)
+-- the same skip again: counted, not a second row
+clock = NOW + 200
+quietly(function() fx.automationAct("continue", byK.held1, { summary = "continue", by = "auto-continue" }, function() ranH = true end) end)
+local list = fx.holdSkipped(byK.held1)
+local cont
+for _, e in ipairs(list) do if e.kind == "continue" then cont = e end end
+check("hold: the skipped sends are listed for the session  (" .. #list .. ")", #list == 3)
+check("hold: ...a repeat is counted, not listed twice", cont ~= nil and cont.count == 2 and cont.at == NOW + 200)
+-- the outside senders ask the same question
+local _, dStops = quietly(function() return fx.holdStops("drain", byK.held1, { summary = "close it after its turn", by = "drain" }) end)
+local rd = rows("held1", "drain")
+check("hold: FX.holdStops stands an outside sender down (the drain close) and lists it",
+      dStops == true and #rd == 1 and rd[1].outcome == "held")
+local _, freeStops = quietly(function() return fx.holdStops("drain", byK.idle1, { summary = "close", by = "drain" }) end)
+check("hold: ...and lets a free session's through, recording nothing", freeStops == false and #rows("idle1", "drain") == 0)
+-- the tile carries it, for the badge, the menu and the detail panel
+quietly(stampHolds)
+check("hold: the tile says it is on hold, with the skipped sends", type(byK.held1.hold) == "table"
+      and byK.held1.hold.scope == "session" and #(byK.held1.hold.skipped or {}) == 4)
+check("hold: ...another session's tile says nothing", byK.idle1.hold == nil)
+-- the mailbox: written, waits, not typed while held; delivered once the hold is lifted
+local _, mp3 = quietly(function() return fx.mailboxSend("held1", "News on ticket t1.") end)
+check("hold: a mailbox message to a held session is still written (it waits)", type(mp3) == "string" and readFile(mp3) ~= nil)
+check("hold: ...the mailbox send isn't a held row", (function()
+  for _, r in ipairs(rows("held1", "mailbox")) do if r.outcome == "held" then return false end end
+  return true
+end)())
+local nudged, realNudge = {}, fx.mailboxNudge
+fx.mailboxNudge = function(it) if it.key == "held1" then nudged[#nudged + 1] = it.key end end
+quietly(function() fx.stepMailbox({ byK.held1 }) end)
+check("hold: ...nothing is typed while it is held", #nudged == 0)
+check("hold: ...the card says the message waits, on hold", byK.held1.mailboxWaiting == 1 and byK.held1.mailboxHeld == true)
+quietly(function() fx.setHold(byK.held1, false) end)
+check("hold: lifting it removes the flag", readFile(HOLD .. "/4242") == nil)
+quietly(function() fx.stepMailbox({ byK.held1 }) end)
+check("hold: once lifted, the waiting message is delivered", #nudged == 1 and nudged[1] == "held1" and not byK.held1.mailboxHeld)
+fx.mailboxNudge = realNudge
+-- a nudge scheduled just before a hold lands: at send time it types nothing and the message stays
+-- (the mailbox isn't held at the door -- its write must go through -- so the nudge asks itself)
+-- (the typing itself is stubbed: a nudge that does go through "lands", and takes the message)
+local realHandle = core.handleAction
+core.handleAction = function() return "nudge" end
+quietly(function() fx.mailboxNudge(byK.held1) end)
+write(HOLD .. "/4242", "{}")
+quietly(function() fx.readHolds() end)
+quietly(beats)
+core.handleAction = realHandle
+local rmb = rows("held1", "mailbox")
+local leftIn = io.popen('ls -1 "' .. T .. '/inbox/held1" 2>/dev/null'):read("*a") or ""
+check("hold: a mailbox nudge that fires after the hold landed types nothing  (" .. tostring(rmb[#rmb] and rmb[#rmb].reason) .. ")",
+      rmb[#rmb] ~= nil and rmb[#rmb].outcome == "refused" and rmb[#rmb].reason == core.AUTOMATION_HELD)
+check("hold: ...and the message stays, unclaimed", leftIn:find("%.msg\n") ~= nil and not leftIn:find("claim", 1, true))
+os.remove(HOLD .. "/4242")
+quietly(function() fx.readHolds() end)
+ranH = false
+quietly(function() fx.automationAct("continue", byK.held1, { summary = "continue" }, function() ranH = true; return true end) end)
+check("hold: ...and automation acts on it again", ranH == true)
+check("hold: nothing held was replayed on release", typed.held1 == nil)
+quietly(stampHolds)
+check("hold: the skipped list stays readable after the hold is lifted", byK.held1.hold ~= nil
+      and byK.held1.hold.scope == nil and #(byK.held1.hold.skipped or {}) == 4)
+-- the detail panel's Hold and Clear, through the panel's message channel
+quietly(function() panelCb({ body = json.encode({ a = "hold-clear", v = "held1", text = "" }) }) end)
+quietly(stampHolds)
+check("hold: Clear empties the list of a session no longer on hold", byK.held1.hold == nil)
+quietly(function() panelCb({ body = json.encode({ a = "hold", v = "idle3", text = "" }) }) end)
+check("hold: the detail panel's Hold holds a session with no known process by its key", readFile(HOLD .. "/key-idle3") ~= nil)
+check("hold: ...and is ledgered", (function()
+  for _, ev in ipairs(events("hold_toggle", "idle3")) do if ev.on == true then return true end end
+  return false
+end)())
+quietly(function() panelCb({ body = json.encode({ a = "hold", v = "idle3", text = "" }) }) end)
+check("hold: ...pressed again, it lifts it", readFile(HOLD .. "/key-idle3") == nil)
+-- the fleet freeze: the toolbar's button
+quietly(function() panelCb({ body = json.encode({ a = "freeze", v = "", text = "" }) }) end)
+check("freeze: the toolbar's Freeze writes cc-hold/.fleet", readFile(HOLD .. "/.fleet") ~= nil)
+ranH = false
+quietly(function() fx.automationAct("respawn", byK.idle4, { summary = "relaunch" }, function() ranH = true end) end)
+local rfz = rows("idle4", "respawn")
+check("freeze: every session's automation stands down  (" .. tostring(rfz[#rfz] and rfz[#rfz].reason) .. ")",
+      ranH == false and rfz[#rfz].outcome == "held" and rfz[#rfz].reason == "the fleet is frozen")
+local _, sStops = quietly(function() return fx.holdStops("schedule", { name = "nightly" }, { summary = "spawn 'nightly'", by = "schedule" }) end)
+check("freeze: a scheduled routine's spawn (no session) stands down too", sStops == true)
+quietly(stampHolds)
+check("freeze: every tile says the fleet is frozen", byK.idle2.hold and byK.idle2.hold.scope == "fleet")
+check("freeze: the panel knows (for the toolbar)", fx._hold.holds.fleet == true)
+quietly(function() panelCb({ body = json.encode({ a = "freeze", v = "", text = "" }) }) end)
+check("freeze: pressed again, it thaws", readFile(HOLD .. "/.fleet") == nil and fx._hold.holds.fleet == false)
+-- a flag written outside the panel is read on the next tick (a quiet folder, no watcher)
+write(HOLD .. "/.fleet", "")
+quietly(function() fx.readHolds() end)
+check("freeze: a .fleet written by hand is honored once read", fx._hold.holds.fleet == true)
+os.remove(HOLD .. "/.fleet")
+quietly(function() fx.readHolds() end)
+check("freeze: ...and its removal too", fx._hold.holds.fleet == false)
+
 -- ---- the Trace view ----
 js = {}
 quietly(function() panelCb({ body = json.encode({ a = "open-trace", v = "idle2", text = "" }) }) end)
@@ -274,6 +412,12 @@ check("trace view: a repeated decision comes as one row x2", sawX2)
 check("trace view: focused on the session it was opened for", payload.focus == "idle2")
 check("trace view: says whether dry run is on (off now)", type(payload.dry) == "table" and payload.dry.on == false)
 check("trace view: labels for every kind", type(payload.kinds) == "table" and payload.kinds.tabless_end ~= nil and payload.kinds.continue ~= nil)
+check("trace view: labels for the senders outside the door a hold stands down (drain, schedule, merge)",
+      payload.kinds.drain ~= nil and payload.kinds.schedule ~= nil and payload.kinds.merge ~= nil)
+check("trace view: a held decision comes as a held row", (function()
+  for _, e in ipairs(ents) do if e.key == "held1" and e.outcome == "held" then return true end end
+  return false
+end)())
 
 -- ---- Settings: Save writes the switches into their own blocks, keeping the rest ----
 config({ rules = { enabled = true }, tabless = { autoEndMinutes = 20 } })

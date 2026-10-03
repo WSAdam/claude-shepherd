@@ -158,6 +158,7 @@ Everything lives under `~/.claude/`:
 | `cc-reqs.json` | [Requirement ids](merging-and-batches.md#requirement-ids-and-the-merge-receipt): each repo's `REQ-NNN` list (Shepherd is its only writer) |
 | `cc-ask/` | Answers to held questions (the question itself is in the session's status file) |
 | `cc-guard/` | The Stop guards' once-markers: a turn [sent back for asking in prose](approvals-and-policies.md#questions-asked-in-prose-come-back) is marked here, so it is sent back once, and so is the commit a [finished unit was reminded](approvals-and-policies.md#finished-units-get-a-merge-reminder) about, or [sent back for its diff](approvals-and-policies.md#done-is-checked-against-the-diff) |
+| `cc-hold/` | [Hands-off holds](automation.md#hands-off-hold): `<pid>` for a session held by its claude process, `key-<key>` for one without, `.fleet` for the fleet freeze |
 | `cc-decide/` | The [decisions inbox](approvals-and-policies.md#decisions-inbox): open `cc-decide.sh` questions and their answers |
 | `cc-inbox/` | The [session mailbox](automation.md#session-mailbox): messages waiting for each session |
 | `cc-send/` | [cc-send](automation.md#send-a-prompt-from-a-shell) requests waiting for Shepherd, and its answers |

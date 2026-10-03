@@ -85,6 +85,47 @@ let it, and what it did while you were away. Your own clicks never go through it
 Outside a dry run nothing changes: each action does exactly what it did before, with the same
 readiness and shared-window refusals.
 
+## Hands-off hold
+
+A dry run still records what automation *would* do. A hold stops it for one session, or for the
+whole fleet, while you take over.
+
+- **Hold one session.** **Hold (no automatic sends)** in the tile's right-click menu, or **Hold** in
+  the detail panel. A **HOLD** badge marks the tile. The hold belongs to the session's claude
+  process, so it survives `/clear`. A terminal or kitty session has no known process, so its hold
+  is keyed to the session itself and a `/clear` drops it. Click again to lift it.
+- **Freeze the fleet.** **❄** in the toolbar holds every session, and reads **❄ Frozen** while it is
+  on. Every tile shows **FROZEN**. Click again to thaw.
+- **What stands down.** Everything that goes through the [one door](#dry-run-and-the-automation-trace):
+  auto-continue, auto-feed, project routing, rules, auto-respawn, the self-summary, resume at the
+  limit reset, ending a tab-less leftover, the `/rc` sweep, and the reopens and `Continue` of a fleet
+  restart. Senders outside the door also stand down:
+  - the [drain](#drain-and-tile-cleanup) close, which is used up rather than run later;
+  - a [routine](#routines)'s spawn, while the fleet is frozen (it is marked fired, so a one-shot
+    is used up);
+  - a merge on a [batch grant](merging-and-batches.md). The request waits for your **Merge** instead,
+    and its card says why;
+  - in the session's own hooks: the [Stop guards](approvals-and-policies.md#questions-asked-in-prose-come-back), the
+    [notes request](#auto-compact-with-notes), and the resume hook's wake at the reset.
+
+  A dry run doesn't override a hold. A held session gets nothing, not even a *would*.
+- **Skipped, listed, never replayed.** Each send a hold stops shows as a **held** row in the
+  Automation trace (`automation` with `outcome` `held` in the ledger). It is also listed in the
+  session's detail panel with its time and ×N for repeats. Lifting the hold replays nothing. The
+  list stays readable afterwards until you press **Clear**. Sends with no session, such as a
+  routine's spawn, are only in the trace.
+- **Mail waits.** A [mailbox](#session-mailbox) message is never held. Messages from other sessions,
+  ticket news and your answers to `cc-decide.sh` questions are still written. They wait: nothing is
+  typed, and the session's turn end and start hand nothing over. The card says
+  "1 message waiting (on hold)". Once you lift the hold, mail goes out as usual: typed into an idle
+  session where typing is safe, or handed over at its next turn end or start.
+- **Your own clicks** (Nudge, Feed next, Continue, Merge) still work on a held session.
+
+The flags are files in `~/.claude/cc-hold/`: `<pid>` for a session's claude process, `key-<key>`
+for a session without one, and `.fleet` for the freeze. Shepherd reads them every tick and the hooks
+read them on every turn end. Deleting a file by hand lifts that hold. A session's hold is removed
+when the session ends.
+
 ## Task queue
 
 Each session has a queue. **Queue** in the detail panel adds the input; **Feed next** sends the

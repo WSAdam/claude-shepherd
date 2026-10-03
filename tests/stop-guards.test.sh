@@ -560,4 +560,83 @@ assert_absent "SessionEnd removes the session's fake-completion marker" "$CC_GUA
 assert_eq "defaults/cc-config.json ships stopGuards.fakeDone on" "true" \
   "$(jq -r '.stopGuards.fakeDone' "$ROOT/defaults/cc-config.json" 2>/dev/null)"
 
+# ---- hands-off hold (2026-10-03, mining round 2 D2) ----
+# Adam held this session (cc-hold/<session_pid>: its claude process, so a /clear keeps it; key-<key>
+# where no process is known) or froze the fleet (cc-hold/.fleet). Nothing automatic reaches it at its
+# turn end: the Stop guards and the notes request stand down, and a mailbox message waits, unclaimed,
+# to be handed over at the first turn end after the hold is lifted. Its start takes no mail either.
+export CC_HOLD_DIR="$TMP/cc-hold"
+mkdir -p "$CC_HOLD_DIR"
+# hstatus <sid> [session_pid]: a session the hook has seen, with its claude process when known
+hstatus() {
+  jq -nc --arg s "$1" --arg c "$CWD" --arg p "${2:-}" \
+    '{session_id:$s, cwd:$c, status:"working"} + (if $p == "" then {} else {session_pid:$p} end)' > "$CC_STATUS_DIR/$1.json"
+}
+hmail() {
+  mkdir -p "$CC_INBOX_DIR/$1"
+  jq -nc --arg t "$2" '{nonce:"ab12", text:$t, at:1790000000, from:"shepherd"}' > "$CC_INBOX_DIR/$1/1790000000-000001-ab12.msg"
+}
+hleft() { ls "$CC_INBOX_DIR/$1" 2>/dev/null | grep -c '\.msg$'; }
+
+hstatus h1 4242
+touch "$CC_HOLD_DIR/4242"
+got="$(evout stop "$(stop_json h1 "All green. Want me to push?")")"
+assert_eq "hold: a held session's turn end isn't sent back by a Stop guard" "" "$got"
+assert_json "...it is done" "$CC_STATUS_DIR/h1.json" '.status' "done"
+assert_json "...and its claude process is still on record" "$CC_STATUS_DIR/h1.json" '.session_pid' "4242"
+hmail h1 "[shepherd] Adam says: yes, push it."
+got="$(evout stop "$(stop_json h1 "Pushed.")")"
+assert_eq "hold: a mailbox message isn't handed over at a held session's turn end" "" "$got"
+assert_eq "...it waits in the inbox, unclaimed" "1" "$(hleft h1)"
+got="$(evout sessionstart "$(jq -nc --arg c "$CWD" '{session_id:"h1", cwd:$c, source:"resume"}')")"
+assert_eq "hold: its start takes no mail either" "" "$(printf '%s' "$got" | grep -F "Adam says")"
+assert_eq "...the message still waits" "1" "$(hleft h1)"
+# the same claude process after a /clear: a new key, and the hold stays (it is the process's)
+TRH="$TMP/tr/h2.jsonl"
+jq -nc '{type:"assistant", message:{role:"assistant", content:[{type:"text", text:"Done."}], usage:{input_tokens:150000}}}' > "$TRH"
+hstatus h2 4242
+printf '144000 153000 200000\n' > "$CC_NOTES_DIR/h2.due-at"
+got="$(evout stop "$(stop_json h2 "Done. Want me to push?" false default "$TRH")")"
+assert_eq "hold: the notes request stands down too, and the hold outlives a /clear (same process, new key)" "" "$got"
+# lifted: the waiting message is handed over at the next turn end
+rm -f "$CC_HOLD_DIR/4242"
+got="$(evout stop "$(stop_json h1 "Pushed.")")"
+assert_eq "hold lifted: the message that waited is handed over at the next turn end" \
+  "[shepherd] Adam says: yes, push it." "$(reason "$got")"
+assert_eq "...and leaves the inbox" "0" "$(hleft h1)"
+# a session with no known process (a terminal or kitty one) is held by its key
+hstatus h3
+touch "$CC_HOLD_DIR/key-h3"
+got="$(evout stop "$(stop_json h3 "Want me to push?")")"
+assert_eq "hold: a session with no known process is held by its key" "" "$got"
+rm -f "$CC_HOLD_DIR/key-h3"
+# another session isn't held by this one's hold
+hstatus h6 5150
+touch "$CC_HOLD_DIR/4242"
+got="$(evout stop "$(stop_json h6 "Want me to push?")")"
+assert_eq "hold: another session's turn end is still sent back" "block" "$(decision "$got")"
+rm -f "$CC_HOLD_DIR/4242"
+# the fleet freeze holds every session
+touch "$CC_HOLD_DIR/.fleet"
+got="$(evout stop "$(stop_json h4 "Want me to push?")")"
+assert_eq "freeze: a frozen fleet's turn ends aren't sent back" "" "$got"
+rm -f "$CC_HOLD_DIR/.fleet"
+got="$(evout stop "$(stop_json h4 "Want me to push?")")"
+assert_eq "...and once it thaws, the guards are back" "block" "$(decision "$got")"
+# with no hold anywhere, asking costs no process (no jq for the session's pid, no ps walk)
+assert_eq "hold: cc-lib.sh asks cc_held" "yes" "$( . "$ROOT/cc-lib.sh"; type cc_held >/dev/null 2>&1 && echo yes)"
+spy="$TMP/held-spy"; mkdir -p "$spy"
+for tool in jq ps; do
+  printf '#!/bin/sh\necho %s >> "%s/calls"\nexec "%s" "$@"\n' "$tool" "$spy" "$(command -v "$tool")" > "$spy/$tool"
+  chmod +x "$spy/$tool"
+done
+hstatus h7 4242
+# (the spy's log starts after cc-lib.sh is sourced: only cc_held's own calls count)
+( PATH="$spy:$PATH"; . "$ROOT/cc-lib.sh"; : > "$spy/calls"; cc_held h7 ) >/dev/null 2>&1
+assert_eq "hold: with no hold anywhere, cc_held runs no process" "0" "$(cat "$spy/calls" 2>/dev/null | grep -c .)"
+touch "$CC_HOLD_DIR/4242"
+assert_eq "...and with one, it finds this session's (the spy really sees it)" "held 1" \
+  "$( PATH="$spy:$PATH"; . "$ROOT/cc-lib.sh"; : > "$spy/calls"; cc_held h7 && printf 'held '; grep -c . "$spy/calls")"
+rm -f "$CC_HOLD_DIR/4242"
+
 finish

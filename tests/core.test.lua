@@ -8474,7 +8474,8 @@ do
   -- 2026-10-03: 46 -> 47 for the brief pre-flight ("preflight", flagged new).
   -- 2026-10-03: 47 -> 48 for checking "done" against the diff ("fakedone", flagged new).
   -- 2026-10-03: 48 -> 49 for the fleet-idle alert ("fleetidle", flagged new).
-  eq("FEATURES: the 49 new features are flagged", newCount, 49)
+  -- 2026-10-03: 49 -> 50 for the hands-off hold and fleet freeze ("hold", flagged new).
+  eq("FEATURES: the 50 new features are flagged", newCount, 50)
   check("FEATURES: lists checking \"done\" against the diff", keys.fakedone == true)
   check("FEATURES: lists the unfinished-unit reminder", keys.unfinished == true)
   check("FEATURES: lists the brief pre-flight", keys.preflight == true)
@@ -14633,6 +14634,86 @@ do
   local kept = core.overlayConfig({ seance = { maxBudgetUsd = 35, timeoutSeconds = 600 } }, { seance = {} })
   check("seance: a Settings save keeps a hand-set budget cap and timeout",
         kept.seance and kept.seance.maxBudgetUsd == 35 and kept.seance.timeoutSeconds == 600)
+end
+
+-- ---- Hands-off hold (2026-10-03, mining round 2 unit D2) ----
+-- Adam holds one session (by its claude process, so a /clear keeps it; by its key where no process is
+-- known) or freezes the fleet: every automatic send stands down. The mailbox never does -- its
+-- messages wait and are handed over once the hold is lifted.
+do
+  eq("holdId: a session's hold is filed under its claude process", core.holdId({ key = "k1", session_pid = "4242" }), "4242")
+  eq("holdId: ...a number counts too", core.holdId({ key = "k1", session_pid = 4242 }), "4242")
+  eq("holdId: no process (a terminal or kitty session) -> its key", core.holdId({ key = "k1" }), "key-k1")
+  eq("holdId: a session_pid that isn't a pid -> its key", core.holdId({ key = "k1", session_pid = "12; rm" }), "key-k1")
+  eq("holdId: a key that could name a path outside the folder has none", core.holdId({ key = "../x" }), nil)
+  eq("holdId: nothing to go on", core.holdId(nil), nil)
+
+  eq("holdFileOf: the fleet freeze", core.holdFileOf(".fleet"), "fleet")
+  eq("holdFileOf: a session's process", core.holdFileOf("4242"), "pid")
+  eq("holdFileOf: a session's key", core.holdFileOf("key-k1"), "key")
+  eq("holdFileOf: a torn write is nobody's hold", core.holdFileOf("4242.tmp.77"), nil)
+  eq("holdFileOf: ...nor is . or ..", core.holdFileOf(".."), nil)
+  eq("holdFileOf: ...nor a stranger", core.holdFileOf("notes.txt"), nil)
+
+  local h = core.holdsFrom({ ".", "..", "4242", "key-k2", "4242.tmp.9", "junk" })
+  check("holdsFrom: the ids, no freeze", h.fleet == false and h.ids["4242"] == true and h.ids["key-k2"] == true
+        and h.ids["4242.tmp.9"] == nil and h.ids.junk == nil)
+  check("holdsFrom: .fleet is the freeze", core.holdsFrom({ ".fleet" }).fleet == true)
+  check("holdsFrom: an empty folder holds nothing", next(core.holdsFrom({}).ids) == nil and core.holdsFrom(nil).fleet == false)
+
+  local held = { key = "a", session_pid = "4242" }
+  local cleared = { key = "a2", session_pid = "4242" }   -- the same process after a /clear
+  local free = { key = "b", session_pid = "5150" }
+  local kitty = { key = "k2", editor = "kitty" }
+  eq("holdOf: a session on hold", core.holdOf(h, held), "session")
+  eq("holdOf: ...still on hold after a /clear (same process, new key)", core.holdOf(h, cleared), "session")
+  eq("holdOf: another session isn't", core.holdOf(h, free), nil)
+  eq("holdOf: a kitty session held by its key", core.holdOf(h, kitty), "session")
+  eq("holdOf: a remote session's pid is another machine's -- never a local hold",
+     core.holdOf(h, { key = "r", session_pid = "4242", remote = { host = "box" } }), nil)
+  local frozen = core.holdsFrom({ ".fleet" })
+  eq("holdOf: a frozen fleet holds every session", core.holdOf(frozen, free), "fleet")
+  eq("holdOf: ...remote ones too", core.holdOf(frozen, { key = "r", remote = { host = "box" } }), "fleet")
+  eq("holdOf: ...and an effect with no session at all (a routine's spawn)", core.holdOf(frozen, { name = "nightly" }), "fleet")
+  eq("holdOf: no holds read yet", core.holdOf(nil, held), nil)
+
+  local a1, s1 = core.automationHeld(h, held, "continue")
+  check("automationHeld: a held session's auto-continue stands down", a1 == true and s1 == "session")
+  check("automationHeld: ...a feed, a rule, a respawn, a resume, the drain close too",
+        core.automationHeld(h, held, "feed") and core.automationHeld(h, held, "rule") and core.automationHeld(h, held, "respawn")
+        and core.automationHeld(h, held, "resume") and core.automationHeld(h, held, "drain"))
+  eq("automationHeld: a mailbox message is never held (it waits in the inbox)", core.automationHeld(h, held, "mailbox"), false)
+  eq("automationHeld: a free session acts", core.automationHeld(h, free, "continue"), false)
+  local a2, s2 = core.automationHeld(frozen, free, "schedule")
+  check("automationHeld: a frozen fleet holds a scheduled spawn", a2 == true and s2 == "fleet")
+  eq("automationHeld: the `why` a held effect returns", core.AUTOMATION_HELD, "on hold")
+
+  -- the held list: a repeat bumps its count instead of adding a row; the newest `cap` are kept
+  local list = {}
+  check("holdSkipAdd: a first skip is a new row", core.holdSkipAdd(list, { at = 10, kind = "continue", summary = "continue" }, 3) == true)
+  check("holdSkipAdd: the same send again bumps it", core.holdSkipAdd(list, { at = 20, kind = "continue", summary = "continue" }, 3) == false
+        and #list == 1 and list[1].count == 2 and list[1].at == 20 and list[1].first == 10)
+  core.holdSkipAdd(list, { at = 30, kind = "feed", summary = "feed 'a'" }, 3)
+  core.holdSkipAdd(list, { at = 40, kind = "feed", summary = "feed 'b'" }, 3)
+  core.holdSkipAdd(list, { at = 50, kind = "rule", summary = "nudge" }, 3)
+  check("holdSkipAdd: only the newest `cap` are kept", #list == 3 and list[1].summary == "feed 'a'" and list[3].kind == "rule")
+  check("holdSkipAdd: a send already listed further up is bumped and becomes the newest, not a second row",
+        core.holdSkipAdd(list, { at = 60, kind = "feed", summary = "feed 'a'" }, 3) == false
+        and #list == 3 and list[3].summary == "feed 'a'" and list[3].count == 2 and list[3].at == 60)
+
+  -- the mailbox: a held session's messages wait (not typed, not handed over at its turn end)
+  local idle = { key = "m1", status = "done", editor = "kitty" }
+  eq("mailboxRoute: an idle session's message is typed", core.mailboxRoute(idle, 1), "type")
+  eq("mailboxRoute: ...but not while it's on hold", core.mailboxRoute(idle, 1, true), "held")
+  eq("mailboxRoute: ...even mid-turn (its turn end hands nothing over either)",
+     core.mailboxRoute({ key = "m1", status = "working" }, 1, true), "held")
+  eq("mailboxRoute: nothing waiting, nothing to hold", core.mailboxRoute(idle, 0, true), nil)
+
+  local hk = {}; for _, k in ipairs(core.HOLD_KINDS) do hk[k.kind] = k.label end
+  check("HOLD_KINDS: the senders outside the door have Trace labels", hk.drain and hk.schedule and hk.merge)
+  local fkeys = {}; for _, ft in ipairs(core.FEATURES) do fkeys[ft.key] = ft end
+  check("hold: FEATURES lists the hands-off hold, flagged new", fkeys.hold ~= nil and fkeys.hold.new == true
+        and fkeys.hold.title == "Hands-off hold")
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))

@@ -49,6 +49,10 @@ export CC_TICKETS_DIR="${CC_TICKETS_DIR:-$CC_TEST_ISOLATION/cc-tickets}"
 # 2026-10-02: a Stop guard that blocks leaves a once-marker in ~/.claude/cc-guard, and a SessionEnd
 # (cc_remove) drops the session's; a suite's fake session must never write or drop a real one.
 export CC_GUARD_DIR="${CC_GUARD_DIR:-$CC_TEST_ISOLATION/cc-guard}"
+# 2026-10-03: a hold Adam puts on a live session or the fleet (~/.claude/cc-hold) stands its Stop guards,
+# notes, mail and resume wake down, and a SessionEnd (cc_remove) reaps holds; a suite's fake session
+# must never read or reap a real one.
+export CC_HOLD_DIR="${CC_HOLD_DIR:-$CC_TEST_ISOLATION/cc-hold}"
 
 # sysbin_without <outdir> <tool>... - mirror /usr/bin + /bin into <outdir> as symlinks,
 # leaving out the named tools, and echo <outdir>. Use it in place of a literal

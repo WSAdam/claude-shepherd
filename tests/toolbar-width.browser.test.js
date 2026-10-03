@@ -102,7 +102,9 @@ function measure() {
     const W = " @" + width + "px";
     const g = await page.evaluate(measure);
 
-    check("the toolbar holds its six controls" + W, g.controls.length === 6);
+    // 2026-10-03: six -> seven -- the hands-off hold's ❄ Freeze joined the toolbar (a new control, not
+    // a looser check: every geometry check below holds for all seven)
+    check("the toolbar holds its seven controls" + W, g.controls.length === 7);
     const outside = g.controls.filter((c) => c.left < -0.5 || c.right > g.vw + 0.5).map((c) => c.id + " " + Math.round(c.left) + "–" + Math.round(c.right));
     check("every toolbar control is fully inside the panel" + (outside.length ? " (" + outside.join(", ") + ")" : "") + W, outside.length === 0);
     if (width >= 360) check("the panel doesn't scroll sideways (" + g.pageOverflow + "px over)" + W, g.pageOverflow <= 0);
@@ -114,7 +116,7 @@ function measure() {
 
     if (width === 580) {
       check("at the default width the title shows, whole, on one line" + W, g.titleShown && g.titleLines === 1 && !g.titleClipped);
-      check("...with all six controls in one row" + W, g.rows.length === 1);
+      check("...with all seven controls in one row" + W, g.rows.length === 1);
     }
     if (width === 400) {
       check("too narrow for the title: it hides" + W, !g.titleShown);

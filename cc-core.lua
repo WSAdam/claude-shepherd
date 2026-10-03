@@ -12591,6 +12591,99 @@ function M.automationDryRun(cfg, kind)
   return false
 end
 
+-- ---- Hands-off hold (2026-10-03, mining round 2 D2) ----
+-- Adam puts one session on hold (its tile menu or detail panel) or freezes the whole fleet (the
+-- toolbar's ❄ Freeze), and Shepherd's automatic sends stand down. A hold is a flag in ~/.claude/cc-hold/:
+-- <session_pid> (the claude process, so a /clear -- the same process, a new session -- keeps it),
+-- key-<key> for a session whose process isn't known (a terminal or kitty one), and .fleet for the
+-- freeze. The folder is read each tick, never watched. FX.automationAct honors it -- a "held" row in the
+-- Trace -- and so does every sender outside that door (FX.holdStops): the drain close, a scheduled
+-- routine's spawn, a merge on a batch grant, and in the shell the Stop guards, the notes request, the
+-- mail a turn end or start hands over, and the resume wake (cc_held, cc-lib.sh). A held send is
+-- skipped and listed, never replayed. The mailbox itself is never held: a message is written and
+-- waits, and is handed over once the hold is lifted. KEEP THE NAMES IN SYNC with cc_held / cc_hold_prune.
+M.AUTOMATION_HELD = "on hold"   -- the `why` FX.automationAct returns when a hold stood the effect down
+M.HOLD_FLEET = ".fleet"
+M.HOLD_SKIPPED_CAP = 20         -- the skipped sends listed per session, newest kept
+-- The senders outside FX.automationAct a hold stands down, by their kind in the Trace.
+M.HOLD_KINDS = {
+  { kind = "drain",    label = "Drain close" },
+  { kind = "schedule", label = "Scheduled routine" },
+  { kind = "merge",    label = "Merge on a batch grant" },
+}
+-- A kind's name in the Trace and the held list: its AUTOMATION_KINDS or HOLD_KINDS label, else itself.
+function M.automationKindLabel(kind)
+  for _, k in ipairs(M.AUTOMATION_KINDS) do if k.kind == kind then return k.label end end
+  for _, k in ipairs(M.HOLD_KINDS) do if k.kind == kind then return k.label end end
+  return tostring(kind or "?")
+end
+-- The name a session's hold is filed under: its claude process, else "key-<key>"; nil when neither
+-- can name a file in the folder.
+function M.holdId(it)
+  if type(it) ~= "table" then return nil end
+  local pid = tostring(it.session_pid or ""):match("^%d+$")
+  if pid then return pid end
+  if M.mailboxKeyOk(it.key) then return "key-" .. it.key end
+  return nil
+end
+-- What a cc-hold/ file is: "fleet", "pid", "key", or nil (a torn write, ., .., a stranger).
+function M.holdFileOf(name)
+  if type(name) ~= "string" then return nil end
+  if name == M.HOLD_FLEET then return "fleet" end
+  if name:match("^%d+$") then return "pid" end
+  local key = name:match("^key%-(.+)$")
+  if key and M.mailboxKeyOk(key) and not key:find("%.tmp%.") then return "key" end
+  return nil
+end
+-- The folder's names -> { fleet = bool, ids = { [holdId] = true } }.
+function M.holdsFrom(names)
+  local h = { fleet = false, ids = {} }
+  for _, n in ipairs(type(names) == "table" and names or {}) do
+    local kind = M.holdFileOf(n)
+    if kind == "fleet" then h.fleet = true elseif kind then h.ids[n] = true end
+  end
+  return h
+end
+-- Is this session held? "fleet" (the freeze holds everything, an effect with no session too),
+-- "session" (its own hold), or nil. A remote session's pid is another machine's: only the freeze.
+function M.holdOf(holds, it)
+  if type(holds) ~= "table" then return nil end
+  if holds.fleet == true then return "fleet" end
+  if type(it) ~= "table" or it.remote or type(holds.ids) ~= "table" then return nil end
+  local id = M.holdId(it)
+  if id and holds.ids[id] then return "session" end
+  return nil
+end
+-- Is `kind` held for this session? true plus the scope ("session" / "fleet"), or false. Never the
+-- mailbox: its message is written and waits for the hold to lift (M.mailboxRoute says "held").
+function M.automationHeld(holds, it, kind)
+  if kind == "mailbox" then return false end
+  local scope = M.holdOf(holds, it)
+  if scope then return true, scope end
+  return false
+end
+-- List a skipped send e = { at, kind, summary, by } in `list` (oldest first). One already listed
+-- (same kind and summary) is bumped -- count, at -- and moved to the end, and returns false; anything
+-- else is a new row (true). The newest `cap` are kept. Mutates list.
+function M.holdSkipAdd(list, e, cap)
+  if type(list) ~= "table" or type(e) ~= "table" then return false end
+  for i, r in ipairs(list) do
+    if r.kind == e.kind and tostring(r.summary or "") == tostring(e.summary or "") then
+      r.count, r.at = (r.count or 1) + 1, e.at
+      table.remove(list, i)
+      list[#list + 1] = r
+      return false
+    end
+  end
+  local row = {}
+  for k, v in pairs(e) do row[k] = v end
+  row.first, row.count = row.first or row.at, row.count or 1
+  list[#list + 1] = row
+  cap = tonumber(cap) or M.HOLD_SKIPPED_CAP
+  while #list > cap do table.remove(list, 1) end
+  return true
+end
+
 -- What's in dry run, for the Trace's banner: { all, on, features = { feature, ... } } (Settings order).
 function M.dryRunState(cfg)
   cfg = type(cfg) == "table" and cfg or {}
@@ -12768,8 +12861,11 @@ end
 -- Code window shared with other Claude tabs, where nothing may be typed: it waits for the
 -- session's next turn end or start, and the card says so), or "type" (idle where Shepherd may
 -- type: FX.typeWhenReady types it once the session is ready).
-function M.mailboxRoute(it, n)
+-- 2026-10-03 (D2): `held` (the session is on hold, or the fleet frozen) -> "held": nothing is typed,
+-- and its turn end and start hand nothing over (cc_held) -- the message waits for the hold to lift.
+function M.mailboxRoute(it, n, held)
   if type(it) ~= "table" or (tonumber(n) or 0) <= 0 or it.remote then return nil end
+  if held then return "held" end
   if it.status == "working" or it.status == "approval" or it.gate == "waiting" then return "turn-end" end
   if M.keystrokeBlocked(it) then return "waiting" end
   return "type"
@@ -22926,6 +23022,9 @@ M.FEATURES = {
   { key = "talk", cat = "Control", new = true, title = "Talk mode",
     what = "One click in a tile's menu or the detail panel puts a session in discussion-only mode: it can read, search and run read-only commands (ls, cat, grep, git log...), but edits outside ~/.claude/ and its scratchpad, and shell commands that change things, are denied. A TALK badge marks the tile.",
     why = "Ask a session to explain, review or plan without it changing anything -- whatever the gate, autopilot or its permission mode says." },
+  { key = "hold", cat = "Control", new = true, title = "Hands-off hold",
+    what = "Hold in a tile's menu or the detail panel puts one session on hold, and ❄ Freeze in the toolbar holds the whole fleet: Shepherd types nothing into it and acts on nothing -- no auto-feed, routing, rules, auto-continue, respawn, resume, drain close, Stop guard or notes request, no scheduled routine, no merge on a batch grant (those wait for your click). Each skipped send is listed on the session, never replayed. Mail from other sessions, tickets and your answers waits and arrives once you lift it. A HOLD badge marks the tile, and the hold survives /clear.",
+    why = "Take over a session, or stop everything at once, without Shepherd typing into it behind your back -- and see afterwards what it would have done." },
   { key = "fence", cat = "Control", new = true, title = "Worktree fence",
     what = "A session can't edit files in another worktree of its own repo, or run git that changes one (git -C <other> commit, cd <other> && git add, --work-tree, GIT_DIR=...). Read-only git (status, log, diff) still works, and a session in the main checkout may change main. Its own approved merge into main is the one exception.",
     why = "Parallel units stay in their own lanes: a slip of a path never lands one unit's change in another's branch -- whatever the gate or its permission mode says." },

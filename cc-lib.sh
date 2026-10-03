@@ -533,6 +533,47 @@ cc_pins_prune() {
   return 0
 }
 
+# Hands-off hold (mining round 2 D2, 2026-10-03): Adam put a session on hold -- cc-hold/<session_pid>,
+# its claude process, so a /clear (the same process, a new session) keeps it; key-<key> for a session
+# whose process isn't known (a terminal or kitty one) -- or froze the fleet (cc-hold/.fleet). Shepherd's
+# automatic sends stand down: here the Stop guards, the notes request and the mail a turn end or start
+# hands over (cc-status.sh, cc_session_context), and the resume wake (cc-resume.sh). Only the panel
+# writes the flags. KEEP THE NAMES IN SYNC with core.holdFileOf. Default MUST match FX.HOLD_DIR.
+CC_HOLD_DIR="${CC_HOLD_DIR:-${HOME}/.claude/cc-hold}"
+# 0 when this session is held. Costs no process unless some session is held by its claude process:
+# then one jq for this session's pid (from its status file).
+cc_held() { # <key>
+  [ -d "$CC_HOLD_DIR" ] || return 1
+  [ -e "$CC_HOLD_DIR/.fleet" ] && return 0
+  case "$1" in ''|.|..|*/*) ;; *) [ -e "$CC_HOLD_DIR/key-$1" ] && return 0 ;; esac
+  local f any=""
+  for f in "$CC_HOLD_DIR"/[0-9]*; do
+    case "${f##*/}" in *[!0-9]*) continue ;; esac   # a torn write (<pid>.tmp.<n>) is nobody's hold
+    [ -e "$f" ] && { any=1; break; }
+  done
+  [ -n "$any" ] || return 1
+  local sp; sp="$(cc_read_field "$1" '.session_pid')"
+  case "$sp" in ''|*[!0-9]*) return 1 ;; esac
+  [ -e "$CC_HOLD_DIR/$sp" ]
+}
+# The removers' share (cc_remove; FX.holdPrune in the panel): the session's key hold and its torn
+# writes; a process hold only once its claude process is gone (a /clear ends one session, not the
+# process). The fleet freeze is nobody's to reap.
+cc_hold_prune() { # <key>
+  [ -d "$CC_HOLD_DIR" ] || return 0
+  case "$1" in ''|.|..|*/*) ;; *) rm -f "$CC_HOLD_DIR/key-$1" "$CC_HOLD_DIR/key-$1".tmp.* 2>/dev/null ;; esac
+  local f p
+  for f in "$CC_HOLD_DIR"/[0-9]*; do
+    [ -e "$f" ] || continue
+    p="${f##*/}"
+    case "$p" in *[!0-9]*) continue ;; esac
+    kill -0 "$p" 2>/dev/null && continue
+    rm -f "$f" 2>/dev/null
+    cc_debug "cc_hold_prune: dropped the hold of claude process $p (it is gone)"
+  done
+  return 0
+}
+
 # Worktree leases (build program unit 27, 2026-09-29): Shepherd leases each worktree it starts a
 # session for its own PORT and DB path, in CC_LEASE_DIR/<encoded main checkout>.json. Shepherd is
 # the ONLY writer -- its sweep frees a gone worktree's lease and deletes the database file it named
@@ -638,6 +679,8 @@ cc_decide_prune() {
 # cc-guard/<key>.<guard> (2026-10-02): the Stop guards' once-markers, every guard's.
 # cc-merge/<key>.notyet (2026-10-03): the commit Adam answered Not yet for (cc-merge.sh), which the
 # unfinished-unit reminder doesn't push back at him.
+# cc-hold/key-<key> (2026-10-03): the session's hands-off hold, when no claude process is known; a
+# process hold (cc-hold/<pid>) outlives a /clear and goes once that process is gone (cc_hold_prune).
 # KEEP THE FILE SET IN SYNC with FX.removeStatus in claude-dashboard.lua.
 cc_remove() {
   rm -f "$(cc_file "$1")" "$(cc_file "$1")".tmp.* "$(cc_decision_file "$1")" \
@@ -667,6 +710,8 @@ cc_remove() {
   esac
   # Pinned links are per worktree, not per key: only those of a worktree that's gone (2026-09-29).
   cc_pins_prune
+  # Hands-off holds (2026-10-03): the session's key hold; a process hold once its process is gone.
+  cc_hold_prune "$1"
   # Worktree leases are per main checkout: only the files nothing can use (2026-09-29).
   cc_lease_prune
   # The decisions inbox: the session's open questions, then every session's stale files (2026-09-29).
@@ -1710,14 +1755,20 @@ CC_CONTEXT_PARTS="notes lease finish decisions tickets onpurpose handoff mailbox
 CC_CONTEXT_MAX=8000
 CC_PENDING_MAX_AGE=3600   # a respawn's note nobody took within the hour is stale
 
+# 2026-10-03: a session on hold (or a frozen fleet, cc_held) is handed no mail at its start -- the
+# mailbox, Adam's late answers and ticket news wait, and arrive once the hold is lifted.
+CC_HOLD_MAIL_PARTS="mailbox decisions tickets"
+
 cc_session_context() { # $1 source (startup|resume|clear|compact), $2 key, $3 cwd
   [ -z "${CC_SHEPHERD_INTERNAL:-}" ] || return 0   # Shepherd's own runs take nothing
-  local out="" name part block keep max="$CC_CONTEXT_MAX"
+  local out="" name part block keep max="$CC_CONTEXT_MAX" held=""
+  cc_held "$2" && held=1
   # 2026-09-29: a compacted session's notes have their own 12KB (CC_NOTES_PART_MAX) on top of the
   # cap every other part shares, so the notes never crowd the rest out -- or get cut at 8000.
   [ "$1" != compact ] || max=$(( CC_CONTEXT_MAX + ${CC_NOTES_PART_MAX:-12288} + 512 ))
   local cut="[cut: Shepherd's session context is capped at $max characters]"
   for name in $CC_CONTEXT_PARTS; do
+    if [ -n "$held" ]; then case " $CC_HOLD_MAIL_PARTS " in *" $name "*) continue ;; esac; fi
     part="$("_cc_ctx_$name" "$1" "$2" "$3")"
     [ -n "$part" ] || continue
     block="[Shepherd: $name]"$'\n'"$part"

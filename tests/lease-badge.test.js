@@ -41,6 +41,7 @@ if (!(escSrc && titleSrc && badgeSrc && badgesSrc)) {
 }
 const lib = new Function(
   "function talkBadge(){ return ''; } function riskBadge(){ return ''; } function prBadgeHtml(){ return ''; }\n" +
+  "function holdBadge(){ return ''; }\n" +   // 2026-10-03: the hands-off hold's badge joined the row
   "function bgBadge(){ return ''; } function notesBadge(){ return ''; } function pinChipsHtml(){ return ''; }\n" +
   "function ticketBadge(){ return ''; } function coachBadge(){ return ''; } function schedLockBadge(){ return ''; }\n" +
   escSrc + "\n" + titleSrc + "\n" + badgeSrc + "\n" + badgesSrc +

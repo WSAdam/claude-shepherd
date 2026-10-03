@@ -190,6 +190,31 @@ assert_absent "...no arm" "$CC_RESUME_DIR/s9.json"
 assert_eq "a key that could leave the folder arms nothing" "0" "$(wait_rc h3)"
 assert_eq "...writing nothing outside it" "" "$(ls "$TMP" | grep -v -E '^(status|cc-resume|[a-z][0-9]+\.(out|err|rc))$')"
 
+# ---- a hands-off hold (2026-10-03, mining round 2 D2): the wake stands down ----
+# Adam held the session (cc-hold/<session_pid>) or froze the fleet (cc-hold/.fleet) while it waited:
+# at the reset nothing wakes it. The arm says skipped, on hold -- Shepherd lists it on the session --
+# and nothing is replayed once the hold is lifted (a skipped arm waits for a clean Stop like any other).
+HOLD_DIR="$TMP/k0-hold"; mkdir -p "$HOLD_DIR"
+spawn_pid P9
+printf '{"session_id":"s10","status":"error","session_pid":"%s"}' "$P9" > "$CC_STATUS_DIR/s10.json"
+( printf '%s' "$(fail_json s10)" | CC_HOLD_DIR="$HOLD_DIR" CC_RESUME_SESSION_PID="$P9" CLAUDE_CODE_ENTRYPOINT=claude-vscode \
+    bash "$HOOK" >"$TMP/k1.out" 2>"$TMP/k1.err"; echo $? > "$TMP/k1.rc" ) &
+wait_file "$CC_RESUME_DIR/s10.json"
+touch "$HOLD_DIR/$P9"
+plan s10 "$(arm_field s10 '.nonce')" wait "$(( $(NOW) - 1 ))"
+assert_eq "hold: at the reset a held session isn't woken -- the waiter exits 0" "0" "$(wait_rc k1)"
+assert_eq "...silently (nothing reaches the model)" "" "$(cat "$TMP/k1.err")"
+assert_eq "...and the arm says skipped, on hold" "skipped on hold" "$(arm_field s10 '.state') $(arm_field s10 '.reason')"
+rm -f "$HOLD_DIR/$P9"
+spawn_pid P10
+( printf '%s' "$(fail_json s11)" | CC_HOLD_DIR="$HOLD_DIR" CC_RESUME_SESSION_PID="$P10" CLAUDE_CODE_ENTRYPOINT=claude-vscode \
+    bash "$HOOK" >"$TMP/k2.out" 2>"$TMP/k2.err"; echo $? > "$TMP/k2.rc" ) &
+wait_file "$CC_RESUME_DIR/s11.json"
+touch "$HOLD_DIR/.fleet"
+plan s11 "$(arm_field s11 '.nonce')" wait "$(( $(NOW) - 1 ))"
+assert_eq "freeze: a frozen fleet's waiter doesn't wake its session either" "0 skipped" "$(wait_rc k2) $(arm_field s11 '.state')"
+rm -r "$HOLD_DIR"
+
 # ---- the wiring ----
 H="$ROOT/settings-hooks.json"
 assert_eq "settings-hooks.json: a StopFailure group with matcher rate_limit runs cc-resume.sh" "1" \

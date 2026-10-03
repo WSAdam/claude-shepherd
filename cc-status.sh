@@ -234,6 +234,12 @@ case "$EVENT" in
     ;;
   stop)
     STATUS="done"
+    # 2026-10-03: hands-off hold (mining round 2 D2). Adam put this session on hold or froze the
+    # fleet: nothing automatic reaches it at its turn end -- its mail waits (handed over at the first
+    # turn end after the hold is lifted), and the notes request and the Stop guards stand down.
+    # (cc_held tests the folder first: with no hold anywhere it costs no process.)
+    HELD=""
+    cc_held "$KEY" && HELD="1"
     # 2026-09-29: resume at the limit reset. A clean turn end clears the resume this session's
     # usage limit armed (cc-resume.sh): its waiter stops, and only now may the next limit arm
     # again -- a resume that hits the limit again ends in StopFailure, never here, so it can't loop.
@@ -246,7 +252,7 @@ case "$EVENT" in
     # it and stays working. Never while stop_hook_active -- that stop ends a turn a block already
     # kept going, and blocking it again could loop -- and never in Shepherd's own internal runs.
     # (The folder test first: most sessions have no inbox, and it costs no jq.)
-    if [ -d "$CC_INBOX_DIR/$KEY" ] && [ -z "${CC_SHEPHERD_INTERNAL:-}" ] \
+    if [ -z "$HELD" ] && [ -d "$CC_INBOX_DIR/$KEY" ] && [ -z "${CC_SHEPHERD_INTERNAL:-}" ] \
        && [ "$(cc_get "$INPUT" '.stop_hook_active')" != "true" ]; then
       STOP_MAIL="$(cc_mailbox_claim "$KEY" stop)" && STATUS="working"
     fi
@@ -254,7 +260,7 @@ case "$EVENT" in
     # first turn end of a compaction cycle asks it to write its notes before Claude Code compacts
     # it (cc_notes_request: never while stop_hook_active or in plan mode). Blocked, it stays working.
     # (The file test first: with compaction off there is no due-at, and it costs nothing.)
-    if [ -f "$CC_NOTES_DIR/$KEY.due-at" ] && [ -z "${CC_SHEPHERD_INTERNAL:-}" ]; then
+    if [ -z "$HELD" ] && [ -f "$CC_NOTES_DIR/$KEY.due-at" ] && [ -z "${CC_SHEPHERD_INTERNAL:-}" ]; then
       STOP_NOTES="$(cc_notes_request "$KEY" "$INPUT")" && STATUS="working"
     fi
     # 2026-10-02: the Stop guards (mining round 2). A turn that ended the wrong way -- asking Adam a
@@ -263,7 +269,7 @@ case "$EVENT" in
     # without asking to merge (stopGuards.unfinished, 2026-10-03) -- is sent back once with a reason, through
     # cc_stop_decision, and stays working. A mailbox message stands them down: it is new input, maybe
     # the very answer. (cc_stop_guard reads the config first: with every switch off it costs one jq.)
-    if [ -z "${STOP_MAIL:-}" ] && [ -z "${CC_SHEPHERD_INTERNAL:-}" ]; then
+    if [ -z "$HELD" ] && [ -z "${STOP_MAIL:-}" ] && [ -z "${CC_SHEPHERD_INTERNAL:-}" ]; then
       STOP_GUARD="$(cc_stop_guard "$KEY" "$INPUT")" && STATUS="working"
     fi
     ;;
