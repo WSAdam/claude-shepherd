@@ -6725,11 +6725,89 @@ function FX.coachNewest(root)
   return newest
 end
 
+-- ---- Evidence runs (2026-10-03, mining round 2 unit B4) ----
+-- With coach.evidence.minItems set (and coach.enabled), a repo whose weekly run isn't due gets a run
+-- once enough new evidence came in since its last one (core.coachDue): entries in Shepherd's own log
+-- (merge notes, checker verdicts, lessons filed with cc-lesson.sh), then Adam's corrections and
+-- interrupts in its transcripts since. The log is a small file, read in the tick; the transcripts are
+-- counted in the background (core.coachScanCmd, one hs.task per repo), only when the log alone isn't
+-- enough and at most every COACH.evidence.recountSeconds. The daily cap (coach.evidence.dailyUsd)
+-- weighs every repo's evidence runs today: Shepherd's own evidence-spend.json, plus each in flight.
+-- counts: root -> { since, n, at } (the last transcript count), with { task, startedAt } while one runs.
+FX._coach.counts = {}
+function FX.coachSpendPath() return FX.COACH_DIR .. "/evidence-spend.json" end
+function FX.coachSpend() return core.parseCoachSpend(FX.readFile(FX.coachSpendPath())) end
+function FX.coachSpendAdd(usd)
+  local s = core.coachSpendAdd(FX.coachSpend(), usd, FX.now())
+  if not FX.writeFileAtomic(FX.coachSpendPath(), core.json.encode(s)) then
+    print("[cc-dashboard] ❌ coach: couldn't save today's evidence-run spend")
+  end
+  return s
+end
+
+-- How many new evidence items `root` has since `since`, or nil while its transcripts are being counted.
+function FX.coachEvidenceCount(root, since, minItems, now)
+  local p = FX.coachPath(root, ".log.json")
+  local n = core.coachLogEvidence(core.parseCoachLog(p and FX.readFile(p) or nil), since)
+  if n >= minItems then return n end
+  local c = FX._coach.counts[root]
+  if c and c.task then
+    if now - (c.startedAt or 0) < core.COACH.scanSeconds then
+      return (c.since == since and c.n) and (n + c.n) or nil
+    end
+    -- a wedged count never holds the repo: drop it and count again
+    print("[cc-dashboard] ⚠️ coach: counting " .. tostring(root) .. "'s transcripts timed out -- counting again")
+    pcall(function() c.task:terminate() end)
+    pcall(c.cleanup)
+    c.task = nil
+  end
+  local known = c and c.since == since and c.n
+  if known and now - (c.at or 0) < core.COACH.evidence.recountSeconds then return n + c.n end
+  FX.coachEvidenceScan(root, since, now, known and c or nil)
+  c = FX._coach.counts[root]
+  return (c and c.since == since and c.n) and (n + c.n) or nil
+end
+
+-- Count `root`'s corrections and interrupts since `since` in the transcripts written since then.
+-- `prev` (the last count for the same `since`) is kept while the new one runs.
+function FX.coachEvidenceScan(root, since, now, prev)
+  local touched = {}
+  for _, f in ipairs(FX.coachTranscripts(root)) do if f.mtime > since then touched[#touched + 1] = f end end
+  local files = core.coachPickTranscripts(touched, core.COACH.sessions)
+  if #files == 0 then FX._coach.counts[root] = { since = since, n = 0, at = now }; return end
+  local outBase = FX.scratchFile("coach-evidence")
+  local paths = {}
+  for i, f in ipairs(files) do paths[i] = f.path end
+  local function cleanup() for i = 1, #files do pcall(os.remove, outBase .. "." .. i) end end
+  local c = { since = since, n = prev and prev.n or nil, at = prev and prev.at or nil, startedAt = now, cleanup = cleanup }
+  FX._coach.counts[root] = c
+  local ok, err = pcall(function()
+    local myTask   -- the exit callback checks it still owns the count
+    myTask = hs.task.new("/bin/sh", function()
+      if FX._coach.counts[root] ~= c or c.task ~= myTask then cleanup(); return end
+      local texts = {}
+      for i = 1, #files do texts[i] = FX.readFile(outBase .. "." .. i) or "" end
+      cleanup()
+      c.task, c.n, c.at = nil, core.coachTranscriptEvidence(texts, since), FX.now()
+      print("[cc-dashboard] 🔍 coach: " .. tostring(root) .. " has " .. c.n .. " correction(s) and interrupt(s) since its last run")
+    end, { "-c", core.coachScanCmd(paths, outBase) })
+    if not myTask then error("task create failed") end
+    c.task = myTask
+    myTask:start()
+  end)
+  if not ok then
+    cleanup()
+    FX._coach.counts[root] = { since = since, n = c.n or 0, at = now }   -- tried again after recountSeconds
+    print("[cc-dashboard] ❌ coach: couldn't count " .. tostring(root) .. "'s transcripts: " .. tostring(err))
+  end
+end
+
 -- Start a run for `repo` ({ commonDir, root, name }): "weekly" or "card"; `retry` = it retries a
 -- lost run (its attempts count on). `sharpen` (2026-10-03) = an applied edit's commit: the run asks
--- for a better wording of that edit alone (a lost one retried stays one). Returns the record, or nil
--- and why ("waiting" when it waits for the repo's merge checker).
-function FX.coachStart(repo, trigger, cfg, retry, sharpen)
+-- for a better wording of that edit alone (a lost one retried stays one). `evidence` (2026-10-03) = an
+-- evidence run's count of the new items that started it. Returns the record, or nil and why
+-- ("waiting" when it waits for the repo's merge checker).
+function FX.coachStart(repo, trigger, cfg, retry, sharpen, evidence)
   if type(repo) ~= "table" then return nil, "no repo" end
   local root = repo.root
   pcall(FX.coachHistory, root)   -- the record is about to be replaced: its applied edits go to the history first
@@ -6737,7 +6815,7 @@ function FX.coachStart(repo, trigger, cfg, retry, sharpen)
   if not okL then print("[cc-dashboard] ❌ coach: folding " .. tostring(root) .. "'s lessons failed: " .. tostring(errL)) end
   if FX.coachBusy(root) then return nil, "the coach is already reading this repo's sessions" end
   if FX.coachCheckerBusy(repo.commonDir) then
-    FX._coach.waiting[root] = { repo = repo, trigger = trigger, retry = retry, sharpen = sharpen }
+    FX._coach.waiting[root] = { repo = repo, trigger = trigger, retry = retry, sharpen = sharpen, evidence = evidence }
     return nil, "waiting"
   end
   FX._coach.waiting[root] = nil
@@ -6748,7 +6826,8 @@ function FX.coachStart(repo, trigger, cfg, retry, sharpen)
   local rec = { v = 1, repo = repo.commonDir, root = root, name = repo.name, state = "queued", trigger = trigger,
                 at = FX.now(), attempts = lostRetry and ((prev.attempts or 1) + 1) or 1,
                 lastRunAt = prev and prev.lastRunAt or nil, edits = {}, decisions = {},
-                sharpen = sharpen or (lostRetry and prev.sharpen) or nil }
+                sharpen = sharpen or (lostRetry and prev.sharpen) or nil,
+                evidence = tonumber(evidence) or (lostRetry and prev.evidence) or nil }
   FX.coachSave(rec)
   local outBase = FX.scratchFile("coach-scan")
   local paths = {}
@@ -6845,6 +6924,12 @@ function FX.coachFinish(root, rec, res, judge)
   rec.state, rec.doneAt, rec.lastRunAt = "done", FX.now(), FX.now()
   rec.verdict, rec.why, rec.summary = p.verdict, p.why, p.summary
   rec.costUsd, rec.turns = p.costUsd, p.turns
+  -- 2026-10-03: an evidence run's cost counts toward today's cap (a run that timed out, at its budget)
+  if rec.trigger == "evidence" then
+    local usd = tonumber(p.costUsd)
+    if not usd and res and res.timedOut then usd = tonumber(core.config(loadConfig(), "coach.maxBudgetUsd", core.COACH.budgetUsd)) end
+    if usd and usd > 0 then pcall(FX.coachSpendAdd, usd) end
+  end
   rec.edits, rec.decisions = p.edits or {}, p.decisions or {}
   for _, e in ipairs(rec.edits) do e.status = "pending" end
   for _, d in ipairs(rec.decisions) do d.status = "pending" end
@@ -6898,17 +6983,38 @@ function FX.stepCoach(list, cfg)
     FX._coach.nextCheck = now + core.COACH.checkEverySeconds
     local enabled = core.config(cfg, "coach.enabled", false) == true
     local day = core.config(cfg, "coach.day", "mon")
+    -- evidence runs (2026-10-03): off unless coach.evidence.minItems is set; today's spend across
+    -- repos, each evidence run in flight (or waiting for its checker) counted at its budget
+    local minItems = tonumber(core.config(cfg, "coach.evidence.minItems", nil))
+    local budget = tonumber(core.config(cfg, "coach.maxBudgetUsd", core.COACH.budgetUsd)) or core.COACH.budgetUsd
+    local inFlight = 0
+    for r, x in pairs(FX._coach.recs) do
+      if x and x.trigger == "evidence" and FX.coachBusy(r) then inFlight = inFlight + 1 end
+    end
+    for _, w in pairs(FX._coach.waiting) do if w.trigger == "evidence" then inFlight = inFlight + 1 end end
+    local spent = (minItems and minItems >= 1) and core.coachEvidenceSpent(FX.coachSpend(), now, inFlight, budget) or 0
     for root, repo in pairs(repos) do
       local w = FX._coach.waiting[root]
       if w then
-        FX.coachStart(w.repo, w.trigger, cfg, w.retry, w.sharpen)
+        FX.coachStart(w.repo, w.trigger, cfg, w.retry, w.sharpen, w.evidence)
       else
         local rec = FX.coachRecord(root)
+        local counted
+        local evidence = (minItems and minItems >= 1) and {
+          minItems = minItems, spent = spent,
+          cooldownHours = tonumber(core.config(cfg, "coach.evidence.cooldownHours", core.COACH.evidence.cooldownHours)),
+          dailyUsd = tonumber(core.config(cfg, "coach.evidence.dailyUsd", core.COACH.evidence.dailyUsd)),
+          count = function(since) counted = FX.coachEvidenceCount(root, since, minItems, now); return counted end } or nil
         local due, why = core.coachDue(rec, { now = now, enabled = enabled, day = day, running = FX.coachBusy(root),
-                                              newest = function() return FX.coachNewest(root) end })
+                                              newest = function() return FX.coachNewest(root) end, evidence = evidence })
         if due then
           local retry = why == "retry"
-          FX.coachStart(repo, (retry and rec) and rec.trigger or "weekly", cfg, retry)
+          local trigger = (retry and rec) and rec.trigger or (why == "evidence" and "evidence" or "weekly")
+          if why == "evidence" then
+            print("[cc-dashboard] 🔍 coach: " .. tostring(repo.name) .. " has " .. tostring(counted) .. " new evidence item(s) since its last run")
+          end
+          local started = FX.coachStart(repo, trigger, cfg, retry, nil, why == "evidence" and counted or nil)
+          if trigger == "evidence" and (started or FX._coach.waiting[root]) then spent = spent + budget end
         end
       end
     end
@@ -7252,6 +7358,39 @@ function FX.coachNote(commonDir, entry)
   if not p then return false end
   local list = core.coachLogAdd(core.parseCoachLog(FX.readFile(p)), entry, FX.now())
   return FX.writeFileAtomic(p, core.json.encode(list))
+end
+
+-- Lessons for the coach (2026-10-03, mining round 2 unit B4): `cc-lesson.sh "<one line>"` leaves
+-- ~/.claude/cc-lesson/<epoch>-<pid>.json (a quiet folder, read each tick -- never an FSEvents
+-- watcher). Each record goes into its repo's coach log as a `learned` entry (FX.coachNote, deduped
+-- by its id), which the next run reads and which counts toward an evidence run, then the file goes.
+-- A record that can't be read is dropped; a write still in progress is left for a minute.
+FX.LESSON_DIR = os.getenv("CC_LESSON_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-lesson")
+function FX.stepLessons()
+  local now = FX.now()
+  for _, fn in ipairs(FX.readDir(FX.LESSON_DIR)) do
+    local f = core.lessonFileOf(fn)
+    local path = FX.LESSON_DIR .. "/" .. fn
+    if f and f.kind == "json" then
+      local l = core.parseLesson(fn, FX.readFile(path))
+      if not l then
+        os.remove(path)
+        print("[cc-dashboard] ⚠️ coach: dropped an unreadable lesson (" .. fn .. ")")
+      elseif not core.repoMainRoot(l.commonDir) then
+        os.remove(path)
+        print("[cc-dashboard] ⚠️ coach: dropped a lesson for a repo with no main checkout (" .. l.commonDir .. ")")
+      elseif FX.coachNote(l.commonDir, { kind = "learned", id = "learned|" .. l.id, branch = l.branch, note = l.text }) then
+        os.remove(path)
+        print("[cc-dashboard] ✅ coach: a lesson for " .. tostring(core.repoMainRoot(l.commonDir)) .. ": " .. core.capChars(l.text, 80))
+      else
+        print("[cc-dashboard] ❌ coach: couldn't log the lesson " .. fn .. " -- trying again next tick")
+      end
+    elseif f and f.kind == "part" then
+      local mt
+      pcall(function() mt = tonumber((hs.fs.attributes(path, "modification"))) end)
+      if mt and now - mt > 60 then os.remove(path) end
+    end
+  end
 end
 
 -- Merge fields into a session's status file (optimistic local patch -- e.g. the
@@ -23692,6 +23831,9 @@ local HTML = [[
       else if(v.verdict === "none") st = "The coach read " + esc(v.sessions || 0) + " session(s): nothing to change in CLAUDE.md. " + rerun;
       else st = (sharp ? "Sharpening the edit committed " + sharp + " · " : "") + (v.summary ? esc(v.summary) + " · " : "") + esc(v.sessions || 0) + " session(s) read"
         + (v.doneAt ? " · " + esc(fmtAge(v.doneAt)) + " ago" : "") + (typeof v.costUsd === "number" ? " · $" + esc(v.costUsd.toFixed(2)) : "");
+      // 2026-10-03: a run that enough new evidence started (v.trigger, v.evidence: core.coachView) says so
+      if(v.trigger === "evidence" && v.state !== "new" && v.state !== "waiting" && v.state !== "lost")
+        st = "Started by " + esc(v.evidence || "enough") + " new evidence items since the last run · " + st;
       var h = '<div class="co-state">' + st + '</div>';
       // 2026-09-30: what an edit is expected to change, so it can be judged later
       function expectHtml(o){
@@ -26285,8 +26427,11 @@ function FX._refreshBody()
     local okt, errt = pcall(FX.stepTickets, list)
     if not okt then print("[cc-dashboard] ❌ tickets step failed: " .. tostring(errt)) end
   end
-  -- 2026-09-29: the coach -- a weekly (or waiting) run started when due, and each card's 🧭 chip
+  -- 2026-09-29: the coach -- a weekly (or waiting) run started when due, and each card's 🧭 chip.
+  -- 2026-10-03: lessons filed with cc-lesson.sh go into the coach's log first (they count as evidence).
   do
+    local okl, errl = pcall(FX.stepLessons)
+    if not okl then print("[cc-dashboard] ❌ coach lessons step failed: " .. tostring(errl)) end
     local okc, errc = pcall(FX.stepCoach, list, cfg)
     if not okc then print("[cc-dashboard] ❌ coach step failed: " .. tostring(errc)) end
   end

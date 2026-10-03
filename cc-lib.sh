@@ -331,6 +331,10 @@ CC_INBOX_DIR="${CC_INBOX_DIR:-${HOME}/.claude/cc-inbox}"
 # <key>.<epoch>-<pid>.json, and Adam's answers, <id>.answer. Default MUST match cc-decide.sh's
 # (it sources this file) and the dashboard's FX.DECIDE_DIR.
 CC_DECIDE_DIR="${CC_DECIDE_DIR:-${HOME}/.claude/cc-decide}"
+# Lessons for the coach (mining round 2 unit B4, 2026-10-03): cc-lesson.sh's one-line lessons,
+# <epoch>-<pid>.json, which Shepherd moves into the repo's coach log. Default MUST match the
+# dashboard's FX.LESSON_DIR.
+CC_LESSON_DIR="${CC_LESSON_DIR:-${HOME}/.claude/cc-lesson}"
 # Resume at the usage limit's reset (build program unit 13, 2026-09-29): cc-resume.sh's arm
 # (<key>.json), Shepherd's plan (<key>.plan.json) and the card's Cancel (<key>.cancel), per
 # session key. A clean Stop clears them (cc-status.sh). Default MUST match the dashboard's FX.RESUME_DIR.

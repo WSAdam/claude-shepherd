@@ -573,7 +573,8 @@ instructions every session in it reads first. It suggests; nothing changes until
   `.claude/worktrees/<slug>`'s transcripts, newest first): your corrections (every prompt after a
   session's first), your interrupts, tool errors, tool calls you denied with a note, and **Not
   yet** notes. Shepherd adds what transcripts don't hold: your **Not yet** notes on merge requests,
-  blocked merges' notes, and merge-checker fails and findings, from its own log
+  blocked merges' notes, merge-checker fails and findings, and lessons sessions filed with
+  `cc-lesson.sh` (below), from its own log
   (`~/.claude/cc-coach/<repo>.log.json`, three weeks, 40 entries). The digest is capped at about 30KB;
   the repo's `CLAUDE.md` and `DECISIONS.md` go in on top.
 - **How it runs:** a headless, read-only Sonnet (the [merge checker](merging-and-batches.md#the-checker-a-read-only-review-of-every-merge-request)'s
@@ -592,6 +593,24 @@ instructions every session in it reads first. It suggests; nothing changes until
   through Monday catches up when it wakes, and only when a session ran since. A couldn't-run counts
   as that week's run. A Hammerspoon reload kills a run in flight: it reads **lost**, never counts
   as a verdict, and is retried 15 minutes later (up to 3 times).
+- **Evidence runs:** with `coach.enabled` on and `coach.evidence.minItems` set, a repo doesn't wait
+  for its day once enough new evidence has come in since its last run (of any kind): entries in
+  Shepherd's log (merge notes, checker verdicts, filed lessons), then your corrections and
+  interrupts in its transcripts since. The log is checked every minute; the transcripts are counted
+  in the background, only when the log alone isn't enough, at most every 15 minutes. At
+  `minItems` items (default 10) a run starts, unless one ran in the last
+  `coach.evidence.cooldownHours` (24) or today's evidence runs, across every repo, have spent
+  `coach.evidence.dailyUsd` ($3; a run in flight counts at `coach.maxBudgetUsd` until its cost is
+  known). Each evidence run's cost is kept in `~/.claude/cc-coach/evidence-spend.json`, per day.
+  The overlay says what started it (**Started by N new evidence items since the last run**). The
+  weekly run still happens when it is due. Without `minItems` (or at 0) there are no evidence
+  runs.
+- **Filing a lesson:** a session (or you, in a shell) that learned something the hard way runs
+  `cc-lesson.sh "<one line>"` anywhere in the repo, a worktree included. The words are joined
+  into one line (at most 400 characters) and left in `~/.claude/cc-lesson/`; Shepherd takes each
+  on its next tick (Shepherd needn't be running when it's filed) and puts it in the repo's coach
+  log as a filed lesson, which the next run reads as evidence and which counts toward an evidence
+  run.
 - **Reviewing:** suggestions wait behind a **🧭 N** chip on the project card; click it for the
   Coach overlay. **Apply** writes the edit into `CLAUDE.md` and commits that file alone
   (`git commit -- CLAUDE.md`, a plain message: `CLAUDE.md: <section>` and the why), leaving
@@ -655,10 +674,12 @@ instructions every session in it reads first. It suggests; nothing changes until
   button, and isn't judged again.
 
 ```json
-{ "coach": { "enabled": true, "day": "mon", "maxBudgetUsd": 1, "timeoutSeconds": 600 } }
+{ "coach": { "enabled": true, "day": "mon", "maxBudgetUsd": 1, "timeoutSeconds": 600,
+             "evidence": { "minItems": 10, "cooldownHours": 24, "dailyUsd": 3 } } }
 ```
 
-Its records live in `~/.claude/cc-coach/`, one per repo; `uninstall.sh --purge` removes them.
+Its records live in `~/.claude/cc-coach/`, one per repo, and lessons not yet taken in
+`~/.claude/cc-lesson/`; `uninstall.sh --purge` removes both.
 
 ## A/B compare
 

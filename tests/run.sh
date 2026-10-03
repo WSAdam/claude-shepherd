@@ -487,6 +487,9 @@ echo ""
 echo "== lua: the coach -- the digest on literal transcripts (sections, the 30KB cap), the scan, the proposal parser (bad JSON couldn't run), Apply's refusals (hash moved, dirty file), a commit of CLAUDE.md alone (temp repo), the weekly catch-up clock, a lost run retried (stubbed hs) =="
 HOME="$(mktemp -d)" lua "$DIR/coach.test.lua" || fail=1
 echo ""
+echo "== bash: a lesson for the coach -- one line filed for the repo's main checkout, from a worktree too, refusals outside a repo (cc-lesson.sh) =="
+bash "$DIR/lesson.test.sh" || fail=1
+echo ""
 echo "== node: the Coach overlay and the card's chip, every suggested word escaped, a click sends only the root and a number (behavioral, runs the shipped coachRowsHtml) =="
 node "$DIR/coach-view.test.js" || fail=1
 echo ""

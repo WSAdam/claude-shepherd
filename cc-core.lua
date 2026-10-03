@@ -11188,7 +11188,8 @@ M.SETTINGS_KEEP_SUBKEYS = {
   lease = { "portFrom", "portTo", "dbDir" },
   -- 2026-09-29: the coach has no inputs (a card button runs it); if the form ever rebuilds `coach`,
   -- the hand-set weekly switch, day, budget and timeout stay.
-  coach = { "enabled", "day", "maxBudgetUsd", "timeoutSeconds" },
+  -- 2026-10-03: and the evidence runs' block (minItems, cooldownHours, dailyUsd).
+  coach = { "enabled", "day", "maxBudgetUsd", "timeoutSeconds", "evidence" },
   automation = { "dryRun" },
   queue = { "dryRun" },
   rules = { "dryRun" },
@@ -16993,10 +16994,15 @@ M.COACH = {
   judgeMax = 8,              -- ...at most this many per run (the newest), in the prompt's <applied>
   activityDays = 7,          -- a first run needs a session this recent
   checkEverySeconds = 60,
+  -- evidence runs (2026-10-03): on with coach.evidence.minItems >= 1; these are the other two's
+  -- defaults, and how often a repo's transcripts are counted again while the log alone isn't enough
+  evidence = { cooldownHours = 24, dailyUsd = 3, recountSeconds = 900 },
 }
 M.COACH_FILE = "CLAUDE.md"
 M.COACH_DAYS = { sun = 1, mon = 2, tue = 3, wed = 4, thu = 5, fri = 6, sat = 7 }
-M.COACH_LOG_KINDS = { notyet = true, blocked = true, checker = true }
+-- learned (2026-10-03): a one-line lesson a session filed with cc-lesson.sh
+M.COACH_LOG_KINDS = { notyet = true, blocked = true, checker = true, learned = true }
+M.COACH_TRIGGERS = { weekly = true, card = true, evidence = true }
 M.COACH_VERDICTS = { proposals = true, none = true, couldntRun = true }
 M.COACH_CHECK_VERDICTS = { working = true, ["still-seen"] = true, ["no-data"] = true }
 do
@@ -17089,8 +17095,11 @@ do
   -- a record are decoded (a `tail -c` tears the first, a live transcript the last), walked with a
   -- plain find. The first prompt of Adam's in the window is what the session was asked; every
   -- later one is a correction. Shepherd's own prompts, task notifications and meta lines aren't his.
-  function M.coachSessionFacts(text)
-    local f = { corrections = {}, interrupts = 0, errors = {}, denials = {}, bareDenials = 0, notes = {} }
+  -- `since` (2026-10-03, an epoch): `fresh` counts the corrections and interrupts after it, every one
+  -- (the lists are capped) -- what an evidence run weighs.
+  function M.coachSessionFacts(text, since)
+    since = tonumber(since)
+    local f = { corrections = {}, interrupts = 0, errors = {}, denials = {}, bareDenials = 0, notes = {}, fresh = 0 }
     local seenErr = {}
     text = type(text) == "string" and text or ""
     local pos = 1
@@ -17109,6 +17118,7 @@ do
           end
           local c = obj.message.content
           local origin = M.promptOrigin(obj)
+          local fresh = since ~= nil and ts ~= nil and ts > since
           if origin == "human" then
             local t = oneLine(stripIdeContext(contentText(c)), C.promptChars)
             if t ~= "" then
@@ -17116,11 +17126,15 @@ do
               else
                 f.corrections[#f.corrections + 1] = t
                 if #f.corrections > C.perSession.corrections then table.remove(f.corrections, 1) end
+                if fresh then f.fresh = f.fresh + 1 end
               end
             end
           elseif origin == nil and not obj.isMeta then
             local t = checkerTrim(contentText(c))
-            if t:sub(1, #M.INTERRUPT_MARKER) == M.INTERRUPT_MARKER then f.interrupts = f.interrupts + 1 end
+            if t:sub(1, #M.INTERRUPT_MARKER) == M.INTERRUPT_MARKER then
+              f.interrupts = f.interrupts + 1
+              if fresh then f.fresh = f.fresh + 1 end
+            end
           end
           for _, part in ipairs(type(c) == "table" and c or {}) do
             if type(part) == "table" and part.type == "tool_result" then
@@ -17163,6 +17177,23 @@ do
       end
     end
     return f
+  end
+
+  -- What an evidence run weighs (2026-10-03): Adam's corrections and interrupts after `since` in the
+  -- scanned transcript windows (each window's first prompt is what it was asked, never one), and
+  -- every entry of Shepherd's own log after it (merge notes, checker verdicts, filed lessons).
+  function M.coachTranscriptEvidence(texts, since)
+    local n = 0
+    for _, t in ipairs(type(texts) == "table" and texts or {}) do n = n + M.coachSessionFacts(t, since).fresh end
+    return n
+  end
+  function M.coachLogEvidence(log, since)
+    since = tonumber(since) or 0
+    local n = 0
+    for _, e in ipairs(type(log) == "table" and log or {}) do
+      if type(e) == "table" and (tonumber(e.at) or 0) > since then n = n + 1 end
+    end
+    return n
   end
 
   local function when(at) return tonumber(at) and os.date("%Y-%m-%d %H:%M", tonumber(at)) or nil end
@@ -17215,6 +17246,7 @@ do
       local lines
       if e.kind == "notyet" then lines = { "- " .. who .. "Not yet — " .. tostring(e.note or "") }
       elseif e.kind == "blocked" then lines = { "- " .. who .. "blocked — " .. tostring(e.note or "") }
+      elseif e.kind == "learned" then lines = { "- " .. who .. "lesson filed — " .. tostring(e.note or "") }
       else
         lines = { "- " .. who .. "checker " .. tostring(e.verdict or "?") .. " — " .. tostring(e.summary or "") }
         for _, fd in ipairs(type(e.findings) == "table" and e.findings or {}) do
@@ -17471,7 +17503,7 @@ do
         .. " \"after\": one sentence on what a session is expected to do instead once the edit is in CLAUDE.md --"
         .. " concrete enough that Adam could look at a later session and tell whether the edit worked.",
       "  - \"evidence\": 1 to 5 short quotes from the evidence below (a correction, an error, a denial note, a merge note,"
-        .. " a checker finding). An edit nothing below calls for is not an edit.",
+        .. " a checker finding, a filed lesson). An edit nothing below calls for is not an edit.",
     }
     local decisionsRule = "- DECISIONS.md lists what the project does on purpose. Never propose an edit that undoes, weakens or contradicts"
       .. " one of its entries."
@@ -17503,7 +17535,8 @@ do
       lines = {
         repo .. " Below is what went wrong in its"
           .. " recent Claude Code sessions: Adam's corrections, his interrupts, tool errors, tool calls he denied with a note,"
-          .. " merge notes and merge-checker findings. Propose at most " .. C.maxEdits .. " edits to the repo's CLAUDE.md -- the"
+          .. " merge notes, merge-checker findings, and lessons sessions filed with cc-lesson.sh after learning something"
+          .. " the hard way. Propose at most " .. C.maxEdits .. " edits to the repo's CLAUDE.md -- the"
           .. " instructions every session in this repo reads first -- that would have prevented them.",
         "",
         "Rules:",
@@ -18225,6 +18258,11 @@ do
   -- Otherwise one run per week: due once the slot has passed since the last run -- after sleep
   -- too, since the slot is in the past -- and only if a session ran since (a first run: this week).
   -- A couldn't-run counts as the week's run: it cost money, and the card offers Run again.
+  -- Evidence runs (2026-10-03): o.evidence = { minItems, cooldownHours, dailyUsd, spent (today's, in
+  -- dollars), count = a number or function(since) -> the new items since the last run, nil while not
+  -- known yet }. With the weekly run not due, enough new evidence (minItems >= 1) starts one ("evidence")
+  -- -- never within cooldownHours of any run, nor once today's evidence runs spent dailyUsd; the count
+  -- is only asked for past both. The weekly run stays the floor.
   function M.coachDue(rec, o)
     o = type(o) == "table" and o or {}
     local now = tonumber(o.now) or 0
@@ -18239,12 +18277,27 @@ do
     end
     if not o.enabled then return false, "off" end
     local last = type(rec) == "table" and tonumber(rec.lastRunAt) or nil
-    if last and last >= M.coachSlot(now, o.day) then return false, "done this week" end
-    local newest = o.newest
-    if type(newest) == "function" then newest = newest() end
     local since = last or (now - C.activityDays * 86400)
-    if not (tonumber(newest) and tonumber(newest) > since) then return false, "no new sessions" end
-    return true, last and "weekly" or "first"
+    local why
+    if last and last >= M.coachSlot(now, o.day) then why = "done this week"
+    else
+      local newest = o.newest
+      if type(newest) == "function" then newest = newest() end
+      if tonumber(newest) and tonumber(newest) > since then return true, last and "weekly" or "first" end
+      why = "no new sessions"
+    end
+    local ev = type(o.evidence) == "table" and o.evidence or nil
+    local minItems = ev and tonumber(ev.minItems) or nil
+    if not (minItems and minItems >= 1) then return false, why end
+    local cooldown = (tonumber(ev.cooldownHours) or C.evidence.cooldownHours) * 3600
+    if last and now - last < cooldown then return false, "cooldown" end
+    if (tonumber(ev.spent) or 0) >= (tonumber(ev.dailyUsd) or C.evidence.dailyUsd) then return false, "daily cap" end
+    local count = ev.count
+    if type(count) == "function" then count = count(since) end
+    count = tonumber(count)
+    if count == nil then return false, "counting" end
+    if count >= minItems then return true, "evidence" end
+    return false, why
   end
 
   -- A record read back from disk (Shepherd is its only writer). A run still queued or running when
@@ -18256,7 +18309,8 @@ do
     if type(t.root) ~= "string" or t.root:sub(1, 1) ~= "/" then return nil end
     local function str(v, n) return (type(v) == "string" and v ~= "") and capChars(v, n) or nil end
     local r = { v = 1, repo = str(t.repo, 1000), root = t.root, name = str(t.name, 200), state = t.state,
-                trigger = (t.trigger == "card") and "card" or "weekly", at = tonumber(t.at), doneAt = tonumber(t.doneAt),
+                trigger = M.COACH_TRIGGERS[t.trigger] and t.trigger or "weekly", at = tonumber(t.at), doneAt = tonumber(t.doneAt),
+                evidence = tonumber(t.evidence),   -- an evidence run: the new items that started it (2026-10-03)
                 attempts = math.max(1, math.floor(tonumber(t.attempts) or 1)), lastRunAt = tonumber(t.lastRunAt),
                 verdict = M.COACH_VERDICTS[t.verdict] and t.verdict or nil, why = str(t.why, 300), summary = str(t.summary, 300),
                 claudeHash = str(t.claudeHash, 64), decisionsHash = str(t.decisionsHash, 64),
@@ -18305,7 +18359,7 @@ do
     local byId = {}
     for _, l in ipairs(type(lessons) == "table" and lessons or {}) do if type(l) == "table" and l.id then byId[l.id] = l end end
     local v = { root = rec.root, name = rec.name, state = rec.state, verdict = rec.verdict, why = rec.why, summary = rec.summary,
-                trigger = rec.trigger, at = rec.at, doneAt = rec.doneAt, lastRunAt = rec.lastRunAt, costUsd = rec.costUsd,
+                trigger = rec.trigger, evidence = rec.evidence, at = rec.at, doneAt = rec.doneAt, lastRunAt = rec.lastRunAt, costUsd = rec.costUsd,
                 sessions = rec.sessions, cut = rec.cut, pending = pendingCount(rec), edits = {}, decisions = {},
                 sharpen = rec.sharpen }
     if live.waiting then v.state = "waiting" elseif live.busy then v.state = "running" end
@@ -18378,6 +18432,53 @@ do
       if n and tonumber(e.at) and #out < C.logMax then out[#out + 1] = n end
     end
     return out
+  end
+
+  -- What evidence runs spent today, across repos (2026-10-03): Shepherd's own file,
+  -- ~/.claude/cc-coach/evidence-spend.json = { day = "YYYY-MM-DD" (local), usd }. A new day starts at 0.
+  local function today(now) return os.date("%Y-%m-%d", tonumber(now) or 0) end
+  function M.parseCoachSpend(raw)
+    if type(raw) ~= "string" then return nil end
+    local ok, t = pcall(M.json.decode, raw)
+    if not ok or type(t) ~= "table" or type(t.day) ~= "string" or not tonumber(t.usd) then return nil end
+    return { day = t.day, usd = math.max(0, tonumber(t.usd)) }
+  end
+  function M.coachSpendToday(spend, now)
+    if type(spend) ~= "table" or spend.day ~= today(now) then return 0 end
+    return tonumber(spend.usd) or 0
+  end
+  function M.coachSpendAdd(spend, usd, now)
+    return { day = today(now), usd = M.coachSpendToday(spend, now) + math.max(0, tonumber(usd) or 0) }
+  end
+  -- ...and what the cap weighs: that, plus each evidence run in flight at its budget (its cost isn't
+  -- known until it ends), so two repos due in one check can't both start under the cap.
+  function M.coachEvidenceSpent(spend, now, inFlight, budgetUsd)
+    return M.coachSpendToday(spend, now) + (tonumber(inFlight) or 0) * (tonumber(budgetUsd) or C.budgetUsd)
+  end
+
+  -- A lesson cc-lesson.sh filed (2026-10-03): ~/.claude/cc-lesson/<epoch>-<pid>.json, written
+  -- temp-then-rename (<name>.tmp.<pid> while in progress). KEEP THE FIELDS IN SYNC with cc-lesson.sh.
+  function M.lessonFileOf(fn)
+    if type(fn) ~= "string" then return nil end
+    local id = fn:match("^(%d+%-%d+)%.json$")
+    if id then return { id = id, kind = "json" } end
+    id = fn:match("^(%d+%-%d+)%.json%.tmp%.%d+$")
+    if id then return { id = id, kind = "part" } end
+    return nil
+  end
+  -- { id, commonDir, branch, text, at } or nil: its id must be its name, its repo an absolute git
+  -- common dir, its text one non-empty line (capped like a log note).
+  function M.parseLesson(fn, raw)
+    local f = M.lessonFileOf(fn)
+    if not f or f.kind ~= "json" or type(raw) ~= "string" then return nil end
+    local ok, t = pcall(M.json.decode, raw)
+    if not ok or type(t) ~= "table" or tonumber(t.v) ~= 1 or t.id ~= f.id then return nil end
+    if type(t.commonDir) ~= "string" or t.commonDir:sub(1, 1) ~= "/" then return nil end
+    local text = oneLine(t.text, C.noteChars)
+    if text == "" then return nil end
+    local branch = (type(t.branch) == "string" and t.branch ~= "") and capChars(t.branch, 200) or nil
+    return { id = f.id, commonDir = M.normDir(t.commonDir), branch = branch, text = text, at = tonumber(t.at),
+             session_id = type(t.session_id) == "string" and capChars(t.session_id, 200) or nil }
   end
 end
 
@@ -22543,7 +22644,7 @@ M.FEATURES = {
     what = "Scheduled actions that fire on a cron-like timetable.",
     why = "Standups, sweeps, or kickoffs happen on their own." },
   { key = "coach", cat = "Automate", new = true, title = "Coach",
-    what = "Weekly (coach.enabled, catching up after sleep) or from a session's 🧭 Coach button, a read-only Sonnet reads the repo's last 10 sessions -- your corrections, interrupts, tool errors, denials with a note, merge notes and checker findings -- and suggests up to 5 CLAUDE.md edits, each with its evidence. They wait behind a 🧭 chip on the project card: Apply writes CLAUDE.md and commits it alone (refused if it changed since the coach read it or has uncommitted edits), Skip puts one aside. It never proposes undoing a DECISIONS.md entry, and can suggest new ones. A lessons ledger keeps every Apply, Skip (with an optional one-line reason) and Undo for the next run: an applied suggestion isn't proposed again, a skipped or undone one comes back only with new evidence, and a repeat says \"seen in N runs\". Each run also judges the applied edits at least 3 later sessions postdate -- working, still seen (with quotes) or no data yet -- on their history rows, where Sharpen asks the coach for a better wording of one edit alone.",
+    what = "Weekly (coach.enabled, catching up after sleep), once enough new evidence has come in since its last run (coach.evidence: a 24h cooldown and a daily cap across repos), or from a session's 🧭 Coach button, a read-only Sonnet reads the repo's last 10 sessions -- your corrections, interrupts, tool errors, denials with a note, merge notes, checker findings and lessons sessions filed with cc-lesson.sh -- and suggests up to 5 CLAUDE.md edits, each with its evidence. They wait behind a 🧭 chip on the project card: Apply writes CLAUDE.md and commits it alone (refused if it changed since the coach read it or has uncommitted edits), Skip puts one aside. It never proposes undoing a DECISIONS.md entry, and can suggest new ones. A lessons ledger keeps every Apply, Skip (with an optional one-line reason) and Undo for the next run: an applied suggestion isn't proposed again, a skipped or undone one comes back only with new evidence, and a repeat says \"seen in N runs\". Each run also judges the applied edits at least 3 later sessions postdate -- working, still seen (with quotes) or no data yet -- on their history rows, where Sharpen asks the coach for a better wording of one edit alone.",
     why = "The corrections you keep repeating end up in the instructions every session reads first." },
 
   -- ---- See what's happening ----

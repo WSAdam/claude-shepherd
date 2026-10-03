@@ -4771,7 +4771,8 @@ do
   check("coach: ...its commit is a task with a retained timeout", apply:find("hs.task.new(", 1, true) ~= nil
         and apply:find("job.timer = hs.timer.doAfter(", 1, true) ~= nil)
   -- 2026-10-03: coachStart gained `sharpen` (a Sharpen run's commit); the pin slices by the new signature
-  local start = src:match("\nfunction FX%.coachStart%(repo, trigger, cfg, retry, sharpen%)(.-)\nend\n") or ""
+  -- 2026-10-03: ...and `evidence` (an evidence run's count, mining round 2 unit B4)
+  local start = src:match("\nfunction FX%.coachStart%(repo, trigger, cfg, retry, sharpen, evidence%)(.-)\nend\n") or ""
   check("coach: a run waits while the repo's merge checker is queued or running",
         start:find("if FX.coachCheckerBusy(repo.commonDir) then", 1, true) ~= nil)
   local scanned = src:match("\nfunction FX%.coachScanned%(repo, rec, scan, cfg%)(.-)\nend\n") or ""
@@ -5059,6 +5060,23 @@ do
         and not body:find("dispatchSerialized", 1, true) and not body:find("pasteboard", 1, true))
   check("seance: ...and writes no transcript", body ~= "" and not body:find('io.open(tp, "w', 1, true)
         and not body:find("writeFile", 1, true))
+end
+
+-- ---- Lessons filed with cc-lesson.sh reach the coach every tick (2026-10-03) ----
+-- Mining round 2 unit B4. tests/coach.test.lua drives FX.stepLessons and the evidence runs on a real
+-- repo; this pins that the tick runs it, isolated, BEFORE the coach step (a lesson counts as evidence
+-- in the same tick), and that the folder is cc-lib.sh's, polled -- never watched.
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  local tick = src:match("function FX%._refreshBody%(%)(.-)\nend\n") or ""
+  local lessons, coach = tick:find("pcall(FX.stepLessons)", 1, true), tick:find("pcall(FX.stepCoach, list, cfg)", 1, true)
+  check("lessons: the tick takes filed lessons, isolated in a pcall", lessons ~= nil)
+  check("lessons: ...before the coach step", lessons ~= nil and coach ~= nil and lessons < coach)
+  check("lessons: FX.LESSON_DIR reads CC_LESSON_DIR, as cc-lib.sh does",
+        src:find('FX.LESSON_DIR = os.getenv("CC_LESSON_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-lesson")', 1, true) ~= nil)
+  check("lessons: no FSEvents watcher on the folder", not src:find("pathwatcher.new(FX.LESSON_DIR", 1, true))
 end
 
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))

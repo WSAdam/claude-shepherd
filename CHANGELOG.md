@@ -14,6 +14,11 @@ parallel units. Each unit adds its line here.
   new process), **came back fresh** (a new session in its folder, named only while no other reopened
   session waits there) or **didn't come back** (neither within 5 minutes), shown as a chip on its row,
   recorded as `restart_outcome` and summed up in one toast per run (`core.restartOutcome`).
+- Coach evidence runs: with `coach.evidence.minItems` set, a repo's coach no longer waits for its
+  weekly day once enough new evidence arrives since its last run (Shepherd's log entries, then the
+  corrections and interrupts in its transcripts), after a 24h cooldown and under a daily dollar cap
+  across repos. `cc-lesson.sh "<one line>"` (new) files a lesson from inside a repo; Shepherd puts
+  it in the coach's log as a filed lesson, which the next run reads and which counts as evidence.
 
 - Coach edit outcomes: each run judges the applied `CLAUDE.md` edits at least 3 of its sessions
   postdate, against what each was expected to change: working, still seen (with quotes) or no

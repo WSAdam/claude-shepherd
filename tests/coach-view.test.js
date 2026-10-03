@@ -358,5 +358,20 @@ eq("...that opens the overlay without jumping", /data-nodbl/.test(chip) && /oncl
 eq("a running coach shows a quiet chip", lib.coachBadge({ coach: { pending: 0, state: "running" } }) !== "", true);
 eq("nothing waiting and idle: no chip", lib.coachBadge({ coach: { pending: 0, state: "done", verdict: "none" } }), "");
 
+// ---- an evidence run says what started it (2026-10-03, mining round 2 unit B4) ----
+// A run nobody clicked, on no weekly day, read as if it came from nowhere.
+const evNone = lib.coachRowsHtml({ root: "/r", state: "done", verdict: "none", trigger: "evidence", evidence: 12, sessions: 4, edits: [], decisions: [] });
+eq("an evidence run with nothing to change says enough new evidence started it, and how much",
+  /new evidence/i.test(evNone) && evNone.indexOf("12") >= 0, true);
+const evProp = lib.coachRowsHtml({ root: "/r", state: "done", verdict: "proposals", trigger: "evidence", evidence: 7, summary: "s", sessions: 4,
+  edits: [{ i: 1, section: "Git", old: "a", new: "b", why: "w", evidence: ["e"], status: "pending" }], decisions: [] });
+eq("...and so does one with suggestions", /new evidence/i.test(evProp) && evProp.indexOf("7") >= 0, true);
+const evRun = lib.coachRowsHtml({ root: "/r", state: "running", at: 1000, trigger: "evidence", evidence: 9, edits: [], decisions: [] });
+eq("...and one still reading", /new evidence/i.test(evRun) && evRun.indexOf("9") >= 0, true);
+eq("a weekly run says nothing of the kind", /new evidence/i.test(lib.coachRowsHtml({ root: "/r", state: "done", verdict: "none", trigger: "weekly",
+  sessions: 4, edits: [], decisions: [] })), false);
+eq("the count is escaped like every field", lib.coachRowsHtml({ root: "/r", state: "done", verdict: "none", trigger: "evidence", evidence: "<b>x</b>",
+  sessions: 4, edits: [], decisions: [] }).indexOf("<b>x</b>") < 0, true);
+
 console.log("\n-- coach-view.test.js: " + run + " run, " + failed + " failed --");
 process.exit(failed === 0 ? 0 : 1);

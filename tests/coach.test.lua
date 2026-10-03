@@ -883,6 +883,151 @@ do
   end
 end
 
+-- ---- evidence runs and filed lessons (2026-10-03, mining round 2 unit B4) ----
+-- The coach ran weekly or from a card only, so a week of corrections waited for its day, and a
+-- session that learned something the hard way had nowhere to file it. Now enough new evidence since
+-- the last run starts one (after a cooldown, under a daily cap across repos), and cc-lesson.sh files
+-- a one-line lesson that Shepherd puts in the coach's log as `learned`.
+do
+  local function edue(rec, ev, over)
+    local e = { minItems = 5, cooldownHours = 24, dailyUsd = 3, spent = 0, count = 5 }
+    for k, v in pairs(ev or {}) do e[k] = v end
+    local o = { now = NOW, enabled = true, day = "mon", newest = NOW - 3600, evidence = e }
+    for k, v in pairs(over or {}) do o[k] = v end
+    return core.coachDue(rec, o)
+  end
+  local week = { state = "done", verdict = "none", trigger = "weekly", lastRunAt = SLOT + 60 }   -- this week's run, 2 days ago
+  local d, why = edue(week)
+  check("evidence: enough new evidence since this week's run starts another  (" .. tostring(why) .. ")", d == true and why == "evidence")
+  check("evidence: ...not with fewer items than coach.evidence.minItems", edue(week, { count = 4 }) == false)
+  check("evidence: ...not with the trigger off (no minItems, or 0)", edue(week, { minItems = false }) == false and edue(week, { minItems = 0 }) == false)
+  check("evidence: ...not without coach.enabled", edue(week, nil, { enabled = false }) == false)
+  check("evidence: ...not while a run is going", edue(week, nil, { running = true }) == false)
+  local recent = { state = "done", verdict = "none", trigger = "card", lastRunAt = NOW - 23 * 3600 }
+  local rd, rwhy = edue(recent, { count = 50 })
+  check("evidence: ...not within the cooldown after any run  (" .. tostring(rwhy) .. ")", rd == false and rwhy == "cooldown")
+  check("evidence: ...the cooldown is coach.evidence.cooldownHours", edue(recent, { count = 50, cooldownHours = 12 }) == true)
+  local cd, cwhy = edue(week, { spent = 3 })
+  check("evidence: ...not once today's evidence runs reached coach.evidence.dailyUsd  (" .. tostring(cwhy) .. ")", cd == false and cwhy == "daily cap")
+  check("evidence: ...below the cap it runs", edue(week, { spent = 2.5 }) == true)
+  local asked = 0
+  edue(recent, { count = function() asked = asked + 1; return 50 end })
+  edue(week, { spent = 3, count = function() asked = asked + 1; return 50 end })
+  check("evidence: the count isn't asked for while the cooldown or the cap holds", asked == 0)
+  local sinceAsked
+  edue(week, { count = function(since) sinceAsked = since; return 5 end })
+  check("evidence: the count is asked for what arrived since the last run", sinceAsked == SLOT + 60)
+  check("evidence: a count not known yet (its scan in flight) is not due", edue(week, { count = function() return nil end }) == false)
+  local wd, wwhy = edue({ state = "done", verdict = "none", lastRunAt = SLOT - 7 * 86400 + 60 }, { count = 50 })
+  check("evidence: a weekly run that is due stays weekly (the floor)", wd == true and wwhy == "weekly")
+  local fd, fwhy = edue(nil, { count = 50 }, { newest = NOW - 30 * 86400 })
+  check("evidence: no run yet and no session this week -- enough filed lessons still start one  (" .. tostring(fwhy) .. ")",
+        fd == true and fwhy == "evidence")
+  local ld, lwhy = edue({ state = "lost", trigger = "evidence", at = NOW - core.COACH.retryLostSeconds - 1, attempts = 1, lastRunAt = SLOT + 60 })
+  check("evidence: a lost evidence run is retried like a weekly one", ld == true and lwhy == "retry")
+  check("evidence: ...but not with coach.enabled off", edue({ state = "lost", trigger = "evidence", at = NOW - core.COACH.retryLostSeconds - 1,
+        attempts = 1, lastRunAt = SLOT + 60 }, nil, { enabled = false }) == false)
+
+  -- the record keeps the trigger (parseCoachRecord coerced every unknown trigger to weekly)
+  local er = core.parseCoachRecord(json.encode({ v = 1, repo = "/r/repo/.git", root = "/r/repo", state = "done", verdict = "none",
+    trigger = "evidence", evidence = 7, at = 100, doneAt = 200, lastRunAt = 200, edits = {}, decisions = {} }))
+  check("record: an evidence run keeps its trigger", er and er.trigger == "evidence")
+  check("record: ...and how many new items started it", er and er.evidence == 7)
+  local br = core.parseCoachRecord(json.encode({ v = 1, root = "/r/repo", state = "done", verdict = "none", trigger = "bogus" }))
+  check("record: an unknown trigger still reads weekly", br and br.trigger == "weekly")
+  local ev = core.coachView(er) or {}
+  check("view: the overlay is told an evidence run's trigger and count", ev.trigger == "evidence" and ev.evidence == 7)
+
+  -- the counts: Shepherd's log entries, and a transcript's corrections and interrupts, since the last run
+  local since = core.isoToEpoch("2026-09-29T08:05:00.000Z")
+  local function u(ts, content, human)
+    return '{"type":"user","message":{"role":"user","content":' .. json.encode(content) .. '},"timestamp":"2026-09-29T' .. ts
+      .. '.000Z"' .. (human and ',"origin":{"kind":"human"}' or "") .. "}"
+  end
+  local WIN = table.concat({
+    u("08:00:00", "Fix the tick freeze", true),                         -- what it was asked: no correction
+    u("08:03:00", "no, not that file", true),                           -- a correction before the last run
+    u("08:10:00", "stop -- time the tick in the live VM first", true),  -- after: counts
+    u("08:12:00", { { type = "text", text = "[Request interrupted by user]" } }),   -- an interrupt after: counts
+    u("08:15:00", "[shepherd] Continue where you left off", true),      -- Shepherd's own prompt: never
+    u("08:20:00", "use git restore, not checkout", true),               -- counts
+    u("08:21:00", { { type = "tool_result", content = "boom", is_error = true, tool_use_id = "t1" } }),   -- a tool error: not a correction
+    "" }, "\n")
+  check("evidence: a transcript's corrections and interrupts since the last run are counted  ("
+        .. tostring(core.coachTranscriptEvidence and core.coachTranscriptEvidence({ WIN }, since)) .. ")",
+        type(core.coachTranscriptEvidence) == "function" and core.coachTranscriptEvidence({ WIN }, since) == 3)
+  local FIRST = u("09:00:00", "Start the release notes", true) .. "\n"
+  check("evidence: ...a session's first prompt is what it was asked, not a correction",
+        type(core.coachTranscriptEvidence) == "function" and core.coachTranscriptEvidence({ FIRST }, since) == 0)
+  check("evidence: ...summed over the transcripts", type(core.coachTranscriptEvidence) == "function"
+        and core.coachTranscriptEvidence({ WIN, WIN, FIRST }, since) == 6)
+  local SLOG = { { kind = "notyet", id = "a", at = since - 10 }, { kind = "learned", id = "b", at = since + 10 },
+                 { kind = "checker", id = "c", at = since + 20 }, { kind = "blocked", id = "d", at = since + 30 } }
+  check("evidence: Shepherd's log entries since the last run count, every kind",
+        type(core.coachLogEvidence) == "function" and core.coachLogEvidence(SLOG, since) == 3)
+
+  -- a filed lesson in the log and the digest: its own words, never read as a checker verdict
+  local lg2 = core.coachLogAdd({}, { kind = "learned", id = "learned|1790000000-42", branch = "feat/x",
+                                     note = "  run make lint\n before make test " }, 1790000000)
+  check("log: a filed lesson is a learned entry, kept on one line", #lg2 == 1 and lg2[1].kind == "learned"
+        and lg2[1].note == "run make lint before make test")
+  check("log: ...and survives its file", #core.parseCoachLog(json.encode(lg2)) == 1 and core.parseCoachLog(json.encode(lg2))[1].kind == "learned")
+  local dtext = core.coachDigest({}, lg2, {}).text or ""
+  check("digest: a filed lesson reads as one  (" .. dtext:gsub("\n", " | ") .. ")",
+        dtext:find("feat/x: lesson filed — run make lint before make test", 1, true) ~= nil and not dtext:find("feat/x: checker", 1, true))
+  local ptext = core.coachPrompt(core.coachDigest({}, lg2, {}), "# R\n", "", { name = "repo" })
+  check("prompt: names filed lessons among the evidence", ptext:find("cc-lesson.sh", 1, true) ~= nil)
+
+  -- today's spend on evidence runs, across repos, from Shepherd's own file
+  local okS = type(core.coachSpendAdd) == "function" and type(core.coachSpendToday) == "function" and type(core.parseCoachSpend) == "function"
+  check("spend: core.coachSpendAdd, coachSpendToday and parseCoachSpend exist", okS)
+  if okS then
+    local sp = core.coachSpendAdd(nil, 0.4, NOW)
+    sp = core.coachSpendAdd(sp, 0.35, NOW + 60)
+    check("spend: today's evidence runs add up", math.abs(core.coachSpendToday(sp, NOW + 120) - 0.75) < 1e-9)
+    check("spend: ...a new day starts at zero", core.coachSpendToday(sp, NOW + 86400) == 0)
+    check("spend: ...and its first run starts the new day's tally",
+          math.abs(core.coachSpendToday(core.coachSpendAdd(sp, 0.2, NOW + 86400), NOW + 86400) - 0.2) < 1e-9)
+    check("spend: round-trips through its file; a torn one is nothing spent",
+          math.abs(core.coachSpendToday(core.parseCoachSpend(json.encode(sp)), NOW) - 0.75) < 1e-9
+          and core.coachSpendToday(core.parseCoachSpend("{"), NOW) == 0)
+    check("spend: a run in flight counts at its budget (two repos can't both start under the cap)",
+          math.abs(core.coachEvidenceSpent(sp, NOW, 2, 1) - 2.75) < 1e-9 and math.abs(core.coachEvidenceSpent(nil, NOW, 0, 1)) < 1e-9)
+  end
+
+  -- what cc-lesson.sh writes: ~/.claude/cc-lesson/<epoch>-<pid>.json
+  local okL = type(core.lessonFileOf) == "function" and type(core.parseLesson) == "function"
+  check("lesson: core.lessonFileOf and core.parseLesson exist", okL)
+  if okL then
+    check("lesson: <epoch>-<pid>.json is a lesson, its temp write a part, anything else nothing",
+          (core.lessonFileOf("1790000000-42.json") or {}).kind == "json" and (core.lessonFileOf("1790000000-42.json.tmp.42") or {}).kind == "part"
+          and core.lessonFileOf("notes.txt") == nil and core.lessonFileOf("x.json") == nil and core.lessonFileOf(".panel-alive") == nil)
+    local function lesson(over)
+      local t = { v = 1, id = "1790000000-42", commonDir = "/r/repo/.git/", toplevel = "/r/repo", branch = "feat/x",
+                  text = "  run   make lint first ", at = 1790000000 }
+      for k, v in pairs(over or {}) do t[k] = v end
+      return core.parseLesson("1790000000-42.json", json.encode(t))
+    end
+    local L = lesson()
+    check("lesson: what cc-lesson.sh writes is read back", L and L.id == "1790000000-42" and L.commonDir == "/r/repo/.git"
+          and L.branch == "feat/x" and L.text == "run make lint first")
+    check("lesson: refused -- an id that isn't its name, a relative repo, an empty line, torn JSON",
+          lesson({ id = "1790000000-43" }) == nil and lesson({ commonDir = "r/.git" }) == nil and lesson({ text = "  \n " }) == nil
+          and core.parseLesson("1790000000-42.json", "{") == nil)
+    local LL = lesson({ text = ("x"):rep(2000) })
+    check("lesson: a long line is capped", LL and utf8.len(LL.text) <= core.COACH.noteChars + 1)
+  end
+
+  -- config: the evidence trigger ships in defaults/, and a Save keeps it
+  local okd2, dcfg2 = pcall(json.decode, read(ROOT .. "defaults/cc-config.json") or "")
+  local ce = okd2 and type(dcfg2) == "table" and type(dcfg2.coach) == "table" and dcfg2.coach.evidence or nil
+  check("config: defaults/ ships coach.evidence (minItems, cooldownHours 24, dailyUsd)", type(ce) == "table"
+        and (tonumber(ce.minItems) or 0) >= 1 and ce.cooldownHours == 24 and (tonumber(ce.dailyUsd) or 0) > 0)
+  local keep2 = {}
+  for _, k in ipairs(core.SETTINGS_KEEP_SUBKEYS.coach or {}) do keep2[k] = true end
+  check("config: SETTINGS_KEEP_SUBKEYS keeps coach.evidence", keep2.evidence == true)
+end
+
 -- ---- the panel half: the real claude-dashboard.lua under a stubbed hs ----
 local REPO = T .. "/repo"
 local COMMON = REPO .. "/.git"
@@ -1494,6 +1639,100 @@ check("sharpen (repo): ...and the sharpened entry names the commit that replaced
 local okU
 quiet(function() okU = fx.coachSharpen(REPO, tostring(iA)) end)
 check("sharpen (repo): an entry already sharpened isn't sharpened again", okU == false)
+end)()
+
+-- 2026-10-03 (mining round 2 unit B4): evidence runs and filed lessons on a real repo. A session files
+-- a lesson with the real cc-lesson.sh; the tick puts it in the repo's coach log as `learned`. Then,
+-- with this week's run done a day ago, enough new evidence (that lesson, plus the corrections in a
+-- fresh transcript, counted by a background scan) starts an evidence run, whose cost counts toward
+-- the daily cap; neither the cooldown nor a spent cap lets another start.
+;(function()
+if type(fx.stepLessons) ~= "function" then check("evidence (repo): FX.stepLessons exists", false); return end
+local LDIR = T .. "/.claude/cc-lesson"
+check("lesson (repo): FX.LESSON_DIR is ~/.claude/cc-lesson", fx.LESSON_DIR == LDIR)
+local LOGF = CDIR .. "/" .. core.coachFileKey(REPO) .. ".log.json"
+os.remove(LOGF)
+local AROOT = (sh("cd " .. q(ROOT) .. " && pwd -P")):gsub("%s+$", "")
+local out, code = sh("cd " .. q(REPO) .. " && HOME=" .. q(T) .. " CC_LESSON_DIR=" .. q(LDIR) .. " bash " .. q(AROOT .. "/cc-lesson.sh")
+  .. " 'run make lint before make test'")
+check("lesson (repo): cc-lesson.sh files the line  (" .. out:gsub("\n", " ") .. ")", code == 0)
+-- (the panel's clock runs ahead of the real one here: each file's time is set on the panel's)
+local function touchAt(path, at) sh("touch -t " .. os.date("%Y%m%d%H%M.%S", at) .. " " .. q(path)) end
+write(LDIR .. "/1790000000-1.json.tmp.1", "{")   -- a write in progress: left alone
+touchAt(LDIR .. "/1790000000-1.json.tmp.1", fx.now() - 5)
+write(LDIR .. "/1790000000-3.json.tmp.3", "{")   -- one torn by a killed write, two minutes old: dropped
+touchAt(LDIR .. "/1790000000-3.json.tmp.3", fx.now() - 120)
+write(LDIR .. "/1790000000-2.json", "{not json")  -- garbage: dropped
+quiet(function() fx.stepLessons() end)
+local got
+for _, e in ipairs(core.parseCoachLog(read(LOGF))) do if e.kind == "learned" then got = e end end
+check("lesson (repo): the tick puts it in the repo's coach log as learned, with its branch",
+      got ~= nil and got.note == "run make lint before make test" and got.branch == (sh("git -C " .. q(REPO) .. " branch --show-current")):gsub("%s+$", ""))
+local left = (sh("ls -1 " .. q(LDIR))):gsub("%s+$", "")
+check("lesson (repo): ...its file is taken, garbage dropped, a write in progress left  (" .. left:gsub("\n", " ") .. ")",
+      left == "1790000000-1.json.tmp.1")
+quiet(function() fx.stepLessons() end)
+local n = 0
+for _, e in ipairs(core.parseCoachLog(read(LOGF))) do if e.kind == "learned" then n = n + 1 end end
+check("lesson (repo): ...and is logged once", n == 1)
+
+-- the evidence trigger
+local function evScans() return tasksWhere(function(t) return t.bin == "/bin/sh" and tostring(t.args[2] or ""):find("coach-evidence", 1, true) end) end
+local function runScans() return tasksWhere(function(t) return t.bin == "/bin/sh" and tostring(t.args[2] or ""):find("coach-scan", 1, true) end) end
+local LAST = fx.now() - 25 * 3600
+local DAYN = os.date("%a", LAST):lower():sub(1, 3)   -- this week's slot is the day of the last run: the weekly run is done
+local ECFG = { coach = { enabled = true, day = DAYN, maxBudgetUsd = 1, evidence = { minItems = 3, cooldownHours = 24, dailyUsd = 2 } } }
+fx._coach.recs[REPO] = { v = 1, repo = COMMON, root = REPO, name = "repo", state = "done", verdict = "none", trigger = "weekly",
+  at = LAST - 60, doneAt = LAST, lastRunAt = LAST, edits = {}, decisions = {} }
+fx._coach.scans, fx._coach.waiting = {}, {}
+fx._headless["coach|" .. REPO] = nil
+-- the lesson came in AFTER the last run; so does a fresh transcript: asked, two corrections, an interrupt
+local function iso(t) return os.date("!%Y-%m-%dT%H:%M:%S.000Z", t) end
+local NOWR = fx.now()
+write(pdir .. "/ev1.jsonl", table.concat({
+  '{"type":"user","message":{"role":"user","content":"Tidy the coach"},"timestamp":"' .. iso(NOWR - 3000) .. '","origin":{"kind":"human"}}',
+  '{"type":"user","message":{"role":"user","content":"no, keep the log section"},"timestamp":"' .. iso(NOWR - 2000) .. '","origin":{"kind":"human"}}',
+  '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]},"timestamp":"' .. iso(NOWR - 1500) .. '"}',
+  '{"type":"user","message":{"role":"user","content":"run the suite first"},"timestamp":"' .. iso(NOWR - 1000) .. '","origin":{"kind":"human"}}',
+  "" }, "\n"))
+local function estep() fx._coach.nextCheck = 0; stamp(); return quiet(function() fx.stepCoach(list, ECFG) end) end
+local nE, nR = #evScans(), #runScans()
+estep()
+check("evidence (repo): the log alone isn't enough -- one count of the transcripts starts, no run  ("
+      .. (#evScans() - nE) .. " count, " .. (#runScans() - nR) .. " run)", #evScans() == nE + 1 and #runScans() == nR)
+estep()
+check("evidence (repo): ...and isn't started twice while it runs", #evScans() == nE + 1 and #runScans() == nR)
+if evScans()[nE + 1] then runFor(evScans()[nE + 1]) end
+estep()
+local erec = fx.coachRecord(REPO) or {}
+check("evidence (repo): with the count in, an evidence run starts  (" .. tostring(erec.trigger) .. ")",
+      #runScans() == nR + 1 and erec.trigger == "evidence")
+check("evidence (repo): ...its record says how many new items started it (1 lesson + 3 from the transcript)  (" .. tostring(erec.evidence) .. ")",
+      erec.evidence == 4)
+if runScans()[nR + 1] then runFor(runScans()[nR + 1]) end
+local CC = claudes()
+answerClaude(CC[#CC] or { args = {}, cb = function() end }, { summary = "Nothing new.", edits = {}, decisions = {} })
+erec = fx.coachRecord(REPO) or {}
+local SPF = CDIR .. "/evidence-spend.json"
+check("evidence (repo): it finishes like any run", erec.state == "done" and erec.verdict == "none" and erec.trigger == "evidence")
+check("evidence (repo): ...and its cost counts toward today's cap  (" .. tostring(read(SPF)) .. ")",
+      type(core.parseCoachSpend) == "function" and math.abs(core.coachSpendToday(core.parseCoachSpend(read(SPF)), fx.now()) - 0.21) < 1e-9)
+-- three more lessons right away: the cooldown holds
+for i = 1, 3 do fx.coachNote(COMMON, { kind = "learned", id = "learned|cool" .. i, branch = "main", note = "lesson " .. i }) end
+nR = #runScans()
+estep()
+check("evidence (repo): not again within the cooldown, however much comes in", #runScans() == nR)
+-- a day later, with today's cap spent: no run
+OFFSET = OFFSET + 25 * 3600
+for i = 1, 3 do fx.coachNote(COMMON, { kind = "learned", id = "learned|cap" .. i, branch = "main", note = "lesson " .. i }) end
+write(SPF, json.encode({ day = os.date("%Y-%m-%d", fx.now()), usd = 2 }))
+nE = #evScans()
+estep()
+check("evidence (repo): not once today's evidence runs spent coach.evidence.dailyUsd", #runScans() == nR)
+os.remove(SPF)
+estep()
+check("evidence (repo): under the cap it runs, on the log alone -- no transcript count needed",
+      #runScans() == nR + 1 and (fx.coachRecord(REPO) or {}).trigger == "evidence" and #evScans() == nE)
 end)()
 
 finish()

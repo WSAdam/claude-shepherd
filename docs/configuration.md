@@ -95,6 +95,7 @@ install's [defaults](../defaults/cc-config.json) differ.
 | `resume.enabled` | `true` | | [Resume at the limit reset](automation.md#resume-at-the-limit-reset) |
 | `coach.enabled` | `false` (the 🧭 Coach button works either way) | | [The coach](automation.md#the-coach) |
 | `coach.day` / `maxBudgetUsd` / `timeoutSeconds` | `"mon"` / `1` / `600` | | [The coach](automation.md#the-coach) |
+| `coach.evidence.minItems` / `cooldownHours` / `dailyUsd` | unset: no evidence runs (`defaults/`: `10`) / `24` / `3` | | [Evidence runs](automation.md#the-coach) |
 | `restart.waveMinutes` / `keepHours` | `30` / `72` | | [Restart the fleet in place](fleet.md#restart-the-fleet-in-place) |
 | `lease.enabled` | `true` | | [Worktree leases](fleet.md#worktree-leases) |
 | `lease.portFrom` / `portTo` / `dbDir` | `4100` / `4199` / `~/.claude/cc-lease/db` | | [Worktree leases](fleet.md#worktree-leases) |
@@ -168,7 +169,8 @@ Everything lives under `~/.claude/`:
 | `cc-bridge/` | The tab bridge's per-window tab lists and command folders |
 | `cc-lease/` | [Worktree leases](fleet.md#worktree-leases): each repo's leased ports and database paths, and (by default) the databases in `db/` |
 | `cc-restart.json` | The [restart snapshot](fleet.md#restart-the-fleet-in-place): every session Shepherd could reopen, and the ones it already did (Shepherd is its only writer) |
-| `cc-coach/` | [The coach](automation.md#the-coach)'s suggestions and its log of merge notes and checker findings, per repo |
+| `cc-coach/` | [The coach](automation.md#the-coach)'s suggestions and its log of merge notes, checker findings and filed lessons, per repo, and `evidence-spend.json` (today's evidence-run spend) |
+| `cc-lesson/` | Lessons filed with `cc-lesson.sh`, until Shepherd moves them into the coach's log |
 | `cc-policy/`, `cc-policy-override/`, `cc-gate-tools/`, `cc-automodel/` | Per-session policy (the resolved rules, and the **Policy** dropdown's choice), gated-tool and auto-model settings |
 | `cc-approved/`, `cc-autopilot/` | What approve-repeats remembers per session, and each session's Autopilot window |
 | `cc-ledger/` | The audit ledger (one JSONL file per day) |
