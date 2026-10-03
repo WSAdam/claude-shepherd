@@ -663,5 +663,61 @@ do
   quiet(function() fx.batchStop("drv", "b8") end)
   os.remove(T .. "/status/ut.json")
 end
+-- ---- an answer nothing collects wakes the driver (2026-10-03) ----
+-- 2026-10-03: Adam approved batch 2 while the driver's propose was already gone (killed at its
+-- 10-minute background limit); nothing told the driver, so the approval sat for two hours until Adam
+-- asked "what are we waiting on?". An answer still unclaimed 30s after he gave it is mailed to the
+-- driver, once, with the command that collects it.
+do
+  local INBOX = T .. "/.claude/cc-inbox/drv"
+  os.execute('mkdir -p "' .. INBOX .. '"')   -- this test's hs.fs.mkdir stub makes no folder; the real one does
+  local function mails()
+    local out, p = {}, io.popen('cat "' .. INBOX .. '"/*.msg 2>/dev/null')
+    local s = p and p:read("*a") or ""; if p then p:close() end
+    for _ in s:gmatch("propose %-%-resume blate1") do out[#out + 1] = true end
+    return #out
+  end
+  local function proposal(id)
+    write(FD .. "/" .. id .. ".json", json.encode({ v = 1, id = id, nonce = "n-" .. id,
+      driver = { session_id = "drv", pid = "4242", name = "A-drv" },
+      repo = "/r/A", commonDir = "/r/A/.git", title = "Late " .. id, mergeWhenGreen = true, at = now, phase = "proposed",
+      units = { { type = "docs", slug = "late", task = "Late.", branch = "docs/late" } } }))
+  end
+  status("drv", "/r/A", "4242")
+  proposal("blate1")
+  tick()
+  quiet(function() fx.batchApprove("drv", '{"id":"blate1","grantMerge":true}') end)
+  tick()
+  check("unclaimed answer: nothing is mailed while a live propose may still collect it  (" .. mails() .. ")", mails() == 0)
+  local realNow = fx.now
+  fx.now = function() return realNow() + 31 end
+  tick()
+  check("unclaimed answer: 30s on, the driver is told to collect it with propose --resume  (" .. mails() .. ")", mails() == 1)
+  tick()
+  check("...once, not every tick  (" .. mails() .. ")", mails() == 1)
+  -- an answer that was collected (the decision file claimed) is never mailed
+  fx.now = realNow
+  proposal("blate2")
+  tick()
+  quiet(function() fx.batchApprove("drv", '{"id":"blate2","grantMerge":true}') end)
+  os.remove(FD .. "/blate2.decision")
+  fx.now = function() return realNow() + 31 end
+  tick()
+  local any = io.popen('grep -l "blate2" "' .. INBOX .. '"/*.msg 2>/dev/null'):read("*a")
+  check("a collected answer mails nothing", any == "")
+  -- nor does a batch the driver stopped
+  fx.now = realNow
+  proposal("blate3")
+  tick()
+  quiet(function() fx.batchApprove("drv", '{"id":"blate3","grantMerge":true}') end)
+  quiet(function() fx.batchStop("drv", "blate3") end)
+  fx.now = function() return realNow() + 31 end
+  tick()
+  any = io.popen('grep -l "blate3" "' .. INBOX .. '"/*.msg 2>/dev/null'):read("*a")
+  check("a stopped batch mails nothing", any == "")
+  fx.now = realNow
+  quiet(function() fx.batchStop("drv", "blate1") end)
+  quiet(function() fx.batchStop("drv", "blate2") end)
+end
 check("no keystroke anywhere", taps == 0)
 finish()

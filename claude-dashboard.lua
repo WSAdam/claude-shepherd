@@ -4797,6 +4797,19 @@ function FX.annotateFleet(list, cfg, bannerOn)
     end
     local finished, fwhy = core.batchFinished(b, state.grant, state, FX.fleetRepoGone(b))
     if finished then FX.fleetFinish(id, b, fwhy) end
+    -- 2026-10-03: Adam's answer that no propose collected wakes the driver (core.fleetUnclaimedDue)
+    if core.fleetUnclaimedDue(b, state.grant, FX._fleetNames[id .. ".decision"], now) then
+      local drv
+      for _, it in ipairs(list or {}) do
+        if not it.remote and it.session_id == b.driver.session_id then drv = it end
+      end
+      local sent = drv and FX.deliverTo(drv, core.fleetUnclaimedMessage(b, state.grant), { kind = "fleet-unclaimed", batch = id })
+      if sent then
+        state.grant.nudgedAt = now
+        FX.saveFleetState(id)
+        print("[cc-dashboard] ⇉ batch " .. id .. ": Adam's answer was unclaimed -- mailed the driver to collect it")
+      end
+    end
     for _, u in ipairs(b.units) do
       local reqName = id .. ".tab-" .. u.slug .. ".json"
       local raw = FX._fleetNames[reqName] and FX.readFile(FX.FLEET_DIR .. "/" .. reqName) or nil

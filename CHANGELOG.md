@@ -19,6 +19,9 @@ parallel units. Each unit adds its line here.
   a 10-minute background limit) was stranded: nothing could collect the answer, the batch read
   "proposed" for good, and it had to be proposed and approved again. `cc-fleet.sh propose --resume <id>`
   now collects a late answer, for the session that proposed it only.
+- Fixed: nothing told the driver when its approval was stranded, so an approved batch sat until Adam
+  asked what was going on. An answer still uncollected 30 seconds after Adam gives it now mails the
+  driving session (once) the `cc-fleet.sh propose --resume <id>` command that acts on it.
 
 - Coach lessons ledger: every Apply, Skip (with an optional one-line reason typed next to Skip)
   and Undo is kept per repo (`~/.claude/cc-coach/<repo>.lessons.json`), and the next run's prompt

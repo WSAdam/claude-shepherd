@@ -5269,6 +5269,26 @@ end
 -- Is this batch old enough to prune? A stopped batch `keep` seconds after its stop (Shepherd's
 -- grant.stoppedAt, else the stop marker's time -- never a guess), a denied one after its answer.
 -- A running batch, or a proposal nobody answered, is kept.
+-- ---- an answer nothing collects (2026-10-03) ----
+-- The driver's `cc-fleet.sh propose` claims Adam's decision file (by mv). When that command is gone --
+-- killed at a background time limit -- the decision sits unclaimed and nothing tells the driver: on
+-- 2026-10-02 an approval waited two hours. Once the decision file has been unclaimed this long after
+-- Adam answered, the driver is mailed (once) the command that collects it.
+M.FLEET_UNCLAIMED_SECONDS = 30
+function M.fleetUnclaimedDue(batch, grant, decisionWaiting, now)
+  if type(batch) ~= "table" or batch.phase ~= "proposed" or not decisionWaiting then return false end
+  if type(grant) ~= "table" or grant.stopped or grant.nudgedAt then return false end
+  if not (grant.approved or grant.denied) then return false end
+  return (tonumber(now) or 0) - (tonumber(grant.at) or 0) >= M.FLEET_UNCLAIMED_SECONDS
+end
+function M.fleetUnclaimedMessage(batch, grant)
+  local id = tostring(batch and batch.id or "")
+  return "Adam " .. ((type(grant) == "table" and grant.approved) and "approved" or "answered") .. " batch " .. id
+    .. " (" .. M.capChars(tostring(batch and batch.title or ""), 120) .. "), and nothing collected his answer: your "
+    .. "`cc-fleet.sh propose` stopped waiting. Run `~/.claude/cc-fleet.sh propose --resume " .. id
+    .. "` in the background to act on it."
+end
+
 function M.batchPruneDue(grant, stopMarkerAt, now, keep)
   if type(grant) ~= "table" then return false end
   now, keep = tonumber(now) or 0, tonumber(keep) or 0

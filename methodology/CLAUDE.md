@@ -51,7 +51,7 @@ parallel.
   2. Run `~/.claude/cc-fleet.sh propose --file <batch.json>` from inside the repo **in the
      background** and end the turn with a short summary; I approve or deny it in Shepherd. If it
      stops before I answer (a background time limit), `cc-fleet.sh propose --resume <id>` collects
-     my answer later.
+     my answer later; Shepherd mails you that command if my answer sits uncollected.
   3. `BATCH APPROVED` → for each unit run `~/.claude/cc-fleet.sh tab --batch <id> --unit <slug>`,
      then SendMessage the session it prints the message it prints (`notify_when_idle: true`).
      `DENIED: <note>` → act on the note; nothing was opened.

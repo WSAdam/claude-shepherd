@@ -368,7 +368,8 @@ approval from you per batch**:
    from, if any) and runs
    `~/.claude/cc-fleet.sh propose --file <batch.json>` in the background. If that command stops
    before you answer (a background time limit kills it), the answer isn't lost: the driver collects
-   it later with `cc-fleet.sh propose --resume <id>`.
+   it later with `cc-fleet.sh propose --resume <id>`. Shepherd makes sure it does: if your answer is
+   still uncollected 30 seconds after you give it, the driver gets a mailbox message with that command.
 2. Its card says *⇉ proposes 3 units in <repo>* and reads **Needs you** (red dot, pulsing ring, one
    alert). Its detail panel shows the
    batch: every unit and its task, and a **"Claude may merge these when green"** checkbox set to
