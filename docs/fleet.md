@@ -218,6 +218,19 @@ them back, each with its conversation.
   once, after it is back and [can take it](automation.md#when-automation-types). If it hasn't come
   back within 5 minutes the Continue is dropped. A VS Code or Cursor tab never gets anything typed;
   its row says a turn was in progress, so you know which tabs to continue yourself.
+- **How each one ended.** A link that went out, or a line that was typed, doesn't prove the
+  conversation is back, so each reopened row waits for its outcome and then shows it as a chip:
+  - **resumed**: a hook of that session wrote again since the reopen, or a Claude Code session file
+    names it under a process started since;
+  - **came back fresh**: a new session showed up in its folder (or its own kitty window) instead, a
+    new conversation rather than the old one. Shepherd names it only when no other reopened session
+    is still waiting in that folder, and only one new session appeared there;
+  - **didn't come back**: neither within 5 minutes.
+
+  Until then the row reads *waiting for it to come back*. Each outcome goes to the
+  [audit ledger](usage-and-cost.md#the-audit-ledger) as `restart_outcome`, and once every row of a run has one, a
+  toast sums it up ("Restart: 2 resumed, 1 didn't come back"). Outcomes are kept in memory, so a
+  Hammerspoon reload forgets the ones still waiting.
 - **Never twice.** A session is marked as reopened in the snapshot before anything launches, and a
   second **Reopen** leaves it alone ("already reopened"). The mark is taken back only when Shepherd
   knows nothing opened (the window wasn't in front, the launch was refused). It clears when the

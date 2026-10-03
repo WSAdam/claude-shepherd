@@ -6545,6 +6545,8 @@ local NARRATE = {
   restart_session = { "♻️", "restart in place" },
   restart_fleet_done = { "♻️", "restart in place finished" },
   restart_continue = { "▶️", "continued after a restart" },
+  -- 2026-10-03: how a reopened session ended: resumed, came back fresh, or didn't come back
+  restart_outcome = { "♻️", "restart outcome" },
 }
 -- R3-10: expose NARRATE so the dashboard can inject it as data (__NARRATE__) and the JS
 -- evDesc twin derives BOTH its emoji and verb label from this single source -- otherwise
@@ -15460,15 +15462,18 @@ do
     for _, r in ipairs(plan.rows or {}) do
       local head = ((r.verdict == "reopen") and (r.older and "older   " or "reopen  ") or "skip    ")
         .. tostring(r.name) .. " [" .. tostring(r.editor or "?") .. "] " .. tostring(r.id)
+      -- how its last reopen ended (M.restartStampOutcomes), 2026-10-03
+      local out = r.back and M.RESTART_OUTCOMES[r.back]
+      out = out and (" · " .. out .. (r.backId and (" as " .. tostring(r.backId)) or "")) or ""
       if r.verdict == "reopen" then
         local bits = { tostring(r.where) .. ": " .. tostring(r.command) .. (r.continue and ", then Continue" or "") }
         if r.turn and not r.continue then bits[#bits + 1] = "a turn was in progress" end
         if r.mode then bits[#bits + 1] = r.mode end
         if r.model then bits[#bits + 1] = r.model end
         if r.ended then bits[#bits + 1] = "ended " .. rsAgo(now - r.ended) .. " ago" end
-        lines[#lines + 1] = head .. " -- " .. table.concat(bits, " · ")
+        lines[#lines + 1] = head .. " -- " .. table.concat(bits, " · ") .. out
       else
-        lines[#lines + 1] = head .. " -- " .. tostring(r.why)
+        lines[#lines + 1] = head .. " -- " .. tostring(r.why) .. out
       end
     end
     return table.concat(lines, "\n")
@@ -15498,6 +15503,124 @@ do
     if now - at > M.RESTART.continueSeconds then return "drop" end
     if type(it) ~= "table" or (tonumber(it.updated) or 0) < at then return "wait" end
     return "type"
+  end
+
+  -- ---- Restart outcomes (2026-10-03, mining round 2 unit A4) ----
+  -- "Opened" only says the link went out or the line was typed, not that the conversation is back.
+  -- Each opened row of a run ends as one of:
+  --   resumed  a status file of that session written since it was reopened (M.restartContinueTile /
+  --            M.restartContinueDue, the Continue's own test), or a session file of Claude Code's
+  --            naming it under a process started since
+  --   fresh    "came back fresh": a NEW session id in its folder (or in its own kitty window), written
+  --            since -- the link opened a new conversation instead of the old one. restartNext reopens
+  --            one at a time, but rows wait for their outcomes side by side, so a new session is
+  --            attributed only while this is the one restart in flight in that folder, and only when
+  --            exactly one such session showed up
+  --   lost     "didn't come back": neither within RESTART.continueSeconds
+  -- `waiting` labels a row that may still come back.
+  M.RESTART_OUTCOMES = { resumed = "resumed", fresh = "came back fresh", lost = "didn't come back",
+                         waiting = "waiting for it to come back" }
+
+  -- A session file's startedAt (Claude Code writes milliseconds since the epoch), in seconds.
+  local function rsStarted(r)
+    local s = tonumber(type(r) == "table" and r.startedAt or nil)
+    if not s then return nil end
+    return (s > 1e11) and s / 1000 or s
+  end
+  local function rsFolders(r)
+    local set = {}
+    for _, k in ipairs({ "dir", "root", "cwd" }) do
+      local d = type(r) == "table" and rsDir(r[k]) or nil
+      if d then set[d] = true end
+    end
+    return set
+  end
+  local function rsWithin(set, it)
+    local cwd, origin = rsDir(it.cwd), rsDir(it.originDir)
+    return (cwd ~= nil and set[cwd] == true) or (origin ~= nil and set[origin] == true)
+  end
+
+  -- row = { id, at (when it was reopened), dir, root, cwd, kittyWindowId + kittyListenOn (its own
+  --         kitty window, when the line went there), known = { [id] = true } (every session open when
+  --         it was reopened, plus any new one another row already came back as), rivals = { row, ... }
+  --         (the other reopened rows still waiting for theirs) }
+  -- items = the tick's status items; registry = Claude Code's session files (FX.readSessions()).
+  -- Returns "resumed" | "fresh" | "lost" and the tile that decided it (none for a session file or
+  -- "lost"); nil while it may still come back.
+  function M.restartOutcome(row, items, registry, now)
+    if type(row) ~= "table" or not M.restartIdOk(row.id) then return nil end
+    now = tonumber(now) or os.time()
+    items = type(items) == "table" and items or {}
+    local at = tonumber(row.at) or 0
+    local it = M.restartContinueTile(row, items)
+    local due = M.restartContinueDue(row, it, now)
+    if due == "drop" then return "lost" end
+    if due == "type" and it.session_id == row.id then return "resumed", it end
+    local started = {}
+    for _, r in pairs(type(registry) == "table" and registry or {}) do
+      local s = rsStarted(r)
+      if s and type(r.sessionId) == "string" and (started[r.sessionId] == nil or s > started[r.sessionId]) then
+        started[r.sessionId] = s
+      end
+    end
+    if started[row.id] and started[row.id] >= at then return "resumed" end
+    local known = type(row.known) == "table" and row.known or {}
+    local mine, rivals = rsFolders(row), {}
+    for _, o in ipairs(type(row.rivals) == "table" and row.rivals or {}) do rivals[#rivals + 1] = rsFolders(o) end
+    local found, n = nil, 0
+    for _, c in ipairs(items) do
+      if type(c) == "table" and not c.remote and M.restartIdOk(c.session_id) and c.session_id ~= row.id
+         and not known[c.session_id] and (tonumber(c.updated) or 0) >= at
+         and not (started[c.session_id] and started[c.session_id] < at) then
+        local own = row.kittyWindowId ~= nil and tostring(c.kitty_window_id or "") == row.kittyWindowId
+          and c.kitty_listen_on == row.kittyListenOn
+        if own or rsWithin(mine, c) then
+          local contested = false
+          if not own then
+            for _, set in ipairs(rivals) do if rsWithin(set, c) then contested = true end end
+          end
+          if not contested then found, n = c, n + 1 end
+        end
+      end
+    end
+    if n == 1 then return "fresh", found end
+    return nil
+  end
+
+  -- The plan's rows, each with its session's latest reopen: back = an outcome, or "waiting" while it
+  -- may still come back; backId = the new session a fresh one came back as. outcomes = { [id] = the
+  -- dashboard's record of that reopen }. Only a reopen that opened something has an outcome.
+  function M.restartStampOutcomes(plan, outcomes)
+    if type(plan) ~= "table" or type(plan.rows) ~= "table" or type(outcomes) ~= "table" then return plan end
+    for _, row in ipairs(plan.rows) do
+      local r = type(row) == "table" and outcomes[row.id] or nil
+      if type(r) == "table" and r.outcome == "opened" then
+        local done = r.back ~= "waiting" and M.RESTART_OUTCOMES[r.back] ~= nil
+        row.back = done and r.back or "waiting"
+        row.backId = (r.back == "fresh" and M.restartIdOk(r.freshId)) and r.freshId or nil
+        row.backAt = tonumber(r.backAt)
+      end
+    end
+    return plan
+  end
+
+  -- One line once every opened row of a run has its outcome ("Restart: 2 resumed, 1 came back
+  -- fresh, 1 didn't come back"); nil while any is still waiting, or when nothing was opened.
+  function M.restartOutcomeSummary(results)
+    local n, any = { resumed = 0, fresh = 0, lost = 0 }, false
+    for _, r in ipairs(type(results) == "table" and results or {}) do
+      if type(r) == "table" and r.outcome == "opened" then
+        if n[r.back] == nil then return nil end
+        n[r.back] = n[r.back] + 1
+        any = true
+      end
+    end
+    if not any then return nil end
+    local parts = {}
+    for _, k in ipairs({ "resumed", "fresh", "lost" }) do
+      if n[k] > 0 then parts[#parts + 1] = n[k] .. " " .. M.RESTART_OUTCOMES[k] end
+    end
+    return "Restart: " .. table.concat(parts, ", ")
   end
 end
 
@@ -22294,7 +22417,7 @@ M.FEATURES = {
     what = "Act on any session from its tile — focus its window, send it a message, stop it, or clear its context.",
     why = "Drive a session without switching to it." },
   { key = "restart", cat = "Control", new = true, title = "Restart the fleet in place",
-    what = "After a Claude Code update or a reboot, ☰ → Restart fleet lists every session that went down and how each would come back, and one click reopens them with their conversations: VS Code and Cursor tabs one at a time, kitty and Terminal sessions with claude -r, plus Continue where a turn was in progress. Only a session Shepherd can verify is dead is reopened, and never twice.",
+    what = "After a Claude Code update or a reboot, ☰ → Restart fleet lists every session that went down and how each would come back, and one click reopens them with their conversations: VS Code and Cursor tabs one at a time, kitty and Terminal sessions with claude -r, plus Continue where a turn was in progress. Only a session Shepherd can verify is dead is reopened, and never twice. Each reopened row then says how it ended: resumed, came back fresh (a new conversation opened instead), or didn't come back.",
     why = "An update or a reboot no longer costs you the afternoon of finding and resuming every conversation by hand." },
   { key = "seance", cat = "Control", new = true, title = "Seance: ask a session",
     what = "Ask any session a question — live, or long finished — from its detail panel, a fleet-search hit or a History row. A read-only fork of its own conversation answers (claude -p --resume … --fork-session, nothing saved, its transcript untouched), in the session's model with a budget sized from its context, and the answer shows right under the box.",

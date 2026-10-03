@@ -426,6 +426,106 @@ check("continue: it is typed through the readiness check, as its own automation 
 eq("continue: a mid-turn session is never typed into (core.readyToType)",
    core.readyToType({ key = C, status = "working", updated = NOW }, nil, NOW + 10), false)
 
+-- ---- restart outcomes (2026-10-03) ---------------------------------------------------------------
+-- 2026-10-03: a run's rows ended at "opened" -- the link went out, the line was typed -- so a tab
+-- that opened a blank chat, or a session that never started, read exactly like one that was back.
+-- Each opened row now ends as resumed, came back fresh, or didn't come back (core.restartOutcome).
+check("outcome: core ships restartOutcome, its stamp on the plan and the summary",
+      type(core.restartOutcome) == "function" and type(core.restartStampOutcomes) == "function"
+      and type(core.restartOutcomeSummary) == "function" and type(core.RESTART_OUTCOMES) == "table")
+local function outcome(row, list, reg, now)
+  if type(core.restartOutcome) ~= "function" then return "missing" end
+  return core.restartOutcome(row, list, reg, now)
+end
+local SHOPDIR, WTDIR, APIDIR = "/Users/u/code/shop", "/Users/u/code/shop/.claude/worktrees/fix-x", "/Users/u/code/api"
+local N1 = "99999999-aaaa-4bbb-8ccc-000000000091"   -- a session that showed up after the restart
+local N2 = "99999999-aaaa-4bbb-8ccc-000000000092"
+local function tile(id, cwd, updated, extra)
+  local t = { session_id = id, key = id, cwd = cwd, updated = updated, status = "idle" }
+  for k, v in pairs(extra or {}) do t[k] = v end
+  return t
+end
+local function orow(extra)
+  local r = { id = A, at = NOW, dir = SHOPDIR, root = SHOPDIR, known = { [B] = true } }
+  for k, v in pairs(extra or {}) do r[k] = v end
+  return r
+end
+eq("outcome: nothing back yet: still waiting", outcome(orow(), {}, {}, NOW + 5), nil)
+eq("outcome: its old status file, written before the restart, is no answer",
+   outcome(orow(), { tile(A, SHOPDIR, NOW - 30) }, {}, NOW + 5), nil)
+local back = tile(A, SHOPDIR, NOW + 4)
+local o1, t1 = outcome(orow(), { back }, {}, NOW + 5)
+eq("outcome: a status file of that session written since: resumed", o1, "resumed")
+eq("outcome: ...and the tile that said so", t1, back)
+eq("outcome: a session file naming it under a process started since: resumed",
+   outcome(orow(), {}, { ["955"] = { pid = 955, sessionId = A, startedAt = (NOW + 2) * 1000 } }, NOW + 5), "resumed")
+eq("outcome: a session file naming it under a process older than the restart is no answer",
+   outcome(orow(), {}, { ["955"] = { pid = 955, sessionId = A, startedAt = (NOW - 600) * 1000 } }, NOW + 5), nil)
+eq("outcome: a remote tile with its id is not it", outcome(orow(), { tile(A, SHOPDIR, NOW + 4, { remote = true }) }, {}, NOW + 5), nil)
+local fresh = tile(N1, SHOPDIR, NOW + 6)
+local o2, t2 = outcome(orow(), { fresh }, {}, NOW + 8)
+eq("outcome: a NEW session id in its folder, written since: came back fresh", o2, "fresh")
+eq("outcome: ...naming the new session", t2, fresh)
+eq("outcome: resumed wins over a new session beside it", outcome(orow(), { fresh, back }, {}, NOW + 8), "resumed")
+eq("outcome: a session that was open when it was reopened is not new",
+   outcome(orow({ known = { [N1] = true } }), { fresh }, {}, NOW + 8), nil)
+eq("outcome: a new session in another folder is not its",
+   outcome(orow(), { tile(N1, APIDIR, NOW + 6) }, {}, NOW + 8), nil)
+eq("outcome: a new id whose status file predates the restart is not its",
+   outcome(orow(), { tile(N1, SHOPDIR, NOW - 2) }, {}, NOW + 8), nil)
+eq("outcome: a new id whose process started before the restart (its first hook only now) is not its",
+   outcome(orow(), { fresh }, { ["970"] = { pid = 970, sessionId = N1, startedAt = (NOW - 900) * 1000 } }, NOW + 8), nil)
+eq("outcome: a worktree session's tab comes back in its window folder: its root counts",
+   outcome(orow({ dir = WTDIR, root = SHOPDIR }), { fresh }, {}, NOW + 8), "fresh")
+eq("outcome: ...and a tile whose origin is that folder",
+   outcome(orow({ dir = WTDIR, root = SHOPDIR }), { tile(N1, "/elsewhere", NOW + 6, { originDir = SHOPDIR }) }, {}, NOW + 8), "fresh")
+eq("outcome: another restart still waiting in the same folder: attributed to neither",
+   outcome(orow({ rivals = { { id = B, dir = WTDIR, root = SHOPDIR } } }), { fresh }, {}, NOW + 8), nil)
+eq("outcome: another restart waiting in a different folder doesn't stop it",
+   outcome(orow({ rivals = { { id = C, dir = APIDIR, root = APIDIR } } }), { fresh }, {}, NOW + 8), "fresh")
+eq("outcome: two new sessions in its folder: can't tell which, not attributed",
+   outcome(orow(), { fresh, tile(N2, SHOPDIR, NOW + 7) }, {}, NOW + 8), nil)
+eq("outcome: relaunched in its own kitty window, a new id there came back fresh",
+   outcome(orow({ id = C, dir = APIDIR, root = APIDIR, kittyWindowId = "7", kittyListenOn = "unix:/tmp/kitty-900" }),
+           { tile(N1, "/somewhere/else", NOW + 6, { kitty_window_id = "7", kitty_listen_on = "unix:/tmp/kitty-900" }) }, {}, NOW + 8), "fresh")
+eq("outcome: neither within RESTART.continueSeconds: didn't come back",
+   outcome(orow(), {}, {}, NOW + core.RESTART.continueSeconds + 1), "lost")
+eq("outcome: no row, no outcome", outcome(nil, { back }, {}, NOW + 5), nil)
+eq("outcome: a row whose id isn't a session id, no outcome", outcome(orow({ id = "x; rm" }), { back }, {}, NOW + 5), nil)
+if type(core.restartStampOutcomes) == "function" then
+  local plan = { now = NOW, rows = {
+    { id = A, verdict = "skip", reason = "reopened", why = "already reopened 30s ago" },
+    { id = B, verdict = "skip", reason = "alive", why = "it is running (pid 912)" },
+    { id = C, verdict = "skip", reason = "reopened", why = "already reopened 40s ago" },
+    { id = D, verdict = "reopen", how = "terminal-new", where = "a new Terminal window", command = "claude -r " .. D },
+  } }
+  core.restartStampOutcomes(plan, {
+    [A] = { id = A, outcome = "opened", back = "fresh", freshId = N1, backAt = NOW + 8 },
+    [B] = { id = B, outcome = "opened", back = "resumed", backAt = NOW + 4 },
+    [C] = { id = C, outcome = "opened" },
+    [D] = { id = D, outcome = "refused", why = "the window wasn't in front" },
+  })
+  eq("stamp: a row that came back fresh says so", plan.rows[1].back, "fresh")
+  eq("stamp: ...with the new session's id", plan.rows[1].backId, N1)
+  eq("stamp: a resumed row", plan.rows[2].back, "resumed")
+  eq("stamp: an opened row with no outcome yet is waiting", plan.rows[3].back, "waiting")
+  eq("stamp: a reopen that opened nothing has no outcome", plan.rows[4].back, nil)
+  local text = core.restartPlanText(plan, NOW + 10)
+  check("plan text: the outcome is on the row (hs -c shows it)", text:find("came back fresh as " .. N1, 1, true) ~= nil
+        and text:find("· resumed", 1, true) ~= nil and text:find("waiting for it to come back", 1, true) ~= nil)
+end
+if type(core.restartOutcomeSummary) == "function" then
+  eq("summary: nothing while a row is still waiting",
+     core.restartOutcomeSummary({ { outcome = "opened", back = "resumed" }, { outcome = "opened" } }), nil)
+  eq("summary: once every opened row has its outcome",
+     core.restartOutcomeSummary({ { outcome = "opened", back = "resumed" }, { outcome = "opened", back = "resumed" },
+       { outcome = "opened", back = "fresh" }, { outcome = "opened", back = "lost" }, { outcome = "refused" } }),
+     "Restart: 2 resumed, 1 came back fresh, 1 didn't come back")
+  eq("summary: only the outcomes that happened", core.restartOutcomeSummary({ { outcome = "opened", back = "lost" } }),
+     "Restart: 1 didn't come back")
+  eq("summary: nothing opened, nothing to say", core.restartOutcomeSummary({ { outcome = "would" }, { outcome = "refused" } }), nil)
+end
+
 -- ---- the real FX functions under a stubbed Hammerspoon ------------------------------------------
 local realGetenv = os.getenv
 os.getenv = function(k)
@@ -591,6 +691,18 @@ FX.now = function() return clock end
 local toasts = {}
 local realAlert = FX.alert
 FX.alert = function(m, secs) toasts[#toasts + 1] = tostring(m); return realAlert(m, secs) end
+-- 2026-10-03: the ledger events a run writes (restart_outcome among them), as FX.appendLedger got them
+local ledger = {}
+local realAppend = FX.appendLedger
+FX.appendLedger = function(ev) ledger[#ledger + 1] = ev; return realAppend(ev) end
+local function ledgerOf(typ, id)
+  for i = #ledger, 1, -1 do local ev = ledger[i]; if ev.type == typ and ev.session_id == id then return ev end end
+end
+local function stepOutcome(list) if type(FX.stepRestartOutcome) == "function" then FX.stepRestartOutcome(list) end end
+local function outOf(id) local o = FX._restart.outcomes; return type(o) == "table" and type(o[id]) == "table" and o[id] or {} end
+local function rowBack(id)
+  for _, r in ipairs(FX.restartPreview().rows) do if r.id == id then return r.back, r.backId end end
+end
 
 -- the fleet, in this HOME: two VS Code tabs in one window, a kitty session, a Terminal session
 local function statusText(id, name, cwd, editor, status, extra)
@@ -717,6 +829,10 @@ local uris = table.concat(opened, "\n")
 check("restart: each is that session's own link", uris:find("vscode://anthropic.claude-code/open?session=" .. A, 1, true) ~= nil
       and uris:find("vscode://anthropic.claude-code/open?session=" .. B, 1, true) ~= nil)
 check("restart: the summary says two reopened", (toasts[#toasts] or ""):find("2 reopened", 1, true) ~= nil)
+-- 2026-10-03: an opened row is not the end: each waits on the run for its outcome
+check("outcome: each opened row is kept on the run, waiting to come back",
+      outOf(A).outcome == "opened" and outOf(A).back == nil and outOf(B).outcome == "opened" and outOf(B).back == nil)
+eq("outcome: the preview's row says it is waiting", rowBack(A), "waiting")
 eq("restart: the run is over", FX._restart.run, nil)
 eq("restart: both are stamped in the snapshot", core.parseRestartSnapshot(readAll(FX.RESTART_FILE)).sessions[B].restarted ~= nil, true)
 -- never twice: a second run over the same sessions opens nothing
@@ -734,6 +850,28 @@ clock = clock + 30
 LIVE[B] = statusText(B, "fix-x", WT, "vscode", "idle", { host_window = "777", session_pid = "912", permission_mode = "auto" })
 tick({ B })
 eq("back: a hook write after the reopen clears the stamp", FX.restartSnapshot().sessions[B].restarted, nil)
+stepOutcome(tick({ B }))
+eq("outcome: a hook of the reopened session writing again: resumed", outOf(B).back, "resumed")
+eq("outcome: the ledger gets restart_outcome", (ledgerOf("restart_outcome", B) or {}).outcome, "resumed")
+eq("outcome: the other one still waits (no hook of it, no new session in its folder)", outOf(A).back, nil)
+check("outcome: no summary while one is still waiting", not (toasts[#toasts] or ""):find("resumed", 1, true))
+-- its link opened a blank chat instead: a NEW session shows up in its folder
+local NEWA = "99999999-aaaa-4bbb-8ccc-0000000000a1"
+LIVE[NEWA] = statusText(NEWA, "shop", SHOP, "vscode", "idle", { host_window = "777", session_pid = "913" })
+clock = clock + 2
+stepOutcome(tick({ B, NEWA }))
+eq("outcome: a new session in its folder after the restart: came back fresh", outOf(A).back, "fresh")
+eq("outcome: ...as that session", outOf(A).freshId, NEWA)
+local evA = ledgerOf("restart_outcome", A) or {}
+eq("outcome: the ledger's restart_outcome names the new session", tostring(evA.outcome) .. "|" .. tostring(evA.fresh_id), "fresh|" .. NEWA)
+eq("outcome: once every row has its outcome, one summary", toasts[#toasts], "Restart: 1 resumed, 1 came back fresh")
+local bA, idA = rowBack(A)
+eq("outcome: the preview's row ends as its outcome, not 'opened'", tostring(bA) .. "|" .. tostring(idA), "fresh|" .. NEWA)
+eq("outcome: ...and the resumed one's", rowBack(B), "resumed")
+stepOutcome(tick({ B, NEWA }))
+local nOut = 0
+for _, ev in ipairs(ledger) do if ev.type == "restart_outcome" then nOut = nOut + 1 end end
+eq("outcome: each row's outcome is recorded once", nOut, 2)
 
 -- verified right before the URI goes out: a session that came alive in between is not reopened
 local E = "55555555-aaaa-4bbb-8ccc-000000000005"
@@ -821,6 +959,8 @@ eq("continue: ...into that session", typed[1] and typed[1].key, C)
 FX.stepRestartContinue(idle)
 runTimers()
 eq("continue: never a second time", #typed, 1)
+stepOutcome(idle)
+eq("outcome: the kitty session back under its own id: resumed", outOf(C).back, "resumed")
 
 -- kitty, its window still there at a shell prompt: the line is typed into THAT window, no new one
 local G = "77777777-aaaa-4bbb-8ccc-000000000007"
@@ -852,6 +992,12 @@ check("kitty window: claude -r <id> is typed into its own window, through its ow
 check("kitty window: ...then Return, as its own write", pressedEnter)
 check("kitty window: no new kitty window is opened", not newWindow)
 eq("kitty window: a session that had finished gets no Continue", FX._restart.pending[G], nil)
+eq("outcome: a relaunch in its own kitty window remembers that window", outOf(G).kittyWindowId, "11")
+clock = clock + core.RESTART.continueSeconds + 1
+stepOutcome({})
+eq("outcome: nothing back within RESTART.continueSeconds: didn't come back", outOf(G).back, "lost")
+eq("outcome: ...in the ledger too", (ledgerOf("restart_outcome", G) or {}).outcome, "lost")
+eq("outcome: ...and the summary says so", toasts[#toasts], "Restart: 1 didn't come back")
 kittyLsOut = nil
 
 -- Terminal, the shell that ran it still there: the line goes into its own tab

@@ -93,5 +93,29 @@ check("...nor where, the command, the mode or the model", evil.indexOf("<script>
 check("...nor a reason quoting a path", evil.indexOf("alert(5)>") < 0);
 eq("...and both rows still render", count(evil, 'class="rs-row '), 2);
 
+// 2026-10-03: a run's rows ended at "opened" -- the link went out -- so a blank chat or a session
+// that never started read like one that was back. A reopened row now ends as its outcome
+// (core.restartStampOutcomes: back = resumed | fresh | lost, or waiting while it may still come back).
+const N1 = "99999999-aaaa-4bbb-8ccc-000000000091";
+const out = lib.restartRowsHtml({ now: NOW, rows: [
+  { id: A, name: "shop", editor: "vscode", verdict: "skip", reason: "reopened", why: "already reopened 2m ago", back: "fresh", backId: N1 },
+  { id: C, name: "api", editor: "kitty", verdict: "skip", reason: "alive", why: "it is running (pid 913)", back: "resumed" },
+  { id: D, name: "docs", editor: "terminal", verdict: "skip", reason: "reopened", why: "already reopened 6m ago", back: "lost" },
+  { id: "55555555-aaaa-4bbb-8ccc-000000000005", name: "w", editor: "kitty", verdict: "skip", reason: "reopened",
+    why: "already reopened 20s ago", back: "waiting" },
+  { id: "66666666-aaaa-4bbb-8ccc-000000000006", name: "plain", editor: "kitty", verdict: "skip", reason: "alive", why: "it is running" },
+] });
+eq("outcome: one chip per reopened row, none on a row that wasn't reopened", count(out, 'class="rs-out '), 4);
+check("outcome: resumed", out.indexOf('<span class="rs-out rs-out-resumed">resumed</span>') >= 0);
+check("outcome: came back fresh, naming the new session", /<span class="rs-out rs-out-fresh" title="new session 99999999-aaaa-4bbb-8ccc-000000000091">came back fresh<\/span>/.test(out));
+check("outcome: didn't come back", out.indexOf('<span class="rs-out rs-out-lost">didn&#39;t come back</span>') >= 0);
+check("outcome: waiting while it may still come back", out.indexOf('<span class="rs-out rs-out-waiting">waiting for it to come back</span>') >= 0);
+const evilOut = lib.restartRowsHtml({ now: NOW, rows: [
+  { id: "x", name: "n", editor: "kitty", verdict: "skip", why: "w", back: '"><img src=x onerror=alert(6)>' },
+  { id: "y", name: "m", editor: "kitty", verdict: "skip", why: "w", back: "fresh", backId: '"><img src=x onerror=alert(7)>' },
+] });
+check("outcome: an outcome code that isn't one renders no chip (never raw)", evilOut.indexOf("alert(6)") < 0 && count(evilOut, 'class="rs-out ') === 1);
+check("outcome: ...and a hostile new-session id is escaped", evilOut.indexOf('"><img') < 0 && evilOut.indexOf("&lt;img") >= 0);
+
 console.log("\n-- restart-view.test.js: " + run + " run, " + failed + " failed --");
 process.exit(failed === 0 ? 0 : 1);

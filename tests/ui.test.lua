@@ -4984,6 +4984,12 @@ do
         and snapStep:find("if changed or st.dirty then", 1, true) ~= nil)
   check("restart: a session Shepherd drops itself leaves the snapshot (FX.removeStatus)",
         fn("FX.removeStatus(key)"):find('if type(FX._restart) == "table" then FX._restart.forget[tostring(key)] = true end', 1, true) ~= nil)
+  -- 2026-10-03: rows ended at "opened"; the tick now ends each as resumed, came back fresh or didn't come back
+  check("restart outcomes: the tick decides each reopened row's outcome (core.restartOutcome)",
+        src:find("pcall(FX.stepRestartOutcome, list)", 1, true) ~= nil
+        and fn("FX.stepRestartOutcome(list)"):find("core.restartOutcome(r, list, reg, now)", 1, true) ~= nil)
+  check("restart outcomes: the preview's rows carry them",
+        fn("FX.restartPlanNow()"):find("core.restartStampOutcomes(plan, FX._restart.outcomes)", 1, true) ~= nil)
 end
 
 -- ---- panel text sweep: what the panel says is what it does (2026-09-30, build program unit 45) ----

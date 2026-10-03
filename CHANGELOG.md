@@ -9,6 +9,12 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
 The second feature-mining round (Maestro, Gas Town, ECC, oh-my-claudecode, OpenRig), built as
 parallel units. Each unit adds its line here.
 
+- Restart outcomes: a Restart fleet row no longer ends at "opened" (a link went out, a line was typed).
+  Each reopened session ends as **resumed** (its hooks wrote again, or a session file names it under a
+  new process), **came back fresh** (a new session in its folder, named only while no other reopened
+  session waits there) or **didn't come back** (neither within 5 minutes), shown as a chip on its row,
+  recorded as `restart_outcome` and summed up in one toast per run (`core.restartOutcome`).
+
 - Coach edit outcomes: each run judges the applied `CLAUDE.md` edits at least 3 of its sessions
   postdate, against what each was expected to change: working, still seen (with quotes) or no
   data; fewer sessions read "no data yet", decided by Shepherd, not the model. The verdict shows on
