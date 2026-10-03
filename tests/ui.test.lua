@@ -5235,5 +5235,26 @@ do
   check("hold: cc-resume.sh asks before it wakes the session", heldAt ~= nil and firedAt ~= nil and heldAt < firedAt)
 end
 
+-- ---- Gate blame: a red gate's failures split into main's and the branch's (2026-10-03, mining round 2 E1a) ----
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("gate blame: the review has its block inside the scrolling body",
+        (src:match('<div class="dm%-body">.-</div>%s*<div class="dm%-acts"') or ""):find('id="dm%-blame"') ~= nil)
+  local review = src:match("\n    function renderMerge%(it%)%{.-\n    %}\n") or ""
+  check("gate blame: renderMerge fills it with textContent (the lines are the runner's), only while the request waits",
+        review:find('getElementById("dm-blame")', 1, true) ~= nil and review:find("gbEl.textContent", 1, true) ~= nil
+        and review:find("asking ? gateBlameText(m.gateBlame, m.base)", 1, true) ~= nil)
+  local css = ""
+  for rule in src:gmatch("#d%-merge %.dm%-blame[^{]*{[^}]*}") do css = css .. rule end
+  check("gate blame: information, never the gate's danger colour", css ~= "" and not css:find("--danger", 1, true))
+  check("gate blame: the tick hands the review its verdict and prunes its runs",
+        src:find("gateBlame = FX.gateBlame(r, facts, gate)", 1, true) ~= nil and src:find("FX.gateBlamePrune(reqs)", 1, true) ~= nil)
+  check("gate blame: its runs go in the gate lane as `low`",
+        src:find("FX._redFirstBase, FX._gateBlameRuns }) do", 1, true) ~= nil
+        and src:find("low = (slot == FX._gateBlameRuns) or nil", 1, true) ~= nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

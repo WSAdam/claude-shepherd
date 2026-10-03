@@ -67,5 +67,50 @@ eq("couldn't run: why, and that nothing was proven", r.text,
 eq("...styled as a warning, never red", r.cls, "dm-redfirst r-couldntRun");
 eq("an unknown state shows nothing", redFirstText({ state: "bogus" }, "main").text, "");
 
+// ---- Gate blame (2026-10-03, mining round 2 unit E1a): whose failures a red gate's are ----
+// The REAL shipped gateBlameText, sliced out the same way. It says which of a red gate's failing
+// lines main already has at the merge-base, as information beside the gate; Merge never reads it.
+const bi = src.indexOf("    function gateBlameText(gb, base){");
+const bj = bi < 0 ? -1 : src.indexOf("\n    }\n", bi);
+check("the shipped gateBlameText is in the panel source", bi >= 0 && bj > bi);
+if (bi >= 0 && bj > bi) {
+  const gateBlameText = new Function(src.slice(bi, bj + 7) + "\nreturn gateBlameText;")();
+  const BP = "Gate blame (a hint, not a gate): ";
+  eq("no verdict: nothing to show", gateBlameText(null, "main").text, "");
+  eq("queued in the lane", gateBlameText({ state: "queued", at: "c0ffee1", command: "make test" }, "main").text,
+    BP + "the same gate on main at c0ffee1 is queued behind the runs that judge a merge…");
+  eq("running: which command, where", gateBlameText({ state: "running", at: "c0ffee1", command: "make test" }, "trunk").text,
+    BP + "running make test on trunk at c0ffee1 to see which failures trunk already has…");
+  eq("nothing to compare", gateBlameText({ state: "none" }, "main").text,
+    BP + "the gate named no failing test, so there's nothing to compare with main");
+  let b = gateBlameText({ state: "split", at: "c0ffee1", total: 3, newN: 3, oldN: 0, new: "FAIL - a\nFAIL - b\nFAIL - c", log: "/s/b.log" }, "main");
+  eq("all new: says so, without repeating the gate's lines", b.text,
+    BP + "all 3 failing lines are new in this branch — main at c0ffee1 doesn't fail them\nmain's run: /s/b.log");
+  eq("...styled as news, never red", b.cls, "dm-blame b-new");
+  eq("one line: singular", gateBlameText({ state: "split", at: "c0ffee1", total: 1, newN: 1, oldN: 0 }, "main").text,
+    BP + "the failing line is new in this branch — main at c0ffee1 doesn't fail it");
+  b = gateBlameText({ state: "split", at: "c0ffee1", total: 2, newN: 0, oldN: 2, old: "FAIL - x\nFAIL - y" }, "main");
+  eq("all old: main already fails every one", b.text,
+    BP + "all 2 failing lines already fail on main at c0ffee1 — none is new in this branch");
+  eq("...styled as a warning about main", b.cls, "dm-blame b-old");
+  b = gateBlameText({ state: "split", at: "c0ffee1", total: 3, newN: 1, oldN: 2, new: "FAIL - mine", old: "FAIL - x\nFAIL - y", log: "/s/b.log" }, "main");
+  eq("mixed: both sides, each with its lines", b.text,
+    BP + "1 new in this branch, 2 already failing on main at c0ffee1\n"
+    + "new in this branch:\nFAIL - mine\nalready failing on main:\nFAIL - x\nFAIL - y\nmain's run: /s/b.log");
+  eq("...styled as news", b.cls, "dm-blame b-new");
+  const twelve = Array.from({ length: 12 }, (_, k) => "FAIL - n" + k).join("\n");
+  b = gateBlameText({ state: "split", at: "c0ffee1", total: 30, newN: 20, oldN: 10, new: twelve, old: "FAIL - o" }, "main");
+  check("a capped side says how many more  (" + JSON.stringify(b.text) + ")",
+    b.text.indexOf("new in this branch (12 of 20):") > 0 && b.text.indexOf("already failing on main (1 of 10):") > 0);
+  b = gateBlameText({ state: "couldntRun", at: "c0ffee1", why: "it timed out", log: "/s/b.log" }, "main");
+  eq("couldn't run: why, and that no failure counts on either side", b.text,
+    BP + "couldn't run the gate on main at c0ffee1 (it timed out) — no failure is counted as main's or this branch's\nmain's run: /s/b.log");
+  eq("...styled as a warning", b.cls, "dm-blame b-couldntRun");
+  b = gateBlameText({ state: "unclear", at: "c0ffee1", code: 2, command: "make lint && make test" }, "main");
+  eq("unclear: main failed without naming a test", b.text,
+    BP + "make lint && make test on main at c0ffee1 exited 2 without naming a failing test — couldn't tell which failures main has");
+  eq("an unknown state shows nothing", gateBlameText({ state: "bogus" }, "main").text, "");
+}
+
 console.log("-- redfirst-view.test.js: " + run + " run, " + failed + " failed --");
 process.exit(failed === 0 ? 0 : 1);

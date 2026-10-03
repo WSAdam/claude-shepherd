@@ -371,6 +371,9 @@ echo ""
 echo "== node: the red-first proof's line in the merge review (behavioral, runs the shipped redFirstText) =="
 node "$DIR/redfirst-view.test.js" || fail=1
 echo ""
+echo "== lua: gate blame -- a red gate's command again at the merge-base, behind the gates that judge a merge, split into main's failures and the branch's (behavioral, stubbed hs + a real git repo) =="
+HOME="$(mktemp -d)" lua "$DIR/gateblame.test.lua" || fail=1
+echo ""
 echo "== bash: tests/run.sh runs just the files it is given (the red-first proof's runner) =="
 bash "$DIR/run-files.test.sh" || fail=1
 echo ""

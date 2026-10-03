@@ -192,6 +192,35 @@ by extension (`.lua` with `lua` and a temp `HOME`, `.sh` with `bash`, `.js` with
 calls a function the fix adds still reads as red. Its red-first command is
 `bash tests/run.sh {files}`.
 
+#### Gate blame: which failures were already on main?
+
+A red gate says the suite failed. It doesn't say whose failures they are: a unit cut from a main
+that was already red used to take the blame for main's breakage as well as its own. So when a
+pre-merge gate **fails** and its log names at least one failing test, Shepherd runs the **same gate
+at the merge-base** and the review splits the failing lines in two: *already failing on main* and
+*new in this branch*. Nothing to configure: every `merge.gates` entry (and a repo-declared gate) gets it.
+
+- The run uses a **detached scratch worktree at the merge-base** in `~/.claude/cc-scratch/`, made
+  and removed the way the red-first proof's are, with nothing of the unit's checked out onto it. A
+  repo-declared gate runs the merge-base's own `.worktree-check` there.
+- It is **cached per repo, merge-base and command**: units cut from the same main share one run,
+  and a new commit on the same merge-base reuses it.
+- It runs in the repo's one gate lane, with the gate's `timeoutSeconds`, and **behind every run
+  that judges a merge**: a gate waiting for the lane starts first, even one queued after it. Once
+  it has started, a gate asked for meanwhile waits for it like any run in the lane. It never runs
+  beside another suite.
+- A failing line is matched by its words and the `== <suite> ==` header it sits under, with
+  durations, line numbers, the checkout's own path and `mktemp` names ignored. Each line on main
+  accounts for one line in the branch, so a test failing twice where main fails it once counts once
+  on each side.
+- A run on main that **couldn't run or timed out counts on neither side**: the review says so and
+  splits nothing. If main fails without naming a failing test (its lint, say), the review says it
+  couldn't tell. A gate that names no failing test, a timed-out gate, and a passed or couldn't-run
+  gate get no run at all.
+- It is **information only**. A red gate stays red even when every failure is main's: **Merge**
+  stays refused, and a batch unit's merge on your grant never goes through on it. Fix main (or
+  rebase onto a fixed main) and the gate runs again.
+
 ### The claim check: a hint, never a gate
 
 The gate proves the suite is green; it doesn't prove what the session *wrote* is true. The review

@@ -140,7 +140,7 @@ every other automatic behaviour here waits for its switch.
   review its commits, diff and tests, and **Merge** rebases, tests and fast-forwards main.
 - [**Finished units get a merge reminder**](docs/approvals-and-policies.md#finished-units-get-a-merge-reminder): a unit that says "done" but never asks to merge is sent back once per commit.
 - [**"Done" is checked against the diff**](docs/approvals-and-policies.md#done-is-checked-against-the-diff): a "done" over a new `.only`/`.skip`, a deleted test or a stub is sent back with the lines.
-- [**Merge gates**](docs/merging-and-batches.md#merge-gates-shepherd-runs-the-tests-itself): Shepherd runs the suite itself, before the merge and on main after it.
+- [**Merge gates**](docs/merging-and-batches.md#merge-gates-shepherd-runs-the-tests-itself): Shepherd runs the suite itself, before the merge and on main after it; [**Gate blame**](docs/merging-and-batches.md#gate-blame-which-failures-were-already-on-main) splits a red gate's failures into main's and the branch's.
 - [**Merge checker**](docs/merging-and-batches.md#the-checker-a-read-only-review-of-every-merge-request):
   every merge request gets red flags from the diff and a read-only Sonnet review; a batch unit
   merges only on a pass, and 🔎 Verify reviews any session.

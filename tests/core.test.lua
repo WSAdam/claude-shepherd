@@ -8477,7 +8477,8 @@ do
   -- 2026-10-03: 49 -> 50 for the hands-off hold and fleet freeze ("hold", flagged new).
   -- 2026-10-03: 50 -> 51 for playbooks as My List sources ("playbooks", flagged new).
   -- 2026-10-03: 51 -> 52 for lessons learned in 2+ repos going to the global CLAUDE.md ("coachglobal", flagged new).
-  eq("FEATURES: the 52 new features are flagged", newCount, 52)
+  -- 2026-10-03: 52 -> 53 for gate blame ("gateblame", flagged new).
+  eq("FEATURES: the 53 new features are flagged", newCount, 53)
   check("FEATURES: lists the coach across repos", keys.coachglobal == true)
   check("FEATURES: lists checking \"done\" against the diff", keys.fakedone == true)
   check("FEATURES: lists the unfinished-unit reminder", keys.unfinished == true)
@@ -14863,6 +14864,124 @@ do
   local fkeys = {}; for _, ft in ipairs(core.FEATURES) do fkeys[ft.key] = ft end
   check("playbooks: FEATURES lists playbooks in My List, flagged new", fkeys.playbooks ~= nil and fkeys.playbooks.new == true
         and fkeys.playbooks.title == "Playbooks in My List")
+end
+
+-- ---- Gate blame: whose failures a red gate's are (2026-10-03, mining round 2 unit E1a) ----
+-- A red pre-merge gate said THAT the suite failed, never whose failures they were: a unit cut from
+-- a red main took the blame for main's breakage too. The same gate now runs at the merge-base and
+-- the review splits "already failing on main" from "new in this branch". Informational only.
+do
+  local MB = string.rep("c", 40)
+  local RED = table.concat({
+    "== bash: config ==", "ok   - reads the file", "FAIL - config: an old breakage (0.2s)",
+    "== lua: core ==", "FAIL - core: the new behaviour", "FAIL - core: loads /W/wt/tests/x.lua:12",
+    "-- core.test.lua: 3 run, 2 failed --", "❌ SOME TESTS FAILED" }, "\n") .. "\n"
+  local gate = { state = "failed", code = 2, command = "make lint && make test", output = RED, logPath = "/l/g.log" }
+  eq("gateBlameDue: a red gate with failing test lines gets a run on main", core.gateBlameDue(gate), "run")
+  eq("gateBlameDue: a red gate naming no failing test has nothing to compare",
+     core.gateBlameDue({ state = "failed", code = 2, output = "luacheck: 3 warnings\n❌ SOME TESTS FAILED\n" }), "none")
+  check("gateBlameDue: only a FAILED gate -- passed, timed out, couldn't run or still going get nothing",
+        core.gateBlameDue({ state = "passed", output = RED }) == nil and core.gateBlameDue({ state = "timedOut", output = RED }) == nil
+        and core.gateBlameDue({ state = "couldntRun", output = RED }) == nil and core.gateBlameDue({ state = "running" }) == nil
+        and core.gateBlameDue(nil) == nil)
+
+  local pc = core.gateBlamePlanCmd({ commonDir = "/r/A/.git", base = "main" }, "abc123")
+  check("gateBlamePlanCmd: the merge-base, read with Shepherd's own git  (" .. tostring(pc) .. ")",
+        pc and pc:find("git --git-dir='/r/A/.git' merge-base 'refs/heads/main' abc123", 1, true) ~= nil)
+  check("gateBlamePlanCmd: no command for a non-hex sha or a request without a repo",
+        core.gateBlamePlanCmd({ commonDir = "/r/A/.git", base = "main" }, "abc;rm") == nil
+        and core.gateBlamePlanCmd({ base = "main" }, "abc123") == nil)
+  eq("gateBlamePlan: git's answer -> the merge-base", core.gateBlamePlan("@@mergebase\n" .. MB .. "\n"), MB)
+  local nomb, why = core.gateBlamePlan("@@mergebase\n")
+  check("gateBlamePlan: no merge-base -> nil and why", nomb == nil and type(why) == "string" and why ~= "")
+  eq("gateBlameCommand: a configured gate runs its own command", core.gateBlameCommand(gate), "make lint && make test")
+  eq("gateBlameCommand: a repo-declared gate runs the merge-base's own copy",
+     core.gateBlameCommand({ repo = true, command = "main's .worktree-check" }), "./.worktree-check")
+  eq("gateBlameKey: one run per repo, merge-base and command", core.gateBlameKey("/r/A/.git", MB, "make test"),
+     "/r/A/.git|" .. MB .. "|make test")
+  check("gateBlameKey: nothing to cache without a repo, a hex merge-base or a command",
+        core.gateBlameKey(nil, MB, "x") == nil and core.gateBlameKey("/r/A/.git", "HEAD", "x") == nil
+        and core.gateBlameKey("/r/A/.git", MB, "") == nil)
+
+  local ctx = { mergeBase = MB, command = "make lint && make test", root = "/W/wt" }
+  local v = core.gateBlameVerdict(gate, nil, ctx)
+  check("gateBlameVerdict: before the run on main is in the lane, it is queued  (" .. tostring(v and v.state) .. ")",
+        v and v.state == "queued" and v.at == MB:sub(1, 7) and v.total == 3)
+  eq("gateBlameVerdict: ...and running while it runs", (core.gateBlameVerdict(gate, { state = "running" }, ctx) or {}).state, "running")
+  v = core.gateBlameVerdict(gate, { state = "passed", code = 0, output = "✅ ALL GREEN\n", logPath = "/l/b.log" }, ctx)
+  check("gateBlameVerdict: main passes the same gate -> every failure is new in this branch",
+        v and v.state == "split" and v.newN == 3 and v.oldN == 0 and v.old == nil and v.log == "/l/b.log")
+  local BASE = table.concat({
+    "== bash: config ==", "FAIL - config: an old breakage (0.5s)",
+    "== lua: core ==", "FAIL - core: loads /S/redfirst-1-1/tests/x.lua:30",
+    "== lua: other ==", "FAIL - core: the new behaviour" }, "\n") .. "\n"
+  v = core.gateBlameVerdict(gate, { state = "failed", code = 2, output = BASE, scratch = "/S/redfirst-1-1" }, ctx)
+  check("gateBlameVerdict: main fails some of the same tests -> split  (" .. tostring(v and v.newN) .. " new, " .. tostring(v and v.oldN) .. " old)",
+        v and v.state == "split" and v.newN == 1 and v.oldN == 2)
+  check("gateBlameVerdict: ...a duration, the checkout's own path and a line number don't make a failure new",
+        v and v.old and v.old:find("an old breakage", 1, true) and v.old:find("loads /W/wt/tests/x.lua:12", 1, true))
+  check("gateBlameVerdict: ...and the same words under another suite's header are not the same failure",
+        v and v.new == "FAIL - core: the new behaviour")
+  local TWICE = { state = "failed", code = 1, output = "== s ==\nFAIL - flaky\nFAIL - flaky\n" }
+  v = core.gateBlameVerdict(TWICE, { state = "failed", code = 1, output = "== s ==\nFAIL - flaky\n" }, ctx)
+  check("gateBlameVerdict: main failing a line once accounts for one of two, not both", v and v.newN == 1 and v.oldN == 1)
+  v = core.gateBlameVerdict(gate, { state = "failed", code = 2, output = "luacheck: 9 warnings\n", logPath = "/l/b.log" }, ctx)
+  check("gateBlameVerdict: main fails without naming a failing test (its lint) -> unclear, nothing split",
+        v and v.state == "unclear" and v.code == 2 and v.newN == nil and v.oldN == nil and v.log == "/l/b.log")
+  v = core.gateBlameVerdict(gate, { state = "couldntRun", why = "the suite lock was held", output = "FAIL - x\n" }, ctx)
+  check("gateBlameVerdict: a run on main that couldn't run counts on neither side",
+        v and v.state == "couldntRun" and v.why == "the suite lock was held" and v.newN == nil and v.oldN == nil)
+  v = core.gateBlameVerdict(gate, { state = "timedOut", output = "FAIL - config: an old breakage\n" }, ctx)
+  check("gateBlameVerdict: ...nor one that timed out", v and v.state == "couldntRun" and v.why == "it timed out" and v.oldN == nil)
+  v = core.gateBlameVerdict(gate, nil, { err = "git couldn't find the merge-base" })
+  check("gateBlameVerdict: no merge-base -> couldn't run, saying why", v and v.state == "couldntRun" and v.why == "git couldn't find the merge-base")
+  eq("gateBlameVerdict: a gate naming no failing test -> none",
+     (core.gateBlameVerdict({ state = "failed", output = "luacheck: 3 warnings\n" }, nil, ctx) or {}).state, "none")
+  check("gateBlameVerdict: no verdict for a gate that isn't red",
+        core.gateBlameVerdict({ state = "passed", output = RED }, nil, ctx) == nil and core.gateBlameVerdict(nil, nil, ctx) == nil)
+  local many = { "== s ==" }
+  for i = 1, 30 do many[#many + 1] = "FAIL - case " .. i end
+  v = core.gateBlameVerdict({ state = "failed", code = 1, output = table.concat(many, "\n") }, { state = "passed", code = 0, output = "" }, ctx)
+  local shown = 0
+  for _ in ((v and v.new or "") .. "\n"):gmatch("[^\n]*\n") do shown = shown + 1 end
+  check("gateBlameVerdict: the review shows at most GATE_BLAME_LINES per side, and counts them all  (" .. shown .. " shown)",
+        v and v.newN == 30 and shown == core.GATE_BLAME_LINES)
+
+  -- the lane: one run per repo, and a blame run never holds up a gate that judges a merge
+  local rel, waiting = core.mergeGateReleases({
+    { key = "blame", state = "queued", commonDir = "/r/A/.git", at = 5, low = true },
+    { key = "gate", state = "queued", commonDir = "/r/A/.git", at = 10 },
+  })
+  check("mergeGateReleases: a gate queued after a blame run still goes first  (" .. table.concat(rel, ",") .. ")",
+        #rel == 1 and rel[1] == "gate" and waiting.blame == 1)
+  rel = core.mergeGateReleases({ { key = "blame", state = "queued", commonDir = "/r/A/.git", at = 5, low = true } })
+  eq("mergeGateReleases: ...and a blame run starts once nothing else waits", table.concat(rel, ","), "blame")
+  rel = core.mergeGateReleases({
+    { key = "blame", state = "queued", commonDir = "/r/A/.git", at = 5, low = true },
+    { key = "run", state = "running", commonDir = "/r/A/.git", at = 1 },
+  })
+  eq("mergeGateReleases: ...never beside a run already in the lane", #rel, 0)
+
+  -- informational only: the review shows it; readiness, the card line and "needs you" never read it
+  local r = { phase = "requested", branch = "feat/x", base = "main", worktree = "/W/wt", nonce = "n1", at = 1, sha = "abc1234" }
+  local f = { listed = true, head = "feat/x", clean = true, ahead = 1, dirty = {}, sha = "abc1234" }
+  local rd = core.mergeReadiness(r, f, {}, gate)
+  local allOld = core.gateBlameVerdict(gate, { state = "failed", code = 2, output = (RED:gsub("/W/wt/", "/S/redfirst-2-2/")),
+                                               scratch = "/S/redfirst-2-2" }, ctx)
+  check("gateBlameVerdict: main failing every one of them -> all old", allOld and allOld.state == "split"
+        and allOld.newN == 0 and allOld.oldN == 3 and allOld.new == nil)
+  local plain = core.mergeView(r, rd, f, {}, gate)
+  local blamed = core.mergeView(r, rd, f, { gateBlame = allOld }, gate)
+  check("mergeView: the review carries v.gateBlame", blamed.gateBlame == allOld)
+  check("mergeView: ...but a red gate stays red, even when every failure is main's",
+        blamed.ready == false and rd.ready == false and blamed.line == plain.line and blamed.needsYou == plain.needsYou)
+  local merged = core.mergeView({ phase = "merged", branch = "feat/x", base = "main", worktree = "/W/wt", nonce = "n1", at = 1 },
+                                nil, f, { gateBlame = allOld }, gate)
+  eq("mergeView: only a waiting request shows gate blame", merged.gateBlame, nil)
+
+  local fk = {}; for _, ft in ipairs(core.FEATURES) do fk[ft.key] = ft end
+  check("gateblame: FEATURES lists gate blame, flagged new", fk.gateblame ~= nil and fk.gateblame.new == true
+        and fk.gateblame.title == "Gate blame")
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))

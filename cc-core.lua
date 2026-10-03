@@ -2413,6 +2413,9 @@ function M.mergeGateReleases(runs)
   local out, waiting = {}, {}
   for repo, list in pairs(byRepo) do
     table.sort(list, function(a, b)
+      -- 2026-10-03 (E1a): a `low` run (gate blame, informational) waits behind every run that
+      -- judges a merge, however long ago it was queued
+      if (a.low == true) ~= (b.low == true) then return b.low == true end
       local aa, bb = tonumber(a.at) or 0, tonumber(b.at) or 0
       if aa ~= bb then return aa < bb end
       return tostring(a.key) < tostring(b.key)
@@ -2849,6 +2852,9 @@ function M.mergeView(req, rd, facts, q, gate, checker, redFirst)
   -- and is read by nothing else -- not readiness, not the card line, not "needs you".
   if req.phase == "requested" then v.claims = M.mergeClaimCheck(req, facts) end
   if req.phase == "requested" and type(redFirst) == "table" then v.redFirst = redFirst end
+  -- 2026-10-03 (E1a): gate blame (M.gateBlameVerdict) -- which of a red gate's failures main
+  -- already has. Informational: nothing below (the line, needsYou) reads it.
+  if req.phase == "requested" and type(q.gateBlame) == "table" then v.gateBlame = q.gateBlame end
   if req.phase == "requested" and type(q.overlap) == "table" then v.overlap = q.overlap end
   -- 2026-09-29 (unit 22): the receipt -- what was asked and what proves it's done. DISPLAY ONLY:
   -- built after everything above, and nothing below (the line, needsYou) reads it.
@@ -3559,6 +3565,131 @@ do
     v.loose = (loose > 0) and loose or nil
     v.fails = (#fails > 0) and capChars(table.concat(fails, "\n"), M.MERGE_GATE_TAIL_CHARS) or nil
     v.log = (type(run.logPath) == "string" and run.logPath ~= "") and run.logPath or nil
+    return v
+  end
+
+  -- ---- Gate blame (2026-10-03, mining round 2 unit E1a) ---------------------------------------
+  -- A red pre-merge gate said THAT the suite failed, never WHOSE failures they were: a unit cut
+  -- from a main that was already red took the blame for main's breakage too. When a gate fails
+  -- with failing test lines, Shepherd runs the SAME gate command on a detached scratch worktree at
+  -- the merge-base (M.redFirstRunCmd with nothing applied; cached per repo + merge-base + command,
+  -- so units cut from one main share one run), in the repo's gate lane behind any gate that judges
+  -- a merge (`low`, M.mergeGateReleases), and the review splits the failures: already failing on
+  -- main, or new in this branch. INFORMATIONAL ONLY: readiness, the card line, "needs you" and a
+  -- delegated merge never read v.gateBlame -- a red gate stays red even when every failure is
+  -- main's. A run on main that couldn't run (or timed out) counts on neither side.
+  M.GATE_BLAME_LINES = 12   -- failing lines the review shows per side
+
+  local function gateLog(g)
+    if type(g) ~= "table" then return "" end
+    if type(g.output) == "string" then return g.output end
+    return type(g.tail) == "string" and g.tail or ""
+  end
+  -- `root` (a checkout's own path) out of a line, so the same failure reads the same from the
+  -- unit's worktree and from the scratch worktree on main; mktemp names too
+  local function unroot(line, root)
+    if root then
+      local from = 1
+      while true do
+        local s, e = line:find(root, from, true)
+        if not s then break end
+        line = line:sub(1, s - 1) .. "<checkout>" .. line:sub(e + 1)
+        from = s + 10
+      end
+    end
+    return (line:gsub("tmp%.%w+", "tmp.#"))
+  end
+  -- A log's per-test failing lines (the red-first split's failLine), each keyed by the section it
+  -- sits in -- tests/run.sh's `== <suite> ==` header above it -- and normalised like that split.
+  -- Only failing lines and headers are touched: the log is a whole suite's.
+  local function blameLines(output, root)
+    local r = (type(root) == "string" and #root > 1) and root:gsub("/+$", "") or nil
+    local out, section = {}, ""
+    eachLine(output, function(line)
+      if failLine(line) then
+        out[#out + 1] = { key = section .. "\n" .. norm(unroot(line, r)), line = line }
+      elseif line:find("^%s*==") then
+        local h = line:match("^%s*==+%s+(.-)%s+==+%s*$")
+        if h then section = norm(unroot(h, r)) end
+      end
+    end)
+    return out
+  end
+  local function joinCap(t)
+    local out = {}
+    for i = 1, math.min(#t, M.GATE_BLAME_LINES) do out[i] = t[i] end
+    return capChars(table.concat(out, "\n"), M.MERGE_GATE_TAIL_CHARS)
+  end
+
+  -- "run" for a failed gate whose log names a failing test, "none" for one that names none (a lint
+  -- error: nothing to compare), nil for any gate that isn't red. Timed out is left out: its log
+  -- stops wherever the clock did, and the same gate on main would time out the same way.
+  function M.gateBlameDue(gate)
+    if type(gate) ~= "table" or gate.state ~= "failed" then return nil end
+    return (#blameLines(gateLog(gate)) > 0) and "run" or "none"
+  end
+
+  -- The merge-base, read with Shepherd's own git.
+  function M.gateBlamePlanCmd(req, sha)
+    if type(req) ~= "table" or type(req.commonDir) ~= "string" or req.commonDir == "" then return nil end
+    if type(req.base) ~= "string" or req.base == "" or not hex(sha) then return nil end
+    return "echo @@mergebase; git --git-dir=" .. sq(req.commonDir) .. " merge-base " .. sq("refs/heads/" .. req.base)
+      .. " " .. sha .. " 2>/dev/null"
+  end
+  function M.gateBlamePlan(out)
+    local mb = type(out) == "string" and out:match("@@mergebase%s+(%x+)") or nil
+    if not mb or #mb < 7 then return nil, "git couldn't find the merge-base" end
+    return mb
+  end
+
+  -- What runs in the scratch worktree: a configured gate's own command; a repo-declared gate runs
+  -- the merge-base's own .worktree-check (the scratch worktree IS that commit's checkout).
+  function M.gateBlameCommand(gate)
+    if type(gate) ~= "table" then return nil end
+    if gate.repo then return "./" .. M.REPO_GATE_FILE end
+    return (type(gate.command) == "string" and gate.command:match("%S")) and gate.command or nil
+  end
+  function M.gateBlameKey(commonDir, mergeBase, command)
+    if type(commonDir) ~= "string" or commonDir == "" or not hex(mergeBase) then return nil end
+    if type(command) ~= "string" or command == "" then return nil end
+    return commonDir .. "|" .. mergeBase .. "|" .. command
+  end
+
+  -- The review's v.gateBlame. `gate` = the request's red pre-merge gate record; `base` = the lane
+  -- record of the same command at the merge-base (nil until it is queued); ctx = { mergeBase,
+  -- command, root (the worktree the gate ran in), err (why no run could be planned) }.
+  -- state: none | queued | running | couldntRun | unclear | split (newN / oldN, and their lines).
+  function M.gateBlameVerdict(gate, base, ctx)
+    if type(gate) ~= "table" or gate.state ~= "failed" then return nil end
+    ctx = type(ctx) == "table" and ctx or {}
+    local v = { command = capChars(tostring(ctx.command or gate.command or ""), 300),
+                at = hex(ctx.mergeBase) and ctx.mergeBase:sub(1, 7) or nil }
+    local mine = blameLines(gateLog(gate), ctx.root)
+    if #mine == 0 then v.state = "none"; return v end
+    v.total = #mine
+    if ctx.err then v.state, v.why = "couldntRun", capChars(tostring(ctx.err), 200); return v end
+    if type(base) ~= "table" or base.state == "queued" then v.state = "queued"; return v end
+    if base.state == "running" then v.state = "running"; return v end
+    v.log = (type(base.logPath) == "string" and base.logPath ~= "") and base.logPath or nil
+    if base.state ~= "passed" and base.state ~= "failed" then   -- couldntRun, timedOut: neither side
+      v.state = "couldntRun"
+      v.why = capChars(base.state == "timedOut" and "it timed out" or tostring(base.why or "it never started"), 200)
+      return v
+    end
+    local had = {}
+    if base.state == "failed" then
+      local theirs = blameLines(gateLog(base), base.scratch)
+      if #theirs == 0 then v.state, v.code = "unclear", tonumber(base.code); return v end
+      for _, f in ipairs(theirs) do had[f.key] = (had[f.key] or 0) + 1 end
+    end
+    local new, old = {}, {}
+    for _, f in ipairs(mine) do
+      if (had[f.key] or 0) > 0 then had[f.key] = had[f.key] - 1; old[#old + 1] = f.line
+      else new[#new + 1] = f.line end
+    end
+    v.state, v.newN, v.oldN = "split", #new, #old
+    v.new = (#new > 0) and joinCap(new) or nil
+    v.old = (#old > 0) and joinCap(old) or nil
     return v
   end
 end
@@ -23675,6 +23806,9 @@ M.FEATURES = {
   { key = "redfirst", cat = "Control", new = true, title = "Red-first proof",
     what = "With a redFirstCommand on the project's merge gate, Shepherd runs the unit's changed tests on a scratch worktree at the merge-base, without the fix, once the gate passes. The review says whether they fail there: proved red, not red (which files), or couldn't run, leaving out failures main already has. It's a hint; Merge never waits for it.",
     why = "A green suite proves the fix passes its tests; red-first shows the tests would have caught the bug without it." },
+  { key = "gateblame", cat = "Control", new = true, title = "Gate blame",
+    what = "When a merge's test gate goes red, Shepherd runs the same gate on a scratch worktree at the merge-base (once per merge-base, behind any gate that judges a merge), and the review splits the failing lines: already failing on main, or new in this branch. It's information only: a red gate stays red, and a run on main that couldn't finish counts on neither side.",
+    why = "A unit cut from a red main no longer takes the blame for main's failures, and a real regression isn't waved off as old." },
   { key = "reqs", cat = "Control", new = true, title = "Requirement ids and merge receipts",
     what = "A Requirements tab (for a session in a git repo) lists the repo's requirements and adds one with a title and a source; Shepherd mints its id -- REQ-001, REQ-002... per repo, never reused -- in ~/.claude/cc-reqs.json. Every merge review carries a receipt: the source (the batch, the REQ ids the request names, or the session's first prompt), the requester's words, the tests it changed by layer, the gate, red-first and checker evidence, and the known issues from cc-merge.sh request --known-issues. The receipt is display only.",
     why = "Each merge answers what was asked and what proves it's done, in one place, against an id that outlives the chat." },

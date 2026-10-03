@@ -5632,6 +5632,10 @@ FX._redFirstPlans = {}    -- gate key -> { nonce, plan, baseKey }: what one requ
 FX._redFirstRuns = {}     -- gate key -> lane record: the changed tests on the merge-base
 FX._redFirstBase = {}     -- base key -> lane record: the same files on the base tip (cached per tip)
 FX._redFirstCleanups = {} -- scratch path -> the retained task removing a worktree a run left behind
+-- 2026-10-03 (gate blame, FX.gateBlame): a red gate's own command again at the merge-base, same lane
+FX._gateBlamePlans = {}   -- gate key -> { nonce, due, mergeBase, command, baseKey, err, sig, verdict }
+FX._gateBlameRuns = {}    -- base key (repo|merge-base|command) -> lane record, shared by every unit cut there
+FX._gateBlameWant = {}    -- request nonce -> the gate key whose red gate its review shows now
 
 -- Claim (or return) the one run for this gate key. `slot` is the table it lives in, so the
 -- pre- and post-merge runs of the same commit can't collide (an ff-merge makes both shas equal).
@@ -5667,10 +5671,12 @@ function FX.mergeGatePump()
   local runs, byKey = {}, {}
   -- 2026-09-29: the red-first runs (FX.redFirst) share the lane: a scratch worktree is cheap, a
   -- second copy of the suite running beside the gate is not
-  for si, slot in ipairs({ FX._mergeGates, FX._mergeGatesPost, FX._redFirstRuns, FX._redFirstBase }) do
+  -- 2026-10-03: gate blame (FX.gateBlame) too, as `low`: information waits behind every run that
+  -- judges a merge (core.mergeGateReleases)
+  for si, slot in ipairs({ FX._mergeGates, FX._mergeGatesPost, FX._redFirstRuns, FX._redFirstBase, FX._gateBlameRuns }) do
     for gkey, g in pairs(slot) do
       local rec = { key = si .. "|" .. gkey, state = g.state, commonDir = g.commonDir, at = g.at,
-                    slot = slot, gkey = gkey, g = g }
+                    slot = slot, gkey = gkey, g = g, low = (slot == FX._gateBlameRuns) or nil }
       runs[#runs + 1] = rec
       byKey[rec.key] = rec
     end
@@ -5958,6 +5964,81 @@ function FX.redFirstPrune(reqs)
   for key, g in pairs(FX._redFirstBase) do if not keepBase[key] then drop(FX._redFirstBase, key, g) end end
 end
 
+-- ---- Gate blame (2026-10-03, mining round 2 unit E1a) ----------------------------------------
+-- When a request's pre-merge gate FAILS with failing test lines, the same gate command runs on a
+-- detached scratch worktree at the merge-base (core.redFirstRunCmd, nothing applied), once per
+-- repo + merge-base + command (core.gateBlameKey) -- units cut from one main share it -- in the
+-- gate lane behind every run that judges a merge (`low`, FX.mergeGatePump). INFORMATIONAL ONLY:
+-- core.gateBlameVerdict rides on the review as v.gateBlame; readiness, the card line, "needs you"
+-- and a delegated batch merge never read it, so a red gate stays red.
+
+-- The review's v.gateBlame for a request (nil unless its pre-merge gate failed), starting the run
+-- on main the first time. Never retried: a fresh scratch worktree holds no lock, so a run that
+-- couldn't run would give the same answer again (a new commit gets a new gate, and a new look).
+function FX.gateBlame(r, facts, gate)
+  local gkey = (type(facts) == "table") and core.mergeGateKey(r, facts.sha) or nil
+  if not gkey or type(gate) ~= "table" or gate.state ~= "failed" then FX._gateBlameWant[r.nonce] = nil; return nil end
+  local p = FX._gateBlamePlans[gkey]
+  if not p then
+    p = { nonce = r.nonce, due = core.gateBlameDue(gate) }
+    FX._gateBlamePlans[gkey] = p
+    if p.due == "run" then
+      p.command = core.gateBlameCommand(gate)
+      local out
+      pcall(function() out = hs.execute(core.gateBlamePlanCmd(r, facts.sha) or "false") end)
+      p.mergeBase, p.err = core.gateBlamePlan(out)
+      p.baseKey = core.gateBlameKey(r.commonDir, p.mergeBase, p.command)
+      if p.mergeBase and not p.baseKey then p.err = "Shepherd had no gate command to run on " .. tostring(r.base) end
+      print("[cc-dashboard] 🔍 gate blame for " .. tostring(r.branch) .. ": "
+        .. (p.baseKey and (tostring(p.command) .. " on " .. tostring(r.base) .. " at " .. p.mergeBase:sub(1, 7))
+                       or ("couldn't start: " .. tostring(p.err))))
+    end
+  end
+  FX._gateBlameWant[r.nonce] = gkey
+  if p.baseKey and not FX._gateBlameRuns[p.baseKey] then
+    local spec = { commonDir = r.commonDir, scratch = FX.scratchFile(core.RED_FIRST_TAG), at = p.mergeBase, command = p.command }
+    local run = core.redFirstRunCmd(spec)
+    local dir = core.mergeMainRoot(r) or r.worktree   -- the lane's launch dir; the run cd's into its scratch
+    if run then
+      FX.mergeGateStart(FX._gateBlameRuns, p.baseKey, { command = p.command, run = run, scratch = spec.scratch,
+        timeoutSeconds = gate.timeoutSeconds or core.MERGE_GATE_TIMEOUT }, dir, nil, "gate blame on " .. tostring(r.base), r.commonDir)
+    else
+      FX._gateBlameRuns[p.baseKey] = { state = "couldntRun", why = "Shepherd couldn't build the run on " .. tostring(r.base),
+        command = p.command, commonDir = r.commonDir, at = FX.now(), doneAt = FX.now() }
+    end
+  end
+  -- The verdict reads both whole logs: again only when a run's state changed, never every tick.
+  local base = p.baseKey and FX._gateBlameRuns[p.baseKey] or nil
+  local sig = tostring(base and base.state) .. "|" .. tostring(base and base.doneAt) .. "|" .. tostring(gate.doneAt)
+  if p.sig ~= sig then
+    p.sig = sig
+    p.verdict = core.gateBlameVerdict(gate, base, { mergeBase = p.mergeBase, command = p.command, root = r.worktree, err = p.err })
+  end
+  return p.verdict
+end
+
+-- Forget the plans of requests that are no longer waiting. A run on main lives while a waiting
+-- request's plan uses it (it's the cache); one still queued that no red gate shows any more leaves
+-- the lane; a run still going finishes first.
+function FX.gateBlamePrune(reqs)
+  local live, keep, want = {}, {}, {}
+  for _, r in pairs(reqs or {}) do if r.phase == "requested" then live[r.nonce] = true end end
+  for nonce in pairs(FX._gateBlameWant) do if not live[nonce] then FX._gateBlameWant[nonce] = nil end end
+  for gkey, p in pairs(FX._gateBlamePlans) do
+    if not live[p.nonce] then FX._gateBlamePlans[gkey] = nil
+    elseif p.baseKey then
+      keep[p.baseKey] = true
+      if FX._gateBlameWant[p.nonce] == gkey then want[p.baseKey] = true end
+    end
+  end
+  for key, g in pairs(FX._gateBlameRuns) do
+    if not g.task and (not keep[key] or (g.state == "queued" and not want[key])) then
+      if g.logPath then pcall(os.remove, g.logPath) end
+      FX._gateBlameRuns[key] = nil
+    end
+  end
+end
+
 -- The answer, bound to the nonce ON DISK (never a remembered one). true + the request on success.
 function FX.writeMergeDecision(key, verdict, note)
   local r = core.parseMergeRequest(FX.readFile(FX.MERGE_DIR .. "/" .. key .. ".json"))
@@ -6240,6 +6321,7 @@ function FX.annotateMerges(list, cfg, bannerOn)
   FX._mergeReqs, FX._mergeItems, FX._mergeWaitPids = reqs, items, {}
   FX.mergeGatePrune(reqs)
   FX.redFirstPrune(reqs)
+  FX.gateBlamePrune(reqs)
   FX.receiptPrune(reqs)
   FX.mergeGatePump()   -- a gate queued behind another in its repo starts as soon as the lane frees
   -- 2026-09-29: the merge checker reviews every request (verify.onMerge); a delegated merge
@@ -6298,7 +6380,7 @@ function FX.annotateMerges(list, cfg, bannerOn)
   q = core.mergeQueue(reqs, FX._mergeApproved, FX._mergeSent, FX.now())   -- after this tick's releases
   for _, key in ipairs(order) do
     local r, it = reqs[key], items[key]
-    local facts, rd, gate, crec, cid, redFirst
+    local facts, rd, gate, crec, cid, redFirst, gateBlame
     FX.fleetRecordResult(r)   -- a batch unit's outcome (its batch ends itself once all are in)
     -- 2026-09-29: a blocked merge's note goes to the coach's log, once per request
     if r.phase == "blocked" and tostring(r.note or ""):match("%S") and not FX._coach.noted[r.nonce] then
@@ -6311,6 +6393,8 @@ function FX.annotateMerges(list, cfg, bannerOn)
       rd = core.mergeReadiness(r, facts, it, gate, FX.fleetMergeWaits(r))   -- 2026-09-29: + blockedBy
       -- 2026-09-29: the red-first proof, once the gate passed -- shown in the review, read by nothing else
       redFirst = FX.redFirst(r, facts, gate, cfg)
+      -- 2026-10-03 (E1a): a red gate's failures split into main's and the branch's -- information only
+      gateBlame = FX.gateBlame(r, facts, gate)
       -- the checker's review of this commit (started here when verify.onMerge is on; a Verify
       -- press on the request's own commit counts too)
       if checkOn then crec, cid = FX.checkerForRequest(key, r, facts, cfg)
@@ -6347,6 +6431,8 @@ function FX.annotateMerges(list, cfg, bannerOn)
                                                -- 2026-09-29 (unit 22): the receipt's context -- display only
                                                receipt = (r.phase == "requested") and FX.receiptCtx(r, it) or nil,
                                                -- 2026-09-29: the overlap radar's word on this worktree (a hint)
+                                               -- 2026-10-03 (E1a): gate blame -- information only
+                                               gateBlame = gateBlame,
                                                overlap = (r.phase == "requested") and FX.radarReviewFor(r) or nil },
                               gate, core.checkerView(crec, cid), redFirst)
     -- The process actually waiting for Adam's answer (2026-09-17). Kept OFF the tile -- it's a
@@ -15250,6 +15336,10 @@ local HTML = [[
   #d-merge .dm-redfirst:empty { display:none; }
   #d-merge .dm-redfirst.r-red { color:var(--ok); opacity:1; }
   #d-merge .dm-redfirst.r-notRed, #d-merge .dm-redfirst.r-couldntRun { color:var(--warn); opacity:1; }
+  /* gate blame (2026-10-03): which of a red gate's failures main already has -- information, never danger */
+  #d-merge .dm-blame { margin-top:4px; white-space:pre-wrap; font-size:11px; opacity:.85; }
+  #d-merge .dm-blame:empty { display:none; }
+  #d-merge .dm-blame.b-old, #d-merge .dm-blame.b-couldntRun, #d-merge .dm-blame.b-unclear { color:var(--warn); opacity:1; }
   #d-merge .dm-gatefile { margin-top:4px; white-space:pre-wrap; font-size:11px; color:var(--warn); }
   #d-merge .dm-gatefile:empty { display:none; }
   #d-merge .dm-overlap { margin-top:4px; white-space:pre-wrap; font-size:11px; color:var(--warn); }
@@ -16864,6 +16954,8 @@ local HTML = [[
         <div class="dm-claims" id="dm-claims"></div>
         <div class="dm-checker" id="dm-checker"></div>
         <div class="dm-redfirst" id="dm-redfirst"></div>
+        <!-- 2026-10-03: gate blame -- red-first's counterpart: it shows on a red gate, red-first on a green one -->
+        <div class="dm-blame" id="dm-blame"></div>
         <div class="dm-gatefile" id="dm-gatefile"></div>
         <div class="dm-overlap" id="dm-overlap"></div>
         <div class="dm-receipt" id="dm-receipt"></div>
@@ -21671,6 +21763,47 @@ local HTML = [[
       }
       return { cls: "dm-redfirst r-" + rf.state, text: t };
     }
+    // Gate blame as text (2026-10-03, mining round 2 unit E1a, core.gateBlameVerdict): which of a red
+    // gate's failing lines main already fails at the merge-base. Information beside the gate, always
+    // through textContent (the lines are the runner's); the Merge button never reads it.
+    function gateBlameText(gb, base){
+      if(!gb || !gb.state) return { cls: "dm-blame", text: "" };
+      var pre = "Gate blame (a hint, not a gate): ", b = base || "main";
+      var where = b + (gb.at ? " at " + gb.at : ""), t;
+      var nl = function(s){ return s ? String(s).split("\n").length : 0; };
+      var side = function(label, lines, total){
+        var shown = nl(lines);
+        return "\n" + label + (shown < (total|0) ? " (" + shown + " of " + (total|0) + ")" : "") + ":\n" + lines;
+      };
+      var cls = gb.state;
+      if(gb.state === "queued") t = pre + "the same gate on " + where + " is queued behind the runs that judge a merge…";
+      else if(gb.state === "running") t = pre + "running " + (gb.command || "the gate") + " on " + where + " to see which failures " + b + " already has…";
+      else if(gb.state === "none") t = pre + "the gate named no failing test, so there's nothing to compare with " + b;
+      else if(gb.state === "couldntRun") t = pre + "couldn't run the gate on " + where + " (" + (gb.why || "no reason given")
+        + ") — no failure is counted as " + b + "'s or this branch's";
+      else if(gb.state === "unclear") t = pre + (gb.command || "the gate") + " on " + where + " exited " + (gb.code === undefined ? "?" : gb.code)
+        + " without naming a failing test — couldn't tell which failures " + b + " has";
+      else if(gb.state === "split"){
+        var nw = gb.newN|0, od = gb.oldN|0, all = nw + od;
+        if(od === 0){
+          cls = "new";
+          t = pre + (all === 1 ? "the failing line is new in this branch — " + where + " doesn't fail it"
+                               : "all " + all + " failing lines are new in this branch — " + where + " doesn't fail them");
+        } else if(nw === 0){
+          cls = "old";
+          t = pre + (all === 1 ? "the failing line already fails on " + where + " — it isn't new in this branch"
+                               : "all " + all + " failing lines already fail on " + where + " — none is new in this branch");
+        } else {
+          cls = "new";
+          t = pre + nw + " new in this branch, " + od + " already failing on " + where
+            + (gb.new ? side("new in this branch", gb.new, nw) : "")
+            + (gb.old ? side("already failing on " + b, gb.old, od) : "");
+        }
+      }
+      else return { cls: "dm-blame", text: "" };
+      if(gb.log && (gb.state === "split" || gb.state === "couldntRun" || gb.state === "unclear")) t += "\n" + b + "'s run: " + gb.log;
+      return { cls: "dm-blame b-" + cls, text: t };
+    }
     // The merge receipt as text (2026-09-29, unit 22, core.mergeReceipt): what was asked and what
     // proves it's done. Display only, always through textContent -- a session or a driver wrote
     // every part of it; the Merge button never reads it.
@@ -21759,6 +21892,12 @@ local HTML = [[
           + (gt.log ? "\nfull log: " + gt.log : "")
           + (gt.tail ? "\n--- last lines ---\n" + gt.tail : "");
       }
+      // 2026-10-03 (E1a): gate blame (core.gateBlameVerdict) -- which of a red gate's failures the
+      // base already has. Information: the Merge button below never reads it.
+      var gbEl = document.getElementById("dm-blame");
+      var gbv = asking ? gateBlameText(m.gateBlame, m.base) : { cls: "dm-blame", text: "" };
+      gbEl.className = gbv.cls || "dm-blame";
+      gbEl.textContent = gbv.text;
       // 2026-09-29: the red-first proof (core.redFirstVerdict) -- do the new tests fail without the
       // fix? A hint: the Merge button below never reads it.
       var rfEl = document.getElementById("dm-redfirst");
