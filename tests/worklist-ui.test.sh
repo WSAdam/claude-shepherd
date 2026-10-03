@@ -181,6 +181,29 @@ assert_eq "Escape clears the filter"                 "yes" "$(has 'function wlSe
 # screen contradicts -- and act on it.
 assert_eq "Mark all hides while a filter is on"      "yes" "$(has 'mb.style.display = (openN && !wlSearchToks().length) ? "" : "none";')"
 
+# ---- Feature 7: playbooks as My List sources (2026-10-03) ---------------------------
+# Mining round 2 D3a: a picked markdown checklist imports like TODO.md (behaviour:
+# tests/worklist-playbooks.test.lua, tests/worklist-playbooks.browser.test.js and the core.test.lua
+# "playbooks as sources" fixtures). These pin the wiring those can't see.
+pb_block="$(awk '/if a == "worklist-playbook-add" or a == "worklist-playbook-remove" then/{on=1} on{print} on && /^  end$/{exit}' "$DASH")"
+assert_eq "the file comes from the native chooser, inside FX.runModal" "yes" \
+  "$(has 'local r = FX.runModal(function()
+    return hs.dialog.chooseFileOrFolder("Pick a playbook: a markdown checklist", startDir,')"
+assert_eq "Add asks the chooser, opening in the tab's own folder" "yes" \
+  "$(printf '%s' "$pb_block" | grep -qF 'local path = FX.choosePlaybookFile(roots[1] or os.getenv("HOME"))' && echo yes || echo no)"
+assert_eq "...and never reads a path from the webview's message" "no" \
+  "$(printf '%s' "$pb_block" | grep -qF 'payload.path' && echo yes || echo no)"
+assert_eq "...nor takes payload.text as a file (Remove's id is its only use)" "yes" \
+  "$(printf '%s' "$pb_block" | grep -c 'payload.text' | grep -qx 1 && echo yes || echo no)"
+assert_eq "the lines go through the pure core merge" "yes" \
+  "$(has 'core.worklistImportPlaybook(st, key, entry.id, parsed, FX.now(), FX.worklistNewId)')"
+assert_eq "the refresh tick re-imports a changed playbook" "yes" "$(has 'pcall(FX.playbookSyncTick)')"
+assert_eq "no write path targets a playbook"        "no"  "$(has 'writeFile(entry.path')"
+assert_eq "the payload carries each tab's playbooks" "yes" "$(has 'playbooks = FX.playbookList(st, k),')"
+assert_eq "JS Add names only the tab"               "yes" "$(has 'send("worklist-playbook-add", worklistScope);')"
+assert_eq "JS Remove names only the source's id"    "yes" "$(has 'send("worklist-playbook-remove", worklistScope, id);')"
+assert_eq "the result line has a handler"           "yes" "$(has 'window.ccPlaybookResult = function(r)')"
+
 # Positive control: prove `has` actually distinguishes present/absent, so a typo in a
 # needle above can't make an assert pass vacuously.
 assert_eq "control: a string that cannot exist is absent" "no" "$(has 'wl-this-token-does-not-exist-xyzzy')"

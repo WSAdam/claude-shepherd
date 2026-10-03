@@ -409,6 +409,15 @@ the FLEET row swaps the session tiles for the list (click again to go back).
   main's copy, and a removed worktree's items stay. The file format is in
   [methodology/CLAUDE.md](../methodology/CLAUDE.md). A [find-only audit](providers-and-integrations.md#find-only-audit)'s
   findings file imports with it: each finding carries a **🔍 severity** chip and is never marked done.
+- **📘 Playbooks**: **📘 Add a playbook…** on a project tab opens the Mac's file chooser in the
+  project's folder. Pick any markdown checklist (a release or deploy runbook, kept anywhere) and its
+  `- [ ]` lines import into the tab exactly like `TODO.md`'s: grouped under a **📘 file name** header
+  after the tab's other open items, with **✓ auto** and **▶ live run** chips that follow the file
+  as it changes. Importing never ticks a row. The tab lists its playbooks under the buttons; a
+  playbook's **✕** (**Remove playbook**) stops the import and keeps its items, still grouped and
+  marked **removed**, for you to verify. Adding the same file again picks up where it left off. The
+  project's own `TODO.md` can't be added (it already imports), and the list is kept in
+  `cc-worklist.json`.
 - **▶ live run**: some lines can only be checked by a live run (deploy, then look). A `TODO.md` line
   written `- [~] text`, or carrying `(needs live run)` / `(live check)` on a `[ ]` or `[x]` line, shows
   a **▶ live run** chip. A `[~]` line is never done; a marked `[x]` keeps its **✓ auto** chip too.

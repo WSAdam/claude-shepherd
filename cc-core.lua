@@ -16557,7 +16557,30 @@ function M.worklistNormalize(t)
       end
     end
   end
-  return { generic = generic, byProject = byProject, todoMeta = todoMeta }
+  -- playbooks (2026-10-03): each tab's picked markdown sources, rebuilt like todoMeta -- fresh
+  -- tables throughout (each tombstone set its own), entries without an id or absolute path dropped.
+  local playbooks = {}
+  if type(t.playbooks) == "table" then
+    for k, v in pairs(t.playbooks) do
+      if type(k) == "string" and k ~= "" and type(v) == "table" then
+        local list = {}
+        for _, e in ipairs(v) do
+          if type(e) == "table" and type(e.id) == "string" and e.id ~= ""
+             and type(e.path) == "string" and e.path:sub(1, 1) == "/" then
+            local seen = {}
+            if type(e.seen) == "table" then
+              for sk, sv in pairs(e.seen) do if type(sk) == "string" and sv then seen[sk] = true end end
+            end
+            list[#list + 1] = { id = e.id, path = e.path,
+              name = (type(e.name) == "string" and e.name ~= "") and e.name or (e.path:match("([^/]+)$") or e.path),
+              added = tonumber(e.added), removed = tonumber(e.removed), mtime = tonumber(e.mtime), seen = seen }
+          end
+        end
+        if #list > 0 then playbooks[k] = list end
+      end
+    end
+  end
+  return { generic = generic, byProject = byProject, todoMeta = todoMeta, playbooks = playbooks }
 end
 
 -- ---- TODO.md import (file -> worklist; Shepherd never writes the file) -------
@@ -16678,16 +16701,31 @@ end
 -- took its file with it, which isn't the line going away. Tombstones (meta.seen) cover
 -- every root, so an item the user cleared never resurrects from a worktree's copy.
 -- Returns { added, updated, missing }. Pure.
-function M.worklistImportTodoRoots(state, key, sources, now, idgen)
+-- Playbooks (mining round 2 D3a, 2026-10-03): `kind` = { src = "playbook", file, name, seen }
+-- runs the SAME merge for one picked markdown file: only items with that src AND srcFile match,
+-- new items carry srcFile/srcName, and the tombstones are the playbook's own (kind.seen) -- so
+-- todoMeta is never touched and the tab is never enrolled in TODO.md sync by a playbook.
+function M.worklistImportTodoRoots(state, key, sources, now, idgen, kind)
   local counts = { added = 0, updated = 0, missing = 0 }
   if type(state) ~= "table" then return counts end
   if type(key) ~= "string" or key == "" or key == "generic" or key == "master" then return counts end
   if type(state.byProject) ~= "table" then state.byProject = {} end
   if type(state.byProject[key]) ~= "table" then state.byProject[key] = {} end
-  if type(state.todoMeta) ~= "table" then state.todoMeta = {} end
-  if type(state.todoMeta[key]) ~= "table" then state.todoMeta[key] = {} end
-  local meta = state.todoMeta[key]
-  if type(meta.seen) ~= "table" then meta.seen = {} end
+  local meta
+  if type(kind) == "table" then
+    if type(kind.seen) ~= "table" then kind.seen = {} end
+    meta = kind
+  else
+    if type(state.todoMeta) ~= "table" then state.todoMeta = {} end
+    if type(state.todoMeta[key]) ~= "table" then state.todoMeta[key] = {} end
+    meta = state.todoMeta[key]
+    if type(meta.seen) ~= "table" then meta.seen = {} end
+  end
+  local srcTag = (type(kind) == "table" and kind.src) or "todo"
+  local srcFile = type(kind) == "table" and kind.file or nil
+  local function ours(it)
+    return type(it) == "table" and it.src == srcTag and (srcFile == nil or it.srcFile == srcFile)
+  end
   local list = state.byProject[key]
   local union, order, read, mainRoot = {}, {}, {}, nil
   for _, src in ipairs(sources or {}) do
@@ -16729,7 +16767,7 @@ function M.worklistImportTodoRoots(state, key, sources, now, idgen)
   end
   -- Pass 1: refresh fileDone/fileMissing/source tags on already-imported items.
   for _, it in ipairs(list) do
-    if type(it) == "table" and it.src == "todo" then
+    if ours(it) then
       local t = (type(it.srcText) == "string" and it.srcText ~= "") and it.srcText or it.text
       local u = union[t]
       if u then
@@ -16762,8 +16800,9 @@ function M.worklistImportTodoRoots(state, key, sources, now, idgen)
     if not u.matched and not meta.seen[t] then
       local it = { id = tostring(idgen and idgen() or ""), text = t, done = false,
                    ts = tonumber(now) or 0, details = "", due = "", steps = {},
-                   src = "todo", srcText = t, fileDone = u.done and true or nil, audit = u.audit,
+                   src = srcTag, srcText = t, fileDone = u.done and true or nil, audit = u.audit,
                    liveRun = u.liveRun and true or nil }
+      if srcFile then it.srcFile, it.srcName = srcFile, kind.name end
       tag(it, u)
       list[#list + 1] = it
       u.matched = true
@@ -16772,6 +16811,100 @@ function M.worklistImportTodoRoots(state, key, sources, now, idgen)
     end
   end
   return counts
+end
+
+-- ---- Playbooks: a picked markdown checklist as a My List source (2026-10-03) ----
+-- Mining round 2, unit D3a. state.playbooks[key] = { {id, path, name, added, removed?, seen}, ... }
+-- in cc-worklist.json. The path comes from a native file chooser (FX), never from the webview; the
+-- webview only ever names a source by its id. Removing one sets `removed` and keeps the entry, so
+-- its tombstones survive and adding the same file again revives it without resurrecting what Adam
+-- cleared; its items stay in the list to be verified either way.
+
+-- Is this path a markdown file? (.md / .markdown, any case.) Pure.
+function M.isMarkdownPath(path)
+  if type(path) ~= "string" then return false end
+  local ext = path:lower():match("%.([%a]+)$")
+  return ext == "md" or ext == "markdown"
+end
+
+-- Why a picked file can't be a playbook on this tab, or nil when it can. todoRoots = the roots whose
+-- TODO.md already imports into the tab: that file is a source already. Pure.
+function M.worklistPlaybookRefusal(path, todoRoots)
+  if type(path) ~= "string" or path:sub(1, 1) ~= "/" then return "Pick a file on this Mac." end
+  if not M.isMarkdownPath(path) then return "A playbook is a markdown file (.md)." end
+  for _, r in ipairs(todoRoots or {}) do
+    if type(r) == "string" and r ~= "" and path == (r:gsub("/+$", "") .. "/TODO.md") then
+      return "That is this project's TODO.md, which already imports here."
+    end
+  end
+  return nil
+end
+
+-- The tab's sources list (the stored entries, removed ones included); nil-safe.
+function M.worklistPlaybookEntries(state, key)
+  local all = type(state) == "table" and type(state.playbooks) == "table" and state.playbooks[key] or nil
+  return type(all) == "table" and all or {}
+end
+
+-- The tab's ACTIVE playbooks (removed ones left out), in the order they were added. Pure.
+function M.worklistPlaybooks(state, key)
+  local out = {}
+  for _, e in ipairs(M.worklistPlaybookEntries(state, key)) do
+    if type(e) == "table" and not e.removed then out[#out + 1] = e end
+  end
+  return out
+end
+
+-- Add a picked file as a source on a project tab. Returns the entry, or nil + a reason:
+-- "tab" (not a project tab), "path" (not an absolute markdown path), "already" (listed).
+-- The same file added again after a Remove revives its old entry (same id, tombstones kept). Pure.
+function M.worklistPlaybookAdd(state, key, path, now, idgen)
+  if type(state) ~= "table" then return nil, "tab" end
+  if type(key) ~= "string" or key == "" or key == "generic" or key == "master" or key == "archive" then
+    return nil, "tab"
+  end
+  if type(path) ~= "string" or path:sub(1, 1) ~= "/" or not M.isMarkdownPath(path) then return nil, "path" end
+  if type(state.playbooks) ~= "table" then state.playbooks = {} end
+  if type(state.playbooks[key]) ~= "table" then state.playbooks[key] = {} end
+  local list = state.playbooks[key]
+  for _, e in ipairs(list) do
+    if type(e) == "table" and e.path == path then
+      if not e.removed then return nil, "already" end
+      e.removed = nil
+      return e
+    end
+  end
+  local e = { id = tostring(idgen and idgen() or ""), path = path,
+              name = path:match("([^/]+)$") or path, added = tonumber(now) or 0, seen = {} }
+  list[#list + 1] = e
+  return e
+end
+
+-- Remove playbook: stop importing it. Its items stay (to be verified), and so does its entry, marked
+-- removed, holding the tombstones. Returns true when an active source was removed. Pure.
+function M.worklistPlaybookRemove(state, key, id, now)
+  for _, e in ipairs(M.worklistPlaybookEntries(state, key)) do
+    if type(e) == "table" and e.id == id and id ~= nil and not e.removed then
+      e.removed = tonumber(now) or 0
+      return true
+    end
+  end
+  return false
+end
+
+-- Merge one playbook's parsed lines (core.parseTodoFile) into its tab, through the TODO.md merge
+-- (core.worklistImportTodoRoots with the playbook as `kind`). parsed == nil means the file wasn't
+-- read (moved, deleted): nothing changes, so an unreadable file never flags every line missing.
+-- A removed source imports nothing. Returns { added, updated, missing }. Pure.
+function M.worklistImportPlaybook(state, key, id, parsed, now, idgen)
+  local entry
+  for _, e in ipairs(M.worklistPlaybookEntries(state, key)) do
+    if type(e) == "table" and e.id == id and not e.removed then entry = e end
+  end
+  if not entry or type(parsed) ~= "table" then return { added = 0, updated = 0, missing = 0 } end
+  if type(entry.seen) ~= "table" then entry.seen = {} end
+  return M.worklistImportTodoRoots(state, key, { { root = "", isMain = true, parsed = parsed } }, now, idgen,
+    { src = "playbook", file = entry.path, name = entry.name, seen = entry.seen })
 end
 
 -- Which My List tab a session's items belong to: a repo session -> the tab that
@@ -23105,6 +23238,9 @@ M.FEATURES = {
   { key = "liverun", cat = "Control", new = true, title = "Needs a live run",
     what = "A TODO.md line written `- [~] text`, or carrying `(needs live run)` / `(live check)`, is one only a live run can check. My List marks it with a ▶ live run chip, and the ▶ live run toggle beside the filter box shows only those lines, on a project tab or on MASTER. A `[~]` line is never done; a marked `[x]` keeps its ✓ auto badge.",
     why = "The checks that need you to deploy and look don't hide among the ones a test already proved." },
+  { key = "playbooks", cat = "Control", new = true, title = "Playbooks in My List",
+    what = "📘 Add a playbook… on a project's My List tab picks any markdown checklist on this Mac. Its `- [ ]` lines import like TODO.md's, grouped under the file's name, and its ✓ auto and ▶ live run badges follow the file as it changes. Remove playbook stops the import and keeps its items to be verified.",
+    why = "A release or deploy checklist you keep outside the repo sits in the same list you verify everything else in." },
   { key = "stories", cat = "Control", new = true, title = "User stories",
     what = "When a project has spec/product/user-stories.md, a gated tab shows its stories by capability area — add, edit, and save them in place.",
     why = "Curate the product's user stories next to the sessions building it, without leaving the panel." },

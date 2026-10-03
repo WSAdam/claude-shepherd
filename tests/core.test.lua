@@ -8475,7 +8475,8 @@ do
   -- 2026-10-03: 47 -> 48 for checking "done" against the diff ("fakedone", flagged new).
   -- 2026-10-03: 48 -> 49 for the fleet-idle alert ("fleetidle", flagged new).
   -- 2026-10-03: 49 -> 50 for the hands-off hold and fleet freeze ("hold", flagged new).
-  eq("FEATURES: the 50 new features are flagged", newCount, 50)
+  -- 2026-10-03: 50 -> 51 for playbooks as My List sources ("playbooks", flagged new).
+  eq("FEATURES: the 51 new features are flagged", newCount, 51)
   check("FEATURES: lists checking \"done\" against the diff", keys.fakedone == true)
   check("FEATURES: lists the unfinished-unit reminder", keys.unfinished == true)
   check("FEATURES: lists the brief pre-flight", keys.preflight == true)
@@ -14714,6 +14715,152 @@ do
   local fkeys = {}; for _, ft in ipairs(core.FEATURES) do fkeys[ft.key] = ft end
   check("hold: FEATURES lists the hands-off hold, flagged new", fkeys.hold ~= nil and fkeys.hold.new == true
         and fkeys.hold.title == "Hands-off hold")
+end
+
+-- ---- My List: playbooks as sources (2026-10-03) ----
+-- Mining round 2, unit D3a. A markdown checklist Adam picks in a project's My List tab becomes a
+-- source: its `- [ ]` lines import exactly like TODO.md lines (core.parseTodoFile, then the
+-- core.worklistImportTodoRoots merge), tagged src = "playbook" with the file's path and name, and
+-- the ✓ auto / ▶ live run badges follow the file. The HARD RULE holds: importing never sets
+-- done/doneTs. Removing a playbook stops the import and keeps its items to be verified. The
+-- sources list lives in cc-worklist.json (state.playbooks[key]), beside the items.
+do
+  local n = 0
+  local function idgen() n = n + 1; return "pb" .. n end
+  local st = { generic = {}, byProject = {}, todoMeta = {} }
+  local PATH = "/Users/adam/notes/release-checklist.md"
+
+  -- adding a source
+  local e, err = core.worklistPlaybookAdd(st, "shop", PATH, 100, idgen)
+  check("playbook add: a markdown file becomes a source", type(e) == "table" and err == nil)
+  eq("playbook add: ...it keeps the file's path", (e or {}).path, PATH)
+  eq("playbook add: ...and is named after the file", (e or {}).name, "release-checklist.md")
+  eq("playbook add: ...with an id of its own", (e or {}).id, "pb1")
+  eq("playbook add: ...listed on its tab", #core.worklistPlaybooks(st, "shop"), 1)
+  eq("playbook add: ...and only on its tab", #core.worklistPlaybooks(st, "other"), 0)
+  local again, aerr = core.worklistPlaybookAdd(st, "shop", PATH, 110, idgen)
+  check("playbook add: the same file twice on one tab is refused", again == nil and aerr == "already")
+  eq("playbook add: ...and still listed once", #core.worklistPlaybooks(st, "shop"), 1)
+  for _, bad in ipairs({ "generic", "master", "archive", "" }) do
+    check("playbook add: never on the '" .. bad .. "' tab", core.worklistPlaybookAdd(st, bad, PATH, 1, idgen) == nil)
+  end
+  check("playbook add: a relative path is refused", core.worklistPlaybookAdd(st, "shop", "notes/x.md", 1, idgen) == nil)
+  check("playbook add: a file that isn't markdown is refused",
+        core.worklistPlaybookAdd(st, "shop", "/Users/adam/notes/x.txt", 1, idgen) == nil)
+  check("playbook add: .markdown counts as markdown", core.worklistPlaybookAdd(st, "spare", "/tmp/Deploy.MARKDOWN", 1, idgen) ~= nil)
+
+  -- the refusal shown before adding: not markdown, or the project's own TODO.md (already imported)
+  eq("playbook refusal: a markdown file elsewhere is fine",
+     core.worklistPlaybookRefusal("/Users/adam/notes/run.md", { "/Users/adam/shop" }), nil)
+  check("playbook refusal: the tab's own TODO.md already imports",
+        core.worklistPlaybookRefusal("/Users/adam/shop/TODO.md", { "/Users/adam/shop" }) ~= nil)
+  check("playbook refusal: ...a worktree's TODO.md too",
+        core.worklistPlaybookRefusal("/Users/adam/shop-wt/TODO.md", { "/Users/adam/shop", "/Users/adam/shop-wt/" }) ~= nil)
+  eq("playbook refusal: another repo's TODO.md is just a markdown file",
+     core.worklistPlaybookRefusal("/Users/adam/other/TODO.md", { "/Users/adam/shop" }), nil)
+  check("playbook refusal: not markdown", core.worklistPlaybookRefusal("/Users/adam/notes/run.pdf", {}) ~= nil)
+
+  -- importing its lines: exactly like TODO.md's
+  local L = function() return st.byProject.shop or {} end
+  local c = core.worklistImportPlaybook(st, "shop", e.id,
+    core.parseTodoFile("# Release\n\nprose\n- [ ] tag the build\n- [x] write the notes\n- [~] look at the store page\n"),
+    200, idgen)
+  eq("playbook import: its checkbox lines arrive as items", #L(), 3)
+  eq("playbook import: ...counted as added", c.added, 3)
+  eq("playbook import: ...in file order", L()[1].text .. "|" .. L()[2].text, "tag the build|write the notes")
+  eq("playbook import: src is playbook", L()[1].src, "playbook")
+  eq("playbook import: ...the file's path is recorded", L()[1].srcFile, PATH)
+  eq("playbook import: ...and its name, to group under", L()[1].srcName, "release-checklist.md")
+  eq("playbook import: ...srcText is the file line", L()[2].srcText, "write the notes")
+  check("playbook import HARD RULE: [x] sets fileDone", L()[2].fileDone == true)
+  check("playbook import HARD RULE: [x] does NOT set done", L()[2].done == false)
+  check("playbook import HARD RULE: [x] does NOT stamp doneTs", L()[2].doneTs == nil)
+  check("playbook import: a [~] line needs a live run, and is never done", L()[3].liveRun == true and L()[3].done == false)
+  check("playbook import: the tab is NOT enrolled in TODO.md sync", st.todoMeta.shop == nil)
+  check("playbook import: the lines are tombstoned on the source", e.seen["tag the build"] == true)
+
+  -- badges follow the file
+  c = core.worklistImportPlaybook(st, "shop", e.id,
+    core.parseTodoFile("- [x] tag the build\n- [ ] write the notes\n- [x] look at the store page\n"), 300, idgen)
+  eq("playbook sync: nothing re-added", c.added, 0)
+  check("playbook sync: fileDone follows the file, on", L()[1].fileDone == true)
+  check("playbook sync: ...and off", L()[2].fileDone == nil)
+  check("playbook sync: liveRun follows the file", L()[3].liveRun == nil and L()[3].fileDone == true)
+  check("playbook sync HARD RULE: still nothing done", L()[1].done == false and L()[1].doneTs == nil)
+  -- Adam verifies one; later syncs never touch that
+  core.worklistToggle(st, "shop", L()[1].id, 400)
+  core.worklistImportPlaybook(st, "shop", e.id, core.parseTodoFile("- [ ] tag the build\n- [ ] write the notes\n"), 500, idgen)
+  check("playbook sync HARD RULE: Adam's tick survives a resync", L()[1].done == true and L()[1].doneTs == 400)
+  check("playbook sync: a line gone from the file is flagged, not removed", L()[3].fileMissing == true and #L() == 3)
+  -- an unreadable file (moved, deleted) is not every line vanishing
+  c = core.worklistImportPlaybook(st, "shop", e.id, nil, 600, idgen)
+  check("playbook sync: an unreadable file changes nothing", c.added == 0 and c.missing == 0 and L()[1].fileMissing == nil)
+
+  -- the same text in TODO.md and in the playbook: two items, each following its own file
+  core.worklistImportTodoRoots(st, "shop", { { root = "/Users/adam/shop", isMain = true,
+    parsed = core.parseTodoFile("- [x] tag the build\n") } }, 700, idgen)
+  local todoTwin, pbTwin
+  for _, it in ipairs(L()) do
+    if it.text == "tag the build" then if it.src == "todo" then todoTwin = it else pbTwin = it end end
+  end
+  check("playbook vs TODO.md: the same line is two items", todoTwin ~= nil and pbTwin ~= nil)
+  check("playbook vs TODO.md: ...each badge follows its own file", todoTwin.fileDone == true and pbTwin.fileDone == nil)
+  core.worklistImportPlaybook(st, "shop", e.id, core.parseTodoFile("- [ ] tag the build\n- [ ] write the notes\n"), 710, idgen)
+  check("playbook vs TODO.md: a playbook sync never touches the TODO.md item", todoTwin.fileDone == true and todoTwin.fileMissing == nil)
+  core.worklistImportTodoRoots(st, "shop", { { root = "/Users/adam/shop", isMain = true, parsed = {} } }, 720, idgen)
+  check("playbook vs TODO.md: ...nor a TODO.md sync the playbook's", pbTwin.fileMissing == nil and todoTwin.fileMissing == true)
+
+  -- two playbooks with a shared line: two items
+  local e2 = core.worklistPlaybookAdd(st, "shop", "/Users/adam/notes/hotfix.md", 800, idgen)
+  core.worklistImportPlaybook(st, "shop", e2.id, core.parseTodoFile("- [x] tag the build\n"), 800, idgen)
+  local fromHotfix
+  for _, it in ipairs(L()) do if it.srcFile == "/Users/adam/notes/hotfix.md" then fromHotfix = it end end
+  check("two playbooks: a shared line is its own item in each", fromHotfix ~= nil and fromHotfix ~= pbTwin
+        and fromHotfix.srcName == "hotfix.md" and fromHotfix.fileDone == true and pbTwin.fileDone == nil)
+
+  -- tombstones: an item Adam removed never comes back from the file
+  core.worklistRemove(st, "shop", L()[2].id)          -- "write the notes"
+  local before = #L()
+  c = core.worklistImportPlaybook(st, "shop", e.id, core.parseTodoFile("- [ ] tag the build\n- [ ] write the notes\n"), 900, idgen)
+  check("playbook tombstone: a removed item is not re-added", c.added == 0 and #L() == before)
+  c = core.worklistImportPlaybook(st, "shop", e.id, core.parseTodoFile("- [ ] tag the build\n- [ ] a new step\n"), 910, idgen)
+  check("playbook tombstone: a new line still imports", c.added == 1 and L()[#L()].text == "a new step")
+
+  -- Remove playbook: the import stops, the items stay
+  local keep = #L()
+  check("playbook remove: removes the source", core.worklistPlaybookRemove(st, "shop", e.id, 1000) == true)
+  eq("playbook remove: ...it is no longer listed", #core.worklistPlaybooks(st, "shop"), 1)
+  eq("playbook remove: ...the other playbook stays", (core.worklistPlaybooks(st, "shop")[1] or {}).name, "hotfix.md")
+  eq("playbook remove: ...and every item stays, to be verified", #L(), keep)
+  c = core.worklistImportPlaybook(st, "shop", e.id, core.parseTodoFile("- [x] tag the build\n- [ ] brand new\n"), 1100, idgen)
+  check("playbook remove: a removed source imports nothing", c.added == 0 and c.updated == 0 and #L() == keep)
+  check("playbook remove: an unknown id removes nothing", core.worklistPlaybookRemove(st, "shop", "nope", 1) == false)
+  -- adding the same file again revives it, tombstones and links intact
+  local back = core.worklistPlaybookAdd(st, "shop", PATH, 1200, idgen)
+  check("playbook re-add: the same source comes back", back ~= nil and back.id == e.id)
+  c = core.worklistImportPlaybook(st, "shop", back.id, core.parseTodoFile("- [x] tag the build\n- [ ] write the notes\n"), 1300, idgen)
+  check("playbook re-add: kept items link up again, removed ones stay gone", c.added == 0 and pbTwin.fileDone == true)
+
+  -- the store keeps the sources list: normalize rebuilds it (hs.json interns empty {}) and drops junk
+  local norm = core.worklistNormalize({ generic = {}, byProject = {}, playbooks = {
+    shop = { { id = "a", path = "/x/a.md", name = "a.md", added = 5, mtime = 44, seen = { one = true } },
+             { id = "b", path = "/x/b.md", name = "b.md", added = 6, removed = 7, seen = {} },
+             { id = "c", path = "", name = "junk" }, "junk", { path = "/x/noid.md" } },
+    [1] = { { id = "z", path = "/z.md" } } } })
+  local np = norm.playbooks or {}
+  eq("normalize: playbooks survive a read", #(np.shop or {}), 2)
+  check("normalize: ...with their tombstones", np.shop and np.shop[1].seen.one == true)
+  eq("normalize: ...and the file's last-synced mtime (a change while Shepherd was down syncs once)",
+     np.shop and np.shop[1].mtime, 44)
+  check("normalize: ...and a removed one stays removed (it keeps its tombstones)", np.shop and np.shop[2].removed == 7)
+  check("normalize: ...a non-string tab key is dropped", np[1] == nil)
+  check("normalize: ...and each tombstone set is its own table",
+        np.shop and np.shop[1].seen ~= np.shop[2].seen)
+  eq("normalize: a store with no playbooks reads as none", next(core.worklistNormalize({}).playbooks or {}), nil)
+
+  local fkeys = {}; for _, ft in ipairs(core.FEATURES) do fkeys[ft.key] = ft end
+  check("playbooks: FEATURES lists playbooks in My List, flagged new", fkeys.playbooks ~= nil and fkeys.playbooks.new == true
+        and fkeys.playbooks.title == "Playbooks in My List")
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))

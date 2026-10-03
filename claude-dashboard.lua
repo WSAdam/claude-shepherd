@@ -3128,6 +3128,114 @@ function FX.todoAutoSyncTick(list)
   pcall(function() wv:evaluateJavaScript("window.ccTodoImported(" .. hs.json.encode(r) .. ")") end)
 end
 
+-- ---- Playbooks: a picked markdown checklist as a My List source (2026-10-03) ----
+-- Mining round 2, unit D3a. The file is picked through a NATIVE chooser (FX.choosePlaybookFile),
+-- never typed into the webview, which only ever names a source by its id. Its lines import through
+-- core.worklistImportPlaybook (the TODO.md merge, so the HARD RULE holds: never done/doneTs), and a
+-- per-tick mtime watch re-imports a changed file so the badges follow it. Shepherd never writes a
+-- playbook. The sources list is state.playbooks in cc-worklist.json.
+
+-- One markdown file, starting in startDir. Through FX.runModal, so a pending keystroke chain can't
+-- press the dialog's default button. Returns the picked path, or nil on Cancel.
+function FX.choosePlaybookFile(startDir)
+  local r = FX.runModal(function()
+    return hs.dialog.chooseFileOrFolder("Pick a playbook: a markdown checklist", startDir,
+      true, false, false, { "md", "markdown" }, true)
+  end)
+  if type(r) ~= "table" then return nil end
+  local p = r["1"] or r[1]      -- Hammerspoon keys the picked paths "1", "2", ...
+  if type(p) ~= "string" or p == "" then return nil end
+  if p:sub(1, 7) == "file://" then
+    p = p:sub(8):gsub("%%(%x%x)", function(h) return string.char(tonumber(h, 16)) end)
+  end
+  return p
+end
+
+-- The roots whose TODO.md already imports into a tab, main first: where the chooser opens, and the
+-- files core.worklistPlaybookRefusal turns away. Derived here, never from the webview.
+function FX.playbookTodoRoots(scope, st)
+  local out = {}
+  local roots = FX.stackRootsFor(scope, st, {})
+  if roots then
+    for _, rt in ipairs(roots) do out[#out + 1] = rt.root end
+    return out
+  end
+  for _, it in ipairs(lastRenderList or {}) do
+    if FX.worklistTabKey(it) == scope and it.cwd and it.cwd ~= "" and not it.remote then
+      local r = FX.todoRoot(it.cwd)
+      if r then out[#out + 1] = r end
+      break
+    end
+  end
+  local meta = ((st or {}).todoMeta or {})[scope]
+  if #out == 0 and type(meta) == "table" and type(meta.cwd) == "string" and meta.cwd ~= "" then out[1] = meta.cwd end
+  return out
+end
+
+-- Read one playbook and merge its lines into its tab. Records the file's mtime on the entry (the
+-- watch compares against it, and it survives a restart, so a change made while Shepherd was down
+-- syncs once). Returns core's counts, plus unreadable = true when the file couldn't be read.
+function FX.playbookImport(st, key, entry)
+  local content = FX.readFile(entry.path)
+  local parsed = content and core.parseTodoFile(content) or nil
+  local c = core.worklistImportPlaybook(st, key, entry.id, parsed, FX.now(), FX.worklistNewId)
+  -- parenthesised: a missing file answers nil + a message, and tonumber(nil, msg) throws
+  local m = tonumber((hs.fs.attributes(entry.path, "modification")))
+  if m then entry.mtime = m end
+  if not content then c.unreadable = true end
+  return c
+end
+
+-- The watch list: one { key, id, path, mtime } per ACTIVE playbook on every tab. Rebuilt from the
+-- store after every add, remove and sync, and lazily on the first tick.
+function FX.playbookRebuildWatch(st)
+  local w = {}
+  for k in pairs((st or {}).playbooks or {}) do
+    for _, e in ipairs(core.worklistPlaybooks(st, k)) do
+      w[#w + 1] = { key = k, id = e.id, path = e.path, mtime = tonumber(e.mtime) }
+    end
+  end
+  FX._pbWatch = w
+end
+
+-- 1 Hz (the refresh tick): stat each playbook and re-import the ones whose file moved. The 2s
+-- settle guard, like TODO.md's, skips a file written under 2s ago (an automation may be mid-write).
+-- One worklist read and one write for the whole batch, and none at all while nothing changed.
+function FX.playbookSyncTick()
+  if FX._pbWatch == nil then FX.playbookRebuildWatch(FX.readWorklist()) end
+  if #FX._pbWatch == 0 then return end
+  local now, due = FX.now(), nil
+  for _, w in ipairs(FX._pbWatch) do
+    local m = tonumber((hs.fs.attributes(w.path, "modification")))
+    if m and m ~= w.mtime and (now - m) >= 2 then due = due or {}; due[#due + 1] = w end
+  end
+  if not due then return end
+  local st = FX.readWorklist()
+  local r = { auto = true, added = 0, updated = 0, missing = 0 }
+  for _, w in ipairs(due) do
+    for _, e in ipairs(core.worklistPlaybooks(st, w.key)) do
+      if e.id == w.id then
+        local c = FX.playbookImport(st, w.key, e)
+        r.name = e.name
+        r.added, r.updated, r.missing = r.added + c.added, r.updated + c.updated, r.missing + c.missing
+      end
+    end
+  end
+  FX.writeWorklist(st)
+  FX.playbookRebuildWatch(st)
+  print("[cc-dashboard] 📘 My List: playbook synced -- " .. r.added .. " new, " .. r.updated .. " updated")
+  pcall(function() wv:evaluateJavaScript("window.ccWorklist(" .. hs.json.encode(FX.worklistPayload()) .. ")") end)
+  pcall(function() wv:evaluateJavaScript("window.ccPlaybookResult(" .. hs.json.encode(r) .. ")") end)
+end
+
+-- What the panel shows of a tab's playbooks: id (all Remove sends back), name, and the path for the
+-- tooltip. nil with none, so a tab without playbooks carries nothing extra.
+function FX.playbookList(st, key)
+  local out = {}
+  for _, e in ipairs(core.worklistPlaybooks(st, key)) do out[#out + 1] = { id = e.id, name = e.name, path = e.path } end
+  return (#out > 0) and out or nil
+end
+
 -- ---- Per-session chat title (two sessions in ONE project) -------------------
 -- Claude Code keeps each session's own chat title in its transcript as an
 -- "ai-title" record -- the same string the editor shows on its tab. Read it ONLY
@@ -11631,6 +11739,7 @@ function FX.worklistPayload()
         items = core.worklistScopeList(st, k),
         todoOn = (tm ~= nil) or nil,
         hasTodo = hasTodo or nil,
+        playbooks = FX.playbookList(st, k),
       }
     end
   end
@@ -11646,6 +11755,7 @@ function FX.worklistPayload()
         items = list,
         todoOn = (tm ~= nil) or nil,
         hasTodo = (type(tm) == "table" and tm.cwd and FX.todoFileAt(tm.cwd)) or nil,
+        playbooks = FX.playbookList(st, k),
       }
     end
   end
@@ -13255,6 +13365,46 @@ local function handleBridgeMsg(msg)
     end
     pcall(function() wv:evaluateJavaScript("window.ccWorklist(" .. hs.json.encode(FX.worklistPayload()) .. ")") end)
     pcall(function() wv:evaluateJavaScript("window.ccTodoImported(" .. hs.json.encode(r or {}) .. ")") end)
+    return
+  end
+  -- 📘 Playbooks (2026-10-03): Add picks the file through the NATIVE chooser -- the message names
+  -- only the tab, never a path -- and Remove names a source by its id. Remove keeps every item (they
+  -- stay to be verified). Both answer window.ccPlaybookResult for the toast.
+  if a == "worklist-playbook-add" or a == "worklist-playbook-remove" then
+    local scope = tostring(payload.v or "")
+    if scope == "" or scope == "generic" or scope == "master" or scope == "archive" then return end
+    local st = FX.readWorklist()
+    local r
+    if a == "worklist-playbook-add" then
+      local roots = FX.playbookTodoRoots(scope, st)
+      local path = FX.choosePlaybookFile(roots[1] or os.getenv("HOME"))
+      if not path then return end                          -- Cancel
+      local why = core.worklistPlaybookRefusal(path, roots)
+      local entry, err
+      if not why then entry, err = core.worklistPlaybookAdd(st, scope, path, FX.now(), FX.worklistNewId) end
+      if why or not entry then
+        r = { error = why or ((err == "already") and "That playbook is already on this tab."
+                              or "That file can't be a playbook.") }
+      else
+        local c = FX.playbookImport(st, scope, entry)
+        r = { name = entry.name, added = c.added, updated = c.updated, missing = c.missing, unreadable = c.unreadable }
+      end
+    else
+      local id, name = tostring(payload.text or ""), nil
+      for _, e in ipairs(core.worklistPlaybooks(st, scope)) do if e.id == id then name = e.name end end
+      r = core.worklistPlaybookRemove(st, scope, id, FX.now()) and { removed = name }
+          or { error = "That playbook is no longer on this tab." }
+    end
+    if r.error then
+      print("[cc-dashboard] ⚠️ My List playbook: " .. r.error)
+    else
+      FX.writeWorklist(st)
+      FX.playbookRebuildWatch(st)
+      print("[cc-dashboard] ✅ My List playbook " .. (r.removed and ("removed: " .. tostring(r.removed))
+        or ("added: " .. tostring(r.name) .. " (" .. tostring(r.added) .. " new)")))
+    end
+    pcall(function() wv:evaluateJavaScript("window.ccWorklist(" .. hs.json.encode(FX.worklistPayload()) .. ")") end)
+    pcall(function() wv:evaluateJavaScript("window.ccPlaybookResult(" .. hs.json.encode(r) .. ")") end)
     return
   end
   if a == "open-audit-view" then
@@ -15098,6 +15248,19 @@ local HTML = [[
     border-radius:14px; padding:2px clamp(7px,2.4cqw,12px); font-size:clamp(10px,2.8cqw,12px);
     cursor:pointer; white-space:nowrap; }
   #wl-todobtn:hover, #wl-todoall:hover { background:var(--surface-hover); border-color:var(--accent); color:var(--accent-text); }
+  /* 📘 playbooks (2026-10-03): the Add button, the tab's sources as chips (each with a Remove ✕),
+     and a header over each playbook's rows -- the file's name as written, so no uppercase. */
+  #wl-pbadd { background:var(--surface); color:var(--text-2); border:1px solid var(--border);
+    border-radius:14px; padding:2px clamp(7px,2.4cqw,12px); font-size:clamp(10px,2.8cqw,12px);
+    cursor:pointer; white-space:nowrap; }
+  #wl-pbadd:hover { background:var(--surface-hover); border-color:var(--accent); color:var(--accent-text); }
+  #wl-pbrow { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin:-2px 0 8px; }
+  .wl-pb { display:inline-flex; align-items:center; gap:4px; max-width:100%; font-size:clamp(9px,2.6cqw,11px);
+    color:var(--text-2); background:var(--surface-2); border:1px solid var(--border-weak); border-radius:10px; padding:0 2px 0 7px; }
+  .wl-pbname { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:22em; }
+  .wl-pbdel { background:none; border:none; color:var(--muted); cursor:pointer; padding:0 4px; font-size:inherit; }
+  .wl-pbdel:hover { color:var(--danger); }
+  .wl-pbgroup { text-transform:none; letter-spacing:0; font-size:clamp(9px,2.6cqw,11px); color:var(--text-3); }
   #wl-todoflash { font-size:clamp(9px,2.6cqw,11px); color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .wl-fdone { flex:0 0 auto; font-size:clamp(9px,2.5cqw,11px); color:var(--ok); background:var(--surface-2);
     border:1px solid #2c5a3a; border-radius:8px; padding:0 5px; white-space:nowrap; }
@@ -16360,8 +16523,10 @@ local HTML = [[
       <button id="wl-todobtn" onclick="todoImportScope()" title="Import this project's TODO.md checkboxes as list items">⇪ Import TODO.md</button>
       <button id="wl-todoall" onclick="todoImportAll()" title="Import/refresh TODO.md for every known project">⇪ All projects</button>
       <button id="wl-markall" onclick="worklistMarkAll()" title="Tick off everything still open on this tab (asks first)">✓ Mark all done</button>
+      <button id="wl-pbadd" onclick="playbookAdd()" style="display:none" title="Pick a markdown checklist on this Mac: its checkbox lines import into this tab like TODO.md's and follow the file as it changes">📘 Add a playbook…</button>
       <span id="wl-todoflash"></span>
     </div>
+    <div id="wl-pbrow" style="display:none"></div>
     <div id="wl-addrow">
       <button id="wl-addbtn" onclick="wlModalOpen('')">＋ Add an item…</button>
     </div>
@@ -18285,9 +18450,11 @@ local HTML = [[
     function wlFileBadges(it, isDone){
       var h = wlAuditChip(it) + wlBranchChip(it);
       h += wlLiveRunChip(it);
+      // 📘 a playbook's line names its own file (2026-10-03); the name is from disk, so esc()
+      var where = (it && it.src === "playbook" && it.srcName) ? String(it.srcName) : "TODO.md";
       if(it && it.fileDone) h += '<span class="wl-fdone' + (isDone ? "" : " need")
-        + '" title="Automation marked this done in TODO.md — tick the box once YOU have verified it">✓ auto</span>';
-      if(it && it.fileMissing) h += '<span class="wl-fmiss" title="This line is no longer in TODO.md">⚠</span>';
+        + '" title="' + esc("Automation marked this done in " + where + " — tick the box once YOU have verified it") + '">✓ auto</span>';
+      if(it && it.fileMissing) h += '<span class="wl-fmiss" title="' + esc("This line is no longer in " + where) + '">⚠</span>';
       return h;
     }
     // The expected-date chip: "Jul 21" (plus the year when it isn't this one), tinted
@@ -18397,6 +18564,7 @@ local HTML = [[
         tb.style.display = (curProj && (curProj.hasTodo || curProj.todoOn)) ? "" : "none";
         tb.textContent = (curProj && curProj.todoOn) ? "↻ Sync TODO.md" : "⇪ Import TODO.md";
       }
+      wlRenderPlaybooks(curProj);
       // Mark all: offered on every tab INCLUDING master, and only while there is something
       // left to mark -- a button that would do nothing shouldn't be there to be clicked.
       // It also steps aside while the filter box is non-empty (2026-09-22): wlOpenCount
@@ -18474,7 +18642,7 @@ local HTML = [[
         });
       }
       document.getElementById("wl-active").innerHTML = active.length
-        ? active.map(function(it){ return wlItemRow(it, false); }).join("")
+        ? wlActiveRows(active, wlCurPlaybooks())
         : '<div class="wl-empty">' + (activeTotal ? "Nothing matches the filter." : "No items — add one above.") + '</div>';
       document.getElementById("wl-done").innerHTML = worklistDoneOpen
         ? done.map(function(it){ return wlItemRow(it, true); }).join("") : "";
@@ -18614,6 +18782,74 @@ local HTML = [[
       if(r.missing|0) msg += ", " + (r.missing|0) + " missing";
       if(!(r.projects|0) && (r.skipped|0)) msg = "no TODO.md found";
       el.textContent = (r.auto ? "TODO.md synced — " : "TODO.md imported — ") + msg;
+      if(wlTodoFlashTimer) clearTimeout(wlTodoFlashTimer);
+      wlTodoFlashTimer = setTimeout(function(){ el.textContent = ""; }, 6000);
+    };
+    // ---- 📘 Playbooks: a picked markdown checklist as a source (2026-10-03) ----
+    // Lua picks the file with a NATIVE chooser, so Add names only the tab and Remove only a source's
+    // id; no path ever leaves this page. A playbook's lines render after the tab's other open rows,
+    // under a header with the file's name: one group per file, in the order its lines first appear.
+    // A removed playbook's items stay (to be verified), still grouped, its header saying so.
+    function wlIsProjectTab(scope){ return !!scope && scope !== "generic" && scope !== "master" && scope !== "archive"; }
+    function wlCurPlaybooks(){
+      var projs = (worklistData && Array.isArray(worklistData.projects)) ? worklistData.projects : [];
+      for(var i = 0; i < projs.length; i++){
+        if(projs[i].key === worklistScope) return Array.isArray(projs[i].playbooks) ? projs[i].playbooks : [];
+      }
+      return [];
+    }
+    function wlRenderPlaybooks(curProj){
+      var add = document.getElementById("wl-pbadd");
+      if(add) add.style.display = (curProj && wlIsProjectTab(worklistScope)) ? "" : "none";
+      var row = document.getElementById("wl-pbrow"); if(!row) return;
+      var pbs = (curProj && wlIsProjectTab(worklistScope)) ? wlCurPlaybooks() : [];
+      row.style.display = pbs.length ? "" : "none";
+      row.innerHTML = pbs.map(function(pb){
+        return '<span class="wl-pb">📘 <span class="wl-pbname" title="' + esc(String(pb.path || "")) + '">'
+          + esc(String(pb.name || "")) + '</span><button class="wl-pbdel" data-pbdel="' + esc(String(pb.id || ""))
+          + '" title="Remove playbook: stop importing it (its items stay to be verified)">✕</button></span>';
+      }).join("");
+    }
+    function wlActiveRows(active, playbooks){
+      var plain = [], groups = [], byFile = {}, live = {};
+      (playbooks || []).forEach(function(pb){ if(pb && pb.path) live[String(pb.path)] = true; });
+      active.forEach(function(it){
+        if(it && it.src === "playbook" && it.srcFile){
+          var f = String(it.srcFile), g = byFile[f];
+          if(!g){ g = { file: f, name: String(it.srcName || f), items: [] }; byFile[f] = g; groups.push(g); }
+          g.items.push(it);
+        } else {
+          plain.push(it);
+        }
+      });
+      var h = plain.map(function(it){ return wlItemRow(it, false); }).join("");
+      groups.forEach(function(g){
+        h += '<div class="wl-mgroup wl-pbgroup" title="' + esc(g.file) + '">📘 ' + esc(g.name)
+          + (live[g.file] ? "" : " · removed") + '</div>'
+          + g.items.map(function(it){ return wlItemRow(it, false); }).join("");
+      });
+      return h;
+    }
+    function playbookAdd(){ if(wlIsProjectTab(worklistScope)) send("worklist-playbook-add", worklistScope); }
+    function playbookRemove(id){
+      var name = "";
+      wlCurPlaybooks().forEach(function(pb){ if(String(pb.id) === String(id)) name = String(pb.name || ""); });
+      if(!confirm("Remove playbook " + name + "? It stops importing; its items stay in the list to be verified.")) return;
+      send("worklist-playbook-remove", worklistScope, id);
+    }
+    window.ccPlaybookResult = function(r){
+      r = r || {};
+      var el = document.getElementById("wl-todoflash"); if(!el) return;
+      var name = String(r.name || ""), msg;
+      if(r.error) msg = String(r.error);
+      else if(r.removed !== undefined) msg = "Playbook " + String(r.removed || "") + " removed — its items stay to be verified";
+      else if(r.unreadable) msg = "Couldn't read playbook " + name;
+      else {
+        msg = (r.added|0) + " new, " + (r.updated|0) + " updated";
+        if(r.missing|0) msg += ", " + (r.missing|0) + " missing";
+        msg = "Playbook " + name + (r.auto ? " synced — " : " added — ") + msg;
+      }
+      el.textContent = msg;
       if(wlTodoFlashTimer) clearTimeout(wlTodoFlashTimer);
       wlTodoFlashTimer = setTimeout(function(){ el.textContent = ""; }, 6000);
     };
@@ -18813,6 +19049,8 @@ local HTML = [[
       if(sb && sb.getAttribute){ var s = sb.getAttribute("data-scope"); if(s !== null) worklistPick(s); }
       var db = (t.classList && t.classList.contains("wl-del")) ? t : (t.closest ? t.closest(".wl-del") : null);
       if(db && db.getAttribute){ var did = db.getAttribute("data-del"); if(did){ worklistRemove(did); return; } }
+      var pd = (t.classList && t.classList.contains("wl-pbdel")) ? t : (t.closest ? t.closest(".wl-pbdel") : null);
+      if(pd && pd.getAttribute){ var pid = pd.getAttribute("data-pbdel"); if(pid){ playbookRemove(pid); return; } }
       // Click a row (but not its checkbox / ✕) -> open the item modal.
       if(!t.closest) return;
       if(t.classList && (t.classList.contains("wl-cb") || t.classList.contains("wl-del"))) return;
@@ -27154,6 +27392,9 @@ function FX._refreshBody()
   -- right after lastRenderList was set, and every auto-sync renamed a relabelled
   -- project's tab back to its folder name.)
   FX.todoAutoSyncTick(list)
+  -- ...and a playbook picked as a My List source re-imports the same way when its file moves
+  -- (2026-10-03); one stat per playbook per tick, nothing at all with none added.
+  pcall(FX.playbookSyncTick)
   -- ...and once a day, age done work out of the store into the archive (2026-09-21).
   -- core.worklistArchiveIsDue makes every other tick a compare and nothing more.
   pcall(FX.worklistArchiveTick)

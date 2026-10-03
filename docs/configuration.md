@@ -179,7 +179,7 @@ Everything lives under `~/.claude/`:
 | `cc-usage-state.json` | Where the [token totals](usage-and-cost.md#fleet-total) stopped reading each transcript, so a reload reads only what's new |
 | `cc-skill-labels.json` | Your ok / not ok labels on [skill runs](providers-and-integrations.md#how-often-each-skill-works) |
 | `cc-labels.json`, `cc-groups.json`, `cc-hidden.json`, `cc-autotitles.json` | Relabels and groups by project, hidden tiles, and auto-titles |
-| `cc-worklist.json`, `cc-worklist-archive.json` | My List and its archive |
+| `cc-worklist.json`, `cc-worklist-archive.json` | My List (its items, TODO.md sync state and playbooks) and its archive |
 | `cc-presets.json`, `cc-recent-dirs.json` | Spawn presets and recent folders |
 | `cc-agents.json`, `cc-mcp.json`, `cc-mcp-configs/` | Agent profiles, their MCP server registry, and the `--mcp-config` files written for their spawns |
 | `cc-audit/` | A [find-only audit](providers-and-integrations.md#find-only-audit)'s launch files (its findings are in `~/.cc-audit/`, which a purge keeps) |

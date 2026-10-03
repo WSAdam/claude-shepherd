@@ -47,8 +47,8 @@ Every feature below has a reference page one click away. The panel lists the sam
   groups, and filter the grid to one group.
 - [**Worklist (My List)**](docs/fleet.md#my-list): a checklist beside the fleet that imports each
   project's `TODO.md`, so you can verify what an automation says it finished.
-- [**Needs a live run**](docs/fleet.md#my-list): `- [~]` and `(needs live run)` TODO lines get a
-  ▶ live run chip in My List, and a toggle that shows only them.
+- [**Needs a live run**](docs/fleet.md#my-list): `- [~]` and `(needs live run)` lines get a ▶ chip and a filter.
+- [**Playbooks in My List**](docs/fleet.md#my-list): any markdown checklist you pick imports into a project's tab.
 - [**User stories**](docs/fleet.md#user-stories-tab): view and edit a project's
   `spec/product/user-stories.md` in a detail-panel tab.
 - [**On purpose**](docs/fleet.md#on-purpose-tab): a repo's `DECISIONS.md` says what it does on

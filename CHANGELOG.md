@@ -9,6 +9,13 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
 The second feature-mining round (Maestro, Gas Town, ECC, oh-my-claudecode, OpenRig), built as
 parallel units. Each unit adds its line here.
 
+- Playbooks in My List: **📘 Add a playbook…** on a project tab picks a markdown checklist through the
+  Mac's file chooser (never a path typed into the panel). Its `- [ ]` lines import like `TODO.md`'s
+  (`core.worklistImportPlaybook` over the same merge, `src = "playbook"`), grouped under the file's
+  name, and a per-tick watch keeps their ✓ auto and ▶ live run chips in step with the file. Importing
+  never ticks a row. **Remove playbook** stops the import and keeps its items to verify. The sources
+  list is `playbooks` in `cc-worklist.json`.
+
 - Fleet idle alert: once every local session has been idle or done for `alerts.idleMinutes` (on, 15),
   Shepherd sends one macOS banner, plus an ntfy push when escalation push is on, and arms again only
   when a session works again (`core.fleetIdleAlertDue`). An interrupted turn counts as idle on its

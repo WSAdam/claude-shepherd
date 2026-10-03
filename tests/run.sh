@@ -524,6 +524,12 @@ echo ""
 echo "== lua: the fleet-idle alert -- one banner (plus an ntfy push) once every local session has been idle for alerts.idleMinutes, re-armed only when one works again, an interrupted turn idle and a quiet one not, spoken through hs.speech when alerts.voice is on (pure + behavioral, stubbed hs) =="
 HOME="$(mktemp -d)" lua "$DIR/fleet-idle.test.lua" || fail=1
 echo ""
+echo "== lua: My List playbooks -- the native chooser (never a webview path) adds a markdown source, its lines import like TODO.md's, the per-tick watch follows the file, Remove keeps the items (behavioral, stubbed hs) =="
+HOME="$(mktemp -d)" lua "$DIR/worklist-playbooks.test.lua" || fail=1
+echo ""
+echo "== node: My List playbooks -- Add on project tabs only, sources listed with Remove, rows grouped under the file's name, escaped (real browser) =="
+node "$DIR/worklist-playbooks.browser.test.js" || fail=1
+echo ""
 
 if [ "$fail" -eq 0 ]; then
   echo "✅ ALL GREEN"
