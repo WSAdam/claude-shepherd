@@ -150,6 +150,7 @@
     "dbDir": "~/.claude/cc-lease/db"
   },
   "stopGuards": {
-    "question": true
+    "question": true,
+    "unfinished": true
   }
 }

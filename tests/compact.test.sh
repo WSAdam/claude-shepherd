@@ -180,4 +180,41 @@ assert_eq "the ask is ledgered as notes_requested, with the tokens" "150010" \
 assert_eq "a compaction is ledgered with its trigger" "auto" \
   "$(cat "$CC_LEDGER_DIR"/*.jsonl 2>/dev/null | jq -r 'select(.type == "compaction" and .key == "l1") | .trigger' | head -1)"
 
+# ---- SessionStart(compact) in a unit's worktree restates the finish protocol (A2, 2026-10-03) ----
+# A summary can drop how a unit finishes; with stopGuards.unfinished on, a session compacted inside
+# a .claude/worktrees/* checkout is told again: ExitWorktree, then cc-merge.sh request --worktree.
+export CC_MERGE_DIR="$TMP/cc-merge"
+mkdir -p "$CC_MERGE_DIR"
+export CC_CONFIG_FILE="$TMP/finish-on.json"; printf '{"stopGuards":{"unfinished":true}}' > "$CC_CONFIG_FILE"
+REPO="$TMP/repo"
+gg() { git -C "$1" -c user.email=t@example.invalid -c user.name=t "${@:2}"; }
+git init -q -b main "$REPO"
+printf '.claude/worktrees/\n' > "$REPO/.gitignore"; printf 'base\n' > "$REPO/app.txt"
+gg "$REPO" add -A; gg "$REPO" commit -qm init
+git -C "$REPO" worktree add -q "$REPO/.claude/worktrees/f1" -b feat/f1
+WT="$(git -C "$REPO/.claude/worktrees/f1" rev-parse --show-toplevel)"
+start() { evout sessionstart "$(jq -nc --arg s "$1" --arg c "$2" --arg src "$3" '{session_id:$s, cwd:$c, source:$src}')"; }
+got="$(start f1 "$WT" compact)"
+assert_eq "a compacted unit session is told how to finish, labelled" "yes" "$(has "$got" "[Shepherd: finish]")"
+assert_eq "...naming its worktree and branch" "yes" "$(has "$got" "$WT (branch feat/f1)")"
+assert_eq "...ExitWorktree first" "yes" "$(has "$got" 'ExitWorktree (action "keep")')"
+assert_eq "...then cc-merge.sh request for this worktree, in the background" "yes" \
+  "$(has "$got" "~/.claude/cc-merge.sh request --worktree $WT --summary")"
+assert_eq "...and what to do with each answer" "yes" "$(has "$got" "NOT YET")"
+for src in startup resume clear; do
+  got="$(start f1 "$WT" "$src")"
+  assert_eq "a $src start isn't told (only a compaction loses it)" "no" "$(has "$got" "[Shepherd: finish]" | head -c 2)"
+done
+got="$(start f2 "$REPO" compact)"
+assert_eq "a compacted session in the main checkout isn't told" "no" "$(has "$got" "[Shepherd: finish]" | head -c 2)"
+got="$(CC_CONFIG_FILE="$TMP/cfg.json" start f3 "$WT" compact)"
+assert_eq "...nor one with stopGuards.unfinished off" "no" "$(has "$got" "[Shepherd: finish]" | head -c 2)"
+jq -n --arg w "$WT" --arg c "$(git -C "$WT" rev-parse --path-format=absolute --git-common-dir)" \
+  '{v:1, key:"f9", session_id:"f9", nonce:"1.2.3", worktree:$w, branch:"feat/f1", base:"main", commonDir:$c, phase:"requested"}' \
+  > "$CC_MERGE_DIR/f9.json"
+got="$(start f4 "$WT" compact)"
+assert_eq "with a merge request already open it says so, instead of asking again" "yes" \
+  "$(has "$got" "already has a merge request for this worktree (requested)")"
+assert_eq "...and doesn't tell it to run the request" "no" "$(has "$got" "cc-merge.sh request --worktree" | head -c 2)"
+
 finish

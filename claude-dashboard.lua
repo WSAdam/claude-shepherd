@@ -4154,12 +4154,16 @@ function FX.removeStatus(key)
   -- 2026-09-29: the merge checker's verdict (FX.checkerSave) and a torn write of it
   os.remove(mergeDir .. "/" .. key .. ".checker.json")
   local ctmp = key .. ".checker.json.tmp."
+  -- 2026-10-03 (A2): cc-merge.sh's Not yet record and a torn write of it (cc_remove too)
+  os.remove(mergeDir .. "/" .. key .. ".notyet")
+  local ntmp = key .. ".notyet.tmp."
   if FX._checkers then FX._checkers[key] = nil end
   for _, fn in ipairs(FX.readDir(mergeDir)) do
     if fn:sub(1, #mclaim) == mclaim then os.remove(mergeDir .. "/" .. fn) end
     if fn:sub(1, #mparked) == mparked then os.remove(mergeDir .. "/" .. fn) end
     if fn:sub(1, #mtmp) == mtmp then os.remove(mergeDir .. "/" .. fn) end
     if fn:sub(1, #ctmp) == ctmp then os.remove(mergeDir .. "/" .. fn) end
+    if fn:sub(1, #ntmp) == ntmp then os.remove(mergeDir .. "/" .. fn) end
   end
   -- Adam's answer to a held question (cc_remove drops the same files)
   os.remove(FX.ASK_DIR .. "/" .. key .. ".answer")

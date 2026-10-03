@@ -632,6 +632,8 @@ cc_decide_prune() {
 # cc-skill-labels.json (2026-09-29) is Adam's hand labels on skill runs, not a session's state:
 # neither remover touches it (tests/lib.test.sh, tests/skill-runs.test.lua).
 # cc-guard/<key>.<guard> (2026-10-02): the Stop guards' once-markers, every guard's.
+# cc-merge/<key>.notyet (2026-10-03): the commit Adam answered Not yet for (cc-merge.sh), which the
+# unfinished-unit reminder doesn't push back at him.
 # KEEP THE FILE SET IN SYNC with FX.removeStatus in claude-dashboard.lua.
 cc_remove() {
   rm -f "$(cc_file "$1")" "$(cc_file "$1")".tmp.* "$(cc_decision_file "$1")" \
@@ -642,6 +644,7 @@ cc_remove() {
     "$CC_MERGE_DIR/$1.json" "$CC_MERGE_DIR/$1.decision" "$CC_MERGE_DIR/$1.decision".claim.* \
     "$CC_MERGE_DIR/$1.decision".parked.* "$CC_MERGE_DIR/$1.decision".tmp.* \
     "$CC_MERGE_DIR/$1.checker.json" "$CC_MERGE_DIR/$1.checker.json".tmp.* \
+    "$CC_MERGE_DIR/$1.notyet" "$CC_MERGE_DIR/$1.notyet".tmp.* \
     "$CC_ASK_DIR/$1.answer" "$CC_ASK_DIR/$1.answer".claim.* \
     "$CC_ASK_DIR/$1.answer".tmp.* "$CC_TALK_DIR/$1" \
     "$CC_RESUME_DIR/$1.json" "$CC_RESUME_DIR/$1.json".tmp.* "$CC_RESUME_DIR/$1.plan.json" \
@@ -1697,7 +1700,9 @@ CC_NOTES_DIR="${CC_NOTES_DIR:-${HOME}/.claude/cc-notes}"
 # 2026-09-29: "decisions" (the decisions inbox, unit 28) -- Adam's late answers -- is short too.
 # 2026-09-29: "tickets" (cross-repo tickets, unit 29) -- news on tickets it filed or holds -- is short too.
 # 2026-09-29: "onpurpose" (DECISIONS.md, unit 33) is one line, so it comes before the long parts.
-CC_CONTEXT_PARTS="notes lease decisions tickets onpurpose handoff mailbox"
+# 2026-10-03: "finish" (the unfinished-unit reminder, A2) prints only after a compaction in a unit's
+# worktree -- a summary can drop how a unit finishes -- and is short, so it comes right after the lease.
+CC_CONTEXT_PARTS="notes lease finish decisions tickets onpurpose handoff mailbox"
 CC_CONTEXT_MAX=8000
 CC_PENDING_MAX_AGE=3600   # a respawn's note nobody took within the hour is stale
 
@@ -2139,16 +2144,17 @@ EOF
 # A guard looks at how a turn ended and, when it shouldn't have ended that way, blocks the stop ONCE
 # with a reason, so the session carries on: cc-status.sh stop prints it through cc_stop_decision and
 # the card stays working. Precedence, highest first: a mailbox message, the notes request, then the
-# guards in CC_STOP_GUARDS order -- question here; fakeDone (A3) and unfinished (A2) go after it. A
-# mailbox message stands every guard down (it is new input, maybe the very answer); the notes request
-# joins them (cc_stop_decision puts it first). Among the guards the first that fires is the only one.
+# guards in CC_STOP_GUARDS order -- question, then unfinished (A2, 2026-10-03); fakeDone (A3) goes
+# between them. A mailbox message stands every guard down (it is new input, maybe the very answer);
+# the notes request joins them (cc_stop_decision puts it first). Among the guards the first that
+# fires is the only one.
 # Each is switched on by stopGuards.<name> (off when the config says nothing; on in defaults/). None
 # runs while stop_hook_active (that stop ends a turn a block already kept going, so a guard can't
 # loop), in plan mode, in Shepherd's own internal runs, or where Shepherd's panel isn't running (a
 # remote host: the card it would send the session to isn't there). A guard blocks once per session
-# and token -- the turn, for the question guard -- through its marker CC_GUARD_DIR/<key>.<guard>,
-# and each block is one ledger event, stop_guard.
-CC_STOP_GUARDS="question"
+# and token -- the turn for the question guard, the head sha for unfinished -- through its marker
+# CC_GUARD_DIR/<key>.<guard>, and each block is one ledger event, stop_guard.
+CC_STOP_GUARDS="question unfinished"
 CC_GUARD_PANEL_MAX_AGE="${CC_GUARD_PANEL_MAX_AGE:-30}"   # seconds, as cc-fleet.sh's shepherd_alive
 
 # Is Shepherd's panel running on this machine? Its heartbeat, at most $1 seconds old.
@@ -2193,14 +2199,18 @@ cc_stop_text() { # $1 hook input
 # "Want me to fix it now? It's small." asks; "Questions? None." and a rhetorical "Why? Because ..."
 # don't, and neither does a question a paragraph before the end. cc-scrub.js keeps exactly these
 # words in an assistant's text (ASK_WORDS), so a scrubbed corpus reads as the real messages do.
-CC_QUESTION_JQ='
+# 2026-10-03 (A2): the masking is shared with cc_claims_done -- code, quotes and blockquotes say
+# nothing about how a turn ended.
+CC_MASK_JQ='
+  def mask: gsub("```[\\s\\S]*?(```|\\z)"; "\n\n")
+    | gsub("~~~[\\s\\S]*?(~~~|\\z)"; "\n\n")
+    | gsub("`[^`\\n]*`"; "code")
+    | gsub("\"[^\"\\n]*\""; "quote")
+    | gsub("“[^”\\n]*”"; "quote")
+    | [split("\n")[] | select(test("^[ \\t]*>") | not)] | join("\n");'
+CC_QUESTION_JQ="$CC_MASK_JQ"'
   def lead: sub("^[\\s*_#>(-]*([0-9]+[.)])?[\\s*_]*"; "");
-  gsub("```[\\s\\S]*?(```|\\z)"; "\n\n")
-  | gsub("~~~[\\s\\S]*?(~~~|\\z)"; "\n\n")
-  | gsub("`[^`\\n]*`"; "code")
-  | gsub("\"[^\"\\n]*\""; "quote")
-  | gsub("“[^”\\n]*”"; "quote")
-  | [split("\n")[] | select(test("^[ \\t]*>") | not)] | join("\n")
+  mask
   | [splits("\\n[ \\t]*\\n") | sub("^\\s+"; "") | sub("\\s+$"; "") | select(length > 0)]
   | select(length > 0)
   | (if length > 1 and (.[-1] | split("\n") | all(test("^\\s*([-*+]|[0-9]+[.)])\\s")))
@@ -2235,6 +2245,135 @@ _cc_guard_question() { # $1 key, $2 hook input
   CC_GUARD_DETAIL="$q"
   CC_GUARD_REASON="[shepherd] You ended by asking Adam in prose. Ask it with the AskUserQuestion tool so it reaches his Shepherd card."
   return 0
+}
+
+# Does text $1 say the work is finished? The claiming sentence on stdout (at most 200 characters) and
+# 0 when it does; 1 otherwise. Masked like cc_question_asked, then read a sentence at a time: one
+# that says "done", "complete(d)", "ready to merge" or "all ... green" claims it -- unless it is a
+# question, or the clause before the word cancels it: a negation ("not", "isn't", "nothing", "almost"),
+# a condition ("once", "when", "if", "until"), the future ("will", "I'll", "need") or an infinitive or
+# article right before it ("to be done", "the complete diff"). "Nothing is pushed; the unit is done."
+# still claims: the clause ends at the ";". A3 (fakeDone) reuses it.
+CC_CLAIMS_DONE_JQ="$CC_MASK_JQ"'
+  def claim: "\\b(done|complete|completed|ready[ -](to|for)[ -]merg(e|ing)|all(\\s+[\\w-]+){0,3}\\s+green)\\b";
+  def cancels: "\\b(not|no|never|nothing|none|nor|without|almost|nearly|partly|partially|half|once|when|whenever|after|until|till|before|if|unless|whether|will|would|should|could|must|need|needs|going)\\b|n[\\x27’]t\\b|[\\x27’]ll\\b|\\b(to|be|the|a|an|this|that|its|our|your|my|their)\\s*$";
+  mask
+  | [splits("(?<=[.!?])\\s+|\\n+") | sub("^[\\s*_#>(-]+"; "") | select(test("\\S"))]
+  | [.[] | select(test("\\?[\\s*_\"\\x27’”)\\]]*$") | not) | . as $s
+       | select([match(claim; "gi")
+                 | select(($s[0:.offset] | [splits("[,;:–—]|\\s-+\\s")] | last // "") | test(cancels; "i") | not)]
+                | length > 0)]
+  | first // empty
+  | .[0:200]'
+cc_claims_done() { # $1 text
+  local c
+  [ -n "$1" ] || return 1
+  cc_have_jq || return 1
+  c="$(printf '%s' "$1" | jq -Rrs "$CC_CLAIMS_DONE_JQ" 2>/dev/null)"
+  [ -n "$c" ] || return 1
+  printf '%s\n' "$c"
+}
+
+# Is the cwd $1 inside a unit's worktree -- a linked worktree under .claude/worktrees/ (EnterWorktree's
+# tabs)? 0 + CC_UNIT_TOP / CC_UNIT_COMMON (its toplevel and git common dir, from _cc_fence_own) and
+# CC_UNIT_BRANCH ("" on a detached HEAD). The main checkout and a sibling-folder worktree are not.
+_cc_unit_worktree() { # $1 cwd
+  CC_UNIT_TOP=""; CC_UNIT_COMMON=""; CC_UNIT_BRANCH=""
+  case "$1" in */.claude/worktrees/*) ;; *) return 1 ;; esac   # pure bash first: most cwds end here
+  [ -d "$1" ] || return 1
+  _cc_fence_own "$1" || return 1
+  [ "$_CC_FENCE_OWN_GITDIR" != "$_CC_FENCE_OWN_COMMON" ] || return 1
+  case "$_CC_FENCE_OWN_TOP" in */.claude/worktrees/*) ;; *) return 1 ;; esac
+  CC_UNIT_TOP="$_CC_FENCE_OWN_TOP"; CC_UNIT_COMMON="$_CC_FENCE_OWN_COMMON"
+  CC_UNIT_BRANCH="$(git -C "$CC_UNIT_TOP" symbolic-ref --quiet --short HEAD 2>/dev/null)"
+  return 0
+}
+
+# The phase of a merge request for worktree $1 (repo $2) on stdout, from ANY session: a request is
+# found by its worktree, never by session key -- a /clear changes the key, and a resumed unit asks
+# from a new session. Nothing when there's none. The request files are cc-merge.sh's <key>.json (the
+# same fields cc_fence_merge_ok reads); a file jq can't read makes the answer "unknown".
+_cc_unit_merge_request() { # $1 worktree, $2 common dir
+  local f files=()
+  for f in "$CC_MERGE_DIR"/*.json; do
+    [ -f "$f" ] || continue
+    case "$f" in *.checker.json) continue ;; esac
+    files+=("$f")
+  done
+  [ ${#files[@]} -gt 0 ] || return 0
+  jq -rn --arg w "$1" --arg c "$2" \
+    'first(inputs | select(type == "object" and .worktree == $w and .commonDir == $c) | .phase // "requested") // empty' \
+    "${files[@]}" 2>/dev/null || printf 'unknown'
+}
+
+# Did Adam answer Not yet for commit $3 of worktree $1 (repo $2)? cc-merge.sh leaves <key>.notyet
+# ({worktree, commonDir, branch, head}) when he does. 0 when one matches.
+_cc_unit_notyet() { # $1 worktree, $2 common dir, $3 head sha
+  local f files=()
+  for f in "$CC_MERGE_DIR"/*.notyet; do [ -f "$f" ] && files+=("$f"); done
+  [ ${#files[@]} -gt 0 ] || return 1
+  [ -n "$(jq -rn --arg w "$1" --arg c "$2" --arg h "$3" \
+    'first(inputs | select(type == "object" and .worktree == $w and .commonDir == $c and .head == $h)) | "yes"' \
+    "${files[@]}" 2>/dev/null)" ]
+}
+
+# The branch a unit merges into: main, else master (as core.verifyTargetCmd). Nothing when neither.
+_cc_unit_base() { # $1 worktree
+  local b
+  for b in main master; do
+    git -C "$1" rev-parse --verify --quiet "refs/heads/$b" >/dev/null 2>&1 && { printf '%s' "$b"; return 0; }
+  done
+  return 1
+}
+
+# The unfinished-unit reminder (stopGuards.unfinished, A2, 2026-10-03): a session in a unit's worktree
+# ends a turn saying the work is done, its branch has commits ahead of main, and nobody has asked
+# Shepherd to merge it -- the unit would sit there finished and forgotten. Reminds it once per head
+# sha (CC_GUARD_TOKEN): a new commit claimed done is reminded again. Never while background work is
+# in flight (background_tasks: it will wake the session), and never for a commit Adam answered Not
+# yet. Cheap first: the cwd's path, then the payload, then the text; git and the merge dir last.
+_cc_guard_unfinished() { # $1 key, $2 hook input
+  local in="$2" cwd claim base ahead sha n what
+  cwd="$(cc_get "$in" '.cwd')"
+  case "$cwd" in */.claude/worktrees/*) ;; *) return 1 ;; esac
+  [ -z "$(cc_get "$in" '(.background_tasks | if type == "array" and length > 0 then "busy" else null end)')" ] || return 1
+  claim="$(cc_claims_done "$(cc_stop_text "$in")")" || return 1
+  _cc_unit_worktree "$cwd" || return 1
+  base="$(_cc_unit_base "$CC_UNIT_TOP")" || return 1
+  [ "$CC_UNIT_BRANCH" != "$base" ] || return 1
+  ahead="$(git -C "$CC_UNIT_TOP" rev-list --count "refs/heads/$base..HEAD" 2>/dev/null)"
+  case "$ahead" in ''|*[!0-9]*|0) return 1 ;; esac
+  sha="$(git -C "$CC_UNIT_TOP" rev-parse HEAD 2>/dev/null)"
+  [ -n "$sha" ] || return 1
+  [ -z "$(_cc_unit_merge_request "$CC_UNIT_TOP" "$CC_UNIT_COMMON")" ] || return 1
+  ! _cc_unit_notyet "$CC_UNIT_TOP" "$CC_UNIT_COMMON" "$sha" || return 1
+  n="commits"; [ "$ahead" != 1 ] || n="commit"
+  what="$CC_UNIT_BRANCH"; [ -n "$what" ] || what="the worktree's detached HEAD"
+  CC_GUARD_TOKEN="$sha"
+  CC_GUARD_DETAIL="${CC_UNIT_BRANCH:-HEAD} ${sha:0:7}, $ahead ahead of $base: $claim"
+  CC_GUARD_REASON="[shepherd] You said the work is done, but $what is $ahead $n ahead of $base and nobody has asked Shepherd to merge it. If the unit is finished (full suite green, everything committed): ExitWorktree (action \"keep\"), then from the main checkout run ~/.claude/cc-merge.sh request --worktree $CC_UNIT_TOP --summary \"<what the unit does and why>\" --tests \"<the command you ran>: <result>\" in the background and end the turn; Shepherd shows Adam the merge review. If it isn't finished, carry on with it."
+  return 0
+}
+
+# The finish part of cc_session_context (A2, 2026-10-03): after a compaction in a unit's worktree, the
+# finish protocol again -- the summary may have dropped it, and a unit that forgets it sits finished
+# and unmerged. With a merge request already open for the worktree it says so instead, so the
+# session waits for the answer rather than asking twice. Switched with stopGuards.unfinished.
+_cc_ctx_finish() { # $1 source, $2 key, $3 cwd
+  local phase
+  [ "$1" = compact ] || return 0
+  [ "$(cc_config '.stopGuards.unfinished' 'false')" = true ] || return 0
+  cc_have_jq || return 0
+  _cc_unit_worktree "$3" || return 0
+  case "$CC_UNIT_TOP" in *[[:cntrl:]]*) return 0 ;; esac
+  phase="$(_cc_unit_merge_request "$CC_UNIT_TOP" "$CC_UNIT_COMMON")"
+  if [ -n "$phase" ]; then
+    printf 'This session works in the worktree %s (branch %s). Shepherd already has a merge request for this worktree (%s): wait for its answer and follow it -- MERGE APPROVED prints the steps; NOT YET: EnterWorktree with that path, act on the note, then leave and ask again.\n' \
+      "$CC_UNIT_TOP" "${CC_UNIT_BRANCH:-detached}" "$phase"
+    return 0
+  fi
+  printf 'This session works in the worktree %s (branch %s). When the unit is done (full suite green, everything committed), never merge it yourself: ExitWorktree (action "keep"), then from the main checkout run ~/.claude/cc-merge.sh request --worktree %s --summary "<what the unit does and why>" --tests "<the command you ran>: <result>" in the background and end the turn. MERGE APPROVED: follow the steps it prints. NOT YET: EnterWorktree with that path, act on the note, then leave and ask again.\n' \
+    "$CC_UNIT_TOP" "${CC_UNIT_BRANCH:-detached}" "$CC_UNIT_TOP"
 }
 
 # Has guard $2 blocked session $1 for token $3 already? 1 when it has; otherwise it is recorded, 0.

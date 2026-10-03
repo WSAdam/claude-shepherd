@@ -4035,7 +4035,8 @@ do
   if lib then lib:close() end
   check("tickets: cc-lib.sh defaults CC_TICKETS_DIR to the same folder",
         ls:find('CC_TICKETS_DIR="${CC_TICKETS_DIR:-${HOME}/.claude/cc-tickets}"', 1, true) ~= nil)
-  check("tickets: SessionStart has a tickets part", ls:find('CC_CONTEXT_PARTS="notes lease decisions tickets onpurpose handoff mailbox"', 1, true) ~= nil)
+  -- 2026-10-03: the list gained "finish" (A2's compaction part) after the lease
+  check("tickets: SessionStart has a tickets part", ls:find('CC_CONTEXT_PARTS="notes lease finish decisions tickets onpurpose handoff mailbox"', 1, true) ~= nil)
 end
 
 -- ---- Capture as scenario (2026-09-29) ----
@@ -4098,6 +4099,12 @@ do
   check("checker: the delegated merge asks core.checkerDelegatedVerdict",
         src:find("core.checkerDelegatedVerdict(", 1, true) ~= nil)
   check("checker: its verdict file is in cc_remove", (io.open(ROOT .. "cc-lib.sh"):read("*a")):find('"$CC_MERGE_DIR/$1.checker.json"', 1, true) ~= nil)
+  -- 2026-10-03 (A2): cc-merge.sh's Not yet record, <key>.notyet, goes with the session in both removers
+  check("unfinished reminder: the Not yet record is in cc_remove",
+        (io.open(ROOT .. "cc-lib.sh"):read("*a")):find('"$CC_MERGE_DIR/$1.notyet"', 1, true) ~= nil)
+  check("unfinished reminder: ...and in FX.removeStatus, with its temps",
+        (src:match("function FX%.removeStatus%(key%)(.-)\nend") or ""):find('key .. ".notyet"', 1, true) ~= nil
+        and (src:match("function FX%.removeStatus%(key%)(.-)\nend") or ""):find('key .. ".notyet.tmp."', 1, true) ~= nil)
   local df = io.open(ROOT .. "defaults/cc-config.json", "r")
   local dsrc = df and df:read("*a") or ""
   if df then df:close() end

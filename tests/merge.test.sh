@@ -480,4 +480,26 @@ assert_eq "Shepherd reads known_issues back from the request" "The tab can't edi
 assert_eq "...and an older request without it still loads" "(none)" "$(lua_known "$MD/ki2.json")"
 rm -f "$MD/ki1.json" "$MD/ki2.json" "$MD/ki3.json"
 
+# ---- Not yet is remembered per commit, for the unfinished-unit reminder (A2, 2026-10-03) ----
+# The Stop guard stopGuards.unfinished reminds a unit that says it's done to ask for the merge --
+# but never for a commit Adam already answered Not yet. The request records the head it asks to
+# merge; a Not yet leaves <key>.notyet ({worktree, commonDir, branch, head}) as the request goes.
+alive
+unit ny feat/ny
+NYWT="$(cd "$REPO/.claude/worktrees/ny" && pwd -P)"
+NYHEAD="$(git -C "$NYWT" rev-parse HEAD)"
+req "$NYWT" ny1 & bg=$!
+wait_for "$MD/ny1.json"
+assert_json "the request records the head it asks to merge" "$MD/ny1.json" .head "$NYHEAD"
+answer ny1 hold "wait for the docs"
+wait $bg
+assert_eq "Not yet: exit 3" "3" "$(cat "$TMP/rc.ny1")"
+assert_json "...leaving a record of the commit Adam said Not yet to" "$MD/ny1.notyet" .head "$NYHEAD"
+assert_json "...for this worktree" "$MD/ny1.notyet" .worktree "$NYWT"
+assert_json "...and repo" "$MD/ny1.notyet" .commonDir "$(git -C "$NYWT" rev-parse --path-format=absolute --git-common-dir)"
+assert_absent "...the request itself still goes" "$MD/ny1.json"
+assert_eq "Shepherd still reads a request that records its head" "(none)" \
+  "$(req "$NYWT" ny2 --wait-max 1; lua_known "$MD/ny2.json")"
+rm -f "$MD/ny1.notyet" "$MD/ny2.json"
+
 finish

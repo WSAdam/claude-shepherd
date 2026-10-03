@@ -10907,7 +10907,8 @@ M.SETTINGS_KEEP_SUBKEYS = {
   restart = { "dryRun", "waveMinutes", "keepHours" },
   -- 2026-10-02: the Stop guards have no inputs (the config switches them); if the form ever rebuilds
   -- `stopGuards`, the question guard's switch stays (A2/A3 add theirs beside it).
-  stopGuards = { "question" },
+  -- 2026-10-03: and the unfinished-unit reminder's (A2).
+  stopGuards = { "question", "unfinished" },
   -- 2026-10-02: Seance has no inputs (its box asks); if the form ever rebuilds `seance`, the
   -- hand-set budget cap and timeout stay.
   seance = { "maxBudgetUsd", "timeoutSeconds" },
@@ -22050,6 +22051,9 @@ M.FEATURES = {
   { key = "stopguards", cat = "Control", new = true, title = "Questions asked in prose come back",
     what = "A turn that ends by asking you something in prose (\"Want me to push?\", \"A or B?\") is sent back once, to ask it with the question tool instead, so it lands on the card as buttons. Code, quotes and a question answered in the same breath don't count. Off in plan mode, in Shepherd's own runs and where Shepherd isn't running. stopGuards.question in ~/.claude/cc-config.json, on by default.",
     why = "A question buried at the end of a long report looks like a finished session; on the card it can't be missed." },
+  { key = "unfinished", cat = "Control", new = true, title = "Finished units get a merge reminder",
+    what = "A session in a .claude/worktrees/ worktree that ends its turn saying the work is done -- with commits ahead of main and no merge request for that worktree -- is sent back once per commit: ExitWorktree, then cc-merge.sh request from the main checkout. Not while background work is running, and never for a commit you answered Not yet. After a compaction, a unit's session is told the finish steps again. stopGuards.unfinished in ~/.claude/cc-config.json, on by default.",
+    why = "A unit that says \"done\" but never asks to merge sits finished in its worktree until you notice; now it asks." },
   { key = "decisions", cat = "Control", new = true, title = "Decisions inbox",
     what = "A session with a question it has a sensible default for asks with ~/.claude/cc-decide.sh and goes ahead on the default instead of stopping. ☰ → Inbox lists every open question -- and every question Shepherd is holding for you -- across the fleet; answer in place. A different answer reaches the session through its mailbox, or at its next start if it has stopped; keeping the default just closes it. A --blocking question waits for you (up to its timeout, then the default) and its card says Needs you; an open one is a heads-up.",
     why = "A question you'd have answered with the obvious choice no longer parks a session until you come back." },

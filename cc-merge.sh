@@ -154,15 +154,18 @@ cmd_request() {
     nonce="$$.$now.$RANDOM"
     rm -f "$DEC"
     local tmp="$REQ.tmp.$$"
+    # 2026-10-03 (A2): head is the commit asked about, so a Not yet is remembered per commit (below)
     jq -n --arg key "$KEY" --arg sid "$SID" --arg pid "${CLAUDE_PID:-}" --arg nonce "$nonce" \
        --arg wt "$wt" --arg branch "$branch" --arg base "$base" --arg common "$common" \
        --arg summary "${summary:0:1000}" --arg tests "${tests:0:300}" \
        --argjson ahead "$ahead" --argjson at "$now" --argjson waitpid "$$" \
        --argjson stash "$(stash_count "$common")" --arg known "${known:0:1000}" \
+       --arg head "$(g rev-parse HEAD 2>/dev/null)" \
        '{v: 1, key: $key, session_id: $sid, pid: $pid, nonce: $nonce, worktree: $wt, branch: $branch,
          base: $base, commonDir: $common, summary: $summary, tests: $tests, ahead: $ahead, at: $at,
          wait_pid: $waitpid, stash_count: $stash, phase: "requested"}
-        + (if $known != "" then {known_issues: $known} else {} end)' > "$tmp" && mv "$tmp" "$REQ" || refuse "couldn't write the request in $MERGE_DIR"
+        + (if $known != "" then {known_issues: $known} else {} end)
+        + (if $head != "" then {head: $head} else {} end)' > "$tmp" && mv "$tmp" "$REQ" || refuse "couldn't write the request in $MERGE_DIR"
   else
     # Re-asking on the SAME request (a foreground wait that ran out): the nonce is kept so an
     # answer given in between isn't lost, but the process waiting for it is a NEW one. Shepherd
@@ -208,6 +211,12 @@ $( [ "$inside" = yes ] || echo "0. EnterWorktree with path $wt (you asked from t
 EOF
             exit 0
           fi
+          # 2026-10-03 (A2): which commit Adam said Not yet to, as <key>.notyet, so the Stop guard's
+          # unfinished-unit reminder (cc-lib.sh) never pushes that same commit back at him. A request
+          # written before head was recorded falls back to the worktree's HEAD now.
+          jq -c --arg h "$(g rev-parse HEAD 2>/dev/null)" --argjson t "$(date +%s)" \
+            '{worktree, commonDir, branch, head: (.head // $h), at: $t}' "$REQ" > "$MERGE_DIR/$KEY.notyet.tmp.$$" 2>/dev/null \
+            && mv "$MERGE_DIR/$KEY.notyet.tmp.$$" "$MERGE_DIR/$KEY.notyet" || rm -f "$MERGE_DIR/$KEY.notyet.tmp.$$"
           rm -f "$REQ"
           echo "NOT YET: ${note:-(no note)}"
           echo "Adam isn't ready to merge $branch. Act on the note (EnterWorktree with path $wt to change it), then leave the worktree and ask again with the same request command."

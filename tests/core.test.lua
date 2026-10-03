@@ -8470,7 +8470,9 @@ do
   -- 2026-09-30: 42 -> 43 for restarting the fleet in place ("restart", flagged new).
   -- 2026-10-02: 43 -> 44 for the Stop guards' question guard ("stopguards", flagged new).
   -- 2026-10-02: 44 -> 45 for asking a session a question ("seance", flagged new).
-  eq("FEATURES: the 45 new features are flagged", newCount, 45)
+  -- 2026-10-03: 45 -> 46 for the unfinished-unit reminder ("unfinished", flagged new).
+  eq("FEATURES: the 46 new features are flagged", newCount, 46)
+  check("FEATURES: lists the unfinished-unit reminder", keys.unfinished == true)
   check("FEATURES: lists the Stop guards", keys.stopguards == true)
   check("FEATURES: lists restarting the fleet in place", keys.restart == true)
   check("FEATURES: lists TODO lines that need a live run", keys.liverun == true)
@@ -14431,6 +14433,23 @@ do
   for _, f in ipairs(core.FEATURES) do if f.key == "stopguards" then feat = f end end
   check("stop guards: FEATURES lists them, flagged new", feat ~= nil and feat.new == true)
   check("stop guards: ...and the entry names the switch", feat ~= nil and tostring(feat.what):find("stopGuards.question", 1, true) ~= nil)
+end
+
+-- ---- Stop guards: the unfinished-unit reminder (2026-10-03) ----
+do
+  -- stopGuards.unfinished has no input in Settings either; a Save that rebuilds `stopGuards` keeps
+  -- it beside the question guard's switch.
+  local keeps = {}
+  for _, k in ipairs(core.SETTINGS_KEEP_SUBKEYS.stopGuards or {}) do keeps[k] = true end
+  check("unfinished reminder: stopGuards.unfinished is in SETTINGS_KEEP_SUBKEYS", keeps.unfinished == true)
+  check("unfinished reminder: ...beside the question guard's", keeps.question == true)
+  local cfg = core.overlayConfig({ stopGuards = { question = true, unfinished = true } }, { stopGuards = {} })
+  eq("unfinished reminder: a Save that rebuilds stopGuards keeps the switch", cfg.stopGuards.unfinished, true)
+  local feat
+  for _, f in ipairs(core.FEATURES) do if f.key == "unfinished" then feat = f end end
+  check("unfinished reminder: FEATURES lists it, flagged new", feat ~= nil and feat.new == true)
+  check("unfinished reminder: ...and the entry names the switch",
+        feat ~= nil and tostring(feat.what):find("stopGuards.unfinished", 1, true) ~= nil)
 end
 
 -- ---- Seance: ask any session a question, read-only (2026-10-02, mining round 2 unit D1) ----

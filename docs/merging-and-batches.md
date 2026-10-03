@@ -45,7 +45,8 @@ runs this **in the background** and ends its turn:
 
 Claude Code wakes it when you answer. (Asking from inside a tab's worktree works too where nothing
 fences it, but Claude Code's worktree guard can refuse to run the script there, so fenced tabs ask
-from outside and step back in to rebase.)
+from outside and step back in to rebase.) A unit that says it's done but never asks is
+[reminded once per commit](approvals-and-policies.md#finished-units-get-a-merge-reminder).
 
 ### The card
 

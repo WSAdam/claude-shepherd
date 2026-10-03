@@ -135,10 +135,10 @@ every other automatic behaviour here waits for its switch.
 
 ### Merge safely
 
-- [**New worktree tab**](docs/merging-and-batches.md#new-worktree-tab): start a unit in a new
-  Claude tab with the prompt to enter its own worktree already typed in.
+- [**New worktree tab**](docs/merging-and-batches.md#new-worktree-tab): start a unit in a new tab, its worktree prompt typed in.
 - [**Ready to merge**](docs/merging-and-batches.md#ready-to-merge): a finished unit asks to merge;
   review its commits, diff and tests, and **Merge** rebases, tests and fast-forwards main.
+- [**Finished units get a merge reminder**](docs/approvals-and-policies.md#finished-units-get-a-merge-reminder): a unit that says "done" but never asks to merge is sent back once per commit.
 - [**Merge gates**](docs/merging-and-batches.md#merge-gates-shepherd-runs-the-tests-itself):
   Shepherd runs the project's suite itself, before the merge and again on main after it.
 - [**Merge checker**](docs/merging-and-batches.md#the-checker-a-read-only-review-of-every-merge-request):

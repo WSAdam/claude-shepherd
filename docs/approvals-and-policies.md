@@ -361,6 +361,43 @@ does.
   and `make setup` on an older one, turns it on; a config that says nothing leaves it off. The
   ledger records each send-back as `stop_guard` (`guard`, and the question as `detail`).
 
+### Finished units get a merge reminder
+
+A unit can end its turn with "Done, all green" and never ask to merge. Its card reads finished, so
+the work sits in its worktree until you notice. With `stopGuards.unfinished` on, the Stop hook
+sends such a turn back **once per commit**, with the finish steps: `ExitWorktree` (keep), then
+`~/.claude/cc-merge.sh request --worktree <its path> --summary … --tests …` from the main checkout,
+in the background (see [Ready to merge](merging-and-batches.md#ready-to-merge)). If the unit isn't
+actually finished, the reminder tells it to carry on.
+
+- **When it fires.** All of these hold:
+  - the session works in a worktree under `.claude/worktrees/` (a tab's worktree, not the main
+    checkout or a sibling folder);
+  - its branch has commits ahead of `main` (or `master`);
+  - its last message claims the work is done: "done", "complete", "ready to merge" or "all …
+    green", in a sentence that doesn't cancel it ("not done yet", "once it's done", "almost
+    done", "the complete diff", a question). Code, quotes and blockquotes are ignored, as for the
+    question guard;
+  - no merge request exists for that worktree. Requests are matched by the worktree's path, from
+    any session, in any phase, so a `/clear` or a resumed unit still counts as having asked.
+- **Once per commit.** The marker (`~/.claude/cc-guard/<key>.unfinished`) holds the head sha it
+  reminded about. A new commit that's claimed done gets reminded again.
+- **When it stays out of the way.**
+  - The question guard goes first: a turn that both asks you something and claims done is sent
+    back for the question only.
+  - Background work still running (Claude Code's `background_tasks`) will wake the session, so
+    that turn isn't reminded.
+  - A commit you answered **Not yet** is never pushed back at you. `cc-merge.sh` records that
+    answer's commit in `~/.claude/cc-merge/<key>.notyet`, removed with the session.
+  - Plus everything the question guard skips: `stop_hook_active`, plan mode, Shepherd's own runs,
+    and machines where the panel isn't running.
+- **After a compaction.** A summary can drop how a unit finishes, so with the switch on, a session
+  compacted inside a unit's worktree is told the finish steps again (`[Shepherd: finish]`). If a
+  merge request is already open, it is told to wait for that answer instead.
+- **Switch.** `"stopGuards": { "unfinished": true }` in `~/.claude/cc-config.json`. It is on in a
+  fresh install and after `make setup`; off when the config says nothing. The ledger records each
+  reminder as `stop_guard` with `guard: "unfinished"`.
+
 ### Questions in the tab
 
 With the setting off (or after **Answer in the tab instead**), the panel still shows the question

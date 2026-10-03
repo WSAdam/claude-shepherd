@@ -102,6 +102,7 @@ install's [defaults](../defaults/cc-config.json) differ.
 | `policies.alwaysAsk.patterns` | `[]` (the built-ins always apply) | | [Always-ask commands](approvals-and-policies.md#always-ask-commands) |
 | `decide.waitSeconds` | `1800` (at most 7200) | | [Decisions inbox](approvals-and-policies.md#decisions-inbox) |
 | `stopGuards.question` | `false` | `true` | [Questions asked in prose come back](approvals-and-policies.md#questions-asked-in-prose-come-back) |
+| `stopGuards.unfinished` | `false` | `true` | [Finished units get a merge reminder](approvals-and-policies.md#finished-units-get-a-merge-reminder) |
 | `verify.onMerge` | `false` (🔎 Verify works either way) | `true` | [The checker](merging-and-batches.md#the-checker-a-read-only-review-of-every-merge-request) |
 | `verify.maxBudgetUsd` / `timeoutSeconds` | `1` / `600` | | [The checker](merging-and-batches.md#the-checker-a-read-only-review-of-every-merge-request) |
 | `seance.maxBudgetUsd` / `timeoutSeconds` | `20` (the cap; each run's budget is sized from its context, at most `50`) / `300` | | [Ask a session](controls.md#ask-a-session-seance) |
@@ -149,11 +150,11 @@ Everything lives under `~/.claude/`:
 | `cc-gate.enabled` | The gate's on/off switch (a flag file) |
 | `cc-status/` | One status file per session, written by the hooks; `.panel-alive` is the panel heartbeat |
 | `cc-status-mirror/` | Remote sessions' status files, pulled by the [SSH status bridge](providers-and-integrations.md#ssh-status-bridge) |
-| `cc-merge/`, `cc-fleet/` | Merge requests and batches, with their answers, the checker's verdicts and a batch's events |
+| `cc-merge/`, `cc-fleet/` | Merge requests and batches, with their answers, the checker's verdicts, a batch's events and the commit each **Not yet** answered (`<key>.notyet`) |
 | `cc-scratch/` | The [red-first proof](merging-and-batches.md#the-red-first-proof-do-the-new-tests-fail-without-the-fix)'s scratch worktrees, removed after each run |
 | `cc-reqs.json` | [Requirement ids](merging-and-batches.md#requirement-ids-and-the-merge-receipt): each repo's `REQ-NNN` list (Shepherd is its only writer) |
 | `cc-ask/` | Answers to held questions (the question itself is in the session's status file) |
-| `cc-guard/` | The Stop guards' once-markers: a turn [sent back for asking in prose](approvals-and-policies.md#questions-asked-in-prose-come-back) is marked here, so it is sent back once |
+| `cc-guard/` | The Stop guards' once-markers: a turn [sent back for asking in prose](approvals-and-policies.md#questions-asked-in-prose-come-back) is marked here, so it is sent back once, and so is the commit a [finished unit was reminded](approvals-and-policies.md#finished-units-get-a-merge-reminder) about |
 | `cc-decide/` | The [decisions inbox](approvals-and-policies.md#decisions-inbox): open `cc-decide.sh` questions and their answers |
 | `cc-inbox/` | The [session mailbox](automation.md#session-mailbox): messages waiting for each session |
 | `cc-send/` | [cc-send](automation.md#send-a-prompt-from-a-shell) requests waiting for Shepherd, and its answers |

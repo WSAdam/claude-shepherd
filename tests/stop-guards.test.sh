@@ -220,4 +220,158 @@ corpus stop-say-go-imperative.jsonl pass "corpus (boundary): an imperative \"Say
 assert_eq "defaults/cc-config.json ships stopGuards.question on" "true" \
   "$(jq -r '.stopGuards.question' "$ROOT/defaults/cc-config.json" 2>/dev/null)"
 
+# ---- the "claims done" detector, cc_claims_done (A2, 2026-10-03; A3 reuses it) ----
+# The final message says the work is finished: "done", "all green", "ready to merge", "complete".
+# Masked like the question guard (code, quotes, blockquotes); a negated, conditional, future or
+# questioning use claims nothing.
+claims() { if ( . "$ROOT/cc-lib.sh"; cc_claims_done "$1" ) >/dev/null 2>&1; then echo yes; else echo no; fi; }
+assert_eq "\"Done.\" claims done" "yes" "$(claims "Done. make lint && make test are green, everything committed.")"
+assert_eq "\"All green\" claims done" "yes" "$(claims "All green: 4,412 tests pass.")"
+assert_eq "\"all tests are green\" claims done" "yes" "$(claims "Rebased on main and all tests are green.")"
+assert_eq "\"Ready to merge\" claims done" "yes" "$(claims "Ready to merge.")"
+assert_eq "\"The unit is complete\" claims done" "yes" "$(claims "The unit is complete; the TODO line is flipped.")"
+assert_eq "a negation in an earlier clause doesn't cancel a later claim" "yes" \
+  "$(claims "Nothing is pushed; the unit is done.")"
+assert_eq "\"Not done yet\" claims nothing" "no" "$(claims "Not done yet: the docs are left.")"
+assert_eq "\"isn't complete\" claims nothing" "no" "$(claims "It isn't complete -- two tests still fail.")"
+assert_eq "\"Not all green\" claims nothing" "no" "$(claims "Not all green: 3 failures in merge.test.sh.")"
+assert_eq "\"almost done\" claims nothing" "no" "$(claims "Almost done; one test left to write.")"
+assert_eq "a condition (\"once it's done\") claims nothing" "no" "$(claims "I'll ask for the merge once it's done.")"
+assert_eq "...nor \"when ... ready to merge\"" "no" "$(claims "When the suite is green and it's ready to merge, I'll ask Shepherd.")"
+assert_eq "\"still to be done\" claims nothing" "no" "$(claims "Two things are still to be done.")"
+assert_eq "a question claims nothing" "no" "$(claims "Is the rebase done?")"
+assert_eq "\"the complete diff\" (an adjective) claims nothing" "no" "$(claims "Here is the complete diff of the hook.")"
+assert_eq "\"done\" in inline code claims nothing" "no" "$(claims 'The script prints `done` when it exits.')"
+assert_eq "...nor in a code fence" "no" "$(claims "$(printf 'It prints:\n\n```\nall green, done\n```')")"
+assert_eq "...nor in quotes" "no" "$(claims 'Shepherd shows "Ready to merge" on the card.')"
+assert_eq "...nor in a blockquote" "no" "$(claims "$(printf 'The old reply was:\n\n> Done.')")"
+assert_eq "\"incomplete\" and \"undone\" are other words" "no" "$(claims "The import is incomplete and one edit is undone.")"
+assert_eq "...and an empty message claims nothing" "no" "$(claims "")"
+
+# ---- the unfinished-unit reminder, stopGuards.unfinished (A2, 2026-10-03) ----
+# A session in a .claude/worktrees/* checkout that ends a turn saying the work is done, with commits
+# ahead of main and no merge request for that worktree, is reminded ONCE per head sha to ask for
+# the merge: ExitWorktree, then cc-merge.sh request --worktree <path> in the background. A real
+# temp repo and worktree; the merge requests are found by worktree, never by session key.
+export CC_MERGE_DIR="$TMP/cc-merge"
+mkdir -p "$CC_MERGE_DIR"
+UON="$TMP/unfinished-on.json"
+printf '{"stopGuards":{"question":true,"unfinished":true}}' > "$UON"
+uev() { CC_CONFIG_FILE="$UON" evout "$@"; }
+has() { case "$1" in *"$2"*) echo yes ;; *) echo "no: $1" ;; esac; }
+gg() { git -C "$1" -c user.email=t@example.invalid -c user.name=t "${@:2}"; }
+REPO="$TMP/repo"
+git init -q -b main "$REPO"
+printf '.claude/worktrees/\n' > "$REPO/.gitignore"; printf 'base\n' > "$REPO/app.txt"
+gg "$REPO" add -A; gg "$REPO" commit -qm init
+git -C "$REPO" worktree add -q "$REPO/.claude/worktrees/u1" -b feat/u1
+WT="$(git -C "$REPO/.claude/worktrees/u1" rev-parse --show-toplevel)"
+COMMON="$(git -C "$WT" rev-parse --path-format=absolute --git-common-dir)"
+work() { printf '%s\n' "$2" >> "$1/work.txt"; gg "$1" add -A; gg "$1" commit -qm "$2"; }
+work "$WT" "first change"
+# ustop <sid> <cwd> <last message> [extra fields, a JSON object]
+ustop() {
+  local x="${4:-}"; [ -n "$x" ] || x='{}'
+  jq -nc --arg s "$1" --arg c "$2" --arg m "$3" --argjson x "$x" \
+    '{session_id:$s, cwd:$c, transcript_path:"/nonexistent", hook_event_name:"Stop", stop_hook_active:false,
+      permission_mode:"default", last_assistant_message:$m} + $x'
+}
+# reqf <key> <worktree> <phase>: a merge request as cc-merge.sh writes it
+reqf() {
+  jq -n --arg k "$1" --arg w "$2" --arg c "$COMMON" --arg p "$3" \
+    '{v:1, key:$k, session_id:$k, nonce:"1.2.3", worktree:$w, branch:"feat/u1", base:"main", commonDir:$c, phase:$p}' \
+    > "$CC_MERGE_DIR/$1.json"
+}
+DONE_MSG="Done. make lint && make test are green and everything is committed."
+
+got="$(uev stop "$(ustop u1 "$WT" "$DONE_MSG")")"
+assert_eq "a unit worktree that says it's done, ahead of main, with no merge request, is reminded" "block" "$(decision "$got")"
+r="$(reason "$got")"
+assert_eq "...marked as Shepherd's" "[shepherd]" "$(printf '%s' "$r" | cut -c1-10)"
+assert_eq "...naming the branch and how far ahead it is" "yes" "$(has "$r" "feat/u1 is 1 commit ahead of main")"
+assert_eq "...to leave the worktree first (ExitWorktree, keep)" "yes" "$(has "$r" 'ExitWorktree (action "keep")')"
+assert_eq "...then ask for this worktree from the main checkout" "yes" "$(has "$r" "~/.claude/cc-merge.sh request --worktree $WT --summary")"
+assert_eq "...in the background" "yes" "$(has "$r" "in the background")"
+assert_eq "...printed once, as one JSON object" "1" "$(printf '%s\n' "$got" | grep -c .)"
+assert_json "...and the session stays working" "$CC_STATUS_DIR/u1.json" '.status' "working"
+got="$(uev stop "$(ustop u1 "$WT" "$DONE_MSG" '{"stop_hook_active":true}')")"
+assert_eq "never while stop_hook_active (the stop that ends the reminded turn)" "" "$got"
+prompt u1
+got="$(uev stop "$(ustop u1 "$WT" "$DONE_MSG")")"
+assert_eq "once per head sha: the same commit isn't reminded again, even in a new turn" "" "$got"
+work "$WT" "second change"
+prompt u1
+got="$(uev stop "$(ustop u1 "$WT" "Fixed the review note. All green.")")"
+assert_eq "...a new commit that's claimed done is reminded again" "block" "$(decision "$got")"
+assert_eq "...counting every commit ahead" "yes" "$(has "$(reason "$got")" "feat/u1 is 2 commits ahead of main")"
+
+got="$(uev stop "$(ustop u2 "$WT" "Wrote the failing test; next I implement the guard.")")"
+assert_eq "a turn that doesn't claim done isn't reminded" "" "$got"
+got="$(uev stop "$(ustop u3 "$WT" "Not done yet: the docs are left.")")"
+assert_eq "...nor one that says it isn't" "" "$got"
+mkdir -p "$WT/sub"
+got="$(uev stop "$(ustop u4 "$WT/sub" "$DONE_MSG")")"
+assert_eq "a session in a subfolder of the worktree is reminded too" "block" "$(decision "$got")"
+
+# a merge request for this worktree, from any session (a /clear changes the key), in any phase
+reqf someone-else "$WT" requested
+got="$(uev stop "$(ustop u5 "$WT" "$DONE_MSG")")"
+assert_eq "a merge request for this worktree, made by another session key, means no reminder" "" "$got"
+reqf someone-else "$WT" blocked
+got="$(uev stop "$(ustop u5 "$WT" "$DONE_MSG")")"
+assert_eq "...whatever its phase (blocked)" "" "$got"
+reqf someone-else "/Users/x/elsewhere/.claude/worktrees/other" requested
+got="$(uev stop "$(ustop u5 "$WT" "$DONE_MSG")")"
+assert_eq "...but a request for another worktree doesn't count" "block" "$(decision "$got")"
+rm -f "$CC_MERGE_DIR/someone-else.json"
+
+# Adam answered Not yet for this very commit (cc-merge.sh leaves <key>.notyet)
+jq -n --arg w "$WT" --arg c "$COMMON" --arg h "$(git -C "$WT" rev-parse HEAD)" \
+  '{worktree:$w, commonDir:$c, branch:"feat/u1", head:$h, at:1790000000}' > "$CC_MERGE_DIR/asker.notyet"
+got="$(uev stop "$(ustop u6 "$WT" "$DONE_MSG")")"
+assert_eq "a commit Adam answered Not yet for isn't pushed back at him" "" "$got"
+work "$WT" "acted on the note"
+got="$(uev stop "$(ustop u6 "$WT" "$DONE_MSG")")"
+assert_eq "...a commit after the Not yet is reminded" "block" "$(decision "$got")"
+rm -f "$CC_MERGE_DIR/asker.notyet"
+
+got="$(uev stop "$(ustop u7 "$WT" "$DONE_MSG" '{"background_tasks":[{"id":"bash_1","status":"running"}]}')")"
+assert_eq "background work still in flight (background_tasks) means no reminder" "" "$got"
+got="$(uev stop "$(ustop u7 "$WT" "$DONE_MSG" '{"background_tasks":[]}')")"
+assert_eq "...an empty background_tasks doesn't stop it" "block" "$(decision "$got")"
+
+got="$(uev stop "$(ustop u8 "$WT" "Done, all green. Want me to push?")")"
+assert_eq "the question guard goes first: a turn that asks and claims done is sent back for the question only" \
+  "$REASON_TEXT" "$(reason "$got")"
+
+got="$(CC_CONFIG_FILE="$ON" evout stop "$(ustop u9 "$WT" "$DONE_MSG")")"
+assert_eq "off unless stopGuards.unfinished is on" "" "$got"
+got="$(uev stop "$(ustop m1 "$REPO" "$DONE_MSG")")"
+assert_eq "the main checkout is never reminded" "" "$got"
+git -C "$REPO" worktree add -q "$TMP/repo-sib" -b feat/sib
+work "$TMP/repo-sib" "sibling change"
+got="$(uev stop "$(ustop m2 "$TMP/repo-sib" "$DONE_MSG")")"
+assert_eq "a worktree outside .claude/worktrees/ (a sibling folder) isn't a unit tab: no reminder" "" "$got"
+git -C "$REPO" worktree add -q "$REPO/.claude/worktrees/u0" -b feat/u0
+got="$(uev stop "$(ustop m3 "$REPO/.claude/worktrees/u0" "$DONE_MSG")")"
+assert_eq "a unit worktree with no commits ahead of main isn't reminded" "" "$got"
+got="$(uev stop "$(ustop m4 "/Users/x/nowhere/.claude/worktrees/gone" "$DONE_MSG")")"
+assert_eq "...nor a folder that isn't a git checkout" "" "$got"
+
+LED2="$TMP/ledger2"
+printf '{"ledger":{"enabled":true},"stopGuards":{"unfinished":true}}' > "$TMP/ledger-unfinished.json"
+printf '%s' "$(ustop l2 "$WT" "$DONE_MSG")" \
+  | CC_CONFIG_FILE="$TMP/ledger-unfinished.json" CC_LEDGER_DIR="$LED2" bash "$CC" stop >/dev/null 2>&1
+assert_eq "the ledger records the reminder as stop_guard, guard unfinished" "l2 unfinished" \
+  "$(cat "$LED2"/*.jsonl 2>/dev/null | jq -r 'select(.type == "stop_guard") | "\(.key) \(.guard)"')"
+assert_eq "...its once-marker holds the head sha" "$(git -C "$WT" rev-parse HEAD)" "$(cat "$CC_GUARD_DIR/l2.unfinished" 2>/dev/null)"
+
+printf '{}' > "$CC_MERGE_DIR/u1.notyet"
+evout sessionend "$(jq -nc --arg c "$WT" '{session_id:"u1", cwd:$c}')" >/dev/null
+assert_absent "SessionEnd removes the session's reminder marker" "$CC_GUARD_DIR/u1.unfinished"
+assert_absent "...and its Not yet record" "$CC_MERGE_DIR/u1.notyet"
+
+assert_eq "defaults/cc-config.json ships stopGuards.unfinished on" "true" \
+  "$(jq -r '.stopGuards.unfinished' "$ROOT/defaults/cc-config.json" 2>/dev/null)"
+
 finish
