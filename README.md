@@ -123,7 +123,7 @@ every other automatic behaviour here waits for its switch.
   stalls, log it, relabel it, nudge it, continue it or feed its queue.
 - [**Automation dry run & trace**](docs/automation.md#dry-run-and-the-automation-trace): see what
   automation would do, did, or refused and why. [**Hands-off hold**](docs/automation.md#hands-off-hold): stop it for a session, or ❄ freeze the fleet.
-- [**Routines**](docs/automation.md#routines): spawn a session or push a digest on a cron schedule.
+- [**Routines**](docs/automation.md#routines): spawn a session, push a digest, or run a [**Main-green check**](docs/merging-and-batches.md#is-main-still-green-a-scheduled-check) on a cron schedule.
 - [**Coach**](docs/automation.md#the-coach): a read-only Sonnet reads a repo's last 10 sessions and
   suggests `CLAUDE.md` edits with evidence, and auto-memory changes (backed up, with Undo). It runs weekly,
   from a card, or on new evidence (`cc-lesson.sh` files a lesson); remembers what you applied, skipped or

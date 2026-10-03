@@ -221,6 +221,38 @@ at the merge-base** and the review splits the failing lines in two: *already fai
   stays refused, and a batch unit's merge on your grant never goes through on it. Fix main (or
   rebase onto a fixed main) and the gate runs again.
 
+#### Is main still green? A scheduled check
+
+Gates run when a unit asks to merge. Main can still go red between merges: a hand edit, a
+dependency, a clock. A **⏰ Routines** routine with the action **Check main is green**
+(`"action": "gate"`) runs the repo's merge gate on main at the time you set. It is opt-in per
+repo: nothing runs until you add one.
+
+```json
+{ "name": "main green", "kind": "cron", "cron": "0 7 * * *", "action": "gate",
+  "folder": "/path/to/repo", "enabled": true }
+```
+
+- **What runs:** the `merge.gates` entry a session in the repo's main checkout would get (matched on
+  its project key, then its path), or main's own `.worktree-check` with `merge.repoGate` on. No gate
+  means no check, and **Run** says so.
+- **Where:** in the repo's **main checkout**, through the repo's one gate lane. Like gate blame, it
+  waits behind every gate that judges a merge, and one check per repo runs at a time.
+- **On main's commit only:** before the gate starts, the run checks that the main checkout is on
+  `branch` (default `main`) with no uncommitted tracked changes, then prints the sha it tests. A
+  checkout on another branch or with uncommitted edits is **couldn't run**, not red.
+- **Red:** one banner (plus an ntfy push when `escalation.push` is on), an **⚠ main is red** flag on
+  every card of that repo, with the failing lines (or the log's last lines) in its tooltip, and an
+  entry in the [coach](automation.md#the-coach)'s log. Red again on a later run is no new banner.
+- **Green:** the next green run clears the flag.
+- **Never red by accident:** a run that couldn't run (a busy suite, a dirty checkout, another
+  branch) or timed out changes nothing: the flag stays as it was.
+- **Holds:** while the fleet is frozen or a session of that repo is [on hold](automation.md#hands-off-hold),
+  the check is skipped and listed as skipped, not run later. A check still waiting for the lane
+  leaves it when a hold or the freeze comes. **Run** on the board is your own click and runs anyway.
+- **Kept:** each repo's last verdict is in `~/.claude/cc-main-green.json`, so a reload keeps the flag
+  without a second banner. Deleting the repo's last gate routine drops its flag.
+
 ### The claim check: a hint, never a gate
 
 The gate proves the suite is green; it doesn't prove what the session *wrote* is true. The review

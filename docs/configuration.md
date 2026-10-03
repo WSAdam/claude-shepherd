@@ -185,6 +185,7 @@ Everything lives under `~/.claude/`:
 | `cc-agents.json`, `cc-mcp.json`, `cc-mcp-configs/` | Agent profiles, their MCP server registry, and the `--mcp-config` files written for their spawns |
 | `cc-audit/` | A [find-only audit](providers-and-integrations.md#find-only-audit)'s launch files (its findings are in `~/.cc-audit/`, which a purge keeps) |
 | `cc-templates.json`, `cc-prompts/`, `cc-rules.json`, `cc-schedules.json` | Templates, the folder they import from, automation rules, routines |
+| `cc-main-green.json` | Each repo's last [main-green check](merging-and-batches.md#is-main-still-green-a-scheduled-check) verdict, so a reload keeps the card's flag (Shepherd is its only writer) |
 | `cc-ab.json` | A/B compare cohorts |
 | `cc-lock.json` | The screen lock's salted password hash |
 | `cc-exports/` | Exported sessions |

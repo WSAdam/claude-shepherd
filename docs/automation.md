@@ -606,7 +606,7 @@ Every firing is ledgered as `by:"rule"`.
 
 ## Routines
 
-Routines fire the normal spawn or digest effects on a schedule. They are not a second executor, and
+Routines fire the normal spawn or digest effects, or a check that main is green, on a schedule. They are not a second executor, and
 a scheduled spawn still respects `spawn.live`. Manage them on the **⏰ Routines** board (☰ menu),
 which writes `~/.claude/cc-schedules.json`. The board shows each routine's action, schedule and next
 run, with **Run** (now), **Pause / Resume**, **Edit** and **Delete**. New routines are saved paused.
@@ -618,6 +618,10 @@ run, with **Run** (now), **Pause / Resume**, **Edit** and **Delete**. New routin
   prompt.
 - **Push a shift-report digest** pushes a fleet shift report over a window through ntfy (a
   `pushTopic`, or the escalation topic); it needs no folder.
+- **Check main is green** (`"action": "gate"`) runs the repo's merge gate in its main checkout and
+  flags the repo's card when main is red. It takes the repo's `folder` and an optional `branch`
+  (default `main`), spawns nothing, and is skipped while the fleet is frozen or a session of that
+  repo is on hold. See [Is main still green?](merging-and-batches.md#is-main-still-green-a-scheduled-check)
 - The master switch is `schedules.enabled` in `cc-config.json` (default off). While the fleet is
   at `schedules.maxConcurrent`, a recurring run is skipped (it's retried only within its own
   minute) and a once-routine waits. **Run** works while the switch is off. Each firing is ledgered

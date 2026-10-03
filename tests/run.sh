@@ -374,6 +374,12 @@ echo ""
 echo "== lua: gate blame -- a red gate's command again at the merge-base, behind the gates that judge a merge, split into main's failures and the branch's (behavioral, stubbed hs + a real git repo) =="
 HOME="$(mktemp -d)" lua "$DIR/gateblame.test.lua" || fail=1
 echo ""
+echo "== lua: the scheduled main-green check -- a gate routine runs the repo's merge gate in its main checkout, in the gate lane; red raises one banner, a card flag and a coach-log entry, green clears it, couldn't-run never reds, a freeze or a held session stands it down (behavioral, stubbed hs + a real git repo) =="
+HOME="$(mktemp -d)" lua "$DIR/maingreen.test.lua" || fail=1
+echo ""
+echo "== node: a card's main-is-red flag, its failing lines in the tooltip, both escaped (behavioral, runs the shipped mainRedBadge) =="
+node "$DIR/maingreen-badge.test.js" || fail=1
+echo ""
 echo "== bash: tests/run.sh runs just the files it is given (the red-first proof's runner) =="
 bash "$DIR/run-files.test.sh" || fail=1
 echo ""

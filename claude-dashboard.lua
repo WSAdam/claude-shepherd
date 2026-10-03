@@ -5636,6 +5636,8 @@ FX._redFirstCleanups = {} -- scratch path -> the retained task removing a worktr
 FX._gateBlamePlans = {}   -- gate key -> { nonce, due, mergeBase, command, baseKey, err, sig, verdict }
 FX._gateBlameRuns = {}    -- base key (repo|merge-base|command) -> lane record, shared by every unit cut there
 FX._gateBlameWant = {}    -- request nonce -> the gate key whose red gate its review shows now
+-- 2026-10-03 (the main-green check, FX.mainGreenFire): a scheduled gate on main, same lane
+FX._mainGreenRuns = {}    -- common dir -> lane record: one check per repo at a time
 
 -- Claim (or return) the one run for this gate key. `slot` is the table it lives in, so the
 -- pre- and post-merge runs of the same commit can't collide (an ff-merge makes both shas equal).
@@ -5680,6 +5682,14 @@ function FX.mergeGatePump()
       runs[#runs + 1] = rec
       byKey[rec.key] = rec
     end
+  end
+  -- 2026-10-03 (E1b): the scheduled main-green check (FX.mainGreenFire) shares the lane, `low` like
+  -- gate blame: it judges no merge, so a gate that does goes first
+  for gkey, g in pairs(FX._mainGreenRuns) do
+    local rec = { key = "mg|" .. gkey, state = g.state, commonDir = g.commonDir, at = g.at,
+                  slot = FX._mainGreenRuns, gkey = gkey, g = g, low = true }
+    runs[#runs + 1] = rec
+    byKey[rec.key] = rec
   end
   local release, waiting = core.mergeGateReleases(runs)
   -- 2026-09-22: stamp where each gate is in its repo's lane, so a request whose gate has not
@@ -6036,6 +6046,159 @@ function FX.gateBlamePrune(reqs)
       if g.logPath then pcall(os.remove, g.logPath) end
       FX._gateBlameRuns[key] = nil
     end
+  end
+end
+
+-- ---- Main is still green (2026-10-03, mining round 2 unit E1b) ---------------------------------
+-- A routine with action "gate" (cc-schedules.json; opt-in, none by default) runs its repo's merge
+-- gate (core.mainGreenGateFor) in the repo's MAIN checkout through the gate lane, `low`
+-- (FX.mergeGatePump), one check per repo at a time. The routine tick only queues it
+-- (FX._mainGreen.due): FX.stepMainGreen runs after the stacks and holds are stamped, stands it down
+-- for a fleet freeze or a held session of the repo (core.mainGreenHeld: listed, never replayed),
+-- starts it, judges each finished run once (core.mainGreenVerdict) and stamps it.mainRed on every
+-- card of a red repo. Red: ONE banner (plus ntfy when escalation push is on) and a coach-log entry;
+-- the next green clears the flag; couldn't-run and timed-out change nothing. Each repo's record is
+-- kept in ~/.claude/cc-main-green.json, so a reload keeps the flag and doesn't banner it again.
+FX.MAIN_GREEN_FILE = os.getenv("CC_MAIN_GREEN_FILE") or (CLAUDE_DIR .. "/cc-main-green.json")
+FX._mainGreen = { state = nil, due = {} }   -- state: common dir -> record (nil until read); due: routines fired
+
+function FX.mainGreenLoad()
+  if FX._mainGreen.state == nil then
+    FX._mainGreen.state = core.mainGreenPrune(core.parseMainGreen(FX.readFile(FX.MAIN_GREEN_FILE)),
+      core.scheduleList(FX.readSchedules()))
+  end
+  return FX._mainGreen.state
+end
+function FX.mainGreenSave()
+  local ok = FX.writeFileAtomic(FX.MAIN_GREEN_FILE, core.json.encode(FX._mainGreen.state or {}))
+  if not ok then print("[cc-dashboard] ❌ main green: couldn't write " .. FX.MAIN_GREEN_FILE) end
+  return ok
+end
+-- The routines changed (the board): a repo no gate routine checks any more drops its flag.
+function FX.mainGreenPruneTo(routines)
+  local st = FX.mainGreenLoad()
+  local kept, before, after = core.mainGreenPrune(st, routines), 0, 0
+  for _ in pairs(st) do before = before + 1 end
+  for _ in pairs(kept) do after = after + 1 end
+  if after ~= before then
+    FX._mainGreen.state = kept
+    FX.mainGreenSave()
+    print("[cc-dashboard] 🔍 main green: " .. (before - after) .. " repo(s) no gate routine checks any more")
+  end
+end
+
+-- Start (queue) one check for routine `r` -- the board's Run, or a due routine FX.stepMainGreen let
+-- through. Returns the lane record, or nil and why. A check already waiting or running is the one.
+function FX.mainGreenFire(r, cfg, ident)
+  local name = tostring(type(r) == "table" and r.name or "?")
+  if type(r) ~= "table" then return nil, "no routine" end
+  ident = ident or FX.repoIdentity(r.folder)
+  local commonDir = ident and ident.commonDir or nil
+  local root = core.repoMainRoot(commonDir)
+  if not root then
+    print("[cc-dashboard] ⚠️ main green '" .. name .. "': " .. tostring(r.folder) .. " isn't in a git repo with a main checkout")
+    return nil, tostring(r.folder) .. " isn't in a git repo with a main checkout"
+  end
+  local gate = core.mainGreenGateFor(cfg, root)
+  if not gate then
+    print("[cc-dashboard] ⚠️ main green '" .. name .. "': no merge gate is configured for " .. root)
+    return nil, "no merge gate is configured for " .. root .. " (merge.gates, or merge.repoGate)"
+  end
+  local g = FX._mainGreenRuns[commonDir]
+  if g and (g.state == "queued" or g.state == "running") then return g end
+  if g then
+    if g.logPath then pcall(os.remove, g.logPath) end
+    if g.script then pcall(os.remove, g.script) end
+    FX._mainGreenRuns[commonDir] = nil
+  end
+  local branch = r.branch or "main"
+  gate = FX.repoGateFor(FX._mainGreenRuns, commonDir, gate, { commonDir = commonDir, base = branch, branch = branch }, root)
+  if not gate then return nil, branch .. " has no " .. core.REPO_GATE_FILE end
+  if gate.state then return nil, "Shepherd is still reading " .. branch .. "'s " .. core.REPO_GATE_FILE end
+  g = FX.mergeGateStart(FX._mainGreenRuns, commonDir, { command = gate.command,
+    run = core.mainGreenRun(gate.run or gate.command, branch), script = gate.script, why = gate.why,
+    timeoutSeconds = gate.timeoutSeconds or core.MERGE_GATE_TIMEOUT }, root, nil, "main-green check", commonDir)
+  if not g then return nil, "Shepherd couldn't build the run" end
+  g.routine, g.folder, g.branch = r.name, r.folder, branch
+  print("[cc-dashboard] 🚀 main green '" .. name .. "': " .. tostring(gate.command) .. " on " .. branch .. " in " .. root
+    .. " (" .. tostring(g.state) .. ")")
+  return g
+end
+
+-- A finished check's news: the banner and the coach's log on red, a log line otherwise.
+function FX.mainGreenEvent(commonDir, rec, event, g, cfg)
+  local root = core.repoMainRoot(commonDir) or tostring(commonDir)
+  local repo, b = root:match("([^/]+)$") or root, tostring(g.branch or "main")
+  if event == "red" then
+    local first = (tostring(rec and rec.lines or "") .. "\n"):match("^([^\n]*)\n") or ""
+    local text = repo .. ": " .. tostring(g.command) .. " failed on " .. b .. (first ~= "" and (" -- " .. first) or "")
+    print("[cc-dashboard] ❌ main green: " .. text)
+    FX.notify("Claude Shepherd: " .. b .. " is red", text)
+    local topic = tostring(core.config(cfg, "escalation.pushTopic", ""))
+    if core.config(cfg, "escalation.push", false) == true and topic ~= "" then
+      FX.push(topic, "Claude Shepherd: " .. b .. " is red", text)
+    end
+    local okc, errc = pcall(FX.coachNote, commonDir, { kind = "mainred", branch = b, summary = g.command, note = rec and rec.lines,
+      id = "mainred|" .. tostring(commonDir) .. "|" .. tostring(rec and rec.sha or "?") .. "|" .. tostring(rec and rec.at or FX.now()) })
+    if not okc then print("[cc-dashboard] ❌ main green: the coach log write failed: " .. tostring(errc)) end
+  elseif event == "cleared" then
+    print("[cc-dashboard] ✅ main green: " .. repo .. ": " .. b .. " is green again")
+  elseif event == "couldntRun" then
+    print("[cc-dashboard] ⚠️ main green: " .. repo .. ": the check couldn't run (" .. tostring(g.why or g.state)
+      .. ") -- it says nothing about " .. b)
+  else
+    print("[cc-dashboard] " .. ((rec and rec.state == "red") and "❌ main green: " .. repo .. ": " .. b .. " is still red"
+      or "✅ main green: " .. repo .. ": " .. b .. " is green"))
+  end
+end
+
+-- Tick, after the stacks (repoKey) and the holds are stamped.
+function FX.stepMainGreen(list, cfg)
+  local state = FX.mainGreenLoad()
+  local function skip(it, r, scope)
+    FX.holdSkip("schedule", it or { name = r.name }, { summary = "check main is green: routine '" .. tostring(r.name) .. "'",
+      by = "schedule" }, scope)
+  end
+  -- the routines fired this tick: a freeze or a held session of the repo stands each down
+  local due = FX._mainGreen.due
+  FX._mainGreen.due = {}
+  for _, r in ipairs(due) do
+    local ident = FX.repoIdentity(r.folder)
+    local held, scope, who = core.mainGreenHeld(FX._hold.holds, list, ident and ident.commonDir)
+    if held then skip(who, r, scope) else FX.mainGreenFire(r, cfg, ident) end
+  end
+  -- a check still waiting for the lane leaves it when one comes
+  local queued = false
+  for cd, g in pairs(FX._mainGreenRuns) do
+    if g.state == "queued" then
+      local held, scope, who = core.mainGreenHeld(FX._hold.holds, list, cd)
+      if held then
+        skip(who, { name = g.routine }, scope)
+        if g.script then pcall(os.remove, g.script) end
+        FX._mainGreenRuns[cd] = nil
+      else
+        queued = true
+      end
+    end
+  end
+  -- each finished run, judged once; its log goes (the record keeps the failing lines)
+  local changed = false
+  for cd, g in pairs(FX._mainGreenRuns) do
+    if g.doneAt and not g.judged then
+      g.judged = true
+      local rec, event = core.mainGreenVerdict(state[cd], g, FX.now())
+      if rec ~= state[cd] then state[cd] = rec; changed = true end
+      FX.mainGreenEvent(cd, rec, event, g, cfg)
+      if g.logPath then pcall(os.remove, g.logPath); g.logPath = nil end
+      if g.script then pcall(os.remove, g.script); g.script = nil end
+    end
+  end
+  if changed then FX.mainGreenSave() end
+  if queued then FX.mergeGatePump() end
+  -- the flag on every card of a red repo
+  for _, it in ipairs(list or {}) do
+    local rec = (not it.remote and type(it.repoKey) == "string") and state[it.repoKey] or nil
+    it.mainRed = core.mainRedView(rec)
   end
 end
 
@@ -13239,6 +13402,8 @@ local function handleBridgeMsg(msg)
       local on = (payload.text == "true" or payload.text == true)
       FX.writeSchedules(core.scheduleSetEnabled(FX.readSchedules(), tostring(payload.v or ""), on))
     end
+    -- 2026-10-03 (E1b): a repo whose gate routine went keeps no main-is-red flag
+    pcall(FX.mainGreenPruneTo, core.scheduleList(FX.readSchedules()))
     local board = core.scheduleBoard(core.scheduleList(FX.readSchedules()), os.time())
     local lc = loadConfig()
     local sOn = core.config(lc, "schedules.enabled", false) == true
@@ -13268,6 +13433,12 @@ local function handleBridgeMsg(msg)
       else
         pcall(function() FX.alert("Claude Shepherd: no push topic (set escalation.pushTopic)") end)
       end
+    -- 2026-10-03 (E1b): Run on a gate routine checks main now -- Adam's own click, so no hold stands it down
+    elseif r.action == "gate" then
+      local g, why = FX.mainGreenFire(r, cfg)
+      pcall(function() FX.alert(g and ("Claude Shepherd: checking " .. tostring(r.branch or "main") .. " is green ('"
+        .. tostring(r.name) .. "', " .. tostring(g.state) .. ")")
+        or ("Claude Shepherd: '" .. tostring(r.name) .. "' can't check main: " .. tostring(why))) end)
     else
       FX.spawnSession(r.editor or core.config(cfg, "spawn.editor", "terminal"),
         r.folder, r.prompt, r.permMode, r.provider or "")
@@ -15520,6 +15691,10 @@ local HTML = [[
     font-variant-numeric:tabular-nums; white-space:nowrap; vertical-align:middle; }
   /* 2026-09-29: a bad scheduled-tasks lock on the card -- a warning, with the fix in its tooltip */
   .slock-b { display:inline-block; font-size:10px; line-height:14px; margin-left:6px; padding:1px 5px;
+    border-radius:8px; border:1px solid var(--warn); color:var(--warn); cursor:help;
+    white-space:nowrap; vertical-align:middle; }
+  /* 2026-10-03: the repo's main went red on its scheduled check -- a heads-up, the failing lines in its tooltip */
+  .mainred-b { display:inline-block; font-size:10px; line-height:14px; margin-left:6px; padding:1px 5px;
     border-radius:8px; border:1px solid var(--warn); color:var(--warn); cursor:help;
     white-space:nowrap; vertical-align:middle; }
   @keyframes spin { to { transform:rotate(360deg); } }
@@ -17806,6 +17981,7 @@ local HTML = [[
           <select id="rf-action" onchange="routineFormVis()">
             <option value="spawn">Spawn a session</option>
             <option value="digest">Push a shift-report digest</option>
+            <option value="gate">Check main is green (the repo's merge gate)</option>
           </select>
         </label>
         <label>Kind
@@ -17837,9 +18013,10 @@ local HTML = [[
       <label id="rf-at-wrap" style="display:none;">Run at (local, YYYY-MM-DD HH:MM)<input type="text" id="rf-at" placeholder="2026-06-15 14:30" oninput="routineFormSync()"></label>
       <div class="r-grid" id="rf-spawn-fields">
         <label>Folder<input type="text" id="rf-folder" placeholder="/Users/you/Programming/project"></label>
-        <label>Editor
+        <label id="rf-editor-wrap">Editor
           <select id="rf-editor"><option value="">(default)</option><option value="terminal">Terminal</option><option value="kitty">Kitty</option><option value="vscode">VS Code</option><option value="cursor">Cursor</option></select>
         </label>
+        <label id="rf-branch-wrap" style="display:none;">Branch (the main checkout's)<input type="text" id="rf-branch" placeholder="main"></label>
       </div>
       <div class="r-grid" id="rf-spawn-fields2">
         <label>Provider<input type="text" id="rf-provider" placeholder="(default — blank for bare claude)"></label>
@@ -23199,7 +23376,7 @@ local HTML = [[
       var body = document.getElementById("r-body"); body.innerHTML = "";
       if(!ROUTINES.length){
         var e = document.createElement("div"); e.className = "r-empty";
-        e.textContent = "No routines yet. “+ Add routine” schedules a session spawn or a shift-report digest.";
+        e.textContent = "No routines yet. “+ Add routine” schedules a session spawn, a shift-report digest, or a check that main is still green.";
         body.appendChild(e); document.getElementById("r-info").textContent = ""; return;
       }
       ROUTINES.forEach(function(r){
@@ -23211,7 +23388,7 @@ local HTML = [[
         main.appendChild(nm);
         var sub = document.createElement("div"); sub.className = "r-sub";
         var bAct = document.createElement("span"); bAct.className = "r-badge" + (r.action==="digest" ? " digest" : "");
-        bAct.textContent = (r.action === "digest") ? "digest" : "spawn"; sub.appendChild(bAct);
+        bAct.textContent = (r.action === "digest") ? "digest" : (r.action === "gate") ? "main green" : "spawn"; sub.appendChild(bAct);
         var bSch = document.createElement("span"); bSch.className = "r-badge";
         bSch.textContent = (r.kind === "oneShot") ? "once" : (r.human || r.cron || ""); sub.appendChild(bSch);
         var tail = document.createElement("span"); var bits = [];
@@ -23276,8 +23453,10 @@ local HTML = [[
     function routineFormVis(){
       var action = gv("rf-action"), kind = gv("rf-kind"), freq = gv("rf-freq");
       var isDigest = (action === "digest"), isOnce = (kind === "oneShot");
-      show("rf-spawn-fields", !isDigest); show("rf-spawn-fields2", !isDigest);
-      show("rf-prompt-wrap", !isDigest); show("rf-digest-wrap", isDigest);
+      var isGate = (action === "gate");   // 2026-10-03: the repo's folder and branch, nothing to spawn
+      show("rf-spawn-fields", !isDigest); show("rf-spawn-fields2", !isDigest && !isGate);
+      show("rf-editor-wrap", !isGate); show("rf-branch-wrap", isGate);
+      show("rf-prompt-wrap", !isDigest && !isGate); show("rf-digest-wrap", isDigest);
       show("rf-cron-wrap", !isOnce); show("rf-at-wrap", isOnce);
       // cron sub-fields by freq
       show("rf-every-wrap", freq === "minute");
@@ -23330,7 +23509,7 @@ local HTML = [[
       sv("rf-freq","day"); sv("rf-every","5"); sv("rf-hour","9"); sv("rf-min","0"); sv("rf-dom","1");
       sv("rf-cron-raw","0 9 * * *"); sv("rf-at","");
       sv("rf-folder",""); sv("rf-editor",""); sv("rf-provider",""); sv("rf-permmode","");
-      sv("rf-prompt",""); sv("rf-digesthours","24"); sv("rf-pushtopic","");
+      sv("rf-prompt",""); sv("rf-digesthours","24"); sv("rf-pushtopic",""); sv("rf-branch","");
     }
     function routineNew(){ rfEditing = null; routineFormReset(); routineFormShow(); }
     function routineCancel(){ routineFormHide(); }
@@ -23340,7 +23519,7 @@ local HTML = [[
       sv("rf-folder", r.folder || ""); sv("rf-editor", r.editor || "");
       sv("rf-provider", r.provider || ""); sv("rf-permmode", r.permMode || "");
       sv("rf-prompt", r.prompt || ""); if(r.digestHours) sv("rf-digesthours", r.digestHours);
-      sv("rf-pushtopic", r.pushTopic || "");
+      sv("rf-pushtopic", r.pushTopic || ""); sv("rf-branch", r.branch || "");
       // raw cron is the source of truth on save; pickers are best-effort decompose
       if(r.kind === "cron" && r.cron){ sv("rf-cron-raw", r.cron); decomposeCron(r.cron); }
       if(r.kind === "oneShot" && r.at) sv("rf-at", epochToLocal(r.at));
@@ -23388,6 +23567,14 @@ local HTML = [[
         rec.digestHours = parseInt(gv("rf-digesthours"),10) || 24;
         var pt = gv("rf-pushtopic").trim();
         if(pt) rec.pushTopic = pt; else delete rec.pushTopic;  // a cleared field clears it
+      } else if(action === "gate"){
+        // 2026-10-03: check main is green -- the repo's folder and (optionally) its main branch
+        delete rec.pushTopic;
+        var gf = gv("rf-folder").trim();
+        if(!gf){ alert("A main-green check needs the repo's folder."); return; }
+        rec.folder = gf;
+        var br = gv("rf-branch").trim();
+        if(br) rec.branch = br;
       } else {
         delete rec.pushTopic;  // spawn routines don't push
         var folder = gv("rf-folder").trim();
@@ -25684,6 +25871,7 @@ local HTML = [[
       b += ticketBadge(it);    // 2026-09-29: cross-repo tickets no session here can take
       b += coachBadge(it);     // 2026-09-29: the coach's CLAUDE.md suggestions for this repo
       b += schedLockBadge(it); // 2026-09-29: a dead, committed or foreign scheduled-tasks lock
+      b += mainRedBadge(it);   // 2026-10-03: the repo's scheduled main-green check found main red
       return b ? '<span class="badges">'+b+'</span>' : "";
     }
     // 2026-09-29: the coach (build program unit 32) -- CLAUDE.md suggestions waiting for this card's
@@ -25749,6 +25937,14 @@ local HTML = [[
       var sl = it && it.schedLock;
       if(!sl || typeof sl !== "object" || !sl.label) return "";
       return '<span class="slock-b" title="'+esc(sl.tip || "")+'">'+esc(sl.label)+'</span>';
+    }
+    // 2026-10-03: main is red (mining round 2 unit E1b) -- the repo's scheduled main-green check last ran
+    // red (it.mainRed, FX.stepMainGreen / core.mainRedView); its next green run clears it. The tooltip
+    // carries the failing lines, the runner's own output, so label and tooltip both go through esc().
+    function mainRedBadge(it){
+      var mr = it && it.mainRed;
+      if(!mr || typeof mr !== "object" || !mr.label) return "";
+      return '<span class="mainred-b" title="'+esc(mr.tip || "")+'">'+esc(mr.label)+'</span>';
     }
     // 2026-09-29: pinned links (build program unit 31) -- up to 8 links the session pinned with
     // cc-pin.sh (it.pins, FX.stepPins). A session wrote every label and link, so both go through
@@ -27460,6 +27656,15 @@ function FX._refreshBody()
           if ledgerOn then ledgerFor({ name = r.name },
             { type = "schedule_fire", routine = r.name, kind = r.kind, action = "digest" }) end
           sstate = core.scheduleMarkFired(sstate, r.name, os.time())
+        -- 2026-10-03 (E1b): a gate routine checks main is still green. It spawns nothing, so no
+        -- backpressure; FX.stepMainGreen starts it once the cards carry their repo and hold (a
+        -- freeze or a held session of the repo stands it down there, listed)
+        elseif r.action == "gate" then
+          print("[cc-sched] firing main-green routine '" .. tostring(r.name) .. "'")
+          table.insert(FX._mainGreen.due, r)
+          if ledgerOn then ledgerFor({ name = r.name, projectKey = r.folder, cwd = r.folder },
+            { type = "schedule_fire", routine = r.name, kind = r.kind, action = "gate" }) end
+          sstate = core.scheduleMarkFired(sstate, r.name, os.time())
         elseif core.scheduleBackpressure(liveCount, cap) then
           print("[cc-sched] backpressure (" .. liveCount .. "/" .. cap .. "): deferring '" .. tostring(r.name) .. "'")
         -- 2026-10-03 (D2): a frozen fleet spawns nothing: skipped and listed, and marked fired so the
@@ -27719,6 +27924,12 @@ function FX._refreshBody()
   do
     local okh, errh = pcall(FX.annotateHolds, list)
     if not okh then print("[cc-dashboard] ❌ hold stamp failed: " .. tostring(errh)) end
+  end
+  -- 2026-10-03 (E1b): the scheduled main-green check -- after the holds (a freeze or a held session of
+  -- the repo stands it down) and the stacks (each card's repo, for the main-is-red flag)
+  do
+    local okg, errg = pcall(FX.stepMainGreen, list, cfg)
+    if not okg then print("[cc-dashboard] ❌ main-green step failed: " .. tostring(errg)) end
   end
   -- resume at the usage limit's reset (2026-09-29): plan new arms, type or flag the ones due
   do

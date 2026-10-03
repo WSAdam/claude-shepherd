@@ -44,6 +44,7 @@ const lib = new Function(
   "function holdBadge(){ return ''; }\n" +   // 2026-10-03: the hands-off hold's badge joined the row
   "function bgBadge(){ return ''; } function notesBadge(){ return ''; } function pinChipsHtml(){ return ''; }\n" +
   "function ticketBadge(){ return ''; } function coachBadge(){ return ''; } function schedLockBadge(){ return ''; }\n" +
+  "function mainRedBadge(){ return ''; }\n" +   // 2026-10-03: the main-green check's flag joined the row
   escSrc + "\n" + titleSrc + "\n" + badgeSrc + "\n" + badgesSrc +
   "\nreturn { leaseBadge, badgesHtml };")();
 

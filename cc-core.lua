@@ -17548,7 +17548,8 @@ M.COACH = {
 M.COACH_FILE = "CLAUDE.md"
 M.COACH_DAYS = { sun = 1, mon = 2, tue = 3, wed = 4, thu = 5, fri = 6, sat = 7 }
 -- learned (2026-10-03): a one-line lesson a session filed with cc-lesson.sh
-M.COACH_LOG_KINDS = { notyet = true, blocked = true, checker = true, learned = true }
+-- mainred (2026-10-03, E1b): the scheduled main-green check found the repo's main red
+M.COACH_LOG_KINDS = { notyet = true, blocked = true, checker = true, learned = true, mainred = true }
 M.COACH_TRIGGERS = { weekly = true, card = true, evidence = true }
 M.COACH_VERDICTS = { proposals = true, none = true, couldntRun = true }
 M.COACH_CHECK_VERDICTS = { working = true, ["still-seen"] = true, ["no-data"] = true }
@@ -17796,6 +17797,8 @@ do
       if e.kind == "notyet" then lines = { "- " .. who .. "Not yet — " .. tostring(e.note or "") }
       elseif e.kind == "blocked" then lines = { "- " .. who .. "blocked — " .. tostring(e.note or "") }
       elseif e.kind == "learned" then lines = { "- " .. who .. "lesson filed — " .. tostring(e.note or "") }
+      elseif e.kind == "mainred" then
+        lines = { "- " .. who .. "main went red — " .. tostring(e.summary or "the merge gate") .. ": " .. tostring(e.note or "") }
       else
         lines = { "- " .. who .. "checker " .. tostring(e.verdict or "?") .. " — " .. tostring(e.summary or "") }
         for _, fd in ipairs(type(e.findings) == "table" and e.findings or {}) do
@@ -20315,8 +20318,10 @@ M.SCHEDULE_CAP = 50
 M.SCHEDULE_FIELDS = { name = true, kind = true, cron = true, at = true, folder = true,
   editor = true, provider = true, model = true, permMode = true, prompt = true,
   templateRef = true, agentRef = true, enabled = true, tags = true, lastFiredAt = true,
-  action = true, digestHours = true, pushTopic = true }
-M.SCHEDULE_ACTIONS = { spawn = true, digest = true }
+  action = true, digestHours = true, pushTopic = true, branch = true }
+-- 2026-10-03 (E1b): `gate` runs the repo's merge gate on main in its main checkout (M.mainGreenRun);
+-- `branch` (optional, default "main") is the branch that checkout must be on
+M.SCHEDULE_ACTIONS = { spawn = true, digest = true, gate = true }
 
 local function slist(state)
   if type(state) == "table" and type(state.schedules) == "table" then return state.schedules end
@@ -20454,10 +20459,15 @@ function M.validateSchedule(rec)
     errs[#errs + 1] = "oneShot needs an `at` epoch"
   end
   local action = rec.action == nil and "spawn" or tostring(rec.action)
-  if not M.SCHEDULE_ACTIONS[action] then errs[#errs + 1] = "action must be spawn or digest" end
-  -- a `spawn` routine needs a folder; a `digest` routine doesn't (it pushes a report)
+  if not M.SCHEDULE_ACTIONS[action] then errs[#errs + 1] = "action must be spawn, digest or gate" end
+  -- a `spawn` routine needs a folder, and so does a `gate` one (its repo); a `digest` routine doesn't
+  -- (it pushes a report)
   if action ~= "digest" and agTrim(rec.folder) == "" then
     errs[#errs + 1] = "missing required field: folder"
+  end
+  -- it reaches a shell line (M.mainGreenRun): a plain ref name only
+  if rec.branch ~= nil and not mergeRefOk(rec.branch) then
+    errs[#errs + 1] = "branch must be a plain branch name"
   end
   for k in pairs(rec) do
     if not M.SCHEDULE_FIELDS[k] then errs[#errs + 1] = "unknown field: " .. tostring(k) end
@@ -20475,8 +20485,11 @@ local function scheduleNorm(rec)
     enabled = rec.enabled == true,  -- default OFF (a routine must be explicitly enabled)
     tags = type(rec.tags) == "table" and rec.tags or nil,
     lastFiredAt = tonumber(rec.lastFiredAt),
-    action = (rec.action == "digest") and "digest" or "spawn",  -- default: spawn a session
+    -- default: spawn a session. 2026-10-03: a gate routine stays one -- read as a spawn, it would
+    -- start a session in the repo instead of checking main
+    action = (rec.action == "digest" or rec.action == "gate") and rec.action or "spawn",
     digestHours = tonumber(rec.digestHours), pushTopic = tplStr(rec.pushTopic),
+    branch = tplStr(rec.branch),
   }
 end
 
@@ -20643,6 +20656,143 @@ function M.scheduleBoard(list, now)
       row.nextRunAt = M.nextRunAt(s.cron, now)
     end
     out[#out + 1] = row
+  end
+  return out
+end
+
+-- ---- Main is still green (2026-10-03, mining round 2 unit E1b) ---------------------------------
+-- A routine with action "gate" runs its repo's merge gate (M.mainGreenGateFor: the merge.gates entry
+-- a session in the main checkout gets, or main's own .worktree-check) in the repo's MAIN checkout,
+-- through the one gate lane per repo, behind every run that judges a merge. M.mainGreenRun first
+-- checks that checkout is on its branch with no uncommitted tracked changes -- otherwise it isn't
+-- main's commit under test, and the run is couldn't-run -- then prints the sha it tests.
+-- M.mainGreenVerdict folds a finished run into the repo's record: red once (one banner, one coach-log
+-- entry), red again quietly, and the next green clears it; a run that couldn't run or timed out says
+-- nothing about main and changes nothing. Opt-in: nothing runs until Adam adds a gate routine. A
+-- fleet freeze or a held session of the repo stands it down (M.mainGreenHeld).
+M.MAIN_GREEN_SHA_TAG = "@@main-sha"
+M.MAIN_GREEN_LINES = 12          -- failing lines kept on the record (and the card's tooltip)
+M.MAIN_GREEN_TAIL_LINES = 8      -- ...or, when none matches a failure shape, the log's last lines
+M.MAIN_GREEN_LINE_CHARS = 2000
+
+-- The gate to run: a merge.gates entry matched on the main checkout's Claude project key (what a
+-- session there carries), then on its path; with neither, merge.repoGate's main .worktree-check.
+function M.mainGreenGateFor(cfg, mainRoot)
+  if type(mainRoot) ~= "string" or mainRoot == "" then return nil end
+  local enc = M.encodeProjectPath(mainRoot)
+  local a = enc and M.mergeGateFor(cfg, { projectKey = enc }) or nil
+  if a and not a.repo then return a end
+  local b = M.mergeGateFor(cfg, { projectKey = mainRoot })
+  if b and not b.repo then return b end
+  return a or b
+end
+
+-- The shell line the lane runs in the main checkout (M.mergeGateCmd wraps it): refuse -- as
+-- couldn't-run, never red -- a checkout on another branch or with uncommitted tracked changes,
+-- print the sha under test, then run the gate's own line.
+function M.mainGreenRun(run, branch)
+  if type(run) ~= "string" or run == "" then return nil end
+  if not mergeRefOk(branch) then branch = "main" end
+  local no, code = M.GATE_NORUN_TOKEN, M.TEST_LOCK_EXIT
+  return 'b=$(git symbolic-ref --short -q HEAD); '
+    .. '[ "$b" = "' .. branch .. '" ] || { echo "' .. no .. ': the main checkout is on ${b:-a detached HEAD}, not '
+    .. branch .. '"; exit ' .. code .. '; }; '
+    .. '[ -z "$(git status --porcelain --untracked-files=no 2>/dev/null)" ] || { echo "' .. no
+    .. ': the main checkout has uncommitted changes, so it is not ' .. branch .. '\'s commit under test"; exit ' .. code .. '; }; '
+    .. 'echo "' .. M.MAIN_GREEN_SHA_TAG .. ' $(git rev-parse HEAD)"; ' .. run
+end
+
+-- The sha the run said it tested, or nil.
+function M.mainGreenSha(output)
+  if type(output) ~= "string" then return nil end
+  local s, tag = "\n" .. output, "\n" .. M.MAIN_GREEN_SHA_TAG .. " "
+  local at = s:find(tag, 1, true)
+  if not at then return nil end
+  local sha = s:match("^(%x+)", at + #tag)
+  return (sha and #sha >= 7) and sha or nil
+end
+
+-- A finished lane run -> (the repo's new record, event). event: "red" (newly red: the banner and the
+-- coach-log entry), "cleared" (red -> green), "couldntRun" (the record is `prev`, untouched), nil.
+function M.mainGreenVerdict(prev, g, now)
+  if type(prev) ~= "table" then prev = nil end
+  if type(g) ~= "table" or (g.state ~= "passed" and g.state ~= "failed") then return prev, "couldntRun" end
+  local out = type(g.output) == "string" and g.output or ""
+  local wasRed = prev ~= nil and prev.state == "red"
+  local rec = { sha = M.mainGreenSha(out), branch = g.branch or "main", command = g.command,
+                at = tonumber(now) or 0, routine = g.routine, folder = g.folder }
+  if g.state == "passed" then
+    rec.state = "green"
+    return rec, wasRed and "cleared" or nil
+  end
+  rec.state = "red"
+  local lines = M.gateFailureLines(out, M.MAIN_GREEN_LINES)
+  if lines == "" then
+    -- nothing shaped like a failing test (a lint, a build): the log's last lines, without the sha's
+    local kept, pos, tag = {}, 1, M.MAIN_GREEN_SHA_TAG
+    while pos <= #out do
+      local nl = out:find("\n", pos, true)
+      local line = out:sub(pos, (nl or #out + 1) - 1)
+      if line:sub(1, #tag) ~= tag then kept[#kept + 1] = line end
+      pos = (nl or #out) + 1
+    end
+    lines = M.lastLines(table.concat(kept, "\n"), M.MAIN_GREEN_TAIL_LINES)
+  end
+  rec.lines = capChars(lines, M.MAIN_GREEN_LINE_CHARS)
+  rec.since = wasRed and (tonumber(prev.since) or tonumber(prev.at) or rec.at) or rec.at
+  return rec, (not wasRed) and "red" or nil
+end
+
+-- The card's flag for a repo's record: { label, tip } while it is red, else nil.
+function M.mainRedView(rec)
+  if type(rec) ~= "table" or rec.state ~= "red" then return nil end
+  local b = tostring(rec.branch or "main")
+  local sha = type(rec.sha) == "string" and rec.sha:sub(1, 7) or nil
+  local tip = b .. " is red" .. (sha and (" at " .. sha) or "") .. ": " .. tostring(rec.command or "the merge gate") .. " failed"
+  if tonumber(rec.at) then tip = tip .. " (" .. os.date("%Y-%m-%d %H:%M", tonumber(rec.at)) .. ")" end
+  if type(rec.lines) == "string" and rec.lines ~= "" then tip = tip .. "\n" .. rec.lines end
+  if tonumber(rec.since) and tonumber(rec.at) and tonumber(rec.since) < tonumber(rec.at) then
+    tip = tip .. "\nRed since " .. os.date("%Y-%m-%d %H:%M", tonumber(rec.since))
+  end
+  tip = tip .. "\nChecked in the main checkout by the routine '" .. tostring(rec.routine or "?")
+    .. "'; the flag clears on its next green run."
+  return { label = "⚠ " .. b .. " is red", tip = tip }
+end
+
+-- Does a hold stand the check down? The fleet freeze, or any session of the repo (a tile whose
+-- repoKey is its common dir) on hold. true + scope ("fleet"/"session") + the held tile, or false.
+function M.mainGreenHeld(holds, tiles, commonDir)
+  if type(holds) ~= "table" then return false end
+  if holds.fleet == true then return true, "fleet", nil end
+  if type(commonDir) ~= "string" or commonDir == "" then return false end
+  for _, it in ipairs(type(tiles) == "table" and tiles or {}) do
+    if type(it) == "table" and not it.remote and it.repoKey == commonDir and M.holdOf(holds, it) == "session" then
+      return true, "session", it
+    end
+  end
+  return false
+end
+
+-- A repo no gate routine checks any more keeps no flag: records whose routine folder is gone drop.
+function M.mainGreenPrune(state, routines)
+  local keep, out = {}, {}
+  for _, r in ipairs(type(routines) == "table" and routines or {}) do
+    if type(r) == "table" and r.action == "gate" and type(r.folder) == "string" then keep[r.folder] = true end
+  end
+  for cd, rec in pairs(type(state) == "table" and state or {}) do
+    if type(rec) == "table" and keep[rec.folder] then out[cd] = rec end
+  end
+  return out
+end
+
+-- ~/.claude/cc-main-green.json = { [commonDir] = record }; garbled or missing -> {}.
+function M.parseMainGreen(raw)
+  local out = {}
+  if type(raw) ~= "string" or raw == "" then return out end
+  local ok, t = pcall(M.json.decode, raw)
+  if not ok or type(t) ~= "table" then return out end
+  for cd, rec in pairs(t) do
+    if type(cd) == "string" and type(rec) == "table" and (rec.state == "red" or rec.state == "green") then out[cd] = rec end
   end
   return out
 end
@@ -23927,6 +24077,9 @@ M.FEATURES = {
   { key = "gateblame", cat = "Control", new = true, title = "Gate blame",
     what = "When a merge's test gate goes red, Shepherd runs the same gate on a scratch worktree at the merge-base (once per merge-base, behind any gate that judges a merge), and the review splits the failing lines: already failing on main, or new in this branch. It's information only: a red gate stays red, and a run on main that couldn't finish counts on neither side.",
     why = "A unit cut from a red main no longer takes the blame for main's failures, and a real regression isn't waved off as old." },
+  { key = "maingreen", cat = "Control", new = true, title = "Main-green check",
+    what = "A routine with the action \"Check main is green\" runs a repo's merge gate in its main checkout at the time you set, in the repo's gate lane behind any merge. When main goes red you get one banner, the repo's card shows ⚠ main is red with the failing lines in its tooltip, and the coach's log notes it; the next green run clears the flag. A run that couldn't run (uncommitted changes, another branch checked out, a busy suite) or timed out never counts as red, and a fleet freeze or a held session of the repo skips it.",
+    why = "A main that broke between merges is caught on your schedule, not by the next unit's red gate." },
   { key = "reqs", cat = "Control", new = true, title = "Requirement ids and merge receipts",
     what = "A Requirements tab (for a session in a git repo) lists the repo's requirements and adds one with a title and a source; Shepherd mints its id -- REQ-001, REQ-002... per repo, never reused -- in ~/.claude/cc-reqs.json. Every merge review carries a receipt: the source (the batch, the REQ ids the request names, or the session's first prompt), the requester's words, the tests it changed by layer, the gate, red-first and checker evidence, and the known issues from cc-merge.sh request --known-issues. The receipt is display only.",
     why = "Each merge answers what was asked and what proves it's done, in one place, against an id that outlives the chat." },

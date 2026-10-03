@@ -5256,5 +5256,28 @@ do
         and src:find("low = (slot == FX._gateBlameRuns) or nil", 1, true) ~= nil)
 end
 
+-- ---- Main is still green: a scheduled gate on main flags the repo's card (2026-10-03, mining round 2 E1b) ----
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  check("main green: the card's badges row shows the main-is-red flag", src:find("b += mainRedBadge(it);", 1, true) ~= nil)
+  local badge = src:match("\n    function mainRedBadge%(it%)%{.-\n    %}\n") or ""
+  check("main green: the flag's label and tooltip (the runner's failing lines) go through esc()",
+        badge:find("esc(mr.tip", 1, true) ~= nil and badge:find("esc(mr.label)", 1, true) ~= nil)
+  local css = ""
+  for rule in src:gmatch("%.mainred%-b[^{]*{[^}]*}") do css = css .. rule end
+  check("main green: the flag is a heads-up colour, never the danger red", css ~= "" and not css:find("--danger", 1, true))
+  check("main green: the tick stamps the flag after the holds (it reads them) and the stacks (repoKey)",
+        (src:find("pcall(FX.annotateHolds, list)", 1, true) or 1e9) < (src:find("pcall(FX.stepMainGreen, list, cfg)", 1, true) or 0))
+  check("main green: its runs go in the gate lane as `low`",
+        src:find("slot = FX._mainGreenRuns, gkey = gkey, g = g, low = true", 1, true) ~= nil)
+  check("main green: the routine form offers the gate action",
+        src:find('<option value="gate">', 1, true) ~= nil)
+  local runNow = src:match('if a == "schedule%-run%-now" then.-\n    return\n  end') or ""
+  check("main green: Run on a gate routine runs the check, never a spawn",
+        runNow:find('r.action == "gate"', 1, true) ~= nil and runNow:find("FX.mainGreenFire(", 1, true) ~= nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

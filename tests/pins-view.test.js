@@ -48,6 +48,7 @@ const lib = new Function("sent", "stubs",
   "function holdBadge(){ return ''; }\n" +   // 2026-10-03: the hands-off hold's badge joined the row
   "function bgBadge(){ return ''; } function notesBadge(){ return ''; } function leaseBadge(){ return ''; }\n" +
   "function ticketBadge(){ return ''; } function coachBadge(){ return ''; } function schedLockBadge(){ return ''; }\n" +
+  "function mainRedBadge(){ return ''; }\n" +   // 2026-10-03: the main-green check's flag joined the row
   escSrc + "\n" + chipsSrc + "\n" + openSrc + "\n" + badgesSrc +
   "\nreturn { pinChipsHtml, openPin, badgesHtml, setSel: function(k){ selectedKey = k; } };")(sent, { selectedKey: null });
 

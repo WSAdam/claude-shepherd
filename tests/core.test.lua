@@ -8479,8 +8479,10 @@ do
   -- 2026-10-03: 51 -> 52 for lessons learned in 2+ repos going to the global CLAUDE.md ("coachglobal", flagged new).
   -- 2026-10-03: 52 -> 53 for gate blame ("gateblame", flagged new).
   -- 2026-10-03: 53 -> 54 for the main moved notice ("mainmoved", flagged new).
-  eq("FEATURES: the 54 new features are flagged", newCount, 54)
+  -- 2026-10-03: 54 -> 55 for the scheduled main-green check ("maingreen", flagged new).
+  eq("FEATURES: the 55 new features are flagged", newCount, 55)
   check("FEATURES: lists the main moved notice", keys.mainmoved == true)
+  check("FEATURES: lists the main-green check", keys.maingreen == true)
   check("FEATURES: lists the coach across repos", keys.coachglobal == true)
   check("FEATURES: lists checking \"done\" against the diff", keys.fakedone == true)
   check("FEATURES: lists the unfinished-unit reminder", keys.unfinished == true)
@@ -14984,6 +14986,112 @@ do
   local fk = {}; for _, ft in ipairs(core.FEATURES) do fk[ft.key] = ft end
   check("gateblame: FEATURES lists gate blame, flagged new", fk.gateblame ~= nil and fk.gateblame.new == true
         and fk.gateblame.title == "Gate blame")
+end
+
+-- ---- Main is still green: a scheduled gate on main (2026-10-03, mining round 2 E1b) ----
+do
+  -- the schedule action
+  local g = { name = "main-green", kind = "cron", cron = "0 7 * * *", action = "gate", folder = "/r/A" }
+  eq("vsched: a gate routine with a folder is valid", core.validateSchedule(g).ok, true)
+  local noFolder = core.validateSchedule({ name = "g", kind = "cron", cron = "0 7 * * *", action = "gate" })
+  check("vsched: a gate routine needs the repo's folder", noFolder.ok == false
+        and table.concat(noFolder.errors, ";"):find("folder", 1, true) ~= nil)
+  local bad = core.validateSchedule({ name = "g", kind = "cron", cron = "0 7 * * *", folder = "/p", action = "boom" })
+  check("vsched: a bad action names gate among the choices", bad.ok == false
+        and table.concat(bad.errors, ";"):find("gate", 1, true) ~= nil)
+  eq("sched: a gate routine stays a gate routine (never normalized to a spawn)", core.scheduleList({ schedules = { g } })[1].action, "gate")
+  eq("vsched: a gate routine may name its branch",
+     core.validateSchedule({ name = "g", kind = "cron", cron = "0 7 * * *", action = "gate", folder = "/p", branch = "master" }).ok, true)
+  eq("sched: ...which rides through the load",
+     core.scheduleList({ schedules = { { name = "g", kind = "cron", cron = "0 7 * * *", action = "gate", folder = "/p", branch = "master" } } })[1].branch, "master")
+  eq("vsched: a branch that isn't a plain ref name is refused",
+     core.validateSchedule({ name = "g", kind = "cron", cron = "0 7 * * *", action = "gate", folder = "/p", branch = "main; rm x" }).ok, false)
+
+  -- which gate: the repo's merge gate, matched like a main-checkout session's
+  local cfg = { merge = { gates = {
+    { match = { project = "*other*" }, command = "OTHER" },
+    { match = { project = "*claude-instance-manager*" }, command = "make lint && make test", timeoutSeconds = 1800 },
+    { match = { project = "/Users/a/plain/*" }, command = "PLAIN" },
+  } } }
+  local gt = core.mainGreenGateFor(cfg, "/Users/a/Programming/claude-instance-manager")
+  check("mainGreenGateFor: the repo's merge gate, matched on its Claude project key",
+        gt and gt.command == "make lint && make test" and gt.timeoutSeconds == 1800)
+  gt = core.mainGreenGateFor(cfg, "/Users/a/plain/repo")
+  check("mainGreenGateFor: ...or on the main checkout's path", gt and gt.command == "PLAIN")
+  eq("mainGreenGateFor: a repo with no gate gets none", core.mainGreenGateFor(cfg, "/Users/a/nogate"), nil)
+  gt = core.mainGreenGateFor({ merge = { repoGate = true } }, "/Users/a/nogate")
+  check("mainGreenGateFor: merge.repoGate on -> main's own .worktree-check", gt and gt.repo == true)
+
+  -- the run line refuses a main checkout that isn't main's commit: couldn't-run, never red
+  local line = core.mainGreenRun("make test", "main")
+  check("mainGreenRun: checks the branch, then a clean tree, then says the sha, then runs the gate",
+        line and line:find("symbolic-ref", 1, true) and line:find("status --porcelain --untracked-files=no", 1, true)
+        and line:find(core.GATE_NORUN_TOKEN, 1, true) and line:find("exit " .. core.TEST_LOCK_EXIT, 1, true)
+        and line:sub(-#"make test") == "make test")
+  eq("mainGreenRun: no run, no line", core.mainGreenRun(nil, "main"), nil)
+  eq("mainGreenSha: reads the sha the run printed",
+     core.mainGreenSha("@@main-sha " .. string.rep("a", 40) .. "\nok   - x\n"), string.rep("a", 40))
+  eq("mainGreenSha: none printed -> nil", core.mainGreenSha("FAIL - x\n"), nil)
+
+  -- the verdict: red once, still red quietly, green clears; couldn't run says nothing
+  local SHA = string.rep("b", 40)
+  local RED = "@@main-sha " .. SHA .. "\n== suite: core ==\nok   - one\nFAIL - two\n-- core.test.lua: 2 run, 1 failed --\n"
+  local run = { state = "failed", code = 2, output = RED, command = "make test", branch = "main", routine = "mg", folder = "/r/A" }
+  local rec, ev = core.mainGreenVerdict(nil, run, 1000)
+  check("mainGreenVerdict: a failed run turns the repo red  (" .. tostring(ev) .. ")", rec and rec.state == "red" and ev == "red")
+  check("mainGreenVerdict: ...with the failing lines, the sha and the command",
+        rec.lines == "FAIL - two\n-- core.test.lua: 2 run, 1 failed --" and rec.sha == SHA and rec.command == "make test"
+        and rec.branch == "main" and rec.at == 1000 and rec.since == 1000 and rec.folder == "/r/A")
+  local rec2, ev2 = core.mainGreenVerdict(rec, run, 2000)
+  check("mainGreenVerdict: red again is no new event (one banner)  (" .. tostring(ev2) .. ")",
+        rec2.state == "red" and ev2 == nil and rec2.since == 1000 and rec2.at == 2000)
+  local rec3, ev3 = core.mainGreenVerdict(rec2, { state = "couldntRun", code = 9, output = "CC_TEST_SUITE_LOCKED\n" }, 3000)
+  check("mainGreenVerdict: couldn't run leaves the flag as it was", rec3 == rec2 and ev3 == "couldntRun")
+  local rec4, ev4 = core.mainGreenVerdict(rec2, { state = "timedOut", output = "" }, 3000)
+  check("mainGreenVerdict: ...and so does a timeout: it proves nothing about main", rec4 == rec2 and ev4 == "couldntRun")
+  local nr, nev = core.mainGreenVerdict(nil, { state = "couldntRun", output = "CC_GATE_CANNOT_RUN: dirty\n" }, 3000)
+  check("mainGreenVerdict: a first run that couldn't run is never red", nr == nil and nev == "couldntRun")
+  local green, gev = core.mainGreenVerdict(rec2, { state = "passed", code = 0, output = "@@main-sha " .. SHA .. "\n",
+    command = "make test", branch = "main", routine = "mg", folder = "/r/A" }, 4000)
+  check("mainGreenVerdict: the next green clears it  (" .. tostring(gev) .. ")", green.state == "green" and gev == "cleared" and green.lines == nil)
+  local _, gev2 = core.mainGreenVerdict(green, { state = "passed", code = 0, output = "" }, 5000)
+  eq("mainGreenVerdict: green again is no event", gev2, nil)
+  local lint = core.mainGreenVerdict(nil, { state = "failed", code = 2, output = "@@main-sha " .. SHA .. "\nluacheck: 1 warning\nmake: *** [lint] Error 1\n" }, 1)
+  check("mainGreenVerdict: a red that names no failing test still shows its last lines",
+        lint.state == "red" and lint.lines:find("Error 1", 1, true) ~= nil and not lint.lines:find("@@main-sha", 1, true))
+
+  -- the card's flag
+  eq("mainRedView: a green repo has no flag", core.mainRedView(green), nil)
+  eq("mainRedView: nor an unknown one", core.mainRedView(nil), nil)
+  local view = core.mainRedView(rec2)
+  check("mainRedView: a red repo's flag says so, and its tooltip carries the failing lines",
+        view and view.label:find("main is red", 1, true) and view.tip:find("FAIL - two", 1, true)
+        and view.tip:find(SHA:sub(1, 7), 1, true) and view.tip:find("make test", 1, true))
+
+  -- a hold on the repo, or the freeze, stands it down
+  local tiles = { { key = "a1", repoKey = "/r/A/.git", session_pid = "11" }, { key = "b1", repoKey = "/r/B/.git", session_pid = "22" } }
+  eq("mainGreenHeld: nothing held", core.mainGreenHeld({ fleet = false, ids = {} }, tiles, "/r/A/.git"), false)
+  local h, scope = core.mainGreenHeld({ fleet = true, ids = {} }, tiles, "/r/A/.git")
+  check("mainGreenHeld: the fleet freeze", h == true and scope == "fleet")
+  local h2, scope2, who = core.mainGreenHeld({ fleet = false, ids = { ["11"] = true } }, tiles, "/r/A/.git")
+  check("mainGreenHeld: a session of the repo on hold", h2 == true and scope2 == "session" and who and who.key == "a1")
+  eq("mainGreenHeld: a held session of ANOTHER repo doesn't", core.mainGreenHeld({ fleet = false, ids = { ["22"] = true } }, tiles, "/r/A/.git"), false)
+
+  -- a repo whose gate routine is gone loses its flag
+  local st = { ["/r/A/.git"] = rec2, ["/r/Z/.git"] = { state = "red", folder = "/r/Z" } }
+  local pr = core.mainGreenPrune(st, { { name = "mg", action = "gate", folder = "/r/A" }, { name = "s", action = "spawn", folder = "/r/Z" } })
+  check("mainGreenPrune: keeps a repo a gate routine still checks, drops the rest", pr["/r/A/.git"] == rec2 and pr["/r/Z/.git"] == nil)
+
+  -- the coach hears about it
+  local log = core.coachLogAdd({}, { kind = "mainred", id = "mainred|/r/A/.git|" .. SHA, branch = "main",
+    summary = "make test", note = "FAIL - two" }, 1000)
+  eq("coachLogAdd: a main-is-red entry is kept", #log, 1)
+  local dg = core.coachDigest({}, log, {})
+  check("coachDigest: ...and read as main going red", (dg.text or ""):find("main went red", 1, true) ~= nil
+        and dg.text:find("FAIL - two", 1, true) ~= nil)
+
+  local fk = {}; for _, ft in ipairs(core.FEATURES) do fk[ft.key] = ft end
+  check("maingreen: FEATURES lists the main-green check, flagged new", fk.maingreen ~= nil and fk.maingreen.new == true)
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
