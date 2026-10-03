@@ -16540,11 +16540,14 @@ end
 -- area in the UI; unchecking brings it back). Stamps `doneTs` (epoch seconds) the
 -- moment it becomes done, so the "recently completed" rollup can window the last N
 -- days; unchecking clears it. `now` is optional (pure/testable).
+-- 2026-10-03 (D3b): Adam's own click never carries doneBy -- only core.worklistRunCheck writes it
+-- ("run:<id>", a checklist run he started) -- so either flip of the box clears it.
 function M.worklistToggle(state, scope, id, now)
   for _, it in ipairs(M.worklistScopeList(state, scope)) do
     if it.id == id then
       it.done = not it.done
       if it.done then it.doneTs = tonumber(now) or 0 else it.doneTs = nil end
+      it.doneBy = nil
       break
     end
   end
@@ -17154,6 +17157,403 @@ function M.worklistImportPlaybook(state, key, id, parsed, now, idgen)
   if type(entry.seen) ~= "table" then entry.seen = {} end
   return M.worklistImportTodoRoots(state, key, { { root = "", isMain = true, parsed = parsed } }, now, idgen,
     { src = "playbook", file = entry.path, name = entry.name, seen = entry.seen })
+end
+
+-- ---- Run selected: the checklist runner in My List (2026-10-03) ----
+-- Mining round 2, unit D3b. Adam selects open items on a project's My List tab and clicks Run
+-- selected. They run ONE AT A TIME, each in a fresh session in the repo's main checkout (the
+-- sequential exception): the tab opens through the expect-tag machinery with the item's brief typed in.
+-- When is an item finished? Never on the session's word alone:
+--   * a file line (TODO.md, or a playbook's): its box is ticked in that file (FX reads it with
+--     core.parseTodoFile) and the turn's label isn't "did nothing";
+--   * any other item (Adam's own, an audit finding): its OWN session reported done through cc-run.sh.
+-- Then -- and only for a run Adam started -- M.worklistRunCheck sets HIS checkmark (done, doneTs,
+-- doneBy = "run:<id>"). That is the one narrow carve-out from the HARD RULE: importing still never
+-- sets done/doneTs. Three items in a row that finish nothing stop the run; a live-run item or a
+-- blocked report pauses it and tells Adam; a hold or a fleet freeze holds it where it is; one run
+-- per repo, and none while a batch runs there. The run is ~/.claude/cc-run/<id>.run.json, written
+-- only by Shepherd; cc-run.sh leaves reports beside it. These are the pure halves; FX does the I/O.
+do
+  M.RUN = {
+    missesToStop = 3,          -- items in a row that finish nothing before the run stops
+    settleSeconds = 3,         -- a turn reports done mid-turn, then sums up: wait this long after
+    appearSeconds = 120,       -- how long a new tab's card may take to show up
+    keepSeconds = 7 * 86400,   -- an ended run's file is kept this long (the panel shows it)
+    noteChars = 300,           -- a report's note
+    maxItems = 50,             -- items in one run
+  }
+  local RUN_PHASES = { running = true, paused = true, stopped = true, finished = true }
+  local RUN_STATES = { queued = true, opening = true, open = true, done = true, nothing = true, blocked = true, skipped = true }
+
+  -- "r" + lowercase hex: a file name and a tab-bridge tag at once.
+  function M.runIdOk(id)
+    return type(id) == "string" and #id >= 7 and #id <= 17 and id:match("^r[0-9a-f]+$") ~= nil
+  end
+  -- A new run id from a hex nonce (FX.mailboxNonce): "r" + its first 8 digits, or nil.
+  function M.runNewId(hex)
+    local h = tostring(hex or ""):lower():gsub("[^0-9a-f]", ""):sub(1, 8)
+    if #h < 6 then return nil end
+    return "r" .. h
+  end
+
+  -- How an open My List item is judged finished in a run -- "file" (its box ticked in its file) or
+  -- "report" (its session's done report) -- or nil plus why it can't run at all.
+  function M.runItemKind(it)
+    if type(it) ~= "table" or type(it.id) ~= "string" or it.id == "" then return nil, "it isn't an item" end
+    if it.done then return nil, "it's already checked off" end
+    if it.fileDone then return nil, "its box is already ticked in its file -- verify it yourself" end
+    if it.fileMissing then return nil, "its line is gone from its file" end
+    if it.audit ~= nil then return "report" end   -- a finding's [x] claims nothing (core.parseAuditFindings)
+    if it.src == "todo" then
+      if it.srcRoots ~= nil then return nil, "its line is only in a worktree's TODO.md -- it belongs to that branch" end
+      return "file"
+    elseif it.src == "playbook" then
+      if type(it.srcFile) ~= "string" or it.srcFile:sub(1, 1) ~= "/" then return nil, "its playbook's file is unknown" end
+      return "file"
+    end
+    return "report"
+  end
+  -- The open items on a tab that can't run, and why: { [id] = why }, or nil when every one can.
+  function M.runWhyMap(list)
+    local out, any = {}, false
+    for _, it in ipairs(type(list) == "table" and list or {}) do
+      if type(it) == "table" and not it.done and type(it.id) == "string" then
+        local k, why = M.runItemKind(it)
+        if not k then out[it.id] = why; any = true end
+      end
+    end
+    return any and out or nil
+  end
+
+  local function liveText(text)
+    local lower = tostring(text or ""):lower()
+    return lower:find("(needs live run)", 1, true) ~= nil or lower:find("(live check)", 1, true) ~= nil
+  end
+
+  -- Adam's selection -> a run. list = the tab's items, ids = what he selected (any order: the run
+  -- keeps the TAB's order), ctx = { id, key, root, todoFile, now } -- root is the main checkout,
+  -- todoFile its TODO.md. What can't run is left out and counted (run.refused). nil + why when
+  -- nothing can run.
+  function M.runNew(list, ids, ctx)
+    ctx = type(ctx) == "table" and ctx or {}
+    if not M.runIdOk(ctx.id) then return nil, "no run id" end
+    local key = ctx.key
+    if type(key) ~= "string" or key == "" or key == "generic" or key == "master" or key == "archive" then
+      return nil, "a run starts on a project's tab"
+    end
+    local root = (type(ctx.root) == "string" and ctx.root:sub(1, 1) == "/") and M.normDir(ctx.root) or nil
+    if not root then return nil, "Shepherd doesn't know this project's folder" end
+    local want, nWant = {}, 0
+    for _, id in ipairs(type(ids) == "table" and ids or {}) do
+      if type(id) == "string" and id ~= "" and not want[id] then want[id] = true; nWant = nWant + 1 end
+    end
+    if nWant == 0 then return nil, "nothing selected" end
+    local items = {}
+    for _, it in ipairs(type(list) == "table" and list or {}) do
+      if type(it) == "table" and want[it.id] and #items < M.RUN.maxItems then
+        local kind = M.runItemKind(it)
+        local file = (kind == "file") and ((it.src == "playbook") and it.srcFile or ctx.todoFile) or nil
+        if kind == "report" or (kind == "file" and type(file) == "string" and file:sub(1, 1) == "/") then
+          local text = capChars(tostring(it.text or ""), 500)
+          local src = (type(it.srcText) == "string" and it.srcText ~= "") and it.srcText or text
+          items[#items + 1] = { n = #items + 1, id = it.id, text = text, kind = kind, file = file,
+            srcText = (kind == "file") and src or nil,
+            liveRun = (it.liveRun == true or liveText(text)) or nil, state = "queued" }
+        end
+      end
+    end
+    if #items == 0 then return nil, "none of the selected items can run" end
+    return { v = 1, id = ctx.id, key = key, root = root, startedBy = "adam", startedAt = tonumber(ctx.now) or 0,
+             phase = "running", misses = 0, cur = 0, items = items, refused = nWant - #items }
+  end
+
+  function M.runActive(run) return type(run) == "table" and (run.phase == "running" or run.phase == "paused") end
+
+  -- Why a new run can't start in this repo, or nil: one run per repo, none while a batch runs there.
+  function M.runRefusal(runs, root, batchActive)
+    if batchActive then return "a batch is running in this repo -- start the run once it's done" end
+    root = M.normDir(tostring(root or ""))
+    for _, r in pairs(type(runs) == "table" and runs or {}) do
+      if M.runActive(r) and M.normDir(tostring(r.root or "")) == root then
+        return "a run is already going in this repo (" .. tostring(r.id) .. ") -- stop it first"
+      end
+    end
+    return nil
+  end
+
+  -- The tag the tab bridge gives an item's tab ("expect"): "<run id>:<item>".
+  function M.runUnitTag(id, n) return tostring(id) .. ":" .. tostring(math.floor(tonumber(n) or 0)) end
+
+  -- What an item's tab has typed in: Shepherd's, naming the run and item first.
+  function M.runBrief(run, item)
+    local head = M.SHEPHERD_TAG .. " Run " .. tostring(run.id) .. " #" .. tostring(item.n) .. " of " .. #(run.items or {})
+      .. " (a checklist run Adam started from My List). Do only this item, nothing else:\n\n" .. tostring(item.text) .. "\n\n"
+      .. "Work straight in this checkout, no worktree (the sequential exception in the global CLAUDE.md). "
+    local blocked = "If you can't finish it, run `~/.claude/cc-run.sh blocked " .. tostring(run.id) .. " " .. tostring(item.n)
+      .. " --note \"<why>\"` and stop."
+    if item.kind == "file" then
+      return head .. "When it is finished, tick its box in " .. tostring(item.file)
+        .. ": change this line's `- [ ]` to `- [x]` and nothing else in that file:\n- [ ] " .. tostring(item.srcText) .. "\n"
+        .. "Shepherd sees the tick when your turn ends, checks the item off in My List and closes this tab. " .. blocked
+    end
+    return head .. "When it is finished, run `~/.claude/cc-run.sh done " .. tostring(run.id) .. " " .. tostring(item.n)
+      .. "` (add `--note \"<what you did>\"` if it helps). Shepherd checks the item off in My List when your turn ends "
+      .. "and closes this tab. " .. blocked
+  end
+
+  -- Is this item's turn over? Its card is done (not mid-turn, its label read, no background work), it
+  -- has had a prompt (a fresh tab sits idle until Adam presses Return), and it has settled.
+  function M.runTurnOver(tile, item, now)
+    if type(tile) ~= "table" or tile.status ~= "done" or tile.bg_active or tile.turnLabelPending then return false end
+    if type(tile.last_prompt) ~= "string" or tile.last_prompt == "" then return false end
+    local since = tonumber(tile.since) or 0
+    if since < (tonumber(type(item) == "table" and item.openedAt) or 0) then return false end
+    return (tonumber(now) or 0) - since >= M.RUN.settleSeconds
+  end
+
+  local function runPause(run, kind, n, why, now)
+    run.phase, run.why, run.pauseKind, run.pausedOn, run.pausedAt = "paused", why, kind, n, now
+  end
+  local function runEnd(run, cur, finished, now, why)
+    cur.endedAt = now
+    if finished then
+      cur.state = "done"
+      run.misses = 0
+      return { act = "done", n = cur.n }
+    end
+    cur.state, cur.note = "nothing", why
+    run.misses = (tonumber(run.misses) or 0) + 1
+    if run.misses >= M.RUN.missesToStop then
+      run.phase, run.endedAt = "stopped", now
+      run.why = run.misses .. " items in a row finished nothing, so the run stopped"
+      return { act = "stop", n = cur.n, why = run.why, notify = true }
+    end
+    return { act = "nothing", n = cur.n, why = why }
+  end
+
+  -- One tick of a run: what happens next, given what FX saw. Mutates run.
+  -- facts = { now, held = "fleet"|"session"|nil, batch = a batch runs in the repo,
+  --           tile = the current item's session card (nil: not seen), ticked = its file line's box
+  --           (file items, read only once the turn is over) }.
+  -- Returns { act, n?, why?, notify? }: idle (not running) | held (nothing moves) | wait | open (open
+  -- item n's tab) | done (item n finished: check it off, close its tab) | nothing (item n ended
+  -- without finishing; the run moves on) | pause | stop | finished.
+  function M.runStep(run, facts)
+    if type(run) ~= "table" or run.phase ~= "running" or type(run.items) ~= "table" then return { act = "idle" } end
+    facts = type(facts) == "table" and facts or {}
+    local now = tonumber(facts.now) or 0
+    if facts.held then
+      return { act = "held", why = (facts.held == "fleet") and "the fleet is frozen" or "its session is on hold" }
+    end
+    local cur = run.items[tonumber(run.cur) or 0]
+    if cur and cur.state == "opening" then return { act = "wait", n = cur.n } end
+    if cur and cur.state == "open" then
+      local rep = type(cur.report) == "table" and cur.report or nil
+      if rep and rep.verdict == "blocked" then
+        cur.state, cur.note, cur.endedAt = "blocked", rep.note, now
+        runPause(run, "blocked", cur.n, "item " .. cur.n .. " is blocked: " .. tostring(rep.note or "no reason given"), now)
+        return { act = "pause", n = cur.n, why = run.why, notify = true }
+      end
+      local tile = facts.tile
+      if type(tile) ~= "table" then
+        if cur.seen or now - (tonumber(cur.openedAt) or now) > M.RUN.appearSeconds then
+          return runEnd(run, cur, false, now, "its session ended before it finished")
+        end
+        return { act = "wait", n = cur.n }
+      end
+      cur.seen = true
+      if not M.runTurnOver(tile, cur, now) then return { act = "wait", n = cur.n } end
+      if cur.kind == "file" then
+        if facts.ticked ~= true then return runEnd(run, cur, false, now, "its box wasn't ticked") end
+        if tile.turnLabel == "did nothing" then return runEnd(run, cur, false, now, "its turn did nothing") end
+        return runEnd(run, cur, true, now)
+      end
+      if rep and rep.verdict == "done" then return runEnd(run, cur, true, now) end
+      return runEnd(run, cur, false, now, "it never reported done")
+    end
+    local nxt
+    for _, it in ipairs(run.items) do if it.state == "queued" then nxt = it; break end end
+    if not nxt then
+      local d = 0
+      for _, it in ipairs(run.items) do if it.state == "done" then d = d + 1 end end
+      run.phase, run.endedAt = "finished", now
+      run.why = d .. " of " .. #run.items .. " checked off"
+      return { act = "finished", why = run.why, notify = true }
+    end
+    if facts.batch then
+      runPause(run, "batch", nil, "a batch is running in this repo -- Resume once it's done", now)
+      return { act = "pause", why = run.why, notify = true }
+    end
+    if nxt.liveRun then
+      runPause(run, "live", nxt.n, "item " .. nxt.n .. " needs a live run (" .. nxt.text
+        .. ") -- check it yourself, then Resume to skip it", now)
+      return { act = "pause", n = nxt.n, why = run.why, notify = true }
+    end
+    run.cur, nxt.state, nxt.openedAt = nxt.n, "opening", now
+    return { act = "open", n = nxt.n }
+  end
+
+  local function runItem(run, n)
+    return type(run) == "table" and type(run.items) == "table" and run.items[tonumber(n) or 0] or nil
+  end
+  -- The tab being opened for item n is session `session` ({ id, pid, name }): the item is open.
+  function M.runItemOpened(run, n, session, now)
+    local it = runItem(run, n)
+    if not it or it.state ~= "opening" or run.cur ~= it.n then return false end
+    if type(session) ~= "table" or type(session.id) ~= "string" or session.id == "" then return false end
+    it.session = { id = session.id, pid = session.pid ~= nil and tostring(session.pid) or nil,
+                   name = session.name ~= nil and tostring(session.name) or nil }
+    it.state, it.tabAt = "open", tonumber(now) or 0
+    return true
+  end
+  -- Item n's tab didn't open: it goes back in the queue and the run pauses (Resume tries it again).
+  function M.runOpenFailed(run, n, why, now)
+    local it = runItem(run, n)
+    if not it or it.state ~= "opening" then return false end
+    it.state, it.openedAt = "queued", nil
+    runPause(run, "open", it.n, "item " .. it.n .. "'s tab didn't open: " .. tostring(why or "no reason given")
+      .. " -- Resume to try again", now)
+    return true
+  end
+  -- Resume a paused run; a live-run item it paused on is skipped (left for Adam to check).
+  function M.runResume(run, now)
+    if type(run) ~= "table" or run.phase ~= "paused" then return false end
+    if run.pauseKind == "live" then
+      local it = runItem(run, run.pausedOn)
+      if it and it.state == "queued" then
+        it.state, it.note, it.endedAt = "skipped", "needs a live run -- left for you", tonumber(now) or 0
+      end
+    end
+    run.phase, run.why, run.pauseKind, run.pausedOn, run.pausedAt = "running", nil, nil, nil, nil
+    return true
+  end
+  function M.runStop(run, now, why)
+    if not M.runActive(run) then return false end
+    run.phase, run.endedAt, run.why = "stopped", tonumber(now) or 0, why or "stopped by Adam"
+    run.pauseKind, run.pausedOn, run.pausedAt = nil, nil, nil
+    return true
+  end
+
+  -- A cc-run.sh report (M.parseRunReport) for this run: taken only for the item under way, from that
+  -- item's OWN session. false + "wait" while its tab is still opening (the file stays for next tick),
+  -- false + why otherwise (the caller drops it).
+  function M.runRecordReport(run, rep, now)
+    if type(run) ~= "table" or type(rep) ~= "table" or rep.run ~= run.id then return false, "not this run's" end
+    if not M.runActive(run) then return false, "the run is over" end
+    local it = runItem(run, rep.n)
+    if not it or run.cur ~= it.n then return false, "not the item under way" end
+    if it.state == "opening" then return false, "wait" end
+    if it.state ~= "open" then return false, "that item isn't open" end
+    if type(it.session) ~= "table" or it.session.id ~= rep.session_id then return false, "another session's report" end
+    if rep.verdict ~= "done" and rep.verdict ~= "blocked" then return false, "not done or blocked" end
+    it.report = { verdict = rep.verdict, note = rep.note, at = tonumber(now) or 0 }
+    return true
+  end
+
+  -- Adam's checkmark, set by a run: only a run HE started (startedBy, which only the Run selected click
+  -- writes), only on its own tab, only for an item that run finished, and only once. Stamps doneBy =
+  -- "run:<id>" so My List shows it as checked by a run; unchecking it is his usual click
+  -- (M.worklistToggle clears doneBy). Import never calls this. true, or false + why. Pure.
+  function M.worklistRunCheck(state, key, itemId, run, now)
+    if type(run) ~= "table" or run.startedBy ~= "adam" or not M.runIdOk(run.id) then
+      return false, "only a run Adam started checks items off"
+    end
+    if run.key ~= key then return false, "that item isn't on the run's tab" end
+    local ri
+    for _, x in ipairs(type(run.items) == "table" and run.items or {}) do
+      if type(x) == "table" and x.id == itemId then ri = x end
+    end
+    if not ri then return false, "that item isn't in the run" end
+    if ri.state ~= "done" then return false, "the run didn't finish that item" end
+    for _, it in ipairs(M.worklistScopeList(state, key)) do
+      if type(it) == "table" and it.id == itemId then
+        if it.done then return false, "it's already checked off" end
+        it.done, it.doneTs, it.doneBy = true, tonumber(now) or 0, "run:" .. run.id
+        return true
+      end
+    end
+    return false, "the item is gone from the list"
+  end
+
+  -- ~/.claude/cc-run/: <id>.run.json (the run, Shepherd's), <run>.<item>.<epoch>-<pid>.json (a report
+  -- cc-run.sh left), and <name>.tmp.<pid> while either is being written. KEEP IN SYNC with cc-run.sh.
+  function M.runFileOf(fn)
+    if type(fn) ~= "string" then return nil end
+    if fn:match("%.tmp%.%d+$") then return { kind = "part" } end
+    local id = fn:match("^(r[0-9a-f]+)%.run%.json$")
+    if id and M.runIdOk(id) then return { kind = "run", id = id } end
+    local run, n, rid = fn:match("^(r[0-9a-f]+)%.(%d+)%.(%d+%-%d+)%.json$")
+    if run and M.runIdOk(run) then return { kind = "report", run = run, n = tonumber(n), id = rid } end
+    return nil
+  end
+  -- { run, n, verdict, note, session_id, at } or nil: its body must match its name, done or blocked
+  -- (blocked with a note), and name the session that sent it.
+  function M.parseRunReport(fn, raw)
+    local f = M.runFileOf(fn)
+    if not f or f.kind ~= "report" or type(raw) ~= "string" then return nil end
+    local ok, t = pcall(M.json.decode, raw)
+    if not ok or type(t) ~= "table" or tonumber(t.v) ~= 1 then return nil end
+    if t.id ~= f.id or t.run ~= f.run or tonumber(t.item) ~= f.n then return nil end
+    if t.verdict ~= "done" and t.verdict ~= "blocked" then return nil end
+    if type(t.session_id) ~= "string" or t.session_id == "" then return nil end
+    local note = (type(t.note) == "string")
+      and capChars((t.note:gsub("%c+", " "):gsub("^%s+", ""):gsub("%s+$", "")), M.RUN.noteChars) or nil
+    if note == "" then note = nil end
+    if t.verdict == "blocked" and not note then return nil end
+    return { run = f.run, n = f.n, verdict = t.verdict, note = note, session_id = capChars(t.session_id, 200), at = tonumber(t.at) }
+  end
+
+  -- A run read back from its file, rebuilt field by field (fresh tables), or nil when it isn't one.
+  function M.parseRunState(raw)
+    local ok, t = pcall(M.json.decode, tostring(raw or ""))
+    if not ok or type(t) ~= "table" or not M.runIdOk(t.id) or not RUN_PHASES[t.phase] then return nil end
+    if type(t.key) ~= "string" or t.key == "" or type(t.root) ~= "string" or t.root:sub(1, 1) ~= "/" then return nil end
+    local items = {}
+    for i, x in ipairs(type(t.items) == "table" and t.items or {}) do
+      if type(x) ~= "table" or type(x.id) ~= "string" or not RUN_STATES[x.state] then return nil end
+      if x.kind ~= "file" and x.kind ~= "report" then return nil end
+      local s = x.session
+      local rp = x.report
+      local it = { n = i, id = x.id, text = tostring(x.text or ""), kind = x.kind,
+        file = (type(x.file) == "string" and x.file:sub(1, 1) == "/") and x.file or nil,
+        srcText = (type(x.srcText) == "string" and x.srcText ~= "") and x.srcText or nil,
+        liveRun = (x.liveRun == true) or nil, state = x.state,
+        session = (type(s) == "table" and type(s.id) == "string" and s.id ~= "")
+          and { id = s.id, pid = s.pid ~= nil and tostring(s.pid) or nil, name = s.name ~= nil and tostring(s.name) or nil } or nil,
+        report = (type(rp) == "table" and (rp.verdict == "done" or rp.verdict == "blocked"))
+          and { verdict = rp.verdict, note = type(rp.note) == "string" and rp.note or nil, at = tonumber(rp.at) } or nil,
+        openedAt = tonumber(x.openedAt), tabAt = tonumber(x.tabAt), endedAt = tonumber(x.endedAt),
+        seen = (x.seen == true) or nil, note = type(x.note) == "string" and x.note or nil }
+      if it.kind == "file" and not (it.file and it.srcText) then return nil end
+      items[i] = it
+    end
+    if #items == 0 then return nil end
+    return { v = 1, id = t.id, key = t.key, root = M.normDir(t.root),
+             startedBy = type(t.startedBy) == "string" and t.startedBy or nil, startedAt = tonumber(t.startedAt) or 0,
+             phase = t.phase, why = type(t.why) == "string" and t.why or nil,
+             misses = math.floor(tonumber(t.misses) or 0), cur = math.floor(tonumber(t.cur) or 0), items = items,
+             refused = tonumber(t.refused), pauseKind = type(t.pauseKind) == "string" and t.pauseKind or nil,
+             pausedOn = tonumber(t.pausedOn), pausedAt = tonumber(t.pausedAt), endedAt = tonumber(t.endedAt),
+             dismissed = (t.dismissed == true) or nil }   -- an ended run Adam closed on his tab
+  end
+
+  -- What My List shows of a run (its tab's run bar): no session ids, no paths.
+  function M.runView(run)
+    if type(run) ~= "table" then return nil end
+    local items, done = {}, 0
+    for _, it in ipairs(type(run.items) == "table" and run.items or {}) do
+      items[#items + 1] = { n = it.n, text = it.text, state = it.state, note = it.note, kind = it.kind }
+      if it.state == "done" then done = done + 1 end
+    end
+    return { id = run.id, phase = run.phase, why = run.why, cur = run.cur, total = #items, done = done, items = items,
+             canResume = run.phase == "paused", canStop = M.runActive(run), startedAt = run.startedAt, endedAt = run.endedAt }
+  end
+  -- An ended run's file goes after RUN.keepSeconds; a running or paused one never.
+  function M.runPruneDue(run, now)
+    if type(run) ~= "table" or M.runActive(run) then return false end
+    local ended = tonumber(run.endedAt) or tonumber(run.startedAt) or 0
+    return (tonumber(now) or 0) - ended >= M.RUN.keepSeconds
+  end
 end
 
 -- Which My List tab a session's items belong to: a repo session -> the tab that
@@ -24133,6 +24533,9 @@ M.FEATURES = {
   { key = "playbooks", cat = "Control", new = true, title = "Playbooks in My List",
     what = "📘 Add a playbook… on a project's My List tab picks any markdown checklist on this Mac. Its `- [ ]` lines import like TODO.md's, grouped under the file's name, and its ✓ auto and ▶ live run badges follow the file as it changes. Remove playbook stops the import and keeps its items to be verified.",
     why = "A release or deploy checklist you keep outside the repo sits in the same list you verify everything else in." },
+  { key = "runner", cat = "Control", new = true, title = "Run selected",
+    what = "▶ Run… on a project's My List tab: pick open items (TODO.md lines, playbook lines, your own) and Run selected works through them one at a time, each in a fresh session in the repo's main checkout, its brief typed into a new tab for you to send. A file line counts once its box is ticked and the turn did something; your own item once its session reports done with cc-run.sh. Then the item gets your checkmark, shown as ✓ by run (uncheck it as usual). Three in a row that finish nothing stop the run; a live-run item, a blocked report, a hold or a freeze pauses it.",
+    why = "A checklist of small jobs gets worked through while you verify, instead of you starting each session by hand." },
   { key = "stories", cat = "Control", new = true, title = "User stories",
     what = "When a project has spec/product/user-stories.md, a gated tab shows its stories by capability area — add, edit, and save them in place.",
     why = "Curate the product's user stories next to the sessions building it, without leaving the panel." },

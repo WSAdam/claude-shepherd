@@ -8480,7 +8480,8 @@ do
   -- 2026-10-03: 52 -> 53 for gate blame ("gateblame", flagged new).
   -- 2026-10-03: 53 -> 54 for the main moved notice ("mainmoved", flagged new).
   -- 2026-10-03: 54 -> 55 for the scheduled main-green check ("maingreen", flagged new).
-  eq("FEATURES: the 55 new features are flagged", newCount, 55)
+  -- 2026-10-03: 55 -> 56 for Run selected in My List ("runner", flagged new).
+  eq("FEATURES: the 56 new features are flagged", newCount, 56)
   check("FEATURES: lists the main moved notice", keys.mainmoved == true)
   check("FEATURES: lists the main-green check", keys.maingreen == true)
   check("FEATURES: lists the coach across repos", keys.coachglobal == true)
@@ -15092,6 +15093,313 @@ do
 
   local fk = {}; for _, ft in ipairs(core.FEATURES) do fk[ft.key] = ft end
   check("maingreen: FEATURES lists the main-green check, flagged new", fk.maingreen ~= nil and fk.maingreen.new == true)
+end
+
+-- ---- My List: Run selected, the checklist runner (2026-10-03) ----
+-- Mining round 2, unit D3b. Adam selects open items in a project's My List tab and clicks Run
+-- selected: they run one at a time, each in a fresh session in the repo's main checkout. A file line
+-- (TODO.md or a playbook) is finished when its box is ticked in the file AND the turn wasn't "did
+-- nothing"; Adam's own item when its own session reports done through cc-run.sh. Then -- only for a
+-- run Adam started -- core.worklistRunCheck sets HIS checkmark (done, doneTs, doneBy = "run:<id>").
+-- Three items in a row that finish nothing stop the run; a live-run item or a blocked report pauses
+-- it; a hold or a fleet freeze holds it; one run per repo, and none while a batch runs there.
+do
+  local function items()
+    return {
+      { id = "t1", text = "fix the parser", src = "todo", srcText = "fix the parser", done = false },
+      { id = "t2", text = "already verified", src = "todo", srcText = "already verified", done = true, doneTs = 5 },
+      { id = "t3", text = "ticked, not verified", src = "todo", srcText = "ticked, not verified", fileDone = true },
+      { id = "t4", text = "branch only", src = "todo", srcText = "branch only", srcRoots = { "/r/wt" }, srcBranches = { "feat/x" } },
+      { id = "t5", text = "gone line", src = "todo", srcText = "gone line", fileMissing = true },
+      { id = "p1", text = "tag the build", src = "playbook", srcText = "tag the build", srcFile = "/n/release.md", srcName = "release.md" },
+      { id = "o1", text = "renew the cert", done = false },
+      { id = "l1", text = "look at the panel (needs live run)", src = "todo", srcText = "look at the panel (needs live run)", liveRun = true },
+      { id = "a1", text = "[HIGH] AUD-001 x", src = "todo", srcText = "[HIGH] AUD-001 x", audit = { sev = "HIGH", id = "AUD-001" } },
+    }
+  end
+  local ctx = { id = "r1a2b3c4d", key = "shop", root = "/r/shop", todoFile = "/r/shop/TODO.md", now = 1000 }
+  local function turnDone(since, label) return { status = "done", since = since, last_prompt = "[shepherd] Run", turnLabel = label or "done" } end
+
+  -- which items can run, and how each one is judged finished
+  local I = items()
+  eq("run kind: a TODO.md line ticks its box", core.runItemKind(I[1]), "file")
+  eq("run kind: a playbook line ticks its box", core.runItemKind(I[6]), "file")
+  eq("run kind: Adam's own item reports done", core.runItemKind(I[7]), "report")
+  eq("run kind: an audit finding reports done (its file's [x] claims nothing)", core.runItemKind(I[9]), "report")
+  eq("run kind: a live-run line is a file line (the run pauses on it)", core.runItemKind(I[8]), "file")
+  for _, c in ipairs({ { I[2], "already checked off" }, { I[3], "box already ticked in its file" },
+                       { I[4], "a line only on a branch" }, { I[5], "a line gone from its file" } }) do
+    local k, why = core.runItemKind(c[1])
+    check("run kind: can't run " .. c[2] .. ", and says why", k == nil and type(why) == "string" and why ~= "")
+  end
+
+  -- Adam's selection becomes a run: in the tab's order, only what can run
+  local run, why = core.runNew(items(), { "o1", "t1", "t3", "p1", "nope" }, ctx)
+  check("run: a selection becomes a run", type(run) == "table" and why == nil)
+  run = run or { items = {} }
+  eq("run: ...started by Adam", run.startedBy, "adam")
+  eq("run: ...running", run.phase, "running")
+  eq("run: ...on its tab", run.key, "shop")
+  eq("run: ...in the repo's main checkout", run.root, "/r/shop")
+  eq("run: ...with its id", run.id, "r1a2b3c4d")
+  eq("run: ...only the items that can run", #run.items, 3)
+  eq("run: ...in the tab's order, not the click order", table.concat({ (run.items[1] or {}).id or "?",
+     (run.items[2] or {}).id or "?", (run.items[3] or {}).id or "?" }, ","), "t1,p1,o1")
+  eq("run: ...the selection it couldn't run is counted", run.refused, 2)
+  eq("run: a TODO.md line names the main checkout's TODO.md", (run.items[1] or {}).file, "/r/shop/TODO.md")
+  eq("run: a playbook line names its playbook", (run.items[2] or {}).file, "/n/release.md")
+  eq("run: ...and keeps the line it ticks", (run.items[2] or {}).srcText, "tag the build")
+  eq("run: Adam's own item names no file", (run.items[3] or {}).file, nil)
+  eq("run: items are numbered from 1", (run.items[3] or {}).n, 3)
+  eq("run: ...and start queued", (run.items[1] or {}).state, "queued")
+  check("run: nothing selected is refused", core.runNew(items(), {}, ctx) == nil)
+  local none, nwhy = core.runNew(items(), { "t2", "t3" }, ctx)
+  check("run: a selection with nothing that can run is refused, saying why", none == nil and type(nwhy) == "string")
+  check("run: no main checkout is refused", core.runNew(items(), { "t1" }, { id = "r1a2b3c4d", key = "shop", now = 1 }) == nil)
+  check("run: a bad run id is refused", core.runNew(items(), { "t1" }, { id = "../x", key = "shop", root = "/r/shop", now = 1 }) == nil)
+  check("run ids: r + hex", core.runIdOk("r1a2b3c4d") and not core.runIdOk("b1a2b3c4") and not core.runIdOk("r1") and not core.runIdOk(nil))
+
+  -- one run per repo, none while a batch runs there
+  check("run refusal: a second run in the same repo", core.runRefusal({ [run.id] = run }, "/r/shop", false) ~= nil)
+  eq("run refusal: ...another repo is fine", core.runRefusal({ [run.id] = run }, "/r/other", false), nil)
+  check("run refusal: a batch running in the repo", core.runRefusal({}, "/r/shop", true) ~= nil)
+  local ended = core.runNew(items(), { "t1" }, ctx); ended.phase = "stopped"
+  eq("run refusal: a stopped run doesn't count", core.runRefusal({ x = ended }, "/r/shop", false), nil)
+
+  -- the brief each item's session gets
+  local b1 = core.runBrief(run, run.items[1])
+  check("brief: starts as Shepherd's, naming the run and item", b1:sub(1, #"[shepherd] Run r1a2b3c4d #1") == "[shepherd] Run r1a2b3c4d #1")
+  check("brief: do only this item", b1:find("Do only this item", 1, true) ~= nil and b1:find("fix the parser", 1, true) ~= nil)
+  check("brief: a file line ticks its box in the file it names",
+        b1:find("/r/shop/TODO.md", 1, true) ~= nil and b1:find("- [ ] fix the parser", 1, true) ~= nil and b1:find("- [x]", 1, true) ~= nil)
+  check("brief: ...and doesn't report done through cc-run.sh", b1:find("cc-run.sh done", 1, true) == nil)
+  check("brief: it can say it's blocked", b1:find("~/.claude/cc-run.sh blocked r1a2b3c4d 1 --note", 1, true) ~= nil)
+  check("brief: straight in the main checkout, no worktree", b1:find("no worktree", 1, true) ~= nil)
+  local b3 = core.runBrief(run, run.items[3])
+  check("brief: Adam's own item reports done through cc-run.sh", b3:find("~/.claude/cc-run.sh done r1a2b3c4d 3", 1, true) ~= nil
+        and b3:find("renew the cert", 1, true) ~= nil)
+  check("brief: ...and has no box to tick", b3:find("- [x]", 1, true) == nil)
+  eq("run tag: <run id>:<item>", core.runUnitTag("r1a2b3c4d", 2), "r1a2b3c4d:2")
+  check("run tag: one the tab bridge accepts", core.runUnitTag("r1a2b3c4d", 12):match("^[%w._:-]+$") ~= nil)
+
+  -- a file line, start to finish
+  local r = core.runNew(items(), { "t1", "p1", "o1" }, ctx)
+  local a = core.runStep(r, { now = 1001 })
+  eq("step: the first item's tab opens", a.act, "open"); eq("step: ...item 1", a.n, 1)
+  eq("step: ...and it is opening", r.items[1].state, "opening")
+  eq("step: still opening -> wait", core.runStep(r, { now = 1002 }).act, "wait")
+  check("step: its session is recorded", core.runItemOpened(r, 1, { id = "S1", pid = "11", name = "shop" }, 1003))
+  eq("step: ...and the item is open", r.items[1].state, "open")
+  eq("step: ...on that session", (r.items[1].session or {}).id, "S1")
+  eq("step: its card not here yet -> wait", core.runStep(r, { now = 1004 }).act, "wait")
+  eq("step: Adam hasn't pressed Return (idle, no prompt) -> wait",
+     core.runStep(r, { now = 1010, tile = { status = "idle", since = 1003 } }).act, "wait")
+  eq("step: mid-turn -> wait", core.runStep(r, { now = 1020, tile = { status = "working", since = 1012, last_prompt = "x" } }).act, "wait")
+  eq("step: a turn that just ended settles first -> wait", core.runStep(r, { now = 1031, tile = turnDone(1030), ticked = true }).act, "wait")
+  local pend = turnDone(1030); pend.turnLabel = nil; pend.turnLabelPending = true
+  eq("step: its turn label still being read -> wait", core.runStep(r, { now = 1040, tile = pend, ticked = true }).act, "wait")
+  a = core.runStep(r, { now = 1040, tile = turnDone(1030), ticked = true })
+  eq("step: box ticked and the turn did something -> done", a.act, "done"); eq("step: ...item 1", a.n, 1)
+  eq("step: ...the item is done", r.items[1].state, "done")
+  a = core.runStep(r, { now = 1041 })
+  eq("step: then the next item opens", a.act, "open"); eq("step: ...item 2", a.n, 2)
+
+  -- did nothing, or never ticked: finished nothing
+  local r2 = core.runNew(items(), { "t1", "o1" }, ctx)
+  core.runStep(r2, { now = 1 }); core.runItemOpened(r2, 1, { id = "S2" }, 2)
+  a = core.runStep(r2, { now = 20, tile = turnDone(10, "did nothing"), ticked = true })
+  eq("step: a ticked box on a turn that did nothing finishes nothing", a.act, "nothing")
+  eq("step: ...the item says so", r2.items[1].state, "nothing")
+  eq("step: ...and it counts as a miss", r2.misses, 1)
+  core.runStep(r2, { now = 21 }); core.runItemOpened(r2, 2, { id = "S3" }, 22)
+  a = core.runStep(r2, { now = 40, tile = turnDone(30, "made progress") })
+  eq("step: Adam's own item with no done report finishes nothing", a.act, "nothing")
+  a = core.runStep(r2, { now = 41 })
+  eq("step: every item ran -> finished", a.act, "finished")
+  check("step: ...and Adam is told", a.notify == true)
+  eq("step: ...the run is finished", r2.phase, "finished")
+  eq("step: a finished run does nothing more", core.runStep(r2, { now = 42 }).act, "idle")
+  local r2b = core.runNew(items(), { "t1" }, ctx)
+  core.runStep(r2b, { now = 1 }); core.runItemOpened(r2b, 1, { id = "S2b" }, 2)
+  eq("step: a turn that did something but never ticked the box finishes nothing",
+     core.runStep(r2b, { now = 20, tile = turnDone(10, "made progress"), ticked = false }).act, "nothing")
+
+  -- three in a row that finish nothing stop the run; a finished item resets the count
+  local own = {}
+  for i = 1, 4 do own[i] = { id = "o" .. i, text = "own " .. i } end
+  local r3 = core.runNew(own, { "o1", "o2", "o3", "o4" }, ctx)
+  local t = 100
+  for i = 1, 3 do
+    core.runStep(r3, { now = t }); core.runItemOpened(r3, i, { id = "S" .. i }, t + 1)
+    a = core.runStep(r3, { now = t + 20, tile = turnDone(t + 10, "made progress") })
+    t = t + 100
+  end
+  eq("stop: the third item in a row that finished nothing stops the run", a.act, "stop")
+  check("stop: ...and Adam is told why", a.notify == true and tostring(r3.why):find("3", 1, true) ~= nil)
+  eq("stop: ...stopped", r3.phase, "stopped")
+  eq("stop: ...the rest never runs", r3.items[4].state, "queued")
+  eq("stop: a stopped run does nothing more", core.runStep(r3, { now = t }).act, "idle")
+  local r3b = core.runNew(own, { "o1", "o2", "o3", "o4" }, ctx)
+  t = 100
+  for i = 1, 4 do
+    core.runStep(r3b, { now = t }); core.runItemOpened(r3b, i, { id = "T" .. i }, t + 1)
+    if i == 2 then core.runRecordReport(r3b, { run = r3b.id, n = 2, verdict = "done", session_id = "T2" }, t + 5) end
+    a = core.runStep(r3b, { now = t + 20, tile = turnDone(t + 10, "made progress") })
+    t = t + 100
+  end
+  eq("stop: a finished item in between resets the count", r3b.phase, "running")
+  eq("stop: ...two misses since it", r3b.misses, 2)
+
+  -- Adam's own item: a done report from ITS session
+  local r4 = core.runNew(own, { "o1", "o2" }, ctx)
+  core.runStep(r4, { now = 1 })
+  local okw, wwhy = core.runRecordReport(r4, { run = r4.id, n = 1, verdict = "done", session_id = "S9" }, 2)
+  check("report: while the tab is still opening it waits (the file stays)", okw == false and wwhy == "wait")
+  core.runItemOpened(r4, 1, { id = "S9" }, 3)
+  check("report: another session's report is refused", not core.runRecordReport(r4, { run = r4.id, n = 1, verdict = "done", session_id = "S8" }, 4))
+  check("report: another item's report is refused", not core.runRecordReport(r4, { run = r4.id, n = 2, verdict = "done", session_id = "S9" }, 4))
+  check("report: another run's report is refused", not core.runRecordReport(r4, { run = "r9999999", n = 1, verdict = "done", session_id = "S9" }, 4))
+  check("report: its own session's done is taken", core.runRecordReport(r4, { run = r4.id, n = 1, verdict = "done", note = "renewed", session_id = "S9" }, 5))
+  eq("report: ...but not acted on mid-turn", core.runStep(r4, { now = 6, tile = { status = "working", since = 4, last_prompt = "x" } }).act, "wait")
+  a = core.runStep(r4, { now = 20, tile = turnDone(10, "made progress") })
+  eq("report: a done report and a finished turn -> done", a.act, "done")
+
+  -- a blocked report pauses the run and tells Adam; Resume goes on with the next item
+  local r5 = core.runNew(own, { "o1", "o2" }, ctx)
+  core.runStep(r5, { now = 1 }); core.runItemOpened(r5, 1, { id = "S5" }, 2)
+  core.runRecordReport(r5, { run = r5.id, n = 1, verdict = "blocked", note = "needs the API key", session_id = "S5" }, 3)
+  a = core.runStep(r5, { now = 4, tile = { status = "working", since = 3, last_prompt = "x" } })
+  eq("blocked: pauses the run, even mid-turn", a.act, "pause")
+  check("blocked: ...tells Adam, with the session's note", a.notify == true and tostring(r5.why):find("needs the API key", 1, true) ~= nil)
+  eq("blocked: ...paused", r5.phase, "paused")
+  eq("blocked: ...the item is blocked", r5.items[1].state, "blocked")
+  eq("blocked: a paused run does nothing", core.runStep(r5, { now = 5 }).act, "idle")
+  check("blocked: Resume", core.runResume(r5, 6))
+  a = core.runStep(r5, { now = 7 })
+  eq("blocked: ...goes on with the next item", a.act, "open"); eq("blocked: ...item 2", a.n, 2)
+  eq("blocked: ...the blocked one stays blocked", r5.items[1].state, "blocked")
+
+  -- a live-run item pauses before it opens; Resume skips it (Adam checks it himself)
+  local r6 = core.runNew({ items()[8], items()[1] }, { "l1", "t1" }, ctx)
+  a = core.runStep(r6, { now = 1 })
+  eq("live run: pauses before the item opens", a.act, "pause")
+  check("live run: ...tells Adam", a.notify == true and tostring(r6.why):find("live run", 1, true) ~= nil)
+  eq("live run: ...nothing opened", r6.items[1].state, "queued")
+  core.runResume(r6, 2)
+  eq("live run: Resume skips it", r6.items[1].state, "skipped")
+  a = core.runStep(r6, { now = 3 })
+  eq("live run: ...and opens the next", a.act, "open"); eq("live run: ...item 2", a.n, 2)
+
+  -- a hold or a fleet freeze holds the run where it is
+  local r7 = core.runNew(items(), { "t1", "o1" }, ctx)
+  a = core.runStep(r7, { now = 1, held = "fleet" })
+  eq("hold: a frozen fleet opens nothing", a.act, "held")
+  eq("hold: ...the item still queued", r7.items[1].state, "queued")
+  eq("hold: ...the run still running (it goes on when thawed)", r7.phase, "running")
+  core.runStep(r7, { now = 2 }); core.runItemOpened(r7, 1, { id = "S7" }, 3)
+  eq("hold: a held session's finished item waits", core.runStep(r7, { now = 20, held = "session", tile = turnDone(10), ticked = true }).act, "held")
+  eq("hold: ...still open", r7.items[1].state, "open")
+  eq("hold: lifted -> done", core.runStep(r7, { now = 21, tile = turnDone(10), ticked = true }).act, "done")
+
+  -- a batch in the repo pauses it before the next item opens
+  local r8 = core.runNew(items(), { "t1" }, ctx)
+  a = core.runStep(r8, { now = 1, batch = true })
+  check("batch: a batch running in the repo pauses the run before a tab opens", a.act == "pause" and r8.items[1].state == "queued"
+        and tostring(r8.why):find("batch", 1, true) ~= nil)
+  core.runResume(r8, 2)
+  eq("batch: Resume, the batch gone -> it opens", core.runStep(r8, { now = 3 }).act, "open")
+
+  -- its session went before it finished
+  local r9 = core.runNew(items(), { "t1", "o1" }, ctx)
+  core.runStep(r9, { now = 1 }); core.runItemOpened(r9, 1, { id = "S10" }, 2)
+  core.runStep(r9, { now = 3, tile = { status = "idle", since = 2 } })
+  eq("gone: a session that ended (its tab closed) finished nothing", core.runStep(r9, { now = 4 }).act, "nothing")
+  local r9b = core.runNew(items(), { "t1" }, ctx)
+  core.runStep(r9b, { now = 1 }); core.runItemOpened(r9b, 1, { id = "S11" }, 2)
+  eq("gone: a card never seen gets time to appear", core.runStep(r9b, { now = 60 }).act, "wait")
+  eq("gone: ...but not forever", core.runStep(r9b, { now = 2 + core.RUN.appearSeconds + 1 }).act, "nothing")
+
+  -- a tab that didn't open pauses the run; Resume tries that item again
+  local r10 = core.runNew(items(), { "t1" }, ctx)
+  core.runStep(r10, { now = 1 })
+  core.runOpenFailed(r10, 1, "the window wasn't in front", 2)
+  check("open failed: pauses the run, saying why", r10.phase == "paused" and tostring(r10.why):find("window wasn't in front", 1, true) ~= nil)
+  eq("open failed: ...the item queued again", r10.items[1].state, "queued")
+  core.runResume(r10, 3)
+  eq("open failed: Resume opens it again", core.runStep(r10, { now = 4 }).n, 1)
+  check("stop: Adam stops a run", core.runStop(r10, 5))
+  eq("stop: ...stopped", r10.phase, "stopped")
+  check("stop: ...and it can't be resumed", not core.runResume(r10, 6))
+
+  -- Adam's checkmark: only a run he started, only for an item it finished
+  local st = { generic = {}, byProject = { shop = items() } }
+  local T1 = st.byProject.shop[1]
+  local rr = core.runNew(st.byProject.shop, { "t1", "o1" }, ctx)
+  local ok, cwhy = core.worklistRunCheck(st, "shop", "t1", rr, 2000)
+  check("run check: refused while the run hasn't finished the item", ok == false and type(cwhy) == "string" and T1.done == false)
+  check("run check: refused without a run", core.worklistRunCheck(st, "shop", "t1", nil, 2000) == false and T1.done == false)
+  local forged = core.parseRunState(core.json.encode(rr)); forged.items[1].state = "done"; forged.startedBy = nil
+  check("run check: refused for a run Adam didn't start", core.worklistRunCheck(st, "shop", "t1", forged, 2000) == false and T1.done == false)
+  forged.startedBy = "session"
+  check("run check: ...whoever else claims it", core.worklistRunCheck(st, "shop", "t1", forged, 2000) == false and T1.done == false)
+  rr.items[1].state = "done"
+  check("run check: refused on another tab", core.worklistRunCheck(st, "other", "t1", rr, 2000) == false)
+  check("run check: refused for an item not in the run", core.worklistRunCheck(st, "shop", "t3", rr, 2000) == false)
+  check("run check: refused for an item the run didn't finish", core.worklistRunCheck(st, "shop", "o1", rr, 2000) == false)
+  ok = core.worklistRunCheck(st, "shop", "t1", rr, 2000)
+  check("run check: a finished item gets Adam's checkmark", ok == true and T1.done == true)
+  eq("run check: ...stamped", T1.doneTs, 2000)
+  eq("run check: ...as checked by the run", T1.doneBy, "run:r1a2b3c4d")
+  check("run check: ...once", core.worklistRunCheck(st, "shop", "t1", rr, 2001) == false and T1.doneTs == 2000)
+  -- the import still never touches done/doneTs/doneBy
+  core.worklistImportTodos(st, "shop", core.parseTodoFile("- [ ] fix the parser\n"), 2050, function() return "new" end)
+  check("run check: a resync of the line leaves the run's checkmark alone", T1.done == true and T1.doneBy == "run:r1a2b3c4d")
+  core.worklistToggle(st, "shop", "t1", 2100)
+  check("run check: Adam unchecks it as usual", T1.done == false and T1.doneTs == nil and T1.doneBy == nil)
+  core.worklistToggle(st, "shop", "t1", 2200)
+  check("run check: ...and his own check carries no run", T1.done == true and T1.doneBy == nil)
+
+  -- cc-run.sh's reports and the run's own file
+  eq("run files: <id>.run.json is a run", (core.runFileOf("r1a2b3c4d.run.json") or {}).kind, "run")
+  local rf = core.runFileOf("r1a2b3c4d.2.1790000000-123.json") or {}
+  check("run files: <run>.<item>.<epoch>-<pid>.json is a report", rf.kind == "report" and rf.run == "r1a2b3c4d" and rf.n == 2)
+  eq("run files: a write in progress", (core.runFileOf("r1a2b3c4d.2.1790000000-123.json.tmp.55") or {}).kind, "part")
+  eq("run files: anything else isn't ours", core.runFileOf("notes.txt"), nil)
+  local function report(t) return core.json.encode(t) end
+  local good = { v = 1, id = "1790000000-123", run = "r1a2b3c4d", item = 2, verdict = "done", note = "did it",
+                 session_id = "S1", at = 1790000000 }
+  local rep = core.parseRunReport("r1a2b3c4d.2.1790000000-123.json", report(good)) or {}
+  check("report parse: a done report", rep.run == "r1a2b3c4d" and rep.n == 2 and rep.verdict == "done"
+        and rep.note == "did it" and rep.session_id == "S1")
+  local bad = {}; for k, v in pairs(good) do bad[k] = v end; bad.item = 3
+  eq("report parse: its body must match its name", core.parseRunReport("r1a2b3c4d.2.1790000000-123.json", report(bad)), nil)
+  bad.item = 2; bad.verdict = "maybe"
+  eq("report parse: done or blocked only", core.parseRunReport("r1a2b3c4d.2.1790000000-123.json", report(bad)), nil)
+  bad.verdict = "blocked"; bad.note = nil
+  eq("report parse: blocked needs a note", core.parseRunReport("r1a2b3c4d.2.1790000000-123.json", report(bad)), nil)
+  bad.note = "x"; bad.session_id = nil
+  eq("report parse: a report names its session", core.parseRunReport("r1a2b3c4d.2.1790000000-123.json", report(bad)), nil)
+  eq("report parse: junk", core.parseRunReport("r1a2b3c4d.2.1790000000-123.json", "{not json"), nil)
+
+  -- the run's file round-trips, and the panel's view of it
+  local back = core.parseRunState(core.json.encode(r)) or { items = {} }
+  check("run state: round-trips", back.id == r.id and back.startedBy == "adam" and #back.items == 3
+        and back.items[1].state == "done" and back.items[1].session.id == "S1" and back.cur == 2)
+  eq("run state: junk", core.parseRunState("[]"), nil)
+  local v = core.runView(r5)
+  check("run view: phase, item and count", v.id == r5.id and v.phase == "running" and v.total == 2 and v.cur == 2)
+  check("run view: ...each item's text and state", v.items[1].text == "own 1" and v.items[1].state == "blocked")
+  check("run view: ...what Adam can do", v.canStop == true and v.canResume == false)
+  local rp = core.runNew(items(), { "t1" }, ctx); core.runStep(rp, { now = 1, batch = true })
+  check("run view: a paused run can be resumed or stopped", core.runView(rp).canResume == true and core.runView(rp).canStop == true)
+  check("run view: a stopped one neither", core.runView(r10).canResume == false and core.runView(r10).canStop == false)
+  check("run prune: a finished run goes after a week", core.runPruneDue(r2, (r2.endedAt or 0) + 8 * 86400) == true
+        and core.runPruneDue(r2, (r2.endedAt or 0) + 60) == false)
+  check("run prune: a running one never", core.runPruneDue(r7, 10 ^ 10) == false)
+
+  local fk = {}; for _, ft in ipairs(core.FEATURES) do fk[ft.key] = ft end
+  check("runner: FEATURES lists Run selected, flagged new", fk.runner ~= nil and fk.runner.new == true
+        and fk.runner.title == "Run selected")
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))

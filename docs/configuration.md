@@ -181,6 +181,7 @@ Everything lives under `~/.claude/`:
 | `cc-skill-labels.json` | Your ok / not ok labels on [skill runs](providers-and-integrations.md#how-often-each-skill-works) |
 | `cc-labels.json`, `cc-groups.json`, `cc-hidden.json`, `cc-autotitles.json` | Relabels and groups by project, hidden tiles, and auto-titles |
 | `cc-worklist.json`, `cc-worklist-archive.json` | My List (its items, TODO.md sync state and playbooks) and its archive |
+| `cc-run/` | [Checklist runs](fleet.md#my-list) started with **Run selected**: each run's `<id>.run.json` (Shepherd is its only writer; kept a week after it ends) and the `cc-run.sh` reports waiting for it |
 | `cc-presets.json`, `cc-recent-dirs.json` | Spawn presets and recent folders |
 | `cc-agents.json`, `cc-mcp.json`, `cc-mcp-configs/` | Agent profiles, their MCP server registry, and the `--mcp-config` files written for their spawns |
 | `cc-audit/` | A [find-only audit](providers-and-integrations.md#find-only-audit)'s launch files (its findings are in `~/.cc-audit/`, which a purge keeps) |

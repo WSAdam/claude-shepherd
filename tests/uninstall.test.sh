@@ -29,6 +29,7 @@ mkdir -p "$C/cc-notes/pending"; printf '# Handoff\n' > "$C/cc-notes/abc.handoff.
 mkdir -p "$C/cc-inbox/abc"; printf '{"nonce":"ab"}' > "$C/cc-inbox/abc/1790000000-000001-ab.msg"
 mkdir -p "$C/cc-decide"; printf '{"id":"abc.1790000000-1","key":"abc"}' > "$C/cc-decide/abc.1790000000-1.json"
 mkdir -p "$C/cc-lesson"; printf '{"v":1,"id":"1790000000-1"}' > "$C/cc-lesson/1790000000-1.json"
+mkdir -p "$C/cc-run"; printf '{"v":1,"id":"r1a2b3c4d"}' > "$C/cc-run/r1a2b3c4d.run.json"
 mkdir -p "$C/cc-resume"; printf '{"key":"abc","nonce":"ab","state":"waiting"}' > "$C/cc-resume/abc.json"
 mkdir -p "$C/cc-pins"; printf '{"v":1,"root":"/r","pins":[]}' > "$C/cc-pins/-r.json"
 mkdir -p "$C/cc-lease/db"; printf '{"v":1,"main":"/r","leases":{}}' > "$C/cc-lease/-r.json"
@@ -111,6 +112,8 @@ assert_eq "--purge removes the session mailbox" "gone" "$([ -e "$C/cc-inbox" ] &
 assert_eq "--purge removes the open decisions" "gone" "$([ -e "$C/cc-decide" ] && echo there || echo gone)"
 # 2026-10-03: the lessons waiting for the coach (cc-lesson/) are Shepherd's state too
 assert_eq "--purge removes the lessons waiting for the coach" "gone" "$([ -e "$C/cc-lesson" ] && echo there || echo gone)"
+# 2026-10-03: the checklist runs and their sessions' reports (cc-run/) are Shepherd's state too
+assert_eq "--purge removes the checklist runs" "gone" "$([ -e "$C/cc-run" ] && echo there || echo gone)"
 # 2026-09-29: the resumes waiting for a usage limit's reset (cc-resume/) are Shepherd's state too
 assert_eq "--purge removes the resumes waiting for a limit reset" "gone" "$([ -e "$C/cc-resume" ] && echo there || echo gone)"
 # 2026-09-29: the pinned links (cc-pins/) are Shepherd's state too

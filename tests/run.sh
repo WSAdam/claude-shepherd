@@ -542,6 +542,15 @@ echo ""
 echo "== node: My List playbooks -- Add on project tabs only, sources listed with Remove, rows grouped under the file's name, escaped (real browser) =="
 node "$DIR/worklist-playbooks.browser.test.js" || fail=1
 echo ""
+echo "== bash: a checklist run's reports -- done and blocked for the run and item a brief names, refusals, the record core.parseRunReport reads (cc-run.sh) =="
+bash "$DIR/checklist-run.test.sh" || fail=1
+echo ""
+echo "== lua: Run selected -- a run of what can run, each item's tab opened with its brief typed in (never a key), the box or its own session's report, Adam's checkmark by the run, one run per repo, freeze / live-run / Stop (behavioral, stubbed hs) =="
+HOME="$(mktemp -d)" lua "$DIR/worklist-runner.test.lua" || fail=1
+echo ""
+echo "== node: My List Run selected -- ▶ Run… picks nothing preselected, Run selected sends the tab and ids in tab order, the run bar, ✓ by run, escaped (real browser) =="
+node "$DIR/worklist-runner.browser.test.js" || fail=1
+echo ""
 
 if [ "$fail" -eq 0 ]; then
   echo "✅ ALL GREEN"

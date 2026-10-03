@@ -418,6 +418,29 @@ the FLEET row swaps the session tiles for the list (click again to go back).
   marked **removed**, for you to verify. Adding the same file again picks up where it left off. The
   project's own `TODO.md` can't be added (it already imports), and the list is kept in
   `cc-worklist.json`.
+- **▶ Run selected**: **▶ Run…** on a project tab lets you pick open items (`TODO.md` lines, playbook
+  lines, your own). Nothing is preselected. An item that can't run has a greyed box that says why:
+  its box is already ticked in its file, its line is gone, or it's only on a branch. **▶ Run selected
+  (N)** works through them **one at a time**, in the tab's order. Each item gets a fresh Claude tab in
+  the repo's **main checkout** (the sequential exception), opened like a batch unit's tab, with its
+  brief typed in. Press Return to send it; Shepherd never types into a window. The brief says: do only
+  this item, then tick its box in the file it names. For your own items, the brief says to run
+  `~/.claude/cc-run.sh done <run> <item>`. Any item's session can run `cc-run.sh blocked <run> <item>
+  --note "<why>"`. When the session's turn ends, Shepherd checks the item itself. A file line is
+  finished when its box is ticked and the turn did something (not **did nothing**). Any other item is
+  finished when its own session reported done. A finished item gets **your checkmark**, shown as
+  **✓ by run**; uncheck it as usual. Its tab then closes. An item that finished nothing keeps its tab
+  open for you to look at. The run bar above the list shows the item running now, with a chip per item,
+  plus **Resume**, **Stop** (it asks first) and **✕** once the run has ended.
+  - Three items in a row that finish nothing **stop** the run.
+  - A `[~]` / `(needs live run)` item, a **blocked** report, a tab that didn't open, or a batch
+    starting in the repo **pause** it and tell you (a toast and a banner). **Resume** skips a live-run
+    item, which is left for you.
+  - A [hold](automation.md#hands-off-hold) on the item's session, or **❄ Freeze**, holds the run
+    where it is until it lifts.
+  - One run per repo. None starts while a batch runs there.
+  - Runs live in `~/.claude/cc-run/`. Only a run you started can check an item off; importing
+    never does.
 - **▶ live run**: some lines can only be checked by a live run (deploy, then look). A `TODO.md` line
   written `- [~] text`, or carrying `(needs live run)` / `(live check)` on a `[ ]` or `[x]` line, shows
   a **▶ live run** chip. A `[~]` line is never done; a marked `[x]` keeps its **✓ auto** chip too.

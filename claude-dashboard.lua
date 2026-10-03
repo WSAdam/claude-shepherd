@@ -3236,6 +3236,309 @@ function FX.playbookList(st, key)
   return (#out > 0) and out or nil
 end
 
+-- ---- Run selected: the checklist runner in My List (2026-10-03) ----
+-- Mining round 2, unit D3b (the rules and the pure halves: cc-core's "Run selected"). Adam selects
+-- open items on a project's My List tab and clicks Run selected (FX.runStart; the message names the
+-- tab and item ids, never a path -- the folder comes from Shepherd's own records). Each tick FX.runTick
+-- takes the reports cc-run.sh left (FX.runIntake), then moves every running run one step
+-- (core.runStep): the next item's tab opens in the repo's main checkout through the expect-tag
+-- machinery with its brief typed in (FX.runOpenTab -- never a keystroke: Adam sends it), its session
+-- is found like a batch unit's (core.newTabSession), and once its turn is over the item is judged --
+-- a file line by reading its box (core.parseTodoFile), any other item by its own session's report. A
+-- finished item gets Adam's checkmark (core.worklistRunCheck) and its tab closes by the run's tag
+-- (FX.closeTab's opts.unit; core.mergeClosesTab is never widened). A pause or a stop tells Adam
+-- (toast and banner). The run is ~/.claude/cc-run/<id>.run.json, written only here. State on FX: the
+-- main chunk is at Lua's 200-local cap.
+FX.RUN_DIR = os.getenv("CC_RUN_DIR") or ((os.getenv("HOME") or "") .. "/.claude/cc-run")
+-- runs: id -> run (read once, then kept); opening: id -> the tab being opened; held: id -> why a hold holds it
+FX._run = { runs = nil, opening = {}, held = {} }
+
+function FX.runAll()
+  if FX._run.runs == nil then
+    local runs = {}
+    for _, fn in ipairs(FX.readDir(FX.RUN_DIR)) do
+      local f = core.runFileOf(fn)
+      if f and f.kind == "run" then
+        local r = core.parseRunState(FX.readFile(FX.RUN_DIR .. "/" .. fn))
+        if r and r.id == f.id then runs[r.id] = r end
+      end
+    end
+    FX._run.runs = runs
+  end
+  return FX._run.runs
+end
+function FX.runSave(run)
+  pcall(function() hs.fs.mkdir(FX.RUN_DIR) end)
+  if not FX.writeFileAtomic(FX.RUN_DIR .. "/" .. run.id .. ".run.json", core.json.encode(run)) then
+    print("[cc-dashboard] ❌ run " .. tostring(run.id) .. ": couldn't save it in " .. FX.RUN_DIR)
+  end
+end
+function FX.runPush()
+  pcall(function() wv:evaluateJavaScript("window.ccWorklist(" .. hs.json.encode(FX.worklistPayload()) .. ")") end)
+end
+-- A pause, a stop or the end: a toast, and a banner (a run works while Adam is elsewhere).
+function FX.runNotify(run, text)
+  print("[cc-dashboard] ▶ run " .. tostring(run.id) .. ": " .. tostring(text))
+  pcall(function() FX.alert("▶ Checklist run: " .. tostring(text), 8) end)
+  pcall(function() FX.notify("Shepherd · checklist run", tostring(text)) end)
+end
+
+-- The run a tab shows: its active one, else its newest ended one Adam hasn't dismissed.
+function FX.runFor(key)
+  local best
+  for _, r in pairs(FX.runAll()) do
+    if r.key == key then
+      if core.runActive(r) then return r end
+      if not r.dismissed and (not best or (tonumber(r.startedAt) or 0) > (tonumber(best.startedAt) or 0)) then best = r end
+    end
+  end
+  return best
+end
+-- What the tab's run bar gets (core.runView), plus what a hold says while it holds the run.
+function FX.runPanel(key)
+  local r = FX.runFor(key)
+  local v = r and core.runView(r) or nil
+  if v then v.held = FX._run.held[r.id] end
+  return v
+end
+
+-- Is a batch running in this repo (or waiting for Adam's answer)? Then no run starts or opens a tab
+-- there: one new tab per repo at a time is what keeps core.newTabSession unambiguous.
+function FX.runBatchActive(root)
+  root = core.normDir(tostring(root or ""))
+  for id, b in pairs(FX._fleetBatches or {}) do
+    if type(b) == "table" and core.normDir(tostring(b.repo or "")) == root then
+      local g = (FX.fleetState(id) or {}).grant
+      if not (type(g) == "table" and (g.stopped or g.denied)) then return true end
+    end
+  end
+  return false
+end
+
+-- Run selected: Adam's click (the bridge's worklist-run). ids = the selected item ids, as JSON. The
+-- main checkout comes from the tab's own roots (FX.playbookTodoRoots), never from the webview.
+-- Returns what the panel's toast says: { started, refused } or { error }.
+function FX.runStart(key, idsText)
+  local okd, ids = pcall(function() return core.json.decode(tostring(idsText or "")) end)
+  if not okd or type(ids) ~= "table" then return { error = "No items were selected." } end
+  local st = FX.readWorklist()
+  -- a repo tab runs in its MAIN checkout, never a worktree (the sequential exception); a plain folder in itself
+  local root
+  local roots = FX.stackRootsFor(key, st, {})
+  if roots then
+    for _, rt in ipairs(roots) do if rt.isMain and not root then root = rt.root end end
+    if not root then return { error = "Shepherd doesn't know this repo's main checkout yet -- open a session in it first." } end
+  else
+    root = FX.playbookTodoRoots(key, st)[1]
+  end
+  if not root then return { error = "Shepherd doesn't know this project's folder yet -- open a session in it first." } end
+  root = core.normDir(root)
+  local why = core.runRefusal(FX.runAll(), root, FX.runBatchActive(root))
+  if why then return { error = (why:gsub("^%l", string.upper)) } end
+  local run, err = core.runNew(core.worklistScopeList(st, key), ids,
+    { id = core.runNewId(FX.mailboxNonce()), key = key, root = root, todoFile = root .. "/TODO.md", now = FX.now() })
+  if not run then return { error = (tostring(err or "nothing to run"):gsub("^%l", string.upper)) } end
+  FX.runAll()[run.id] = run
+  FX.runSave(run)
+  print("[cc-dashboard] 🚀 run " .. run.id .. ": " .. #run.items .. " item(s) in " .. root
+    .. ((run.refused or 0) > 0 and (", " .. run.refused .. " selected couldn't run") or ""))
+  FX.appendLedger({ type = "run_start", run = run.id, cwd = root, items = #run.items, refused = run.refused })
+  return { started = #run.items, refused = run.refused, id = run.id }
+end
+
+-- Open item's tab: an empty Claude tab in the repo's window with its brief typed in (FX.openClaudeTab,
+-- which never presses a key), the window's tab bridge told to EXPECT it and tag it "<run>:<item>"
+-- (core.runUnitTag) so it can be closed when the item is done. The session is found later
+-- (FX.runPollOpen). true, or false + why it couldn't start.
+function FX.runOpenTab(run, item)
+  do
+    local host = FX.fleetRepoHost(run.root)
+    local reg = host and FX.tabBridgeRegistry(host)
+    if type(reg) == "table" and not core.tabBridgeSupports(reg.version, "expect") then
+      return false, run.root .. "'s VS Code window runs tab bridge " .. tostring(reg.version or "?")
+        .. ", which can't tag the item's tab -- Developer: Reload Window there"
+    end
+  end
+  local t = { at = FX.now(), n = item.n }
+  FX._run.opening[run.id] = t
+  local tag = core.runUnitTag(run.id, item.n)
+  local editor = "vscode"
+  for _, it in ipairs(lastRenderList or {}) do
+    if it.editor == "cursor" and not it.remote and core.normDir(tostring(it.cwd or "")) == run.root then editor = "cursor" end
+  end
+  local ok = false
+  pcall(function() ok = FX.openClaudeTab({ root = run.root, editor = editor, prompt = core.runBrief(run, item),
+    label = "run item " .. item.n, quiet = true,
+    beforeOpen = function()
+      t.before = FX.readSessions()
+      local host = FX.fleetRepoHost(run.root)
+      if host then
+        local cmd = core.tabBridgeCommand("expect-" .. run.id, nil, FX.now(), "expect", tag)
+        FX.writeFileAtomic(FX.TAB_BRIDGE_DIR .. "/" .. host .. ".in/" .. cmd.id .. ".json", core.json.encode(cmd))
+        FX.tabBridgeTrack(cmd.id, { op = "expect", hw = host, label = tag, name = "run item " .. item.n, at = FX.now() })
+      end
+    end,
+    onDone = function(sent, why)
+      if FX._run.opening[run.id] ~= t then return end
+      if sent then t.sent = FX.now() else t.failed = tostring(why or "the tab didn't open") end
+    end }) end)
+  if not ok then
+    FX._run.opening[run.id] = nil
+    return false, "Shepherd couldn't start opening the tab"
+  end
+  return true
+end
+
+-- The tab being opened for `item`: has its session appeared (the one new session file in the main
+-- checkout, in the repo's window -- the batch unit's rule)? A tab that never opens pauses the run.
+function FX.runPollOpen(run, item, now)
+  local t = FX._run.opening[run.id]
+  local function fail(why)
+    FX._run.opening[run.id] = nil
+    core.runOpenFailed(run, item.n, why, now)
+    FX.runSave(run)
+    FX.runNotify(run, run.why)
+    FX.runPush()
+  end
+  if not t or t.n ~= item.n then return fail("Shepherd reloaded while it was opening") end
+  if t.failed then return fail(t.failed) end
+  if not t.sent then
+    if now - t.at >= FX.FLEET_TAB_WAIT + core.FLEET_TAB_OPEN_GRACE then
+      return fail("it never opened (is the repo's VS Code window open?)")
+    end
+    return
+  end
+  local s, why = core.newTabSession(t.before, FX.readSessions(), run.root)
+  if s then
+    local host, ppid = FX.fleetRepoHost(run.root), nil
+    if host then
+      pcall(function() ppid = (hs.execute("ps -o ppid= -p " .. tostring(math.floor(tonumber(s.pid) or 0))) or ""):match("%d+") end)
+      if ppid ~= host then return fail("a new session appeared in " .. run.root .. " but not in its VS Code window") end
+    end
+    FX._run.opening[run.id] = nil
+    core.runItemOpened(run, item.n, { id = s.sessionId, pid = s.pid, name = s.name }, now)
+    FX.runSave(run)
+    print("[cc-dashboard] ✅ run " .. run.id .. ": item " .. item.n .. " is session " .. tostring(s.name or s.sessionId))
+    pcall(function() FX.alert("▶ Checklist run: item " .. item.n .. " of " .. #run.items .. " is typed into a new tab in "
+      .. (run.root:match("([^/]+)$") or run.root) .. " -- press Return there to start it", 10) end)
+    FX.runPush()
+    return
+  end
+  if why and why:find("at once", 1, true) then return fail(why) end
+  if now - t.sent >= FX.FLEET_TAB_WAIT then return fail("its session never appeared") end
+end
+
+-- A file item's box, read from its file: true ticked, false not (or the line is gone), nil unreadable.
+function FX.runTicked(item)
+  local content = FX.readFile(item.file)
+  if not content then return nil end
+  for _, e in ipairs(core.parseTodoFile(content)) do
+    if e.text == item.srcText then return e.done == true end
+  end
+  return false
+end
+
+-- The reports cc-run.sh left: each taken (core.runRecordReport) only for its run's item under way, from
+-- that item's own session; anything else is dropped. A report for a tab still opening waits a tick.
+function FX.runIntake(runs, now)
+  for _, fn in ipairs(FX.readDir(FX.RUN_DIR)) do
+    local f = core.runFileOf(fn)
+    local path = FX.RUN_DIR .. "/" .. fn
+    if f and f.kind == "report" then
+      local rep = core.parseRunReport(fn, FX.readFile(path))
+      local run = rep and runs[rep.run] or nil
+      local ok, why = false, rep and "no such run" or "unreadable"
+      if run then ok, why = core.runRecordReport(run, rep, now) end
+      if ok then
+        os.remove(path)
+        FX.runSave(run)
+        print("[cc-dashboard] ✅ run " .. run.id .. ": item " .. rep.n .. " reported " .. rep.verdict)
+      elseif why ~= "wait" then
+        os.remove(path)
+        print("[cc-dashboard] ⚠️ run: dropped a report (" .. fn .. "): " .. tostring(why))
+      end
+    elseif f and f.kind == "part" then
+      local mt
+      pcall(function() mt = tonumber((hs.fs.attributes(path, "modification"))) end)
+      if mt and now - mt > 60 then os.remove(path) end
+    end
+  end
+end
+
+-- One step of a running run, and its effect.
+function FX.runAdvance(run, bySid, now)
+  local cur = run.items[tonumber(run.cur) or 0]
+  if cur and cur.state == "opening" then
+    FX.runPollOpen(run, cur, now)
+    if run.phase ~= "running" or cur.state == "opening" then return end
+  end
+  local tile = (cur and cur.state == "open" and type(cur.session) == "table") and bySid[cur.session.id] or nil
+  local holds = FX._hold and FX._hold.holds or {}
+  local facts = { now = now, tile = tile,
+                  held = (holds.fleet == true and "fleet") or (tile and FX.holdOf(tile)) or nil }
+  if not (cur and cur.state == "open") then facts.batch = FX.runBatchActive(run.root) end
+  if cur and cur.state == "open" and cur.kind == "file" and tile and core.runTurnOver(tile, cur, now) then
+    facts.ticked = FX.runTicked(cur)
+  end
+  local a = core.runStep(run, facts)
+  FX._run.held[run.id] = (a.act == "held") and a.why or nil
+  if a.act == "open" then
+    local item = run.items[a.n]
+    local ok, why = FX.runOpenTab(run, item)
+    if not ok then
+      core.runOpenFailed(run, a.n, why, now)
+      FX.runNotify(run, run.why)
+    end
+    print("[cc-dashboard] ▶ run " .. run.id .. ": " .. (ok and "opening" or "couldn't open") .. " item " .. a.n .. "'s tab")
+    FX.runSave(run)
+    FX.runPush()
+  elseif a.act == "done" then
+    local item = run.items[a.n]
+    local st = FX.readWorklist()
+    local okc, whyc = core.worklistRunCheck(st, run.key, item.id, run, now)
+    if okc then
+      FX.writeWorklist(st)
+      print("[cc-dashboard] ✅ run " .. run.id .. ": item " .. a.n .. " done -- checked off by the run")
+    else
+      print("[cc-dashboard] ⚠️ run " .. run.id .. ": item " .. a.n .. " done, but not checked off: " .. tostring(whyc))
+    end
+    if tile then
+      local okt, whyt = FX.closeTab(tile, { quiet = true, unit = core.runUnitTag(run.id, item.n) })
+      if not okt then print("[cc-dashboard] ⚠️ run " .. run.id .. ": item " .. a.n .. "'s tab stays open: " .. tostring(whyt)) end
+    end
+    FX.runSave(run)
+    FX.runPush()
+  elseif a.act == "nothing" then
+    print("[cc-dashboard] ⚠️ run " .. run.id .. ": item " .. a.n .. " finished nothing -- " .. tostring(a.why))
+    FX.runSave(run)
+    FX.runPush()
+  elseif a.act == "pause" or a.act == "stop" or a.act == "finished" then
+    FX.runSave(run)
+    FX.runNotify(run, (a.act == "finished") and ("finished -- " .. tostring(run.why)) or tostring(run.why))
+    FX.runPush()
+  end
+end
+
+-- Each tick: the reports, then one step of every running run; an ended run's file goes after a week.
+-- Nothing at all while there is no run.
+function FX.runTick(list)
+  local runs = FX.runAll()
+  if next(runs) == nil then return end
+  local now = FX.now()
+  FX.runIntake(runs, now)
+  local bySid = {}
+  for _, it in ipairs(list or {}) do if it.session_id then bySid[it.session_id] = it end end
+  for id, run in pairs(runs) do
+    if run.phase == "running" then
+      local ok, err = pcall(FX.runAdvance, run, bySid, now)
+      if not ok then print("[cc-dashboard] ❌ run " .. tostring(id) .. ": " .. tostring(err)) end
+    elseif core.runPruneDue(run, now) then
+      os.remove(FX.RUN_DIR .. "/" .. id .. ".run.json")
+      runs[id] = nil
+    end
+  end
+end
+
 -- ---- Per-session chat title (two sessions in ONE project) -------------------
 -- Claude Code keeps each session's own chat title in its transcript as an
 -- "ai-title" record -- the same string the editor shows on its tab. Read it ONLY
@@ -4430,7 +4733,9 @@ function FX.closeTab(it, opts)
   -- a batch unit's tab is targeted by the tag its bridge gave it (it never gets a name); which
   -- channel names it, the fall-back to the tab's own name, and whether a refusal can ever heal
   -- are all core.tabCloseVerdict's call now -- the panel has to ask the same question.
-  local unit = FX.fleetUnitTagOf(it)
+  -- opts.unit (2026-10-03): a checklist run's item tab, tagged "<run>:<item>" by its own expect (the
+  -- run alone knows it; FX.fleetUnitTagOf stays batch-only, so core.mergeClosesTab is never widened).
+  local unit = (opts and type(opts.unit) == "string" and opts.unit ~= "") and opts.unit or FX.fleetUnitTagOf(it)
   local byName = FX.sessionTabLabel(it)
   local ok, why, retryable, by = core.tabCloseVerdict(FX.tabBridgeRegistry(hw), unit, byName, FX.now())
   if not ok then return refuse(why, retryable) end
@@ -12328,6 +12633,8 @@ function FX.worklistPayload()
         todoOn = (tm ~= nil) or nil,
         hasTodo = hasTodo or nil,
         playbooks = FX.playbookList(st, k),
+        run = FX.runPanel(k),                                  -- ▶ the tab's checklist run (2026-10-03)
+        runWhy = core.runWhyMap(core.worklistScopeList(st, k)),
       }
     end
   end
@@ -12344,6 +12651,8 @@ function FX.worklistPayload()
         todoOn = (tm ~= nil) or nil,
         hasTodo = (type(tm) == "table" and tm.cwd and FX.todoFileAt(tm.cwd)) or nil,
         playbooks = FX.playbookList(st, k),
+        run = FX.runPanel(k),
+        runWhy = core.runWhyMap(list),
       }
     end
   end
@@ -13971,6 +14280,35 @@ local function handleBridgeMsg(msg)
   -- 📘 Playbooks (2026-10-03): Add picks the file through the NATIVE chooser -- the message names
   -- only the tab, never a path -- and Remove names a source by its id. Remove keeps every item (they
   -- stay to be verified). Both answer window.ccPlaybookResult for the toast.
+  -- ▶ Run selected (2026-10-03): the message names the tab and, for a start, the selected item ids
+  -- (JSON) -- never a path; Resume, Stop and Dismiss name only the tab (its run is FX.runFor's). Each
+  -- answers window.ccRunResult for the toast, and the tab's run bar follows in the payload.
+  if a == "worklist-run" or a == "worklist-run-resume" or a == "worklist-run-stop" or a == "worklist-run-dismiss" then
+    local scope = tostring(payload.v or "")
+    if scope == "" or scope == "generic" or scope == "master" or scope == "archive" then return end
+    local r
+    if a == "worklist-run" then
+      r = FX.runStart(scope, payload.text)
+    else
+      local run = FX.runFor(scope)
+      if a == "worklist-run-resume" then
+        r = (run and core.runResume(run, FX.now())) and { resumed = true } or { error = "That run isn't paused." }
+      elseif a == "worklist-run-stop" then
+        r = (run and core.runStop(run, FX.now(), "stopped by Adam")) and { stopped = true } or { error = "That run isn't going." }
+        if run then FX._run.opening[run.id] = nil end
+      elseif run and not core.runActive(run) then
+        run.dismissed = true
+        r = { dismissed = true }
+      else
+        r = { error = "Stop the run before closing it." }
+      end
+      if run and not r.error then FX.runSave(run) end
+    end
+    print("[cc-dashboard] " .. (r.error and ("⚠️ My List run: " .. r.error) or ("✅ My List run: " .. a)))
+    FX.runPush()
+    pcall(function() wv:evaluateJavaScript("window.ccRunResult(" .. hs.json.encode(r) .. ")") end)
+    return
+  end
   if a == "worklist-playbook-add" or a == "worklist-playbook-remove" then
     local scope = tostring(payload.v or "")
     if scope == "" or scope == "generic" or scope == "master" or scope == "archive" then return end
@@ -15870,6 +16208,31 @@ local HTML = [[
   .wl-pbdel { background:none; border:none; color:var(--muted); cursor:pointer; padding:0 4px; font-size:inherit; }
   .wl-pbdel:hover { color:var(--danger); }
   .wl-pbgroup { text-transform:none; letter-spacing:0; font-size:clamp(9px,2.6cqw,11px); color:var(--text-3); }
+  /* ▶ Run selected (2026-10-03): the picking buttons, a pick box in place of the done box, the
+     tab's run bar (what runs now, Resume / Stop / close) with one chip per item, and ✓ by run. */
+  .wl-runbtn { background:var(--surface); color:var(--text-2); border:1px solid var(--border);
+    border-radius:14px; padding:2px clamp(7px,2.4cqw,12px); font-size:clamp(10px,2.8cqw,12px);
+    cursor:pointer; white-space:nowrap; }
+  .wl-runbtn:hover:not(:disabled) { background:var(--surface-hover); border-color:var(--accent); color:var(--accent-text); }
+  .wl-runbtn:disabled { opacity:.5; cursor:default; }
+  .wl-rpick { cursor:pointer; margin:1px 0 0; flex:0 0 auto; width:15px; height:15px; accent-color:var(--accent); }
+  .wl-rpick:disabled { cursor:not-allowed; }
+  #wl-runbar { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin:-2px 0 8px; padding:5px 8px;
+    border:1px solid var(--border-weak); border-radius:8px; background:var(--surface-2);
+    font-size:clamp(10px,2.8cqw,12px); color:var(--text-2); }
+  .wl-runhead { flex:1 1 12em; min-width:0; overflow:hidden; text-overflow:ellipsis; }
+  .wl-runsub, .wl-runcount { color:var(--muted); white-space:nowrap; }
+  #wl-runbar button { background:var(--surface); color:var(--text-2); border:1px solid var(--border); border-radius:10px;
+    padding:0 8px; font-size:inherit; cursor:pointer; }
+  #wl-runbar button:hover { border-color:var(--accent); color:var(--accent-text); }
+  .wl-runitems { flex:1 1 100%; display:flex; flex-wrap:wrap; gap:4px; }
+  .wl-runit { max-width:18em; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:clamp(9px,2.5cqw,11px);
+    border:1px solid var(--border-weak); border-radius:8px; padding:0 5px; color:var(--text-3); }
+  .wl-runit.done { color:var(--ok); }
+  .wl-runit.open, .wl-runit.opening { color:var(--accent-text); border-color:var(--accent); }
+  .wl-runit.blocked, .wl-runit.nothing { color:var(--warn); }
+  .wl-byrun { flex:0 0 auto; font-size:clamp(9px,2.5cqw,11px); color:var(--ok); background:var(--surface-2);
+    border:1px solid var(--border-weak); border-radius:8px; padding:0 5px; white-space:nowrap; }
   #wl-todoflash { font-size:clamp(9px,2.6cqw,11px); color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .wl-fdone { flex:0 0 auto; font-size:clamp(9px,2.5cqw,11px); color:var(--ok); background:var(--surface-2);
     border:1px solid #2c5a3a; border-radius:8px; padding:0 5px; white-space:nowrap; }
@@ -17133,8 +17496,12 @@ local HTML = [[
       <button id="wl-todoall" onclick="todoImportAll()" title="Import/refresh TODO.md for every known project">⇪ All projects</button>
       <button id="wl-markall" onclick="worklistMarkAll()" title="Tick off everything still open on this tab (asks first)">✓ Mark all done</button>
       <button id="wl-pbadd" onclick="playbookAdd()" style="display:none" title="Pick a markdown checklist on this Mac: its checkbox lines import into this tab like TODO.md's and follow the file as it changes">📘 Add a playbook…</button>
+      <button id="wl-runsel" class="wl-runbtn" onclick="wlRunPickStart()" style="display:none" title="Pick open items to run, one at a time, each in a fresh session in this project's main checkout">▶ Run…</button>
+      <button id="wl-rungo" class="wl-runbtn" onclick="wlRunGo()" style="display:none" title="Run the picked items one at a time, each in a fresh session">▶ Run selected</button>
+      <button id="wl-runcancel" class="wl-runbtn" onclick="wlRunPickCancel()" style="display:none">Cancel</button>
       <span id="wl-todoflash"></span>
     </div>
+    <div id="wl-runbar" style="display:none"></div>
     <div id="wl-pbrow" style="display:none"></div>
     <div id="wl-addrow">
       <button id="wl-addbtn" onclick="wlModalOpen('')">＋ Add an item…</button>
@@ -19000,6 +19367,7 @@ local HTML = [[
         if(list[i] && String(list[i].id) === String(id)){
           list[i].done = !list[i].done;
           if(list[i].done) list[i].doneTs = Math.floor(Date.now() / 1000); else delete list[i].doneTs;
+          delete list[i].doneBy;   // 2026-10-03: Adam's click is never a run's (core.worklistToggle)
           return true;
         }
       }
@@ -19014,7 +19382,17 @@ local HTML = [[
       // tint) and a ✓ stamp of when it was actually completed -- the same pairing
       // MASTER's Recently-completed drawer shows, now on every scope's Done area.
       var chips = wlProgChip(it.steps) + wlDueChip(it.due, isDone)
-                + (isDone ? wlDoneChip(it.doneTs) : "") + wlFileBadges(it, isDone);
+                + (isDone ? wlDoneChip(it.doneTs) + wlByRunChip(it) : "") + wlFileBadges(it, isDone);
+      // ▶ Run… picking (2026-10-03): an open row's box picks it to run instead of checking it off
+      // (disabled, saying why, for an item Lua says can't run); a click on the row picks it too.
+      if(!isDone && wlRunPicking()){
+        var why = wlRunWhy(it);
+        return '<div class="wl-item wl-picking" data-open="' + id + '" title="' + (why ? esc("Can't run: " + why) : "Click to pick it to run") + '">'
+          + '<input type="checkbox" class="wl-rpick" data-rpick="' + id + '"'
+          + (worklistRunPick.ids[String(it.id || "")] ? " checked" : "")
+          + (why ? ' disabled title="' + esc("Can't run: " + why) + '"' : ' title="Pick it to run"') + '>'
+          + '<span class="wl-txt">' + esc(it.text || "") + '</span>' + chips + '</div>';
+      }
       return '<div class="wl-item" data-open="' + id + '" title="Click to open">'
         + '<input type="checkbox" class="wl-cb" data-id="' + id + '"'
         + (isDone ? " checked" : "") + '>'
@@ -19178,6 +19556,7 @@ local HTML = [[
         tb.textContent = (curProj && curProj.todoOn) ? "↻ Sync TODO.md" : "⇪ Import TODO.md";
       }
       wlRenderPlaybooks(curProj);
+      wlRenderRun(curProj);
       // Mark all: offered on every tab INCLUDING master, and only while there is something
       // left to mark -- a button that would do nothing shouldn't be there to be clicked.
       // It also steps aside while the filter box is non-empty (2026-09-22): wlOpenCount
@@ -19466,6 +19845,136 @@ local HTML = [[
       if(wlTodoFlashTimer) clearTimeout(wlTodoFlashTimer);
       wlTodoFlashTimer = setTimeout(function(){ el.textContent = ""; }, 6000);
     };
+    // ---- ▶ Run selected: the checklist runner (2026-10-03) ----
+    // ▶ Run… on a project tab starts picking open items -- nothing preselected, a TODO.md line
+    // included; Run selected (N) sends the tab and the picked ids in the TAB's order, and Lua works
+    // through them one at a time, each in a fresh session in the repo's main checkout. An item Lua says
+    // can't run (the tab's runWhy) gets a disabled box with the reason. The run bar shows the tab's run
+    // (core.runView): what runs now, Resume on a paused run, Stop (asks first), close on an ended one.
+    // Every message names only the tab (and the ids, for a start); every word from a file or a session
+    // goes through esc().
+    var worklistRunPick = null;   // null, or { scope, ids: { <id>: true } } while picking
+    var RUN_ICONS = { done: "✓", open: "▶", opening: "…", queued: "·", nothing: "✗", blocked: "⏸", skipped: "↷" };
+    function wlCurProj(){
+      var projs = (worklistData && Array.isArray(worklistData.projects)) ? worklistData.projects : [];
+      for(var i = 0; i < projs.length; i++){ if(projs[i].key === worklistScope) return projs[i]; }
+      return null;
+    }
+    function wlRunPicking(){ return !!worklistRunPick && worklistRunPick.scope === worklistScope; }
+    function wlRunWhy(it){
+      var p = wlCurProj(), m = p && p.runWhy, id = String((it && it.id) || "");
+      return (m && typeof m === "object" && Object.prototype.hasOwnProperty.call(m, id)) ? String(m[id] || "it can't run") : "";
+    }
+    function wlRunActive(p){ var r = p && p.run; return !!(r && (r.phase === "running" || r.phase === "paused")); }
+    function wlRunnableCount(){
+      var n = 0;
+      wlScopeItems(worklistScope).forEach(function(it){ if(it && !it.done && !wlRunWhy(it)) n++; });
+      return n;
+    }
+    function wlRunPicked(){
+      if(!wlRunPicking()) return [];
+      var out = [];
+      wlScopeItems(worklistScope).forEach(function(it){
+        if(it && !it.done && worklistRunPick.ids[String(it.id)]) out.push(String(it.id));
+      });
+      return out;
+    }
+    function wlRunPickStart(){
+      if(!wlIsProjectTab(worklistScope)) return;
+      worklistRunPick = { scope: worklistScope, ids: {} };
+      renderWorklist();
+    }
+    function wlRunPickCancel(){ worklistRunPick = null; renderWorklist(); }
+    function wlRunToggle(id){
+      if(!wlRunPicking()) return;
+      var it = null;
+      wlScopeItems(worklistScope).forEach(function(x){ if(x && String(x.id) === String(id)) it = x; });
+      if(!it || it.done || wlRunWhy(it)) return;
+      var ids = worklistRunPick.ids, k = String(id);
+      if(ids[k]) delete ids[k]; else ids[k] = true;
+      renderWorklist();
+    }
+    function wlRunGo(){
+      var ids = wlRunPicked();
+      if(!ids.length) return;
+      worklistRunPick = null;
+      renderWorklist();
+      send("worklist-run", worklistScope, JSON.stringify(ids));
+    }
+    function wlRunResume(){ send("worklist-run-resume", worklistScope); }
+    function wlRunStop(){
+      if(!confirm("Stop this run? The item under way keeps its tab; nothing more opens.")) return;
+      send("worklist-run-stop", worklistScope);
+    }
+    function wlRunDismiss(){ send("worklist-run-dismiss", worklistScope); }
+    // "✓ by run": a done item a run Adam started checked off (core.worklistRunCheck's doneBy).
+    function wlByRunChip(it){
+      var by = String((it && it.doneBy) || "");
+      if(by.indexOf("run:") !== 0) return "";
+      return '<span class="wl-byrun" title="' + esc("Checked off by checklist run " + by.slice(4)
+        + " once its session finished it — uncheck it to reopen") + '">✓ by run</span>';
+    }
+    function wlRenderRun(curProj){
+      var proj = (curProj && wlIsProjectTab(worklistScope)) ? curProj : null;
+      var active = wlRunActive(proj);
+      if(worklistRunPick && (!proj || active || worklistRunPick.scope !== worklistScope)) worklistRunPick = null;
+      var picking = wlRunPicking();
+      var sel = document.getElementById("wl-runsel"), go = document.getElementById("wl-rungo");
+      var cancel = document.getElementById("wl-runcancel");
+      if(sel) sel.style.display = (proj && !picking && !active && wlRunnableCount()) ? "" : "none";
+      if(go){
+        var n = wlRunPicked().length;
+        go.style.display = picking ? "" : "none";
+        go.disabled = !n;
+        go.textContent = "▶ Run selected (" + n + ")";
+      }
+      if(cancel) cancel.style.display = picking ? "" : "none";
+      var bar = document.getElementById("wl-runbar"); if(!bar) return;
+      var r = proj && proj.run;
+      if(!r || typeof r !== "object"){ bar.style.display = "none"; bar.innerHTML = ""; return; }
+      var items = Array.isArray(r.items) ? r.items : [], cur = null, head, sub = "";
+      items.forEach(function(it){ if(it && it.n === r.cur) cur = it; });
+      if(r.phase === "running"){
+        head = "▶ Run · item " + (r.cur|0) + " of " + (r.total|0) + (cur ? ": " + String(cur.text || "") : "");
+        if(r.held) sub = "⏸ held: " + String(r.held);
+        else if(cur && cur.state === "opening") sub = "opening its tab…";
+        else if(cur && cur.state === "open") sub = "in its own tab — press Return there if it hasn't started";
+      } else if(r.phase === "paused") head = "⏸ Run paused: " + String(r.why || "");
+      else if(r.phase === "stopped") head = "⏹ Run stopped: " + String(r.why || "");
+      else head = "✓ Run finished: " + String(r.why || "");
+      var h = '<span class="wl-runhead" title="' + esc(head) + '">' + esc(head) + '</span>'
+        + (sub ? '<span class="wl-runsub">' + esc(sub) + '</span>' : '')
+        + '<span class="wl-runcount">' + esc((r.done|0) + "/" + (r.total|0) + " checked off") + '</span>'
+        + (r.canResume ? '<button id="wl-runresume" onclick="wlRunResume()" title="Go on with the next item">Resume</button>' : '')
+        + (r.canStop ? '<button id="wl-runstop" onclick="wlRunStop()" title="Stop the run: nothing more opens">Stop</button>'
+                     : '<button id="wl-rundismiss" onclick="wlRunDismiss()" title="Close this run\'s summary">✕</button>');
+      if(items.length){
+        h += '<div class="wl-runitems">' + items.map(function(it){
+          var st = String((it && it.state) || ""), icon = RUN_ICONS.hasOwnProperty(st) ? RUN_ICONS[st] : "·";
+          return '<span class="wl-runit ' + (RUN_ICONS.hasOwnProperty(st) ? st : "") + '" title="'
+            + esc(st + (it.note ? " — " + String(it.note) : "") + ": " + String(it.text || "")) + '">'
+            + esc(icon + " " + String(it.text || "")) + '</span>';
+        }).join("") + '</div>';
+      }
+      bar.style.display = "";
+      bar.innerHTML = h;
+    }
+    window.ccRunResult = function(r){
+      r = r || {};
+      var el = document.getElementById("wl-todoflash"); if(!el) return;
+      var msg;
+      if(r.error) msg = String(r.error);
+      else if(r.started !== undefined){
+        msg = "Run started: " + (r.started|0) + " item" + ((r.started|0) === 1 ? "" : "s") + ", one at a time";
+        if(r.refused|0) msg += " (" + (r.refused|0) + " selected couldn't run)";
+      }
+      else if(r.resumed) msg = "Run resumed";
+      else if(r.stopped) msg = "Run stopped — nothing more opens";
+      else msg = "";
+      el.textContent = msg;
+      if(wlTodoFlashTimer) clearTimeout(wlTodoFlashTimer);
+      wlTodoFlashTimer = setTimeout(function(){ el.textContent = ""; }, 6000);
+    };
     // add/edit both carry FOUR values (scope + subject + details + due), more than the
     // 2-value send() takes, so they post the bridge message directly. On edit the id
     // rides as `text` and the new subject as `edit` (add has no id, so subject is `text`).
@@ -19666,8 +20175,10 @@ local HTML = [[
       if(pd && pd.getAttribute){ var pid = pd.getAttribute("data-pbdel"); if(pid){ playbookRemove(pid); return; } }
       // Click a row (but not its checkbox / ✕) -> open the item modal.
       if(!t.closest) return;
-      if(t.classList && (t.classList.contains("wl-cb") || t.classList.contains("wl-del"))) return;
+      if(t.classList && (t.classList.contains("wl-cb") || t.classList.contains("wl-del") || t.classList.contains("wl-rpick"))) return;
       var row = t.closest(".wl-item"); if(!row || !row.getAttribute) return;
+      // ▶ Run… picking (2026-10-03): a click on an open row picks it instead of opening it
+      if(row.classList && row.classList.contains("wl-picking")){ wlRunToggle(row.getAttribute("data-open")); return; }
       // A MASTER row belongs to another scope: switch to that tab, then open it there.
       var ms = row.getAttribute("data-mscope");
       if(ms){
@@ -19680,6 +20191,7 @@ local HTML = [[
     });
     document.addEventListener("change", function(e){
       var cb = e.target;
+      if(cb && cb.classList && cb.classList.contains("wl-rpick")){ wlRunToggle(cb.getAttribute("data-rpick")); return; }
       if(!cb || !cb.classList || !cb.classList.contains("wl-cb")) return;
       // A MASTER row's tick belongs to ITS scope, not the tab you're looking at
       // (master is a rollup, so worklistScope would be the wrong list to write to).
@@ -28132,6 +28644,9 @@ function FX._refreshBody()
   -- ...and a playbook picked as a My List source re-imports the same way when its file moves
   -- (2026-10-03); one stat per playbook per tick, nothing at all with none added.
   pcall(FX.playbookSyncTick)
+  -- ...and a checklist run started from My List takes its sessions' reports and moves one step
+  -- (2026-10-03, after the playbook sync so a just-ticked line is already imported); nothing with no run.
+  pcall(FX.runTick, list)
   -- ...and once a day, age done work out of the store into the archive (2026-09-21).
   -- core.worklistArchiveIsDue makes every other tick a compare and nothing more.
   pcall(FX.worklistArchiveTick)

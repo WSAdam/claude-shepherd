@@ -5279,5 +5279,34 @@ do
         runNow:find('r.action == "gate"', 1, true) ~= nil and runNow:find("FX.mainGreenFire(", 1, true) ~= nil)
 end
 
+-- ---- Run selected: the checklist runner in My List (2026-10-03, mining round 2 D3b) ----
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  local block = src:match("\n%-%- %-%-%-%- Run selected: the checklist runner in My List.-\nfunction FX%.runTick%(list%).-\nend\n") or ""
+  check("runner: the FX block is found", block ~= "")
+  check("runner: the tick moves the runs, after the playbook sync",
+        (src:find("pcall(FX.playbookSyncTick)", 1, true) or math.huge) < (src:find("pcall(FX.runTick, list)", 1, true) or 0))
+  check("runner: an item's tab opens through FX.openClaudeTab, quiet, its brief typed in",
+        block:find("FX.openClaudeTab({ root = run.root, editor = editor, prompt = core.runBrief(run, item)", 1, true) ~= nil
+        and block:find("quiet = true", 1, true) ~= nil)
+  check("runner: ...tagged by its own expect, never a batch unit's", block:find('"expect", tag)', 1, true) ~= nil
+        and block:find("core.fleetUnitTag", 1, true) == nil)
+  for _, typist in ipairs({ "typeWhenReady", "handleAction", "keyStroke", "pasteIntoWindow", "dispatchSerialized" }) do
+    check("runner: nothing typed into a window (" .. typist .. ")", block:find(typist, 1, true) == nil)
+  end
+  check("runner: its tab closes by the run's tag", block:find("FX.closeTab(tile, { quiet = true, unit = core.runUnitTag(run.id, item.n) })", 1, true) ~= nil)
+  check("runner: FX.closeTab takes that tag only from its caller", src:find("(opts and type(opts.unit) == \"string\" and opts.unit ~= \"\") and opts.unit or FX.fleetUnitTagOf(it)", 1, true) ~= nil)
+  check("runner: core.mergeClosesTab still asks only for a batch unit's tag",
+        src:find("if not core.mergeClosesTab(FX.fleetUnitTagOf(it) ~= nil, FX.sessionFirstPrompt(it)) then", 1, true) ~= nil)
+  local _, checks = src:gsub("core%.worklistRunCheck%(", "")
+  check("runner: Adam's checkmark is set in one place, a finished item's step", checks == 1
+        and block:find("core.worklistRunCheck(st, run.key, item.id, run, now)", 1, true) ~= nil)
+  check("runner: a hold or a freeze holds the run", block:find("held = (holds.fleet == true and \"fleet\") or (tile and FX.holdOf(tile)) or nil", 1, true) ~= nil)
+  check("runner: the start message carries no path: the folder is the tab's own",
+        block:find("FX.playbookTodoRoots(key, st)[1]", 1, true) ~= nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

@@ -39,6 +39,9 @@ export CC_DECIDE_DIR="${CC_DECIDE_DIR:-$CC_TEST_ISOLATION/cc-decide}"
 # 2026-10-03: cc-lesson.sh files a lesson in ~/.claude/cc-lesson; a suite's fake session must never
 # file one where the real Shepherd would read it.
 export CC_LESSON_DIR="${CC_LESSON_DIR:-$CC_TEST_ISOLATION/cc-lesson}"
+# 2026-10-03: cc-run.sh leaves a checklist run's reports in ~/.claude/cc-run; a suite's fake session
+# must never report into a real run.
+export CC_RUN_DIR="${CC_RUN_DIR:-$CC_TEST_ISOLATION/cc-run}"
 # 2026-09-29: a SessionEnd (cc_remove) drops the session's cc-send requests and prunes stale ones in
 # ~/.claude/cc-send; a suite's fake session end must never touch the real ones.
 export CC_SEND_DIR="${CC_SEND_DIR:-$CC_TEST_ISOLATION/cc-send}"

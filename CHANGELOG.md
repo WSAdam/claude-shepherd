@@ -9,6 +9,14 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
 The second feature-mining round (Maestro, Gas Town, ECC, oh-my-claudecode, OpenRig), built as
 parallel units. Each unit adds its line here.
 
+- Run selected in My List: **▶ Run…** on a project tab picks open items (nothing preselected) and
+  **Run selected** works through them one at a time, each in a fresh tab in the repo's main checkout,
+  opened through the expect-tag machinery with its brief typed in (Adam sends it; no keystroke). A file
+  line counts once its box is ticked and the turn didn't do nothing; any other item once its own
+  session runs the new `cc-run.sh done` (or `blocked`). Then `core.worklistRunCheck` sets Adam's
+  checkmark with `doneBy = "run:<id>"` (**✓ by run**), only for a run he started. Import still never does.
+  Three misses in a row stop a run; a live-run item, a blocked report or a batch pauses it; a hold or
+  freeze holds it; one run per repo. Runs are `~/.claude/cc-run/<id>.run.json`.
 - Playbooks in My List: **📘 Add a playbook…** on a project tab picks a markdown checklist through the
   Mac's file chooser (never a path typed into the panel). Its `- [ ]` lines import like `TODO.md`'s
   (`core.worklistImportPlaybook` over the same merge, `src = "playbook"`), grouped under the file's
