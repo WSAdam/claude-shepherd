@@ -638,6 +638,22 @@ instructions every session in it reads first. It suggests; nothing changes until
   lesson (the model judges the match, not Shepherd), and its row says **seen in N runs**, what
   you did with it before and your reason, and **New since then:** in the coach's words.
 
+- **Did it work?** Every run also judges the applied edits that at least 3 of its sessions
+  postdate (a session counts by when it last ran; the newest 8 such edits per run). The prompt
+  lists each by its commit, with its **Today** and **Expected after**, and the coach answers
+  **working** (the sessions since do what was expected, or the problem stopped), **still seen**
+  (quoting where it still shows) or **no data** (those sessions never came near it). An edit
+  fewer sessions postdate reads **No data yet · N of 3 sessions since it was applied**: Shepherd
+  decides that, never the model, and it doesn't take away a verdict an earlier run gave. The
+  verdict and its quotes are stored on the edit's history entry and shown on its row under
+  **Applied edits**, until the next run judges it again. An undone edit isn't judged.
+- **Sharpen:** next to **Undo** on an applied edit, **Sharpen** runs the coach on that edit alone:
+  the same sessions, with that edit's text, why, expectations and last verdict, asking for ONE
+  better wording of it and nothing else (no other edits, no `DECISIONS.md` entries, no verdicts).
+  Like **Run the coach again**, it replaces the suggestions waiting now. Its suggestion is applied
+  like any other; once it is, the old entry reads **Sharpened** with the new commit, offers neither
+  button, and isn't judged again.
+
 ```json
 { "coach": { "enabled": true, "day": "mon", "maxBudgetUsd": 1, "timeoutSeconds": 600 } }
 ```

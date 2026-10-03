@@ -124,10 +124,10 @@ every other automatic behaviour here waits for its switch.
 - [**Automation dry run & trace**](docs/automation.md#dry-run-and-the-automation-trace): see what
   automation would do before it does it, and what it did, refused and why, newest first.
 - [**Routines**](docs/automation.md#routines): spawn a session or push a digest on a cron schedule.
-- [**Coach**](docs/automation.md#the-coach): weekly or on demand, a read-only Sonnet reads a repo's last
-  10 sessions and suggests `CLAUDE.md` edits with evidence; Apply commits that file alone. A
-  lessons ledger remembers what you applied, skipped (and why) or undid, so a skipped suggestion
-  doesn't come back without new evidence.
+- [**Coach**](docs/automation.md#the-coach): a read-only Sonnet reads a repo's last 10 sessions and
+  suggests `CLAUDE.md` edits with evidence; Apply commits that file alone. It remembers what you
+  applied, skipped (and why) or undid, judges each applied edit on the sessions since (working,
+  still seen, no data yet), and Sharpen rewords one.
 - [**Notifications & escalation**](docs/automation.md#escalation-and-watchdogs): louder nags, macOS
   banners and phone pushes when a session has waited on you too long or stalled.
 - [**A/B compare**](docs/automation.md#ab-compare): run one task as 2–4 variants in separate

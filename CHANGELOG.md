@@ -9,6 +9,12 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
 The second feature-mining round (Maestro, Gas Town, ECC, oh-my-claudecode, OpenRig), built as
 parallel units. Each unit adds its line here.
 
+- Coach edit outcomes: each run judges the applied `CLAUDE.md` edits at least 3 of its sessions
+  postdate, against what each was expected to change: working, still seen (with quotes) or no
+  data; fewer sessions read "no data yet", decided by Shepherd, not the model. The verdict shows on
+  the edit's row under Applied edits, next to a new **Sharpen**, which runs the coach on that edit
+  alone for a better wording of it.
+
 - Fixed: a batch Adam approved after the driver's `cc-fleet.sh propose` had stopped waiting (killed at
   a 10-minute background limit) was stranded: nothing could collect the answer, the batch read
   "proposed" for good, and it had to be proposed and approved again. `cc-fleet.sh propose --resume <id>`

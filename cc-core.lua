@@ -16570,6 +16570,8 @@ M.COACH = {
   lessonsBytes = 6000,       -- ...of which the prompt's <lessons> block carries, newest first
   lessonRuns = 20,           -- runs remembered per lesson ("seen in N runs")
   lessonTextChars = 160, reasonChars = 200,
+  judgeSessions = 3,         -- an applied edit is judged once this many digest sessions postdate it
+  judgeMax = 8,              -- ...at most this many per run (the newest), in the prompt's <applied>
   activityDays = 7,          -- a first run needs a session this recent
   checkEverySeconds = 60,
 }
@@ -16577,6 +16579,7 @@ M.COACH_FILE = "CLAUDE.md"
 M.COACH_DAYS = { sun = 1, mon = 2, tue = 3, wed = 4, thu = 5, fri = 6, sat = 7 }
 M.COACH_LOG_KINDS = { notyet = true, blocked = true, checker = true }
 M.COACH_VERDICTS = { proposals = true, none = true, couldntRun = true }
+M.COACH_CHECK_VERDICTS = { working = true, ["still-seen"] = true, ["no-data"] = true }
 do
   local C = M.COACH
   local function sq(s) return "'" .. tostring(s):gsub("'", "'\\''") .. "'" end
@@ -16807,9 +16810,10 @@ do
     return out
   end
 
-  -- The digest: { text, bytes, cut, sessions, empty }. `sessions` = { { id, facts } } newest first,
+  -- The digest: { text, bytes, cut, sessions, ats, empty }. `sessions` = { { id, facts } } newest first,
   -- `log` = Shepherd's log entries. Shepherd's log leads (small and high-signal), then each session
-  -- whole while it fits; the one that doesn't is cut at a line and the digest says so.
+  -- whole while it fits; the one that doesn't is cut at a line and the digest says so. `ats` is when
+  -- each session it holds last ran (facts.at), in its order: what judges an applied edit (2026-10-03).
   function M.coachDigest(sessions, log, opts)
     opts = type(opts) == "table" and opts or {}
     local cap = tonumber(opts.maxBytes) or C.digestBytes
@@ -16820,11 +16824,15 @@ do
     local buf = { "# The repo's last " .. n .. " session" .. (n == 1 and "" or "s") .. ", newest first\n" }
     local size = #buf[1]
     if logText ~= "" then buf[#buf + 1] = "\n" .. logText; size = size + 1 + #logText end
-    local cut, used = false, 0
+    local cut, used, ats = false, 0, {}
+    local function held(s)
+      local at = type(s) == "table" and type(s.facts) == "table" and tonumber(s.facts.at) or nil
+      if at then ats[#ats + 1] = at end
+    end
     for i, s in ipairs(sessions) do
       local block = "\n" .. sessionBlock(i, n, s)
       if size + #block <= cap - #CUT then
-        buf[#buf + 1] = block; size = size + #block; used = used + 1
+        buf[#buf + 1] = block; size = size + #block; used = used + 1; held(s)
       else
         local room, keep, p = cap - #CUT - size, 0, 1
         while true do   -- the longest whole-line prefix that fits
@@ -16832,14 +16840,14 @@ do
           if not nl or nl > room then break end
           keep, p = nl, nl + 1
         end
-        if keep > 1 then buf[#buf + 1] = block:sub(1, keep); size = size + keep; used = used + 1 end
+        if keep > 1 then buf[#buf + 1] = block:sub(1, keep); size = size + keep; used = used + 1; held(s) end
         cut = true
         break
       end
     end
     if cut then buf[#buf + 1] = CUT end
     local text = table.concat(buf)
-    return { text = text, bytes = #text, cut = cut, sessions = used, empty = (n == 0 and logText == "") }
+    return { text = text, bytes = #text, cut = cut, sessions = used, ats = ats, empty = (n == 0 and logText == "") }
   end
 
   -- A lesson's id (the lessons ledger, below): "L" and its text hash's hex, "-<n>" when two collide.
@@ -16882,21 +16890,158 @@ do
     return table.concat(out, "\n")
   end
 
+  -- ---- did the edit work? (2026-10-03, mining round 2 unit B2) -------------------------------
+  -- Each applied edit says what sessions did before it and what they are expected to do after. A run
+  -- now judges it on the sessions since: the prompt's <applied> lists the edits at least judgeSessions
+  -- of the digest's sessions postdate (by facts.at), and the answer adds checks:[{sha, verdict, evidence}]
+  -- -- working, still-seen (quoted) or no-data -- inside the same object as its edits. Fewer sessions
+  -- than that is "no data yet", decided here, never by the model. A check lives on its history entry.
+  -- Sharpen runs the coach on ONE applied edit (the record's sharpen = its commit): the prompt asks
+  -- for a better wording of that edit alone, and once that is applied the old entry is "sharpened"
+  -- and judged no more.
+  local function histSha(v) return (type(v) == "string" and #v >= 7 and #v <= 64 and v:match("^%x+$")) and v or nil end
+  -- One list of quotes: 1-5 strings (or numbers), each on one line, capped.
+  local function quotes(list)
+    local ev = {}
+    for _, x in ipairs(type(list) == "table" and list or {}) do
+      local s = (type(x) == "string" or type(x) == "number") and oneLine(tostring(x), 300) or ""
+      if s ~= "" and #ev < 5 then ev[#ev + 1] = s end
+    end
+    return ev
+  end
+  -- Two commits are one when the shorter (7+ hex digits) starts the longer: the prompt names each by
+  -- its first 7, and the model may echo either.
+  local function shaMatch(a, b)
+    a, b = histSha(a), histSha(b)
+    if not (a and b) then return false end
+    a, b = a:lower(), b:lower()
+    if #a > #b then a, b = b, a end
+    return b:sub(1, #a) == a
+  end
+  -- A verdict as it sits on a history entry: { verdict, evidence, at (when judged), since (sessions
+  -- after the edit) }; nil when it isn't one.
+  local function storedCheck(c)
+    if type(c) ~= "table" or not M.COACH_CHECK_VERDICTS[c.verdict] then return nil end
+    return { verdict = c.verdict, evidence = quotes(c.evidence), at = tonumber(c.at) or 0,
+             since = math.max(0, math.floor(tonumber(c.since) or 0)) }
+  end
+  -- One check from the model's answer: { sha, verdict, evidence }. still-seen is a claim the problem is
+  -- there, so it needs a quote; working and no-data may name none.
+  local function modelCheck(c)
+    if type(c) ~= "table" or not M.COACH_CHECK_VERDICTS[c.verdict] then return nil end
+    local sha = histSha(c.sha)
+    if not sha then return nil end
+    local ev = quotes(c.evidence)
+    if c.verdict == "still-seen" and #ev == 0 then return nil end
+    return { sha = sha:lower(), verdict = c.verdict, evidence = ev }
+  end
+
+  -- Which applied edits a run can judge, given when the digest's sessions last ran (`ats`): one row per
+  -- live entry (not undone, not sharpened), newest first -- { i (its place in the list), sha, at, since
+  -- (sessions after it), judge (since >= judgeSessions), asked (judged and among the newest judgeMax) }.
+  function M.coachEditsToJudge(history, ats)
+    local rows = {}
+    for i, e in ipairs(type(history) == "table" and history or {}) do
+      if type(e) == "table" and histSha(e.sha) and not e.undone and not e.sharpened then
+        local at, n = tonumber(e.at) or 0, 0
+        for _, t in ipairs(type(ats) == "table" and ats or {}) do
+          if tonumber(t) and tonumber(t) > at then n = n + 1 end
+        end
+        rows[#rows + 1] = { i = i, sha = e.sha, at = at, since = n, judge = n >= C.judgeSessions }
+      end
+    end
+    table.sort(rows, function(a, b)
+      if a.at ~= b.at then return a.at > b.at end
+      return a.i > b.i
+    end)
+    local asked = 0
+    for _, r in ipairs(rows) do
+      if r.judge and asked < C.judgeMax then r.asked = true; asked = asked + 1 end
+    end
+    return rows
+  end
+
+  -- A new history list with this run's verdicts on it (each entry it changes is a copy). o = { at
+  -- (when), ats (the digest's session times) }. An edit asked about gets the model's check for its
+  -- commit, or no-data when it said nothing; one too few sessions postdate reads no-data ("yet") --
+  -- unless an earlier run gave it a real verdict, which a smaller digest doesn't take away. An edit
+  -- judgeable but past judgeMax keeps what it had. Returns the list and whether it changed.
+  function M.coachApplyChecks(history, checks, o)
+    o = type(o) == "table" and o or {}
+    local out, changed = {}, false
+    for i, e in ipairs(type(history) == "table" and history or {}) do out[i] = e end
+    local valid = {}
+    for _, c in ipairs(type(checks) == "table" and checks or {}) do valid[#valid + 1] = modelCheck(c) end
+    for _, r in ipairs(M.coachEditsToJudge(out, o.ats)) do
+      local e = out[r.i]
+      local prior = type(e.check) == "table" and e.check.verdict ~= "no-data"
+      if r.asked or not (r.judge or prior) then
+        local verdict, ev = "no-data", {}
+        if r.asked then
+          for _, m in ipairs(valid) do
+            if shaMatch(m.sha, r.sha) then verdict, ev = m.verdict, m.evidence; break end
+          end
+        end
+        local copy = {}
+        for k, v in pairs(e) do copy[k] = v end
+        copy.check = { verdict = verdict, evidence = ev, at = tonumber(o.at) or 0, since = r.since }
+        out[r.i] = copy
+        changed = true
+      end
+    end
+    return out, changed
+  end
+
+  local function entrySection(e) return (type(e.section) == "string" and e.section ~= "") and e.section or "CLAUDE.md" end
+  -- The prompt's <applied> lines: the edits a run is asked to judge (M.coachEditsToJudge's asked), newest
+  -- first, each by its commit's first 7, with what it was expected to change. nil when there are none.
+  local function appliedBlock(history, ats)
+    local list = type(history) == "table" and history or {}
+    local out = {}
+    for _, r in ipairs(M.coachEditsToJudge(list, ats)) do
+      if r.asked then
+        local e = list[r.i]
+        local l = { "- " .. r.sha:sub(1, 7) .. " · applied " .. (when(r.at) or "?") .. " · " .. entrySection(e)
+                    .. " · " .. r.since .. " session" .. (r.since == 1 and "" or "s") .. " since" }
+        local why, before, after, new = oneLine(e.why, 300), oneLine(e.before, 300), oneLine(e.after, 300), oneLine(e.new, 300)
+        if why ~= "" then l[#l + 1] = "  Why: " .. why end
+        if before ~= "" then l[#l + 1] = "  Today: " .. before end
+        if after ~= "" then l[#l + 1] = "  Expected after: " .. after end
+        if new ~= "" then l[#l + 1] = "  What it put in CLAUDE.md: " .. new end
+        out[#out + 1] = table.concat(l, "\n")
+      end
+    end
+    return #out > 0 and table.concat(out, "\n") or nil
+  end
+  -- The prompt's <sharpen> block: the one applied edit, whole, with its last check.
+  local function sharpenBlock(e)
+    local l = { "Commit " .. e.sha:sub(1, 7) .. " · applied " .. (when(e.at) or "?") .. " · section: " .. entrySection(e) }
+    local why, before, after = oneLine(e.why, 500), oneLine(e.before, 300), oneLine(e.after, 300)
+    if why ~= "" then l[#l + 1] = "Why: " .. why end
+    if before ~= "" then l[#l + 1] = "Today: " .. before end
+    if after ~= "" then l[#l + 1] = "Expected after: " .. after end
+    local c = storedCheck(e.check)
+    if c then
+      l[#l + 1] = "Last check: " .. c.verdict .. " on " .. c.since .. " session" .. (c.since == 1 and "" or "s") .. " since"
+      for _, q in ipairs(c.evidence) do l[#l + 1] = "- " .. q end
+    end
+    if type(e.old) == "string" and e.old ~= "" then l[#l + 1] = "The text it replaced:\n" .. e.old end
+    l[#l + 1] = "The text it put in CLAUDE.md:\n" .. tostring(e.new or "")
+    return table.concat(l, "\n")
+  end
+
   -- What the headless run is asked. The digest, the repo's CLAUDE.md and DECISIONS.md go in whole
   -- up to their caps (past one, it reads the rest itself: it runs in the repo with Read). o.lessons
-  -- is the repo's lessons ledger (2026-10-02): what Adam did with earlier suggestions.
+  -- is the repo's lessons ledger (2026-10-02): what Adam did with earlier suggestions. o.history is
+  -- its applied edits (2026-10-03): the ones enough of the digest's sessions postdate are judged.
+  -- o.sharpen, one of those entries: the run proposes a better wording of that edit alone.
   function M.coachPrompt(digest, claudeMd, decisions, o)
     o = type(o) == "table" and o or {}
     local text = type(digest) == "table" and digest.text or tostring(digest or "")
     local name = oneLine(o.name, 80)
-    local lines = {
-      "You are Shepherd's coach for the repo" .. (name ~= "" and (" \"" .. name .. "\"") or "") .. ". Below is what went wrong in its"
-        .. " recent Claude Code sessions: Adam's corrections, his interrupts, tool errors, tool calls he denied with a note,"
-        .. " merge notes and merge-checker findings. Propose at most " .. C.maxEdits .. " edits to the repo's CLAUDE.md -- the"
-        .. " instructions every session in this repo reads first -- that would have prevented them.",
-      "",
-      "Rules:",
-      "- Edit CLAUDE.md only. Each edit is {\"section\", \"old\", \"new\", \"why\", \"before\", \"after\", \"evidence\"}:",
+    local sharpen = (type(o.sharpen) == "table" and histSha(o.sharpen.sha)) and o.sharpen or nil
+    local repo = "You are Shepherd's coach for the repo" .. (name ~= "" and (" \"" .. name .. "\"") or "") .. "."
+    local editRules = {
       "  - \"old\" is text copied character for character from the CLAUDE.md below -- its line breaks and"
         .. " indentation included, never joined onto one line or re-wrapped; prefer whole lines -- occurring there"
         .. " exactly once; \"new\" replaces it, and \"section\" is the heading that text sits under."
@@ -16908,27 +17053,78 @@ do
         .. " concrete enough that Adam could look at a later session and tell whether the edit worked.",
       "  - \"evidence\": 1 to 5 short quotes from the evidence below (a correction, an error, a denial note, a merge note,"
         .. " a checker finding). An edit nothing below calls for is not an edit.",
-      "- Keep each edit small and in the file's own voice. Never restate a rule CLAUDE.md already has; sharpen it instead.",
-      "- DECISIONS.md lists what the project does on purpose. Never propose an edit that undoes, weakens or contradicts"
-        .. " one of its entries.",
-      "- If the evidence shows a deliberate choice that sessions keep \"fixing\", you may propose a DECISIONS.md entry"
-        .. " {\"what\", \"why\"} (at most " .. C.maxDecisions .. "), never one it already has.",
-      "- If nothing is worth changing, return empty lists. Don't change any file; you may read the repo to check a claim.",
     }
-    local lessons = lessonsBlock(o.lessons, C.lessonsBytes)
+    local decisionsRule = "- DECISIONS.md lists what the project does on purpose. Never propose an edit that undoes, weakens or contradicts"
+      .. " one of its entries."
+    local lines, lessons, applied
+    if sharpen then
+      -- Sharpen (2026-10-03): one applied edit, a better wording of it, nothing else
+      lines = {
+        repo .. " Adam applied the CLAUDE.md edit in <sharpen> below earlier and asked you to sharpen it: propose ONE"
+          .. " better wording of that edit -- clearer, harder to misread, closer to what the evidence below shows going"
+          .. " wrong -- and nothing else.",
+        "",
+        "Rules:",
+        "- One edit, of that edit's text only: {\"section\", \"old\", \"new\", \"why\", \"before\", \"after\", \"evidence\"}:",
+      }
+      for _, r in ipairs(editRules) do lines[#lines + 1] = r end
+      lines[#lines + 1] = "- Its \"old\" is that edit's text as it reads in the CLAUDE.md below now (it may have changed since it was"
+        .. " applied); its last check's quotes, if any, count as evidence."
+      lines[#lines + 1] = "- Keep it small and in the file's own voice."
+      lines[#lines + 1] = decisionsRule
+      lines[#lines + 1] = "- If its wording can't be made clearer, return an empty list. Don't change any file; you may read the repo"
+        .. " to check a claim."
+      lines[#lines + 1] = ""
+      lines[#lines + 1] = "End your answer with ONE JSON object on its last line, nothing after it:"
+      lines[#lines + 1] = "{\"summary\": \"<one sentence>\", \"edits\": [{\"section\": \"...\", \"old\": \"...\", \"new\": \"...\", \"why\": \"...\","
+        .. " \"before\": \"...\", \"after\": \"...\", \"evidence\": [\"...\"]}], \"decisions\": []}"
+      lines[#lines + 1] = ""
+      lines[#lines + 1] = "<sharpen>\n" .. sharpenBlock(sharpen) .. "\n</sharpen>"
+    else
+      lines = {
+        repo .. " Below is what went wrong in its"
+          .. " recent Claude Code sessions: Adam's corrections, his interrupts, tool errors, tool calls he denied with a note,"
+          .. " merge notes and merge-checker findings. Propose at most " .. C.maxEdits .. " edits to the repo's CLAUDE.md -- the"
+          .. " instructions every session in this repo reads first -- that would have prevented them.",
+        "",
+        "Rules:",
+        "- Edit CLAUDE.md only. Each edit is {\"section\", \"old\", \"new\", \"why\", \"before\", \"after\", \"evidence\"}:",
+      }
+      for _, r in ipairs(editRules) do lines[#lines + 1] = r end
+      lines[#lines + 1] = "- Keep each edit small and in the file's own voice. Never restate a rule CLAUDE.md already has; sharpen it instead."
+      lines[#lines + 1] = decisionsRule
+      lines[#lines + 1] = "- If the evidence shows a deliberate choice that sessions keep \"fixing\", you may propose a DECISIONS.md entry"
+        .. " {\"what\", \"why\"} (at most " .. C.maxDecisions .. "), never one it already has."
+      lines[#lines + 1] = "- If nothing is worth changing, return empty lists. Don't change any file; you may read the repo to check a claim."
+      lessons = lessonsBlock(o.lessons, C.lessonsBytes)
+      applied = appliedBlock(o.history, type(digest) == "table" and digest.ats or nil)
+    end
     if lessons then
       lines[#lines + 1] = "- <lessons> lists what Adam did with this coach's earlier suggestions, newest first. An applied one is"
         .. " in CLAUDE.md already: never propose it again. A skipped or undone one: propose it again only with new evidence"
         .. " below -- something that happened since it was set aside -- and say in \"whatsNew\" what that is."
       lines[#lines + 1] = "- When an edit repeats a lesson, reworded or not, set \"lesson\" to that lesson's id."
     end
-    lines[#lines + 1] = ""
-    lines[#lines + 1] = "End your answer with ONE JSON object on its last line, nothing after it:"
-    lines[#lines + 1] = "{\"summary\": \"<one sentence>\", \"edits\": [{\"section\": \"...\", \"old\": \"...\", \"new\": \"...\", \"why\": \"...\","
-      .. " \"before\": \"...\", \"after\": \"...\", \"evidence\": [\"...\"]}], \"decisions\": [{\"what\": \"...\", \"why\": \"...\"}]}"
+    if applied then
+      lines[#lines + 1] = "- <applied> lists edits Adam applied to CLAUDE.md earlier, each with what sessions did before it (Today) and"
+        .. " what they were expected to do after (Expected after). Judge each one ONLY on the sessions below dated after it"
+        .. " was applied: \"working\" -- they do what was expected, or the problem it targets has stopped; \"still-seen\" --"
+        .. " the problem still shows (quote it); \"no-data\" -- none of those sessions came near it."
+    end
+    if not sharpen then
+      lines[#lines + 1] = ""
+      lines[#lines + 1] = "End your answer with ONE JSON object on its last line, nothing after it:"
+      lines[#lines + 1] = "{\"summary\": \"<one sentence>\", \"edits\": [{\"section\": \"...\", \"old\": \"...\", \"new\": \"...\", \"why\": \"...\","
+        .. " \"before\": \"...\", \"after\": \"...\", \"evidence\": [\"...\"]}], \"decisions\": [{\"what\": \"...\", \"why\": \"...\"}]}"
+    end
     if lessons then
       lines[#lines + 1] = "An edit that repeats a lesson also carries \"lesson\": \"<its id>\", and \"whatsNew\": \"<one sentence>\" when"
         .. " that lesson was skipped or undone."
+    end
+    if applied then
+      lines[#lines + 1] = "That same object also carries \"checks\": [{\"sha\": \"<its commit, as <applied> names it>\", \"verdict\":"
+        .. " \"working\" | \"still-seen\" | \"no-data\", \"evidence\": [\"<1 to 5 short quotes from those sessions; still-seen needs"
+        .. " at least one>\"]}], one per edit in <applied>."
     end
     lines[#lines + 1] = ""
     if type(claudeMd) == "string" then
@@ -16953,6 +17149,10 @@ do
       lines[#lines + 1] = "<lessons>\n" .. lessons .. "\n</lessons>"
       lines[#lines + 1] = ""
     end
+    if applied then
+      lines[#lines + 1] = "<applied>\n" .. applied .. "\n</applied>"
+      lines[#lines + 1] = ""
+    end
     lines[#lines + 1] = "<evidence>\n" .. text .. "</evidence>"
     return table.concat(lines, "\n") .. "\n"
   end
@@ -16975,11 +17175,7 @@ do
     if old == "" and section == "" then return nil end   -- an add needs a place to go
     local why = oneLine(e.why, 500)
     if why == "" then return nil end
-    local ev = {}
-    for _, x in ipairs(type(e.evidence) == "table" and e.evidence or {}) do
-      local s = (type(x) == "string" or type(x) == "number") and oneLine(tostring(x), 300) or ""
-      if s ~= "" and #ev < 5 then ev[#ev + 1] = s end
-    end
+    local ev = quotes(e.evidence)
     if #ev == 0 then return nil end
     local out = { section = section, old = old, new = new, why = why, evidence = ev }
     -- what sessions do today, and what they are expected to do once this is applied (optional:
@@ -17016,22 +17212,32 @@ do
   end
 
   -- claude -p --output-format json -> { verdict = proposals | none | couldntRun, edits, decisions,
-  -- summary, why, costUsd, turns }. The answer's last JSON object carrying "edits" is read; with
-  -- none, or edits that aren't a list, or only edits that fail the checks, it couldn't run.
-  function M.parseCoachOutput(raw, errText)
-    local res = { verdict = "couldntRun", edits = {}, decisions = {} }
+  -- checks, summary, why, costUsd, turns }. The answer's last JSON object carrying "edits" is read;
+  -- with none, or edits that aren't a list, or only edits that fail the checks, it couldn't run.
+  -- checks (2026-10-03): its verdicts on applied edits, from that same object (modelCheck). o.sharpen
+  -- = a Sharpen run's answer: one edit, and no DECISIONS.md entries or checks.
+  function M.parseCoachOutput(raw, errText, o)
+    o = type(o) == "table" and o or {}
+    local res = { verdict = "couldntRun", edits = {}, decisions = {}, checks = {} }
     local t = headlessEnvelope(raw, errText, res)
     if not t then return res end
     local v = lastObjectWith(t.result, "edits", 200000)
     if not v then res.why = "its answer had no JSON with edits"; return res end
     if type(v.edits) ~= "table" then res.why = "its answer's edits weren't a list"; return res end
+    local maxEdits = o.sharpen and 1 or C.maxEdits
     for _, e in ipairs(v.edits) do
-      if #res.edits >= C.maxEdits then break end
+      if #res.edits >= maxEdits then break end
       res.edits[#res.edits + 1] = coachEdit(e)
     end
-    for _, d in ipairs(type(v.decisions) == "table" and v.decisions or {}) do
-      if #res.decisions >= C.maxDecisions then break end
-      res.decisions[#res.decisions + 1] = coachEntry(d)
+    if not o.sharpen then
+      for _, d in ipairs(type(v.decisions) == "table" and v.decisions or {}) do
+        if #res.decisions >= C.maxDecisions then break end
+        res.decisions[#res.decisions + 1] = coachEntry(d)
+      end
+      for _, c in ipairs(type(v.checks) == "table" and v.checks or {}) do
+        if #res.checks >= C.judgeMax * 2 then break end
+        res.checks[#res.checks + 1] = modelCheck(c)
+      end
     end
     local summary = oneLine(v.summary, 300)
     res.summary = summary ~= "" and summary or nil
@@ -17260,8 +17466,9 @@ do
   -- can take one back out. Undo reads the file before and after that commit from git, works out the
   -- whole lines it added and removed (M.coachChange), and replaces them in the file as it is now
   -- (M.coachUndoDecision) -- refused unless those lines are there exactly once -- then commits
-  -- CLAUDE.md alone, like Apply. Nothing is rewritten: an undo is one more commit.
-  local function histSha(v) return (type(v) == "string" and #v >= 7 and #v <= 64 and v:match("^%x+$")) and v or nil end
+  -- CLAUDE.md alone, like Apply. Nothing is rewritten: an undo is one more commit. (histSha is with
+  -- the edit outcomes, above the prompt.) An entry also keeps the coach's last verdict on it (check,
+  -- 2026-10-03), and the commit of the better wording that replaced it (sharpened).
   local function histEntry(e)
     if type(e) ~= "table" then return nil end
     local sha = histSha(e.sha)
@@ -17276,6 +17483,10 @@ do
                   error = (type(e.error) == "string" and e.error ~= "") and capChars(e.error, 300) or nil,
                   lesson = lessonId(e.lesson) }   -- the lessons ledger's entry for it (2026-10-02), so Undo finds it
     if type(e.undone) == "table" and histSha(e.undone.sha) then out.undone = { sha = e.undone.sha, at = tonumber(e.undone.at) or 0 } end
+    out.check = storedCheck(e.check)
+    if type(e.sharpened) == "table" and histSha(e.sharpened.sha) then
+      out.sharpened = { sha = e.sharpened.sha, at = tonumber(e.sharpened.at) or 0 }
+    end
     return out
   end
   -- A new list with `entry` at its end: one entry per commit, newest kept past historyMax.
@@ -17300,15 +17511,19 @@ do
     end
     return out
   end
-  -- For the overlay: newest first, each with its place in the list (what an Undo click sends back).
+  -- For the overlay: newest first, each with its place in the list (what an Undo or Sharpen click sends
+  -- back), its last verdict (with how many sessions one needs) and the commit that sharpened it.
   function M.coachHistoryView(list)
     local out = {}
     list = type(list) == "table" and list or {}
     for i = #list, 1, -1 do
       local e = list[i]
+      local c = e.check
       out[#out + 1] = { i = i, sha = e.sha, at = e.at, section = e.section, why = e.why, before = e.before, after = e.after,
                         old = e.old, new = e.new, error = e.error, undone = e.undone and true or nil,
-                        undoSha = e.undone and e.undone.sha or nil, undoAt = e.undone and e.undone.at or nil }
+                        undoSha = e.undone and e.undone.sha or nil, undoAt = e.undone and e.undone.at or nil,
+                        check = c and { verdict = c.verdict, evidence = c.evidence, at = c.at, since = c.since, need = C.judgeSessions } or nil,
+                        sharpenedSha = e.sharpened and e.sharpened.sha or nil }
     end
     return out
   end
@@ -17627,7 +17842,8 @@ do
                 verdict = M.COACH_VERDICTS[t.verdict] and t.verdict or nil, why = str(t.why, 300), summary = str(t.summary, 300),
                 claudeHash = str(t.claudeHash, 64), decisionsHash = str(t.decisionsHash, 64),
                 sessions = tonumber(t.sessions), digestBytes = tonumber(t.digestBytes), cut = t.cut == true or nil,
-                costUsd = tonumber(t.costUsd), turns = tonumber(t.turns), edits = {}, decisions = {} }
+                costUsd = tonumber(t.costUsd), turns = tonumber(t.turns), edits = {}, decisions = {},
+                sharpen = histSha(t.sharpen) }   -- a Sharpen run: the applied edit's commit (2026-10-03)
     for _, e in ipairs(type(t.edits) == "table" and t.edits or {}) do
       if #r.edits >= C.maxEdits then break end
       r.edits[#r.edits + 1] = coachEdit(e, true)
@@ -17671,7 +17887,8 @@ do
     for _, l in ipairs(type(lessons) == "table" and lessons or {}) do if type(l) == "table" and l.id then byId[l.id] = l end end
     local v = { root = rec.root, name = rec.name, state = rec.state, verdict = rec.verdict, why = rec.why, summary = rec.summary,
                 trigger = rec.trigger, at = rec.at, doneAt = rec.doneAt, lastRunAt = rec.lastRunAt, costUsd = rec.costUsd,
-                sessions = rec.sessions, cut = rec.cut, pending = pendingCount(rec), edits = {}, decisions = {} }
+                sessions = rec.sessions, cut = rec.cut, pending = pendingCount(rec), edits = {}, decisions = {},
+                sharpen = rec.sharpen }
     if live.waiting then v.state = "waiting" elseif live.busy then v.state = "running" end
     v.timeoutSeconds = tonumber(live.timeoutSeconds)   -- the overlay's timer says when a run gives up
     for i, e in ipairs(rec.edits or {}) do
@@ -21898,7 +22115,7 @@ M.FEATURES = {
     what = "Scheduled actions that fire on a cron-like timetable.",
     why = "Standups, sweeps, or kickoffs happen on their own." },
   { key = "coach", cat = "Automate", new = true, title = "Coach",
-    what = "Weekly (coach.enabled, catching up after sleep) or from a session's 🧭 Coach button, a read-only Sonnet reads the repo's last 10 sessions -- your corrections, interrupts, tool errors, denials with a note, merge notes and checker findings -- and suggests up to 5 CLAUDE.md edits, each with its evidence. They wait behind a 🧭 chip on the project card: Apply writes CLAUDE.md and commits it alone (refused if it changed since the coach read it or has uncommitted edits), Skip puts one aside. It never proposes undoing a DECISIONS.md entry, and can suggest new ones. A lessons ledger keeps every Apply, Skip (with an optional one-line reason) and Undo for the next run: an applied suggestion isn't proposed again, a skipped or undone one comes back only with new evidence, and a repeat says \"seen in N runs\".",
+    what = "Weekly (coach.enabled, catching up after sleep) or from a session's 🧭 Coach button, a read-only Sonnet reads the repo's last 10 sessions -- your corrections, interrupts, tool errors, denials with a note, merge notes and checker findings -- and suggests up to 5 CLAUDE.md edits, each with its evidence. They wait behind a 🧭 chip on the project card: Apply writes CLAUDE.md and commits it alone (refused if it changed since the coach read it or has uncommitted edits), Skip puts one aside. It never proposes undoing a DECISIONS.md entry, and can suggest new ones. A lessons ledger keeps every Apply, Skip (with an optional one-line reason) and Undo for the next run: an applied suggestion isn't proposed again, a skipped or undone one comes back only with new evidence, and a repeat says \"seen in N runs\". Each run also judges the applied edits at least 3 later sessions postdate -- working, still seen (with quotes) or no data yet -- on their history rows, where Sharpen asks the coach for a better wording of one edit alone.",
     why = "The corrections you keep repeating end up in the instructions every session reads first." },
 
   -- ---- See what's happening ----

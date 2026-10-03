@@ -6709,9 +6709,10 @@ function FX.coachNewest(root)
 end
 
 -- Start a run for `repo` ({ commonDir, root, name }): "weekly" or "card"; `retry` = it retries a
--- lost run (its attempts count on). Returns the record, or nil and why ("waiting" when it waits for
--- the repo's merge checker).
-function FX.coachStart(repo, trigger, cfg, retry)
+-- lost run (its attempts count on). `sharpen` (2026-10-03) = an applied edit's commit: the run asks
+-- for a better wording of that edit alone (a lost one retried stays one). Returns the record, or nil
+-- and why ("waiting" when it waits for the repo's merge checker).
+function FX.coachStart(repo, trigger, cfg, retry, sharpen)
   if type(repo) ~= "table" then return nil, "no repo" end
   local root = repo.root
   pcall(FX.coachHistory, root)   -- the record is about to be replaced: its applied edits go to the history first
@@ -6719,16 +6720,18 @@ function FX.coachStart(repo, trigger, cfg, retry)
   if not okL then print("[cc-dashboard] ❌ coach: folding " .. tostring(root) .. "'s lessons failed: " .. tostring(errL)) end
   if FX.coachBusy(root) then return nil, "the coach is already reading this repo's sessions" end
   if FX.coachCheckerBusy(repo.commonDir) then
-    FX._coach.waiting[root] = { repo = repo, trigger = trigger, retry = retry }
+    FX._coach.waiting[root] = { repo = repo, trigger = trigger, retry = retry, sharpen = sharpen }
     return nil, "waiting"
   end
   FX._coach.waiting[root] = nil
   local files = core.coachPickTranscripts(FX.coachTranscripts(root), core.COACH.sessions)
   if #files == 0 then return nil, "no sessions of this repo to read" end
   local prev = FX.coachRecord(root)
+  local lostRetry = retry and prev and prev.state == "lost"
   local rec = { v = 1, repo = repo.commonDir, root = root, name = repo.name, state = "queued", trigger = trigger,
-                at = FX.now(), attempts = (retry and prev and prev.state == "lost") and ((prev.attempts or 1) + 1) or 1,
-                lastRunAt = prev and prev.lastRunAt or nil, edits = {}, decisions = {} }
+                at = FX.now(), attempts = lostRetry and ((prev.attempts or 1) + 1) or 1,
+                lastRunAt = prev and prev.lastRunAt or nil, edits = {}, decisions = {},
+                sharpen = sharpen or (lostRetry and prev.sharpen) or nil }
   FX.coachSave(rec)
   local outBase = FX.scratchFile("coach-scan")
   local paths = {}
@@ -6789,23 +6792,34 @@ function FX.coachScanned(repo, rec, scan, cfg)
   local decisions = FX.readFile(root .. "/" .. core.DECISIONS_FILE)
   rec.claudeHash, rec.decisionsHash = core.coachHash(claudeMd), core.coachHash(decisions)
   rec.sessions, rec.digestBytes, rec.cut = digest.sessions, digest.bytes, digest.cut or nil
+  -- 2026-10-03: the applied edits go in too (judged once enough of these sessions postdate them), and
+  -- a Sharpen run's edit; one whose entry is gone makes it an ordinary run
+  local history = FX.coachHistory(root)
+  local sharpen
+  for _, h in ipairs(rec.sharpen and history or {}) do if h.sha == rec.sharpen then sharpen = h end end
+  if rec.sharpen and not sharpen then
+    print("[cc-dashboard] ⚠️ coach: the edit to sharpen (" .. tostring(rec.sharpen) .. ") isn't in " .. tostring(root) .. "'s history -- an ordinary run")
+    rec.sharpen = nil
+  end
   FX.coachSave(rec)
   cfg = cfg or loadConfig()
   FX.runHeadless({ id = "coach|" .. root, lane = repo.commonDir, dir = root,
-    prompt = core.coachPrompt(digest, claudeMd, decisions, { name = repo.name, lessons = FX.coachLessons(root) }),
+    prompt = core.coachPrompt(digest, claudeMd, decisions, { name = repo.name, lessons = FX.coachLessons(root),
+                                                             history = history, sharpen = sharpen }),
     timeoutSeconds = tonumber(core.config(cfg, "coach.timeoutSeconds", core.COACH.timeoutSeconds)) or core.COACH.timeoutSeconds,
     maxBudgetUsd = core.config(cfg, "coach.maxBudgetUsd", core.COACH.budgetUsd),
     onStart = function()
       if FX._coach.recs[root] == rec then rec.state = "running"; FX.coachSave(rec) end
     end,
-    onDone = function(_, res) FX.coachFinish(root, rec, res) end })
+    onDone = function(_, res) FX.coachFinish(root, rec, res, { ats = digest.ats }) end })
 end
 
 -- The run is over: its verdict is this week's (a lost run never reaches here -- its task died
--- with Hammerspoon, and the record reads lost when it's read back).
-function FX.coachFinish(root, rec, res)
+-- with Hammerspoon, and the record reads lost when it's read back). `judge` = { ats }, when the
+-- digest's sessions last ran: the applied edits enough of them postdate get this run's verdicts.
+function FX.coachFinish(root, rec, res, judge)
   if FX._coach.recs[root] ~= rec then return end   -- a newer run replaced this one
-  local p = core.parseCoachOutput(res and res.output, res and res.err)
+  local p = core.parseCoachOutput(res and res.output, res and res.err, { sharpen = rec.sharpen ~= nil })
   if res and res.timedOut then
     p = { verdict = "couldntRun", edits = {}, decisions = {}, why = "timed out after " .. tostring(res.timeoutSeconds) .. "s" }
   elseif res and res.code == -1 and (res.output or "") == "" then
@@ -6823,12 +6837,28 @@ function FX.coachFinish(root, rec, res)
     if changed then FX.coachLessonsSave(root, list) end
   end)
   if not okL then print("[cc-dashboard] ❌ coach: counting " .. tostring(root) .. "'s repeated lessons failed: " .. tostring(errL)) end
+  -- 2026-10-03: did each applied edit work? Only from a real answer, and never in a Sharpen run;
+  -- "no data yet" is core's call (core.coachApplyChecks), whatever the model said
+  if p.verdict ~= "couldntRun" and not rec.sharpen and type(judge) == "table" then
+    local okC, errC = pcall(function()
+      local list, changed = core.coachApplyChecks(FX.coachHistory(root), p.checks, { at = FX.now(), ats = judge.ats })
+      if changed then
+        FX.coachHistorySave(root, list)
+        print("[cc-dashboard] 🔍 coach: judged " .. tostring(root) .. "'s applied edits (" .. #(p.checks or {}) .. " check(s) in its answer)")
+      end
+    end)
+    if not okC then print("[cc-dashboard] ❌ coach: storing " .. tostring(root) .. "'s edit verdicts failed: " .. tostring(errC)) end
+  end
   FX.coachSave(rec)
   local name = tostring(rec.name or root)
   local n = #rec.edits + #rec.decisions
   print("[cc-dashboard] " .. (p.verdict == "couldntRun" and "⚠️" or "✅") .. " coach " .. name .. " -> " .. tostring(p.verdict)
     .. " (" .. n .. " proposal(s)" .. (p.why and (": " .. p.why) or "") .. ")")
-  if p.verdict == "proposals" then
+  if p.verdict == "proposals" and rec.sharpen then
+    FX.alert("🧭 The coach has a better wording for " .. name .. "'s edit " .. tostring(rec.sharpen):sub(1, 7) .. " -- the 🧭 chip on its card", 5)
+  elseif p.verdict == "none" and rec.sharpen then
+    FX.alert("🧭 The coach found no clearer wording for " .. name .. "'s edit " .. tostring(rec.sharpen):sub(1, 7), 4)
+  elseif p.verdict == "proposals" then
     FX.alert("🧭 The coach has " .. n .. " suggestion" .. (n == 1 and "" or "s") .. " for " .. name .. "'s CLAUDE.md -- the 🧭 chip on its card", 5)
   elseif p.verdict == "none" then
     FX.alert("🧭 The coach read " .. name .. "'s last sessions: nothing to change in its CLAUDE.md", 4)
@@ -6854,7 +6884,7 @@ function FX.stepCoach(list, cfg)
     for root, repo in pairs(repos) do
       local w = FX._coach.waiting[root]
       if w then
-        FX.coachStart(w.repo, w.trigger, cfg, w.retry)
+        FX.coachStart(w.repo, w.trigger, cfg, w.retry, w.sharpen)
       else
         local rec = FX.coachRecord(root)
         local due, why = core.coachDue(rec, { now = now, enabled = enabled, day = day, running = FX.coachBusy(root),
@@ -6998,7 +7028,16 @@ function FX.coachApply(root, i, anyway)
         if id then e.lesson = id; FX.coachLessonsSave(root, list) end
       end)
       if not okL then print("[cc-dashboard] ❌ coach: recording the applied lesson failed: " .. tostring(errL)) end
-      if e.sha then FX.coachHistorySave(root, core.coachHistoryAdd(FX.coachHistory(root), e)) end   -- kept past the next run, for Undo
+      if e.sha then
+        -- 2026-10-03: a Sharpen run's better wording replaces the edit it sharpens: that entry says so,
+        -- and is judged no more
+        if rec.sharpen then
+          for _, h in ipairs(FX.coachHistory(root)) do
+            if h.sha == rec.sharpen and not h.sharpened then h.sharpened = { sha = e.sha, at = e.at } end
+          end
+        end
+        FX.coachHistorySave(root, core.coachHistoryAdd(FX.coachHistory(root), e))   -- kept past the next run, for Undo
+      end
       local where = not dec.added and "Applied to CLAUDE.md"
         or (dec.newSection and ("Added under a new section, " .. tostring(e.section) .. ",") or "Added at the end of its section")
       FX.alert("🧭 " .. where .. " and committed" .. (e.sha and (" " .. e.sha:sub(1, 7)) or ""), 4)
@@ -7109,6 +7148,25 @@ function FX.coachUndo(root, i)
     end)
   end)
   if not started then done(false, "", "Shepherd couldn't start git") end
+  return true
+end
+
+-- Sharpen (2026-10-03): the coach on one applied edit alone, for a better wording of it. A run like
+-- Run the coach again -- it replaces the suggestions waiting now -- whose record carries the edit's
+-- commit (rec.sharpen); its answer is one edit, applied like any other, and once it is in, the old
+-- entry reads sharpened (FX.coachApply).
+function FX.coachSharpen(root, i)
+  local h = FX.coachHistory(root)[math.tointeger(tonumber(i) or 0) or 0]
+  if not h then return false end
+  if h.undone then FX.alert("That edit is undone -- there is nothing to sharpen"); return false end
+  if h.sharpened then FX.alert("That edit was sharpened already -- sharpen its newer wording instead"); return false end
+  local repo = FX.coachRepoForRoot(root)
+  if not repo then FX.alert("⚠️ Coach: that repo has no card here any more"); return false end
+  local rec, why = FX.coachStart(repo, "card", loadConfig(), nil, h.sha)
+  if FX._coach.open == root then FX.pushCoach(root) end
+  if not rec and why ~= "waiting" then FX.alert("⚠️ Coach: " .. tostring(why)); return false end
+  print("[cc-dashboard] 🚀 coach: sharpening " .. tostring(h.sha) .. " in " .. tostring(root) .. (rec and "" or " (waiting for the merge checker)"))
+  FX.alert("🧭 The coach is sharpening the edit " .. tostring(h.sha):sub(1, 7) .. " -- its better wording lands in this overlay", 4)
   return true
 end
 
@@ -12262,6 +12320,8 @@ local function handleBridgeMsg(msg)
   if a == "coach-unskip" then FX.coachUnskip(tostring(payload.v or ""), tostring(payload.text or ""), "edits"); return end
   if a == "coach-dec-unskip" then FX.coachUnskip(tostring(payload.v or ""), tostring(payload.text or ""), "decisions"); return end
   if a == "coach-undo" then FX.coachUndo(tostring(payload.v or ""), tostring(payload.text or "")); return end
+  -- 2026-10-03: a run on one applied edit alone; text = the history entry's own number, like Undo
+  if a == "coach-sharpen" then FX.coachSharpen(tostring(payload.v or ""), tostring(payload.text or "")); return end
   if a == "coach-dec-add" then FX.coachDecision(tostring(payload.v or ""), tostring(payload.text or ""), "add"); return end
   if a == "coach-dec-skip" then FX.coachDecision(tostring(payload.v or ""), tostring(payload.text or ""), "skip"); return end
   if a == "coach-rerun" then
@@ -15160,6 +15220,10 @@ local HTML = [[
 .co-expect{ margin:0 0 8px; padding:6px 8px; border-left:2px solid var(--accent); color:var(--text); overflow-wrap:anywhere; }
 .co-expect b{ color:var(--text-2); font-weight:600; }
 .co-hist-h{ margin:16px 0 8px; color:var(--text-2); font-weight:600; }
+.co-check{ margin:0 0 6px; font-weight:600; overflow-wrap:anywhere; }
+.co-check.working{ color:var(--ok); }
+.co-check.still{ color:var(--warn); }
+.co-check.nodata{ color:var(--dim); font-weight:400; }
 .co-old, .co-new{ margin:0 0 6px; padding:6px 8px; border-radius:6px; white-space:pre-wrap; overflow-wrap:anywhere;
   font:11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; max-height:14em; overflow:auto; }
 .co-old{ background:var(--surface-2); color:var(--dim); text-decoration:line-through; }
@@ -23502,15 +23566,18 @@ local HTML = [[
       // button with words that say so -- the file did not change under it
       var misquoted = rerun.replace('data-act="rerun"', 'data-act="rerun" title="The coach quoted text that does not match CLAUDE.md: a fresh run reads the file as it is now and quotes it again, and replaces these suggestions"');
       var ran = (v.state === "running" || v.state === "queued") ? coachElapsedText(v.at, coachNow()) : "";
-      if(v.state === "running" || v.state === "queued") st = "The coach is reading this repo's last sessions…"
+      // 2026-10-03: a Sharpen run (v.sharpen, the applied edit's commit) says which edit it rewords
+      var sharp = v.sharpen ? esc(String(v.sharpen).slice(0, 7)) : "";
+      if(v.state === "running" || v.state === "queued") st = (sharp ? "The coach is sharpening the edit committed " + sharp + "…" : "The coach is reading this repo's last sessions…")
         + (ran ? ' <span id="co-elapsed">' + esc(ran) + '</span> so far'
                + (v.timeoutSeconds > 0 ? ' (it gives up at ' + esc(Math.round(v.timeoutSeconds / 60)) + 'm)' : '') : '');
       else if(v.state === "waiting") st = "The coach waits for this repo's merge checker, then reads its sessions.";
       else if(v.state === "lost") st = "Shepherd reloaded while the coach ran; it tries again by itself.";
       else if(v.state === "new") st = "The coach hasn't read this repo's sessions yet. " + rerun.replace("again", "now");
       else if(v.verdict === "couldntRun") st = "The coach couldn't run: " + esc(v.why || "no answer") + " " + rerun;
+      else if(v.verdict === "none" && sharp) st = "The coach found no clearer wording for the edit committed " + sharp + ". " + rerun;
       else if(v.verdict === "none") st = "The coach read " + esc(v.sessions || 0) + " session(s): nothing to change in CLAUDE.md. " + rerun;
-      else st = (v.summary ? esc(v.summary) + " · " : "") + esc(v.sessions || 0) + " session(s) read"
+      else st = (sharp ? "Sharpening the edit committed " + sharp + " · " : "") + (v.summary ? esc(v.summary) + " · " : "") + esc(v.sessions || 0) + " session(s) read"
         + (v.doneAt ? " · " + esc(fmtAge(v.doneAt)) + " ago" : "") + (typeof v.costUsd === "number" ? " · $" + esc(v.costUsd.toFixed(2)) : "");
       var h = '<div class="co-state">' + st + '</div>';
       // 2026-09-30: what an edit is expected to change, so it can be judged later
@@ -23563,23 +23630,46 @@ local HTML = [[
                     : "Skipped " + '<button class="ib-btn" data-act="dec-unskip" data-i="' + i + '" onclick="coachAct(event)" title="Put this entry back with the ones waiting">Bring back</button>') + '</div>')
           + '</div>';
       });
+      // 2026-10-03: did it work? The coach's last verdict on the sessions since it was applied
+      // (x.check, core.coachApplyChecks): working or still seen with its quotes, or no data -- "yet"
+      // while fewer sessions than a verdict needs postdate it. An undone edit has none to show.
+      function checkHtml(x){
+        var c = x.check;
+        if(!c || x.undone) return '';
+        var n = Number(c.since) || 0, need = Number(c.need) || 0;
+        var since = esc(n) + ' session' + (n === 1 ? '' : 's') + ' since';
+        var age = c.at ? ', ' + esc(fmtAge(c.at)) + ' ago' : '';
+        var cls = { working: "working", "still-seen": "still" }[c.verdict] || "nodata";
+        var head = c.verdict === "working" ? '✓ Working · judged on ' + since + age
+          : (c.verdict === "still-seen" ? '⚠ Still seen · judged on ' + since + age
+          : (n < need ? 'No data yet · ' + esc(n) + ' of ' + esc(need) + ' sessions since it was applied'
+                      : 'No data · the ' + since + ' never came near it'));
+        var ev = c.evidence || [];
+        return '<div class="co-check ' + cls + '">' + head + '</div>'
+          + (ev.length ? '<ul class="co-ev">' + ev.map(function(q){ return '<li>' + esc(q) + '</li>'; }).join("") + '</ul>' : '');
+      }
       // 2026-09-30: what was applied before (v.history, newest first). It outlives the run that
       // proposed it: each entry shows its commit, both texts and what it was expected to change,
-      // with Undo -- which sends only the entry's number, like every other click here.
+      // with Undo -- which sends only the entry's number, like every other click here. 2026-10-03:
+      // and its verdict, with Sharpen (a run on that edit alone) beside Undo; an edit a sharpened
+      // wording replaced names that commit and offers neither.
       var hist = v.history || [];
       if(hist.length){
         h += '<div class="co-hist-h">Applied edits · ' + esc(hist.length) + '</div>';
         hist.forEach(function(x, i){
-          h += '<div class="ib-row co-row co-hist' + (x.undone ? ' done' : '') + '">'
+          h += '<div class="ib-row co-row co-hist' + (x.undone || x.sharpenedSha ? ' done' : '') + '">'
             + '<div class="ib-q">' + esc(x.section || "CLAUDE.md") + '</div>'
             + '<div class="ib-meta">' + (x.at ? esc(fmtAge(x.at)) + ' ago · ' : '') + 'committed ' + esc(String(x.sha || "").slice(0, 7)) + '</div>'
             + '<div class="co-why">' + esc(x.why) + '</div>'
             + expectHtml(x)
+            + checkHtml(x)
             + (x.old ? '<pre class="co-old">' + esc(x.old) + '</pre>' : '')
             + '<pre class="co-new">' + esc(x["new"]) + '</pre>'
             + (!x.undone && x.error ? '<div class="co-err">' + esc(x.error) + '</div>' : '')
             + (x.undone ? '<div class="co-done">↩ Undone' + (x.undoSha ? ' · committed ' + esc(String(x.undoSha).slice(0, 7)) : '') + '</div>'
-                        : '<div class="ib-free"><button class="ib-btn" data-act="undo" data-i="' + i + '" onclick="coachAct(event)" title="Take this edit back out of CLAUDE.md and commit CLAUDE.md alone (one more commit; nothing is rewritten)">Undo</button></div>')
+              : (x.sharpenedSha ? '<div class="co-done">✎ Sharpened · its new wording committed ' + esc(String(x.sharpenedSha).slice(0, 7)) + '</div>'
+              : '<div class="ib-free"><button class="ib-btn" data-act="sharpen" data-i="' + i + '" onclick="coachAct(event)" title="Run the coach on this edit alone: it proposes a better wording of it, to Apply like any suggestion (the suggestions waiting now are replaced)">Sharpen</button>'
+                + '<button class="ib-btn" data-act="undo" data-i="' + i + '" onclick="coachAct(event)" title="Take this edit back out of CLAUDE.md and commit CLAUDE.md alone (one more commit; nothing is rewritten)">Undo</button></div>'))
             + '</div>';
         });
       }
@@ -23592,9 +23682,9 @@ local HTML = [[
       if(!t || !v || !v.root) return;
       var act = t.getAttribute("data-act");
       if(act === "rerun"){ send("coach-rerun", v.root); return; }
-      if(act === "undo"){   // the history is shown newest first; Lua wants the entry's own number
+      if(act === "undo" || act === "sharpen"){   // the history is shown newest first; Lua wants the entry's own number
         var hist = v.history || [], hx = hist[parseInt(t.getAttribute("data-i"), 10)];
-        if(hx && hx.i) send("coach-undo", v.root, String(hx.i));
+        if(hx && hx.i) send("coach-" + act, v.root, String(hx.i));
         return;
       }
       var list = (act === "apply" || act === "skip" || act === "add" || act === "unskip") ? v.edits

@@ -753,6 +753,136 @@ do
   end
 end
 
+-- ---- did the edit work? (2026-10-03, mining round 2 unit B2) ----
+-- 2026-10-03: an applied edit said what sessions did before it and what they were expected to do
+-- after, and nothing ever looked again: no run said whether the sessions since behaved as expected.
+-- Each run now judges the applied edits that at least COACH.judgeSessions digest sessions postdate
+-- (working, still seen, or no data); fewer than that is "no data yet", decided in Lua, never by the
+-- model. Sharpen runs the coach on one applied edit alone, for a better wording of it.
+do
+  local fns = { "coachEditsToJudge", "coachApplyChecks" }
+  local have = true
+  for _, n in ipairs(fns) do if type(core[n]) ~= "function" then have = false; print("       missing core." .. n) end end
+  check("core has the edit-outcome functions", have and type(core.COACH.judgeSessions) == "number" and core.COACH.judgeSessions >= 1)
+  if have then
+    local K = core.COACH.judgeSessions
+    -- the digest says when each session it holds last ran, newest first
+    check("digest: carries each held session's time (ats), newest first",
+          type(D.ats) == "table" and #D.ats == 2 and D.ats[1] == F2.at and D.ats[2] == F.at)
+    check("digest: ...a session cut out of it is not counted", type(capped.ats) == "table" and #capped.ats == capped.sessions)
+    -- an applied history: an old edit (judgeable), one applied after every session (too early), an undone one
+    local T0 = core.isoToEpoch("2026-09-20T00:00:00.000Z")
+    local ATS = {}
+    for i = 1, K + 1 do ATS[i] = T0 + 1000 * (K + 2 - i) end   -- K+1 sessions after T0, newest first
+    local HIST = {
+      { sha = "aaa1111aaaa", at = T0, section = "Git", why = "Units pushed alone.", old = "", new = "- never push from a unit",
+        before = "A unit ran git push when green.", after = "A unit asks Adam before it pushes." },
+      { sha = "bbb2222bbbb", at = T0 + 1000 * (K + 1) + 1, section = "Tests", why = "Lint late.", old = "", new = "- lint first",
+        before = "Lint ran last.", after = "Lint runs first." },
+      { sha = "ccc3333cccc", at = T0, section = "Docs", why = "Gone.", old = "", new = "- gone", undone = { sha = "ddd4444dddd", at = T0 + 5 } },
+    }
+    local J = core.coachEditsToJudge(HIST, ATS)
+    local byJ = {}
+    for _, x in ipairs(J) do byJ[x.sha] = x end
+    check("judge: an edit with K or more sessions since is judged  (" .. tostring(byJ.aaa1111aaaa and byJ.aaa1111aaaa.since) .. ")",
+          byJ.aaa1111aaaa and byJ.aaa1111aaaa.since == K + 1 and byJ.aaa1111aaaa.judge == true and byJ.aaa1111aaaa.asked == true)
+    check("judge: an edit no session postdates is not, and says how many there are",
+          byJ.bbb2222bbbb and byJ.bbb2222bbbb.since == 0 and byJ.bbb2222bbbb.judge == false and not byJ.bbb2222bbbb.asked)
+    check("judge: an undone edit is never judged", byJ.ccc3333cccc == nil)
+    local ONE = { HIST[1] }
+    local short = {}
+    for i = 1, K - 1 do short[i] = ATS[i] end
+    check("judge: one session short of K is not enough", core.coachEditsToJudge(ONE, short)[1].judge == false
+          and core.coachEditsToJudge(ONE, short)[1].since == K - 1)
+    check("judge: a session at the very second it was applied doesn't postdate it", core.coachEditsToJudge(ONE, { T0, T0, T0 })[1].since == 0)
+    -- the prompt asks about the judgeable edits only, with what each was expected to change
+    local DJ = { text = "### Session 1 of 1\n", ats = ATS, sessions = #ATS }
+    local PJ = core.coachPrompt(DJ, "# Repo\n\n## Git\n\n- never push from a unit\n", nil, { name = "repo", history = HIST })
+    local ab = PJ:match("<applied>\n(.-)\n</applied>") or ""
+    check("prompt: an <applied> block names a judgeable edit by its commit", ab:find("aaa1111", 1, true) ~= nil)
+    check("prompt: ...with what sessions did before it and what was expected after",
+          ab:find("A unit ran git push when green.", 1, true) ~= nil and ab:find("A unit asks Adam before it pushes.", 1, true) ~= nil)
+    check("prompt: ...and never an edit too recent to judge, or an undone one",
+          not ab:find("bbb2222", 1, true) and not ab:find("ccc3333", 1, true))
+    check("prompt: asks for a check per edit inside the same JSON, as working, still-seen or no-data",
+          PJ:find('"checks"', 1, true) ~= nil and PJ:find("working", 1, true) ~= nil and PJ:find("still-seen", 1, true) ~= nil
+          and PJ:find("no-data", 1, true) ~= nil)
+    local PN = core.coachPrompt(DJ, "# Repo\n", nil, { name = "repo", history = { HIST[2], HIST[3] } })
+    check("prompt: nothing to judge, no block and no checks asked for", not PN:find("<applied>", 1, true) and not PN:find('"checks"', 1, true))
+    -- the answer's checks, read from the same object as its edits
+    local pc = core.parseCoachOutput(envelope(json.encode({ summary = "s", edits = {}, decisions = {}, checks = {
+      { sha = "aaa1111", verdict = "still-seen", evidence = { "a unit ran\n git push", "again" } },
+      { sha = "bbb2222", verdict = "working", evidence = {} },
+      { sha = "eee5555", verdict = "great", evidence = { "x" } },
+      { sha = "rm -rf /", verdict = "working", evidence = { "x" } },
+      { sha = "fff6666", verdict = "still-seen", evidence = {} },
+      { sha = "abcdef0", verdict = "no-data" } } })), "")
+    check("output: nothing to change is still a verdict, with its checks", pc.verdict == "none" and type(pc.checks) == "table")
+    local pcs = {}
+    for _, x in ipairs(pc.checks or {}) do pcs[x.sha] = x end
+    check("output: a check keeps its commit, its verdict and its quotes, each on one line",
+          pcs.aaa1111 and pcs.aaa1111.verdict == "still-seen" and pcs.aaa1111.evidence[1] == "a unit ran git push" and #pcs.aaa1111.evidence == 2)
+    check("output: working needs no quote, no-data none either", pcs.bbb2222 and pcs.bbb2222.verdict == "working" and pcs.abcdef0 and pcs.abcdef0.verdict == "no-data")
+    check("output: a made-up verdict, a sha that isn't one, and still-seen with nothing quoted are dropped",
+          pcs.eee5555 == nil and pcs["rm -rf /"] == nil and pcs.fff6666 == nil and #pc.checks == 3)
+    local pnc = core.parseCoachOutput(envelope(json.encode({ summary = "s", edits = {}, decisions = {}, checks = "lots" })), "")
+    check("output: checks that aren't a list are none", pnc.verdict == "none" and #(pnc.checks or {}) == 0)
+    -- applying them: Lua decides "no data yet", whatever the model said
+    local H2 = core.coachApplyChecks(HIST, { { sha = "aaa1111", verdict = "still-seen", evidence = { "a unit ran git push" } },
+                                             { sha = "bbb2222bbbb", verdict = "working", evidence = { "made up" } } }, { at = 5000, ats = ATS })
+    local hb = {}
+    for _, x in ipairs(H2) do hb[x.sha] = x end
+    check("checks: a judged edit keeps the coach's verdict, its quotes, when and how many sessions since",
+          hb.aaa1111aaaa and type(hb.aaa1111aaaa.check) == "table" and hb.aaa1111aaaa.check.verdict == "still-seen"
+          and hb.aaa1111aaaa.check.evidence[1] == "a unit ran git push" and hb.aaa1111aaaa.check.at == 5000 and hb.aaa1111aaaa.check.since == K + 1)
+    check("checks: an edit too recent to judge reads no data yet, though the coach called it working",
+          hb.bbb2222bbbb and hb.bbb2222bbbb.check and hb.bbb2222bbbb.check.verdict == "no-data" and hb.bbb2222bbbb.check.since == 0
+          and #(hb.bbb2222bbbb.check.evidence or {}) == 0)
+    check("checks: an undone edit is left alone", hb.ccc3333cccc and hb.ccc3333cccc.check == nil)
+    check("checks: ...the list it was given is unchanged", HIST[1].check == nil)
+    local H3 = core.coachApplyChecks(HIST, {}, { at = 6000, ats = ATS })
+    check("checks: a judgeable edit the coach said nothing about reads no data", H3[1].check and H3[1].check.verdict == "no-data" and H3[1].check.since == K + 1)
+    local back = core.parseCoachHistory(json.encode(H2))
+    check("checks: a verdict survives the history file", back[1].check and back[1].check.verdict == "still-seen"
+          and back[1].check.evidence[1] == "a unit ran git push" and back[1].check.since == K + 1)
+    check("checks: a bad verdict on disk is dropped, the entry kept",
+          core.parseCoachHistory(json.encode({ { sha = "aaa1111aaaa", at = 1, section = "S", why = "w", old = "", new = "- x",
+                                                 check = { verdict = "<b>", evidence = { "e" }, at = 1, since = 3 } } }))[1].check == nil)
+    local hv = core.coachHistoryView(H2)
+    local hvb = {}
+    for _, x in ipairs(hv) do hvb[x.sha] = x end
+    check("view: a history row carries its check, and how many sessions a verdict needs",
+          hvb.aaa1111aaaa and hvb.aaa1111aaaa.check and hvb.aaa1111aaaa.check.verdict == "still-seen" and hvb.aaa1111aaaa.check.need == K
+          and hvb.aaa1111aaaa.check.evidence[1] == "a unit ran git push")
+    -- Sharpen: one applied edit, a better wording of it alone
+    local SH = H2[1]
+    local PS = core.coachPrompt(DJ, "# Repo\n\n## Git\n\n- never push from a unit\n", "# Decisions\n", { name = "repo", history = H2, sharpen = SH })
+    local sb = PS:match("<sharpen>\n(.-)\n</sharpen>") or ""
+    check("sharpen: the prompt carries the one edit, its text, why and what it was expected to change",
+          sb:find("aaa1111", 1, true) ~= nil and sb:find("- never push from a unit", 1, true) ~= nil and sb:find("Units pushed alone.", 1, true) ~= nil
+          and sb:find("A unit asks Adam before it pushes.", 1, true) ~= nil)
+    check("sharpen: ...and what the last check quoted", sb:find("a unit ran git push", 1, true) ~= nil)
+    check("sharpen: asks for ONE better wording of that edit and nothing else", PS:find("ONE", 1, true) ~= nil and PS:lower():find("better wording", 1, true) ~= nil)
+    check("sharpen: no judging in a sharpen run", not PS:find("<applied>", 1, true) and not PS:find('"checks"', 1, true))
+    local ps = core.parseCoachOutput(envelope(json.encode({ summary = "s", edits = { edit(1), edit(2) }, decisions = { { what = "w", why = "y" } },
+                                                           checks = { { sha = "aaa1111", verdict = "working" } } })), "", { sharpen = true })
+    check("sharpen: its answer keeps one edit, no DECISIONS.md entry and no checks",
+          ps.verdict == "proposals" and #ps.edits == 1 and #ps.decisions == 0 and #(ps.checks or {}) == 0)
+    local sr = core.parseCoachRecord(json.encode({ v = 1, repo = "/r/repo/.git", root = "/r/repo", state = "done", verdict = "proposals",
+      trigger = "card", at = 100, doneAt = 200, lastRunAt = 200, sharpen = "aaa1111aaaa", edits = {}, decisions = {} }))
+    check("sharpen: the run's record keeps the commit it sharpens", sr and sr.sharpen == "aaa1111aaaa")
+    check("sharpen: ...and drops one that isn't a commit", core.parseCoachRecord(json.encode({ v = 1, root = "/r", state = "done",
+      verdict = "none", sharpen = "$(rm)", edits = {}, decisions = {} })).sharpen == nil)
+    check("sharpen: the overlay's view says which commit it sharpens", core.coachView(sr).sharpen == "aaa1111aaaa")
+    -- once its better wording is applied, the old entry says so and is judged no more
+    local SHD = core.parseCoachHistory(json.encode({ { sha = "aaa1111aaaa", at = T0, section = "Git", why = "w", old = "", new = "- x",
+                                                      sharpened = { sha = "fff7777ffff", at = T0 + 9 } } }))
+    check("sharpen: a sharpened entry keeps the commit that replaced it", SHD[1] and SHD[1].sharpened and SHD[1].sharpened.sha == "fff7777ffff")
+    check("sharpen: ...is no longer judged", #core.coachEditsToJudge(SHD, ATS) == 0)
+    check("sharpen: ...and its row says so", core.coachHistoryView(SHD)[1].sharpenedSha == "fff7777ffff")
+  end
+end
+
 -- ---- the panel half: the real claude-dashboard.lua under a stubbed hs ----
 local REPO = T .. "/repo"
 local COMMON = REPO .. "/.git"
@@ -1266,6 +1396,104 @@ for _, js in ipairs(jsCalls) do
   if js:find("ccCoach(", 1, true) and js:find('"seen":2', 1, true) and js:find("two more force-pushes this week", 1, true) then seenSent = true end
 end
 check("lessons (repo): ...and the overlay is told it was seen in 2 runs, with what is new", seenSent)
+end)()
+
+-- 2026-10-03: did the edit work? On a real repo: a run judges the applied edits enough sessions
+-- postdate (the rest read "no data yet", whatever the model says), stores each verdict on its
+-- history entry, and Sharpen runs the coach on one edit alone for a better wording of it.
+;(function()
+if type(core.coachEditsToJudge) ~= "function" then check("outcomes (repo): core.coachEditsToJudge exists", false); return end
+local K = core.COACH.judgeSessions
+for i = 2, K do write(pdir .. "/s" .. i .. ".jsonl", TR .. "\n") end   -- K sessions, each last active 2026-09-28
+local CURO = "# Repo\n\n## Git\n\n- never push from a unit\n"
+write(REPO .. "/CLAUDE.md", CURO); sh("git -C " .. q(REPO) .. " add -A && git -C " .. q(REPO) .. " commit -q -m outcomes")
+local SHA_A = (sh("git -C " .. q(REPO) .. " rev-parse HEAD")):gsub("%s+$", "")
+local SHA_B = "bbb2222bbbb2222"
+os.remove(HFILE)
+fx._coach.history = {}
+fx._coach.recs[REPO] = nil
+fx._coach.scans = {}
+fx._headless["coach|" .. REPO] = nil
+fx.coachHistorySave(REPO, {
+  { sha = SHA_A, at = core.isoToEpoch("2026-09-27T00:00:00.000Z"), section = "Git", why = "Units pushed alone.", old = "",
+    new = "- never push from a unit", before = "A unit ran git push when green.", after = "A unit asks Adam before it pushes." },
+  { sha = SHA_B, at = core.isoToEpoch("2026-09-29T00:00:00.000Z"), section = "Tests", why = "Lint late.", old = "",
+    new = "- lint first", before = "Lint ran last.", after = "Lint runs first." } })
+local nScans = #scans()
+quiet(function() fx.coachStart(fx.coachRepoForRoot(REPO), "card", CFG) end)
+if scans()[nScans + 1] then runFor(scans()[nScans + 1]) end
+local CC = claudes()
+local ct = CC[#CC] or { args = {}, cb = function() end }
+local pf = tostring(ct.args[3] or ""):match("< '([^']+)' >")
+local ptext = pf and read(pf) or ""
+local ab = ptext:match("<applied>\n(.-)\n</applied>") or ""
+check("outcomes (repo): the run's prompt asks about the edit " .. K .. " sessions postdate, by its commit",
+      ab:find(SHA_A:sub(1, 7), 1, true) ~= nil and ab:find("A unit asks Adam before it pushes.", 1, true) ~= nil)
+check("outcomes (repo): ...and not the one no session postdates", not ab:find(SHA_B:sub(1, 7), 1, true))
+answerClaude(ct, { summary = "Still pushing.", edits = {}, decisions = {},
+  checks = { { sha = SHA_A:sub(1, 7), verdict = "still-seen", evidence = { "denied: git push origin main" } },
+             { sha = SHA_B:sub(1, 7), verdict = "working", evidence = { "made up" } } } })
+local OH = core.parseCoachHistory(read(HFILE))
+local oh = {}
+for _, x in ipairs(OH) do oh[x.sha] = x end
+check("outcomes (repo): the judged edit's verdict and quotes are stored on its history entry",
+      oh[SHA_A] and oh[SHA_A].check and oh[SHA_A].check.verdict == "still-seen" and oh[SHA_A].check.evidence[1] == "denied: git push origin main"
+      and oh[SHA_A].check.since == K)
+check("outcomes (repo): the edit too recent to judge reads no data yet, whatever the coach said",
+      oh[SHA_B] and oh[SHA_B].check and oh[SHA_B].check.verdict == "no-data" and oh[SHA_B].check.since == 0)
+jsCalls = {}
+quiet(function() fx.pushCoach(REPO) end)
+local verdictSent = false
+for _, js in ipairs(jsCalls) do
+  if js:find("ccCoach(", 1, true) and js:find('"still-seen"', 1, true) and js:find("denied: git push origin main", 1, true) then verdictSent = true end
+end
+check("outcomes (repo): ...and the overlay is sent them", verdictSent)
+-- Sharpen: a run on that one edit
+local DSRC = read(ROOT .. "claude-dashboard.lua") or ""
+check("outcomes (repo): the overlay's Sharpen click reaches FX.coachSharpen with the entry's number",
+      DSRC:find('if a == "coach-sharpen" then FX.coachSharpen(tostring(payload.v or ""), tostring(payload.text or "")); return end', 1, true) ~= nil)
+local iA
+for i, x in ipairs(OH) do if x.sha == SHA_A then iA = i end end
+nScans = #scans()
+local okS
+quiet(function() okS = type(fx.coachSharpen) == "function" and fx.coachSharpen(REPO, tostring(iA)) end)
+check("sharpen (repo): starts a run for the repo", okS == true and #scans() == nScans + 1)
+local srec = fx.coachRecord(REPO)
+check("sharpen (repo): ...whose record carries the commit it sharpens", srec and srec.sharpen == SHA_A)
+if scans()[nScans + 1] then runFor(scans()[nScans + 1]) end
+CC = claudes()
+ct = CC[#CC] or { args = {}, cb = function() end }
+pf = tostring(ct.args[3] or ""):match("< '([^']+)' >")
+ptext = pf and read(pf) or ""
+check("sharpen (repo): its prompt asks for a better wording of that edit alone, with its last check's quotes",
+      (ptext:match("<sharpen>\n(.-)\n</sharpen>") or ""):find("- never push from a unit", 1, true) ~= nil
+      and ptext:find("denied: git push origin main", 1, true) ~= nil and not ptext:find("<applied>", 1, true))
+answerClaude(ct, { summary = "Sharper.", decisions = { { what = "Keep bash", why = "portable" } },
+  edits = { { section = "Git", old = "- never push from a unit", new = "- a unit never runs git push; Adam pushes main",
+              why = "Units still pushed.", evidence = { "denied: git push origin main" } },
+            { section = "Git", old = "", new = "- something else", why = "w", evidence = { "e" } } },
+  checks = { { sha = SHA_A:sub(1, 7), verdict = "working", evidence = { "x" } } } })
+srec = fx.coachRecord(REPO)
+check("sharpen (repo): its answer keeps one edit and no DECISIONS.md entry",
+      srec and srec.verdict == "proposals" and #srec.edits == 1 and #srec.decisions == 0 and srec.sharpen == SHA_A)
+OH = core.parseCoachHistory(read(HFILE))
+oh = {}
+for _, x in ipairs(OH) do oh[x.sha] = x end
+check("sharpen (repo): ...and judges nothing", oh[SHA_A] and oh[SHA_A].check and oh[SHA_A].check.verdict == "still-seen")
+local nC = #commitTasks()
+local okA
+quiet(function() okA = fx.coachApply(REPO, 1) end)
+if commitTasks()[nC + 1] then runFor(commitTasks()[nC + 1]) end
+OH = core.parseCoachHistory(read(HFILE))
+oh = {}
+for _, x in ipairs(OH) do oh[x.sha] = x end
+check("sharpen (repo): applying the better wording commits it",
+      okA == true and srec.edits[1].status == "applied" and (read(REPO .. "/CLAUDE.md") or ""):find("Adam pushes main", 1, true) ~= nil)
+check("sharpen (repo): ...and the sharpened entry names the commit that replaced it",
+      oh[SHA_A] and oh[SHA_A].sharpened and oh[SHA_A].sharpened.sha == srec.edits[1].sha and oh[srec.edits[1].sha or "?"] ~= nil)
+local okU
+quiet(function() okU = fx.coachSharpen(REPO, tostring(iA)) end)
+check("sharpen (repo): an entry already sharpened isn't sharpened again", okU == false)
 end)()
 
 finish()

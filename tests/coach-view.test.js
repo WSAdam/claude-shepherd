@@ -227,6 +227,53 @@ lib.coachAct({ target: { closest: function(){ return { getAttribute: function(k)
 eq("Undo sends the repo's root and the entry's own number, never text", JSON.stringify(sent.pop()), JSON.stringify(["coach-undo", "/r/repo", "2"]));
 lib.setView(null);
 
+// ---- did the edit work? (2026-10-03, mining round 2 unit B2) ----
+// 2026-10-03: an applied edit said what it was expected to change, and nothing ever said whether it
+// did. Each history row now shows the coach's verdict on the sessions since (working, still seen,
+// no data yet), with its quotes, and offers Sharpen (a run on that edit alone) beside Undo.
+const outView = { root: "/r/repo", state: "done", verdict: "none", edits: [], decisions: [],
+  history: [
+    { i: 4, sha: "aaa1111aaa", at: 1000, section: "Git", why: "w", old: "", new: "- a",
+      check: { verdict: "working", evidence: ["no push since" + EVIL], at: 2000, since: 4, need: 3 } },
+    { i: 3, sha: "bbb2222bbb", at: 900, section: "Git", why: "w", old: "", new: "- b",
+      check: { verdict: "still-seen", evidence: ["denied: git push" + EVIL, "pushed again"], at: 2000, since: 5, need: 3 } },
+    { i: 2, sha: "ccc3333ccc", at: 800, section: "Git", why: "w", old: "", new: "- c",
+      check: { verdict: "no-data", evidence: [], at: 2000, since: 1, need: 3 } },
+    { i: 1, sha: "ddd4444ddd", at: 700, section: "Git", why: "w", old: "", new: "- d",
+      check: { verdict: "no-data", evidence: [], at: 2000, since: 6, need: 3 } },
+    { i: 5, sha: "eee5555eee", at: 600, section: "Git", why: "w", old: "", new: "- e" },
+    { i: 6, sha: "fff6666fff", at: 500, section: "Git", why: "w", old: "", new: "- f", undone: true, undoSha: "1231231",
+      check: { verdict: "working", evidence: ["old"], at: 400, since: 3, need: 3 } },
+    { i: 7, sha: "abcabc1abc", at: 450, section: "Git", why: "w", old: "", new: "- g", sharpenedSha: "9879879aaa",
+      check: { verdict: "still-seen", evidence: ["was bad"], at: 400, since: 3, need: 3 } },
+  ] };
+const oh = lib.coachRowsHtml(outView);
+const orows = oh.split('class="ib-row co-row co-hist').slice(1);
+eq("one row per applied edit", orows.length, 7);
+eq("a working edit says so, with what shows it", /class="co-check[^"]*working[^"]*"[\s\S]*Working/.test(orows[0]) && orows[0].indexOf("no push since") >= 0, true);
+eq("...judged on how many sessions since", /4 sessions since/.test(orows[0]), true);
+eq("an edit whose problem is still seen says so, quoting it", /Still seen/.test(orows[1]) && orows[1].indexOf("denied: git push") >= 0 && orows[1].indexOf("pushed again") >= 0, true);
+eq("...every quote escaped", oh.indexOf("<img") < 0, true);
+eq("an edit too few sessions postdate says no data yet, and how many there are of how many",
+  /No data yet/.test(orows[2]) && /1 of 3 sessions/.test(orows[2]), true);
+eq("an edit the sessions since never touched says no data, not \"yet\"", /No data/.test(orows[3]) && !/No data yet/.test(orows[3]), true);
+eq("an edit never judged shows no verdict", /co-check/.test(orows[4]), false);
+eq("a live edit offers Sharpen and Undo, each carrying only its row number",
+  /data-act="sharpen" data-i="1"/.test(orows[1]) && /data-act="undo" data-i="1"/.test(orows[1]), true);
+eq("an edit never judged can be sharpened too", /data-act="sharpen" data-i="4"/.test(orows[4]), true);
+eq("an undone edit offers neither, and shows no verdict", !/data-act="sharpen"/.test(orows[5]) && !/data-act="undo"/.test(orows[5]) && !/co-check/.test(orows[5]), true);
+eq("a sharpened edit names the commit that replaced it, and offers neither",
+  /Sharpened/.test(orows[6]) && orows[6].indexOf("9879879") >= 0 && !/data-act="sharpen"/.test(orows[6]) && !/data-act="undo"/.test(orows[6]), true);
+lib.setView(outView);
+sent.length = 0;
+lib.coachAct({ target: { closest: function(){ return { getAttribute: function(k){ return { "data-act": "sharpen", "data-i": "1" }[k]; } }; } }, stopPropagation: function(){} });
+eq("Sharpen sends the repo's root and the entry's own number, never text", JSON.stringify(sent.pop()), JSON.stringify(["coach-sharpen", "/r/repo", "3"]));
+lib.setView(null);
+eq("a sharpen run says what it is doing", /sharpen/i.test(lib.coachRowsHtml({ root: "/r", state: "running", at: 1000, sharpen: "aaa1111aaa", edits: [], decisions: [] }))
+  && lib.coachRowsHtml({ root: "/r", state: "running", at: 1000, sharpen: "aaa1111aaa", edits: [], decisions: [] }).indexOf("aaa1111") >= 0, true);
+eq("...and so does its answer", /sharpen/i.test(lib.coachRowsHtml({ root: "/r", state: "done", verdict: "proposals", sharpen: "aaa1111aaa", summary: "s", decisions: [],
+  edits: [{ i: 1, section: "Git", old: "a", new: "b", why: "w", evidence: ["e"], status: "pending" }] })), true);
+
 // ---- a running coach shows how long it has been at it (2026-09-30) ----
 // 2026-09-30: Adam ran the coach again and the overlay read "The coach is reading this repo's last
 // sessions…" for minutes with nothing moving: no way to tell a slow run from a dead one.

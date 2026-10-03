@@ -4763,7 +4763,8 @@ do
         and apply:find("core.coachCommitCmd(rec.root, subject, body, current == nil)", 1, true) ~= nil)
   check("coach: ...its commit is a task with a retained timeout", apply:find("hs.task.new(", 1, true) ~= nil
         and apply:find("job.timer = hs.timer.doAfter(", 1, true) ~= nil)
-  local start = src:match("\nfunction FX%.coachStart%(repo, trigger, cfg, retry%)(.-)\nend\n") or ""
+  -- 2026-10-03: coachStart gained `sharpen` (a Sharpen run's commit); the pin slices by the new signature
+  local start = src:match("\nfunction FX%.coachStart%(repo, trigger, cfg, retry, sharpen%)(.-)\nend\n") or ""
   check("coach: a run waits while the repo's merge checker is queued or running",
         start:find("if FX.coachCheckerBusy(repo.commonDir) then", 1, true) ~= nil)
   local scanned = src:match("\nfunction FX%.coachScanned%(repo, rec, scan, cfg%)(.-)\nend\n") or ""
