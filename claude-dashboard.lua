@@ -1143,6 +1143,15 @@ function FX.queueKeyFor(item)
   end
   return qk or legacy
 end
+-- The detail panel's queue editor gets its list as each line's text plus, 2026-10-03 (D4b), which
+-- lines are held (core.queueLines) -- the texts stay a plain array, so the editor's other code is unchanged.
+function FX.queueListJs(key, qk)
+  local texts, held = {}, {}
+  for i, l in ipairs(core.queueLines(FX.readQueue(qk))) do texts[i] = l.text; held[i] = l.held end
+  local tj = (#texts > 0) and hs.json.encode(texts) or "[]"
+  local hj = (#held > 0) and hs.json.encode(held) or "[]"
+  pcall(function() wv:evaluateJavaScript("ccQueueList(" .. jsString(key) .. ", " .. tj .. ", " .. hj .. ")") end)
+end
 -- Returns whether the task was actually delivered (false = the no-window-match
 -- guard skipped the paste); callers must NOT pop the queue on a skip. `preface` (DR6,
 -- optional) is a slash command (e.g. "/model opus") submitted first in the SAME focus
@@ -10045,6 +10054,88 @@ function FX.pushTickets()
   local js = "ccTickets(" .. ((#rows == 0) and "[]" or core.json.encode(rows)) .. ")"
   pcall(function() wv:evaluateJavaScript(js) end)
 end
+
+-- ---- The Queue view (2026-10-03, mining round 2 unit D4b) ----------------------------------
+-- ☰ → Queues: every ~/.claude/cc-queue/*.json, whose it is, each line held or not, and an @packet
+-- line's last drift check (core.queueViewRows). Read-only: a file that won't decode is listed as
+-- unreadable and left alone (FX.readQueue would set it aside), and no packet check is started --
+-- the view shows the verdict the feed-time check left in FX._packetVerdicts. Pushed each tick only
+-- while the view is open, and right after each click.
+FX._queueView = { open = false }
+function FX.queueViewRows()
+  local entries, verdicts = {}, {}
+  for k, v in pairs(FX._packetVerdicts or {}) do
+    local _, qk, id, at = tostring(k):match("^(.-)\0(.-)\0(.-)\0(.*)$")   -- FX.packetKey's root\0qk\0id\0at
+    if qk then
+      local slot = qk .. "\0" .. id .. "\0" .. at
+      if not verdicts[slot] or (tonumber(v.at) or 0) > (tonumber(verdicts[slot].at) or 0) then verdicts[slot] = v end
+    end
+  end
+  for _, fn in ipairs(FX.readDir(QUEUE_DIR)) do
+    local qk = core.queueFileKey(fn)
+    if qk then
+      local okd, q = pcall(core.json.decode, FX.readFile(QUEUE_DIR .. "/" .. fn) or "")
+      if not okd or type(q) ~= "table" then
+        entries[#entries + 1] = { qk = qk, unreadable = true }
+      else
+        local e = { qk = qk, q = q }
+        local tasks = {}
+        for _, l in ipairs(core.queueLines(q)) do tasks[#tasks + 1] = l.text end
+        if next(core.packetIdsIn(tasks)) then
+          e.packets, e.verdicts = FX.readPackets(qk), {}
+          for id, p in pairs(e.packets.packets or {}) do
+            e.verdicts[id] = verdicts[qk .. "\0" .. id .. "\0" .. tostring(type(p) == "table" and p.at or "")]
+          end
+        end
+        entries[#entries + 1] = e
+      end
+    end
+  end
+  return core.queueViewRows(entries, FX.allItems(), FX.now())
+end
+-- A click in the view: hold / release / up / down / remove one line of the queue file `req.qk`,
+-- with the line's text as the stale-list guard (core.queueSetHeld / queueMove / queueRemoveAt).
+-- Refused for a key that isn't a queue's or a queue that isn't there (never creates one).
+-- -> ok, why.
+function FX.queueViewEdit(req)
+  req = type(req) == "table" and req or {}
+  local qk, op = req.qk, tostring(req.op or "")
+  if not core.queueKeyOk(qk) then return false, "that isn't a queue" end
+  if not FX.readFile(QUEUE_DIR .. "/" .. qk .. ".json") then return false, "that queue isn't there any more" end
+  local q, q2, ok, removed = FX.readQueue(qk), nil, false, nil
+  if op == "hold" or op == "release" then
+    q2, ok = core.queueSetHeld(q, req.idx, op == "hold", req.task)
+  elseif op == "up" or op == "down" then
+    q2, ok = core.queueMove(q, req.idx, (op == "up") and -1 or 1, req.task)
+  elseif op == "remove" then
+    q2, removed = core.queueRemoveAt(q, req.idx, req.task)
+    ok = removed ~= nil
+  else
+    return false, "unknown edit " .. op
+  end
+  if not ok then
+    print("[cc-queue] queue view: " .. op .. " refused for " .. qk .. " -- the queue changed underneath; refreshed")
+    return false, "the queue changed underneath"
+  end
+  FX.writeQueue(qk, q2)
+  if removed then FX.dropPacket(qk, (core.packetRef(removed))) end
+  print("[cc-queue] ✅ queue view: " .. op .. " line " .. tostring(req.idx) .. " of " .. qk)
+  for _, it in ipairs(FX.allItems()) do
+    if core.queueKey(it) == qk then
+      ledgerFor(it, { type = "queue_edit", op = op, by = "queue view",
+                      task = removed and tostring(removed):sub(1, 200) or nil })
+      break
+    end
+  end
+  return true
+end
+-- ...to the panel (ccQueues): every tick while the view is open, or `force`d right after a click.
+function FX.pushQueueView(force)
+  if not wv or not (FX._queueView.open or force) then return end
+  local rows = FX.queueViewRows()
+  local js = "ccQueues(" .. ((#rows == 0) and "[]" or core.json.encode(rows)) .. ")"
+  pcall(function() wv:evaluateJavaScript(js) end)
+end
 -- "Open a tab for it" (the board, or a card's badge): a new Claude tab in the ticket's repo, its
 -- prompt taking the ticket -- typed, never sent (FX.openClaudeTab). The ticket records it, so the
 -- router leaves it to that tab for core.TICKET.tabGraceSeconds. Only for a ticket nobody holds.
@@ -13713,7 +13804,15 @@ local function handleBridgeMsg(msg)
       -- Feed next runs again once it lands (once). Moved: not fed, and said so.
       do
         local qk = FX.queueKeyFor(item)
-        local head = core.queuePeek(FX.readQueue(qk))
+        local qNow = FX.readQueue(qk)
+        local head = core.queuePeek(qNow)
+        -- 2026-10-03 (D4b): Feed next skips held lines like every feed; with every line held it
+        -- says so rather than doing nothing
+        if head == nil and core.queueDepth(qNow) > 0 then
+          print("[cc-queue] not fed: every queued line is held -- " .. tostring(qk))
+          pcall(function() FX.alert("Claude Shepherd: nothing fed -- every queued line is held") end)
+          return
+        end
         local g, why = FX.packetGate(item, qk, head)
         if g == "wait" and not payload.packetRetried then
           payload.packetRetried = true
@@ -13781,9 +13880,7 @@ local function handleBridgeMsg(msg)
       end
       ledgerFor(item, { type = "queue_edit", op = "packet_add", packet = idOrWhy })
       reply(true, "Queued " .. tostring(token))
-      local tasks = FX.readQueue(qk).tasks or {}
-      pcall(function() wv:evaluateJavaScript("ccQueueList(" .. jsString(key) .. ", "
-        .. ((#tasks > 0) and hs.json.encode(tasks) or "[]") .. ")") end)
+      FX.queueListJs(key, qk)
     end)
     return
   end
@@ -13792,16 +13889,24 @@ local function handleBridgeMsg(msg)
   -- asynchronously, so the JS snapshot may be stale), passes the clicked task
   -- text as the `expect` guard, and always replies with the fresh list so the
   -- panel self-heals after a refused edit.
-  if a == "queue-list" or a == "queue-move" or a == "queue-remove" or a == "queue-add-bulk" then
+  if a == "queue-list" or a == "queue-move" or a == "queue-remove" or a == "queue-add-bulk" or a == "queue-hold" then
     local key = tostring(payload.v or "")
     local item = byKey[key]
     local qk = item and FX.queueKeyFor(item) or ((key ~= "") and key or nil)
     if not qk then return end
-    if a == "queue-move" or a == "queue-remove" then
+    if a == "queue-move" or a == "queue-remove" or a == "queue-hold" then
       local okr, req = pcall(hs.json.decode, payload.text or "{}")
       req = (okr and type(req) == "table") and req or {}
       local q = FX.readQueue(qk)
-      if a == "queue-move" then
+      if a == "queue-hold" then
+        -- 2026-10-03 (D4b): hold or release one line; it keeps its place, and every feed skips it
+        local q2, ok = core.queueSetHeld(q, req.idx, req.held == true, req.task)
+        if ok then
+          FX.writeQueue(qk, q2)
+          print("[cc-queue] " .. (req.held == true and "⏸ held" or "▶ released") .. " line " .. tostring(req.idx) .. " of " .. qk)
+          if item then ledgerFor(item, { type = "queue_edit", op = req.held == true and "hold" or "release" }) end
+        end
+      elseif a == "queue-move" then
         local q2, moved = core.queueMove(q, req.idx, req.dir, req.task)
         if moved then
           FX.writeQueue(qk, q2)
@@ -13824,9 +13929,22 @@ local function handleBridgeMsg(msg)
         if item then ledgerFor(item, { type = "queue_edit", op = "bulk_add", count = #tasks }) end
       end
     end
-    local tasks = FX.readQueue(qk).tasks or {}
-    local listJson = (#tasks > 0) and hs.json.encode(tasks) or "[]"
-    pcall(function() wv:evaluateJavaScript("ccQueueList(" .. jsString(key) .. ", " .. listJson .. ")") end)
+    FX.queueListJs(key, qk)
+    return
+  end
+  -- 2026-10-03 (D4b): ☰ → Queues, every session's queue in one place (FX.queueViewRows). A click
+  -- names the queue file's key, the line's number and its text; FX.queueViewEdit checks all three.
+  if a == "queues-open" then FX._queueView.open = true; pcall(FX.pushQueueView, true); return end
+  if a == "queues-close" then FX._queueView.open = false; return end
+  if a == "queue-view-edit" then
+    local okr, req = pcall(hs.json.decode, payload.text or "{}")
+    req = (okr and type(req) == "table") and req or {}
+    req.qk = tostring(payload.v or "")
+    local ok, why = FX.queueViewEdit(req)
+    if not ok and why ~= "the queue changed underneath" then
+      pcall(function() FX.alert("Claude Shepherd: queue not changed -- " .. tostring(why)) end)
+    end
+    pcall(FX.pushQueueView, true)
     return
   end
   -- 4c-E: arm/disarm project routing for this project's queue. The flag lives
@@ -17010,6 +17128,7 @@ local HTML = [[
                    padding:0 5px; cursor:pointer; font-size:11px; }
   .ql-row button:disabled { opacity:.3; cursor:default; }
   .ql-row button.ql-x { color:#e88; border-color:#3a2c2f; }
+  .ql-row.held .ql-text { color:var(--dim); }
   /* task packets (2026-09-29): the + Packet form under the queue row */
   #b-packet { background:var(--surface); color:var(--text-2); border:1px solid var(--border); border-radius:8px;
               font-size:12px; padding:5px 10px; cursor:pointer; }
@@ -17329,6 +17448,25 @@ local HTML = [[
 .tk-note{ color:var(--text); }
 #tm-tickets-badge{ display:none; background:var(--accent); color:var(--bg); border-radius:8px; font-size:9px;
   padding:0 4px; font-variant-numeric:tabular-nums; margin-left:auto; }
+/* 📑 Queues (2026-10-03, D4b): every session's queue, fleet-wide (the Inbox's row styles) */
+#queues{ position:fixed; inset:0; background:var(--bg-overlay); z-index:12; display:none; flex-direction:column; font-size:12px; }
+#queues.show{ display:flex; }
+#queues .ov-head{ display:flex; align-items:center; justify-content:space-between; padding:12px 16px; border-bottom:1px solid var(--border); font-weight:600; color:var(--text); }
+#queues .ov-body{ flex:1; overflow-y:auto; padding:14px 16px; }
+#queues .ov-foot{ padding:10px 16px; border-top:1px solid var(--border); color:var(--dim); font-size:11px; }
+.qv-sess{ background:none; border:none; padding:0; color:var(--accent-text); cursor:pointer; font-size:11px; }
+.qv-sess:hover{ text-decoration:underline; }
+.qv-line{ display:flex; align-items:center; gap:4px; padding:3px 0; border-top:1px solid var(--border-weak); flex-wrap:wrap; }
+.qv-line.held .qv-text{ color:var(--dim); }
+.qv-text{ flex:1; min-width:120px; color:var(--text-2); overflow-wrap:anywhere; }
+.qv-line button{ background:none; border:1px solid var(--border); color:var(--text-3); border-radius:5px; padding:0 5px; cursor:pointer; font-size:11px; }
+.qv-line button:disabled{ opacity:.3; cursor:default; }
+.qv-line button.qv-x{ color:#e88; border-color:#3a2c2f; }
+.qv-hold, .ql-hold{ font-size:9px; font-weight:700; color:#8fd0f0; border:1px solid #8fd0f0; border-radius:4px; padding:0 3px; }
+.qv-next{ font-size:9px; color:var(--accent-text); }
+.qv-pk{ width:100%; padding-left:18px; font-size:11px; color:var(--dim); overflow-wrap:anywhere; }
+.qv-pk-moved, .qv-pk-missing, .qv-pk-unreadable{ color:var(--st-approval); }
+.qv-bad, .qv-none{ color:var(--dim); }
 /* 🧭 Coach (2026-09-29): a repo's suggested CLAUDE.md edits (the Inbox's row styles) */
 #coach{ position:fixed; inset:0; background:var(--bg-overlay); z-index:12; display:none; flex-direction:column; font-size:12px; }
 #coach.show{ display:flex; }
@@ -17729,6 +17867,7 @@ local HTML = [[
         <div id="toolmenu">
           <button class="tm-item" onclick="menuPick('inbox')"><span class="tm-ic">📥</span> Inbox<span id="tm-inbox-badge"></span></button>
           <button class="tm-item" onclick="menuPick('tickets')" title="Work sessions filed for other repos (cc-ticket.sh)"><span class="tm-ic">🎫</span> Tickets<span id="tm-tickets-badge" title="Tickets no session can take"></span></button>
+          <button class="tm-item" onclick="menuPick('queues')" title="Every session's queue in one place: hold or release a line, reorder, remove"><span class="tm-ic">📑</span> Queues</button>
           <button class="tm-item" onclick="menuPick('search')"><span class="tm-ic">🔍</span> Filter sessions</button>
           <button class="tm-item" onclick="menuPick('fsearch')"><span class="tm-ic">🔎</span> Find in fleet</button>
           <button class="tm-item" onclick="menuPick('insights')"><span class="tm-ic">📊</span> Fleet insights</button>
@@ -18510,6 +18649,12 @@ local HTML = [[
     <div class="ov-foot"><span>Work sessions filed for other repos with cc-ticket.sh. Shepherd offers each to a live session of its repo -- the least busy, never one waiting on you; one that nobody there can take waits here and on that repo's card.</span></div>
   </div>
 
+  <div id="queues">
+    <div class="ov-head"><span>📑 Queues</span><button class="s-x" onclick="closeQueueView()">✕</button></div>
+    <div class="ov-body" id="qv-body"></div>
+    <div class="ov-foot"><span>Every session's queue, one per project folder. A held line keeps its place and isn't fed -- not by auto-feed, Feed next or the router -- until you release it; the next line that isn't held goes first. A packet line shows its last cited-code check, which runs only when it's next to feed. Queues with nothing in them aren't listed.</span></div>
+  </div>
+
   <div id="coach">
     <div class="ov-head"><span id="co-title">🧭 Coach</span><button class="s-x" onclick="closeCoach()">✕</button></div>
     <div class="ov-body" id="co-body"></div>
@@ -19121,16 +19266,36 @@ local HTML = [[
     }
 
     // ---- Queue editor (roadmap #5a): list / reorder / remove ---------------
-    var QUEUE_LIST = { key: null, tasks: [] };
+    var QUEUE_LIST = { key: null, tasks: [], held: [] };
     var queueListOpen = false;
     function toggleQueueList(){
       queueListOpen = !queueListOpen;
       if(queueListOpen && selectedKey){ send("queue-list", selectedKey); }
       renderQueueList();
     }
-    function ccQueueList(key, tasks){
-      QUEUE_LIST = { key: key, tasks: tasks || [] };
+    // 2026-10-03 (D4b): `held` is a parallel array (FX.queueListJs) -- which lines are held
+    function ccQueueList(key, tasks, held){
+      QUEUE_LIST = { key: key, tasks: tasks || [], held: Array.isArray(held) ? held : [] };
       renderQueueList();
+    }
+    function queueListRowsHtml(ql){
+      var tasks = (ql && Array.isArray(ql.tasks)) ? ql.tasks : [];
+      var heldList = (ql && Array.isArray(ql.held)) ? ql.held : [];
+      var n = tasks.length;
+      return tasks.map(function(t, i){
+        var held = heldList[i] === true;
+        // idx+task ride along as the expect guard: the Lua side refuses the
+        // edit if the queue changed underneath (autofeed popped the head).
+        return '<div class="ql-row' + (held ? ' held' : '') + '">'
+          + '<span class="ql-text" title="' + esc(t) + '">' + (i+1) + '. ' + esc(t) + '</span>'
+          + (held ? '<span class="ql-hold" title="' + esc(QV_HOLD_TIP) + '">HOLD</span>' : '')
+          + (held ? '<button onclick="queueHold(' + i + ')" title="' + esc(QV_RELEASE_TIP) + '">Release</button>'
+                  : '<button onclick="queueHold(' + i + ')" title="' + esc(QV_HOLD_TIP) + '">Hold</button>')
+          + '<button onclick="queueMove(' + i + ',-1)"' + (i === 0 ? ' disabled' : '') + ' title="Move up">▲</button>'
+          + '<button onclick="queueMove(' + i + ',1)"' + (i === n-1 ? ' disabled' : '') + ' title="Move down">▼</button>'
+          + '<button class="ql-x" onclick="queueRemove(' + i + ')" title="Remove">✕</button>'
+          + '</div>';
+      }).join("");
     }
     function renderQueueList(){
       var box = document.getElementById("queue-list"); if(!box) return;
@@ -19138,17 +19303,24 @@ local HTML = [[
                && QUEUE_LIST.tasks && QUEUE_LIST.tasks.length;
       box.classList.toggle("show", !!ok);
       if(!ok){ box.innerHTML = ""; return; }
-      box.innerHTML = QUEUE_LIST.tasks.map(function(t, i){
-        var n = QUEUE_LIST.tasks.length;
-        // idx+task ride along as the expect guard: the Lua side refuses the
-        // edit if the queue changed underneath (autofeed popped the head).
-        return '<div class="ql-row">'
-          + '<span class="ql-text" title="' + esc(t) + '">' + (i+1) + '. ' + esc(t) + '</span>'
-          + '<button onclick="queueMove(' + i + ',-1)"' + (i === 0 ? ' disabled' : '') + ' title="Move up">▲</button>'
-          + '<button onclick="queueMove(' + i + ',1)"' + (i === n-1 ? ' disabled' : '') + ' title="Move down">▼</button>'
-          + '<button class="ql-x" onclick="queueRemove(' + i + ')" title="Remove">✕</button>'
-          + '</div>';
-      }).join("");
+      box.innerHTML = queueListRowsHtml(QUEUE_LIST);
+    }
+    // 2026-10-03 (D4b): hold or release one line -- its number and text are the stale-list guard
+    function queueHold(i){
+      if(!selectedKey) return;
+      var t = QUEUE_LIST.tasks[i];
+      if(typeof t !== "string") return;
+      var held = Array.isArray(QUEUE_LIST.held) && QUEUE_LIST.held[i] === true;
+      send("queue-hold", selectedKey, JSON.stringify({ idx: i+1, task: t, held: !held }));
+    }
+    // 2026-10-03 (D4b): the detail's "Queue: 3 (1 held) ▾", and whether the open editor's list is out
+    // of date -- a line fed, or held or released from the Queues view, re-fetches it
+    function queueCountText(it, n){
+      return n > 0 ? ("Queue: " + n + (it.queueHeld ? " (" + Number(it.queueHeld) + " held)" : "") + " ▾") : "Queue: empty";
+    }
+    function queueListStale(it, n){
+      var held = (QUEUE_LIST.held || []).filter(function(h){ return h === true; }).length;
+      return QUEUE_LIST.tasks.length !== n || held !== (it.queueHeld || 0);
     }
     function queueMove(i, dir){
       if(!selectedKey) return;
@@ -23137,7 +23309,7 @@ local HTML = [[
       renderDecisions();
       renderDetailUsage(it);
       var n = it.queue || 0;
-      document.getElementById("q-count").textContent = n>0 ? ("Queue: " + n + " ▾") : "Queue: empty";
+      document.getElementById("q-count").textContent = queueCountText(it, n);
       document.getElementById("b-feed").style.display = n>0 ? "inline-block" : "none";
       document.getElementById("q-route").checked = !!it.routed;
       var seqEl = document.getElementById("q-route-seq"); if(seqEl) seqEl.checked = !!it.routeSeq;
@@ -23145,7 +23317,7 @@ local HTML = [[
       // (autofeed/manual feed popped a head) and fold it shut when empty.
       if(queueListOpen){
         if(n === 0){ queueListOpen = false; renderQueueList(); }
-        else if(QUEUE_LIST.key === selectedKey && QUEUE_LIST.tasks.length !== n){
+        else if(QUEUE_LIST.key === selectedKey && queueListStale(it, n)){
           send("queue-list", selectedKey);
         }
       }
@@ -25717,6 +25889,7 @@ local HTML = [[
       if(which === "search") toggleSearch();
       else if(which === "inbox") openInbox();
       else if(which === "tickets") openTickets();
+      else if(which === "queues") openQueueView();
       else if(which === "fsearch") openFleetSearch();
       else if(which === "insights") openInsights();
       else if(which === "audit") openAudit();
@@ -26031,6 +26204,107 @@ local HTML = [[
       return true;
     }
     document.addEventListener("keydown", function(e){ if(e.key === "Escape") closeTickets(); });
+    // ---- 📑 Queues (2026-10-03, mining round 2 unit D4b) ------------------------
+    // Every session's queue in one place (core.queueViewRows, pushed by FX.pushQueueView while the
+    // view is open and right after each click): whose it is, each line and whether it's held, the
+    // line that feeds next, and an @packet line's last drift check -- read-only here; the check runs
+    // only when that line is next to feed. Every word came from a session or its queue, so each goes
+    // through esc(); a click sends only what QUEUES.rows holds -- the queue file's key, the line's
+    // number and its text as the stale-list guard -- never text read back out of the markup.
+    var QUEUES = { rows: [], latest: [], sig: "", open: false };
+    var QV_OPS = { hold: 1, release: 1, up: 1, down: 1, remove: 1, open: 1 };
+    var QV_PK = { missing: 1, nocites: 1, unchecked: 1, unreadable: 1, moved: 1, unchanged: 1 };
+    var QV_HOLD_TIP = "Hold: auto-feed, Feed next and the router skip this line until you release it. It keeps its place; the next line that isn't held goes first.";
+    var QV_RELEASE_TIP = "Release: this line can be fed again, from where it sits in the queue.";
+    function ccQueues(rows){
+      rows = Array.isArray(rows) ? rows : [];
+      var sig = JSON.stringify(rows);
+      if(sig === QUEUES.sig) return;
+      QUEUES.sig = sig; QUEUES.latest = rows;
+      if(QUEUES.open) renderQueueView(rows);
+    }
+    function queueViewHtml(rows){
+      if(!rows || !rows.length) return '<div class="ib-empty">No queued lines — queue a task from a session\'s detail panel.</div>';
+      return rows.map(function(r, ri){
+        var sessions = Array.isArray(r.sessions) ? r.sessions : [];
+        var lines = Array.isArray(r.lines) ? r.lines : [];
+        var who = sessions.length ? sessions.map(function(s, si){
+            return '<button class="qv-sess" data-r="' + ri + '" data-s="' + si + '" data-act="open" onclick="queueViewAct(event)"'
+              + ' title="Open this session\'s card">' + esc(s.name) + '</button>';
+          }).join(", ") : '<span class="qv-none">no live session</span>';
+        var meta = who;
+        if(!r.unreadable){
+          meta += ' · ' + lines.length + (lines.length === 1 ? ' line' : ' lines')
+            + (r.held ? ' · ' + esc(String(r.held)) + ' held' : '')
+            + (r.routed ? ' · routed' + (r.seq ? ', one at a time' : '') : '');
+        }
+        var h = '<div class="ib-row qv-row" data-row="' + ri + '"><div class="ib-q">' + esc(r.project || r.qk) + '</div>'
+          + '<div class="ib-meta">' + meta + '</div>';
+        if(r.unreadable) return h + '<div class="qv-bad">This queue file couldn\'t be read, so nothing in it is fed. Shepherd leaves it as it is.</div></div>';
+        h += lines.map(function(l, li){
+          var held = !!l.held;
+          var at = ' data-r="' + ri + '" data-l="' + li + '"';
+          var out = '<div class="qv-line' + (held ? ' held' : '') + '">'
+            + '<span class="qv-text" title="' + esc(l.text) + '">' + (li + 1) + '. ' + esc(l.text) + '</span>'
+            + (held ? '<span class="qv-hold" title="' + esc(QV_HOLD_TIP) + '">HOLD</span>' : '')
+            + (r.next === li + 1 ? '<span class="qv-next" title="Fed next">next</span>' : '')
+            + (held ? '<button' + at + ' data-act="release" onclick="queueViewAct(event)" title="' + esc(QV_RELEASE_TIP) + '">Release</button>'
+                    : '<button' + at + ' data-act="hold" onclick="queueViewAct(event)" title="' + esc(QV_HOLD_TIP) + '">Hold</button>')
+            + '<button' + at + ' data-act="up"' + (li === 0 ? ' disabled' : '') + ' onclick="queueViewAct(event)" title="Move up">▲</button>'
+            + '<button' + at + ' data-act="down"' + (li === lines.length - 1 ? ' disabled' : '') + ' onclick="queueViewAct(event)" title="Move down">▼</button>'
+            + '<button class="qv-x"' + at + ' data-act="remove" onclick="queueViewAct(event)" title="Remove (asks first)">✕</button>';
+          var p = l.packet;
+          if(p && typeof p === "object"){
+            var st = QV_PK.hasOwnProperty(p.state) ? p.state : "unchecked";
+            out += '<div class="qv-pk qv-pk-' + st + '">📦 ' + esc(p.id) + ': ' + esc(p.why)
+              + (p.head ? ' at ' + esc(p.head) : '')
+              + (typeof p.age === "number" ? ' · checked ' + esc(fmtAge(Math.floor(Date.now()/1000) - p.age)) + ' ago' : '')
+              + '</div>';
+          }
+          return out + '</div>';
+        }).join("");
+        return h + '</div>';
+      }).join("");
+    }
+    function queueViewAct(ev){
+      if(ev && ev.stopPropagation) ev.stopPropagation();
+      var t = ev && ev.target && ev.target.closest ? ev.target.closest("[data-act]") : null;
+      if(!t) return;
+      var act = t.getAttribute("data-act");
+      if(!QV_OPS.hasOwnProperty(act)) return;
+      var r = QUEUES.rows[parseInt(t.getAttribute("data-r"), 10)];
+      if(!r || typeof r.qk !== "string") return;
+      if(act === "open"){
+        var s = (Array.isArray(r.sessions) ? r.sessions : [])[parseInt(t.getAttribute("data-s"), 10)];
+        if(!s || typeof s.key !== "string") return;
+        closeQueueView(); selectTile(s.key);
+        return;
+      }
+      var li = parseInt(t.getAttribute("data-l"), 10);
+      var line = (Array.isArray(r.lines) ? r.lines : [])[li];
+      if(!line || typeof line.text !== "string") return;
+      if(act === "remove" && !confirm("Remove this line from " + (r.project || r.qk) + "'s queue?\n\n" + line.text)) return;
+      send("queue-view-edit", r.qk, JSON.stringify({ op: act, idx: li + 1, task: line.text }));
+    }
+    function renderQueueView(rows){
+      var body = document.getElementById("qv-body"); if(!body) return;
+      QUEUES.rows = rows;
+      body.innerHTML = queueViewHtml(rows);
+    }
+    function openQueueView(){
+      QUEUES.open = true;
+      document.getElementById("queues").classList.add("show");
+      renderQueueView(QUEUES.latest);
+      send("queues-open");
+    }
+    function closeQueueView(){
+      var el = document.getElementById("queues");
+      if(!el || !el.classList.contains("show")) return false;
+      el.classList.remove("show"); QUEUES.open = false;
+      send("queues-close");
+      return true;
+    }
+    document.addEventListener("keydown", function(e){ if(e.key === "Escape") closeQueueView(); });
     // ---- 🧭 Coach (2026-09-29, build program unit 32) ------------------------
     // One repo's run (core.coachView, pushed by FX.pushCoach when it opens and after every click):
     // each suggested CLAUDE.md edit -- section, why, the text it replaces, the new text, evidence --
@@ -26674,7 +26948,8 @@ local HTML = [[
       if(headsUp(it) && it.needsYouWhy){ meta = (meta ? meta + " · " : "") + it.needsYouWhy; }
       if(it.remote){ meta = (meta ? meta + " · " : "") + "⇄ " + (it.remote.host || "remote")
                             + (it.bridgeStale ? " (bridge offline)" : ""); }
-      if(it.queue > 0){ meta = (meta ? meta + " · " : "") + (it.routed ? "⇉" : "+") + it.queue + " queued"; }
+      if(it.queue > 0){ meta = (meta ? meta + " · " : "") + (it.routed ? "⇉" : "+") + it.queue + " queued"
+                          + (it.queueHeld ? " (" + Number(it.queueHeld) + " held)" : ""); }   // 2026-10-03 (D4b)
       else if(it.routed){ meta = (meta ? meta + " · " : "") + "⇉ routed"; }
       if(it.starved){ meta = (meta ? meta + " · " : "") + "⌛ queue starved"; }
       // 2026-09-29 (unit 26): the task packet at the head isn't fed -- its cited code moved (or it
@@ -28183,6 +28458,8 @@ function FX._refreshBody()
     local qk = FX.queueKeyFor(it)
     local q = FX.readQueue(qk)
     it.queue = core.queueDepth(q)
+    -- 2026-10-03 (D4b): held lines stay in the count; the card and the editor say how many are held
+    do local held = core.queueHeldCount(q); it.queueHeld = (held > 0) and held or nil end
     -- 2026-09-29 (unit 26): a task packet at the head is checked against THIS session's worktree
     -- in the background (FX.packetGate); a moved one flags the card, recorded once per episode.
     do
@@ -28218,7 +28495,7 @@ function FX._refreshBody()
     if not drained and not it.stale and not it.remote and not routedHere
        and not core.keystrokeBlocked(it) then
       feedNow, holdPacket = core.packetAutofeed(core.shouldFeed(pv and pv.status, it.status, q, autofeed),
-        FX._packetRetry[it.key] == true and autofeed and it.queue > 0, it.status, it.packetHead)
+        FX._packetRetry[it.key] == true and autofeed and core.queuePeek(q) ~= nil, it.status, it.packetHead)
     end
     FX._packetRetry[it.key] = holdPacket or nil
     if feedNow then
@@ -28700,9 +28977,10 @@ function FX._refreshBody()
                    onRefused = function() routePending[item.key] = nil end })
           end
         end
-      elseif core.queueRouted(q) and core.queueDepth(q) > 0 then
+      elseif core.queueRouted(q) and core.queuePeek(q) ~= nil then
         -- Armed + work queued + nobody free: starvation clock. One ledger event
         -- + tile tint per episode when queue.routing.starveMinutes > 0.
+        -- 2026-10-03 (D4b): a queue whose every line is held has nothing to feed, so its clock resets.
         starvedSince[qk] = starvedSince[qk] or now
         if core.queueStarved(members, q, { minutes = starveMin, sinceTs = starvedSince[qk],
              now = now, draining = draining, pending = routePending }) then
@@ -29098,6 +29376,7 @@ function FX._refreshBody()
     pcall(function() wv:evaluateJavaScript("setFreeze(" .. tostring(FX._hold.holds.fleet == true) .. ")") end)
     pcall(FX.pushInbox)   -- 2026-09-29: the Inbox's rows and ☰'s badge (open questions + held asks)
     pcall(FX.pushTickets) -- 2026-09-29: the Tickets board's rows (cross-repo tickets)
+    pcall(FX.pushQueueView) -- 2026-10-03 (D4b): the Queues view's rows, only while it's open
   end
 
   -- Paint the Stream Deck from the SAME fully-decorated list the panel just got --

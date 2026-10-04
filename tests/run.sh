@@ -563,6 +563,12 @@ echo ""
 echo "== node: the transcript keeper's panel side -- Diagnostics' offer button, ★ changes sent to Lua, History's kept marks and Remove offers, a kept fleet-search hit, escaped (behavioral, runs the shipped functions) =="
 node "$DIR/keeper-view.test.js" || fail=1
 echo ""
+echo "== lua: held queue lines and the Queue view -- peek/pop skip a held line and it keeps its place, the flag round-trips with the line and an old queue file reads as before, every reader (auto-feed, router, packets) skips held lines, the view's rows and its edits over real cc-queue/ files, read-only packet drift (pure + behavioral) =="
+lua "$DIR/queue-hold.test.lua" || fail=1
+echo ""
+echo "== node: the Queue view and the editor's Hold / Release -- every field escaped, the line that feeds next, packet drift, a click sends only the row array's key, number and text, ✕ asks first (behavioral, runs the shipped functions) =="
+node "$DIR/queue-view.test.js" || fail=1
+echo ""
 
 if [ "$fail" -eq 0 ]; then
   echo "✅ ALL GREEN"

@@ -143,6 +143,26 @@ each time the session finishes, so a session works through a backlog unattended
 - **Bulk paste**: paste a multi-line list and press Queue. It splits into one task per line
   (bullets and numbering stripped, blanks dropped) after a confirm.
 
+### Queue hold and the Queues view
+
+- **Hold one line**: **Hold** on a line in the queue editor (or in the Queues view) parks it.
+  Auto-feed, **Feed next** and the [router](#project-routing) skip a held line; it keeps its
+  place, and the next line that isn't held goes first. **Release** lets it feed again from where
+  it sits. With every line held, nothing is fed, and Feed next says so. The card reads
+  `+3 queued (1 held)`.
+- **In the file**: the flag rides with the line. A held line is stored as
+  `{ "text": "…", "held": true }` in `~/.claude/cc-queue/<queue>.json`; every other line stays a
+  plain string, so a queue with nothing held keeps the old shape and an older file reads as
+  before. A held `@packet` line keeps its packet.
+- **☰ → 📑 Queues** lists every queue file in one place: the project, the live sessions whose
+  queue it is (click one to open its card), each line held or not, the line that feeds next, and
+  whether the queue is routed. A [packet](#task-packets) line shows its last cited-code check:
+  unchanged or moved at which commit, and how long ago. The view only reads that check; it runs
+  when the line is next to feed. Each line has Hold / Release, ▲ ▼, and ✕, which asks first.
+  Like the editor, each click carries the line's text, so an edit to a queue that changed
+  underneath is refused and the list refreshed. A queue file that won't read is listed as such
+  and left alone; queues with nothing in them aren't listed.
+
 ### Task packets
 
 A task written against the code as it is today can send a session after lines that are gone by

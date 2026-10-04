@@ -5400,5 +5400,46 @@ do
         and removeBlock:find('if answer ~= "Remove"', 1, true) < (removeBlock:find("os.remove(", 1, true) or 0))
 end
 
+-- ---- Held queue lines and the Queue view (2026-10-03, mining round 2 D4b) ----
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  -- the feed loop: a held line is skipped because every feed pops and peeks through core
+  check("queue hold: the autofeed pops through core.queuePop, which skips held lines",
+        src:find('FX.typeWhenReady(it, "autofeed", function()\n          FX.feedGuard(function()\n          local task, q2 = core.queuePop(FX.readQueue(qk))', 1, true) ~= nil)
+  check("queue hold: a feed held for its packet is retried only while a line that isn't held waits",
+        src:find("FX._packetRetry[it.key] == true and autofeed and core.queuePeek(q) ~= nil", 1, true) ~= nil)
+  check("queue hold: the tick counts held lines for the card", src:find("it.queueHeld = (held > 0) and held or nil", 1, true) ~= nil)
+  check("queue hold: the router's starvation clock runs only while a line that isn't held waits",
+        src:find("elseif core.queueRouted(q) and core.queuePeek(q) ~= nil then", 1, true) ~= nil)
+  check("queue hold: Feed next with every line held says so instead of doing nothing",
+        src:find("every queued line is held", 1, true) ~= nil)
+  check("queue hold: the editor's Hold goes through core.queueSetHeld, the line's text the guard",
+        src:find("core.queueSetHeld(q, req.idx, req.held == true, req.task)", 1, true) ~= nil)
+  local listJs = src:match("\nfunction FX%.queueListJs%(key, qk%).-\nend\n") or ""
+  check("queue hold: the editor's list carries each line's held state",
+        listJs:find("core.queueLines(", 1, true) ~= nil and listJs:find("ccQueueList(", 1, true) ~= nil)
+  local _, listUses = src:gsub("FX%.queueListJs%(key, qk%)", "")
+  check("queue hold: ...every reply to the editor sends it (edits and a saved packet)", listUses >= 2)
+  -- the view
+  local push = src:match("\nfunction FX%.pushQueueView%(force%).-\nend\n") or ""
+  check("queue view: pushed only while it's open, or right after a click",
+        push:find("if not wv or not (FX._queueView.open or force) then return end", 1, true) ~= nil)
+  check("queue view: the tick pushes it", src:find("pcall(FX.pushQueueView) -- 2026-10-03 (D4b)", 1, true) ~= nil)
+  check("queue view: opened and closed from the panel", src:find('if a == "queues-open" then FX._queueView.open = true; pcall(FX.pushQueueView, true); return end', 1, true) ~= nil
+        and src:find('if a == "queues-close" then FX._queueView.open = false; return end', 1, true) ~= nil)
+  check("queue view: a click goes through FX.queueViewEdit and the view refreshes",
+        src:find("local ok, why = FX.queueViewEdit(req)", 1, true) ~= nil)
+  local block = src:match("\nFX%._queueView = .-\nfunction FX%.pushQueueView") or ""
+  check("queue view: it never starts a packet check (read-only drift)", block ~= "" and block:find("packetCheck", 1, true) == nil
+        and block:find("packetGate", 1, true) == nil)
+  local rowsFn = src:match("\nfunction FX%.queueViewRows%(%).-\nend\n") or ""
+  check("queue view: listing never goes through FX.readQueue (it would set an undecodable file aside)",
+        rowsFn ~= "" and rowsFn:find("FX.readQueue", 1, true) == nil)
+  check("queue view: every field reaching the markup goes through esc()",
+        (src:match("function queueViewHtml%(rows%).-\n    }\n") or ""):find("esc(l.text)", 1, true) ~= nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

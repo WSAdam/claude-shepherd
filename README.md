@@ -102,7 +102,7 @@ A fresh install turns on auto-continue, handoff notes, resume at the limit reset
 every other automatic behaviour here waits for its switch.
 
 - [**Task queue & auto-feed**](docs/automation.md#task-queue): line up tasks per session, feed the
-  next when one finishes, and route a project's tasks to whichever session is free.
+  next when one finishes, and route a project's tasks to whichever session is free. [**Queue hold & fleet view**](docs/automation.md#queue-hold-and-the-queues-view): hold a line in place, and see every queue in one view.
 - [**Task packets**](docs/automation.md#task-packets): a queued task carries the code it cites,
   repro and done-when, and isn't fed while that code has moved.
 - [**Prompt templates**](docs/automation.md#prompt-templates): reusable, versioned prompts with

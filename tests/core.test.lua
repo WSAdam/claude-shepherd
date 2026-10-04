@@ -8484,7 +8484,9 @@ do
   -- 2026-10-03: 56 -> 57 for grey cards, live sessions with no status file ("hookless", flagged new).
   -- 2026-10-03: 57 -> 58 for kept transcripts ("keeper", flagged new).
   -- 2026-10-03: 58 -> 59 for grant grading ("grantgrade", flagged new).
-  eq("FEATURES: the 59 new features are flagged", newCount, 59)
+  -- 2026-10-03: 59 -> 60 for holding a queued line and the Queues view ("queuehold", flagged new).
+  eq("FEATURES: the 60 new features are flagged", newCount, 60)
+  check("FEATURES: lists queue hold and the Queues view", keys.queuehold == true)
   check("FEATURES: lists the grey cards", keys.hookless == true)
   check("FEATURES: lists kept transcripts", keys.keeper == true)
   check("FEATURES: lists grant grading", keys.grantgrade == true)

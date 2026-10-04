@@ -9,6 +9,10 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
 The second feature-mining round (Maestro, Gas Town, ECC, oh-my-claudecode, OpenRig), built as
 parallel units. Each unit adds its line here.
 
+- Queue hold & fleet view: **Hold** on a queued line parks it in place (stored with the line as
+  `{text, held}`; an old queue file reads as before), and auto-feed, Feed next and the router feed the next
+  line that isn't held; ☰ → 📑 Queues lists every `cc-queue/*.json` with its sessions, held lines and a
+  packet line's last drift check, with Hold / Release, ▲ ▼ and ✕ (asks first).
 - Grey cards: a live interactive session in `~/.claude/sessions/<pid>.json` that no status file covers
   (started before Shepherd's hooks, or with hooks off) gets a grey card in its own row under the grid,
   with its folder, Claude Code's busy/idle and "restart it to get live status" (never an `sdk-*` headless

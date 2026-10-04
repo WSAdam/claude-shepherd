@@ -10425,9 +10425,25 @@ end
 -- 4c-E arm flag (routing = true) rides in the same file, so EVERY function that
 -- rebuilds a queue must carry it through `qkeep` -- a pop/move/push that
 -- dropped it would silently disarm the project on the next write.
+-- 2026-10-03 (D4b): a line can be HELD. The flag rides with the line: a held line is
+-- { text = "...", held = true }, every other line stays a plain string, so a queue with nothing
+-- held keeps the old file shape. queuePeek/queuePop take the first line that isn't held -- so
+-- auto-feed, Feed next, the router and the packet gate all skip held lines -- and a held line
+-- keeps its place. Parsed tolerantly: a line with no string text is dropped on the next rebuild.
+function M.queueText(x)
+  if type(x) == "string" then return x end
+  if type(x) == "table" and type(x.text) == "string" then return x.text end
+  return nil
+end
+function M.queueLineHeld(x) return type(x) == "table" and x.held == true end
 local function qtasks(q)
-  if type(q) == "table" and type(q.tasks) == "table" then return q.tasks end
-  return {}
+  if type(q) ~= "table" or type(q.tasks) ~= "table" then return {} end
+  local out = {}
+  for _, x in ipairs(q.tasks) do
+    local text = M.queueText(x)
+    if text then out[#out + 1] = M.queueLineHeld(x) and { text = text, held = true } or text end
+  end
+  return out
 end
 local function qkeep(q, out)
   if type(q) == "table" then
@@ -10448,18 +10464,50 @@ function M.queuePush(q, task)
   return qkeep(q, { tasks = t })
 end
 
--- Returns the front task and the queue without it.
+-- Returns the front task and the queue without it. 2026-10-03 (D4b): the front task is the
+-- first line that isn't held; held lines stay where they are. Every line held -> nil.
 function M.queuePop(q)
   local src = qtasks(q)
-  if #src == 0 then return nil, qkeep(q, { tasks = {} }) end
-  local rest = {}
-  for i = 2, #src do rest[#rest + 1] = src[i] end
-  return src[1], qkeep(q, { tasks = rest })
+  local task, rest = nil, {}
+  for _, x in ipairs(src) do
+    if task == nil and not M.queueLineHeld(x) then task = x else rest[#rest + 1] = x end
+  end
+  return task, qkeep(q, { tasks = rest })
 end
 
 -- The front task without removing it. The router peeks the head to resolve a
 -- routed task's @role: before choosing a target (the dispatcher then pops it).
-function M.queuePeek(q) return qtasks(q)[1] end
+-- 2026-10-03 (D4b): the first line that isn't held, as queuePop takes it.
+function M.queuePeek(q)
+  for _, x in ipairs(qtasks(q)) do
+    if not M.queueLineHeld(x) then return x end
+  end
+  return nil
+end
+
+-- 2026-10-03 (D4b): hold or release tasks[idx]. `expect` is the line's text, the same stale-list
+-- guard as queueMove. A released line is written back as a plain string. -> newQueue, ok.
+function M.queueSetHeld(q, idx, held, expect)
+  local t = qtasks(q)
+  idx = tonumber(idx)
+  if not idx or idx ~= math.floor(idx) or idx < 1 or idx > #t then return qkeep(q, { tasks = t }), false end
+  local text = M.queueText(t[idx])
+  if expect ~= nil and text ~= expect then return qkeep(q, { tasks = t }), false end
+  t[idx] = held and { text = text, held = true } or text
+  return qkeep(q, { tasks = t }), true
+end
+
+-- 2026-10-03 (D4b): every line as { text, held } (the panel's lists), and how many are held.
+function M.queueLines(q)
+  local out = {}
+  for _, x in ipairs(qtasks(q)) do out[#out + 1] = { text = M.queueText(x), held = M.queueLineHeld(x) } end
+  return out
+end
+function M.queueHeldCount(q)
+  local n = 0
+  for _, x in ipairs(qtasks(q)) do if M.queueLineHeld(x) then n = n + 1 end end
+  return n
+end
 
 -- Concatenate two queues (a's tasks first). Used when adopting a legacy
 -- session-keyed queue file into the project-keyed one -- `a` is the DESTINATION
@@ -10486,7 +10534,7 @@ function M.queueMove(q, idx, dir, expect)
   if not idx or not dir or (dir ~= -1 and dir ~= 1) then return qkeep(q, { tasks = t }), false end
   local j = idx + dir
   if idx < 1 or idx > #t or j < 1 or j > #t then return qkeep(q, { tasks = t }), false end
-  if expect ~= nil and t[idx] ~= expect then return qkeep(q, { tasks = t }), false end
+  if expect ~= nil and M.queueText(t[idx]) ~= expect then return qkeep(q, { tasks = t }), false end
   t[idx], t[j] = t[j], t[idx]
   return qkeep(q, { tasks = t }), true
 end
@@ -10499,9 +10547,9 @@ function M.queueRemoveAt(q, idx, expect)
   for _, x in ipairs(src) do t[#t + 1] = x end
   idx = tonumber(idx)
   if not idx or idx < 1 or idx > #t then return qkeep(q, { tasks = t }), nil end
-  if expect ~= nil and t[idx] ~= expect then return qkeep(q, { tasks = t }), nil end
+  if expect ~= nil and M.queueText(t[idx]) ~= expect then return qkeep(q, { tasks = t }), nil end
   local removed = table.remove(t, idx)
-  return qkeep(q, { tasks = t }), removed
+  return qkeep(q, { tasks = t }), M.queueText(removed)
 end
 
 -- Split a multi-line queue input into tasks: one per line, CRLF-tolerant,
@@ -10564,8 +10612,96 @@ end
 -- be a fresh transition either: counting it would re-feed on every reload.)
 function M.shouldFeed(prev, cur, q, autoOn)
   if not autoOn then return false end
-  if M.queueDepth(q) == 0 then return false end
+  if M.queuePeek(q) == nil then return false end   -- empty, or every line held (D4b)
   return cur == "done" and prev ~= nil and prev ~= "done"
+end
+
+-- ---- The Queue view (2026-10-03, mining round 2 unit D4b) --------------------
+-- ☰ → Queues lists every ~/.claude/cc-queue/*.json in one place: whose queue it is, each line and
+-- whether it's held, and an @packet line's last drift check. Read-only for packets: the view shows
+-- the verdict the feed-time check left and never starts one.
+
+-- A queue file's key from its name in cc-queue/: "<qk>.json" only -- never a packet store, a temp
+-- write or a set-aside bad file. nil for anything else.
+function M.queueFileKey(name)
+  local qk = type(name) == "string" and name:match("^(.+)%.json$") or nil
+  if not qk or qk:match("%.packets$") or not M.queueKeyOk(qk) then return nil end
+  return qk
+end
+-- A key a queue file can have (core.queueKey's alphabet, no "." or ".." and no packet store):
+-- what a click from the view may name.
+function M.queueKeyOk(qk)
+  return type(qk) == "string" and qk:match("^[%w._%-]+$") ~= nil and qk:match("^%.+$") == nil
+    and qk:match("%.packets$") == nil
+end
+
+-- An @packet line's drift, as the last feed-time check left it. verdict = FX._packetVerdicts' entry
+-- ({ head, moved, at } | { failed, at }) or nil. -> { id, state, why, head?, age? }; state is one of
+-- missing / nocites / unchecked / unreadable / moved / unchanged.
+function M.queueViewPacket(id, packet, verdict, now)
+  local out = { id = id }
+  if type(packet) ~= "table" then
+    out.state, out.why = "missing", "packet " .. tostring(id) .. " isn't in this project's packet store"
+    return out
+  end
+  if type(packet.cites) ~= "table" or #packet.cites == 0 then
+    out.state, out.why = "nocites", "cites no code"
+    return out
+  end
+  local v = type(verdict) == "table" and verdict or nil
+  if not v then
+    out.state, out.why = "unchecked", "not checked yet -- its cited code is checked when it's next in line to feed"
+    return out
+  end
+  out.age = math.max(0, (tonumber(now) or 0) - (tonumber(v.at) or 0))
+  if v.failed then
+    out.state, out.why = "unreadable", "couldn't read its cited code: " .. tostring(v.failed)
+  elseif type(v.moved) == "table" and #v.moved > 0 then
+    out.state, out.why = "moved", M.packetMovedLine(v.moved)
+  else
+    out.state, out.why = "unchanged", "cited code unchanged"
+  end
+  if type(v.head) == "string" and v.head ~= "" then out.head = v.head:sub(1, 7) end
+  return out
+end
+
+-- The view's rows. entries = { { qk, q, packets?, verdicts? = { [id] = verdict }, unreadable? } }
+-- (FX reads the files); items = the live sessions, matched to a queue by core.queueKey. A queue with
+-- no lines isn't listed. Sorted by project, then key. Pure.
+function M.queueViewRows(entries, items, now)
+  local byQk = {}
+  for _, it in ipairs(items or {}) do
+    local qk = M.queueKey(it)
+    if qk then
+      byQk[qk] = byQk[qk] or {}
+      table.insert(byQk[qk], { key = it.key, name = tostring(it.name or it.key or "") })
+    end
+  end
+  local rows = {}
+  for _, e in ipairs(entries or {}) do
+    local lines = e.unreadable and {} or M.queueLines(e.q)
+    if e.unreadable or #lines > 0 then
+      local row = { qk = e.qk, project = M.projectKeyLabel(e.qk), sessions = byQk[e.qk] or {}, lines = {},
+                    held = 0, routed = M.queueRouted(e.q) or nil, unreadable = e.unreadable or nil }
+      row.seq = (row.routed and M.queueRouteMode(e.q) == "sequential") or nil
+      local store = type(e.packets) == "table" and type(e.packets.packets) == "table" and e.packets.packets or {}
+      local verdicts = type(e.verdicts) == "table" and e.verdicts or {}
+      for i, l in ipairs(lines) do
+        local line = { text = l.text, held = l.held }
+        if l.held then row.held = row.held + 1 elseif not row.next then row.next = i end
+        local id = M.packetRef(l.text)
+        if id then line.packet = M.queueViewPacket(id, store[id], verdicts[id], now) end
+        row.lines[i] = line
+      end
+      rows[#rows + 1] = row
+    end
+  end
+  table.sort(rows, function(a, b)
+    local pa, pb = a.project:lower(), b.project:lower()
+    if pa ~= pb then return pa < pb end
+    return tostring(a.qk) < tostring(b.qk)
+  end)
+  return rows
 end
 
 -- ---- Task packets (2026-09-29, build program unit 26) ------------------------
@@ -10673,7 +10809,7 @@ do
   function M.packetIdsIn(tasks)
     local ids = {}
     for _, t in ipairs(type(tasks) == "table" and tasks or {}) do
-      local id = M.packetRef(t)
+      local id = M.packetRef(M.queueText(t))   -- a held line is { text, held } (D4b)
       if id then ids[id] = true end
     end
     return ids
@@ -11137,7 +11273,7 @@ function M.routeTask(members, q, opts)
   opts = opts or {}
   if not opts.globalOn then return nil end
   if not M.queueRouted(q) then return nil end
-  if M.queueDepth(q) == 0 then return nil end
+  if M.queuePeek(q) == nil then return nil end   -- empty, or every line held (D4b)
   -- sequential mode: hold while a routed task is still in flight (one at a time)
   if M.queueRouteMode(q) == "sequential"
      and M.projectBusy(members, { pending = opts.pending, now = opts.now,
@@ -11177,7 +11313,7 @@ function M.queueStarved(members, q, opts)
   opts = opts or {}
   local minutes = tonumber(opts.minutes) or 0
   if minutes <= 0 then return false end
-  if not M.queueRouted(q) or M.queueDepth(q) == 0 then return false end
+  if not M.queueRouted(q) or M.queuePeek(q) == nil then return false end   -- every line held isn't starved (D4b)
   -- R1-16: a sequential queue with a task in flight is PROGRESSING one-at-a-time, not
   -- starved. routeTask already holds (returns nil) for sequential-busy; mirror that
   -- here so the dispatcher's starvation branch doesn't fire queue_starved on a queue
@@ -25093,6 +25229,9 @@ M.FEATURES = {
   { key = "packets", cat = "Automate", new = true, title = "Task packets",
     what = "+ Packet in the queue editor saves a task with its evidence: the code it cites (path:line or path:from-to, read at the session's HEAD and kept with that commit), repro steps and when it's done. The queue holds @packet:pN. Before it is fed, Shepherd re-reads each cited range at the receiving worktree's HEAD in the background; if any of it changed, the task isn't fed and the card says \"cited code moved\". A batch unit can carry a packet too: it is checked before the unit's tab opens, and its evidence goes into the unit's message.",
     why = "A task written against yesterday's code doesn't send a session after lines that are no longer there." },
+  { key = "queuehold", cat = "Automate", new = true, title = "Queue hold & fleet view",
+    what = "Hold one queued line and auto-feed, Feed next and the router skip it: it keeps its place, and the next line that isn't held goes first, until you Release it. ☰ → Queues lists every session's queue in one place -- whose it is, each line held or not, the line fed next and a packet line's last cited-code check -- with Hold / Release, ▲ ▼ and ✕ (which asks first).",
+    why = "Park a task that isn't ready without losing its place, and see what every session has lined up without opening each card." },
   { key = "recover", cat = "Automate", title = "Auto-respawn & auto-continue",
     what = "Respawn a stuck session and nudge one frozen on an API error to continue — within safe retry budgets.",
     why = "A long-running fleet heals itself instead of silently stalling overnight." },
