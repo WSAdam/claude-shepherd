@@ -129,6 +129,11 @@ local ok, err = quiet(function() dofile(ROOT .. "claude-dashboard.lua") end)
 check("the dashboard loads and runs its first refresh", ok)
 if not ok then print("       " .. tostring(err)); finish() end
 local fx = rawget(_G, "__ccDashboard").fx
+-- 2026-10-03 (E4, a requirement change): a merge on the batch grant now needs the gate's pass for
+-- its commit on record, so this fixture's project has a gate and it passed. The grant-grading
+-- section at the end takes it away (GATE = nil) to show what waits without one.
+local GATE = { state = "passed", code = 0, command = "make test" }
+fx.mergeGate = function() return GATE end
 -- the test's repos (/r/A) are made-up paths: only b3's repo counts as gone (FX.fleetRepoGone)
 fx.fleetRepoGone = function(bb) return bb.id == "b3" end
 local function tick() return quiet(function() fx._refreshBody() end) end
@@ -718,6 +723,83 @@ do
   fx.now = realNow
   quiet(function() fx.batchStop("drv", "blate1") end)
   quiet(function() fx.batchStop("drv", "blate2") end)
+end
+-- ---- grant grading: a risky merge on the grant waits for Adam's click (2026-10-03) ----
+-- Mining round 2 unit E4: a unit's merge on the batch grant waits for Adam's own Merge when its diff
+-- touches hook wiring (read from the UNCAPPED file list, so a file past the review's cut still
+-- counts), or when no gate pass is on record for its commit. Its card says why; his click merges it.
+do
+  for _, f in ipairs({ "ua.json", "ua.decision", "zz.json", "zz.decision", "u2.json", "u2.decision" }) do os.remove(MD .. "/" .. f) end
+  fx._mergeSent, fx._mergeApproved = {}, {}
+  write(FD .. "/bgr.json", json.encode({ v = 1, id = "bgr", nonce = "n-bgr", driver = { session_id = "drv", pid = "4242", name = "A-drv" },
+    repo = "/r/A", commonDir = "/r/A/.git", title = "Graded", mergeWhenGreen = true, at = os.time(), phase = "approved",
+    units = { { type = "feat", slug = "risky", task = "Risky.", branch = "feat/risky" },
+              { type = "feat", slug = "plain", task = "Plain.", branch = "feat/plain" },
+              { type = "feat", slug = "bare", task = "Ungated.", branch = "feat/bare" },
+              { type = "feat", slug = "off", task = "Config off.", branch = "feat/off" } } }))
+  write(FD .. "/bgr.state.json", json.encode({ grant = { approved = true, grantMerge = true, at = os.time() },
+    units = { risky ={ session = { id = "ur", name = "A-r", pid = "5201" } }, plain = { session = { id = "up", name = "A-p", pid = "5202" } },
+              bare = { session = { id = "un", name = "A-n", pid = "5203" } }, off = { session = { id = "uo", name = "A-o", pid = "5204" } } } }))
+  fx._fleetState.bgr = nil
+  -- a unit's facts: the review's capped @@files, then the uncapped @@allfiles the grading reads
+  local function unit(key, slug, pid, capped, all)
+    local wt = "/r/A/.claude/worktrees/" .. slug
+    status(key, wt, pid)
+    facts(wt, "feat/" .. slug)
+    FACTS[wt] = FACTS[wt]:sub(1, #FACTS[wt] - #"M\tx\n") .. table.concat(capped, "\n") .. "\n@@allfiles\n" .. table.concat(all, "\n") .. "\n"
+    write(MD .. "/" .. key .. ".json", json.encode({ v = 1, key = key, session_id = key, pid = pid, nonce = "m-" .. key,
+      worktree = wt, branch = "feat/" .. slug, base = "main", commonDir = "/r/A/.git",
+      summary = slug, tests = "green", ahead = 1, at = os.time(), phase = "requested" }))
+  end
+  local capped, all = {}, {}
+  for i = 1, 200 do capped[#capped + 1] = "M\tsrc/f" .. i .. ".lua"; all[#all + 1] = "M\tsrc/f" .. i .. ".lua" end
+  all[#all + 1] = "M\tsettings-hooks.json"   -- past the review's 200-file cut
+  unit("ur", "risky", "5201", capped, all)
+  tick(); tick()
+  check("grant grading: a unit whose diff touches hook wiring doesn't merge on the grant", read(MD .. "/ur.decision") == nil)
+  local ur = items().ur
+  check("...its card says why, naming the file from past the review's cut  (" .. tostring(ur and ur.merge and ur.merge.line) .. ")",
+        ur and ur.merge and tostring(ur.merge.line):find("touches hook wiring: settings-hooks.json", 1, true) ~= nil)
+  check("...and it needs Adam", ur and ur.merge and ur.merge.needsYou == true)
+  check("...and the review's file list stays capped", ur and ur.merge and #ur.merge.files == 200)
+
+  -- a plain unit with the gate's pass on record still merges on the grant
+  unit("up", "plain", "5202", { "M\tapp.lua" }, { "M\tapp.lua" })
+  tick(); tick()
+  local dp = decoded(MD .. "/up.decision")
+  check("grant grading: a plain change with a gate pass merges on the grant", dp and dp.verdict == "merge" and dp.nonce == "m-up")
+  os.remove(MD .. "/up.json"); os.remove(MD .. "/up.decision"); os.remove(T .. "/status/up.json")
+  fx._mergeSent, fx._mergeApproved = {}, {}
+  tick()
+
+  -- Adam's own Merge click is never affected
+  local okR = select(2, quiet(function() return fx.mergeApprove("ur") end))
+  local dr = decoded(MD .. "/ur.decision")
+  check("grant grading: Adam's own Merge click still merges the risky unit", okR ~= false and dr and dr.verdict == "merge" and dr.nonce == "m-ur")
+  os.remove(MD .. "/ur.json"); os.remove(MD .. "/ur.decision"); os.remove(T .. "/status/ur.json")
+  fx._mergeSent, fx._mergeApproved = {}, {}
+  tick()
+
+  -- no gate pass on record: nothing to show it's green, so it waits too
+  GATE = nil
+  unit("un", "bare", "5203", { "M\tapp.lua" }, { "M\tapp.lua" })
+  tick(); tick()
+  check("grant grading: with no gate pass on record the grant doesn't merge it", read(MD .. "/un.decision") == nil)
+  local un = items().un
+  check("...and its card says so  (" .. tostring(un and un.merge and un.merge.line) .. ")",
+        un and un.merge and tostring(un.merge.line):find("no test gate passed for this commit", 1, true) ~= nil)
+  os.remove(MD .. "/un.json"); os.remove(T .. "/status/un.json")
+  GATE = { state = "passed", code = 0, command = "make test" }
+
+  -- merge.grantWaitsFor = []: no category waits, and the gate's pass is enough again
+  write(T .. "/.claude/cc-config.json", json.encode({ merge = { grantWaitsFor = {} } }))
+  unit("uo", "off", "5204", { "M\tsettings-hooks.json" }, { "M\tsettings-hooks.json" })
+  tick(); tick()
+  local doo = decoded(MD .. "/uo.decision")
+  check("grant grading: with merge.grantWaitsFor = [] a hook-wiring change merges on the gate's pass", doo and doo.verdict == "merge")
+  os.remove(MD .. "/uo.json"); os.remove(MD .. "/uo.decision"); os.remove(T .. "/status/uo.json")
+  os.remove(T .. "/.claude/cc-config.json")
+  quiet(function() fx.batchStop("drv", "bgr") end)
 end
 check("no keystroke anywhere", taps == 0)
 finish()

@@ -85,6 +85,22 @@ const review = { key: "k1", sharedWindow: 3, merge: {
              evidence: "it says \"Each bug has a <img src=x onerror=window.__pwned=1> new fixture\", but no test or fixture path is among the 40 changed files" }],
 } };
 
+// 2026-10-03 (grant grading, mining round 2 unit E4): the head line of a merge Adam granted that
+// waited for his click, built by the REAL core (core.grantVerdict -> core.mergeView), so the review
+// shows exactly the why the panel would.
+let grantLine = "";
+try {
+  grantLine = execFileSync("lua", ["-e", `
+    local core = dofile(${JSON.stringify(path.join(ROOT, "cc-core.lua"))})
+    local files = { { st = "M", path = "settings-hooks.json" }, { st = "D", path = "tests/old.test.lua" }, { st = "M", path = "deno.lock" } }
+    local _, _, why = core.grantVerdict({ files = files, gate = { state = "passed" }, checkOn = false, cfg = {} })
+    local req = { phase = "requested", branch = "feat/grant-grading-on-a-long-branch-name", base = "main",
+                  worktree = "/r/A/.claude/worktrees/grant-grading" }
+    io.write(core.mergeView(req, { ready = true, checking = false, problems = {} }, nil, { checkerHold = why },
+                            { state = "passed", command = "make test" }).line)
+  `], { encoding: "utf8" });
+} catch (e) { /* checked below: an empty line fails the grant-grading checks */ }
+
 (async () => {
   let browser;
   try { browser = await pw.chromium.launch({ headless: true }); }
@@ -187,6 +203,25 @@ const review = { key: "k1", sharedWindow: 3, merge: {
   }, review);
   check("no claim reads couldn't tell, unflagged", quiet.unknown.indexOf("couldn't tell") >= 0 && !quiet.unknownFlagged);
   check("a review with no claim check at all (an older record) leaves the block empty", quiet.none === "");
+
+  // ---- grant grading (2026-10-03): a grant merge that waited says why, and Merge stays live ----
+  const grant = await page.evaluate((a) => {
+    const h = JSON.parse(JSON.stringify(a.r));
+    h.merge.line = a.line; h.merge.needsYou = true; delete h.merge.claims;
+    h.merge.gate = { state: "passed", code: 0, command: "make lint && make test" };
+    renderMerge(h);
+    const head = document.getElementById("dm-head");
+    return { text: head.textContent, sw: head.scrollWidth, cw: head.clientWidth,
+             mergeDisabled: document.getElementById("dm-merge").disabled };
+  }, { r: review, line: grantLine });
+  check("grant grading: the review's head says why the grant merge waited  (" + grant.text + ")",
+    grant.text.indexOf("touches hook wiring: settings-hooks.json") >= 0
+    && grant.text.indexOf("deletes tracked files: tests/old.test.lua") >= 0
+    && grant.text.indexOf("touches lockfiles: deno.lock") >= 0
+    && grant.text.indexOf("so it waits for your click") >= 0);
+  check("...wrapped inside the review, not running off its edge  (scrollWidth=" + grant.sw + " clientWidth=" + grant.cw + ")",
+    grant.cw > 0 && grant.sw <= grant.cw);
+  check("...and Adam's own Merge button stays live: his click is never graded", grant.mergeDisabled === false);
 
   await browser.close();
   finish();

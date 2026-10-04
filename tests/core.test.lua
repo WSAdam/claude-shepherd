@@ -8483,9 +8483,11 @@ do
   -- 2026-10-03: 55 -> 56 for Run selected in My List ("runner", flagged new).
   -- 2026-10-03: 56 -> 57 for grey cards, live sessions with no status file ("hookless", flagged new).
   -- 2026-10-03: 57 -> 58 for kept transcripts ("keeper", flagged new).
-  eq("FEATURES: the 58 new features are flagged", newCount, 58)
+  -- 2026-10-03: 58 -> 59 for grant grading ("grantgrade", flagged new).
+  eq("FEATURES: the 59 new features are flagged", newCount, 59)
   check("FEATURES: lists the grey cards", keys.hookless == true)
   check("FEATURES: lists kept transcripts", keys.keeper == true)
+  check("FEATURES: lists grant grading", keys.grantgrade == true)
   check("FEATURES: lists the main moved notice", keys.mainmoved == true)
   check("FEATURES: lists the main-green check", keys.maingreen == true)
   check("FEATURES: lists the coach across repos", keys.coachglobal == true)
@@ -15516,6 +15518,180 @@ do
   local fk = {}; for _, ft in ipairs(core.FEATURES) do fk[ft.key] = ft end
   check("hookless: FEATURES lists the grey cards, flagged new", fk.hookless ~= nil and fk.hookless.new == true
         and fk.hookless.title == "Grey cards")
+end
+
+-- ---- Grant grading: a risky merge on the grant waits for Adam (2026-10-03, mining round 2 unit E4) ----
+do
+  local function F(st, path, from) return { st = st, path = path, from = from } end
+  local function risk(files, checker, cfg) return core.grantRisk(files, checker, cfg or {}) end
+  local function says(list, needle)
+    for _, w in ipairs(list or {}) do if tostring(w):find(needle, 1, true) then return true end end
+    return false
+  end
+  eq("grant: a plain change is not risky", risk({ F("M", "cc-core.lua"), F("A", "tests/x.test.lua") }), nil)
+  eq("grant: no files, no checker -> nothing to wait for", risk({}), nil)
+  eq("grant: junk input -> nothing to wait for", core.grantRisk(nil, nil, nil), nil)
+
+  -- each category, with WHY naming the file
+  local r = risk({ F("M", "settings-hooks.json") })
+  check("grant: hook wiring waits, naming the file  (" .. tostring(r and r[1]) .. ")",
+        r and #r == 1 and r[1] == "touches hook wiring: settings-hooks.json")
+  for _, p in ipairs({ "install.sh", "uninstall.sh", "SHIPPED" }) do
+    check("grant: hook wiring: " .. p, says(risk({ F("M", p) }), "touches hook wiring: " .. p))
+  end
+  check("grant: a nested install.sh is not Shepherd's hook wiring", risk({ F("M", "demo/install.sh") }) == nil)
+  r = risk({ F("D", "tests/old.test.lua") })
+  check("grant: a deleted tracked file waits  (" .. tostring(r and r[1]) .. ")",
+        r and r[1] == "deletes tracked files: tests/old.test.lua")
+  check("grant: a rename is not a deletion", risk({ F("R", "src/b.lua", "src/a.lua") }) == nil)
+  check("grant: ...but a rename OF a risky path still counts",
+        says(risk({ F("R", "setup/install-old.sh", "install.sh") }), "touches hook wiring: install.sh"))
+  check("grant: CLAUDE.md waits", says(risk({ F("M", "CLAUDE.md") }), "touches session instructions: CLAUDE.md"))
+  check("grant: ...a nested CLAUDE.md too", says(risk({ F("A", "app/CLAUDE.md") }), "app/CLAUDE.md"))
+  check("grant: methodology/ waits", says(risk({ F("M", "methodology/CLAUDE.md") }), "touches session instructions"))
+  check("grant: DECISIONS.md waits", says(risk({ F("M", "DECISIONS.md") }), "touches the decision log: DECISIONS.md"))
+  check("grant: defaults/ waits", says(risk({ F("M", "defaults/cc-config.json") }), "touches the shipped defaults: defaults/cc-config.json"))
+  check("grant: CI config waits", says(risk({ F("A", ".github/workflows/ci.yml") }), "touches CI config: .github/workflows/ci.yml"))
+  check("grant: ...other CI files too", says(risk({ F("M", ".gitlab-ci.yml") }), "touches CI config"))
+  check("grant: migrations wait", says(risk({ F("A", "db/migrations/0002_add.sql") }), "touches migrations: db/migrations/0002_add.sql"))
+  check("grant: lockfiles wait", says(risk({ F("M", "deno.lock") }), "touches lockfiles: deno.lock"))
+  check("grant: ...a nested lockfile too", says(risk({ F("M", "ui/package-lock.json") }), "ui/package-lock.json"))
+  check("grant: .claude/settings* waits", says(risk({ F("M", ".claude/settings.local.json") }), "touches Claude settings: .claude/settings.local.json"))
+  check("grant: a lookalike isn't risky (lockfile in a name, settings outside .claude)",
+        risk({ F("M", "docs/lockfiles.md"), F("M", "settings.json"), F("M", "app/migrations.lua") }) == nil)
+
+  -- several reasons, in category order; a long list is cut with a count
+  r = risk({ F("M", "deno.lock"), F("M", "settings-hooks.json"), F("D", "a.lua") })
+  check("grant: several categories each give their reason, in a fixed order  (" .. table.concat(r or {}, " | ") .. ")",
+        r and #r == 3 and r[1]:find("hook wiring", 1, true) and r[2]:find("deletes", 1, true) and r[3]:find("lockfiles", 1, true))
+  r = risk({ F("D", "a"), F("D", "b"), F("D", "c"), F("D", "d"), F("D", "e") })
+  eq("grant: a long list names three and counts the rest", r and r[1], "deletes tracked files: a, b, c and 2 more")
+
+  -- the checker: a high-severity finding waits, even on a pass; lower ones don't
+  local pass = { state = "done", verdict = "pass", findings = { { file = "app.lua", line = 7, severity = "high", issue = "drops errors" } } }
+  r = risk({ F("M", "app.lua") }, pass)
+  check("grant: a high-severity checker finding waits  (" .. tostring(r and r[1]) .. ")",
+        r and r[1] == "the checker reported a high-severity finding: app.lua:7")
+  check("grant: medium and low findings don't",
+        risk({}, { state = "done", verdict = "pass", findings = { { file = "a", severity = "medium" }, { file = "b", severity = "low" } } }) == nil)
+  check("grant: a checker still running says nothing yet", risk({}, { state = "running", findings = pass.findings }) == nil)
+
+  -- config: merge.grantWaitsFor names the categories; all of them when unset, none for []
+  check("grant: every category is on when the config doesn't say", #core.GRANT_WAIT_CATEGORIES == 10)
+  local hooksOnly = { merge = { grantWaitsFor = { "hookWiring" } } }
+  check("grant: config: only the listed categories count",
+        risk({ F("M", "deno.lock"), F("M", "install.sh") }, nil, hooksOnly)[1] == "touches hook wiring: install.sh"
+        and #risk({ F("M", "deno.lock"), F("M", "install.sh") }, nil, hooksOnly) == 1)
+  local off = { merge = { grantWaitsFor = {} } }
+  eq("grant: config off ([]) -> nothing waits", risk({ F("M", "settings-hooks.json"), F("D", "x") }, pass, off), nil)
+  check("grant: config: an unknown name is ignored, never an error",
+        risk({ F("M", "deno.lock") }, nil, { merge = { grantWaitsFor = { "nope", "lockfiles" } } })[1] == "touches lockfiles: deno.lock")
+
+  -- the uncapped list: its own facts section, past MERGE_FACTS_MAX_FILES
+  local req = { commonDir = "/r/A/.git", worktree = "/r/A/.claude/worktrees/x", branch = "feat/x", base = "main",
+                nonce = "n-x", phase = "requested", summary = "s", tests = "t", at = 1 }
+  local cmd = core.mergeFactsCmd(req)
+  local allSec = cmd:match("echo @@allfiles; ([^;]*)")
+  check("grant: the facts ask git for every changed file, uncapped  (" .. tostring(allSec) .. ")",
+        allSec ~= nil and allSec:find("diff --name-status", 1, true) ~= nil and allSec:find("main...feat/x", 1, true) ~= nil
+        and allSec:find("head", 1, true) == nil)
+  local capped, all = {}, {}
+  for i = 1, core.MERGE_FACTS_MAX_FILES do capped[#capped + 1] = "M\tsrc/f" .. i .. ".lua" end
+  for i = 1, core.MERGE_FACTS_MAX_FILES + 50 do all[#all + 1] = "M\tsrc/f" .. i .. ".lua" end
+  all[#all + 1] = "M\tsettings-hooks.json"
+  all[#all + 1] = "R087\tinstall.sh\tsetup/install.sh"
+  all[#all + 1] = 'D\t"defaults/caf\\303\\251.json"'
+  local out = "@@listed\n@@head\nfeat/x\n@@sha\nabc123\n@@status\n@@ahead\n1\n@@behind\n0\n@@commits\n@@stat\n@@files\n"
+    .. table.concat(capped, "\n") .. "\n@@markers\n@@gatefile\n@@allfiles\n" .. table.concat(all, "\n") .. "\n"
+  local f = core.parseMergeFacts(out, req)
+  check("grant: the capped list stops at the cut", #f.files == core.MERGE_FACTS_MAX_FILES)
+  check("grant: the uncapped list has every file  (" .. tostring(f.allFiles and #f.allFiles) .. ")",
+        f.allFiles and #f.allFiles == core.MERGE_FACTS_MAX_FILES + 53)
+  local ren = f.allFiles and f.allFiles[core.MERGE_FACTS_MAX_FILES + 52]
+  check("grant: a rename keeps both paths", ren and ren.st == "R" and ren.from == "install.sh" and ren.path == "setup/install.sh")
+  local q = f.allFiles and f.allFiles[core.MERGE_FACTS_MAX_FILES + 53]
+  check("grant: a quoted path loses its quotes", q and q.st == "D" and q.path:sub(1, 9) == "defaults/")
+  r = risk(f.allFiles)
+  check("grant: a risky file past the cut still waits  (" .. table.concat(r or {}, " | ") .. ")",
+        says(r, "settings-hooks.json") and says(r, "install.sh") and says(r, "deletes tracked files"))
+  eq("grant: facts from an older command have no uncapped list", core.parseMergeFacts("@@listed\n@@files\nM\tx\n", req).allFiles, nil)
+
+  -- the verdict on the grant: risk, then evidence on record (the gate's pass for this commit,
+  -- and with verify.onMerge the checker's pass); otherwise the checker's own verdict stands
+  local passed = { state = "passed", code = 0, command = "make test" }
+  local ckPass = { id = "n|abc", state = "done", verdict = "pass", findings = {} }
+  local function verdict(t)
+    return core.grantVerdict({ files = t.files or { F("M", "app.lua") }, gate = t.gate, checker = t.checker,
+                               checkerId = t.cid or "n|abc", checkOn = t.checkOn, cfg = t.cfg or {} })
+  end
+  local ok, act, why = verdict({ gate = passed, checker = ckPass, checkOn = true })
+  check("grant verdict: a plain change with a gate pass and a checker pass merges", ok == true and act == "merge")
+  ok, act, why = verdict({ gate = passed, checkOn = false })
+  check("grant verdict: ...and with the checker off, the gate's pass is enough", ok == true and act == "merge")
+  ok, act, why = verdict({ files = { F("M", "settings-hooks.json") }, gate = passed, checker = ckPass, checkOn = true })
+  check("grant verdict: a risky change holds, saying why  (" .. tostring(why) .. ")",
+        ok == false and act == "hold" and why == "touches hook wiring: settings-hooks.json, so it waits for your click")
+  ok, act, why = verdict({ files = { F("M", "deno.lock") }, gate = passed, checker = { id = "n|abc", state = "running" }, checkOn = true })
+  check("grant verdict: a risky change holds at once, without waiting for the checker", ok == false and act == "hold"
+        and tostring(why):find("lockfiles", 1, true) ~= nil)
+  ok, act, why = verdict({ gate = nil, checker = ckPass, checkOn = true })
+  check("grant verdict: no gate pass on record holds  (" .. tostring(why) .. ")",
+        ok == false and act == "hold" and tostring(why):find("no test gate passed for this commit", 1, true) ~= nil)
+  ok, act = verdict({ gate = { state = "failed", code = 1 }, checker = ckPass, checkOn = true })
+  check("grant verdict: ...nor does a red one count as a pass", ok == false and act == "hold")
+  ok, act, why = verdict({ gate = passed, checker = { id = "n|abc", state = "running" }, checkOn = true })
+  check("grant verdict: a plain change waits for the checker as before", ok == false and act == "wait"
+        and tostring(why):find("reviewing", 1, true) ~= nil)
+  ok, act, why = verdict({ gate = passed, checker = { id = "n|abc", state = "done", verdict = "fail", findings = {} }, checkOn = true })
+  eq("grant verdict: a checker fail still holds with its own words", why, "the checker failed it, so it waits for your click")
+  ok, act, why = verdict({ gate = passed, checker = { id = "n|abc", state = "done", verdict = "fail", findings = pass.findings }, checkOn = true })
+  eq("grant verdict: ...its high finding isn't repeated beside the fail (that's a pass's category)", why,
+     "the checker failed it, so it waits for your click")
+  ok, act, why = verdict({ files = { F("M", "deno.lock") }, gate = passed,
+                           checker = { id = "n|abc", state = "done", verdict = "fail", findings = {} }, checkOn = true })
+  eq("grant verdict: a fail beside a risky file joins the list", why,
+     "touches lockfiles: deno.lock; the checker failed it, so it waits for your click")
+  ok, act, why = verdict({ gate = passed, checker = { id = "n|abc", state = "done", verdict = "pass", findings = pass.findings }, checkOn = true })
+  check("grant verdict: a pass with a high-severity finding holds  (" .. tostring(why) .. ")",
+        ok == false and act == "hold" and tostring(why):find("high-severity finding: app.lua:7", 1, true) ~= nil)
+  ok, act, why = verdict({ gate = passed, checker = { id = "n|old", state = "done", verdict = "pass", findings = pass.findings }, checkOn = false })
+  check("grant verdict: a finding on an earlier commit doesn't count", ok == true and act == "merge")
+  ok, act, why = verdict({ files = { F("M", "install.sh") }, gate = nil, checkOn = false })
+  check("grant verdict: several reasons join  (" .. tostring(why) .. ")",
+        why == "touches hook wiring: install.sh; no test gate passed for this commit, so it waits for your click")
+  ok, act = verdict({ files = { F("M", "install.sh") }, gate = passed, checkOn = false, cfg = off })
+  check("grant verdict: config off lets a risky change merge on the gate's pass", ok == true and act == "merge")
+  -- the panel asks core.checkerDelegatedVerdict itself and hands its answer in
+  local base = { files = { F("M", "app.lua") }, gate = passed, checker = ckPass, checkerId = "n|abc", checkOn = true, cfg = {} }
+  ok, act, why = core.grantVerdict(base, false, "retry", "the checker couldn't run; it tries once more")
+  check("grant verdict: a checker verdict handed in stands for a plain change", ok == false and act == "retry"
+        and why == "the checker couldn't run; it tries once more")
+  base.files = { F("M", "SHIPPED") }
+  ok, act, why = core.grantVerdict(base, true, "merge")
+  eq("grant verdict: ...and a risky change still holds over a handed-in pass", why, "touches hook wiring: SHIPPED, so it waits for your click")
+
+  -- the review: a held grant merge reads as needing Adam, with the why on its line
+  local mv = core.mergeView(req, { ready = true, checking = false, problems = {} }, f,
+                            { checkerHold = "touches hook wiring: settings-hooks.json, so it waits for your click" }, passed)
+  eq("grant review: the line says why it waited", mv.line,
+     "⇡ ready to merge feat/x → main -- touches hook wiring: settings-hooks.json, so it waits for your click")
+  check("grant review: ...and it needs Adam", mv.needsYou == true)
+  check("grant review: the uncapped list never rides to the panel", mv.allFiles == nil and #mv.files == core.MERGE_FACTS_MAX_FILES)
+
+  do
+    local fh = io.open(ROOT .. "defaults/cc-config.json", "r")
+    local dc = fh and core.json.decode(fh:read("*a")) or {}
+    if fh then fh:close() end
+    local list = (dc.merge or {}).grantWaitsFor
+    local got = type(list) == "table" and table.concat(list, ",") or tostring(list)
+    eq("grant: defaults/cc-config.json ships every category on", got, table.concat(core.GRANT_WAIT_CATEGORIES, ","))
+  end
+  check("grant: SETTINGS_KEEP_SUBKEYS keeps merge.grantWaitsFor", (function()
+    for _, k in ipairs(core.SETTINGS_KEEP_SUBKEYS.merge or {}) do if k == "grantWaitsFor" then return true end end
+    return false end)())
+  local fk = {}; for _, ft in ipairs(core.FEATURES) do fk[ft.key] = ft end
+  check("grant: FEATURES lists grant grading, flagged new", fk.grantgrade ~= nil and fk.grantgrade.new == true
+        and fk.grantgrade.title == "Grant grading")
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))

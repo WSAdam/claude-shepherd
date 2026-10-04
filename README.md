@@ -148,8 +148,8 @@ every other automatic behaviour here waits for its switch.
   the unit's changed tests run on the merge-base without its fix, and the review says whether they fail.
 - [**Requirement ids and merge receipts**](docs/merging-and-batches.md#requirement-ids-and-the-merge-receipt):
   Shepherd mints REQ ids per repo, and every review shows what was asked and what proves it's done.
-- [**Claude drives a batch**](docs/merging-and-batches.md#claude-drives-a-batch): a session proposes
-  several units, you approve once, and it opens their tabs and hands out the tasks.
+- [**Claude drives a batch**](docs/merging-and-batches.md#claude-drives-a-batch): a session proposes several units, you approve once, and it opens their tabs and hands out the tasks;
+  [**Grant grading**](docs/merging-and-batches.md#grant-grading-a-risky-merge-waits-for-your-click): a merge on your grant that touches hook wiring, instructions, CI or lockfiles, or deletes a file, waits for your click.
 - [**Overlap radar & unit order**](docs/merging-and-batches.md#overlap-radar-and-unit-order): worktrees that touch the same files are flagged with which to merge first, and a batch unit can wait for others;
   [**Main moved notice**](docs/merging-and-batches.md#main-moved-sibling-worktrees-hear-about-a-merge): after a merge, the worktrees whose files it touched are told to rebase.
 - [**Coverage index**](docs/merging-and-batches.md#coverage-index-a-batch-says-what-it-covers): a batch built from an issue list can't be approved until every issue is covered or triaged.

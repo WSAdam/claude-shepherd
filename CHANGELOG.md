@@ -25,6 +25,13 @@ parallel units. Each unit adds its line here.
   copies**, confirmed first, and `uninstall.sh --purge` leaves the folder. Diagnostics shows
   `cleanupPeriodDays` (30 when unset) with **Keep transcripts 365 days**, which writes only that key
   (`core.settingsNumberCmd`, atomic and symlink-aware like the env writer).
+- Grant grading: a batch unit's merge on Adam's grant waits for his Merge click when its diff touches
+  hook wiring, `CLAUDE.md`/`methodology/`, `DECISIONS.md`, `defaults/`, CI, migrations, lockfiles or
+  `.claude/settings*`, deletes a tracked file, or the checker reported a high-severity finding
+  (`core.grantRisk`, read from a new uncapped `@@allfiles` facts section). Otherwise it merges only on
+  evidence Shepherd holds: the gate's pass for that commit, plus the checker's pass with
+  `verify.onMerge` on, so an ungated repo's units now wait too. The card says why; his own click is
+  never graded. `merge.grantWaitsFor` lists the categories (all on).
 - Run selected in My List: **▶ Run…** on a project tab picks open items (nothing preselected) and
   **Run selected** works through them one at a time, each in a fresh tab in the repo's main checkout,
   opened through the expect-tag machinery with its brief typed in (Adam sends it; no keystroke). A file

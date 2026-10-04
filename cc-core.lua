@@ -2308,6 +2308,9 @@ function M.mergeFactsCmd(req)
     -- 2026-09-29: does the unit's diff touch the repo's declared gate? Its own uncapped question,
     -- so the edit can't hide past MERGE_FACTS_MAX_FILES in the file list.
     "echo @@gatefile", G .. " diff --name-only " .. dots .. " -- " .. sq(M.REPO_GATE_FILE) .. " 2>/dev/null",
+    -- 2026-10-03 (E4): every changed file, UNCAPPED, for grant grading alone (M.grantRisk): a risky
+    -- file past MERGE_FACTS_MAX_FILES must still hold a merge on the batch grant
+    "echo @@allfiles", G .. " -c core.quotepath=off diff --name-status --find-renames " .. dots .. " 2>/dev/null",
   }, "; ")
 end
 
@@ -2336,6 +2339,20 @@ function M.parseMergeFacts(out, req)
   end
   f.markers, f.markerFiles = parseMarkerLines(sec.markers)
   for _, l in ipairs(sec.gatefile or {}) do if l:match("%S") then f.gateFile = true end end
+  -- 2026-10-03 (E4): the uncapped list, { st, path, from } (a rename keeps both paths). Absent when
+  -- the output carries no such section (an older command): the caller falls back to `files`.
+  if sec.allfiles then
+    local function unq(p) return (p:match('^"(.*)"$')) or p end
+    f.allFiles = {}
+    for _, l in ipairs(sec.allfiles) do
+      local st, rest = l:match("^(%u)%d*\t(.+)$")
+      if st then
+        local from, to = rest:match("^([^\t]+)\t(.+)$")
+        if from then f.allFiles[#f.allFiles + 1] = { st = st, path = unq(to), from = unq(from) }
+        else f.allFiles[#f.allFiles + 1] = { st = st, path = unq(rest) } end
+      end
+    end
+  end
   return f
 end
 
@@ -4306,6 +4323,128 @@ function M.checkerDelegatedVerdict(rec, id, required)
     return false, "retry", "the checker couldn't run; it tries once more before it merges on your grant"
   end
   return false, "hold", "the checker couldn't run twice, so it waits for your click"
+end
+
+-- ---- Grant grading (2026-10-03, mining round 2 unit E4) -------------------------------------
+-- A batch unit's merge on Adam's grant waits for his own Merge click when the change is the kind he
+-- reviews himself: it touches hook wiring, the instructions sessions read, the decision log, the
+-- shipped defaults, CI, migrations, lockfiles or Claude's settings, deletes a tracked file, or the
+-- checker reported a high-severity finding. merge.grantWaitsFor names the categories that count
+-- (all of them when unset; [] for none). His own Merge click never reads any of this.
+M.GRANT_WAIT_CATEGORIES = { "hookWiring", "deletedFiles", "instructions", "decisions", "defaults",
+                            "ci", "migrations", "lockfiles", "claudeSettings", "checkerHigh" }
+M.GRANT_WAIT_LABELS = {
+  hookWiring = "touches hook wiring", deletedFiles = "deletes tracked files",
+  instructions = "touches session instructions", decisions = "touches the decision log",
+  defaults = "touches the shipped defaults", ci = "touches CI config", migrations = "touches migrations",
+  lockfiles = "touches lockfiles", claudeSettings = "touches Claude settings",
+  checkerHigh = "the checker reported a high-severity finding",
+}
+M.GRANT_HOOK_FILES = { ["settings-hooks.json"] = true, ["install.sh"] = true, ["uninstall.sh"] = true, SHIPPED = true }
+M.GRANT_CI_FILES = { [".gitlab-ci.yml"] = true, [".travis.yml"] = true, ["azure-pipelines.yml"] = true,
+                     Jenkinsfile = true, ["bitbucket-pipelines.yml"] = true }
+M.GRANT_LOCKFILES = { ["deno.lock"] = true, ["package-lock.json"] = true, ["npm-shrinkwrap.json"] = true,
+  ["yarn.lock"] = true, ["pnpm-lock.yaml"] = true, ["bun.lock"] = true, ["bun.lockb"] = true,
+  ["Cargo.lock"] = true, ["Gemfile.lock"] = true, ["poetry.lock"] = true, ["Pipfile.lock"] = true,
+  ["uv.lock"] = true, ["composer.lock"] = true, ["go.sum"] = true, ["flake.lock"] = true, ["mix.lock"] = true,
+  ["Podfile.lock"] = true, ["pubspec.lock"] = true, ["packages.lock.json"] = true, ["gradle.lockfile"] = true }
+M.GRANT_SHOW_FILES = 3
+
+do
+  -- Which path categories one path falls in (deletion is the file's status, not its path).
+  local function pathCats(p, add)
+    if type(p) ~= "string" or p == "" then return end
+    local base = p:match("([^/]+)$") or p
+    if M.GRANT_HOOK_FILES[p] then add("hookWiring") end
+    if base == "CLAUDE.md" or p:sub(1, 12) == "methodology/" then add("instructions") end
+    if p == "DECISIONS.md" then add("decisions") end
+    if p:sub(1, 9) == "defaults/" then add("defaults") end
+    if p:sub(1, 8) == ".github/" or p:sub(1, 10) == ".circleci/" or p:sub(1, 11) == ".buildkite/" or M.GRANT_CI_FILES[p] then
+      add("ci")
+    end
+    local dirs = "/" .. p:sub(1, #p - #base)
+    if dirs:find("/migrations?/") or dirs:find("/migrate/") then add("migrations") end
+    if M.GRANT_LOCKFILES[base] then add("lockfiles") end
+    if p:find("^%.claude/settings[^/]*$") or p:find("/%.claude/settings[^/]*$") then add("claudeSettings") end
+  end
+
+  -- The categories merge.grantWaitsFor turns on: a set. Unset (or not a list) = all of them.
+  function M.grantWaitsFor(cfg)
+    local list = M.config(cfg, "merge.grantWaitsFor", nil)
+    local on = {}
+    if type(list) ~= "table" then
+      for _, c in ipairs(M.GRANT_WAIT_CATEGORIES) do on[c] = true end
+      return on
+    end
+    for _, c in ipairs(list) do if M.GRANT_WAIT_LABELS[c] then on[c] = true end end
+    return on
+  end
+
+  -- Why a merge on the grant waits for Adam's click, from the diff's UNCAPPED file list
+  -- ({ st, path, from }, M.parseMergeFacts' allFiles) and the checker's record for this commit (or
+  -- nil): nil when nothing does, else one reason per category, in M.GRANT_WAIT_CATEGORIES order,
+  -- each naming up to GRANT_SHOW_FILES files ("touches hook wiring: settings-hooks.json").
+  function M.grantRisk(files, checker, cfg)
+    local on = M.grantWaitsFor(cfg)
+    local hits, seen = {}, {}
+    local function hit(cat, what)
+      if not on[cat] then return end
+      hits[cat] = hits[cat] or {}
+      local k = cat .. "\0" .. what
+      if not seen[k] then seen[k] = true; table.insert(hits[cat], what) end
+    end
+    for _, f in ipairs(type(files) == "table" and files or {}) do
+      if type(f) == "table" and type(f.path) == "string" then
+        if f.st == "D" then hit("deletedFiles", f.path) end
+        for _, p in ipairs({ f.from or false, f.path }) do
+          if p then pathCats(p, function(cat) hit(cat, p) end) end
+        end
+      end
+    end
+    if type(checker) == "table" and checker.state == "done" then
+      for _, fd in ipairs(type(checker.findings) == "table" and checker.findings or {}) do
+        if type(fd) == "table" and tostring(fd.severity or ""):lower() == "high" then
+          local where = tostring(fd.file or "?")
+          if tonumber(fd.line) then where = where .. ":" .. math.floor(tonumber(fd.line)) end
+          hit("checkerHigh", where)
+        end
+      end
+    end
+    local out = {}
+    for _, cat in ipairs(M.GRANT_WAIT_CATEGORIES) do
+      local list = hits[cat]
+      if list then
+        local shown = {}
+        for i = 1, math.min(#list, M.GRANT_SHOW_FILES) do shown[i] = list[i] end
+        local more = (#list > M.GRANT_SHOW_FILES) and (" and " .. (#list - M.GRANT_SHOW_FILES) .. " more") or ""
+        out[#out + 1] = M.GRANT_WAIT_LABELS[cat] .. ": " .. table.concat(shown, ", ") .. more
+      end
+    end
+    return (#out > 0) and out or nil
+  end
+end
+
+-- May a batch unit's merge go through on the grant, all told? t = { files (uncapped), gate (this
+-- commit's gate record), checker (its record), checkerId (the request's nonce|sha), checkOn
+-- (verify.onMerge), cfg }. A risky change holds at once (it is Adam's however the checker answers);
+-- so does a commit with no gate pass on record -- the grant merges only on evidence Shepherd holds
+-- itself, never on the session's word. Otherwise the checker's own verdict stands: `ok, act, why`
+-- as M.checkerDelegatedVerdict answered (the panel asks it itself), or asked here when not given.
+-- -> ok, act, why in that shape ("merge", "wait", "retry" or "hold").
+function M.grantVerdict(t, ok, act, cwhy)
+  t = type(t) == "table" and t or {}
+  local ck = t.checker
+  if type(ck) ~= "table" or ck.id ~= t.checkerId then ck = nil end
+  -- a fail already holds in the checker's own words; checkerHigh is for a PASS that still reported one
+  local why = M.grantRisk(t.files, (ck and ck.verdict ~= "fail") and ck or nil, t.cfg) or {}
+  if not (type(t.gate) == "table" and t.gate.state == "passed") then
+    why[#why + 1] = "no test gate passed for this commit"
+  end
+  if ok == nil then ok, act, cwhy = M.checkerDelegatedVerdict(ck, t.checkerId, t.checkOn) end
+  if #why == 0 then return ok, act, cwhy end
+  -- a checker hold of its own (a fail, or couldn't run twice) joins the list rather than vanishing
+  if act == "hold" and type(cwhy) == "string" then why[#why + 1] = (cwhy:gsub(", so it waits for your click$", "")) end
+  return false, "hold", table.concat(why, "; ") .. ", so it waits for your click"
 end
 
 -- A couldn't-run from a merge request's checker gets its one retry a minute later. A run cut by
@@ -11874,7 +12013,8 @@ M.SETTINGS_KEEP_SUBKEYS = {
   -- block the form rebuilds keeps its own; the rest are listed in case the form ever sends them.
   autoContinue = { "backoff", "dryRun" },
   -- 2026-09-29: the form doesn't send `merge` today; if it ever rebuilds it, repoGate (no input) stays.
-  merge = { "repoGate" },
+  -- 2026-10-03: and grant grading's category list (grantWaitsFor, no input either).
+  merge = { "repoGate", "grantWaitsFor" },
   -- 2026-09-29: worktree leases have no inputs; if the form ever rebuilds `lease`, the hand-set
   -- port range and database folder stay.
   lease = { "portFrom", "portTo", "dbDir" },
@@ -24868,6 +25008,9 @@ M.FEATURES = {
   { key = "checker", cat = "Control", new = true, title = "Merge checker",
     what = "Every merge request gets a background review: Shepherd first scans the diff for red flags (conflict markers, deleted or weakened tests, a new .skip/.only, stubs), then a read-only Sonnet run answers pass or fail, shown in the review. A batch unit merges on your grant only after a pass; your own Merge click still works. 🔎 Verify runs the same review on any session.",
     why = "The tests prove the suite is green; the checker reads the code, so a merge nobody looked at still gets a second pair of eyes." },
+  { key = "grantgrade", cat = "Control", new = true, title = "Grant grading",
+    what = "A batch unit's merge on your grant waits for your Merge click when its diff touches hook wiring (settings-hooks.json, install.sh, uninstall.sh, SHIPPED), CLAUDE.md or methodology/, DECISIONS.md, defaults/, CI config, migrations, lockfiles or .claude/settings*, deletes a tracked file, or the checker reported a high-severity finding -- read from the full file list, never the review's cut one. Otherwise it merges only on evidence Shepherd holds: the gate's pass for that commit, and the checker's pass when it's on. The review says why it waited; your own click is unaffected. merge.grantWaitsFor picks the categories.",
+    why = "Your one approval covers the routine merges, and the ones that change how every session behaves still come to you." },
   { key = "redfirst", cat = "Control", new = true, title = "Red-first proof",
     what = "With a redFirstCommand on the project's merge gate, Shepherd runs the unit's changed tests on a scratch worktree at the merge-base, without the fix, once the gate passes. The review says whether they fail there: proved red, not red (which files), or couldn't run, leaving out failures main already has. It's a hint; Merge never waits for it.",
     why = "A green suite proves the fix passes its tests; red-first shows the tests would have caught the bug without it." },

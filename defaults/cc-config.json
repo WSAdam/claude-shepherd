@@ -129,6 +129,10 @@
     "maxBudgetUsd": 1,
     "timeoutSeconds": 600
   },
+  "merge": {
+    "grantWaitsFor": ["hookWiring", "deletedFiles", "instructions", "decisions", "defaults",
+                      "ci", "migrations", "lockfiles", "claudeSettings", "checkerHigh"]
+  },
   "coach": {
     "enabled": false,
     "day": "mon",

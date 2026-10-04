@@ -187,6 +187,9 @@ local ok, err = quiet(function() dofile(ROOT .. "claude-dashboard.lua") end)
 check("the dashboard loads and runs its first refresh", ok)
 if not ok then print("       " .. tostring(err)); finish() end
 local fx = rawget(_G, "__ccDashboard").fx
+-- 2026-10-03 (E4, a requirement change): a merge on the batch grant now needs the gate's pass for
+-- its commit on record as well as the checker's, so this fixture's projects have a gate and it passed.
+fx.mergeGate = function() return { state = "passed", code = 0, command = "make test" } end
 fx.fleetRepoGone = function() return false end
 local OFFSET = 0
 fx.now = function() return os.time() + OFFSET end

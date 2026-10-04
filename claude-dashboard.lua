@@ -7072,10 +7072,17 @@ function FX.annotateMerges(list, cfg, bannerOn)
       local b = FX.fleetDelegates(r)
       -- the test gate gates a delegated merge exactly as it gates Adam's Merge button
       local f = b and FX.mergeFacts(r) or nil
-      if b and core.mergeReadiness(r, f, items[key], FX.mergeGate(r, f, cfg), FX.fleetMergeWaits(r)).ready then
+      local g = b and FX.mergeGate(r, f, cfg) or nil
+      if b and core.mergeReadiness(r, f, items[key], g, FX.fleetMergeWaits(r)).ready then
         local crec, cid
-        if checkOn then crec, cid = FX.checkerForRequest(key, r, f, cfg) end
+        if checkOn then crec, cid = FX.checkerForRequest(key, r, f, cfg)
+        else crec, cid = FX.checkerRecord(key), core.mergeGateKey(r, f and f.sha) end   -- a Verify press's findings count too
         local okc, act, why = core.checkerDelegatedVerdict(crec, cid, checkOn)
+        -- 2026-10-03 (E4): grant grading -- a risky diff (its UNCAPPED file list) or a high-severity
+        -- finding waits for Adam's click, and so does a commit with no gate pass on record; otherwise
+        -- the checker's verdict above stands
+        okc, act, why = core.grantVerdict({ files = f and (f.allFiles or f.files), gate = g, checker = crec,
+                                            checkerId = cid, checkOn = checkOn, cfg = cfg }, okc, act, why)
         -- 2026-10-03 (D2): a frozen fleet, or the unit's session on hold, merges nothing on the grant:
         -- the request waits for Adam's own click, and its card says why
         if okc and FX.holdStops("merge", items[key], { summary = "merge " .. tostring(r.branch) .. " on the batch grant", by = "fleet" }) then

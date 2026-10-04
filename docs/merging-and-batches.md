@@ -293,7 +293,8 @@ The gate proves the suite is green, and the claim check reads the summary. The c
 
 What happens next depends on the verdict:
 
-- **Pass:** a batch unit's merge goes through on your grant, as before.
+- **Pass:** a batch unit's merge goes through on your grant, unless
+  [grant grading](#grant-grading-a-risky-merge-waits-for-your-click) holds it.
 - **Fail:** a batch unit's merge **waits for your click**. The card says *the checker failed it, so
   it waits for your click*, it reads **Needs you**, and you get one alert.
 - **Couldn't run** (no answer, a timeout, the turn or budget cap): nothing was proven either way,
@@ -458,7 +459,9 @@ approval from you per batch**:
    unit's merge on the batch's grant **only** for that unit's own session on its own branch, once
    its own git check passes (and, with `verify.onMerge` on, once
    [the checker](#the-checker-a-read-only-review-of-every-merge-request) passes it), one merge per
-   repo at a time. Without it, units wait for your Merge.
+   repo at a time. A risky change, or one with no gate pass on record, waits for your Merge
+   anyway ([grant grading](#grant-grading-a-risky-merge-waits-for-your-click)). Without the
+   permission, units wait for your Merge.
    Tabs close after their merges as usual.
 5. **Stop batch** (on the driver's card) or `cc-fleet.sh stop --batch <id>` ends it at once: no more tabs, no
    more merges on its grant. A batch also **ends itself** once every unit has merged or blocked (or
@@ -477,6 +480,42 @@ Your approval lives in Shepherd (`~/.claude/cc-fleet/<id>.state.json`), never in
 own file. `"fleet": { "enabled": false }` makes Shepherd ignore proposals. A batch stopped (or
 denied) more than a week ago is pruned, every file of it: Shepherd does it in its tick, and
 `cc-fleet.sh propose` does it before writing a new proposal.
+
+### Grant grading: a risky merge waits for your click
+
+Your one approval covers the routine merges. A unit's merge on the grant still **waits for your
+Merge click** when its diff:
+
+- touches **hook wiring**: `settings-hooks.json`, `install.sh`, `uninstall.sh` or `SHIPPED`;
+- **deletes** a tracked file (a rename doesn't count; renaming a risky file does);
+- touches **session instructions** (any `CLAUDE.md`, or `methodology/`), the **decision log**
+  (`DECISIONS.md`) or the **shipped defaults** (`defaults/`);
+- touches **CI config** (`.github/`, `.gitlab-ci.yml`, `.circleci/` and the like), **migrations**
+  (a `migrations/` or `migrate/` folder), **lockfiles** (`deno.lock`, `package-lock.json`,
+  `Cargo.lock` and the like) or **Claude settings** (`.claude/settings*`);
+- or the checker reported a **high-severity finding**, even on a pass.
+
+The question is read from the diff's **full** file list, Shepherd's own `git diff` with no cut,
+so a risky file can't hide past the 200 files the review lists.
+
+Otherwise the merge goes through on the grant only on **evidence Shepherd holds itself**: its own
+gate run passed on that commit, and with `verify.onMerge` on, the checker passed it. A repo with no
+gate (no `merge.gates` entry, no [repo-declared gate](#a-repo-can-declare-its-own-gate)) has no
+pass to show, so its units wait for your click too.
+
+A merge that waits reads **Needs you**, and its card and the review say why, for example
+*touches hook wiring: settings-hooks.json; deletes tracked files: tests/old.test.lua, so it waits
+for your click*. **Your own Merge click is never graded.**
+
+`merge.grantWaitsFor` lists the categories that count: `hookWiring`, `deletedFiles`,
+`instructions`, `decisions`, `defaults`, `ci`, `migrations`, `lockfiles`, `claudeSettings` and
+`checkerHigh`. Unset means all of them, and a fresh install ships them all. `[]` turns the
+categories off, but the evidence rule above still applies.
+
+```json
+"merge": { "grantWaitsFor": ["hookWiring", "deletedFiles", "instructions", "decisions", "defaults",
+                             "ci", "migrations", "lockfiles", "claudeSettings", "checkerHigh"] }
+```
 
 ### Coverage index: a batch says what it covers
 
