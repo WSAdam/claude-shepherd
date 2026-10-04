@@ -15908,6 +15908,15 @@ local HTML = [[
   /* shared bits */
   #grid { display:grid; gap:var(--gap); padding:var(--pad); }
   .tile { cursor:pointer; position:relative; }
+  /* 2026-10-03 (F1): grey cards -- live sessions Shepherd's hooks never reported, in their own row
+     under the grid. Grey and dashed: display only, nothing to click. */
+  #hookless { display:grid; gap:var(--gap); padding:0 var(--pad) var(--pad);
+              grid-template-columns:repeat(auto-fill,minmax(var(--tile-min, 180px),1fr)); }
+  #hookless:empty { display:none; }
+  .theme-bar #hookless:not(:empty) { display:flex; flex-wrap:wrap; }
+  .tile.hookless { cursor:default; opacity:.6; filter:grayscale(1); border-style:dashed; }
+  .tile.hookless .dot { background:var(--text-3); }
+  .tile.hookless .meta { white-space:normal; }
   .tile.sel { outline:2px solid var(--accent); outline-offset:1px; }
   /* 2026-09-17: a quiet card read as faded-out when it was in fact waiting for Adam.
      Only a genuinely idle card fades now (tileHtml's staleDim), and more gently. */
@@ -17483,6 +17492,7 @@ local HTML = [[
     <button id="mylist-btn" onclick="toggleWorklist()">📋 My List</button>
   </div>
   <div id="grid"></div>
+  <div id="hookless"></div>
   <div id="empty">Waiting for Claude Code sessions...<br>Start a session in any project.</div>
   <div id="worklist">
     <div id="wl-scopes"></div>
@@ -26742,7 +26752,9 @@ local HTML = [[
       var empty = document.getElementById("empty");
       renderGroupChips();  // refresh the group filter row from the latest data
       if(lastItems.length === 0){
-        grid.innerHTML = ""; lastGridSig = null; empty.innerHTML = EMPTY_WAITING; empty.style.display = "block";
+        // 2026-10-03 (F1): grey cards below mean there ARE sessions -- "Waiting for sessions" steps aside
+        grid.innerHTML = ""; lastGridSig = null; empty.innerHTML = EMPTY_WAITING;
+        empty.style.display = HOOKLESS_N > 0 ? "none" : "block";
         CARD_KEYS = {}; renderBulkBar([]); updateSearchCount(0, 0); return;
       }
       var matched = visibleItems();
@@ -26787,6 +26799,32 @@ local HTML = [[
         if(span.textContent !== age){ span.textContent = age; }
       }
     }
+    // 2026-10-03 (F1): grey cards -- a live session Shepherd's hooks never reported (it started before
+    // they were installed, or runs with hooks off), from Claude Code's own ~/.claude/sessions file
+    // (FX.stepHookless). Their own row under the grid, never in lastItems: no card count, filter, bulk
+    // action, selection or keyboard target can reach one, and with no data-key no tile handler acts on
+    // one. Display only; every field comes from a file on disk, so all of it goes through esc().
+    var HOOKLESS_N = 0, HOOKLESS_SIG = null;
+    function hooklessCardHtml(h){
+      h = h || {};
+      var state = /^(busy|idle|waiting)$/.test(h.state) ? h.state.charAt(0).toUpperCase() + h.state.slice(1) : "Unknown";
+      var tip = "pid " + (h.pid || "?") + (h.cwd ? " · " + h.cwd : "") + (h.version ? " · Claude Code " + h.version : "")
+        + " · Shepherd only reads Claude Code's session file for this one: no live status, and nothing is typed into it";
+      return '<div class="tile hookless" title="' + esc(tip) + '">'
+           + '<span class="name">' + esc(h.project || "unknown folder") + '</span>'
+           + '<span class="srow"><span class="dot"></span><span class="label">' + esc(state) + '</span></span>'
+           + '<span class="meta">' + esc(h.hint || "") + '</span>'
+           + '</div>';
+    }
+    window.ccHookless = function(list){
+      list = Array.isArray(list) ? list : [];
+      HOOKLESS_N = list.length;
+      var html = list.map(hooklessCardHtml).join("");
+      var box = document.getElementById("hookless");
+      if(box && html !== HOOKLESS_SIG){ box.innerHTML = html; HOOKLESS_SIG = html; }
+      var empty = document.getElementById("empty");
+      if(empty && lastItems.length === 0) empty.style.display = HOOKLESS_N > 0 ? "none" : "block";
+    };
 
     function esc(s){
       return String(s == null ? "" : s)
@@ -27079,6 +27117,31 @@ end)
 -- focused) so ⌘V works immediately without a focus toggle.
 if panelHasFocus then pcall(function() M.pasteTap:start() end) end
 
+-- ---- Grey cards: live sessions with no status file (2026-10-03, mining round 2 F1) ----------
+-- A live interactive session in ~/.claude/sessions/<pid>.json that no status file names (it started
+-- before Shepherd's hooks were installed, or runs with hooks off). Built right after the status
+-- files are parsed (refreshList) and kept HERE, on FX.hookless -- never in the tick's `list`, byKey
+-- or lastRenderList, so no keystroke sender, needs-you stamp, empty-chats / unnamed-tabs verdict,
+-- restart snapshot, Instances view or card count can see one. The panel push is its only reader.
+-- Cost: the session files are a handful of small reads a tick; ps is asked (FX.probeAlive, cached
+-- ALIVE_TTL) only while an unmatched pid exists.
+FX.hookless = {}        -- the cards (core.hooklessSessions): display data only
+FX._hooklessSeen = {}   -- pid -> when it was first seen with no status file (core.HOOKLESS_GRACE)
+function FX.hooklessJson()
+  return (#FX.hookless == 0) and "[]" or hs.json.encode(FX.hookless)
+end
+function FX.stepHookless(raw)
+  local reg = FX.readSessions()
+  local pids = core.hooklessPids(reg, raw)
+  local alive = (next(pids) ~= nil) and FX.probeAlive(pids) or {}
+  local cards, seen = core.hooklessSessions(reg, raw, alive, FX.now(), FX._hooklessSeen)
+  FX._hooklessSeen = seen
+  if #cards ~= #FX.hookless then
+    print("[cc-dashboard] ◌ " .. #cards .. " live session(s) without Shepherd's hooks, shown as grey cards")
+  end
+  FX.hookless = cards
+end
+
 -- Read the status dir, parse via cc-core, refresh byKey, return the sorted list.
 function refreshList()
   local entries = {}
@@ -27090,6 +27153,8 @@ function refreshList()
     end
   end
   local raw = core.parseStatusList(entries, FX.now(), STALE_SECONDS)
+  local okHookless, errHookless = pcall(FX.stepHookless, raw)   -- grey cards (F1): kept off `list`
+  if not okHookless then print("[cc-dashboard] ❌ grey cards step failed: " .. tostring(errHookless)) end
   -- Prune orphans: stale tiles with no session_id, or any tile older than the
   -- configured ghost backstop. (SessionEnd can't clean these; staleness only dims them.)
   -- Also prune /clear "ghosts": a stale tile whose project has a fresher live tile.
@@ -28679,6 +28744,8 @@ function FX._refreshBody()
     table.sort(bundleNames)
     local bundleJson = hs.json.encode(bundleNames)
     wv:evaluateJavaScript("window.ccUpdate(" .. payload .. ", " .. provJson .. ", " .. bundleJson .. ")")
+    -- 2026-10-03 (F1): the grey cards ride alone, after the session cards -- never in shownList
+    pcall(function() wv:evaluateJavaScript("window.ccHookless(" .. FX.hooklessJson() .. ")") end)
     -- Badge the count so a hidden session is always discoverable. This is the
     -- safety valve for hiding one that later blocks on approval: it stays hidden
     -- as asked, but the fleet never silently loses a session you can't find.

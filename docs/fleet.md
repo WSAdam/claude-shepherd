@@ -135,6 +135,29 @@ workflow ([Merging and batches](merging-and-batches.md)).
 - `stacks.enabled: false` in `~/.claude/cc-config.json` switches back to one card per session. The
   Stream Deck stays one key per session.
 
+### Grey cards
+
+A session Shepherd's hooks never reported has no status file, so it can't have a live card. That
+happens when the session started before the hooks were installed, or when it runs with hooks off.
+Claude Code still lists every running session in `~/.claude/sessions/<pid>.json`. Shepherd shows each
+one it can't otherwise see as a **grey card** in its own row under the grid.
+
+- **Which sessions.** An interactive session whose process is still alive, and which no status file
+  covers. That rules out background jobs and daemons (Claude Code's `kind`), and headless `claude -p`
+  or Agent SDK runs (an `sdk-*` entrypoint), Shepherd's own included. Shepherd matches a status
+  file by its process id, so a `/clear` doesn't confuse it. A terminal or Kitty session's status file
+  records no process id, so it is matched by session id. A session must go 15 seconds without a status
+  file before its card appears, so a brand-new session never flashes grey before its first hook runs.
+- **What the card says.** The folder (a worktree reads `repo · slug`), Claude Code's own busy/idle,
+  and *started before Shepherd's hooks: restart it to get live status*. Hover it for the folder path,
+  process id and Claude Code version.
+- **What it never does.** A grey card is display only. Shepherd never types into that session, and
+  never counts it: not as needing you, not in a project card's instances or counts, not among the
+  empty chats or unnamed tabs it may close, and not in the restart snapshot. It has no menu and
+  nothing to click.
+- **To get a live card,** restart the session. Its hooks run from the next start, and the grey card
+  gives way to a normal one.
+
 ### Clearing finished sessions
 
 Every Instances row has a checkbox. **Select finished** checks the sessions whose merge landed and

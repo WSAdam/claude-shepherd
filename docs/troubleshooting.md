@@ -120,6 +120,8 @@ also for a policy that allowed it: the Decisions tab and the audit ledger record
   because the hooks rewrite it (use **Hide tile** for that).
 - **A tile never appears.** Check that the hooks are wired (Diagnostics), then capture what your
   Claude Code version sends ([Development → Confirm your hook payloads](development.md#confirm-your-hook-payloads)).
+  A session that started before the hooks were installed shows as a [grey card](fleet.md#grey-cards)
+  instead. Restart it to get its live card.
 
 ## A card flags a scheduled-tasks lock
 

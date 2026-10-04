@@ -551,6 +551,9 @@ echo ""
 echo "== node: My List Run selected -- ▶ Run… picks nothing preselected, Run selected sends the tab and ids in tab order, the run bar, ✓ by run, escaped (real browser) =="
 node "$DIR/worklist-runner.browser.test.js" || fail=1
 echo ""
+echo "== node: grey cards -- a live session with no status file drawn grey in its own row under the grid, busy/idle and why, no data-key, every field escaped (behavioral, runs the shipped hooklessCardHtml / ccHookless) =="
+node "$DIR/hookless-card.test.js" || fail=1
+echo ""
 
 if [ "$fail" -eq 0 ]; then
   echo "✅ ALL GREEN"

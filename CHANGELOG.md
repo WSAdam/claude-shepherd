@@ -9,6 +9,13 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
 The second feature-mining round (Maestro, Gas Town, ECC, oh-my-claudecode, OpenRig), built as
 parallel units. Each unit adds its line here.
 
+- Grey cards: a live interactive session in `~/.claude/sessions/<pid>.json` that no status file covers
+  (started before Shepherd's hooks, or with hooks off) gets a grey card in its own row under the grid,
+  with its folder, Claude Code's busy/idle and "restart it to get live status" (never an `sdk-*` headless
+  run, Shepherd's own `claude -p` included). It's matched by pid, or
+  by session id for a terminal status file that records no pid, and must stay alive (`FX.probeAlive`) and
+  unmatched for 15s first. Built in `refreshList` (`FX.stepHookless`, `core.hooklessSessions`) and kept on
+  `FX.hookless`, never in the tick's list, so no sender, needs-you, close verdict, restart snapshot or count sees one.
 - Run selected in My List: **▶ Run…** on a project tab picks open items (nothing preselected) and
   **Run selected** works through them one at a time, each in a fresh tab in the repo's main checkout,
   opened through the expect-tag machinery with its brief typed in (Adam sends it; no keystroke). A file

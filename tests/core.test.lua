@@ -8481,7 +8481,9 @@ do
   -- 2026-10-03: 53 -> 54 for the main moved notice ("mainmoved", flagged new).
   -- 2026-10-03: 54 -> 55 for the scheduled main-green check ("maingreen", flagged new).
   -- 2026-10-03: 55 -> 56 for Run selected in My List ("runner", flagged new).
-  eq("FEATURES: the 56 new features are flagged", newCount, 56)
+  -- 2026-10-03: 56 -> 57 for grey cards, live sessions with no status file ("hookless", flagged new).
+  eq("FEATURES: the 57 new features are flagged", newCount, 57)
+  check("FEATURES: lists the grey cards", keys.hookless == true)
   check("FEATURES: lists the main moved notice", keys.mainmoved == true)
   check("FEATURES: lists the main-green check", keys.maingreen == true)
   check("FEATURES: lists the coach across repos", keys.coachglobal == true)
@@ -15400,6 +15402,118 @@ do
   local fk = {}; for _, ft in ipairs(core.FEATURES) do fk[ft.key] = ft end
   check("runner: FEATURES lists Run selected, flagged new", fk.runner ~= nil and fk.runner.new == true
         and fk.runner.title == "Run selected")
+end
+
+-- ---- Grey cards: live sessions Shepherd has no status file for (2026-10-03, mining round 2 F1) ----
+do
+  -- ~/.claude/sessions/<pid>.json as FX.readSessions returns it (keyed by the file's pid), in the
+  -- shape Claude Code 2.1.286 writes: kind is one of interactive|bg|daemon|daemon-worker, status
+  -- one of busy|shell|idle|waiting, startedAt in milliseconds.
+  local function entry(pid, sid, cwd, kind, status)
+    return { pid = tonumber(pid), sessionId = sid, cwd = cwd, kind = kind, status = status,
+             startedAt = 1790000000000, version = "2.1.286", entrypoint = "claude-vscode",
+             name = "peer-" .. pid }
+  end
+  local reg = {
+    ["101"] = entry("101", "s-hooked", "/r/A", "interactive", "busy"),
+    ["202"] = entry("202", "s-old", "/r/B", "interactive", "idle"),
+    ["303"] = entry("303", "s-bg", "/r/C", "bg", "busy"),
+    ["404"] = entry("404", "s-dead", "/r/D", "interactive", "idle"),
+    ["505"] = entry("505", "s-term", "/r/E", "interactive", "busy"),
+    ["606"] = entry("606", "s-before-clear", "/r/F", "interactive", "idle"),
+    ["707"] = entry("707", "s-nokind", "/r/G", nil, "idle"),
+    ["808"] = entry("808", "s-daemon", "/r/H", "daemon", "busy"),
+  }
+  -- status files as core.parseStatusList returns them
+  local items = {
+    { key = "s-hooked", session_id = "s-hooked", session_pid = "101", name = "A", status = "working" },
+    -- 2026-10-03: a terminal or Kitty session's status file carries no session_pid (cc_window_pair only
+    -- walks to an editor-launched claude), so pid-only matching read every hooked terminal as hookless
+    { key = "s-term", session_id = "s-term", name = "E", status = "idle" },
+    -- a /clear minted a new session id in the same process: the pid still matches
+    { key = "s-after-clear", session_id = "s-after-clear", session_pid = "606", name = "F", status = "idle" },
+  }
+  local alive = { ["202"] = true, ["303"] = true, ["404"] = false, ["707"] = true, ["808"] = true }
+  local now = 1790000500
+  eq("hookless: the GRACE is a few seconds, not a tick", core.HOOKLESS_GRACE >= 5 and core.HOOKLESS_GRACE <= 60, true)
+
+  local pids = core.hooklessPids(reg, items)
+  check("hookless: only unmatched interactive pids are probed", pids["202"] == true and pids["404"] == true
+        and pids["101"] == nil and pids["505"] == nil and pids["606"] == nil)
+  check("hookless: ...never a bg/daemon entry or one with no kind", pids["303"] == nil and pids["808"] == nil and pids["707"] == nil)
+  -- 2026-10-03: Claude Code writes kind = $CLAUDE_CODE_SESSION_KIND or "interactive", so a headless
+  -- `claude -p` (Shepherd's own coach, checker and Seance runs, hooks off) could read as interactive;
+  -- its entrypoint (sdk-cli, like an Agent SDK app's sdk-ts / sdk-py) says it is no tab or terminal
+  local sdk = entry("909", "s-print", "/r/I", "interactive", "busy"); sdk.entrypoint = "sdk-cli"
+  local cli = entry("910", "s-cli", "/r/J", "interactive", "busy"); cli.entrypoint = "cli"
+  local sdkPids = core.hooklessPids({ ["909"] = sdk, ["910"] = cli }, {})
+  check("hookless: a headless claude -p (entrypoint sdk-*) is never a grey card, a terminal (cli) is",
+        sdkPids["909"] == nil and sdkPids["910"] == true)
+
+  -- first sight starts the grace: nothing yet
+  local cards, seen = core.hooklessSessions(reg, items, alive, now, {})
+  eq("hookless: nothing on first sight (a session's first hook may not have run yet)", #cards, 0)
+  eq("hookless: ...but the pid's first sight is kept", seen["202"], now)
+  eq("hookless: a dead pid is forgotten", seen["404"], nil)
+  cards, seen = core.hooklessSessions(reg, items, alive, now + core.HOOKLESS_GRACE, seen)
+  eq("hookless: after the grace, one card", #cards, 1)
+  local c = cards[1] or {}
+  eq("hookless: matched by pid -- the unhooked live session", c.pid, "202")
+  eq("hookless: the card shows the registry's busy/idle", c.state, "idle")
+  eq("hookless: ...the cwd's project name", c.project, "B")
+  eq("hookless: ...and why it is grey", c.hint, "started before Shepherd's hooks: restart it to get live status")
+  eq("hookless: the folder rides along for the tooltip", c.cwd, "/r/B")
+  -- the card is never a session tile: nothing that acts on a tile can recognise it as one
+  check("hookless: the card carries no tile fields (key, status, session_pid, host_window, editor)",
+        c.key == nil and c.status == nil and c.session_pid == nil and c.host_window == nil and c.editor == nil)
+
+  -- matching
+  local onlyPid = { { key = "other-id", session_id = "other-id", session_pid = "202", name = "B" } }
+  local c2 = core.hooklessSessions(reg, onlyPid, alive, now + 999, { ["202"] = now })
+  check("hookless: a status file with the same pid covers it, whatever its session id",
+        #c2 == 0 or (function() for _, x in ipairs(c2) do if x.pid == "202" then return false end end return true end)())
+  local remoteOnly = { { key = "h1::s-old", session_id = "s-old", remote = true, session_pid = "202", name = "B" } }
+  local c3 = core.hooklessSessions({ ["202"] = reg["202"] }, remoteOnly, alive, now + 999, { ["202"] = now })
+  eq("hookless: a remote tile's pid is another host's, never a match", #c3, 1)
+  -- alive
+  local c4 = core.hooklessSessions({ ["202"] = reg["202"] }, {}, {}, now + 999, { ["202"] = now })
+  eq("hookless: liveness unknown -> no card", #c4, 0)
+  local _, s4 = core.hooklessSessions({ ["202"] = reg["202"] }, {}, {}, now + 999, { ["202"] = now })
+  eq("hookless: ...but its first sight is kept (a ps hiccup doesn't restart the grace)", s4["202"], now)
+  local c5 = core.hooklessSessions({ ["202"] = reg["202"] }, {}, { ["202"] = false }, now + 999, { ["202"] = now })
+  eq("hookless: a dead pid -> no card", #c5, 0)
+  -- a status file appearing ends it
+  local _, s6 = core.hooklessSessions({ ["202"] = reg["202"] },
+    { { key = "s-old", session_id = "s-old", session_pid = "202", name = "B" } }, alive, now + 999, { ["202"] = now })
+  eq("hookless: once hooks write its status file, the pid is forgotten", s6["202"], nil)
+
+  -- states, projects, junk
+  local function one(e, a)
+    local r = core.hooklessSessions({ ["9"] = e }, {}, { ["9"] = a ~= false }, now + 999, { ["9"] = now })
+    return r[1]
+  end
+  eq("hookless: shell reads as busy", (one(entry("9", "x", "/r/X", "interactive", "shell")) or {}).state, "busy")
+  eq("hookless: waiting stays waiting", (one(entry("9", "x", "/r/X", "interactive", "waiting")) or {}).state, "waiting")
+  eq("hookless: an unknown status reads unknown, never raw", (one(entry("9", "x", "/r/X", "interactive", "<b>")) or {}).state, "unknown")
+  eq("hookless: a worktree reads as repo · slug",
+     (one(entry("9", "x", "/Users/a/repo/.claude/worktrees/feat-x", "interactive", "idle")) or {}).project, "repo · feat-x")
+  eq("hookless: a trailing slash doesn't empty the name", (one(entry("9", "x", "/r/Y/", "interactive", "idle")) or {}).project, "Y")
+  eq("hookless: no cwd -> a plain word", (one(entry("9", "x", nil, "interactive", "idle")) or {}).project, "unknown folder")
+  local bad = core.hooklessSessions({ ["9"] = "junk", ["x"] = entry("1", "y", "/r/Z", "interactive", "idle") },
+    { "junk", { key = "k" } }, { ["9"] = true, ["x"] = true }, now + 999, { ["9"] = now, ["x"] = now })
+  eq("hookless: junk entries and non-pid keys are skipped", #bad, 0)
+  local nilAll = core.hooklessSessions(nil, nil, nil, now, nil)
+  eq("hookless: nothing at all -> nothing", #nilAll, 0)
+  -- order: by project, then pid, so the row doesn't reshuffle every tick
+  local many = core.hooklessSessions({ ["30"] = entry("30", "a", "/r/b", "interactive", "idle"),
+    ["4"] = entry("4", "b", "/r/a", "interactive", "idle"), ["12"] = entry("12", "c", "/r/b", "interactive", "busy") },
+    {}, { ["30"] = true, ["4"] = true, ["12"] = true }, now + 999, { ["30"] = now, ["4"] = now, ["12"] = now })
+  eq("hookless: sorted by project then pid",
+     tostring((many[1] or {}).pid) .. "," .. tostring((many[2] or {}).pid) .. "," .. tostring((many[3] or {}).pid), "4,12,30")
+
+  local fk = {}; for _, ft in ipairs(core.FEATURES) do fk[ft.key] = ft end
+  check("hookless: FEATURES lists the grey cards, flagged new", fk.hookless ~= nil and fk.hookless.new == true
+        and fk.hookless.title == "Grey cards")
 end
 
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))

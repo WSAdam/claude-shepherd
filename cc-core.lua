@@ -1676,6 +1676,90 @@ function M.parseAlivePids(out)
   return seen
 end
 
+-- ---- Grey cards: live sessions with no status file (2026-10-03, mining round 2 F1) --------------
+-- A session started before Shepherd's hooks were installed (or with hooks off) writes no status
+-- file, so it had no card at all. Claude Code's own registry (~/.claude/sessions/<pid>.json, as
+-- FX.readSessions returns it: pid -> entry) still lists it. A registry entry is covered when a
+-- local status file carries its pid (the primary match: a /clear keeps the process and mints a new
+-- id), or, for a status file with no pid -- a terminal or Kitty session, which cc_window_pair never
+-- records one for -- its session id (Claude Code rewrites the entry's sessionId when it changes).
+-- Only kind "interactive": Claude Code's schema requires kind (interactive|bg|daemon|daemon-worker)
+-- and counts only "interactive" as a session; an entry without one is not a session it knows.
+-- That kind is $CLAUDE_CODE_SESSION_KIND or "interactive", so a headless `claude -p` (Shepherd's own
+-- coach, checker and Seance runs, hooks off) is told apart by its entrypoint: sdk-cli, like an
+-- Agent SDK app's sdk-ts / sdk-py, is no tab or terminal and never gets a card.
+-- A pid must go unmatched for HOOKLESS_GRACE seconds first, so a session whose first hook hasn't
+-- run yet (or a /clear between its SessionEnd and SessionStart) never flashes a grey card.
+M.HOOKLESS_GRACE = 15
+M.HOOKLESS_HINT = "started before Shepherd's hooks: restart it to get live status"
+M.HOOKLESS_STATES = { busy = "busy", shell = "busy", idle = "idle", waiting = "waiting" }
+
+-- The pids that need the liveness probe: live-looking interactive entries no status file covers.
+function M.hooklessPids(registry, statusItems)
+  local byPid, byId = {}, {}
+  for _, it in ipairs(type(statusItems) == "table" and statusItems or {}) do
+    if type(it) == "table" and not it.remote then
+      local p = tostring(it.session_pid or ""):match("^%d+$")
+      if p then byPid[tostring(tonumber(p))] = true end
+      for _, id in ipairs({ it.session_id, it.key }) do
+        if type(id) == "string" and id ~= "" then byId[id] = true end
+      end
+    end
+  end
+  local out = {}
+  for pid, e in pairs(type(registry) == "table" and registry or {}) do
+    local d = tostring(pid):match("^%d+$")
+    if d and type(e) == "table" and e.kind == "interactive"
+       and not (type(e.entrypoint) == "string" and e.entrypoint:find("^sdk%-"))
+       and not byPid[tostring(tonumber(d))]
+       and not (type(e.sessionId) == "string" and byId[e.sessionId]) then
+      out[d] = true
+    end
+  end
+  return out
+end
+
+-- The folder a card names: a worktree under .claude/worktrees/ reads "repo · slug".
+function M.hooklessProject(cwd)
+  if type(cwd) ~= "string" or cwd == "" then return "unknown folder" end
+  local dir = cwd:gsub("/+$", "")
+  local repo, slug = dir:match("^(.*)/%.claude/worktrees/([^/]+)$")
+  if repo and slug then return (repo:match("([^/]+)$") or repo) .. " · " .. slug end
+  return dir:match("([^/]+)$") or "unknown folder"
+end
+
+-- registry: FX.readSessions(); statusItems: core.parseStatusList's list; alive: FX.probeAlive's
+-- answer (pid -> true/false; nil = unknown); seen: pid -> when it was first seen unmatched (the
+-- previous call's second result). Returns the cards (sorted by project, then pid) and the new seen.
+-- A card is display data only -- no key, status, session_pid, host_window or editor -- so nothing
+-- that acts on a session tile can take it for one.
+function M.hooklessSessions(registry, statusItems, alive, now, seen)
+  alive, seen, now = type(alive) == "table" and alive or {}, type(seen) == "table" and seen or {}, tonumber(now) or 0
+  local cards, nextSeen = {}, {}
+  for pid in pairs(M.hooklessPids(registry, statusItems)) do
+    if alive[pid] ~= false then
+      local first = tonumber(seen[pid]) or now
+      nextSeen[pid] = first
+      if alive[pid] == true and now - first >= M.HOOKLESS_GRACE then
+        local e = registry[pid]
+        cards[#cards + 1] = {
+          pid = pid,
+          project = M.hooklessProject(e.cwd),
+          cwd = type(e.cwd) == "string" and e.cwd or nil,
+          state = M.HOOKLESS_STATES[e.status] or "unknown",
+          version = type(e.version) == "string" and e.version or nil,
+          hint = M.HOOKLESS_HINT,
+        }
+      end
+    end
+  end
+  table.sort(cards, function(a, b)
+    if a.project ~= b.project then return a.project < b.project end
+    return tonumber(a.pid) < tonumber(b.pid)
+  end)
+  return cards, nextSeen
+end
+
 function M.instanceTier(it, seenAt, now)
   local st = it and it.status
   -- 2026-09-17: all five needs-you sources (a held question, a merge, a batch proposal, an
@@ -24427,6 +24511,9 @@ M.FEATURES = {
   { key = "stacks", cat = "Core", new = true, title = "Project cards & instances",
     what = "A repo's main checkout and its worktrees — or two sessions in one folder — share one card that shows whichever instance needs you. The corner button lists every instance, and the worktrees with no session so you can open one — or start a New worktree tab: a Claude tab in the repo's window with the prompt to enter its own worktree typed in.",
     why = "Parallel units of work on one project read as one project, and a double-click always lands on the instance that's waiting." },
+  { key = "hookless", cat = "Core", new = true, title = "Grey cards",
+    what = "A live Claude Code session that Shepherd's hooks never reported, because it started before they were installed or runs with hooks off, gets a grey card in its own row under the grid. The card shows its folder, Claude Code's own busy/idle and \"started before Shepherd's hooks: restart it to get live status\". Shepherd finds these sessions in ~/.claude/sessions and never types into one, counts it or acts on it.",
+    why = "A session the panel can't see is easy to forget; now you know it's there and what it takes to bring it onto a live card." },
 
   -- ---- Control ----
   { key = "gate", cat = "Control", title = "Headless approvals",

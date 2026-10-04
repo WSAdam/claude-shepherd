@@ -5308,5 +5308,65 @@ do
         block:find("FX.playbookTodoRoots(key, st)[1]", 1, true) ~= nil)
 end
 
+-- ---- Grey cards: a live session with no status file is shown, never acted on (2026-10-03, mining round 2 F1) ----
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  local rl = src:match("\nfunction refreshList%(%).-\nend\n") or ""
+  check("grey cards: refreshList is found", rl ~= "")
+  local parsed = rl:find("core.parseStatusList(entries, FX.now(), STALE_SECONDS)", 1, true) or math.huge
+  local step = rl:find("pcall(FX.stepHookless, raw)", 1, true) or 0
+  check("grey cards: built in refreshList right after the status files are parsed", parsed < step
+        and not rl:sub(parsed, step):find("\n  [^\n]*\n  [^\n]*\n", 1))
+  local block = src:match("\n%-%- %-%-%-%- Grey cards.-\nfunction FX%.stepHookless%(raw%).-\nend\n") or ""
+  check("grey cards: the FX step is found", block ~= "")
+  check("grey cards: the pure parts are core's", block:find("core.hooklessPids(reg, raw)", 1, true) ~= nil
+        and block:find("core.hooklessSessions(reg, raw, alive, FX.now(), FX._hooklessSeen)", 1, true) ~= nil)
+  check("grey cards: alive per FX.probeAlive, asked only about the unmatched pids",
+        block:find("FX.probeAlive(pids)", 1, true) ~= nil)
+  -- Kept out of every list a session is acted on from: the cards live on FX.hookless alone and are
+  -- read only by the panel push. needsYou (FX.annotateNeedsYou), the keystroke senders (FX.targetFor),
+  -- the empty-chats / unnamed-tabs verdicts, the restart snapshot, the Instances view and every
+  -- project card count read `list` / lastRenderList / FX._shownItems, which never get one.
+  local rest = src
+  do
+    local i, j = rest:find(block, 1, true)
+    if block ~= "" and i then rest = rest:sub(1, i - 1) .. rest:sub(j + 1) end
+  end
+  local readers, pushes = {}, {}
+  for line in rest:gmatch("[^\n]+") do
+    if not line:match("^%s*%-%-") and not line:match("^%s*//") then
+      if line:find("FX%.hookless%f[^%w_]") or line:find("FX._hooklessSeen", 1, true) then readers[#readers + 1] = line end
+      if line:find("FX.hooklessJson(", 1, true) then pushes[#pushes + 1] = line end
+    end
+  end
+  check("grey cards: FX.hookless is written and read only in its own block (" .. #readers .. " lines outside)",
+        block ~= "" and #readers == 0 and block:find("FX.hookless = cards", 1, true) ~= nil)
+  check("grey cards: ...and leaves it only through the panel push (" .. #pushes .. ")", #pushes == 1
+        and pushes[1]:find('wv:evaluateJavaScript("window.ccHookless(" .. FX.hooklessJson() .. ")")', 1, true) ~= nil)
+  check("grey cards: never appended to the tick's list or byKey",
+        not rl:find("hookless[^\n]*list%[") and not rl:find("byKey%[[^\n]*hookless"))
+  for _, fn in ipairs({ "FX.annotateNeedsYou", "FX.targetFor", "FX.annotateEmptyChats", "FX.closeEmptyChats",
+                        "FX.closeSessions", "FX.stepRestartSnapshot", "FX.pushInstances", "FX.annotateStacks",
+                        "FX.annotateCleanup" }) do
+    local body = src:match("\nfunction " .. fn:gsub("%.", "%%.") .. "%(.-\nend\n") or ""
+    check("grey cards: " .. fn .. " never sees one", body ~= "" and not body:find("hookless", 1, true))
+  end
+  check("grey cards: the verdicts' core functions never see one",
+        not (src:match("\nfunction M%.emptyChatsVerdict.-\nend\n") or ""):find("hookless", 1, true))
+  -- the panel: their own row under the grid, never in lastItems (foldCards, filters, counts, bulk bar)
+  check("grey cards: their own row right under the grid", src:find('<div id="grid"></div>\n  <div id="hookless"></div>', 1, true) ~= nil)
+  local js = src:match("\n    window%.ccHookless = function%(list%)%{.-\n    %};\n") or ""
+  check("grey cards: window.ccHookless is found", js ~= "")
+  check("grey cards: ...never touches lastItems or the card keys",
+        js ~= "" and not js:find("lastItems%s*=") and not js:find("lastItems.push", 1, true) and not js:find("CARD_KEYS", 1, true))
+  local card = src:match("\n    function hooklessCardHtml%(h%)%{.-\n    %}\n") or ""
+  check("grey cards: every field goes through esc()", card:find("esc(h.project", 1, true) ~= nil
+        and card:find("esc(h.hint", 1, true) ~= nil and card:find("esc(tip)", 1, true) ~= nil)
+  check("grey cards: no data-key, so no tile handler can act on one", card ~= "" and not card:find("data-key", 1, true))
+  check("grey cards: the empty-grid message steps aside for them", src:find('empty.style.display = HOOKLESS_N > 0 ? "none" : "block";', 1, true) ~= nil)
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)
