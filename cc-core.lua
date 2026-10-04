@@ -3841,12 +3841,27 @@ local CHECKER_SKIP_PATTERNS = {
   "%f[%w_]fdescribe%s*%(",
   "@pytest%.mark%.skip", "@unittest%.skip", "%f[%w_]t%.Skip%(", "#%[ignore%]", "@Disabled", "ignore:%s*true",
 }
+-- A TODO/FIXME comment: the word straight after a comment opener (// # -- /* *) that starts the
+-- line or follows a space or another opener. 2026-10-04: the opener's own "/" in a path or route
+-- (`root .. "/TODO.md"`, "/todo", "./todo/add") read as one, so a file name or folder after the
+-- word (".md", "/") doesn't count either.
+local function checkerCommentWord(l, word)
+  local padded, from = " " .. l, 1
+  while true do
+    local s, e = padded:find("[%s%-/#%*!<][%-/#%*]%s*" .. word .. "%f[^%w_]", from)
+    if not s then return false end
+    local after = padded:sub(e + 1, e + 2)
+    if after:sub(1, 1) ~= "/" and not after:find("^%.[%w_]") then return true end
+    from = s + 1
+  end
+end
+
 -- A stub: "not implemented" in any spelling, Rust's placeholders, or a TODO/FIXME comment.
 local function checkerStubLine(content)
   local l = content:lower()
   if l:find("not implemented", 1, true) or l:find("notimplemented", 1, true)
      or l:find("unimplemented!", 1, true) or l:find("todo!(", 1, true) then return true end
-  return l:find("[%-/#%*]%s*todo%f[^%w_]") ~= nil or l:find("[%-/#%*]%s*fixme%f[^%w_]") ~= nil
+  return checkerCommentWord(l, "todo") or checkerCommentWord(l, "fixme")
 end
 
 -- The path in a "diff --git a/<p> b/<p>" line. The two halves are equal unless it's a rename, so

@@ -434,6 +434,10 @@ assert_eq "red flags: paths with spaces and renames; conflict markers and hunk h
      "skipOnly tests/b.test.js 1" "skipOnly tests/my cart.test.js 2" "stub src/attestation.go 1")" \
   "$(kinds "$RFX/paths-and-markers.diff")"
 assert_eq "red flags: an ordinary change has none" "" "$(kinds "$RFX/clean.diff")"
+# 2026-10-04: the checklist runner's `root .. "/TODO.md"` was sent back as a stub -- the comment
+# rule took the path's "/" for a comment opener. A path, a route or a file name isn't a comment.
+assert_eq "red flags: a TODO.md path, a /todo route or ./todo/ import isn't a stub; a TODO or FIXME comment still is" \
+  "stub src/runner.lua 2" "$(kinds "$RFX/todo-paths.diff")"
 assert_eq "red flags: a diff cut mid-line is still read to its torn end" "skipOnly tests/zeta.test.js 1" "$(kinds "$RFX/torn.diff")"
 assert_eq "red flags: samples are trimmed" 'xit("tabbed")' \
   "$(sh_flags "$RFX/paths-and-markers.diff" | awk -F "$US" '$2 == "tests/my cart.test.js" { print $5 }')"

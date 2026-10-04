@@ -1,0 +1,12 @@
+diff --git a/src/runner.lua b/src/runner.lua
+index 1111111..2222222 100644
+--- a/src/runner.lua
++++ b/src/runner.lua
+@@ -1,0 +2,7 @@ local M = {}
++  local run = { root = root, todoFile = root .. "/TODO.md" }
++  app.get("/todo", listItems)
++  local add = require("./todo/add")
++  local notes = io.open(dir .. "/todo.txt")
++  -- the items come from TODO.md, never from Adam's own list
++  -- TODO: retry a run that couldn't open its tab
++  -- FIXME: the pause banner overlaps the run bar

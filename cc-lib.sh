@@ -2538,7 +2538,10 @@ BEGIN {
   SKIP[4] = W "xdescribe" S "\\("; SKIP[5] = W "xtest" S "\\("; SKIP[6] = W "fdescribe" S "\\("
   SKIP[7] = "@pytest\\.mark\\.skip"; SKIP[8] = "@unittest\\.skip"; SKIP[9] = W "t\\.Skip\\("
   SKIP[10] = "#\\[ignore\\]"; SKIP[11] = "@Disabled"; SKIP[12] = "ignore:" S "true"; NSKIP = 12
-  STUB_TODO = "[-/#*]" S "todo([^A-Za-z0-9_]|$)"; STUB_FIXME = "[-/#*]" S "fixme([^A-Za-z0-9_]|$)"
+  # 2026-10-04: a comment opener starts the line or follows a space or another opener, and a file
+  # name or folder after the word (".md", "/") is no comment: root .. "/TODO.md" read as a stub
+  STUB_PRE = "(^|[[:space:]!<#*/-])[-/#*]" S; STUB_END = "([^A-Za-z0-9_./]|\\.([^A-Za-z0-9_]|$)|$)"
+  STUB_TODO = STUB_PRE "todo" STUB_END; STUB_FIXME = STUB_PRE "fixme" STUB_END
   cur = 0; header = 0; nf = 0
 }
 {

@@ -4,6 +4,15 @@ Notable changes to Claude Shepherd. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); this is a personal tool with no
 versioned releases, so entries are dated. Earlier history is in `git log`.
 
+## Unreleased — fixes after mining round 2
+
+- Fixed: the stub check (the fake-completion Stop guard and the merge checker's red flags) took a
+  path or route for a TODO comment, because a "/" counted as a comment opener: the checklist
+  runner's `root .. "/TODO.md"` was sent back as a stub. A comment opener now has to start the
+  line or follow a space or another opener, and a file name or folder after the word (`TODO.md`,
+  `todo/`) doesn't count; `// TODO`, `# TODO`, `-- FIXME` and `/* FIXME` still do
+  (`tests/fixtures/red-flags/todo-paths.diff`).
+
 ## Unreleased — mining round 2
 
 The second feature-mining round (Maestro, Gas Town, ECC, oh-my-claudecode, OpenRig), built as
