@@ -9506,6 +9506,9 @@ end
 -- primary argument is only the file, so one long file read in three chunks read as one call made
 -- three times. A whole-file Read carries none of them and is signed by its file alone, as before.
 local LOOP_PRIMARY = { "command", "file_path", "path", "pattern", "url", "query", "prompt" }
+-- 2026-10-04: a search (Grep, Glob) is signed by its WHOLE input too. Its primary argument was the
+-- path it searched, so three different searches of one folder read as one call made three times.
+M.LOOP_SEARCH_TOOLS = { Grep = true, Glob = true }
 M.LOOP_READ_CHUNK = { "offset", "limit", "pages" }
 -- A tool input as one string that is the same whenever the input is: keys in sorted order, a
 -- list in its own.
@@ -9525,7 +9528,7 @@ end
 function M.toolCallSig(name, input)
   local arg = ""
   if type(input) == "table" then
-    if M.EDIT_TOOLS[tostring(name or "")] then
+    if M.EDIT_TOOLS[tostring(name or "")] or M.LOOP_SEARCH_TOOLS[tostring(name or "")] then
       if next(input) ~= nil then arg = M.inputSig(input) end
     else
       for _, f in ipairs(LOOP_PRIMARY) do

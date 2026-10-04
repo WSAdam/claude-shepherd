@@ -374,7 +374,8 @@ All derived locally from the transcript Shepherd already reads, with no extra ho
 - **Loop watchdog** (off by default, `escalation.loop.enabled`): a ⟳ badge when a working session
   keeps repeating the same tool call (for example re-running a failing command). Different edits
   of one file are different calls, and so are different chunks of one file read one after
-  another; the same edit attempted again, or the same chunk read again, is a repeat. Detection only.
+  another and different searches (Grep, Glob) of one folder; the same edit attempted again, the
+  same chunk read again, or the same search run again, is a repeat. Detection only.
 - **Stuck-session watchdog** (off by default, `escalation.hung.enabled`): a session that stays `working` with no transcript
   growth for `escalation.hung.minutes` gets ⏳ and a purple ring
   ([Automation → Escalation](automation.md#escalation-and-watchdogs)).

@@ -32,6 +32,9 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
   `cc-status.sh` now pops it, in the background, only when the stop ends the turn (no guard,
   mailbox or notes block), and the Stop group's own `cc-popup.sh complete` stands down. No wiring
   change, so no `make setup` needed.
+- Fixed: the loop watchdog read three different Greps (or Globs) of one folder as one call made
+  three times: `core.toolCallSig` signed a search by its path alone. A search is now signed by its
+  whole input, like an edit; the same search run again is still a repeat.
 
 ## 2026-10-04 — Mining round 2
 

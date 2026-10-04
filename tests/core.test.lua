@@ -14285,6 +14285,29 @@ bug("loop signature of an edit", function()
   eq("...and a Read by its file", core.toolCallSig("Read", { file_path = "/a/b.lua" }), "Read\1/a/b.lua")
 end)
 
+-- Three different Greps (or Globs) under one path read as a loop
+bug("loop signature of a search", function()
+  -- 2026-10-04: core.toolCallSig took the first of command / file_path / path / pattern, so a Grep
+  -- or Glob that names a path was signed by the path alone: three different searches of one folder
+  -- were "the same call three times".
+  local function tu(name, input) return core.json.encode({ type = "assistant",
+    message = { content = { { type = "tool_use", name = name, input = input } } } }) end
+  local function looping(...) return core.isLooping(core.transcriptToolSigs(table.concat({ ... }, "\n"), 5), 3) end
+  local D = "/r/src"
+  eq("three different Greps under one path are not a loop",
+     looping(tu("Grep", { pattern = "toolCallSig", path = D }), tu("Grep", { pattern = "isLooping", path = D }),
+             tu("Grep", { pattern = "inputSig", path = D })), false)
+  eq("the same Grep three times is one",
+     looping(tu("Grep", { pattern = "toolCallSig", path = D }), tu("Grep", { pattern = "toolCallSig", path = D }),
+             tu("Grep", { pattern = "toolCallSig", path = D })), true)
+  eq("three different Globs under one path are not a loop",
+     looping(tu("Glob", { pattern = "*.lua", path = D }), tu("Glob", { pattern = "*.sh", path = D }),
+             tu("Glob", { pattern = "*.js", path = D })), false)
+  eq("...and the same search with another output mode is another search",
+     core.toolCallSig("Grep", { pattern = "x", path = D }) == core.toolCallSig("Grep", { pattern = "x", path = D, output_mode = "content" }), false)
+  eq("a Glob with nothing in it is still just its name", core.toolCallSig("Glob", {}), "Glob\1")
+end)
+
 -- A usage-limited card with a resume scheduled at the reset still ranks red "Needs you"
 bug("usage limit with a resume scheduled", function()
   -- 2026-09-30: core.needsYouKind kept every usage limit red ("he waits, or switches"), written
