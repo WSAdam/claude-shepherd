@@ -1,187 +1,280 @@
 # Context — Claude Shepherd
 
-Orientation for working in this repo: architecture, invariants, and workflow. Other docs:
-user-facing [README.md](README.md), dated history [CHANGELOG.md](CHANGELOG.md). Older planning notes
-(`todos.md`, `docs/orchestrator-next.md`, `docs/feature-mining/`) are in git history only (untracked 2026-09-17).
+Orientation for working on Shepherd's own code: what it is, how it is split, the invariants a change
+must keep, and the workflow. Read [CLAUDE.md](CLAUDE.md) first: it holds the traps that have bitten
+this repo, and this file points to it rather than repeating them. Other docs: the front page
+[README.md](README.md) (its feature tour), the reference pages under [docs/](docs/) (start with
+[docs/development.md](docs/development.md) and [docs/configuration.md](docs/configuration.md)), and
+the dated history in [CHANGELOG.md](CHANGELOG.md). Older planning notes (`todos.md`,
+`docs/orchestrator-next.md`, `docs/feature-mining/`, `docs/hardware-verification.md`) have been
+gitignored since 2026-09-17: a checkout may have local copies, and git history has the old ones.
 
 ## What it is
 
-A local, single-user macOS control panel for a fleet of Claude Code sessions (renamed from
-"babysitter"). A Hammerspoon webview dashboard surfaces every session's live status, lets you
-approve / stop / nudge them, and automates routine babysitting: task auto-feed, graceful
-drain, stale-approval escalation, opt-in auto-respawn, and a stuck-session watchdog. No
-network, no multi-user, no secrets — it reads session status off the local filesystem.
+A local, single-user macOS console for a fleet of Claude Code sessions (renamed from
+"babysitter"). It is Lua running inside Hammerspoon, with no process of its own. Claude Code hooks
+write each session's status to `~/.claude/cc-status/`; the panel turns that into one card per
+project, and lets Adam approve, deny, answer a held question, stop, nudge, jump to or close a
+session. It also runs Adam's parallel-worktree method end to end. What it automates, by area
+(the README's [feature tour](README.md#feature-tour) has the full list; `core.FEATURES` holds 89
+entries):
+
+- **Feeding work:** task queues with auto-feed and routing, routines (cron spawns, digests, the
+  main-green check), event rules, auto-continue with back-off, resume at a usage-limit reset,
+  auto-respawn with handoff notes, auto-compact with notes, task packets.
+- **Steering without keystrokes:** the session mailbox, `cc-send.sh`, cross-repo tickets, the
+  decisions inbox, AskUserQuestion answered on the card, the Stop guards, the hands-off hold and
+  ❄ Freeze.
+- **Safety:** the opt-in approval gate and policy bundles, always-ask commands, talk mode, the
+  worktree fence, one worktree per agent.
+- **Merging:** ready-to-merge requests, Shepherd-run test gates, the red-first proof, gate blame,
+  the merge checker, batches driven by a session with grant grading, the overlap radar, worktree
+  leases, the main-moved notice.
+- **Learning and looking back:** the coach (CLAUDE.md and memory edits, across repos too), the
+  audit ledger, History (every transcript, kept copies, Resume), Seance, the Time view, usage and
+  cost, commit stats, My List (TODO.md import, playbooks, Run selected).
+
+It is not offline. What reaches the network:
+
+- the plan-usage call to `api.anthropic.com/api/oauth/usage`, with the user's own Claude Code OAuth
+  token (read from the Keychain or `$CLAUDE_CODE_OAUTH_TOKEN`, never logged);
+- `gh` for PR status;
+- ntfy pushes (escalation, the fleet idle alert, main red, a compatibility failure, a usage-limit
+  resume), when a topic is set;
+- headless `claude -p` runs: Seance, the coach, the merge checker (`FX.runHeadless`, hooks off,
+  `CC_SHEPHERD_INTERNAL=1`, a dollar cap each);
+- the SSH status bridge and the leaderboard "Improve" claim, when configured.
+
+Single user, no server, no accounts. Records store env-var names, never secrets.
 
 ## Architecture — the load-bearing split
 
-- **[cc-core.lua](cc-core.lua) — pure logic, zero `hs.*`.** Every decision (status
-  parse/sort/staleness, action selection, spawn specs, ledger parse/cache/assembly +
-  fleet-insights aggregation, per-session risk, grouping/filtering, sparkline bucketing,
-  installed-MCP/skills/CLI-tools inventory, worklist CRUD) is a pure, deterministic
-  function unit-tested directly in plain `lua`. **New logic goes here.**
-- **[claude-dashboard.lua](claude-dashboard.lua) — Hammerspoon glue (~5,900 lines).** The
-  webview, the ~1s refresh loop, module-level state, and all side effects. Effects funnel
-  through one `fx` table (focus / keys / paste / file writes / spawn) so tests pass a
-  **recorder double** instead of acting. This file is NOT unit-tested directly — put logic in
-  cc-core, or smoke-test after `make install`.
-- **Panel JS** (embedded in claude-dashboard.lua as an HTML string) renders the grid
-  client-side. A few pure cc-core helpers are **hand-mirrored** in this JS for instant
-  interactivity (`filterTiles`, `applyGroups`, `fmtDuration`, `contextBand` → the JS
-  `barLevel`, and `resolveAppearance`/`appearanceCss` → the JS `applyAppearance` live-preview twin —
-  see the 2026-06-19 Appearance state); these twins must stay in sync — comments mark them. `BULK_RULES` is single-sourced (injected as
-  `__BULK_RULES__`) so the bulk-bar count can't drift from what Lua acts on; likewise the ⌨ hotkey
-  legend is injected as `__HOTKEY_LEGEND__`, built from the real `HOTKEY_*` bindings so the displayed
-  combos can't drift from what's bound — and those `HOTKEY_*` are themselves resolved from
-  `cc-config.json`'s `hotkeys` block via pure `core.resolveHotkeys` (read early via `readConfigEarly`,
-  before `loadConfig`/FX exist), so config → binds → legend are one source.
-- **Shell hooks** — [cc-status.sh](cc-status.sh) / [cc-approve.sh](cc-approve.sh) /
-  [cc-popup.sh](cc-popup.sh) + [cc-lib.sh](cc-lib.sh). Claude Code hooks write session status
-  JSON into `~/.claude/cc-status/`; the dashboard reads it.
+- **[cc-core.lua](cc-core.lua) — pure logic, zero `hs.*` (~26,600 lines).** Every decision is a
+  pure, deterministic function, unit-tested in plain `lua` ([tests/core.test.lua](tests/core.test.lua)
+  plus topic suites). Clock only through an injected `now`. **New logic goes here.**
+- **[claude-dashboard.lua](claude-dashboard.lua) — Hammerspoon glue (~30,000 lines).** The webview,
+  the ~1s refresh tick, module-level state, the background timers, and every side effect. Effects
+  go through the `FX` table (declared near the top, `local FX = {}`), so tests swap in
+  [tests/support/fx_recorder.lua](tests/support/fx_recorder.lua). The main chunk sits at Lua's
+  200-local cap: new state and functions hang on `FX` or go inside a `do … end` (CLAUDE.md).
+- **The glue is tested.** About 50 Lua suites load the real dashboard, or an `FX` block cut from it,
+  under a stubbed `hs`: `smoke`, `readiness`, `shared-window`, `fleet`, `merge-request`, `seance`,
+  `fleet-idle`, `maingreen`, `worklist-runner`, `past-sessions-wiring`, `keeper-copy` and more.
+  `tests/ui.test.lua` pins wiring at the source level.
+- **Panel HTML/CSS/JS** lives in one Lua long string, `local HTML = [[ … ]]` (about lines
+  16,360–27,770). A literal `]]` or `[[` inside it ends the string (CLAUDE.md). Small pure helpers
+  are hand-mirrored as JS twins for instant interactivity (the tile filter, `barLevel`,
+  `applyAppearance`, `cronBuild`, the My List search, and others; each is commented "twin", so
+  `grep -n twin claude-dashboard.lua` finds them) and must stay in sync. Lists that both sides read
+  are injected instead: `__BULK_RULES__`, `__HOTKEY_LEGEND__` (built from the bound `HOTKEY_*`,
+  themselves resolved by `core.resolveHotkeys` from `cc-config.json`), `__DETAIL_TABS__`,
+  `__APPEARANCE_THEMES__`. Shipped JS is tested by node suites that extract and run the real
+  function from claude-dashboard.lua (the [tests/done-order.test.js](tests/done-order.test.js)
+  pattern) and by 17 Playwright `*.browser.test.js` geometry suites (they skip without Playwright).
+- **Hooks**, wired in [settings-hooks.json](settings-hooks.json). Changing the wiring needs
+  `make setup`, not `make install`:
+
+  | Event | Scripts |
+  | --- | --- |
+  | SessionStart | `cc-status.sh` (also prints Shepherd's session context: handoff note, compaction notes, lease, mail, tickets, decisions, DECISIONS.md) |
+  | UserPromptSubmit | `cc-status.sh` (stamps `turn_id`) |
+  | PreToolUse, any tool | `cc-status.sh`, `cc-approve.sh` (gate, always-ask, talk mode, fence, policies; 130s) |
+  | PreToolUse, AskUserQuestion | `cc-ask.sh` (holds the question for the card; 3630s) |
+  | PreToolUse, EnterWorktree | `cc-worktree-guard.sh` (denies a worktree another live session is in) |
+  | PostToolUse | `cc-status.sh` |
+  | PostToolUseFailure | `cc-status.sh` (clears `tool_started_at` after a failed tool; without it `core.readyToType` refused every send to that session) |
+  | PermissionRequest, Notification | `cc-status.sh`, `cc-popup.sh approval` |
+  | Stop | `cc-status.sh stop` (can block the turn, see below), `cc-popup.sh complete` |
+  | StopFailure | `cc-status.sh`; matcher `rate_limit`: `cc-resume.sh` (async, asyncRewake) |
+  | PreCompact | `cc-status.sh precompact` |
+  | SessionEnd | `cc-status.sh sessionend` (`cc_remove` reaps the session's files) |
+
+- **The Stop hook blocks turns.** At a turn end `cc-status.sh stop` may keep the session working,
+  highest first: a mailbox message, the notes request (auto-compact), then the Stop guards in
+  order question → fakeDone → unfinished (`cc_stop_guard` in [cc-lib.sh](cc-lib.sh)). A guard
+  fires once per session and turn (question) or head sha (the other two), with its marker in
+  `~/.claude/cc-guard/`. None runs while the session is held, in plan mode, while
+  `stop_hook_active`, in Shepherd's own internal runs, or when the panel heartbeat is stale. The
+  guards are off in code and on in `defaults/`.
+- **Scripts sessions run themselves:** `cc-merge.sh` (ready to merge), `cc-fleet.sh` (batches),
+  `cc-pin.sh`, `cc-decide.sh`, `cc-lesson.sh`, `cc-run.sh`, `cc-send.sh`, `cc-ticket.sh`; plus
+  `cc-commits.sh` (commit stats) and `cc-scrub.js` (transcript scrubber). Shared bash helpers are
+  in `cc-lib.sh`.
+- **[SHIPPED](SHIPPED)** is the one list of shipped files: `install.sh`, `uninstall.sh`, the
+  Makefile and the tests all read it, and `core.OUR_HOOK_SCRIPTS` names the same hooks. Shipping a
+  new script is one line there, plus its wiring for a hook.
+- **[vscode-bridge/](vscode-bridge/)** is the tab bridge, a plain-JS VS Code extension (0.6.0) with
+  three ops: close, select, expect. Its rules are in CLAUDE.md.
+- **[defaults/](defaults/)** is a fresh install's setup: `cc-config.json` (Adam's config; many
+  features off in code are on here) and `claude-settings.json`. [methodology/CLAUDE.md](methodology/CLAUDE.md)
+  is the worktree and test-first part of Adam's global CLAUDE.md. Refresh the copies when he changes
+  the originals at home.
+- **State** lives under `~/.claude/`: `cc-status/` (one JSON per session, plus the panel heartbeat
+  `.panel-alive`), `cc-config.json`, and a `cc-*` file or folder per feature. `uninstall.sh`'s
+  `STATE` is the full list (what `--purge` removes);
+  [docs/configuration.md](docs/configuration.md#files-shepherd-keeps) says what each holds. Newer ones: `cc-guard/`, `cc-hold/`, `cc-lesson/`, `cc-run/`,
+  `cc-main-green.json`, `cc-coach/`, `cc-merge/<key>.notyet` and `cc-merge/main-moved.seen`,
+  `cc-scratch/` (Seance, red-first and gate-blame worktrees), and `cc-keep/` (kept transcripts,
+  which `--purge` leaves in place).
 
 ## Invariants worth knowing
 
-- **projectKey is the stable identity** — the encoded launch folder from `transcript_path`
-  (cwd fallback when there's no transcript). Labels, groups, and respawn budgets key by it so
-  they survive cd-drift and close/reopen. A live `cwd` can drift, so **never resolve
-  persistent per-project state by cwd when a projectKey exists** (the cwd-keyed fallback fires
-  only for genuinely keyless sessions — see `applyGroups` / `applyLabelsByCwd`).
-- **cc-core stays pure + deterministic** — no `hs.*`, no wall-clock except via an injected
-  `now`. Need a side effect? Route it through `fx`.
-- **Webview XSS defense is render-time `esc()`**, not input sanitization — every
-  user-controlled string (label / relabel / group) passes through `esc()` at the sink.
-  [tests/escaping.test.sh](tests/escaping.test.sh) is a source-level tripwire for it.
-- **Per-tile refresh state is one row**: `prev[key] = { status, stale, escalated }`, rebuilt
-  and swapped each refresh so a vanished tile drops out. `respawnAttempts` is separate
-  (keyed by projectKey — a per-folder budget, different lifecycle). **Autonomous actions
-  (feed / prune / respawn) never fire from a missing prev** — the first refresh after a
-  reload is an observation, not a transition edge — and never target a stale tile.
-- **A large `hs.task` capture deadlocks — redirect to a file.** `hs.task` direct-exec waits for
-  the child to exit while reading its stdout pipe; once the child's output exceeds the OS pipe
-  buffer (~64KB) it blocks on write and neither side advances (this silently wedged the
-  folder-scan index over `~/Programming`). For any scan that can emit a lot, run it via
-  `/bin/sh -c "<cmd> > <tmpfile>"` (keeps the task's own pipe empty) and read the file on exit,
-  with a retained-timer timeout backstop. `core.folderScanShellCommand` builds the quoted command.
-  The accelerators it runs (`rg`/`fd`) are resolved by `resolveBin` (PATH + `/opt/homebrew/bin`
-  + `/usr/local/bin`) and **degrade gracefully** to grep/find; `make doctor` reports what's live.
-- **Keystroke delivery is a contract.** `FX.pasteIntoWindow` / `FX.sendKeys` / `feedTask`
-  return delivery status; when no window positively matches, they **skip** (never type into
-  whatever is frontmost) and the caller must gate its side effects (queue pop, mode patch,
-  ledger event, success alert) on that return. Every window-keystroke dispatch goes through
-  the single `dispatchSerialized` chokepoint (shared `core.staggerSlot` tail) so chains
-  can't interleave; headless paths (kitty `@`, armed-gate decision files) stay immediate.
-- **Gate decisions are nonce-bound.** `cc-approve.sh` publishes `pending.nonce` per request;
-  `FX.writeDecision` echoes it (`allow <nonce>`, written tmp+rename); the gate consumes only
-  a matching nonce (legacy bare verbs need a strictly-newer mtime) via an atomic PID-owned
-  claim, restoring non-matching answers for their owner.
-- **The context bar tracks the editor, not the raw window.** `core.contextFractionFor` divides
-  context tokens by `window * context.autoCompactFraction` (default 0.92) so the per-tile bar
-  matches Claude Code's "% until auto-compact" (the editor measures against the window minus an
-  output reserve). The threshold is **undocumented** — the fraction is an approximation, hand-
-  tunable, and preserved across Settings saves (`SETTINGS_KEEP_SUBKEYS.context`). Color comes
-  from `core.contextBand` (7 bands, mirrored in the panel `barLevel` twin — keep them in sync).
-- **Two different "remote controls" — don't conflate them.** `spawn.kittyRemote` /
-  `kittyAutoRemote` is **Kitty's** `kitty @` control (so *Shepherd* can drive the window
-  headlessly). `remoteControl.*` is **Claude Code's own** Remote Control (so *you* drive a local
-  session from claude.ai / mobile): `onSpawn` adds the `--remote-control` launch flag (LOCAL
-  native-Anthropic only — it rejects gateway/ssh and needs claude.ai auth), `sweepOnStartup`
-  types `/rc` into already-running idle/done local sessions. The "enable for all sessions"
-  Claude Code setting has **no documented settings.json key**, so Shepherd can't set it — it's a
-  manual `/config` toggle (noted in the ⚙ help + README).
-- **Auto-Continue is a bounded loop-guard.** `core.stepAutoContinue` resumes an `error` tile by
-  typing `continue` after a grace delay, but charges a **per-folder** budget that resets ONLY on
-  a clean `done`/`idle` — never on the `working` the continue itself produces — so a persistently
-  dead connection can't loop. Same edge discipline as auto-respawn (off by default, ledgered).
-- **L1 Agent Profiles + L2 policy bundles (shipped 2026-06-14) — the operator-data files + sync
-  contracts a refactor must not break:**
-  - **Operator-data registries** (same posture as `cc-presets.json`, never store secrets — env-var
-    NAMES only): `cc-agents.json` (saved agent profiles; `core.agentList/agentPush/.../agentFork`),
-    `cc-mcp.json` (MCP servers; `core.mcpList/.../mcpConfig`). Skills are read-only from
-    `~/.claude/skills/*/SKILL.md` (`core.parseSkillFrontmatter`, `FX.listSkills`).
-  - **"Spawn from a saved agent"** = `core.resolveAgent` → `core.spawnExtraFlags` appends
-    `--mcp-config`/`--append-system-prompt`/`--agent`/`--add-dir`/`--plugin-dir` inside `spawnSpec`.
-    New `shArg` quotes value-bearing flags in the shell sinks only (kitty argv stays raw; existing
-    no-space flags byte-identical — don't regress that).
-  - **L2 gate KEEP-IN-SYNC (load-bearing):** the panel resolves each session's policy with
-    `core.resolvePolicy` (precedence per-session override > attachment > fleet) and writes
-    `~/.claude/cc-policy/<key>` = `{autoAllow, autoDeny, bundle}`; `cc-approve.sh` `match_patterns`
-    reads that file as **authoritative + opt-in** (applies regardless of `policies.patterns.enabled`),
-    falling back to the flat fleet `policies.patterns.*` only when the file is absent. Three rules a
-    change must preserve: (1) the per-session **orphan sweep** in `refresh()` (readDir `POLICY_DIR`,
-    clear any key not re-written this tick) is **decoupled** from the `hasAtt/hasOvr` fast-path — a
-    removed attachment must never leave an enforcing orphan; (2) `FX.writeResolvedPolicy` is **atomic**
-    (temp+rename) — the gate reads it on the hot path; (3) `cc_remove` (SessionEnd, `cc-lib.sh`) reaps
-    `cc-policy`/`cc-policy-override`. The `POLICY_DIR` default must match across `cc-lib.sh`,
-    `cc-approve.sh`, and the dashboard (`~/.claude/cc-policy`).
-- **Three load-bearing facts any new feature MUST honor** (verified during the 2026-06-14 mining; the
-  whole spawn / agent-profile / policy layer rests on them):
-  1. **The `claude` CLI is present** at `~/.local/bin/claude` (v2.1.175) and exposes `--mcp-config`/
-     `--strict-mcp-config`, `--agent`/`--agents`, `--plugin-dir`, `--append-system-prompt`, `--add-dir`,
-     and `claude plugin` / `claude mcp add`. But native Claude Code already reads project `.mcp.json` and
-     keeps its own plugin/MCP registry — **Shepherd stays a thin fleet-convenience layer (emit flags/files);
-     it does NOT reimplement MCP/skills/plugins.** Skills live at `~/.claude/skills/<name>/SKILL.md`
-     (frontmatter `name`/`display_title`/`description`).
-  2. **`gate.tools` is a HOLD-FOR-APPROVAL / escalation list, NOT a capability allow-list.** Tools *not* in
-     it run freely (`cc-approve.sh` `*) exit 0`). A "read-only agent" is built by **`autoDeny`** of the
-     mutating set (`Bash Write Edit MultiEdit NotebookEdit` = `DEFAULT_GATE_TOOLS`), **never** by adding
-     them to `gate.tools`. Any design phrased as "seed the allow-list to grant a tool" is backwards.
-  3. **Secrets are never stored — env-var NAMES only.** Records store the env-var *name* (`authTokenEnv`),
-     expanded by the spawned login shell via `loginShellWrap` (the `providerEnv` pattern). Operator-data
-     registries (`cc-presets.json`/`cc-agents.json`/`cc-mcp.json`) live OUTSIDE the Settings round-trip.
-     Spawn side-effects gate behind `spawn.live` (default dry-run); VS Code/Cursor flag injection is
-     keystroke-only (best-effort), reliable on Kitty/Terminal.
+The traps in CLAUDE.md are invariants too (the 200-local cap, retained timers, `dispatchSerialized`
+and `esc()`, the tab bridge's three ops, the merge and question channels bound to a nonce read from
+disk, `FX.alert`, interrupted turns, FSEvents). These are the others.
+
+- **projectKey is the stable identity**: the encoded launch folder from `transcript_path` (cwd
+  fallback when there's no transcript). Labels, groups and respawn budgets key by it so they survive
+  cd-drift and close/reopen. **Never resolve persistent per-project state by cwd when a projectKey
+  exists** (`core.applyGroups` / `core.applyLabelsByCwd` fall back to cwd only for keyless sessions).
+- **cc-core stays pure and deterministic.** No `hs.*`, no wall clock except an injected `now`. A
+  side effect goes through `FX`.
+- **Webview XSS defense is render-time `esc()`**, not input sanitization.
+  [tests/escaping.test.sh](tests/escaping.test.sh) is the tripwire. A key that a click sends back
+  rides an `esc()`'d `data-` attribute read with `getAttribute`, never an inline JS string.
+- **Per-tile refresh state is one row**: `prev[key] = { status, stale, escalated }`, rebuilt each
+  tick so a vanished tile drops out. `respawnAttempts` is keyed by projectKey. **Autonomous actions
+  never fire from a missing `prev`** (the first tick after a reload observes, it is not an edge) and
+  never target a stale tile. Every module-level per-key table starts as `{}`: the end-of-tick reaps
+  iterate them even when their feature is off (`core.reapUnbacked`).
+- **A large `hs.task` capture deadlocks: redirect to a file.** Past the ~64KB pipe buffer the child
+  blocks on write while `hs.task` waits for it to exit. Anything that can print a lot runs as
+  `/bin/sh -c "<cmd> > <tmpfile>"` and is read on exit, with a retained-timer backstop
+  (`core.folderScanShellCommand`; the compatibility check hit the same wall at 64KB).
+- **Nothing heavy on the tick.** Scans (radar, time index, past sessions, schedLock, commits, the
+  transcript keeper) run as background tasks on their own timers, cached, with a hung task
+  reclaimed. Time the tick before blaming a feature for a freeze (CLAUDE.md).
+- **Typing into a session is a contract.**
+  - `FX.pasteIntoWindow` / `FX.sendKeys` / `feedTask` return whether they delivered; with no
+    positive window match they skip, never type into whatever is frontmost, and the caller gates
+    its side effects (queue pop, ledger event, alert) on that return. Window keystrokes are
+    serialized through `dispatchSerialized` (shared `core.staggerSlot` tail); headless paths
+    (kitty `@`, decision files) stay immediate.
+  - Automated sends go through `FX.typeWhenReady`, which waits for `core.readyToType`: not mid-turn,
+    not into an approval or a held question, not during a tool, not within 3s of a status change,
+    and in kitty only into an empty composer. A refusal is ledgered once as `typing_refused`.
+  - Every automatic effect passes `FX.automationAct`, which asks the hold first (a held session or a
+    frozen fleet gets nothing), then honours `automation.dryRun` / `<feature>.dryRun` and records
+    the ⚡ Trace. Senders outside that door call `FX.holdStops`. Hold flags live in
+    `~/.claude/cc-hold/` (`<pid>`, `key-<key>`, `.fleet` = ❄ Freeze).
+  - A window shared by several sessions gets no keystrokes (`core.keystrokeBlocked`; build every
+    target with `FX.targetFor`). Such a session is reached through the mailbox instead
+    (`FX.deliverTo`): a message is handed over at its next turn end by the Stop hook, and a
+    turn-end-only note (the main-moved notice) is never typed (`core.mailboxRoute`).
+- **Gate decisions are nonce-bound.** `cc-approve.sh` publishes `pending.nonce`; `FX.writeDecision`
+  echoes it (tmp + rename); the gate consumes only a matching nonce through an atomic PID-owned
+  claim. The merge (`FX.writeMergeDecision`) and question (`FX.answerAsk`) channels use the same
+  shape.
+- **The panel's localStorage holds per-viewer state only**: detail-tab state keyed by projectKey,
+  the commit drawer's open state, and History's ★ pins (`cc-historyPins`). The pins are also sent to
+  Lua (`keep-pins`) and kept in `~/.claude/cc-keep/pins.json`, because the transcript keeper acts on
+  them.
+- **"Needs you" is one decision**, `core.needsYouKind`: needs, heads-up (`core.TIER_FYI`) or nothing.
+  A new source joins that predicate, never a new branch in `core.instanceTier` (CLAUDE.md has why).
+- **The Claude URI never reveals an existing tab (D-14).** New tabs open through
+  `vscode://anthropic.claude-code/open?prompt=`, sent only by `FX.openClaudeTab` after a positive
+  window match, the prompt typed in and never sent. `?session=` is the one exception: written only
+  by `core.restartTabUri`, sent only by `FX.openClaudeTab` after it re-checks the session is dead
+  (`FX.restartVerifyDead`). Its two callers are `FX.restartOne` (Restart fleet) and
+  `FX.pastResumeLaunch` (History's Resume, Adam's call 2026-10-04). `tests/ui.test.lua` pins both.
+- **The context bar tracks the editor, not the raw window.** `core.contextFractionFor` divides by
+  `window * context.autoCompactFraction` (default 0.92, an undocumented approximation kept across a
+  Settings Save). A `[1m]` model reads a 1M window. Colour comes from `core.contextBand` (7 bands,
+  mirrored in the JS `barLevel`).
+- **Two different "remote controls".** `spawn.kittyRemote` / `kittyAutoRemote` is Kitty's `kitty @`
+  (Shepherd drives the window headlessly). `remoteControl.*` is Claude Code's own Remote Control:
+  `onSpawn` adds `--remote-control` (local, native-Anthropic sessions only), and `sweepOnStartup`
+  types `/rc` into idle terminal and kitty sessions only (`core.RC_SWEEP_EDITORS`): in VS Code the
+  slash menu once fuzzy-matched it to `/deep-research` (CLAUDE.md). The "enable for all sessions"
+  setting has no settings.json key; it is a manual `/config` toggle.
+- **Auto-continue is a bounded loop guard.** `core.stepAutoContinue` charges a per-folder budget that
+  resets only on a clean `done`/`idle`, never on the `working` its own continue produces, and not on
+  a turn that did nothing or only planned. From the second such turn in a row it backs off (2
+  minutes, doubling to 30). A usage limit is left to the resume path. Auto-respawn has the same edge
+  discipline. Both are off in code and on in `defaults/`.
+- **Agent profiles and policy bundles** (L1/L2, 2026-06-14) rest on three facts:
+  1. **Shepherd stays a thin layer over the `claude` CLI** (`~/.local/bin/claude`): it emits flags
+     (`--mcp-config`, `--agent`, `--plugin-dir`, `--append-system-prompt`, `--add-dir`, `--settings`,
+     `--allowedTools`) through `core.spawnExtraFlags` and never reimplements MCP, skills or plugins.
+     Skills are read from `~/.claude/skills/<name>/SKILL.md`.
+  2. **`gate.tools` is a hold-for-approval list, not a capability allow-list.** A read-only agent is
+     built with `autoDeny` of the mutating set (`core.DEFAULT_GATE_TOOLS`), never by adding tools to
+     `gate.tools`.
+  3. **Secrets are never stored.** Records keep the env-var name (`authTokenEnv`), expanded by the
+     spawned login shell. Operator registries (`cc-presets.json`, `cc-agents.json`, `cc-mcp.json`)
+     live outside the Settings round-trip; spawns are dry-run until `spawn.live`.
+
+  The gate reads `~/.claude/cc-policy/<key>` (resolved by `core.resolvePolicy`, written atomically by
+  `FX.writeResolvedPolicy`) as authoritative. The per-tick orphan sweep must stay decoupled from the
+  attachment fast path, and `cc_remove` reaps the file; `POLICY_DIR` must match across `cc-lib.sh`,
+  `cc-approve.sh` and the dashboard.
 
 ## Workflow
 
-- **`make test`** runs the whole suite ([tests/run.sh](tests/run.sh)): bash + standalone lua,
-  all side-effect-free (temp dirs + recorder doubles, never touches real `~/.claude`). Keep it
-  green before every deploy.
-- **Dashboard smoke test** ([tests/smoke.test.lua](tests/smoke.test.lua), in `make test`): loads
-  claude-dashboard.lua under a **stubbed `hs`** and runs the load-time `refresh()` once. This is
-  the only thing that exercises the Hammerspoon glue — `luac` + the pure unit tests can't catch a
-  runtime error there. It exists because a refresh-loop **`pairs(nil)`** (a reap over an
-  uninitialized state table) once crashed the whole panel at load and shipped. **Invariant: every
-  module-level per-key state table must be initialized `{}` up front** — the end-of-refresh reaps
-  iterate them even when their feature is off. When you add an `hs.<ns>` the dashboard touches in a
-  new way, the smoke may need a matching stub (numeric value-tables for anything bit-OR-ed, e.g.
-  `windowMasks`/`windowLevels`).
-- **`make install`** copies files into `~/.claude` + `~/.hammerspoon`; **`make deploy`** =
-  test + install + reload. **Edits are not live until installed/deployed.** `make deploy`'s `hs -c`
-  reload can hang — if it stalls after the copy, `make install` then reload separately with a
-  timeout backstop.
-- Typical change: add a pure cc-core function + its regression test → wire it into the
-  dashboard → mirror in the panel JS if it affects rendering (and note the twin) → `make test`
-  (smoke included) → deploy.
-- **Test purity:** pure decisions live in cc-core + unit tests; effects go through the `fx` recorder; shell
-  hooks get bash temp-dir suites. **No live `kitty @` / keystrokes / network in tests** — provider
-  env-injection, usage parse/sum/window, and ssh-wrap are all asserted as pure strings (no real keys/spawns).
+- **`make test`** runs [tests/run.sh](tests/run.sh): about 167 files (65 Lua, 41 bash, 61 node, 17
+  of them Playwright browser suites) plus the demo's deno tests. Side-effect-free: temp dirs, a temp
+  `HOME` for stubbed-`hs` suites, recorder doubles, `hermetic-env.sh` strips `CC_*` from the calling
+  shell. It holds a per-checkout lock (`install.test.sh` shells out to the real `make`), and
+  `bash tests/run.sh <files…>` runs just those files, which is how the red-first proof runs a unit's
+  tests on the merge-base. CI (`.github/workflows/ci.yml`) runs lint and the suite on ubuntu;
+  `tests/portability.test.sh` catches Mac-only test code.
+- **`make lint`** = luacheck (when installed) + `tests/lint-timers.sh` + `luac -p`.
+- **`make install`** copies the `SHIPPED` files by rename (Lua to `~/.hammerspoon`, scripts and
+  `cc-core.lua` to `~/.claude`) and reinstalls the tab bridge on a version bump. **`make deploy`** =
+  lint + test + install + reload. **`make setup`** (`install.sh`) is the full install and upgrade:
+  suite first, then copy, merge the hook wiring, the `init.lua` line, the Dock launcher. Others:
+  `make reload` (stops a hung `hs` client after ~10s), `make doctor`, `make uninstall [PURGE=1]`,
+  `make demo`.
+- **Edits are not live until deployed**, and a deploy is verified in the running VM with `hs -c`
+  (CLAUDE.md).
+- **A typical change:** a failing test first (a bug gets a fixture and a TODO.md line), then a pure
+  `cc-core` function, wiring in the dashboard with a `ui.test.lua` pin or a stubbed-`hs` behavioural
+  suite, a JS twin or a node/browser test if the panel shows it, a new suite wired into
+  `tests/run.sh`, `make lint` and `make test`, deploy, probe with `hs -c`. New transcript-fixture
+  words go in `tests/fixtures/transcripts/vocabulary.txt`.
+- **Units and merges** follow the worktree method: `.claude/worktrees/<slug>`, `cc-merge.sh
+  request` when green, the gate again after the rebase and on main, then `make deploy` from main
+  before `cc-merge.sh done` (CLAUDE.md, "Finishing a unit here").
 
 ## Tooling stance — detect → use → degrade gracefully
 
-A missing binary means slower, never broken. `jq` is the only hard dependency; `rg`/`fd` are auto-detected
-accelerators (fleet search + the spawn modal's fuzzy folder scan), resolved by `resolveBin` (PATH +
-`/opt/homebrew/bin` + `/usr/local/bin`) and degrading to grep/find. The chosen engine is **logged at runtime**
-(`[cc-search] engine=rg …`, `[cc-spawn] folder scan: fd …`) and **`make doctor`** reports tool status + offers
-to install a missing accelerator — so an accelerator can't silently sit unused (which is how `fd` went
-uninstalled for a while). Any `hs.task` capturing large output must redirect to a file (the ~64KB pipe-buffer
-deadlock — see Invariants). **Declined** (no surface / altitude inversion / terminal-human niceties the
-webview doesn't want): `gron`/`yq`/`htmlq`/`hexyl`, `jc`, `eza`/`bat`/`tv`/`fzf`.
+- **Required:** `jq`, `lua` and `node` (`bootstrap.sh` installs them, `install.sh` checks),
+  Hammerspoon (its `hs` CLI for reloads and probes), `git`.
+- **Needed by a feature:** the `claude` CLI for Seance, the coach and the merge checker; `gh` for PR
+  status; VS Code's `code` CLI to install the tab bridge (without it, Close on shared-window tabs
+  stays refused); `ffmpeg` + `whisper-cli` for Stream Deck voice.
+- **Optional accelerators:** `rg`/`fd` for fleet search and the spawn modal's folder scan, resolved by
+  `resolveBin` (PATH + `/opt/homebrew/bin` + `/usr/local/bin`), falling back to grep/find. The engine
+  in use is logged (`[cc-search] engine=rg …`), and `make doctor` reports tool status and offers to
+  install a missing one.
+- **Test-only:** luacheck, Playwright (browser suites skip without it), deno (the demo).
+- **Declined:** `gron`/`yq`/`htmlq`/`hexyl`, `jc`, `eza`/`bat`/`tv`/`fzf` (no surface in a webview).
 
 ## Known platform limits (not bugs)
 
-- **VS Code / Cursor extension UI widgets are mouse-only** (AskUserQuestion picker, permission-mode switcher —
-  no keyboard path). So click-to-answer, live mode-switch, and non-gate approve are **best-effort / jump-only**
-  in the extension, and **reliable only on Kitty** (`kitty @`) or via the **headless gate** (decision file).
-  VS Code spawn ("run claude in a new terminal") is likewise best-effort keystrokes; Kitty/Terminal spawn
-  reliably.
-- **A pop on *completion*** with both `popOn*` flags off is the **VS Code extension** raising its own window,
-  not Shepherd (arming the gate stops the *approval* pop).
+- **VS Code / Cursor extension widgets are mouse-only.** Shepherd works around them: AskUserQuestion
+  is answered through `cc-ask.sh` (`updatedInput`) from the card; approvals go through the gate's
+  decision file; new tabs open through the Claude URI (`FX.openClaudeTab`) for New worktree tab,
+  batch units, Instances Open, Run selected items, a ticket's tab, a new session in a window that
+  already has one, Restart fleet and History Resume. The permission-mode switcher still has no
+  keyboard path.
+- **Keystrokes go to a window, not a tab**, so a VS Code window with several sessions gets none
+  (mailbox instead). Kitty (`kitty @`) is the one surface where typing is fully reliable.
+- **Waking an idle session** with `asyncRewake` (the resume at a limit reset) is unverified; Shepherd
+  types the line where typing is allowed, else says so on the card and pushes.
+- **A pop on completion** with both `popOn*` flags off is the VS Code extension raising its own
+  window, not Shepherd.
 
-## Deferred / not-yet-built (as of the 2026-06-19 todos reset)
+## Deferred / not-yet-built (historical, as of the 2026-06-19 todos reset)
 
-Consciously-left-unbuilt work, kept here so the todos wipe loses nothing — full per-item detail (FOR/AGAINST
-rulings, data shapes) is in git history of `todos.md` and `docs/feature-mining/*`.
+Kept as written on 2026-06-19; check the code before assuming an item is still unbuilt. Since then
+the session mailbox (04273f3), `cc-send.sh` and cross-repo tickets covered part of the delegation
+and "broadcast mailbox" family. The editors the 2026-06-14 entries below call deferred (agents
+1d2966c, bundles 19ab916, templates 6eff6b5, rules 432c594, the routine board 5801199) had already
+shipped on 2026-06-14; the polish items here are what remained of them. Full per-item detail is in
+git history of `todos.md` and `docs/feature-mining/*`.
 
-- **Needs hardware (runbook ready):** `docs/hardware-verification.md` (git history) — verify
+- **Needs hardware (runbook ready):** `docs/hardware-verification.md` (local, gitignored) — verify
   the `core.KITTY_KEY` send-key tokens + AskUserQuestion `answerKeys` nav on a real Kitty box, and the SSH
   status-bridge 8-step checklist (remote install / headless-only assumption, rsync+openrsync round-trip,
   decision round-trip, `BatchMode` auth, clock-skew → `bridge.staleSlackSeconds`, the `bridge.keystrokes`
@@ -201,6 +294,72 @@ rulings, data shapes) is in git history of `todos.md` and `docs/feature-mining/*
   aren't counted as "changed"; DR4 an LLM-as-judge "deep score" + a fleet-wide score trend; DR5 per-tile /
   per-project $ + budget-alert rules; DR6 an LLM classify pass + fleet-wide opt-in once trusted; DR7 worktree
   cleanup of an abandoned (never-kept) cohort (`git worktree prune`).
+
+## State (2026-10-04) — the worktree method, the build program, mining round 2
+
+Since 2026-06-29 Shepherd went from a fleet monitor to the console that runs Adam's parallel-worktree
+method. This is the map; [CHANGELOG.md](CHANGELOG.md) has one dated section per change and the
+[docs/](docs/) pages have the reference detail.
+
+**July–August.** Two multi-agent bug sweeps (2026-07-02: 30 fixes; 2026-07-13: 36), the VS Code
+transcript-buffering status fixes, My List growing into a per-project verification list (item modal,
+MASTER rollup, persistent tabs), more Appearance themes (50 now), an installer that runs the suite
+before it touches any config.
+
+**The worktree method (2026-09-10 → 09-25).** One card per project with its worktrees folded in, and
+the Instances view; New worktree tab; no keystrokes into a shared window; the tab bridge extension;
+ready to merge (`cc-merge.sh`) with Shepherd running the test gate itself; batches driven by a session
+(`cc-fleet.sh`); held questions answered on the card (`cc-ask.sh`); "Needs you" as one decision;
+toasts instead of `hs.alert`; install by double-click with `defaults/` and `methodology/`. See
+[docs/merging-and-batches.md](docs/merging-and-batches.md) and the 2026-09-10 to 09-25 CHANGELOG
+sections.
+
+**The build program (2026-09-28 → 09-30, complete).** A 44-unit plan run as parallel batches B0–B15,
+each unit a worktree that Shepherd merged on a green gate. The
+[CHANGELOG section](CHANGELOG.md#2026-09-30--the-build-program) lists every unit; in short:
+
+- Cards: turn labels, the working-on line, Running N jobs, pinned links (`cc-pin.sh`), the
+  scheduled-tasks lock check, API errors and usage limits read as errors.
+- Reaching a session: the session mailbox, `cc-send.sh`, tickets (`cc-ticket.sh`), the decisions
+  inbox (`cc-decide.sh`, 📥 Inbox), Restart fleet in place.
+- Automation: readiness before typing, the automation door with dry run and the ⚡ Trace,
+  auto-continue back-off, resume at the limit reset (`cc-resume.sh`), handoff notes, auto-compact with
+  notes, task packets, the coach.
+- Safety: always-ask commands, talk mode, the worktree fence, `cc-worktree-guard.sh`.
+- Merging: merge hardening (markers, clean main, stash count), the merge checker, the red-first proof,
+  the repo-declared gate, REQ ids and merge receipts, the batch relay (`cc-fleet.sh wait`), the overlap
+  radar with `blockedBy`, the coverage index, worktree leases.
+- Health, docs, tests: the Claude Code compatibility check, `SHIPPED`, the README split into `docs/`,
+  the ledger quarantine, the scenario corpus and `cc-scrub.js`, CI on ubuntu.
+
+Follow-ups on 2026-09-30 and 10-02: the coach's applied-edit history with Undo, and the
+`PostToolUseFailure` hook (a failed tool no longer blocks every send to its session).
+
+**Mining round 2 (2026-10-02 → 10-04, complete).** A second feature-mining round (Maestro, Gas Town,
+ECC, oh-my-claudecode, OpenRig), built as 23 units in 8 batches after the U0 hook fix, merged on
+green. See [the CHANGELOG section](CHANGELOG.md#2026-10-04--mining-round-2):
+
+- Stop guards: question, fakeDone, unfinished (`cc_stop_guard`; on in `defaults/`).
+- The coach: a lessons ledger, evidence runs and `cc-lesson.sh`, edit outcomes and Sharpen, a review
+  of the repo's auto-memory, lessons across repos into the global CLAUDE.md.
+- Steering: Seance, the fleet idle alert, the hands-off hold and ❄ Freeze, playbooks and Run selected
+  in My List (`cc-run.sh`), queue hold and the 📑 Queues view, Restart fleet outcomes.
+- Merging: brief pre-flight, gate blame, the main-moved notice, the main-green check (a routine with
+  `"action": "gate"`), grant grading (a risky merge on a batch grant waits for Adam's click).
+- Unseen sessions: grey cards for live sessions with no status file; the transcript keeper
+  (`cc-keep/`, and Diagnostics can set `cleanupPeriodDays`); History listing every transcript and
+  kept copy (`FX.refreshPastSessions`, a background scan) with Resume, which puts a kept copy back
+  first when Claude Code has deleted the original.
+
+A fix after the round (78f3a73) stopped the stub check reading `/TODO.md` paths as TODO comments.
+Open after it: the E5 "land together" design note (`docs/feature-mining/e5-land-together-design.md`,
+local) waits for Adam's decision, and the live checks no test can prove are the `[~]` /
+`(needs live run)` lines in TODO.md.
+
+---
+
+The entries below are dated snapshots, kept as history and not updated: names, counts and "deferred"
+notes in them may be out of date. The sections above describe the code as it is now.
 
 ## State (2026-06-29) — User Stories detail tab (view/edit spec/product/user-stories.md)
 

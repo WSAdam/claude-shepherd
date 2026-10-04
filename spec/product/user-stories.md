@@ -1,9 +1,10 @@
 # Claude Shepherd — User Stories
 
 User stories derived from [spec.md](./spec.md) — reverse-engineered from the shipped app
-(README + code), capturing what Claude Shepherd does today as demoable stories. Shepherd is
-a floating, always-on-top Mac fleet console for **Claude Code** sessions — one tile per
-session, with control, observability, automation, and governance from a single pane.
+(README + code), capturing what Claude Shepherd does as of 2026-10-04 (after the build program
+and mining round 2) as demoable stories. Shepherd is a floating, always-on-top Mac fleet console
+for **Claude Code** sessions — one tile per session, with control, observability, automation,
+and governance from a single pane.
 
 Stories are grouped by capability area and written in the canonical form
 "As a `<role>`, I want `<capability>`, so that `<benefit>`". Three roles recur:
@@ -12,8 +13,8 @@ the **fleet operator** (supervising many Claude Code sessions at once), the
 (looking at what the fleet did, for governance and accountability).
 
 This is a living document we'll iterate on before extending the pattern to other
-projects. Capabilities still in design (routing topology, in-panel bundle/agent
-editors, the routine board) are intentionally omitted until they ship.
+projects. Capabilities still in design (a routing topology view, role-addressed
+delegation, idle/auto-spawn routing targets) are intentionally omitted until they ship.
 
 ## Fleet overview & status
 
@@ -26,6 +27,10 @@ editors, the routine board) are intentionally omitted until they ship.
 - As a **fleet operator**, I want each tile to show time-in-state, the latest prompt, and the exact command being requested on an approval, so that I can triage what a session needs before opening it.
 - As a **fleet operator**, I want a live "Doing:" activity peek from the selected session's transcript, so that I can see what an agent is currently working on without switching to it.
 - As a **fleet operator**, I want duplicate "ghost" tiles left by /clear or restart auto-pruned by matching them to the same window, so that the grid stays clean without manual cleanup.
+- As a **fleet operator**, I want a tool that failed (a Bash command that exited non-zero, an interrupted tool) to stop counting as in flight, so that automated sends to that session aren't refused until it happens to run another tool.
+- As a **fleet operator**, I want a live Claude Code session that Shepherd's hooks never reported to show as a grey card in its own row, with its folder, busy/idle and "restart it to get live status", so that a session the panel can't track isn't forgotten.
+- As a **fleet operator**, I want one banner (and a phone push when escalation push is on) once every local session has been idle for 15 minutes, armed again only when one works again, so that a fleet that ran out of work while I was away tells me once.
+- As a **fleet operator**, I want an opt-in voice that speaks the fleet idle alert, and optionally the moment a session starts needing me, so that I hear it when I'm not looking at the screen.
 
 ## Projects & worktrees
 
@@ -51,11 +56,38 @@ editors, the routine board) are intentionally omitted until they ship.
 - As a **fleet operator**, I want a leftover claude process with no tab marked on its card with End session, so that it stops passing for a second tab and blocking the real one.
 - As a **developer**, I want Jump to bring a session's own tab to the front, so that I land on the chat I meant in a window with several tabs.
 - As a **developer**, I want to let a Claude session drive a batch of worktree units on my single approval, so that parallel work doesn't need me to open tabs, press Return and click every merge.
-- As a **fleet operator**, I want to decide in the batch approval whether Claude may merge its units when green, so that I keep the last word on main when I want it.
+- As a **fleet operator**, I want to decide in the batch approval whether Claude may merge its units without my click, so that I keep the last word on main when I want it.
 - As a **fleet operator**, I want a batch's merge permission to cover only each unit's own session and branch, and Stop batch to revoke it at once, so that the grant can't be stretched.
 - As a **developer**, I want a session's question to flash on its card with its answers as buttons, and my click to answer it, so that a session waiting on me never waits for me to find its tab.
 - As a **developer**, I want every card that waits on me to read Needs you with a red pulse and always offer a button, so that I never miss one and never face a red card with nothing to press.
 - As a **developer**, I want Shepherd's messages inside its own panel instead of centre-screen overlays, so that nothing covers the windows I'm working in.
+
+## Merge evidence & batches
+
+- As a **fleet operator**, I want Shepherd to run a project's test suite itself in the worktree before a merge review calls the unit ready, one gate per repo at a time, so that "tests pass" is Shepherd's evidence rather than the session's claim.
+- As a **fleet operator**, I want a gate that couldn't run (a locked suite, a missing command) reported as couldn't-run, never as a failure, so that I don't learn to dismiss red gates.
+- As a **reviewer**, I want every merge request scanned for red flags in its diff and reviewed by a read-only headless model, with 🔎 Verify to run the same review on any session, so that a merge nobody read still gets a second pair of eyes.
+- As a **fleet operator**, I want a red gate run again at the merge-base so the review splits the failures into already failing on main and new in this branch, so that a unit cut from a red main doesn't take the blame for main's failures.
+- As a **developer**, I want a worktree session whose files overlap a merge that just landed to get one mailbox note saying main moved and to rebase before asking to merge, so that it learns before a red gate or a conflict tells it.
+- As a **fleet operator**, I want a routine that checks main is green on my schedule and marks every card of the repo "⚠ main is red", with the failing lines, when it isn't, so that a main that broke between merges is caught before the next unit's gate.
+- As a **fleet operator**, I want a merge on my batch grant to go through only on Shepherd's own gate pass (and the checker's, when it's on), so that my grant never rests on a session's word.
+- As a **fleet operator**, I want a merge on my batch grant to wait for my click when its diff touches hook wiring, session instructions, the decision log, the shipped defaults, CI, migrations, lockfiles or Claude settings, deletes a tracked file, or drew a high-severity checker finding, so that my one approval covers the routine merges and the risky ones still come to me.
+- As a **fleet operator**, I want a proposed batch's full briefs scanned for risky asks (force push, push to main, deleting or skipping tests, rm -rf, secrets, CI or deploy files, two units on one file) and each flag listed with its words in the review, without holding Approve, so that a risky line past the review's cut gets my eyes before the units run.
+- As a **developer** driving a batch, I want `cc-fleet.sh propose --resume <id>` to collect an answer given after my `propose` stopped waiting, so that a late approval doesn't strand the batch.
+- As a **developer** driving a batch, I want to be mailed the command that collects my batch's answer once it has sat uncollected for 30 seconds, so that an approved batch doesn't sit idle until someone asks what happened.
+
+## Stop guards
+
+- As a **developer**, I want a turn that ends by asking me a question in prose to be sent back once to ask it with AskUserQuestion, so that a question buried at the end of a report lands on the card as buttons instead of looking like a finished session.
+- As a **reviewer**, I want a turn that claims done while its diff since main switches a test off, focuses one, deletes one or leaves a stub to be sent back once per commit with those lines, so that a suite that is green only because a test stopped running is caught before the merge request.
+- As a **fleet operator**, I want a unit that says it's done, with commits ahead of main and no merge request, reminded once per commit to ask to merge (and told the finish steps again after a compaction), so that finished units don't sit forgotten in their worktrees.
+- As a **developer**, I want every Stop guard to fire at most once per turn or commit, never in plan mode, on hold or where Shepherd isn't running, and to stand down for a mailbox message, so that a guard never loops or talks over real input.
+
+## Hands-off hold
+
+- As a **developer**, I want Hold on a session to stop Shepherd sending it anything automatic (feeds, rules, auto-continue, respawn, resume, Stop guards, merges on a batch grant) and to list each send it skipped, so that I can take a session over without Shepherd typing into it behind my back.
+- As a **fleet operator**, I want ❄ Freeze in the toolbar to hold the whole fleet the same way, with a FROZEN badge on every card, so that I can stop every automatic action at once.
+- As a **fleet operator**, I want mail sent to a held session to wait and go out once I lift the hold, while the skipped automatic sends are never replayed, so that releasing a hold doesn't unleash a backlog of stale actions.
 
 ## Session observability
 
@@ -86,6 +118,7 @@ editors, the routine board) are intentionally omitted until they ship.
 - As a **fleet operator**, I want an Improve action that sends this repo's un-applied leaderboard insights to a session as a review-first prompt, so that I can fold in suggested improvements without blind wholesale edits.
 - As a **developer**, I want Shepherd to refuse, and say why, any keystroke action for a session whose VS Code window holds other Claude sessions, so that a nudge, queued task or close meant for one tab never lands in another.
 - As a **developer**, I want the Wants and Why lines clamped to two lines but click-to-expand, so that I can scan many tiles yet still read the full reasoning when I care.
+- As a **fleet operator**, I want Shepherd to leave a session a message in its mailbox, handed over when its turn ends or at its next start and typed only into a window of its own, so that automation reaches a session mid-turn or in a shared window without keystrokes landing in the wrong tab.
 
 ## Headless approvals (the gate)
 
@@ -135,19 +168,31 @@ editors, the routine board) are intentionally omitted until they ship.
 - As a **fleet operator**, I want a project's queue to feed whichever of its sessions is free, so that parallel sessions in one folder drain a shared backlog.
 - As a **fleet operator**, I want queue-line routing syntax (@role / @all / @any / seq), so that I can target tasks to a role, gate on join barriers, or force one-at-a-time processing.
 - As a **reviewer**, I want each routed/queued task timed from feed to completion, so that the shift report can show throughput and average duration.
+- As a **developer**, I want to hold one queued line in place so auto-feed, Feed next and the router skip it until I release it, so that I can park a task that isn't ready without losing its place.
+- As a **fleet operator**, I want ☰ → 📑 Queues to list every session's queue (held lines, the line fed next, a packet line's last check) with Hold/Release, reorder and remove, so that I can see and manage what the whole fleet has lined up without opening each card.
 
 ## Automation & policies
 
-- As a **fleet operator**, I want one settings file (and a ⚙ Settings panel) governing all automatic behavior with everything off by default, so that nothing acts on my fleet until I opt in.
+- As a **fleet operator**, I want one settings file (and a ⚙ Settings panel) governing all automatic behavior, with only a few named conveniences on before I opt in and a fresh install's defaults spelled out, so that I always know what can act on my fleet.
 - As a **fleet operator**, I want escalation that nags harder (stronger pulse, optional sound/push) when an approval waits too long, so that a forgotten prompt eventually gets my attention.
 - As a **fleet operator**, I want optional focus-pop of the editor when a session completes or needs approval, so that the right window comes forward at the moment it matters.
 - As a **fleet operator**, I want declarative event-callback rules that react to a done/error/approval edge with a safe effect (log/relabel/nudge), so that I can automate small reactions without writing code.
-- As a **fleet operator**, I want scheduled routines (cron/one-shot) that spawn sessions or push a digest, so that recurring work like nightly tests runs on its own.
+- As a **fleet operator**, I want scheduled routines (cron/one-shot) that spawn sessions, push a digest or check that a repo's main is still green, so that recurring work like nightly tests runs on its own.
 - As a **fleet operator**, I want a per-session risk indicator computed from its ledger history, so that I can notice a session accumulating denials and odd behavior.
 - As a **fleet operator**, I want collision warnings when two active sessions share a working directory, so that two agents don't silently clobber each other's edits.
 - As a **fleet operator**, I want a Drain action that finishes the current turn then closes a session, so that I can retire a session without interrupting its work.
 - As a **fleet operator**, I want manual and automatic respawn of a session frozen mid-turn, capped per folder, so that a crashed run recovers without me and a crash-loop can't thrash.
 - As a **fleet operator**, I want optional Auto-Continue that resumes a session frozen on an API error, capped per folder, so that transient connection failures recover hands-free.
+
+## The coach
+
+- As a **fleet operator**, I want a coach that reads a repo's recent sessions (weekly, on enough new evidence, or from a 🧭 Coach button) and proposes up to five CLAUDE.md edits with their evidence, so that the corrections I keep making become instructions sessions read.
+- As a **fleet operator**, I want Apply to write and commit CLAUDE.md alone, refused if the file changed since the coach read it or has uncommitted edits, and Undo to take an applied edit back in a commit of its own, so that a suggestion can never clobber my file and every change is reversible.
+- As a **fleet operator**, I want every Apply, Skip (with an optional one-line why) and Undo kept in a lessons ledger the next run reads, so that an applied suggestion isn't proposed again and a skipped one comes back only with new evidence.
+- As a **reviewer**, I want each applied edit judged on the sessions since (working, still seen with quotes, or no data yet) and a Sharpen that reruns the coach on that edit alone, so that I can tell which instructions work and improve the ones that don't.
+- As a **developer**, I want `cc-lesson.sh "<one line>"` to file a lesson for my repo's next coach run, and enough new evidence to start a run before its weekly day (under a daily dollar cap), so that a lesson learned mid-session reaches the coach without waiting a week.
+- As a **fleet operator**, I want the coach to review the repo's Claude Code auto-memory (delete, rewrite, keep or promote a note into CLAUDE.md) with a backup and Undo, so that stale memory stops steering sessions.
+- As a **fleet operator**, I want a lesson learned in two or more repos proposed as one rule for a marked block in my global ~/.claude/CLAUDE.md, applied only on my click with a backup and Undo, so that a lesson every repo learns is written once for all of them.
 
 ## Fleet navigation & bulk actions
 
@@ -170,11 +215,19 @@ editors, the routine board) are intentionally omitted until they ship.
 - As a **reviewer**, I want a Fleet insights overlay aggregating turns, approval/denial rates, decision provenance, and time the fleet spent blocked on me, so that I can see where my attention is the bottleneck.
 - As a **fleet operator**, I want a notification-history view of what fired while I was away, so that I can catch up on escalations, stalls, and auto-actions I missed.
 - As a **reviewer**, I want a one-click shift report rolling up what the fleet did over a window, so that I can summarize unattended activity and copy it out.
-- As a **reviewer**, I want a session-history browser with filter/sort/pin and scoped multi-select delete, so that I can review and prune recorded session history without touching Claude's transcripts.
+- As a **reviewer**, I want a session-history browser with filter/sort/pin and scoped multi-select delete of the recorded history (never Claude's transcripts), listing every transcript Claude Code still has and every kept copy beside the ledger's sessions, so that I can review, prune and find any past conversation in one place.
 - As a **reviewer**, I want per-row redact/export/purge and a GC'd retention policy on the ledger, so that I can keep the record useful without it growing unbounded or leaking sensitive lines.
 - As a **reviewer**, I want session-lineage rollups for auto-respawns and /clears, so that I can recognize a crash-loop survivor instead of seeing a churn of unrelated session ids.
-- As a **fleet operator**, I want to search every live and dead session's transcript and the ledger, so that I can answer "which session touched this file?" across the fleet.
+- As a **fleet operator**, I want to search every live and dead session's transcript (a kept copy once Claude Code has deleted the original) and the ledger, so that I can answer "which session touched this file?" across the fleet.
 - As a **reviewer**, I want a "Review activity" prompt that sends a ledger slice to a session as a read-only governance review, so that an agent can assess risky actions without editing anything.
+
+## Past sessions & transcripts
+
+- As a **reviewer**, I want to ask any session a question (live or long finished) from its detail panel, a fleet-search hit or a History row, answered by a read-only fork of its own conversation, so that I learn what it did or why without interrupting it or reviving it.
+- As a **developer**, I want ↻ Resume on a History row to reopen a past session with its conversation, as its VS Code tab or with claude -r, only once Shepherd has verified it isn't running anywhere, so that I pick up last week's work without forking a session that's still live.
+- As a **developer**, I want a session whose transcript Claude Code already deleted to resume from its kept copy, put back at its original path first and never over a file, so that the conversation comes back whole instead of as an empty tab.
+- As a **reviewer**, I want every transcript of a project I ★ in History copied to ~/.claude/cc-keep once its session ends, and never deleted unless I confirm, so that the sessions I care about outlive Claude Code's 30-day cleanup.
+- As a **fleet operator**, I want Diagnostics to show Claude Code's cleanupPeriodDays and offer to raise it to 365 days, writing only that key, so that I can keep every transcript longer without editing settings.json by hand.
 
 ## Token & usage tracking
 
@@ -227,17 +280,23 @@ editors, the routine board) are intentionally omitted until they ship.
 - As a **fleet operator**, I want a TODO line that appears in several worktrees' copies to import once, so that a repo that commits TODO.md doesn't hand me every item again per worktree.
 - As a **fleet operator**, I want a line that exists only on a branch to show that branch until it reaches main, so that I know which unit of work it belongs to.
 - As a **fleet operator**, I want a removed worktree's items to stay in My List instead of being flagged missing, so that finishing and removing a worktree never loses what I still have to verify.
+- As a **fleet operator**, I want 📘 Add a playbook… to import a markdown checklist I keep outside the repo into a project's My List tab, kept in step with the file, so that a release or deploy checklist sits beside everything else I verify.
+- As a **fleet operator**, I want ▶ Run… to work through items I pick one at a time, each in a fresh session in the repo's main checkout with its brief typed in for me to send, and its tab closed once the item is done, so that a list of small jobs gets done while I verify.
+- As a **fleet operator**, I want a run I started to set my checkmark (✓ by run) only on Shepherd's own evidence (the box ticked in its file and a turn that did something, or the item's own session reporting done) and never on import, so that a checkmark still means I, or a run I started, checked it.
+- As a **fleet operator**, I want a run to stop after three items in a row finish nothing, and to pause for a live-run item, a blocked report or a batch in the repo and wait out a hold or freeze, so that a run never churns through my list unattended.
 
 ## Keeping the Mac & fleet running
 
 - As a **fleet operator**, I want a ☕ keep-awake toggle that prevents sleep even with the lid closed, so that long unattended agent runs aren't interrupted.
 - As a **fleet operator**, I want a 🔒 soft-lock overlay that blocks input while everything keeps running, so that I can step away with the fleet working and casual access deterred.
 - As a **fleet operator**, I want a force-unlock chord and release on quit/reboot, so that a typo at the lock screen can never lock me out.
+- As a **fleet operator**, I want ☰ → ♻️ Restart fleet to show what would reopen and then reopen every session that went down after a Claude Code update or a reboot, only those verified dead and each at most once, so that I don't resume every conversation by hand.
+- As a **fleet operator**, I want each reopened session's row to end as resumed, came back fresh or didn't come back, with one summary toast per run, so that I know which ones still need me.
 
 ## Personalization & ergonomics
 
 - As a **fleet operator**, I want to hide detail-panel tabs I don't use and have my last-open tab remembered per project, so that the panel shows only what I care about.
-- As a **developer**, I want AskUserQuestion options rendered as clickable buttons (driven directly on Kitty, jump-to on VS Code), so that I can answer an agent's question from the panel.
+- As a **developer**, I want AskUserQuestion options rendered as clickable buttons, answered through the cc-ask.sh hook (which hands my answer to Claude, so no picker is involved) and, when the hook isn't holding the question, driven directly on Kitty or jumped to on VS Code, so that I can answer an agent's question from the panel whatever its editor.
 - As a **fleet operator**, I want selectable themes, so that the panel fits how I like to work.
 - As a **fleet operator**, I want a Stream Deck integration mirroring panel actions, so that I can drive the fleet from physical keys.
 

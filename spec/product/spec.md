@@ -6,7 +6,8 @@ tile shows the project and a live status; selecting it opens a control panel to
 automation, and governance over the whole fleet from a single pane.
 
 > Status: **reverse-engineered from the shipped app** (README + source), not a forward
-> scoping draft. This documents intent and the decisions already made, so the
+> scoping draft. Brought up to date on 2026-10-04, after the build program and mining round 2.
+> This documents intent and the decisions already made, so the
 > [user stories](./user-stories.md) have a traced home and future features can be scoped
 > against it. Sections marked **[DECISION]** record a product choice that's already
 > settled (with its rationale), not an open question.
@@ -25,8 +26,13 @@ losing your place.**
   doing, nudge it, stop it, switch its model — happens **in the panel**.
 - It is the on-screen equivalent of a **Stream Deck for a fleet of agents**.
 
-The design constant: Shepherd **observes and nudges**; it never becomes the thing doing
-the work. Claude Code is still the harness; Shepherd is the supervisor's console.
+The design constant: Shepherd **supervises; it never does a unit's work**. Claude Code is still
+the harness and the sessions still write the code; Shepherd is the supervisor's console. Its own
+hands are few and bounded: it starts read-only headless `claude -p` runs (the merge checker, the
+coach, Seance), runs a project's test gate itself, opens a fresh session for a batch unit or a
+My List item (a My List item's brief is typed in and never sent: you press Return), and writes
+instruction files (a repo's `CLAUDE.md`, a marked block in `~/.claude/CLAUDE.md`, a repo's
+auto-memory) only on your click.
 
 ## 2. Goals / Non-goals
 
@@ -35,48 +41,87 @@ the work. Claude Code is still the harness; Shepherd is the supervisor's console
 - Reliable **approve/deny** of permission prompts — ideally hands-free, regardless of editor.
 - Per-session control (jump, stop, nudge, clear/compact, effort/mode/model) from the panel.
 - Spawn new sessions (folders, presets, agent profiles, providers) from the panel.
-- Opt-in automation: queues/routing, escalation, respawn, rules, schedules — **all off by default**.
-- Governance you can audit: an opt-in ledger, insights, shift reports, gate-decision provenance.
+- Automation you switch on: queues/routing, escalation, auto-respawn, rules, schedules and the
+  coach act only once enabled. A few named conveniences are on from the start, and a fresh install
+  writes the author's defaults, which turn on more; §7 lists both exactly.
+- Governance you can audit: a local ledger, insights, shift reports, gate-decision provenance.
+- Evidence Shepherd gathers itself (its own git, its own test-gate runs) before it calls a merge
+  ready, merges on a batch grant or ticks an item off, never a session's word (D-5).
 - Local-first observability (status, plan/TODO, usage, subagents) **derived from data Claude
-  already writes** — no extra hooks, zero model tokens.
+  already writes** and Shepherd's own hook events, spending no model tokens. The few features that
+  do spend tokens (merge checker, coach, Seance) are named and capped (§6).
 
 **Non-goals**
 - **Orchestrating non-Claude agent CLIs** (aider, gemini-cli). They have no hook system, so
   tiles/approvals couldn't work. Shepherd supervises **Claude Code** specifically. **[DECISION D-1]**
-- **Being a second executor.** Rules and routines fire the *normal* spawn/nudge effects; they
-  don't introduce a parallel action engine. **[DECISION D-2]**
+- **Being a second executor.** Rules and routines fire the *normal* spawn/nudge/digest effects,
+  and a routine's `gate` action (**Check main is green**) runs the repo's own merge gate in its
+  gate lane; they don't introduce a parallel action engine. **[DECISION D-2]**
 - **Enforcement by quarantine.** Risk/collision/loop/hung are **detection only** — they badge,
-  they never block, lock, or kill another process. **[DECISION D-3]**
+  they never block, lock, or kill another process. The brief pre-flight and gate blame are
+  advisory in the same way. **[DECISION D-3]** Two things do hold work back, on purpose, and
+  neither touches another process: the **Stop guards** send a session's own turn end back once
+  with a reason (D-22), and **grant grading** holds Shepherd's own merge on a batch grant until
+  Adam clicks (D-18). Denying a tool call (the gate, always-ask commands, talk mode, the worktree
+  fence) is the approval hook's job, not a detector's.
 - **A hardened security boundary.** The screen lock is a *soft* deterrent, not the macOS login
   window (that would break keystroke control of GUI sessions). **[DECISION D-4]**
 - **Cross-platform.** macOS + Hammerspoon only; control relies on macOS Accessibility, `kitty @`,
   and AppleScript-style focus.
-- **Claiming outcomes.** Shepherd reports *operations* (prompts, approvals, spawns), never "what
-  shipped" — it has no git/CI ground truth. **[DECISION D-5]**
+- **Claiming outcomes on a session's word.** Shepherd claims an outcome only on evidence it
+  checks itself, never on a session's prose ("done", "tests pass"). It reads merges with its own
+  git (D-16), runs a project's test gate itself, re-runs a red gate at the merge-base to say which
+  failures main already has (gate blame), checks main on a schedule (main-green), merges on a
+  batch grant only on its own gate pass for that commit (D-18), ticks a My List item off only on
+  its own reading of the item's file or that item's own session's `cc-run.sh` report (D-24), and
+  says how each restarted session came back. Beyond that it reports *operations* (prompts,
+  approvals, spawns): it has no CI of its own, and a PR's state is only read through `gh`.
+  **[DECISION D-5, revised]**
 
 ## 3. The core loop (the heart of the design)
 
-Everything rests on a one-way **hook → status file → panel** flow, with an optional
-**panel → decision file → gate** return path. No daemon, no socket, no DB.
+Everything rests on a one-way **hook → status file → panel** flow, with **panel → file → hook**
+return paths for the answers only Adam gives. No daemon, no socket, no DB.
 
 ```
 Claude Code hooks ──► cc-status.sh ──► ~/.claude/cc-status/<session_id>.json ──► dashboard (tiles)
-                  └─► cc-approve.sh ◄── ~/.claude/cc-status/<session_id>.decision ◄── (panel Approve/Deny)
+                  ├─► cc-approve.sh ◄── ~/.claude/cc-status/<session_id>.decision ◄── (panel Approve/Deny)
+                  ├─► cc-ask.sh ◄── ~/.claude/cc-ask/<key>.answer ◄── (panel answers a held question)
+                  ├─► cc-resume.sh ◄── ~/.claude/cc-resume/<key>.plan.json ◄── (panel's limit-reset plan)
+                  ├─► cc-worktree-guard.sh  (EnterWorktree: one worktree, one agent)
+                  └─► cc-popup.sh           (optional editor focus-pop)
+Stop ──► cc-status.sh ──► {"decision":"block"}  (a mailbox message, a notes request, a Stop guard)
 ```
 
-- **`cc-status.sh`** merges each hook event (SessionStart, UserPromptSubmit, Pre/PostToolUse,
-  Notification, Stop, SessionEnd, PermissionRequest, AskUserQuestion) into that session's JSON.
+- **`cc-status.sh`** merges each hook event into that session's JSON. `settings-hooks.json` wires
+  SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, PostToolUseFailure, PermissionRequest,
+  Notification, Stop, StopFailure, PreCompact and SessionEnd. PostToolUseFailure (2026-10-02)
+  clears a failed tool's in-flight marker the way PostToolUse clears a successful one: before it,
+  a failed Bash command left the session refusing every automated send with "tool" until it ran
+  another tool.
 - **`cc-approve.sh`** is the optional PreToolUse gate: it parks a gated tool and reads the
   decision file the panel writes — **no window focus, no keystrokes** needed to approve.
+- **`cc-ask.sh`** is a PreToolUse hook on the AskUserQuestion matcher (D-19);
+  **`cc-worktree-guard.sh`** one on EnterWorktree, denying a linked worktree another live session
+  works in; **`cc-resume.sh`** a StopFailure hook on `rate_limit` that wakes the session at the
+  usage limit's reset.
 - **`cc-core.lua`** is the pure logic (parsing, sorting, action selection, deck layout,
   spawn-command building) — no `hs.*`, fully unit-tested.
 - **`claude-dashboard.lua`** is the Hammerspoon bootstrap: reads the JSON, renders tiles,
   writes a heartbeat, and wires the real effects (focus, keystrokes, Kitty remote, Stream Deck).
 
-**Why a file-merge model.** Hooks are fire-and-forget shell calls; a status file per session is
-crash-safe, inspectable, and needs nothing running between events. The dashboard is a *reader*;
-the gate is a *reader*; the only writers are the hook script and the panel's decision file.
-**[DECISION D-6]**
+**Why a file-merge model.** A status file per session is crash-safe, inspectable, and needs
+nothing running between events. The dashboard is a *reader* of status files; the hooks read back
+what Adam decides. Every answer the panel gives (an approval, a held question's answer, a merge
+decision, a batch's grant) is a file bound to its request's nonce read from disk and claimed with
+`mv`. Not every hook is fire-and-forget any more: the Stop hook may print a block decision (a
+mailbox message, a notes request, a Stop guard), and it reads `cc-hold/` first so a held session
+gets none of them. Each writer owns its own files: the hooks (`cc-status/`, a Stop guard's
+`cc-guard/<key>.<guard>`); the scripts sessions run (`cc-merge.sh` → `cc-merge/`, including the
+`<key>.notyet` a Not yet leaves; `cc-fleet.sh` → a batch's proposal; `cc-lesson.sh` → `cc-lesson/`;
+`cc-run.sh` → reports in `cc-run/`; `cc-decide.sh`, `cc-ticket.sh`, `cc-send.sh`, `cc-pin.sh`);
+and the panel (decision and answer files, a batch's own state, `cc-hold/`, `cc-main-green.json`,
+`cc-keep/`, checklist runs). **[DECISION D-6, revised]**
 
 ## 4. Status model
 
@@ -86,9 +131,17 @@ the gate is a *reader*; the only writers are the hook script and the panel's dec
 | `working`  | amber           | UserPromptSubmit, Pre/PostTool| Actively doing work                    |
 | `approval` | red (pulsing)   | Notification (permission)     | Needs permission or your input         |
 | `done`     | green           | Stop, Notification (idle)     | Finished its turn, ready for you       |
-| `error`    | magenta         | *derived from transcript*     | Frozen on an API error (no Stop fired)  |
+| `error`    | magenta         | StopFailure, *or the transcript* | Frozen on an API error (no Stop fired)  |
 
 - Sessions are keyed by **session_id** (two sessions in one folder never collide).
+- A **grey card**, in its own row under the grid, is a live interactive session in Claude Code's
+  `~/.claude/sessions/` that no status file covers (started before Shepherd's hooks, or with hooks
+  off): its folder, Claude Code's own busy/idle, and "restart it to get live status". It must stay
+  alive and unmatched for 15 s first and is never an `sdk-*` headless run (Shepherd's own `claude -p`
+  included). No sender, count, needs-you verdict or restart snapshot sees one.
+- Badges ride on top of the status: **HOLD** (one session on hands-off hold) or **FROZEN** (the
+  fleet is frozen), D-23; **⚠ main is red** on every card of a repo whose scheduled main-green
+  check last failed, with the failing lines in its tooltip.
 - Tiles **dim** after ~90s of silence (a crash), **disappear** on SessionEnd.
 - A `done` tile **self-heals to `working`** when the transcript shows the model resumed, so an
   auto-continued/text-only turn isn't stuck on "Ready for you" (`status.resumeSlack`).
@@ -108,6 +161,15 @@ Two delivery paths, and which one a session uses determines reliability. **[DECI
    supported API to inject into a running session). **Queue** stores work reliably; feeding into
    the VS Code chat input is the fragile part.
 
+A third path carries messages rather than keystrokes: the **session mailbox** (2026-09-29).
+Shepherd leaves a session a `[shepherd]`-marked message in `~/.claude/cc-inbox/<key>/`; the Stop
+hook hands the oldest over by blocking the turn's stop with it (never while `stop_hook_active`),
+a resumed or compacted session is shown what still waits, and an idle session is typed a one-line
+nudge only in kitty or a VS Code window of its own. In a shared window nothing is typed and the
+card says **1 message waiting**. Each message is claimed by rename, so it arrives once. `cc-send.sh`,
+tickets, late decision answers, the main moved notice and the driver's uncollected-answer mail all
+travel this way.
+
 Each session **self-reports its editor** (`cc-status.sh` reads the env it inherits from `claude`),
 so the panel routes effects per session: Kitty → headless, everything else → focus-and-type.
 
@@ -119,11 +181,14 @@ approvals are unaffected; `keystrokes.refuseSharedWindow` turns the guard off. *
 
 New Claude tabs don't go through keystrokes at all: the Claude extension's
 `vscode://anthropic.claude-code/open?prompt=` URI opens a **new** tab in the *active* editor
-window with the prompt typed in. Shepherd uses it for **New worktree tab** (and to resume an idle
-`.claude/worktrees/` worktree): it brings the repo's own window to the front, re-checks it right
-before the URI goes out, and **never sends the prompt** — the operator reads it and presses
-Return. A prefilled tab costs one keypress; an automatic Return would be the very keystroke into a
-shared window that D-12 refuses. **[DECISION D-13]**
+window with the prompt typed in. Shepherd uses it for **New worktree tab**, to resume an idle
+`.claude/worktrees/` worktree, for a spawn into a window that already holds a live Claude session,
+for a ticket's **Open a tab for it**, for a batch unit's tab (opened empty: the driver sends its
+task with SendMessage, D-18) and for each item tab of a My List checklist run (its brief typed in,
+D-24). Every time it brings the repo's own window to the front, re-checks it right before the URI
+goes out, and **never sends the prompt** — the operator reads it and presses Return. A prefilled
+tab costs one keypress; an automatic Return would be the very keystroke into a shared window that
+D-12 refuses. **[DECISION D-13]**
 
 Jump stays **window-level**: it doesn't bring a session's own tab to the front. The same URI with
 `?session=<id>` can — a 2026-09-10 spike showed it switches the active tab to that session's
@@ -136,26 +201,44 @@ surface). Shepherd can't tell a sidebar session from an editor tab, so a Jump wo
 live session; instead you pick the tab (its title is the chat title). Revisit if the extension ever
 refuses to resume a session live elsewhere. **[DECISION D-14]**
 
-D-14 has **one exception** (2026-09-30): **restart in place**. After a Claude Code update or a
-reboot the sessions are gone, and a session with no process anywhere cannot be forked — so
-`?session=<id>` may reopen the tab of a session that is **verified dead**: no session file of
-Claude Code's (`~/.claude/sessions/`) names it under a process `ps` still shows, and its own
-recorded process is gone or is another process now (start times compared, Shepherd's own pid as the
-control; anything unverifiable counts as alive). The URI is written in one place
-(`core.restartTabUri`), sent by one function (`FX.openClaudeTab`, which verifies again right before
-it goes out) and requested by one path (`FX.restartOne`, one session at a time, each stamped so it
-is never reopened twice). Every other use stays banned: Jump, Open and New worktree tab never pass
-a session id. **[DECISION D-14, revised]**
+D-14 has **one exception** (2026-09-30): reopening a session that is **verified dead**. A session
+with no process anywhere cannot be forked, so `?session=<id>` may reopen its tab. The URI is
+written in one place (`core.restartTabUri`) and sent by one function (`FX.openClaudeTab`, which
+verifies again right before it goes out), and it has exactly two callers:
+
+- **Restart in place** (`FX.restartOne`, 2026-09-30): after a Claude Code update or a reboot,
+  ☰ → ♻️ Restart fleet reopens the sessions of its snapshot one at a time, each stamped so it is
+  never reopened twice. Dead means no session file of Claude Code's (`~/.claude/sessions/`) names
+  it under a process `ps` still shows, and its own recorded process is gone or is another process
+  now (start times compared, Shepherd's own pid as the control).
+- **History's ↻ Resume** (`FX.pastResumeLaunch`, 2026-10-04, Adam's call): a past session in no
+  restart snapshot is judged by `core.pastLiveness` — no card in Shepherd, no live
+  `~/.claude/sessions` entry, and no process whose command line holds its id. A spike found a
+  missing transcript makes the link open an *empty* tab, so a session whose original transcript
+  Claude Code has deleted but whose kept copy remains gets that copy put back at its original path
+  first: clone-copied to a part file beside it, then linked into place, never over a file that is
+  there. A terminal session comes back with `claude -r <id>` instead.
+
+Anything that can't be verified counts as alive and is never reopened. Every other use stays
+banned: Jump, Open and New worktree tab never pass a session id. **[DECISION D-14, revised]**
 
 Closing **one** tab needs something inside VS Code: nothing outside can target a tab (⌘W hits
 the front one; the Claude extension's URI has no close; VS Code's Accessibility tree is off). So a
 tiny local companion extension, the **tab bridge** (`vscode-bridge/`), runs in every window's
 extension host — the same process as that window's Claude tabs, so its pid *is* `host_window` —
-lists the window's Claude tabs by name, and takes exactly one command: close a Claude tab by name.
-The tab API exposes no session id, so the name is the identity: Shepherd computes it as the Claude
-extension does (custom title, else AI title, cut to 24 UTF-16 units + "…"), and the bridge closes
-only on a **single** match — a fresh "Claude Code" tab, or two tabs sharing a name, stay refused.
-It is installed locally with VS Code's own CLI, never published. **[DECISION D-15]**
+lists the window's Claude tabs by name, and takes exactly three commands, each acting only on a
+**single** match: **close** a Claude tab, **select** one (D-17), and **expect**: tag the next
+Claude tab that opens as a batch unit's (D-18) or a checklist run item's (D-24). Those tabs never
+get a name, so close and select take the tag instead of a name for them. The tab API exposes no
+session id, so the name is the identity: Shepherd computes it as the Claude extension does (custom
+title, else AI title, cut to 24 UTF-16 units + "…"), and close uses only that strict name — a fresh
+"Claude Code" tab, or two tabs sharing a name, stay refused. One narrow exception: never-used chats
+all read "Claude Code" and are interchangeable, so close may carry a count and close an untagged
+"Claude Code" tab only while the window shows exactly as many as Shepherd counts empty sessions
+there; Instances' **Close selected** (2026-09-25, Adam confirms first) closes unnamed sessions by
+that count only when every unnamed session in the window is selected. Bridge 0.6.0 carries the
+tags over when VS Code rebuilds its tab objects on a tab switch. It is installed locally with VS
+Code's own CLI, never published. **[DECISION D-15]**
 
 **Ready to merge** is its own channel, not the approval gate: the gate's status values, its
 `allow|deny <nonce>` answers and its 120 s hook wait can't carry a review or wait an hour. A
@@ -166,6 +249,37 @@ reviews it on the card, and answers with a decision file bound to the request's 
 conflicts with the tests, fast-forwards main and runs `cc-merge.sh done` (which removes the
 worktree and branch only once the branch is in main, never forced) — one merge per repo at a time,
 in click order. Shepherd re-verifies with git before the tab bridge closes the tab. **[DECISION D-16]**
+
+Around a merge Shepherd gathers more of its own evidence (D-5):
+
+- **Test gate** (`merge.gates`, 2026-09-17; or, with `merge.repoGate`, the base branch's own
+  `.worktree-check`, read with Shepherd's git so a unit can't rewrite its own gate): Shepherd runs
+  the project's suite itself in the worktree before the review calls the unit ready — one gate per
+  repo at a time, pre- and post-merge sharing the lane. A gate that couldn't run (a locked suite, a
+  missing command, a folder that's gone) is never reported as one that failed.
+- **Merge checker** (`verify.onMerge`, 2026-09-29): red flags from the diff with no model (added
+  conflict markers, deleted tests or lines removed from one, a new `.skip`/`.only`/`fdescribe(`,
+  stubs), then a headless read-only Sonnet review (`verify.maxBudgetUsd`, $1 by default), once per
+  request per commit, shown as pass / fail / couldn't run. 🔎 Verify runs the same review for any
+  session. Adam's own Merge click never reads it.
+- **Gate blame** (2026-10-03): a gate that fails with failing test lines is run again at the
+  merge-base in a detached scratch worktree (cached per repo, merge-base and command, queued behind
+  any gate that judges a merge), and the review splits the failures into *already failing on main*
+  and *new in this branch*. Informational only: a red gate stays red, and a merge-base run that
+  couldn't finish counts on neither side.
+- **Main moved notice** (`merge.mainMovedNotice`, on by default, 2026-10-03): at a verified merge,
+  every other live worktree session of that repo whose own changes (as the overlap radar scanned
+  them) touch the merged files gets one mailbox note — "main moved to <sha7> (<unit>), touching
+  <files>: rebase onto main before you ask to merge". It is handed over at a turn end or start,
+  never typed, and announced once per repo and merged sha, across reloads (`main-moved.seen`).
+- **Main-green check** (2026-10-03): a routine with `"action": "gate"` (**Check main is green** on
+  the ⏰ Routines board, opt-in per repo) runs the repo's merge gate in its main checkout, behind any
+  merge in the repo's gate lane, after checking the checkout is on its branch with no uncommitted
+  tracked changes. Red raises one banner (and a phone push with escalation push on), **⚠ main is
+  red** on every card of the repo and an entry in the coach's log; the next green clears it. A run
+  that couldn't run or timed out changes nothing, and a fleet freeze or a held session of the repo
+  skips a scheduled run. It fires on schedule only with `schedules.enabled`; **Run** (Adam's own
+  click) works regardless.
 
 Jump lands on the **exact tab** after all — through the tab bridge, not the Claude URI. The bridge's
 second op, `select` (by name, single match only), focuses the tab's editor group and opens the tab
@@ -180,9 +294,31 @@ batch**. The session proposes it with `cc-fleet.sh propose`; the review on its c
 the proposal file is the session's and is never trusted for permission. Approved, Shepherd opens each unit's
 tab on the driver's request (an empty Claude tab, then the one new session in the repo root whose
 parent is that window's extension host — one opening per repo at a time); the driver hands the unit
-its task with SendMessage, which runs under the unit's own permissions. Merges go through on the
-grant only for a unit's **own session on its own branch** and only after Shepherd's readiness
-check; everything else still waits for Adam's click. Stop ends the grant at once. **[DECISION D-18]**
+its task with SendMessage, which runs under the unit's own permissions. Stop ends the grant at once.
+**[DECISION D-18]**
+
+- **Brief pre-flight** (2026-10-03): before Adam answers, the units' *full* briefs (not the
+  review's 300-character cut) are scanned for force push, push to main, deleting or skipping
+  tests, `rm -rf`, secrets and CI or deploy files (negation-aware: "never git push" doesn't
+  count), plus two units citing one file and more than one hook-wiring unit. The review lists each
+  flag with the words that raised it, the card counts them, and `propose` prints one line. It is
+  advisory (D-3): Approve is never held.
+- **A late answer is still collected** (2026-10-02/03): when the driver's `propose` stopped
+  waiting before Adam answered (a background time limit), `cc-fleet.sh propose --resume <id>`
+  collects the answer, for the session that proposed the batch only. An answer still uncollected
+  30 s after Adam gives it mails the driver, once, that command.
+- **Merges on the grant need Shepherd's own evidence.** They go through only for a unit's **own
+  session on its own branch**, after Shepherd's readiness check, and only with **its own test
+  gate's pass recorded for that commit** (a repo with no gate configured waits for Adam's click)
+  plus, with `verify.onMerge` on, the merge checker's pass.
+- **Grant grading** (`core.grantRisk`, 2026-10-03) holds a merge for Adam's click when the diff's
+  full file list touches hook wiring (`settings-hooks.json`, `install.sh`, `uninstall.sh`,
+  `SHIPPED`), any `CLAUDE.md` or `methodology/`, `DECISIONS.md`, `defaults/`, CI config,
+  migrations, lockfiles or `.claude/settings*`, deletes a tracked file, or the checker passed it
+  with a high-severity finding. `merge.grantWaitsFor` picks the categories; unset means all of
+  them. A hands-off hold on the unit's session, or a ❄ fleet freeze, makes it wait too (D-23).
+  The card says why it waits, and Adam's own Merge click never reads any of this.
+  **[DECISION D-18, revised]**
 
 A session's **question is answered from Shepherd**, not by driving the tab. Nothing outside the
 VS Code webview can click its picker, so the question is caught before it is shown: `cc-ask.sh`, a
@@ -191,14 +327,16 @@ and waits for `cc-ask/<key>.answer` bound to that nonce. It then allows the tool
 `updatedInput.answers` (keyed by question text; a list for multi-select; free text accepted), and
 Claude Code skips its picker and gives Claude the answer as the tool result — spiked 2026-09-11 in
 the CLI and a VS Code tab. A release, a timeout (`ask.waitSeconds`, ≤ 3600) or a dead panel emits
-nothing, and the tab's own picker is the fallback. Approve/Deny never act on a held question.
-**[DECISION D-19]**
+nothing, and the tab's own picker is the fallback. Approve/Deny never act on a held question. A
+turn that asks Adam in prose instead is sent back once to ask it this way (the question Stop
+guard, D-22). **[DECISION D-19]**
 
 After a verified merge Shepherd closes **only a tab it opened for that one job** — a batch unit's
 (known by its tag) or one started with its own prompt (New worktree tab, a resumed worktree). A main
 chat that did a unit itself in a worktree stays open; its finished request is cleared with a toast.
-(2026-09-14: closing every merged session's tab took Adam's working conversation with it.)
-**[DECISION D-20]**
+(2026-09-14: closing every merged session's tab took Adam's working conversation with it.) A
+checklist run's item tab (D-24) closes by its run tag once its item is done, through the bridge's
+own close by tag: `core.mergeClosesTab` was never widened for it. **[DECISION D-20]**
 
 Shepherd never types a slash command into a VS Code/Cursor tab that the extension lacks: the chat
 input's slash menu fuzzy-matches and the autocomplete Return runs its guess. The Remote Control
@@ -206,25 +344,55 @@ startup sweep therefore types `/rc` into **terminal** sessions only; extension t
 Control from their launch flags. (2026-09-15: `/rc` ran `/deep-research` in VS Code tabs on every
 Shepherd reload, 11 times in a week.) **[DECISION D-21]**
 
-## 6. Observability (local, derived, zero extra hooks)
+## 6. Observability (local, derived, no model tokens)
 
-All from the transcript Shepherd already tails — **no extra hooks, no model tokens**:
+All from the transcript Shepherd already tails, its own hook events and Claude Code's own session
+files — **no model tokens**:
 
 - Live "Doing:" activity peek; current plan/TODO; error-cause badge; loop-repeat watchdog (badge
   only); stuck/hung watchdog (badge only).
 - **Subagent/Workflow fan-out** read from the `subagents/` tree Claude writes; a "⚙ N" pill and
   "Running N agents" so background work isn't mistaken for idle.
+- **Grey cards** for live sessions the hooks never reported (§4).
 - Optional: auto-title, desktop banners, post-run self-summary, PR/MR status (via `gh`), host
   stats, run score — each off by default.
+- **Fleet idle alert** (on, `alerts.idleMinutes`, 15): one macOS banner (plus a phone push when
+  escalation push is on) once every local session has been idle or done that long, armed again
+  only when a session works again. An interrupted turn counts as idle by its transcript marker,
+  never by going quiet. `alerts.voice` (off) speaks it through `hs.speech`, and
+  `alerts.voiceEvents: ["needsYou"]` also says when a session starts needing you.
 - **Token usage** read from the local transcript `usage` fields: per-tile context-fullness bar,
   fleet total + estimated $ (subscription is flat-rate; this is an API-equivalent estimate),
   and real plan-window (5h/weekly) bars from a **metadata-only** OAuth usage call (spends no
   model tokens; falls back to a labeled local approximation).
 
+**What does spend model tokens** is named and capped, each a headless read-only `claude -p` run
+with its own `--max-budget-usd`: the **merge checker** (`verify.maxBudgetUsd`, $1 a run), the
+**coach** (`coach.maxBudgetUsd`, $1 a run; its evidence runs also stop at `coach.evidence.dailyUsd`,
+$3 a day across repos; its across-repos run at most once a day) and **Seance** (a budget sized from
+the session's context, at most `seance.maxBudgetUsd`, 20 by default).
+
 ## 7. Automation & governance posture
 
-**One settings file (`~/.claude/cc-config.json`), and everything is off until you turn it on.**
-A ⚙ Settings panel writes it; the gate reads it on the next hook fire. The capability ladder:
+**One settings file (`~/.claude/cc-config.json`).** A ⚙ Settings panel writes it; the hooks read
+it on their next fire. Not everything starts off; this is exactly what is on, and when:
+
+- **With no file at all**, only conveniences act by themselves: a held question answered on the
+  card (D-19), resume at a usage limit's reset, worktree leases, Remote Control for spawned
+  sessions, ending a tab-less leftover, plan-limit alerts, the **fleet idle alert**
+  (`alerts.idleMinutes`, 15), the **main moved notice** (`merge.mainMovedNotice`) and closing a
+  merged unit's tab. **Grant grading** holds merges on a batch grant from the start
+  (`merge.grantWaitsFor` unset means every category). Read-only background checks (commit
+  counts, the overlap radar, the scheduled-tasks lock check) run too.
+- **A fresh install** writes the author's daily settings (`defaults/cc-config.json`) when there is
+  no file yet, and those also turn on auto-continue, the Respawn menu, auto-compact with notes, the
+  three **Stop guards** (`stopGuards.question`, `.fakeDone`, `.unfinished`), the merge checker
+  (`verify.onMerge`), the worktree fence, the audit ledger and real spawning (`spawn.live`).
+- **Off until switched on**, either way: the queue's auto-feed and routing, rules, routines
+  (`schedules.enabled`), escalation, auto-respawn, voice alerts (`alerts.voice`) and the coach's
+  own runs (`coach.enabled`).
+
+The capability ladder:
 
 - **The gate** holds a configurable risky-tool list (default `Bash Write Edit MultiEdit
   NotebookEdit`) until you decide; pattern `autoAllow`/`autoDeny` globs (deny wins); per-session
@@ -234,17 +402,127 @@ A ⚙ Settings panel writes it; the gate reads it on the next hook fire. The cap
   project/group/provider glob; union with or replace the fleet patterns.
 - **Event-callback rules** (L6): `{trigger: done|error|approval, processor: log|relabel|nudge}`,
   optional match scope, fire-once.
-- **Scheduled routines** (L7): cron/one-shot that fire the normal spawn/nudge/digest effects;
-  a scheduled spawn still respects `spawn.live` (dry-run).
+- **Scheduled routines** (L7): cron/one-shot that fire the normal spawn or digest effects, or a
+  `gate` action (**Check main is green**, §5); a scheduled spawn still respects `spawn.live`
+  (dry-run). Nothing fires on schedule until `schedules.enabled`.
+- **Queues:** a queued line can be **held** in place (stored as `{text, held = true}`): auto-feed,
+  Feed next and the router feed the next line that isn't held, until it is released. ☰ → 📑 Queues
+  lists every session's queue (its sessions, held lines, a packet line's last cited-code check)
+  with Hold / Release, ▲ ▼ and ✕ (which asks first).
 - **Recovery:** manual + automatic **respawn** of a session frozen mid-turn (capped per folder);
   **Auto-Continue** of a session frozen on an API error (capped per folder); **escalation** nag
-  when an approval waits too long. A session waiting on *you* is never auto-respawned.
+  when an approval waits too long. A session waiting on *you* is never auto-respawned. After a
+  Claude Code update or a reboot, ☰ → ♻️ **Restart fleet** previews and then reopens every session
+  that went down (D-14), and each reopened row ends as **resumed** (its hooks wrote again, or a
+  session file names it under a new process), **came back fresh** (a new session in its folder) or
+  **didn't come back** (neither within 5 minutes), recorded as `restart_outcome` and summed up in
+  one toast per run.
 - **Detection:** risk indicator, shared-directory collision, loop/hung watchdogs — badges only.
 
-**Audit:** an opt-in append-only JSONL **ledger** (`~/.claude/cc-ledger/`) is the data source for
-**Fleet insights**, **notification history**, the **shift report**, the **session-history browser**,
-**lineage**, and **gate-decision provenance**. Retention is GC'd by days/size; rows can be
-redacted/exported/purged. Off by default; never records Claude's own transcripts.
+**Stop guards** (2026-10-02/03). A guard reads how a turn ended and, when it shouldn't have ended
+that way, the Stop hook blocks the stop **once** with a reason, so the session carries on and its
+card stays working:
+
+- **question** — the last paragraph asks Adam something in prose (code, quotes and a question
+  answered in the same breath don't count): ask it with AskUserQuestion, so it lands on the card
+  (D-19). Never while a question is already held.
+- **fakeDone** — the last message claims done while the diff from the merge-base with main to the
+  working tree adds a `.skip`/`.only`/`xit`/`fdescribe`… to a test, deletes a test, or leaves a
+  stub: the lines are listed (up to 8), to fix, or to justify in one line. The merge checker's own
+  rules, run at the turn end.
+- **unfinished** — a session in a `.claude/worktrees/` worktree claims done, with commits ahead of
+  main and no merge request for that worktree: ExitWorktree, then `cc-merge.sh request`. Not while
+  background tasks run, and never for a commit Adam answered Not yet; after a compaction a unit's
+  session is told the finish steps again.
+
+A mailbox message stands every guard down (it is new input, maybe the very answer); the notes
+request goes first and the guard joins it; among the guards question > fakeDone > unfinished, and
+only the first that fires speaks. Each blocks once per session and turn (question) or head sha
+(the other two), remembered in `cc-guard/<key>.<guard>`; none runs while `stop_hook_active`, in
+plan mode, in Shepherd's own internal runs, on hold, or where the panel's heartbeat is stale. Each
+block is one `stop_guard` ledger event. This is D-3's carve-out: a guard sends back the session's
+own turn end, never another process, and the session may answer it in one line and carry on.
+**[DECISION D-22]**
+
+**Hands-off hold** (2026-10-03). **Hold** (a tile's menu, the detail panel) puts one session on
+hold, and **❄ Freeze** in the toolbar holds the fleet; the card reads HOLD or FROZEN. Every
+automatic send stands down: the automation door (auto-feed, routing, rules, auto-continue,
+respawn, a *held* row in the Trace), the drain close, scheduled spawns and the main-green check,
+a checklist run, merges on a batch grant (they wait for Adam's click), and in the hooks the Stop
+guards, the notes request and the resume wake. Each skipped send is listed on the session and
+never replayed. Mail (the mailbox, decisions, tickets) waits and goes out once the hold is lifted.
+The flags are `cc-hold/<pid>` (it survives `/clear`), `key-<key>` (no known process) and `.fleet`.
+**[DECISION D-23]**
+
+**Playbooks and the checklist runner** (2026-10-03). **📘 Add a playbook…** on a project's My List
+tab picks a markdown checklist through the Mac's file chooser (never a path typed into the panel);
+its `- [ ]` lines import like `TODO.md`'s, grouped under the file's name, and their ✓ auto and
+▶ live run chips follow the file. **Remove playbook** stops the import and keeps its items to
+verify. **▶ Run…** picks open items (nothing preselected) and **Run selected** works through them
+one at a time, each in a fresh tab in the repo's **main checkout**, opened through D-13 with its
+brief typed in (Adam presses Return) and tagged through the bridge's `expect`, so it closes by
+its run tag when the item is done (D-20). A file line (`TODO.md`, a playbook) counts once Shepherd
+reads its box ticked and the turn didn't end as *did nothing*; any other item once its own session
+runs `cc-run.sh done` (or `blocked`, which pauses the run). Then Shepherd sets **Adam's own
+checkmark**, shown as **✓ by run** and unchecked like any other, and only for a run Adam started;
+importing a `TODO.md` or a playbook never sets it. Three items in a row that finish nothing stop
+the run; a live-run item, a blocked report or a batch in the repo pauses it; a hold or a freeze
+holds it; one run per repo at a time. Runs are `cc-run/<id>.run.json`, written only by the panel.
+**[DECISION D-24]**
+
+**The coach** (2026-09-30, extended 2026-10-02/03). With `coach.enabled` (off by default) the coach
+runs weekly (`coach.day`), or sooner once enough new evidence has come in (`coach.evidence.minItems`,
+after a 24 h cooldown, under the daily dollar cap); a session's **🧭 Coach** button starts one by
+hand, switch or not. A headless read-only Sonnet reads the repo's last 10 sessions (corrections,
+interrupts, tool errors, denials with a note, Not yet notes) and Shepherd's own log (merge notes,
+checker findings, main going red, and lessons sessions filed with `cc-lesson.sh "<one line>"`),
+and proposes up to 5 `CLAUDE.md` edits with evidence, optional `DECISIONS.md` entries, and a review
+of the repo's Claude Code auto-memory (delete, rewrite or keep a note, or promote one into
+`CLAUDE.md`). Nothing is written but on Adam's click:
+
+- **Apply** writes `CLAUDE.md` and commits it alone, refused when the file changed since the
+  coach read it (hash) or has uncommitted edits; **Undo** takes an applied edit back out in a
+  commit of its own. A memory edit is refused the same way when a session changed the note, is
+  backed up first in `cc-coach/<repo>.memory-backup/` with `MEMORY.md`'s index kept in step, and
+  Undo restores it. Nothing outside the repo's memory folder is touched.
+- A per-repo **lessons ledger** keeps every Apply, Skip (with an optional one-line *Why skip?*)
+  and Undo; the next run reads it, so an applied suggestion isn't proposed again and a skipped or
+  undone one comes back only with new evidence.
+- Each run judges the applied edits that at least 3 later sessions postdate: working, still seen
+  (with quotes) or no data yet, decided by Shepherd, not the model. **Sharpen** runs the coach on
+  one edit alone for a better wording.
+- **Across repos**: at most once a day, when 2+ repos have applied lessons it hasn't compared, one
+  run groups the same lesson across repos (the model's call, never fuzzy matching) and proposes
+  each group as one rule for a marked, 4 KB-capped block in `~/.claude/CLAUDE.md`. Apply is a
+  click, refused once the file changed since the run read it, written through a link to its
+  target and backed up first in `cc-coach/global.claude-backup/`; Undo restores the backup. It is
+  never mirrored into `methodology/CLAUDE.md`.
+
+**[DECISION D-25]**
+
+**Seance** (2026-10-02). Any session, live or long finished, can be asked a question from its
+detail panel, a Find-in-fleet hit or a 🗂 History row. A read-only headless fork of its own
+conversation answers (`claude -p --resume <transcript> --fork-session --no-session-persistence`,
+the checker's read-only tools, hooks off, no MCP), in the session's model with a budget sized from
+its context (§6). Nothing is saved, the session never sees the question, and its transcript is
+only read. It runs in its own lane, never behind a repo's checker or coach. **[DECISION D-26]**
+
+**Audit:** an append-only JSONL **ledger** (`~/.claude/cc-ledger/`; off in code, on in a fresh
+install's defaults) is the data source for **Fleet insights**, **notification history**, the
+**shift report**, the **session-history browser**, **lineage**, and **gate-decision provenance**.
+Round 2 adds `stop_guard`, `restart_outcome` and `past_resume` events. Retention is GC'd by
+days/size; rows can be redacted/exported/purged. The ledger never records Claude's own transcripts.
+
+**Past sessions and kept transcripts** (2026-10-03/04). 🗂 History also lists every transcript
+Claude Code still has in `~/.claude/projects` and every kept copy (AI title or first prompt, size,
+date), read by a background scan, never the tick; each row offers 🔮 Ask (Seance) and ↻ Resume
+(D-14). The **transcript keeper** copies every transcript of a project ★-pinned in History into
+`~/.claude/cc-keep/<project>/<session>.jsonl` once its session ends (an APFS clone on its own
+5-minute timer), and again when it grows. History, fleet search and Seance read the copy once
+Claude Code has deleted the original. Nothing deletes a copy on its own: unstarring offers
+**Remove kept copies**, confirmed first, and `uninstall.sh --purge` leaves the folder. Diagnostics
+shows Claude Code's `cleanupPeriodDays` (30 when unset) and offers **Keep transcripts 365 days**,
+which writes only that key.
 
 ## 8. Providers & models
 
@@ -275,30 +553,61 @@ card's name is the main checkout's relabel. Display and triage fold; per-session
 ```
 cc-status/<session_id>.json     live per-session status (hook-written)
 cc-status/<session_id>.decision panel→gate approval decisions
+cc-ask/<key>.answer             panel→cc-ask.sh answer to a held question
 cc-labels.json / cc-groups.json relabels, group tags        (by project identity)
 cc-presets.json / cc-agents.json spawn presets, agent profiles
 cc-mcp.json                     MCP server defs (secrets as ${VAR} refs, never values)
-cc-queue (per project)          task queues; cc-templates.json parameterized templates
-cc-worklist.json                the My-List checklist          (by project identity)
+cc-queue/*.json (per project)   task queues: a line is a string, or {text, held = true} while held
+cc-templates.json               parameterized templates
+cc-worklist.json                the My-List checklist and its `playbooks` sources (by project identity)
 cc-config.json / cc-rules.json / cc-schedules.json  automation config
 cc-policy/<key> / cc-gate-tools/<key>  resolved per-session gate state
-cc-ledger/YYYY-MM-DD.jsonl      opt-in append-only audit ledger
+cc-ledger/YYYY-MM-DD.jsonl      append-only audit ledger
 cc-exports/                     archived sessions (transcript + meta.json)
+cc-inbox/<key>/                 the session mailbox
+cc-merge/<key>.json             merge requests (cc-merge.sh); <key>.notyet = the commit Adam said
+                                Not yet to; main-moved.seen = main moved notices already sent
+cc-fleet/<id>.*                 a batch: the driver's proposal, Shepherd's own state, its events
+cc-hold/                        hands-off holds: <pid>, key-<key>, .fleet
+cc-guard/<key>.<guard>          a Stop guard's once-marker (the turn, or the head sha)
+cc-lesson/<epoch>-<pid>.json    lessons sessions filed for the coach (cc-lesson.sh)
+cc-run/<id>.run.json            checklist runs (the panel's); <run>.<item>.*.json = cc-run.sh reports
+cc-main-green.json              the main-green check's verdicts, per repo
+cc-coach/                       per repo: <repo>.json (the run), .log.json, .lessons.json,
+                                .applied.json, .memory-backup/; across repos: global.json,
+                                global.claude-backup/; evidence-spend.json (today's evidence runs)
+cc-scratch/                     scratch worktrees and runs (Seance's in cc-scratch/seance)
+cc-keep/<project>/<session>.jsonl  kept transcripts of ★ projects, plus pins.json; --purge leaves it
 ```
+
+`uninstall.sh`'s `STATE` list is the full inventory of what `--purge` removes.
 
 ## 10. UX & interaction model
 
-- **Grid of tiles** (status, time-in-state, latest prompt, wants/why, context bar, badges) +
-  header (New, ☕ keep-awake, 🔒 lock, 📊 insights, 📜 audit, ⚙ settings, theme, 🔍 search).
+- **Grid of tiles** (status, time-in-state, latest prompt, wants/why, context bar, badges such as
+  HOLD / FROZEN, ⚠ main is red and the coach's 🧭 chip), with **grey cards** in their own row under
+  the grid. Header: New, ☕ keep-awake, 🔒 lock, **❄ Freeze**, the ☰ views menu, ⚙ settings, theme.
+- **☰ views menu:** 📥 Inbox, 🎫 Tickets, **📑 Queues**, 🔍 Filter sessions, 🔎 Find in fleet,
+  📊 Fleet insights, 📜 Audit ledger (with 🗂 History), ⏰ Routines, 📝 Templates, ✦ Agents,
+  🔌 MCPs & Skills, 🛡 Policy bundles, ⚙️ Automation rules, ⚡ Automation trace, **♻️ Restart
+  fleet**, 💰 Cost & tokens, 🩺 Diagnostics, ✨ Features list, 📋 Shift report, 🔔 Notifications.
 - **Detail panel** with a tab strip — Activity, Transcript, Rewind, Decisions, Usage, Changes
-  (git status + diff), **User Stories** (gated on `spec/product/user-stories.md`), Agents, Queue —
-  expensive tabs load on open; the ⋯ menu hides tabs and remembers your last-open tab per project.
+  (git status + diff), **User Stories** (gated on `spec/product/user-stories.md`), On purpose and
+  Requirements (gated on a git repo), Agents, Queue — expensive tabs load on open; the ⋯ menu hides
+  tabs and remembers your last-open tab per project. It also carries **Hold** (with the list of
+  sends a hold skipped) and the **Seance** box (🔮 Ask).
+- **🗂 History:** the ledger's sessions plus every past transcript and kept copy (📦 kept /
+  📦 kept copy only), ★ to keep a project's transcripts, 🔮 Ask and ↻ Resume on each row.
+- **Coach overlay** (from a card's 🧭 chip or a session's 🧭 Coach): the waiting suggestions (Apply,
+  Skip with *Why skip?*, Bring back), memory rows (Delete it / Rewrite it, Undo), **Applied edits**
+  (each one's verdict, **Sharpen**, Undo) and **Across repos**.
 - **Fleet navigation:** search, groups + group chips, bulk Approve/Stop over the visible set.
 - **Global hotkeys** (remappable): approve front, **jump-to-the-session-that-needs-you**, cycle,
   spawn, show/hide; a live legend so they never drift.
-- **Worklist** (My List): a built-in per-project + global checklist — items carry subject,
+- **Worklist** (📋 My List): a built-in per-project + global checklist — items carry subject,
   details, a tickable sub-step checklist and an expected date, with a MASTER tab rolling every
-  open item up by date priority across lists.
+  open item up by date priority across lists. A project tab adds **📘 Add a playbook…** and
+  **▶ Run…** (pick items, then Run selected); a run's checkmark shows as **✓ by run**.
 - **Keep the fleet alive:** ☕ caffeinate (holds with the lid closed) + 🔒 soft lock (blocks input
   while everything keeps running; force-unlock chord so a typo can't lock you out).
 - **Remote (SSH bridge):** rsync-pulled remote `cc-status/` renders remote sessions as headless-
@@ -318,9 +627,12 @@ Shepherd grew in levels; these are the milestones as built, not a forward plan.
 | **L5** | **Session observability** — error cause, plan/TODO, subagent fan-out, run score, banners. |
 | **L6** | **Event-callback rules** — react to a done/error/approval edge with log/relabel/nudge. |
 | **L7** | **Scheduled routines** — cron/one-shot spawn or fleet digest. |
+| **L8** | **Merge flow & the build program** (2026-09) — ready to merge, the tab bridge, batch driving on one approval, the test gate and merge checker, the session mailbox, tickets, restart in place, the worktree fence and leases. |
+| **L9** | **Mining round 2** (2026-10) — Stop guards, grant grading, gate blame, main-green and main moved, hands-off hold, queue hold, the coach's ledger/evidence/memory/across-repos runs, Seance, kept transcripts and past sessions, playbooks and Run selected, grey cards, the fleet idle alert. |
 
-Deferred (need a design call first): in-panel bundle/agent/template editors, a routing topology
-view, role-addressed delegation/handoff, idle/auto-spawn routing targets, the routine board.
+The in-panel bundle, agent and template editors and the ⏰ Routines board have shipped. Deferred
+(need a design call first): a routing topology view, role-addressed delegation/handoff,
+idle/auto-spawn routing targets.
 
 ## 12. Risks & honest limits
 
@@ -334,14 +646,24 @@ view, role-addressed delegation/handoff, idle/auto-spawn routing targets, the ro
    The $ figure is a labeled estimate; the plan-window % reflects the Anthropic account only.
 5. **Remote Control widens the trust boundary** (on by default) — anyone on your claude.ai can
    type into a local shell; documented and toggle-able.
+6. **Some features spend model tokens** — the merge checker, the coach and Seance run headless
+   `claude -p`. Each run carries its own `--max-budget-usd` (§6), the coach's scheduled and evidence
+   runs stay off until `coach.enabled`, and the evidence runs share a daily cap across repos.
+7. **Stop guards read prose** — a guard can misread a turn's last message. Each blocks at most once
+   per turn or commit, never in plan mode or on hold, and the session can answer it in one line and
+   carry on; each switch is its own `stopGuards.*` key.
 
 ## 13. Verdict
 
 Feasible and shipped on well-understood pieces (Hammerspoon, Claude Code hooks, a per-session
 status file, a decision-file gate, `kitty @`, macOS Accessibility). The design's power is **where
-state lives and who writes it**: hooks write status files, the panel writes decision files, and
-everything else is a pure read — no daemon, no DB, crash-safe, inspectable. The one thing that
-stays fragile by nature is **keystroke delivery into the VS Code extension**, which is why the
-reliable spine is **headless approvals + queues + Kitty remote control**. Every automation is
-**off by default**, every detector is **advisory not enforcing**, and the audit trail is **opt-in
-and local** — so the tool earns trust before it acts.
+state lives and who writes it**: hooks and Shepherd's scripts write their own files, the panel's
+answers are nonce-bound files claimed with `mv`, and everything else is a read — no daemon, no DB,
+crash-safe, inspectable. The one thing that stays fragile by nature is **keystroke delivery into
+the VS Code extension**, which is why the reliable spine is **headless approvals + queues + the
+session mailbox + Kitty remote control**. What acts on its own is named (§7): a few conveniences
+with no config, and the author's defaults a fresh install writes. Detectors are **advisory not
+enforcing**; the two things that hold work back, the Stop guards and grant grading, are named
+decisions (D-22, D-18) that never touch another process. Shepherd claims outcomes only on evidence
+it gathered itself (D-5), and the audit trail is **local** — so the tool earns trust before it
+acts.
