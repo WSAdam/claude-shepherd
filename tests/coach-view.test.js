@@ -258,6 +258,13 @@ eq("an edit too few sessions postdate says no data yet, and how many there are o
   /No data yet/.test(orows[2]) && /1 of 3 sessions/.test(orows[2]), true);
 eq("an edit the sessions since never touched says no data, not \"yet\"", /No data/.test(orows[3]) && !/No data yet/.test(orows[3]), true);
 eq("an edit never judged shows no verdict", /co-check/.test(orows[4]), false);
+// 2026-10-04: a no-data the coach never gave (it said nothing about the edit) read "the N sessions
+// since never came near it", a claim nobody made. It says the coach gave no verdict instead.
+const unanswered = lib.coachRowsHtml({ root: "/r/repo", state: "done", verdict: "none", edits: [], decisions: [],
+  history: [{ i: 1, sha: "ddd4444ddd", at: 700, section: "Git", why: "w", old: "", new: "- d",
+    check: { verdict: "no-data", unanswered: true, evidence: [], at: 2000, since: 6, need: 3 } }] });
+eq("an edit the coach gave no verdict for says so, not that the sessions never came near it",
+  /gave no verdict/.test(unanswered) && !/never came near it/.test(unanswered), true);
 eq("a live edit offers Sharpen and Undo, each carrying only its row number",
   /data-act="sharpen" data-i="1"/.test(orows[1]) && /data-act="undo" data-i="1"/.test(orows[1]), true);
 eq("an edit never judged can be sharpened too", /data-act="sharpen" data-i="4"/.test(orows[4]), true);

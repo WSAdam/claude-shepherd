@@ -41,6 +41,9 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
 - Fixed: a list item the coach added under a list got a blank line before it when the list's last
   item wrapped onto an indented line, splitting the list in two. The add now walks back over a
   wrapped item's continuation lines, and the new item joins the list.
+- Fixed: an applied coach edit the model said nothing about read "No data · the N sessions since
+  never came near it", a claim nobody made. Such a verdict is now kept as unanswered and reads
+  "No data · the coach gave no verdict on the N sessions since".
 
 ## 2026-10-04 — Mining round 2
 

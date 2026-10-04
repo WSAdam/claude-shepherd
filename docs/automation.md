@@ -765,8 +765,8 @@ instructions every session in it reads first. It suggests; nothing changes until
   postdate (a session counts by when it last ran; the newest 8 such edits per run). The prompt
   lists each by its commit, with its **Today** and **Expected after**, and the coach answers
   **working** (the sessions since do what was expected, or the problem stopped), **still seen**
-  (quoting where it still shows) or **no data** (those sessions never came near it, or the coach
-  gave no verdict for it). An edit
+  (quoting where it still shows) or **no data** (those sessions never came near it; when the coach
+  gave no verdict for it at all, the row says so instead). An edit
   fewer sessions postdate reads **No data yet · N of 3 sessions since it was applied**: Shepherd
   decides that, never the model, and it doesn't take away a verdict an earlier run gave. The
   verdict and its quotes are stored on the edit's history entry and shown on its row under

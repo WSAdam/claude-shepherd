@@ -842,6 +842,16 @@ do
     check("checks: ...the list it was given is unchanged", HIST[1].check == nil)
     local H3 = core.coachApplyChecks(HIST, {}, { at = 6000, ats = ATS })
     check("checks: a judgeable edit the coach said nothing about reads no data", H3[1].check and H3[1].check.verdict == "no-data" and H3[1].check.since == K + 1)
+    -- 2026-10-04: the panel then said "the N sessions since never came near it" -- which the coach
+    -- never claimed. A no-data the coach didn't give is marked unanswered, and kept that way.
+    check("checks: ...marked unanswered (the coach gave no verdict), not \"never came near it\"", H3[1].check and H3[1].check.unanswered == true)
+    local H4 = core.coachApplyChecks(HIST, { { sha = "aaa1111", verdict = "no-data" } }, { at = 6000, ats = ATS })
+    check("checks: a no-data the coach did give isn't unanswered", H4[1].check and H4[1].check.verdict == "no-data" and H4[1].check.unanswered == nil)
+    local back3 = core.parseCoachHistory(json.encode(H3))
+    check("checks: unanswered survives the history file", back3[1].check and back3[1].check.unanswered == true)
+    local hv3row
+    for _, x in ipairs(core.coachHistoryView(H3)) do if x.sha == H3[1].sha then hv3row = x end end
+    check("checks: ...and reaches the panel's view", hv3row and hv3row.check and hv3row.check.unanswered == true)
     local back = core.parseCoachHistory(json.encode(H2))
     check("checks: a verdict survives the history file", back[1].check and back[1].check.verdict == "still-seen"
           and back[1].check.evidence[1] == "a unit ran git push" and back[1].check.since == K + 1)

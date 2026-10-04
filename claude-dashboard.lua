@@ -26783,7 +26783,8 @@ local HTML = [[
         var head = c.verdict === "working" ? '✓ Working · judged on ' + since + age
           : (c.verdict === "still-seen" ? '⚠ Still seen · judged on ' + since + age
           : (n < need ? 'No data yet · ' + esc(n) + ' of ' + esc(need) + ' sessions since it was applied'
-                      : 'No data · the ' + since + ' never came near it'));
+          : (c.unanswered ? 'No data · the coach gave no verdict on the ' + since
+                      : 'No data · the ' + since + ' never came near it')));
         var ev = c.evidence || [];
         return '<div class="co-check ' + cls + '">' + head + '</div>'
           + (ev.length ? '<ul class="co-ev">' + ev.map(function(q){ return '<li>' + esc(q) + '</li>'; }).join("") + '</ul>' : '');

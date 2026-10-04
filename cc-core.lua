@@ -19497,7 +19497,8 @@ do
   local function storedCheck(c)
     if type(c) ~= "table" or not M.COACH_CHECK_VERDICTS[c.verdict] then return nil end
     return { verdict = c.verdict, evidence = quotes(c.evidence), at = tonumber(c.at) or 0,
-             since = math.max(0, math.floor(tonumber(c.since) or 0)) }
+             since = math.max(0, math.floor(tonumber(c.since) or 0)),
+             unanswered = (c.verdict == "no-data" and c.unanswered == true) or nil }
   end
   -- One check from the model's answer: { sha, verdict, evidence }. still-seen is a claim the problem is
   -- there, so it needs a quote; working and no-data may name none.
@@ -19550,15 +19551,19 @@ do
       local e = out[r.i]
       local prior = type(e.check) == "table" and e.check.verdict ~= "no-data"
       if r.asked or not (r.judge or prior) then
-        local verdict, ev = "no-data", {}
+        local verdict, ev, answered = "no-data", {}, false
         if r.asked then
           for _, m in ipairs(valid) do
-            if shaMatch(m.sha, r.sha) then verdict, ev = m.verdict, m.evidence; break end
+            if shaMatch(m.sha, r.sha) then verdict, ev, answered = m.verdict, m.evidence, true; break end
           end
         end
         local copy = {}
         for k, v in pairs(e) do copy[k] = v end
-        copy.check = { verdict = verdict, evidence = ev, at = tonumber(o.at) or 0, since = r.since }
+        -- 2026-10-04: an edit the coach was asked about and said nothing on is no-data too, but
+        -- marked unanswered: the panel said "the sessions since never came near it" for it, a
+        -- claim the coach never made
+        copy.check = { verdict = verdict, evidence = ev, at = tonumber(o.at) or 0, since = r.since,
+                       unanswered = (r.asked and not answered) or nil }
         out[r.i] = copy
         changed = true
       end
@@ -20270,7 +20275,8 @@ do
       out[#out + 1] = { i = i, sha = e.sha, at = e.at, section = e.section, why = e.why, before = e.before, after = e.after,
                         old = e.old, new = e.new, error = e.error, undone = e.undone and true or nil,
                         undoSha = e.undone and e.undone.sha or nil, undoAt = e.undone and e.undone.at or nil,
-                        check = c and { verdict = c.verdict, evidence = c.evidence, at = c.at, since = c.since, need = C.judgeSessions } or nil,
+                        check = c and { verdict = c.verdict, evidence = c.evidence, at = c.at, since = c.since, need = C.judgeSessions,
+                                        unanswered = c.unanswered } or nil,
                         sharpenedSha = e.sharpened and e.sharpened.sha or nil }
     end
     return out
