@@ -7208,7 +7208,9 @@ function M.annotateSearchHits(hits, items, ledgerDir)
       -- rendered who="?" and its audit overlay opened empty.
       local parent = f:match("^(.*)/subagents/[^/]+%.jsonl$")
       local pf = parent and (parent .. ".jsonl") or f
-      h.projectKey = pf:match("/projects/([^/]+)/[^/]+%.jsonl$")
+      -- 2026-10-03: a kept copy (~/.claude/cc-keep/<ENC>/<sid>.jsonl, the transcript keeper) maps
+      -- to its session and project the same way
+      h.projectKey = pf:match("/projects/([^/]+)/[^/]+%.jsonl$") or pf:match("/cc%-keep/([^/]+)/[^/]+%.jsonl$")
       h.sessionId = pf:match("/([^/]+)%.jsonl$")
       local live = byTranscript[pf]
       if live then h.key = live.key; h.name = live.label or live.name end
@@ -9881,19 +9883,13 @@ end
 
 do
   local function sq(s) return "'" .. tostring(s):gsub("'", "'\\''") .. "'" end
-  -- The command that sets (value) or removes (value nil) env.<key> in the Claude Code settings
-  -- file at `path` and touches nothing else: jq keeps every other key, in its order. Symlink-aware
-  -- like install.sh's resolve_link (the link chain is followed, the target is written), atomic
-  -- (a copy of the target, keeping its mode, is filled beside it and renamed over it), and a file
-  -- that isn't a JSON object with an object env is left exactly as it is. Prints one @@ok / @@fail
-  -- line (M.settingsEnvResult). nil for a key that isn't an env var name: nothing reaches a shell.
-  function M.settingsEnvCmd(path, key, value)
-    if type(path) ~= "string" or path == "" or type(key) ~= "string" or not key:match("^[A-Za-z_][A-Za-z0-9_]*$") then
-      return nil
-    end
-    local set = value ~= nil
-    local filter = set and '.env = ((.env // {}) + {($k): $v})'
-                        or 'if (.env | type) == "object" then .env |= del(.[$k]) else . end'
+  -- The one script both writers below run. o = { args (jq's --arg/--argjson words, quoted), filter
+  -- (the jq edit), create (the jq -n expression for a file that doesn't exist yet; nil = nothing to
+  -- do then), check (what the file must be before it is touched) }. Symlink-aware like install.sh's
+  -- resolve_link (the link chain is followed, the target is written), atomic (a copy of the target,
+  -- keeping its mode, is filled beside it and renamed over it), and a file that fails `check` is
+  -- left exactly as it is. Prints one @@ok / @@fail line (M.settingsEnvResult).
+  local function settingsScript(path, o)
     -- Its own PATH for jq: the panel runs it without hs.execute's login shell, which pastes the
     -- command into naive double quotes and would expand this script's $ and eat its quotes.
     local script = table.concat({
@@ -9902,19 +9898,48 @@ do
       'while [ -L "$p" ] && [ "$n" -lt 40 ]; do t="$(readlink "$p")"; case "$t" in /*) p="$t" ;; *) p="$(dirname "$p")/$t" ;; esac; n=$((n + 1)); done',
       'd="$(dirname "$p")"; tmp="$d/.settings.json.tmp.$$"',
       'if [ ! -e "$p" ]; then',
-      set and ('  mkdir -p "$d" && jq -n --arg k ' .. sq(key) .. ' --arg v ' .. sq(value)
-                 .. " '{env: {($k): $v}}' > \"$tmp\" && mv -f \"$tmp\" \"$p\" && { echo '@@ok created'; exit 0; }"
-                 .. '\n  rm -f "$tmp"; echo "@@fail could not create $p"; exit 1')
-          or "  echo '@@ok nothing to remove'; exit 0",
+      o.create and ('  mkdir -p "$d" && jq -n ' .. o.args .. ' ' .. sq(o.create)
+                      .. " > \"$tmp\" && mv -f \"$tmp\" \"$p\" && { echo '@@ok created'; exit 0; }"
+                      .. '\n  rm -f "$tmp"; echo "@@fail could not create $p"; exit 1')
+               or "  echo '@@ok nothing to remove'; exit 0",
       'fi',
-      "jq -e 'type == \"object\" and ((.env // {}) | type == \"object\")' \"$p\" >/dev/null 2>&1"
+      "jq -e " .. sq(o.check) .. " \"$p\" >/dev/null 2>&1"
         .. ' || { echo "@@fail could not parse $p as a settings object -- left as it is"; exit 3; }',
       'cp -p "$p" "$tmp" 2>/dev/null || { echo "@@fail could not copy $p"; exit 1; }',
-      'if jq --arg k ' .. sq(key) .. (set and (' --arg v ' .. sq(value)) or '') .. ' ' .. sq(filter)
+      'if jq ' .. o.args .. ' ' .. sq(o.filter)
         .. ' "$p" > "$tmp" && [ -s "$tmp" ] && mv -f "$tmp" "$p"; then echo "@@ok written"; exit 0; fi',
       'rm -f "$tmp"; echo "@@fail could not write $p"; exit 1',
     }, "\n")
     return "/bin/bash -c " .. sq(script)
+  end
+  local function keyOk(key) return type(key) == "string" and key:match("^[A-Za-z_][A-Za-z0-9_]*$") ~= nil end
+  -- The command that sets (value) or removes (value nil) env.<key> in the Claude Code settings
+  -- file at `path` and touches nothing else: jq keeps every other key, in its order. A file that
+  -- isn't a JSON object with an object env is left as it is. nil for a key that isn't an env var
+  -- name: nothing reaches a shell.
+  function M.settingsEnvCmd(path, key, value)
+    if type(path) ~= "string" or path == "" or not keyOk(key) then return nil end
+    local set = value ~= nil
+    return settingsScript(path, {
+      args = '--arg k ' .. sq(key) .. (set and (' --arg v ' .. sq(value)) or ''),
+      filter = set and '.env = ((.env // {}) + {($k): $v})'
+                    or 'if (.env | type) == "object" then .env |= del(.[$k]) else . end',
+      create = set and '{env: {($k): $v}}' or nil,
+      check = 'type == "object" and ((.env // {}) | type == "object")',
+    })
+  end
+  -- 2026-10-03 (the transcript keeper's cleanupPeriodDays offer): the same, for a TOP-LEVEL key set
+  -- to a whole number (a JSON number, not a string). Only that key changes; a new key goes last.
+  -- nil for a key that isn't a plain name or a value that isn't a whole number from 0 to 10^9.
+  function M.settingsNumberCmd(path, key, n)
+    if type(path) ~= "string" or path == "" or not keyOk(key) then return nil end
+    if type(n) ~= "number" or n ~= n or n < 0 or n > 1e9 or n ~= math.floor(n) then return nil end
+    return settingsScript(path, {
+      args = '--arg k ' .. sq(key) .. ' --argjson v ' .. string.format("%d", n),
+      filter = '.[$k] = $v',
+      create = '{($k): $v}',
+      check = 'type == "object"',
+    })
   end
 end
 
@@ -9924,6 +9949,284 @@ function M.settingsEnvResult(out)
   local okMsg = out:match("@@ok ?([^\n]*)")
   if okMsg then return true, okMsg end
   return false, out:match("@@fail ?([^\n]*)") or (out ~= "" and out:gsub("%s+$", "") or "no output")
+end
+
+-- ---- The transcript keeper (2026-10-03, mining round 2 unit F3) --------------------------------
+-- Claude Code deletes a transcript once it is cleanupPeriodDays old (unset = 30, minimum 1), and
+-- with it the only record of what a session did. Shepherd keeps a copy of every transcript of the
+-- projects Adam starred in 🗂 History: once the session has ended, with an APFS clone (`cp -c`) into
+-- ~/.claude/cc-keep/<project key>/<session id>.jsonl (mode 700), and again whenever the original
+-- grows. The pins live in the panel's localStorage; the panel sends them and Shepherd keeps them in
+-- cc-keep/pins.json. Readers (History, fleet search, Seance) fall back to the copy when the original
+-- is gone. Nothing deletes a copy but Adam's confirmed Remove on an unstarred project. These are the
+-- pure halves; FX.stepKeeper and friends in the panel do the I/O.
+M.KEEPER = {
+  dir = "cc-keep",            -- under ~/.claude
+  pinsFile = "pins.json",
+  scanSeconds = 300,          -- how often the starred projects are looked at (its own timer, never the tick)
+  quietSeconds = 600,         -- a transcript untouched this long, with no live session, has ended
+  liveStaleSeconds = 86400,   -- a "live" session whose transcript hasn't moved in a day has ended too
+                              -- (a crashed claude leaves its registry entry behind)
+  copyTimeoutSeconds = 120,   -- a copy still running after this is reclaimed
+  cleanupDefaultDays = 30,    -- Claude Code's cleanupPeriodDays when unset
+  cleanupMinDays = 1,
+  raiseToDays = 365,          -- what Diagnostics' offer sets it to
+  maxPins = 500,
+}
+
+-- A project key Shepherd can keep: the folder name Claude Code gives a project under
+-- ~/.claude/projects (its launch path with every other character folded to "-"). Never a path, so
+-- never a way out of the keep folder. (A session with no transcript has its cwd as its projectKey.)
+function M.keeperProjectKeyOk(pk)
+  return type(pk) == "string" and #pk <= 255 and pk:match("^[%w%-]+$") ~= nil
+end
+
+-- The pin set the panel sends (a list, or localStorage's { [key] = true } map) -> the keepable keys,
+-- once each, sorted, capped at maxPins.
+function M.keeperPins(v)
+  local seen, out = {}, {}
+  if type(v) ~= "table" then return out end
+  local function add(pk)
+    if M.keeperProjectKeyOk(pk) and not seen[pk] then seen[pk] = true; out[#out + 1] = pk end
+  end
+  if #v > 0 then
+    for _, pk in ipairs(v) do add(pk) end
+  else
+    for pk, on in pairs(v) do if on == true then add(pk) end end
+  end
+  table.sort(out)
+  while #out > M.KEEPER.maxPins do out[#out] = nil end
+  return out
+end
+
+-- pins.json: { "pins": [ ... ] }. Written by hand so an empty list is still a list; the keys need no
+-- escaping (keeperProjectKeyOk).
+function M.keeperPinsJson(list)
+  local parts = {}
+  for _, pk in ipairs(M.keeperPins(list)) do parts[#parts + 1] = '"' .. pk .. '"' end
+  return '{"pins":[' .. table.concat(parts, ",") .. ']}\n'
+end
+function M.keeperPinsParse(text)
+  if type(text) ~= "string" then return {} end
+  local ok, t = pcall(function() return M.json.decode(text) end)
+  if not ok or type(t) ~= "table" then return {} end
+  return M.keeperPins(type(t.pins) == "table" and t.pins or t)
+end
+
+-- Which transcripts need a copy now. o = { files = { { pk, sid, size, mtime } } (the starred
+-- projects' transcripts), kept = { ["<pk>/<sid>"] = { size } }, live = { [sid] = true }, now,
+-- quietSeconds, liveStaleSeconds }. A transcript is copied once its session has ended -- quiet for
+-- quietSeconds and not live (or "live" but untouched for liveStaleSeconds) -- and either has no copy
+-- ("missing") or has grown past it ("grown"). A copy bigger than its original is never replaced by
+-- the smaller one. Oldest first: Claude Code's cleanup deletes the oldest first.
+function M.keeperWants(o)
+  o = type(o) == "table" and o or {}
+  local K = M.KEEPER
+  local now = tonumber(o.now) or os.time()
+  local quiet = tonumber(o.quietSeconds) or K.quietSeconds
+  local stale = tonumber(o.liveStaleSeconds) or K.liveStaleSeconds
+  local kept = type(o.kept) == "table" and o.kept or {}
+  local live = type(o.live) == "table" and o.live or {}
+  local out = {}
+  for _, f in ipairs(type(o.files) == "table" and o.files or {}) do
+    if type(f) == "table" and M.keeperProjectKeyOk(f.pk) and M.restartIdOk(f.sid) then
+      local size, mtime = tonumber(f.size), tonumber(f.mtime)
+      if size and mtime then
+        local idle = now - mtime
+        if idle >= quiet and (not live[f.sid] or idle >= stale) then
+          local k = kept[f.pk .. "/" .. f.sid]
+          local why
+          if type(k) ~= "table" then why = "missing"
+          elseif size > (tonumber(k.size) or 0) then why = "grown" end
+          if why then out[#out + 1] = { pk = f.pk, sid = f.sid, why = why, size = size, mtime = mtime } end
+        end
+      end
+    end
+  end
+  table.sort(out, function(a, b)
+    if a.mtime ~= b.mtime then return a.mtime < b.mtime end
+    if a.pk ~= b.pk then return a.pk < b.pk end
+    return a.sid < b.sid
+  end)
+  return out
+end
+
+-- The copy's argv for hs.task's /bin/sh (the paths ride as $1 $2 $3, never pasted into the script):
+-- an APFS clone (`cp -c`, near-instant and free until either side changes; a plain `cp -p` where the
+-- volume can't clone), into a part file beside the copy that is renamed over it, so a reader never
+-- sees half a transcript. umask 077 and the chmod keep the keep folder and its project folders 700.
+-- Prints @@kept <bytes> or @@fail <why> (M.keeperCopyResult). nil unless all three are absolute,
+-- with no "..", and `to` is <root>/<project key>/<session id>.jsonl.
+function M.keeperCopyArgv(from, to, root)
+  local function abs(p)
+    return type(p) == "string" and p:sub(1, 1) == "/" and not p:find("/../", 1, true)
+      and not p:find("/%.%.$") and not p:find("[%c]")
+  end
+  if not (abs(from) and abs(to) and abs(root)) then return nil end
+  root = root:gsub("/+$", "")
+  local pk, sid = to:sub(#root + 2):match("^([^/]+)/([^/]+)%.jsonl$")
+  if to:sub(1, #root + 1) ~= root .. "/" or not M.keeperProjectKeyOk(pk) or not M.restartIdOk(sid) then return nil end
+  local script = table.concat({
+    'umask 077',
+    'mkdir -p "$3" && chmod 700 "$3" && mkdir -p "$(dirname "$2")" || { echo "@@fail could not make the folder for $2"; exit 1; }',
+    't="$2.part.$$"',
+    'if { cp -c -p "$1" "$t" 2>/dev/null || cp -p "$1" "$t" 2>/dev/null; } && mv -f "$t" "$2"; then',
+    '  echo "@@kept $(wc -c < "$2" | tr -d \' \')"; exit 0',
+    'fi',
+    'rm -f "$t"; echo "@@fail could not copy $1"; exit 1',
+  }, "\n")
+  return { "-c", script, "cc-keep", from, to, root }
+end
+
+-- The copy's exit code and output -> true, bytes | false, why.
+function M.keeperCopyResult(code, out)
+  out = tostring(out or "")
+  local n = out:match("@@kept (%d+)")
+  if tonumber(code) == 0 and n then return true, tonumber(n) end
+  local why = out:match("@@fail ([^\n]*)")
+  if not why then
+    local trimmed = (out:gsub("%s+$", ""))
+    why = (trimmed ~= "") and trimmed or ("exit " .. tostring(code))
+  end
+  return false, why
+end
+
+-- Where a transcript's kept copy is (or would be): <keepDir>/<pk>/<sid>.jsonl for a session's own
+-- transcript <projectsDir>/<pk>/<sid>.jsonl; nil for anything else (a subagent's file, a path
+-- outside the projects folder). keptOriginalOf is the way back.
+function M.keptCopyOf(path, projectsDir, keepDir)
+  if type(path) ~= "string" or type(projectsDir) ~= "string" or type(keepDir) ~= "string" then return nil end
+  local pre = projectsDir:gsub("/+$", "") .. "/"
+  if path:sub(1, #pre) ~= pre then return nil end
+  local pk, sid = path:sub(#pre + 1):match("^([^/]+)/([^/]+)%.jsonl$")
+  if not (M.keeperProjectKeyOk(pk) and M.restartIdOk(sid)) then return nil end
+  return keepDir:gsub("/+$", "") .. "/" .. pk .. "/" .. sid .. ".jsonl"
+end
+function M.keptOriginalOf(path, projectsDir, keepDir)
+  return M.keptCopyOf(path, keepDir, projectsDir)
+end
+
+-- The file a reader should read for `path`: the original while it exists, else its kept copy, else
+-- nil. Returns path, kept (true when it is the copy). exists(p) is the caller's file check.
+function M.keeperReadPath(path, projectsDir, keepDir, exists)
+  if type(path) ~= "string" or type(exists) ~= "function" then return nil, false end
+  if exists(path) then return path, false end
+  local k = M.keptCopyOf(path, projectsDir, keepDir)
+  if k and exists(k) then return k, true end
+  return nil, false
+end
+
+-- Fleet search reads the keep folder too. A hit in a kept copy counts only once Claude Code has
+-- deleted its original (the original's own hit covers it otherwise); one that counts is marked kept.
+function M.keeperSearchHits(hits, projectsDir, keepDir, exists)
+  local out, gone = {}, {}
+  for _, h in ipairs(type(hits) == "table" and hits or {}) do
+    local o = type(h) == "table" and M.keptOriginalOf(h.file, projectsDir, keepDir) or nil
+    if o then
+      if gone[o] == nil then gone[o] = not (type(exists) == "function" and exists(o) == true) end
+      if gone[o] then h.kept = true; out[#out + 1] = h end
+    else
+      out[#out + 1] = h
+    end
+  end
+  return out
+end
+
+-- History rows: kept (a copy exists) and keptOnly (and the original is gone). index = the kept
+-- copies, { ["<pk>/<sid>"] = { size } }; originalExists(pk, sid) is the caller's check.
+function M.keeperAnnotateHistory(records, index, originalExists)
+  if type(index) ~= "table" then return records end
+  for _, r in ipairs(type(records) == "table" and records or {}) do
+    if type(r) == "table" and r.projectKey and r.session_id
+      and index[tostring(r.projectKey) .. "/" .. tostring(r.session_id)] then
+      r.kept = true
+      if type(originalExists) == "function" and not originalExists(r.projectKey, r.session_id) then r.keptOnly = true end
+    end
+  end
+  return records
+end
+-- How many copies each project has (History offers to remove an unstarred project's).
+function M.keeperProjectCounts(index)
+  local out = {}
+  for k in pairs(type(index) == "table" and index or {}) do
+    local pk = tostring(k):match("^([^/]+)/")
+    if pk then out[pk] = (out[pk] or 0) + 1 end
+  end
+  return out
+end
+
+-- settings.json's text -> { readable, set, value } for cleanupPeriodDays.
+function M.cleanupDaysFact(text)
+  if type(text) ~= "string" then return { readable = false } end
+  local ok, t = pcall(function() return M.json.decode(text) end)
+  if not ok or type(t) ~= "table" then return { readable = false } end
+  local v = t.cleanupPeriodDays
+  return { readable = true, set = v ~= nil, value = v }
+end
+-- What Diagnostics' offer writes: raiseTo (default KEEPER.raiseToDays) unless the setting already
+-- keeps transcripts that long; nil for a settings.json it can't read (the writer would refuse it).
+function M.cleanupDaysPlan(fact, raiseTo)
+  raiseTo = tonumber(raiseTo) or M.KEEPER.raiseToDays
+  if type(fact) ~= "table" or not fact.readable then return nil end
+  if type(fact.value) == "number" and fact.value >= raiseTo then return nil end
+  return raiseTo
+end
+
+-- Diagnostics' rows: how long Claude Code keeps transcripts, with an offer to raise it (the panel
+-- renders r.offer = { id, label } as a button; FX writes only that key on Adam's click), and the
+-- keeper itself. k = { cleanup = M.cleanupDaysFact(...), pins, kept, bytes, lastError = { file, why } }.
+function M.keeperDoctorRows(k)
+  local rows = {}
+  local function add(label, status, detail, fix, offer)
+    rows[#rows + 1] = { label = label, status = status, detail = detail, fix = fix, offer = offer }
+  end
+  if type(k) ~= "table" then return rows end
+  local K = M.KEEPER
+  local offer = { id = "cleanup-days", label = "Keep transcripts " .. K.raiseToDays .. " days" }
+  local function days(n) return string.format("%g", n) .. ((n == 1) and " day" or " days") end
+  local either = "; ★ projects in 🗂 History keep copies in ~/.claude/cc-keep either way"
+  local c = type(k.cleanup) == "table" and k.cleanup or nil
+  if c then
+    local v = c.value
+    if not c.readable then
+      add("cleanupPeriodDays: can't read ~/.claude/settings.json", "info",
+          "it isn't readable JSON, so Shepherd can't say how long Claude Code keeps transcripts, and won't write to it")
+    elseif not c.set then
+      add("Claude Code deletes transcripts after " .. days(K.cleanupDefaultDays), "info",
+          "cleanupPeriodDays isn't set in ~/.claude/settings.json, so Claude Code's default applies" .. either, nil, offer)
+    elseif type(v) == "number" and v >= K.cleanupMinDays then
+      if v >= K.raiseToDays then
+        add("Claude Code keeps transcripts " .. days(v), "ok", "cleanupPeriodDays in ~/.claude/settings.json")
+      else
+        add("Claude Code deletes transcripts after " .. days(v), "info",
+            "cleanupPeriodDays is " .. string.format("%g", v) .. " in ~/.claude/settings.json" .. either, nil, offer)
+      end
+    else
+      local shown = (type(v) == "number") and string.format("%g", v)
+        or (type(v) == "string" and ('"' .. v:sub(1, 30) .. '"')) or "not a number"
+      add("cleanupPeriodDays is " .. shown, "warn",
+          "Claude Code wants a number of days, at least its minimum of " .. K.cleanupMinDays
+          .. " -- it may ignore this or delete transcripts sooner than you meant", nil, offer)
+    end
+  end
+  local pins, kept, bytes = tonumber(k.pins) or 0, tonumber(k.kept) or 0, tonumber(k.bytes) or 0
+  local copies = kept .. " kept " .. ((kept == 1) and "copy" or "copies") .. " (" .. M.fmtBytes(bytes) .. ")"
+  if pins > 0 then
+    add("Transcript keeper: " .. copies .. " for " .. pins .. " ★ project" .. ((pins == 1) and "" or "s"), "ok",
+        "in ~/.claude/cc-keep: each transcript is copied once its session ends and again when it grows, and never deleted on its own")
+  elseif kept > 0 then
+    add("Transcript keeper: " .. copies .. ", no ★ project", "info",
+        "the copies of unstarred projects stay until you remove them in 🗂 History")
+  else
+    add("Transcript keeper: no ★ project", "info",
+        "★ a project in 🗂 History and Shepherd keeps a copy of each of its transcripts once the session ends, so Claude Code's cleanup can't take them")
+  end
+  local e = type(k.lastError) == "table" and k.lastError or nil
+  if e then
+    add("Transcript keeper couldn't copy " .. tostring(type(e.file) == "string" and e.file:match("[^/]+$") or "a transcript"), "warn",
+        tostring(e.why or "?"), "check the free disk space, and that ~/.claude/cc-keep is yours")
+  end
+  return rows
 end
 
 -- Per-tile context bar color band. Calm below 50%, then a new band every 10% (50/60/70/80/90),
@@ -24468,6 +24771,10 @@ function M.doctorChecks(facts)
     end
   end
 
+  -- 2026-10-03: the transcript keeper (mining round 2 unit F3) -- cleanupPeriodDays with its offer,
+  -- and the kept copies ({ cleanup, pins, kept, bytes, lastError } from FX.keeperFacts)
+  for _, r in ipairs(M.keeperDoctorRows(facts.keeper)) do rows[#rows + 1] = r end
+
   local n = tonumber(facts.sessions) or 0
   add(n .. " live session" .. ((n == 1) and "" or "s"), "info", "tiles currently tracked")
 
@@ -24540,6 +24847,9 @@ M.FEATURES = {
   { key = "seance", cat = "Control", new = true, title = "Seance: ask a session",
     what = "Ask any session a question — live, or long finished — from its detail panel, a fleet-search hit or a History row. A read-only fork of its own conversation answers (claude -p --resume … --fork-session, nothing saved, its transcript untouched), in the session's model with a budget sized from its context, and the answer shows right under the box.",
     why = "Find out what a session did or why, without interrupting it, typing into its tab, or reviving a finished one." },
+  { key = "keeper", cat = "Control", new = true, title = "Kept transcripts",
+    what = "★ a project in 🗂 History and Shepherd keeps a copy of each of its transcripts in ~/.claude/cc-keep once the session ends (an APFS clone, in the background), and copies it again when it grows. History, fleet search and Seance read the copy once Claude Code has deleted the original. Diagnostics shows Claude Code's cleanupPeriodDays (30 days unless set) and offers to raise it to 365, writing only that key. A copy is never deleted on its own: unstarring offers to remove it.",
+    why = "Claude Code deletes transcripts after a month; the sessions you starred stay readable and askable." },
   { key = "pins", cat = "Control", new = true, title = "Pinned links",
     what = "A session pins up to 8 links -- a preview URL, a PR, a file in its worktree -- with ~/.claude/cc-pin.sh add <link> [--label L], and they show as chips on its card and in the detail panel; a click opens one. Pins belong to the worktree, so they survive /clear, and go when its merge is verified. Only http(s) links and files under the session's git root are taken, never one holding a shell metacharacter, and each is checked again before it opens.",
     why = "The page to look at, the PR to review or the report to read is one click from the card, not somewhere in the transcript." },

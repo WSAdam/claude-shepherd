@@ -253,6 +253,30 @@ row asks that session a question, however long ago it ended ([Ask a session](con
 Multi-select rows and **Delete selected** purges those sessions' recorded history through the same
 confirmed purge the Purge button uses. It never deletes Claude Code's own transcripts.
 
+### Kept transcripts
+
+Claude Code deletes a transcript once it is `cleanupPeriodDays` old (30 days unless you set it in
+`~/.claude/settings.json`). ★-pin a project in the 🗂 History tab and Shepherd keeps a copy of each of
+its transcripts in `~/.claude/cc-keep/<project>/<session>.jsonl` (a private folder, mode 700):
+
+- **When:** once the session has ended (no card or `~/.claude/sessions` entry for it, and its
+  transcript untouched for 10 minutes), and again whenever the original grows, say after a resume.
+  A copy is never replaced by a smaller original.
+- **How:** an APFS clone (`cp -c`, a plain copy elsewhere), one at a time in the background, every
+  5 minutes and right after you star a project. It never runs on the panel's tick.
+- **Reading them:** once Claude Code has deleted the original, the History row says **📦 kept copy
+  only** (**📦 kept** while both exist), fleet search finds the copy (**📦 kept** on the hit), and
+  [🔮 Ask](controls.md#ask-a-session-seance) asks it.
+- **Removing them:** nothing deletes a copy on its own. Unstarring a project stops new copies and
+  shows **Remove kept copies** at the top of the History tab; Shepherd asks before it deletes them.
+  `uninstall.sh --purge` leaves the folder too.
+- **Diagnostics** shows how long Claude Code keeps transcripts and offers **Keep transcripts 365
+  days**, which sets `cleanupPeriodDays` to 365 in `~/.claude/settings.json` and changes nothing else
+  there. It also counts the kept copies and names a copy that failed.
+
+The ★ set lives in the panel; Shepherd keeps its own record of it in `~/.claude/cc-keep/pins.json`.
+Subagents' transcripts aren't kept, only each session's own.
+
 ### Run score
 
 The detail panel's **Score** button rates the selected session 0–100 from the ledger: it starts at

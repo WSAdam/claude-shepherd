@@ -42,6 +42,7 @@ printf '{"v":1,"labels":{"toolu_a":{"verdict":"ok"}}}' > "$C/cc-skill-labels.jso
 mkdir -p "$C/cc-coach"; printf '{"v":1,"root":"/r","state":"done"}' > "$C/cc-coach/-r.json"
 mkdir -p "$C/cc-guard"; printf '1790000000.42\n' > "$C/cc-guard/abc.question"
 mkdir -p "$C/cc-hold"; printf '{"at":1790000000}' > "$C/cc-hold/4242"; printf '{"at":1790000000}' > "$C/cc-hold/.fleet"
+mkdir -p "$C/cc-keep/-r-A"; printf '{"pins":["-r-A"]}\n' > "$C/cc-keep/pins.json"; printf '{}\n' > "$C/cc-keep/-r-A/abc.jsonl"
 printf '{"version":1,"written":1790000000,"sessions":[]}' > "$C/cc-restart.json"
 printf '{"version":1,"items":[]}' > "$C/cc-worklist.json"
 printf '{"version":1,"items":[{"id":"a","text":"an old done item","done":true}]}' > "$C/cc-worklist-archive.json"
@@ -97,8 +98,13 @@ before="$(cat "$C/settings.json" "$C/CLAUDE.md" "$H/init.lua")"
 run_uninstall
 assert_eq "a second uninstall changes nothing" "$before" "$(cat "$C/settings.json" "$C/CLAUDE.md" "$H/init.lua")"
 
-run_uninstall --purge
+purge_out="$(CC_INSTALL_CLAUDE_DIR="$C" CC_INSTALL_HS_DIR="$H" CC_UNINSTALL_APP_DIR="$A" CC_CODE_CLI="$FAKE" \
+  bash "$ROOT/uninstall.sh" --purge 2>&1)"
 assert_eq "--purge removes Shepherd's settings" "gone" "$([ -e "$C/cc-config.json" ] && echo there || echo gone)"
+# 2026-10-03: the transcript keeper's copies (cc-keep/) are transcripts Adam starred to keep, not
+# Shepherd's state: even --purge leaves them, and says where they are
+assert_eq "--purge keeps the kept transcripts" "there" "$([ -e "$C/cc-keep/-r-A/abc.jsonl" ] && echo there || echo gone)"
+assert_eq "...and says where they are" "yes" "$(printf '%s' "$purge_out" | grep -q 'cc-keep' && echo yes || echo no)"
 assert_eq "--purge removes Shepherd's state" "gone" "$([ -e "$C/cc-status" ] && echo there || echo gone)"
 # 2026-09-28: the saved usage totals (cc-usage-state.json) are Shepherd's state too
 assert_eq "--purge removes the saved usage totals" "gone" "$([ -e "$C/cc-usage-state.json" ] && echo there || echo gone)"

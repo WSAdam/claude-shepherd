@@ -146,6 +146,11 @@ if [ "$PURGE" -eq 1 ]; then
   for s in $STATE; do rm -rf "${CLAUDE_DIR:?}/$s"; done
   rm -rf "$CLAUDE_DIR"/cc-ledger.* "$CLAUDE_DIR"/cc-exports.*
   echo "✅ removed Shepherd's settings and state from $CLAUDE_DIR"
+  # 2026-10-03: the transcript keeper's copies are transcripts you starred to keep, not Shepherd's
+  # state, so even --purge leaves them (never in STATE)
+  if [ -d "$CLAUDE_DIR/cc-keep" ]; then
+    echo "ℹ️  kept your kept transcripts in $CLAUDE_DIR/cc-keep -- delete that folder yourself if you don't want them"
+  fi
 else
   echo "ℹ️  kept Shepherd's settings and state in $CLAUDE_DIR (cc-config.json, cc-status/, ...) -- re-run with --purge to remove them"
 fi

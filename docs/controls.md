@@ -197,7 +197,8 @@ and nothing is typed into its tab.
 parent session), and on a row of the audit ledger's
 [🗂 History](usage-and-cost.md#session-history) tab. Type the question and press **Enter** or **Ask**.
 The question shows above the box, then the answer, with what it cost, how long it took and the model.
-A new question to the same session replaces one that is still running.
+A new question to the same session replaces one that is still running. Once Claude Code has deleted
+a session's transcript, Shepherd asks its [kept copy](usage-and-cost.md#kept-transcripts) instead.
 
 **How it answers.** Shepherd forks the session's own conversation with a headless
 `claude -p --resume <its transcript> --fork-session --no-session-persistence`. The fork remembers

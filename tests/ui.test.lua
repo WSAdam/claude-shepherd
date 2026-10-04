@@ -5368,5 +5368,37 @@ do
   check("grey cards: the empty-grid message steps aside for them", src:find('empty.style.display = HOOKLESS_N > 0 ? "none" : "block";', 1, true) ~= nil)
 end
 
+-- ---- The transcript keeper: its own timer, the ★ set sent on load, no synchronous copy (2026-10-03, mining round 2 F3) ----
+do
+  local f = io.open(ROOT .. "claude-dashboard.lua", "r")
+  local src = f and f:read("*a") or ""
+  if f then f:close() end
+  local tickBody = src:match("\nfunction FX%._refreshBody%(%).-\nend\n") or ""
+  check("keeper: its pass runs on its own retained timer, never the tick",
+        src:find("FX.keepTimer = hs.timer.doEvery(60, function() pcall(FX.stepKeeper) end)", 1, true) ~= nil
+        and tickBody ~= "" and tickBody:find("stepKeeper", 1, true) == nil and tickBody:find("keepCopyNext", 1, true) == nil)
+  local block = src:match("\nfunction FX%.stepKeeper%(force%).-\nfunction FX%.keepReadPath") or ""
+  check("keeper: the scan and the copy are found", block ~= "")
+  check("keeper: the copy is an hs.task through /bin/sh, never hs.execute",
+        block:find('hs.task.new("/bin/sh"', 1, true) ~= nil and block:find("hs.execute", 1, true) == nil)
+  -- 2026-10-03: only a non-empty set -- a page load sends nothing when nothing is starred (the
+  -- My List archive check counts every message the page sends)
+  check("keeper: the panel sends its ★ set once when it loads, outside any function, when anything is starred",
+        src:find("\n    try { if(Object.keys(historyPins()).length) syncKeepPins(); } catch(e){}\n", 1, true) ~= nil)
+  check("keeper: and on every ★ change", (src:match("function setHistoryPin%(pk, on%).-\n    }\n") or ""):find("syncKeepPins();", 1, true) ~= nil)
+  check("keeper: Seance reads the kept copy once the original is gone",
+        src:find("if type(tp) == \"string\" then tp = FX.keepReadPath(tp) or tp end", 1, true) ~= nil)
+  check("keeper: fleet search reads the keep folder and drops a copy whose original exists",
+        src:find("paths[#paths + 1] = FX.KEEP_DIR", 1, true) ~= nil
+        and src:find("core.keeperSearchHits(res.hits, FX.PROJECTS_DIR, FX.KEEP_DIR, FX.keepIsFile)", 1, true) ~= nil)
+  local removeBlock = src:match("\nfunction FX%.keepRemove%(pk%).-\nend\n") or ""
+  local keeperBlock = src:match("\n%-%- %-%-%-%- The transcript keeper .-\nfunction FX%.claudeSettingsEnv") or ""
+  local _, removes = keeperBlock:gsub("os%.remove%(", "")
+  check("keeper: a kept copy is deleted in one place, FX.keepRemove, after its question",
+        keeperBlock ~= "" and removes == 2   -- the files, then their emptied folder
+        and removeBlock:find('if answer ~= "Remove" then return false end', 1, true) ~= nil
+        and removeBlock:find('if answer ~= "Remove"', 1, true) < (removeBlock:find("os.remove(", 1, true) or 0))
+end
+
 print(string.format("-- ui.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

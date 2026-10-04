@@ -16,6 +16,15 @@ parallel units. Each unit adds its line here.
   by session id for a terminal status file that records no pid, and must stay alive (`FX.probeAlive`) and
   unmatched for 15s first. Built in `refreshList` (`FX.stepHookless`, `core.hooklessSessions`) and kept on
   `FX.hookless`, never in the tick's list, so no sender, needs-you, close verdict, restart snapshot or count sees one.
+- Kept transcripts: every transcript of a project ★-pinned in 🗂 History is copied into
+  `~/.claude/cc-keep/<project>/<session>.jsonl` (mode 700) once its session ends, and again when it
+  grows, with an async `cp -c` (APFS clone) on its own 5-minute timer, one task at a time. The ★ set,
+  which lives in the panel's localStorage, now reaches Lua (`keep-pins`, kept in `cc-keep/pins.json`).
+  History (**📦 kept** / **📦 kept copy only**), fleet search and Seance read the copy once Claude Code
+  has deleted the original. Nothing deletes a copy on its own: unstarring offers **Remove kept
+  copies**, confirmed first, and `uninstall.sh --purge` leaves the folder. Diagnostics shows
+  `cleanupPeriodDays` (30 when unset) with **Keep transcripts 365 days**, which writes only that key
+  (`core.settingsNumberCmd`, atomic and symlink-aware like the env writer).
 - Run selected in My List: **▶ Run…** on a project tab picks open items (nothing preselected) and
   **Run selected** works through them one at a time, each in a fresh tab in the repo's main checkout,
   opened through the expect-tag machinery with its brief typed in (Adam sends it; no keystroke). A file

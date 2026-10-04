@@ -1739,6 +1739,254 @@ function FX.setClaudeSettingsEnv(key, value)
   return ok, why
 end
 
+-- 2026-10-03: the same for a TOP-LEVEL key set to a whole number (core.settingsNumberCmd): only that
+-- key changes, atomically, through symlinks, an unreadable file left alone. Diagnostics' offer to raise
+-- cleanupPeriodDays is its one caller, on Adam's click. true on success.
+function FX.setClaudeSettingsNumber(key, n)
+  local cmd = core.settingsNumberCmd(FX.CLAUDE_SETTINGS, key, n)
+  if not cmd then
+    print("[cc-dashboard] ❌ settings.json: refused " .. tostring(key) .. " = " .. tostring(n))
+    return false, "not a plain key and a whole number"
+  end
+  local out = hs.execute(cmd)   -- never the login shell (see FX.setClaudeSettingsEnv)
+  local ok, why = core.settingsEnvResult(out)
+  if ok then
+    print("[cc-dashboard] ✅ " .. FX.CLAUDE_SETTINGS .. ": " .. key .. " = " .. tostring(n) .. " (" .. tostring(why) .. ")")
+  else
+    print("[cc-dashboard] ❌ couldn't set " .. key .. " in " .. FX.CLAUDE_SETTINGS .. ": " .. tostring(why))
+  end
+  return ok, why
+end
+
+-- ---- The transcript keeper (2026-10-03, mining round 2 unit F3) --------------------------------
+-- Copies every transcript of the projects starred in 🗂 History into ~/.claude/cc-keep/<project>/
+-- <session>.jsonl once the session has ended, and again when the original grows, so Claude Code's
+-- cleanupPeriodDays can't take them (core.KEEPER and the pure halves in cc-core.lua). The ★ set lives
+-- in the panel's localStorage: the panel sends it (keep-pins) and it is kept in cc-keep/pins.json.
+-- FX.stepKeeper runs on its own timer (FX.keepTimer), never the tick: hs.fs looks at the starred
+-- projects' folders, and ONE hs.task at a time does the copying (`cp -c`, an APFS clone). Readers
+-- (Seance, fleet search, History) go through FX.keepReadPath / core.keeperSearchHits once the
+-- original is gone. Nothing here deletes a copy except FX.keepRemove, on Adam's confirmed click for
+-- an unstarred project. State on FX: the main chunk is at Lua's 200-local cap.
+FX.KEEP_DIR = CLAUDE_DIR .. "/" .. core.KEEPER.dir
+FX._keep = { queue = {} }   -- pins, index ({ ["pk/sid"] = { size, mtime } }), task, job, taskAt,
+                            -- scannedAt, lastError ({ file, why, at }), dirReady
+
+function FX.keepPinsFile() return FX.KEEP_DIR .. "/" .. core.KEEPER.pinsFile end
+function FX.keepPins()
+  if FX._keep.pins == nil then FX._keep.pins = core.keeperPinsParse(FX.readFile(FX.keepPinsFile())) end
+  return FX._keep.pins
+end
+function FX.keepIsFile(p)
+  local mode
+  pcall(function() mode = hs.fs.attributes(p, "mode") end)
+  return mode == "file"
+end
+
+-- The keep folder, mode 700, made once per load before pins.json is first written (each copy's own
+-- script makes and chmods it too). mkdir + chmod: instant, so hs.execute is fine here.
+function FX.keepEnsureDir()
+  if FX._keep.dirReady then return true end
+  local qd = "'" .. FX.KEEP_DIR:gsub("'", "'\\''") .. "'"
+  hs.execute("/bin/mkdir -p " .. qd .. " && /bin/chmod 700 " .. qd)
+  local mode
+  pcall(function() mode = hs.fs.attributes(FX.KEEP_DIR, "mode") end)
+  FX._keep.dirReady = (mode == "directory")
+  return FX._keep.dirReady
+end
+
+-- The panel's ★ set (keep-pins, a JSON list): kept in pins.json when it changed. A project starred
+-- just now is looked at at once; one unstarred keeps every copy it has.
+function FX.keepSetPins(text)
+  local okj, v = pcall(function() return hs.json.decode(tostring(text or "")) end)
+  if not okj or type(v) ~= "table" then return false end
+  local list, old = core.keeperPins(v), FX.keepPins()
+  local was = {}
+  for _, pk in ipairs(old) do was[pk] = true end
+  FX._keep.pins = list
+  local text2 = core.keeperPinsJson(list)
+  local onDisk = FX.readFile(FX.keepPinsFile())
+  if onDisk == text2 or (onDisk == nil and #list == 0) then return true end
+  if not FX.keepEnsureDir() or not FX.writeFileAtomic(FX.keepPinsFile(), text2) then
+    print("[cc-dashboard] ❌ keeper: couldn't write " .. FX.keepPinsFile())
+    return false
+  end
+  print("[cc-dashboard] ✅ keeper: " .. #list .. " ★ project(s) kept: " .. table.concat(list, ", "))
+  for _, pk in ipairs(list) do
+    if not was[pk] then pcall(FX.stepKeeper, true); break end
+  end
+  return true
+end
+
+-- The kept copies on disk (part files and pins.json aren't copies).
+function FX.keepIndexScan()
+  local index = {}
+  for _, pk in ipairs(FX.readDir(FX.KEEP_DIR)) do
+    if core.keeperProjectKeyOk(pk) then
+      local dir = FX.KEEP_DIR .. "/" .. pk
+      for _, name in ipairs(FX.readDir(dir)) do
+        local sid = name:match("^(.+)%.jsonl$")
+        local a = sid and core.restartIdOk(sid) and hs.fs.attributes(dir .. "/" .. name) or nil
+        if type(a) == "table" and a.mode == "file" then index[pk .. "/" .. sid] = { size = a.size, mtime = a.modification } end
+      end
+    end
+  end
+  FX._keep.index = index
+  return index
+end
+
+-- Session ids still running: every card's, and every ~/.claude/sessions entry's.
+function FX.keepLiveIds()
+  local live = {}
+  for _, src in ipairs({ FX._shownItems or {}, FX._hiddenItems or {} }) do
+    for _, it in ipairs(src) do
+      if type(it.session_id) == "string" and not it.remote then live[it.session_id] = true end
+    end
+  end
+  for _, e in pairs(FX.readSessions()) do
+    if type(e) == "table" and type(e.sessionId) == "string" then live[e.sessionId] = true end
+  end
+  return live
+end
+
+-- One pass: reclaim a hung copy, then (once scanSeconds have gone by, or at once when forced) look
+-- at the starred projects' transcripts and start the copies they need (core.keeperWants).
+function FX.stepKeeper(force)
+  local K, s = core.KEEPER, FX._keep
+  local now = FX.now()
+  if s.task then
+    if now - (s.taskAt or now) < K.copyTimeoutSeconds then return "copying" end
+    local job = s.job
+    pcall(function() s.task:terminate() end)
+    s.task, s.job = nil, nil
+    s.lastError = { file = job and job.from, why = "the copy was still running after " .. K.copyTimeoutSeconds .. "s", at = now }
+    print("[cc-dashboard] ❌ keeper: reclaimed a hung copy of " .. tostring(job and job.from))
+  end
+  if not force and s.scannedAt and now - s.scannedAt < K.scanSeconds then return "waiting" end
+  s.scannedAt = now
+  local pins = FX.keepPins()
+  if #pins == 0 then s.queue = {}; return "none" end
+  local files = {}
+  for _, pk in ipairs(pins) do
+    local dir = FX.PROJECTS_DIR .. "/" .. pk
+    for _, name in ipairs(FX.readDir(dir)) do
+      local sid = name:match("^(.+)%.jsonl$")
+      local a = sid and hs.fs.attributes(dir .. "/" .. name) or nil
+      if type(a) == "table" and a.mode == "file" then
+        files[#files + 1] = { pk = pk, sid = sid, size = a.size, mtime = a.modification }
+      end
+    end
+  end
+  s.queue = core.keeperWants({ files = files, kept = FX.keepIndexScan(), live = FX.keepLiveIds(), now = now })
+  -- an error about a file that no longer needs a copy (it landed, or its original is gone) is over
+  if s.lastError then
+    local still = false
+    for _, w in ipairs(s.queue) do
+      if FX.PROJECTS_DIR .. "/" .. w.pk .. "/" .. w.sid .. ".jsonl" == s.lastError.file then still = true end
+    end
+    if not still then s.lastError = nil end
+  end
+  if #s.queue > 0 then print("[cc-dashboard] 🔍 keeper: " .. #s.queue .. " transcript(s) to keep") end
+  FX.keepCopyNext()
+  return "scanned"
+end
+
+-- Start the next queued copy: /bin/sh with the paths as arguments (core.keeperCopyArgv), retained
+-- in FX._keep.task until it calls back; the callback starts the one after.
+function FX.keepCopyNext()
+  local s = FX._keep
+  if s.task then return end
+  local job = table.remove(s.queue or {}, 1)
+  if not job then return end
+  local from = FX.PROJECTS_DIR .. "/" .. job.pk .. "/" .. job.sid .. ".jsonl"
+  local to = FX.KEEP_DIR .. "/" .. job.pk .. "/" .. job.sid .. ".jsonl"
+  local argv = core.keeperCopyArgv(from, to, FX.KEEP_DIR)
+  if not argv then return FX.keepCopyNext() end
+  job.from, job.to = from, to
+  local task
+  task = hs.task.new("/bin/sh", function(code, out, err)
+    if FX._keep.task ~= task then return end   -- reclaimed as hung: a newer copy owns the slot
+    FX._keep.task, FX._keep.job = nil, nil
+    local ok, res = core.keeperCopyResult(code, tostring(out or "") .. "\n" .. tostring(err or ""))
+    if ok then
+      FX._keep.index = FX._keep.index or {}
+      FX._keep.index[job.pk .. "/" .. job.sid] = { size = res, mtime = FX.now() }
+      if FX._keep.lastError and FX._keep.lastError.file == from then FX._keep.lastError = nil end
+      print("[cc-dashboard] ✅ keeper: kept " .. job.pk .. "/" .. job.sid .. " (" .. tostring(job.why) .. ", " .. tostring(res) .. " bytes)")
+    else
+      FX._keep.lastError = { file = from, why = res, at = FX.now() }
+      print("[cc-dashboard] ❌ keeper: couldn't copy " .. from .. ": " .. tostring(res))
+    end
+    FX.keepCopyNext()
+  end, argv)
+  if not task then
+    FX._keep.lastError = { file = from, why = "couldn't start the copy", at = FX.now() }
+    print("[cc-dashboard] ❌ keeper: couldn't start a copy of " .. from)
+    return
+  end
+  s.task, s.job, s.taskAt = task, job, FX.now()
+  if not task:start() then
+    s.task, s.job = nil, nil
+    s.lastError = { file = from, why = "couldn't start the copy", at = FX.now() }
+    print("[cc-dashboard] ❌ keeper: couldn't start a copy of " .. from)
+    return FX.keepCopyNext()
+  end
+end
+
+-- The file to read for a transcript path: the original while it exists, else its kept copy, else nil.
+function FX.keepReadPath(path)
+  return (core.keeperReadPath(path, FX.PROJECTS_DIR, FX.KEEP_DIR, FX.keepIsFile))
+end
+
+-- Remove an UNSTARRED project's kept copies, after Adam confirms (History's offer). A starred
+-- project's are refused: they would only be copied again.
+function FX.keepRemove(pk)
+  pk = tostring(pk or "")
+  if not core.keeperProjectKeyOk(pk) then
+    print("[cc-dashboard] ⚠️ keeper: refused to remove copies of " .. pk .. " (not a project key)")
+    return false
+  end
+  for _, p in ipairs(FX.keepPins()) do
+    if p == pk then FX.alert("⚠️ Unstar the project first: its transcripts are still being kept", 4); return false end
+  end
+  local dir = FX.KEEP_DIR .. "/" .. pk
+  local names, n = {}, 0
+  for _, name in ipairs(FX.readDir(dir)) do
+    if name:match("%.jsonl$") or name:match("%.jsonl%.part%.%d+$") then
+      names[#names + 1] = name
+      if name:match("%.jsonl$") then n = n + 1 end
+    end
+  end
+  if #names == 0 then return false end
+  local answer = FX.runModal(function() return hs.dialog.blockAlert("Remove kept transcripts",
+    "Delete the " .. n .. " kept transcript cop" .. ((n == 1) and "y" or "ies") .. " of " .. pk
+      .. " from ~/.claude/cc-keep?\nClaude Code's own transcripts, where they still exist, aren't touched. This can't be undone.",
+    "Keep them", "Remove") end)
+  if answer ~= "Remove" then return false end
+  for _, name in ipairs(names) do os.remove(dir .. "/" .. name) end
+  os.remove(dir)   -- the folder goes once it's empty
+  FX.keepIndexScan()
+  print("[cc-dashboard] ✅ keeper: removed " .. n .. " kept transcript(s) of " .. pk)
+  FX.alert("Removed " .. n .. " kept transcript" .. ((n == 1) and "" or "s") .. " of " .. pk, 3)
+  return true
+end
+
+-- Diagnostics' facts (core.keeperDoctorRows). A missing settings.json is an unset key.
+function FX.keeperFacts()
+  local index = FX._keep.index or FX.keepIndexScan()
+  local kept, bytes = 0, 0
+  for _, v in pairs(index) do kept = kept + 1; bytes = bytes + (tonumber(v.size) or 0) end
+  return { cleanup = core.cleanupDaysFact(FX.readFile(FX.CLAUDE_SETTINGS) or "{}"), pins = #FX.keepPins(),
+           kept = kept, bytes = bytes, lastError = FX._keep.lastError }
+end
+
+-- Diagnostics' offer: cleanupPeriodDays up to core.KEEPER.raiseToDays, that key only.
+function FX.raiseCleanupDays()
+  local n = core.cleanupDaysPlan(core.cleanupDaysFact(FX.readFile(FX.CLAUDE_SETTINGS) or "{}"))
+  if not n then return false, "it already keeps transcripts that long, or settings.json can't be read" end
+  return FX.setClaudeSettingsNumber("cleanupPeriodDays", n)
+end
+
 -- env.<key> as Claude Code's settings.json says it now; nil when unset or unreadable.
 function FX.claudeSettingsEnv(key)
   local raw = FX.readFile(FX.CLAUDE_SETTINGS)
@@ -2415,6 +2663,8 @@ function FX.doctorStatus()
     compact = (function() local okc, f = pcall(FX.compactFacts, cfg); return okc and f or nil end)(),
     -- 2026-09-29: Claude Code compatibility -- the last check of a new version, its own section
     ccCompat = (function() local okc, f = pcall(FX.compatDoctorFacts); return okc and f or nil end)(),
+    -- 2026-10-03: the transcript keeper -- cleanupPeriodDays (with its offer) and the kept copies
+    keeper = (function() local okk, f = pcall(FX.keeperFacts); return okk and f or nil end)(),
   })
 end
 
@@ -2535,8 +2785,14 @@ end
 function FX.sendHistory()
   if not wv then return end
   local recs = core.sessionHistory(FX.readLedger({ limit = 0 }).events)
+  -- 2026-10-03: the transcript keeper -- which rows have a kept copy (and only that), and the copies
+  -- per project, for unstarring's "Remove kept copies" offer
+  local index = FX.keepIndexScan()
+  core.keeperAnnotateHistory(recs, index, function(pk, sid)
+    return FX.keepIsFile(FX.PROJECTS_DIR .. "/" .. tostring(pk) .. "/" .. tostring(sid) .. ".jsonl")
+  end)
   pcall(function()
-    wv:evaluateJavaScript("window.ccHistory(" .. hs.json.encode({ records = recs }) .. ")")
+    wv:evaluateJavaScript("window.ccHistory(" .. hs.json.encode({ records = recs, keptByProject = core.keeperProjectCounts(index) }) .. ")")
   end)
 end
 
@@ -7213,12 +7469,14 @@ function FX.seanceAsk(text)
   local question = type(req.question) == "string" and req.question or ""
   if not question:match("%S") then return refuse("type a question for the session first") end
   -- a file the panel names (a fleet-search hit) must be a transcript in Claude's own projects
-  -- folder, whatever else the request says; a subagent's file asks its parent session
+  -- folder (or, from 2026-10-03, the transcript keeper's copy of one), whatever else the request
+  -- says; a subagent's file asks its parent session
   local file
   if type(req.file) == "string" and req.file ~= "" then
     local parent = req.file:match("^(.*)/subagents/[^/]+%.jsonl$")
     file = parent and (parent .. ".jsonl") or req.file
-    if file:sub(1, #projects) ~= projects or file:find("/../", 1, true) or not file:match("%.jsonl$") then
+    local inKeep = file:sub(1, #FX.KEEP_DIR + 1) == FX.KEEP_DIR .. "/"
+    if (file:sub(1, #projects) ~= projects and not inKeep) or file:find("/../", 1, true) or not file:match("%.jsonl$") then
       return refuse("it only reads transcripts in ~/.claude/projects")
     end
   end
@@ -7237,6 +7495,8 @@ function FX.seanceAsk(text)
   if not tp and type(req.projectKey) == "string" and req.projectKey:match("^[%w%-]+$") then
     tp = projects .. req.projectKey .. "/" .. sid .. ".jsonl"
   end
+  -- 2026-10-03: Claude Code deleted it -- ask its kept copy (the transcript keeper)
+  if type(tp) == "string" then tp = FX.keepReadPath(tp) or tp end
   local head
   if type(tp) == "string" then
     pcall(function()
@@ -7253,7 +7513,7 @@ function FX.seanceAsk(text)
     facts.model or (st and st.lastModel) or (it and it.model))
   local cfg = loadConfig()
   local plan, why = core.seancePlan({ sessionId = sid, transcript = tp,
-    projectKey = (it and it.projectKey) or tp:match("/projects/([^/]+)/[^/]+%.jsonl$"),
+    projectKey = (it and it.projectKey) or tp:match("/projects/([^/]+)/[^/]+%.jsonl$") or tp:match("/cc%-keep/([^/]+)/[^/]+%.jsonl$"),
     cwd = (it and it.cwd) or facts.cwd, origin = (it and it.originDir) or facts.origin,
     model = model, contextTokens = ctx, fallbackDir = FX.seanceDir(),
     maxBudgetUsd = core.config(cfg, "seance.maxBudgetUsd", nil) }, FX.seanceIsDir)
@@ -13902,6 +14162,25 @@ local function handleBridgeMsg(msg)
     pcall(function() wv:evaluateJavaScript("window.ccDoctor(" .. hs.json.encode(FX.doctorStatus()) .. ")") end)
     return
   end
+  -- 2026-10-03: a Diagnostics row's offer button (v = its id; Lua decides what each does). The one
+  -- offer: raise Claude Code's cleanupPeriodDays, writing that key only. The rows come back at once.
+  if a == "doctor-offer" then
+    if tostring(payload.v or "") == "cleanup-days" then
+      local okr, why = FX.raiseCleanupDays()
+      if okr then FX.alert("✅ Claude Code now keeps transcripts " .. core.KEEPER.raiseToDays .. " days (cleanupPeriodDays in ~/.claude/settings.json)", 4)
+      else FX.alert("⚠️ Couldn't change cleanupPeriodDays: " .. tostring(why), 5) end
+    end
+    pcall(function() wv:evaluateJavaScript("window.ccDoctor(" .. hs.json.encode(FX.doctorStatus()) .. ")") end)
+    return
+  end
+  -- 2026-10-03: the transcript keeper. keep-pins: the History tab's ★ set (text = a JSON list), sent
+  -- on every change and when the panel loads. keep-remove: an unstarred project's kept copies
+  -- (v = its key), removed only after Adam confirms; History is sent again either way.
+  if a == "keep-pins" then FX.keepSetPins(payload.text); return end
+  if a == "keep-remove" then
+    if FX.keepRemove(payload.v) then FX.sendHistory() end
+    return
+  end
   -- ---- Project stacks: v is a STACK key here, not a session key -------------------
   if a == "focus-group" then
     -- Double-click on a project card: jump to the instance that needs you most, picked
@@ -14399,6 +14678,8 @@ local function handleBridgeMsg(msg)
       .. (kind ~= "rg" and "  (install ripgrep for faster fleet search)" or ""))
     local paths = { (os.getenv("HOME") or "") .. "/.claude/projects" }
     if hs.fs.attributes(LEDGER_DIR) then paths[#paths + 1] = LEDGER_DIR end
+    -- 2026-10-03: the transcript keeper's copies (a hit there counts once its original is gone)
+    if hs.fs.attributes(FX.KEEP_DIR) then paths[#paths + 1] = FX.KEEP_DIR end
     local args = core.searchArgv(kind, q, paths, { excludeDirs = core.SEARCH_EXCLUDE_DIRS })
     if not args then return end  -- too-short query: JS already cleared the view
     local maxResults = tonumber(core.config(cfg, "search.maxResults", 200)) or 200
@@ -14426,6 +14707,7 @@ local function handleBridgeMsg(msg)
         pcall(os.remove, outFile)
         if gen ~= searchGen then return end  -- superseded by a newer query
         local res = core.parseSearchResults(out, { limit = maxResults })
+        res.hits = core.keeperSearchHits(res.hits, FX.PROJECTS_DIR, FX.KEEP_DIR, FX.keepIsFile)
         local items = {}
         for _, it in pairs(byKey) do items[#items + 1] = it end
         res.hits = core.annotateSearchHits(res.hits, items, LEDGER_DIR)
@@ -16892,6 +17174,11 @@ local HTML = [[
 .h-sub{ color:var(--dim); white-space:nowrap; max-width:200px; overflow:hidden; text-overflow:ellipsis; }
 .h-stat{ color:var(--text-3); flex:1; font-size:11px; }
 .h-when{ color:var(--dim); white-space:nowrap; font-variant-numeric:tabular-nums; font-size:11px; }
+/* the transcript keeper (2026-10-03): a row's kept copy, and unstarring's Remove offer */
+.h-kept, .fs-kept{ color:var(--text-3); font-size:11px; white-space:nowrap; }
+.h-keep-offer{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; padding:5px 8px; margin:2px 0 6px; border:1px dashed var(--border); border-radius:7px; color:var(--text-2); font-size:12px; }
+.h-keep-offer button{ background:none; border:1px solid var(--border); color:var(--text-2); border-radius:6px; padding:1px 8px; cursor:pointer; font-size:11px; }
+.h-keep-offer button:hover{ color:var(--text); border-color:var(--danger); }
 #a-body{ flex:1; overflow:auto; padding:6px 10px; }
 .a-item{ border-bottom:1px solid var(--border-weak); }
 .a-row{ display:flex; gap:8px; align-items:baseline; padding:3px 0; }
@@ -17172,6 +17459,9 @@ local HTML = [[
 .doc-ok .doc-ic{ color:var(--ok); } .doc-warn .doc-ic{ color:var(--warn); }
 .doc-crit .doc-ic{ color:var(--danger); } .doc-info .doc-ic{ color:var(--muted); }
 .doc-sec{ color:var(--accent); font-weight:700; font-size:11px; text-transform:uppercase; letter-spacing:.06em; margin:16px 0 2px; }
+.doc-offer{ margin-top:5px; background:var(--surface); color:var(--text-2); border:1px solid var(--border); border-radius:6px; padding:2px 10px; cursor:pointer; font-size:11px; }
+.doc-offer:hover:not(:disabled){ color:var(--text); border-color:var(--accent); }
+.doc-offer:disabled{ opacity:.6; cursor:default; }
 /* F9 Features list */
 .feat-cat{ color:var(--accent); font-weight:700; font-size:11px; text-transform:uppercase; letter-spacing:.06em;
            margin:16px 0 4px; padding-bottom:4px; border-bottom:1px solid var(--border); }
@@ -23032,9 +23322,19 @@ local HTML = [[
               + '<span class="doc-main"><span class="doc-label">'+esc(r.label||"")+'</span>'
               + (r.detail ? '<div class="doc-detail">'+esc(r.detail)+'</div>' : '')
               + (r.fix ? '<div class="doc-fix">'+esc(r.fix)+'</div>' : '')
+              + (r.offer && r.offer.id ? '<button class="doc-offer" data-offer="'+esc(r.offer.id)+'" onclick="doctorOffer(this)">'+esc(r.offer.label || "Do it")+'</button>' : '')
               + '</span></div>';
       }
       return html;
+    }
+    // 2026-10-03: a row's offer (the transcript keeper's cleanupPeriodDays): its id rides in data-offer
+    // and Lua decides what it does; the button can't be clicked twice while it runs
+    function doctorOffer(btn){
+      var id = btn && btn.getAttribute ? btn.getAttribute("data-offer") : null;
+      if(!id) return;
+      btn.disabled = true;
+      btn.textContent = "Saving…";
+      send("doctor-offer", id);
     }
     window.ccDoctor = function(rows){
       var body = document.getElementById("doc-body"); if(!body) return;
@@ -25128,17 +25428,44 @@ local HTML = [[
     function historyPins(){
       try { return JSON.parse(window.localStorage.getItem("cc-historyPins") || "{}") || {}; } catch(e){ return {}; }
     }
+    // 2026-10-03: the transcript keeper keeps every ★ project's transcripts, but Lua can't read
+    // localStorage: the set goes to Lua on every change and once when the panel loads (just below)
+    // -- unless nothing is starred: then there's nothing to tell, and should a wiped localStorage ever
+    // forget its stars, pins.json goes on keeping them, which loses nothing.
+    var HISTORY_KEPT = {};       // project key -> its kept transcript copies (window.ccHistory)
+    function syncKeepPins(){
+      send("keep-pins", "", JSON.stringify(Object.keys(historyPins())));
+    }
+    try { if(Object.keys(historyPins()).length) syncKeepPins(); } catch(e){}
     function setHistoryPin(pk, on){
       if(!pk) return;
       var p = historyPins();
       if(on) p[pk] = true; else delete p[pk];
       try { window.localStorage.setItem("cc-historyPins", JSON.stringify(p)); } catch(e){}
+      syncKeepPins();
       renderHistory();
     }
     window.ccHistory = function(payload){
       HISTORY = (payload && payload.records) || [];
+      HISTORY_KEPT = (payload && payload.keptByProject) || {};
       if(auditView === "history") renderHistory();
     };
+    // Unstarring offers to remove a project's kept copies (Lua asks first): one line per UNSTARRED
+    // project that still has copies -- a starred project's are being kept, so none for it.
+    function historyKeepOffersHtml(kept, pins){
+      kept = kept || {}; pins = pins || {};
+      return Object.keys(kept).sort().filter(function(pk){ return (Number(kept[pk]) || 0) > 0 && !pins[pk]; }).map(function(pk){
+        var n = Number(kept[pk]) || 0;
+        return '<div class="h-keep-offer" data-pk="' + esc(pk) + '">📦 ' + n + ' kept transcript' + (n === 1 ? '' : 's')
+          + ' of <b>' + esc(decodeProjectKey(pk)) + '</b> stay after unstarring.'
+          + ' <button onclick="historyKeepRemove(this)" title="Delete these copies from ~/.claude/cc-keep (Shepherd asks first)">Remove kept copies</button></div>';
+      }).join("");
+    }
+    function historyKeepRemove(btn){
+      var row = btn && btn.closest ? btn.closest(".h-keep-offer") : null;
+      var pk = row && row.getAttribute("data-pk");
+      if(pk) send("keep-remove", pk);
+    }
     function historySortCmp(s){
       if(s === "oldest") return function(a,b){ return (a.lastTs||0) - (b.lastTs||0); };
       if(s === "active")  return function(a,b){ return ((b.prompts||0)+(b.toolRequests||0)) - ((a.prompts||0)+(a.toolRequests||0)) || (b.lastTs||0)-(a.lastTs||0); };
@@ -25161,13 +25488,14 @@ local HTML = [[
       });
       rows.sort(historySortCmp(historySort));
       document.getElementById("h-info").textContent = rows.length + " session(s)";
+      var offers = historyKeepOffersHtml(HISTORY_KEPT, pins);
       if(!rows.length){
-        body.innerHTML = '<div class="s-help" style="margin-left:0;">'
+        body.innerHTML = offers + '<div class="s-help" style="margin-left:0;">'
           + (HISTORY.length ? 'No sessions match the filter.' : 'No session history yet — the audit ledger must be enabled to record it.')
           + '</div>';
         updateHistoryDelBtn(); return;
       }
-      body.innerHTML = rows.map(historyRow).join("");
+      body.innerHTML = offers + rows.map(historyRow).join("");
       updateHistoryDelBtn();
     }
     // NOTE: projectKey/session_id are written as ESC'd data- attributes and read back raw
@@ -25184,6 +25512,10 @@ local HTML = [[
         + '<span class="h-sub">' + sub + '</span>'
         + '<span class="h-stat">' + (r.prompts||0) + ' turns · ' + (r.toolRequests||0) + ' tools · ' + (r.events||0) + ' events</span>'
         + '<span class="h-when">' + esc(fmtTs(r.lastTs)) + '</span>'
+        // the transcript keeper (2026-10-03): a kept copy, or only that once Claude Code deleted the original
+        + (r.kept ? '<span class="h-kept" title="' + (r.keptOnly ? 'Claude Code deleted the original; Shepherd reads its kept copy in ~/.claude/cc-keep'
+                                                                : 'A copy of this transcript is kept in ~/.claude/cc-keep')
+                    + '">' + (r.keptOnly ? '📦 kept copy only' : '📦 kept') + '</span>' : '')
         // Seance (2026-10-02): ask this session a question, live or long finished
         + (r.session_id ? '<button class="h-ask" onclick="seanceToggle(event, this)" title="Ask this session a question: a read-only fork of its conversation answers">🔮 Ask</button>' : '')
         + '</div>';
@@ -25318,6 +25650,10 @@ local HTML = [[
       fsTimer = setTimeout(function(){ send("fleet-search", "", JSON.stringify({ q: q })); }, 300);
     }
     var FS_HITS = [];
+    // the transcript keeper (2026-10-03): a hit in a kept copy (its original deleted by Claude Code)
+    function fsKeptTag(h){
+      return (h && h.kept) ? '<span class="fs-kept" title="Claude Code deleted the original; this hit is in its kept copy in ~/.claude/cc-keep">📦 kept</span>' : "";
+    }
     window.ccSearch = function(res){
       res = res || {};
       var cur = (document.getElementById("fs-input").value || "").trim();
@@ -25341,6 +25677,7 @@ local HTML = [[
           + (seance ? ' data-sid="' + esc(h.sessionId) + '" data-key="' + esc(h.key || "") + '" data-file="' + esc(h.file || "") + '"' : '') + '>'
           + '<span class="fs-who">' + (h.key ? "● " : "") + esc(who) + '</span>'
           + '<span class="fs-file">' + esc(base) + ':' + (h.line || "?") + '</span>'
+          + fsKeptTag(h)
           + '<span class="fs-text">' + esc(h.text || "") + '</span>'
           + (seance ? '<button class="fs-ask" onclick="seanceToggle(event, this)" title="Ask this session a question: a read-only fork of its conversation answers">🔮 Ask</button>' : '')
           + (h.key ? '<button class="fs-jump" onclick="event.stopPropagation();send(\'focus\',\'' + esc(h.key) + '\')" title="Jump to this session\'s window">Jump</button>' : '')
@@ -28855,6 +29192,9 @@ FX.radarTimer = hs.timer.doEvery(30, function() pcall(FX.refreshRadar) end)
 FX.schedLockTimer = hs.timer.doEvery(30, function() pcall(FX.refreshSchedLocks) end)
 -- 2026-09-29: the Time view's transcript index -- its own timer, never the tick (timeLost.refreshSeconds)
 FX.timeIndexTimer = hs.timer.doEvery(60, function() pcall(FX.refreshTimeIndex) end)
+-- 2026-10-03: the transcript keeper -- a look at the ★ projects every keeper scanSeconds, the copies
+-- one async task at a time (FX.stepKeeper decides); never on the tick.
+FX.keepTimer = hs.timer.doEvery(60, function() pcall(FX.stepKeeper) end)
 -- Official plan-usage window (metadata call, no model tokens): refresh every 180s.
 M.officialUsageTimer = hs.timer.doEvery(OFFICIAL_TTL, function()
   pcall(FX.fetchOfficialUsage)

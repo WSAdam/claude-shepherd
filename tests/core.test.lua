@@ -8482,8 +8482,10 @@ do
   -- 2026-10-03: 54 -> 55 for the scheduled main-green check ("maingreen", flagged new).
   -- 2026-10-03: 55 -> 56 for Run selected in My List ("runner", flagged new).
   -- 2026-10-03: 56 -> 57 for grey cards, live sessions with no status file ("hookless", flagged new).
-  eq("FEATURES: the 57 new features are flagged", newCount, 57)
+  -- 2026-10-03: 57 -> 58 for kept transcripts ("keeper", flagged new).
+  eq("FEATURES: the 58 new features are flagged", newCount, 58)
   check("FEATURES: lists the grey cards", keys.hookless == true)
+  check("FEATURES: lists kept transcripts", keys.keeper == true)
   check("FEATURES: lists the main moved notice", keys.mainmoved == true)
   check("FEATURES: lists the main-green check", keys.maingreen == true)
   check("FEATURES: lists the coach across repos", keys.coachglobal == true)

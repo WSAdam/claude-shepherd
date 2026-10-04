@@ -191,6 +191,7 @@ Everything lives under `~/.claude/`:
 | `cc-lock.json` | The screen lock's salted password hash |
 | `cc-exports/` | Exported sessions |
 | `cc-scenarios/` | Scrubbed transcript windows saved by [Capture as scenario](development.md#capturing-a-scenario) |
+| `cc-keep/` | [Kept transcripts](usage-and-cost.md#kept-transcripts) of your ★ projects, and `pins.json` (the ★ set). A purge leaves it: those are your transcripts |
 | `cc-shepherd.log` | The panel's log (the Hammerspoon console, mirrored) |
 
 The layout choice and the panel's size and position live in Hammerspoon's own settings. The

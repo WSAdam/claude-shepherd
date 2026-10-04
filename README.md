@@ -72,7 +72,7 @@ Every feature below has a reference page one click away. The panel lists the sam
   a message, stop its turn, or clear or compact it, from its tile.
 - [**Pinned links**](docs/controls.md#pinned-links): a session pins up to 8 links (its preview, its
   PR, a file in its worktree) with `cc-pin.sh`, and they show as chips on its card.
-- [**Seance: ask a session**](docs/controls.md#ask-a-session-seance): ask any session, live or finished, a read-only question.
+- [**Seance: ask a session**](docs/controls.md#ask-a-session-seance): ask any session, live or finished, a read-only question; [**Kept transcripts**](docs/usage-and-cost.md#kept-transcripts) keep your ★ projects' sessions past Claude Code's 30-day cleanup.
 - [**cc-send**](docs/automation.md#send-a-prompt-from-a-shell): `cc-send.sh <project|session> "prompt"
   --wait` hands a live session a prompt from any shell and prints its reply.
 - [**Cross-repo tickets**](docs/automation.md#cross-repo-tickets): `cc-ticket.sh file --repo <repo>` hands
