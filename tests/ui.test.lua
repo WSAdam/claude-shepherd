@@ -1763,12 +1763,28 @@ do
   -- ===== #7 session-history browser + bulk history management =====
   -- the uncapped read + aggregate + ccHistory push are single-sourced in FX.sendHistory so the
   -- tab and its post-delete refresh can't diverge (e.g. one site capping the read).
+  -- 2026-10-04 (F2): FX.sendHistory(reuse) -- the past-session scan's own refresh merges onto the
+  -- aggregation the last open read (FX._past.ledger) instead of re-reading a 15MB ledger per pass;
+  -- every other caller still reads the whole ledger, in this one place.
   check("hist-pin: open-history-view + FX.sendHistory aggregate the FULL (uncapped) ledger",
         src:find('a == "open-history-view"', 1, true) ~= nil
         and src:find("FX.sendHistory()", 1, true) ~= nil
-        and src:find("function FX.sendHistory()", 1, true) ~= nil
+        and src:find("function FX.sendHistory(reuse)", 1, true) ~= nil
         and src:find("core.sessionHistory(FX.readLedger({ limit = 0 }).events)", 1, true) ~= nil
         and src:find("window.ccHistory(", 1, true) ~= nil)
+  local sendH = src:match("\nfunction FX%.sendHistory%(reuse%)(.-)\nend\n") or ""
+  local function cnt(needle)
+    local n, i = 0, 1
+    while true do
+      local s, e = src:find(needle, i, true)
+      if not s then break end
+      n, i = n + 1, e + 1
+    end
+    return n
+  end
+  check("hist-pin: ...only the scan's refresh reuses the last read (FX.sendHistory(true)), never a stale one on open",
+        sendH:find("local base = reuse and FX._past.ledger or nil", 1, true) ~= nil
+        and cnt("FX.sendHistory(true)") == 0 and cnt("pcall(FX.sendHistory, true)") == 1)
   check("hist-pin: bulk delete purges selected sessions through the scoped-purge path (+ confirm)",
         src:find('a == "history-delete"', 1, true) ~= nil
         and src:find("FX.purgeLedger({ sessions = sessions })", 1, true) ~= nil
@@ -3382,7 +3398,8 @@ do
   -- VERIFIED-DEAD session's tab by id -- with no live process there is nothing to fork. The
   -- literal is written once, in core.restartTabUri; that has one caller, FX.openClaudeTab, which
   -- verifies the session dead right before the URI goes out; and only the restart path
-  -- (FX.restartOne) hands it a session. Every other use -- Jump above all -- stays banned.
+  -- (FX.restartOne) hands it a session -- plus, from 2026-10-04, History's Resume
+  -- (FX.pastResumeLaunch), by the same rule. Every other use -- Jump above all -- stays banned.
   local function count(hay, needle)
     local n, i = 0, 1
     while true do
@@ -3410,8 +3427,24 @@ do
         iNone and iUri and iOut and iUri < iNone and iNone < iOut
         and open:find("return done(false, whyNot or \"not a session id\")", 1, true) ~= nil or false)
   local one = src:match("\nfunction FX%.restartOne%(row, finish%)(.-)\nend\n") or ""
-  check("d14-pin: only the restart path hands FX.openClaudeTab a session (FX.restartOne)",
-        count(src, "restartSession = ") == 1 and one:find("restartSession = row.id", 1, true) ~= nil)
+  -- 2026-10-04 (mining round 2 unit F2, Adam's decision 2026-10-02): History's Resume reopens a past
+  -- VS Code session by the same rule -- verified dead, the URI from core.restartTabUri, sent by
+  -- FX.openClaudeTab. It is the ONE other caller allowed to hand FX.openClaudeTab a session.
+  local past = src:match("\nfunction FX%.pastResumeLaunch%(plan, name%)(.-)\nend\n") or ""
+  check("d14-pin: only the restart path and History's Resume hand FX.openClaudeTab a session (FX.restartOne, FX.pastResumeLaunch)",
+        count(src, "restartSession = ") == 2 and one:find("restartSession = row.id", 1, true) ~= nil
+        and past:find("restartSession = plan.id", 1, true) ~= nil)
+  local iPastDead, iPastTab = past:find("FX.restartVerifyDead(plan.id)", 1, true), past:find("FX.openClaudeTab({", 1, true)
+  check("d14-pin: ...and Resume verifies the session dead before it asks for the tab",
+        iPastDead and iPastTab and iPastDead < iPastTab or false)
+  local vd = src:match("\nfunction FX%.restartVerifyDead%(id%)(.-)\nend\n") or ""
+  local iSnap, iPast = vd:find("local e = FX.restartSnapshot().sessions[id]", 1, true), vd:find("if not e then return FX.pastVerifyDead(id) end", 1, true)
+  check("d14-pin: a session in no restart snapshot is verified dead by the past-session rule (card, session file, ps)",
+        iSnap and iPast and iSnap < iPast or false)
+  local pvd = src:match("\nfunction FX%.pastVerifyDead%(id%)(.-)\nend\n") or ""
+  check("d14-pin: ...one ps with Shepherd's own pid as its control, decided by core.pastLiveness",
+        pvd:find("core.pastPsCmd()", 1, true) ~= nil and pvd:find("core.pastLiveness(id, {", 1, true) ~= nil
+        and pvd:find('if live == "dead" then return true end', 1, true) ~= nil)
   local focus = src:match("\nfunction FX%.focusWindow%(target%)(.-)\nend\n") or ""
   check("d14-pin: Jump never reaches the restart path (it selects the tab through the tab bridge)",
         #focus > 0 and not focus:find("restart", 1, true) and not focus:find("openClaudeTab", 1, true))
@@ -5188,10 +5221,11 @@ do
         nHeld ~= nil and nClaim ~= nil and nHeld < nClaim)
   -- the census: every caller of an effect primitive is accounted for
   -- FX.spawnSession: its definition; Adam's clicks (spawnPrompt, open-worktree, A/B compare, the New
-  -- panel, a routine's Run now, the tile menu's Respawn); and the automatic ones -- auto-respawn and
-  -- restart (both inside FX.automationAct) and a scheduled routine (FX.holdStops "schedule").
+  -- panel, a routine's Run now, the tile menu's Respawn, and -- 2026-10-04 -- History's ↻ Resume of a
+  -- past session, which has no card and so no hold: FX.pastResumeLaunch); and the automatic ones --
+  -- auto-respawn and restart (both inside FX.automationAct) and a scheduled routine (FX.holdStops "schedule").
   eq("hold: census -- FX.spawnSession has exactly the callers listed here (a new one: decide if the hold must stop it)",
-     count("FX.spawnSession("), 10)
+     count("FX.spawnSession("), 11)
   -- FX._mergeApproved: Adam's Merge click, and the delegated merge on a batch grant (FX.holdStops "merge")
   eq("hold: census -- a merge is approved in exactly two places", count("FX._mergeApproved[key] = {"), 2)
   -- the tick's close: only the drain (FX.holdStops "drain"); every other close is a menu click on `item`

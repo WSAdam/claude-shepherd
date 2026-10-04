@@ -7017,6 +7017,8 @@ local NARRATE = {
   restart_continue = { "▶️", "continued after a restart" },
   -- 2026-10-03: how a reopened session ended: resumed, came back fresh, or didn't come back
   restart_outcome = { "♻️", "restart outcome" },
+  -- 2026-10-04: History's Resume reopened a past session (or refused to)
+  past_resume = { "↻", "resumed a past session" },
 }
 -- R3-10: expose NARRATE so the dashboard can inject it as data (__NARRATE__) and the JS
 -- evDesc twin derives BOTH its emoji and verb label from this single source -- otherwise
@@ -10366,6 +10368,436 @@ function M.keeperDoctorRows(k)
         tostring(e.why or "?"), "check the free disk space, and that ~/.claude/cc-keep is yours")
   end
   return rows
+end
+
+-- ---- Past sessions: browse and reopen (2026-10-04, mining round 2 unit F2) ----------------------
+-- 🗂 History lists every session the ledger saw; it now also lists every session Claude Code still
+-- has a transcript for (~/.claude/projects/<project>/<session>.jsonl) and every one whose original
+-- Claude Code deleted but the transcript keeper kept (~/.claude/cc-keep). A background scan in the
+-- panel (FX.refreshPastSessions: hs.task, never the tick) reads each transcript's head -- its first
+-- prompt, the folder it ran in, the surface that ran it -- and its tail -- its newest AI title -- a
+-- capped batch per pass, newest first; a head is read once it holds a prompt, a tail again whenever
+-- the file moves. Each row offers Seance and Resume. Resume reopens only a session verified dead
+-- (M.pastLiveness): VS Code through the extension's session link (M.restartTabUri, sent only by
+-- FX.openClaudeTab: the restart path's rule, Adam's decision 2026-10-02), a terminal or kitty
+-- session with `claude -r <id>`. Spike S4 (2026-10-04, on 913fcf84): with its transcript moved away
+-- the link opened a NEW EMPTY tab (a fresh session id, no error); with the same bytes moved back it
+-- resumed (`claude --resume=<id>`). So a kept-only session is resumed by copying its kept copy back
+-- to its original path first (M.pastRestoreArgv), and never over a file that is there.
+M.PAST = {
+  headBytes = 32768,       -- a transcript's head: its first prompt sits within the first 16KB (2026-10-04: all 212 of Adam's)
+  tailBytes = 16384,       -- its tail: the newest ai-title record, when it has one
+  passFiles = 60,          -- transcripts read per pass: each callback's parse stays short on the one thread
+  refreshSeconds = 120,    -- History rescans at most this often (opening the tab forces one)
+  deadlineSeconds = 60,    -- a scan still running after this is reclaimed
+  promptMax = 160,
+  titleMax = 100,
+}
+do
+  local function q(s) return "'" .. tostring(s):gsub("'", "'\\''") .. "'" end
+  local function fold(s, max)
+    s = tostring(s or ""):gsub("%s+", " "):gsub("^ ", ""):gsub(" $", "")
+    if s == "" then return nil end
+    local c = capChars(s, max)
+    if c ~= s then c = c .. "…" end
+    return c
+  end
+  local function pidStr(v)
+    local d = (type(v) == "number" and string.format("%d", v) or tostring(v or "")):match("^%d+$")
+    return d and tostring(tonumber(d)) or nil
+  end
+  -- each whole line of `s`, walked with find (a fixed-size read ends mid-line: that torn piece is
+  -- never decoded -- LuaSkin logs a JSON error even inside pcall -- and never handed to a
+  -- *-quantified pattern, which backtracks quadratically on it). skipFirst: the first line is torn
+  -- (a tail); keepRest: the piece after the last newline is whole (the file's own end).
+  local function eachLine(s, skipFirst, keepRest, fn)
+    local pos, n = 1, #s
+    if skipFirst then
+      local nl = s:find("\n", 1, true)
+      if not nl then return end
+      pos = nl + 1
+    end
+    while pos <= n do
+      local nl = s:find("\n", pos, true)
+      local line
+      if nl then line = s:sub(pos, nl - 1); pos = nl + 1
+      elseif keepRest then line = s:sub(pos); pos = n + 1
+      else return end
+      if fn(line) then return end
+    end
+  end
+  -- One text of a user record -> its prompt, or nil: not wrapped in a tag (VS Code puts the open
+  -- file and the selection first), a slash command by its name, and a unit's brief, which arrives
+  -- from another session as a meta record. Any other meta record (a hook's context) is no prompt.
+  local function textPrompt(text, isMeta)
+    local t = tostring(text or ""):gsub("^%s+", "")
+    -- (a torn line may end before its isMeta flag: the brief is unwrapped either way)
+    local body = t:match("^Another Claude session sent a message:%s*<cross%-session%-message[^>]*>(.*)$")
+    if body then
+      local close = body:find("</cross-session-message>", 1, true)
+      return fold(close and body:sub(1, close - 1) or body, M.PAST.promptMax)
+    end
+    if isMeta then return nil end
+    while true do   -- leading <tag>…</tag> blocks (the IDE's context) are no prompt
+      local tag = t:match("^<([%w_%-]+)[^>]*>")
+      if not tag or tag == "command-name" then break end
+      local close = t:find("</" .. tag .. ">", 1, true)
+      if not close then break end
+      t = t:sub(close + #tag + 3):gsub("^%s+", "")
+    end
+    local cmd = t:match("^<command%-name>%s*(/[^<]-)%s*</command%-name>")
+    if cmd and cmd ~= "" then return cmd end
+    if t ~= "" and t:sub(1, 1) ~= "<" then return fold(t, M.PAST.promptMax) end
+    return nil
+  end
+  local function promptOf(line)
+    local ok, e = pcall(function() return M.json.decode(line) end)
+    if not ok or type(e) ~= "table" or e.type ~= "user" or type(e.message) ~= "table" then return nil end
+    local c, texts = e.message.content, {}
+    if type(c) == "string" then texts[1] = c
+    elseif type(c) == "table" then
+      for _, part in ipairs(c) do
+        if type(part) == "table" and part.type == "text" and type(part.text) == "string" then texts[#texts + 1] = part.text end
+      end
+    end
+    for _, text in ipairs(texts) do
+      local p = textPrompt(text, e.isMeta)
+      if p or e.isMeta then return p end
+    end
+    return nil
+  end
+  -- A user line too long for the head (a long paste): the start of its message text, read from the
+  -- torn line WITHOUT decoding it -- a bounded walk to the first unescaped quote, JSON escapes undone.
+  -- An image ahead of the text puts the text out of reach: nil.
+  local function tornPrompt(rest)
+    local c = rest:find('"content":', 1, true)
+    if not c then return nil end
+    local s
+    if rest:sub(c + 10, c + 10) == '"' then s = c + 11
+    else
+      local t = rest:find('{"type":"text","text":"', c, true)
+      if not t or rest:sub(c + 10, t - 1):find("{", 1, true) then return nil end   -- an image (or tool result) comes first
+      s = t + 23
+    end
+    local raw, out, k = rest:sub(s, s + 1600), {}, 1
+    while k <= #raw do
+      local ch = raw:sub(k, k)
+      if ch == '"' then break end
+      if ch == "\\" then
+        local nx = raw:sub(k + 1, k + 1)
+        if nx == "u" then
+          local cp = tonumber(raw:sub(k + 2, k + 5), 16)
+          out[#out + 1] = (cp and cp >= 32 and cp < 0xD800) and utf8.char(cp) or " "
+          k = k + 6
+        else
+          out[#out + 1] = (nx == "n" or nx == "t" or nx == "r") and " " or nx
+          k = k + 2
+        end
+      else
+        out[#out + 1] = ch
+        k = k + 1
+      end
+    end
+    return textPrompt(table.concat(out), rest:find('"isMeta":true', 1, true) ~= nil)
+  end
+
+  -- A transcript's head -> { prompt, user (it has a user line: a session, not a title-only stub),
+  -- cwd, entrypoint, firstTs }. whole = the head is the whole file.
+  function M.pastHeadFacts(head, whole)
+    local f = {}
+    if type(head) ~= "string" or head == "" then return f end
+    f.cwd = M.transcriptOriginCwd(head)
+    local i = head:find('"entrypoint":"', 1, true)
+    if i then f.entrypoint = head:match('^"entrypoint":"([%w_%-]+)"', i) end
+    i = head:find('"timestamp":"', 1, true)
+    if i then f.firstTs = M.isoToEpoch(head:match('^"timestamp":"([^"]+)"', i)) end
+    eachLine(head, false, whole == true, function(line)
+      if line:find('"type":"user"', 1, true) then
+        f.user = true
+        f.prompt = promptOf(line)
+        return f.prompt ~= nil
+      end
+    end)
+    if not f.prompt and whole ~= true then
+      local last = 0
+      while true do
+        local nl = head:find("\n", last + 1, true)
+        if not nl then break end
+        last = nl
+      end
+      local rest = head:sub(last + 1)
+      if rest:find('"type":"user"', 1, true) then
+        f.user = true
+        f.prompt = tornPrompt(rest)
+      end
+    end
+    return f
+  end
+
+  -- A transcript's tail -> its newest AI title, or nil. whole = the tail is the whole file (its
+  -- first line isn't torn).
+  function M.pastTailTitle(tail, whole)
+    if type(tail) ~= "string" or tail == "" then return nil end
+    local title
+    eachLine(tail, whole ~= true, whole == true, function(line)
+      if line:find('"type":"ai-title"', 1, true) then
+        local ok, e = pcall(function() return M.json.decode(line) end)
+        if ok and type(e) == "table" and type(e.aiTitle) == "string" then title = fold(e.aiTitle, M.PAST.titleMax) or title end
+      end
+    end)
+    return title
+  end
+
+  -- What to read this pass. cache = { [path] = { size, mtime, facts, title, headDone } }; files =
+  -- { { path, pk, sid, size, mtime } }. A new file, or one that shrank (replaced), is read from
+  -- scratch; one that moved gets its tail again, and its head only while that holds no prompt yet
+  -- (a head past headBytes never changes). Newest first, at most passFiles; behind = more left.
+  function M.pastScanPlan(cache, files, opts)
+    opts = type(opts) == "table" and opts or {}
+    cache = type(cache) == "table" and cache or {}
+    local cap = tonumber(opts.passFiles) or M.PAST.passFiles
+    local want = {}
+    for _, f in ipairs(type(files) == "table" and files or {}) do
+      local path, size, mtime = type(f) == "table" and f.path or nil, type(f) == "table" and tonumber(f.size) or nil,
+        type(f) == "table" and (tonumber(f.mtime) or 0) or 0
+      if type(path) == "string" and size then
+        local e, r = cache[path], nil
+        if type(e) ~= "table" or size < (tonumber(e.size) or 0) then
+          r = { head = true, tail = true, fresh = true }
+        elseif size ~= tonumber(e.size) or mtime ~= tonumber(e.mtime) then
+          r = { head = not e.headDone, tail = true }
+        end
+        if r then
+          r.path, r.size, r.mtime = path, size, mtime
+          r.wholeHead, r.wholeTail = size <= M.PAST.headBytes, size <= M.PAST.tailBytes
+          want[#want + 1] = r
+        end
+      end
+    end
+    table.sort(want, function(a, b)
+      if a.mtime ~= b.mtime then return a.mtime > b.mtime end
+      return a.path < b.path
+    end)
+    local out = {}
+    for k = 1, math.min(cap, #want) do out[k] = want[k] end
+    return out, #want > cap
+  end
+
+  -- The pass's one shell command: each read's head into <outBase>.<n>.h and tail into .t.
+  function M.pastScanCommand(reads, outBase)
+    local parts = {}
+    for k, r in ipairs(type(reads) == "table" and reads or {}) do
+      local p = q(tostring(r.path))
+      if r.head then parts[#parts + 1] = "head -c " .. M.PAST.headBytes .. " " .. p .. " > " .. q(tostring(outBase) .. "." .. k .. ".h") .. " 2>/dev/null" end
+      if r.tail then parts[#parts + 1] = "tail -c " .. M.PAST.tailBytes .. " " .. p .. " > " .. q(tostring(outBase) .. "." .. k .. ".t") .. " 2>/dev/null" end
+    end
+    return table.concat(parts, "; ")
+  end
+
+  -- Land one read in its cache entry. A head with a prompt, or one past headBytes, is done.
+  function M.pastScanApply(e, read, headText, tailText)
+    read = type(read) == "table" and read or {}
+    if read.fresh or type(e) ~= "table" then e = { facts = {} } end
+    if read.head and type(headText) == "string" then
+      e.facts = M.pastHeadFacts(headText, read.wholeHead == true)
+      e.headDone = e.facts.prompt ~= nil or read.wholeHead ~= true
+    end
+    if read.tail and type(tailText) == "string" then
+      e.title = M.pastTailTitle(tailText, read.wholeTail == true) or e.title
+    end
+    e.size, e.mtime = tonumber(read.size), tonumber(read.mtime) or 0
+    return e
+  end
+
+  -- The rows: one per session whose transcript has a user line (not a title-only stub), never a
+  -- headless run (an sdk-* entrypoint: Shepherd's own coach, checker and Seance runs). files carry
+  -- kept (a copy exists too) and keptOnly (this IS the kept copy: the original is gone).
+  function M.pastSessionRows(files, cache)
+    cache = type(cache) == "table" and cache or {}
+    local out, seen = {}, {}
+    for _, f in ipairs(type(files) == "table" and files or {}) do
+      local e = type(f) == "table" and cache[f.path] or nil
+      if type(e) == "table" and M.restartIdOk(f.sid) and M.keeperProjectKeyOk(f.pk) then
+        local facts = type(e.facts) == "table" and e.facts or {}
+        local headless = type(facts.entrypoint) == "string" and facts.entrypoint:match("^sdk%-") ~= nil
+        if (facts.prompt or facts.user) and not headless then
+          local r = { session_id = f.sid, projectKey = f.pk, prompt = facts.prompt, title = e.title, cwd = facts.cwd,
+                      entrypoint = facts.entrypoint, firstTs = facts.firstTs, size = tonumber(f.size),
+                      sizeHuman = M.fmtBytes(f.size), mtime = tonumber(f.mtime),
+                      kept = (f.kept or f.keptOnly) and true or nil, keptOnly = f.keptOnly and true or nil }
+          local prev = seen[f.sid]
+          if not prev then
+            seen[f.sid] = r; out[#out + 1] = r
+          elseif (r.mtime or 0) > (prev.mtime or 0) then
+            for k in pairs(prev) do prev[k] = nil end
+            for k, v in pairs(r) do prev[k] = v end
+          end
+        end
+      end
+    end
+    return out
+  end
+
+  -- History's records: every ledger record (a COPY: the cached aggregation is never touched) with
+  -- its transcript's facts (past), plus a record of its own for every transcript the ledger never
+  -- saw (transcriptOnly). opts = { scanned (the scan has finished: a record with no transcript
+  -- anywhere is noTranscript), live = { [sid] = true } }. canResume: an ended session with a
+  -- transcript or a kept copy -- the real check happens on the click.
+  function M.pastSessionsMerge(records, rows, opts)
+    opts = type(opts) == "table" and opts or {}
+    local live = type(opts.live) == "table" and opts.live or {}
+    local byId = {}
+    for _, r in ipairs(type(rows) == "table" and rows or {}) do
+      if type(r) == "table" and r.session_id then byId[r.session_id] = r end
+    end
+    local function facts(r)
+      return { prompt = r.prompt, title = r.title, size = r.size, sizeHuman = r.sizeHuman, mtime = r.mtime,
+               cwd = r.cwd, firstTs = r.firstTs, entrypoint = r.entrypoint }
+    end
+    local out, used = {}, {}
+    for _, rec in ipairs(type(records) == "table" and records or {}) do
+      if type(rec) == "table" then
+        local c = {}
+        for k, v in pairs(rec) do c[k] = v end
+        local row = c.session_id and byId[c.session_id] or nil
+        if row then
+          used[c.session_id] = true
+          c.past = facts(row)
+          if not M.keeperProjectKeyOk(c.projectKey) then c.projectKey = row.projectKey end
+          if row.kept then c.kept = true end
+          if row.keptOnly then c.keptOnly = true end
+          if (row.mtime or 0) > (tonumber(c.lastTs) or 0) then c.lastTs = row.mtime end
+        elseif opts.scanned and c.session_id then
+          c.noTranscript = true
+        end
+        out[#out + 1] = c
+      end
+    end
+    for _, r in ipairs(type(rows) == "table" and rows or {}) do
+      if type(r) == "table" and r.session_id and not used[r.session_id] then
+        used[r.session_id] = true
+        out[#out + 1] = { session_id = r.session_id, projectKey = r.projectKey, firstTs = r.firstTs, lastTs = r.mtime,
+                          events = 0, prompts = 0, toolRequests = 0, allow = 0, deny = 0, transcriptOnly = true,
+                          past = facts(r), kept = r.kept, keptOnly = r.keptOnly }
+      end
+    end
+    for _, c in ipairs(out) do
+      if c.session_id and live[c.session_id] then c.live = true end
+      c.canResume = (c.past ~= nil and not c.live and not c.noTranscript) or nil
+    end
+    return out
+  end
+
+  -- The probe: every process's start time and FULL command line, in Claude Code's zone and locale
+  -- (a session file's procStart is written that way).
+  function M.pastPsCmd() return "LC_ALL=C TZ=UTC ps -axww -o pid=,lstart=,command= 2>/dev/null" end
+
+  -- Is a past session verified dead? f = { liveIds = the cards' session ids, registry =
+  -- FX.readSessions(), psOut = M.pastPsCmd's answer, me = Shepherd's own pid }. "alive" + why: a card
+  -- has it; a Claude Code session file names it under a process that still runs (same pid, same
+  -- start); or a process's command line holds its id (`claude -r <id>`, `--resume <id>`, VS Code's
+  -- `--resume=<id>`, a Seance fork). A session file whose process is gone, or whose pid is another
+  -- process now, is a crash's leftover and doesn't count. "unknown" + why: no session id, or a ps
+  -- that didn't list Shepherd itself -- it proves nothing. Only "dead" is ever reopened.
+  function M.pastLiveness(id, f)
+    f = type(f) == "table" and f or {}
+    if not M.restartIdOk(id) then return "unknown", "that isn't a session id" end
+    if type(f.liveIds) == "table" and f.liveIds[id] then return "alive", "it has a card in Shepherd: use the card" end
+    local me = pidStr(f.me)
+    local procs, byPid, probed = {}, {}, false
+    if type(f.psOut) == "string" and me then
+      eachLine(f.psOut, false, true, function(line)
+        local pid, ls, cmd = line:match("^%s*(%d+)%s+(%a%a%a %a%a%a [%d ]%d %d%d:%d%d:%d%d %d%d%d%d)%s*(.*)$")
+        pid = pidStr(pid)
+        if pid == me then probed = true
+        elseif pid then byPid[pid] = ls; procs[#procs + 1] = { pid = pid, cmd = cmd } end
+      end)
+    end
+    if not probed then return "unknown", "ps gave no answer that included Shepherd itself" end
+    for key, r in pairs(type(f.registry) == "table" and f.registry or {}) do
+      if type(r) == "table" and r.sessionId == id then
+        local d = pidStr(r.pid) or pidStr(key)
+        local ls = d and byPid[d]
+        if ls and (type(r.procStart) ~= "string" or r.procStart == "" or r.procStart == ls) then
+          return "alive", "Claude Code's session file says it is running (pid " .. d .. ")"
+        end
+      end
+    end
+    for _, p in ipairs(procs) do
+      if p.cmd:find(id, 1, true) then return "alive", "a process still has it open (pid " .. p.pid .. ")" end
+    end
+    return "dead"
+  end
+
+  -- How to reopen it. t = { sid, pk, original, originalExists, keptPath, keptExists, cwd (its head's),
+  -- entrypoint, editor (spawn.editor) }; isDir(path) says whether a folder exists. VS Code's
+  -- sessions (entrypoint claude-vscode) come back as their tab (Cursor's when that's the spawn
+  -- editor), a CLI session with claude -r in kitty or Terminal. The folder is its launch folder
+  -- (M.launchDirFor: the one its project key encodes), which must still exist. -> plan or nil, why.
+  function M.pastResumePlan(t, isDir)
+    t = type(t) == "table" and t or {}
+    if not M.restartIdOk(t.sid) then return nil, "that isn't a session id" end
+    if not M.keeperProjectKeyOk(t.pk) then return nil, "that isn't a Claude Code project" end
+    if type(t.entrypoint) == "string" and t.entrypoint:match("^sdk%-") then
+      return nil, "it was a headless run (claude -p), not a session to reopen"
+    end
+    local restore
+    if not t.originalExists then
+      if not (t.keptExists and type(t.keptPath) == "string" and type(t.original) == "string") then
+        return nil, "its transcript is gone and no copy was kept"
+      end
+      restore = { from = t.keptPath, to = t.original }
+    end
+    local dir = M.launchDirFor(t.pk, t.cwd, t.cwd)
+    if not dir then return nil, "Shepherd can't tell which folder it ran in" end
+    if type(isDir) ~= "function" or isDir(dir) ~= true then return nil, "its folder " .. dir .. " is gone" end
+    local spawnEd = tostring(t.editor or "")
+    local editor
+    if t.entrypoint == "claude-vscode" then editor = (spawnEd == "cursor") and "cursor" or "vscode"
+    elseif t.entrypoint == "cli" then editor = (spawnEd == "kitty" or spawnEd == "terminal") and spawnEd or "terminal"
+    else editor = M.RESTART_EDITORS[spawnEd] and spawnEd or "terminal" end
+    return { id = t.sid, pk = t.pk, dir = dir, editor = editor,
+             how = (editor == "vscode" or editor == "cursor") and "tab" or "shell", restore = restore, transcript = t.original }
+  end
+
+  -- The kept copy back to its original path, for /bin/sh (the paths ride as $1 $2): a copy into a
+  -- part file beside it, private (600) and touched (Claude Code's cleanup goes by mtime, and the copy
+  -- is old), then `ln` -- which fails when anything is at the original path, so a transcript that is
+  -- there, or appeared meanwhile, is never overwritten. The PART file is linked, never the kept copy:
+  -- the two stay separate files, so the resumed session never writes into the copy and the keeper's
+  -- "grown" re-copy isn't a copy onto itself. Prints @@restored <bytes> or @@fail <why>.
+  -- nil unless `from` is a kept copy under keepDir and `to` is its own original under projectsDir.
+  function M.pastRestoreArgv(from, to, keepDir, projectsDir)
+    local function abs(p)
+      return type(p) == "string" and p:sub(1, 1) == "/" and not p:find("/../", 1, true)
+        and not p:find("/%.%.$") and not p:find("[%c]")
+    end
+    if not (abs(from) and abs(to) and abs(keepDir) and abs(projectsDir)) then return nil end
+    if M.keptOriginalOf(from, projectsDir, keepDir) ~= to then return nil end
+    local script = table.concat({
+      'umask 077',
+      '[ -e "$2" ] && { echo "@@fail $2 is there already: left alone"; exit 1; }',
+      'mkdir -p "$(dirname "$2")" || { echo "@@fail could not make the folder for $2"; exit 1; }',
+      't="$2.part.$$"',
+      'if { cp -c "$1" "$t" 2>/dev/null || cp "$1" "$t" 2>/dev/null; } && chmod 600 "$t" && touch "$t"; then',
+      '  if ln "$t" "$2" 2>/dev/null; then rm -f "$t"; echo "@@restored $(wc -c < "$2" | tr -d \' \')"; exit 0; fi',
+      '  rm -f "$t"; echo "@@fail $2 appeared meanwhile: left alone"; exit 1',
+      'fi',
+      'rm -f "$t"; echo "@@fail could not copy $1"; exit 1',
+    }, "\n")
+    return { "-c", script, "cc-past-restore", from, to }
+  end
+  function M.pastRestoreResult(code, out)
+    out = tostring(out or "")
+    local n = out:match("@@restored (%d+)")
+    if tonumber(code) == 0 and n then return true, tonumber(n) end
+    local why = out:match("@@fail ([^\n]*)")
+    if not why then
+      local trimmed = (out:gsub("%s+$", ""))
+      why = (trimmed ~= "") and trimmed or ("exit " .. tostring(code))
+    end
+    return false, why
+  end
 end
 
 -- Per-tile context bar color band. Calm below 50%, then a new band every 10% (50/60/70/80/90),
@@ -25126,6 +25558,9 @@ M.FEATURES = {
   { key = "keeper", cat = "Control", new = true, title = "Kept transcripts",
     what = "★ a project in 🗂 History and Shepherd keeps a copy of each of its transcripts in ~/.claude/cc-keep once the session ends (an APFS clone, in the background), and copies it again when it grows. History, fleet search and Seance read the copy once Claude Code has deleted the original. Diagnostics shows Claude Code's cleanupPeriodDays (30 days unless set) and offers to raise it to 365, writing only that key. A copy is never deleted on its own: unstarring offers to remove it.",
     why = "Claude Code deletes transcripts after a month; the sessions you starred stay readable and askable." },
+  { key = "pastsessions", cat = "Control", new = true, title = "Past sessions",
+    what = "🗂 History lists every session Claude Code still has a transcript for, and every kept copy, beside the ledger's: its AI title or first prompt, its size and when it last moved, read in the background. ↻ Resume reopens one with its conversation -- VS Code as its tab, a terminal session with claude -r -- only once Shepherd has verified it isn't running anywhere (no card, no live session file, no process using its id). A session with only its kept copy left gets that copy put back first, never over a file. 🔮 Ask works on every row.",
+    why = "Pick up last week's conversation where it left off, without hunting for its id or risking a second copy of a session that's still running." },
   { key = "pins", cat = "Control", new = true, title = "Pinned links",
     what = "A session pins up to 8 links -- a preview URL, a PR, a file in its worktree -- with ~/.claude/cc-pin.sh add <link> [--label L], and they show as chips on its card and in the detail panel; a click opens one. Pins belong to the worktree, so they survive /clear, and go when its merge is verified. Only http(s) links and files under the session's git root are taken, never one holding a shell metacharacter, and each is checked again before it opens.",
     why = "The page to look at, the PR to review or the report to read is one click from the card, not somewhere in the transcript." },

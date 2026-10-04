@@ -2791,9 +2791,18 @@ end
 -- session, so the payload stays small) and push the records to the History tab. The
 -- uncapped read + the ccHistory push live in ONE place so the tab and its post-delete
 -- refresh can't diverge (and both get the pcall guard).
-function FX.sendHistory()
+-- 2026-10-04: reuse = the past-session scan's own refresh: merge onto the ledger aggregation already
+-- read (FX._past.ledger -- the ledger can be 15MB, read once per open, never once per scan pass).
+function FX.sendHistory(reuse)
   if not wv then return end
-  local recs = core.sessionHistory(FX.readLedger({ limit = 0 }).events)
+  local base = reuse and FX._past.ledger or nil
+  if not base then
+    base = core.sessionHistory(FX.readLedger({ limit = 0 }).events)
+    FX._past.ledger = base
+  end
+  -- 2026-10-04: past sessions -- every transcript Claude Code still has (and every kept copy), merged
+  -- in as COPIES of the ledger's records (core.pastSessionsMerge), with which are live right now
+  local recs = core.pastSessionsMerge(base, FX._past.rows, { scanned = FX._past.scanned, live = FX.pastLiveIds(true) })
   -- 2026-10-03: the transcript keeper -- which rows have a kept copy (and only that), and the copies
   -- per project, for unstarring's "Remove kept copies" offer
   local index = FX.keepIndexScan()
@@ -2801,8 +2810,250 @@ function FX.sendHistory()
     return FX.keepIsFile(FX.PROJECTS_DIR .. "/" .. tostring(pk) .. "/" .. tostring(sid) .. ".jsonl")
   end)
   pcall(function()
-    wv:evaluateJavaScript("window.ccHistory(" .. hs.json.encode({ records = recs, keptByProject = core.keeperProjectCounts(index) }) .. ")")
+    wv:evaluateJavaScript("window.ccHistory(" .. hs.json.encode({ records = recs, keptByProject = core.keeperProjectCounts(index),
+      scanning = FX._past.inflight ~= nil }) .. ")")
   end)
+end
+
+-- ---- Past sessions: browse and reopen (2026-10-04, mining round 2 unit F2) ----------------------
+-- Opening 🗂 History starts a background scan (FX.refreshPastSessions, on the FX.refreshCommits
+-- pattern: its own hs.task, never the tick; one pass at a time, a hung one reclaimed) of every
+-- transcript in ~/.claude/projects, plus each kept copy whose original Claude Code deleted. A pass
+-- reads a capped batch of heads and tails (core.pastScanPlan: only what changed, newest first) into
+-- scratch files; its callback parses them (core.pastScanApply: whole lines, walked with find) and
+-- re-sends History; a batch left behind chains the next. Resume (FX.pastResume) reopens only a session
+-- verified dead (FX.restartVerifyDead -> FX.pastVerifyDead: no card, no live session file, no process
+-- using its id): VS Code through FX.openClaudeTab's session-link rule (D-14), a terminal or kitty
+-- session through FX.spawnSession's claude -r; a kept-only one gets its copy back first
+-- (core.pastRestoreArgv: never over a file). State on FX: the main chunk is at Lua's 200-local cap.
+FX._past = { cache = {}, files = {}, rows = nil, scanned = false, restores = {} }
+
+-- Every transcript Claude Code still has, and each kept copy whose original it deleted (keptOnly).
+function FX.pastFiles()
+  local files, have = {}, {}
+  local index = FX.keepIndexScan()
+  for _, pk in ipairs(FX.readDir(FX.PROJECTS_DIR)) do
+    if core.keeperProjectKeyOk(pk) then
+      local dir = FX.PROJECTS_DIR .. "/" .. pk
+      for _, name in ipairs(FX.readDir(dir)) do
+        local sid = name:match("^(.+)%.jsonl$")
+        local a = sid and core.restartIdOk(sid) and hs.fs.attributes(dir .. "/" .. name) or nil
+        if type(a) == "table" and a.mode == "file" then
+          files[#files + 1] = { path = dir .. "/" .. name, pk = pk, sid = sid, size = a.size,
+                                mtime = tonumber(a.modification) or 0, kept = index[pk .. "/" .. sid] and true or nil }
+          have[pk .. "/" .. sid] = true
+        end
+      end
+    end
+  end
+  for k, v in pairs(index) do
+    local pk, sid = k:match("^([^/]+)/(.+)$")
+    if pk and not have[k] then
+      files[#files + 1] = { path = FX.KEEP_DIR .. "/" .. k .. ".jsonl", pk = pk, sid = sid, size = v.size,
+                            mtime = tonumber(v.mtime) or 0, keptOnly = true }
+    end
+  end
+  return files
+end
+
+-- Session ids running right now: every card's, and (withRegistry) every ~/.claude/sessions entry
+-- whose process ps still shows (FX.probeAlive: a crash's leftover file doesn't count; an unknown
+-- answer counts as running).
+function FX.pastLiveIds(withRegistry)
+  local live = {}
+  for _, src in ipairs({ FX._shownItems or {}, FX._hiddenItems or {} }) do
+    for _, it in ipairs(src) do
+      if type(it.session_id) == "string" then live[it.session_id] = true end
+    end
+  end
+  if withRegistry then
+    local pids, byPid = {}, {}
+    for key, e in pairs(FX.readSessions()) do
+      if type(e) == "table" and type(e.sessionId) == "string" then
+        local d = (type(e.pid) == "number" and string.format("%d", e.pid) or tostring(e.pid or key)):match("^%d+$")
+        if d then pids[d] = true; byPid[d] = e.sessionId end
+      end
+    end
+    if next(pids) ~= nil then
+      local alive = FX.probeAlive(pids)
+      for d, sid in pairs(byPid) do
+        if alive[d] ~= false then live[sid] = true end
+      end
+    end
+  end
+  return live
+end
+
+-- force: true = scan now (History just opened). Returns true when a pass started.
+function FX.refreshPastSessions(force)
+  local st, P = FX._past, core.PAST
+  local now = os.time()
+  local ttl = (force == true or st.behind) and 0 or P.refreshSeconds
+  local plan = core.prPollPlan(st.scannedAt and { ts = st.scannedAt, data = true } or nil, st.inflight, now,
+    { ttl = ttl, retryTtl = 30, deadline = P.deadlineSeconds })
+  if plan.act ~= "start" then return false end
+  if plan.killStale and st.inflight and st.inflight.task then
+    pcall(function() st.inflight.task:terminate() end)   -- a hung read: reclaim the slot
+    print("⚠️ [cc-dashboard] past sessions: the last read hung past " .. P.deadlineSeconds .. "s; starting over")
+  end
+  st.inflight = nil
+  local files = FX.pastFiles()
+  st.files = files
+  local want = {}
+  for _, f in ipairs(files) do want[f.path] = true end
+  core.reapUnbacked(st.cache, want)   -- a transcript that's gone
+  local reads, behind = core.pastScanPlan(st.cache, files)
+  st.scannedAt, st.behind = now, nil
+  if #reads == 0 then
+    st.rows, st.scanned = core.pastSessionRows(files, st.cache), true
+    return false
+  end
+  local outBase = FX.scratchFile("past")
+  local cmd = core.pastScanCommand(reads, outBase)
+  local function cleanup()
+    for i = 1, #reads do pcall(os.remove, outBase .. "." .. i .. ".h"); pcall(os.remove, outBase .. "." .. i .. ".t") end
+  end
+  local started = hs.timer.secondsSinceEpoch()
+  print("🔍 [cc-dashboard] past sessions: reading " .. #reads .. " transcript(s)" .. (behind and ", more after" or ""))
+  local ok = pcall(function()
+    local t   -- forward-declared: the callback's ownership check needs THIS task as an upvalue
+    t = hs.task.new("/bin/sh", function(code)
+      if FX._past ~= st or not core.prCallbackOwns(st.inflight, t) then cleanup(); return end
+      st.inflight = nil
+      local ms = math.floor((hs.timer.secondsSinceEpoch() - started) * 1000)
+      if code == 0 then
+        for i, r in ipairs(reads) do
+          local h = r.head and (FX.readFile(outBase .. "." .. i .. ".h") or "") or nil
+          local tl = r.tail and (FX.readFile(outBase .. "." .. i .. ".t") or "") or nil
+          st.cache[r.path] = core.pastScanApply(st.cache[r.path], r, h, tl)
+        end
+        st.behind = behind or nil
+        st.rows = core.pastSessionRows(st.files, st.cache)
+        st.scanned = st.scanned or not behind
+        print("✅ [cc-dashboard] past sessions: " .. #reads .. " transcript(s) read in " .. ms .. "ms, "
+          .. #st.rows .. " session(s)" .. (behind and " -- more to read" or ""))
+      else
+        print("❌ [cc-dashboard] past sessions: the read exited " .. tostring(code) .. " after " .. ms .. "ms; keeping the last rows")
+      end
+      cleanup()
+      pcall(FX.sendHistory, true)
+      -- left behind by the per-pass cap: the next pass, soon (retained, or GC can eat it)
+      if st.behind then FX._pastChain = hs.timer.doAfter(1, function() pcall(FX.refreshPastSessions) end) end
+    end, { "-c", cmd })
+    if not t then error("task create failed") end
+    st.inflight = { task = t, ts = now }
+    t:start()
+  end)
+  if not ok then
+    st.inflight = nil; cleanup()
+    print("❌ [cc-dashboard] past sessions: couldn't start the read")
+  end
+  return ok
+end
+
+-- A past session (in no restart snapshot) verified dead RIGHT NOW? true, or false + why: one ps
+-- for every process, with Shepherd's own pid as its control (core.pastLiveness decides).
+function FX.pastVerifyDead(id)
+  local me = tostring(type(rawget(hs, "processInfo")) == "table" and hs.processInfo.processID or ""):match("^%d+$")
+  local out
+  pcall(function() out = hs.execute(core.pastPsCmd()) end)
+  local live, why = core.pastLiveness(id, { liveIds = FX.pastLiveIds(false), registry = FX.readSessions(), psOut = out, me = me })
+  if live == "dead" then return true end
+  if live == "alive" then return false, tostring(why) end
+  return false, "can't tell that it is dead: " .. tostring(why)
+end
+
+-- History's ↻ Resume (text = { sessionId, projectKey }, both checked here): plan from the
+-- transcript's own head (core.pastResumePlan), refuse a live or still-resumed session, then reopen
+-- it -- after putting its kept copy back when that's all that's left. Returns true once under way.
+function FX.pastResume(text)
+  local okj, req = pcall(function() return hs.json.decode(tostring(text or "")) end)
+  if not okj or type(req) ~= "table" then return false end
+  local sid, pk = req.sessionId, req.projectKey
+  local function refuse(msg)
+    print("[cc-dashboard] ⚠️ resume: " .. tostring(sid) .. " not reopened -- " .. tostring(msg))
+    FX.alert("⚠️ Resume: " .. tostring(msg), 5)
+    return false
+  end
+  if not core.restartIdOk(sid) then return refuse("that isn't a session id") end
+  if not core.keeperProjectKeyOk(pk) then return refuse("that isn't a Claude Code project") end
+  if FX.pastLiveIds(false)[sid] then return refuse("it has a card in Shepherd: use the card") end
+  local original = FX.PROJECTS_DIR .. "/" .. pk .. "/" .. sid .. ".jsonl"
+  local keptPath = FX.KEEP_DIR .. "/" .. pk .. "/" .. sid .. ".jsonl"
+  local originalExists, keptExists = FX.keepIsFile(original), FX.keepIsFile(keptPath)
+  local head
+  pcall(function()
+    local f = io.open(originalExists and original or keptPath, "rb")
+    if f then head = f:read(core.PAST.headBytes); f:close() end
+  end)
+  local facts = core.pastHeadFacts(head, head ~= nil and #head < core.PAST.headBytes)
+  local plan, why = core.pastResumePlan({ sid = sid, pk = pk, original = original, originalExists = originalExists,
+    keptPath = keptPath, keptExists = keptExists, cwd = facts.cwd, entrypoint = facts.entrypoint,
+    editor = core.config(loadConfig(), "spawn.editor", "terminal") },
+    function(d) return hs.fs.attributes(d, "mode") == "directory" end)
+  if not plan then return refuse(why) end
+  local occupant = FX.worktreeOccupantOf(plan.dir, nil)
+  if occupant then return refuse(core.occupantReason(occupant)) end
+  local dead, whyNot = FX.restartVerifyDead(sid)
+  if not dead then return refuse(whyNot or "it can't be verified dead") end
+  local name = core.capChars(tostring(facts.prompt or sid:sub(1, 8)), 40)
+  if not plan.restore then return FX.pastResumeLaunch(plan, name) end
+  -- only its kept copy is left: back to its original path first (spike S4), one task per session
+  local argv = core.pastRestoreArgv(plan.restore.from, plan.restore.to, FX.KEEP_DIR, FX.PROJECTS_DIR)
+  if not argv then return refuse("its kept copy isn't where Shepherd keeps them") end
+  if FX._past.restores[sid] then return refuse("its kept copy is being put back already") end
+  local task
+  task = hs.task.new("/bin/sh", function(code, out, err)
+    if FX._past.restores[sid] ~= task then return end
+    FX._past.restores[sid] = nil
+    local okr, res = core.pastRestoreResult(code, tostring(out or "") .. "\n" .. tostring(err or ""))
+    if not okr then
+      FX.appendLedger({ type = "past_resume", session_id = sid, cwd = plan.dir, editor = plan.editor, how = plan.how,
+        outcome = "refused", reason = "restore: " .. tostring(res), summary = "not reopened: its kept copy couldn't go back" })
+      return refuse("couldn't put its kept copy back: " .. tostring(res))
+    end
+    print("[cc-dashboard] ✅ resume: put the kept copy of " .. sid .. " back at " .. plan.restore.to .. " (" .. tostring(res) .. " bytes)")
+    FX.pastResumeLaunch(plan, name)
+  end, argv)
+  if not task or not task:start() then return refuse("couldn't start putting its kept copy back") end
+  FX._past.restores[sid] = task   -- retained until it calls back
+  print("[cc-dashboard] 🚀 resume: putting the kept copy of " .. sid .. " back first")
+  return true
+end
+
+-- Reopen a planned past session, verified dead again right before: its VS Code / Cursor tab through
+-- FX.openClaudeTab (core.restartTabUri's session link, D-14's rule, nothing typed), else
+-- `claude -r <id>` through FX.spawnSession (its one-worktree-one-agent check, spawn.live, ledger).
+function FX.pastResumeLaunch(plan, name)
+  local function note(outcome, why)
+    FX.appendLedger({ type = "past_resume", session_id = plan.id, cwd = plan.dir, editor = plan.editor, how = plan.how,
+      restored = plan.restore and true or nil, outcome = outcome, reason = why,
+      summary = (outcome == "ok") and ("reopened " .. tostring(name)) or ("not reopened: " .. tostring(why)) })
+  end
+  local dead, whyNot = FX.restartVerifyDead(plan.id)
+  if not dead then
+    note("refused", whyNot)
+    FX.alert("⚠️ Resume: " .. tostring(whyNot), 5)
+    return false
+  end
+  if plan.how == "tab" then
+    local scheduled = FX.openClaudeTab({ root = plan.dir, editor = plan.editor, prompt = "", label = name, quiet = true,
+      restartSession = plan.id, onDone = function(ok, why)
+        if ok then
+          note("ok")
+          FX.alert("↻ Reopened " .. tostring(name) .. " in its tab", 4)
+        else
+          note("refused", why)
+          FX.alert("⚠️ Resume: " .. tostring(why), 5)
+        end
+      end })
+    if not scheduled then note("refused", "no folder to open it in"); FX.alert("⚠️ Resume: no folder to open it in", 5) end
+    return scheduled
+  end
+  local launched = FX.spawnSession(plan.editor, plan.dir, nil, nil, "", { resume = plan.id }, false, nil)
+  note(launched and "ok" or "refused", (not launched) and "not launched (spawn.live off, or no launch command)" or nil)
+  if launched then FX.alert("↻ Reopening " .. tostring(name) .. " with claude -r", 4) end
+  return launched
 end
 
 -- Retention GC: delete daily files past ledger.retentionDays, then (if maxTotalMB
@@ -12310,10 +12561,12 @@ end
 
 -- Is this session verified dead RIGHT NOW? true, or false + why. Asked before a session is
 -- stamped and again right before its tab's URI goes out (FX.openClaudeTab).
+-- 2026-10-04 (F2): a past session reopened from 🗂 History is in no snapshot (that keeps 72h): it is
+-- verified by the past-session rule instead -- no card, no live session file, no process using its id.
 function FX.restartVerifyDead(id)
   if not core.restartIdOk(id) then return false, "not a session id" end
   local e = FX.restartSnapshot().sessions[id]
-  if not e then return false, "it isn't in the restart snapshot" end
+  if not e then return FX.pastVerifyDead(id) end
   local live, why = core.restartLiveness(e, FX.restartFacts({ sessions = { [id] = e } }))
   if live == "dead" then return true end
   if live == "alive" then return false, tostring(why or "it is running") end
@@ -15316,9 +15569,13 @@ local function handleBridgeMsg(msg)
     return
   end
   if a == "open-history-view" then
+    -- 2026-10-04: the past-session scan starts first (in the background), so the first push says so
+    pcall(FX.refreshPastSessions, true)
     FX.sendHistory()   -- #7: aggregate the full ledger -> records -> ccHistory (one source)
     return
   end
+  -- 2026-10-04: History's ↻ Resume (text = { sessionId, projectKey }; FX.pastResume checks both)
+  if a == "past-resume" then FX.pastResume(payload.text); return end
   if a == "history-delete" then
     -- #7 bulk history delete: purge the ledger events of the SELECTED sessions, routed
     -- through the same scoped-purge path (with its own confirm) the Purge button uses.
@@ -17362,6 +17619,13 @@ local HTML = [[
    fleet-search hit or a History row. The answer keeps its line breaks. */
 .fs-ask, .h-ask{ background:none; border:1px solid var(--border); color:var(--text-3); border-radius:5px; padding:0 6px; cursor:pointer; font-size:11px; white-space:nowrap; }
 .fs-ask:hover, .h-ask:hover{ color:var(--text); border-color:var(--accent); }
+/* past sessions (2026-10-04): a row's first prompt, Resume, and why there's none */
+.h-prompt{ color:var(--text-3); font-size:11px; white-space:nowrap; max-width:280px; overflow:hidden; text-overflow:ellipsis; }
+.h-resume{ background:none; border:1px solid var(--border); color:var(--text-3); border-radius:5px; padding:0 6px; cursor:pointer; font-size:11px; white-space:nowrap; }
+.h-resume:hover{ color:var(--text); border-color:var(--ok); }
+.h-resume:disabled{ opacity:.6; cursor:default; }
+.h-live{ color:var(--ok); font-size:11px; white-space:nowrap; }
+.h-gone{ color:var(--dim); font-size:11px; white-space:nowrap; }
 .seance-box{ margin:6px 0; padding:6px 10px; border:1px dashed var(--border); border-radius:8px; font-size:12px; }
 #fs-body .seance-box, #a-body .seance-box{ margin:2px 0 8px 18px; }
 .sn-row{ display:flex; gap:6px; align-items:center; }
@@ -25624,9 +25888,11 @@ local HTML = [[
       syncKeepPins();
       renderHistory();
     }
+    var HISTORY_SCANNING = false; // 2026-10-04: Lua is still reading past sessions' transcripts
     window.ccHistory = function(payload){
       HISTORY = (payload && payload.records) || [];
       HISTORY_KEPT = (payload && payload.keptByProject) || {};
+      HISTORY_SCANNING = !!(payload && payload.scanning);
       if(auditView === "history") renderHistory();
     };
     // Unstarring offers to remove a project's kept copies (Lua asks first): one line per UNSTARRED
@@ -25659,44 +25925,76 @@ local HTML = [[
       var rows = (HISTORY || []).filter(function(r){
         if(pinOnly && !pins[r.projectKey]) return false;
         if(wsPk && r.projectKey !== wsPk) return false;
-        if(q){
-          var hay = ((r.name||"") + " " + decodeProjectKey(r.projectKey||"")).toLowerCase();
-          if(hay.indexOf(q) === -1) return false;
-        }
+        if(q && historyHay(r).indexOf(q) === -1) return false;
         return true;
       });
       rows.sort(historySortCmp(historySort));
-      document.getElementById("h-info").textContent = rows.length + " session(s)";
+      document.getElementById("h-info").textContent = historyInfoText(rows.length, HISTORY_SCANNING);
       var offers = historyKeepOffersHtml(HISTORY_KEPT, pins);
       if(!rows.length){
         body.innerHTML = offers + '<div class="s-help" style="margin-left:0;">'
-          + (HISTORY.length ? 'No sessions match the filter.' : 'No session history yet — the audit ledger must be enabled to record it.')
+          + (HISTORY.length ? 'No sessions match the filter.'
+             : (HISTORY_SCANNING ? 'Reading past sessions’ transcripts…' : 'No sessions yet: no audit ledger record and no transcript in ~/.claude/projects.'))
           + '</div>';
         updateHistoryDelBtn(); return;
       }
       body.innerHTML = offers + rows.map(historyRow).join("");
       updateHistoryDelBtn();
     }
+    // What the filter box searches (lowercased): the name and folder, and (2026-10-04) the
+    // transcript's first prompt and AI title.
+    function historyHay(r){
+      var p = (r && r.past) || {};
+      return [(r && r.name) || "", decodeProjectKey((r && r.projectKey) || ""), p.prompt || "", p.title || ""].join(" ").toLowerCase();
+    }
+    function historyInfoText(n, scanning){
+      return n + " session(s)" + (scanning ? " · reading past sessions…" : "");
+    }
+    // ↻ Resume (2026-10-04): the row's session id and project key ride in data- attributes, read
+    // back here (never inside the handler); Lua checks both, verifies the session dead, and says how
+    // it went in a toast.
+    function historyResume(ev, btn){
+      if(ev && ev.stopPropagation) ev.stopPropagation();
+      var row = btn && btn.closest ? btn.closest(".h-row") : null;
+      var sid = row && row.getAttribute("data-sid");
+      if(!sid) return;
+      btn.disabled = true;
+      btn.textContent = "Resuming…";
+      send("past-resume", "", JSON.stringify({ sessionId: sid, projectKey: row.getAttribute("data-pk") || "" }));
+    }
     // NOTE: projectKey/session_id are written as ESC'd data- attributes and read back raw
     // via getAttribute (never interpolated into an inline JS handler), so a key with a quote
     // can't break out -- same anti-XSS pattern as the tile data-key / openPr.
     function historyRow(r){
       var pinned = !!historyPins()[r.projectKey];
-      var who = esc(r.name || decodeProjectKey(r.projectKey || "") || r.session_id || "?");
+      // 2026-10-04: past sessions -- what its transcript says (r.past): its AI title or first prompt
+      // names a row the ledger never saw; the prompt and size show on every row that has one
+      var past = r.past || {};
+      var who = esc(r.name || past.title || past.prompt || decodeProjectKey(r.projectKey || "") || r.session_id || "?");
       var sub = esc(decodeProjectKey(r.projectKey || ""));
+      var named = r.name || past.title;
+      var stat = r.transcriptOnly ? esc(past.sizeHuman || "")
+        : ((r.prompts||0) + ' turns · ' + (r.toolRequests||0) + ' tools · ' + (r.events||0) + ' events'
+           + (past.sizeHuman ? ' · ' + esc(past.sizeHuman) : ''));
+      var resumeTip = r.keptOnly ? 'Reopen it: Shepherd first puts its kept copy back where Claude Code keeps transcripts, then resumes it'
+                                 : 'Reopen this session with its conversation (VS Code: its tab; a terminal: claude -r) -- only once Shepherd has verified it is not running';
       return '<div class="h-row" data-pk="' + esc(r.projectKey || "") + '" data-sid="' + esc(r.session_id || "") + '">'
         + '<input type="checkbox" class="h-ck" onchange="updateHistoryDelBtn()">'
         + '<button class="h-pin' + (pinned ? ' on' : '') + '" title="Pin/unpin this project" onclick="historyPinClick(event)">' + (pinned ? '★' : '☆') + '</button>'
         + '<span class="h-name">' + who + '</span>'
         + '<span class="h-sub">' + sub + '</span>'
-        + '<span class="h-stat">' + (r.prompts||0) + ' turns · ' + (r.toolRequests||0) + ' tools · ' + (r.events||0) + ' events</span>'
+        + (named && past.prompt ? '<span class="h-prompt" title="Its first prompt">' + esc(past.prompt) + '</span>' : '')
+        + '<span class="h-stat">' + stat + '</span>'
         + '<span class="h-when">' + esc(fmtTs(r.lastTs)) + '</span>'
         // the transcript keeper (2026-10-03): a kept copy, or only that once Claude Code deleted the original
         + (r.kept ? '<span class="h-kept" title="' + (r.keptOnly ? 'Claude Code deleted the original; Shepherd reads its kept copy in ~/.claude/cc-keep'
                                                                 : 'A copy of this transcript is kept in ~/.claude/cc-keep')
                     + '">' + (r.keptOnly ? '📦 kept copy only' : '📦 kept') + '</span>' : '')
+        + (r.live ? '<span class="h-live" title="It is running now: use its card">● live</span>' : '')
+        + (r.noTranscript ? '<span class="h-gone" title="Claude Code deleted its transcript and no copy was kept (★ a project to keep its transcripts)">transcript gone</span>' : '')
         // Seance (2026-10-02): ask this session a question, live or long finished
-        + (r.session_id ? '<button class="h-ask" onclick="seanceToggle(event, this)" title="Ask this session a question: a read-only fork of its conversation answers">🔮 Ask</button>' : '')
+        + (r.session_id && !r.noTranscript ? '<button class="h-ask" onclick="seanceToggle(event, this)" title="Ask this session a question: a read-only fork of its conversation answers">🔮 Ask</button>' : '')
+        + (r.session_id && r.canResume ? '<button class="h-resume" onclick="historyResume(event, this)" title="' + resumeTip + '">↻ Resume</button>' : '')
         + '</div>';
     }
     function historyPinClick(ev){

@@ -247,11 +247,44 @@ because a prompt is an instruction and the ledger has no CI ground truth.
 ### Session history
 
 The ledger's **🗂 History** tab lists every session the ledger has seen, with its turns, tool calls,
-events and last activity. Filter by name or folder, sort **Recent / Oldest / Most active**, and
+events and last activity, and every [past session](#past-sessions) Claude Code still has a transcript
+for. Filter by name, folder, first prompt or title, sort **Recent / Oldest / Most active**, and
 narrow to **this workspace** or **pinned only**; ★-pin the projects you care about. **🔮 Ask** on a
 row asks that session a question, however long ago it ended ([Ask a session](controls.md#ask-a-session-seance)).
 Multi-select rows and **Delete selected** purges those sessions' recorded history through the same
 confirmed purge the Purge button uses. It never deletes Claude Code's own transcripts.
+
+### Past sessions
+
+Opening 🗂 History also reads Claude Code's own transcripts (`~/.claude/projects/<project>/<session>.jsonl`)
+and the [kept copies](#kept-transcripts) whose originals it deleted, so a session shows up even when
+the ledger was off or never saw it:
+
+- **What a row shows:** its AI title (or its first prompt), the first prompt, the transcript's size
+  and when it last changed. A unit's brief from another session counts as its first prompt. Title-only
+  stubs and Shepherd's own headless runs (`claude -p`: the coach, the checker, Seance) aren't listed.
+- **How it reads them:** in the background, at most 60 transcripts a pass, newest first, and never on
+  the panel's tick. It reads each transcript's first 32 KB and last 16 KB; after that only the tail of
+  a transcript that changed.
+- **● live** marks a session that is running now (a card, or a Claude Code session file whose process
+  is still there). **transcript gone** marks a ledger row whose transcript was deleted with no copy
+  kept; it has no Ask and no Resume.
+- **↻ Resume** reopens a session with its conversation: a VS Code session as its tab (Cursor's when
+  `spawn.editor` is cursor), a terminal session with `claude -r <id>` in its folder, in kitty or
+  Terminal per `spawn.editor`. It runs only once Shepherd has verified the session is dead:
+  - no card has it;
+  - no `~/.claude/sessions` entry names it under a process that is still running;
+  - no process's command line holds its id (`claude -r`, `--resume`, VS Code's `--resume=<id>`, a
+    Seance fork).
+
+  It checks again right before the tab opens. A session that ran in a folder that's gone (a removed
+  worktree) can't be resumed, and neither can one in a worktree another live session works in.
+- **Only a kept copy left:** VS Code's session link opens a new empty tab when the transcript is
+  missing, so Resume first copies the kept copy back to where Claude Code keeps transcripts, with a
+  fresh date so Claude Code's cleanup doesn't take it again at once. It never overwrites a file that
+  is already there.
+
+Each Resume is logged in the audit ledger (`past_resume`), with why when it refused.
 
 ### Kept transcripts
 

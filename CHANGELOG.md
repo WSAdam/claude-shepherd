@@ -29,6 +29,13 @@ parallel units. Each unit adds its line here.
   copies**, confirmed first, and `uninstall.sh --purge` leaves the folder. Diagnostics shows
   `cleanupPeriodDays` (30 when unset) with **Keep transcripts 365 days**, which writes only that key
   (`core.settingsNumberCmd`, atomic and symlink-aware like the env writer).
+- Past sessions: 🗂 History also lists every transcript in `~/.claude/projects` and every kept copy
+  (AI title or first prompt, size, date), read by a background scan (`FX.refreshPastSessions`, 60 a pass,
+  never the tick). **↻ Resume** reopens a verified-dead session (`core.pastLiveness`: no card, no live
+  `~/.claude/sessions` entry, no process holding its id): VS Code through `core.restartTabUri` and
+  `FX.openClaudeTab`, now its second caller (the D-14 pins say so), and a terminal one with `claude -r`. Spike
+  S4 found a missing transcript opens an empty tab, so a kept-only session gets its copy put back
+  first, never over a file.
 - Grant grading: a batch unit's merge on Adam's grant waits for his Merge click when its diff touches
   hook wiring, `CLAUDE.md`/`methodology/`, `DECISIONS.md`, `defaults/`, CI, migrations, lockfiles or
   `.claude/settings*`, deletes a tracked file, or the checker reported a high-severity finding

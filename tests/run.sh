@@ -569,6 +569,15 @@ echo ""
 echo "== node: the Queue view and the editor's Hold / Release -- every field escaped, the line that feeds next, packet drift, a click sends only the row array's key, number and text, ✕ asks first (behavioral, runs the shipped functions) =="
 node "$DIR/queue-view.test.js" || fail=1
 echo ""
+echo "== lua: past sessions -- a transcript's first prompt, folder and surface (whole lines, walked with find), its newest AI title, the capped newest-first scan plan, rows merged with the ledger, verified dead (no card, no live session file, no process using its id), the resume plan, the kept copy restored for real and never over a file (pure) =="
+lua "$DIR/past-sessions.test.lua" || fail=1
+echo ""
+echo "== lua: past sessions' wiring -- History's background scan (never the tick), Resume refused for a live or still-resumed session, a VS Code tab through FX.openClaudeTab's ?session= rule, claude -r for a terminal one, a kept-only session restored first (behavioral, stubbed hs) =="
+HOME="$(mktemp -d)" lua "$DIR/past-sessions-wiring.test.lua" || fail=1
+echo ""
+echo "== node: past sessions in History -- prompt, title and size on a row, Resume only where Lua allows it, live and transcript-gone rows, the filter, Resume's click, escaped (behavioral, runs the shipped functions) =="
+node "$DIR/past-sessions-view.test.js" || fail=1
+echo ""
 
 if [ "$fail" -eq 0 ]; then
   echo "✅ ALL GREEN"
