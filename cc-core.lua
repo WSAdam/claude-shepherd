@@ -20160,7 +20160,11 @@ do
     elseif base:find(edit.old, s + 1, true) then
       r = { ok = false, error = "ambiguous" }
     else
-      return { ok = true, text = base:sub(1, s - 1) .. edit.new .. base:sub(e + 1) }
+      -- 2026-10-04: in the file's own line endings, as the add and re-wrapped paths already were --
+      -- a two-line edit wrote a bare "\n" into a CRLF CLAUDE.md
+      local eol = base:find("\r\n", 1, true) and "\r\n" or "\n"
+      local new = (edit.new:gsub("\r\n", "\n"):gsub("\n", eol))
+      return { ok = true, text = base:sub(1, s - 1) .. new .. base:sub(e + 1) }
     end
     if r.ok or not anyway or (r.error ~= "not-found" and r.error ~= "ambiguous") then return r end
     local body = M.coachAddBody(edit)

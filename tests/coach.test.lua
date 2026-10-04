@@ -2459,4 +2459,20 @@ check("global: ...and nothing was written to their ledgers by listing them",
       read(CDIR .. "/" .. kd .. ".lessons.json") == nil and read(CDIR .. "/" .. ke .. ".lessons.json") == nil)
 end)()
 
+-- ---- line endings on an exact replace (2026-10-04) ----
+-- 2026-10-04: an exact-match replace wrote `new` as the coach gave it, so a two-line edit put a
+-- bare "\n" into a CRLF CLAUDE.md (the add and the re-wrapped paths already used the file's own).
+;(function()
+  local crlf = "# CLAUDE.md\r\n\r\n## Rules\r\n\r\n- old rule\r\n- keep this\r\n"
+  local r = core.coachApplyDecision(crlf, core.coachHash(crlf),
+    { old = "- old rule", new = "- new rule\n- another rule", section = "Rules" }, false)
+  check("crlf: an exact replace into a CRLF file is applied", r.ok == true)
+  check("crlf: ...in the file's own line endings, no bare newline  (" .. tostring(r.text):gsub("\r", "\\r"):gsub("\n", "\\n") .. ")",
+        r.text == "# CLAUDE.md\r\n\r\n## Rules\r\n\r\n- new rule\r\n- another rule\r\n- keep this\r\n")
+  local lf = "## Rules\n\n- old rule\n"
+  local rl = core.coachApplyDecision(lf, core.coachHash(lf),
+     { old = "- old rule", new = "- new rule\r\n- another rule", section = "Rules" }, false)
+  check("crlf: ...and an LF file keeps LF", rl.text == "## Rules\n\n- new rule\n- another rule\n")
+end)()
+
 finish()

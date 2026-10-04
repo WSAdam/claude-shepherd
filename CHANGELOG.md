@@ -35,6 +35,9 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
 - Fixed: the loop watchdog read three different Greps (or Globs) of one folder as one call made
   three times: `core.toolCallSig` signed a search by its path alone. A search is now signed by its
   whole input, like an edit; the same search run again is still a repeat.
+- Fixed: a coach edit applied by exact match wrote its text as the coach gave it, so a two-line
+  edit put a bare newline into a CRLF `CLAUDE.md`. It now goes in with the file's own line
+  endings, as an addition and a re-wrapped match already did.
 
 ## 2026-10-04 — Mining round 2
 
