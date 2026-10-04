@@ -564,7 +564,9 @@ sits, when its process is gone, or when nothing is scheduled (the cases under *N
 - **Focus pop** (`focus.popOnComplete` / `focus.popOnApproval`): bring the detected VS Code or
   Cursor window forward when a session finishes or needs approval. The hooks call
   [cc-popup.sh](../cc-popup.sh), which acts only when the flag is on (a legacy `focus.popEditor`
-  still seeds both). The Claude Code extension may raise its own window on completion
+  still seeds both). A finished turn pops only once its stop really ends the turn: a stop a
+  [Stop guard](approvals-and-policies.md#questions-asked-in-prose-come-back), a mailbox message or
+  the notes request sends back doesn't. The Claude Code extension may raise its own window on completion
   independently of this.
 
 ## Fleet idle alert

@@ -656,4 +656,33 @@ assert_eq "...and with one, it finds this session's (the spy really sees it)" "h
   "$( PATH="$spy:$PATH"; . "$ROOT/cc-lib.sh"; : > "$spy/calls"; cc_held h7 && printf 'held '; grep -c . "$spy/calls")"
 rm -f "$CC_HOLD_DIR/4242"
 
+# ---- the "complete" popup sees the block (2026-10-04) ----
+# 2026-10-04: cc-popup.sh "complete" ran beside cc-status.sh in the Stop group, so with
+# focus.popOnComplete on it focused the editor for a stop a Stop guard was sending back -- the
+# turn went on, and the editor jumped forward anyway. Only a stop that ends the turn pops now.
+POP="$TMP/popped"; : > "$POP"
+printf '#!/bin/sh\necho "$*" >> "%s"\n' "$POP" > "$TMP/fake-open"; chmod +x "$TMP/fake-open"
+PON="$TMP/pop-on.json"
+printf '{"stopGuards":{"question":true},"focus":{"popOnComplete":true}}' > "$PON"
+popstop() { printf '%s' "$1" | CC_CONFIG_FILE="$PON" CC_POPUP_OPEN="$TMP/fake-open" CLAUDE_CODE_ENTRYPOINT=claude-vscode \
+  CLAUDE_PROJECT_DIR="$CWD" bash "$CC" stop 2>/dev/null; }
+pops() { n=0; while [ "$n" -lt 30 ] && [ "$(grep -c . "$POP")" -lt "$1" ]; do sleep 0.1; n=$((n + 1)); done; grep -c . "$POP"; }
+prompt pp1
+got="$(popstop "$(stop_json pp1 "All green. Want me to push?")")"
+assert_eq "popup: a stop the question guard sends back..." "block" "$(decision "$got")"
+assert_eq "...doesn't pop the editor (the turn goes on)" "0" "$(pops 1)"
+got="$(popstop "$(stop_json pp1 "All green. Want me to push?" true)")"
+assert_eq "...and the stop that then ends the turn does, once" "1" "$(pops 1)"
+assert_eq "...with the project's folder" "yes" "$(grep -qF "$CWD" "$POP" && echo yes || echo no)"
+prompt pp2
+popstop "$(stop_json pp2 "Committed as e658683, pushed, deployed.")" >/dev/null
+assert_eq "popup: a turn that ends normally pops" "2" "$(pops 2)"
+( CC_CONFIG_FILE="$PON" CC_POPUP_OPEN="$TMP/fake-open" CLAUDE_CODE_ENTRYPOINT=claude-vscode \
+  bash "$ROOT/cc-popup.sh" "$CWD" complete ) >/dev/null 2>&1
+sleep 0.5
+assert_eq "popup: the Stop group's own cc-popup.sh call stands down (cc-status.sh pops instead)" "2" "$(grep -c . "$POP")"
+( CC_CONFIG_FILE="$TMP/pop-appr.json" CC_POPUP_OPEN="$TMP/fake-open" CLAUDE_CODE_ENTRYPOINT=claude-vscode \
+  bash "$ROOT/cc-popup.sh" "$CWD" approval ) >/dev/null 2>&1
+assert_eq "...an approval popup is unchanged (its own switch, off here)" "2" "$(grep -c . "$POP")"
+
 finish

@@ -637,6 +637,12 @@ fi
 # that order.
 if [ "$EVENT" = "stop" ]; then
   cc_stop_decision "${STOP_MAIL:-}" "${STOP_NOTES:-}" "${STOP_GUARD:-}"
+  # 2026-10-04: the editor pops for a finished turn (focus.popOnComplete) from here, and only for a
+  # stop that ends the turn -- cc-popup.sh beside this script in the Stop group couldn't see a
+  # block. In the background, so the hook returns at once.
+  if [ -z "${STOP_MAIL:-}${STOP_NOTES:-}${STOP_GUARD:-}" ]; then
+    ( bash "$(dirname "$0")/cc-popup.sh" "${CLAUDE_PROJECT_DIR:-$CWD}" complete --after-stop >/dev/null 2>&1 & )
+  fi
 fi
 
 # ---- What the compaction summary is told (2026-09-29) ----

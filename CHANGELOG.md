@@ -27,6 +27,11 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
   anywhere in `settings.json`, so an install missing a newer event's group (`PostToolUseFailure`)
   still read fully wired. It now counts each event + script `settings-hooks.json` wires
   (`core.HOOK_WIRING`, 18 today; a test keeps the two in step) and names any that's missing.
+- Fixed: with `focus.popOnComplete` on, the editor popped for a stop a Stop guard was sending back:
+  `cc-popup.sh` runs beside `cc-status.sh` in the Stop group and couldn't see the block.
+  `cc-status.sh` now pops it, in the background, only when the stop ends the turn (no guard,
+  mailbox or notes block), and the Stop group's own `cc-popup.sh complete` stands down. No wiring
+  change, so no `make setup` needed.
 
 ## 2026-10-04 — Mining round 2
 

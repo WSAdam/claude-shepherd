@@ -21,6 +21,12 @@ set -u
 DIR="${1:-$PWD}"
 EVENT="${2:-complete}"
 
+# 2026-10-04: the Stop group runs this beside cc-status.sh, so a "complete" from there popped the
+# editor for a stop that a Stop guard, a mailbox message or the notes request was sending back.
+# cc-status.sh now calls it with --after-stop once the stop really ends the turn; the Stop group's
+# own call stands down. (CC_POPUP_OPEN: the tests' stand-in for open.)
+if [ "$EVENT" = "complete" ] && [ "${3:-}" != "--after-stop" ]; then exit 0; fi
+
 # Pick the governing flag (legacy popEditor is the fallback default for both).
 case "$EVENT" in
   approval) FLAG="$(cc_config '.focus.popOnApproval' "$(cc_config '.focus.popEditor' 'false')")" ;;
@@ -32,5 +38,5 @@ esac
 APP="$(cc_editor_app "$(cc_detect_editor)")"
 [ -n "$APP" ] || exit 0
 
-open -a "$APP" "$DIR" 2>/dev/null || true
+"${CC_POPUP_OPEN:-open}" -a "$APP" "$DIR" 2>/dev/null || true
 exit 0
