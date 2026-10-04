@@ -12,6 +12,12 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
   line or follow a space or another opener, and a file name or folder after the word (`TODO.md`,
   `todo/`) doesn't count; `// TODO`, `# TODO`, `-- FIXME` and `/* FIXME` still do
   (`tests/fixtures/red-flags/todo-paths.diff`).
+- Fixed: the question guard sent a turn back for reporting a question someone else asked. The
+  batch driver's "It left one question in your Shepherd Inbox: should a turn be sent back once per
+  commit…?" ended its paragraph on "?", and that alone read as asking Adam. A question behind a
+  reporting frame (a colon after "asks", "asked", "left", "filed" and the like) now counts only when
+  the question itself is put to the reader ("Want…", "Should I…", "you"). `cc-scrub.js` keeps the
+  frame's verbs in an assistant's text, so a scrubbed corpus reads the same.
 
 ## 2026-10-04 — Mining round 2
 

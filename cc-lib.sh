@@ -2263,16 +2263,23 @@ CC_MASK_JQ='
     | gsub("\"[^\"\\n]*\""; "quote")
     | gsub("“[^”\\n]*”"; "quote")
     | [split("\n")[] | select(test("^[ \\t]*>") | not)] | join("\n");'
+# 2026-10-03: a question someone else asked, behind a reporting frame ("It left one question in your
+# Inbox: should ...?", "The unit asks: ...?"), asks the reader only when the question itself does --
+# a driver reporting a unit's question was sent back for it. Only this guard reads the frame;
+# core.turnEvidence's endsWithQuestion still labels such a turn "needs follow-up".
 CC_QUESTION_JQ="$CC_MASK_JQ"'
   def lead: sub("^[\\s*_#>(-]*([0-9]+[.)])?[\\s*_]*"; "");
+  def toreader: test("^(want|should i|shall i)\\b"; "i") or test("\\byour?\\b"; "i");
+  def reported: test("\\b(asks?|asked|asking|wants to know|wanted to know|wonders|wondered|left|filed|raised|posted|logged)\\b[^:]*:"; "i");
+  def put: if reported then (sub("^.*:\\s*"; "") | toreader) else true end;
   mask
   | [splits("\\n[ \\t]*\\n") | sub("^\\s+"; "") | sub("\\s+$"; "") | select(length > 0)]
   | select(length > 0)
   | (if length > 1 and (.[-1] | split("\n") | all(test("^\\s*([-*+]|[0-9]+[.)])\\s")))
      then .[-2] + "\n" + .[-1] else .[-1] end) as $block
   | [$block | scan("[^.!?\\n]*\\?") | lead | select(length > 0)] as $qs
-  | if ($block | test("\\?[\\s*_\"\u0027’”)\\]]*$")) then ($qs | last // "?")
-    else ($qs | map(select(test("^(want|should i|shall i)\\b"; "i") or test("\\byour?\\b"; "i"))) | last // empty)
+  | if ($block | test("\\?[\\s*_\"\u0027’”)\\]]*$")) then (($qs | last // "?") | select(put))
+    else ($qs | map(select(if reported then (sub("^.*:\\s*"; "") | toreader) else toreader end)) | last // empty)
     end
   | .[0:200]'
 cc_question_asked() { # $1 text

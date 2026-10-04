@@ -348,8 +348,10 @@ does.
   to you: it starts "Want", "Should I" or "Shall I", or says "you" ("Want me to fix it now? It's
   small."). When that paragraph is only a list of options, the paragraph before it counts too.
   Code (fenced or inline), quoted text and blockquotes are ignored, and so is a question answered
-  in the same breath ("Questions? None.") or one a paragraph before the end. An imperative with no
-  question mark ("Say go and I'll build it") isn't caught.
+  in the same breath ("Questions? None.") or one a paragraph before the end. A question someone
+  else asked, reported behind a colon ("It left one question in your Inbox: should …?", "The unit
+  asks: …?"), counts only when the question itself is put to you ("The unit asks: do you want it
+  tonight?"). An imperative with no question mark ("Say go and I'll build it") isn't caught.
 - **Once per turn.** A turn is sent back at most once: Claude Code marks the stop that ends it
   `stop_hook_active`, and Shepherd keeps a marker per session (`~/.claude/cc-guard/<key>.question`,
   removed with the session). The next prompt starts a new turn.

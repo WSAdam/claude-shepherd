@@ -220,6 +220,8 @@ eq("chunked read: three page ranges of one PDF are not a loop, scrubbed or not",
       message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_09AskAsk", content: "want you should" }] } },
     { type: "assistant", timestamp: "2026-10-02T09:00:08.000Z", message: { role: "assistant", model: "claude-opus-5-5", content: [
       { type: "text", text: "Should I push the zebra fix? It stays local. Want me to, or do you want your quokka first? Shall I wait?" }] } },
+    { type: "assistant", timestamp: "2026-10-02T09:00:09.000Z", message: { role: "assistant", model: "claude-opus-5-5", content: [
+      { type: "text", text: "The unit asks: should the zebra merge tonight? It left a quokka question." }] } },
   ];
   fs.writeFileSync(raw, recs.map((r) => JSON.stringify(r)).join("\n") + "\n");
   const r = spawnSync("node", [SCRUB, "--src", raw, "--out", scrubbed, "--tail", "65536"], { encoding: "utf8" });
@@ -228,6 +230,11 @@ eq("chunked read: three page ranges of one PDF are not a loop, scrubbed or not",
   eq("ask words: an assistant's own text keeps Want, Should, Shall, I, you and your, masking the rest",
     got[3] && got[3].message.content[0].text,
     "Should I xxxx xxx xxxxx xxx? xx xxxxx xxxxx. Want xx xx, xx xx you want your xxxxxx xxxxx? Shall I xxxx?");
+  // 2026-10-03: the question guard reads a reporting frame ("<who> asks / left ...: ...?") as no ask,
+  // so a scrubbed corpus keeps the frame's verbs too
+  eq("ask words: ...and a reporting frame's verbs (asks, left), so a reported question still reads as one",
+    got[4] && got[4].message.content[0].text,
+    "xxx xxxx asks: should xxx xxxxx xxxxx xxxxxxx? xx left x xxxxxx xxxxxxxx.");
   eq("ask words: ...never a prompt's", got[0] && got[0].message.content[0].text, "xxxxxx xxx xxxx xxx xxxxx xxxxxx, x xxxx xxx xx");
   eq("ask words: ...a tool input's", got[1] && Object.values(got[1].message.content[0].input).join(" | "),
     "xxxx xxxx xxx xxxxxx | xxxxxx x xxxx xxxx xxxxx");

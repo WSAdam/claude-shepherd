@@ -75,6 +75,19 @@ assert_eq "...nor in double quotes" "no" \
 assert_eq "...nor in curly quotes" "no" "$(asks 'The caller said “Hello?” twice before the greeting.')"
 assert_eq "...nor in a blockquote" "no" "$(asks "$(printf 'The old wording was:\n\n> Want me to push?')")"
 assert_eq "a statement is not a question" "no" "$(asks "Committed as e658683, pushed, deployed.")"
+# 2026-10-03: the batch driver's own turn was sent back for REPORTING a unit's question -- the last
+# paragraph ended in "?", and that alone read as asking Adam. A question someone else asked, behind a
+# reporting frame ("<who> asks / left ... :"), asks the reader only when its own words do.
+assert_eq "a question another session left, reported, is not an ask" "no" \
+  "$(asks "Batch 6 is still running. It left one question in your Shepherd Inbox: should a turn be sent back once per commit…?")"
+assert_eq "...nor one a unit asks, reported with a colon" "no" \
+  "$(asks "Both gates are green. The unit asks: should the gate run twice on main?")"
+assert_eq "...but a reported question that is put to you still asks" "yes" \
+  "$(asks "The unit asks: do you want it merged tonight?")"
+assert_eq "\"Quick question: want me to push?\" is still an ask (no reporting verb)" "yes" \
+  "$(asks "Quick question: want me to push?")"
+assert_eq "\"One question for you: should I push now?\" is still an ask" "yes" \
+  "$(asks "All green. One question for you: should I push now?")"
 assert_eq "...nor is an empty message" "no" "$(asks "")"
 
 # ---- through the real Stop hook ----

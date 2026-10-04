@@ -106,8 +106,11 @@ const COMMAND_WORDS = new Set(`git commit
 // last assistant text for a question to the reader: a "?" sentence that starts "Want", "Should I"
 // or "Shall I", or says "you". Masked, "Should I push? It stays local." read as no question, so a
 // scrubbed corpus held only the questions that end a message. Kept in an assistant's own text only;
-// a prompt, a tool input or a tool result keeps none of them.
-const ASK_WORDS = new Set(`want should shall i you your`.split(/\s+/).filter(Boolean));
+// a prompt, a tool input or a tool result keeps none of them. 2026-10-03: plus the reporting
+// frame's verbs ("The unit asks: ...?", "It left one question ...: ...?"), which make a reported
+// question no ask ("to" and "know" stay masked, so "wants to know" doesn't survive a scrub).
+const ASK_WORDS = new Set(`want should shall i you your
+  ask asks asked asking wants wanted wonders wondered left filed raised posted logged`.split(/\s+/).filter(Boolean));
 const NONE = new Set();
 
 const DETECTORS = ["turn", "resumed", "awaiting", "interrupted", "error", "looping"];   // core.SCENARIO_DETECTORS
