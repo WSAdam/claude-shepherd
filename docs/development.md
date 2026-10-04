@@ -17,7 +17,9 @@ cc-merge.sh / cc-fleet.sh ◄──► ~/.claude/cc-merge/, ~/.claude/cc-fleet/ 
 panel ──► ~/.claude/cc-bridge/<pid>.in/ ──► tab bridge (VS Code extension) ──► .out/ ──► panel
 ```
 
-- [cc-status.sh](../cc-status.sh) merges each hook event into the session's JSON status file.
+- [cc-status.sh](../cc-status.sh) merges each hook event (including `PostToolUseFailure`, so a failed
+  tool doesn't stay in flight) into the session's JSON status file. Its `Stop` branch can also send a
+  turn back once: the [Stop guards](approvals-and-policies.md#questions-asked-in-prose-come-back).
 - [cc-approve.sh](../cc-approve.sh) is the opt-in `PreToolUse` approval gate
   ([Approvals and policies](approvals-and-policies.md)).
 - [cc-ask.sh](../cc-ask.sh) holds an AskUserQuestion for the panel while Shepherd is running.
@@ -28,12 +30,15 @@ panel ──► ~/.claude/cc-bridge/<pid>.in/ ──► tab bridge (VS Code exte
 - [cc-worktree-guard.sh](../cc-worktree-guard.sh) denies an `EnterWorktree` into a worktree another
   live session is using, and [cc-resume.sh](../cc-resume.sh) waits out a usage limit
   ([Automation](automation.md#resume-at-the-limit-reset)).
-- [cc-pin.sh](../cc-pin.sh), [cc-send.sh](../cc-send.sh), [cc-ticket.sh](../cc-ticket.sh) and
-  [cc-decide.sh](../cc-decide.sh) are the commands a session runs itself: pin a link, hand another
-  session a prompt, file a ticket for another repo, ask a question with a default.
+- [cc-pin.sh](../cc-pin.sh), [cc-send.sh](../cc-send.sh), [cc-ticket.sh](../cc-ticket.sh),
+  [cc-decide.sh](../cc-decide.sh), [cc-lesson.sh](../cc-lesson.sh) and [cc-run.sh](../cc-run.sh) are
+  the commands a session runs itself: pin a link, hand another session a prompt, file a ticket for
+  another repo, ask a question with a default, file a lesson for the
+  [coach](automation.md#the-coach), and report a [Run selected](fleet.md#my-list) item done or
+  blocked.
 - [cc-commits.sh](../cc-commits.sh) counts commits for the footer, and
   [cc-scrub.js](../cc-scrub.js) scrubs a transcript window for a captured scenario.
-- [cc-lib.sh](../cc-lib.sh) holds the helpers the hooks share.
+- [cc-lib.sh](../cc-lib.sh) holds the helpers the hooks share, the three Stop guards among them.
 - [cc-core.lua](../cc-core.lua) is the pure logic: parsing, sorting, staleness, action selection,
   spawn specs, the ledger, insights, policies, merge and batch decisions. It has **no `hs.*`
   calls** and is unit-tested directly in plain `lua`.

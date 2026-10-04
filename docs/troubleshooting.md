@@ -18,7 +18,7 @@ info •, and some carry a fix. **Re-check** runs it again.
 | Audit ledger | On or off, its size, and a warning over 50 MB | Lower `ledger.retentionDays` (shown) |
 | Mailbox | How many [mailbox](automation.md#session-mailbox) messages wait, per session | They arrive at each session's next turn end or start |
 | Auto-compact | `settings.json` carries the override, and every installed claude still reads it ([Auto-compact with notes](automation.md#auto-compact-with-notes)) | ⚙ Settings → Auto-compact: Save with it on, or check Claude Code's changelog (shown) |
-| Claude Code keeps transcripts N days | `cleanupPeriodDays` in `~/.claude/settings.json` (30 when unset) | **Keep transcripts 365 days** sets that key only (shown) |
+| Claude Code deletes transcripts after N days | `cleanupPeriodDays` in `~/.claude/settings.json` (30 when unset). At 365 or more it reads **keeps transcripts N days** (ok); a value that isn't a number of days warns as **cleanupPeriodDays is …**; a `settings.json` it can't read is info only | **Keep transcripts 365 days** sets that key only (shown) |
 | Transcript keeper | How many [kept transcripts](usage-and-cost.md#kept-transcripts) there are, for how many ★ projects, and a copy that failed | Check the free disk space (shown) |
 | Live sessions | How many tiles are tracked (info) | |
 | Claude Code compatibility | Its own section: whether the newest Claude Code version still has what Shepherd reads ([below](#claude-code-compatibility)) | Check Claude Code's changelog (shown) |
@@ -110,6 +110,26 @@ also for a policy that allowed it: the Decisions tab and the audit ledger record
   close the tab by hand.
 - **Merge refused**: the merge gate is still running or queued, or it failed; the review says which
   ([Merging and batches → Merge gates](merging-and-batches.md#merge-gates-shepherd-runs-the-tests-itself)).
+- **A batch unit's merge waits although you granted merges**: [grant grading](merging-and-batches.md#grant-grading-a-risky-merge-waits-for-your-click)
+  held it (a risky file, a deleted file, a high checker finding, or no gate pass on record, as in a
+  repo with no merge gate), or its session is on hold or the fleet is frozen. The card says which;
+  your own **Merge** still works.
+- **Nothing automatic reaches a session**: it's on [hold](automation.md#hands-off-hold), or ❄ Freeze
+  is on. Each skipped send is listed in its detail panel and the Automation trace; mail waits
+  until you lift the hold.
+- **↻ Resume refused**: the session isn't verified dead: it still has a card, a live
+  `~/.claude/sessions` entry or a process holding its id
+  ([Usage and cost → Past sessions](usage-and-cost.md#past-sessions)).
+- **A checklist run paused**: an item is a `[~]` / `(needs live run)` line, a session reported it
+  blocked, its tab didn't open, a batch started in the repo, or a hold is on
+  ([Fleet → My List](fleet.md#my-list)). **Resume** on the run bar carries on.
+- **A turn was sent back**: one of the three [Stop guards](approvals-and-policies.md#questions-asked-in-prose-come-back)
+  caught a question asked in prose, a "done" over flagged lines, or a finished unit that never asked
+  to merge. Each sends a turn back once, and says why in the session.
+- **The coach never runs by itself**: its weekly and evidence runs need `coach.enabled`, which a
+  fresh install leaves off; the card's **🧭 Coach** button works either way. The Coach overlay opens
+  from the **🧭** chip, which shows only while something waits, runs or failed
+  ([Automation → The coach](automation.md#the-coach)).
 
 ## Tiles look wrong
 

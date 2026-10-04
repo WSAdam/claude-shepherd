@@ -1,5 +1,5 @@
 {
-  "_comment": "Claude Shepherd settings. Copy to ~/.claude/cc-config.json and flip what you want ON. Everything here is OFF by default; nothing auto-acts until you enable it.",
+  "_comment": "Claude Shepherd settings. Copy to ~/.claude/cc-config.json and flip what you want ON. Each block's _comment says what it does with no setting; most of it is off until you enable it, a few conveniences are on (see docs/configuration.md, What's on), and defaults/cc-config.json -- what a fresh install writes -- turns several more on.",
 
   "worklist": {
     "_comment": "My List. archive: once a day, work you finished more than archiveAfterDays ago moves out of cc-worklist.json into cc-worklist-archive.json -- nothing is deleted, and the Archive tab shows it (read-only, newest first, tagged with the project it came from). This is the one thing here that is ON by default (2026-09-21): the live store is re-read on every check-off, so what it carries is what a click costs, and Adam's had grown to 778KB with 442 items done over ten days earlier. Set archive:false to keep everything in the live list.",
@@ -155,10 +155,36 @@
     "refuseSharedWindow": true
   },
 
+  "stopGuards": {
+    "_comment": "The three Stop guards (off when absent; a fresh install turns all three on). Each sends a turn back ONCE through the session's own Stop hook, never by typing, and stands down while the session is held, in plan mode or in Shepherd's own runs. question: a turn that ends asking Adam in prose is told to ask with AskUserQuestion, so it reaches his card. fakeDone: a 'done' over a new .only/.skip, a deleted test or a stub in code is sent back with the lines, once per head sha. unfinished: a worktree unit that says done with commits ahead of main and no merge request is reminded to ExitWorktree and run cc-merge.sh request, once per head sha.",
+    "question": false,
+    "fakeDone": false,
+    "unfinished": false
+  },
+
+  "coach": {
+    "_comment": "The coach: a read-only Sonnet reads a repo's last 10 sessions and suggests CLAUDE.md edits and auto-memory changes, applied only by your click. The detail panel's 🧭 Coach button works with or without this block; enabled turns on its own runs: weekly (day, catching up after sleep) and, with evidence.minItems set, early once that many new evidence items came in (cooldownHours apart, at most dailyUsd a day across repos), plus the once-a-day compare across repos. maxBudgetUsd caps each run; timeoutSeconds stops a run that hangs.",
+    "enabled": false,
+    "day": "mon",
+    "maxBudgetUsd": 1,
+    "timeoutSeconds": 600,
+    "evidence": { "minItems": 10, "cooldownHours": 24, "dailyUsd": 3 }
+  },
+
+  "seance": {
+    "_comment": "Seance: ask any session a read-only question through a headless fork of its conversation. Each run's budget is sized from the session's context and capped here (at most 50); timeoutSeconds stops a run that hangs.",
+    "maxBudgetUsd": 20,
+    "timeoutSeconds": 300
+  },
+
   "merge": {
     "_comment": "Ready to merge (ON by default). A worktree tab that finishes a unit runs ~/.claude/cc-merge.sh request in the background; its card says 'ready to merge <branch> -> main' and the detail panel shows the review (commits, files, full diff, the session's summary and test claim). Shepherd checks the worktree with its own git first. Merge tells the waiting session to rebase, test, fast-forward main and clean up -- one merge per repo at a time, in the order you click; Not yet sends your note back. No keystrokes. false = requests are ignored.",
     "enabled": true,
     "closeTab": true,
+    "_comment_mainMoved": "Main moved notice (ON when absent): after a verified merge, each live session in ANOTHER worktree of the repo whose changed files overlap the merge gets one mailbox note at its next turn end -- 'main moved to <sha> (<unit>), touching <files>: rebase onto main before you ask to merge'. Never typed; announced once per repo + merged sha (~/.claude/cc-merge/main-moved.seen). false = no notes.",
+    "mainMovedNotice": true,
+    "_comment_grant": "Grant grading. A unit's merge on a batch grant waits for your Merge click when its diff hits one of these categories (absent = ALL of them; [] = none): hookWiring (settings-hooks.json, install.sh, uninstall.sh, SHIPPED), deletedFiles, instructions (any CLAUDE.md, methodology/), decisions (DECISIONS.md), defaults (defaults/), ci, migrations, lockfiles, claudeSettings (.claude/settings*), checkerHigh (a checker pass with a high-severity finding). Separately, and whatever this list says, a grant merge needs a test gate pass on record for its commit: a repo with no gate always waits. Your own Merge click is never graded.",
+    "grantWaitsFor": ["hookWiring", "deletedFiles", "instructions", "decisions", "defaults", "ci", "migrations", "lockfiles", "claudeSettings", "checkerHigh"],
     "_comment_gates": "The test gate Shepherd runs ITSELF (off unless you list one). Everything else in the review is checked with Shepherd's own git; the tests were the session's word. A gate names the suite Shepherd runs in the unit's worktree before it calls the request ready: while it runs the card says 'checking', a red or timed-out run blocks Merge (and a batch unit's merge on your grant) and the review shows the command, the exit code and the last 15 lines of its output -- the session's own test line stays, labelled advisory. The SAME suite runs once in the main checkout after the merge; if main is red the unit's tab stays open and the card says so. One run per request per commit (a new commit in the worktree re-runs it), through your login shell so it finds your PATH. match works like policies.attachments: project/group/key globs, first entry wins, an absent field is a wildcard; project is matched against the session's project key (its transcript's project folder, else its cwd). timeoutSeconds defaults to 900. With no gates listed nothing runs and the flow is exactly as before. redFirstCommand (optional) is the red-first proof: once the gate passes, the unit's changed test files run on a detached scratch worktree at the merge-base, without the fix, with {files} replaced by those files; the review says whether they fail there (a hint, never a gate).",
     "gates": [
       { "match": { "project": "*claude-instance-manager*" }, "command": "make lint && make test", "timeoutSeconds": 900,

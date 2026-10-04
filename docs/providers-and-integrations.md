@@ -118,8 +118,9 @@ works:
 Severities are `CRITICAL`, `HIGH`, `MEDIUM` and `LOW`. The findings file imports into the project's
 **My List** tab with its `TODO.md` ([My List](fleet.md#my-list)): each finding becomes a verify-me
 item with a **🔍 severity** chip (the id in its tooltip), and re-syncs when the file changes. A
-finding is never marked done, even from an `[x]` in the file: an auditor fixes nothing, and the
-checkbox stays yours. Lines under **Already works**, and checkboxes that aren't `[SEV] AUD-NNN`
+finding is never marked done from an `[x]` in the file: an auditor fixes nothing, and the
+checkbox stays yours (a [checklist run](fleet.md#my-list) you start on a finding is the one thing
+that can check it, as **✓ by run**). Lines under **Already works**, and checkboxes that aren't `[SEV] AUD-NNN`
 findings, are left out. `uninstall.sh --purge` removes the launch files (`~/.claude/cc-audit/`) and
 leaves your findings in `~/.cc-audit/`.
 

@@ -236,7 +236,7 @@ collect_answer() { # <id> <batch file> <nonce> <wait-max> <main checkout>
   update_batch "$bf" '.phase = "approved" | .approvedAt = $t' --argjson t "$(date +%s)"
   echo "BATCH APPROVED -- $(jq -r .title "$bf"): $(jq -r '.units | length' "$bf") units in $main."
   if [ "$grant" = "true" ]; then
-    echo "Merges are delegated: Shepherd merges each unit once its own git check finds it ready (one per repo at a time)."
+    echo "Merges are delegated: Shepherd merges each unit once its own git check finds it ready (one per repo at a time). A risky change, or one with no gate pass, still waits for Adam's click (grant grading)."
   else
     echo "Merges are NOT delegated: each unit stops at 'ready to merge' for Adam's click."
   fi

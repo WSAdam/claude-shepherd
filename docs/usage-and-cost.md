@@ -3,8 +3,9 @@
 [← README](../README.md) · [Fleet](fleet.md) · [Configuration](configuration.md)
 
 Token use, plan limits, cost estimates, commit counts, and the audit ledger with the views built on
-it. None of this **spends model tokens**, and all of it except the plan-window bars (one metadata
-call) is read locally.
+it. All of it is read locally, apart from the plan-window bars (one metadata call), and none of it
+**spends model tokens** except History's **🔮 Ask** (a [Seance](controls.md#ask-a-session-seance)
+question, with its own budget) and **↻ Resume**, which reopens a session.
 
 ## Token usage
 
@@ -277,8 +278,11 @@ the ledger was off or never saw it:
   - no process's command line holds its id (`claude -r`, `--resume`, VS Code's `--resume=<id>`, a
     Seance fork).
 
-  It checks again right before the tab opens. A session that ran in a folder that's gone (a removed
-  worktree) can't be resumed, and neither can one in a worktree another live session works in.
+  A session still in the [restart](fleet.md#restart-the-fleet-in-place) snapshot (it ended within
+  `restart.keepHours`) is checked by Restart fleet's own, stricter rule instead. It checks again
+  right before the tab opens. A session that ran in a folder that's gone (a removed worktree) can't
+  be resumed, and neither can one in a worktree another live session works in. A terminal or kitty
+  Resume launches like a spawn, so with `spawn.live` off nothing is launched (it says so).
 - **Only a kept copy left:** VS Code's session link opens a new empty tab when the transcript is
   missing, so Resume first copies the kept copy back to where Claude Code keeps transcripts, with a
   fresh date so Claude Code's cleanup doesn't take it again at once. It never overwrites a file that
@@ -293,7 +297,8 @@ Claude Code deletes a transcript once it is `cleanupPeriodDays` old (30 days unl
 its transcripts in `~/.claude/cc-keep/<project>/<session>.jsonl` (a private folder, mode 700):
 
 - **When:** once the session has ended (no card or `~/.claude/sessions` entry for it, and its
-  transcript untouched for 10 minutes), and again whenever the original grows, say after a resume.
+  transcript untouched for 10 minutes; a leftover `~/.claude/sessions` entry stops counting once its
+  transcript has gone a day untouched), and again whenever the original grows, say after a resume.
   A copy is never replaced by a smaller original.
 - **How:** an APFS clone (`cp -c`, a plain copy elsewhere), one at a time in the background, every
   5 minutes and right after you star a project. It never runs on the panel's tick.

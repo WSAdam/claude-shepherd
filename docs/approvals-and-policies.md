@@ -39,9 +39,11 @@ How a session's requests reach you, what can answer them without you, and what n
   can't edit files in another worktree of its repo or run git that changes one, gate armed or not.
 - **Questions are yours.** A question a session asks with AskUserQuestion is answered only by you,
   from the card or in the tab. Approve / Deny and Approve all skip it.
-- **Merges are yours.** A unit merges only when you press **Merge**, or on a batch's grant you gave,
-  and then only for that unit's own session and branch, after Shepherd's own git check and any merge
-  gate pass ([Merging and batches](merging-and-batches.md)).
+- **Merges are yours.** A unit merges only when you press **Merge**, or on a batch's grant you gave.
+  On a grant it merges only for that unit's own session and branch, after Shepherd's own git check,
+  with its merge gate's pass on record for that commit (a repo with no gate waits for your click),
+  the checker's pass when `verify.onMerge` is on, and nothing [grant grading](merging-and-batches.md#grant-grading-a-risky-merge-waits-for-your-click)
+  holds back: a risky change waits for your **Merge** too.
 - **Answers are bound to their request.** Gate decisions, merge answers and question answers are
   files bound to a one-time nonce, so a leftover or concurrent answer can never answer a different
   request.
@@ -351,7 +353,8 @@ does.
 - **Once per turn.** A turn is sent back at most once: Claude Code marks the stop that ends it
   `stop_hook_active`, and Shepherd keeps a marker per session (`~/.claude/cc-guard/<key>.question`,
   removed with the session). The next prompt starts a new turn.
-- **When it stays out of the way.** In plan mode, in Shepherd's own runs, while a question is
+- **When it stays out of the way.** In plan mode, in Shepherd's own runs, while the session is on
+  [hold](automation.md#hands-off-hold) or the fleet is frozen, while a question is
   already held on the card, when a mailbox message arrives at that turn end (it may be the answer),
   and where Shepherd isn't running: on a machine with no panel heartbeat, such as a remote host
   behind the SSH bridge, there is no card to send the question to.
@@ -390,7 +393,7 @@ actually finished, the reminder tells it to carry on.
   - A commit you answered **Not yet** is never pushed back at you. `cc-merge.sh` records that
     answer's commit in `~/.claude/cc-merge/<key>.notyet`, removed with the session.
   - Plus everything the question guard skips: `stop_hook_active`, plan mode, Shepherd's own runs,
-    and machines where the panel isn't running.
+    a hold or a frozen fleet, and machines where the panel isn't running.
 - **After a compaction.** A summary can drop how a unit finishes, so with the switch on, a session
   compacted inside a unit's worktree is told the finish steps again (`[Shepherd: finish]`). If a
   merge request is already open, it is told to wait for that answer instead.
@@ -424,9 +427,11 @@ carries on.
   worktree that is the whole branch; in the main checkout, its uncommitted work.
 - **What it flags.** The merge checker's own rules, ported to the hook: a test file the diff
   deletes; a new `.only`, `.skip`, `xit`, `xdescribe`, `xtest`, `fdescribe`, `@Disabled`,
-  `@pytest.mark.skip`, `t.Skip(`, `#[ignore]` or `ignore: true` in a test file; and a stub in code
-  (`not implemented`, `NotImplementedError`, `todo!()`, `unimplemented!`, a `TODO`/`FIXME`
-  comment), never in docs or tests. Up to 8 lines are listed, then a count of the rest. A test
+  `@pytest.mark.skip`, `@unittest.skip`, `t.Skip(`, `#[ignore]` or `ignore: true` in a test file;
+  and a stub in code (`not implemented`, `NotImplementedError`, `todo!()`, `unimplemented!`, a
+  `TODO`/`FIXME` comment: the word right after `//`, `#`, `--` or `/*`, so a path like
+  `"/TODO.md"` doesn't count), never in docs or tests. Up to 8 lines are listed, then a count of
+  the rest (the hook reads at most 30 flags). A test
   suite checks that the hook and the checker read the same diffs alike
   (`tests/fixtures/red-flags/`).
 - **Bounded.** The hook reads at most the first 200,000 bytes of the diff (changed lines only), so
@@ -438,7 +443,7 @@ carries on.
   flagged lines and no merge request hears about the lines first, and about the merge at its next
   claim.
 - **When it stays out of the way.** Everything the question guard skips (`stop_hook_active`, plan
-  mode, Shepherd's own runs, machines where the panel isn't running), a folder that isn't a git
+  mode, Shepherd's own runs, a hold or a frozen fleet, machines where the panel isn't running), a folder that isn't a git
   checkout, and a repo with neither `main` nor `master`.
 - **Switch.** `"stopGuards": { "fakeDone": true }` in `~/.claude/cc-config.json`. It is on in a
   fresh install and after `make setup`; off when the config says nothing. The ledger records each

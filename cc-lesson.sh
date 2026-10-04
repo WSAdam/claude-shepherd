@@ -26,7 +26,7 @@ cc-lesson.sh "<one line>"
 File a lesson for this repo's coach: something a session learned the hard way that its CLAUDE.md
 should say. Run it from inside the repo (a worktree counts as its repo). The words are joined into
 one line of at most 400 characters. Shepherd puts it in the repo's coach log; the coach's next run
-reads it as evidence, and enough new evidence starts a run (coach.evidence).
+reads it as evidence, and enough new evidence starts a run (coach.evidence, once coach.enabled is on).
 EOF
 }
 

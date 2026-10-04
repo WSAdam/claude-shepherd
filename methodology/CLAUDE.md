@@ -49,8 +49,8 @@ parallel.
      (1–8 units that don't edit the same code if you can help it). Ask for `mergeWhenGreen`
      only if I said merges can go through without me. Even on that grant, a merge waits for my
      click when it touches hook wiring, CLAUDE.md, methodology, DECISIONS.md, defaults, CI,
-     migrations, lockfiles or `.claude/settings*`, deletes files, has a high checker finding, or
-     has no gate pass (`merge.grantWaitsFor`).
+     migrations, lockfiles or `.claude/settings*`, deletes files or has a high checker finding
+     (`merge.grantWaitsFor`), or has no gate pass on record.
   2. Run `~/.claude/cc-fleet.sh propose --file <batch.json>` from inside the repo **in the
      background** and end the turn with a short summary; I approve or deny it in Shepherd. If it
      stops before I answer (a background time limit), `cc-fleet.sh propose --resume <id>` collects

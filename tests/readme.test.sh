@@ -131,6 +131,19 @@ done <<< "$MD_EXISTING"
 [ -n "$(jq -r 'to_entries[] | select((.value|type)=="object" and .value.enabled==true) | .key' "$ROOT/defaults/cc-config.json")" ] || claims=""
 assert_eq "no page says the automations are off until you turn them on (a fresh install turns some on)" "" "$claims"
 
+# 2026-10-04: mining round 2 turned things on with no `enabled` key -- the three Stop guards
+# (stopGuards.question/fakeDone/unfinished) and the fleet idle alert (alerts.idleMinutes) -- and
+# the README's "On out of the box" and configuration.md's "What's on" still listed only the
+# `enabled` blocks. Each switch the defaults turn on that way is named in both.
+awk '/^\*\*What.s on\.\*\*/{on=1} on && /^## /{exit} on' "$ROOT/docs/configuration.md" > "$TMP/whatson.md"
+unnamed=""
+for k in $(jq -r '(.stopGuards // {} | to_entries[] | select(.value == true) | "stopGuards"),
+                  (if ((.alerts.idleMinutes // 0) > 0) then "alerts.idleMinutes" else empty end)' "$ROOT/defaults/cc-config.json" | sort -u); do
+  grep -qF "\`$k\`" "$TMP/config.md" || unnamed="$unnamed [README:$k]"
+  grep -qF "\`$k\`" "$TMP/whatson.md" || unnamed="$unnamed [configuration.md:$k]"
+done
+assert_eq "the switches the defaults turn on without an \`enabled\` key are named as on (README, configuration.md)" "" "$unnamed"
+
 # ---- the reference pages against the code (2026-09-30) ----------------------------------------
 # The final docs pass of the build program found four lists the units had outgrown: the config
 # reference (no coach, decide, radar, schedLock, timeLost...), the files Shepherd keeps (a dozen
@@ -212,6 +225,16 @@ while IFS= read -r label; do
   grep -qF -- "$label" "$TMP/controls.md" || untold="$untold [$label]"
 done < "$TMP/menu.txt"
 assert_eq "docs/controls.md names every ☰ menu entry" "" "$untold"
+
+# Every file SHIPPED installs is named in docs/development.md (2026-10-04: cc-lesson.sh and
+# cc-run.sh shipped in mining round 2 and the page's script list never heard of them).
+untold=""
+for f in $(awk '!/^#/ && NF { print $1 }' "$ROOT/SHIPPED"); do
+  grep -qF "$f" "$ROOT/docs/development.md" || untold="$untold [$f]"
+done
+got=$(awk '!/^#/ && NF' "$ROOT/SHIPPED" | wc -l | tr -d ' ')
+assert_eq "SHIPPED was read" "yes" "$([ "$got" -ge 10 ] && echo yes || echo "no: $got")"
+assert_eq "docs/development.md names every file SHIPPED installs" "" "$untold"
 
 # ---- it stays a front page ---------------------------------------------------------
 lines="$(wc -l < "$ROOT/README.md" | tr -d ' ')"

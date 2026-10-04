@@ -65,7 +65,8 @@ session that is working. Heads-ups include:
 - a merge request whose test gate is still running (nothing to press yet; it turns red on its own
   the moment the gate finishes),
 - a batch unit's merge while [the checker](#the-checker-a-read-only-review-of-every-merge-request)
-  reviews it (it merges on your grant on a pass, and turns red on a fail),
+  reviews it (on a pass it merges on your grant unless [grant grading](#grant-grading-a-risky-merge-waits-for-your-click)
+  holds it, and it turns red on a fail),
 - a merged unit whose post-merge gate went red (main is red, and its worktree is already gone),
 - a connection blip the session is still retrying (the only one that reads **Retrying**),
 - an error you stopped yourself, or one on a session that has exited,
@@ -226,7 +227,8 @@ at the merge-base** and the review splits the failing lines in two: *already fai
 Gates run when a unit asks to merge. Main can still go red between merges: a hand edit, a
 dependency, a clock. A **⏰ Routines** routine with the action **Check main is green**
 (`"action": "gate"`) runs the repo's merge gate on main at the time you set. It is opt-in per
-repo: nothing runs until you add one.
+repo: nothing runs until you add one. Like every routine, it fires on its schedule only while
+`schedules.enabled` is on (off by default); its **Run** works either way.
 
 ```json
 { "name": "main green", "kind": "cron", "cron": "0 7 * * *", "action": "gate",
@@ -491,7 +493,7 @@ Merge click** when its diff:
 - touches **session instructions** (any `CLAUDE.md`, or `methodology/`), the **decision log**
   (`DECISIONS.md`) or the **shipped defaults** (`defaults/`);
 - touches **CI config** (`.github/`, `.gitlab-ci.yml`, `.circleci/` and the like), **migrations**
-  (a `migrations/` or `migrate/` folder), **lockfiles** (`deno.lock`, `package-lock.json`,
+  (a `migrations/`, `migration/` or `migrate/` folder at any depth), **lockfiles** (`deno.lock`, `package-lock.json`,
   `Cargo.lock` and the like) or **Claude settings** (`.claude/settings*`);
 - or the checker reported a **high-severity finding**, even on a pass.
 
@@ -500,8 +502,9 @@ so a risky file can't hide past the 200 files the review lists.
 
 Otherwise the merge goes through on the grant only on **evidence Shepherd holds itself**: its own
 gate run passed on that commit, and with `verify.onMerge` on, the checker passed it. A repo with no
-gate (no `merge.gates` entry, no [repo-declared gate](#a-repo-can-declare-its-own-gate)) has no
-pass to show, so its units wait for your click too.
+gate (no `merge.gates` entry, and no [repo-declared gate](#a-repo-can-declare-its-own-gate),
+which counts only while `merge.repoGate` is on) has no pass to show, so its units wait for your
+click too.
 
 A merge that waits reads **Needs you**, and its card and the review say why, for example
 *touches hook wiring: settings-hooks.json; deletes tracked files: tests/old.test.lua, so it waits
@@ -740,12 +743,14 @@ one tab without keystrokes. It runs in every VS Code window, has no network acce
 other tabs, and has exactly three operations, each on a single match only:
 
 - **close** a Claude tab: by its name (its chat title, as the tab shows it) when exactly one Claude
-  tab in that window carries it, or, for a batch unit, by the tag it gave the tab when it opened
-  (bridge 0.3.0+; since 0.5.0 also when the tab opened a moment before the tag request arrived).
+  tab in that window carries it, or, for a batch unit or a [checklist run](fleet.md#my-list)'s item,
+  by the tag it gave the tab when it opened (bridge 0.3.0+; since 0.5.0 also when the tab opened a
+  moment before the tag request arrived).
 - **select** a Claude tab after a Jump: when one of the session's names (custom title, AI title,
   first or last prompt) picks out exactly one Claude tab, it brings that tab to the front. A batch
   unit's tab is selected by its tag.
-- **expect** a tab: tag the next Claude tab that opens as a batch unit's.
+- **expect** a tab: tag the next Claude tab that opens as a batch unit's, or as a checklist
+  run's item (`<run>:<item>`).
 
 Each window writes its Claude tabs' names to `~/.claude/cc-bridge/<pid>.json`. Shepherd drops a
 command in `<pid>.in/` and reads the answer from `<pid>.out/`.

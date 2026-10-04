@@ -49,8 +49,7 @@ Every feature below has a reference page one click away. The panel lists the sam
   project's `TODO.md`, so you can verify what an automation says it finished.
 - [**Needs a live run**](docs/fleet.md#my-list): `- [~]` and `(needs live run)` lines get a ▶ chip and a filter.
 - [**Playbooks in My List**](docs/fleet.md#my-list): any markdown checklist you pick imports into a project's tab; [**Run selected**](docs/fleet.md#my-list) works through picked items one fresh session at a time and checks off what got done.
-- [**User stories**](docs/fleet.md#user-stories-tab): view and edit a project's
-  `spec/product/user-stories.md` in a detail-panel tab.
+- [**User stories**](docs/fleet.md#user-stories-tab): view and edit a project's `spec/product/user-stories.md` in a detail-panel tab.
 - [**On purpose**](docs/fleet.md#on-purpose-tab): a repo's `DECISIONS.md` says what it does on
   purpose; sessions and the merge checker read it, and a detail-panel tab adds to it.
 - [**Audit ledger & insights**](docs/usage-and-cost.md#the-audit-ledger): an optional local log of
@@ -63,8 +62,7 @@ Every feature below has a reference page one click away. The panel lists the sam
   commits and lines changed per day and project, from local git, each linked to its session.
 - [**Where the time went**](docs/usage-and-cost.md#where-the-time-went): time lost to waits, limits, stalls and errors.
 - [**How often each skill works**](docs/providers-and-integrations.md#how-often-each-skill-works): runs and ok-rate per skill, from how each run's turn ended; your own label wins.
-- [**Shift report**](docs/usage-and-cost.md#shift-report): a summary of what the fleet did while you
-  were away.
+- [**Shift report**](docs/usage-and-cost.md#shift-report): a summary of what the fleet did while you were away.
 
 ### Steer
 
@@ -98,8 +96,8 @@ Every feature below has a reference page one click away. The panel lists the sam
 
 ### Automate
 
-A fresh install turns on auto-continue, handoff notes, resume at the limit reset and auto-compact;
-every other automatic behaviour here waits for its switch.
+A fresh install turns on auto-continue, handoff notes, resume at the limit reset, auto-compact and
+the fleet idle alert; every other automatic behaviour here waits for its switch.
 
 - [**Task queue & auto-feed**](docs/automation.md#task-queue): line up tasks per session, feed the
   next when one finishes, and route a project's tasks to whichever session is free. [**Queue hold & fleet view**](docs/automation.md#queue-hold-and-the-queues-view): hold a line in place, and see every queue in one view.
@@ -125,8 +123,8 @@ every other automatic behaviour here waits for its switch.
   automation would do, did, or refused and why. [**Hands-off hold**](docs/automation.md#hands-off-hold): stop it for a session, or ❄ freeze the fleet.
 - [**Routines**](docs/automation.md#routines): spawn a session, push a digest, or run a [**Main-green check**](docs/merging-and-batches.md#is-main-still-green-a-scheduled-check) on a cron schedule.
 - [**Coach**](docs/automation.md#the-coach): a read-only Sonnet reads a repo's last 10 sessions and
-  suggests `CLAUDE.md` edits with evidence, and auto-memory changes (backed up, with Undo). It runs weekly,
-  from a card, or on new evidence (`cc-lesson.sh` files a lesson); remembers what you applied, skipped or
+  suggests `CLAUDE.md` edits with evidence, and auto-memory changes (backed up, with Undo). A card starts it;
+  with `coach.enabled` it also runs weekly and on new evidence (`cc-lesson.sh` files a lesson); remembers what you applied, skipped or
   undid; judges applied edits; Sharpen rewords one. [**Coach across repos**](docs/automation.md#across-repos): a lesson 2+ repos learned is proposed for `~/.claude/CLAUDE.md`.
 - [**Notifications & escalation**](docs/automation.md#escalation-and-watchdogs): nags, banners and pushes when a session waits
   too long or stalls; a [**Fleet idle alert**](docs/automation.md#fleet-idle-alert) once nothing has worked for 15 min.
@@ -143,13 +141,13 @@ every other automatic behaviour here waits for its switch.
 - [**Merge gates**](docs/merging-and-batches.md#merge-gates-shepherd-runs-the-tests-itself): Shepherd runs the suite itself, before the merge and on main after it; [**Gate blame**](docs/merging-and-batches.md#gate-blame-which-failures-were-already-on-main) splits a red gate's failures into main's and the branch's.
 - [**Merge checker**](docs/merging-and-batches.md#the-checker-a-read-only-review-of-every-merge-request):
   every merge request gets red flags from the diff and a read-only Sonnet review; a batch unit
-  merges only on a pass, and 🔎 Verify reviews any session.
+  merges on your grant only on a pass, and 🔎 Verify reviews any session.
 - [**Red-first proof**](docs/merging-and-batches.md#the-red-first-proof-do-the-new-tests-fail-without-the-fix):
   the unit's changed tests run on the merge-base without its fix, and the review says whether they fail.
 - [**Requirement ids and merge receipts**](docs/merging-and-batches.md#requirement-ids-and-the-merge-receipt):
   Shepherd mints REQ ids per repo, and every review shows what was asked and what proves it's done.
 - [**Claude drives a batch**](docs/merging-and-batches.md#claude-drives-a-batch): a session proposes several units, you approve once, and it opens their tabs and hands out the tasks;
-  [**Grant grading**](docs/merging-and-batches.md#grant-grading-a-risky-merge-waits-for-your-click): a merge on your grant that touches hook wiring, instructions, CI or lockfiles, or deletes a file, waits for your click.
+  [**Grant grading**](docs/merging-and-batches.md#grant-grading-a-risky-merge-waits-for-your-click): a merge on your grant waits for your click when it touches hook wiring, instructions, defaults, CI, migrations, lockfiles or settings, deletes a file, has a high checker finding, or has no gate pass.
 - [**Overlap radar & unit order**](docs/merging-and-batches.md#overlap-radar-and-unit-order): worktrees that touch the same files are flagged with which to merge first, and a batch unit can wait for others;
   [**Main moved notice**](docs/merging-and-batches.md#main-moved-sibling-worktrees-hear-about-a-merge): after a merge, the worktrees whose files it touched are told to rebase.
 - [**Coverage index**](docs/merging-and-batches.md#coverage-index-a-batch-says-what-it-covers): a batch built from an issue list can't be approved until every issue is covered or triaged.
@@ -176,7 +174,7 @@ every other automatic behaviour here waits for its switch.
 - [**Keep awake & screen lock**](docs/controls.md#keep-this-mac-awake): keep the Mac awake for long
   runs, and [lock the screen](docs/controls.md#lock-the-screen-keep-the-agents-running) without pausing the sessions.
 - [**Diagnostics**](docs/troubleshooting.md#start-with-diagnostics): a one-screen health check of the
-  hooks, the gate, the panel heartbeat, the tab bridge, the mailbox, auto-compact and the ledger, with fixes.
+  hooks, the gate, the panel heartbeat, the tab bridge, the mailbox, auto-compact, the ledger and how long Claude Code keeps transcripts, with fixes.
 - [**Claude Code compatibility alarms**](docs/troubleshooting.md#claude-code-compatibility): each new
   Claude Code version is checked once against what Shepherd reads; a break alerts you, once.
 
@@ -246,7 +244,7 @@ One unit of work = one branch = one worktree = one Claude session.
 3. **Merge:** a finished, green unit asks to merge. Review it on its card and press **Merge**; it
    rebases, tests and fast-forwards main, then its tab closes.
 4. **Or hand over a batch:** one session runs several units in parallel. You approve the batch once,
-   and choose whether its units may merge on green.
+   and choose whether its units may merge on green; a risky one, or one with no gate pass, still waits for you.
 
 Every session follows these rules from `~/.claude/CLAUDE.md`
 ([methodology/CLAUDE.md](methodology/CLAUDE.md)). See the whole loop in the
@@ -260,10 +258,11 @@ a fresh install starts from [defaults/cc-config.json](defaults/cc-config.json) (
 any key you haven't set).
 
 **On out of the box:** auto-continue (`autoContinue`), respawn (`respawn`), resume at the limit
-reset (`resume`), auto-compact (`compact`), worktree leases (`lease`) and the audit ledger
-(`ledger`), plus the merge checker, the worktree fence, held questions, Remote Control for spawned
-sessions and ending leftover processes that have no tab. Auto-feed, rules, routines, escalation and
-the weekly coach start off. Reference: [docs/configuration.md](docs/configuration.md).
+reset (`resume`), auto-compact (`compact`), worktree leases (`lease`), the audit ledger (`ledger`),
+the three Stop guards (`stopGuards`) and the fleet idle alert (`alerts.idleMinutes`), plus the merge
+checker, the worktree fence, held questions, Remote Control for spawned sessions, ending leftover
+processes that have no tab, the main moved notice and grant grading. Auto-feed, rules, routines,
+escalation and the coach start off. Reference: [docs/configuration.md](docs/configuration.md).
 
 ## Safety model
 
@@ -276,9 +275,10 @@ the weekly coach start off. Reference: [docs/configuration.md](docs/configuratio
 - **When the gate can't answer** (it's off, the tool isn't gated, Shepherd wasn't running, or 120
   seconds pass), Claude Code's own permission mode decides; in Auto or Bypass mode there may be no
   prompt. The gate never approves on a timeout.
-- **Never automatic:** answering a question, merging without your **Merge** or a batch grant, and
-  closing a session you didn't ask to close (except a merged unit's own tab and an idle leftover
-  process with no tab).
+- **Never automatic:** answering a question, merging without your **Merge** or a batch grant (on a
+  grant, a risky change or one with no gate pass still waits for your click), and closing a session
+  you didn't ask to close (except a merged unit's own tab, a finished item's tab in a checklist run
+  you started, and an idle leftover process with no tab).
 - **Remote Control is on by default** for sessions Shepherd spawns, so anyone with your claude.ai
   account can type into them. Turn it off in ⚙ Settings → Spawn and in Claude Code's `/config`.
 
@@ -286,8 +286,8 @@ Full detail: [docs/approvals-and-policies.md](docs/approvals-and-policies.md#the
 
 ## Troubleshooting
 
-- **☰ → 🩺 Diagnostics** checks the hooks, gate, heartbeat, tab bridge and ledger and says how to
-  fix what's wrong. `make doctor` checks the command-line tools.
+- **☰ → 🩺 Diagnostics** checks the hooks, gate, heartbeat, tab bridge, ledger and transcript
+  retention and says how to fix what's wrong. `make doctor` checks the command-line tools.
 - **Is it running?** Shepherd is Lua inside Hammerspoon, so `pgrep shepherd` finds nothing;
   `~/.claude/cc-fleet.sh alive` reads the panel heartbeat.
 - **A change didn't take?** Run `make setup`, reload Hammerspoon and older VS Code windows. Logs:
@@ -298,12 +298,12 @@ Full detail: [docs/approvals-and-policies.md](docs/approvals-and-policies.md#the
 | Page | What's in it |
 |------|--------------|
 | [Install](docs/install.md) | Install, upgrade, uninstall, what the installer changes, the tab bridge, the Dock launcher |
-| [Fleet](docs/fleet.md) | Statuses, project cards, Instances, leases, restart in place, the detail panel and its tabs, search, groups, My List |
-| [Controls](docs/controls.md) | Clicks and menus, detail-panel buttons, pinned links, shared windows, spawning, hotkeys, Stream Deck, awake and lock |
-| [Approvals and policies](docs/approvals-and-policies.md) | The safety model, the gate, always-ask commands, talk mode, the worktree fence, policies, questions, the Inbox |
-| [Merging and batches](docs/merging-and-batches.md) | Worktree tabs, ready to merge, gates, the checker, red-first, receipts, batches, the overlap radar, the demo, the tab bridge |
-| [Automation](docs/automation.md) | When automation types, dry run, queue and packets, templates, respawn, notes, the mailbox, cc-send, tickets, resume, rules, routines, the coach, A/B compare |
-| [Usage and cost](docs/usage-and-cost.md) | Context bars, plan usage, cost, commits, where the time went, the audit ledger and its views |
+| [Fleet](docs/fleet.md) | Statuses, grey cards, project cards, Instances, leases, restart in place and its outcomes, the detail panel and its tabs, search, groups, My List, playbooks, Run selected |
+| [Controls](docs/controls.md) | Clicks and menus, detail-panel buttons, Seance, Hold and ❄ Freeze, pinned links, shared windows, spawning, hotkeys, Stream Deck, awake and lock |
+| [Approvals and policies](docs/approvals-and-policies.md) | The safety model, the gate, always-ask commands, talk mode, the worktree fence, policies, questions, the Inbox, the three Stop guards |
+| [Merging and batches](docs/merging-and-batches.md) | Worktree tabs, ready to merge, gates, gate blame, the main-green check, the checker, red-first, receipts, batches, brief pre-flight, grant grading, the overlap radar, main moved, the demo, the tab bridge |
+| [Automation](docs/automation.md) | When automation types, dry run, the hands-off hold, queue and packets, queue hold and the Queues view, templates, respawn, notes, the mailbox, cc-send, tickets, resume, rules, routines, the coach, the fleet idle alert, A/B compare |
+| [Usage and cost](docs/usage-and-cost.md) | Context bars, plan usage, cost, commits, where the time went, the audit ledger and its views, past sessions and Resume, kept transcripts |
 | [Providers and integrations](docs/providers-and-integrations.md) | Providers and models, agent profiles, the find-only audit, MCPs and skills, Remote Control, the SSH bridge |
 | [Make it yours](docs/customizing.md) | Layouts, themes, colours, sizing |
 | [Configuration](docs/configuration.md) | Settings tabs, `cc-config.json` block by block, what's on by default, the files Shepherd keeps, environment variables |

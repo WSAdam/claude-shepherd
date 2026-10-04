@@ -13,15 +13,118 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
   `todo/`) doesn't count; `// TODO`, `# TODO`, `-- FIXME` and `/* FIXME` still do
   (`tests/fixtures/red-flags/todo-paths.diff`).
 
-## Unreleased — mining round 2
+## 2026-10-04 — Mining round 2
 
-The second feature-mining round (Maestro, Gas Town, ECC, oh-my-claudecode, OpenRig), built as
-parallel units. Each unit adds its line here.
+Everything the second feature-mining round landed (from Maestro, Gas Town, ECC, oh-my-claudecode
+and OpenRig), one line per unit, grouped by area. The README's
+[feature tour](README.md#feature-tour) links each feature's reference page. The failed-tool fix
+that came first has its own section below (2026-10-02).
 
+### "Done" means done (Stop guards)
+
+- Questions asked in prose come back (`stopGuards.question`, on in `defaults/`): a turn whose last paragraph asks Adam a question in plain text is sent back once by the Stop hook, to ask it with AskUserQuestion so it lands on the card. Code, quotes and a question answered in the same breath don't count; never in plan mode, in internal runs, while a question is held, after a mailbox message or where the panel isn't running. Builds the Stop-guard base A2/A3 extend (`cc_stop_guard` in `cc-lib.sh`: precedence mailbox > notes > guards, a once-marker per session and turn in `~/.claude/cc-guard/`, `turn_id` stamped at each prompt, one `stop_guard` ledger event per block), with a corpus of ten real turn-final messages, scrubbed; the scrubber now keeps the words the guard reads in an assistant's own text.
+- Finished units get a merge reminder (`stopGuards.unfinished`, on in `defaults/`): a session in a `.claude/worktrees/` worktree whose last message claims done (`cc_claims_done`: done / complete / ready to merge / all … green, negation-aware and masked like the question guard; A3 reuses it), with commits ahead of main and no merge request for that worktree (matched by path, from any session), is sent back once per head sha: ExitWorktree, then `cc-merge.sh request --worktree …` in the background. Not while `background_tasks` run or the question guard fires, and never for a commit Adam answered Not yet (`cc-merge.sh` now records the request's `head` and leaves `cc-merge/<key>.notyet`, removed in both removers). After a compaction a unit's session is told the finish steps again (a new `finish` context part).
+- "Done" is checked against the diff (`stopGuards.fakeDone`, on in `defaults/`): a turn whose last message claims done (`cc_claims_done`, checked first) while its diff from the merge-base with main to the working tree adds a `.skip`/`.only`/`xit`/`fdescribe`/`@Disabled`… to a test, deletes a test, or adds a stub in code is sent back once per head sha with the lines (up to 8, then a count). The diff is cut at 200,000 bytes (`-U0`, `GIT_OPTIONAL_LOCKS=0`). The scan is `cc_diff_red_flags`, an awk port of `core.diffRedFlags`' skip/only, stub and deleted-test rules; `tests/stop-guards.test.sh` runs both over `tests/fixtures/red-flags/*.diff` (and CRLF copies) and needs the same flags and `core.redFlagLine` wording. Guard order is now question > fakeDone > unfinished. The merge checker's skip list gains `fdescribe(`.
+
+### The coach
+
+- Coach lessons ledger: every Apply, Skip (with an optional one-line reason typed next to Skip)
+  and Undo is kept per repo (`~/.claude/cc-coach/<repo>.lessons.json`), and the next run's prompt
+  carries it, so an applied suggestion isn't proposed again and a skipped or undone one comes back
+  only with new evidence, saying what is new; a repeat's row says "seen in N runs". Skips used to be
+  lost when the next run replaced the record.
+- Coach edit outcomes: each run judges the applied `CLAUDE.md` edits at least 3 of its sessions
+  postdate, against what each was expected to change: working, still seen (with quotes) or no
+  data; fewer sessions read "no data yet", decided by Shepherd, not the model. The verdict shows on
+  the edit's row under Applied edits, next to a new **Sharpen**, which runs the coach on that edit
+  alone for a better wording of it.
+- Coach memory review: each run also reads the repo's Claude Code auto-memory (`MEMORY.md` and its
+  notes) and may propose deleting, rewriting or keeping a note, or promoting one into `CLAUDE.md` as an
+  ordinary edit row. **Delete it** / **Rewrite it** refuse when a session changed the file since the
+  coach read it, back it up in `~/.claude/cc-coach/<repo>.memory-backup/` first, keep `MEMORY.md`'s
+  index lines in step, and **Undo** restores it; nothing outside the repo's memory folder is touched.
+- Coach evidence runs: with `coach.evidence.minItems` set, a repo's coach no longer waits for its
+  weekly day once enough new evidence arrives since its last run (Shepherd's log entries, then the
+  corrections and interrupts in its transcripts), after a 24h cooldown and under a daily dollar cap
+  across repos. `cc-lesson.sh "<one line>"` (new) files a lesson from inside a repo; Shepherd puts
+  it in the coach's log as a filed lesson, which the next run reads and which counts as evidence.
+- Coach across repos: with `coach.enabled`, at most once a day, when 2+ repos have applied coach lessons it
+  hasn't compared yet, one headless Sonnet run in its own lane (`coach|global`, $1) groups the same lesson
+  across repos (the model's call, never fuzzy Lua) and proposes each group as one rule for a marked,
+  4KB-capped block in `~/.claude/CLAUDE.md`. Apply is a click under **Across repos** in the Coach overlay:
+  refused once the file changed since the run read it, written through a link to its target, backed up
+  first in `~/.claude/cc-coach/global.claude-backup/`; Undo restores that backup. Never mirrored into
+  `methodology/CLAUDE.md`.
+- Fixed: the coach's across-repos run counted only repos with a lessons ledger, so repos whose edits
+  were applied before the ledger existed (they live only in `<repo>.applied.json`) were left out, and no
+  grouping run could start until each repo's own coach ran again. Their applied history now counts at once.
+
+### Steering sessions
+
+- Added: **Seance**. Ask any session a question, live or long finished, from its detail panel, a
+  Find-in-fleet hit or a History row. A read-only headless fork of its own conversation
+  (`claude -p --resume <transcript> --fork-session --no-session-persistence`) answers in place, in
+  the session's model with a budget sized from its context. It runs in its own lane, never behind a
+  repo's checker. Nothing is saved, and the session's transcript is only read.
+- Hands-off hold: **Hold** (tile menu, detail panel) puts one session on hold and **❄ Freeze** in the
+  toolbar holds the fleet, with a HOLD / FROZEN badge. Every automatic send stands down: the
+  automation door (a **held** row in the Trace), the drain close, scheduled spawns, merges on a batch
+  grant (they wait for your click), and in the hooks the Stop guards, the notes request and the resume
+  wake. Each skipped send is listed in the detail panel and never replayed. Mail waits and goes out
+  once the hold is lifted. Flags are `~/.claude/cc-hold/<pid>` (survives `/clear`), `key-<key>` and `.fleet`.
 - Queue hold & fleet view: **Hold** on a queued line parks it in place (stored with the line as
   `{text, held}`; an old queue file reads as before), and auto-feed, Feed next and the router feed the next
   line that isn't held; ☰ → 📑 Queues lists every `cc-queue/*.json` with its sessions, held lines and a
   packet line's last drift check, with Hold / Release, ▲ ▼ and ✕ (asks first).
+- Fleet idle alert: once every local session has been idle or done for `alerts.idleMinutes` (on, 15),
+  Shepherd sends one macOS banner, plus an ntfy push when escalation push is on, and arms again only
+  when a session works again (`core.fleetIdleAlertDue`). An interrupted turn counts as idle on its
+  transcript marker, never a quiet one. `alerts.voice` (off) speaks it through `hs.speech`, and
+  `alerts.voiceEvents: ["needsYou"]` also says when a session starts needing you.
+
+### My List
+
+- Playbooks in My List: **📘 Add a playbook…** on a project tab picks a markdown checklist through the
+  Mac's file chooser (never a path typed into the panel). Its `- [ ]` lines import like `TODO.md`'s
+  (`core.worklistImportPlaybook` over the same merge, `src = "playbook"`), grouped under the file's
+  name, and a per-tick watch keeps their ✓ auto and ▶ live run chips in step with the file. Importing
+  never ticks a row. **Remove playbook** stops the import and keeps its items to verify. The sources
+  list is `playbooks` in `cc-worklist.json`.
+- Run selected in My List: **▶ Run…** on a project tab picks open items (nothing preselected) and
+  **Run selected** works through them one at a time, each in a fresh tab in the repo's main checkout,
+  opened through the expect-tag machinery with its brief typed in (Adam sends it; no keystroke). A file
+  line counts once its box is ticked and the turn didn't do nothing; any other item once its own
+  session runs the new `cc-run.sh done` (or `blocked`). Then `core.worklistRunCheck` sets Adam's
+  checkmark with `doneBy = "run:<id>"` (**✓ by run**), only for a run he started. Import still never does.
+  Three misses in a row stop a run; a live-run item, a blocked report or a batch pauses it; a hold or
+  freeze holds it; one run per repo. Runs are `~/.claude/cc-run/<id>.run.json`.
+
+### Merging
+
+- Gate blame: a pre-merge gate that fails with failing test lines (`core.gateBlameDue`) gets the same gate command run at the merge-base in a detached scratch worktree (`core.redFirstRunCmd`, nothing applied; a repo-declared gate runs the merge-base's own `.worktree-check`), cached per repo + merge-base + command (`core.gateBlameKey`) and queued in the repo's gate lane as `low`, so `core.mergeGateReleases` starts it only when no gate that judges a merge is waiting there. The review's `v.gateBlame` (`core.gateBlameVerdict`) splits the failing lines into already failing on main and new in this branch, matched per `== <suite> ==` section with durations, line numbers, the checkout's path and mktemp names normalised away, one main line per branch line; a run on main that couldn't run or timed out counts on neither side. Informational only: readiness, the card line, "needs you" and the delegated merge never read it.
+- Main-green check: a routine with `"action": "gate"` (**Check main is green** on the ⏰ Routines board; opt-in per repo, optional `branch`, default `main`) runs the repo's merge gate (`core.mainGreenGateFor`) in its main checkout through the repo's gate lane as `low`, after checking the checkout is on that branch with no uncommitted tracked changes (else couldn't-run, `core.mainGreenRun`). Red raises one banner (and ntfy with escalation push), an **⚠ main is red** flag on every card of the repo with the failing lines in its tooltip, and a `mainred` coach-log entry; the next green clears it (`core.mainGreenVerdict`). Couldn't-run and timed-out runs change nothing. A fleet freeze or a held session of the repo skips the check (listed). Verdicts persist in `~/.claude/cc-main-green.json`.
+- Main moved notice (`merge.mainMovedNotice`, default on): at the verified-merge edge (`FX.mergeAutoClose`), the merge's files (the verify command's new `@@files`, read by `core.mergeVerifyFiles`, never by the verdict) are matched against each other live worktree session's radar files (`core.mainMovedTargets`: same repo, not the main checkout, the merged session or a remote one). Each session that overlaps gets one turn-end-only mailbox note through `FX.deliverTo` (`core.mainMovedMessage`: "main moved to <sha7> (<unit>), touching <files>: rebase onto main before you ask to merge"). A turn-end-only message is never typed (`core.mailboxRoute`'s typeable count; `FX.mailboxClaim` passes it over), and it is announced once per repo + merged sha in `~/.claude/cc-merge/main-moved.seen`, across reloads. Fixed with it: the radar scanned a repo with only ONE linked worktree as empty, so the last sibling left after a merge had no files to match.
+- Grant grading: a batch unit's merge on Adam's grant waits for his Merge click when its diff touches
+  hook wiring, `CLAUDE.md`/`methodology/`, `DECISIONS.md`, `defaults/`, CI, migrations, lockfiles or
+  `.claude/settings*`, deletes a tracked file, or the checker reported a high-severity finding
+  (`core.grantRisk`, read from a new uncapped `@@allfiles` facts section). Otherwise it merges only on
+  evidence Shepherd holds: the gate's pass for that commit, plus the checker's pass with
+  `verify.onMerge` on, so an ungated repo's units now wait too. The card says why; his own click is
+  never graded. `merge.grantWaitsFor` lists the categories (all on).
+
+### Batches
+
+- Added: **Brief pre-flight**. A proposed batch's full briefs (not the review's 300-character cut) are scanned for force push, push to main, deleting or skipping tests, `rm -rf`, secrets and CI or deploy files, negation-aware ("never git push" doesn't count), plus two units citing one file and more than one hook-wiring unit; the review lists each flag with the words that raised it, the card counts them, and `cc-fleet.sh propose` prints one line (`cc-fleet.sh preflight` checks a file without proposing). Advisory only: Approve is never held. The panel's Lua and the script's jq answer to one table, `tests/fixtures/brief-flags.tsv`.
+- Fixed: a batch Adam approved after the driver's `cc-fleet.sh propose` had stopped waiting (killed at
+  a 10-minute background limit) was stranded: nothing could collect the answer, the batch read
+  "proposed" for good, and it had to be proposed and approved again. `cc-fleet.sh propose --resume <id>`
+  now collects a late answer, for the session that proposed it only.
+- Fixed: nothing told the driver when its approval was stranded, so an approved batch sat until Adam
+  asked what was going on. An answer still uncollected 30 seconds after Adam gives it now mails the
+  driving session (once) the `cc-fleet.sh propose --resume <id>` command that acts on it.
+
+### Sessions Shepherd couldn't see, and History
+
 - Grey cards: a live interactive session in `~/.claude/sessions/<pid>.json` that no status file covers
   (started before Shepherd's hooks, or with hooks off) gets a grey card in its own row under the grid,
   with its folder, Claude Code's busy/idle and "restart it to get live status" (never an `sdk-*` headless
@@ -45,97 +148,11 @@ parallel units. Each unit adds its line here.
   `FX.openClaudeTab`, now its second caller (the D-14 pins say so), and a terminal one with `claude -r`. Spike
   S4 found a missing transcript opens an empty tab, so a kept-only session gets its copy put back
   first, never over a file.
-- Grant grading: a batch unit's merge on Adam's grant waits for his Merge click when its diff touches
-  hook wiring, `CLAUDE.md`/`methodology/`, `DECISIONS.md`, `defaults/`, CI, migrations, lockfiles or
-  `.claude/settings*`, deletes a tracked file, or the checker reported a high-severity finding
-  (`core.grantRisk`, read from a new uncapped `@@allfiles` facts section). Otherwise it merges only on
-  evidence Shepherd holds: the gate's pass for that commit, plus the checker's pass with
-  `verify.onMerge` on, so an ungated repo's units now wait too. The card says why; his own click is
-  never graded. `merge.grantWaitsFor` lists the categories (all on).
-- Run selected in My List: **▶ Run…** on a project tab picks open items (nothing preselected) and
-  **Run selected** works through them one at a time, each in a fresh tab in the repo's main checkout,
-  opened through the expect-tag machinery with its brief typed in (Adam sends it; no keystroke). A file
-  line counts once its box is ticked and the turn didn't do nothing; any other item once its own
-  session runs the new `cc-run.sh done` (or `blocked`). Then `core.worklistRunCheck` sets Adam's
-  checkmark with `doneBy = "run:<id>"` (**✓ by run**), only for a run he started. Import still never does.
-  Three misses in a row stop a run; a live-run item, a blocked report or a batch pauses it; a hold or
-  freeze holds it; one run per repo. Runs are `~/.claude/cc-run/<id>.run.json`.
-- Playbooks in My List: **📘 Add a playbook…** on a project tab picks a markdown checklist through the
-  Mac's file chooser (never a path typed into the panel). Its `- [ ]` lines import like `TODO.md`'s
-  (`core.worklistImportPlaybook` over the same merge, `src = "playbook"`), grouped under the file's
-  name, and a per-tick watch keeps their ✓ auto and ▶ live run chips in step with the file. Importing
-  never ticks a row. **Remove playbook** stops the import and keeps its items to verify. The sources
-  list is `playbooks` in `cc-worklist.json`.
-- Coach across repos: with `coach.enabled`, at most once a day, when 2+ repos have applied coach lessons it
-  hasn't compared yet, one headless Sonnet run in its own lane (`coach|global`, $1) groups the same lesson
-  across repos (the model's call, never fuzzy Lua) and proposes each group as one rule for a marked,
-  4KB-capped block in `~/.claude/CLAUDE.md`. Apply is a click under **Across repos** in the Coach overlay:
-  refused once the file changed since the run read it, written through a link to its target, backed up
-  first in `~/.claude/cc-coach/global.claude-backup/`; Undo restores that backup. Never mirrored into
-  `methodology/CLAUDE.md`.
-
-- Fleet idle alert: once every local session has been idle or done for `alerts.idleMinutes` (on, 15),
-  Shepherd sends one macOS banner, plus an ntfy push when escalation push is on, and arms again only
-  when a session works again (`core.fleetIdleAlertDue`). An interrupted turn counts as idle on its
-  transcript marker, never a quiet one. `alerts.voice` (off) speaks it through `hs.speech`, and
-  `alerts.voiceEvents: ["needsYou"]` also says when a session starts needing you.
-
-- Hands-off hold: **Hold** (tile menu, detail panel) puts one session on hold and **❄ Freeze** in the
-  toolbar holds the fleet, with a HOLD / FROZEN badge. Every automatic send stands down: the
-  automation door (a **held** row in the Trace), the drain close, scheduled spawns, merges on a batch
-  grant (they wait for your click), and in the hooks the Stop guards, the notes request and the resume
-  wake. Each skipped send is listed in the detail panel and never replayed. Mail waits and goes out
-  once the hold is lifted. Flags are `~/.claude/cc-hold/<pid>` (survives `/clear`), `key-<key>` and `.fleet`.
 - Restart outcomes: a Restart fleet row no longer ends at "opened" (a link went out, a line was typed).
   Each reopened session ends as **resumed** (its hooks wrote again, or a session file names it under a
   new process), **came back fresh** (a new session in its folder, named only while no other reopened
   session waits there) or **didn't come back** (neither within 5 minutes), shown as a chip on its row,
   recorded as `restart_outcome` and summed up in one toast per run (`core.restartOutcome`).
-- Coach evidence runs: with `coach.evidence.minItems` set, a repo's coach no longer waits for its
-  weekly day once enough new evidence arrives since its last run (Shepherd's log entries, then the
-  corrections and interrupts in its transcripts), after a 24h cooldown and under a daily dollar cap
-  across repos. `cc-lesson.sh "<one line>"` (new) files a lesson from inside a repo; Shepherd puts
-  it in the coach's log as a filed lesson, which the next run reads and which counts as evidence.
-
-- Coach edit outcomes: each run judges the applied `CLAUDE.md` edits at least 3 of its sessions
-  postdate, against what each was expected to change: working, still seen (with quotes) or no
-  data; fewer sessions read "no data yet", decided by Shepherd, not the model. The verdict shows on
-  the edit's row under Applied edits, next to a new **Sharpen**, which runs the coach on that edit
-  alone for a better wording of it.
-- Coach memory review: each run also reads the repo's Claude Code auto-memory (`MEMORY.md` and its
-  notes) and may propose deleting, rewriting or keeping a note, or promoting one into `CLAUDE.md` as an
-  ordinary edit row. **Delete it** / **Rewrite it** refuse when a session changed the file since the
-  coach read it, back it up in `~/.claude/cc-coach/<repo>.memory-backup/` first, keep `MEMORY.md`'s
-  index lines in step, and **Undo** restores it; nothing outside the repo's memory folder is touched.
-
-- Fixed: a batch Adam approved after the driver's `cc-fleet.sh propose` had stopped waiting (killed at
-  a 10-minute background limit) was stranded: nothing could collect the answer, the batch read
-  "proposed" for good, and it had to be proposed and approved again. `cc-fleet.sh propose --resume <id>`
-  now collects a late answer, for the session that proposed it only.
-- Fixed: nothing told the driver when its approval was stranded, so an approved batch sat until Adam
-  asked what was going on. An answer still uncollected 30 seconds after Adam gives it now mails the
-  driving session (once) the `cc-fleet.sh propose --resume <id>` command that acts on it.
-- Fixed: the coach's across-repos run counted only repos with a lessons ledger, so repos whose edits
-  were applied before the ledger existed (they live only in `<repo>.applied.json`) were left out, and no
-  grouping run could start until each repo's own coach ran again. Their applied history now counts at once.
-
-- Coach lessons ledger: every Apply, Skip (with an optional one-line reason typed next to Skip)
-  and Undo is kept per repo (`~/.claude/cc-coach/<repo>.lessons.json`), and the next run's prompt
-  carries it, so an applied suggestion isn't proposed again and a skipped or undone one comes back
-  only with new evidence, saying what is new; a repeat's row says "seen in N runs". Skips used to be
-  lost when the next run replaced the record.
-- Questions asked in prose come back (`stopGuards.question`, on in `defaults/`): a turn whose last paragraph asks Adam a question in plain text is sent back once by the Stop hook, to ask it with AskUserQuestion so it lands on the card. Code, quotes and a question answered in the same breath don't count; never in plan mode, in internal runs, while a question is held, after a mailbox message or where the panel isn't running. Builds the Stop-guard base A2/A3 extend (`cc_stop_guard` in `cc-lib.sh`: precedence mailbox > notes > guards, a once-marker per session and turn in `~/.claude/cc-guard/`, `turn_id` stamped at each prompt, one `stop_guard` ledger event per block), with a corpus of ten real turn-final messages, scrubbed; the scrubber now keeps the words the guard reads in an assistant's own text.
-- Finished units get a merge reminder (`stopGuards.unfinished`, on in `defaults/`): a session in a `.claude/worktrees/` worktree whose last message claims done (`cc_claims_done`: done / complete / ready to merge / all … green, negation-aware and masked like the question guard; A3 reuses it), with commits ahead of main and no merge request for that worktree (matched by path, from any session), is sent back once per head sha: ExitWorktree, then `cc-merge.sh request --worktree …` in the background. Not while `background_tasks` run or the question guard fires, and never for a commit Adam answered Not yet (`cc-merge.sh` now records the request's `head` and leaves `cc-merge/<key>.notyet`, removed in both removers). After a compaction a unit's session is told the finish steps again (a new `finish` context part).
-- "Done" is checked against the diff (`stopGuards.fakeDone`, on in `defaults/`): a turn whose last message claims done (`cc_claims_done`, checked first) while its diff from the merge-base with main to the working tree adds a `.skip`/`.only`/`xit`/`fdescribe`/`@Disabled`… to a test, deletes a test, or adds a stub in code is sent back once per head sha with the lines (up to 8, then a count). The diff is cut at 200,000 bytes (`-U0`, `GIT_OPTIONAL_LOCKS=0`). The scan is `cc_diff_red_flags`, an awk port of `core.diffRedFlags`' skip/only, stub and deleted-test rules; `tests/stop-guards.test.sh` runs both over `tests/fixtures/red-flags/*.diff` (and CRLF copies) and needs the same flags and `core.redFlagLine` wording. Guard order is now question > fakeDone > unfinished. The merge checker's skip list gains `fdescribe(`.
-- Added: **Seance**. Ask any session a question, live or long finished, from its detail panel, a
-  Find-in-fleet hit or a History row. A read-only headless fork of its own conversation
-  (`claude -p --resume <transcript> --fork-session --no-session-persistence`) answers in place, in
-  the session's model with a budget sized from its context. It runs in its own lane, never behind a
-  repo's checker. Nothing is saved, and the session's transcript is only read.
-- Added: **Brief pre-flight**. A proposed batch's full briefs (not the review's 300-character cut) are scanned for force push, push to main, deleting or skipping tests, `rm -rf`, secrets and CI or deploy files, negation-aware ("never git push" doesn't count), plus two units citing one file and more than one hook-wiring unit; the review lists each flag with the words that raised it, the card counts them, and `cc-fleet.sh propose` prints one line (`cc-fleet.sh preflight` checks a file without proposing). Advisory only: Approve is never held. The panel's Lua and the script's jq answer to one table, `tests/fixtures/brief-flags.tsv`.
-- Main-green check: a routine with `"action": "gate"` (**Check main is green** on the ⏰ Routines board; opt-in per repo, optional `branch`, default `main`) runs the repo's merge gate (`core.mainGreenGateFor`) in its main checkout through the repo's gate lane as `low`, after checking the checkout is on that branch with no uncommitted tracked changes (else couldn't-run, `core.mainGreenRun`). Red raises one banner (and ntfy with escalation push), an **⚠ main is red** flag on every card of the repo with the failing lines in its tooltip, and a `mainred` coach-log entry; the next green clears it (`core.mainGreenVerdict`). Couldn't-run and timed-out runs change nothing. A fleet freeze or a held session of the repo skips the check (listed). Verdicts persist in `~/.claude/cc-main-green.json`.
-- Gate blame: a pre-merge gate that fails with failing test lines (`core.gateBlameDue`) gets the same gate command run at the merge-base in a detached scratch worktree (`core.redFirstRunCmd`, nothing applied; a repo-declared gate runs the merge-base's own `.worktree-check`), cached per repo + merge-base + command (`core.gateBlameKey`) and queued in the repo's gate lane as `low`, so `core.mergeGateReleases` starts it only when no gate that judges a merge is waiting there. The review's `v.gateBlame` (`core.gateBlameVerdict`) splits the failing lines into already failing on main and new in this branch, matched per `== <suite> ==` section with durations, line numbers, the checkout's path and mktemp names normalised away, one main line per branch line; a run on main that couldn't run or timed out counts on neither side. Informational only: readiness, the card line, "needs you" and the delegated merge never read it.
-- Main moved notice (`merge.mainMovedNotice`, default on): at the verified-merge edge (`FX.mergeAutoClose`), the merge's files (the verify command's new `@@files`, read by `core.mergeVerifyFiles`, never by the verdict) are matched against each other live worktree session's radar files (`core.mainMovedTargets`: same repo, not the main checkout, the merged session or a remote one). Each session that overlaps gets one turn-end-only mailbox note through `FX.deliverTo` (`core.mainMovedMessage`: "main moved to <sha7> (<unit>), touching <files>: rebase onto main before you ask to merge"). A turn-end-only message is never typed (`core.mailboxRoute`'s typeable count; `FX.mailboxClaim` passes it over), and it is announced once per repo + merged sha in `~/.claude/cc-merge/main-moved.seen`, across reloads. Fixed with it: the radar scanned a repo with only ONE linked worktree as empty, so the last sibling left after a merge had no files to match.
 
 ## 2026-10-02 — A failed tool no longer stays "in flight"
 

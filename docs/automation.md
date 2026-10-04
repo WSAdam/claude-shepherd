@@ -3,12 +3,14 @@
 [← README](../README.md) · [Configuration](configuration.md) · [Controls](controls.md)
 
 Each **automatic** behaviour on this page has a switch, in ⚙ Settings → Automation or in
-`~/.claude/cc-config.json`. A fresh install turns four on: auto-continue, the **Respawn from cwd**
-action, [resume at the limit reset](#resume-at-the-limit-reset) and
-[auto-compact with notes](#auto-compact-with-notes). [Handoff notes](#handoff-notes) and the
+`~/.claude/cc-config.json`. A fresh install turns five on: auto-continue, the **Respawn from cwd**
+action, [resume at the limit reset](#resume-at-the-limit-reset),
+[auto-compact with notes](#auto-compact-with-notes) and the [fleet idle alert](#fleet-idle-alert)
+(on even with no settings file). [Handoff notes](#handoff-notes) and the
 [session mailbox](#session-mailbox) have no switch. Auto-feed, routing, auto-respawn, model
-auto-routing, the self-summary, escalation, rules, routines and the weekly coach start off; their
-keys are in [Configuration](configuration.md#editing-the-file-by-hand). The manual tools (Queue,
+auto-routing, the self-summary, escalation, rules, routines and the coach's own runs
+(`coach.enabled`, which its weekly and evidence runs both need) start off; their keys are in
+[Configuration](configuration.md#editing-the-file-by-hand). The manual tools (Queue,
 Feed next, templates, A/B compare, a routine's **Run**) work without a switch.
 
 Automatic actions that type into a session are delivery-gated (a task leaves the queue only once
@@ -20,7 +22,9 @@ session can take the text ([below](#when-automation-types)), and are recorded in
 Auto-feed, project routing, a rule's `nudge` or `continue`, auto-continue, the post-run
 self-summary, the startup `/rc` sweep, a waiting [mailbox](#session-mailbox) message and the
 `Continue` after a [fleet restart](fleet.md#restart-the-fleet-in-place) all type into a session
-without you. Each one waits until the session can take it:
+without you. (The [Stop guards](approvals-and-policies.md#questions-asked-in-prose-come-back) never
+type: they send a turn back through the session's own Stop hook.) Each one waits until the session
+can take it:
 
 - **Never mid-turn**: not while the session is working, waiting on an approval or on a question
   Shepherd holds, or running a tool.
@@ -102,7 +106,10 @@ whole fleet, while you take over.
   restart. Senders outside the door also stand down:
   - the [drain](#drain-and-tile-cleanup) close, which is used up rather than run later;
   - a [routine](#routines)'s spawn, while the fleet is frozen (it is marked fired, so a one-shot
-    is used up);
+    is used up), and a main-green check, while the fleet is frozen or any session of its repo is
+    held;
+  - a [checklist run](fleet.md#my-list), which waits at its next item while that item's session is
+    held or the fleet is frozen;
   - a merge on a [batch grant](merging-and-batches.md). The request waits for your **Merge** instead,
     and its card says why;
   - in the session's own hooks: the [Stop guards](approvals-and-policies.md#questions-asked-in-prose-come-back), the
@@ -661,9 +668,11 @@ instructions every session in it reads first. It suggests; nothing changes until
   `.claude/worktrees/<slug>`'s transcripts, newest first): your corrections (every prompt after a
   session's first), your interrupts, tool errors, tool calls you denied with a note, and **Not
   yet** notes. Shepherd adds what transcripts don't hold: your **Not yet** notes on merge requests,
-  blocked merges' notes, merge-checker fails and findings, and lessons sessions filed with
-  `cc-lesson.sh` (below), from its own log
-  (`~/.claude/cc-coach/<repo>.log.json`, three weeks, 40 entries). The digest is capped at about 30KB;
+  blocked merges' notes, merge-checker fails and findings, lessons sessions filed with
+  `cc-lesson.sh` (below), and the times the [main-green check](merging-and-batches.md#is-main-still-green-a-scheduled-check)
+  found main red, from its own log (`~/.claude/cc-coach/<repo>.log.json`, three weeks, 40 entries;
+  `<repo>` in these file names is the main checkout's encoded project folder, as in
+  `~/.claude/projects/`). The digest is capped at about 30KB;
   the repo's `CLAUDE.md` and `DECISIONS.md` go in on top.
 - **How it runs:** a headless, read-only Sonnet (the [merge checker](merging-and-batches.md#the-checker-a-read-only-review-of-every-merge-request)'s
   runner: hooks off, no MCP, no tab) in the repo's main checkout, at `coach.maxBudgetUsd` (default
@@ -683,24 +692,28 @@ instructions every session in it reads first. It suggests; nothing changes until
   as a verdict, and is retried 15 minutes later (up to 3 times).
 - **Evidence runs:** with `coach.enabled` on and `coach.evidence.minItems` set, a repo doesn't wait
   for its day once enough new evidence has come in since its last run (of any kind): entries in
-  Shepherd's log (merge notes, checker verdicts, filed lessons), then your corrections and
+  Shepherd's log (merge notes, checker verdicts, filed lessons, main went red), then your corrections and
   interrupts in its transcripts since. The log is checked every minute; the transcripts are counted
   in the background, only when the log alone isn't enough, at most every 15 minutes. At
-  `minItems` items (default 10) a run starts, unless one ran in the last
+  `minItems` items (a fresh install sets 10) a run starts, unless one ran in the last
   `coach.evidence.cooldownHours` (24) or today's evidence runs, across every repo, have spent
   `coach.evidence.dailyUsd` ($3; a run in flight counts at `coach.maxBudgetUsd` until its cost is
-  known). Each evidence run's cost is kept in `~/.claude/cc-coach/evidence-spend.json`, per day.
+  known). Today's running total is kept in `~/.claude/cc-coach/evidence-spend.json` (one record,
+  started again each day).
   The overlay says what started it (**Started by N new evidence items since the last run**). The
   weekly run still happens when it is due. Without `minItems` (or at 0) there are no evidence
   runs.
 - **Filing a lesson:** a session (or you, in a shell) that learned something the hard way runs
-  `cc-lesson.sh "<one line>"` anywhere in the repo, a worktree included. The words are joined
-  into one line (at most 400 characters) and left in `~/.claude/cc-lesson/`; Shepherd takes each
+  `~/.claude/cc-lesson.sh "<one line>"` anywhere in the repo, a worktree included. The words are
+  joined into one line and left in `~/.claude/cc-lesson/`; a lesson over 400 characters, one filed
+  outside a git repo, or one filed without `jq` is refused (exit 2). Shepherd takes each
   on its next tick (Shepherd needn't be running when it's filed) and puts it in the repo's coach
   log as a filed lesson, which the next run reads as evidence and which counts toward an evidence
-  run.
+  run. A lesson from a repo whose main checkout Shepherd can't find is dropped.
 - **Reviewing:** suggestions wait behind a **🧭 N** chip on the project card; click it for the
-  Coach overlay. **Apply** writes the edit into `CLAUDE.md` and commits that file alone
+  Coach overlay. The chip is the only way in, and it shows only while something waits, a run is
+  reading or waiting, or the last run failed: with nothing pending, **Applied edits**, their
+  verdicts, **Undo** and **Sharpen** wait until the next run. **Apply** writes the edit into `CLAUDE.md` and commits that file alone
   (`git commit -- CLAUDE.md`, a plain message: `CLAUDE.md: <section>` and the why), leaving
   anything else you have staged as it was. It's refused, and says why on the edit, when
   `CLAUDE.md` changed since the coach read it (its hash) or has uncommitted edits, when the
@@ -732,13 +745,14 @@ instructions every session in it reads first. It suggests; nothing changes until
   entry, when `CLAUDE.md` has uncommitted edits, when those lines aren't in the file exactly once
   any more (undo it by hand with `git revert`), or when the commit is no longer in the repo.
 
-- **Lessons:** what you did with each suggestion is kept in the repo's lessons ledger
+- **Lessons:** what you did with each `CLAUDE.md` edit and auto-memory change (not `DECISIONS.md`
+  entries) is kept in the repo's lessons ledger
   (`~/.claude/cc-coach/<repo>.lessons.json`, the newest 200): applied, skipped or undone, with
-  when, its section, its text and why. Each pending suggestion has a **Why skip? (optional)** box
+  when, its section, its text and why. Each pending `CLAUDE.md` edit has a **Why skip? (optional)** box
   next to **Skip**: one line, sent with the Skip (Return in the box skips too), and shown on the
   skipped row. An Apply or an Undo goes into the ledger at once; a skip goes in when the next run
   starts, so **Bring back** before then takes it out again. Edits applied before the ledger
-  existed are added from the history. Every run's prompt carries the ledger, newest first and
+  existed are added from the history. Every run's prompt (not a Sharpen run's) carries the ledger, newest first and
   capped at about 6KB, with these rules: an applied suggestion is in `CLAUDE.md` already and is
   never proposed again; a skipped or undone one comes back only with new evidence, and the coach
   says what is new. When a suggestion repeats a lesson, reworded or not, the coach names that
@@ -749,7 +763,8 @@ instructions every session in it reads first. It suggests; nothing changes until
   postdate (a session counts by when it last ran; the newest 8 such edits per run). The prompt
   lists each by its commit, with its **Today** and **Expected after**, and the coach answers
   **working** (the sessions since do what was expected, or the problem stopped), **still seen**
-  (quoting where it still shows) or **no data** (those sessions never came near it). An edit
+  (quoting where it still shows) or **no data** (those sessions never came near it, or the coach
+  gave no verdict for it). An edit
   fewer sessions postdate reads **No data yet · N of 3 sessions since it was applied**: Shepherd
   decides that, never the model, and it doesn't take away a verdict an earlier run gave. The
   verdict and its quotes are stored on the edit's history entry and shown on its row under
@@ -763,8 +778,9 @@ instructions every session in it reads first. It suggests; nothing changes until
 - **Auto-memory:** every run (not Sharpen) also reads the repo's Claude Code auto-memory: the notes
   sessions saved in `~/.claude/projects/<the main checkout's folder>/memory/` (`MEMORY.md`, the
   index, first, then each `*.md` by name; a worktree's project folder has no memory of its own). Whole
-  files only, about 16KB in all: a file past that is only named, and nothing is proposed for it. A
-  link (the folder, a file) is never read. The coach may propose up to 8 changes, each with why and
+  files only, at most 8KB each and about 16KB in all: a file past either cap is only named, and
+  nothing is proposed for it. A link (the folder, a file) is never read. `MEMORY.md` itself can only
+  be rewritten, never deleted, renamed or promoted, and a rewrite longer than 8KB is dropped. The coach may propose up to 8 changes, each with why and
   evidence: **delete** a note that is wrong, stale or already in `CLAUDE.md`; **rewrite** one (its
   whole new text, optionally under a new file name); **keep** one (shown, nothing to click); or
   **promote** one into `CLAUDE.md`, which arrives as an ordinary edit row marked **From auto-memory**
@@ -776,7 +792,7 @@ instructions every session in it reads first. It suggests; nothing changes until
   `MEMORY.md` in step: a delete takes out the index lines that link to the file, a rename points them
   at the new name. Memory isn't in git, so nothing is committed. **Undo** puts the file back from
   that backup (and its index line, at the end, unless one links to it again), refused if a session
-  changed the file since. **Skip** and **Bring back** work as for edits. Nothing outside the repo's
+  changed the file since. **Skip** and **Bring back** work as for edits, without the reason box. Nothing outside the repo's
   memory folder is ever touched: every name is one plain `*.md`, and a link is never written
   through. The lessons ledger records these decisions too, as `memory/<file>`, with the same rules.
 
@@ -796,8 +812,11 @@ compares them.
 
 - **When:** with `coach.enabled` on, at most once a day (counted from the last run's start, a run a
   reload killed included), and only when 2 or more repos have an applied lesson no run has compared
-  yet. The repos' ledgers are read once the day allows it, then at most every 15 minutes.
-  **Run again** in the overlay compares now, whatever the clock says.
+  yet. The repos' ledgers are read once the day allows it, then at most every 15 minutes. A repo
+  whose edits were applied before its ledger existed (it has only `<repo>.applied.json`) counts
+  too. **Run again** shows in the overlay when the last compare was lost or couldn't run, or when
+  a proposal was refused because the file changed; it compares now, whatever the clock says, as
+  long as 2 or more repos have applied lessons.
 - **What it reads:** every repo's lessons ledger (`<repo>.lessons.json`): the lessons you applied,
   with each one's whole text from its applied history (`<repo>.applied.json`). Skipped and undone
   lessons, and auto-memory changes, aren't included. Each lesson is marked new or not, newest first, about
@@ -817,7 +836,8 @@ compares them.
   end of the file the first time, and the rest of the file isn't touched. When
   `~/.claude/CLAUDE.md` is a link, the write goes to its target and the link stays. First, though,
   the file is copied into `~/.claude/cc-coach/global.claude-backup/` (`~/.claude` isn't a git
-  repo): no backup, no change. Apply is refused, and says why on the row, when:
+  repo): no backup, no change. (When `~/.claude/CLAUDE.md` doesn't exist yet, Apply creates it with
+  no backup, and Undo deletes it again.) Apply is refused, and says why on the row, when:
   - the file changed since the run read it (Shepherd's own Apply and Undo don't count): it offers **Run again**;
   - the rule is in the block already;
   - the block would pass 4KB;

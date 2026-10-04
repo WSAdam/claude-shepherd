@@ -99,10 +99,13 @@ In order (a remote SSH-bridge tile offers only Relabel and Set group):
   ([Usage and cost](usage-and-cost.md#run-score)).
 - **🔎 Verify**: a read-only review of the session's work, the same one every merge request gets
   ([Merging and batches](merging-and-batches.md#the-checker-a-read-only-review-of-every-merge-request)).
-- **🧭 Coach**: read the repo's last sessions and suggest `CLAUDE.md` edits
-  ([Automation](automation.md#the-coach)).
-- **🔮 Ask this session**: a question box under the buttons. A read-only fork of the session's own
-  conversation answers it, and the answer shows under the box ([Ask a session](#ask-a-session-seance)).
+- **🧭 Coach**: read the repo's last sessions and suggest `CLAUDE.md` edits and auto-memory changes;
+  its suggestions then wait behind the **🧭** chip on the project card, the way into the Coach
+  overlay ([Automation](automation.md#the-coach)).
+
+Above the tabs and buttons sits the **Ask this session…** box with its **🔮 Ask** button: a
+read-only fork of the session's own conversation answers the question in the box
+([Ask a session](#ask-a-session-seance)).
 - **📜 Timeline**: the audit ledger scoped to this session.
 - **⚡ Trace**: what automation did to this session, would do in a dry run, or was refused
   ([Automation](automation.md#dry-run-and-the-automation-trace)).
@@ -192,11 +195,12 @@ Ask any session a question, read-only: what it changed, why it chose something, 
 It can be a live one or one that finished days ago. The session itself never sees the question,
 and nothing is typed into its tab.
 
-**Where.** The **🔮 Ask this session** box in the detail panel. **🔮 Ask** on a
+**Where.** The **Ask this session…** box above the detail panel's tabs, with its **🔮 Ask** button. **🔮 Ask** on a
 [Find in fleet](fleet.md#search-groups-and-bulk-actions) hit (a hit in a subagent's file asks its
 parent session), and on a row of the audit ledger's
 [🗂 History](usage-and-cost.md#session-history) tab. Type the question and press **Enter** or **Ask**.
-The question shows above the box, then the answer, with what it cost, how long it took and the model.
+The box then shows **Asked:** and the question under its input, then the answer, with what it cost,
+how long it took and the model.
 A new question to the same session replaces one that is still running. Once Claude Code has deleted
 a session's transcript, Shepherd asks its [kept copy](usage-and-cost.md#kept-transcripts) instead.
 
@@ -222,7 +226,8 @@ no MCP servers, and at most 12 turns.
   from any folder; resuming by session id only works from the launch folder.
 - **Its own lane.** Each session's question runs on its own. A repo's merge checker or coach run
   never holds a question up, and a question never holds them up.
-- **What it reads.** Only a transcript under `~/.claude/projects/`, named for the session's id.
+- **What it reads.** Only a transcript under `~/.claude/projects/`, or its
+  [kept copy](usage-and-cost.md#kept-transcripts) in `~/.claude/cc-keep/`, named for the session's id.
   Shepherd refuses any other path the panel sends, any id that isn't a session id, a remote
   session, and an empty question, each with a toast that says why.
 

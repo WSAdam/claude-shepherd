@@ -148,7 +148,8 @@ one it can't otherwise see as a **grey card** in its own row under the grid.
   file by its process id, so a `/clear` doesn't confuse it. A terminal or Kitty session's status file
   records no process id, so it is matched by session id. A session must go 15 seconds without a status
   file before its card appears, so a brand-new session never flashes grey before its first hook runs.
-- **What the card says.** The folder (a worktree reads `repo · slug`), Claude Code's own busy/idle,
+- **What the card says.** The folder (a worktree reads `repo · slug`), Claude Code's own state (Busy,
+  Idle, Waiting or Unknown),
   and *started before Shepherd's hooks: restart it to get live status*. Hover it for the folder path,
   process id and Claude Code version.
 - **What it never does.** A grey card is display only. Shepherd never types into that session, and
@@ -401,7 +402,9 @@ All derived locally from the transcript Shepherd already reads, with no extra ho
   the live session (or open an ended one's audit timeline); **🔮 Ask** on a transcript hit asks that
   session a question ([Ask a session](controls.md#ask-a-session-seance)). Instant with
   [ripgrep](https://github.com/BurntSushi/ripgrep) installed; it falls back to grep otherwise.
-  `search.maxResults` caps the hits. Two folders inside the ledger are never searched:
+  `search.maxResults` caps the hits. Once Claude Code has deleted a transcript, its
+  [kept copy](usage-and-cost.md#kept-transcripts) is searched instead (**📦 kept** on the hit).
+  Two folders inside the ledger are never searched:
   `quarantine/` and `exports/` (an audit export is a copy of ledger lines, so its events would
   show twice).
 - **Groups**: right-click → **Set group…** tags a session into a named cohort, kept by the stable
@@ -425,13 +428,15 @@ the FLEET row swaps the session tiles for the list (click again to go back).
   `~/.claude/cc-worklist.json`, keyed by the stable launch-folder identity. A project's tab and its
   items **persist whether or not a window is open**, until you clear the list.
 - **TODO.md import**: **⇪ Import TODO.md** pulls a project's `TODO.md` checkboxes into its tab as
-  verify-me items (the file's `[x]` shows as a **✓ auto** chip; the row checkbox stays yours). Once
+  verify-me items (the file's `[x]` shows as a **✓ auto** chip; the row checkbox stays yours, unless
+  a [checklist run](#my-list) you started finishes the item: **✓ by run**). Once
   imported, the tab **re-syncs whenever the file changes**. A repo's main checkout and its worktrees
   share one tab, and the import reads **every worktree's** `TODO.md`: a line in several copies
   imports once, a line that exists only on a branch carries a **⎇ branch** chip until it reaches
   main's copy, and a removed worktree's items stay. The file format is in
   [methodology/CLAUDE.md](../methodology/CLAUDE.md). A [find-only audit](providers-and-integrations.md#find-only-audit)'s
-  findings file imports with it: each finding carries a **🔍 severity** chip and is never marked done.
+  findings file imports with it: each finding carries a **🔍 severity** chip, and an `[x]` in the file
+  never marks it done (only a checklist run you start on it can).
 - **📘 Playbooks**: **📘 Add a playbook…** on a project tab opens the Mac's file chooser in the
   project's folder. Pick any markdown checklist (a release or deploy runbook, kept anywhere) and its
   `- [ ]` lines import into the tab exactly like `TODO.md`'s: grouped under a **📘 file name** header
@@ -446,7 +451,9 @@ the FLEET row swaps the session tiles for the list (click again to go back).
   its box is already ticked in its file, its line is gone, or it's only on a branch. **▶ Run selected
   (N)** works through them **one at a time**, in the tab's order. Each item gets a fresh Claude tab in
   the repo's **main checkout** (the sequential exception), opened like a batch unit's tab, with its
-  brief typed in. Press Return to send it; Shepherd never types into a window. The brief says: do only
+  brief typed in. Press Return to send it; Shepherd never types into a window. That needs a VS Code
+  or Cursor window on the repo whose [tab bridge](merging-and-batches.md#the-tab-bridge) can tag a
+  new tab (its `expect` op); an older bridge is refused, and the run pauses. The brief says: do only
   this item, then tick its box in the file it names. For your own items, the brief says to run
   `~/.claude/cc-run.sh done <run> <item>`. Any item's session can run `cc-run.sh blocked <run> <item>
   --note "<why>"`. When the session's turn ends, Shepherd checks the item itself. A file line is

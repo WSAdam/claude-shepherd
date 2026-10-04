@@ -8,13 +8,18 @@ live in Hammerspoon's settings; launch at login is Hammerspoon's own login item.
 
 **What's on.** With no file at all, nothing acts on a session by itself apart from a few
 conveniences: held questions, resume at a usage limit's reset, worktree leases, Remote Control for
-spawned sessions, ending tab-less leftovers, plan-limit alerts and closing a merged unit's tab.
-(The read-only background checks, such as commit counts, the overlap radar and the scheduled-tasks
-lock check, are on too.) A fresh install writes the author's daily
+spawned sessions, ending tab-less leftovers, plan-limit alerts, the
+[fleet idle alert](automation.md#fleet-idle-alert) (`alerts.idleMinutes`, 15 minutes), the
+[main moved notice](merging-and-batches.md#main-moved-sibling-worktrees-hear-about-a-merge)
+(`merge.mainMovedNotice`) and closing a merged unit's tab. [Grant grading](merging-and-batches.md#grant-grading-a-risky-merge-waits-for-your-click)
+holds back merges on a batch grant from the start (`merge.grantWaitsFor` unset means every
+category). (The read-only background checks, such as commit counts, the overlap radar and the
+scheduled-tasks lock check, are on too.) A fresh install writes the author's daily
 settings ([defaults/cc-config.json](../defaults/cc-config.json)) when you have no file yet, and
-those also turn on auto-continue, respawn, auto-compact, the merge checker, the worktree fence, the
-audit ledger and real spawning. The queue's auto-feed, routing, rules, routines, escalation and the
-weekly coach stay off until you switch them on. On an upgrade, `make setup` adds any of the
+those also turn on auto-continue, respawn, auto-compact, the three Stop guards (`stopGuards`), the
+merge checker, the worktree fence, the audit ledger and real spawning. The queue's auto-feed,
+routing, rules, routines (the main-green check among them), escalation and the coach's own runs
+(`coach.enabled`, which its weekly and evidence runs both need) stay off until you switch them on. On an upgrade, `make setup` adds any of the
 defaults' keys you haven't set, and never changes one you have.
 
 ## The ⚙ Settings panel
@@ -52,7 +57,8 @@ File-only switches include, among others: `rules.enabled`, `schedules.enabled` a
 `subagents.*`, `status.resumeSlack`, `autoContinue.backoff.*`, `fleet.enabled`, `commits.*`,
 `usage.limitAlerts.*`, `ask.waitSeconds`, `tabless.autoEndMinutes`, `escalation.hung`, `search.*`,
 `worklist.*`, `decisions.*`, `notifications.days`, `templates.sourceDir`,
-`context.autoCompactFraction`, and the `keystrokes`, `tabBridge`, `stacks` and `alerts` sections.
+`context.autoCompactFraction`, `stopGuards.*`, `seance.*`, `alerts.onScreen` and
+`alerts.voiceEvents`, and the `keystrokes`, `tabBridge` and `stacks` sections.
 Policy bundles and attachments are edited in the 🛡 editor.
 
 ## Editing the file by hand
@@ -64,7 +70,7 @@ The panel re-reads the file within about a second (except `hotkeys`, which need 
 
 | Section | What it controls | Reference |
 |---------|------------------|-----------|
-| `gate`, `policies`, `ask`, `decide`, `stopGuards` | Gated tools, the worktree fence, auto-allow/deny, always-ask commands, bundles, Autopilot, held questions, the decisions inbox, questions asked in prose, "done" checked against the diff | [Approvals and policies](approvals-and-policies.md) |
+| `gate`, `policies`, `ask`, `decide`, `stopGuards` | Gated tools, the worktree fence, auto-allow/deny, always-ask commands, bundles, Autopilot, held questions, the decisions inbox, the three Stop guards (questions asked in prose, "done" checked against the diff, the finished-unit merge reminder) | [Approvals and policies](approvals-and-policies.md) |
 | `merge`, `verify`, `fleet`, `radar`, `tabBridge` | Ready to merge, merge gates, the merge checker, batches, the overlap radar, the tab bridge | [Merging and batches](merging-and-batches.md) |
 | `queue`, `templates`, `automodel`, `coach` | Task queue, routing, templates, model auto-routing, the coach | [Automation](automation.md) |
 | `respawn`, `autoContinue`, `resume`, `drain`, `prune`, `cleanup`, `tabless` | Recovery, resuming at a usage limit's reset, and cleanup | [Automation](automation.md), [Controls](controls.md#sessions-with-no-tab) |
@@ -79,7 +85,8 @@ The panel re-reads the file within about a second (except `hotkeys`, which need 
 | `stacks`, `keystrokes`, `search`, `hotkeys`, `voice` | Project cards, the shared-window guard, search, shortcuts, Stream Deck voice | [Fleet](fleet.md), [Controls](controls.md) |
 | `lease` | Each worktree's own port (`portFrom`–`portTo`) and database folder (`dbDir`) | [Fleet](fleet.md#worktree-leases) |
 | `restart` | Restart in place: which ended sessions count as the last wave (`waveMinutes`, default 30), how long an ended session stays in the snapshot (`keepHours`, default 72), and its `dryRun` | [Fleet](fleet.md#restart-the-fleet-in-place) |
-| `appearance`, `alerts`, `worklist` | Look, on-screen alerts, My List archive | [Make it yours](customizing.md), [Fleet](fleet.md#my-list) |
+| `appearance`, `alerts`, `worklist` | Look, on-screen alerts, the fleet idle alert and spoken alerts, My List archive | [Make it yours](customizing.md), [Automation](automation.md#fleet-idle-alert), [Fleet](fleet.md#my-list) |
+| `seance` | Asking a session a question: its budget cap and timeout | [Controls](controls.md#ask-a-session-seance) |
 
 ### Newer blocks and their defaults
 
@@ -96,7 +103,7 @@ install's [defaults](../defaults/cc-config.json) differ.
 | `resume.enabled` | `true` | | [Resume at the limit reset](automation.md#resume-at-the-limit-reset) |
 | `coach.enabled` | `false` (the 🧭 Coach button works either way) | | [The coach](automation.md#the-coach) |
 | `coach.day` / `maxBudgetUsd` / `timeoutSeconds` | `"mon"` / `1` / `600` | | [The coach](automation.md#the-coach) |
-| `coach.evidence.minItems` / `cooldownHours` / `dailyUsd` | unset: no evidence runs (`defaults/`: `10`) / `24` / `3` | | [Evidence runs](automation.md#the-coach) |
+| `coach.evidence.minItems` / `cooldownHours` / `dailyUsd` | unset: no evidence runs / `24` / `3` (evidence runs also need `coach.enabled`) | `10` | [Evidence runs](automation.md#the-coach) |
 | `restart.waveMinutes` / `keepHours` | `30` / `72` | | [Restart the fleet in place](fleet.md#restart-the-fleet-in-place) |
 | `lease.enabled` | `true` | | [Worktree leases](fleet.md#worktree-leases) |
 | `lease.portFrom` / `portTo` / `dbDir` | `4100` / `4199` / `~/.claude/cc-lease/db` | | [Worktree leases](fleet.md#worktree-leases) |
@@ -108,6 +115,8 @@ install's [defaults](../defaults/cc-config.json) differ.
 | `stopGuards.unfinished` | `false` | `true` | [Finished units get a merge reminder](approvals-and-policies.md#finished-units-get-a-merge-reminder) |
 | `verify.onMerge` | `false` (🔎 Verify works either way) | `true` | [The checker](merging-and-batches.md#the-checker-a-read-only-review-of-every-merge-request) |
 | `verify.maxBudgetUsd` / `timeoutSeconds` | `1` / `600` | | [The checker](merging-and-batches.md#the-checker-a-read-only-review-of-every-merge-request) |
+| `alerts.idleMinutes` | `15` (`0` turns it off) | `15` | [Fleet idle alert](automation.md#fleet-idle-alert) |
+| `alerts.voice` / `voiceEvents` | `false` / `[]` (voice speaks the fleet idle alert; listing `"needsYou"` also speaks a card that starts needing you) | | [Fleet idle alert](automation.md#fleet-idle-alert) |
 | `seance.maxBudgetUsd` / `timeoutSeconds` | `20` (the cap; each run's budget is sized from its context, at most `50`) / `300` | | [Ask a session](controls.md#ask-a-session-seance) |
 | `merge.repoGate` | `false` | | [A repo can declare its own gate](merging-and-batches.md#a-repo-can-declare-its-own-gate) |
 | `merge.grantWaitsFor` | every category | every category | [Grant grading](merging-and-batches.md#grant-grading-a-risky-merge-waits-for-your-click) |
@@ -156,7 +165,7 @@ Everything lives under `~/.claude/`:
 | `cc-status/` | One status file per session, written by the hooks; `.panel-alive` is the panel heartbeat |
 | `cc-status-mirror/` | Remote sessions' status files, pulled by the [SSH status bridge](providers-and-integrations.md#ssh-status-bridge) |
 | `cc-merge/`, `cc-fleet/` | Merge requests and batches, with their answers, the checker's verdicts, a batch's events and the commit each **Not yet** answered (`<key>.notyet`), and the merges already announced to their [sibling worktrees](merging-and-batches.md#main-moved-sibling-worktrees-hear-about-a-merge) (`main-moved.seen`) |
-| `cc-scratch/` | The [red-first proof](merging-and-batches.md#the-red-first-proof-do-the-new-tests-fail-without-the-fix)'s and [gate blame](merging-and-batches.md#gate-blame-which-failures-were-already-on-main)'s scratch worktrees, removed after each run |
+| `cc-scratch/` | The [red-first proof](merging-and-batches.md#the-red-first-proof-do-the-new-tests-fail-without-the-fix)'s and [gate blame](merging-and-batches.md#gate-blame-which-failures-were-already-on-main)'s scratch worktrees, removed after each run; the background scans' temporary output; and `seance/`, the folder [Seance](controls.md#ask-a-session-seance) runs in when a dead session's own folder is gone (kept) |
 | `cc-reqs.json` | [Requirement ids](merging-and-batches.md#requirement-ids-and-the-merge-receipt): each repo's `REQ-NNN` list (Shepherd is its only writer) |
 | `cc-ask/` | Answers to held questions (the question itself is in the session's status file) |
 | `cc-guard/` | The Stop guards' once-markers: a turn [sent back for asking in prose](approvals-and-policies.md#questions-asked-in-prose-come-back) is marked here, so it is sent back once, and so is the commit a [finished unit was reminded](approvals-and-policies.md#finished-units-get-a-merge-reminder) about, or [sent back for its diff](approvals-and-policies.md#done-is-checked-against-the-diff) |
@@ -173,7 +182,7 @@ Everything lives under `~/.claude/`:
 | `cc-bridge/` | The tab bridge's per-window tab lists and command folders |
 | `cc-lease/` | [Worktree leases](fleet.md#worktree-leases): each repo's leased ports and database paths, and (by default) the databases in `db/` |
 | `cc-restart.json` | The [restart snapshot](fleet.md#restart-the-fleet-in-place): every session Shepherd could reopen, and the ones it already did (Shepherd is its only writer) |
-| `cc-coach/` | [The coach](automation.md#the-coach)'s suggestions and its log of merge notes, checker findings and filed lessons, per repo, and `evidence-spend.json` (today's evidence-run spend); `global.json` and `global.claude-backup/` for [lessons learned across repos](automation.md#across-repos) |
+| `cc-coach/` | [The coach](automation.md#the-coach)'s files per repo, named by the main checkout's encoded project folder (`-Users-you-code-app`): its suggestions, its log (merge notes, checker findings, filed lessons, main-went-red entries), `<repo>.applied.json` (applied edits), `<repo>.lessons.json` (the lessons ledger) and `<repo>.memory-backup/` (auto-memory backups for Undo); `evidence-spend.json` (today's evidence-run spend); `global.json` and `global.claude-backup/` for [lessons learned across repos](automation.md#across-repos) |
 | `cc-lesson/` | Lessons filed with `cc-lesson.sh`, until Shepherd moves them into the coach's log |
 | `cc-policy/`, `cc-policy-override/`, `cc-gate-tools/`, `cc-automodel/` | Per-session policy (the resolved rules, and the **Policy** dropdown's choice), gated-tool and auto-model settings |
 | `cc-approved/`, `cc-autopilot/` | What approve-repeats remembers per session, and each session's Autopilot window |
