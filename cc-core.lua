@@ -20127,7 +20127,14 @@ do
       if l.text:match("%S") then last = i end
     end
     local firstBody = body:match("^[^\r\n]*")
-    local sep = (last ~= h and isListItem(lines[last].text) and isListItem(firstBody)) and eol or (eol .. eol)
+    -- 2026-10-04: the section's last line may be a list item's indented continuation (a wrapped
+    -- item), so walk back over those to the line that starts it; a new item then joins the list
+    -- instead of starting another after a blank line.
+    local itemStart = last
+    while itemStart > h + 1 and not isListItem(lines[itemStart].text) and lines[itemStart].text:match("^%s+%S") do
+      itemStart = itemStart - 1
+    end
+    local sep = (last ~= h and isListItem(lines[itemStart].text) and isListItem(firstBody)) and eol or (eol .. eol)
     local at = lines[last].stop
     return { ok = true, text = base:sub(1, at) .. sep .. body .. base:sub(at + 1) }
   end

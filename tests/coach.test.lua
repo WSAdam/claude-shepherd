@@ -2475,4 +2475,19 @@ end)()
   check("crlf: ...and an LF file keeps LF", rl.text == "## Rules\n\n- new rule\n- another rule\n")
 end)()
 
+-- ---- a list item added under a wrapped last item (2026-10-04) ----
+-- 2026-10-04: the add branch put a list item straight under a list only when the section's last
+-- line was a list item; when that item wrapped onto an indented continuation line, the new item
+-- got a blank line before it, splitting the list in two.
+;(function()
+  local base = "## Rules\n\n- first rule\n- second rule, long enough that it\n  wraps onto a second line\n"
+  local r = core.coachApplyDecision(base, core.coachHash(base), { old = "", new = "- third rule", section = "Rules" }, false)
+  check("list: an item added under a wrapped last item joins the list  (" .. tostring(r.text):gsub("\n", "\\n") .. ")",
+        r.ok == true and r.text == "## Rules\n\n- first rule\n- second rule, long enough that it\n  wraps onto a second line\n- third rule\n")
+  local para = "## Rules\n\nA paragraph that\n  is indented on its second line\n"
+  local rp = core.coachApplyDecision(para, core.coachHash(para), { old = "", new = "- a rule", section = "Rules" }, false)
+  check("list: ...but an item after a paragraph still gets its blank line",
+        rp.ok == true and rp.text == "## Rules\n\nA paragraph that\n  is indented on its second line\n\n- a rule\n")
+end)()
+
 finish()

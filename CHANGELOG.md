@@ -38,6 +38,9 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
 - Fixed: a coach edit applied by exact match wrote its text as the coach gave it, so a two-line
   edit put a bare newline into a CRLF `CLAUDE.md`. It now goes in with the file's own line
   endings, as an addition and a re-wrapped match already did.
+- Fixed: a list item the coach added under a list got a blank line before it when the list's last
+  item wrapped onto an indented line, splitting the list in two. The add now walks back over a
+  wrapped item's continuation lines, and the new item joins the list.
 
 ## 2026-10-04 — Mining round 2
 
