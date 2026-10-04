@@ -5012,7 +5012,10 @@ do
       end
     end
     -- the files it cites: a path whose last part has a known extension (or is a Makefile...),
-    -- inside the repo (not ~ / $), not a glob, not negated ("don't touch cc-core.lua")
+    -- inside the repo (not ~ / $), not a glob, not negated ("don't touch cc-core.lua"). Each cite
+    -- keeps its sentence, lowercased with its spaces collapsed, so M.batchBriefFlags can tell a
+    -- sentence every brief says word for word (boilerplate) from a unit's own.
+    local normSent = (sent:lower():gsub("%s+", " "):gsub("^ ", ""):gsub(" $", ""))
     for o, tok in sent:gmatch("()([%w%._%-/~%$%*]+)") do
       if not tok:find("*", 1, true) then
         local path = tok:gsub("%.+$", ""):gsub("^%./", "")
@@ -5021,7 +5024,7 @@ do
         local stem, ext = base:match("^(.+)%.(%w+)$")
         local isFile = FILE_NAMES[base] or (stem and stem:find("%a") and FILE_EXT[ext:lower()])
         if isFile and first ~= "~" and first ~= "/" and first ~= "$" and not NOT_FILES[base:lower()] and not negated(o) then
-          cites[#cites + 1] = { base = base:lower(), path = path }
+          cites[#cites + 1] = { base = base:lower(), path = path, sent = normSent }
         end
       end
     end
@@ -5076,19 +5079,34 @@ function M.briefFlags(task) return M.briefScan(task).flags end
 -- Each flag: { id = "same-file"|"hook-wiring", units = {slugs}, file?, line }.
 function M.batchBriefFlags(units)
   local byBase, hooks, out = {}, {}, {}
-  for _, u in ipairs(type(units) == "table" and units or {}) do
-    local cites = type(u.cites) == "table" and u.cites or M.briefScan(u.task).cites
+  units = type(units) == "table" and units or {}
+  -- 2026-10-04: a sentence EVERY unit's brief says word for word is the batch's boilerplate (the
+  -- merge steps name cc-merge.sh in each), so the files it names are no unit's own: every review
+  -- read "cc-merge.sh is cited by" all its units. With one unit, nothing is boilerplate.
+  local allCites, said = {}, {}
+  for i, u in ipairs(units) do
+    allCites[i] = type(u.cites) == "table" and u.cites or M.briefScan(u.task).cites
+    local mine = {}
+    for _, c in ipairs(allCites[i]) do
+      if c.sent and not mine[c.sent] then mine[c.sent] = true; said[c.sent] = (said[c.sent] or 0) + 1 end
+    end
+  end
+  local function boilerplate(c) return #units >= 2 and c.sent ~= nil and said[c.sent] == #units end
+  for i, u in ipairs(units) do
+    local cites = allCites[i]
     local seen, hookFiles = {}, {}
     for _, c in ipairs(cites) do
-      if M.BRIEF_HOOK_FILES[c.base] then
-        if not seen[c.base] then hookFiles[#hookFiles + 1] = c.base end
-      elseif not M.BRIEF_SHARED_FILES[c.base] then
-        local b = byBase[c.base]
-        if not b then b = { units = {}, path = c.path }; byBase[c.base] = b end
-        if #c.path > #b.path or (#c.path == #b.path and c.path < b.path) then b.path = c.path end
-        if not seen[c.base] then b.units[#b.units + 1] = u.slug end
+      if not boilerplate(c) then
+        if M.BRIEF_HOOK_FILES[c.base] then
+          if not seen[c.base] then hookFiles[#hookFiles + 1] = c.base end
+        elseif not M.BRIEF_SHARED_FILES[c.base] then
+          local b = byBase[c.base]
+          if not b then b = { units = {}, path = c.path }; byBase[c.base] = b end
+          if #c.path > #b.path or (#c.path == #b.path and c.path < b.path) then b.path = c.path end
+          if not seen[c.base] then b.units[#b.units + 1] = u.slug end
+        end
+        seen[c.base] = true
       end
-      seen[c.base] = true
     end
     if #hookFiles > 0 then hooks[#hooks + 1] = { slug = u.slug, files = hookFiles } end
   end

@@ -18,6 +18,11 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
   reporting frame (a colon after "asks", "asked", "left", "filed" and the like) now counts only when
   the question itself is put to the reader ("Want…", "Should I…", "you"). `cc-scrub.js` keeps the
   frame's verbs in an assistant's text, so a scrubbed corpus reads the same.
+- Fixed: every batch's pre-flight said "cc-merge.sh is cited by" all its units, because each brief
+  ends with the same merge steps, which name it. A sentence every brief in the batch says word for
+  word is now boilerplate, and the files it names count for no unit (both scanners:
+  `core.batchBriefFlags` and `cc-fleet.sh`'s jq). Two units naming a file in their own words are
+  still flagged, wherever the boilerplate sits.
 
 ## 2026-10-04 — Mining round 2
 

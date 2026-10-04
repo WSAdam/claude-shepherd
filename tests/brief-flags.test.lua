@@ -104,6 +104,34 @@ do
   eq("a lone unit has no batch flags", #core.batchBriefFlags({ UNITS[1] }), 0)
 end
 
+-- 2026-10-04: every batch's review said "cc-merge.sh is cited by <every unit>": each brief ends with
+-- the same merge steps ("... run `cc-merge.sh done --result merged` ..."). A sentence every unit's
+-- brief says word for word is boilerplate; a file it names isn't a file the units share.
+do
+  local TAIL = " After the ff, run `cc-merge.sh done --result merged`, then report the sha."
+  local function sameFiles(units)
+    local out = {}
+    for _, f in ipairs(core.batchBriefFlags(units)) do if f.id == "same-file" then out[#out + 1] = f.file end end
+    table.sort(out); return table.concat(out, ",")
+  end
+  eq("boilerplate: a file only the shared merge steps name isn't flagged", sameFiles({
+    { slug = "alpha", task = "Change cc-core.lua for the badge." .. TAIL },
+    { slug = "beta",  task = "Docs only: docs/fleet.md." .. TAIL } }), "")
+  eq("...nor when one unit also edits it, while the other only has the boilerplate", sameFiles({
+    { slug = "alpha", task = "Fix the refusal in cc-merge.sh." .. TAIL },
+    { slug = "beta",  task = "Docs only: docs/fleet.md." .. TAIL } }), "")
+  eq("...and a unit's own words count even after the boilerplate named the file first", sameFiles({
+    { slug = "alpha", task = TAIL .. " Then fix the refusal in cc-merge.sh." },
+    { slug = "beta",  task = TAIL .. " Then add a --dry-run flag to cc-merge.sh." } }), "cc-merge.sh")
+  eq("...but two units naming it in their own words still are", sameFiles({
+    { slug = "alpha", task = "Fix the refusal in cc-merge.sh." .. TAIL },
+    { slug = "beta",  task = "Add a --dry-run flag to cc-merge.sh." .. TAIL } }), "cc-merge.sh")
+  eq("...and a shared sentence only SOME units say is no boilerplate", sameFiles({
+    { slug = "alpha", task = "Extend cc-core.lua." },
+    { slug = "beta",  task = "Extend cc-core.lua." },
+    { slug = "gamma", task = "Docs only: docs/fleet.md." } }), "cc-core.lua")
+end
+
 -- ---- in the batch review (2026-10-03) ----
 local function bj(units, phase)
   local us = {}

@@ -565,6 +565,17 @@ assert_json "preflight: TODO.md, CHANGELOG.md, the plan, a glob and a one-unit f
 assert_json "preflight: two units changing hook wiring" "$TMP/pf3.out" \
   '[.batch[] | select(.id == "hook-wiring") | .units | join(",")] | join(" ")' "alpha,beta"
 
+# 2026-10-04: the shared merge steps every brief ends with named cc-merge.sh, so every review said
+# it was "cited by" all the units. A sentence every brief says word for word is boilerplate.
+PF4='{"title":"Tail","units":[
+ {"type":"feat","slug":"alpha","task":"Fix the refusal in cc-merge.sh. After the ff, run `cc-merge.sh done --result merged`, then report the sha."},
+ {"type":"docs","slug":"beta","task":"Docs only: docs/fleet.md. After the ff, run `cc-merge.sh done --result merged`, then report the sha."},
+ {"type":"feat","slug":"gamma","task":"Add a --dry-run flag to cc-merge.sh. After the ff, run `cc-merge.sh done --result merged`, then report the sha."}]}'
+batch "$PF4"
+(cd "$REPO" && CLAUDE_CODE_SESSION_ID=drv bash "$F" preflight --file "$TMP/batch.json" --json > "$TMP/pf4.out" 2>&1)
+assert_json "preflight: the merge steps every brief shares don't count; two units naming cc-merge.sh in their own words do" "$TMP/pf4.out" \
+  '[.batch[] | select(.id == "same-file") | "\(.file)=\(.units | join(","))"] | join(" ")' "cc-merge.sh=alpha,gamma"
+
 # propose: one line, beside the coverage line; the batch still goes to Adam as usual
 alive
 batch '{"title":"Risky","mergeWhenGreen":false,"units":[{"type":"feat","slug":"pfa","task":"Build it, then git push --force and rm -rf build/."},{"type":"fix","slug":"pfb","task":"Fix it. Never force push, never rm -rf."}]}'

@@ -581,7 +581,8 @@ Two more flags need the whole batch:
 - **Two units citing one file** (*cc-core.lua is cited by alpha, beta*): a likely conflict. Files
   every unit touches by convention don't count (`TODO.md`, `CHANGELOG.md`, `README.md`,
   `CLAUDE.md`, `DECISIONS.md`, `tests/run.sh`, the transcript vocabulary), and neither do paths
-  outside the repo (`~/…`), globs, or a file a brief says not to touch.
+  outside the repo (`~/…`), globs, a file a brief says not to touch, or a file named only in a
+  sentence every brief says word for word (the merge steps, say, naming `cc-merge.sh`).
 - **More than one unit changing hook wiring** (`settings-hooks.json`, `install.sh`,
   `uninstall.sh`): a batch takes at most one.
 

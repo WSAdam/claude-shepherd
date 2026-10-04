@@ -153,7 +153,8 @@ def bf_sentence($c):
                | ((split("/") | last) // "") as $b
                | select($b | bf_isfile)
                | select($b | ascii_downcase | IN("node.js", "next.js", "vue.js", "nuxt.js", "d3.js", "chart.js", "three.js") | not)
-               | { base: ($b | ascii_downcase), path: . } ],
+               | { base: ($b | ascii_downcase), path: .,
+                   sent: ($t | ascii_downcase | gsub("\\s+"; " ") | ltrimstr(" ") | rtrimstr(" ")) } ],
       state: ($ws | bf_fold($c)) };
 # One brief: { flags (in bf_order), cites }. A list line under a negated "Never:" starts negated.
 def bf_scan:
@@ -170,9 +171,16 @@ def bf_scan:
 def bf_shared: IN("todo.md", "changelog.md", "readme.md", "claude.md", "decisions.md", "run.sh", "vocabulary.txt");
 def bf_hook: IN("settings-hooks.json", "install.sh", "uninstall.sh");
 # The batch: { units: [{slug, flags}], batch: [{id: same-file, file, units} | {id: hook-wiring, units}] }
+# 2026-10-04: a sentence every brief in the batch says word for word is boilerplate (the merge
+# steps name cc-merge.sh in each), so the files it names belong to no unit -- the same rule as
+# core.batchBriefFlags.
 def bf_preflight:
-  [ (.units // [])[] | { slug: ((.slug // "?") | tostring), scan: ((.task // "") | tostring | bf_scan) } ] as $u
-  | { units: [ $u[] | { slug, flags: .scan.flags } ],
+  [ (.units // [])[] | { slug: ((.slug // "?") | tostring), scan: ((.task // "") | tostring | bf_scan) } ] as $u0
+  | ($u0 | length) as $n
+  | ([ $u0[] | [ .scan.cites[].sent ] | unique[] ] | group_by(.)
+     | map(select($n >= 2 and length == $n) | .[0])) as $boiler
+  | [ $u0[] | .scan.cites |= map(.sent as $x | select(any($boiler[]; . == $x) | not)) ] as $u
+  | { units: [ $u0[] | { slug, flags: .scan.flags } ],
       batch: ( ([ $u | to_entries[] | .key as $ix | .value.slug as $s | .value.scan.cites[]
                   | select(.base | (bf_shared or bf_hook) | not) | . + { ix: $ix, slug: $s } ]
                 | group_by(.base)
