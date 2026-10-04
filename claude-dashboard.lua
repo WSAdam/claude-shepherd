@@ -2621,18 +2621,13 @@ function FX.doctorStatus()
     local out = hs.execute("command -v " .. name, true)  -- true = user's shell/PATH
     return type(out) == "string" and out:gsub("%s+", "") ~= ""
   end
-  -- hooks wired into ~/.claude/settings.json (count distinct OUR_HOOK_SCRIPTS present)
-  local hooksWired = 0
+  -- hooks wired into ~/.claude/settings.json: each event + script settings-hooks.json wires
+  -- (core.HOOK_WIRING), so a newer event's missing group shows (2026-10-04)
+  local hooks = core.hookWiringStatus(nil)
   local raw = FX.readFile((os.getenv("HOME") or "") .. "/.claude/settings.json")
   if raw then
     local okj, settings = pcall(function() return core.json.decode(raw) end)
-    if okj and type(settings) == "table" then
-      local seen = {}
-      for _, r in ipairs(core.parseHookInventory(settings) or {}) do
-        if r.script then seen[r.script] = true end
-      end
-      for _, name in ipairs(core.OUR_HOOK_SCRIPTS) do if seen[name] then hooksWired = hooksWired + 1 end end
-    end
+    if okj and type(settings) == "table" then hooks = core.hookWiringStatus(settings) end
   end
   local hbAge
   local hb = FX.readFile(HEARTBEAT)
@@ -2660,7 +2655,7 @@ function FX.doctorStatus()
     tabBridge = (core.config(cfg, "tabBridge.enabled", true) ~= false)
       and core.tabBridgeCoverage(live, regs, os.time(), ((FX.readFile(FX.TAB_BRIDGE_DIR .. "/.installed") or ""):gsub("%s+", ""))) or nil,
     jq = hasTool("jq"),
-    hooksWired = hooksWired, hooksTotal = #core.OUR_HOOK_SCRIPTS,
+    hooksWired = hooks.wired, hooksTotal = hooks.total, hooksMissing = hooks.missing,
     scriptsInstalled = exists(CLAUDE_DIR .. "/cc-status.sh") and exists(CLAUDE_DIR .. "/cc-approve.sh"),
     heartbeatAgeSec = hbAge,
     gateArmed = FX.readFile(GATE_FLAG) ~= nil,

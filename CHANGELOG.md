@@ -23,6 +23,10 @@ versioned releases, so entries are dated. Earlier history is in `git log`.
   word is now boilerplate, and the files it names count for no unit (both scanners:
   `core.batchBriefFlags` and `cc-fleet.sh`'s jq). Two units naming a file in their own words are
   still flagged, wherever the boilerplate sits.
+- Fixed: Diagnostics' **Claude Code hooks wired** counted which of Shepherd's hook scripts appeared
+  anywhere in `settings.json`, so an install missing a newer event's group (`PostToolUseFailure`)
+  still read fully wired. It now counts each event + script `settings-hooks.json` wires
+  (`core.HOOK_WIRING`, 18 today; a test keeps the two in step) and names any that's missing.
 
 ## 2026-10-04 — Mining round 2
 

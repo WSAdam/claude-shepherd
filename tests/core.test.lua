@@ -15698,5 +15698,36 @@ do
         and fk.grantgrade.title == "Grant grading")
 end
 
+-- ---- Diagnostics counts the hooks each EVENT runs, not just which scripts appear (2026-10-04) ----
+-- 2026-10-04: an install whose settings.json lacked the PostToolUseFailure group (wired in 80d33e4)
+-- still read "6/6 hook scripts active" -- cc-status.sh was wired on other events, so it counted.
+do
+  check("core.HOOK_WIRING and core.hookWiringStatus exist",
+        type(core.HOOK_WIRING) == "table" and type(core.hookWiringStatus) == "function")
+  if type(core.HOOK_WIRING) == "table" and type(core.hookWiringStatus) == "function" then
+    local fh = io.open(ROOT .. "settings-hooks.json", "r")
+    local tpl = core.json.decode(fh:read("a")); fh:close()
+    local want, have = {}, {}
+    for _, r in ipairs(core.parseHookInventory(tpl)) do if r.script then want[#want + 1] = r.event .. " " .. r.script end end
+    for _, w in ipairs(core.HOOK_WIRING) do have[#have + 1] = w.event .. " " .. w.script end
+    table.sort(want); table.sort(have)
+    eq("core.HOOK_WIRING is every event + script settings-hooks.json wires", table.concat(have, ","), table.concat(want, ","))
+    local full = core.hookWiringStatus(tpl)
+    check("a settings.json with every group wired is complete  (" .. full.wired .. "/" .. full.total .. ")",
+          full.wired == full.total and full.total == #want and #full.missing == 0)
+    local old = core.json.decode(core.json.encode(tpl)); old.hooks.PostToolUseFailure = nil
+    local st = core.hookWiringStatus(old)
+    eq("an install missing the PostToolUseFailure group is one short", st.total - st.wired, 1)
+    eq("...and names what's missing", table.concat(st.missing, ","), "PostToolUseFailure (cc-status.sh)")
+    local rows = core.doctorChecks({ jq = true, hooksWired = st.wired, hooksTotal = st.total, hooksMissing = st.missing,
+                                     scriptsInstalled = true, heartbeatAgeSec = 2, sessions = 1 })
+    local warn
+    for _, r in ipairs(rows) do if r.status == "warn" and r.label:lower():find("hooks", 1, true) then warn = r end end
+    check("Diagnostics warns, naming the missing event, with make setup as the fix  (" .. tostring(warn and warn.detail) .. ")",
+          warn ~= nil and warn.detail:find("PostToolUseFailure", 1, true) ~= nil and (warn.fix or ""):find("make setup", 1, true) ~= nil)
+    eq("no settings.json at all: nothing wired", core.hookWiringStatus(nil).wired, 0)
+  end
+end
+
 print(string.format("-- core.test.lua: %d run, %d failed --", run, failed))
 os.exit(failed == 0 and 0 or 1)

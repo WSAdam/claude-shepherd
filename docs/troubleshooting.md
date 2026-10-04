@@ -10,7 +10,7 @@ info •, and some carry a fix. **Re-check** runs it again.
 | Row | What it checks | What to do |
 |-----|----------------|------------|
 | jq installed | The one required tool for the hooks | `brew install jq` (shown) |
-| Claude Code hooks wired | Shepherd's hooks are in `~/.claude/settings.json` (N of N) | `make setup` (shown) |
+| Claude Code hooks wired | Each hook Shepherd wires is in `~/.claude/settings.json` on its own event (N of N). One missing is named, as an older install that predates a newer event's group (`PostToolUseFailure`, say) reads | `make setup` (shown) |
 | Hook scripts installed | `cc-status.sh` and `cc-approve.sh` are in `~/.claude` | `make setup` |
 | Panel live | The panel heartbeat is at most 10 seconds old | Reload Hammerspoon |
 | Headless approvals | ok when the gate is armed, info when it's off | ⚙ Settings → Approvals |

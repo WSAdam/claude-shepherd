@@ -12808,6 +12808,46 @@ function M.parseHookInventory(settings)
   return out
 end
 
+-- Every hook Shepherd wires, as event + script: settings-hooks.json pair for pair
+-- (tests/core.test.lua checks). 2026-10-04: Diagnostics counted which of OUR_HOOK_SCRIPTS appeared
+-- anywhere in settings.json, so an install missing a newer event's group (PostToolUseFailure)
+-- still read fully wired -- cc-status.sh was there on the other events. It counts these pairs now.
+M.HOOK_WIRING = {
+  { event = "SessionStart", script = "cc-status.sh" },
+  { event = "UserPromptSubmit", script = "cc-status.sh" },
+  { event = "PreToolUse", script = "cc-status.sh" },
+  { event = "PreToolUse", script = "cc-approve.sh" },
+  { event = "PreToolUse", script = "cc-ask.sh" },
+  { event = "PreToolUse", script = "cc-worktree-guard.sh" },
+  { event = "PostToolUse", script = "cc-status.sh" },
+  { event = "PostToolUseFailure", script = "cc-status.sh" },
+  { event = "PermissionRequest", script = "cc-status.sh" },
+  { event = "PermissionRequest", script = "cc-popup.sh" },
+  { event = "Notification", script = "cc-status.sh" },
+  { event = "Notification", script = "cc-popup.sh" },
+  { event = "Stop", script = "cc-status.sh" },
+  { event = "Stop", script = "cc-popup.sh" },
+  { event = "StopFailure", script = "cc-status.sh" },
+  { event = "StopFailure", script = "cc-resume.sh" },
+  { event = "PreCompact", script = "cc-status.sh" },
+  { event = "SessionEnd", script = "cc-status.sh" },
+}
+
+-- How much of M.HOOK_WIRING a settings.json (decoded) carries: { wired, total, missing = {
+-- "<Event> (<script>)"... } in M.HOOK_WIRING order }. Pure.
+function M.hookWiringStatus(settings)
+  local have = {}
+  for _, r in ipairs(M.parseHookInventory(settings)) do
+    if r.script then have[r.event .. "\0" .. r.script] = true end
+  end
+  local wired, missing = 0, {}
+  for _, w in ipairs(M.HOOK_WIRING) do
+    if have[w.event .. "\0" .. w.script] then wired = wired + 1
+    else missing[#missing + 1] = w.event .. " (" .. w.script .. ")" end
+  end
+  return { wired = wired, total = #M.HOOK_WIRING, missing = missing }
+end
+
 -- The gate hook (cc-approve.sh) needs its long timeout: the nonce-bound atomic
 -- claim runs well past Claude Code's default. Returns { present, timeout, ok }.
 -- minTimeout defaults to 130 (what install.sh sets).
@@ -25415,8 +25455,15 @@ function M.doctorChecks(facts)
   else add("jq missing", "crit", "the hook scripts need jq to write session status", "brew install jq") end
 
   local hw, ht = tonumber(facts.hooksWired) or 0, tonumber(facts.hooksTotal) or 0
-  if ht > 0 and hw >= ht then add("Claude Code hooks wired", "ok", hw .. "/" .. ht .. " hook scripts active")
-  elseif hw > 0 then add("Some hooks not wired", "warn", hw .. "/" .. ht .. " hook scripts active", "run: make setup")
+  local miss = type(facts.hooksMissing) == "table" and facts.hooksMissing or {}
+  local missText = ""
+  if #miss > 0 then
+    local shown = {}
+    for i = 1, math.min(#miss, 4) do shown[#shown + 1] = tostring(miss[i]) end
+    missText = "; missing: " .. table.concat(shown, ", ") .. ((#miss > 4) and (" and " .. (#miss - 4) .. " more") or "")
+  end
+  if ht > 0 and hw >= ht then add("Claude Code hooks wired", "ok", hw .. "/" .. ht .. " hooks wired, each on its event")
+  elseif hw > 0 then add("Some hooks not wired", "warn", hw .. "/" .. ht .. " hooks wired" .. missText, "run: make setup")
   else add("Hooks not installed", "crit", "no Shepherd hooks found in settings.json", "run: make setup") end
 
   if facts.scriptsInstalled == false then
