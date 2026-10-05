@@ -38,6 +38,8 @@ and the README's "Testing & development" section.
 - **Finishing a unit here** follows the global ready-to-merge protocol, with one extra step:
   after the ff-merge and `make test` on main, run `make deploy` from main (the live copy must
   be main) BEFORE `~/.claude/cc-merge.sh done --result merged`, then flip the unit's TODO lines.
+  The `git merge --ff-only` itself runs only from the main checkout after `ExitWorktree` and a
+  `MERGE APPROVED` answer — never from inside the worktree, and never before that approval.
 
 ## Traps that have bitten this repo
 
